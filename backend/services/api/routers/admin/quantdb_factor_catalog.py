@@ -9,7 +9,7 @@ import json
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -29,7 +29,13 @@ from backend.services.engine.data_platform.quantdb_factor_reader import (
     normalize_market,
     sources_for_market,
 )
+from backend.services.api.routers.admin.research_factor_registration import (
+    MAX_CODES,
+    RegistrationError,
+    register_research_factors,
+)
 from backend.services.engine.data_platform.quantdb_factor_dictionary import definition_for
+from backend.services.engine.factor_research.store import FactorDataset
 from backend.shared.database_manager_v2 import get_session
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -117,6 +123,11 @@ FACTOR_SOURCE_LABELS = {
     "alpha_library": "Alpha 库因子",
     "rd_mined": "RD 挖掘因子",
 }
+
+# 建表只做一次（见 _ensure_schema 的死锁说明）。进程内布尔 + 单锁：
+# 首次 acquire 之后本进程不再取锁，因此不存在跨事件循环复用的问题。
+_schema_ready = False
+_SCHEMA_LOCK = asyncio.Lock()
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS qm_quantdb_factor_field (
@@ -236,6 +247,27 @@ def _category_for(column: str) -> tuple[str, str]:
 
 
 async def _ensure_schema(session) -> None:
+    """建表 / 补列（幂等）。**进程内只跑一次**——这是并发正确性要求，不是优化。
+
+    DDL 在对象已存在时照样取锁（PG 15 实测）：``CREATE INDEX IF NOT EXISTS``
+    在 mapping 表上取 ``ShareLock``，``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``
+    在 version 表上取 ``AccessExclusiveLock``。于是 DDL 事务的取锁序是
+    ``mapping → version``，而注册事务是 ``version（建草稿）→ mapping（写映射）``
+    —— 两者交叉构成 ABBA 死锁（``ShareLock`` 与 ``RowExclusiveLock`` 冲突）。
+    只要请求路径上还存在 DDL 事务，这个环就随时可能闭环；把 DDL 收回进程启动期
+    才是根治（此前「每个读路径都跑一遍 DDL」也让训练页的读查询平白无故挡写）。
+    """
+    global _schema_ready
+    if _schema_ready:
+        return
+    async with _SCHEMA_LOCK:
+        if _schema_ready:
+            return
+        await _create_schema(session)
+        _schema_ready = True
+
+
+async def _create_schema(session) -> None:
     for statement in _SCHEMA_SQL.split(";"):
         if statement.strip():
             await session.execute(text(statement))
@@ -684,6 +716,64 @@ async def create_draft_version(
             "source_dataset": _validate_source(payload.source_dataset), "market": market}
 
 
+@router.get("/versions")
+async def list_catalog_versions(
+    market: str = Query("CN"),
+    source_dataset: str = Query(DEFAULT_FACTOR_SOURCE),
+    status: str | None = Query(None, description="按状态过滤：draft | published | archived（缺省返回全部）"),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(require_admin),
+):
+    """列出某来源库在某市场下的目录版本（**含草稿**），最新在前。
+
+    为什么必须单开这个端点：``/catalog`` 不带 version_id 时只解析「活动发布版本」
+    （``_active_version`` 里写死 ``status='published'``），而带上 version_id 又要
+    调用方**先知道**那个 id。于是别处写进来的草稿没有任何入口能被发现——因子研究页
+    的「注册到训练目录」正是这样撞墙的：草稿确实落库了，训练数据集页却看不见，
+    而发布按钮只在这一页，整条链断在这里（注册 → 看不见 → 发布不了 → 训练用不上）。
+
+    ``mapping_count`` 用左连接带出：空草稿要显示 0，而不是让前端自己数或者缺字段。
+    """
+    _ = current_user
+    market = normalize_market(market)
+    source_dataset = _validate_source(source_dataset)
+    if status is not None and status not in _VALID_STATUS:
+        raise HTTPException(status_code=400, detail=f"Unknown status: {status}")
+    # 与 _active_version 同风格：条件拼进 SQL，不用 CAST(:x AS text) IS NULL 那种写法
+    status_clause = " AND v.status = :status" if status else ""
+    params: dict[str, Any] = {
+        "market": market, "source_dataset": source_dataset, "limit": limit,
+    }
+    if status:
+        params["status"] = status
+    async with get_session() as session:
+        await _ensure_schema(session)
+        rows = (await session.execute(text(f"""
+            SELECT v.version_id, v.version_name, v.status, v.source_dataset, v.market,
+                   v.created_by, v.created_at, v.published_at,
+                   COUNT(m.mapping_id) AS mapping_count
+            FROM qm_training_factor_catalog_version v
+            LEFT JOIN qm_training_factor_mapping m ON m.version_id = v.version_id
+            WHERE v.market = :market AND v.source_dataset = :source_dataset{status_clause}
+            GROUP BY v.version_id
+            ORDER BY v.created_at DESC
+            LIMIT :limit
+        """), params)).mappings().all()
+    return {
+        "market": market,
+        "source_dataset": source_dataset,
+        "versions": [
+            {
+                **dict(row),
+                "mapping_count": int(row["mapping_count"] or 0),
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "published_at": row["published_at"].isoformat() if row["published_at"] else None,
+            }
+            for row in rows
+        ],
+    }
+
+
 @router.get("/catalog")
 async def get_factor_catalog(
     market: str = Query("CN"),
@@ -799,6 +889,66 @@ async def publish_catalog_version(session, version_id: str) -> None:
     """), {"version_id": version_id, "published_at": datetime.now(timezone.utc)})
 
 
+async def clone_version_mappings(
+    session, *, source_version_id: str, target_version_id: str
+) -> int:
+    """把一份目录版本的映射整体复制到另一份（保留 enabled / 勾选 / 排序）。
+
+    新 ``mapping_id`` 加随机前缀：同一行会被复制进多个版本，主键不能撞。
+
+    ``ON CONFLICT DO NOTHING`` 让整条动作幂等——**目标版本里已有的行优先**，
+    复制不覆盖它们。补种存量草稿（``backfill_draft_from_published.py``）可重跑；
+    对全新空草稿则无冲突可言，行为不变。
+    """
+    result = await session.execute(text("""
+        INSERT INTO qm_training_factor_mapping
+          (mapping_id, version_id, source_dataset, source_column, feature_key, display_name,
+           category_id, category_name, enabled, default_selected, required, sort_order)
+        SELECT :prefix || mapping_id, :target_version_id, source_dataset, source_column,
+               feature_key, display_name, category_id, category_name, enabled,
+               default_selected, required, sort_order
+        FROM qm_training_factor_mapping WHERE version_id = :source_version_id
+        ON CONFLICT (version_id, source_dataset, feature_key) DO NOTHING
+    """), {
+        "prefix": f"{uuid.uuid4().hex[:8]}-",
+        "target_version_id": target_version_id,
+        "source_version_id": source_version_id,
+    })
+    return int(result.rowcount or 0)
+
+
+async def seed_draft_from_published(
+    session, *, draft_id: str, market: str, source_dataset: str
+) -> int:
+    """新建草稿时先从线上那份抄一份，返回抄来的行数（无线上版本返回 0）。
+
+    没有这一步，「注册 → 发布」会把线上训练口径**整份替换**成草稿的内容：
+    ``publish_catalog_version`` 把旧版转 ``archived``、把草稿原样扶正，中间
+    **没有合并**。2026-10-07 线上实证——``factor_defs`` 线上 1336 个启用特征，
+    注册建出的草稿里只有刚注册的那 2 个，管理员一点「发布」线上就变成 2。
+    管理员点注册的意图是「把这些因子加进训练口径」，不是「换成这几个」。
+
+    抄的是**已发布那一版**，而不是「已发现字段全量」（``seed_catalog_mappings``
+    那条路）：被手工关掉的特征是线上现状的一部分，不该借注册之机复活；「加几个
+    因子」也不该顺带把整个来源库的字段口径刷新一遍。
+    """
+    published = (await session.execute(text("""
+        SELECT version_id FROM qm_training_factor_catalog_version
+        WHERE market = :market AND source_dataset = :source_dataset
+          AND status = 'published'
+        ORDER BY published_at DESC NULLS LAST, created_at DESC LIMIT 1
+    """), {
+        "market": market, "source_dataset": source_dataset,
+    })).scalars().first()
+    if not published:
+        return 0
+    return await clone_version_mappings(
+        session,
+        source_version_id=str(published),
+        target_version_id=draft_id,
+    )
+
+
 async def seed_catalog_mappings(session, version: dict[str, Any]) -> dict[str, int]:
     """把已发现的字段全量播种为该草稿的映射（端点与引导脚本共用）。
 
@@ -876,14 +1026,9 @@ async def clone_factor_catalog(version_id: str, payload: CatalogVersionClone, cu
             "version_name": payload.version_name, "source_dataset": source["source_dataset"],
             "created_by": str(current_user.get("user_id") or current_user.get("sub") or "admin"),
         })
-        await session.execute(text("""
-            INSERT INTO qm_training_factor_mapping
-              (mapping_id, version_id, source_dataset, source_column, feature_key, display_name,
-               category_id, category_name, enabled, default_selected, required, sort_order)
-            SELECT :prefix || mapping_id, :clone_id, source_dataset, source_column, feature_key, display_name,
-                   category_id, category_name, enabled, default_selected, required, sort_order
-            FROM qm_training_factor_mapping WHERE version_id = :version_id
-        """), {"prefix": f"{uuid.uuid4().hex[:8]}-", "clone_id": clone_id, "version_id": version_id})
+        await clone_version_mappings(
+            session, source_version_id=version_id, target_version_id=clone_id
+        )
     return {"version_id": clone_id, "source_dataset": source["source_dataset"],
             "market": source["market"], "status": "draft"}
 
@@ -904,3 +1049,57 @@ async def seed_draft_mappings(version_id: str, current_user: dict = Depends(requ
             raise HTTPException(status_code=409, detail="Only draft catalogs can be seeded")
         seeded = await seed_catalog_mappings(session, dict(version))
     return {"version_id": version_id, **seeded}
+
+
+class RegisterFromResearchRequest(BaseModel):
+    """因子研究页 → 训练目录草稿的注册请求。"""
+
+    # dataset 会经 store.artifact_dir 拼进文件系统路径，必须收死值域：
+    # 放任任意字符串即可 `{"dataset":"../../../../etc"}` 读出库外文件。
+    dataset: FactorDataset = "private"
+    # 元素也要限长：未命中的 code 会逐字回显在 skipped 里，只限列表长度
+    # 挡不住 `["A"*5_000_000] * 500` 这种请求/响应双向放大。128 对齐
+    # qm_training_factor_mapping.source_column 的列宽。
+    codes: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
+        ..., min_length=1, max_length=MAX_CODES
+    )
+    market: str = Field("CN", min_length=1, max_length=16)
+    version_id: str | None = Field(
+        None, max_length=64, description="指定草稿；不传则按来源库找/建草稿"
+    )
+    version_name: str | None = Field(None, max_length=128)
+
+
+@router.post("/register-from-research")
+async def register_from_research(
+    payload: RegisterFromResearchRequest,
+    current_user: dict = Depends(require_admin),
+):
+    """把「因子研究」页多选的因子写进训练因子目录**草稿**。
+
+    只写草稿、不发布——发布仍是训练页上的显式动作（`/versions/{id}/publish`），
+    避免研究页的操作绕过发布闸门直接改线上训练口径。响应逐条回报成功与跳过原因。
+
+    DDL 与 DML **分两个事务**：`_ensure_schema` 只在进程首次请求时真正执行（见其
+    死锁说明），但仍是独立事务提交，注册事务里就只剩纯 DML——真正的串行化交给
+    `register_research_factors` 内的 advisory lock。
+    """
+    async with get_session() as session:
+        await _ensure_schema(session)
+
+    async with get_session() as session:
+        try:
+            return await register_research_factors(
+                session,
+                market=payload.market,
+                dataset=payload.dataset,
+                codes=payload.codes,
+                user_id=str(
+                    current_user.get("user_id") or current_user.get("sub") or "admin"
+                ),
+                tenant_id=str(current_user.get("tenant_id") or "default"),
+                version_id=payload.version_id,
+                version_name=payload.version_name,
+            )
+        except RegistrationError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
