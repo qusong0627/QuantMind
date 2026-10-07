@@ -363,6 +363,11 @@ services:
       - QM_SIMONLIN_A_DIR=${QM_SIMONLIN_A_DIR:-/data/third_party/simonlin_a_stock}
       # TdxAiData 实时数据通道（P6）：安装目录含 libTdxAiData.so + tqServer.py + TdxAiData.ini（Token）
       - TDX_AIDATA_DIR=${TDX_AIDATA_DIR:-/opt/tdx-aidata}
+    # 让容器能用 host.docker.internal 指回宿主机（Linux 上 daemon 不默认给这个名字）。
+    # 用途：本地 ollama 向量化——因子挖掘子进程在容器里跑，填 127.0.0.1 会指到容器自己。
+    # 宿主机侧还需 ollama 监听 0.0.0.0（默认只监听 127.0.0.1，容器照样够不到）。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # 运行时数据
       - ./data:/data

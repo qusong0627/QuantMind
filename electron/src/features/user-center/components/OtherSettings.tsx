@@ -549,7 +549,9 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
               type="button"
               onClick={() => {
                 setEmbeddingModel('bge-m3');
-                setEmbeddingBaseUrl('http://127.0.0.1:11434/v1');
+                // 不能填 127.0.0.1：挖掘子进程跑在容器里，那是**容器自己**。
+                // host.docker.internal 由 compose 的 extra_hosts 映射到宿主机。
+                setEmbeddingBaseUrl('http://host.docker.internal:11434/v1');
               }}
               className="px-2 py-1 text-[11px] rounded-md border border-gray-200 text-gray-600 hover:border-emerald-300 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
             >
@@ -576,7 +578,9 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
               className="!h-8 !rounded-[8px] !font-mono !text-xs"
             />
             <p className="text-[11px] text-gray-400">
-              OpenAI 兼容端点。留空则沿用容器级 EMBEDDING_BASE_URL；本地服务填 http://127.0.0.1:11434/v1
+              OpenAI 兼容端点。留空则沿用容器级 EMBEDDING_BASE_URL；本地 ollama 用
+              http://host.docker.internal:11434/v1（且 ollama 需监听 0.0.0.0，默认只监听
+              127.0.0.1 时容器够不到）
             </p>
           </div>
 
