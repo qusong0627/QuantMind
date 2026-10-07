@@ -53,6 +53,14 @@ def _resolve_data_dir() -> Path:
     return quantdb_paths.resolve_quantdb_dir()
 
 
+def _dir_has_data(p: Path) -> bool:
+    """目录存在且非空（any 短路，开销为一次目录项枚举）。"""
+    try:
+        return p.is_dir() and any(p.iterdir())
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # 列名映射：QuantDB parquet → QuantMind 规范
 # ---------------------------------------------------------------------------
@@ -103,54 +111,6 @@ def _dt_conditions(start: date | None, end: date | None, col: str = "dt") -> lis
 
 
 class QuantDBDataHub:
-    """A 股数据中枢 — 所有数据读取的单一入口。"""
-
-    _instance: QuantDBDataHub | None = None
-    _instance_lock = threading.Lock()
-
-    def __init__(self, data_dir: str | Path | None = None) -> None:
-        if data_dir is not None:
-            self._data_dir = Path(data_dir)
-        else:
-            self._data_dir = _resolve_data_dir()
-        self._local = threading.local()
-        self._views_mounted_per_conn: set[int] = set()  # track which conn ids have views mounted
-
-    @classmethod
-    def get_instance(cls) -> QuantDBDataHub:
-        """获取全局单例（懒初始化，线程安全）。"""
-        if cls._instance is None:
-            with cls._instance_lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-        return cls._instance
-
-    @property
-    def data_dir(self) -> Path:
-        return self._data_dir
-
-    @property
-    def available(self) -> bool:
-        """数据目录是否存在且包含数据。"""
-        return self._data_dir.is_dir() and any(self._data_dir.iterdir())
-
-    def warm_up(self) -> None:
-        """预初始化 DuckDB 连接和视图，消除首次查询延迟。
-
-        应在服务启动时调用（在主线程中），这样后续请求无需等待视图注册。
-        """
-        if not self.available:
-            logger.info("QuantDB data not available, skipping warm-up")
-            return
-        try:
-            conn = self._get_duck_conn()
-            conn.execute("SELECT 1")
-            logger.info("QuantDB DuckDB warm-up complete")
-        except Exception as exc:
-            logger.warning("QuantDB warm-up failed (non-fatal): %s", exc)
-
-
-class QuantDBDataHub:
     """A 股数据中枢 — 所有数据读取的单一入口。
 
     用法：
@@ -164,12 +124,16 @@ class QuantDBDataHub:
     _instance_lock = threading.Lock()
 
     def __init__(self, data_dir: str | Path | None = None) -> None:
+        # 显式传入目录（如 QuantUS/HK/Futures 子类）时不做自动重解析，尊重调用方
+        self._explicit_dir = data_dir is not None
         if data_dir is not None:
             self._data_dir = Path(data_dir)
         else:
             self._data_dir = _resolve_data_dir()
         self._local = threading.local()
         self._views_mounted_per_conn: set[int] = set()  # track which conn ids have views mounted
+        self._dir_lock = threading.Lock()
+        self._dir_generation = 0  # 数据目录重解析代数，变更后按代重建线程连接
 
     @classmethod
     def get_instance(cls) -> QuantDBDataHub:
@@ -182,12 +146,28 @@ class QuantDBDataHub:
 
     @property
     def data_dir(self) -> Path:
+        """当前数据目录（自动重解析）。
+
+        非显式指定目录、且缓存目录当前无数据时（典型场景：单例创建于
+        「初始化数据」完成之前，_resolve_data_dir 跳过空目录 fallback 到了
+        错误路径），重新走 _resolve_data_dir()。数据补齐后长驻进程（api/
+        engine/stream/celery 各进程单例）无需重启即可读到。
+        """
+        if not self._explicit_dir and not _dir_has_data(self._data_dir):
+            with self._dir_lock:
+                if not self._explicit_dir and not _dir_has_data(self._data_dir):
+                    new_dir = _resolve_data_dir()
+                    if new_dir != self._data_dir:
+                        self._data_dir = new_dir
+                        self._dir_generation += 1
+                        self._views_mounted_per_conn.clear()
+                        logger.info("QuantDB 数据目录重解析: %s", new_dir)
         return self._data_dir
 
     @property
     def available(self) -> bool:
-        """数据目录是否存在且包含数据。"""
-        return self._data_dir.is_dir() and any(self._data_dir.iterdir())
+        """数据目录是否存在且包含数据（经 data_dir 触发重解析后判断）。"""
+        return _dir_has_data(self.data_dir)
 
     def warm_up(self) -> None:
         """预初始化 DuckDB 连接和视图，消除首次查询延迟。
@@ -208,15 +188,27 @@ class QuantDBDataHub:
     # DuckDB 连接管理（线程安全）
     # ------------------------------------------------------------------
     def _get_duck_conn(self):
-        """获取当前线程的 DuckDB 连接。"""
-        if not hasattr(self._local, "duck_conn") or self._local.duck_conn is None:
+        """获取当前线程的 DuckDB 连接。
+
+        先经 data_dir 触发目录不可用时的重解析；目录变更（代数推进）后
+        重建连接并重新挂载视图，避免读到旧路径下的空视图。
+        """
+        _ = self.data_dir
+        conn = getattr(self._local, "duck_conn", None)
+        if conn is None or getattr(self._local, "conn_gen", -1) != self._dir_generation:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             try:
                 import duckdb
             except ImportError:
-                raise RuntimeError("duckdb 未安装，请运行 pip install duckdb")
+                raise RuntimeError("duckdb 未安装，请运行 pip install duckdb") from None
             self._local.duck_conn = duckdb.connect(":memory:")
             self._mount_views(self._local.duck_conn)
             self._views_mounted_per_conn.add(id(self._local.duck_conn))
+            self._local.conn_gen = self._dir_generation
         return self._local.duck_conn
 
     def _mount_views(self, conn, force: bool = False) -> None:
@@ -228,7 +220,7 @@ class QuantDBDataHub:
         conn_id = id(conn)
         if not force and conn_id in self._views_mounted_per_conn:
             return
-        dd = self._data_dir
+        dd = self.data_dir
 
         # 分区数据视图（dt=YYYYMMDD Hive partitioning）
         partitioned_views = {
@@ -343,7 +335,7 @@ class QuantDBDataHub:
         end: date | None = None,
     ) -> list[str]:
         """目录枚举分区日期（YYYYMMDD，升序），不读任何 parquet 内容。"""
-        dd = self._data_dir / rel_path
+        dd = self.data_dir / rel_path
         if not dd.is_dir():
             return []
         start_s = start.strftime("%Y%m%d") if start else ""
@@ -375,7 +367,7 @@ class QuantDBDataHub:
         与 ``dt=*`` glob + ``WHERE dt IN (...)`` 等价，但 DuckDB 不必枚举全部分区：
         实测 daily_unadjusted 两天 0.78s → 0.007s，l2 全历史 22.5s → 单日 0.04s。
         """
-        base = self._data_dir / rel_path
+        base = self.data_dir / rel_path
         existing = [d for d in dates if (base / f"dt={d}").is_dir()]
         if not existing:
             return pd.DataFrame()
@@ -422,7 +414,7 @@ class QuantDBDataHub:
             dates = dates[-lookback:]
         if not dates or not symbols:
             return pd.DataFrame()
-        base = self._data_dir / rel
+        base = self.data_dir / rel
         existing = [d for d in dates if (base / f"dt={d}").is_dir()]
         if not existing:
             return pd.DataFrame()
@@ -626,7 +618,7 @@ class QuantDBDataHub:
     ) -> pd.DataFrame:
         """读取分钟 K 线（单文件 per-symbol parquet）。"""
         subdir = "min1_kline" if freq == "1min" else "min5_kline"
-        file_path = self._data_dir / "1_kline_data" / subdir / f"{symbol}.parquet"
+        file_path = self.data_dir / "1_kline_data" / subdir / f"{symbol}.parquet"
         if not file_path.exists():
             return pd.DataFrame()
 
@@ -644,7 +636,7 @@ class QuantDBDataHub:
     # ------------------------------------------------------------------
     def fetch_stock_list(self) -> pd.DataFrame:
         """读取股票列表。"""
-        base_dir = self._data_dir / "2_base_sector" / "instrument_detail"
+        base_dir = self.data_dir / "2_base_sector" / "instrument_detail"
         for fname in ("instrument_detail.parquet", "instrument_list.parquet"):
             file_path = base_dir / fname
             if file_path.exists():
@@ -660,7 +652,7 @@ class QuantDBDataHub:
 
         返回 DataFrame 包含: symbol, ind_name_l1, ind_code_l1
         """
-        base_dir = self._data_dir / "2_base_sector" / "instrument_detail"
+        base_dir = self.data_dir / "2_base_sector" / "instrument_detail"
         # QuantDB 落盘文件名历史上为 instrument_detail.parquet，现行同步产出
         # instrument_list.parquet；两者都要试，否则行业映射静默返回空。
         file_path = next(
@@ -704,7 +696,7 @@ class QuantDBDataHub:
 
         兼容两套列名（小写规范列 + 原始大写列）与两种文件名。
         """
-        base_dir = self._data_dir / "2_base_sector" / "sector_concept"
+        base_dir = self.data_dir / "2_base_sector" / "sector_concept"
         for fname in ("sector_members.parquet", "sector_member.parquet"):
             file_path = base_dir / fname
             if file_path.exists():
@@ -732,7 +724,7 @@ class QuantDBDataHub:
         end: date | None = None,
     ) -> pd.DataFrame:
         """读取交易日历。"""
-        cal_dir = self._data_dir / "2_base_sector" / "trading_calendar"
+        cal_dir = self.data_dir / "2_base_sector" / "trading_calendar"
         if not cal_dir.exists():
             return pd.DataFrame()
 
@@ -765,7 +757,7 @@ class QuantDBDataHub:
 
     def fetch_index_weights(self, index_symbol: str) -> pd.DataFrame:
         """读取指数权重。"""
-        iw_dir = self._data_dir / "2_base_sector" / "index_weights"
+        iw_dir = self.data_dir / "2_base_sector" / "index_weights"
         if not iw_dir.exists():
             return pd.DataFrame()
 
@@ -814,7 +806,7 @@ class QuantDBDataHub:
             start: 报告期起始
             end: 报告期结束
         """
-        file_path = self._data_dir / "3_financial_data" / statement_type / f"{symbol}.parquet"
+        file_path = self.data_dir / "3_financial_data" / statement_type / f"{symbol}.parquet"
         if not file_path.exists():
             return pd.DataFrame()
 
@@ -941,7 +933,7 @@ class QuantDBDataHub:
         1. 分区格式: l1_factors/dt=YYYYMMDD/data.parquet
         2. 平铺格式: l1_factors/l1_factors_YYYYMMDD.parquet
         """
-        l1_dir = self._data_dir / "6_ml_datasets" / "l1_factors"
+        l1_dir = self.data_dir / "6_ml_datasets" / "l1_factors"
         if not l1_dir.exists():
             return pd.DataFrame()
 
@@ -1144,7 +1136,7 @@ class QuantDBDataHub:
         """直接从 parquet 文件读取日线（DuckDB 视图不可用时的 fallback）。"""
         subdir_map = {"qfq": "daily_forward", "hfq": "daily_backward", "none": "daily_unadjusted"}
         subdir = subdir_map.get(adjust, "daily_forward")
-        base_dir = self._data_dir / "1_kline_data" / subdir
+        base_dir = self.data_dir / "1_kline_data" / subdir
 
         if not base_dir.exists():
             return pd.DataFrame()
@@ -1326,11 +1318,11 @@ class QuantDBDataHub:
         Returns:
             {"date_range": {...}, "universes": {...}, "stock_count": int, "datasets": {...}}
         """
-        summary: dict = {"available": self.available, "data_dir": str(self._data_dir)}
+        summary: dict = {"available": self.available, "data_dir": str(self.data_dir)}
         if not self.available:
             return summary
 
-        dd = self._data_dir
+        dd = self.data_dir
 
         # 日期范围（从 daily_forward 分区目录推断）
         daily_dir = dd / "1_kline_data" / "daily_forward"
@@ -1406,13 +1398,13 @@ class QuantDBDataHub:
     def get_summary(self) -> dict:
         """返回数据目录摘要信息。"""
         summary: dict = {
-            "data_dir": str(self._data_dir),
+            "data_dir": str(self.data_dir),
             "available": self.available,
         }
         if not self.available:
             return summary
 
-        dd = self._data_dir
+        dd = self.data_dir
         categories = {
             "kline_data": "1_kline_data",
             "base_sector": "2_base_sector",
