@@ -30,7 +30,10 @@ Thumbs.db
 *.swp
 *.swo
 *.bak
-*.bak_*
+# 备份文件命名习惯不一：曾出现 config/runtime.env.bak-20260925（连字符）而旧规则
+# 只写 *.bak_*（下划线），导致含密钥的备份未被忽略、有被 git add . 提交的风险。
+# 统一用 *.bak* 覆盖 .bak / .bak_ / .bak- / .bak. 各种写法。
+*.bak*
 .project
 .pydevproject
 .settings/
