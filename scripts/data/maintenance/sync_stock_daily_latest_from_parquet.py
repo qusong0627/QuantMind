@@ -195,6 +195,16 @@ def normalize_frame(frame: pd.DataFrame, target_columns: list[str]) -> tuple[pd.
     skipped_columns = [col for col in target_columns if col not in frame.columns]
     normalized = frame.reindex(columns=common_columns).copy()
 
+    if "symbol" in normalized.columns:
+        # QuantDB 后缀式 600036.SH -> PG 内码前缀式 SH600036（与 quantdb_daily_sync 一致，
+        # 转换中枢 StockCodeUtil.to_prefix）。不转换会写出后缀式重复行，使
+        # `WHERE symbol='SH600036'` 类查询落空。
+        from backend.shared.stock_utils import StockCodeUtil
+
+        normalized["symbol"] = normalized["symbol"].map(
+            lambda s: StockCodeUtil.to_prefix(str(s)) if pd.notna(s) else s
+        )
+
     for col in common_columns:
         if col == "trade_date":
             normalized[col] = pd.to_datetime(normalized[col]).dt.date
