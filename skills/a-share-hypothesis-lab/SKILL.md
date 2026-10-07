@@ -7,8 +7,9 @@ description: "A股假设库实验室 — 把定性认知变成带胜率的可验
 
 ## ⚙️ 运行环境契约
 
-1. **执行位置**：宿主机 `baymax` venv（需 pandas/duckdb）。
-   入口：`/home/zbox/baymax/.venv/bin/python dsh/skills/a-share-hypothesis-lab/scripts/hypothesis_lab.py`
+1. **执行位置**：本仓（quantmind）宿主 `/usr/bin/python3`（需 pandas/duckdb，已装）。
+   入口（**绝对路径，任意 cwd 可跑**）：`/usr/bin/python3 /home/zbox/projects/quantmind/scripts/hypothesis_lab.py`
+   （实现 2026-09-29 随 quant-Trader 退役迁入本仓 `scripts/`；本仓 `skills/…/scripts/` 转调壳自动解析到它，实现不在本仓时用 `QM_SKILL_REPO_ROOT=<实现仓根>` 指路。）
 2. **数据源**：quantdb `daily_backward`（流动性前 N 只）。
 3. **纪律**：全样本 pooled 只作参考；verified 须 OOS 与 IS 同向 + 同向窗占比 ≥60% + n≥60；
    contradicted（反向证据明确）维持。结果写回 `configs/hypotheses.json`（含 wf 块）。

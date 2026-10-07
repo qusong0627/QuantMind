@@ -7,8 +7,9 @@ description: "A股财务 PIT 快照与防前视审计 — 按公告日构建任�
 
 ## ⚙️ 运行环境契约
 
-1. **执行位置**：宿主机 `baymax` venv（需 duckdb）。
-   入口：`/home/zbox/baymax/.venv/bin/python dsh/skills/a-share-pit-financial/scripts/pit_financial.py <子命令>`
+1. **执行位置**：本仓（quantmind）宿主 `/usr/bin/python3`（需 duckdb，已装）。
+   入口（**绝对路径，任意 cwd 可跑**）：`/usr/bin/python3 /home/zbox/projects/quantmind/scripts/pit_financial.py <子命令>`
+   （实现 2026-09-29 随 quant-Trader 退役迁入本仓 `scripts/`；本仓 `skills/…/scripts/` 转调壳自动解析到它，实现不在本仓时用 `QM_SKILL_REPO_ROOT=<实现仓根>` 指路。）
 2. **数据源**：quantdb `3_financial_data/{balance,income,cashflow}/{code}.parquet`
    （m_timetag 报告期 + m_anntime 公告日；income 为**年初至今累计**，TTM 由累计→单季推算，
    Q1 单季=Q1 累计，不得减上年 12 月）。

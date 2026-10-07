@@ -7,8 +7,9 @@ description: "A股事件雷达（akshare→东财）— 解禁/股权质押/回�
 
 ## ⚙️ 运行环境契约
 
-1. **执行位置**：宿主机 `baymax` venv（需 pandas/pyarrow/akshare 1.18+）。
-   入口：`/home/zbox/baymax/.venv/bin/python dsh/skills/a-share-event-radar/scripts/event_radar.py <子命令>`
+1. **执行位置**：本仓（quantmind）宿主 `/usr/bin/python3`（需 pandas/pyarrow/akshare 1.18+，已装）。
+   入口（**绝对路径，任意 cwd 可跑**）：`/usr/bin/python3 /home/zbox/projects/quantmind/scripts/event_radar.py <子命令>`
+   （实现 2026-09-29 随 quant-Trader 退役迁入本仓 `scripts/`；本仓 `skills/…/scripts/` 转调壳自动解析到它，实现不在本仓时用 `QM_SKILL_REPO_ROOT=<实现仓根>` 指路。）
 2. **数据源**：akshare → 东方财富数据中心（免费无 token）。字段可能随上游变动——
    解析失败静默降级为空标签，绝不阻塞研究/复盘主流程。
 3. **缓存**：`data/events/{kind}_{yyyymmdd}.parquet`，当日已采集默认跳过（`--refresh` 强制）。

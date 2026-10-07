@@ -9,7 +9,29 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[4]  # dsh/skills/<name>/scripts → 仓库根
+HERE = Path(__file__).resolve()
+
+
+def _resolve_impl_root() -> Path | None:
+    """定位提供 `scripts/market_state.py` 的实现仓根。
+
+    布局敏感（同 a-share-* 转调壳）：本仓壳在 `<root>/skills/<skill>/scripts/`
+    （上溯 3 层），旧仓 dsh 布局在 `<root>/dsh/skills/<skill>/scripts/`（上溯 4 层）。
+    实现不在本仓时用 `QM_SKILL_REPO_ROOT=<实现仓根>` 指路；全落空 → None——
+    调用处照旧继续，`market_state` 一节会如实报 ImportError，不静默。
+    """
+    candidates = []
+    env_root = os.environ.get("QM_SKILL_REPO_ROOT", "").strip()
+    if env_root:
+        candidates.append(Path(env_root))
+    candidates.extend((HERE.parents[3], HERE.parents[4]))
+    return next(
+        (r for r in candidates if (r / "scripts" / "market_state.py").is_file()),
+        None,
+    )
+
+
+ROOT = _resolve_impl_root() or HERE.parents[4]  # dsh/skills/<name>/scripts → 仓库根
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 

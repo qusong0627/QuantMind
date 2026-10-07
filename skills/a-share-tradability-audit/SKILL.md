@@ -7,8 +7,9 @@ description: "A股可交易性约束审计 — 把交易流放回历史行情，
 
 ## ⚙️ 运行环境契约
 
-1. **执行位置**：宿主机 `baymax` venv（需 duckdb/pandas）。
-   入口：`/home/zbox/baymax/.venv/bin/python dsh/skills/a-share-tradability-audit/scripts/tradability_audit.py <子命令>`
+1. **执行位置**：本仓（quantmind）宿主 `/usr/bin/python3`（需 duckdb/pandas，已装）。
+   入口（**绝对路径，任意 cwd 可跑**）：`/usr/bin/python3 /home/zbox/projects/quantmind/scripts/tradability_audit.py <子命令>`
+   （实现 2026-09-29 随 quant-Trader 退役迁入本仓 `scripts/`；本仓 `skills/…/scripts/` 转调壳自动解析到它，实现不在本仓时用 `QM_SKILL_REPO_ROOT=<实现仓根>` 指路。）
 2. **行情面板**：默认 quantdb `daily_backward`（后复权→比例法判封板，跨除权日可能漏判）；
    `--source bridge` 用通达信桥未复权日K（可算精确涨跌停价，逐票限流 1/s，仅小集合）。
 3. **制度规则**：`scripts/ashare_rules.py`（板块带宽按日期解析，含 2026-07-06 主板 ST ±10% 沿革）。
