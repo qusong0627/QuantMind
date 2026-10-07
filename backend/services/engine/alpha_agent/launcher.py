@@ -347,6 +347,10 @@ class AlphaAgentLauncher:
             openai_api_key = llm_overrides.get("OPENAI_API_KEY", openai_api_key)
             chat_model = llm_overrides.get("CHAT_MODEL", chat_model)
 
+        # CoSTEER 经验记忆（知识库）：跨任务累积「因子代码怎么写才过评测」的经验。
+        # 读写路径、绝对路径约束与 filelock 的理由见 rd_agent/kb_env.py。
+        from backend.services.engine.rd_agent.kb_env import knowledge_base_env
+
         env = {
             **os.environ,
             "PYTHONPATH": os.getenv("PYTHONPATH") or "/app",
@@ -355,6 +359,7 @@ class AlphaAgentLauncher:
             "QLIB_FACTOR_UNIVERSE": task.universe,
             "REASONING_MODEL": chat_model,
             "CHAT_STREAM": "false",
+            **knowledge_base_env(),
             # 回测数据从 2016 年开始 (默认 2008 太慢)
             "QLIB_FACTOR_TRAIN_START": os.getenv("QLIB_FACTOR_TRAIN_START", "2016-01-01"),
             "QLIB_FACTOR_VALID_START": os.getenv("QLIB_FACTOR_VALID_START", "2021-01-01"),
@@ -379,7 +384,17 @@ class AlphaAgentLauncher:
             for _k in ("LITELLM_OPENAI_API_KEY", "LITELLM_OPENAI_API_BASE"):
                 if llm_overrides.get(_k):
                     env[_k] = llm_overrides[_k]
-        from backend.services.engine.rd_agent.llm_env import build_llm_env
+
+        from backend.services.engine.rd_agent.llm_env import (
+            build_llm_env,
+            embedding_overrides,
+        )
+
+        # 用户级向量检索配置（个人中心「向量检索」）——与 chat 是**独立通道**，
+        # 必须单独透传：漏掉这一步，界面显示「已保存」而挖掘始终用容器级 .env。
+        # 键清单与理由见 llm_env.embedding_overrides。
+        env.update(embedding_overrides(llm_overrides))
+
         build_llm_env(env)
 
         # Add market adapter env overrides (RD-Agent runner used for all markets)

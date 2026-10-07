@@ -116,6 +116,13 @@ class UserProfile(Base):
     llm_provider = Column(String(32), comment="LLM 供应商（deepseek/qwen 等）")
     llm_extra_headers = Column(Text, comment="LLM 自定义请求头（JSON 文本，如自建网关鉴权头）")
 
+    # 向量检索（embedding）配置 —— 与 chat 独立。
+    # 原因：chat 供应商（如 DeepSeek）通常不提供 embedding 接口，必须能单独指向
+    # 另一个供应商或本地服务，否则因子挖掘的知识库语义检索无可用通道。
+    embedding_model = Column(String(128), comment="Embedding 模型名称（如 BAAI/bge-m3）")
+    embedding_base_url = Column(String(512), comment="Embedding 接口地址（OpenAI 兼容 base_url）")
+    embedding_api_key = Column(Text, comment="Embedding API Key（可与 chat 不同供应商）")
+
     # 审计字段
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"

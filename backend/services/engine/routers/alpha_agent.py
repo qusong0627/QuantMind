@@ -91,6 +91,7 @@ async def _fetch_profile_llm_config(user_id: str, tenant_id: str):
     from backend.services.engine.alpha_agent.llm_client import (
         LLMConfig,
         _is_placeholder,
+        normalize_embedding_base_url,
         parse_extra_headers,
     )
 
@@ -126,8 +127,18 @@ async def _fetch_profile_llm_config(user_id: str, tenant_id: str):
         if protocol == "openai" and not base.endswith("/v1"):
             base += "/v1"
         headers = parse_extra_headers(data.get("llm_extra_headers"))
+        # 向量检索（embedding）通道：可指向与 chat 完全不同的供应商/本地服务。
+        # 缺失时留空，由容器级 EMBEDDING_* 兜底（见 rd_agent/llm_env.build_llm_env）。
+        embedding_base = normalize_embedding_base_url(data.get("embedding_base_url"))
         return LLMConfig(
-            api_key=key, base_url=base, model=model, protocol=protocol, headers=headers
+            api_key=key,
+            base_url=base,
+            model=model,
+            protocol=protocol,
+            headers=headers,
+            embedding_model=(data.get("embedding_model") or "").strip(),
+            embedding_base_url=embedding_base,
+            embedding_api_key=(data.get("embedding_api_key") or "").strip(),
         )
     except Exception:
         logger.exception("[alpha-agent] fetch profile llm config failed")

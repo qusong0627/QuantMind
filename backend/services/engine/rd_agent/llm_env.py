@@ -10,6 +10,15 @@ RD-Agent 因子挖掘用 litellm 作为 LLM 后端（rdagent/oai/backend/litellm
 本模块统一构建两套变量：
   LITELLM_*（RD-Agent settings 对象用）+ OPENAI_*（litellm HTTP 层用）
 优先 DeepSeek（DEEPSEEK_API_KEY），回退现有 AI_IDE/讯飞 MaaS 配置。
+
+向量检索（embedding）是**独立通道**，不在这里构造：
+  - 变量名 EMBEDDING_MODEL / EMBEDDING_BASE_URL / EMBEDDING_API_KEY（容器级 .env 已有
+    SiliconFlow 默认值），由 rdagent/oai/utils/embedding.py:resolve_embedding_channel 直读。
+  - 用户级覆盖来自个人中心「AI 服务配置」的 embedding_* 字段，经
+    alpha_agent.llm_client.LLMConfig.llm_env_overrides 写成同名变量；未配置的项
+    留给容器级 .env 兜底（子进程继承 os.environ，见 launcher 的 env 构造）。
+  chat 与 embedding 必须能分开选：DeepSeek 不提供 embedding 接口，而 bge-m3 这类
+  中文向量模型通常来自 SiliconFlow 或本地服务。
 """
 
 from __future__ import annotations
@@ -106,3 +115,27 @@ def build_llm_env(env: dict[str, Any]) -> dict[str, Any]:
             env["OPENAI_BASE_URL"] = litellm_base
 
     return env
+
+
+EMBEDDING_ENV_KEYS = ("EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY")
+"""用户级向量检索配置要透传给挖掘子进程的键。
+
+chat 与 embedding 是**独立通道**（DeepSeek 这类 chat 供应商没有 /embeddings 端点），
+所以这几个键必须和 LITELLM_/OPENAI_ 那组一起进子进程 env。漏掉任一环，
+「个人中心配了向量检索」就整条空转：界面显示已保存，挖掘却始终用容器级 .env。
+"""
+
+
+def embedding_overrides(llm_overrides: dict[str, Any] | None) -> dict[str, str]:
+    """从用户级配置里挑出**非空**的 embedding 项。
+
+    留空即沿用容器级 .env —— 与 `LLMConfig.llm_env_overrides` 的语义一致，
+    也让「只换模型、沿用容器 key」这种半配置成立。
+    """
+    if not llm_overrides:
+        return {}
+    return {
+        key: str(llm_overrides[key]).strip()
+        for key in EMBEDDING_ENV_KEYS
+        if str(llm_overrides.get(key) or "").strip()
+    }

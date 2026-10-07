@@ -136,6 +136,16 @@ class ProfileService:
                 await session.execute(
                     text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS llm_extra_headers TEXT")
                 )
+                # 向量检索（embedding）配置：与 chat 独立，见 models/user.py
+                await session.execute(
+                    text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(128)")
+                )
+                await session.execute(
+                    text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS embedding_base_url VARCHAR(512)")
+                )
+                await session.execute(
+                    text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS embedding_api_key TEXT")
+                )
                 ProfileService._profile_columns_checked = True
         except Exception:
             logger.exception("Failed to ensure user_profiles table")
@@ -190,6 +200,9 @@ class ProfileService:
                 "llm_model": profile.llm_model,
                 "llm_provider": profile.llm_provider,
                 "llm_extra_headers": profile.llm_extra_headers,
+                "embedding_model": profile.embedding_model,
+                "embedding_base_url": profile.embedding_base_url,
+                "embedding_api_key": profile.embedding_api_key,
                 "created_at": profile.created_at,
                 "updated_at": profile.updated_at,
                 "username_at_runtime": username,  # 附加用户名
@@ -252,6 +265,9 @@ class ProfileService:
                 "llm_model": profile.llm_model,
                 "llm_provider": profile.llm_provider,
                 "llm_extra_headers": profile.llm_extra_headers,
+                "embedding_model": profile.embedding_model,
+                "embedding_base_url": profile.embedding_base_url,
+                "embedding_api_key": profile.embedding_api_key,
                 "created_at": profile.created_at,
                 "updated_at": profile.updated_at,
                 "username_at_runtime": None,
@@ -320,6 +336,9 @@ class ProfileService:
                 "llm_model": profile.llm_model,
                 "llm_provider": profile.llm_provider,
                 "llm_extra_headers": profile.llm_extra_headers,
+                "embedding_model": profile.embedding_model,
+                "embedding_base_url": profile.embedding_base_url,
+                "embedding_api_key": profile.embedding_api_key,
                 "created_at": profile.created_at,
                 "updated_at": profile.updated_at,
                 "username_at_runtime": None,

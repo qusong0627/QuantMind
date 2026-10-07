@@ -21,6 +21,43 @@ import type {
   PaginatedResponse,
 } from '../types';
 
+/** 密钥字段名（api_key / qwen_api_key / embedding_api_key / token / password …） */
+const SECRET_FIELD_PATTERN = /(^|_)(api_?key|password|secret|token)$/i;
+
+/**
+ * 日志脱敏：递归把密钥字段替换成 `***`。
+ *
+ * 保存向量检索配置的请求体里必然带 `embedding_api_key` 明文，直接 console.log
+ * 等于把密钥写进开发者工具、Electron 日志以及任何一张截图里。
+ */
+function redactSecrets(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+      k,
+      SECRET_FIELD_PATTERN.test(k) ? '***' : redactSecrets(v),
+    ])
+  );
+}
+
+/**
+ * 错误摘要：只取「方法 + URL + 状态码 + 消息」。
+ *
+ * 不能直接打印 axios error —— 它挂着 `error.config`，里面含
+ * `Authorization: Bearer <token>` 与整个请求体，日志里就是明文凭证。
+ */
+function describeRequestError(error: unknown): string {
+  const e = error as {
+    config?: { method?: string; url?: string };
+    response?: { status?: number };
+    message?: string;
+  };
+  const where = [e?.config?.method?.toUpperCase(), e?.config?.url].filter(Boolean).join(' ');
+  const status = e?.response?.status ? ` (HTTP ${e.response.status})` : '';
+  return `${where || 'request'} failed${status}: ${e?.message ?? String(error)}`;
+}
+
 /**
  * 基础API客户端类
  */
@@ -61,11 +98,14 @@ class BaseApiClient {
         // 添加请求ID用于追踪
         config.headers['X-Request-ID'] = this.generateRequestId();
 
-        console.log(`[API Request] ${config.method?.toUpperCase()} ${config.url}`, config.data);
+        console.log(
+          `[API Request] ${config.method?.toUpperCase()} ${config.url}`,
+          redactSecrets(config.data)
+        );
         return config;
       },
       (error) => {
-        console.error('[API Request Error]', error);
+        console.error('[API Request Error]', describeRequestError(error));
         return Promise.reject(error);
       }
     );
@@ -73,7 +113,7 @@ class BaseApiClient {
     // 响应拦截器
     this.axiosInstance.interceptors.response.use(
       (response: AxiosResponse) => {
-        console.log(`[API Response] ${response.config.url}`, response.data);
+        console.log(`[API Response] ${response.config.url}`, redactSecrets(response.data));
         const data = response.data as any;
         if (data && typeof data === 'object' && 'code' in data && 'data' in data) {
           response.data = data.data;
@@ -86,7 +126,7 @@ class BaseApiClient {
           return authService.handle401Error(error, this.axiosInstance);
         }
 
-        console.error('[API Response Error]', error);
+        console.error('[API Response Error]', describeRequestError(error));
         return Promise.reject(this.handleError(error));
       }
     );
@@ -784,7 +824,18 @@ export class UserCenterService extends BaseApiClient {
   /**
    * 获取 LLM 配置状态
    */
-  async getLLMConfig(): Promise<{ has_key: boolean; masked_key: string; model: string; base_url: string; provider: string; extra_headers: string }> {
+  async getLLMConfig(): Promise<{
+    has_key: boolean;
+    masked_key: string;
+    model: string;
+    base_url: string;
+    provider: string;
+    extra_headers: string;
+    embedding_model: string;
+    embedding_base_url: string;
+    has_embedding_key: boolean;
+    masked_embedding_key: string;
+  }> {
     const response = await this.get<any>('/ai-ide/config/llm');
     return {
       has_key: response?.has_key || false,
@@ -793,6 +844,10 @@ export class UserCenterService extends BaseApiClient {
       base_url: response?.base_url || '',
       provider: response?.provider || '',
       extra_headers: response?.extra_headers || '',
+      embedding_model: response?.embedding_model || '',
+      embedding_base_url: response?.embedding_base_url || '',
+      has_embedding_key: response?.has_embedding_key || false,
+      masked_embedding_key: response?.masked_embedding_key || '',
     };
   }
 
@@ -801,6 +856,25 @@ export class UserCenterService extends BaseApiClient {
    */
   async saveLLMConfig(apiKey: string, model?: string, baseUrl?: string, provider?: string, extraHeaders?: string): Promise<{ success: boolean; message?: string }> {
     return this.post('/ai-ide/config/llm', { qwen_api_key: apiKey, model, base_url: baseUrl, provider, extra_headers: extraHeaders });
+  }
+
+  /**
+   * 保存向量检索（embedding）配置 —— 与 chat 独立。
+   *
+   * 只提交显式传入的字段（undefined = 不动，'' = 清除），未提交的项由容器级
+   * EMBEDDING_* 继续兜底。chat 供应商（如 DeepSeek）通常不提供 embedding 接口，
+   * 因此这里允许指向完全不同的供应商或本地服务。
+   */
+  async saveEmbeddingConfig(embedding: {
+    model?: string;
+    baseUrl?: string;
+    apiKey?: string;
+  }): Promise<{ success: boolean; message?: string }> {
+    const payload: Record<string, unknown> = {};
+    if (embedding.model !== undefined) payload.embedding_model = embedding.model;
+    if (embedding.baseUrl !== undefined) payload.embedding_base_url = embedding.baseUrl;
+    if (embedding.apiKey !== undefined) payload.embedding_api_key = embedding.apiKey;
+    return this.post('/ai-ide/config/llm', payload);
   }
 
   /**

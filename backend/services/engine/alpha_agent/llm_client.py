@@ -57,6 +57,22 @@ def parse_extra_headers(raw: str | dict | None) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items() if k and v is not None}
 
 
+def normalize_embedding_base_url(raw: str | None) -> str:
+    """规整向量检索端点：去尾斜杠，缺 ``/v1`` 时补上。
+
+    与 chat 通道同一套规则。embedding 端点必然是 OpenAI 兼容形态
+    （``resolve_embedding_channel`` 会强制补 ``openai/`` 前缀，litellm 按
+    ``{base}/embeddings`` 拼接），用户按习惯只填主机名
+    （``https://api.siliconflow.cn``）时缺 ``/v1`` 会直接 404。
+
+    留空返回空串 —— 调用方据此走「容器级 EMBEDDING_* 兜底」分支。
+    """
+    base = (raw or "").strip().rstrip("/")
+    if base and not base.endswith("/v1"):
+        base += "/v1"
+    return base
+
+
 def env_extra_headers() -> dict[str, str]:
     """全局兜底：从 LLM_EXTRA_HEADERS 环境变量读取自定义请求头。"""
     return parse_extra_headers(os.getenv("LLM_EXTRA_HEADERS", ""))
@@ -80,12 +96,21 @@ class LLMConfig:
     model: str
     protocol: str  # "openai" | "anthropic"
     headers: dict[str, str] = field(default_factory=dict)
+    # 向量检索（embedding）通道，与 chat 独立。见 rd_agent/llm_env.py 与
+    # rdagent/oai/utils/embedding.py:resolve_embedding_channel。
+    embedding_model: str = ""
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
 
     def llm_env_overrides(self) -> dict[str, str]:
         """生成 RD-Agent 子进程的 LLM 环境变量覆盖。
 
         覆盖 LITELLM_*/OPENAI_*/CHAT_MODEL 全套，确保 build_llm_env 的
         优先级链（占位符过滤后）最终选中本配置。
+
+        EMBEDDING_* 只在用户显式配置时才写出：未配置的项留给容器级 .env 兜底
+        （子进程继承了 os.environ），这样「只在个人中心换 embedding 模型、沿用
+        容器里的 key/base」也能生效。
         """
         env = {
             "LITELLM_OPENAI_API_KEY": self.api_key,
@@ -97,7 +122,21 @@ class LLMConfig:
         }
         if self.headers:
             env["LLM_EXTRA_HEADERS"] = json.dumps(self.headers, ensure_ascii=False)
+        if self.embedding_model:
+            env["EMBEDDING_MODEL"] = self.embedding_model
+        if self.embedding_base_url:
+            env["EMBEDDING_BASE_URL"] = self.embedding_base_url
+        if self.embedding_api_key:
+            env["EMBEDDING_API_KEY"] = self.embedding_api_key
         return env
+
+    def embedding_env_overrides(self) -> dict[str, str]:
+        """仅 embedding 三个变量（供不重建整套 chat env 的调用方使用）。"""
+        return {
+            k: v
+            for k, v in self.llm_env_overrides().items()
+            if k in ("EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY")
+        }
 
 
 def resolve_llm_config() -> LLMConfig | None:

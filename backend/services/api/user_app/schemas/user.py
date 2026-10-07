@@ -105,6 +105,15 @@ class UserProfileUpdate(BaseModel):
     llm_extra_headers: str | None = Field(
         None, max_length=4096, description="LLM 自定义请求头（JSON 文本，如自建网关鉴权头）"
     )
+    embedding_model: str | None = Field(
+        None, max_length=128, description="Embedding 模型名称（如 BAAI/bge-m3）"
+    )
+    embedding_base_url: str | None = Field(
+        None, max_length=512, description="Embedding 接口地址（OpenAI 兼容 base_url）"
+    )
+    embedding_api_key: str | None = Field(
+        None, max_length=2048, description="Embedding API Key（可与 chat 不同供应商）"
+    )
 
 
 # ============ 响应模型 ============
@@ -150,6 +159,9 @@ class UserProfileResponse(BaseModel):
     llm_model: str | None = Field(None, description="LLM 模型名称")
     llm_provider: str | None = Field(None, description="LLM 供应商")
     llm_extra_headers: str | None = Field(None, description="LLM 自定义请求头（JSON 文本）")
+    embedding_model: str | None = Field(None, description="Embedding 模型名称")
+    embedding_base_url: str | None = Field(None, description="Embedding 接口地址")
+    embedding_api_key: str | None = Field(None, description="Embedding API Key")
     created_at: datetime
     updated_at: datetime | None
 

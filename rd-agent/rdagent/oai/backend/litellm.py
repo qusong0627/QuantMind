@@ -1,4 +1,5 @@
 import copyreg
+import re
 from typing import Any, Literal, Optional, Type, TypedDict, Union, cast
 
 import numpy as np
@@ -18,6 +19,10 @@ from rdagent.log import LogColors
 from rdagent.log import rdagent_logger as logger
 from rdagent.oai.backend.base import APIBackend
 from rdagent.oai.llm_conf import LLMSettings
+from rdagent.oai.utils.embedding import (
+    embedding_channel_is_explicit,
+    resolve_embedding_channel,
+)
 
 
 # NOTE: Patching! Otherwise, the exception will call the constructor and with following error:
@@ -44,6 +49,27 @@ class LiteLLMSettings(LLMSettings):
 LITELLM_SETTINGS = LiteLLMSettings()
 ACC_COST = 0.0
 
+_SECRET_FIELD_PATTERN = re.compile(r"(?:^|_)(?:key|token|secret|password)$", re.IGNORECASE)
+"""settings 里以这些后缀结尾的字段一律脱敏后才准进日志。
+
+上游把整个 ``LITELLM_SETTINGS`` 原样打印（repr 与 ``model_dump()`` 各一次），
+``openai_api_key`` / ``chat_openai_api_key`` / ``embedding_openai_api_key``
+等字段因此**明文落日志**。实测确认：讯飞 MaaS 的 key 会出现在容器 stdout，
+而 ``log_object`` 还会把它写进落盘的 log artifact。
+"""
+
+
+def _redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """把 settings dump 里的密钥字段替换成 ``***``，其余原样保留。
+
+    保留结构而非整条丢弃：这份 dump 是排查配置问题的唯一快照，
+    去掉密钥后仍能看出模型、端点、重试策略是否如预期。
+    """
+    return {
+        key: ("***" if _SECRET_FIELD_PATTERN.search(key) else value)
+        for key, value in settings.items()
+    }
+
 
 class LiteLLMAPIBackend(APIBackend):
     """LiteLLM implementation of APIBackend interface"""
@@ -52,8 +78,12 @@ class LiteLLMAPIBackend(APIBackend):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if not self.__class__._has_logged_settings:
-            logger.info(f"{LITELLM_SETTINGS}")
-            logger.log_object(LITELLM_SETTINGS.model_dump(), tag="LITELLM_SETTINGS")
+            # 上游这里是 `logger.info(f"{LITELLM_SETTINGS}")` + 原样 model_dump，
+            # 会把 openai_api_key 明文写进 stdout 与落盘日志。改为脱敏后打印：
+            # 排查配置所需的模型/端点/重试策略全部保留，只有密钥变 `***`。
+            settings_dump = _redact_settings(LITELLM_SETTINGS.model_dump())
+            logger.info(f"LITELLM_SETTINGS={settings_dump}")
+            logger.log_object(settings_dump, tag="LITELLM_SETTINGS")
             self.__class__._has_logged_settings = True
         super().__init__(*args, **kwargs)
 
@@ -68,12 +98,45 @@ class LiteLLMAPIBackend(APIBackend):
         logger.info(f"{LogColors.CYAN}Token count: {LogColors.END} {num_tokens}", tag="debug_litellm_token")
         return num_tokens
 
+    def _embedding_channel_ready(self) -> tuple[bool, str]:
+        """本后端是否真的能产出 embedding。
+
+        在 `base.py` 的重试循环**之前**检查：embedding 通道没配好是配置错误，不是瞬时
+        故障，必须快速失败并给出可操作的提示，而不是被 30×5s 的退避吞掉。
+
+        ⚠️ 不能只判 ``model_name`` 非空：``LLM_SETTINGS.embedding_model`` 的默认值
+        ``text-embedding-3-small``（``oai/llm_conf.py:16``）就是非空的，只看它会让
+        「完全没配」被误判为就绪——然后静默回落到 chat 供应商的凭证。
+        """
+        model_name, _, _ = resolve_embedding_channel()
+        if model_name and embedding_channel_is_explicit():
+            return True, ""
+        return False, (
+            "Embedding channel is not configured. Set EMBEDDING_MODEL + EMBEDDING_BASE_URL "
+            "(plus EMBEDDING_API_KEY for hosted / OpenAI-compatible providers) before enabling "
+            "the knowledge-base retrieval path. Without an explicit channel the request would "
+            "silently fall back to the chat provider's credentials"
+            + (f", using the default model {model_name!r}" if model_name else "")
+            + "."
+        )
+
     def _create_embedding_inner_function(self, input_content_list: list[str]) -> list[list[float]]:
         """
         Call the embedding function
         """
-        model_name = LITELLM_SETTINGS.embedding_model
-        logger.info(f"{LogColors.GREEN}Using emb model{LogColors.END} {model_name}", tag="debug_litellm_emb")
+        model_name, api_base, api_key = resolve_embedding_channel()
+        # 自定义端点（本地 embedding 服务 / 第三方 OpenAI 兼容网关）需要显式传 api_base + api_key；
+        # 不传时 litellm 只会去读 OPENAI_* 全局变量，指不到 embedding 供应商。
+        extra: dict[str, Any] = {}
+        if api_base:
+            extra["api_base"] = api_base
+        if api_key:
+            extra["api_key"] = api_key
+        logger.info(
+            f"{LogColors.GREEN}Using emb model{LogColors.END} {model_name} "
+            f"(api_base={api_base or '<litellm default>'})",
+            tag="debug_litellm_emb",
+        )
         if LITELLM_SETTINGS.log_llm_chat_content:
             logger.info(
                 f"{LogColors.MAGENTA}Creating embedding{LogColors.END} for: {input_content_list}",
@@ -82,6 +145,7 @@ class LiteLLMAPIBackend(APIBackend):
         response = embedding(
             model=model_name,
             input=input_content_list,
+            **extra,
         )
         response_list = [data["embedding"] for data in response.data]
         return response_list

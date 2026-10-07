@@ -400,7 +400,12 @@ services:
       - ./docker/conda-shim:/usr/local/bin/conda:ro
       # litellm+pydantic 兼容补丁（因子挖掘 LLM 调用用，见 docker/litellm_sitecustomize.py）
       - ./docker/litellm_sitecustomize.py:/usr/local/lib/python3.10/site-packages/sitecustomize.py:ro
-      # RD-Agent 已 pip install 到镜像中，不再需要运行时挂载
+      # RD-Agent 源码外挂载。镜像是**烘焙**的（Dockerfile.oss:104 COPY rd-agent/
+      # 后 install_rdagent.sh 又 rm -rf 源码目录），所以改仓库不生效、容器重建还会
+      # 退回旧版，只能靠 docker cp——而 cp 的产物在重建时同样丢失。
+      # 挂载安全性已验证：容器内 690 文件 vs 仓库 694，**0 个容器独有文件、
+      # 0 个 .so/.pyd**，不会遮蔽任何东西（仓库多出的 4 个是 gitignore 的 .h5/日志）。
+      - ./rd-agent/rdagent:/usr/local/lib/python3.10/site-packages/rdagent
       # 允许 API 容器调用宿主机 Docker 启动训练容器
       - /var/run/docker.sock:/var/run/docker.sock
       # 通达信桥共享目录（宿主以 CIFS 挂 //<win>/PYPlugins，见 /etc/fstab）。

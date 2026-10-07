@@ -17,6 +17,12 @@ class LLMConfig(BaseModel):
     base_url: str | None = None
     provider: str | None = None
     extra_headers: str | None = None  # 自定义请求头（JSON 文本）
+    # 向量检索（embedding）通道 —— 与 chat 独立配置。
+    # chat 供应商（如 DeepSeek）通常不提供 embedding 接口，必须能单独指向另一个
+    # 供应商或本地服务（如 ollama / SiliconFlow / 自建 OpenAI 兼容端点）。
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
 
 
 def _get_user_info(request: Request):
@@ -34,6 +40,28 @@ def _get_api_gateway_url():
         return url
     # OSS 单容器模式，所有服务在同一容器内
     return "http://127.0.0.1:8000"
+
+
+def _validation_fields(resp: httpx.Response) -> list[str]:
+    """从下游错误回包里**只**取校验失败的字段路径，绝不带值。
+
+    下游是 FastAPI，422 的 detail 形如
+    ``[{"loc": ["body", "embedding_api_key"], "input": "sk-真实密钥"}]`` ——
+    ``input`` 就是明文密钥，所以整包 ``resp.text`` 不能进日志。
+    """
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        return []
+    if not isinstance(detail, list):
+        return []
+    return sorted(
+        {
+            ".".join(str(part) for part in item.get("loc", ()))
+            for item in detail
+            if isinstance(item, dict) and item.get("loc")
+        }
+    )
 
 
 def _build_profile_payload(config: LLMConfig, raw_body: dict | None = None) -> dict:
@@ -58,6 +86,14 @@ def _build_profile_payload(config: LLMConfig, raw_body: dict | None = None) -> d
     # 自定义请求头：None=不动；空串=清除；有值=覆盖
     if config.extra_headers is not None:
         payload["llm_extra_headers"] = str(config.extra_headers).strip()
+    # Embedding 通道：同样遵循 None=不动 / 空串=清除 / 有值=覆盖。
+    # 只写显式传入的字段，未传的留给 Profile 现有值 / 容器级 EMBEDDING_* 兜底。
+    if config.embedding_model is not None:
+        payload["embedding_model"] = str(config.embedding_model).strip()
+    if config.embedding_base_url is not None:
+        payload["embedding_base_url"] = str(config.embedding_base_url).strip()
+    if config.embedding_api_key is not None:
+        payload["embedding_api_key"] = str(config.embedding_api_key).strip()
     return payload
 
 
@@ -85,6 +121,9 @@ async def get_llm_config(request: Request):
                 key = data.get("api_key")
                 has_key = bool(key and key.strip())
                 masked = f"{key[:3]}****{key[-4:]}" if has_key and len(key) > 8 else ""
+                emb_key = data.get("embedding_api_key")
+                has_emb_key = bool(emb_key and emb_key.strip())
+                masked_emb = f"{emb_key[:3]}****{emb_key[-4:]}" if has_emb_key and len(emb_key) > 8 else ""
                 return {
                     "success": True,
                     "has_key": has_key,
@@ -93,13 +132,29 @@ async def get_llm_config(request: Request):
                     "base_url": data.get("llm_base_url") or "",
                     "provider": data.get("llm_provider") or "",
                     "extra_headers": data.get("llm_extra_headers") or "",
+                    "embedding_model": data.get("embedding_model") or "",
+                    "embedding_base_url": data.get("embedding_base_url") or "",
+                    "has_embedding_key": has_emb_key,
+                    "masked_embedding_key": masked_emb,
                 }
             else:
                 logger.warning(f"Failed to fetch profile: {resp.status_code} {resp.text}")
     except Exception as e:
         logger.error(f"Failed to fetch profile for user {user_id}: {e}")
 
-    return {"success": True, "has_key": False, "masked_key": "", "model": "", "base_url": "", "provider": "", "extra_headers": ""}
+    return {
+        "success": True,
+        "has_key": False,
+        "masked_key": "",
+        "model": "",
+        "base_url": "",
+        "provider": "",
+        "extra_headers": "",
+        "embedding_model": "",
+        "embedding_base_url": "",
+        "has_embedding_key": False,
+        "masked_embedding_key": "",
+    }
 
 
 @router.post("/llm")
@@ -151,7 +206,13 @@ async def save_llm_config(request: Request, config: LLMConfig):
                 json=payload,
             )
             if resp.status_code != 200:
-                logger.error(f"Failed to update profile for user {user_id}: {resp.text}")
+                # 不打印 resp.text：FastAPI 422 的 detail 会把违规入参**原样回显**
+                # （detail[].input），而本请求体含 api_key / embedding_api_key 明文，
+                # 等于把密钥写进服务端日志。只记状态码与出错字段名。
+                logger.error(
+                    f"Failed to update profile for user {user_id}: "
+                    f"HTTP {resp.status_code}, 校验失败字段={_validation_fields(resp)}"
+                )
                 raise HTTPException(status_code=resp.status_code, detail="同步到用户服务失败")
 
         return {"success": True, "message": "配置已成功同步到个人档案"}

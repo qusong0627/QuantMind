@@ -490,20 +490,36 @@ class APIBackend(ABC):
         )
         return resp
 
+    def _embedding_channel_ready(self) -> tuple[bool, str]:
+        """Whether this backend can actually produce embeddings.
+
+        Checked *before* the retry loop in `create_embedding`: a missing embedding
+        provider is a configuration error, not a transient failure, so it must fail
+        fast with an actionable message instead of being retried for minutes.
+        Backends that need external credentials override this.
+        """
+        return True, ""
+
     def create_embedding(self, input_content: str | list[str], *args, **kwargs) -> list[float] | list[list[float]]:  # type: ignore[no-untyped-def]
-        # Return dummy embeddings when embedding API is unavailable (e.g., DeepSeek has no embedding model)
-        import hashlib
-        import struct
+        """Create embeddings through the configured embedding channel.
+
+        Restored to upstream shape (see FORK_DIVERGENCE.md A2): this fork used to return
+        sha256-seeded pseudo-random vectors, which made the knowledge-base semantic search
+        run on noise without any error. Real failures must surface, never be papered over.
+        """
+        ready, reason = self._embedding_channel_ready()
+        if not ready:
+            raise ValueError(reason)
         input_content_list = [input_content] if isinstance(input_content, str) else input_content
-        def _hash_to_vector(s: str, dim: int = 1536) -> list[float]:
-            h = hashlib.sha256(s.encode()).digest()
-            import random
-            rng = random.Random(int.from_bytes(h[:8], 'big'))
-            return [rng.gauss(0, 1) for _ in range(dim)]
-        results = [_hash_to_vector(c) for c in input_content_list]
+        resp = self._try_create_chat_completion_or_embedding(  # type: ignore[misc]
+            input_content_list=input_content_list,
+            embedding=True,
+            *args,
+            **kwargs,
+        )
         if isinstance(input_content, str):
-            return results[0]
-        return results
+            return resp[0]  # type: ignore[return-value]
+        return resp  # type: ignore[return-value]
 
     def build_messages_and_calculate_token(
         self,
