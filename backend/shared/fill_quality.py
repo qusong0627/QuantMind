@@ -3,7 +3,10 @@
 口径（文档化，报表随附）：
 - **成交价偏差**：``cost_bps = direction × (fill_price/ref_price − 1) × 1e4``，
   direction=+1 买 / −1 卖（正 = 成本，负 = 收益）；``ref_price`` = 当日真实参考价
-  （默认收盘，QuantDB 前复权日线；调用方给定，缺失该笔不计入分布并如实计数）；
+  （默认收盘，QuantDB 前复权日线；调用方给定，缺失该笔不计入分布并如实计数）。
+  公式实现在 ``backend.shared.exec_cost.slip_bps``（**唯一出处**，与 TCA 执行损耗
+  报告共用）：同一套符号约定在两处各写一遍，就是两处可以分别改错的地方，而两块
+  看板会同时给出相反的故事、各自的自测还都是绿的；
 - **成交率** = 有成交委托 / 委托总数；**部分成交比例** = 有成交且成交量 < 委托量 的笔数 / 有成交笔数；
 - **滑点实现** = 偏差分布中位数与配置滑点（bps）之差（正 = 实现比配置更贵）；
 - **保真度分层**：按 ``execution_model``（daily 核 = synthetic_price；F2 = snapshot_core）
@@ -16,7 +19,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-_DIRECTION = {"buy": 1.0, "sell": -1.0}
+from backend.shared.exec_cost import slip_bps
 
 
 def _f(value: Any) -> float | None:
@@ -55,13 +58,14 @@ def fidelity_metrics(
     missing_ref = 0
     for row in filled_rows:
         symbol = str(row.get("symbol") or "")
-        ref = refs.get(symbol)
-        direction = _DIRECTION.get(str(row.get("side") or "").lower())
-        price = _f(row.get("fill_price"))
-        if ref is None or ref <= 0 or direction is None or price is None:
+        # 偏差公式**只在 exec_cost 里实现一次**（含符号约定与"脏值→不可定价"的判据）；
+        # 这里换用它的返回 None 作为"该笔不计入分布"的同一判据——原先散在这里的
+        # ref/direction/price 三条判断题与那边的实现必须一致，否则计数会分叉。
+        bps = slip_bps(row.get("side"), refs.get(symbol), _f(row.get("fill_price")))
+        if bps is None:
             missing_ref += 1
             continue
-        deviations.append(direction * (price / ref - 1.0) * 1e4)
+        deviations.append(bps)
 
     partial = 0
     for row in filled_rows:

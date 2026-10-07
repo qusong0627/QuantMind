@@ -83,11 +83,23 @@ def test_cycle_timeout_and_heartbeat_defaults(monkeypatch):
 
 
 def test_trade_service_starts_simulation_eod_worker():
+    """交易服务起 EOD worker，且挂进 shutdown 取消清单。
+
+    断言的是**接线**（起任务 + 进取消清单），不是 `name=` 那个调试标签：
+    `4357b06b` 把它从 `simulation-eod-worker` 改成 `simulation-eod`（与同族的
+    `simulation-t1-unlock`/`simulation-pending-order`/`simulation-corporate-action`
+    对齐），该字串对行为无意义，钉它只会让纯改名报红。
+
+    路径按 `__file__` 解析：原先写相对路径 `backend/services/...`，只有从项目根跑
+    才成立，从 `backend/` 跑必红——那是 cwd 依赖，不是接线断了。
+    """
     from pathlib import Path
 
-    source = Path("backend/services/trade/main.py").read_text(encoding="utf-8")
+    source = (
+        Path(__file__).resolve().parents[1] / "services" / "trade" / "main.py"
+    ).read_text(encoding="utf-8")
     assert "run_simulation_eod_worker" in source
-    assert "simulation-eod-worker" in source
+    assert "simulation_eod_task," in source, "任务没进 shutdown 取消清单（会泄漏）"
 
 
 def test_ensure_table_runs_once_per_process(monkeypatch):

@@ -771,7 +771,10 @@ def _train_nativetft(
     logger.info("NativeTFT saved: model.pth (best_epoch=%d, best_ic=%.6f)", best_epoch, best_score)
 
     dl_metadata = {
-        "model_type": "NativeTFT",
+        # 小写，与通用 DL 路径（`"model_type": model_type`，键取自 _QLIB_TS_MODEL_MAP）
+        # 及 ALGO_CLASS_NAMES / ALGO_FRAMEWORKS / SEQUENCE_TYPES 的键一致。
+        # 曾写驼峰 "NativeTFT"，导致同一算法在按算法聚合时裂成两组。
+        "model_type": "nativetft",
         "model_arch": {
             "input_dim": d_feat,
             "hidden_dim": hidden_dim,

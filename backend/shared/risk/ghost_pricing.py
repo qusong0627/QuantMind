@@ -52,6 +52,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from backend.services.simulation.services.local_market_data import PRICE_EPS_YUAN
 from backend.shared.risk.ghost import GhostRow, cost_of, num
 
 #: 远期窗口（交易日）：t1=入场日收盘；tN=入场日起第 N 个交易日收盘
@@ -64,7 +65,15 @@ RETRY_WINDOW_S = 300.0
 
 #: 价格比较容差（元）。涨停价由 `compute_limits` 按板别规则精确取整，
 #: 触板时 open 与 limit_up **逐分相等**，故这里只需吸收浮点误差。
-PRICE_EPS = 1e-9
+#:
+#: **从唯一事实源导入**（`local_market_data.PRICE_EPS_YUAN` = 0.004 < 半分钱，
+#: 正是"两边都是分位价、只差浮点噪声"的定义场景）。本模块曾自持一个写死的
+#: ``1e-9`` 同名常量 —— 那是全库**第四个**价位容差口径，而"价格等值比较"早有
+#: 权威定义（`local_market_data` 的 docstring 明确列了三种口径各自的适用范围）。
+#: 自持一份就是"下一次改口径只改到一处"的起点，被
+#: `backend/tests/test_limit_tolerance_single_source.py` 挡下。
+#: 0.004 仍远小于一分钱，故"差一分就不是一字板"的边界不受影响。
+PRICE_EPS = PRICE_EPS_YUAN
 
 #: 各期状态（见模块头；报告按此分组）
 H_OK = "ok"

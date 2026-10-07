@@ -316,6 +316,30 @@ def test_preflight_freshness_fallback_to_trade_redis(monkeypatch):
     assert res["details"]["level"] == "fresh"
 
 
+@pytest.mark.integration
+def test_preflight_freshness_client_construction_error_degrades(monkeypatch):
+    """远端行情未配置/`REMOTE_QUOTE_DISABLED=true` 时**构造客户端就会抛错** ——
+    这种情况必须降级到交易 Redis / 日线兜底，不能外抛。
+
+    历史缺陷：构造在 try 之外，`/trading-precheck` 的 REAL 分支没有兜底
+    try，于是「远端行情关掉」表现为整个端点 500（前端「检测失败」），
+    而不是回退日线。
+    """
+    from backend.services.live_trading.routers import real_trading_utils as rtu
+
+    monkeypatch.setattr(rtu, "_resolve_preflight_symbols", lambda: ["600036.SH"])
+
+    def _boom():
+        raise RuntimeError("远端行情 Redis 未配置或已禁用（REMOTE_QUOTE_DISABLED）")
+
+    monkeypatch.setattr(rtu, "_get_stream_series_redis_client", _boom)
+
+    fallback = _FakeRedisLike(time.time() - 5)
+    res = rtu.check_stream_series_freshness(redis_client=fallback)
+    assert res["ok"] and res["details"]["used_fallback"] is True
+    assert "REMOTE_QUOTE_DISABLED" in res["details"]["remote_probe_error"]
+
+
 # ── 5. 真 Redis 打点回环 ────────────────────────────────────────────
 
 

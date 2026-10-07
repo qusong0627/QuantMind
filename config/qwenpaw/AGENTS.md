@@ -40,7 +40,7 @@ read_when:
 | Engine 服务 | `http://quantmind:8001` |
 | Trade 服务 | `http://quantmind:8002` |
 | Stream 服务 | `http://quantmind:8003` |
-| 内部认证 | Header `X-Internal-Call: quantmind-internal-secret` |
+| 内部认证 | Header `X-Internal-Call: <INTERNAL_CALL_SECRET 的当前值>`（见 `config/runtime.env`；**此文档不印明文**） |
 | 用户身份 | Header `X-User-Id: qwenpaw` |
 
 > 各技能 SKILL.md 里的接口优先。上面是兜底。带 `X-Internal-Call` 的请求都要同时带 `X-User-Id`。
