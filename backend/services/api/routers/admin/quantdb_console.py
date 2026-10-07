@@ -1189,6 +1189,26 @@ async def modelscope_preflight(
         raise HTTPException(status_code=500, detail=f"failed: {exc}") from exc
 
 
+def _reset_quantdb_runtime_caches() -> None:
+    """初始化数据覆盖本地目录后，重置 api 进程内的 QuantDB 单例与个股终端缓存。
+
+    数据目录为空时创建的 hub 单例会 fallback 并永久缓存错误路径，
+    不重置则个股终端在重启容器前一直读不到新初始化的数据。
+    """
+    try:
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+        QuantDBDataHub.reset_instance()
+    except Exception:  # noqa: BLE001 - 重置失败不影响任务状态
+        logger.warning("重置 QuantDBDataHub 单例失败（忽略）", exc_info=True)
+    try:
+        from backend.services.api.routers import stock_terminal
+
+        stock_terminal.reset_terminal_caches()
+    except Exception:  # noqa: BLE001
+        logger.warning("清空个股终端缓存失败（忽略）", exc_info=True)
+
+
 def _run_modelscope_init_job(job_id: str, payload: ModelScopeInitRequest) -> None:
     from backend.services.engine.data_platform.modelscope_dataset_sync import (
         init_from_modelscope,
@@ -1269,6 +1289,10 @@ def _run_modelscope_init_job(job_id: str, payload: ModelScopeInitRequest) -> Non
             if job is not None:
                 job.update(status="failed", error=str(exc), finished_at=_now_iso())
         return
+    finally:
+        # 成功/取消/中途失败都可能已写入文件，统一重置进程内缓存，
+        # 使 hub 单例与个股终端重新解析数据目录。
+        _reset_quantdb_runtime_caches()
     logger.info("modelscope init job %s %s (started %s)", job_id, status, started_at)
 
 

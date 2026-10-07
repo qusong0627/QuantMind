@@ -72,6 +72,20 @@ _MAX_CONCEPTS = 24
 _MIN_SIGNAL_COVERAGE = 1000
 
 
+def reset_terminal_caches() -> None:
+    """清空个股终端进程内缓存（数据目录初始化/全量覆盖后调用）。
+
+    _DATA_DIR 摘自 QuantDBDataHub 单例；若单例在数据目录为空时创建，
+    会永久缓存 fallback 错误路径，必须连同各 TTL 缓存一起清空重解析。
+    """
+    global _DATA_DIR
+    _DATA_DIR = None
+    _universe_cache.update({"df": None, "ts": 0.0, "trade_date": ""})
+    _model_options_cache.update({"v": None, "ts": 0.0})
+    _concept_cache.update({"ts": 0.0, "symbol_map": {}})
+    _index_membership_cache.update({"ts": 0.0, "map": {}})
+
+
 def _classify_board(symbol: str) -> str:
     """按代码归类市场板块：SH 主板/科创板、SZ 主板/创业板、BJ 北交所。"""
     code = symbol.split(".")[0]

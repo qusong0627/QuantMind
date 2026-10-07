@@ -184,6 +184,17 @@ class QuantDBDataHub:
         except Exception as exc:
             logger.warning("QuantDB warm-up failed (non-fatal): %s", exc)
 
+    @classmethod
+    def reset_instance(cls) -> None:
+        """重置全局单例，使 data_dir 在下次访问时重新解析。
+
+        若单例是在数据目录尚为空时创建的（_resolve_data_dir 会跳过空目录
+        并 fallback 到错误路径），「初始化数据」等全量覆盖任务完成后必须
+        调用本方法，否则长驻进程会一直读旧路径。
+        """
+        with cls._instance_lock:
+            cls._instance = None
+
     # ------------------------------------------------------------------
     # DuckDB 连接管理（线程安全）
     # ------------------------------------------------------------------
