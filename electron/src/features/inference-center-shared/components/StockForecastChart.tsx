@@ -28,6 +28,8 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
     // 1. 历史 K 线数据
     const historyDates = kline.map(k => k.date);
     const klineData = kline.map(k => [k.open, k.close, k.low, k.high]); // ECharts Candlestick: [open, close, lowest, highest]
+    // 按日期索引源数据：tooltip 取值不依赖 ECharts 内部维度布局
+    const klineByDate = new Map(kline.map(k => [k.date, k]));
 
     // 2. 预测部分数据对齐
     const forecastDates = forecast.map(f => f.date);
@@ -96,11 +98,15 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
           
           params.forEach((item: any) => {
             if (item.seriesType === 'candlestick') {
-              const [, close, low, high] = item.data;
+              // 以源数据为准取值：echarts 6 在类别轴下把 ordinal 序号补成了首维，
+              // params.data / params.value 实为 [序号, open, close, low, high]，
+              // 老写法 `const [, close] = item.data` 取到的是「开盘价」。
+              const bar = klineByDate.get(date);
+              if (!bar) return;
               html += `
                 <div style="display: flex; justify-content: space-between; gap: 12px; font-size: 11px; margin: 2px 0;">
                   <span style="color: #334155;">K线收盘:</span>
-                  <span style="font-weight: 600; font-family: monospace;">${currencySymbol}${close?.toFixed(2)}</span>
+                  <span style="font-weight: 600; font-family: monospace;">${currencySymbol}${Number(bar.close).toFixed(2)}</span>
                 </div>
               `;
             } else if (item.value !== null && item.value !== undefined) {

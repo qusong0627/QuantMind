@@ -221,7 +221,7 @@ export const InferenceCoveragePanel: React.FC<{ modelId: string }> = ({ modelId 
 
       <Card size="small" className="rounded-2xl">
         <div className="flex items-center justify-between mb-3">
-          <Text className="text-xs font-black text-slate-700 flex items-center gap-1.5"><Calendar size={12} className="text-slate-400"/>覆盖日历（6-8月）</Text>
+          <Text className="text-xs font-black text-slate-700 flex items-center gap-1.5"><Calendar size={12} className="text-slate-400"/>覆盖日历</Text>
           <Tag className="rounded-full">{gapCount} 个缺口日</Tag>
         </div>
         {(() => {
