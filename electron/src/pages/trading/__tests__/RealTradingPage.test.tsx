@@ -134,6 +134,8 @@ const makeExtraTab = (onRender?: (ctx: RealTradingTabContext) => void): RealTrad
 });
 
 const BASE_LABELS = BASE_CONSOLE_TABS.map((t) => t.label);
+/** 基础栏去掉「设置」——它被 composeConsoleTabs 钉在最后一位，追加页签插在它之前 */
+const BASE_LABELS_WITHOUT_SETTINGS = BASE_CONSOLE_TABS.filter((t) => t.id !== 'settings').map((t) => t.label);
 
 describe('RealTradingPage 外壳接线', () => {
     beforeEach(() => {
@@ -174,11 +176,11 @@ describe('RealTradingPage 外壳接线', () => {
         );
     });
 
-    it('追加页签：排在基础 9 栏之后，点击挂载，切走卸载', () => {
+    it('追加页签：排在基础栏之后、「设置」之前，点击挂载，切走卸载', () => {
         renderPage({ extraTabs: [makeExtraTab()] });
 
-        // 追加在末尾，基础 9 栏原样在前
-        expect(sidebarLabels()).toEqual([...BASE_LABELS, '探针栏']);
+        // 追加栏插在「设置」之前（设置恒为最后一栏，见 consoleTabs.ts::PINNED_LAST_TAB_ID）
+        expect(sidebarLabels()).toEqual([...BASE_LABELS_WITHOUT_SETTINGS, '探针栏', '设置']);
 
         clickTab('探针栏');
         expect(pane('extra-probe')).not.toBeNull();

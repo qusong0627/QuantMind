@@ -25,6 +25,14 @@ interface RiskLayerProps {
     status: RealTradingStatus | null;
     enabled: boolean;
     refreshKey?: number;
+    /**
+     * 窄栏排布：指标卡固定 2 列，不随视口断点撑成 4 列。缺省 false = 既有宽版形态。
+     *
+     * `lg:grid-cols-4` 是**视口**断点：把它放进 380px 的侧栏里，视口照样是 ≥1024，
+     * 于是四张卡各挤到 ~80px（标签折成三行）—— 容器变窄而断点不知道。
+     * 宿主是窄栏时由调用方显式声明，而不是靠视口猜。
+     */
+    compact?: boolean;
 }
 
 const pct = (value: unknown): string => {
@@ -53,7 +61,7 @@ const Metric: React.FC<{
  * 本层直接读 `/risk-status`（与下单侧同源），并把「口径分裂」放在最显眼处：
  * **止损看着配了却不触发**是最隐蔽的一类事故，必须主动报。
  */
-const RiskLayer: React.FC<RiskLayerProps> = ({ status, enabled, refreshKey }) => {
+const RiskLayer: React.FC<RiskLayerProps> = ({ status, enabled, refreshKey, compact = false }) => {
     const [data, setData] = useState<RiskStatusPayload | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -119,7 +127,7 @@ const RiskLayer: React.FC<RiskLayerProps> = ({ status, enabled, refreshKey }) =>
                     <button type="button" onClick={() => void load()} className="ml-2 underline">重试</button>
                 </div>
             ) : (
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                <div className={`grid grid-cols-2 gap-2 ${compact ? '' : 'lg:grid-cols-4'}`}>
                     <Metric
                         label="止损线"
                         value={pct(exec.stop_loss)}

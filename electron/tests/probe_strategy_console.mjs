@@ -2,6 +2,7 @@
  * 策略控制台探针（T-RC-15/17/19/20）——把「交互不变量」落到可复跑的证据上。
  *
  * 覆盖四件事（都是用户明确点名的）：
+ *   0. 模式契约（2026-09-30 双栏化后改版，见下方「模式契约」段）
  *   1. 实盘页签里**不存在「模拟」字样**（旧版把 isSim 分支写反，实盘按钮写着「启动模拟交易」）
  *   2. 策略下拉**不含非当前市场**的策略（旧版漏传 market，港股策略混进 A 股视图）
  *   3. 守护条常驻 + 关联「关闭页面不影响运行」的明示
@@ -12,9 +13,18 @@
  *
  * ⚠️ 深链必须带 `#/`（HashRouter；漏了会落到默认页，量到的东西全不对）。
  *
+ * 模式契约（2026-09-30 起）：用户口径「一个模拟、一个实盘」后，本机 /trading 是
+ * 模拟栏（模式被 App 定死 simulation，页内**刻意不挂**模式开关）、#/live 是实盘栏
+ * （定死 real）。「页内切换开关」只存在于没有独立实盘栏的产物（公开仓形态）——
+ * 探针两种形态自适应，且每条分支都要求正证据（无开关本身不是通过理由）：
+ *   · 页内有开关 → 点开关 → 过 T-FE-18 危险确认 → 复读 data-mode（PROBE_MODE 生效）；
+ *   · 页内无开关 + 侧栏有 `[data-nav-id="live"]` → 双栏形态，必须能从 #/live 栏
+ *     拿到 REAL 控制台（证「实盘模式有入口」，不是把入口删了了事）；
+ *   · 页内无开关 + 无实盘栏 → 实盘开关关闭的产物，控制台必须恒 SIMULATION（安全方向）。
+ *
  * 用法：
  *   PROBE_BASE=http://localhost:3000 node tests/probe_strategy_console.mjs
- *   PROBE_MODE=simulation node tests/probe_strategy_console.mjs   # 默认 real
+ *   PROBE_MODE=simulation node tests/probe_strategy_console.mjs   # 默认 real（仅开关分支生效）
  * 退出码：0 全过；1 有 FAIL；无 FAIL 但有 N/A 时仍为 0（N/A 会明确打印，不冒充通过）。
  */
 import { chromium } from 'playwright';
@@ -87,6 +97,14 @@ async function openConsole() {
   await page.waitForTimeout(3500); // 等首屏 status/precheck 落地
 }
 
+/** 读当前控制台模式 + 页内是否存在模式开关（「模式契约」分支的判据） */
+async function readModeState() {
+  return await page.evaluate(() => ({
+    mode: document.querySelector('[data-testid="strategy-console"]')?.getAttribute('data-mode') || null,
+    toggle: !!document.querySelector('button[role="switch"][aria-label*="交易模式"]'),
+  }));
+}
+
 /** 切到目标模式（`data-mode` 用 `real`/`simulation`，界面上是「实盘/模拟」开关） */
 async function switchModeIfNeeded(want) {
   const cur = await page.evaluate(() =>
@@ -113,14 +131,53 @@ await login();
 await openConsole();
 await dismissModals();
 
-// 只在显式指定 PROBE_MODE 时切模式——不指定就按 App 当前模式如实断言，
-// 避免探针擅自把界面切到实盘（生产实例上这是可见的状态改变）。
+// ── 0. 模式契约（2026-09-30 双栏化后）───────────────────────────────────────
+// 详见文件头「模式契约」段。三种形态各自取正证据，绝不以「没有开关可点」为由静默放行。
 {
-  const got = await switchModeIfNeeded(MODE);
-  if (MODE && String(got).toLowerCase() !== String(MODE).toLowerCase()) {
-    record(`切换到 ${MODE} 模式`, false, `切换后仍是 ${got}`);
-  } else if (MODE) {
-    record(`切换到 ${MODE} 模式`, true, '');
+  const st = await readModeState();
+  if (st.toggle) {
+    // 单栏形态（没有独立实盘栏的产物）：页内开关是通往实盘的唯一入口，走点击切换验证。
+    // 只在显式指定 PROBE_MODE 时切模式——不指定就按 App 当前模式如实断言，
+    // 避免探针擅自把界面切到实盘（生产实例上这是可见的状态改变）。
+    const got = await switchModeIfNeeded(MODE);
+    if (String(got).toLowerCase() !== String(MODE).toLowerCase()) {
+      record(`切换到 ${MODE} 模式`, false, `切换后仍是 ${got}`);
+    } else {
+      record(`切换到 ${MODE} 模式`, true, '');
+    }
+  } else {
+    const simPinned = String(st.mode || '').toLowerCase() === 'simulation';
+    const hasLiveColumn = await page.evaluate(() => !!document.querySelector('[data-nav-id="live"]'));
+    if (hasLiveColumn) {
+      // 双栏形态（本机）：正证据 = #/live 栏里能拿到 REAL 的控制台
+      let liveMode = null;
+      let liveErr = '';
+      try {
+        await page.goto(`${BASE}/#/live`, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(5000);
+        await dismissModals();
+        const liveTab = page.locator('button', { hasText: /^策略管理$/ }).first();
+        if (await liveTab.count()) await liveTab.click({ timeout: 8000 }).catch(() => {});
+        await page.waitForSelector('[data-testid="strategy-console"]', { timeout: 20000 });
+        await page.waitForTimeout(2000);
+        liveMode = await page.evaluate(() =>
+          document.querySelector('[data-testid="strategy-console"]')?.getAttribute('data-mode'));
+      } catch (e) {
+        liveErr = String((e && e.message) || e).split('\n')[0].slice(0, 120);
+      }
+      record(
+        '模式契约：模拟栏定死 SIMULATION，实盘栏（#/live）能拿到 REAL 控制台',
+        simPinned && String(liveMode || '').toLowerCase() === 'real',
+        `模拟栏=${st.mode || '未取到'}；实盘栏=${liveMode || `未取到（${liveErr || '无控制台'}）`}`,
+      );
+      await openConsole(); // 回模拟栏（后续断言都按模拟模式跑）
+    } else {
+      record(
+        '模式契约：无独立实盘栏且无页内开关（实盘开关关闭的产物），控制台恒 SIMULATION',
+        simPinned,
+        `data-mode=${st.mode || '未取到'}`,
+      );
+    }
   }
 }
 
@@ -326,7 +383,13 @@ if (!landing.found) {
       await stopBtn.click({ timeout: 8000 }).catch(() => {});
       await page.waitForTimeout(1500);
       const modal = await page.evaluate(() => {
-        const m = document.querySelector('.ant-modal:visible');
+        // ⚠️ `:visible` 是 Playwright 伪类，DOM 的 querySelector **不认**（会抛
+        // SyntaxError 把探针自己炸掉——2026-09-30 就是这么崩的）。antd 的显隐在
+        // `.ant-modal-wrap` 上（display:none），按 wrap 的 display 找可见弹窗。
+        const wrap = [...document.querySelectorAll('.ant-modal-wrap')].find(
+          (w) => getComputedStyle(w).display !== 'none' && w.querySelector('.ant-modal')
+        );
+        const m = wrap?.querySelector('.ant-modal') || null;
         if (!m) return null;
         return {
           text: m.innerText.replace(/\s+/g, ' '),

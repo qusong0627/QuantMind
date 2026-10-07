@@ -63,10 +63,19 @@ describe('composeConsoleTabs', () => {
         expect(composeConsoleTabs([])).toEqual([...BASE_CONSOLE_TABS]);
     });
 
-    it('追加页签排在基础页签之后，且保持传入顺序', () => {
+    it('追加页签插在「设置」之前，且保持传入顺序（设置恒为最后一栏）', () => {
         const second: ConsoleTab = { id: 'extra-two', label: '追加栏二', icon: Star };
         const ids = composeConsoleTabs([EXTRA, second]).map((t) => t.id);
-        expect(ids).toEqual([...BASE_CONSOLE_TABS.map((t) => t.id), 'extra-one', 'extra-two']);
+        expect(ids).toEqual([
+            ...BASE_CONSOLE_TABS.map((t) => t.id).filter((id) => id !== 'settings'),
+            'extra-one',
+            'extra-two',
+            'settings',
+        ]);
+    });
+
+    it('追加页签顶不掉「设置」：用 settings 这个 id 同样抛错', () => {
+        expect(() => composeConsoleTabs([{ ...EXTRA, id: 'settings' }])).toThrow(/settings/);
     });
 
     it('追加页签 id 与基础页签冲突时抛错，不静默合成一个页签', () => {

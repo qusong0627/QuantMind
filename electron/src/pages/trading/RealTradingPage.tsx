@@ -157,9 +157,27 @@ export interface RealTradingPageProps {
      * 「总控放设置里面、数据也放设置里面」，不在侧栏另起入口）。
      */
     settingsPanels?: readonly SettingsExtraPanel[];
+    /**
+     * 追加到「手动任务」栏向导下方的区块，拿到与追加页签同一份运行期上下文。缺省不渲染。
+     *
+     * 与 `extraTabs` 同一约定：**公开树不感知调用方是谁** —— 无调用方时整个分支不参与
+     * 渲染，公开仓形态与本机制引入前逐位相同。用途是「属于手动任务范畴、但只有本机
+     * 实盘栏才有」的面板（本机把「推送下单」并进手动任务，用户 2026-09-23 口径
+     * 「推送下单放手动任务」，不在侧栏另起入口）。
+     */
+    manualTaskExtras?: (ctx: RealTradingTabContext) => React.ReactNode;
+    /**
+     * 追加到「持仓监控」栏右栏（持仓风险与情报）的区块，拿到与追加页签同一份运行期
+     * 上下文。缺省不渲染。
+     *
+     * 与 `extraTabs` 同一约定：**公开树不感知调用方是谁** —— 无调用方时整个分支不参与
+     * 渲染，公开仓形态与本机制引入前逐位相同。用途同上（本机把「风控止损」并进持仓
+     * 监控，用户 2026-09-23 口径「风控止损放持仓监控那」）。
+     */
+    positionRailExtras?: (ctx: RealTradingTabContext) => React.ReactNode;
 }
 
-const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, extraTabs, banner, settingsPanels }) => {
+const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, extraTabs, banner, settingsPanels, manualTaskExtras, positionRailExtras }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     // 默认「系统健康」，深链 ?tab=eval|signals 直达 —— 规则见 utils/activeTab.ts（有测试锁定）
     const initialTab: ActiveTab = resolveInitialTab(
@@ -736,7 +754,16 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, ex
                             />
                     )}
                     {activeTab === 'manual-task' && (
-                        <ManualTaskPage tenantId={tenantId} userId={userId} tradingMode={tradingMode} onBack={() => setActiveTab('manage')} />
+                        <ManualTaskPage
+                            tenantId={tenantId}
+                            userId={userId}
+                            tradingMode={tradingMode}
+                            onBack={() => setActiveTab('manage')}
+                            // 调用方注入的追加区块（无调用方时为 undefined，逐位不变）。
+                            // 回调只返回**元素**、不直接调 hook —— 它是在本组件的渲染里被
+                            // 调用的，hook 会挂到本组件上（同 extraTabs 的纪律）。
+                            extraSections={manualTaskExtras?.(tabContext)}
+                        />
                     )}
                     {activeTab === 'personal' && (
                         <PersonalCenter
@@ -752,6 +779,8 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, ex
                             isActive={activeTab === 'position'}
                             accountInfo={accountInfo}
                             accountMode={tradingMode}
+                            // 同 manualTaskExtras：回调返回元素，不在这里调 hook
+                            railPanels={positionRailExtras?.(tabContext)}
                         />
                     )}
                     {activeTab === 'history' && (

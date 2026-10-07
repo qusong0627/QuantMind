@@ -58,17 +58,30 @@ export const BASE_CONSOLE_TABS: readonly ConsoleTab[] = [
 ];
 
 /**
- * 基础页签 + 追加页签。追加项一律排在基础项之后，传入顺序即显示顺序。
+ * 钉在侧栏**最后一位**的页签：追加页签一律插在它之前（2026-09-23 用户口径
+ * 「设置放最低 / 最底部」）。
+ *
+ * 为什么要钉：`BASE_CONSOLE_TABS` 本来就把 `settings` 排在末尾，但追加页签是
+ * 「接到数组尾部」的，于是实盘栏目那边 QuantBot/实况等栏会落到「设置」**下面**，
+ * 设置反而不是最后一项。钉一下之后：追加页签再多，设置也恒在最底部，
+ * 且**公开仓（没有追加页签）输出与本机制引入前逐项相同**。
+ */
+const PINNED_LAST_TAB_ID = 'settings';
+
+/**
+ * 基础页签 + 追加页签。追加项插在「设置」之前，**传入顺序即显示顺序**。
  *
  * `id` 冲突**抛错而不是去重**：去重会静默少一栏，而「实盘栏目比模拟交易少了
  * 一栏」正是本次要消除的不一致；冲突是调用方的编程错误，就该在开发期炸出来。
  */
 export function composeConsoleTabs(extra?: readonly ConsoleTab[]): ConsoleTab[] {
-    const composed: ConsoleTab[] = [...BASE_CONSOLE_TABS];
-    if (!extra || extra.length === 0) return composed;
+    const head = BASE_CONSOLE_TABS.filter((tab) => tab.id !== PINNED_LAST_TAB_ID);
+    const tail = BASE_CONSOLE_TABS.filter((tab) => tab.id === PINNED_LAST_TAB_ID);
 
-    const seen = new Set(composed.map((tab) => tab.id));
-    for (const tab of extra) {
+    // 冲突集要含被钉住的尾部页签，否则调用方可以用 id 'settings' 顶掉它
+    const seen = new Set(BASE_CONSOLE_TABS.map((tab) => tab.id));
+    const appended: ConsoleTab[] = [];
+    for (const tab of extra ?? []) {
         if (seen.has(tab.id)) {
             throw new Error(
                 `[consoleTabs] 追加页签 id 与既有页签冲突：${tab.id}。` +
@@ -78,9 +91,9 @@ export function composeConsoleTabs(extra?: readonly ConsoleTab[]): ConsoleTab[] 
             );
         }
         seen.add(tab.id);
-        composed.push(tab);
+        appended.push(tab);
     }
-    return composed;
+    return [...head, ...appended, ...tail];
 }
 
 /**

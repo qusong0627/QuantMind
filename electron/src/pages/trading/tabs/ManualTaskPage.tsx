@@ -45,6 +45,16 @@ interface ManualTaskPageProps {
     userId: string;
     tradingMode?: 'real' | 'simulation';
     onBack?: () => void;
+    /**
+     * 追加到 5 步向导下方的区块。缺省不渲染。
+     *
+     * **公开树不感知调用方是谁** —— 无调用方时这个 prop 为 undefined，追加分支
+     * 整段不参与渲染，公开仓形态与本机制引入前逐位相同（与 `RealTradingPage`
+     * 的 `extraTabs` / `settingsPanels` 同一约定）。本机「实盘交易」栏目用它把
+     * 「推送下单」并进本页（用户 2026-09-23 口径「推送下单放手动任务」），
+     * 不再在侧栏另起一栏。
+     */
+    extraSections?: React.ReactNode;
 }
 
 const STEP_TITLES = ['选择模型', '选择推理批次', '选择策略', '生成调仓预案', '确认提交'];
@@ -121,7 +131,7 @@ const modelDisplayName = (model: any) => {
     return (meta.display_name || meta.model_name || model.model_id) as string;
 };
 
-const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) => {
+const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, extraSections }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [currentStep, setCurrentStep] = useState(0);
 
@@ -1444,6 +1454,11 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                     </div>
                 ) : null}
             </div>
+
+            {/* 追加区块（调用方注入，排在向导之后；缺省时整段不渲染）：
+                推送下单与 5 步向导是同一件事的两条路径（手工发起一笔委托），
+                分在两栏时用户要点两个地方才能确认「我这单到底发出去没有」。 */}
+            {extraSections ? <div className="mt-4 space-y-4">{extraSections}</div> : null}
 
             <DangerConfirmModal
                 open={largeOrderConfirmOpen}

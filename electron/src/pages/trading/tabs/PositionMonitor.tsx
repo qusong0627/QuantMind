@@ -20,6 +20,19 @@ interface PositionMonitorProps {
     /** 当前看的是哪个账户（页面顶栏 模拟/实盘）。卖出预检的默认通道跟随它——
      *  看实盘持仓却默认发模拟腿，会因为「模拟账户没有这只票」逐笔被拦。 */
     accountMode?: TradingAccountMode;
+    /**
+     * 追加到右栏（持仓风险与情报）的区块，排在哨兵面板之后、副驾驶之前。缺省不渲染。
+     *
+     * **公开树不感知调用方是谁** —— 无调用方时这个 prop 为 undefined，追加分支整段
+     * 不参与渲染，公开仓形态与本机制引入前逐位相同（与 `RealTradingPage` 的
+     * `extraTabs` / `settingsPanels` 同一约定）。本机「实盘交易」栏目用它把
+     * 「风控止损」并进本页（用户 2026-09-23 口径「风控止损放持仓监控那」），
+     * 不再在侧栏另起一栏。
+     *
+     * 排在哨兵之后而非末尾：这一块答的是「现在的止损到底是多少、有没有被锁」，
+     * 与持仓告警同属「看着持仓时要立刻知道的事」，压在副驾驶下面会被滚出视野。
+     */
+    railPanels?: React.ReactNode;
 }
 
 /** stream 服务推送的实时行情消息（topic stock.{code}） */
@@ -58,7 +71,7 @@ const mergeLivePrices = (holdings: NormalizedHolding[], live: Record<string, num
     });
 };
 
-const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isActive, accountInfo, accountMode = 'simulation' }) => {
+const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isActive, accountInfo, accountMode = 'simulation', railPanels }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [stockNames, setStockNames] = useState<Record<string, string>>({});
     const [livePrices, setLivePrices] = useState<Record<string, number>>({});
@@ -187,6 +200,8 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
                     className="shrink-0 min-h-0 grid content-start grid-cols-1 xl:grid-cols-2 2xl:grid-cols-1 gap-2 2xl:w-[380px] 2xl:overflow-y-auto custom-scrollbar"
                 >
                     <HoldingAlertPanel />
+                    {/* 追加区块（调用方注入，缺省时不产出节点） */}
+                    {railPanels}
                     <CopilotPanel />
                     {/* 悬浮 Dock 是覆盖层不占布局（memory: dock-overlay-bottom-clearance）：
                         窄屏时右栏铺满整行、底部会被 Dock 吞掉，滚动末端补实体占位块。 */}
