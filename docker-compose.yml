@@ -744,7 +744,9 @@ services:
       dockerfile: docker/Dockerfile.dsh
       args:
         # dsh 预览版：钉版本；升级须先 --dump-config + 真实 boot 双验证再改（非交易时段重建）
-        DSH_VERSION: ${DSH_VERSION:-0.1.5-rc.1}
+        DSH_VERSION: ${DSH_VERSION:-0.2.0-rc.2}
+        # npm 源（默认官方源；国内网络可 NPM_REGISTRY=https://registry.npmmirror.com docker compose build dsh）
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     image: quantmind-dsh:latest
     container_name: quantmind-dsh
     ports:

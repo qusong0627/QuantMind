@@ -9,13 +9,18 @@ FROM node:22-slim
 
 # ⚠️ dsh 仍是开发者预览版（破坏性变更常见）：钉版本，不要裸装 latest。
 # 升级流程：先在非交易时段用 --dump-config 与真实 boot 双重验证新版本，再改这里重建。
-ARG DSH_VERSION=0.1.5-rc.1
+# 0.2.0-rc.2 升级预检（2026-10-07）：loopback 补丁锚点、cookie 签名格式（v1/HMAC）、
+# .credentials.yaml 结构、--profile web 全部旗标、plugin 子命令均逐字比对兼容，实测通过。
+ARG DSH_VERSION=0.2.0-rc.2
 # pnpm：`dsh plugin add` 会把参数转给 profile 目录下的 pnpm，镜像里没有就无法装插件
 ARG PNPM_VERSION=11.24.0
 # docker CLI 静态二进制（技能契约：docker cp/exec quantmind 执行重依赖脚本）
 ARG DOCKER_CLI_VERSION=29.7.2
+# npm 源：默认官方源；国内网络构建可覆盖
+# （如 --build-arg NPM_REGISTRY=https://registry.npmmirror.com —— 官方源在国内偶发中途断流）
+ARG NPM_REGISTRY=https://registry.npmjs.org/
 
-RUN npm install -g --no-audit --no-fund \
+RUN npm install -g --no-audit --no-fund --registry="${NPM_REGISTRY}" \
       "@deepseek-ai/dsh@${DSH_VERSION}" \
       "pnpm@${PNPM_VERSION}"
 

@@ -2,12 +2,12 @@
   "name": "dsh-profile-web",
   "private": true,
   "dependencies": {
-    "@furongjun1999/dsh-memory": "^0.4.7",
-    "@xmanrui/dsh-im": "^4.21.0",
-    "dsh-free-search": "^0.4.28",
-    "dsh-mcp-connector": "^0.2.49",
-    "dsh-univer-office": "^0.2.14",
-    "dshmarket": "^1.47.0"
+    "@furongjun1999/dsh-memory": "0.4.8",
+    "@xmanrui/dsh-im": "4.21.2",
+    "dsh-free-search": "0.8.1",
+    "dsh-mcp-connector": "0.2.68",
+    "dsh-univer-office": "0.3.6",
+    "dshmarket": "1.66.9"
   },
   "dsh": {
     "profile": {
