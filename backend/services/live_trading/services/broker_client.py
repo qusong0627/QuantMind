@@ -26,6 +26,7 @@ from backend.services.trade_shared.trade_config import settings
 from backend.shared.auth import get_internal_call_secret
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.order_contract import build_bridge_plan_id
+from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
@@ -1132,15 +1133,12 @@ class TdxBroker(BaseBroker):
         }
 
     def _std_symbol(self, symbol: str) -> str:
-        """补齐标准代码: 600519 -> 600519.SH, 000001 -> 000001.SZ"""
-        s = str(symbol or "").strip()
-        if not s:
-            return s
-        if "." in s:
-            return s.upper()
-        if s.startswith(("6", "9")):
-            return f"{s}.SH"
-        return f"{s}.SZ"
+        """补齐标准代码: 600519 -> 600519.SH, 000001 -> 000001.SZ（行情层后缀口径）。
+
+        口径以 StockCodeUtil.to_suffix 为准：旧实现把 4/8/92 开头的北交所代码
+        一律补成 .SZ，且前缀式入参（SH600519）会拼出 "SH600519.SZ" 这种垃圾串。
+        """
+        return StockCodeUtil.to_suffix(str(symbol or "").strip())
 
     async def place_order(
         self,

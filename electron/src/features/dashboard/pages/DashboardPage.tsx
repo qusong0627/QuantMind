@@ -20,6 +20,7 @@ import { researchService } from '../../../services/researchService';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { selectCurrentMarket, setMarket, AppMarket } from '../../../store/slices/uiSlice';
 import { isMarketEnabled } from '../../../config/marketFlags';
+import { toSuffixCode } from '../../../utils/portfolioUtils';
 
 const { Title, Text } = Typography;
 
@@ -135,8 +136,14 @@ const DashboardPage: React.FC = () => {
         if (/^0\d{4}$/.test(s.replace(/\.\w+$/, ''))) return { symbol: `${s.replace(/\.\w+$/, '')}.HK`, market: 'HK' };
         // .SH/.SZ/.BJ suffix already in correct format
         if (/\.(SH|SZ|BJ)$/.test(s)) return { symbol: s, market: 'CN' };
-        // 6-digit A-stock code without suffix
-        if (/^\d{6}$/.test(s)) return { symbol: `${s}.SZ`, market: 'CN' };
+        // 6-digit A-stock code without suffix（号段口径走中枢 toSuffixCode：
+        // 60/68/90→SH、00/30/20→SZ、43/83/87/88/92→BJ；旧实现一律 .SZ 会把
+        // 600519 标成 600519.SZ，QuantDB/快照查空后静默降级）
+        if (/^\d{6}$/.test(s)) {
+            const suffixed = toSuffixCode(s);
+            if (/\.(SH|SZ|BJ)$/.test(suffixed)) return { symbol: suffixed, market: 'CN' };
+            return { symbol: s, market: 'CN' };
+        }
         // Crypto: USDT/USDC suffix or high-entropy alphanumeric ticker
         if (/USDT$|USDC$|^BTC|^ETH|^BNB|^SOL|^XRP|^DOGE/.test(s)) return { symbol: s, market: 'CRYPTO' };
         // Futures: .CN/.FUT/.CNF suffix

@@ -15,6 +15,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { SERVICE_URLS } from '../config/services';
 import { authService } from '../features/auth/services/authService';
+import { normalizeStockCode } from '../utils/portfolioUtils';
 
 // ============================================================================
 // 类型定义
@@ -605,17 +606,17 @@ class BacktestService {
     if (['all', 'csi300', 'csi500', 'csi800', 'csi1000'].includes(normalized.toLowerCase())) {
       return normalized;
     }
+    // 全局股票池引用（pool:<code>）直接透传
+    if (normalized.toLowerCase().startsWith('pool:')) {
+      return normalized;
+    }
     const symbols = symbol
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean);
     if (!symbols.length) return 'csi300';
-    return symbols
-      .map((sym) => {
-        const parts = sym.split('.');
-        return parts.length === 2 ? `${parts[1]}${parts[0]}` : sym;
-      })
-      .join(' ');
+    // 后缀/前缀/裸码统一归一为前缀式（SH600000），空格拼接，供 qlib universe 使用
+    return symbols.map((sym) => normalizeStockCode(sym)).join(' ');
   }
 
   /**
@@ -827,6 +828,12 @@ class BacktestService {
 
     if (config.strategy_code?.trim()) {
       payload.strategy_content = config.strategy_code;
+    }
+
+    // 策略归属透传：后端据此把回测挂到策略上（跑通后置实盘准入标识 / AI 修复覆盖）。
+    // 旧实现从不传，UI 发起的回测一律无归属，准入标识永不开启。
+    if (config.strategy_id != null && String(config.strategy_id).trim() !== '') {
+      payload.strategy_id = String(config.strategy_id).trim();
     }
 
     // 使用异步模式提交：立即返回 task_id，由前端轮询/WebSocket 获取结果。

@@ -1,5 +1,6 @@
 // 市场数据服务API接口 - 增强版股票搜索
 import axios from 'axios';
+import { toSuffixCode } from '../utils/portfolioUtils';
 
 // 基础配置 - 使用统一端口配置
 import { SERVICE_URLS } from '../config/services';
@@ -518,37 +519,13 @@ class MarketDataService {
     return true;
   }
 
-  // 自动补全/规范化股票代码格式 (转换为 600000.SH 格式)
+  // 自动补全/规范化股票代码格式 (转换为 600000.SH 格式)。
+  // 口径以 utils/portfolioUtils.toSuffixCode 为准（前缀/后缀/裸码统一收敛），
+  // 本方法仅做委托，禁止在此手写号段/正则——旧正则 ^[S[HZB]J]\d{6}$ 的字符类
+  // 只匹配单字符，前缀式代码从未被转换过；旧裸码推断把 9xxxxx（沪B）与
+  // 92xxxx（新北交所号段）一律判成 SZ。
   normalizeStockSymbol(input: string): string {
-    const cleaned = input.trim().toUpperCase();
-
-    // 1. 如果包含点且格式正确 (000001.SZ), 直接返回
-    if (cleaned.includes('.')) {
-      const parts = cleaned.split('.');
-      if (parts.length === 2 && /^\d{6}$/.test(parts[0])) {
-        const suffix = parts[1];
-        if (['SH', 'SZ', 'BJ'].includes(suffix)) {
-          return cleaned;
-        }
-      }
-    }
-
-    // 2. 处理前缀格式 (SH600000 -> 600000.SH)
-    if (/^[S[HZB]J]\d{6}$/.test(cleaned)) {
-      const prefix = cleaned.substring(0, 2);
-      const code = cleaned.substring(2);
-      return `${code}.${prefix}`;
-    }
-
-    // 3. 如果是6位数字，根据前缀推断添加后缀
-    if (/^\d{6}$/.test(cleaned)) {
-      const suffix = cleaned.startsWith('6') || cleaned.startsWith('688') ? 'SH' : 
-                     (cleaned.startsWith('4') || cleaned.startsWith('8') ? 'BJ' : 'SZ');
-      return `${cleaned}.${suffix}`;
-    }
-
-    // 无法自动识别的格式，返回原值(大写)
-    return cleaned;
+    return toSuffixCode(input);
   }
 
   // 搜索建议（自动补全）
