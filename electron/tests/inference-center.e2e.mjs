@@ -52,6 +52,17 @@ if ((await p.locator('input[type=password]').count()) > 0) {
 }
 console.log('登录后:', p.url());
 
+/** 首启「投资适当性评估」弹窗会遮住整页（ant-modal 拦截一切点击）：走「稍后再答」（localStorage 留痕，7 天内不再问） */
+async function dismissRiskModal(page) {
+  const later = page.locator('.ant-modal button', { hasText: '稍后再答' }).first();
+  const shown = await later.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
+  if (shown) {
+    await later.click().catch(() => {});
+    await page.waitForTimeout(800);
+  }
+}
+await dismissRiskModal(p);
+
 let pass = 0, total = 0;
 const check = (ok, label) => { total++; if (ok) pass++; console.log(`${ok ? '✓' : '✗'} ${label}`); };
 
@@ -76,6 +87,7 @@ async function switchMarket(page, radioLabel, wantKey) {
 for (const mk of TO_RUN) {
   console.log(`\n========== ${mk.key} 推理中心 ==========`);
   await p.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
+  await dismissRiskModal(p);
   const switched = await switchMarket(p, mk.radio, mk.key);
   const market = await p.evaluate(() => localStorage.getItem('qm:current_market'));
   check(switched, `市场已切到 ${mk.key}（localStorage=${market}）`);
