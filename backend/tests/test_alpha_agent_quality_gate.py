@@ -88,7 +88,8 @@ def test_backtest_pipelines_emit_quality() -> None:
     assert 'print("PFS=%.4f" % _q["pfs"])' in src
     assert 'or {{}}' in src  # 子进程脚本里的 {} 已按 f-string 转义
     assert 'elif line.startswith("PFS="):' in src
-    assert 'elif line.startswith("PFS_GAUSS="):' in src
+    # IC/ICIR/组合指标改走 _metric 助手后，PFS_GAUSS 成为 PFS 解析循环的首分支
+    assert 'if line.startswith("PFS_GAUSS="):' in src
     assert 'metadata={"data_source": "h5", **({"quality": pfs_quality} if pfs_quality else {})},' in src
 
 

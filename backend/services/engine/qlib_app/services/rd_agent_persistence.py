@@ -212,11 +212,16 @@ class RDAgentFactorPersistence:
         annual_return: float | None = None,
         max_drawdown: float | None = None,
         rank_ic: float | None = None,
+        icir: float | None = None,
+        rank_icir: float | None = None,
         universe: str | None = None,
         date_range: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """更新因子的回测指标，metadata 与已有值合并而非覆盖"""
+        """更新因子的回测指标，metadata 与已有值合并而非覆盖
+
+        icir / rank_icir 不是表字段，写入 metadata_json（前端从 metadata 读取）。
+        """
         fields: dict[str, Any] = {"updated_at": datetime.now()}
         if status is not None:
             fields["status"] = status
@@ -234,7 +239,12 @@ class RDAgentFactorPersistence:
             fields["universe"] = universe
         if date_range is not None:
             fields["date_range"] = date_range
-        if metadata is not None:
+        metric_meta: dict[str, Any] = {}
+        if icir is not None:
+            metric_meta["icir"] = icir
+        if rank_icir is not None:
+            metric_meta["rank_icir"] = rank_icir
+        if metadata is not None or metric_meta or status == "completed":
             # Merge with existing metadata to preserve task_id, market, etc.
             async with get_session(read_only=True) as session:
                 row = await session.execute(
@@ -248,7 +258,11 @@ class RDAgentFactorPersistence:
                     merged = json.loads(existing) if isinstance(existing, str) else (existing or {})
                 except Exception:
                     merged = {}
-            merged.update(metadata)
+            merged.update(metadata or {})
+            merged.update(metric_meta)
+            if status == "completed":
+                # 回测成功时清掉历史失败原因，否则前端会把上一次的报错当成当前状态
+                merged["backtest_error"] = None
             fields["metadata_json"] = json.dumps(merged, ensure_ascii=False)
 
         set_clause = ", ".join(f"{k} = :{k}" for k in fields)

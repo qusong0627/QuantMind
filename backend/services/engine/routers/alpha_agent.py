@@ -1009,24 +1009,30 @@ def _detect_factor_kind(factor_code: str) -> str:
     return "unknown"
 
 
-def _vectorized_daily_spearman_ic(f: "pd.Series", r: "pd.Series") -> tuple[float, float, float, int]:
+def _vectorized_daily_spearman_ic(
+    f: "pd.Series", r: "pd.Series"
+) -> tuple[float, float, float, float, int]:
     """向量化计算日度 Spearman IC（秩相关 = 秩的 Pearson）。
 
     不用每日 spearmanr() 调用，全表 groupby 一次算完。
-    Returns: (ic_mean, rank_ic_median, icir, observations)
+    Returns: (ic_mean, rank_ic_median, icir, rank_icir, observations)
+
+    口径与挖掘阶段 scripts/alpha_agent/run_rd_agent.py:compute_factor_ic 一致：
+    ic = 日度秩相关均值，rank_ic = 其中位数，std = 该序列标准差(ddof=1)，
+    icir = ic/std，rank_icir = rank_ic/std。
     """
     import numpy as np
     import pandas as pd
 
     if len(f) < 100 or len(r) < 100:
-        return 0.0, 0.0, 0.0, 0
+        return 0.0, 0.0, 0.0, 0.0, 0
 
     df = pd.DataFrame({"f": f.values, "r": r.values})
     # Qlib MultiIndex: [instrument, datetime]
     df["date"] = f.index.get_level_values(1)
     df = df[np.isfinite(df["f"]) & np.isfinite(df["r"])]
     if len(df) < 100:
-        return 0.0, 0.0, 0.0, 0
+        return 0.0, 0.0, 0.0, 0.0, 0
 
     # 每日 rank
     df["f_rank"] = df.groupby("date")["f"].rank(method="average")
@@ -1056,13 +1062,14 @@ def _vectorized_daily_spearman_ic(f: "pd.Series", r: "pd.Series") -> tuple[float
     ic_by_date = df.groupby("date")["corr"].first().dropna()
     ic_by_date = ic_by_date[np.isfinite(ic_by_date)]
     if len(ic_by_date) == 0:
-        return 0.0, 0.0, 0.0, 0
+        return 0.0, 0.0, 0.0, 0.0, 0
 
     ic_mean = float(ic_by_date.mean())
     rank_ic_median = float(ic_by_date.median())
     std = float(ic_by_date.std(ddof=1)) if len(ic_by_date) > 1 else 0.0
     icir = ic_mean / (std + 1e-8)
-    return ic_mean, rank_ic_median, icir, int(len(df))
+    rank_icir = rank_ic_median / (std + 1e-8)
+    return ic_mean, rank_ic_median, icir, rank_icir, int(len(df))
 
 
 def _resolve_instruments_for_universe(
@@ -1261,7 +1268,9 @@ async def _backtest_via_qlib(
     r_clean = pd.Series(r.values[mask], index=r.index[mask])
 
     # 向量化 IC
-    ic_mean, rank_ic_median, icir, n_obs = _vectorized_daily_spearman_ic(f_clean, r_clean)
+    ic_mean, rank_ic_median, icir, rank_icir, n_obs = _vectorized_daily_spearman_ic(
+        f_clean, r_clean
+    )
     if n_obs == 0:
         raise RuntimeError("日度 IC 全部为 NaN，因子可能与价格列不匹配")
 
@@ -1304,7 +1313,11 @@ async def _backtest_via_qlib(
         universe=universe,
         date_range=f"{start}~{end}",
         metadata={
-            "data_source": "qlib_bin", "market": market, "icir": icir, "n_obs": n_obs,
+            "data_source": "qlib_bin",
+            "market": market,
+            "icir": icir,
+            "rank_icir": rank_icir,
+            "n_obs": n_obs,
             **({"quality": pfs_quality} if pfs_quality else {}),
         },
     )
@@ -1795,6 +1808,19 @@ try:
     except Exception:
         pass
     returns.index.names = ['datetime', 'instrument']
+    # 统一 instrument 大小写：因子代码可能输出大写（SH600036），而 daily_pv.h5 用小写
+    # （sh600036）；不统一会导致交集为空。与挖掘阶段 compute_factor_ic 同口径。
+    def _upper_instrument(_s):
+        _names = list(_s.index.names)
+        if 'instrument' in _names:
+            _lvl = _names.index('instrument')
+            _lvs = _s.index.levels[_lvl]
+            if _lvs.dtype == object:
+                _s.index = _s.index.set_levels(_lvs.str.upper(), level=_lvl)
+        return _s
+
+    factor_values = _upper_instrument(factor_values)
+    returns = _upper_instrument(returns)
     common_idx = factor_values.index.intersection(returns.index)
     if len(common_idx) < 100:
         print("INSUFFICIENT_DATA"); sys.exit(1)
@@ -1803,23 +1829,54 @@ try:
     f = f[mask]; r = r[mask]
     if len(f) < 100:
         print("INSUFFICIENT_CLEAN_DATA"); sys.exit(1)
-    from scipy import stats
-    # 向量化逐日 IC（groupby 避免逐日 loc 全表扫描，显著提速）
-    df_ic = pd.DataFrame({'f': f, 'r': r})
-    df_ic['dt'] = df_ic.index.get_level_values(0)
-    ic_values = []
-    for dt, g in df_ic.groupby('dt'):
-        if len(g) > 5:
-            corr, _ = stats.spearmanr(g['f'], g['r'])
-            if np.isfinite(corr):
-                ic_values.append(corr)
-    if not ic_values:
+    # 日度 Spearman（秩的 Pearson，向量化；口径与挖掘阶段 compute_factor_ic 完全一致）
+    df_ic = pd.DataFrame({{'f': f.values, 'r': r.values}})
+    df_ic['dt'] = f.index.get_level_values(0)
+    df_ic = df_ic[np.isfinite(df_ic['f']) & np.isfinite(df_ic['r'])]
+    g = df_ic.groupby('dt')
+    df_ic['fr'] = g['f'].rank(method='average')
+    df_ic['rr'] = g['r'].rank(method='average')
+    g = df_ic.groupby('dt')
+    _means = g[['fr', 'rr']].transform('mean')
+    df_ic['fc'] = df_ic['fr'] - _means['fr']
+    df_ic['rc'] = df_ic['rr'] - _means['rr']
+    df_ic['fcr'] = df_ic['fc'] * df_ic['rc']
+    df_ic['fc2'] = df_ic['fc'] ** 2
+    df_ic['rc2'] = df_ic['rc'] ** 2
+    _sums = g[['fcr', 'fc2', 'rc2']].transform('sum')
+    _counts = g['fcr'].transform('count')
+    _n = (_counts - 1).clip(lower=1)
+    _cov = _sums['fcr'] / _n
+    _var_f = _sums['fc2'] / _n
+    _var_r = _sums['rc2'] / _n
+    _denom = np.sqrt(_var_f * _var_r)
+    df_ic['corr'] = np.where(_denom > 1e-12, _cov / np.where(_denom > 1e-12, _denom, 1.0), np.nan)
+    ic_by_day = g['corr'].first().dropna()
+    ic_by_day = ic_by_day[np.isfinite(ic_by_day)]
+    if len(ic_by_day) == 0:
         print("NO_IC_VALUES"); sys.exit(1)
-    ic = np.mean(ic_values)
-    rank_ic = np.median(ic_values)
-    icir = np.mean(ic_values) / (np.std(ic_values) + 1e-8)
-    print(f"IC={{ic:.4f}}"); print(f"RANK_IC={{rank_ic:.4f}}")
-    print(f"ICIR={{icir:.4f}}"); print(f"OBSERVATIONS={{len(f)}}")
+    ic = float(ic_by_day.mean())
+    rank_ic = float(ic_by_day.median())
+    _std = float(ic_by_day.std(ddof=1)) if len(ic_by_day) > 1 else 0.0
+    icir = ic / (_std + 1e-8)
+    rank_icir = rank_ic / (_std + 1e-8)
+    print("IC=%s" % ic); print("RANK_IC=%s" % rank_ic)
+    print("ICIR=%s" % icir); print("RANK_ICIR=%s" % rank_icir)
+    print("OBSERVATIONS=%s" % len(f))
+    # 组合指标（与 Qlib 路径同口径：做多因子前 30% 的等权日收益）
+    _pair = pd.DataFrame({{'f': f.values, 'r': r.values}})
+    _pair['dt'] = f.index.get_level_values(0)
+    _pair = _pair[np.isfinite(_pair['f']) & np.isfinite(_pair['r'])]
+    _pair['fr'] = _pair.groupby('dt')['f'].rank(pct=True)
+    _longs = _pair[_pair['fr'] >= 0.7].groupby('dt')['r'].mean().dropna()
+    if len(_longs) > 1:
+        _ann = float(_longs.mean() * 252)
+        _sharpe = float(_longs.mean() / (_longs.std(ddof=1) + 1e-8) * np.sqrt(252))
+        _cum = (1 + _longs).cumprod()
+        _peak = _cum.cummax()
+        _dd = (_peak - _cum) / _peak
+        _mdd = float(_dd.max()) if len(_dd) else None
+        print("ANN_RET=%s" % _ann); print("SHARPE=%s" % _sharpe); print("MAX_DD=%s" % _mdd)
     # 质量闸门：扰动保真度 PFS（与训练侧 data/factor_quality 同一实现；
     # 用 % 格式化避免与外层 f-string 的花括号冲突）
     try:
@@ -1852,20 +1909,30 @@ except Exception as e:
         )
         # 合并 stdout + stderr（因子脚本异常用 stderr 输出 traceback）
         out = stdout + "\n" + stderr
-        ic_mean = rank_ic_mean = None
+
+        def _metric(name: str) -> float | None:
+            """从子进程输出解析 NAME=<float> 指标（缺失或非法返回 None）。"""
+            prefix = f"{name}="
+            for line in out.splitlines():
+                if line.startswith(prefix):
+                    try:
+                        value = float(line.split("=", 1)[1])
+                    except Exception:
+                        return None
+                    return value if value == value else None  # 过滤 NaN
+            return None
+
+        ic_mean = _metric("IC")
+        rank_ic_mean = _metric("RANK_IC")
+        icir = _metric("ICIR")
+        rank_icir = _metric("RANK_ICIR")
+        ann_ret = _metric("ANN_RET")
+        sharpe = _metric("SHARPE")
+        max_dd = _metric("MAX_DD")
+
         pfs_quality: dict = {}
         for line in out.splitlines():
-            if line.startswith("IC="):
-                try:
-                    ic_mean = float(line.split("=")[1])
-                except Exception:
-                    pass
-            elif line.startswith("RANK_IC="):
-                try:
-                    rank_ic_mean = float(line.split("=")[1])
-                except Exception:
-                    pass
-            elif line.startswith("PFS_GAUSS="):
+            if line.startswith("PFS_GAUSS="):
                 try:
                     pfs_quality["pfs_gauss"] = float(line.split("=")[1])
                 except Exception:
@@ -1894,16 +1961,25 @@ except Exception as e:
             status="completed",
             ic_value=ic_mean,
             rank_ic=rank_ic_mean,
-            sharpe_ratio=None,
-            annual_return=None,
-            max_drawdown=None,
+            icir=icir,
+            rank_icir=rank_icir,
+            sharpe_ratio=sharpe,
+            annual_return=ann_ret,
+            max_drawdown=max_dd,
             universe=universe,
             date_range=f"{start}~{end}",
             metadata={"data_source": "h5", **({"quality": pfs_quality} if pfs_quality else {})},
         )
-        logger.info("[alpha-backtest-fn] %s done ic=%.4f rank_ic=%s pfs=%s", factor_id, ic_mean,
-                    f"{rank_ic_mean:.4f}" if rank_ic_mean is not None else "N/A",
-                    f"{pfs_quality['pfs']:.4f}" if pfs_quality.get("pfs") is not None else "N/A")
+        logger.info(
+            "[alpha-backtest-fn] %s done ic=%.4f rank_ic=%s icir=%s sharpe=%s ann_ret=%s max_dd=%s pfs=%s",
+            factor_id, ic_mean,
+            f"{rank_ic_mean:.4f}" if rank_ic_mean is not None else "N/A",
+            f"{icir:.4f}" if icir is not None else "N/A",
+            f"{sharpe:.4f}" if sharpe is not None else "N/A",
+            f"{ann_ret:.4f}" if ann_ret is not None else "N/A",
+            f"{max_dd:.4f}" if max_dd is not None else "N/A",
+            f"{pfs_quality['pfs']:.4f}" if pfs_quality.get("pfs") is not None else "N/A",
+        )
     except FactorBacktestCancelled:
         logger.info("[alpha-backtest-fn] %s cancelled by user", factor_id)
         try:
