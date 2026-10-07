@@ -21,6 +21,12 @@ pytestmark = pytest.mark.integration
 _CST = timezone(timedelta(hours=8))
 
 
+def _session_now() -> float:
+    """测试时钟钉在**今天 10:30**（连续竞价时段内）：市场族只在时段内取数
+    （anomaly_engine.in_market_session），用墙钟跑测试会在夜间/周末假红。"""
+    return datetime.now(_CST).replace(hour=10, minute=30, second=0, microsecond=0).timestamp()
+
+
 def _redis(db: int = 0):
     import os
 
@@ -61,14 +67,24 @@ def test_anomaly_engine_real_actions_end_to_end():
                  "positions": []}]
 
     def data_fetcher(cfg):
-        return [{"symbol": "600036.SH",
+        # ⚠️ 必须用**虚构代码**：data_jump 是 critical，deny 走 _symbol_holders → 会给
+        # 持有该代码的**真实模拟账户**写标的锁（TTL 到当日 23:59+4h）。原先写真实代码
+        # 600036.SH，实测有 3 个真实账户持仓 ⇒ 每跑一次这个测试就锁掉它们一天的买入。
+        return [{"symbol": symbol,
                  "latest": {"date": "2026-09-14", "close": 20.0, "volume": 1000,
                             "limit_up": 12.1, "limit_down": 9.9},  # fidelity: allow-limit-threshold — 非阈值：跌停价夹具（供包络判定）
                  "prev": {"date": "2026-09-11", "close": 11.0},
                  "expected_prev_date": "2026-09-11"}]
 
+    # 模型 id 用**生产长度**（60~68 字符，/app/models 实测最长 68）：12 字符的
+    # itest-xxxx 塞得进 instrument varchar(16)，会让下面「模型告警必须落表」的断言
+    # 假绿——2026-10-08 实测该表 2829 行全是 price_surge、model_ic_drop 0 行，
+    # 缺陷正是被短夹具盖住的。
+    model_id = f"mdl_it_train_20261008010203_{tag}abcd_ef{tag}12_catboost_9c8d7e6f"
+    assert len(model_id) > 16, "夹具必须长于 instrument 列宽"
+
     def model_fetcher(cfg):
-        return [{"model_id": f"itest-{tag}",
+        return [{"model_id": model_id,
                  "ic_stats": {"ic_5": -0.05, "ic_20": 0.03, "n_5": 6, "n_20": 20}}]
 
     engine = AnomalyEngine(
@@ -79,6 +95,7 @@ def test_anomaly_engine_real_actions_end_to_end():
         account_fetcher=account_fetcher,
         data_fetcher=data_fetcher,
         model_fetcher=model_fetcher,
+        now_fn=_session_now,
     )
 
     bus = _redis(0)      # intel 总线在通用库
@@ -105,19 +122,34 @@ def test_anomaly_engine_real_actions_end_to_end():
         assert mine, "识别引擎事件未落总线"
         kinds = {str((e.get("payload") or {}).get("kind")) for e in mine}
         assert "volume_surge" in kinds
+        # 模型级告警也必须真上总线：旧实现把 68 字符模型 id 塞进证券级 targets，
+        # publish_event 抛 IntelEventError 被兜成 WARNING ⇒ 该告警一条都没上过总线。
+        model_evs = [e for e in mine if (e.get("payload") or {}).get("subject") == model_id]
+        assert model_evs, "本次模型的 IC 告警未上总线"
+        assert model_evs[0].get("targets") == [], "模型 id 不得进证券级 targets"
+        assert model_evs[0]["payload"]["title"].endswith("IC 异常")
 
         # ② 留痕 → 真 PG（qm_market_anomalies）
         with SessionLocal() as session:
+            # 按**本次夹具 subject** 读：原先按「近 5 分钟」读，会被同表里别的运行
+            # 残留的行污染（2026-10-08 实测：断言拿到上一轮另一 tag 的 symbol）。
             rows = session.execute(
                 sql_text(
-                    "SELECT anomaly_type FROM qm_market_anomalies "
+                    "SELECT anomaly_type, instrument, details->>'subject' FROM qm_market_anomalies "
                     "WHERE details->>'source' = 'anomaly_engine' "
-                    "AND created_at > NOW() - INTERVAL '5 minutes'"
-                )
+                    "AND details->>'subject' IN (:sym, :uid, :mid)"
+                ),
+                {"sym": symbol, "uid": user_id, "mid": model_id},
             ).fetchall()
         types = {r[0] for r in rows}
         # 四类检测（量价/账户/数据/模型）全部真机落表
         assert {"volume_surge", "account_cancel_ratio", "data_jump", "model_ic_drop"} <= types
+        # instrument 只承载证券代码；模型/账户族的 subject 落 details（机器可读）
+        by_type = {r[0]: r for r in rows}
+        assert by_type["volume_surge"][1] == symbol, "symbol 族的 instrument 不得被本次改动动摇"
+        assert by_type["model_ic_drop"][1] is None, "模型 id 不得写进 instrument varchar(16)"
+        assert by_type["model_ic_drop"][2] == model_id, "完整模型 id 必须可取回"
+        assert by_type["account_cancel_ratio"][1] is None
 
         # ③ 否决 → 真 risk lock（账户锁；fail-closed 通道）+ risk_events 审计
         assert trade.get(account_lock_key) is not None, "账户锁未写入（fail-closed 通道断裂）"
@@ -132,27 +164,38 @@ def test_anomaly_engine_real_actions_end_to_end():
         actions = {r[0] for r in audits}
         assert "deny" in actions and "reduce_suggested" in actions
     finally:
-        # 清理：账户锁 + 审计行（总线事件为追加流，按 MAXLEN 自然淘汰，不动）
+        # 清理：账户锁 + 去重冷却键 + 审计行（总线事件为追加流，按 MAXLEN 自然淘汰，不动）
         try:
             trade.delete(account_lock_key)
+            # 去重冷却键（qm:anomaly:last_fired:*，TTL 30min）按夹具 subject 清掉：
+            # 留着会在冷却窗内压掉同 (kind,subject,severity) 的后续告警
+            for key in bus.scan_iter(match="qm:anomaly:last_fired:*", count=500):
+                if any(s in str(key) for s in (symbol, user_id, model_id)):
+                    bus.delete(key)
+            # 异动源集合同样按自造 subject 清（TTL 1h，留着会喂给热集构建器的"异动源"）
+            bus.srem("qm:anomaly:recent_symbols", symbol)
             bus.close()
             trade.close()
         except Exception:  # noqa: BLE001
             pass
         try:
             with SessionLocal() as session:
+                # 只删**本次自造**的行（按夹具 subject 钉死）：原先按「近 5 分钟」
+                # 清场会顺手删掉真实引擎这 5 分钟里落的行——测试不许删生产行。
                 session.execute(
                     sql_text(
                         "DELETE FROM risk_events WHERE rule_type LIKE 'anomaly_engine:%' "
-                        "AND created_at > NOW() - INTERVAL '5 minutes'"
-                    )
+                        "AND symbol IN (:sym, :uid, :mid)"
+                    ),
+                    {"sym": symbol, "uid": user_id, "mid": model_id[:32]},
                 )
                 session.execute(
                     sql_text(
                         "DELETE FROM qm_market_anomalies "
                         "WHERE details->>'source' = 'anomaly_engine' "
-                        "AND created_at > NOW() - INTERVAL '5 minutes'"
-                    )
+                        "AND details->>'subject' IN (:sym, :uid, :mid)"
+                    ),
+                    {"sym": symbol, "uid": user_id, "mid": model_id},
                 )
                 session.commit()
         except Exception:  # noqa: BLE001
@@ -174,6 +217,7 @@ def test_anomaly_recent_symbols_feed_hot_set_source():
         publisher=lambda d: None,
         recorder=lambda d: None,
         denier=lambda d: {},
+        now_fn=_session_now,
     )
     bus = _redis(0)
     try:
@@ -203,6 +247,7 @@ def test_anomaly_dedup_suppresses_repeat_within_cooldown():
         publisher=lambda d: fired.append(d),
         recorder=lambda d: None,
         denier=lambda d: {},
+        now_fn=_session_now,
     )
     bus = _redis(0)
     try:

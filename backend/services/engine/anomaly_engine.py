@@ -50,6 +50,26 @@ STATUS_KEY = "qm:anomaly:status"
 RECENT_SYMBOLS_TTL = 3600
 SOURCE = "anomaly_engine"
 
+# subject 的语义按 kind 分族（见 Detection.subject）：**只有市场/数据族的 subject 是
+# 证券代码**。账户族=user_id、模型族=model_id 都不是——模型 id 实测 60~68 字符
+# （/app/models/**/pred.parquet 的父目录名），写进 qm_market_anomalies.instrument
+# （varchar(16)）必被 PG 拒（StringDataRightTruncation）**整行丢失**；build_once 逐条
+# try/except 兜住，只留一条 WARNING。2026-10-08 实测：表里 2829 行全是 price_surge、
+# model_ic_drop 0 行，而同期 risk_events 审计有 979 行——审计在、台账空，且自引擎上线起
+# 如此（不是当天坏的）。判据用**白名单**：新 kind 默认不写 instrument，宁可少一列也
+# 不静默丢整行；`_mark_recent` 的市场四类是其子集（异动源只认量价）。
+# 全量归类由 test_anomaly_record_instrument.test_every_engine_kind_is_classified 钉住。
+SYMBOL_SUBJECT_KINDS = frozenset({
+    "price_surge",
+    "price_limit_up",
+    "price_limit_down",
+    "volume_surge",
+    "data_jump",
+    "data_gap",
+    "data_zero_volume",
+})
+NON_SYMBOL_KIND_PREFIXES = ("account_", "model_")
+
 DEFAULT_CADENCE_S = 60.0
 DEFAULT_DATA_EVERY_S = 1800.0
 DEFAULT_MODEL_EVERY_S = 3600.0
@@ -73,6 +93,25 @@ def trading_elapsed_fraction(now: datetime | None = None) -> float:
         elif minutes > s:
             elapsed += minutes - s
     return min(max(elapsed / 240.0, 0.05), 1.0)
+
+
+def in_market_session(now: datetime | None = None) -> bool:
+    """A 股连续竞价时段（工作日 09:30–11:30 / 13:00–15:00，Asia/Shanghai）。
+
+    市场族（量价）的**取数闸**：行情源在盘外仍留有「PreClose 已翻篇、Now 还是上一根」
+    的冻结快照，拿它评量价异动 = 把昨天的涨跌当今天实时报。实测（2026-10-08 查
+    ``qm_market_anomalies``）：国庆假期 10-01~10-06 共 287 条 price_surge **全部**落在
+    时段外（00:00、08:09、20:21、23:57 都在报），09-25 的 48 条全在 08:11–08:17 盘前，
+    时段内 0 条——本闸正好覆盖该形态（数据/账户/模型族不受影响：它们本就该盘后跑）。
+
+    节假日不判（交易日历在调度侧，不引第二份日历）；假期时段内的告警实测为 0 条，
+    若日后出现该形态，再补 ``exchange_calendars`` 判据。
+    """
+    current = now or datetime.now(_SH_TZ)
+    if current.weekday() >= 5:
+        return False
+    hhmm = current.strftime("%H:%M")
+    return any(start.strftime("%H:%M") <= hhmm <= end.strftime("%H:%M") for start, end in _SESSIONS)
 
 
 def _main_redis():
@@ -223,6 +262,7 @@ class AnomalyEngine:
             "denied": 0,
             "reduce_suggested": 0,
             "skipped_market": 0,
+            "skipped_market_closed": 0,
             "skipped_account": 0,
             "skipped_data": 0,
             "skipped_model": 0,
@@ -235,7 +275,14 @@ class AnomalyEngine:
     # ── 动作（默认真实接线；测试注入桩） ────────────────────────────
 
     def _default_publish(self, detection: Detection) -> None:
-        """动作① 告警：intel 总线（type=anomaly）。"""
+        """动作① 告警：intel 总线（type=anomaly）。
+
+        targets 是**证券级路由键**（总线契约 MAX_TARGET_LEN=24），只有 symbol 族才发；
+        模型 id 60~68 字符超限会让 publish_event 抛 IntelEventError、**整条事件发布失败**
+        （只留一条 WARNING）——2026-10-08 实测 model_ic_drop 自引擎上线起一条都没上过总线。
+        非 symbol 族发空数组（消费端 sentinel_alert_service 按 "*" 兜底），完整 subject 走
+        payload.subject（机器可读；title 里也有）。
+        """
         from backend.shared.intel_events import publish_event
 
         client = _main_redis()
@@ -246,13 +293,16 @@ class AnomalyEngine:
                     "ts": self._now(),
                     "type": "anomaly",
                     "market": detection.market,
-                    "targets": list(detection.targets)[:64],
+                    "targets": list(detection.targets)[:64]
+                    if detection.kind in SYMBOL_SUBJECT_KINDS
+                    else [],
                     "level": detection.severity,
                     "payload": {
                         "kind": detection.kind,
                         "title": detection.title,
                         "description": detection.description,
                         "metrics": detection.metrics,
+                        "subject": detection.subject,
                     },
                     "actions_hint": list(detection.actions_hint)[:8],
                     "source": SOURCE,
@@ -279,15 +329,19 @@ class AnomalyEngine:
                 {
                     "d": datetime.now(_SH_TZ).date(),
                     "t": detection.kind,
-                    "ins": None if detection.kind.startswith("account_")
-                    else (detection.subject or None),
+                    # instrument=varchar(16) 证券代码列：只有 symbol 族能写
+                    # （判据见 SYMBOL_SUBJECT_KINDS；其余族写 NULL，完整 subject 落 details）。
+                    "ins": (detection.subject or None)
+                    if detection.kind in SYMBOL_SUBJECT_KINDS
+                    else None,
                     "sev": "critical" if detection.severity == "critical" else (
                         "warning" if detection.severity == "warn" else "info"),
                     "title": detection.title[:256],
                     "desc": detection.description[:2000],
                     "details": json.dumps(
                         {"metrics": detection.metrics, "source": SOURCE,
-                         "targets": list(detection.targets)},
+                         "targets": list(detection.targets),
+                         "subject": detection.subject},
                         ensure_ascii=False, default=str,
                     ),
                 },
@@ -315,13 +369,20 @@ class AnomalyEngine:
             if user:
                 write_account_lock(trade_redis, tenant, user, trade_date)
                 locked_users.append(user)
-        else:
+        elif detection.kind in SYMBOL_SUBJECT_KINDS:
             holders = self._symbol_holders(detection.subject)
             for tenant_id, user_id in holders:
                 write_symbol_lock(trade_redis, tenant_id, user_id, trade_date, detection.subject)
                 locked_users.append(f"{tenant_id}:{user_id}")
+        # 其余族（模型/未来非证券类）：subject 不是证券代码，无可锁标的——不扫持有人，
+        # 直接落 no_targets 审计（旧判据按「非账户即标的」会拿 model_id 去全量扫账户）
+        # 非 symbol 族的 subject 在审计行的 symbol 列上会被 [:32] 截断（列宽）——
+        # 完整值补进 message，保证审计行能无损认出是哪个模型/账户。
+        subject_note = (
+            "" if detection.kind in SYMBOL_SUBJECT_KINDS else f" subject={detection.subject}"
+        )
         self._audit(detection, action="deny", status="applied" if locked_users else "no_targets",
-                    message=f"locked={len(locked_users)}")
+                    message=f"locked={len(locked_users)}{subject_note}")
         return {"locked": locked_users}
 
     def _symbol_holders(self, symbol: str) -> list[tuple[str, str]]:
@@ -425,22 +486,26 @@ class AnomalyEngine:
         now = self._now()
         detections: list[Detection] = []
 
-        # 市场（量价）
-        try:
-            quotes = dict(self._market_fetcher(cfg) or {})
-            frac = trading_elapsed_fraction()
-            detections += detect_volume_price(
-                quotes,
-                volume_ratio_min=cfg.volume_ratio_min,
-                price_pct_min=cfg.price_pct_min,
-                elapsed_fraction=frac,
-            )
+        # 市场（量价）——仅连续竞价时段取数（盘外行情源的冻结快照会假报，见 in_market_session）
+        if in_market_session(datetime.fromtimestamp(now, _SH_TZ)):
+            try:
+                quotes = dict(self._market_fetcher(cfg) or {})
+                frac = trading_elapsed_fraction()
+                detections += detect_volume_price(
+                    quotes,
+                    volume_ratio_min=cfg.volume_ratio_min,
+                    price_pct_min=cfg.price_pct_min,
+                    elapsed_fraction=frac,
+                )
+                with self._lock:
+                    self.counters["skipped_market"] += max(0, len(quotes) - len(
+                        [q for q in quotes.values() if isinstance(q, Mapping) and q.get("price")]
+                    ))
+            except Exception as exc:  # noqa: BLE001
+                self._note_error(f"market fetch: {exc}")
+        else:
             with self._lock:
-                self.counters["skipped_market"] += max(0, len(quotes) - len(
-                    [q for q in quotes.values() if isinstance(q, Mapping) and q.get("price")]
-                ))
-        except Exception as exc:  # noqa: BLE001
-            self._note_error(f"market fetch: {exc}")
+                self.counters["skipped_market_closed"] += 1
 
         # 账户（撤单率/集中度）
         try:
@@ -623,7 +688,13 @@ class AnomalyEngine:
     # ── 默认取数（生产接线；全部失败安全） ──────────────────────────
 
     def _default_market_inputs(self, cfg: AnomalyConfig) -> Mapping[str, Mapping[str, Any]]:
-        """热集抽样 → 远端快照 + volume_ma_3 基线（快照缺失/基线缺失的标的不产出检测）。"""
+        """热集抽样 → 远端快照 + volume_ma_3 基线（快照缺失/基线缺失的标的不产出检测）。
+
+        ``LimitUp/LimitDown`` 读的是**订阅写侧契约**（``tdx_aidata.collector.frame_to_redis``
+        写过这两个驼峰键）；桥源席 ``get_market_snapshot`` 不提供涨跌停/封单字段，故纯桥源
+        部署下 ``price_limit_up/price_limit_down`` 不产出——这是数据源能力边界（0 条属正常），
+        不是漏读：别把键名改小写，也别用昨收自造涨跌停价（ST/创业板幅度不一，会假报）。
+        """
         from backend.shared.hot_set_store import make_hot_set_client, hot_set_key
 
         hc = make_hot_set_client()

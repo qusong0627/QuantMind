@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 pytestmark = pytest.mark.unit
+
+# 市场族只在连续竞价时段取数（见 anomaly_engine.in_market_session）：本文件的市场类
+# 用例必须把时钟钉在时段内，否则随测试运行时钟点漂移（2026-10-08 前是 1000.0=08:16）。
+_SESSION_EPOCH = datetime(2026, 10, 8, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
 
 
 def _engine(**overrides):
@@ -26,7 +33,7 @@ def _engine(**overrides):
         recent_marker=lambda ds: calls["recent"].append(list(ds)),
         deduper=lambda ds, cfg: (list(ds), 0),  # 单测不经 Redis；去重行为由集成测试覆盖
         status_writer=lambda payload: None,
-        now_fn=lambda: 1000.0,
+        now_fn=lambda: _SESSION_EPOCH,
     )
     return engine, calls, cfg_holder
 
