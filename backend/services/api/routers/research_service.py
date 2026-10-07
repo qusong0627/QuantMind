@@ -2860,7 +2860,10 @@ async def get_stock_kline(
                                     "close": float(row[2]),
                                     "high": float(row[3]),
                                     "low": float(row[4]),
-                                    "volume": float(row[5]),
+                                    # 腾讯 fqkline 成交量为「手」（1 手 = 100 股），
+                                    # ×100 归一为「股」，与 QuantDB 路径
+                                    # （qdb_daily_unadjusted.volume 单位=股）及前端展示一致。
+                                    "volume": float(row[5]) * 100.0,
                                 })
         except Exception as e:
             logger.warning(f"[get_stock_kline] 实时在线拉取 K 线失败: {e}")

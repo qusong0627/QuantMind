@@ -212,3 +212,73 @@ async def test_get_stock_kline_uses_sdl_cache(monkeypatch):
     assert calls["count"] == 1
     assert payload_1 == payload_2
     assert payload_1["data"]["symbol"] == "SH600000"
+
+
+@pytest.mark.asyncio
+async def test_get_stock_kline_tencent_fallback_volume_normalized_to_shares(
+    monkeypatch,
+):
+    """腾讯 fqkline 兜底成交量为「手」，须 ×100 归一为「股」（与 QuantDB 路径一致）。"""
+    import sys
+    import types
+
+    research_service = research._research_service  # noqa: SLF001
+    research_service._SDL_CACHE.clear()  # noqa: SLF001
+
+    # 屏蔽 QuantDB 主路；stock_daily_latest 回退返回空（next 保留该回退路径，
+    # 空结果即真实场景中的「库内无该标的行情」），继续落到腾讯在线兜底。
+    monkeypatch.setattr(research_service, "_quantdb_kline_items", lambda *a, **k: [])
+
+    class _EmptySession:
+        async def execute(self, statement, params=None):
+            return []
+
+    @asynccontextmanager
+    async def _fake_get_session(read_only=True):
+        yield _EmptySession()
+
+    monkeypatch.setattr(research_service, "get_session", _fake_get_session)
+
+    tencent_payload = {
+        "data": {
+            "sh600000": {
+                "qfqday": [["2026-09-18", "10.00", "10.50", "10.60", "9.90", "1234"]]
+            }
+        }
+    }
+
+    class _FakeResp:
+        status = 200
+
+        async def json(self, content_type=None):
+            return tencent_payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeClientSession:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def get(self, url, timeout=None):
+            return _FakeResp()
+
+    fake_aiohttp = types.ModuleType("aiohttp")
+    fake_aiohttp.ClientSession = _FakeClientSession
+    fake_aiohttp.ClientTimeout = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp)
+
+    payload = await research_service.get_stock_kline("SH600000", 2)
+
+    items = payload["data"]["items"]
+    assert len(items) == 1
+    assert items[0]["volume"] == 1234.0 * 100  # 1234 手 → 123400 股

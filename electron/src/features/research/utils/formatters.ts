@@ -15,10 +15,16 @@ export const normalizeSymbol = (raw: string): string => {
   return s;
 };
 
+/**
+ * ROE 统一口径：百分数（如 11.76 表示 11.76%）。
+ *
+ * 与后端 `research_service._format_candidate_record` 的契约完全一致：
+ * 小数（|v| <= 1.5，如 0.1192）视为「小数」→ ×100 转百分数；
+ * 其余（已是百分数，如 QuantDB `fun_roe`）原样返回。全局只有这一条规则。
+ */
 export const normalizeRoe = (value: unknown): number => {
-  let v = safeNum(value, 0);
-  if (Math.abs(v) > 200) v = v / 100;
-  return v;
+  const v = safeNum(value, 0);
+  return Math.abs(v) <= 1.5 ? v * 100 : v;
 };
 
 export const fmt2 = (value: unknown): string => safeNum(value, 0).toFixed(2);
