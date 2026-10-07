@@ -764,6 +764,9 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       # 浏览器访问 QuantBot 的主机白名单（host[:port]，逗号/空格分隔）：
       # dsh 的 trusted-host 围栏与鉴权 cookie 都按 host:port 精确匹配 → 填实际访问地址（LAN IP/域名）；
+      # ⚠️ LAN IP/域名必须带对外端口（如 192.168.31.68:8088，浏览器发的 Host 就长这样）：
+      # dsh 核的围栏对无端口条目宽容（任意端口都信），但 dsh-mcp-connector 插件的中继 fence
+      # 是 host 严格相等——裸主机名会让 /mcp-connector/*（MCP 连接器 UI 与其 API）全部 403；
       # 留空时仅 localhost/127.0.0.1 可用。
       - DSH_TRUSTED_HOSTS=${DSH_TRUSTED_HOSTS:-}
       - DSH_EXTERNAL_PORT=${DSH_PORT:-8088}
