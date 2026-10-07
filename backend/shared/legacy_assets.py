@@ -5,6 +5,10 @@
 落到本仓能看见的地方，且要**可复验**——60MB 搬完没有清单，日后没人能回答「搬全了吗、
 和源逐字节一致吗、有没有把密钥一起搬进来」。
 
+2026-09-29 起同一套规则也服务 **arena UI 原生迁移**（`docs/local/arena-ui-native-migration-
+plan.md`）：「实盘交易」栏的 arena 页面要由 QuantMind 原生后端供数，多市场 agent 台账
+（``agent_data{_us,_hk}``）、行情基准文件、Pine→Pyne 转写产物等一并纳入白名单。
+
 三层纪律
 --------
 
@@ -77,6 +81,8 @@ CATEGORIES: tuple[Category, ...] = (
             "logs/live_equity.jsonl",
             "logs/live_roundtrips.jsonl",
             "logs/ghost_ledger.jsonl",
+            # arena 实况「已平仓」视图补填来源（api_server live_closed L1589）
+            "logs/live_closed_backfill.jsonl",
         ),
     ),
     Category(
@@ -88,6 +94,8 @@ CATEGORIES: tuple[Category, ...] = (
             "logs/sentiment_zt.jsonl",
             "logs/premarket_probe_state.json",
             "logs/rt_status.json",
+            # arena 总控「服务探活」读它（api_server L1327/L1752）
+            "logs/service_status.json",
             "logs/live_analysis_round.json",
             "logs/live_llm_trade_state.json",
             "logs/bridge_scan.json",
@@ -105,6 +113,16 @@ CATEGORIES: tuple[Category, ...] = (
         ),
     ),
     Category("decisions", ("data/agent_data_astock/**",)),
+    # 多市场 agent 台账（arena 前端「智能体交易」切市场时读；cn 在 decisions，
+    # us/hk 各自的整目录在这里 —— market_memory.md 也随目录一起走）
+    Category(
+        "agents-other",
+        (
+            "data/agent_data/**",
+            "data/agent_data_us/**",
+            "data/agent_data_hk/**",
+        ),
+    ),
     Category(
         "history",
         (
@@ -122,6 +140,19 @@ CATEGORIES: tuple[Category, ...] = (
             "data/pine_library/index.json",
             "data/pine_library/chat/**",
             "data/pine_library/pine_audit/**",
+            # arena 策略库管理的编辑稿/备注/版本三件套（recrawl/ 是爬虫暂存，API 不读，不搬）
+            "data/pine_library/edited/**",
+            "data/pine_library/notes/**",
+            "data/pine_library/versions/**",
+        ),
+    ),
+    # Pine→Pyne 转写产物（job/meta/report/prompt + 候选 py；__pycache__ 与 .lock 不收）
+    Category(
+        "transpile",
+        (
+            "data/pine_transpile/*/*.json",
+            "data/pine_transpile/*/*.py",
+            "data/pine_transpile/*/*.md",
         ),
     ),
     Category("events", ("data/events/*.parquet",)),
@@ -131,15 +162,28 @@ CATEGORIES: tuple[Category, ...] = (
             "data/risk_block.json",
             "data/fundamental_flags.json",
             "data/news_blacklist_2026.json",
+            # 黑名单判据的人工审计证据（与「长期排除清单」同族，同去同留）
+            "data/news_blacklist_evidence_*",
             "data/长期排除清单_*",
         ),
     ),
+    # market_memory.md 已随 agents-other 整目录覆盖（先匹配先赢），这里只留批量回测结果
+    Category("research", ("data/lab_batch/**",)),
+    # 行情基准与逐票价（arena 前端「基准线/滚动条」直接 fetch 的静态文件；
+    # A_stock/HK_stock 目录里还带各自的合成脚本与权重 csv，是 provenance，一并留档）
     Category(
-        "research",
+        "market-files",
         (
-            "data/lab_batch/**",
-            "data/agent_data/market_memory.md",
-            "data/agent_data_hk/market_memory.md",
+            "data/A_stock/*",
+            "data/HK_stock/*",
+            "data/benchmark_nasdaq100.json",
+            "data/Adaily_prices_QQQ.json",
+            "data/hsi_daily.json",
+            "data/daily_prices_*.json",
+            # US 市场合并价格文件（agent_data._merged_file 估值直接读根下这份；
+            # cn/hk 各自的 merged.jsonl 已随 A_stock/、HK_stock/ 目录收走）
+            "data/merged.jsonl",
+            "data/config.yaml",
         ),
     ),
     # 配置分两支：JSON 走脱敏（里面有 ``models.openai_api_key`` 这类真密钥），

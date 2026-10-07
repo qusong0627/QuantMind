@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """导入「候选信号排除名单」（通道 A：用户基线名单）——**宿主侧**运行。
 
-把隔壁 quant-Trader 的四份产物归一成一份 JSON，落到 ``data/exclusions/cn.json``
+把 keeper 的四份产物（2026-09-29 起与本仓同根：``data/`` + ``configs/``）归一成
+一份 JSON，落到 ``data/exclusions/cn.json``
 （``./data:/data`` 已挂进容器，落盘即容器可读，零部署改动）：
 
 | 源文件 | 源名 | 形态 |
@@ -11,10 +12,10 @@
 | ``data/news_blacklist_2026.json`` | ``news_blacklist`` | 已后缀 |
 | ``configs/live_symbols.json`` | ``block_buy`` | 已后缀 |
 
-**为什么在宿主侧而不是容器内实时算**：隔壁的纪律就是「离线生成 + 落盘 + 每日刷新，
-报表与闸门同源」，且容器**没有**挂载隔壁目录（客户机也没有该目录），把跨仓路径钉进
-compose 会污染部署。本仓 ``/list`` 是单 worker uvicorn，实时重算 1600 只的多层基本面
-判据会阻塞全部并发请求——所以这里只落一份查表产物。
+**为什么在宿主侧而不是容器内实时算**：keeper 纪律是「离线生成 + 落盘 + 每日刷新，
+报表与闸门同源」（该产物早于迁入就由隔壁宿主生成，2026-09-29 起 keeper 与本仓同根）。
+本仓 ``/list`` 是单 worker uvicorn，实时重算 1600 只的多层基本面判据会阻塞全部并发
+请求——所以这里只落一份查表产物。
 
 **本脚本的一半价值在审计**：源文件与名单最危险的失效方式是**静默少排**
 （代码归一碰撞、后缀写错交易所），界面上完全看不出来。故 ``audit()`` 会把
@@ -24,7 +25,7 @@ compose 会污染部署。本仓 ``/list`` 是单 worker uvicorn，实时重算 
 
     python backend/scripts/import_exclusion_list.py                  # 导入（默认源目录）
     python backend/scripts/import_exclusion_list.py --dry-run        # 只审计并打差异
-    python backend/scripts/import_exclusion_list.py --from /path/to/quant-Trader
+    python backend/scripts/import_exclusion_list.py --from /path/to/keeper-root
 """
 
 from __future__ import annotations
@@ -48,8 +49,9 @@ from backend.shared.exclusion_list import (  # noqa: E402
 )
 from backend.shared.stock_utils import StockCodeUtil  # noqa: E402
 
-#: 隔壁仓库默认位置（客户机上不存在——那时用 ``--from`` 指定）
-DEFAULT_SOURCE_ROOT = "/home/zbox/quant-Trader"
+#: keeper 产物根默认位置：本仓根（2026-09-29 keeper 迁入后改为自产自读——
+#: 原默认指向隔壁 quant-Trader；客户机上无该布局时用 ``--from`` 指定）
+DEFAULT_SOURCE_ROOT = str(PROJECT_ROOT)
 #: 本仓产物目录（``./data:/data`` 挂载，容器内即 ``/data/exclusions``）
 DEFAULT_OUT_DIR = PROJECT_ROOT / "data" / "exclusions"
 
@@ -243,7 +245,7 @@ def _print_report(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="导入候选信号排除名单（通道 A）")
     parser.add_argument("--from", dest="source_root", default=DEFAULT_SOURCE_ROOT,
-                        help=f"隔壁仓库根目录（默认 {DEFAULT_SOURCE_ROOT}）")
+                        help=f"keeper 产物根目录（默认 {DEFAULT_SOURCE_ROOT}）")
     parser.add_argument("--out", dest="out_dir", default=str(DEFAULT_OUT_DIR),
                         help=f"本仓产物目录（默认 {DEFAULT_OUT_DIR}）")
     parser.add_argument("--market", default="CN", help="市场（默认 CN）")

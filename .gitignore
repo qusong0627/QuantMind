@@ -74,6 +74,9 @@ electron/out/
 # ==============================================================================
 logs/
 *.log
+# keeper 运行时产物（2026-09-29 由 quant-Trader 迁入 scripts/）
+/configs/
+config/keeper.env
 # Databases
 *.duckdb
 *.duckdb.tmp/
@@ -301,10 +304,13 @@ minibt/build/
 deploy/live-win/
 # 本机独有运维文档（含内网地址、隔壁项目拓扑，绝不进公开仓）
 docs/local/
-# arena（quant-Trader）代理：同上——实盘栏的 arena 页面靠它转发到本机 8091。
-# 公开仓缺此文件时 main.py 的 try/except 注册静默跳过（端点树不变）。
-backend/services/api/routers/agent_arena_proxy.py
-backend/tests/test_agent_arena_proxy.py
+# arena 数据面（quant-Trader 原生迁移，2026-09-29）：实盘栏的 arena 页面
+# （智能体交易/实况/行情回测/总控/数据）由 QM 原生路由供数，服务层是从隔壁
+# 逐字节移植的副本。公开仓缺这两个包时 main.py 的 try/except 注册静默跳过
+# （端点树不变）。
+backend/services/agent_arena/
+backend/services/api/routers/agent_arena/
+backend/tests/test_agent_arena_native.py
 # 导出的实盘增量包（推理结果 + 策略的 CSV，属业务数据；CSV 已被 *.csv 覆盖，
 # 这里连 manifest.json/目录本身一起挡掉）
 deploy/portable/live-out/

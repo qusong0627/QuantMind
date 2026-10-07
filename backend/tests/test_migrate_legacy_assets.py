@@ -89,7 +89,9 @@ def _make_source(root: Path) -> Path:
     _write(root, ".env", f"OPENAI_API_KEY={FAKE_OPENAI_KEY}\n")
     _write(root, "config/brokers.json", '{"private_key": "x"}\n')
     _write(root, "logs/random.log", "noise\n")
-    _write(root, "data/pine_transpile/0203/prompt.md", "不搬的研究中间产物\n")
+    # 注：``data/pine_transpile/*`` 曾是「不搬的研究中间产物」；2026-09-29 arena UI
+    # 原生迁移把它纳入白名单（转写一览视图要用），见下面的 arena 类别专测。
+    _write(root, "data/pine_transpile/0203/__pycache__/x.pyc", b"\x00\x01")
     return root
 
 
@@ -120,7 +122,7 @@ def _scan_tree(root: Path, needle: str) -> list[str]:
 
 
 def test_plan_selects_only_whitelisted_files(tmp_path):
-    """白名单之外的一律不搬：``.env`` / ``config/`` / 研究中间产物 / 无关日志。"""
+    """白名单之外的一律不搬：``.env`` / ``config/`` / 无关日志 / 转写缓存。"""
     src = _make_source(tmp_path / "src")
     plan = _plan(src)
 
@@ -133,10 +135,67 @@ def test_plan_selects_only_whitelisted_files(tmp_path):
         ".env",
         "config/brokers.json",
         "logs/random.log",
-        "data/pine_transpile/0203/prompt.md",
+        "data/pine_transpile/0203/__pycache__/x.pyc",
     ):
         assert absent not in got, f"{absent} 不该被白名单选中"
         assert absent not in {s.path for s in plan.skipped}
+
+
+def test_arena_ui_categories_cover_multi_market_and_market_files(tmp_path):
+    """arena UI 原生迁移新增的类别（2026-09-29）：多市场台账 / 基准文件 / 转写产物。
+
+    逐类断言**类别归属**而不只是「被选中」：类别决定落盘报告的归类口径，
+    归错类=日后审计时找不到东西。
+    """
+    src = tmp_path / "src"
+    _write(src, "data/agent_data_us/deepseek-v4-flash/position/position.jsonl", "{}\n")
+    _write(src, "data/agent_data_hk/glm-5.3-flash/log/2026-09-03/log.jsonl", "{}\n")
+    _write(src, "data/agent_data/market_memory.md", "# memory\n")
+    _write(src, "data/A_stock/index_daily_sse_50.json", "[]\n")
+    _write(src, "data/A_stock/get_daily_price_a_stock.py", "PASS = 1\n")
+    _write(src, "data/HK_stock/merged.jsonl", "{}\n")
+    _write(src, "data/benchmark_nasdaq100.json", "[]\n")
+    _write(src, "data/hsi_daily.json", "[]\n")
+    _write(src, "data/daily_prices_AAPL.json", "[]\n")
+    _write(src, "data/merged.jsonl", "{}\n")
+    _write(src, "data/config.yaml", "markets: {}\n")
+    _write(src, "data/news_blacklist_evidence_2026-09-11.txt", "evidence\n")
+    _write(src, "data/pine_library/notes/0001.md", "# note\n")
+    _write(src, "data/pine_transpile/0203/prompt.md", "prompt\n")
+    _write(src, "data/pine_transpile/0203/report.json", '{"ok": true}\n')
+    _write(src, "data/pine_transpile/0203/candidate.py", "print()\n")
+    _write(src, "data/pine_transpile/0203/__pycache__/x.pyc", b"\x00\x01")
+    _write(src, "logs/live_closed_backfill.jsonl", "{}\n")
+    _write(src, "logs/service_status.json", '{"ok": true}\n')
+
+    plan = _plan(src)
+    by_path = {f.path: f.category for f in plan.files}
+    assert by_path["data/agent_data_us/deepseek-v4-flash/position/position.jsonl"] == (
+        "agents-other"
+    )
+    assert by_path["data/agent_data_hk/glm-5.3-flash/log/2026-09-03/log.jsonl"] == (
+        "agents-other"
+    )
+    assert by_path["data/agent_data/market_memory.md"] == "agents-other"
+    for p in (
+        "data/A_stock/index_daily_sse_50.json",
+        "data/A_stock/get_daily_price_a_stock.py",
+        "data/HK_stock/merged.jsonl",
+        "data/benchmark_nasdaq100.json",
+        "data/hsi_daily.json",
+        "data/daily_prices_AAPL.json",
+        "data/merged.jsonl",
+        "data/config.yaml",
+    ):
+        assert by_path[p] == "market-files", p
+    assert by_path["data/news_blacklist_evidence_2026-09-11.txt"] == "exclusions"
+    assert by_path["data/pine_library/notes/0001.md"] == "knowledge"
+    assert by_path["data/pine_transpile/0203/prompt.md"] == "transpile"
+    assert by_path["data/pine_transpile/0203/report.json"] == "transpile"
+    assert by_path["data/pine_transpile/0203/candidate.py"] == "transpile"
+    assert "data/pine_transpile/0203/__pycache__/x.pyc" not in by_path
+    assert by_path["logs/live_closed_backfill.jsonl"] == "ledger"
+    assert by_path["logs/service_status.json"] == "state"
 
 
 def test_directory_categories_are_not_silently_empty(tmp_path):
