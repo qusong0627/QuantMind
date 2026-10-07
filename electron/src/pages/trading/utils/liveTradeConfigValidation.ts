@@ -10,7 +10,9 @@ export interface ValidationIssue {
 /** HH:MM ∈ [start, end]；支持跨午夜时段（期货夜盘 21:00–02:30）。 */
 function isTimeInRange(value: string, start: string, end: string) {
   if (!value || !start || !end) return false;
-  return start <= end ? value >= start && value <= end : value >= start || value <= end;
+  // <input type="time"> 偶发带秒（09:30:00），先裁成 HH:MM 再比较，避免端点假阴性
+  const hhmm = value.length >= 5 ? value.slice(0, 5) : value;
+  return start <= end ? hhmm >= start && hhmm <= end : hhmm >= start || hhmm <= end;
 }
 
 export function validateLiveTradeConfig(

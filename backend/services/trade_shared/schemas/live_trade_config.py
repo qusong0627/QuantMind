@@ -63,13 +63,17 @@ class LiveTradeConfigSchema(BaseModel):
     @field_validator("sell_time", "buy_time")
     @classmethod
     def validate_hhmm(cls, value: str) -> str:
-        if len(value) != 5 or value[2] != ":":
+        text = str(value or "").strip()
+        # HTML <input type="time"> 偶发带秒，统一裁成 HH:MM
+        if len(text) >= 8 and text[2] == ":" and text[5] == ":":
+            text = text[:5]
+        if len(text) != 5 or text[2] != ":":
             raise ValueError("time must be HH:MM")
-        hours = int(value[:2])
-        minutes = int(value[3:])
+        hours = int(text[:2])
+        minutes = int(text[3:])
         if hours < 0 or hours > 23 or minutes < 0 or minutes > 59:
             raise ValueError("invalid time")
-        return value
+        return text
 
     @model_validator(mode="after")
     def validate_logic(self):

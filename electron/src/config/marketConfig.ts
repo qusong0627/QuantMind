@@ -165,7 +165,8 @@ export const MARKET_SESSIONS_UI: Record<AppMarket, MarketSessionConfig> = {
 /** 会话 → 默认买卖时点（市场本地钟点；切换时段按钮时的预填） */
 export const MARKET_SESSION_DEFAULTS: Record<AppMarket, Record<string, { sell_time: string; buy_time: string }>> = {
   CN: {
-    AM: { sell_time: '09:00', buy_time: '09:05' },
+    // 与后端时段校验（A 股连续竞价 AM 09:30–11:30）一致；09:00 会被后端 400
+    AM: { sell_time: '09:30', buy_time: '09:35' },
     PM: { sell_time: '14:30', buy_time: '14:45' },
     AFTER_HOURS: { sell_time: '15:05', buy_time: '15:10' },
   },

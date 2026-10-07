@@ -1216,6 +1216,14 @@ def _normalize_live_trade_config(
     ):
         normalized["max_price_deviation"] = float(normalized["max_price_deviation"])
 
+    # schema 校验可能已把 HH:MM:SS 裁成 HH:MM（改动仅在 pydantic 模型内）；merged 原文
+    # 仍可能带秒，这里再兜底一次，保证时段比较口径一致（"11:30:00" 字典序 > "11:30"
+    # 会在端点处假阴性）。
+    for key in ("sell_time", "buy_time"):
+        text = str(normalized.get(key) or "").strip()
+        if len(text) >= 5 and text[2] == ":":
+            normalized[key] = text[:5]
+
     # T-P3-07：时段校验按**策略市场本地时钟**（市场唯一事实源 shared/market_sessions）。
     # A股 "14:45"=北京钟点；美股 "15:50"=美东钟点——本地钟不随夏令时漂移，校验零 DST 复杂度。
     from backend.shared.market_sessions import in_session_hhmm, session_ranges_local

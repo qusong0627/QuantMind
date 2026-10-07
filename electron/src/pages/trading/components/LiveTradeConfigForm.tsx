@@ -25,7 +25,9 @@ type SessionRanges = Record<string, [string, string]>;
 /** HH:MM 是否落在 [start, end]；支持跨午夜时段（如期货夜盘 21:00–02:30）。 */
 function isTimeInRange(time: string, start: string, end: string): boolean {
   if (!time || !start || !end) return false;
-  return start <= end ? time >= start && time <= end : time >= start || time <= end;
+  // <input type="time"> 偶发带秒（09:30:00），先裁成 HH:MM 再比较，避免端点假阴性
+  const hhmm = time.length >= 5 ? time.slice(0, 5) : time;
+  return start <= end ? hhmm >= start && hhmm <= end : hhmm >= start || hhmm <= end;
 }
 
 function isTimeInSessions(time: string, sessions: TradingSession[], ranges: SessionRanges): boolean {

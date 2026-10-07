@@ -36,7 +36,7 @@ const DEFAULT_LIVE_TRADE_CONFIG: LiveTradeConfig = {
   trade_weekdays: [],
   enabled_sessions: ['AM'],
   sell_time: '09:30',
-  buy_time: '09:30',
+  buy_time: '09:35',
   sell_first: true,
   order_type: 'MARKET',
   max_price_deviation: 0.02,
