@@ -83,6 +83,37 @@ def test_matching_hash_reports_no_drift(runner: Any, monkeypatch: pytest.MonkeyP
     assert "schema_drift" not in result
 
 
+def test_empty_mapping_does_not_skip_the_check(
+    runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有 factor_field_sources 的老模型不能整个跳过缺列检查。
+
+    实测：87 个 QuantDB 直读模型里 16 个（HK l1_factors，各 8 特征）映射为空。
+    判据若只遍历映射，这些模型缺列时预检照样返回 ready=True，而执行侧按
+    feature_columns 取数 → 缺列 → exit 2 —— 正是本检查要消灭的症状。
+    """
+    meta = {"factor_source": "l1_factors", "feature_columns": ["mom_5", "vol_20"]}
+    _arm(runner, monkeypatch, meta=meta, status=_Status(columns=["close", "mom_5"]))
+
+    result = runner._query_quantdb_readiness(trade_date="")
+
+    assert result["ready"] is False, "映射为空不等于无列可查"
+    assert "vol_20" in result["detail"], "缺列必须指名道姓"
+
+
+def test_empty_mapping_with_all_columns_present_passes(
+    runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向守卫：列都在就不许误报（别把空映射修成恒失败）。"""
+    meta = {"factor_source": "l1_factors", "feature_columns": ["mom_5", "vol_20"]}
+    _arm(runner, monkeypatch, meta=meta, status=_Status(columns=["close", "mom_5", "vol_20"]))
+
+    result = runner._query_quantdb_readiness(trade_date="")
+
+    assert result["ready"] is True
+    assert result["detail"] == "ok"
+
+
 def test_out_of_range_trade_date_still_blocks(runner: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """时效闸门不受本次改动影响：请求日期晚于数据覆盖范围仍须硬失败。"""
     meta = {**_BASE_META, "factor_schema_hash": "livehash"}

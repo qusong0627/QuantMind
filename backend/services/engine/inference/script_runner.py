@@ -560,9 +560,16 @@ class InferenceScriptRunner:
             field_sources = {
                 str(k): str(v) for k, v in (meta.get("factor_field_sources") or {}).items()
             }
+            # 判据必须对齐**执行侧真正要读的列**：执行读 feature_columns（旧键
+            # features），映射只是「逻辑名 → 物理列」的解析表。只遍历映射的话，
+            # 映射为空的老模型（实测 87 个里 16 个：HK l1_factors，各 8 特征）
+            # 整个检查被跳过 → 预检绿灯、跑起来缺列 exit 2，正是本检查要消灭的症状。
+            features = list(meta.get("feature_columns") or meta.get("features") or [])
+            if not features:
+                features = list(field_sources)
             _, missing_features = split_features_by_availability(
                 reader,
-                list(field_sources),
+                features,
                 field_sources,
                 anchor=source,
                 columns_of=lambda lib: _cached_describe(reader, lib).columns,

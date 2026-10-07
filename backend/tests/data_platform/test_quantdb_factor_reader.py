@@ -382,6 +382,24 @@ def test_secondary_library_does_not_expand_row_universe(tmp_path):
     assert frame["a101_x"].tolist() == [1.0, 2.0]
 
 
+def test_anchor_missing_column_names_the_column(tmp_path):
+    """锚库缺列的**硬失败**（执行侧真正的闸门，2026-10-08 起是唯一一道）。
+
+    推理执行侧已不再拿整库 schema_hash 当闸门（漂移只提示），硬失败全靠这里——
+    这条分支若被削弱，缺列会退化成「静默按 0 填充」而没有任何测试报警。
+    """
+    _write_factor_partition(tmp_path, "l1_factors", _frame("2024-01-02", 10), "20240102")
+
+    with pytest.raises(
+        QuantDBFactorError, match="l1_factors is missing mapped fields: missing_col"
+    ):
+        QuantDBFactorReader(tmp_path).read_day(
+            "l1_factors",
+            features=["missing_col"],
+            trade_date="2024-01-02",
+        )
+
+
 def test_secondary_library_missing_column_reports_qualified_name(tmp_path):
     _write_factor_partition(tmp_path, "l1_factors", _frame("2024-01-02", 10), "20240102")
     _write_factor_partition(tmp_path, "alpha_library", _alpha_frame("2024-01-02", 1.5, 9.0), "20240102")
