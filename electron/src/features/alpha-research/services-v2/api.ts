@@ -135,7 +135,12 @@ function normalizeAgentTask(raw: any, configHint?: any): Task {
           : raw?.error_message || (status === 'completed' ? '完成' : '运行中'),
       timestamp: raw?.updated_at ?? new Date().toISOString(),
     },
-    metrics: emptyMetrics(),
+    // 回测任务由 getBacktestStatus 把后端 factor 详情里的指标放进 raw.metrics；
+    // 此前这里无条件用 emptyMetrics() 覆盖，导致「回测结果」面板永远显示 0.0000 / --。
+    // 保留后端给的字段（缺失的键保持 undefined，前端据此显示 "--" 而不是伪造 0）。
+    metrics: (raw?.metrics && Object.keys(raw.metrics).length > 0
+      ? raw.metrics
+      : emptyMetrics()) as RealtimeMetrics,
     logs: [],
     createdAt: raw?.created_at ?? new Date().toISOString(),
     updatedAt: raw?.updated_at ?? new Date().toISOString(),
@@ -367,16 +372,30 @@ export async function exportFactorToIde(
   return makeOk(res.data?.data ?? {});
 }
 
+/** 回测可选的因子项（下拉显示 name，提交用 id） */
+export interface FactorLibraryOption {
+  id: string;
+  name: string;
+  ic: number | null;
+  status: string;
+}
+
 export async function listFactorLibraries(): Promise<
-  ApiResponse<{ libraries: string[] }>
+  ApiResponse<{ libraries: FactorLibraryOption[] }>
 > {
   try {
-    const res = await apiClient.get(`/alpha-agent/factors`);
+    const res = await apiClient.get(`/alpha-agent/factors?limit=200`);
     const rawFactors: any[] = res.data?.data?.factors ?? [];
-    // Extract unique factor IDs as library identifiers
-    const libraries: string[] = rawFactors
-      .map((f: any) => f.id ?? f.factor_id ?? '')
-      .filter((id: string) => id.length > 0);
+    // 下拉项以因子为单位：显示 factor_name，值用 factor_id。
+    // 此前只回显裸 id（如 1897d59bf8cc143d3c339b5f105d2efd），用户无法判断是哪个因子。
+    const libraries: FactorLibraryOption[] = rawFactors
+      .map((f: any) => ({
+        id: String(f.factor_id ?? f.id ?? ''),
+        name: String(f.factor_name ?? f.name ?? ''),
+        ic: typeof f.ic_value === 'number' ? f.ic_value : null,
+        status: String(f.status ?? ''),
+      }))
+      .filter((o: FactorLibraryOption) => o.id.length > 0);
     return makeOk({ libraries });
   } catch {
     return makeOk({ libraries: [] });
@@ -534,6 +553,17 @@ export async function getBacktestStatus(
     if (raw.annual_return != null) metrics.annualReturn = raw.annual_return;
     if (raw.max_drawdown != null) metrics.maxDrawdown = raw.max_drawdown;
     if (raw.rank_ic != null) metrics.rankIc = raw.rank_ic;
+    // ICIR / Rank ICIR 不是表字段，落在 metadata_json（挖掘阶段写入 icir / rank_icir）
+    const meta = raw.metadata ?? {};
+    const asNum = (v: any): number | null => {
+      if (typeof v === 'number') return v;
+      if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return Number(v);
+      return null;
+    };
+    const icir = asNum(meta.icir);
+    const rankIcir = asNum(meta.rank_icir);
+    if (icir != null) metrics.icir = icir;
+    if (rankIcir != null) metrics.rankIcir = rankIcir;
     return makeOk({
       task: normalizeAgentTask({
         task_id: taskId,
