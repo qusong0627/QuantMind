@@ -73,6 +73,39 @@ def _rewrite_display_name(name: str, old_market: str, new_market: str) -> str:
     return name
 
 
+def evaluate_precheck(
+    *,
+    library_ready: bool,
+    missing_columns: list[str],
+    hash_ok: bool,
+) -> dict:
+    """迁移后就绪裁决（纯函数，判据与推理门禁同口径）。
+
+    硬失败只有两条：**因子库不可用** / **执行侧要读的列取不到**。
+    ``factor_schema_hash`` 不同**只标记不阻断**——哈希只覆盖列名集合，因子库每加一列
+    就会变（实测 quantcustom 273→282），拿它当闸门会把成功的迁移渲染成
+    ``precheck: FAIL`` + 退出码 1，运维据此误判去做多余回滚。同款口径见
+    ``inference/script_runner.py`` 预检与 ``inference/data_loader.py`` 执行侧（2026-09-20
+    b3e3a61b 起的「缺列才硬失败、漂移只提示」），本脚本是那轮改动的第三处。
+    """
+    ready = bool(library_ready) and not missing_columns
+    notes: list[str] = []
+    if not library_ready:
+        notes.append("因子库不可用（status.ready=False）")
+    if missing_columns:
+        notes.append(f"执行侧要读的列在库中取不到：{list(missing_columns)[:5]}")
+    if not hash_ok:
+        notes.append(
+            "schema 漂移：pin 的 factor_schema_hash 与当前列集不同（列名增减；按名取数"
+            "不受影响，是否缺列见 missing_mapped_fields）"
+        )
+    return {
+        "schema_hash_ok": hash_ok,
+        "notes": notes,
+        "precheck": "PASS" if ready else "FAIL",
+    }
+
+
 async def migrate(
     *,
     model_id: str,
@@ -246,14 +279,19 @@ async def migrate(
     hash_ok = (not disk_meta.get("factor_schema_hash")) or (
         disk_meta["factor_schema_hash"] == status.schema_hash
     )
-    ready = status.ready and not missing and hash_ok
+    # 裁决口径见 evaluate_precheck：缺列才硬失败，哈希漂移只标记（原实现把漂移也算
+    # 硬失败，会让成功的迁移以 exit 1 收场；本脚本服务的 CUSTOM→CN 场景跨过库加列期
+    # 就会命中，而 pin 过期与「能不能推理」是两回事）。
     verdict = {
         "data_dir": str(data_dir),
         "factor_source": source,
         "coverage": f"{status.min_date}~{status.max_date}",
-        "schema_hash_ok": hash_ok,
         "missing_mapped_fields": missing[:10],
-        "precheck": "PASS" if ready else "FAIL",
+        **evaluate_precheck(
+            library_ready=bool(status.ready),
+            missing_columns=missing,
+            hash_ok=bool(hash_ok),
+        ),
     }
     log.info("迁移后就绪校验: %s", json.dumps(verdict, ensure_ascii=False))
     return {
