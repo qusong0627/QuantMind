@@ -22,6 +22,13 @@ const QWENPAW_DIRECT_PORT = 8088;
 /** iframe 加载超时时间（毫秒） */
 const IFRAME_LOAD_TIMEOUT_MS = 15_000;
 
+/** onLoad 后网络层探活的超时（毫秒）：网络黑洞时 fetch 会挂起，用 AbortController 兜底 */
+const PROBE_TIMEOUT_MS = 4_000;
+
+/** 探活失败（iframe 里是浏览器错误页）时自动重载的最大次数与间隔 */
+const MAX_AUTO_RETRIES = 3;
+const AUTO_RETRY_DELAY_MS = 4_000;
+
 /**
  * 推导 dsh 直连 Web UI 地址（供“在外部浏览器打开”使用）。
  * 基于已配置的 API 网关地址（如 http://1.2.3.4:8000）取同名主机、换到 8088 端口，
@@ -61,6 +68,8 @@ export function useQuantBotFrame(): QuantBotFrameState {
   const [connected, setConnected] = useState<boolean>(false);
   const [timedOut, setTimedOut] = useState<boolean>(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryCountRef = useRef<number>(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const embedUrl = useMemo(() => {
     // Electron：dsh 部署在用户配置的远端服务器，直连其 8088。
@@ -84,6 +93,10 @@ export function useQuantBotFrame(): QuantBotFrameState {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
   }, []);
 
   const reload = useCallback(() => {
@@ -91,6 +104,7 @@ export function useQuantBotFrame(): QuantBotFrameState {
     setConnected(false);
     setTimedOut(false);
     clearTimer();
+    retryCountRef.current = 0; // 手动重连重置自动重试额度
     // 不用函数式 setter（本仓 tsc 下必报错），也不必读旧值：key 只要「每次刷新都不同」。
     setIframeKey(Date.now());
   }, [clearTimer]);
@@ -99,12 +113,50 @@ export function useQuantBotFrame(): QuantBotFrameState {
     window.open(getQwenPawDirectUrl(), '_blank');
   }, []);
 
+  /**
+   * 网络层探活：no-cors fetch 只要求「连得上」——HTTP 状态码不可见（响应 opaque），
+   * 连接被拒/网络黑洞则 reject。这正是「iframe 里其实是浏览器错误页」的判据。
+   */
+  const probeReachable = useCallback(async (): Promise<boolean> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    try {
+      await fetch(embedUrl, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }, [embedUrl]);
+
   const handleIframeLoad = useCallback(() => {
     clearTimer();
-    setLoading(false);
-    setConnected(true);
-    setTimedOut(false);
-  }, [clearTimer]);
+    // iframe 即使加载的是**浏览器错误页**（连接被拒）也会触发 onLoad —— 旧实现直接
+    // 置 connected 会让错误页永久驻留，且不显示任何重试入口（2026-10-07 实测：
+    // dsh 容器重建窗口被 iframe 撞上，实盘栏里连刷新按钮都没有，用户只能整页强刷）。
+    // 探活确认可达后才算真连通；不可达则自动重载（有限次），耗尽后亮「未响应 + 重新连接」。
+    void probeReachable().then((reachable) => {
+      if (reachable) {
+        retryCountRef.current = 0;
+        setLoading(false);
+        setConnected(true);
+        setTimedOut(false);
+        return;
+      }
+      if (retryCountRef.current < MAX_AUTO_RETRIES) {
+        retryCountRef.current += 1;
+        retryTimerRef.current = setTimeout(() => {
+          retryTimerRef.current = null;
+          setIframeKey(Date.now()); // 换 key 触发 iframe 重新挂载（loading 遮罩保持）
+        }, AUTO_RETRY_DELAY_MS);
+        return;
+      }
+      setLoading(false);
+      setConnected(false);
+      setTimedOut(true);
+    });
+  }, [clearTimer, probeReachable]);
 
   const handleIframeError = useCallback(() => {
     clearTimer();
