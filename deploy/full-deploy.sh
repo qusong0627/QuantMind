@@ -456,7 +456,7 @@ persist_torch_device() {
 ensure_torch_device() {
     local device="${TORCH_DEVICE:-${QUANTMIND_TORCH_DEVICE:-}}"
     local env_file="$PROJECT_DIR/.env"
-    local inferred have helper d want
+    local inferred have helper
     if [[ -z "$device" && -f "$env_file" ]]; then
         device="$(grep -E '^[[:space:]]*TORCH_DEVICE=' "$env_file" 2>/dev/null | tail -1 \
             | cut -d= -f2- | tr -d "\"' " || true)"
@@ -464,23 +464,12 @@ ensure_torch_device() {
     if [[ -z "$device" ]]; then
         helper="$PROJECT_DIR/deploy/req-fingerprint.sh"
         if [[ -f "$helper" ]]; then
+            # --infer-torch 已覆盖：Label 读取 / 指纹对拍 / 旧指纹探测回落
+            # （镜像存在时必返回 cpu|gpu|skip 之一，调用方不得再 die）
             inferred="$(bash "$helper" --infer-torch "$PROJECT_DIR" quantmind-oss:latest 2>/dev/null || true)"
-            # 兼容尚未包含 --infer-torch 的旧 helper：按 cpu/gpu/skip 对拍镜像指纹。
-            if [[ -z "$inferred" ]]; then
-                have="$(image_req_sha quantmind-oss:latest)"
-                if [[ "$have" != notloaded && "$have" != none ]]; then
-                    for d in cpu gpu skip; do
-                        want="$(TORCH_DEVICE="$d" bash "$helper" "$PROJECT_DIR" 2>/dev/null || true)"
-                        if [[ -n "$want" && "$want" == "$have" ]]; then
-                            inferred="$d"
-                            break
-                        fi
-                    done
-                fi
-            fi
         fi
         if [[ -n "$inferred" ]]; then
-            log "未指定 TORCH_DEVICE，已从镜像推断为 $inferred"
+            log "未指定 TORCH_DEVICE，已从镜像推断/回落为 $inferred"
             persist_torch_device "$inferred"
             return 0
         fi
@@ -497,7 +486,17 @@ ensure_torch_device() {
                 return 0
                 ;;
             *)
-                die "未指定 TORCH_DEVICE，且无法从镜像推断（镜像指纹=${have}）。请显式设置 TORCH_DEVICE=cpu|gpu|skip 后重试，以免把已含 torch 的镜像按 skip 重建。"
+                # 兜底（helper 缺失/过旧时才会走到）：探测镜像内是否已有 torch，
+                # 有则按 cpu 保留推理环境，无则按 skip，绝不阻断部署。
+                if docker run --rm --network none --entrypoint python quantmind-oss:latest \
+                    -c 'import torch' >/dev/null 2>&1; then
+                    log "未指定 TORCH_DEVICE，镜像指纹=${have} 对不上当前代码但含 torch，按 cpu 处理"
+                    persist_torch_device cpu
+                else
+                    log "未指定 TORCH_DEVICE，镜像指纹=${have} 对不上当前代码且无 torch，按 skip 处理"
+                    persist_torch_device skip
+                fi
+                return 0
                 ;;
         esac
     fi

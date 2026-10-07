@@ -60,6 +60,8 @@ image_label() {
 
 # 优先读 qm.torch.device；旧镜像没有该 Label 时，用当前代码分别按 cpu/gpu/skip
 # 重算指纹，与 qm.req.sha 对得上的即为打包时的 torch 形态。
+# 指纹对不上（镜像按旧 requirements 烙的 sha）时：探测镜像内是否已有 torch，
+# 有则按 cpu 保留，避免 update 直接 die 卡住纯代码升级。
 infer_torch_from_image() {
     local ROOT="$1"
     local IMAGE="${2:-quantmind-oss:latest}"
@@ -74,11 +76,14 @@ infer_torch_from_image() {
     esac
     have="$(image_label "$IMAGE" "qm.req.sha")"
     case "$have" in
-        ""|none|"<no value>")
-            # 早于指纹机制的镜像：能 import torch 则按 cpu 保留，避免 skip 重建拆掉推理环境。
+        ""|none|"<no value>"|unknown)
+            # 早于指纹机制的镜像：能 import torch 则按 cpu 保留，避免 skip 重建拆掉推理环境；
+            # 镜像本就没有 torch（曾按 skip 构建）时回落 skip（本仓库无 auto 形态）。
             if docker run --rm --network none --entrypoint python "$IMAGE" \
                 -c 'import torch' >/dev/null 2>&1; then
                 printf 'cpu'
+            else
+                printf 'skip'
             fi
             return 0
             ;;
@@ -90,6 +95,14 @@ infer_torch_from_image() {
             return 0
         fi
     done
+    # 镜像指纹来自旧依赖清单，与当前 cpu/gpu/skip 都对不上：
+    # 不能因此阻断 update——探测 torch 后回落，并让调用方写入 .env。
+    if docker run --rm --network none --entrypoint python "$IMAGE" \
+        -c 'import torch' >/dev/null 2>&1; then
+        printf 'cpu'
+    else
+        printf 'skip'
+    fi
 }
 
 MODE="hash"

@@ -33,11 +33,11 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --ref) REF="${2:-}"; shift 2 ;;
         --remote) REMOTE="${2:-}"; shift 2 ;;
-        --force) FORCE=true; shift ;;
+        --force|-force) FORCE=true; shift ;;
         --no-build) BUILD=false; shift ;;
         --skip-backup) SKIP_BACKUP=true; shift ;;
         -h|--help) usage; exit 0 ;;
-        *) die "未知参数: $1" ;;
+        *) die "未知参数: $1（force 请用 --force）" ;;
     esac
 done
 
@@ -153,6 +153,11 @@ EOF
     else
         rm -f "$PROJECT_DIR/backend/shared/version.json"
     fi
+
+    # 部署提交已变：清掉版本检查缓存（version_check.json），避免管理页
+    # 继续显示过期的「落后 N 个提交」。
+    rm -f "${STORAGE_ROOT:-$PROJECT_DIR/data}/version_check.json" \
+        /data/version_check.json 2>/dev/null || true
 }
 
 build_core() {
@@ -215,28 +220,12 @@ build_core() {
         "$PROJECT_DIR/docker-compose.yml" 2>/dev/null || true)"
     torch_val="${TORCH_DEVICE:-$(grep -E '^[[:space:]]*TORCH_DEVICE=' "$PROJECT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' " || true)}"
     if [[ -z "$torch_val" ]]; then
+        # 唯一推断实现：deploy/req-fingerprint.sh --infer-torch
+        # （含「旧指纹对不上当前代码」时的 torch 探测回落，禁止在此 die）
         torch_val="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" --infer-torch \
             "$PROJECT_DIR" quantmind-oss:latest 2>/dev/null || true)"
-        if [[ -z "$torch_val" ]]; then
-            local img_sha want d
-            img_sha="$(docker image inspect quantmind-oss:latest \
-                --format '{{ index .Config.Labels "qm.req.sha" }}' 2>/dev/null || true)"
-            case "$img_sha" in
-                ""|none|"<no value>"|notloaded) ;;
-                *)
-                    for d in cpu gpu skip; do
-                        want="$(TORCH_DEVICE="$d" bash "$PROJECT_DIR/deploy/req-fingerprint.sh" \
-                            "$PROJECT_DIR" 2>/dev/null || true)"
-                        if [[ -n "$want" && "$want" == "$img_sha" ]]; then
-                            torch_val="$d"
-                            break
-                        fi
-                    done
-                    ;;
-            esac
-        fi
         if [[ -n "$torch_val" ]]; then
-            log "2/4 未指定 TORCH_DEVICE，已从镜像推断为 $torch_val"
+            log "2/4 未指定 TORCH_DEVICE，已从镜像推断/回落为 $torch_val（写入 .env，避免下次再拦）"
             export TORCH_DEVICE="$torch_val"
             if [[ -f "$PROJECT_DIR/.env" ]]; then
                 if grep -qE '^[[:space:]]*TORCH_DEVICE=' "$PROJECT_DIR/.env"; then
@@ -246,18 +235,8 @@ build_core() {
                         "$torch_val" >> "$PROJECT_DIR/.env"
                 fi
             fi
-        elif docker image inspect quantmind-oss:latest >/dev/null 2>&1; then
-            local img_sha
-            img_sha="$(docker image inspect quantmind-oss:latest \
-                --format '{{ index .Config.Labels "qm.req.sha" }}' 2>/dev/null || true)"
-            case "$img_sha" in
-                ""|none|"<no value>")
-                    log '2/4 镜像无依赖指纹且无法推断 TORCH_DEVICE，构建签名按 skip'
-                    ;;
-                *)
-                    die "未指定 TORCH_DEVICE，且无法从镜像推断（镜像指纹=${img_sha}）。请显式设置 TORCH_DEVICE=cpu|gpu|skip 后重试，以免把已含 torch 的镜像按 skip 重建。"
-                    ;;
-            esac
+        else
+            log '2/4 未指定 TORCH_DEVICE 且无可用镜像推断，构建签名按 skip'
         fi
     fi
     build_blk="$(printf '%s' "$svc_blk" \

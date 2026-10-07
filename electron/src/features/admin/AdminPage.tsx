@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Layout, Menu, Button, Badge, Avatar, Typography, Divider, Tag } from 'antd';
+import React, { useEffect, useState } from 'react';
+import { Layout, Menu, Button, Badge, Avatar, Typography, Divider, Tag, Tooltip } from 'antd';
 import { 
     DashboardOutlined, 
     UserOutlined, 
@@ -13,8 +13,62 @@ import {
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { AdminSystemLoadWidget } from './components/AdminSystemLoadWidget';
+import { systemService, type SystemVersion } from '../../services/systemService';
 
 const { Title, Text } = Typography;
+
+const AdminUpdateBadge: React.FC = () => {
+    const [versionInfo, setVersionInfo] = useState<SystemVersion | null>(null);
+    const [checkingUpdate, setCheckingUpdate] = useState(false);
+
+    const loadVersion = (force = false) => {
+        setCheckingUpdate(true);
+        systemService
+            .getVersion(force)
+            .then((info) => setVersionInfo(info))
+            .catch(() => setVersionInfo(null))
+            .finally(() => setCheckingUpdate(false));
+    };
+
+    useEffect(() => {
+        loadVersion();
+    }, []);
+
+    const update = versionInfo?.update;
+    if (checkingUpdate && !update) {
+        return <span className="text-[10px] text-slate-400">检查更新…</span>;
+    }
+    if (!update) {
+        return null;
+    }
+    if (update.behind > 0) {
+        return (
+            <Tooltip title="在服务器项目目录执行：sudo bash deploy/update.sh">
+                <button
+                    type="button"
+                    onClick={() => loadVersion(true)}
+                    disabled={checkingUpdate}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1 text-xs font-medium disabled:opacity-60"
+                >
+                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                    {`落后 ${update.behind}${update.behind_capped ? '+' : ''} 个提交`}
+                </button>
+            </Tooltip>
+        );
+    }
+    if (update.is_up_to_date) {
+        return (
+            <button
+                type="button"
+                onClick={() => loadVersion(true)}
+                className="text-[10px] font-medium text-slate-400 hover:text-emerald-600"
+            >
+                已最新
+            </button>
+        );
+    }
+    return null;
+};
 
 const AdminPage: React.FC = () => {
     const navigate = useNavigate();
@@ -127,6 +181,7 @@ const AdminPage: React.FC = () => {
                     </div>
                     
                     <div className="flex items-center gap-5">
+                        <AdminUpdateBadge />
                         <Badge dot color="#10b981" offset={[-2, 2]}>
                             <Button type="text" icon={<BellOutlined />} className="text-slate-400 hover:text-slate-800" />
                         </Badge>
