@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from backend.shared.feature_incremental import TIER_COLUMNS
+from backend.shared.feature_incremental import TIER_COLUMNS, is_missing
 
 
 def digits(symbol: str) -> str:
@@ -221,7 +221,7 @@ def compute_cycle(
                 if lv is not None and np.isfinite(lv):
                     val = lv
                     overridden += 1
-            if val is None or (isinstance(val, float) and np.isnan(val)):
+            if is_missing(val):
                 val = fill.get(col, 0.0)
                 missing += 1
             x[i, j] = float(val)

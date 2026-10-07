@@ -23,6 +23,24 @@ TIER_MAX_WINDOW = 46  # 45 历史 + 形成中 bar（flow_vpin_ma_20 依赖 40 �
 _NAN = np.nan
 
 
+def is_missing(value: Any) -> bool:
+    """浮点缺失判据（**float32 必须认**）——实时装配/增量覆盖的唯一入口。
+
+    为什么不能用 ``isinstance(value, float)`` 直接判：QuantDB 因子列在 DuckDB 侧
+    被显式 CAST 成 ``FLOAT``（float32，float64 会让 429 因子全历史长表超训练容器
+    内存，见 ``quantdb_factor_reader.py`` 的 CAST 段），而 ``np.float32`` **不是**
+    Python ``float`` 的子类（``np.float64`` 是）——旧判据对 float32 恒为 False。
+
+    实测后果（2026-10-08）：QuantDB 直读模型的每个 NaN 特征都静默绕过
+    ``fill_values`` 直接进 ONNX 输入矩阵，``missing`` 计数也不涨；同一判据在
+    ``incremental_features.features_with_fallback`` 里会把 float32 NaN 基线当成
+    「可用的 t1 值」。遗留快照模型（float64）与纯 Python float 语义不变。
+    """
+    return value is None or (
+        isinstance(value, (float, np.floating)) and bool(np.isnan(value))
+    )
+
+
 # ── NaN 语义对齐的滚动统计（与 pandas rolling 相同的 skipna/min_periods）────
 
 

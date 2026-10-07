@@ -29,7 +29,12 @@ from typing import Any
 
 import numpy as np
 
-from backend.shared.feature_incremental import TIER_MAX_WINDOW, Window, compute_tier
+from backend.shared.feature_incremental import (
+    TIER_MAX_WINDOW,
+    Window,
+    compute_tier,
+    is_missing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -314,13 +319,12 @@ class IncrementalFeatureEngine:
         if live is not None:
             live.pop("_meta", None)
             for col, value in live.items():
-                live_missing = value is None or (
-                    isinstance(value, float) and np.isnan(value)
-                )
+                # float32 必须认（QuantDB 直读列是 float32，np.float32 不是
+                # Python float 的子类）——否则 NaN 会被当成有效值写成 "live"，
+                # 基线里有值的列也不会回退。判据单源见 feature_incremental.is_missing。
+                live_missing = is_missing(value)
                 base_value = row.get(col)
-                base_finite = base_value is not None and not (
-                    isinstance(base_value, float) and np.isnan(base_value)
-                )
+                base_finite = not is_missing(base_value)
                 if live_missing:
                     if base_finite:
                         prov[col] = "t1"  # 回退基线（row 保留基线值）
