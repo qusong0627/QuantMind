@@ -660,6 +660,30 @@ class StrategyStorageService:
                 "version": int(row[19] or 1),
             }
 
+    async def rename(self, user_id: str, strategy_id: str, name: str) -> bool:
+        """只更新策略显示名称，编号不变（AI-IDE 云端工作区 path 即策略编号）。"""
+        sid_text = str(strategy_id or "").strip()
+        if not sid_text.isdigit():
+            return False
+        uid_int = _ensure_int_user_id(user_id)
+        now = datetime.now(timezone.utc)
+        with get_db() as session:
+            row = session.execute(
+                text(
+                    "UPDATE strategies SET name = :name, updated_at = :now "
+                    "WHERE id = :sid AND user_id = :uid "
+                    f"AND status != '{_STATUS_ARCHIVED}' "
+                    "RETURNING id"
+                ),
+                {
+                    "name": name,
+                    "now": now,
+                    "sid": int(sid_text),
+                    "uid": uid_int,
+                },
+            ).fetchone()
+            return row is not None
+
     async def mark_as_verified(self, strategy_id: str, user_id: str) -> bool:
         """回测验证通过标记（T-P3-04 状态一致化）。
 
