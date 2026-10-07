@@ -457,7 +457,18 @@ def load_date_data(trade_date: str, data_dir: Path, meta: dict) -> pd.DataFrame 
             status = reader.assert_ready(source, start=trade_date, end=trade_date)
             expected_hash = str(meta.get("factor_schema_hash") or "")
             if expected_hash and expected_hash != status.schema_hash:
-                raise RuntimeError("QuantDB schema hash differs from model metadata")
+                # 漂移 ≠ 错误：哈希只覆盖**列名集合**，因子库新增一列就会变。当硬闸门
+                # 的代价是存量模型被永久锁死——注册表 ready、点下去 exit 2「该日期无
+                # 数据」。2026-09-20 b3e3a61b 已在预检侧改成「缺列才硬失败、漂移只
+                # 提示」，本模板（渲染进每个模型目录）当时漏改；此处对齐。真正的硬失败
+                # 由 read_range 的**按名**缺列检查给出（锚库/副库分别指名），本函数照常
+                # 返回 None → exit 2。
+                logger.warning(
+                    "QuantDB schema drift for %s: expected %s, got %s (按名取数，继续)",
+                    source,
+                    expected_hash[:16],
+                    str(status.schema_hash or "")[:16],
+                )
             day_df = reader.read_day(
                 source, features=features, trade_date=trade_date,
                 feature_sources=meta.get("factor_field_sources") or None,
