@@ -35,6 +35,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from backend.services.engine.anomaly_detectors import (
+    KIND_MODEL_IC_DROP,
     Detection,
     detect_account_anomaly,
     detect_data_anomaly,
@@ -203,6 +204,12 @@ class AnomalyConfig:
     jump_pct_max: float = 0.11
     ic_short_min: float = 0.0
     ic_drop_ratio_max: float = 0.5
+    # IC 告警时效闸门（自然日）：窗口数据比今天旧过此值 → 不算「当日异常」（0=关）。
+    # 21 天须覆盖健康模型 lag+horizon+同步 的天然滞后（T+10 模型 ~3 周）。
+    ic_stale_days: int = 21
+    # 模型类异动专属冷却：IC 按日粒度推进，同一窗口跨扫描重复命中不算新事件。
+    # 全局 cooldown_s(1800s) < model_every_s(3600s) 时，旧行为等于每小时刷一次屏。
+    model_cooldown_s: float = 43200.0
     deny_enabled: bool = True
     reduce_enabled: bool = False
     cooldown_s: float = 1800.0  # 同 (kind,subject,severity) 重复异动抑制窗（防总线/落表刷屏）
@@ -247,6 +254,8 @@ class AnomalyConfig:
             jump_pct_max=max(0.02, _f("jump_pct_max", 0.11)),
             ic_short_min=_f("ic_short_min", 0.0),
             ic_drop_ratio_max=min(max(_f("ic_drop_ratio_max", 0.5), 0.05), 1.0),
+            ic_stale_days=max(0, _i("ic_stale_days", 21)),
+            model_cooldown_s=max(60.0, _f("model_cooldown_s", 43200.0)),
             deny_enabled=_b("deny_enabled", True),
             reduce_enabled=_b("reduce_enabled", False),
             cooldown_s=max(60.0, _f("cooldown_s", 1800.0)),
@@ -667,6 +676,8 @@ class AnomalyEngine:
                         row.get("ic_stats") or {},
                         short_min=cfg.ic_short_min,
                         drop_ratio_max=cfg.ic_drop_ratio_max,
+                        stale_after_days=cfg.ic_stale_days,
+                        today=now_dt.date(),
                     )
             except Exception as exc:  # noqa: BLE001
                 self._note_error(f"model fetch: {exc}")
@@ -733,8 +744,15 @@ class AnomalyEngine:
         try:
             for d in detections:
                 key = f"{key_prefix}{d.kind}:{d.subject}:{d.severity}"
+                # 模型类走专属冷却：IC 按日推进，扫描间（3600s）重复命中同一窗口
+                # 不是新事件（全局 1800s 冷却挡不住扫描间隔，曾每小时刷屏，2026-10-08）
+                ex = (
+                    cfg.model_cooldown_s
+                    if d.kind == KIND_MODEL_IC_DROP
+                    else cfg.cooldown_s
+                )
                 try:
-                    first = client.set(key, str(int(self._now())), nx=True, ex=int(cfg.cooldown_s))
+                    first = client.set(key, str(int(self._now())), nx=True, ex=int(ex))
                 except Exception:  # noqa: BLE001
                     first = True
                 if first:
@@ -998,19 +1016,22 @@ class AnomalyEngine:
         candidates: list[Path] = []
         try:
             for pred in root.glob("**/pred.parquet"):
-                candidates.append(pred.parent)
+                candidates.append(pred)
         except Exception:  # noqa: BLE001
             return []
         if not candidates:
             return []
+        # 按 pred.parquet 自身 mtime（= 最近出分时间）挑；**不能**按目录 mtime——
+        # 目录会被无关文件（如 onnx 再导出）碰新，曾把停更 4 周的模型顶进
+        # 扫描前三并假报「当日 IC 严重异常」（2026-10-08 告警复盘）。
         candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
         picked = candidates[: max(1, cfg.model_max)]
 
         from backend.scripts.model_ic_monitor import monitor as ic_monitor
 
         out: list[Mapping[str, Any]] = []
-        for model_dir in picked:
-            model_id = model_dir.name
+        for pred_file in picked:
+            model_id = pred_file.parent.name
             try:
                 result = ic_monitor(model_id, 90, [5, 20])
             except BaseException as exc:  # noqa: BLE001 - SystemExit 一并兜住

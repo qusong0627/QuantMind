@@ -287,3 +287,45 @@ def test_anomaly_dedup_suppresses_repeat_within_cooldown():
         bus.delete(f"qm:anomaly:last_fired:volume_surge:{symbol}:critical")
         bus.srem("qm:anomaly:recent_symbols", symbol)
         bus.close()
+
+
+def test_anomaly_dedup_model_kind_uses_daily_cooldown():
+    """模型类异动走专属冷却（真 Redis 钉 TTL）：IC 按日推进，扫描间隔（3600s）
+    大于全局冷却（1800s）时旧行为每小时刷屏；模型键的 TTL 必须用 model_cooldown_s。"""
+    from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
+
+    model_id = f"mdl_t_{uuid.uuid4().hex[:6]}"
+    fired: list = []
+    cfg = AnomalyConfig(
+        enabled=True, cooldown_s=600, model_cooldown_s=1234, model_every_s=0.0
+    )
+    engine = AnomalyEngine(
+        config_loader=lambda: cfg,
+        market_fetcher=lambda c: {},
+        account_fetcher=lambda c: [],
+        data_fetcher=lambda c: [],
+        model_fetcher=lambda c: [
+            {
+                "model_id": model_id,
+                "ic_stats": {"ic_5": -0.05, "ic_20": 0.05, "n_5": 5, "n_20": 20},
+            }
+        ],
+        publisher=lambda d: fired.append(d),
+        recorder=lambda d: None,
+        denier=lambda d: {},
+        status_writer=_no_status_write,
+        now_fn=_session_now,
+    )
+    bus = _redis(0)
+    key = f"qm:anomaly:last_fired:model_ic_drop:{model_id}:critical"
+    try:
+        engine.build_once()
+        assert len(fired) == 1, "首轮应触发"
+        engine.build_once()
+        assert len(fired) == 1, "模型冷却窗内第二次不应再触发"
+        assert engine.counters["deduped"] >= 1
+        ttl = bus.ttl(key)
+        assert 1200 < ttl <= 1234, f"TTL 应用 model_cooldown_s(1234) 而非全局 600：{ttl}"
+    finally:
+        bus.delete(key)
+        bus.close()

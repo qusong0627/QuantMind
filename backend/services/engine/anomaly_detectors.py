@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 from collections.abc import Mapping, Sequence
 
@@ -306,6 +307,14 @@ def detect_data_anomaly(
     return out
 
 
+def _iso_date(value: Any) -> date | None:
+    """宽松解析 ISO 日期（date/datetime/`YYYY-MM-DD…` 字符串）；不可解析返回 None。"""
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
 def detect_model_anomaly(
     model_id: str,
     ic_stats: Mapping[str, Any],
@@ -315,13 +324,30 @@ def detect_model_anomaly(
     short_min: float = 0.0,
     drop_ratio_max: float = 0.5,
     min_samples: int = 5,
+    stale_after_days: int = 21,
+    today: date | None = None,
 ) -> list[Detection]:
     """模型异常：短窗 IC 低于绝对阈，或相对长窗骤降。
 
     ic_stats: {ic_5: float, ic_20: float, n_5: int, n_20: int, latest_ic_date?: str}
     （即 `scripts/model_ic_monitor.monitor()` 输出的窗口统计）。
+
+    时效闸门（2026-10-08 假警报复盘）：``latest_ic_date`` 比 ``today`` 旧过
+    ``stale_after_days`` 自然日 → 返回空。监测窗口早已停止推进的模型（分数停更、
+    pred 仅为补建产物）不得按「当日异常」告警。健康模型的窗口天然滞后「今天」
+    lag+horizon+同步 个交易日（T+10 模型可达 ~3 周），故阈值须覆盖该滞后，
+    默认 21 天；0 = 关闭闸门。无 ``latest_ic_date`` / 无 ``today`` 时无从判断
+    时效，维持原判据（宁报警不静默吞）。
     """
     out: list[Detection] = []
+    latest = _iso_date((ic_stats or {}).get("latest_ic_date"))
+    if (
+        today is not None
+        and stale_after_days > 0
+        and latest is not None
+        and (today - latest).days > stale_after_days
+    ):
+        return out
     short = _f((ic_stats or {}).get(short_window))
     long = _f((ic_stats or {}).get(long_window))
     n_short = _f((ic_stats or {}).get(f"n_{short_window.split('_')[-1]}"))
@@ -337,6 +363,8 @@ def detect_model_anomaly(
         desc += f"，长窗 {long_window}={long:+.3f}"
     if drop_triggered:
         desc += f"（相对骤降 > {drop_ratio_max:.0%}）"
+    if latest is not None:
+        desc += f"（数据截至 {latest.isoformat()}）"
     out.append(
         Detection(
             kind=KIND_MODEL_IC_DROP,

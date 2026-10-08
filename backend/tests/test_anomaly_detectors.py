@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -160,3 +162,30 @@ def test_model_ic_drop_absolute_and_relative():
 
     # 健康 → 不判
     assert detect_model_anomaly("m4", {"ic_5": 0.04, "ic_20": 0.05, "n_5": 5, "n_20": 20}) == []
+
+
+def test_model_ic_drop_stale_window_not_alerted():
+    """窗口数据旧过时效闸门 → 不按「当日异常」告警；闸内照常告警且描述带数据截止日。
+
+    2026-10-08 假警报复盘：补建 pred 的停更模型（数据止于 09-10）被顶进扫描面，
+    28 天旧的窗口报了「当日严重」。
+    """
+    from backend.services.engine.anomaly_detectors import detect_model_anomaly
+
+    stale = {"ic_5": -0.039, "ic_20": 0.155, "n_5": 5, "n_20": 20,
+             "latest_ic_date": "2026-09-10"}
+    assert detect_model_anomaly("m5", stale, today=date(2026, 10, 8)) == []
+
+    fresh = {**stale, "latest_ic_date": "2026-10-01"}
+    out = detect_model_anomaly("m6", fresh, today=date(2026, 10, 8))
+    assert out and out[0].severity == "critical"
+    assert "数据截至 2026-10-01" in out[0].description
+
+
+def test_model_ic_drop_without_asof_keeps_old_behavior():
+    """无 latest_ic_date / 无 today → 无从判断时效，维持原判据（不静默吞告警）。"""
+    from backend.services.engine.anomaly_detectors import detect_model_anomaly
+
+    stats = {"ic_5": -0.02, "ic_20": 0.03, "n_5": 5, "n_20": 20}
+    assert detect_model_anomaly("m7", stats, today=date(2026, 10, 8))
+    assert detect_model_anomaly("m8", {**stats, "latest_ic_date": "2026-09-10"})
