@@ -105,6 +105,41 @@ def test_live_pin_is_still_honoured(monkeypatch, tmp_path):
     assert _RecordingReader.seen_roots == [str(pin)]
 
 
+@pytest.mark.unit
+def test_list_infer_models_includes_cust_dirs(monkeypatch, tmp_path):
+    """候选扫描须覆盖自定义训练目录 ``mdl_cust_*``：面板要能选到刚训好的 NativeTFT。
+
+    旧 glob 只认 ``mdl_cn*``，自定义模型在「实时推理」下拉里根本不可见——即使
+    ONNX 已导出、配置接口也能保存（validate_model_dir 只按 metadata 校验）。
+    """
+    from backend.services.api.routers.admin import realtime as rt
+
+    def _mk(base, name):
+        d = base / name
+        d.mkdir(parents=True)
+        (d / "metadata.json").write_text(
+            json.dumps({"feature_columns": ["a", "b"]}), encoding="utf-8"
+        )
+        return d
+
+    _mk(tmp_path / "users" / "default" / "10000001", "mdl_cn_train_1")
+    _mk(tmp_path / "users" / "default" / "10000001", "mdl_cust_train_2")
+    _mk(tmp_path, "mdl_cust_train_3")
+
+    async def _no_names(_ids):
+        return {}
+
+    monkeypatch.setattr(rt, "MODELS_ROOT", tmp_path)
+    monkeypatch.setattr(rt, "_load_model_display_names", _no_names)
+
+    import asyncio
+
+    models = asyncio.run(rt.list_infer_models())
+    dir_names = {m["dir_name"] for m in models}
+
+    assert dir_names == {"mdl_cn_train_1", "mdl_cust_train_2", "mdl_cust_train_3"}
+
+
 @pytest.mark.integration
 def test_admin_realtime_config_roundtrip_real_redis(tmp_path):
     import os

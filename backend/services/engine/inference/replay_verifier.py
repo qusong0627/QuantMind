@@ -27,8 +27,10 @@ from backend.services.engine.inference.realtime_core import (
     digits,
     effective_override,
     load_baseline_for_model,
+    load_window_for_model,
     matrix_digest,
     scores_digest,
+    sequence_len_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,9 @@ def verify_entry(
     pointers: dict[str, int],
     engine: Any,
     bootstrapped: set[str],
+    window: dict[str, list[dict[str, Any] | None]] | None = None,
+    seq_len: int = 1,
+    feat_norm: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """单周期对账：按 cuts 推进指针 → 共享装配 → 双摘要比对。"""
     symbols = list(entry.get("symbols") or [])
@@ -124,6 +129,9 @@ def verify_entry(
         override=override,
         engine=engine,
         bootstrapped=bootstrapped,
+        window=window,
+        seq_len=seq_len,
+        feat_norm=feat_norm,
     )
     x_match = matrix_digest(result.x, cols, str(entry.get("model_version") or "")) == entry.get("x_digest")
     scores_match = scores_digest(result.scores) == entry.get("scores_digest")
@@ -157,6 +165,7 @@ def verify_day(
     ledger: list[dict[str, Any]],
     frames: Any,
     baseline_bundle: dict[str, Any] | None = None,
+    window_frames: dict[str, list[dict[str, Any] | None]] | None = None,
     session_factory: Callable[[Path, int], Any] | None = None,
     detail_limit: int = 20,
 ) -> dict[str, Any]:
@@ -185,6 +194,20 @@ def verify_day(
         )
     baseline = baseline_bundle.get("rows") or {}
     histories = baseline_bundle.get("history") or {}
+    # 时序模型（NativeTFT 等）：窗口帧与在线服务同源同函数——回放漏拼窗口会让
+    # 3D 输入形状对不上或 x_digest 必然不匹配（两侧必须同一份对齐纪律）。
+    seq_len = sequence_len_of(meta)
+    window: dict[str, list[dict[str, Any] | None]] | None = None
+    if seq_len > 1:
+        if window_frames is not None:
+            window = window_frames
+        else:
+            window = (
+                load_window_for_model(
+                    symbols_union, day, meta=meta, cols=cols, step_len=seq_len
+                ).get("frames")
+                or {}
+            )
 
     if session_factory is None:
         def session_factory(model_path: Path, n_features: int):
@@ -217,6 +240,8 @@ def verify_day(
             session=session, input_name=input_name, cols=cols, fill=fill,
             baseline=baseline, histories=histories, frames_by_symbol=frames_by_symbol,
             pointers=pointers, engine=engine, bootstrapped=bootstrapped,
+            window=window, seq_len=seq_len,
+            feat_norm=meta.get("feat_norm") if seq_len > 1 else None,
         )
         results.append(outcome)
         if not outcome["matched"] and len(mismatches) < detail_limit:

@@ -41,6 +41,8 @@ from backend.services.engine.inference.realtime_core import (
     ledger_json,
     live_coverage,
     load_baseline_for_model,
+    load_window_for_model,
+    sequence_len_of,
     snapshot_key,
 )
 
@@ -176,6 +178,7 @@ class RealtimeInferenceService:
         hot_set_fetcher: Callable[[], list[str]] | None = None,
         snapshot_fetcher: Callable[[list[str]], dict[str, dict[str, Any]]] | None = None,
         baseline_loader: Callable[[list[str], date], dict[str, dict[str, Any]]] | None = None,
+        window_loader: Callable[..., dict[str, Any]] | None = None,
         publisher: Callable[[dict[str, Any], RealtimeInferConfig], Any] | None = None,
         ledger_sink: Callable[[dict[str, Any]], None] | None = None,
         status_writer: Callable[[dict[str, Any]], None] | None = None,
@@ -184,6 +187,7 @@ class RealtimeInferenceService:
         self._hot_set_fetcher = hot_set_fetcher
         self._snapshot_fetcher = snapshot_fetcher
         self._baseline_loader = baseline_loader
+        self._window_loader = window_loader  # 仅时序模型用（注入式；默认带日级缓存）
         self._publisher = publisher
         self._ledger_sink = ledger_sink  # 注入式账本落点（None → Redis；测试注入 list.append）
         # 注入式状态镜像落点（None → 写生产键 qm:realtime:infer:status）。tick_once
@@ -198,6 +202,7 @@ class RealtimeInferenceService:
         self._sessions: dict[str, Any] = {}  # model_dir → ort session
         self._baselines: dict[str, dict[str, dict[str, Any]]] = {}  # "YYYYMMDD|model" → rows
         self._baseline_day: str | None = None
+        self._windows: dict[str, dict[str, Any]] = {}  # 时序窗口缓存（日级 + 覆盖集扩容）
         self.counters: dict[str, Any] = {
             "cycles": 0, "published": 0, "scores": 0, "skipped": 0,
             "ledger_entries": 0, "ledger_errors": 0,
@@ -269,6 +274,43 @@ class RealtimeInferenceService:
             self._baseline_day = cache_key
             self._baselines = {cache_key: bundle}
         return bundle
+
+    def _window_for(
+        self,
+        symbols: list[str],
+        day: date,
+        *,
+        meta: dict[str, Any],
+        cols: list[str],
+        seq_len: int,
+    ) -> dict[str, list[dict[str, Any] | None]]:
+        """时序模型窗口帧（前 seq_len-1 帧）；日级缓存 + 覆盖集扩容重读。
+
+        与基线同日级缓存纪律：因子窗口盘中不变，15s 周期不重读（``read_range`` 是
+        全市场读，每次几秒——逐周期重读会把节拍吃满）。热集扩容（新标的进来）时
+        带着覆盖并集重读一次，不把新标的静默打成空窗口。
+        """
+        if self._window_loader is not None:
+            bundle = self._window_loader(
+                symbols, day, meta=meta, cols=cols, seq_len=seq_len
+            )
+            return bundle.get("frames") or {}
+        model_dir = self._current_model_dir()
+        cache_key = f"{day.isoformat()}|{model_dir}|{seq_len}"
+        wanted = {_digits(s) for s in symbols}
+        with self._lock:
+            cached = self._windows.get(cache_key)
+        covered = set(cached.get("covered") or ()) if cached else set()
+        if cached is not None and wanted <= covered:
+            return cached["frames"]
+        covered |= wanted
+        bundle = load_window_for_model(
+            sorted(covered), day, meta=meta, cols=cols, step_len=seq_len
+        )
+        frames = bundle.get("frames") or {}
+        with self._lock:
+            self._windows = {cache_key: {"frames": frames, "covered": sorted(covered)}}
+        return frames
 
     def _append_ledger(self, entry: dict[str, Any]) -> None:
         """账本落 Redis（best-effort：失败计数不阻断发布——回放验收依赖它的完整性计数）。"""
@@ -390,11 +432,17 @@ class RealtimeInferenceService:
         with self._lock:
             self.counters["last_skip"] = None
         today = _now().date()
+        seq_len = sequence_len_of(meta)
         bundle = (self._baseline_loader or self._default_baseline)(hot, today)
         baseline = bundle.get("rows") or {}
         histories = bundle.get("history") or {}
+        window_frames = None
+        if seq_len > 1:
+            window_frames = self._window_for(
+                hot, today, meta=meta, cols=cols, seq_len=seq_len
+            )
 
-        session = self._ensure_session(model_dir, len(cols))
+        session = self._ensure_session(model_dir, len(cols), seq_len)
         input_name = session.get_inputs()[0].name
 
         if self._engine is None:
@@ -422,6 +470,9 @@ class RealtimeInferenceService:
             override=override,
             engine=self._engine,
             bootstrapped=self._bootstrapped,
+            window=window_frames,
+            seq_len=seq_len,
+            feat_norm=meta.get("feat_norm") if seq_len > 1 else None,
         )
         cycle_ts = time.time()
         run_id = f"rt-{model_id}-{today.strftime('%Y%m%d')}"
@@ -460,12 +511,14 @@ class RealtimeInferenceService:
                 "override_whitelist": sorted(override),
                 "degraded_level": int(degrade_level),
                 "live_coverage": round(coverage, 4),
+                "seq_len": seq_len,
+                "window_missing": int(result.window_missing),
                 "note": OVERRIDE_GUARD_NOTE,
             },
             "scores": items,
         }
 
-    def _ensure_session(self, model_dir: Path, n_features: int) -> Any:
+    def _ensure_session(self, model_dir: Path, n_features: int, seq_len: int = 1) -> Any:
         key = str(model_dir)
         with self._lock:
             cached = self._sessions.get(key)
@@ -481,9 +534,32 @@ class RealtimeInferenceService:
             if not report.get("ok"):
                 raise RuntimeError(f"ONNX 导出失败: {report.get('reason')}")
         session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-        got = int(session.get_inputs()[0].shape[1] or 0)
+        shape = list(session.get_inputs()[0].shape)
+
+        def _dim(idx: int) -> int:
+            # 动态维在 ONNX 里是符号名（str）或 None，一律按 0 = 不限处理
+            value = shape[idx] if -len(shape) <= idx < len(shape) else None
+            return int(value) if isinstance(value, int) else 0
+
+        got = _dim(-1)
         if got not in (0, n_features):
             raise RuntimeError(f"ONNX 输入维度 {got} ≠ feature_columns {n_features}")
+        if seq_len > 1:
+            if len(shape) != 3:
+                raise RuntimeError(
+                    f"时序模型需要 3D ONNX 输入 [batch, {seq_len}, {n_features}]，"
+                    f"实际 shape={shape}（model.onnx 是否按窗口导出？）"
+                )
+            got_seq = _dim(1)
+            if got_seq not in (0, seq_len):
+                raise RuntimeError(
+                    f"ONNX 窗口长度 {got_seq} ≠ metadata step_len {seq_len}"
+                )
+        elif len(shape) == 3:
+            raise RuntimeError(
+                f"平铺模型不接 3D ONNX 输入 shape={shape}"
+                "（metadata.is_sequence_model 与模型文件不一致）"
+            )
         with self._lock:
             self._sessions[key] = session
         return session

@@ -257,10 +257,17 @@ async def list_infer_models(limit: int = 60) -> list[dict[str, Any]]:
     """实时推理候选模型（CN，轻量扫描）：users/{tenant}/{user}/mdl_cn*/metadata.json。
 
     只报目录/显示名/ONNX 有无/更新时间——不做特征覆盖等重校验（保存时由 POST 校验兜底）。
+    自定义训练模型目录前缀是 ``mdl_cust_*``（用户「模型训练」产物），与内置 ``mdl_cn_*``
+    一样可作实时候选——旧 glob 只认 ``mdl_cn*``，面板选不到刚训好的 NativeTFT。
     """
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for pattern in ("users/*/*/mdl_cn*/metadata.json", "mdl_cn*/metadata.json"):
+    for pattern in (
+        "users/*/*/mdl_cn*/metadata.json",
+        "users/*/*/mdl_cust*/metadata.json",
+        "mdl_cn*/metadata.json",
+        "mdl_cust*/metadata.json",
+    ):
         for meta_path in MODELS_ROOT.glob(pattern):
             d = meta_path.parent
             key = str(d)

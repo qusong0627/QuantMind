@@ -81,6 +81,53 @@ class CycleResult:
     missing: int
     overridden: int
     cuts: list[float | None] = field(default_factory=list)
+    seq_len: int = 1  # 1 = 平铺单帧；>1 = 时序窗口帧数（矩阵为 [n, seq, d]）
+    window_missing: int = 0  # 时序模式下前帧有缺（整帧缺席）的标的数——仅时序模式可非零
+
+
+def sequence_len_of(meta: dict[str, Any]) -> int:
+    """模型窗口长度（唯一实现；在线服务与回放器共用）。
+
+    非时序模型 → 1。时序模型依次认 ``dl_params.dl_step_len`` → ``dl_params.step_len``
+    → ``input_spec.tensor_shape[1]``（批量模板只认 ``dl_step_len`` 且默认 20——训练实际
+    写的是 ``step_len``，本函数把它也认上）。全部来源缺失**显式报错**，不静默拿默认值：
+    窗口长度猜错 = 拿错形状的矩阵喂模型，分数全是噪声。
+    """
+    if not meta.get("is_sequence_model"):
+        return 1
+    dl = meta.get("dl_params") or {}
+    shape = (meta.get("input_spec") or {}).get("tensor_shape")
+    candidates: list[Any] = [dl.get("dl_step_len"), dl.get("step_len")]
+    if isinstance(shape, (list, tuple)) and len(shape) > 2:
+        candidates.append(shape[1])
+    for raw in candidates:
+        try:
+            if raw is not None and int(raw) > 0:
+                return int(raw)
+        except (TypeError, ValueError):
+            continue
+    raise ValueError(
+        "时序模型（is_sequence_model=true）metadata 缺 step_len："
+        "dl_params.dl_step_len / dl_params.step_len / input_spec.tensor_shape[1] 均不可用"
+    )
+
+
+def apply_feat_norm(x: np.ndarray, feat_norm: dict[str, Any] | None) -> np.ndarray:
+    """批量 DL 标准化口径的镜像（``templates/inference_parquet.py::_apply_feat_norm``）。
+
+    训练集 mean/std 标准化（std=0 视作 1）后 NaN/Inf 归零——批量时序推理就是这么把
+    缺值喂进模型的。与批量模板的唯一有意差异：无 feat_norm 时批量原样返回（NaN 留在
+    分数里由下游 skip），实时链归零——链上消费方（排名/落库/JSON 状态镜像）都吃不消
+    NaN 分数。镜像等价由 ``test_realtime_sequence_window.py`` 与模板函数逐值对拍钉住。
+    """
+    fn = feat_norm if isinstance(feat_norm, dict) else {}
+    if not (fn.get("mean") and fn.get("std")):
+        return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    mean = np.asarray(fn["mean"], dtype=np.float32)
+    std = np.asarray(fn["std"], dtype=np.float32)
+    std = np.where(std == 0, 1.0, std)
+    x = (x - mean) / std
+    return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def matrix_digest(x: np.ndarray, cols: list[str], model_version: str) -> str:
@@ -120,6 +167,8 @@ def ledger_entry(
         "ready": result.ready,
         "missing": result.missing,
         "overridden": result.overridden,
+        "seq_len": int(result.seq_len),
+        "window_missing": int(result.window_missing),
         "symbols": list(result.symbols),
         "cuts": result.cuts,
         "override": sorted(str(c) for c in override),
@@ -183,13 +232,29 @@ def compute_cycle(
     override: set[str],
     engine: Any,
     bootstrapped: set[str],
+    window: dict[str, list[dict[str, Any] | None]] | None = None,
+    seq_len: int = 1,
+    feat_norm: dict[str, Any] | None = None,
 ) -> CycleResult:
     """单周期装配：引导(每标的一次) → 喂当前快照一帧 → live 覆盖 → 矩阵 → 推理 → 排名。
 
     在线服务与离线回放共用本函数——任何装配逻辑改动两侧同时生效（结构纪律）。
+
+    时序模型（``seq_len > 1``，如 NativeTFT；``metadata`` 经 :func:`sequence_len_of` 裁定）：
+    矩阵升为三维 ``[n, seq_len, d]``——前 seq_len-1 帧来自 ``window``（:func:`load_window_for_model`
+    按因子日对齐，整帧缺席为 None），最后一帧 = 基线行 + live 覆盖（覆盖只作用于最后一帧：
+    历史帧是既成事实）。装配口径**镜像批量 DL 路径**（``templates/inference_parquet.py``）：
+    **不填 fill_values**，统一 :func:`apply_feat_norm`（训练集 mean/std）后 NaN/Inf 归零。
+    批量对整窗不足的标的是弃打分（NaN），实时不弃——热集池固定、分数行必须对齐；缺帧只
+    影响该标的自身分数并记入 ``window_missing``（如实计数，不装没发生）。
     """
-    x = np.empty((len(hot), len(cols)), dtype=np.float32)
-    ready = missing = overridden = 0
+    seq = max(int(seq_len or 1), 1)
+    n_cols = len(cols)
+    if seq > 1:
+        x = np.empty((len(hot), seq, n_cols), dtype=np.float32)
+    else:
+        x = np.empty((len(hot), n_cols), dtype=np.float32)
+    ready = missing = overridden = window_missing = 0
     symbols_norm: list[str] = []
     cuts: list[float | None] = []
     for i, sym in enumerate(hot):
@@ -214,19 +279,45 @@ def compute_cycle(
                 live = engine.compute(sym)
             except Exception:  # noqa: BLE001 - 单标的失败不拖垮周期
                 live = None
-        for j, col in enumerate(cols):
+        vals: list[float | None] = []
+        for col in cols:
             val = row.get(col)
             if live is not None and col in override:
                 lv = live.get(col)
                 if lv is not None and np.isfinite(lv):
                     val = lv
                     overridden += 1
-            if is_missing(val):
-                val = fill.get(col, 0.0)
-                missing += 1
-            x[i, j] = float(val)
+            vals.append(float(val) if not is_missing(val) else None)
+        if seq > 1:
+            frames = list((window or {}).get(norm) or [])
+            gap = False
+            for j in range(seq - 1):
+                frame = frames[j] if j < len(frames) else None
+                if frame is None:
+                    gap = True
+                    frame = {}
+                for k, col in enumerate(cols):
+                    v = frame.get(col)
+                    x[i, j, k] = float(v) if not is_missing(v) else np.nan
+            if gap:
+                window_missing += 1
+            for k, val in enumerate(vals):
+                if val is None:
+                    missing += 1
+                    x[i, seq - 1, k] = np.nan
+                else:
+                    x[i, seq - 1, k] = val
+        else:
+            for k, col in enumerate(cols):
+                val = vals[k]
+                if val is None:
+                    val = fill.get(col, 0.0)
+                    missing += 1
+                x[i, k] = float(val)
         if row:
             ready += 1
+    if seq > 1:
+        x = apply_feat_norm(x, feat_norm)
     out = session.run(None, {input_name: x})[0]
     scores = np.asarray(out, dtype=float).reshape(-1)
     order = np.argsort(-scores)
@@ -235,6 +326,7 @@ def compute_cycle(
     return CycleResult(
         x=x, symbols=symbols_norm, cols=list(cols), scores=scores, ranks=ranks,
         ready=ready, missing=missing, overridden=overridden, cuts=cuts,
+        seq_len=seq, window_missing=window_missing,
     )
 
 
@@ -454,6 +546,109 @@ def load_baseline_for_model(
         )
     return load_baseline_bundle(
         symbols, day, parquet_path=parquet_path, cols=cols, history_len=history_len
+    )
+
+
+def load_window_quantdb(
+    symbols: list[str],
+    day: date,
+    *,
+    meta: dict[str, Any],
+    cols: list[str],
+    step_len: int,
+    reader: Any | None = None,
+) -> dict[str, Any]:
+    """时序模型窗口（批量 ``load_window_data`` 的同源镜像）：D 之前 step_len-1 个因子日 × 请求标的。
+
+    D = 最近可用因子日（≤ day-1，与 :func:`load_baseline_quantdb` 同一锚点）——服务把
+    基线的「当前帧」当窗口最后一帧，本函数只取**前 step_len-1 帧**。帧序 = 因子日序
+    （旧→新），与批量 ``tail(step_len)`` 的窗口切片对齐；某标的某日缺行 → 该帧为 None
+    （整帧缺席，交 :func:`compute_cycle` 记 ``window_missing``）。因子日不足 step_len-1 天
+    （新库/次新上市）时**前部补 None**，绝不把缺失帧挤到新端——错位一帧整窗就移了位。
+
+    取数源/列过滤/副库映射与基线完全同规（``split_features_by_availability`` + 库:列映射）。
+    返回 ``{"dates": [因子日或 None × (step_len-1)], "frames": {纯数字码: [帧或 None]}}``。
+    """
+    from backend.services.engine.data_platform.quantdb_factor_reader import (
+        split_features_by_availability,
+    )
+
+    frames_n = max(int(step_len) - 1, 0)
+    if frames_n == 0:
+        return {"dates": [], "frames": {}}
+    if reader is None:
+        reader = _quantdb_reader_for_meta(meta)
+    source = str(meta.get("factor_source") or "l1_l2_factors")
+    dates = reader.available_dates(source, end=(day - timedelta(days=1)).isoformat())
+    if not dates:
+        return {"dates": [None] * frames_n, "frames": {}}
+    prior = [str(d) for d in dates[:-1][-frames_n:]]
+    pad = frames_n - len(prior)
+    dates_out: list[str | None] = [None] * pad + prior
+
+    mapping = {
+        str(k): str(v) for k, v in (meta.get("factor_field_sources") or {}).items()
+    }
+    requested, _missing = split_features_by_availability(
+        reader,
+        dict.fromkeys(cols),
+        mapping,
+        anchor=source,
+    )
+    wanted = {digits(s) for s in symbols}
+    by_date: dict[str, dict[str, dict[str, Any]]] = {d: {} for d in prior}
+    if requested and prior:
+        try:
+            df = reader.read_range(
+                source,
+                features=requested,
+                feature_sources=mapping or None,
+                start=prior[0],
+                end=prior[-1],
+                include_ohlcv=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - 与基线同纪律：直读失败显式抛出记 last_error
+            raise RuntimeError(f"QuantDB 时序窗口读取失败: {exc}") from exc
+        df = df.assign(
+            _norm=df["symbol"].map(digits),
+            _date=df["trade_date"].astype(str).str[:10],
+        )
+        df = df[df["_norm"].isin(wanted)]
+        for (norm, dt), g in df.groupby(["_norm", "_date"]):
+            slot = by_date.get(str(dt))
+            if slot is None:
+                continue
+            last = g.iloc[-1]
+            slot[str(norm)] = {c: last.get(c) for c in cols}
+    return {
+        "dates": dates_out,
+        "frames": {
+            s: [None] * pad + [by_date[d].get(s) for d in prior] for s in wanted
+        },
+    }
+
+
+def load_window_for_model(
+    symbols: list[str],
+    day: date,
+    *,
+    meta: dict[str, Any],
+    cols: list[str],
+    step_len: int,
+    reader: Any | None = None,
+) -> dict[str, Any]:
+    """窗口加载唯一分派（在线服务/回放验收共用）：时序窗口目前只支持 quantdb 直读源。
+
+    遗留 ``model_features_{year}.parquet`` 是「单文件=最新日」快照，没有按日整表语义，
+    拼不出逐日对齐的窗口 → **显式报错**，绝不静默拿错帧喂模型。
+    """
+    if str(meta.get("data_source") or "").strip() == QUANTDB_DATA_SOURCE:
+        return load_window_quantdb(
+            symbols, day, meta=meta, cols=cols, step_len=step_len, reader=reader
+        )
+    raise RuntimeError(
+        f"时序模型（step_len={step_len}）需要 quantdb_factors 基线，"
+        f"当前 data_source={meta.get('data_source')!r} 不支持窗口拼装"
     )
 
 
