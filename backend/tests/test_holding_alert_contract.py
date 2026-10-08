@@ -18,6 +18,7 @@ from backend.shared.holding_alert_contract import (
     KIND_RISK_NEWS,
     KIND_SCORE_BELOW_THRESHOLD,
     KIND_SCORE_CROSS_ZERO,
+    KIND_SCORE_DROP,
     MAX_BASELINE_GAP_DAYS,
     SEVERITY_CRITICAL,
     SEVERITY_INFO,
@@ -84,6 +85,83 @@ class TestEvaluateScoreTransition:
     def test_first_seen_negative_is_not_an_alert(self):
         # 首次见到就是负分（哨兵刚开/新买入）——那叫「不该买」，不叫「跌了」
         assert evaluate_score_transition(None, -0.5) is None
+
+
+class TestScoreDropRule:
+    """分数骤降（``score_drop``）：单步大跌 或 越过当日基准回落线，二者都只报一次。
+
+    当日基准（anchor）= 当天第一眼看到的分数，逐日重置。跨日重锚**只**让基准
+    交叉规则本轮失效——``prev`` 类规则（下穿 0 / 单步骤降）照跑，否则哨兵停机
+    一夜后第一个早晨会把隔夜下穿 0 静默吞掉。
+    """
+
+    def test_single_step_drop_fires_warning(self):
+        assert evaluate_score_transition(0.5, 0.1, drop_threshold=0.35) == (
+            KIND_SCORE_DROP,
+            SEVERITY_WARNING,
+        )
+
+    def test_exactly_at_threshold_fires(self):
+        # 与「停在 0 算下穿」同款边界口径：恰好等于阈值算到达
+        assert evaluate_score_transition(0.5, 0.15, drop_threshold=0.35) == (
+            KIND_SCORE_DROP,
+            SEVERITY_WARNING,
+        )
+
+    def test_smaller_drop_is_silent(self):
+        assert evaluate_score_transition(0.5, 0.2, drop_threshold=0.35) is None
+
+    def test_zero_threshold_disables_drop_rule(self):
+        # 不跨 0 的大跌：阈值 0（关闭）时什么都不报；显式 0.0 同款
+        assert evaluate_score_transition(0.5, 0.12) is None
+        assert evaluate_score_transition(0.5, 0.12, drop_threshold=0.0) is None
+        # 跨 0 的下跌与骤降阈值无关：下穿 0 始终报（critical）
+        assert evaluate_score_transition(0.5, -0.4, drop_threshold=0.0) == (
+            KIND_SCORE_CROSS_ZERO,
+            SEVERITY_CRITICAL,
+        )
+
+    def test_anchor_crossing_fires_exactly_once(self):
+        # 当日基准 +0.5：前一扫 +0.2 还没越过回落线（0.30 < 0.35），本扫 +0.1 越过（0.40 ≥ 0.35）
+        assert evaluate_score_transition(
+            0.2, 0.1, drop_threshold=0.35, anchor=0.5
+        ) == (KIND_SCORE_DROP, SEVERITY_WARNING)
+        # 越线后继续阴跌（每步都小于阈值）不重复报——同一段回落只有一次事件
+        assert (
+            evaluate_score_transition(0.1, 0.05, drop_threshold=0.35, anchor=0.5)
+            is None
+        )
+
+    def test_anchor_crossing_needs_falling_motion(self):
+        # 从深坑里回升（离基准仍远）不是「骤降」：prev 到 now 必须在下行
+        assert (
+            evaluate_score_transition(-0.3, -0.25, drop_threshold=0.35, anchor=0.5)
+            is None
+        )
+
+    def test_single_step_covers_overnight_batch_swap(self):
+        # 隔夜重打分跳水（asOf 换日、分数从 0.6 掉到 0.1）：基准同日锚在旧值上时
+        # 单步条件就够；这里显式固定「不依赖 anchor 也报」
+        assert evaluate_score_transition(0.6, 0.1, drop_threshold=0.35) == (
+            KIND_SCORE_DROP,
+            SEVERITY_WARNING,
+        )
+
+    def test_cross_zero_beats_drop(self):
+        assert evaluate_score_transition(0.12, -0.40, drop_threshold=0.35) == (
+            KIND_SCORE_CROSS_ZERO,
+            SEVERITY_CRITICAL,
+        )
+
+    def test_drop_beats_below_threshold(self):
+        # 同时成立时报信息更足的那条（这次迁移跌了多少），不重复两条
+        assert evaluate_score_transition(
+            0.5, 0.1, threshold=0.2, drop_threshold=0.35
+        ) == (KIND_SCORE_DROP, SEVERITY_WARNING)
+
+    def test_missing_side_kills_drop(self):
+        assert evaluate_score_transition(None, -0.5, drop_threshold=0.35) is None
+        assert evaluate_score_transition(0.5, None, drop_threshold=0.35) is None
 
 
 class TestBaselineComparable:
@@ -223,6 +301,31 @@ class TestConfig:
         assert parse_alert_config({"score_threshold": -3})["score_threshold"] == 0.0
         assert parse_alert_config({"score_threshold": 99})["score_threshold"] == 1.0
 
+    def test_drop_threshold_defaults_and_clamps(self):
+        # 默认 0.35 ≈ 实测单日 |Δ| 的 p90（0.33）：报得出来但不刷屏
+        assert DEFAULT_CONFIG["score_drop_threshold"] == 0.35
+        assert parse_alert_config({})["score_drop_threshold"] == 0.35
+        assert (
+            parse_alert_config({"score_drop_threshold": -1})["score_drop_threshold"]
+            == 0.0
+        )
+        assert (
+            parse_alert_config({"score_drop_threshold": 99})["score_drop_threshold"]
+            == 2.0
+        )
+        assert (
+            parse_alert_config({"score_drop_threshold": "abc"})[
+                "score_drop_threshold"
+            ]
+            == 0.35
+        )
+        assert (
+            parse_alert_config({"score_drop_threshold": "0.5"})[
+                "score_drop_threshold"
+            ]
+            == 0.5
+        )
+
     def test_string_booleans_are_coerced(self):
         cfg = parse_alert_config({"notify_sound": "off", "notify_desktop": "1"})
 
@@ -248,12 +351,19 @@ class TestSeverityAndText:
         assert "招商银行" in build_alert_title(
             KIND_SCORE_CROSS_ZERO, "招商银行", "SH600036"
         )
+        assert "骤降" in build_alert_title(KIND_SCORE_DROP, "招商银行", "SH600036")
         # 日频分要如实标注，别让用户以为这是盘中的分数
         assert "日频" in build_alert_title(
             KIND_SCORE_CROSS_ZERO, "招商银行", "SH600036", freq="daily"
         )
+        assert "日频" in build_alert_title(
+            KIND_SCORE_DROP, "招商银行", "SH600036", freq="daily"
+        )
         assert "日频" not in build_alert_title(
             KIND_SCORE_CROSS_ZERO, "招商银行", "SH600036", freq="realtime"
+        )
+        assert "日频" not in build_alert_title(
+            KIND_SCORE_DROP, "招商银行", "SH600036", freq="realtime"
         )
 
     def test_content_carries_both_numbers(self):
@@ -265,6 +375,16 @@ class TestSeverityAndText:
         )
 
         assert "+0.123" in text and "-0.045" in text
+
+    def test_content_for_drop_carries_both_numbers(self):
+        text = build_alert_content(
+            kind=KIND_SCORE_DROP,
+            symbol="SH600036",
+            score_prev=0.5,
+            score_now=0.1,
+        )
+
+        assert "+0.500" in text and "+0.100" in text
 
     def test_content_for_news_alert_keeps_the_reason(self):
         text = build_alert_content(
@@ -283,6 +403,7 @@ class TestSeverityAndText:
         for kind in (
             KIND_SCORE_CROSS_ZERO,
             KIND_SCORE_BELOW_THRESHOLD,
+            KIND_SCORE_DROP,
             KIND_RISK_NEWS,
             KIND_RISK_ANOMALY,
             KIND_RISK_LIST,

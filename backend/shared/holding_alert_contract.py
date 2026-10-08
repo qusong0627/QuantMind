@@ -8,6 +8,12 @@
 
 - **分数下穿 0**（``prev > 0 and now <= 0``）→ ``critical``。只陈述分数在评分轴上
   由正侧移到非正侧这一**事实**，不下方向结论（怎么处理由用户自己判断）。
+- **分数骤降**（``score_drop``）→ ``warning``，两种触发取其一：
+  单步骤降（``prev - now >= drop_threshold``，覆盖隔夜重打分换值）或
+  越过当日基准回落线（``anchor - prev < drop_threshold <= anchor - now``，覆盖
+  多步阴跌）。基准 = **当天第一眼**看到的分数，逐日重置；跨日重锚只让基准交叉
+  规则本轮失效，``prev`` 类规则照跑（停机一夜后的隔夜下穿 0 必须照报）。
+  ``drop_threshold`` 为 0 表示不启用该规则。
 - **跌破自定阈值**（``threshold > 0 and prev >= threshold > now``）→ ``warning``。
   阈值 0 表示不启用该规则（与「下穿 0」重合，不重复报）。
 - **没有基线不报警**（``prev is None``）——首次见到一只票时它是负分不是「跌了」，
@@ -35,6 +41,7 @@ TABLE = "qm_holding_alerts"
 #: 预警类型
 KIND_SCORE_CROSS_ZERO = "score_cross_zero"
 KIND_SCORE_BELOW_THRESHOLD = "score_below_threshold"
+KIND_SCORE_DROP = "score_drop"
 KIND_RISK_NEWS = "risk_news"
 KIND_RISK_ANOMALY = "risk_anomaly"
 KIND_RISK_LIST = "risk_list"
@@ -73,6 +80,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
     # 跌破该值告警；0 = 关闭该规则（下穿 0 仍然报）
     "score_threshold": 0.0,
+    # 分数较当日基准跌落该幅度告警；0 = 关闭该规则。
+    # 0.35 ≈ 实测单日 |Δ| 的 p90（0.33）：报得出来但不刷屏
+    "score_drop_threshold": 0.35,
     # 监控范围：默认「持仓 + 手工自选」，候选不监控（几百只票全监控等于没有监控）
     "watch_sim": True,
     "watch_real": True,
@@ -211,6 +221,14 @@ def parse_alert_config(raw: Mapping[str, Any] | str | None) -> dict[str, Any]:
             # 阈值语义是「跌到 0 以下多深算事」，负值没有意义；上限 1 覆盖满仓分
             out[key] = min(max(value, 0.0), 1.0)
             continue
+        if key == "score_drop_threshold":
+            try:
+                value = float(src.get(key, default))
+            except (TypeError, ValueError):
+                value = float(default)
+            # 回落幅度语义（正数）；上限 2 覆盖实测分数全幅（±0.8）
+            out[key] = min(max(value, 0.0), 2.0)
+            continue
         if key == "min_severity":
             text = str(src.get(key, default) or "").strip().lower()
             out[key] = text if text in SEVERITY_ORDER else str(default)
@@ -260,12 +278,20 @@ def baseline_is_comparable(
 
 
 def evaluate_score_transition(
-    prev: float | None, now: float | None, threshold: float = 0.0
+    prev: float | None,
+    now: float | None,
+    threshold: float = 0.0,
+    *,
+    drop_threshold: float = 0.0,
+    anchor: float | None = None,
 ) -> tuple[str, str] | None:
     """分数迁移 → ``(kind, severity)``；不该报返回 ``None``。
 
-    规则见模块 docstring。任一侧缺分返回 None——「没有分数」不是「分数变差了」，
-    拿它报警等于在数据缺口上编故事。
+    规则见模块 docstring；同一迁移同时命中多条时按严重度取一条：
+    下穿 0（critical）> 骤降 > 跌破阈值。``anchor`` = 当日基准（当天第一眼看到
+    的分数），只参与骤降的「越过回落线」判定；为 None 时骤降只看单步跌幅。
+    任一侧缺分返回 None——「没有分数」不是「分数变差了」，拿它报警等于在数据
+    缺口上编故事。
     """
     if prev is None or now is None:
         return None
@@ -273,6 +299,20 @@ def evaluate_score_transition(
     now_f = float(now)
     if prev_f > 0 and now_f <= 0:
         return KIND_SCORE_CROSS_ZERO, SEVERITY_CRITICAL
+    drop_f = float(drop_threshold or 0.0)
+    if drop_f > 0 and now_f < prev_f:
+        if prev_f - now_f >= drop_f:
+            return KIND_SCORE_DROP, SEVERITY_WARNING
+        if anchor is not None:
+            try:
+                anchor_f = float(anchor)
+            except (TypeError, ValueError):
+                anchor_f = None
+            if (
+                anchor_f is not None
+                and anchor_f - now_f >= drop_f > anchor_f - prev_f
+            ):
+                return KIND_SCORE_DROP, SEVERITY_WARNING
     threshold_f = float(threshold or 0.0)
     if threshold_f > 0 and prev_f >= threshold_f > now_f:
         return KIND_SCORE_BELOW_THRESHOLD, SEVERITY_WARNING
@@ -324,6 +364,8 @@ def build_alert_title(
         return f"{name} 分数降至 0 及以下{tag}"
     if kind == KIND_SCORE_BELOW_THRESHOLD:
         return f"{name} 分数跌破阈值{tag}"
+    if kind == KIND_SCORE_DROP:
+        return f"{name} 分数骤降{tag}"
     if kind == KIND_RISK_NEWS:
         return f"{name} 出现重大利空"
     if kind == KIND_RISK_ANOMALY:
@@ -352,7 +394,7 @@ def build_alert_content(
     面板里由用户自己发起，提醒本身不下指令。
     """
     parts: list[str] = []
-    if kind in {KIND_SCORE_CROSS_ZERO, KIND_SCORE_BELOW_THRESHOLD}:
+    if kind in {KIND_SCORE_CROSS_ZERO, KIND_SCORE_BELOW_THRESHOLD, KIND_SCORE_DROP}:
         parts.append(
             f"{symbol} 信号分 {format_score(score_prev)} → {format_score(score_now)}"
         )

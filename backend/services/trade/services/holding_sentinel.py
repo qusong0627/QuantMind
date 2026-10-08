@@ -10,7 +10,8 @@
 三类信号：
 
 1. **分数下滑**（T1）：同一张分数表（`backend.shared.signal_scores`，与自选池
-   统一视图同一个装载函数）——下穿 0 / 跌破自定阈值。基线存 Redis，逐轮对比。
+   统一视图同一个装载函数）——下穿 0 / 跌破自定阈值 / 骤降（单步大跌或越过
+   当日基准回落线）。基线存 Redis，逐轮对比。
 2. **盘中重大利空 / 异动**（T2）：`sentinel_alerts` 增量里**标的级、方向向下**的
    行（新闻利空 / 大幅下行），标的落在监控集内才提醒。
 3. **名单新增命中**（T3）：排除名单快照换版时，**新进**阻断集的持仓才提醒
@@ -27,6 +28,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backend.shared.holding_alert_contract import (
@@ -67,6 +69,9 @@ SCHEDULER_NAME = "holding_sentinel"
 
 #: 市场级告警只吃这个窗口内的行（哨兵停摆后回放几天前的新闻没有意义）
 _INTEL_LOOKBACK_SECONDS = 48 * 3600
+
+#: 「当日基准」的「日」= 上海墙钟日（A 股口径；容器时区不可依赖，显式 +8）
+_CST = timezone(timedelta(hours=8))
 
 #: 一条市场告警最多扇出多少只标的（全市场级新闻的 targets 可能很长）
 _MAX_TARGETS_PER_ALERT = 50
@@ -481,29 +486,57 @@ class HoldingSentinel:
             stored = {}
 
         current_as_of = str(meta.get("signal_date") or "")
+        scan_day = datetime.fromtimestamp(float(now_ts), _CST).date().isoformat()
         alerts: list[dict[str, Any]] = []
         new_baseline: dict[str, str] = {}
         for sym, entry in score_map.items():
             if sym not in monitor:
                 continue
             now_score = entry.get("value")
+            raw = stored.get(sym)
+            prev: Mapping[str, Any] | None = None
+            if raw is not None:
+                try:
+                    parsed = json.loads(raw)
+                except (TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, Mapping):
+                    prev = parsed
+
+            # 当日基准（骤降判定用）：当天第一眼看到的分数，跨日或老格式记录重设。
+            # 重设只让「越过回落线」本轮失效——prev 类规则（下穿 0 / 单步骤降）
+            # 照跑，否则停机一夜后的第一个早晨会静默吞掉隔夜下穿 0。
+            anchor = prev.get("a") if prev else None
+            try:
+                anchor_f = float(anchor) if anchor is not None else None
+            except (TypeError, ValueError):
+                anchor_f = None
+            anchor_day = str((prev.get("ad") if prev else "") or "")
+            if anchor_f is None or anchor_day != scan_day:
+                anchor_f = None
+                next_anchor, next_anchor_day = now_score, scan_day
+            else:
+                next_anchor, next_anchor_day = anchor_f, anchor_day
+
             new_baseline[sym] = json.dumps(
-                {"v": now_score, "d": entry.get("asOf") or current_as_of},
+                {
+                    "v": now_score,
+                    "d": entry.get("asOf") or current_as_of,
+                    "a": next_anchor,
+                    "ad": next_anchor_day,
+                },
                 ensure_ascii=False,
             )
-            raw = stored.get(sym)
-            if raw is None:
+            if prev is None:
                 continue  # 首次见到：只播种，不报警
-            try:
-                prev = json.loads(raw)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(prev, Mapping):
-                continue
             if not baseline_is_comparable(prev.get("d"), entry.get("asOf")):
                 continue  # 基线过期（哨兵停摆/换期）：重新播种，不把陈年下跌当今天
             verdict = evaluate_score_transition(
-                prev.get("v"), now_score, cfg.get("score_threshold", 0.0)
+                prev.get("v"),
+                now_score,
+                cfg.get("score_threshold", 0.0),
+                drop_threshold=cfg.get("score_drop_threshold", 0.0),
+                anchor=anchor_f,
             )
             if verdict is None:
                 continue
@@ -532,6 +565,7 @@ class HoldingSentinel:
                         "side": entry.get("side"),
                         "score_as_of": entry.get("asOf"),
                         "baseline_as_of": prev.get("d"),
+                        "day_anchor": anchor_f,
                         "sources": watch.get("sources") or [],
                     },
                     score_prev=prev.get("v"),

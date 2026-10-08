@@ -29,6 +29,7 @@ from backend.shared.holding_alert_contract import (
     KIND_RISK_ANOMALY,
     KIND_RISK_NEWS,
     KIND_SCORE_CROSS_ZERO,
+    KIND_SCORE_DROP,
     SEVERITY_CRITICAL,
     SEVERITY_WARNING,
 )
@@ -271,7 +272,11 @@ class TestScoreScan:
 
         assert alerts == []
         stored = redis.hashes[f"{BASELINE_KEY_PREFIX}default:10000001"]
-        assert json.loads(stored["SH600036"])["v"] == -0.4
+        record = json.loads(stored["SH600036"])
+        assert record["v"] == -0.4
+        # 首见即设当日基准（anchor 只在同日有效，跨日首扫要重设）
+        assert record["a"] == -0.4
+        assert record["ad"] == "2001-09-09"  # now_ts=1e9 的上海墙钟日
 
     @pytest.mark.asyncio
     async def test_crossing_zero_alerts_once(self):
@@ -406,3 +411,151 @@ class TestScoreScan:
 
         stored = redis.hashes[f"{BASELINE_KEY_PREFIX}default:10000001"]
         assert set(stored) == {"SH600036"}
+
+    @pytest.mark.asyncio
+    async def test_drop_rule_alerts_on_single_step_collapse(self):
+        """隔夜重打分跳水（一次迁移内跌超阈值）→ score_drop 警告。"""
+        redis = FakeRedis()
+        sentinel = self._sentinel([self._scores(0.5), self._scores(0.1)], redis)
+        user = {"tenant_id": "default", "user_id": "10000001"}
+        cfg = {"score_drop_threshold": 0.35}
+
+        await sentinel._scan_scores(redis, user, self._watch(), cfg, 1e9)
+        alerts = await sentinel._scan_scores(redis, user, self._watch(), cfg, 1e9 + 60)
+
+        assert len(alerts) == 1
+        assert alerts[0]["kind"] == KIND_SCORE_DROP
+        assert alerts[0]["severity"] == SEVERITY_WARNING
+        assert alerts[0]["score_prev"] == 0.5
+        assert alerts[0]["score_now"] == 0.1
+        record = json.loads(
+            redis.hashes[f"{BASELINE_KEY_PREFIX}default:10000001"]["SH600036"]
+        )
+        assert record["a"] == 0.5  # 当日基准保持首见值，不随分移动
+        assert record["ad"] == "2001-09-09"
+
+    @pytest.mark.asyncio
+    async def test_small_drop_is_below_threshold_and_silent(self):
+        redis = FakeRedis()
+        sentinel = self._sentinel([self._scores(0.5), self._scores(0.2)], redis)
+        user = {"tenant_id": "default", "user_id": "10000001"}
+
+        await sentinel._scan_scores(redis, user, self._watch(), {}, 1e9)
+        alerts = await sentinel._scan_scores(
+            redis, user, self._watch(), {"score_drop_threshold": 0.35}, 1e9 + 60
+        )
+
+        assert alerts == []
+
+    @pytest.mark.asyncio
+    async def test_gradual_slide_fires_when_day_anchor_crossed(self):
+        """阴跌（每步小于阈值）累计越过当日基准回落线 → 报一次。"""
+        redis = FakeRedis()
+        sentinel = self._sentinel(
+            [self._scores(0.5), self._scores(0.35), self._scores(0.2), self._scores(0.1)],
+            redis,
+        )
+        user = {"tenant_id": "default", "user_id": "10000001"}
+        cfg = {"score_drop_threshold": 0.35}
+
+        await sentinel._scan_scores(redis, user, self._watch(), cfg, 1e9)
+        a1 = await sentinel._scan_scores(redis, user, self._watch(), cfg, 1e9 + 60)
+        a2 = await sentinel._scan_scores(redis, user, self._watch(), cfg, 1e9 + 120)
+        a3 = await sentinel._scan_scores(redis, user, self._watch(), cfg, 1e9 + 180)
+
+        assert a1 == [] and a2 == []
+        assert len(a3) == 1
+        assert a3[0]["kind"] == KIND_SCORE_DROP
+        # 越线后继续阴跌不重复报（同一段回落只有一个事件）
+        a4 = await sentinel._scan_scores(
+            redis, user, self._watch(), cfg, 1e9 + 240
+        )
+        assert a4 == []
+
+    @pytest.mark.asyncio
+    async def test_new_day_reanchors_before_measuring(self):
+        """跨日首扫重设当日基准：昨天的跌幅不按「今日回落」重报。"""
+        redis = FakeRedis()
+        sentinel = self._sentinel(
+            [self._scores(0.5), self._scores(0.3), self._scores(0.1)], redis
+        )
+        user = {"tenant_id": "default", "user_id": "10000001"}
+        cfg = {"score_drop_threshold": 0.35}
+
+        await sentinel._scan_scores(redis, user, self._watch(), cfg, 1e9)  # 当日锚 0.5
+        await sentinel._scan_scores(redis, user, self._watch(), cfg, 1e9 + 86400)
+        alerts = await sentinel._scan_scores(
+            redis, user, self._watch(), cfg, 1e9 + 86460
+        )
+
+        # 新一天从 0.3 起锚：0.3→0.1 单步 0.2、距锚 0.2，都不到 0.35
+        assert alerts == []
+        record = json.loads(
+            redis.hashes[f"{BASELINE_KEY_PREFIX}default:10000001"]["SH600036"]
+        )
+        assert record["a"] == 0.3
+        assert record["ad"] == "2001-09-10"
+
+    @pytest.mark.asyncio
+    async def test_new_day_reanchor_does_not_swallow_cross_zero(self):
+        """重锚只让基准交叉规则本轮失效——prev 类规则照跑。
+
+        哨兵停机一夜后第一个早晨若把隔夜下穿 0 静默吞掉，用户就少了一次
+        最该响的提醒。
+        """
+        redis = FakeRedis()
+        redis.hashes[f"{BASELINE_KEY_PREFIX}default:10000001"] = {
+            "SH600036": json.dumps(
+                {"v": 0.4, "d": "2026-09-19", "a": 0.4, "ad": "2001-09-08"}
+            )
+        }
+        sentinel = self._sentinel([self._scores(-0.1)], redis)
+
+        alerts = await sentinel._scan_scores(
+            redis,
+            {"tenant_id": "default", "user_id": "10000001"},
+            self._watch(),
+            {"score_drop_threshold": 0.35},
+            1e9,
+        )
+
+        assert len(alerts) == 1
+        assert alerts[0]["kind"] == KIND_SCORE_CROSS_ZERO
+        assert alerts[0]["severity"] == SEVERITY_CRITICAL
+
+    @pytest.mark.asyncio
+    async def test_legacy_baseline_without_anchor_is_upgraded_silently(self):
+        """老格式记录（无 a/ad）升级：补锚、不凭缺失字段报「回落」。"""
+        redis = FakeRedis()
+        redis.hashes[f"{BASELINE_KEY_PREFIX}default:10000001"] = {
+            "SH600036": json.dumps({"v": 0.5, "d": "2026-09-20"})
+        }
+        sentinel = self._sentinel([self._scores(0.3)], redis)
+
+        alerts = await sentinel._scan_scores(
+            redis,
+            {"tenant_id": "default", "user_id": "10000001"},
+            self._watch(),
+            {"score_drop_threshold": 0.35},
+            1e9,
+        )
+
+        assert alerts == []  # 0.5→0.3 单步 0.2 < 0.35；锚缺失不臆造交叉事件
+        record = json.loads(
+            redis.hashes[f"{BASELINE_KEY_PREFIX}default:10000001"]["SH600036"]
+        )
+        assert record["a"] == 0.3
+        assert record["ad"] == "2001-09-09"
+
+    @pytest.mark.asyncio
+    async def test_drop_rule_zero_disables(self):
+        redis = FakeRedis()
+        sentinel = self._sentinel([self._scores(0.5), self._scores(0.12)], redis)
+        user = {"tenant_id": "default", "user_id": "10000001"}
+
+        await sentinel._scan_scores(redis, user, self._watch(), {}, 1e9)
+        alerts = await sentinel._scan_scores(
+            redis, user, self._watch(), {"score_drop_threshold": 0.0}, 1e9 + 60
+        )
+
+        assert alerts == []
