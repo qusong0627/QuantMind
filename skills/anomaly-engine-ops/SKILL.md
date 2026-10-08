@@ -101,7 +101,7 @@ for k in sorted(c.scan_iter(match='qm:anomaly:last_fired:*', count=500)):
 | `detections` / `deduped` | 本轮检出 / 被 30min 冷却压掉 |
 | `skipped_market` | 取到的行情条目里**缺 `price`**（不可评测）而被跳过的条数——正常，非故障 |
 | `skipped_market_closed` | **时段外闸拦下市场族取数**（见 §4.2）。盘外每分钟 +1（cadence 60s），15:00→次日 09:30 累计 ~1100 属正常；内存计数，重启归零 |
-| `skipped_market_holiday` | **工作日假期被交易日历拦下**（2026-10-08 新增，见 §4.2）。假期时段内每分钟 +1；**工作日交易日读到它在涨 = 日历答错了或引擎认为今天不是交易日**，先查日志 `[anomaly] 交易日历答不了` |
+| `skipped_market_holiday` | **工作日假期被交易日历拦下**（2026-10-08 新增，见 §4.2）。假期时段内每分钟 +1；**工作日交易日读到它在涨 = 日历答错了或引擎认为今天不是交易日**——先跑 §4.2 自查命令看日历结论；日志里出现 `[anomaly] 交易日历答不了` 才是「答不了→降级」那一支，日历答 False 时只有一条 `[anomaly] 交易日历判定 <日期> 非交易日` 的 INFO |
 | `last_market_fetch_at` | **取数心跳**（2026-10-08 新增）：最近一次**时段内取数**的时刻（墙钟）。盘中它应在一分钟内前进；不前进 = 没在取数（闸误判/停摆）。盘外停在收盘前后属正常 |
 | `last_market_quote_at` | 最近一次**取到有效报价**的时刻。盘中它停在昨天而 `last_market_fetch_at` 在前进 = **取了但零报价**（热集空 / 行情源挂）——`errors` 这一格不会涨，别对着 `cycles` 猜 |
 | `errors` + `last_error` | 会把 `deny no_targets`（模型/非持仓标的无持有人，**正常**）也算进去 |
@@ -186,11 +186,15 @@ docker exec -w /app quantmind python -m pytest \
   （平台时段表不止一份历史，改共享表忘改引擎 → 这条红）；
 - **节假日层**（2026-10-08 评审补）：工作日假期在闸门眼里原先与交易日无异——**停牌/冻结数据照报，
   critical 还会按真实标的写锁**（「时段内实测 0 条」不足以下结论，假期只有 6 天样本）。现在工作日
-  时段内再问一层交易日历：`shared.trading_calendar.is_trading_day_xcal`（CN→XSHG，平台同一把尺子的
-  同步出口），按日缓存、时段外根本不问。
+  时段内再问一层交易日历：`shared.trading_calendar.is_trading_day_xcal`（CN→XSHG），按日缓存、
+  时段外根本不问。**注意这个闸只走 xcal，不看 DB 覆盖层** `qm_market_calendar_day`
+  （`TradingCalendarService` 才是 DB 优先；引擎在 worker 线程、只有同步 xcal 出口）——给 DB 灌
+  2027 的假期**不会**让异动闸知道，闸的解法是升级 `exchange_calendars` 或改判据。
 - **日历答不了就退回旧口径（放行）**：库缺失/越界（XSHG 实测印发到 **2026-12-31**）时引擎按「工作日+
   时段」判，并每天打一条 `[anomaly] 交易日历答不了 <日期>`。这是有意的——本改动只许关闸、不许凭空
   开闸；**越过 2026-12-31 前后必看这条日志**，届时升级 `exchange_calendars` 或改用带 DB 覆盖层的判据。
+  日历**答了 False** 时另有一条 INFO（`交易日历判定 <日期> 非交易日`）：那是「市场族整天不取数」的现场，
+  若该日实际开市，是日历口径错而不是闸的错。
   自查当前口径（容器内，任意时点可试）——**`market_session_state` 本身不问日历**，必须与
   `_default_trading_day_lookup` 组合，才是 `build_once` 的那条判据：
   ```bash
@@ -227,7 +231,7 @@ docker exec -w /app quantmind python -m pytest \
 | 台账某类告警**一条都没有** | 该 kind 的 subject 长度 vs 落点形状 | 形状不匹配会静默丢整条：`instrument` varchar(16)、总线 target ≤24 |
 | `errors` 计数涨、`last_error=deny no_targets` | — | 正常（无持有人可锁）；只有 `record:`/`publish:` 失败才是故障 |
 | 重启后想立刻看模型告警 | — | 模型族首轮必跑（~10s）；冷却键会压掉 30 分钟内的重复，验证时可删该 subject 的键 |
-| 盘外/半夜/假期在报市场异动 | 该行 `created_at` 的时段 | 时段外 ⇒ §4.2 缺陷复发（闸没生效/被绕过），先看 `skipped_market_closed` 有没有在涨；**假期时段内**报了 ⇒ 日历层答不了（日志 `[anomaly] 交易日历答不了`）或 XSHG 印发期已过（2026-12-31） |
+| 盘外/半夜/假期在报市场异动 | 该行 `created_at` 的时段 | 时段外 ⇒ §4.2 缺陷复发（闸没生效/被绕过），先看 `skipped_market_closed` 有没有在涨；**假期时段内**报了 ⇒ 日历层答不了（日志 `[anomaly] 交易日历答不了`）或 XSHG 印发期已过（2026-12-31）；日志里两条都没有 ⇒ 日历把这天答成了 True（数据/口径错，跑 §4.2 自查命令核对） |
 | 盘外调接口看不到市场族动静 | `skipped_market_closed` | **正常**，闸在干活；盘中再来验 |
 | 假期盘中看不到市场族动静 | `skipped_market_holiday` | **正常**（2026-10-08 起的日历层）；工作日看到这一格才要查 |
 | 盘中「引擎活着但一条市场异动都没有」，`errors=0` | `last_market_fetch_at` / `last_market_quote_at` | 两个心跳停昨天 ⇒ 取了但零报价：先查热集是否为空（`hot_set_key`），再查 `_remote_redis`（公网行情服/桥）通不通——**这两格就是给这种静默失效用的**，别对着 `cycles` 猜 |
