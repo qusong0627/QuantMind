@@ -102,6 +102,12 @@ JOBS: tuple[JobSpec, ...] = (
         "全用户持仓并集 ∪ 候选池 → Redis 热集集合（订阅采集数据源，T-P6-06）",
     ),
     JobSpec(
+        "live_equity_sampler", "实盘净值分钟采样", "worker", "trade",
+        "交易日 9:25-11:30/13:00-15:10（60s 周期）",
+        "QM_LIVE_EQUITY_SAMPLER_ENABLED", True, 300, None,
+        "桥实时资产 + 每 agent 分账 → live_equity.jsonl（实况图数据源，旧栈停机后迁回）",
+    ),
+    JobSpec(
         "t1_unlock", "T+1 解锁", "worker", "trade", "60s 轮询（交易日 09:16 生效）",
         None, True, 300, None,
         "次日补齐 available_volume",

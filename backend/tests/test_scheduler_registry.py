@@ -59,6 +59,8 @@ _HEARTBEAT_WIRED = {
     # P2.6 减仓执行器（真钱风控动作）：同上，心跳写在常驻循环里（四层拆分后
     # 常驻循环在 ``_runner``，编排层 ``leverage_trim.py`` 不含 worker）。
     "leverage_trim": "services/trade/services/leverage_trim_runner.py",
+    # 实盘净值分钟采样（实况图数据源写入方）：曲线停更时 C07 是唯一可观测信号
+    "live_equity_sampler": "services/live_trading/services/live_equity_sampler.py",
 }
 
 #: 心跳用模块常量（``_sched_heartbeat(SCHEDULER_NAME)``）间接引用的任务：

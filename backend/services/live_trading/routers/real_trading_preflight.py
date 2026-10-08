@@ -1153,6 +1153,16 @@ async def get_account(
             }
 
         account_info = dict(latest_snapshot)
+        # 盘中实时口径（tdx_bridge）：桥不回现价、落库用昨收补 → 概览浮盈整天不动。
+        # 读侧按桥实时价重算（快照/账本口径不动）；失败静默回退快照值，绝不阻断读取。
+        try:
+            from backend.services.live_trading.services.account_live_overlay import (
+                overlay_account_live_prices,
+            )
+
+            account_info = await overlay_account_live_prices(account_info)
+        except Exception as e:  # noqa: BLE001 - 覆盖层失败绝不阻断账户读取
+            logger.warning("account live overlay failed: %s", e)
         snapshot_ts = _parse_snapshot_timestamp(account_info.get("snapshot_at"))
         stale_threshold_sec = max(
             30, int(os.getenv("QMT_AGENT_ACCOUNT_STALE_THRESHOLD_SEC", "120") or 120)

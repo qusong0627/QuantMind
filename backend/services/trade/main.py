@@ -81,6 +81,7 @@ async def lifespan(app: FastAPI):
     corp_action_task = None
     simulation_eod_task = None
     hot_set_builder_task = None
+    live_equity_sampler_task = None
     decision_round_task = None
     leverage_trim_task = None
 
@@ -647,6 +648,32 @@ async def lifespan(app: FastAPI):
                 logger.info("hot_set builder disabled (QM_HOT_SET_BUILD_ENABLED=false)")
         except Exception as e:
             logger.error("hot_set builder start failed: %s", e, exc_info=True)
+        # 实盘净值分钟采样器：实况页净值图/模型卡的数据源写入方（旧栈停机后迁回，
+        # 2026-10-08）。交易时段每分钟一行；默认开启（纯本地读+追加，代价低）。
+        try:
+            from backend.services.live_trading.services.live_equity_sampler import (
+                run_live_equity_sampler_worker,
+            )
+
+            if str(
+                os.getenv("QM_LIVE_EQUITY_SAMPLER_ENABLED", "true")
+            ).strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }:
+                live_equity_sampler_task = asyncio.create_task(
+                    run_live_equity_sampler_worker(), name="live-equity-sampler"
+                )
+                app.state.live_equity_sampler_task = live_equity_sampler_task
+                logger.info("live equity sampler worker started")
+            else:
+                logger.info(
+                    "live equity sampler disabled (QM_LIVE_EQUITY_SAMPLER_ENABLED=false)"
+                )
+        except Exception as e:
+            logger.error("live equity sampler start failed: %s", e, exc_info=True)
         # 策略监控推送源：把模拟盘实时盈亏写进 strategy_events，驱动仪表盘
         # 「策略监控」卡片刷新（WS 连上时前端会关掉轮询，只认推送）。
         try:
@@ -826,6 +853,7 @@ async def lifespan(app: FastAPI):
         corp_action_task,
         simulation_eod_task,
         hot_set_builder_task,
+        live_equity_sampler_task,
         sentinel_alert_task,
         sentinel_backfill_task,
         holding_sentinel_task,

@@ -1,6 +1,9 @@
 """热集构建服务（T-P6-06）：全用户持仓并集 ∪ 候选池 ∪ 异动池 → Redis 热集集合。
 
-- **持仓**：遍历交易 Redis 的 ``simulation:account:*``（与对账同一先例），取各账户持仓 symbol；
+- **持仓**：模拟账户（交易 Redis ``simulation:account:*``，与对账同一先例）∪ **桥实盘/QMT
+  真实持仓**（``real_positions.load_real_positions``，多券商并集）——量化实时推理必须覆盖
+  真实持仓，否则「自己盘的票」只有恰好进了候选才被推理到（2026-10-08 实测：桥 4 只持仓
+  仅 1 只在集）；
 - **候选**：``engine_signal_scores`` 最新交易日、CN 口径、按 fusion_score 降序 TopN；
 - **异动**：T-P6-14 识别引擎接口占位（现返回空，接口已留）；
 - **输出**：远端行情 Redis 集合 ``qm:hot_set:symbols``（与 T-P6-02 订阅 worker 同源同键）+
@@ -38,12 +41,17 @@ class HotSetBuilder:
         candidate_top_n: int = DEFAULT_CANDIDATE_TOP_N,
         positions_redis=None,
         output_redis_factory: Callable[[], Any] | None = None,
+        real_positions_loader: Callable[[], Any] | None = None,
     ) -> None:
         self.hot_set_key = hot_set_key or tdx_config.hot_set_key()
         self.cap = int(cap if cap is not None else os.getenv("QM_HOT_SET_CAP", "2000"))
         self.candidate_top_n = int(candidate_top_n)
         self._positions_redis = positions_redis
-        self._output_redis_factory = output_redis_factory or self._default_output_factory
+        self._output_redis_factory = (
+            output_redis_factory or self._default_output_factory
+        )
+        #: 桥实盘/QMT 持仓加载器（测试注入用；生产走 shared.real_positions）。
+        self._real_positions_loader = real_positions_loader
 
     @staticmethod
     def _default_output_factory():
@@ -54,7 +62,9 @@ class HotSetBuilder:
     def _trade_redis(self):
         if self._positions_redis is not None:
             return self._positions_redis
-        from backend.services.trade_shared.redis_client import redis_client as trade_redis
+        from backend.services.trade_shared.redis_client import (
+            redis_client as trade_redis,
+        )
 
         if trade_redis.client is None:
             trade_redis.connect()
@@ -62,14 +72,18 @@ class HotSetBuilder:
 
     # ── 源采集 ──────────────────────────────────────────────────────
 
-    def _collect_positions(self, tenant_filter: str | None) -> tuple[list[str], str | None]:
+    def _collect_positions(
+        self, tenant_filter: str | None
+    ) -> tuple[list[str], str | None]:
         """扫描模拟账户（全用户并集）→ 持仓 symbol 列表。"""
         symbols: list[str] = []
         try:
             client = self._trade_redis()
             if client.client is None:
                 return [], "交易 Redis 不可用"
-            keys = list(client.client.scan_iter(match="simulation:account:*", count=500))
+            keys = list(
+                client.client.scan_iter(match="simulation:account:*", count=500)
+            )
             for raw_key in keys:
                 key = str(raw_key)
                 parts = key.split(":")
@@ -95,7 +109,40 @@ class HotSetBuilder:
         except Exception as exc:  # noqa: BLE001
             return symbols, f"持仓采集失败: {exc}"
 
-    async def _collect_candidates(self, tenant_filter: str | None) -> tuple[list[str], str | None]:
+    async def _collect_real_positions(
+        self, tenant_filter: str | None
+    ) -> tuple[list[str], str | None]:
+        """桥实盘/QMT 真实持仓（多券商并集，shared.real_positions 单一实现）。
+
+        测试租户（``tenant_filter`` 非真实租户）**不并入**：真实账户属于
+        ``QM_HOT_SET_REAL_TENANT``（默认 default），混进 t-* 测试构建等于把真实持仓
+        写进别人的断言里（也违背「按租户隔离」语义）。
+        """
+        real_tenant = (
+            os.getenv("QM_HOT_SET_REAL_TENANT", "default") or "default"
+        ).strip()
+        if tenant_filter and tenant_filter != real_tenant:
+            return [], None
+        try:
+            if self._real_positions_loader is not None:
+                positions, _meta = await self._real_positions_loader()
+            else:
+                from backend.shared.real_positions import load_real_positions
+                from backend.shared.simulation_account_keys import (
+                    resolve_db_account_user,
+                )
+
+                user = resolve_db_account_user("QM_HOT_SET_REAL_USER")
+                positions, _meta = await load_real_positions(real_tenant, user)
+            if not isinstance(positions, dict):
+                return [], None
+            return [str(sym) for sym in positions], None
+        except Exception as exc:  # noqa: BLE001 - 实盘源失败不阻断其余源
+            return [], f"实盘持仓采集失败: {exc}"
+
+    async def _collect_candidates(
+        self, tenant_filter: str | None
+    ) -> tuple[list[str], str | None]:
         """当日推理 TopN（最新交易日、CN 口径、fusion_score 降序、截面去重）。"""
         from sqlalchemy import text
 
@@ -129,19 +176,26 @@ class HotSetBuilder:
         try:
             from backend.shared.anomaly_contract import read_recent_anomaly_symbols
 
-            return read_recent_anomaly_symbols(limit=self.ANOMALY_POOL_MAX)[: self.ANOMALY_POOL_MAX], None
+            return read_recent_anomaly_symbols(limit=self.ANOMALY_POOL_MAX)[
+                : self.ANOMALY_POOL_MAX
+            ], None
         except Exception as exc:  # noqa: BLE001 - 异动源失败不阻断构建
             return [], f"异动池采集失败: {exc}"
 
     # ── 构建与写入 ──────────────────────────────────────────────────
 
     async def build_once(self, *, tenant_filter: str | None = None) -> dict[str, Any]:
-        positions, pos_err = await asyncio.to_thread(self._collect_positions, tenant_filter)
+        positions, pos_err = await asyncio.to_thread(
+            self._collect_positions, tenant_filter
+        )
+        real_positions, real_err = await self._collect_real_positions(tenant_filter)
         candidates, cand_err = await self._collect_candidates(tenant_filter)
         anomalies, anom_err = self._collect_anomalies()
 
         composed = hot_set_pure.compose_hot_set(
-            positions=positions, anomalies=anomalies, candidates=candidates,
+            positions=[*positions, *real_positions],
+            anomalies=anomalies,
+            candidates=candidates,
             indexes=hot_set_pure.REGIME_INDEXES,  # T-P6-13：regime 常驻指数（不占 cap）
             cap=self.cap,
         )
@@ -149,19 +203,24 @@ class HotSetBuilder:
             **composed["stats"],
             "built_at": datetime.now(timezone.utc).isoformat(),
             "sources": {
-                "positions": len(positions),
+                "positions": len(positions) + len(real_positions),
+                "positions_sim": len(positions),
+                "positions_real": len(real_positions),
                 "candidates": len(candidates),
                 "anomalies": len(anomalies),
                 "indexes": len(hot_set_pure.REGIME_INDEXES),
             },
-            "errors": [e for e in (pos_err, cand_err, anom_err) if e],
+            "errors": [e for e in (pos_err, real_err, cand_err, anom_err) if e],
         }
         await asyncio.to_thread(self._write, composed["symbols"], report)
         if report["errors"]:
             logger.warning("hot_set 构建部分源失败: %s", report["errors"])
         logger.info(
             "hot_set built kept=%s total=%s truncated=%s skipped=%s",
-            report["kept"], report["total"], report["truncated"], report["skipped"],
+            report["kept"],
+            report["total"],
+            report["truncated"],
+            report["skipped"],
         )
         return report
 
@@ -186,7 +245,9 @@ class HotSetBuilder:
                     "kept": str(report.get("kept")),
                     "truncated": str(report.get("truncated")),
                     "skipped": str(report.get("skipped")),
-                    "sources": json.dumps(report.get("sources") or {}, ensure_ascii=False),
+                    "sources": json.dumps(
+                        report.get("sources") or {}, ensure_ascii=False
+                    ),
                 },
             )
             pipe.execute()
@@ -203,7 +264,10 @@ async def run_hot_set_builder_worker() -> None:
     builder = HotSetBuilder()
     logger.info(
         "hot_set builder started interval=%ss key=%s cap=%s top_n=%s",
-        interval, builder.hot_set_key, builder.cap, builder.candidate_top_n,
+        interval,
+        builder.hot_set_key,
+        builder.cap,
+        builder.candidate_top_n,
     )
     while True:
         try:
