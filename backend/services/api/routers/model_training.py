@@ -3928,6 +3928,10 @@ async def get_stock_inference_history(
         d = str(row.get("data_trade_date") or row["trade_date"])[:10]
         if d not in by_date:
             by_date[d] = dict(row)
+            by_date[d]["prediction_trade_date"] = str(row["trade_date"])[:10]
+            by_date[d]["date_semantics"] = (
+                "data_trade_date" if row.get("data_trade_date") else "prediction_trade_date"
+            )
             by_date[d]["trade_date"] = d
             if by_date[d].get("data_trade_date") is not None:
                 by_date[d]["data_trade_date"] = str(by_date[d]["data_trade_date"])
@@ -4051,6 +4055,7 @@ async def get_stock_inference_history(
         "items": items,
         "models": models,
         "score_source": "pred_parquet" if pred_items else "inference_runs",
+        "date_semantics": "pred_parquet 为数据交易日；批次优先使用数据交易日，缺失时保留信号生效日并在条目标明。不能把节后生效预测当作假期行情评分。",
     }
 
 

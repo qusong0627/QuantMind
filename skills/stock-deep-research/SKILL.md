@@ -70,6 +70,13 @@ curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/research/symbols/features" \
 
 ### 3.3 模型推理分数（历史趋势 + 最新 + 多模型）
 
+**日期与批次核对（必做）**：
+- 每条分数必须对应明确的日期、模型和 `run_id`；报告列出「数据交易日／信号生效日／模型／批次／融合值／方向」表，缺失字段写未知，不按自然日补齐。
+- `score_source=pred_parquet` 的 `trade_date` 是数据交易日；`inference_runs` 优先显示数据日，条目 `date_semantics=prediction_trade_date` 表示数据日缺失、当前日期是生效日。`signal-overlay` 的 `date` 是信号生效日。两者禁止混用。
+- 节假日内可用节前数据生成节后生效预测，不得称为假期行情评分；行情截至日期与预测生效日期分别注明。
+- 同一天多条记录按模型或批次分开，不得写成「日期范围内依次为若干分数」暗示连续每日评分；只有确认同一模型、同一口径后才能讨论时序趋势。模型或批次无法识别时不得推断连续趋势。
+- 正负判断逐条核对，含任意正值时不得写「全部为负」或「持续为负」；HOLD 只表示该次模型未给出买卖方向，不能由此证明连续趋势。
+
 ```bash
 curl -s -H "$AUTH" "$BASE/api/v1/models/inference/stock/600519.SH/history?days=180"
 # 无 envelope 包裹，直接返回:

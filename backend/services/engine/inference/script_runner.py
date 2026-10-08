@@ -702,17 +702,14 @@ class InferenceScriptRunner:
 
         # 加密货币 7×24，T+1 自然日
         if market_upper == "CRYPTO":
-            try:
-                d = _date.fromisoformat(str(data_trade_date)[:10])
-                return (d + timedelta(days=1)).isoformat()
-            except Exception:
-                return str(data_trade_date)
+            d = _date.fromisoformat(str(data_trade_date)[:10])
+            return (d + timedelta(days=1)).isoformat()
 
         try:
             import exchange_calendars as xcals
 
-            _MARKET_XCAL = {"A": "XSHG", "HK": "XHKG", "US": "XNYS"}
-            xcal_name = _MARKET_XCAL.get(market_upper, "XSHG")
+            _MARKET_XCAL = {"A": "XSHG", "CN": "XSHG", "HK": "XHKG", "US": "XNYS"}
+            xcal_name = _MARKET_XCAL[market_upper]
             cal = xcals.get_calendar(xcal_name)
             # 将输入日期转换为下一个交易日
             nxt = cal.next_session(data_trade_date)
@@ -722,14 +719,9 @@ class InferenceScriptRunner:
                 else str(nxt).split(" ")[0]
             )
         except Exception as e:
-            logger.warning(
-                f"[InferenceScriptRunner] 计算预测日期失败，回退到 T+1 自然日: {e}"
-            )
-            # 兜底：如果日历解析失败，至少加 1 天（自然日）
-            from datetime import datetime, timedelta
-
-            dt = datetime.strptime(data_trade_date, "%Y-%m-%d")
-            return (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+            raise RuntimeError(
+                f"无法确定 {market_upper} 市场 {data_trade_date} 的下一交易日，停止推理；请检查交易日历"
+            ) from e
 
     def _query_dimension_readiness(self, trade_date: str, expected_dim: int) -> dict:
         # 使用同步驱动进行就绪度查询
@@ -924,7 +916,21 @@ class InferenceScriptRunner:
         script_path = self.primary_model_dir / self.primary_script_name
         primary_meta = self._read_primary_metadata()
         model_market = str((primary_meta.get("context") or {}).get("market") or "A").upper()
-        prediction_trade_date = self._resolve_prediction_trade_date(date, market=model_market)
+        try:
+            prediction_trade_date = self._resolve_prediction_trade_date(
+                date, market=model_market
+            )
+        except (RuntimeError, ValueError) as exc:
+            return ExecutionResult(
+                success=False,
+                exit_code=1,
+                stdout="",
+                stderr="",
+                error=str(exc),
+                failure_stage="trading_calendar",
+                data_trade_date=date,
+                active_model_id=self.primary_model_id,
+            )
         data_source = str(primary_meta.get("data_source") or "").lower()
         active_data_source = self._resolve_primary_active_data_source(primary_meta)
         if not script_path.is_file():
