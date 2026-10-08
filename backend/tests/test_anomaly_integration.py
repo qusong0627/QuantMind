@@ -27,6 +27,17 @@ def _session_now() -> float:
     return datetime.now(_CST).replace(hour=10, minute=30, second=0, microsecond=0).timestamp()
 
 
+def _no_status_write(payload) -> None:
+    """**必须注入**：默认 status_writer 写的是生产状态镜像 `qm:anomaly:status`
+    （``_default_status_write`` → hset），测试引擎跑一轮就会把它覆盖成测试计数。
+
+    2026-10-08 实测：跑完本文件后读到 `cycles=2 / skipped_market_closed=0 /
+    detections=1`，而真身实例当时是 `cycles=10 / skipped_market_closed=10`——
+    运维据此以为引擎重启过或时段闸失效。真身下一轮会盖回来（≤1 分钟自愈），
+    但那一分钟里的运维判断是错的，所以测试不许碰这个键。"""
+    return None
+
+
 def _redis(db: int = 0):
     import os
 
@@ -95,6 +106,7 @@ def test_anomaly_engine_real_actions_end_to_end():
         account_fetcher=account_fetcher,
         data_fetcher=data_fetcher,
         model_fetcher=model_fetcher,
+        status_writer=_no_status_write,
         now_fn=_session_now,
     )
 
@@ -217,6 +229,7 @@ def test_anomaly_recent_symbols_feed_hot_set_source():
         publisher=lambda d: None,
         recorder=lambda d: None,
         denier=lambda d: {},
+        status_writer=_no_status_write,
         now_fn=_session_now,
     )
     bus = _redis(0)
@@ -247,6 +260,7 @@ def test_anomaly_dedup_suppresses_repeat_within_cooldown():
         publisher=lambda d: fired.append(d),
         recorder=lambda d: None,
         denier=lambda d: {},
+        status_writer=_no_status_write,
         now_fn=_session_now,
     )
     bus = _redis(0)
