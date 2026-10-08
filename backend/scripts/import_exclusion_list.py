@@ -15,7 +15,8 @@
 **为什么在宿主侧而不是容器内实时算**：keeper 纪律是「离线生成 + 落盘 + 每日刷新，
 报表与闸门同源」（该产物早于迁入就由隔壁宿主生成，2026-09-29 起 keeper 与本仓同根）。
 本仓 ``/list`` 是单 worker uvicorn，实时重算 1600 只的多层基本面判据会阻塞全部并发
-请求——所以这里只落一份查表产物。
+请求——所以这里只落一份查表产物。2026-10-08 起个人中心有「重导名单」按钮：
+API 以**子进程**跑本脚本（同一份审计与写盘逻辑，仅换源目录参数），与宿主手动跑等价。
 
 **本脚本的一半价值在审计**：源文件与名单最危险的失效方式是**静默少排**
 （代码归一碰撞、后缀写错交易所），界面上完全看不出来。故 ``audit()`` 会把
@@ -26,6 +27,11 @@
     python backend/scripts/import_exclusion_list.py                  # 导入（默认源目录）
     python backend/scripts/import_exclusion_list.py --dry-run        # 只审计并打差异
     python backend/scripts/import_exclusion_list.py --from /path/to/keeper-root
+
+    # 容器内（个人中心「重导名单」按钮走的正是这一条——data 与 configs 在容器里
+    # 不相邻：/data 是挂载点，configs/ 以只读方式另挂到 /app/configs）：
+    python backend/scripts/import_exclusion_list.py \
+        --data-dir /data --configs-dir /app/configs --out /data/exclusions
 """
 
 from __future__ import annotations
@@ -55,14 +61,6 @@ DEFAULT_SOURCE_ROOT = str(PROJECT_ROOT)
 #: 本仓产物目录（``./data:/data`` 挂载，容器内即 ``/data/exclusions``）
 DEFAULT_OUT_DIR = PROJECT_ROOT / "data" / "exclusions"
 
-#: 源文件名 → 载荷里的源名（审计报告逐源对账用）
-SOURCE_FILES: dict[str, str] = {
-    "data/fundamental_flags.json": "fundamental_flags",
-    "data/risk_block.json": "risk_block",
-    "data/news_blacklist_2026.json": "news_blacklist",
-    "configs/live_symbols.json": "block_buy",
-}
-
 _SUFFIXED = re.compile(r"^(\d{6})\.(SH|SZ|BJ)$")
 
 
@@ -72,21 +70,33 @@ def _read_json(path: Path) -> Any:
         return json.load(fh)
 
 
-def load_sources(source_root: Path) -> dict[str, Any]:
-    """读四份源文件 → ``build_payload`` 的入参（缺一份即报错，不静默跳过）。"""
-    root = Path(source_root)
-    missing = [rel for rel in SOURCE_FILES if not (root / rel).is_file()]
+def load_sources(data_dir: Path, configs_dir: Path) -> dict[str, Any]:
+    """读四份源文件 → ``build_payload`` 的入参（缺一份即报错，不静默跳过）。
+
+    两个目录**显式传入**而非单一 root：宿主上它们是 ``<root>/data`` 与
+    ``<root>/configs``，容器里则是 ``/data``（挂载点）与 ``/app/configs``
+    （只读另挂）——同一份代码要在两种布局下都能指对（见模块头用法）。
+    """
+    data = Path(data_dir)
+    configs = Path(configs_dir)
+    paths = {
+        "data/fundamental_flags.json": data / "fundamental_flags.json",
+        "data/risk_block.json": data / "risk_block.json",
+        "data/news_blacklist_2026.json": data / "news_blacklist_2026.json",
+        "configs/live_symbols.json": configs / "live_symbols.json",
+    }
+    missing = [rel for rel, path in paths.items() if not path.is_file()]
     if missing:
         raise FileNotFoundError(
-            f"源文件缺失：{', '.join(missing)}（源目录 {root}）"
+            f"源文件缺失：{', '.join(missing)}（数据目录 {data}、配置目录 {configs}）"
             "——名单不完整比没有名单更危险，拒绝生成"
         )
     return {
         "market": "CN",
-        "fundamental_flags": _read_json(root / "data/fundamental_flags.json"),
-        "risk_block": _read_json(root / "data/risk_block.json"),
-        "news_blacklist": _read_json(root / "data/news_blacklist_2026.json"),
-        "live_symbols": _read_json(root / "configs/live_symbols.json"),
+        "fundamental_flags": _read_json(paths["data/fundamental_flags.json"]),
+        "risk_block": _read_json(paths["data/risk_block.json"]),
+        "news_blacklist": _read_json(paths["data/news_blacklist_2026.json"]),
+        "live_symbols": _read_json(paths["configs/live_symbols.json"]),
     }
 
 
@@ -245,7 +255,12 @@ def _print_report(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="导入候选信号排除名单（通道 A）")
     parser.add_argument("--from", dest="source_root", default=DEFAULT_SOURCE_ROOT,
-                        help=f"keeper 产物根目录（默认 {DEFAULT_SOURCE_ROOT}）")
+                        help=f"keeper 产物根目录（默认 {DEFAULT_SOURCE_ROOT}；"
+                             "容器内不用它，改传 --data-dir/--configs-dir）")
+    parser.add_argument("--data-dir", default=None,
+                        help="源数据目录（默认 <--from>/data；容器内即 /data）")
+    parser.add_argument("--configs-dir", default=None,
+                        help="配置目录（默认 <--from>/configs；容器内即 /app/configs）")
     parser.add_argument("--out", dest="out_dir", default=str(DEFAULT_OUT_DIR),
                         help=f"本仓产物目录（默认 {DEFAULT_OUT_DIR}）")
     parser.add_argument("--market", default="CN", help="市场（默认 CN）")
@@ -254,7 +269,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="审计有问题也照样写盘（默认拒绝，避免半份名单上线）")
     args = parser.parse_args(argv)
 
-    raw = load_sources(Path(args.source_root))
+    data_dir = Path(args.data_dir) if args.data_dir else Path(args.source_root) / "data"
+    configs_dir = (
+        Path(args.configs_dir) if args.configs_dir else Path(args.source_root) / "configs"
+    )
+    try:
+        raw = load_sources(data_dir, configs_dir)
+    except FileNotFoundError as exc:
+        # 干净的一行，而不是 traceback——这句话要原样经 /refresh 端点抬到界面上
+        print(f"\n[拒绝生成] {exc}", file=sys.stderr)
+        return 1
     raw["market"] = args.market
     payload = build_payload(raw, generated_at=now_iso())
 

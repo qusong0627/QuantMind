@@ -12,6 +12,7 @@ import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../config/servi
 import { authService } from '../auth/services/authService';
 import type {
   ActionFilter,
+  BlacklistListMeta,
   BlacklistListResponse,
   BlacklistMetaResponse,
   BlacklistAction,
@@ -33,6 +34,16 @@ export interface UpsertBlacklistParams {
   reason?: string;
   note?: string;
   expire?: string | null;
+}
+
+/** 重导结果：新 meta + 「盘上旧产物 → 新源」的差异数（首次导入时差异无意义，为 0）。 */
+export interface BlacklistRefreshResult {
+  firstImport: boolean;
+  added: number;
+  removed: number;
+  addedSample: string[];
+  removedSample: string[];
+  meta: BlacklistListMeta | null;
 }
 
 function detailOf(err: unknown): string {
@@ -113,6 +124,38 @@ export class TradingBlacklistService {
     try {
       const resp = await this.client.delete(`/exclusion/entries/${encodeURIComponent(symbol)}`);
       return Boolean(resp.data?.data?.removed);
+    } catch (err) {
+      throw new Error(detailOf(err));
+    }
+  }
+
+  /**
+   * 重导机器名单（后端跑导入器子进程，含逐源审计）。
+   *
+   * 审计不过 / 源缺失时后端返回 409，detail 是**多行逐条原因**——这里原样透出
+   * （面板用弹窗展示），截断或吞掉会让用户看着「刷新失败」四个字无从下手。
+   */
+  async refresh(): Promise<BlacklistRefreshResult> {
+    try {
+      // 单独放宽到 60s：导入是子进程 + 四份文件读盘，正常秒级，但比默认 20s 抖动的
+      // 余地大——客户端先超时会让用户以为没刷新成功，实际后端已经落盘了
+      const resp = await this.client.post('/exclusion/refresh', null, { timeout: 60000 });
+      const d = resp.data.data as {
+        first_import?: boolean;
+        added?: number;
+        removed?: number;
+        added_sample?: string[];
+        removed_sample?: string[];
+        meta?: BlacklistListMeta | null;
+      };
+      return {
+        firstImport: Boolean(d.first_import),
+        added: Number(d.added ?? 0),
+        removed: Number(d.removed ?? 0),
+        addedSample: d.added_sample ?? [],
+        removedSample: d.removed_sample ?? [],
+        meta: d.meta ?? null,
+      };
     } catch (err) {
       throw new Error(detailOf(err));
     }

@@ -11,6 +11,7 @@
 - ``POST /api/v1/exclusion/entries``  新增/改判一条手工条目
 - ``DELETE /api/v1/exclusion/entries/{symbol}``  撤销一条本人改动
 - ``GET  /api/v1/exclusion/meta``     名单基准日 / 陈旧度 / 两层条数
+- ``POST /api/v1/exclusion/refresh``  重导机器基线（子进程跑导入器，含审计）
 
 **删除的语义是「撤销本人改动」而不是「把这只票移出名单」**：删掉一条 ``allow``
 会让那只票回到「按机器名单被排除」，删掉一条 ``block`` 会让它回到「不在名单里」。
@@ -19,14 +20,26 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+import threading
 from datetime import date
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend.services.api.user_app.middleware.auth import get_current_user
-from backend.shared.exclusion_list import load_exclusion_list, source_label
+from backend.shared.exclusion_list import (
+    DEFAULT_EXCLUSION_DIR,
+    EXCLUSION_DIR_ENV,
+    clear_cache,
+    load_exclusion_list,
+    source_label,
+)
 from backend.shared.exclusion_overlay import (
     ACTION_ALLOW,
     ACTION_BLOCK,
@@ -41,6 +54,26 @@ from backend.shared.logging_config import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/exclusion", tags=["ExclusionAdmin"])
+
+#: 导入脚本路径。重导**复用 CLI 子进程**而不是在请求里重写导入逻辑：名单值钱的一半
+#: 在审计（逐源条数对账、后缀与交易所自洽），CLI 是它的唯一实现，绕开它写第二遍
+#: 就等于把两条会漂移的实现放上生产。
+_IMPORT_SCRIPT = (
+    Path(__file__).resolve().parents[3] / "scripts" / "import_exclusion_list.py"
+)
+
+#: 容器内源目录：``/data`` 是挂载点；``configs/`` 不在 data 下，以只读方式另挂到
+#: ``/app/configs``（compose 里的一条 volume）。env 覆盖点与 exclusion_list.py 同风格。
+SRC_DATA_DIR_ENV = "QM_EXCLUSION_SRC_DATA_DIR"
+SRC_CONFIGS_DIR_ENV = "QM_EXCLUSION_SRC_CONFIGS_DIR"
+DEFAULT_SRC_DATA_DIR = "/data"
+DEFAULT_SRC_CONFIGS_DIR = "/app/configs"
+
+#: 导入是读四份 JSON + 写一份产物，正常秒级；跑满这个数说明源文件出了异常（如被写坏）
+_REFRESH_TIMEOUT_S = 120
+
+#: 双击防重：两个并发导入写同一个 ``.json.tmp``，后完成者的原子替换会踩空。
+_refresh_lock = threading.Lock()
 
 #: 本模块只服务 A 股（港股/美股各有自己的名单产物，尚未导入）
 SUPPORTED_MARKETS = ("CN",)
@@ -258,3 +291,104 @@ async def remove_entry(
     except OverlayError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"success": True, "data": {"symbol": symbol, "removed": removed}}
+
+
+def _read_symbols(path: Path) -> set[str] | None:
+    """盘上现产物的代码集合；文件缺失/损坏返回 ``None``。
+
+    ``None`` 与空集是两回事：前者（没有可比基线）不该报「新增 N 只」那样的差异数，
+    后者（空产物但可读）是合法状态，差异照常算。
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return set(payload.get("items") or {})
+
+
+def _tail_lines(text: str, limit: int = 8) -> str:
+    """取最后若干非空行——导入器的逐条原因落在报告尾部（错误列表与拒绝行都在那里）。"""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return "导入器退出码非零（无输出）"
+    return "\n".join(lines[-limit:])
+
+
+@router.post("/refresh")
+def refresh_exclusion_list(current_user: dict = Depends(get_current_user)):
+    """重导机器基线：跑 ``backend/scripts/import_exclusion_list.py``（同一份审计逻辑）。
+
+    机器基线是「keeper 产物 → 导入器 → 查表产物」三步里的第三步：源每日刷新，但导入
+    此前只有宿主手动一步（2026-10-08 基准日曾停在 09-18 二十天）。审计不过则**拒绝
+    写盘**，逐条原因原样抬到响应里——吞成「刷新失败」会让用户无从下手。
+
+    ``def``（非 ``async``）：子进程调用是阻塞的，交给 FastAPI 线程池，不占事件循环。
+    """
+    _ = current_user
+    if not _refresh_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="上一次重导还在进行中，请稍候再试")
+
+    try:
+        data_dir = os.environ.get(SRC_DATA_DIR_ENV) or DEFAULT_SRC_DATA_DIR
+        configs_dir = os.environ.get(SRC_CONFIGS_DIR_ENV) or DEFAULT_SRC_CONFIGS_DIR
+        out_dir = os.environ.get(EXCLUSION_DIR_ENV) or DEFAULT_EXCLUSION_DIR
+        out_path = Path(out_dir) / "cn.json"
+        before = _read_symbols(out_path)
+
+        cmd = [
+            sys.executable,
+            str(_IMPORT_SCRIPT),
+            "--data-dir",
+            data_dir,
+            "--configs-dir",
+            configs_dir,
+            "--out",
+            out_dir,
+            "--market",
+            "CN",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=_REFRESH_TIMEOUT_S
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(
+                status_code=504,
+                detail=f"导入超时（>{_REFRESH_TIMEOUT_S}s）——检查源文件是否正被写坏",
+            ) from None
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"无法启动导入脚本：{exc}") from exc
+
+        if proc.returncode != 0:
+            # stdout 尾是逐条审计原因、stderr 尾是拒绝行/缺源说明——两段都要（只有
+            # stderr 的话，用户看到「确认无误可加 --force」却看不到到底哪条没过）
+            detail = _tail_lines((proc.stdout or "") + "\n" + (proc.stderr or ""))
+            logger.warning("[ExclusionAdmin] 重导被拒：%s", detail)
+            raise HTTPException(status_code=409, detail=detail)
+
+        # 产物的 mtime 变了缓存本会自动失效，这里显式清一次，让本次响应就带上新 meta
+        clear_cache()
+        lst = load_exclusion_list("CN")
+        after = set(lst.items) if lst else set()
+        added = sorted(after - before) if before is not None else []
+        removed = sorted(before - after) if before is not None else []
+        logger.info(
+            "[ExclusionAdmin] 名单已重导 asof=%s total=%d（+%d/-%d）",
+            lst.asof if lst else "?",
+            len(after),
+            len(added),
+            len(removed),
+        )
+        return {
+            "success": True,
+            "data": {
+                "first_import": before is None,
+                "added": len(added),
+                "removed": len(removed),
+                "added_sample": added[:8],
+                "removed_sample": removed[:8],
+                "meta": lst.meta() if lst else None,
+            },
+        }
+    finally:
+        _refresh_lock.release()

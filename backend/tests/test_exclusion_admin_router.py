@@ -289,3 +289,118 @@ def test_meta_endpoint_reports_both_layers(client, root):
     assert data["meta"]["asof"] == "2026-09-18"
     assert data["overlay"]["counts"]["block"] == 1
     assert data["sources"]["user_manual"]["label"] == "手工排除（本人在个人中心添加）"
+
+
+# ---------------------------------------------------------------------------
+# POST /refresh —— 重导机器基线（子进程跑真实导入器，见 exclusion_admin.py）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def src(tmp_path, monkeypatch):
+    """四份最小合法源文件 + 目录 env。
+
+    重导端点喂的是**真实子进程 + 真实导入器**，所以这里不能打桩脚本本身——
+    源文件是唯一可控的输入面。目录走 env（``QM_EXCLUSION_SRC_*``），
+    与容器内用挂载目录的路径同一条解析。
+    """
+    data_dir = tmp_path / "src_data"
+    configs_dir = tmp_path / "src_configs"
+    data_dir.mkdir()
+    configs_dir.mkdir()
+    (data_dir / "fundamental_flags.json").write_text(
+        json.dumps(
+            {
+                "asof": "2026-10-08",
+                "items": {"600606": {"flags": ["fin"], "reason": "连续 3 年亏损"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (data_dir / "risk_block.json").write_text(
+        json.dumps({"asof": "2026-10-08", "items": {}}), encoding="utf-8"
+    )
+    (data_dir / "news_blacklist_2026.json").write_text(
+        json.dumps({"until": "2026-10-08", "items": []}), encoding="utf-8"
+    )
+    (configs_dir / "live_symbols.json").write_text(
+        json.dumps({"block_buy": ["300750.SZ"]}), encoding="utf-8"
+    )
+    monkeypatch.setenv("QM_EXCLUSION_SRC_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("QM_EXCLUSION_SRC_CONFIGS_DIR", str(configs_dir))
+    return data_dir, configs_dir
+
+
+def test_refresh_imports_from_source_dirs(client, root, src):
+    """重导：落盘 + 信封 meta.asof 就是源基准日，两层来源都在产物里。"""
+    # Act
+    resp = client.post(f"{PREFIX}/refresh")
+
+    # Assert
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["first_import"] is True
+    assert data["meta"]["asof"] == "2026-10-08"
+    payload = json.loads((root / "cn.json").read_text(encoding="utf-8"))
+    assert "600606.SH" in payload["items"]  # 裸码源 → 后缀式键
+    assert "300750.SZ" in payload["items"]  # configs 源也在（两块目录各自指对）
+
+
+def test_refresh_reports_delta_on_second_run(client, root, src):
+    """连跑两次：第二次如实报「源变化 → 新增/移除」，而不是永远 first_import。"""
+    # Arrange
+    first = client.post(f"{PREFIX}/refresh").json()["data"]
+    assert first["first_import"] is True and first["added"] == 0
+
+    data_dir, _ = src
+    (data_dir / "fundamental_flags.json").write_text(
+        json.dumps(
+            {
+                "asof": "2026-10-09",
+                "items": {"600036": {"flags": ["fin"], "reason": "新加入"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Act
+    second = client.post(f"{PREFIX}/refresh").json()["data"]
+
+    # Assert
+    assert second["first_import"] is False
+    assert second["added"] == 1 and second["removed"] == 1
+    assert second["added_sample"] == ["600036.SH"]
+    assert second["removed_sample"] == ["600606.SH"]
+    assert second["meta"]["asof"] == "2026-10-09"
+
+
+def test_refresh_refuses_when_source_missing(client, root, src):
+    """源缺一份 → 409 + 点名缺哪个文件，且**不写盘**（名单不完整比没有名单更危险）。"""
+    # Arrange
+    data_dir, _ = src
+    (data_dir / "risk_block.json").unlink()
+
+    # Act
+    resp = client.post(f"{PREFIX}/refresh")
+
+    # Assert
+    assert resp.status_code == 409
+    assert "risk_block.json" in resp.json()["detail"]
+    assert not (root / "cn.json").exists()
+
+
+def test_refresh_surfaces_audit_failure(client, root, src):
+    """后缀与交易所不符（永远不会命中的键=静默少排）→ 审计拦写盘，原因抬进响应。"""
+    # Arrange
+    _, configs_dir = src
+    (configs_dir / "live_symbols.json").write_text(
+        json.dumps({"block_buy": ["300750.SH"]}), encoding="utf-8"
+    )
+
+    # Act
+    resp = client.post(f"{PREFIX}/refresh")
+
+    # Assert
+    assert resp.status_code == 409
+    assert "后缀" in resp.json()["detail"]
+    assert not (root / "cn.json").exists()

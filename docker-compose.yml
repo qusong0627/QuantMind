@@ -390,6 +390,10 @@ services:
       - ./.env.example:/app/.env.example:ro
       - ./docker-compose.yml:/app/docker-compose.yml:ro
       - ./config:/app/config
+      # 操作员私有配置（本仓 .gitignore 忽略 /configs/，客户机可能没有该目录——
+      # Docker 会建空目录，导入器按「源文件缺失」明确拒绝而不是静默少读）。
+      # 个人中心「重导名单」端点要读其中的 live_symbols.json。
+      - ./configs:/app/configs:ro
       - ./scripts:/app/scripts
       # AlphaAgent 包源码（容器内 Python 通过 PYTHONPATH=/app 直接 import）
       - ./alphaagent:/app/alphaagent

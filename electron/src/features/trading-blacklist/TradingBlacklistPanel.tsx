@@ -18,6 +18,7 @@ import {
   Check,
   Pencil,
   Plus,
+  RefreshCcw,
   RefreshCw,
   Search,
   ShieldAlert,
@@ -59,6 +60,7 @@ export function TradingBlacklistPanel() {
   const [debounced, setDebounced] = useState('');
   const [actionFilter, setActionFilter] = useState<ActionFilter>('all');
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -92,6 +94,41 @@ export function TradingBlacklistPanel() {
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  /**
+   * 重导机器名单（后端跑导入器子进程）→ 成功后刷新表格。
+   *
+   * 与「刷新」按钮的区别必须一眼可辨：那个只重读**已有**名单，这个把 keeper 的
+   * 四份源重新导一遍（基准日会前进）。失败（审计不过/源缺失）时用弹窗完整展示
+   * 多行原因——这里是唯一告诉用户「为什么没导进去」的地方。
+   */
+  const runImport = useCallback(async () => {
+    setImporting(true);
+    try {
+      const res = await tradingBlacklistService.refresh();
+      const bits = [
+        res.firstImport ? '首次导入完成' : '重导完成',
+        `基准日 ${res.meta?.asof || '未知'}`,
+        `共 ${res.meta?.counts?.total ?? 0} 条`,
+      ];
+      if (!res.firstImport && (res.added || res.removed)) {
+        bits.push(`新增 ${res.added}、移除 ${res.removed}`);
+      }
+      message.success(bits.join('，'));
+      await load();
+    } catch (err) {
+      Modal.error({
+        title: '重导失败',
+        content: (
+          <pre className="mt-1 max-h-[300px] overflow-auto whitespace-pre-wrap break-words text-[12px] leading-relaxed text-gray-700 font-mono">
+            {(err as Error).message}
+          </pre>
+        ),
+      });
+    } finally {
+      setImporting(false);
+    }
   }, [load]);
 
   // 过滤条件变化时回到第一页——否则「在第 30 页搜一个词」会得到「无结果」，
@@ -173,9 +210,18 @@ export function TradingBlacklistPanel() {
             候选信号默认排除这些股票；放行需要你逐只确认
           </span>
           <button
+            onClick={runImport}
+            disabled={importing}
+            title="把 keeper 的四份源重新导一遍（后端跑导入器，含逐源审计）；与右侧「刷新」不同——那个只重读已有名单"
+            className="ml-auto shrink-0 flex items-center gap-1 text-[11px] font-bold text-gray-400 hover:text-rose-600 transition-colors disabled:opacity-50"
+          >
+            <RefreshCcw size={12} className={importing ? 'animate-spin' : ''} /> 重导名单
+          </button>
+          <button
             onClick={load}
             disabled={loading}
-            className="ml-auto shrink-0 flex items-center gap-1 text-[11px] font-bold text-gray-400 hover:text-indigo-600 transition-colors disabled:opacity-50"
+            title="只重读当前名单（不重新导入）"
+            className="shrink-0 flex items-center gap-1 text-[11px] font-bold text-gray-400 hover:text-indigo-600 transition-colors disabled:opacity-50"
           >
             <RefreshCw size={12} className={loading ? 'animate-spin' : ''} /> 刷新
           </button>
@@ -202,8 +248,16 @@ export function TradingBlacklistPanel() {
         </div>
 
         {stale && (
-          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1">
-            <AlertTriangle size={12} /> {stale} —— 请运行 <code className="font-mono">backend/scripts/import_exclusion_list.py</code> 刷新
+          <div className="mt-1.5 flex items-center gap-1.5 flex-wrap text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1">
+            <AlertTriangle size={12} /> {stale}
+            <button
+              onClick={runImport}
+              disabled={importing}
+              title="重新导入机器名单（后端跑导入器，含逐源审计）"
+              className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-600 text-white text-[10px] font-bold hover:bg-amber-700 transition-colors disabled:opacity-50"
+            >
+              <RefreshCcw size={10} className={importing ? 'animate-spin' : ''} /> 立即重导
+            </button>
           </div>
         )}
         {miss && (
