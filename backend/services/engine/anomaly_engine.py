@@ -58,7 +58,11 @@ SOURCE = "anomaly_engine"
 # model_ic_drop 0 行，而同期 risk_events 审计有 979 行——审计在、台账空，且自引擎上线起
 # 如此（不是当天坏的）。判据用**白名单**：新 kind 默认不写 instrument，宁可少一列也
 # 不静默丢整行；`_mark_recent` 的市场四类是其子集（异动源只认量价）。
-# 全量归类由 test_anomaly_record_instrument.test_every_engine_kind_is_classified 钉住。
+# **加新 kind 时必看**（2026-10-08 评审）：若新 kind 的 subject 是证券代码，必须同时加进
+# 本集合——漏加的后果不是报错而是**静默少动作**：instrument 少写、总线 targets 为空、
+# 持有人锁不写（该拦的不拦）。所以归类必须全量、不设默认：由
+# test_anomaly_record_instrument.test_every_engine_kind_is_classified 钉住（新 kind 不进
+# 任一族 → 该用例红）。
 SYMBOL_SUBJECT_KINDS = frozenset({
     "price_surge",
     "price_limit_up",
