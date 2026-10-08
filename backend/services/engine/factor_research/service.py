@@ -25,7 +25,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from backend.services.engine.factor_research import analysis, scorecard, store
+from backend.services.engine.factor_research import (
+    analysis,
+    discovery,
+    scorecard,
+    store,
+)
 from backend.services.engine.factor_research.catalog import BY_CODE, FACTORS, L1_ORDER
 
 
@@ -58,7 +63,7 @@ def catalog(dataset: str = "classic") -> dict:
     if dataset == "private":
         f = store.factors_meta()
         if f is None:
-            raise FileNotFoundError(
+            raise store.SnapshotMissing(
                 "私人因子库快照缺失（请先一键计算，产物 factor_research_private/factors.json）"
             )
         items = [{**e, "env_tag": "", "time_tag": ""} for e in f.get("factors", [])]
@@ -135,7 +140,7 @@ def _range_key(start: str | None, end: str | None, dataset: str) -> tuple:
 def _build_ctx(key: tuple, start: str | None, end: str | None, dataset: str) -> dict:
     p = store.panel(dataset)
     if p is None:
-        raise FileNotFoundError(
+        raise store.SnapshotMissing(
             f"factor_panel.parquet 缺失（数据集 {dataset}；请先跑构建或点「快照-一键计算」）"
         )
     bench = store.benchmark_table(dataset)
@@ -602,6 +607,45 @@ def screening() -> dict:
 # ---------------------------------------------------------------------------
 _BUILD_LOG = "build.log"
 _BUILD_PID = "build.pid"
+
+
+def scan_sources(dataset: str = "private") -> dict:
+    """扫描 quantdb 目录 → 与快照目录的差异（新增/消失）。**只读**，绝不触发重算。
+
+    为什么需要：目录（``factors.json``）是**快照产物**，不是每次读盘现算的。
+    新挖到的因子写进 ``6_ml_datasets`` 后，不重算就看不见；而重算一次私人库要
+    5~15 分钟并重写 5.5GB 宽表。这个接口让人先看清「有什么新的」再决定付不付。
+
+    **口径**：**必须**与重算走同一份扫描（``discovery``），否则这里说「没有新
+    因子」而重算算出别的结果 —— 那就成了一句骗人的前置提示。重算按钮
+    （``start_build``）不带 ``--source``，即脚本默认的 ``auto``；这里同样按
+    ``auto`` 比。故快照若当初是用 ``--source l1l2/kept`` 建的，会老实地报出大量
+    「新增」——这是对的：点一次重算它们确实会进来（``snapshot_source`` 会把这件事
+    告诉前端）。
+    """
+    if dataset != "private":
+        raise ValueError(
+            f"扫描仅支持 private 数据集（classic 的目录来自静态 catalog.py，"
+            f"没有「盘上有什么」可对），收到 {dataset!r}"
+        )
+    f = store.factors_meta()
+    if f is None:
+        raise store.SnapshotMissing(
+            "私人因子库快照缺失（请先一键计算，产物 factor_research_private/factors.json）"
+        )
+    factors = [e for e in f.get("factors", []) if e.get("code")]
+    out = discovery.diff_catalog(
+        discovery.scan_libraries(),
+        {e["code"] for e in factors},
+        catalog_library={
+            e["code"]: discovery.source_of(e.get("wind_source", "")) for e in factors
+        },
+    )
+    meta = f.get("meta", {})
+    out["dataset"] = dataset
+    out["snapshot_at"] = meta.get("built_at")
+    out["snapshot_source"] = meta.get("source")
+    return out
 
 
 def _build_running(d: Path) -> int | None:

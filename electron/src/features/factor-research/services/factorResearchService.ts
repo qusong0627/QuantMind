@@ -141,3 +141,38 @@ export function getSnapshotStatus(dataset: FactorDataset = 'classic'): Promise<S
 export function postBuildSnapshot(dataset: FactorDataset = 'classic'): Promise<{ started: boolean; running: boolean; pid?: number }> {
   return requestJson(`/build?dataset=${dataset}`, { method: 'POST' }, 30000);
 }
+
+// ---------------------------------------------------------------------------
+// 来源扫描（只读：列出 quantdb 里有哪些因子是快照目录还没有的）
+// ---------------------------------------------------------------------------
+/** 一条差异：因子代码 + 它来自哪个库（消失项可能取不到库名，故可为空串） */
+export interface ScanDiffItem {
+  code: string;
+  library: string;
+  library_label: string;
+}
+
+/** 「盘上扫到什么」× 「快照目录记了什么」的差异（后端 /scan，只读） */
+export interface ScanDiff {
+  /** 盘上有、快照目录没有（重算会收进来） */
+  new: ScanDiffItem[];
+  /** 快照目录有、盘上已找不到（重算会移出去） */
+  missing: ScanDiffItem[];
+  /** 新增数按来源库（分组标题用；顺序与 new 一致） */
+  new_by_library: Record<string, number>;
+  unchanged_count: number;
+  /** 盘上扫到的因子数（已跨库去重） */
+  discovered_count: number;
+  /** 快照目录里记的因子数 */
+  catalog_count: number;
+  dataset: string;
+  /** 当前快照的构建时间 */
+  snapshot_at: string | null;
+  /** 当前快照按哪个来源建的（auto/l1l2/kept）。非 auto 时「新增」会偏多，因为重算走 auto 全量 */
+  snapshot_source: string | null;
+}
+
+/** 扫描 quantdb 的因子来源，列出与快照目录的差异（只读，不触发重算） */
+export function getScanSources(dataset: FactorDataset = 'private'): Promise<ScanDiff> {
+  return requestJson<ScanDiff>(`/scan?dataset=${dataset}`, {}, 30000);
+}

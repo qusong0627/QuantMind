@@ -43,7 +43,16 @@ DEFAULT_FACTOR_SOURCE: FactorSource = "l1_factors"
 # 各市场 6_ml_datasets/ 下实际存在的训练直读数据集。
 # CUSTOM 为用户自传市场：仅做因子扫描，不强制 OHLCV 完备性（见 describe）。
 MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
-    "CN": ("l1_factors", "l2_factors", "l1_l2_factors", "alpha_library"),
+    # factor_defs 与 alpha_library 同为「清单库」，两者必须**同时**出现在这里：
+    # 上面那段 2026-09-23 的拆分说明要求清单库能做训练直读，alpha_library 照做了，
+    # factor_defs 漏了。漏一个的后果不是「少一个选项」——`_cached_factor_sources`
+    # 只从 sources_for_market + 非 EXCLUDED 的动态源里取集合，factor_defs 两边都不沾，
+    # 于是 statuses 里没有它，`load_quantdb_training_catalog` 直接 422
+    # 「因子源 factor_defs 不属于市场 CN」。而注册接口（resolve_registrable 只看
+    # EXCLUDED_FROM_TRAINING，那里没有 factor_defs）照样允许写入——**写进去的草稿
+    # 列不出、读不了、发不了，是一条静默死路**。
+    # 它占私人因子库 1336/2754（49%），2026-10-07 用户实测撞上。
+    "CN": ("l1_factors", "l2_factors", "l1_l2_factors", "alpha_library", "factor_defs"),
     "HK": ("l1_factors", "ccass_factors", "south_factors"),
     "US": ("l1_factors",),
     "CRYPTO": ("l1_factors",),

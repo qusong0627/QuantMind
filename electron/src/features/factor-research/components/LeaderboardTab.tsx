@@ -3,7 +3,7 @@
  * 双标签展示与筛选、勾选带入对比 / 合成。
  */
 import React, { useMemo, useState } from 'react';
-import { ArrowRightLeft, CheckSquare, Layers, Square, TrendingUp } from 'lucide-react';
+import { ArrowRightLeft, CheckSquare, Layers, PackagePlus, Square, TrendingUp } from 'lucide-react';
 import type { LeaderboardRow } from '../types/factorResearch';
 import { ALL_TAGS, Card, fmtNum, fmtPct, TagChip } from './common';
 
@@ -21,6 +21,8 @@ interface Props {
   onSendCompose: () => void;
   onOpenSingle: (code: string) => void;
   meta: Record<string, unknown>;
+  /** 仅管理员可见：把勾选因子写进训练因子目录草稿。非管理员不传（不渲染）。 */
+  onRegisterToTraining?: () => void;
 }
 
 type Col = {
@@ -34,7 +36,10 @@ type Col = {
 
 const COLS: Col[] = [
   { key: 'rank', label: '#', width: 'w-8', align: 'left' },
-  { key: 'name', label: '因子', align: 'left' },
+  // 因子列必须**定宽**。此前它没有宽度，在 `table-layout: auto` 下由内容决定：
+  // 私人库每个因子都要渲染 name_cn + code + l1/l2（外加两个可能的徽章），
+  // 于是它把剩下来的宽度全部吃掉，后面 9 个数值列被挤成一条缝。
+  { key: 'name', label: '因子', width: 'w-[13rem]', align: 'left' },
   { key: 'composite', label: '综合分', width: 'w-14', align: 'right', fmt: (v) => fmtNum(v as number, 3) },
   { key: 'annual_return', label: '年化', width: 'w-14', align: 'right', fmt: (v) => fmtPct(v as number) },
   { key: 'sharpe', label: '夏普', width: 'w-12', align: 'right', fmt: (v) => fmtNum(v as number) },
@@ -49,7 +54,7 @@ const COLS: Col[] = [
 
 export const LeaderboardTab: React.FC<Props> = ({
   rows, loading, error, selected, tagFilter, n, onNChange, onToggle, onToggleTag,
-  onSendCompare, onSendCompose, onOpenSingle, meta,
+  onSendCompare, onSendCompose, onOpenSingle, meta, onRegisterToTraining,
 }) => {
   const [sortKey, setSortKey] = useState<string>('composite');
   const [asc, setAsc] = useState(false);
@@ -130,6 +135,17 @@ export const LeaderboardTab: React.FC<Props> = ({
           <Layers className="w-3 h-3" />
           带入合成（{selected.length}）
         </button>
+        {onRegisterToTraining && (
+          <button
+            onClick={onRegisterToTraining}
+            disabled={selected.length < 1}
+            title="把勾选的因子写进训练因子目录草稿（只写草稿，需在训练数据集页发布后模型才会用上）"
+            className="flex items-center gap-1.5 rounded-full bg-slate-900 px-3 py-1 text-[11px] font-bold text-white hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <PackagePlus className="w-3 h-3" />
+            注册到训练目录（{selected.length}）
+          </button>
+        )}
       </div>
 
       {/* 说明 */}
@@ -151,7 +167,13 @@ export const LeaderboardTab: React.FC<Props> = ({
             三项 z 均 &lt; 0.5 → 全天候型；时效——近 12 月 RankIC 均值与区间全样本之差：&gt;+0.012 近期转强、
             &lt;−0.012 近期失效、两者 |RankIC| 都 &lt; 0.01 持续低效、其余长期稳定型。
           </p>
-          <p>点击列头可改排序（如点「最大回撤」看最抗跌、点「年化」看最赚钱）；勾选因子后可一键带入对比 / 合成。</p>
+          <p>
+            点击列头可改排序（如点「最大回撤」看最抗跌、点「年化」看最赚钱）；勾选因子后可一键带入对比 /
+            合成
+            {/* 只在实际有入口时提这句：经典因子库不提供注册（后端会逐条跳过），
+                写死这句话会把用户指向一个刷不出来的「刷新字段」流程。 */}
+            {onRegisterToTraining && '；管理员还可「注册到训练目录」，把勾选的因子写进训练特征库的草稿'}。
+          </p>
         </div>
       </details>
 
@@ -216,23 +238,38 @@ export const LeaderboardTab: React.FC<Props> = ({
                         {isSel ? <CheckSquare className="w-3.5 h-3.5 text-blue-600" /> : <Square className="w-3.5 h-3.5 text-slate-300" />}
                       </td>
                       <td className="py-1.5 font-mono text-slate-400">{r.rank}</td>
-                      <td className="py-1.5">
-                        <span className="font-bold text-slate-700">{r.name_cn}</span>
-                        <span className="ml-1.5 font-mono text-[10px] text-slate-400">{r.code}</span>
-                        <span className="ml-1.5 text-[9px] text-slate-300">{r.l1.slice(0, 2)} / {r.l2}</span>
-                        {r.insufficient && (
-                          <span className="ml-1.5 rounded-full bg-amber-50 border border-amber-100 px-1.5 py-[1px] text-[9px] font-bold text-amber-600">
-                            数据不足（{r.n_months ?? 0} 月）
+                      <td className="py-1.5 w-[13rem] max-w-[13rem]">
+                        {/* flex-wrap：正常一行放得下；带徽章的少数行让徽章折到第二行，
+                            而不是把徽章裁掉（它们是数据质量告警，被裁等于没告警）。 */}
+                        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
+                          <span className="font-bold text-slate-700 max-w-[7rem] truncate" title={r.name_cn}>
+                            {r.name_cn}
                           </span>
-                        )}
-                        {r.suspicious && (
-                          <span
-                            className="ml-1.5 rounded-full bg-orange-50 border border-orange-100 px-1.5 py-[1px] text-[9px] font-bold text-orange-600"
-                            title="|IC|>0.3 或 |ICIR|>5，超出真实因子的物理上限，疑似未来函数（数据质量问题，已沉底不参与正常排序）"
-                          >
-                            疑似未来函数
+                          {/* 私人因子库 2754/2754 的 name_cn 与 code 是**同一个字符串**（实测），
+                              两个都印等于把同一串字符排两遍并挤掉后面的数值列；只有经典库
+                              （82/82 两者不同、name_cn 是「动量」这类中文名）才需要并列显示。 */}
+                          {r.code !== r.name_cn && (
+                            <span className="shrink-0 font-mono text-[10px] text-slate-400" title={r.code}>
+                              {r.code}
+                            </span>
+                          )}
+                          <span className="shrink-0 text-[9px] text-slate-300 whitespace-nowrap">
+                            {r.l1.slice(0, 2)} / {r.l2}
                           </span>
-                        )}
+                          {r.insufficient && (
+                            <span className="shrink-0 rounded-full bg-amber-50 border border-amber-100 px-1.5 py-[1px] text-[9px] font-bold text-amber-600">
+                              数据不足（{r.n_months ?? 0} 月）
+                            </span>
+                          )}
+                          {r.suspicious && (
+                            <span
+                              className="shrink-0 rounded-full bg-orange-50 border border-orange-100 px-1.5 py-[1px] text-[9px] font-bold text-orange-600"
+                              title="|IC|>0.3 或 |ICIR|>5，超出真实因子的物理上限，疑似未来函数（数据质量问题，已沉底不参与正常排序）"
+                            >
+                              疑似未来函数
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-1.5 text-right font-mono font-bold text-indigo-600">{fmtNum(r.composite, 3)}</td>
                       <td className={`py-1.5 text-right font-mono font-bold ${(r.annual_return || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>

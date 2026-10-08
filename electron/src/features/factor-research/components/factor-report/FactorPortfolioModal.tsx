@@ -93,7 +93,7 @@ export const FactorPortfolioModal: React.FC<Props> = ({ open, dataset, datasetLa
               <div className="text-[11px] text-slate-500 mt-0.5">
                 规则：|ICIR| ≥ {String(data.rule?.icir_min)}、覆盖率 ≥ {Number(data.rule?.coverage_min) * 100}%、
                 T+{String(data.rule?.holding_days)} 调仓扣费后净收益 &gt; 0、|ρ| ≥ {String(data.rule?.corr_threshold)} 去重后按最大 ICIR 配权。
-                <span className="text-indigo-600 font-bold"> 该集合已写入训练目录（数据集 {data.dataset}），训练页默认勾选。</span>
+                <span className="text-slate-500"> 此推荐集仅在本页计算，不会自动进入训练目录——要作为训练特征请在排行榜勾选后点「注册到训练目录」。</span>
               </div>
             </div>
           )}

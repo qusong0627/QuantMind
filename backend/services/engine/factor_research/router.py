@@ -15,14 +15,20 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.services.engine.factor_research import service
+from backend.services.engine.factor_research.store import FactorDataset, SnapshotMissing
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/factor-research", tags=["Factor Research"])
 
 
 def _snapshot_guard(exc: FileNotFoundError) -> None:
-    """快照缺失（如未计算/重建中）→ 503 可读提示，而非 500。"""
-    if "factor_panel" in str(exc) or "缺失" in str(exc):
+    """快照缺失（如未计算/重建中）→ 503 可读提示，而非 500。
+
+    按**类型**判，不按文案判：数据目录缺失（``6_ml_datasets`` 没挂上 / 没生成）
+    的报错文案里也有「缺失」，按文案判会把它翻译成「请点一键计算」—— 指错路，
+    且用户照着点只会白等一次几分钟的重建。
+    """
+    if isinstance(exc, SnapshotMissing):
         raise HTTPException(
             status_code=503,
             detail="因子快照不完整（可能未生成或正在重建）：请在页面右上角「快照」中一键计算",
@@ -39,7 +45,7 @@ async def _run(fn, *args):
 
 
 @router.get("/catalog")
-async def get_catalog(dataset: str = "classic"):
+async def get_catalog(dataset: FactorDataset = "classic"):
     """因子目录（大类/小类/方向/公式/数据源/可用性）+ 快照元信息 + 基准。"""
     return await _run(service.catalog, dataset)
 
@@ -49,7 +55,7 @@ async def get_leaderboard(
     start: str | None = None,
     end: str | None = None,
     n: int = 30,
-    dataset: str = "classic",
+    dataset: FactorDataset = "classic",
 ):
     """排行榜：区间内重算 KPI/超额/RankIC + 持仓画像 + 双标签 + 综合分。
 
@@ -65,7 +71,7 @@ async def get_factor(
     start: str | None = None,
     end: str | None = None,
     stocks_n: int = 30,
-    dataset: str = "classic",
+    dataset: FactorDataset = "classic",
 ):
     """单因子：区间内多档持仓数（ns=5,10,30）净值/KPI/超额 + N 扫描 + 个股表 + 分布。"""
     try:
@@ -87,7 +93,7 @@ class CompareRequest(BaseModel):
     items: list[CompareItem]
     start: str | None = None
     end: str | None = None
-    dataset: str = "classic"
+    dataset: FactorDataset = "classic"
 
 
 @router.get("/compare")
@@ -95,7 +101,7 @@ async def get_compare(
     codes: str,
     start: str | None = None,
     end: str | None = None,
-    dataset: str = "classic",
+    dataset: FactorDataset = "classic",
 ):
     """多因子对比（GET 兼容形态：codes=逗号分隔，每因子 Top-30）。"""
     lst = [c.strip() for c in codes.split(",") if c.strip()]
@@ -119,14 +125,34 @@ async def get_screening():
     return await asyncio.to_thread(service.screening)
 
 
+@router.get("/scan")
+async def get_scan(dataset: FactorDataset = "private"):
+    """扫描 quantdb 目录，列出与快照目录的差异（新增/消失）。
+
+    **只读**：不写 factors.json、不触发重算（重算要 5~15 分钟并重写 5.5GB 宽表，
+    值不值得付由用户看完差异再定）。dataset 只支持 private —— classic 的目录来自
+    静态 catalog.py，没有「盘上有什么」可对，故明确 400 而不是回一份空差异。
+    「哪个 dataset 能扫」这条规则只在 ``service.scan_sources`` 里写一次，这里只
+    把它的 ``ValueError`` 翻成状态码（避免两处各判一次、日后改一处漏一处）。
+    """
+    try:
+        return await _run(service.scan_sources, dataset)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except FileNotFoundError as e:
+        # 能走到这里的 FileNotFoundError 都不是快照缺失（那些在 `_run` 里已翻成
+        # 「请点一键计算」了），而是数据目录本身的问题 —— 指路要指到「数据」。
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
 @router.get("/snapshot-status")
-async def get_snapshot_status(dataset: str = "classic"):
+async def get_snapshot_status(dataset: FactorDataset = "classic"):
     """快照状态（是否存在/构建中/进度日志）—— 供前端「一键计算」入口。"""
     return await _run(service.snapshot_status, dataset)
 
 
 @router.post("/build")
-async def post_build(dataset: str = "classic"):
+async def post_build(dataset: FactorDataset = "classic"):
     """一键计算快照（后台子进程，全本地 QuantDB 计算、不上传任何数据）。"""
     out = await _run(service.start_build, dataset)
     if out.get("error"):
@@ -152,7 +178,7 @@ class ComposeRequest(BaseModel):
     cost_rate: float | None = Field(None, ge=0, le=0.05)
     start: str | None = None
     end: str | None = None
-    dataset: str = "classic"
+    dataset: FactorDataset = "classic"
 
 
 @router.post("/compose")
@@ -179,7 +205,7 @@ class OptimalRequest(BaseModel):
     top_n: int = Field(30, ge=1, le=100)
     start: str | None = None
     end: str | None = None
-    dataset: str = "classic"
+    dataset: FactorDataset = "classic"
 
 
 @router.post("/optimal-weights")

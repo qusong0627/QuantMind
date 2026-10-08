@@ -52,47 +52,19 @@ from backend.services.engine.factor_research import analysis  # noqa: E402
 from backend.services.engine.factor_research import data as frdata  # noqa: E402
 from backend.services.engine.factor_research import engine  # noqa: E402
 from backend.services.engine.factor_research.catalog import BY_CODE  # noqa: E402
+from backend.services.engine.factor_research import discovery  # noqa: E402
 from backend.shared.quantdb_paths import resolve_quantdb_dir  # noqa: E402
 
 LOOKBACK_START = "2018-06-01"
 DEFAULT_START = "2020-01-01"
 PANEL_K = 150
-# 来源库（auto = 扫描 6_ml_datasets；l1l2 = L1/L2 因子数据；kept = 多库筛选保留清单）
-L1L2_SOURCES = ("l1_factors", "l2_factors")
-KEPT_LIB_SOURCES = ("alpha_library", "alpha360", "jq110", "tdxgs")
-# auto 模式的优先序（重名列先到先得）；未列出的目录按字母序追加
-AUTO_PRIORITY = (
-    "l1_factors",
-    "l2_factors",
-    "alpha_library",
-    "alpha360",
-    "jq110",
-    "tdxgs",
-    "features_daily",
-)
-# auto 模式跳过的目录：标签集（非因子）与 L1∪L2 冗余并集
-AUTO_SKIP = {"alpha_library_labels", "l1_l2_factors"}
-LIB_LABELS = {
-    "l1_factors": "L1 因子",
-    "l2_factors": "L2 因子",
-    "alpha_library": "Alpha 因子库",
-    "alpha360": "Alpha360 量价",
-    "jq110": "聚宽 JQ110",
-    "tdxgs": "通达信指标",
-    "features_daily": "每日特征（技术+估值）",
-    "factor_research": "经典因子（demo 复刻）",
-    "gap_mined": "空档挖掘因子",  # GAP_MINED_MARK
-}
-
-
-def _lib_label(lib: str) -> str:
-    """库的中文标签；未登记的库回退成目录名。
-
-    `auto` 的语义是「扫描 6_ml_datasets 全部因子数据集」，所以必须容忍没登记过的
-    库：直接下标取字典的话，新增一个因子库就会在**跑完各库、落盘前**抛裸
-    `KeyError`，几分钟算力白费且报错点离原因几百行。全脚本只此一处取标签。
-    """
-    return LIB_LABELS.get(lib, lib)
+# 扫描的唯一实现已提到 `factor_research.discovery`：构建与「扫描」接口共用同一份，
+# 否则扫描会给出与重算不符的承诺（按钮说「没有新因子」而重算算出别的结果）。
+# 下面两个名字保留为**转调别名**，供本脚本既有调用点（`main()`）与既有测试引用；
+# 其余常量（L1L2_SOURCES/AUTO_PRIORITY/AUTO_SKIP/DROP_COLS/LIB_LABELS）已无本地
+# 引用，需要时直接从 `discovery` 取，别再在这里复制一份。
+KEPT_LIB_SOURCES = discovery.KEPT_LIB_SOURCES
+_lib_label = discovery.lib_label
 
 
 def _write_wide_scores(wide_parts: list[pd.DataFrame], path: Path) -> int:
@@ -127,21 +99,6 @@ def _write_wide_scores(wide_parts: list[pd.DataFrame], path: Path) -> int:
     return len(cols)
 
 
-# 非因子列（标识与行情行情列不入库；date 为分区日期的冗余列）
-DROP_COLS = {
-    "symbol",
-    "time",
-    "dt",
-    "date",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "amount",
-}
-
-
 def _out_dir() -> Path:
     env = os.environ.get("FACTOR_RESEARCH_OUT")  # 冒烟测试用临时目录
     if env:
@@ -153,102 +110,45 @@ def _out_dir() -> Path:
     return d
 
 
-def _load_kept() -> tuple[dict[str, list[dict]], list[dict]]:
-    """五库联合筛选保留清单 → (外部库分组, factor_research 组)。"""
-    p = (
-        resolve_quantdb_dir()
-        / "factor_research"
-        / "screening"
-        / "factor_selection.json"
-    )
-    if not p.exists():
-        raise FileNotFoundError(f"筛选清单缺失（先跑 screen_factors.py）: {p}")
-    sel = json.loads(p.read_text(encoding="utf-8"))
-    external: dict[str, list[dict]] = {}
-    fr_kept: list[dict] = []
-    for k in sel.get("kept", []):
-        if not k.get("name"):
-            continue
-        if k["library"] in KEPT_LIB_SOURCES:
-            external.setdefault(k["library"], []).append(k)
-        elif k["library"] == "factor_research":
-            fr_kept.append(k)
-    return external, fr_kept
-
-
-def _load_l1l2(qroot: Path) -> tuple[dict[str, list[dict]], list[dict]]:
-    """本地 L1/L2 因子数据的因子列清单 → (L1/L2 分组, 空)。"""
-    external: dict[str, list[dict]] = {}
-    for ds in L1L2_SOURCES:
-        root = qroot / "6_ml_datasets" / ds
-        parts = sorted(root.glob("dt=*/data.parquet"))
-        if not parts:
-            raise FileNotFoundError(
-                f"{ds} 数据集缺失（先运行特征管线生成 {ds}）: {root}"
-            )
-        names = _numeric_names(parts[-1])
-        external[ds] = [{"name": c, "display_name": c} for c in names]
-    return external, []
-
-
-def _load_auto(qroot: Path) -> tuple[dict[str, list[dict]], list[dict]]:
-    """自动扫描 6_ml_datasets：全部含分区的因子数据集（按优先序去重）。"""
-    root = qroot / "6_ml_datasets"
-    if not root.exists():
-        raise FileNotFoundError(f"6_ml_datasets 目录缺失: {root}")
-    found = set()
-    for d_ in root.iterdir():
-        # 跳过：约定名、点目录、以及**下划线前缀**（临时/试跑目录的约定）。
-        # 下划线必须排除，不只是为了整洁：`_`(0x5F) 字典序在字母前，试跑目录会排在
-        # 正式库前面先占住列名，正式库的同名列随即被 seen 过滤掉 —— 因子还在，但
-        # 用的是试跑那份（通常窗口短得多）的数据，且全程不报错。
-        if not d_.is_dir() or d_.name in AUTO_SKIP or d_.name.startswith((".", "_")):
-            continue
-        parts = sorted(d_.glob("dt=*/data.parquet"))
-        if parts:
-            found.add(d_.name)
-    order = [x for x in AUTO_PRIORITY if x in found] + sorted(
-        found - set(AUTO_PRIORITY)
-    )
-    external: dict[str, list[dict]] = {}
-    seen: set[str] = set()
-    for ds in order:
-        parts = sorted((root / ds).glob("dt=*/data.parquet"))
-        names = [c for c in _numeric_names(parts[-1]) if c not in seen]
-        if len(names) < 5:  # 非因子目录（记录/元数据）跳过
-            continue
-        seen.update(names)
-        external[ds] = [{"name": c, "display_name": c} for c in names]
-    return external, []
-
-
-def _load_sources(source: str, qroot: Path) -> tuple[dict[str, list[dict]], list[dict]]:
-    if source == "kept":
-        return _load_kept()
-    if source == "l1l2":
-        return _load_l1l2(qroot)
-    return _load_auto(qroot)
-
-
-def _numeric_names(path: Path) -> list[str]:
-    """分区内的数值型因子列（排除标识/行情列与字符串列）。"""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    out = []
-    for field in pq.ParquetFile(path).schema_arrow:
-        if field.name in DROP_COLS:
-            continue
-        if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
-            out.append(field.name)
-    return out
+# 以下 5 个名字是**转调别名**，供本脚本既有调用点（`main()` 用 `_load_sources`）
+# 与既有测试（`test_factor_panel_private_scan.py` 用 `_load_auto`）引用。
+# 不要在这里重新长出实现：扫描接口读的是 `discovery`，两边一旦分叉，
+# 「有哪些因子」就会有两种答案，而没有任何一层会报错。
+_load_kept = discovery.load_kept
+_load_l1l2 = discovery.load_l1l2
+_load_auto = discovery.load_auto
+_load_sources = discovery.load_sources
+_numeric_names = discovery.numeric_factor_names
 
 
 def _day_matrix(f: Path, names: list[str], symbols: pd.Index) -> np.ndarray:
-    """读取单日分区 → (F, S) float32，按 symbols 对齐。"""
-    df = pd.read_parquet(f, columns=["symbol", *names])
-    df = df.set_index("symbol").reindex(symbols)
-    return df[names].to_numpy(dtype=np.float32).T
+    """读取单日分区 → (F, S) float32，按 symbols 对齐；**分区缺该列时整行留 NaN**。
+
+    列清单来自该库的**最新分区**（`discovery.load_auto` 只读 `parts[-1]`），而历史
+    分区的 schema 会变：`features_daily` 的 `return_*d` 在 2026-09-21 改名成
+    `future_return_*d`，拿新列名去读 2016 年的分区时 pyarrow 直接抛
+
+        ArrowInvalid: No match for FieldRef.Name(future_return_1d)
+
+    `columns=` 是整批读，一列对不上就整个重算死在该库上；而写盘全在库循环**之后**，
+    所以用户白等 5 分钟后快照一个字节没变（2026-10-07 由扫描→重算这条路径实测）。
+    故先按分区实际 schema 取交集，缺列留 NaN——新列只在它真正存在的那段有值，这与
+    `_score_row_block` 对 NaN 的处理一致。
+
+    行数必须**恒等于** `len(names)`：调用方 `vals[di] = ...` 是按 names 的位置写入
+    (F, S) 缓冲区的，少一行就是整体错位。
+    """
+    import pyarrow.parquet as pq
+
+    have = set(pq.ParquetFile(f).schema_arrow.names)
+    pos = [i for i, c in enumerate(names) if c in have]
+    out = np.full((len(names), len(symbols)), np.nan, dtype=np.float32)
+    if pos:
+        use = [names[i] for i in pos]
+        df = pd.read_parquet(f, columns=["symbol", *use])
+        df = df.set_index("symbol").reindex(symbols)
+        out[pos] = df[use].to_numpy(dtype=np.float32).T
+    return out
 
 
 def _score_row_block(v: np.ndarray) -> np.ndarray:
@@ -451,7 +351,9 @@ def main() -> int:
                         + sel_note
                     ),
                     "formula": "",
-                    "wind_source": f"QuantDB 6_ml_datasets/{lib}",
+                    # 前缀取自 discovery：扫描侧要从这个字段反查来源库（source_of），
+                    # 各写各的字符串就会对不上，差异里的库标签集体变空且不报错。
+                    "wind_source": f"{discovery.SOURCE_PREFIX}{lib}",
                     "ic_mean": round(icm, 4) if np.isfinite(icm) else None,
                     "ic_std": round(ics, 4) if np.isfinite(ics) else None,
                     "ic_ir": round(icm / ics, 3)

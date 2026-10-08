@@ -6,9 +6,9 @@
  * 工具：因子报告（2026-09-17 由技能中心迁入，全宽渲染；策略模板已迁至回测中心·策略管理右侧，评估中心已迁至模拟交易页签）
  * 数据：/api/v1/factor-research（引擎服务，快照由 build_factor_research.py 构建）
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowRightLeft, Award, BarChart3, Database, Filter, Layers, LineChart, Sigma, TableProperties } from 'lucide-react';
+import { ArrowRightLeft, Award, BarChart3, Database, Filter, Layers, LineChart, ScanSearch, Sigma, TableProperties } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { ApiError, getCatalog, getLeaderboard } from '../services/factorResearchService';
 import type { FactorDataset, RangeParams } from '../services/factorResearchService';
@@ -21,8 +21,12 @@ import { SingleFactorTab } from '../components/SingleFactorTab';
 import { CompareTab } from '../components/CompareTab';
 import { ComposeTab } from '../components/ComposeTab';
 import { ScreeningTab } from '../components/ScreeningTab';
+import type { FactorLocation } from '../components/ScreeningTab';
 import { SnapshotPanel } from '../components/SnapshotPanel';
+import { ScanPanel } from '../components/ScanPanel';
+import { RegisterToTrainingModal } from '../components/RegisterToTrainingModal';
 import { FactorReportPanel } from '../components/factor-report/FactorReportPanel';
+import { useAppSelector } from '../../../store';
 
 type Tab = 'leaderboard' | 'single' | 'compare' | 'compose' | 'screening' | 'factor-report';
 
@@ -76,9 +80,62 @@ const FactorResearchPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
-  const [showSnapshot, setShowSnapshot] = useState(false);
+  // 主区右上角的两块「工具面板」：快照（状态/构建）与扫描（差异）。同一时刻只开一块。
+  const [panel, setPanel] = useState<'none' | 'snapshot' | 'scan'>('none');
+  // 快照就绪后要不要**自动收起**快照面板，取决于它是怎么打开的：
+  // - 榜单 503（快照缺失）时自动弹出 → 建完就该收起并把数据带回来；
+  // - 用户自己点开（「快照」按钮 / 扫描面板的「重算快照」）→ **绝不能自动收起**。
+  //   快照存在时 SnapshotPanel 首轮轮询就会回调 onReady，自动收起会让面板一闪而过，
+  //   里面那个真正发起构建的「重算快照」按钮永远点不到 —— 入口变成死胡同。
+  const [snapshotAutoClose, setSnapshotAutoClose] = useState(true);
+  // 本轮 503 是否已经自动弹过一次面板。**必须**有这个闸门：`/snapshot-status` 说
+  // 「就绪」而榜单仍 503 时（快照文件在但不完整），「弹出 → onReady → 收起 → 重拉榜单
+  // → 又 503 → 再弹出」会自转成一个请求循环，把引擎打满 —— 2026-09-19 就有过并发
+  // 因子研究请求把引擎健康检查压到失败、被看门狗重启的先例。榜单一旦成功即复位，
+  // 真正的下一次快照缺失照样能自动弹。
+  const autoOpenedRef = useRef(false);
   const [dataset, setDataset] = useState<FactorDataset>('private'); // 默认以 L1+L2 私人因子库为主
   const [reloadKey, setReloadKey] = useState(0);
+  // 注册弹窗的入参在**打开那一刻**固定下来。主选（selected）与筛选页签的选择
+  // 是两套互不相干的状态，且目标数据集可能不同（筛选选中恒为私人库），
+  // 让弹窗自己去读 state 会在切页签/切数据集时错位到另一批因子。
+  const [registerTarget, setRegisterTarget] = useState<{ codes: string[]; dataset: FactorDataset } | null>(null);
+  // 因子报告的深链目标。只有从筛选页签点「报告」才会被设置；用户自己点页签会清掉。
+  const [reportTarget, setReportTarget] = useState<{ dataset: string; code: string } | null>(null);
+  /**
+   * 两个数据集目录的累积缓存。页面主流程只消费 `factors`（当前数据集），
+   * 但筛选页签的名字横跨两个目录，需要一份完整的 name→落点索引才行。
+   * 私人库 1.1 MB / 经典库 39 KB，缓存下来比每次现拉划算得多。
+   */
+  const [catalogCache, setCatalogCache] = useState<Partial<Record<FactorDataset, FactorMeta[]>>>({});
+  /**
+   * 在途的目录请求。主流程与「补缺的那份」两条路可能同时想要同一个数据集——
+   * 进页面就立刻点筛选页签最典型（私人库目录 1.1 MB 还在路上，cache 仍是空的）。
+   * 没有这个闸门就会把同一份目录拉两遍，而引擎被并发因子研究请求压垮过一次
+   * （2026-09-19，看门狗重启），这里不该再添一份。
+   */
+  const catalogInflightRef = useRef(new Set<FactorDataset>());
+  /**
+   * 每个目录的取回结果。筛选页要靠它区分两件**界面表现必须不同**的事：
+   * 「这份目录还没到手 / 没取回来」与「目录到手了、里面确实没这个因子」。
+   * 只有后者才该建议去重算快照 —— 把取回失败说成「新挖到的因子还没进快照」，
+   * 等于把人指去跑一个十分钟的昂贵错路，而真正的问题是引擎那一下没答理。
+   */
+  const [catalogOutcome, setCatalogOutcome] = useState<Partial<Record<FactorDataset, 'ok' | 'fail'>>>({});
+  /** 筛选页签里勾中的因子。**不并入 `selected`**：那一个是当前数据集的 code 空间
+   *  （切库即清空、排行榜/对比/合成共用），而筛选的勾选天然跨库且只服务于注册。 */
+  const [screeningSelected, setScreeningSelected] = useState<string[]>([]);
+  /** 跨库跳转时把目标 code 带过 `[dataset]` 那次清理（见下面的 effect）。 */
+  const keepActiveRef = useRef<string | null>(null);
+  // 注册会写 `qm_training_factor_mapping`，后端是 require_admin；非管理员不渲染入口。
+  const isAdmin = useAppSelector((state) => state.auth.user?.is_admin) || false;
+
+  // 经典因子库**不能**注册：`store.factors_meta("classic")` 恒为 None（只有
+  // `build_factor_panel_private.py` 写 factors.json），且 classic 的 l2 是
+  // 「动量」这类中文字面量，过不了后端的来源库标识符校验。所以放行条件必须
+  // 带上数据集，否则按钮点了只会全量 skipped，还把用户指向永远刷不出来的
+  // 「刷新字段」。
+  const canRegister = isAdmin && dataset === 'private';
 
   const rangeParams: RangeParams = useMemo(
     () => ({ start: range.start, end: range.end }),
@@ -88,6 +145,7 @@ const FactorResearchPage: React.FC = () => {
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    catalogInflightRef.current.add(dataset);
     getCatalog(dataset)
       .then((cat) => {
         if (!alive) return;
@@ -95,11 +153,17 @@ const FactorResearchPage: React.FC = () => {
         setL1Order(cat.l1_order);
         setL2Order(cat.l2_order || {});
         setCatalogMeta(cat.meta);
+        setCatalogCache((prev) => ({ ...prev, [dataset]: cat.factors }));
+        setCatalogOutcome((prev) => ({ ...prev, [dataset]: 'ok' }));
       })
       .catch((e: unknown) => {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
+        if (!alive) return;
+        setError(e instanceof Error ? e.message : String(e));
+        setCatalogOutcome((prev) => ({ ...prev, [dataset]: 'fail' }));
       })
       .finally(() => {
+        // 不论组件还在不在都要销号：请求已经结束了，留在册只会让补缺那条路永远跳过它。
+        catalogInflightRef.current.delete(dataset);
         if (alive) setLoading(false);
       });
     return () => {
@@ -107,12 +171,89 @@ const FactorResearchPage: React.FC = () => {
     };
   }, [dataset]);
 
-  // 切换数据集：清空选择态，避免跨库代码混选
+  // 切换数据集：清空选择态，避免跨库代码混选。
+  // 注册弹窗也要关——它按 dataset 决定目标库，挂着不关会用旧库的 codes 去写新库。
+  // 工具面板同理：扫描只对私人库有意义（经典库目录来自内置清单，扫不出东西），
+  // 停在扫描面板切到经典会留下一块讲不通的空结果。
   useEffect(() => {
     setSelected([]);
-    setActiveCode(null);
+    // 榜单行也要清空。**不清就是个静默错配**：rows 在切库的这一刻还是上一库的，
+    // 而下面「没选中就补第一个因子」那个 effect 会在 activeCode 被置空后重跑一次
+    // （它的依赖就是 activeCode），条件成立 → 把上一库的第一名写回 activeCode。
+    // 之后新榜单落地时 activeCode 已经非空，effect 不会再纠正，于是单因子分析
+    // 拿私人库的 code 去问经典库的快照，只显示「该因子不可用」——用户从没选过它。
+    // 清空不会闪：同一批更新里 loading 也被置 true，表格位渲染的是骨架屏。
+    setRows([]);
+    // 跨库跳转（筛选页点经典库的因子）会在同一次事件里改 dataset 和 activeCode，
+    // 而这里会把 activeCode 清掉 —— 它是为「用户自己切库」写的，分不清两种情况。
+    // keepActiveRef 把转移中的目标带过这一次清理；「没选中就补第一个因子」的那个
+    // effect 因为 activeCode 非空，也就不会把用户点到的东西替换掉。
+    setActiveCode(keepActiveRef.current);
+    keepActiveRef.current = null;
     setTagFilter([]);
+    setRegisterTarget(null);
+    setPanel('none');
   }, [dataset]);
+
+  // 筛选页签需要**两个**数据集的目录才建得出 name→落点索引，而主流程只拉当前
+  // 那一个。缺的那份在这里补，且只补进 cache：factors/l1Order/l2Order 是
+  // 「当前数据集」的展示态，不能被一次后台补数改掉。
+  // 依赖里的 catalogCache 会让它在补完后重跑一次并立刻空转返回，不会自转。
+  useEffect(() => {
+    if (tab !== 'screening') return;
+    // 在途的跳过：主流程可能正在拉同一个数据集（进页面就点筛选页签），
+    // 不跳就会把 1.1 MB 的私人库目录拉两遍。
+    const missing = (['private', 'classic'] as FactorDataset[]).filter(
+      (d) => !catalogCache[d] && !catalogInflightRef.current.has(d),
+    );
+    if (missing.length === 0) return;
+    let alive = true;
+    missing.forEach((d) => catalogInflightRef.current.add(d));
+    Promise.all(
+      missing.map((d) =>
+        getCatalog(d)
+          .then((cat) => [d, cat.factors] as const)
+          .catch(() => null)
+          .finally(() => catalogInflightRef.current.delete(d)),
+      ),
+    ).then((out) => {
+      if (!alive) return;
+      const patch: Partial<Record<FactorDataset, FactorMeta[]>> = {};
+      out.forEach((o) => {
+        if (o) patch[o[0]] = o[1];
+      });
+      // 全部失败时一个字都不写：写了会改变 catalogCache 的引用、白触发一轮重渲染，
+      // 而缺的那份还是缺的。空转返回即止（依赖没变，effect 不会再跑）。
+      if (Object.keys(patch).length) setCatalogCache((prev) => ({ ...prev, ...patch }));
+      // 成败逐个记账：cache 里没有不等于没取回来，筛选页要凭这个说实话。
+      setCatalogOutcome((prev) => {
+        const next = { ...prev };
+        out.forEach((o, i) => { next[missing[i]] = o ? 'ok' : 'fail'; });
+        return next;
+      });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [tab, catalogCache]);
+
+  const catalogIndex = useMemo(() => {
+    const idx = new Map<string, FactorLocation>();
+    // 索引键必须是目录的 **code**，不是 name_cn：筛选清单里的名字与 code 逐字
+    // 相同（实测 362/362），而经典库的 name_cn 是「动量」这类中文名，用它建索引
+    // 会一个都对不上。私人库后写：两份目录实测零重叠，万一将来重名，让主库赢。
+    (['classic', 'private'] as FactorDataset[]).forEach((ds) => {
+      (catalogCache[ds] || []).forEach((f) => idx.set(f.code, { dataset: ds, code: f.code }));
+    });
+    return idx;
+  }, [catalogCache]);
+
+  /** 目录的可信度，交给筛选页决定怎么解释「这行点不进去」。 */
+  const catalogStatus: 'loading' | 'degraded' | 'ready' = useMemo(() => {
+    const both: FactorDataset[] = ['private', 'classic'];
+    if (both.some((d) => catalogOutcome[d] === 'fail')) return 'degraded';
+    return both.every((d) => catalogOutcome[d] === 'ok') ? 'ready' : 'loading';
+  }, [catalogOutcome]);
 
   useEffect(() => {
     let alive = true;
@@ -124,12 +265,17 @@ const FactorResearchPage: React.FC = () => {
         setLbMeta(lb.meta);
         setError(null);
         setErrorStatus(null);
+        autoOpenedRef.current = false; // 榜单恢复 → 允许下一次快照缺失再自动弹
       })
       .catch((e: unknown) => {
         if (!alive) return;
         setError(e instanceof Error ? e.message : String(e));
         setErrorStatus(e instanceof ApiError ? e.status : null);
-        if (e instanceof ApiError && e.status === 503) setShowSnapshot(true);
+        if (e instanceof ApiError && e.status === 503 && !autoOpenedRef.current) {
+          autoOpenedRef.current = true;
+          setSnapshotAutoClose(true);
+          setPanel('snapshot');
+        }
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -151,10 +297,54 @@ const FactorResearchPage: React.FC = () => {
   const toggleTag = (tag: string) =>
     setTagFilter(tagFilter.includes(tag) ? tagFilter.filter((t) => t !== tag) : [...tagFilter, tag]);
 
-  const openSingle = (code: string) => {
-    setActiveCode(code);
-    setTab('single');
-  };
+  /**
+   * 打开单因子分析。`target` 是该因子所属的数据集（筛选页签会带过来）——
+   * 与当前数据集不同就顺带切库：拿经典库的 code 去问私人库的快照，
+   * 只会得到一屏「该因子不可用」，而界面上没有任何地方说明是库选错了。
+   */
+  const openSingle = useCallback(
+    (code: string, target?: FactorDataset) => {
+      if (target && target !== dataset) {
+        keepActiveRef.current = code;
+        setDataset(target);
+      }
+      setActiveCode(code);
+      setTab('single');
+    },
+    [dataset, setTab],
+  );
+
+  const toggleScreening = useCallback((code: string) => {
+    setScreeningSelected((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
+  }, []);
+
+  const toggleScreeningMany = useCallback((codes: string[], select: boolean) => {
+    setScreeningSelected((prev) =>
+      select ? [...new Set([...prev, ...codes])] : prev.filter((c) => !codes.includes(c)),
+    );
+  }, []);
+
+  const openReport = useCallback(
+    (reportDataset: string, code: string) => {
+      setReportTarget({ dataset: reportDataset, code });
+      setTab('factor-report');
+    },
+    [setTab],
+  );
+
+  /** 用户主动打开快照面板（「快照」按钮 / 扫描面板的重算）：就绪后**不**自动收起 */
+  const openSnapshotManually = useCallback(() => {
+    setSnapshotAutoClose(false);
+    setPanel('snapshot');
+  }, []);
+
+  // 必须 useCallback：SnapshotPanel 的轮询 effect 依赖 onReady，而它每轮 setSt 都会
+  // 重渲染。onReady 每次渲染换新 → effect 重订阅 → 立刻再 tick 一次……
+  // 于是「5 秒轮询」退化成不受控的请求风暴（快照缺失、面板不被收起时最明显）。
+  const handleSnapshotReady = useCallback(() => {
+    setReloadKey((k) => k + 1);
+    if (snapshotAutoClose) setPanel('none');
+  }, [snapshotAutoClose]);
 
   const window_ = meta?.window as string[] | undefined;
   const available = factors.filter((f) => f.available).length;
@@ -181,7 +371,12 @@ const FactorResearchPage: React.FC = () => {
                 return (
                   <button
                     key={t.key}
-                    onClick={() => setTab(t.key)}
+                    onClick={() => {
+                      // 用户自己点页签 = 一次全新访问，丢掉上次从筛选页带过来的深链目标，
+                      // 否则离开「因子报告」再回来会被拽回那个因子。
+                      setReportTarget(null);
+                      setTab(t.key);
+                    }}
                     className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-bold transition-colors ${
                       tab === t.key ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
                     }`}
@@ -211,7 +406,13 @@ const FactorResearchPage: React.FC = () => {
         {/* 工具页签：整页全宽（原技能中心的因子报告） */}
         {isTool && tab === 'factor-report' && (
           <div className="flex-1 min-h-0 min-w-0 overflow-hidden">
-            <FactorReportPanel />
+            <FactorReportPanel
+              // key 换掉即重挂载：面板只在挂载时读一次深链目标（见它的 props 注释），
+              // 用 key 而不是「监听 props 变化」来保证这个约定不被父级的不卸载破坏。
+              key={reportTarget ? `${reportTarget.dataset}|${reportTarget.code}` : 'default'}
+              initialDataset={reportTarget?.dataset}
+              initialCode={reportTarget?.code}
+            />
           </div>
         )}
 
@@ -264,10 +465,26 @@ const FactorResearchPage: React.FC = () => {
                   {rangeMeta.n_months} 个月末
                 </span>
               )}
+              {/* 扫描只对私人库有意义：经典库的目录来自内置 catalog.py，
+                  没有「盘上有什么」可对，后端也会 400。故按数据集隐藏而不是禁用。 */}
+              {dataset === 'private' && (
+                <button
+                  onClick={() => setPanel(panel === 'scan' ? 'none' : 'scan')}
+                  data-testid="open-scan"
+                  className={`flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold ${
+                    panel === 'scan'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-600'
+                      : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+                  }`}
+                  title="扫描 quantdb：列出新挖到、还没进快照的因子（只读，不触发重算）"
+                >
+                  <ScanSearch className="w-3 h-3" /> 扫描
+                </button>
+              )}
               <button
-                onClick={() => setShowSnapshot(!showSnapshot)}
+                onClick={() => (panel === 'snapshot' ? setPanel('none') : openSnapshotManually())}
                 className={`flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold ${
-                  showSnapshot
+                  panel === 'snapshot'
                     ? 'border-indigo-200 bg-indigo-50 text-indigo-600'
                     : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
                 }`}
@@ -277,20 +494,26 @@ const FactorResearchPage: React.FC = () => {
               </button>
             </div>
 
-            {showSnapshot ? (
-              <SnapshotPanel
-                dataset={dataset}
-                onReady={() => {
-                  setShowSnapshot(false);
-                  setReloadKey(reloadKey + 1);
-                }}
+            {panel === 'snapshot' ? (
+              <SnapshotPanel dataset={dataset} onReady={handleSnapshotReady} />
+            ) : panel === 'scan' ? (
+              <ScanPanel
+                // 重算交给快照面板：进度、日志、轮询都只在那一边实现。
+                // 走「手动」入口：用户是冲着「重算」来的，面板不能自己收起来。
+                onRebuild={openSnapshotManually}
+                onClose={() => setPanel('none')}
               />
             ) : error ? (
               <div className="flex-1 flex flex-col items-center justify-center gap-2">
                 <span className="text-sm text-rose-500">{error.slice(0, 240)}</span>
                 {errorStatus === 503 ? (
                   <button
-                    onClick={() => setShowSnapshot(true)}
+                    // 这条链接只出现在「快照缺失」的 503 分支上，与自动弹出同路：
+                    // 建完就收起并把榜单带回来。
+                    onClick={() => {
+                      setSnapshotAutoClose(true);
+                      setPanel('snapshot');
+                    }}
                     className="text-[11px] font-bold text-indigo-500 hover:text-indigo-600"
                   >
                     → 打开快照计算面板
@@ -316,18 +539,42 @@ const FactorResearchPage: React.FC = () => {
                 onSendCompose={() => setTab('compose')}
                 onOpenSingle={openSingle}
                 meta={meta}
+                onRegisterToTraining={canRegister ? () => setRegisterTarget({ codes: selected, dataset }) : undefined}
               />
             ) : tab === 'single' ? (
               <SingleFactorTab code={activeCode} range={rangeParams} dataset={dataset} />
             ) : tab === 'compare' ? (
               <CompareTab codes={selected} onRemove={toggleSelected} nameOf={nameOf} range={rangeParams} dataset={dataset} />
             ) : tab === 'screening' ? (
-              <ScreeningTab />
+              <ScreeningTab
+                index={catalogIndex}
+                catalogStatus={catalogStatus}
+                selected={screeningSelected}
+                onToggle={toggleScreening}
+                onToggleMany={toggleScreeningMany}
+                onOpenSingle={openSingle}
+                onOpenReport={openReport}
+                canRegisterToTraining={isAdmin}
+                // 筛选的勾选恒为私人库 code（经典库的行根本勾不上），所以目标
+                // 数据集写死不跟 dataset 走——否则用户在经典库下勾选会写错库。
+                onRegister={() => setRegisterTarget({ codes: screeningSelected, dataset: 'private' })}
+              />
             ) : (
               <ComposeTab factors={factors} codes={selected} onChangeCodes={setSelected} range={rangeParams} dataset={dataset} />
             )}
           </div>
         </div>
+        )}
+
+        {registerTarget && (
+          <RegisterToTrainingModal
+            codes={registerTarget.codes}
+            // 来源库（弹窗按它分组）取自**目标数据集**的目录，不是当前展示的那个：
+            // 从筛选页注册时页面可能正停在经典库上。
+            factors={catalogCache[registerTarget.dataset] || []}
+            dataset={registerTarget.dataset}
+            onClose={() => setRegisterTarget(null)}
+          />
         )}
       </div>
     </div>

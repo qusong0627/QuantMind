@@ -16,6 +16,7 @@ import math
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 
@@ -25,6 +26,20 @@ _lock = threading.Lock()
 
 # 数据集 → 产物目录名
 DATASET_DIRS = {"classic": "factor_research", "private": "factor_research_private"}
+
+# 合法数据集取值的唯一出处（须与 DATASET_DIRS 同步，有测试锁死）。
+# 对外接口一律用它收口：dataset 会经 artifact_dir 拼进文件系统路径。
+FactorDataset = Literal["classic", "private"]
+
+
+class SnapshotMissing(FileNotFoundError):
+    """快照产物不存在（没建过 / 正在重建）。
+
+    单独成类型，是因为路由要靠它把「去点一键计算」这条路指对。原先路由按
+    文案里的「缺失」二字判（`_snapshot_guard`），而**数据目录缺失**（6_ml_datasets
+    未挂载/未生成）的报错也含这两个字，会被一并翻译成「请点快照-一键计算」——
+    用户点了也只是白等一次几分钟的重建，真正的原因（数据没挂上）一个字都没提。
+    """
 
 
 def _sanitize(o):
@@ -39,9 +54,23 @@ def _sanitize(o):
 
 
 def artifact_dir(dataset: str = "classic") -> Path:
+    """数据集 → 产物目录。**fail-closed**：未知 dataset 直接抛错，不做兜底。
+
+    这是对外参数进入文件系统路径的唯一入口，原先写的是
+    ``DATASET_DIRS.get(dataset, dataset)`` —— 未命中的取值被原样当路径组件，
+    而 ``Path`` 保留 ``..``（由内核在 ``open()`` 时解析），于是
+    ``?dataset=../../../../etc`` 就能读出库外文件；``POST /build`` 还会
+    ``mkdir(parents=True)`` 在库外建目录。合法取值只有 ``DATASET_DIRS`` 的键。
+    """
     from backend.shared.quantdb_paths import resolve_quantdb_dir
 
-    return resolve_quantdb_dir() / DATASET_DIRS.get(dataset, dataset)
+    try:
+        name = DATASET_DIRS[dataset]
+    except KeyError:
+        raise ValueError(
+            f"未知因子数据集 {dataset!r}（合法取值：{'、'.join(sorted(DATASET_DIRS))}）"
+        ) from None
+    return resolve_quantdb_dir() / name
 
 
 def _cached_obj(key: str, loader):
