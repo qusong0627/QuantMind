@@ -417,6 +417,24 @@ class AdminService {
         return resp.data;
     }
 
+    async getFactorFillSchedule(market: string): Promise<any> {
+        const resp = await this.axiosInstance.get(`/admin/data-platform/factor-fill-schedule/${market}`);
+        return resp.data;
+    }
+
+    async saveFactorFillSchedule(market: string, cfg: {
+        enabled: boolean;
+        time: string;
+    }): Promise<any> {
+        const resp = await this.axiosInstance.post(`/admin/data-platform/factor-fill-schedule/${market}`, cfg);
+        return resp.data;
+    }
+
+    async runFactorFillNow(market: string): Promise<any> {
+        const resp = await this.axiosInstance.post(`/admin/data-platform/factor-fill-schedule/${market}/run`);
+        return resp.data;
+    }
+
     /** TdxAiData 数据源配置 + worker 状态（只读，不拉起 worker） */
     async getTdxAiDataConfig(): Promise<any> {
         const resp = await this.axiosInstance.get('/admin/data-platform/tdx-aidata/config');

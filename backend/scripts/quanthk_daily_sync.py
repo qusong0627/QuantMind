@@ -139,8 +139,9 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
 
     if not datasets:
         # 全量定时路径：核心数据(K线→南向→L1→CCASS→南向/CCASS因子)先落盘保证每晚必达，
-        # 雅虎元数据段(估值快照/财务序列/分析师)最后执行——任务有 3600s 硬限制，
-        # 若被截断只损失元数据增量，次日续跑；雅虎必须 skip_kline(K线口径铁律)。
+        # 雅虎元数据段(估值快照/财务序列/分析师)最后执行——任务预算由
+        # MARKET_SYNC_TIME_LIMIT 控制，若被截断只损失元数据增量，次日续跑；
+        # 雅虎必须 skip_kline(K线口径铁律)。
         _sync_akshare_kline(result, days=days, symbols=symbols)
         # 指数与个股必须同轮更新，否则 index_daily 滞后、页面日期错位
         _sync_index(result)
@@ -156,9 +157,11 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
             result["sdl_hk"] = _sdl_sync()
         except Exception as exc:  # noqa: BLE001
             result["sdl_hk"] = {"status": "error", "error": str(exc)}
-        result["yahoo"] = _yahoo_run("HK", days=days, symbols=symbols, fast=fast, skip_kline=True)
-        # 本地信号因子(南向/CCASS)在原始数据全部落盘后统一增量刷新
+        # 本地信号因子(南向/CCASS)在原始数据落盘后统一增量刷新。必须排在雅虎段
+        # 之前：雅虎元数据受上游限流常吃满剩余预算，因子集排在其后会被超时饿停
+        # （2026-09-12~10-07 因子集停更 4 周的根因）。
         _refresh_signal_datasets(result)
+        result["yahoo"] = _yahoo_run("HK", days=days, symbols=symbols, fast=fast, skip_kline=True)
         return result
 
     # 南向资金（港股通）— 独立爬虫，按数据源勾选控制

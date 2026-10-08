@@ -1161,26 +1161,41 @@ def tca_daily_report(days: int = 30, tenant_id: str = "default") -> dict[str, An
 # ---------------------------------------------------------------------------
 @celery_app.task(name="engine.tasks.dispatch_market_sync")
 def dispatch_market_sync() -> dict[str, Any]:
-    """每分钟检查各市场定时同步配置，到点派发同步任务。"""
+    """每分钟检查各市场定时同步/因子填充配置，到点派发任务。"""
     from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
 
     _sched_heartbeat("market_sync_dispatch")  # T-P1-06 调度心跳
+    out: dict[str, Any] = {}
     try:
         from backend.services.engine.tasks.market_sync_scheduler import dispatch_due_syncs
 
-        return dispatch_due_syncs()
+        out.update(dispatch_due_syncs())
     except Exception as e:
         logger.exception("[SyncSchedule] 派发检查失败: %s", e)
-        return {"status": "failed", "error": str(e)}
+        out.update({"status": "failed", "error": str(e)})
+    # 因子填充独立调度：与上游同步各自隔离，一段失败不影响另一段检查
+    try:
+        from backend.services.engine.tasks.factor_fill_scheduler import (
+            dispatch_due_factor_fills,
+        )
+
+        out["factor_fill"] = dispatch_due_factor_fills()
+    except Exception as e:
+        logger.exception("[FactorFill] 派发检查失败: %s", e)
+        out["factor_fill"] = {"status": "failed", "error": str(e)}
+    return out
 
 
 @celery_app.task(
     name="engine.tasks.run_market_scheduled_sync",
-    # 上游数据源（yfinance 等）被限流时会把单个 ticker 拖到分钟级，整体超过全局
-    # 3600s 硬限制 → 进程被 SIGKILL；叠加 acks_late 会导致任务重新入队、再次超时，
-    # 形成死循环。这里收紧独立超时，并在派发即 ack，保证一次调度最多失败一次。
-    soft_time_limit=int(os.getenv("MARKET_SYNC_SOFT_TIME_LIMIT", "1800")),
-    time_limit=int(os.getenv("MARKET_SYNC_TIME_LIMIT", "2100")),
+    # 上游数据源（yfinance 等）被限流时会把单个 ticker 拖到分钟级；acks_late=False
+    # + reject_on_worker_lost=False 保证超时被杀的任务不重新入队，一次调度最多
+    # 失败一次（不恢复 acks_late 就没有重复入队的死循环风险）。
+    # 预算必须装得下整条市场链：HK=K线+南向+L1+CCASS增量抓取+因子集刷新+雅虎元数据；
+    # US=指数+K线/元数据+L1+快照。1800/2100（35 分钟）实测装不下——链尾步骤
+    # 被超时截断饿停（2026-09-12~10-07 南向/CCASS 因子集与美股 L1/index 停更的根因）。
+    soft_time_limit=int(os.getenv("MARKET_SYNC_SOFT_TIME_LIMIT", "6900")),
+    time_limit=int(os.getenv("MARKET_SYNC_TIME_LIMIT", "7200")),
     acks_late=False,
     reject_on_worker_lost=False,
 )
@@ -1213,6 +1228,27 @@ def run_custom_dataset_rebuild(market: str, cfg: dict[str, Any]) -> dict[str, An
         return run_market_sync(market, cfg)
     except Exception as e:
         logger.exception("[SyncSchedule] %s 数据集重建失败: %s", market, e)
+        return {"market": market, "status": "failed", "error": str(e)}
+
+
+@celery_app.task(
+    name="engine.tasks.run_factor_fill_scheduled",
+    # 纯本地磁盘作业（不请求上游）：l1/south 增量秒级，ccass 落后时全量重算
+    # 分钟级。与市场同步同样的「超时被杀不重入队」纪律（acks_late=False +
+    # reject_on_worker_lost=False），预算按 ccass 全量重算最坏情况放宽。
+    soft_time_limit=int(os.getenv("FACTOR_FILL_SOFT_TIME_LIMIT", "2700")),
+    time_limit=int(os.getenv("FACTOR_FILL_TIME_LIMIT", "3000")),
+    acks_late=False,
+    reject_on_worker_lost=False,
+)
+def run_factor_fill_scheduled(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """执行某市场的因子数据集定时填充（由 dispatch_market_sync 派发）。"""
+    try:
+        from backend.services.engine.tasks.factor_fill_scheduler import run_factor_fill
+
+        return run_factor_fill(market, cfg)
+    except Exception as e:
+        logger.exception("[FactorFill] %s 因子填充失败: %s", market, e)
         return {"market": market, "status": "failed", "error": str(e)}
 
 

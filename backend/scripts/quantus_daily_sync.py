@@ -72,11 +72,14 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
         fast: bool = False, **kwargs: Any) -> dict:
     """同步美股数据。datasets 为勾选的数据集名；None 时全量同步雅虎数据。"""
     if not datasets:
-        result = dict(_yahoo_run("US", days=days, symbols=symbols, fast=fast))
-        result["market"] = "US"
-        # 指数与个股必须同轮更新，否则 index_daily 停滞、页面日期错位
+        result: dict[str, Any] = {"market": "US"}
+        # 指数走 akshare、与雅虎段无依赖，先落盘：雅虎元数据受限流常吃满预算，
+        # 排在它后面的步骤会被超时截断饿停（index_daily 曾停滞数周）
         _sync_index(result)
-        # L1 因子直读数据集随日K落盘后刷新（与港股同口径）
+        # 日K与全部元数据段都在雅虎路径内（US 无 akshare 主K线替代）
+        result.update(_yahoo_run("US", days=days, symbols=symbols, fast=fast))
+        result["market"] = "US"
+        # L1 因子直读数据集随日K落盘后刷新（与港股同口径）——依赖雅虎 K线，必须在后
         _refresh_l1_dataset(result)
         # 个股预测/研究服务的 PG 快照（stock_daily_latest_us）刷新最近 90 交易日
         _refresh_sdl(result)

@@ -14,6 +14,7 @@ import {
 } from '../services/dataPlatformService';
 import { describeError, formatPartitionDate, formatSize } from './quantdb/utils';
 import { SyncSchedulePanel } from './data-management/SyncSchedulePanel';
+import { FactorFillSchedulePanel } from './data-management/FactorFillSchedulePanel';
 
 const { Text } = Typography;
 
@@ -28,6 +29,9 @@ const MARKET_KEY_TO_SCHEDULE: Record<MarketKey, string> = {
     quantbc: 'BC',
     quantfutures: 'FUTURES',
 };
+
+/** 因子自动填充覆盖的市场（后端 factor_fill_scheduler.MARKETS 同口径） */
+const FACTOR_FILL_MARKETS: string[] = ['HK', 'US'];
 
 const LAYOUT_LABELS: Record<QuantDBDataset['layout'], { text: string; color: string }> = {
     partition: { text: '按日分区', color: 'blue' },
@@ -451,6 +455,11 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
                 selectedDatasets={selected}
                 defaultDays={market === 'quantbc' ? 365 : 5}
             />
+
+            {/* 因子自动填充调度（独立于同步：落后才建，只覆盖港股/美股） */}
+            {FACTOR_FILL_MARKETS.includes(MARKET_KEY_TO_SCHEDULE[market]) && (
+                <FactorFillSchedulePanel market={MARKET_KEY_TO_SCHEDULE[market]} />
+            )}
 
             {activeJob && <MarketSyncJobProgress job={activeJob} />}
 
