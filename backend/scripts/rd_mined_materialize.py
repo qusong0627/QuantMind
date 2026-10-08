@@ -20,6 +20,11 @@
 清单文件 ``_materialize_manifest.json`` 记录逐因子状态（materialized /
 rejected_duplicate / error），支持断点续跑；``--force`` 重做。
 
+门禁复评 ``--gates-only``：对已定终态（物化/重复/硬拒）的因子用**当前**
+metadata 指标重跑门禁并合并进 manifest + metadata——不执行因子代码、不写
+数据集、不回溯改 status。存量因子的 gates 缺口用它补齐（值级查重的硬拒
+发生在门禁之前，``--force`` 重跑重复因子永远写不出 gates）。
+
 典型用法::
 
     # 单任务（挖掘脚本自动挂接时用）
@@ -31,6 +36,10 @@ rejected_duplicate / error），支持断点续跑；``--force`` 重做。
     # 只对齐分区 schema / 预演
     python backend/scripts/rd_mined_materialize.py --align-only
     python backend/scripts/rd_mined_materialize.py --dry-run
+
+    # 存量门禁复评（先 --dry-run 看判定，再落库）
+    python backend/scripts/rd_mined_materialize.py --gates-only --dry-run
+    python backend/scripts/rd_mined_materialize.py --gates-only
 
 宿主机无 PyTables 时单测自动跳过执行路径；真实链路在容器内跑。
 """
@@ -136,6 +145,12 @@ def _eligible_row(row: Mapping[str, Any]) -> tuple[bool, str]:
     return True, "ok"
 
 
+# 终态裁决：物化成功 / 值级重复拒入 / 硬门禁拒入。常规路径
+# （_should_materialize）与门禁复评（_gates_refresh_needed）共用同一集合，
+# 新增/改名终态时两处不漂移。
+_TERMINAL_STATUSES = frozenset({"materialized", "rejected_duplicate", "rejected_gate"})
+
+
 def _should_materialize(
     row: Mapping[str, Any], manifest: Mapping[str, Any], *, force: bool
 ) -> tuple[bool, str]:
@@ -146,7 +161,7 @@ def _should_materialize(
     if force:
         return True, "force"
     status = str(entry.get("status") or "")
-    if status in ("materialized", "rejected_duplicate", "rejected_gate"):
+    if status in _TERMINAL_STATUSES:
         # 同 factor_id 的代码被改写（同任务重跑会 UPDATE factor_code）时，
         # 旧值/旧判定都随之失效，必须按新代码重算。
         stored = str(entry.get("code_fp") or "")
@@ -762,9 +777,14 @@ def _log_gate_outcomes(decision: Any, prefix: str = "  ") -> None:
             logger.info("%s门禁 %s：%s", prefix, outcome.key, outcome.message)
 
 
-async def _update_factor_meta(factor_id: str, entry: Mapping[str, Any]) -> None:
+async def _update_factor_meta(factor_id: str, entry: Mapping[str, Any]) -> bool:
+    """回写 ``metadata.materialization``；返回是否真正落库。
+
+    消费方（池页门禁列）读的是这份 metadata——调用方（复评模式）据返回值
+    决定是否落 manifest，绝不把没落库的裁决当既成事实。
+    """
     if not factor_id:
-        return
+        return False
     try:
         from backend.services.engine.qlib_app.services.rd_agent_persistence import (
             RDAgentFactorPersistence,
@@ -773,8 +793,170 @@ async def _update_factor_meta(factor_id: str, entry: Mapping[str, Any]) -> None:
         await RDAgentFactorPersistence().update_factor_metrics(
             factor_id=factor_id, metadata={"materialization": dict(entry)}
         )
+        return True
     except Exception as exc:  # noqa: BLE001 - 元数据回写失败不阻断物化
         logger.warning("回写 materialization 元数据失败 %s：%s", factor_id, exc)
+        return False
+
+
+# ── 门禁复评（--gates-only）：不跑因子代码的裁决刷新 ──────────────────
+
+
+def _gates_refresh_needed(entry: Mapping[str, Any], *, force: bool) -> tuple[bool, str]:
+    """复评选择判据：已有**完整**终态裁决才跳过（--force 无条件重评）。
+
+    ``error`` 未定终局——留给常规物化重做，不在这里出裁决。
+    含 ``skipped`` 门禁的裁决**不是终态**：先跑复评后补指标的场景下，
+    若把「缺输入」当既成事实，指标补齐后默认轮次将永远不再看它
+    （复评的价值就在于指标到位后自动收敛，不该要求 --force）。
+    """
+    status = str((entry or {}).get("status") or "")
+    if status not in _TERMINAL_STATUSES:
+        return False, f"status_{status or 'unknown'}"
+    gates = (entry or {}).get("gates")
+    if force or gates is None:
+        return True, "force" if force else "refresh"
+    outcomes = gates.get("gates") if isinstance(gates, Mapping) else None
+    if isinstance(outcomes, list) and any(
+        str((outcome or {}).get("status") or "") == "skipped" for outcome in outcomes
+    ):
+        return True, "gates_partial"
+    return False, "has_gates"
+
+
+async def _run_gates_only(args: argparse.Namespace) -> int:
+    """对 manifest 里已定终态的因子用**当前** metadata 重跑门禁（只读指标）。
+
+    为什么需要它：门禁插件（P1）晚于存量物化/拒绝裁决落地；且值级查重
+    （既有硬拒）先于门禁判定——``--force`` 重跑重复因子会在查重处
+    ``continue``，永远写不出 gates。本模式不执行因子代码、不写数据集、
+    不动池行，只把 ``metadata.materialization.gates`` 与 manifest 补齐
+    （池页门禁列的唯一数据源）。
+
+    **不回溯改 status**：列已写入数据集是既成事实，复评硬性不过只如实
+    落库并告警——是否下架由运维另行决定（届时走常规 ``--force`` 重做）。
+
+    写序纪律（存量修复工具四条纪律）：消费方读的是 metadata，先写
+    metadata、**成功才落 manifest**——反过来一旦 metadata 回写失败，
+    跳过判据（读 manifest）会把没落库的裁决当既成事实永久跳过。
+    """
+    lib_root = _lib_root()
+    manifest = _load_manifest(lib_root)
+    wanted = {str(fid) for fid in (args.factor_ids or []) if str(fid).strip()}
+    todo: list[str] = []
+    skipped: dict[str, int] = {}
+    for factor_id, entry in manifest.items():
+        if wanted and str(factor_id) not in wanted:
+            continue
+        ok, reason = _gates_refresh_needed(entry, force=bool(args.force))
+        if ok:
+            todo.append(str(factor_id))
+        else:
+            skipped[reason] = skipped.get(reason, 0) + 1
+    if args.limit and int(args.limit) > 0:
+        todo = todo[: int(args.limit)]
+    logger.info(
+        "门禁复评：清单 %d，待复评 %d，跳过 %s",
+        len(manifest),
+        len(todo),
+        skipped or "无",
+    )
+
+    stats: dict[str, int] = {
+        "evaluated": 0,
+        "updated": 0,
+        "hard_fail": 0,
+        "gate_pass": 0,
+        "gate_fail": 0,
+        "gate_skipped": 0,
+        "gate_other": 0,
+        "partial_verdicts": 0,
+        "code_changed": 0,
+        "not_in_manifest": 0,
+        "missing_row": 0,
+        "errors": 0,
+    }
+    if wanted:
+        stats["not_in_manifest"] = len(wanted - {str(k) for k in manifest})
+        if stats["not_in_manifest"]:
+            logger.warning(
+                "  --factor-ids 有 %d 个不在清单（未物化过的因子不产生门禁裁决）",
+                stats["not_in_manifest"],
+            )
+    if not todo:
+        logger.info("汇总：%s", stats)
+        return 0
+    rows = await _query_candidates(factor_ids=todo, market=args.market)
+    by_id = {str(row.get("factor_id") or ""): row for row in rows}
+    for factor_id in todo:
+        row = by_id.get(factor_id)
+        if row is None:
+            logger.warning("  复评跳过：DB 无此因子 %s", factor_id[:8])
+            stats["missing_row"] += 1
+            continue
+        entry = dict(manifest.get(factor_id) or {})
+        stored_fp = str(entry.get("code_fp") or "")
+        if stored_fp:
+            current_fp = code_fingerprint(str(row.get("factor_code") or "")) or ""
+            if current_fp and stored_fp != current_fp:
+                # 代码改写后指标对应的是新代码，复评会得出「描述旧列」的裁决；
+                # 留给常规物化按 code_changed 重做。
+                logger.warning(
+                    "  复评跳过：代码已改写 %s（等常规物化重做）", factor_id[:8]
+                )
+                stats["code_changed"] += 1
+                continue
+        try:
+            decision = await _evaluate_gates(row)
+        except Exception as exc:  # noqa: BLE001 - 单因子装配故障不中断其余复评
+            logger.warning("  复评失败（保留原裁决） %s：%s", factor_id[:8], exc)
+            stats["errors"] += 1
+            continue
+        stats["evaluated"] += 1
+        has_skipped = False
+        for outcome in decision.outcomes:
+            key = f"gate_{outcome.status}"
+            if key in stats:
+                stats[key] += 1
+            else:
+                stats["gate_other"] += 1
+            has_skipped = has_skipped or outcome.status == "skipped"
+        if has_skipped:
+            stats["partial_verdicts"] += 1
+        _log_gate_outcomes(decision)
+        if decision.rejected:
+            stats["hard_fail"] += 1
+            logger.warning(
+                "  %s 复评硬性不过：已物化事实不回溯，仅落库告警（见 gates）",
+                factor_id[:8],
+            )
+        if args.dry_run:
+            logger.info(
+                "  [dry-run] 复评 %s → rejected=%s", factor_id[:8], decision.rejected
+            )
+            continue
+        entry = {
+            **entry,
+            "gates": decision.to_dict(),
+            "gates_at": _now_iso(),
+        }
+        if not await _update_factor_meta(factor_id, entry):
+            stats["errors"] += 1
+            logger.warning(
+                "  %s metadata 回写失败：不落 manifest，等待下次复评重试",
+                factor_id[:8],
+            )
+            continue
+        manifest[factor_id] = entry
+        _save_manifest(lib_root, manifest)
+        stats["updated"] += 1
+    if stats["partial_verdicts"]:
+        logger.warning(
+            "其中 %d 条裁决含 skipped 门禁（输入未齐）：指标补齐后重跑本模式会自动重评",
+            stats["partial_verdicts"],
+        )
+    logger.info("汇总：%s", stats)
+    return 0 if stats["errors"] == 0 else 1
 
 
 async def _published_enabled_columns(session: Any) -> tuple[str | None, set[str]]:
@@ -1098,6 +1280,8 @@ async def _run(args: argparse.Namespace) -> int:
     if lock is None:
         logger.warning("另一个物化进程正在运行，本次跳过（避免并发写同一座库）")
         return 0
+    if args.gates_only:
+        return await _run_gates_only(args)
     if args.align_only:
         report = _align_partition_schemas(lib_root)
         logger.info("分区 schema 对齐：%s", report)
@@ -1335,13 +1519,35 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--force-register", action="store_true", help="目录列集未变也强制发布新版"
     )
-    parser.add_argument("--force", action="store_true", help="重做已物化/已拒绝的因子")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="重做已物化/已拒绝的因子（--gates-only 时=已复评的也重评）",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只打印将执行的动作")
     parser.add_argument(
         "--align-only", action="store_true", help="只做分区 schema 对齐后退出"
     )
+    parser.add_argument(
+        "--gates-only",
+        action="store_true",
+        help=(
+            "只对已定终态（物化/重复/硬拒）的因子复评门禁，不跑因子代码"
+            "（与 --task-id/--align-only/--register 不兼容）"
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="调试日志")
     args = parser.parse_args(argv)
+    if args.gates_only:
+        for flag, value in (
+            ("--task-id", args.task_id),
+            ("--align-only", args.align_only),
+            ("--register", args.register),
+        ):
+            if value:
+                parser.error(
+                    f"{flag} 与 --gates-only 不兼容（复评按清单范围，不做物化/注册）"
+                )
     args.factor_ids = [
         s.strip() for s in str(args.factor_ids or "").split(",") if s.strip()
     ]

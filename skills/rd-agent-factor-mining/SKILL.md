@@ -176,6 +176,33 @@ GET  /api/v1/alpha-agent/combos/{combo_id}                          # 详情：�
 不拦物化。升级为硬拦两条路：yaml `gates.<key>.mode: hard` 或 env `QM_MINING_GATES_MODE=strict`
 （全局）；逐条关闭 `QM_MINING_GATES_DISABLED=<key>[,<key>]`。
 
+**存量裁决补齐（--gates-only）**：gates 只在物化时刻产生，且值级查重（硬拒）先于
+门禁判定——`--force` 重跑「重复」因子会在查重处 continue，**永远写不出 gates**；
+存量因子的 metadata 还缺 RRE/换手/net 指标（门禁对其判 skipped，不判 0）。补齐
+三步（顺序不可反，先有指标才有真裁决）：
+
+```bash
+# ① 面板 + 缺失指标回填（长任务，因子代码逐只执行；日志 /app/logs/ 下）
+docker exec -w /app quantmind python -m backend.scripts.mining_pool_rebuild --apply --panels --metrics
+# ② 门禁复评预演（秒级：不跑因子代码，只读 metadata 指标）
+docker exec -w /app quantmind python backend/scripts/rd_mined_materialize.py --gates-only --dry-run
+# ③ 落库（manifest + metadata.materialization.gates，池页门禁 tab 即刻可见）
+docker exec -w /app quantmind python backend/scripts/rd_mined_materialize.py --gates-only
+```
+
+- `--gates-only` 只对已定终态（materialized / rejected_duplicate / rejected_gate）复评；
+  **不跑因子代码、不写数据集、不回溯改 status**（已物化硬性不过只落库 + 告警，
+  是否下架另行 `--force` 重做）；与物化器共用同一把 flock（物化在跑时安静退 0）。
+- 选择语义：**已有「完整」裁决的默认跳过；含 skipped 的「部分」裁决自动重评**
+  （指标补齐后再跑一轮即自动补全，无需 `--force`）；`--force` = 全部重评。
+  复评按**先 metadata（消费方读的那份）后 manifest**的写序；metadata 回写失败该条
+  不落 manifest 且退出码非 0 → 直接重跑即可续（不会出现「manifest 说评过、
+  metadata 里没有」的永久跳过）。
+- 代码已改写（code_fp 漂移）的因子复评会跳过（等常规物化按 code_changed 重做），
+  不产生「描述旧列」的裁决。
+- `--gates-only` 与 `--task-id` / `--align-only` / `--register` 互斥（响亮报错，
+  防静默扩大写范围）。
+
 ### 组合实验室（P2）
 
 前端：因子池页 →「组合实验室」tab。流程 = 选 **2–12 个有面板**因子 → 差分进化
@@ -292,6 +319,8 @@ curl -s -H "$AUTH" "$BASE/api/v1/alpha-agent/stats"                             
 - [ ] `mining_pool_rebuild --dry-run` 输出与 `--apply` 落库结果一致（预演先看再写）
 - [ ] 物化 dry-run：manifest 与 factor metadata `materialization.gates` 出现判定，
       池页「门禁状态」tab 可见软告警黄标
+- [ ] 存量因子门禁补齐：`--gates-only --dry-run` 预演 → `--gates-only` 落库后，
+      池因子接口的 `gates` 字段由 null 变判定（`ic_pool_pct` 等键齐全，缺指标显 skipped）
 - [ ] 高分因子完成 `explain`，解读与 direction 假设一致（非噪声）
 - [ ] 确认有效的因子已 `export`（日志有导出记录）
 - [ ] 组合实验室（可选）：≥3 因子优化完成，权重 Σ|w|=1、valid 指标与净值曲线可见、

@@ -610,3 +610,459 @@ class TestMaterializeGates:
                         {"ids": ids},
                     )
             await close_database()
+
+
+# ── 门禁复评模式（--gates-only）──────────────────────────────────────
+
+
+class TestGatesRefreshSelection:
+    @pytest.mark.unit
+    def test_terminal_statuses_participate(self):
+        from backend.scripts.rd_mined_materialize import _gates_refresh_needed
+
+        for status in ("materialized", "rejected_duplicate", "rejected_gate"):
+            ok, reason = _gates_refresh_needed({"status": status}, force=False)
+            assert ok and reason == "refresh", status
+        # error 未定终局 → 留给常规物化重做，不在这里出裁决
+        ok, reason = _gates_refresh_needed({"status": "error"}, force=False)
+        assert not ok and reason == "status_error"
+
+    @pytest.mark.unit
+    def test_complete_gates_skip_but_partial_reevaluate(self):
+        """含 skipped 的裁决非终态：补指标后默认轮次自动重评，无需 --force。"""
+        from backend.scripts.rd_mined_materialize import _gates_refresh_needed
+
+        complete = {
+            "status": "materialized",
+            "gates": {
+                "rejected": False,
+                "gates": [{"key": "pfs_floor", "status": "pass"}],
+            },
+        }
+        ok, reason = _gates_refresh_needed(complete, force=False)
+        assert not ok and reason == "has_gates"
+        assert _gates_refresh_needed(complete, force=True) == (True, "force")
+
+        partial = {
+            "status": "materialized",
+            "gates": {
+                "rejected": False,
+                "gates": [
+                    {"key": "pfs_floor", "status": "pass"},
+                    {"key": "rre_floor", "status": "skipped"},
+                ],
+            },
+        }
+        assert _gates_refresh_needed(partial, force=False) == (True, "gates_partial")
+
+    @pytest.mark.unit
+    def test_cli_flag_parses_and_conflicts_rejected(self):
+        from backend.scripts.rd_mined_materialize import _parse_args
+
+        args = _parse_args(["--gates-only", "--force", "--factor-ids", "a,b"])
+        assert args.gates_only is True
+        assert args.force is True
+        assert args.factor_ids == ["a", "b"]
+        # 范围/动作冲突的旗标组合必须响亮拒绝，不能静默扩大写范围
+        for extra in (["--task-id", "t1"], ["--align-only"], ["--register"]):
+            with pytest.raises(SystemExit):
+                _parse_args(["--gates-only", *extra])
+
+
+class TestGatesOnlyRun:
+    """``_run_gates_only``：只碰 manifest + metadata，绝不执行因子代码。"""
+
+    @staticmethod
+    def _decision(rejected: bool, status: str = "pass"):
+        from backend.services.engine.mining_plugins import GateDecision, GateOutcome
+
+        return GateDecision(
+            rejected=rejected,
+            outcomes=(
+                GateOutcome(
+                    key="pfs_floor",
+                    label="PFS",
+                    mode="soft",
+                    status=status,
+                    message="ok",
+                    observed=0.95,
+                    threshold=0.9,
+                ),
+            ),
+        )
+
+    def _fake_env(
+        self,
+        monkeypatch,
+        tmp_path,
+        manifest,
+        rows,
+        decision,
+        captured,
+        *,
+        evaluated=None,
+        meta_ok=True,
+    ):
+        import argparse
+
+        import backend.scripts.rd_mined_materialize as mod
+
+        _save_manifest(tmp_path, manifest)
+        monkeypatch.setattr(mod, "_lib_root", lambda: tmp_path)
+
+        async def fake_query(**kwargs):
+            return list(rows)
+
+        monkeypatch.setattr(mod, "_query_candidates", fake_query)
+
+        async def fake_eval(row):
+            if evaluated is not None:
+                evaluated.append(dict(row))
+            return decision
+
+        monkeypatch.setattr(mod, "_evaluate_gates", fake_eval)
+
+        async def fake_meta(factor_id, entry):
+            captured.append((factor_id, dict(entry)))
+            return meta_ok
+
+        monkeypatch.setattr(mod, "_update_factor_meta", fake_meta)
+
+        def boom(*a, **k):
+            raise AssertionError("gates-only 不得执行因子代码/写数据集")
+
+        monkeypatch.setattr(mod, "_compute_factor_values", boom)
+        monkeypatch.setattr(mod, "_write_factor", boom)
+        monkeypatch.setattr(mod, "_align_partition_schemas", boom)
+
+        return mod, argparse.Namespace(
+            factor_ids=[],
+            market="a_share",
+            limit=0,
+            force=False,
+            dry_run=False,
+            verbose=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_to_gates_only(self, monkeypatch, tmp_path):
+        """``_run`` 必须把 --gates-only 路由到复评，绝不能落进物化主路径。"""
+        import argparse
+
+        import backend.scripts.rd_mined_materialize as mod
+
+        called: list = []
+        monkeypatch.setattr(mod, "_lib_root", lambda: tmp_path)
+        monkeypatch.setattr(mod, "_acquire_run_lock", lambda: object())
+
+        async def fake_gates_only(args):
+            called.append(args)
+            return 0
+
+        monkeypatch.setattr(mod, "_run_gates_only", fake_gates_only)
+
+        def boom_candidates(*a, **k):
+            raise AssertionError("--gates-only 不得进物化主路径（_load_candidates）")
+
+        monkeypatch.setattr(mod, "_load_candidates", boom_candidates)
+        rc = await mod._run(argparse.Namespace(gates_only=True))
+        assert rc == 0 and len(called) == 1
+
+    @pytest.mark.asyncio
+    async def test_merge_preserves_materialized_fields_and_persists(
+        self, monkeypatch, tmp_path
+    ):
+        manifest = {
+            "fid1": {
+                "status": "materialized",
+                "column": "rd_vz5",
+                "name": "动量反转",
+                "values": 12345,
+                "corr": 0.42,
+                "code_fp": "abc",
+                "at": "2026-10-07T15:19:03Z",
+            },
+            "fid2": {
+                "status": "rejected_duplicate",
+                "column": "rd_zz1",
+                "name": "旧重复",
+                "corr": 0.97,
+                "at": "2026-09-29T03:00:00Z",
+            },
+        }
+        rows = [
+            {"factor_id": fid, "market": "a_share", "universe": "csi300"}
+            for fid in ("fid1", "fid2")
+        ]
+        captured: list = []
+        evaluated: list = []
+        mod, args = self._fake_env(
+            monkeypatch,
+            tmp_path,
+            manifest,
+            rows,
+            self._decision(False),
+            captured,
+            evaluated=evaluated,
+        )
+        rc = await mod._run_gates_only(args)
+        assert rc == 0
+        assert [r["factor_id"] for r in evaluated] == ["fid1", "fid2"]
+        on_disk = _load_manifest(tmp_path)
+        e1 = on_disk["fid1"]
+        assert e1["status"] == "materialized" and e1["column"] == "rd_vz5"
+        assert e1["values"] == 12345 and e1["corr"] == 0.42
+        assert e1["at"] == "2026-10-07T15:19:03Z", "物化时间不因复评而改写"
+        assert e1["gates"]["rejected"] is False
+        assert e1["gates"]["gates"][0]["key"] == "pfs_floor"
+        assert e1["gates_at"], "复评自带时间戳，与物化时间可分"
+        assert on_disk["fid2"]["status"] == "rejected_duplicate"
+        assert on_disk["fid2"]["gates"]["rejected"] is False
+        assert [fid for fid, _ in captured] == ["fid1", "fid2"]
+        assert captured[0][1]["status"] == "materialized"
+        assert captured[0][1]["gates"]["rejected"] is False
+
+    @pytest.mark.asyncio
+    async def test_hard_fail_records_but_keeps_status(self, monkeypatch, tmp_path):
+        manifest = {
+            "fid1": {
+                "status": "materialized",
+                "column": "c1",
+                "name": "n",
+                "at": "t0",
+            }
+        }
+        rows = [{"factor_id": "fid1", "market": "a_share", "universe": ""}]
+        captured: list = []
+        mod, args = self._fake_env(
+            monkeypatch,
+            tmp_path,
+            manifest,
+            rows,
+            self._decision(True, status="fail"),
+            captured,
+        )
+        rc = await mod._run_gates_only(args)
+        assert rc == 0
+        entry = _load_manifest(tmp_path)["fid1"]
+        assert entry["status"] == "materialized", "复评不回溯改已有终态"
+        assert entry["gates"]["rejected"] is True, "硬性不过如实落库"
+
+    @pytest.mark.asyncio
+    async def test_metadata_written_before_manifest(self, monkeypatch, tmp_path):
+        """写序：先 metadata（消费方读的那份）后 manifest（跳过判据读的那份）。"""
+        import backend.scripts.rd_mined_materialize as mod
+
+        manifest = {
+            "fid1": {"status": "materialized", "column": "c1", "name": "n", "at": "t0"}
+        }
+        rows = [{"factor_id": "fid1", "market": "a_share", "universe": ""}]
+        captured: list = []
+        states: list = []
+        mod2, args = self._fake_env(
+            monkeypatch, tmp_path, manifest, rows, self._decision(False), captured
+        )
+
+        async def recording_meta(factor_id, entry):
+            states.append(_load_manifest(tmp_path).get(factor_id, {}).get("gates"))
+            captured.append((factor_id, dict(entry)))
+            return True
+
+        monkeypatch.setattr(mod2, "_update_factor_meta", recording_meta)
+        rc = await mod2._run_gates_only(args)
+        assert rc == 0
+        assert states == [None], (
+            "metadata 回写时 manifest 还未落 gates（先写消费方那份）"
+        )
+        assert _load_manifest(tmp_path)["fid1"]["gates"]["rejected"] is False
+
+    @pytest.mark.asyncio
+    async def test_metadata_write_failure_is_error_and_retryable(
+        self, monkeypatch, tmp_path
+    ):
+        """metadata 回写失败 ⇒ rc=1 且 manifest 不落 gates（下一轮自动重试）。"""
+        manifest = {
+            "fid1": {"status": "materialized", "column": "c1", "name": "n", "at": "t0"}
+        }
+        rows = [{"factor_id": "fid1", "market": "a_share", "universe": ""}]
+        captured: list = []
+        mod, args = self._fake_env(
+            monkeypatch,
+            tmp_path,
+            manifest,
+            rows,
+            self._decision(False),
+            captured,
+            meta_ok=False,
+        )
+        rc = await mod._run_gates_only(args)
+        assert rc == 1
+        assert len(captured) == 1, "回写被尝试过"
+        assert "gates" not in _load_manifest(tmp_path)["fid1"], (
+            "写失败绝不能把裁决当既成事实落 manifest（否则永久跳过）"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dry_run_writes_nothing(self, monkeypatch, tmp_path):
+        manifest = {
+            "fid1": {"status": "materialized", "column": "c1", "name": "n", "at": "t0"}
+        }
+        rows = [{"factor_id": "fid1", "market": "a_share", "universe": ""}]
+        captured: list = []
+        evaluated: list = []
+        mod, args = self._fake_env(
+            monkeypatch,
+            tmp_path,
+            manifest,
+            rows,
+            self._decision(False),
+            captured,
+            evaluated=evaluated,
+        )
+        args.dry_run = True
+        rc = await mod._run_gates_only(args)
+        assert rc == 0
+        assert captured == []
+        assert [r["factor_id"] for r in evaluated] == ["fid1"], (
+            "dry-run 也要真评（预演的就是判定本身），只是不落库"
+        )
+        assert "gates" not in _load_manifest(tmp_path)["fid1"]
+
+    @pytest.mark.asyncio
+    async def test_skip_complete_reeval_partial_missing_row(
+        self, monkeypatch, tmp_path
+    ):
+        """三分支各自取证：完整跳过 / 部分重评 / 行缺失不伪造裁决。"""
+        manifest = {
+            "fid1": {
+                "status": "materialized",
+                "gates": {
+                    "rejected": False,
+                    "gates": [{"key": "pfs_floor", "status": "pass"}],
+                },
+                "at": "t0",
+            },
+            "fid2": {
+                "status": "materialized",
+                "column": "c2",
+                "at": "t0",
+                "gates": {
+                    "rejected": False,
+                    "gates": [
+                        {"key": "pfs_floor", "status": "pass"},
+                        {"key": "rre_floor", "status": "skipped"},
+                    ],
+                },
+            },
+            "fid3": {"status": "materialized", "column": "c3", "at": "t0"},
+        }
+        # fid2 有行（部分重评且会写）；fid3 无行（missing_row）
+        rows = [{"factor_id": "fid2", "market": "a_share", "universe": ""}]
+        captured: list = []
+        evaluated: list = []
+        mod, args = self._fake_env(
+            monkeypatch,
+            tmp_path,
+            manifest,
+            rows,
+            self._decision(False),
+            captured,
+            evaluated=evaluated,
+        )
+        rc = await mod._run_gates_only(args)
+        assert rc == 0
+        assert [r["factor_id"] for r in evaluated] == ["fid2"], (
+            "完整 gates 的 fid1 不评；含 skipped 的 fid2 默认重评；fid3 行缺失不评"
+        )
+        assert [fid for fid, _ in captured] == ["fid2"]
+        on_disk = _load_manifest(tmp_path)
+        assert on_disk["fid3"].get("gates") is None, "missing_row 不得伪造裁决"
+        fresh = on_disk["fid2"]["gates"]["gates"]
+        assert [o["status"] for o in fresh] == ["pass"], (
+            "旧的部分裁决被整份替换（不再残留 skipped）"
+        )
+
+    @pytest.mark.asyncio
+    async def test_limit_and_factor_ids_filter(self, monkeypatch, tmp_path):
+        manifest = {
+            fid: {"status": "materialized", "column": f"c{i}", "at": "t0"}
+            for i, fid in enumerate(("fid1", "fid2", "fid3"))
+        }
+        rows = [
+            {"factor_id": fid, "market": "a_share", "universe": ""} for fid in manifest
+        ]
+        captured: list = []
+        evaluated: list = []
+        mod, args = self._fake_env(
+            monkeypatch,
+            tmp_path,
+            manifest,
+            rows,
+            self._decision(False),
+            captured,
+            evaluated=evaluated,
+        )
+        args.factor_ids = ["fid2", "fid3", "nope"]
+        args.limit = 1
+        rc = await mod._run_gates_only(args)
+        assert rc == 0
+        assert [r["factor_id"] for r in evaluated] == ["fid2"], (
+            "factor_ids 过滤 + limit 截断都在选择层生效"
+        )
+
+    @pytest.mark.asyncio
+    async def test_code_changed_entry_is_skipped(self, monkeypatch, tmp_path):
+        """代码改写后复评会得出「描述旧列」的裁决 → 让常规物化按 code_changed 重做。"""
+        manifest = {
+            "fid1": {
+                "status": "materialized",
+                "column": "c1",
+                "at": "t0",
+                "code_fp": code_fingerprint("x = 1  # 旧版"),
+            }
+        }
+        rows = [
+            {
+                "factor_id": "fid1",
+                "market": "a_share",
+                "universe": "",
+                "factor_code": "x = 2  # 新版",
+            }
+        ]
+        captured: list = []
+        evaluated: list = []
+        mod, args = self._fake_env(
+            monkeypatch,
+            tmp_path,
+            manifest,
+            rows,
+            self._decision(False),
+            captured,
+            evaluated=evaluated,
+        )
+        rc = await mod._run_gates_only(args)
+        assert rc == 0
+        assert evaluated == [] and captured == []
+        assert "gates" not in _load_manifest(tmp_path)["fid1"]
+
+    @pytest.mark.asyncio
+    async def test_evaluate_failure_keeps_entry_and_rc_nonzero(
+        self, monkeypatch, tmp_path
+    ):
+        import backend.scripts.rd_mined_materialize as mod
+
+        manifest = {"fid1": {"status": "materialized", "column": "c1", "at": "t0"}}
+        rows = [{"factor_id": "fid1", "market": "a_share", "universe": ""}]
+        captured: list = []
+        env_mod, args = self._fake_env(
+            monkeypatch, tmp_path, manifest, rows, self._decision(False), captured
+        )
+
+        async def raising_eval(row):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(env_mod, "_evaluate_gates", raising_eval)
+        rc = await env_mod._run_gates_only(args)
+        assert rc == 1
+        assert captured == []
+        assert "gates" not in _load_manifest(tmp_path)["fid1"]
