@@ -102,12 +102,16 @@ for k in sorted(c.scan_iter(match='qm:anomaly:last_fired:*', count=500)):
 | `skipped_market` | 取到的行情条目里**缺 `price`**（不可评测）而被跳过的条数——正常，非故障 |
 | `skipped_market_closed` | **时段外闸拦下市场族取数**（见 §4.2）。盘外每分钟 +1（cadence 60s），15:00→次日 09:30 累计 ~1100 属正常；内存计数，重启归零 |
 | `skipped_market_holiday` | **工作日假期被交易日历拦下**（2026-10-08 新增，见 §4.2）。假期时段内每分钟 +1；**工作日交易日读到它在涨 = 日历答错了或引擎认为今天不是交易日**，先查日志 `[anomaly] 交易日历答不了` |
+| `last_market_fetch_at` | **取数心跳**（2026-10-08 新增）：最近一次**时段内取数**的时刻（墙钟）。盘中它应在一分钟内前进；不前进 = 没在取数（闸误判/停摆）。盘外停在收盘前后属正常 |
+| `last_market_quote_at` | 最近一次**取到有效报价**的时刻。盘中它停在昨天而 `last_market_fetch_at` 在前进 = **取了但零报价**（热集空 / 行情源挂）——`errors` 这一格不会涨，别对着 `cycles` 猜 |
 | `errors` + `last_error` | 会把 `deny no_targets`（模型/非持仓标的无持有人，**正常**）也算进去 |
 
 所以 `errors` 上涨 + `last_error=deny no_targets: model_ic_drop:...` 不是故障；`skipped_market_closed`
 上涨更不是故障（那是闸在干活）。真故障看日志里 `[anomaly] record:` / `[anomaly] publish:` 的行。
 
-**判「引擎是否在正常干活」的顺序**：先看 `last_build_at` 是不是一分钟内（循环在转）→ 交易日
+**判「引擎是否在正常干活」的顺序**：先看 `last_build_at` 是不是一分钟内（循环在转）→ 盘中再看
+两个心跳 `last_market_fetch_at` / `last_market_quote_at` 是不是也在一分钟内（前者不前进=没取数；
+后者不前进而前者前进=取了但零报价，见 §2 表）→ 交易日
 盘中 `skipped_market_closed` 与 `skipped_market_holiday` 都应为 **0**；盘外 `closed` **+1/分钟**、
 假期盘中 `holiday` **+1/分钟**、`detections` 不动
 ——**盘外/假期还出市场族告警就是缺陷复发**（§4.2）。`detections` 盘中也可能长时间为 0：异动本就稀疏。
@@ -226,6 +230,7 @@ docker exec -w /app quantmind python -m pytest \
 | 盘外/半夜/假期在报市场异动 | 该行 `created_at` 的时段 | 时段外 ⇒ §4.2 缺陷复发（闸没生效/被绕过），先看 `skipped_market_closed` 有没有在涨；**假期时段内**报了 ⇒ 日历层答不了（日志 `[anomaly] 交易日历答不了`）或 XSHG 印发期已过（2026-12-31） |
 | 盘外调接口看不到市场族动静 | `skipped_market_closed` | **正常**，闸在干活；盘中再来验 |
 | 假期盘中看不到市场族动静 | `skipped_market_holiday` | **正常**（2026-10-08 起的日历层）；工作日看到这一格才要查 |
+| 盘中「引擎活着但一条市场异动都没有」，`errors=0` | `last_market_fetch_at` / `last_market_quote_at` | 两个心跳停昨天 ⇒ 取了但零报价：先查热集是否为空（`hot_set_key`），再查 `_remote_redis`（公网行情服/桥）通不通——**这两格就是给这种静默失效用的**，别对着 `cycles` 猜 |
 | 涨跌停类告警一条都没有 | §5 | 桥源不给涨跌停字段 → 能力边界，不是漏报 |
 | 「识别引擎没跑」 | `qm:engine:anomaly:config.enabled` | 门控默认关，生产为 `true`；改配置只动 Redis 键 |
 | **计数像刚重启过**（`cycles` 很小、盘外 `skipped_market_closed=0`） | 这台机器上最近有没有人跑过 pytest | 2026-10-08 前，测试用默认 `status_writer` 会把生产镜像 `qm:anomaly:status` 覆盖成测试计数（同日发现实时推理镜像 `qm:realtime:infer:status` 同病），已修：引擎加注入缝 + 测试注入空实现。**再遇到先查测试来源，别急着重启容器或改闸**——真身下一轮会盖回，重启反而清掉现场 |
