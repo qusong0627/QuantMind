@@ -30,8 +30,9 @@ description: "识别引擎（T-P6-14 异动/异常检测常驻服务）运维口
 
 节奏：主循环 `cadence_s=60`；数据族 `data_every_s=1800`、模型族 `model_every_s=3600`
 **低频但首轮必跑**（重启后 ~10s 就会跑一次模型 IC → 想立刻验证重启是最快的办法）。
-**市场族只在连续竞价时段取数**（工作日 09:30–11:30 / 13:00–15:00，盘外计 `skipped_market_closed`，
-见 §4.2）——盘外调接口试引擎，看不到市场族的任何动静是**对的**。
+**市场族只在连续竞价时段 + 交易日取数**（工作日 09:30–11:30 / 13:00–15:00，且当日过交易日历；
+盘外计 `skipped_market_closed`、工作日假期计 `skipped_market_holiday`，见 §4.2）——盘外/假期调
+接口试引擎，看不到市场族的任何动静是**对的**。
 去重冷却 `qm:anomaly:last_fired:{kind}:{subject}:{severity}`（TTL 1800s）——**冷却窗内的告警不会重复落表/上总线**，
 排查「怎么没新行」先看这个键。
 
@@ -99,15 +100,17 @@ for k in sorted(c.scan_iter(match='qm:anomaly:last_fired:*', count=500)):
 |---|---|
 | `detections` / `deduped` | 本轮检出 / 被 30min 冷却压掉 |
 | `skipped_market` | 取到的行情条目里**缺 `price`**（不可评测）而被跳过的条数——正常，非故障 |
-| `skipped_market_closed` | **盘外闸拦下市场族取数**（见 §4.2）。盘外每分钟 +1（cadence 60s），15:00→次日 09:30 累计 ~1100 属正常；内存计数，重启归零 |
+| `skipped_market_closed` | **时段外闸拦下市场族取数**（见 §4.2）。盘外每分钟 +1（cadence 60s），15:00→次日 09:30 累计 ~1100 属正常；内存计数，重启归零 |
+| `skipped_market_holiday` | **工作日假期被交易日历拦下**（2026-10-08 新增，见 §4.2）。假期时段内每分钟 +1；**工作日交易日读到它在涨 = 日历答错了或引擎认为今天不是交易日**，先查日志 `[anomaly] 交易日历答不了` |
 | `errors` + `last_error` | 会把 `deny no_targets`（模型/非持仓标的无持有人，**正常**）也算进去 |
 
 所以 `errors` 上涨 + `last_error=deny no_targets: model_ic_drop:...` 不是故障；`skipped_market_closed`
 上涨更不是故障（那是闸在干活）。真故障看日志里 `[anomaly] record:` / `[anomaly] publish:` 的行。
 
-**判「引擎是否在正常干活」的顺序**：先看 `last_build_at` 是不是一分钟内（循环在转）→ 盘中
-`skipped_market_closed` 应为 **0** 且在涨；盘外应为 **+1/分钟**、`detections` 不动
-——**盘外还出市场族告警就是缺陷复发**（§4.2）。`detections` 盘中也可能长时间为 0：异动本就稀疏。
+**判「引擎是否在正常干活」的顺序**：先看 `last_build_at` 是不是一分钟内（循环在转）→ 交易日
+盘中 `skipped_market_closed` 与 `skipped_market_holiday` 都应为 **0**；盘外 `closed` **+1/分钟**、
+假期盘中 `holiday` **+1/分钟**、`detections` 不动
+——**盘外/假期还出市场族告警就是缺陷复发**（§4.2）。`detections` 盘中也可能长时间为 0：异动本就稀疏。
 
 ## 3. 状态端点（带内部调用头；**不要自铸 token**）
 
@@ -170,14 +173,32 @@ docker exec -w /app quantmind python -m pytest \
 的冻结快照——拿它评量价异动 = 把昨天的涨跌当今天实时报。实证：国庆假期 10-01~10-06 共 **287 条
 `price_surge` 全部落在时段外**（时段内 0 条）；09-25 的 48 条全在 08:11–08:17 盘前。
 
-**修复**：`in_market_session()` 闸——市场族**只在工作日 09:30–11:30 / 13:00–15:00（Asia/Shanghai）取数**，
-盘外只计 `skipped_market_closed`（**取数都不取**，不是取到不算）。数据/账户/模型族**不受影响**：
-日线跳变、IC 骤降本就该盘后出值。
+**修复**：`in_market_session()` 闸——市场族**只在交易日 09:30–11:30 / 13:00–15:00（Asia/Shanghai）取数**，
+盘外/假期只计 `skipped_market_closed` / `skipped_market_holiday`（**取数都不取**，不是取到不算）。
+数据/账户/模型族**不受影响**：日线跳变、IC 骤降本就该盘后出值。
 
 - 时钟走 `now_fn` 注入点（与节流/冷却同一时钟），测试可注入任意时点；
 - 时段常量与 `shared/market_sessions.py` 的 CN 表由 `test_session_windows_match_shared_cn_table` 钉住防漂移
   （平台时段表不止一份历史，改共享表忘改引擎 → 这条红）；
-- **不判节假日**（日历在调度器那边，不引入新依赖）：节假日只会白跑取数，不会假报（时段内实测 0 条）。
+- **节假日层**（2026-10-08 评审补）：工作日假期在闸门眼里原先与交易日无异——**停牌/冻结数据照报，
+  critical 还会按真实标的写锁**（「时段内实测 0 条」不足以下结论，假期只有 6 天样本）。现在工作日
+  时段内再问一层交易日历：`shared.trading_calendar.is_trading_day_xcal`（CN→XSHG，平台同一把尺子的
+  同步出口），按日缓存、时段外根本不问。
+- **日历答不了就退回旧口径（放行）**：库缺失/越界（XSHG 实测印发到 **2026-12-31**）时引擎按「工作日+
+  时段」判，并每天打一条 `[anomaly] 交易日历答不了 <日期>`。这是有意的——本改动只许关闸、不许凭空
+  开闸；**越过 2026-12-31 前后必看这条日志**，届时升级 `exchange_calendars` 或改用带 DB 覆盖层的判据。
+  自查当前口径（容器内，任意时点可试）——**`market_session_state` 本身不问日历**，必须与
+  `_default_trading_day_lookup` 组合，才是 `build_once` 的那条判据：
+  ```bash
+  docker exec -w /app quantmind python -c "
+  from datetime import datetime; from zoneinfo import ZoneInfo
+  from backend.services.engine.anomaly_engine import (
+      _default_trading_day_lookup as look, market_session_state)
+  for d in (1, 8, 10):
+      t = datetime(2026, 10, d, 10, 30, tzinfo=ZoneInfo('Asia/Shanghai'))
+      print(t.date(), t.strftime('%a'), '->', market_session_state(t, trading_day=look(t.date())))"
+  # 实测：2026-10-01 Thu -> holiday（国庆）、10-08 Thu -> open、10-10 Sat -> closed
+  ```
 
 ### 4.3 教训：改「取数入口」要连测试时钟一起改
 
@@ -202,8 +223,9 @@ docker exec -w /app quantmind python -m pytest \
 | 台账某类告警**一条都没有** | 该 kind 的 subject 长度 vs 落点形状 | 形状不匹配会静默丢整条：`instrument` varchar(16)、总线 target ≤24 |
 | `errors` 计数涨、`last_error=deny no_targets` | — | 正常（无持有人可锁）；只有 `record:`/`publish:` 失败才是故障 |
 | 重启后想立刻看模型告警 | — | 模型族首轮必跑（~10s）；冷却键会压掉 30 分钟内的重复，验证时可删该 subject 的键 |
-| 盘外/半夜/假期在报市场异动 | 该行 `created_at` 的时段 | 时段外 ⇒ §4.2 缺陷复发（闸没生效/被绕过），先看 `skipped_market_closed` 有没有在涨 |
+| 盘外/半夜/假期在报市场异动 | 该行 `created_at` 的时段 | 时段外 ⇒ §4.2 缺陷复发（闸没生效/被绕过），先看 `skipped_market_closed` 有没有在涨；**假期时段内**报了 ⇒ 日历层答不了（日志 `[anomaly] 交易日历答不了`）或 XSHG 印发期已过（2026-12-31） |
 | 盘外调接口看不到市场族动静 | `skipped_market_closed` | **正常**，闸在干活；盘中再来验 |
+| 假期盘中看不到市场族动静 | `skipped_market_holiday` | **正常**（2026-10-08 起的日历层）；工作日看到这一格才要查 |
 | 涨跌停类告警一条都没有 | §5 | 桥源不给涨跌停字段 → 能力边界，不是漏报 |
 | 「识别引擎没跑」 | `qm:engine:anomaly:config.enabled` | 门控默认关，生产为 `true`；改配置只动 Redis 键 |
 | **计数像刚重启过**（`cycles` 很小、盘外 `skipped_market_closed=0`） | 这台机器上最近有没有人跑过 pytest | 2026-10-08 前，测试用默认 `status_writer` 会把生产镜像 `qm:anomaly:status` 覆盖成测试计数（同日发现实时推理镜像 `qm:realtime:infer:status` 同病），已修：引擎加注入缝 + 测试注入空实现。**再遇到先查测试来源，别急着重启容器或改闸**——真身下一轮会盖回，重启反而清掉现场 |
