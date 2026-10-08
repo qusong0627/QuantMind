@@ -201,6 +201,7 @@ docker exec -w /app quantmind python -m pytest \
 | 盘外调接口看不到市场族动静 | `skipped_market_closed` | **正常**，闸在干活；盘中再来验 |
 | 涨跌停类告警一条都没有 | §5 | 桥源不给涨跌停字段 → 能力边界，不是漏报 |
 | 「识别引擎没跑」 | `qm:engine:anomaly:config.enabled` | 门控默认关，生产为 `true`；改配置只动 Redis 键 |
+| **计数像刚重启过**（`cycles` 很小、盘外 `skipped_market_closed=0`） | 这台机器上最近有没有人跑过 pytest | 2026-10-08 前，测试用默认 `status_writer` 会把生产镜像 `qm:anomaly:status` 覆盖成测试计数（同日发现实时推理镜像 `qm:realtime:infer:status` 同病），已修：引擎加注入缝 + 测试注入空实现。**再遇到先查测试来源，别急着重启容器或改闸**——真身下一轮会盖回，重启反而清掉现场 |
 
 ## 相关技能
 
