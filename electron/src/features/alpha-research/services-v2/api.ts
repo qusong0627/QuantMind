@@ -42,25 +42,23 @@ function makeOk<T>(data: T): ApiResponse<T> {
   return { success: true, data };
 }
 
-function emptyMetrics(): RealtimeMetrics {
+export function emptyMetrics(): RealtimeMetrics {
+  // 计数 + 空清单；IC/收益族一律缺席（undefined）——界面显「—」，
+  // 绝不把「没算过」伪造成 0.0000
   return {
-    ic: 0,
-    icir: 0,
-    rankIc: 0,
-    rankIcir: 0,
-    annualReturn: 0,
-    sharpeRatio: 0,
-    maxDrawdown: 0,
     totalFactors: 0,
     highQualityFactors: 0,
     mediumQualityFactors: 0,
     lowQualityFactors: 0,
-    top10Factors: [],
+    factors: [],
   };
 }
 
-export function classifyQuality(ic: number | null | undefined): 'high' | 'medium' | 'low' {
-  if (ic == null) return 'low';
+export function classifyQuality(
+  ic: number | null | undefined,
+): 'high' | 'medium' | 'low' | 'unknown' {
+  // IC 缺失 = 质量无从分级；旧实现判 'low'（缺失被当成差因子）
+  if (ic == null || !Number.isFinite(ic)) return 'unknown';
   const v = Math.abs(ic);
   if (v >= 0.05) return 'high';
   if (v >= 0.02) return 'medium';
@@ -168,6 +166,23 @@ function pickNumber(...candidates: any[]): number | undefined {
   return undefined;
 }
 
+/** 物化条目（后端 snake_case）→ 前端 camelCase；无条目返回 undefined。 */
+function normalizeMaterialization(meta: any): Factor['materialization'] {
+  const raw = meta?.materialization;
+  if (!raw || typeof raw !== 'object' || typeof raw.status !== 'string') return undefined;
+  return {
+    status: raw.status,
+    column: typeof raw.column === 'string' ? raw.column : undefined,
+    name: typeof raw.name === 'string' ? raw.name : undefined,
+    values: toNumber(raw.values) ?? undefined,
+    corr: toNumber(raw.corr),
+    corrAgainst: typeof raw.corr_against === 'string' ? raw.corr_against : null,
+    at: typeof raw.at === 'string' ? raw.at : undefined,
+    gates: raw.gates,
+    error: typeof raw.error === 'string' ? raw.error : undefined,
+  };
+}
+
 export function normalizeAgentFactor(raw: any): Factor {
   const ic = raw?.ic_value ?? null;
   const meta = raw?.metadata ?? {};
@@ -189,16 +204,15 @@ export function normalizeAgentFactor(raw: any): Factor {
     quality: classifyQuality(ic),
     market: meta.market ?? raw?.market ?? undefined,
     universe: raw?.universe ?? meta.universe ?? undefined,
-    ic: ic ?? 0,
-    // H5 路径 ICIR 只写表字段（metadata 里没有），qlib 路径双写——两个源都要认
-    icir: pickNumber(raw?.icir, meta.icir) ?? 0,
-    rankIc: raw?.rank_ic ?? meta.rank_ic ?? 0,
-    // 两个回测路径都写 rank_icir（表字段 + qlib 路径 metadata 双写）；没有真实值就
-    // 保持 undefined——旧实现硬编码 0，把「没算过」伪装成「算出来是 0」。
+    // 指标族一律「没有真实值就 undefined」——两个回测路径（表字段 / metadata 双写）
+    // 都认；旧实现对缺失硬编码 0，把「没算过」伪装成「算出来是 0」。
+    ic: pickNumber(ic),
+    icir: pickNumber(raw?.icir, meta.icir),
+    rankIc: pickNumber(raw?.rank_ic, meta.rank_ic),
     rankIcir: pickNumber(raw?.rank_icir, meta.rank_icir),
-    sharpeRatio: raw?.sharpe_ratio ?? 0,
-    annualReturn: raw?.annual_return ?? 0,
-    maxDrawdown: raw?.max_drawdown ?? 0,
+    sharpeRatio: pickNumber(raw?.sharpe_ratio, meta.sharpe_ratio),
+    annualReturn: pickNumber(raw?.annual_return, meta.annual_return),
+    maxDrawdown: pickNumber(raw?.max_drawdown, meta.max_drawdown),
     // 机构级指标（mining_plugins 评估器链）：缺失保持 undefined → 界面显「—」
     rre: pickNumber(meta.rre),
     pfsQuality,
@@ -208,6 +222,10 @@ export function normalizeAgentFactor(raw: any): Factor {
     sharpeNet: pickNumber(meta.sharpe_net),
     maxDrawdownNet: pickNumber(meta.max_drawdown_net),
     nObs: pickNumber(meta.n_obs),
+    // 物化状态（metadata.materialization，物化器回写；未物化 = 缺席）
+    materialization: normalizeMaterialization(meta),
+    // 历史因子（user_id IS NULL）：只读。服务端 for_write 仍兜底 404，这里只做 UI 预判
+    ownerless: raw?.user_id == null,
     round: meta.round ?? 0,
     direction: meta.direction ?? raw?.category ?? '',
     createdAt: raw?.created_at ?? '',
@@ -312,6 +330,8 @@ export interface FactorListParams {
   library?: string;
   market?: string;
   universe?: string;
+  /** 只列该挖掘任务产出的因子（结果区权威清单：挖到多少列多少） */
+  taskId?: string;
 }
 
 export interface FactorListResponse {
@@ -321,21 +341,28 @@ export interface FactorListResponse {
   offset: number;
   metadata?: any;
   libraries?: string[];
+  /** 服务端本页实际上限（界面据此显示「已达上限」） */
+  serverLimit?: number;
 }
+
+/** 与服务端 Query(le=500) 对齐的客户端上限（请求超过会被 422）。 */
+export const FACTOR_LIST_MAX_LIMIT = 500;
 
 export async function getFactors(
   params: FactorListParams = {},
 ): Promise<ApiResponse<FactorListResponse>> {
   const qs = new URLSearchParams();
-  // Backend caps `limit` at 200 — clamp client-side so callers requesting more
-  // get the first 200 instead of a 422 validation error.
-  const requested = params.limit ?? 200;
-  const clamped = Math.min(Math.max(requested, 1), 200);
+  // Backend caps `limit` at 500 — clamp client-side so callers requesting more
+  // get the first 500 instead of a 422 validation error.
+  const requested = params.limit ?? FACTOR_LIST_MAX_LIMIT;
+  const clamped = Math.min(Math.max(requested, 1), FACTOR_LIST_MAX_LIMIT);
   qs.set('limit', String(clamped));
   if (params.market) qs.set('market', params.market);
   if (params.universe) qs.set('universe', params.universe);
+  if (params.taskId) qs.set('task_id', params.taskId);
   const res = await apiClient.get(`/alpha-agent/factors?${qs.toString()}`);
   let factors: Factor[] = (res.data?.data?.factors ?? []).map(normalizeAgentFactor);
+  const serverLimit: number = res.data?.data?.limit ?? clamped;
 
   if (params.quality) {
     factors = factors.filter((f) => f.quality === params.quality);
@@ -359,6 +386,7 @@ export async function getFactors(
     limit: params.limit ?? total,
     offset,
     libraries: ['default'],
+    serverLimit,
   });
 }
 
@@ -568,24 +596,41 @@ export async function startBacktest(
     taskId,
     task: normalizeAgentTask({
       task_id: taskId,
-      status: data.status ?? 'running',
+      // 本端点两种返回（已触发 / 已在跑）都是 status="backtesting"——直接透传会落进
+      // normalizeTaskStatus 的 default 分支变成 idle；显式归一为 running。
+      status: 'running',
       progress: data.message,
     }),
   });
 }
 
+export interface BacktestStatusData {
+  task: Task;
+  /** 失败/取消原文（metadata.backtest_error 尾段，或 HTTP detail）——行内状态展示用 */
+  error?: string;
+}
+
 export async function getBacktestStatus(
   taskId: string,
-): Promise<ApiResponse<{ task: Task }>> {
+): Promise<ApiResponse<BacktestStatusData>> {
   try {
     const res = await apiClient.get(`/alpha-agent/factors/${taskId}`);
     const raw = res.data?.data ?? {};
-    // Map backend status correctly: 'failed' should map to 'failed', not 'running'
+    // 状态映射以 factor 行 status 为准。'pending'（从未回测）必须映射为 idle——
+    // 旧实现把一切非终态映射成 running，attach 一个没回测过的因子会永远「回测中」。
     const rawStatus: string = raw.status ?? '';
-    const status: string =
-      rawStatus === 'completed' ? 'completed' :
-      rawStatus === 'failed' || rawStatus === 'cancelled' ? 'failed' :
-      'running';
+    const status: TaskStatus =
+      rawStatus === 'completed'
+        ? 'completed'
+        : rawStatus === 'failed' || rawStatus === 'cancelled'
+          ? 'failed'
+          : rawStatus === 'backtesting'
+            ? 'running'
+            : 'idle';
+    const backtestError =
+      typeof raw.metadata?.backtest_error === 'string' && raw.metadata.backtest_error
+        ? (raw.metadata.backtest_error as string)
+        : undefined;
     // Extract metrics from factor detail response
     const metrics: Record<string, any> = {};
     if (raw.ic_value != null) metrics.ic = raw.ic_value;
@@ -621,17 +666,34 @@ export async function getBacktestStatus(
       task: normalizeAgentTask({
         task_id: taskId,
         status,
-        progress: status === 'completed' ? 'Backtest done' : 'Running',
+        progress:
+          status === 'failed'
+            ? backtestError ?? '回测失败'
+            : status === 'completed'
+              ? 'Backtest done'
+              : status === 'running'
+                ? 'Running'
+                : '未回测',
         metrics: Object.keys(metrics).length > 0 ? metrics : undefined,
       }),
+      error: backtestError,
     });
-  } catch {
-    return makeOk({ task: normalizeAgentTask({ task_id: taskId, status: 'failed' }) });
+  } catch (err: any) {
+    // 归属校验 404 / 网络错：把原文带给调用方（行内三态要能显示失败原因，不能只吞）
+    const detail = err?.response?.data?.detail;
+    const message = typeof detail === 'string' && detail ? detail : '查询回测状态失败';
+    return makeOk({
+      task: normalizeAgentTask({ task_id: taskId, status: 'failed', progress: message }),
+      error: message,
+    });
   }
 }
 
-export async function cancelBacktest(_taskId: string): Promise<ApiResponse> {
-  return makeOk({});
+export async function cancelBacktest(taskId: string): Promise<ApiResponse> {
+  // taskId 即 factorId（回测任务以因子为句柄）；旧实现是空 stub——
+  // 页面点了「停止回测」后端子进程照跑，属假动作。
+  const res = await apiClient.post(`/alpha-agent/factors/${taskId}/cancel`);
+  return makeOk(res.data?.data ?? {});
 }
 
 // ========================== LLM Config ==========================
@@ -1352,6 +1414,7 @@ export function connectMiningWs(
   let lastPhase = '';
   let lastPct = -1;
   let lastFactorsCount = -1;
+  let lastFactorsHead = '';
   let logOffset = 0;
 
   // Regex to parse RD-Agent log lines like:
@@ -1433,13 +1496,18 @@ export function connectMiningWs(
       const statusChanged = status !== lastStatus;
       // 后端随任务状态返回的结构化因子（rd_agent_factors 已落库），优先于日志正则解析
       const backendFactors: any[] = Array.isArray(data.factors) ? data.factors : [];
-      const factorsChanged = backendFactors.length !== lastFactorsCount;
+      // 载荷恒为「最新 20 条」（ORDER BY created_at DESC）：数量饱和在 20 后，新因子
+      // 只会顶掉最旧一条（数量不变）——只比数量会让新因子静默不进 UI；并列比首条 id。
+      const factorsHead = backendFactors[0]?.factor_id ?? '';
+      const factorsChanged =
+        backendFactors.length !== lastFactorsCount || factorsHead !== lastFactorsHead;
 
       if (statusChanged || phaseChanged || pctChanged || factorsChanged) {
         lastStatus = status;
         lastPhase = backendPhase;
         lastPct = progressPct;
         lastFactorsCount = backendFactors.length;
+        lastFactorsHead = factorsHead;
         const phase: ExecutionPhase =
           status === 'completed'
             ? 'completed'

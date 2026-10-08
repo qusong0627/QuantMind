@@ -78,7 +78,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
             <span className="text-[11px] font-mono text-slate-500">AutoAlpha 2.0</span>
           </div>
 
-          <h2 className="text-3xl sm:text-4xl font-black tracking-tight mb-2.5 bg-gradient-to-r from-slate-900 via-blue-900 to-indigo-900 bg-clip-text text-transparent">
+          <h2 className="text-2xl sm:text-3xl font-black tracking-tight mb-2.5 bg-gradient-to-r from-slate-900 via-blue-900 to-indigo-900 bg-clip-text text-transparent">
             欢迎使用 QuantaAlpha
           </h2>
           <p className="text-sm sm:text-base text-slate-500 font-medium leading-relaxed">

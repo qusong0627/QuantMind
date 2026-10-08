@@ -564,6 +564,8 @@ async def get_task_status(task_id: str, request: Request):
     status = await _require_owned_task(task_id, request)
     auth_user_id, _ = get_authenticated_identity(request)
     try:
+        # 载荷刻意截 20 条（本端点 2s 轮询、要小）；结果区权威清单走
+        # GET /factors?task_id=…&limit=500（「挖到多少显示多少」按此为准）。
         status["factors"] = await persistence.list_factors(
             user_id=auth_user_id,
             task_id=task_id,
@@ -649,9 +651,16 @@ async def list_factors(
     status: str | None = Query(
         None, description="按状态过滤: pending/backtesting/completed/failed"
     ),
-    limit: int = Query(50, ge=1, le=200),
+    task_id: str | None = Query(None, description="只返回该挖掘任务产出的因子"),
+    limit: int = Query(50, ge=1, le=500),
 ):
-    """列出当前用户已生成的因子"""
+    """列出当前用户已生成的因子。
+
+    ``task_id`` 走 ``metadata_json->>'task_id'``；查询本身已按认证用户收口
+    （``user_id = auth_user_id``），他人 task_id 天然查空——不需要也不应该
+    对 task_id 另做归属校验（多一次查询只会多一个存在性泄露面）。
+    响应带 ``limit`` 供界面诚实显示「已达上限」。
+    """
     auth_user_id, auth_tenant_id = get_authenticated_identity(request)
     assert_identity_not_spoofed(
         auth_user_id=auth_user_id,
@@ -663,9 +672,206 @@ async def list_factors(
         status=status,
         market=market,
         universe=universe,
+        task_id=task_id,
         limit=limit,
     )
-    return {"code": 200, "data": {"factors": factors, "total": len(factors)}}
+    return {
+        "code": 200,
+        "data": {"factors": factors, "total": len(factors), "limit": limit},
+    }
+
+
+class FactorMaterializeRequest(BaseModel):
+    factor_ids: list[str]
+    force: bool = False
+
+
+# 用户自助物化的启动确认参数（模块级常量：测试 monkeypatch 缩短用；
+# 与 admin 面同值同纪律——回包前必须确认子进程真拿住 flock）。
+_MATERIALIZE_CONFIRM_TIMEOUT_S = 15.0
+_MATERIALIZE_CONFIRM_POLL_S = 0.25
+
+
+@router.post("/factors/materialize")
+async def post_factor_materialize(request: Request, body: FactorMaterializeRequest):
+    """把选中因子手动送入物化（rd_mined 训练数据集），owner 恒为鉴权身份。
+
+    与 admin 面板共用同一把 flock 与同一启动纪律（shared launcher）；只接受
+    当前用户名下、带代码、a_share 且未定终态的因子。越权/无码/非 a_share/
+    已物化等一律在明细里如实回报，不静默吞（跳过原因与物化器同词表）。
+    """
+    auth_user_id, _ = get_authenticated_identity(request)
+
+    from backend.scripts.rd_mined_materialize import (
+        _eligible_row,
+        _lib_root,
+        _load_manifest,
+        _query_candidates,
+        _should_materialize,
+        _web_log_path,
+        build_run_command,
+        probe_run_lock,
+        project_root,
+    )
+    from backend.shared.rd_mined_materialize_launch import (
+        START_GUARD,
+        MaterializeSpawnError,
+        normalize_factor_ids,
+        spawn_materialize,
+    )
+
+    try:
+        ids = normalize_factor_ids(body.factor_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    rows = await _query_candidates(factor_ids=ids, ensure=False)
+    by_id = {str(row.get("factor_id")): row for row in rows}
+    manifest = _load_manifest(_lib_root())
+
+    rejected: list[dict[str, str]] = []
+    skipped: dict[str, str] = {}
+    materializable: list[str] = []
+    for factor_id in ids:
+        row = by_id.get(factor_id)
+        owner = row.get("user_id") if row else None
+        # 归属过滤先于一切：他人 / 历史无主（user_id IS NULL，只读）一律按
+        # 「不存在」处理（与 _require_owned_factor(for_write) 同语义，不泄露存在性）。
+        if row is None or owner != auth_user_id:
+            rejected.append({"factor_id": factor_id, "reason": "not_found"})
+            continue
+        ok, reason = _eligible_row(row)
+        if not ok:
+            skipped[factor_id] = reason
+            continue
+        ok, reason = _should_materialize(row, manifest, force=body.force)
+        if not ok:
+            skipped[factor_id] = reason
+            continue
+        materializable.append(factor_id)
+
+    if len(rejected) == len(ids):
+        # 全是他人的/不存在的 id：与单因子端点同一口径 404（不逐个回显原因）
+        raise HTTPException(status_code=404, detail="Factor not found")
+
+    if not materializable:
+        return {
+            "code": 200,
+            "data": {
+                "started": False,
+                "running": probe_run_lock(),
+                "requested": len(ids),
+                "materializable": [],
+                "skipped": skipped,
+                "rejected": rejected,
+                "message": "没有可物化的因子（原因见明细）",
+            },
+        }
+
+    if probe_run_lock():
+        raise HTTPException(
+            status_code=409,
+            detail="已有物化进程在运行，本次未启动（物化独占同一座库，避免并发写坏分区）",
+        )
+    if not START_GUARD.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409, detail="上一次启动确认尚未完成，请稍后重试"
+        )
+    try:
+        try:
+            result = await spawn_materialize(
+                command=build_run_command(materializable),
+                log_path=_web_log_path(),
+                cwd=project_root(),
+                probe=probe_run_lock,
+                log_holder=logger,
+                confirm_timeout_s=_MATERIALIZE_CONFIRM_TIMEOUT_S,
+                confirm_poll_s=_MATERIALIZE_CONFIRM_POLL_S,
+            )
+        except MaterializeSpawnError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    finally:
+        START_GUARD.release()
+
+    return {
+        "code": 200,
+        "data": {
+            "started": True,
+            "running": bool(result["confirmed"]),
+            "confirmed": bool(result["confirmed"]),
+            "pid": result["pid"],
+            "log_path": result["log_path"],
+            "requested": len(ids),
+            "materializable": materializable,
+            "skipped": skipped,
+            "rejected": rejected,
+            "message": (
+                f"物化已确认在后台运行：{len(materializable)} 个因子；"
+                "完成后自动刷新字段注册与训练目录"
+                if result["confirmed"]
+                else "物化进程已启动但暂未确认持锁，请稍后刷新状态"
+            ),
+        },
+    }
+
+
+@router.get("/factors/materialize/status")
+async def get_factor_materialize_status(
+    request: Request,
+    factor_ids: str = Query("", description="逗号分隔的因子 ID（最多 100 个）"),
+):
+    """选中因子的物化状态（manifest 面）。
+
+    只回当前用户名下的条目（越权/不存在的 id 直接缺席）。刻意**不回日志尾**：
+    web 日志可能夹带其他用户或管理员运行的因子名，对普通用户回吐即跨租户
+    泄露；probe_run_lock + manifest 足够支撑界面（日志尾保持 admin 专属）。
+    """
+    auth_user_id, _ = get_authenticated_identity(request)
+
+    from backend.scripts.rd_mined_materialize import (
+        _lib_root,
+        _load_manifest,
+        _query_candidates,
+        probe_run_lock,
+    )
+    from backend.shared.rd_mined_materialize_launch import normalize_factor_ids
+
+    raw = [part for part in factor_ids.split(",") if part.strip()]
+    try:
+        ids = normalize_factor_ids(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    rows = await _query_candidates(factor_ids=ids, ensure=False)
+    owned = {
+        str(row.get("factor_id")) for row in rows if row.get("user_id") == auth_user_id
+    }
+    manifest = _load_manifest(_lib_root())
+
+    factors: list[dict[str, object]] = []
+    last_at: str | None = None
+    for factor_id in ids:
+        if factor_id not in owned:
+            continue
+        entry = manifest.get(factor_id) or {}
+        at = entry.get("at")
+        factors.append(
+            {
+                "factor_id": factor_id,
+                "status": str(entry.get("status") or "none"),
+                "at": at if isinstance(at, str) else None,
+            }
+        )
+        if isinstance(at, str) and (last_at is None or at > last_at):
+            last_at = at
+    return {
+        "code": 200,
+        "data": {
+            "running": probe_run_lock(),
+            "factors": factors,
+            "last_at": last_at,
+        },
+    }
 
 
 @router.get("/factors/{factor_id}")

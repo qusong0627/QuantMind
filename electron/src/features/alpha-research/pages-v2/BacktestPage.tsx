@@ -23,6 +23,7 @@ import {
 } from '../services-v2/api';
 import type { FactorLibraryOption } from '../services-v2/api';
 import type { UniverseId, UniverseInfo } from '../types-v2';
+import { PageHeader } from '../components-v2/layout/PageHeader';
 import {
   AreaChart,
   Area,
@@ -121,7 +122,7 @@ const MetricCard = ({ label, value, unit = '' }: { label: string; value?: number
     <div className="text-lg font-bold font-mono">
       {typeof value === 'number' 
         ? `${formatNumber(value, 4)}${unit}`
-        : '--'}
+        : '—'}
     </div>
   </div>
 );
@@ -227,7 +228,7 @@ export const BacktestPage: React.FC = () => {
     <div className="glass rounded-xl p-4 text-center">
       <div className="text-xs text-muted-foreground mb-1">{label}</div>
       <div className="text-lg font-bold text-foreground">
-        {typeof value === 'number' ? value.toFixed(precision) : value ?? '--'}
+        {typeof value === 'number' ? value.toFixed(precision) : value ?? '—'}
         {unit && <span className="text-xs text-muted-foreground ml-1">{unit}</span>}
       </div>
     </div>
@@ -251,15 +252,11 @@ export const BacktestPage: React.FC = () => {
   return (
     <div className="space-y-6 animate-fade-in-up">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold flex items-center gap-3">
-          <BarChart3 className="h-8 w-8 text-primary" />
-          独立回测
-        </h1>
-        <p className="text-muted-foreground mt-1">
-          使用因子库进行全周期回测评估
-        </p>
-      </div>
+      <PageHeader
+        icon={BarChart3}
+        title="独立回测"
+        subtitle="使用因子库进行全周期回测评估"
+      />
 
       {/* Info Banner */}
       <Card className="glass border-primary/30">
@@ -498,7 +495,8 @@ export const BacktestPage: React.FC = () => {
                 {task.status === 'running' ? '运行中' :
                  task.status === 'completed' ? '已完成' :
                  task.status === 'failed' ? '失败' :
-                 task.status === 'cancelled' ? '已取消' : task.status}
+                 task.status === 'cancelled' ? '已取消' :
+                 task.status === 'idle' ? '未回测' : task.status}
               </Badge>
             </CardTitle>
           </CardHeader>
@@ -560,7 +558,7 @@ export const BacktestPage: React.FC = () => {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-muted-foreground">
               <div>任务 ID: <span className="font-mono text-foreground">{task.taskId}</span></div>
               <div>开始时间: {new Date(task.createdAt).toLocaleTimeString()}</div>
-              <div>因子ID: {task.config?.factorId || selectedLibrary}</div>
+              <div>因子ID: {task.config?.factorId || task.taskId}</div>
               <div>因子源: {task.config?.factorSource || factorSource}</div>
             </div>
           </CardContent>
@@ -578,7 +576,7 @@ export const BacktestPage: React.FC = () => {
               </div>
               {metrics.__num_factors != null && (
                 <span className="text-xs text-muted-foreground font-normal">
-                  {metrics.__num_factors} 个因子 · 耗时 {metrics.__elapsed_seconds != null ? `${Math.round(metrics.__elapsed_seconds)}s` : '--'}
+                  {metrics.__num_factors} 个因子 · 耗时 {metrics.__elapsed_seconds != null ? `${Math.round(metrics.__elapsed_seconds)}s` : '—'}
                 </span>
               )}
             </CardTitle>

@@ -10,8 +10,8 @@ export type ExecutionPhase =
   | 'analyzing'    // Analyzing results
   | 'completed';   // Completed
 
-// Factor quality level
-export type FactorQuality = 'high' | 'medium' | 'low';
+// Factor quality level（unknown = IC 缺失，质量无从分级；旧实现把 null 判成 low）
+export type FactorQuality = 'high' | 'medium' | 'low' | 'unknown';
 
 // 内置指数池 + 全局自定义股票池 code
 export type BuiltinUniverseId =
@@ -97,38 +97,25 @@ export interface TaskConfig {
 
 // Real-time metrics
 export interface RealtimeMetrics {
-  // IC metrics
-  ic: number;
-  icir: number;
-  rankIc: number;
+  // IC metrics —— 一律可选：后端没算过 → undefined → 界面显「—」，禁止补 0
+  // （0 的语义是「算出来就是 0」，与「没算过」是两回事）
+  ic?: number;
+  icir?: number;
+  rankIc?: number;
   rankIcir?: number;
 
   // Optional factor name if available (e.g. best factor)
   factorName?: string;
 
-  // Top 10 factors list
-  top10Factors?: Array<{
-    factorId: string;
-    factorName: string;
-    factorExpression: string;
-    rankIc: number;
-    rankIcir: number;
-    ic: number;
-    icir: number;
-    annualReturn?: number;
-    sharpeRatio?: number;
-    maxDrawdown?: number;
-    calmarRatio?: number;
-    market?: string;
-    cumulativeCurve?: Array<{date: string, value: number}>;
-  }>;
+  // 本轮挖掘产出的全部结构化因子（挖到多少显示多少；旧实现截 Top10）
+  factors?: Factor[];
 
-  // Return metrics
-  annualReturn: number;
-  sharpeRatio: number;
-  maxDrawdown: number;
+  // Return metrics（同上：可选）
+  annualReturn?: number;
+  sharpeRatio?: number;
+  maxDrawdown?: number;
 
-  // Factor statistics
+  // Factor statistics（计数必有——统计面板直接渲染）
   totalFactors: number;
   highQualityFactors: number;
   mediumQualityFactors: number;
@@ -202,6 +189,30 @@ export interface LogEntry {
   message: string;
 }
 
+// 物化状态（后端 metadata.materialization / manifest 条目，snake→camel 归一后）
+export type FactorMaterializationStatus =
+  | 'materialized'
+  | 'rejected_duplicate'
+  | 'rejected_gate'
+  | 'error'
+  | 'none';
+
+export interface FactorMaterialization {
+  status: FactorMaterializationStatus;
+  /** 训练库列名（column） */
+  column?: string;
+  name?: string;
+  values?: number;
+  /** 与库内最高相关因子的 |ρ|（rejected_duplicate / 物化时的查重值） */
+  corr?: number | null;
+  /** 最高相关对照列 */
+  corrAgainst?: string | null;
+  at?: string;
+  /** 门禁裁决明细（rejected_gate / materialized 都带） */
+  gates?: any;
+  error?: string;
+}
+
 // Factor information
 export interface Factor {
   factorId: string;
@@ -212,15 +223,21 @@ export interface Factor {
   market?: string;  // a_share, crypto, hong_kong, us_stock
   universe?: string;  // csi300, csi500, csi1000, sse50, gem, star, csi800, all_a
 
-  // Backtest metrics
-  ic: number;
-  icir: number;
-  rankIc: number;
-  /** 元数据里没有真实值时保持 undefined（旧实现硬编码 0，与「算出来就是 0」无法区分） */
+  // Backtest metrics —— 一律可选：后端没算过保持 undefined（界面显「—」），
+  // 旧实现硬编码 0，把「没算过」伪造成「算出来是 0」
+  ic?: number;
+  icir?: number;
+  rankIc?: number;
   rankIcir?: number;
-  sharpeRatio: number;
-  annualReturn: number;
-  maxDrawdown: number;
+  sharpeRatio?: number;
+  annualReturn?: number;
+  maxDrawdown?: number;
+
+  // —— 物化（训练库入库状态）——
+  /** 未物化的因子没有这段（undefined） */
+  materialization?: FactorMaterialization;
+  /** 历史因子（user_id IS NULL）：只读，物化/回测入口禁用 */
+  ownerless?: boolean;
 
   // —— 机构级指标（metadata_json；缺失保持 undefined，界面显「—」）——
   rre?: number;

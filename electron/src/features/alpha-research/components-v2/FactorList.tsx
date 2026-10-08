@@ -1,304 +1,216 @@
-import React, { useState } from 'react';
-import {
-  AreaChart,
-  Area,
-  ResponsiveContainer,
-} from 'recharts';
+/**
+ * FactorList — 本轮挖掘结果区（机构级密集表）。
+ *
+ * 组成：粘性操作条（MaterializeBar）+ 密集因子表（FactorTable）+ 详情抽屉。
+ * 数据纪律：
+ * - 挖到多少显示多少：清单来自 metrics.factors（TaskContext 经 /factors?task_id=…
+ *   limit=500 全量合并，不再截 Top10）；
+ * - 指标缺失一律「—」、真 0 显 0（formatMetricValue），红涨绿跌只用于有方向的量；
+ * - 行级回测/物化走 RunQueueContext（跨页共享）；「看图表」经 attachBacktestTask
+ *   把既有回测载入回测页（不重跑）。
+ */
+
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/Card';
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "./ui/HoverCard";
-import { RealtimeMetrics } from '../types-v2';
-import { formatNumber, formatPercent } from '../utils-v2';
-import { TrendingUp, Zap, Check, Loader2, Sparkles, FileUp, Play } from 'lucide-react';
+import type { Factor, RealtimeMetrics } from '../types-v2';
 import { alphaAgentService } from '../services/alphaAgentService';
-import { explainFactor, exportFactorToIde } from '../services-v2/api';
+import { FACTOR_LIST_MAX_LIMIT } from '../services-v2/api';
 import { useTaskContext } from '../context-v2/TaskContext';
+import { useBacktestQueue, useMaterializeRun } from '../context-v2/RunQueueContext';
+import { FactorTable } from './FactorTable';
+import { MaterializeBar } from './MaterializeBar';
+import { FactorDetailDrawer } from './FactorDetailDrawer';
+import type { BacktestRunEntry } from '../context-v2/RunQueueContext';
 
 interface FactorListProps {
   metrics: RealtimeMetrics | null;
   onNavigate?: (page: string) => void;
 }
 
-const MARKET_LABELS: Record<string, string> = {
-  a_share: 'A股', crypto: '加密货币', hong_kong: '港股', us_stock: '美股', futures: '期货',
-};
+type PromoteState = 'loading' | 'done' | 'error';
+
+/**
+ * 默认排序：RankIC 降序、缺失恒排最后（缺失不是「小」）；tie → createdAt desc
+ * → factorId。用户点表头后由 FactorTable 接管排序。
+ */
+function sortByRankIc(factors: Factor[]): Factor[] {
+  const next = [...factors];
+  next.sort((a, b) => {
+    const va = a.rankIc;
+    const vb = b.rankIc;
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    if (va !== vb) return vb - va;
+    return 0;
+  });
+  return next;
+}
 
 export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) => {
-  const { startBacktestTask } = useTaskContext();
-  const [promoting, setPromoting] = useState<Record<string, 'loading' | 'done' | 'error'>>({});
-  const [exporting, setExporting] = useState<Record<string, 'loading' | 'done' | 'error'>>({});
-  const [explanations, setExplanations] = useState<Record<string, { loading: boolean; text?: string; error?: string }>>({});
+  const { refreshMiningFactors, attachBacktestTask } = useTaskContext();
+  const backtestQueue = useBacktestQueue();
+  const materialize = useMaterializeRun();
 
-  const handleExplain = async (factorId: string, factorName: string) => {
-    // Check localStorage cache first
-    const cacheKey = `alpha_explain_${factorId}`;
-    const cached = localStorage.getItem(cacheKey);
-    if (cached) {
-      setExplanations((prev => ({ ...prev, [factorId]: { loading: false, text: cached } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
-      return;
-    }
+  const rawFactors = metrics?.factors;
+  const factors = useMemo(() => sortByRankIc(rawFactors ?? []), [rawFactors]);
 
-    setExplanations((prev => ({ ...prev, [factorId]: { loading: true } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
-    try {
-      const result = await explainFactor(factorId);
-      if (result.success && result.data?.explanation) {
-        const text = result.data.explanation;
-        localStorage.setItem(cacheKey, text);
-        setExplanations((prev => ({ ...prev, [factorId]: { loading: false, text } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
-      } else {
-        setExplanations((prev => ({ ...prev, [factorId]: { loading: false, error: '解释失败' } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [promoting, setPromoting] = useState<Record<string, PromoteState>>({});
+
+  // 清单变化时清掉已消失的勾选（因子被并发刷新移除/换任务）
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const present = new Set(factors.map((f) => f.factorId));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (present.has(id)) next.add(id);
+        else changed = true;
       }
-    } catch {
-      setExplanations((prev => ({ ...prev, [factorId]: { loading: false, error: '请求失败' } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
-    }
-  };
+      return changed ? next : prev;
+    });
+  }, [factors]);
 
-  const handlePromote = async (factorName: string, expression: string) => {
-    setPromoting((prev => ({ ...prev, [factorName]: 'loading' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
+  const selectableIds = useMemo(
+    () => factors.filter((f) => !f.ownerless && !f.readOnly).map((f) => f.factorId),
+    [factors],
+  );
+  const selected = useMemo(
+    () => factors.filter((f) => selectedIds.has(f.factorId)),
+    [factors, selectedIds],
+  );
+  const detailFactor = useMemo(
+    () => (detailId ? factors.find((f) => f.factorId === detailId) ?? null : null),
+    [factors, detailId],
+  );
+
+  // 物化/回测任一行动终结 → 拉一次权威清单（物化 chip、回测指标都是服务端口径）
+  const handleSettledRefresh = useCallback(() => {
+    void refreshMiningFactors();
+  }, [refreshMiningFactors]);
+
+  const handleToggleSelect = useCallback((factorId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(factorId)) next.delete(factorId);
+      else next.add(factorId);
+      return next;
+    });
+  }, []);
+
+  const handleToggleSelectAll = useCallback(
+    (checked: boolean) => {
+      setSelectedIds(checked ? new Set(selectableIds) : new Set());
+    },
+    [selectableIds],
+  );
+
+  const handleClearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
+  const handleBacktest = useCallback(
+    (factorId: string) => {
+      backtestQueue.enqueue([factorId], { onSettled: handleSettledRefresh });
+    },
+    [backtestQueue, handleSettledRefresh],
+  );
+
+  const handleMaterialize = useCallback(
+    (factorId: string) => {
+      // 失败原文由 RunQueueContext 置入 materialize.warning（MaterializeBar 告警行上屏）
+      void materialize
+        .start([factorId], { onCompleted: handleSettledRefresh })
+        .catch(() => {});
+    },
+    [materialize, handleSettledRefresh],
+  );
+
+  const handleViewBacktest = useCallback(
+    (factorId: string) => {
+      void attachBacktestTask(factorId).catch((err) => {
+        console.error('[alpha-research] attach backtest failed:', err);
+      });
+      onNavigate?.('backtest');
+    },
+    [attachBacktestTask, onNavigate],
+  );
+
+  // 训练 = promoteByExpression 进训练特征集（保留的既有出口；物化是另一条链路）
+  const handlePromote = useCallback(async (factor: Factor) => {
+    setPromoting((prev) => ({ ...prev, [factor.factorId]: 'loading' }));
     try {
-      const result = await alphaAgentService.promoteByExpression([{ name: factorName, expression }]);
-      if (result.success && result.promoted.length > 0) {
-        setPromoting((prev => ({ ...prev, [factorName]: 'done' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-      } else {
-        setPromoting((prev => ({ ...prev, [factorName]: 'error' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-      }
+      const result = await alphaAgentService.promoteByExpression([
+        { name: factor.factorName, expression: factor.factorExpression },
+      ]);
+      setPromoting((prev) => ({
+        ...prev,
+        [factor.factorId]:
+          result.success && result.promoted.length > 0 ? 'done' : 'error',
+      }));
     } catch {
-      setPromoting((prev => ({ ...prev, [factorName]: 'error' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
+      setPromoting((prev) => ({ ...prev, [factor.factorId]: 'error' }));
     }
-  };
+  }, []);
 
-  const handleExport = async (factorId: string, factorName: string) => {
-    setExporting((prev => ({ ...prev, [factorId]: 'loading' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-    try {
-      const result = await exportFactorToIde(factorId);
-      if (result.success) {
-        setExporting((prev => ({ ...prev, [factorId]: 'done' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-      } else {
-        setExporting((prev => ({ ...prev, [factorId]: 'error' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-      }
-    } catch {
-      setExporting((prev => ({ ...prev, [factorId]: 'error' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-    }
-  };
-
-  const truncate = (str: string, max: number) => {
-    if (!str) return '';
-    return str.length > max ? str.substring(0, max) + '...' : str;
-  };
-
-  const formatMetric = (value: number | undefined | null, type: 'number' | 'percent' = 'number') => {
-    if (value === undefined || value === null || value === 0) return <span className="text-muted-foreground/50">N/A</span>;
-    return type === 'percent' ? formatPercent(value) : formatNumber(value, 4);
-  };
+  const btEntriesForDetail: BacktestRunEntry | undefined = detailFactor
+    ? backtestQueue.entries[detailFactor.factorId]
+    : undefined;
 
   return (
-    <Card className="glass card-hover animate-fade-in-up w-full">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
-          <div className="h-2 w-2 rounded-full bg-purple-500 animate-pulse" />
-          当前因子库 RankIC Top 10
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border/50">
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground w-1/6">因子名</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground w-1/4">公式</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">市场</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">IC</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">RankIC</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">ICIR</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">RankICIR</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">ARR</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">MDD</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">Sharpe</th>
-                <th className="py-3 px-4 text-center font-medium text-muted-foreground">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {metrics?.top10Factors && metrics.top10Factors.length > 0 ? (
-                metrics.top10Factors.map((factor, index) => (
-                  <HoverCard key={index} openDelay={200}>
-                    <HoverCardTrigger asChild>
-                      <tr className="group hover:bg-muted/50 transition-colors border-b border-border/50 last:border-0 cursor-help">
-                        <td className="py-3 px-4 font-medium max-w-[150px] truncate text-center" title={factor.factorName}>
-                          {truncate(factor.factorName, 15)}
-                        </td>
-                        <td className="py-3 px-4 font-mono text-xs text-muted-foreground max-w-[200px] truncate text-center">
-                          {truncate(factor.factorExpression, 30)}
-                        </td>
-                        <td className="py-3 px-4 text-center">
-                          {factor.market ? (
-                            <span className="inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium bg-secondary/30 text-muted-foreground">
-                              {MARKET_LABELS[factor.market] || factor.market}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground/40 text-xs">—</span>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 text-center font-mono">{formatMetric(factor.ic)}</td>
-                        <td className="py-3 px-4 text-center font-mono font-bold text-primary">{formatMetric(factor.rankIc)}</td>
-                        <td className="py-3 px-4 text-center font-mono">{formatMetric(factor.icir)}</td>
-                        <td className="py-3 px-4 text-center font-mono">{formatMetric(factor.rankIcir)}</td>
-                        <td className="py-3 px-4 text-center font-mono text-success">{formatMetric(factor.annualReturn, 'percent')}</td>
-                        <td className="py-3 px-4 text-center font-mono text-destructive">{formatMetric(factor.maxDrawdown, 'percent')}</td>
-                        <td className="py-3 px-4 text-center font-mono">{formatMetric(factor.sharpeRatio)}</td>
-                        <td className="py-3 px-4 text-center">
-                          <div className="flex items-center justify-center gap-1">
-                            {promoting[factor.factorName] === 'done' ? (
-                              <span className="inline-flex items-center gap-1 text-xs text-green-500">
-                                <Check size={12} /> 已加入
-                              </span>
-                            ) : promoting[factor.factorName] === 'loading' ? (
-                              <Loader2 size={14} className="animate-spin text-muted-foreground" />
-                            ) : promoting[factor.factorName] === 'error' ? (
-                              <span className="text-xs text-red-400">失败</span>
-                            ) : (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handlePromote(factor.factorName, factor.factorExpression);
-                                }}
-                                className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md
-                                           bg-primary/10 text-primary hover:bg-primary/20
-                                           border border-primary/20 transition-colors"
-                                title="将此因子加入训练特征集"
-                              >
-                                <Zap size={12} /> 训练
-                              </button>
-                            )}
-                            {exporting[factor.factorId] === 'done' ? (
-                              <span className="inline-flex items-center gap-1 text-xs text-green-500">
-                                <Check size={12} /> 已导出
-                              </span>
-                            ) : exporting[factor.factorId] === 'loading' ? (
-                              <Loader2 size={14} className="animate-spin text-muted-foreground" />
-                            ) : (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleExport(factor.factorId, factor.factorName);
-                                }}
-                                className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md
-                                           bg-blue-500/10 text-blue-400 hover:bg-blue-500/20
-                                           border border-blue-500/20 transition-colors"
-                                title="导出因子代码到 AI-IDE 工作空间"
-                              >
-                                <FileUp size={12} /> 导出IDE
-                              </button>
-                            )}
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                try {
-                                  startBacktestTask({
-                                    factorId: factor.factorId,
-                                    universe: (factor as any).universe || 'csi300',
-                                  });
-                                  onNavigate?.('backtest');
-                                } catch (err) { console.error(err); }
-                              }}
-                              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md
-                                         bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20
-                                         border border-emerald-500/20 transition-colors"
-                              title="回测此因子"
-                            >
-                              <Play size={12} /> 回测
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    </HoverCardTrigger>
-                    <HoverCardContent 
-                      className="w-[400px] glass-strong p-4 shadow-xl border border-primary/20" 
-                      side="top" 
-                      align="center"
-                      sideOffset={10}
-                      collisionPadding={20}
-                      avoidCollisions={true}
-                      style={{ zIndex: 1000 }}
-                    >
-                      <div className="space-y-4">
-                        <div>
-                          <div className="flex items-center justify-between mb-2">
-                            <h4 className="font-bold text-primary text-base">{factor.factorName}</h4>
-                            <div className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-medium border border-primary/20">
-                               Score: {formatNumber(factor.rankIc * 100, 1)}
-                            </div>
-                          </div>
-                          <div className="p-3 bg-secondary/40 rounded-lg font-mono text-xs break-all border border-border/50 text-foreground/90 shadow-inner">
-                            {factor.factorExpression}
-                          </div>
-                        </div>
-                        
-                        <div className="grid grid-cols-2 gap-3 p-3 bg-background/40 rounded-lg border border-border/30">
-                          <div>
-                            <span className="text-xs text-muted-foreground block mb-0.5">年化收益 (ARR)</span>
-                            <span className="font-bold text-success text-sm">{formatPercent(factor.annualReturn || 0)}</span>
-                          </div>
-                          <div>
-                            <span className="text-xs text-muted-foreground block mb-0.5">夏普比率 (Sharpe)</span>
-                            <span className="font-bold text-sm">{formatNumber(factor.sharpeRatio || 0, 2)}</span>
-                          </div>
-                          <div>
-                            <span className="text-xs text-muted-foreground block mb-0.5">最大回撤 (MDD)</span>
-                            <span className="font-bold text-destructive text-sm">{formatPercent(factor.maxDrawdown || 0)}</span>
-                          </div>
-                          <div>
-                            <span className="text-xs text-muted-foreground block mb-0.5">卡玛比率 (CR)</span>
-                            <span className="font-bold text-primary text-sm">{formatNumber(factor.calmarRatio || 0, 2)}</span>
-                          </div>
-                        </div>
+    <>
+      <Card className="glass animate-fade-in-up w-full">
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <div className="h-2 w-2 rounded-full bg-purple-500 animate-pulse" />
+            本轮挖掘因子（{factors.length}）
+            <span className="text-[11px] font-normal text-muted-foreground">
+              · 按 RankIC 降序
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          <MaterializeBar
+            selected={selected}
+            onClearSelection={handleClearSelection}
+            onSettledRefresh={handleSettledRefresh}
+          />
+          <FactorTable
+            factors={factors}
+            selectedIds={selectedIds}
+            onToggleSelect={handleToggleSelect}
+            onToggleSelectAll={handleToggleSelectAll}
+            backtestEntries={backtestQueue.entries}
+            materializingIds={materialize.runningIds}
+            materializeRunning={materialize.running}
+            onOpenDetail={setDetailId}
+            onBacktest={handleBacktest}
+            onMaterialize={handleMaterialize}
+            onViewBacktest={handleViewBacktest}
+            emptyText="暂无因子数据（挖掘产出落库后会自动出现）"
+            serverLimit={FACTOR_LIST_MAX_LIMIT}
+          />
+        </CardContent>
+      </Card>
 
-                        {/* AI Explanation */}
-                        {explanations[factor.factorId]?.text ? (
-                          <div className="p-3 bg-primary/5 rounded-lg border border-primary/20">
-                            <div className="flex items-center gap-1.5 mb-2">
-                              <Sparkles className="h-3.5 w-3.5 text-primary" />
-                              <span className="text-xs font-medium text-primary">AI 解读</span>
-                            </div>
-                            <div className="text-xs text-foreground/80 whitespace-pre-line leading-relaxed">
-                              {explanations[factor.factorId].text}
-                            </div>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleExplain(factor.factorId, factor.factorName);
-                            }}
-                            disabled={explanations[factor.factorId]?.loading}
-                            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg
-                                       bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50
-                                       border border-primary/20 transition-colors"
-                          >
-                            {explanations[factor.factorId]?.loading ? (
-                              <><Loader2 size={12} className="animate-spin" /> AI 解读中...</>
-                            ) : explanations[factor.factorId]?.error ? (
-                              <span className="text-destructive">{explanations[factor.factorId].error}</span>
-                            ) : (
-                              <><Sparkles size={12} /> AI 解读因子</>
-                            )}
-                          </button>
-                        )}
-
-                      </div>
-                    </HoverCardContent>
-                  </HoverCard>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={10} className="py-8 text-center text-muted-foreground">
-                    暂无因子数据
-                  </td>
-                </tr>
-              )}
-
-            </tbody>
-          </table>
-        </div>
-      </CardContent>
-    </Card>
+      <FactorDetailDrawer
+        factor={detailFactor}
+        onClose={() => setDetailId(null)}
+        onBacktest={handleBacktest}
+        onMaterialize={handleMaterialize}
+        onViewBacktest={handleViewBacktest}
+        btEntry={btEntriesForDetail}
+        isMaterializing={Boolean(
+          detailFactor &&
+            materialize.running &&
+            materialize.runningIds.has(detailFactor.factorId),
+        )}
+        onPromote={handlePromote}
+        promoteState={detailFactor ? promoting[detailFactor.factorId] : undefined}
+      />
+    </>
   );
 };
+
+export default FactorList;

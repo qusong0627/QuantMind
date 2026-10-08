@@ -1,8 +1,8 @@
 import React, { useRef, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/Card';
-import { Badge } from './ui/Badge';
 import { TimeSeriesData, RealtimeMetrics, LogEntry } from '../types-v2';
-import { formatNumber, formatPercent, formatDateTime } from '../utils-v2';
+import { cn, formatPercent, formatDateTime, metricToneClass } from '../utils-v2';
+import { formatMetricValue } from '../services-v2/metricRegistry';
 import { TrendingUp, Activity, BarChart3, Target } from 'lucide-react';
 
 interface LiveChartsProps {
@@ -133,16 +133,16 @@ export const LiveCharts: React.FC<LiveChartsProps> = ({
   };
 
   const StatCard = ({ icon: Icon, label, value, trend, color }: any) => (
-    <div className="glass rounded-xl p-4 card-hover h-[140px] flex flex-col items-center justify-center text-center gap-1">
-      <div className={`p-2 rounded-lg ${color} bg-opacity-20`}>
-        <Icon className={`h-5 w-5 ${color}`} />
+    <div className="glass rounded-xl p-4 card-hover h-[96px] flex flex-col items-center justify-center text-center gap-0.5">
+      <div className={`p-1.5 rounded-lg ${color} bg-opacity-20`}>
+        <Icon className={`h-4 w-4 ${color}`} />
       </div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-2xl font-bold">{value}</div>
-      {trend !== undefined && (
-        <Badge variant={trend > 0 ? 'success' : 'destructive'} className="text-xs">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="text-lg font-bold leading-tight">{value}</div>
+      {typeof trend === 'number' && Number.isFinite(trend) && (
+        <span className={cn('text-[10px] font-medium', metricToneClass(trend))}>
           {trend > 0 ? '+' : ''}{formatPercent(trend, 1)}
-        </Badge>
+        </span>
       )}
     </div>
   );
@@ -155,26 +155,26 @@ export const LiveCharts: React.FC<LiveChartsProps> = ({
           <StatCard
             icon={TrendingUp}
             label={metrics.factorName ? `最佳因子年化收益 (${metrics.factorName.split('_').slice(0,2).join('_')}...)` : "最佳因子年化收益"}
-            value={formatPercent(metrics.annualReturn)}
+            value={formatMetricValue('annual_return', metrics.annualReturn)}
             trend={metrics.annualReturn}
             color="text-success"
           />
           <StatCard
             icon={Activity}
             label="最佳因子RankIC"
-            value={formatNumber(metrics.rankIc, 4)}
+            value={formatMetricValue('rank_ic', metrics.rankIc)}
             color="text-primary"
           />
           <StatCard
             icon={BarChart3}
             label="最佳因子夏普比率"
-            value={formatNumber(metrics.sharpeRatio, 2)}
+            value={formatMetricValue('sharpe_ratio', metrics.sharpeRatio)}
             color="text-warning"
           />
           <StatCard
             icon={Target}
             label="最佳因子最大回撤"
-            value={formatPercent(metrics.maxDrawdown)}
+            value={formatMetricValue('max_drawdown', metrics.maxDrawdown)}
             trend={metrics.maxDrawdown}
             color="text-destructive"
           />

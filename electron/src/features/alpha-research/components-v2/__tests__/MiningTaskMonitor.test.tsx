@@ -128,6 +128,27 @@ describe('MiningTaskMonitor：后台进度在刷新之后仍然存在', () => {
   });
 });
 
+describe('MiningTaskMonitor：未登录不轮询（壳在公开路由/登录页也会挂载）', () => {
+  test('enabled=false 时不发请求、不渲染；登录后（enabled→true）立刻开始拉取', async () => {
+    vi.useFakeTimers();
+    const { container, rerender } = render(<MiningTaskMonitor enabled={false} />);
+    await settle();
+
+    // 静置 10 秒（跨过两个轮询周期）：未登录一个请求都不许发
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(listTasksMock).not.toHaveBeenCalled();
+    expect(container.firstChild).toBeNull();
+
+    // 登录态出现：立刻拉取并渲染，不等下一个 5 秒节拍
+    rerender(<MiningTaskMonitor enabled={true} />);
+    await settle();
+    expect(listTasksMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/因子挖掘 47%/)).toBeTruthy();
+  });
+});
+
 describe('MiningTaskMonitor：轮询节流、失败降级与收起', () => {
   test('5 秒轮询一次，不是每次渲染都发请求', async () => {
     vi.useFakeTimers();

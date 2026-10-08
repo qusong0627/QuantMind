@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { Square } from 'lucide-react';
 import { ProgressSidebar } from '../components-v2/ProgressSidebar';
 import { LiveCharts } from '../components-v2/LiveCharts';
 import { FactorStatsRow } from '../components-v2/FactorStatsRow';
 import { FactorList } from '../components-v2/FactorList';
 import { useTaskContext } from '../context-v2/TaskContext';
+import { useBacktestQueue } from '../context-v2/RunQueueContext';
 import { Layout } from '../components-v2/layout/Layout';
 import type { PageId } from '../components-v2/layout/Layout';
 
@@ -18,7 +19,21 @@ export const MiningDashboardPage: React.FC<MiningDashboardPageProps> = ({ onNavi
     miningEquityCurve: equityCurve,
     miningDrawdownCurve: drawdownCurve,
     stopMining,
+    refreshMiningFactors,
   } = useTaskContext();
+  const backtestQueue = useBacktestQueue();
+
+  // 一键回测：真入队（并发 2）；每行终结后拉一次权威清单刷新指标
+  const handleQuickBacktest = useCallback(
+    (factorIds: string[]) => {
+      backtestQueue.enqueue(factorIds, {
+        onSettled: () => {
+          void refreshMiningFactors();
+        },
+      });
+    },
+    [backtestQueue, refreshMiningFactors],
+  );
 
   // If no task, this page shouldn't be active (or show empty state)
   if (!task) {
@@ -104,18 +119,9 @@ export const MiningDashboardPage: React.FC<MiningDashboardPageProps> = ({ onNavi
 
         {/* New Rows - Full Width */}
         <div className="lg:col-span-4">
-           <FactorStatsRow 
-             metrics={task.metrics || null} 
-             onBacktest={() => {
-               // Set active library for backtest page
-               if (task.config?.librarySuffix) {
-                 const libName = `all_factors_library_${task.config.librarySuffix}.json`;
-                 localStorage.setItem('quantaalpha_active_library', libName);
-               } else {
-                 localStorage.setItem('quantaalpha_active_library', 'all_factors_library.json');
-               }
-               onNavigate?.('backtest');
-             }}
+           <FactorStatsRow
+             metrics={task.metrics || null}
+             onQuickBacktest={handleQuickBacktest}
            />
         </div>
         <div className="lg:col-span-4">

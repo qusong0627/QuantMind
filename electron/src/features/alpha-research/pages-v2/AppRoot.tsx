@@ -9,6 +9,7 @@ import { Layout } from '../components-v2/layout/Layout';
 import type { PageId } from '../components-v2/layout/Layout';
 import { ParticleBackground } from '../components-v2/ParticleBackground';
 import { TaskProvider, useTaskContext } from '../context-v2/TaskContext';
+import { RunQueueProvider } from '../context-v2/RunQueueContext';
 
 // Inner component to access context
 const AppContent: React.FC = () => {
@@ -59,7 +60,10 @@ const AppContent: React.FC = () => {
 const AppRoot: React.FC = () => {
   return (
     <TaskProvider>
-      <AppContent />
+      {/* 行级回测/物化队列跨页共享：挂在 TaskProvider 内、页面外，切页不丢 */}
+      <RunQueueProvider>
+        <AppContent />
+      </RunQueueProvider>
     </TaskProvider>
   );
 };

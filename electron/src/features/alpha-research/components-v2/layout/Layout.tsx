@@ -45,8 +45,8 @@ export const Layout: React.FC<LayoutProps> = ({
           className="flex items-center gap-3 cursor-pointer hover:opacity-85 transition-opacity"
           onClick={() => onNavigate('home')}
         >
-          <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 via-indigo-600 to-purple-600 text-white shadow-xs">
-            <Sparkles className="h-4 w-4" />
+          <div className="relative flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 via-indigo-600 to-purple-600 text-white shadow-xs">
+            <Sparkles className="h-3.5 w-3.5" />
           </div>
           <div>
             <h1 className="text-sm font-black text-slate-800 m-0 tracking-tight leading-none">QuantaAlpha</h1>

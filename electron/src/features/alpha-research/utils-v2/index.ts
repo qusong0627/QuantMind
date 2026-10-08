@@ -34,7 +34,33 @@ export function formatDateTime(date: string | Date): string {
   });
 }
 
-export function getQualityColor(quality: 'high' | 'medium' | 'low'): string {
+/**
+ * 有方向的指标着色（A股口径：**红涨绿跌**）。
+ * 只用于收益/IC 这类有正负方向的量；回撤/换手等中性量不要用本函数。
+ * 质量分级（getQualityBadgeClass）是另一套色语言：绿=高质量，与红涨绿跌无关。
+ */
+export type MetricTone = 'up' | 'down' | 'flat';
+
+export function metricTone(value: number | null | undefined): MetricTone {
+  if (value == null || typeof value !== 'number' || !Number.isFinite(value) || value === 0) {
+    return 'flat';
+  }
+  return value > 0 ? 'up' : 'down';
+}
+
+/** 与 metricTone 配套的文本色类（A股口径：正=红、负=绿）。 */
+export function metricToneClass(value: number | null | undefined): string {
+  switch (metricTone(value)) {
+    case 'up':
+      return 'text-rose-500';
+    case 'down':
+      return 'text-emerald-500';
+    default:
+      return '';
+  }
+}
+
+export function getQualityColor(quality: 'high' | 'medium' | 'low' | 'unknown'): string {
   switch (quality) {
     case 'high':
       return 'text-success';
@@ -42,10 +68,12 @@ export function getQualityColor(quality: 'high' | 'medium' | 'low'): string {
       return 'text-warning';
     case 'low':
       return 'text-destructive';
+    case 'unknown':
+      return 'text-muted-foreground';
   }
 }
 
-export function getQualityBadgeClass(quality: 'high' | 'medium' | 'low'): string {
+export function getQualityBadgeClass(quality: 'high' | 'medium' | 'low' | 'unknown'): string {
   switch (quality) {
     case 'high':
       return 'bg-success/20 text-success border-success/50';
@@ -53,6 +81,8 @@ export function getQualityBadgeClass(quality: 'high' | 'medium' | 'low'): string
       return 'bg-warning/20 text-warning border-warning/50';
     case 'low':
       return 'bg-destructive/20 text-destructive border-destructive/50';
+    case 'unknown':
+      return 'bg-muted/30 text-muted-foreground border-border/50';
   }
 }
 

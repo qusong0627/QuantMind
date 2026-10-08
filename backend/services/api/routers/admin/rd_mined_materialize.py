@@ -17,25 +17,26 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import subprocess
-import threading
-import time
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.services.api.user_app.middleware.auth import require_admin
+from backend.shared.rd_mined_materialize_launch import (
+    START_GUARD,
+    MaterializeSpawnError,
+    reap_process,
+    spawn_materialize,
+)
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 logger = logging.getLogger(__name__)
 
 # 进程内启动闩：探测→子进程拿锁之间有 ~4s 解释器启动窗口（实测冷启 3.8~4.3s），
 # 期间再来的 POST 会看到「未运行」。非阻塞拿闩，第二个 POST 直接 409 让位。
-_START_GUARD = threading.Lock()
+# 与用户自助物化面（alpha_agent 路由）共用 shared 里的同一把闩。
+_START_GUARD = START_GUARD
 _START_CONFIRM_TIMEOUT_S = 15.0
 _START_CONFIRM_POLL_S = 0.25
 
@@ -88,7 +89,12 @@ async def start_rd_mined_materialize() -> dict[str, Any]:
 
 
 async def _spawn_and_confirm() -> dict[str, Any]:
-    """起子进程 → 确认锁被拿住 → 起回收线程 → 回包（失败一律抛 HTTPException）。"""
+    """起子进程 → 确认锁被拿住 → 起回收线程 → 回包（失败一律抛 HTTPException）。
+
+    启动/确认/换名/回收纪律在 ``backend.shared.rd_mined_materialize_launch``
+    （与用户自助物化面共用同一实现）；本函数只负责取路径与常量、把
+    ``MaterializeSpawnError`` 映射成 HTTPException。
+    """
     from backend.scripts.rd_mined_materialize import (
         _web_log_path,
         build_run_command,
@@ -96,108 +102,19 @@ async def _spawn_and_confirm() -> dict[str, Any]:
         project_root,
     )
 
-    log_path = _web_log_path()
-    if log_path.is_symlink():
-        raise HTTPException(
-            status_code=500,
-            detail=f"物化日志路径 {log_path} 是符号链接，拒绝写入（防止覆盖任意文件）",
-        )
-    command = build_run_command()
-    # 先写 .tmp、子进程起成功后再原子换名到正式路径：启动失败（解释器缺失、
-    # 权限变化等）时不毁掉上一轮的事后日志；os.replace 不跟随目标符号链接。
-    tmp_path = log_path.with_name(log_path.name + ".tmp")
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(
-            tmp_path,
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-            0o640,
+        return await spawn_materialize(
+            command=build_run_command(),
+            log_path=_web_log_path(),
+            cwd=project_root(),
+            probe=probe_run_lock,
+            log_holder=logger,
+            confirm_timeout_s=_START_CONFIRM_TIMEOUT_S,
+            confirm_poll_s=_START_CONFIRM_POLL_S,
         )
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500, detail=f"物化日志文件不可写：{tmp_path}（{exc}）"
-        ) from exc
-
-    log_handle = os.fdopen(fd, "w", encoding="utf-8")
-    try:
-        process = subprocess.Popen(  # noqa: S603 - 固定 argv 常量，无外部输入
-            command,
-            cwd=str(project_root()),
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # 脱离 API 进程组：api 子进程重启不牵连物化
-            env=os.environ.copy(),
-        )
-    except OSError as exc:
-        tmp_path.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=500, detail=f"物化子进程启动失败：{exc}（上一轮日志未动）"
-        ) from exc
-    finally:
-        log_handle.close()  # 子进程持有自己的 fd，父侧句柄即可关闭
-    os.replace(tmp_path, log_path)  # 子进程 fd 跟随 inode，继续写正式路径
-
-    confirmed = await _confirm_child_took_lock(process, probe_run_lock, log_path)
-    if process.poll() is None:
-        # 回收僵尸并记录退出码（物化可能跑数小时，退出时 API 早已不在栈上）
-        threading.Thread(
-            target=_reap_materialize_process,
-            args=(process, logger),
-            name="rd-mined-materialize-reaper",
-            daemon=True,
-        ).start()
-    logger.info(
-        "RD 挖掘因子物化已启动：pid=%s log=%s argv=%s",
-        process.pid,
-        log_path,
-        command,
-    )
-    return {
-        "started": True,
-        "pid": process.pid,
-        "log_path": str(log_path),
-        "message": (
-            "物化已确认在后台运行；完成后会自动刷新字段注册并发布训练目录"
-            if confirmed
-            else "物化进程存活但暂未确认持锁，面板会继续探测；请留意下方日志"
-        ),
-    }
+    except MaterializeSpawnError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-async def _confirm_child_took_lock(
-    process: subprocess.Popen, probe: Any, log_path: Path
-) -> bool:
-    """等子进程拿住独占锁（或退出）再回包；拿不到锁=别家在跑，如实 409。
-
-    返回 True=确认持锁；False=进程存活但超时仍未确认（慢机器上导入卡顿等，
-    不算失败——进程还活着，面板轮询会补上确认）。
-    """
-    deadline = time.monotonic() + _START_CONFIRM_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if probe():
-            return True
-        code = process.poll()
-        if code is not None:
-            process.wait()  # 回收已退出的子进程，避免僵尸
-            if probe():
-                raise HTTPException(
-                    status_code=409,
-                    detail="已有物化进程在运行（本次子进程未取得独占锁，已退出，未写任何数据）",
-                )
-            raise HTTPException(
-                status_code=500,
-                detail=f"物化启动失败（退出码 {code}），详见日志：{log_path}",
-            )
-        await asyncio.sleep(_START_CONFIRM_POLL_S)
-    return False
-
-
-def _reap_materialize_process(process: subprocess.Popen, log: logging.Logger) -> None:
-    code = process.wait()
-    if code == 0:
-        log.info("RD 挖掘因子物化进程正常退出（pid=%s）", process.pid)
-    else:
-        log.warning(
-            "RD 挖掘因子物化进程退出码 %s（pid=%s），详见日志", code, process.pid
-        )
+def _reap_materialize_process(process: Any, log: logging.Logger) -> None:
+    reap_process(process, log)

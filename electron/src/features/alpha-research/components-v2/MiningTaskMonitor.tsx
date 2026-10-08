@@ -18,6 +18,9 @@
  *    面板里不能把它显示成「完成」——宁可让它落在一个「其他」桶里。
  * 3. **失败一定带原因**。`error_message` 是后端给的原文（例如
  *    "Server restarted while task was running"），面板只做截断不做改写。
+ * 4. **未登录不轮询**（`enabled`，2026-10-09）：壳在公开路由（登录页）也会挂载，
+ *    无 token 的 `GET /tasks` 每 5 秒打一发 401 + 控制台报错。由壳传入登录态；
+ *    `enabled` 翻 true 的那一挂立刻拉一次，不等下一个节拍。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, CircleDashed, Loader2, X } from 'lucide-react';
@@ -68,7 +71,15 @@ function sortForDisplay(tasks: Task[]): Task[] {
   });
 }
 
-const MiningTaskMonitor: React.FC = () => {
+export interface MiningTaskMonitorProps {
+  /**
+   * 有登录态才轮询。壳在公开路由（登录页）也会挂载本组件，未登录时轮询
+   * 只会打 401；登录后翻 true，立即拉取。默认 true（兼容既有调用/测试）。
+   */
+  enabled?: boolean;
+}
+
+const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true }) => {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [open, setOpen] = useState(false);
   const [dismissed, setDismissed] = useState(false);
@@ -95,6 +106,7 @@ const MiningTaskMonitor: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     aliveRef.current = true;
     void refresh();
     const timer = setInterval(() => void refresh(), POLL_MS);
@@ -102,7 +114,7 @@ const MiningTaskMonitor: React.FC = () => {
       aliveRef.current = false;
       clearInterval(timer);
     };
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   const running = useMemo(() => tasks.filter((t) => BUCKET_OF[t.status] === 'running'), [tasks]);
   const ordered = useMemo(() => sortForDisplay(tasks).slice(0, MAX_ROWS), [tasks]);
@@ -142,8 +154,9 @@ const MiningTaskMonitor: React.FC = () => {
     [refresh],
   );
 
-  // 一个任务都没有：整个组件不渲染（不占屏幕、不给导航栏添乱）
-  if (tasks.length === 0) return null;
+  // 未登录（登录页不再挂答案）或一个任务都没有：整个组件不渲染
+  // （不占屏幕、不给导航栏添乱）
+  if (!enabled || tasks.length === 0) return null;
 
   const primary = running[0];
   const chipLabel = primary

@@ -341,8 +341,8 @@ export const FactorPoolPage: React.FC = () => {
       {/* 页头：作用域 + 刷新动作 */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2 mr-auto">
-          <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-violet-600 via-purple-600 to-fuchsia-600 text-white shadow-xs">
-            <Network className="h-4 w-4" />
+          <div className="relative flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-600 via-purple-600 to-fuchsia-600 text-white shadow-xs">
+            <Network className="h-3.5 w-3.5" />
           </div>
           <div>
             <h2 className="text-base font-black text-slate-800 m-0 tracking-tight leading-none">因子池</h2>

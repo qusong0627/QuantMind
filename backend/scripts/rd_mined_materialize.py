@@ -1121,19 +1121,34 @@ def _web_log_path() -> Path:
     return Path("/data/rd_mined_materialize_ui.log")
 
 
-def build_run_command() -> list[str]:
-    """后台触发的物化命令（固定 argv：全常量、无任何用户输入拼接）。
+def build_run_command(factor_ids: list[str] | None = None) -> list[str]:
+    """后台触发的物化命令（argv 全常量或白名单校验过的 id，无自由文本）。
 
-    与手工 ``python3 backend/scripts/rd_mined_materialize.py --register``
-    等价；用 ``-m`` + ``cwd=project_root()`` 让 ``backend.*`` 绝对导入不依赖
+    默认（``factor_ids=None``）与手工 ``python3 backend/scripts/rd_mined_materialize.py
+    --register`` 等价（admin 面板固定 argv，运维回归测试钉死逐字节一致）；
+    用 ``-m`` + ``cwd=project_root()`` 让 ``backend.*`` 绝对导入不依赖
     PYTHONPATH 是否设置。
+
+    传 ``factor_ids`` 时追加单 token ``--factor-ids=a,b,c``（``=`` 形式防
+    argparse 把前导 ``-`` 当 flag）。进入 argv 的每个 id 都必须过共享白名单
+    ``normalize_factor_ids``——这是子进程入口，注入等于任意命令执行。
+    显式空列表是调用方 bug（CLI 侧空列表会退化成「全库物化」），响亮拒绝。
     """
-    return [
+    command = [
         sys.executable,
         "-m",
         "backend.scripts.rd_mined_materialize",
-        "--register",
     ]
+    if factor_ids is not None:
+        from backend.shared.rd_mined_materialize_launch import (
+            normalize_factor_ids,
+        )
+
+        ids = normalize_factor_ids(factor_ids)  # 空列表 → ValueError
+        if ids:
+            command.append(f"--factor-ids={','.join(ids)}")
+    command.append("--register")
+    return command
 
 
 def probe_run_lock() -> bool:

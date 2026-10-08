@@ -9,6 +9,7 @@ import { apiClient } from '../../../services/aiStrategyClients';
 import { REFERENCE_MINING_DIRECTIONS, getDirectionLabel, type MiningDirectionItem, importFeatureCatalogDirections, fetchMiningDirections } from '../utils-v2/miningDirections';
 import { buildEmbeddingSavePayload } from '../utils-v2/embeddingPayload';
 import type { DataSummary, UniverseId, UniverseInfo } from '../types-v2';
+import { PageHeader } from '../components-v2/layout/PageHeader';
 import { Modal } from 'antd';
 
 interface SystemConfig {
@@ -294,31 +295,33 @@ export const SettingsPage: React.FC = () => {
   return (
     <div className="space-y-6 animate-fade-in-up">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold flex items-center gap-3">
-            <Settings className="h-8 w-8 text-primary" />
-            系统配置
-          </h1>
-          <p className="text-muted-foreground mt-1">
-            管理 API 连接、数据源及实验参数
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <Button variant="outline" onClick={handleReset}>
-            <RotateCcw className="h-4 w-4 mr-2" />
-            重置
-          </Button>
-          <Button variant="primary" onClick={handleSave} disabled={!isDirty || isSaving}>
-            {isSaving ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : (
-              <Save className="h-4 w-4 mr-2" />
-            )}
-            保存配置
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        icon={Settings}
+        title="系统配置"
+        subtitle="管理 API 连接、数据源及实验参数"
+        actions={
+          <>
+            <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={handleReset}>
+              <RotateCcw className="h-3.5 w-3.5 mr-1" />
+              重置
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={handleSave}
+              disabled={!isDirty || isSaving}
+            >
+              {isSaving ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+              ) : (
+                <Save className="h-3.5 w-3.5 mr-1" />
+              )}
+              保存配置
+            </Button>
+          </>
+        }
+      />
 
       {/* Status Banners */}
       {isSaved && (

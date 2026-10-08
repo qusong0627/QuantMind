@@ -7,6 +7,7 @@
 
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import type {
+  Factor,
   Task,
   TaskConfig,
   LogEntry,
@@ -24,10 +25,17 @@ import {
   getBacktestStatus,
   cancelBacktest as apiCancelBacktest,
   connectMiningWs,
+  getFactors,
+  normalizeAgentFactor,
+  emptyMetrics,
+  FACTOR_LIST_MAX_LIMIT,
   healthCheck,
 } from '../services-v2/api';
 import type { BacktestStartParams } from '../services-v2/api';
 import { getDefaultMiningDirection, getStoredDirectionConfig } from '../utils-v2/miningDirections';
+
+/** 回测状态轮询间隔（后端回测为分钟级，2.5s 足够且不压库） */
+const BACKTEST_POLL_MS = 2500;
 
 // ========================== Backtest local type ==========================
 
@@ -50,53 +58,53 @@ export interface BacktestTask {
 // ========================== Structured factors merge ==========================
 
 /**
- * 把后端任务状态返回的结构化因子（rd_agent_factors 已落库数据）合并进实时指标。
- * 数据来自数据库而非日志文本解析，不受后端日志措辞变化影响。
+ * 把后端返回的结构化因子（rd_agent_factors 已落库数据）合并进实时指标。
+ *
+ * - 全量合并：挖到多少显示多少（旧实现 slice(0,10) 是双层截断之一）；
+ * - 按 factorId 去重，后到覆盖（同一因子的物化/回测状态会更新）；
+ * - 走 normalizeAgentFactor：缺失指标保持 undefined（界面显「—」），禁止 `?? 0`；
+ * - 质量计数由清单现算（纯派生，不伪造）；
+ * - 头条指标 = 全清单里 RankIC 最优因子（没有可比的 RankIC 就留 undefined）。
  */
-function mergeStructuredFactors(
+function mergeTaskFactors(
   metrics: RealtimeMetrics | undefined,
   rawFactors: any[],
 ): RealtimeMetrics {
-  const base: RealtimeMetrics = metrics || {
-    ic: 0, icir: 0, rankIc: 0, rankIcir: 0,
-    annualReturn: 0, sharpeRatio: 0, maxDrawdown: 0,
-    totalFactors: 0, highQualityFactors: 0, mediumQualityFactors: 0, lowQualityFactors: 0,
-    top10Factors: [],
-  };
-  if (!rawFactors.length) return base;
+  const base: RealtimeMetrics = metrics ?? emptyMetrics();
+  const incoming = rawFactors
+    .map((raw) => normalizeAgentFactor(raw))
+    .filter((f) => f.factorId);
+  if (incoming.length === 0) return base;
 
-  const mapped = rawFactors.map((f: any) => ({
-    factorId: f.factor_id ?? '',
-    factorName: f.factor_name ?? 'unnamed',
-    factorExpression:
-      f.factor_formulation || f.metadata?.formulation || (f.factor_code || '').slice(0, 120),
-    rankIc: f.rank_ic ?? 0,
-    rankIcir: f.metadata?.rank_icir ?? 0,
-    ic: f.ic_value ?? 0,
-    icir: f.metadata?.icir ?? 0,
-    annualReturn: f.annual_return ?? 0,
-    sharpeRatio: f.sharpe_ratio ?? 0,
-    maxDrawdown: f.max_drawdown ?? 0,
-    calmarRatio: 0,
-    market: f.market,
-    cumulativeCurve: [] as Array<{ date: string; value: number }>,
-  }));
+  const byId = new Map<string, Factor>();
+  for (const f of base.factors ?? []) byId.set(f.factorId, f);
+  for (const f of incoming) {
+    const prev = byId.get(f.factorId);
+    byId.set(f.factorId, prev ? { ...prev, ...f } : f);
+  }
+  const factors = [...byId.values()];
 
-  // RankIC 降序取 Top10，并重算最优因子指标
-  const top10 = [...mapped].sort((a, b) => (b.rankIc || 0) - (a.rankIc || 0)).slice(0, 10);
-  const best = top10.reduce((b, c) => ((c.rankIc || 0) > (b.rankIc || 0) ? c : b), top10[0]);
+  let best: Factor | undefined;
+  for (const f of factors) {
+    if (f.rankIc == null) continue;
+    if (!best || f.rankIc > (best.rankIc as number)) best = f;
+  }
+
   return {
     ...base,
-    totalFactors: Math.max(base.totalFactors || 0, mapped.length),
-    top10Factors: top10,
-    factorName: best.factorName,
-    rankIc: best.rankIc ?? 0,
-    rankIcir: best.rankIcir ?? 0,
-    ic: best.ic ?? 0,
-    icir: best.icir ?? 0,
-    annualReturn: best.annualReturn ?? 0,
-    sharpeRatio: best.sharpeRatio ?? 0,
-    maxDrawdown: best.maxDrawdown ?? 0,
+    totalFactors: factors.length,
+    highQualityFactors: factors.filter((f) => f.quality === 'high').length,
+    mediumQualityFactors: factors.filter((f) => f.quality === 'medium').length,
+    lowQualityFactors: factors.filter((f) => f.quality === 'low').length,
+    factors,
+    factorName: best?.factorName,
+    rankIc: best?.rankIc,
+    rankIcir: best?.rankIcir,
+    ic: best?.ic,
+    icir: best?.icir,
+    annualReturn: best?.annualReturn,
+    sharpeRatio: best?.sharpeRatio,
+    maxDrawdown: best?.maxDrawdown,
   };
 }
 
@@ -118,11 +126,18 @@ interface TaskContextValue {
   startMining: (config: TaskConfig) => void;
   stopMining: () => void;
   resetMiningTask: () => void;
+  /**
+   * 拉取当前挖掘任务的**权威全量**因子清单（GET /factors?task_id=…&limit=500），
+   * 覆盖 /tasks 载荷的 20 条上限。任务完成沿自动调用；物化/回测结束后可手动调用。
+   */
+  refreshMiningFactors: (taskId?: string) => Promise<void>;
 
   // ---- Backtest ----
   backtestTask: BacktestTask | null;
   backtestLogs: LogEntry[];
   startBacktestTask: (params: BacktestStartParams) => Promise<void>;
+  /** 「查看回测」：把某因子的既有回测载入回测页（不重跑；running 则续轮询） */
+  attachBacktestTask: (factorId: string) => Promise<void>;
   stopBacktestTask: () => void;
 }
 
@@ -192,9 +207,6 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         clearInterval(backtestPollingRef.current);
         backtestPollingRef.current = null;
       }
-      // Clear backtest WS
-      backtestWsRef.current?.close();
-      backtestWsRef.current = null;
     };
   }, []);
 
@@ -211,68 +223,16 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
             updated.status = msg.data.phase === 'completed' ? 'completed' : 'running';
             if (msg.data.timeline) updated.timeline = msg.data.timeline;
             if (msg.data.tokenUsage) updated.tokenUsage = msg.data.tokenUsage;
-            // 结构化因子（后端已落库，优先于日志正则解析），直接更新 Top10 列表
+            // 结构化因子（后端已落库，走 normalizeAgentFactor 全量合并）
             if (Array.isArray(msg.data.factors) && msg.data.factors.length > 0) {
-              updated.metrics = mergeStructuredFactors(updated.metrics, msg.data.factors);
+              updated.metrics = mergeTaskFactors(updated.metrics, msg.data.factors);
             }
             break;
           case 'log':
-            // Increased frontend log retention limit from 99 to 2000
+            // 只追加日志行。**不要**再把日志文本正则解析成假因子行：
+            // 旧实现用 generateId() 造的行没有真实 factor_id，无法回测/物化，
+            // 属纯幻觉数据（真实清单由 progress/refresh 从数据库带上来）。
             updated.logs = [...(updated.logs || []).slice(-2000), msg.data as LogEntry];
-            
-            // Try to extract factor from log message to show it immediately in the list
-            // Pattern: "Added new factor: {name} with expression: {expr}"
-            const logMsg = (msg.data as LogEntry).message;
-            if (logMsg && logMsg.includes("Added new factor:")) {
-              const match = logMsg.match(/Added new factor: (.+?) with expression: (.+)/);
-              if (match) {
-                const [_, name, expr] = match;
-                const currentMetrics = updated.metrics || {
-                    ic: 0, icir: 0, rankIc: 0, rankIcir: 0,
-                    annualReturn: 0, sharpeRatio: 0, maxDrawdown: 0,
-                    totalFactors: 0, highQualityFactors: 0, mediumQualityFactors: 0, lowQualityFactors: 0,
-                    top10Factors: []
-                };
-                
-                const currentFactors = currentMetrics.top10Factors || [];
-                // Avoid duplicates
-                if (!currentFactors.some((f: any) => f.factorName === name)) {
-                    const newFactor = {
-                        factorId: generateId(),
-                        factorName: name,
-                        factorExpression: expr,
-                        rankIc: 0, rankIcir: 0, ic: 0, icir: 0,
-                        annualReturn: 0, sharpeRatio: 0, maxDrawdown: 0, calmarRatio: 0,
-                        cumulativeCurve: []
-                    };
-                    
-                    // Recalculate best metrics from the updated list
-                    const updatedFactors = [newFactor, ...currentFactors];
-                    const bestFactor = updatedFactors.reduce((best, current) => {
-                        // Prioritize RankIC, but handle potential missing values
-                        const bestScore = best.rankIc || 0;
-                        const currentScore = current.rankIc || 0;
-                        return currentScore > bestScore ? current : best;
-                    }, updatedFactors[0]);
-
-                    updated.metrics = {
-                        ...currentMetrics,
-                        totalFactors: (currentMetrics.totalFactors || 0) + 1,
-                        // Prepend new factor to the list so user sees it immediately
-                        top10Factors: updatedFactors,
-                        // Update best factor metrics
-                        factorName: bestFactor.factorName,
-                        rankIc: bestFactor.rankIc ?? 0,
-                        rankIcir: bestFactor.rankIcir ?? 0,
-                        ic: bestFactor.ic ?? 0,
-                        icir: bestFactor.icir ?? 0,
-                        annualReturn: bestFactor.annualReturn ?? 0,
-                        sharpeRatio: bestFactor.sharpeRatio ?? 0,
-                        maxDrawdown: bestFactor.maxDrawdown ?? 0,
-                    };
-                }
-              }
-            }
             break;
           case 'metrics':
             updated.metrics = {
@@ -367,6 +327,34 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
       .catch(() => {});
   }, [bindMiningTransport]);
 
+  // 权威全量清单刷新：/tasks 载荷只有最新 20 条，「挖到多少显示多少」必须以
+  // GET /factors?task_id=…（limit=500）为准。合并失败不致命——轮询仍在跑。
+  const refreshMiningFactors = useCallback(async (taskId?: string) => {
+    const id = taskId ?? miningTaskRef.current?.taskId;
+    if (!id) return;
+    try {
+      const r = await getFactors({ taskId: id, limit: FACTOR_LIST_MAX_LIMIT });
+      if (!mountedRef.current || !r.success || !r.data) return;
+      const rows = r.data.factors ?? [];
+      setMiningTask((prev) => {
+        if (!prev || prev.taskId !== id) return prev;
+        return { ...prev, metrics: mergeTaskFactors(prev.metrics, rows) };
+      });
+    } catch (err) {
+      console.error('[alpha-research] refresh mining factors failed:', err);
+    }
+  }, []);
+
+  // 任务完成沿自动拉一次全量清单（覆盖：新任务完成、恢复出的已完成历史任务）
+  const factorsRefreshedForTaskRef = useRef<string | null>(null);
+  useEffect(() => {
+    const t = miningTask;
+    if (!t || !t.taskId || t.status !== 'completed') return;
+    if (factorsRefreshedForTaskRef.current === t.taskId) return;
+    factorsRefreshedForTaskRef.current = t.taskId;
+    void refreshMiningFactors(t.taskId);
+  }, [miningTask, refreshMiningFactors]);
+
   // Start mining (real backend)
   const startRealMining = useCallback(
     async (config: TaskConfig) => {
@@ -406,14 +394,9 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!resp.success || !resp.data) throw new Error(resp.error || 'Failed');
 
         const taskData = resp.data.task as Task;
-        // Initialize metrics with empty top10Factors to avoid stale data
-        if (taskData.metrics) {
-            taskData.metrics.top10Factors = [];
-            taskData.metrics.totalFactors = 0;
-            taskData.metrics.highQualityFactors = 0;
-            taskData.metrics.mediumQualityFactors = 0;
-            taskData.metrics.lowQualityFactors = 0;
-        }
+        // 新任务从零开始：清掉任何残留清单与 IC 族头条（缺失=undefined→界面显「—」；
+        // 旧实现只清 top10Factors，IC 族残留 0 值，统计卡永远显示 0.0000）
+        taskData.metrics = emptyMetrics();
         setMiningTask(taskData);
         miningStartSeqRef.current += 1;
         setMiningStartSeq(miningStartSeqRef.current);
@@ -517,50 +500,82 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [backtestTask, setBacktestTask] = useState<BacktestTask | null>(null);
   const [backtestLogs, setBacktestLogs] = useState<LogEntry[]>([]);
 
-  const backtestWsRef = useRef<WebSocket | null>(null);
   const backtestPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // WS handler for backtest
-  // IMPORTANT: setBacktestLogs must NOT be inside setBacktestTask's updater function,
-  // because React StrictMode double-invokes updater functions in development mode,
-  // which would cause every log entry to be added twice.
-  const handleBacktestWsMessage = useCallback((msg: WsMessage) => {
-    if (!mountedRef.current) return;
-    switch (msg.type) {
-      case 'progress':
-        setBacktestTask(((prev: BacktestTask | null) => {
-          if (!prev) return prev;
-          return { ...prev, progress: msg.data, updatedAt: new Date().toISOString() };
-        }) as unknown as BacktestTask | null);
-        break;
-      case 'log':
-        setBacktestLogs(((l: LogEntry[]) => [...l.slice(-499), msg.data as LogEntry]) as unknown as LogEntry[]);
-        break;
-      case 'metrics':
-        setBacktestTask(((prev: BacktestTask | null) => {
-          if (!prev) return prev;
-          return { ...prev, metrics: msg.data, updatedAt: new Date().toISOString() };
-        }) as unknown as BacktestTask | null);
-        break;
-      case 'result':
-        setBacktestTask(((prev: BacktestTask | null) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            status: msg.data.status === 'completed' ? 'completed' : 'failed',
-            metrics: msg.data.metrics || prev.metrics,
-            updatedAt: new Date().toISOString(),
-          };
-        }) as unknown as BacktestTask | null);
-        break;
-      case 'error':
-        setBacktestTask(((prev: BacktestTask | null) => {
-          if (!prev) return prev;
-          return { ...prev, status: 'failed', updatedAt: new Date().toISOString() };
-        }) as unknown as BacktestTask | null);
-        break;
+  const stopBacktestPolling = useCallback(() => {
+    if (backtestPollingRef.current) {
+      clearInterval(backtestPollingRef.current);
+      backtestPollingRef.current = null;
     }
   }, []);
+
+  /**
+   * 拉一次因子回测状态并同步进 backtestTask/backtestLogs。
+   * 失败原文（ownerless 404 / 无代码 400 / metadata.backtest_error）进日志面板。
+   * 防串台：当前查看的是别的因子时不覆盖（并发提交时旧轮询的在途 tick）。
+   */
+  const syncBacktestOnce = useCallback(
+    async (factorId: string): Promise<BacktestTask | null> => {
+      const r = await getBacktestStatus(factorId);
+      if (!mountedRef.current) return null;
+      const t = (r.data?.task ?? null) as unknown as BacktestTask | null;
+      if (!t) return null;
+      const errText = r.data?.error;
+      setBacktestTask((prev) => {
+        if (prev && prev.taskId !== factorId) return prev;
+        const base = prev ?? t;
+        return {
+          ...base,
+          status: t.status,
+          progress: t.progress || base.progress,
+          metrics:
+            t.metrics && Object.keys(t.metrics).length > 0 ? t.metrics : base.metrics,
+          updatedAt: t.updatedAt,
+        };
+      });
+      if (t.status === 'failed' && errText) {
+        setBacktestLogs((logs) => {
+          const id = `bt-err-${factorId}`;
+          if (logs.some((l) => l.id === id)) return logs; // 幂等：并发 tick 不重复
+          return [
+            ...logs.slice(-499),
+            { id, timestamp: new Date().toISOString(), level: 'error' as const, message: errText },
+          ];
+        });
+      }
+      return t;
+    },
+    [],
+  );
+
+  /**
+   * 2.5s 轮询直到终态。旧实现的「回测 WebSocket」是假的：connectMiningWs(taskId
+   * =factor_id) 实际轮询 /tasks/{factor_id}（factor_id 不是任务 id）恒 404 ——
+   * 点了回测什么都没发生。真回测状态只在 GET /factors/{id} 的 factor 行上。
+   */
+  const bindBacktestPolling = useCallback(
+    (factorId: string) => {
+      stopBacktestPolling();
+      backtestPollingRef.current = setInterval(async () => {
+        if (!mountedRef.current) {
+          stopBacktestPolling();
+          return;
+        }
+        try {
+          const t = await syncBacktestOnce(factorId);
+          if (
+            t &&
+            (t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled')
+          ) {
+            stopBacktestPolling();
+          }
+        } catch {
+          // transient — keep polling
+        }
+      }, BACKTEST_POLL_MS);
+    },
+    [stopBacktestPolling, syncBacktestOnce],
+  );
 
   // Start backtest
   const startBacktestTask = useCallback(
@@ -572,78 +587,53 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const taskData = resp.data.task as unknown as BacktestTask;
       setBacktestTask(taskData);
 
-      // WebSocket
-      const ws = connectMiningWs(
-        resp.data.taskId,
-        handleBacktestWsMessage,
-        () => {
-          if (!mountedRef.current) return;
-          getBacktestStatus(resp.data!.taskId).then((r) => {
-            if (r.data?.task && mountedRef.current) setBacktestTask(r.data.task as unknown as BacktestTask);
-          });
-        },
-      );
-      backtestWsRef.current = ws;
-
-      // Polling fallback
-      backtestPollingRef.current = setInterval(async () => {
-        if (!mountedRef.current) {
-          clearInterval(backtestPollingRef.current!);
-          backtestPollingRef.current = null;
-          return;
-        }
-        try {
-          const r = await getBacktestStatus(resp.data!.taskId);
-          if (!mountedRef.current) return;
-          if (r.data?.task) {
-            const t = r.data.task as unknown as BacktestTask;
-
-            // Always sync progress from polling (in case WS missed updates)
-            setBacktestTask(((prev: BacktestTask | null) => {
-              if (!prev) return t;
-              return {
-                ...prev,
-                status: t.status,
-                progress: t.progress || prev.progress,
-                metrics: (t.metrics && Object.keys(t.metrics).length > 0) ? t.metrics : prev.metrics,
-                updatedAt: t.updatedAt,
-              };
-            }) as unknown as BacktestTask | null);
-
-            if (t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled') {
-              // Final update: sync task + logs from backend (in case WS missed some)
-              setBacktestTask(t);
-              if (t.logs && t.logs.length > 0) {
-                setBacktestLogs(t.logs.slice(-500));
-              }
-              clearInterval(backtestPollingRef.current!);
-              backtestPollingRef.current = null;
-            }
-          }
-        } catch {
-          // ignore
-        }
-      }, 5000);
+      const factorId = (resp.data.taskId as string) || params.factorId;
+      bindBacktestPolling(factorId);
+      // 立刻探一次拿到服务端原文（重复提交会得到「回测已在进行中」）
+      void syncBacktestOnce(factorId).catch(() => {});
     },
-    [handleBacktestWsMessage],
+    [bindBacktestPolling, syncBacktestOnce],
+  );
+
+  // 「查看回测」：不重跑，只把既有状态/指标载入回测页；running 则续轮询
+  const attachBacktestTask = useCallback(
+    async (factorId: string) => {
+      setBacktestLogs([]);
+      stopBacktestPolling(); // 先停旧轮询，避免旧 tick 与新查看对象竞争
+      const r = await getBacktestStatus(factorId);
+      if (!mountedRef.current) return;
+      const t = (r.data?.task ?? null) as unknown as BacktestTask | null;
+      if (!t) return;
+      setBacktestTask(t); // 显式切换查看对象（不走 syncBacktestOnce 的防串台守卫）
+      const errText = r.data?.error;
+      if (t.status === 'failed' && errText) {
+        setBacktestLogs([
+          {
+            id: `bt-err-${factorId}`,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: errText,
+          },
+        ]);
+      }
+      if (t.status === 'running') {
+        bindBacktestPolling(factorId);
+      }
+    },
+    [bindBacktestPolling, stopBacktestPolling],
   );
 
   // Stop backtest
   const stopBacktestTask = useCallback(async () => {
     if (!backtestTask) return;
-    backtestWsRef.current?.close();
-    backtestWsRef.current = null;
-    if (backtestPollingRef.current) {
-      clearInterval(backtestPollingRef.current);
-      backtestPollingRef.current = null;
-    }
+    stopBacktestPolling();
     try {
       await apiCancelBacktest(backtestTask.taskId);
     } catch {
       // ignore
     }
-    setBacktestTask((backtestTask ? { ...backtestTask, status: 'cancelled' } : null));
-  }, [backtestTask]);
+    setBacktestTask((prev) => (prev ? { ...prev, status: 'cancelled' } : null));
+  }, [backtestTask, stopBacktestPolling]);
 
   // ==================================================================
   // Context value
@@ -660,11 +650,13 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
     startMining,
     stopMining,
     resetMiningTask,
+    refreshMiningFactors,
 
     // ---- Backtest ----
     backtestTask,
     backtestLogs,
     startBacktestTask,
+    attachBacktestTask,
     stopBacktestTask,
   };
 
