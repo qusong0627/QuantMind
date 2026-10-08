@@ -27,6 +27,21 @@ def _session_now() -> float:
     return datetime.now(_CST).replace(hour=10, minute=30, second=0, microsecond=0).timestamp()
 
 
+@pytest.fixture(autouse=True)
+def _require_trading_day():
+    """非交易日跳过本文件：三条用例都靠市场族取数产检测，闸一关断言必假红。
+
+    时钟钉的是「今天 10:30」，所以日期跟墙钟走——2026-10-08 时段闸补了交易日历层后，
+    工作日假期（原先照跑）也会关闸。显式跳过并说明原因，别让人对着一条周末/假期假红
+    的集成测试找自己的改动。日历答不了（None）时照跑——与生产降级口径一致。
+    """
+    from backend.services.engine.anomaly_engine import _default_trading_day_lookup
+
+    today = datetime.now(_CST).date()
+    if today.weekday() >= 5 or _default_trading_day_lookup(today) is False:
+        pytest.skip(f"{today} 非交易日：市场族被时段闸跳过，本文件只在交易日有意义")
+
+
 def _no_status_write(payload) -> None:
     """**必须注入**：默认 status_writer 写的是生产状态镜像 `qm:anomaly:status`
     （``_default_status_write`` → hset），测试引擎跑一轮就会把它覆盖成测试计数。

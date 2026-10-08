@@ -29,7 +29,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime
+from datetime import date, datetime, time as dtime
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -95,8 +95,40 @@ def trading_elapsed_fraction(now: datetime | None = None) -> float:
     return min(max(elapsed / 240.0, 0.05), 1.0)
 
 
-def in_market_session(now: datetime | None = None) -> bool:
-    """A 股连续竞价时段（工作日 09:30–11:30 / 13:00–15:00，Asia/Shanghai）。
+def _in_session_window(now: datetime) -> bool:
+    """连续竞价时段（工作日 09:30–11:30 / 13:00–15:00，Asia/Shanghai）——**只看时钟与星期**。
+
+    交易日历是另一层（``market_session_state`` 的 ``trading_day``）：分开的理由是降级
+    口径要显式——时钟这一层永远答得了，日历那一层可能答不了。
+    """
+    if now.weekday() >= 5:
+        return False
+    hhmm = now.strftime("%H:%M")
+    return any(
+        start.strftime("%H:%M") <= hhmm <= end.strftime("%H:%M")
+        for start, end in _SESSIONS
+    )
+
+
+def market_session_state(
+    now: datetime | None = None, *, trading_day: bool | None = None
+) -> str:
+    """市场族时段状态：``"open" | "closed" | "holiday"``。
+
+    - ``closed``：周末或时段外（含节假日里的时段外）——时钟就能判，不问日历；
+    - ``holiday``：工作日时段内、但日历明示该日不是交易日（``trading_day is False``）；
+    - ``open``：工作日时段内且未被否证（``True``，或 ``None`` = 日历答不了 → 降级放行）。
+    """
+    current = now or datetime.now(_SH_TZ)
+    if not _in_session_window(current):
+        return "closed"
+    return "holiday" if trading_day is False else "open"
+
+
+def in_market_session(
+    now: datetime | None = None, *, trading_day: bool | None = None
+) -> bool:
+    """A 股连续竞价时段（工作日 09:30–11:30 / 13:00–15:00，Asia/Shanghai）且当日是交易日。
 
     市场族（量价）的**取数闸**：行情源在盘外仍留有「PreClose 已翻篇、Now 还是上一根」
     的冻结快照，拿它评量价异动 = 把昨天的涨跌当今天实时报。实测（2026-10-08 查
@@ -104,14 +136,28 @@ def in_market_session(now: datetime | None = None) -> bool:
     时段外（00:00、08:09、20:21、23:57 都在报），09-25 的 48 条全在 08:11–08:17 盘前，
     时段内 0 条——本闸正好覆盖该形态（数据/账户/模型族不受影响：它们本就该盘后跑）。
 
-    节假日不判（交易日历在调度侧，不引第二份日历）；假期时段内的告警实测为 0 条，
-    若日后出现该形态，再补 ``exchange_calendars`` 判据。
+    **节假日**（2026-10-08 评审补）：工作日假期落在 09:30–15:00 时，闸门原先看不出它
+    与交易日的差别——同样的冻结快照/停牌数据照报，critical 还会给真实账户写标的锁。
+    日历口径 = 平台同一把尺子的同步出口 ``shared.trading_calendar.is_trading_day_xcal``
+    （CN→XSHG），引擎按日缓存、每轮至多查一次。
+
+    **降级口径（重要）**：日历答不了（库缺失 / 越界，XSHG 实测印发到 2026-12-31）→
+    退回「只看工作日+时段」。选降级放行而不是降级关闸，是为了让本改动**只许关闸、
+    不许凭空开闸**：任何一天的新行为都 ⊆ 旧行为，2026-12-31 之后最坏也只是回到改前
+    口径（另有每日一条 WARNING 提示该日无日历依据，见 ``_trading_day_for``）。
     """
-    current = now or datetime.now(_SH_TZ)
-    if current.weekday() >= 5:
-        return False
-    hhmm = current.strftime("%H:%M")
-    return any(start.strftime("%H:%M") <= hhmm <= end.strftime("%H:%M") for start, end in _SESSIONS)
+    return market_session_state(now, trading_day=trading_day) == "open"
+
+
+def _default_trading_day_lookup(day: date) -> bool | None:
+    """CN 交易日判据（同步、无 DB）：平台同一把尺子，见 ``shared.trading_calendar``。
+
+    懒 import：本模块被 API 进程一起载入，不该为一个日频调用拉进 DB/日历依赖；
+    测试要替换它一律走 ``AnomalyEngine(trading_day_lookup=...)`` 注入缝。
+    """
+    from backend.shared.trading_calendar import is_trading_day_xcal
+
+    return is_trading_day_xcal("CN", day)
 
 
 def _main_redis():
@@ -232,6 +278,7 @@ class AnomalyEngine:
         recent_marker: Callable[[Sequence[Detection]], None] | None = None,
         deduper: Callable[[list[Detection], AnomalyConfig], tuple[list[Detection], int]] | None = None,
         status_writer: Callable[[dict[str, Any]], None] | None = None,
+        trading_day_lookup: Callable[[date], bool | None] | None = None,
         now_fn: Callable[[], float] = time.time,
     ) -> None:
         self._config_loader = config_loader or _load_config_sync
@@ -246,6 +293,9 @@ class AnomalyEngine:
         self._recent_marker = recent_marker or self._mark_recent
         self._deduper = deduper or self._dedup
         self._status_writer = status_writer or self._default_status_write
+        self._trading_day_lookup = trading_day_lookup or _default_trading_day_lookup
+        self._trading_day_cache: dict[date, bool | None] = {}
+        self._calendar_warned_on: date | None = None
         self._now = now_fn
 
         self._last_data_ts: float | None = None
@@ -263,6 +313,7 @@ class AnomalyEngine:
             "reduce_suggested": 0,
             "skipped_market": 0,
             "skipped_market_closed": 0,
+            "skipped_market_holiday": 0,
             "skipped_account": 0,
             "skipped_data": 0,
             "skipped_model": 0,
@@ -479,6 +530,35 @@ class AnomalyEngine:
 
     # ── 主循环 ─────────────────────────────────────────────────────
 
+    def _trading_day_for(self, now_dt: datetime) -> bool | None:
+        """该日是否交易日（按日缓存；只在**时段内的工作日**才查；答不了返回 ``None``）。
+
+        日历是日频事实而引擎是分钟级循环，不缓存等于每分钟问一次；查历失败/答不了
+        一律降级放行（口径见 ``in_market_session``），并每天告警一条——那是「本闸退化
+        成只看工作日」的唯一可观测信号（XSHG 印发到 2026-12-31，到期前后该看见它）。
+        """
+        if not _in_session_window(now_dt):
+            return None  # 时段外不问：state 必为 closed，日历说什么都不改变结论
+        day = now_dt.date()
+        if day not in self._trading_day_cache:
+            try:
+                verdict = self._trading_day_lookup(day)
+            except Exception as exc:  # noqa: BLE001 - 查历失败=答不了，不许反噬主循环
+                logger.warning("[anomaly] 交易日历查询异常 %s: %s", day, exc)
+                verdict = None
+            self._trading_day_cache[day] = verdict
+            if len(self._trading_day_cache) > 8:  # 长跑进程跨日时只留最近几天
+                for old in sorted(self._trading_day_cache)[:-8]:
+                    self._trading_day_cache.pop(old, None)
+            if verdict is None and self._calendar_warned_on != day:
+                self._calendar_warned_on = day
+                logger.warning(
+                    "[anomaly] 交易日历答不了 %s：市场族闸退回「只看工作日+时段」"
+                    "（exchange_calendars XSHG 印发到 2026-12-31，需要精确判假期请升级库）",
+                    day,
+                )
+        return self._trading_day_cache[day]
+
     def build_once(self) -> dict[str, Any]:
         cfg = self._config_loader()
         if not cfg.enabled:
@@ -486,8 +566,11 @@ class AnomalyEngine:
         now = self._now()
         detections: list[Detection] = []
 
-        # 市场（量价）——仅连续竞价时段取数（盘外行情源的冻结快照会假报，见 in_market_session）
-        if in_market_session(datetime.fromtimestamp(now, _SH_TZ)):
+        # 市场（量价）——仅连续竞价时段 + 交易日取数（盘外冻结快照、工作日假期的停牌
+        # 数据都会假报，见 in_market_session / market_session_state）
+        now_dt = datetime.fromtimestamp(now, _SH_TZ)
+        state = market_session_state(now_dt, trading_day=self._trading_day_for(now_dt))
+        if state == "open":
             try:
                 quotes = dict(self._market_fetcher(cfg) or {})
                 frac = trading_elapsed_fraction()
@@ -504,8 +587,11 @@ class AnomalyEngine:
             except Exception as exc:  # noqa: BLE001
                 self._note_error(f"market fetch: {exc}")
         else:
+            # 假日与盘外分开计数：前者是「闸判断对了」，后者是「还没到点/已收市」，
+            # 混成一格的话，工作日读到它根本分不出是正常收盘还是引擎停摆。
+            key = "skipped_market_holiday" if state == "holiday" else "skipped_market_closed"
             with self._lock:
-                self.counters["skipped_market_closed"] += 1
+                self.counters[key] += 1
 
         # 账户（撤单率/集中度）
         try:

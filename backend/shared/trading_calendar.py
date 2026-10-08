@@ -190,6 +190,28 @@ def _get_xcal_calendar(market_code: str):
         return None
 
 
+def is_trading_day_xcal(market_code: str, trade_date: date) -> bool | None:
+    """同步、只问 ``exchange_calendars`` 的交易日判据；``None`` = 这把尺子答不了。
+
+    存在的理由：常驻引擎跑在 worker 线程里（``asyncio.to_thread``），走不了
+    ``TradingCalendarService`` 的 async 通道，但它必须与平台其余部分**同一把尺子**
+    ——本函数是那把尺子的同步出口，``TradingCalendarService._is_trading_day_xcal``
+    直接调它（实现只有这一份，改口径不会再分叉）。
+
+    覆盖年限 = 库印发年限（容器内 4.13.2 实测 XSHG 2006-10-09~2026-12-31，到期日见
+    ``xcal_coverage``）：越界 / 库缺失 / 单次求值异常一律 ``None``，**降级口径由调用方
+    定**——市场取数闸倾向「未知即放行」（改动只许关闸、不许凭空开闸，见
+    ``anomaly_engine.in_market_session``），决策轮按 fail-closed 拒绝出决策。
+    """
+    cal = _get_xcal_calendar(market_code)
+    if cal is None:
+        return None
+    try:
+        return bool(cal.is_session(trade_date))
+    except Exception:  # noqa: BLE001 - 越界等一律「答不了」，由调用方定降级
+        return None
+
+
 #: 全仓跑决策/训练/推理的三个市场 → 真日历名（与
 #: ``admin_training_utils._MARKET_TO_XCAL`` 同口径：CN/HK/US）。
 #: C13 体检按这张表逐历查覆盖年限。
@@ -385,14 +407,8 @@ class TradingCalendarService:
     # =========================================================================
 
     def _is_trading_day_xcal(self, market: str, d: date) -> bool | None:
-        """通过 exchange_calendars 判断交易日。返回 None 表示不可用"""
-        cal = _get_xcal_calendar(market)
-        if cal is None:
-            return None
-        try:
-            return bool(cal.is_session(d))
-        except Exception:
-            return None
+        """通过 exchange_calendars 判断交易日。返回 None 表示不可用（实现见模块级）"""
+        return is_trading_day_xcal(market, d)
 
     def _next_trading_day_xcal(self, market: str, d: date) -> date | None:
         """通过 exchange_calendars 获取下一交易日"""

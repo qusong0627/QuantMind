@@ -11,6 +11,13 @@
 **口径**：市场族只在 A 股连续竞价时段（工作日 09:30–11:30 / 13:00–15:00，Asia/Shanghai）
 取数；数据/账户/模型族**不受影响**（它们本就该盘后跑：日线跳变、IC 骤降都在收盘后才有值）。
 时钟走 `now_fn` 注入点，闸门判定与节流/冷却共用同一时钟。
+
+**节假日层（2026-10-08 评审补）**：工作日+时段内还要过一层交易日历（CN→XSHG）。原先
+只判「工作日+时段」，工作日假期（如国庆 10-01，周四）在闸门眼里与交易日无异——同样的
+冻结快照/停牌数据照报，critical 还会给真实账户写标的锁。日历走
+``shared.trading_calendar.is_trading_day_xcal``（平台同一把尺子的同步出口），引擎按日
+缓存；**答不了就退回旧口径（放行）**——本改动只许关闸、不许凭空开闸，故降级口径要与
+旧行为逐条对拍（见 ``test_calendar_unavailable_degrades_to_old_behaviour``）。
 """
 
 from __future__ import annotations
@@ -23,8 +30,9 @@ import pytest
 pytestmark = pytest.mark.unit
 
 CST = ZoneInfo("Asia/Shanghai")
-# 2026-10-08 是周四；10-10/10-11 是周末
+# 2026-10-08 是周四；10-10/10-11 是周末；10-01（周四）是国庆假期——真日历上的非交易日
 _THU, _SAT, _SUN, _MON = 8, 10, 11, 12
+_HOLIDAY_THU = 1
 
 
 def _at(day: int, h: int, m: int) -> datetime:
@@ -70,6 +78,20 @@ def test_weekend_is_never_a_session():
     assert in_market_session(_at(_MON, 10, 30)) is True
 
 
+def test_session_state_holiday_vs_closed_vs_open():
+    """三态的判据分层：时段外恒 closed（**不问日历**）；时段内才由日历分出 holiday。"""
+    from backend.services.engine.anomaly_engine import market_session_state
+
+    # 时段外 / 周末：无论日历说什么都是 closed（日历答不了也不影响结论）
+    assert market_session_state(_at(_THU, 20, 21), trading_day=True) == "closed"
+    assert market_session_state(_at(_THU, 12, 0), trading_day=False) == "closed"
+    assert market_session_state(_at(_SAT, 10, 30), trading_day=True) == "closed"
+    # 时段内：日历否证 = holiday；肯定/答不了 = open（降级放行）
+    assert market_session_state(_at(_THU, 10, 30), trading_day=False) == "holiday"
+    assert market_session_state(_at(_THU, 10, 30), trading_day=True) == "open"
+    assert market_session_state(_at(_THU, 10, 30), trading_day=None) == "open"
+
+
 def test_session_windows_match_shared_cn_table():
     """防漂移：引擎时段常量必须等于 ``shared.market_sessions`` 的 CN AM/PM 窗口。
 
@@ -87,7 +109,12 @@ def test_session_windows_match_shared_cn_table():
 # ── 行为：盘外不取数、盘中照常、其他族不受影响 ──────────────────────
 
 
-def _engine(now_epoch: float, **counters):
+def _engine(now_epoch: float, trading_day: bool | None = True):
+    """时段闸用例的引擎。``trading_day`` 是注入的日历结论（默认「是交易日」= 旧行为）。
+
+    日历一律注入：这一层的行为由 ``test_calendar_lookup_*`` 与接线用例单独钉；时段闸
+    用例只关心「给定日历结论，取数闸怎么动」。
+    """
     from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
 
     calls = {"market": 0, "account": 0, "data": 0, "model": 0}
@@ -115,6 +142,7 @@ def _engine(now_epoch: float, **counters):
         recent_marker=lambda ds: None,
         deduper=lambda ds, cfg: (list(ds), 0),
         status_writer=lambda payload: None,
+        trading_day_lookup=lambda d: trading_day,
         now_fn=lambda: now_epoch,
     )
     return engine, calls
@@ -174,6 +202,7 @@ def test_session_gate_uses_injected_clock_not_wall_clock():
         recent_marker=lambda ds: None,
         deduper=lambda ds, cfg: (list(ds), 0),
         status_writer=lambda payload: None,
+        trading_day_lookup=lambda d: True,
         now_fn=lambda: holder["now"],
     )
     engine.build_once()
@@ -181,3 +210,157 @@ def test_session_gate_uses_injected_clock_not_wall_clock():
     holder["now"] = _epoch(_THU, 10, 30)  # 同一个"今天"，只是到了盘中
     engine.build_once()
     assert holder["market"] == 1
+
+
+# ── 节假日层：日历结论如何改变取数闸 ────────────────────────────────
+
+
+def test_holiday_in_session_skips_market_family():
+    """工作日假期盘中（日历明示非交易日）：市场族**取数都不取**，记 holiday 而非 closed。
+
+    这正是评审指出的缺口：改前闸门只认「工作日+时段」，假期盘中与交易日无异——
+    冻结快照照报，critical 还按真实标的写锁。
+    """
+    engine, calls = _engine(_epoch(_THU, 10, 30), trading_day=False)
+
+    result = engine.build_once()
+
+    assert calls["market"] == 0, "非交易日盘中不得取数"
+    assert result["detections"] == 0
+    assert engine.counters["skipped_market_holiday"] == 1
+    assert engine.counters["skipped_market_closed"] == 0, "假日与盘外必须分开计数"
+    assert engine.counters["errors"] == 0, "这是正常路径，不是错误"
+
+
+def test_holiday_only_gates_market_family():
+    """假日只闸市场族：数据/账户/模型族照常——它们本就该盘后（含假期）出值。"""
+    engine, calls = _engine(_epoch(_THU, 10, 30), trading_day=False)
+
+    engine.build_once()
+
+    assert calls == {"market": 0, "account": 1, "data": 1, "model": 1}
+
+
+def test_calendar_unavailable_degrades_to_old_behaviour():
+    """日历答不了（None）→ **退回旧口径**：时段内照常取数，不动计数。
+
+    降级必须放行而不是关闸：本改动只许关闸、不许凭空开闸。关闸式降级（未知即跳）
+    会让 XSHG 印发期（实测到 2026-12-31）一过，市场族在每个交易日静默停摆。
+    """
+    engine, calls = _engine(_epoch(_THU, 10, 30), trading_day=None)
+
+    result = engine.build_once()
+
+    assert calls["market"] == 1, "日历答不了不是停摆的理由"
+    assert result["detections"] >= 1
+    assert engine.counters["skipped_market_holiday"] == 0
+    assert engine.counters["skipped_market_closed"] == 0
+
+
+def test_calendar_lookup_is_per_day_cached_and_skipped_off_window():
+    """日历按日缓存、且**时段外不问**：日频事实不该在分钟级循环里每分钟查一次。"""
+    from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
+
+    asked: list[str] = []
+    holder = {"now": _epoch(_THU, 20, 21)}  # 从盘外起步：第一轮就不该问日历
+
+    engine = AnomalyEngine(
+        config_loader=lambda: AnomalyConfig(enabled=True),
+        market_fetcher=lambda cfg: {},
+        account_fetcher=lambda cfg: [],
+        data_fetcher=lambda cfg: [],
+        model_fetcher=lambda cfg: [],
+        publisher=lambda d: None,
+        recorder=lambda d: None,
+        denier=lambda d: {},
+        recent_marker=lambda ds: None,
+        deduper=lambda ds, cfg: (list(ds), 0),
+        status_writer=lambda payload: None,
+        trading_day_lookup=lambda d: (asked.append(d.isoformat()), True)[1],
+        now_fn=lambda: holder["now"],
+    )
+
+    engine.build_once()  # 20:21 外 → 不查
+    assert asked == []
+    holder["now"] = _epoch(_THU, 10, 30)
+    engine.build_once()  # 盘中 → 查一次
+    holder["now"] = _epoch(_THU, 14, 0)
+    engine.build_once()  # 同日再查 → 命中缓存
+    holder["now"] = _epoch(_MON, 10, 30)
+    engine.build_once()  # 隔日 → 再查一次
+    assert asked == ["2026-10-08", "2026-10-12"]
+
+
+def test_calendar_lookup_exception_degrades_instead_of_crashing():
+    """日历查询抛异常 = 答不了：降级放行 + 记一条 WARNING，不许反噬主循环。"""
+    from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
+
+    def boom(day):
+        raise RuntimeError("日历炸了")
+
+    engine = AnomalyEngine(
+        config_loader=lambda: AnomalyConfig(enabled=True),
+        market_fetcher=lambda cfg: {},
+        account_fetcher=lambda cfg: [],
+        data_fetcher=lambda cfg: [],
+        model_fetcher=lambda cfg: [],
+        publisher=lambda d: None,
+        recorder=lambda d: None,
+        denier=lambda d: {},
+        recent_marker=lambda ds: None,
+        deduper=lambda ds, cfg: (list(ds), 0),
+        status_writer=lambda payload: None,
+        trading_day_lookup=boom,
+        now_fn=lambda: _epoch(_THU, 10, 30),
+    )
+
+    result = engine.build_once()
+
+    assert result["enabled"] is True and engine.counters["errors"] == 0
+
+
+def test_default_lookup_is_wired_to_shared_calendar():
+    """接线：不注入 lookup 时，引擎用的是**平台那把尺子**（shared xcal），不是「恒 True」。
+
+    探针钉在 2026-10-01（周四·国庆，XSHG 印发区间内）：真日历说它不是交易日 ⇒ 市场族
+    必须被跳过。把默认值改回 ``lambda d: True``、或把共享实现接错市场，这条立刻红
+    ——时段闸自己的用例全是注入桩，没人钉接线就会「测试全绿而生产永远不关闸」。
+    """
+    from backend.services.engine.anomaly_engine import (
+        AnomalyConfig,
+        AnomalyEngine,
+        _default_trading_day_lookup,
+    )
+    from backend.shared.trading_calendar import is_trading_day_xcal
+    from datetime import date as _date
+
+    assert _default_trading_day_lookup(_date(2026, 10, 1)) is False, (
+        "共享尺子本身要答对"
+    )
+    assert is_trading_day_xcal("CN", _date(2026, 10, 1)) is False, "CN 走 XSHG"
+
+    calls = {"market": 0}
+
+    def market_fetcher(cfg):
+        calls["market"] += 1
+        return {}
+
+    engine = AnomalyEngine(
+        config_loader=lambda: AnomalyConfig(enabled=True),
+        market_fetcher=market_fetcher,
+        account_fetcher=lambda cfg: [],
+        data_fetcher=lambda cfg: [],
+        model_fetcher=lambda cfg: [],
+        publisher=lambda d: None,
+        recorder=lambda d: None,
+        denier=lambda d: {},
+        recent_marker=lambda ds: None,
+        deduper=lambda ds, cfg: (list(ds), 0),
+        status_writer=lambda payload: None,
+        now_fn=lambda: _epoch(_HOLIDAY_THU, 10, 30),
+    )
+
+    engine.build_once()
+
+    assert calls["market"] == 0, "默认接线没接上共享日历（否则国庆盘中照样取数）"
+    assert engine.counters["skipped_market_holiday"] == 1
