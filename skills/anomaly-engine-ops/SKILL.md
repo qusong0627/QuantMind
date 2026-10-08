@@ -116,12 +116,17 @@ for k in sorted(c.scan_iter(match='qm:anomaly:last_fired:*', count=500)):
 quantmind 容器内都通）：
 
 ```bash
-# dsh（QuantBot）里：引擎服务在 quantmind:8001
-curl -s -H "X-Internal-Call: $INTERNAL_CALL_SECRET" http://quantmind:8001/api/v1/engine/realtime/anomaly/status
+# dsh（QuantBot）里：引擎服务在 quantmind:8001。密钥经 stdin 配置传入，**不进 argv**
+# （-H "$SECRET" 会把它落到 ps 与 shell 历史里；该头等价 admin，见下）：
+printf 'header = "X-Internal-Call: %s"\n' "$INTERNAL_CALL_SECRET" \
+  | curl -s --config - http://quantmind:8001/api/v1/engine/realtime/anomaly/status
 
 # 宿主/维护者：在容器内跑，密钥不出容器（$INTERNAL_CALL_SECRET 由容器环境展开，勿打印）
 docker exec quantmind sh -lc 'curl -s -H "X-Internal-Call: $INTERNAL_CALL_SECRET" http://127.0.0.1:8001/api/v1/engine/realtime/anomaly/status'
 ```
+
+> 该头**等价 admin**（`shared/auth.py` 走内部调用分支，角色由客户端自选的 `X-User-Id` 决定），
+> 所以只在本机/容器内使用，别写进脚本、别贴进聊天、别自铸 token（见 §3 标题）。
 
 返回 `{"ok":true,"data":{"enabled",…,"counters":{…},"recent_…"}}`——与 §2 的 Redis `qm:anomaly:status`
 同源（端点读的就是它），**计数读法见 §2 表**。只读接口，不需要 `X-User-Id`（实测不带也 200）。
