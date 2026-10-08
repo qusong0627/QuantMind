@@ -389,15 +389,27 @@ def test_calendar_lookup_is_per_day_cached_and_skipped_off_window():
 
 
 def test_calendar_lookup_exception_degrades_instead_of_crashing():
-    """日历查询抛异常 = 答不了：降级放行 + 记一条 WARNING，不许反噬主循环。"""
+    """日历查询抛异常 = 答不了：**降级放行** + 记一条 WARNING，不许反噬主循环。
+
+    本用例同时钉住 except 分支的**方向**（2026-10-08 评审 M1）：只断言「没崩、没记错」
+    对放行与关闸**都成立**——把 except 里的 ``verdict = None`` 改成 ``False``（异常即
+    当假期、关闸），旧断言照样全绿。而这一支正是 XSHG 印发期过后生产会走的路径，
+    「只许关闸、不许凭空开闸」的降级政策就压在这里，必须用取数次数钉死方向。
+    """
     from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
 
     def boom(day):
         raise RuntimeError("日历炸了")
 
+    calls = {"market": 0}
+
+    def market_fetcher(cfg):
+        calls["market"] += 1
+        return {}
+
     engine = AnomalyEngine(
         config_loader=lambda: AnomalyConfig(enabled=True),
-        market_fetcher=lambda cfg: {},
+        market_fetcher=market_fetcher,
         account_fetcher=lambda cfg: [],
         data_fetcher=lambda cfg: [],
         model_fetcher=lambda cfg: [],
@@ -414,6 +426,9 @@ def test_calendar_lookup_exception_degrades_instead_of_crashing():
     result = engine.build_once()
 
     assert result["enabled"] is True and engine.counters["errors"] == 0
+    assert calls["market"] == 1, "查历异常必须降级放行——异常不是关闸的理由"
+    assert engine.counters["skipped_market_holiday"] == 0, "异常 ≠ 假期（不许记成 holiday）"
+    assert engine.counters["skipped_market_closed"] == 0
 
 
 def test_default_lookup_is_wired_to_shared_calendar():
