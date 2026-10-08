@@ -70,7 +70,7 @@ def status_mirror_payload(
     cfg: RealtimeInferConfig,
     governor: dict[str, Any] | None,
 ) -> dict[str, str]:
-    """状态镜像载荷（纯函数，便于单测；`_write_status_mirror` 只负责写）。
+    """状态镜像载荷（纯函数，便于单测；`_write_status_mirror` 只组装、`_default_status_write` 只负责写）。
 
     这三个字段回答面板的三个问题：`counters`=发了多少、`config`=按什么参数在发、
     `governor`=**发得动吗**（近窗 p95 时延 / 降级阶梯 / 生效节拍）。
@@ -178,6 +178,7 @@ class RealtimeInferenceService:
         baseline_loader: Callable[[list[str], date], dict[str, dict[str, Any]]] | None = None,
         publisher: Callable[[dict[str, Any], RealtimeInferConfig], Any] | None = None,
         ledger_sink: Callable[[dict[str, Any]], None] | None = None,
+        status_writer: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._config_loader = config_loader or _load_config_sync
         self._hot_set_fetcher = hot_set_fetcher
@@ -185,6 +186,9 @@ class RealtimeInferenceService:
         self._baseline_loader = baseline_loader
         self._publisher = publisher
         self._ledger_sink = ledger_sink  # 注入式账本落点（None → Redis；测试注入 list.append）
+        # 注入式状态镜像落点（None → 写生产键 qm:realtime:infer:status）。tick_once
+        # 每轮 finally 都会调它，测试**必须**注入空实现——证据见 _write_status_mirror。
+        self._status_writer = status_writer or self._default_status_write
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._lock = threading.Lock()
@@ -549,7 +553,33 @@ class RealtimeInferenceService:
         return governor
 
     def _write_status_mirror(self, cfg: RealtimeInferConfig) -> None:
-        """状态镜像到 Redis（best-effort）：admin/前端面板唯一读面（不做跨服务 HTTP）。"""
+        """组装状态镜像并交给落点（best-effort）：admin/前端面板唯一读面。
+
+        ⚠️ 落点可注入（``status_writer``），**测试必须注入**：默认落点写的是生产键
+        ``qm:realtime:infer:status``，而 `tick_once` 的 finally 每轮都会调到这里。
+        2026-10-08 实测：跑 test_realtime_inference 的两个 tick 用例后，生产镜像从
+        真身的 ``cycles=48 / model_dir=…catboost / cadence=15`` 变成测试的
+        ``cycles=0 / model_dir="" / cadence=3 / last_skip=启用但未配置模型目录``
+        —— 面板对着**正在正常跑**的服务报「配置缺失」。真身 15s 后盖回，但服务真停
+        时这行假故障会一直挂到 TTL（24h）结束。
+        """
+        try:
+            with self._lock:
+                counters = dict(self.counters)
+            # 治理器快照与 counters 同锁语义：两者都要与本次周期一致，
+            # 否则面板可能看到「周期数已 +1、p95 还是上一轮」的错配。
+            governor = None
+            with self._lock:
+                if self._governor is not None:
+                    governor = self._governor.snapshot()
+            self._status_writer(
+                status_mirror_payload(counters=counters, cfg=cfg, governor=governor)
+            )
+        except Exception:  # noqa: BLE001 - 镜像失败不影响推理循环
+            pass
+
+    def _default_status_write(self, payload: dict[str, Any]) -> None:
+        """默认落点：写生产 Redis 状态镜像（best-effort，失败不影响推理循环）。"""
         try:
             import os
 
@@ -562,21 +592,8 @@ class RealtimeInferenceService:
                 password=os.getenv("REDIS_PASSWORD") or None,
                 decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
             )
-            with self._lock:
-                counters = dict(self.counters)
-            # 治理器快照与 counters 同锁语义：两者都要与本次周期一致，
-            # 否则面板可能看到「周期数已 +1、p95 还是上一轮」的错配。
-            governor = None
-            with self._lock:
-                if self._governor is not None:
-                    governor = self._governor.snapshot()
             try:
-                client.hset(
-                    STATUS_KEY,
-                    mapping=status_mirror_payload(
-                        counters=counters, cfg=cfg, governor=governor
-                    ),
-                )
+                client.hset(STATUS_KEY, mapping=payload)
                 client.expire(STATUS_KEY, 86400)
             finally:
                 client.close()

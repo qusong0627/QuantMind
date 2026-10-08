@@ -22,6 +22,19 @@ import pytest
 _CST = timezone(timedelta(hours=8))
 
 
+def _no_status_write(payload) -> None:
+    """**每条 tick_once 用例都必须注入**：默认落点是生产状态镜像
+    `qm:realtime:infer:status`（`_default_status_write` → hset），而 tick_once 的
+    finally 每轮都会写一次。
+
+    2026-10-08 实测：跑本文件的两个 tick 用例后，生产镜像从真身的
+    `cycles=48 / model_dir=…catboost_8f24cd5c / cadence=15` 变成测试的
+    `cycles=0 / model_dir="" / cadence=3 / last_skip=启用但未配置模型目录`
+    —— 面板对着正在正常跑的服务报「配置缺失」（真身 15s 后盖回；服务真停时
+    这行假故障会挂满 24h TTL），所以测试不许碰这个键。"""
+    return None
+
+
 def _make_model_dir(tmp_path: Path, n_features: int = 6) -> Path:
     """真实 sklearn 模型目录（含 metadata），供导出链与服务使用。"""
     from sklearn.linear_model import Ridge
@@ -619,6 +632,7 @@ async def test_tick_clears_stale_error_on_normal_skip(tmp_path):
         snapshot_fetcher=lambda symbols: snaps,
         baseline_loader=lambda symbols, day: bundle,
         publisher=lambda payload, cfg: None,
+        status_writer=_no_status_write,
     )
 
     # 第一条：模型目录失效 → 记错误
@@ -650,7 +664,9 @@ async def test_tick_enabled_without_model_dir_leaves_skip_trace(tmp_path):
 
     cfg = RealtimeInferConfig(enabled=True, model_dir="", cadence_s=3)
 
-    svc = RealtimeInferenceService(config_loader=lambda: cfg)
+    svc = RealtimeInferenceService(
+        config_loader=lambda: cfg, status_writer=_no_status_write
+    )
 
     await svc.tick_once()
 
@@ -658,6 +674,39 @@ async def test_tick_enabled_without_model_dir_leaves_skip_trace(tmp_path):
     assert "未配置模型目录" in (svc.counters["last_skip"] or ""), (
         "启用但无模型目录时必须留下跳过原因，不能静默变绿"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_tick_dispatches_status_payload_to_injected_writer():
+    """注入的 status_writer 必须收到**每轮**镜像载荷（新缝的守卫）。
+
+    没有这条，注入点被绕过（有人把 hset 写回 tick_once）时不会有任何测试变红。
+    载荷三件套 = 面板的三个问题：counters=发了多少 / config=按什么参数 /
+    governor=发得动吗（governor=None 也要如实出现，面板须能区分「未建立」）。
+    用「启用但未配模型目录」这条确定性分支：无 IO、当轮 counters 必带 last_skip，
+    可同时证明下发的是**本轮**计数而非空壳。
+    """
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferenceService,
+        RealtimeInferConfig,
+    )
+
+    cfg = RealtimeInferConfig(enabled=True, model_dir="", cadence_s=3)
+    written: list[dict] = []
+    svc = RealtimeInferenceService(
+        config_loader=lambda: cfg, status_writer=written.append
+    )
+
+    await svc.tick_once()
+
+    assert len(written) == 1, "每轮 tick 必须下发一次镜像载荷"
+    payload = written[0]
+    assert set(payload) == {"updated_at", "counters", "config", "governor"}
+    assert json.loads(payload["config"])["enabled"] is True
+    assert "未配置模型目录" in (json.loads(payload["counters"])["last_skip"] or "")
+    # 治理器快照必须与本轮同一份（节拍取自本 cfg，而非上一轮/默认值）
+    assert json.loads(payload["governor"])["base_cadence_s"] == 3
     assert svc.counters["published"] == 0
 
 
