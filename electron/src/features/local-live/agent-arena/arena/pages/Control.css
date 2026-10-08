@@ -1,0 +1,229 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* 总控台 —— 参考 nof0 monitor.html，coke 视觉 */
+
+/* 紧凑页头：一行装下「标题 / 视图 tab / 服务灯 / 数据时效」，
+   窄屏按 flex-wrap 折行（原先是三行满宽区块，顶部太占地方） */
+.qm-arena-root .control-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border: 2px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .control-title {
+  font-size: 17px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .control-tabs { margin-bottom: 0; }
+
+.qm-arena-root .control-refresh {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: #444;
+  font-family: 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.qm-arena-root .control-refresh em {
+  font-style: normal;
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #aaa;
+  border-left: 1px solid #ddd;
+  padding-left: 6px;
+}
+
+.qm-arena-root .control-refresh em:first-child { border-left: none; padding-left: 0; }
+
+/* 服务健康灯：行内小徽章（原来每个 170px 起、被 grid 拉满整行 → 顶部太宽） */
+.qm-arena-root .svc-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 0;
+}
+
+.qm-arena-root .svc-row .svc-chip {
+  padding: 2px 7px;
+  border-width: 1.5px;
+  font-size: 10px;
+  gap: 5px;
+}
+
+.qm-arena-root .svc-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 2px solid #000;
+  background: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.qm-arena-root .svc-dot { width: 8px; height: 8px; border-radius: 50%; }
+.qm-arena-root .svc-up { background: #10a37f; }
+.qm-arena-root .svc-down { background: #ef4444; }
+
+/* 市场区块 */
+.qm-arena-root .mk-section {
+  margin-bottom: 16px;
+  border: 2px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .mk-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 2px solid #000;
+  background: #f5f5f5;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .mk-count {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 400;
+  color: #666;
+}
+
+.qm-arena-root .mk-empty {
+  padding: 24px;
+  text-align: center;
+  color: #999;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+}
+
+/* ---------- 交易所状态行：等宽网格（每项一个完整小卡片） ---------- */
+
+.qm-arena-root .exch-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .exch-row .svc-chip {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+/* 状态细节小字统一换行到第二行，与名称左对齐（dot 8px + gap 6px） */
+.qm-arena-root .exch-row .exch-sub {
+  flex-basis: 100%;
+  margin-left: 0;
+  padding-left: 14px;
+}
+
+.qm-arena-root .exch-sub {
+  margin-left: 4px;
+  font-size: 9.5px;
+  font-weight: 400;
+  color: #666;
+  white-space: nowrap;
+}
+
+.qm-arena-root .exch-sub.exch-on {
+  color: #10a37f;
+  font-weight: 700;
+}
+
+/* ---------- 并列布局（用户要求：整行竖排改为多列 grid） ---------- */
+
+.qm-arena-root .control-grid {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+/* 交易所状态 + A股实盘分账：两列 */
+.qm-arena-root .control-grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+}
+
+/* 三市场（cn/hk/us）：三列并排 */
+.qm-arena-root .control-grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+}
+
+.qm-arena-root .control-grid .mk-section {
+  margin-bottom: 0;
+}
+
+/* ---------- 窄屏（移动端）：单列堆叠，表格由 .table-wrap 横向滚动 ---------- */
+
+@media (max-width: 560px) {
+  /* 特异性 (.page + class) 高于 .control-grid-2 主定义——
+     vite 打包会把 @media 重排到主定义之前，同特异性会被覆盖。
+     列宽用 minmax(0,1fr) + 子项 min-width:0：grid 项默认
+     min-width:auto 会按内容 min-content 撑列（exch-sub nowrap 是根因） */
+  .qm-arena-root .page .control-grid-2,
+  .qm-arena-root .page .control-grid-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .qm-arena-root .page .control-grid-2 > *,
+  .qm-arena-root .page .control-grid-3 > * {
+    min-width: 0;
+  }
+  .qm-arena-root .page .exch-sub {
+    white-space: normal;
+  }
+  .qm-arena-root .page .mk-head {
+    padding: 8px 10px;
+  }
+}
+
+/* grid 卡片内表格：紧凑排版（3 列并排后列宽有限） */
+.qm-arena-root .mk-table .data {
+  font-size: 11px;
+}
+
+.qm-arena-root .mk-table .data th,
+.qm-arena-root .mk-table .data td {
+  padding: 6px 8px;
+  white-space: nowrap;
+}
+
+.qm-arena-root .mk-table .data th:first-child,
+.qm-arena-root .mk-table .data td:first-child {
+  padding-left: 12px;
+}
+
+/* QMT 持仓：50 只全列会把三市场区块顶出屏幕 → 卡内纵向滚动，表头吸顶 */
+.qm-arena-root .qmt-pos-wrap {
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.qm-arena-root .qmt-pos-wrap .data thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  /* 与全站表头底色一致（globals.css table.data thead），否则吸顶行白底融进行 */
+  background: var(--bg-tertiary, #f5f5f5);
+}

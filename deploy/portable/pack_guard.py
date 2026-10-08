@@ -8,12 +8,12 @@
     python3 deploy/portable/pack_guard.py --zip    <输出.zip>
     python3 deploy/portable/pack_guard.py --zip <实盘包.zip> --profile live
 
-三种模式都接受 ``--allow-local-live``（显式放行本机独有实盘栏目的前端产物，
-自用包；默认拒绝，与 ``scripts/deploy_frontend.sh`` 同名同义）与 ``--profile``
-（``general`` 默认 / ``live``）：**检测器是同一份，分叉的只是判据清单**——
-``pack.env``、``bridge/**``、``live/**``、``dsh/**`` 在通用包里是「泄漏」，
-在实盘包里是「少一个就是残包」；实盘包还必须带上 ``web/assets/LiveTradingPage*``
-（通用包反过来禁止它）。理由与两清单的关系写在 ``pack_rules`` 的「包形态」一节。
+三种模式都接受 ``--profile``（``general`` 默认 / ``live``）：**检测器是同一份，
+分叉的只是判据清单**——``pack.env``、``bridge/**``、``live/**``、``dsh/**`` 在通用包
+里是「泄漏」，在实盘包里是「少一个就是残包」；实盘包还必须带上
+``web/assets/LiveTradingPage*``（通用包不再判它：2026-10-08 起栏目源码入仓，
+chunk 恒在，存在性问不出东西）。理由与两清单的关系写在 ``pack_rules`` 的
+「包形态」一节。
 退出码：``0`` 通过 / ``1`` 有违规（非零即中止出包）/ ``2`` 用法或 IO 错误。
 
 为什么要有这道闸门（不是「再加一层保险」）
@@ -28,11 +28,10 @@
 
 三层判据（全部在 ``pack_rules.py``，本文件只负责执行）
 ------------------------------------------------------
-1. **路径清单**：排除项（打包时跳过；压缩后还在 = 违规）与必备项（少一个 = 残包）；
-   另有 **私有栏目产物**（``R.PRIVATE_CHUNKS``）：``electron/src/features/local-live/``
-   是运营者本机独有、不开源的实盘栏目（``.gitignore`` 排除），本机构建会把它打进
-   ``dist-react/``，而两份包都从那里取 ``web/`` —— 产物里出现它的 chunk 即违规，
-   与 ``scripts/deploy_frontend.sh`` 第 3 步同源同判；
+1. **路径清单**：排除项（打包时跳过；压缩后还在 = 违规）与必备项（少一个 = 残包）。
+   （原先还有第三类「私有栏目产物」（``R.PRIVATE_CHUNKS``），2026-10-08 随实盘栏目
+   入仓一起退役——chunk 在每一次干净构建里都存在，判据失去信号，理由在
+   ``pack_rules`` 的注记里。）
 2. **内容判据**：内网地址与明文口令——检测器**复用**
    ``backend/tests/test_no_internal_addresses_or_plaintext_secrets.py``，
    本文件不重写正则。那份是权威定义（含全部误报豁免与理由），这里只是把扫描面
@@ -228,14 +227,9 @@ def scan_entries(
     mode: str,
     needles: list[tuple[str, str]],
     detectors,
-    allow_private: bool = False,
     profile: R.Profile | None = None,
 ) -> tuple[list[Finding], list[str]]:
     """``mode`` ∈ {"stage", "zip"}：stage 下命中排除项只是提示，zip 下是违规。
-
-    私有栏目产物（``profile.private_chunks``）在**两种模式下都是违规**：它不在排除
-    清单里，打包时不会消失——出现在 staging 就等于会出现在产物里。``allow_private``
-    是 ``--allow-local-live`` 的显式放行（与 ``scripts/deploy_frontend.sh`` 同名同义）。
 
     ``profile`` 决定「这份包该长什么样」（见 pack_rules 的包形态一节）：默认通用包。
     """
@@ -267,21 +261,6 @@ def scan_entries(
             )
             # 排除项不会出厂 ⇒ 内容判据不必再看它（省掉 models/users 那 1.3G 的读）。
             continue
-        for pattern, reason in profile.private_chunks:
-            if R.matches_pattern(pattern, rel):
-                findings.append(
-                    Finding(
-                        "私有栏目",
-                        rel,
-                        reason
-                        + (
-                            "（已由 --allow-local-live 显式放行）"
-                            if allow_private
-                            else ""
-                        ),
-                        fatal=not allow_private,
-                    )
-                )
         findings.extend(_scan_content(entry, needles, detectors, notes, profile))
     for reason, rels in kept.items():
         notes.append(f"有意保留：{len(rels)} 个文件（{reason}）—— 例 {rels[0]}")
@@ -454,7 +433,7 @@ def check_required(
     for sentinel, must, reason in profile.required_pairs:
         if sentinel in rels and must not in rels:
             out.append(Finding("缺必备", must, reason, True))
-    # 必备栏目产物：与私有栏目产物是同一判据的两面（一份包禁止、另一份必查）。
+    # 必备栏目产物：实盘包专属（通用包 2026-10-08 起不判它——源码入仓后 chunk 恒在）。
     for pattern, reason in profile.required_chunks:
         if not any(R.matches_pattern(pattern, rel) for rel in rels):
             out.append(Finding("缺必备", pattern, reason, True))
@@ -590,7 +569,6 @@ def _report(findings: list[Finding], notes: list[str], headline: str) -> int:
     order = [
         "缺必备",
         "排除项",
-        "私有栏目",
         "形态",
         "内网地址",
         "明文口令",
@@ -654,12 +632,6 @@ def main(argv: list[str] | None = None) -> int:
         "--env-file", action="append", default=[], help="补充宿主探针来源（可多次）"
     )
     ap.add_argument(
-        "--allow-local-live",
-        action="store_true",
-        help="显式放行本机独有实盘栏目的前端产物（自用包；"
-        "与 scripts/deploy_frontend.sh 同名同义，默认拒绝）",
-    )
-    ap.add_argument(
         "--profile",
         choices=sorted(R.PROFILES),
         default="general",
@@ -690,7 +662,6 @@ def main(argv: list[str] | None = None) -> int:
             unreadable,
             dropped,
             detectors,
-            allow_private=args.allow_local_live,
             profile=profile,
         )
         if code != 0:
@@ -718,7 +689,6 @@ def main(argv: list[str] | None = None) -> int:
             unreadable,
             dropped,
             detectors,
-            allow_private=args.allow_local_live,
             profile=profile,
         )
 
@@ -731,7 +701,6 @@ def main(argv: list[str] | None = None) -> int:
             mode="zip",
             needles=needles,
             detectors=detectors,
-            allow_private=args.allow_local_live,
             profile=profile,
         )
         findings.extend(check_required(iter(entries), profile, mode="zip"))
@@ -755,7 +724,6 @@ def _verify_stage(
     dropped,
     detectors,
     *,
-    allow_private: bool = False,
     profile: R.Profile | None = None,
 ) -> int:
     profile = profile or R.PROFILES["general"]
@@ -767,7 +735,6 @@ def _verify_stage(
         mode="stage",
         needles=needles,
         detectors=detectors,
-        allow_private=allow_private,
         profile=profile,
     )
     findings.extend(check_required(iter(entries), profile, mode="stage"))

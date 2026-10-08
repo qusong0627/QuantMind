@@ -132,6 +132,16 @@ export interface RealTradingPageProps {
      */
     forcedTradingMode?: TradingMode;
     /**
+     * 顶栏右侧状态徽章那一行的**附加节点**。缺省不渲染。
+     *
+     * 与 `extraTabs` 同一约定：**公开树不感知调用方是谁** —— 无调用方时 prop 为
+     * undefined，`{undefined}` 不产生任何 DOM，公开仓形态与本机制引入前逐位相同。
+     * 本机「实盘交易」栏用它把市场切换器（A股/港股/美股，`components/layout/MarketSelector`）
+     * 挂到顶栏：这一栏经常停在一个市场上看账户，切市场不该先退回主页再切回来。
+     * 收**节点**而非渲染函数：切换器读写全局 redux 状态，不需要 `ctx`。
+     */
+    topBarExtras?: React.ReactNode;
+    /**
      * 追加到侧栏末尾的页签。缺省不追加。
      *
      * 本机独有「实盘交易」栏目（`features/local-live/`，不入库）用它把实盘专属面板
@@ -177,7 +187,7 @@ export interface RealTradingPageProps {
     positionRailExtras?: (ctx: RealTradingTabContext) => React.ReactNode;
 }
 
-const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, extraTabs, banner, settingsPanels, manualTaskExtras, positionRailExtras }) => {
+const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, topBarExtras, extraTabs, banner, settingsPanels, manualTaskExtras, positionRailExtras }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     // 默认「系统健康」，深链 ?tab=eval|signals 直达 —— 规则见 utils/activeTab.ts（有测试锁定）
     const initialTab: ActiveTab = resolveInitialTab(
@@ -655,6 +665,7 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, ex
                         tradingMode={tradingMode}
                         runMode={resolvedRunMode}
                         orchestrationMode={resolvedOrchestrationMode}
+                        topBarExtras={topBarExtras}
                         accountInfo={(() => {
                             return accountInfo ? buildTradingTopBarAccountInfo(accountInfo, status) : undefined;
                         })()}

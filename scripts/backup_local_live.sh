@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 「实盘交易」栏目（electron/src/features/local-live/）的本机备份。
+# 「实盘交易」栏目（electron/src/features/local-live/）的 NAS 快照备份。
 #
-# 为什么单独有一支备份脚本：该目录被 .gitignore 排除，**不在任何 clone 里**。
-# 换机、磁盘故障、误 `git clean -fdx` 都会直接丢，且没有任何"从远端拉回来"的途径。
-# 这是本方案唯一的不可逆风险点。
+# 2026-10-08 起该目录**已入仓**，git 是第一副本；本脚本保留为 NAS 侧快照，
+# 兜的是 git 也救不了的场景：**未提交的本地改动** + 误删/误 `git clean -fdx`
+# 工作区（快照按工作区当前状态取，不是 HEAD）。换机恢复 = HEAD + 快照里的未提交部分。
 #
 # 用法:
 #   LOCAL_LIVE_BACKUP_TARGET=/mnt/nas/quantmind_local_live bash scripts/backup_local_live.sh

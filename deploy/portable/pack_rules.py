@@ -275,24 +275,20 @@ SHAPE_MARKERS: tuple[tuple[bytes, str], ...] = (
     ),
 )
 
-#: **私有栏目产物**：按路径判（路径在排除清单之外，所以是独立的一类判据）。
+#: ~~私有栏目产物~~（2026-10-08 **退役**，保留此注记以免有人再把它加回来）。
 #:
-#: ``electron/src/features/local-live/`` 是运营者本机独有的实盘交易栏目
-#: （``.gitignore:221`` 排除、不开源）：本机 ``npm run build`` 会把它整块打进
-#: ``dist-react/``，而两份包都从这里取 ``web/``。判据（chunk 名）与
-#: ``scripts/deploy_frontend.sh`` 第 3 步**同源**——那份脚本拿它拦「别把不开源的
-#: 部分 ``docker cp`` 到面向公网的容器」，这里拦的是同一件事的另一条出口。
+#: 原先这里有一条判据：``web/assets/LiveTradingPage*`` 默认违规——当时实盘栏目源码
+#: （``electron/src/features/local-live/``）被 ``.gitignore`` 排除、不开源，本机构建
+#: 会把它打进 ``dist-react/``，随包出厂即泄漏（与 ``scripts/deploy_frontend.sh``
+#: 当时的源码目录闸门同源）。
 #:
-#: 元组第二项是显式放行开关的名字（``--allow-local-live``，与那份脚本同名同义）：
-#: 本机自用包允许带，默认拒绝。**拦的是意外，不是决定**——本机开发时那个目录
-#: 一直在，没有这条判据就只剩「构建日志里什么都没有」。
-PRIVATE_CHUNKS: tuple[tuple[str, str], ...] = (
-    (
-        "web/assets/LiveTradingPage*",
-        "本机独有实盘栏目的前端产物（源码 electron/src/features/local-live/ 未跟踪、"
-        "不开源）——随包出厂等于把不开源的部分发给别人",
-    ),
-)
+#: 2026-10-08 起该目录**已入仓**（连同实盘栏目一起入仓），chunk 在**每一次**干净
+#: 构建里都存在，存在性不再是信号——留着这条判据会拒绝**每一次**出包。
+#:
+#: 「实盘 UI 可见的构建」（内联标记 ``VITE_ENABLE_REAL_TRADING:"true"``）**不进
+#: 出厂闸门**：README「形态」一节的原判——界面开关是策略不是泄漏，不在此列。
+#: 便携包的可见性由构建侧的显式选项收敛（``package-for-windows.sh --real-trading``，
+#: 默认关）；web 部署侧另有 ``scripts/deploy_frontend.sh`` 第 3b 步的产物标记闸门。
 
 
 #: 文本类后缀：内容扫描（正则 + 宿主值）都只扫这些。白名单而不是黑名单——
@@ -419,27 +415,10 @@ def match_excludes(
     return None
 
 
-def find_private_chunks(
-    dist_root: Path, chunks: tuple[tuple[str, str], ...] | None = None
-) -> list[str]:
-    """前端产物目录里命中的私有栏目 chunk（返回 ``web/...`` 形式的包根相对路径）。
-
-    :data:`PRIVATE_CHUNKS` 的模式按**包根**写（``web/`` 即前端的 ``dist-react/``），
-    这里补上前缀，让同一份模式既能校验 staging，也能直接校验前端产物目录本身——
-    ``build_windows_pack.sh`` 用它把这道判据提到构建期（否则要等 4GB 依赖下完、
-    走到最后一步才报）。判据一份，两个调用点。
-    """
-    pats = PRIVATE_CHUNKS if chunks is None else chunks
-    hits: list[str] = []
-    root = Path(dist_root)
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames.sort()
-        for name in sorted(filenames):
-            path = Path(dirpath) / name
-            rel = "web/" + str(path.relative_to(root))
-            if any(matches_pattern(pat, rel) for pat, _ in pats):
-                hits.append(rel)
-    return hits
+# find_private_chunks() 随私有栏目判据一起退役（2026-10-08，理由见
+# PRIVATE_CHUNKS 处的注记）：栏目源码入仓后 LiveTradingPage chunk 恒在，
+# 「有没有这个 chunk」问不出任何东西。build_windows_pack.sh 的同名构建期预检
+# 一并删除——预检的意义是「早失败省 4GB 下载」，判据没了预检自然没了。
 
 
 def is_text_path(rel: str) -> bool:
@@ -586,8 +565,9 @@ def host_needles(
 #
 #   pack.env / bridge/** / live/** / README-LIVE.md / dsh/** —— 通用包：违规；
 #                                                              实盘包：必备。
-#   web/assets/LiveTradingPage*                              —— 通用包：违规（不开源）；
-#                                                              实盘包：必须有。
+#   web/assets/LiveTradingPage*                              —— 实盘包：必须有
+#                                                              （通用包：已不判——
+#                                                              源码入仓，chunk 恒在）。
 #
 # **检测器不复制**（正则、宿主探针、明文口令都是同一份实现），分叉的只是判据清单。
 # 两份清单各写一套禁止项 = 迟早分叉，这正是本闸门从一开始就要避免的形状。
@@ -655,8 +635,6 @@ class Profile:
     optional_components: tuple[tuple[str, str], ...]
     #: 禁止的构建期内联标记（``web/`` 里的二进制串匹配）。
     shape_markers: tuple[tuple[bytes, str], ...]
-    #: 默认禁止的私有栏目产物（``--allow-local-live`` 可显式放行）。
-    private_chunks: tuple[tuple[str, str], ...]
     #: 必备的栏目产物：``pattern`` 至少命中 1 个文件，否则违规（通用/实盘正好相反）。
     required_chunks: tuple[tuple[str, str], ...] = ()
     #: 内容级必备判据（见 :class:`ContentAssert`）。
@@ -837,7 +815,6 @@ PROFILES: dict[str, Profile] = {
         required_pairs=REQUIRED_PAIRS,
         optional_components=OPTIONAL_COMPONENTS,
         shape_markers=SHAPE_MARKERS,
-        private_chunks=PRIVATE_CHUNKS,
     ),
     "live": Profile(
         name="live",
@@ -853,12 +830,11 @@ PROFILES: dict[str, Profile] = {
             ),
         ),
         shape_markers=(),
-        private_chunks=(),
         required_chunks=(
             (
                 "web/assets/LiveTradingPage*",
                 "实盘栏目的前端产物——整包的意义就是它（源码在 "
-                "electron/src/features/local-live/，本机独有）",
+                "electron/src/features/local-live/，2026-10-08 起入仓）",
             ),
         ),
         required_content=LIVE_REQUIRED_CONTENT,

@@ -221,13 +221,13 @@ db/db.zip
 # 2026-05 曾被误当"数据目录"加入 ignore，导致任何新克隆的前端构建失败。
 # 已放行并入库，勿再次忽略。
 
-# 本机独有的「实盘交易」栏目（开发者自用，不开源）。
-# 与上一条相反：这里是**故意**忽略的源码目录——公开仓不含实盘 UI 栏目，
-# 缺该目录时 electron/src/features/shared/localLive.ts 的 import.meta.glob
-# 匹配为空，构建照常通过。勿因"源码目录不该被忽略"而放行（那会把实盘 UI 发出去）。
-# 闸门：electron/src/features/shared/__tests__/localLiveNotTracked.test.ts
-# 备份：scripts/backup_local_live.sh（NAS；gitignore 的文件不在任何 clone 里）
-electron/src/features/local-live/
+# 「实盘交易」栏目源码（electron/src/features/local-live/）**已入仓**（2026-10-08）。
+# 之前这里有一行 `electron/src/features/local-live/` 把它排除在外（本机独有、不开源）；
+# 现在源码随仓分发，是否**渲染**由构建期 VITE_ENABLE_REAL_TRADING 收敛：
+# 默认构建（.env.production 里为 false）不渲染整栏、底部导航也不出现入口，
+# 要启用须两端同时打开（见 docs/实盘模块_启用与通道指南.md）。
+# **不要再把它加回 ignore**：导航/路由/闸门测试（localLiveTracking.test.ts）都以
+# 「目录恒在」为前提，重新忽略会让测试与部署脚本同时失义。
 /.cache/
 /.venv*/
 /Untitled*.ipynb

@@ -171,6 +171,22 @@ export function formatBackendTime(
 }
 
 /**
+ * 按上海时区格式化后端日期（只到日）
+ */
+export function formatBackendDate(value: string | number | Date | null | undefined): string {
+  const date = parseBackendTimestamp(value);
+  if (!date) {
+    return '--';
+  }
+
+  return buildShangHaiFormatter({
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+/**
  * 按上海时区格式化后端日期时间
  */
 export function formatBackendDateTime(value: string | number | Date | null | undefined): string {

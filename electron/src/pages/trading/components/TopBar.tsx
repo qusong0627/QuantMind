@@ -27,9 +27,18 @@ interface TopBarProps {
     tradingMode?: 'real' | 'simulation';
     runMode?: 'REAL' | 'SHADOW' | 'SIMULATION';
     orchestrationMode?: 'docker' | 'k8s';
+    /**
+     * 右侧状态徽章那一行的**附加节点**（本机实盘栏挂市场切换器）。缺省不渲染。
+     *
+     * 与页面其余槽位同一约定：**公开树不感知调用方是谁** —— 无调用方时 prop 为
+     * undefined，`{undefined}` 不产生任何 DOM，公开仓形态与本机制引入前逐位相同。
+     * 这里收的是**节点**而不是像 `banner`/`extraTabs` 那样的渲染函数：市场切换器
+     * 读写的是全局 redux 状态，不需要外壳那份运行期上下文。
+     */
+    topBarExtras?: React.ReactNode;
 }
 
-const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatus, tradingMode, runMode, orchestrationMode }) => {
+const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatus, tradingMode, runMode, orchestrationMode, topBarExtras }) => {
     const formatMoney = (val: number | undefined) => {
         if (val === undefined || (!accountInfo && val === 0)) return '0.00';
         return val.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -158,6 +167,8 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                 </div>
 
                 <div className="flex items-center gap-2">
+                    {/* 调用方附加节点（本机实盘栏的市场切换器）：无调用方时这里不产生 DOM */}
+                    {topBarExtras}
                     <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200/80 rounded-full text-xs text-slate-600 font-medium">
                         <Wifi size={13} className={isConnected ? 'text-emerald-500 animate-pulse' : 'text-slate-300'} />
                         <span>{isConnected ? '行情已连接' : '未连接'}</span>

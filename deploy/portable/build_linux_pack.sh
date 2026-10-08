@@ -30,9 +30,9 @@ PIP_FALLBACKS=("$PIP_DEFAULT" "https://pypi.tuna.tsinghua.edu.cn/simple/" "https
 TORCH_INDEX="https://download.pytorch.org/whl/cpu"
 PG_VERSION="${PG_VERSION:-15.19.0}"
 REDIS_VERSION="${REDIS_VERSION:-7.2.9}"
-# 前端产物目录。**发给他人的包要在干净检出里构建**：`electron/src/features/local-live/*.tsx`
-# 是未跟踪的本机独有实盘栏目，`import.meta.glob` 按文件系统存在与否决定是否打包，主工作树
-# 构建会把它整块打进 web/。`scripts/package-for-windows.sh` 已自动化这件事，本脚本留这个
+# 前端产物目录。**发给他人的包要在干净检出里构建**——修订可追溯、不带未提交改动
+# （2026-10-08 前这里拦的是「未跟踪的本机实盘栏目被打进产物」；栏目已入仓，那条
+# 理由消失）。`scripts/package-for-windows.sh` 已自动化这件事，本脚本留这个
 # 口子给同样的产物用（同一个 dist-react 既能伺服 Linux 包也能伺服 Windows 包）。
 WEB_DIST="${WEB_DIST:-$REPO_ROOT/electron/dist-react}"
 NPROC="$(nproc 2>/dev/null || echo 4)"

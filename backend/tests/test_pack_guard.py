@@ -439,92 +439,30 @@ def test_needle_scan_reaches_model_metadata(tmp_path: Path) -> None:
     assert "metadata.json" in proc.stdout
 
 
-#: 本机独有实盘栏目的产物 chunk（真实形态，取自 2026-09-24 的本机构建：
+#: 实盘栏目 chunk 的真实形态（取自 2026-09-24 的本机构建：
 #: `LiveTradingPage-Bi6VNCLg.js` / `LiveTradingPage-DDUnkuO4.css`）。
-PRIVATE_CHUNKS = (
+LIVE_COLUMN_CHUNKS = (
     "web/assets/LiveTradingPage-Bi6VNCLg.js",
     "web/assets/LiveTradingPage-DDUnkuO4.css",
 )
 
 
-@pytest.mark.parametrize("rel", PRIVATE_CHUNKS)
-def test_private_live_column_chunk_is_fatal_by_default(
-    tmp_path: Path, rel: str
-) -> None:
-    """`electron/src/features/local-live/` 未跟踪、不开源，本机构建会把它打进
-    `dist-react/`，而两份包都从那里取 `web/` —— 随包出厂就是把不开源的部分发了出去。
+@pytest.mark.parametrize("rel", LIVE_COLUMN_CHUNKS)
+def test_live_column_chunk_is_no_longer_a_violation(tmp_path: Path, rel: str) -> None:
+    """2026-10-08 起实盘栏目**已入仓**（`electron/src/features/local-live/`），
+    `LiveTradingPage*` chunk 在**每一次**干净构建里都存在——旧的「私有栏目 chunk
+    = 违规」判据（连同 `--allow-local-live` 放行开关）整体退役，留着会拦下每一次出包。
 
-    这一条**在 stage 模式下也必须是违规**：它不在排除清单里，打包时不会消失。
+    这条用例钉的是**退役方向**：chunk 在场时闸门必须**放行**，且报告里连旧类别名
+    （「私有栏目」）都不该出现——不是「不报」，是这类判据不存在了。有人凭旧记忆把
+    判据加回来，这里当场变红（历史与理由在 `pack_rules.PRIVATE_CHUNKS` 注记里）。
     """
     stage, env = _clean(tmp_path)
-    _write(stage, rel, "// live column\n")
+    for chunk in LIVE_COLUMN_CHUNKS:
+        _write(stage, chunk, "// live column\n")
     proc = _verify(stage, env)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "私有栏目" in proc.stdout and rel in proc.stdout
-    assert "local-live" in proc.stdout  # 报告要指出它出自哪里
-
-
-def test_private_live_column_can_be_explicitly_allowed(tmp_path: Path) -> None:
-    """本机自用包正当存在，所以给一条显式出路（与 deploy_frontend.sh 同名同义）：
-    **拦的是意外，不是决定**。放行时仍要如实列出来，不许静默。"""
-    stage, env = _clean(tmp_path)
-    _write(stage, PRIVATE_CHUNKS[0], "// live column\n")
-    out = tmp_path / "pack.zip"
-    proc = _run(
-        "--make-zip",
-        str(stage),
-        str(out),
-        "--env-file",
-        str(env),
-        "--allow-local-live",
-    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert out.is_file()
-    assert "私有栏目" in proc.stdout and "显式放行" in proc.stdout
-
-
-def test_private_chunk_judgement_matches_deploy_frontend_script() -> None:
-    """**耦合标记**（不是行为断言）：这条判据与 `scripts/deploy_frontend.sh` 第 3 步
-    同源，chunk 名是两份判据之间的契约。哪边改了名前另一边必须一起改——
-    所以这里直接钉住两处都还认得这个名字。"""
-    script = (REPO_ROOT / "scripts" / "deploy_frontend.sh").read_text(encoding="utf-8")
-    assert "LiveTradingPage*.js" in script, "deploy_frontend.sh 的本机栏目判据不见了"
-    patterns = [p for p, _ in pack_rules.PRIVATE_CHUNKS]
-    assert any("LiveTradingPage" in p for p in patterns), "闸门这边的判据不见了"
-    for rel in PRIVATE_CHUNKS:
-        assert any(pack_rules.matches_pattern(p, rel) for p in patterns), (
-            f"{rel} 不再被任何一条私有栏目判据覆盖"
-        )
-
-
-def test_find_private_chunks_scans_a_frontend_dist(tmp_path: Path) -> None:
-    """构建期那一道（`build_windows_pack.sh` 第 90 行附近）走的入口。
-
-    它扫的是**前端产物目录**而不是 staging，所以规则里那层 ``web/`` 前缀由本函数补。
-    前缀补错（比如漏了 ``web/``）时模式一个都匹配不上——闸门静默空转，构建期那道
-    就白设了，所以这里连「命中」带「不误报」一起钉。
-    """
-    dist = tmp_path / "dist-react"
-    live_js, live_css = (
-        PRIVATE_CHUNKS[0].split("/", 1)[1],
-        PRIVATE_CHUNKS[1].split("/", 1)[1],
-    )
-    _write(dist, live_js, "// live column\n")
-    _write(dist, live_css, "/* live column */\n")
-    _write(dist, "index.html", "<html></html>\n")
-    _write(dist, "assets/MarketPage-AAAA1111.js", "// normal chunk\n")
-
-    assert pack_rules.find_private_chunks(dist) == sorted(
-        [PRIVATE_CHUNKS[0], PRIVATE_CHUNKS[1]]
-    )
-
-
-def test_find_private_chunks_on_a_clean_dist_is_empty(tmp_path: Path) -> None:
-    """干净产物必须零命中——否则每次构建都白报一次，护栏会被无视。"""
-    dist = tmp_path / "dist-react"
-    _write(dist, "index.html", "<html></html>\n")
-    _write(dist, "assets/MarketPage-AAAA1111.js", "// normal chunk\n")
-    assert pack_rules.find_private_chunks(dist) == []
+    assert "私有栏目" not in proc.stdout
 
 
 def test_planted_live_node_frontend_shape_is_fatal(tmp_path: Path) -> None:

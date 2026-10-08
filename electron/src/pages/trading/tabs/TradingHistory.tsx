@@ -7,10 +7,17 @@ import type { Order } from '../../../services/realTradingService';
 import { marketDataService } from '../../../services/marketDataService';
 import { csvExporter } from '../../../services/export';
 import { exportTradeRecordsToExcel } from '../../../utils/excelExport';
-import { formatBackendDateTime, formatBackendTime } from '../../../utils/format';
+import { formatBackendDate, formatBackendDateTime, formatBackendTime } from '../../../utils/format';
 import type { TradeRecordExportRow } from '../../../utils/excelExport';
 // 市场推断统一走 utils/marketInfer（与后端 market_rules.infer_market 同口径）
 import { inferMarketOfSymbol } from '../../../utils/marketInfer';
+import {
+    applyColumnFilters,
+    collectUniqueValues,
+    type ColumnAccessors,
+    type ColumnFilterState,
+} from './tradingHistory/columnFilters';
+import ExcelFilterDropdown from './tradingHistory/ExcelFilterDropdown';
 
 interface TradingHistoryProps {
     userId: string;
@@ -21,6 +28,7 @@ interface TradingHistoryProps {
 interface TradeRow {
     id: string;
     createdAt: string;
+    date: string;             // 上海时区日历日（表格「日期」列/该列的 Excel 筛选）
     time: string;
     direction: string;
     code: string;
@@ -46,6 +54,32 @@ interface OrdersRange {
 }
 
 const PAGE_SIZE = 500;
+
+/** 状态码 → 界面文案（表格、筛选面板、导出共用同一份，避免三处各写一套） */
+const STATUS_TEXT: Record<string, string> = {
+    filled: '已成交',
+    pending: '委托中',
+    submitted: '委托中',
+    open: '待成交',
+    partial: '部分成交',
+    partially_filled: '部分成交',
+    cancelled: '已撤单',
+    rejected: '已拒绝',
+    expired: '已过期',
+};
+
+const statusDisplayText = (status: string): string => STATUS_TEXT[status] ?? status;
+
+/**
+ * Excel 表头筛选按**显示值**取值（用户筛的是看到的那一列文本，不是内部状态码）。
+ * 取值口径与单元格渲染保持一致：这里怎么写，单元格就怎么显示。
+ */
+const COLUMN_ACCESSORS: ColumnAccessors<TradeRow> = {
+    date: (trade) => trade.date,
+    direction: (trade) => (trade.direction === 'buy' ? '买入' : '卖出'),
+    action: (trade) => trade.tradeAction || '--',
+    status: (trade) => statusDisplayText(trade.status),
+};
 
 const buildDateRange = (timeRange: 'today' | 'week' | 'month' | 'all'): OrdersRange => {
     if (timeRange === 'all') return {};
@@ -80,6 +114,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
     const [directionFilter, setDirectionFilter] = useState<string>('all');
     const [currentPage, setCurrentPage] = useState(1);
     const [trades, setTrades] = useState<TradeRow[]>([]);
+    const [columnFilters, setColumnFilters] = useState<ColumnFilterState>({});
     const [stockNames, setStockNames] = React.useState<Record<string, string>>({});
     const [exporting, setExporting] = useState(false);
     const stockNamesRef = useRef<Record<string, string>>({});
@@ -185,6 +220,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                 return {
                     id: order.id.toString(),
                     createdAt: order.submitted_at || order.created_at,
+                    date: formatBackendDate(order.submitted_at || order.created_at),
                     time: formatBackendTime(order.submitted_at || order.created_at, { withSeconds: true }),
                     direction: String(order.side || '').toLowerCase(),
                     code: order.symbol,
@@ -221,27 +257,40 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
 
     React.useEffect(() => {
         setCurrentPage(1);
-    }, [searchTerm, timeRange, statusFilter, directionFilter]);
+    }, [searchTerm, timeRange, statusFilter, directionFilter, columnFilters]);
+
+    const setColumnFilter = useCallback((column: string, next: string[] | undefined) => {
+        setColumnFilters((prev) => ({ ...prev, [column]: next }));
+    }, []);
+
+    // 筛选面板的可选值取**全量**数据域，而不是当前筛选结果——否则筛选项会自己吃掉自己
+    const filterOptions = useMemo(() => ({
+        date: collectUniqueValues(trades, COLUMN_ACCESSORS.date).reverse(), // 日期倒序：近的在前
+        direction: collectUniqueValues(trades, COLUMN_ACCESSORS.direction),
+        action: collectUniqueValues(trades, COLUMN_ACCESSORS.action),
+        status: collectUniqueValues(trades, COLUMN_ACCESSORS.status),
+    }), [trades]);
 
     const filteredTrades = useMemo(() => {
         const keyword = searchTerm.trim().toLowerCase();
-        return trades.filter((trade) => {
+        const base = trades.filter((trade) => {
             const matchesKeyword = !keyword
                 || trade.code.toLowerCase().includes(keyword)
                 || trade.name.toLowerCase().includes(keyword);
-            
+
             const matchesStatus = statusFilter === 'all'
                 || (statusFilter === 'filled' && trade.status === 'filled')
                 || (statusFilter === 'pending' && ['pending', 'submitted', 'open', 'partial', 'partially_filled'].includes(trade.status))
                 || (statusFilter === 'cancelled' && trade.status === 'cancelled')
                 || (statusFilter === 'rejected' && ['rejected', 'expired'].includes(trade.status));
-            
+
             const matchesDirection = directionFilter === 'all'
                 || trade.direction === directionFilter;
 
             return matchesKeyword && matchesStatus && matchesDirection;
         });
-    }, [searchTerm, trades, statusFilter, directionFilter]);
+        return applyColumnFilters(base, columnFilters, COLUMN_ACCESSORS);
+    }, [searchTerm, trades, statusFilter, directionFilter, columnFilters]);
 
     const totalPages = Math.ceil(filteredTrades.length / itemsPerPage);
     const startIndex = (currentPage - 1) * itemsPerPage;
@@ -293,28 +342,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         }
     };
 
-    const getStatusText = useCallback((status: string) => {
-        switch (status) {
-            case 'filled':
-                return '已成交';
-            case 'pending':
-            case 'submitted':
-                return '委托中';
-            case 'open':
-                return '待成交';
-            case 'partial':
-            case 'partially_filled':
-                return '部分成交';
-            case 'cancelled':
-                return '已撤单';
-            case 'rejected':
-                return '已拒绝';
-            case 'expired':
-                return '已过期';
-            default:
-                return status;
-        }
-    }, []);
+    const getStatusText = useCallback((status: string) => statusDisplayText(status), []);
 
     const buildExportRows = useCallback((rows: TradeRow[]) => rows.map((trade) => ({
         时间: formatBackendDateTime(trade.createdAt),
@@ -489,22 +517,43 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     <table className="w-full text-xs table-fixed">
                         <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
                             <tr>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[10%] whitespace-nowrap">时间</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[8%]">方向</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[8%]">操作</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[11%]">代码</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[11%]">名称</th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[9%] whitespace-nowrap">
+                                    <span className="inline-flex items-center justify-center gap-1">
+                                        日期
+                                        <ExcelFilterDropdown title="日期" options={filterOptions.date} selected={columnFilters.date} onApply={(next) => setColumnFilter('date', next)} />
+                                    </span>
+                                </th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[8%] whitespace-nowrap">时间</th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[7%]">
+                                    <span className="inline-flex items-center justify-center gap-1">
+                                        方向
+                                        <ExcelFilterDropdown title="方向" options={filterOptions.direction} selected={columnFilters.direction} onApply={(next) => setColumnFilter('direction', next)} />
+                                    </span>
+                                </th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[7%]">
+                                    <span className="inline-flex items-center justify-center gap-1">
+                                        操作
+                                        <ExcelFilterDropdown title="操作" options={filterOptions.action} selected={columnFilters.action} onApply={(next) => setColumnFilter('action', next)} />
+                                    </span>
+                                </th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[10%]">代码</th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[10%]">名称</th>
                                 <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[12%]">成交量/委托量</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[11%]">成交均价</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[11%]">成交金额</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[9%]">手续费</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[9%]">状态</th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[10%]">成交均价</th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[10%]">成交金额</th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[8%]">手续费</th>
+                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[9%]">
+                                    <span className="inline-flex items-center justify-center gap-1">
+                                        状态
+                                        <ExcelFilterDropdown title="状态" options={filterOptions.status} selected={columnFilters.status} onApply={(next) => setColumnFilter('status', next)} />
+                                    </span>
+                                </th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                             {paginatedTrades.length === 0 ? (
                                 <tr>
-                                    <td colSpan={9} className="px-3 py-12 text-center text-gray-400">
+                                    <td colSpan={11} className="px-3 py-12 text-center text-gray-400">
                                         <div className="flex flex-col items-center gap-2">
                                             <FileText size={32} className="text-gray-200" />
                                             <span className="text-sm">暂无交易记录</span>
@@ -520,6 +569,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                                 const isPending = ['pending', 'submitted', 'open'].includes(trade.status);
                                 return (
                                     <tr key={trade.id} className="hover:bg-gray-50 transition-colors">
+                                        <td className="px-3 py-2 text-gray-600 text-center whitespace-nowrap font-mono">{trade.date}</td>
                                         <td className="px-3 py-2 text-gray-600 text-center whitespace-nowrap font-mono">{trade.time}</td>
                                         <td className="px-3 py-2 text-center">
                                             <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold ${trade.direction === 'buy'

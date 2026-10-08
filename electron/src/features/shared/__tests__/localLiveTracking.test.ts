@@ -1,13 +1,24 @@
 /**
- * 「实盘交易」栏目是**本机独有**的：源码在 `electron/src/features/local-live/`，
- * 被 `.gitignore` 排除，不开源、不提交。
+ * 「实盘交易」栏目**入仓**闸门（2026-10-08 用户决定：连同实盘栏目一起入仓）。
  *
- * 这条约束靠自觉必然失守（一次 `git add -A` 就够了），所以在此钉成机器闸门。
- * `git ls-files` 是唯一能真正回答「这个目录到底提交没提交」的手段 —— 断言
- * 文件系统上存不存在是没用的，它在本机当然存在。
+ * 本条决定之前，本文件是一条**反向**机器闸门——「local-live 目录不得被跟踪」
+ * （一次 `git add -A` 就够毁掉口头约定，所以要机器钉住）。现在约定翻过来了，
+ * 闸门钉的是**新不变量**：
  *
- * 公开仓形态下 `local-live/` 整个目录不存在，本文件仍然必须通过：它断言的是
- * **不被跟踪**，不是**存在**。
+ *   ① 目录**必须在仓**：`git ls-files` 非空且含入口文件。导航（FloatingNavBar）、
+ *      路由（App.tsx）、部署脚本（deploy_frontend.sh）、垫片注释都以「目录恒在」为
+ *      前提；把目录重新加回 .gitignore 或 git rm 掉，这几个前提会同时失义且分散在
+ *      三处源码里——所以钉在这里，一处变红。
+ *   ② `.gitignore` 里**没有**排除该目录的**生效行**。注释行允许提路径（本轮的新
+ *      注释就提了），所以判据是剥掉注释与空行后的行。
+ *   ③ 垫片仍是「缺目录也可构建」的形态：`import.meta.glob` 探测，而非静态动态导入。
+ *      （防有人趁目录恒在就改成 `import('../local-live/xxx')`，把裁剪形态打爆。）
+ *
+ * 「开不开」不归本文件管：导航项开关断言在 `FloatingNavBar.test.tsx`
+ * （`isLiveTradingEnabled`），页面兜底在 `LiveDisabledPage`。
+ *
+ * `git ls-files` 看的是**索引**——目录 add 完即绿，不必等提交，所以它能在
+ * 提交之前就当闸门用。
  */
 
 import { execSync } from 'node:child_process';
@@ -29,29 +40,36 @@ function trackedFilesUnder(rel: string): string[] {
     return out.split('\n').filter((line) => line.trim().length > 0);
 }
 
-describe('「实盘交易」栏目不得进入公开仓', () => {
+/** .gitignore 剥掉注释与空行后的**生效行**。断言不许拿注释行当证据。 */
+function activeIgnoreLines(): string[] {
+    return readFileSync(GITIGNORE, 'utf-8')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith('#'));
+}
+
+describe('「实盘交易」栏目必须随仓分发', () => {
     it('仓库根确实是个 git 仓（否则下面的断言全是假绿）', () => {
         expect(existsSync(path.join(REPO_ROOT, '.git'))).toBe(true);
         expect(existsSync(GITIGNORE)).toBe(true);
     });
 
-    it('.gitignore 排除了整个 local-live 目录', () => {
-        const ignore = readFileSync(GITIGNORE, 'utf-8');
-        expect(ignore).toContain(LOCAL_LIVE_REL);
+    it('.gitignore 里没有排除 local-live 的生效行', () => {
+        const offending = activeIgnoreLines().filter((line) => line.includes(LOCAL_LIVE_REL));
+        expect(offending).toEqual([]);
     });
 
-    it('local-live 下没有任何文件被跟踪', () => {
-        // 这是本文件存在的全部理由：`git add -f` 或 .gitignore 被误删时当场变红。
+    it('local-live 下的文件被跟踪（含入口 LiveTradingPage.tsx）', () => {
         const tracked = trackedFilesUnder(LOCAL_LIVE_REL);
-        expect(tracked).toEqual([]);
+        expect(tracked.length).toBeGreaterThan(0);
+        expect(tracked).toContain(`${LOCAL_LIVE_REL}/LiveTradingPage.tsx`);
     });
 
     it('闸门本身不是零项通过（能真的列出被跟踪的文件）', () => {
-        // 反向自检：拿一个**确定被跟踪**的路径验证 trackedFilesUnder 有区分度。
-        // 少了这条，`git ls-files` 拼错参数返回空串也能让上面的用例全绿。
-        //
-        // 控制组刻意用 package.json 而不是本测试文件自身：后者在首次提交前是
-        // untracked，拿它做控制组会让这条自检在提交前假红（且掩盖真实回归）。
+        // 反向自检：拿一个**确定被跟踪**的路径验证 trackedFilesUnder 有区分度——
+        // 命令拼错/cwd 退化时，"空输出"既可能来自"没被跟踪"也可能来自"命令没跑成"，
+        // 这条控制组把两者区分开。控制组刻意用 package.json 而不是本测试文件自身：
+        // 后者在首次提交前是 untracked，拿它做控制组会假红（且掩盖真实回归）。
         expect(trackedFilesUnder('electron/package.json').length).toBe(1);
     });
 });
@@ -115,7 +133,7 @@ describe('探测垫片必须能在缺目录时构建通过', () => {
     it('用静态 import.meta.glob 探测，而非静态动态导入', () => {
         const code = stripComments(readFileSync(SHIM, 'utf-8'));
         // 静态模式的 glob 缺目录时返回 {}；而 `import('../local-live/...')` 是
-        // 构建期解析，公开仓没这个目录 → Rollup unresolved import → 构建失败。
+        // 构建期解析，缺这个目录的裁剪形态 → Rollup unresolved import → 构建失败。
         expect(code).toContain("import.meta.glob('../local-live/");
         expect(code).not.toMatch(/import\(\s*['"][^'"]*local-live/);
     });

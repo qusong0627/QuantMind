@@ -1,0 +1,105 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* 实况「详情」tab：系统规格说明（LiveDetails.tsx）。ld- 前缀防全局撞车。 */
+
+.qm-arena-root .ld-body {
+  padding: 12px 14px 20px;
+  font-size: 10.5px;
+  line-height: 1.75;
+  color: #2b2b2b;
+}
+
+.qm-arena-root .ld-h {
+  margin: 16px 0 7px;
+  padding-bottom: 4px;
+  border-bottom: 2px solid #000;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #000;
+}
+.qm-arena-root .ld-h:first-child { margin-top: 2px; }
+
+/* 规格键值表：左列定宽，右列可换行 */
+.qm-arena-root .ld-spec {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 2px 10px;
+  margin: 6px 0 2px;
+  padding: 7px 9px;
+  background: #fafafa;
+  border: 1.5px solid #e2e2e2;
+}
+.qm-arena-root .ld-spec dt {
+  color: #7a7a7a;
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+}
+.qm-arena-root .ld-spec dd { margin: 0; font-weight: 600; }
+
+.qm-arena-root .ld-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+  margin: 4px 0 2px;
+}
+.qm-arena-root .ld-table th {
+  text-align: left;
+  background: #000;
+  color: #fff;
+  padding: 4px 6px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.qm-arena-root .ld-table td {
+  border-bottom: 1px solid #e6e6e6;
+  padding: 5px 6px;
+  vertical-align: top;
+  line-height: 1.6;
+}
+.qm-arena-root .ld-table tr:nth-child(even) td { background: #fcfcfc; }
+.qm-arena-root .ld-stage { font-weight: 700; white-space: nowrap; }
+.qm-arena-root .ld-src {
+  font-family: 'Courier New', monospace;
+  color: #555;
+  white-space: nowrap;
+}
+.qm-arena-root .ld-cad {
+  color: #0b7a5c;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.qm-arena-root .ld-list {
+  margin: 4px 0 2px;
+  padding-left: 16px;
+  list-style: square;
+}
+.qm-arena-root .ld-list li { margin-bottom: 3px; }
+.qm-arena-root .ld-list b { color: #000; }
+
+.qm-arena-root .ld-agent {
+  margin: 0 0 6px;
+  padding-left: 8px;
+  border-left: 3px solid #10a37f;
+}
+.qm-arena-root .ld-agent-name {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+}
+.qm-arena-root .ld-agent-ret {
+  margin-left: 6px;
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+}
+.qm-arena-root .ld-agent-role {
+  display: block;
+  color: #666;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.qm-arena-root .ld-empty {
+  color: #8a8a8a;
+  margin: 2px 0 6px;
+}

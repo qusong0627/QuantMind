@@ -105,11 +105,13 @@ const AlphaResearchPage = lazy(() => import('./features/alpha-research/pages/Alp
 const DeskTodayPage = lazy(() => import('./features/desk/DeskTodayPage'));
 const FactorResearchPage = lazy(() => import('./features/factor-research/pages/FactorResearchPage'));
 
-// 本机独有的「实盘交易」栏目（源码在 .gitignore 目录 electron/src/features/local-live/）。
-// 公开仓形态：glob 匹配为空 → isLocalLiveAvailable=false → loader 为 null →
+// 「实盘交易」栏目（源码在 electron/src/features/local-live/，2026-10-08 起入仓）。
+// 这里只管「有没有源码」：glob 匹配为空（老检出/裁剪产物没有该目录）→ loader 为 null →
 // 下面既不构造 React.lazy，也不注册路由，整条链路不参与构建。
+// 「开不开」是另一件事：导航项由 isLiveTradingEnabled() 收敛，页面内由
+// LiveDisabledPage 兜底（flag 关时 `#/live` 显示「实盘控制台未启用」说明页）。
 // 注意**不能**写成 `lazy(() => import('./features/local-live/LiveTradingPage'))`：
-// 那是构建期解析，公开仓没这个文件 → Rollup unresolved import → 构建直接失败。
+// 那是构建期解析，缺文件时 Rollup unresolved import → 构建直接失败。
 const localLiveLoader = loadLocalLivePage();
 const LocalLivePage = localLiveLoader ? lazy(localLiveLoader) : null;
 // 有独立实盘栏目时，「模拟交易」栏目定死模拟盘（两栏各管一边，见
@@ -718,8 +720,10 @@ export default function App() {
                       </ProtectedRoute>
                     }
                   />
-                  {/* 本机独有的「实盘交易」栏目。公开仓 LocalLivePage 恒为 null，
-                      这一整块不渲染、不注册路由——不是隐藏，是没构造。 */}
+                  {/* 「实盘交易」栏目路由。缺源码目录时 LocalLivePage 为 null，
+                      这一整块不渲染、不注册路由——不是隐藏，是没构造。
+                      flag 关闭时路由仍可达（深链 #/live），页面内渲染
+                      LiveDisabledPage 说明页——这是有意的：向用户解释双开关怎么开。 */}
                   {LocalLivePage && (
                     <Route
                       path="/live"
@@ -824,7 +828,7 @@ export default function App() {
                       实盘节点形态下这个兜底改成回实盘交易页：该形态没有底部导航，
                       整个界面就是那一栏（QuantBot 是它侧栏里「设置」下面的一栏），根路径和已裁掉的
                       栏目路径（/dashboard、/backtest…）都不该落到仪表盘上。
-                      公开仓里 LocalLivePage 恒为 null（features/local-live 不随包发布），
+                      缺源码目录时 LocalLivePage 恒为 null（老检出/裁剪产物），
                       那时退回 /quantbot —— 否则会跳到一个根本没注册的路由上打转。
                       显式注册的路由（/live、/trading、/admin…）不受影响 —— React Router
                       里它们比 "/*" 更具体，仍旧可达（页面内深链不会断）。 */}

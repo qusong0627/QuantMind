@@ -63,7 +63,7 @@ bash scripts/package-for-windows.sh --require-clean   # 发版：工作树有未
    干净检出里那个目录**不存在**，于是产物天然是第三方形态（`VITE_ENABLE_REAL_TRADING` 也是
    开源版默认的 false）。`node_modules` 用符号链接借主工作树的（省 1.4G 与一次 `npm ci`），
    `--keep-worktree` 可保留现场排查。
-2. **构建期就被闸门拦，而不是等 4GB 依赖下完、走到最后一步才报**：前端产物先扫私有栏目 chunk，
+2. **构建期就被闸门拦，而不是等 4GB 依赖下完、走到最后一步才报**：前端产物先过形态检查，
    再进组装。
 3. **产物带可追溯与可校验信息**：`VERSION` 记 `git=<短修订>`（跟踪文件与 HEAD 不一致时记
    `<修订>-dirty`——源码是从工作树拷的，不标就等于谎报来源）、`built=<时间>`；zip 旁写 `.sha256`。
@@ -132,9 +132,13 @@ bash deploy/portable/build_windows_pack.sh
 第三方运行时，**内容不扫**——里面有 `__pycache__`、`cacert.pem`、`test.key` 都是正常的，
 不分范围就是每条都误报，护栏被淹掉然后被人关掉：**一条会误报的护栏等于没有护栏**。
 
-**本机独有实盘栏目**：`web/assets/LiveTradingPage*` 默认按违规拦（源码 `electron/src/features/local-live/`
-未跟踪、不开源，判据与 `scripts/deploy_frontend.sh` 第 3 步同源）。本机自用包显式放行：
-`--allow-local-live`（等价环境变量 `PACK_ALLOW_LOCAL_LIVE=1`）。**拦的是意外，不是决定**。
+**实盘栏目（2026-10-08 起）**：`electron/src/features/local-live/` 已随仓分发，`web/assets/LiveTradingPage*`
+在每一次构建里都出现——旧的「私有栏目 chunk = 违规」判据连同 `--allow-local-live` /
+`PACK_ALLOW_LOCAL_LIVE` 一并**退役**（留着会拦下每一次出包）。界面开关
+（`VITE_ENABLE_REAL_TRADING`）仍按上文「形态」一条的口径处理：策略不是泄漏，不进出厂闸门。
+便携包的实盘 UI 可见性由构建侧显式选项收敛（`scripts/package-for-windows.sh --real-trading`，
+默认关）；web 部署侧有 `scripts/deploy_frontend.sh` 第 3b 步的产物内联标记闸门
+（`VITE_ENABLE_REAL_TRADING:"true"`，与包闸门无关）。
 
 **为什么排除只发生在写 zip 侧**：`build/QuantMind-Portable-win-x64` 这份 staging 是**两个构建器
 共用**的（通用包与实盘瘦节点包，后者往同一份 staging 覆盖 `pack.env` / `bridge/` / `live/` /

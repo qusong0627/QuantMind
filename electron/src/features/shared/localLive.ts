@@ -1,14 +1,19 @@
 /**
- * 「实盘交易」栏目的**存在性探测**——公开仓与本机之间唯一的接线点。
+ * 「实盘交易」栏目的**存在性探测**——栏目源码与外壳之间唯一的接线点。
  *
- * 栏目源码在 `electron/src/features/local-live/`，被 `.gitignore` 排除：
- * 公开仓里没有这个目录，`import.meta.glob` 匹配为空 → 底部栏不出现「实盘交易」、
- * 路由不注册。开发者本机放上该目录即可完整启用，**不需要改一行公开代码**。
+ * 栏目源码在 `electron/src/features/local-live/`，2026-10-08 起**随仓分发**
+ * （此前被 .gitignore 排除）。这里探测的只是「有没有这个目录」；「**开不开**」
+ * 是另一件事，由 `config/tradingFlags.ts` 的 `isLiveTradingEnabled()` 收敛——
+ * 导航项两者都满足才出现（`FloatingNavBar`），页面内由 `LiveDisabledPage` 兜底。
+ *
+ * 为什么还保留 glob：老检出/裁剪过的产物可能没有该目录（或者将来栏目再被拆走），
+ * 缺目录时 `import.meta.glob` 匹配为空 → 返回 `{}`，底部栏不出现「实盘交易」、
+ * 路由不注册，构建照常通过。这一点有测试钉着
+ * （`__tests__/localLiveTracking.test.ts`）。
  *
  * 为什么必须用 `import.meta.glob` 而不是 `import('../local-live/xxx')`：
  * 静态动态导入是**构建期解析**，缺目录时 Rollup 直接报 unresolved import →
- * 公开仓构建失败。glob 的静态模式匹配为空时返回 `{}`，是唯一"缺目录也不报错"
- * 的形态。这一点有测试钉着（`__tests__/localLiveNotTracked.test.ts`）。
+ * 构建失败。glob 的静态模式匹配为空时返回 `{}`，是唯一"缺目录也不报错"的形态。
  *
  * 为什么用 glob 而不是 `existsSync`：后者在渲染进程里没有 fs，且会把判断推迟到
  * 运行期——构建产物里仍会留下对不存在模块的引用。

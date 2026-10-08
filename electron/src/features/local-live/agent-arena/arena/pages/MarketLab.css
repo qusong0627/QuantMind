@@ -1,0 +1,1807 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* 行情回测（quantdb K线 + 策略回测）— 终端风（2026-09-10 版式改版）
+   基调：与全站一致的新粗野——2px 黑框 + 硬阴影 + 等宽字体，
+   页头带说明、每栏是一块有名字的板子、结论先于明细。 */
+
+.qm-arena-root .lab-page {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 16px 20px 60px;
+  font-family: 'Courier New', monospace;
+  color: #1a1a1a;
+}
+
+/* ---------- 页头：标题带（左）+ 带说明的分段标签（右） ---------- */
+.qm-arena-root .lab-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 4px 0 14px;
+  border-bottom: 2px solid #000;
+  margin-bottom: 16px;
+}
+
+.qm-arena-root .lab-title h1 {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  margin: 0;
+}
+
+.qm-arena-root .lab-sub {
+  margin-top: 8px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--text-tertiary);
+}
+
+/* ---------- 顶部标签：主标题 + 一句说明，自解释不必靠 hover ---------- */
+.qm-arena-root .lab-tabs {
+  display: flex;
+}
+
+.qm-arena-root .lab-tabs button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 150px;
+  padding: 8px 14px;
+  font-family: 'Courier New', monospace;
+  text-align: left;
+  border: 2px solid #000;
+  border-right: none;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.qm-arena-root .lab-tabs button:last-child {
+  border-right: 2px solid #000;
+}
+
+.qm-arena-root .lab-tabs .t {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .lab-tabs .h {
+  font-size: 9px;
+  color: var(--text-tertiary);
+}
+
+.qm-arena-root .lab-tabs button:hover {
+  background: #f2f2f2;
+}
+
+.qm-arena-root .lab-tabs button.on {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-tabs button.on .h {
+  color: #bbb;
+}
+
+/* ---------- 行情条：标的 / 名称 / 复权，一块板子 ---------- */
+.qm-arena-root .lab-k {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-chip {
+  padding: 1px 7px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  border: 1px solid #000;
+}
+
+.qm-arena-root .lab-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 1 300px;
+}
+
+.qm-arena-root .lab-input-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.qm-arena-root .lab-search input {
+  width: 100%;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  outline: none;
+}
+
+.qm-arena-root .lab-search input:focus {
+  box-shadow: inset 0 -2px 0 #000;
+}
+
+.qm-arena-root .lab-hits {
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: #fff;
+  border: 1.5px solid #000;
+  border-top: none;
+}
+
+.qm-arena-root .lab-hits li {
+  display: flex;
+  gap: 10px;
+  padding: 5px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-hits li:hover {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-hits .code {
+  font-family: 'Courier New', monospace;
+  min-width: 74px;
+}
+
+.qm-arena-root .lab-hits .name {
+  color: #666;
+}
+
+.qm-arena-root .lab-hits li:hover .name {
+  color: #ccc;
+}
+
+.qm-arena-root .lab-symbol {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.qm-arena-root .lab-symbol strong {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qm-arena-root .lab-symbol .code {
+  font-size: 11px;
+  color: #666;
+}
+
+.qm-arena-root .lab-adj {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-left: auto;
+}
+
+.qm-arena-root .lab-adj .seg {
+  display: flex;
+}
+
+.qm-arena-root .lab-adj button {
+  padding: 4px 11px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  border-right: none;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-adj button:last-child {
+  border-right: 1.5px solid #000;
+}
+
+.qm-arena-root .lab-adj button:hover {
+  background: #f2f2f2;
+}
+
+.qm-arena-root .lab-adj button.on,
+.qm-arena-root .lab-adj button.on:hover {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-err {
+  margin-bottom: 12px;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #e2373b;
+  border-left-width: 5px;
+  color: #e2373b;
+  background: #fff5f5;
+}
+
+.qm-arena-root .lab-chart {
+  position: relative;
+  border: 2px solid #000;
+  box-shadow: 4px 4px 0 #000;
+  background: #fff;
+  padding: 2px;
+}
+
+.qm-arena-root .kline-box {
+  width: 100%;
+}
+
+.qm-arena-root .lab-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  color: #666;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* K 线底部工具条：左meta / 右按钮组（按钮独立成组，别再各自 auto 外边距分家） */
+.qm-arena-root .lab-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: var(--text-tertiary);
+  border-top: 2px solid #000;
+  background: var(--bg-tertiary);
+}
+
+.qm-arena-root .lab-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.qm-arena-root .lab-span {
+  padding: 3px 9px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-span:hover {
+  background: #000;
+  color: #fff;
+}
+
+/* 指标图例：色块与 K 线上的线一一对应（副图按调用点分组，组间用竖线隔开） */
+.qm-arena-root .lab-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 4px 6px 5px;
+  border-top: 1px dashed #eee;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: #444;
+}
+
+.qm-arena-root .lab-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.qm-arena-root .lab-legend-item i {
+  width: 10px;
+  height: 3px;
+  border-radius: 1px;
+}
+
+.qm-arena-root .lab-legend-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 10px;
+  border-left: 1px solid #ddd;
+}
+
+/* ---------- 右侧面板 ---------- */
+.qm-arena-root .lab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.qm-arena-root .lab-panel-block {
+  border: 2px solid #000;
+  background: #fff;
+  padding: 12px;
+}
+
+.qm-arena-root .lab-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: 2px solid #000;
+}
+
+.qm-arena-root .lab-panel select {
+  width: 100%;
+  padding: 5px 7px;
+  font-size: 11px;
+  font-family: inherit;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  outline: none;
+}
+
+.qm-arena-root .lab-desc {
+  margin: 8px 0 0;
+  font-size: 10px;
+  line-height: 1.7;
+  color: #555;
+}
+
+.qm-arena-root .lab-params {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #ddd;
+}
+
+.qm-arena-root .lab-params label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  color: #333;
+}
+
+.qm-arena-root .lab-params input {
+  width: 92px;
+  padding: 5px 7px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  text-align: right;
+  border: 1.5px solid #000;
+  background: #fff;
+  outline: none;
+}
+
+.qm-arena-root .lab-params input:focus {
+  box-shadow: inset 0 0 0 1px #000;
+}
+
+.qm-arena-root .lab-run {
+  width: 100%;
+  margin-top: 12px;
+  padding: 11px 0;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.06em;
+  border: 2px solid #000;
+  background: #000;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.16);
+  transition: background 0.12s, color 0.12s, box-shadow 0.12s, transform 0.12s;
+}
+
+.qm-arena-root .lab-run:hover:not(:disabled) {
+  background: #fff;
+  color: #000;
+  box-shadow: 1px 1px 0 #000;
+  transform: translate(3px, 3px);
+}
+
+.qm-arena-root .lab-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* ---------- 统计卡：头号指标放大跨两格，其余等权小格 ---------- */
+.qm-arena-root .lab-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 1px;
+  background: #e6e6e6;
+  border: 1px solid #ddd;
+}
+
+.qm-arena-root .lab-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 11px;
+  background: #fff;
+}
+
+.qm-arena-root .lab-stat .k {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.08em;
+}
+
+.qm-arena-root .lab-stat .v {
+  font-size: 13px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.qm-arena-root .lab-stat.hero {
+  grid-column: span 2;
+  padding: 12px 14px;
+}
+
+.qm-arena-root .lab-stat.hero .k {
+  font-size: 10px;
+}
+
+.qm-arena-root .lab-stat.hero .v {
+  font-size: 26px;
+  letter-spacing: -0.5px;
+  line-height: 1.15;
+}
+
+.qm-arena-root .lab-stat.up .v {
+  color: var(--up-color);
+}
+
+.qm-arena-root .lab-stat.down .v {
+  color: var(--down-color);
+}
+
+.qm-arena-root .lab-equity,
+.qm-arena-root .lab-trades {
+  border: 2px solid #000;
+  background: #fff;
+  padding: 12px;
+}
+
+.qm-arena-root .lab-table-wrap {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.qm-arena-root .lab-trades table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .lab-trades th {
+  position: sticky;
+  top: 0;
+  padding: 5px 6px;
+  text-align: left;
+  font-weight: 700;
+  background: #fff;
+  border-bottom: 1.5px solid #000;
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-trades th.num,
+.qm-arena-root .lab-trades td.num {
+  text-align: right;
+}
+
+.qm-arena-root .lab-trades td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #f0f0f0;
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-trades tr.up td:last-child {
+  color: #e2373b;
+}
+
+.qm-arena-root .lab-trades tr.down td:last-child {
+  color: #1a9e5c;
+}
+
+/* ---------- 批量回测（策略排行 / 单策略选股） ---------- */
+
+.qm-arena-root .lab-empty {
+  padding: 30px 16px;
+  font-size: 11px;
+  line-height: 1.9;
+  font-family: 'Courier New', monospace;
+  color: #777;
+  text-align: center;
+  border: 1.5px dashed #bbb;
+  background: #fcfcfc;
+}
+
+.qm-arena-root .lab-empty b {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #000;
+}
+
+.qm-arena-root .lab-empty code {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 3px 8px;
+  color: #fff;
+  background: #000;
+}
+
+.qm-arena-root .lab-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  border: 2px solid #000;
+  background: #fff;
+  margin-bottom: 0;
+}
+
+.qm-arena-root .lab-batch-bar label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-tertiary);
+}
+
+.qm-arena-root .lab-batch-bar select,
+.qm-arena-root .lab-screen-bar select {
+  padding: 6px 9px;
+  font-size: 11px;
+  font-family: inherit;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  outline: none;
+  max-width: 320px;
+}
+
+.qm-arena-root .lab-batch-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.qm-arena-root .lab-batch-meta span {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: #555;
+  border: 1px solid #ddd;
+  background: #fafafa;
+}
+
+.qm-arena-root .lab-batch-body {
+  border: 2px solid #000;
+  background: #fff;
+  box-shadow: 5px 5px 0 #000;
+  margin-bottom: 22px;
+}
+
+/* 批次结论带：进页先给答案（谁最强/谁最稳），明细留给下面的表 */
+.qm-arena-root .lab-hero {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-bottom: 2px solid #000;
+}
+
+.qm-arena-root .lab-hero-cell {
+  padding: 12px 14px;
+  border-right: 1px solid #ddd;
+  min-width: 0;
+}
+
+.qm-arena-root .lab-hero-cell:last-child {
+  border-right: none;
+}
+
+.qm-arena-root .lab-hero-k {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.qm-arena-root .lab-hero-v {
+  margin-top: 7px;
+  font-size: 17px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qm-arena-root .lab-hero-s {
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 跑新批次的命令：默认收起，别再拿一坨命令行占着头屏 */
+.qm-arena-root .lab-cmd {
+  border: 2px solid #000;
+  border-top: none;
+  background: #fafafa;
+  margin-bottom: 14px;
+}
+
+.qm-arena-root .lab-cmd summary {
+  padding: 8px 14px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #666;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-cmd-body {
+  padding: 0 14px 12px;
+  font-size: 10px;
+  line-height: 1.9;
+  color: #777;
+}
+
+.qm-arena-root .lab-cmd-body code {
+  display: block;
+  margin-top: 7px;
+  padding: 7px 10px;
+  color: #fff;
+  background: #000;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.qm-arena-root .lab-screen-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  border-bottom: 1px solid #ddd;
+}
+
+/* 选股页的结论带夹在控制条与表格之间，得自己带上边框 */
+.qm-arena-root .lab-screen-bar + .lab-hero {
+  border-top: 2px solid #000;
+}
+
+.qm-arena-root .lab-screen-bar label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-tertiary);
+}
+
+.qm-arena-root .lab-screen-stat {
+  margin-left: auto;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: var(--text-tertiary);
+}
+
+.qm-arena-root .lab-table-tall {
+  max-height: 620px;
+}
+
+/* 排行/选股表：数字列一律等宽右对齐，条形嵌在收益列里 */
+.qm-arena-root .lab-rank {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .lab-rank th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #666;
+  background: var(--bg-tertiary);
+  border-bottom: 2px solid #000;
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-rank th.num,
+.qm-arena-root .lab-rank td.num {
+  text-align: right;
+}
+
+.qm-arena-root .lab-rank td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #eee;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.qm-arena-root .lab-rank tbody tr:hover {
+  background: rgba(0, 0, 0, 0.035);
+}
+
+.qm-arena-root .lab-rank .idx {
+  width: 44px;
+}
+
+/* 名次徽章：前三名描边加重，第一名实心 */
+.qm-arena-root .lab-idx {
+  display: inline-block;
+  min-width: 22px;
+  padding: 2px 0;
+  text-align: center;
+  font-weight: 700;
+  color: #aaa;
+}
+
+.qm-arena-root .lab-idx.top {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-idx.medal {
+  border: 1.5px solid #000;
+  color: #000;
+}
+
+.qm-arena-root .lab-rank .name {
+  font-family: inherit;
+  font-weight: 700;
+}
+
+.qm-arena-root .lab-rank .name .code {
+  margin-left: 7px;
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: 400;
+  color: #999;
+}
+
+.qm-arena-root .lab-rank td.up {
+  color: var(--up-color);
+}
+
+.qm-arena-root .lab-rank td.down {
+  color: var(--down-color);
+}
+
+.qm-arena-root .lab-rank .range {
+  color: #999;
+  font-size: 10px;
+}
+
+/* 选股表可点行 */
+.qm-arena-root .lab-rank tbody tr {
+  cursor: default;
+}
+
+.qm-arena-root .lab-rank tbody tr[title] {
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-rank tbody tr[title]:hover {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-rank tbody tr[title]:hover .name .code,
+.qm-arena-root .lab-rank tbody tr[title]:hover .range {
+  color: #ccc;
+}
+
+/* 均值净收益量级条（类名与工作台的 .lab-bar 行情条分开，别再撞名） */
+.qm-arena-root .lab-mag {
+  display: block;
+  width: 72px;
+  height: 6px;
+  margin: 5px 0 0 auto;
+  background: #eee;
+  border: 1px solid #ddd;
+}
+
+.qm-arena-root .lab-mag i {
+  display: block;
+  height: 100%;
+}
+
+.qm-arena-root .lab-mag i.pos {
+  background: var(--up-color);
+}
+
+.qm-arena-root .lab-mag i.neg {
+  background: var(--down-color);
+}
+
+.qm-arena-root .lab-note {
+  margin: 9px 0 0;
+  font-size: 10px;
+  line-height: 1.8;
+  color: #777;
+}
+
+/* 批次口径脚注：贴在表格板子底部，与明细分开 */
+.qm-arena-root .lab-batch-body > .lab-note {
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid #ddd;
+  background: var(--bg-tertiary);
+}
+
+.qm-arena-root .lab-note-top {
+  margin: 0 0 12px;
+}
+
+.qm-arena-root .lab-note code {
+  margin: 0 3px;
+  padding: 1px 5px;
+  font-family: 'Courier New', monospace;
+  color: #fff;
+  background: #000;
+}
+
+@media (max-width: 1080px) {
+  .qm-arena-root .lab-head {
+    align-items: flex-start;
+  }
+
+  .qm-arena-root .lab-tabs {
+    flex-wrap: wrap;
+  }
+
+  .qm-arena-root .lab-tabs button {
+    min-width: 0;
+  }
+
+  .qm-arena-root .lab-batch-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .qm-arena-root .lab-batch-meta,
+  .qm-arena-root .lab-screen-stat {
+    margin-left: 0;
+  }
+
+  .qm-arena-root .lab-hero {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .qm-arena-root .lab-hero-cell:nth-child(1),
+  .qm-arena-root .lab-hero-cell:nth-child(2) {
+    border-bottom: 1px solid #ddd;
+  }
+
+  .qm-arena-root .lab-hero-cell:nth-child(2) {
+    border-right: none;
+  }
+}
+
+.qm-arena-root .lab-rank td.cat {
+  font-family: inherit;
+  font-size: 10px;
+  color: #666;
+}
+
+.qm-arena-root .lab-rank tbody tr.on {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-rank tbody tr.on .code,
+.qm-arena-root .lab-rank tbody tr.on .cat,
+.qm-arena-root .lab-rank tbody tr.on .idx {
+  color: #ccc;
+}
+
+.qm-arena-root .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: 1px;
+}
+
+.qm-arena-root .dot.ok {
+  background: #1a9e5c;
+}
+
+.qm-arena-root .dot.bad {
+  background: #e8a33d;
+}
+
+.qm-arena-root .lab-more {
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 0;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-more:hover:not(:disabled) {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-more:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.qm-arena-root .lab-lib-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.qm-arena-root .lab-lib-title strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qm-arena-root .lab-lib-title .code {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  color: #999;
+}
+
+.qm-arena-root .lab-lib-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.qm-arena-root .tag {
+  padding: 2px 7px;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  border: 1px solid #ccc;
+  color: #555;
+  background: #fafafa;
+  text-decoration: none;
+}
+
+.qm-arena-root .tag.warn {
+  border-color: #e8a33d;
+  color: #a9701a;
+  background: #fff9f0;
+}
+
+.qm-arena-root .tag.link:hover {
+  background: #000;
+  color: #fff;
+  border-color: #000;
+}
+
+.qm-arena-root .lab-lib-editor {
+  width: 100%;
+  height: 520px;
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  font-family: 'Courier New', monospace;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+  border: 1.5px solid #000;
+  background: #fcfcfc;
+  color: #111;
+  outline: none;
+  resize: vertical;
+}
+
+.qm-arena-root .lab-lib-editor:focus {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #000;
+}
+
+.qm-arena-root .lab-transpile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border: 1px solid #ddd;
+  border-left: 3px solid #1a9e5c;
+  background: #fafafa;
+}
+
+.qm-arena-root .lab-transpile-stats {
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: #555;
+}
+
+.qm-arena-root .lab-lib-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.qm-arena-root .lab-lib-run label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: #555;
+}
+
+.qm-arena-root .lab-lib-save {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 104px;
+  margin-top: 0;
+  padding: 6px 16px;
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-lib-actions .lab-more {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 0;
+  padding: 6px 14px;
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-lib-msg {
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: #1a9e5c;
+}
+
+.qm-arena-root .lab-lib-msg.err {
+  color: #e2373b;
+}
+
+@media (max-width: 1080px) {
+  
+
+  .qm-arena-root .lab-lib-editor {
+    height: 360px;
+  }
+}
+
+/* ---------- 工作台：三栏（策略 / K线结果 / 运行与备注） ---------- */
+
+.qm-arena-root .lab-bar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border: 2px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .lab-wb {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+}
+
+.qm-arena-root .lab-hidden {
+  display: none;
+}
+
+/* 左栏 */
+.qm-arena-root .lab-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: calc(100vh - 250px);
+  min-height: 520px;
+  border: 2px solid #000;
+  box-shadow: 4px 4px 0 #000;
+  background: #fff;
+  padding: 10px;
+}
+
+.qm-arena-root .lab-rail-sec {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.qm-arena-root .lab-rail-grow {
+  flex: 1 1 auto;
+}
+
+.qm-arena-root .lab-rail-sec + .lab-rail-sec {
+  padding-top: 10px;
+  border-top: 1px solid #000;
+}
+
+.qm-arena-root .lab-rail-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-bottom: 7px;
+  margin-bottom: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-bottom: 2px solid #000;
+}
+
+/* 标题文字必须是独立元素：直接当 flex 匿名项会被右侧计数挤断行（"PIN / E"） */
+.qm-arena-root .lab-rail-title .t {
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-rail-count {
+  margin-left: auto;
+  padding: 0 6px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: #999;
+  border: 1px solid #ddd;
+}
+
+.qm-arena-root .lab-rail-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.qm-arena-root .lab-rail-filter select,
+.qm-arena-root .lab-rail-filter input {
+  width: 100%;
+  padding: 5px 7px;
+  font-size: 11px;
+  font-family: inherit;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  outline: none;
+}
+
+.qm-arena-root .lab-tpl-list,
+.qm-arena-root .lab-pine-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.qm-arena-root .lab-tpl-list li {
+  padding: 6px 7px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-tpl-list li:hover {
+  background: #fafafa;
+}
+
+.qm-arena-root .lab-tpl-list li.on {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-tpl-list .n {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.qm-arena-root .lab-tpl-list .d {
+  display: block;
+  margin-top: 2px;
+  font-size: 9px;
+  line-height: 1.5;
+  color: #777;
+}
+
+.qm-arena-root .lab-tpl-list li.on .d {
+  color: #ccc;
+}
+
+.qm-arena-root .lab-pine-list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.qm-arena-root .lab-pine-list li {
+  padding: 5px 7px;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-pine-list li:hover {
+  background: #fafafa;
+}
+
+.qm-arena-root .lab-pine-list li.on {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-pine-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.qm-arena-root .lab-pine-row .i {
+  font-size: 9px;
+  font-family: 'Courier New', monospace;
+  color: #bbb;
+}
+
+.qm-arena-root .lab-pine-row .n {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qm-arena-root .lab-pine-row .b {
+  display: flex;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+
+.qm-arena-root .lab-pine-row em {
+  padding: 0 3px;
+  font-size: 8px;
+  font-style: normal;
+  font-family: 'Courier New', monospace;
+  border: 1px solid #1a9e5c;
+  color: #1a9e5c;
+}
+
+.qm-arena-root .lab-pine-row em.edited {
+  border-color: #a9701a;
+  color: #a9701a;
+}
+
+.qm-arena-root .lab-pine-row em.rep {
+  border-color: #555;
+  color: #555;
+}
+
+.qm-arena-root .lab-pine-list li.on .lab-pine-row em {
+  border-color: #ccc;
+  color: #ccc;
+}
+
+.qm-arena-root .lab-pine-sub {
+  margin-top: 2px;
+  font-size: 9px;
+  font-family: 'Courier New', monospace;
+  color: #999;
+}
+
+.qm-arena-root .lab-pine-sub .dot {
+  margin: 0 5px 0 7px;
+}
+
+/* 中栏 */
+.qm-arena-root .lab-center {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.qm-arena-root .lab-center .lab-table-wrap {
+  max-height: 360px;
+}
+
+.qm-arena-root .lab-tag-src {
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  border: 1px solid #ccc;
+  color: #666;
+}
+
+.qm-arena-root .lab-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #e8a33d;
+  border-left-width: 5px;
+  background: #fff9f0;
+  color: #a9701a;
+}
+
+.qm-arena-root .lab-warn button {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #a9701a;
+  background: #fff;
+  color: #a9701a;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-warn button:hover {
+  background: #a9701a;
+  color: #fff;
+}
+
+/* 右栏：备注 / 对话 */
+.qm-arena-root .lab-subtabs {
+  display: flex;
+  margin-bottom: 9px;
+  border-bottom: 1px solid #000;
+}
+
+.qm-arena-root .lab-subtabs button {
+  padding: 4px 12px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  border-bottom: none;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-subtabs button.on {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .lab-src {
+  margin-top: 10px;
+}
+
+.qm-arena-root .lab-src summary {
+  padding: 5px 0;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  border-bottom: 1px solid #000;
+}
+
+.qm-arena-root .lab-src .lab-lib-editor {
+  height: 320px;
+  margin-top: 8px;
+}
+
+/* 备注编辑器 */
+.qm-arena-root .lab-note-edit {
+  width: 100%;
+  height: 150px;
+  padding: 7px 8px;
+  font-size: 11px;
+  line-height: 1.7;
+  font-family: inherit;
+  border: 1.5px solid #000;
+  background: #fcfcfc;
+  color: #111;
+  outline: none;
+  resize: vertical;
+}
+
+.qm-arena-root .lab-note-edit:focus {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #000;
+}
+
+.qm-arena-root .lab-note-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.qm-arena-root .lab-note-meta label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: #555;
+}
+
+.qm-arena-root .lab-note-meta input,
+.qm-arena-root .lab-note-meta select {
+  flex: 0 1 190px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: inherit;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  outline: none;
+}
+
+.qm-arena-root .lab-note-stamp {
+  margin-top: 6px;
+  font-size: 9px;
+  font-family: 'Courier New', monospace;
+  color: #999;
+}
+
+/* 对话（P2：只读问答） */
+.qm-arena-root .lab-chat-log {
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1.5px solid #000;
+  background: #fcfcfc;
+}
+
+.qm-arena-root .lab-msg {
+  margin-bottom: 10px;
+}
+
+.qm-arena-root .lab-msg:last-child {
+  margin-bottom: 0;
+}
+
+.qm-arena-root .lab-msg-role {
+  margin-bottom: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.1em;
+  color: #999;
+}
+
+.qm-arena-root .lab-msg-body {
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-left: 3px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .lab-msg.user .lab-msg-role {
+  color: #666;
+}
+
+.qm-arena-root .lab-msg.user .lab-msg-body {
+  border-left-color: #c9c9c9;
+  background: #f2f2f2;
+}
+
+.qm-arena-root .lab-msg.pending .lab-msg-body {
+  opacity: 0.55;
+}
+
+.qm-arena-root .lab-typing {
+  color: #666;
+  font-style: italic;
+}
+
+.qm-arena-root .lab-chat-quick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.qm-arena-root .lab-chat-quick .lab-more {
+  margin-top: 0;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.qm-arena-root .lab-chat-form {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  margin-top: 8px;
+}
+
+.qm-arena-root .lab-chat-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  font-family: inherit;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #111;
+  outline: none;
+  resize: vertical;
+}
+
+.qm-arena-root .lab-chat-input:focus {
+  box-shadow: inset 0 0 0 1px #000;
+}
+
+.qm-arena-root .lab-chat-input:disabled {
+  background: #f4f4f4;
+  color: #999;
+}
+
+.qm-arena-root .lab-chat-send {
+  flex: 0 0 66px;
+  margin-top: 0;
+}
+
+/* 对话模式切换（问策略 / 改策略） */
+.qm-arena-root .lab-chat-modes {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.qm-arena-root .lab-chat-modes .lab-more.on {
+  background: #000;
+  color: #fff;
+  border-color: #000;
+}
+
+.qm-arena-root .lab-chat-hint {
+  font-size: 9px;
+  font-family: 'Courier New', monospace;
+  color: #999;
+}
+
+/* agent 回答下方的动作（写入备注） */
+.qm-arena-root .lab-msg-act {
+  margin-top: 4px;
+  padding: 2px 6px;
+  font-size: 9px;
+  font-family: 'Courier New', monospace;
+  border: 1px solid #ccc;
+  background: #fff;
+  color: #666;
+  cursor: pointer;
+}
+
+.qm-arena-root .lab-msg-act:hover:not(:disabled) {
+  border-color: #000;
+  color: #000;
+}
+
+.qm-arena-root .lab-msg-act:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.qm-arena-root .lab-ok {
+  margin-bottom: 12px;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #0a7d3c;
+  border-left-width: 5px;
+  color: #0a7d3c;
+  background: #f2fbf5;
+}
+
+/* 候选对比卡（edit 模式）：改前 / 改后 / 变化 */
+.qm-arena-root .lab-cand {
+  margin: 10px 0;
+  border: 1.5px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .lab-cand-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1.5px solid #000;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  background: #f4f4f4;
+}
+
+.qm-arena-root .lab-cand-head b {
+  font-size: 11px;
+}
+
+.qm-arena-root .lab-cand-head span {
+  color: #666;
+}
+
+/* 「改前」基线比当前源码旧时的提醒：黄底黑框，别做成红色警报吓人 */
+.qm-arena-root .lab-cand-warn {
+  padding: 6px 8px;
+  border-bottom: 1.5px solid #000;
+  background: #fff3bf;
+  font-size: 10px;
+  line-height: 1.5;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .lab-cand-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .lab-cand-table th,
+.qm-arena-root .lab-cand-table td {
+  padding: 4px 8px;
+  text-align: right;
+  border-bottom: 1px solid #eee;
+}
+
+.qm-arena-root .lab-cand-table th:first-child,
+.qm-arena-root .lab-cand-table td:first-child {
+  text-align: left;
+}
+
+.qm-arena-root .lab-cand-table th {
+  font-size: 9px;
+  color: #999;
+  font-weight: 400;
+}
+
+.qm-arena-root .lab-cand-table td.up {
+  color: #0a7d3c;
+}
+
+.qm-arena-root .lab-cand-table td.down {
+  color: #e2373b;
+}
+
+.qm-arena-root .lab-cand-src {
+  padding: 6px 8px;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  border-top: 1px solid #eee;
+}
+
+.qm-arena-root .lab-cand-src summary {
+  cursor: pointer;
+  color: #666;
+}
+
+.qm-arena-root .lab-cand-src pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 6px;
+  font-size: 10px;
+  line-height: 1.5;
+  background: #fafafa;
+  border: 1px solid #eee;
+}
+
+.qm-arena-root .lab-cand .lab-run {
+  width: 100%;
+  margin: 0;
+  border-top: 1.5px solid #000;
+}
+
+.qm-arena-root .lab-versions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 9px;
+  font-family: 'Courier New', monospace;
+  color: #666;
+}
+
+.qm-arena-root .lab-tpl-list em.note,
+.qm-arena-root .lab-pine-row em.note {
+  margin-left: 5px;
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1;
+}
+
+.qm-arena-root .lab-pine-row em.note {
+  margin-left: 0;
+  padding: 0 2px;
+  border: none;
+}
+
+@media (max-width: 1280px) {
+  .qm-arena-root .lab-wb {
+    grid-template-columns: 260px minmax(0, 1fr) 280px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .qm-arena-root .lab-wb {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .qm-arena-root .lab-rail {
+    max-height: 460px;
+  }
+}

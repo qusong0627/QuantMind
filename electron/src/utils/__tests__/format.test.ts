@@ -8,6 +8,7 @@ import {
   formatDate,
   getRelativeTime,
   formatBackendTime,
+  formatBackendDate,
   parseBackendTimestamp,
 } from '../format';
 
@@ -135,5 +136,13 @@ describe('backend time formatting', () => {
   it('should keep timezone-aware timestamps stable', () => {
     expect(parseBackendTimestamp('2026-04-09T05:12:00Z')?.toISOString()).toBe('2026-04-09T05:12:00.000Z');
     expect(formatBackendTime('2026-04-09T05:12:00Z', { withSeconds: true })).toBe('13:12:00');
+  });
+
+  it('should format backend date only (Shanghai calendar day)', () => {
+    // 跨日边界：UTC 2026-04-09 17:00 已是上海 2026-04-10 01:00
+    expect(formatBackendDate('2026-04-09T05:12:00')).toBe('2026/04/09');
+    expect(formatBackendDate('2026-04-09T17:00:00')).toBe('2026/04/10');
+    expect(formatBackendDate(null)).toBe('--');
+    expect(formatBackendDate('not-a-date')).toBe('--');
   });
 });

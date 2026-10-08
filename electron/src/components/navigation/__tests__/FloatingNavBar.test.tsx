@@ -9,12 +9,16 @@
  * 所以这里断言的是「栏目名 == 该形态下应有的模式全称」，而不是把「实盘交易」再抄一遍。
  *
  * 2026-09-22 起这条规则分两种形态（用户原话：「模拟盘栏目，就搞模拟盘，实盘的都去掉吧、
- * 现在 2 个模块的。一个模拟、一个实盘。」）：公开树只有一栏，名字随模式走；本机两栏
- * 并存，交易栏目定死模拟盘、名字也随之钉住。所以断言写 `expectedTradingLabel(mode)`，
- * 由形态决定期望值——写死任何一个都会在另一种形态下变红。
+ * 现在 2 个模块的。一个模拟、一个实盘。」）：只有一栏时名字随模式走；两栏并存时交易
+ * 栏目定死模拟盘、名字也随之钉住。所以断言写 `expectedTradingLabel(mode)`，由形态决定
+ * 期望值——写死任何一个都会在另一种形态下变红。
+ *
+ * 2026-10-08 起本栏目源码入仓（此前是本机独有目录），「两栏形态」不再由目录有无区分，
+ * 而是由构建开关 `isLiveTradingEnabled()` 收敛：开关关 → 「实盘交易」栏目**不入导航**
+ * （断言在本文件末尾的 describe，开关用 `vi.mock` 替身控制）；开关开 + 目录在 → 两栏。
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import React from 'react';
@@ -23,6 +27,18 @@ import { setTradingMode } from '../../../store/slices/uiSlice';
 import { FloatingNavBar } from '../FloatingNavBar';
 import { modeCopy, containsSimulationWording } from '../../../pages/trading/utils/tradingModeCopy';
 import { isLocalLiveAvailable } from '../../../features/shared/localLive';
+import { isLiveTradingEnabled } from '../../../config/tradingFlags';
+
+/**
+ * 实盘开关的测试替身。真实实现在 vitest 环境里是「未显式配置 → dev 默认开」，
+ * 但那是环境巧合，不能当常量用；替身让「开/关」两种形态都能被钉住。
+ * `vi.hoisted` 提升到 import 之前，供 `vi.mock` 工厂引用。
+ */
+const liveFlag = vi.hoisted(() => ({ enabled: true }));
+vi.mock('../../../config/tradingFlags', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../config/tradingFlags')>();
+  return { ...actual, isLiveTradingEnabled: () => liveFlag.enabled };
+});
 
 const renderNav = () =>
   render(
@@ -48,16 +64,17 @@ const navItem = (id: string): HTMLElement | null =>
 const navItemLabel = (id: string): string =>
   (navItem(id)?.querySelector('.dock-label')?.textContent || '').trim();
 
-/** 非交易类栏目数：本机的「实盘交易」栏目是额外一个，公开仓为 0 */
-const EXTRA_LOCAL_ITEMS = isLocalLiveAvailable ? 1 : 0;
+/** 额外栏目数：「实盘交易」栏多占一栏的条件 = 目录在仓 **且** 构建开关打开 */
+const EXTRA_LOCAL_ITEMS = isLocalLiveAvailable && isLiveTradingEnabled() ? 1 : 0;
 
 /**
  * 交易栏目名是否被定死成模拟盘。
  *
- * 本机有独立的「实盘交易」栏目，交易栏目恒为模拟盘（`resolveSimColumnForcedMode`
- * 同源的判断，源码里走 `isLocalLiveAvailable`）。栏目名再跟着全局模式走，底部栏
- * 就会出现**两个都叫「实盘交易」**的入口，点进去一个却是模拟盘 —— 所以这里也不再
- * 断言「栏目名 == 当前模式」，而是断言两种形态各自该有的名字。
+ * 有独立「实盘交易」栏目时交易栏目恒为模拟盘（`resolveSimColumnForcedMode`
+ * 同源的判断，源码里走 `isLocalLiveAvailable`——只判目录，与构建开关无关）。
+ * 栏目名再跟着全局模式走，底部栏就会出现**两个都叫「实盘交易」**的入口，点进去
+ * 一个却是模拟盘 —— 所以这里断言两种形态各自该有的名字。开关关时不冲突：
+ * 那会儿全局模式本就被归一成模拟，钉不钉结果相同。
  */
 const SIM_COLUMN_PINNED = isLocalLiveAvailable;
 
@@ -167,5 +184,43 @@ describe('FloatingNavBar 交易栏目名', () => {
     // 全 dock 文案唯一：两个都叫「实盘交易」正是这次要消除的形态
     const labels = dockLabels();
     expect(new Set(labels).size).toBe(labels.length);
+  });
+});
+
+/**
+ * 「实盘交易」栏目由构建开关收敛（2026-10-08 入仓后新增）。
+ *
+ * 不这么做的话，源码入仓后**每一次**构建的底部栏都会挂着「实盘交易」入口，
+ * 而默认构建的后端闸门是关的、页面也是兜底页——外壳标着「实盘」却什么都打不开，
+ * 与「本次构建不显示实盘 UI」的声明相反。
+ */
+describe('FloatingNavBar 「实盘交易」栏目由构建开关收敛', () => {
+  afterEach(() => {
+    liveFlag.enabled = true;
+    cleanup();
+  });
+
+  it('开关关闭时该栏目不入导航（源码目录在仓也一样）', () => {
+    liveFlag.enabled = false;
+
+    renderNav();
+
+    expect(navItem('live')).toBeNull();
+    // 交易栏目此时钉在模拟盘，所以全 dock 不该出现「实盘交易」字样
+    expect(dockLabels()).not.toContain(modeCopy('real').full);
+  });
+
+  it('开关打开时该栏目出现在导航里（目录存在的前提下）', () => {
+    liveFlag.enabled = true;
+
+    renderNav();
+
+    if (isLocalLiveAvailable) {
+      expect(navItem('live')).not.toBeNull();
+      expect(navItemLabel('live')).toBe(modeCopy('real').full);
+    } else {
+      // 目录缺失的裁剪形态：开关再开也没有源码可挂
+      expect(navItem('live')).toBeNull();
+    }
   });
 });

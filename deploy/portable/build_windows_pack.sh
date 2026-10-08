@@ -80,16 +80,9 @@ command -v python3 >/dev/null || fail "需要 python3"
 
 # 前端产物来源。默认取**本机那次**构建（electron/dist-react），可用 WEB_DIST 指到
 # 别处——`scripts/package-for-windows.sh` 就是拿它接一份「干净检出 + 干净构建」的
-# 产物（本机构建里带着未跟踪的本机独有栏目，第三方包不能用那一份）。
+# 产物（第三方包用那一份：修订可追溯、不带未提交改动）。
 WEB_DIST="${WEB_DIST:-$REPO_ROOT/electron/dist-react}"
 [ -f "$WEB_DIST/index.html" ] || fail "缺少前端构建产物: $WEB_DIST"
-
-# 出厂净化闸门的显式放行开关（自用包）。默认关：第三方包不许带本机独有栏目的产物。
-GUARD_EXTRA=()
-if [ "${PACK_ALLOW_LOCAL_LIVE:-0}" = "1" ]; then
-    GUARD_EXTRA+=(--allow-local-live)
-    log "PACK_ALLOW_LOCAL_LIVE=1：允许本机独有实盘栏目的前端产物（自用包形态）"
-fi
 
 # 前端产物形态闸：通用便携包必须是**全栏目**形态。
 # 实盘节点包（deploy/live-win/build_live_pack.sh，本机专用/未进版本库）要求
@@ -105,29 +98,11 @@ if grep -rqs 'VITE_LIVE_NODE_ONLY:"true"' "$WEB_DIST/assets"; then
          npm run dashboard:build   # 在仓库根目录执行，不带 VITE_LIVE_NODE_ONLY"
 fi
 
-# 前端产物形态闸之二：**本机独有实盘栏目**的产物（`electron/src/features/local-live/`
-# 未跟踪、不开源）。本机 npm run build 会把它整块打进 dist-react，而两份包都从这里
-# 取 web/ ——第三方包带上就等于把不开源的部分发出去。
-# 判据直接读 pack_rules.PRIVATE_CHUNKS（**不在这儿再写一遍 glob**：闸门、这份脚本、
-# scripts/deploy_frontend.sh 三处各写一遍，迟早有一处漂掉）。放在这里而不是只等第 6
-# 步的成品校验：那时候 4GB 依赖已经下完了，白等一场。
-if [ "${PACK_ALLOW_LOCAL_LIVE:-0}" != "1" ]; then
-    PRIVATE_HITS="$(python3 - "$HERE" "$WEB_DIST" <<'PYEOF'
-import pathlib, sys
-sys.path.insert(0, sys.argv[1])
-import pack_rules as R  # noqa: E402
-
-print("\n".join(R.find_private_chunks(pathlib.Path(sys.argv[2]))[:10]))
-PYEOF
-)"
-    if [ -n "$PRIVATE_HITS" ]; then
-        fail "前端产物里有本机独有实盘栏目的 chunk（未跟踪、不开源）:
-       $(echo "$PRIVATE_HITS" | tr '\n' ' ')
-       第三方包不能用这一份。改用干净构建:
-         bash scripts/package-for-windows.sh
-       自用包要带它，显式放行: PACK_ALLOW_LOCAL_LIVE=1 $0"
-    fi
-fi
+# （旧「形态闸之二：本机独有实盘栏目产物」已退役，2026-10-08：栏目源码
+#   electron/src/features/local-live/ 已入仓，LiveTradingPage chunk 在**每一次**
+#   干净构建里都存在——存在性不再是信号，留着会拦下每一次出包。界面开关
+#   VITE_ENABLE_REAL_TRADING 不进这道闸门（是策略不是泄漏，见 README 形态一节）；
+#   便携包的可见性由构建侧显式选项收敛：scripts/package-for-windows.sh --real-trading。）
 
 mkdir -p "$BUILD/cache" "$STAGE"
 AVAIL_KB=$(df -k "$BUILD" | awk 'NR==2{print $4}')
@@ -459,13 +434,13 @@ mkdir -p "$DIST"
 ZIP_OUT="$DIST/QuantMind-Portable-win-x64.zip"
 if [ "${SKIP_TAR:-0}" = "1" ]; then
     log "SKIP_TAR=1：只做 staging 校验，不压缩 ..."
-    python3 "$HERE/pack_guard.py" --stage "$STAGE" "${GUARD_EXTRA[@]}"
+    python3 "$HERE/pack_guard.py" --stage "$STAGE"
     ok "组装完成: $STAGE"
 else
     log "出厂净化闸门：校验 staging ..."
-    python3 "$HERE/pack_guard.py" --make-zip "$STAGE" "$ZIP_OUT" "${GUARD_EXTRA[@]}"
+    python3 "$HERE/pack_guard.py" --make-zip "$STAGE" "$ZIP_OUT"
     log "出厂净化闸门：复核产物 ..."
-    python3 "$HERE/pack_guard.py" --zip "$ZIP_OUT" "${GUARD_EXTRA[@]}"
+    python3 "$HERE/pack_guard.py" --zip "$ZIP_OUT"
     sha256sum "$ZIP_OUT" | sed 's# .*/#  #' > "$ZIP_OUT.sha256"
     ok "打包完成: $ZIP_OUT ($(du -sh "$ZIP_OUT" | cut -f1))"
     ok "sha256: $(cut -d' ' -f1 "$ZIP_OUT.sha256")  （$ZIP_OUT.sha256）"

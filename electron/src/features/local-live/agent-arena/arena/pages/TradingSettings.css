@@ -1,0 +1,432 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* ============================================================
+   交易所设置页 — 终端风（黑白描边 + Courier New）
+   通达信交易桥 / 券商接入（富途/老虎/IB）/ 实时交易状态
+   ============================================================ */
+
+.qm-arena-root .ts {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2px 20px 40px;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .ts-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 0;
+  border-bottom: 2px solid #000;
+}
+
+.qm-arena-root .ts-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.qm-arena-root .ts-sub {
+  font-size: 10px;
+  color: #666;
+  letter-spacing: 0.3px;
+}
+
+.qm-arena-root .ts-refresh-note {
+  font-size: 10px;
+  color: #888;
+}
+
+/* ---------- 卡片通用 ---------- */
+
+.qm-arena-root .ts-card {
+  margin-top: 16px;
+  border: 2px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .ts-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 2px solid #000;
+  background: #fafafa;
+}
+
+.qm-arena-root .ts-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.qm-arena-root .ts-card-desc {
+  font-size: 9.5px;
+  color: #666;
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .ts-btn {
+  padding: 4px 12px;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .ts-btn:hover:not(:disabled) { background: #f0f0f0; }
+.qm-arena-root .ts-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.qm-arena-root .ts-btn.dark { background: #000; color: #fff; }
+.qm-arena-root .ts-btn.dark:hover:not(:disabled) { background: #333; }
+.qm-arena-root .ts-btn.green { background: #10a37f; border-color: #10a37f; color: #fff; }
+.qm-arena-root .ts-btn.green:hover:not(:disabled) { background: #0e8c6f; }
+.qm-arena-root .ts-btn.rose { background: #ef4444; border-color: #ef4444; color: #fff; }
+.qm-arena-root .ts-btn.rose:hover:not(:disabled) { background: #dc2626; }
+
+/* ---------- 状态徽章 ---------- */
+
+.qm-arena-root .ts-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 2px solid #000;
+}
+
+.qm-arena-root .ts-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1.5px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .ts-badge.on { color: #10a37f; }
+.qm-arena-root .ts-badge.off { color: #999; }
+.qm-arena-root .ts-badge.warn { color: #ef4444; }
+
+.qm-arena-root .ts-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #999;
+  display: inline-block;
+}
+.qm-arena-root .ts-dot.on { background: #10a37f; }
+.qm-arena-root .ts-dot.off { background: #ef4444; }
+
+/* ---------- 健康/错误条 ---------- */
+
+.qm-arena-root .ts-health {
+  margin: 0 14px 12px;
+  padding: 8px 12px;
+  font-size: 10.5px;
+  border: 1.5px solid #000;
+}
+
+.qm-arena-root .ts-health.err { border-color: #ef4444; color: #ef4444; background: #fef2f2; }
+.qm-arena-root .ts-health.ok { border-color: #10a37f; color: #10a37f; background: #f0fdf9; }
+
+/* ---------- 操作行 ---------- */
+
+.qm-arena-root .ts-op-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  border-bottom: 2px solid #000;
+}
+
+.qm-arena-root .ts-op-label {
+  font-size: 10px;
+  color: #333;
+  font-weight: 700;
+}
+
+.qm-arena-root .ts-op-label .dim { color: #999; font-weight: 400; }
+
+.qm-arena-root .ts-op-btns {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* ---------- 配置区（滚动买卖 / 止损止盈） ---------- */
+
+.qm-arena-root .ts-cfg {
+  padding: 12px 14px;
+  border-bottom: 2px solid #000;
+}
+
+.qm-arena-root .ts-cfg-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.qm-arena-root .ts-cfg-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+}
+
+.qm-arena-root .ts-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.qm-arena-root .ts-field-label {
+  font-size: 9px;
+  color: #888;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.qm-arena-root .ts-input {
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  border: 1.5px solid #000;
+  background: #fff;
+  border-radius: 0;
+  min-width: 90px;
+}
+
+.qm-arena-root .ts-input.wide { min-width: 150px; }
+.qm-arena-root .ts-input.date { min-width: 130px; }
+
+/* 执行模式三选 */
+.qm-arena-root .ts-modes {
+  display: flex;
+  gap: 0;
+  margin: 8px 0 4px;
+}
+
+.qm-arena-root .ts-mode {
+  padding: 4px 12px;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1.5px solid #000;
+  border-right: none;
+  background: #fff;
+  cursor: pointer;
+  color: #666;
+  font-family: 'Courier New', monospace;
+  transition: all 0.15s;
+}
+
+.qm-arena-root .ts-mode:last-child { border-right: 1.5px solid #000; }
+.qm-arena-root .ts-mode:hover { background: #f5f5f5; }
+.qm-arena-root .ts-mode.active { background: #000; color: #fff; }
+.qm-arena-root .ts-mode.active.paper { background: #7c3aed; border-color: #7c3aed; }
+.qm-arena-root .ts-mode.active.tdx { background: #10a37f; border-color: #10a37f; }
+
+.qm-arena-root .ts-hint {
+  font-size: 9.5px;
+  color: #999;
+  line-height: 1.6;
+  margin-top: 6px;
+}
+
+.qm-arena-root .ts-msg {
+  margin-top: 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.qm-arena-root .ts-msg.ok { color: #10a37f; }
+.qm-arena-root .ts-msg.err { color: #ef4444; }
+
+/* 开关行 */
+.qm-arena-root .ts-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.qm-arena-root .ts-toggle-row .dim { color: #999; font-weight: 400; }
+
+.qm-arena-root .ts-checkbox {
+  width: 14px;
+  height: 14px;
+  accent-color: #ef4444;
+  cursor: pointer;
+}
+
+/* ---------- 滚动结果 ---------- */
+
+.qm-arena-root .ts-result {
+  padding: 10px 14px;
+  border-bottom: 2px solid #000;
+  font-size: 10.5px;
+}
+.qm-arena-root .ts-result.ok { background: #f0fdf9; color: #0e8c6f; }
+.qm-arena-root .ts-result.err { background: #fef2f2; color: #ef4444; }
+
+.qm-arena-root .ts-result .row { margin: 4px 0; }
+.qm-arena-root .ts-result .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+
+.qm-arena-root .ts-chip {
+  padding: 2px 7px;
+  font-size: 9.5px;
+  border: 1px solid #000;
+  background: #fff;
+  font-family: 'Courier New', monospace;
+}
+
+/* ---------- 桥主机状态网格 ---------- */
+
+.qm-arena-root .ts-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  border-bottom: 2px solid #000;
+}
+
+.qm-arena-root .ts-grid-cell {
+  padding: 10px 14px;
+  border-right: 1px solid #000;
+  border-bottom: 1px solid #000;
+}
+
+.qm-arena-root .ts-grid-cell:nth-child(3n) { border-right: none; }
+.qm-arena-root .ts-grid-cell:nth-last-child(-n + 3) { border-bottom: none; }
+
+.qm-arena-root .ts-cell-label {
+  font-size: 8.5px;
+  font-weight: 700;
+  color: #888;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.qm-arena-root .ts-cell-val {
+  font-size: 13px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .ts-cell-sub {
+  font-size: 9.5px;
+  color: #666;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qm-arena-root .ts-cell-sub b { color: #000; }
+
+/* ---------- 券商接入 ---------- */
+
+.qm-arena-root .ts-broker-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  padding: 14px;
+}
+
+.qm-arena-root .ts-broker {
+  border: 2px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .ts-broker-head {
+  padding: 10px 12px;
+  border-bottom: 1.5px solid #000;
+  background: #fafafa;
+}
+
+.qm-arena-root .ts-broker-name {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .ts-broker-market {
+  font-size: 9px;
+  color: #888;
+  margin-top: 2px;
+}
+
+.qm-arena-root .ts-broker-body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qm-arena-root .ts-broker-desc {
+  font-size: 9.5px;
+  color: #666;
+  line-height: 1.6;
+}
+
+.qm-arena-root .ts-broker-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.qm-arena-root .ts-broker-msg {
+  font-size: 9.5px;
+  font-weight: 700;
+  min-height: 13px;
+}
+.qm-arena-root .ts-broker-msg.ok { color: #10a37f; }
+.qm-arena-root .ts-broker-msg.err { color: #ef4444; }
+
+/* ---------- 实时交易状态 ---------- */
+
+.qm-arena-root .ts-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+}
+
+.qm-arena-root .ts-status-grid .ts-grid-cell { border-bottom: none; }
+
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 900px) {
+  .qm-arena-root .ts-grid, .qm-arena-root .ts-status-grid { grid-template-columns: repeat(2, 1fr); }
+  .qm-arena-root .ts-grid-cell:nth-child(3n) { border-right: 1px solid #000; }
+  .qm-arena-root .ts-grid-cell:nth-child(2n) { border-right: none; }
+  .qm-arena-root .ts-grid-cell:nth-last-child(-n + 3) { border-bottom: 1px solid #000; }
+  .qm-arena-root .ts-grid-cell:nth-last-child(-n + 2) { border-bottom: none; }
+  .qm-arena-root .ts-broker-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 480px) {
+  .qm-arena-root .ts { padding: 2px 10px 30px; }
+  .qm-arena-root .ts-grid, .qm-arena-root .ts-status-grid { grid-template-columns: 1fr; }
+  .qm-arena-root .ts-grid-cell:nth-child(n) { border-right: none; border-bottom: 1px solid #000; }
+  .qm-arena-root .ts-grid-cell:last-child { border-bottom: none; }
+  .qm-arena-root .ts-cfg-fields { gap: 10px; }
+}

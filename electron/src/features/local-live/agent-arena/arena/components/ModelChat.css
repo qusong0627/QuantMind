@@ -1,0 +1,451 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* ============================================================
+   ModelChat / ChatStream —— 对话卡整体重设计（2026-09-03 v2）
+   原则：纯文档流（无绝对定位/无特殊布局上下文）→ 结构上不可能重叠；
+   终端风延续（白底/黑描边/Courier）；单一滚动容器（右侧面板）。
+   区块：头部 / 总结条 / 四小节（提示词·链路·决策·推理）
+   ============================================================ */
+
+/* ---------- 列表与卡片骨架 ---------- */
+.qm-arena-root .mc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.qm-arena-root .mc-card {
+  width: 100%;
+  box-sizing: border-box;
+  border: 2px solid #000;
+  background: #fff;
+}
+.qm-arena-root .mc-card.open { background: #fcfcfc; }
+
+/* ---------- 头部 ---------- */
+.qm-arena-root .mc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 2px solid #000;
+  cursor: pointer;
+  user-select: none;
+  flex-wrap: wrap;
+}
+.qm-arena-root .mc-head:hover { background: #f5f5f5; }
+.qm-arena-root .mc-logo { font-size: 16px; line-height: 1; }
+.qm-arena-root .mc-model {
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+.qm-arena-root .mc-status {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  background: #000;
+  color: #fff;
+  padding: 2px 8px;
+  letter-spacing: 0.08em;
+}
+.qm-arena-root .mc-date {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: #333;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.qm-arena-root .mc-expand { font-size: 10px; color: #10a37f; }
+.qm-arena-root .mc-expand.open { color: #000; }
+
+/* ---------- 标签（模式/动作） ---------- */
+.qm-arena-root .mc-mode-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #eef4ff;
+  color: #0b57d0;
+  border: 1px solid #c6dafc;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.qm-arena-root .mc-mode-chip.plain { background: #f4f4f4; color: #555; border-color: #ddd; }
+.qm-arena-root .mc-mode-chip.action { border-radius: 4px; }
+.qm-arena-root .mc-mode-chip.action.sell { background: #fdecea; color: #c62828; border-color: #f3b9b4; }
+.qm-arena-root .mc-mode-chip.action.buy  { background: #e8f5e9; color: #2e7d32; border-color: #b7dfba; }
+.qm-arena-root .mc-mode-chip.action.hold { background: #f4f4f4; color: #555; border-color: #ddd; }
+/* 新闻 agent 段（不参与交易动作判定，单独特色以示区分） */
+.qm-arena-root .mc-mode-chip.news { background: #fff5e6; color: #a35c00; border-color: #f0d3a8; }
+/* 小节头不可折叠（结构化输出直接铺开） */
+.qm-arena-root .mc-section-head.static { cursor: default; }
+.qm-arena-root .mc-section-head.static:hover { background: transparent; }
+.qm-arena-root .mc-mode-chip.action.empty{ background: #fff; color: #999; border-style: dashed; }
+.qm-arena-root .mc-mode-chip.action.tp   { background: #fff8e1; color: #b26a00; border-color: #f2d98c; }
+.qm-arena-root .mc-mode-chip.action.tune { background: #fff3e0; color: #e65100; border-color: #f4c89b; }
+.qm-arena-root .mc-tokens { font-size: 9px; color: #888; white-space: nowrap; }
+
+/* ---------- 总结条（始终可见） ---------- */
+.qm-arena-root .mc-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 14px;
+  border-bottom: 1px dashed #bbb;
+  background: #f7f9f7;
+}
+.qm-arena-root .mc-sum-label {
+  flex: none;
+  font-family: 'Courier New', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  background: #10a37f;
+  padding: 2px 6px;
+  letter-spacing: 0.1em;
+  margin-top: 1px;
+}
+.qm-arena-root .mc-sum-text {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  color: #222;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 小节（四段式） ---------- */
+.qm-arena-root .mc-body { border-top: 2px solid #000; }
+.qm-arena-root .mc-section { border-bottom: 1px solid #ddd; }
+.qm-arena-root .mc-section:last-child { border-bottom: none; }
+.qm-arena-root .mc-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  background: #fff;
+}
+.qm-arena-root .mc-section-head:hover { background: #efefef; }
+.qm-arena-root .mc-caret { font-size: 10px; color: #10a37f; }
+
+/* 内容块：统一内边距与排版，整段撑开（滚动交给右侧面板） */
+.qm-arena-root .mc-code {
+  margin: 0;
+  padding: 10px 14px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #222;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  background: #fafafa;
+  border-top: 1px dashed #ddd;
+}
+.qm-arena-root .mc-thought { background: #fbfbf6; }
+
+/* 长内容限高 + 展开全文（纯 max-height，展开后移除类名） */
+.qm-arena-root .mc-clamp {
+  max-height: 17em;
+  overflow-y: auto;           /* 不点展开也能滚 */
+  overscroll-behavior: auto;  /* 滚到块底自然接续面板，不卡 */
+}
+.qm-arena-root .mc-clamp::-webkit-scrollbar { width: 8px; }
+.qm-arena-root .mc-clamp::-webkit-scrollbar-thumb { background: #c5c5c5; border-radius: 4px; }
+.qm-arena-root .mc-more {
+  display: block;
+  margin: 4px 14px 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #10a37f;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: 'Courier New', monospace;
+}
+.qm-arena-root .mc-more:hover { text-decoration: underline; }
+
+/* ---------- 交易决策（迷你行动卡） ---------- */
+.qm-arena-root .mc-trades {
+  padding: 8px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #fafafa;
+  border-top: 1px dashed #ddd;
+}
+.qm-arena-root .mc-decision-mini {
+  border: 1px solid #ddd;
+  border-left: 4px solid #999;
+  background: #fff;
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+}
+.qm-arena-root .mc-decision-mini:has(.mc-decision-mini-side.buy)  { border-left-color: #e0483e; }
+.qm-arena-root .mc-decision-mini:has(.mc-decision-mini-side.sell) { border-left-color: #12b886; }
+.qm-arena-root .mc-decision-mini-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.qm-arena-root .mc-decision-mini-side { font-weight: 700; padding: 1px 7px; border-radius: 3px; }
+.qm-arena-root .mc-decision-mini-side.buy  { color: #e0483e; background: #fdecea; }
+.qm-arena-root .mc-decision-mini-side.sell { color: #12b886; background: #e6f7f0; }
+.qm-arena-root .mc-decision-mini-side.hold { color: #555; background: #f0f0f0; }
+.qm-arena-root .mc-decision-mini-code { font-weight: 700; }
+.qm-arena-root .mc-decision-mini-pct { color: #666; }
+.qm-arena-root .mc-decision-mini-reason {
+  color: #333;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.qm-arena-root .mc-decision-mini-exit {
+  font-size: 10px;
+  color: #8a6d00;
+  background: #fffbe6;
+  border: 1px solid #f2e2ac;
+  padding: 3px 7px;
+  border-radius: 3px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.qm-arena-root .mc-no-trade {
+  padding: 10px 14px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: #888;
+  background: #fafafa;
+  border-top: 1px dashed #ddd;
+}
+
+/* ---------- markdown 块（保留） ---------- */
+.qm-arena-root .mc-md-p { padding: 2px 0; }
+.qm-arena-root .mc-md-h3, .qm-arena-root .mc-md-h4 {
+  margin: 10px 0 4px;
+  padding: 4px 10px;
+  background: #000;
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.qm-arena-root .mc-md-h4 { background: #ececec; color: #000; }
+.qm-arena-root .mc-md-list { margin: 2px 0; padding-left: 20px; }
+.qm-arena-root .mc-md-list li { margin: 3px 0; }
+.qm-arena-root .mc-md-warn {
+  margin: 8px 0;
+  padding: 6px 10px;
+  background: #fff8e1;
+  border-left: 4px solid #f5a623;
+  color: #5a4a00;
+}
+.qm-arena-root .mc-md-warn strong { color: #8a6d00; }
+
+/* ---------- 实盘成交回报（桥 · 秒级） ---------- */
+.qm-arena-root .mc-live-list { padding: 8px 14px 10px; display: flex; flex-direction: column; gap: 6px; background: #fafafa; border-top: 1px dashed #ddd; }
+.qm-arena-root .mc-live-fill {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+  padding: 5px 9px;
+  border: 1px solid #ddd;
+  border-left: 4px solid #999;
+  background: #fff;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.qm-arena-root .mc-live-fill.buy { border-left-color: #e0483e; }
+.qm-arena-root .mc-live-fill.sell { border-left-color: #12b886; }
+.qm-arena-root .mc-live-ts { font-weight: 700; }
+.qm-arena-root .mc-live-sym { font-size: 11.5px; }
+.qm-arena-root .mc-live-code { font-size: 9.5px; color: #999; }
+.qm-arena-root .mc-live-qty { color: #333; }
+.qm-arena-root .mc-live-price { color: #333; }
+.qm-arena-root .mc-live-amt { font-weight: 700; }
+.qm-arena-root .mc-live-oid { margin-left: auto; font-size: 9.5px; color: #999; }
+.qm-arena-root .mc-toolbar-note { color: #999; font-size: 9.5px; }
+
+/* ---------- 复盘工具条（筛选 / 批量展开 / 数据范围） ---------- */
+.qm-arena-root .mc-wrap { display: flex; flex-direction: column; gap: 10px; }
+.qm-arena-root .mc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 2px solid #000;
+  background: #fff;
+  font-family: 'Courier New', monospace;
+  font-size: 10.5px;
+}
+.qm-arena-root .mc-toolbar-stat b { font-variant-numeric: tabular-nums; }
+.qm-arena-root .mc-toolbar-range { color: #777; font-variant-numeric: tabular-nums; }
+.qm-arena-root .mc-toolbar-btns { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.qm-arena-root .mc-filters { display: flex; gap: 0; }
+.qm-arena-root .mc-filter {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 4px 9px;
+  border: 1.5px solid #000;
+  border-right-width: 0;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+}
+.qm-arena-root .mc-filter:last-child { border-right-width: 1.5px; }
+.qm-arena-root .mc-filter:hover { background: #f0f0f0; }
+.qm-arena-root .mc-filter.active { background: #000; color: #fff; }
+
+/* ---------- 回合头补充：轮次号 / 类型 / 秒级时间 ---------- */
+.qm-arena-root .mc-seq {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: #666;
+  font-variant-numeric: tabular-nums;
+  border-right: 1px solid #ddd;
+  padding-right: 8px;
+}
+.qm-arena-root .mc-kind {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border: 1px solid #0d8a6b;
+  color: #0d8a6b;
+  background: #eefaf6;
+  white-space: nowrap;
+}
+.qm-arena-root .mc-status.idle { background: #8a8a8a; }
+.qm-arena-root .mc-status.review { background: #0d8a6b; }
+.qm-arena-root .mc-date { display: inline-flex; align-items: baseline; gap: 6px; }
+.qm-arena-root .mc-date-wd { font-style: normal; font-size: 9.5px; color: #777; }
+.qm-arena-root .mc-date-ago { font-style: normal; font-size: 9.5px; color: #999; font-weight: 400; }
+
+/* 轮次副行：交易日 / 记录时刻 / tokens / 工具调用 */
+.qm-arena-root .mc-subline {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 5px 14px;
+  border-bottom: 1px dashed #ddd;
+  background: #fbfbfb;
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  color: #333;
+}
+.qm-arena-root .mc-subline-k {
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #999;
+}
+.qm-arena-root .mc-subline b { font-variant-numeric: tabular-nums; }
+.qm-arena-root .mc-subline-note { color: #999; font-weight: 400; }
+.qm-arena-root .mc-subline-tool { font-weight: 400; color: #444; }
+
+/* ---------- 轮次元数据（展开后第一块） ---------- */
+.qm-arena-root .mc-meta {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  border-bottom: 2px solid #000;
+  background: #fff;
+}
+.qm-arena-root .mc-meta-cell {
+  padding: 7px 10px;
+  border-right: 1px solid #eee;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.qm-arena-root .mc-meta-cell:last-child { border-right: none; }
+.qm-arena-root .mc-meta-cell.wide { grid-column: span 6; border-right: none; border-bottom: 1px solid #eee; }
+.qm-arena-root .mc-meta-k {
+  font-family: 'Courier New', monospace;
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #999;
+}
+.qm-arena-root .mc-meta-v {
+  font-family: 'Courier New', monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.qm-arena-root .mc-section-hint { margin-left: auto; font-size: 9.5px; font-weight: 400; color: #888; }
+
+/* ---------- 结构化决策（模型 JSON：说的） ---------- */
+.qm-arena-root .mc-dec-list { padding: 8px 14px 10px; display: flex; flex-direction: column; gap: 8px; background: #fafafa; border-top: 1px dashed #ddd; }
+.qm-arena-root .mc-dec {
+  border: 1px solid #ddd;
+  border-left: 4px solid #999;
+  background: #fff;
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+}
+.qm-arena-root .mc-dec.buy { border-left-color: #e0483e; }
+.qm-arena-root .mc-dec.sell { border-left-color: #12b886; }
+.qm-arena-root .mc-dec-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.qm-arena-root .mc-dec-side { font-weight: 700; padding: 1px 7px; }
+.qm-arena-root .mc-dec-side.buy { color: #e0483e; background: #fdecea; }
+.qm-arena-root .mc-dec-side.sell { color: #12b886; background: #e6f7f0; }
+.qm-arena-root .mc-dec-side.hold { color: #555; background: #f0f0f0; }
+.qm-arena-root .mc-dec-code { font-weight: 700; }
+.qm-arena-root .mc-dec-sym { font-size: 9.5px; color: #999; font-variant-numeric: tabular-nums; }
+.qm-arena-root .mc-dec-pct { color: #666; font-size: 10px; }
+.qm-arena-root .mc-dec-exec { margin-left: auto; font-size: 9.5px; font-weight: 700; padding: 1px 6px; border: 1px solid #ccc; }
+.qm-arena-root .mc-dec-exec.done { color: #0d7a4f; border-color: #b6e0cd; background: #f0fbf6; }
+.qm-arena-root .mc-dec-exec.none { color: #8a6d00; border-color: #f2e2ac; background: #fffbe6; }
+.qm-arena-root .mc-dec-reason { color: #333; line-height: 1.6; overflow-wrap: anywhere; }
+.qm-arena-root .mc-dec-exit { display: flex; gap: 10px; flex-wrap: wrap; font-size: 10px; color: #8a6d00; background: #fffbe6; border: 1px solid #f2e2ac; padding: 3px 7px; }
+
+/* ---------- 成交决策卡（真实回报：做的） ---------- */
+.qm-arena-root .mc-decision { border: 2px solid #000; background: #fff; }
+.qm-arena-root .mc-decision.buy { border-left: 8px solid #e0483e; }
+.qm-arena-root .mc-decision.sell { border-left: 8px solid #12b886; }
+.qm-arena-root .mc-decision-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  border-bottom: 1px solid #ddd;
+  background: #fafafa;
+}
+.qm-arena-root .mc-decision-sym { font-family: 'Courier New', monospace; font-size: 12.5px; }
+.qm-arena-root .mc-decision-code { font-family: 'Courier New', monospace; font-size: 9.5px; color: #999; font-variant-numeric: tabular-nums; }
+.qm-arena-root .mc-decision-date { margin-left: auto; font-family: 'Courier New', monospace; font-size: 10px; color: #777; font-variant-numeric: tabular-nums; }
+.qm-arena-root .mc-decision-body { display: grid; grid-template-columns: repeat(5, 1fr); }
+.qm-arena-root .mc-decision-body .mc-meta-cell { border-right: 1px solid #eee; }
+.qm-arena-root .mc-side.buy { color: #e0483e; }
+.qm-arena-root .mc-side.sell { color: #12b886; }
+.qm-arena-root .mc-side { font-family: 'Courier New', monospace; font-size: 11px; font-weight: 700; }
+
+@media (max-width: 900px) {
+  .qm-arena-root .mc-meta { grid-template-columns: repeat(2, 1fr); }
+  .qm-arena-root .mc-meta-cell.wide { grid-column: span 2; }
+  .qm-arena-root .mc-decision-body { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 560px) {
+  .qm-arena-root .mc-toolbar-btns { margin-left: 0; }
+  .qm-arena-root .mc-meta { grid-template-columns: 1fr; }
+  .qm-arena-root .mc-meta-cell { border-right: none; }
+  .qm-arena-root .mc-decision-body { grid-template-columns: 1fr; }
+}

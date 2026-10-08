@@ -1,0 +1,119 @@
+/**
+ * arena → QuantMind 宿主适配层（**手写，不参与搬运脚本的生成**）
+ *
+ * 为什么需要这一层：`arena/**` 下的文件全部由 `tools/port-from-arena.mjs` 从
+ * quant-Trader 生成，重跑即覆盖——本地要改的地方只能写在这里（并在该脚本的
+ * PORTING.md manifest 里登记），否则下一次同步就没了。
+ *
+ * 这里只放**宿主环境差异**导致的修正，不放任何视觉重设计：arena 在独立窗口里
+ * 是整屏宽度，搬进交易台后可用宽度小得多（右侧有侧栏、底部有 Dock，1680 视口下
+ * 内容区约 1400px），凡是按「整屏宽度」写死的尺寸到这都会撑破容器。
+ *
+ * 加载顺序：在 `arena/styles/globals.css` **之后**（见 ArenaSurface.tsx），
+ * 同特异性时靠后者覆盖。
+ */
+
+/* ==========================================================================
+   1) 总控 → 三市场卡片（A股/港股/美股 并排）里的表格：不许出卡
+   --------------------------------------------------------------------------
+   病根：`.mk-table` 是 `overflow-x: auto`，表格比卡片宽时**最右一列被吃掉**
+   （实测 1680 视口：卡宽 437px，表宽 506/513/493px → 「回放截止」「状态」看不全，
+   观感就是「右边的框没显示全」）。arena 原版在整屏宽度下三列各有 ~600px，不会触发。
+   治法：`table-layout: fixed` + `width: 100%` 把列宽按比例钉死，表格**恒等于卡宽**，
+   再也不用横向滚；列宽按实测需要分配，谁超了就地省略号，不挤别人。
+   首列（agent 名）另有一条**代码侧**改写：全名 `deepseek-v4-flash` 单列就要 125px，
+   改渲染 `shortName()`（实况页/台账/详情页同款「DS V4-FLASH」），见
+   `tools/port-from-arena.mjs` 里 Control.tsx 的那两条 PATCHES。
+
+   只圈 `.control-grid-3`：同页「A股实盘」卡的表格本来就放得下（实测 666/666），
+   QMT 持仓表（`.qmt-pos-wrap`）列结构完全不同，都不能套这组列宽。
+
+   整段限定在 `min-width: 1000px`：定宽列宽的前提是「卡片 ≥ 410px」。窄到一定程度
+   （卡片被 grid 压到 400px 以下）7 列怎么分都放不下，此时交给上游原样 ——
+   `.mk-table` 的横向滚动在小屏上是合理的兜底，硬套定宽只会把每一列都切成省略号。
+   ========================================================================== */
+@media (min-width: 1000px) {
+.qm-arena-root .control-grid-3 .mk-table .data {
+  width: 100%;
+  table-layout: fixed;
+}
+
+/* 收字号腾宽度：三列并排后每列只有 437px，7 列要一起挤进来。
+   ⚠️ 字号必须写在 **th/td 上**，不能只写在 table 上：globals.css 有一条
+   `.qm-arena-root table.data td { font-size: 11px }`（元素选择器），td 上有直接
+   声明时继承来的字号永远不会生效 —— 只改 table 会得到「padding 变了、字没变」，
+   看着像是列宽没调对。 */
+.qm-arena-root .control-grid-3 .mk-table .data th,
+.qm-arena-root .control-grid-3 .mk-table .data td {
+  padding: 6px 3px;
+  font-size: 10px;
+  /* 定宽后内容超出去就省略号（列宽已按实测需要分配，正常不该触发） */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qm-arena-root .control-grid-3 .mk-table .data th { font-size: 9px; }
+
+/* 列宽百分比（合计 100%）：AGENT / 当前权益 / 收益率 / 最大回撤 / 记录数 / 回放截止 / 状态。
+   分配依据是 PROBE_COLS=1 跑 probe_arena_overflow.mjs 量出的「该列实际需要多宽」
+   （含 padding；取该列所有行 scrollWidth 的最大值），再各留一点余量 ——
+   数值逐日会变（权益位数、回撤符号），不能卡着临界值分。 */
+.qm-arena-root .control-grid-3 .mk-table .data tr > *:nth-child(1) { width: 22%; padding-left: 9px; }
+.qm-arena-root .control-grid-3 .mk-table .data tr > *:nth-child(2) { width: 16.5%; }
+.qm-arena-root .control-grid-3 .mk-table .data tr > *:nth-child(3) { width: 11.5%; }
+.qm-arena-root .control-grid-3 .mk-table .data tr > *:nth-child(4) { width: 11.5%; }
+.qm-arena-root .control-grid-3 .mk-table .data tr > *:nth-child(5) { width: 9%; }
+.qm-arena-root .control-grid-3 .mk-table .data tr > *:nth-child(6) { width: 16.5%; }
+.qm-arena-root .control-grid-3 .mk-table .data tr > *:nth-child(7) { width: 13%; }
+
+/* 状态徽标在 13% 定宽里要塞下「运行中」+ 内边距，收紧它自己的内边距 */
+.qm-arena-root .control-grid-3 .mk-table .status-badge {
+  padding: 1px 4px;
+  font-size: 9px;
+}
+} /* @media (min-width: 1000px) */
+
+/* ==========================================================================
+   2) 整幅页面不许再给自己套宽度上限：行情回测 / 关于「太窄了」
+   --------------------------------------------------------------------------
+   2026-09-23 用户反馈「行情回测页面没有全屏，太窄了」「关于的内容也是太窄了」。
+   实测（1920 视口，交易台内容区可视 1670px；`probe_arena_width_audit.mjs`）：
+
+     行情回测  .lab-page   容器 1440px，两侧各空 115px  ← 自己的 max-width: 1440
+     关于      .about-page 容器 1080px，两侧各空 295px  ← 自己的 max-width: 1080
+
+   两块都是 arena 在**独立整屏窗口**下的排版选择（正文限宽利于阅读，那儿窗口就是
+   最大宽度）。搬进交易台后，宿主内容区已经是「扣掉侧栏之后可用的一块」，页面再
+   各留 115/295px 空白，观感就是「没用满、太窄」。
+
+   ⚠️ 这里必须**提特异性**，不能同分靠顺序：页面样式（Live/MarketLab/About.css，实测
+   sheet#30/#32/#33）在 `ArenaSurface` 的样式之后加载，同特异性时是它们赢。
+   两条都往上加一层（元素/多余一个类）到 (0,2,1) 与 (0,3,1)，稳压 `.lab-page` /
+   `.about-page` 的 (0,2,0) 与 globals 的 `.page`。
+
+   `div.lab-page` 的 `div` 不是装饰：`.lab-page` 的根节点**没有** `.page` 类
+   （`<div className="lab-page">`），用 `.page.lab-page` 会一条都不命中。
+   ========================================================================== */
+.qm-arena-root div.lab-page,
+.qm-arena-root div.page.about-page {
+  max-width: none;
+}
+
+/* ==========================================================================
+   3) A6 未迁移能力按钮置灰（2026-09-30）
+   --------------------------------------------------------------------------
+   「立即分析」两枚按钮（对话 tab / 新闻 tab）按 §4-② 裁决置灰：能力未迁移，
+   P2 决策层落地后再接。`.analyze-trigger` 是自绘样式（白底绿字 + hover 反色），
+   原生 disabled 属性在它身上**不改变外观**（浏览器只对原生控件灰化），
+   必须补 :disabled 视觉，否则「置灰」在界面上不可见。
+   ========================================================================== */
+.qm-arena-root .analyze-trigger:disabled {
+  border-color: #b9b9b9;
+  color: #9a9a9a;
+  background: #f3f3f3;
+  cursor: not-allowed;
+}
+.qm-arena-root .analyze-trigger:disabled:hover {
+  /* 基样式 hover 是绿底白字（.analyze-trigger:hover）——禁用态不许再反色 */
+  background: #f3f3f3;
+  color: #9a9a9a;
+}

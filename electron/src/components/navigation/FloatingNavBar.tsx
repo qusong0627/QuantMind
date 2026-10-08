@@ -78,11 +78,14 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     navItems.push({ id: 'admin', label: '后台管理', icon: ShieldCheck });
   }
 
-  // 本机独有的「实盘交易」栏目：公开仓没有 electron/src/features/local-live/ 目录，
-  // isLocalLiveAvailable 恒为 false，这一项根本不进数组——不是"藏起来"，是没构造。
-  // 刻意不接 isLiveTradingEnabled：那个开关管的是"公开树里实盘组件渲染不渲染"，
-  // 而这一项在本机就是常驻入口（开发者自用的真实盘，与控制公开发行的开关无关）。
-  if (isLocalLiveAvailable) {
+  // 「实盘交易」栏目：源码 2026-10-08 起入仓（`electron/src/features/local-live/`），
+  // 之前只在开发者本机存在。现在**两个条件都满足**才出现：
+  //   · isLocalLiveAvailable —— 有源码目录（老检出/裁剪产物可能没有）；
+  //   · isLiveTradingEnabled() —— 构建期 VITE_ENABLE_REAL_TRADING 打开。
+  // 默认构建（flag=false）里这一项根本不进数组——不是"藏起来"，是没构造；
+  // 否则外壳会长期挂着一个「实盘交易」入口，点进去却只是兜底页（或更糟：
+  // 与本次构建「不显示实盘 UI」的声明相反）。
+  if (isLocalLiveAvailable && isLiveTradingEnabled()) {
     navItems.push({ id: 'live', label: '实盘交易', icon: Radio });
   }
 

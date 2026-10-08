@@ -1,0 +1,117 @@
+/* 港股下单面板样式（QuantMind 本地新增，2026-10-08）。
+ * 独立文件、`hkop-` 前缀——本文件不在 arena 生成器作用域内，
+ * 类名必须自包含防串色。视觉语言沿用 Live.css 的 neo-brutalism
+ * （3px 黑边卡片 / 表格数字 tabular-nums / 红涨绿跌）。 */
+
+.hkop-card { margin-top: 12px; }
+
+.hkop-env { font-size: 10px; padding: 1px 4px; }
+
+/* 实盘警示条：选 REAL 时常驻，提交前还有 confirm 二道确认 */
+.hkop-real-warn {
+  margin: 6px 0;
+  padding: 6px 8px;
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: #8a2d00;
+  background: #fff4e5;
+  border-left: 3px solid #d9622b;
+}
+
+.hkop-form {
+  display: grid;
+  grid-template-columns: 1.4fr 0.8fr 0.8fr 0.9fr 0.8fr auto;
+  gap: 6px;
+  align-items: end;
+  margin-top: 8px;
+}
+
+.hkop-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hkop-field > span {
+  font-size: 9.5px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.hkop-field input,
+.hkop-field select {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 6px;
+  border: 2px solid #111;
+  border-radius: 0;
+  background: #fff;
+  color: #111;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.hkop-field input:disabled { background: #f2f2f2; color: #999; }
+.hkop-field input:focus,
+.hkop-field select:focus { outline: 2px solid var(--primary-color, #10a37f); outline-offset: 0; }
+
+.hkop-submit {
+  padding: 7px 14px;
+  font-size: 12px;
+  border-radius: 0;
+  border: 2px solid #111;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.hkop-submit:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+.hkop-hint { margin-top: 6px; font-size: 10px; color: #888; }
+
+.hkop-msg {
+  margin-top: 8px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.7;
+  border-left: 3px solid #111;
+  word-break: break-all;
+}
+.hkop-ok { color: #1e8449; border-left-color: #1e8449; background: #f0faf3; }
+.hkop-fail { color: #c0392b; border-left-color: #c0392b; background: #fdf1ef; }
+
+.hkop-orders { margin-top: 12px; border-top: 2px solid #111; padding-top: 8px; }
+
+.hkop-refresh {
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 400;
+  padding: 2px 8px;
+  border: 2px solid #111;
+  background: #fff;
+  cursor: pointer;
+}
+.hkop-refresh:hover { background: #111; color: #fff; }
+
+.hkop-order-list { max-height: 220px; overflow-y: auto; }
+.hkop-order-row {
+  display: grid;
+  grid-template-columns: 1.3fr 1.4fr 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11.5px;
+  padding: 5px 0;
+  border-bottom: 1px dotted #ddd;
+  font-variant-numeric: tabular-nums;
+}
+.hkop-order-main { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.hkop-order-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hkop-order-code { color: #888; font-size: 10px; }
+.hkop-order-detail { color: #555; }
+.hkop-order-status { color: #111; font-weight: 700; }
+.hkop-order-err { color: #c0392b; font-weight: 400; }
+
+.hkop-cancel {
+  font-family: inherit;
+  font-size: 10.5px;
+  padding: 2px 10px;
+  border: 2px solid #c0392b;
+  background: #fff;
+  color: #c0392b;
+  cursor: pointer;
+  font-weight: 700;
+}
+.hkop-cancel:hover:not(:disabled) { background: #c0392b; color: #fff; }
+.hkop-cancel:disabled { opacity: 0.5; cursor: not-allowed; }

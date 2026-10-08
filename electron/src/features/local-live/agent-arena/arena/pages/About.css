@@ -1,0 +1,730 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* About 页：系统说明（智能体谱系 / 架构 / 口径），终端风专业排版。
+ *
+ * 色码只用来标记「属于哪条产线」，不做装饰：
+ *   trade 交易 / agent 体系与市场 / news 新闻 / lab 回测 / risk 风控实盘 / sys 系统 / muted 备注
+ * -x 为浅底用深色（对比度 ≥4.5），-l 为深底用亮色。 */
+
+.qm-arena-root .about-page {
+  --a-trade: #0a7f60;
+  --a-agent: #1d4ed8;
+  --a-news: #a8690a;
+  --a-lab: #5b3fd6;
+  --a-risk: #c0342b;
+  --a-sys: #5b6b7f;
+  --a-muted: #94a3b8;
+  --a-trade-l: #34d3a6;
+  --a-agent-l: #7cb0ff;
+  --a-news-l: #f2b53c;
+  --a-lab-l: #b39bff;
+  --a-risk-l: #ff8a80;
+  --a-sys-l: #9fb0c4;
+
+  max-width: 1080px;
+  font-family: 'Courier New', monospace;
+}
+
+/* 色码 → --tone 变量（限定在本页，避免 .trade/.news 这类通用类名污染全局样式） */
+.qm-arena-root .about-page .trade,
+.qm-arena-root .about-page .tone-trade { --tone: var(--a-trade); }
+.qm-arena-root .about-page .agent,
+.qm-arena-root .about-page .tone-agent { --tone: var(--a-agent); }
+.qm-arena-root .about-page .news,
+.qm-arena-root .about-page .tone-news { --tone: var(--a-news); }
+.qm-arena-root .about-page .lab,
+.qm-arena-root .about-page .tone-lab { --tone: var(--a-lab); }
+.qm-arena-root .about-page .risk,
+.qm-arena-root .about-page .tone-risk { --tone: var(--a-risk); }
+.qm-arena-root .about-page .sys,
+.qm-arena-root .about-page .tone-sys { --tone: var(--a-sys); }
+.qm-arena-root .about-page .muted,
+.qm-arena-root .about-page .tone-muted { --tone: var(--a-muted); }
+
+/* ---------- 头部 ---------- */
+
+.qm-arena-root .about-head {
+  border: 2px solid #000;
+  background: #fff;
+  box-shadow: 5px 5px 0 #000;
+  margin-bottom: 16px;
+}
+
+.qm-arena-root .about-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #e5e5e5;
+  background: linear-gradient(90deg, rgba(10, 127, 96, 0.07), rgba(255, 255, 255, 0) 62%);
+}
+
+.qm-arena-root .about-title-row h1 {
+  font-size: 26px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .about-ver {
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid var(--a-trade);
+  padding: 3px 9px;
+  color: var(--a-trade);
+  background: rgba(10, 127, 96, 0.08);
+  white-space: nowrap;
+}
+
+.qm-arena-root .about-lead {
+  margin: 0 20px;
+  padding: 10px 0 2px 12px;
+  border-left: 3px solid var(--a-trade);
+  font-size: 11.5px;
+  line-height: 1.85;
+  color: #333;
+  max-width: 780px;
+}
+
+.qm-arena-root .about-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  padding: 12px 20px 14px;
+  font-size: 10px;
+}
+
+.qm-arena-root .about-meta-item {
+  color: #333;
+}
+
+.qm-arena-root .about-meta-item b {
+  display: inline-block;
+  margin-right: 6px;
+  color: #fff;
+  background: #000;
+  padding: 1px 6px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+/* ---------- 目录 ---------- */
+
+.qm-arena-root .about-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.qm-arena-root .about-toc-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1.5px solid #000;
+  border-left-width: 3px;
+  border-left-color: var(--tone, #000);
+  background: #fff;
+  color: #000;
+  font-size: 10px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.qm-arena-root .about-toc-item:hover {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .about-toc-item:hover .about-toc-num {
+  color: #fff;
+}
+
+.qm-arena-root .about-toc-num {
+  font-size: 9px;
+  color: #999;
+}
+
+.qm-arena-root .about-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--tone, #000);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+/* ---------- 区块 ---------- */
+
+.qm-arena-root .about-sec {
+  padding: 18px 20px 20px;
+  margin-bottom: 16px;
+  scroll-margin-top: 12px;
+}
+
+.qm-arena-root .about-sec .panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 9px;
+  border-bottom: 2px solid var(--tone, #000);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.qm-arena-root .about-sec-num {
+  background: var(--tone, #000);
+  color: #fff;
+  font-size: 9px;
+  padding: 2px 6px;
+  letter-spacing: 0.1em;
+}
+
+.qm-arena-root .about-sec-t {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.qm-arena-root .about-sec-en {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--tone, #999);
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+
+/* ---------- 结论带（总览数字） ---------- */
+
+.qm-arena-root .about-hero {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: 2px solid #000;
+  background: #fff;
+  box-shadow: 5px 5px 0 #000;
+}
+
+.qm-arena-root .about-hero-cell {
+  padding: 12px 14px 13px;
+  border-right: 1px solid #e5e5e5;
+  border-top: 4px solid var(--tone, #000);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.qm-arena-root .about-hero-cell:last-child {
+  border-right: none;
+}
+
+.qm-arena-root .about-hero-k {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #666;
+}
+
+.qm-arena-root .about-hero-v {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.5px;
+  color: var(--tone, #000);
+}
+
+.qm-arena-root .about-hero-s {
+  font-size: 9.5px;
+  color: #666;
+  line-height: 1.5;
+}
+
+/* ---------- 智能体卡片 ---------- */
+
+.qm-arena-root .about-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.qm-arena-root .about-card {
+  border: 2px solid #000;
+  border-top: 4px solid var(--tone, #000);
+  background: #fff;
+  box-shadow: 4px 4px 0 #000;
+  display: flex;
+  flex-direction: column;
+}
+
+.qm-arena-root .about-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid #e5e5e5;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.04), rgba(255, 255, 255, 0) 70%);
+}
+
+.qm-arena-root .about-card-id {
+  background: var(--tone, #000);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 7px;
+  letter-spacing: 0.08em;
+}
+
+.qm-arena-root .about-card-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #000;
+}
+
+.qm-arena-root .about-card-role {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--tone, #666);
+  border: 1px solid var(--tone, #ddd);
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.qm-arena-root .about-card-desc {
+  font-size: 10.5px;
+  line-height: 1.8;
+  color: #333;
+  padding: 11px 12px 4px;
+}
+
+.qm-arena-root .about-card-rows {
+  margin-top: auto;
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.qm-arena-root .about-card-row {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 10px;
+  padding: 4px 0;
+  border-top: 1px solid #f0f0f0;
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.qm-arena-root .about-card-row dt {
+  font-weight: 700;
+  color: var(--tone, #999);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  padding-top: 1px;
+  opacity: 0.9;
+}
+
+.qm-arena-root .about-card-row dd {
+  margin: 0;
+  color: #333;
+}
+
+/* ---------- 管线流程 ---------- */
+
+.qm-arena-root .about-pipe {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 12px 14px;
+  border: 1.5px solid #000;
+  background: var(--bg-tertiary);
+  margin-bottom: 12px;
+}
+
+.qm-arena-root .about-pipe-node {
+  padding: 5px 11px;
+  border: 1.5px solid var(--tone, #000);
+  background: #fff;
+  color: var(--tone, #000);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.qm-arena-root .about-pipe-node.hl {
+  background: var(--tone, #000);
+  color: #fff;
+}
+
+.qm-arena-root .about-pipe-node.sub {
+  border-color: color-mix(in srgb, var(--tone, #999) 45%, #fff);
+  font-weight: 400;
+  font-size: 9.5px;
+  padding: 3px 9px;
+}
+
+.qm-arena-root .about-pipe-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px;
+  border: 1.5px dashed var(--tone, #000);
+  background: #fff;
+}
+
+.qm-arena-root .about-pipe-arrow {
+  color: #888;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+/* ---------- 时间轴 ---------- */
+
+.qm-arena-root .about-tl {
+  border: 1.5px solid #000;
+}
+
+.qm-arena-root .about-tl-row {
+  display: grid;
+  grid-template-columns: 108px 1fr;
+  border-bottom: 1px solid #eee;
+}
+
+.qm-arena-root .about-tl-row:last-child {
+  border-bottom: none;
+}
+
+.qm-arena-root .about-tl-row:hover {
+  background: var(--bg-tertiary);
+}
+
+.qm-arena-root .about-tl-t {
+  background: var(--tone, #000);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 7px 10px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.qm-arena-root .about-tl-c {
+  padding: 7px 12px;
+  font-size: 10.5px;
+  line-height: 1.75;
+  color: #333;
+}
+
+/* ---------- 架构图（终端块） ---------- */
+
+.qm-arena-root .about-arch {
+  border: 2px solid #000;
+  box-shadow: 5px 5px 0 #000;
+  background: #101a26;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.qm-arena-root .about-arch-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  background: #0a121b;
+  color: #cbd5e1;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-bottom: 1px solid #22303f;
+}
+
+.qm-arena-root .about-arch-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.qm-arena-root .about-arch-dots i {
+  width: 8px;
+  height: 8px;
+  display: block;
+}
+
+.qm-arena-root .about-arch-dots i:nth-child(1) { background: #ff5f57; }
+.qm-arena-root .about-arch-dots i:nth-child(2) { background: #febc2e; }
+.qm-arena-root .about-arch-dots i:nth-child(3) { background: #28c840; }
+
+.qm-arena-root .about-arch-layer {
+  display: grid;
+  grid-template-columns: 158px 1fr;
+  border-top: 1px solid #1d2a38;
+  border-left: 3px solid var(--tone, #9fb0c4);
+}
+
+.qm-arena-root .about-arch-tag {
+  padding: 12px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+  color: var(--tone, #9fb0c4);
+  border-right: 1px solid #1d2a38;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.qm-arena-root .about-arch-body {
+  margin: 0;
+  padding: 12px 16px;
+  overflow-x: auto;
+  font-size: 11px;
+  line-height: 1.75;
+  font-family: 'Courier New', monospace;
+  color: #c8d6e5;
+  white-space: pre;
+}
+
+/* ---------- 表格 ---------- */
+
+.qm-arena-root .about-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10.5px;
+  font-family: 'Courier New', monospace;
+  margin-bottom: 10px;
+  border: 2px solid #000;
+}
+
+.qm-arena-root .about-table th {
+  background: var(--tone, #000);
+  color: #fff;
+  text-align: left;
+  padding: 7px 10px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.qm-arena-root .about-table td {
+  padding: 7px 10px;
+  border: 1px solid #e5e5e5;
+  color: #333;
+  vertical-align: top;
+  line-height: 1.7;
+}
+
+.qm-arena-root .about-table tbody tr:nth-child(even) td {
+  background: #fafafa;
+}
+
+.qm-arena-root .about-table tbody tr:hover td {
+  background: var(--bg-tertiary);
+}
+
+.qm-arena-root .about-table td b {
+  color: #000;
+}
+
+.qm-arena-root .about-table td b.trade { color: var(--a-trade); }
+.qm-arena-root .about-table td b.agent { color: var(--a-agent); }
+.qm-arena-root .about-table td b.news { color: var(--a-news); }
+.qm-arena-root .about-table td b.lab { color: var(--a-lab); }
+.qm-arena-root .about-table td b.risk { color: var(--a-risk); }
+.qm-arena-root .about-table td b.sys { color: var(--a-sys); }
+
+.qm-arena-root .about-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 8.5px;
+  font-weight: 700;
+  color: var(--a-agent);
+  border: 1px solid var(--a-agent);
+  padding: 0 4px;
+  vertical-align: 1px;
+}
+
+/* ---------- 描述 / 键值 / 流程 ---------- */
+
+.qm-arena-root .about-desc {
+  font-size: 10.5px;
+  color: #333;
+  line-height: 1.85;
+}
+
+.qm-arena-root .about-desc b {
+  color: #000;
+}
+
+.qm-arena-root .about-desc.dim {
+  color: #777;
+}
+
+.qm-arena-root .about-desc code {
+  background: var(--bg-tertiary);
+  border: 1px solid #ddd;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+.qm-arena-root .about-flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 0 0 12px;
+  font-family: 'Courier New', monospace;
+  font-size: 10.5px;
+}
+
+.qm-arena-root .about-flow-step {
+  padding: 4px 10px;
+  border: 1.5px solid var(--tone, #000);
+  background: #fff;
+  color: var(--tone, #000);
+  font-weight: 700;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.qm-arena-root .about-flow-arrow {
+  color: #888;
+  font-weight: 700;
+}
+
+.qm-arena-root .about-flow-step.hl {
+  background: var(--tone, #000);
+  color: #fff;
+}
+
+.qm-arena-root .about-kv {
+  display: grid;
+  grid-template-columns: 104px 1fr;
+  gap: 8px 16px;
+  font-size: 10.5px;
+  line-height: 1.8;
+  margin: 0;
+}
+
+.qm-arena-root .about-kv dt {
+  font-weight: 700;
+  color: #000;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding-top: 1px;
+  border-top: 1px solid #e5e5e5;
+  padding-bottom: 8px;
+}
+
+.qm-arena-root .about-kv dd {
+  margin: 0;
+  color: #444;
+  border-top: 1px solid #e5e5e5;
+  padding-bottom: 8px;
+}
+
+.qm-arena-root .about-kv code {
+  background: var(--bg-tertiary);
+  border: 1px solid #ddd;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 900px) {
+  .qm-arena-root .about-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-arena-root .about-hero {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .qm-arena-root .about-hero-cell:nth-child(2) {
+    border-right: none;
+  }
+
+  .qm-arena-root .about-hero-cell:nth-child(1),
+  .qm-arena-root .about-hero-cell:nth-child(2) {
+    border-bottom: 1px solid #e5e5e5;
+  }
+
+  .qm-arena-root .about-arch-layer {
+    grid-template-columns: 118px 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .qm-arena-root .about-page {
+    padding: 12px;
+  }
+
+  .qm-arena-root .about-title-row h1 {
+    font-size: 19px;
+  }
+
+  .qm-arena-root .about-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-arena-root .about-hero-cell {
+    border-right: none;
+    border-bottom: 1px solid #e5e5e5;
+  }
+
+  .qm-arena-root .about-hero-cell:last-child {
+    border-bottom: none;
+  }
+
+  .qm-arena-root .about-kv {
+    grid-template-columns: 1fr;
+    gap: 2px 0;
+  }
+
+  .qm-arena-root .about-kv dt {
+    border-top: 1px solid #e5e5e5;
+    padding-bottom: 0;
+  }
+
+  .qm-arena-root .about-kv dd {
+    border-top: none;
+    padding-bottom: 8px;
+  }
+
+  .qm-arena-root .about-tl-row {
+    grid-template-columns: 84px 1fr;
+  }
+
+  .qm-arena-root .about-arch-layer {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-arena-root .about-arch-tag {
+    border-right: none;
+    border-bottom: 1px solid #1d2a38;
+    padding: 8px 12px;
+  }
+
+  .qm-arena-root .about-arch-body {
+    font-size: 9.5px;
+    padding: 10px 12px;
+  }
+
+  .qm-arena-root .about-table {
+    font-size: 9.5px;
+  }
+
+  .qm-arena-root .about-table th,
+  .qm-arena-root .about-table td {
+    padding: 5px 7px;
+  }
+}

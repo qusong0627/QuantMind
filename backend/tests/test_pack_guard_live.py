@@ -3,8 +3,9 @@
 为什么单独一份文件
 ------------------
 ``test_pack_guard.py`` 钉的是通用便携包那一侧（``pack.env``/``bridge/**`` 是泄漏）。
-实盘包恰好相反：同一批文件是**必备**，少一个就是残包；而通用包禁止的私有栏目产物
-（``web/assets/LiveTradingPage*``）反过来是这一包存在的理由。两侧判据写在同一个
+实盘包恰好相反：同一批文件是**必备**，少一个就是残包；而通用包曾禁止的私有栏目产物
+（``web/assets/LiveTradingPage*``；该判据 2026-10-08 已退役——栏目源码入仓后每次构建
+都有它）反过来仍是这一包存在的理由，在实盘包侧是硬必备。两侧判据写在同一个
 文件里，改错一行就会把一份包判成另一份 —— 而且**两份都全绿**，那是最坏的形态。
 
 这里逐个钉住翻转点，每一条都配一个「反向也会红」的用例：只测「实盘包收得下」会养出
@@ -140,7 +141,7 @@ def test_live_stage_with_all_requirements_passes(tmp_path: Path) -> None:
 
 
 def test_live_stage_fails_without_the_live_frontend(tmp_path: Path) -> None:
-    """私有栏目 chunk 是这一包存在的理由：缺了就是「实盘控制台未启用」那个故障。"""
+    """实盘栏目 chunk 是这一包存在的理由：缺了就是「实盘控制台未启用」那个故障。"""
     stage = _make_live_stage(tmp_path)
     (stage / "web/assets/LiveTradingPage-Xyz789.js").unlink()
     proc = _verify(stage, _probe_env(tmp_path))

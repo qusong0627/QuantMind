@@ -1,0 +1,52 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+.qm-arena-root .news-agent-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.qm-arena-root .news-agent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.qm-arena-root .news-chip {
+  border: 1px solid var(--border, #2a2f3a);
+  background: transparent;
+  color: var(--text-dim, #8b93a7);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.qm-arena-root .news-chip:hover {
+  color: var(--text, #e8eaf0);
+  border-color: var(--text-dim, #8b93a7);
+}
+
+.qm-arena-root .news-chip.active {
+  background: var(--accent, #4c7dff);
+  border-color: var(--accent, #4c7dff);
+  color: #fff;
+}
+
+.qm-arena-root .news-chip.news-run {
+  margin-left: auto;
+  border-color: var(--accent, #4c7dff);
+  color: var(--accent, #4c7dff);
+}
+
+.qm-arena-root .news-chip.news-run:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.qm-arena-root .news-run-msg {
+  font-size: 12px;
+  color: var(--text-dim, #8b93a7);
+  align-self: center;
+}

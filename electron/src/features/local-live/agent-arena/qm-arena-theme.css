@@ -1,0 +1,175 @@
+/**
+ * arena 视觉打磨层（**手写，不参与搬运脚本的生成**）
+ *
+ * 与隔壁 `qm-arena-overrides.css` 的分工 —— 两者都手写、都被重跑搬运脚本保住，
+ * 但性质不同，别混着写：
+ *   · overrides = 「宿主环境差异**不得不**改」的修正（整屏宽度、容器收窄导致的挤压）
+ *   · theme     = 「用户**要求**改」的视觉打磨
+ * 分开的理由：重跑搬运时，前者是必须复核的功能性差异，后者是设计意图；混在一个
+ * 文件里，下一次同步的人分不清哪几条删了会出事、哪几条只是好看。
+ *
+ * 加载顺序：globals.css → qm-arena-overrides.css → **本文件**（见 ArenaSurface.tsx），
+ * 是我们这一侧最后加载的一张表。注意页面自带的样式表（Live.css 等，随页面 chunk 加载）
+ * 仍在**本文件之后** —— 同特异性时是它们赢，所以下面每条都靠 `.qm-arena-root
+ * .model-cards-section <元素>` 这个 (0,3,0) 选择器压过页面的 (0,2,0)。
+ *
+ * 视觉语言不新造：沿用 arena 自己的 neo-brutalism（2px 黑描边、无圆角、Courier 数字、
+ * 硬投影）+ 品牌色 `--model-accent`，只是把「信息层级」做出来。
+ */
+@media (min-width: 481px) {
+/* ==========================================================================
+   实况页 → 智能体模型卡（权益曲线下方横排三张）
+   --------------------------------------------------------------------------
+   2026-09-23 用户反馈「这个美化一下外观」（当时三张卡：DS V4-FLASH ¥114,657
+   +14.66% ⚡1.34M tok / DS V4-PRO / GLM-5.3-FLASH）。
+
+   原版的问题不是丑，是「没层级」：logo 是裸 emoji、名称/权益/收益率/token 四行
+   同字号同灰度一路排下来，三张卡之间除了 emoji 颜色没有任何身份区分，整块读起来
+   像一段文本而不是一组卡。
+
+   改法（不动 DOM，纯 CSS + 一处 --model-accent 注入）：
+     · 左侧 5px 品牌色竖条 + logo 落进同色浅底方块 → 三张卡一眼分得开
+     · 权益升为 18px Courier 数字（tabular-nums，三张卡数字横向对齐，扫一眼能比大小）
+     · 收益率做成描边 pill，token 降为注脚 → 四种信息的层级一眼分明
+     · 选中态加右上角标、悬停加品牌色浅底 → 点选后能看出「这张卡在右栏展开了」
+
+   ⚠️ 两条护栏，都是踩过才有的：
+
+   1) 整段限定 `min-width: 481px`：页面在 ≤480px 有一套**故意**的两列布局
+      （Live.css 里 `.model-card-mini { min-width: calc(50% - 4px) }` 等一串，同为 (0,2,0)
+      但在更晚加载的表里）。下面这些选择器是 (0,3,0)，不设这层护栏就会在小屏上静默
+      压掉那套布局 —— 这类「搬家式覆盖」正是最容易在半年后变成幽灵 bug 的写法。
+
+   2) 「权益｜收益率同行」那一版排版走的是 **@container** 而不是视口断点。卡有多宽
+      跟视口关系不大：1920 视口下卡区 1084px、每张 353px，1440 视口下卡区只有 604px、
+      每张 193px（右侧 540px 面板是定宽的，挤的都是左边）。按视口写断点，1440 会在
+      193px 的卡里硬塞两列，把名称挤成省略号。详见项目记忆
+      「视口断点 ≠ 容器宽度」。
+   ========================================================================== */
+.qm-arena-root .model-cards-section {
+  gap: 14px;
+}
+
+/* 卡片本体：铺满整行（原版卡在 max-width: 240px，右侧空出一截）、左侧品牌色竖条。
+   `min-width` 保持页面原值 170px 不动 —— 卡区窄到 604px 时三张卡仍该排成一行
+   （193px/张），把它抬到 200px 会让第三张卡无缘无故掉到第二行。
+   `container-type` 是给下面 @container 用的：查询容器就是卡自己。 */
+.qm-arena-root .model-cards-section .model-card-mini {
+  container-type: inline-size;
+  position: relative;
+  flex: 1 1 0;
+  max-width: none;
+  gap: 12px;
+  padding: 12px 14px 12px 12px;
+  border-left-width: 5px;
+  border-left-color: var(--model-accent, #000);
+  overflow: hidden;
+  transition: transform 0.15s, box-shadow 0.15s, background 0.15s;
+}
+
+.qm-arena-root .model-cards-section .model-card-mini:hover {
+  transform: translateY(-2px);
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.14);
+  background: color-mix(in srgb, var(--model-accent, #000) 6%, #fff);
+}
+
+/* 选中：抬升一格（投影/底色由 ModelCard 的 inline style 按品牌色给，这里不重复设，
+   设了也会被 inline 压掉）。角标是「已选中」的第二个信号 —— 右栏展开的是哪张卡，
+   光靠边框颜色在浅色品牌色上不够显眼 */
+.qm-arena-root .model-cards-section .model-card-mini.selected {
+  transform: translateY(-2px);
+}
+
+.qm-arena-root .model-cards-section .model-card-mini.selected::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 0;
+  height: 0;
+  border-top: 10px solid var(--model-accent, #4d6bfe);
+  border-left: 10px solid transparent;
+}
+
+/* logo：裸 emoji 落进品牌色浅底方块，卡的身份标识 */
+.qm-arena-root .model-cards-section .model-logo {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  border: 2px solid #000;
+  background: color-mix(in srgb, var(--model-accent, #888) 16%, #fff);
+}
+
+.qm-arena-root .model-cards-section .model-info {
+  width: 100%;
+}
+
+.qm-arena-root .model-cards-section .model-name {
+  font-size: 10px;
+  letter-spacing: 0.6px;
+}
+
+/* 卡里的主角：权益数字。tabular-nums 是为了三张卡横向对齐 —— 数字位数逐日会变，
+   等宽字形下「¥114,672 / ¥105,419 / ¥98,936」才能直接比大小 */
+.qm-arena-root .model-cards-section .model-balance {
+  font-size: 18px;
+  font-family: 'Courier New', Courier, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+  line-height: 1.15;
+}
+
+/* 收益率 pill：描边取 currentColor，自动跟着 .up/.down/.dim 走（A股口径：涨红跌绿） */
+.qm-arena-root .model-cards-section .model-pnl {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border: 1.5px solid currentColor;
+  font-family: 'Courier New', Courier, monospace;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* token 用量是注脚：灰度再退一档（窄卡里仍是竖排最后一行，见下面的宽卡排版） */
+.qm-arena-root .model-cards-section .model-tokens {
+  color: #999;
+}
+
+/* --------------------------------------------------------------------------
+   卡宽 ≥ 260px：信息区改 2×2 网格 —— 名称｜收益率 pill / 权益｜token。
+   DOM 顺序是 name→balance→pnl→tokens，**必须显式指定 grid 行列**才能换位：
+   靠自动流会排成「名称 / 权益 / pill / token」四行，卡片一宽就是左上角一小坨、
+   右下角一大片空（第一版正是这样，截图里三张卡中间空得像没加载完）。
+
+   阈值 260px 的来历：卡里除 logo 与内边距外，信息区还余 卡宽−86px；
+   「权益(18px 等宽 ≈100px) + 间距 + pill(≈55px)」要 ≈170px 才不挤，即卡宽 ≈256px。
+   353px 的卡走这版；193px 的卡（1440 视口）退回上面的竖排，名称不会被省略号吃掉。
+   -------------------------------------------------------------------------- */
+@container (min-width: 260px) {
+  .qm-arena-root .model-cards-section .model-info {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 12px;
+    row-gap: 3px;
+  }
+
+  .qm-arena-root .model-cards-section .model-name { grid-column: 1; grid-row: 1; }
+  .qm-arena-root .model-cards-section .model-balance { grid-column: 1; grid-row: 2; }
+
+  .qm-arena-root .model-cards-section .model-pnl {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .qm-arena-root .model-cards-section .model-tokens {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+  }
+}
+} /* @media (min-width: 481px) */

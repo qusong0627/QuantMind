@@ -1,0 +1,124 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+.qm-arena-root .navbar {
+  background-color: #ffffff;
+  border-bottom: 2px solid #000000;
+  padding: 0;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.qm-arena-root .navbar-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 56px;
+  padding: 0 16px;
+  width: 100%;
+}
+
+.qm-arena-root .navbar-logo {
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+}
+
+.qm-arena-root .logo-text {
+  display: flex;
+  align-items: baseline;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.qm-arena-root .logo-alpha {
+  font-size: 20px;
+  font-weight: 700;
+  color: #000000;
+  letter-spacing: -0.5px;
+}
+
+.qm-arena-root .logo-arena {
+  font-size: 14px;
+  font-weight: 400;
+  color: #000000;
+  margin-left: 2px;
+}
+
+.qm-arena-root .navbar-menu-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  list-style: none;
+  gap: 24px;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+}
+
+.qm-arena-root .navbar-menu-center li {
+  display: flex;
+  align-items: center;
+}
+
+.qm-arena-root .navbar-menu-center li.separator {
+  color: #000000;
+  font-size: 14px;
+  font-weight: 300;
+}
+
+.qm-arena-root .navbar-menu-center li a {
+  color: #000000;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  transition: color 0.2s;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  white-space: nowrap;
+}
+
+.qm-arena-root .navbar-menu-center li a:hover,
+.qm-arena-root .navbar-menu-center li a.active {
+  color: #10a37f;
+}
+
+/* 中屏（平板横屏）：菜单跟随收缩，不折行、不压到 logo */
+@media (max-width: 1000px) {
+  .qm-arena-root .navbar-menu-center {
+    gap: 13px;
+  }
+  .qm-arena-root .navbar-menu-center li a {
+    font-size: 10.5px;
+    letter-spacing: 0.2px;
+  }
+}
+
+@media (max-width: 768px) {
+  /* 手机：菜单紧跟 logo 之后一行排开 */
+  .qm-arena-root .navbar-container {
+    flex-wrap: wrap; /* 极窄时菜单整体换行，不裁切 */
+    justify-content: flex-start;
+    height: auto;
+    padding: 8px 16px;
+  }
+  .qm-arena-root .navbar-menu-center {
+    position: static;
+    transform: none;
+    width: auto;
+    justify-content: flex-start;
+    margin: 0 0 0 12px;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .qm-arena-root .navbar-menu-center li a { font-size: 10px; white-space: nowrap; }
+  .qm-arena-root .logo-alpha { font-size: 16px; }
+  .qm-arena-root .logo-arena { font-size: 12px; }
+}
+
+@media (max-width: 480px) {
+  .qm-arena-root .navbar-container { padding: 6px 10px; }
+  .qm-arena-root .navbar-menu-center { gap: 4px; margin-left: 8px; }
+  .qm-arena-root .navbar-menu-center li a { font-size: 8.5px; }
+  .qm-arena-root .logo-alpha { font-size: 15px; }
+  .qm-arena-root .logo-arena { font-size: 11px; }
+}

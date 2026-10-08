@@ -27,9 +27,13 @@ import { BASE_CONSOLE_TABS } from '../utils/consoleTabs';
 // 每个桩带自己的 testid，用于断言「当前挂载的是哪一栏」。
 
 vi.mock('../components/TopBar', () => ({
-    // 把 tradingMode 暴露到 DOM：固定模式是否真的定死实盘，只能从这里观测
-    default: ({ tradingMode }: { tradingMode: string }) => (
-        <div data-testid="topbar" data-trading-mode={tradingMode} />
+    // 把 tradingMode 暴露到 DOM：固定模式是否真的定死实盘，只能从这里观测。
+    // topBarExtras 原样转渲染：顶栏槽位是否真的透传到 TopBar，只能从这里观测
+    // （真 TopBar 不在这里渲染，见 TopBar.test.tsx 管它自己那一半）。
+    default: ({ tradingMode, topBarExtras }: { tradingMode: string; topBarExtras?: React.ReactNode }) => (
+        <div data-testid="topbar" data-trading-mode={tradingMode}>
+            {topBarExtras}
+        </div>
     ),
 }));
 
@@ -255,6 +259,21 @@ describe('RealTradingPage 外壳接线', () => {
         expect(pane('settings')?.getAttribute('data-live-config')).toBe('false');
         // 标题取的是**生效模式**：全局偏好留在实盘，这一栏也仍是模拟盘设置
         expect(pane('settings')?.getAttribute('data-trading-mode')).toBe('simulation');
+    });
+
+    it('顶栏槽位：不传 topBarExtras 就不产生任何节点', () => {
+        renderPage();
+
+        expect(document.querySelector('[data-testid="extras-probe"]')).toBeNull();
+        // 顶栏本身还在（不是把整块顶栏一起省掉了）
+        expect(document.querySelector('[data-testid="topbar"]')).not.toBeNull();
+    });
+
+    it('顶栏槽位：topBarExtras 透传到 TopBar（本机实盘栏靠它挂市场切换器）', () => {
+        renderPage({ topBarExtras: <span data-testid="extras-probe" /> });
+
+        const topbar = document.querySelector('[data-testid="topbar"]');
+        expect(topbar?.querySelector('[data-testid="extras-probe"]')).not.toBeNull();
     });
 
     it('顶栏横幅缺省：不传 banner 就整段不渲染', () => {

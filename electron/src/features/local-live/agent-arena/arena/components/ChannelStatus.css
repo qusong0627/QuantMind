@@ -1,0 +1,108 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* 交易通道在线状态块（ChannelStatus.tsx）。类名统一 chan- 前缀：
+   全站 CSS 全局打包，无前缀会撞车（此前已有 mk-/mdp-/ts- 等前缀惯例）。 */
+
+.qm-arena-root .chan-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qm-arena-root .chan-card {
+  border: 2px solid #000;
+  background: #fff;
+  padding: 8px 10px 9px;
+  box-shadow: 3px 3px 0 #000;
+}
+
+/* 左侧状态色条：在线绿 / 半死黄 / 离线红 / 未知灰 */
+.qm-arena-root .chan-card { border-left-width: 6px; }
+.qm-arena-root .chan-ok { border-left-color: #12b886; }
+.qm-arena-root .chan-warn { border-left-color: #e8a013; }
+.qm-arena-root .chan-off { border-left-color: #e0483e; }
+.qm-arena-root .chan-unknown { border-left-color: #b5b5b5; }
+
+.qm-arena-root .chan-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.qm-arena-root .chan-dot {
+  width: 9px;
+  height: 9px;
+  border: 1px solid #000;
+  border-radius: 50%;
+  flex: none;
+}
+.qm-arena-root .chan-dot-ok { background: #12b886; }
+.qm-arena-root .chan-dot-warn { background: #e8a013; }
+.qm-arena-root .chan-dot-off { background: #e0483e; }
+.qm-arena-root .chan-dot-unknown { background: #d5d5d5; }
+
+.qm-arena-root .chan-label {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .chan-state {
+  margin-left: auto;
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border: 1.5px solid currentColor;
+}
+.qm-arena-root .chan-state-ok { color: #0b7a5c; background: #e9f8f2; }
+.qm-arena-root .chan-state-warn { color: #8a6100; background: #fff8e6; }
+.qm-arena-root .chan-state-off { color: #a3231b; background: #fdeceb; }
+.qm-arena-root .chan-state-unknown { color: #6b6b6b; background: #f2f2f2; }
+
+.qm-arena-root .chan-role {
+  margin: 3px 0 6px;
+  font-size: 10px;
+  color: #666;
+  line-height: 1.4;
+}
+
+.qm-arena-root .chan-lines {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1px 10px;
+}
+
+.qm-arena-root .chan-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: 'Courier New', monospace;
+  font-size: 10.5px;
+  line-height: 1.7;
+  border-bottom: 1px dotted #e6e6e6;
+  min-width: 0;
+}
+
+.qm-arena-root .chan-k {
+  color: #888;
+  flex: none;
+}
+
+.qm-arena-root .chan-v {
+  margin-left: auto;
+  text-align: right;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.qm-arena-root .chan-v-ok { color: #0b7a5c; }
+.qm-arena-root .chan-v-warn { color: #8a6100; }
+.qm-arena-root .chan-v-off { color: #a3231b; }
+.qm-arena-root .chan-v-unknown { color: #7a7a7a; }
+
+.qm-arena-root .chan-foot {
+  font-size: 9.5px;
+  color: #8a8a8a;
+  line-height: 1.5;
+}

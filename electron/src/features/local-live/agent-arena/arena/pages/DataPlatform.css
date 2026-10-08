@@ -1,0 +1,570 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* ============================================================
+   数据平台页 — 终端风（黑白描边 + Courier New）
+   多市场 parquet 仓库浏览 / 预览 / 文件夹选择 / QuantDB SDK
+   ============================================================ */
+
+.qm-arena-root .dp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 0;
+  border-bottom: 2px solid #000;
+  margin-bottom: 14px;
+}
+
+.qm-arena-root .dp-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.qm-arena-root .dp-sub {
+  font-size: 10px;
+  color: #666;
+  letter-spacing: 0.3px;
+  margin-top: 2px;
+}
+
+.qm-arena-root .dp-refresh {
+  font-size: 10px;
+  color: #888;
+}
+
+/* ---------- 市场 tab ---------- */
+
+.qm-arena-root .dp-tabs {
+  display: flex;
+  gap: 0;
+  border: 2px solid #000;
+  border-bottom: none;
+  flex-wrap: wrap;
+}
+
+.qm-arena-root .dp-tab {
+  padding: 8px 14px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  background: #fff;
+  border: none;
+  border-right: 2px solid #000;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .dp-tab:hover {
+  background: #f0f0f0;
+}
+
+.qm-arena-root .dp-tab.active {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .dp-beta {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 8px;
+  font-weight: 700;
+  border: 1px solid #d97706;
+  color: #d97706;
+  vertical-align: 1px;
+}
+
+.qm-arena-root .dp-tab.active .dp-beta {
+  border-color: #fbbf24;
+  color: #fbbf24;
+}
+
+/* ---------- 卡片通用 ---------- */
+
+.qm-arena-root .dp-card {
+  margin-top: 16px;
+  border: 2px solid #000;
+  background: #fff;
+}
+
+.qm-arena-root .dp-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 2px solid #000;
+  background: #fafafa;
+}
+
+.qm-arena-root .dp-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.qm-arena-root .dp-card-desc {
+  font-size: 9.5px;
+  color: #666;
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .dp-code {
+  font-family: 'Courier New', monospace;
+  background: #f0f0f0;
+  border: 1px solid #999;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+.qm-arena-root .dp-warn {
+  color: #d97706;
+  font-weight: 700;
+}
+
+.qm-arena-root .dp-dim {
+  color: #888;
+  font-size: 10px;
+}
+
+.qm-arena-root .dp-btn {
+  padding: 4px 12px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.qm-arena-root .dp-btn:hover:not(:disabled) {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .dp-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.qm-arena-root .dp-btn-primary {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .dp-btn-primary:hover:not(:disabled) {
+  background: #333;
+  color: #fff;
+}
+
+.qm-arena-root .dp-btn-mini {
+  padding: 2px 8px;
+  font-size: 9px;
+}
+
+.qm-arena-root .dp-empty {
+  padding: 30px 0;
+  text-align: center;
+  color: #999;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+/* ---------- 分组折叠 ---------- */
+
+.qm-arena-root .dp-group {
+  border-bottom: 1px solid #ddd;
+}
+
+.qm-arena-root .dp-group:last-child {
+  border-bottom: none;
+}
+
+.qm-arena-root .dp-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 14px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  background: #fff;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.qm-arena-root .dp-group-head:hover {
+  background: #f5f5f5;
+}
+
+.qm-arena-root .dp-group-arrow {
+  font-size: 9px;
+}
+
+.qm-arena-root .dp-group-name {
+  letter-spacing: 0.05em;
+}
+
+.qm-arena-root .dp-group-tag {
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  border: 1px solid #000;
+}
+
+.qm-arena-root .dp-group-size {
+  margin-left: auto;
+  font-size: 10px;
+  color: #666;
+  font-weight: 400;
+}
+
+.qm-arena-root .dp-layout {
+  padding: 1px 6px;
+  font-size: 9px;
+  border: 1px solid #444;
+  color: #444;
+}
+
+.qm-arena-root .dp-dot {
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  border: 1px solid #000;
+}
+
+.qm-arena-root .dp-on {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .dp-off {
+  color: #aaa;
+  border-color: #ccc;
+}
+
+.qm-arena-root .dp-null {
+  color: #bbb;
+}
+
+/* ---------- QuantDB SDK 卡 ---------- */
+
+.qm-arena-root .dp-sdk {
+  border-style: solid;
+  border-width: 2px 2px 0;
+}
+
+.qm-arena-root .dp-sdk-body {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+}
+
+.qm-arena-root .dp-sdk-col {
+  flex: 1;
+  min-width: 280px;
+}
+
+.qm-arena-root .dp-sdk-traffic {
+  border-left: 2px solid #000;
+  padding-left: 24px;
+  min-width: 320px;
+}
+
+.qm-arena-root .dp-sdk-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qm-arena-root .dp-sdk-big {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .dp-sdk-state {
+  padding: 2px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  border: 1.5px solid #000;
+}
+
+.qm-arena-root .dp-meter {
+  height: 10px;
+  border: 1.5px solid #000;
+  background: #fff;
+  margin: 8px 0 4px;
+}
+
+.qm-arena-root .dp-meter-fill {
+  height: 100%;
+  background: #000;
+  transition: width 0.3s;
+}
+
+/* ---------- 弹层 ---------- */
+
+.qm-arena-root .dp-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.qm-arena-root .dp-modal {
+  background: #fff;
+  border: 2px solid #000;
+  max-width: 1200px;
+  width: 100%;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .dp-modal-folder {
+  max-width: 900px;
+}
+
+.qm-arena-root .dp-modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 2px solid #000;
+  background: #fafafa;
+}
+
+.qm-arena-root .dp-modal-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.qm-arena-root .dp-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-top: 2px solid #000;
+  margin-top: 12px;
+}
+
+.qm-arena-root .dp-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 14px 0;
+}
+
+.qm-arena-root .dp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.qm-arena-root .dp-field-wide {
+  flex: 1;
+  min-width: 260px;
+}
+
+.qm-arena-root .dp-field-label {
+  font-size: 9px;
+  color: #666;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.qm-arena-root .dp-input {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  padding: 5px 8px;
+  border: 1.5px solid #000;
+  background: #fff;
+  outline: none;
+}
+
+.qm-arena-root .dp-input:focus {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .dp-input-num {
+  width: 70px;
+}
+
+.qm-arena-root .dp-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px 0;
+}
+
+.qm-arena-root .dp-tag {
+  padding: 1px 7px;
+  font-size: 9px;
+  font-weight: 700;
+  border: 1px solid #444;
+  color: #444;
+}
+
+.qm-arena-root .dp-tag-green {
+  border-color: #166534;
+  color: #166534;
+}
+
+.qm-arena-root .dp-tag-blue {
+  border-color: #1d4ed8;
+  color: #1d4ed8;
+}
+
+.qm-arena-root .dp-tag-purple {
+  border-color: #7e22ce;
+  color: #7e22ce;
+}
+
+.qm-arena-root .dp-file {
+  font-size: 9px;
+  word-break: break-all;
+}
+
+.qm-arena-root .dp-error {
+  margin: 10px 14px 0;
+  padding: 7px 10px;
+  font-size: 10px;
+  border: 1.5px solid #dc2626;
+  color: #dc2626;
+  background: #fef2f2;
+}
+
+.qm-arena-root .dp-ok {
+  margin: 10px 14px 0;
+  padding: 7px 10px;
+  font-size: 10px;
+  border: 1.5px solid #166534;
+  color: #166534;
+  background: #f0fdf4;
+}
+
+.qm-arena-root .dp-loading {
+  padding: 24px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  color: #666;
+}
+
+/* ---------- 勾选开关 / 数据集多选 chips ---------- */
+
+.qm-arena-root .dp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.qm-arena-root .dp-chip:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+.qm-arena-root .dp-chip-on {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .dp-chip-on .dp-dim {
+  color: #bbb;
+}
+
+.qm-arena-root .dp-chip-on:hover:not(:disabled) {
+  background: #333;
+  color: #fff;
+}
+
+.qm-arena-root .dp-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.qm-arena-root .dp-chip-dot {
+  font-size: 8px;
+}
+
+/* ---------- 目录行点击直接预览 ---------- */
+
+.qm-arena-root .dp-row:hover {
+  background: #f5f5f5;
+}
+
+.qm-arena-root .dp-preview-table {
+  max-height: 52vh;
+  overflow: auto;
+}
+
+.qm-arena-root .dp-preview-table td,
+.qm-arena-root .dp-preview-table th {
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qm-arena-root .dp-col-dtype {
+  font-size: 8.5px;
+  color: #888;
+  font-weight: 400;
+}
+
+/* ---------- 文件夹选择统计 ---------- */
+
+.qm-arena-root .dp-stats {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 14px 4px;
+}
+
+.qm-arena-root .dp-stat {
+  border: 1.5px solid #000;
+  padding: 8px 14px;
+  min-width: 110px;
+}
+
+.qm-arena-root .dp-stat-v {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.qm-arena-root .dp-stat-k {
+  font-size: 8.5px;
+  color: #666;
+  letter-spacing: 0.08em;
+  margin-top: 2px;
+}

@@ -1,0 +1,164 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* 新闻 agent 行式协议渲染（前缀 npx-：全站 CSS 全局打包，必须唯一前缀）
+   视觉沿用站点语言：白底 + 2px 黑描边 + Courier 数字，标签左侧色条区分段落。 */
+
+.qm-arena-root .npx-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0 2px;
+}
+
+/* ---------- 单行 ---------- */
+.qm-arena-root .npx-row {
+  border-left: 3px solid #d0d0d0;
+  background: #fcfcfc;
+  padding: 5px 8px 5px 7px;
+}
+.qm-arena-root .npx-row-topic { border-left-color: #e0483e; }
+.qm-arena-root .npx-row-view { border-left-color: #10a37f; }
+.qm-arena-root .npx-row-driver { border-left-color: #10a37f; }
+.qm-arena-root .npx-row-risk { border-left-color: #faad14; }
+.qm-arena-root .npx-row-hold { border-left-color: #e0483e; }
+.qm-arena-root .npx-row-watch { border-left-color: #2b6cb0; }
+.qm-arena-root .npx-row-event { border-left-color: #2b6cb0; }
+.qm-arena-root .npx-row-cross { border-left-color: #b7791f; }
+.qm-arena-root .npx-row-action { border-left-color: #7c3aed; }
+.qm-arena-root .npx-row-observe { border-left-color: #2b6cb0; }
+.qm-arena-root .npx-row-note { border-left-color: #666; }
+.qm-arena-root .npx-row-editor { border-left-color: #666; }
+.qm-arena-root .npx-row-conf { border-left-color: #10a37f; background: #f5fbf9; }
+
+.qm-arena-root .npx-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.qm-arena-root .npx-tag {
+  flex: none;
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  background: #111;
+  color: #fff;
+}
+.qm-arena-root .npx-tag-view, .qm-arena-root .npx-tag-driver, .qm-arena-root .npx-tag-conf { background: #0d8a6b; }
+.qm-arena-root .npx-tag-risk { background: #b7791f; }
+.qm-arena-root .npx-tag-hold { background: #e0483e; }
+.qm-arena-root .npx-tag-topic { background: #e0483e; }
+.qm-arena-root .npx-tag-watch, .qm-arena-root .npx-tag-event, .qm-arena-root .npx-tag-observe { background: #2b6cb0; }
+.qm-arena-root .npx-tag-cross { background: #b7791f; }
+.qm-arena-root .npx-tag-action { background: #7c3aed; }
+.qm-arena-root .npx-tag-note, .qm-arena-root .npx-tag-editor { background: #555; }
+
+.qm-arena-root .npx-cell { display: inline-flex; align-items: baseline; gap: 4px; }
+
+.qm-arena-root .npx-k {
+  font-size: 10px;
+  color: #999;
+  margin-right: 3px;
+}
+
+.qm-arena-root .npx-code {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: #111;
+  background: #f0f0f0;
+  padding: 0 4px;
+}
+
+.qm-arena-root .npx-name {
+  font-size: 12px;
+  color: #111;
+}
+
+.qm-arena-root .npx-sent {
+  font-weight: 700;
+  font-size: 11px;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+}
+.qm-arena-root .npx-sent.up { color: var(--up-color); }
+.qm-arena-root .npx-sent.down { color: var(--down-color); }
+.qm-arena-root .npx-sent.dim { color: #888; }
+
+.qm-arena-root .npx-num {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+.qm-arena-root .npx-num.up { color: var(--up-color); }
+.qm-arena-root .npx-num.down { color: var(--down-color); }
+.qm-arena-root .npx-num.dim { color: #888; }
+
+.qm-arena-root .npx-text { font-size: 11px; color: #333; }
+
+.qm-arena-root .npx-block {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: #333;
+  word-break: break-word;
+}
+.qm-arena-root .npx-block .npx-k { float: none; }
+
+/* ---------- 门卫（黑名单统计） ---------- */
+.qm-arena-root .npx-gate {
+  border: 2px solid #111;
+  background: #fff;
+  padding: 8px;
+}
+.qm-arena-root .npx-gate-head {
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.qm-arena-root .npx-gate-stats { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.qm-arena-root .npx-gate-stat {
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  padding: 2px 7px;
+  border: 1px solid #111;
+}
+.qm-arena-root .npx-chip-skip { background: #f0f0f0; color: #555; }
+.qm-arena-root .npx-chip-macro { background: #0d8a6b; color: #fff; }
+.qm-arena-root .npx-chip-hold { background: #e0483e; color: #fff; }
+
+.qm-arena-root .npx-gate-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 4px;
+}
+.qm-arena-root .npx-gate-k { flex: none; width: 56px; font-size: 10px; color: #666; }
+.qm-arena-root .npx-gate-nos { display: flex; flex-wrap: wrap; gap: 3px; }
+.qm-arena-root .npx-no {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  padding: 0 4px;
+  border: 1px solid #ccc;
+  color: #666;
+}
+.qm-arena-root .npx-no-macro { border-color: #0d8a6b; color: #0d8a6b; }
+.qm-arena-root .npx-no-hold { border-color: #e0483e; color: #e0483e; }
+
+/* ---------- 兜底 ---------- */
+.qm-arena-root .npx-plain {
+  margin-top: 6px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #555;
+  background: #f7f7f7;
+  padding: 6px 8px;
+  border-left: 3px solid #ccc;
+}
+.qm-arena-root .npx-empty { font-size: 11px; color: #999; }

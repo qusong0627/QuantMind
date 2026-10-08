@@ -1,0 +1,110 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+.qm-arena-root .news-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.qm-arena-root .news-card {
+  border: 1.5px solid #000;
+  background: #fff;
+  padding: 10px 12px;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.9);
+}
+
+.qm-arena-root .news-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.qm-arena-root .news-sent {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border: 1.5px solid #000;
+  margin-top: 1px;
+}
+
+.qm-arena-root .news-sent.bullish {
+  background: #e0483e;
+  color: #fff;
+}
+
+.qm-arena-root .news-sent.bearish {
+  background: #12b886;
+  color: #fff;
+}
+
+.qm-arena-root .news-sent.neutral {
+  background: #f1f1ef;
+  color: #555;
+}
+
+.qm-arena-root .news-title {
+  color: #000;
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1.45;
+  text-decoration: none;
+}
+
+.qm-arena-root .news-title:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.qm-arena-root .news-summary {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #444;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.qm-arena-root .news-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.qm-arena-root .news-tickers {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.qm-arena-root .news-ticker {
+  font-size: 10px;
+  font-weight: 700;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  border: 1px solid #000;
+  padding: 1px 4px;
+  background: #f1f1ef;
+}
+
+.qm-arena-root .news-source {
+  font-size: 11px;
+  color: #555;
+}
+
+.qm-arena-root .news-time {
+  margin-left: auto;
+  font-size: 11px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color: #777;
+}
+
+.qm-arena-root .news-empty-sub {
+  display: block;
+  font-size: 11px;
+  color: #888;
+  margin-top: 4px;
+}

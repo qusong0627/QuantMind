@@ -1,0 +1,1228 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* ============================================================
+   Live 终端页 — 终端风布局：
+   顶部状态条（价格 + HIGHEST/LOWEST）
+   左：chart-area（TOTAL ACCOUNT VALUE + ALL/5D + 模型横排卡）
+   右：540px 面板（7 tabs + FILTER + 列表）
+   ============================================================ */
+
+.qm-arena-root .live {
+  max-width: 1760px; /* 比原 1440 拉宽,且 1920 屏左右各留 ~80px */
+  margin: 2px auto 16px; /* 顶部 margin 极紧凑：交易时段条(导航栏下方)与内容框之间不留空隙 */
+  padding: 0;
+  border: 3px solid #000; /* 终端外框（加粗强化可见性） */
+  box-shadow: 0 0 0 1px #fff, 6px 6px 0 rgba(0, 0, 0, 0.15); /* 白描边 + 硬投影，让框感明显 */
+  background: #fff;
+  font-family: 'Courier New', monospace;
+}
+
+/* ---------- 持仓滚动价格条 ---------- */
+
+.qm-arena-root .ticker {
+  border-bottom: 2px solid #000;
+  background: #fafafa;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.qm-arena-root .ticker-track {
+  display: inline-flex;
+  padding: 6px 20px;
+  animation: ticker-scroll var(--ticker-dur, 120s) linear infinite;
+  will-change: transform;
+}
+
+.qm-arena-root .ticker:hover .ticker-track {
+  animation-play-state: paused;
+}
+
+.qm-arena-root .ticker-item {
+  display: inline-flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-right: 40px;
+  font-size: 11px;
+}
+
+.qm-arena-root .ticker-sym {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.qm-arena-root .ticker-name {
+  color: #888;
+}
+
+.qm-arena-root .ticker-price {
+  font-weight: 700;
+}
+
+.qm-arena-root .ticker-chg {
+  font-weight: 700;
+}
+
+@keyframes qm-arena-ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* ---------- 顶部状态条 ---------- */
+
+.qm-arena-root .top-status-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  /* 右侧留 ~1 字符空隙给市场切换 chips（它们固定贴右） */
+  padding: 8px 10px 8px 20px;
+  border-bottom: 2px solid #000;
+  background: #fff;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.qm-arena-root .status-group {
+  display: flex;
+  gap: 32px;
+  align-items: center;
+  flex-wrap: wrap;
+  /* 占满状态条全宽，指数 2×3 grid 在其中伸展 */
+  flex: 1;
+}
+
+.qm-arena-root .price-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.qm-arena-root .price-label {
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.qm-arena-root .price-value {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.qm-arena-root .price-change {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* 当日实时指数组：单元格内 名称·价格·涨跌 单行横排；行/列间 1px 分隔线。
+   自适应三态（用户指定）：
+   ≥1060px 6 格单行排满；621-1059px 2 行 × 3 列；≤620px 手机 3 行 × 2 列 */
+.qm-arena-root .index-bar {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+}
+
+/* 状态条只装指数 2×3（chips 已上移到交易时段条），无需任何媒体查询：
+   .index-bar flex:1 自动填满全宽 */
+
+.qm-arena-root .index-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-right: 1px solid #eee;
+  white-space: nowrap;
+}
+
+/* 2×3 表格分隔线：每行第 3 列无右边线，第 1 行有下边线 */
+.qm-arena-root .index-item:nth-child(3n) { border-right: none; }
+.qm-arena-root .index-item:nth-child(-n+3) { border-bottom: 1px solid #eee; }
+
+.qm-arena-root .index-name {
+  color: #666;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  /* 极端窄时名称先省略号收缩，价格/涨跌保持完整 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.qm-arena-root .index-last {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.qm-arena-root .index-chg {
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* 宽屏（≥1060px）：6 格单行排满（自适应——拉长就显示一行）。
+   清除 2×3 的行下边线；第 1-5 格右边线，第 6 格无。
+   选择器 .status-group 前缀压住基础 nth-child 规则（vite @media 重排问题） */
+@media (min-width: 1060px) {
+  .qm-arena-root .top-status-bar .index-bar {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+  .qm-arena-root .status-group .index-item:nth-child(n) { border-bottom: none; }
+  .qm-arena-root .status-group .index-item:nth-child(-n+5) { border-right: 1px solid #eee; }
+  .qm-arena-root .status-group .index-item:nth-child(6) { border-right: none; }
+}
+
+/* 手机窄屏（≤620px）：3 列单元格放不下"名称+价格+涨跌"单行 → 2 列 × 3 行。
+   分隔线重排：奇数列右边线、前 2 行下边线 */
+@media (max-width: 620px) {
+  .qm-arena-root .top-status-bar .index-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .qm-arena-root .status-group .index-item {
+    gap: 4px;
+    padding: 6px 8px;
+  }
+  .qm-arena-root .status-group .index-item:nth-child(odd) { border-right: 1px solid #eee; }
+  .qm-arena-root .status-group .index-item:nth-child(even) { border-right: none; }
+  .qm-arena-root .status-group .index-item:nth-child(-n+4) { border-bottom: 1px solid #eee; }
+  .qm-arena-root .status-group .index-item:nth-child(n+5) { border-bottom: none; }
+  /* 字号收缩：320px 时 2 列 ~142px 才放得下 */
+  .qm-arena-root .status-group .index-item .index-last { font-size: 13px; }
+  .qm-arena-root .status-group .index-item .index-chg { font-size: 10px; }
+  .qm-arena-root .status-group .index-item .index-name { font-size: 8px; }
+}
+
+/* 最高/最低表演者：位于交易时段条(mh-bar)内，水平并排 */
+.qm-arena-root .performers {
+  display: flex;
+  flex-direction: row;
+  gap: 14px;
+  align-items: baseline;
+}
+
+.qm-arena-root .performer {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.qm-arena-root .performer-label {
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.qm-arena-root .performer-value b {
+  font-weight: 700;
+}
+
+/* 交易时段独立条（导航栏横线正下方，全宽）：交易时段 + 规则 + 状态 +
+   最高/最低(左，单行窄屏横滑) + 市场切换 chips(右)。
+   与指数 2×3 区块合计共 2 行（本条 1 行 + 指数区 2 行） */
+.qm-arena-root .mh-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 20px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+}
+
+/* 内容单行：放得下时居中(safe)，放不下时左起横向滚动（终端风，同 ticker） */
+.qm-arena-root .mh-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  overflow-x: auto;
+  justify-content: safe center;
+  scrollbar-width: none;
+}
+
+.qm-arena-root .mh-content::-webkit-scrollbar { display: none; }
+
+.qm-arena-root .mh-bar .market-switcher {
+  flex-shrink: 0;
+}
+
+/* chips 紧凑化：位于薄时段条内，保持单行高度（原 11px/4-12 太高） */
+.qm-arena-root .mh-bar .market-switcher .chip {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+
+@media (max-width: 640px) {
+  .qm-arena-root .mh-bar {
+    padding: 4px 12px;
+  }
+}
+
+.qm-arena-root .mh-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.qm-arena-root .mh-label {
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.qm-arena-root .mh-hours {
+  font-weight: 600;
+}
+
+.qm-arena-root .mh-status {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+
+.qm-arena-root .mh-status.open {
+  background: #10a37f;
+  color: #fff;
+}
+
+.qm-arena-root .mh-status.closed {
+  background: #f0f0f0;
+  color: #888;
+}
+
+.qm-arena-root .mh-divider {
+  color: #ccc;
+}
+
+.qm-arena-root .mh-rule {
+  color: #666;
+}
+
+/* 市场切换已移入交易时段条(mh-bar)右侧，固定靠右 */
+
+/* ---------- 主区左右分栏 ---------- */
+
+.qm-arena-root .main-content {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+}
+
+.qm-arena-root .chart-area {
+  flex: 1;
+  min-width: 0;
+  padding: 16px 20px;
+}
+
+/* ---------- 图表头部 ---------- */
+
+.qm-arena-root .chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.qm-arena-root .chart-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.qm-arena-root .chart-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.qm-arena-root .time-btn {
+  padding: 4px 14px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border: 1px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .time-btn:hover { background: #f0f0f0; }
+.qm-arena-root .time-btn.active { background: #000; color: #fff; }
+
+.qm-arena-root .chart-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 10px;
+  color: #333;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.qm-arena-root .legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.qm-arena-root .legend-dash {
+  font-weight: 700;
+}
+
+/* ---------- 模型横排 mini 卡 ---------- */
+
+.qm-arena-root .model-cards-section {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.qm-arena-root .model-card-mini {
+  flex: 1;
+  min-width: 170px;
+  max-width: 240px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 2px solid #000;
+  background: #fff;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.qm-arena-root .model-card-mini:hover {
+  transform: translateY(-2px);
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.12);
+}
+
+/* 选中态：品牌色由 ModelCard inline style 注入（--model-accent + 边框/浅底），
+   这里兜底默认蓝 + 名称着色（原黑底白字已废弃） */
+.qm-arena-root .model-card-mini.selected {
+  border-color: #4d6bfe;
+  background: #4d6bfe12;
+  box-shadow: 3px 3px 0 #4d6bfe40;
+}
+
+.qm-arena-root .model-card-mini.selected .model-name {
+  color: var(--model-accent, #4d6bfe);
+  font-weight: 700;
+}
+
+.qm-arena-root .model-tokens {
+  font-size: 9px;
+  color: #888;
+  margin-top: 1px;
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .model-logo {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.qm-arena-root .model-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.qm-arena-root .model-name {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qm-arena-root .model-balance {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-arena-root .model-pnl {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* ---------- 右侧 540px 面板 ---------- */
+
+.qm-arena-root .right-section {
+  width: 540px;
+  flex-shrink: 0;
+  border-left: 3px solid #000;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  min-height: 600px;
+  /* 长内容（对话/决策）由右侧面板承接滚动，页面联动跟随 */
+  max-height: calc(100vh - 190px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.qm-arena-root .trade-tabs {
+  display: flex;
+  border-bottom: 2px solid #000;
+  background: #fff;
+}
+
+/* 分组：组内 1px 浅分隔，组间 2px 实线（8 个 tab 一眼分成 4 块） */
+.qm-arena-root .trade-tab-group {
+  display: flex;
+  min-width: 0;
+  border-right: 2px solid #000;
+}
+
+.qm-arena-root .trade-tab-group:last-child { border-right: none; }
+
+.qm-arena-root .trade-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.2px;
+  border: none;
+  border-right: 1px solid #e0e0e0;
+  background: #fff;
+  color: #555;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.qm-arena-root .trade-tab:last-child { border-right: none; }
+.qm-arena-root .trade-tab:hover { background: #f5f5f5; color: #000; }
+.qm-arena-root .trade-tab.active {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .trade-tab-badge {
+  font-size: 8.5px;
+  font-weight: 400;
+  color: #999;
+  font-variant-numeric: tabular-nums;
+}
+
+.qm-arena-root .trade-tab-badge.zero { color: #ccc; }
+.qm-arena-root .trade-tab.active .trade-tab-badge { color: #9fe6d2; }
+.qm-arena-root .trade-tab.active .trade-tab-badge.zero { color: #777; }
+
+.qm-arena-root .filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #000;
+  font-size: 10px;
+}
+
+.qm-arena-root .filter-label {
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 700;
+  font-size: 9px;
+}
+
+.qm-arena-root .filter-select {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 10px;
+  border: 1px solid #000;
+  background: #fff;
+  border-radius: 0;
+  font-family: 'Courier New', monospace;
+}
+
+/* 「日期」筛选下拉：固定窄宽（模型下拉继续占余量），外观同 filter-select */
+.qm-arena-root .filter-select.filter-date {
+  flex: 0 0 auto;
+  width: 104px;
+}
+
+.qm-arena-root .filter-count {
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+}
+
+/* ---------- 列表 ---------- */
+
+.qm-arena-root .trade-list {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 640px;
+}
+
+.qm-arena-root .trade-list-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid #000;
+  font-size: 10px;
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes qm-arena-slideIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.qm-arena-root .trade-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.qm-arena-root .trade-item-time {
+  color: #666;
+  font-size: 9px;
+}
+
+.qm-arena-root .trade-side {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+}
+
+.qm-arena-root .trade-side.buy { color: var(--up-color); }
+.qm-arena-root .trade-side.sell { color: var(--down-color); }
+/* 减仓（部分卖出，桥仍持有）：橙色与清仓（红）区分 */
+.qm-arena-root .trade-side.sell.partial { color: #e65100; background: #fff3e0; }
+.qm-arena-root .trade-side.info { color: #666; }
+
+.qm-arena-root .trade-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.qm-arena-root .trade-symbol {
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.qm-arena-root .trade-qty {
+  color: #333;
+}
+
+.qm-arena-root .trade-pnl {
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.qm-arena-root .trade-cash {
+  color: #666;
+  font-size: 9px;
+  margin-top: 2px;
+}
+
+/* 比赛配置（每模型多选分析配置，全中文） */
+.qm-arena-root .comp-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qm-arena-root .comp-market-badge {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border: 1px solid #000;
+  background: #fff;
+  color: #000;
+}
+
+.qm-arena-root .comp-model {
+  border: 1.5px solid #000;
+  padding: 8px 10px;
+}
+
+.qm-arena-root .comp-model-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.qm-arena-root .comp-model-name {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qm-arena-root .comp-model-count {
+  font-size: 9px;
+  color: #666;
+  white-space: nowrap;
+  margin-left: 8px;
+}
+
+.qm-arena-root .comp-model-switches {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.qm-arena-root .comp-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qm-arena-root .comp-switch:hover { background: #f5f5f5; }
+
+.qm-arena-root .comp-switch.on {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .comp-switch-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  border: 1px solid currentColor;
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+.qm-arena-root .comp-save-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.qm-arena-root .comp-save {
+  flex: 1;
+  padding: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 2px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.qm-arena-root .comp-save:hover { background: #000; color: #fff; }
+.qm-arena-root .comp-save:disabled { opacity: 0.5; cursor: wait; }
+
+.qm-arena-root .comp-saved {
+  font-size: 10px;
+  font-weight: 700;
+  color: #10a37f;
+}
+
+.qm-arena-root .comp-error {
+  border: 1.5px solid #d32f2f;
+  color: #d32f2f;
+  font-size: 10px;
+  padding: 6px 8px;
+}
+
+.qm-arena-root .comp-mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qm-arena-root .comp-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1.5px solid #000;
+  background: #fff;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s;
+}
+
+.qm-arena-root .comp-mode:hover {
+  background: #f5f5f5;
+}
+
+.qm-arena-root .comp-mode.active {
+  background: #000;
+  color: #fff;
+}
+
+.qm-arena-root .comp-mode-num {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.qm-arena-root .comp-mode-name {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .comp-mode-badge {
+  margin-left: auto;
+  font-size: 9px;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  color: #999;
+}
+
+.qm-arena-root .comp-mode-badge.on {
+  color: #10a37f;
+  font-weight: 700;
+}
+
+.qm-arena-root .comp-desc {
+  border: 1.5px solid #000;
+  padding: 10px 12px;
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: #333;
+}
+
+.qm-arena-root .comp-desc h4 {
+  font-size: 11px;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.qm-arena-root .comp-desc p { margin-bottom: 4px; }
+.qm-arena-root .comp-desc .comp-note { color: #999; }
+
+/* TRADES 成交详细卡片 */
+.qm-arena-root .trade-card {
+  margin: 10px 12px;
+  padding: 8px 10px;
+  border: 1.5px solid #000;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.1);
+  font-size: 10.5px;
+  animation: slideIn 0.3s ease-out;
+}
+
+.qm-arena-root .trade-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.qm-arena-root .trade-card-symbol {
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+.qm-arena-root .trade-card-code {
+  font-size: 10px;
+  color: #888;
+  font-weight: 400;
+  margin-left: 6px;
+}
+
+.qm-arena-root .trade-card-date {
+  margin-left: auto;
+  color: #888;
+  font-size: 9px;
+}
+
+.qm-arena-root .trade-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  font-size: 10px;
+  color: #555;
+}
+
+.qm-arena-root .trade-card-grid b {
+  color: #000;
+}
+
+/* 决策消息 */
+.qm-arena-root .msg-content {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #333;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow: hidden;
+  position: relative;
+}
+
+.qm-arena-root .msg-content::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 24px;
+  background: linear-gradient(transparent, #fff);
+  pointer-events: none;
+}
+
+/* 持仓列表 */
+.qm-arena-root .pos-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 8px 0;
+  border-bottom: 1px solid #eee;
+  font-size: 11px;
+}
+
+.qm-arena-root .pos-row .pos-sym { font-weight: 700; }
+.qm-arena-root .pos-row .pos-name { margin-right: 6px; }
+.qm-arena-root .pos-row .pos-code { font-weight: 400; font-size: 10px; color: #888; }
+.qm-arena-root .pos-row .pos-qty { color: #333; }
+
+/* 实盘持仓（通达信桥） */
+.qm-arena-root .pos-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #666;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+.qm-arena-root .pos-section-sub {
+  margin-left: auto;
+  font-weight: 600;
+  color: #444;
+}
+.qm-arena-root .live-clock {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: #555;
+  white-space: nowrap;
+}
+.qm-arena-root .live-pos-card {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.qm-arena-root .live-pos-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.qm-arena-root .live-pos-name { font-weight: 700; font-size: 13px; }
+.qm-arena-root .live-pos-code { font-size: 10px; color: #888; }
+.qm-arena-root .live-pos-pnl { font-weight: 700; margin-left: auto; }
+.qm-arena-root .live-pos-pnl.up { color: var(--up-color); }
+.qm-arena-root .live-pos-pnl.down { color: var(--down-color); }
+.qm-arena-root .live-pos-sub {
+  margin-top: 5px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: #777;
+}
+.qm-arena-root .pos-row .pos-cash { font-weight: 700; }
+
+/* README */
+.qm-arena-root .readme-body {
+  padding: 14px 16px;
+  font-size: 10px;
+  line-height: 1.7;
+  color: #333;
+}
+
+.qm-arena-root .readme-body h4 {
+  font-size: 10px;
+  margin: 12px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.qm-arena-root .readme-body p { margin-bottom: 6px; }
+.qm-arena-root .readme-body b { color: #000; }
+
+.qm-arena-root .readme-links {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 2px solid #000;
+  font-size: 10px;
+}
+.qm-arena-root .readme-links a {
+  color: #10a37f;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.qm-arena-root .readme-links a:hover { color: #000; }
+
+.qm-arena-root .empty-state {
+  padding: 40px 16px;
+  text-align: center;
+  color: #999;
+  font-size: 10px;
+}
+
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 1024px) {
+  .qm-arena-root .right-section { width: 380px; }
+  .qm-arena-root .model-card-mini { min-width: 150px; }
+}
+
+@media (max-width: 820px) {
+  .qm-arena-root .main-content { flex-direction: column; }
+  /* 列布局下右面板按内容自适应，不再用桌面端 600px 最小高度撑出底部空白 */
+  .qm-arena-root .live .right-section { min-height: 0; }
+  .qm-arena-root .right-section { width: 100%; border-left: none; border-top: 2px solid #000; }
+  .qm-arena-root .trade-list { max-height: 420px; }
+  .qm-arena-root .chart-area { padding: 12px 12px; }
+  .qm-arena-root .price-item { font-size: 10px; }
+}
+
+@media (max-width: 480px) {
+  .qm-arena-root .top-status-bar { padding: 8px 10px; gap: 8px; }
+  .qm-arena-root .status-group { gap: 14px; }
+  .qm-arena-root .price-value { font-size: 13px; }
+  .qm-arena-root .performer { font-size: 10px; }
+  .qm-arena-root .chart-area { padding: 10px 8px; }
+  .qm-arena-root .chart-title { font-size: 11px; }
+  .qm-arena-root .chart-controls { gap: 4px; }
+  .qm-arena-root .time-btn { padding: 3px 10px; font-size: 9px; }
+  .qm-arena-root .chart-legend { gap: 8px; font-size: 9px; }
+  .qm-arena-root .model-cards-section { gap: 8px; }
+  .qm-arena-root .model-card-mini { min-width: calc(50% - 4px); max-width: none; flex: 1 1 calc(50% - 4px); padding: 8px 10px; }
+  .qm-arena-root .model-logo { font-size: 18px; }
+  .qm-arena-root .model-balance { font-size: 12px; }
+  .qm-arena-root .trade-tabs { overflow-x: auto; }
+  .qm-arena-root .trade-tab { flex: 1 0 auto; padding: 9px 6px; font-size: 8.5px; }
+  .qm-arena-root .trade-list { max-height: 380px; }
+  .qm-arena-root .filter-bar { flex-wrap: wrap; }
+  .qm-arena-root .msg-content { max-height: 90px; }
+}
+
+/* ---- 实盘账户 tab（quantmind PG 同步） ---- */
+.qm-arena-root .real-body { padding: 8px 12px; display: flex; flex-direction: column; gap: 12px; }
+.qm-arena-root .real-account-card { border: 3px solid #111; padding: 10px 12px; background: #fff; }
+.qm-arena-root .real-account-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.qm-arena-root .real-account-title { font-weight: 700; font-size: 12px; letter-spacing: 0.04em; }
+.qm-arena-root .real-account-ts { font-size: 10px; color: #888; font-variant-numeric: tabular-nums; }
+.qm-arena-root .real-asset-row { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 2px solid #111; padding-bottom: 6px; }
+.qm-arena-root .real-asset-label { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 0.08em; }
+.qm-arena-root .real-asset-value { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.qm-arena-root .real-sub-row { display: flex; gap: 10px; font-size: 11px; color: #555; margin-top: 6px; flex-wrap: wrap; }
+.qm-arena-root .real-up { color: #c0392b; font-weight: 700; }
+.qm-arena-root .real-down { color: #1e8449; font-weight: 700; }
+.qm-arena-root .real-positions { margin-top: 8px; border-top: 1px dashed #bbb; padding-top: 6px; max-height: 150px; overflow-y: auto; }
+.qm-arena-root .real-pos-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; font-size: 12px; padding: 4px 0; border-bottom: 1px dotted #ddd; align-items: baseline; }
+.qm-arena-root .real-pos-id { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.qm-arena-root .real-pos-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qm-arena-root .real-pos-code { color: #999; font-size: 9px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.qm-arena-root .real-pos-qty { color: #555; font-variant-numeric: tabular-nums; }
+.qm-arena-root .real-pos-val { font-variant-numeric: tabular-nums; text-align: right; }
+.qm-arena-root .real-pos-pct { font-size: 10px; opacity: 0.75; }
+.qm-arena-root .real-section { border: 3px solid #111; padding: 10px 12px; background: #fff; }
+.qm-arena-root .real-section-title { font-weight: 700; font-size: 12px; letter-spacing: 0.04em; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline; }
+.qm-arena-root .real-section-sub { font-size: 10px; color: #888; font-weight: 400; }
+/* 账户读不到时的显式说明（不能停在「加载中」，也不要大块灰底空态） */
+.qm-arena-root .real-pos-empty {
+  padding: 10px 0 2px; font-size: 10.5px; line-height: 1.7; color: #8a5a00;
+  border-left: 3px solid #d9a441; padding-left: 8px;
+}
+/* 「说明」小节正文（左对齐块，与空态区分） */
+.qm-arena-root .real-note { font-size: 10.5px; line-height: 1.8; color: #555; border-left: 3px solid #ddd; padding-left: 8px; }
+/* 180px svg + 底部图例(~28px): 高度不足图例会溢出盖住下方表格 */
+.qm-arena-root .real-chart { height: 210px; }
+.qm-arena-root .real-l2-table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.qm-arena-root .real-l2-table th { text-align: left; font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 2px solid #111; padding: 3px 2px; }
+.qm-arena-root .real-l2-table td { padding: 3px 2px; border-bottom: 1px dotted #ddd; }
+.qm-arena-root .real-l2-name { font-weight: 700; white-space: nowrap; }
+.qm-arena-root .real-l2-code { font-weight: 400; color: #888; font-size: 10px; white-space: nowrap; }
+
+/* A股两通道选择器（通达信桥 / 迅投 QMT）：状态灯 + 资产 + 新鲜度标签 */
+.qm-arena-root .ra-chan-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.qm-arena-root .ra-chan {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 2px solid #111;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: box-shadow 0.12s, transform 0.12s;
+}
+.qm-arena-root .ra-chan:hover { transform: translate(-1px, -1px); box-shadow: 2px 2px 0 #000; }
+.qm-arena-root .ra-chan.active { background: #f2fbf7; box-shadow: 3px 3px 0 #10a37f; border-color: #10a37f; }
+.qm-arena-root .ra-chan-ok { border-left-width: 6px; border-left-color: #12b886; }
+.qm-arena-root .ra-chan-warn { border-left-width: 6px; border-left-color: #e8a013; }
+.qm-arena-root .ra-chan-off { border-left-width: 6px; border-left-color: #e0483e; }
+.qm-arena-root .ra-chan-unknown { border-left-width: 6px; border-left-color: #b5b5b5; }
+.qm-arena-root .ra-chan-dot { width: 8px; height: 8px; border: 1px solid #000; border-radius: 50%; flex: none; }
+.qm-arena-root .ra-chan-dot-ok { background: #12b886; }
+.qm-arena-root .ra-chan-dot-warn { background: #e8a013; }
+.qm-arena-root .ra-chan-dot-off { background: #e0483e; }
+.qm-arena-root .ra-chan-dot-unknown { background: #d5d5d5; }
+.qm-arena-root .ra-chan-name { font-weight: 700; font-size: 11px; white-space: nowrap; }
+.qm-arena-root .ra-chan-meta {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: #333;
+  white-space: nowrap;
+}
+.qm-arena-root .ra-chan-tag {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+.qm-arena-root .ra-chan-tag-ok { color: #0b7a5c; background: #e9f8f2; }
+.qm-arena-root .ra-chan-tag-warn { color: #8a6100; background: #fff8e6; }
+.qm-arena-root .ra-chan-tag-off { color: #a3231b; background: #fdeceb; }
+.qm-arena-root .ra-chan-tag-unknown { color: #6b6b6b; background: #f2f2f2; }
+.qm-arena-root .ra-chan-note { font-size: 9.5px; color: #7a7a7a; line-height: 1.5; margin-top: -4px; }
+.qm-arena-root .real-pos-avail { color: #b0872a; font-size: 9.5px; }
+
+/* 「立即分析」手动触发按钮（对话 tab 筛选栏） */
+.qm-arena-root .analyze-trigger {
+  margin-left: 8px;
+  padding: 3px 10px;
+  border: 1px solid #10a37f;
+  border-radius: 12px;
+  background: #fff;
+  color: #10a37f;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.qm-arena-root .analyze-trigger:hover { background: #10a37f; color: #fff; }
+.qm-arena-root .analyze-trigger.busy { opacity: 0.55; cursor: wait; }
+.qm-arena-root .analyze-msg {
+  margin-left: 8px;
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+}
+
+/* ---------- 比赛配置 v2 视觉（2026-09-03） ---------- */
+.qm-arena-root .comp-body { gap: 12px; padding: 14px; }
+.qm-arena-root .comp-market-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+  padding: 4px 10px; border: 1.5px solid #000; background: #000; color: #fff;
+}
+.qm-arena-root .comp-model {
+  border: 1.5px solid #000; padding: 10px 12px;
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.08);
+}
+.qm-arena-root .comp-model-head { gap: 8px; margin-bottom: 8px; }
+.qm-arena-root .comp-model-logo { font-size: 15px; line-height: 1; }
+.qm-arena-root .comp-model-count {
+  font-size: 9px; color: #fff; background: #10a37f;
+  padding: 1px 7px; border-radius: 8px; font-weight: 700;
+}
+.qm-arena-root .comp-model-switches { gap: 8px; }
+.qm-arena-root .comp-switch {
+  border: 1.5px solid #999; border-radius: 3px; padding: 6px 9px;
+}
+.qm-arena-root .comp-switch:hover { border-color: #000; background: #f0f0f0; }
+.qm-arena-root .comp-switch.on { background: #10a37f; border-color: #0d8a6b; color: #fff; }
+.qm-arena-root .comp-switch.on .comp-switch-box { color: #fff; }
+.qm-arena-root .comp-model-desc {
+  margin-top: 8px; font-family: 'Courier New', monospace; font-size: 9.5px;
+  line-height: 1.6; color: #666; border-top: 1px dashed #ddd; padding-top: 6px;
+}
+.qm-arena-root .comp-desc-head { font-size: 9px; color: #999; margin-bottom: 5px; }
+.qm-arena-root .comp-desc-item {
+  display: grid; grid-template-columns: 78px 1fr auto; gap: 6px;
+  align-items: start; padding: 3px 0;
+}
+.qm-arena-root .comp-desc-item + .comp-desc-item { border-top: 1px dotted #eee; }
+.qm-arena-root .comp-desc-name {
+  font-weight: 700; color: #fff; background: #10a37f;
+  padding: 1px 6px; border-radius: 8px; text-align: center;
+  font-size: 9px; white-space: nowrap;
+}
+.qm-arena-root .comp-desc-text { color: #444; word-break: break-word; }
+.qm-arena-root .comp-desc-text.clamp {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.qm-arena-root .comp-desc-more {
+  border: none; background: none; color: #0d8a6b; font-size: 9px;
+  cursor: pointer; padding: 0; text-decoration: underline; white-space: nowrap;
+}
+.qm-arena-root .comp-desc-more:hover { color: #000; }
+.qm-arena-root .comp-save-row { position: sticky; bottom: 0; background: #fff; padding: 10px 0 2px; border-top: 1.5px solid #000; }
+.qm-arena-root .comp-save {
+  border: 1.5px solid #000; background: #000; color: #fff;
+  font-weight: 700; font-size: 11px; padding: 8px 18px; cursor: pointer;
+  font-family: 'Courier New', monospace; letter-spacing: 0.06em;
+}
+.qm-arena-root .comp-save:hover { background: #10a37f; border-color: #10a37f; }
+.qm-arena-root .comp-save:disabled { opacity: 0.5; cursor: wait; }
+.qm-arena-root .comp-saved-at { margin-left: 10px; font-size: 10px; color: #0d8a6b; font-weight: 700; }

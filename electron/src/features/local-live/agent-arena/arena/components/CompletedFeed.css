@@ -1,0 +1,104 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* COMPLETED —— nof1 风格平仓消息卡流 */
+.qm-arena-root .completed-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.qm-arena-root .feed-card {
+  border: 1.5px solid #000;
+  background: #fff;
+  padding: 10px 12px;
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.12);
+  font-family: 'Courier New', monospace;
+}
+
+.qm-arena-root .feed-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.qm-arena-root .feed-logo {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.qm-arena-root .feed-msg {
+  flex: 1;
+}
+
+.qm-arena-root .feed-agent {
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .feed-symbol {
+  letter-spacing: 0.03em;
+}
+
+.qm-arena-root .feed-symbol .feed-code {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  color: #888;
+  letter-spacing: 0.02em;
+}
+
+.qm-arena-root .feed-date {
+  font-size: 10px;
+  color: #888;
+  flex-shrink: 0;
+}
+
+.qm-arena-root .feed-price {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.qm-arena-root .feed-arrow {
+  color: #888;
+}
+
+.qm-arena-root .feed-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr 1fr;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.qm-arena-root .feed-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.qm-arena-root .feed-k {
+  color: #888;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.qm-arena-root .feed-v {
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qm-arena-root .feed-pnl {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed #ccc;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* 盈亏色跟随全局 .up/.down（A股习惯：盈利红 #e0483e、亏损绿 #12b886）——
+   此前本地 override 用的是国际惯例（盈绿亏红），与全局相反，已删除 */

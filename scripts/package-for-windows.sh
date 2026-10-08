@@ -8,12 +8,12 @@
 #   bash scripts/package-for-windows.sh --web-dist=DIR   # 用现成的前端产物，不重新构建
 #
 # 选项:
-#   --private         自用包：前端用**本机工作树**的产物（含未跟踪的
-#                     electron/src/features/local-live/ 实盘栏目），并显式放行闸门里
-#                     那条私有栏目判据。与 --rev / --web-dist 互斥。
-#   --real-trading    前端带 VITE_ENABLE_REAL_TRADING=true 构建（实盘 UI 可见）。
-#                     这是**双开关的前半**：后端那半由目标机 pack.env 的
-#                     ENABLE_REAL_TRADING 决定，两半都开才真的能用。默认关。
+#   --private         自用包：前端用**本机工作树**的产物（含未提交改动，不追修订）。
+#                     与 --rev / --web-dist 互斥。
+#   --real-trading    前端带 VITE_ENABLE_REAL_TRADING=true 构建（实盘 UI 可见：
+#                     底部栏出现「实盘交易」入口）。这是**双开关的前半**：后端那半
+#                     由目标机 pack.env 的 ENABLE_REAL_TRADING 决定，两半都开才真的
+#                     能用。默认关——可见即是**显式决定**，不要把这类包随手发给第三方。
 #   --web-dist=DIR    直接指定前端产物目录（跳过构建）。
 #   --rev=REF         干净检出用哪个修订（默认 HEAD）。
 #   --require-clean   工作树有未提交的跟踪改动就拒绝出包（正式发布用）。
@@ -22,11 +22,9 @@
 #
 # 它做的事:
 #   ① 前置检查：工具、磁盘、工作树状态（有未提交改动时如实告知并记进 VERSION）
-#   ② 前端产物：**默认在干净检出里构建**。本机工作树里有未跟踪的
-#      electron/src/features/local-live/（不开源的本机实盘栏目），本机构建会把它
-#      整块打进 dist-react/，而两份便携包都从那里取 web/ —— 干净检出里没有那个
-#      目录，产物天然是公开形态（与 scripts/deploy_frontend.sh 里
-#      「部署公开版本：改用干净检出」同一招，这里把它自动化）。
+#   ② 前端产物：**默认在干净检出里构建**——修订可追溯、不带未提交改动
+#      （2026-10-08 起实盘栏目已入仓，干净检出与工作树的差别只剩这一条；
+#      在此之前这里拦的是「未跟踪的本机独有栏目被打进产物」）。
 #   ③ 组装出包：调 deploy/portable/build_windows_pack.sh。源码取**本机工作树**
 #      （models/、hpu 缓存这类运行期目录只在工作树里齐），只把前端换成 ② 的产物。
 #   ④ 出厂净化闸门随出包一起跑（排除清单 / 必备清单 / 内网地址 / 明文口令 /
@@ -76,7 +74,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$MODE_PRIVATE" ] && [ -n "$WEB_DIST_OPT" ] && fail "--private（本机产物）与 --web-dist 互斥"
-[ -n "$MODE_PRIVATE" ] && [ "$REV" != "HEAD" ] && fail "--private（本机产物）与 --rev 互斥：干净检出不带未跟踪的本机栏目"
+[ -n "$MODE_PRIVATE" ] && [ "$REV" != "HEAD" ] && fail "--private（本机产物）与 --rev 互斥：自用包就是本机工作树，修订追不得"
 
 # ── 1. 前置检查 ───────────────────────────────────────────────
 for tool in git python3 npm curl; do
@@ -143,7 +141,7 @@ if [ -n "$WEB_DIST_OPT" ]; then
 elif [ -n "$MODE_PRIVATE" ]; then
     WEB_DIST="${PROJECT_ROOT}/electron/dist-react"
     FRONTEND_DESC="本机工作树产物（自用包）"
-    log "自用包：在本机工作树构建前端（含未跟踪的 local-live 实盘栏目）..."
+    log "自用包：在本机工作树构建前端（含未提交改动，不追修订）..."
     build_react "${PROJECT_ROOT}/electron"
 else
     WEB_DIST="${CLEAN_SRC}/electron/dist-react"
@@ -153,12 +151,8 @@ else
     git -C "$PROJECT_ROOT" worktree add --detach --quiet "$CLEAN_SRC" "$REV" \
         || fail "git worktree add 失败（${CLEAN_SRC}）"
     WT_ACTIVE=1
-    # 本机独有栏目在干净检出里必须**不存在**（它在 .gitignore 里，没提交过）。
-    # 真出现了说明有人把它提交了 —— 那正是「不开源的部分」要出事的那一天，当场停。
-    if [ -e "${CLEAN_SRC}/electron/src/features/local-live" ]; then
-        fail "干净检出里出现了 local-live/：它被提交进版本库了（.gitignore 被绕过？）。
-       这份检出不能用来做公开形态的产物，先把它从版本库里清掉"
-    fi
+    # （旧的「干净检出里不许出现 local-live/」检查已删，2026-10-08：栏目源码已入仓，
+    #   干净检出里**就该**有它；缺了反而是拿了入仓之前的旧修订。）
     # 依赖树（根 1.4G + electron 80M）不重装，软链本机那份：vite/pnpm 这套（依赖
     # 本来就是软链）一直这么工作，构建的读写都落在工作树的输出目录里。
     ln -sfn "${PROJECT_ROOT}/node_modules" "${CLEAN_SRC}/node_modules"
@@ -180,10 +174,6 @@ fi
 # ── 3. 组装 + 出包（闸门在里面跑）─────────────────────────────
 log "组装便携包（源码取本机工作树；闸门随出包一起跑）..."
 export WEB_DIST
-if [ -n "$MODE_PRIVATE" ]; then
-    export PACK_ALLOW_LOCAL_LIVE=1
-    warn "自用包：显式放行本机独有实盘栏目（这一包**不要**发给第三方）"
-fi
 bash "${PORTABLE}/build_windows_pack.sh"
 
 # ── 4. 交付摘要 ───────────────────────────────────────────────

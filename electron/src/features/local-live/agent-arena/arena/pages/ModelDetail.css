@@ -1,0 +1,305 @@
+/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
+/* ModelDetail —— 战报头 + KPI 带 + 指标矩阵 + 明细四表（2026-09-10 改版）
+   设计口径：模型色 `--mdp-accent` 只用于身份标识（页头条 / 图表线），
+   涨跌一律红涨绿跌（A股惯例，全站统一），不给数字涂装饰色。 */
+
+.qm-arena-root .mdp-page {
+  --mdp-accent: #5a5a5a;
+}
+
+/* ---------- 页头 ---------- */
+.qm-arena-root .mdp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 2px solid #000;
+  border-left: 8px solid var(--mdp-accent);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--mdp-accent) 8%, #fff), #fff 55%);
+}
+.qm-arena-root .mdp-back {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: #000;
+  text-decoration: none;
+  padding: 5px 10px;
+  border: 2px solid #000;
+  background: #fff;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.qm-arena-root .mdp-back:hover { background: #000; color: #fff; }
+.qm-arena-root .mdp-logo { font-size: 24px; line-height: 1; }
+.qm-arena-root .mdp-name {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+}
+.qm-arena-root .mdp-head-sub {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: 'Courier New', monospace;
+}
+.qm-arena-root .mdp-live {
+  padding: 1px 7px;
+  border: 1px solid var(--primary-color);
+  color: var(--primary-color);
+  font-weight: 700;
+  font-size: 10px;
+}
+.qm-arena-root .mdp-sim {
+  padding: 1px 7px;
+  border: 1px dashed #999;
+  color: #777;
+  font-size: 10px;
+}
+.qm-arena-root .mdp-head-meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: 'Courier New', monospace;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+.qm-arena-root .mdp-head-meta em {
+  font-style: normal;
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #aaa;
+  border-left: 1px solid #ddd;
+  padding-left: 6px;
+}
+.qm-arena-root .mdp-head-meta em:first-child { border-left: none; padding-left: 0; }
+
+/* ---------- 战报头 ---------- */
+.qm-arena-root .mdp-hero {
+  display: grid;
+  grid-template-columns: 1.6fr repeat(5, 1fr);
+  border: 2px solid #000;
+  background: #fff;
+  box-shadow: 5px 5px 0 #000;
+  margin-bottom: 18px;
+}
+.qm-arena-root .mdp-hero-main {
+  padding: 16px 20px 14px;
+  border-right: 2px solid #000;
+  background: repeating-linear-gradient(45deg, transparent 0 6px, color-mix(in srgb, var(--mdp-accent) 6%, transparent) 6px 7px);
+}
+.qm-arena-root .mdp-hero-k,
+.qm-arena-root .mdp-kpi-k {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  font-family: 'Courier New', monospace;
+}
+.qm-arena-root .mdp-hero-v {
+  font-size: clamp(28px, 2.6vw, 40px);
+  font-weight: 700;
+  line-height: 1.05;
+  margin-top: 6px;
+  letter-spacing: -1px;
+  font-family: 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+}
+.qm-arena-root .mdp-hero-s {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+}
+.qm-arena-root .mdp-kpi {
+  padding: 16px 14px 14px;
+  border-right: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+}
+.qm-arena-root .mdp-kpi:last-child { border-right: none; }
+.qm-arena-root .mdp-kpi-v {
+  margin-top: 8px;
+  font-size: 19px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 指标矩阵 ---------- */
+.qm-arena-root .mdp-matrix {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.qm-arena-root .mdp-cell {
+  border: 2px solid #000;
+  background: #fff;
+  padding: 0 14px 8px;
+}
+.qm-arena-root .mdp-cell-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-family: 'Courier New', monospace;
+  padding: 10px 0 8px;
+  margin-bottom: 4px;
+  border-bottom: 2px solid #000;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 口径标记：实盘模型下这三组指标仍来自模拟盘回放，必须一眼看出数据范围 */
+.qm-arena-root .mdp-scope {
+  margin-left: auto;
+  font-size: 8.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #8a6d00;
+  background: #fffbe6;
+  border: 1px solid #f2e2ac;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+.qm-arena-root .mdp-metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px dashed #e3e3e3;
+}
+.qm-arena-root .mdp-metric:last-child { border-bottom: none; }
+.qm-arena-root .mdp-metric-k {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+}
+.qm-arena-root .mdp-metric-v {
+  font-size: 12.5px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.qm-arena-root .mdp-metric-v em {
+  display: block;
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+.qm-arena-root .mdp-metric-v.up { color: var(--up-color); }
+.qm-arena-root .mdp-metric-v.down { color: var(--down-color); }
+
+/* ---------- 页内说明 / 统计条 ---------- */
+.qm-arena-root .mdp-note {
+  margin: 0 0 12px;
+  padding: 6px 10px;
+  border-left: 3px solid #000;
+  background: var(--bg-tertiary);
+  font-family: 'Courier New', monospace;
+  font-size: 10.5px;
+  color: #444;
+  line-height: 1.7;
+}
+.qm-arena-root .mdp-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border: 1.5px solid #000;
+  background: #fff;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.qm-arena-root .mdp-strip em {
+  font-style: normal;
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #999;
+  margin-right: 6px;
+}
+
+/* ---------- 持仓变动时间线（PositionHistory） ---------- */
+.qm-arena-root .tag-live {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: 8.5px;
+  font-weight: 700;
+  color: #b45309;
+  border: 1px solid #e3b778;
+  background: #fdf6e7;
+  vertical-align: 1px;
+}
+
+.qm-arena-root .pos-act { font-family: 'Courier New', monospace; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.qm-arena-root .pos-act.up { color: var(--up-color); }
+.qm-arena-root .pos-act.down { color: var(--down-color); }
+.qm-arena-root .pos-changes { display: flex; flex-direction: column; gap: 4px; }
+.qm-arena-root .pos-change {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 2px 7px;
+  border-left: 3px solid #999;
+  background: #fafafa;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+}
+.qm-arena-root .pos-change.open { border-left-color: #e0483e; }
+.qm-arena-root .pos-change.add { border-left-color: #f08a2e; }
+.qm-arena-root .pos-change.reduce { border-left-color: #12b886; }
+.qm-arena-root .pos-change.close { border-left-color: #2f6fb3; }
+.qm-arena-root .pos-change-code { font-size: 9.5px; color: #999; font-variant-numeric: tabular-nums; }
+.qm-arena-root .pos-change em { font-style: normal; font-weight: 700; }
+.qm-arena-root .pos-change.open em, .qm-arena-root .pos-change.add em { color: #e0483e; }
+.qm-arena-root .pos-change.reduce em, .qm-arena-root .pos-change.close em { color: #12b886; }
+.qm-arena-root .pos-change-qty { font-size: 10px; color: #777; font-variant-numeric: tabular-nums; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 1400px) {
+  .qm-arena-root .mdp-matrix { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 1100px) {
+  .qm-arena-root .mdp-hero { grid-template-columns: 1fr 1fr 1fr; }
+  .qm-arena-root .mdp-hero-main { grid-column: 1 / -1; border-right: none; border-bottom: 2px solid #000; }
+}
+
+@media (max-width: 900px) {
+  .qm-arena-root .mdp-matrix { grid-template-columns: 1fr; }
+  .qm-arena-root .mdp-hero { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 560px) {
+  .qm-arena-root .mdp-name { font-size: 17px; }
+  .qm-arena-root .mdp-hero-v { font-size: 26px; }
+  .qm-arena-root .mdp-kpi-v { font-size: 15px; }
+  .qm-arena-root .mdp-head-meta { width: 100%; }
+}
