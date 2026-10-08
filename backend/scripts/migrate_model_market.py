@@ -73,6 +73,12 @@ def _rewrite_display_name(name: str, old_market: str, new_market: str) -> str:
     return name
 
 
+#: notes 里最多列几个列名（其余只给计数——被截断而不自知是排障事故）。
+_NOTE_COLUMNS = 5
+#: 裁决字段里最多列几个列名。
+_VERDICT_COLUMNS = 10
+
+
 def evaluate_precheck(
     *,
     library_ready: bool,
@@ -93,7 +99,15 @@ def evaluate_precheck(
     if not library_ready:
         notes.append("因子库不可用（status.ready=False）")
     if missing_columns:
-        notes.append(f"执行侧要读的列在库中取不到：{list(missing_columns)[:5]}")
+        listed = list(missing_columns)[:_NOTE_COLUMNS]
+        hidden = len(missing_columns) - len(listed)
+        # 截断必须显式：只列 5 个而不说「还有多少」会把「缺 12 列」读成「缺 5 列」。
+        tail = (
+            f"（共 {len(missing_columns)} 列，其余见 missing_mapped_fields）"
+            if hidden
+            else ""
+        )
+        notes.append(f"执行侧要读的列在库中取不到：{listed}{tail}")
     if not hash_ok:
         notes.append(
             "schema 漂移：pin 的 factor_schema_hash 与当前列集不同（列名增减；按名取数"
@@ -104,6 +118,55 @@ def evaluate_precheck(
         "notes": notes,
         "precheck": "PASS" if ready else "FAIL",
     }
+
+
+def execution_feature_columns(meta: dict) -> list[str]:
+    """执行侧**真正要读的列**：``feature_columns``（旧键 ``features``）优先。
+
+    判据必须对齐执行侧：执行读 feature_columns，``factor_field_sources`` 只是
+    「逻辑名 → 物理列」的解析表。只遍历映射的话，映射为空的老模型整个缺列检查被
+    静默跳过（本机实测 87 个 metadata.json 里 17 个空映射且都有 feature_columns
+    ——HK 模型各 8 列，另有 1 个 CN 模型 136 列）→ 预检绿灯、跑起来缺列。同款兜底
+    见推理预检（``script_runner``：features 为空时回退 field_sources）。
+    """
+    features = list(meta.get("feature_columns") or meta.get("features") or [])
+    return features or list(meta.get("factor_field_sources") or {})
+
+
+def build_verdict(
+    *,
+    data_dir: str | Path,
+    factor_source: str,
+    coverage: str,
+    missing_columns: list[str],
+    library_ready: bool,
+    hash_ok: bool,
+) -> dict:
+    """装配完整的迁移后就绪裁决（纯函数）：**唯一装配点**，migrate() 与测试共用。
+
+    单拎出来的理由：装配本身是要害。把 ``**evaluate_precheck(...)`` 的展开丢掉、
+    或退回内联判据，只测 `evaluate_precheck` 的用例会全绿而 CLI 的 PASS⇒0 语义
+    已经变了——2026-10-08 评审指出的「测试没钉住接线」正是这个形状。装配固定成
+    可测函数后，「漂移⇒PASS 且 exit 0」这类口径必须从装配层过。
+    """
+    missing = list(missing_columns)
+    return {
+        "data_dir": str(data_dir),
+        "factor_source": factor_source,
+        "coverage": coverage,
+        "missing_mapped_fields": missing[:_VERDICT_COLUMNS],
+        **evaluate_precheck(
+            library_ready=library_ready,
+            missing_columns=missing,
+            hash_ok=hash_ok,
+        ),
+    }
+
+
+def exit_code_for(result: dict | None) -> int:
+    """CLI 退出码口径：**只有裁决 FAIL 才非零**（无 verification 的路径视为 0）。"""
+    verification = (result or {}).get("verification") or {}
+    return 1 if verification.get("precheck") == "FAIL" else 0
 
 
 async def migrate(
@@ -270,29 +333,30 @@ async def migrate(
     }
     _valid, missing_features = split_features_by_availability(
         reader,
-        list(field_sources),
+        execution_feature_columns(disk_meta),
         field_sources,
         anchor=source,
-        columns_of=lambda lib: status.columns if lib == source else reader.describe(lib).columns,
+        columns_of=lambda lib: (
+            status.columns if lib == source else reader.describe(lib).columns
+        ),
     )
-    missing = [field_sources[name] for name in missing_features]
+    # 报「取不到的列」而非特征键：无映射时 name 本身就是列名（同 script_runner 的
+    # `.get(name, name)` 兜底）。
+    missing = [field_sources.get(name, name) for name in missing_features]
     hash_ok = (not disk_meta.get("factor_schema_hash")) or (
         disk_meta["factor_schema_hash"] == status.schema_hash
     )
     # 裁决口径见 evaluate_precheck：缺列才硬失败，哈希漂移只标记（原实现把漂移也算
     # 硬失败，会让成功的迁移以 exit 1 收场；本脚本服务的 CUSTOM→CN 场景跨过库加列期
     # 就会命中，而 pin 过期与「能不能推理」是两回事）。
-    verdict = {
-        "data_dir": str(data_dir),
-        "factor_source": source,
-        "coverage": f"{status.min_date}~{status.max_date}",
-        "missing_mapped_fields": missing[:10],
-        **evaluate_precheck(
-            library_ready=bool(status.ready),
-            missing_columns=missing,
-            hash_ok=bool(hash_ok),
-        ),
-    }
+    verdict = build_verdict(
+        data_dir=data_dir,
+        factor_source=source,
+        coverage=f"{status.min_date}~{status.max_date}",
+        missing_columns=missing,
+        library_ready=bool(status.ready),
+        hash_ok=bool(hash_ok),
+    )
     log.info("迁移后就绪校验: %s", json.dumps(verdict, ensure_ascii=False))
     return {
         **plan,
@@ -327,8 +391,7 @@ def main() -> int:
         )
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    verification = result.get("verification") or {}
-    return 1 if verification and verification.get("precheck") == "FAIL" else 0
+    return exit_code_for(result)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,13 @@
 
 判据（与推理门禁同口径）：库不可用 / 执行侧要读的列取不到 ⇒ FAIL；仅哈希不同 ⇒ PASS
 但必须把漂移写进 `notes`（可见，不必可阻断）。
+
+**2026-10-08 评审补的两条（本文件后半）**：
+1. 只测 ``evaluate_precheck`` 钉不住**接线**——装配（`build_verdict`）或退出码口径
+   （`exit_code_for`）被改回内联判据时，前面 5 条全绿而 CLI 语义已变。故补装配层用例。
+2. 空 `factor_field_sources` 的模型要让检查回退到 `feature_columns`，否则缺列检查
+   被整个跳过（实测 87 个 metadata.json 里 17 个属此类，含 1 个 136 列的 CN 模型）。
+   故抽出 `execution_feature_columns` 并钉住回退口径。
 """
 
 from __future__ import annotations
@@ -40,7 +47,9 @@ def test_hash_drift_alone_is_not_fatal():
 def test_missing_columns_is_fatal():
     """执行侧要读的列取不到 ⇒ 硬失败，且 note 要指名道姓（便于定位）。"""
     verdict = _evaluate(
-        library_ready=True, missing_columns=["f_l2_net_inflow", "f_l2_bid_ratio"], hash_ok=True
+        library_ready=True,
+        missing_columns=["f_l2_net_inflow", "f_l2_bid_ratio"],
+        hash_ok=True,
     )
 
     assert verdict["precheck"] == "FAIL"
@@ -70,3 +79,74 @@ def test_missing_columns_win_over_drift_when_both_present():
     assert verdict["precheck"] == "FAIL"
     joined = " ".join(verdict["notes"])
     assert "f_x" in joined and "漂移" in joined
+
+
+def test_execution_columns_fall_back_to_feature_columns():
+    """空映射的老模型必须回退到 feature_columns——否则缺列检查整个被跳过。
+
+    实测（2026-10-08，`/app/models/users`）：87 个 metadata.json 里 17 个
+    `factor_field_sources` 为空，且 17 个都有 feature_columns（HK 模型各 8 列，
+    另有 1 个 CN 模型 136 列）。只遍历映射的旧实现对这批模型恒 `missing=[]`，
+    预检绿灯、迁移后推理缺列。
+    """
+    from backend.scripts.migrate_model_market import execution_feature_columns
+
+    assert execution_feature_columns(
+        {"feature_columns": ["a", "b"], "factor_field_sources": {"x": "a"}}
+    ) == ["a", "b"], "执行读的是 feature_columns，不是映射键"
+    assert execution_feature_columns(
+        {"feature_columns": [], "factor_field_sources": {"x": "col_x", "y": "col_y"}}
+    ) == ["x", "y"], "没写 feature_columns 的老模型回退映射键"
+    assert execution_feature_columns({"features": ["old_key"]}) == ["old_key"], (
+        "旧键 features"
+    )
+    assert execution_feature_columns({}) == [], (
+        "两处都空：没有可检查的列（调用方如实报空）"
+    )
+
+
+def test_build_verdict_wires_precheck_into_exit_code():
+    """装配层口径：漂移单独出现 ⇒ PASS 且退出码 0——**接线本身**要被钉住。
+
+    单测 `evaluate_precheck` 时，把 `build_verdict` 里的展开丢掉（或退回内联判据）
+    不会有任何用例变红，而 CLI 的 PASS⇒0 语义已经变了（评审指出的正是这个形状）。
+    """
+    from backend.scripts.migrate_model_market import build_verdict, exit_code_for
+
+    verdict = build_verdict(
+        data_dir="/app/models/x",
+        factor_source="l1_factors",
+        coverage="2020-01-01~2026-09-30",
+        missing_columns=[],
+        library_ready=True,
+        hash_ok=False,
+    )
+
+    assert verdict["precheck"] == "PASS", "漂移不得阻断（装配层同样口径）"
+    assert verdict["schema_hash_ok"] is False and verdict["notes"], "漂移仍须可见"
+    assert exit_code_for({"verification": verdict}) == 0
+
+    bad = build_verdict(
+        data_dir="/app/models/x",
+        factor_source="l1_factors",
+        coverage="c",
+        missing_columns=[f"f{i}" for i in range(12)],
+        library_ready=True,
+        hash_ok=True,
+    )
+
+    assert bad["precheck"] == "FAIL"
+    assert len(bad["missing_mapped_fields"]) == 10, "裁决字段最多列 10 个列名"
+    assert exit_code_for({"verification": bad}) == 1
+    assert exit_code_for({}) == 0 and exit_code_for(None) == 0, "无裁决的路径不改退出码"
+
+
+def test_truncated_note_reports_the_total_count():
+    """notes 截断必须带总数：只列 5 个而不说还有多少，会把「缺 12 列」读成「缺 5 列」。"""
+    verdict = _evaluate(
+        library_ready=True, missing_columns=[f"f{i}" for i in range(12)], hash_ok=True
+    )
+
+    note = next(n for n in verdict["notes"] if "取不到" in n)
+    assert "f0" in note and "f11" not in note, "notes 只列前 5 个"
+    assert "12" in note, "截断时必须报总列数"
