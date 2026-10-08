@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components-v2/ui/Ca
 import { Button } from '../components-v2/ui/Button';
 import { Badge } from '../components-v2/ui/Badge';
 import { Factor, FactorQuality, UniverseInfo } from '../types-v2';
+import type { PageId } from '../components-v2/layout/Layout';
 import { formatNumber, getQualityBadgeClass } from '../utils-v2';
 import { getFactors, getFactorDetail, getUniverses, getFactoryFactors, classifyQuality, UNIVERSE_LABELS } from '../services-v2/api';
 import { alphaAgentService, MarketInfo } from '../services/alphaAgentService';
@@ -37,7 +38,11 @@ const MARKET_COLORS: Record<string, string> = {
   us_stock: 'bg-green-500/15 text-green-400 border-green-500/30',
 };
 
-export const FactorLibraryPage: React.FC<{ onNavigate?: (page: string) => void }> = ({ onNavigate }) => {
+// `onNavigate` 收 `PageId` 而不是 `string`：同级的 HomePage / MiningDashboardPage /
+// Layout 都是这么写的，只有这里松了一格。松的代价是实打实的——回调最终落到
+// `setCurrentPage`，收 `string` 就意味着任何拼错的页面名都能编译通过，
+// 然后静默切到一个不存在的页（`currentPage === 'xxx'` 全不命中，白屏）。
+export const FactorLibraryPage: React.FC<{ onNavigate?: (page: PageId) => void }> = ({ onNavigate }) => {
   const { startBacktestTask } = useTaskContext();
   const [factors, setFactors] = useState<Factor[]>([]);
   const [filteredFactors, setFilteredFactors] = useState<Factor[]>([]);
@@ -83,6 +88,9 @@ export const FactorLibraryPage: React.FC<{ onNavigate?: (page: string) => void }
         const apiFactors: Factor[] = resp.data.factors.map((f: any) => {
           const bt = f.backtestResults || {};
           return {
+            // 先透传 normalizeAgentFactor 产出的全部键（rre/pfsQuality/annTurnover…），
+            // 下面的显式赋值再覆盖需要归一化的字段——漏字段=新指标在列表页静默消失。
+            ...f,
             factorId: f.factorId || '',
             factorName: f.factorName || 'Unknown',
             factorExpression: f.factorExpression || '',

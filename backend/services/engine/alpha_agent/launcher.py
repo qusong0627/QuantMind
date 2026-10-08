@@ -22,7 +22,22 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from backend.shared.utc_datetime import UTC, to_utc_iso
+
 logger = logging.getLogger(__name__)
+
+
+def _created_at_iso(ts: Any) -> str | None:
+    """任务创建时刻 → ISO-8601 UTC（带 Z）；取不到就是 None。
+
+    `created_at` 在 `EvolutionTask` 里是 `time.time()` 的 epoch 秒。前端那个全局进度
+    面板靠它回答「这个任务是刚刚起的、还是我去吃饭前就挂着的那一个」，所以**绝不能**
+    在缺失时回落到 `now()`——那会把一个几小时前的僵尸任务显示成刚提交的。
+    """
+    try:
+        return to_utc_iso(datetime.fromtimestamp(float(ts), UTC))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 class TaskStatus(str, Enum):
@@ -146,6 +161,9 @@ class AlphaAgentLauncher:
         return {
             "task_id": task.task_id,
             "user_id": task.user_id,
+            # 前端全局进度面板据此排序并显示「开始于」；此前这个字段只在磁盘
+            # task_state.json 里有，状态接口不返回，前端只能拿不到就填 now()。
+            "created_at": _created_at_iso(task.created_at),
             "status": task.status.value,
             "progress": task.progress,
             "phase": task.phase,
@@ -326,6 +344,20 @@ class AlphaAgentLauncher:
         task_log_dir = self._log_dir / task.task_id
         task_log_dir.mkdir(parents=True, exist_ok=True)
 
+        # 因子池检索注入（单通道：只写提示词文件，零运行时副作用——绝不碰
+        # base_factors.json，否则 LLM 会把历史摘要当可用基础特征送进因子代码
+        # 运行时，理由见 pool_service 模块 docstring）。任何失败都空注入，
+        # 绝不拦住一次挖矿。
+        from backend.services.engine.mining_plugins import pool_service
+
+        injection = await pool_service.prepare_injection(
+            user_id=task.user_id,
+            market=task.market,
+            universe=task.universe,
+            task_id=task.task_id,
+            log_dir=task_log_dir,
+        )
+
         # Build environment
         openai_base = (
             os.getenv("OPENAI_BASE_URL")
@@ -377,6 +409,9 @@ class AlphaAgentLauncher:
             env["OPENAI_API_KEY"] = openai_api_key
         if chat_model:
             env["CHAT_MODEL"] = chat_model
+        if injection.path is not None:
+            # rd_loop_wrapper._build_prompt_suffix 读这个文件追加「历史挖掘记忆」段
+            env["QMF_POOL_CONTEXT_PATH"] = str(injection.path)
 
         # 补齐 RD-Agent litellm 后端需要的 LITELLM_ 前缀变量（deepseek 优先）
         if llm_overrides:
@@ -441,6 +476,11 @@ class AlphaAgentLauncher:
             )
             task.process = process
             self._persist_task(task)
+
+            # spawn 成功才记检索疲劳（提示词已随子进程启动送达）；
+            # mark_retrieved 自身吞异常，失败最多少计一次，绝不影响挖掘
+            if injection.factor_ids:
+                await pool_service.mark_retrieved(injection.factor_ids)
 
             while process.poll() is None:
                 if task._cancel_requested:

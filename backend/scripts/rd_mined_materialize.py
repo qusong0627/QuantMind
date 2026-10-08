@@ -8,11 +8,14 @@
    QuantDB parquet 生成、qfq + ``$factor`` + 富化列），产出全历史因子值；
 3. 值级查重：逐日截面秩相关（日均 |ρ|）对照 CUSTOM ``l1_factors`` +
    ``rd_mined`` 既有列，≥ 阈值（默认 0.9）判为重复因子拒入；
-4. 经 ``merge_factor_into_source`` 按交易日写回
+4. 物化门禁（P1）：PFS／RRE／池内 IC 分位／年化换手／扣费年化五项，默认
+   全软（只告警并落 manifest + ``metadata.materialization.gates``）；
+   yaml/env 升级为 hard 后失败即拒（status=``rejected_gate``，--force 重做）；
+5. 经 ``merge_factor_into_source`` 按交易日写回
    ``$QM_QUANTCUSTOM_DATA_DIR/6_ml_datasets/rd_mined/dt=*/data.parquet``
    （列名 = ``feature_column_name``，``rd_`` 前缀 + SQL 安全）；
-5. 收尾对齐各分区列集（训练读取层无 union_by_name，列漂移会响亮失败）；
-6. ``--register`` 时刷新字段注册并发布/更新训练目录版本（列集未变则跳过）。
+6. 收尾对齐各分区列集（训练读取层无 union_by_name，列漂移会响亮失败）；
+7. ``--register`` 时刷新字段注册并发布/更新训练目录版本（列集未变则跳过）。
 
 清单文件 ``_materialize_manifest.json`` 记录逐因子状态（materialized /
 rejected_duplicate / error），支持断点续跑；``--force`` 重做。
@@ -143,16 +146,14 @@ def _should_materialize(
     if force:
         return True, "force"
     status = str(entry.get("status") or "")
-    if status in ("materialized", "rejected_duplicate"):
+    if status in ("materialized", "rejected_duplicate", "rejected_gate"):
         # 同 factor_id 的代码被改写（同任务重跑会 UPDATE factor_code）时，
         # 旧值/旧判定都随之失效，必须按新代码重算。
         stored = str(entry.get("code_fp") or "")
         current = code_fingerprint(str(row.get("factor_code") or "")) or ""
         if stored and current and stored != current:
             return True, "code_changed"
-        return False, (
-            "already_materialized" if status == "materialized" else "rejected_duplicate"
-        )
+        return False, ("already_materialized" if status == "materialized" else status)
     return True, "retry"
 
 
@@ -661,7 +662,7 @@ async def _query_candidates(
         await RDAgentFactorPersistence().ensure_tables()
 
     clauses: list[str] = []
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = {"default_market": DEFAULT_MARKET}
     if factor_ids:
         clauses.append("factor_id = ANY(:ids)")
         params["ids"] = list(factor_ids)
@@ -670,19 +671,24 @@ async def _query_candidates(
         params["task_id"] = task_id
     if market:
         clauses.append("COALESCE(market, :default_market) = :market")
-        params["default_market"] = DEFAULT_MARKET
         params["market"] = market
     where = " AND ".join(clauses) if clauses else "TRUE"
     sql = (
         "SELECT factor_id, factor_name, factor_code, factor_formulation, "
-        "COALESCE(market, :default_market) AS market, status "
+        "COALESCE(market, :default_market) AS market, "
+        "COALESCE(universe, '') AS universe, user_id, status, "
+        # 门禁输入（P1）：从回测 metadata 取扁平指标；SQL 侧取文本再转 float，
+        # 不依赖 JSONB 驱动的反序列化行为。
+        "metadata_json->'quality'->>'pfs' AS pfs, "
+        "metadata_json->>'rre' AS rre, "
+        "metadata_json->>'ann_turnover' AS ann_turnover, "
+        "metadata_json->>'ann_return_net' AS ann_return_net "
         "FROM rd_agent_factors "
         f"WHERE {where} ORDER BY created_at"
     )
     if limit and limit > 0:
         sql += " LIMIT :limit"
         params["limit"] = int(limit)
-        params.setdefault("default_market", DEFAULT_MARKET)
     async with get_session(read_only=True) as session:
         rows = (await session.execute(text(sql), params)).mappings().all()
     return [dict(row) for row in rows]
@@ -695,6 +701,65 @@ async def _load_candidates(args: argparse.Namespace) -> list[dict[str, Any]]:
         market=args.market,
         limit=int(args.limit or 0),
     )
+
+
+# ── 物化门禁（P1，软告警默认） ─────────────────────────────────────────
+
+
+def _as_float(value: Any) -> float | None:
+    """metadata 文本值 → float；解析失败/缺失一律 None（门禁判 skipped）。"""
+    try:
+        return None if value in (None, "") else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _evaluate_gates(row: Mapping[str, Any]) -> Any:
+    """装配 GateContext → run_gates。池分位查询失败降级为 None（判 skipped），
+    门禁本身异常由 registry 吞并记 skipped——物化不因门禁故障中断。"""
+    from backend.services.engine.mining_plugins import GateContext, run_gates
+
+    factor_id = str(row.get("factor_id") or "")
+    market = str(row.get("market") or DEFAULT_MARKET)
+    universe = str(row.get("universe") or "")
+    metrics = {
+        "pfs": _as_float(row.get("pfs")),
+        "rre": _as_float(row.get("rre")),
+        "ann_turnover": _as_float(row.get("ann_turnover")),
+        "ann_return_net": _as_float(row.get("ann_return_net")),
+    }
+    pool_ic_pct: float | None = None
+    user_id = str(row.get("user_id") or "")
+    if user_id:
+        try:
+            from backend.services.engine.mining_plugins import pool_service
+
+            pool_ic_pct = await pool_service.ic_pool_percentile(
+                user_id=user_id,
+                market=market,
+                universe=universe,
+                factor_id=factor_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - 分位不可得 → 门禁 skipped
+            logger.warning("池内 IC 分位查询失败（门禁按不可得处理）：%s", exc)
+    ctx = GateContext(
+        factor_id=factor_id,
+        market=market,
+        universe=universe,
+        metrics=metrics,
+        pool_ic_pct=pool_ic_pct,
+    )
+    return run_gates(ctx)
+
+
+def _log_gate_outcomes(decision: Any, prefix: str = "  ") -> None:
+    for outcome in decision.outcomes:
+        if outcome.status == "fail":
+            logger.warning(
+                "%s门禁 %s[%s]：%s", prefix, outcome.key, outcome.mode, outcome.message
+            )
+        elif outcome.status == "skipped":
+            logger.info("%s门禁 %s：%s", prefix, outcome.key, outcome.message)
 
 
 async def _update_factor_meta(factor_id: str, entry: Mapping[str, Any]) -> None:
@@ -916,44 +981,11 @@ def probe_run_lock() -> bool:
 
 
 def tail_web_log(max_lines: int = 120, max_bytes: int = 256 * 1024) -> dict[str, Any]:
-    """后台物化日志尾部（面板展示用）；文件不存在返回 exists=False。
+    """后台物化日志尾部（面板展示用）；实现见 ``backend.shared.log_tail``
+    （符号链接拒读等安全约束在两处面板共用一份，不拷贝）。"""
+    from backend.shared.log_tail import tail_log_file
 
-    符号链接一律拒读：日志路径可被同挂载域的低权限写者摆成任意文件的链接，
-    顺着读会把面板变成别人的文件浏览器（读到的内容进管理员浏览器）。
-    """
-    path = _web_log_path()
-    if path.is_symlink():
-        return {
-            "path": str(path),
-            "exists": False,
-            "lines": [],
-            "note": "路径是符号链接，拒绝读取",
-        }
-    if not path.is_file():
-        return {"path": str(path), "exists": False, "lines": []}
-    size = path.stat().st_size
-    truncated = size > max_bytes
-    with open(path, "rb") as fh:
-        if truncated:
-            start = size - max_bytes
-            # 边界前一字节是换行 → 截断点恰好落在行首，首行是完整的，不能丢
-            fh.seek(start - 1)
-            boundary_aligned = fh.read(1) == b"\n"
-            fh.seek(start)
-        else:
-            boundary_aligned = True
-        raw = fh.read()
-    content = raw.decode("utf-8", errors="replace")
-    lines = content.splitlines()
-    if truncated and not boundary_aligned and lines:
-        lines = lines[1:]  # 截断点落在行中间：首行是半个行，丢弃残片
-    return {
-        "path": str(path),
-        "exists": True,
-        "size": size,
-        "truncated": truncated,
-        "lines": lines[-max(1, int(max_lines)) :],
-    }
+    return tail_log_file(_web_log_path(), max_lines=max_lines, max_bytes=max_bytes)
 
 
 async def materialize_overview(*, market: str = DEFAULT_MARKET) -> dict[str, Any]:
@@ -1104,6 +1136,10 @@ async def _run(args: argparse.Namespace) -> int:
                 column,
                 "（列名冲突，已消歧）" if column != base else "",
             )
+            try:
+                _log_gate_outcomes(await _evaluate_gates(row), prefix="    ")
+            except Exception as exc:  # noqa: BLE001 - 预演不因门禁装配失败中断
+                logger.warning("    [dry-run] 门禁判定失败：%s", exc)
             owners[column] = factor_id
         if len(todo) > 50:
             logger.info("  ... 其余 %d 条", len(todo) - 50)
@@ -1114,6 +1150,7 @@ async def _run(args: argparse.Namespace) -> int:
     stats = {
         "materialized": 0,
         "rejected_duplicate": 0,
+        "rejected_gate": 0,
         "errors": 0,
         "corr_unverified": 0,  # 值级查重没算出结果的因子数（门静默退化可见性）
     }
@@ -1194,6 +1231,28 @@ async def _run(args: argparse.Namespace) -> int:
                         rho,
                         args.corr_threshold,
                     )
+            # 物化门禁（P1，软告警默认）：值级查重（既有硬拒）之后、发布之前。
+            # 软失败只记录（manifest + metadata.materialization.gates）；
+            # hard 失败拒入账（rejected_gate，--force 可重做）。
+            decision = await _evaluate_gates(row)
+            _log_gate_outcomes(decision)
+            if decision.rejected:
+                entry = {
+                    "status": "rejected_gate",
+                    "column": column,
+                    "name": name,
+                    "gates": decision.to_dict(),
+                    "code_fp": code_fingerprint(str(row.get("factor_code") or "")),
+                    "at": _now_iso(),
+                }
+                manifest[factor_id] = entry
+                _save_manifest(lib_root, manifest)
+                await _update_factor_meta(factor_id, entry)
+                owners[column] = factor_id
+                stats["rejected_gate"] += 1
+                logger.warning("  硬门禁未过，拒绝入账（--force 可重做）")
+                continue
+            gate_entry = decision.to_dict()
             # 先置脏再写：_write_factor 可能半途失败留下部分分区，尾部对齐不可跳过
             dirty_library = True
             written = _write_factor(values, column)
@@ -1208,6 +1267,7 @@ async def _run(args: argparse.Namespace) -> int:
                 "corr_against": matched
                 if rho is not None and rho >= _CORR_WARN
                 else None,
+                "gates": gate_entry,
                 "code_fp": code_fingerprint(str(row.get("factor_code") or "")),
                 "at": _now_iso(),
             }

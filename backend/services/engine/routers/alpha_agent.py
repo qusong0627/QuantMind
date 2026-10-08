@@ -11,10 +11,14 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # pandas 在函数内按需 import；这里只为字符串注解提供名字
+    import pandas as pd
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
 from backend.services.engine.alpha_agent.launcher import get_launcher
@@ -83,25 +87,81 @@ _backtest_processes: dict[str, subprocess.Popen] = {}
 _backtest_cancelled: set[str] = set()
 
 
-async def _fetch_profile_llm_config(user_id: str, tenant_id: str):
-    """读取用户个人中心「AI 服务配置」（Profile 的 api_key/llm_base_url/llm_model）。
+# 向量检索（embedding）通道的 profile 字段。三个通道彼此独立：chat 供应商
+# （DeepSeek 等）通常没有 /embeddings 端点，必须能单独指向别的供应商或本地服务。
+_EMBEDDING_FIELDS = ("embedding_model", "embedding_base_url", "embedding_api_key")
 
-    与 AI-IDE 共享同一份凭证。无有效 Key 返回 None。
+# 掩码最短长度：短于这个长度就不做「首3末4」——9 位 Key 用「首3末4」会露出 7/9。
+# 真实供应商的 Key 远长于此，取 16 是留出安全边际而不是卡住谁。
+_MIN_MASKABLE_KEY_LEN = 16
+
+
+class EmbeddingFieldError(ValueError):
+    """embedding 字段值不是字符串（含字段名，供端点拼 400 文案）。"""
+
+
+def build_embedding_payload(body: dict) -> dict:
+    """从请求体挑出**显式传入**的 embedding 字段，组装 Profile 更新 payload。
+
+    未传 = 不动，``""`` = 清除，``null`` = 未传。这条语义是硬要求：如果改成
+    「全量提交」，用户只改模型名就会把已存的 Key 一起清空，子进程随即退回
+    容器级 ``EMBEDDING_*`` —— 表现为「改了个模型名，检索悄悄换了个供应商」，
+    而没有任何一层会报错。
+
+    非字符串一律拒绝，不做 ``str()`` 兜底：``str(["https://x/v1"])`` 得到
+    ``"['https://x/v1']"``，会以 200 落库、界面显示「已保存」，直到子进程
+    拿着这串垃圾去请求才以不透明错误失败。
     """
-    from backend.services.engine.alpha_agent.llm_client import (
-        LLMConfig,
-        _is_placeholder,
-        normalize_embedding_base_url,
-        parse_extra_headers,
-    )
+    payload: dict = {}
+    for key in _EMBEDDING_FIELDS:
+        if key not in body:
+            continue
+        value = body[key]
+        if value is None:
+            continue  # JSON null 是「没这个字段」，不是「清空」
+        if not isinstance(value, str):
+            raise EmbeddingFieldError(f"{key} 必须是字符串")
+        payload[key] = value.strip()
+    return payload
+
+
+def normalize_embedding_status(profile_data: dict | None) -> dict:
+    """Profile → 可回显的 embedding 状态（**绝不带明文 Key**）。
+
+    短 Key 不做「首3末4」掩码：那样等于把整条 Key 原样打印出来。
+
+    model/base_url 一并 strip：运行时取配置时会 strip（``"  "`` 等同未配置），
+    这里不 strip 就会出现「配置页显示已填、挖掘实际用容器默认值」的口径差。
+    """
+    data = profile_data or {}
+    key = str(data.get("embedding_api_key") or "").strip()
+    return {
+        "model": str(data.get("embedding_model") or "").strip(),
+        "base_url": str(data.get("embedding_base_url") or "").strip(),
+        "has_key": bool(key),
+        "key_masked": (
+            f"{key[:3]}****{key[-4:]}" if len(key) >= _MIN_MASKABLE_KEY_LEN else ""
+        ),
+    }
+
+
+def _profile_gateway() -> str:
+    return os.getenv("INTERNAL_API_GATEWAY_URL") or "http://127.0.0.1:8000"
+
+
+async def _fetch_profile_raw(user_id: str, tenant_id: str) -> dict | None:
+    """直接取用户 Profile 原始字段（不做「有没有 chat key」的判断）。
+
+    embedding 状态必须走这条：``_fetch_profile_llm_config`` 在 chat key 缺失时
+    返回 None，而两个通道是独立的——没配 chat 的账号照样要能看见自己的
+    embedding 配置。
+    """
+    from backend.shared.auth import get_internal_call_secret
 
     try:
-        from backend.shared.auth import get_internal_call_secret
-
-        gateway = os.getenv("INTERNAL_API_GATEWAY_URL") or "http://127.0.0.1:8000"
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
-                f"{gateway}/api/v1/profiles/{user_id}",
+                f"{_profile_gateway()}/api/v1/profiles/{user_id}",
                 headers={
                     "X-Internal-Call": get_internal_call_secret(),
                     "X-User-Id": user_id,
@@ -109,53 +169,175 @@ async def _fetch_profile_llm_config(user_id: str, tenant_id: str):
                 },
             )
         if resp.status_code != 200:
-            logger.warning("[alpha-agent] fetch profile %s llm config: http %s", user_id, resp.status_code)
+            logger.warning(
+                "[alpha-agent] fetch profile %s: http %s", user_id, resp.status_code
+            )
             return None
-        data = resp.json().get("data", {})
-        key = (data.get("api_key") or "").strip()
-        if not key or _is_placeholder(key):
-            return None
-        base = (data.get("llm_base_url") or "").strip()
-        model = (data.get("llm_model") or "").strip()
-        # 以用户设置为准：base/model 缺失视为未配置，回退 env 兜底
-        if not base or not model:
-            return None
-        base = base.rstrip("/")
-        # DeepSeek 等 Anthropic 兼容端点（.../anthropic）走 Anthropic 协议
-        protocol = "anthropic" if "/anthropic" in base or model.lower().startswith("astron") else "openai"
-        # OpenAI 兼容端点统一保留 /v1（实际调用/RD-Agent 子进程都按 {base}/chat/completions 拼接）
-        if protocol == "openai" and not base.endswith("/v1"):
-            base += "/v1"
-        headers = parse_extra_headers(data.get("llm_extra_headers"))
+        return resp.json().get("data", {}) or {}
+    except Exception:
+        logger.exception("[alpha-agent] fetch profile %s failed", user_id)
+        return None
+
+
+async def _update_profile(user_id: str, tenant_id: str, payload: dict) -> None:
+    """把 payload 写回 Profile。失败抛 HTTPException（调用方据此回滚 UI 状态）。"""
+    from backend.shared.auth import get_internal_call_secret
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.put(
+                f"{_profile_gateway()}/api/v1/profiles/{user_id}",
+                headers={
+                    "X-Internal-Call": get_internal_call_secret(),
+                    "X-User-Id": user_id,
+                    "X-Tenant-Id": tenant_id,
+                },
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        # 连接失败/超时：网关没起来或地址错。不转成 502 的话冒泡成 500，
+        # 前端拿到的就是「服务器内部错误」，与「写失败」这个可操作信息无关。
+        # 不记 exc 详情：URL 里含 user_id，且异常链可能带上请求体（含 Key）。
+        logger.error("[alpha-agent] update profile %s: %s", user_id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="保存失败，请稍后重试") from exc
+    if resp.status_code != 200:
+        # 不记 resp.text：FastAPI 422 的 detail[].input 会把明文密钥原样回显，
+        # 等于把 Key 写进服务端日志。本请求体含 embedding_api_key。
+        logger.error(
+            "[alpha-agent] update profile %s: http %s", user_id, resp.status_code
+        )
+        raise HTTPException(status_code=502, detail="保存失败，请稍后重试")
+
+
+def llm_config_from_profile(data: dict):
+    """Profile 原始字段 → ``LLMConfig``（**不做「chat 是否配全」的判断**）。
+
+    拆出来是为了让 embedding 通道能独立于 chat 取值：一个账号可能 chat 走
+    容器级 env（OSS 默认），但 embedding 在个人中心配了自己的供应商。若把
+    两者绑在同一个「三件套齐全才算配置」的判断里，用户的 embedding 会静默
+    失效——这正是本次改动要消灭的口径。
+
+    chat 三件套（key/base/model）可能为空，由调用方各自决定够不够用。
+    """
+    from backend.services.engine.alpha_agent.llm_client import (
+        LLMConfig,
+        normalize_embedding_base_url,
+        parse_extra_headers,
+    )
+
+    base = (data.get("llm_base_url") or "").strip().rstrip("/")
+    model = (data.get("llm_model") or "").strip()
+    # DeepSeek 等 Anthropic 兼容端点（.../anthropic）走 Anthropic 协议
+    protocol = (
+        "anthropic"
+        if "/anthropic" in base or model.lower().startswith("astron")
+        else "openai"
+    )
+    # OpenAI 兼容端点统一保留 /v1（实际调用/RD-Agent 子进程都按 {base}/chat/completions 拼接）。
+    # base 为空时**不能**补成 "/v1"：那会凭空造出一个看似合法的地址。
+    if protocol == "openai" and base and not base.endswith("/v1"):
+        base += "/v1"
+    return LLMConfig(
+        api_key=(data.get("api_key") or "").strip(),
+        base_url=base,
+        model=model,
+        protocol=protocol,
+        headers=parse_extra_headers(data.get("llm_extra_headers")),
         # 向量检索（embedding）通道：可指向与 chat 完全不同的供应商/本地服务。
         # 缺失时留空，由容器级 EMBEDDING_* 兜底（见 rd_agent/llm_env.build_llm_env）。
-        embedding_base = normalize_embedding_base_url(data.get("embedding_base_url"))
-        return LLMConfig(
-            api_key=key,
-            base_url=base,
-            model=model,
-            protocol=protocol,
-            headers=headers,
-            embedding_model=(data.get("embedding_model") or "").strip(),
-            embedding_base_url=embedding_base,
-            embedding_api_key=(data.get("embedding_api_key") or "").strip(),
-        )
+        embedding_model=(data.get("embedding_model") or "").strip(),
+        embedding_base_url=normalize_embedding_base_url(data.get("embedding_base_url")),
+        embedding_api_key=(data.get("embedding_api_key") or "").strip(),
+    )
+
+
+def profile_embedding_overrides(data: dict | None) -> dict:
+    """Profile → 子进程用的 ``EMBEDDING_*`` env（**只含用户显式填了的项**）。
+
+    与 chat 的取值来源无关：无论 chat 来自 Profile 还是容器 env，只要用户在
+    个人中心配过 embedding，就必须把这组变量传给子进程。否则用户在配置页
+    看到「已保存」，挖掘却按容器默认供应商检索——静默换供应商，没有任何一层
+    会报错。空项一律不产出，交由容器级 ``EMBEDDING_*`` 兜底。
+    """
+    from backend.services.engine.alpha_agent.llm_client import _is_placeholder
+
+    if not data:
+        return {}
+    try:
+        cfg = llm_config_from_profile(data)
+    except Exception:
+        logger.exception("[alpha-agent] build embedding overrides failed")
+        return {}
+    if not (
+        cfg.embedding_model.strip()
+        and cfg.embedding_base_url.strip()
+        and cfg.embedding_api_key.strip()
+    ):
+        return {}
+    # 占位符（如 "your-api-key"）不是有效配置，别覆盖容器级兜底
+    if _is_placeholder(cfg.embedding_api_key):
+        return {}
+    return cfg.embedding_env_overrides()
+
+
+def build_subprocess_overrides(llm_config, embedding_env: dict | None) -> dict:
+    """子进程 env = chat 覆盖 ∪ embedding 覆盖（embedding 后写，优先级更高）。
+
+    两组变量来源可以不同：chat 走容器 env（``resolve_llm_config``，其
+    ``LLMConfig`` 的 embedding 字段恒为空）而 embedding 来自用户 Profile。
+    因此必须**分头取值再合并**，不能只下发 ``llm_config.llm_env_overrides()``
+    —— 那正是「用户配了 embedding 却按容器默认供应商检索」的成因。
+    """
+    return {**llm_config.llm_env_overrides(), **(embedding_env or {})}
+
+
+async def _fetch_profile_llm_config(
+    user_id: str, tenant_id: str, *, data: dict | None = None
+):
+    """读取用户个人中心「AI 服务配置」（Profile 的 api_key/llm_base_url/llm_model）。
+
+    与 AI-IDE 共享同一份凭证。无有效 Key 返回 None。
+
+    ``data`` 可由调用方预先取好传进来，避免同一个请求里重复打网关——注意
+    chat 配置**不可**复用 embedding 状态那条路径，反之亦然：二者判「有没有配」
+    的条件不同（chat 要求 key+base+model 三件套齐全）。
+    """
+    from backend.services.engine.alpha_agent.llm_client import _is_placeholder
+
+    try:
+        if data is None:
+            data = await _fetch_profile_raw(user_id, tenant_id)
+        if data is None:
+            return None
+        cfg = llm_config_from_profile(data)
+        if not cfg.api_key or _is_placeholder(cfg.api_key):
+            return None
+        # 以用户设置为准：base/model 缺失视为未配置，回退 env 兜底
+        if not cfg.base_url or not cfg.model:
+            return None
+        return cfg
     except Exception:
         logger.exception("[alpha-agent] fetch profile llm config failed")
         return None
 
 
 async def _resolve_effective_llm_config(user_id: str, tenant_id: str):
-    """以用户设置为准：优先当前用户 Profile 的「AI 服务配置」，环境变量仅作兜底。"""
+    """以用户设置为准：优先当前用户 Profile 的「AI 服务配置」，环境变量仅作兜底。
+
+    Returns: ``(LLMConfig | None, source, embedding_env)``。``embedding_env``
+    是**独立于 source** 的：chat 走 env 时用户配的 embedding 同样要生效。
+    """
     from backend.services.engine.alpha_agent.llm_client import resolve_llm_config
 
-    cfg = await _fetch_profile_llm_config(user_id, tenant_id)
+    data = await _fetch_profile_raw(user_id, tenant_id)
+    embedding_env = profile_embedding_overrides(data)
+    cfg = await _fetch_profile_llm_config(user_id, tenant_id, data=data)
     if cfg is not None:
-        return cfg, "user_profile"
+        return cfg, "user_profile", embedding_env
     cfg = resolve_llm_config()
     if cfg is not None:
-        return cfg, "env"
-    return None, "none"
+        return cfg, "env", embedding_env
+    return None, "none", embedding_env
 
 
 class FactorBacktestCancelled(RuntimeError):
@@ -173,7 +355,9 @@ async def _run_subprocess_tracked(
     """
     import subprocess
 
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     _backtest_processes[factor_id] = proc
     try:
         try:
@@ -181,7 +365,9 @@ async def _run_subprocess_tracked(
         except subprocess.TimeoutExpired:
             proc.kill()
             stdout, stderr = await asyncio.to_thread(proc.communicate)
-            raise RuntimeError(f"因子计算超时（>{int(timeout)}s），子进程已终止") from None
+            raise RuntimeError(
+                f"因子计算超时（>{int(timeout)}s），子进程已终止"
+            ) from None
         if factor_id in _backtest_cancelled:
             raise FactorBacktestCancelled("回测已被用户取消")
         return proc.returncode, stdout or "", stderr or ""
@@ -220,12 +406,16 @@ async def _require_owned_factor(
 @router.get("/markets")
 async def list_markets():
     """列出所有可用的市场"""
-    from backend.services.engine.rd_agent.market_adapters import list_markets as _list_markets
+    from backend.services.engine.rd_agent.market_adapters import (
+        list_markets as _list_markets,
+    )
+
     markets = _list_markets()
     # Check data readiness for each market
     for m in markets:
         try:
             from backend.services.engine.rd_agent.market_adapters import get_adapter
+
             adapter = get_adapter(m["market_id"])
             m["data_ready"] = adapter.is_data_ready()
         except Exception:
@@ -236,14 +426,27 @@ async def list_markets():
 @router.post("/evolve")
 async def start_evolution(
     request: Request,
-    user_id: str | None = Query(None, description="已废弃：身份取自 JWT，仅用于防伪校验"),
-    market: str = Query("a_share", description="市场: a_share, crypto, hong_kong, us_stock"),
-    universe: str = Query("csi300", description="股票池: csi300, csi500, csi1000, sse50, gem, star, csi800, all_a"),
+    user_id: str | None = Query(
+        None, description="已废弃：身份取自 JWT，仅用于防伪校验"
+    ),
+    market: str = Query(
+        "a_share", description="市场: a_share, crypto, hong_kong, us_stock"
+    ),
+    universe: str = Query(
+        "csi300",
+        description="股票池: csi300, csi500, csi1000, sse50, gem, star, csi800, all_a",
+    ),
     loop_n: int = Query(5, ge=1, le=20, description="演化轮数"),
     direction: str = Query("", description="因子挖掘方向/假设"),
-    directions: list[str] = Query(default=[], description="L1 因子类别方向列表（多选）"),
-    direction_mode: str = Query("selected", description="类别选择模式: selected=取第一条, random=随机一条"),
-    data_source: str = Query("", description="数据源: qlib_bin, parquet, pg (留空使用默认)"),
+    directions: list[str] = Query(
+        default=[], description="L1 因子类别方向列表（多选）"
+    ),
+    direction_mode: str = Query(
+        "selected", description="类别选择模式: selected=取第一条, random=随机一条"
+    ),
+    data_source: str = Query(
+        "", description="数据源: qlib_bin, parquet, pg (留空使用默认)"
+    ),
 ):
     """启动因子演化任务"""
     auth_user_id, auth_tenant_id = get_authenticated_identity(request)
@@ -255,7 +458,11 @@ async def start_evolution(
 
     # Validate market
     try:
-        from backend.services.engine.rd_agent.market_adapters import get_adapter, list_markets
+        from backend.services.engine.rd_agent.market_adapters import (
+            get_adapter,
+            list_markets,
+        )
+
         adapter = get_adapter(market)
     except ValueError as e:
         available = [m["market_id"] for m in list_markets()]
@@ -275,14 +482,21 @@ async def start_evolution(
             ),
         )
 
-    llm_config, llm_source = await _resolve_effective_llm_config(auth_user_id, auth_tenant_id)
+    llm_config, llm_source, embedding_env = await _resolve_effective_llm_config(
+        auth_user_id, auth_tenant_id
+    )
     if llm_config is None:
         raise HTTPException(
             status_code=412,
             detail="未配置 LLM API Key：可在个人中心「其他设置 → AI 服务配置」填写（与 AI-IDE 共用），"
             "或在服务器 .env 配置 DEEPSEEK_API_KEY / AI_IDE_LLM_API_KEY / OPENAI_API_KEY。",
         )
-    logger.info("[alpha-agent] evolve llm source=%s model=%s", llm_source, llm_config.model)
+    logger.info(
+        "[alpha-agent] evolve llm source=%s model=%s embedding=%s",
+        llm_source,
+        llm_config.model,
+        "user_profile" if embedding_env else "container",
+    )
 
     # 类别方向下发：前端传多选类别 + 模式，服务端解析成单条 direction
     clean_dirs = [d.strip() for d in directions if isinstance(d, str) and d.strip()]
@@ -294,7 +508,9 @@ async def start_evolution(
         )
         logger.info(
             "[alpha-agent] evolve directions=%d mode=%s -> %s",
-            len(clean_dirs), direction_mode, direction,
+            len(clean_dirs),
+            direction_mode,
+            direction,
         )
 
     launcher = get_launcher()
@@ -322,7 +538,10 @@ async def start_evolution(
             loop_n=loop_n,
             direction=direction or None,
             data_source=data_source or None,
-            llm_overrides=llm_config.llm_env_overrides(),
+            # embedding 独立于 chat 的来源：chat 走容器 env 时，用户在个人中心
+            # 配的向量检索同样要下发（否则配置页显示「已保存」，挖掘却按容器
+            # 默认供应商检索）。两组变量同源时值相同，覆盖幂等。
+            llm_overrides=build_subprocess_overrides(llm_config, embedding_env),
         )
     except HardwareLockError as exc:
         raise HTTPException(status_code=412, detail=str(exc)) from exc
@@ -346,7 +565,9 @@ async def get_task_status(task_id: str, request: Request):
     auth_user_id, _ = get_authenticated_identity(request)
     try:
         status["factors"] = await persistence.list_factors(
-            user_id=auth_user_id, task_id=task_id, limit=20,
+            user_id=auth_user_id,
+            task_id=task_id,
+            limit=20,
         )
     except Exception:
         logger.exception("[alpha-agent] list factors for task %s failed", task_id)
@@ -361,7 +582,9 @@ async def cancel_task(task_id: str, request: Request):
     launcher = get_launcher()
     ok = await launcher.cancel_task(task_id)
     if not ok:
-        raise HTTPException(status_code=400, detail="无法取消任务（可能已完成或不存在）")
+        raise HTTPException(
+            status_code=400, detail="无法取消任务（可能已完成或不存在）"
+        )
     return {"code": 200, "data": {"task_id": task_id, "status": "cancelled"}}
 
 
@@ -396,7 +619,9 @@ async def get_task_log(
 @router.get("/tasks")
 async def list_tasks(
     request: Request,
-    user_id: str | None = Query(None, description="已废弃：身份取自 JWT，仅用于防伪校验"),
+    user_id: str | None = Query(
+        None, description="已废弃：身份取自 JWT，仅用于防伪校验"
+    ),
     market: str | None = Query(None, description="按市场过滤"),
 ):
     """列出当前用户的演化任务"""
@@ -416,10 +641,14 @@ async def list_tasks(
 @router.get("/factors")
 async def list_factors(
     request: Request,
-    user_id: str | None = Query(None, description="已废弃：身份取自 JWT，仅用于防伪校验"),
+    user_id: str | None = Query(
+        None, description="已废弃：身份取自 JWT，仅用于防伪校验"
+    ),
     market: str | None = Query(None, description="按市场过滤"),
     universe: str | None = Query(None, description="按股票池过滤"),
-    status: str | None = Query(None, description="按状态过滤: pending/backtesting/completed/failed"),
+    status: str | None = Query(
+        None, description="按状态过滤: pending/backtesting/completed/failed"
+    ),
     limit: int = Query(50, ge=1, le=200),
 ):
     """列出当前用户已生成的因子"""
@@ -430,7 +659,11 @@ async def list_factors(
         provided_user_id=user_id,
     )
     factors = await persistence.list_factors(
-        user_id=auth_user_id, status=status, market=market, universe=universe, limit=limit,
+        user_id=auth_user_id,
+        status=status,
+        market=market,
+        universe=universe,
+        limit=limit,
     )
     return {"code": 200, "data": {"factors": factors, "total": len(factors)}}
 
@@ -440,6 +673,32 @@ async def get_factor(factor_id: str, request: Request):
     """获取单个因子详情"""
     factor = await _require_owned_factor(factor_id, request)
     return {"code": 200, "data": factor}
+
+
+@router.get("/metrics/registry")
+async def get_metrics_registry(request: Request):
+    """指标描述符注册表（前端展示契约）。
+
+    静态词汇表（label/unit/better/precision/description），前端
+    ``services-v2/metricRegistry.ts`` 拉取后与本地默认表合并；本仓金样
+    ``backend/tests/fixtures/miningMetricsGolden.json`` 的 registry 段为准。
+    ``gates`` 段为门禁描述符（物化门禁徽标/配置页用），与 metrics 同源枚举。
+    """
+    get_authenticated_identity(request)  # 复用统一鉴权（与 /factors 一致）
+
+    from backend.services.engine.mining_plugins import (
+        list_descriptors,
+        list_gate_descriptors,
+    )
+
+    return {
+        "code": 200,
+        "data": {
+            "version": 1,
+            "metrics": list_descriptors(),
+            "gates": list_gate_descriptors(),
+        },
+    }
 
 
 def _resolve_factory_manifest() -> Path:
@@ -477,36 +736,40 @@ async def list_factory_factors(request: Request):
             if not name:
                 continue
             expr = (row.get("expression") or "").strip()
-            factors.append({
-                "factor_id": f"factory:{name}",
-                "factor_name": name,
-                "factor_expression": expr,
-                "factor_formulation": expr,
-                "factor_code": "",
-                "ic_value": _to_float(row.get("ic")),
-                "icir": _to_float(row.get("icir")),
-                "coverage": _to_float(row.get("coverage")),
-                "rank_ic": None,
-                "status": "completed",
-                "market": "a_share",
-                "universe": "all_a",
-                "source": "factor_factory",
-                "read_only": True,
-                "metadata": {
-                    "source": "factor_factory",
-                    "read_only": True,
-                    "field": row.get("field") or "",
+            factors.append(
+                {
+                    "factor_id": f"factory:{name}",
+                    "factor_name": name,
+                    "factor_expression": expr,
+                    "factor_formulation": expr,
+                    "factor_code": "",
+                    "ic_value": _to_float(row.get("ic")),
                     "icir": _to_float(row.get("icir")),
                     "coverage": _to_float(row.get("coverage")),
-                },
-            })
+                    "rank_ic": None,
+                    "status": "completed",
+                    "market": "a_share",
+                    "universe": "all_a",
+                    "source": "factor_factory",
+                    "read_only": True,
+                    "metadata": {
+                        "source": "factor_factory",
+                        "read_only": True,
+                        "field": row.get("field") or "",
+                        "icir": _to_float(row.get("icir")),
+                        "coverage": _to_float(row.get("coverage")),
+                    },
+                }
+            )
     factors.sort(key=lambda x: abs(x.get("ic_value") or 0.0), reverse=True)
     return {
         "code": 200,
         "data": {
             "factors": factors,
             "total": len(factors),
-            "generated_at": datetime.fromtimestamp(manifest.stat().st_mtime).isoformat(),
+            "generated_at": datetime.fromtimestamp(
+                manifest.stat().st_mtime
+            ).isoformat(),
         },
     }
 
@@ -535,7 +798,8 @@ async def explain_factor(factor_id: str, request: Request):
     from backend.services.engine.alpha_agent.llm_client import chat as llm_chat
 
     auth_user_id, auth_tenant_id = get_authenticated_identity(request)
-    llm_config, _ = await _resolve_effective_llm_config(auth_user_id, auth_tenant_id)
+    # 只用 chat 通道解释因子，不落子进程 —— embedding 覆盖在此无意义
+    llm_config, _, _ = await _resolve_effective_llm_config(auth_user_id, auth_tenant_id)
     if llm_config is None:
         raise HTTPException(
             status_code=412,
@@ -564,8 +828,15 @@ SCORE: 50 到 100 的整数（50-70 逻辑牵强/易过拟合，70-85 逻辑合�
             config=llm_config,
         )
     except httpx.HTTPStatusError as e:
-        logger.error("LLM explain failed: status=%s body=%s", e.response.status_code, e.response.text[:300])
-        raise HTTPException(status_code=502, detail=f"LLM 服务返回错误 ({e.response.status_code})，请检查 API Key 配置") from e
+        logger.error(
+            "LLM explain failed: status=%s body=%s",
+            e.response.status_code,
+            e.response.text[:300],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM 服务返回错误 ({e.response.status_code})，请检查 API Key 配置",
+        ) from e
     except Exception as e:
         logger.error("LLM explain failed: %s", e)
         raise HTTPException(status_code=500, detail="LLM 解释失败，请稍后重试") from e
@@ -579,7 +850,14 @@ SCORE: 50 到 100 的整数（50-70 逻辑牵强/易过拟合，70-85 逻辑合�
         metadata["logic_score"] = logic_score
     await persistence.update_factor_metrics(factor_id, metadata=metadata)
 
-    return {"code": 200, "data": {"explanation": explanation, "logic_score": logic_score, "cached": False}}
+    return {
+        "code": 200,
+        "data": {
+            "explanation": explanation,
+            "logic_score": logic_score,
+            "cached": False,
+        },
+    }
 
 
 @router.post("/factors/{factor_id}/backtest")
@@ -588,8 +866,13 @@ async def backtest_factor(
     request: Request,
     start_date: str | None = None,
     end_date: str | None = None,
-    universe: str | None = Query("csi300", description="回测股票池: csi300, csi500, csi1000, sse50, gem, star, csi800, all_a"),
-    data_source: str | None = Query("qlib_bin", description="回测数据源: qlib_bin(默认) | h5"),
+    universe: str | None = Query(
+        "csi300",
+        description="回测股票池: csi300, csi500, csi1000, sse50, gem, star, csi800, all_a",
+    ),
+    data_source: str | None = Query(
+        "qlib_bin", description="回测数据源: qlib_bin(默认) | h5"
+    ),
 ):
     """对因子发起轻量验证（多市场 + 数据源可选）
 
@@ -642,7 +925,14 @@ async def cancel_backtest(factor_id: str, request: Request):
     """取消一个正在进行的回测：kill 子进程（不再等 600s 超时）并标记 cancelled"""
     factor = await _require_owned_factor(factor_id, request)
     if factor_id not in _running_backtests:
-        return {"code": 200, "data": {"factor_id": factor_id, "status": factor.get("status"), "message": "回测未在运行"}}
+        return {
+            "code": 200,
+            "data": {
+                "factor_id": factor_id,
+                "status": factor.get("status"),
+                "message": "回测未在运行",
+            },
+        }
     _backtest_cancelled.add(factor_id)
     proc = _backtest_processes.get(factor_id)
     if proc and proc.poll() is None:
@@ -654,7 +944,9 @@ async def cancel_backtest(factor_id: str, request: Request):
                 await asyncio.sleep(0.2)
             if proc.poll() is None:
                 proc.kill()
-                logger.warning("[alpha-backtest] force-killed subprocess for %s", factor_id)
+                logger.warning(
+                    "[alpha-backtest] force-killed subprocess for %s", factor_id
+                )
         except ProcessLookupError:
             pass
         except Exception as e:
@@ -694,27 +986,32 @@ async def export_factor_to_ide(
     logic_score = meta.get("logic_score")
     quality_warnings = _quality_warnings(pfs_val, logic_score)
     if quality_warnings:
-        logger.warning("[alpha-export] %s quality warnings: %s", factor_id, "; ".join(quality_warnings))
+        logger.warning(
+            "[alpha-export] %s quality warnings: %s",
+            factor_id,
+            "; ".join(quality_warnings),
+        )
 
     # 生成带头部注释的完整 Python 文件
     header_lines = [
         '"""',
-        f'Factor: {factor_name}',
-        'Source: RD-Agent Alpha Research',
-        f'IC: {factor.get("ic_value", "N/A")}',
-        f'RankIC: {meta.get("rank_ic", "N/A")}',
-        f'Sharpe: {factor.get("sharpe_ratio", "N/A")}',
-        f'Market: {meta.get("market", "a_share")}',
-        f'PFS (perturbation fidelity): {f"{float(pfs_val):.3f}" if pfs_val is not None else "N/A"}',
-        f'LogicScore: {logic_score if logic_score is not None else "N/A"}',
-        f'Description: {meta.get("description", "")[:200]}',
+        f"Factor: {factor_name}",
+        "Source: RD-Agent Alpha Research",
+        f"IC: {factor.get('ic_value', 'N/A')}",
+        f"RankIC: {meta.get('rank_ic', 'N/A')}",
+        f"Sharpe: {factor.get('sharpe_ratio', 'N/A')}",
+        f"Market: {meta.get('market', 'a_share')}",
+        f"PFS (perturbation fidelity): {f'{float(pfs_val):.3f}' if pfs_val is not None else 'N/A'}",
+        f"LogicScore: {logic_score if logic_score is not None else 'N/A'}",
+        f"Description: {meta.get('description', '')[:200]}",
         '"""',
-        '',
+        "",
     ]
     full_code = "\n".join(header_lines) + factor_code
 
     # 保存到策略库
     from backend.shared.strategy_storage import get_strategy_storage_service
+
     svc = get_strategy_storage_service()
     file_name = f"factor_{factor_name}"
     res = await svc.save(
@@ -762,7 +1059,8 @@ async def get_stats(
     where_clause = "WHERE " + " AND ".join(conditions)
 
     async with get_session(read_only=True) as session:
-        rows = await session.execute(text(f"""
+        rows = await session.execute(
+            text(f"""
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE status = 'completed') AS completed,
@@ -775,7 +1073,9 @@ async def get_stats(
                 MAX(sharpe_ratio) AS best_sharpe
             FROM rd_agent_factors
             {where_clause}
-        """), params)
+        """),
+            params,
+        )
         row = rows.mappings().first()
 
     if not row:
@@ -793,6 +1093,7 @@ async def get_data_summary():
     """返回 QuantDB 数据可用性摘要（日期范围、股票池、数据集）"""
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
         hub = QuantDBDataHub.get_instance()
         summary = hub.get_data_summary()
         return {"code": 200, "data": summary}
@@ -806,6 +1107,7 @@ async def get_factor_categories():
     """返回 L1 因子类别（从 feature catalog 加载）"""
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
         hub = QuantDBDataHub.get_instance()
         categories = hub.fetch_l1_factor_categories()
         return {"code": 200, "data": categories}
@@ -826,7 +1128,9 @@ async def get_universes(request: Request):
         for code, meta in (summary.get("universes") or {}).items():
             universes[code] = {
                 "count": meta.get("count", 0) if isinstance(meta, dict) else 0,
-                "indexSymbol": meta.get("indexSymbol") if isinstance(meta, dict) else None,
+                "indexSymbol": meta.get("indexSymbol")
+                if isinstance(meta, dict)
+                else None,
                 "is_system": True,
             }
     except Exception as e:
@@ -884,12 +1188,20 @@ async def get_universes(request: Request):
 async def get_llm_config(request: Request):
     """返回当前生效的 LLM 配置状态（不回显完整 key）。
 
-    优先级：服务器环境变量 > 当前用户个人中心的 AI 服务配置。
+    优先级：当前用户个人中心的 AI 服务配置 > 服务器环境变量（以用户设置为准，
+    env 仅作兜底）。
+
+    ``embedding`` 段与 chat 段**互相独立**：它只反映 Profile 里用户自己填的值，
+    为空时意味着「沿用容器级 EMBEDDING_*」，不跟随 chat 的 env 兜底。所以哪怕
+    chat 未配置，embedding 段也照样返回。
     """
     from backend.services.engine.alpha_agent.llm_client import resolve_llm_config
 
     auth_user_id, auth_tenant_id = get_authenticated_identity(request)
-    cfg = await _fetch_profile_llm_config(auth_user_id, auth_tenant_id)
+    profile = await _fetch_profile_raw(auth_user_id, auth_tenant_id)
+    embedding = normalize_embedding_status(profile)
+
+    cfg = await _fetch_profile_llm_config(auth_user_id, auth_tenant_id, data=profile)
     source = "user_profile"
     if cfg is None:
         cfg = resolve_llm_config()
@@ -900,6 +1212,7 @@ async def get_llm_config(request: Request):
             "data": {
                 "configured": False,
                 "reason": "未配置可用的 API Key：可在个人中心「其他设置 → AI 服务配置」填写，或在服务器 .env 配置",
+                "embedding": embedding,
             },
         }
     # 仅回显 key 末 4 位，避免泄露
@@ -914,8 +1227,310 @@ async def get_llm_config(request: Request):
             "model": cfg.model,
             "base_url": cfg.base_url,
             "api_key_masked": masked,
+            "embedding": embedding,
         },
     }
+
+
+@router.put("/llm-config/embedding")
+async def update_embedding_config(request: Request):
+    """保存向量检索（embedding）配置。
+
+    因子挖掘的记忆检索走 RD-Agent 子进程的 ``EMBEDDING_*`` 环境变量，
+    由 ``rd_agent/llm_env.embedding_overrides`` 从用户配置注入。这条通道与
+    chat 独立，正是为了让 DeepSeek 这类没有 ``/embeddings`` 端点的 chat 供应商
+    也能用上向量检索。
+
+    **只提交显式传入的字段**（``undefined`` = 不动，``""`` = 清除，``null`` = 未传）：
+    未提交的项留给容器级 ``EMBEDDING_*`` 兜底。全量提交会让「只改模型名」的
+    请求顺手清掉 Key，然后静默退回容器默认端点。
+    """
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        # 非法 JSON 会由 Starlette 抛 JSONDecodeError（ValueError 子类）；不接的话
+        # 变成 500，用户只看到「服务器错误」而不知道是自己发的 body 有问题。
+        raise HTTPException(status_code=400, detail="请求体不是合法 JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+
+    try:
+        payload = build_embedding_payload(body)
+    except EmbeddingFieldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not payload:
+        raise HTTPException(
+            status_code=400, detail="请至少填写模型、接口地址或 API Key"
+        )
+
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    await _update_profile(auth_user_id, auth_tenant_id, payload)
+
+    profile = await _fetch_profile_raw(auth_user_id, auth_tenant_id)
+    return {"code": 200, "data": normalize_embedding_status(profile)}
+
+
+# ── 因子池（P1）：池总览 / 池列表 / 谱系图 / 刷新（子进程 + 锁）──────────
+#
+# universe 的 HTTP 约定：**空串或缺省 = 全 universe 汇总**（页面「全部」选项
+# 发空串），非空值 = 精确作用域过滤。空 universe 作用域（因子没写 universe）
+# 不从 HTTP 单选，刷新走全 scope 发现自然覆盖。
+# 刷新是子进程（与管理员面物化同款硬化）：跨 asyncio.run 的 DB 引擎会绑错事件
+# 循环（memory: 全局 _db_manager 缓存跨 loop 陷阱），且 pandas 重算会阻塞引擎
+# 事件循环——绝不在引擎进程内跑。
+
+
+def _pool_scope(market: str, universe: str) -> tuple[str, str | None]:
+    """校验 market 并把 HTTP 的空串 universe 归一到 None（全量）。"""
+    if market not in _MARKET_TO_QLIB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的 market：{market}（可选：{', '.join(_MARKET_TO_QLIB)}）",
+        )
+    universe = (universe or "").strip()
+    return market, (universe or None)
+
+
+@router.get("/pool/overview")
+async def get_pool_overview(
+    request: Request,
+    market: str = Query("a_share"),
+    universe: str = Query(""),
+):
+    """因子池总览：计数 / 质量均值 / 多样性熵 / 检索计数（user-scoped）。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+    market, universe = _pool_scope(market, universe)
+
+    from backend.services.engine.mining_plugins import pool_service
+
+    data = await pool_service.pool_overview(
+        user_id=auth_user_id, market=market, universe=universe
+    )
+    return {"code": 200, "data": data}
+
+
+@router.get("/pool/factors")
+async def get_pool_factors(
+    request: Request,
+    market: str = Query("a_share"),
+    universe: str = Query(""),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    sort: str = Query("pool_score"),
+):
+    """池内因子分页列表（含门禁裁决、被检索次数、面板有无标记）。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+    market, universe = _pool_scope(market, universe)
+
+    from backend.services.engine.mining_plugins import pool_service
+
+    data = await pool_service.list_pool_factors(
+        user_id=auth_user_id,
+        market=market,
+        universe=universe,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+    )
+    return {"code": 200, "data": data}
+
+
+@router.get("/pool/graph")
+async def get_pool_graph(
+    request: Request,
+    market: str = Query("a_share"),
+    universe: str = Query(""),
+    max_nodes: int = Query(200, ge=2, le=500),
+):
+    """谱系图（nodes + edges）；上限与 service 内部钳制一致，超出直接 422。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+    market, universe = _pool_scope(market, universe)
+
+    from backend.services.engine.mining_plugins import pool_service
+
+    data = await pool_service.pool_graph(
+        user_id=auth_user_id, market=market, universe=universe, max_nodes=max_nodes
+    )
+    return {"code": 200, "data": data}
+
+
+@router.post("/pool/refresh")
+async def post_pool_refresh(
+    request: Request,
+    market: str = Query("a_share"),
+    universe: str = Query(""),
+    dry_run: bool = Query(True),
+):
+    """启动后台刷新子进程（默认 dry_run；单飞，409=已有刷新在跑）。
+
+    **owner 恒为鉴权身份**，不接受客户端传 user_id——刷新会重写池行与
+    谱系边，跨用户触发等于替别人重算并占全局锁。
+    """
+    auth_user_id, _ = get_authenticated_identity(request)
+    market, universe = _pool_scope(market, universe)
+
+    from backend.scripts.mining_pool_rebuild import (
+        RefreshBusyError,
+        RefreshStartError,
+        spawn_refresh,
+    )
+
+    try:
+        data = await spawn_refresh(
+            user_id=auth_user_id, market=market, universe=universe, dry_run=dry_run
+        )
+    except RefreshBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:  # build_run_command 白名单校验失败
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RefreshStartError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"code": 200, "data": data}
+
+
+@router.get("/pool/refresh/status")
+async def get_pool_refresh_status(request: Request):
+    """刷新状态（锁探活 + 最近一次落盘状态 + 日志尾）。
+
+    状态文件与日志是全局单份（单锁单日志）：最近一次刷新属主不是调用者时
+    只回 ``running`` 位与 ``other_user`` 标记，日志/scope 一律不回显——
+    否则任一面板变成他人挖掘面的浏览窗口。
+    """
+    auth_user_id, _ = get_authenticated_identity(request)
+
+    from backend.scripts.mining_pool_rebuild import refresh_status
+
+    status = refresh_status()
+    owner = str((status.get("args") or {}).get("user") or "")
+    if owner and owner != auth_user_id:
+        return {
+            "code": 200,
+            "data": {
+                "running": bool(status.get("running")),
+                "status": "other_user",
+                "log": {"exists": False, "lines": []},
+            },
+        }
+    return {"code": 200, "data": status}
+
+
+# ── 组合实验室（P2）：POST /combos/optimize + 列表 / 详情 ────────────────
+# 作业是**子进程**（差分进化是 CPU 大户 + 跨 loop DB 引擎陷阱，与池刷新同
+# 架构）；组合行就是作业的请求与结果载体：探活（忙 409，不建行）→ 建行
+# （校验失败 400）→ spawn（竞态忙 409 / 起不来 500，失败路径当场把行标
+# failed——不许静默 pending）→ 前端轮询 GET /combos/{id} 看 running/done/
+# failed 与两窗指标；死亡作业（OOM/重启）由详情路径惰性收敛。
+
+
+class ComboOptimizeRequest(BaseModel):
+    market: str = "a_share"
+    # universe 最长 64（安全 M-1：此前原样入库无上限，一行可塞任意大字符串）
+    universe: str = Field("", max_length=64)
+    factor_ids: list[str]
+    name: str = ""
+    seed: int | None = None
+
+
+async def _combo_fail_best_effort(combo_id: str, error: str) -> None:
+    """启动失败的行不许静默 pending：尽力标 failed（标记失败不掩盖 409/500 原因）。"""
+    try:
+        from backend.scripts.mining_combo_optimize import mark_failed_row
+
+        await mark_failed_row(combo_id, error)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[combos] 标记组合行失败状态失败 %s: %s", combo_id, exc)
+
+
+@router.post("/combos/optimize")
+async def post_combo_optimize(request: Request, body: ComboOptimizeRequest):
+    """建组合行 + 起后台优化子进程；owner 恒为鉴权身份（不接受客户端 user_id）。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+    market, universe = _pool_scope(body.market, body.universe)
+
+    from backend.scripts.mining_combo_optimize import (
+        ComboBusyError,
+        ComboStartError,
+        create_combo_row,
+        probe_combo_lock,
+        spawn_combo,
+    )
+
+    # 单飞前置探活：锁被占时 409 直接返回、不做校验也不建行——一次注定被拒
+    # 的请求不许留 failed 行（安全 M-1）。竞态窗口由 spawn 取锁兜底。
+    if probe_combo_lock():
+        raise HTTPException(
+            status_code=409, detail="已有组合优化作业在运行，请稍后重试"
+        )
+
+    try:
+        combo_id = await create_combo_row(
+            user_id=auth_user_id,
+            market=market,
+            universe=universe or "",
+            factor_ids=body.factor_ids,
+            name=body.name,
+            seed=body.seed,
+        )
+    except ValueError as exc:  # 因子集 / scope 校验失败
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        started = await spawn_combo(combo_id)
+    except ComboBusyError as exc:
+        await _combo_fail_best_effort(combo_id, str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ComboStartError as exc:
+        await _combo_fail_best_effort(combo_id, str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — 兜底：托管异常之外也不许静默留 pending
+        logger.exception("[combos] 启动组合优化子进程异常 combo=%s", combo_id)
+        await _combo_fail_best_effort(combo_id, f"{type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"组合优化启动失败：{exc}") from exc
+    return {
+        "code": 200,
+        "data": {"combo_id": combo_id, "status": "pending", **started},
+    }
+
+
+@router.get("/combos")
+async def get_combos(
+    request: Request,
+    market: str = Query(""),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """组合列表（user-scoped，新→旧）；market 空串 = 全部市场。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+    if market:
+        market, _ = _pool_scope(market, "")
+
+    from backend.scripts.mining_combo_optimize import list_combos
+
+    data = await list_combos(
+        user_id=auth_user_id, market=market or None, limit=limit, offset=offset
+    )
+    return {"code": 200, "data": data}
+
+
+@router.get("/combos/{combo_id}")
+async def get_combo_detail(request: Request, combo_id: str):
+    """组合详情（含权重/两窗指标/净值曲线）；非属主 404（不泄露存在性）。
+
+    pending/running 的行先做惰性收敛：作业进程死亡（OOM/容器重启）时行里
+    没有心跳，只有锁位能证明活着——锁空闲且状态陈旧就收尸标 failed，
+    否则前端会永久轮询一个不可能推进的状态（评审发现 2）。
+    """
+    auth_user_id, _ = get_authenticated_identity(request)
+
+    from backend.scripts.mining_combo_optimize import get_combo, reconcile_stale_row
+
+    data = await get_combo(combo_id, user_id=auth_user_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="组合不存在")
+    if str(data.get("status") or "") in ("pending", "running"):
+        if await reconcile_stale_row(combo_id, user_id=auth_user_id):
+            data = await get_combo(combo_id, user_id=auth_user_id) or data
+    return {"code": 200, "data": data}
 
 
 _MARKET_TO_QLIB: dict[str, str] = {
@@ -947,8 +1562,12 @@ def _compute_pfs_quality(df: "pd.DataFrame") -> dict | None:
             return None
         return {
             "pfs": round(float(out["pfs"]), 4),
-            "pfs_gauss": round(float(out["pfs_gauss"]), 4) if out.get("pfs_gauss") is not None else None,
-            "pfs_t": round(float(out["pfs_t"]), 4) if out.get("pfs_t") is not None else None,
+            "pfs_gauss": round(float(out["pfs_gauss"]), 4)
+            if out.get("pfs_gauss") is not None
+            else None,
+            "pfs_t": round(float(out["pfs_t"]), 4)
+            if out.get("pfs_t") is not None
+            else None,
             "n_days": int(out.get("n_days") or 0),
         }
     except Exception as exc:  # noqa: BLE001 — 质量度量失败不影响回测结果
@@ -970,6 +1589,64 @@ def _quality_warnings(pfs: float | None, logic_score: int | None) -> list[str]:
     return warnings
 
 
+def _run_mining_evaluators(
+    f_clean: "pd.Series",
+    r_clean: "pd.Series",
+    *,
+    market: str,
+    universe: str,
+    factor_id: str,
+) -> dict[str, float]:
+    """机构级评估器链（mining_plugins）：RRE / 换手 / 扣成本。
+
+    与 H5 子进程路径共用同一入口（evaluate_paired）；成功值并入回测 metadata
+    （缺失键不写——前端一律以「—」呈现缺失）。评估器故障降级为空 dict：
+    指标是可加层，绝不拖垮回测本身（与 _compute_pfs_quality 同策略）。
+    """
+    try:
+        import numpy as np
+        import pandas as pd
+
+        from backend.services.engine.mining_plugins import evaluate_paired
+
+        paired = pd.DataFrame(
+            {
+                "datetime": f_clean.index.get_level_values("datetime"),
+                "symbol": f_clean.index.get_level_values("instrument"),
+                "factor": np.asarray(f_clean, dtype=float),
+                "ret": np.asarray(r_clean, dtype=float),
+            }
+        )
+        metrics = evaluate_paired(
+            paired, market=market, universe=universe, factor_id=factor_id
+        )
+        return {k: v for k, v in metrics.items() if v is not None}
+    except Exception as exc:  # noqa: BLE001 — 评估器故障不影响回测结果
+        logger.warning("[alpha-backtest] mining evaluators failed: %s", exc)
+        return {}
+
+
+def _parse_eval_metrics(out: str) -> dict[str, float]:
+    """从子进程输出解析 ``EVAL_<key>=<float>`` 行（评估器插件统一协议）。
+
+    缺失/非法值跳过（与 _metric 的缺失语义一致）；过滤 NaN。返回 {metric_key: value}。
+    """
+    metrics: dict[str, float] = {}
+    for line in out.splitlines():
+        if not line.startswith("EVAL_"):
+            continue
+        key, sep, raw = line[len("EVAL_") :].partition("=")
+        if not sep or not key:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if value == value:  # 过滤 NaN
+            metrics[key] = value
+    return metrics
+
+
 def _parse_logic_score(text: str) -> tuple[str, int | None]:
     """从 LLM 解释文本中抽出 ``SCORE: <50-100>`` 评分行。
 
@@ -979,11 +1656,11 @@ def _parse_logic_score(text: str) -> tuple[str, int | None]:
     """
     score: int | None = None
     match = None
-    for match in re.finditer(r"SCORE\s*[:：]\s*(\d{1,3})", text):
-        pass  # 取最后一个匹配
+    for match in re.finditer(r"SCORE\s*[:：]\s*(\d{1,3})", text):  # noqa: B007 -- 取最后一个匹配
+        pass
     if match is not None:
         score = max(0, min(100, int(match.group(1))))
-        text = (text[: match.start()] + text[match.end():]).strip()
+        text = (text[: match.start()] + text[match.end() :]).strip()
     return text, score
 
 
@@ -993,6 +1670,7 @@ def _detect_factor_kind(factor_code: str) -> str:
     不执行因子代码，只解析语法树。
     """
     import ast
+
     try:
         tree = ast.parse(factor_code)
     except SyntaxError as e:
@@ -1004,9 +1682,8 @@ def _detect_factor_kind(factor_code: str) -> str:
         if isinstance(node, ast.ClassDef):
             name_lower = node.name.lower()
             if "factor" in name_lower or any(
-                isinstance(n, ast.Assign) and any(
-                    isinstance(t, ast.Name) and t.id == "name" for t in n.targets
-                )
+                isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "name" for t in n.targets)
                 for n in node.body
             ):
                 has_class = True
@@ -1039,8 +1716,8 @@ def _vectorized_daily_spearman_ic(
         return 0.0, 0.0, 0.0, 0.0, 0
 
     df = pd.DataFrame({"f": f.values, "r": r.values})
-    # Qlib MultiIndex: [instrument, datetime]
-    df["date"] = f.index.get_level_values(1)
+    # 按**名字**取日期层：层序归位到 (datetime, instrument) 之后按下标取会取到标的。
+    df["date"] = f.index.get_level_values("datetime")
     df = df[np.isfinite(df["f"]) & np.isfinite(df["r"])]
     if len(df) < 100:
         return 0.0, 0.0, 0.0, 0.0, 0
@@ -1067,7 +1744,9 @@ def _vectorized_daily_spearman_ic(
     var_r = sums["rc2"] / n
     denom = np.sqrt(var_f * var_r)
     # 避免除零
-    df["corr"] = np.where(denom > 1e-12, cov / np.where(denom > 1e-12, denom, 1.0), np.nan)
+    df["corr"] = np.where(
+        denom > 1e-12, cov / np.where(denom > 1e-12, denom, 1.0), np.nan
+    )
 
     # 每日的 IC
     ic_by_date = df.groupby("date")["corr"].first().dropna()
@@ -1103,13 +1782,23 @@ def _resolve_instruments_for_universe(
         try:
             from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
             from backend.shared.stock_utils import StockCodeUtil
+
             hub = QuantDBDataHub.get_instance()
             universe_df = hub.fetch_universe_stocks(universe or "csi300")
             if universe_df is None or universe_df.empty:
                 raise RuntimeError(f"QuantDB returned no constituents for {universe}")
-            return sorted({StockCodeUtil.to_prefix(s) for s in universe_df["symbol"].tolist()[:500]})
+            return sorted(
+                {
+                    StockCodeUtil.to_prefix(s)
+                    for s in universe_df["symbol"].tolist()[:500]
+                }
+            )
         except Exception as e:
-            logger.warning("QuantDB universe %s unavailable, falling back to csi300: %s", universe, e)
+            logger.warning(
+                "QuantDB universe %s unavailable, falling back to csi300: %s",
+                universe,
+                e,
+            )
             return D.instruments(market="csi300")
     # 非 CN 市场：Qlib cache 的 instruments/all.txt 是全集，universe 仅作过滤
     # 这里简化: 直接 D.instruments(market="all")
@@ -1135,7 +1824,9 @@ def _default_backtest_window(market: str = "a_share") -> tuple[str, str]:
         logger.warning("[alpha-backtest] resolve default window failed: %s", exc)
     if end_ts is None or pd.isna(end_ts):
         end_ts = pd.Timestamp.today().normalize()
-    return (end_ts - pd.DateOffset(years=1)).strftime("%Y-%m-%d"), end_ts.strftime("%Y-%m-%d")
+    return (end_ts - pd.DateOffset(years=1)).strftime("%Y-%m-%d"), end_ts.strftime(
+        "%Y-%m-%d"
+    )
 
 
 async def _run_factor_backtest(
@@ -1178,9 +1869,7 @@ async def _run_factor_backtest(
                 factor_id, factor_code, kind, market, market_upper, universe, start, end
             )
         else:
-            await _backtest_via_h5(
-                factor_id, factor_code, kind, universe, start, end
-            )
+            await _backtest_via_h5(factor_id, factor_code, kind, universe, start, end)
     except FactorBacktestCancelled:
         logger.info("[alpha-backtest] %s cancelled by user", factor_id)
         try:
@@ -1197,6 +1886,7 @@ async def _run_factor_backtest(
         tb_text = ""
         if tb:
             import traceback as _tb
+
             tb_text = "".join(_tb.format_tb(tb))[-1500:]
         err_msg = f"{type(exc).__name__}: {exc}" + (f"\n{tb_text}" if tb_text else "")
         try:
@@ -1210,6 +1900,171 @@ async def _run_factor_backtest(
     finally:
         _running_backtests.discard(factor_id)
         _backtest_cancelled.discard(factor_id)
+
+
+# ── 层序归位（2026-10-07）─────────────────────────────────────────────
+# 因子产出与价格数据的 MultiIndex **层序相反**：
+#   · 挖掘侧（RD-Agent 因子代码）：(datetime, instrument)——因子代码里自己断言
+#     MultiIndex 并要求 set_index(['datetime','instrument'])；
+#   · Qlib D.features()：(instrument, datetime)。
+# 旧实现在拿到因子结果后写 `s.index.names = ["instrument", "datetime"]`：**只改名、
+# 不换层**，名字与值自此不符；而 Index.intersection 比对的是**值**（元组），
+# (日期, 标的) 去撞 (标的, 日期) 交集恒为 0，最终报「因子与价格对齐后数据不足
+# (共 0 行)」——层序问题却伪装成了数据不足。
+#
+# 此后一律**按值**判定哪一层是日期（不看 names，因为 names 本身可能就是被上游
+# 改错的），统一归位到挖掘侧层序 (datetime, instrument) 再对齐。
+CANONICAL_INDEX_NAMES = ["datetime", "instrument"]
+
+
+def _detect_datetime_level(index) -> int:
+    """按**值**判定 MultiIndex 中哪一层是日期；判定不了就抛错，不猜。"""
+    import pandas as _pd
+
+    if not isinstance(index, _pd.MultiIndex) or index.nlevels < 2:
+        raise ValueError("因子产出索引必须是 MultiIndex(datetime, instrument)")
+
+    # 先看 dtype（快路径）
+    dtype_hits = [
+        level
+        for level in range(index.nlevels)
+        if _pd.api.types.is_datetime64_any_dtype(index.get_level_values(level))
+    ]
+    if len(dtype_hits) == 1:
+        return dtype_hits[0]
+
+    # dtype 判定不出来（object 里装 Timestamp）时取样本看实际类型
+    for level in range(index.nlevels):
+        sample = index.get_level_values(level)[:8]
+        if len(sample) and all(isinstance(v, _pd.Timestamp) for v in sample):
+            return level
+
+    raise ValueError(f"无法从索引层 {list(index.names)} 判定哪一层是日期")
+
+
+def _canonicalize_multiindex(series):
+    """把 (datetime, instrument) 两层索引的 Series 归位成挖掘侧层序并排序。
+
+    只重排索引层级与行序，**不动值**——值必须跟着自己那行走。
+    """
+    import pandas as _pd
+
+    if not isinstance(series.index, _pd.MultiIndex) or series.index.nlevels != 2:
+        raise ValueError(
+            f"需要 2 层 MultiIndex(datetime, instrument)，实际 "
+            f"{getattr(series.index, 'nlevels', 1)} 层"
+        )
+
+    dt_level = _detect_datetime_level(series.index)
+    out = series
+    if dt_level != 0:
+        out = out.reorder_levels([dt_level, 1 - dt_level])
+    out = out.copy()
+    out.index = out.index.set_names(CANONICAL_INDEX_NAMES)
+    return out.sort_index()
+
+
+def _canonicalize_factor_series(result):
+    """因子计算结果 → 索引恒为 (datetime, instrument) 的 Series。"""
+    import pandas as _pd
+
+    if isinstance(result, _pd.Series):
+        s = result
+    elif isinstance(result.index, _pd.MultiIndex) and result.index.nlevels >= 2:
+        s = result.iloc[:, 0]
+    else:
+        s = result.stack()
+    return _canonicalize_multiindex(s)
+
+
+def _upper_instrument_level(series):
+    """把 instrument 层统一成大写。
+
+    **这是挖掘侧的既有契约，不是回测新发明的**：``scripts/alpha_agent/run_rd_agent.py``
+    在算 IC 前对因子产出与收益**两侧**做同一件事，原文注释——
+    「因子代码可能假设大写（SH600036），而 daily_pv.h5 用小写（sh600036），不统一
+    会导致对齐交集为空、IC 无法计算」。所以「因子把代码大写」在挖掘侧是被容许的、
+    有据可依的写法，不是因子作者的笔误。
+
+    回测若不做这一步，同一个因子就会在挖掘阶段算出 IC、在回测阶段撞空——这正是
+    「回测要喂挖掘同源数据」要补齐的那条缝。两边都转，且是幂等的，不会把原本
+    对齐的数据弄丢（值不动，只动标签）。
+    """
+    names = list(series.index.names)
+    if "instrument" not in names:
+        return series
+    level = names.index("instrument")
+    levels = series.index.levels[level]
+    if levels.dtype != object:
+        return series
+    out = series.copy()
+    out.index = out.index.set_levels(levels.str.upper(), level=level)
+    return out
+
+
+def _index_fingerprint(series, canonicalize) -> str:
+    """索引指纹：层名 + 行数 + 样本，用来一眼看出两边差在哪。
+
+    对齐结果行数极少时，成因不止层序一种——因子代码自己把标的代码大写
+    （``.str.upper()``，注释还写着「以匹配 Qlib」）同样会撞空。只报「数据不足」
+    的话这两种成因长得一模一样，所以样本值必须抬出来。
+    """
+    try:
+        index = canonicalize(series).index
+    except Exception:  # noqa: BLE001 - 指纹只是诊断信息，取不到就退回原始索引
+        index = series.index
+    return (
+        f"{list(index.names)} 共 {len(index)} 行，样例 {[tuple(v) for v in index[:3]]}"
+    )
+
+
+def _alignment_failure_message(factor_series, close, aligned_rows: int) -> str:
+    """对齐行数极少时的报错正文：两边的索引指纹一起给出。"""
+    return (
+        f"因子与价格对齐后数据不足 (共 {aligned_rows} 行)；"
+        f"因子侧 {_index_fingerprint(factor_series, _canonicalize_factor_for_alignment)}；"
+        f"价格侧 {_index_fingerprint(close, _canonicalize_price_for_alignment)}"
+    )
+
+
+def _forward_return(close):
+    """次日收益：按 **instrument 组内**前移一天。
+
+    两个坑都在这一行里：
+    · 分组键必须**按名字**取。层序归位后 level 0 是 datetime，`groupby(level=0)`
+      会变成按日期分组（每天每只票一组，pct_change 恒为 NaN）；
+    · shift 必须落在 **groupby 之内**。`groupby(level=0).pct_change().shift(-1)`
+      的 shift 在 groupby 之外，是整表位移，上一只股票的末日会拿到下一只的首日收益。
+    """
+    import pandas as _pd
+
+    if "instrument" not in close.index.names:
+        raise ValueError(f"价格索引缺少 instrument 层：{list(close.index.names)}")
+    ordered = _canonicalize_multiindex(close)
+    grouped = ordered.groupby(level="instrument", sort=False)
+    return grouped.shift(-1) / ordered - 1.0
+
+
+def _canonicalize_factor_for_alignment(result):
+    """因子产出 → 对齐口径：层序 (datetime, instrument) + instrument 大写。"""
+    return _upper_instrument_level(_canonicalize_factor_series(result))
+
+
+def _canonicalize_price_for_alignment(close):
+    """价格 → 对齐口径（与因子侧同一套规整，缺一不可）。"""
+    return _upper_instrument_level(_canonicalize_multiindex(close))
+
+
+def _align_factor_returns(factor, close):
+    """把因子产出与价格对齐到同一个 (datetime, instrument) 索引。
+
+    两边都要走完**同一套**规整：先归位层序，再统一 instrument 大小写。
+    任何一步只做一边，交集都是 0——层序错位与大小写不一致都会伪装成「数据不足」。
+    """
+    f_all = _canonicalize_factor_for_alignment(factor)
+    r_all = _upper_instrument_level(_forward_return(close))
+    common = f_all.index.intersection(r_all.index)
+    return f_all.loc[common], r_all.loc[common]
 
 
 async def _backtest_via_qlib(
@@ -1232,7 +2087,10 @@ async def _backtest_via_qlib(
     provider_uri = resolve_qlib_provider_uri(market_upper)
     # 幂等 init：qlib.init 多次调用是安全的，第二次会快速返回
     try:
-        qlib.init(provider_uri=provider_uri, region="cn" if market_upper in ("CN", "HK", "FUTURES", "CRYPTO") else "us")
+        qlib.init(
+            provider_uri=provider_uri,
+            region="cn" if market_upper in ("CN", "HK", "FUTURES", "CRYPTO") else "us",
+        )
     except Exception as e:
         logger.warning("qlib.init(%s) raised: %s", provider_uri, e)
 
@@ -1240,19 +2098,37 @@ async def _backtest_via_qlib(
     fields = ["$open", "$high", "$low", "$close", "$volume", "$factor"]
     df = D.features(instruments, fields, start_time=start, end_time=end, freq="day")
     if df.empty:
-        raise RuntimeError(f"Qlib 数据为空: market={market}, instruments={instruments}, provider_uri={provider_uri}")
+        raise RuntimeError(
+            f"Qlib 数据为空: market={market}, instruments={instruments}, provider_uri={provider_uri}"
+        )
 
     logger.info(
         "[alpha-backtest] %s market=%s universe=%s rows=%d cols=%s",
-        factor_id, market, universe, len(df), list(df.columns),
+        factor_id,
+        market,
+        universe,
+        len(df),
+        list(df.columns),
     )
 
     # 计算因子值（LLM 生成/用户提交的代码一律 subprocess 隔离执行，
     # 严禁在 engine 主进程 exec——主进程持有 DB 凭证与全部服务状态）
     if kind == "functional":
-        # RD-Agent calculate_* 函数式：用 subprocess 跑（隔离 + 捕获 traceback）
+        # RD-Agent calculate_* 函数式：用 subprocess 跑（隔离 + 捕获 traceback）。
+        # 优先喂**挖掘侧同源**的富化数据（39 列）：因子代码是照着挖掘时的列写的，
+        # 只给它 6 列量价，读到 $netflow_5 这类富化列就是 KeyError。
+        mining_source = _resolve_mining_source_h5(market)
+        if mining_source:
+            logger.info(
+                "[alpha-backtest] %s 使用挖掘同源富化数据: %s", factor_id, mining_source
+            )
+        else:
+            logger.info(
+                "[alpha-backtest] %s 无挖掘同源富化数据，回退 Qlib 现拼 6 列（因子若用富化列会缺列）",
+                factor_id,
+            )
         factor_series = await _run_functional_factor_subprocess(
-            factor_id, factor_code, df
+            factor_id, factor_code, df, source_h5=mining_source
         )
     else:
         # Qlib Factor 类：subprocess 逐股计算，主进程读结果 H5
@@ -1261,16 +2137,16 @@ async def _backtest_via_qlib(
     if factor_series is None or len(factor_series) == 0:
         raise RuntimeError("因子计算无输出，请检查 calculate_* 函数或 Factor 类")
 
-    # 准备收益率（次日收益，Qlib index=(instrument, datetime)，level=0 是股码）
+    # 对齐：因子产出是挖掘侧层序 (datetime, instrument)，Qlib 价格是
+    # (instrument, datetime)。**两边都**归位层序后再取交集——只归位一边，
+    # 交集照样是 0（正是 2026-10-07 那次「数据不足 (共 0 行)」的成因）。
     close = df["$close"]
-    fwd_ret = close.groupby(level=0).pct_change().shift(-1)
-
-    # 对齐 (datetime, instrument) MultiIndex
-    common_idx = factor_series.index.intersection(fwd_ret.index)
-    if len(common_idx) < 100:
-        raise RuntimeError(f"因子与价格对齐后数据不足 (共 {len(common_idx)} 行)")
-    f = factor_series.loc[common_idx]
-    r = fwd_ret.loc[common_idx]
+    f, r = _align_factor_returns(factor_series, close)
+    if len(f) < 100:
+        # 这个错误以前只说「数据不足」，而**层序错位**和**标的代码大小写不一致**
+        # 都会表现成对齐后行数极少——同一句话盖住了两种完全不同的成因，
+        # 真因因此被排查漏过（2026-10-07）。所以两边的层名、行数、样本值一起抬出来。
+        raise RuntimeError(_alignment_failure_message(factor_series, close, len(f)))
     mask = np.isfinite(f.values) & np.isfinite(r.values)
     if mask.sum() < 100:
         raise RuntimeError("清洗后有效数据 < 100 行")
@@ -1288,14 +2164,16 @@ async def _backtest_via_qlib(
     # Sharpe / Annual Return / Max Drawdown: 简单 long-top30% 组合
     try:
         df_pair = pd.DataFrame({"f": f_clean, "r": r_clean})
-        df_pair["date"] = df_pair.index.get_level_values(1)  # level 1 = datetime
+        df_pair["date"] = df_pair.index.get_level_values("datetime")
         df_pair["f_rank"] = df_pair.groupby("date")["f"].rank(pct=True)
         # long top 30% 每日收益均值
         longs = df_pair[df_pair["f_rank"] >= 0.7].groupby("date")["r"].mean().dropna()
         if len(longs) > 1:
             daily_ret = longs
             ann_ret = float(daily_ret.mean() * 252)
-            sharpe = float(daily_ret.mean() / (daily_ret.std(ddof=1) + 1e-8) * np.sqrt(252))
+            sharpe = float(
+                daily_ret.mean() / (daily_ret.std(ddof=1) + 1e-8) * np.sqrt(252)
+            )
             cum = (1 + daily_ret).cumprod()
             peak = cum.cummax()
             dd = (peak - cum) / peak
@@ -1307,11 +2185,20 @@ async def _backtest_via_qlib(
 
     # 质量闸门：扰动保真度（PFS）——同一批因子值上直接算，标注进 metadata，
     # 因子列表/详情原样返回（前端可据此过滤；低于阈值时导出会带质量警告）
-    pfs_quality = _compute_pfs_quality(pd.DataFrame({
-        "trade_date": f_clean.index.get_level_values(1),  # Qlib index=(instrument, datetime)
-        "symbol": f_clean.index.get_level_values(0),
-        "factor": np.asarray(f_clean, dtype=float),
-    }))
+    pfs_quality = _compute_pfs_quality(
+        pd.DataFrame(
+            {
+                "trade_date": f_clean.index.get_level_values("datetime"),
+                "symbol": f_clean.index.get_level_values("instrument"),
+                "factor": np.asarray(f_clean, dtype=float),
+            }
+        )
+    )
+
+    # 机构级评估器链（mining_plugins）：RRE / 换手 / 扣成本，新增键不改毛指标
+    eval_metrics = _run_mining_evaluators(
+        f_clean, r_clean, market=market, universe=universe, factor_id=factor_id
+    )
 
     await persistence.update_factor_metrics(
         factor_id,
@@ -1330,79 +2217,215 @@ async def _backtest_via_qlib(
             "rank_icir": rank_icir,
             "n_obs": n_obs,
             **({"quality": pfs_quality} if pfs_quality else {}),
+            **eval_metrics,
         },
     )
+
+    # 因子池登记（P1）：面板落盘（进程内有 f_clean，恰好是最全的一份）+ 池行 +
+    # 公式/task 边。record_backtested_factor 自身吞异常，这里再兜一层 import 失败——
+    # 池是增益层，任何情况下不拖挂回测。
+    try:
+        from backend.services.engine.mining_plugins import pool_service
+
+        await pool_service.record_backtested_factor(
+            factor_id,
+            market=market,
+            universe=universe,
+            values=f_clean,
+            forward_return=r_clean,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[alpha-backtest] 因子池登记失败（不拦回测）%s: %s", factor_id, exc
+        )
+
     logger.info(
-        "[alpha-backtest] %s done market=%s ic=%.4f rank_ic=%.4f icir=%.4f sharpe=%s ann_ret=%s max_dd=%s pfs=%s n=%d",
-        factor_id, market, ic_mean, rank_ic_median, icir,
+        "[alpha-backtest] %s done market=%s ic=%.4f rank_ic=%.4f icir=%.4f sharpe=%s ann_ret=%s max_dd=%s pfs=%s rre=%s ann_to=%s net_ret=%s n=%d",
+        factor_id,
+        market,
+        ic_mean,
+        rank_ic_median,
+        icir,
         f"{sharpe:.3f}" if sharpe is not None else "N/A",
         f"{ann_ret:.3f}" if ann_ret is not None else "N/A",
         f"{max_dd:.3f}" if max_dd is not None else "N/A",
         pfs_quality["pfs"] if pfs_quality else "N/A",
+        f"{eval_metrics['rre']:.4f}" if "rre" in eval_metrics else "N/A",
+        f"{eval_metrics['ann_turnover']:.2f}"
+        if "ann_turnover" in eval_metrics
+        else "N/A",
+        f"{eval_metrics['ann_return_net']:.3f}"
+        if "ann_return_net" in eval_metrics
+        else "N/A",
         n_obs,
     )
 
 
-async def _run_functional_factor_subprocess(
-    factor_id: str, factor_code: str, df: "pd.DataFrame"
-) -> "pd.Series | None":
-    """对 RD-Agent calculate_* 函数式因子：用 subprocess 跑（隔离错误），主进程读 result.h5。
+_MINING_H5_KEY = "data"
 
-    准备 daily_pv.h5 在 /tmp（用现有 df 写入，比 337MB 模板小且数据新）。
+
+def _resolve_mining_source_h5(market: str) -> str | None:
+    """挖掘侧喂给 RD-Agent 的那份富化 h5；没有就返回 None。
+
+    挖掘走 ``RDLoopWrapper._generate_h5_from_parquet`` →
+    ``<quantdb_dir>/.h5_cache/daily_pv_all.h5``（契约：MultiIndex[datetime,
+    instrument] + $open/$high/$low/$close/$volume/$amount/$factor 再拼 QuantDB
+    富化列）。回测此前从 Qlib 二进制现拼 6 列，富化列全缺，因子一读到
+    ``$netflow_5`` 就是 KeyError。
+
+    只认**已存在**的缓存：生成一份要读全市场日线（分钟级到 40 分钟），回测绝不
+    自己触发；没有就返回 None，由调用方退回旧路径（HK/US 等市场本就没有这份缓存）。
+    """
+    if _MARKET_TO_QLIB.get(market) != "CN":
+        return None
+    try:
+        # 懒 import：rd_loop_wrapper 会拉进 rdagent，别压在模块导入期
+        from backend.services.engine.rd_agent.rd_loop_wrapper import RDLoopWrapper
+
+        quantdb_dir = RDLoopWrapper._resolve_quantdb_dir()
+    except Exception as exc:  # noqa: BLE001 - 定位缓存失败不该让回测挂掉
+        logger.warning(
+            "[alpha-backtest] 解析 QuantDB 目录失败，回退 Qlib 现拼: %s", exc
+        )
+        return None
+    if not quantdb_dir:
+        return None
+    cache_path = os.path.join(quantdb_dir, ".h5_cache", "daily_pv_all.h5")
+    return cache_path if os.path.exists(cache_path) else None
+
+
+def _write_mining_input(src_h5: str, dest_h5: str, df) -> None:
+    """把挖掘侧富化 h5 切成回测窗口/股票池，写成子进程能相对读的 daily_pv.h5。
+
+    ``df`` 是 Qlib ``D.features()`` 取的那份（只用它拿股票池与日期窗口）。
+
+    不把 1.5GB 全量丢给因子代码：那份要读全市场全历史，单次回测既慢又吃内存。
+    **列的契约与挖掘逐字一致**（39 列、$ 前缀、(datetime, instrument)），只是范围
+    收窄——因子代码看到的仍是它挖掘时看到的那套列。
+    """
+    import pandas as _pd
+
+    dt_level = _detect_datetime_level(df.index)
+    inst_level = 1 - dt_level
+    wanted = set(df.index.get_level_values(inst_level).unique())
+    lo = _pd.Timestamp(df.index.get_level_values(dt_level).min())
+    hi = _pd.Timestamp(df.index.get_level_values(dt_level).max())
+
+    # HDF 层切片只是省 I/O 的优化，**不是**过滤的保证：索引非单调或未建
+    # data_columns 时会抛错走全量读，那时若不再自己过滤，窗口就静默失效了。
+    # 所以下面无条件再按日期/股票池裁一次，切片成不成功结果都一样。
+    try:
+        raw = _pd.read_hdf(src_h5, key=_MINING_H5_KEY, start=lo, stop=hi)
+    except (TypeError, ValueError):
+        raw = _pd.read_hdf(src_h5, key=_MINING_H5_KEY)
+
+    raw_dt_level = _detect_datetime_level(raw.index)
+    raw_dates = raw.index.get_level_values(raw_dt_level)
+    raw = raw[(raw_dates >= lo) & (raw_dates <= hi)]
+    if "instrument" in raw.index.names:
+        raw = raw[raw.index.get_level_values("instrument").isin(wanted)]
+    elif raw.index.nlevels == 2:
+        raw = raw[raw.index.get_level_values(1 - raw_dt_level).isin(wanted)]
+
+    if raw.empty:
+        raise RuntimeError(
+            f"挖掘同源数据在 {lo.date()}~{hi.date()} / {len(wanted)} 只标的上筛不出任何行"
+        )
+    raw.to_hdf(dest_h5, key=_MINING_H5_KEY, mode="w")
+
+
+async def _run_functional_factor_subprocess(
+    factor_id: str, factor_code: str, df: "pd.DataFrame", source_h5: str | None = None
+) -> "pd.Series | None":
+    """对 RD-Agent 函数式因子：用 subprocess 跑（隔离错误），主进程读 result.h5。
+
+    **因子有两种入口样式，与挖掘侧同一套契约、同一优先级**（见
+    ``scripts/alpha_agent/run_rd_agent.py``）：
+
+    1. **自执行式**——带 ``main()`` 与 ``__main__`` 守卫，自己读 ``daily_pv.h5``、
+       写 ``result.h5``。**优先**：能自执行就自执行，不碰 ``calculate_*``。
+    2. **零参函数式**——无守卫，靠显式调 ``calculate_*()`` 并用返回值。
+       仅在样式 1 没产出任何结果文件时才走这条。
+
+    顺序不可颠倒：样式 1 的 ``calculate_*(data)`` 需要一个由 ``main()`` 注入的实参，
+    无条件先调它必然 ``TypeError``，而结果其实已经写好了。
+
+    ``source_h5`` 给了就写**挖掘侧同源**的富化数据（39 列，层序 (datetime,
+    instrument)）；没给才退回「从 Qlib 二进制现拼 6 列」的老路。
+
+    输入文件放在**每次运行独立的临时目录**里（不再是全局 /tmp/daily_pv.h5）：
+    并发回测此前会互相覆盖这个文件，而因子代码是按相对路径读它的。
     """
     import sys as _sys
     import shutil
     import tempfile
     from pathlib import Path
 
-    h5_path = "/tmp/daily_pv.h5"
+    run_dir = tempfile.mkdtemp(prefix=f"bt_{factor_id[:8]}_")
+    h5_path = os.path.join(run_dir, "daily_pv.h5")
     try:
-        # 把 Qlib 拉的 df 写成 H5 给 subprocess 读。
-        # Qlib D.features() 的列名带 "$" 前缀 (如 $close, $volume)，
-        # 但 RD-Agent 因子代码通常用不带前缀的列名 (如 close, volume)。
-        # 同时写入两组列名，兼容两种命名约定。
-        df_out = df.copy()
-        for col in list(df_out.columns):
-            if col.startswith("$"):
-                plain = col[1:]
-                if plain not in df_out.columns:
-                    df_out[plain] = df_out[col]
-        df_out.to_hdf(h5_path, key="data", mode="w")
+        if source_h5:
+            _write_mining_input(source_h5, h5_path, df)
+        else:
+            # 回退路径：把 Qlib 拉的 df 写成 H5 给 subprocess 读。
+            # Qlib D.features() 的列名带 "$" 前缀 (如 $close, $volume)，
+            # 但 RD-Agent 因子代码通常用不带前缀的列名 (如 close, volume)。
+            # 同时写入两组列名，兼容两种命名约定。
+            df_out = df.copy()
+            for col in list(df_out.columns):
+                if col.startswith("$"):
+                    plain = col[1:]
+                    if plain not in df_out.columns:
+                        df_out[plain] = df_out[col]
+            df_out.to_hdf(h5_path, key="data", mode="w")
     except Exception as e:
         raise RuntimeError(f"准备 daily_pv.h5 失败: {e}") from e
 
-    tb_path = "/tmp/_bt_tb.txt"
+    # 三个中间文件也收进 per-run 目录：写死在 /tmp 时，并发回测会互相覆盖，
+    # 表现为「A 的回测读到了 B 的因子结果」这种极难复现的错。
+    tb_path = os.path.join(run_dir, "_bt_tb.txt")
     Path(tb_path).unlink(missing_ok=True)
-    out_path = "/tmp/_bt_result.h5"
+    out_path = os.path.join(run_dir, "_bt_result.h5")
     Path(out_path).unlink(missing_ok=True)
-    Path("/tmp/result.h5").unlink(missing_ok=True)
+    Path(os.path.join(run_dir, "result.h5")).unlink(missing_ok=True)
 
     script = f"""
 import pandas as pd
 import numpy as np
 import sys, os, tempfile, traceback, shutil
 
-os.chdir(tempfile.gettempdir())
-TB = "/tmp/_bt_tb.txt"
-OUT = "/tmp/_bt_result.h5"
+os.chdir({run_dir!r})
+TB = {tb_path!r}
+OUT = {out_path!r}
 try:
-    _factor_ns = {{}}
+    # __name__ 必须显式给成 '__main__'。挖掘侧对因子有**两种**入口样式，且**优先
+    # 自执行**（run_rd_agent.py 原注释：「若因子代码未自执行（无 __main__ 守卫）或
+    # 未产出 result.h5，则显式调用 calculate_*()」）。子进程 exec 的命名空间里没有
+    # __name__，守卫取到的是 'builtins' 而不是 '__main__'，main() 根本不触发，
+    # 于是自执行因子统统掉进下面的零参调用——线上 6 个因子卡在这（2026-10-07）。
+    _factor_ns = {{"__name__": "__main__"}}
     exec({repr(factor_code)}, _factor_ns)
-    _calc_fns = [v for k, v in _factor_ns.items() if k.startswith("calculate_") and callable(v)]
-    if not _calc_fns:
-        print("NO_CALC_FN"); sys.exit(1)
-    _result = _calc_fns[0]()
-    # 优先用返回值（DataFrame），否则看 result.h5
-    if _result is not None and hasattr(_result, 'to_hdf'):
-        _result.to_hdf(OUT, key='data', mode='w')
-    elif os.path.exists('result.h5'):
-        shutil.move('result.h5', OUT)
-    else:
-        # 兜底: 找 cwd 下所有 .h5（排除 daily_pv）
-        for f in os.listdir('.'):
-            if f.endswith('.h5') and f != 'daily_pv.h5' and not f.startswith('_bt'):
-                shutil.move(f, OUT)
-                break
+
+    def _produced_h5():
+        # 因子自己写出来的结果；daily_pv.h5 是输入，_bt* 是本脚本的中间文件。
+        return [f for f in os.listdir('.')
+                if f.endswith('.h5') and f != 'daily_pv.h5' and not f.startswith('_bt')]
+
+    # 先看自执行有没有产出；**没产出才**退回显式调用 calculate_*()。
+    # 顺序反过来就是错的：自执行因子的 calculate_*(data) 需要一个由 main() 注入的
+    # 实参，无条件先调它必然 TypeError，而结果其实已经躺在 result.h5 里了。
+    if not _produced_h5():
+        _calc_fns = [v for k, v in _factor_ns.items() if k.startswith("calculate_") and callable(v)]
+        if _calc_fns:
+            _result = _calc_fns[0]()
+            if _result is not None and hasattr(_result, 'to_hdf'):
+                _result.to_hdf(OUT, key='data', mode='w')
+
+    if not os.path.exists(OUT):
+        # 兜底：因子自己写的那个 h5（无论来自自执行还是函数返回）
+        _cands = _produced_h5()
+        if _cands:
+            shutil.move(_cands[0], OUT)
         else:
             print("NO_RESULT_FILE"); sys.exit(1)
     print("FACTOR_DONE")
@@ -1425,17 +2448,14 @@ except Exception as e:
     # 读 result.h5
     try:
         import pandas as _pd
+
         result_df = _pd.read_hdf(out_path)
     except Exception as e:
         raise RuntimeError(f"读取 result.h5 失败: {e}") from e
 
-    # 转成 MultiIndex(datetime, instrument) 的 Series
-    if isinstance(result_df.index, _pd.MultiIndex) and result_df.index.nlevels >= 2:
-        s = result_df.iloc[:, 0]
-    else:
-        s = result_df.stack()
-    s.index.names = ["instrument", "datetime"]
-    return s
+    # 归位成 (datetime, instrument)：因子代码自己 set_index(['datetime','instrument'])，
+    # 旧实现却按下标改名成 ["instrument","datetime"]——名字与值不符，交集恒 0 行。
+    return _canonicalize_factor_series(result_df)
 
 
 async def _run_factor_class_subprocess(
@@ -1457,6 +2477,7 @@ async def _run_factor_class_subprocess(
 
     try:
         import pandas as _pd
+
         df.to_hdf(input_path, key="data", mode="w")
     except Exception as e:
         raise RuntimeError(f"准备因子输入数据失败: {e}") from e
@@ -1509,6 +2530,7 @@ except Exception:
 
     try:
         import pandas as _pd
+
         result_df = _pd.read_hdf(out_path)
     except Exception as e:
         raise RuntimeError(f"读取因子结果失败: {e}") from e
@@ -1519,8 +2541,8 @@ except Exception:
         s = result_df.iloc[:, 0]
     else:
         s = result_df.stack()
-    s.index.names = ["instrument", "datetime"]
-    return s
+    # 同上：层序按值判定并归位，绝不按下标改名。
+    return _canonicalize_multiindex(s)
 
 
 async def _backtest_via_h5(
@@ -1537,8 +2559,12 @@ async def _backtest_via_h5(
         raise RuntimeError(f"H5 数据文件不存在: {h5_path}，请改用 data_source=qlib_bin")
     # 复制到 /tmp 让因子代码能相对路径读
     import shutil
+
     tmp_h5 = "/tmp/daily_pv.h5"
-    if not Path(tmp_h5).exists() or Path(tmp_h5).stat().st_mtime < Path(h5_path).stat().st_mtime:
+    if (
+        not Path(tmp_h5).exists()
+        or Path(tmp_h5).stat().st_mtime < Path(h5_path).stat().st_mtime
+    ):
         shutil.copy2(h5_path, tmp_h5)
     await _backtest_functional_factor(factor_id, factor_code, start, end, universe)
 
@@ -1578,7 +2604,9 @@ async def _run_lightweight_backtest(
         # AST 预检，不执行代码。
         kind = _detect_factor_kind(factor_code)
         if kind == "functional":
-            await _backtest_functional_factor(factor_id, factor_code, start_date, end_date, universe)
+            await _backtest_functional_factor(
+                factor_id, factor_code, start_date, end_date, universe
+            )
             return
         if kind != "factor_class":
             raise RuntimeError("因子代码中未找到可调用的 Factor 类")
@@ -1596,18 +2624,28 @@ async def _run_lightweight_backtest(
             from backend.shared.stock_utils import StockCodeUtil
 
             try:
-                from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+                from backend.services.engine.data_platform.quantdb_hub import (
+                    QuantDBDataHub,
+                )
+
                 hub = QuantDBDataHub.get_instance()
                 universe_df = hub.fetch_universe_stocks(universe or "csi300")
                 if universe_df.empty:
-                    raise RuntimeError(f"QuantDB returned no constituents for {universe}")
+                    raise RuntimeError(
+                        f"QuantDB returned no constituents for {universe}"
+                    )
                 # Qlib instrument files use prefix format (SZ000001), not suffix (000001.SZ)
                 instruments = sorted(
-                    {StockCodeUtil.to_prefix(s) for s in universe_df["symbol"].tolist()[:500]}
+                    {
+                        StockCodeUtil.to_prefix(s)
+                        for s in universe_df["symbol"].tolist()[:500]
+                    }
                 )
             except Exception as e:
                 logger.warning(
-                    "QuantDB universe %s unavailable, falling back to csi300: %s", universe, e
+                    "QuantDB universe %s unavailable, falling back to csi300: %s",
+                    universe,
+                    e,
                 )
                 instruments = D.instruments(market="csi300")
 
@@ -1648,6 +2686,7 @@ async def _run_lightweight_backtest(
             # Spearman Rank IC
             try:
                 from scipy.stats import spearmanr
+
                 rank_ic, _ = spearmanr(paired.iloc[:, 0], paired.iloc[:, 1])
                 if np.isfinite(rank_ic):
                     rank_ic_list.append(float(rank_ic))
@@ -1667,7 +2706,8 @@ async def _run_lightweight_backtest(
         rank_ic_mean = float(np.mean(rank_ic_list)) if rank_ic_list else None
         sharpe = (
             float(np.mean(ret_list) / (np.std(ret_list) + 1e-8) * np.sqrt(252))
-            if ret_list else None
+            if ret_list
+            else None
         )
         annual_return = float(np.mean(ret_list) * 252) if ret_list else None
 
@@ -1697,7 +2737,8 @@ async def _run_lightweight_backtest(
         )
         logger.info(
             "[alpha-backtest] %s done ic=%.4f rank_ic=%s sharpe=%s max_dd=%s universe=%s",
-            factor_id, ic_mean,
+            factor_id,
+            ic_mean,
             f"{rank_ic_mean:.4f}" if rank_ic_mean is not None else "N/A",
             f"{sharpe:.3f}" if sharpe is not None else "N/A",
             f"{max_drawdown:.3f}" if max_drawdown is not None else "N/A",
@@ -1754,6 +2795,7 @@ async def _backtest_functional_factor(
         data_path = _resolve_factor_h5_path(universe)
         # 复制到 /tmp/daily_pv.h5，因子代码用相对路径 daily_pv.h5 能读到
         import shutil
+
         tmp_h5 = "/tmp/daily_pv.h5"
         try:
             if Path(data_path).exists() and (
@@ -1877,6 +2919,7 @@ try:
     # 组合指标（与 Qlib 路径同口径：做多因子前 30% 的等权日收益）
     _pair = pd.DataFrame({{'f': f.values, 'r': r.values}})
     _pair['dt'] = f.index.get_level_values(0)
+    _pair['symbol'] = f.index.get_level_values(1)
     _pair = _pair[np.isfinite(_pair['f']) & np.isfinite(_pair['r'])]
     _pair['fr'] = _pair.groupby('dt')['f'].rank(pct=True)
     _longs = _pair[_pair['fr'] >= 0.7].groupby('dt')['r'].mean().dropna()
@@ -1909,6 +2952,19 @@ try:
                 print("PFS_DAYS=%d" % int(_q.get("n_days") or 0))
     except Exception:
         pass
+    # 机构级评估器链（mining_plugins）：RRE / 换手 / 扣成本 → EVAL_<key>= 协议
+    # （与 Qlib 路径共用 evaluate_paired；本函数仅跑 A 股 h5，市场固定 a_share）
+    try:
+        from backend.services.engine.mining_plugins import evaluate_paired
+        _eval_paired = pd.DataFrame({{"datetime": _pair["dt"], "symbol": _pair["symbol"],
+                                      "factor": _pair["f"], "ret": _pair["r"]}})
+        for _ek, _ev in sorted(evaluate_paired(
+                _eval_paired, market="a_share", universe={universe!r},
+                factor_id={factor_id!r}).items()):
+            if _ev is not None:
+                print("EVAL_%s=%s" % (_ek, _ev))
+    except Exception as _ee:
+        print("MiningEvalError: %s" % _ee, file=sys.stderr)
 except Exception as e:
     print(f"ERROR: {{e}}")
     traceback.print_exc()
@@ -1964,6 +3020,8 @@ except Exception as e:
                 except Exception:
                     pass
 
+        eval_metrics = _parse_eval_metrics(out)
+
         if ic_mean is None:
             raise RuntimeError(f"因子回测失败: {out[-500:]}")
 
@@ -1979,17 +3037,44 @@ except Exception as e:
             max_drawdown=max_dd,
             universe=universe,
             date_range=f"{start}~{end}",
-            metadata={"data_source": "h5", **({"quality": pfs_quality} if pfs_quality else {})},
+            metadata={
+                "data_source": "h5",
+                **({"quality": pfs_quality} if pfs_quality else {}),
+                **eval_metrics,
+            },
         )
+        # 因子池登记（P1）：h5 路径进程内无因子序列（值在子进程 result.h5 里），
+        # values=None → 只建池行 + 公式/task 边，面板留待 mining_pool_rebuild --panels。
+        # 池是增益层：record_backtested_factor 自身吞异常，这里再兜 import 失败。
+        try:
+            from backend.services.engine.mining_plugins import pool_service
+
+            await pool_service.record_backtested_factor(
+                factor_id, market="a_share", universe=universe, values=None
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[alpha-backtest-fn] 因子池登记失败（不拦回测）%s: %s", factor_id, exc
+            )
         logger.info(
-            "[alpha-backtest-fn] %s done ic=%.4f rank_ic=%s icir=%s sharpe=%s ann_ret=%s max_dd=%s pfs=%s",
-            factor_id, ic_mean,
+            "[alpha-backtest-fn] %s done ic=%.4f rank_ic=%s icir=%s sharpe=%s ann_ret=%s max_dd=%s pfs=%s rre=%s ann_to=%s net_ret=%s",
+            factor_id,
+            ic_mean,
             f"{rank_ic_mean:.4f}" if rank_ic_mean is not None else "N/A",
             f"{icir:.4f}" if icir is not None else "N/A",
             f"{sharpe:.4f}" if sharpe is not None else "N/A",
             f"{ann_ret:.4f}" if ann_ret is not None else "N/A",
             f"{max_dd:.4f}" if max_dd is not None else "N/A",
-            f"{pfs_quality['pfs']:.4f}" if pfs_quality.get("pfs") is not None else "N/A",
+            f"{pfs_quality['pfs']:.4f}"
+            if pfs_quality.get("pfs") is not None
+            else "N/A",
+            f"{eval_metrics['rre']:.4f}" if "rre" in eval_metrics else "N/A",
+            f"{eval_metrics['ann_turnover']:.2f}"
+            if "ann_turnover" in eval_metrics
+            else "N/A",
+            f"{eval_metrics['ann_return_net']:.3f}"
+            if "ann_return_net" in eval_metrics
+            else "N/A",
         )
     except FactorBacktestCancelled:
         logger.info("[alpha-backtest-fn] %s cancelled by user", factor_id)
@@ -2018,7 +3103,9 @@ except Exception as e:
 
 def _resolve_factor_h5_path(universe: str = "csi300") -> str:
     """解析因子回测用 H5 数据文件路径（RD-Agent daily_pv.h5）。"""
-    base = "/app/alphaagent/scenarios/qlib/experiment/factor_data_template/daily_pv_all.h5"
+    base = (
+        "/app/alphaagent/scenarios/qlib/experiment/factor_data_template/daily_pv_all.h5"
+    )
     if Path(base).exists():
         return base
     return "/tmp/daily_pv.h5"

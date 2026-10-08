@@ -111,6 +111,103 @@ docker exec -w /app quantmind python /app/backend/scripts/factor_factory.py --sm
 - **训练侧读取**：`QuantDBFactorReader(mode="CUSTOM")`（`QM_QUANTCUSTOM_DATA_DIR`）。
 - 落盘/目录口径见 [[quantdb-data-structure]] 的 `quantcustom` 小节。
 
+## 1.6 因子池 / 谱系 / 物化门禁 / 组合实验室（机构级升级）
+
+「演化 + 回测」之外的机构级面：**跨 run 因子记忆**（回测完成的因子自动登记进池 +
+价值级面板缓存）、**谱系边**、**检索注入**（历史因子摘要进 prompt）、**物化门禁**、
+**组合权重优化**。前端入口：因子挖掘模块 →「因子池」页（池总览 / 池因子 / 谱系图 /
+门禁状态 / 组合实验室 五个 tab）。
+
+### 指标口径（改公式必须过金样）
+
+| 口径 | 定义 | 金样 |
+|---|---|---|
+| RRE 排序可靠度 | 逐日 rank 份额分布的 KL 稳定性 `mean(1/(1+KL_t))`（ε=1e-8，跳过首日） | `backend/tests/fixtures/miningMetricsGolden.json`（`rre_cases`） |
+| 换手 / 扣成本 | top30% 组合日名单变动 `to_t`；`ann_turnover=mean(to_t)×252`；`r_net=r−to_t×cost_rate`；net 是**新增键**，gross（annual_return/sharpe_ratio）原样保留 | 同文件 `turnover_cases` |
+| Diversity | 池内因子按日 zscore → 协方差特征值截负 → 熵/lnN（0..1）；留一法出单因子贡献 | `test_pool_service.py` 合成断言 |
+
+金样被后端（`test_mining_eval_rre.py` / `test_mining_eval_turnover_cost.py`）与前端
+描述符测试共读；**口径拆分刻意不搬** AlphaEval 的 round 3 位、NaN>50%→0 截断、maxiter=1。
+
+### 因子池运维 CLI（回填 / 刷新）
+
+```bash
+# 容器内执行（依赖 parquet/pandas/Qlib；先预演后 apply 是纪律）
+docker exec -w /app quantmind python -m backend.scripts.mining_pool_rebuild --dry-run   # 默认：只统计不落库
+docker exec -w /app quantmind python -m backend.scripts.mining_pool_rebuild --apply     # 写池行/谱系边/新颖度/pool_score
+docker exec -w /app quantmind python -m backend.scripts.mining_pool_rebuild --apply --panels  # 顺带回填缺失面板
+```
+
+- 范围限定：`--user` / `--market` / `--universe`；`--metrics`（补算新指标）、`--no-refresh`（只回填不刷池）。
+- flock 单飞：同机同时只跑一个（前端「执行刷新」走同一把锁，409=已有刷新在跑）。
+- **面板缓存**：`{QM_FACTOR_POOL_PANEL_DIR:/data/rd_agent_pool/panels}/{market}/{factor_id}.parquet`
+  （逐日 rank-pct float32 + fret 收益列，csi300 约 0.6MB/因子）；缺 fret 的旧面板
+  `--panels` 会自动重建（组合实验室取 fret 当 rank-IC 目标）。
+- 状态/日志：`/data/mining_pool_rebuild_status.json`、`/data/mining_pool_rebuild_ui.log`（env 可覆盖）。
+
+### 检索注入（prompt 单通道，默认开）
+
+挖矿 spawn 前 engine 侧 `build_injection_digest` 把池内 top-k 摘要写
+`<task_log_dir>/pool_context.md`（路径经 `QMF_POOL_CONTEXT_PATH` 传给 rdagent 子进程），
+`rd_loop_wrapper` 读入后追加「历史挖掘记忆」prompt 段；**不进 base_factors.json**（那是
+LLM 的基础特征集，塞摘要会污染运行时特征）。spawn 成功后 `mark_retrieved` 批量 +1
+（疲劳计数，失败不计数）。开关：`QM_FACTOR_POOL_INJECT_DISABLED=1` 关；
+`QM_FACTOR_POOL_INJECT_K` 改条数（默认 5）。
+
+### API（Bearer 鉴权同 §2；全部 user-scoped）
+
+```text
+GET  /api/v1/alpha-agent/pool/overview?market=&universe=            # KPI + 多样性熵 + 有效因子数
+GET  /api/v1/alpha-agent/pool/factors?market=&universe=&limit=&offset=&sort=  # 池因子（门禁裁决/被检索次数/有无面板）
+GET  /api/v1/alpha-agent/pool/graph?market=&universe=&max_nodes=    # 谱系 nodes+edges
+POST /api/v1/alpha-agent/pool/refresh?market=&universe=&dry_run=true|false    # 后台子进程（flock 单飞）
+GET  /api/v1/alpha-agent/pool/refresh/status                        # 锁探活 + 最近状态 + 日志尾
+GET  /api/v1/alpha-agent/metrics/registry                           # 指标/门禁描述符（前端展示口径）
+POST /api/v1/alpha-agent/combos/optimize                            # JSON {market,universe,factor_ids,name,seed}；400/409/500 语义见下
+GET  /api/v1/alpha-agent/combos?market=&limit=&offset=              # 组合历史（新→旧）
+GET  /api/v1/alpha-agent/combos/{combo_id}                          # 详情：权重/两窗指标/valid 净值曲线
+```
+
+### 物化门禁（软告警默认）
+
+内置五门（全 soft）：`pfs_floor 0.9` / `rre_floor 0.5` / `ic_pool_pct 0.3`（池内分位）/
+`turnover_cap 60`（年化换手）/ `net_return_floor 0.0`。**现有 |ρ|≥0.9 去重硬拒语义不变**。
+软 = 记录并展示（manifest + factor metadata `materialization.gates`，池页「门禁状态」tab 可见），
+不拦物化。升级为硬拦两条路：yaml `gates.<key>.mode: hard` 或 env `QM_MINING_GATES_MODE=strict`
+（全局）；逐条关闭 `QM_MINING_GATES_DISABLED=<key>[,<key>]`。
+
+### 组合实验室（P2）
+
+前端：因子池页 →「组合实验室」tab。流程 = 选 **2–12 个有面板**因子 → 差分进化
+（scipy `differential_evolution`，bounds (−1,1)^d，`w=u/Σ|u|` L1 归一允许负权，
+目标 = **train 窗日均 rank-IC** 最大）→ train/valid 按日期 **70/30** 拆分 → valid 出
+扣成本净值曲线与两窗指标对比。同 seed 重跑权重可复现（参数回执落 `train_metrics.config`：
+seed/popsize/maxiter/tol/converged/n_evaluations）。作业是**子进程单飞**（全局 flock；
+日志 `/data/combo_optimize_logs/{combo_id}.log`，env `QM_COMBO_LOG_DIR` / `QM_COMBO_LOCK`）；
+端点上 400=因子集/scope 被拒（无面板/不足 2 个）、409=已有作业在跑、500=子进程起不来，
+失败路径都会把组合行标 failed（**不许静默 pending**）。结果仅研究展示，不自动进生产链路。
+
+### 插件扩展（加一个 evaluator / gate 的 4 步）
+
+1. 新文件进 `backend/services/engine/mining_plugins/evaluators/`（或 `gates/builtin.py`），纯函数实现；
+2. `register_evaluator` / `register_gate` 装饰器注册（`__init__.py` 导入即触发）；
+3. 定义 `MetricDescriptor`（key/label/group/unit/better/precision）→
+   `GET /alpha-agent/metrics/registry` 与前端描述符表自动出现（缺失显「—」）；
+4. 配单测 + 金样（口径类必须），`config/factor_mining/plugins.yaml` 给默认开关。
+
+### 环境变量总表（运维热调，免重建镜像）
+
+| env | 作用 | 默认 |
+|---|---|---|
+| `QM_MINING_PLUGINS_CONFIG` | 插件 yaml 路径 | `config/factor_mining/plugins.yaml`（可缺省） |
+| `QM_MINING_COST_RATE` | 扣成本口径（双边） | `factor_research.analysis.COST_RATE` = 0.002 |
+| `QM_MINING_GATES_MODE` | 门禁全局升级：`strict`=全硬 | soft |
+| `QM_MINING_GATES_DISABLED` | 逐条关闭门禁（逗号分隔 key） | 无 |
+| `QM_FACTOR_POOL_PANEL_DIR` | 面板缓存根 | `/data/rd_agent_pool/panels` |
+| `QM_FACTOR_POOL_INJECT_K` / `_INJECT_DISABLED` | 注入条数 / 关开关 | 5 / 开 |
+| `QM_POOL_REBUILD_LOCK` / `_STATUS` / `_WEB_LOG` | 刷新锁/状态/日志路径 | `/tmp`、`/data/mining_pool_rebuild_status.json`、`/data/mining_pool_rebuild_ui.log` |
+| `QM_COMBO_LOCK` / `QM_COMBO_LOG_DIR` | 组合作业锁 / 日志目录 | `/tmp/qm-combo-optimize.lock`、`/data/combo_optimize_logs` |
+
 ## 2. 手动分步（需要精细控制时用 API）
 
 ### 认证
@@ -187,9 +284,18 @@ curl -s -H "$AUTH" "$BASE/api/v1/alpha-agent/stats"                             
 - [ ] preflight 三项 PASS
 - [ ] 演化任务 `completed`（非 failed）
 - [ ] 有因子入库且完成批量回测（`ic_value` 非空）
+- [ ] 回测完成的因子自动进池（`GET /pool/overview` total 增长；回测因子 `has_panel=true`）；
+      前端因子池页可见图/表（不再手动）
 - [ ] 排行榜上 |IC| 高、ICIR 明显 > 0 的因子受关注
+- [ ] 第二轮挖掘任务：prompt 含「历史挖掘记忆」段（或日志见注入文件路径）、
+      相关因子 `times_retrieved` +1（疲劳计数生效）
+- [ ] `mining_pool_rebuild --dry-run` 输出与 `--apply` 落库结果一致（预演先看再写）
+- [ ] 物化 dry-run：manifest 与 factor metadata `materialization.gates` 出现判定，
+      池页「门禁状态」tab 可见软告警黄标
 - [ ] 高分因子完成 `explain`，解读与 direction 假设一致（非噪声）
 - [ ] 确认有效的因子已 `export`（日志有导出记录）
+- [ ] 组合实验室（可选）：≥3 因子优化完成，权重 Σ|w|=1、valid 指标与净值曲线可见、
+      同 seed 重跑权重一致
 - [ ] 报告落盘（默认 /tmp/rd_agent_factor_report.md）
 
 ## 5. 常见问题与踩坑
@@ -210,3 +316,11 @@ curl -s -H "$AUTH" "$BASE/api/v1/alpha-agent/stats"                             
 - 环境修复：`docker/conda-shim`、`docker/litellm_sitecustomize.py`（compose 挂载固化）
 - RD-Agent Runner 入口：`scripts/alpha_agent/run_rd_agent.py`
 - 因子工厂：`backend/scripts/factor_factory.py`（+ `backend/scripts/alpha_library_factors.py` 复用算子/写盘）
+- 挖掘插件包：`backend/services/engine/mining_plugins/`（registry/base/config +
+  evaluators/ + gates/builtin.py + pool_service/pool_panels/pool_edges/pool_scoring/combo_optimizer）
+- 池回填 CLI：`backend/scripts/mining_pool_rebuild.py`；组合作业 CLI：`backend/scripts/mining_combo_optimize.py`
+- 插件配置：`config/factor_mining/plugins.yaml`；指标金样：`backend/tests/fixtures/miningMetricsGolden.json`
+- 注入接线：`backend/services/engine/alpha_agent/launcher.py`（`QMF_POOL_CONTEXT_PATH` + `mark_retrieved`）
+  → `backend/services/engine/rd_agent/rd_loop_wrapper.py`（prompt「历史挖掘记忆」段）
+- 前端因子池页：`electron/src/features/alpha-research/pages-v2/FactorPoolPage.tsx`
+  （组合实验室 tab：`components-v2/ComboLabTab.tsx`）

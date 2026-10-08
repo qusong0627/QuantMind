@@ -1,11 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components-v2/ui/Card';
 import { Button } from '../components-v2/ui/Button';
 import { Badge } from '../components-v2/ui/Badge';
-import { Settings, Save, RotateCcw, Check, X, AlertCircle, Loader2, Database, Sliders, Box, Cpu, Compass, Shuffle, Info, Bot, BarChart3 } from 'lucide-react';
-import { healthCheck, getDataSummary, getUniverses, getLlmConfig, type LlmConfigStatus } from '../services-v2/api';
+import { Settings, Save, RotateCcw, Check, X, AlertCircle, Loader2, Database, Sliders, Box, Cpu, Compass, Shuffle, Info, Bot, BarChart3, Layers, Eye, EyeOff } from 'lucide-react';
+import { healthCheck, getDataSummary, getUniverses, getLlmConfig, saveEmbeddingConfig, type LlmConfigStatus } from '../services-v2/api';
+import { extractApiError } from '../../../utils/apiError';
 import { apiClient } from '../../../services/aiStrategyClients';
 import { REFERENCE_MINING_DIRECTIONS, getDirectionLabel, type MiningDirectionItem, importFeatureCatalogDirections, fetchMiningDirections } from '../utils-v2/miningDirections';
+import { buildEmbeddingSavePayload } from '../utils-v2/embeddingPayload';
 import type { DataSummary, UniverseId, UniverseInfo } from '../types-v2';
 import { Modal } from 'antd';
 
@@ -67,6 +69,13 @@ export const SettingsPage: React.FC = () => {
   const [l1Directions, setL1Directions] = useState<MiningDirectionItem[]>([]);
   const [llmConfig, setLlmConfig] = useState<LlmConfigStatus | null>(null);
   const [llmLoading, setLlmLoading] = useState(false);
+  // 向量检索（embedding）—— 因子挖掘的记忆检索走这条通道，与 chat 独立。
+  const [embeddingForm, setEmbeddingForm] = useState({ model: '', baseUrl: '', apiKey: '' });
+  const [embeddingSaving, setEmbeddingSaving] = useState(false);
+  const [embeddingMsg, setEmbeddingMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [embKeyVisible, setEmbKeyVisible] = useState(false);
+  /** 表单只在首次拿到状态时灌初值，之后不再覆盖用户正在编辑的内容 */
+  const embHydrated = useRef(false);
 
   // Load config from backend on mount
   useEffect(() => {
@@ -82,6 +91,75 @@ export const SettingsPage: React.FC = () => {
       .catch(() => {});
     refreshLlmConfig();
   }, []);
+
+  useEffect(() => {
+    const emb = llmConfig?.embedding;
+    if (embHydrated.current || !emb) return;
+    setEmbeddingForm({ model: emb.model, baseUrl: emb.base_url, apiKey: '' });
+    embHydrated.current = true;
+  }, [llmConfig]);
+
+  const updateEmbeddingField = (patch: Partial<typeof embeddingForm>) => {
+    setEmbeddingForm({ ...embeddingForm, ...patch });
+    // 一改输入就撤掉「已保存」绿字：否则用户改完模型名看到绿字还在，会以为
+    // 新值已经存好了，切走页面 → 下次挖掘仍用旧模型。
+    setEmbeddingMsg(null);
+  };
+
+  /** 服务端已知的 embedding 状态；为 undefined 表示状态**没拉到**（后端连不上）。 */
+  const embeddingStatus = llmConfig?.embedding;
+
+  const handleSaveEmbedding = async () => {
+    // 状态没拉到就不许写：表单这时是空表，用户以为自己「没配过」而只补一个 Key，
+    // 保存会把新 Key 与服务端**已存的** model/base_url 拼成一组从未验证过的组合
+    // （新 Key 打旧端点），要等到挖掘任务调用 embedding 才暴露。
+    if (!embeddingStatus) {
+      setEmbeddingMsg({ ok: false, text: '配置状态未加载成功，请先刷新状态再保存' });
+      return;
+    }
+
+    setEmbeddingSaving(true);
+    setEmbeddingMsg(null);
+    try {
+      // 三态语义（undefined = 不动 / '' = 清除 / 有值 = 设置）统一在
+      // buildEmbeddingSavePayload 里实现并有单测覆盖，这里只负责调用。
+      const payload = buildEmbeddingSavePayload(embeddingForm, embeddingStatus);
+
+      if (!Object.keys(payload).length) {
+        setEmbeddingMsg({ ok: true, text: '没有需要保存的改动' });
+        return;
+      }
+
+      const res = await saveEmbeddingConfig(payload);
+      if (res.data) {
+        setEmbeddingForm({ model: res.data.model, baseUrl: res.data.base_url, apiKey: '' });
+      }
+      setEmbeddingMsg({ ok: true, text: '向量检索配置已保存' });
+      refreshLlmConfig();
+    } catch (e: unknown) {
+      setEmbeddingMsg({ ok: false, text: extractApiError(e, '保存失败，请稍后重试') });
+    } finally {
+      setEmbeddingSaving(false);
+    }
+  };
+
+  /** 清除 Key：唯一会发空串的入口（空串在后端语义 = 回退容器级 EMBEDDING_*）。 */
+  const handleClearEmbeddingKey = async () => {
+    setEmbeddingSaving(true);
+    setEmbeddingMsg(null);
+    try {
+      await saveEmbeddingConfig({ apiKey: '' });
+      // 只清 apiKey 一项。原先展开闭包里的 embeddingForm 会把「点击那一刻」的
+      // model/baseUrl 一并写回，等于把用户在这段等待里改的东西回滚掉。
+      updateEmbeddingField({ apiKey: '' });
+      setEmbeddingMsg({ ok: true, text: '已清除 Key，将沿用容器级 EMBEDDING_* 配置' });
+      refreshLlmConfig();
+    } catch (e: unknown) {
+      setEmbeddingMsg({ ok: false, text: extractApiError(e, '清除失败，请稍后重试') });
+    } finally {
+      setEmbeddingSaving(false);
+    }
+  };
 
   const refreshLlmConfig = async () => {
     setLlmLoading(true);
@@ -275,6 +353,7 @@ export const SettingsPage: React.FC = () => {
         
         {/* API Configuration Tab */}
         {activeTab === 'api' && (
+          <>
           <Card className="glass card-hover animate-fade-in-up">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -287,13 +366,13 @@ export const SettingsPage: React.FC = () => {
                 <div className="flex items-start gap-3">
                   <AlertCircle className="h-5 w-5 text-blue-500 mt-0.5 shrink-0" />
                   <div className="space-y-1 text-sm">
-                    <p className="font-medium text-foreground">LLM 凭证由后端环境变量统一管理</p>
+                    <p className="font-medium text-foreground">用户配置优先，环境变量兜底</p>
                     <p className="text-muted-foreground">
-                      出于安全考虑，API Key 不在前端设置。请在容器/服务器环境变量中配置，
-                      后端启动时自动加载，因子挖掘与因子解释共享同一套凭证。
+                      对话模型的凭证在<span className="font-medium">个人中心「其他设置 → AI 服务配置」</span>填写，
+                      AI-IDE、因子挖掘与因子解释共用这一份；未配置时回落到容器/服务器环境变量。
                     </p>
                     <p className="text-xs text-muted-foreground mt-2 font-mono">
-                      支持的环境变量（按优先级）：
+                      支持的环境变量（兜底，按优先级）：
                       <br />· DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL / DEEPSEEK_MODEL
                       <br />· AI_IDE_LLM_API_KEY / AI_IDE_LLM_BASE_URL / AI_IDE_LLM_MODEL
                       <br />· OPENAI_API_KEY / OPENAI_BASE_URL / CHAT_MODEL
@@ -394,6 +473,184 @@ export const SettingsPage: React.FC = () => {
               </div>
             </CardContent>
           </Card>
+
+          {/* 向量检索（Embedding）—— 因子挖掘**独有**的配置，故从个人中心迁到这里。
+              chat 配置仍留在个人中心：AI-IDE 与因子挖掘共用同一份，放这边会让
+              AI-IDE 的用户找不到自己的设置。 */}
+          <Card className="glass card-hover animate-fade-in-up">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Layers className="w-4 h-4" /> 向量检索（Embedding）
+                <Badge variant="default">因子挖掘专用</Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <p className="text-sm text-muted-foreground">
+                因子挖掘的<span className="font-medium">记忆检索</span>使用这条通道（RD-Agent 从历史
+                实验中召回相似尝试）。它与上面的对话模型相互独立——DeepSeek 这类 chat 供应商
+                没有 <span className="font-mono text-xs">/embeddings</span> 端点，因此这里可以指向
+                完全不同的供应商或本地服务。
+              </p>
+
+              {/* 状态没拉到时禁止保存（见 handleSaveEmbedding 的守卫）：空表 + 只补一个
+                  Key，会和**服务端已存的** model/base_url 拼成一组没验证过的组合。 */}
+              {!embeddingStatus && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <AlertCircle className="w-3.5 h-3.5 mt-[1px] shrink-0" />
+                  <span className="flex-1">
+                    未能读到服务端的向量检索配置，表单此时是空白——若直接保存，可能与已存配置拼成
+                    错误组合（新 Key 打旧端点）。请先刷新状态。
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={refreshLlmConfig}
+                    disabled={llmLoading}
+                  >
+                    {llmLoading ? '刷新中…' : '刷新状态'}
+                  </Button>
+                </div>
+              )}
+
+              {/* 快速填充 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">快速填充：</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={embeddingSaving || !embeddingStatus}
+                  onClick={() =>
+                    updateEmbeddingField({
+                      model: 'BAAI/bge-m3',
+                      baseUrl: 'https://api.siliconflow.cn/v1',
+                    })
+                  }
+                >
+                  SiliconFlow · bge-m3
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={embeddingSaving || !embeddingStatus}
+                  onClick={() =>
+                    updateEmbeddingField({
+                      model: 'bge-m3',
+                      // 不能填 127.0.0.1：挖掘子进程跑在容器里，那是**容器自己**。
+                      baseUrl: 'http://host.docker.internal:11434/v1',
+                    })
+                  }
+                >
+                  本地 ollama · bge-m3
+                </Button>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">模型名称</label>
+                <input
+                  type="text"
+                  value={embeddingForm.model}
+                  disabled={embeddingSaving || !embeddingStatus}
+                  onChange={(e) => updateEmbeddingField({ model: e.target.value })}
+                  placeholder="BAAI/bge-m3"
+                  className="w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-mono focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary transition-all"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">接口地址</label>
+                <input
+                  type="text"
+                  value={embeddingForm.baseUrl}
+                  disabled={embeddingSaving || !embeddingStatus}
+                  onChange={(e) => updateEmbeddingField({ baseUrl: e.target.value })}
+                  placeholder="https://api.siliconflow.cn/v1"
+                  className="w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-mono focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary transition-all"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  OpenAI 兼容端点。留空则沿用容器级 EMBEDDING_BASE_URL；本地 ollama 用
+                  http://host.docker.internal:11434/v1（且 ollama 需监听 0.0.0.0，
+                  默认只监听 127.0.0.1 时容器够不到）
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">
+                  API Key
+                  {embeddingStatus?.has_key && (
+                    <span className="ml-2 font-normal text-muted-foreground font-mono text-xs">
+                      已保存 {embeddingStatus.key_masked || '****'}
+                    </span>
+                  )}
+                </label>
+                <div className="relative">
+                  <input
+                    type={embKeyVisible ? 'text' : 'password'}
+                    value={embeddingForm.apiKey}
+                    disabled={embeddingSaving || !embeddingStatus}
+                    onChange={(e) => updateEmbeddingField({ apiKey: e.target.value })}
+                    placeholder={
+                      embeddingStatus?.has_key ? '输入新 Key 以更新（留空则不变）' : 'sk-xxxxxxxxxxxxxxxx'
+                    }
+                    className="w-full rounded-lg border border-input bg-background px-4 py-2 pr-10 text-sm font-mono focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary transition-all"
+                  />
+                  {/* 明文回显：粘贴截断/多空格只能靠肉眼核对，掩码看不出来 */}
+                  <button
+                    type="button"
+                    onClick={() => setEmbKeyVisible(!embKeyVisible)}
+                    disabled={embeddingSaving || !embeddingStatus}
+                    aria-label={embKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    {embKeyVisible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <Button
+                  size="sm"
+                  onClick={handleSaveEmbedding}
+                  disabled={embeddingSaving || !embeddingStatus}
+                >
+                  {embeddingSaving ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  ) : (
+                    <Save className="h-4 w-4 mr-1" />
+                  )}
+                  保存向量检索配置
+                </Button>
+                {embeddingStatus?.has_key && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleClearEmbeddingKey}
+                    disabled={embeddingSaving}
+                  >
+                    清除 Key
+                  </Button>
+                )}
+                {embeddingMsg && (
+                  <span
+                    className={`text-xs ${embeddingMsg.ok ? 'text-success' : 'text-destructive'}`}
+                    title={embeddingMsg.text}
+                  >
+                    {embeddingMsg.text}
+                  </span>
+                )}
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                保存后对<span className="font-medium">新启动</span>的挖掘任务生效（配置经子进程环境变量注入）。
+                「清除 Key」会回退到容器级 EMBEDDING_* 配置。
+              </p>
+            </CardContent>
+          </Card>
+          </>
         )}
 
         {/* Data Path Configuration Tab */}

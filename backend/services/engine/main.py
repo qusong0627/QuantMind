@@ -73,6 +73,14 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ AlphaAgent factors table ensure failed: {e}")
 
     try:
+        # 因子池三表（P1）：池是增益层不是主链路，建表失败只告警不阻启动
+        from backend.shared.factor_pool_contract import ensure_factor_pool_tables_async
+
+        await ensure_factor_pool_tables_async()
+    except Exception as e:
+        logger.error(f"❌ Factor pool table ensure failed: {e} (non-fatal)")
+
+    try:
         from backend.services.engine.quantbot.task_store import QuantBotTaskStore
 
         await QuantBotTaskStore().ensure_tables()
@@ -271,6 +279,38 @@ install_error_contract_handlers(app)
 install_access_log_middleware(app, service_name="quantmind-engine")
 
 
+# 必须持有**用户身份**（不只是内部密钥）才能访问的引擎路由前缀。
+#
+# 为什么单独拎成模块级常量：网关（`engine_proxy`）对**每一个**转发请求都无条件
+# 注入 `X-Internal-Call`，所以「内部密钥匹配」这一条在网关面前恒为真——真正的
+# 关卡是下面那句 `if not user_id and any(...)`。前缀表漏掉一个前缀，该前缀下的
+# 全部路由就变成**匿名可达**，而且不报错、不打日志，没有任何一层会提示。
+# 拎出来的目的就是让它可被测试直接断言（见
+# `backend/tests/test_factor_research_auth_gate.py`）。
+#
+# 判定用的是 `str.startswith`，所以每一项**必须带结尾斜杠**：写成
+# `/api/v1/analysis` 会连带把 `/api/v1/analysis-anything` 一起放进来。
+PROTECTED_PREFIXES: tuple[str, ...] = (
+    "/api/v1/qlib/",
+    "/api/v1/strategies/",
+    "/api/v1/inference/",
+    "/api/v1/analysis/",
+    "/api/v1/selection/",
+    "/api/v1/scanner/",
+    "/api/v1/strategy/",
+    "/api/v1/backtest/",
+    "/api/v1/rd-agent/",
+    "/api/v1/alpha-agent/",
+    "/api/v1/pipeline/",
+    "/api/v1/admin/",
+    # 因子研究：`/scan` 会吐出本地挖出来的因子名与来源库、`/leaderboard` 与
+    # `/catalog` 会吐出私人因子库的目录——都是私有 alpha。此前不在表内，
+    # 2026-10-07 实测匿名 `GET /api/v1/factor-research/scan?dataset=private`
+    # 经网关返回 200（对照 `/api/v1/qlib/health` 正确地 401）。
+    "/api/v1/factor-research/",
+)
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """
@@ -313,22 +353,8 @@ async def auth_middleware(request: Request, call_next):
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Authentication required (Invalid internal secret or missing user context)"},
             )
-        # 需要用户上下文的受保护路由列表
-        protected_prefixes = (
-            "/api/v1/qlib/",
-            "/api/v1/strategies/",
-            "/api/v1/inference/",
-            "/api/v1/analysis/",
-            "/api/v1/selection/",
-            "/api/v1/scanner/",
-            "/api/v1/strategy/",
-            "/api/v1/backtest/",
-            "/api/v1/rd-agent/",
-            "/api/v1/alpha-agent/",
-            "/api/v1/pipeline/",
-            "/api/v1/admin/",
-        )
-        if not user_id and any(path.startswith(p) for p in protected_prefixes):
+        # 需要用户上下文的受保护路由列表（唯一出处见模块级 PROTECTED_PREFIXES）
+        if not user_id and any(path.startswith(p) for p in PROTECTED_PREFIXES):
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "需要登录。请确认您的登录状态并重试。"},

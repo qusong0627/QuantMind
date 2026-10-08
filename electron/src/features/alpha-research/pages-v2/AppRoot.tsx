@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { HomePage } from '../pages-v2/HomePage';
 import { MiningDashboardPage } from '../pages-v2/MiningDashboardPage';
 import { FactorLibraryPage } from '../pages-v2/FactorLibraryPage';
+import { FactorPoolPage } from '../pages-v2/FactorPoolPage';
 import { BacktestPage } from '../pages-v2/BacktestPage';
 import { SettingsPage } from '../pages-v2/SettingsPage';
 import { Layout } from '../components-v2/layout/Layout';
@@ -34,6 +35,11 @@ const AppContent: React.FC = () => {
       {currentPage === 'library' && (
         <Layout currentPage={currentPage} onNavigate={setCurrentPage}>
           <FactorLibraryPage onNavigate={setCurrentPage} />
+        </Layout>
+      )}
+      {currentPage === 'pool' && (
+        <Layout currentPage={currentPage} onNavigate={setCurrentPage}>
+          <FactorPoolPage />
         </Layout>
       )}
       {currentPage === 'backtest' && (

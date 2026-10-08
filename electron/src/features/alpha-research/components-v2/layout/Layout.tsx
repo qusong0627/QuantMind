@@ -1,7 +1,13 @@
 import React from 'react';
-import { Sparkles, Database, BarChart3, Settings as SettingsIcon } from 'lucide-react';
+import { Sparkles, Database, BarChart3, Settings as SettingsIcon, Network } from 'lucide-react';
 
-export type PageId = 'home' | 'library' | 'backtest' | 'settings' | 'mining_dashboard';
+export type PageId =
+  | 'home'
+  | 'library'
+  | 'pool'
+  | 'backtest'
+  | 'settings'
+  | 'mining_dashboard';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -25,6 +31,7 @@ export const Layout: React.FC<LayoutProps> = ({
   const navItems = [
     { id: 'home' as const, label: '因子挖掘', icon: Sparkles },
     { id: 'library' as const, label: '因子库', icon: Database },
+    { id: 'pool' as const, label: '因子池', icon: Network },
     { id: 'backtest' as const, label: '回测', icon: BarChart3 },
     { id: 'settings' as const, label: '设置', icon: SettingsIcon },
   ];

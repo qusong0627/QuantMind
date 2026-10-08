@@ -16,9 +16,11 @@ import pytest
 from backend.scripts.rd_mined_materialize import (
     MANIFEST_NAME,
     _align_partition_schemas,
+    _as_float,
     _column_owners,
     _disambiguate_column,
     _eligible_row,
+    _evaluate_gates,
     _execute_factor_code,
     _load_manifest,
     _max_abs_corr,
@@ -458,3 +460,153 @@ def test_lock_path_env_override(tmp_path, monkeypatch):
     assert _lock_path() == tmp_path / "x.lock"
     monkeypatch.delenv("RD_MINED_MATERIALIZE_LOCK")
     assert _lock_path().name == "_rd_mined_materialize.lock"
+
+
+# ── 物化门禁（P1）──────────────────────────────────────────────────────
+
+
+class TestMaterializeGates:
+    @pytest.mark.unit
+    def test_rejected_gate_is_terminal_like_duplicate(self):
+        row = {"factor_id": "fid1", "factor_code": "x = 1"}
+        m = {"fid1": {"status": "rejected_gate"}}
+        ok, reason = _should_materialize(row, m, force=False)
+        assert not ok and reason == "rejected_gate"
+        assert _should_materialize(row, m, force=True) == (True, "force")
+        # 代码改写 → 旧判定失效，重算
+        m2 = {"fid1": {"status": "rejected_gate", "code_fp": code_fingerprint("x = 1")}}
+        row2 = {"factor_id": "fid1", "factor_code": "x = 2"}
+        assert _should_materialize(row2, m2, force=False) == (True, "code_changed")
+
+    @pytest.mark.unit
+    def test_as_float_missing_is_none(self):
+        assert _as_float("0.5") == 0.5
+        assert _as_float(None) is None
+        assert _as_float("") is None
+        assert _as_float("abc") is None
+
+    @pytest.mark.asyncio
+    async def test_evaluate_gates_soft_default_then_strict_env(self, monkeypatch):
+        """软默认：指标差只 fail 不拒；env 全局 strict → 同输入硬拒。
+
+        user_id 留空 → 跳过池分位查询，本测试不碰 DB。
+        """
+        monkeypatch.delenv("QM_MINING_GATES_MODE", raising=False)
+        monkeypatch.delenv("QM_MINING_GATES_DISABLED", raising=False)
+        row = {
+            "factor_id": "f1",
+            "market": "a_share",
+            "universe": "csi300",
+            "user_id": "",
+            "pfs": "0.2",  # < 0.9 → fail
+            "rre": "0.9",  # ≥ 0.5 → pass
+            "ann_turnover": "10",  # ≤ 60 → pass
+            "ann_return_net": "0.5",  # ≥ 0 → pass
+        }
+        soft = await _evaluate_gates(row)
+        by_key = {o.key: o for o in soft.outcomes}
+        assert soft.rejected is False
+        assert by_key["pfs_floor"].status == "fail"
+        assert by_key["pfs_floor"].mode == "soft"
+        assert by_key["rre_floor"].status == "pass"
+        assert by_key["ic_pool_pct"].status == "skipped", "无池分位 → 判 skipped 不判 0"
+        assert by_key["ic_pool_pct"].message.startswith("IC 池内分位")
+
+        monkeypatch.setenv("QM_MINING_GATES_MODE", "strict")
+        strict = await _evaluate_gates(row)
+        assert strict.rejected is True, "strict 下软门槛全升硬，fail 即拒"
+
+    @pytest.mark.asyncio
+    async def test_query_candidates_exposes_gate_inputs_and_real_percentile(self):
+        """真库链路：_query_candidates 装配门禁输入 → 池内分位落进 ic_pool_pct。"""
+        import json as _json
+        import uuid as _uuid
+
+        from sqlalchemy import text as _sql
+
+        from backend.scripts.rd_mined_materialize import _query_candidates
+        from backend.shared.database_manager_v2 import close_database, get_session
+        from backend.shared.factor_pool_contract import POOL_TABLE
+
+        try:
+            async with get_session(read_only=True) as probe:
+                await probe.execute(_sql("SELECT 1"))
+        except Exception as exc:  # noqa: BLE001
+            pytest.skip(f"DB 不可用: {exc}")
+
+        run = f"t-mat-{_uuid.uuid4().hex[:10]}"
+        uid = f"{run}-u"
+        f_low, f_high = f"{run}_l", f"{run}_h"
+        ids = [f_low, f_high]
+        try:
+            async with get_session() as session:
+                for fid, ic in ((f_low, 0.01), (f_high, 0.03)):
+                    await session.execute(
+                        _sql("""
+                            INSERT INTO rd_agent_factors
+                                (factor_id, factor_name, factor_code, status, user_id,
+                                 metadata_json, market, universe, factor_formulation,
+                                 ic_value)
+                            VALUES
+                                (:fid, :name, '-', 'completed', :uid,
+                                 CAST(:meta AS JSONB), 'a_share', 'csi300', 'close',
+                                 :ic)
+                        """),
+                        {
+                            "fid": fid,
+                            "name": f"name-{fid}",
+                            "uid": uid,
+                            "ic": ic,
+                            "meta": _json.dumps(
+                                {
+                                    "quality": {"pfs": 0.95},
+                                    "rre": 0.6,
+                                    "ann_turnover": 12.5,
+                                    "ann_return_net": 0.08,
+                                }
+                            ),
+                        },
+                    )
+                    await session.execute(
+                        _sql(
+                            f"INSERT INTO {POOL_TABLE} "
+                            "(factor_id, user_id, market, universe) "
+                            "VALUES (:fid, :uid, 'a_share', 'csi300') "
+                            "ON CONFLICT (factor_id) DO NOTHING"
+                        ),
+                        {"fid": fid, "uid": uid},
+                    )
+
+            rows = await _query_candidates(factor_ids=[f_low])
+            assert len(rows) == 1
+            row = rows[0]
+            assert row["pfs"] == "0.95" and row["rre"] == "0.6"
+            assert row["ann_turnover"] == "12.5"
+            assert row["ann_return_net"] == "0.08"
+            assert row["universe"] == "csi300" and row["user_id"] == uid
+
+            decision = await _evaluate_gates(row)
+            by_key = {o.key: o for o in decision.outcomes}
+            assert decision.rejected is False
+            assert by_key["pfs_floor"].status == "pass"
+            assert by_key["rre_floor"].status == "pass"
+            assert by_key["turnover_cap"].status == "pass"
+            assert by_key["net_return_floor"].status == "pass"
+            assert by_key["ic_pool_pct"].status == "fail"
+            assert by_key["ic_pool_pct"].observed == pytest.approx(0.0), (
+                "池内两因子、自身 IC 更低 → 分位 0（真库算出来的，不是缺省）"
+            )
+        finally:
+            async with get_session() as session:
+                if ids:
+                    await session.execute(
+                        _sql(f"DELETE FROM {POOL_TABLE} WHERE factor_id = ANY(:ids)"),
+                        {"ids": ids},
+                    )
+                    await session.execute(
+                        _sql(
+                            "DELETE FROM rd_agent_factors WHERE factor_id = ANY(:ids)"
+                        ),
+                        {"ids": ids},
+                    )
+            await close_database()

@@ -150,9 +150,37 @@ function normalizeAgentTask(raw: any, configHint?: any): Task {
   };
 }
 
-function normalizeAgentFactor(raw: any): Factor {
+/** 宽松数值归一（number 原样 / 数字字符串转换 / 其余 null）。缺失绝不补 0。 */
+function toNumber(value: any): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) {
+    return Number(value);
+  }
+  return null;
+}
+
+/** 从多个候选源里取第一个有效数值（表字段 → metadata 的优先级由调用方给出）。 */
+function pickNumber(...candidates: any[]): number | undefined {
+  for (const candidate of candidates) {
+    const value = toNumber(candidate);
+    if (value != null) return value;
+  }
+  return undefined;
+}
+
+export function normalizeAgentFactor(raw: any): Factor {
   const ic = raw?.ic_value ?? null;
   const meta = raw?.metadata ?? {};
+  const quality = meta.quality ?? {};
+  const pfsQuality =
+    pickNumber(quality.pfs, quality.pfs_gauss, quality.pfs_t, quality.n_days) != null
+      ? {
+          pfs: pickNumber(quality.pfs),
+          pfsGauss: pickNumber(quality.pfs_gauss),
+          pfsT: pickNumber(quality.pfs_t),
+          nDays: pickNumber(quality.n_days),
+        }
+      : undefined;
   return {
     factorId: raw?.id ?? raw?.factor_id ?? '',
     factorName: raw?.factor_name ?? 'unnamed',
@@ -162,12 +190,24 @@ function normalizeAgentFactor(raw: any): Factor {
     market: meta.market ?? raw?.market ?? undefined,
     universe: raw?.universe ?? meta.universe ?? undefined,
     ic: ic ?? 0,
-    icir: meta.icir ?? 0,
+    // H5 路径 ICIR 只写表字段（metadata 里没有），qlib 路径双写——两个源都要认
+    icir: pickNumber(raw?.icir, meta.icir) ?? 0,
     rankIc: raw?.rank_ic ?? meta.rank_ic ?? 0,
-    rankIcir: 0,
+    // 两个回测路径都写 rank_icir（表字段 + qlib 路径 metadata 双写）；没有真实值就
+    // 保持 undefined——旧实现硬编码 0，把「没算过」伪装成「算出来是 0」。
+    rankIcir: pickNumber(raw?.rank_icir, meta.rank_icir),
     sharpeRatio: raw?.sharpe_ratio ?? 0,
     annualReturn: raw?.annual_return ?? 0,
     maxDrawdown: raw?.max_drawdown ?? 0,
+    // 机构级指标（mining_plugins 评估器链）：缺失保持 undefined → 界面显「—」
+    rre: pickNumber(meta.rre),
+    pfsQuality,
+    turnoverDaily: pickNumber(meta.turnover_daily),
+    annTurnover: pickNumber(meta.ann_turnover),
+    annReturnNet: pickNumber(meta.ann_return_net),
+    sharpeNet: pickNumber(meta.sharpe_net),
+    maxDrawdownNet: pickNumber(meta.max_drawdown_net),
+    nObs: pickNumber(meta.n_obs),
     round: meta.round ?? 0,
     direction: meta.direction ?? raw?.category ?? '',
     createdAt: raw?.created_at ?? '',
@@ -553,17 +593,30 @@ export async function getBacktestStatus(
     if (raw.annual_return != null) metrics.annualReturn = raw.annual_return;
     if (raw.max_drawdown != null) metrics.maxDrawdown = raw.max_drawdown;
     if (raw.rank_ic != null) metrics.rankIc = raw.rank_ic;
-    // ICIR / Rank ICIR 不是表字段，落在 metadata_json（挖掘阶段写入 icir / rank_icir）
+    // ICIR / Rank ICIR：qlib 路径表字段与 metadata_json 双写；H5 路径只在表字段。
+    // 两个源都认（旧实现只读 metadata，H5 因子的 ICIR 永远显示不出来）。
     const meta = raw.metadata ?? {};
-    const asNum = (v: any): number | null => {
-      if (typeof v === 'number') return v;
-      if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return Number(v);
-      return null;
-    };
-    const icir = asNum(meta.icir);
-    const rankIcir = asNum(meta.rank_icir);
+    const icir = pickNumber(raw.icir, meta.icir);
+    const rankIcir = pickNumber(raw.rank_icir, meta.rank_icir);
     if (icir != null) metrics.icir = icir;
     if (rankIcir != null) metrics.rankIcir = rankIcir;
+    // 机构级指标（mining_plugins 评估器链 → metadata_json；缺失一律不写，
+    // 页面以「—」呈现——换手 0 与没算过是两回事，禁止补 0）
+    const setMetric = (key: string, ...sources: any[]) => {
+      const value = pickNumber(...sources);
+      if (value != null) metrics[key] = value;
+    };
+    setMetric('rre', meta.rre);
+    setMetric('nObs', meta.n_obs);
+    const quality = meta.quality ?? {};
+    setMetric('pfs', quality.pfs);
+    setMetric('pfsGauss', quality.pfs_gauss);
+    setMetric('pfsT', quality.pfs_t);
+    setMetric('turnoverDaily', meta.turnover_daily);
+    setMetric('annTurnover', meta.ann_turnover);
+    setMetric('annReturnNet', meta.ann_return_net);
+    setMetric('sharpeNet', meta.sharpe_net);
+    setMetric('maxDrawdownNet', meta.max_drawdown_net);
     return makeOk({
       task: normalizeAgentTask({
         task_id: taskId,
@@ -583,6 +636,19 @@ export async function cancelBacktest(_taskId: string): Promise<ApiResponse> {
 
 // ========================== LLM Config ==========================
 
+/**
+ * 向量检索（embedding）通道状态。与 chat **互相独立**：它只反映用户自己填的值，
+ * 为空表示沿用容器级 `EMBEDDING_*`，不跟随 chat 的 env 兜底。
+ * 唯一的运行时消费者是因子挖掘（RD-Agent 子进程的记忆检索）。
+ */
+export interface EmbeddingConfigStatus {
+  model: string;
+  base_url: string;
+  has_key: boolean;
+  /** 掩码后的 Key（如 `sk-****abcd`）；Key 过短时为空串，绝不回显明文 */
+  key_masked: string;
+}
+
 export interface LlmConfigStatus {
   configured: boolean;
   reason?: string;
@@ -592,6 +658,8 @@ export interface LlmConfigStatus {
   model?: string;
   base_url?: string;
   api_key_masked?: string;
+  /** 与 chat 独立，故 chat 未配置时这一段照样返回 */
+  embedding?: EmbeddingConfigStatus;
 }
 
 /** Read-only LLM config status from backend (key resolved from env vars). */
@@ -605,6 +673,27 @@ export async function getLlmConfig(): Promise<ApiResponse<LlmConfigStatus>> {
   }
 }
 
+/**
+ * 保存向量检索配置。
+ *
+ * **只提交显式传入的字段**：`undefined` = 不动，`''` = 清除（回退容器级
+ * `EMBEDDING_*`）。全量提交会让「只改模型名」的请求顺手清掉已存的 Key，
+ * 子进程随即退回容器默认端点——而没有任何一层会报错。
+ */
+export async function saveEmbeddingConfig(embedding: {
+  model?: string;
+  baseUrl?: string;
+  apiKey?: string;
+}): Promise<ApiResponse<EmbeddingConfigStatus>> {
+  const payload: Record<string, string> = {};
+  if (embedding.model !== undefined) payload.embedding_model = embedding.model;
+  if (embedding.baseUrl !== undefined) payload.embedding_base_url = embedding.baseUrl;
+  if (embedding.apiKey !== undefined) payload.embedding_api_key = embedding.apiKey;
+
+  const res = await apiClient.put(`/alpha-agent/llm-config/embedding`, payload);
+  return makeOk(res.data?.data);
+}
+
 // ========================== Health Check ==========================
 
 export async function healthCheck(): Promise<
@@ -612,6 +701,623 @@ export async function healthCheck(): Promise<
 > {
   await apiClient.get(`/alpha-agent/stats`);
   return makeOk({ status: 'ok', timestamp: new Date().toISOString() });
+}
+
+// ========================== Factor Pool API（P1 因子池） ==========================
+//
+// 作用域约定：`universe` 空串/缺省 = 全部（后端把它归一为 None），
+// 非空 = 精确作用域。刷新端点的 owner 恒为登录身份，前端没有 user_id 参数。
+
+export interface PoolOverview {
+  total: number;
+  withPanel: number;
+  retrievedTotal: number;
+  retrievedFactors: number;
+  avgPoolScore: number | null;
+  avgNovelty: number | null;
+  avgMaxCorr: number | null;
+  avgIc: number | null;
+  avgIcir: number | null;
+  avgPfs: number | null;
+  /** 池多样性熵（0..1，越高越分散）；未算过 = null → 界面显「—」 */
+  poolDiversity: number | null;
+  /** 有效因子数（熵的指数形式） */
+  nEff: number | null;
+}
+
+export interface PoolGateOutcome {
+  key: string;
+  label: string;
+  mode: 'soft' | 'hard' | string;
+  status: 'pass' | 'fail' | 'skipped' | string;
+  message: string;
+  observed: number | null;
+  threshold: number | null;
+}
+
+export interface PoolFactorGates {
+  rejected: boolean;
+  gates: PoolGateOutcome[];
+}
+
+export interface PoolFactorRow {
+  factorId: string;
+  factorName: string;
+  factorFormulation: string;
+  ic: number | null;
+  rankIc: number | null;
+  icir: number | null;
+  pfs: number | null;
+  poolScore: number | null;
+  novelty: number | null;
+  maxPoolCorr: number | null;
+  maxPoolCorrWith: string | null;
+  diversityContrib: number | null;
+  timesRetrieved: number;
+  lastRetrievedAt: string | null;
+  hasPanel: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+  /** 物化门禁裁决（metadata.materialization.gates）；未物化过 = null */
+  gates: PoolFactorGates | null;
+}
+
+export interface PoolFactorList {
+  total: number;
+  items: PoolFactorRow[];
+  limit: number;
+  offset: number;
+}
+
+export interface PoolGraphNode {
+  factorId: string;
+  factorName: string;
+  poolScore: number | null;
+  novelty: number | null;
+  timesRetrieved: number;
+  hasPanel: boolean;
+  taskId: string | null;
+  icir: number | null;
+}
+
+export interface PoolGraphEdge {
+  source: string;
+  target: string;
+  relation: string;
+  method: string;
+  weight: number | null;
+}
+
+export interface PoolGraph {
+  nodes: PoolGraphNode[];
+  edges: PoolGraphEdge[];
+  maxNodes?: number;
+}
+
+export interface PoolRefreshStatus {
+  status: string;
+  running: boolean;
+  log?: { path?: string; exists: boolean; lines: string[]; truncated?: boolean };
+  args?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+  error?: string;
+  started_at?: string;
+  finished_at?: string;
+  /** 最近一次刷新属主不是当前用户时的掩码状态（后端不回显日志/scope） */
+  note?: string;
+}
+
+export interface MiningGateDescriptor {
+  key: string;
+  label: string;
+  default_mode: 'soft' | 'hard' | string;
+  description: string;
+  default_threshold: number | null;
+}
+
+/**
+ * 物化门禁描述符（与 /metrics/registry 的 gates 段同源）。
+ * 后端失败回落空数组：门禁页显「描述符不可用」而不是假数据。
+ */
+export async function getGateDescriptors(): Promise<
+  ApiResponse<{ gates: MiningGateDescriptor[] }>
+> {
+  try {
+    const res = await apiClient.get(`/alpha-agent/metrics/registry`);
+    const raw = res.data?.data?.gates;
+    const gates: MiningGateDescriptor[] = (Array.isArray(raw) ? raw : []).map(
+      (g: any) => ({
+        key: String(g?.key ?? ''),
+        label: String(g?.label ?? g?.key ?? ''),
+        default_mode: String(g?.default_mode ?? 'soft'),
+        description: String(g?.description ?? ''),
+        default_threshold:
+          typeof g?.default_threshold === 'number' && Number.isFinite(g.default_threshold)
+            ? g.default_threshold
+            : null,
+      }),
+    );
+    return makeOk({ gates });
+  } catch {
+    return makeOk({ gates: [] });
+  }
+}
+
+export type PoolSortKey =
+  | 'pool_score'
+  | 'novelty'
+  | 'ic'
+  | 'times_retrieved'
+  | 'created_at'
+  | 'updated_at';
+
+function poolQs(market: string, universe?: string): string {
+  const qs = new URLSearchParams();
+  qs.set('market', market);
+  if (universe) qs.set('universe', universe);
+  return qs.toString();
+}
+
+function poolNum(value: unknown): number | null {
+  return toNumber(value);
+}
+
+function mapPoolFactorRow(raw: any): PoolFactorRow {
+  return {
+    factorId: String(raw?.factor_id ?? ''),
+    factorName: String(raw?.factor_name ?? 'unnamed'),
+    factorFormulation: String(raw?.factor_formulation ?? ''),
+    ic: poolNum(raw?.ic_value),
+    rankIc: poolNum(raw?.rank_ic),
+    icir: poolNum(raw?.icir),
+    pfs: poolNum(raw?.pfs),
+    poolScore: poolNum(raw?.pool_score),
+    novelty: poolNum(raw?.novelty),
+    maxPoolCorr: poolNum(raw?.max_pool_corr),
+    maxPoolCorrWith: raw?.max_pool_corr_with != null ? String(raw.max_pool_corr_with) : null,
+    diversityContrib: poolNum(raw?.diversity_contrib),
+    timesRetrieved: Number.isFinite(raw?.times_retrieved) ? Number(raw.times_retrieved) : 0,
+    lastRetrievedAt: raw?.last_retrieved_at != null ? String(raw.last_retrieved_at) : null,
+    hasPanel: raw?.has_panel === true,
+    createdAt: raw?.created_at != null ? String(raw.created_at) : null,
+    updatedAt: raw?.updated_at != null ? String(raw.updated_at) : null,
+    gates:
+      raw?.gates && Array.isArray(raw.gates?.gates)
+        ? {
+            rejected: raw.gates.rejected === true,
+            gates: raw.gates.gates.map((g: any) => ({
+              key: String(g?.key ?? ''),
+              label: String(g?.label ?? g?.key ?? ''),
+              mode: String(g?.mode ?? 'soft'),
+              status: String(g?.status ?? 'skipped'),
+              message: String(g?.message ?? ''),
+              observed: poolNum(g?.observed),
+              threshold: poolNum(g?.threshold),
+            })),
+          }
+        : null,
+  };
+}
+
+/** 池总览（KPI + 多样性熵）。失败返回 success=false，面板显错误而不是假 0。 */
+export async function getPoolOverview(params: {
+  market: string;
+  universe?: string;
+}): Promise<ApiResponse<PoolOverview>> {
+  try {
+    const res = await apiClient.get(
+      `/alpha-agent/pool/overview?${poolQs(params.market, params.universe)}`,
+    );
+    const raw = res.data?.data ?? {};
+    return makeOk({
+      total: Number(raw.total ?? 0),
+      withPanel: Number(raw.with_panel ?? 0),
+      retrievedTotal: Number(raw.retrieved_total ?? 0),
+      retrievedFactors: Number(raw.retrieved_factors ?? 0),
+      avgPoolScore: poolNum(raw.avg_pool_score),
+      avgNovelty: poolNum(raw.avg_novelty),
+      avgMaxCorr: poolNum(raw.avg_max_corr),
+      avgIc: poolNum(raw.avg_ic),
+      avgIcir: poolNum(raw.avg_icir),
+      avgPfs: poolNum(raw.avg_pfs),
+      poolDiversity: poolNum(raw.pool_diversity),
+      nEff: poolNum(raw.n_eff),
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '因子池总览获取失败';
+    return { success: false, error: message };
+  }
+}
+
+/** 池内因子分页列表（含门禁裁决、被检索次数、面板标记）。 */
+export async function getPoolFactors(params: {
+  market: string;
+  universe?: string;
+  limit?: number;
+  offset?: number;
+  sort?: PoolSortKey;
+}): Promise<ApiResponse<PoolFactorList>> {
+  try {
+    const qs = new URLSearchParams(poolQs(params.market, params.universe));
+    qs.set('limit', String(params.limit ?? 50));
+    qs.set('offset', String(params.offset ?? 0));
+    if (params.sort) qs.set('sort', params.sort);
+    const res = await apiClient.get(`/alpha-agent/pool/factors?${qs.toString()}`);
+    const raw = res.data?.data ?? {};
+    return makeOk({
+      total: Number(raw.total ?? 0),
+      items: Array.isArray(raw.items) ? raw.items.map(mapPoolFactorRow) : [],
+      limit: Number(raw.limit ?? 50),
+      offset: Number(raw.offset ?? 0),
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '池因子列表获取失败';
+    return { success: false, error: message };
+  }
+}
+
+/** 谱系图（nodes + edges；节点按 pool_score 取前 max_nodes 个）。 */
+export async function getPoolGraph(params: {
+  market: string;
+  universe?: string;
+  maxNodes?: number;
+}): Promise<ApiResponse<PoolGraph>> {
+  try {
+    const qs = new URLSearchParams(poolQs(params.market, params.universe));
+    qs.set('max_nodes', String(params.maxNodes ?? 200));
+    const res = await apiClient.get(`/alpha-agent/pool/graph?${qs.toString()}`);
+    const raw = res.data?.data ?? {};
+    return makeOk({
+      nodes: (Array.isArray(raw.nodes) ? raw.nodes : []).map((n: any) => ({
+        factorId: String(n?.factor_id ?? ''),
+        factorName: String(n?.factor_name ?? 'unnamed'),
+        poolScore: poolNum(n?.pool_score),
+        novelty: poolNum(n?.novelty),
+        timesRetrieved: Number(n?.times_retrieved ?? 0),
+        hasPanel: n?.has_panel === true,
+        taskId: n?.task_id != null ? String(n.task_id) : null,
+        icir: poolNum(n?.icir),
+      })),
+      edges: (Array.isArray(raw.edges) ? raw.edges : []).map((e: any) => ({
+        source: String(e?.src_factor_id ?? ''),
+        target: String(e?.dst_factor_id ?? ''),
+        relation: String(e?.relation ?? ''),
+        method: String(e?.method ?? ''),
+        weight: poolNum(e?.weight),
+      })),
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '谱系图获取失败';
+    return { success: false, error: message };
+  }
+}
+
+/**
+ * 启动后台刷新（默认 dry_run 预演）。409 = 已有刷新在跑（单飞闸门），
+ * 400 = 参数被白名单拒绝，500 = 子进程起不来——都映射成可展示的 error。
+ */
+export async function refreshPool(opts: {
+  market: string;
+  universe?: string;
+  dryRun: boolean;
+}): Promise<ApiResponse<{ started: boolean; pid?: number; logPath?: string; confirmed?: boolean }>> {
+  try {
+    const qs = new URLSearchParams(poolQs(opts.market, opts.universe));
+    qs.set('dry_run', String(opts.dryRun));
+    const res = await apiClient.post(`/alpha-agent/pool/refresh?${qs.toString()}`);
+    const raw = res.data?.data ?? {};
+    return makeOk({
+      started: raw.started === true,
+      pid: typeof raw.pid === 'number' ? raw.pid : undefined,
+      logPath: raw.log_path != null ? String(raw.log_path) : undefined,
+      confirmed: raw.confirmed === true,
+    });
+  } catch (error: unknown) {
+    const err = error as { response?: { status?: number; data?: { detail?: unknown } } };
+    const status = err?.response?.status;
+    const detail = err?.response?.data?.detail;
+    const message =
+      typeof detail === 'string' && detail
+        ? detail
+        : status === 409
+          ? '已有因子池刷新任务在运行，请稍后再试'
+          : status === 403
+            ? '没有执行刷新的权限'
+            : status === 500
+              ? '刷新子进程启动失败，请查看服务日志'
+              : '刷新请求失败';
+    return { success: false, error: message };
+  }
+}
+
+/** 刷新状态（锁探活 + 最近一次落盘状态 + 日志尾）。 */
+export async function getPoolRefreshStatus(): Promise<ApiResponse<PoolRefreshStatus>> {
+  try {
+    const res = await apiClient.get(`/alpha-agent/pool/refresh/status`);
+    const raw = res.data?.data ?? {};
+    const log = raw.log ?? {};
+    return makeOk({
+      status: String(raw.status ?? 'unknown'),
+      running: raw.running === true,
+      log: {
+        path: log.path != null ? String(log.path) : undefined,
+        exists: log.exists === true,
+        lines: Array.isArray(log.lines) ? log.lines.map(String) : [],
+        truncated: log.truncated === true,
+      },
+      args: raw.args ?? undefined,
+      summary: raw.summary ?? undefined,
+      error: raw.error != null ? String(raw.error) : undefined,
+      started_at: raw.started_at != null ? String(raw.started_at) : undefined,
+      finished_at: raw.finished_at != null ? String(raw.finished_at) : undefined,
+      note: raw.note != null ? String(raw.note) : undefined,
+    });
+  } catch {
+    // 状态查询失败不抛：面板显示「未知」，不影响池数据本身
+    return makeOk({ status: 'unknown', running: false });
+  }
+}
+
+// ========================== Combo Lab API（P2 组合实验室） ==========================
+//
+// 组合作业是后台子进程：POST 建行 + 启动即时回包（不阻塞请求），前端按
+// combo_id 轮询详情看 pending/running/done/failed。权重是 `{factor_id: 权重}`
+// 对象（L1 归一 Σ|w|=1，允许负权=反向暴露）；缺失指标一律 null → 界面显「—」。
+
+export interface ComboConfigEcho {
+  seed: number | null;
+  popsize: number | null;
+  maxiter: number | null;
+  tol: number | null;
+  maxDays: number | null;
+  trainRatio: number | null;
+  timeBudgetS: number | null;
+  costRate: number | null;
+  converged: boolean | null;
+  nEvaluations: number | null;
+}
+
+export interface ComboCurve {
+  /** 交易日（ISO 或 YYYY-MM-DD） */
+  dates: string[];
+  /** 扣成本净值（1.0 起累计） */
+  values: number[];
+}
+
+export interface ComboWindowMetrics {
+  meanRankIc: number | null;
+  rankIcir: number | null;
+  turnoverDaily: number | null;
+  annTurnover: number | null;
+  annReturnNet: number | null;
+  sharpeNet: number | null;
+  maxDrawdownNet: number | null;
+  nDays: number | null;
+  nObs: number | null;
+  /** 仅 valid 窗：扣成本净值曲线；train 窗为 null */
+  curve: ComboCurve | null;
+  /** 仅 train 窗：优化参数回执（seed 落库可复现）；valid 窗为 null */
+  config: ComboConfigEcho | null;
+}
+
+export interface ComboListItem {
+  comboId: string;
+  name: string;
+  market: string;
+  universe: string;
+  nFactors: number;
+  /** pending | running | done | failed */
+  status: string;
+  error: string | null;
+  trainWindow: string | null;
+  trainMeanRankIc: number | null;
+  validMeanRankIc: number | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface ComboList {
+  total: number;
+  items: ComboListItem[];
+}
+
+export interface ComboDetail {
+  comboId: string;
+  market: string;
+  universe: string;
+  name: string;
+  factorIds: string[];
+  /** factor_id → 权重（L1 归一；正=正向暴露，负=反向暴露） */
+  weights: Record<string, number>;
+  trainWindow: string | null;
+  trainMetrics: ComboWindowMetrics | null;
+  validMetrics: ComboWindowMetrics | null;
+  status: string;
+  error: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+function mapComboCurve(raw: any): ComboCurve | null {
+  if (!raw || !Array.isArray(raw.dates) || !Array.isArray(raw.values)) return null;
+  if (raw.dates.length === 0 || raw.dates.length !== raw.values.length) return null;
+  const values = raw.values.map((v: unknown) => toNumber(v));
+  if (values.some((v: number | null) => v == null)) return null;
+  return { dates: raw.dates.map(String), values: values as number[] };
+}
+
+function mapComboConfigEcho(raw: any): ComboConfigEcho | null {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    seed: poolNum(raw.seed),
+    popsize: poolNum(raw.popsize),
+    maxiter: poolNum(raw.maxiter),
+    tol: poolNum(raw.tol),
+    maxDays: poolNum(raw.max_days),
+    trainRatio: poolNum(raw.train_ratio),
+    timeBudgetS: poolNum(raw.time_budget_s),
+    costRate: poolNum(raw.cost_rate),
+    converged: typeof raw.converged === 'boolean' ? raw.converged : null,
+    nEvaluations: poolNum(raw.n_evaluations),
+  };
+}
+
+function mapComboWindowMetrics(raw: any): ComboWindowMetrics | null {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    meanRankIc: poolNum(raw.mean_rank_ic),
+    rankIcir: poolNum(raw.rank_icir),
+    turnoverDaily: poolNum(raw.turnover_daily),
+    annTurnover: poolNum(raw.ann_turnover),
+    annReturnNet: poolNum(raw.ann_return_net),
+    sharpeNet: poolNum(raw.sharpe_net),
+    maxDrawdownNet: poolNum(raw.max_drawdown_net),
+    nDays: poolNum(raw.n_days),
+    nObs: poolNum(raw.n_obs),
+    curve: mapComboCurve(raw.curve),
+    config: mapComboConfigEcho(raw.config),
+  };
+}
+
+function mapComboListItem(raw: any): ComboListItem {
+  return {
+    comboId: String(raw?.combo_id ?? ''),
+    name: String(raw?.name ?? ''),
+    market: String(raw?.market ?? ''),
+    universe: String(raw?.universe ?? ''),
+    nFactors: Number.isFinite(raw?.n_factors) ? Number(raw.n_factors) : 0,
+    status: String(raw?.status ?? 'unknown'),
+    error: raw?.error != null ? String(raw.error) : null,
+    trainWindow: raw?.train_window != null ? String(raw.train_window) : null,
+    trainMeanRankIc: poolNum(raw?.train_mean_rank_ic),
+    validMeanRankIc: poolNum(raw?.valid_mean_rank_ic),
+    createdAt: raw?.created_at != null ? String(raw.created_at) : null,
+    updatedAt: raw?.updated_at != null ? String(raw.updated_at) : null,
+  };
+}
+
+function mapComboDetail(raw: any): ComboDetail {
+  const weights: Record<string, number> = {};
+  if (raw?.weights && typeof raw.weights === 'object' && !Array.isArray(raw.weights)) {
+    for (const [fid, w] of Object.entries(raw.weights)) {
+      const value = poolNum(w);
+      if (value != null) weights[fid] = value;
+    }
+  }
+  return {
+    comboId: String(raw?.combo_id ?? ''),
+    market: String(raw?.market ?? ''),
+    universe: String(raw?.universe ?? ''),
+    name: String(raw?.name ?? ''),
+    factorIds: Array.isArray(raw?.factor_ids) ? raw.factor_ids.map(String) : [],
+    weights,
+    trainWindow: raw?.train_window != null ? String(raw.train_window) : null,
+    trainMetrics: mapComboWindowMetrics(raw?.train_metrics),
+    validMetrics: mapComboWindowMetrics(raw?.valid_metrics),
+    status: String(raw?.status ?? 'unknown'),
+    error: raw?.error != null ? String(raw.error) : null,
+    createdAt: raw?.created_at != null ? String(raw.created_at) : null,
+    updatedAt: raw?.updated_at != null ? String(raw.updated_at) : null,
+  };
+}
+
+/**
+ * 提交组合优化（后台子进程）。400 = 因子集被拒（detail 是原因，如无面板/
+ * 不足 2 个），409 = 已有组合作业在跑（单飞），500 = 子进程起不来——
+ * 都映射成可展示的 error 文案。
+ */
+export async function optimizeCombo(params: {
+  market: string;
+  universe?: string;
+  factorIds: string[];
+  name?: string;
+  seed?: number | null;
+}): Promise<
+  ApiResponse<{
+    comboId: string;
+    status: string;
+    pid?: number;
+    logPath?: string;
+    confirmed?: boolean;
+  }>
+> {
+  try {
+    const res = await apiClient.post(`/alpha-agent/combos/optimize`, {
+      market: params.market,
+      universe: params.universe ?? '',
+      factor_ids: params.factorIds,
+      name: params.name ?? '',
+      seed: params.seed ?? null,
+    });
+    const raw = res.data?.data ?? {};
+    return makeOk({
+      comboId: String(raw.combo_id ?? ''),
+      status: String(raw.status ?? 'pending'),
+      pid: typeof raw.pid === 'number' ? raw.pid : undefined,
+      logPath: raw.log_path != null ? String(raw.log_path) : undefined,
+      confirmed: raw.confirmed === true,
+    });
+  } catch (error: unknown) {
+    const err = error as { response?: { status?: number; data?: { detail?: unknown } } };
+    const status = err?.response?.status;
+    const detail = err?.response?.data?.detail;
+    const message =
+      typeof detail === 'string' && detail
+        ? detail
+        : status === 409
+          ? '已有组合优化任务在运行，请稍后再试'
+          : status === 500
+            ? '优化子进程启动失败，请查看服务日志'
+            : '组合优化请求失败';
+    return { success: false, error: message };
+  }
+}
+
+/** 组合历史列表（user-scoped，新→旧）；market 缺省 = 全部市场。 */
+export async function listCombos(
+  params: { market?: string; limit?: number; offset?: number } = {},
+): Promise<ApiResponse<ComboList>> {
+  try {
+    const qs = new URLSearchParams();
+    if (params.market) qs.set('market', params.market);
+    qs.set('limit', String(params.limit ?? 20));
+    qs.set('offset', String(params.offset ?? 0));
+    const res = await apiClient.get(`/alpha-agent/combos?${qs.toString()}`);
+    const raw = res.data?.data ?? {};
+    return makeOk({
+      total: Number(raw.total ?? 0),
+      items: Array.isArray(raw.items) ? raw.items.map(mapComboListItem) : [],
+    });
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { detail?: unknown } } };
+    const detail = err?.response?.data?.detail;
+    const message =
+      typeof detail === 'string' && detail
+        ? detail
+        : error instanceof Error
+          ? error.message
+          : '组合列表获取失败';
+    return { success: false, error: message };
+  }
+}
+
+/** 组合详情（含权重 / 两窗指标 / valid 净值曲线）；非属主 404。 */
+export async function getCombo(comboId: string): Promise<ApiResponse<ComboDetail>> {
+  try {
+    const res = await apiClient.get(`/alpha-agent/combos/${encodeURIComponent(comboId)}`);
+    return makeOk(mapComboDetail(res.data?.data ?? {}));
+  } catch (error: unknown) {
+    const err = error as { response?: { status?: number; data?: { detail?: unknown } } };
+    const status = err?.response?.status;
+    const detail = err?.response?.data?.detail;
+    const message =
+      status === 404
+        ? '组合不存在或不属于当前用户'
+        : typeof detail === 'string' && detail
+          ? detail
+          : '组合详情获取失败';
+    return { success: false, error: message };
+  }
 }
 
 // ========================== Pseudo WebSocket via polling ==========================

@@ -2708,3 +2708,97 @@ CREATE INDEX IF NOT EXISTS idx_agent_ledger_pos_agent ON qm_agent_ledger_positio
 CREATE INDEX IF NOT EXISTS idx_agent_ledger_fill_day ON qm_agent_ledger_fill (tenant_id, user_id, trade_date DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_ledger_fill_order ON qm_agent_ledger_fill (order_id);
 CREATE INDEX IF NOT EXISTS idx_agent_ledger_rt_agent ON qm_agent_ledger_roundtrip (tenant_id, user_id, agent, sell_ts DESC);
+
+-- ── 因子池（P1）：rd_agent_factor_pool / _edges / _combos ──────────────
+-- 权威出处：backend/shared/factor_pool_contract.py（本段是该文件的逐字镜像，
+-- 由 backend/tests/test_factor_pool_contract.py 守着两份不漂移）。
+-- 老库自愈走 engine 启动期的 ensure_factor_pool_tables_async()。
+CREATE TABLE IF NOT EXISTS rd_agent_factor_pool (
+    factor_id           TEXT PRIMARY KEY,
+    user_id             TEXT NOT NULL,
+    market              TEXT NOT NULL DEFAULT 'a_share',
+    universe            TEXT NOT NULL DEFAULT '',
+    pool_score          DOUBLE PRECISION,
+    novelty             DOUBLE PRECISION,
+    max_pool_corr       DOUBLE PRECISION,
+    max_pool_corr_with  TEXT,
+    diversity_contrib   DOUBLE PRECISION,
+    times_retrieved     INTEGER NOT NULL DEFAULT 0,
+    last_retrieved_at   TIMESTAMPTZ,
+    panel_ref           TEXT,
+    extra               JSONB,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS rd_agent_factor_edges (
+    edge_id        BIGSERIAL PRIMARY KEY,
+    user_id        TEXT NOT NULL,
+    src_factor_id  TEXT NOT NULL,
+    dst_factor_id  TEXT NOT NULL,
+    relation       TEXT NOT NULL,
+    method         TEXT NOT NULL,
+    weight         DOUBLE PRECISION,
+    extra          JSONB,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_rd_agent_factor_edges
+        UNIQUE (src_factor_id, dst_factor_id, relation, method)
+);
+
+CREATE TABLE IF NOT EXISTS rd_agent_factor_combos (
+    combo_id       TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL,
+    market         TEXT NOT NULL DEFAULT 'a_share',
+    universe       TEXT NOT NULL DEFAULT '',
+    name           TEXT NOT NULL DEFAULT '',
+    factor_ids     JSONB NOT NULL,
+    weights        JSONB NOT NULL,
+    train_window   TEXT,
+    train_metrics  JSONB,
+    valid_metrics  JSONB,
+    status         TEXT NOT NULL DEFAULT 'pending',
+    error          TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rd_factor_pool_scope ON rd_agent_factor_pool (user_id, market, universe);
+CREATE INDEX IF NOT EXISTS idx_rd_factor_edges_src ON rd_agent_factor_edges (src_factor_id);
+CREATE INDEX IF NOT EXISTS idx_rd_factor_edges_dst ON rd_agent_factor_edges (dst_factor_id);
+CREATE INDEX IF NOT EXISTS idx_rd_factor_combos_scope ON rd_agent_factor_combos (user_id, market);
+
+-- ── 滚动训练 campaign 台账（P1）：qm_rolling_campaigns ──────────────────
+-- 权威出处：backend/shared/rolling_campaigns.py 的 _DDL_STATEMENTS（本段是
+-- 逐字镜像，由 backend/tests/test_rolling_campaigns.py 守着两份不漂移）。
+-- 老库自愈走 api 启动期的 rolling_campaigns.ensure_tables()。
+CREATE TABLE IF NOT EXISTS qm_rolling_campaigns (
+    campaign_id   TEXT PRIMARY KEY,
+    market        VARCHAR(16)  NOT NULL,
+    recipe_id     VARCHAR(128) NOT NULL,
+    recipe_hash   VARCHAR(64)  NOT NULL,
+    trigger       VARCHAR(16)  NOT NULL,
+    status        VARCHAR(16)  NOT NULL,
+    window_index  INTEGER      NOT NULL,
+    anchor_date   DATE         NOT NULL,
+    purge_days    INTEGER      NOT NULL,
+    window_policy JSONB,
+    window_plan   JSONB,
+    run_id        VARCHAR(64),
+    model_id      VARCHAR(128),
+    attempts      INTEGER      NOT NULL DEFAULT 0,
+    detail        JSONB,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    dispatched_at TIMESTAMPTZ,
+    finished_at   TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qm_rolling_campaigns_window
+ON qm_rolling_campaigns (market, recipe_id, anchor_date, trigger);
+
+CREATE INDEX IF NOT EXISTS idx_qm_rolling_campaigns_status
+ON qm_rolling_campaigns (status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_qm_rolling_campaigns_run
+ON qm_rolling_campaigns (run_id)
+WHERE run_id IS NOT NULL;

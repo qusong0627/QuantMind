@@ -1,0 +1,104 @@
+{
+  "meta": {
+    "purpose": "因子挖掘机构级指标金样：后端实现与前端描述符表都以此为准，改公式/改标签必须过本文件",
+    "source": "AlphaEval (BerkinChen/AlphaEval, MIT) master 源码对照：modeltester.py:315-327（RRE）、backtest/combo.py:93-101（组合权重，P2）、0.0015 成本惯例不采用（本仓用 factor_research.analysis.COST_RATE=0.002 双边）",
+    "epsilon": 1e-8,
+    "cost_rate": 0.002,
+    "rre_policy": "probs=当日排名份额（ranks/sum）；KL_t=Σ p_t*ln((p_t+ε)/(p_{t-1}+ε))；首日 probs_prev 全 NaN → pandas sum(skipna) 为 0.0 → 计 1.0（与源实现同行为，刻意保留）；RRE=mean(1/(1+KL_t))；某标的缺值日其 KL 项跳过",
+    "turnover_policy": "多头集合 S_t = 当日 rank(pct)≥0.7；to_t=|S_t∖S_{t-1}|/|S_t|（首日无定义被排除）；r_net=r-to*cost（首日 NaN）；年化=×252",
+    "dotted_key_note": "quality.* 为 metadata_json 嵌套路径，其余为 metadata 顶层键或表字段",
+    "expected_tolerance": 1e-6
+  },
+  "registry": [
+    {"key": "ic", "label": "IC（日均）", "group": "prediction", "unit": "ratio", "better": "higher", "precision": 4, "description": "因子值与次日收益的日度截面相关系数均值"},
+    {"key": "rank_ic", "label": "Rank IC（日中位）", "group": "prediction", "unit": "ratio", "better": "higher", "precision": 4, "description": "日度截面 Spearman 秩相关的中位数"},
+    {"key": "icir", "label": "ICIR", "group": "prediction", "unit": "ratio", "better": "higher", "precision": 3, "description": "日均 IC ÷ 日度 IC 标准差"},
+    {"key": "rank_icir", "label": "Rank ICIR", "group": "prediction", "unit": "ratio", "better": "higher", "precision": 3, "description": "日均 Rank IC ÷ 其标准差"},
+    {"key": "n_obs", "label": "有效天数", "group": "prediction", "unit": "days", "better": "none", "precision": 0, "description": "参与 IC 计算的交易日数"},
+    {"key": "rre", "label": "RRE（排序可靠度）", "group": "robustness", "unit": "score", "better": "higher", "precision": 4, "description": "相邻日排名分布 KL 散度贴合度，1=分布完全不变（AlphaEval 口径）"},
+    {"key": "quality.pfs", "label": "PFS（扰动保真度）", "group": "robustness", "unit": "score", "better": "higher", "precision": 4, "description": "截面加噪后排序保持率，<0.9 预警"},
+    {"key": "quality.pfs_gauss", "label": "PFS-Gauss", "group": "robustness", "unit": "score", "better": "higher", "precision": 4, "description": "高斯噪声扰动下的 PFS"},
+    {"key": "quality.pfs_t", "label": "PFS-T", "group": "robustness", "unit": "score", "better": "higher", "precision": 4, "description": "t 分布噪声扰动下的 PFS"},
+    {"key": "turnover_daily", "label": "日均换手", "group": "trading", "unit": "ratio", "better": "lower", "precision": 4, "description": "多头组合（截面 rank 前 30%）名单日均变动比"},
+    {"key": "ann_turnover", "label": "年化换手", "group": "trading", "unit": "ratio", "better": "lower", "precision": 2, "description": "日均换手 × 252"},
+    {"key": "ann_return_net", "label": "扣费年化收益", "group": "trading", "unit": "pct", "better": "higher", "precision": 2, "description": "按换手比例扣除双边成本后的年化收益（研究口径 0.2%）"},
+    {"key": "sharpe_net", "label": "扣费夏普", "group": "trading", "unit": "ratio", "better": "higher", "precision": 2, "description": "扣费日收益的年化夏普"},
+    {"key": "max_drawdown_net", "label": "扣费最大回撤", "group": "trading", "unit": "pct", "better": "lower", "precision": 2, "description": "扣费净值最大回撤"},
+    {"key": "annual_return", "label": "年化收益（毛）", "group": "return", "unit": "pct", "better": "higher", "precision": 2, "description": "多头组合年化收益（未扣成本）"},
+    {"key": "sharpe_ratio", "label": "夏普（毛）", "group": "return", "unit": "ratio", "better": "higher", "precision": 3, "description": "毛收益年化夏普"},
+    {"key": "max_drawdown", "label": "最大回撤（毛）", "group": "return", "unit": "pct", "better": "lower", "precision": 2, "description": "毛净值最大回撤"}
+  ],
+  "rre_cases": [
+    {
+      "name": "stable_rank_is_one",
+      "symbols": ["A", "B", "C"],
+      "values": [[1.0, 2.0, 3.0], [10.0, 20.0, 30.0], [0.1, 0.2, 0.3], [5.0, 5.1, 5.2]],
+      "expected_rre": 1.0
+    },
+    {
+      "name": "swap_two_names",
+      "symbols": ["A", "B"],
+      "values": [[1.0, 2.0], [2.0, 1.0], [2.0, 1.0]],
+      "expected_rre": 0.9374384380505406
+    },
+    {
+      "name": "nan_day_partial",
+      "symbols": ["A", "B", "C"],
+      "values": [[1.0, 2.0, 3.0], [3.0, 1.0, null], [1.0, 3.0, 2.0]],
+      "expected_rre": 0.8496130717325577
+    }
+  ],
+  "turnover_cases": [
+    {
+      "name": "three_day_rotation",
+      "symbols": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+      "factors": [
+        [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+        [10, 9, 8, 1, 6, 5, 4, 3, 2, 7],
+        [10, 9, 8, 1, 6, 5, 4, 3, 2, 7],
+        [1, 6, 10, 5, 8, 7, 4, 3, 2, 9]
+      ],
+      "returns": [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01], [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02], [-0.01, -0.01, -0.01, -0.01, -0.01, -0.01, -0.01, -0.01, -0.01, -0.01]],
+      "cost_rate": 0.002,
+      "expected": {
+        "turnover_daily": 0.25,
+        "ann_turnover": 63.0,
+        "ann_return_net": 1.5540000000000003,
+        "sharpe_net": 6.208897137409622,
+        "max_drawdown_net": 0.010999999999999916
+      }
+    },
+    {
+      "name": "no_change_zero_turnover",
+      "symbols": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+      "factors": [
+        [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+        [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+        [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+      ],
+      "returns": [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03], [0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04]],
+      "cost_rate": 0.002,
+      "expected": {
+        "turnover_daily": 0.0,
+        "ann_turnover": 0.0,
+        "ann_return_net": 8.82,
+        "sharpe_net": 78.57469400085485,
+        "max_drawdown_net": 0.0
+      }
+    },
+    {
+      "name": "single_day_no_turnover",
+      "symbols": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+      "factors": [[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]],
+      "returns": [[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]],
+      "cost_rate": 0.002,
+      "expected": {
+        "turnover_daily": null,
+        "ann_turnover": null,
+        "ann_return_net": null,
+        "sharpe_net": null,
+        "max_drawdown_net": null
+      }
+    }
+  ]
+}

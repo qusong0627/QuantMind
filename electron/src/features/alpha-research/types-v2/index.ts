@@ -101,11 +101,11 @@ export interface RealtimeMetrics {
   ic: number;
   icir: number;
   rankIc: number;
-  rankIcir: number;
-  
+  rankIcir?: number;
+
   // Optional factor name if available (e.g. best factor)
   factorName?: string;
-  
+
   // Top 10 factors list
   top10Factors?: Array<{
     factorId: string;
@@ -133,6 +133,27 @@ export interface RealtimeMetrics {
   highQualityFactors: number;
   mediumQualityFactors: number;
   lowQualityFactors: number;
+
+  // —— 机构级指标（mining_plugins 评估器链，metadata_json 透传）——
+  // 一律可选：后端没算过/旧回测 → undefined → 界面显「—」，禁止补 0。
+  /** RRE 排序可靠度（robustness，越大越稳） */
+  rre?: number;
+  /** PFS 扰动保真度（截面加噪排序保持率） */
+  pfs?: number;
+  pfsGauss?: number;
+  pfsT?: number;
+  /** 有效天数（参与 IC 计算的交易日数） */
+  nObs?: number;
+  /** 多头组合（rank 前 30%）日均换手 */
+  turnoverDaily?: number;
+  /** 年化换手 = 日均 × 252 */
+  annTurnover?: number;
+  /** 扣费年化收益（研究口径双边 0.2%） */
+  annReturnNet?: number;
+  /** 扣费夏普 */
+  sharpeNet?: number;
+  /** 扣费最大回撤 */
+  maxDrawdownNet?: number;
 }
 
 // Execution progress
@@ -195,10 +216,27 @@ export interface Factor {
   ic: number;
   icir: number;
   rankIc: number;
-  rankIcir: number;
+  /** 元数据里没有真实值时保持 undefined（旧实现硬编码 0，与「算出来就是 0」无法区分） */
+  rankIcir?: number;
   sharpeRatio: number;
   annualReturn: number;
   maxDrawdown: number;
+
+  // —— 机构级指标（metadata_json；缺失保持 undefined，界面显「—」）——
+  rre?: number;
+  /** PFS 族（后端 metadata.quality 子对象） */
+  pfsQuality?: {
+    pfs?: number;
+    pfsGauss?: number;
+    pfsT?: number;
+    nDays?: number;
+  };
+  turnoverDaily?: number;
+  annTurnover?: number;
+  annReturnNet?: number;
+  sharpeNet?: number;
+  maxDrawdownNet?: number;
+  nObs?: number;
 
   // Metadata
   round: number;

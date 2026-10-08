@@ -1,0 +1,14 @@
+# 因子挖掘插件配置（mining_plugins）
+#
+# 缺省行为 = 全部内置默认：本文件不存在或键被注释掉时——
+#   cost_rate  取 factor_research.analysis.COST_RATE（0.002 双边，单一出处）
+#   evaluators 全部启用
+# 运维热覆盖优先走 env（免重建镜像）：
+#   QM_MINING_PLUGINS_CONFIG   本文件路径
+#   QM_MINING_COST_RATE        扣成本口径
+#
+# 示例（取消注释即生效）：
+# cost_rate: 0.002
+# evaluators:
+#   reliability: true        # RRE 排序可靠度
+#   turnover_cost: true      # 换手 + 扣费净指标

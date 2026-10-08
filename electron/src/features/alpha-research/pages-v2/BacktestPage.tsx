@@ -223,11 +223,11 @@ export const BacktestPage: React.FC = () => {
   const isFinished = task?.status === 'completed' || task?.status === 'failed' || task?.status === 'cancelled';
 
   // -- Render metric card --
-  const MetricCard = ({ label, value, unit }: { label: string; value: any; unit?: string }) => (
+  const MetricCard = ({ label, value, unit, precision = 4 }: { label: string; value: any; unit?: string; precision?: number }) => (
     <div className="glass rounded-xl p-4 text-center">
       <div className="text-xs text-muted-foreground mb-1">{label}</div>
       <div className="text-lg font-bold text-foreground">
-        {typeof value === 'number' ? value.toFixed(4) : value ?? '--'}
+        {typeof value === 'number' ? value.toFixed(precision) : value ?? '--'}
         {unit && <span className="text-xs text-muted-foreground ml-1">{unit}</span>}
       </div>
     </div>
@@ -241,6 +241,12 @@ export const BacktestPage: React.FC = () => {
   const calmar =
     metrics.calmar_ratio ?? metrics.calmarRatio ??
     (annualReturn != null && maxDrawdown ? annualReturn / Math.abs(maxDrawdown) : undefined);
+  // 机构级评估器指标（mining_plugins）：任何一个有值才渲染该区块；
+  // 旧回测没有这些键 → 整块不出现（而不是一排 "--" 噪音）
+  const hasMiningMetrics =
+    metrics.rre != null || metrics.pfs != null || metrics.turnoverDaily != null ||
+    metrics.annTurnover != null || metrics.annReturnNet != null ||
+    metrics.sharpeNet != null || metrics.maxDrawdownNet != null;
 
   return (
     <div className="space-y-6 animate-fade-in-up">
@@ -583,19 +589,55 @@ export const BacktestPage: React.FC = () => {
               <MetricCard label="ICIR" value={metrics.icir ?? metrics.ICIR} />
               <MetricCard label="Rank IC" value={metrics.rankIc ?? metrics.RankIC ?? metrics['Rank IC']} />
               <MetricCard label="Rank ICIR" value={metrics.rankIcir ?? metrics.RankICIR ?? metrics['Rank ICIR']} />
+              {/* 毛/净两张卡刻意分开：annualReturn 是**未扣成本**的毛收益，
+                  扣费口径看评估器链的 annReturnNet（旧标题误标「扣费」） */}
               <MetricCard
-                label="年化扣费收益"
+                label="年化收益（毛）"
                 value={annualReturn != null ? annualReturn * 100 : undefined}
                 unit="%"
+                precision={2}
               />
               <MetricCard
-                label="最大回撤"
+                label="最大回撤（毛）"
                 value={maxDrawdown != null ? maxDrawdown * 100 : undefined}
                 unit="%"
+                precision={2}
               />
               <MetricCard label="信息比率" value={metrics.information_ratio ?? metrics.informationRatio} />
               <MetricCard label="Calmar" value={calmar} />
             </div>
+
+            {/* 机构级评估（mining_plugins 插件链）：RRE / 稳健性 / 换手与扣费 */}
+            {hasMiningMetrics && (
+              <div className="pt-4 border-t border-border/50">
+                <h4 className="text-sm font-medium mb-4 flex items-center gap-2">
+                  <TrendingUp className="h-4 w-4 text-primary" />
+                  机构级评估（稳健性 / 换手与扣费）
+                </h4>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <MetricCard label="RRE 排序可靠度" value={metrics.rre} />
+                  <MetricCard label="PFS 扰动保真度" value={metrics.pfs} />
+                  <MetricCard label="PFS-Gauss" value={metrics.pfsGauss} />
+                  <MetricCard label="PFS-T" value={metrics.pfsT} />
+                  <MetricCard label="日均换手" value={metrics.turnoverDaily} />
+                  <MetricCard label="年化换手" value={metrics.annTurnover} precision={2} />
+                  <MetricCard
+                    label="扣费年化收益"
+                    value={metrics.annReturnNet != null ? metrics.annReturnNet * 100 : undefined}
+                    unit="%"
+                    precision={2}
+                  />
+                  <MetricCard label="扣费夏普" value={metrics.sharpeNet} precision={2} />
+                  <MetricCard
+                    label="扣费最大回撤"
+                    value={metrics.maxDrawdownNet != null ? metrics.maxDrawdownNet * 100 : undefined}
+                    unit="%"
+                    precision={2}
+                  />
+                  <MetricCard label="有效天数" value={metrics.nObs} precision={0} />
+                </div>
+              </div>
+            )}
 
             {/* Cumulative Excess Return Chart */}
             {metrics.cumulative_curve && (

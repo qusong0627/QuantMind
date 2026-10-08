@@ -128,6 +128,9 @@ class RDLoopWrapper:
     # 需要注入中文/研究方向指令的 prompt key（RD-Agent prompts.yaml 中的顶层键）
     _INJECT_TARGET_KEYS = ("qlib_factor_background", "qlib_quant_background")
 
+    #: 因子池注入文件路径（launcher 在 spawn 前写好、经 env 传入）
+    _ENV_POOL_CONTEXT = "QMF_POOL_CONTEXT_PATH"
+
     def _build_prompt_suffix(self) -> str:
         """构造追加到因子背景 prompt 末尾的中文与研究方向指令。"""
         suffix = (
@@ -145,7 +148,28 @@ class RDLoopWrapper:
                 f"User's research direction/hypothesis: {direction}\n"
                 "请围绕此方向进行因子探索。Focus factor exploration on this theme.\n"
             )
+        suffix += self._pool_context_block()
         return suffix
+
+    def _pool_context_block(self) -> str:
+        """历史挖掘记忆段（因子池 top-k 摘要，launcher 交付的文件）。
+
+        只读文件、不做 DB：本函数运行在 RD-Agent 子进程内，子进程里复用主
+        进程 DB engine 会跨事件循环炸（旧坑）；池查询全部在 launcher
+        （engine 进程）完成，这里只消费交付物。文件缺失/为空 → 空串，
+        注入是增益层，任何情况下不拦挖掘。
+        """
+        path = os.getenv(self._ENV_POOL_CONTEXT, "").strip()
+        if not path:
+            return ""
+        try:
+            content = Path(path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.warning("[%s] 池注入文件读取失败(%s): %s", self.market, path, exc)
+            return ""
+        if not content:
+            return ""
+        return f"\n\n====== 历史挖掘记忆 / Past Mining Memory ======\n{content}\n"
 
     def _patch_prompts_for_chinese(self):
         """注入中文与研究方向指令到 RD-Agent 提示词。
