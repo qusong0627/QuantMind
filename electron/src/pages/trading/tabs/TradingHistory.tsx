@@ -85,6 +85,7 @@ function inferMarketOfSymbol(symbol: string): string {
 }
 
 const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradingMode }) => {
+    const isSimulation = tradingMode === 'simulation';
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month' | 'all'>('all');
     const [searchTerm, setSearchTerm] = useState('');
@@ -501,9 +502,14 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     <table className="w-full text-xs table-fixed">
                         <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
                             <tr>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[10%] whitespace-nowrap">时间</th>
+                                {isSimulation && (
+                                    <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[10%] whitespace-nowrap">日期</th>
+                                )}
+                                <th className={`px-3 py-2 text-center font-semibold text-gray-600 ${isSimulation ? 'w-[8%]' : 'w-[10%]'} whitespace-nowrap`}>时间</th>
                                 <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[8%]">方向</th>
-                                <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[8%]">操作</th>
+                                {!isSimulation && (
+                                    <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[8%]">操作</th>
+                                )}
                                 <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[11%]">代码</th>
                                 <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[11%]">名称</th>
                                 <th className="px-3 py-2 text-center font-semibold text-gray-600 w-[12%]">成交量/委托量</th>
@@ -516,7 +522,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                         <tbody className="divide-y divide-gray-100">
                             {paginatedTrades.length === 0 ? (
                                 <tr>
-                                    <td colSpan={9} className="px-3 py-12 text-center text-gray-400">
+                                    <td colSpan={10} className="px-3 py-12 text-center text-gray-400">
                                         <div className="flex flex-col items-center gap-2">
                                             <FileText size={32} className="text-gray-200" />
                                             <span className="text-sm">暂无交易记录</span>
@@ -532,6 +538,11 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                                 const isPending = ['pending', 'submitted', 'open'].includes(trade.status);
                                 return (
                                     <tr key={trade.id} className="hover:bg-gray-50 transition-colors">
+                                        {isSimulation && (
+                                            <td className="px-3 py-2 text-gray-600 text-center whitespace-nowrap font-mono">
+                                                {formatBackendDateTime(trade.createdAt).split(' ')[0].replace(/\//g, '-')}
+                                            </td>
+                                        )}
                                         <td className="px-3 py-2 text-gray-600 text-center whitespace-nowrap font-mono">{trade.time}</td>
                                         <td className="px-3 py-2 text-center">
                                             <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold ${trade.direction === 'buy'
@@ -545,11 +556,13 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                                                 )}
                                             </div>
                                         </td>
-                                        <td className="px-3 py-2 text-center text-gray-500">
-                                            {trade.tradeAction ? (
-                                                <span className="px-1.5 py-0.5 bg-gray-100 rounded text-xs text-gray-600">{trade.tradeAction}</span>
-                                            ) : '--'}
-                                        </td>
+                                        {!isSimulation && (
+                                            <td className="px-3 py-2 text-center text-gray-500">
+                                                {trade.tradeAction ? (
+                                                    <span className="px-1.5 py-0.5 bg-gray-100 rounded text-xs text-gray-600">{trade.tradeAction}</span>
+                                                ) : '--'}
+                                            </td>
+                                        )}
                                         <td className="px-3 py-2 text-center font-mono text-gray-900 overflow-hidden text-ellipsis whitespace-nowrap">{trade.code}</td>
                                         <td className="px-3 py-2 text-center font-medium text-gray-900 overflow-hidden text-ellipsis whitespace-nowrap">{trade.name}</td>
                                         <td className="px-3 py-2 text-center">
