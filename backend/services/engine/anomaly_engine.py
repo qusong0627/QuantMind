@@ -325,6 +325,13 @@ class AnomalyEngine:
             "last_error": None,
             "last_build_at": None,
             "last_detection_at": None,
+            # 取数心跳（2026-10-08 评审 [3]）：盘外引擎与「源挂了」的引擎在计数上长得
+            # 一样（都只有 cycles 在涨、errors=0），源挂只能在盘中现形。这两个时间戳
+            # 是运维判「今天真的取过数吗」的现场：盘中 last_market_fetch_at 不前进 =
+            # 引擎没在取数；前进而 last_market_quote_at 停在昨天 = 取了但零报价
+            # （热集空 / 行情源挂），别再对着 cycles 猜。
+            "last_market_fetch_at": None,
+            "last_market_quote_at": None,
         }
 
     # ── 动作（默认真实接线；测试注入桩） ────────────────────────────
@@ -577,7 +584,14 @@ class AnomalyEngine:
         if state == "open":
             try:
                 quotes = dict(self._market_fetcher(cfg) or {})
-                frac = trading_elapsed_fraction()
+                stamp = datetime.now(_SH_TZ).isoformat()
+                with self._lock:
+                    self.counters["last_market_fetch_at"] = stamp
+                    if quotes:
+                        self.counters["last_market_quote_at"] = stamp
+                # 与时段闸**同一注入时钟**：frac 默认走墙钟（trading_elapsed_fraction()），
+                # 会让量比阈值在换时钟的测试里随真实时间漂移——闸门换了、分母没换
+                frac = trading_elapsed_fraction(now_dt)
                 detections += detect_volume_price(
                     quotes,
                     volume_ratio_min=cfg.volume_ratio_min,

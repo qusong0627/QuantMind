@@ -20,26 +20,24 @@ pytestmark = pytest.mark.integration
 
 _CST = timezone(timedelta(hours=8))
 
+# 时段闸的夹具时钟：2026-10-08（周四）10:30 —— 固定的交易日，闸必开（真 XSHG 答 True；
+# 印发期外答不了时按降级口径也放行，见 anomaly_engine.in_market_session）。
+_SESSION_EPOCH = datetime(2026, 10, 8, 10, 30, tzinfo=_CST).timestamp()
+
 
 def _session_now() -> float:
-    """测试时钟钉在**今天 10:30**（连续竞价时段内）：市场族只在时段内取数
-    （anomaly_engine.in_market_session），用墙钟跑测试会在夜间/周末假红。"""
-    return datetime.now(_CST).replace(hour=10, minute=30, second=0, microsecond=0).timestamp()
+    """测试时钟钉在**固定的交易日 10:30**（2026-10-08，周四）。
 
+    不能钉「今天 10:30」：时段闸还要求工作日 + 交易日历（anomaly_engine.
+    market_session_state），周末/假期跑会因闸关而假红（2026-10-08 评审实测 Sat
+    2026-10-10 三条用例红；当时的 autouse 跳过只是把红换成静默不覆盖）。固定日期让
+    「闸开」成为夹具前提，与真实今天是星期几无关。
 
-@pytest.fixture(autouse=True)
-def _require_trading_day():
-    """非交易日跳过本文件：三条用例都靠市场族取数产检测，闸一关断言必假红。
-
-    时钟钉的是「今天 10:30」，所以日期跟墙钟走——2026-10-08 时段闸补了交易日历层后，
-    工作日假期（原先照跑）也会关闸。显式跳过并说明原因，别让人对着一条周末/假期假红
-    的集成测试找自己的改动。日历答不了（None）时照跑——与生产降级口径一致。
+    注意时钟只钉**判定面**（时段闸、节流、冷却）：锁/审计/落表的 trade_date 仍取墙钟
+    （引擎 _default_deny/_audit/recorder 用的是 datetime.now），所以下面 trade_date
+    断言照旧取墙钟日期。
     """
-    from backend.services.engine.anomaly_engine import _default_trading_day_lookup
-
-    today = datetime.now(_CST).date()
-    if today.weekday() >= 5 or _default_trading_day_lookup(today) is False:
-        pytest.skip(f"{today} 非交易日：市场族被时段闸跳过，本文件只在交易日有意义")
+    return _SESSION_EPOCH
 
 
 def _no_status_write(payload) -> None:

@@ -212,6 +212,103 @@ def test_session_gate_uses_injected_clock_not_wall_clock():
     assert holder["market"] == 1
 
 
+def test_volume_fraction_follows_injected_clock_not_wall_clock():
+    """量比的时段进度（frac）必须取自注入时钟——墙钟会让阈值随真实时间漂移。
+
+    回归靶子（2026-10-08 评审 [2]）：``build_once`` 曾把 ``trading_elapsed_fraction()``
+    按默认参数调用（墙钟），于是闸门走注入时钟、分母走墙钟——本模块自己声明的「闸门判定
+    与节流/冷却共用同一时钟」只成立了一半。夹具让两种时钟给出不同 frac（09:30→0.05、
+    10:30→0.25），断言检测里记的就是注入值：bug 版两条都报同一个墙钟值，至少一条红。
+    """
+    from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
+
+    holder = {"now": _epoch(_THU, 9, 30)}
+    published: list = []
+
+    engine = AnomalyEngine(
+        # 现量 800 / 均量 1000：09:30 量比 16、10:30 量比 3.2，两档都过阈值 3.0 而
+        # frac 不同——两边都产检测，才有东西可断言
+        config_loader=lambda: AnomalyConfig(
+            enabled=True, volume_ratio_min=3.0, deny_enabled=False
+        ),
+        market_fetcher=lambda cfg: {
+            "600036.SH": {
+                "price": 40.0,
+                "pct_chg": 0.0,
+                "now_volume": 800.0,
+                "avg_daily_volume": 1000.0,
+            }
+        },
+        account_fetcher=lambda cfg: [],
+        data_fetcher=lambda cfg: [],
+        model_fetcher=lambda cfg: [],
+        publisher=published.append,  # build_once 不回流 Detection，只能从动作侧取
+        recorder=lambda d: None,
+        denier=lambda d: {},
+        recent_marker=lambda ds: None,
+        deduper=lambda ds, cfg: (list(ds), 0),  # 冷却走真 Redis；此处只要检测本身
+        status_writer=lambda payload: None,
+        trading_day_lookup=lambda d: True,
+        now_fn=lambda: holder["now"],
+    )
+
+    engine.build_once()  # 09:30 → frac 0.05
+    holder["now"] = _epoch(_THU, 10, 30)
+    engine.build_once()  # 10:30 → frac 0.25
+
+    fracs = [d.metrics["elapsed_fraction"] for d in published]
+    assert fracs == [0.05, 0.25], (
+        f"frac 跟墙钟走了（trading_elapsed_fraction 无参调用）；期望注入时钟 [0.05, 0.25]，"
+        f"实得 {fracs}"
+    )
+    assert engine.counters["errors"] == 0
+
+
+def test_market_fetch_heartbeat_counters():
+    """取数心跳（2026-10-08 评审 [3]）：盘外引擎与「源挂了」的引擎计数长得一样，
+    这两个时间戳是运维判「今天真的取过数吗」的现场。
+
+    - 时段外：不取数，两个时间戳都不许动（否则「昨天取过」会装成「引擎活着」）；
+    - 时段内：每次取数记 ``last_market_fetch_at``；**有有效报价**才记
+      ``last_market_quote_at``（零报价 = 热集空/源挂，与「取了但没值」分开）。
+    """
+    from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
+
+    quote = {"600036.SH": {"price": 40.0, "pct_chg": 0.0}}
+
+    def _mk(now_epoch: float, fetcher):
+        return AnomalyEngine(
+            config_loader=lambda: AnomalyConfig(enabled=True),
+            market_fetcher=fetcher,
+            account_fetcher=lambda cfg: [],
+            data_fetcher=lambda cfg: [],
+            model_fetcher=lambda cfg: [],
+            publisher=lambda d: None,
+            recorder=lambda d: None,
+            denier=lambda d: {},
+            recent_marker=lambda ds: None,
+            deduper=lambda ds, cfg: (list(ds), 0),
+            status_writer=lambda payload: None,
+            trading_day_lookup=lambda d: True,
+            now_fn=lambda: now_epoch,
+        )
+
+    off = _mk(_epoch(_THU, 20, 21), lambda cfg: quote)
+    off.build_once()
+    assert off.counters["last_market_fetch_at"] is None, "时段外不得记取数心跳"
+    assert off.counters["last_market_quote_at"] is None
+
+    full = _mk(_epoch(_THU, 10, 30), lambda cfg: quote)
+    full.build_once()
+    assert full.counters["last_market_fetch_at"], "盘中取过数，必须留心跳"
+    assert full.counters["last_market_quote_at"]
+
+    empty = _mk(_epoch(_THU, 10, 30), lambda cfg: {})
+    empty.build_once()
+    assert empty.counters["last_market_fetch_at"], "取数发生了（只是没取到值）"
+    assert empty.counters["last_market_quote_at"] is None, "零报价不得记『取到过数』"
+
+
 # ── 节假日层：日历结论如何改变取数闸 ────────────────────────────────
 
 
