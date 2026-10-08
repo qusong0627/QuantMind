@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
     tdx_hot_set_feed_task = None
     health_recheck_task = None
     close_audit_task = None
+    daily_pnl_report_task = None
     tdx_quote_feed_task = None
     tdx_l2_capture_task = None
     tdx_l2_realtime_task = None
@@ -491,6 +492,15 @@ async def lifespan(app: FastAPI):
             run_close_audit_task(),
             name="close-cleanup-audit",
         )
+        # 收盘收益报表 → QQ 推送（默认 15:10，结算 finalize 15:05 之后）
+        from backend.services.trade.services.daily_pnl_report_task import (
+            run_daily_pnl_report_task,
+        )
+
+        daily_pnl_report_task = asyncio.create_task(
+            run_daily_pnl_report_task(),
+            name="daily-pnl-report",
+        )
         from backend.services.live_trading.services.tdx_quote_feed import (
             run_tdx_quote_feed_task,
         )
@@ -845,6 +855,7 @@ async def lifespan(app: FastAPI):
         eval_scores_task,
         health_recheck_task,
         close_audit_task,
+        daily_pnl_report_task,
         tdx_quote_feed_task,
         tdx_l2_capture_task,
         tdx_l2_realtime_task,
