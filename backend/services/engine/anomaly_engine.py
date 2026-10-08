@@ -299,7 +299,7 @@ class AnomalyEngine:
         self._status_writer = status_writer or self._default_status_write
         self._trading_day_lookup = trading_day_lookup or _default_trading_day_lookup
         self._trading_day_cache: dict[date, bool | None] = {}
-        self._calendar_warned_on: date | None = None
+        self._calendar_logged_on: date | None = None
         self._now = now_fn
 
         self._last_data_ts: float | None = None
@@ -545,30 +545,46 @@ class AnomalyEngine:
         """该日是否交易日（按日缓存；只在**时段内的工作日**才查；答不了返回 ``None``）。
 
         日历是日频事实而引擎是分钟级循环，不缓存等于每分钟问一次；查历失败/答不了
-        一律降级放行（口径见 ``in_market_session``），并每天告警一条——那是「本闸退化
-        成只看工作日」的唯一可观测信号（XSHG 印发到 2026-12-31，到期前后该看见它）。
+        一律降级放行（口径见 ``in_market_session``），并每天记一条日志——答不了是
+        WARNING（「本闸退化成只看工作日」的唯一可观测信号，XSHG 印发到 2026-12-31，
+        到期前后该看见它），日历答 **False 是 INFO**（市场族整天不取数的现场；若该日
+        实际开市，是日历口径错——先按 anomaly-engine-ops §4.2 自查命令核对）。
+
+        返回**本次查到的结论**而不是回读缓存：缓存只留最近 8 天，时钟回拨越过缓存
+        跨度（快照恢复/手工 date/NTP 大跳）时当天会被当场淘汰，回读会 KeyError 并
+        打断整个 build_once（四族全停、5s 一次）——见
+        ``test_calendar_cache_survives_backward_clock_jump``。
         """
         if not _in_session_window(now_dt):
             return None  # 时段外不问：state 必为 closed，日历说什么都不改变结论
         day = now_dt.date()
-        if day not in self._trading_day_cache:
-            try:
-                verdict = self._trading_day_lookup(day)
-            except Exception as exc:  # noqa: BLE001 - 查历失败=答不了，不许反噬主循环
-                logger.warning("[anomaly] 交易日历查询异常 %s: %s", day, exc)
-                verdict = None
-            self._trading_day_cache[day] = verdict
-            if len(self._trading_day_cache) > 8:  # 长跑进程跨日时只留最近几天
-                for old in sorted(self._trading_day_cache)[:-8]:
-                    self._trading_day_cache.pop(old, None)
-            if verdict is None and self._calendar_warned_on != day:
-                self._calendar_warned_on = day
+        if day in self._trading_day_cache:
+            return self._trading_day_cache[day]
+        try:
+            verdict = self._trading_day_lookup(day)
+        except Exception as exc:  # noqa: BLE001 - 查历失败=答不了，不许反噬主循环
+            logger.warning("[anomaly] 交易日历查询异常 %s: %s", day, exc)
+            verdict = None
+        self._trading_day_cache[day] = verdict
+        if len(self._trading_day_cache) > 8:  # 长跑进程跨日时只留最近几天
+            for old in sorted(self._trading_day_cache)[:-8]:
+                self._trading_day_cache.pop(old, None)
+        if self._calendar_logged_on != day:
+            if verdict is None:
+                self._calendar_logged_on = day
                 logger.warning(
                     "[anomaly] 交易日历答不了 %s：市场族闸退回「只看工作日+时段」"
                     "（exchange_calendars XSHG 印发到 2026-12-31，需要精确判假期请升级库）",
                     day,
                 )
-        return self._trading_day_cache[day]
+            elif verdict is False:
+                self._calendar_logged_on = day
+                logger.info(
+                    "[anomaly] 交易日历判定 %s 非交易日：市场族当日不取数"
+                    "（若该日实际开市，先跑 anomaly-engine-ops §4.2 自查命令核对口径）",
+                    day,
+                )
+        return verdict
 
     def build_once(self) -> dict[str, Any]:
         cfg = self._config_loader()

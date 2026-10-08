@@ -22,7 +22,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -41,6 +41,17 @@ def _at(day: int, h: int, m: int) -> datetime:
 
 def _epoch(day: int, h: int, m: int) -> float:
     return _at(day, h, m).timestamp()
+
+
+def _weekdays(start: date, n: int) -> list[date]:
+    """从 start（含）起数 n 个工作日——构造越过日历缓存上限（8 格）的日期序列。"""
+    out: list[date] = []
+    cur = start
+    while len(out) < n:
+        if cur.weekday() < 5:
+            out.append(cur)
+        cur += timedelta(days=1)
+    return out
 
 
 # ── 谓词边界 ────────────────────────────────────────────────────────
@@ -427,8 +438,108 @@ def test_calendar_lookup_exception_degrades_instead_of_crashing():
 
     assert result["enabled"] is True and engine.counters["errors"] == 0
     assert calls["market"] == 1, "查历异常必须降级放行——异常不是关闸的理由"
-    assert engine.counters["skipped_market_holiday"] == 0, "异常 ≠ 假期（不许记成 holiday）"
+    assert engine.counters["skipped_market_holiday"] == 0, (
+        "异常 ≠ 假期（不许记成 holiday）"
+    )
     assert engine.counters["skipped_market_closed"] == 0
+
+
+def test_calendar_cache_survives_backward_clock_jump():
+    """时钟回拨越过缓存跨度：当天会被当场淘汰，**不许**再从缓存回读（评审 F3）。
+
+    旧实现收尾 ``return self._trading_day_cache[day]``：淘汰后回读 → KeyError 从
+    build_once 冒出、run_forever 整轮记错并跳过——四族全停、5s 一次，直到墙钟追上。
+    触发面：主机时钟回拨 > 缓存跨度（快照恢复 / 手工 date / NTP 大跳）。
+    """
+    from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
+
+    asked: list[str] = []
+    holder = {"now": 0.0}
+    calls = {"market": 0}
+
+    def market_fetcher(cfg):
+        calls["market"] += 1
+        return {}
+
+    engine = AnomalyEngine(
+        config_loader=lambda: AnomalyConfig(enabled=True),
+        market_fetcher=market_fetcher,
+        account_fetcher=lambda cfg: [],
+        data_fetcher=lambda cfg: [],
+        model_fetcher=lambda cfg: [],
+        publisher=lambda d: None,
+        recorder=lambda d: None,
+        denier=lambda d: {},
+        recent_marker=lambda ds: None,
+        deduper=lambda ds, cfg: (list(ds), 0),
+        status_writer=lambda payload: None,
+        trading_day_lookup=lambda d: (asked.append(d.isoformat()), True)[1],
+        now_fn=lambda: holder["now"],
+    )
+
+    days = _weekdays(date(2026, 10, 8), 9)  # 9 个工作日 → 最老的 10-08 被淘汰
+    for d in days:
+        holder["now"] = datetime.combine(d, dtime(10, 30), tzinfo=CST).timestamp()
+        engine.build_once()
+
+    holder["now"] = datetime.combine(days[0], dtime(10, 30), tzinfo=CST).timestamp()
+    first = engine.build_once()
+    second = engine.build_once()
+
+    assert first["enabled"] is True and second["enabled"] is True
+    assert calls["market"] == 11, (
+        "9 天 + 回拨日两轮：每轮都得照常取数（不许整轮被打断）"
+    )
+    assert engine.counters["errors"] == 0
+    assert asked[-1] == days[0].isoformat(), "回拨日不在缓存里（已被淘汰）→ 应重查"
+
+
+def test_calendar_verdict_logging_is_once_per_day(caplog):
+    """日历日志：答 False 要留痕（评审 F4a），同一天被反复重查也不得每轮重复打（F4b）。
+
+    答 False = 市场族整天不取数：运维看到 ``skipped_market_holiday`` 在涨（技能里写着
+    「正常」）时，这是唯一能区分「日历口径错」与「真假期」的现场；旧实现只对 None 打
+    WARNING，False 静默。护栏（``_calendar_logged_on``）只在「同一天被反复重查」时才
+    看得见——用回拨场景（当天被淘汰 → 每轮重查）钉住。
+    """
+    import logging
+
+    from backend.services.engine.anomaly_engine import AnomalyConfig, AnomalyEngine
+
+    holder = {"now": 0.0}
+    engine = AnomalyEngine(
+        config_loader=lambda: AnomalyConfig(enabled=True),
+        market_fetcher=lambda cfg: {},
+        account_fetcher=lambda cfg: [],
+        data_fetcher=lambda cfg: [],
+        model_fetcher=lambda cfg: [],
+        publisher=lambda d: None,
+        recorder=lambda d: None,
+        denier=lambda d: {},
+        recent_marker=lambda ds: None,
+        deduper=lambda ds, cfg: (list(ds), 0),
+        status_writer=lambda payload: None,
+        trading_day_lookup=lambda d: False,  # 日历明示：这些候选日都不是交易日
+        now_fn=lambda: holder["now"],
+    )
+
+    def _run(d: date) -> None:
+        holder["now"] = datetime.combine(d, dtime(10, 30), tzinfo=CST).timestamp()
+        engine.build_once()
+
+    with caplog.at_level(logging.INFO, logger="backend.services.engine.anomaly_engine"):
+        days = _weekdays(date(2026, 10, 8), 9)
+        for d in days:
+            _run(d)
+        assert len([m for m in caplog.messages if days[0].isoformat() in m]) == 1, (
+            "日历答 False 必须留 INFO（旧实现整天静默）"
+        )
+        caplog.clear()
+        _run(days[0])  # 回拨日：不在缓存（已被淘汰）→ 重查
+        _run(days[0])  # 同日再一轮 → 护栏压掉
+    assert len([m for m in caplog.messages if days[0].isoformat() in m]) == 1, (
+        "同一天被反复重查时应只留一条日志（_calendar_logged_on 护栏）"
+    )
 
 
 def test_default_lookup_is_wired_to_shared_calendar():
