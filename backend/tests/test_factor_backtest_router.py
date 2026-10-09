@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 
 import pytest
 
@@ -483,3 +484,134 @@ def test_series_endpoint_404s_and_payload(client, stub, monkeypatch):
 
 async def _none():
     return None
+
+
+# ── 机构报告（T-FB-16）──────────────────────────────────────────────
+
+
+def _report_series(n: int = 60) -> dict:
+    ic = [0.04 + 0.15 * math.sin(i * 0.37) for i in range(n)]
+    ls = [0.001 + 0.002 * math.sin(i * 0.23) for i in range(n)]
+    nav_ls, acc = [], 1.0
+    for r in ls:
+        acc *= 1.0 + r
+        nav_ls.append(acc)
+    return {
+        "dates": [f"d{i:03d}" for i in range(n)],
+        "ic": ic,
+        "ic_cum": ic,
+        "nav_long": nav_ls,
+        "nav_ls": nav_ls,
+        "nav_bench": [1.0] * n,
+        "q_curves": {},
+        "turnover": [0.3] * n,
+        "coverage": [100] * n,
+        "bench": "equal_weight",
+        "meta": {
+            "cost_bps": 10,
+            "top_pct": 0.3,
+            "n_buckets": 5,
+            "turnover_convention": "daily_two_sided",
+        },
+    }
+
+
+def _stub_report_store(monkeypatch, *, run: dict, series: dict | None, siblings=None):
+    async def _get_run(run_id):
+        return run
+
+    async def _get_series(run_id):
+        return {"series": series} if series is not None else None
+
+    monkeypatch.setattr(fb.store, "get_run", _get_run)
+    monkeypatch.setattr(fb.store, "get_series", _get_series)
+    if siblings is not None:
+
+        async def _batch_runs(batch_id):
+            return siblings
+
+        monkeypatch.setattr(fb.store, "batch_runs", _batch_runs)
+
+
+def test_report_endpoint_404s(client, stub, monkeypatch):
+    _stub_report_store(monkeypatch, run=None, series=None)
+    assert client.get(f"{_PREFIX}/report/nope").status_code == 404
+
+
+def test_report_endpoint_degraded_no_numbers(client, stub, monkeypatch):
+    _stub_report_store(
+        monkeypatch,
+        run={
+            "run_id": "fb-run-1",
+            "factor_id": "f-1",
+            "status": "data_unsupported",
+            "error": "missing_columns",
+            "batch_id": None,
+        },
+        series=None,
+    )
+    r = client.get(f"{_PREFIX}/report/fb-run-1")
+    assert r.status_code == 200
+    rep = r.json()["data"]["report"]
+    assert rep["available"] is False
+    assert rep["reason"] == "missing_columns"
+    assert "headline" not in rep and "cost_grid" not in rep
+
+
+def test_report_endpoint_family_and_override(client, stub, monkeypatch):
+    from backend.services.engine.factor_report import metrics as M
+
+    _stub_report_store(
+        monkeypatch,
+        run={
+            "run_id": "r-self",
+            "factor_id": "f-1",
+            "status": "completed",
+            "batch_id": "bb-1",
+            "metrics": {"benchmark": "csi300"},
+        },
+        series=_report_series(),
+        siblings=[
+            {"run_id": "r-a", "status": "completed", "metrics": {"ic_nw_t": 0.5}},
+            {"run_id": "r-self", "status": "completed", "metrics": {"ic_nw_t": 2.5}},
+            {"run_id": "r-c", "status": "completed", "metrics": {"ic_nw_t": 1.2}},
+            {"run_id": "r-d", "status": "failed", "metrics": {}},
+            {"run_id": "r-e", "status": "completed", "metrics": {}},
+        ],
+    )
+
+    r = client.get(f"{_PREFIX}/report/r-self")
+    assert r.status_code == 200
+    sig = r.json()["data"]["report"]["significance"]
+    expected_q = float(M.bhy_qvalues([M.normal_pvalue(t) for t in (0.5, 2.5, 1.2)])[1])
+    assert sig["family_n"] == 3  # failed 与缺 t 的单元不入族
+    assert sig["q_value_bhy"] == pytest.approx(expected_q, rel=1e-12)
+    assert sig["n_trials"] == 3
+    assert sig["n_trials_source"] == "batch_completed_units"
+
+    r2 = client.get(f"{_PREFIX}/report/r-self", params={"n_trials": 9})
+    sig2 = r2.json()["data"]["report"]["significance"]
+    assert sig2["n_trials"] == 9 and sig2["n_trials_source"] == "param"
+
+
+def test_report_endpoint_self_outside_family_falls_back(client, stub, monkeypatch):
+    """自身不在族表（自身 NW t 缺失）→ 回落 n=1，绝不按位错配别人的 q。"""
+    _stub_report_store(
+        monkeypatch,
+        run={
+            "run_id": "r-self",
+            "factor_id": "f-1",
+            "status": "completed",
+            "batch_id": "bb-1",
+            "metrics": {},
+        },
+        series=_report_series(),
+        siblings=[
+            {"run_id": "r-a", "status": "completed", "metrics": {"ic_nw_t": 0.5}},
+        ],
+    )
+    sig = client.get(f"{_PREFIX}/report/r-self").json()["data"]["report"][
+        "significance"
+    ]
+    assert sig["family_n"] == 1
+    assert "未做多重校正" in sig["family_note"]

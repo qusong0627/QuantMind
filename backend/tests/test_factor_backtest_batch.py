@@ -595,12 +595,73 @@ def test_resume_interrupted_scans_and_resumes(monkeypatch):
         coro.close()
         return None
 
+    settle_calls: list = []
+
+    async def _settle_singles(*, error):
+        settle_calls.append(error)
+        return 0
+
     monkeypatch.setattr(bt.store, "list_running_batches", _running)
     monkeypatch.setattr(bt.store, "get_batch", _get_batch)
+    monkeypatch.setattr(bt.store, "settle_orphan_single_runs", _settle_singles)
     monkeypatch.setattr(bt, "_spawn", _spawn)
 
     assert asyncio.run(bt.resume_interrupted()) == 2
     assert set(bt._STATES) == {"fbb-1", "fbb-2"}
+    # 孤儿单跑先于批次扫描收口（同款中断标记）
+    assert settle_calls == ["engine_restarted_mid_run"]
+
+
+def test_resume_interrupted_settles_orphan_singles_without_batches(monkeypatch):
+    """无中断批次时也要执行单跑孤儿收口（启动扫描的第一段）。"""
+
+    async def _running(limit=20):
+        return []
+
+    settle_calls: list = []
+
+    async def _settle_singles(*, error):
+        settle_calls.append(error)
+        return 3
+
+    monkeypatch.setattr(bt.store, "list_running_batches", _running)
+    monkeypatch.setattr(bt.store, "settle_orphan_single_runs", _settle_singles)
+
+    assert asyncio.run(bt.resume_interrupted()) == 0
+    assert settle_calls == ["engine_restarted_mid_run"]
+
+
+def test_resume_interrupted_single_sweep_failure_does_not_block(monkeypatch):
+    """单跑收口失败只告警：批次恢复照常（两段扫描相互独立）。"""
+
+    async def _running(limit=20):
+        return [{"batch_id": "fbb-1", "spec": {"units": []}}]
+
+    async def _get_batch(batch_id):
+        return {
+            "batch_id": batch_id,
+            "user_id": "u-1",
+            "status": "running",
+            "error": None,
+            "spec": {"units": []},
+            "created_at": dt.datetime(2026, 1, 1),
+            "finished_at": None,
+        }
+
+    async def _settle_singles(*, error):
+        raise RuntimeError("db down")
+
+    def _spawn(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(bt.store, "list_running_batches", _running)
+    monkeypatch.setattr(bt.store, "get_batch", _get_batch)
+    monkeypatch.setattr(bt.store, "settle_orphan_single_runs", _settle_singles)
+    monkeypatch.setattr(bt, "_spawn", _spawn)
+
+    assert asyncio.run(bt.resume_interrupted()) == 1
+    assert set(bt._STATES) == {"fbb-1"}
 
 
 # ── 取消 ─────────────────────────────────────────────────────────────

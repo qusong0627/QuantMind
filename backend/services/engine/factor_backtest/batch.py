@@ -13,7 +13,9 @@ cost)`` 的展开——同批次内 (factor, market) 先例去重，跨批次按
   身份守卫、序列落盘语义与单发链路逐字一致），不复制第二份生命周期。
 - **重启可重入**：重建时遗留 running 行收口为 failed
   (``engine_restarted_mid_run``)，该单元**重试一次**（第二次再中断不再重试，
-  防重启-重试死循环）；未启动单元照常续跑。
+  防重启-重试死循环）；未启动单元照常续跑。无批次归属的**孤儿单跑**同值
+  收口但**不重试**（单跑没有 spec/单元表可续跑，UI 如实显示 failed，
+  用户重派）。
 - **熔断**：连续 N 个单元 failed（``QM_BACKTEST_MAX_CONSEC_FAILS``，默认 5）
   → aborted；completed/data_unsupported/insufficient/unavailable 是适配结论，
   重置连败计数——降级终态不是故障。
@@ -268,7 +270,21 @@ async def resume_batch(batch_id: str) -> bool:
 
 
 async def resume_interrupted() -> int:
-    """engine 启动扫描：把中断批次全部重新入队。返回恢复批次数。"""
+    """engine 启动扫描：收口孤儿单跑 + 把中断批次全部重新入队。返回恢复批次数。
+
+    单跑（无 batch_id）不在批次重建面内——没有 spec/单元表可续跑，唯一正确
+    的处置是收口 failed（``engine_restarted_mid_run``）让台账/矩阵如实显示；
+    收口失败只告警，绝不拦批次恢复。
+    """
+    try:
+        settled_singles = await store.settle_orphan_single_runs(error=_RESTART_ERROR)
+        if settled_singles:
+            logger.warning(
+                "[factor-backtest] 重启恢复：收口 %d 个孤儿单跑 running 行",
+                settled_singles,
+            )
+    except Exception as exc:  # noqa: BLE001 — 单跑收口失败不拦批次恢复
+        logger.warning("[factor-backtest] 单跑孤儿收口失败: %s", exc)
     try:
         rows = await store.list_running_batches()
     except Exception as exc:  # noqa: BLE001 — 启动路径永不因此失败

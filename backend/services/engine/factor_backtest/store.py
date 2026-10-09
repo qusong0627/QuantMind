@@ -388,12 +388,13 @@ async def latest_cells(
 
 
 async def get_run(run_id: str) -> dict[str, Any] | None:
-    """按 run_id 取单行（归属校验用：路由先看它属于哪个因子）。"""
+    """按 run_id 取单行（归属校验/报告装配用；``batch_id`` 供报告层查族）。"""
     async with get_session(read_only=True) as session:
         rows = await session.execute(
             text(
                 """
                 SELECT b.run_id, b.factor_id, b.factor_name, b.status, b.kind,
+                       b.batch_id,
                        b.market, b.universe, b.data_source, b.date_range,
                        b.ic_value, b.rank_ic, b.icir, b.rank_icir,
                        b.sharpe_ratio, b.annual_return, b.max_drawdown,
@@ -632,6 +633,31 @@ async def settle_orphan_running(batch_id: str, *, error: str) -> int:
                 """
             ),
             {"batch_id": batch_id, "error": error},
+        )
+        return result.rowcount or 0
+
+
+async def settle_orphan_single_runs(*, error: str) -> int:
+    """重启恢复：把**无批次归属**的遗留 running 单跑收口为 failed。
+
+    单跑（``POST /single``）的兜底在 ``_run_single`` 的 try/except——进程活着
+    则必有终态；能留下 running 的唯一路径是**引擎进程死亡**（重启/被杀），此
+    时子进程已随旧进程消亡，行是纯孤儿。收口策略：标 failed + 错误原文，
+    **不自动重试**（单跑是用户一次性动作，UI 上可直接重派；「恰一次」重试语义
+    只属于批次单元，见 ``batch._pending_units``）。返回收口行数。
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                UPDATE rd_agent_factor_backtests
+                SET status = 'failed', error = :error, finished_at = now()
+                WHERE batch_id IS NULL
+                  AND status = 'running'
+                  AND finished_at IS NULL
+                """
+            ),
+            {"error": error},
         )
         return result.rowcount or 0
 
