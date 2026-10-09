@@ -21,6 +21,8 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from .rolling_shared import ScheduleUpdateRequest, apply_schedule_update
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/internal/rolling", tags=["InternalRolling"])
@@ -34,34 +36,6 @@ class DispatchRequest(BaseModel):
     trigger: Trigger = "schedule"
     dry_run: bool = False
     anchor_date: str | None = None
-
-
-class ScheduleUpdateRequest(BaseModel):
-    """单市场重训调度配置（键面与 retrain_scheduler.DEFAULT_SCHEDULE 对齐）。
-
-    ``day_rule`` 不在入口做白名单——未知规则由调度器的 ``judge_due`` 拒绝并
-    每日告警：坏配置要**可见**，不能被保存口静默改写成「每月首交易日」。
-
-    ``window_policy`` / ``purge_days`` 只接受 ``None``（缺省=沿用配方策略；
-    只为 GET→PUT 往返保真而留在键面）。窗口策略归**配方**所有——派发链路
-    （rolling_dispatch / rolling_train.py）一律读 ``recipe.window_policy``，
-    调度配置里的覆写没有任何消费者；非 None 一律 400 拒绝，宁可让配置人
-    当场看到错误，也不存一份「看起来生效实则被忽略」的假配置。
-
-    ``executor="remote"`` 尚未接线：派发 payload 不携带 ``node_id``，admin 侧
-    编排器永远落回 ``"local"``，唯一实际效果是跳过调度器的内存守卫——PUT 一律
-    400 拒绝；接线（节点路由）前只认 ``local``。
-    """
-
-    enabled: bool = False
-    day_rule: str = "first_trading_day"
-    time: str = "15:30"
-    recipe_id: str = Field(min_length=1, max_length=128)
-    observation_days: int = Field(default=20, ge=1, le=250)
-    max_time_minutes: int = Field(default=240, ge=10, le=1440)
-    executor: Literal["local", "remote"] = "local"
-    window_policy: dict[str, Any] | None = None
-    purge_days: int | None = None
 
 
 def _verify(secret: str) -> None:
@@ -189,41 +163,5 @@ async def put_retrain_schedule(
 ) -> dict[str, Any]:
     _verify(x_internal_call_secret)
 
-    from backend.services.engine.tasks import retrain_scheduler as rts
-    from backend.shared.training.recipe_registry import RecipeError, load_recipe
-
-    if req.window_policy is not None or req.purge_days is not None:
-        # 见 ScheduleUpdateRequest docstring：窗口策略归配方所有，调度层存了
-        # 不生效 = 静默陷阱。rolling_train.py 对本地覆写参数同样硬拒。
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "窗口策略（window_policy/purge_days）归配方所有，调度配置不支持覆写；"
-                "请修改配方后重新保存"
-            ),
-        )
-    if req.executor == "remote":
-        # 见 ScheduleUpdateRequest docstring：node_id 路由未打通，存 remote =
-        # 实际本地执行还跳过内存守卫（拆安全闸的假配置）。
-        raise HTTPException(
-            status_code=400,
-            detail="executor=remote 尚未接线（训练节点路由未打通），暂仅支持 local",
-        )
-
-    market_code = str(market or "").strip().upper()
-    if market_code not in rts.recipe_markets():
-        # 无有效配方的市场允许保存只会换来每天一条 recipe_invalid 告警
-        raise HTTPException(
-            status_code=404, detail=f"市场无有效重训配方: {market_code or market}"
-        )
-    try:
-        recipe = load_recipe(req.recipe_id)
-    except RecipeError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if str(recipe.market or "").upper() != market_code:
-        raise HTTPException(
-            status_code=400,
-            detail=f"配方 {req.recipe_id} 属 {recipe.market}，不能配置给 {market_code}",
-        )
-    saved = rts.save_schedule(market_code, req.model_dump())
-    return {"market": market_code, "schedule": saved}
+    # 用户态端点（model_rolling）共用同一实现，校验纪律见 rolling_shared
+    return apply_schedule_update(market, req)

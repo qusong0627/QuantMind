@@ -49,6 +49,7 @@ import { PublishModelModal } from './hub/PublishModelModal';
 import { DriftTabPanel } from './DriftTabPanel';
 import { MarketRegimePanel } from './MarketRegimePanel';
 import { InferenceCoveragePanel } from './InferenceCoveragePanel';
+import { ModelRollingPanel } from './ModelRollingPanel';
 import {
   buildFeatureLabelMap,
   DEFAULT_FEATURE_CATEGORIES,
@@ -702,6 +703,15 @@ export const ModelRegistryPage: React.FC = () => {
                           />
                         ),
                       }] : []),
+                      {
+                        key: 'rolling',
+                        label: (
+                          <span className="text-xs font-black uppercase tracking-widest px-1 flex items-center gap-1.5">
+                            滚动训练
+                          </span>
+                        ),
+                        children: <ModelRollingPanel model={selectedModel} />,
+                      },
                       {
                         key: 'attribution',
                         label: (

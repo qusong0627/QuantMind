@@ -35,6 +35,7 @@ from backend.services.api.market_analysis_us.router import router as market_anal
 from backend.services.api.routers.market_kline import router as market_kline_router
 from backend.services.api.routers.model_training import router as model_training_router
 from backend.services.api.routers.model_rollouts import router as model_rollouts_router
+from backend.services.api.routers.model_rolling import router as model_rolling_router
 from backend.services.api.routers.training_per_model import build_per_model_router
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.services.api.routers.news import (
@@ -434,6 +435,7 @@ app.include_router(
     model_training_router, prefix="/api/v1/models", tags=["ModelTraining"]
 )
 app.include_router(model_rollouts_router)  # 晋升流程（/api/v1/models/rollouts/*）
+app.include_router(model_rolling_router)  # 滚动训练用户态（/api/v1/models/rolling/*，P1）
 app.include_router(
     build_per_model_router(get_current_user),
     prefix="/api/v1/models",

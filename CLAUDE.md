@@ -175,6 +175,10 @@ Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运�
 - `backend/services/api/routers/news.py` - 新闻代理路由
 - `backend/services/api/routers/market_kline.py` - K 线行情路由
 - `electron/src/features/trading-agents/` - TradingAgents 前端模块（页面、组件、服务）
+- `backend/services/api/routers/model_rolling.py` + `rolling_shared.py` - 滚动训练用户态端点（JWT `/api/v1/models/rolling/*`：recipes/campaigns/schedule/dispatch/derive；调度校验与内部端点共享 `apply_schedule_update` 一份实现，前端不持内部密钥）
+- `backend/shared/training/model_recipe.py` - 模型→滚动配方派生（读模型目录 `metadata.json`+`config.yaml`；云端导入模型同路径可用；缺因子源/特征/可训练模型类型即拒派生；`deploy_to_production` 恒 False、`auto_feature_filter` 恒关）
+- `backend/shared/training/recipe_registry.py` - 滚动配方注册表（内建 + 用户配方目录 `QM_ROLLING_RECIPE_DIR`〔默认 `/data/rolling_recipes`〕双源装载；`save_user_recipe` 原子落盘、内容未变幂等）
+- `electron/src/pages/ModelRollingPanel.tsx` + `services/modelRollingService.ts` - 模型管理「滚动训练」面板（派生配方 / 手动派发 / 月度重训调度 / 滚动台账）
 - `backend/shared/tdx_aidata/` - TdxAiData 实时行情通道（worker 唯一 SDK 引入口 + 订阅引擎写 `market:snapshot`/`market:series` 标准键，P6 盘中主源；**SDK 单次订阅上限 100 只**——超限整批拒绝且只打印不抛，>100 必须分片集群 `TdxAiDataCluster`，分片数在 Redis `qm:market:tdx_aidata:config.shard_count`）
 - `backend/shared/l05_store.py` - L0.5 热集快照按日落盘（`data/l05_snapshots/date=YYYYMMDD/` + 质检 + 降冷 + 订阅写侧归档器，T-P6-04）
 - `backend/shared/freshness.py` - 行情新鲜度分级唯一谓词（fresh/stale/unavailable；阈值 env 唯一读取点，T-P6-05）
