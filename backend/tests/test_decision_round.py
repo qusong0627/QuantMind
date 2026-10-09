@@ -2722,3 +2722,31 @@ def test_modules_stay_within_the_file_budget_and_layering():
     for layer, markers in forbidden.items():
         for marker in markers:
             assert marker not in src[layer], f"{layer} 反向依赖了上层：{marker}"
+
+
+@pytest.mark.asyncio
+async def test_llm_decide_runs_off_the_event_loop_thread():
+    """to_thread 守卫（2026-10-09 14:45 trade 冻结实证）。
+
+    ``binding.decide`` 是同步阻塞 httpx（单次最长 ~120s，见 decision_llm_client
+    模块契约）。在 trade 的共享事件循环里直呼会冻结全体任务（含 ``/health``），
+    主进程监督者 3×30s 健康检查判死重启——认领键残留后该槽位后续 tick 永久
+    「已被认领（跳过）」（当日 1445 pro 轮因此整轮丢失）。必须在工作线程执行。
+    """
+    import threading
+
+    threads: list[int] = []
+    text = decisions_json({"action": "hold", "code": "600036.SH", "reason": "观望"})
+
+    def _decide(prompt, schema):
+        threads.append(threading.get_ident())
+        return attempt_from(text, schema=schema)
+
+    h = make_harness(load_llm=lambda: LLMBinding(model="fake-model", decide=_decide))
+    result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+
+    assert result.status == R.STATUS_OK
+    assert threads, "LLM 未被调用"
+    assert threads[0] != threading.get_ident(), (
+        "decide 跑在事件循环主线程——to_thread 下放缺失，阻塞即冻结 trade"
+    )

@@ -115,6 +115,7 @@ CLI / 常驻 worker：**不在这里**，见 ``decision_round_runner.py``（驱�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -522,10 +523,9 @@ async def _run_once_inner(
         per_stock_pct=per_stock_pct,
         max_new_buys=max_new_buys,
     )
-
-    # ⑧ LLM 调用（模型名与调用器同源，见 LLMBinding）
+    # ⑧ LLM 调用（模型名与调用器同源，见 LLMBinding）：decide 同步阻塞 httpx（最长 ~120s），必须 to_thread
     prompt = render_prompt(context)
-    attempt = binding.decide(prompt, slot.schema)
+    attempt = await asyncio.to_thread(binding.decide, prompt, slot.schema)
     if not getattr(attempt, "ok", False):
         # 没出决策：**不写审计行、不置 done 键**（补跑槽还能再来一次），只留状态。
         reason = str(getattr(attempt, "error_text", lambda: "")() or "")
