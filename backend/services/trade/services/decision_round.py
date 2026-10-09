@@ -579,7 +579,7 @@ async def _run_once_inner(
                 # 否决——本可成交的腿变成一条否决记录。取更紧的那个之后，vcash 闸退回
                 # 它真正的职责：``per_stock_pct`` 未配置（=不夹取）时的最后一道兜底。
                 quota=min(quota_total - quota_used, virtual_cash),
-                new_buys_round=max_new_buys,
+                new_buys_round=0,  # 本轮已产生数：单轮一次规划＝0；别传档位上限（会全否）
                 inflight=inflight,
                 agent=agent,
                 real=mode == "real",

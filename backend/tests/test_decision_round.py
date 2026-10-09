@@ -848,7 +848,11 @@ async def test_run_once_happy_path_wires_round_quota_and_audit():
     assert sent["round_id"] == "rnd-20260924-0935"  # 进腿幂等键的 round 段
     # 额度：额度三数同源 ⇒ 剩余额度 ≡ 可用现金，逐元一致
     assert sent["quota"] == 50000.0
-    assert sent["new_buys_round"] == 2  # 档位 max_new_buys 覆盖上下文默认 3
+    # ``new_buys_round`` 是「本轮**已**产生的新开仓数」：单轮一次规划，调用前必为 0，
+    # 计数在 ``_Plan`` 内过闸自增。把档位上限本身传进来 = 首单即 ``used >= cap``，
+    # **每一笔**新开仓都被「已达上限」全否（2026-10-09 实盘 13:00 轮 legs=0 实锤）。
+    assert sent["new_buys_round"] == 0
+    assert sent["gate"].max_new_buys_round == 2  # 档位 max_new_buys 覆盖上下文默认 3
     assert sent["agent"] == "fake-model"  # 模型名进幂等键
     assert sent["real"] is False and sent["submitter"] is None  # 时段内、模拟模式
     assert sent["inflight"] is None  # 时段内发单 → 在途账由 run_round 自己读
