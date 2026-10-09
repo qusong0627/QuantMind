@@ -46,6 +46,9 @@ exchange-calendars>=4.5.0
 reportlab>=4.0.0
 openpyxl>=3.1.0
 matplotlib>=3.8.0
+# 文档挖掘链图片转码（webp/gif/bmp/tiff/avif → PNG，alpha_agent_docs.py）
+# 显式直依赖：此前只是 matplotlib/reportlab 的传递依赖，被裁掉会静默降级
+Pillow>=10.0.0
 
 # 系统与监控
 prometheus_client

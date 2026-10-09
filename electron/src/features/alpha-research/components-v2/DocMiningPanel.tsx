@@ -29,6 +29,7 @@ import {
   DOC_MAX_TOTAL_UPLOAD_BYTES,
   DOC_MAX_UPLOAD_BYTES,
   DOC_STATUS_LABELS,
+  DOC_UNSUPPORTED_IMAGE_EXTS,
   DOC_UPLOAD_ACCEPT,
   ORGANIZE_KIND_LABELS,
   extractDetail,
@@ -231,6 +232,13 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
         const ext = f.name.includes('.')
           ? `.${f.name.split('.').pop()!.toLowerCase()}`
           : '';
+        if (DOC_UNSUPPORTED_IMAGE_EXTS.includes(ext)) {
+          // iPhone 默认格式：先于白名单单独引导（给可执行的动作，不是干巴巴拒绝）
+          setError(
+            `「${f.name}」是 HEIC 照片（iPhone 默认格式），暂不能直接解析：请在「导出/另存为」里选 JPG 或 PNG 后再上传`,
+          );
+          return;
+        }
         if (!DOC_UPLOAD_ACCEPT.split(',').includes(ext)) {
           setError(
             `「${f.name}」不支持的文件类型 ${ext || '（无后缀）'}：仅支持 PDF / Word / PPT / 图片`,
@@ -463,7 +471,8 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
                     点击选择文件，或拖入此区域
                   </span>
                   <span className="text-[11px] text-slate-500">
-                    支持 PDF / Word（doc、docx）/ PPT（ppt、pptx）/ 图片（png、jpg），单文件 ≤ 200MB / 200 页；
+                    支持 PDF / Word（doc、docx）/ PPT（ppt、pptx）/ 图片（png、jpg、webp、gif、bmp、tif、avif；
+                    webp 等自动转 PNG，HEIC 请先转 JPG/PNG），单文件 ≤ 200MB / 200 页；
                     可多选一次上传（正文+附录、多图自动合并解析，合计 ≤ 200MB）
                   </span>
                 </>

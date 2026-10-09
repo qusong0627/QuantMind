@@ -153,6 +153,18 @@ describe('上传闸：白名单与大小在前端先拦（省一次白传）', (
     expect(uploadDocsMock).not.toHaveBeenCalled();
   });
 
+  test('HEIC 单独引导（可执行动作），不发请求', async () => {
+    const { input } = renderPanel();
+    await flush();
+
+    fireEvent.change(input, { target: { files: [mkFile('IMG_0001.HEIC')] } });
+    await flush();
+
+    expect(screen.getByText(/HEIC 照片（iPhone 默认格式）/)).toBeTruthy();
+    expect(screen.getByText(/另存为.*JPG 或 PNG/)).toBeTruthy();
+    expect(uploadDocsMock).not.toHaveBeenCalled();
+  });
+
   test('超过 200MB 显式报错，不发请求', async () => {
     const { input } = renderPanel();
     await flush();

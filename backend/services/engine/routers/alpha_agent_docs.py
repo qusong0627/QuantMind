@@ -15,7 +15,14 @@
 - 文件名：拒绝一切路径分隔符（含 Windows ``\\``——posix 的 ``Path().name``
   不会剥它）、隐藏名、超长名、**控制/格式字符**（``Cc/Cf``：换行伪造日志、
   bidi/零宽伪装，安全审查 L3）；
-- 扩展名白名单 + **magic 字节**双验（防「改名成 .pdf 的可执行文件」）；
+- **内容定形三分法**（改名/异格式真图片不该被拒，可执行文件仍必须被拒）：
+  ``sniff_content_type`` 读首 ≤16 字节判内容类型 → ①直通族（pdf/png/jpeg，
+  含改名）按**内容**定扩展名落盘（改名 png 存成 ``original.png``）；②转码族
+  （webp/gif/bmp/tiff/avif）Pillow 解首帧压制为 PNG 后入库（MinerU 只吃
+  png/jpg/jpeg；复用键按转码后字节重算）；③容器族（zip/OLE）声称扩展名
+  必须与容器同族（docx/pptx、doc/ppt），否则 400；HEIC 一律可读 400 引导
+  转 JPG/PNG（容器无 heif 解码器）；其余未知内容 400（防「改名成 .pdf 的
+  可执行文件」）。落盘仍按定型后的 ``STORAGE_MAGIC`` 复验一遍 magic；
 - 大小**两道闸**（安全审查 C1）：handler 里先从 ``request.stream()`` 拿不到
   就拒——先用 ``Content-Length`` 粗拦（缺头 411：不支持 chunked），再分块
   计数精验（不信任声明值）。**不能**用 ``file: UploadFile = File(...)`` 参数：
@@ -165,17 +172,60 @@ ORGANIZE_LOCK_TTL_S = 1800
 
 MAX_FILENAME_CHARS = 200
 
-#: 扩展名 → magic 头（小写比较）。office 两族：docx/pptx 是 zip，doc/ppt 是 OLE。
-ALLOWED_EXTENSIONS: dict[str, bytes] = {
-    ".pdf": b"%pdf-",
-    ".png": b"\x89png\r\n\x1a\n",
-    ".jpg": b"\xff\xd8\xff",
-    ".jpeg": b"\xff\xd8\xff",
-    ".docx": b"pk\x03\x04",
-    ".pptx": b"pk\x03\x04",
-    ".doc": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
-    ".ppt": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+#: 文件名层接受的扩展名：8 个基准族 + 服务端可转 PNG 的图片族（webp/gif/bmp/
+#: tiff/avif）。内容层再由嗅探收口（纠正 / 转码 / 拒绝），见
+#: ``resolve_upload_content``；HEIC 在文件名层单独给「请转换」文案。
+ACCEPTED_EXTENSIONS = frozenset(
+    {
+        ".pdf",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".docx",
+        ".pptx",
+        ".doc",
+        ".ppt",
+        ".webp",
+        ".gif",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".avif",
+    }
+)
+
+#: 直存族：内容自证身份，落盘扩展名以**实际内容**为准——声明 .jpg 实为 PNG
+#: 是改名不是攻击，纠正尾缀后照常解析。
+DIRECT_SNIFF_EXTS = frozenset({".pdf", ".png", ".jpeg"})
+
+#: 转码族：MinerU 云端/本地都只吃 png/jpg/jpeg——服务端解首帧转 PNG 再进链。
+IMAGE_TRANSCODE_EXTS = frozenset({".webp", ".gif", ".bmp", ".tiff", ".avif"})
+
+#: 图片转码读入内存的保护上限：超限让用户先压缩，不硬扛 RAM。
+IMAGE_TRANSCODE_MAX_BYTES = 64 * 1024 * 1024
+
+#: 落盘前首字节复查（小写比较；嗅探刚验过，这是防呆双保险）。avif 的 ftyp
+#: 不在首字节、无法用前缀表达——留空 = 不再复查（以嗅探为准）。
+STORAGE_MAGIC: dict[str, tuple[bytes, ...]] = {
+    ".pdf": (b"%pdf-",),
+    ".png": (b"\x89png\r\n\x1a\n",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".gif": (b"gif87a", b"gif89a"),
+    ".webp": (b"riff",),
+    ".bmp": (b"bm",),
+    ".tiff": (b"ii*\x00", b"mm\x00*"),
+    ".avif": (),
+    ".docx": (b"pk\x03\x04",),
+    ".pptx": (b"pk\x03\x04",),
+    ".doc": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
+    ".ppt": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
 }
+
+#: HEIC/HEIF：可识别、不可直接解析（Pillow 无 HEIF 解码）——文件名层直接拦
+_HEIC_EXTS = frozenset({".heic", ".heif"})
+
+#: 嗅探读取的头部字节数：ftyp 品牌在 4..12，16 足够覆盖全部签名
+_SNIFF_HEAD_BYTES = 16
 
 #: 预览白名单：扩展名 → media type（解析产物目录里只会出现这些）
 PREVIEW_MEDIA_TYPES: dict[str, str] = {
@@ -236,13 +286,106 @@ def sanitize_upload_filename(raw: str | None) -> str:
     if name.startswith("."):
         raise HTTPException(status_code=400, detail="非法文件名")
     ext = PurePosixPath(name).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        supported = "、".join(sorted(ALLOWED_EXTENSIONS))
+    if ext in _HEIC_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "HEIC 照片（iPhone 默认格式）暂不支持直接解析："
+                "请在导出/另存时选择 JPG 或 PNG 后再上传"
+            ),
+        )
+    if ext not in ACCEPTED_EXTENSIONS:
+        supported = "、".join(sorted(ACCEPTED_EXTENSIONS))
         raise HTTPException(
             status_code=400,
             detail=f"不支持的文件类型 {ext or '（无扩展名）'}，支持：{supported}",
         )
     return name
+
+
+#: ftyp 品牌 → HEIC/HEIF 族（mif1/msf1 是通用 HEIF 品牌，同样只能走转换）
+_HEIC_BRANDS = frozenset(
+    {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1"}
+)
+_AVIF_BRANDS = frozenset({b"avif", b"avis"})
+
+
+def sniff_content_type(head: bytes) -> str | None:
+    """文件头（≤16 字节）→ 实际内容类型的规范扩展名；无法识别回 None。
+
+    顺序即优先级。zip/OLE 是**同族容器**（docx vs pptx、doc vs ppt 内容上
+    无从分辨），返回容器标记，由 ``resolve_upload_content`` 按声明扩展名
+    定形。判定只依赖前 16 字节，绝不读满文件。
+    """
+    if head[:5].lower() == b"%pdf-":
+        return ".pdf"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    if head.startswith(b"BM"):
+        return ".bmp"
+    if head.startswith((b"II*\x00", b"MM\x00*")):
+        return ".tiff"
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in _HEIC_BRANDS:
+            return ".heic"
+        if brand in _AVIF_BRANDS:
+            return ".avif"
+    if head.startswith(b"PK\x03\x04"):
+        return ".zip"
+    if head.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return ".ole"
+    return None
+
+
+def resolve_upload_content(sniffed: str | None, claimed_ext: str) -> str:
+    """（实际内容, 声明扩展名）→ 落盘扩展名；不可直接解析抛 400 可读报错。
+
+    内容即真相：声明尾缀只在「内容无从分辨」的容器族（zip/OLE）里参与
+    定形，其余以嗅探结果为准。
+    """
+    if sniffed is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"无法识别的文件内容（声明为 {claimed_ext or '无后缀'}）："
+                "请上传 PDF、PNG/JPG 图片或 Word/PPT 文档"
+            ),
+        )
+    if sniffed in DIRECT_SNIFF_EXTS or sniffed in IMAGE_TRANSCODE_EXTS:
+        return sniffed
+    if sniffed == ".zip":
+        if claimed_ext in (".docx", ".pptx"):
+            return claimed_ext
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件内容实为 Office 压缩包（docx/pptx），与扩展名 {claimed_ext} 不符",
+        )
+    if sniffed == ".ole":
+        if claimed_ext in (".doc", ".ppt"):
+            return claimed_ext
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件内容实为旧版 Office 文档（doc/ppt），与扩展名 {claimed_ext} 不符",
+        )
+    if sniffed == ".heic":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "文件实为 HEIC 照片（iPhone 默认格式），暂不支持直接解析："
+                "请在导出/另存时选择 JPG 或 PNG 后再上传"
+            ),
+        )
+    raise HTTPException(  # 防御：嗅探表新增类型忘了归族时显形
+        status_code=400,
+        detail=f"暂不支持的文件内容类型（{sniffed}）",
+    )
 
 
 def _env_mb(name: str, default_mb: int) -> int:
@@ -307,20 +450,21 @@ def _enforce_upload_content_length(request: Request) -> None:
 
 
 async def _stream_to_disk(
-    file: UploadFile, dest: Path, *, max_bytes: int, magic: bytes
+    file: UploadFile, dest: Path, *, max_bytes: int, magics: tuple[bytes, ...]
 ) -> tuple[int, str]:
-    """分块落盘 + sha256 边写边算 + magic 首验；超限抛 413、伪装抛 400。
+    """分块落盘 + sha256 边写边算 + 首字节复查；超限抛 413、不符抛 400。
 
     计数是唯一权威（不信 Content-Length）：分段读到超过 max_bytes 立即抛。
-    调用方负责清理半成品（异常路径 rmtree 整个文档目录）。
+    调用方负责清理半成品（异常路径 rmtree 整个文档目录）。``magics`` 为空
+    元组 = 跳过复查（嗅探阶段已定性、签名不在首字节的格式，如 avif）。
     """
     max_mb = max_bytes // (1024 * 1024)
     hasher = hashlib.sha256()
     with dest.open("wb") as fh:
-        head = await file.read(len(magic))
-        if not head or not head.lower().startswith(magic):
+        head = await file.read(_SNIFF_HEAD_BYTES)
+        if magics and (not head or not any(head.lower().startswith(m) for m in magics)):
             raise HTTPException(
-                status_code=400, detail="文件内容与扩展名不符（magic 校验失败）"
+                status_code=400, detail="文件内容与声明类型不符（落盘复查失败）"
             )
         fh.write(head)
         hasher.update(head)
@@ -349,6 +493,67 @@ def _composite_sha256(pairs: list[tuple[str, str]]) -> str:
     return hasher.hexdigest()
 
 
+async def _sniff_upload_ext(file: UploadFile) -> str | None:
+    """读流首 ≤16 字节嗅探内容类型；读完归位——落盘仍从头开始。"""
+    head = await file.read(_SNIFF_HEAD_BYTES)
+    await file.seek(0)
+    return sniff_content_type(head)
+
+
+def _sha256_file(path: Path) -> str:
+    """文件字节 sha256（分块读；转码件重算复用键用）。"""
+    hasher = hashlib.sha256()
+    with path.open("rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _convert_image_to_png_blocking(src: Path) -> None:
+    """就地转码：解首帧 → 同目录同名 .png（透明底压白，避免 α 丢成黑底）。
+
+    动图（GIF/WebP）只取首帧——挖掘链吃的是版面内容，帧序列无意义。
+    """
+    from PIL import Image
+
+    with Image.open(src) as im:
+        im.seek(0)
+        if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+            rgba = im.convert("RGBA")
+            flat = Image.new("RGB", rgba.size, (255, 255, 255))
+            flat.paste(rgba, mask=rgba.split()[-1])
+            out = flat
+        elif im.mode == "RGB":
+            out = im.copy()
+        else:
+            out = im.convert("RGB")
+        out.save(src.with_suffix(".png"), "PNG")
+
+
+async def _transcode_image_to_png(src: Path) -> Path:
+    """转码族落盘后 → PNG（返回新路径，原文件删除）。失败一律 400 可读报错。"""
+    if src.stat().st_size > IMAGE_TRANSCODE_MAX_BYTES:
+        max_mb = IMAGE_TRANSCODE_MAX_BYTES // (1024 * 1024)
+        raise HTTPException(
+            status_code=400,
+            detail=f"图片过大（>{max_mb}MB），请压缩或先转为 PNG/JPG 再上传",
+        )
+    try:
+        await asyncio.to_thread(_convert_image_to_png_blocking, src)
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="服务器缺少图片转换组件，请先将图片转为 PNG/JPG 再上传",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 —— 解码坏件是用户可修 400，不是 500
+        raise HTTPException(
+            status_code=400, detail="图片解码失败（文件可能损坏），请转换后重试"
+        ) from exc
+    png_path = src.with_suffix(".png")
+    src.unlink(missing_ok=True)
+    return png_path
+
+
 async def _store_uploaded_files(
     files: list[UploadFile],
     filenames: list[str],
@@ -357,41 +562,41 @@ async def _store_uploaded_files(
 ) -> tuple[list[dict[str, str]], list[int], str]:
     """单/多文件落盘 → (部件清单, 各部件字节数, 复用键 sha256)。
 
-    - 单文件：``original{ext}``（历史逐字节同路径），sha256 = 内容哈希；
+    逐件先嗅探内容定形（改名纠尾缀 / webp 等转 PNG / HEIC 拒绝），再流式落盘：
+    - 单文件：``original{ext}``（ext = 定型后的扩展名）；
     - 多文件：``originals/p{i}{ext}``（i 从 1 起，与 MinerU 部件序号对齐），
-      逐件精验单文件上限、累计精验合计上限，复用键 = 复合 sha256。
+      逐件精验单文件上限、累计精验合计上限，复用键 = 复合 sha256（转码件按
+      转码后字节哈希——复用键跟着真正进解析链的那份内容走）。
 
     任何异常（含 413/400）由调用方 rmtree 整个文档目录。
     """
-    if len(files) == 1:
-        dest = doc_dir / f"original{exts[0]}"
-        size, sha256 = await _stream_to_disk(
-            files[0],
-            dest,
-            max_bytes=max_upload_bytes(),
-            magic=ALLOWED_EXTENSIONS[exts[0]],
-        )
-        return (
-            [{"path": str(dest), "name": filenames[0], "ext": exts[0]}],
-            [size],
-            sha256,
-        )
-
+    multi = len(files) > 1
     originals_dir = doc_dir / "originals"
-    originals_dir.mkdir(parents=True, exist_ok=True)
+    if multi:
+        originals_dir.mkdir(parents=True, exist_ok=True)
     total_cap = max_total_upload_bytes()
     manifest: list[dict[str, str]] = []
     sizes: list[int] = []
     pairs: list[tuple[str, str]] = []
     total = 0
     # filenames/exts 由 files 逐件推导，三列表天然同长
-    for idx, (file, name, ext) in enumerate(
+    for idx, (file, name, claimed_ext) in enumerate(
         zip(files, filenames, exts, strict=True), 1
     ):
-        dest = originals_dir / f"p{idx}{ext}"
+        sniffed = await _sniff_upload_ext(file)
+        ext = resolve_upload_content(sniffed, claimed_ext)
+        if multi:
+            dest = originals_dir / f"p{idx}{ext}"
+        else:
+            dest = doc_dir / f"original{ext}"
         size, sha256 = await _stream_to_disk(
-            file, dest, max_bytes=max_upload_bytes(), magic=ALLOWED_EXTENSIONS[ext]
+            file, dest, max_bytes=max_upload_bytes(), magics=STORAGE_MAGIC[ext]
         )
+        if ext in IMAGE_TRANSCODE_EXTS:
+            dest = await _transcode_image_to_png(dest)
+            ext = ".png"
+            size = dest.stat().st_size
+            sha256 = await asyncio.to_thread(_sha256_file, dest)
         total += size
         if total > total_cap:
             max_mb = total_cap // (1024 * 1024)
@@ -401,7 +606,10 @@ async def _store_uploaded_files(
         manifest.append({"path": str(dest), "name": name, "ext": ext})
         sizes.append(size)
         pairs.append((name, sha256))
-    return manifest, sizes, _composite_sha256(pairs)
+    if multi:
+        return manifest, sizes, _composite_sha256(pairs)
+    # 单文件沿用历史口径：复用键 = 该文件字节 sha256（转码件即转码后字节）
+    return manifest, sizes, pairs[0][1]
 
 
 async def _estimate_pages(path: Path, ext: str, size: int) -> int:
@@ -574,7 +782,8 @@ async def upload_doc(request: Request) -> dict:
         logger.exception("[docs] 上传落盘失败 doc=%s", doc_id)
         raise HTTPException(status_code=500, detail="上传写入失败，请重试") from exc
     size = sum(sizes)
-    ext = exts[0]
+    # 以部件清单里的定型扩展名建行（改名纠尾缀 / webp 转 PNG 后 ext 可能已变）
+    ext = parts[0]["ext"]
 
     # L5：建行/复用抛错时已落盘的原件不许变成孤儿（≤ 合计上限）。
     try:

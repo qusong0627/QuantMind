@@ -320,6 +320,25 @@ def _upload_many(
 PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF\n"
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 DOCX_BYTES = b"PK\x03\x04" + b"\x00" * 32
+JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01" + b"\x00" * 16
+#: 未识别内容（防改名可执行文件的正样本）：任何嗅探表都不命中
+ELF_BYTES = b"\x7fELF\x02\x01\x01" + b"\x00" * 16
+#: HEIC 头（ftypheic）—— 可识别但不可直接解析
+HEIC_BYTES = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00" + b"\x00" * 16
+
+
+def _pillow_bytes(fmt: str, *, size: tuple[int, int] = (4, 4)) -> bytes:
+    """用 Pillow 生成真实可解码的图片字节（转码测试必须真图，magic 桩不够）。"""
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover —— 环境缺 Pillow 时跳过该格式
+        pytest.skip("Pillow 不在本环境")
+    buf = io.BytesIO()
+    try:
+        Image.new("RGB", size, (200, 30, 30)).save(buf, fmt)
+    except Exception as exc:  # pragma: no cover —— Pillow 构建不支持该格式
+        pytest.skip(f"Pillow 不支持 {fmt}: {exc}")
+    return buf.getvalue()
 
 
 def _blank_pdf_bytes(pages: int = 3) -> bytes:
@@ -679,18 +698,204 @@ async def test_upload_rate_limited_429_before_any_io(
 
 
 @pytest.mark.asyncio
-async def test_upload_rejects_magic_mismatch_and_cleans_dir(
+async def test_upload_rejects_unknown_content_and_cleans_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """防改名可执行文件：内容任何嗅探都不命中 → 400，不留垃圾目录。"""
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.upload_doc(request=_upload(ELF_BYTES, "fake.pdf"))
+    assert ei.value.status_code == 400
+    assert "无法识别" in str(ei.value.detail)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("head", "expected"),
+    [
+        (b"%PDF-1.4\n", ".pdf"),
+        (b"%pdf-1.4\n", ".pdf"),  # 大小写不敏感
+        (b"\x89PNG\r\n\x1a\n\x00\x00", ".png"),
+        (b"\xff\xd8\xff\xe0\x00\x10", ".jpeg"),
+        (b"GIF87a\x00", ".gif"),
+        (b"GIF89a\x00", ".gif"),
+        (b"RIFF\x24\x00\x00\x00WEBPVP8 ", ".webp"),
+        (b"BM\x36\x00\x00\x00", ".bmp"),
+        (b"II*\x00\x10\x00\x00\x00", ".tiff"),
+        (b"MM\x00*\x00\x00\x00\x10", ".tiff"),
+        (b"\x00\x00\x00\x18ftypheic\x00\x00", ".heic"),
+        (b"\x00\x00\x00\x18ftypmif1\x00\x00", ".heic"),
+        (b"\x00\x00\x00\x18ftypavif\x00\x00", ".avif"),
+        (b"PK\x03\x04\x14\x00", ".zip"),
+        (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", ".ole"),
+        (b"RIFF\x24\x00\x00\x00WAVEfmt ", None),  # RIFF 但不是 WEBP
+        (ELF_BYTES, None),
+        (b"", None),
+    ],
+)
+def test_sniff_content_type(head: bytes, expected: str | None) -> None:
+    assert docs_mod.sniff_content_type(head) == expected
+
+
+@pytest.mark.asyncio
+async def test_upload_renamed_png_as_jpg_corrects_ext_and_parses(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """内容即真相：PNG 内容声明 .jpg —— 以实际内容落盘（original.png），照常解析。"""
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    quota = FakeQuota()
+    _wire(monkeypatch, store, svc, quota)
+
+    out = await docs_mod.upload_doc(request=_upload(PNG_BYTES, "照片.jpg"))
+
+    doc = out["data"]["doc"]
+    assert out["code"] == 200 and out["data"]["reused"] is False
+    assert doc["ext"] == ".png"
+    assert store.created[0]["ext"] == ".png"
+    doc_dir = tmp_path / doc["doc_id"]
+    assert (doc_dir / "original.png").read_bytes() == PNG_BYTES
+    assert not (doc_dir / "original.jpg").exists(), "声明尾缀不留残影"
+    assert len(svc.submitted) == 1
+    assert quota.guards == [("u-1", 1)], "转正后按图片 1 页预估"
+
+
+@pytest.mark.asyncio
+async def test_upload_renamed_jpeg_as_png_corrects_ext(
     monkeypatch, tmp_path: Path
 ) -> None:
     store = FakeStore()
     svc = FakeParseService(tmp_path, store=store)
     _wire(monkeypatch, store, svc, FakeQuota())
 
+    out = await docs_mod.upload_doc(request=_upload(JPEG_BYTES, "scan.png"))
+    doc = out["data"]["doc"]
+    assert doc["ext"] == ".jpeg"
+    assert (tmp_path / doc["doc_id"] / "original.jpeg").read_bytes() == JPEG_BYTES
+
+
+@pytest.mark.parametrize(
+    ("fmt", "filename"), [("WEBP", "图.webp"), ("GIF", "动图.gif")]
+)
+@pytest.mark.asyncio
+async def test_upload_native_transcode_formats_to_png(
+    monkeypatch, tmp_path: Path, fmt: str, filename: str
+) -> None:
+    """WebP/GIF 等 MinerU 直吃不下的格式：服务端解首帧转 PNG 再提交。
+
+    文件行 sha256 必须是**转码后**字节的哈希——复用键跟着真正入解析链的
+    那份内容走，否则同图重传既不复用也无法对账。
+    """
+    data = _pillow_bytes(fmt)
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    quota = FakeQuota()
+    _wire(monkeypatch, store, svc, quota)
+
+    out = await docs_mod.upload_doc(request=_upload(data, filename))
+
+    doc = out["data"]["doc"]
+    assert out["code"] == 200
+    assert doc["ext"] == ".png" and store.created[0]["ext"] == ".png"
+    doc_dir = tmp_path / doc["doc_id"]
+    png_path = doc_dir / "original.png"
+    png_bytes = png_path.read_bytes()
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert png_path.with_suffix(f".{fmt.lower()}").exists() is False
+    from PIL import Image
+
+    with Image.open(io.BytesIO(png_bytes)) as im:
+        assert im.size == (4, 4)
+    assert store.created[0]["sha256"] == hashlib.sha256(png_bytes).hexdigest()
+    assert quota.guards == [("u-1", 1)]
+
+
+@pytest.mark.asyncio
+async def test_upload_renamed_webp_as_jpg_transcoded_to_png(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """用户实测形状：WebP 内容顶着 .jpg 名字 —— 转码 + 纠尾缀，一条链走通。"""
+    data = _pillow_bytes("WEBP")
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+
+    out = await docs_mod.upload_doc(request=_upload(data, "截屏 2026.jpg"))
+    doc = out["data"]["doc"]
+    assert out["code"] == 200
+    assert doc["ext"] == ".png"
+    assert (
+        (tmp_path / doc["doc_id"] / "original.png")
+        .read_bytes()
+        .startswith(b"\x89PNG\r\n\x1a\n")
+    )
+
+
+@pytest.mark.parametrize("filename", ["IMG_0001.jpg", "IMG_0001.heic"])
+@pytest.mark.asyncio
+async def test_upload_heic_rejected_with_actionable_message(
+    monkeypatch, tmp_path: Path, filename: str
+) -> None:
+    """HEIC 可识别但不可直接解析：给出「导出为 PNG/JPG」的可操作报错，不留垃圾。"""
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+
     with pytest.raises(HTTPException) as ei:
-        await docs_mod.upload_doc(request=_upload(PNG_BYTES, "fake.pdf"))
+        await docs_mod.upload_doc(request=_upload(HEIC_BYTES, filename))
+    detail = str(ei.value.detail)
     assert ei.value.status_code == 400
-    assert "magic" in str(ei.value.detail)
-    assert list(tmp_path.iterdir()) == []
+    assert "HEIC" in detail and "PNG" in detail
+    assert store.created == [] and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_office_zip_renamed_pdf_rejected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """zip 内容顶着 .pdf：容器族只能靠声明定形，声明不符一律拒绝（防换头）。"""
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.upload_doc(request=_upload(DOCX_BYTES, "paper.pdf"))
+    assert ei.value.status_code == 400
+    assert "不符" in str(ei.value.detail)
+    assert store.created == [] and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_multi_renamed_parts_correct_ext_and_hash_stored_bytes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """多文件逐件纠尾缀/转码；复用键按转码后字节算（逐件对齐）。"""
+    webp = _pillow_bytes("WEBP")
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+
+    out = await docs_mod.upload_doc(
+        request=_upload_many([(PNG_BYTES, "正文.jpg"), (webp, "附录.png")])
+    )
+    doc = out["data"]["doc"]
+    assert out["code"] == 200 and doc["ext"] == ".png"
+    doc_dir = tmp_path / doc["doc_id"]
+    p1 = doc_dir / "originals" / "p1.png"
+    p2 = doc_dir / "originals" / "p2.png"
+    assert p1.read_bytes() == PNG_BYTES
+    assert p2.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    manifest = store.created[0]["original_paths"]
+    assert [p["ext"] for p in manifest] == [".png", ".png"]
+    assert [p["name"] for p in manifest] == ["正文.jpg", "附录.png"]
+    expected = hashlib.sha256()
+    for name, path in (("正文.jpg", p1), ("附录.png", p2)):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        expected.update(f"{name}\0{digest}\0".encode())
+    assert store.created[0]["sha256"] == expected.hexdigest()
 
 
 @pytest.mark.asyncio
@@ -906,16 +1111,16 @@ async def test_upload_multi_total_size_over_cap_413_cleans_dir(
 async def test_upload_multi_magic_failure_midway_cleans_everything(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """第二件 magic 不符：第一件已落盘也要连根清（不留半批孤儿）。"""
+    """第二件内容不可识别：第一件已落盘也要连根清（不留半批孤儿）。"""
     store = FakeStore()
     svc = FakeParseService(tmp_path, store=store)
     _wire(monkeypatch, store, svc, FakeQuota())
 
     with pytest.raises(HTTPException) as ei:
         await docs_mod.upload_doc(
-            request=_upload_many([(PDF_BYTES, "ok.pdf"), (PNG_BYTES, "fake.pdf")])
+            request=_upload_many([(PDF_BYTES, "ok.pdf"), (ELF_BYTES, "fake.pdf")])
         )
-    assert ei.value.status_code == 400 and "magic" in str(ei.value.detail)
+    assert ei.value.status_code == 400 and "无法识别" in str(ei.value.detail)
     assert store.created == [] and list(tmp_path.iterdir()) == []
 
 

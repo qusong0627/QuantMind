@@ -28,6 +28,7 @@ import {
   DOC_MAX_FILES,
   DOC_MAX_TOTAL_UPLOAD_BYTES,
   DOC_MAX_UPLOAD_BYTES,
+  DOC_UNSUPPORTED_IMAGE_EXTS,
   DOC_UPLOAD_ACCEPT,
   deleteDoc,
   extractDetail,
@@ -70,10 +71,21 @@ describe('常量：与后端同字面量', () => {
     expect(DOC_MAX_FILES).toBe(20);
   });
 
-  test('扩展名白名单覆盖后端 ALLOWED_EXTENSIONS', () => {
-    for (const ext of ['.pdf', '.png', '.jpg', '.jpeg', '.docx', '.pptx', '.doc', '.ppt']) {
+  test('扩展名白名单覆盖后端 ACCEPTED_EXTENSIONS', () => {
+    for (const ext of [
+      '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.avif',
+      '.docx', '.pptx', '.doc', '.ppt',
+    ]) {
       expect(DOC_UPLOAD_ACCEPT.split(',')).toContain(ext);
     }
+  });
+
+  test('HEIC 不在接受词表（后端无解码器），走单独引导常量', () => {
+    for (const ext of DOC_UNSUPPORTED_IMAGE_EXTS) {
+      expect(DOC_UPLOAD_ACCEPT.split(',')).not.toContain(ext);
+    }
+    expect(DOC_UNSUPPORTED_IMAGE_EXTS).toContain('.heic');
+    expect(DOC_UNSUPPORTED_IMAGE_EXTS).toContain('.heif');
   });
 });
 

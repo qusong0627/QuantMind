@@ -14,8 +14,16 @@ import { apiClient } from '../../../services/aiStrategyClients';
 
 // ========================== 常量 ==========================
 
-/** 与后端 `ALLOWED_EXTENSIONS`（alpha_agent_docs.py）同词表，改一处必须改两处。 */
-export const DOC_UPLOAD_ACCEPT = '.pdf,.png,.jpg,.jpeg,.docx,.pptx,.doc,.ppt';
+/**
+ * 与后端 `ACCEPTED_EXTENSIONS`（alpha_agent_docs.py）同词表，改一处必须改两处。
+ * webp/gif/bmp/tif/tiff/avif 后端会转码成 PNG 再入库（改名图片按内容纠尾缀）；
+ * heic/heif 故意不在词表（容器无解码器）：面板对它们走专门的可读引导文案。
+ */
+export const DOC_UPLOAD_ACCEPT =
+  '.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.docx,.pptx,.doc,.ppt';
+
+/** 明知后端无法解码、需单独引导的扩展名（iPhone 默认 HEIC 照片）。 */
+export const DOC_UNSUPPORTED_IMAGE_EXTS = ['.heic', '.heif'];
 
 /** 与后端 `MAX_SUBMIT_DIRECTION_CHARS`（routers/alpha_agent.py）同字面量。 */
 export const DOC_MAX_DIRECTION_CHARS = 8000;

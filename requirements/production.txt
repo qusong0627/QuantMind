@@ -60,6 +60,8 @@ psutil>=5.9.0
 reportlab>=4.0.0
 openpyxl>=3.1.0
 matplotlib>=3.8.0
+# 文档挖掘链图片转码（webp/gif/bmp/tiff/avif → PNG，alpha_agent_docs.py）
+Pillow>=10.0.0
 
 # ============ Trade Calendar ============
 exchange-calendars>=4.5.0
