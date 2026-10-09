@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Sparkles, Bot, Database, BarChart3, ArrowRight, Zap,
   Layers, CheckCircle2, TrendingUp, Shield, Activity, Cpu,
-  Loader2, Square, MessageSquareText, FileUp
+  Loader2, Square, MessageSquareText, FileUp, AlertCircle
 } from 'lucide-react';
 import { ChatInput } from '../components-v2/ChatInput';
 import { DocMiningPanel } from '../components-v2/DocMiningPanel';
@@ -11,7 +11,7 @@ import type { PageId } from '../components-v2/layout/Layout';
 import { useTaskContext } from '../context-v2/TaskContext';
 import { getDataSummary } from '../services-v2/api';
 import { isDocMiningEnabled } from '../../../config/docMiningFlags';
-import type { DataSummary, DocMiningResume, MiningRetryDraft } from '../types-v2';
+import type { DataSummary, DocMiningResume, MiningRetryDraft, Task } from '../types-v2';
 
 interface HomePageProps {
   onNavigate?: (page: PageId) => void;
@@ -28,13 +28,22 @@ const PRESET_PROMPTS = [
   '基于多周期均线发散度与流动性溢价挖掘中短线稳健因子',
 ];
 
+/** 任务行标题：新建任务带 config.userInput（方向原文）；兜底用进度消息 */
+function taskDirectionLabel(task: Task): string {
+  const dir = task.config?.userInput?.trim();
+  return dir || task.progress?.message || '挖掘任务';
+}
+
 export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docResume }) => {
   const {
     backendAvailable,
-    miningTask: task,
+    miningTasks,
     miningStarting,
+    miningStartError,
+    dismissMiningStartError,
     startMining,
     stopMining,
+    focusMiningTask,
   } = useTaskContext();
 
   const [dataSummary, setDataSummary] = useState<DataSummary | null>(null);
@@ -43,13 +52,13 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
   const docsEnabled = isDocMiningEnabled();
   const [inputMode, setInputMode] = useState<'text' | 'doc'>('text');
 
-  // 任务激活 = 正在提交（POST /evolve 进行中）或后端任务运行中
-  const taskActive = miningStarting || task?.status === 'running';
+  // 运行中的任务（多任务并行、相互独立）：逐行展示、逐行可停可查看
+  const runningTasks = miningTasks.filter((t) => t.status === 'running');
 
   // 「AI 因子挖掘」入口：有任务（运行中/已完成）才进演化台；
   // 无任务时滚动到输入框，避免打开空的进度页。
   const handleOpenDashboard = () => {
-    if (task) {
+    if (miningTasks.length > 0) {
       onNavigate?.('mining_dashboard');
     } else {
       document.getElementById('mining-input')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -130,51 +139,88 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
 
         {/* ================= 2. Central Integrated Prompt Input ================= */}
         <div id="mining-input" className="w-full flex flex-col gap-3">
-          {/* 运行中任务进度提示 + 提交锁（避免重复提交） */}
-          {taskActive && (
-            <div className="w-full max-w-4xl mx-auto flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50/70 px-4 py-2.5 shadow-2xs">
-              {miningStarting ? (
-                <Loader2 className="w-4 h-4 text-blue-500 animate-spin shrink-0" />
-              ) : (
-                <span className="relative flex h-2.5 w-2.5 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
-                </span>
+          {/* 多任务：提交在途一行 + 每个运行中任务一行（相互独立，逐行可停/可查看） */}
+          {(miningStarting || runningTasks.length > 0) && (
+            <div className="w-full max-w-4xl mx-auto flex flex-col gap-2">
+              {miningStarting && (
+                <div className="w-full flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50/70 px-4 py-2.5 shadow-2xs">
+                  <Loader2 className="w-4 h-4 text-blue-500 animate-spin shrink-0" />
+                  <span className="text-xs font-bold text-blue-700 whitespace-nowrap">任务提交中...</span>
+                  <span className="text-xs text-blue-600/70 truncate flex-1 min-w-0">
+                    正在创建任务，请稍候（数据源为 Parquet 时首次建缓存可能较久）
+                  </span>
+                </div>
               )}
-              <span className="text-xs font-bold text-blue-700 whitespace-nowrap">
-                {miningStarting ? '任务提交中...' : '任务运行中'}
-              </span>
-              <span
-                className="text-xs text-blue-600/70 truncate flex-1 min-w-0"
-                title={task?.progress?.message}
-              >
-                {task?.progress?.message || '正在启动因子挖掘，请稍候...'}
-              </span>
-              {!miningStarting && task && (
-                <>
-                  <div className="w-24 h-1.5 rounded-full bg-blue-100 overflow-hidden hidden sm:block">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-500"
-                      style={{ width: `${Math.min(100, Math.max(0, task.progress?.progress ?? 0))}%` }}
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => onNavigate?.('mining_dashboard')}
-                    className="text-xs font-bold text-blue-600 hover:text-blue-700 whitespace-nowrap cursor-pointer"
+              {runningTasks.map((t) => {
+                const pct = Math.min(100, Math.max(0, t.progress?.progress ?? 0));
+                return (
+                  <div
+                    key={t.taskId}
+                    className="w-full flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50/70 px-4 py-2.5 shadow-2xs"
                   >
-                    查看演化台
-                  </button>
-                </>
+                    <span className="relative flex h-2.5 w-2.5 shrink-0">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
+                    </span>
+                    <span className="text-xs font-bold text-blue-700 whitespace-nowrap">任务运行中</span>
+                    <span
+                      className="text-xs text-blue-600/70 truncate flex-1 min-w-0"
+                      title={`${taskDirectionLabel(t)} · ${t.progress?.message ?? ''}`}
+                    >
+                      {taskDirectionLabel(t)}
+                    </span>
+                    <div className="w-24 h-1.5 rounded-full bg-blue-100 overflow-hidden hidden sm:block">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-500"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-[11px] font-mono text-blue-500/80 hidden md:block w-9 text-right">
+                      {pct}%
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        focusMiningTask(t.taskId);
+                        onNavigate?.('mining_dashboard');
+                      }}
+                      className="text-xs font-bold text-blue-600 hover:text-blue-700 whitespace-nowrap cursor-pointer"
+                    >
+                      查看演化台
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void stopMining(t.taskId)}
+                      className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold text-red-600 bg-white hover:bg-red-50 border border-red-100 transition-colors whitespace-nowrap cursor-pointer"
+                      title="只停止这个任务，其它任务不受影响"
+                    >
+                      <Square className="w-3 h-3" />
+                      停止
+                    </button>
+                  </div>
+                );
+              })}
+              {runningTasks.length > 1 && (
+                <p className="m-0 text-center text-[11px] text-slate-400">
+                  {runningTasks.length} 个任务各自独立运行；可在下方继续提交新想法
+                </p>
               )}
+            </div>
+          )}
+
+          {/* 提交失败（429 并发上限 / 建缓存失败等）：后端原文上屏，可关掉 */}
+          {miningStartError && (
+            <div className="w-full max-w-4xl mx-auto flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50/80 px-4 py-2.5 text-xs font-bold text-rose-600">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span className="flex-1 min-w-0 truncate" title={miningStartError}>
+                {miningStartError}
+              </span>
               <button
                 type="button"
-                onClick={stopMining}
-                className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold text-red-600 bg-white hover:bg-red-50 border border-red-100 transition-colors whitespace-nowrap cursor-pointer"
-                title="停止当前任务"
+                onClick={dismissMiningStartError}
+                className="shrink-0 rounded-full border border-rose-200 bg-white px-3 py-1 text-[11px] font-bold text-rose-600 hover:bg-rose-50 cursor-pointer"
               >
-                <Square className="w-3 h-3" />
-                停止
+                知道了
               </button>
             </div>
           )}
@@ -220,7 +266,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
           {docsEnabled && inputMode === 'doc' ? (
             <DocMiningPanel
               onStartMining={startMining}
-              isRunning={taskActive}
+              isRunning={miningStarting}
               resume={docResume}
             />
           ) : (
@@ -230,8 +276,8 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
               initialConfig={retryDraft ?? undefined}
               initialConfigKey={retryDraft?.key}
               onSubmit={startMining}
-              onStop={stopMining}
-              isRunning={taskActive}
+              isSubmitting={miningStarting}
+              runningCount={runningTasks.length}
             />
           )}
 

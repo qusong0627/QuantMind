@@ -5,7 +5,15 @@
  * to App level, so running state is not lost when switching pages.
  */
 
-import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useMemo,
+} from 'react';
 import type {
   Factor,
   Task,
@@ -114,21 +122,34 @@ interface TaskContextValue {
   // Backend health
   backendAvailable: boolean | null;
 
-  // ---- Mining ----
+  // ---- Mining（多任务注册表：可多条并存，相互独立）----
+  /** 聚焦任务（= miningTasks 里 focusedTaskId 指向的一条）；演化台展示对象 */
   miningTask: Task | null;
+  /** 注册表全量（按启动先后排序）：运行中的、本会话已跑完的都在这里 */
+  miningTasks: Task[];
+  /** 当前聚焦任务 id（演化台/因子清单跟随它） */
+  focusedTaskId: string | null;
+  /** 切换聚焦任务（认不出的 id 忽略，不产生悬空焦点） */
+  focusMiningTask: (taskId: string) => void;
   /** POST /evolve 提交进行中（后端同步建缓存时可能耗时较长） */
   miningStarting: boolean;
+  /** 最近一次提交失败的原文（429 并发上限 / 建缓存失败等）；新提交时清空 */
+  miningStartError: string | null;
+  dismissMiningStartError: () => void;
   /** 用户主动开始挖掘的序号（仅用于「开始后自动进入演化台」，恢复历史任务不触发） */
   miningStartSeq: number;
   miningEquityCurve: TimeSeriesData[];
   miningDrawdownCurve: TimeSeriesData[];
   miningIcTimeSeries: TimeSeriesData[];
   startMining: (config: TaskConfig) => void;
-  stopMining: () => void;
-  resetMiningTask: () => void;
+  /** 停止指定任务（缺省=聚焦任务）：只断该任务的传输与后端任务，互不影响 */
+  stopMining: (taskId?: string) => Promise<void>;
+  /** 从注册表移除指定任务（缺省=聚焦任务）；只做前端清场，不触发后端取消 */
+  resetMiningTask: (taskId?: string) => void;
   /**
-   * 拉取当前挖掘任务的**权威全量**因子清单（GET /factors?task_id=…&limit=500），
-   * 覆盖 /tasks 载荷的 20 条上限。任务完成沿自动调用；物化/回测结束后可手动调用。
+   * 拉取某挖掘任务的**权威全量**因子清单（GET /factors?task_id=…&limit=500），
+   * 覆盖 /tasks 载荷的 20 条上限。缺省=聚焦任务；任务完成沿自动调用；
+   * 物化/回测结束后可手动调用。
    */
   refreshMiningFactors: (taskId?: string) => Promise<void>;
 
@@ -143,6 +164,18 @@ interface TaskContextValue {
 
 const TaskContext = createContext<TaskContextValue | null>(null);
 
+/** 每个挖掘任务一套传输句柄（伪 WS 轮询 + 10s 兜底轮询），按 taskId 隔离 */
+interface MiningTransport {
+  ws: WebSocket;
+  pollingId: ReturnType<typeof setInterval>;
+}
+
+/**
+ * 曲线占位：这三条曲线从没有任何代码写入过（历史遗留字段），消费者拿到的一直是
+ * 空数组。保留接口字段不破坏消费者，但不再用 state 假装它会变。
+ */
+const EMPTY_SERIES: TimeSeriesData[] = [];
+
 // ========================== Provider ==========================
 
 export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -156,51 +189,63 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   // ==================================================================
-  // MINING
+  // MINING（多任务注册表：任务相互独立，可并行）
   // ==================================================================
-  const [miningTask, setMiningTask] = useState<Task | null>(null);
-  // 任务提交锁：POST /evolve 进行中（数据源为 parquet 时后端同步建缓存可能耗时 1 分钟+），
-  // 期间禁止重复提交
+  const [miningTasks, setMiningTasks] = useState<Task[]>([]);
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const [miningStartError, setMiningStartError] = useState<string | null>(null);
+  // 提交锁：POST /evolve 在途时禁止重复提交；已有任务运行**不**拦（多任务）
   const [miningStarting, setMiningStarting] = useState(false);
   const [miningStartSeq, setMiningStartSeq] = useState(0);
   const miningStartSeqRef = useRef(0);
-  const [miningEquityCurve, setMiningEquityCurve] = useState<TimeSeriesData[]>([]);
-  const [miningDrawdownCurve, setMiningDrawdownCurve] = useState<TimeSeriesData[]>([]);
-  const [miningIcTimeSeries, setMiningIcTimeSeries] = useState<TimeSeriesData[]>([]);
 
-  const miningWsRef = useRef<WebSocket | null>(null);
-  const miningPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const miningWsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const miningDataPointsRef = useRef(0);
+  // 聚焦任务派生：演化台/因子清单等既有消费者继续只读 miningTask
+  const miningTask = useMemo(
+    () => miningTasks.find((t) => t.taskId === focusedTaskId) ?? null,
+    [miningTasks, focusedTaskId],
+  );
+
+  const transportsRef = useRef<Map<string, MiningTransport>>(new Map());
   const mountedRef = useRef(true);
-  // 同步到 ref 供 startRealMining 闭包内读取，避免 stale state
+  // 同步到 ref 供 startRealMining / 恢复效应闭包内读取，避免 stale state
   const miningStartingRef = useRef(false);
-  const miningTaskRef = useRef<Task | null>(null);
+  const miningTasksRef = useRef<Task[]>([]);
+  const focusedTaskIdRef = useRef<string | null>(null);
   useEffect(() => {
     miningStartingRef.current = miningStarting;
   }, [miningStarting]);
   useEffect(() => {
-    miningTaskRef.current = miningTask;
-  }, [miningTask]);
+    miningTasksRef.current = miningTasks;
+  }, [miningTasks]);
+  useEffect(() => {
+    focusedTaskIdRef.current = focusedTaskId;
+  }, [focusedTaskId]);
 
-  // Cleanup on unmount: clear all polling intervals, WS connections, and
-  // the recursive setTimeout inside connectMiningWs, and prevent stale state updates.
+  /**
+   * 拆掉某任务的实时传输。先摘注册表再 close：伪 WS 的 close() 会触发 onClose，
+   * 而 onClose 只在「传输仍在注册表」时才做终态权威对齐——主动拆除（停止/重置/
+   * 卸载）后不该再拉一次可能晚于取消请求的旧状态。
+   * connectMiningWs 的递归 setTimeout 每轮都会改写 _pollingTimeoutId，必须现场
+   * 读取（bind 时缓存的值会过期，clearTimeout 变成空操作）。
+   */
+  const teardownMiningTransport = useCallback((taskId: string) => {
+    const transport = transportsRef.current.get(taskId);
+    if (!transport) return;
+    transportsRef.current.delete(taskId);
+    const pending = (transport.ws as any)?._pollingTimeoutId;
+    if (pending) clearTimeout(pending);
+    transport.ws.close();
+    if (transport.pollingId) clearInterval(transport.pollingId);
+  }, []);
+
+  // Cleanup on unmount: tear down every task transport (pseudo-WS recursive
+  // timers + fallback intervals) and prevent stale state updates.
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      // Clear mining polling
-      if (miningPollingRef.current) {
-        clearInterval(miningPollingRef.current);
-        miningPollingRef.current = null;
-      }
-      // Clear mining WS
-      miningWsRef.current?.close();
-      miningWsRef.current = null;
-      // Clear the recursive setTimeout from connectMiningWs
-      if (miningWsTimeoutRef.current) {
-        clearTimeout(miningWsTimeoutRef.current);
-        miningWsTimeoutRef.current = null;
+      for (const id of [...transportsRef.current.keys()]) {
+        teardownMiningTransport(id);
       }
       // Clear backtest polling
       if (backtestPollingRef.current) {
@@ -208,14 +253,29 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         backtestPollingRef.current = null;
       }
     };
+  }, [teardownMiningTransport]);
+
+  /** 按任务更新注册表（任务已被 reset 移除时静默忽略） */
+  const patchMiningTask = useCallback((taskId: string, updater: (prev: Task) => Task) => {
+    setMiningTasks((prev) => prev.map((t) => (t.taskId === taskId ? updater(t) : t)));
   }, []);
 
-  // WS handler for mining
+  /** 插入或整体替换某任务（新任务提交、恢复、终态权威对齐共用） */
+  const upsertMiningTask = useCallback((task: Task) => {
+    setMiningTasks((prev) => {
+      const idx = prev.findIndex((t) => t.taskId === task.taskId);
+      if (idx === -1) return [...prev, task];
+      const next = [...prev];
+      next[idx] = task;
+      return next;
+    });
+  }, []);
+
+  // WS handler for mining（消息按 taskId 路由到对应任务，多任务互不串台）
   const handleMiningWsMessage = useCallback(
-    (msg: WsMessage) => {
+    (taskId: string, msg: WsMessage) => {
       if (!mountedRef.current) return;
-      setMiningTask(((prev: Task | null) => {
-        if (!prev) return prev;
+      patchMiningTask(taskId, (prev) => {
         const updated = { ...prev };
         switch (msg.type) {
           case 'progress':
@@ -259,70 +319,70 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         updated.updatedAt = new Date().toISOString();
         return updated;
-      }) as unknown as Task | null);
+      });
     },
-    [],
+    [patchMiningTask],
   );
 
-  // 绑定某个挖掘任务的实时传输（WebSocket + 轮询兜底），供新任务与恢复共用
+  // 绑定某任务的实时传输（伪 WS + 轮询兜底），供新任务与恢复共用；同 id 重绑先拆旧
   const bindMiningTransport = useCallback(
     (taskId: string) => {
-      if (miningWsTimeoutRef.current) {
-        clearTimeout(miningWsTimeoutRef.current);
-        miningWsTimeoutRef.current = null;
-      }
-      miningWsRef.current?.close();
-      miningWsRef.current = null;
-      if (miningPollingRef.current) {
-        clearInterval(miningPollingRef.current);
-        miningPollingRef.current = null;
-      }
-      const ws = connectMiningWs(taskId, handleMiningWsMessage, () => {
+      teardownMiningTransport(taskId);
+      const ws = connectMiningWs(
+        taskId,
+        (msg) => handleMiningWsMessage(taskId, msg),
+        () => {
+          // 传输自然终结（轮询到终态）→ 用后端权威任务行对齐一次；
+          // 主动拆除已先从注册表摘除，跳过这次对齐（避免与取消请求竞态）
+          if (!mountedRef.current || !transportsRef.current.has(taskId)) return;
+          getMiningStatus(taskId)
+            .then((r) => {
+              if (r.data?.task && mountedRef.current) {
+                const authoritative = r.data.task as Task;
+                patchMiningTask(taskId, () => authoritative);
+              }
+            })
+            .catch(() => {});
+        },
+      );
+      const pollingId = setInterval(async () => {
         if (!mountedRef.current) return;
-        getMiningStatus(taskId).then((r) => {
-          if (r.data?.task && mountedRef.current) setMiningTask(r.data.task as Task);
-        });
-      });
-      miningWsRef.current = ws;
-      miningWsTimeoutRef.current = (ws as any)._pollingTimeoutId ?? null;
-      miningPollingRef.current = setInterval(async () => {
-        if (!mountedRef.current) {
-          clearInterval(miningPollingRef.current!);
-          miningPollingRef.current = null;
-          return;
-        }
         try {
           const r = await getMiningStatus(taskId);
-          if (!mountedRef.current) return;
-          if (r.data?.task) {
-            const t = r.data.task as Task;
-            if (t.status === 'completed' || t.status === 'failed') {
-              setMiningTask(t);
-              clearInterval(miningPollingRef.current!);
-              miningPollingRef.current = null;
-            }
+          if (!mountedRef.current || !r.data?.task) return;
+          const t = r.data.task as Task;
+          if (t.status === 'completed' || t.status === 'failed') {
+            upsertMiningTask(t);
+            teardownMiningTransport(taskId);
           }
         } catch {
           // ignore
         }
       }, 10000);
+      transportsRef.current.set(taskId, { ws, pollingId });
     },
-    [handleMiningWsMessage],
+    [handleMiningWsMessage, teardownMiningTransport, patchMiningTask, upsertMiningTask],
   );
 
-  // 恢复：刷新/离开再回来时，若后端仍有运行中的挖掘任务，重新绑定并展示进度
+  // 恢复：刷新/离开再回来时，把后端仍在运行的全部挖掘任务接管回来（逐条绑定
+  // 传输；焦点给最新一条）。历史已完成任务走「挖掘历史」页，不在这里铺。
   const miningRecoveredRef = useRef(false);
   useEffect(() => {
     if (miningRecoveredRef.current) return;
     miningRecoveredRef.current = true;
     listTasks()
       .then((r) => {
-        if (!mountedRef.current || miningTaskRef.current) return;
-        const running = (r.data?.tasks ?? []).find((t) => t.status === 'running');
-        if (running) {
-          setMiningTask(running);
-          bindMiningTransport(running.taskId);
-        }
+        if (!mountedRef.current) return;
+        // 用户可能在请求在途时已自己提交了任务——注册表非空就不恢复（不夺焦点）
+        if (miningTasksRef.current.length > 0) return;
+        const running = (r.data?.tasks ?? []).filter((t) => t.status === 'running');
+        if (running.length === 0) return;
+        setMiningTasks(running);
+        for (const t of running) bindMiningTransport(t.taskId);
+        const newest = running.reduce((a, b) =>
+          Date.parse(b.createdAt) >= Date.parse(a.createdAt) ? b : a,
+        );
+        setFocusedTaskId(newest.taskId);
       })
       .catch(() => {});
   }, [bindMiningTransport]);
@@ -330,39 +390,39 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // 权威全量清单刷新：/tasks 载荷只有最新 20 条，「挖到多少显示多少」必须以
   // GET /factors?task_id=…（limit=500）为准。合并失败不致命——轮询仍在跑。
   const refreshMiningFactors = useCallback(async (taskId?: string) => {
-    const id = taskId ?? miningTaskRef.current?.taskId;
+    const id = taskId ?? focusedTaskIdRef.current;
     if (!id) return;
     try {
       const r = await getFactors({ taskId: id, limit: FACTOR_LIST_MAX_LIMIT });
       if (!mountedRef.current || !r.success || !r.data) return;
       const rows = r.data.factors ?? [];
-      setMiningTask((prev) => {
-        if (!prev || prev.taskId !== id) return prev;
-        return { ...prev, metrics: mergeTaskFactors(prev.metrics, rows) };
-      });
+      patchMiningTask(id, (prev) => ({ ...prev, metrics: mergeTaskFactors(prev.metrics, rows) }));
     } catch (err) {
       console.error('[alpha-research] refresh mining factors failed:', err);
     }
-  }, []);
+  }, [patchMiningTask]);
 
-  // 任务完成沿自动拉一次全量清单（覆盖：新任务完成、恢复出的已完成历史任务）
-  const factorsRefreshedForTaskRef = useRef<string | null>(null);
+  // 任务完成沿自动拉一次全量清单（覆盖：新任务完成、恢复出的已完成历史任务）。
+  // 逐任务记账：A 完成触发 A 的清单、B 完成触发 B 的，互不顶替。
+  const factorsRefreshedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const t = miningTask;
-    if (!t || !t.taskId || t.status !== 'completed') return;
-    if (factorsRefreshedForTaskRef.current === t.taskId) return;
-    factorsRefreshedForTaskRef.current = t.taskId;
-    void refreshMiningFactors(t.taskId);
-  }, [miningTask, refreshMiningFactors]);
+    for (const t of miningTasks) {
+      if (!t.taskId || t.status !== 'completed') continue;
+      if (factorsRefreshedRef.current.has(t.taskId)) continue;
+      factorsRefreshedRef.current.add(t.taskId);
+      void refreshMiningFactors(t.taskId);
+    }
+  }, [miningTasks, refreshMiningFactors]);
 
   // Start mining (real backend)
   const startRealMining = useCallback(
     async (config: TaskConfig) => {
-      // 任务锁：已有任务在运行或提交进行中时，忽略重复提交
+      // 只锁「提交在途」；已有任务运行不拦——任务相互独立，并发上限由后端
+      // 429 兜底（默认 2/人），失败原文进 miningStartError 上屏。
       if (miningStartingRef.current) return;
-      if (miningTaskRef.current?.status === 'running') return;
       try {
         setMiningStarting(true);
+        setMiningStartError(null);
         // Load defaults from localStorage
         let defaults: any = {};
         const savedConfig = localStorage.getItem('quantaalpha_config');
@@ -399,16 +459,14 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // 新任务从零开始：清掉任何残留清单与 IC 族头条（缺失=undefined→界面显「—」；
         // 旧实现只清 top10Factors，IC 族残留 0 值，统计卡永远显示 0.0000）
         taskData.metrics = emptyMetrics();
-        setMiningTask(taskData);
+        upsertMiningTask(taskData);
+        // 新任务获得焦点（AppRoot 沿 miningStartSeq 自动进演化台，看到的就是它）
+        setFocusedTaskId(taskData.taskId);
         miningStartSeqRef.current += 1;
         setMiningStartSeq(miningStartSeqRef.current);
-        setMiningEquityCurve([]);
-        setMiningDrawdownCurve([]);
-        setMiningIcTimeSeries([]);
-        miningDataPointsRef.current = 0;
 
-        // 绑定 WebSocket + 轮询兜底
-        bindMiningTransport(resp.data.taskId);
+        // 绑定该任务的实时传输（与其它运行中任务的传输并存、互不干扰）
+        bindMiningTransport(taskData.taskId);
       } catch (err: any) {
         console.error('Failed to start mining task:', err);
         const detail = err?.response?.data?.detail;
@@ -416,33 +474,13 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
           typeof detail === 'string' && detail.trim()
             ? detail
             : (err?.message || '无法连接后端服务');
-        // Set error state instead of falling back to mock data
-        setMiningTask({
-          taskId: '',
-          status: 'failed',
-          config,
-          progress: {
-            phase: 'parsing',
-            currentRound: 0,
-            totalRounds: config.maxRounds || 3,
-            progress: 0,
-            message: `启动失败: ${failMsg}`,
-            timestamp: new Date().toISOString(),
-          },
-          logs: [{
-            id: generateId(),
-            timestamp: new Date().toISOString(),
-            level: 'error' as const,
-            message: `启动挖掘任务失败: ${failMsg}`,
-          }],
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
+        // 提交失败没有任务可展示：错误单独上屏，**不**再伪造 taskId='' 的失败任务行
+        setMiningStartError(`启动失败: ${failMsg}`);
       } finally {
         setMiningStarting(false);
       }
     },
-    [bindMiningTransport],
+    [bindMiningTransport, upsertMiningTask],
   );
 
   // Public start mining
@@ -453,48 +491,42 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [startRealMining],
   );
 
-  // Stop mining
-  const stopMining = useCallback(async () => {
-    if (!miningTask) return;
-    // Clear the recursive setTimeout from connectMiningWs
-    if (miningWsTimeoutRef.current) {
-      clearTimeout(miningWsTimeoutRef.current);
-      miningWsTimeoutRef.current = null;
-    }
-    miningWsRef.current?.close();
-    miningWsRef.current = null;
-    if (miningPollingRef.current) {
-      clearInterval(miningPollingRef.current);
-      miningPollingRef.current = null;
-    }
+  /** 聚焦切换（认不出的 id 忽略，防止悬空焦点） */
+  const focusMiningTask = useCallback((taskId: string) => {
+    if (!miningTasksRef.current.some((t) => t.taskId === taskId)) return;
+    setFocusedTaskId(taskId);
+  }, []);
+
+  const dismissMiningStartError = useCallback(() => setMiningStartError(null), []);
+
+  // Stop mining（缺省=聚焦任务）：只拆指定任务的传输并取消它，其它任务不受影响
+  const stopMining = useCallback(async (taskId?: string) => {
+    const id = taskId ?? focusedTaskIdRef.current;
+    if (!id) return;
+    teardownMiningTransport(id);
     if (backendAvailable) {
       try {
-        await apiCancelMining(miningTask.taskId);
+        await apiCancelMining(id);
       } catch {
         // ignore
       }
     }
-    setMiningTask((miningTask ? { ...miningTask, status: 'failed' } : null));
-  }, [miningTask, backendAvailable]);
+    // TaskStatus 无 cancelled：本地终态沿用 failed（与 normalizeTaskStatus
+    // 把后端 cancelled 归并为 failed 同一口径），后端原文留在 progress.message
+    patchMiningTask(id, (prev) => ({ ...prev, status: 'failed' }));
+  }, [backendAvailable, teardownMiningTransport, patchMiningTask]);
 
-  // Reset mining task
-  const resetMiningTask = useCallback(() => {
-    // Ensure stopped first
-    if (miningWsTimeoutRef.current) {
-      clearTimeout(miningWsTimeoutRef.current);
-      miningWsTimeoutRef.current = null;
+  // Reset mining task（缺省=聚焦任务）：前端清场；聚焦对象被移除时改焦剩余最新
+  const resetMiningTask = useCallback((taskId?: string) => {
+    const id = taskId ?? focusedTaskIdRef.current;
+    if (!id) return;
+    teardownMiningTransport(id);
+    setMiningTasks((prev) => prev.filter((t) => t.taskId !== id));
+    if (focusedTaskIdRef.current === id) {
+      const rest = miningTasksRef.current.filter((t) => t.taskId !== id);
+      setFocusedTaskId(rest.length ? rest[rest.length - 1].taskId : null);
     }
-    miningWsRef.current?.close();
-    miningWsRef.current = null;
-    if (miningPollingRef.current) {
-      clearInterval(miningPollingRef.current);
-      miningPollingRef.current = null;
-    }
-    setMiningTask(null);
-    setMiningEquityCurve([]);
-    setMiningDrawdownCurve([]);
-    setMiningIcTimeSeries([]);
-  }, []);
+  }, [teardownMiningTransport]);
 
   // ==================================================================
   // BACKTEST
@@ -642,13 +674,18 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // ==================================================================
   const value: TaskContextValue = {
     backendAvailable,
-    // Mining
+    // Mining（多任务注册表）
     miningTask,
+    miningTasks,
+    focusedTaskId,
+    focusMiningTask,
     miningStarting,
+    miningStartError,
+    dismissMiningStartError,
     miningStartSeq,
-    miningEquityCurve,
-    miningDrawdownCurve,
-    miningIcTimeSeries,
+    miningEquityCurve: EMPTY_SERIES,
+    miningDrawdownCurve: EMPTY_SERIES,
+    miningIcTimeSeries: EMPTY_SERIES,
     startMining,
     stopMining,
     resetMiningTask,

@@ -50,18 +50,22 @@ vi.mock('../../services/alphaAgentService', () => ({
 }));
 
 let taskFactors: Factor[] = [];
+const currentTask = () => ({
+  taskId: 't1',
+  status: 'completed',
+  config: { userInput: 'x' },
+  progress: { phase: 'completed', currentRound: 3, totalRounds: 3, progress: 100, message: '完成', timestamp: '' },
+  logs: [],
+  createdAt: '',
+  updatedAt: '',
+  metrics: { totalFactors: taskFactors.length, highQualityFactors: 0, mediumQualityFactors: 0, lowQualityFactors: 0, factors: taskFactors } as RealtimeMetrics,
+});
 vi.mock('../../context-v2/TaskContext', () => ({
   useTaskContext: () => ({
-    miningTask: {
-      taskId: 't1',
-      status: 'completed',
-      config: { userInput: 'x' },
-      progress: { phase: 'completed', currentRound: 3, totalRounds: 3, progress: 100, message: '完成', timestamp: '' },
-      logs: [],
-      createdAt: '',
-      updatedAt: '',
-      metrics: { totalFactors: taskFactors.length, highQualityFactors: 0, mediumQualityFactors: 0, lowQualityFactors: 0, factors: taskFactors } as RealtimeMetrics,
-    },
+    miningTask: currentTask(),
+    miningTasks: [currentTask()],
+    focusedTaskId: 't1',
+    focusMiningTask: vi.fn(),
     miningEquityCurve: [],
     miningDrawdownCurve: [],
     stopMining: vi.fn(),

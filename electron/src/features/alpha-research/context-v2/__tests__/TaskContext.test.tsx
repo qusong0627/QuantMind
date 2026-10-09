@@ -1,5 +1,5 @@
 /**
- * TaskContext —— 「挖到多少显示多少」与「指标不造假」的数据层契约。
+ * TaskContext —— 数据层契约（全量清单口径 + 多任务注册表）。
  *
  * 钉死的边：
  * - **权威全量清单**：`refreshMiningFactors` 走 `GET /factors?task_id=…&limit=500`，
@@ -10,7 +10,9 @@
  *   最优（绝不把 undefined 显成 0.0000）；
  * - **日志行不再是假因子**：旧实现把 "Added new factor:" 正则解析成 generateId()
  *   造的假行（无法回测/物化），现在日志只进 logs；
- * - **任务完成沿自动拉一次全量清单**。
+ * - **任务完成沿自动拉一次全量清单**；
+ * - **多任务相互独立**：运行中任务可多条并存（后端上限 2/人，429 兜底），
+ *   WS 消息按 taskId 路由、停止只断指定任务的传输、提交失败不产生假任务行。
  */
 import React from 'react';
 import { describe, test, expect, vi, beforeEach } from 'vitest';
@@ -24,12 +26,16 @@ const {
   healthCheckMock,
   getFactorsMock,
   connectMiningWsMock,
+  cancelMiningMock,
+  getMiningStatusMock,
 } = vi.hoisted(() => ({
   startMiningMock: vi.fn(),
   listTasksMock: vi.fn(),
   healthCheckMock: vi.fn(),
   getFactorsMock: vi.fn(),
   connectMiningWsMock: vi.fn(),
+  cancelMiningMock: vi.fn(),
+  getMiningStatusMock: vi.fn(),
 }));
 
 // axios 宿主模块：测试一律不加载真实实现（authService 等一串依赖）
@@ -47,11 +53,14 @@ vi.mock('../../services-v2/api', async (importOriginal) => {
     startMining: startMiningMock,
     getFactors: getFactorsMock,
     connectMiningWs: connectMiningWsMock,
+    cancelMining: cancelMiningMock,
+    getMiningStatus: getMiningStatusMock,
   };
 });
 
-/** 捕获 WS 消息处理器（bindMiningTransport 把 handleMiningWsMessage 传进来） */
-let wsOnMessage: ((msg: any) => void) | null = null;
+/** 按 taskId 捕获各任务独立的 WS 消息处理器与 close（多任务传输互不覆盖） */
+const wsHandlers = new Map<string, (msg: any) => void>();
+const wsClosed = new Map<string, ReturnType<typeof vi.fn>>();
 
 type Ctx = ReturnType<typeof useTaskContext>;
 const handle: { ctx: Ctx } = { ctx: null as any };
@@ -74,6 +83,12 @@ const Probe: React.FC = () => {
       </span>
       <span data-testid="logs">{t?.logs?.length ?? -1}</span>
       <span data-testid="status">{t?.status ?? 'none'}</span>
+      {/* 多任务视图：注册表全量（顺序=启动先后）与焦点 */}
+      <span data-testid="tasks">
+        {ctx.miningTasks.map((x) => `${x.taskId}:${x.status}:${x.progress.progress}`).join(',')}
+      </span>
+      <span data-testid="focused">{ctx.focusedTaskId ?? 'none'}</span>
+      <span data-testid="start-error">{ctx.miningStartError ?? 'none'}</span>
     </div>
   );
 };
@@ -86,21 +101,28 @@ beforeEach(() => {
   healthCheckMock.mockReset();
   getFactorsMock.mockReset();
   connectMiningWsMock.mockReset();
-  wsOnMessage = null;
+  cancelMiningMock.mockReset();
+  getMiningStatusMock.mockReset();
+  wsHandlers.clear();
+  wsClosed.clear();
 
   healthCheckMock.mockResolvedValue(true);
   listTasksMock.mockResolvedValue({ success: true, data: { tasks: [] } });
-  connectMiningWsMock.mockImplementation((_taskId: string, onMessage: (msg: any) => void) => {
-    wsOnMessage = onMessage;
-    return { close: vi.fn(), _pollingTimeoutId: undefined };
+  cancelMiningMock.mockResolvedValue({ success: true, data: {} });
+  getMiningStatusMock.mockResolvedValue({ success: true, data: { task: null } });
+  connectMiningWsMock.mockImplementation((taskId: string, onMessage: (msg: any) => void) => {
+    wsHandlers.set(taskId, onMessage);
+    const close = vi.fn();
+    wsClosed.set(taskId, close);
+    return { close, _pollingTimeoutId: undefined };
   });
 });
 
-const mkTask = (): Task =>
+const mkTask = (taskId = 't1', over: Partial<Task> = {}): Task =>
   ({
-    taskId: 't1',
+    taskId,
     status: 'running',
-    config: { userInput: 'momentum' },
+    config: { userInput: `dir-${taskId}` },
     progress: {
       phase: 'evolving',
       currentRound: 1,
@@ -112,6 +134,7 @@ const mkTask = (): Task =>
     logs: [],
     createdAt: '2026-10-08T00:00:00Z',
     updatedAt: '2026-10-08T00:00:00Z',
+    ...over,
   }) as Task;
 
 /** 24 个唯一因子 + f5 重复一次（后到覆盖）；f0 有 ic、其余 IC 无关字段留空 */
@@ -138,6 +161,11 @@ function rawFactors(): any[] {
   return rows;
 }
 
+const factorsPayload = () => ({
+  success: true,
+  data: { factors: rawFactors(), total: 25, limit: 500, offset: 0, serverLimit: 500 },
+});
+
 async function mountAndStart(): Promise<void> {
   render(
     <TaskProvider>
@@ -145,20 +173,29 @@ async function mountAndStart(): Promise<void> {
     </TaskProvider>,
   );
   await flush(); // healthCheck / listTasks 落地
-  startMiningMock.mockResolvedValue({ success: true, data: { taskId: 't1', task: mkTask() } });
-  await act(async () => {
-    handle.ctx.startMining({ userInput: 'momentum' } as any);
-  });
+  await startTask('t1');
   expect(screen.getByTestId('status').textContent).toBe('running');
-  expect(wsOnMessage).toBeTruthy();
+  expect(wsHandlers.has('t1')).toBe(true);
+}
+
+/** 起一个任务：mock 返回 mkTask(id) 并等待 POST 落地 */
+async function startTask(id: string, over: Partial<Task> = {}): Promise<void> {
+  startMiningMock.mockResolvedValue({ success: true, data: { taskId: id, task: mkTask(id, over) } });
+  await act(async () => {
+    handle.ctx.startMining({ userInput: `dir-${id}` } as any);
+  });
+}
+
+/** 把消息派发给指定任务的传输（模拟该任务的 WS 轮询回调） */
+async function sendWs(taskId: string, msg: any): Promise<void> {
+  await act(async () => {
+    wsHandlers.get(taskId)!(msg);
+  });
 }
 
 describe('TaskContext：全量因子清单（挖到多少显示多少）', () => {
   test('refreshMiningFactors 带 taskId + limit=500，25 行去重合并成 24 个因子', async () => {
-    getFactorsMock.mockResolvedValue({
-      success: true,
-      data: { factors: rawFactors(), total: 25, limit: 500, offset: 0, serverLimit: 500 },
-    });
+    getFactorsMock.mockResolvedValue(factorsPayload());
     await mountAndStart();
 
     await act(async () => {
@@ -174,10 +211,7 @@ describe('TaskContext：全量因子清单（挖到多少显示多少）', () =>
   });
 
   test('缺失不补 0：ic 缺席显示 undef；头条指标=全清单 RankIC 最优', async () => {
-    getFactorsMock.mockResolvedValue({
-      success: true,
-      data: { factors: rawFactors(), total: 25, limit: 500, offset: 0, serverLimit: 500 },
-    });
+    getFactorsMock.mockResolvedValue(factorsPayload());
     await mountAndStart();
 
     await act(async () => {
@@ -194,7 +228,7 @@ describe('TaskContext：全量因子清单（挖到多少显示多少）', () =>
     expect(screen.getByTestId('quality').textContent).toBe('1/1/0');
   });
 
-  test('不带参数的 refreshMiningFactors 用当前任务 id', async () => {
+  test('不带参数的 refreshMiningFactors 用当前聚焦任务 id', async () => {
     getFactorsMock.mockResolvedValue({
       success: true,
       data: { factors: [], total: 0, limit: 500, offset: 0, serverLimit: 500 },
@@ -211,26 +245,21 @@ describe('TaskContext：全量因子清单（挖到多少显示多少）', () =>
 
 describe('TaskContext：日志行不再是假因子', () => {
   test('WS 日志 "Added new factor:" 只进 logs，不产生 factor 行', async () => {
-    getFactorsMock.mockResolvedValue({
-      success: true,
-      data: { factors: rawFactors(), total: 25, limit: 500, offset: 0, serverLimit: 500 },
-    });
+    getFactorsMock.mockResolvedValue(factorsPayload());
     await mountAndStart();
     await act(async () => {
       await handle.ctx.refreshMiningFactors('t1');
     });
     expect(screen.getByTestId('count').textContent).toBe('24');
 
-    await act(async () => {
-      wsOnMessage!({
-        type: 'log',
-        data: {
-          id: 'l1',
-          timestamp: '2026-10-08T00:01:00Z',
-          level: 'info',
-          message: 'Added new factor: momentum_reversal_5d',
-        },
-      });
+    await sendWs('t1', {
+      type: 'log',
+      data: {
+        id: 'l1',
+        timestamp: '2026-10-08T00:01:00Z',
+        level: 'info',
+        message: 'Added new factor: momentum_reversal_5d',
+      },
     });
 
     expect(screen.getByTestId('count').textContent).toBe('24'); // 没有第 25 个假行
@@ -240,20 +269,177 @@ describe('TaskContext：日志行不再是假因子', () => {
 
 describe('TaskContext：任务完成沿自动拉全量清单', () => {
   test('WS result 置 completed 后自动再拉一次 /factors?task_id', async () => {
-    getFactorsMock.mockResolvedValue({
-      success: true,
-      data: { factors: rawFactors(), total: 25, limit: 500, offset: 0, serverLimit: 500 },
-    });
+    getFactorsMock.mockResolvedValue(factorsPayload());
     await mountAndStart();
     const callsBefore = getFactorsMock.mock.calls.length;
 
-    await act(async () => {
-      wsOnMessage!({ type: 'result', data: { status: 'completed' } });
-    });
+    await sendWs('t1', { type: 'result', data: { status: 'completed' } });
     await flush();
 
     expect(screen.getByTestId('status').textContent).toBe('completed');
     expect(getFactorsMock.mock.calls.length).toBe(callsBefore + 1);
     expect(getFactorsMock).toHaveBeenLastCalledWith({ taskId: 't1', limit: 500 });
+  });
+});
+
+describe('TaskContext：多任务相互独立', () => {
+  test('已有任务运行中仍可提交第二个；注册表两条、焦点切到新任务', async () => {
+    await mountAndStart(); // t1
+    await startTask('t2');
+
+    expect(startMiningMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('tasks').textContent).toBe('t1:running:40,t2:running:40');
+    expect(screen.getByTestId('focused').textContent).toBe('t2');
+    // 两个任务各自绑定了独立的传输
+    expect(wsHandlers.has('t1')).toBe(true);
+    expect(wsHandlers.has('t2')).toBe(true);
+  });
+
+  test('WS 消息按 taskId 路由：t2 的进度不污染 t1', async () => {
+    await mountAndStart();
+    await startTask('t2');
+
+    await sendWs('t2', {
+      type: 'progress',
+      data: {
+        phase: 'planning',
+        currentRound: 2,
+        totalRounds: 9,
+        progress: 77,
+        message: 't2 进度',
+        timestamp: '2026-10-08T02:00:00Z',
+      },
+    });
+
+    expect(screen.getByTestId('tasks').textContent).toBe('t1:running:40,t2:running:77');
+  });
+
+  test('停止 t1 只断 t1：取消请求带 t1、t1 终态、t2 传输与消息仍然活着', async () => {
+    await mountAndStart();
+    await startTask('t2');
+
+    await act(async () => {
+      await handle.ctx.stopMining('t1');
+    });
+
+    expect(cancelMiningMock).toHaveBeenCalledWith('t1');
+    expect(screen.getByTestId('tasks').textContent).toBe('t1:failed:40,t2:running:40');
+    expect(wsClosed.get('t1')).toHaveBeenCalled();
+    expect(wsClosed.get('t2')).not.toHaveBeenCalled();
+
+    // t2 仍然接收消息（传输没有被 t1 的停止连带拆掉）
+    await sendWs('t2', {
+      type: 'log',
+      data: { id: 'x', timestamp: '2026-10-08T02:01:00Z', level: 'info', message: 't2 alive' },
+    });
+    expect(screen.getByTestId('tasks').textContent).toContain('t2:running');
+  });
+
+  test('恢复：listTasks 里全部运行中任务都绑定传输，焦点取最新一条', async () => {
+    listTasksMock.mockResolvedValue({
+      success: true,
+      data: {
+        tasks: [
+          mkTask('tA', { createdAt: '2026-10-08T00:00:00Z' }),
+          mkTask('tB', { createdAt: '2026-10-08T01:00:00Z' }),
+          mkTask('tC', { status: 'completed', createdAt: '2026-10-07T00:00:00Z' }),
+        ],
+      },
+    });
+    render(
+      <TaskProvider>
+        <Probe />
+      </TaskProvider>,
+    );
+    await flush();
+
+    expect(screen.getByTestId('tasks').textContent).toBe('tA:running:40,tB:running:40');
+    expect([...wsHandlers.keys()].sort()).toEqual(['tA', 'tB']);
+    expect(screen.getByTestId('focused').textContent).toBe('tB');
+  });
+
+  test('提交失败（429）不产生假任务行，错误原文进 miningStartError', async () => {
+    render(
+      <TaskProvider>
+        <Probe />
+      </TaskProvider>,
+    );
+    await flush();
+
+    startMiningMock.mockRejectedValue({
+      response: { data: { detail: '您已有 2 个挖掘任务在运行（上限 2），请等待完成或先取消任务。' } },
+    });
+    await act(async () => {
+      handle.ctx.startMining({ userInput: 'x' } as any);
+    });
+
+    expect(screen.getByTestId('tasks').textContent).toBe('');
+    expect(screen.getByTestId('focused').textContent).toBe('none');
+    expect(screen.getByTestId('start-error').textContent).toContain('上限 2');
+    // 下次成功提交后错误清场
+    await startTask('t1');
+    expect(screen.getByTestId('start-error').textContent).toBe('none');
+  });
+
+  test('提交在途锁：POST 未返回时重复提交被忽略，返回后解锁', async () => {
+    render(
+      <TaskProvider>
+        <Probe />
+      </TaskProvider>,
+    );
+    await flush();
+
+    let resolveStart: (v: any) => void = () => {};
+    startMiningMock.mockImplementation(
+      () => new Promise((res) => { resolveStart = res; }),
+    );
+    act(() => {
+      handle.ctx.startMining({ userInput: 'a' } as any);
+    });
+    await flush();
+    expect(handle.ctx.miningStarting).toBe(true);
+
+    act(() => {
+      handle.ctx.startMining({ userInput: 'b' } as any);
+    });
+    expect(startMiningMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveStart({ success: true, data: { taskId: 't1', task: mkTask('t1') } });
+    });
+    expect(handle.ctx.miningStarting).toBe(false);
+    expect(screen.getByTestId('tasks').textContent).toBe('t1:running:40');
+  });
+
+  test('focusMiningTask 切换聚焦任务，miningTask 派生跟随', async () => {
+    await mountAndStart();
+    await startTask('t2');
+    expect(handle.ctx.miningTask?.taskId).toBe('t2');
+
+    act(() => {
+      handle.ctx.focusMiningTask('t1');
+    });
+
+    expect(screen.getByTestId('focused').textContent).toBe('t1');
+    expect(handle.ctx.miningTask?.taskId).toBe('t1');
+    // 认不出的任务 id 不改焦点（防止悬空焦点）
+    act(() => {
+      handle.ctx.focusMiningTask('nope');
+    });
+    expect(screen.getByTestId('focused').textContent).toBe('t1');
+  });
+
+  test('resetMiningTask 只移除指定任务并改焦到剩余最新，传输同步拆除', async () => {
+    await mountAndStart();
+    await startTask('t2');
+
+    await act(async () => {
+      handle.ctx.resetMiningTask('t2');
+    });
+
+    expect(screen.getByTestId('tasks').textContent).toBe('t1:running:40');
+    expect(screen.getByTestId('focused').textContent).toBe('t1');
+    expect(wsClosed.get('t2')).toHaveBeenCalled();
+    expect(wsClosed.get('t1')).not.toHaveBeenCalled();
   });
 });

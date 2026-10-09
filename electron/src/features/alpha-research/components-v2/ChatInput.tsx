@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Square, Compass } from 'lucide-react';
+import { Send, Compass } from 'lucide-react';
 import { TaskConfig, UniverseId, UniverseInfo } from '../types-v2';
 import { alphaAgentService, MarketInfo } from '../services/alphaAgentService';
 import { getUniverses } from '../services-v2/api';
@@ -14,8 +14,13 @@ const MARKET_LABELS: Record<string, string> = {
 
 interface ChatInputProps {
   onSubmit: (config: TaskConfig) => void;
-  onStop?: () => void;
-  isRunning?: boolean;
+  /**
+   * 提交在途（POST /evolve 未返回）——只锁提交动作本身。
+   * 多任务下「已有任务运行」不再是提交障碍（任务相互独立），运行数走 runningCount。
+   */
+  isSubmitting?: boolean;
+  /** 运行中任务数：只影响占位提示文案，不禁用任何控件 */
+  runningCount?: number;
   inline?: boolean;
   initialPrompt?: string;
   /** 「重跑」回填：市场/池/数据源。只在有值时覆盖，空值不动用户当前选择。 */
@@ -27,8 +32,8 @@ interface ChatInputProps {
 
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSubmit,
-  onStop,
-  isRunning = false,
+  isSubmitting = false,
+  runningCount = 0,
   inline = false,
   initialPrompt = '',
   initialConfig,
@@ -70,7 +75,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   }, []);
 
   const handleSubmit = () => {
-    if (isRunning) return;
+    if (isSubmitting) return;
     const suffix = config.librarySuffix?.trim() || undefined;
     onSubmit({
       userInput: input.trim(),
@@ -121,7 +126,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               <button
                 key={m.id}
                 onClick={() => setMiningMarket(m.id)}
-                disabled={isRunning || !m.ready}
+                disabled={isSubmitting || !m.ready}
                 className={`rounded-full px-2.5 py-[3px] text-[11px] font-semibold transition-all duration-200 flex items-center gap-1 ${
                   miningMarket === m.id
                     ? 'bg-blue-50 text-blue-600 ring-1 ring-blue-200 shadow-xs'
@@ -143,7 +148,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 <select
                   value={universe}
                   onChange={(e) => setUniverse(e.target.value as UniverseId)}
-                  disabled={isRunning}
+                  disabled={isSubmitting}
                   className="rounded-full bg-slate-50 px-2.5 py-[3px] text-[11px] font-medium text-slate-600 border-0 focus:outline-none focus:ring-1 focus:ring-blue-200 disabled:opacity-40 appearance-none cursor-pointer"
                   title="选择因子挖掘的股票池"
                 >
@@ -170,7 +175,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 <button
                   key={ds.id}
                   onClick={() => setDataSource(ds.id)}
-                  disabled={isRunning}
+                  disabled={isSubmitting}
                   className={`rounded-full px-2.5 py-[3px] text-[11px] font-semibold transition-all duration-200 ${
                     dataSource === ds.id
                       ? 'bg-blue-50 text-blue-600 ring-1 ring-blue-200 shadow-xs'
@@ -209,41 +214,34 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                isRunning
-                  ? '实验运行中...可切换页面，任务不会中断'
+                isSubmitting
+                  ? '任务提交中...'
                   : selectedNotReady
                     ? '该市场数据未就绪，请先在管理后台同步数据'
-                    : useCustomMiningDirection
-                      ? '已开启自选挖掘方向，将使用「设置 → 挖掘方向」中的选项'
-                      : miningMarket === 'crypto'
-                        ? '描述加密货币因子需求，如：短期动量反转、量价背离...'
-                        : '描述因子挖掘需求 (如：挖掘基于5日动量反转与成交量偏度组合的Alpha因子)，按 Enter 发送'
+                    : runningCount > 0
+                      ? `已有 ${runningCount} 个任务运行中，可继续提交新想法（任务相互独立）`
+                      : useCustomMiningDirection
+                        ? '已开启自选挖掘方向，将使用「设置 → 挖掘方向」中的选项'
+                        : miningMarket === 'crypto'
+                          ? '描述加密货币因子需求，如：短期动量反转、量价背离...'
+                          : '描述因子挖掘需求 (如：挖掘基于5日动量反转与成交量偏度组合的Alpha因子)，按 Enter 发送'
               }
-              disabled={isRunning}
+              disabled={isSubmitting}
               className="flex-1 bg-transparent text-sm placeholder:text-slate-400 focus:outline-none focus:ring-0 resize-none leading-relaxed font-sans rounded-xl border border-transparent focus:border-blue-200"
               rows={2}
               style={{ minHeight: '44px', maxHeight: '100px' }}
             />
 
-            {/* Send / Stop button */}
-            {isRunning && onStop ? (
-              <button
-                onClick={onStop}
-                className="flex-shrink-0 p-2.5 rounded-xl bg-red-500 text-white hover:bg-red-600 transition-all duration-200 hover:scale-105 active:scale-95 shadow-lg shadow-red-500/25 cursor-pointer"
-                title="中断实验"
-              >
-                <Square className="h-4 w-4" />
-              </button>
-            ) : (
-              <button
-                onClick={handleSubmit}
-                disabled={isRunning || !!selectedNotReady}
-                className="flex-shrink-0 p-2.5 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 text-white hover:from-blue-600 hover:to-indigo-700 disabled:from-slate-300 disabled:to-slate-400 disabled:cursor-not-allowed transition-all duration-200 hover:scale-105 active:scale-95 shadow-lg shadow-blue-500/25 disabled:shadow-none cursor-pointer"
-                title={selectedNotReady ? '市场数据未就绪' : '发送 (Enter)'}
-              >
-                <Send className="h-4 w-4" />
-              </button>
-            )}
+            {/* Send button：多任务下「停止」不属于输入框（每行任务各有自己的停止），
+                这里只负责提交；仅在提交在途或市场未就绪时禁用 */}
+            <button
+              onClick={handleSubmit}
+              disabled={isSubmitting || !!selectedNotReady}
+              className="flex-shrink-0 p-2.5 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 text-white hover:from-blue-600 hover:to-indigo-700 disabled:from-slate-300 disabled:to-slate-400 disabled:cursor-not-allowed transition-all duration-200 hover:scale-105 active:scale-95 shadow-lg shadow-blue-500/25 disabled:shadow-none cursor-pointer"
+              title={selectedNotReady ? '市场数据未就绪' : '发送 (Enter)'}
+            >
+              <Send className="h-4 w-4" />
+            </button>
           </div>
         </div>
       </div>

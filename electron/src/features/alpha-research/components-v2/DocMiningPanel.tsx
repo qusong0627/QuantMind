@@ -93,7 +93,8 @@ function ensureClipboardFileName(f: File): File {
 export interface DocMiningPanelProps {
   /** 开始挖掘（TaskContext.startMining）；docId 一并下发记录文档血统 */
   onStartMining: (config: TaskConfig) => void;
-  /** 任务提交中/运行中：锁提交 */
+  /** 提交在途（POST /evolve 未返回）时锁提交。多任务下不再代表「有任务运行中」——
+   *  已有任务运行不挡新文档挖掘（任务相互独立），并发上限由后端 429 兜底 */
   isRunning: boolean;
   /** 「文档解析 → 继续挖掘」带回的文档（key 为代次：连点两次也要重新应用） */
   resume?: DocMiningResume | null;

@@ -13,9 +13,26 @@ interface MiningDashboardPageProps {
   onNavigate?: (page: PageId) => void;
 }
 
+/** 任务胶囊的状态点颜色（与运行中/已完成/失败三态对应） */
+function statusDotClass(status: string): string {
+  if (status === 'running') return 'bg-blue-500 animate-pulse';
+  if (status === 'completed') return 'bg-emerald-500';
+  return 'bg-rose-400';
+}
+
+function statusLabel(status: string): string {
+  if (status === 'running') return '运行中';
+  if (status === 'completed') return '已完成';
+  if (status === 'failed') return '失败';
+  return '未知';
+}
+
 export const MiningDashboardPage: React.FC<MiningDashboardPageProps> = ({ onNavigate }) => {
   const {
     miningTask: task,
+    miningTasks,
+    focusedTaskId,
+    focusMiningTask,
     miningEquityCurve: equityCurve,
     miningDrawdownCurve: drawdownCurve,
     stopMining,
@@ -62,6 +79,42 @@ export const MiningDashboardPage: React.FC<MiningDashboardPageProps> = ({ onNavi
       onNavigate={onNavigate || (() => {})}
       showNavigation={!!onNavigate}
     >
+      {/* 任务切换（多任务时出现）：点哪条就把演化台切到哪条，运行中/已完成都可回看 */}
+      {miningTasks.length > 1 && (
+        <div
+          role="tablist"
+          aria-label="任务切换"
+          className="mb-3 flex flex-wrap items-center justify-center gap-1.5"
+        >
+          {miningTasks.map((t) => {
+            const active = t.taskId === focusedTaskId;
+            const label = (t.config?.userInput?.trim() || t.taskId).slice(0, 18);
+            const pct = Math.min(100, Math.max(0, t.progress?.progress ?? 0));
+            return (
+              <button
+                key={t.taskId}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => focusMiningTask(t.taskId)}
+                title={`${t.config?.userInput?.trim() || t.taskId} · ${statusLabel(t.status)}`}
+                className={`inline-flex max-w-[16rem] items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors cursor-pointer ${
+                  active
+                    ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-2xs'
+                    : 'border-slate-200 bg-white/80 text-slate-500 hover:border-blue-200 hover:text-blue-600'
+                }`}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${statusDotClass(t.status)}`} />
+                <span className="truncate">{label}</span>
+                {t.status === 'running' && (
+                  <span className="font-mono text-[10px] text-blue-400 shrink-0">{pct}%</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* 任务状态栏：状态 + 进度 + 停止（替代原底部悬浮输入框） */}
       <div className="mb-4 flex items-center justify-center gap-3 rounded-2xl border border-border/60 bg-white/80 backdrop-blur-xl px-4 py-3 shadow-xs text-center">
         {task.status === 'running' ? (
@@ -93,9 +146,9 @@ export const MiningDashboardPage: React.FC<MiningDashboardPageProps> = ({ onNavi
         </span>
         {task.status === 'running' && (
           <button
-            onClick={stopMining}
+            onClick={() => void stopMining(task.taskId)}
             className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 transition-colors cursor-pointer"
-            title="停止当前任务"
+            title="只停止这个任务，其它任务不受影响"
           >
             <Square className="w-3 h-3" />
             停止任务
