@@ -12,7 +12,7 @@ import { ArrowRightLeft, Award, BarChart3, Database, Filter, Layers, LineChart, 
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { ApiError, getCatalog, getLeaderboard } from '../services/factorResearchService';
 import type { FactorDataset, RangeParams } from '../services/factorResearchService';
-import type { FactorMeta, LeaderboardRow } from '../types/factorResearch';
+import type { CategoryFilter, FactorMeta, LeaderboardRow } from '../types/factorResearch';
 import { RangePicker } from '../components/common';
 import type { RangeValue } from '../components/common';
 import { CatalogSidebar } from '../components/CatalogSidebar';
@@ -60,11 +60,17 @@ const FactorResearchPage: React.FC = () => {
   );
   const isTool = isToolTab(tab);
 
-  // URL 为准：外部导航（徽章深链等）带 ?tab= 时同步切换页签
+  // URL 为准：外部导航（徽章深链等）带 ?tab= 时同步切换页签。
+  // 依赖里**只放 searchParams、不放 tab**：本页自己的 setTab 是「先改 state、后跳
+  // URL」，中间那一版渲染 searchParams 还停在旧值（如 ?tab=single），effect 若跟着
+  // tab 一起重跑，就会拿这个滞后 URL 把刚切过去的页签拽回去。回排行榜的跳转会把
+  // ?tab= 清成空串，没有第二次纠正机会 —— 表现为「点排行榜却停在单因子」卡死
+  // （2026-10-09 由分类接线测试实测暴露；切去 *别的* 页签时 URL 最后会带上新
+  // ?tab= 再纠正一次，所以这个坑只在回排行榜时显形）。
   useEffect(() => {
     const fromUrl = searchParams.get('tab');
-    if (isValidTab(fromUrl) && fromUrl !== tab) setTabState(fromUrl);
-  }, [searchParams, tab]);
+    if (isValidTab(fromUrl)) setTabState(fromUrl);
+  }, [searchParams]);
   const [factors, setFactors] = useState<FactorMeta[]>([]);
   const [l1Order, setL1Order] = useState<string[]>([]);
   const [l2Order, setL2Order] = useState<Record<string, string[]>>({});
@@ -77,6 +83,15 @@ const FactorResearchPage: React.FC = () => {
   const [lbN, setLbN] = useState(30);
   const [selected, setSelected] = useState<string[]>([]);
   const [activeCode, setActiveCode] = useState<string | null>(null);
+  /**
+   * 左侧目录选中的分类限定。只作用于排行榜的过滤视图（榜单内的名次/综合分
+   * 本就是全库截面口径）；`l2: null` = 整个大类。切数据集时清空 —— l1/l2 是
+   * 各库自己的命名空间（经典库 l2 是「动量」这类中文名），跨库残留只会筛出空榜。
+   */
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter | null>(null);
+  /** 目录（factors）拉取中。与共享的 `loading` 分开：那个还盖着榜单重算， */
+  /** 而左侧目录的空态文案（「正在加载因子目录…」vs「无匹配因子」）只跟这一件事有关。 */
+  const [catalogLoading, setCatalogLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
@@ -145,6 +160,7 @@ const FactorResearchPage: React.FC = () => {
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setCatalogLoading(true);
     catalogInflightRef.current.add(dataset);
     getCatalog(dataset)
       .then((cat) => {
@@ -164,7 +180,10 @@ const FactorResearchPage: React.FC = () => {
       .finally(() => {
         // 不论组件还在不在都要销号：请求已经结束了，留在册只会让补缺那条路永远跳过它。
         catalogInflightRef.current.delete(dataset);
-        if (alive) setLoading(false);
+        if (alive) {
+          setLoading(false);
+          setCatalogLoading(false);
+        }
       });
     return () => {
       alive = false;
@@ -191,6 +210,9 @@ const FactorResearchPage: React.FC = () => {
     setActiveCode(keepActiveRef.current);
     keepActiveRef.current = null;
     setTagFilter([]);
+    // 分类限定同样清空：l1/l2 是各库自己的命名空间（经典库 l2 是「动量」这类
+    // 中文名），残留私人库的分类名去筛经典库只会得到一块空榜。
+    setCategoryFilter(null);
     setRegisterTarget(null);
     setPanel('none');
   }, [dataset]);
@@ -296,6 +318,18 @@ const FactorResearchPage: React.FC = () => {
     setSelected(selected.includes(code) ? selected.filter((c) => c !== code) : [...selected, code]);
   const toggleTag = (tag: string) =>
     setTagFilter(tagFilter.includes(tag) ? tagFilter.filter((t) => t !== tag) : [...tagFilter, tag]);
+
+  /**
+   * 左侧目录点分类名：把右侧排行榜限定到该类（再点一次取消）。选中时切回排行榜 ——
+   * 限定只作用于榜单视图，停在单因子/合成等页签上点了等于没反应。
+   */
+  const handleSelectCategory = useCallback(
+    (f: CategoryFilter | null) => {
+      setCategoryFilter(f);
+      if (f) setTab('leaderboard');
+    },
+    [setTab],
+  );
 
   /**
    * 打开单因子分析。`target` 是该因子所属的数据集（筛选页签会带过来）——
@@ -426,6 +460,9 @@ const FactorResearchPage: React.FC = () => {
             selected={selected}
             activeCode={activeCode}
             tagFilter={tagFilter}
+            loading={catalogLoading}
+            categoryFilter={categoryFilter}
+            onSelectCategory={handleSelectCategory}
             onToggle={toggleSelected}
             onOpen={openSingle}
           />
@@ -531,6 +568,8 @@ const FactorResearchPage: React.FC = () => {
                 error={null}
                 selected={selected}
                 tagFilter={tagFilter}
+                categoryFilter={categoryFilter}
+                onClearCategoryFilter={() => setCategoryFilter(null)}
                 n={lbN}
                 onNChange={setLbN}
                 onToggle={toggleSelected}

@@ -93,6 +93,12 @@ export interface LeaderboardResponse {
   meta: Record<string, unknown> & { range?: RangeMeta };
 }
 
+/** 左侧目录选中的分类限定（l2 为 null = 整个大类）；null = 全部因子 */
+export interface CategoryFilter {
+  l1: string;
+  l2: string | null;
+}
+
 export interface StockRow {
   rank: number;
   symbol: string;
@@ -151,7 +157,10 @@ export interface FactorDetail {
   ic: SeriesPoint[];
   ic_kpi: FactorKpi;
   stocks: StockRow[];
-  stocks_date: string;
+  /** 个股表截面日；该因子整段无数据时为 null */
+  stocks_date: string | null;
+  /** true = 面板末月无该因子数据，已回退到它自身最近一个有数据的截面 */
+  stocks_stale?: boolean;
   industry_dist: DistRow[];
   cap_dist: DistRow[];
 }

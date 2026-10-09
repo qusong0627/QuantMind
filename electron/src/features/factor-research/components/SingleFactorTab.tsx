@@ -279,10 +279,21 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset }) => {
           {/* 个股表 + 分布 */}
           <div className="shrink-0 grid grid-cols-1 xl:grid-cols-3 gap-2">
             <Card
-              title={`Top 30 股票（截面日 ${detail.stocks_date}，按得分降序）`}
+              title={
+                detail.stocks_date
+                  ? `Top 30 股票（截面日 ${detail.stocks_date}${
+                      detail.stocks_stale ? '，该因子最近可用截面' : ''
+                    }，按得分降序）`
+                  : 'Top 30 股票（暂无截面数据）'
+              }
               className="xl:col-span-2"
               extra={<span className="text-[10px] text-slate-400">市值/PE/PB 为当日快照 · 成交额=近 252 交易日日均</span>}
             >
+              {detail.stocks_stale && (
+                <div className="mb-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] leading-relaxed text-amber-700">
+                  该因子数据未更新到最新截面，以下为它最近一个有数据的截面（{detail.stocks_date}），行业/市值分布同口径。
+                </div>
+              )}
               <div className="h-full min-h-0 overflow-auto custom-scrollbar" style={{ maxHeight: 320 }}>
                 <table className="w-full text-[10px]">
                   <thead className="sticky top-0 bg-white">
@@ -300,6 +311,13 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset }) => {
                     </tr>
                   </thead>
                   <tbody>
+                    {detail.stocks.length === 0 && (
+                      <tr>
+                        <td colSpan={10} className="py-3 text-center text-slate-400">
+                          该因子在当前面板区间内没有可用的截面数据
+                        </td>
+                      </tr>
+                    )}
                     {detail.stocks.map((s) => (
                       <tr key={s.symbol} className="border-t border-slate-50 hover:bg-slate-50/60">
                         <td className="py-[3px] text-slate-400 font-mono">{s.rank}</td>
@@ -328,7 +346,7 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset }) => {
             </div>
           </div>
           <div className="shrink-0 text-[10px] text-slate-300 pb-1">
-            月末收盘调仓、Top-N 等权、剔除 ST/退市、双边成本 0.2%（按换手计）·「Top 30 股票」始终是最新截面 ·
+            月末收盘调仓、Top-N 等权、剔除 ST/退市、双边成本 0.2%（按换手计）·「Top 30 股票」始终为该因子最近可用截面 ·
             快照由 build_factor_research.py 构建
           </div>
         </>

@@ -1,10 +1,13 @@
 /**
  * 因子研究 —— 排行榜页签：区间内全列排序（综合分 = 0.5×有效性 + 0.5×业绩）、
  * 双标签展示与筛选、勾选带入对比 / 合成。
+ *
+ * 分类限定：左侧目录点 L1/L2 后，这里只排那一类（榜单内的名次/综合分本就是
+ * 全库截面口径，分类只是过滤视图）；顶部徽章可一键清除。
  */
 import React, { useMemo, useState } from 'react';
-import { ArrowRightLeft, CheckSquare, Layers, PackagePlus, Square, TrendingUp } from 'lucide-react';
-import type { LeaderboardRow } from '../types/factorResearch';
+import { ArrowRightLeft, CheckSquare, Layers, Loader2, PackagePlus, Square, TrendingUp, X } from 'lucide-react';
+import type { CategoryFilter, LeaderboardRow } from '../types/factorResearch';
 import { ALL_TAGS, Card, fmtNum, fmtPct, TagChip } from './common';
 
 interface Props {
@@ -17,6 +20,9 @@ interface Props {
   onNChange: (n: number) => void;
   onToggle: (code: string) => void;
   onToggleTag: (tag: string) => void;
+  /** 左侧目录选中的分类限定（null=全部） */
+  categoryFilter: CategoryFilter | null;
+  onClearCategoryFilter: () => void;
   onSendCompare: () => void;
   onSendCompose: () => void;
   onOpenSingle: (code: string) => void;
@@ -54,15 +60,22 @@ const COLS: Col[] = [
 
 export const LeaderboardTab: React.FC<Props> = ({
   rows, loading, error, selected, tagFilter, n, onNChange, onToggle, onToggleTag,
+  categoryFilter, onClearCategoryFilter,
   onSendCompare, onSendCompose, onOpenSingle, meta, onRegisterToTraining,
 }) => {
   const [sortKey, setSortKey] = useState<string>('composite');
   const [asc, setAsc] = useState(false);
 
   const view = useMemo(() => {
-    const filtered = tagFilter.length
-      ? rows.filter((r) => tagFilter.includes(r.env_tag) || tagFilter.includes(r.time_tag))
-      : rows;
+    let filtered = rows;
+    if (categoryFilter) {
+      filtered = filtered.filter(
+        (r) => r.l1 === categoryFilter.l1 && (!categoryFilter.l2 || r.l2 === categoryFilter.l2),
+      );
+    }
+    if (tagFilter.length) {
+      filtered = filtered.filter((r) => tagFilter.includes(r.env_tag) || tagFilter.includes(r.time_tag));
+    }
     const sorted = [...filtered];
     sorted.sort((a, b) => {
       if (sortKey === 'name') {
@@ -75,7 +88,7 @@ export const LeaderboardTab: React.FC<Props> = ({
       return asc ? na - nb : nb - na;
     });
     return sorted;
-  }, [rows, sortKey, asc, tagFilter]);
+  }, [rows, sortKey, asc, tagFilter, categoryFilter]);
 
   const range = meta?.range as { start?: string; end?: string; n_months?: number } | undefined;
 
@@ -170,6 +183,7 @@ export const LeaderboardTab: React.FC<Props> = ({
             不并入、不可互比。
           </p>
           <p>
+            点左侧目录的分类名（L1/L2）= 榜单只看该类，再点一次或点顶部「分类」徽章取消；
             点击列头可改排序（如点「最大回撤」看最抗跌、点「年化」看最赚钱）；勾选因子后可一键带入对比 /
             合成
             {/* 只在实际有入口时提这句：经典因子库不提供注册（后端会逐条跳过），
@@ -179,8 +193,19 @@ export const LeaderboardTab: React.FC<Props> = ({
         </div>
       </details>
 
-      {/* 标签筛选 */}
+      {/* 分类限定 + 标签筛选 */}
       <div className="shrink-0 flex items-center gap-1 flex-wrap">
+        {categoryFilter && (
+          <button
+            onClick={onClearCategoryFilter}
+            title="清除分类限定（回到全部因子）"
+            className="flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-600 hover:bg-blue-100"
+          >
+            分类：{categoryFilter.l1}
+            {categoryFilter.l2 ? ` / ${categoryFilter.l2}` : ''}
+            <X className="w-2.5 h-2.5" />
+          </button>
+        )}
         <span className="text-[10px] font-bold text-slate-400 mr-0.5">标签筛选</span>
         {ALL_TAGS.map((t) => {
           const on = tagFilter.includes(t);
@@ -196,16 +221,32 @@ export const LeaderboardTab: React.FC<Props> = ({
 
       {/* 表格 */}
       <Card
-        title={`因子排行榜（${view.length}）`}
+        title={`因子排行榜（${view.length}${categoryFilter ? ` / 全部 ${rows.length}` : ''}）`}
         className="flex-1"
-        extra={<span className="text-[10px] text-slate-400">点击行看单因子 · 点列头排序</span>}
+        extra={
+          loading && rows.length ? (
+            <span className="flex items-center gap-1 text-[10px] font-bold text-indigo-500">
+              <Loader2 className="w-3 h-3 animate-spin" /> 重算中…
+            </span>
+          ) : (
+            <span className="text-[10px] text-slate-400">点击行看单因子 · 点列头排序</span>
+          )
+        }
       >
         {error ? (
           <div className="h-full flex items-center justify-center text-xs text-rose-500">{error}</div>
-        ) : loading ? (
-          <div className="h-full rounded-xl bg-slate-50 animate-pulse" />
+        ) : loading && rows.length === 0 ? (
+          // 首次进入要现算全库综合分（私人库 2000+ 因子需数秒）：给可读的进度提示，
+          // 而不是一块无字灰屏。已有数据的重算不落到这里（表格变暗 + 「重算中」）。
+          <div className="h-full flex flex-col items-center justify-center gap-3">
+            <Loader2 className="w-5 h-5 animate-spin text-indigo-400" />
+            <div className="text-xs text-slate-400">正在加载因子数据…</div>
+            <div className="text-[10px] text-slate-300">
+              首次进入需要数秒（私人因子库 2000+ 因子现算综合分与标签）
+            </div>
+          </div>
         ) : (
-          <div className="h-full overflow-y-auto custom-scrollbar">
+          <div className={`h-full overflow-y-auto custom-scrollbar ${loading ? 'opacity-60 pointer-events-none' : ''}`}>
             <table className="w-full text-[11px]">
               <thead className="sticky top-0 bg-white z-10">
                 <tr className="text-slate-400 font-bold">
@@ -228,6 +269,15 @@ export const LeaderboardTab: React.FC<Props> = ({
                 </tr>
               </thead>
               <tbody>
+                {view.length === 0 && (
+                  <tr>
+                    <td colSpan={16} className="py-4 text-center text-[11px] text-slate-400">
+                      {categoryFilter
+                        ? '该分类下没有因子——点上方「分类」徽章清除限定'
+                        : '没有符合当前筛选的因子'}
+                    </td>
+                  </tr>
+                )}
                 {view.map((r) => {
                   const isSel = selected.includes(r.code);
                   return (
