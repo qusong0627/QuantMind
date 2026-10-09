@@ -41,6 +41,7 @@ from typing import Any
 from backend.shared.factor_pool_contract import EDGES_TABLE, POOL_TABLE
 
 from . import pool_panels
+from .pool_cleanup import CleanupCandidate, CleanupCriteria, evaluate_cleanup
 from .pool_edges import DEFAULT_TOP_K as _FORMULA_TOP_K
 from .pool_edges import formula_tokens, similar_pairs
 from .pool_scoring import (
@@ -109,6 +110,34 @@ def _scoring_params() -> ScoringParams:
         freshness_halflife_days=_f(
             "freshness_halflife_days", defaults.freshness_halflife_days
         ),
+    )
+
+
+def _cleanup_criteria() -> CleanupCriteria:
+    """清理判据阈值（yaml ``cleanup:`` 段 > 代码默认，缺省见 CleanupCriteria）。"""
+    from .config import load_plugin_config
+
+    raw = load_plugin_config().get("cleanup") or {}
+    defaults = CleanupCriteria()
+
+    def _f(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            logger.warning("cleanup.%s=%r 非法，用默认 %s", key, raw.get(key), default)
+            return default
+
+    def _i(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            logger.warning("cleanup.%s=%r 非法，用默认 %s", key, raw.get(key), default)
+            return default
+
+    return CleanupCriteria(
+        corr_dup=_f("corr_dup", defaults.corr_dup),
+        weak_icir_quantile=_f("weak_icir_quantile", defaults.weak_icir_quantile),
+        min_icir_sample=_i("min_icir_sample", defaults.min_icir_sample),
     )
 
 
@@ -762,6 +791,8 @@ async def build_injection_digest(
         "p.market = :market",
         "p.universe = :universe",
         "f.status = 'completed'",
+        # 归档因子退出注入与 SOTA 标杆（用户主动判定「不值得再参考」）
+        "p.archived_at IS NULL",
     ]
     params: dict[str, Any] = {
         "user_id": str(user_id),
@@ -951,9 +982,18 @@ async def pool_overview(
     from backend.shared.database_manager_v2 import get_session
 
     conds, params = _scope_conds(user_id, market, universe)
-    where = " AND ".join(conds)
+    where = " AND ".join([*conds, "p.archived_at IS NULL"])
+    where_archived = " AND ".join([*conds, "p.archived_at IS NOT NULL"])
     numeric = "^-?[0-9]+(\\.[0-9]+)?$"
     async with get_session(read_only=True) as session:
+        archived_count = (
+            await session.execute(
+                text(
+                    f"SELECT COUNT(*)::int FROM {POOL_TABLE} p WHERE {where_archived}"
+                ),
+                params,
+            )
+        ).scalar()
         agg = (
             (
                 await session.execute(
@@ -1000,6 +1040,8 @@ async def pool_overview(
     out = dict(agg or {})
     out["pool_diversity"] = None
     out["n_eff"] = None
+    # 归档计数照实回传（默认聚合只算活跃因子；UI 用这个数字给「已归档 N」）
+    out["archived_count"] = int(archived_count or 0)
     if div and div["d"] not in (None, ""):
         try:
             out["pool_diversity"] = float(div["d"])
@@ -1031,12 +1073,16 @@ async def list_pool_factors(
     limit: int = 50,
     offset: int = 0,
     sort: str = "pool_score",
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     from sqlalchemy import text
 
     from backend.shared.database_manager_v2 import get_session
 
     conds, params = _scope_conds(user_id, market, universe)
+    if not include_archived:
+        # 归档因子默认退出列表（UI 显式勾选「含已归档」才可见）
+        conds.append("p.archived_at IS NULL")
     where = " AND ".join(conds)
     order = _SORT_COLUMNS.get(sort, _SORT_COLUMNS["pool_score"])
     limit = max(1, min(int(limit), 500))
@@ -1062,6 +1108,7 @@ async def list_pool_factors(
                            p.pool_score, p.novelty, p.max_pool_corr,
                            p.max_pool_corr_with, p.diversity_contrib,
                            p.times_retrieved, p.last_retrieved_at, p.panel_ref,
+                           p.archived_at,
                            f.created_at, p.updated_at,
                            f.metadata_json->'materialization'->'gates' AS gates
                     FROM {POOL_TABLE} p
@@ -1090,12 +1137,15 @@ async def pool_graph(
     market: str,
     universe: str | None = None,
     max_nodes: int = 200,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     from sqlalchemy import text
 
     from backend.shared.database_manager_v2 import get_session
 
     conds, params = _scope_conds(user_id, market, universe)
+    if not include_archived:
+        conds.append("p.archived_at IS NULL")
     where = " AND ".join(conds)
     max_nodes = max(2, min(int(max_nodes), 500))
     numeric = "^-?[0-9]+(\\.[0-9]+)?$"
@@ -1157,11 +1207,214 @@ async def pool_graph(
     return {"nodes": [dict(n) for n in nodes], "edges": edges, "max_nodes": max_nodes}
 
 
+# ── 非 SOTA 清理建议与归档（P3）─────────────────────────────────────────
+#
+# 纪律：**只建议不自动删**。判据（pool_cleanup）算好给用户看，归档与否由
+# 用户决定；归档只置 ``archived_at`` 时间戳——池行/边/面板全保留，默认
+# 退出注入摘要、池列表、谱系图与总览聚合，随时可恢复（unarchive）。
+# 归档不参与 refresh_pool 的重算过滤：数据层仍在，隐藏是**视图决策**。
+
+
+async def cleanup_suggestions(
+    *,
+    user_id: str,
+    market: str,
+    universe: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """全池清理建议（判据见 ``pool_cleanup.evaluate_cleanup``）。
+
+    在**全 scope** 上评估（分位/支配关系必须看全池），输出截断到 ``limit``；
+    ``summary`` 计数覆盖全部建议（不是截断后的），``criteria`` 回传实际
+    阈值——UI 要展示「判据是什么」。archived 因子不参与评估。
+    """
+    from sqlalchemy import text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    conds, params = _scope_conds(user_id, market, universe)
+    scope_conds = [*conds, "f.status = 'completed'"]
+    active_where = " AND ".join([*scope_conds, "p.archived_at IS NULL"])
+    archived_where = " AND ".join([*conds, "p.archived_at IS NOT NULL"])
+    async with get_session(read_only=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(f"""
+                    SELECT p.factor_id, f.factor_name, f.factor_formulation,
+                           f.ic_value,
+                           f.metadata_json->>'icir' AS icir,
+                           f.metadata_json->'quality'->>'pfs' AS pfs,
+                           p.pool_score, p.max_pool_corr, p.max_pool_corr_with,
+                           p.diversity_contrib, p.times_retrieved
+                    FROM {POOL_TABLE} p
+                    JOIN rd_agent_factors f ON f.factor_id = p.factor_id
+                    WHERE {active_where}
+                """),
+                    params,
+                )
+            )
+            .mappings()
+            .all()
+        )
+        archived_count = (
+            await session.execute(
+                text(
+                    f"SELECT COUNT(*)::int FROM {POOL_TABLE} p WHERE {archived_where}"
+                ),
+                params,
+            )
+        ).scalar()
+
+    criteria = _cleanup_criteria()
+    candidates = [
+        CleanupCandidate(
+            factor_id=str(r["factor_id"]),
+            factor_name=str(r["factor_name"] or r["factor_id"]),
+            icir=_as_float(r["icir"]),
+            pool_score=_as_float(r["pool_score"]),
+            max_pool_corr=(
+                abs(corr)
+                if (corr := _as_float(r["max_pool_corr"])) is not None
+                else None
+            ),
+            max_pool_corr_with=(
+                str(r["max_pool_corr_with"]) if r["max_pool_corr_with"] else None
+            ),
+            diversity_contrib=_as_float(r["diversity_contrib"]),
+        )
+        for r in rows
+    ]
+    report = evaluate_cleanup(candidates, criteria)
+    by_row = {str(r["factor_id"]): r for r in rows}
+
+    summary: dict[str, int] = {}
+    for suggestion in report.suggestions:
+        for reason in suggestion.reasons:
+            summary[reason.code] = summary.get(reason.code, 0) + 1
+
+    items: list[dict[str, Any]] = []
+    for suggestion in report.suggestions[: max(1, int(limit))]:
+        row = by_row[suggestion.candidate.factor_id]
+        items.append(
+            {
+                "factor_id": suggestion.candidate.factor_id,
+                "factor_name": suggestion.candidate.factor_name,
+                "factor_formulation": str(row["factor_formulation"] or ""),
+                "icir": suggestion.candidate.icir,
+                "pool_score": suggestion.candidate.pool_score,
+                "max_pool_corr": suggestion.candidate.max_pool_corr,
+                "max_pool_corr_with": suggestion.candidate.max_pool_corr_with,
+                "diversity_contrib": suggestion.candidate.diversity_contrib,
+                "times_retrieved": int(row["times_retrieved"] or 0),
+                "severity": suggestion.severity,
+                "reasons": [
+                    {"code": r.code, "label": r.label, "detail": r.detail}
+                    for r in suggestion.reasons
+                ],
+            }
+        )
+
+    sota = _pool_sota(rows)
+    return {
+        "items": items,
+        "total": len(report.suggestions),
+        "pool_size": len(rows),
+        "archived_count": int(archived_count or 0),
+        "summary": summary,
+        "criteria": {
+            "corr_dup": criteria.corr_dup,
+            "weak_icir_quantile": criteria.weak_icir_quantile,
+            "min_icir_sample": criteria.min_icir_sample,
+            "weak_icir_threshold": report.weak_icir_threshold,
+            "icir_sample_size": report.icir_sample_size,
+        },
+        "sota": {
+            "count": sota.count,
+            "best_ic": sota.best_ic,
+            "best_icir": sota.best_icir,
+            "best_pfs": sota.best_pfs,
+        },
+    }
+
+
+def _norm_ids(factor_ids) -> list[str]:
+    """去重 + 剔空 + 排序（确定性；上限由 router 层把关）。"""
+    return sorted({str(x) for x in factor_ids if str(x or "").strip()})
+
+
+async def archive_factors(*, user_id: str, factor_ids) -> dict[str, Any]:
+    """批量归档（置 ``archived_at``）。**只认本人的行**——跨用户 id 只进 skipped。
+
+    归档不是删除，也不检查因子是否「够差」：这是用户看过判据后的决定。
+    """
+    from sqlalchemy import text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    ids = _norm_ids(factor_ids)
+    if not ids:
+        return {"archived": 0, "archived_ids": [], "skipped": []}
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                text(f"""
+                    UPDATE {POOL_TABLE}
+                       SET archived_at = NOW(), updated_at = NOW()
+                     WHERE factor_id = ANY(:ids)
+                       AND user_id = :user_id
+                       AND archived_at IS NULL
+                 RETURNING factor_id
+                """),
+                {"ids": ids, "user_id": str(user_id)},
+            )
+        ).all()
+    done = {str(r[0]) for r in rows}
+    return {
+        "archived": len(done),
+        "archived_ids": sorted(done),
+        "skipped": sorted(set(ids) - done),
+    }
+
+
+async def unarchive_factors(*, user_id: str, factor_ids) -> dict[str, Any]:
+    """恢复归档（清 ``archived_at``）；不在池/非本人/未归档的 id 进 skipped。"""
+    from sqlalchemy import text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    ids = _norm_ids(factor_ids)
+    if not ids:
+        return {"restored": 0, "restored_ids": [], "skipped": []}
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                text(f"""
+                    UPDATE {POOL_TABLE}
+                       SET archived_at = NULL, updated_at = NOW()
+                     WHERE factor_id = ANY(:ids)
+                       AND user_id = :user_id
+                       AND archived_at IS NOT NULL
+                 RETURNING factor_id
+                """),
+                {"ids": ids, "user_id": str(user_id)},
+            )
+        ).all()
+    done = {str(r[0]) for r in rows}
+    return {
+        "restored": len(done),
+        "restored_ids": sorted(done),
+        "skipped": sorted(set(ids) - done),
+    }
+
+
 __all__ = [
     "CORR_EDGE_THRESHOLD",
     "DEFAULT_INJECT_K",
     "PoolInjection",
+    "archive_factors",
     "build_injection_digest",
+    "cleanup_suggestions",
     "inject_k",
     "injection_enabled",
     "list_pool_factors",
@@ -1171,4 +1424,5 @@ __all__ = [
     "prepare_injection",
     "record_backtested_factor",
     "refresh_pool",
+    "unarchive_factors",
 ]

@@ -1080,6 +1080,8 @@ export interface PoolOverview {
   poolDiversity: number | null;
   /** 有效因子数（熵的指数形式） */
   nEff: number | null;
+  /** 已归档因子数（默认聚合只算活跃因子；此数给「已归档 N」提示） */
+  archivedCount: number;
 }
 
 export interface PoolGateOutcome {
@@ -1115,6 +1117,8 @@ export interface PoolFactorRow {
   hasPanel: boolean;
   createdAt: string | null;
   updatedAt: string | null;
+  /** 归档时间戳（NULL = 活跃）；仅「含已归档」视图下有值 */
+  archivedAt: string | null;
   /** 物化门禁裁决（metadata.materialization.gates）；未物化过 = null */
   gates: PoolFactorGates | null;
 }
@@ -1238,6 +1242,7 @@ function mapPoolFactorRow(raw: any): PoolFactorRow {
     hasPanel: raw?.has_panel === true,
     createdAt: raw?.created_at != null ? String(raw.created_at) : null,
     updatedAt: raw?.updated_at != null ? String(raw.updated_at) : null,
+    archivedAt: raw?.archived_at != null ? String(raw.archived_at) : null,
     gates:
       raw?.gates && Array.isArray(raw.gates?.gates)
         ? {
@@ -1279,6 +1284,7 @@ export async function getPoolOverview(params: {
       avgPfs: poolNum(raw.avg_pfs),
       poolDiversity: poolNum(raw.pool_diversity),
       nEff: poolNum(raw.n_eff),
+      archivedCount: Number(raw.archived_count ?? 0) || 0,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : '因子池总览获取失败';
@@ -1293,12 +1299,15 @@ export async function getPoolFactors(params: {
   limit?: number;
   offset?: number;
   sort?: PoolSortKey;
+  /** 勾选「含已归档」才带出归档行（行里 archivedAt 有值） */
+  includeArchived?: boolean;
 }): Promise<ApiResponse<PoolFactorList>> {
   try {
     const qs = new URLSearchParams(poolQs(params.market, params.universe));
     qs.set('limit', String(params.limit ?? 50));
     qs.set('offset', String(params.offset ?? 0));
     if (params.sort) qs.set('sort', params.sort);
+    if (params.includeArchived) qs.set('include_archived', 'true');
     const res = await apiClient.get(`/alpha-agent/pool/factors?${qs.toString()}`);
     const raw = res.data?.data ?? {};
     return makeOk({
@@ -1318,10 +1327,12 @@ export async function getPoolGraph(params: {
   market: string;
   universe?: string;
   maxNodes?: number;
+  includeArchived?: boolean;
 }): Promise<ApiResponse<PoolGraph>> {
   try {
     const qs = new URLSearchParams(poolQs(params.market, params.universe));
     qs.set('max_nodes', String(params.maxNodes ?? 200));
+    if (params.includeArchived) qs.set('include_archived', 'true');
     const res = await apiClient.get(`/alpha-agent/pool/graph?${qs.toString()}`);
     const raw = res.data?.data ?? {};
     return makeOk({
@@ -1412,6 +1423,179 @@ export async function getPoolRefreshStatus(): Promise<ApiResponse<PoolRefreshSta
   } catch {
     // 状态查询失败不抛：面板显示「未知」，不影响池数据本身
     return makeOk({ status: 'unknown', running: false });
+  }
+}
+
+// ── 清理建议（P3）：只建议不自动删；归档 = 时间戳，随时可恢复 ──────────
+
+export interface PoolCleanupReason {
+  code: string;
+  label: string;
+  detail: string;
+}
+
+export interface PoolCleanupSuggestion {
+  factorId: string;
+  factorName: string;
+  factorFormulation: string;
+  icir: number | null;
+  poolScore: number | null;
+  maxPoolCorr: number | null;
+  maxPoolCorrWith: string | null;
+  diversityContrib: number | null;
+  timesRetrieved: number;
+  severity: 'high' | 'medium' | string;
+  reasons: PoolCleanupReason[];
+}
+
+export interface PoolCleanupCriteria {
+  corrDup: number;
+  weakIcirQuantile: number;
+  minIcirSample: number;
+  /** 池内后 q 分位 ICIR 实际阈值；样本不足/无分化 = null → 显「—」 */
+  weakIcirThreshold: number | null;
+  icirSampleSize: number;
+}
+
+export interface PoolCleanupSota {
+  count: number;
+  bestIc: number | null;
+  bestIcir: number | null;
+  bestPfs: number | null;
+}
+
+export interface PoolCleanupReport {
+  /** 截断到 limit 的建议（排序：high 在前，再按 factor_id） */
+  items: PoolCleanupSuggestion[];
+  /** 全量建议数（不代表 items.length） */
+  total: number;
+  /** 参与评估的活跃因子数 */
+  poolSize: number;
+  archivedCount: number;
+  /** 全量建议的判据计数（code → 条数） */
+  summary: Record<string, number>;
+  criteria: PoolCleanupCriteria;
+  sota: PoolCleanupSota;
+}
+
+export interface PoolArchiveResult {
+  archived: number;
+  archivedIds: string[];
+  skipped: string[];
+}
+
+export interface PoolUnarchiveResult {
+  restored: number;
+  restoredIds: string[];
+  skipped: string[];
+}
+
+/** 清理建议（判据逐条带数字证据）。失败返回 success=false，面板显错误。 */
+export async function getPoolCleanupSuggestions(params: {
+  market: string;
+  universe?: string;
+  limit?: number;
+}): Promise<ApiResponse<PoolCleanupReport>> {
+  try {
+    const qs = new URLSearchParams(poolQs(params.market, params.universe));
+    qs.set('limit', String(params.limit ?? 50));
+    const res = await apiClient.get(
+      `/alpha-agent/pool/cleanup/suggestions?${qs.toString()}`,
+    );
+    const raw = res.data?.data ?? {};
+    const c = raw.criteria ?? {};
+    const s = raw.sota ?? {};
+    return makeOk({
+      items: (Array.isArray(raw.items) ? raw.items : []).map((it: any) => ({
+        factorId: String(it?.factor_id ?? ''),
+        factorName: String(it?.factor_name ?? 'unnamed'),
+        factorFormulation: String(it?.factor_formulation ?? ''),
+        icir: poolNum(it?.icir),
+        poolScore: poolNum(it?.pool_score),
+        maxPoolCorr: poolNum(it?.max_pool_corr),
+        maxPoolCorrWith:
+          it?.max_pool_corr_with != null ? String(it.max_pool_corr_with) : null,
+        diversityContrib: poolNum(it?.diversity_contrib),
+        timesRetrieved: Number.isFinite(it?.times_retrieved)
+          ? Number(it.times_retrieved)
+          : 0,
+        severity: String(it?.severity ?? 'medium'),
+        reasons: (Array.isArray(it?.reasons) ? it.reasons : []).map((r: any) => ({
+          code: String(r?.code ?? ''),
+          label: String(r?.label ?? r?.code ?? ''),
+          detail: String(r?.detail ?? ''),
+        })),
+      })),
+      total: Number(raw.total ?? 0),
+      poolSize: Number(raw.pool_size ?? 0),
+      archivedCount: Number(raw.archived_count ?? 0),
+      summary:
+        raw.summary && typeof raw.summary === 'object' ? raw.summary : {},
+      criteria: {
+        corrDup: poolNum(c.corr_dup) ?? 0.9,
+        weakIcirQuantile: poolNum(c.weak_icir_quantile) ?? 0.2,
+        minIcirSample: Number.isFinite(c.min_icir_sample)
+          ? Number(c.min_icir_sample)
+          : 5,
+        weakIcirThreshold: poolNum(c.weak_icir_threshold),
+        icirSampleSize: Number.isFinite(c.icir_sample_size)
+          ? Number(c.icir_sample_size)
+          : 0,
+      },
+      sota: {
+        count: Number(s.count ?? 0),
+        bestIc: poolNum(s.best_ic),
+        bestIcir: poolNum(s.best_icir),
+        bestPfs: poolNum(s.best_pfs),
+      },
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '清理建议获取失败';
+    return { success: false, error: message };
+  }
+}
+
+/** 批量归档因子（非删除）。跨用户/不在池/已归档 id 只进 skipped。 */
+export async function archivePoolFactors(factorIds: string[]): Promise<
+  ApiResponse<PoolArchiveResult>
+> {
+  try {
+    const res = await apiClient.post(`/alpha-agent/pool/cleanup/archive`, {
+      factor_ids: factorIds,
+    });
+    const raw = res.data?.data ?? {};
+    return makeOk({
+      archived: Number(raw.archived ?? 0),
+      archivedIds: Array.isArray(raw.archived_ids)
+        ? raw.archived_ids.map(String)
+        : [],
+      skipped: Array.isArray(raw.skipped) ? raw.skipped.map(String) : [],
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '归档失败';
+    return { success: false, error: message };
+  }
+}
+
+/** 恢复归档（清 archived_at），重新参与注入与池视图。 */
+export async function unarchivePoolFactors(factorIds: string[]): Promise<
+  ApiResponse<PoolUnarchiveResult>
+> {
+  try {
+    const res = await apiClient.post(`/alpha-agent/pool/cleanup/unarchive`, {
+      factor_ids: factorIds,
+    });
+    const raw = res.data?.data ?? {};
+    return makeOk({
+      restored: Number(raw.restored ?? 0),
+      restoredIds: Array.isArray(raw.restored_ids)
+        ? raw.restored_ids.map(String)
+        : [],
+      skipped: Array.isArray(raw.skipped) ? raw.skipped.map(String) : [],
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '恢复归档失败';
+    return { success: false, error: message };
   }
 }
 

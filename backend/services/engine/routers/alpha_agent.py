@@ -97,11 +97,15 @@ class MiningBatchRequest(BaseModel):
     """批量派发请求：每条 direction 独立成任务；名满自动排队（不 429 背压）。"""
 
     directions: list[str] = Field(
-        ..., min_length=1, description="按顺序派发的挖掘方向列表（通常是拆解卡片拼接文本）"
+        ...,
+        min_length=1,
+        description="按顺序派发的挖掘方向列表（通常是拆解卡片拼接文本）",
     )
     market: str = Field("a_share", description="目标市场")
     universe: str = Field("csi300", description="股票池")
-    loop_n: int | None = Field(None, ge=1, le=20, description="每任务演化轮数（默认 5）")
+    loop_n: int | None = Field(
+        None, ge=1, le=20, description="每任务演化轮数（默认 5）"
+    )
 
 
 def _normalize_pool_ref(universe: str) -> str:
@@ -779,7 +783,9 @@ async def dispatch_mining_batch(request: Request, payload: MiningBatchRequest):
         )
     for idx, direction in enumerate(directions, start=1):
         if not direction:
-            raise HTTPException(status_code=400, detail=f"第 {idx} 条方向为空，请删除或补全")
+            raise HTTPException(
+                status_code=400, detail=f"第 {idx} 条方向为空，请删除或补全"
+            )
         if len(direction) > MAX_SUBMIT_DIRECTION_CHARS:
             raise HTTPException(
                 status_code=400,
@@ -2007,8 +2013,13 @@ async def get_pool_factors(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     sort: str = Query("pool_score"),
+    include_archived: bool = Query(False),
 ):
-    """池内因子分页列表（含门禁裁决、被检索次数、面板有无标记）。"""
+    """池内因子分页列表（含门禁裁决、被检索次数、面板有无标记）。
+
+    默认不含已归档；``include_archived=true`` 时行里带 ``archived_at``
+    （UI 用它渲染「已归档」徽章与恢复入口）。
+    """
     auth_user_id, _ = get_authenticated_identity(request)
     market, universe = _pool_scope(market, universe)
 
@@ -2021,6 +2032,7 @@ async def get_pool_factors(
         limit=limit,
         offset=offset,
         sort=sort,
+        include_archived=include_archived,
     )
     return {"code": 200, "data": data}
 
@@ -2031,6 +2043,7 @@ async def get_pool_graph(
     market: str = Query("a_share"),
     universe: str = Query(""),
     max_nodes: int = Query(200, ge=2, le=500),
+    include_archived: bool = Query(False),
 ):
     """谱系图（nodes + edges）；上限与 service 内部钳制一致，超出直接 422。"""
     auth_user_id, _ = get_authenticated_identity(request)
@@ -2039,7 +2052,11 @@ async def get_pool_graph(
     from backend.services.engine.mining_plugins import pool_service
 
     data = await pool_service.pool_graph(
-        user_id=auth_user_id, market=market, universe=universe, max_nodes=max_nodes
+        user_id=auth_user_id,
+        market=market,
+        universe=universe,
+        max_nodes=max_nodes,
+        include_archived=include_archived,
     )
     return {"code": 200, "data": data}
 
@@ -2102,6 +2119,62 @@ async def get_pool_refresh_status(request: Request):
             },
         }
     return {"code": 200, "data": status}
+
+
+# ── 非 SOTA 清理建议与归档（P3）─────────────────────────────────────────
+# 只建议不自动删：判据（池冗余/弱 ICIR/零多样性贡献）由 pool_cleanup 计算、
+# 带数字证据展示；归档=打 archived_at 时间戳（非删除），默认退出注入与池
+# 视图，可随时恢复。owner 恒为鉴权身份——归档是写操作，跨用户 id 只进
+# skipped（service 层 user_id 硬过滤）。
+
+
+class PoolArchiveRequest(BaseModel):
+    factor_ids: list[str] = Field(..., min_length=1, max_length=500)
+
+
+@router.get("/pool/cleanup/suggestions")
+async def get_pool_cleanup_suggestions(
+    request: Request,
+    market: str = Query("a_share"),
+    universe: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """清理建议清单：items（判据逐条带数字）+ summary + criteria + sota。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+    market, universe = _pool_scope(market, universe)
+
+    from backend.services.engine.mining_plugins import pool_service
+
+    data = await pool_service.cleanup_suggestions(
+        user_id=auth_user_id, market=market, universe=universe, limit=limit
+    )
+    return {"code": 200, "data": data}
+
+
+@router.post("/pool/cleanup/archive")
+async def post_pool_cleanup_archive(request: Request, body: PoolArchiveRequest):
+    """批量归档（非删除）。返回 archived/skipped；跨用户因子只会进 skipped。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+
+    from backend.services.engine.mining_plugins import pool_service
+
+    data = await pool_service.archive_factors(
+        user_id=auth_user_id, factor_ids=body.factor_ids
+    )
+    return {"code": 200, "data": data}
+
+
+@router.post("/pool/cleanup/unarchive")
+async def post_pool_cleanup_unarchive(request: Request, body: PoolArchiveRequest):
+    """恢复归档（清 archived_at），重新参与注入与池视图。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+
+    from backend.services.engine.mining_plugins import pool_service
+
+    data = await pool_service.unarchive_factors(
+        user_id=auth_user_id, factor_ids=body.factor_ids
+    )
+    return {"code": 200, "data": data}
 
 
 # ── 组合实验室（P2）：POST /combos/optimize + 列表 / 详情 ────────────────

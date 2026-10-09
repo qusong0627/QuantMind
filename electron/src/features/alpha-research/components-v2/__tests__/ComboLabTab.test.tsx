@@ -65,6 +65,7 @@ function mkPoolRow(over: Partial<PoolFactorRow> & { factorId: string }): PoolFac
     hasPanel: true,
     createdAt: null,
     updatedAt: null,
+    archivedAt: null,
     gates: null,
     ...over,
   };

@@ -2754,7 +2754,8 @@ CREATE TABLE IF NOT EXISTS rd_agent_factor_pool (
     panel_ref           TEXT,
     extra               JSONB,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    archived_at         TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS rd_agent_factor_edges (

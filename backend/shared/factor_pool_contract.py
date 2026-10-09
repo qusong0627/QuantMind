@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS {POOL_TABLE} (
     panel_ref           TEXT,
     extra               JSONB,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    archived_at         TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS {EDGES_TABLE} (
@@ -158,9 +159,13 @@ _V1_COLUMNS: dict[str, frozenset[str]] = {
     ),
 }
 
-#: 建表**之后**追加的列（老库补列用）：``(表, 列名, 列 DDL)``。当前为空——三张表
-#: 都是本批首建。
-_COLUMN_TOPUPS: tuple[tuple[str, str, str], ...] = ()
+#: 建表**之后**追加的列（老库补列用）：``(表, 列名, 列 DDL)``。
+#: ``archived_at``（P3 清理面）：非 NULL = 用户主动归档——归档不是删除，
+#: 因子行/边/面板全保留，只是默认不再进注入摘要、池列表、谱系图与总览
+#: 聚合；随时可恢复。判据见 ``mining_plugins/pool_cleanup.py``。
+_COLUMN_TOPUPS: tuple[tuple[str, str, str], ...] = (
+    (POOL_TABLE, "archived_at", "TIMESTAMPTZ"),
+)
 
 _COLUMNS_SQL = (
     "SELECT table_name, column_name FROM information_schema.columns "

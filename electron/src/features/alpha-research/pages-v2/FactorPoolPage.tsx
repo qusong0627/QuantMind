@@ -15,6 +15,7 @@ import { Button } from '../components-v2/ui/Button';
 import { Badge } from '../components-v2/ui/Badge';
 import { ComboLabTab } from '../components-v2/ComboLabTab';
 import { FactorPoolGraph } from '../components-v2/FactorPoolGraph';
+import { PoolCleanupTab } from '../components-v2/PoolCleanupTab';
 import { MISSING_METRIC_TEXT } from '../services-v2/metricRegistry';
 import { alphaAgentService } from '../services/alphaAgentService';
 import {
@@ -25,6 +26,7 @@ import {
   getPoolRefreshStatus,
   getUniverses,
   refreshPool,
+  unarchivePoolFactors,
   type MiningGateDescriptor,
   type PoolFactorList,
   type PoolFactorRow,
@@ -35,6 +37,7 @@ import {
   type PoolSortKey,
 } from '../services-v2/api';
 import {
+  Archive,
   ChevronLeft,
   ChevronRight,
   Eye,
@@ -49,13 +52,14 @@ import {
   X,
 } from 'lucide-react';
 
-type PoolTab = 'overview' | 'factors' | 'graph' | 'gates' | 'combo';
+type PoolTab = 'overview' | 'factors' | 'graph' | 'gates' | 'cleanup' | 'combo';
 
 const TAB_ITEMS: { id: PoolTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'overview', label: '池总览', icon: LayoutGrid },
   { id: 'factors', label: '池因子', icon: Table2 },
   { id: 'graph', label: '谱系图', icon: Network },
   { id: 'gates', label: '门禁状态', icon: ShieldCheck },
+  { id: 'cleanup', label: '清理建议', icon: Archive },
   { id: 'combo', label: '组合实验室', icon: FlaskConical },
 ];
 
@@ -143,6 +147,8 @@ export const FactorPoolPage: React.FC = () => {
   const [factorsError, setFactorsError] = useState<string | null>(null);
   const [sort, setSort] = useState<PoolSortKey>('pool_score');
   const [page, setPage] = useState(0);
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [restorePending, setRestorePending] = useState<string | null>(null);
   const [graph, setGraph] = useState<PoolGraph | null>(null);
   const [graphError, setGraphError] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -208,6 +214,7 @@ export const FactorPoolPage: React.FC = () => {
         limit: PAGE_SIZE,
         offset: targetPage * PAGE_SIZE,
         sort: targetSort,
+        includeArchived,
       });
       if (res.success && res.data) {
         setFactors(res.data);
@@ -216,7 +223,7 @@ export const FactorPoolPage: React.FC = () => {
         setFactorsError(res.error ?? '池因子列表加载失败');
       }
     },
-    [market, universe],
+    [market, universe, includeArchived],
   );
 
   useEffect(() => {
@@ -229,7 +236,21 @@ export const FactorPoolPage: React.FC = () => {
 
   useEffect(() => {
     setPage(0);
-  }, [market, universe]);
+  }, [market, universe, includeArchived]);
+
+  // ── 归档行恢复（池因子表内联动作；确认动作在「清理建议」tab） ──
+  const handleRestoreRow = useCallback(
+    async (factorId: string) => {
+      setRestorePending(factorId);
+      try {
+        await unarchivePoolFactors([factorId]);
+        await Promise.all([loadFactors(page, sort), loadOverview()]);
+      } finally {
+        setRestorePending(null);
+      }
+    },
+    [loadFactors, loadOverview, page, sort],
+  );
 
   // ── 谱系图：进入 tab 拉取（避免每个筛选都拖 200 点图） ──
   const loadGraph = useCallback(async () => {
@@ -471,7 +492,13 @@ export const FactorPoolPage: React.FC = () => {
                 <KpiTile
                   label="池内因子"
                   value={overview ? String(overview.total) : MISSING_METRIC_TEXT}
-                  hint={overview ? `有面板 ${overview.withPanel}` : undefined}
+                  hint={
+                    overview
+                      ? `有面板 ${overview.withPanel}${
+                          overview.archivedCount > 0 ? ` · 已归档 ${overview.archivedCount}` : ''
+                        }`
+                      : undefined
+                  }
                 />
                 <KpiTile
                   label="被检索过的因子"
@@ -520,6 +547,14 @@ export const FactorPoolPage: React.FC = () => {
                 池内因子 {factors ? `（${factors.total}）` : ''}
               </CardTitle>
               <div className="flex items-center gap-2 text-xs">
+                <label className="flex items-center gap-1.5 cursor-pointer text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={includeArchived}
+                    onChange={(e) => setIncludeArchived(e.target.checked)}
+                  />
+                  含已归档
+                </label>
                 <span className="text-muted-foreground">排序</span>
                 <select
                   aria-label="排序"
@@ -570,8 +605,26 @@ export const FactorPoolPage: React.FC = () => {
                             <div className="truncate font-medium" title={row.factorFormulation || row.factorName}>
                               {row.factorName}
                             </div>
-                            <div className="truncate font-mono text-[10px] text-muted-foreground">
-                              {row.factorId.slice(0, 12)}
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              <span className="truncate font-mono text-[10px] text-muted-foreground">
+                                {row.factorId.slice(0, 12)}
+                              </span>
+                              {row.archivedAt != null && (
+                                <>
+                                  <Badge variant="outline" className="shrink-0 text-[9px] px-1 py-0">
+                                    已归档
+                                  </Badge>
+                                  <button
+                                    type="button"
+                                    className="shrink-0 text-[10px] font-medium text-primary hover:underline disabled:opacity-50"
+                                    disabled={restorePending === row.factorId}
+                                    title="恢复：重新参与提示词注入与池视图"
+                                    onClick={() => handleRestoreRow(row.factorId)}
+                                  >
+                                    恢复
+                                  </button>
+                                </>
+                              )}
                             </div>
                           </td>
                           <td className="py-2 px-2 text-center font-mono">{fmtNum(row.ic)}</td>
@@ -802,6 +855,9 @@ export const FactorPoolPage: React.FC = () => {
           </Card>
         </div>
       )}
+
+      {/* ── 清理建议（P3）：只建议不自动删；归档 ≠ 删除 ── */}
+      {tab === 'cleanup' && <PoolCleanupTab market={market} universe={universe} />}
 
       {/* ── 组合实验室 ── */}
       {tab === 'combo' && <ComboLabTab market={market} universe={universe} />}

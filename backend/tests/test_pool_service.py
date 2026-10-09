@@ -588,3 +588,185 @@ class TestIcPoolPercentile:
                 [f_low, f_mid, f_high, f_nul, f_out, f_solo], [user, user_solo]
             )
             await close_database()
+
+
+class TestCleanupCriteriaConfig:
+    def test_yaml_cleanup_section_overrides_defaults(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "plugins.yaml"
+        cfg.write_text(
+            "cleanup:\n  corr_dup: 0.85\n  weak_icir_quantile: 0.1\n  min_icir_sample: 8\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("QM_MINING_PLUGINS_CONFIG", str(cfg))
+        criteria = pool_service._cleanup_criteria()
+        assert criteria.corr_dup == pytest.approx(0.85)
+        assert criteria.weak_icir_quantile == pytest.approx(0.1)
+        assert criteria.min_icir_sample == 8
+
+    def test_invalid_values_fall_back_to_defaults(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "plugins.yaml"
+        cfg.write_text(
+            "cleanup:\n  corr_dup: abc\n  min_icir_sample: x\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("QM_MINING_PLUGINS_CONFIG", str(cfg))
+        criteria = pool_service._cleanup_criteria()
+        assert criteria.corr_dup == pytest.approx(0.9)
+        assert criteria.min_icir_sample == 5
+
+
+class TestArchiveCleanup:
+    """归档链路：只打时间戳（非删除），默认退出注入/列表/图/总览，可恢复。
+
+    防的静默故障：归档后某个读路径漏了 ``archived_at`` 过滤——归档因子
+    继续被注入进 prompt（用户已判定它不值得参考）、或列表里消失但总览
+    计数没变（对不上账）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_archive_roundtrip_across_all_read_paths(self):
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        run = _run_id()
+        user = run
+        weak = f"{run}_weak"
+        strong = [f"{run}_s{i}" for i in range(4)]
+        try:
+            async with get_session() as session:
+                await _seed_factor(session, factor_id=weak, user_id=user, icir=0.01)
+                for i, fid in enumerate(strong):
+                    await _seed_factor(
+                        session, factor_id=fid, user_id=user, icir=0.9 - 0.1 * i
+                    )
+            for fid in [weak, *strong]:
+                assert await pool_service.record_backtested_factor(fid, market=MARKET)
+
+            # 判据面：5 个样本里 0.01 垫底 → weak_icir 命中
+            report = await pool_service.cleanup_suggestions(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+            assert report["pool_size"] == 5
+            assert report["archived_count"] == 0
+            by_id = {it["factor_id"]: it for it in report["items"]}
+            assert weak in by_id, "垫底因子未进清理建议"
+            codes = {r["code"] for r in by_id[weak]["reasons"]}
+            assert "weak_icir" in codes
+            assert by_id[weak]["severity"] == "medium"
+            assert report["summary"].get("weak_icir", 0) >= 1
+
+            # 归档（非删除）：返回条数 + 行仍在（时间戳形式）
+            result = await pool_service.archive_factors(user_id=user, factor_ids=[weak])
+            assert result == {"archived": 1, "archived_ids": [weak], "skipped": []}
+            again = await pool_service.archive_factors(user_id=user, factor_ids=[weak])
+            assert again["archived"] == 0 and again["skipped"] == [weak]
+
+            # 读路径一：注入摘要排除
+            digest, ids = await pool_service.build_injection_digest(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+            assert weak not in ids, "已归档因子仍被注入"
+            assert "池内共 4 条" in digest, "SOTA 标杆仍把归档因子算进去"
+
+            # 读路径二：清建议排除 + 归档计数
+            report2 = await pool_service.cleanup_suggestions(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+            assert report2["pool_size"] == 4
+            assert report2["archived_count"] == 1
+            assert weak not in {it["factor_id"] for it in report2["items"]}
+
+            # 读路径三：列表默认排除；include_archived 才可见且带时间戳
+            default_list = await pool_service.list_pool_factors(
+                user_id=user, market=MARKET, universe=UNIVERSE, limit=50
+            )
+            assert weak not in {r["factor_id"] for r in default_list["items"]}
+            with_archived = await pool_service.list_pool_factors(
+                user_id=user,
+                market=MARKET,
+                universe=UNIVERSE,
+                limit=50,
+                include_archived=True,
+            )
+            row = next(r for r in with_archived["items"] if r["factor_id"] == weak)
+            assert row["archived_at"] is not None
+
+            # 读路径四：谱系图
+            graph = await pool_service.pool_graph(
+                user_id=user, market=MARKET, universe=UNIVERSE, max_nodes=50
+            )
+            assert weak not in {n["factor_id"] for n in graph["nodes"]}
+            graph_all = await pool_service.pool_graph(
+                user_id=user,
+                market=MARKET,
+                universe=UNIVERSE,
+                max_nodes=50,
+                include_archived=True,
+            )
+            assert weak in {n["factor_id"] for n in graph_all["nodes"]}
+
+            # 读路径五：总览聚合只算活跃 + 归档计数
+            overview = await pool_service.pool_overview(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+            assert overview["total"] == 4
+            assert overview["archived_count"] == 1
+
+            # 恢复：回到注入与总览
+            restored = await pool_service.unarchive_factors(
+                user_id=user, factor_ids=[weak]
+            )
+            assert restored == {"restored": 1, "restored_ids": [weak], "skipped": []}
+            _, ids3 = await pool_service.build_injection_digest(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+            assert weak in ids3
+            overview2 = await pool_service.pool_overview(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+            assert overview2["total"] == 5
+            assert overview2["archived_count"] == 0
+        finally:
+            await _cleanup([weak, *strong], [user])
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_archive_and_restore_are_user_scoped(self):
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        run = _run_id()
+        owner = run
+        intruder = f"{run}-other"
+        fid = f"{run}_f"
+        try:
+            async with get_session() as session:
+                await _seed_factor(session, factor_id=fid, user_id=owner, icir=0.3)
+            assert await pool_service.record_backtested_factor(fid, market=MARKET)
+
+            stolen = await pool_service.archive_factors(
+                user_id=intruder, factor_ids=[fid]
+            )
+            assert stolen["archived"] == 0 and stolen["skipped"] == [fid]
+            async with get_session(read_only=True) as session:
+                still = (
+                    await session.execute(
+                        text(
+                            f"SELECT archived_at FROM {POOL_TABLE} "
+                            "WHERE factor_id = :fid"
+                        ),
+                        {"fid": fid},
+                    )
+                ).scalar()
+            assert still is None, "跨用户归档动了别人的池行"
+
+            assert await pool_service.archive_factors(
+                user_id=owner, factor_ids=[fid]
+            ) == {"archived": 1, "archived_ids": [fid], "skipped": []}
+            stolen_restore = await pool_service.unarchive_factors(
+                user_id=intruder, factor_ids=[fid]
+            )
+            assert stolen_restore["restored"] == 0
+            assert stolen_restore["skipped"] == [fid]
+        finally:
+            await _cleanup([fid], [owner, intruder])
+            await close_database()

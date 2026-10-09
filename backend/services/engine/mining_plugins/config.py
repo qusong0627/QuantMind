@@ -41,7 +41,13 @@ def config_path() -> Path:
 
 def load_plugin_config() -> dict:
     """读取插件配置；文件缺失/损坏一律退回默认（不拦回测，只告警）。"""
-    cfg: dict = {"cost_rate": None, "evaluators": {}, "gates": {}, "scoring": {}}
+    cfg: dict = {
+        "cost_rate": None,
+        "evaluators": {},
+        "gates": {},
+        "scoring": {},
+        "cleanup": {},
+    }
     try:
         path = config_path()
         if path.exists():
@@ -55,6 +61,8 @@ def load_plugin_config() -> dict:
                     cfg["gates"] = data["gates"]
                 if isinstance(data.get("scoring"), dict):
                     cfg["scoring"] = data["scoring"]
+                if isinstance(data.get("cleanup"), dict):
+                    cfg["cleanup"] = data["cleanup"]
     except Exception as exc:  # noqa: BLE001 — 配置坏不拦回测
         logger.warning(
             "mining_plugins 配置读取失败(%s)，退回默认: %s", config_path(), exc
