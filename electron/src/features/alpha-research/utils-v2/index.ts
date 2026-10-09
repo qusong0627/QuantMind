@@ -35,6 +35,25 @@ export function formatDateTime(date: string | Date): string {
 }
 
 /**
+ * ISO-8601（带 Z）→ 紧凑本地时间「MM-DD HH:mm」；非本年才带年份。
+ * 解析不了返回「—」，绝不回落 now()（空缺必须诚实）。
+ */
+export function formatShortTime(iso: string): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const hm = d.toLocaleTimeString('zh-CN', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  return d.getFullYear() === new Date().getFullYear()
+    ? `${md} ${hm}`
+    : `${d.getFullYear()}-${md} ${hm}`;
+}
+
+/**
  * 有方向的指标着色（A股口径：**红涨绿跌**）。
  * 只用于收益/IC 这类有正负方向的量；回撤/换手等中性量不要用本函数。
  * 质量分级（getQualityBadgeClass）是另一套色语言：绿=高质量，与红涨绿跌无关。

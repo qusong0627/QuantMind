@@ -13,8 +13,12 @@
  *    本组件不自己拼装新任务、不直接换页。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { History, RefreshCw, FileText, RotateCcw, ExternalLink, AlertCircle, Inbox } from 'lucide-react';
+import { History, RefreshCw, FileText, RotateCcw, ExternalLink, AlertCircle, Inbox, FileSearch } from 'lucide-react';
 import { PageHeader } from '../components-v2/layout/PageHeader';
+import { DocsHistoryTab } from '../components-v2/DocsHistoryTab';
+import { isDocMiningEnabled } from '../../../config/docMiningFlags';
+import { formatShortTime } from '../utils-v2';
+import type { DocRow } from '../services-v2/docMiningApi';
 import {
   getMiningHistory,
   MINING_HISTORY_PAGE_SIZE,
@@ -26,6 +30,8 @@ export interface HistoryPageProps {
   onViewResults?: (row: MiningHistoryRow) => void;
   /** 「重跑」：AppRoot 负责跳首页并把整行回填进 ChatInput */
   onRetry?: (row: MiningHistoryRow) => void;
+  /** 「文档解析 → 继续挖掘」：AppRoot 负责跳首页并把文档带回文档链 */
+  onResumeDoc?: (row: DocRow) => void;
 }
 
 const MARKET_LABELS: Record<string, string> = {
@@ -67,22 +73,6 @@ function marketLabel(row: MiningHistoryRow): string {
   return row.universe ? `${market} · ${row.universe}` : market;
 }
 
-/** ISO-8601（带 Z）→ 本地短时间；解析不了就「—」，不填 now()。 */
-function formatTime(iso: string): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  const hm = d.toLocaleTimeString('zh-CN', {
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-  return d.getFullYear() === new Date().getFullYear()
-    ? `${md} ${hm}`
-    : `${d.getFullYear()}-${md} ${hm}`;
-}
-
 const STATUS_FILTERS: Array<{ value: string; label: string }> = [
   { value: 'all', label: '全部状态' },
   { value: 'pending', label: '排队中' },
@@ -92,7 +82,11 @@ const STATUS_FILTERS: Array<{ value: string; label: string }> = [
   { value: 'cancelled', label: '已取消' },
 ];
 
-export const HistoryPage: React.FC<HistoryPageProps> = ({ onViewResults, onRetry }) => {
+export const HistoryPage: React.FC<HistoryPageProps> = ({
+  onViewResults,
+  onRetry,
+  onResumeDoc,
+}) => {
   const [rows, setRows] = useState<MiningHistoryRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -100,6 +94,13 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({ onViewResults, onRetry
   const [marketFilter, setMarketFilter] = useState('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 文档解析 Tab（构建期开关关时整排 Tab 不渲染，挖掘任务 Tab 不受影响）
+  const docsEnabled = isDocMiningEnabled();
+  const [activeTab, setActiveTab] = useState<'tasks' | 'docs'>('tasks');
+  const [docsRefreshSeq, setDocsRefreshSeq] = useState(0);
+  const tabsShown = docsEnabled;
+  // 当前展示的是文档 Tab（开关关时恒为任务 Tab）
+  const onDocsTab = docsEnabled && activeTab === 'docs';
 
   // 迟到的响应不许倒灌（快速改过滤条件时旧请求可能后到）
   const reqSeqRef = useRef(0);
@@ -151,52 +152,98 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({ onViewResults, onRetry
         subtitle="每次挖了什么、挖出多少因子 —— 进程重启也不会失忆"
         actions={
           <>
-            <select
-              aria-label="市场筛选"
-              value={marketFilter}
-              onChange={(e) => {
-                setMarketFilter(e.target.value);
-                setOffset(0);
-              }}
-              className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-slate-600 border border-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-200 cursor-pointer"
-            >
-              <option value="all">全部市场</option>
-              {Object.entries(MARKET_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="状态筛选"
-              value={statusFilter}
-              onChange={(e) => {
-                setStatusFilter(e.target.value);
-                setOffset(0);
-              }}
-              className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-slate-600 border border-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-200 cursor-pointer"
-            >
-              {STATUS_FILTERS.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
+            {!onDocsTab && (
+              <select
+                aria-label="市场筛选"
+                value={marketFilter}
+                onChange={(e) => {
+                  setMarketFilter(e.target.value);
+                  setOffset(0);
+                }}
+                className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-slate-600 border border-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-200 cursor-pointer"
+              >
+                <option value="all">全部市场</option>
+                {Object.entries(MARKET_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {!onDocsTab && (
+              <select
+                aria-label="状态筛选"
+                value={statusFilter}
+                onChange={(e) => {
+                  setStatusFilter(e.target.value);
+                  setOffset(0);
+                }}
+                className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-slate-600 border border-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-200 cursor-pointer"
+              >
+                {STATUS_FILTERS.map((s) => (
+                  <option key={s.value} value={s.value}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               type="button"
-              onClick={() => void load()}
-              disabled={loading}
+              onClick={() => (onDocsTab ? setDocsRefreshSeq((s) => s + 1) : void load())}
+              disabled={!onDocsTab && loading}
               className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-bold text-slate-600 border border-slate-200 hover:border-blue-300 hover:text-blue-600 disabled:opacity-50 cursor-pointer"
               title="刷新"
             >
-              <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`h-3.5 w-3.5 ${!onDocsTab && loading ? 'animate-spin' : ''}`} />
               刷新
             </button>
           </>
         }
       />
 
-      {error && (
+      {/* Tab 切换（文档链构建期开关关闭时整排不渲染） */}
+      {tabsShown && (
+        <div
+          role="tablist"
+          aria-label="挖掘历史分类"
+          className="flex w-fit items-center gap-1 rounded-full border border-slate-200/80 bg-white/80 p-1 shadow-2xs"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'tasks'}
+            onClick={() => setActiveTab('tasks')}
+            className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-black transition-colors cursor-pointer ${
+              activeTab === 'tasks'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-500 hover:text-blue-600'
+            }`}
+          >
+            <History className="h-3.5 w-3.5" />
+            挖掘任务
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'docs'}
+            onClick={() => setActiveTab('docs')}
+            className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-black transition-colors cursor-pointer ${
+              activeTab === 'docs'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-500 hover:text-blue-600'
+            }`}
+          >
+            <FileSearch className="h-3.5 w-3.5" />
+            文档解析
+          </button>
+        </div>
+      )}
+
+      {onDocsTab && (
+        <DocsHistoryTab onResume={onResumeDoc} refreshSeq={docsRefreshSeq} />
+      )}
+
+      {!onDocsTab && error && (
         <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50/80 px-4 py-2.5 text-xs font-bold text-rose-600">
           <AlertCircle className="h-4 w-4 shrink-0" />
           <span className="flex-1 min-w-0 truncate" title={error}>
@@ -212,7 +259,8 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({ onViewResults, onRetry
         </div>
       )}
 
-      <div className="rounded-2xl border border-white/90 bg-white/80 backdrop-blur-xl shadow-xs overflow-hidden">
+      {!onDocsTab && (
+        <div className="rounded-2xl border border-white/90 bg-white/80 backdrop-blur-xl shadow-xs overflow-hidden">
         {rows.length === 0 && !loading && !error ? (
           <div className="flex flex-col items-center gap-3 py-16 text-center">
             <Inbox className="h-8 w-8 text-slate-300" />
@@ -251,7 +299,7 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({ onViewResults, onRetry
                             row.completed_at ? ` · 完成于 ${row.completed_at}` : ''
                           }`}
                         >
-                          {formatTime(row.created_at)}
+                          {formatShortTime(row.created_at)}
                         </span>
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap text-slate-500">
@@ -341,7 +389,8 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({ onViewResults, onRetry
             </button>
           </div>
         </div>
-      </div>
+        </div>
+      )}
     </div>
   );
 };

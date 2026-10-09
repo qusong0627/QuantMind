@@ -390,6 +390,8 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
           librarySuffix: config.librarySuffix || defaults.defaultLibrarySuffix || undefined,
           qualityGateEnabled: config.qualityGateEnabled ?? defaults.qualityGateEnabled ?? true,
           parallelEnabled: config.parallelExecution ?? defaults.parallelExecution ?? false,
+          // 文档血统（文档链提交时带上）：落任务 source=doc + 回写文档 task_id
+          docId: config.docId,
         });
         if (!resp.success || !resp.data) throw new Error(resp.error || 'Failed');
 

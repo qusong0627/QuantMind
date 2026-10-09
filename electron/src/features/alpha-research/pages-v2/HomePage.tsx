@@ -2,19 +2,23 @@ import React, { useEffect, useState } from 'react';
 import {
   Sparkles, Bot, Database, BarChart3, ArrowRight, Zap,
   Layers, CheckCircle2, TrendingUp, Shield, Activity, Cpu,
-  Loader2, Square
+  Loader2, Square, MessageSquareText, FileUp
 } from 'lucide-react';
 import { ChatInput } from '../components-v2/ChatInput';
+import { DocMiningPanel } from '../components-v2/DocMiningPanel';
 import { Layout } from '../components-v2/layout/Layout';
 import type { PageId } from '../components-v2/layout/Layout';
 import { useTaskContext } from '../context-v2/TaskContext';
 import { getDataSummary } from '../services-v2/api';
-import type { DataSummary, MiningRetryDraft } from '../types-v2';
+import { isDocMiningEnabled } from '../../../config/docMiningFlags';
+import type { DataSummary, DocMiningResume, MiningRetryDraft } from '../types-v2';
 
 interface HomePageProps {
   onNavigate?: (page: PageId) => void;
   /** 「挖掘历史 → 重跑」回填草稿：按 key 把当时的方向/市场/数据源放回输入框 */
   retryDraft?: MiningRetryDraft | null;
+  /** 「文档解析 → 继续挖掘」带回的文档：按 key 切到文档链并恢复进度 */
+  docResume?: DocMiningResume | null;
 }
 
 const PRESET_PROMPTS = [
@@ -24,7 +28,7 @@ const PRESET_PROMPTS = [
   '基于多周期均线发散度与流动性溢价挖掘中短线稳健因子',
 ];
 
-export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft }) => {
+export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docResume }) => {
   const {
     backendAvailable,
     miningTask: task,
@@ -35,6 +39,9 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft }) =>
 
   const [dataSummary, setDataSummary] = useState<DataSummary | null>(null);
   const [activePrompt, setActivePrompt] = useState('');
+  // 输入方式：文字指令 / 上传文档（文档链构建期开关关时不存在第二态）
+  const docsEnabled = isDocMiningEnabled();
+  const [inputMode, setInputMode] = useState<'text' | 'doc'>('text');
 
   // 任务激活 = 正在提交（POST /evolve 进行中）或后端任务运行中
   const taskActive = miningStarting || task?.status === 'running';
@@ -60,9 +67,18 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft }) =>
   // 方向为空（legacy 行）只回填配置，不清掉用户已敲的内容。
   useEffect(() => {
     if (!retryDraft) return;
+    // 「重跑」是文字链语义：即使上次停在文档链也要切回来
+    setInputMode('text');
     if (retryDraft.userInput) setActivePrompt(retryDraft.userInput);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [retryDraft?.key]);
+
+  // 「文档解析 → 继续挖掘」：按 key 代次切到文档链（连点两次同一文档也要重新应用）
+  useEffect(() => {
+    if (!docResume || !docsEnabled) return;
+    setInputMode('doc');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docResume?.key]);
 
   const universeCount = dataSummary?.universes
     ? Object.keys(dataSummary.universes).length
@@ -163,33 +179,81 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft }) =>
             </div>
           )}
 
-          <ChatInput
-            inline={true}
-            initialPrompt={activePrompt}
-            initialConfig={retryDraft ?? undefined}
-            initialConfigKey={retryDraft?.key}
-            onSubmit={startMining}
-            onStop={stopMining}
-            isRunning={taskActive}
-          />
-
-          {/* Quick Starter Prompts */}
-          <div className="flex items-center gap-2 flex-wrap justify-center px-2">
-            <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1">
-              <Zap className="w-3 h-3 text-amber-500" /> 推荐方向:
-            </span>
-            {PRESET_PROMPTS.map((promptText, idx) => (
+          {/* 输入方式切换（文字指令 ⇄ 上传文档；文档链构建期开关关时不渲染） */}
+          {docsEnabled && (
+            <div
+              role="tablist"
+              aria-label="挖掘输入方式"
+              className="mx-auto flex w-fit items-center gap-1 rounded-full border border-slate-200/80 bg-white/80 p-1 shadow-2xs"
+            >
               <button
-                key={idx}
                 type="button"
-                onClick={() => setActivePrompt(promptText)}
-                className="text-[11px] font-medium text-slate-600 hover:text-blue-600 bg-white/70 hover:bg-white border border-slate-200/80 hover:border-blue-300 rounded-full px-3 py-1 transition-all shadow-2xs hover:shadow-xs cursor-pointer truncate max-w-[340px]"
-                title={promptText}
+                role="tab"
+                aria-selected={inputMode === 'text'}
+                onClick={() => setInputMode('text')}
+                className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-black transition-colors cursor-pointer ${
+                  inputMode === 'text'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-500 hover:text-blue-600'
+                }`}
               >
-                {promptText}
+                <MessageSquareText className="h-3.5 w-3.5" />
+                文字指令
               </button>
-            ))}
-          </div>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={inputMode === 'doc'}
+                onClick={() => setInputMode('doc')}
+                className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-black transition-colors cursor-pointer ${
+                  inputMode === 'doc'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-500 hover:text-blue-600'
+                }`}
+              >
+                <FileUp className="h-3.5 w-3.5" />
+                上传文档
+              </button>
+            </div>
+          )}
+
+          {docsEnabled && inputMode === 'doc' ? (
+            <DocMiningPanel
+              onStartMining={startMining}
+              isRunning={taskActive}
+              resume={docResume}
+            />
+          ) : (
+            <ChatInput
+              inline={true}
+              initialPrompt={activePrompt}
+              initialConfig={retryDraft ?? undefined}
+              initialConfigKey={retryDraft?.key}
+              onSubmit={startMining}
+              onStop={stopMining}
+              isRunning={taskActive}
+            />
+          )}
+
+          {/* Quick Starter Prompts（仅文字指令态） */}
+          {(!docsEnabled || inputMode === 'text') && (
+            <div className="flex items-center gap-2 flex-wrap justify-center px-2">
+              <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1">
+                <Zap className="w-3 h-3 text-amber-500" /> 推荐方向:
+              </span>
+              {PRESET_PROMPTS.map((promptText, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => setActivePrompt(promptText)}
+                  className="text-[11px] font-medium text-slate-600 hover:text-blue-600 bg-white/70 hover:bg-white border border-slate-200/80 hover:border-blue-300 rounded-full px-3 py-1 transition-all shadow-2xs hover:shadow-xs cursor-pointer truncate max-w-[340px]"
+                  title={promptText}
+                >
+                  {promptText}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* ================= 3. Major Feature Portals (3-Column Grid) ================= */}

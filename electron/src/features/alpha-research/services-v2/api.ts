@@ -252,24 +252,45 @@ export interface MiningStartParams {
   directions?: string[];
   /** 类别选择模式：selected=取第一条，random=随机一条 */
   directionMode?: 'selected' | 'random';
+  /**
+   * 文档血统：来自文档链的挖掘带上它。**带 docId 时改走 JSON body 变体**
+   * （后端 EvolveRequest.doc_id → 落任务 source=doc + 回写文档 task_id）；
+   * 不带时 query 形态一字不动（老路径零回归）。
+   */
+  docId?: string;
 }
 
 export async function startMining(
   params: MiningStartParams,
 ): Promise<ApiResponse<{ taskId: string; task: Task }>> {
   const loopN = params.maxRounds ?? params.maxLoops ?? 3;
-  const qs = new URLSearchParams({
-    loop_n: String(loopN),
-    direction: params.direction || '',
-  });
-  if (params.market) qs.set('market', params.market);
-  if (params.universe) qs.set('universe', params.universe);
-  if (params.dataSource) qs.set('data_source', params.dataSource);
-  for (const d of params.directions ?? []) {
-    if (d && d.trim()) qs.append('directions', d.trim());
+  let res: { data?: { data?: { task_id?: string; status?: string } } };
+  if (params.docId) {
+    // JSON body 变体（与后端 EvolveRequest 字段对齐）；query 路径保持原样
+    res = await apiClient.post('/alpha-agent/evolve', {
+      direction: params.direction || '',
+      market: params.market || 'a_share',
+      universe: params.universe || 'csi300',
+      data_source: params.dataSource || '',
+      loop_n: loopN,
+      directions: params.directions ?? [],
+      direction_mode: params.directionMode || 'selected',
+      doc_id: params.docId,
+    });
+  } else {
+    const qs = new URLSearchParams({
+      loop_n: String(loopN),
+      direction: params.direction || '',
+    });
+    if (params.market) qs.set('market', params.market);
+    if (params.universe) qs.set('universe', params.universe);
+    if (params.dataSource) qs.set('data_source', params.dataSource);
+    for (const d of params.directions ?? []) {
+      if (d && d.trim()) qs.append('directions', d.trim());
+    }
+    if (params.directionMode) qs.set('direction_mode', params.directionMode);
+    res = await apiClient.post(`/alpha-agent/evolve?${qs.toString()}`);
   }
-  if (params.directionMode) qs.set('direction_mode', params.directionMode);
-  const res = await apiClient.post(`/alpha-agent/evolve?${qs.toString()}`);
   const data = res.data?.data ?? {};
   const taskId: string = data.task_id ?? '';
   const task = normalizeAgentTask(

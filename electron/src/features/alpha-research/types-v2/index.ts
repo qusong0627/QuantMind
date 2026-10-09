@@ -69,6 +69,12 @@ export interface TaskConfig {
   numDirections?: number;
   maxRounds?: number;
   librarySuffix?: string;
+  /**
+   * 文档血统：本次挖掘来自哪份文档（文档链提交时带上）。
+   * 下发到 evolve（JSON body），落 rd_agent_mining_tasks.doc_id
+   * 并回写 rd_agent_docs.task_id——历史页据此显示出处。
+   */
+  docId?: string;
 
   // LLM configuration
   apiKey?: string;
@@ -106,6 +112,16 @@ export interface MiningRetryDraft {
   miningMarket?: TaskConfig['miningMarket'];
   universe?: UniverseId;
   dataSource?: TaskConfig['dataSource'];
+}
+
+/**
+ * 「文档解析 → 继续挖掘」带回首页文档链的草稿（AppRoot 交给 HomePage）。
+ * `key` 同样是代次语义：连点两次同一文档也要重新应用。
+ */
+export interface DocMiningResume {
+  key: number;
+  docId: string;
+  filename: string;
 }
 
 // Real-time metrics
