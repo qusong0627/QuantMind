@@ -1,0 +1,633 @@
+/*
+ * 滚动训练面板（模型管理 →「滚动训练」tab）。
+ *
+ * 设计口径：本页已有语言是「font-black 微型标签 + mono ID + slate-900 主按钮
+ * + 柔和色 pill」，此面板在其上加一层「控制台」气质——四步 bento 布局，
+ * 序号 + 发丝线分区，派生卡用深色主卡突出（云端导入模型的入口），
+ * 窗口色带把 训练/验证/测试 三段窗口做成设计系统内的数据可视化。
+ *
+ * 全部规则作用域在 .rp-board 内；容器查询（container query）做响应式——
+ * 面板实际宽度受左侧模型列表挤压，视口断点在这里是错的度量。
+ */
+
+.rp-board {
+  container-type: inline-size;
+  --rp-line: #e8ecf3;
+  --rp-line-soft: #f1f5f9;
+  --rp-ink: #0f172a;
+  --rp-card: #0d1526;
+  --rp-mut: #94a3b8;
+  --rp-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --rp-train: #334155;
+  --rp-valid: #0ea5e9;
+  --rp-test: #f59e0b;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ── 顶部：标题 + 实时统计 chips ─────────────────────────────── */
+
+.rp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 4px 0;
+}
+
+.rp-head__title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 19px;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+  color: var(--rp-ink);
+}
+
+.rp-head__title svg {
+  color: #7c3aed;
+}
+
+.rp-head__sub {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--rp-mut);
+}
+
+.rp-chips {
+  display: flex;
+  gap: 8px;
+}
+
+.rp-chip {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 88px;
+  padding: 7px 13px;
+  border: 1px solid var(--rp-line);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.rp-chip b {
+  display: flex;
+  align-items: center;
+  min-height: 17px;
+  font: 900 14px/1.2 var(--rp-mono);
+  color: #1e293b;
+}
+
+.rp-chip span {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  color: var(--rp-mut);
+}
+
+/* ── bento 网格 ─────────────────────────────────────────────── */
+
+.rp-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.rp-cell--schedule,
+.rp-cell--ledger {
+  grid-column: 1 / -1;
+}
+
+@container (max-width: 780px) {
+  .rp-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── 卡片 ───────────────────────────────────────────────────── */
+
+.rp-cell {
+  position: relative;
+  min-width: 0;
+  padding: 15px 17px 17px;
+  border: 1px solid var(--rp-line);
+  border-radius: 20px;
+  background: #fff;
+  transition: box-shadow 0.25s ease, transform 0.25s ease, border-color 0.25s ease;
+}
+
+.rp-cell:hover {
+  border-color: #dbe3ee;
+  box-shadow: 0 18px 40px -30px rgba(15, 23, 42, 0.45);
+  transform: translateY(-1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rp-cell,
+  .rp-cell:hover {
+    transition: none;
+    transform: none;
+  }
+}
+
+/* 步骤头：序号 + 图标 + 标题 + 发丝线 */
+.rp-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 13px;
+}
+
+.rp-step__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+}
+
+.rp-accent--violet  { background: #f5f3ff; color: #7c3aed; }
+.rp-accent--blue    { background: #eff6ff; color: #2563eb; }
+.rp-accent--emerald { background: #ecfdf5; color: #059669; }
+.rp-accent--amber   { background: #fffbeb; color: #d97706; }
+
+.rp-step__no {
+  font: 900 10px/1 var(--rp-mono);
+  letter-spacing: 0.18em;
+  color: #b6c2d4;
+}
+
+.rp-step__title {
+  font-size: 13px;
+  font-weight: 900;
+  color: #1e293b;
+}
+
+.rp-step__rule {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--rp-line) 0%, rgba(232, 236, 243, 0) 100%);
+}
+
+/* ── 深色主卡（01 派生配方）──────────────────────────────────── */
+
+.rp-cell--hero {
+  border-color: #223049;
+  color: #dbe4f2;
+  background:
+    radial-gradient(130% 150% at 88% -30%, rgba(124, 58, 237, 0.38) 0%, rgba(124, 58, 237, 0) 48%),
+    radial-gradient(100% 120% at -10% 110%, rgba(37, 99, 235, 0.22) 0%, rgba(37, 99, 235, 0) 52%),
+    var(--rp-card);
+}
+
+.rp-cell--hero:hover {
+  border-color: #31466b;
+  box-shadow: 0 24px 50px -32px rgba(13, 21, 38, 0.9);
+}
+
+.rp-cell--hero .rp-step__no { color: #8b5cf6; }
+.rp-cell--hero .rp-step__title { color: #f1f5f9; }
+.rp-cell--hero .rp-step__rule {
+  background: linear-gradient(90deg, rgba(139, 92, 246, 0.5), rgba(139, 92, 246, 0));
+}
+
+.rp-hero__model {
+  font: 600 11px/1.6 var(--rp-mono);
+  color: #8fa2c0;
+  word-break: break-all;
+}
+
+.rp-hero__desc {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: #8fa2c0;
+}
+
+.rp-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* 深色卡内的降级告警（派生 warnings） */
+.rp-hero__warn {
+  font-size: 10.5px;
+  line-height: 1.65;
+  color: #fbbf24;
+  word-break: break-word;
+}
+
+/* 深色卡内的按钮与读数面板 */
+.rp-board .rp-btn-ghost.ant-btn {
+  border-radius: 12px;
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e2e8f0;
+  font-weight: 700;
+  box-shadow: none;
+}
+
+.rp-board .rp-btn-ghost.ant-btn:hover {
+  border-color: rgba(255, 255, 255, 0.35) !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: #fff !important;
+}
+
+.rp-board .rp-btn-violet.ant-btn {
+  border-color: #7c3aed;
+  border-radius: 12px;
+  background: #7c3aed;
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 10px 24px -12px rgba(124, 58, 237, 0.65);
+}
+
+.rp-board .rp-btn-violet.ant-btn:hover {
+  border-color: #8b5cf6 !important;
+  background: #8b5cf6 !important;
+  color: #fff !important;
+}
+
+/* 派发主按钮：slate-900 实心（本页「设为默认」同款承诺色） */
+.rp-board .rp-btn-dispatch.ant-btn {
+  border-color: var(--rp-ink);
+  border-radius: 12px;
+  background: var(--rp-ink);
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 10px 24px -14px rgba(15, 23, 42, 0.8);
+}
+
+.rp-board .rp-btn-dispatch.ant-btn:hover {
+  border-color: #1e293b !important;
+  background: #1e293b !important;
+  color: #fff !important;
+}
+
+/* ── 读数面板（结果回显）─────────────────────────────────────── */
+
+.rp-inset {
+  border-radius: 14px;
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px var(--rp-line-soft);
+  padding: 10px 12px;
+}
+
+.rp-readout {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px var(--rp-line-soft);
+}
+
+.rp-cell--hero .rp-readout {
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.18);
+}
+
+.rp-readout__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: #475569;
+}
+
+.rp-cell--hero .rp-readout__head {
+  color: #c7d3e8;
+}
+
+.rp-readout__id {
+  font: 800 12px/1.4 var(--rp-mono);
+  color: #1e293b;
+  word-break: break-all;
+}
+
+.rp-cell--hero .rp-readout__id {
+  color: #f1f5f9;
+}
+
+.rp-readout__mono {
+  font: 500 10.5px/1.65 var(--rp-mono);
+  color: #7c8aa0;
+  word-break: break-all;
+}
+
+.rp-cell--hero .rp-readout__mono {
+  color: #93a4c3;
+}
+
+.rp-readout__json {
+  font: 500 10px/1.6 var(--rp-mono);
+  color: #a3aec0;
+  word-break: break-all;
+}
+
+/* ── 窗口色带（训练 / 验证 / 测试）───────────────────────────── */
+
+.rp-band {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rp-band__track {
+  display: flex;
+  gap: 3px;
+  height: 12px;
+}
+
+.rp-band__seg {
+  min-width: 8px;
+  border-radius: 5px;
+}
+
+.rp-band__seg--train { background: var(--rp-train); }
+.rp-band__seg--valid { background: var(--rp-valid); }
+.rp-band__seg--test  { background: var(--rp-test); }
+
+.rp-band__caps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rp-band__cap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rp-band__cap b {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 800;
+  color: #475569;
+}
+
+.rp-band__cap b::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.rp-band__cap--train b { color: var(--rp-train); }
+.rp-band__cap--valid b { color: #0284c7; }
+.rp-band__cap--test b  { color: #b45309; }
+
+.rp-band__cap span {
+  font: 500 10px/1.5 var(--rp-mono);
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rp-band__note {
+  font: 500 10.5px/1.5 var(--rp-mono);
+  color: #94a3b8;
+}
+
+/* 深色卡内的色带：提升对比、读数文字变浅色 */
+.rp-cell--hero .rp-band__seg--train { background: #64748b; }
+.rp-cell--hero .rp-band__seg--valid { background: #38bdf8; }
+.rp-cell--hero .rp-band__seg--test  { background: #fbbf24; }
+.rp-cell--hero .rp-band__cap b { color: #c7d3e8; }
+.rp-cell--hero .rp-band__cap--train b { color: #cbd5e1; }
+.rp-cell--hero .rp-band__cap--valid b { color: #7dd3fc; }
+.rp-cell--hero .rp-band__cap--test b  { color: #fcd34d; }
+.rp-cell--hero .rp-band__cap span,
+.rp-cell--hero .rp-band__note { color: #8fa2c0; }
+
+/* ── 状态 pill ──────────────────────────────────────────────── */
+
+.rp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font: 800 10px/1 var(--rp-mono);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.rp-pill::before {
+  content: '';
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.rp-pill--ok     { background: #ecfdf5; color: #047857; }
+.rp-pill--info   { background: #eff6ff; color: #1d4ed8; }
+.rp-pill--warn   { background: #fffbeb; color: #b45309; }
+.rp-pill--err    { background: #fef2f2; color: #b91c1c; }
+.rp-pill--muted  { background: #f1f5f9; color: #64748b; }
+.rp-pill--violet { background: #f5f3ff; color: #6d28d9; }
+
+/* ── 坏配方提示条 ───────────────────────────────────────────── */
+
+.rp-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid #fde68a;
+  border-radius: 16px;
+  background: #fffbeb;
+}
+
+.rp-notice svg {
+  flex: none;
+  margin-top: 2px;
+  color: #d97706;
+}
+
+.rp-notice__body {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: #92400e;
+  word-break: break-word;
+}
+
+/* ── 派发控制台 ─────────────────────────────────────────────── */
+
+.rp-console {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rp-console__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.rp-console__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ── 调度表单（12 列网格）───────────────────────────────────── */
+
+.rp-form {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px 16px;
+  align-items: end;
+}
+
+.rp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rp-field__label {
+  font-size: 9.5px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  color: var(--rp-mut);
+  text-transform: uppercase;
+}
+
+.rp-field--power  { grid-column: span 3; }
+.rp-field--rule   { grid-column: span 3; }
+.rp-field--time   { grid-column: span 2; }
+.rp-field--recipe { grid-column: span 4; }
+.rp-field--obs    { grid-column: span 2; }
+.rp-field--max    { grid-column: span 2; }
+.rp-field--save   { grid-column: span 3; align-items: flex-end; }
+.rp-field--last   { grid-column: span 5; }
+.rp-foot          { grid-column: 1 / -1; }
+
+@container (max-width: 780px) {
+  .rp-field--power  { grid-column: span 6; }
+  .rp-field--rule   { grid-column: span 6; }
+  .rp-field--time   { grid-column: span 4; }
+  .rp-field--recipe { grid-column: span 8; }
+  .rp-field--obs    { grid-column: span 4; }
+  .rp-field--max    { grid-column: span 4; }
+  .rp-field--save   { grid-column: span 4; }
+  .rp-field--last   { grid-column: span 12; }
+}
+
+.rp-power {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--rp-line);
+  border-radius: 10px;
+  background: #f8fafc;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.rp-power--on {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+}
+
+.rp-power b {
+  font-size: 11px;
+  font-weight: 900;
+  color: #64748b;
+}
+
+.rp-power--on b {
+  color: #047857;
+}
+
+.rp-lastrun {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 12px;
+  border: 1px dashed var(--rp-line);
+  border-radius: 12px;
+}
+
+.rp-lastrun b {
+  font: 700 11.5px/1.4 var(--rp-mono);
+  color: #475569;
+}
+
+.rp-foot {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--rp-mut);
+}
+
+/* ── 台账表格 ───────────────────────────────────────────────── */
+
+.rp-table .ant-table-thead > tr > th {
+  background: #f8fafc !important;
+  color: var(--rp-mut) !important;
+  font-size: 9.5px !important;
+  font-weight: 900 !important;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--rp-line) !important;
+}
+
+.rp-table .ant-table-thead > tr > th::before {
+  display: none !important;
+}
+
+.rp-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--rp-line-soft) !important;
+}
+
+.rp-table .ant-table-tbody > tr:hover > td {
+  background: #f8fafc !important;
+}
+
+.rp-table .ant-table-tbody > tr:last-child > td {
+  border-bottom: none !important;
+}
+
+.rp-mk {
+  font: 900 11px/1 var(--rp-mono);
+  color: #334155;
+}
+
+.rp-trunc {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
