@@ -1094,12 +1094,16 @@ export const MODEL_SHORT_NAMES: Record<string, string> = {
   nativetft: 'TFT',
 };
 
-export const buildAutoDisplayName = (referenceDate: Dayjs, target: TrainingTarget, featureCount: number, version = DEFAULT_MODEL_VERSION, market?: string, modelType?: string) => {
+export const buildAutoDisplayName = (referenceDate: Dayjs, target: TrainingTarget, featureCount: number, version = DEFAULT_MODEL_VERSION, market?: string, modelType?: string | string[]) => {
   const dateToken = referenceDate.format('DD');
   const returnToken = `T${target.horizonDays}`;
   const dimensionToken = `Alpha${Math.max(1, featureCount)}`;
   const marketSuffix = market ? `_${market.toUpperCase()}` : '';
-  const modelPrefix = modelType ? `${MODEL_SHORT_NAMES[modelType] ?? modelType.toUpperCase()}_` : '';
+  // 集合训练（多模型）短码用 + 连接：LGB+XGB_…
+  const modelTypes = Array.isArray(modelType) ? modelType.filter(Boolean) : modelType ? [modelType] : [];
+  const modelPrefix = modelTypes.length > 0
+    ? `${modelTypes.map((mt) => MODEL_SHORT_NAMES[mt] ?? mt.toUpperCase()).join('+')}_`
+    : '';
   return `${modelPrefix}${dateToken}_${returnToken}_${dimensionToken}_${version}${marketSuffix}`;
 };
 
@@ -1432,7 +1436,10 @@ export const buildTrainingRequest = (
   const trainingWindow = `${formatRange(timePeriods.train)} | ${formatRange(timePeriods.val)} | ${formatRange(timePeriods.test)}`;
   const resolvedContext = market ? { ...context, market } : context;
   return {
-    displayName: displayName.trim() || buildAutoDisplayName(dayjs(), target, finalFeatures.length, undefined, market, params.model_type),
+    displayName: displayName.trim() || buildAutoDisplayName(
+      dayjs(), target, finalFeatures.length, undefined, market,
+      params.model_types?.length ? params.model_types : params.model_type,
+    ),
     selectedFeatures: finalFeatures,
     featureCategories: summarizeFeatureCategories(finalFeatures, categories),
     target,

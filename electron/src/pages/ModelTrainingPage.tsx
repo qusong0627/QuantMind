@@ -125,11 +125,10 @@ function formReducer(state: FormState, action: FormAction): FormState {
       if (!action.payload) return { ...state, draftHydrated: true };
       const p = action.payload;
       const restoredParams = { ...DEFAULT_PARAMS, ...p.params };
-      // 单选模型：历史草稿若存有多选，只保留主模型
-      restoredParams.model_types = [restoredParams.model_type];
-      restoredParams.ensemble_method = 'none';
-      if (!p.params?.model_types && p.params?.model_type) {
-        restoredParams.model_types = [p.params.model_type];
+      // 兼容单选时代（2026-09 改版）落的历史草稿：无 model_types 字段则用主模型补一个；
+      // 含多选与 ensemble_method 的草稿原样恢复（集合训练入口已恢复）
+      if (!restoredParams.model_types?.length) {
+        restoredParams.model_types = [restoredParams.model_type];
       }
       if (restoredParams.model_type && MODEL_DL_DEFAULTS[restoredParams.model_type]) {
         const defaults = MODEL_DL_DEFAULTS[restoredParams.model_type];
@@ -358,8 +357,11 @@ export const ModelTrainingPage: React.FC = () => {
 
   const featureCount = selectedFeatures.length;
   const autoDisplayName = useMemo(
-    () => buildAutoDisplayName(dayjs(), target, featureCount, undefined, trainingMarket, params.model_type),
-    [target, featureCount, trainingMarket, params.model_type]
+    () => buildAutoDisplayName(
+      dayjs(), target, featureCount, undefined, trainingMarket,
+      params.model_types?.length ? params.model_types : params.model_type,
+    ),
+    [target, featureCount, trainingMarket, params.model_type, params.model_types]
   );
   const trainDays = useMemo(() => daysBetween(timePeriods.train), [timePeriods.train]);
   const valDays = useMemo(() => daysBetween(timePeriods.val), [timePeriods.val]);
@@ -1014,8 +1016,8 @@ export const ModelTrainingPage: React.FC = () => {
   return (
     <div className={PAGE_LAYOUT.outerClass}>
       <div className={PAGE_LAYOUT.frameClass}>
-        <header className={PAGE_LAYOUT.headerClass} style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}>
-          <div className="flex items-center gap-3">
+        <header className={clsx(PAGE_LAYOUT.headerClass, 'py-2')} style={{ minHeight: `${PAGE_LAYOUT.headerHeight}px` }}>
+          <div className="flex items-center gap-3 shrink-0">
             <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-500 rounded-2xl flex items-center justify-center shadow-lg">
               <Brain className="w-5 h-5 text-white" />
             </div>
@@ -1024,6 +1026,135 @@ export const ModelTrainingPage: React.FC = () => {
               <div className="h-4 w-[1px] bg-slate-200 self-center" />
               <span className="text-sm font-medium text-slate-500">模型训练中心</span>
             </div>
+          </div>
+
+          {/* 训练全局配置条：原为内容区顶部大卡片，整体上移到标题行之后——
+              滚动区优先让给下方步骤内容显示（窄屏自动折行，minHeight 随内容撑高） */}
+          <div className="flex flex-1 min-w-0 flex-wrap items-center gap-x-5 gap-y-2 ml-6">
+            <div className="flex items-center gap-2 shrink-0">
+              <CurrentIcon size={18} className="text-blue-500" />
+              <Title level={5} className="!mb-0">{currentModule.title}</Title>
+            </div>
+            <div className="flex items-center gap-2 text-xs shrink-0">
+              <span className="font-medium text-slate-600 shrink-0">训练市场</span>
+              <Select
+                value={trainingMarket}
+                onChange={handleTrainingMarketChange}
+                className="min-w-36"
+                disabled={isTrainingInProgress}
+                options={TRAINING_MARKET_OPTIONS}
+              />
+              {trainingMarket === 'CUSTOM' && (
+                <Tooltip title="自定义数据市场：训练直接用后端已发布的自传数据集（如 RD 挖掘因子库），不改全局市场。">
+                  <Tag color="purple" className="!m-0">自定义数据</Tag>
+                </Tooltip>
+              )}
+            </div>
+            {isQuantDBMarket(trainingMarket) && (
+              <div className="flex items-center gap-2 text-xs min-w-0">
+                <span className="font-medium text-slate-600 shrink-0">数据源</span>
+                <Select
+                  value={factorSource}
+                  onChange={handleFactorSourceChange}
+                  className="min-w-52"
+                  loading={featureCatalogLoading && factorSources.length === 0}
+                  options={factorSources.map((item) => ({
+                    value: item.id,
+                    label: item.default ? `${item.name}（默认）` : item.name,
+                    disabled: !item.ready,
+                  }))}
+                />
+                {factorCatalogVersion
+                  ? <Tooltip title={`目录版本 ${factorCatalogVersion}`}>
+                      <Tag color="blue" className="!m-0 inline-flex items-center gap-1 cursor-default">
+                        <Layers size={11} />{factorCatalogVersion.split('-').pop()?.slice(0, 8)}
+                      </Tag>
+                    </Tooltip>
+                  : <Tooltip title="前往后台「训练服务 → 模型训练数据集」执行『刷新字段』数据扫描">
+                      <Tag
+                        color={dataCoverage?.ready ? 'default' : 'warning'}
+                        className="cursor-pointer hover:opacity-80"
+                        onClick={() => navigate('/admin/training-datasets')}
+                      >
+                        {factorSources.find((item) => item.id === factorSource)?.reason || '尚未发布因子目录'} →
+                      </Tag>
+                    </Tooltip>}
+                {factorSources.length > 0 && (
+                  <>
+                    <span className="font-medium text-slate-600 shrink-0">附加因子库</span>
+                    <Select
+                      mode="multiple"
+                      value={extraFactorSources}
+                      onChange={(next: string[]) => setExtraFactorSources(sanitizeExtraFactorSources(next, factorSource))}
+                      className="min-w-48"
+                      placeholder={hasSelectableExtraSource ? '可跨库组合因子' : '无可用附加因子库'}
+                      disabled={isTrainingInProgress || !hasSelectableExtraSource}
+                      loading={featureCatalogLoading && factorSources.length === 0}
+                      maxTagCount="responsive"
+                      options={extraSourceOptions.map((option) => ({
+                        value: option.value,
+                        label: option.label,
+                        disabled: option.disabled,
+                        // 置灰原因：鼠标悬停即可看到，不用去猜为什么点不动
+                        title: option.reason || undefined,
+                      }))}
+                    />
+                    {!hasSelectableExtraSource && (
+                      <Tooltip title="附加因子库需要先在该库发布因子目录（后台『训练服务 → 模型训练数据集』执行『刷新字段』并发布）">
+                        <Tag color="warning" className="cursor-pointer hover:opacity-80" onClick={() => navigate('/admin/training-datasets')}>
+                          {extraSourceOptions.find((option) => option.disabled)?.reason || '无可用附加因子库'} →
+                        </Tag>
+                      </Tooltip>
+                    )}
+                    {extraFactorSources.length > 0 && (
+                      <Tag color="geekblue">跨源训练 {extraFactorSources.length + 1} 库</Tag>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+            <Space className="ml-auto shrink-0">
+              {currentStep === 0 && (
+                <>
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept=".yml,.yaml,.txt,text/yaml,text/plain"
+                    className="hidden"
+                    onChange={(event) => void handleImportConfigFile(event.target.files?.[0])}
+                  />
+                  <Button
+                    size="small"
+                    icon={<Upload size={14} />}
+                    className="rounded-xl h-8 font-bold px-3"
+                    loading={importingConfig}
+                    disabled={isTrainingInProgress}
+                    onClick={() => importInputRef.current?.click()}
+                  >
+                    导入配置
+                  </Button>
+                </>
+              )}
+              <Button size="small" icon={<RefreshCcw size={14}/>} className="rounded-xl h-8 font-bold px-3" onClick={handleResetAll} disabled={isTrainingInProgress}>清空</Button>
+              {isTrainingInProgress && (
+                <Button
+                  size="small"
+                  danger
+                  icon={<Square size={14} />}
+                  className="rounded-xl h-8 font-bold px-4"
+                  onClick={handleCancelTraining}
+                >
+                  取消训练
+                </Button>
+              )}
+              <Tooltip title={disableStartTraining ? startDisabledReason : undefined}>
+                <span className={disableStartTraining ? 'inline-block' : undefined}>
+                  <Button size="small" type="primary" icon={<ChevronRight size={14}/>} className="rounded-xl h-8 bg-blue-600 font-bold px-4 shadow-sm" onClick={stepAction} disabled={disableStartTraining}>
+                    {stepActionLabel}
+                  </Button>
+                </span>
+              </Tooltip>
+            </Space>
           </div>
         </header>
 
@@ -1104,140 +1235,8 @@ export const ModelTrainingPage: React.FC = () => {
           </aside>
 
           <main className="flex-1 flex flex-col bg-gray-50/50 min-w-0">
-            <div className={PAGE_LAYOUT.breadcrumbClass}>
-              <div className="flex items-center gap-2 text-sm">
-                <span className="text-gray-500">训练中心</span>
-                <span className="text-gray-400">/</span>
-                <span className="text-gray-800 font-medium">{currentModule.title}</span>
-              </div>
-            </div>
-
             <div className={`flex-1 overflow-y-auto overflow-x-hidden p-6 ${TRAINING_PAGE_BOTTOM_SAFE_CLASS}`}>
               <div className="max-w-6xl mx-auto space-y-4">
-                <Card className="rounded-2xl border-gray-200 shadow-sm" styles={{ body: { padding: '12px 20px' } }}>
-                  <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-                    <div className="flex items-center gap-2 shrink-0">
-                      <CurrentIcon size={18} className="text-blue-500" />
-                      <Title level={5} className="!mb-0">{currentModule.title}</Title>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs shrink-0">
-                      <span className="font-medium text-slate-600 shrink-0">训练市场</span>
-                      <Select
-                        value={trainingMarket}
-                        onChange={handleTrainingMarketChange}
-                        className="min-w-36"
-                        disabled={isTrainingInProgress}
-                        options={TRAINING_MARKET_OPTIONS}
-                      />
-                      {trainingMarket === 'CUSTOM' && (
-                        <Tooltip title="自定义数据市场：训练直接用后端已发布的自传数据集（如 RD 挖掘因子库），不改全局市场。">
-                          <Tag color="purple" className="!m-0">自定义数据</Tag>
-                        </Tooltip>
-                      )}
-                    </div>
-                    {isQuantDBMarket(trainingMarket) && (
-                      <div className="flex items-center gap-2 text-xs min-w-0">
-                      <span className="font-medium text-slate-600 shrink-0">数据源</span>
-                      <Select
-                        value={factorSource}
-                        onChange={handleFactorSourceChange}
-                        className="min-w-52"
-                        loading={featureCatalogLoading && factorSources.length === 0}
-                        options={factorSources.map((item) => ({
-                          value: item.id,
-                          label: item.default ? `${item.name}（默认）` : item.name,
-                          disabled: !item.ready,
-                        }))}
-                      />
-                      {factorCatalogVersion
-                        ? <Tag color="blue">目录版本 {factorCatalogVersion}</Tag>
-                        : <Tooltip title="前往后台「训练服务 → 模型训练数据集」执行『刷新字段』数据扫描">
-                            <Tag
-                              color={dataCoverage?.ready ? 'default' : 'warning'}
-                              className="cursor-pointer hover:opacity-80"
-                              onClick={() => navigate('/admin/training-datasets')}
-                            >
-                              {factorSources.find((item) => item.id === factorSource)?.reason || '尚未发布因子目录'} →
-                            </Tag>
-                          </Tooltip>}
-                      {factorSources.length > 0 && (
-                        <>
-                          <span className="font-medium text-slate-600 shrink-0">附加因子库</span>
-                          <Select
-                            mode="multiple"
-                            value={extraFactorSources}
-                            onChange={(next: string[]) => setExtraFactorSources(sanitizeExtraFactorSources(next, factorSource))}
-                            className="min-w-48"
-                            placeholder={hasSelectableExtraSource ? '可跨库组合因子' : '无可用附加因子库'}
-                            disabled={isTrainingInProgress || !hasSelectableExtraSource}
-                            loading={featureCatalogLoading && factorSources.length === 0}
-                            maxTagCount="responsive"
-                            options={extraSourceOptions.map((option) => ({
-                              value: option.value,
-                              label: option.label,
-                              disabled: option.disabled,
-                              // 置灰原因：鼠标悬停即可看到，不用去猜为什么点不动
-                              title: option.reason || undefined,
-                            }))}
-                          />
-                          {!hasSelectableExtraSource && (
-                            <Tooltip title="附加因子库需要先在该库发布因子目录（后台『训练服务 → 模型训练数据集』执行『刷新字段』并发布）">
-                              <Tag color="warning" className="cursor-pointer hover:opacity-80" onClick={() => navigate('/admin/training-datasets')}>
-                                {extraSourceOptions.find((option) => option.disabled)?.reason || '无可用附加因子库'} →
-                              </Tag>
-                            </Tooltip>
-                          )}
-                          {extraFactorSources.length > 0 && (
-                            <Tag color="geekblue">跨源训练 {extraFactorSources.length + 1} 库</Tag>
-                          )}
-                        </>
-                      )}
-                      </div>
-                    )}
-                    <Space className="ml-auto shrink-0">
-                      {currentStep === 0 && (
-                        <>
-                          <input
-                            ref={importInputRef}
-                            type="file"
-                            accept=".yml,.yaml,.txt,text/yaml,text/plain"
-                            className="hidden"
-                            onChange={(event) => void handleImportConfigFile(event.target.files?.[0])}
-                          />
-                          <Button
-                            size="small"
-                            icon={<Upload size={14} />}
-                            className="rounded-xl h-8 font-bold px-3"
-                            loading={importingConfig}
-                            disabled={isTrainingInProgress}
-                            onClick={() => importInputRef.current?.click()}
-                          >
-                            导入配置
-                          </Button>
-                        </>
-                      )}
-                      <Button size="small" icon={<RefreshCcw size={14}/>} className="rounded-xl h-8 font-bold px-3" onClick={handleResetAll} disabled={isTrainingInProgress}>清空</Button>
-                      {isTrainingInProgress && (
-                        <Button
-                          size="small"
-                          danger
-                          icon={<Square size={14} />}
-                          className="rounded-xl h-8 font-bold px-4"
-                          onClick={handleCancelTraining}
-                        >
-                          取消训练
-                        </Button>
-                      )}
-                      <Tooltip title={disableStartTraining ? startDisabledReason : undefined}>
-                        <span className={disableStartTraining ? 'inline-block' : undefined}>
-                          <Button size="small" type="primary" icon={<ChevronRight size={14}/>} className="rounded-xl h-8 bg-blue-600 font-bold px-4 shadow-sm" onClick={stepAction} disabled={disableStartTraining}>
-                            {stepActionLabel}
-                          </Button>
-                        </span>
-                      </Tooltip>
-                    </Space>
-                  </div>
-                </Card>
 
                 <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
                     <MetricCard label="市场" value={getMarketConfig(trainingMarket).label} centered />

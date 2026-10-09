@@ -1,6 +1,6 @@
 import React from 'react';
-import { Card, Divider, Input, Button, Row, Col, InputNumber, Select, Alert, Typography, Tag, Radio, Switch, Tooltip } from 'antd';
-import { Settings2, MonitorPlay, TreePine, Cpu, Ruler } from 'lucide-react';
+import { Card, Divider, Input, Button, Row, Col, InputNumber, Select, Alert, Typography, Tag, Checkbox, Switch, Tooltip } from 'antd';
+import { Settings2, MonitorPlay, TreePine, Cpu, Ruler, AlertTriangle } from 'lucide-react';
 import {
   TrainingParams,
   TrainingContext,
@@ -8,6 +8,7 @@ import {
   WfaConfig,
   DealPrice,
   ModelType,
+  EnsembleMethod,
   MODEL_TYPE_OPTIONS,
   MODEL_DL_DEFAULTS,
 } from './trainingUtils';
@@ -92,10 +93,20 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
   const isReturnTarget = target.mode === 'return';
   // 分位推理：后端仅支持 A 股单 LightGBM 回归模型（train.py _validate_quantile_config）
   const quantileDisabled = market !== 'CN' || !isSingleLgb || !isReturnTarget;
-  // WFA 诊断：后端仅支持树模型 + 线性，其余直接 skip（train.py _train_wfa_single）
+  // WFA 诊断：后端仅支持树模型 + 线性，其余直接 skip（train.py _train_wfa_single）。
+  // 集合训练时 WFA 跑在主模型（model_type，即选中列表第一个）上。
   const wfaSupported = ['lightgbm', 'xgboost', 'catboost', 'linear'].includes(params.model_type);
-  // 行业编码：仅 CatBoost 声明 cat_features 做类别处理，其余模型无此口径
-  const isCatboost = params.model_type === 'catboost';
+  // 行业编码：仅 CatBoost 声明 cat_features 做类别处理；多模型混跑一律不给
+  const isCatboost = params.model_types.length === 1 && params.model_type === 'catboost';
+  // 集合训练（Stacking）：≥2 个模型才可选；「树/线性 + 深度学习」混合后端不支持
+  // 集成（train.py 多模型分支），混合选型将各自独立训练。
+  const hasDLSelected = params.model_types.some((mt) => MODEL_TYPE_OPTIONS.find((m) => m.value === mt)?.category === 'deep_learning');
+  const hasClassicSelected = params.model_types.some((mt) => {
+    const category = MODEL_TYPE_OPTIONS.find((m) => m.value === mt)?.category;
+    return category === 'tree' || category === 'linear';
+  });
+  const isEnsembleMixed = params.model_types.length > 1 && hasDLSelected && hasClassicSelected;
+  const showEnsembleSelector = params.model_types.length > 1 && !isEnsembleMixed;
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_0.9fr]">
       <Card className="rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: 20 } }}>
@@ -110,32 +121,43 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
           <Card className="rounded-2xl border-slate-200" size="small" title="模型类型">
             <div className="space-y-3">
               <div className="text-xs text-slate-500">
-                一次训练一个模型。树模型适合快速实验，线性模型作为基线 sanity check，深度学习模型在大数据集上潜力更大。
+                可多选模型：选 2 个及以上树模型 / 线性模型可做 Stacking 集合训练；与深度学习模型混合选型时各自独立训练（不集成）。
               </div>
-              <Radio.Group
-                value={params.model_type}
+              <Checkbox.Group
+                value={params.model_types}
                 className="w-full"
-                onChange={(event) => {
-                  const selected = event.target.value as ModelType;
-                  // 切换模型类型时，自动填充该模型的推荐 DL 默认参数
-                  const dlDefaults = MODEL_DL_DEFAULTS[selected] || {};
+                onChange={(checkedValues) => {
+                  const selected = checkedValues as ModelType[];
+                  if (selected.length === 0) return; // 至少保留一个模型
+                  const primary = selected[0];
+                  // 混合（树/线性 + 深度学习）后端不支持集成，将各自独立训练
+                  const selectedHasDL = selected.some((mt) => MODEL_TYPE_OPTIONS.find((m) => m.value === mt)?.category === 'deep_learning');
+                  const selectedHasClassic = selected.some((mt) => {
+                    const category = MODEL_TYPE_OPTIONS.find((m) => m.value === mt)?.category;
+                    return category === 'tree' || category === 'linear';
+                  });
+                  const mixed = selected.length > 1 && selectedHasDL && selectedHasClassic;
+                  // 切换模型类型时，自动填充主模型的推荐 DL 默认参数
+                  const dlDefaults = MODEL_DL_DEFAULTS[primary] || {};
                   // 对于非 DL 模型，不覆盖已设置的 DL 参数
                   const updated: TrainingParams = {
                     ...params,
-                    model_type: selected,
-                    model_types: [selected],
-                    ensemble_method: 'none',
-                    prediction_mode: selected === 'lightgbm' ? params.prediction_mode : 'point',
+                    model_type: primary,
+                    model_types: selected,
+                    // 多选且非混合时保留集成方式；单选/混合一律回落 none
+                    ensemble_method: selected.length > 1 && !mixed ? (params.ensemble_method || 'none') : 'none',
+                    prediction_mode: selected.length === 1 && primary === 'lightgbm' ? params.prediction_mode : 'point',
                   };
                   if (dlDefaults.dl_hidden_size !== undefined) {
                     Object.assign(updated, dlDefaults);
                   }
                   onParamsChange(updated);
-                  // 切换到不支持的模型时，自动关闭右侧已开的开关，避免提交无效组合
-                  if (selected !== 'catboost' && context.industry_as_feature) {
+                  // 行业编码仅单选 CatBoost 可用；其余组合自动关闭，避免提交无效组合
+                  if (!(selected.length === 1 && primary === 'catboost') && context.industry_as_feature) {
                     onContextChange({ ...context, industry_as_feature: false });
                   }
-                  if (!['lightgbm', 'xgboost', 'catboost', 'linear'].includes(selected) && wfa?.enabled) {
+                  // WFA 诊断跑在主模型上：主模型不支持时自动关闭
+                  if (!['lightgbm', 'xgboost', 'catboost', 'linear'].includes(primary) && wfa?.enabled) {
                     onWfaChange?.({ ...wfa, enabled: false });
                   }
                 }}
@@ -146,10 +168,10 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2 pl-1">
                     {MODEL_TYPE_OPTIONS.filter(m => m.category === 'tree').map(m => (
-                      <Radio
+                      <Checkbox
                         key={m.value}
                         value={m.value}
-                        className="!inline-flex !items-start [&_.ant-radio]:top-1 [&_.ant-radio]:self-start"
+                        className="!inline-flex !items-start [&_.ant-checkbox]:top-1 [&_.ant-checkbox]:self-start"
                       >
                         <span className="inline-flex flex-col gap-0.5 leading-normal">
                           <span className="inline-flex items-center gap-1.5">
@@ -162,7 +184,7 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                           </span>
                           <span className="text-xs text-slate-400">{m.description}</span>
                         </span>
-                      </Radio>
+                      </Checkbox>
                     ))}
                   </div>
                   <div className="text-xs font-medium text-slate-600 flex items-center gap-1">
@@ -170,10 +192,10 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2 pl-1">
                     {MODEL_TYPE_OPTIONS.filter(m => m.category === 'linear').map(m => (
-                      <Radio
+                      <Checkbox
                         key={m.value}
                         value={m.value}
-                        className="!inline-flex !items-start [&_.ant-radio]:top-1 [&_.ant-radio]:self-start"
+                        className="!inline-flex !items-start [&_.ant-checkbox]:top-1 [&_.ant-checkbox]:self-start"
                       >
                         <span className="inline-flex flex-col gap-0.5 leading-normal">
                           <span className="inline-flex items-center gap-1.5">
@@ -186,7 +208,7 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                           </span>
                           <span className="text-xs text-slate-400">{m.description}</span>
                         </span>
-                      </Radio>
+                      </Checkbox>
                     ))}
                   </div>
                   <div className="text-xs font-medium text-slate-600 flex items-center gap-1">
@@ -194,10 +216,10 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2 pl-1">
                     {MODEL_TYPE_OPTIONS.filter(m => m.category === 'deep_learning').map(m => (
-                      <Radio
+                      <Checkbox
                         key={m.value}
                         value={m.value}
-                        className="!inline-flex !items-start [&_.ant-radio]:top-1 [&_.ant-radio]:self-start"
+                        className="!inline-flex !items-start [&_.ant-checkbox]:top-1 [&_.ant-checkbox]:self-start"
                       >
                         <span className="inline-flex flex-col gap-0.5 leading-normal">
                           <span className="inline-flex items-center gap-1.5">
@@ -210,11 +232,80 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                           </span>
                           <span className="text-xs text-slate-400">{m.description}</span>
                         </span>
-                      </Radio>
+                      </Checkbox>
                     ))}
                   </div>
                 </div>
-              </Radio.Group>
+              </Checkbox.Group>
+              {params.model_types.length > 1 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs text-slate-500">已选模型：</span>
+                  {params.model_types.map(mt => {
+                    const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
+                    return (
+                      <Tag key={mt} color="blue" className="!m-0 rounded-lg">
+                        {opt?.label ?? mt}
+                      </Tag>
+                    );
+                  })}
+                </div>
+              )}
+              {isEnsembleMixed && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  icon={<AlertTriangle size={14} />}
+                  message="树模型与深度学习模型混合训练时，集成方法暂不支持，将分别独立训练"
+                  className="rounded-xl"
+                />
+              )}
+              {showEnsembleSelector && (
+                <div className="space-y-1">
+                  <div className="text-xs text-slate-500">集成方法</div>
+                  <Select
+                    value={params.ensemble_method}
+                    className="w-full"
+                    onChange={(value) => onParamsChange({ ...params, ensemble_method: value as EnsembleMethod })}
+                    options={[
+                      { label: '无集成 (各自独立训练)', value: 'none' },
+                      { label: 'Stacking 集成', value: 'stacking' },
+                    ]}
+                  />
+                  <div className="text-[10px] text-slate-400">Stacking：各基模型先产 OOF 预测，再由 Ridge 元学习器加权融合（评估与产物口径均为集成预测）</div>
+                </div>
+              )}
+              {showEnsembleSelector && params.ensemble_method === 'stacking' && (
+                <Row gutter={[12, 12]}>
+                  <Col span={12}>
+                    <div className="space-y-1">
+                      <div className="text-xs text-slate-500">OOF 折数 (n_folds)</div>
+                      <InputNumber
+                        value={params.n_folds ?? 3}
+                        min={2}
+                        max={10}
+                        step={1}
+                        className="w-full"
+                        onChange={(v) => onParamsChange({ ...params, n_folds: Number(v ?? 3) })}
+                      />
+                      <div className="text-[10px] text-slate-400">时序扩展窗口折数，越多越稳但越慢</div>
+                    </div>
+                  </Col>
+                  <Col span={12}>
+                    <div className="space-y-1">
+                      <div className="text-xs text-slate-500">元学习器正则 (alpha)</div>
+                      <InputNumber
+                        value={params.meta_alpha ?? 1.0}
+                        min={0.01}
+                        max={100}
+                        step={0.5}
+                        className="w-full"
+                        onChange={(v) => onParamsChange({ ...params, meta_alpha: Number(v ?? 1.0) })}
+                      />
+                      <div className="text-[10px] text-slate-400">Ridge 元学习器 L2 系数，越大越保守</div>
+                    </div>
+                  </Col>
+                </Row>
+              )}
               {params.model_types.some(mt => {
                 const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
                 return opt?.framework === 'pytorch';
