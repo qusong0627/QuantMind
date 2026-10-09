@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components-v2/ui/Card';
 import { Button } from '../components-v2/ui/Button';
 import { Badge } from '../components-v2/ui/Badge';
@@ -6,7 +6,18 @@ import { Factor, FactorQuality, UniverseInfo } from '../types-v2';
 import type { PageId } from '../components-v2/layout/Layout';
 import { formatNumber, getQualityBadgeClass, metricToneClass } from '../utils-v2';
 import { formatMetricValue } from '../services-v2/metricRegistry';
-import { getFactors, getFactorDetail, getUniverses, getFactoryFactors, classifyQuality, UNIVERSE_LABELS, type FactorQualityCounts } from '../services-v2/api';
+import {
+  getFactors,
+  getFactorDetail,
+  getUniverses,
+  getFactoryFactors,
+  classifyQuality,
+  UNIVERSE_LABELS,
+  startFactorRecovery,
+  getFactorRecoveryStatus,
+  type FactorQualityCounts,
+  type FactorRecoveryStatus,
+} from '../services-v2/api';
 import { alphaAgentService, MarketInfo } from '../services/alphaAgentService';
 import {
   Database,
@@ -60,6 +71,13 @@ type LibraryView = 'list' | 'cards';
  * 既是「为啥就显示 200」的直接原因，也是「越挖、中等因子越少」的假象来源。
  */
 const LIBRARY_LIST_LIMIT = 500;
+
+/**
+ * 补码评估批次轮询间隔（ms）。批次要跑 45 次 LLM 调用 + 45 次回测（串行、
+ * 每秒级到分钟级一条），4s 足够让「当前因子 / done 计数」动起来又不churn；
+ * 状态查询是内存快照，开销可忽略。
+ */
+const RECOVERY_POLL_MS = 4000;
 
 /** /alpha-agent/factors 行 → 列表 Factor（回测指标优先级链；缺失保持
  *  undefined，界面显「—」，禁止 `|| 0` 把「没算过」伪造成「算出来是 0」）。 */
@@ -180,6 +198,13 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
   } | null>(null);
   // 已取回的挖掘因子行数（= 下一页的 offset；按取回行数推进，不按去重后计数）
   const [apiNextOffset, setApiNextOffset] = useState(0);
+  // 补码评估（待评估存量因子：旧批次半成品没有实现代码）
+  const [recovery, setRecovery] = useState<FactorRecoveryStatus | null>(null);
+  const [isStartingRecovery, setIsStartingRecovery] = useState(false);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  // 批次 running→终态的那一刻要刷新列表（把新生效的 IC 拉进来）——用 ref 记
+  // 上一次状态，避免把副作用写进 setState 更新函数（StrictMode 会双调）。
+  const recoveryWasRunning = useRef(false);
 
   useEffect(() => {
     alphaAgentService.listMarkets().then(setMarkets).catch(() => {});
@@ -276,6 +301,37 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
       setIsLoadingMore(false);
     }
   }, [marketFilter, universeFilter, taskFilter?.taskId, apiNextOffset, isLoadingMore]);
+
+  // 补码评估进度轮询：挂载先主动拉一次（页面切走再回来也能接上已在跑的批次），
+  // running 时每 4s 跟一次；转终态那一刻刷新列表（新 IC 进瓦片/页签计数）。
+  const recoveryRunning = recovery?.running ?? false;
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const res = await getFactorRecoveryStatus();
+      if (cancelled) return;
+      if (!res.success || !res.data) {
+        if (recoveryRunning) setRecoveryError(res.error ?? '查询补码评估进度失败');
+        return;
+      }
+      setRecoveryError(null);
+      setRecovery(res.data);
+      if (recoveryWasRunning.current && !res.data.running) {
+        void loadFactors();
+      }
+      recoveryWasRunning.current = res.data.running;
+    };
+    void tick();
+    const timer = recoveryRunning
+      ? window.setInterval(() => {
+          void tick();
+        }, RECOVERY_POLL_MS)
+      : undefined;
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [recoveryRunning, loadFactors]);
 
   const filterFactors = () => {
     let filtered = factors;
@@ -457,6 +513,32 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
       unknown: base.unknown + factory.unknown,
     };
   }, [apiScope, factors, marketFilter, universeFilter]);
+
+  // 发起补码评估批次（stats 之后声明：确认文案要带「待评估 N」，而 stats 是
+  // 块级 const——回调放前面会触发 TS 的 use-before-declaration）。
+  const handleStartRecovery = useCallback(async () => {
+    if (isStartingRecovery || recoveryRunning) return;
+    // 45 条 LLM 调用 + 回测不是小动作，先让用户确认（文案带清数量与去向）
+    const confirmed = window.confirm(
+      `将为 ${stats.unknown} 个「待评估」因子逐条用 AI 补全实现代码，并自动回测补 IC。\n` +
+        '后台串行执行（每条约 1-2 分钟，可离开本页），完成后自动归入高/中/低档，可用于物化与训练。',
+    );
+    if (!confirmed) return;
+    setIsStartingRecovery(true);
+    setRecoveryError(null);
+    try {
+      const res = await startFactorRecovery();
+      if (res.success && res.data) {
+        setRecovery(res.data);
+        recoveryWasRunning.current = res.data.running;
+      } else {
+        // 412（未配置 LLM Key）等 detail 原文上屏——补 Key 入口就在提示里
+        setRecoveryError(res.error ?? '发起补码评估失败');
+      }
+    } finally {
+      setIsStartingRecovery(false);
+    }
+  }, [isStartingRecovery, recoveryRunning, stats.unknown]);
 
   const StatTile = ({
     icon: Icon,
@@ -696,6 +778,62 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
           >
             {isLoadingMore ? '加载中…' : `加载更多（还有 ${apiScope.total - apiNextOffset} 个）`}
           </Button>
+        </div>
+      )}
+
+      {/* 补码评估：待评估因子多是旧批次半成品（无实现代码），行内「回测」用不了——
+          这里给出批次入口与进度（服务端串行补码+回测，完成后归入高/中/低档） */}
+      {(recoveryError ||
+        recoveryRunning ||
+        recovery?.message ||
+        stats.unknown > 0) && (
+        <div className="glass rounded-lg p-3 flex flex-wrap items-center gap-3 bg-primary/5 border-primary/30">
+          <Play className="h-4 w-4 text-primary flex-shrink-0" />
+          <span className="min-w-0 flex-1 text-xs text-foreground">
+            {recoveryRunning && recovery ? (
+              <>
+                补码评估进行中 {recovery.done + recovery.failed}/{recovery.total}
+                {recovery.currentFactorName ? ` · 当前：${recovery.currentFactorName}` : ''}
+                {recovery.failed > 0 ? `（失败 ${recovery.failed}，原因见各行）` : ''}
+                {recovery.skipped > 0 ? `（跳过 ${recovery.skipped}）` : ''}
+              </>
+            ) : recoveryError ? (
+              <span className="text-warning">{recoveryError}</span>
+            ) : recovery?.message ? (
+              recovery.message
+            ) : (
+              <>
+                {stats.unknown} 个因子从未评估：多为旧批次半成品（只存了公式、没有实现代码），
+                行内「回测」无法使用。将按公式用 AI 补全代码并自动回测，完成后归入高/中/低档、可用于物化与训练。
+              </>
+            )}
+          </span>
+          {recoveryRunning ? (
+            <RefreshCw className="h-3.5 w-3.5 animate-spin text-primary" />
+          ) : stats.unknown > 0 ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onClick={handleStartRecovery}
+              disabled={isStartingRecovery}
+            >
+              {isStartingRecovery ? '发起中…' : '补全代码并评估'}
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              aria-label="关闭"
+              onClick={() => {
+                setRecovery(null);
+                setRecoveryError(null);
+              }}
+            >
+              <X className="h-3 w-3" />
+            </Button>
+          )}
         </div>
       )}
 

@@ -41,6 +41,26 @@ def classify_quality(ic_value: Any) -> str:
     return "low"
 
 
+def _decode_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    """把行里的 ``metadata_json`` 就地解成 ``metadata`` dict（唯一一份解码）。
+
+    psycopg 对 jsonb 列可能回 dict 也可能回 str（版本/驱动差异），解析失败
+    一律回落空 dict——列表/详情/补码候选三处曾各写一份，任何一处改错就是
+    「界面与库不一致」类静默故障，收敛到这里。
+    """
+    raw_meta = item.pop("metadata_json", None)
+    if isinstance(raw_meta, dict):
+        item["metadata"] = raw_meta
+    elif isinstance(raw_meta, str):
+        try:
+            item["metadata"] = json.loads(raw_meta)
+        except Exception:
+            item["metadata"] = {}
+    else:
+        item["metadata"] = {}
+    return item
+
+
 class RDAgentFactorPersistence:
     """管理 RD-Agent 生成的因子数据，供 QuantMind 回测读取共享"""
 
@@ -251,21 +271,7 @@ class RDAgentFactorPersistence:
                 params,
             )
             data = rows.mappings().all()
-            results = []
-            for r in data:
-                item = dict(r)
-                raw_meta = item.pop("metadata_json", None)
-                if isinstance(raw_meta, dict):
-                    item["metadata"] = raw_meta
-                elif isinstance(raw_meta, str):
-                    try:
-                        item["metadata"] = json.loads(raw_meta)
-                    except Exception:
-                        item["metadata"] = {}
-                else:
-                    item["metadata"] = {}
-                results.append(item)
-            return results
+            return [_decode_metadata(dict(r)) for r in data]
 
     async def factor_scope_stats(
         self,
@@ -295,6 +301,47 @@ class RDAgentFactorPersistence:
             stats[classify_quality(v)] += 1
         return stats
 
+    async def list_factors_needing_recovery(
+        self,
+        user_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """列出**从未评估**（``ic_value IS NULL``）的因子，供补码评估批次消费。
+
+        口径与「待评估」页签一致（ic 缺失 = 没跑过任何评估），与
+        ``classify_quality`` 的 unknown 同源但**不完全相同**：这里只看 ic 是否
+        为空，不排除 ±Inf/脏值——评估批次的任务是「让它们有 IC」，直接按
+        NULL 捞最稳。
+
+        有意包含「已补码但尚未回测成功」的行（factor_code 非空、ic 仍为
+        NULL）：批次因此可重入——中断后重跑只会补缺口，不会漏掉补过码但
+        回测失败/取消的因子。ic 非空的行即使回测失败也不会入选（各行以
+        自有的 ic 参与分档，重跑属行内「回测」按钮的职责）。
+
+        按 ``created_at ASC``（最老的先补）：旧批次半成品集中在前，用户
+        按列表顺序也能对上进度。
+        """
+        conditions = ["ic_value IS NULL"]
+        params: dict[str, Any] = {}
+        if user_id:
+            conditions.append("user_id = :user_id")
+            params["user_id"] = user_id
+        params["limit"] = limit
+        async with get_session(read_only=True) as session:
+            rows = await session.execute(
+                text(f"""
+                    SELECT factor_id, factor_name, factor_code, status, user_id, market,
+                           universe, factor_formulation, data_source, metadata_json, created_at
+                    FROM rd_agent_factors
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY created_at ASC
+                    LIMIT :limit
+                    """),
+                params,
+            )
+            data = rows.mappings().all()
+            return [_decode_metadata(dict(r)) for r in data]
+
     async def get_factor(self, factor_id: str) -> dict[str, Any] | None:
         """获取单个因子详情"""
         async with get_session(read_only=True) as session:
@@ -311,18 +358,7 @@ class RDAgentFactorPersistence:
             r = row.mappings().first()
             if not r:
                 return None
-            item = dict(r)
-            raw_meta = item.pop("metadata_json", None)
-            if isinstance(raw_meta, dict):
-                item["metadata"] = raw_meta
-            elif isinstance(raw_meta, str):
-                try:
-                    item["metadata"] = json.loads(raw_meta)
-                except Exception:
-                    item["metadata"] = {}
-            else:
-                item["metadata"] = {}
-            return item
+            return _decode_metadata(dict(r))
 
     async def update_factor_metrics(
         self,

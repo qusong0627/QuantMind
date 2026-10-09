@@ -25,8 +25,10 @@ import {
   FACTOR_LIST_MAX_LIMIT,
   cancelBacktest,
   getBacktestStatus,
+  getFactorRecoveryStatus,
   getFactors,
   startBacktest,
+  startFactorRecovery,
 } from '../api';
 
 beforeEach(() => {
@@ -147,6 +149,69 @@ describe('startBacktest：POST 真实回测端点，返回归一为 running', ()
 
     expect(res.success).toBe(false);
     expect(apiPostMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('补码评估（待评估存量因子的批量补码+回测）', () => {
+  test('startFactorRecovery POST /factors/recovery?limit=…，data 段映射为 camelCase', async () => {
+    apiPostMock.mockResolvedValue({
+      data: {
+        data: {
+          running: true,
+          total: 45,
+          done: 3,
+          failed: 1,
+          skipped: 0,
+          current_factor_id: 'f-9',
+          current_factor_name: 'Overnight_Gap',
+          message: null,
+          started_at: '2026-10-09T01:00:00+00:00',
+          finished_at: null,
+          user_id: 'u-should-be-dropped',
+        },
+      },
+    });
+
+    const res = await startFactorRecovery();
+
+    expect(apiPostMock).toHaveBeenCalledWith('/alpha-agent/factors/recovery?limit=200');
+    expect(res.success).toBe(true);
+    expect(res.data?.running).toBe(true);
+    expect(res.data?.total).toBe(45);
+    expect(res.data?.currentFactorName).toBe('Overnight_Gap');
+    expect(res.data?.finishedAt).toBeNull();
+  });
+
+  test('412（未配置 LLM Key）时 detail 原文进 error，不吞成泛化文案', async () => {
+    const detail =
+      '未配置 LLM API Key：可在个人中心「其他设置 → AI 服务配置」填写，或在服务器 .env 配置。';
+    apiPostMock.mockRejectedValue({ response: { status: 412, data: { detail } } });
+
+    const res = await startFactorRecovery();
+
+    expect(res.success).toBe(false);
+    expect(res.error).toBe(detail);
+  });
+
+  test('getFactorRecoveryStatus GET /factors/recovery/status（3 段路径不与 /factors/{id} 混）', async () => {
+    apiGetMock.mockResolvedValue({
+      data: { data: { running: false, total: 45, done: 45, failed: 0, skipped: 0 } },
+    });
+
+    const res = await getFactorRecoveryStatus();
+
+    expect(apiGetMock).toHaveBeenCalledWith('/alpha-agent/factors/recovery/status');
+    expect(res.data?.running).toBe(false);
+    expect(res.data?.done).toBe(45);
+  });
+
+  test('状态查询失败归为 success:false 带原文（页面把错误显示在评估条上）', async () => {
+    apiGetMock.mockRejectedValue({
+      response: { status: 500, data: { detail: 'boom' } },
+    });
+    const res = await getFactorRecoveryStatus();
+    expect(res.success).toBe(false);
+    expect(res.error).toBe('boom');
   });
 });
 

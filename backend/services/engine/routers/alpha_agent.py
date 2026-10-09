@@ -1300,6 +1300,91 @@ async def get_factor_materialize_status(
     }
 
 
+@router.post("/factors/recovery")
+async def start_factor_recovery(
+    request: Request,
+    limit: int = Query(200, ge=1, le=500, description="单批最多处理的因子数"),
+):
+    """对「待评估」（无 IC）因子批量补码并评估。
+
+    旧批次半成品没有实现代码（factor_code 为空），行内「回测」会直接 400；
+    本端点按公式+描述用 LLM 补码（写回 factor_code，metadata 标注
+    ``code_recovered``），随后逐个跑标准回测补 IC。后台串行执行，进度用
+    ``GET /factors/recovery/status`` 轮询；失败条目保留原因、可重发（选择
+    口径 ic 为空即可重入）。无 LLM 配置时 412（与 explain/evolve 同一提示）。
+    """
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    if _recovery_state["running"]:
+        return {
+            "code": 200,
+            "data": {
+                **_recovery_snapshot(auth_user_id),
+                "message": "补码评估批次已在进行中",
+            },
+        }
+
+    # 候选清单与 LLM 配置都是无副作用的读，先做完再认领——认领那一刻
+    # （下方二次检查 → 置位）之间无让出点，两个并发提交只有一个能起批次。
+    factors = await persistence.list_factors_needing_recovery(auth_user_id, limit=limit)
+    if not factors:
+        return {
+            "code": 200,
+            "data": {
+                **_recovery_snapshot(auth_user_id),
+                "total": 0,
+                "message": "没有待评估的因子",
+            },
+        }
+    llm_config, _, _ = await _resolve_effective_llm_config(auth_user_id, auth_tenant_id)
+    if llm_config is None:
+        raise HTTPException(
+            status_code=412,
+            detail="未配置 LLM API Key：可在个人中心「其他设置 → AI 服务配置」填写，或在服务器 .env 配置。",
+        )
+
+    if _recovery_state["running"]:
+        return {
+            "code": 200,
+            "data": {
+                **_recovery_snapshot(auth_user_id),
+                "message": "补码评估批次已在进行中",
+            },
+        }
+
+    from backend.shared.utc_datetime import utc_now
+
+    _recovery_state.update(
+        {
+            "running": True,
+            "user_id": auth_user_id,
+            "total": len(factors),
+            "done": 0,
+            "failed": 0,
+            "skipped": 0,
+            "current_factor_id": None,
+            "current_factor_name": None,
+            "message": None,
+            "started_at": utc_now().isoformat(),
+            "finished_at": None,
+        }
+    )
+    logger.info(
+        "[factor-recovery] 批次启动 user=%s 待处理=%s（无码=%s）",
+        auth_user_id,
+        len(factors),
+        sum(1 for f in factors if not (f.get("factor_code") or "").strip()),
+    )
+    _spawn_recovery_batch(_run_factor_recovery(factors, llm_config, auth_user_id))
+    return {"code": 200, "data": _recovery_snapshot(auth_user_id)}
+
+
+@router.get("/factors/recovery/status")
+async def get_factor_recovery_status(request: Request):
+    """补码评估批次进度（发起人可见当前因子名；其他登录用户只见计数）。"""
+    auth_user_id, _ = get_authenticated_identity(request)
+    return {"code": 200, "data": _recovery_snapshot(auth_user_id)}
+
+
 @router.get("/factors/{factor_id}")
 async def get_factor(factor_id: str, request: Request):
     """获取单个因子详情"""
@@ -1540,6 +1625,94 @@ async def _record_backtest_finish(run_id: str | None, status: str, **kwargs) -> 
         )
 
 
+async def _prepare_factor_backtest(
+    factor_id: str,
+    factor: dict,
+    *,
+    market: str,
+    universe: str,
+    data_source: str,
+) -> str | None:
+    """回测发起前的公共前置：去重占位 → 状态置 backtesting → 台账登记。
+
+    调用方（单因子端点与补码评估批次）须**先自查** ``factor_id not in
+    _running_backtests``；本函数入口即 ``add``，check→add 之间不得出现让出点，
+    否则双击「回测」两个请求都通过检查、并发跑两个子进程。
+
+    Returns: 台账 run_id（收口身份，透传给 ``_run_factor_backtest``）。
+    """
+    _running_backtests.add(factor_id)
+    try:
+        await persistence.update_factor_metrics(factor_id, status="backtesting")
+    except Exception:
+        _running_backtests.discard(factor_id)
+        raise
+    # 历史台账：发起即登记 running 行（收口在 _run_factor_backtest 的终态写入点）。
+    # run_id 是本进程内收口该行的唯一身份——不能等到收口时再按 factor「找最新」，
+    # 取消→立即重跑后旧任务收尾会收错行。
+    run_id = await _record_backtest_start(
+        factor_id,
+        factor,
+        market=market,
+        universe=universe,
+        data_source=data_source,
+    )
+    _running_backtest_runs[factor_id] = run_id
+    return run_id
+
+
+# ── 补码评估（2026-10-09）─────────────────────────────────────────────
+# 「待评估」因子（ic 从未算出）的存量主体来自 2026-09-13 之前的旧挖掘批次：
+# 旧提取器把 coding 未完成的半成品也落了库（factor_code 为空串），工作区已
+# 清理、代码不可找回，物化/回测/训练三条路都堵。这里按公式+描述用 LLM 补出
+# 实现代码（factor_codegen），再自动跑标准回测补 IC——完成后归入高/中/低档，
+# 重新可用。批次**进程内单跑**（_recovery_state["running"] 互斥）：45 次 LLM
+# 调用 + 45 次回测是重活，重复提交只会互相抢引擎。
+#
+#: 连续失败熔断阈值：LLM/回测属环境性问题时（断网、Key 失效、Qlib 数据坏），
+#: 逐条硬跑到黑只会空烧配额且每条都写一遍同样的错——连败即止，已完成的保留，
+#: 未轮到的下次重发（选择口径 ic IS NULL 天然可重入）。
+_MAX_CONSECUTIVE_RECOVERY_FAILURES = 3
+
+_recovery_state: dict = {
+    "running": False,
+    "user_id": None,
+    "total": 0,
+    "done": 0,
+    "failed": 0,
+    "skipped": 0,
+    "current_factor_id": None,
+    "current_factor_name": None,
+    "message": None,
+    "started_at": None,
+    "finished_at": None,
+}
+
+
+def _recovery_snapshot(viewer_id: str | None = None) -> dict:
+    """批次状态快照（JSON 键名与前端 FactorRecoveryStatus 对齐）。
+
+    非发起人查看时隐去当前因子身份（跨租户不回吐因子名/ID；计数是纯进度，
+    保留以便用户知道「引擎正忙」而不是自己的批次卡住）。
+    """
+    state = dict(_recovery_state)
+    if viewer_id is not None and state.get("user_id") not in (None, viewer_id):
+        state["current_factor_id"] = None
+        state["current_factor_name"] = None
+    state.pop("user_id", None)
+    return state
+
+
+def _spawn_recovery_batch(coro) -> None:
+    """后台启动补码评估批次。
+
+    单独一个函数是为测试留挂桩点：TestClient 每个请求走独立 portal loop，
+    ``asyncio.create_task`` 的后台任务在响应结束后会被取消——路由级测试
+    monkeypatch 本函数直接 await worker（与单测直调 worker 同路径）。
+    """
+    asyncio.create_task(coro)
+
+
 @router.post("/factors/{factor_id}/backtest")
 async def backtest_factor(
     factor_id: str,
@@ -1577,23 +1750,13 @@ async def backtest_factor(
     market = factor.get("market") or "a_share"
     # 先占位再 await：check（上方）→ add 之间不得出现让出点，否则双击「回测」
     # 两个请求都通过检查、并发跑两个子进程（旧实现 add 在 update 之后）。
-    _running_backtests.add(factor_id)
-    try:
-        await persistence.update_factor_metrics(factor_id, status="backtesting")
-    except Exception:
-        _running_backtests.discard(factor_id)
-        raise
-    # 历史台账：发起即登记 running 行（收口在 _run_factor_backtest 的终态写入点）。
-    # run_id 是本进程内收口该行的唯一身份——不能等到收口时再按 factor「找最新」，
-    # 取消→立即重跑后旧任务收尾会收错行。
-    run_id = await _record_backtest_start(
+    run_id = await _prepare_factor_backtest(
         factor_id,
         factor,
         market=market,
         universe=universe or "csi300",
         data_source=data_source or "qlib_bin",
     )
-    _running_backtest_runs[factor_id] = run_id
 
     asyncio.create_task(
         _run_factor_backtest(
@@ -2453,11 +2616,19 @@ def _parse_logic_score(text: str) -> tuple[str, int | None]:
 
 
 def _detect_factor_kind(factor_code: str) -> str:
-    """AST 预检：判断是 Qlib Factor 类还是 RD-Agent 函数式 (calculate_*)。
+    """AST 预检：判断是 Qlib Factor 类还是 RD-Agent 函数式。
 
-    不执行因子代码，只解析语法树。
+    不执行因子代码，只解析语法树。函数式含**两种入口样式**（与
+    ``_run_functional_factor_subprocess`` 的优先级注释一一对应）：
+    ``calculate_*()`` 函数，或自执行式 ``main()`` + ``__main__`` 守卫。
+    判定顺序 calculate_ → class → main 守卫：类因子顺带写个自测守卫不能被
+    误判成函数式（进错执行器），而只有守卫没有类/calculate_ 的代码此前直接
+    「unknown」拒跑——补码评估实测踩中（2026-10-09，LLM 按自执行契约产出的
+    Amihud ILLIQ 因检测缺口报「未找到可调用的 Factor 类或 calculate_*」）。
     """
     import ast
+
+    from backend.services.engine.alpha_agent.factor_codegen import is_main_guard
 
     try:
         tree = ast.parse(factor_code)
@@ -2466,6 +2637,7 @@ def _detect_factor_kind(factor_code: str) -> str:
 
     has_class = False
     has_calculate = False
+    has_main_guard = False
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
             name_lower = node.name.lower()
@@ -2477,11 +2649,15 @@ def _detect_factor_kind(factor_code: str) -> str:
                 has_class = True
         elif isinstance(node, ast.FunctionDef) and node.name.startswith("calculate_"):
             has_calculate = True
+        elif isinstance(node, ast.If) and is_main_guard(node.test):
+            has_main_guard = True
 
     if has_calculate:
         return "functional"
     if has_class:
         return "factor_class"
+    if has_main_guard:
+        return "functional"
     return "unknown"
 
 
@@ -2732,6 +2908,126 @@ async def _run_factor_backtest(
             _backtest_cancelled.discard(factor_id)
 
 
+async def _run_factor_recovery(
+    factors: list[dict],
+    llm_config,
+    user_id: str | None,
+) -> None:
+    """补码评估批次 worker（进程内串行；状态写模块级 ``_recovery_state``）。
+
+    逐条：无码 → LLM 补码并写回（metadata 标注 ``code_recovered``）→ 调标准
+    回测补 IC。**成败按行终态判**（回测把失败写进 status/metadata 而不抛异常，
+    见 ``_run_factor_backtest`` 的 except 分支）：回测后回读 status，completed
+    计成功，其余（failed/cancelled/pending）计失败——与用户点「回测」看到的
+    口径一致，不按「有没有异常」猜。
+
+    连败 ``_MAX_CONSECUTIVE_RECOVERY_FAILURES`` 条即中止（剩余条目保留待重发）：
+    Key 失效/数据坏这类环境性问题逐条硬跑只会空烧配额，且每条都写同样的错。
+    """
+    from backend.services.engine.alpha_agent.factor_codegen import (
+        generate_factor_code,
+    )
+    from backend.shared.utc_datetime import utc_now
+
+    state = _recovery_state
+    consecutive = 0
+    try:
+        for factor in factors:
+            factor_id = str(factor.get("factor_id") or "")
+            factor_name = factor.get("factor_name") or factor_id
+            state["current_factor_id"] = factor_id
+            state["current_factor_name"] = factor_name
+            try:
+                if factor_id in _running_backtests:
+                    # 该因子正被用户的手动回测占用：跳过而不是排队等（进度
+                    # 语义会含混）；本轮跳过计 skipped，ic 仍空，下次可重发。
+                    state["skipped"] += 1
+                    continue
+
+                code = (factor.get("factor_code") or "").strip()
+                market = factor.get("market") or "a_share"
+                universe = factor.get("universe") or "csi300"
+                if not code:
+                    code = await generate_factor_code(factor, config=llm_config)
+                    await persistence.save_factor(
+                        factor_id,
+                        factor_name=factor_name,
+                        factor_code=code,
+                        user_id=factor.get("user_id") or user_id,
+                    )
+                    metadata = dict(factor.get("metadata") or {})
+                    metadata["code_recovered"] = "llm_codegen"
+                    metadata["code_recovered_at"] = utc_now().isoformat()
+                    await persistence.update_factor_metrics(
+                        factor_id, metadata=metadata
+                    )
+                    factor = {**factor, "factor_code": code}
+
+                run_id = await _prepare_factor_backtest(
+                    factor_id,
+                    factor,
+                    market=market,
+                    universe=universe,
+                    data_source="qlib_bin",
+                )
+                await _run_factor_backtest(
+                    factor_id,
+                    code,
+                    market=market,
+                    data_source="qlib_bin",
+                    universe=universe,
+                    run_id=run_id,
+                )
+
+                row = await persistence.get_factor(factor_id) or {}
+                if row.get("status") == "completed":
+                    state["done"] += 1
+                    consecutive = 0
+                else:
+                    state["failed"] += 1
+                    consecutive += 1
+            except Exception as exc:  # noqa: BLE001 —— 单条失败不掀批次
+                logger.warning(
+                    "[factor-recovery] %s(%s) 失败: %s",
+                    factor_name,
+                    factor_id,
+                    exc,
+                )
+                try:
+                    metadata = dict(factor.get("metadata") or {})
+                    metadata["recover_error"] = _format_backtest_error(exc)[-500:]
+                    await persistence.update_factor_metrics(
+                        factor_id, metadata=metadata
+                    )
+                except Exception:
+                    pass
+                state["failed"] += 1
+                consecutive += 1
+
+            if consecutive >= _MAX_CONSECUTIVE_RECOVERY_FAILURES:
+                state["message"] = (
+                    f"连续 {consecutive} 条失败，批次提前中止"
+                    "（未处理条目保留，修复原因后可重新发起）"
+                )
+                logger.warning(
+                    "[factor-recovery] 连败熔断：已完成 done=%s failed=%s skipped=%s",
+                    state["done"],
+                    state["failed"],
+                    state["skipped"],
+                )
+                break
+        else:
+            state["message"] = (
+                f"补码评估完成：成功 {state['done']} · 失败 {state['failed']}"
+                f" · 跳过 {state['skipped']}"
+            )
+    finally:
+        state["running"] = False
+        state["current_factor_id"] = None
+        state["current_factor_name"] = None
+        state["finished_at"] = utc_now().isoformat()
+
+
 # ── 层序归位（2026-10-07）─────────────────────────────────────────────
 # 因子产出与价格数据的 MultiIndex **层序相反**：
 #   · 挖掘侧（RD-Agent 因子代码）：(datetime, instrument)——因子代码里自己断言
@@ -2927,7 +3223,13 @@ async def _backtest_via_qlib(
 
     instruments = _resolve_instruments_for_universe(market_upper, universe)
     fields = ["$open", "$high", "$low", "$close", "$volume", "$factor"]
-    df = D.features(instruments, fields, start_time=start, end_time=end, freq="day")
+    # D.features 是同步阻塞调用（内部 joblib 多进程读 bin，冷启动数十秒）：
+    # 直接压在事件循环上会把 /health 拖过看门狗阈值（30s×3 连败）强杀 engine——
+    # 批量回测连续执行时必现（2026-10-09 补码评估批次实测：跑到第 4 条被重启）。
+    # 放线程池执行，事件循环期间可继续响应健康检查与其他请求。
+    df = await asyncio.to_thread(
+        D.features, instruments, fields, start_time=start, end_time=end, freq="day"
+    )
     if df.empty:
         raise RuntimeError(
             f"Qlib 数据为空: market={market}, instruments={instruments}, provider_uri={provider_uri}"

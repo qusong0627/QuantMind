@@ -961,6 +961,77 @@ export async function cancelBacktest(taskId: string): Promise<ApiResponse> {
   return makeOk(res.data?.data ?? {});
 }
 
+// ========================== 补码评估（待评估存量因子） ==========================
+
+/**
+ * 补码评估批次进度（后端 /factors/recovery 的 data 段）。
+ *
+ * 「待评估」的存量因子没有实现代码（旧提取器落的半成品），行内「回测」直接
+ * 400——批次按公式用 LLM 补码（写回 factor_code）后自动跑标准回测补 IC，
+ * 完成后归入高/中/低档、重新可用于物化与训练。
+ */
+export interface FactorRecoveryStatus {
+  running: boolean;
+  total: number;
+  done: number;
+  failed: number;
+  skipped: number;
+  /** 批次正在处理的因子（仅发起人可见；其他用户为 null） */
+  currentFactorId: string | null;
+  currentFactorName: string | null;
+  /** 运行中为 null；终态为摘要（完成统计 / 连败中止 / 无候选等） */
+  message: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+function mapRecoveryStatus(raw: any): FactorRecoveryStatus {
+  return {
+    running: Boolean(raw?.running),
+    total: Number(raw?.total ?? 0),
+    done: Number(raw?.done ?? 0),
+    failed: Number(raw?.failed ?? 0),
+    skipped: Number(raw?.skipped ?? 0),
+    currentFactorId: raw?.current_factor_id ?? null,
+    currentFactorName: raw?.current_factor_name ?? null,
+    message: raw?.message ?? null,
+    startedAt: raw?.started_at ?? null,
+    finishedAt: raw?.finished_at ?? null,
+  };
+}
+
+/** 发起补码评估批次（后台串行；进度轮询 getFactorRecoveryStatus）。 */
+export async function startFactorRecovery(
+  limit = 200,
+): Promise<ApiResponse<FactorRecoveryStatus>> {
+  try {
+    const res = await apiClient.post(
+      `/alpha-agent/factors/recovery?limit=${encodeURIComponent(String(limit))}`,
+    );
+    return makeOk(mapRecoveryStatus(res.data?.data));
+  } catch (err: any) {
+    // 412（未配置 LLM Key）等错误的 detail 原文上屏——补 Key 的入口在提示里
+    const detail = err?.response?.data?.detail;
+    const message =
+      typeof detail === 'string' && detail ? detail : '发起补码评估失败';
+    return { success: false, error: message } as ApiResponse<FactorRecoveryStatus>;
+  }
+}
+
+export async function getFactorRecoveryStatus(): Promise<
+  ApiResponse<FactorRecoveryStatus>
+> {
+  try {
+    const res = await apiClient.get('/alpha-agent/factors/recovery/status');
+    return makeOk(mapRecoveryStatus(res.data?.data));
+  } catch (err: any) {
+    const detail = err?.response?.data?.detail;
+    const message =
+      typeof detail === 'string' && detail ? detail : '查询补码评估进度失败';
+    return { success: false, error: message } as ApiResponse<FactorRecoveryStatus>;
+  }
+}
+
 // ========================== 回测历史（一次运行一行） ==========================
 
 /** 一次回测运行的历史记录（后端 rd_agent_factor_backtests 行）。 */
