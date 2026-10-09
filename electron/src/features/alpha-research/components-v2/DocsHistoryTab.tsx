@@ -4,24 +4,29 @@
  * 数据源是 PG `rd_agent_docs`（GET /alpha-agent/docs），与挖掘任务表同库不同表：
  * - 状态只按后端字面量渲染，认不出的状态原样显示（不塞进近似的桶里）；
  * - 「看文本」拉解析产物 full.md（白名单内联预览），原文照实展示；
+ * - 「已挖掘 · N 个方向」徽标（一文档多方向，T-FM-19b）：点开拉详情
+ *   （GET /docs/{id} 的 tasks）看每次挖的方向/状态；task_count 未知时徽标
+ *   退回不带数的「已挖掘」——宁少报数，不把查询失败冒充成 0 个方向；
  * - 「继续挖掘」把整行交给 AppRoot（跳首页文档链），本组件不自己发任务；
  * - 删除二次确认：连解析文件一并清除（后端 cancel → rmtree → 软删）。
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FileText, AlertCircle, Inbox, Loader2,
-  Trash2, Play, Eye, EyeOff,
+  Trash2, Play, Eye, EyeOff, ChevronDown, ChevronUp,
 } from 'lucide-react';
-import { formatShortTime } from '../utils-v2';
+import { formatShortTime, taskStatusMeta } from '../utils-v2';
 import {
   DOC_STATUS_LABELS,
   deleteDoc,
   extractDetail,
+  getDocDetail,
   getDocFileText,
   getDocQuota,
   listDocs,
   type DocQuotaStatus,
   type DocRow,
+  type DocTaskSummary,
 } from '../services-v2/docMiningApi';
 
 export const DOCS_PAGE_SIZE = 20;
@@ -54,6 +59,20 @@ function canDig(status: string): boolean {
   return status === 'parsed' || status === 'organized';
 }
 
+/** 方向原文 → 单行摘要（任务明细行内展示用；全文靠 title 悬停）。 */
+export function directionExcerpt(text: string): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  return clean.length > 80 ? `${clean.slice(0, 80)}…` : clean;
+}
+
+interface TasksPanelState {
+  loading: boolean;
+  /** undefined = 后端未返回明细（查询失败）——与 []（确认没有）语义不同 */
+  tasks?: DocTaskSummary[];
+  count?: number;
+  error?: string;
+}
+
 export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refreshSeq }) => {
   const [rows, setRows] = useState<DocRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -66,6 +85,10 @@ export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refres
   const [previewText, setPreviewText] = useState<Record<string, string>>({});
   const [previewLoading, setPreviewLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // 「已挖掘 · N 个方向」徽标：同时只展开一行；每次展开都重拉（任务是活数据，
+  // 运行中→完成的状态变化不该被缓存冻住）
+  const [tasksOpenId, setTasksOpenId] = useState<string | null>(null);
+  const [tasksPanel, setTasksPanel] = useState<Record<string, TasksPanelState>>({});
   // 迟到的响应不许倒灌（快速翻页时旧请求可能后到）
   const reqSeqRef = useRef(0);
 
@@ -128,6 +151,30 @@ export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refres
       }
     },
     [previewId, previewText],
+  );
+
+  const toggleTasks = useCallback(
+    async (row: DocRow) => {
+      if (tasksOpenId === row.doc_id) {
+        setTasksOpenId(null);
+        return;
+      }
+      setTasksOpenId(row.doc_id);
+      setTasksPanel((prev) => ({ ...prev, [row.doc_id]: { loading: true } }));
+      try {
+        const { doc, tasks } = await getDocDetail(row.doc_id);
+        setTasksPanel((prev) => ({
+          ...prev,
+          [row.doc_id]: { loading: false, tasks, count: doc.task_count },
+        }));
+      } catch (e: unknown) {
+        setTasksPanel((prev) => ({
+          ...prev,
+          [row.doc_id]: { loading: false, error: extractDetail(e) },
+        }));
+      }
+    },
+    [tasksOpenId],
   );
 
   const handleDelete = useCallback(
@@ -225,6 +272,16 @@ export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refres
                 {rows.map((row) => {
                   const meta = statusMeta(row.status);
                   const expanded = previewId === row.doc_id;
+                  // 「N 个方向」徽标：task_count 已知（>0）时带数；未知但 task_id
+                  // 在（旧后端/计数降级）时退回「已挖掘」——宁少报数，不假报数
+                  const knownCount = row.task_count;
+                  const mined = Boolean(row.task_id) || (knownCount ?? 0) > 0;
+                  const badgeText =
+                    knownCount !== undefined && knownCount > 0
+                      ? `已挖掘 · ${knownCount} 个方向`
+                      : '已挖掘';
+                  const tasksOpen = tasksOpenId === row.doc_id;
+                  const panel = tasksPanel[row.doc_id];
                   return (
                     <React.Fragment key={row.doc_id}>
                       <tr className="border-b border-slate-50 last:border-b-0 hover:bg-slate-50/60 transition-colors">
@@ -237,10 +294,21 @@ export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refres
                             >
                               {row.filename}
                             </span>
-                            {row.task_id && (
-                              <span className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[9px] font-bold text-blue-600">
-                                已挖掘
-                              </span>
+                            {mined && (
+                              <button
+                                type="button"
+                                onClick={() => void toggleTasks(row)}
+                                aria-expanded={tasksOpen}
+                                title="查看这份文档挖掘过的方向记录"
+                                className="shrink-0 inline-flex items-center gap-0.5 rounded bg-blue-50 px-1.5 py-0.5 text-[9px] font-bold text-blue-600 hover:bg-blue-100 cursor-pointer"
+                              >
+                                {badgeText}
+                                {tasksOpen ? (
+                                  <ChevronUp className="h-2.5 w-2.5" />
+                                ) : (
+                                  <ChevronDown className="h-2.5 w-2.5" />
+                                )}
+                              </button>
                             )}
                           </span>
                           {row.error && (
@@ -321,6 +389,70 @@ export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refres
                               <pre className="max-h-72 overflow-auto rounded-xl bg-white border border-slate-100 p-3 text-[11px] leading-relaxed text-slate-600 whitespace-pre-wrap break-all m-0">
                                 {previewText[row.doc_id] ?? ''}
                               </pre>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                      {tasksOpen && (
+                        <tr className="border-b border-slate-50 last:border-b-0 bg-blue-50/30">
+                          <td colSpan={5} className="px-4 py-3">
+                            {!panel || panel.loading ? (
+                              <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-500">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                正在读取挖掘记录…
+                              </span>
+                            ) : panel.error ? (
+                              <span className="text-[11px] font-bold text-rose-500">
+                                挖掘记录读取失败：{panel.error}
+                              </span>
+                            ) : panel.tasks === undefined ? (
+                              <span className="text-[11px] font-bold text-slate-500">
+                                任务明细暂时不可用（可收起后重试）
+                              </span>
+                            ) : panel.tasks.length === 0 ? (
+                              <span className="text-[11px] text-slate-500">
+                                还没有从这份文档发起过挖掘
+                              </span>
+                            ) : (
+                              <>
+                                <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                                  {panel.tasks.map((t) => {
+                                    const tm = taskStatusMeta(t.status);
+                                    return (
+                                      <li
+                                        key={t.task_id}
+                                        className="flex items-start gap-2 text-[11px]"
+                                      >
+                                        <span
+                                          className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-bold ${tm.cls}`}
+                                        >
+                                          {tm.label}
+                                        </span>
+                                        <span className="shrink-0 font-mono text-slate-400">
+                                          {formatShortTime(t.created_at)}
+                                        </span>
+                                        <span
+                                          className={`min-w-0 flex-1 truncate ${
+                                            t.direction ? 'text-slate-600' : 'text-slate-400'
+                                          }`}
+                                          title={t.direction || undefined}
+                                        >
+                                          {t.direction
+                                            ? directionExcerpt(t.direction)
+                                            : '（无方向文本）'}
+                                        </span>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                                {panel.count !== undefined &&
+                                  panel.count > panel.tasks.length && (
+                                    <div className="mt-1.5 text-[10px] text-slate-400">
+                                      共 {panel.count} 个方向 · 上方显示最近{' '}
+                                      {panel.tasks.length} 条
+                                    </div>
+                                  )}
+                              </>
                             )}
                           </td>
                         </tr>

@@ -54,6 +54,29 @@ export function formatShortTime(iso: string): string {
 }
 
 /**
+ * 挖掘任务状态 → 徽标样式（与后端 `TASK_STATUSES` 同词表）。
+ * 注意与**文档**状态（DOC_STATUS_LABELS）、**因子**状态不是同一套：
+ * 任务多了 cancelled、没有 backtesting——跨域混用会被后端白名单拦下。
+ */
+export const TASK_STATUS_META: Record<string, { label: string; cls: string }> = {
+  pending: { label: '排队中', cls: 'bg-slate-100 text-slate-500 border-slate-200' },
+  running: { label: '运行中', cls: 'bg-indigo-50 text-indigo-600 border-indigo-200' },
+  completed: { label: '已完成', cls: 'bg-emerald-50 text-emerald-600 border-emerald-200' },
+  failed: { label: '失败', cls: 'bg-rose-50 text-rose-600 border-rose-200' },
+  cancelled: { label: '已取消', cls: 'bg-amber-50 text-amber-600 border-amber-200' },
+};
+
+/** 认不出的状态原样显示，不倒进某个桶里假装认识。 */
+export function taskStatusMeta(status: string): { label: string; cls: string } {
+  return (
+    TASK_STATUS_META[status] ?? {
+      label: status || '未知',
+      cls: 'bg-slate-100 text-slate-500 border-slate-200',
+    }
+  );
+}
+
+/**
  * 有方向的指标着色（A股口径：**红涨绿跌**）。
  * 只用于收益/IC 这类有正负方向的量；回撤/换手等中性量不要用本函数。
  * 质量分级（getQualityBadgeClass）是另一套色语言：绿=高质量，与红涨绿跌无关。

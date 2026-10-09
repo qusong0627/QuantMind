@@ -119,6 +119,7 @@ from backend.services.engine.alpha_agent.mineru_client import (
     count_pdf_pages,
     run_pdf_job,
 )
+from backend.services.engine.alpha_agent.task_store import get_mining_task_store
 from backend.services.engine.auth_context import get_authenticated_identity
 from backend.services.engine.routers.alpha_agent import _resolve_effective_llm_config
 
@@ -441,14 +442,50 @@ def resolve_preview_path(parsed_root: Path, rel_path: str) -> Path:
     return target
 
 
-def _public_doc(row: dict | None, *, include_organized: bool = True) -> dict | None:
-    """DB 行 → API 视图：剥内部字段；列表不带 organized_text（体积）。"""
+def _public_doc(
+    row: dict | None, *, include_organized: bool = True, task_count: int | None = None
+) -> dict | None:
+    """DB 行 → API 视图：剥内部字段；列表不带 organized_text（体积）。
+
+    ``task_count``（该文档关联的挖掘任务数，T-FM-19b）：**None = 未知，键整个
+    不出现**——绝不落成 0（0 的语义是「确认没挖过」，查询失败时冒充 0 会让
+    已挖过的文档看起来从未挖掘）。
+    """
     if row is None:
         return None
     out = {k: v for k, v in row.items() if k not in _INTERNAL_FIELDS}
     if not include_organized:
         out.pop("organized_text", None)
+    if task_count is not None:
+        out["task_count"] = task_count
     return out
+
+
+async def _task_counts_or_none(
+    user_id: str, doc_ids: list[str]
+) -> dict[str, int] | None:
+    """批量取 per-doc 任务数；失败只告警返回 None（列表面降级，不拦主数据）。
+
+    None 与 {} 语义不同：None=查不到（徽标不显示），{} 或缺键=确认 0 条。
+    """
+    if not doc_ids:
+        return {}
+    try:
+        return await get_mining_task_store().count_tasks_by_docs(
+            user_id=user_id, doc_ids=doc_ids
+        )
+    except Exception as exc:  # noqa: BLE001 —— 徽标是辅助信息，坏掉不拦文档列表
+        logger.warning("[docs] task_count 批量查询失败（列表不带任务数）：%s", exc)
+        return None
+
+
+async def _tasks_or_none(user_id: str, doc_id: str) -> list[dict] | None:
+    """取该文档的任务明细；失败只告警返回 None（同上：None=未知，[]=确认没有）。"""
+    try:
+        return await get_mining_task_store().list_by_doc(user_id=user_id, doc_id=doc_id)
+    except Exception as exc:  # noqa: BLE001 —— 明细是辅助信息，坏掉不拦文档详情
+        logger.warning("[docs] 任务明细查询失败 doc=%s：%s", doc_id, exc)
+        return None
 
 
 def _require_owned_doc(doc: dict | None, doc_id: str) -> dict:
@@ -616,7 +653,11 @@ async def list_docs(
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
-    """本人文档列表（不含已删；organized_text 只在详情带）。"""
+    """本人文档列表（不含已删；organized_text 只在详情带）。
+
+    每行带 ``task_count``（已挖掘方向数，T-FM-19b）；任务数查询失败时该键
+    整体缺省（未知 ≠ 0——见 :func:`_public_doc`）。
+    """
     user_id, _tenant_id = get_authenticated_identity(request)
     try:
         filters = resolve_list_filters(status=status, limit=limit, offset=offset)
@@ -631,10 +672,20 @@ async def list_docs(
         offset=filters["offset"],
     )
     total = await store.count_docs(user_id=user_id, status=filters["status"])
+    counts = await _task_counts_or_none(user_id, [str(r["doc_id"]) for r in items])
     return {
         "code": 200,
         "data": {
-            "items": [_public_doc(r, include_organized=False) for r in items],
+            "items": [
+                _public_doc(
+                    r,
+                    include_organized=False,
+                    task_count=None
+                    if counts is None
+                    else counts.get(str(r["doc_id"]), 0),
+                )
+                for r in items
+            ],
             "total": total,
             "limit": filters["limit"],
             "offset": filters["offset"],
@@ -707,10 +758,27 @@ async def docs_stats(request: Request) -> dict:
 
 @router.get("/docs/{doc_id}")
 async def get_doc_detail(request: Request, doc_id: str) -> dict:
-    """文档详情（含 organized_text 与解析进度字段）。"""
+    """文档详情（含 organized_text、解析进度字段与关联挖掘任务）。
+
+    ``data.tasks`` = 该文档的挖掘任务明细（最近 ≤20 条，一文档多方向）；
+    ``doc.task_count`` = 真实总数（明细截断时界面报「共 N 个」）。
+    两者各自独立降级：查询失败则该键缺省，绝不冒充空列表/0。
+    """
     user_id, _tenant_id = get_authenticated_identity(request)
-    doc = await get_doc_store().get_doc(doc_id, user_id=user_id)
-    return {"code": 200, "data": {"doc": _public_doc(_require_owned_doc(doc, doc_id))}}
+    doc = _require_owned_doc(
+        await get_doc_store().get_doc(doc_id, user_id=user_id), doc_id
+    )
+    counts = await _task_counts_or_none(user_id, [doc_id])
+    tasks = await _tasks_or_none(user_id, doc_id)
+    data: dict = {
+        "doc": _public_doc(
+            doc,
+            task_count=None if counts is None else counts.get(doc_id, 0),
+        )
+    }
+    if tasks is not None:
+        data["tasks"] = tasks
+    return {"code": 200, "data": data}
 
 
 @router.get("/docs/{doc_id}/file")

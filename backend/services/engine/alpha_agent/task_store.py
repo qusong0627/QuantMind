@@ -33,6 +33,11 @@ DEFAULT_HISTORY_LIMIT = 50
 MAX_HISTORY_LIMIT = 200
 MAX_DIRECTION_CHARS = 20000
 
+#: 单文档任务明细（T-FM-19b 一文档多方向）的返回上限；真实总数另走
+#: :meth:`MiningTaskStore.count_tasks_by_docs`——明细截断时界面靠它报「共 N 个」，
+#: 绝不把「最近 20 条」冒充全部。
+DOC_TASKS_LIMIT = 20
+
 # 任务状态全集。注意与**因子**状态（pending/backtesting/completed/failed）
 # 不是同一套：任务多了 cancelled、没有 backtesting。
 TASK_STATUSES = ("pending", "running", "completed", "failed", "cancelled")
@@ -315,11 +320,73 @@ class MiningTaskStore:
 
         必须是真的 COUNT：拿本页行数当 total，分页器永远显示 ≤ limit 条。
         """
-        filters = resolve_history_filters(market=market, status=status, limit=1, offset=0)
+        filters = resolve_history_filters(
+            market=market, status=status, limit=1, offset=0
+        )
         where, params = _history_where(user_id, filters)
-        query = f"SELECT count(*) FROM rd_agent_mining_tasks WHERE {' AND '.join(where)}"
+        query = (
+            f"SELECT count(*) FROM rd_agent_mining_tasks WHERE {' AND '.join(where)}"
+        )
         async with get_session(read_only=True) as session:
             return int((await session.execute(text(query), params)).scalar_one())
+
+    async def count_tasks_by_docs(
+        self, *, user_id: str, doc_ids: list[str]
+    ) -> dict[str, int]:
+        """按文档批量计任务数（文档列表「N 个方向」徽标），**只回非零项**。
+
+        空入参零 SQL 直返：空文档列表不该为一次没有内容的聚合伙付查询往返。
+        没出现的 doc_id 语义 = 0 条任务（真零，不是「查不到」）——调用方
+        只在查询本身失败时才有「未知」态，两者绝不可混。
+        """
+        ids = [d for d in doc_ids if d]
+        if not ids:
+            return {}
+        async with get_session(read_only=True) as session:
+            rows = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT doc_id, count(*) AS n FROM rd_agent_mining_tasks "
+                            "WHERE user_id = :user_id AND doc_id = ANY(:doc_ids) "
+                            "GROUP BY doc_id"
+                        ),
+                        {"user_id": user_id, "doc_ids": ids},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return {str(r["doc_id"]): int(r["n"]) for r in rows}
+
+    async def list_by_doc(
+        self, *, user_id: str, doc_id: str, limit: int = DOC_TASKS_LIMIT
+    ) -> list[dict[str, Any]]:
+        """某文档关联的挖掘任务（最近优先）——一文档多方向回看的明细面。
+
+        只选展示四列（task_id/status/direction/created_at）：direction 单条
+        可达两万字，整行透出会把详情响应撑大一个量级；市场/池等字段任务中心
+        页面已有，本处不重复搬运。
+        """
+        capped = max(1, min(int(limit), MAX_HISTORY_LIMIT))
+        async with get_session(read_only=True) as session:
+            rows = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT task_id, status, direction, created_at "
+                            "FROM rd_agent_mining_tasks "
+                            "WHERE user_id = :user_id AND doc_id = :doc_id "
+                            "ORDER BY created_at DESC, task_id DESC "
+                            "LIMIT :limit"
+                        ),
+                        {"user_id": user_id, "doc_id": doc_id, "limit": capped},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [row_to_dict(r) for r in rows]
 
     async def reconcile_orphans(self, *, user_id: str | None = None) -> int:
         """重启对账：把孤儿行（pending/running）翻 failed，返回翻转行数。

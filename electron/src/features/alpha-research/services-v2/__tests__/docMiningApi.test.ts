@@ -28,6 +28,7 @@ import {
   deleteDoc,
   extractDetail,
   getDoc,
+  getDocDetail,
   getDocFileText,
   organizeDoc,
   uploadDoc,
@@ -134,6 +135,49 @@ describe('uploadDoc', () => {
     const sent = (form as FormData).getAll('file');
     expect(sent.map((f) => (f as File).name)).toEqual(['正文.pdf', '附录.pdf']);
     expect(out.doc.files_count).toBe(2);
+  });
+});
+
+describe('getDocDetail：文档 + 关联挖掘任务（一文档多方向）', () => {
+  test('缺 doc → 抛「文档不存在或已删除」；tasks 非数组 → undefined（未知 ≠ 空）', async () => {
+    apiGetMock.mockResolvedValue({ data: { data: {} } });
+    await expect(getDocDetail('d-1')).rejects.toThrow('文档不存在或已删除');
+
+    apiGetMock.mockResolvedValue({ data: { data: { doc: DOC } } });
+    const out = await getDocDetail('d-1');
+    expect(out.doc.doc_id).toBe('d-1');
+    expect(out.tasks).toBeUndefined();
+  });
+
+  test('带 tasks 时原样透出（顺序/字段由后端保证）；getDoc 委托取 doc', async () => {
+    apiGetMock.mockResolvedValue({
+      data: {
+        data: {
+          doc: { ...DOC, task_count: 2 },
+          tasks: [
+            {
+              task_id: 't-2',
+              status: 'running',
+              direction: '方向二',
+              created_at: '2026-10-09T01:00:00Z',
+            },
+            {
+              task_id: 't-1',
+              status: 'completed',
+              direction: '方向一',
+              created_at: '2026-10-09T00:00:00Z',
+            },
+          ],
+        },
+      },
+    });
+
+    const out = await getDocDetail('d-1');
+    expect(out.doc.task_count).toBe(2);
+    expect(out.tasks?.map((t) => t.task_id)).toEqual(['t-2', 't-1']);
+
+    const doc = await getDoc('d-1');
+    expect(doc.doc_id).toBe('d-1');
   });
 });
 

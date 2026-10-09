@@ -66,9 +66,29 @@ export interface DocRow {
   organize_prompt_version: string | null;
   organized_at: string | null;
   task_id: string | null;
+  /**
+   * 该文档关联的挖掘任务数（一文档多方向）。列表/详情端点批量带出；
+   * **undefined = 后端未返回（查询失败），0 = 确认没挖过**——两者绝不混。
+   */
+  task_count?: number;
   error: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 文档关联的挖掘任务摘要（GET /docs/{id} 的 tasks 项，最近优先，≤20 条）。 */
+export interface DocTaskSummary {
+  task_id: string;
+  status: string;
+  /** 挖掘方向原文（可能上万字，展示面自行截断） */
+  direction: string;
+  created_at: string;
+}
+
+export interface DocDetail {
+  doc: DocRow;
+  /** 明细（≤20 条）；undefined = 后端未返回明细（查询失败），[] = 确认没有 */
+  tasks?: DocTaskSummary[];
 }
 
 export interface DocsListPage {
@@ -168,11 +188,19 @@ export async function listDocs(params?: {
   };
 }
 
-export async function getDoc(docId: string): Promise<DocRow> {
+/** 文档详情 + 关联挖掘任务（一文档多方向回看）。缺 doc → 抛错，不许编空壳。 */
+export async function getDocDetail(docId: string): Promise<DocDetail> {
   const res = await apiClient.get(`/alpha-agent/docs/${docId}`);
-  const doc = res.data?.data?.doc;
-  if (!doc) throw new Error('文档不存在或已删除');
-  return doc as DocRow;
+  const data = res.data?.data ?? {};
+  if (!data.doc) throw new Error('文档不存在或已删除');
+  return {
+    doc: data.doc as DocRow,
+    tasks: Array.isArray(data.tasks) ? (data.tasks as DocTaskSummary[]) : undefined,
+  };
+}
+
+export async function getDoc(docId: string): Promise<DocRow> {
+  return (await getDocDetail(docId)).doc;
 }
 
 export async function getDocQuota(): Promise<DocQuotaStatus> {

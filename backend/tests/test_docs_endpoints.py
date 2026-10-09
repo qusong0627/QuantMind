@@ -338,10 +338,57 @@ class FakeTokenResolver:
         return self.token, self.src
 
 
-def _wire(monkeypatch, store, svc, quota, user_id="u-1", *, token=("test-tok", "env")):
+class FakeTaskStore:
+    """挖掘任务表替身（T-FM-19b）：count_tasks_by_docs / list_by_doc。
+
+    契约与真 store 对齐：count 只回非零项（缺键=确认 0 条）；fail_* 开关
+    模拟查询炸掉——两者在 API 上语义不同（未知 vs 0/空），必须能被区分。
+    """
+
+    def __init__(
+        self,
+        counts: dict[str, dict[str, int]] | None = None,
+        tasks: dict[str, list[dict]] | None = None,
+        *,
+        fail_counts: bool = False,
+        fail_tasks: bool = False,
+    ) -> None:
+        self.counts = counts or {}  # {user_id: {doc_id: n}}
+        self.tasks = tasks or {}  # {doc_id: [行, ...]}
+        self.fail_counts = fail_counts
+        self.fail_tasks = fail_tasks
+        self.count_calls: list[tuple[str, list[str]]] = []
+        self.list_calls: list[tuple[str, str]] = []
+
+    async def count_tasks_by_docs(self, *, user_id, doc_ids):
+        self.count_calls.append((user_id, list(doc_ids)))
+        if self.fail_counts:
+            raise RuntimeError("db down: task counts")
+        by_doc = self.counts.get(user_id, {})
+        return {d: by_doc[d] for d in doc_ids if d in by_doc}
+
+    async def list_by_doc(self, *, user_id, doc_id, limit=20):
+        self.list_calls.append((user_id, doc_id))
+        if self.fail_tasks:
+            raise RuntimeError("db down: task list")
+        return [dict(r) for r in self.tasks.get(doc_id, [])][:limit]
+
+
+def _wire(
+    monkeypatch,
+    store,
+    svc,
+    quota,
+    user_id="u-1",
+    *,
+    token=("test-tok", "env"),
+    tasks_store=None,
+):
     monkeypatch.setattr(docs_mod, "get_doc_store", lambda: store)
     monkeypatch.setattr(docs_mod, "get_doc_parse_service", lambda: svc)
     monkeypatch.setattr(docs_mod, "get_doc_quota", lambda: quota)
+    fake_tasks = tasks_store if tasks_store is not None else FakeTaskStore()
+    monkeypatch.setattr(docs_mod, "get_mining_task_store", lambda: fake_tasks)
     resolver = FakeTokenResolver(*token)
     monkeypatch.setattr(docs_mod, "resolve_effective_mineru_token", resolver)
     _auth_as(monkeypatch, user_id)
@@ -955,6 +1002,114 @@ async def test_get_doc_detail_deleted_404(monkeypatch) -> None:
     with pytest.raises(HTTPException) as ei:
         await docs_mod.get_doc_detail(request=FakeRequest(), doc_id="d1")
     assert ei.value.status_code == 404
+
+
+# ── 一文档多方向（T-FM-19b）：task_count / tasks ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_docs_carries_task_count_and_true_zero(monkeypatch) -> None:
+    """已挖 2 个方向的带 2；没挖过的带 **0**（确认零，不是缺键）。"""
+    store = FakeStore(
+        [mk_row(doc_id="d1", user_id="u-1"), mk_row(doc_id="d2", user_id="u-1")]
+    )
+    tasks_store = FakeTaskStore(counts={"u-1": {"d1": 2}})
+    _wire(
+        monkeypatch,
+        store,
+        FakeParseService(Path("/nonexistent")),
+        FakeQuota(),
+        tasks_store=tasks_store,
+    )
+
+    out = await docs_mod.list_docs(
+        request=FakeRequest(), status=None, limit=10, offset=0
+    )
+
+    by_id = {d["doc_id"]: d for d in out["data"]["items"]}
+    assert by_id["d1"]["task_count"] == 2
+    assert by_id["d2"]["task_count"] == 0
+    # 一次批量查询覆盖整页（不是每行一发）
+    assert tasks_store.count_calls == [("u-1", ["d2", "d1"])]
+
+
+@pytest.mark.asyncio
+async def test_list_docs_task_count_failure_omits_key_not_zero(monkeypatch) -> None:
+    """计数查询失败 → 键整体缺省：宁可不显示，绝不冒充 0（0=确认没挖过）。"""
+    store = FakeStore([mk_row(doc_id="d1", user_id="u-1")])
+    _wire(
+        monkeypatch,
+        store,
+        FakeParseService(Path("/nonexistent")),
+        FakeQuota(),
+        tasks_store=FakeTaskStore(fail_counts=True),
+    )
+
+    out = await docs_mod.list_docs(
+        request=FakeRequest(), status=None, limit=10, offset=0
+    )
+
+    assert out["data"]["total"] == 1, "任务数坏掉不拦文档列表"
+    assert "task_count" not in out["data"]["items"][0]
+
+
+@pytest.mark.asyncio
+async def test_get_doc_detail_includes_tasks_and_true_count(monkeypatch) -> None:
+    """详情带明细（最近优先由 store 保证）与**真实总数**——明细截断时靠它报数。"""
+    store = FakeStore([mk_row(doc_id="d1", user_id="u-1", status="organized")])
+    tasks_store = FakeTaskStore(
+        counts={"u-1": {"d1": 3}},
+        tasks={
+            "d1": [
+                {
+                    "task_id": "t-2",
+                    "status": "running",
+                    "direction": "动量 × 波动率",
+                    "created_at": NOW,
+                },
+                {
+                    "task_id": "t-1",
+                    "status": "completed",
+                    "direction": "复现论文《X》",
+                    "created_at": NOW,
+                },
+            ]
+        },
+    )
+    _wire(
+        monkeypatch,
+        store,
+        FakeParseService(Path("/nonexistent")),
+        FakeQuota(),
+        tasks_store=tasks_store,
+    )
+
+    out = await docs_mod.get_doc_detail(request=FakeRequest(), doc_id="d1")
+
+    assert out["data"]["doc"]["task_count"] == 3, "总数是 COUNT，不是明细长度"
+    tasks = out["data"]["tasks"]
+    assert [t["task_id"] for t in tasks] == ["t-2", "t-1"]
+    assert tasks[0]["status"] == "running" and tasks[1]["direction"] == "复现论文《X》"
+    assert tasks_store.list_calls == [("u-1", "d1")]
+
+
+@pytest.mark.asyncio
+async def test_get_doc_detail_task_queries_failure_omits_keys(monkeypatch) -> None:
+    """计数/明细各自独立降级：doc 照常返回，坏掉的那部分键缺省。"""
+    store = FakeStore([mk_row(doc_id="d1", user_id="u-1")])
+    _wire(
+        monkeypatch,
+        store,
+        FakeParseService(Path("/nonexistent")),
+        FakeQuota(),
+        tasks_store=FakeTaskStore(fail_counts=True, fail_tasks=True),
+    )
+
+    out = await docs_mod.get_doc_detail(request=FakeRequest(), doc_id="d1")
+
+    assert out["data"]["doc"]["doc_id"] == "d1"
+    assert "task_count" not in out["data"]["doc"]
+    assert "tasks" not in out["data"]
 
 
 # ── 配额 ────────────────────────────────────────────────────────────

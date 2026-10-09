@@ -197,6 +197,51 @@ async def test_real_db_create_get_roundtrip_is_user_scoped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_real_db_count_and_list_by_doc_multi_direction() -> None:
+    """一文档多方向（T-FM-19b）：同一 doc 挂多个任务、跨用户隔离、明细紧凑。
+
+    - count 只回非零项（没出现的 doc_id 语义=0 条）；按 user 收口；
+    - list 最近优先、只带展示四列、created_at 带 Z；limit 截断。
+    """
+    await _ready()
+    user = _scope()
+    other = _scope()
+    doc_a = f"doc-{uuid.uuid4().hex[:8]}"
+    doc_b = f"doc-{uuid.uuid4().hex[:8]}"
+    t1, t2, t3, t_other = (uuid.uuid4().hex[:16] for _ in range(4))
+    try:
+        store = get_mining_task_store()
+        await _create(store, t1, user, source="doc", doc_id=doc_a, direction="方向一")
+        await _create(store, t2, user, source="doc", doc_id=doc_a, direction="方向二")
+        await _create(store, t3, user, source="doc", doc_id=doc_b, direction="方向三")
+        await _create(
+            store, t_other, other, source="doc", doc_id=doc_a, direction="别人的方向"
+        )
+
+        counts = await store.count_tasks_by_docs(
+            user_id=user, doc_ids=[doc_a, doc_b, "doc-none"]
+        )
+        assert counts == {doc_a: 2, doc_b: 1}, "只回非零项；没出现的 doc_id 语义=0"
+        assert await store.count_tasks_by_docs(user_id=user, doc_ids=[]) == {}
+        assert (
+            await store.count_tasks_by_docs(user_id="t-nobody", doc_ids=[doc_a]) == {}
+        )
+
+        tasks = await store.list_by_doc(user_id=user, doc_id=doc_a)
+        assert [t["task_id"] for t in tasks] == [t2, t1], "最近优先；他人任务不可见"
+        assert set(tasks[0]) == {"task_id", "status", "direction", "created_at"}
+        assert tasks[0]["direction"] == "方向二"
+        assert tasks[0]["created_at"].endswith("Z")
+
+        capped = await store.list_by_doc(user_id=user, doc_id=doc_a, limit=1)
+        assert [t["task_id"] for t in capped] == [t2]
+    finally:
+        await _cleanup(user)
+        await _cleanup(other)
+        await _close()
+
+
+@pytest.mark.asyncio
 async def test_real_db_create_is_idempotent_on_task_id() -> None:
     """task_id 撞键（重放/重试）不该炸——重复创建是无操作而非 500。"""
     await _ready()

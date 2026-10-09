@@ -17,7 +17,7 @@ import { History, RefreshCw, FileText, RotateCcw, ExternalLink, AlertCircle, Inb
 import { PageHeader } from '../components-v2/layout/PageHeader';
 import { DocsHistoryTab } from '../components-v2/DocsHistoryTab';
 import { isDocMiningEnabled } from '../../../config/docMiningFlags';
-import { formatShortTime } from '../utils-v2';
+import { formatShortTime, taskStatusMeta } from '../utils-v2';
 import type { DocRow } from '../services-v2/docMiningApi';
 import {
   getMiningHistory,
@@ -41,24 +41,6 @@ const MARKET_LABELS: Record<string, string> = {
   crypto: '加密货币',
   futures: '期货',
 };
-
-const STATUS_META: Record<string, { label: string; cls: string }> = {
-  pending: { label: '排队中', cls: 'bg-slate-100 text-slate-500 border-slate-200' },
-  running: { label: '运行中', cls: 'bg-indigo-50 text-indigo-600 border-indigo-200' },
-  completed: { label: '已完成', cls: 'bg-emerald-50 text-emerald-600 border-emerald-200' },
-  failed: { label: '失败', cls: 'bg-rose-50 text-rose-600 border-rose-200' },
-  cancelled: { label: '已取消', cls: 'bg-amber-50 text-amber-600 border-amber-200' },
-};
-
-/** 认不出的状态原样显示，不倒进某个桶里假装认识。 */
-function statusMeta(status: string): { label: string; cls: string } {
-  return (
-    STATUS_META[status] ?? {
-      label: status || '未知',
-      cls: 'bg-slate-100 text-slate-500 border-slate-200',
-    }
-  );
-}
 
 function sourceLabel(row: MiningHistoryRow): string {
   if (row.source === 'doc') {
@@ -285,7 +267,7 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({
               </thead>
               <tbody>
                 {rows.map((row) => {
-                  const meta = statusMeta(row.status);
+                  const meta = taskStatusMeta(row.status);
                   const canView = row.factor_count > 0;
                   return (
                     <tr
