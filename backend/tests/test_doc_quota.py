@@ -335,10 +335,63 @@ def test_check_rate_zero_limit_disables() -> None:
 
 def test_try_lock_dedupes_and_unlock_frees() -> None:
     q = mk_quota(now=FIXED)
-    assert q.try_lock("organize:d1", ttl_s=60) is True
-    assert q.try_lock("organize:d1", ttl_s=60) is False, "在途同名锁拿不到"
+    token = q.try_lock("organize:d1", ttl_s=60)
+    assert isinstance(token, str) and token, "拿到锁要返回令牌（供 CAD 释放）"
+    assert q.try_lock("organize:d1", ttl_s=60) is None, "在途同名锁拿不到"
+    q.unlock("organize:d1", token)
+    assert q.try_lock("organize:d1", ttl_s=60)
+
+
+def test_unlock_with_stale_token_does_not_delete_new_lock() -> None:
+    """ABA 防护：锁过期后被后来者抢走，前持有者的旧令牌不许误删新锁。"""
+    q = mk_quota(now=FIXED)
+    stale = q.try_lock("organize:d1", ttl_s=60)
+    q.unlock("organize:d1", stale)  # 正常释放
+    fresh = q.try_lock("organize:d1", ttl_s=60)
+    assert fresh and fresh != stale
+    q.unlock("organize:d1", stale)  # 旧令牌：值不符，不动
+    assert q.try_lock("organize:d1", ttl_s=60) is None, "后来者的锁必须还在"
+
+
+def test_unlock_decodes_bytes_lock_value() -> None:
+    """真 Redis 默认返回 bytes：令牌比对要先解码，否则 CAD 永远不命中。"""
+    r = StubRedis()
+    q = mk_quota(r, now=FIXED)
+    token = q.try_lock("organize:d1", ttl_s=60)
+    key = "qm:docmining:lock:organize:d1"
+    r.data[key] = token.encode()
+    q.unlock("organize:d1", token)
+    assert key not in r.data
+
+
+def test_unlock_without_token_is_unconditional() -> None:
+    """遗留调用方（不带令牌）：无条件删除，兼容旧行为。"""
+    q = mk_quota(now=FIXED)
+    assert q.try_lock("organize:d1", ttl_s=60)
     q.unlock("organize:d1")
-    assert q.try_lock("organize:d1", ttl_s=60) is True
+    assert q.try_lock("organize:d1", ttl_s=60)
+
+
+# ── 预留转已用（commit） ────────────────────────────────────────────
+
+
+def test_commit_reservation_keeps_pages_on_books() -> None:
+    """页数不可知但已计费（MinerU 已拿到文件）：预留转已用，不许全退。"""
+    r = StubRedis()
+    q = mk_quota(r, now=FIXED)
+    q.reserve("u1", 200, doc_id="d1")
+    q.commit_reservation("d1")
+    assert r.data[UKEY] == "200", "预留额留在账上（费用已发生）"
+    assert "qm:docmining:reserve:d1" not in r.data, "预留键取走，防后续 release 全退"
+    q.release("d1", "u1")  # 幂等：键已不在，不再动账
+    assert r.data[UKEY] == "200"
+
+
+def test_commit_reservation_without_reservation_is_noop() -> None:
+    r = StubRedis()
+    q = mk_quota(r, now=FIXED)
+    q.commit_reservation("d-none")
+    assert r.data == {}, "没预留过就没有账可转"
 
 
 # ── 状态与预警 ──────────────────────────────────────────────────────

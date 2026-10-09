@@ -1,8 +1,10 @@
 """文档挖掘配额告警（T-FM-14）—— 平台余量跌到预算 10% 以下时告警一次。
 
-触发点只有**结算**：``DocParseService._settle_quota``。预留在 reserve 时是
-保守的占位（数不出页数的按单文件上限压），用量真正落地在 settle；失败路径
-release 全额退回后条件可能不再成立，所以不在预留/退回那两处判。
+触发点只有**结算**：``DocParseService._settle_or_commit_quota`` settle 落地后
+经 ``_alert_quota_low`` 递过来（to_thread 调用——管理员 fanout 是同步 psycopg
+落库，直接跑会卡事件循环）。预留在 reserve 时是保守的占位（数不出页数的按
+单文件上限压），用量真正落地在 settle；失败路径 release 全额退回后条件可能
+不再成立，所以不在预留/退回那两处判。
 
 三条纪律：
 
@@ -75,11 +77,11 @@ def maybe_alert_quota_low(
     quota = quota if quota is not None else get_doc_quota()
     name = _lock_name(status.day)
     try:
-        acquired = quota.try_lock(name, ttl_s=ALERT_LOCK_TTL_S)
+        token = quota.try_lock(name, ttl_s=ALERT_LOCK_TTL_S)
     except Exception as exc:  # noqa: BLE001 —— 去重锁故障宁可漏发，不刷屏
         logger.warning("配额告警去重锁失败（本次跳过）: %s", exc)
         return False
-    if not acquired:
+    if not token:
         return False
     try:
         send = publisher or _default_publisher()
@@ -92,7 +94,7 @@ def maybe_alert_quota_low(
     except Exception as exc:  # noqa: BLE001 —— 发送失败释放锁，下个结算点重试
         logger.warning("配额告警发送失败（已释放去重锁，稍后重试）: %s", exc)
         try:
-            quota.unlock(name)
+            quota.unlock(name, token)  # compare-and-delete：只解自己那把
         except Exception:  # noqa: BLE001 —— 释放失败等 TTL 自愈
             pass
         return False

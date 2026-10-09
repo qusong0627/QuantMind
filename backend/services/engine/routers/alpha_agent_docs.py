@@ -124,8 +124,11 @@ DEFAULT_MAX_UPLOAD_MB = 200
 #: 粗拦时按「文件上限 + 本余量」封顶（安全审查 C1）
 MULTIPART_OVERHEAD_BYTES = 8 * 1024 * 1024
 
-#: 整理在途锁 TTL：LLM map-reduce 上界（分钟级）留足余量
-ORGANIZE_LOCK_TTL_S = 900
+#: 整理在途锁 TTL：LLM map-reduce 最坏时长上界 = 8 段 × 120s + reduce 120s
+#: = 1080s（doc_organize 的 ORGANIZE_MAX_CHUNKS/ORGANIZE_LLM_TIMEOUT_S），
+#: TTL 必须盖过它——否则慢文档还在整理、锁先过期，第二个请求会拿到新锁并发
+#: 跑双份 LLM（用户自己付费）并双写 organized_text。
+ORGANIZE_LOCK_TTL_S = 1800
 
 MAX_FILENAME_CHARS = 200
 
@@ -603,7 +606,8 @@ async def organize_doc(request: Request, doc_id: str, payload: OrganizeRequest) 
     except RateLimited as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     lock_name = f"organize:{doc_id}"
-    if not quota.try_lock(lock_name, ttl_s=ORGANIZE_LOCK_TTL_S):
+    lock_token = quota.try_lock(lock_name, ttl_s=ORGANIZE_LOCK_TTL_S)
+    if not lock_token:
         raise HTTPException(status_code=409, detail="该文档正在整理中，请稍候再试")
 
     try:
@@ -630,7 +634,8 @@ async def organize_doc(request: Request, doc_id: str, payload: OrganizeRequest) 
         except OrganizeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        quota.unlock(lock_name)
+        # compare-and-delete：只解自己那把（锁若已过期并被后来者重取，不误删）
+        quota.unlock(lock_name, lock_token)
 
     # H2：LLM 期间用户可能已删除——落库被 deleted 守卫拦下（没复活），
     # 这里如实 404，不把「已删除」的文档当成功返回。
@@ -654,7 +659,7 @@ async def delete_doc(request: Request, doc_id: str) -> dict:
     """连根删：先取消在途轮询 → rmtree 目录 → 软删行（行保留审计）。"""
     user_id, _tenant_id = get_authenticated_identity(request)
     store = get_doc_store()
-    _require_owned_doc(await store.get_doc(doc_id, user_id=user_id), doc_id)
+    doc = _require_owned_doc(await store.get_doc(doc_id, user_id=user_id), doc_id)
 
     svc = get_doc_parse_service()
     try:
@@ -668,11 +673,17 @@ async def delete_doc(request: Request, doc_id: str) -> dict:
     hit = await store.soft_delete(doc_id, user_id=user_id)
     if not hit:
         raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
-    # H1：未结算的在途预留全额退回（parsed/organized 的已结算 = no-op）
-    try:
-        get_doc_quota().release(doc_id, user_id)
-    except Exception as exc:  # noqa: BLE001 —— 释放失败只告警（预留 TTL 兜底回收）
-        logger.warning("[docs] 删除释放配额预留失败 doc=%s: %s", doc_id, exc)
+    # H1（安全审查修订）：只在 **MinerU 从未拿到文件** 时退预留——判据是
+    # mineru_batch_id 未落库。已提交的行（parsing 等）MinerU 无取消 API，
+    # 云端照常解析并按页扣平台账号，退预留 = 账面与真实账单脱钩（且每用户
+    # 日限、余量告警全部失真——上传→秒删循环能在账面为零的情况下烧穿平台
+    # 额度）。已 settle 的行（parsed/organized）退 = no-op，天然无害。
+    # 预留键 24h TTL 自回收，不会永久占账。
+    if not doc.get("mineru_batch_id"):
+        try:
+            get_doc_quota().release(doc_id, user_id)
+        except Exception as exc:  # noqa: BLE001 —— 释放失败只告警（TTL 兜底回收）
+            logger.warning("[docs] 删除释放配额预留失败 doc=%s: %s", doc_id, exc)
     # H2：软删落地后二次清扫——抓在途写（下载/解包）在 status 检查与 rmtree
     # 之间竞态写回的半成品；此后一切写入都被 deleted 守卫拦下。
     shutil.rmtree(doc_dir, ignore_errors=True)

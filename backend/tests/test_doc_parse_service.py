@@ -144,11 +144,15 @@ class FakeQuota:
     def __init__(self) -> None:
         self.recorded: list[tuple[str, int]] = []
         self.released: list[tuple[str, str]] = []
+        self.committed: list[str] = []
         self.settle_status = None
 
     def settle(self, doc_id, user_id, pages):
         self.recorded.append((user_id, int(pages)))
         return self.settle_status
+
+    def commit_reservation(self, doc_id):
+        self.committed.append(str(doc_id))
 
     def release(self, doc_id, user_id):
         self.released.append((doc_id, user_id))
@@ -453,8 +457,11 @@ async def test_poll_once_download_failure_settles_actual_without_release(
     assert "产物下载/解包失败" in fields["error"]
 
 
-def test_settle_quota_hands_status_to_alert_hook(tmp_path: Path, monkeypatch) -> None:
-    """余量告警挂在结算点（T-FM-14）：settle 返回的状态原样递钩子；
+@pytest.mark.asyncio
+async def test_settle_quota_hands_status_to_alert_hook(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """余量告警挂在结算点（T-FM-14）：settle 返回的状态原样递钩子（to_thread）；
     结算抛错则没有状态可递——不告警、不上抛。"""
     from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
 
@@ -471,7 +478,7 @@ def test_settle_quota_hands_status_to_alert_hook(tmp_path: Path, monkeypatch) ->
     quota.settle_status = sentinel
     svc, _ = mk_service(tmp_path, FakeStore(), client=FakeMineru(), quota=quota)
 
-    svc._settle_quota(doc, 7)
+    await svc._alert_quota_low(svc._settle_quota(doc, 7))
     assert quota.recorded == [("u1", 7)]
     assert alerts == [(sentinel, quota)], "结算状态要带着同一个 quota 实例递钩子"
 
@@ -480,8 +487,32 @@ def test_settle_quota_hands_status_to_alert_hook(tmp_path: Path, monkeypatch) ->
             raise RuntimeError("redis down")
 
     svc2, _ = mk_service(tmp_path, FakeStore(), client=FakeMineru(), quota=Boom())
-    svc2._settle_quota(doc, 7)  # 不抛
+    await svc2._alert_quota_low(svc2._settle_quota(doc, 7))  # 不抛
     assert len(alerts) == 1, "结算失败没有状态可递，不许告警"
+
+
+@pytest.mark.asyncio
+async def test_settle_or_commit_quota_commits_when_pages_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """done 但上游没报页数：页数不可知，预留转已用留在账上，不许 settle(0) 全退。"""
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+
+    alerts: list = []
+    monkeypatch.setattr(
+        parse_mod,
+        "maybe_alert_quota_low",
+        lambda st, *, quota: alerts.append(st),
+    )
+    quota = FakeQuota()
+    svc, _ = mk_service(tmp_path, FakeStore(), client=FakeMineru(), quota=quota)
+    doc = mk_doc(tmp_path)
+
+    await svc._settle_or_commit_quota(doc, 0)
+
+    assert quota.committed == [DOC_ID], "页数不可知 → 预留转已用（费用已发生）"
+    assert quota.recorded == [], "不许 settle(0) 把已发生的费用洗成 0"
+    assert alerts == [], "commit 没有状态可递，不判告警"
 
 
 @pytest.mark.asyncio
@@ -682,10 +713,11 @@ async def test_submit_parse_failure_marks_row_and_raises(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_submit_parse_deleted_during_upload_aborts_and_releases(
+async def test_submit_parse_deleted_during_upload_aborts_and_commits(
     tmp_path: Path,
 ) -> None:
-    """H2：上传窗口内被删除 → 写 parsing 被守卫拦下，清目录、退预留、不挂轮询。"""
+    """H2：上传窗口内被删除 → 写 parsing 被守卫拦下，清目录、预留转已用
+    （MinerU 已拿到文件会照常计费）、不挂轮询。"""
     doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None)
     store = FakeStore({DOC_ID: dict(doc)})
     quota = FakeQuota()
@@ -704,7 +736,8 @@ async def test_submit_parse_deleted_during_upload_aborts_and_releases(
 
     assert store.rows[DOC_ID]["status"] == "deleted", "已删行不许被写回 parsing"
     assert not doc_dir.exists(), "上传窗口放弃解析必须清目录"
-    assert quota.released == [(DOC_ID, "u1")]
+    assert quota.committed == [DOC_ID], "MinerU 已拿到文件：预留转已用，不许全退"
+    assert quota.released == []
     assert svc._tasks == {}, "放弃解析不许挂轮询（挂上就是删后复活）"
     assert any("parsing" == f.get("status") for _, f in store.rejected_writes)
 

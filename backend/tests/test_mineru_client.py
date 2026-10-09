@@ -734,6 +734,12 @@ async def test_run_pdf_job_exception_returns_none() -> None:
         "https://172.16.0.1/x.zip",
         "https://169.254.169.254/x.zip",  # 链路本地（云元数据端点）
         "https://0.0.0.0/x.zip",
+        # 数字别名（inet_aton 形态）：ipaddress 解析拒绝，但客户端照样连 127.0.0.1
+        "https://127.1/x.zip",
+        "https://2130706433/x.zip",
+        "https://0x7f000001/x.zip",
+        "https://0177.0.0.1/x.zip",
+        "https://0300.0250.1.1/x.zip",  # 八进制 192.168.1.1
         "https://[::1]/x.zip",
         "https://[fe80::1]/x.zip",
         "ftp://mineru.test/x.zip",

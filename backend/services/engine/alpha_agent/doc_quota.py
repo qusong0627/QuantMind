@@ -1,8 +1,8 @@
 """MinerU 页数配额守卫（T-FM-12）—— 平台账号级共享额度的记账与双闸。
 
 MinerU 免费额度是**账号级 1000 页/日**，一次烧穿全平台当天都不能解析。本模块
-是所有页数记账与频控的**唯一入口**，四条纪律（2026-10-09 安全审查 C1/H1/M1
-修复后定稿）：
+是所有页数记账与频控的**唯一入口**，五条纪律（2026-10-09 安全审查修复后
+定稿）：
 
 - ``reserve`` **先扣后交（原子）**：提交解析前按保守预估值预留。旧实现
   「先读后判」的 check-then-act 在并发下就是真超支（N 个请求都读到
@@ -14,9 +14,13 @@ MinerU 免费额度是**账号级 1000 页/日**，一次烧穿全平台当天�
   结算只有拿到键的那个生效（幂等）。
 - ``release`` **失败全额退**：MinerU 没交付产物就不计用户的账（对用户保守；
   平台侧多花的部分由预留期的保守值兜底）。
+- ``commit_reservation`` **预留转已用**：页数不可知但费用已发生（MinerU 已
+  拿到文件）时的兜底——预留额留在账上、清预留键，不许 settle(0) 全额退回
+  （那是把已发生的扣费记成 0，账面与真实账单脱钩）。
 - ``check_rate`` / ``try_lock``：上传与整理端点的**按用户限流**与**单文档
   在途去重**（安全审查 M1）——整理一次最多烧 9 次 LLM 调用，同一份文档
-  的并发重复整理必须被 409 挡住。
+  的并发重复整理必须被 409 挡住。锁带随机令牌，释放走 compare-and-delete
+  （锁过期被后来者重取时，前持有者不误删）。
 
 预留按**保守预估**计（非 PDF 数不出页数 = 单文件上限，图片 = 1 页）：
 宁可多留不许多放，多留的在结算时退回。日界按**北京时间**换键（平台按
@@ -30,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -288,6 +293,14 @@ class DocQuota:
         self._bump(day, user_id, pages - reserved)
         return self.status(user_id)
 
+    def commit_reservation(self, doc_id: str) -> None:
+        """预留转已用：页数不可知但**费用已发生**（MinerU done 已计费）时的兜底。
+
+        预留额本来就是保守上界，直接留在账上、清掉预留键——不 settle(0) 全额
+        退回（那是把已发生的平台扣费记成 0，账面与真实账单脱钩）。
+        """
+        self._take_reservation(doc_id)  # 取走即留账，不 _bump
+
     def release(self, doc_id: str, user_id: str) -> QuotaStatus:
         """失败/删除：全额退回预留（从未预留过 = no-op）。"""
         held = self._take_reservation(doc_id)
@@ -321,14 +334,36 @@ class DocQuota:
                 window_s=RATE_WINDOW_S,
             )
 
-    def try_lock(self, name: str, *, ttl_s: int) -> bool:
-        """在途去重锁（SET NX EX）。拿不到说明同名操作正在进行。"""
-        return bool(
-            self._client().set(f"{KEY_LOCK_PREFIX}:{name}", "1", nx=True, ex=ttl_s)
-        )
+    def try_lock(self, name: str, *, ttl_s: int) -> str | None:
+        """在途去重锁（SET NX EX，值为随机令牌）。拿不到说明同名操作正在进行。
 
-    def unlock(self, name: str) -> None:
-        self._client().delete(f"{KEY_LOCK_PREFIX}:{name}")
+        返回的令牌要原样交给 ``unlock``——compare-and-delete 只解自己那把，
+        锁过期后后来者拿到的锁不会被前一个持有者误删（ABA）。
+        """
+        token = uuid.uuid4().hex
+        ok = self._client().set(f"{KEY_LOCK_PREFIX}:{name}", token, nx=True, ex=ttl_s)
+        return token if ok else None
+
+    def unlock(self, name: str, token: str | None = None) -> None:
+        """释放锁。带令牌 = compare-and-delete（值不符不动，防误删后来者）；
+        不带 = 无条件删除（仅限无令牌的遗留调用方）。
+
+        不是 Lua 原子脚本：GET 命中自己的令牌时锁必然还在（NX 锁不会被并发
+        抢走），GET 与 DEL 之间只隔着一次往返——锁恰好在那一瞬过期并被重新
+        抢走的窗口可忽略，且误删代价只是一次多余的重试。
+        """
+        key = f"{KEY_LOCK_PREFIX}:{name}"
+        client = self._client()
+        if token is None:
+            client.delete(key)
+            return
+        current = client.get(key)
+        if current is None:
+            return
+        if isinstance(current, bytes):  # 真 Redis 默认返回 bytes
+            current = current.decode("utf-8", "replace")
+        if current == token:
+            client.delete(key)
 
 
 _quota: DocQuota | None = None

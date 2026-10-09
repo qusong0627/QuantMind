@@ -215,15 +215,17 @@ class FakeQuota:
         self.guards: list[tuple[str, int]] = []
         self.reserve_doc_ids: list[str] = []
         self.released: list[tuple[str, str]] = []
+        self.committed: list[str] = []
         self.rate_checks: list[tuple[str, str]] = []
         self.locks: list[str] = []
-        self.unlocks: list[str] = []
+        self.unlocks: list[tuple[str, str | None]] = []
         self.exc = exc
         self.rate_exc = rate_exc
         self.lock_granted = lock_granted
         self.status_obj = status_obj
         self.status_user = None
         self.events = events if events is not None else []
+        self._lock_seq = 0
 
     def reserve(self, user_id, pages, *, doc_id):
         self.events.append("guard")
@@ -235,6 +237,9 @@ class FakeQuota:
     def release(self, doc_id, user_id):
         self.released.append((str(doc_id), str(user_id)))
 
+    def commit_reservation(self, doc_id):
+        self.committed.append(str(doc_id))
+
     def check_rate(self, user_id, action):
         self.rate_checks.append((user_id, action))
         if self.rate_exc is not None:
@@ -242,10 +247,13 @@ class FakeQuota:
 
     def try_lock(self, name, *, ttl_s):
         self.locks.append(name)
-        return self.lock_granted
+        if not self.lock_granted:
+            return None
+        self._lock_seq += 1
+        return f"tok-{self._lock_seq}"
 
-    def unlock(self, name):
-        self.unlocks.append(name)
+    def unlock(self, name, token=None):
+        self.unlocks.append((name, token))
 
     def status(self, user_id):
         self.status_user = user_id
@@ -884,7 +892,7 @@ async def test_organize_happy_returns_payload_and_persists(monkeypatch) -> None:
     assert isinstance(calls["config"], FakeConfig)
     assert quota.rate_checks == [("u-1", "organize")]
     assert quota.locks == ["organize:d1"], "在途锁防同一文档并发重复烧 LLM"
-    assert quota.unlocks == ["organize:d1"], "无论成败锁都要释放"
+    assert quota.unlocks == [("organize:d1", "tok-1")], "无论成败锁都要释放（带令牌）"
     data = out["data"]
     assert data["prompt_version"] == "v1" and data["markdown"] == "# t\n"
     assert data["doc"]["doc_id"] == "d1" and "original_path" not in data["doc"]
@@ -1185,7 +1193,30 @@ async def test_delete_cancels_poll_then_removes_dir_and_soft_deletes(
     assert svc.cancelled == ["d1"], "必须先取消在途轮询（否则删完又被写回 parsed）"
     assert not doc_dir.exists()
     assert store.soft_deleted == [("d1", "u-1")]
-    assert quota.released == [("d1", "u-1")], "删除退回未结算的预留"
+    assert quota.released == [], (
+        "批次已建（MinerU 已拿到文件、照常计费）→ 不许退预留："
+        "上传→秒删循环能在账面为零的情况下烧穿平台额度"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_uploaded_without_batch_releases_reservation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """MinerU 从未拿到文件（批次号未落库）→ 预留全额退回（费用没发生）。"""
+    doc_dir = tmp_path / "d1"
+    doc_dir.mkdir()
+    store = FakeStore(
+        [mk_row(doc_id="d1", user_id="u-1", status="uploaded", mineru_batch_id=None)]
+    )
+    svc = FakeParseService(tmp_path)
+    quota = FakeQuota()
+    _wire(monkeypatch, store, svc, quota)
+
+    out = await docs_mod.delete_doc(request=FakeRequest(), doc_id="d1")
+
+    assert out["data"] == {"doc_id": "d1", "deleted": True}
+    assert quota.released == [("d1", "u-1")], "从未提交 MinerU：预留要退"
 
 
 @pytest.mark.asyncio

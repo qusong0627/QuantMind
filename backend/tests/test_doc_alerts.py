@@ -40,13 +40,14 @@ def mk_status(*, warning: bool) -> QuotaStatus:
 
 
 class FakeLockQuota:
-    """SET NX EX 替身：第一次授予，之后拿不到（模拟同日重复结算）。"""
+    """SET NX EX 替身：第一次授予（返回令牌），之后拿不到（模拟同日重复结算）。"""
 
     def __init__(self, *, grant: bool = True, raise_on_lock: bool = False) -> None:
         self.locks: list[tuple[str, int]] = []
-        self.unlocks: list[str] = []
+        self.unlocks: list[tuple[str, str | None]] = []
         self.grant = grant
         self.raise_on_lock = raise_on_lock
+        self._token_seq = 0
 
     def try_lock(self, name, *, ttl_s):
         if self.raise_on_lock:
@@ -54,11 +55,12 @@ class FakeLockQuota:
         self.locks.append((name, ttl_s))
         if self.grant:
             self.grant = False  # 同配额日第二次不再授予
-            return True
-        return False
+            self._token_seq += 1
+            return f"tok-{self._token_seq}"
+        return None
 
-    def unlock(self, name):
-        self.unlocks.append(name)
+    def unlock(self, name, token=None):
+        self.unlocks.append((name, token))
 
 
 def mk_publisher(calls: list, *, error: Exception | None = None):
@@ -112,7 +114,9 @@ def test_publish_failure_releases_lock_for_retry() -> None:
         maybe_alert_quota_low(mk_status(warning=True), quota=quota, publisher=pub)
         is False
     )
-    assert quota.unlocks == ["doc_quota_alert:20261009"], "发送失败要放锁供重试"
+    assert quota.unlocks == [("doc_quota_alert:20261009", "tok-1")], (
+        "发送失败要放锁供重试（带令牌 CAD）"
+    )
 
 
 def test_lock_trouble_is_swallowed() -> None:

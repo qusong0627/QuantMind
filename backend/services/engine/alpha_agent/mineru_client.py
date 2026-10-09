@@ -34,6 +34,7 @@ import ipaddress
 import logging
 import os
 import re
+import socket
 import stat
 import time
 import zipfile
@@ -439,6 +440,11 @@ def assert_safe_remote_url(url: str, *, context: str) -> None:
     正常链路里这些 URL 来自 MinerU 官方响应（TLS 之下）；此闸防的是
     「MinerU 端点被攻陷/MITM 后把服务端引向内网」。域名不解析（DNS 绑定
     不可控），只拦直写 IP 的私网/回环/链路本地/保留段与 localhost。
+
+    2026-10-09 补数字别名旁路：``127.1`` / ``2130706433`` / ``0x7f000001``
+    / ``0177.0.0.1`` 这类 inet_aton 形态 ``ipaddress`` 直接解析拒绝，会从
+    「不是 IP」的 except 分支放行、而 HTTP 客户端照样连到 127.0.0.1。
+    用 ``inet_aton`` 再归一（纯本地换算，不发 DNS——解析不出的才是真域名）。
     """
     parsed = urlsplit(str(url or ""))
     if parsed.scheme != "https" or not parsed.hostname:
@@ -449,7 +455,11 @@ def assert_safe_remote_url(url: str, *, context: str) -> None:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return
+        # inet_aton 认得的数字别名就地归一；真域名（解析不出的）按原策略放行
+        try:
+            ip = ipaddress.ip_address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            return
     if (
         ip.is_private
         or ip.is_loopback

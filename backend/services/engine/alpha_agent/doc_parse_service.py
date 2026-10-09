@@ -38,7 +38,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.services.engine.alpha_agent.doc_alerts import maybe_alert_quota_low
-from backend.services.engine.alpha_agent.doc_quota import DocQuota, get_doc_quota
+from backend.services.engine.alpha_agent.doc_quota import (
+    DocQuota,
+    QuotaStatus,
+    get_doc_quota,
+)
 from backend.services.engine.alpha_agent.doc_store import DocStore, get_doc_store
 from backend.services.engine.alpha_agent.mineru_client import (
     MineruBatchItem,
@@ -305,7 +309,7 @@ class DocParseService:
             self._release_quota(doc)
             raise
         # H2：从落盘到 MinerU 上传完成可以很久，用户可能已在这个窗口里删除。
-        # 行已删 → 写 no-op（返回值 False），放弃解析并全额退预留，不留产物。
+        # 行已删 → 写 no-op（返回值 False），放弃解析，不留产物。
         hit = await self._store.update_doc(
             doc_id,
             status="parsing",
@@ -314,8 +318,10 @@ class DocParseService:
             error=None,
         )
         if not hit:
+            # 但 MinerU **已经拿到文件**（批次已建、上传已完成），会照常解析
+            # 并计费——预留转已用，不许全退（退=账面与真实账单脱钩）。
             shutil.rmtree(self.doc_dir(doc_id), ignore_errors=True)
-            self._release_quota(doc)
+            self._commit_quota(doc)
             logger.info("doc %s 上传期间已被删除，放弃解析", doc_id)
             return
         self.start_poll(doc_id)
@@ -359,20 +365,40 @@ class DocParseService:
         except Exception as exc:  # noqa: BLE001 —— 释放失败只告警（TTL 会回收）
             logger.warning("doc %s 配额预留释放失败: %s", doc.get("doc_id"), exc)
 
-    def _settle_quota(self, doc: Mapping[str, Any], pages: int) -> None:
-        """产物落定后的结算：预留 → 实际（多退少补）。
+    def _commit_quota(self, doc: Mapping[str, Any]) -> None:
+        """页数不可知但费用已发生（MinerU done / 文件已上传）→ 预留转已用。"""
+        try:
+            self._quota.commit_reservation(str(doc["doc_id"]))
+        except Exception as exc:  # noqa: BLE001 —— 记账失败只告警不回滚
+            logger.warning("doc %s 配额预留转已用失败: %s", doc.get("doc_id"), exc)
 
-        结算是用量**真正落地**的唯一时点——平台余量告警挂在这里
-        （失败路径 release 全退后条件可能不再成立，不在那里判）。
+    def _settle_quota(self, doc: Mapping[str, Any], pages: int) -> QuotaStatus | None:
+        """产物落定后的结算：预留 → 实际（多退少补）；返回结算后状态供告警判。
+
+        结算是用量**真正落地**的唯一时点——平台余量告警挂在结算之后的
+        调用方（失败路径 release 全退后条件可能不再成立，不在那里判）。
         """
         try:
-            status = self._quota.settle(
+            return self._quota.settle(
                 str(doc["doc_id"]), str(doc.get("user_id") or ""), int(pages or 0)
             )
         except Exception as exc:  # noqa: BLE001 —— 产物已落盘，记账失败只告警不回滚
             logger.warning("doc %s 配额结算失败: %s", doc.get("doc_id"), exc)
+            return None
+
+    async def _alert_quota_low(self, status: QuotaStatus | None) -> None:
+        """结算后判告警。走 to_thread：管理员 fanout 是同步 psycopg 落库，
+        直接在事件循环里跑会在 DB 慢时卡住整个 engine（轮询/API 一起等）。
+
+        旁路纪律不变：任何异常只记日志，绝不上抛（``maybe_alert_quota_low``
+        自身承诺不抛；to_thread 调度层出错也在这里兜住）。
+        """
+        if status is None:
             return
-        maybe_alert_quota_low(status, quota=self._quota)
+        try:
+            await asyncio.to_thread(maybe_alert_quota_low, status, quota=self._quota)
+        except Exception as exc:  # noqa: BLE001 —— 告警是锦上添花，绝不弄断主链
+            logger.warning("doc 配额告警旁路异常（已忽略）: %s", exc)
 
     async def _fail(
         self,
@@ -423,6 +449,19 @@ class DocParseService:
         await self._store.update_doc(doc_id, **fields)
         return "active"
 
+    async def _settle_or_commit_quota(self, doc: Mapping[str, Any], pages: int) -> None:
+        """页数已知 → settle（多退少补）+ 告警判；不可知 → 预留转已用。
+
+        MinerU 报了 done 却没给页数（上游契约外）时 settle(0) 会把预留全退——
+        费用明明已发生，账面却归零。改为把预留留在账上（保守上界）。
+        """
+        if pages:
+            status = self._settle_quota(doc, pages)
+        else:
+            self._commit_quota(doc)
+            status = None
+        await self._alert_quota_low(status)
+
     async def _finish_done(self, doc: Mapping[str, Any], item: MineruBatchItem) -> str:
         """done → 立即下载落盘（链接无 TTL 承诺）→ 白名单解包 → parsed + 结算。"""
         doc_id = str(doc["doc_id"])
@@ -441,7 +480,7 @@ class DocParseService:
                 result = await asyncio.to_thread(extract_zip_whitelist, zip_path, dest)
             except MineruError as exc:
                 # MinerU 真扣了页才给 zip（done），按实际页数结算而不是全退
-                self._settle_quota(doc, pages)
+                await self._settle_or_commit_quota(doc, pages)
                 await self._fail(
                     doc,
                     f"产物下载/解包失败：{exc}",
@@ -462,12 +501,14 @@ class DocParseService:
         hit = await self._store.update_doc(doc_id, **fields)
         if not hit:
             # H2：下载/解包期间用户删了文档（写被 deleted 守卫拦下）。
-            # 产物刚被写回已删目录 → 再清一次；删除端点已退预留，不再结算。
+            # 产物刚被写回已删目录 → 再清一次；删除端点对已建批次的行不退
+            # 预留（MinerU 照常计费），此处也不再结算——预留留在账上
+            # （保守上界，24h TTL 自回收），账面与真实账单一致。
             shutil.rmtree(doc_dir, ignore_errors=True)
             logger.info("doc %s 完成前已被删除，丢弃产物", doc_id)
             return "gone"
 
-        self._settle_quota(doc, pages)
+        await self._settle_or_commit_quota(doc, pages)
         logger.info(
             "doc %s 解析完成（%d 页，%d 张图）", doc_id, pages, result.image_count
         )
