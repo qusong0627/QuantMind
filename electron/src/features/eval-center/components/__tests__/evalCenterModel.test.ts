@@ -175,6 +175,15 @@ describe('gradeColor / gradeCounts / averageScore / rowLabels（2026-09-17 改�
 
     const daily = rowLabels(makeRow({ object_type: 'daily_selection', object_id: '2026-09-15', display_name: null }));
     expect(daily).toEqual({ primary: '2026-09-15', secondary: null });
+
+    // 体检留档：后端解析出策略名时用名；解析不到时兜底「策略 #id」（裸数字看不懂）
+    const healthNamed = rowLabels(
+      makeRow({ object_type: 'strategy_health', object_id: '32', display_name: 'minibt·HullMA 双周期' })
+    );
+    expect(healthNamed).toEqual({ primary: 'minibt·HullMA 双周期', secondary: '32' });
+
+    const healthBare = rowLabels(makeRow({ object_type: 'strategy_health', object_id: '32', display_name: null }));
+    expect(healthBare).toEqual({ primary: '策略 #32', secondary: null });
   });
 });
 

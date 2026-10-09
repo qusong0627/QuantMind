@@ -143,6 +143,24 @@ describe('insightFor 关键实测量（缺证据必带原因，不许留白）',
     expect(insight.value).toBe('-1.12');
     expect(insight.tone).toBe('neg');
     expect(insight.hint).toContain('反转');
+    // 关键结论可见化：收进悬停后会丢失可见性，必须有独立徽标
+    expect(insight.badge).toBe('反转可用');
+  });
+
+  it('非反向因子不挂「反转可用」徽标（徽标只标记真反转）', () => {
+    const row = makeRow({
+      object_type: 'factor',
+      dimensions: {
+        predictive: {
+          label: '预测力',
+          score: 74,
+          weight: 30,
+          detail: { mean_ic: 0.052, icir: 1.12 },
+        },
+      },
+    });
+
+    expect(insightFor(row)!.badge).toBeUndefined();
   });
 
   it('策略 → 年化 / 最大回撤（带回超额口径）', () => {

@@ -55,6 +55,11 @@ const TYPE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
   strategy_health: HeartPulse,
 };
 
+/** 页签短名（后端 label 去掉「评分卡/留档」后缀；全称留在 title 悬停里） */
+function tabLabel(label: string): string {
+  return label.replace(/评分卡$/, '').replace(/留档$/, '') || label;
+}
+
 export const EvalCenterPanel: React.FC = () => {
   const { isSimple } = useUiMode();
   const [objectTypes, setObjectTypes] = useState<EvalObjectType[]>([]);
@@ -146,15 +151,14 @@ export const EvalCenterPanel: React.FC = () => {
   );
 
   const isHealth = activeType === 'strategy_health';
+  const activeLabel = objectTypes.find((t) => t.object_type === activeType)?.label || '';
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-xl font-bold text-slate-800">评估中心</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            六类评分卡与体检档案（数据源 eval_scores；评分由每日 EOD 任务与回测体检自动生成）
-          </p>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+        <div className="flex flex-wrap items-baseline gap-x-2.5">
+          <h2 className="text-lg font-bold text-slate-800">评估中心</h2>
+          <p className="text-[11px] text-slate-400">每日收盘自动评分 · 回测完成自动体检</p>
         </div>
         <button
           type="button"
@@ -167,7 +171,7 @@ export const EvalCenterPanel: React.FC = () => {
         </button>
       </div>
 
-      {/* 类型页签（图标 + 胶囊） */}
+      {/* 类型页签（图标 + 胶囊；短名，全称在悬停里） */}
       <div className="flex w-fit max-w-full flex-wrap items-center gap-1 rounded-full border border-slate-200 bg-slate-100 p-0.5">
         {objectTypes.map((otype) => {
           const Icon = TYPE_ICONS[otype.object_type] || Award;
@@ -176,13 +180,14 @@ export const EvalCenterPanel: React.FC = () => {
             <button
               key={otype.object_type}
               type="button"
+              title={otype.label}
               onClick={() => setActiveType(otype.object_type)}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-bold transition-colors ${
+              className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11px] font-bold transition-colors ${
                 active ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
               }`}
             >
               <Icon className="w-3 h-3" />
-              {otype.label}
+              {tabLabel(otype.label)}
             </button>
           );
         })}
@@ -239,6 +244,7 @@ export const EvalCenterPanel: React.FC = () => {
                 <EvalDetail
                   row={selectedRow}
                   objectType={activeType}
+                  typeLabel={tabLabel(activeLabel)}
                   history={history}
                   isSimple={isSimple}
                 />

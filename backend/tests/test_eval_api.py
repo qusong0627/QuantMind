@@ -116,6 +116,7 @@ def test_display_name_helpers():
         backtest_display_label,
         factor_display_name,
         fallback_model_label,
+        strategy_health_display_name,
     )
 
     # 因子：复用引擎词典（alpha158 窗口族 / gtja 编号）
@@ -157,6 +158,13 @@ def test_display_name_helpers():
     assert account_display_label("999:CN") == "A股 模拟账户（用户 999）"
     assert account_display_label("999:CN", "张三") == "A股 模拟账户（张三）"
     assert account_display_label("") is None
+
+    # 策略体检留档：展示名 = 策略名（空名/无策略 → None，前端回退「策略 #id」）
+    assert strategy_health_display_name("默认 Top-K 选股策略") == "默认 Top-K 选股策略"
+    assert strategy_health_display_name(" minibt·HullMA 双周期 ") == "minibt·HullMA 双周期"
+    assert strategy_health_display_name("") is None
+    assert strategy_health_display_name("   ") is None
+    assert strategy_health_display_name(None) is None
 
 
 # ── 真库 E2E ────────────────────────────────────────────────────────

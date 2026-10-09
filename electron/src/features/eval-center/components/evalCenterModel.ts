@@ -91,6 +91,10 @@ export function rowLabels(row: Pick<EvalScoreRow, 'object_type' | 'object_id' | 
   if (row.object_type === 'strategy') {
     return { primary: `策略回测 ${row.object_id.slice(0, 8)}…`, secondary: row.object_id };
   }
+  if (row.object_type === 'strategy_health') {
+    // object_id = 策略 id：后端解析策略名失败时兜底（裸数字看不懂）
+    return { primary: `策略 #${row.object_id}`, secondary: null };
+  }
   return { primary: row.object_id, secondary: null };
 }
 

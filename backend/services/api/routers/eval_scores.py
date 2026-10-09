@@ -166,6 +166,14 @@ def account_display_label(object_id: str, username: str | None = None) -> str | 
     return f"{base}（{who}）" if who else base
 
 
+def strategy_health_display_name(name: Any) -> str | None:
+    """体检留档展示名 = 策略名（空名/查无此策略 → None，前端回退「策略 #id」）。"""
+    if name is None:
+        return None
+    cleaned = str(name).strip()
+    return cleaned or None
+
+
 async def _resolve_display_names(
     session: Any, object_type: str, ids: list[str]
 ) -> dict[str, str | None]:
@@ -216,6 +224,22 @@ async def _resolve_display_names(
             )
             cfg_by_id = {str(r["backtest_id"]): r["config_json"] for r in rows}
             return {i: backtest_display_label(cfg_by_id.get(i)) for i in unique}
+        if object_type == "strategy_health":
+            # object_id = 策略 id（整型）；展示名取策略名，查无/非数字 → None 由前端回退
+            int_ids = [int(i) for i in unique if i.isdigit()]
+            if not int_ids:
+                return dict.fromkeys(unique)
+            rows = (
+                await session.execute(
+                    _text(
+                        "SELECT CAST(id AS TEXT), name FROM strategies "
+                        "WHERE id = ANY(:ids)"
+                    ),
+                    {"ids": int_ids},
+                )
+            ).fetchall()
+            names = {str(r[0]): strategy_health_display_name(r[1]) for r in rows}
+            return {i: names.get(i) for i in unique}
         if object_type == "account":
             heads = {i: i.partition(":")[0] for i in unique}
             int_ids = [int(h) for h in heads.values() if h.isdigit()]

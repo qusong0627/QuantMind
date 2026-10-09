@@ -111,6 +111,8 @@ export interface Insight {
   hint: string;
   /** true = 无证据（显示为斜纹/虚线，不与「算出来正好是 0」同形） */
   missing: boolean;
+  /** 可见小标记（如因子「反转可用」）：关键结论不能只活在悬停里 */
+  badge?: string;
 }
 
 type DetailLike = Record<string, unknown>;
@@ -158,9 +160,10 @@ function factorInsight(row: EvalScoreRow): Insight {
     return missingInsight('ICIR', detail, '预测力维缺省（IC 序列不足 20 日）');
   }
   const meanIc = toNumber(detail?.mean_ic);
+  const inverted = String(detail?.direction || '') === 'inverted';
   const bits: string[] = [];
   if (meanIc !== null) bits.push(`均值 IC ${formatNumber(meanIc, 4)}`);
-  if (String(detail?.direction || '') === 'inverted') {
+  if (inverted) {
     bits.push('方向反向 —— 反转即可用，不按 0 分处理');
   }
   return {
@@ -169,6 +172,7 @@ function factorInsight(row: EvalScoreRow): Insight {
     tone: signTone(icir),
     hint: bits.join('；') || 'ICIR 取自预测力维',
     missing: false,
+    badge: inverted ? '反转可用' : undefined,
   };
 }
 

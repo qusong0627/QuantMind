@@ -35,6 +35,8 @@ import { TermTooltip } from '../../shared/TermTooltip';
 interface EvalDetailProps {
   row: EvalScoreRow | null;
   objectType: string;
+  /** 中文类型名（页签短名；缺省回退 objectType 原文） */
+  typeLabel?: string;
   history: EvalScoreRow[];
   isSimple: boolean;
 }
@@ -52,7 +54,14 @@ const InsightChip: React.FC<{ row: EvalScoreRow }> = ({ row }) => {
       >
         {insight.value}
       </span>
-      <span className="text-[10px] leading-4 text-slate-400">{insight.hint}</span>
+      {insight.badge && (
+        <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
+          {insight.badge}
+        </span>
+      )}
+      <span className="text-[10px] leading-4 text-slate-400" title={insight.hint}>
+        {insight.hint}
+      </span>
     </div>
   );
 };
@@ -233,7 +242,13 @@ const RegimeDependencySection: React.FC<{ row: EvalScoreRow }> = ({ row }) => {
   );
 };
 
-export const EvalDetail: React.FC<EvalDetailProps> = ({ row, objectType, history, isSimple }) => {
+export const EvalDetail: React.FC<EvalDetailProps> = ({
+  row,
+  objectType,
+  typeLabel,
+  history,
+  isSimple,
+}) => {
   const labels = row ? rowLabels(row) : null;
   const meta = row ? gradeMeta(row.grade, row.low_confidence) : null;
   const color = gradeColor(row?.grade);
@@ -259,7 +274,7 @@ export const EvalDetail: React.FC<EvalDetailProps> = ({ row, objectType, history
               <div className="truncate font-mono text-[10px] text-slate-400">{labels.secondary}</div>
             )}
             <div className="mt-1 text-[10px] text-slate-400">
-              {row.snapshot_date || '—'} · {objectType}
+              {row.snapshot_date || '—'} · {typeLabel || objectType}
             </div>
           </div>
           <div className="shrink-0 text-right">
@@ -281,7 +296,7 @@ export const EvalDetail: React.FC<EvalDetailProps> = ({ row, objectType, history
         <div className="mt-3">
           <DimensionCoverageBar row={row} />
           <p className="mt-1 text-[10px] text-slate-400">
-            有色=该维已算 · 斜纹虚线=缺省（悬停看原因；缺省维不计入加权，权重已归一）
+            实心=已评维 · 虚线=缺省（不计权重，悬停看原因）
           </p>
         </div>
 
