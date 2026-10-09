@@ -454,8 +454,6 @@ services:
       - ./scripts:/app/scripts
       # AlphaAgent 包源码（容器内 Python 通过 PYTHONPATH=/app 直接 import）
       - ./alphaagent:/app/alphaagent
-      # TradingAgents-Astock 多Agent投研框架
-      - ./TradingAgents-astock:/app/TradingAgents-astock
       # 训练脚本（用于 Docker-in-Docker 启动训练容器）
       - ./docker/training:/app/docker/training
       # 策略模板
@@ -482,7 +480,7 @@ services:
       # QwenPaw 共享文件目录
     # 都访问 PyPI 安装依赖（离线/受限网络会一直卡在此步骤）。
     command: >
-      sh -c "PYTHONPATH=/app/TradingAgents-astock:$$PYTHONPATH python backend/main_oss.py"
+      sh -c "python backend/main_oss.py"
     # deploy:
     #   resources:
     #     reservations:

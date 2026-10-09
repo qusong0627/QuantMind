@@ -184,7 +184,7 @@ GET /api/ext/v1/capabilities           # 需要 Bearer
 | 面 | 内容 | 传输 | 状态 |
 |---|---|---|---|
 | control | 策略 / 模型清单（**只读**） | JSON REST | **已实现** |
-| task | 训练、回测、因子演化、数据同步、TradingAgents 分析 | `202 + ref` + **轮询** | **已实现** |
+| task | 训练、回测、因子演化、数据同步 | `202 + ref` + **轮询** | **已实现** |
 | data | QuantDB、特征快照、推理结果、新闻富化 | 游标增量 + Parquet over HTTP | **已实现** |
 | stream | 实时行情、情报总线、信号 | WebSocket | **不提供**（理由见 6.4） |
 | trading | 模拟盘：账户 / 持仓 / 委托 / 成交 | REST + 幂等键 | **已实现（仅模拟盘）** |
@@ -236,14 +236,14 @@ GET /api/ext/v1/capabilities           # 需要 Bearer
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/task/kinds` | 五类任务的自描述（含各自的参数 schema 与 market 取值） |
+| GET | `/task/kinds` | 四类任务的自描述（含各自的参数 schema 与 market 取值） |
 | POST | `/task/{kind}` | 投递，**202**，返回 `ref` 与 `pollable` |
 | GET | `/task/{kind}/{ref}` | 轮询。`ref` 的形状**由 kind 决定** |
 
-`kind` ∈ `training` / `backtest` / `alpha_evolve` / `trading_agents` / `data_sync`。
+`kind` ∈ `training` / `backtest` / `alpha_evolve` / `data_sync`。
 
-**为什么要轮询、为什么当初写的 SSE 没做**：上游五个 kind 是**五个不同的
-服务、三种不同的任务模型**（Celery `AsyncResult`、进程内线程 + 进度字典、
+**为什么要轮询、为什么当初写的 SSE 没做**：上游四个 kind 分属不同服务、
+**三种不同的任务模型**（Celery `AsyncResult`、进程内线程 + 进度字典、
 直接返回）。要让它们吐出统一的事件流，得在中间再造一层状态总线；而对外节点
 本来就是一个「按自己节奏做事」的程序，轮询是它能直接写对的形状。**跨公网
 RTT 下 SSE 相对轮询没有优势**——省下的那点延迟被一次重连抵消掉。
@@ -257,9 +257,8 @@ RTT 下 SSE 相对轮询没有优势**——省下的那点延迟被一次重连
   一个不存在的产物。归一不等于抹平：`upstream_status` 永远保留原值。
 * `progress_pct` 为 **null ≠ 0**：`null` = 上游这类任务不报百分比，
   `0` = 确实还没开始动。两者对「要不要继续等」的结论不同。
-* **没有 cancel**。五个 kind 有三种取消形状，其中回测的取消键是 Celery
-  `task_id` 而它的轮询键是 `backtest_id`、两者之间没有上游映射端点；
-  TradingAgents 的取消是个 best-effort 线程、取消完连状态都不回。
+* **没有 cancel**。各 kind 的取消形状互不相同，其中回测的取消键是 Celery
+  `task_id` 而它的轮询键是 `backtest_id`、两者之间没有上游映射端点。
   **一个悄悄不生效的 cancel 比没有 cancel 更坏**，所以宁可不提供。
 * `data_sync` 是**唯一** `pollable=false` 的 kind：上游那个端点
   **不返回任务 id**（`send_task` 的 `AsyncResult` 被丢弃了），且它要求

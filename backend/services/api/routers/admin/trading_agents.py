@@ -15,7 +15,7 @@ router = APIRouter(
 )
 
 ENGINE_BASE_URL = os.getenv("ENGINE_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
-PROXY_TIMEOUT = 300.0  # 5 min for long-running analysis
+PROXY_TIMEOUT = 300.0  # 5 min：容忍大 PDF 上传 / 慢盘写入
 
 
 @router.api_route(

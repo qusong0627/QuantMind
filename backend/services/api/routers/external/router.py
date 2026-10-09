@@ -403,10 +403,10 @@ async def get_capabilities(
             ),
             PlaneInfo(
                 plane="task",
-                description="训练、回测、因子演化、数据同步、TradingAgents 分析",
+                description="训练、回测、因子演化、数据同步",
                 # 规划时写的是「202 + task_id + SSE」，落地改成轮询。
                 # 理由见 `task.py` 模块 docstring「为什么是轮询，不是 SSE」——
-                # 一句话：上游五个任务里没有一个值得为它维持一条长连接。
+                # 一句话：上游几个任务里没有一个值得为它维持一条长连接。
                 transport="202 + ref + polling",
                 available=True,
             ),

@@ -5,6 +5,11 @@ description: "投研分析（TradingAgents）— 7 AI分析师 → 质量门控 
 
 # 投研分析（TradingAgents）技能
 
+> ⚠️ **管线已退役（2026-10-09）**：`TradingAgents-astock` 包与执行面端点
+> （`/analyze`、`/progress`、`/report`、`/stop`）已删除。本文件是**方法论存档**——
+> 12 阶段流程的分工与字段口径仍值得参考（自主模式按此组织子代理），
+> 但其中的 API 调用示例不再可用。投研分析走 `SKILL.md` 第 2~8 节自主模式。
+
 多 Agent 投研分析管线：**7 个 AI 分析师 → 质量门控 → 多空辩论 → 交易决策 → 风控评估 → 最终决策**。支持 **A股/港股/美股/区块链/期货** 五市场，本地 QuantDB 数据驱动。
 
 ## 一、完整流程（LangGraph 状态图）

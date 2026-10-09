@@ -12,10 +12,9 @@
 | 训练 | JSON body（自由 dict） | `train_{时间}_{hex8}` | int 0-100 | `status` | 有 |
 | 回测 | JSON body（大） | `uuid4().hex`（另有一个 Celery `task_id`） | 只有 0 或 1 | `status` | 键是 task_id |
 | 因子演化 | **只有 query，没有 body** | `uuid4().hex[:16]` | `progress_pct` int | `status` | 有 |
-| TradingAgents | JSON body | `str(uuid4())[:8]` | **完全没有** | 两个 bool + error | 尽力而为 |
 | 数据同步 | 只有市场路径参数 | **没有** | 没有 | 没有 | 没有 |
 
-五种信封、四种轮询形状、三种 id 形状。直接转发等于把这份差异摊给每个调用方。
+四种信封、三种轮询形状、三种 id 形状。直接转发等于把这份差异摊给每个调用方。
 
 于是本面做三件归一，且**只做这三件**：
 
@@ -36,9 +35,9 @@
 规划时 `task` 面的 `transport` 写的是「202 + task_id + SSE」。落地时改成轮询，
 理由不是省事：
 
-* 上游五个任务里**只有训练有日志流**（Redis `_training_log_stream`），回测的
-  `progress` 只有 0 和 1 两个值、TradingAgents 连百分比都没有。做一条 SSE
-  通道去推一个「进度永远是 0 或 100」的数字，是在为一个不存在的实时性付复杂度。
+* 上游四个任务里**只有训练有日志流**（Redis `_training_log_stream`），回测的
+  `progress` 只有 0 和 1 两个值。做一条 SSE 通道去推一个「进度永远是
+  0 或 100」的数字，是在为一个不存在的实时性付复杂度。
 * api 服务是**单 worker 单事件循环**（见 `upstream.py` 的说明）。SSE 会把一条
   连接连同它的心跳长期挂在唯一的事件循环上；外部节点重连一次泄漏一条，
   是个没有上限的资源占用点，而它的收益是「少发几次 GET」。
@@ -49,12 +48,11 @@
 
 提交/轮询之外的三条边界
 ------------------------
-* **不实现取消（本版）。** 五种取消是三种不同形状，回测那种还**不可能**实现：
+* **不实现取消（本版）。** 各家的取消形状互不相同，回测那种还**不可能**实现：
   它的取消键是 Celery `task_id`，而轮询键是 `backtest_id`，两者之间上游没有
   映射端点——提交响应里两个 id 都给，但状态响应里没有 `task_id`，所以拿到
-  `ref` 之后无法推出该停哪个。更重要的是 TradingAgents 的取消是**尽力而为**的
-  daemon 线程（stop 只返回一句话，连状态都不给）。一条「点了取消但其实还在跑」
-  的接口比没有取消更糟：调用方会据此认为资源已释放。宁可如实缺席。
+  `ref` 之后无法推出该停哪个。一条「点了取消但其实还在跑」的接口比没有取消
+  更糟：调用方会据此认为资源已释放。宁可如实缺席。
 * **不返回结果体。** 五种结果五种形状，塞进一个端点等于把刚归一掉的信封差异
   从「状态」挪到「结果」。本轮只给 `result_available` 这个布尔，取结果走
   各自的数据面端点（下一批）。
@@ -143,10 +141,9 @@ def normalize_status(raw: Any) -> str:
 KIND_TRAINING = "training"
 KIND_BACKTEST = "backtest"
 KIND_ALPHA_EVOLVE = "alpha_evolve"
-KIND_TRADING_AGENTS = "trading_agents"
 KIND_DATA_SYNC = "data_sync"
 
-TaskKind = Literal["training", "backtest", "alpha_evolve", "trading_agents", "data_sync"]
+TaskKind = Literal["training", "backtest", "alpha_evolve", "data_sync"]
 
 #: 对外市场词表。**与交易面 `SimOrderRequest.market` 同一套**——外部节点
 #: 只该学一套市场写法。上游内部另有两套（同步码 `A/BC`、适配器 id
@@ -212,16 +209,11 @@ class TaskStatusResponse(BaseModel):
         le=100,
         description=(
             "0-100。**null 表示上游根本没有这个量**，不要当 0 处理。"
-            "回测只会上报 0 或 100；TradingAgents 恒为 null。"
+            "回测只会上报 0 或 100。"
         ),
     )
-    stage: str | None = Field(None, description="当前阶段标识（仅 TradingAgents 提供）")
-    stages_completed: int | None = Field(
-        None,
-        description=(
-            "已完成阶段数（仅 TradingAgents）。**没有总数**——上游的阶段表"
-            "不在响应里，本面不写死一个会在加阶段后过期的常量。"
-        ),
+    stage: str | None = Field(
+        None, description="当前阶段标识（目前仅因子演化提供 `phase`）"
     )
     error: str | None = None
     result_available: bool = Field(
@@ -330,19 +322,6 @@ class AlphaEvolveSubmit(BaseModel):
     data_source: str = Field("", description="数据源；留空用默认")
 
 
-class TradingAgentsSubmit(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ticker: str = Field(..., min_length=1, max_length=32, description="标的代码")
-    trade_date: str | None = Field(
-        None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="分析基准日；留空用最近交易日"
-    )
-    market: Market | None = Field(None, description="市场（对外词表）")
-    llm_provider: str | None = None
-    deep_think_llm: str | None = None
-    quick_think_llm: str | None = None
-
-
 class DataSyncSubmit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -353,10 +332,9 @@ class DataSyncSubmit(BaseModel):
 # 上游响应薄模型
 # ---------------------------------------------------------------------------
 #
-# `extra="ignore"`：上游响应里有大字段（训练的 `logs` 最多 600 行合并文本、
-# TradingAgents 的 `stage_reports` 是几份完整 LLM 报告）。它们**必须**
-# 不被解析进来——api 服务是单进程，让一个轮询端点把几 MB 的报告搬进内存
-# 再丢掉，是把内存和延迟花在没人要的数据上。
+# `extra="ignore"`：上游响应里有大字段（训练的 `logs` 最多 600 行合并文本）。
+# 它们**必须**不被解析进来——api 服务是单进程，让一个轮询端点把几 MB 的文本
+# 搬进内存再丢掉，是把内存和延迟花在没人要的数据上。
 
 
 class _TrainingRun(BaseModel):
@@ -404,24 +382,8 @@ class _AlphaTask(BaseModel):
     result: Any = None
 
 
-class _TradingAgentsProgress(BaseModel):
-    """`GET /api/v1/trading-agents/progress/{id}` 的 `data`。
-
-    进度要靠两个布尔推：上游**没有**百分比字段。`stage_reports` 被
-    `extra="ignore"` 挡在门外（几份完整报告）。
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    is_running: bool = False
-    is_complete: bool = False
-    error: str | None = None
-    current_stage: str | None = None
-    completed_stages: list[str] = Field(default_factory=list)
-
-
 class _UpstreamEnvelope(BaseModel):
-    """`alpha-agent` 与 `trading-agents` 共用的 `{code, data}` 信封。"""
+    """`alpha-agent` 的 `{code, data}` 信封。"""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -558,40 +520,6 @@ async def _submit_alpha_evolve(
     )
 
 
-async def _submit_trading_agents(
-    principal: ExternalPrincipal, body: dict[str, Any]
-) -> TaskSubmitResponse:
-    # 上游的 `market` 走它自己的适配器/市场词表；本面收到的是对外词表，
-    # 归一后再交给上游（`normalize_market_key` 是唯一归一实现）。
-    payload = dict(body)
-    if payload.get("market"):
-        payload["market"] = _normalize_market(payload["market"])
-    raw = await fetch_json(
-        "engine",
-        "POST",
-        "/api/v1/trading-agents/analyze",
-        principal=principal,
-        json_body=payload,
-        timeout=WRITE_TIMEOUT_SECONDS,
-    )
-    data = _unwrap_alpha(raw)
-    analysis_id = data.get("analysis_id")
-    if not analysis_id:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="upstream_contract_changed"
-        )
-    return TaskSubmitResponse(
-        kind=KIND_TRADING_AGENTS,
-        ref=str(analysis_id),
-        status=STATUS_QUEUED,
-        upstream_status=None,  # 上游受理响应里没有状态字段
-        pollable=True,
-        note=(
-            "分析在上游的守护线程里跑。取消了也无法验证，故本版不提供取消。"
-        ),
-    )
-
-
 async def _submit_data_sync(
     principal: ExternalPrincipal, body: dict[str, Any]
 ) -> TaskSubmitResponse:
@@ -639,7 +567,6 @@ _SUBMITTERS = {
     KIND_TRAINING: (_submit_training, TrainingSubmit),
     KIND_BACKTEST: (_submit_backtest, BacktestSubmit),
     KIND_ALPHA_EVOLVE: (_submit_alpha_evolve, AlphaEvolveSubmit),
-    KIND_TRADING_AGENTS: (_submit_trading_agents, TradingAgentsSubmit),
     KIND_DATA_SYNC: (_submit_data_sync, DataSyncSubmit),
 }
 
@@ -722,46 +649,10 @@ async def _poll_alpha_evolve(
     )
 
 
-async def _poll_trading_agents(
-    principal: ExternalPrincipal, ref: str
-) -> TaskStatusResponse:
-    raw = await fetch_json(
-        "engine",
-        "GET",
-        f"/api/v1/trading-agents/progress/{ref}",
-        principal=principal,
-        model=_UpstreamEnvelope,
-    )
-    data = _TradingAgentsProgress.model_validate(raw.data or {})
-    error = (data.error or "").strip()
-    if error:
-        normalized = STATUS_FAILED
-    elif data.is_complete:
-        normalized = STATUS_SUCCEEDED
-    elif data.is_running:
-        normalized = STATUS_RUNNING
-    else:
-        # 既没在跑也还没完成：上游的 tracker 刚建好，线程尚未起步。
-        normalized = STATUS_QUEUED
-    return TaskStatusResponse(
-        kind=KIND_TRADING_AGENTS,
-        ref=ref,
-        status=normalized,
-        upstream_status=None,  # 上游没有状态字段，只有这两个布尔
-        # 上游**没有**百分比。不拿 completed_stages/12 去凑一个：那个 12 会过期。
-        progress_pct=None,
-        stage=data.current_stage or None,
-        stages_completed=len(data.completed_stages),
-        error=error or None,
-        result_available=normalized == STATUS_SUCCEEDED,
-    )
-
-
 _POLLERS = {
     KIND_TRAINING: _poll_training,
     KIND_BACKTEST: _poll_backtest,
     KIND_ALPHA_EVOLVE: _poll_alpha_evolve,
-    KIND_TRADING_AGENTS: _poll_trading_agents,
 }
 
 
@@ -804,17 +695,6 @@ def _unwrap_alpha(raw: Any) -> dict[str, Any]:
     )
 
 
-def _normalize_market(raw: str) -> str:
-    """对外市场词表内的值 → 归一市场键。
-
-    对外词表本身就是规范化之后的值，所以这里几乎总是恒等；留着是因为
-    上游要的是归一键，而**归一实现只该有一份**（`shared/market_sessions`）。
-    """
-    from backend.shared.market_sessions import normalize_market_key
-
-    return normalize_market_key(raw)
-
-
 def _to_sync_market(market: str) -> str:
     """对外市场词表 → 上游的**同步码**（`CN`→`A`、`CRYPTO`→`BC`）。
 
@@ -840,7 +720,7 @@ async def list_kinds(
 ) -> KindsResponse:
     """本部署支持哪些任务种类、各自的入参 schema。
 
-    **先问再做**：上游五个端点的入参形状互不相同，让调用方靠文档猜，猜错的
+    **先问再做**：上游四个端点的入参形状互不相同，让调用方靠文档猜，猜错的
     代价是「提交成功但跑的不是我想的配置」。schema 由服务端校验用的模型直接
     生成，所以不会与实现漂开。
     """
@@ -876,16 +756,6 @@ async def list_kinds(
                 notes=[
                     "上游同时限流：每用户 >2 个并发或全局 >4 个会 429。",
                     "未配置 LLM 密钥时上游返回 412。",
-                ],
-            ),
-            KindInfo(
-                kind=KIND_TRADING_AGENTS,
-                description="多 Agent 投研分析（7 分析师 + 辩论 + 风控）",
-                pollable=True,
-                request=TradingAgentsSubmit.model_json_schema(),
-                notes=[
-                    "上游不提供百分比进度，progress_pct 恒为 null；"
-                    "用 stage + stages_completed 判断进展。",
                 ],
             ),
             KindInfo(
@@ -989,7 +859,6 @@ __all__ = [
     "KIND_ALPHA_EVOLVE",
     "KIND_BACKTEST",
     "KIND_DATA_SYNC",
-    "KIND_TRADING_AGENTS",
     "KIND_TRAINING",
     "STATUS_CANCELLED",
     "STATUS_FAILED",

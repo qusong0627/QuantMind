@@ -85,7 +85,6 @@ AGENTS.md
 models/
 alphaagent/
 go-stock/
-TradingAgents-astock/
 dexter-finance/
 tools/
 openbb-cn/

@@ -1,7 +1,7 @@
 """对外任务面（`external/task.py`）。
 
 这一面存在的理由是**归一**，所以这个文件测的也主要是归一：
-上游五种任务的状态/进度/入参形状各不相同，外部节点只该看到一种。
+上游四种任务的状态/进度/入参形状各不相同，外部节点只该看到一种。
 
 钉住四类东西：
 
@@ -9,7 +9,7 @@
    猜错的代价是调用方对一个已失败的任务继续等。
 2. **进度取的是哪个字段**——这里最容易静默出错：alpha-agent 的响应里
    `progress` 是**字符串**短语、`progress_pct` 才是 int；拿错了不报错，
-   只是永远得到 0。TradingAgents 则**没有**百分比，必须是 None 而不是 0
+   只是永远得到 0。没有这个量的上游必须是 None 而不是 0
    （0 的语义是「刚开始」，与「没有这个量」是两回事）。
 3. **入参翻译**——对外一套市场词表，上游两套（同步码 `A/BC`、适配器
    `a_share/crypto`）。翻译表要与上游实际的注册表对得上，否则调用方会收到
@@ -41,7 +41,6 @@ ACCESS_KEY = "qm_live_tasktest0001"
 REF_TRAINING = "train_20260923143012_ab12cd34"
 REF_BACKTEST = "3f9a1c0d5e7b24689a0b1c2d3e4f5a6b"
 REF_ALPHA = "0b6d2f4a7c314e58"
-REF_ANALYSIS = "a1b2c3d4"
 
 
 @pytest.fixture(autouse=True)
@@ -251,80 +250,6 @@ def test_alpha_progress_takes_pct_field_not_the_string_one(
     assert body["stage"] == "factor_mining"
 
 
-def test_trading_agents_progress_is_null_not_zero(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, auth_headers: dict
-) -> None:
-    """TradingAgents **没有**百分比。必须是 null。
-
-    特别地：不许拿 `completed_stages / 12` 凑一个出来——那个 12 是上游阶段表的
-    长度，加一个阶段就过期，而它过期的方式是**悄悄地偏小**。
-    """
-    _install(
-        monkeypatch,
-        {
-            ("GET", f"/api/v1/trading-agents/progress/{REF_ANALYSIS}"): {
-                "code": 200,
-                "data": {
-                    "ticker": "600036",
-                    "is_running": True,
-                    "is_complete": False,
-                    "current_stage": "debate",
-                    "completed_stages": ["market", "social", "news"],
-                    "stage_reports": {"market_report": "x" * 100000},
-                },
-            }
-        },
-    )
-    body = client.get(
-        f"/api/ext/v1/task/trading_agents/{REF_ANALYSIS}", headers=auth_headers
-    ).json()
-    assert body["progress_pct"] is None
-    assert body["stage"] == "debate"
-    assert body["stages_completed"] == 3
-    assert body["status"] == task_plane.STATUS_RUNNING
-
-
-@pytest.mark.parametrize(
-    "payload,expected",
-    [
-        # 两个布尔推出状态（上游没有状态字段）
-        ({"is_running": True, "is_complete": False}, task_plane.STATUS_RUNNING),
-        ({"is_running": False, "is_complete": True}, task_plane.STATUS_SUCCEEDED),
-        ({"is_running": False, "is_complete": False}, task_plane.STATUS_QUEUED),
-        # error 压过一切：上游可能同时留着 is_complete 与 error
-        (
-            {"is_running": False, "is_complete": True, "error": "LLM 超时"},
-            task_plane.STATUS_FAILED,
-        ),
-        # 只有空白的 error 不算错误
-        (
-            {"is_running": True, "is_complete": False, "error": "   "},
-            task_plane.STATUS_RUNNING,
-        ),
-    ],
-)
-def test_trading_agents_status_derived_from_booleans(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    auth_headers: dict,
-    payload: dict,
-    expected: str,
-) -> None:
-    _install(
-        monkeypatch,
-        {
-            ("GET", f"/api/v1/trading-agents/progress/{REF_ANALYSIS}"): {
-                "code": 200,
-                "data": payload,
-            }
-        },
-    )
-    body = client.get(
-        f"/api/ext/v1/task/trading_agents/{REF_ANALYSIS}", headers=auth_headers
-    ).json()
-    assert body["status"] == expected
-
-
 def test_training_error_is_read_from_result_error(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, auth_headers: dict
 ) -> None:
@@ -520,14 +445,6 @@ def test_data_sync_uses_upstream_sync_codes(
     这里手抄一份就会在被改时静默漂开。
     """
     assert task_plane._to_sync_market(external) == sync_code
-
-
-def test_normalize_market_delegates_to_the_single_source() -> None:
-    """归一实现只该有一份（`shared/market_sessions`）。"""
-    from backend.shared.market_sessions import normalize_market_key
-
-    assert task_plane._normalize_market("CN") == normalize_market_key("CN")
-    assert task_plane._normalize_market("US") == "US"
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +645,6 @@ def test_kinds_publishes_every_kind_with_a_schema(
         task_plane.KIND_TRAINING,
         task_plane.KIND_BACKTEST,
         task_plane.KIND_ALPHA_EVOLVE,
-        task_plane.KIND_TRADING_AGENTS,
         task_plane.KIND_DATA_SYNC,
     }
     for name, info in kinds.items():
@@ -768,16 +684,16 @@ def test_kinds_status_vocabulary_matches_the_mapping_table(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("ref", [REF_TRAINING, REF_BACKTEST, REF_ALPHA, REF_ANALYSIS])
+@pytest.mark.parametrize("ref", [REF_TRAINING, REF_BACKTEST, REF_ALPHA])
 def test_ref_shapes_survive_the_gate_pattern(
     ref: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """四种真实的上游 id 形状都必须过得了闸门的「未登记即拒绝」模式表。
+    """三种真实的上游 id 形状都必须过得了闸门的「未登记即拒绝」模式表。
 
-    上游的 id 有三四种不同形状（`train_..._hex8`、`uuid4().hex`、
-    `uuid4().hex[:16]`、`str(uuid4())[:8]`）。模式表把 `{ref}` 位放宽到
-    `[A-Za-z0-9_.-]+` 就是为了这个——但放宽后**仍然**不许出现 `/`。
-    这条用例拿真实形状去跑判定，避免模式表被收窄成只认其中一种。
+    上游的 id 有三种不同形状（`train_..._hex8`、`uuid4().hex`、
+    `uuid4().hex[:16]`）。模式表把 `{ref}` 位放宽到 `[A-Za-z0-9_.-]+`
+    就是为了这个——但放宽后**仍然**不许出现 `/`。这条用例拿真实形状去跑
+    判定，避免模式表被收窄成只认其中一种。
     """
     monkeypatch.setenv(gate.ENV_KEY, "false")
     assert gate.is_blocked("GET", f"{gate.EXT_API}/task/training/{ref}") is False

@@ -325,22 +325,22 @@ curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/trading-agents/files/move" \
 curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/trading-agents/files/delete-folder" -d '{"folder":"重点观察"}'
 ```
 
-## 十、可选的容器投研管线（备用模式）
+## 十、容器投研管线（已退役，2026-10-09）
 
-> 平台还有一条**容器内 TradingAgents 管线**（7 AI 分析师 → 质量门控 → 多空辩论 → 风控 → 最终决策），但**依赖容器内 LLM Key 配置**（minimax/openai 等），Key 没配好会 401。
-> 管线可正常运行时，分析完成**自动导出** md+PDF（后端 report_exporter.py 已内置）。
+> ⚠️ **该管线已完整退役**：`TradingAgents-astock` 包、`/analyze`、
+> `/progress`、`/report`、`/stop` 端点与外部任务面的 `trading_agents`
+> 任务类型均已删除（容器挂载与 PYTHONPATH 也已移除）。本节仅作方法论存档——
+> 那条 12 阶段流程（7 分析师 → 质量门控 → 多空辩论 → 风控 → 最终决策）
+> 仍可参考 `references/pipeline-mode.md`，但**不要再调用这些端点**。
+> 投研分析一律走**自主模式**（本技能第 2~8 节）：任何大模型都能跑，
+> 不依赖容器内 LLM Key 配置。
+>
+> 历史实现可从 git 找回：`git show bb1b38a0:TradingAgents-astock/...`
+> （commit `bb1b38a0` 是删除前的最后版本）。
 
-```bash
-curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/trading-agents/analyze" \
-  -d '{"ticker":"600519","trade_date":"2026-08-15","market":"CN"}'
-# → analysis_id，然后循环:
-curl -s -H "$AUTH" "$BASE/api/v1/trading-agents/progress/{analysis_id}"   # 直到 is_complete
-curl -s -H "$AUTH" "$BASE/api/v1/trading-agents/report/{analysis_id}"     # 拿 stage_reports
-```
-
-**智能体选择模式**：
-- 默认用**自主模式**（本技能第 2~8 节）—— 任何大模型都能跑，不依赖管线 Key
-- 管线 Key 可用且用户明确要"7 分析师全管线"时，用备用模式，取 stage_reports 后仍按本技能第 6 节版式组装 md + 导出 PDF
+**仅存的文件面**（报告档案管理，仍可用）：`$BASE/api/v1/trading-agents/files/*`
+（list / upload / pdf / move / delete / delete-folder / create-folder）——
+自主模式生成的 md+PDF 用第 9 节的端点归档，不受退役影响。
 
 ## 十一、相关技能
 

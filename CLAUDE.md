@@ -75,10 +75,10 @@ npm run dashboard:build  # 生产环境构建
   - **QuantDB 远程适配器**：`adapters/quantdb_adapter.py` - 远程 SDK 实时查询（兜底）
   - **Qlib 数据构建器**：`qlib_data_builder.py` - 由 QuantDB parquet 生成 Qlib 二进制缓存（派生产物）
   - **字段路由**：`config/data_sources/field_routing.yaml` - quantdb_local 优先，旧适配器兜底
-- **TradingAgents**：`backend/services/engine/trading_agents/` - 多 Agent A 股投研框架（7 个 AI 分析师、辩论、风险评估）
-  - `runner.py` - TradingAgentsGraph 管线的后台线程运行器
-  - `progress.py` - 线程安全的进度跟踪器（12 阶段）
-  - `routers/trading_agents.py` - REST API（analyze、progress、report、history、download）
+- **投研分析（自主模式）**：`skills/trading-agents/` - 智能体自主版个股深度投研（拉本地数据 → 子代理辩论 → md/PDF 报告落「股票报告」档案）
+  - 容器投研管线（`TradingAgents-astock` 包 + `/analyze`、`/progress`、`/report`、`/stop`）已于 **2026-10-09 完整退役**；历史实现见 `git show bb1b38a0:TradingAgents-astock/`
+  - `backend/services/engine/trading_agents/progress.py` - 进度跟踪器（报告导出复用的阶段表）
+  - `backend/services/engine/routers/trading_agents.py` - 仅存报告档案文件面（files/list、upload、pdf、move、delete）
 - **数据管线**：`backend/scripts/` - 统一的每日数据同步
   - `quantdb_daily_sync.py` - 主同步链路：sync_dataset() → parquet → PG 回填 → Qlib 缓存
   - `daily_data_sync.py` - 全量同步：QuantDB parquet → baostock → akshare → eltdx → PG → Qlib 缓存 → 指标 → parquet
@@ -159,9 +159,8 @@ Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运�
 - `backend/services/engine/rd_agent/market_adapters/` - 市场适配器注册表（a_share、crypto、hong_kong、us_stock）
 - `backend/services/engine/rd_agent/rd_loop_wrapper.py` - 桥接 RD-Agent 与 QuantMind 的 RDLoop 封装
 - `backend/services/engine/routers/alpha_agent.py` - Alpha Agent API（含 /markets、带 market 参数的 /evolve）
-- `backend/services/engine/routers/trading_agents.py` - TradingAgents REST API（analyze、progress、report、history）
-- `backend/services/engine/trading_agents/runner.py` - TradingAgents 后台线程运行器
-- `backend/services/engine/trading_agents/progress.py` - TradingAgents 进度跟踪器（12 阶段）
+- `backend/services/engine/routers/trading_agents.py` - 投研报告档案文件面（报告列表/上传/PDF/移动/删除；执行面端点已退役）
+- `backend/services/engine/trading_agents/progress.py` - 投研进度跟踪器（阶段表；报告导出复用）
 - `scripts/alpha_agent/run_rd_agent.py` - RD-Agent 多市场运行脚本（子进程入口）
 - `backend/services/engine/data_platform/` - 多市场数据平台
 - `backend/services/engine/data_platform/quantdb_hub.py` - QuantDB 数据中枢（A 股 parquet 读取统一入口）
@@ -174,7 +173,7 @@ Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运�
 - `backend/services/api/routers/admin/data_platform.py` - 数据平台管理端点（同步、parquet、健康）
 - `backend/services/api/routers/news.py` - 新闻代理路由
 - `backend/services/api/routers/market_kline.py` - K 线行情路由
-- `electron/src/features/trading-agents/` - TradingAgents 前端模块（页面、组件、服务）
+- `electron/src/features/trading-agents/pages/ReportManagerPage.tsx` - 报告档案管理页（QuantBot ReportsModal 复用；执行面页面已退役）
 - `backend/services/api/routers/model_rolling.py` + `rolling_shared.py` - 滚动训练用户态端点（JWT `/api/v1/models/rolling/*`：recipes/campaigns/schedule/dispatch/derive；调度校验与内部端点共享 `apply_schedule_update` 一份实现，前端不持内部密钥）
 - `backend/shared/training/model_recipe.py` - 模型→滚动配方派生（读模型目录 `metadata.json`+`config.yaml`；云端导入模型同路径可用；缺因子源/特征/可训练模型类型即拒派生；`deploy_to_production` 恒 False、`auto_feature_filter` 恒关）
 - `backend/shared/training/recipe_registry.py` - 滚动配方注册表（内建 + 用户配方目录 `QM_ROLLING_RECIPE_DIR`〔默认 `/data/rolling_recipes`〕双源装载；`save_user_recipe` 原子落盘、内容未变幂等）

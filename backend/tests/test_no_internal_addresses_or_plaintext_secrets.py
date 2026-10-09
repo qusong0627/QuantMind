@@ -117,7 +117,7 @@ _SKIP_DIR_PARTS = {
     # 本地运行数据与计划文档：`.gitignore` 覆盖，从不入库
     "local",
     # vendored 上游：与本仓的出厂配置无关，改动会被下次同步冲掉
-    "rd-agent", "TradingAgents-astock", "minibt", "alphaagent",
+    "rd-agent", "minibt", "alphaagent",
     # 运行期日志（`logs/`、`backend/logs/`）：内容是**运行时输出**，不是出厂文本——
     # 里面天然会有密钥指纹、access_key 前缀、内网地址（一次排查就能写进去）。
     # `.gitignore` + `.dockerignore:50` 都排除，从未入库。
