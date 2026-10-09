@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -58,6 +59,78 @@ def _task_store():
     return get_mining_task_store()
 
 
+#: 任务日志根：每任务一个子目录（subprocess_stdout.log + task_state.json +
+#: RD-Agent 工作区）。默认 /data——容器重建不丢（T-FM-20）；历史本体另在
+#: PG `rd_agent_mining_tasks`，日志只是排障补充。主机直跑等 /data 不可写的
+#: 场景用 LOG_TRACE_PATH 显式指到可写目录（旧默认即 /tmp/alpha_agent_logs）。
+DEFAULT_LOG_DIR = "/data/alpha_agent_logs"
+
+#: 终态任务日志目录的留存线（天）：engine 启动时由 :func:`gc_task_logs` 执行。
+ENV_LOG_RETENTION_DAYS = "LOG_TRACE_RETENTION_DAYS"
+DEFAULT_LOG_RETENTION_DAYS = 90
+
+#: 可被 GC 的 task_state.json status 原文；认不出的状态与非终态一律不动。
+_GC_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _resolve_log_dir() -> Path:
+    return Path(os.getenv("LOG_TRACE_PATH", DEFAULT_LOG_DIR))
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s=%r 不是整数，按默认 %d 处理", name, raw, default)
+        return default
+
+
+def gc_task_logs(
+    log_dir: Path | None = None, *, retention_days: int | None = None
+) -> dict[str, int]:
+    """任务日志留存 GC：清理终态且超龄的任务目录，返回 ``{"scanned", "pruned"}``。
+
+    只认「``<log_dir>/<task_id>/task_state.json`` 可解析 + status 是终态 +
+    状态文件 mtime 早于留存线」的目录；任何一条不满足就原样保留——认不出的
+    东西不动（框架自身往根下写的 ``__session__`` 之类天然免疫）。历史本体在
+    PG ``rd_agent_mining_tasks``，清掉的是排障日志，清后「查看日志」读不到
+    属预期留存语义。``retention_days`` 缺省读 env，0 = 下次启动清空终态。
+    """
+    root = Path(log_dir) if log_dir is not None else _resolve_log_dir()
+    if retention_days is None:
+        retention_days = _env_int(ENV_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS)
+    cutoff = time.time() - max(0, int(retention_days)) * 86400
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return {"scanned": 0, "pruned": 0}
+    scanned = 0
+    pruned = 0
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        scanned += 1
+        state_file = entry / "task_state.json"
+        try:
+            with open(state_file) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if str(data.get("status", "")) not in _GC_TERMINAL_STATUSES:
+            continue
+        try:
+            if state_file.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        pruned += 1
+    return {"scanned": scanned, "pruned": pruned}
+
+
 @dataclass
 class EvolutionTask:
     task_id: str
@@ -92,7 +165,7 @@ class AlphaAgentLauncher:
 
     def __init__(self) -> None:
         self._tasks: dict[str, EvolutionTask] = {}
-        self._log_dir = Path(os.getenv("LOG_TRACE_PATH", "/tmp/alpha_agent_logs"))
+        self._log_dir = _resolve_log_dir()
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._load_tasks()
 

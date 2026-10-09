@@ -371,6 +371,10 @@ services:
       # 需重建 quantmind-web）与 ENGINE_PROXY_MAX_BODY_MB，否则外层先 413。
       - RD_AGENT_DOC_MAX_TOTAL_MB=${RD_AGENT_DOC_MAX_TOTAL_MB:-200}
       - ENGINE_PROXY_MAX_BODY_MB=${ENGINE_PROXY_MAX_BODY_MB:-210}
+      # 挖掘任务日志根：每任务一子目录（stdout/状态/RD-Agent 工作区），/data
+      # 持久化——容器重建不丢；终态目录留存 GC 在 engine 启动时执行。
+      - LOG_TRACE_PATH=${LOG_TRACE_PATH:-/data/alpha_agent_logs}
+      - LOG_TRACE_RETENTION_DAYS=${LOG_TRACE_RETENTION_DAYS:-90}
 
       # 市值单位配置：数据库存储单位为元，1亿=100,000,000
       - AI_STRATEGY_TOTAL_MV_PER_YI=100000000.0

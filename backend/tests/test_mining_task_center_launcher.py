@@ -13,6 +13,8 @@ launcher 是任务的唯一生产者，本文件锁它与 ``rd_agent_mining_task
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -244,3 +246,96 @@ async def test_start_evolution_records_direction_and_source(monkeypatch) -> None
     assert kind == "create" and kwargs["task_id"] == task_id
     assert kwargs["direction"] == "动量 × 波动率"
     assert kwargs["source"] == "doc" and kwargs["doc_id"] == "doc-9"
+
+
+# ── 任务日志根与留存 GC（T-FM-20）────────────────────────────────────
+#
+# 日志根默认 /data（容器重建不丢）；启动期 GC 只清「状态文件可解析 + 终态 +
+# 超龄」目录——认不出的东西（框架 __session__、写坏的 json、非终态）一律不动。
+# 真删错的代价是排障日志没了，所以闸门全部按最保守方向设计，本组测试逐条钉死。
+
+
+def _mk_task_dir(root: Path, name: str, *, status: str | None, age_days: float) -> Path:
+    """造一个任务目录：state 文件 + 把 mtime 拨老 age_days 天。
+
+    status=None 表示不写 task_state.json（模拟非任务目录）。
+    """
+    task_dir = root / name
+    task_dir.mkdir()
+    if status is not None:
+        state_file = task_dir / "task_state.json"
+        state_file.write_text(
+            json.dumps({"task_id": name, "status": status}), encoding="utf-8"
+        )
+        old = time.time() - age_days * 86400
+        os.utime(state_file, (old, old))
+    return task_dir
+
+
+def test_gc_task_logs_prunes_only_aged_terminal_dirs(tmp_path: Path) -> None:
+    _mk_task_dir(tmp_path, "t-completed-old", status="completed", age_days=100)
+    _mk_task_dir(tmp_path, "t-failed-old", status="failed", age_days=100)
+    _mk_task_dir(tmp_path, "t-completed-fresh", status="completed", age_days=1)
+    _mk_task_dir(tmp_path, "t-running-old", status="running", age_days=100)
+    _mk_task_dir(tmp_path, "t-pending-old", status="pending", age_days=100)
+    _mk_task_dir(tmp_path, "t-future-status", status="reborn", age_days=100)
+    _mk_task_dir(tmp_path, "t-no-state", status=None, age_days=100)
+    garbage = tmp_path / "t-garbage"
+    garbage.mkdir()
+    (garbage / "task_state.json").write_text("{not json", encoding="utf-8")
+
+    # 显式留存线：不赌环境里 LOG_TRACE_RETENTION_DAYS 的默认值（环境无关）
+    out = launcher_module.gc_task_logs(tmp_path, retention_days=90)
+
+    assert out == {"scanned": 8, "pruned": 2}
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "t-completed-fresh",
+        "t-future-status",
+        "t-garbage",
+        "t-no-state",
+        "t-pending-old",
+        "t-running-old",
+    ]
+
+
+def test_gc_task_logs_missing_root_is_zero(tmp_path: Path) -> None:
+    assert launcher_module.gc_task_logs(tmp_path / "nope") == {
+        "scanned": 0,
+        "pruned": 0,
+    }
+
+
+def test_gc_task_logs_retention_env_and_param(tmp_path: Path, monkeypatch) -> None:
+    _mk_task_dir(tmp_path, "t-40d", status="completed", age_days=40)
+
+    # env 留存 30 天：40 天前的该清
+    monkeypatch.setenv("LOG_TRACE_RETENTION_DAYS", "30")
+    assert launcher_module.gc_task_logs(tmp_path)["pruned"] == 1
+
+    # 显式参数优先于 env：留存 60 天 → 40 天前的保住
+    _mk_task_dir(tmp_path, "t-40d-b", status="completed", age_days=40)
+    assert launcher_module.gc_task_logs(tmp_path, retention_days=60)["pruned"] == 0
+
+    # env 非整数回落默认 90：40 天前的保住（不因配置写错而提前删）
+    monkeypatch.setenv("LOG_TRACE_RETENTION_DAYS", "abc")
+    _mk_task_dir(tmp_path, "t-40d-c", status="completed", age_days=40)
+    assert launcher_module.gc_task_logs(tmp_path)["pruned"] == 0
+
+
+def test_resolve_log_dir_defaults_to_data_and_env_wins(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("LOG_TRACE_PATH", raising=False)
+    assert launcher_module._resolve_log_dir() == Path("/data/alpha_agent_logs")
+    monkeypatch.setenv("LOG_TRACE_PATH", str(tmp_path / "logs"))
+    assert launcher_module._resolve_log_dir() == tmp_path / "logs"
+
+
+def test_launcher_init_uses_resolved_log_dir(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_TRACE_PATH", str(tmp_path / "logs"))
+
+    launcher = AlphaAgentLauncher()
+
+    assert launcher._log_dir == tmp_path / "logs"
+    assert launcher._log_dir.is_dir()
+    assert launcher._tasks == {}

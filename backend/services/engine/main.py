@@ -120,6 +120,21 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Doc center ensure/resume failed: {e} (non-fatal)")
 
     try:
+        # 挖掘任务日志 GC（T-FM-20）：日志根在 /data（LOG_TRACE_PATH，容器重建不丢），
+        # 终态任务目录超留存线（LOG_TRACE_RETENTION_DAYS，默认 90 天）在此清。
+        # 历史本体在 rd_agent_mining_tasks，清日志不影响任何记录。
+        from backend.services.engine.alpha_agent.launcher import gc_task_logs
+
+        _gc_logs = gc_task_logs()
+        logger.info(
+            "✅ Alpha task log GC: pruned=%d scanned=%d",
+            _gc_logs["pruned"],
+            _gc_logs["scanned"],
+        )
+    except Exception as e:
+        logger.warning(f"Alpha task log GC failed: {e} (non-fatal)")
+
+    try:
         from backend.shared.model_registry import model_registry_service
 
         await model_registry_service.ensure_tables()
