@@ -23,6 +23,44 @@ logger = logging.getLogger(__name__)
 
 SERIES_KEY_PREFIX = "market:series:"
 
+# series 成员 volume 为**手**（写侧契约：tdx_hot_set_feed/qmt_quote_backup 均为手口径），
+# 下游日频核按**股**做整手取整（capacity // lot_size * lot_size，lot=100 股）。
+SERIES_VOLUME_UNIT_SHARES = 100
+
+
+def recent_traded_shares(window_rows: list[tuple[Any, Any]]) -> float | None:
+    """窗口内**同源**累计成交量差（股）；不可验证一律 None，绝不返回 0 冒充「无流动性」。
+
+    2026-10-09 事故（决策轮买单全拒 ``insufficient_realtime_liquidity``，日频核容量为 0）
+    暴露的三个口径缺陷：
+    * **单位**：series volume 为手，日频核按股取整——手当股再缩 100 倍，常态归零；
+    * **跨源**：热集席（tdx_bridge）与 QMT 备源（qmt_big）交替写同一键，两源累计量
+      刷新不同频、可先后倒挂（实测 qmt 36546 → tdx 36436），混合相减出负数被钳 0；
+    * **粒度**：TDX 快照量按批刷新（实测整分钟平值），同源差 0 不代表「无成交」。
+    ⇒ 只取**最新成员同源**的成员求差；同源 <2 个、或差 ≤0 一律 None（走
+    ``SIM_LIQUIDITY_UNVERIFIED_MAX_NOTIONAL`` 兜底，>10 万拒、小额放行）；
+    正常差值 ×100 归一为股，与下游整手取整同一坐标系。
+    """
+    pairs: list[tuple[str, float]] = []
+    for raw_member, _raw_score in window_rows:
+        try:
+            payload = json.loads(raw_member)
+            volume = float(payload.get("volume"))
+            if volume >= 0:
+                pairs.append((str(payload.get("source") or ""), volume))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if len(pairs) < 2:
+        return None
+    last_source = pairs[-1][0]
+    same_source = [volume for source, volume in pairs if source == last_source]
+    if len(same_source) < 2:
+        return None
+    delta = same_source[-1] - same_source[0]
+    if delta <= 0:
+        return None
+    return delta * SERIES_VOLUME_UNIT_SHARES
+
 
 def _env() -> tuple[str, int, str | None, int] | None:
     """远端行情连接参数；配置关闭/主机为空时返回 None（本级别取价禁用）。
@@ -181,6 +219,10 @@ async def fetch_series_ticks(
     整批漏掉「stale 但策略判定可用」的合法 tick（而单只取价正常返回），决策轮
     买单因此全拒「无法获取实时行情，模拟单拒绝成交」。硬窗不能顶着**快照/帧
     节拍**的下限设——节拍一变，窗就变成静默的取价门禁。
+
+    ``recent_volume`` 口径见 :func:`recent_traded_shares`：**股**（手×100 归一）、
+    仅同源成员求差、不可验证为 None（None 在撮合核是「量能未知，10 万内放行」，
+    0 是「容量 0，硬拒」——语义混淆即毒源）。
     """
     policy = policy or quote_policy()
     try:
@@ -220,17 +262,6 @@ async def fetch_series_ticks(
         tick = parse_series_member(member, float(score), now_ts, policy)
         if tick is None:
             continue
-        volumes: list[float] = []
-        for raw_member, _raw_score in window_rows:
-            try:
-                payload = json.loads(raw_member)
-                volume = float(payload.get("volume"))
-                if volume >= 0:
-                    volumes.append(volume)
-            except (TypeError, ValueError, KeyError):
-                continue
-        tick["recent_volume"] = (
-            max(0.0, volumes[-1] - volumes[0]) if len(volumes) >= 2 else None
-        )
+        tick["recent_volume"] = recent_traded_shares(window_rows)
         result[symbol] = tick
     return result

@@ -110,6 +110,8 @@ class MarketSnapshot:
     price_source: str
     quote_timestamp: int | None = None
     quote_age_seconds: float | None = None
+    # 窗口内成交量（**股**；redis_series 侧手口径 ×100 归一，见 recent_traded_shares）；
+    # None=不可验证（走 10 万兜底），0=容量零硬拒——两者语义不同，勿混。
     recent_volume: float | None = None
     limit_up: bool = False
     limit_down: bool = False

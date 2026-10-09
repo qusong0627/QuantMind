@@ -11,6 +11,7 @@ from backend.shared.freshness import FreshnessPolicy
 from backend.services.simulation.services import redis_series_quote as rq
 from backend.services.simulation.services.redis_series_quote import (
     parse_series_member,
+    recent_traded_shares,
     series_key_for,
 )
 
@@ -101,8 +102,80 @@ class _FakeRedis:
         return rows[-1:] if rows else []
 
 
-def _member(price: float, volume: float) -> str:
-    return json.dumps({"price": price, "volume": volume, "source": "tdx_bridge"})
+def _member(price: float, volume: float, source: str = "tdx_bridge") -> str:
+    return json.dumps({"price": price, "volume": volume, "source": source})
+
+
+# ── recent_traded_shares：口径三缺陷（2026-10-09 决策轮买单全拒事故）────────────
+#
+# 当日实证（1445 轮重放）：SH600282 窗口差 65~800（手）被当股取整 → 容量 0 股 → 硬拒；
+# SZ002438 最新成员同源仅 1 个、且跨源相减（qmt 36546 → tdx 36436）出负数被钳 0 →
+# 同样硬拒。容量 0 是「无流动性」断言，None 才是「不可验证」——此区分是本案核心。
+
+
+def _rows(*specs):
+    """(volume, source, score) 序列 → window_rows 形状（score 被本函数忽略）。"""
+    return [(json.dumps({"volume": v, "source": s}), float(t)) for v, s, t in specs]
+
+
+def test_recent_volume_converts_hands_to_shares():
+    rows = _rows((100.0, "tdx_bridge", 0), (130.0, "tdx_bridge", 30))
+    assert recent_traded_shares(rows) == 3000.0  # 30 手 → 3000 股
+
+
+def test_recent_volume_same_source_zero_or_negative_is_unverifiable():
+    # 同源平值（TDX 快照量按批刷新，整分钟平值实测）→ 不可当「无成交」
+    assert (
+        recent_traded_shares(_rows((100.0, "tdx_bridge", 0), (100.0, "tdx_bridge", 30)))
+        is None
+    )
+    # 同源倒挂（源侧重启/回滚）→ 不可验证，不能钳 0
+    assert (
+        recent_traded_shares(_rows((130.0, "tdx_bridge", 0), (90.0, "tdx_bridge", 30)))
+        is None
+    )
+
+
+def test_recent_volume_last_source_needs_two_members():
+    # 最新成员是 tdx、但同源只有 1 个 → 不可验证（跨源混合相减正是上一次事故）
+    rows = _rows(
+        (36546.0, "qmt_big", 0), (36715.0, "qmt_big", 10), (36436.0, "tdx_bridge", 30)
+    )
+    assert recent_traded_shares(rows) is None
+
+
+def test_recent_volume_uses_last_source_domain_only():
+    # 最新源 qmt_big 有 3 个成员：只在该域内求差，跨源成员不参与
+    rows = _rows(
+        (100.0, "qmt_big", 0),
+        (500.0, "tdx_bridge", 10),  # 另一源，量纲跳动不得污染差值
+        (130.0, "qmt_big", 20),
+        (160.0, "qmt_big", 30),
+    )
+    assert recent_traded_shares(rows) == 6000.0  # (160 - 100) 手 → 股
+
+
+def test_recent_volume_single_member_or_empty_is_none():
+    assert recent_traded_shares(_rows((100.0, "tdx_bridge", 0))) is None
+    assert recent_traded_shares([]) is None
+    # 毒丸成员（非 JSON / volume 缺失）跳过，不炸
+    assert recent_traded_shares([("not-json", 0.0), ("{}", 1.0)]) is None
+
+
+@pytest.mark.asyncio
+async def test_batch_fetch_cross_source_dip_is_none_not_zero(monkeypatch):
+    """跨源倒挂的窗口必须落 None（放行小额），绝不能钳 0（硬拒）——2026-10-09 实证形态。"""
+    now = time.time()
+    store = {
+        "market:series:SZ002438": [
+            (_member(13.5, 36546.0, "qmt_big"), now - 50.0),
+            (_member(13.5, 36715.0, "qmt_big"), now - 40.0),
+            (_member(13.5, 36436.0, "tdx_bridge"), now - 20.0),
+        ]
+    }
+    monkeypatch.setattr(rq, "_get_client", lambda: _FakeRedis(store))
+    ticks = await rq.fetch_series_ticks(["SZ002438"], policy=_POLICY)
+    assert ticks["SZ002438"]["recent_volume"] is None
 
 
 @pytest.mark.asyncio
@@ -145,7 +218,8 @@ async def test_batch_fetch_drops_unavailable_and_reports_recent_volume(monkeypat
     assert "SH600282" not in ticks  # 超龄不允许「凑合用」
     assert "SH600036" not in ticks
     assert ticks["SZ002664"]["price"] == 14.2
-    assert ticks["SZ002664"]["recent_volume"] == 30.0  # 160 - 130（60s 窗内量差）
+    # 160 - 130 = 30 手 → ×100 归一为股（下游日频核整手取整按股）
+    assert ticks["SZ002664"]["recent_volume"] == 3000.0
 
 
 @pytest.mark.asyncio
