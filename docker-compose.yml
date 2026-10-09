@@ -354,6 +354,13 @@ services:
       # 按用户整点小时桶频控（上传/整理）
       - DOC_UPLOAD_RATE_PER_HOUR=${DOC_UPLOAD_RATE_PER_HOUR:-30}
       - DOC_ORGANIZE_RATE_PER_HOUR=${DOC_ORGANIZE_RATE_PER_HOUR:-60}
+      # 整理链 LLM 输出预算（推理模型的思考内容也计入）。太小时可见 JSON 会被
+      # 截断——截断会被显式识别并提示调这两个键；8192 是主流网关的通用上限。
+      - DOC_ORGANIZE_MAP_MAX_TOKENS=${DOC_ORGANIZE_MAP_MAX_TOKENS:-8192}
+      - DOC_ORGANIZE_FINAL_MAX_TOKENS=${DOC_ORGANIZE_FINAL_MAX_TOKENS:-8192}
+      # 整理默认关掉推理模型的思考（JSON 抽取用不着，只烧预算与延迟）。
+      # 精确填 false 才恢复默认思考；严格网关不认 thinking 参数会自动回退重试。
+      - DOC_ORGANIZE_DISABLE_THINKING=${DOC_ORGANIZE_DISABLE_THINKING:-}
       # 文档原件与解析产物目录（随 ./data:/data 卷持久化）
       - RD_AGENT_DOCS_DIR=${RD_AGENT_DOCS_DIR:-/data/rd_agent_docs}
       - RD_AGENT_DOC_RETENTION_DAYS=${RD_AGENT_DOC_RETENTION_DAYS:-90}

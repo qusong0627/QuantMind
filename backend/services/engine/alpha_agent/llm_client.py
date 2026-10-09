@@ -23,7 +23,11 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_PLACEHOLDER_KEYS = {"your-deepseek-api-key", "mock-api-key", "mock-api-key-not-configured"}
+_PLACEHOLDER_KEYS = {
+    "your-deepseek-api-key",
+    "mock-api-key",
+    "mock-api-key-not-configured",
+}
 
 
 def _is_placeholder(key: str) -> bool:
@@ -151,10 +155,22 @@ def resolve_llm_config() -> LLMConfig | None:
         model = os.getenv("DEEPSEEK_MODEL", "").strip() or "deepseek-chat"
         # Anthropic 兼容端点（.../anthropic）：chat() 会再拼 /v1/messages，不能再补 /v1
         if "/anthropic" in base:
-            return LLMConfig(api_key=deepseek_key, base_url=base, model=model, protocol="anthropic", headers=env_extra_headers())
+            return LLMConfig(
+                api_key=deepseek_key,
+                base_url=base,
+                model=model,
+                protocol="anthropic",
+                headers=env_extra_headers(),
+            )
         if not base.endswith("/v1"):
             base += "/v1"
-        return LLMConfig(api_key=deepseek_key, base_url=base, model=model, protocol="openai", headers=env_extra_headers())
+        return LLMConfig(
+            api_key=deepseek_key,
+            base_url=base,
+            model=model,
+            protocol="openai",
+            headers=env_extra_headers(),
+        )
 
     key = (
         os.getenv("AI_IDE_LLM_API_KEY", "").strip()
@@ -180,24 +196,29 @@ def resolve_llm_config() -> LLMConfig | None:
         protocol = "anthropic"
     else:
         protocol = "openai"
-    return LLMConfig(api_key=key, base_url=base, model=model, protocol=protocol, headers=env_extra_headers())
+    return LLMConfig(
+        api_key=key,
+        base_url=base,
+        model=model,
+        protocol=protocol,
+        headers=env_extra_headers(),
+    )
 
 
-async def chat(
+async def _chat_impl(
     messages: list[dict[str, str]],
     *,
-    max_tokens: int = 500,
-    temperature: float = 0.3,
-    timeout: float = 30,
-    config: LLMConfig | None = None,
-) -> str:
-    """调用 LLM 返回纯文本。messages 为 [{role, content}, ...]。
-
-    config 不传时从环境变量解析；调用方可显式传入（如用户 Profile 中的 Key）。
-    """
+    max_tokens: int,
+    temperature: float,
+    timeout: float,
+    config: LLMConfig | None,
+    extra_body: dict | None = None,
+) -> tuple[str, dict]:
     cfg = config or resolve_llm_config()
     if cfg is None:
-        raise RuntimeError("未配置可用的 LLM API Key（DEEPSEEK_API_KEY / AI_IDE_LLM_API_KEY / OPENAI_API_KEY 均为空或占位符）")
+        raise RuntimeError(
+            "未配置可用的 LLM API Key（DEEPSEEK_API_KEY / AI_IDE_LLM_API_KEY / OPENAI_API_KEY 均为空或占位符）"
+        )
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         if cfg.protocol == "anthropic":
@@ -211,6 +232,8 @@ async def chat(
             }
             if sys_msgs:
                 payload["system"] = "\n\n".join(sys_msgs)
+            if extra_body:
+                payload.update(extra_body)
             resp = await client.post(
                 f"{cfg.base_url.rstrip('/')}/v1/messages",
                 headers={
@@ -229,6 +252,8 @@ async def chat(
                 "max_tokens": max_tokens,
                 "temperature": temperature,
             }
+            if extra_body:
+                payload.update(extra_body)
             resp = await client.post(
                 openai_chat_url(cfg.base_url),
                 headers={
@@ -242,5 +267,72 @@ async def chat(
         resp.raise_for_status()
         data = resp.json()
         if cfg.protocol == "anthropic":
-            return "".join(b.get("text", "") for b in data.get("content", []))
-        return data["choices"][0]["message"]["content"]
+            text = "".join(b.get("text", "") for b in data.get("content", []))
+            meta = {
+                "model": cfg.model,
+                "finish_reason": data.get("stop_reason"),
+                "has_reasoning": False,
+            }
+        else:
+            choice = data["choices"][0]
+            message = choice.get("message") or {}
+            text = message.get("content") or ""
+            meta = {
+                "model": cfg.model,
+                "finish_reason": choice.get("finish_reason"),
+                "has_reasoning": bool(message.get("reasoning_content")),
+            }
+        return text, meta
+
+
+async def chat(
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 500,
+    temperature: float = 0.3,
+    timeout: float = 30,
+    config: LLMConfig | None = None,
+    extra_body: dict | None = None,
+) -> str:
+    """调用 LLM 返回纯文本。messages 为 [{role, content}, ...]。
+
+    config 不传时从环境变量解析；调用方可显式传入（如用户 Profile 中的 Key）。
+    extra_body 合并进请求体（如 ``{"thinking": {"type": "disabled"}}`` 关推理
+    模型的思考）——严格网关不认未知参数会 400，调用方自理回退。
+    """
+    text, _meta = await _chat_impl(
+        messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+        config=config,
+        extra_body=extra_body,
+    )
+    return text
+
+
+async def chat_with_meta(
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 500,
+    temperature: float = 0.3,
+    timeout: float = 30,
+    config: LLMConfig | None = None,
+    extra_body: dict | None = None,
+) -> tuple[str, dict]:
+    """同 ``chat``，附带元信息 ``{model, finish_reason, has_reasoning}``。
+
+    2026-10-09 起：推理模型（网关上的 deepseek-v4-flash 一类）的
+    ``reasoning_content`` 也计入 max_tokens——预算被思考耗尽时可见输出会在
+    JSON 中途被截断（``finish_reason="length"``）甚至为空（正文为空、
+    ``has_reasoning=True``）。结构化输出调用方（doc_organize）据此把「静默的
+    半截 JSON」升级为可操作报错；``chat`` 契约不变，元信息不改变返回值语义。
+    """
+    return await _chat_impl(
+        messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+        config=config,
+        extra_body=extra_body,
+    )

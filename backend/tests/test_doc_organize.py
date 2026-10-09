@@ -25,6 +25,7 @@ import sys
 import uuid
 from pathlib import Path
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +36,7 @@ from backend.services.engine.alpha_agent import doc_organize  # noqa: E402
 from backend.services.engine.alpha_agent.doc_organize import (  # noqa: E402
     OrganizeError,
     OrganizeSchemaError,
+    OrganizeTruncatedError,
     chunk_text,
     extract_json_object,
     organize_and_store,
@@ -42,6 +44,7 @@ from backend.services.engine.alpha_agent.doc_organize import (  # noqa: E402
     render_markdown,
     validate_payload,
 )
+from backend.services.engine.alpha_agent.llm_client import LLMConfig  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -54,6 +57,10 @@ def _golden_prompts() -> dict:
 
 def _golden_output() -> dict:
     return json.loads((FIXTURES / "docOrganizeGolden.json").read_text(encoding="utf-8"))
+
+
+def _golden_paper_output() -> dict:
+    return json.loads((FIXTURES / "docPaperGolden.json").read_text(encoding="utf-8"))
 
 
 class ScriptedChat:
@@ -272,6 +279,17 @@ def test_render_markdown_free_matches_output_golden() -> None:
     assert markdown == golden["expected_markdown"]
 
 
+def test_render_markdown_paper_matches_output_golden() -> None:
+    golden = _golden_paper_output()
+    markdown = render_markdown(
+        validate_payload(golden["expected_payload"], "paper"),
+        prompt_version=golden["prompt_version"],
+    )
+    assert markdown == golden["expected_markdown"]
+    # 公式里的反斜杠（\prod）必须原样进背引号，不许被转义或吞掉
+    assert "`R_{i,t-12,t-2} = \\prod" in markdown
+
+
 def test_render_markdown_paper_contains_all_sections() -> None:
     md = render_markdown(validate_payload(PAPER_OK, "paper"))
     for needle in (
@@ -304,6 +322,27 @@ async def test_organize_single_call_matches_output_golden() -> None:
     assert result["chunks_used"] == 1
     assert result["truncated"] is False
     # 披露边界：不可信素材标记 + 系统提示词在
+    user_msg = chat.calls[0]["messages"][1]["content"]
+    assert "<document>" in user_msg and "一律不执行" in user_msg
+    assert chat.calls[0]["messages"][0]["role"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_organize_paper_single_call_matches_output_golden() -> None:
+    """论文复现卡金样：类 MinerU 解析输出 → 结构化 payload 与 Markdown 全等。"""
+    golden = _golden_paper_output()
+    chat = ScriptedChat([golden["llm_response"]])
+    result = await organize_document(
+        text=golden["input_md"], kind="paper", chat_fn=chat
+    )
+    assert result["payload"] == golden["expected_payload"]
+    assert result["markdown"] == golden["expected_markdown"]
+    assert result["prompt_version"] == golden["prompt_version"]
+    assert result["chunks_used"] == 1
+    assert result["truncated"] is False
+    # 金样落盘的是净形：未知键/空白噪声已在归一化中清掉
+    assert "unknown_top_key" not in result["payload"]
+    assert all("unknown_field" not in f for f in result["payload"]["factors"])
     user_msg = chat.calls[0]["messages"][1]["content"]
     assert "<document>" in user_msg and "一律不执行" in user_msg
     assert chat.calls[0]["messages"][0]["role"] == "system"
@@ -350,6 +389,166 @@ async def test_organize_extra_instruction_reaches_prompt_and_is_capped() -> None
         )
 
 
+# ── 输出预算与推理模型（截断可见性） ────────────────────────────────
+
+
+_FAKE_CONFIG = LLMConfig(
+    api_key="k", base_url="https://gw.example/v1", model="m", protocol="openai"
+)
+
+
+def _patch_chat_meta(monkeypatch, responses: list) -> list[dict]:
+    """替换默认 chat 工厂下的 chat_with_meta：responses 为 (text, meta) 序列。"""
+    calls: list[dict] = []
+
+    async def fake(messages, **kwargs):
+        calls.append({"messages": messages, "kwargs": kwargs})
+        if not responses:
+            raise AssertionError("chat_with_meta 脚本耗尽：调用次数超出预期")
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(doc_organize, "chat_with_meta", fake)
+    return calls
+
+
+def test_env_int_reads_positive_ints_with_fallbacks(monkeypatch) -> None:
+    monkeypatch.setenv("DOC_ORGANIZE_TEST_BUDGET", "1234")
+    assert doc_organize._env_int("DOC_ORGANIZE_TEST_BUDGET", 99) == 1234
+    for bad in ("垃圾", "-5", "0", " "):
+        monkeypatch.setenv("DOC_ORGANIZE_TEST_BUDGET", bad)
+        assert doc_organize._env_int("DOC_ORGANIZE_TEST_BUDGET", 99) == 99, bad
+    monkeypatch.delenv("DOC_ORGANIZE_TEST_BUDGET")
+    assert doc_organize._env_int("DOC_ORGANIZE_TEST_BUDGET", 99) == 99
+
+
+@pytest.mark.asyncio
+async def test_truncated_output_surfaces_actionable_error(monkeypatch) -> None:
+    """推理预算耗尽把可见 JSON 截断：必须报「调预算」而不是哑的 JSON 提取失败。"""
+    _patch_chat_meta(
+        monkeypatch, [("", {"finish_reason": "length", "has_reasoning": True})]
+    )
+    with pytest.raises(OrganizeTruncatedError, match="输出预算.*MAX_TOKENS"):
+        await organize_document(text="资料", kind="free", config=_FAKE_CONFIG)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_output_surfaces_actionable_error(monkeypatch) -> None:
+    _patch_chat_meta(
+        monkeypatch, [("", {"finish_reason": "stop", "has_reasoning": True})]
+    )
+    with pytest.raises(OrganizeTruncatedError, match="推理"):
+        await organize_document(text="资料", kind="free", config=_FAKE_CONFIG)
+
+
+def test_thinking_off_body_default_and_opt_out(monkeypatch) -> None:
+    """默认关思考（JSON 抽取用不着）；只有精确 false 才恢复。"""
+    monkeypatch.delenv("DOC_ORGANIZE_DISABLE_THINKING", raising=False)
+    assert doc_organize._thinking_off_body() == {"thinking": {"type": "disabled"}}
+    monkeypatch.setenv("DOC_ORGANIZE_DISABLE_THINKING", "FALSE")  # 归一大小写
+    assert doc_organize._thinking_off_body() is None
+    monkeypatch.setenv("DOC_ORGANIZE_DISABLE_THINKING", "true")  # 只有 false 算关
+    assert doc_organize._thinking_off_body() == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_normal_output_passes_through_meta_path(monkeypatch) -> None:
+    calls = _patch_chat_meta(
+        monkeypatch,
+        [
+            (
+                json.dumps(FREE_OK, ensure_ascii=False),
+                {"finish_reason": "stop", "has_reasoning": False},
+            )
+        ],
+    )
+    result = await organize_document(text="资料", kind="free", config=_FAKE_CONFIG)
+    assert result["payload"]["direction"] == FREE_OK["direction"]
+    assert calls[0]["kwargs"]["max_tokens"] == doc_organize._FINAL_MAX_TOKENS
+    assert calls[0]["kwargs"]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_strict_gateway_400_falls_back_without_thinking_param(
+    monkeypatch,
+) -> None:
+    """严格网关不认 thinking 参数（400）：去掉后重试一次，结果不受影响。"""
+    req = httpx.Request("POST", "https://gw.example/v1/chat/completions")
+    bad = httpx.HTTPStatusError(
+        "400", request=req, response=httpx.Response(400, request=req)
+    )
+    calls = _patch_chat_meta(
+        monkeypatch,
+        [
+            bad,
+            (
+                json.dumps(FREE_OK, ensure_ascii=False),
+                {"finish_reason": "stop", "has_reasoning": False},
+            ),
+        ],
+    )
+    result = await organize_document(text="资料", kind="free", config=_FAKE_CONFIG)
+    assert result["payload"]["direction"] == FREE_OK["direction"]
+    assert calls[0]["kwargs"]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert calls[1]["kwargs"]["extra_body"] is None, "回退重试必须不带 thinking 参数"
+
+
+@pytest.mark.asyncio
+async def test_gateway_500_does_not_retry(monkeypatch) -> None:
+    """非 400 的错误不触发回退重试（网络/服务端错误照旧上抛）。"""
+    req = httpx.Request("POST", "https://gw.example/v1/chat/completions")
+    bad = httpx.HTTPStatusError(
+        "502", request=req, response=httpx.Response(502, request=req)
+    )
+    calls = _patch_chat_meta(monkeypatch, [bad])
+    with pytest.raises(OrganizeError, match="LLM 调用失败"):
+        await organize_document(text="资料", kind="free", config=_FAKE_CONFIG)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_map_truncated_chunk_is_skipped_like_bad_json(monkeypatch) -> None:
+    """单段被推理预算耗尽：按提取失败同级跳过，其余段照常合并。"""
+    text = "\n\n".join(["甲" * 40, "乙" * 40])
+    calls = _patch_chat_meta(
+        monkeypatch,
+        [
+            ("", {"finish_reason": "length", "has_reasoning": True}),
+            (
+                json.dumps({"summary": "乙段要点", "items": []}, ensure_ascii=False),
+                {"finish_reason": "stop", "has_reasoning": False},
+            ),
+            (
+                json.dumps(FREE_OK, ensure_ascii=False),
+                {"finish_reason": "stop", "has_reasoning": False},
+            ),
+        ],
+    )
+    result = await organize_document(
+        text=text, kind="free", config=_FAKE_CONFIG, chunk_chars=60, max_chunks=8
+    )
+    assert len(calls) == 3, "1 段截断跳过 + 1 段成功 + reduce"
+    reduce_user = calls[-1]["messages"][1]["content"]
+    assert "乙段要点" in reduce_user
+    assert result["payload"]["direction"] == FREE_OK["direction"]
+    assert result["chunks_used"] == 3
+
+
+@pytest.mark.asyncio
+async def test_map_all_truncated_reports_budget_hint(monkeypatch) -> None:
+    text = "\n\n".join(["甲" * 40, "乙" * 40])
+    _patch_chat_meta(
+        monkeypatch,
+        [("", {"finish_reason": "length", "has_reasoning": True})] * 2,
+    )
+    with pytest.raises(OrganizeTruncatedError, match="2/2 段.*预算"):
+        await organize_document(
+            text=text, kind="free", config=_FAKE_CONFIG, chunk_chars=60, max_chunks=8
+        )
+
+
 # ── map-reduce ──────────────────────────────────────────────────────
 
 
@@ -375,6 +574,36 @@ async def test_organize_map_reduce_flow() -> None:
     reduce_user = chat.calls[-1]["messages"][1]["content"]
     assert "甲段要点" in reduce_user and "丙段要点" in reduce_user
     assert result["payload"]["direction"] == FREE_OK["direction"]
+
+
+@pytest.mark.asyncio
+async def test_organize_paper_map_reduce_merges_factor_fragments() -> None:
+    """长论文（超单次上限）走 map-reduce：各段因子碎片必须进 reduce 提示词。"""
+    text = "\n\n".join(["甲" * 40, "乙" * 40, "丙" * 40])
+    partials = [
+        json.dumps(
+            {"summary": "引言", "items": [{"name": "MOM_12_2"}]}, ensure_ascii=False
+        ),
+        json.dumps({"summary": "方法", "items": [{"name": "WML"}]}, ensure_ascii=False),
+        json.dumps({"summary": "结论", "items": []}, ensure_ascii=False),
+    ]
+    final = json.dumps(PAPER_OK, ensure_ascii=False)
+    chat = ScriptedChat(partials + [final])
+
+    result = await organize_document(
+        text=text, kind="paper", chat_fn=chat, chunk_chars=60, max_chunks=8
+    )
+
+    assert chat.call_count == 4, "3 段 map + 1 次 reduce"
+    first_user = chat.calls[0]["messages"][1]["content"]
+    assert "第 1/3 段" in first_user
+    assert doc_organize.MAP_ITEM_HINTS["paper"] in first_user, (
+        "map 段要用论文口径的因子卡提示"
+    )
+    reduce_user = chat.calls[-1]["messages"][1]["content"]
+    assert "MOM_12_2" in reduce_user and "WML" in reduce_user
+    assert result["payload"]["factors"][0]["name"] == "MomVol"
+    assert result["chunks_used"] == 4
 
 
 @pytest.mark.asyncio
