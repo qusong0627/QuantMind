@@ -33,7 +33,7 @@ export const Layout: React.FC<LayoutProps> = ({
     { id: 'home' as const, label: '因子挖掘', icon: Sparkles },
     { id: 'library' as const, label: '因子库', icon: Database },
     { id: 'pool' as const, label: '因子池', icon: Network },
-    { id: 'backtest' as const, label: '回测', icon: BarChart3 },
+    { id: 'backtest' as const, label: '回测中心', icon: BarChart3 },
     { id: 'history' as const, label: '挖掘历史', icon: History },
     { id: 'settings' as const, label: '设置', icon: SettingsIcon },
   ];
