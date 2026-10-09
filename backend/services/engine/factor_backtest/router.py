@@ -12,6 +12,7 @@
 - ``GET  /runs``               台账列表（可筛可排的数据面）
 - ``GET  /runs/{id}/series``   曲线下钻（IC/净值/分位/换手）
 - ``GET  /report/{id}``        机构报告标量块（headline/显著性/成本网格/超额标注）
+- ``GET  /report/{id}/pdf``    单报告 PDF 导出（同源同数；落「因子研究」档案目录）
 
 纪律（与旧回测链共存的边界）：
 - 去重与取消**共享** ``alpha_agent`` 的 ``_running_backtests``/
@@ -31,6 +32,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend.services.engine.auth_context import get_authenticated_identity
@@ -38,6 +40,7 @@ from backend.services.engine.factor_backtest import batch, store
 from backend.services.engine.factor_backtest.compat import classify_factor
 from backend.services.engine.factor_backtest.engine import evaluate_factor_market
 from backend.services.engine.factor_backtest.report import build_report_block
+from backend.services.engine.factor_backtest.report_pdf import export_report_pdf
 from backend.services.engine.factor_backtest.profiles import (
     columns_for_market,
     get_market_profile,
@@ -673,30 +676,19 @@ async def get_backtest_series(run_id: str, request: Request):
 # ── 机构报告（T-FB-16）──────────────────────────────────────────────
 
 
-@router.get("/report/{run_id}")
-async def get_backtest_report(
+async def _assemble_report_block(
+    run: dict[str, Any],
     run_id: str,
-    request: Request,
-    n_trials: int | None = Query(
-        None, ge=1, le=100000, description="DSR 去膨胀试次数（覆盖批内默认）"
-    ),
-):
-    """机构报告标量块：headline / 显著性（NW t、BY q、DSR、Bootstrap）/ 成本网格。
+    series: dict[str, Any] | None,
+    *,
+    n_trials: int | None,
+) -> dict[str, Any]:
+    """报告标量块装配（``/report`` 与 ``/report/pdf`` 共用的单源，含批内族校正）。
 
-    - 族校正（BHY q 与 DSR 试次数默认值）：run 挂在批次上时读**同批次全部完成
-      单元**的 ``metrics.ic_nw_t`` 组族（一次派发即一族假设）；自身不在族内
-      （如 NW t 缺失）或无批次 → 回落 n=1，块内 family_note/dsr_note 明说口径。
-    - 非完成终态 / 序列缺失 → 200 + ``report.available=False`` + reason（诚实
-      降级：前端展示原因而不是数字）；run 不存在 404；他人因子 404。
+    族校正（BHY q 与 DSR 试次数默认值）：run 挂在批次上时读**同批次全部完成
+    单元**的 ``metrics.ic_nw_t`` 组族（一次派发即一族假设）；自身不在族内
+    （如 NW t 缺失）或无批次 → 回落 n=1，块内 family_note/dsr_note 明说口径。
     """
-    run = await store.get_run(run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    await _require_owned_factor(run["factor_id"], request)
-
-    series_row = await store.get_series(run_id)
-    series = (series_row or {}).get("series")
-
     family_nw_t: list[float] | None = None
     self_index = 0
     if series and run.get("status") == "completed" and run.get("batch_id"):
@@ -716,7 +708,7 @@ async def get_backtest_report(
             family_nw_t = [t for _, t in pairs]
             self_index = idx
 
-    report = build_report_block(
+    return build_report_block(
         run,
         series,
         family_nw_t=family_nw_t,
@@ -724,4 +716,62 @@ async def get_backtest_report(
         n_trials=n_trials,
         n_trials_source="param" if n_trials is not None else None,
     )
+
+
+@router.get("/report/{run_id}")
+async def get_backtest_report(
+    run_id: str,
+    request: Request,
+    n_trials: int | None = Query(
+        None, ge=1, le=100000, description="DSR 去膨胀试次数（覆盖批内默认）"
+    ),
+):
+    """机构报告标量块：headline / 显著性（NW t、BY q、DSR、Bootstrap）/ 成本网格。
+
+    - 族校正口径见 :func:`_assemble_report_block`（两端点共用单源）。
+    - 非完成终态 / 序列缺失 → 200 + ``report.available=False`` + reason（诚实
+      降级：前端展示原因而不是数字）；run 不存在 404；他人因子 404。
+    """
+    run = await store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    await _require_owned_factor(run["factor_id"], request)
+
+    series_row = await store.get_series(run_id)
+    series = (series_row or {}).get("series")
+
+    report = await _assemble_report_block(run, run_id, series, n_trials=n_trials)
     return {"code": 200, "data": {"run": run, "report": report}}
+
+
+@router.get("/report/{run_id}/pdf")
+async def export_backtest_report_pdf(run_id: str, request: Request):
+    """单报告 PDF 导出（落「因子研究」档案目录；同一 run 幂等覆盖同文件）。
+
+    - 数据面与 ``GET /report/{run_id}`` 同源同数（含批内族校正；试次数用默认
+      口径——导出件没有交互入口传参，与前端展示的数值保持一致）；
+    - 渲染（reportlab）走 ``asyncio.to_thread``，不阻塞引擎事件循环；
+    - 非完成终态 / 序列缺失 / 降级块 → 409 + reason（绝不产出无数字 PDF）；
+      run 不存在 404；他人因子 404。
+    """
+    run = await store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    await _require_owned_factor(run["factor_id"], request)
+
+    series_row = await store.get_series(run_id)
+    series = (series_row or {}).get("series")
+    report = await _assemble_report_block(run, run_id, series, n_trials=None)
+
+    try:
+        path, filename = await asyncio.to_thread(
+            export_report_pdf, run, series, report
+        )
+    except ValueError as exc:
+        # 降级块：把业务原因原文带给用户（不是服务端错误）
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — 渲染引擎异常：细节已进日志
+        raise HTTPException(
+            status_code=500, detail="PDF 渲染失败，请查看引擎服务日志"
+        ) from exc
+    return FileResponse(path, media_type="application/pdf", filename=filename)
