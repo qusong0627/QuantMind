@@ -22,6 +22,7 @@ import pytest
 
 from backend.services.trade.services import decision_executor as dx
 from backend.shared.decision.contract import (
+    BUY,
     HOLD,
     PCT_GIVEN,
     SELL,
@@ -31,6 +32,7 @@ from backend.shared.decision.contract import (
     Pct,
 )
 from backend.shared.decision.execution import Holding, Leg, Quote
+from backend.shared.decision.gates import BuyGate
 
 # ---------------------------------------------------------------------------
 # 构造器（用例读起来要像在说交易场景）
@@ -58,6 +60,15 @@ def _sell(code: str, pct: float = 0.5, **kw: object) -> Decision:
 
 def _hold(code: str) -> Decision:
     return Decision(action=HOLD, code=code, reason="观望")
+
+
+def _buy(code: str, pct: float = 0.5) -> Decision:
+    return Decision(
+        action=BUY,
+        code=code,
+        pct=Pct(pct, PCT_GIVEN),
+        reason="建仓",
+    )
 
 
 def _held(code: str, available: float = 1000.0) -> tuple[str, Holding]:
@@ -1091,3 +1102,417 @@ def test_executor_does_not_take_the_match_lock_or_bypass_the_router() -> None:
     src = Path(dx.__file__).read_text(encoding="utf-8")
     assert "locked_execution(" not in src
     assert src.count("await submit_order(") == 1
+
+
+# ---------------------------------------------------------------------------
+# 8. 执行户注资：买单现金墙（2026-10-09 实盘事故）的修复面
+# ---------------------------------------------------------------------------
+#
+# 事故：决策轮买单全拒 ``Insufficient cash for buy order``——Lua 现金守卫只读
+# 执行户 ``cash``（¥4,070.93，持仓占满现金），而 sizing 用的是桥户剩余/分账
+# vcash（8.5 万级），三本账量级差 ~200 倍。修法：real 轮在**提交前**把执行户
+# 现金补到「本轮买单地板」（快照价 × 数量 × 缓冲），Redis 原子入金 + PG 台账行
+# 同额落痕；注资失败 fail-open——最坏是撞旧墙（拒单留痕），绝不因注资故障吞掉
+# 本来能成的卖单/小额单。
+
+
+def _buy_gate(*codes: str) -> BuyGate:
+    return BuyGate(pool_codes=frozenset(codes))
+
+
+class _FakeFunder:
+    """注资器替身：记录 ``(market, floor, round_id, agent)``；可安排异常/记序。"""
+
+    def __init__(
+        self, *, log: list | None = None, error: Exception | None = None
+    ) -> None:
+        self.calls: list[tuple] = []
+        self._log = log
+        self._error = error
+
+    async def __call__(self, market: str, floor: float, round_id: str, agent: str):
+        if self._log is not None:
+            self._log.append("fund")
+        self.calls.append((market, floor, round_id, agent))
+        if self._error is not None:
+            raise self._error
+        return {"funded": floor}
+
+
+class _LoggingSubmitter(_FakeSubmitter):
+    """与 ``_FakeFunder`` 共享一条事件序列，钉「注资在提交之前」。"""
+
+    def __init__(self, log: list) -> None:
+        super().__init__()
+        self._log = log
+
+    async def __call__(self, leg, client_order_id, real):
+        self._log.append("submit")
+        return await super().__call__(leg, client_order_id, real)
+
+
+def test_buy_funding_floor_sums_buy_legs_only_with_buffer() -> None:
+    """地板 = Σ(买单腿 数量×价格) ×(1+缓冲)；卖单腿不参与（它们回笼资金）。"""
+    legs = (
+        Leg(0, "600036.SH", "buy", 500.0, None, ""),
+        Leg(1, "600519.SH", "sell", 100.0, None, ""),
+        Leg(2, "000001.SZ", "buy", 200.0, None, ""),
+    )
+    quotes = {
+        "600036.SH": Quote(symbol="600036.SH", price=10.0),
+        "000001.SZ": Quote(symbol="000001.SZ", price=5.0),
+    }
+    floors = dx.buy_funding_floor(legs, quotes)
+    assert floors["CN"] == pytest.approx((500.0 * 10.0 + 200.0 * 5.0) * 1.10)
+
+
+def test_buy_funding_floor_prefers_quote_then_limit_then_skips_unpriced() -> None:
+    """价格口径：本轮快照价优先（执行段填价的基础），缺快照回退腿上限价；
+    两者都缺 → 该腿不计入（不猜价——那腿到撮合也是「无法获取实时行情」）。"""
+    legs = (
+        Leg(0, "600036.SH", "buy", 100.0, 9.0, ""),  # 快照 10 → 用 10，不用限价 9
+        Leg(1, "600519.SH", "buy", 10.0, 100.0, ""),  # 无快照 → 限价 100
+        Leg(2, "600000.SH", "buy", 10.0, 8.0, ""),  # 快照在但无价 → 限价 8
+        Leg(3, "000001.SZ", "buy", 100.0, None, ""),  # 两头都缺 → 跳过
+    )
+    quotes = {
+        "600036.SH": Quote(symbol="600036.SH", price=10.0),
+        "600000.SH": Quote(symbol="600000.SH", price=None),
+    }
+    floors = dx.buy_funding_floor(legs, quotes, buffer=0.0)
+    assert floors == {"CN": pytest.approx(1000.0 + 1000.0 + 80.0)}
+
+
+def test_buy_funding_floor_groups_by_market() -> None:
+    """按市场分组：账户键有市场维度（港股地板不能记进 A 股执行户）。"""
+    legs = (
+        Leg(0, "600036.SH", "buy", 100.0, 10.0, ""),
+        Leg(1, "00700.HK", "buy", 100.0, 400.0, ""),
+    )
+    floors = dx.buy_funding_floor(legs, {}, buffer=0.0)
+    assert floors == {"CN": pytest.approx(1000.0), "HK": pytest.approx(40000.0)}
+
+
+def test_buy_funding_floor_without_buy_legs_is_empty() -> None:
+    legs = (Leg(0, "600036.SH", "sell", 100.0, 10.0, ""),)
+    assert dx.buy_funding_floor(legs, {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_funds_real_buy_legs_before_submitting(monkeypatch) -> None:
+    """real 轮：注资发生在**任何提交之前**，金额=本轮地板，带 round/agent 留痕坐标。"""
+    monkeypatch.setenv("QM_DECISION_ROUND_EXEC_FUNDING", "true")
+    log: list[str] = []
+    funder = _FakeFunder(log=log)
+    submitter = _LoggingSubmitter(log)
+    outcome = await dx.execute_batch(
+        _batch(_buy("600036.SH", 0.5)),
+        round_id="rnd-1",
+        holdings={},
+        quotes={"600036.SH": Quote(symbol="600036.SH", price=10.0)},
+        gate=_buy_gate("600036.SH"),
+        quota=10000.0,
+        real=True,
+        agent="deepseek-v4-pro",
+        submitter=submitter,
+        funder=funder,
+    )
+    assert log == ["fund", "submit"]
+    market, floor, round_id, agent = funder.calls[0]
+    assert (market, round_id, agent) == ("CN", "rnd-1", "deepseek-v4-pro")
+    assert floor == pytest.approx(500.0 * 10.0 * 1.10)
+    assert outcome.summary()["submitted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_never_funds_paper_rounds(monkeypatch) -> None:
+    """影子期（real=False）不注资：模拟腿没有真单，注资只会污染执行户台账。"""
+    monkeypatch.setenv("QM_DECISION_ROUND_EXEC_FUNDING", "true")
+    funder = _FakeFunder()
+    await dx.execute_batch(
+        _batch(_buy("600036.SH", 0.5)),
+        round_id="rnd-1",
+        holdings={},
+        quotes={"600036.SH": Quote(symbol="600036.SH", price=10.0)},
+        gate=_buy_gate("600036.SH"),
+        quota=10000.0,
+        real=False,
+        submitter=_FakeSubmitter(),
+        funder=funder,
+    )
+    assert funder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_skips_funding_when_there_are_no_buy_legs(
+    monkeypatch,
+) -> None:
+    """卖单轮不需要地板：卖单回笼资金，不注资。"""
+    monkeypatch.setenv("QM_DECISION_ROUND_EXEC_FUNDING", "true")
+    funder = _FakeFunder()
+    submitter = _FakeSubmitter()
+    await dx.execute_batch(
+        _batch(_sell("600036.SH", 1.0)),
+        round_id="rnd-1",
+        holdings=dict([_held("600036.SH")]),
+        quotes={"600036.SH": Quote(symbol="600036.SH", price=10.0)},
+        real=True,
+        submitter=submitter,
+        funder=funder,
+    )
+    assert funder.calls == []
+    assert len(submitter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_funding_kill_switch(monkeypatch) -> None:
+    """运维闸：``QM_DECISION_ROUND_EXEC_FUNDING=false`` 时注资整段跳过（腿照发）。"""
+    monkeypatch.setenv("QM_DECISION_ROUND_EXEC_FUNDING", "false")
+    funder = _FakeFunder()
+    submitter = _FakeSubmitter()
+    await dx.execute_batch(
+        _batch(_buy("600036.SH", 0.5)),
+        round_id="rnd-1",
+        holdings={},
+        quotes={"600036.SH": Quote(symbol="600036.SH", price=10.0)},
+        gate=_buy_gate("600036.SH"),
+        quota=10000.0,
+        real=True,
+        submitter=submitter,
+        funder=funder,
+    )
+    assert funder.calls == []
+    assert len(submitter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_funding_is_on_by_default(monkeypatch) -> None:
+    """默认开：变量缺席时注资照跑（修复默认生效，除非显式关掉）。"""
+    monkeypatch.delenv("QM_DECISION_ROUND_EXEC_FUNDING", raising=False)
+    funder = _FakeFunder()
+    await dx.execute_batch(
+        _batch(_buy("600036.SH", 0.5)),
+        round_id="rnd-1",
+        holdings={},
+        quotes={"600036.SH": Quote(symbol="600036.SH", price=10.0)},
+        gate=_buy_gate("600036.SH"),
+        quota=10000.0,
+        real=True,
+        submitter=_FakeSubmitter(),
+        funder=funder,
+    )
+    assert len(funder.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_survives_a_failing_funder(monkeypatch, caplog) -> None:
+    """注资失败 fail-open：腿照发（最坏撞旧墙=拒单留痕），错误必须响。"""
+    monkeypatch.setenv("QM_DECISION_ROUND_EXEC_FUNDING", "true")
+    funder = _FakeFunder(error=RuntimeError("redis 挂了"))
+    submitter = _FakeSubmitter()
+    with caplog.at_level("ERROR"):
+        outcome = await dx.execute_batch(
+            _batch(_buy("600036.SH", 0.5)),
+            round_id="rnd-1",
+            holdings={},
+            quotes={"600036.SH": Quote(symbol="600036.SH", price=10.0)},
+            gate=_buy_gate("600036.SH"),
+            quota=10000.0,
+            real=True,
+            submitter=submitter,
+            funder=funder,
+        )
+    assert len(submitter.calls) == 1
+    assert outcome.aborted == ""
+    assert any("注资" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_run_round_wires_the_default_funder_from_its_own_coordinates(
+    monkeypatch,
+) -> None:
+    """``run_round`` 没收到注资器时用账户坐标构造默认件（db/redis/tenant/user 闭合）。"""
+    monkeypatch.setenv("QM_DECISION_ROUND_EXEC_FUNDING", "true")
+    built: list[dict] = []
+    funder = _FakeFunder()
+
+    def _fake_make(**kw):
+        built.append(kw)
+        return funder
+
+    monkeypatch.setattr(dx, "_make_default_funder", _fake_make)
+    await dx.run_round(
+        _batch(_buy("600036.SH", 0.5)),
+        round_id="rnd-1",
+        holdings={},
+        quotes={"600036.SH": Quote(symbol="600036.SH", price=10.0)},
+        gate=_buy_gate("600036.SH"),
+        quota=10000.0,
+        inflight=frozenset(),
+        real=True,
+        db="DB",
+        redis="REDIS",
+        tenant_id="default",
+        user_id=_ACCOUNT,
+        submitter=_FakeSubmitter(),
+    )
+    assert built and built[0]["tenant_id"] == "default"
+    assert built[0]["user_id"] == _ACCOUNT
+    assert len(funder.calls) == 1
+
+
+# ── 默认注资器的两本书编排（Redis 原子入金 + PG 台账行）──────────────────
+class _FunderRecorder:
+    def __init__(self) -> None:
+        self.funded: list[tuple] = []
+        self.ledger: list[dict] = []
+        self.commits = 0
+        self.events: list[str] = []
+
+
+def _install_fake_funding_stack(
+    monkeypatch,
+    *,
+    snapshot: dict | None,
+    fund_result: dict | None = None,
+    ledger_boom: Exception | None = None,
+) -> tuple:
+    """把默认注资器的两个外部依赖换成替身（源码里的惰性 import 也拦得到）。
+
+    ``_Mgr`` 伪造的是 manager 的**注资面**（``ensure_cash_floor``：锁内读账 →
+    算缺口 → 原子入金，一体）。锁纪律留在 manager 里（它拥有账户键），dx 层
+    只调用该方法——故此处的替身没有锁/读账/入金三个分步。
+    """
+    import backend.services.simulation.services.ledger_service as ledger_mod
+    import backend.services.trade_shared.simulation_manager as manager_mod
+
+    rec = _FunderRecorder()
+
+    class _Mgr:
+        def __init__(self, redis):
+            pass
+
+        async def ensure_cash_floor(
+            self, user_id, floor, tenant_id="default", market="CN", min_deficit=0.0
+        ):
+            rec.events.append("ensure")
+            if fund_result is not None:
+                return fund_result
+            if snapshot is None:
+                return {"success": False, "reason": "ACCOUNT_NOT_FOUND"}
+            cash = float(snapshot.get("cash") or 0.0)
+            deficit = float(floor) - cash
+            if deficit <= float(min_deficit):
+                return {
+                    "success": True,
+                    "funded": 0.0,
+                    "cash": cash,
+                    "snapshot": snapshot,
+                }
+            rec.funded.append((user_id, deficit, tenant_id, market))
+            return {
+                "success": True,
+                "funded": deficit,
+                "cash_before": cash,
+                "cash": cash + deficit,
+                "snapshot": snapshot,
+            }
+
+    class _Ledger:
+        def __init__(self, db):
+            pass
+
+        async def record_cash_adjustment(self, **kw):
+            if ledger_boom is not None:
+                raise ledger_boom
+            rec.events.append("ledger")
+            rec.ledger.append(kw)
+            return 250.0
+
+    class _DB:
+        async def commit(self):
+            rec.events.append("commit")
+            rec.commits += 1
+
+    monkeypatch.setattr(manager_mod, "SimulationAccountManager", _Mgr)
+    monkeypatch.setattr(ledger_mod, "SimulationLedgerService", _Ledger)
+    funder = dx._make_default_funder(
+        db=_DB(), redis=object(), tenant_id="default", user_id=_ACCOUNT
+    )
+    return funder, rec
+
+
+@pytest.mark.asyncio
+async def test_default_funder_tops_up_the_deficit_into_both_books(monkeypatch) -> None:
+    """缺口 = 地板 − 现现金；Redis 先加、PG 台账行同额跟上（提交权在调用方）。"""
+    snapshot = {"cash": 100.0, "available_cash": 100.0, "total_asset": 900.0}
+    funder, rec = _install_fake_funding_stack(monkeypatch, snapshot=snapshot)
+    out = await funder("CN", 1000.0, "rnd-1", "agent-x")
+    assert rec.funded == [(_ACCOUNT, 900.0, "default", "CN")]
+    assert rec.ledger[0]["amount"] == 900.0
+    assert rec.ledger[0]["ref_id"] == "rnd-1"
+    assert rec.ledger[0]["account_snapshot"] is snapshot  # 用注资前的 Redis 快照建行
+    assert rec.commits == 1
+    assert rec.events == ["ensure", "ledger", "commit"]
+    assert out["funded"] == 900.0
+
+
+@pytest.mark.asyncio
+async def test_default_funder_skips_when_cash_already_covers_the_floor(
+    monkeypatch,
+) -> None:
+    """现金已够地板：一分不加（宁可上轮余量留着，也不写无意义的台账行）。"""
+    funder, rec = _install_fake_funding_stack(monkeypatch, snapshot={"cash": 2000.0})
+    out = await funder("CN", 1000.0, "rnd-1", "")
+    assert rec.funded == []
+    assert rec.ledger == []
+    assert rec.commits == 0
+    assert out["funded"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_default_funder_skips_when_the_account_does_not_exist(
+    monkeypatch,
+) -> None:
+    """执行户不存在 → 跳过（首笔成交会自动按 100 万建账，现金墙天然不存在）。"""
+    funder, rec = _install_fake_funding_stack(monkeypatch, snapshot=None)
+    out = await funder("CN", 1000.0, "rnd-1", "")
+    assert rec.funded == []
+    assert out["funded"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_default_funder_reports_a_rejected_redis_fund(
+    monkeypatch, caplog
+) -> None:
+    """Redis 入金被拒（账没了/脚本异常）→ 不写台账行、不提交、如实回报告。"""
+    funder, rec = _install_fake_funding_stack(
+        monkeypatch,
+        snapshot={"cash": 0.0},
+        fund_result={"success": False, "reason": "ACCOUNT_NOT_FOUND"},
+    )
+    with caplog.at_level("ERROR"):
+        out = await funder("CN", 500.0, "rnd-1", "")
+    assert rec.ledger == []
+    assert rec.commits == 0
+    assert out["funded"] == 0.0
+    assert any("注资" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_default_funder_keeps_the_redis_bump_when_the_ledger_write_fails(
+    monkeypatch, caplog
+) -> None:
+    """PG 台账失败**不撤销** Redis 入金（撤销会再开一条竞态）：执行口径优先，
+    缺行 ERROR 留痕（多余现金无害，下一轮地板把它算进 cash）。"""
+    funder, rec = _install_fake_funding_stack(
+        monkeypatch,
+        snapshot={"cash": 0.0},
+        ledger_boom=RuntimeError("PG 挂了"),
+    )
+    with caplog.at_level("ERROR"):
+        out = await funder("CN", 500.0, "rnd-1", "")
+    assert rec.funded  # Redis 已加
+    assert rec.commits == 0
+    assert out["funded"] == 500.0
+    assert any("台账" in r.getMessage() for r in caplog.records)

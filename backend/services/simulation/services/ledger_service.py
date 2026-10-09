@@ -179,6 +179,78 @@ class SimulationLedgerService:
 
         self._sync_account_projection(account, after_snapshot)
 
+    async def record_cash_adjustment(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str | int,
+        market: str | None,
+        amount: float,
+        account_snapshot: dict[str, Any] | None = None,
+        event_type: str = "MIRROR_FUNDING",
+        ref_type: str = "funding",
+        ref_id: str | None = None,
+        note: str | None = None,
+    ) -> float:
+        """显式资金调整（非成交类现金台账行 + 账户投影同增）；返回入账后余额。
+
+        与 ``record_trade`` 同一纪律：调用方已在 Redis 侧同步加过同一金额（执行
+        口径），本方法落 **PG 一侧**（台账行 + 账户投影），**不 commit**——由调用方
+        提交。``account_snapshot`` 是注资**前**的账户（Redis 口径）：账户行缺失
+        时以它建行再增量，绝不给出一个不存在的账户记 0 快照。
+
+        ``amount`` 必须为正（≤0/NaN 是编程错误，不是业务路径，直接 ``ValueError``）。
+        """
+        amt = float(amount)
+        if not (amt > 0):
+            raise ValueError(f"amount={amount!r} 必须为正（注资金额不猜符号）")
+
+        from backend.shared.ledger_contract import (
+            ensure_accounts_market_contract_async,
+            normalize_ledger_market,
+        )
+
+        market_n = normalize_ledger_market(market)
+        await ensure_accounts_market_contract_async()
+        uid = str(user_id or "").strip()
+        if not uid:
+            raise ValueError("user_id 为空：不知道给哪本账记注资")
+        account_id = self.build_account_id(tenant_id, uid, market_n)
+        account = await self._ensure_account(
+            account_id=account_id,
+            tenant_id=tenant_id,
+            user_id=uid,
+            account_snapshot=dict(account_snapshot or {}),
+            market=market_n,
+        )
+
+        occurred_at = _naive_utc(None)
+        new_cash = float(account.cash or 0.0) + amt
+        account.cash = new_cash
+        account.available_cash = float(account.available_cash or 0.0) + amt
+        account.frozen_cash = max(0.0, account.cash - account.available_cash)
+        account.total_asset = float(account.total_asset or 0.0) + amt
+        account.equity = float(account.equity or 0.0) + amt
+        account.last_projected_at = occurred_at
+
+        self.db.add(
+            SimulationCashLedger(
+                account_id=account_id,
+                tenant_id=tenant_id,
+                user_id=uid,
+                market=market_n,
+                event_type=event_type,
+                ref_type=ref_type,
+                ref_id=ref_id or None,
+                amount=amt,
+                balance_after=new_cash,
+                trade_date=occurred_at,
+                occurred_at=occurred_at,
+                note=note or None,
+            )
+        )
+        return new_cash
+
     async def _ensure_account(
         self,
         *,

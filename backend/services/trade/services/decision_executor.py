@@ -43,6 +43,9 @@ agent B 想卖的**是同一批股票**。故在途判定按账户取，宁可�
   同用户撮合临界区锁，重入即死锁（``copilot.py`` 有实测注释）。
 * **单腿失败不阻断其余**：一条腿报错只记进它的 receipt，后面的腿照发；整批的结果
   由 :meth:`ExecutionOutcome.summary` 如实统计（成功 / 失败 / 去重各自计数）。
+* **注资在提交前一次性完成**：real 轮先把执行户现金补到本轮买单地板（``Funder``,
+  见 :func:`buy_funding_floor`），随后才进提交循环——注资**不跨持**撮合锁（提交
+  内部自持同锁，跨持即死锁），也不吞失败（注资故障照下单，最坏拒单留痕）。
 """
 
 from __future__ import annotations
@@ -57,8 +60,10 @@ from backend.shared.decision.execution import (
     Holding,
     Leg,
     Quote,
+    no_quote,
     plan_orders,
 )
+from backend.shared.env_flags import env_flag
 from backend.shared.order_contract import (
     SOURCE_LLM_DECISION,
     build_llm_decision_client_order_id,
@@ -607,6 +612,190 @@ def _make_default_submitter(
     return _submit
 
 
+# ── 执行户注资（买单现金墙修复，2026-10-09）─────────────────────────────
+#: 地板缓冲：成交价 = 基准价 × (1 ± 滑点)，受当日涨跌停约束、**不受腿限价约束**
+#: （市价单语义，见 ``execution_engine._resolve_fill_price``）——10% ≈ 一个主板涨停。
+FUNDING_BUFFER_RATIO = 0.10
+
+#: 缺口小于此值不动账：分钱级缺口不值得一条台账行（下轮地板自然覆盖）。
+FUNDING_MIN_DEFICIT = 1.0
+
+#: 注资器形状：``(market, floor, round_id, agent) -> dict``。账户坐标（db/redis/tenant/
+#: user）不在参数里——同 ``Submitter``：属于「这一轮是谁在跑」，构造时闭合。
+Funder = Callable[[str, float, str, str], Any]
+
+
+def buy_funding_floor(
+    legs: Iterable[Leg],
+    quotes: Mapping[str, Quote],
+    *,
+    buffer: float = FUNDING_BUFFER_RATIO,
+) -> dict[str, float]:
+    """本轮买单的资金地板（按市场分组）：Σ(数量 × 价格) × (1 + 缓冲)。
+
+    只算买单腿：卖单腿回笼资金，且它们排在买单腿之前（``plan_orders`` 的腿序），
+    保守口径下不回冲。价格口径与执行段一致：**本轮快照价优先，缺则腿上限价**；
+    两头都缺的腿跳过（不猜价——那腿到撮合也是 ``l3.no_quote`` 拒单，不占资金）。
+
+    市场口径与 ``order_router`` 同一实现（``market_rules.infer_market``）：注资必须
+    落到路由器将要扣款的那本执行账上，两处各写一份推断 = 资金进错市场。
+    """
+    from backend.services.simulation.services.market_rules import infer_market
+
+    totals: dict[str, float] = {}
+    for leg in legs:
+        if not leg.is_buy:
+            continue
+        quantity = float(leg.quantity or 0.0)
+        if quantity <= 0:
+            continue
+        quote = quotes.get(leg.symbol)
+        price = _price(quote.price) if quote is not None else None
+        if price is None:
+            price = _price(leg.limit_price)
+        if price is None:
+            continue
+        market = infer_market(leg.symbol).value
+        totals[market] = totals.get(market, 0.0) + quantity * price
+    return {market: total * (1.0 + buffer) for market, total in totals.items()}
+
+
+async def _fund_round_buys(
+    *,
+    funder: Funder,
+    buys: Iterable[Leg],
+    quotes: Mapping[str, Quote],
+    round_id: str,
+    agent: str,
+) -> None:
+    """real 轮提交前的一次性注资：逐市场把执行户补到地板（``funder`` 委托）。
+
+    失败**不阻断本轮**（记 ERROR 后继续提交）：注资是给旧现金墙开的旁路，不是新
+    闸门——注少了最坏是拒单留痕（下一轮的缺口会把上轮没成交的部分算回来），因注资
+    故障吞掉本来能成的腿才是方向性错误。单个市场失败不阻断其余市场。
+    """
+    if not env_flag("QM_DECISION_ROUND_EXEC_FUNDING", default=True):
+        logger.info(
+            "[DecisionExec] 本轮注资已关（QM_DECISION_ROUND_EXEC_FUNDING=false）：腿照发"
+        )
+        return
+    try:
+        floors = buy_funding_floor(buys, quotes)
+        for market, floor in sorted(floors.items()):
+            try:
+                await funder(market, floor, round_id, agent)
+            except Exception as exc:  # noqa: BLE001 单市场失败不阻断（见 docstring）
+                logger.error(
+                    "[DecisionExec] 注资失败 market=%s round=%s floor=%.2f: %s："
+                    "继续提交（最坏撞现金墙拒单留痕）",
+                    market,
+                    round_id,
+                    floor,
+                    exc,
+                )
+    except Exception as exc:  # noqa: BLE001 地板计算失败同样不阻断
+        logger.error(
+            "[DecisionExec] 注资地板计算失败 round=%s: %s（跳过注资继续提交）",
+            round_id,
+            exc,
+        )
+
+
+def _make_default_funder(*, db, redis, tenant_id: str, user_id: object) -> Funder:
+    """默认注资器：Redis 原子入金（``ensure_cash_floor``，含锁与缺口现算）+ PG 台账行。
+
+    两本书同额：Redis 是执行口径（现金守卫读它），PG 是审计口径（对账读它）。
+    顺序**先 Redis 后 PG**：Redis 成功而 PG 失败只留 ERROR（多余现金无害，下一轮
+    地板把它算进 cash）；反过来先记台账会凭空造出一个不存在的余额。
+
+    账户坐标经 ``normalize_runtime_user`` 收口（与 ``_make_default_submitter`` 同源）：
+    注资落不进提交将要扣的那本账 = 白注。
+    """
+    from backend.shared.simulation_account_keys import normalize_runtime_user
+
+    account = normalize_runtime_user(user_id)
+
+    async def _fund(
+        market: str, floor: float, round_id: str, agent: str
+    ) -> dict[str, Any]:
+        if not account.isdigit():
+            logger.error(
+                "[DecisionExec] 注资跳过：执行账户坐标不可用（user=%r）", user_id
+            )
+            return {"success": False, "funded": 0.0, "reason": "NO_EXEC_ACCOUNT"}
+        uid = int(account)
+
+        from backend.services.trade_shared.simulation_manager import (
+            SimulationAccountManager,
+        )
+
+        manager = SimulationAccountManager(redis)
+        res = await manager.ensure_cash_floor(
+            uid,
+            float(floor),
+            tenant_id=tenant_id,
+            market=market,
+            min_deficit=FUNDING_MIN_DEFICIT,
+        )
+        if not res.get("success"):
+            logger.error(
+                "[DecisionExec] 注资被拒 market=%s round=%s reason=%s（腿照发，"
+                "撞墙会记拒单）",
+                market,
+                round_id,
+                res.get("reason"),
+            )
+            return {"success": False, "funded": 0.0, "reason": res.get("reason")}
+        funded = float(res.get("funded") or 0.0)
+        if funded <= 0:
+            return {"success": True, "funded": 0.0}
+
+        if db is None:
+            logger.error(
+                "[DecisionExec] 注资 %.2f 已进 Redis（market=%s round=%s）但无 PG "
+                "会话：台账缺行待人工补记",
+                funded,
+                market,
+                round_id,
+            )
+            return {"success": True, "funded": funded}
+
+        from backend.services.simulation.services.ledger_service import (
+            SimulationLedgerService,
+        )
+
+        try:
+            await SimulationLedgerService(db).record_cash_adjustment(
+                tenant_id=tenant_id,
+                user_id=uid,
+                market=market,
+                amount=funded,
+                account_snapshot=res.get("snapshot"),
+                ref_id=round_id,
+                note=f"决策轮镜像资金保障 round={round_id} agent={agent}",
+            )
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001 台账失败**不撤销** Redis 入金
+            # 撤销会再开一条竞态（期间成交已按新余额过账）；执行口径优先，缺行留痕。
+            logger.error(
+                "[DecisionExec] 注资 %.2f 已进 Redis（market=%s round=%s）但台账"
+                "落库失败：%s：不撤销（执行口径优先，缺行待补）",
+                funded,
+                market,
+                round_id,
+                exc,
+            )
+        logger.info(
+            "[DecisionExec] 执行户注资 %.2f market=%s round=%s",
+            funded,
+            market,
+            round_id,
+        )
+        return {"success": True, "funded": funded}
+
+    return _fund
+
+
 async def execute_batch(
     batch,
     *,
@@ -622,6 +811,7 @@ async def execute_batch(
     redis=None,
     real: bool | None = None,
     submitter: Submitter | None = None,
+    funder: Funder | None = None,
     tenant_id: str = "default",
     user_id: object = 0,
 ) -> ExecutionOutcome:
@@ -632,6 +822,11 @@ async def execute_batch(
     把「不知道」和「没有」压成同一个参数，正是重复下单的温床。
 
     ``real=None`` 时按 ``is_real_trading_enabled()`` 现读（进程级 env，一轮内不变）。
+
+    ``funder`` 只在 real 轮且本轮有买单腿时被调用（每市场一次，金额 =
+    :func:`buy_funding_floor`），**发生在任何提交之前**：卖单腿的成交回款可能先
+    到账，但地板按保守口径不含它。注资失败 fail-open（记 ERROR 后照常提交）；
+    ``None`` = 本调用不注资——``run_round`` 会构造默认件。
 
     ``agent`` 进幂等键（见 :func:`~backend.shared.order_contract.
     build_llm_decision_client_order_id`）：**一轮里有多个 agent 必须传**，否则两家
@@ -654,6 +849,16 @@ async def execute_batch(
         from backend.shared.live_trading_gate import is_real_trading_enabled
 
         real = is_real_trading_enabled()
+
+    if real and funder is not None and plan.buys:
+        # 注资在任何提交之前（且不跨持撮合锁——``ensure_cash_floor`` 内部自持自放）。
+        await _fund_round_buys(
+            funder=funder,
+            buys=plan.buys,
+            quotes=quotes,
+            round_id=round_id,
+            agent=agent,
+        )
 
     submit = submitter
     if submit is None:
@@ -749,12 +954,16 @@ async def run_round(
     tenant_id: str = "default",
     user_id: object = 0,
     submitter: Submitter | None = None,
+    funder: Funder | None = None,
 ) -> ExecutionOutcome:
     """``execute_batch`` 的编排版：自己读在途账，读不到就**一张单都不发**。
 
     ``inflight`` 显式给出时跳过取数（调用点已有可信来源，例如刚从券商对账回来）。
     两种失败语义在这里分家：``inflight=None`` + 读取失败 = ``aborted``（本轮不做），
     ``inflight=frozenset()`` = 「我确认没有在途」。
+
+    ``funder`` 缺省时用本轮的账户坐标（db/redis/tenant/user）构造默认注资器——
+    与默认提交器同一纪律：坐标属于「这一轮是谁在跑」，由这层闭合。
     """
     if inflight is None:
         read = await read_inflight(db, tenant_id=tenant_id, user_id=user_id)
@@ -774,6 +983,10 @@ async def run_round(
             logger.error("[DecisionExec] %s", reason)
             return ExecutionOutcome(round_id=round_id, plan=plan, aborted=reason)
         inflight = read.keys
+    if funder is None:
+        funder = _make_default_funder(
+            db=db, redis=redis, tenant_id=tenant_id, user_id=user_id
+        )
     return await execute_batch(
         batch,
         round_id=round_id,
@@ -788,6 +1001,7 @@ async def run_round(
         redis=redis,
         real=real,
         submitter=submitter,
+        funder=funder,
         tenant_id=tenant_id,
         user_id=user_id,
     )

@@ -4,6 +4,7 @@ Simulation Account Manager - Manage paper trading accounts in Redis
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -265,6 +266,34 @@ end
 account.positions = positions
 redis.call("SET", key, cjson.encode(account))
 return cjson.encode({success=true, unlocked=unlocked})
+"""
+
+        # 执行户现金注资（决策轮镜像资金保障的唯一原子原语）：只加现金、不动持仓。
+        # 与 _update_balance_lua 同式重算 total_asset = cash + market_value；金额守卫在
+        # 这里再钉一道（Python 层已拒 ≤0，脚本层防旁路直呼）。available_cash 字段
+        # 存在则同增（保持 frozen = max(0, cash - available) 口径），缺席不凭空造。
+        self._fund_cash_lua = """
+local key = KEYS[1]
+local amount = tonumber(ARGV[1])
+
+local raw = redis.call("GET", key)
+if not raw then
+    return cjson.encode({success=false, reason="ACCOUNT_NOT_FOUND"})
+end
+if not amount or amount <= 0 then
+    return cjson.encode({success=false, reason="INVALID_AMOUNT"})
+end
+
+local account = cjson.decode(raw)
+local new_cash = tonumber(account.cash or 0) + amount
+account.cash = new_cash
+if account.available_cash ~= nil then
+    account.available_cash = tonumber(account.available_cash or 0) + amount
+end
+account.total_asset = new_cash + tonumber(account.market_value or 0)
+
+redis.call("SET", key, cjson.encode(account))
+return cjson.encode({success=true, cash=new_cash})
 """
 
     @staticmethod
@@ -962,6 +991,101 @@ return 0
         except Exception as e:
             logger.error("Failed to update simulation account atomically: %s", e)
             return {"success": False, "reason": "ATOMIC_UPDATE_FAILED"}
+
+    async def fund_execution_cash(
+        self,
+        user_id: int,
+        amount: float,
+        tenant_id: str = "default",
+        market: str = "CN",
+    ) -> dict[str, Any]:
+        """执行户现金注资（决策轮镜像保障；只加现金、不动持仓、不建账）。
+
+        ``update_balance`` 没有「纯入金」通路（它要求 symbol/成交量），而现金墙
+        （``_update_balance_lua`` 的守卫只读 ``cash``）需要一个原子入金原语。
+        纪律：
+
+        * 金额 ≤0 / NaN / Inf → ``INVALID_AMOUNT``（不 eval）；
+        * 账户不存在 → ``ACCOUNT_NOT_FOUND``（**不**自动建账：给一条不存在的账
+          注资会把建账断链掩盖成「钱已到位」）；
+        * 调用方必须已在同用户 ``locked_execution`` 临界区内（与撮合互斥）；
+        * ``available_cash`` 字段存在则同增，``total_asset`` 按
+          ``cash + market_value`` 重算（与 ``_update_balance_lua`` 同式）。
+        """
+        amt = float(amount)
+        if not math.isfinite(amt) or amt <= 0:
+            return {"success": False, "reason": "INVALID_AMOUNT"}
+        if not self._ensure_client():
+            return {"success": False, "reason": "REDIS_UNAVAILABLE"}
+
+        tenant_id = self._normalize_tenant(tenant_id)
+        # 与 update_balance 同口径：先做别名提升（admin '1'/'00000001' 双形），
+        # 保证规范键存在后 Lua 才 GET 得到账。
+        self._pick_cached_account(user_id, tenant_id, market)
+        key = self._get_key(user_id, tenant_id, market)
+
+        try:
+            result = self.redis.client.eval(self._fund_cash_lua, 1, key, str(amt))
+            payload = json.loads(result) if isinstance(result, str) else result
+            if isinstance(payload, dict):
+                return payload
+            return {"success": False, "reason": "INVALID_SCRIPT_RESULT"}
+        except Exception as e:
+            logger.error(
+                "Failed to fund simulation account tenant=%s user=%s: %s",
+                tenant_id,
+                user_id,
+                e,
+            )
+            return {"success": False, "reason": "FUND_FAILED"}
+
+    async def ensure_cash_floor(
+        self,
+        user_id: int,
+        floor: float,
+        tenant_id: str = "default",
+        market: str = "CN",
+        min_deficit: float = 0.0,
+    ) -> dict[str, Any]:
+        """把账户现金补到 ``floor``：读账 → 缺口 → 入金，**全程持同用户撮合锁**。
+
+        锁内读账是刻意的：缺口 = 地板 − 现现金，而现现金会被并发成交扣减——
+        锁外读意味着按一个可能已过时的余额算缺口（注少了照撞墙）。调用方拿到
+        ``snapshot``（注资前账户）用于 PG 台账行建账；本方法只动 Redis。
+
+        返回 ``{"success", "funded", "cash_before"?, "cash"?, "snapshot"?}``；
+        账户不存在 / 入金被拒 → ``success=False`` + ``reason``（不改账）。
+        ``deficit ≤ min_deficit`` 视为已够（不写分钱级台账行）。
+        """
+        tid = self._normalize_tenant(tenant_id)
+        async with self.locked_execution(user_id, tid):
+            snapshot = await self.get_account(user_id, tid, market=market)
+            if not snapshot:
+                return {"success": False, "reason": "ACCOUNT_NOT_FOUND"}
+            cash = float(snapshot.get("cash") or 0.0)
+            deficit = float(floor) - cash
+            if deficit <= float(min_deficit):
+                return {
+                    "success": True,
+                    "funded": 0.0,
+                    "cash": cash,
+                    "snapshot": snapshot,
+                }
+            res = await self.fund_execution_cash(
+                user_id, deficit, tenant_id=tid, market=market
+            )
+            if not res.get("success"):
+                return {
+                    "success": False,
+                    "reason": str(res.get("reason") or "FUND_FAILED"),
+                }
+            return {
+                "success": True,
+                "funded": deficit,
+                "cash_before": cash,
+                "cash": cash + deficit,
+                "snapshot": snapshot,
+            }
 
     async def unlock_t1(
         self, user_id: int, tenant_id: str = "default", market: str = "CN"
