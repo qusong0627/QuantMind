@@ -28,7 +28,7 @@ from backend.services.engine.alpha_agent.direction_decompose import (
 from backend.services.engine.alpha_agent.doc_gate import require_doc_mining
 from backend.services.engine.alpha_agent.doc_store import get_doc_store
 from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
-from backend.services.engine.alpha_agent.launcher import get_launcher
+from backend.services.engine.alpha_agent.launcher import QueueFullError, get_launcher
 from backend.services.engine.alpha_agent.task_store import get_mining_task_store
 from backend.services.engine.auth_context import (
     assert_identity_not_spoofed,
@@ -52,6 +52,10 @@ _VALID_CN_UNIVERSES: list[str] = list(cn_index_symbols().keys())
 #: （静默截断）；这里 8k 是**提交层**显式拒绝——文档整理草稿可长，但方向文本
 #: 塞给 RD-Agent 子进程是有成本的，超限要让用户看到并自己精简，不是被截。
 MAX_SUBMIT_DIRECTION_CHARS = 8000
+
+#: 批量派发的单次条数上限。拆解上限 12 张卡，正常批量都在其内；明显超限的
+#: 请求是误用（且会瞬间占满排队深度），整包先拒而不是逐条失败。
+MAX_BATCH_DISPATCH_ITEMS = 20
 
 
 class EvolveRequest(BaseModel):
@@ -87,6 +91,17 @@ class DecomposeRequest(BaseModel):
             f"卡片数上限（默认 {MAX_CARDS_DEFAULT}、上限 {MAX_CARDS_LIMIT}，越界自动收敛）"
         ),
     )
+
+
+class MiningBatchRequest(BaseModel):
+    """批量派发请求：每条 direction 独立成任务；名满自动排队（不 429 背压）。"""
+
+    directions: list[str] = Field(
+        ..., min_length=1, description="按顺序派发的挖掘方向列表（通常是拆解卡片拼接文本）"
+    )
+    market: str = Field("a_share", description="目标市场")
+    universe: str = Field("csi300", description="股票池")
+    loop_n: int | None = Field(None, ge=1, le=20, description="每任务演化轮数（默认 5）")
 
 
 def _normalize_pool_ref(universe: str) -> str:
@@ -743,6 +758,149 @@ async def decompose_directions(request: Request, payload: DecomposeRequest):
         result["dropped"],
     )
     return {"code": 200, "data": result}
+
+
+@router.post("/mining/batch")
+async def dispatch_mining_batch(request: Request, payload: MiningBatchRequest):
+    """批量派发挖掘任务：逐条 :meth:`start_or_queue`（有名额即启动，满则排队）。
+
+    与 evolve 的 429 背压不同，这里**不拒正常提交**——只有排队深度上限
+    （``ALPHA_AGENT_MAX_QUEUED_*``）才让该条目失败。请求级问题（空列表/
+    超条数/空方向/超长/未知市场）整包 400：一条都没派，不存在半批派出去；
+    运行期错误（排队满/硬件锁/意外异常）逐条回传，绝不拖垮整批。
+    """
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+
+    directions = [(d or "").strip() for d in payload.directions]
+    if len(directions) > MAX_BATCH_DISPATCH_ITEMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"一次最多派发 {MAX_BATCH_DISPATCH_ITEMS} 条方向（当前 {len(directions)} 条），请分批提交",
+        )
+    for idx, direction in enumerate(directions, start=1):
+        if not direction:
+            raise HTTPException(status_code=400, detail=f"第 {idx} 条方向为空，请删除或补全")
+        if len(direction) > MAX_SUBMIT_DIRECTION_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"第 {idx} 条方向过长（{len(direction)} 字，上限 {MAX_SUBMIT_DIRECTION_CHARS} 字），"
+                    "请精简后重试"
+                ),
+            )
+
+    try:
+        from backend.services.engine.rd_agent.market_adapters import (
+            get_adapter,
+            list_markets,
+        )
+
+        adapter = get_adapter(payload.market)
+    except ValueError as e:
+        available = [m["market_id"] for m in list_markets()]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown market: {payload.market}. Available: {available}",
+        ) from e
+    if payload.market == "a_share" and not _universe_is_valid(payload.universe):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown universe: {payload.universe}. "
+                f"Available builtins: {_VALID_CN_UNIVERSES}, "
+                "or any active global/custom pool code from /stock-pools/options"
+            ),
+        )
+
+    llm_config, llm_source, embedding_env = await _resolve_effective_llm_config(
+        auth_user_id, auth_tenant_id
+    )
+    if llm_config is None:
+        raise HTTPException(
+            status_code=412,
+            detail="未配置 LLM API Key：可在个人中心「其他设置 → AI 服务配置」填写（与 AI-IDE 共用），"
+            "或在服务器 .env 配置 DEEPSEEK_API_KEY / AI_IDE_LLM_API_KEY / OPENAI_API_KEY。",
+        )
+    overrides = build_subprocess_overrides(llm_config, embedding_env)
+
+    launcher = get_launcher()
+    loop_n = payload.loop_n or 5
+    items: list[dict] = []
+    started = queued = failed = 0
+    for idx, direction in enumerate(directions):
+        try:
+            receipt = await launcher.start_or_queue(
+                auth_user_id,
+                market=payload.market,
+                universe=payload.universe,
+                loop_n=loop_n,
+                direction=direction,
+                llm_overrides=overrides,
+                tenant_id=auth_tenant_id,
+            )
+        except (QueueFullError, HardwareLockError) as exc:
+            items.append(
+                {
+                    "index": idx,
+                    "task_id": None,
+                    "status": "failed",
+                    "queue_position": None,
+                    "direction_preview": direction[:80],
+                    "error": str(exc),
+                }
+            )
+            failed += 1
+            continue
+        except Exception as exc:  # noqa: BLE001 —— 单条失败不拖垮整批，错误随条目回传
+            logger.warning("[alpha-agent] batch dispatch item %d failed: %s", idx, exc)
+            items.append(
+                {
+                    "index": idx,
+                    "task_id": None,
+                    "status": "failed",
+                    "queue_position": None,
+                    "direction_preview": direction[:80],
+                    "error": f"派发失败：{exc}",
+                }
+            )
+            failed += 1
+            continue
+        if receipt.status == "queued":
+            queued += 1
+        else:
+            started += 1
+        items.append(
+            {
+                "index": idx,
+                "task_id": receipt.task_id,
+                "status": receipt.status,
+                "queue_position": receipt.queue_position,
+                "direction_preview": direction[:80],
+                "error": None,
+            }
+        )
+
+    logger.info(
+        "[alpha-agent] batch dispatch source=%s model=%s n=%d started=%d queued=%d failed=%d",
+        llm_source,
+        llm_config.model,
+        len(directions),
+        started,
+        queued,
+        failed,
+    )
+    return {
+        "code": 200,
+        "data": {
+            "items": items,
+            "started": started,
+            "queued": queued,
+            "failed": failed,
+            "market": payload.market,
+            "universe": payload.universe,
+            "market_name": adapter.market_name,
+        },
+    }
 
 
 @router.get("/tasks/history")
