@@ -8,6 +8,9 @@
 - 兜底 finally 的身份守卫清理（旧任务不得拆新任务的去重键）；
 - 矩阵：归属过滤（他人因子不见单元格）、静态兼容档随市场列集、
   未跑过 = not_run（不是空白）、counts 汇总；
+- 矩阵显著性列（T-FB-18）：NW t 读台账 ``ic_nw_t``、BY q 族校正与 ``/report``
+  单源（同 run 的 q 逐位相等，期望值独立重算）、无批次回落 q = p、非完成
+  终态一律 None；
 - 曲线：404 语义（run 不存在 / 序列未落盘）。
 """
 
@@ -439,6 +442,217 @@ def test_matrix_rejects_unknown_market(client, monkeypatch):
         f"{_PREFIX}/matrix", json={"factor_ids": ["f-1"], "markets": ["mars"]}
     )
     assert r.status_code == 400
+
+
+# ── 矩阵显著性列（T-FB-18）────────────────────────────────────────────
+
+
+def _sig_meta():
+    async def _meta(ids):
+        return [
+            {
+                "factor_id": "f-1",
+                "factor_name": "A",
+                "factor_code": _CODE,
+                "user_id": "u-1",
+                "ic_value": 0.03,
+                "market": "a_share",
+                "status": "completed",
+            }
+        ]
+
+    return _meta
+
+
+def test_matrix_significance_from_batch_family(client, monkeypatch):
+    """矩阵显著性列：NW t 取台账 ic_nw_t；族 = 同批次完成单元 → BY q（独立重算）。"""
+
+    async def _cells(ids, markets=None):
+        return [
+            {
+                "run_id": "fb-run-1",
+                "factor_id": "f-1",
+                "status": "completed",
+                "batch_id": "fb-batch-1",
+                "market": "us_stock",
+                "universe": "all",
+                "date_range": "2023~2026",
+                "finished_at": None,
+                "error": None,
+                "metrics": {"ic": 0.05, "ic_nw_t": 5.6},
+                "ic_value": 0.05,
+            }
+        ]
+
+    async def _batch_runs(batch_id):
+        assert batch_id == "fb-batch-1"
+        return [
+            {"run_id": "fb-run-1", "status": "completed", "metrics": {"ic_nw_t": 5.6}},
+            {"run_id": "fb-run-2", "status": "completed", "metrics": {"ic_nw_t": -0.4}},
+            {"run_id": "fb-run-3", "status": "data_unsupported", "metrics": {}},
+        ]
+
+    monkeypatch.setattr(fb.store, "get_factor_meta", _sig_meta())
+    monkeypatch.setattr(fb.store, "latest_cells", _cells)
+    monkeypatch.setattr(fb.store, "batch_runs", _batch_runs)
+    monkeypatch.setattr(fb, "get_authenticated_identity", lambda request: ("u-1", "d"))
+
+    r = client.post(
+        f"{_PREFIX}/matrix",
+        json={"factor_ids": ["f-1"], "markets": ["us_stock"]},
+    )
+    assert r.status_code == 200
+    sig = r.json()["data"]["factors"][0]["cells"]["us_stock"]["significance"]
+
+    # 期望 q 用独立实现重算（族 p 列表 → BY 校正 → 自身位），不调被测函数
+    mm = pytest.importorskip("backend.services.engine.factor_report.metrics")
+    assert sig["nw_t"] == pytest.approx(5.6)
+    assert sig["p_value"] == pytest.approx(mm.normal_pvalue(5.6))
+    p_list = [mm.normal_pvalue(5.6), mm.normal_pvalue(-0.4)]
+    assert sig["q_value_bhy"] == pytest.approx(float(mm.bhy_qvalues(p_list)[0]))
+    assert sig["family_n"] == 2  # 达降级单元不进族
+    assert "同一批次全部完成单元" in sig["family_note"]
+
+
+def test_matrix_significance_without_batch_falls_back_to_q_eq_p(client, monkeypatch):
+    """无批次上下文 → q = p（n=1）并在 family_note 明说；非完成终态一律 None。"""
+
+    async def _cells(ids, markets=None):
+        return [
+            {
+                "run_id": "fb-run-1",
+                "factor_id": "f-1",
+                "status": "completed",
+                "batch_id": None,
+                "market": "us_stock",
+                "universe": "all",
+                "date_range": "2023~2026",
+                "finished_at": None,
+                "error": None,
+                "metrics": {"ic_nw_t": 2.0},
+                "ic_value": 0.05,
+            },
+            {
+                "run_id": "fb-run-9",
+                "factor_id": "f-1",
+                "status": "failed",
+                "batch_id": "fb-batch-1",
+                "market": "hong_kong",
+                "universe": None,
+                "date_range": None,
+                "finished_at": None,
+                "error": "boom",
+                "metrics": {"ic_nw_t": 9.9},
+                "ic_value": None,
+            },
+        ]
+
+    async def _batch_runs(batch_id):  # 失败格不该进族也不该触发查询口径错配
+        return [{"run_id": "fb-run-9", "status": "failed", "metrics": {"ic_nw_t": 9.9}}]
+
+    monkeypatch.setattr(fb.store, "get_factor_meta", _sig_meta())
+    monkeypatch.setattr(fb.store, "latest_cells", _cells)
+    monkeypatch.setattr(fb.store, "batch_runs", _batch_runs)
+    monkeypatch.setattr(fb, "get_authenticated_identity", lambda request: ("u-1", "d"))
+
+    r = client.post(
+        f"{_PREFIX}/matrix",
+        json={"factor_ids": ["f-1"], "markets": ["us_stock", "hong_kong"]},
+    )
+    cells = r.json()["data"]["factors"][0]["cells"]
+
+    sig = cells["us_stock"]["significance"]
+    assert sig["q_value_bhy"] == sig["p_value"]
+    assert sig["family_n"] == 1
+    assert "无批次族上下文" in sig["family_note"]
+
+    assert cells["hong_kong"]["significance"] is None
+
+
+def test_matrix_and_report_share_family_q(client, stub, monkeypatch):
+    """单源钉死：同一 run 的矩阵格 q 与 /report 报告块 q 逐位相等。
+
+    ``stub`` 不能省：/report 走 ``_require_owned_factor``（真查因子库，
+    单测里 "f-1" 不存在 → 404）；矩阵端点不查归属，故另两个矩阵用例不需要。
+    """
+
+    run_row = {
+        "run_id": "fb-run-1",
+        "factor_id": "f-1",
+        "factor_name": "A",
+        "status": "completed",
+        "kind": None,
+        "batch_id": "fb-batch-1",
+        "market": "us_stock",
+        "universe": "all",
+        "data_source": "quantdb_factors",
+        "date_range": "2023~2026",
+        "ic_value": 0.05,
+        "rank_ic": None,
+        "icir": None,
+        "rank_icir": None,
+        "sharpe_ratio": None,
+        "annual_return": None,
+        "max_drawdown": None,
+        "metrics": {"ic": 0.05, "ic_nw_t": 5.6},
+        "params": {},
+        "error": None,
+        "created_at": None,
+        "finished_at": None,
+    }
+    series = {
+        "dates": ["2023-01-02", "2023-01-03", "2023-01-04"],
+        "ic": [0.1, -0.05, 0.2],
+        "nav_long": [1.0, 1.01, 1.02],
+        "nav_ls": [1.0, 1.005, 1.012],
+        "turnover": [0.1, 0.12, 0.11],
+        "bench": "equal_weight",
+        "meta": {"n_buckets": 5, "top_pct": 0.3, "cost_bps": 20},
+    }
+
+    async def _get_run(run_id):
+        return dict(run_row) if run_id == "fb-run-1" else None
+
+    async def _get_series(run_id):
+        return {"series": series} if run_id == "fb-run-1" else None
+
+    async def _batch_runs(batch_id):
+        # 3 完成单元同族：报告中 nw_t 由序列算出，与台账 5.6 同源；这里以台账值为准
+        return [
+            {"run_id": "fb-run-1", "status": "completed", "metrics": {"ic_nw_t": 5.6}},
+            {"run_id": "fb-run-2", "status": "completed", "metrics": {"ic_nw_t": -0.4}},
+            {
+                "run_id": "fb-run-3",
+                "status": "completed",
+                "metrics": {"ic_nw_t": 2.1},
+            },
+        ]
+
+    monkeypatch.setattr(fb.store, "get_factor_meta", _sig_meta())
+
+    async def _cells(ids, markets=None):
+        return [dict(run_row)]
+
+    monkeypatch.setattr(fb.store, "latest_cells", _cells)
+    monkeypatch.setattr(fb.store, "get_run", _get_run)
+    monkeypatch.setattr(fb.store, "get_series", _get_series)
+    monkeypatch.setattr(fb.store, "batch_runs", _batch_runs)
+    monkeypatch.setattr(fb, "get_authenticated_identity", lambda request: ("u-1", "d"))
+
+    m = client.post(
+        f"{_PREFIX}/matrix", json={"factor_ids": ["f-1"], "markets": ["us_stock"]}
+    )
+    matrix_sig = m.json()["data"]["factors"][0]["cells"]["us_stock"]["significance"]
+
+    rep = client.get(f"{_PREFIX}/report/fb-run-1")
+    assert rep.status_code == 200
+    report_sig = rep.json()["data"]["report"]["significance"]
+
+    # q 是单源不变量：两端点族输入（同批次完成单元的 ic_nw_t）与自身位一致 →
+    # q 逐位相等（nw_t 本身此处不同源：报告从打桩序列现算、矩阵读台账存值——
+    # 「存值 == 现算」由报告套件金样钉死，本用例不打桩真引擎算不出来的东西）。
+    assert matrix_sig["q_value_bhy"] == pytest.approx(report_sig["q_value_bhy"])
+    assert matrix_sig["family_n"] == report_sig["family_n"] == 3
 
 
 # ── 台账 / 曲线 ──────────────────────────────────────────────────────

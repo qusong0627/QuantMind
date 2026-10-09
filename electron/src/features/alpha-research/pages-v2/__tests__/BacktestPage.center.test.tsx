@@ -94,6 +94,7 @@ const MATRIX: MatrixResult = {
           finishedAt: null,
           inSample: true,
           metrics: { rank_ic: 0.05 },
+          significance: null,
         },
         us_stock: {
           status: 'completed',
@@ -107,6 +108,7 @@ const MATRIX: MatrixResult = {
           finishedAt: null,
           inSample: false,
           metrics: { rank_ic: 0.08 },
+          significance: null,
         },
       },
     },

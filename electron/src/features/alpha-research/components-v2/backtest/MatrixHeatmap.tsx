@@ -38,8 +38,10 @@ import type {
 import {
   BACKTEST_STATUS_LABELS,
   MATRIX_METRIC_SPECS,
+  MATRIX_SIGNIFICANCE_KEYS,
   matrixMetricSpec,
 } from '../../types-v2/backtestCenter';
+import type { MatrixSignificanceKey } from '../../types-v2/backtestCenter';
 import { cn, formatNumber, formatPercent, formatShortTime } from '../../utils-v2';
 import { buildCsvText, downloadCsvFile } from '../../../../utils/csvExport';
 
@@ -58,7 +60,16 @@ const DEGRADED_STATUSES = ['data_unsupported', 'insufficient', 'unavailable'];
 
 // ── 取值与格式化 ─────────────────────────────────────────────────────
 
+/** 显著性三列（NW t / p / q）住在 cell.significance 段，不在 metrics 字典 */
+function isSignificanceKey(key: string): key is MatrixSignificanceKey {
+  return (MATRIX_SIGNIFICANCE_KEYS as readonly string[]).includes(key);
+}
+
 function metricValue(cell: MatrixCell, key: string): number | null {
+  if (isSignificanceKey(key)) {
+    const v = cell.significance?.[key] ?? null;
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  }
   const v = cell.metrics[key];
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
@@ -67,9 +78,13 @@ function formatMetric(value: number, format: 'number' | 'percent', precision: nu
   return format === 'percent' ? formatPercent(value, precision) : formatNumber(value, precision);
 }
 
-/** 有符号指标（正负语义）vs 风险指标（幅值语义，无正负着色） */
+/**
+ * 有符号指标（正负语义）vs 幅值语义指标（无正负着色）。
+ * p / q 是 [0,1] 概率（越小越显著），借正负色会把「q=0 最显著」画成浅色、
+ * 「q≈1」画成深红——语义反了；按幅值琥珀加深（越弱越深，读作警示）。
+ */
 function metricIsSigned(key: string): boolean {
-  return !['max_drawdown', 'ann_turnover', 'n_days'].includes(key);
+  return !['max_drawdown', 'ann_turnover', 'n_days', 'p_value', 'q_value_bhy'].includes(key);
 }
 
 /** 完成格的背景/文字色：有符号指标红正绿负，风险指标琥珀按幅值 */
@@ -119,7 +134,19 @@ function cellTooltip(row: MatrixFactorRow, marketLabel: string, cell: MatrixCell
   if (cell.dateRange) lines.push(`区间：${cell.dateRange}`);
   if (cell.finishedAt) lines.push(`收口：${formatShortTime(cell.finishedAt)}`);
   if (cell.error) lines.push(`原因：${cell.error}`);
-  const metricKeys = Object.keys(cell.metrics).filter((k) => cell.metrics[k] != null);
+  if (cell.significance) {
+    const s = cell.significance;
+    const fmt = (v: number | null, digits: number) => (v == null ? '—' : formatNumber(v, digits));
+    const family =
+      s.family_n == null ? '' : s.family_n > 1 ? `（族 N=${s.family_n}，BY 校正）` : '（无族上下文，q=p）';
+    lines.push(
+      `显著性：NW t=${fmt(s.nw_t, 2)}  p=${fmt(s.p_value, 4)}  BY q=${fmt(s.q_value_bhy, 4)}${family}`,
+    );
+  }
+  const metricKeys = Object.keys(cell.metrics).filter(
+    // significance 段在场时跳过 ic_nw_t（同一数值，显著性行已展示，避免重复）
+    (k) => cell.metrics[k] != null && !(cell.significance && k === 'ic_nw_t'),
+  );
   if (metricKeys.length > 0) {
     lines.push(
       metricKeys
@@ -583,6 +610,7 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
                               finishedAt: null,
                               inSample: col.inSample,
                               metrics: {},
+                              significance: null,
                             };
                             const value =
                               cell.status === 'completed' ? metricValue(cell, metricKey) : null;

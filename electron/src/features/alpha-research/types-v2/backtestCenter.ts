@@ -52,6 +52,18 @@ export interface MarketInfo {
 
 // ── 适配矩阵（POST /matrix） ─────────────────────────────────────────
 
+/**
+ * 矩阵格显著性摘要（T-FB-18）。NW t 读台账 ic_nw_t；BY q 的族 = 同批次完成
+ * 单元（与报告块单源）。非完成终态或无 NW t → 整个对象为 null（格显「—」）。
+ */
+export interface MatrixSignificance {
+  nw_t: number | null;
+  p_value: number | null;
+  q_value_bhy: number | null;
+  family_n: number | null;
+  family_note: string | null;
+}
+
 export interface MatrixCell {
   status: MatrixCellStatus;
   runId: string | null;
@@ -72,6 +84,8 @@ export interface MatrixCell {
    * 缺失是**键缺席或 null**，一律显「—」，绝不显示成 0）。
    */
   metrics: Record<string, number | null>;
+  /** 显著性摘要（T-FB-18）；不可计算时 null（不得冒充 0） */
+  significance: MatrixSignificance | null;
 }
 
 export interface MatrixFactorRow {
@@ -382,12 +396,21 @@ export const MATRIX_METRIC_SPECS: MatrixMetricSpec[] = [
   { key: 'ic', label: 'IC', direction: 'higher', format: 'number', precision: 4 },
   { key: 'icir', label: 'ICIR', direction: 'higher', format: 'number', precision: 3 },
   { key: 'rank_icir', label: 'Rank ICIR', direction: 'higher', format: 'number', precision: 3 },
+  // 显著性三列（T-FB-18）：值在 cell.significance 段；NW t 越大越显著，
+  // p / q 越小越显著（阈值筛选如「NW t ≥ 1.96」「BY q 值 ≤ 0.05」）。
+  { key: 'nw_t', label: 'NW t', direction: 'higher', format: 'number', precision: 2 },
+  { key: 'p_value', label: 'p 值', direction: 'lower', format: 'number', precision: 4 },
+  { key: 'q_value_bhy', label: 'BY q 值', direction: 'lower', format: 'number', precision: 4 },
   { key: 'sharpe_net', label: '扣费夏普', direction: 'higher', format: 'number', precision: 2 },
   { key: 'ann_return_net', label: '扣费年化', direction: 'higher', format: 'percent', precision: 2 },
   { key: 'max_drawdown', label: '最大回撤', direction: 'lower', format: 'percent', precision: 2 },
   { key: 'ann_turnover', label: '年化换手', direction: 'lower', format: 'number', precision: 1 },
   { key: 'n_days', label: '有效天数', direction: 'none', format: 'number', precision: 0 },
 ];
+
+/** 取自 cell.significance 段的矩阵指标键（selector 与取值同源判定） */
+export const MATRIX_SIGNIFICANCE_KEYS = ['nw_t', 'p_value', 'q_value_bhy'] as const;
+export type MatrixSignificanceKey = (typeof MATRIX_SIGNIFICANCE_KEYS)[number];
 
 export function matrixMetricSpec(key: string): MatrixMetricSpec {
   return (

@@ -23,7 +23,9 @@
 显著性口径：
 
 - ``nw_t`` 与台账 ``metrics.ic_nw_t`` 同源同值（评估期由同一 ``nw_tstat`` 算出，
-  金样断言二者逐位相等）；
+  金样断言二者逐位相等）；矩阵显著性列（T-FB-18）经
+  :func:`significance_summary` 直接读台账存值，与报告块的族校正单源
+  （:func:`q_value_from_family`）；
 - ``q_value_bhy`` 的「族」= **同批次全部完成单元**（用户一次派发即一族假设，
   批内单元格共享同一数据面与同一参考系）；无批次上下文时 ``q = p`` 且在
   ``family_note`` 明说未做多重校正；
@@ -60,6 +62,54 @@ _UNAVAILABLE_BLOCKS: tuple[dict[str, str], ...] = (
         "reason": "未接入风格因子收益序列（需市值/价值等因子日收益）",
     },
 )
+
+#: 族校正注文（报告块与矩阵显著性列共用同一措辞，防两侧漂移）。
+_FAMILY_NOTE_CORRECTED = "族 = 同一批次全部完成单元（NW t → 正态双侧 p → BY 校正）"
+_FAMILY_NOTE_UNCORRECTED = "无批次族上下文：q = p（n=1，未做多重校正）"
+
+
+def q_value_from_family(family_nw_t: Sequence[float], self_index: int) -> float:
+    """族校正 q 值：族 NW t 列表（含自身，调用方对齐顺序）→ 正态双侧 p →
+    BY 校正后取自身位。报告块与矩阵显著性列（T-FB-18）走这一条实现。
+
+    调用方契约：``family_nw_t`` 各元素均非 None（族成员已按 ``ic_nw_t``
+    存在性过滤）、``0 <= self_index < len(family_nw_t)``。
+    """
+    p_list = [M.normal_pvalue(float(t)) for t in family_nw_t]
+    return float(M.bhy_qvalues(p_list)[int(self_index)])
+
+
+def significance_summary(
+    nw_t: float | None,
+    family_nw_t: Sequence[float] | None = None,
+    self_index: int = 0,
+) -> dict[str, Any] | None:
+    """显著性摘要（矩阵格用）：NW t → p → BY q（族校正可选）。
+
+    - ``nw_t`` 取台账 ``metrics.ic_nw_t``（与报告块 ``nw_t`` 同源同值）；缺失
+      → None——矩阵格显示「—」，绝不造数。
+    - 族契约同 :func:`q_value_from_family`；无族/自身不在族 → ``q = p``、
+      ``family_n = 1``、``family_note`` 明说未校正（与报告块同措辞单源）。
+    """
+    if nw_t is None:
+        return None
+    nw_t = float(nw_t)
+    p_value = M.normal_pvalue(nw_t)
+    q_value = p_value
+    family_n = 1
+    family_note = _FAMILY_NOTE_UNCORRECTED
+    if family_nw_t and 0 <= int(self_index) < len(family_nw_t):
+        family_n = len(family_nw_t)
+        if p_value is not None:
+            q_value = q_value_from_family(family_nw_t, int(self_index))
+        family_note = _FAMILY_NOTE_CORRECTED
+    return {
+        "nw_t": nw_t,
+        "p_value": p_value,
+        "q_value_bhy": q_value,
+        "family_n": family_n,
+        "family_note": family_note,
+    }
 
 
 def _nav_daily(nav: Sequence[float | None] | None) -> np.ndarray:
@@ -122,17 +172,17 @@ def _build_significance(
     p_value = M.normal_pvalue(nw_t)
 
     # 族校正：族 = 同批次全部完成单元的 NW t（调用方保证非空且 self_index 对齐）。
+    # q 计算与矩阵显著性列共用 q_value_from_family（单源）。
     q_value = p_value
     family_n = 1
     family_note: str
     if family_nw_t and 0 <= int(self_index) < len(family_nw_t):
-        p_list = [M.normal_pvalue(float(t)) for t in family_nw_t]
         family_n = len(family_nw_t)
         if p_value is not None:
-            q_value = float(M.bhy_qvalues(p_list)[int(self_index)])
-        family_note = "族 = 同一批次全部完成单元（NW t → 正态双侧 p → BY 校正）"
+            q_value = q_value_from_family(family_nw_t, int(self_index))
+        family_note = _FAMILY_NOTE_CORRECTED
     else:
-        family_note = "无批次族上下文：q = p（n=1，未做多重校正）"
+        family_note = _FAMILY_NOTE_UNCORRECTED
 
     if n_trials is None:
         if family_n > 1:

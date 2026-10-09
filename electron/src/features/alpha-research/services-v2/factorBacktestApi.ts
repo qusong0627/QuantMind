@@ -24,6 +24,7 @@ import type {
   MatrixFactorRow,
   MatrixMarketCol,
   MatrixResult,
+  MatrixSignificance,
   RunReport,
   RunReportResult,
   RunSeries,
@@ -119,6 +120,19 @@ function mapCell(raw: any): MatrixCell {
     finishedAt: str(raw?.finished_at),
     inSample: !!raw?.in_sample,
     metrics,
+    significance: mapSignificance(raw?.significance),
+  };
+}
+
+/** 显著性段（T-FB-18）：整体缺失/非对象 → null（格显「—」，不造 0）。 */
+function mapSignificance(raw: any): MatrixSignificance | null {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    nw_t: num(raw.nw_t),
+    p_value: num(raw.p_value),
+    q_value_bhy: num(raw.q_value_bhy),
+    family_n: num(raw.family_n),
+    family_note: str(raw.family_note),
   };
 }
 

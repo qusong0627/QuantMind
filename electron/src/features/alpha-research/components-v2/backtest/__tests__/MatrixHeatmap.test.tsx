@@ -7,13 +7,18 @@
  * - Best Market 徽标**仅样本外列且 ≥2 个有效值**才判（CN 样本内不参与，
  *   单值不称「最佳」）；
  * - 市场排名模式每列标注 № 名次；
- * - 点格外发完整 DrillTarget（runId/status/metrics），空因子时零请求。
+ * - 点格外发完整 DrillTarget（runId/status/metrics），空因子时零请求；
+ * - 显著性列（T-FB-18）值取 significance 段（不在 metrics 字典），缺失显「—」。
  */
 import React from 'react';
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { MatrixHeatmap } from '../MatrixHeatmap';
-import type { MatrixCell, MatrixResult } from '../../../types-v2/backtestCenter';
+import type {
+  MatrixCell,
+  MatrixResult,
+  MatrixSignificance,
+} from '../../../types-v2/backtestCenter';
 
 const mocks = vi.hoisted(() => ({
   fetchMatrix: vi.fn(),
@@ -41,6 +46,16 @@ const mkCell = (over: Partial<MatrixCell> = {}): MatrixCell => ({
   finishedAt: '2026-10-10T02:00:00Z',
   inSample: false,
   metrics: {},
+  significance: null,
+  ...over,
+});
+
+const mkSig = (over: Partial<MatrixSignificance> = {}): MatrixSignificance => ({
+  nw_t: null,
+  p_value: null,
+  q_value_bhy: null,
+  family_n: null,
+  family_note: null,
   ...over,
 });
 
@@ -60,7 +75,16 @@ const RESULT: MatrixResult = {
       cnIc: 0.011,
       cells: {
         a_share: mkCell({ inSample: true, metrics: { rank_ic: 0.05 } }),
-        us_stock: mkCell({ metrics: { rank_ic: 0.08 } }),
+        us_stock: mkCell({
+          metrics: { rank_ic: 0.08, ic_nw_t: 2.13 },
+          significance: mkSig({
+            nw_t: 2.13,
+            p_value: 0.0333,
+            q_value_bhy: 0.0412,
+            family_n: 4,
+            family_note: '族 = 同一批次全部完成单元（NW t → 正态双侧 p → BY 校正）',
+          }),
+        }),
         hong_kong: mkCell({ metrics: { rank_ic: 0.03 } }),
         crypto: mkCell({ status: 'data_unsupported', runId: null }),
       },
@@ -154,6 +178,31 @@ describe('适配矩阵', () => {
         metrics: expect.objectContaining({ rank_ic: 0.08 }),
       }),
     );
+  });
+
+  test('显著性列（T-FB-18）取自 significance 段：NW t / BY q 可切换；缺失显「—」', async () => {
+    await renderMatrix();
+
+    const selector = screen.getByLabelText('矩阵指标') as HTMLSelectElement;
+    fireEvent.change(selector, { target: { value: 'nw_t' } });
+    expect(screen.getByTestId('matrix-cell-fa-us_stock').textContent).toContain('2.13');
+    // fb-us：completed 但 significance 缺席 → 「—」，绝不显示成 0
+    expect(screen.getByTestId('matrix-cell-fb-us_stock').textContent).toBe('—');
+
+    fireEvent.change(selector, { target: { value: 'q_value_bhy' } });
+    expect(screen.getByTestId('matrix-cell-fa-us_stock').textContent).toContain('0.0412');
+  });
+
+  test('显著性 tooltip：NW t / p / BY q 与族 N；ic_nw_t 不重复展示', async () => {
+    await renderMatrix();
+
+    const title = screen.getByTestId('matrix-cell-fa-us_stock').getAttribute('title') ?? '';
+    expect(title).toContain('显著性：NW t=2.13');
+    expect(title).toContain('p=0.0333');
+    expect(title).toContain('BY q=0.0412');
+    expect(title).toContain('族 N=4');
+    // significance 段在场时 metrics 循环跳过 ic_nw_t（同值，只走显著性行）
+    expect(title).not.toContain('ic_nw_t=');
   });
 
   test('未选因子：引导空态、零请求', async () => {

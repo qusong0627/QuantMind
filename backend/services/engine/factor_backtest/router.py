@@ -8,7 +8,8 @@
 - ``GET  /batch/status``       批次进度（行终态回读 + 熔断/失败清单）
 - ``GET  /batches``            批次列表（UI 重开页面后找回在跑的批次）
 - ``POST /batch/cancel``       取消批次（杀当前单元；未启动单元不落行）
-- ``POST /matrix``             因子 × 市场适配矩阵（每格=最近一次运行 + 静态兼容）
+- ``POST /matrix``             因子 × 市场适配矩阵（每格=最近一次运行 + 静态兼容
+                               + NW t / p / BY q 显著性列，族校正与 /report 单源）
 - ``GET  /runs``               台账列表（可筛可排的数据面）
 - ``GET  /runs/{id}/series``   曲线下钻（IC/净值/分位/换手）
 - ``GET  /report/{id}``        机构报告标量块（headline/显著性/成本网格/超额标注）
@@ -39,7 +40,10 @@ from backend.services.engine.auth_context import get_authenticated_identity
 from backend.services.engine.factor_backtest import batch, store
 from backend.services.engine.factor_backtest.compat import classify_factor
 from backend.services.engine.factor_backtest.engine import evaluate_factor_market
-from backend.services.engine.factor_backtest.report import build_report_block
+from backend.services.engine.factor_backtest.report import (
+    build_report_block,
+    significance_summary,
+)
 from backend.services.engine.factor_backtest.report_pdf import export_report_pdf
 from backend.services.engine.factor_backtest.profiles import (
     columns_for_market,
@@ -541,6 +545,8 @@ async def factor_market_matrix(request: Request, payload: MatrixPayload):
     markets = payload.markets or all_markets
     cells = await store.latest_cells(visible, markets)
     cell_map = {(c["factor_id"], c["market"]): c for c in cells}
+    # 显著性（T-FB-18）：NW t / p / BY q——族校正与 /report 单源，每批次只查一次
+    sig_by_run = await _matrix_significance_by_run(cells)
 
     profiles = {p.market: p for p in list_market_profiles()}
     factors_out: list[dict[str, Any]] = []
@@ -559,7 +565,12 @@ async def factor_market_matrix(request: Request, payload: MatrixPayload):
         for m in markets:
             compat = classify_factor(code, columns_for_market(m))
             run = cell_map.get((fid, m)) if fid in visible else None
-            row["cells"][m] = _matrix_cell(run, compat, profiles[m])
+            row["cells"][m] = _matrix_cell(
+                run,
+                compat,
+                profiles[m],
+                sig_by_run.get(run["run_id"]) if run else None,
+            )
             counts[row["cells"][m]["status"]] = (
                 counts.get(row["cells"][m]["status"], 0) + 1
             )
@@ -586,7 +597,57 @@ async def factor_market_matrix(request: Request, payload: MatrixPayload):
     }
 
 
-def _matrix_cell(run: dict[str, Any] | None, compat: dict, profile) -> dict[str, Any]:
+async def _matrix_significance_by_run(
+    runs: list[dict[str, Any]],
+) -> dict[str, dict[str, Any] | None]:
+    """run_id → 显著性摘要（NW t / p / BY q / 族），与 ``/report`` 单源同口径。
+
+    族 = 同批次全部完成单元的 ``metrics.ic_nw_t``（每批次只查一次，整矩阵
+    共用）；自身不在族内 / 无批次 → 由 :func:`significance_summary` 回落
+    ``q = p``（n=1）。非完成终态或无 ``ic_nw_t`` → None（格显「—」，不造数）。
+    """
+    batches: dict[str, str] = {
+        r["run_id"]: r["batch_id"]
+        for r in runs
+        if r.get("status") == "completed" and r.get("batch_id")
+    }
+    families: dict[str, tuple[list[float], dict[str, int]]] = {}
+    for batch_id in dict.fromkeys(batches.values()):
+        siblings = await store.batch_runs(batch_id)
+        nw_ts: list[float] = []
+        index: dict[str, int] = {}
+        for s in siblings:
+            if s.get("status") != "completed":
+                continue
+            t = (s.get("metrics") or {}).get("ic_nw_t")
+            if t is None:
+                continue
+            index[s["run_id"]] = len(nw_ts)
+            nw_ts.append(float(t))
+        families[batch_id] = (nw_ts, index)
+
+    out: dict[str, dict[str, Any] | None] = {}
+    for r in runs:
+        nw_t = (r.get("metrics") or {}).get("ic_nw_t")
+        if r.get("status") != "completed" or nw_t is None:
+            out[r["run_id"]] = None
+            continue
+        family = families.get(batches.get(r["run_id"], ""))
+        if family and r["run_id"] in family[1]:
+            out[r["run_id"]] = significance_summary(
+                nw_t, family[0], family[1][r["run_id"]]
+            )
+        else:
+            out[r["run_id"]] = significance_summary(nw_t)
+    return out
+
+
+def _matrix_cell(
+    run: dict[str, Any] | None,
+    compat: dict,
+    profile,
+    significance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """单元格：未跑过 → not_run（带静态兼容档）；跑过 → 最近一次运行摘要。"""
     cell: dict[str, Any] = {
         "status": "not_run",
@@ -600,6 +661,7 @@ def _matrix_cell(run: dict[str, Any] | None, compat: dict, profile) -> dict[str,
         "finished_at": None,
         "in_sample": profile.in_sample,
         "metrics": {},
+        "significance": None,
     }
     if run is None:
         return cell
@@ -615,6 +677,7 @@ def _matrix_cell(run: dict[str, Any] | None, compat: dict, profile) -> dict[str,
                 run["finished_at"].isoformat() if run.get("finished_at") else None
             ),
             "metrics": {k: metrics.get(k) for k in _CELL_METRIC_KEYS if k in metrics},
+            "significance": significance,
         }
     )
     # 排序便利键（前端排名视图直接排；缺失一律 None 显示「—」）。metrics_json
@@ -764,9 +827,7 @@ async def export_backtest_report_pdf(run_id: str, request: Request):
     report = await _assemble_report_block(run, run_id, series, n_trials=None)
 
     try:
-        path, filename = await asyncio.to_thread(
-            export_report_pdf, run, series, report
-        )
+        path, filename = await asyncio.to_thread(export_report_pdf, run, series, report)
     except ValueError as exc:
         # 降级块：把业务原因原文带给用户（不是服务端错误）
         raise HTTPException(status_code=409, detail=str(exc)) from exc

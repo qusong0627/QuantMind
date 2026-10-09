@@ -358,6 +358,8 @@ async def latest_cells(
 
     取最近一次而非「最近一次成功」：``insufficient``/``failed`` 本身就是要
     展示的适配结论（诚实降级），静默跳过会把失败化妆成「没跑过」。
+
+    ``batch_id`` 供矩阵显著性列的批内族校正（T-FB-18：q 取同批次完成单元）。
     """
     if not factor_ids:
         return []
@@ -372,6 +374,7 @@ async def latest_cells(
                 f"""
                 SELECT DISTINCT ON (factor_id, market)
                        run_id, factor_id, factor_name, status, kind,
+                       batch_id,
                        market, universe, data_source, date_range,
                        ic_value, rank_ic, icir, rank_icir,
                        sharpe_ratio, annual_return, max_drawdown,
