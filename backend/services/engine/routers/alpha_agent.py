@@ -20,6 +20,7 @@ import httpx
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from backend.services.engine.alpha_agent import profile_gateway
 from backend.services.engine.alpha_agent.doc_gate import require_doc_mining
 from backend.services.engine.alpha_agent.doc_store import get_doc_store
 from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
@@ -173,37 +174,17 @@ def normalize_embedding_status(profile_data: dict | None) -> dict:
 
 
 def _profile_gateway() -> str:
-    return os.getenv("INTERNAL_API_GATEWAY_URL") or "http://127.0.0.1:8000"
+    return profile_gateway.profile_gateway_url()
 
 
 async def _fetch_profile_raw(user_id: str, tenant_id: str) -> dict | None:
     """直接取用户 Profile 原始字段（不做「有没有 chat key」的判断）。
 
-    embedding 状态必须走这条：``_fetch_profile_llm_config`` 在 chat key 缺失时
-    返回 None，而两个通道是独立的——没配 chat 的账号照样要能看见自己的
-    embedding 配置。
+    实现已迁至 ``alpha_agent.profile_gateway``（文档解析后台轮询也要读
+    Profile——非路由代码不该 import 路由私有名）。保留本名做兼容层：
+    本模块多处调用与既有测试 monkeypatch 的都是这个名字。
     """
-    from backend.shared.auth import get_internal_call_secret
-
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                f"{_profile_gateway()}/api/v1/profiles/{user_id}",
-                headers={
-                    "X-Internal-Call": get_internal_call_secret(),
-                    "X-User-Id": user_id,
-                    "X-Tenant-Id": tenant_id,
-                },
-            )
-        if resp.status_code != 200:
-            logger.warning(
-                "[alpha-agent] fetch profile %s: http %s", user_id, resp.status_code
-            )
-            return None
-        return resp.json().get("data", {}) or {}
-    except Exception:
-        logger.exception("[alpha-agent] fetch profile %s failed", user_id)
-        return None
+    return await profile_gateway.fetch_profile_raw(user_id, tenant_id)
 
 
 async def _update_profile(user_id: str, tenant_id: str, payload: dict) -> None:

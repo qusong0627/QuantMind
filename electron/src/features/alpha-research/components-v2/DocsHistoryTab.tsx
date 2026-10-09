@@ -170,7 +170,9 @@ export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refres
           }`}
         >
           {!quota.token_configured ? (
-            <span>解析服务未配置（MinerU Token 缺失），上传解析暂不可用</span>
+            <span>
+              解析服务未配置（MinerU Token 缺失）：可在个人中心「其他设置 → AI 服务配置」填写自己的 Token，或联系管理员配置服务器
+            </span>
           ) : (
             <>
               <span>今日已用 {quota.user_used}/{quota.user_limit} 页</span>

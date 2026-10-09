@@ -40,6 +40,7 @@ from backend.services.engine.alpha_agent.doc_parse_service import (  # noqa: E40
 )
 from backend.services.engine.alpha_agent.mineru_client import (  # noqa: E402
     MineruBatchItem,
+    MineruConfig,
     MineruError,
     MineruFileSpec,
 )
@@ -1019,3 +1020,266 @@ async def test_cancel_while_sleeping_does_not_raise(tmp_path: Path) -> None:
     await asyncio.sleep(0.02)
     assert await svc.cancel(DOC_ID) is True
     assert DOC_ID not in svc._tasks
+
+
+# ── 生产装配路径：client 工厂 / 用户自带 MinerU Token ───────────────
+#
+# 生产单例（get_doc_parse_service()）**不注入 client**——客户端每逢需要时
+# 才能建（env token 或用户 Profile 里的 token）。以上用例全部注入替身，
+# 于是「self._client is None 时轮询怎么办」这条**生产必经之路从未被覆盖**：
+# 轮询循环的兜底 except 会把 AttributeError 当瞬态异常吞掉重试，直到 2h
+# 超时——每份文档都失败，日志却只说「轮询意外异常」。
+
+
+class FakeClientFactory:
+    """记录每次构建配置，返回同一个 FakeMineru（观察用）。"""
+
+    def __init__(self) -> None:
+        self.configs: list[MineruConfig] = []
+        self.client = FakeMineru()
+
+    def __call__(self, cfg: MineruConfig) -> FakeMineru:
+        self.configs.append(cfg)
+        return self.client
+
+
+def mk_factory_service(
+    tmp_path: Path,
+    store: FakeStore,
+    factory: FakeClientFactory,
+    *,
+    quota: FakeQuota | None = None,
+    clock: FakeClock | None = None,
+):
+    """生产装配形态：client=None + client_factory（与单例一致）。"""
+    clock = clock or FakeClock()
+    return DocParseService(
+        store=store,
+        quota=quota or FakeQuota(),
+        client=None,
+        client_factory=factory,
+        docs_root=tmp_path,
+        poll_interval_s=5.0,
+        parse_timeout_s=7200.0,
+        clock=clock.now,
+        sleep=clock.sleep,
+    ), clock
+
+
+@pytest.mark.asyncio
+async def test_poll_once_builds_client_via_factory_in_production_wiring(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """不注入 client 时轮询必须自己经工厂建客户端（env token 路径）。"""
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+
+    monkeypatch.setattr(
+        parse_mod, "resolve_mineru_config", lambda: MineruConfig(token="env-tok")
+    )
+    store = FakeStore({DOC_ID: mk_doc(tmp_path)})
+    factory = FakeClientFactory()
+    factory.client.results_queue = [
+        [MineruBatchItem(file_name="paper.pdf", state="running", data_id=DOC_ID)]
+    ]
+    svc, _ = mk_factory_service(tmp_path, store, factory)
+
+    assert await svc._poll_once(DOC_ID) == "active"
+    assert [c.token for c in factory.configs] == ["env-tok"]
+    assert factory.client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_poll_once_uses_user_own_token_for_user_sourced_doc(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """用户自带 Token 的批次建在用户账号下——轮询必须用同一 Token 查结果。
+
+    env 里没有任何 token 也要能跑：用户 token 独立于 env 兜底。
+    """
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+
+    async def fake_resolve(user_id, tenant_id, *, strict=False):
+        assert (user_id, tenant_id) == ("u1", "t-1")
+        return "user-tok", "user"
+
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
+
+    store = FakeStore(
+        {DOC_ID: mk_doc(tmp_path, mineru_token_src="user", tenant_id="t-1")}
+    )
+    factory = FakeClientFactory()
+    factory.client.results_queue = [
+        [MineruBatchItem(file_name="paper.pdf", state="running", data_id=DOC_ID)]
+    ]
+    svc, _ = mk_factory_service(tmp_path, store, factory)
+
+    assert await svc._poll_once(DOC_ID) == "active"
+    assert [c.token for c in factory.configs] == ["user-tok"]
+    assert factory.configs[0].base_url, "base_url 走 env/默认兜底，不允许为空"
+
+
+@pytest.mark.asyncio
+async def test_poll_once_user_token_resolution_cached_within_ttl(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """轮询每 5s 一跳——用户 token 解析必须带 TTL 缓存，不能每跳打一次网关。"""
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+
+    calls: list[tuple] = []
+
+    async def fake_resolve(user_id, tenant_id, *, strict=False):
+        calls.append((user_id, tenant_id, strict))
+        return "user-tok", "user"
+
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
+
+    store = FakeStore(
+        {DOC_ID: mk_doc(tmp_path, mineru_token_src="user", tenant_id="t-1")}
+    )
+    factory = FakeClientFactory()
+    running = [MineruBatchItem(file_name="paper.pdf", state="running", data_id=DOC_ID)]
+    factory.client.results_queue = [running, running]
+    svc, clock = mk_factory_service(tmp_path, store, factory)
+
+    await svc._poll_once(DOC_ID)
+    clock.t = 299.0
+    await svc._poll_once(DOC_ID)
+    assert len(calls) == 1, "TTL 内复用缓存，不打网关"
+    assert calls[0][2] is True, "后台轮询必须 strict 解析（读不到 ≠ 没配）"
+
+    clock.t = 301.0
+    await svc._poll_once(DOC_ID)
+    assert len(calls) == 2, "TTL 过期后重新解析"
+    assert len(factory.configs) == 1, "同一 token 复用同一客户端实例"
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_fails_doc_when_user_token_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """用户把 Token 清掉：批次在用户账号下，绝不悄悄换 env 账号查——定格失败。"""
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+
+    async def fake_resolve(user_id, tenant_id, *, strict=False):
+        return "env-tok", "env"  # 用户已清除 → 有效来源落回 env
+
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(
+        parse_mod, "resolve_mineru_config", lambda: MineruConfig(token="env-tok")
+    )
+
+    store = FakeStore(
+        {DOC_ID: mk_doc(tmp_path, mineru_token_src="user", tenant_id="t-1")}
+    )
+    factory = FakeClientFactory()
+    svc, _ = mk_factory_service(tmp_path, store, factory)
+
+    await svc._poll_loop(DOC_ID)
+
+    row = store.rows[DOC_ID]
+    assert row["status"] == "parse_failed"
+    assert row["parse_state"] == "failed"
+    assert "Token" in row["error"], "失败文案必须指向 Token（可操作）"
+    assert factory.client.calls == 0, "没有可信凭据就不该打 MinerU"
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_retries_when_profile_gateway_down(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Profile 网关短暂不可用 ≠ 用户没配：strict 解析抛错 → 按节拍重试到成功。"""
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+    from backend.services.engine.alpha_agent.profile_gateway import ProfileGatewayError
+
+    attempts: list[int] = []
+
+    async def flaky_resolve(user_id, tenant_id, *, strict=False):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ProfileGatewayError("gateway down")
+        return "user-tok", "user"
+
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", flaky_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
+
+    store = FakeStore(
+        {DOC_ID: mk_doc(tmp_path, mineru_token_src="user", tenant_id="t-1")}
+    )
+    factory = FakeClientFactory()
+    factory.client.zip_payload = make_zip()
+    factory.client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="paper.pdf",
+                state="done",
+                data_id=DOC_ID,
+                full_zip_url="https://cdn.test/a.zip",
+                total_pages=2,
+            )
+        ]
+    ]
+    quota = FakeQuota()
+    svc, _ = mk_factory_service(tmp_path, store, factory, quota=quota)
+
+    await svc._poll_loop(DOC_ID)
+
+    assert store.rows[DOC_ID]["status"] == "parsed"
+    assert len(attempts) == 2, "第一跳重试、第二跳成功"
+    assert quota.recorded == [("u1", 2)]
+
+
+@pytest.mark.asyncio
+async def test_submit_parse_records_user_token_source(tmp_path, monkeypatch) -> None:
+    """提交期记录凭据来源：engine 重启续轮询时按行上的来源重建同一 Token。"""
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+
+    async def fake_resolve(user_id, tenant_id, *, strict=False):
+        return "user-tok", "user"
+
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
+
+    doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None, tenant_id="t-1")
+    store = FakeStore({DOC_ID: doc})
+    factory = FakeClientFactory()
+    svc, _ = mk_factory_service(tmp_path, store, factory)
+
+    await svc.submit_parse(store.rows[DOC_ID])
+
+    assert factory.configs[-1].token == "user-tok"
+    assert store.rows[DOC_ID]["status"] == "parsing"
+    assert store.rows[DOC_ID]["mineru_token_src"] == "user"
+    assert store.rows[DOC_ID]["mineru_batch_id"] == "b-1"
+    await svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_submit_parse_no_token_anywhere_marks_row_and_raises(
+    tmp_path, monkeypatch
+) -> None:
+    """任何来源都没有 token：行定格 parse_failed + 退预留 + 上抛（端点转 502），
+    而不是把异常留在 try 之外——留下「uploaded 但永远解析不了」的孤儿行。"""
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+
+    async def fake_resolve(user_id, tenant_id, *, strict=False):
+        return None, "none"
+
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
+
+    doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None, tenant_id="t-1")
+    store = FakeStore({DOC_ID: doc})
+    quota = FakeQuota()
+    factory = FakeClientFactory()
+    svc, _ = mk_factory_service(tmp_path, store, factory, quota=quota)
+
+    with pytest.raises(MineruError) as ei:
+        await svc.submit_parse(store.rows[DOC_ID])
+
+    assert "Token" in str(ei.value) or "TOKEN" in str(ei.value)
+    assert store.rows[DOC_ID]["status"] == "parse_failed"
+    assert quota.released == [(DOC_ID, "u1")], "提交失败全额退预留"
+    assert svc._tasks == {}, "提交失败不该挂轮询"
+    assert factory.client.calls == 0

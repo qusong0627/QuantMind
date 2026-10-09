@@ -114,6 +114,9 @@ class UserProfileUpdate(BaseModel):
     embedding_api_key: str | None = Field(
         None, max_length=2048, description="Embedding API Key（可与 chat 不同供应商）"
     )
+    mineru_api_token: str | None = Field(
+        None, max_length=2048, description="MinerU 文档解析 Token（空=用服务器配置）"
+    )
 
 
 # ============ 响应模型 ============
@@ -162,6 +165,7 @@ class UserProfileResponse(BaseModel):
     embedding_model: str | None = Field(None, description="Embedding 模型名称")
     embedding_base_url: str | None = Field(None, description="Embedding 接口地址")
     embedding_api_key: str | None = Field(None, description="Embedding API Key")
+    mineru_api_token: str | None = Field(None, description="MinerU 文档解析 Token")
     created_at: datetime
     updated_at: datetime | None
 

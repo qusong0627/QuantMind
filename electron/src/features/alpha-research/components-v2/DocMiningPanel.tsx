@@ -407,7 +407,9 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
                 }`}
               >
                 {!quota.token_configured ? (
-                  <span>解析服务未配置（MinerU Token 缺失），暂时无法上传解析，请联系管理员</span>
+                  <span>
+                    解析服务未配置（MinerU Token 缺失）：可在个人中心「其他设置 → AI 服务配置」填写自己的 Token，或联系管理员配置服务器
+                  </span>
                 ) : (
                   <>
                     <span>

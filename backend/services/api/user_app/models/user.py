@@ -123,6 +123,10 @@ class UserProfile(Base):
     embedding_base_url = Column(String(512), comment="Embedding 接口地址（OpenAI 兼容 base_url）")
     embedding_api_key = Column(Text, comment="Embedding API Key（可与 chat 不同供应商）")
 
+    # 文档解析（MinerU）配置 —— 用户自带 Token（照 LLM Key 用户级模式）。
+    # 缺省时文档链回退服务器 .env 的 MINERU_API_TOKEN；两者都缺 = 通道不可用。
+    mineru_api_token = Column(Text, comment="MinerU 文档解析 Token（用户级，可空=用服务器配置）")
+
     # 审计字段
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"

@@ -74,12 +74,16 @@ CREATE TABLE IF NOT EXISTS rd_agent_docs (
   organized_at  TIMESTAMPTZ,
   task_id       TEXT,
   error         TEXT,
+  mineru_token_src TEXT,
+  tenant_id     TEXT,
   created_at    TIMESTAMPTZ NOT NULL,
   updated_at    TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rd_docs_user ON rd_agent_docs (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_rd_docs_sha ON rd_agent_docs (user_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_rd_docs_status ON rd_agent_docs (status);
+ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS mineru_token_src TEXT;
+ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS tenant_id TEXT;
 """
 
 _UNSET = object()
@@ -131,6 +135,7 @@ class DocStore:
         sha256: str | None = None,
         original_path: str | None = None,
         status: str = "uploaded",
+        tenant_id: str | None = None,
     ) -> None:
         if status not in DOC_STATUSES:
             raise ValueError(f"unknown doc status: {status!r}")
@@ -140,10 +145,10 @@ class DocStore:
                 text("""
                     INSERT INTO rd_agent_docs
                       (doc_id, user_id, filename, ext, size_bytes, sha256,
-                       original_path, status, created_at, updated_at)
+                       original_path, status, tenant_id, created_at, updated_at)
                     VALUES
                       (:doc_id, :user_id, :filename, :ext, :size_bytes, :sha256,
-                       :original_path, :status, :now, :now)
+                       :original_path, :status, :tenant_id, :now, :now)
                     ON CONFLICT (doc_id) DO NOTHING
                     """),
                 {
@@ -155,6 +160,7 @@ class DocStore:
                     "sha256": sha256,
                     "original_path": original_path,
                     "status": status,
+                    "tenant_id": tenant_id,
                     "now": now,
                 },
             )
@@ -194,6 +200,8 @@ class DocStore:
             "organize_prompt_version",
             "organized_at",
             "task_id",
+            # 凭据来源（"user"/"env"）：提交时定格，重启续轮询按它重建同一 Token
+            "mineru_token_src",
         )
         unknown = set(fields) - set(allowed)
         if unknown:

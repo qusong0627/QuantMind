@@ -29,8 +29,13 @@ def _filter_sensitive_profile_data(data: dict, current_user: dict, target_user_i
     is_owner = current_user.get("user_id") == target_user_id
 
     if not (is_internal or is_owner):
-        # 否则剔除敏感字段
+        # 否则剔除敏感字段（embedding/mineru 的 Key 与 api_key 同级敏感，
+        # 社区功能会读他人档案——漏一个就是把凭据按页面发出去）
         data.pop("api_key", None)
+        data.pop("embedding_api_key", None)
+        data.pop("mineru_api_token", None)
+        # llm_extra_headers 可能含自建网关的 Authorization 头（见字段说明）
+        data.pop("llm_extra_headers", None)
         # 手机号脱敏处理
         if data.get("phone"):
             p = data["phone"]

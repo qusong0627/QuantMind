@@ -146,6 +146,10 @@ class ProfileService:
                 await session.execute(
                     text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS embedding_api_key TEXT")
                 )
+                # 文档解析（MinerU）Token：用户级，照 LLM Key 模式
+                await session.execute(
+                    text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS mineru_api_token TEXT")
+                )
                 ProfileService._profile_columns_checked = True
         except Exception:
             logger.exception("Failed to ensure user_profiles table")
@@ -203,6 +207,7 @@ class ProfileService:
                 "embedding_model": profile.embedding_model,
                 "embedding_base_url": profile.embedding_base_url,
                 "embedding_api_key": profile.embedding_api_key,
+                "mineru_api_token": profile.mineru_api_token,
                 "created_at": profile.created_at,
                 "updated_at": profile.updated_at,
                 "username_at_runtime": username,  # 附加用户名
@@ -268,6 +273,7 @@ class ProfileService:
                 "embedding_model": profile.embedding_model,
                 "embedding_base_url": profile.embedding_base_url,
                 "embedding_api_key": profile.embedding_api_key,
+                "mineru_api_token": profile.mineru_api_token,
                 "created_at": profile.created_at,
                 "updated_at": profile.updated_at,
                 "username_at_runtime": None,
@@ -339,6 +345,7 @@ class ProfileService:
                 "embedding_model": profile.embedding_model,
                 "embedding_base_url": profile.embedding_base_url,
                 "embedding_api_key": profile.embedding_api_key,
+                "mineru_api_token": profile.mineru_api_token,
                 "created_at": profile.created_at,
                 "updated_at": profile.updated_at,
                 "username_at_runtime": None,

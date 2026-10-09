@@ -38,6 +38,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.services.engine.alpha_agent.doc_alerts import maybe_alert_quota_low
+from backend.services.engine.alpha_agent.doc_credentials import (
+    TOKEN_SRC_ENV,
+    TOKEN_SRC_USER,
+    resolve_effective_mineru_token,
+)
 from backend.services.engine.alpha_agent.doc_quota import (
     DocQuota,
     QuotaStatus,
@@ -45,8 +50,11 @@ from backend.services.engine.alpha_agent.doc_quota import (
 )
 from backend.services.engine.alpha_agent.doc_store import DocStore, get_doc_store
 from backend.services.engine.alpha_agent.mineru_client import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL_VERSION,
     MineruBatchItem,
     MineruClient,
+    MineruConfig,
     MineruError,
     MineruFileSpec,
     extract_err_code,
@@ -75,6 +83,13 @@ STALE_UPLOADED_MINUTES = 30
 #: 扫描件探测：抽前 N 页找文本层；超过此大小不做探测（直接按 OCR 送）
 SCAN_SAMPLE_PAGES = 3
 SCAN_DETECT_MAX_BYTES = 64 * 1024 * 1024
+
+#: 用户自带 MinerU Token 的解析缓存 TTL：轮询每 5s 一跳，不能每跳打一次
+#: Profile 网关；负结果（用户清掉了）同样缓存——清掉后 ≤TTL 内定格失败。
+USER_TOKEN_CACHE_TTL_S = 300.0
+#: 两个内存缓存的容量护栏（超过就整体清空，防止多用户长跑无界增长）
+USER_TOKEN_CACHE_MAX = 256
+USER_CLIENT_CACHE_MAX = 64
 
 _DOC_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
@@ -215,6 +230,9 @@ class DocParseService:
         self._sleep = sleep or asyncio.sleep
         self._parse_sem = asyncio.Semaphore(max_concurrent or MAX_CONCURRENT_PARSES)
         self._tasks: dict[str, asyncio.Task] = {}
+        # 用户自带 token：解析结果与按 token 建的客户端各带缓存（TTL/容量见常量）
+        self._user_token_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
+        self._user_clients: dict[str, MineruClient] = {}
 
     # -- 路径 ----------------------------------------------------------
 
@@ -247,12 +265,99 @@ class DocParseService:
         return self._built_client
 
     def ensure_ready(self) -> None:
-        """预检解析通道（token 已配 / 注入了替身）。缺 token 抛 MineruError。
+        """预检解析通道（env token 已配 / 注入了替身）。缺 token 抛 MineruError。
 
         上传端点在**落盘之前**调这里：先收文件再发现通道不可用，会留下
         一堆「上传成功但永远解析不了」的孤儿目录与行。
         """
         self._resolve_client()
+
+    def _client_for_token(self, token: str) -> MineruClient:
+        """用户自带 token 的客户端：env 的 base_url/model 仍生效，只换凭证。"""
+        client = self._user_clients.get(token)
+        if client is None:
+            env_cfg = resolve_mineru_config()
+            base_url = env_cfg.base_url if env_cfg is not None else DEFAULT_BASE_URL
+            model_version = (
+                env_cfg.model_version if env_cfg is not None else DEFAULT_MODEL_VERSION
+            )
+            if len(self._user_clients) >= USER_CLIENT_CACHE_MAX:
+                self._user_clients.clear()
+            client = self._client_factory(
+                MineruConfig(
+                    token=token, base_url=base_url, model_version=model_version
+                )
+            )
+            self._user_clients[token] = client
+        return client
+
+    async def _client_for_submit(
+        self, doc: Mapping[str, Any]
+    ) -> tuple[MineruClient, str]:
+        """提交期建客户端，并返回凭据来源（写进行上的 ``mineru_token_src``）。
+
+        注入替身（测试）直接短路，不做任何 Token 解析。任何来源都没有
+        token → 抛 MineruError（``submit_parse`` 的 except 会定格行 + 退预留）。
+        """
+        if self._client is not None:
+            return self._client, TOKEN_SRC_ENV
+        token, src = await resolve_effective_mineru_token(
+            str(doc.get("user_id") or ""), str(doc.get("tenant_id") or ""), strict=False
+        )
+        if not token:
+            raise MineruError(
+                "文档解析 Token 未配置（个人中心「其他设置 → AI 服务配置」或服务器 "
+                "MINERU_API_TOKEN），文档解析不可用（请配置后重试）",
+                retryable=False,
+            )
+        if src == TOKEN_SRC_USER:
+            return self._client_for_token(token), TOKEN_SRC_USER
+        return self._resolve_client(), TOKEN_SRC_ENV
+
+    async def _cached_user_token(self, doc: Mapping[str, Any]) -> str | None:
+        """行上来源为 user 的文档：解析用户 Token（TTL 缓存）。
+
+        strict 解析：Profile 网关读不到 → ProfileGatewayError 上抛，轮询层
+        按可重试处理——「读不到」绝不当成「用户清掉了」定格失败。
+        """
+        user_id = str(doc.get("user_id") or "")
+        tenant_id = str(doc.get("tenant_id") or "")
+        if not user_id or not tenant_id:
+            return None
+        key = (user_id, tenant_id)
+        now = self._clock()
+        entry = self._user_token_cache.get(key)
+        if entry is not None and now - entry[0] < USER_TOKEN_CACHE_TTL_S:
+            return entry[1]
+        token, src = await resolve_effective_mineru_token(
+            user_id, tenant_id, strict=True
+        )
+        # 只认 user 来源：批次建在用户账号下，换 env 账号查不到结果
+        effective = token if src == TOKEN_SRC_USER else None
+        if len(self._user_token_cache) >= USER_TOKEN_CACHE_MAX:
+            self._user_token_cache.clear()
+        self._user_token_cache[key] = (now, effective)
+        return effective
+
+    async def _client_for_doc(self, doc: Mapping[str, Any]) -> MineruClient:
+        """按行上记录的凭据来源重建客户端（重启续轮询也走这条）。
+
+        生产单例不注入 client——以前轮询直接 ``self._client.get_batch_results``
+        会 AttributeError，被轮询循环的兜底 except 当瞬态异常吞掉重试到 2h
+        超时（每份文档都失败，日志只说「意外异常」）。轮询/下载统一走本方法。
+        """
+        if self._client is not None:
+            return self._client
+        if str(doc.get("mineru_token_src") or "") == TOKEN_SRC_USER:
+            token = await self._cached_user_token(doc)
+            if token:
+                return self._client_for_token(token)
+            raise MineruError(
+                "用户 MinerU Token 已失效（可能已被清除），解析无法继续："
+                "请在个人中心「其他设置 → AI 服务配置」重新配置 Token 后重新上传",
+                retryable=False,
+            )
+        return self._resolve_client()
 
     async def _detect_is_ocr(self, doc: Mapping[str, Any]) -> bool:
         """非 PDF → 不 OCR（图片/office 各有直解通路）；PDF 探测文本层。
@@ -287,7 +392,6 @@ class DocParseService:
         （端点）据此返回错误，用户看到的是「这份文档为什么没解析」。
         """
         doc_id = str(doc["doc_id"])
-        client = self._resolve_client()
         is_ocr = await self._detect_is_ocr(doc)
         spec = MineruFileSpec(
             name=str(doc.get("filename") or "document"),
@@ -295,6 +399,10 @@ class DocParseService:
             is_ocr=is_ocr,
         )
         try:
+            # 凭据解析放在 try 内：任何来源都没有 token 也要走 except 定格
+            # parse_failed + 退预留——留在 try 外会留下「uploaded 但永远
+            # 解析不了」且预留被占死的孤儿行。
+            client, token_src = await self._client_for_submit(doc)
             batch_id, urls = await client.create_upload_batch([spec])
             if not urls:
                 raise MineruError("MinerU 未返回上传链接", retryable=False)
@@ -316,6 +424,7 @@ class DocParseService:
             mineru_batch_id=batch_id,
             parse_state="pending",
             error=None,
+            mineru_token_src=token_src,
         )
         if not hit:
             # 但 MinerU **已经拿到文件**（批次已建、上传已完成），会照常解析
@@ -431,7 +540,8 @@ class DocParseService:
             await self._fail(doc, "缺少 MinerU 批次号（提交未完成），请重新上传")
             return "parse_failed"
 
-        items = await self._client.get_batch_results(str(batch_id))
+        client = await self._client_for_doc(doc)
+        items = await client.get_batch_results(str(batch_id))
         item = self._match_item(items, doc)
         if item is None:
             return "pending"  # 自己那条还没出现在结果里：只等待，不动状态
@@ -476,7 +586,8 @@ class DocParseService:
         dest = doc_dir / "parsed"
         async with self._parse_sem:
             try:
-                await self._client.download_zip(item.full_zip_url, zip_path)
+                client = await self._client_for_doc(doc)
+                await client.download_zip(item.full_zip_url, zip_path)
                 result = await asyncio.to_thread(extract_zip_whitelist, zip_path, dest)
             except MineruError as exc:
                 # MinerU 真扣了页才给 zip（done），按实际页数结算而不是全退

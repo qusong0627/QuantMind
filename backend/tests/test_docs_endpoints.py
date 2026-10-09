@@ -165,18 +165,11 @@ class FakeParseService:
         self._root = Path(root)
         self._store = store
         self.events = events if events is not None else []
-        self.ensure_ready_calls = 0
-        self.ready_error: Exception | None = None
         self.submitted: list[dict] = []
         self.submit_error: Exception | None = None
         self.reuse_result = False
         self.reuse_calls: list[dict] = []
         self.cancelled: list[str] = []
-
-    def ensure_ready(self):
-        self.ensure_ready_calls += 1
-        if self.ready_error is not None:
-            raise self.ready_error
 
     def doc_dir(self, doc_id: str) -> Path:
         return self._root / doc_id
@@ -312,11 +305,27 @@ def _blank_pdf_bytes(pages: int = 3) -> bytes:
     return buf.getvalue()
 
 
-def _wire(monkeypatch, store, svc, quota, user_id="u-1"):
+class FakeTokenResolver:
+    """有效 MinerU Token 解析替身（上传预检 / quota / stats 共用）。"""
+
+    def __init__(self, token="test-tok", src="env") -> None:
+        self.token = token
+        self.src = src
+        self.calls: list[tuple] = []
+
+    async def __call__(self, user_id, tenant_id, *, strict=False):
+        self.calls.append((user_id, tenant_id, strict))
+        return self.token, self.src
+
+
+def _wire(monkeypatch, store, svc, quota, user_id="u-1", *, token=("test-tok", "env")):
     monkeypatch.setattr(docs_mod, "get_doc_store", lambda: store)
     monkeypatch.setattr(docs_mod, "get_doc_parse_service", lambda: svc)
     monkeypatch.setattr(docs_mod, "get_doc_quota", lambda: quota)
+    resolver = FakeTokenResolver(*token)
+    monkeypatch.setattr(docs_mod, "resolve_effective_mineru_token", resolver)
     _auth_as(monkeypatch, user_id)
+    return resolver
 
 
 # ── 上传 ────────────────────────────────────────────────────────────
@@ -345,7 +354,8 @@ async def test_upload_pdf_happy_path_orders_guard_before_submit(
     assert quota.guards == [("u-1", 200)]
     assert quota.reserve_doc_ids == [store.created[0]["doc_id"]]
     assert len(svc.submitted) == 1
-    assert svc.ensure_ready_calls == 1
+    # 行上带 tenant：重启续轮询时凭 (user_id, tenant_id) 重读用户 Token
+    assert store.created[0]["tenant_id"] == "t-1"
     # 原件落盘 + 返回解析中状态 + 不吐内部路径
     original = tmp_path / doc["doc_id"] / "original.pdf"
     assert original.read_bytes() == PDF_BYTES
@@ -548,7 +558,7 @@ async def test_upload_rate_limited_429_before_any_io(
     quota = FakeQuota(
         rate_exc=RateLimited("太频繁", scope="upload", limit=30, window_s=3600)
     )
-    _wire(monkeypatch, store, svc, quota)
+    resolver = _wire(monkeypatch, store, svc, quota)
     req = _upload(PDF_BYTES, "p.pdf")
 
     with pytest.raises(HTTPException) as ei:
@@ -556,7 +566,7 @@ async def test_upload_rate_limited_429_before_any_io(
     assert ei.value.status_code == 429
     assert quota.rate_checks == [("u-1", "upload")]
     assert req.form_called == 0 and store.created == []
-    assert svc.ensure_ready_calls == 0
+    assert resolver.calls == [], "被限流的请求连 Token 预检都不做"
 
 
 @pytest.mark.asyncio
@@ -594,15 +604,17 @@ async def test_upload_rejects_oversize_and_cleans_dir(
 
 @pytest.mark.asyncio
 async def test_upload_503_when_token_missing(monkeypatch, tmp_path: Path) -> None:
+    """任何来源（用户 Profile / env）都没有 Token：落盘之前 503，并说清去哪配。"""
     store = FakeStore()
     svc = FakeParseService(tmp_path, store=store)
-    svc.ready_error = MineruError("MINERU_API_TOKEN 未配置", retryable=False)
-    _wire(monkeypatch, store, svc, FakeQuota())
+    resolver = _wire(monkeypatch, store, svc, FakeQuota(), token=(None, "none"))
 
     with pytest.raises(HTTPException) as ei:
         await docs_mod.upload_doc(request=_upload(PDF_BYTES, "p.pdf"))
     assert ei.value.status_code == 503
     assert "MINERU_API_TOKEN" in str(ei.value.detail)
+    assert "个人中心" in str(ei.value.detail), "必须给出用户自助配置入口"
+    assert resolver.calls == [("u-1", "t-1", False)], "预检按有效 Token 口径"
     assert store.created == [] and list(tmp_path.iterdir()) == []
 
 
@@ -761,8 +773,13 @@ async def test_quota_endpoint_serializes_status(monkeypatch) -> None:
         warning=False,
     )
     quota = FakeQuota(status_obj=st)
-    _wire(monkeypatch, FakeStore(), FakeParseService(Path("/n")), quota)
-    monkeypatch.setattr(docs_mod, "resolve_mineru_config", lambda: None)
+    _wire(
+        monkeypatch,
+        FakeStore(),
+        FakeParseService(Path("/n")),
+        quota,
+        token=(None, "none"),
+    )
 
     out = await docs_mod.doc_quota_status(request=FakeRequest())
 
@@ -772,6 +789,35 @@ async def test_quota_endpoint_serializes_status(monkeypatch) -> None:
     assert data["exhausted"] is False and data["warning"] is False
     assert data["token_configured"] is False
     assert quota.status_user == "u-1"
+
+
+@pytest.mark.asyncio
+async def test_quota_token_configured_uses_effective_token(monkeypatch) -> None:
+    """token_configured 是「有效 Token」口径（用户自带也算已配置），按身份解析。"""
+    st = QuotaStatus(
+        day="20261009",
+        user_id="u-1",
+        user_used=0,
+        user_limit=200,
+        platform_used=0,
+        platform_budget=1000,
+        user_remaining=200,
+        platform_remaining=1000,
+        exhausted=False,
+        warning=False,
+    )
+    resolver = _wire(
+        monkeypatch,
+        FakeStore(),
+        FakeParseService(Path("/n")),
+        FakeQuota(status_obj=st),
+        token=("user-tok", "user"),
+    )
+
+    data = (await docs_mod.doc_quota_status(request=FakeRequest()))["data"]
+
+    assert data["token_configured"] is True
+    assert resolver.calls == [("u-1", "t-1", False)]
 
 
 # ── 统计 ────────────────────────────────────────────────────────────
@@ -802,8 +848,13 @@ async def test_stats_counts_failure_rate_and_quota(monkeypatch) -> None:
         exhausted=False,
         warning=False,
     )
-    _wire(monkeypatch, store, FakeParseService(Path("/n")), FakeQuota(status_obj=st))
-    monkeypatch.setattr(docs_mod, "resolve_mineru_config", lambda: None)
+    _wire(
+        monkeypatch,
+        store,
+        FakeParseService(Path("/n")),
+        FakeQuota(status_obj=st),
+        token=(None, "none"),
+    )
 
     out = await docs_mod.docs_stats(request=FakeRequest())
 
@@ -840,8 +891,13 @@ async def test_stats_failure_rate_zero_when_nothing_attempted(monkeypatch) -> No
         exhausted=False,
         warning=False,
     )
-    _wire(monkeypatch, store, FakeParseService(Path("/n")), FakeQuota(status_obj=st))
-    monkeypatch.setattr(docs_mod, "resolve_mineru_config", lambda: None)
+    _wire(
+        monkeypatch,
+        store,
+        FakeParseService(Path("/n")),
+        FakeQuota(status_obj=st),
+        token=(None, "none"),
+    )
 
     data = (await docs_mod.docs_stats(request=FakeRequest()))["data"]
 

@@ -79,6 +79,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile
 
+from backend.services.engine.alpha_agent.doc_credentials import (
+    resolve_effective_mineru_token,
+)
 from backend.services.engine.alpha_agent.doc_gate import require_doc_mining
 from backend.services.engine.alpha_agent.doc_organize import (
     ORGANIZE_KINDS,
@@ -102,7 +105,6 @@ from backend.services.engine.alpha_agent.mineru_client import (
     MAX_PAGES_PER_FILE,
     MineruError,
     count_pdf_pages,
-    resolve_mineru_config,
     run_pdf_job,
 )
 from backend.services.engine.auth_context import get_authenticated_identity
@@ -161,7 +163,7 @@ PDF_PAGE_COUNT_MAX_BYTES = 64 * 1024 * 1024
 #: 图片扩展名：MinerU 按单页处理，预留守恒为 1
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg"})
 
-#: 内部字段：一律不出 API（展示面不需要 + 不泄漏磁盘布局）
+#: 内部字段：一律不出 API（展示面不需要 + 不泄漏磁盘布局/凭据来源）
 _INTERNAL_FIELDS = (
     "user_id",
     "sha256",
@@ -169,6 +171,8 @@ _INTERNAL_FIELDS = (
     "md_path",
     "content_list_path",
     "mineru_batch_id",
+    "mineru_token_src",
+    "tenant_id",
 )
 
 
@@ -355,7 +359,7 @@ async def upload_doc(request: Request) -> dict:
     FastAPI 会在进入 handler 前把整个 multipart 无上限落临时文件。这里先
     认证、再按 Content-Length 粗拦，然后才 ``request.form()`` 解析。
     """
-    user_id, _tenant_id = get_authenticated_identity(request)
+    user_id, tenant_id = get_authenticated_identity(request)
     quota = get_doc_quota()
     try:
         quota.check_rate(user_id, "upload")
@@ -375,13 +379,18 @@ async def upload_doc(request: Request) -> dict:
 
     store = get_doc_store()
     svc = get_doc_parse_service()
-    try:
-        svc.ensure_ready()
-    except MineruError as exc:
-        # 通道没配就别收文件：先收再发现不可用会留下永远解析不了的孤儿
+    # 通道预检走「有效 Token」口径（用户自带 > env）：没配就别收文件——
+    # 先收再发现不可用会留下永远解析不了的孤儿。
+    token, _token_src = await resolve_effective_mineru_token(user_id, tenant_id)
+    if not token:
         raise HTTPException(
-            status_code=503, detail=f"文档解析服务未就绪：{exc}"
-        ) from exc
+            status_code=503,
+            detail=(
+                "文档解析服务未就绪：未配置 MinerU 解析 Token。"
+                "可在个人中心「其他设置 → AI 服务配置」填写自己的 Token，"
+                "或在服务器 .env 配置 MINERU_API_TOKEN。"
+            ),
+        )
 
     doc_id = uuid.uuid4().hex[:16]
     doc_dir = svc.doc_dir(doc_id)
@@ -410,6 +419,8 @@ async def upload_doc(request: Request) -> dict:
             sha256=sha256,
             original_path=str(original_path),
             status="uploaded",
+            # 行上带 tenant：重启续轮询时凭 (user_id, tenant_id) 重读用户 Token
+            tenant_id=tenant_id,
         )
         doc = await store.get_doc(doc_id, user_id=user_id)
         reused = False
@@ -502,10 +513,12 @@ async def doc_quota_status(request: Request) -> dict:
     ⚠️ 必须注册在 ``/docs/{doc_id}`` **之前**，否则被参数路由吞掉
     （P0 的 /tasks/history 同款教训，有路由顺序回归测试钉住）。
     """
-    user_id, _tenant_id = get_authenticated_identity(request)
+    user_id, tenant_id = get_authenticated_identity(request)
     st = get_doc_quota().status(user_id)
     data = asdict(st)
-    data["token_configured"] = resolve_mineru_config() is not None
+    # 有效 Token 口径（用户自带 > env）：前端据此提示「去哪配」
+    token, _src = await resolve_effective_mineru_token(user_id, tenant_id)
+    data["token_configured"] = token is not None
     return {"code": 200, "data": data}
 
 
@@ -527,7 +540,7 @@ async def docs_stats(request: Request) -> dict:
     ⚠️ 必须注册在 ``/docs/{doc_id}`` **之前**，否则被参数路由吞掉
     （与 /docs/quota 同一路由顺序教训，有回归测试钉住）。
     """
-    user_id, _tenant_id = get_authenticated_identity(request)
+    user_id, tenant_id = get_authenticated_identity(request)
     store = get_doc_store()
     counts: dict[str, int] = {}
     for status in STATS_STATUSES:
@@ -541,7 +554,8 @@ async def docs_stats(request: Request) -> dict:
     )
     failed = counts["parse_failed"]
     quota_data = asdict(get_doc_quota().status(user_id))
-    quota_data["token_configured"] = resolve_mineru_config() is not None
+    token, _src = await resolve_effective_mineru_token(user_id, tenant_id)
+    quota_data["token_configured"] = token is not None
     return {
         "code": 200,
         "data": {
