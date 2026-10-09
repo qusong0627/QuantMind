@@ -257,8 +257,13 @@ def _holdings_profile(
     """最新截面 Top-N 持仓画像：(中位市值亿, 市值风格, 前三行业)。
 
     市值风格（按中位总市值）：≥500 亿大盘 · 100~500 亿中盘 · <100 亿小盘。
+
+    截面取该因子**自身**最近有数据的月份：断更因子（面板末月无行）取全局末月
+    会得到空持仓 → 中位市值/风格/行业全空。
     """
-    last = len(p.dates) - 1
+    last = scorecard.latest_data_month(p, fi)
+    if last is None:
+        return None, None, []
     mvs: list[float] = []
     inds: dict[str, int] = {}
     for sym in p.sym_at(fi, last, n):
@@ -409,47 +414,56 @@ def factor_detail(
         ic_points = _points(sub.index, sub.to_numpy(dtype=float))
         ic_kpi = scorecard.ic_stats_from(ctx["ic_index"].get(code), ctx["rdates"])
 
-    # 最新月末截面的 Top-N 个股表（始终为全样本最新截面）
-    last = len(p.dates) - 1
+    # 最新月末截面的 Top-N 个股表（始终为该因子自身的最新截面）。
+    # 末月可能整月缺该因子的行（源库断更 → 面板不落行，2026-10-09 rd_mined/
+    # gap_mined 实测）：取全局末月会得到空表 + 假日期 —— 回退到该因子自身最近
+    # 有数据的截面；stocks_stale 供前端提示「数据未更新到最新截面」。
+    last = scorecard.latest_data_month(p, fi)
+    stocks_stale = last is not None and last < len(p.dates) - 1
     snap = store.stock_snapshot()
     snap_idx = snap.set_index("symbol") if snap is not None else None
     kk = min(int(stocks_n), p.fwd.shape[2])
-    sym_codes = p.sym_codes(fi, last)[:kk]
-    scores = p.score[fi, last, :kk]
-    raws = p.raw[fi, last, :kk]
-    stocks = []
-    for r_i in range(kk):
-        c_i = int(sym_codes[r_i])
-        if c_i < 0:
-            continue
-        sym = p.symbols[c_i]
-        row = {
-            "rank": r_i + 1,
-            "symbol": sym,
-            "score": round(float(scores[r_i]), 3) if np.isfinite(scores[r_i]) else None,
-            "raw": round(float(raws[r_i]), 4) if np.isfinite(raws[r_i]) else None,
-        }
-        if snap_idx is not None and sym in snap_idx.index:
-            srow = snap_idx.loc[sym]
-            row.update(
-                {
-                    "name": srow.get("name"),
-                    "industry": srow.get("industry"),
-                    "total_mv_yi": None
-                    if pd.isna(srow.get("total_mv_yi"))
-                    else round(float(srow["total_mv_yi"]), 1),
-                    "pe_ttm": None
-                    if pd.isna(srow.get("pe_ttm"))
-                    else round(float(srow["pe_ttm"]), 2),
-                    "pb": None
-                    if pd.isna(srow.get("pb"))
-                    else round(float(srow["pb"]), 2),
-                    "avg_amount_yi": None
-                    if pd.isna(srow.get("avg_amount_yi"))
-                    else round(float(srow["avg_amount_yi"]), 2),
-                }
-            )
-        stocks.append(row)
+    stocks: list[dict] = []
+    stocks_date: str | None = None
+    if last is not None:
+        stocks_date = str(pd.Timestamp(p.dates[last]).date())
+        sym_codes = p.sym_codes(fi, last)[:kk]
+        scores = p.score[fi, last, :kk]
+        raws = p.raw[fi, last, :kk]
+        for r_i in range(kk):
+            c_i = int(sym_codes[r_i])
+            if c_i < 0:
+                continue
+            sym = p.symbols[c_i]
+            row = {
+                "rank": r_i + 1,
+                "symbol": sym,
+                "score": round(float(scores[r_i]), 3)
+                if np.isfinite(scores[r_i])
+                else None,
+                "raw": round(float(raws[r_i]), 4) if np.isfinite(raws[r_i]) else None,
+            }
+            if snap_idx is not None and sym in snap_idx.index:
+                srow = snap_idx.loc[sym]
+                row.update(
+                    {
+                        "name": srow.get("name"),
+                        "industry": srow.get("industry"),
+                        "total_mv_yi": None
+                        if pd.isna(srow.get("total_mv_yi"))
+                        else round(float(srow["total_mv_yi"]), 1),
+                        "pe_ttm": None
+                        if pd.isna(srow.get("pe_ttm"))
+                        else round(float(srow["pe_ttm"]), 2),
+                        "pb": None
+                        if pd.isna(srow.get("pb"))
+                        else round(float(srow["pb"]), 2),
+                        "avg_amount_yi": None
+                        if pd.isna(srow.get("avg_amount_yi"))
+                        else round(float(srow["avg_amount_yi"]), 2),
+                    }
+                )
+            stocks.append(row)
 
     ind_count: dict[str, int] = {}
     cap_count: dict[str, int] = {}
@@ -488,7 +502,8 @@ def factor_detail(
         "ic": ic_points,
         "ic_kpi": ic_kpi,
         "stocks": stocks,
-        "stocks_date": str(pd.Timestamp(p.dates[last]).date()),
+        "stocks_date": stocks_date,
+        "stocks_stale": stocks_stale,
         "industry_dist": industry_dist,
         "cap_dist": cap_dist,
     }

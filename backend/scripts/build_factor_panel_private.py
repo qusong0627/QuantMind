@@ -161,6 +161,25 @@ def _score_row_block(v: np.ndarray) -> np.ndarray:
     return sc.astype(np.float32), rk
 
 
+def _wide_frame(
+    scores_o: np.ndarray, idx: pd.MultiIndex, names: list[str]
+) -> pd.DataFrame:
+    """(D=日, F=因子, S=标的) 打分 → 宽表（行=idx 的 (日, 标的) 展开，列=因子）。
+
+    必须先 ``transpose(0, 2, 1)`` 再 reshape：宽表行序是「日主序 × 标的」，而
+    scores_o 的内存序是「日 × 因子 × 标的」。直接 ``reshape(D*S, F)`` 是按内存序
+    错位切分 —— 行 (d, s) 列 j 得到 ``orig(d, (s*F+j)//S, (s*F+j)%S)``，数值仍落
+    [-4, 4]、不抛任何异常（2026-10-09 与面板逐值比对 150/150 不一致实锤，
+    「多因子合成」经 store.scores_for() 吃了这份错位宽表）。
+    """
+    return pd.DataFrame(
+        # float32：分位数打分精度足够，宽表体积与峰值内存均减半
+        scores_o.transpose(0, 2, 1).reshape(len(idx), len(names)).astype(np.float32),
+        index=idx,
+        columns=names,
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", type=int, default=0, help="冒烟：只取前 N 只股票")
@@ -313,16 +332,7 @@ def main() -> int:
             )
         )
         # 宽表打分（合成用）
-        wide_parts.append(
-            pd.DataFrame(
-                # float32：分位数打分精度足够，宽表体积与峰值内存均减半
-                scores_o.reshape(len(dates) * close.shape[1], f_count).astype(
-                    np.float32
-                ),
-                index=idx,
-                columns=names,
-            )
-        )
+        wide_parts.append(_wide_frame(scores_o, idx, names))
         ic_parts.append(
             pd.DataFrame(ic_o, index=names, columns=pd.DatetimeIndex(dates))
         )

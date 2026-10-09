@@ -438,3 +438,58 @@ def test_weight_grid_valid():
         for w in grid:
             assert abs(sum(w) - 1.0) < 1e-9
             assert all(x >= 0 for x in w)
+
+
+# ---------------------------------------------------------------------------
+# latest_data_month（最近有数据截面回退；2026-10-09 rd_mined/gap_mined 空表事故）
+# ---------------------------------------------------------------------------
+def _stale_tail_panel() -> scorecard.Panel:
+    """FULL 全 4 月有数据；LATE 缺末月；OLD 缺末 2 月 —— 模拟源库断更。
+
+    面板口径：某月该因子无数据 → 该月整列保持空位（-1），行根本不存在。
+    引擎旧逻辑取全局末月（=FULL 的 2026-04-30），LATE/OLD 因此拿到空截面：
+    个股表只剩表头、日期却写着 04-30（假日期），行业/市值分布全空。
+    """
+    rows = []
+    horizon = {"FULL": 4, "LATE": 3, "OLD": 2}
+    for code, months in horizon.items():
+        for mi in range(months):
+            for rk, sym in enumerate(["000001.SZ", "600000.SH"], 1):
+                rows.append(
+                    {
+                        "factor_code": code,
+                        "trade_date": pd.Timestamp(PANEL_MONTHS[mi]),
+                        "rank": rk,
+                        "symbol": sym,
+                        "score": float(10 - rk - mi),
+                        "raw": float(rk),
+                        "fwd_ret": 0.01 * rk,
+                    }
+                )
+    return scorecard.Panel(pd.DataFrame(rows))
+
+
+def test_latest_data_month_falls_back_to_own_last_row():
+    p = _stale_tail_panel()
+    last = len(p.dates) - 1
+    assert last == 3, "用例前提：面板日期是全因子并集"
+    assert p.codes == ["FULL", "LATE", "OLD"]
+    assert scorecard.latest_data_month(p, p.index("FULL")) == last
+    assert scorecard.latest_data_month(p, p.index("LATE")) == last - 1
+    assert scorecard.latest_data_month(p, p.index("OLD")) == last - 2
+    # 缺月必须是真空位 —— 否则上面的回退断言在测另一回事
+    assert (p.sym_codes(p.index("LATE"), last) < 0).all()
+
+
+def test_holdings_profile_uses_factor_own_last_month():
+    """排行榜持仓画像：断更因子不许拿全局末月空截面（→ 中位市值/风格/行业全空）。"""
+    p = _stale_tail_panel()
+    snap_mv = {"000001.SZ": 800.0, "600000.SH": 60.0}
+    snap_ind = {"000001.SZ": "银行", "600000.SH": "医药"}
+    med, style, top = service._holdings_profile(
+        p, p.index("LATE"), 2, snap_mv, snap_ind
+    )
+
+    assert med == 430.0  # median(800, 60) —— 断更前最后截面
+    assert style == "中盘"
+    assert {r["name"] for r in top} == {"银行", "医药"}

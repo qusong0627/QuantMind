@@ -96,6 +96,19 @@ class Panel:
         return [syms[c] for c in codes if c >= 0]
 
 
+def latest_data_month(p: Panel, fi: int) -> int | None:
+    """该因子最近一个有数据的月份下标（月末截面口径，与 mask 无关）。
+
+    面板按「该因子当月有值」才落行 —— 源库断更时末月整列空位（-1）。
+    取全局末月会让断更因子的「最新截面」静默为空、日期还是假的
+    （2026-10-09 rd_mined/gap_mined「Top 30 只有表头」事故的根因）。
+    """
+    for mi in range(len(p.dates) - 1, -1, -1):
+        if np.any(p.sym_codes(fi, mi) >= 0):
+            return mi
+    return None
+
+
 def month_mask(dates: np.ndarray, start: str | None, end: str | None) -> np.ndarray:
     """区间掩码。start/end 支持 'YYYY-MM-DD' / 'YYYY-MM' / None（开放端）。"""
     mask = np.ones(len(dates), dtype=bool)
