@@ -52,14 +52,18 @@ _UNAVAILABLE_LABELS = {
 }
 
 #: 核心指标表行：(headline 键, 显示名, 口径说明, 格式)。顺序即展示顺序。
+#:
+#: 字形纪律（PDF 嵌入字体 Noto Sans CJK SC 缺希腊字母，μ/σ/Π 会渲染成豆腐块）：
+#: 口径列一律中文词写开（「均值/标准差/逐日连乘」）；`|` 会撕列必须避开
+#: （abs(Returns) 而非 |Returns|）——单测有同行列数与字形两道闸。
 _HEADLINE_ROWS: tuple[tuple[str, str, str, str], ...] = (
-    ("returns", "年化收益", "日均多空收益 μ × 252（简单年化，非 CAGR）", "pct"),
-    ("ir", "信息比率 IR", "μ / σ × √252", "num"),
+    ("returns", "年化收益", "日均多空收益均值 × 252（简单年化，非 CAGR）", "pct"),
+    ("ir", "信息比率 IR", "日均收益 / 日收益标准差 × √252", "num"),
     ("turnover", "日均换手", "日度双边换手均值（买、卖各计一次）", "pct"),
-    ("fitness", "Fitness", "IR × √(|Returns| / max(Turnover, 0.125))", "num"),
+    ("fitness", "Fitness", "IR × √(abs(Returns) / max(Turnover, 0.125))", "num"),
     ("margin", "Margin（每单位换手收益）", "Returns / Turnover", "num3"),
-    ("cum_return", "累计收益", "Π(1+日收益) − 1（区间累计，非年化）", "pct"),
-    ("ann_vol", "年化波动", "日收益 σ × √252", "pct"),
+    ("cum_return", "累计收益", "(1+日收益) 逐日连乘 − 1（区间累计，非年化）", "pct"),
+    ("ann_vol", "年化波动", "日收益标准差 × √252", "pct"),
     ("mu_daily", "日均收益", "多空组合日收益均值", "pct3"),
     ("sigma_daily", "日波动", "日收益标准差（样本）", "pct3"),
     ("n_days", "样本天数", "参与统计的有效交易日数", "int"),
@@ -299,7 +303,7 @@ def build_report_markdown(
     lines.append("## 七、口径说明")
     lines.append("")
     lines.append(
-        "- 多空组合日收益由已落盘净值曲线无损反推（nav = Π(1 + r)），"
+        "- 多空组合日收益由已落盘净值曲线无损反推（nav 为 (1 + 日收益) 的逐日连乘），"
         "缺失日按落盘侧约定处理。"
     )
     lines.append("- 换手为**日度双边**（买、卖各计一次）；成本按上式从日收益逐日扣减。")

@@ -10,6 +10,9 @@
   绝不产出「无数字的 PDF」；
 - **文件名确定性**：同 run 同名（幂等覆盖），字符清洗不让路径分隔溜进名字；
 - **禁用词**：PDF 面向用户，正文不含内部工单号；
+- **字形纪律**：正文禁希腊字母（μ/σ/Π 在嵌入 CJK 字体里渲染成豆腐块）；
+- **表格纪律**：每张表逐行 `|` 计数一致（裸竖线会撕列，动态值过 `_cell`，
+  静态常量由测试兜底）；
 - **落盘 smoke**：真实渲染（reportlab）→ %PDF 魔数 + 幂等重导出（无 reportlab
   的环境自动 skip）。
 """
@@ -109,6 +112,44 @@ def test_装配_禁用词与降级拒绝():
     # 导出层的 ValueError 必须带业务原因原文（router 409 detail 直接取自它）
     with pytest.raises(ValueError, match="engine_restarted_mid_run"):
         rpdf.export_report_pdf({"run_id": "r"}, None, degraded)
+
+
+def test_装配_字形纪律_无希腊字母():
+    """μ/σ/Π 在嵌入式 CJK 字体里没有字形，会渲染成豆腐块（实测缺陷）。
+
+    字形纪律：口径列用中文词写开（「均值/标准差/逐日连乘」），正文禁整个
+    Greek and Coptic 区段（U+0370–U+03FF）——比逐个禁字更难绕过。
+    """
+    _, _, md = _block_and_md()
+    greek = [(ch, f"U+{ord(ch):04X}") for ch in md if 0x0370 <= ord(ch) <= 0x03FF]
+    assert greek == [], f"正文含希腊字母（PDF 渲染会成豆腐块）: {greek}"
+
+
+def test_装配_表格纪律_每个表格竖线数一致():
+    """口径文本里的裸 ``|`` 会把表格行撕成多列（实测缺陷）。
+
+    表格纪律：每一段连续 ``|`` 行内，各行的 ``|`` 计数必须完全一致
+    （动态值已由 ``_cell()`` 换全角，静态常量表由本测试兜底）。
+    """
+    _, _, md = _block_and_md()
+
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in md.splitlines():
+        if line.startswith("|"):
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+
+    assert blocks, "金样报告应至少含一张表格"
+    for idx, table in enumerate(blocks, start=1):
+        counts = sorted({line.count("|") for line in table})
+        assert len(counts) == 1, (
+            f"第 {idx} 张表格竖线数不一致（会撕列）: {counts}\n" + "\n".join(table)
+        )
 
 
 def test_文件名_确定性与清洗():
