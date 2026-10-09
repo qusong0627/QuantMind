@@ -21,8 +21,7 @@
 ======================  ==========================================  ==========
 
 缺口不是「以后再补」四个字：**块整段不出现**（渲染器对空串的行为），而不是填假数据。
-池侧 ``agent_picks`` 代缺 ``rank``/``industry``/``fusion`` 三列（``picks`` 代已带）——
-缺的列登记进 ``missing_columns``，渲染成 ``—``/空，不编。
+池侧还缺 ``rank``/``industry``/``fusion`` 三列——QM 的产物里没有，渲染成 ``—``/空。
 
 代码口径：本模块出口一律 **suffix 式**（``600036.SH``）。QM 落库是 prefix 式
 （``SH600036``），模型 schema 与 ``decision.gates`` 内部口径都是 suffix——转换只在
@@ -57,10 +56,8 @@ CST = timezone(timedelta(hours=8))
 #: 5 分钟内有帧；键没了就是**断流**，不是「价格是 0」。
 SNAPSHOT_TTL_S = 300
 
-#: 池文件两代命名：``{date}_agent_picks.json``（night_pool_agent 产物，带事件标注）
-#: 与 ``{date}_picks.json``（postmarket_pipeline/pick_candidates 产物，在产）。
-#: **行数组键也分两代**：``picks``/``code`` 与 ``candidates``/``symbol``（裸码），
-#: 读侧必须两套都认——只认一套时另一代的池会**静默**读成空池（见 ``load_pool_doc``）。
+#: 池文件两代命名：``{date}_agent_picks.json``（带事件标注，现行）与
+#: ``{date}_picks.json``（旧格式，``market_direction`` 里多 total_score）。
 _POOL_SUFFIXES = ("_agent_picks.json", "_picks.json")
 
 
@@ -104,11 +101,9 @@ class PoolDoc:
 def load_pool_doc(day: str, *, top: int | None = None) -> PoolDoc | None:
     """读 QM 的池产物 → :class:`PoolDoc`；文件不在返回 ``None``。
 
-    两代 schema 都认：``picks``/``code`` 与 ``candidates``/``symbol``（见
-    ``_POOL_SUFFIXES`` 上方注释）。``top``：只取前 N 只（**排序以文件为准**，
-    文件里没有 ``rank`` 就按出现顺序编号）。缺的列（``agent_picks`` 代缺
-    ``rank``/``industry``/``fusion``）登记进 ``missing_columns``，渲染成 ``—``/空，
-    **绝不**编一个行业名出来。
+    ``top``：只取前 N 只（**排序以文件为准**，文件里没有 ``rank`` 就按出现顺序编号）。
+    ``rank``/``industry``/``fusion`` 三列 QM 没有 → 缺失列登记进 ``missing_columns``，
+    渲染成 ``—``/空，**绝不**编一个行业名出来。
     """
     path = pool_path(day)
     if path is None:
@@ -118,17 +113,9 @@ def load_pool_doc(day: str, *, top: int | None = None) -> PoolDoc | None:
     except (OSError, ValueError) as exc:
         logger.warning("池文件读不动 %s：%s", path, exc)
         return None
-    # 行数组键两代：``picks``（agent_picks 代）与 ``candidates``（pick_candidates 代）。
-    # 只认 ``picks`` 时在产的池会被**静默**读成空池（2026-10-09 实锤：文件在、30 只
-    # 候选、rows=0、无告警）——空池会让 ``l2.pool_not_member`` 拦下全部新开仓。
-    picks = doc.get("picks")
-    if picks is None:
-        picks = doc.get("candidates")
-    picks = picks or []
+    picks = doc.get("picks") or []
     if not isinstance(picks, list):
-        logger.warning(
-            "池文件 %s 的 picks/candidates 不是列表（%s）", path, type(picks).__name__
-        )
+        logger.warning("池文件 %s 的 picks 不是列表（%s）", path, type(picks).__name__)
         return None
     if top is not None:
         picks = picks[: max(0, int(top))]
@@ -136,12 +123,7 @@ def load_pool_doc(day: str, *, top: int | None = None) -> PoolDoc | None:
     missing: set[str] = set()
     rows: list[PoolRow] = []
     for i, p in enumerate(picks):
-        if not isinstance(p, Mapping):
-            continue
-        # 代码字段两代：``code``（agent_picks，已带后缀）与 ``symbol``
-        # （pick_candidates，裸码/prefix 混用）——出口统一走 _to_suffix。
-        raw_code = p.get("code") or p.get("symbol")
-        if not raw_code:
+        if not isinstance(p, Mapping) or not p.get("code"):
             continue
         for col in ("rank", "industry", "fusion"):
             if p.get(col) is None:
@@ -149,7 +131,7 @@ def load_pool_doc(day: str, *, top: int | None = None) -> PoolDoc | None:
         score = p.get("score")
         rows.append(
             PoolRow(
-                code=_to_suffix(raw_code),
+                code=_to_suffix(p["code"]),
                 name=str(p.get("name") or ""),
                 industry=str(p.get("industry") or ""),
                 score=float(score) if isinstance(score, (int, float)) else None,
