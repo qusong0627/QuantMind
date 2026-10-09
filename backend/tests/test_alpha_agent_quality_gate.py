@@ -7,6 +7,7 @@ alpha_agent 路由依赖 fastapi/DB，本地轻量环境 import 失败时整体�
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -27,7 +28,9 @@ except Exception as _exc:  # noqa: BLE001
     _IMPORT_ERR = _exc
 
 
-pytestmark = pytest.mark.skipif(aa is None, reason="alpha_agent 依赖不可用（需容器环境）")
+pytestmark = pytest.mark.skipif(
+    aa is None, reason="alpha_agent 依赖不可用（需容器环境）"
+)
 
 
 def test_parse_logic_score_extracts_and_strips() -> None:
@@ -64,11 +67,15 @@ def test_quality_warnings_thresholds() -> None:
 def test_compute_pfs_quality_on_panel() -> None:
     rng = np.random.default_rng(7)
     n_days, n_stocks = 30, 120
-    df = pd.DataFrame({
-        "trade_date": np.repeat(pd.date_range("2024-01-01", periods=n_days, freq="B"), n_stocks),
-        "symbol": np.tile([f"s{i:03d}" for i in range(n_stocks)], n_days),
-        "factor": rng.normal(size=n_days * n_stocks),
-    })
+    df = pd.DataFrame(
+        {
+            "trade_date": np.repeat(
+                pd.date_range("2024-01-01", periods=n_days, freq="B"), n_stocks
+            ),
+            "symbol": np.tile([f"s{i:03d}" for i in range(n_stocks)], n_days),
+            "factor": rng.normal(size=n_days * n_stocks),
+        }
+    )
     q = aa._compute_pfs_quality(df)
     assert q is not None
     assert 0.0 <= q["pfs"] <= 1.0
@@ -81,16 +88,25 @@ def test_compute_pfs_quality_on_panel() -> None:
 def test_backtest_pipelines_emit_quality() -> None:
     """两条回测路径都必须把 PFS 写进 metadata（qlib 主进程算 / h5 子进程打印解析）。"""
     src = ALPHA_AGENT_PY.read_text(encoding="utf-8")
-    # qlib 路径：主进程直接算，quality 进 metadata
-    assert "pfs_quality = _compute_pfs_quality(pd.DataFrame({" in src
+    # qlib 路径：主进程直接算，quality 进 metadata。
+    # 调用点被 ruff 重排为多行（pd.DataFrame( 换行展开），按空白容忍匹配，
+    # 只要「在 DataFrame 上调 _compute_pfs_quality 并赋值给 pfs_quality」这个形状在即可。
+    assert re.search(
+        r"pfs_quality = _compute_pfs_quality\(\s*pd\.DataFrame\(\s*\{", src
+    )
     assert '"quality": pfs_quality' in src
     # h5/函数式路径：子进程内算并打印，父进程解析（注意脚本在外层 f-string 里，字面花括号已转义）
     assert 'print("PFS=%.4f" % _q["pfs"])' in src
-    assert 'or {{}}' in src  # 子进程脚本里的 {} 已按 f-string 转义
+    assert "or {{}}" in src  # 子进程脚本里的 {} 已按 f-string 转义
     assert 'elif line.startswith("PFS="):' in src
     # IC/ICIR/组合指标改走 _metric 助手后，PFS_GAUSS 成为 PFS 解析循环的首分支
     assert 'if line.startswith("PFS_GAUSS="):' in src
-    assert 'metadata={"data_source": "h5", **({"quality": pfs_quality} if pfs_quality else {})},' in src
+    # h5 路径的 metadata 同样被 ruff 折行，按空白容忍匹配同一形状
+    assert re.search(
+        r'metadata=\{\s*"data_source": "h5",\s*'
+        r'\*\*\(\{"quality": pfs_quality\} if pfs_quality else \{\}\),',
+        src,
+    )
 
 
 def test_explain_requests_and_persists_logic_score() -> None:
