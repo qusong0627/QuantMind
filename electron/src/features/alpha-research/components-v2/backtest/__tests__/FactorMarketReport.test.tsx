@@ -1,26 +1,30 @@
 /**
- * FactorMarketReport —— 单因子 × 市场报告抽屉（T-FB-14）。
+ * FactorMarketReport —— 单因子 × 市场报告抽屉（T-FB-14 / 报告块 T-FB-16）。
  *
  * 钉死的边：
- * - 降级终态（data_unsupported 等）：给出状态 + 原因原文，不拉序列、图表页签禁用
+ * - 降级终态（data_unsupported 等）：给出状态 + 原因原文，不拉序列/报告、图表页签禁用
  *   ——诚实降级，不画空图；
- * - 完成：拉 /runs/{id}/series，概览出标量卡；基准是等权兜底时必须显著标注
+ * - 完成：并行拉 /runs/{id}/series 与 /report/{id}，概览出标量卡 + 机构报告块
+ *   （显著性 / 成本网格 / 头部 / 暂缺清单）；基准是等权兜底时必须显著标注
  *   （不能冒充指数超额）；
+ * - 报告端点 available=false（序列未落盘）→ 只出原因文本，不出数字区块；
  * - Esc / 背板关闭。
  */
 import React from 'react';
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { FactorMarketReport } from '../FactorMarketReport';
-import type { DrillTarget, RunSeries } from '../../../types-v2/backtestCenter';
+import type { DrillTarget, RunReport, RunSeries } from '../../../types-v2/backtestCenter';
 
 const mocks = vi.hoisted(() => ({
   getRunSeries: vi.fn(),
+  getRunReport: vi.fn(),
   fetchMatrix: vi.fn(),
 }));
 
 vi.mock('../../../services-v2/factorBacktestApi', () => ({
   getRunSeries: mocks.getRunSeries,
+  getRunReport: mocks.getRunReport,
   fetchMatrix: mocks.fetchMatrix,
 }));
 // jsdom 无 canvas
@@ -80,11 +84,78 @@ const TARGET_DEGRADED: DrillTarget = {
   dateRange: '2024-01-01~2024-12-31',
 };
 
+/** 机构报告块（T-FB-16；service 层已映射为 camelCase） */
+const REPORT_OK: RunReport = {
+  available: true,
+  status: 'completed',
+  runId: 'run-1',
+  nDays: 3,
+  headline: {
+    nDays: 3,
+    muDaily: 0.001,
+    sigmaDaily: 0.01,
+    annVol: 0.1587,
+    returns: 0.252,
+    cumReturn: 0.02,
+    ir: 1.6,
+    turnover: 0.3,
+    fitness: 0.95,
+    margin: 0.84,
+  },
+  significance: {
+    plainT: 1.8,
+    nwT: 1.5,
+    pValue: 0.13,
+    qValueBhy: 0.26,
+    familyN: 4,
+    familyNote: '族 = 同一批次全部完成单元（NW t → 正态双侧 p → BY 校正）',
+    dsr: 0.71,
+    nTrials: 4,
+    nTrialsSource: 'batch_completed_units',
+    dsrNote:
+      'DSR 去膨胀所用试次数取批内完成单元数（挖掘史选型的真实试错数不可考，此为可计算下界，非全史试次数）',
+    bootstrap: { lo: -0.02, hi: 0.09, point: 0.03, level: 0.95, nBoot: 2000, stat: 'mean' },
+    crowding: {
+      score: 0.5,
+      turnoverPct: 0.4,
+      icAutocorrLag1: 0.6,
+      nDays: 3,
+      note: '0.5×近期换手分位 + 0.5×IC 一阶自相关（截断到 [0,1]）',
+    },
+  },
+  costGrid: {
+    rows: [
+      { bps: 0, netReturn: 0.25, netIr: 1.6, netFitness: 0.95 },
+      { bps: 10, netReturn: 0.18, netIr: 1.2, netFitness: 0.8 },
+      { bps: 20, netReturn: 0.11, netIr: 0.7, netFitness: 0.5 },
+    ],
+    breakEvenBps: 21.4,
+    breakEvenNote: null,
+    defaultBps: 20,
+  },
+  excess: {
+    kind: 'equal_weight',
+    benchmarkRef: 'csi300',
+    label: '区间等权兜底',
+    note: '超额基准为全域等权组合（兜底口径）；不得把该差额解读为对指数的超额。',
+  },
+  unavailable: [
+    { block: 'capacity', reason: '序列载荷不含成交额与持仓市值，容量模型缺输入' },
+    { block: 'ic_half_life', reason: '运行只存单视界 IC，无多视界 IC 衰减表' },
+  ],
+  meta: { costBps: 10, topPct: 0.1, turnoverConvention: 'daily_two_sided', source: 'stored_series' },
+};
+
 beforeEach(() => {
   mocks.getRunSeries.mockReset();
   mocks.getRunSeries.mockResolvedValue({
     success: true,
     data: { run: mkRun(), series: mkSeries() },
+  });
+  mocks.getRunReport.mockReset();
+  mocks.getRunReport.mockResolvedValue({
+    success: true,
+    data: { run: mkRun(), report: REPORT_OK },
   });
 });
 
@@ -103,6 +174,7 @@ describe('因子报告抽屉', () => {
     expect((screen.getByRole('button', { name: 'IC' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: '分组' }) as HTMLButtonElement).disabled).toBe(true);
     expect(mocks.getRunSeries).not.toHaveBeenCalled();
+    expect(mocks.getRunReport).not.toHaveBeenCalled();
   });
 
   test('完成：拉序列、概览出标量卡，等权兜底显著标注', async () => {
@@ -110,6 +182,7 @@ describe('因子报告抽屉', () => {
     await act(async () => {});
 
     expect(mocks.getRunSeries).toHaveBeenCalledWith('run-1');
+    expect(mocks.getRunReport).toHaveBeenCalledWith('run-1');
     // 标量卡（后端原始键 → 显示标签）
     expect(screen.getByText('Rank IC')).toBeTruthy();
     expect(screen.getByText('0.0300')).toBeTruthy();
@@ -120,6 +193,71 @@ describe('因子报告抽屉', () => {
     expect(screen.getByTestId('chart')).toBeTruthy();
     // 曲线页签可用
     expect((screen.getByRole('button', { name: 'IC' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('机构报告块：显著性/成本网格/头部/暂缺清单落地', async () => {
+    render(<FactorMarketReport target={TARGET_COMPLETED} onClose={vi.fn()} />);
+    await act(async () => {});
+
+    // 显著性：NW t / BY q / 试次数来源 / DSR 注解 / 拥挤度
+    expect(screen.getByTestId('report-significance')).toBeTruthy();
+    expect(screen.getByText('NW t 值')).toBeTruthy();
+    expect(screen.getByText('1.50')).toBeTruthy();
+    expect(screen.getByText('BY q 值（族校正后）')).toBeTruthy();
+    expect(screen.getByText('0.2600')).toBeTruthy();
+    expect(screen.getByText('批内完成单元数')).toBeTruthy();
+    expect(screen.getByText(/DSR 去膨胀所用试次数/)).toBeTruthy();
+    expect(screen.getByText(/拥挤度 0.500/)).toBeTruthy();
+
+    // 多空腿头部（BRAIN 口径）
+    expect(screen.getByTestId('report-headline')).toBeTruthy();
+    expect(screen.getByText('Returns（毛年化）')).toBeTruthy();
+    expect(screen.getByText('Margin（R/换手）')).toBeTruthy();
+
+    // 成本敏感性网格：盈亏平衡 + 默认档行 + 单调行数据
+    const grid = screen.getByTestId('report-cost-grid');
+    expect(grid.textContent).toContain('盈亏平衡');
+    expect(grid.textContent).toContain('21.4');
+    expect(grid.textContent).toContain('净 Fitness');
+    expect(screen.getByText('净年化')).toBeTruthy();
+
+    // 暂缺清单（中文标签映射）
+    const unavail = screen.getByTestId('report-unavailable');
+    expect(unavail.textContent).toContain('容量估算');
+    expect(unavail.textContent).toContain('IC 衰减半衰期');
+  });
+
+  test('报告块 available=false（序列未落盘）：只出原因文本，不出数字区块', async () => {
+    mocks.getRunReport.mockResolvedValue({
+      success: true,
+      data: {
+        run: mkRun(),
+        report: {
+          available: false,
+          status: 'completed',
+          reason: 'series_not_stored',
+          note: '序列未落盘（或落盘失败），报告无数据面可装配',
+        },
+      },
+    });
+    render(<FactorMarketReport target={TARGET_COMPLETED} onClose={vi.fn()} />);
+    await act(async () => {});
+
+    const note = screen.getByTestId('report-unavailable-note');
+    expect(note.textContent).toContain('series_not_stored');
+    expect(screen.queryByTestId('report-significance')).toBeNull();
+    expect(screen.queryByTestId('report-cost-grid')).toBeNull();
+    expect(screen.queryByTestId('report-headline')).toBeNull();
+  });
+
+  test('报告块加载失败：amber 提示，曲线与标量卡不受影响', async () => {
+    mocks.getRunReport.mockResolvedValue({ success: false, error: 'network down' });
+    render(<FactorMarketReport target={TARGET_COMPLETED} onClose={vi.fn()} />);
+    await act(async () => {});
+
+    expect(screen.getByText(/机构报告块加载失败：network down/)).toBeTruthy();
+    expect(screen.getByTestId('chart')).toBeTruthy();
+    expect(screen.getByText('Rank IC')).toBeTruthy();
   });
 
   test('Esc 关闭', async () => {

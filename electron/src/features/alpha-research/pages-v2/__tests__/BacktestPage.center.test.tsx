@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   listBatches: vi.fn(),
   listRuns: vi.fn(),
   getRunSeries: vi.fn(),
+  getRunReport: vi.fn(),
 }));
 
 vi.mock('../../services-v2/api', async (importOriginal) => {
@@ -37,6 +38,7 @@ vi.mock('../../services-v2/factorBacktestApi', () => ({
   listBatches: mocks.listBatches,
   listRuns: mocks.listRuns,
   getRunSeries: mocks.getRunSeries,
+  getRunReport: mocks.getRunReport,
 }));
 // jsdom 无 canvas
 vi.mock('../../../../components/common/EChartsChart', () => ({
@@ -157,6 +159,13 @@ beforeEach(() => {
       },
     },
   });
+  mocks.getRunReport.mockResolvedValue({
+    success: true,
+    data: {
+      run: { runId: 'run-1', factorId: 'fa', status: 'completed', metrics: {} },
+      report: { available: true, status: 'completed' },
+    },
+  });
 });
 
 afterEach(() => {
@@ -197,6 +206,7 @@ describe('回测中心（页面装配）', () => {
     await act(async () => {});
 
     expect(mocks.getRunSeries).toHaveBeenCalledWith('run-1');
+    expect(mocks.getRunReport).toHaveBeenCalledWith('run-1');
     const drawer = screen.getByTestId('factor-report');
     expect(within(drawer).getByText('因子A')).toBeTruthy();
     expect(within(drawer).getByText('美股（样本外）')).toBeTruthy();

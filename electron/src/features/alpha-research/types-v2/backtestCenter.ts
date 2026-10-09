@@ -242,6 +242,113 @@ export interface RunSeriesResult {
   series: RunSeries;
 }
 
+// ── 机构报告标量块（GET /report/{run_id}，T-FB-16） ──────────────────
+
+/** 多空腿头部（BRAIN 口径；Returns 为简单年化 μ×252，不是 CAGR） */
+export interface RunReportHeadline {
+  nDays: number | null;
+  muDaily: number | null;
+  sigmaDaily: number | null;
+  annVol: number | null;
+  returns: number | null;
+  cumReturn: number | null;
+  ir: number | null;
+  /** 日均双边换手（日口径；IC 累计曲线页的年化为另一列） */
+  turnover: number | null;
+  fitness: number | null;
+  margin: number | null;
+}
+
+export interface RunReportBootstrap {
+  lo: number | null;
+  hi: number | null;
+  point: number | null;
+  level: number | null;
+  nBoot: number | null;
+  stat: string | null;
+}
+
+export interface RunReportCrowding {
+  score: number | null;
+  turnoverPct: number | null;
+  icAutocorrLag1: number | null;
+  nDays: number | null;
+  note: string | null;
+}
+
+export interface RunReportSignificance {
+  /** 普通 t（未校正自相关；对照 NW t 读） */
+  plainT: number | null;
+  /** Newey-West 调整 t（与台账 metrics.ic_nw_t 同源同值） */
+  nwT: number | null;
+  pValue: number | null;
+  /** BY 校正 q（族 = 同批次完成单元；无族上下文时 q=p 并见 familyNote） */
+  qValueBhy: number | null;
+  familyN: number;
+  familyNote: string | null;
+  dsr: number | null;
+  nTrials: number;
+  /** batch_completed_units | param | default_single */
+  nTrialsSource: string;
+  dsrNote: string | null;
+  bootstrap: RunReportBootstrap | null;
+  crowding: RunReportCrowding | null;
+}
+
+export interface RunReportCostRow {
+  bps: number;
+  netReturn: number | null;
+  netIr: number | null;
+  netFitness: number | null;
+}
+
+export interface RunReport {
+  /** false = 降级/序列缺失：只有 status/reason/note，**没有任何数字** */
+  available: boolean;
+  status: string;
+  runId?: string;
+  nDays?: number;
+  headline?: RunReportHeadline;
+  significance?: RunReportSignificance;
+  costGrid?: {
+    rows: RunReportCostRow[];
+    breakEvenBps: number | null;
+    breakEvenNote: string | null;
+    defaultBps: number | null;
+  };
+  /** 超额基准标注：等权兜底绝不冒充指数超额 */
+  excess?: {
+    kind: string;
+    benchmarkRef: string | null;
+    label: string;
+    note: string;
+  };
+  /** 序列载荷算不出的报告块（各写明缺什么输入；不做近似替代） */
+  unavailable?: { block: string; reason: string }[];
+  meta?: {
+    costBps: number | null;
+    topPct: number | null;
+    turnoverConvention: string | null;
+    source: string;
+  };
+  /** available=false 时的原因原文 */
+  reason?: string | null;
+  note?: string | null;
+}
+
+export interface RunReportResult {
+  run: LedgerRun;
+  report: RunReport;
+}
+
+/** 暂缺报告块的中文标签（报告抽屉「暂缺」清单） */
+export const REPORT_BLOCK_LABELS: Record<string, string> = {
+  capacity: '容量估算',
+  holding_period: '多期持有对比',
+  ic_half_life: 'IC 衰减半衰期',
+  style_attribution: '风格归因',
+};
+
 // ── 钻取目标（矩阵格 / 台账行 → 报告抽屉） ──────────────────────────
 
 export interface DrillTarget {

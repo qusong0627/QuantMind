@@ -24,6 +24,8 @@ import type {
   MatrixFactorRow,
   MatrixMarketCol,
   MatrixResult,
+  RunReport,
+  RunReportResult,
   RunSeries,
   RunSeriesResult,
 } from '../types-v2/backtestCenter';
@@ -394,5 +396,129 @@ export async function getRunSeries(
     return ok({ run: mapRun(d.run ?? {}), series: mapSeries(d.series ?? {}) });
   } catch (err) {
     return fail(errorText(err, '查询回测曲线失败'));
+  }
+}
+
+// ── 机构报告标量块（GET /report/{run_id}，T-FB-16） ─────────────────
+
+function mapReport(raw: any): RunReport {
+  const d = raw ?? {};
+  if (!d.available) {
+    // 降级出口：除 status/reason/note 文本外无任何数字
+    return {
+      available: false,
+      status: d.status ?? '',
+      reason: str(d.reason),
+      note: str(d.note),
+    };
+  }
+  const h = d.headline ?? {};
+  const s = d.significance ?? {};
+  const cg = d.cost_grid ?? {};
+  const ex = d.excess ?? {};
+  const meta = d.meta ?? {};
+  const boot = s.bootstrap;
+  const crowd = s.crowding;
+  return {
+    available: true,
+    status: d.status ?? '',
+    runId: str(d.run_id),
+    nDays: num(d.n_days),
+    headline: {
+      nDays: num(h.n_days),
+      muDaily: num(h.mu_daily),
+      sigmaDaily: num(h.sigma_daily),
+      annVol: num(h.ann_vol),
+      returns: num(h.returns),
+      cumReturn: num(h.cum_return),
+      ir: num(h.ir),
+      turnover: num(h.turnover),
+      fitness: num(h.fitness),
+      margin: num(h.margin),
+    },
+    significance: {
+      plainT: num(s.plain_t),
+      nwT: num(s.nw_t),
+      pValue: num(s.p_value),
+      qValueBhy: num(s.q_value_bhy),
+      familyN: num(s.family_n) ?? 0,
+      familyNote: str(s.family_note),
+      dsr: num(s.dsr),
+      nTrials: num(s.n_trials) ?? 0,
+      nTrialsSource: s.n_trials_source ?? '',
+      dsrNote: str(s.dsr_note),
+      bootstrap:
+        boot && typeof boot === 'object'
+          ? {
+              lo: num(boot.lo),
+              hi: num(boot.hi),
+              point: num(boot.point),
+              level: num(boot.level),
+              nBoot: num(boot.n_boot),
+              stat: str(boot.stat),
+            }
+          : null,
+      crowding:
+        crowd && typeof crowd === 'object'
+          ? {
+              score: num(crowd.score),
+              turnoverPct: num(crowd.turnover_pct),
+              icAutocorrLag1: num(crowd.ic_autocorr_lag1),
+              nDays: num(crowd.n_days),
+              note: str(crowd.note),
+            }
+          : null,
+    },
+    costGrid: {
+      rows: Array.isArray(cg.rows)
+        ? cg.rows.map((r: any) => ({
+            bps: num(r?.bps) ?? 0,
+            netReturn: num(r?.net_return),
+            netIr: num(r?.net_ir),
+            netFitness: num(r?.net_fitness),
+          }))
+        : [],
+      breakEvenBps: num(cg.break_even_bps),
+      breakEvenNote: str(cg.break_even_note),
+      defaultBps: num(cg.default_bps),
+    },
+    excess: {
+      kind: ex.kind ?? '',
+      benchmarkRef: str(ex.benchmark_ref),
+      label: ex.label ?? '',
+      note: ex.note ?? '',
+    },
+    unavailable: Array.isArray(d.unavailable)
+      ? d.unavailable.map((b: any) => ({
+          block: b?.block ?? '',
+          reason: b?.reason ?? '',
+        }))
+      : [],
+    meta: {
+      costBps: num(meta.cost_bps),
+      topPct: num(meta.top_pct),
+      turnoverConvention: str(meta.turnover_convention),
+      source: meta.source ?? '',
+    },
+  };
+}
+
+/**
+ * 机构报告标量块。`nTrials` 覆盖 DSR 试次数（缺省=后端批内完成单元数）。
+ * 报告端点自身对非完成终态也回 200 + `available:false`（原因在 reason），
+ * 所以这里不按状态做前置拦截，按 `available` 渲染。
+ */
+export async function getRunReport(
+  runId: string,
+  nTrials?: number | null,
+): Promise<ApiResponse<RunReportResult>> {
+  try {
+    const res = await apiClient.get(`${BASE}/report/${encodeURIComponent(runId)}`, {
+      params: nTrials != null ? { n_trials: nTrials } : undefined,
+    });
+    const d = res.data?.data ?? {};
+    return ok({ run: mapRun(d.run ?? {}), report: mapReport(d.report ?? {}) });
+  } catch (err) {
+    return fail(errorText(err, '查询机构报告失败'));
   }
 }

@@ -12,13 +12,21 @@
  * - 超额基准：series.bench='equal_weight' 时是**等权兜底**（该市场无基准指数），
  *   界面必须显著标注，不能冒充指数超额；
  * - CN 列是样本内（挖掘原始市场），非 CN 为样本外重算。
+ *
+ * 机构报告标量块（T-FB-16，`/report/{run_id}`）与曲线并行拉取（仅完成态）：
+ * 概览页签增出「显著性 / 成本敏感性网格 / 多空腿头部 / 暂缺清单」；
+ * 降级终态与序列缺失由报告端点自述（available=false + reason），照实陈列。
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, BarChart3, AlertCircle, Loader2, Table2, TrendingUp, Layers, Scale } from 'lucide-react';
 import { EChartsChart } from '../../../../components/common/EChartsChart';
-import { getRunSeries } from '../../services-v2/factorBacktestApi';
-import type { DrillTarget, RunSeriesResult } from '../../types-v2/backtestCenter';
-import { BACKTEST_STATUS_LABELS, matrixMetricSpec } from '../../types-v2/backtestCenter';
+import { getRunReport, getRunSeries } from '../../services-v2/factorBacktestApi';
+import type { DrillTarget, RunReport, RunSeriesResult } from '../../types-v2/backtestCenter';
+import {
+  BACKTEST_STATUS_LABELS,
+  REPORT_BLOCK_LABELS,
+  matrixMetricSpec,
+} from '../../types-v2/backtestCenter';
 import { cn, formatNumber, formatPercent } from '../../utils-v2';
 import { ComparisonOverlay } from './ComparisonOverlay';
 
@@ -133,6 +141,32 @@ const DEGRADED_HINTS: Record<string, string> = {
   cancelled: '运行被取消，未完成求值。',
 };
 
+/** n_trials 来源 → 中文标签（词表与后端 report.py 的 n_trials_source 对齐） */
+const N_TRIALS_SOURCE_LABELS: Record<string, string> = {
+  batch_completed_units: '批内完成单元数',
+  param: '查询参数指定',
+  default_single: '默认 1（单运行）',
+};
+
+const fmtNum = (v: number | null | undefined, digits: number): string =>
+  typeof v === 'number' && Number.isFinite(v) ? formatNumber(v, digits) : '—';
+
+const fmtPct = (v: number | null | undefined): string =>
+  typeof v === 'number' && Number.isFinite(v) ? formatPercent(v) : '—';
+
+/** 机构报告块迷你标量卡（值缺失一律「—」，绝不显示成 0） */
+const StatCell: React.FC<{ label: string; value: string; hint?: string | null }> = ({
+  label,
+  value,
+  hint,
+}) => (
+  <div className="rounded-lg border border-border/50 bg-muted/20 p-2.5">
+    <div className="text-[10px] text-muted-foreground">{label}</div>
+    <div className="mt-0.5 font-mono text-sm font-semibold text-slate-800">{value}</div>
+    {hint && <div className="mt-0.5 text-[10px] text-muted-foreground">{hint}</div>}
+  </div>
+);
+
 export interface FactorMarketReportProps {
   target: DrillTarget | null;
   onClose: () => void;
@@ -142,6 +176,8 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
   const [seriesResult, setSeriesResult] = useState<RunSeriesResult | null>(null);
   const [seriesError, setSeriesError] = useState<string | null>(null);
   const [seriesLoading, setSeriesLoading] = useState(false);
+  const [report, setReport] = useState<RunReport | null>(null);
+  const [reportError, setReportError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('overview');
 
   // Esc 关闭
@@ -154,23 +190,34 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
     return () => window.removeEventListener('keydown', onKey);
   }, [target, onClose]);
 
-  // 目标切换：重置页签并按可用性拉序列
+  // 目标切换：重置页签并按可用性并行拉 序列 + 机构报告（仅完成态）
   useEffect(() => {
     setActiveTab('overview');
     setSeriesResult(null);
     setSeriesError(null);
+    setReport(null);
+    setReportError(null);
     if (!target?.runId) return;
     if (target.status && target.status !== 'completed') return; // 降级：无序列可拉
     let alive = true;
     setSeriesLoading(true);
     (async () => {
-      const resp = await getRunSeries(target.runId as string);
+      const [seriesResp, reportResp] = await Promise.all([
+        getRunSeries(target.runId as string),
+        getRunReport(target.runId as string),
+      ]);
       if (!alive) return;
-      if (resp.success && resp.data) {
-        setSeriesResult(resp.data);
+      if (seriesResp.success && seriesResp.data) {
+        setSeriesResult(seriesResp.data);
         setSeriesError(null);
       } else {
-        setSeriesError(resp.error ?? '加载曲线失败');
+        setSeriesError(seriesResp.error ?? '加载曲线失败');
+      }
+      if (reportResp.success && reportResp.data) {
+        setReport(reportResp.data.report);
+        setReportError(null);
+      } else {
+        setReportError(reportResp.error ?? '加载机构报告失败');
       }
       setSeriesLoading(false);
     })();
@@ -207,6 +254,11 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
       ),
     [metrics],
   );
+
+  // 报告块三件套（available=false 时全为 null，只出原因文本）
+  const sig = report?.available ? (report.significance ?? null) : null;
+  const headline = report?.available ? (report.headline ?? null) : null;
+  const costGrid = report?.available ? (report.costGrid ?? null) : null;
 
   if (!target) return null;
 
@@ -313,6 +365,13 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
             </p>
           )}
 
+          {!degraded && target.runId && !seriesLoading && reportError && (
+            <p className="flex items-center gap-2 py-3 text-sm text-amber-600">
+              <AlertCircle className="h-4 w-4" /> 机构报告块加载失败：{reportError}
+              （曲线与台账指标不受影响）
+            </p>
+          )}
+
           {!target.runId && !degraded && (
             <p className="py-3 text-sm text-muted-foreground">
               该格尚未回测——在派发台选中此因子并派发批量回测后，这里会出报告。
@@ -320,7 +379,8 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
           )}
 
           {/* 概览 */}
-          {activeTab === 'overview' && (overviewMetrics.length > 0 || series) && (
+          {activeTab === 'overview' &&
+            (overviewMetrics.length > 0 || series || report) && (
             <div className="space-y-5">
               {overviewMetrics.length > 0 && (
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
@@ -336,6 +396,144 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
                   ))}
                 </div>
               )}
+              {/* 报告块不可用（非完成终态 / 序列缺失）——照实说明，不出数字 */}
+              {report && !report.available && (
+                <p className="text-[11px] text-muted-foreground" data-testid="report-unavailable-note">
+                  机构报告块不可用：{report.reason ?? '原因缺失'}
+                  {report.note ? `（${report.note}）` : ''}
+                </p>
+              )}
+
+              {/* 多空腿头部（BRAIN 口径） */}
+              {headline && (
+                <div data-testid="report-headline">
+                  <h4 className="mb-2 text-xs font-medium text-muted-foreground">
+                    多空腿头部（BRAIN 口径；Returns 为简单年化 μ×252，非 CAGR）
+                  </h4>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                    <StatCell label="Returns（毛年化）" value={fmtPct(headline.returns)} />
+                    <StatCell label="IR" value={fmtNum(headline.ir, 2)} />
+                    <StatCell label="日均换手（双边）" value={fmtNum(headline.turnover, 2)} />
+                    <StatCell label="Fitness" value={fmtNum(headline.fitness, 2)} />
+                    <StatCell label="Margin（R/换手）" value={fmtNum(headline.margin, 2)} />
+                    <StatCell label="累计收益" value={fmtPct(headline.cumReturn)} />
+                  </div>
+                </div>
+              )}
+
+              {/* 显著性 */}
+              {sig && (
+                <div data-testid="report-significance">
+                  <h4 className="mb-2 text-xs font-medium text-muted-foreground">
+                    显著性（Newey-West t → 正态双侧 p → BY 族校正 → DSR 去膨胀）
+                  </h4>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <StatCell label="NW t 值" value={fmtNum(sig.nwT, 2)} />
+                    <StatCell label="普通 t 值（对照）" value={fmtNum(sig.plainT, 2)} />
+                    <StatCell label="p 值（双侧）" value={fmtNum(sig.pValue, 4)} />
+                    <StatCell label="BY q 值（族校正后）" value={fmtNum(sig.qValueBhy, 4)} />
+                    <StatCell label="DSR（去膨胀）" value={fmtNum(sig.dsr, 4)} />
+                    <StatCell
+                      label="试次数 n_trials"
+                      value={String(sig.nTrials)}
+                      hint={N_TRIALS_SOURCE_LABELS[sig.nTrialsSource] ?? sig.nTrialsSource}
+                    />
+                    <StatCell label="族大小" value={String(sig.familyN)} />
+                    <StatCell
+                      label="Bootstrap 置信区间"
+                      value={
+                        sig.bootstrap
+                          ? `${fmtNum(sig.bootstrap.lo, 4)} ~ ${fmtNum(sig.bootstrap.hi, 4)}`
+                          : '—'
+                      }
+                      hint={
+                        sig.bootstrap
+                          ? `均值 ${fmtNum(sig.bootstrap.point, 4)} · ${Math.round(
+                              (sig.bootstrap.level ?? 0.95) * 100,
+                            )}% · n=${sig.bootstrap.nBoot ?? '—'}`
+                          : null
+                      }
+                    />
+                  </div>
+                  {sig.familyNote && (
+                    <p className="mt-1.5 text-[11px] text-muted-foreground">{sig.familyNote}</p>
+                  )}
+                  {sig.dsrNote && (
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">{sig.dsrNote}</p>
+                  )}
+                  {sig.crowding && (
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      拥挤度 {fmtNum(sig.crowding.score, 3)}
+                      {sig.crowding.note ? `（${sig.crowding.note}）` : ''}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* 成本敏感性网格 */}
+              {costGrid && costGrid.rows.length > 0 && (
+                <div data-testid="report-cost-grid">
+                  <h4 className="mb-2 text-xs font-medium text-muted-foreground">
+                    成本敏感性（多空腿净收益 = 毛收益 − 双边换手 × 费率；盈亏平衡{' '}
+                    {fmtNum(costGrid.breakEvenBps, 1)}bp）
+                  </h4>
+                  <div className="overflow-x-auto rounded-lg border border-border/50">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-border/40 bg-muted/30 text-[10px] text-muted-foreground">
+                          <th className="px-2.5 py-1.5 text-left font-medium">费率（bp）</th>
+                          <th className="px-2.5 py-1.5 text-right font-medium">净年化</th>
+                          <th className="px-2.5 py-1.5 text-right font-medium">净 IR</th>
+                          <th className="px-2.5 py-1.5 text-right font-medium">净 Fitness</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {costGrid.rows.map((r) => (
+                          <tr
+                            key={r.bps}
+                            className={cn(
+                              'border-b border-border/20 font-mono last:border-0',
+                              costGrid.defaultBps != null &&
+                                r.bps === costGrid.defaultBps &&
+                                'bg-indigo-50/40',
+                            )}
+                          >
+                            <td className="px-2.5 py-1">{r.bps}</td>
+                            <td className="px-2.5 py-1 text-right">{fmtPct(r.netReturn)}</td>
+                            <td className="px-2.5 py-1 text-right">{fmtNum(r.netIr, 2)}</td>
+                            <td className="px-2.5 py-1 text-right">{fmtNum(r.netFitness, 2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {costGrid.defaultBps != null && (
+                    <p className="mt-1 text-[10px] text-muted-foreground">
+                      高亮行 = 该市场默认费率档（{costGrid.defaultBps}bp）。
+                    </p>
+                  )}
+                  {costGrid.breakEvenNote && (
+                    <p className="mt-1 text-[11px] text-amber-600">{costGrid.breakEvenNote}</p>
+                  )}
+                </div>
+              )}
+
+              {/* 暂缺报告块（数据面限制，不做近似替代） */}
+              {report?.available && (report.unavailable?.length ?? 0) > 0 && (
+                <div data-testid="report-unavailable">
+                  <h4 className="mb-1.5 text-xs font-medium text-muted-foreground">
+                    暂缺的报告块（当前数据面算不出，不做近似替代）
+                  </h4>
+                  <ul className="space-y-0.5 text-[11px] text-muted-foreground">
+                    {(report.unavailable ?? []).map((b) => (
+                      <li key={b.block}>
+                        · {REPORT_BLOCK_LABELS[b.block] ?? b.block}：{b.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {series && (
                 <div>
                   <h4 className="mb-2 text-xs font-medium text-muted-foreground">
@@ -444,6 +642,9 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
                   ])}
                 />
               </div>
+              {report?.available && report.excess && (
+                <p className="text-[11px] text-amber-600">{report.excess.note}</p>
+              )}
             </div>
           )}
 
