@@ -11,9 +11,12 @@
 2. **列表过滤在进 SQL 前解析干净**：limit/offset 收敛、状态白名单——未知状态
    必须显式报错而非静默查空：静默查空把「挖了却没显示」变成无从定位的失忆。
    注意任务状态与**因子**状态不同名（任务有 cancelled / 没有 backtesting），
-   白名单必须拦下这种跨域混用。
+   白名单必须拦下这种跨域混用。`queued`（排队等名额）是合法任务状态，历史
+   页要能按它过滤——「排上了却查不到」与查空同罪。
 3. **真库往返**：create → progress → terminal 全字段落位、按 user 收口。
-4. **重启对账**：pending/running 的孤儿行翻 failed（completed 行绝不碰）。
+   create 只收初始态（pending/queued）——running 必须由心跳/对账到来。
+4. **重启对账**：pending/running 的孤儿行翻 failed（completed 行绝不碰）；
+   **queued 行不是孤儿**（没有子进程要回收），原样留给启动排水接续。
 
 真库用例租户前缀 `t-`（与真账隔离），用完必删、按用例 `close_database()`
 （asyncpg 池绑定创建它的 event loop，pytest 每用例新 loop——不收池会把下一个
@@ -90,6 +93,12 @@ def test_resolve_history_filters_defaults_and_clamps() -> None:
         "limit": 1,
         "offset": 0,
     }
+
+
+def test_resolve_history_filters_accepts_queued() -> None:
+    """queued 是合法任务状态（并发满时的排队行）——历史页按它过滤必须放行。"""
+    out = resolve_history_filters(market=None, status="queued", limit=50, offset=0)
+    assert out["status"] == "queued"
 
 
 def test_resolve_history_filters_rejects_unknown_status() -> None:
@@ -326,6 +335,18 @@ async def test_mark_terminal_rejects_non_terminal_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_task_rejects_non_initial_status_before_session() -> None:
+    """建行只收初始态（pending/queued）。running 只能由心跳/对账到来、终态只能
+    走 mark_terminal——放进 create 会绕过 completed_at 维护，且能造出「一出生
+    就是完成态」的历史行。校验同样在开 session 之前（无库环境里红/绿分明）。
+    """
+    store = get_mining_task_store()
+    for bad in ("running", "completed", "failed", "cancelled"):
+        with pytest.raises(ValueError):
+            await store.create_task(task_id="t-x", user_id="t-nobody", status=bad)
+
+
+@pytest.mark.asyncio
 async def test_real_db_count_factors_by_task_id() -> None:
     await _ready()
     from sqlalchemy import text
@@ -486,6 +507,35 @@ async def test_real_db_reconcile_orphans_flips_only_pending_running() -> None:
         assert r3["status"] == "completed" and r3["error"] is None
 
         assert await store.reconcile_orphans(user_id=user) == 0, "幂等：没有孤儿时是 0"
+    finally:
+        await _cleanup(user)
+        await _close()
+
+
+@pytest.mark.asyncio
+async def test_real_db_queued_row_survives_reconcile_and_is_filterable() -> None:
+    """排队行（queued）不是孤儿：重启对账绝不翻它，启动排水靠它接续。
+
+    历史页按 status=queued 过滤必须能查到——「排上了却查不到」与查空同罪。
+    """
+    await _ready()
+    user = _scope()
+    tid = f"t-ms-{uuid.uuid4().hex[:12]}"
+    try:
+        store = get_mining_task_store()
+        await _create(store, tid, user, status="queued", direction="排队中的方向")
+
+        flipped = await store.reconcile_orphans(user_id=user)
+        assert flipped == 0, "queued 不是孤儿（没有子进程要回收），对账不许碰"
+
+        row = await store.get_task(tid)
+        assert row["status"] == "queued"
+        assert row["completed_at"] is None
+        assert row["error"] is None, "排队的行不该被对账写进任何错误原因"
+
+        listed = await store.list_history(user_id=user, status="queued")
+        assert [r["task_id"] for r in listed] == [tid]
+        assert await store.count_history(user_id=user, status="queued") == 1
     finally:
         await _cleanup(user)
         await _close()

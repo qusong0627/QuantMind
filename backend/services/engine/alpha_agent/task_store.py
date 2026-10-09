@@ -39,10 +39,14 @@ MAX_DIRECTION_CHARS = 20000
 DOC_TASKS_LIMIT = 20
 
 # 任务状态全集。注意与**因子**状态（pending/backtesting/completed/failed）
-# 不是同一套：任务多了 cancelled、没有 backtesting。
-TASK_STATUSES = ("pending", "running", "completed", "failed", "cancelled")
+# 不是同一套：任务多了 queued/cancelled、没有 backtesting。
+# queued = 已达并发上限、等名额的排队任务（launcher 排水后翻 running）；
+# 重启对账（reconcile_orphans）**不碰** queued 行——它不是孤儿。
+TASK_STATUSES = ("pending", "queued", "running", "completed", "failed", "cancelled")
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 _PROGRESS_STATUSES = ("pending", "running")
+#: 建行时允许的初始状态：running 只能由心跳/对账到来，终态只能走 mark_terminal。
+_INITIAL_STATUSES = ("pending", "queued")
 
 _TS_FIELDS = ("created_at", "updated_at", "completed_at")
 
@@ -146,6 +150,7 @@ class MiningTaskStore:
         *,
         task_id: str,
         user_id: str,
+        status: str = "pending",
         market: str = "a_share",
         universe: str = "",
         data_source: str = "",
@@ -155,7 +160,16 @@ class MiningTaskStore:
         source: str = "text",
         doc_id: str | None = None,
     ) -> None:
-        """落任务行。task_id 撞键是无操作（重放/重试不该把首次写入覆盖掉）。"""
+        """落任务行。task_id 撞键是无操作（重放/重试不该把首次写入覆盖掉）。
+
+        ``status`` 只收初始态（pending/queued）——校验发生在开 session 之前
+        （无库环境里也要红/绿分明）。
+        """
+        if status not in _INITIAL_STATUSES:
+            raise ValueError(
+                f"create_task 只收初始状态 {_INITIAL_STATUSES}，收到 {status!r}；"
+                "running 由心跳/对账到来，终态请走 mark_terminal"
+            )
         now = utc_now()
         async with get_session() as session:
             await session.execute(
@@ -166,13 +180,14 @@ class MiningTaskStore:
                        progress_pct, current_loop, created_at, updated_at)
                     VALUES
                       (:task_id, :user_id, :market, :universe, :data_source, :direction,
-                       :direction_mode, :loop_n, :source, :doc_id, 'pending',
+                       :direction_mode, :loop_n, :source, :doc_id, :status,
                        0, 0, :now, :now)
                     ON CONFLICT (task_id) DO NOTHING
                     """),
                 {
                     "task_id": task_id,
                     "user_id": user_id,
+                    "status": status,
                     "market": market or "a_share",
                     "universe": universe or "",
                     "data_source": data_source or "",

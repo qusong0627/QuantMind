@@ -353,6 +353,34 @@ async def _resolve_effective_llm_config(user_id: str, tenant_id: str):
     return None, "none", embedding_env
 
 
+async def _launcher_llm_override_resolver(user_id: str, tenant_id: str) -> dict | None:
+    """排队任务排空时的 LLM 覆盖重解析（注册给 launcher）。
+
+    排队行**绝不持久化密钥**：排空时按 (user_id, tenant_id) 走与 evolve
+    完全同一条取值链（用户 Profile 优先、容器 env 兜底）。返回 None 语义 =
+    「两边都没有配置」——launcher 据此把任务显式置失败（与 evolve 的 412
+    同一口径），绝不静默换供应商。
+    """
+    llm_config, llm_source, embedding_env = await _resolve_effective_llm_config(
+        user_id, tenant_id
+    )
+    if llm_config is None:
+        return None
+    logger.info(
+        "[alpha-agent] queue drain llm re-resolve source=%s model=%s",
+        llm_source,
+        llm_config.model,
+    )
+    return build_subprocess_overrides(llm_config, embedding_env)
+
+
+def register_mining_queue_llm_resolver() -> None:
+    """engine 启动期把排空重解析器注册到 launcher（见 main_oss lifespan）。"""
+    from backend.services.engine.alpha_agent.launcher import set_llm_override_resolver
+
+    set_llm_override_resolver(_launcher_llm_override_resolver)
+
+
 class FactorBacktestCancelled(RuntimeError):
     """用户主动取消因子回测（子进程被 kill）。"""
 
@@ -577,10 +605,11 @@ async def start_evolution(
 
     launcher = get_launcher()
     # 并发上限：每个任务是 RD-Agent 子进程（烧 LLM token + Qlib 回测），
-    # 必须限流防止 fork 风暴。可用环境变量调整。
+    # 必须限流防止 fork 风暴。读取点收敛到 launcher（与排队判断同一份口径，
+    # 坏值回落默认而非 ValueError 炸路由）。本端点保持 429 背压——满了立即
+    # 拒（不排队），批量派发路径走 start_or_queue。
     counts = launcher.count_running()
-    max_per_user = int(os.getenv("ALPHA_AGENT_MAX_RUNNING_PER_USER", "2"))
-    max_global = int(os.getenv("ALPHA_AGENT_MAX_RUNNING_GLOBAL", "4"))
+    max_per_user, max_global = launcher.running_capacity()
     user_running = counts["by_user"].get(auth_user_id, 0)
     if user_running >= max_per_user:
         raise HTTPException(

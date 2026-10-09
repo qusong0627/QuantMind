@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -44,8 +45,50 @@ def _created_at_iso(ts: Any) -> str | None:
 class TaskStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
+    QUEUED = "queued"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class QueueFullError(RuntimeError):
+    """排队深度已达上限：批量派发路径据此逐卡片回可操作错误（不落任务行）。"""
+
+
+#: 并发/排队上限的环境变量名与默认值（**唯一读取点**：路由 429 判定与排队
+#: 判断共用 :meth:`AlphaAgentLauncher.running_capacity` / ``queue_capacity``）。
+ENV_MAX_RUNNING_PER_USER = "ALPHA_AGENT_MAX_RUNNING_PER_USER"
+ENV_MAX_RUNNING_GLOBAL = "ALPHA_AGENT_MAX_RUNNING_GLOBAL"
+ENV_MAX_QUEUED_PER_USER = "ALPHA_AGENT_MAX_QUEUED_PER_USER"
+ENV_MAX_QUEUED_GLOBAL = "ALPHA_AGENT_MAX_QUEUED_GLOBAL"
+DEFAULT_MAX_RUNNING_PER_USER = 2
+DEFAULT_MAX_RUNNING_GLOBAL = 4
+DEFAULT_MAX_QUEUED_PER_USER = 20
+DEFAULT_MAX_QUEUED_GLOBAL = 50
+
+
+#: 排空时的 LLM 配置重解析器（注册制，engine 启动期由路由注册）。
+#: 排队行**绝不持久化任何密钥**——排空时按 (user_id, tenant_id) 重新解析。
+#: 未注册（主机直跑/单测）→ None 覆盖，容器 env 兜底照旧；注册后返回 None
+#: （或抛异常）→ 任务显式失败并给可操作报错，绝不静默换供应商。
+_llm_override_resolver: (
+    Callable[[str, str], Awaitable[dict[str, str] | None]] | None
+) = None
+
+
+def set_llm_override_resolver(
+    fn: Callable[[str, str], Awaitable[dict[str, str] | None]] | None,
+) -> None:
+    global _llm_override_resolver
+    _llm_override_resolver = fn
+
+
+#: 排空时既没解析出用户配置、容器 env 也没有 Key：与 evolve 端点 412 同一口径。
+_QUEUE_LLM_MISSING_MESSAGE = (
+    "排队任务启动前重解析 LLM 配置失败：未配置 LLM API Key"
+    "（个人中心「其他设置 → AI 服务配置」，或在服务器 .env 配置 "
+    "DEEPSEEK_API_KEY / AI_IDE_LLM_API_KEY / OPENAI_API_KEY）。"
+    "排队不持久化密钥，无法沿用提交时的配置。"
+)
 
 
 # 进度落库节流：内存心跳每 3s，DB 写 ≥15s 一次（轮询写库会把库压成热点）。
@@ -131,10 +174,20 @@ def gc_task_logs(
     return {"scanned": scanned, "pruned": pruned}
 
 
+@dataclass(frozen=True)
+class QueueReceipt:
+    """一次提交的落点：已启动 or 已排队（带本用户队列内的位次）。"""
+
+    task_id: str
+    status: str  # "running"（已派发子进程）| "queued"
+    queue_position: int | None = None
+
+
 @dataclass
 class EvolutionTask:
     task_id: str
     user_id: str
+    tenant_id: str = "default"
     market: str = "a_share"
     data_source: str = ""
     universe: str = "csi300"
@@ -167,6 +220,8 @@ class AlphaAgentLauncher:
         self._tasks: dict[str, EvolutionTask] = {}
         self._log_dir = _resolve_log_dir()
         self._log_dir.mkdir(parents=True, exist_ok=True)
+        # 排空重入闸：并发 drain（收尾触发 vs 清扫器）只允许一个在跑
+        self._draining = False
         self._load_tasks()
 
     # ------------------------------------------------------------------
@@ -187,12 +242,16 @@ class AlphaAgentLauncher:
         source: str = "text",
         doc_id: str | None = None,
         llm_overrides: dict[str, str] | None = None,
+        tenant_id: str = "default",
     ) -> str:
         """Start a factor evolution task. Returns task_id.
 
         source/doc_id: 输入来源（text=文字指令，doc=文档解析链），落任务记录行。
         llm_overrides: 用户级 LLM 环境变量覆盖（如个人中心配置的 API Key），
         优先于容器全局 env 注入子进程。
+
+        **永不排队**：并发上限的 429 背压契约在路由层（前端「原文上屏」）；
+        需要「满了自动排队」的批量派发路径走 :meth:`start_or_queue`。
         """
         from backend.services.engine.alpha_agent.hw_lock import assert_factor_mining_hardware
 
@@ -200,27 +259,241 @@ class AlphaAgentLauncher:
 
         task_id = uuid.uuid4().hex[:16]
         task = EvolutionTask(
-            task_id=task_id, user_id=user_id, market=market,
-            universe=universe, loop_n=loop_n, data_source=data_source or "",
-            direction=direction or "",
+            task_id=task_id, user_id=user_id, tenant_id=tenant_id or "default",
+            market=market, universe=universe, loop_n=loop_n,
+            data_source=data_source or "", direction=direction or "",
         )
         self._tasks[task_id] = task
 
         # 记录层落行（失败只告警）：历史页第一秒就要能看见这个任务
         await self._db_create(task, source=source, doc_id=doc_id)
 
+        self._launch(
+            task,
+            loop_n=loop_n,
+            seed=seed,
+            provider_uri=provider_uri,
+            direction=direction or "",
+            llm_overrides=llm_overrides,
+        )
+        return task_id
+
+    async def start_or_queue(
+        self,
+        user_id: str,
+        *,
+        market: str = "a_share",
+        universe: str = "csi300",
+        loop_n: int = 5,
+        seed: str | None = None,
+        direction: str | None = None,
+        data_source: str | None = None,
+        source: str = "text",
+        doc_id: str | None = None,
+        llm_overrides: dict[str, str] | None = None,
+        tenant_id: str = "default",
+    ) -> QueueReceipt:
+        """批量派发入口：有名额立即启动，满则有序排队（最旧优先）。
+
+        与 :meth:`start_evolution`（evolve 端点 429 背压）不同，这里**不拒
+        正常提交**——只有排队深度上限（``ALPHA_AGENT_MAX_QUEUED_*``）才抛
+        :class:`QueueFullError`，供批量端点逐卡片回可操作错误。
+
+        并发安全的关键：名额判定与占位（PENDING 入内存表）是同一次同步执行，
+        中间没有任何 await——并发提交看到的是同一份计数，不会双开超额。
+        """
+        from backend.services.engine.alpha_agent.hw_lock import assert_factor_mining_hardware
+
+        assert_factor_mining_hardware()
+
+        counts = self.count_running()
+        max_per_user, max_global = self.running_capacity()
+        has_slot = (
+            counts["by_user"].get(user_id, 0) < max_per_user
+            and counts["global"] < max_global
+        )
+        if not has_slot:
+            self._assert_queue_room(user_id)
+
+        task_id = uuid.uuid4().hex[:16]
+        task = EvolutionTask(
+            task_id=task_id, user_id=user_id, tenant_id=tenant_id or "default",
+            market=market, universe=universe, loop_n=loop_n,
+            data_source=data_source or "", direction=direction or "",
+            status=TaskStatus.PENDING if has_slot else TaskStatus.QUEUED,
+        )
+        self._tasks[task_id] = task
+        await self._db_create(task, source=source, doc_id=doc_id)
+
+        if not has_slot:
+            self._persist_task(task)
+            return QueueReceipt(task_id, "queued", self._queue_position(task))
+
+        self._launch(
+            task,
+            loop_n=loop_n,
+            seed=seed,
+            direction=direction or "",
+            llm_overrides=llm_overrides,
+        )
+        return QueueReceipt(task_id, "running", None)
+
+    async def drain_queue(self) -> int:
+        """把排队任务按「最旧优先」补进空闲名额，返回本次启动数。
+
+        触发点：引擎启动 + 每个任务收尾（成功/失败/取消）+ 60s 清扫器。槽位在
+        第一个 await **之前**同步预留（QUEUED→PENDING），所以并发 drain
+        （``_draining`` 重入闸）与窗口期的新提交（count_running）看到同一份占位。
+
+        **绝不向外抛异常**：单个任务失败（解析不到 LLM 配置 / 启动炸）都落它
+        自己的任务行后继续下一个——排水不能拖垮触发它的收尾路径。排空按注册的
+        解析器重解析 LLM 配置（队列不持久化密钥）；解析器未注册（主机直跑/
+        单测）时 overrides=None，容器 env 兜底。
+        """
+        if self._draining:
+            return 0
+        self._draining = True
+        started = 0
+        try:
+            while True:
+                counts = self.count_running()
+                max_per_user, max_global = self.running_capacity()
+                if counts["global"] >= max_global:
+                    break
+                candidate = next(
+                    (
+                        t
+                        for t in sorted(
+                            (
+                                t
+                                for t in self._tasks.values()
+                                if t.status == TaskStatus.QUEUED
+                            ),
+                            key=lambda t: t.created_at,
+                        )
+                        if counts["by_user"].get(t.user_id, 0) < max_per_user
+                    ),
+                    None,
+                )
+                if candidate is None:
+                    break
+
+                # 同步预留：任何 await 之前先把名额占住
+                candidate.status = TaskStatus.PENDING
+
+                overrides: dict[str, str] | None = None
+                if _llm_override_resolver is not None:
+                    overrides = await self._resolve_drain_overrides(candidate)
+                    if overrides is None:
+                        candidate.status = TaskStatus.FAILED
+                        candidate.error_message = _QUEUE_LLM_MISSING_MESSAGE
+                        self._persist_task(candidate)
+                        await self._db_finish(candidate)
+                        continue
+
+                try:
+                    self._launch(
+                        candidate,
+                        loop_n=candidate.loop_n,
+                        seed=None,
+                        direction=candidate.direction,
+                        llm_overrides=overrides,
+                    )
+                except Exception as e:
+                    candidate.status = TaskStatus.FAILED
+                    candidate.error_message = f"排队任务启动失败: {e}"
+                    logger.exception("queued task %s launch failed", candidate.task_id)
+                    self._persist_task(candidate)
+                    await self._db_finish(candidate)
+                    continue
+                started += 1
+        finally:
+            self._draining = False
+        return started
+
+    async def _resolve_drain_overrides(
+        self, task: EvolutionTask
+    ) -> dict[str, str] | None:
+        """排空时的 LLM 覆盖重解析；None = 解析失败（调用方落任务失败）。"""
+        assert _llm_override_resolver is not None
+        try:
+            return await _llm_override_resolver(task.user_id, task.tenant_id)
+        except Exception as e:
+            logger.warning(
+                "queue drain llm re-resolve failed for %s: %s", task.task_id, e
+            )
+            return None
+
+    async def _drain_after_finish(self) -> None:
+        """收尾/取消后的补位排水；排水自身吞异常——绝不改写调用方任务终态。"""
+        try:
+            await self.drain_queue()
+        except Exception as e:
+            logger.warning("mining queue drain failed: %s", e)
+
+    def _assert_queue_room(self, user_id: str) -> None:
+        q_per_user, q_global = self.queue_capacity()
+        queued = [t for t in self._tasks.values() if t.status == TaskStatus.QUEUED]
+        user_queued = sum(1 for t in queued if t.user_id == user_id)
+        if user_queued >= q_per_user or len(queued) >= q_global:
+            raise QueueFullError(
+                f"排队已满（您已排队 {user_queued}/{q_per_user}，"
+                f"全平台排队 {len(queued)}/{q_global}），"
+                "请等待当前任务完成或先取消已排队的任务。"
+            )
+
+    def _queue_position(self, task: EvolutionTask) -> int | None:
+        """本用户队列内位次（1-based，最旧=1）；不在队列里返回 None。"""
+        queued = sorted(
+            (
+                t
+                for t in self._tasks.values()
+                if t.status == TaskStatus.QUEUED and t.user_id == task.user_id
+            ),
+            key=lambda t: t.created_at,
+        )
+        for idx, t in enumerate(queued, start=1):
+            if t.task_id == task.task_id:
+                return idx
+        return None
+
+    def running_capacity(self) -> tuple[int, int]:
+        """(每用户上限, 全平台上限)。路由 429 判定与排队判断共用同一读取点。"""
+        return (
+            _env_int(ENV_MAX_RUNNING_PER_USER, DEFAULT_MAX_RUNNING_PER_USER),
+            _env_int(ENV_MAX_RUNNING_GLOBAL, DEFAULT_MAX_RUNNING_GLOBAL),
+        )
+
+    def queue_capacity(self) -> tuple[int, int]:
+        """(每用户排队深度, 全平台排队深度)。0 = 不许排队（满了直接拒）。"""
+        return (
+            _env_int(ENV_MAX_QUEUED_PER_USER, DEFAULT_MAX_QUEUED_PER_USER),
+            _env_int(ENV_MAX_QUEUED_GLOBAL, DEFAULT_MAX_QUEUED_GLOBAL),
+        )
+
+    def _launch(
+        self,
+        task: EvolutionTask,
+        *,
+        loop_n: int,
+        seed: str | None = None,
+        provider_uri: str | None = None,
+        direction: str = "",
+        llm_overrides: dict[str, str] | None = None,
+    ) -> None:
+        """解析 provider_uri 并调度 :meth:`_run_evolution`（不等待子进程）。"""
         # Determine provider URI from market adapter if not specified
         if not provider_uri:
             try:
                 from backend.services.engine.rd_agent.market_adapters import get_adapter
-                adapter = get_adapter(market)
+                adapter = get_adapter(task.market)
                 provider_uri = adapter.get_qlib_provider_uri()
             except Exception:
                 provider_uri = os.getenv("QLIB_PROVIDER_URI", "/data/qlib/cn_data")
 
         # Override provider URI based on data_source
-        if data_source:
-            ds = data_source.lower().strip()
+        if task.data_source:
+            ds = task.data_source.lower().strip()
             if ds == "parquet":
                 from backend.services.engine.rd_agent.rd_loop_wrapper import RDLoopWrapper
                 quantdb_dir = RDLoopWrapper._resolve_quantdb_dir()
@@ -242,11 +515,10 @@ class AlphaAgentLauncher:
                 loop_n=loop_n,
                 seed=seed_path,
                 provider_uri=provider_uri,
-                direction=direction or "",
+                direction=direction,
                 llm_overrides=llm_overrides,
             )
         )
-        return task_id
 
     async def get_task_status(self, task_id: str) -> dict[str, Any] | None:
         task = self._tasks.get(task_id)
@@ -272,15 +544,23 @@ class AlphaAgentLauncher:
             "result": task.result,
             "timeline": task.timeline,
             "token_usage": task.token_usage,
+            # 排队位次（本用户队列内，1-based）；非排队状态恒为 None。
+            # 前端「排队中（第 N 位）」直接渲染，不用自己数队列。
+            "queue_position": (
+                self._queue_position(task)
+                if task.status == TaskStatus.QUEUED
+                else None
+            ),
         }
 
     async def cancel_task(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
         if not task:
             return False
-        if task.status not in (TaskStatus.RUNNING, TaskStatus.PENDING):
+        if task.status not in (TaskStatus.RUNNING, TaskStatus.PENDING, TaskStatus.QUEUED):
             return False
         task._cancel_requested = True
+        # 排队任务还没有进程，杀掉这一步天然跳过
         if task.process and task.process.poll() is None:
             try:
                 pgid = os.getpgid(task.process.pid)
@@ -301,6 +581,8 @@ class AlphaAgentLauncher:
         task.error_message = "Cancelled by user"
         self._persist_task(task)
         await self._db_cancel(task)
+        # 取消运行中的任务腾出名额：排队任务立即补位（排水自身吞异常）
+        await self._drain_after_finish()
         return True
 
     async def get_task_log(self, task_id: str, tail: int = 0) -> str | None:
@@ -354,6 +636,9 @@ class AlphaAgentLauncher:
             await _task_store().create_task(
                 task_id=task.task_id,
                 user_id=task.user_id,
+                # 建行状态=建任务时点的状态（pending 立即跑 / queued 已排队）；
+                # store 侧只收这两种初始态，running 只能由心跳/对账到来
+                status=task.status.value,
                 market=task.market,
                 universe=task.universe,
                 data_source=task.data_source,
@@ -414,13 +699,20 @@ class AlphaAgentLauncher:
             )
 
     def _persist_task(self, task: EvolutionTask) -> None:
-        """Save task state to disk so it survives restarts."""
-        state_file = self._log_dir / task.task_id / "task_state.json"
+        """Save task state to disk so it survives restarts.
+
+        纯尽力而为：排队/取消等提交路径都直接调它，任何失败（含路径计算）
+        只告警绝不外抛——持久化失败不能把提交本身打挂。
+        """
         try:
+            state_file = self._log_dir / task.task_id / "task_state.json"
             state_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "task_id": task.task_id,
                 "user_id": task.user_id,
+                # 租户进盘：重启后幸存的任务在排空重解析 LLM 配置时要按
+                # (user_id, tenant_id) 打 profile 网关（密钥本体绝不落盘）
+                "tenant_id": task.tenant_id,
                 "market": task.market,
                 "data_source": task.data_source,
                 "universe": task.universe,
@@ -454,6 +746,7 @@ class AlphaAgentLauncher:
                     task = EvolutionTask(
                         task_id=data["task_id"],
                         user_id=data["user_id"],
+                        tenant_id=data.get("tenant_id", "default") or "default",
                         market=data.get("market", "a_share"),
                         data_source=data.get("data_source", ""),
                         universe=data.get("universe", "csi300"),
@@ -469,7 +762,8 @@ class AlphaAgentLauncher:
                         timeline=data.get("timeline", []),
                         token_usage=data.get("token_usage", {}),
                     )
-                    # Running tasks at startup are likely orphaned
+                    # Running tasks at startup are likely orphaned；
+                    # queued 不是孤儿（还没有子进程）——原样保留，启动排水接续
                     if task.status == TaskStatus.RUNNING:
                         task.status = TaskStatus.FAILED
                         task.error_message = "Server restarted while task was running"
@@ -693,6 +987,10 @@ class AlphaAgentLauncher:
             logger.exception("Factor mining exception for task %s", task.task_id)
             self._persist_task(task)
             await self._db_finish(task)
+        finally:
+            # 名额释放后立即补位排队任务（成功/失败/取消任何收尾路径都算）。
+            # 排水自身吞异常——它绝不能改写本任务的终态。
+            await self._drain_after_finish()
 
     _PHASE_ORDER = [
         ("scenario", "scenario", "初始化场景"),

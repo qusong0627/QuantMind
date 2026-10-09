@@ -37,6 +37,13 @@ class FakeLauncher:
         self.count_running_calls += 1
         return {"global": 0, "by_user": {}}
 
+    def running_capacity(self):
+        """委托真实现（容量口径的唯一读取点）——本文件不测容量，但合约形状
+        必须与真 launcher 一致，否则路由的 429 判定会在双替身上抛 AttributeError。"""
+        from backend.services.engine.alpha_agent.launcher import AlphaAgentLauncher
+
+        return AlphaAgentLauncher.running_capacity(self)
+
     async def start_evolution(self, user_id, **kw):
         self.started = {"user_id": user_id, **kw}
         return "task-9"

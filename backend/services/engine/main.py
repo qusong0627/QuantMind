@@ -26,6 +26,20 @@ from backend.shared.service_health_metrics import (
 
 logger = get_logger(__name__)
 
+#: 挖掘排队清扫间隔（秒）：排水主触发在「任务收尾 / 取消 / 启动」，清扫器只做
+#: 兜底（收尾路径异常漏触发、或外部因素让名额空转）。
+MINING_QUEUE_SWEEP_INTERVAL_S = 60
+
+
+async def _mining_queue_sweeper(launcher) -> None:
+    """排队任务兜底清扫器：每 60s 排一次水（drain 自身吞单任务异常）。"""
+    while True:
+        await asyncio.sleep(MINING_QUEUE_SWEEP_INTERVAL_S)
+        try:
+            await launcher.drain_queue()
+        except Exception as e:  # noqa: BLE001 - 清扫器绝不因单次失败退出
+            logger.warning(f"mining queue sweep failed: {e}")
+
 
 # 兼容 qlib_app 内部裸导入路径（from qlib_app.*）
 if "qlib_app" not in sys.modules:
@@ -99,6 +113,30 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app.state.startup_healthy = False
         logger.error(f"❌ Mining task center ensure/reconcile failed: {e}")
+
+    # 因子挖掘排队（机构级 P0 · A1）：注册排空时的 LLM 重解析器（排队行绝不落
+    # 密钥，排空才按 (user_id, tenant_id) 重取值）→ 启动排水（接续上次进程遗留
+    # 的 queued 行：reconcile 不碰 queued，_load_tasks 原样保留）→ 60s 兜底清扫
+    # 器。drain 自带重入闸与单任务隔离，并发触发安全。
+    mining_startup_drain: asyncio.Task | None = None
+    mining_sweeper_task: asyncio.Task | None = None
+    try:
+        from backend.services.engine.alpha_agent.launcher import get_launcher
+        from backend.services.engine.routers.alpha_agent import (
+            register_mining_queue_llm_resolver,
+        )
+
+        register_mining_queue_llm_resolver()
+        _mining_launcher = get_launcher()
+        mining_startup_drain = asyncio.create_task(
+            _mining_launcher.drain_queue(), name="mining-queue-startup-drain"
+        )
+        mining_sweeper_task = asyncio.create_task(
+            _mining_queue_sweeper(_mining_launcher), name="mining-queue-sweeper"
+        )
+        logger.info("✅ Mining queue ready (startup drain + 60s sweeper)")
+    except Exception as e:
+        logger.warning(f"⚠️ Mining queue startup skipped: {e} (non-fatal)")
 
     try:
         # 文档中心（T-FM-07）：建表 + 重启续轮询（parsing 行是 MinerU 队列里的
@@ -251,6 +289,12 @@ async def lifespan(app: FastAPI):
     # --- 停止逻辑 ---
     if builtin_pool_task and not builtin_pool_task.done():
         builtin_pool_task.cancel()
+    # 挖掘排队：清扫器必须停（否则测试/重载时长眠任务泄漏）；启动排水是一次性
+    # 任务，未跑完也取消，避免 "Task was destroyed but it is pending" 噪音。
+    if mining_startup_drain and not mining_startup_drain.done():
+        mining_startup_drain.cancel()
+    if mining_sweeper_task and not mining_sweeper_task.done():
+        mining_sweeper_task.cancel()
     if vm_task and not vm_task.done():
         try:
             app.state.vectorized_matcher.stop()
