@@ -204,6 +204,43 @@ describe('因子报告抽屉', () => {
     expect((screen.getByRole('button', { name: 'IC' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  test('超额页签：真实指数基准显中文名（BENCH_LABELS）', async () => {
+    mocks.getRunSeries.mockResolvedValue({
+      success: true,
+      data: { run: mkRun(), series: { ...mkSeries(), bench: 'csi300' } },
+    });
+    mocks.getRunReport.mockResolvedValue({
+      success: true,
+      data: {
+        run: mkRun(),
+        report: {
+          ...REPORT_OK,
+          excess: {
+            kind: 'csi300',
+            benchmarkRef: '000300.SH',
+            label: '沪深300 指数',
+            note: '超额基准 = 沪深300 指数（000300.SH）日收益（QuantDB index_daily，与落盘交易日对齐）。',
+          },
+        },
+      },
+    });
+    render(<FactorMarketReport target={TARGET_COMPLETED} onClose={vi.fn()} />);
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole('button', { name: '超额' }));
+    expect(screen.getByText(/——基准 沪深300 指数/)).toBeTruthy();
+    expect(screen.getByText(/QuantDB index_daily/)).toBeTruthy();
+  });
+
+  test('超额页签：等权兜底写明非指数超额', async () => {
+    render(<FactorMarketReport target={TARGET_COMPLETED} onClose={vi.fn()} />);
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole('button', { name: '超额' }));
+    expect(screen.getByText(/——基准为等权兜底/)).toBeTruthy();
+    expect(screen.getByText(/非指数超额/)).toBeTruthy();
+  });
+
   test('机构报告块：显著性/成本网格/头部/暂缺清单落地', async () => {
     render(<FactorMarketReport target={TARGET_COMPLETED} onClose={vi.fn()} />);
     await act(async () => {});

@@ -9,8 +9,9 @@
  *   前端不重算净值）。
  *
  * 口径提示：
- * - 超额基准：series.bench='equal_weight' 时是**等权兜底**（该市场无基准指数），
- *   界面必须显著标注，不能冒充指数超额；
+ * - 超额基准：series.bench 是**实际用上**的口径（真实指数回落等权时同样是
+ *   'equal_weight'，为什么会回落写在 report.excess.note）；'equal_weight'
+ *   即等权兜底——界面必须显著标注，不能冒充指数超额；
  * - CN 列是样本内（挖掘原始市场），非 CN 为样本外重算。
  *
  * 机构报告标量块（T-FB-16，`/report/{run_id}`）与曲线并行拉取（仅完成态）：
@@ -28,6 +29,7 @@ import {
 import type { DrillTarget, RunReport, RunSeriesResult } from '../../types-v2/backtestCenter';
 import {
   BACKTEST_STATUS_LABELS,
+  BENCH_LABELS,
   REPORT_BLOCK_LABELS,
   matrixMetricSpec,
 } from '../../types-v2/backtestCenter';
@@ -683,7 +685,7 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
                 相对基准超额
                 {series.bench === 'equal_weight'
                   ? '——基准为等权兜底（该市场暂无基准指数），非指数超额'
-                  : `——基准 ${series.bench}`}
+                  : `——基准 ${BENCH_LABELS[series.bench] ?? series.bench}`}
               </h4>
               <div className="h-[320px]">
                 <EChartsChart

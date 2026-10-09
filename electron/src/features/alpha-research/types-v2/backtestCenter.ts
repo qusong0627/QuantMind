@@ -363,6 +363,16 @@ export const REPORT_BLOCK_LABELS: Record<string, string> = {
   style_attribution: '风格归因',
 };
 
+/** 超额基准口径的中文标签（series.bench / report.excess.kind）。
+ *  与后端 report._BENCH_LABELS、benchmarks.BENCHMARK_SOURCES 三处同词表
+ *  （改一处必改三处）；'equal_weight' = 等权兜底，不是指数超额。 */
+export const BENCH_LABELS: Record<string, string> = {
+  equal_weight: '等权兜底',
+  csi300: '沪深300 指数',
+  hsi: '恒生指数',
+  spx: '标普500 指数',
+};
+
 // ── 钻取目标（矩阵格 / 台账行 → 报告抽屉） ──────────────────────────
 
 export interface DrillTarget {

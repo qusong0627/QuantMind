@@ -7,8 +7,11 @@ FUT curated）、默认窗口、研究费率、基准、实验性标注。
 口径纪律：
 - **CN 列 = 样本内基准**（挖掘原始市场，用户要求「A股也要别的市场也要对比」），
   其余市场列 = 样本外；BC/FUTURES 结构差异大（7×24 / 合约混合）标实验性。
-- 基准 P0 一律 ``equal_weight``（等权全池兜底，诚实标注）——CN 真实指数
-  （000300 等）接入在 T-FB-19，未接入前**不冒充**已接入。
+- 基准（T-FB-19）：CN/HK/US 声明**真实指数**（``benchmarks.BENCHMARK_SOURCES``
+  登记 csi300/hsi/spx，读数失败或日历覆盖不足时 engine 如实回落等权并在载荷
+  标注）；crypto/futures 无可靠指数序列，声明即等权兜底——**不冒充**指数。
+- 研究费率（T-FB-19 审计口径，见各档案上方注释）：按各市场显性交易成本 +
+  保守滑点估的双边研究费率；``QM_BACKTEST_COST_BPS_DEFAULT`` 可全局覆盖。
 - 窗口默认各市场最近 N 年（``QM_BACKTEST_WINDOW_YEARS`` 可覆盖），起点钳制
   在日历首日之内（BC 只有约 1 年数据，不钳制就是空跑）。
 
@@ -56,13 +59,17 @@ class MarketProfile:
     default_universe: str
     universe_top_n: int  # 0 = 不裁剪（all/curated 模式）
     window_years: int  # 默认回测窗口年数
-    cost_bps: int  # 研究口径双边费率（bps）
-    benchmark: str  # 基准标识（P0 一律 equal_weight）
+    cost_bps: int  # 研究口径双边费率（bps；审计口径见各档案上方注释）
+    benchmark: (
+        str  # 请求基准：csi300/hsi/spx 或 equal_weight（读数失败回落等权并如实标注）
+    )
     experimental: bool  # BC/FUTURES 实验性标注
     note: str  # 界面说明（结构差异等）
 
 
 _PROFILES: tuple[MarketProfile, ...] = (
+    # 费率审计（双边，bps）：佣金万分之 2.5×2 + 卖出印花税 5 + 过户费 ~0.2
+    # + 保守滑点 ~7 ≈ 20。与既有关卡 20bps 口径一致，CN 数字跨批可比。
     MarketProfile(
         market="a_share",
         qlib_market="CN",
@@ -73,10 +80,12 @@ _PROFILES: tuple[MarketProfile, ...] = (
         universe_top_n=0,
         window_years=3,
         cost_bps=20,
-        benchmark="equal_weight",
+        benchmark="csi300",
         experimental=False,
         note="挖掘原始市场（样本内基准列）；股票池沿用现有 8 池",
     ),
+    # 费率审计（双边，bps）：印花税 0.1%×2 = 20 + 交易费/征费/交收费 ~0.4
+    # + 保守滑点 ~5 ≈ 25（港股显性成本全球主要市场最高档）。
     MarketProfile(
         market="hong_kong",
         qlib_market="HK",
@@ -86,11 +95,13 @@ _PROFILES: tuple[MarketProfile, ...] = (
         default_universe="liquid_top500",
         universe_top_n=500,
         window_years=3,
-        cost_bps=20,
-        benchmark="equal_weight",
+        cost_bps=25,
+        benchmark="hsi",
         experimental=False,
         note="动态池：过去 60 日日均成交额 top-N（避免静态名单的生存者偏差）",
     ),
+    # 费率审计（双边，bps）：佣金 $0（主流零佣）+ SEC 卖出规费/TAF ~0.3
+    # + 保守滑点 ~5×2 ≈ 10。
     MarketProfile(
         market="us_stock",
         qlib_market="US",
@@ -100,11 +111,13 @@ _PROFILES: tuple[MarketProfile, ...] = (
         default_universe="all",
         universe_top_n=0,
         window_years=3,
-        cost_bps=20,
-        benchmark="equal_weight",
+        cost_bps=10,
+        benchmark="spx",
         experimental=False,
         note="缓存即为精选流动池（517 只），全列参与",
     ),
+    # 费率审计（双边，bps）：Binance 现货 taker 0.1%×2 = 20（资金费不计入
+    # 日频换手口径）。
     MarketProfile(
         market="crypto",
         qlib_market="CRYPTO",
@@ -119,6 +132,8 @@ _PROFILES: tuple[MarketProfile, ...] = (
         experimental=True,
         note="7×24 日历且历史仅约 1 年（窗口自动钳制）；实验性",
     ),
+    # 费率审计（双边，bps）：手续费+滑点单边 ~2.5，按主力合约估 ≈ 5；待
+    # 主力清单定稿后随之一并复核。
     MarketProfile(
         market="futures",
         qlib_market="FUTURES",
@@ -128,7 +143,7 @@ _PROFILES: tuple[MarketProfile, ...] = (
         default_universe="curated_main",
         universe_top_n=0,
         window_years=3,
-        cost_bps=20,
+        cost_bps=5,
         benchmark="equal_weight",
         experimental=True,
         note="混合 T+D/现货类合约，主力清单尚待人工定稿；实验性",

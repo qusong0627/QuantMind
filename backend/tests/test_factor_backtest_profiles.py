@@ -58,16 +58,38 @@ def test_default_universe_per_market():
     assert profs["hong_kong"].universe_top_n >= 100
 
 
-def test_all_profiles_use_equal_weight_benchmark_for_now():
-    """P0 基准一律等权全池兜底（诚实标注）；CN 真实指数待 T-FB-19 接入。"""
+def test_benchmark_profile_real_index_vs_equal_weight():
+    """T-FB-19 基准档案：CN/HK/US 请求真实指数；crypto/futures 声明即等权兜底。
+
+    真实指数能否取到由 ``benchmarks.load_benchmark_returns`` 裁决（读数失败
+    回落等权并在载荷如实标注）；此处钉的是**档案声明**这一层。
+    """
+    expected = {
+        "a_share": "csi300",
+        "hong_kong": "hsi",
+        "us_stock": "spx",
+        "crypto": "equal_weight",
+        "futures": "equal_weight",
+    }
     for p in P.list_market_profiles():
-        assert p.benchmark == "equal_weight"
+        assert p.benchmark == expected[p.market]
 
 
-def test_research_cost_default_20bps():
-    """研究口径费率默认 20bps（沿 factor_report 常量）。"""
+def test_research_cost_profile_audit():
+    """T-FB-19 费率审计：CN 20 / HK 25 / US 10 / 加密 20 / 期货 5（双边 bps）。
+
+    口径 = 显性交易成本（佣金/印花税/规费）+ 保守滑点；审计依据见
+    ``profiles._PROFILES`` 各档案上方注释。
+    """
+    expected = {
+        "a_share": 20,
+        "hong_kong": 25,
+        "us_stock": 10,
+        "crypto": 20,
+        "futures": 5,
+    }
     for p in P.list_market_profiles():
-        assert p.cost_bps == 20
+        assert p.cost_bps == expected[p.market]
 
 
 # ── 列集与窗口 ───────────────────────────────────────────────────────

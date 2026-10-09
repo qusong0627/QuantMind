@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from backend.services.engine.factor_backtest import profiles as profiles_mod
+from backend.services.engine.factor_backtest.benchmarks import load_benchmark_returns
 from backend.services.engine.factor_backtest.compat import classify_factor
 from backend.services.engine.factor_backtest.ic import (
     DEFAULT_N_BUCKETS,
@@ -411,7 +412,24 @@ async def evaluate_factor_market(
     perf = perf_metrics(curves["ret_long"], curves["traded"], cost)
     # 多空腿毛口径（traded 传 0 序列 → 成本项恒 0，只取毛指标）
     perf_ls = perf_metrics(curves["ret_ls"], curves["ret_ls"] * 0.0, cost)
-    payload = build_series_payload(curves, ic_series, cost, top_pct=top_pct)
+
+    # ⑨b 基准列（T-FB-19）：档案请求真实指数（csi300/hsi/spx）时读 QuantDB
+    #     index_daily 并换掉等权列；读数失败/覆盖不足 → 保持等权兜底。载荷
+    #     bench 与 metrics.bench_used 只记**实际用上的**口径，绝不冒充指数
+    #     （parquet 读取是同步重活，走 to_thread 防看门狗强杀）。
+    bench_label = "equal_weight"
+    if profile.benchmark != "equal_weight":
+        bench_ret = await asyncio.to_thread(
+            load_benchmark_returns, profile.benchmark, curves.index
+        )
+        if bench_ret is not None:
+            curves = curves.copy()
+            curves["bench"] = bench_ret
+            bench_label = profile.benchmark
+
+    payload = build_series_payload(
+        curves, ic_series, cost, top_pct=top_pct, bench=bench_label
+    )
 
     metrics: dict = {
         **stats,
@@ -429,6 +447,7 @@ async def evaluate_factor_market(
         "cost_bps": cost,
         "top_pct": top_pct,
         "benchmark": profile.benchmark,
+        "bench_used": bench_label,
         "universe": universe_value,
         "window": f"{start}~{end}",
         "data_source": "qlib_bin",

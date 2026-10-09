@@ -251,11 +251,16 @@ def build_series_payload(
     ic_series: pd.Series,
     cost_bps: int,
     top_pct: float = DEFAULT_TOP_PCT,
+    bench: str = "equal_weight",
 ) -> dict:
     """台账序列载荷（JSON 安全）——`/runs/{id}/series` 的下钻数据面。
 
     日期轴 = 组合曲线索引；IC 序列按轴对齐（缺失日 None）。净值曲线一律
     起点 1.0 复利累计；IC 累计为**求和**（IC 不是收益率，无误导性复利）。
+
+    ``bench`` = 基准列的**实际口径**（T-FB-19）：真实指数 id（csi300/hsi/spx）
+    或等权兜底 ``equal_weight``；engine 侧换算到位，本函数只如实透传——
+    消费方（报告 excess、前端标注）按它区分「指数超额」与「等权兜底」。
     """
     dates = curves.index
     nav_long = (1.0 + curves["ret_long"].fillna(0.0)).cumprod()
@@ -277,7 +282,7 @@ def build_series_payload(
         "q_curves": q_curves,
         "turnover": _json_list(curves["traded"]),
         "coverage": [int(v) for v in curves["coverage"].tolist()],
-        "bench": "equal_weight",
+        "bench": bench,
         "meta": {
             "cost_bps": cost_bps,
             "top_pct": top_pct,

@@ -215,15 +215,47 @@ def _build_significance(
     }
 
 
+#: 真实指数基准 id → (展示名, 指数代码)；与 ``benchmarks.BENCHMARK_SOURCES``、
+#: 前端 BENCH_LABELS 三处同词表（改一处必改三处）。
+_BENCH_LABELS: dict[str, tuple[str, str]] = {
+    "csi300": ("沪深300 指数", "000300.SH"),
+    "hsi": ("恒生指数", "HSI.HK"),
+    "spx": ("标普500 指数", "SPX.US"),
+}
+
+
 def _build_excess(run: dict[str, Any], series: dict[str, Any]) -> dict[str, Any]:
-    """超额基准标注：等权兜底绝不冒充指数超额（载荷 bench 恒 equal_weight）。"""
+    """超额基准标注：真实指数如实点名；等权兜底绝不冒充指数超额。
+
+    ``series.bench`` 是**实际用上**的口径（engine 读数失败即回落等权并在此
+    如实标注）；``metrics.benchmark`` 是档案请求的基准（回落发生时两者不同，
+    标注里写明「请求 X 不可用已回落」，绝不让兜底差额被读成指数超额）。
+    """
     kind = str(series.get("bench") or "equal_weight")
-    ref = (run.get("metrics") or {}).get("benchmark")
-    if kind == "equal_weight":
-        ref_part = f"台账参考指数 {ref} 未接入指数序列，" if ref else "未接入指数序列，"
+    requested = (run.get("metrics") or {}).get("benchmark")
+    labeled = _BENCH_LABELS.get(kind)
+    if labeled:
+        label, ref = labeled
         return {
             "kind": kind,
             "benchmark_ref": ref,
+            "label": label,
+            "note": (
+                f"超额基准 = {label}（{ref}）日收益"
+                "（QuantDB index_daily，与落盘交易日对齐）。"
+            ),
+        }
+    if kind == "equal_weight":
+        req_label = _BENCH_LABELS.get(str(requested), (str(requested or ""), ""))[0]
+        if requested and requested != "equal_weight":
+            ref_part = (
+                f"请求基准「{req_label}」序列不可用（数据缺失或日历覆盖不足），已回落；"
+            )
+        else:
+            ref_part = "该市场未接入指数序列，"
+        return {
+            "kind": kind,
+            "benchmark_ref": requested,
             "label": "区间等权兜底",
             "note": (
                 f"超额基准为全域等权组合（兜底口径）；{ref_part}"
@@ -232,7 +264,7 @@ def _build_excess(run: dict[str, Any], series: dict[str, Any]) -> dict[str, Any]
         }
     return {
         "kind": kind,
-        "benchmark_ref": ref,
+        "benchmark_ref": requested,
         "label": kind,
         "note": f"超额基准 = 载荷 bench={kind}（序列口径见落盘侧）。",
     }

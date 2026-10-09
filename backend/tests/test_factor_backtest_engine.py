@@ -64,6 +64,9 @@ def _fake_panel(n_days=140, n_inst=6):
 
 def _install_ok_seams(monkeypatch, df, f_series, *, captured=None):
     monkeypatch.setattr(E, "_ensure_qlib", lambda q: None)
+    # 基准读数（T-FB-19）是外部数据面 IO（QuantDB parquet）：默认打桩不可用
+    # → 回落等权（既有断言的基线）；基准接线用例自行覆写本缝。
+    monkeypatch.setattr(E, "load_benchmark_returns", lambda bench, dates: None)
     # universe 解析是外部 IO 边界（生产走 D.instruments/QuantDB）；默认打桩，
     # 个别用例覆写以断言分派（CN 池 / HK 动态池 / all）。
     monkeypatch.setattr(E, "_resolve_instruments_for_universe", lambda mu, u: ["us_t0"])
@@ -208,9 +211,9 @@ async def test_ok_path_metrics_series_and_fields(monkeypatch, tmp_path):
     m = res["metrics"]
     assert m["ic"] > 0.9  # f ≈ r_true，IC 应接近 1
     assert m["n_days"] >= 120
-    assert m["cost_bps"] == 20
+    assert m["cost_bps"] == 10  # T-FB-19 费率审计：美股 10bps 双边
     assert m["ann_return_net"] < m["ann_return"]
-    assert res["series"]["meta"]["cost_bps"] == 20
+    assert res["series"]["meta"]["cost_bps"] == 10
     assert len(res["series"]["dates"]) == len(res["series"]["nav_long"])
     assert "$amount" in captured["fields"]  # 旧路径漏了它——新引擎必须带上
     assert res["compat"]["status"] == "portable"
@@ -218,6 +221,57 @@ async def test_ok_path_metrics_series_and_fields(monkeypatch, tmp_path):
     assert res["data_source"] == "qlib_bin"
     assert res["universe"] == "all"
     assert res["window"]["end"] and res["window"]["start"]
+
+
+# ── 基准接线（T-FB-19）──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_benchmark_index_used_when_available(monkeypatch, tmp_path):
+    """指数读数可用 → 基准列换成指数收益；载荷与指标记真实口径。"""
+    # Arrange
+    prov = _make_fake_provider(tmp_path)
+    monkeypatch.setattr(P, "resolve_qlib_provider_uri", lambda m: prov)
+    df, f_series, _ = _fake_panel()
+    _install_ok_seams(monkeypatch, df, f_series)
+    seen = {}
+
+    def fake_bench(bench, dates):
+        seen["bench"] = bench
+        idx = pd.to_datetime(pd.Index(dates))
+        return pd.Series(0.002, index=idx)  # 每日 +0.2% 的合成指数
+
+    monkeypatch.setattr(E, "load_benchmark_returns", fake_bench)
+    # Act
+    res = await E.evaluate_factor_market(_FACTOR, market="us_stock")
+    # Assert
+    assert res["status"] == "ok"
+    assert seen["bench"] == "spx"  # 档案请求的美股基准
+    assert res["series"]["bench"] == "spx"
+    assert res["metrics"]["bench_used"] == "spx"
+    assert res["metrics"]["benchmark"] == "spx"
+    nav_bench = res["series"]["nav_bench"]
+    # 前向收益口径：轴内每一天（含首日）都有一个次日收益，nav = Π(1+r) 从首日即开始
+    assert nav_bench[-1] == pytest.approx(1.002 ** len(nav_bench), rel=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_benchmark_falls_back_to_equal_weight_when_unavailable(
+    monkeypatch, tmp_path
+):
+    """指数读数不可用（None）→ 保持等权兜底，实际口径如实标注、绝不冒充。"""
+    # Arrange
+    prov = _make_fake_provider(tmp_path)
+    monkeypatch.setattr(P, "resolve_qlib_provider_uri", lambda m: prov)
+    df, f_series, _ = _fake_panel()
+    _install_ok_seams(monkeypatch, df, f_series)  # 基准缝默认 None = 读数失败
+    # Act
+    res = await E.evaluate_factor_market(_FACTOR, market="us_stock")
+    # Assert：请求 spx 未遂 → 载荷与指标都记 equal_weight
+    assert res["status"] == "ok"
+    assert res["series"]["bench"] == "equal_weight"
+    assert res["metrics"]["bench_used"] == "equal_weight"
+    assert res["metrics"]["benchmark"] == "spx"
 
 
 @pytest.mark.asyncio

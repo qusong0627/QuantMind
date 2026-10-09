@@ -221,6 +221,41 @@ def test_超额标注_等权兜底不冒充指数():
     assert ex["kind"] == "equal_weight"
     assert ex["benchmark_ref"] == "csi300"
     assert "等权" in ex["note"] and "指数" in ex["note"]
+    # T-FB-19：请求了真实指数但读数失败——措辞必须写明「已回落」与请求的是什么
+    assert "沪深300 指数" in ex["note"]
+    assert "回落" in ex["note"]
+
+
+@pytest.mark.parametrize(
+    ("bench", "ref", "label"),
+    [
+        ("csi300", "000300.SH", "沪深300 指数"),
+        ("hsi", "HSI.HK", "恒生指数"),
+        ("spx", "SPX.US", "标普500 指数"),
+    ],
+)
+def test_超额标注_真实指数点名(bench, ref, label):
+    """T-FB-19：series.bench 是真实指数时如实点名（中文名 + 指数代码 + 数据出处）。"""
+    run, series = _golden_inputs()
+    run = {**run, "metrics": {**run["metrics"], "benchmark": bench}}
+    series = {**series, "bench": bench}
+    ex = rp.build_report_block(run, series)["excess"]
+    assert ex["kind"] == bench
+    assert ex["benchmark_ref"] == ref
+    assert ex["label"] == label
+    assert label in ex["note"] and ref in ex["note"]
+    assert "QuantDB" in ex["note"]
+
+
+def test_超额标注_无指数市场等权不称回落():
+    """crypto/futures：档案声明即等权——是「未接入」，不是「回落」，措辞不许混。"""
+    run, series = _golden_inputs()
+    run = {**run, "metrics": {**run["metrics"], "benchmark": "equal_weight"}}
+    ex = rp.build_report_block(run, series)["excess"]
+    assert ex["kind"] == "equal_weight"
+    assert ex["benchmark_ref"] == "equal_weight"
+    assert "该市场未接入指数序列" in ex["note"]
+    assert "回落" not in ex["note"]
 
 
 def test_unavailable清单写明缺什么():
