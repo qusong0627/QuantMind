@@ -63,7 +63,7 @@ await page.waitForTimeout(8000);
 await dismissModals();
 // 确保在实况页（有 eq-fill-mark 即图表已出）
 if (!(await page.locator('.eq-fill-mark').first().isVisible().catch(() => false))) {
-  const btn = page.locator('button').filter({ hasText: /^实况$/ }).first();
+  const btn = page.locator('button').filter({ hasText: /^盘中实况$/ }).first();
   await btn.click({ timeout: 8000 }).catch(async () => {
     await dismissModals();
     await btn.click({ force: true });

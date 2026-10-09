@@ -118,9 +118,9 @@ try {
   console.log(`交易台内容区可视宽 ≈ ${contentW}px`);
   console.log('样式表顺序：', JSON.stringify(await sheetOrder()));
 
-  // 实况（模型卡就在这一页）
+  // 盘中实况（模型卡就在这一页；2026-10-09 由「实况」改名）
   await dismiss();
-  await click(/^实况$/);
+  await click(/^盘中实况$/);
   await page.waitForTimeout(14000);
   await dismiss();
   const cards = await page.evaluate(() => {

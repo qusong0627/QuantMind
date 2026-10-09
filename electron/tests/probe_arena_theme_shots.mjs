@@ -45,7 +45,7 @@ await page.goto(`${BASE}/#/live`, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(8000);
 await dismiss();
 
-await click(/^实况$/);
+await click(/^盘中实况$/);
 await page.waitForTimeout(15000);
 await dismiss();
 await page.screenshot({ path: '/tmp/arena_theme_live.png' });

@@ -113,7 +113,7 @@ CATEGORIES: tuple[Category, ...] = (
         ),
     ),
     Category("decisions", ("data/agent_data_astock/**",)),
-    # 多市场 agent 台账（arena 前端「智能体交易」切市场时读；cn 在 decisions，
+    # 多市场 agent 台账（arena 前端「智能体台账」切市场时读；cn 在 decisions，
     # us/hk 各自的整目录在这里 —— market_memory.md 也随目录一起走）
     Category(
         "agents-other",

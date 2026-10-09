@@ -46,18 +46,32 @@
       193px 的卡里硬塞两列，把名称挤成省略号。详见项目记忆
       「视口断点 ≠ 容器宽度」。
    ========================================================================== */
-.qm-arena-root .model-cards-section {
+/* 2026-10-09 从 flex-wrap 改为 grid auto-fit（用户报障「3个智能体界面自适应、
+   不然……就是3行，很难看」）。flex 版的两个毛病：①换行阈值到点就翻车——卡区
+   538px 时 3 张还并排（179px/张），537px 时第三张直接掉行、且被 flex-grow
+   拉成整行通栏（444px 独苗卡 vs 旁边 216px 两张）；②本栏（智能体台账）与实况页
+   共用这段样式，形态必须两边都稳。grid auto-fit 下三张卡永远等宽：容器够 3 列
+   就 3 列，不够就整齐折 2 列/1 列，独苗卡保持列宽不再变形。
+   列宽最小值 170px 对齐页面原口径；`--qm-model-card-min` 给下面的 ≤1024 镜像留钩子。 */
+/* ⚠️ 选择器里的 `div.` 不是废话：主题表在本文件**之后**还要过一遍页面自己的
+   Live.css（随页面 chunk 晚载入），同特异性时晚者赢——`.qm-arena-root
+   .model-cards-section`（0,2,0）写在这里会被页面的 flex 静默压掉（实测：gap 也
+   一直是页面的 12px，14px 这条从写下就没生效过）。`div.` 把特异性抬到 (0,2,1)
+   压过页面，才轮得到 grid 生效。 */
+.qm-arena-root div.model-cards-section {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--qm-model-card-min, 170px), 1fr));
   gap: 14px;
 }
 
-/* 卡片本体：铺满整行（原版卡在 max-width: 240px，右侧空出一截）、左侧品牌色竖条。
-   `min-width` 保持页面原值 170px 不动 —— 卡区窄到 604px 时三张卡仍该排成一行
-   （193px/张），把它抬到 200px 会让第三张卡无缘无故掉到第二行。
+/* 卡片本体：grid 项铺满所在轨道（原版卡在 max-width: 240px，右侧空出一截）、
+   左侧品牌色竖条。`max-width: none` 必须保留——页面 (0,2,0) 的 240px 帽会
+   在宽轨道里把卡捏窄、右边留出空洞。`min-width` 保持页面原值不动（≤1024 时
+   页面自己放宽到 150px，见文件尾镜像块）。
    `container-type` 是给下面 @container 用的：查询容器就是卡自己。 */
 .qm-arena-root .model-cards-section .model-card-mini {
   container-type: inline-size;
   position: relative;
-  flex: 1 1 0;
   max-width: none;
   gap: 12px;
   padding: 12px 14px 12px 12px;
@@ -173,3 +187,13 @@
   }
 }
 } /* @media (min-width: 481px) */
+
+/* 窄屏口径镜像：Live.css 在 ≤1024 把卡片列宽下限放宽到 150px（右栏固定 380px 时，
+   实况页左列只剩 ~350px——170px 三列放不下、两列 2×170+14 又差 4px 掉成一列）。
+   grid 的轨道最小值必须跟着改，否则 1024 宽的实况页会从「两张一行」掉成「一张一行」。
+   ≤480 不进这里：那里页面有一段**故意**的两列布局，主题层整体让位（见上方护栏注释）。 */
+@media (min-width: 481px) and (max-width: 1024px) {
+  .qm-arena-root div.model-cards-section {
+    --qm-model-card-min: 150px;
+  }
+}

@@ -141,9 +141,10 @@ await page.goto(`${BASE}/#/live`, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(8000);
 await dismissModals();
 
-// 「实况」栏（arena Live 页：市场切换 + 右侧成交/持仓/实盘/详情/对话/新闻 tabs）
+// 「盘中实况」栏（arena Live 页：市场切换 + 右侧成交/持仓/实盘/详情/对话/新闻 tabs；
+// 2026-10-09 由「实况」改名）
 {
-  const btn = page.locator('button').filter({ hasText: /^实况$/ }).first();
+  const btn = page.locator('button').filter({ hasText: /^盘中实况$/ }).first();
   await btn.click({ timeout: 8000 }).catch(async () => {
     await dismissModals();
     await btn.click({ force: true });

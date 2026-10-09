@@ -2,7 +2,7 @@
  * arena（Quant Agent Trader）移植层 —— 本机实盘栏专用，整个 `agent-arena/` 目录不入库。
  *
  * 对外只有两样东西：
- *  - `ARENA_TABS`：追加到交易台侧栏的三栏（智能体交易 / 实况 / 行情回测）
+ *  - `ARENA_TABS`：追加到交易台侧栏的三栏（智能体台账 / 盘中实况 / 行情回测）
  *  - `ARENA_SETTINGS_PANELS`：嵌进「设置」页的三块（总控 / 数据 / 关于）
  *
  * 页面代码来自 quant-Trader 的 arena 前端，由 `tools/port-from-arena.mjs` 搬运并
@@ -27,12 +27,13 @@ import DataPanel from './settings/DataPanel';
 export const ARENA_TABS: readonly RealTradingExtraTab[] = [
   {
     id: 'agent-ledger',
-    label: '智能体交易',
+    // 2026-10-09 用户点名改名：「智能体交易」→「智能体台账」（内容本来就是台账+决策日志）
+    label: '智能体台账',
     icon: Bot,
     // 台账 + 对话流都是轮询（无长连接），切走即卸载即可，不必常驻后台刷
     render: () => <AgentLedgerTab />,
   },
-  { id: 'arena-live', label: '实况', icon: Activity, render: () => <LiveTab /> },
+  { id: 'arena-live', label: '盘中实况', icon: Activity, render: () => <LiveTab /> },
   { id: 'arena-market-lab', label: '行情回测', icon: Blocks, render: () => <MarketLabTab /> },
 ];
 

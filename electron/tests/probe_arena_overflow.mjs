@@ -159,7 +159,7 @@ await clickByText(/^交易所设置$/);
 await page.waitForTimeout(10000);
 await scan('设置 → 总控 → 交易所设置');
 await dismiss();
-for (const [tab, wait] of [['行情回测', 12000], ['实况', 14000], ['智能体交易', 12000]]) {
+for (const [tab, wait] of [['行情回测', 12000], ['盘中实况', 14000], ['智能体台账', 12000]]) {
   await dismiss();
   const btn = page.locator('button').filter({ hasText: new RegExp(`^${tab}$`) }).first();
   await btn.click({ timeout: 8000 }).catch(() => btn.click({ force: true }));

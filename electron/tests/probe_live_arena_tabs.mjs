@@ -2,10 +2,11 @@
  * 「arena 整棵移植进实盘栏」验收探针（2026-09-22）。
  *
  * 断的是用户在本次改造里点名的五件事，全按 DOM 文本量，不靠截图肉眼：
- *   1) 侧栏在基础 9 栏之后**多出三栏**：智能体交易 / 实况 / 行情回测，且「设置」恒为最后一栏
+ *   1) 侧栏在基础 9 栏之后**多出三栏**：智能体台账 / 盘中实况 / 行情回测，且「设置」恒为最后一栏
  *      （2026-09-23 用户口径「设置放最低 / 最底部」；「关于」同日移进设置页，不再占侧栏一栏）；
  *   2) 设置栏里多出**三块内嵌面板**：总控 / 数据 / 关于；
- *   3) 三栏点开都有内容——尤其「智能体交易」要看见 arena 跑了大半个月的**历史数据**
+ *   3) 三栏点开都有内容——尤其「智能体台账」（2026-10-09 由「智能体交易」改名）要看见
+ *      arena 跑了大半个月的**历史数据**
  *      （agent 权益 + 决策日志条数），不是一句"暂无数据"；
  *   4) 「设置 → 数据 / 总控 / 关于」点开是 arena 页面本体；
  *   5) 全程 **零 pageerror**，arena 请求不出现 5xx。
@@ -161,25 +162,25 @@ const openTab = async (label, waitMs = 9000) => {
 
 const side = await sidebarLabels();
 console.log('侧栏：', side.join(' | '), '\n');
-for (const label of ['智能体交易', '实况', '行情回测']) {
+for (const label of ['智能体台账', '盘中实况', '行情回测']) {
   check(`侧栏有「${label}」栏`, side.includes(label), side.includes(label) ? '' : `实得 ${JSON.stringify(side)}`);
 }
 check(
   '追加三栏排在基础栏之后、且「设置」恒为最后一栏（用户点名：设置放最底部）',
   side.indexOf('设置') === side.length - 1 &&
-    ['智能体交易', '实况', '行情回测'].every((l) => side.indexOf(l) < side.indexOf('设置')),
+    ['智能体台账', '盘中实况', '行情回测'].every((l) => side.indexOf(l) < side.indexOf('设置')),
   `实得 ${JSON.stringify(side)}`,
 );
 check('「关于」不再占侧栏一栏（2026-09-23 移进设置页）', !side.includes('关于'), `实得 ${JSON.stringify(side)}`);
 
 // ── 三栏：点开 + 激活 + 作用域内内容 ──────────────────────────────────────
 {
-  const { ok, content, clearance } = await openTab('智能体交易', 14000);
-  check('「智能体交易」点开后真的激活（按钮高亮）', ok);
-  check('「智能体交易」滚到底不被悬浮 Dock 盖住', clearance == null || clearance > 0, `离 Dock 顶沿 ${clearance}px`);
+  const { ok, content, clearance } = await openTab('智能体台账', 14000);
+  check('「智能体台账」点开后真的激活（按钮高亮）', ok);
+  check('「智能体台账」滚到底不被悬浮 Dock 盖住', clearance == null || clearance > 0, `离 Dock 顶沿 ${clearance}px`);
   const c = content ?? '';
   check('台账内容在 arena 作用域内渲染', c.length > 200, `作用域内 ${c.length} 字`);
-  check('有台账标题', /智能体交易\s*·\s*台账|智能体交易·台账/.test(c), c.slice(0, 80));
+  check('有台账标题', /智能体台账/.test(c), c.slice(0, 80));
   check('决策日志/模型对话区在', /决策日志|模型对话/.test(c));
   check(
     '看得见历史决策记录（条数 > 0，不是"暂无"）',
@@ -193,10 +194,10 @@ check('「关于」不再占侧栏一栏（2026-09-23 移进设置页）', !side
 }
 
 {
-  const { ok, content, clearance } = await openTab('实况', 14000);
-  check('「实况」点开后真的激活', ok);
-  check('实况内容在 arena 作用域内渲染', (content ?? '').length > 500, `作用域内 ${(content ?? '').length} 字`);
-  check('「实况」滚到底不被悬浮 Dock 盖住', clearance == null || clearance > 0, `离 Dock 顶沿 ${clearance}px`);
+  const { ok, content, clearance } = await openTab('盘中实况', 14000);
+  check('「盘中实况」点开后真的激活', ok);
+  check('盘中实况内容在 arena 作用域内渲染', (content ?? '').length > 500, `作用域内 ${(content ?? '').length} 字`);
+  check('「盘中实况」滚到底不被悬浮 Dock 盖住', clearance == null || clearance > 0, `离 Dock 顶沿 ${clearance}px`);
 }
 await page.screenshot({ path: '/tmp/qm_live_arena_live.png' });
 

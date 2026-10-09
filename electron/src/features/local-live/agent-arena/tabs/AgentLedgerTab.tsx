@@ -1,5 +1,12 @@
 import { useMemo, useState } from 'react';
 import ArenaSurface from '../ArenaSurface';
+// 本栏的模型卡 DOM（.model-cards-section / .model-card-mini / .model-logo…）复用
+// 实况页的类名，而它们的**基础排版规则住在 Live.css**（页面级样式，随实况页的
+// 懒加载 chunk 才载入）。不在这里显式 import 的话：新开会话直接进本栏（没访问过
+// 实况）时，卡片拿到的是「无 display:flex 的裸块」——三张卡各占一整行、内容挤在
+// 左边、收益率药丸飘到最右缘（2026-10-09 用户报障「就是3行，很难看」的根因）。
+// 显式依赖 > 碰运气加载顺序：本栏自己保证 Live.css 先于渲染到位。
+import '../arena/pages/Live.css';
 import {
   fetchLiveEquity,
   fetchLogs,
@@ -18,7 +25,8 @@ import { displayAgentName } from '../arena/utils/agents';
 import { useArenaNav } from '../arena/arenaNav';
 
 /**
- * 「智能体交易」栏 —— 各 agent 台账 + 决策日志（模型对话）。
+ * 「智能体台账」栏（2026-10-09 由「智能体交易」改名）—— 各 agent 台账 + 决策日志
+ *（模型对话）。
  *
  * 这一栏不是新造的面板，而是把**实况页右边那两块**（模型卡 = 各 agent 权益、
  * 对话流 = 决策日志）抽出来单独成栏，方便盯着看：实况页给的是「账 + 盘」的全景，
@@ -84,7 +92,7 @@ const AgentLedgerBody = () => {
   return (
     <div className="page" style={{ maxWidth: 1600 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <h1 style={{ marginBottom: 0 }}>智能体交易 · 台账</h1>
+        <h1 style={{ marginBottom: 0 }}>智能体台账</h1>
         <MarketSwitcher market={market} onChange={(m) => { setMarket(m); setSelected('all'); }} />
         <span style={{ flex: 1 }} />
         <span className="dim" style={{ fontSize: 11 }}>

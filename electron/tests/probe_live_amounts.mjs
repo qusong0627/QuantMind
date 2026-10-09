@@ -61,7 +61,7 @@ await page.goto(`${BASE}/#/live`, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(8000);
 await dismissModals();
 if (!(await page.locator('.eq-fill-mark').first().isVisible().catch(() => false))) {
-  const btn = page.locator('button').filter({ hasText: /^实况$/ }).first();
+  const btn = page.locator('button').filter({ hasText: /^盘中实况$/ }).first();
   await btn.click({ timeout: 8000 }).catch(async () => {
     await dismissModals();
     await btn.click({ force: true });

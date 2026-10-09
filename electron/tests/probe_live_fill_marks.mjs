@@ -74,13 +74,13 @@ async function dismissModals() {
   return false;
 }
 
-/** 切到「实况」栏并按 bg-blue-50 验证真的激活（点下去 ≠ 切栏） */
+/** 切到「盘中实况」栏并按 bg-blue-50 验证真的激活（点下去 ≠ 切栏） */
 async function openLiveTab() {
   await page.goto(`${BASE}/#/live`, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(8000);
   await dismissModals();
   if (await page.locator('.eq-fill-mark').first().isVisible().catch(() => false)) return true;
-  const btn = page.locator('button').filter({ hasText: /^实况$/ }).first();
+  const btn = page.locator('button').filter({ hasText: /^盘中实况$/ }).first();
   await btn.click({ timeout: 8000 }).catch(async () => {
     await dismissModals();
     await btn.click({ force: true });
@@ -89,7 +89,7 @@ async function openLiveTab() {
   await dismissModals();
   return page.evaluate(() => {
     const b = Array.from(document.querySelectorAll('button'))
-      .find((x) => (x.textContent || '').trim() === '实况');
+      .find((x) => (x.textContent || '').trim() === '盘中实况');
     return !!b && /bg-blue-50/.test(b.className);
   });
 }
@@ -97,7 +97,7 @@ async function openLiveTab() {
 await login();
 await dismissModals();
 const liveActive = await openLiveTab();
-record('「实况」栏激活（bg-blue-50）', liveActive === true);
+record('「盘中实况」栏激活（bg-blue-50）', liveActive === true);
 await page.waitForSelector('.eq-fill-mark', { timeout: 30000 }).catch(() => {});
 await page.waitForTimeout(2500); // 稳定一帧（图表重绘/动画）
 
