@@ -522,3 +522,55 @@ export async function getRunReport(
     return fail(errorText(err, '查询机构报告失败'));
   }
 }
+
+/** Content-Disposition → 文件名（RFC 5987 `filename*=UTF-8''…` 优先，回退 `filename=`）。 */
+function parseContentDisposition(header: unknown): string | null {
+  if (typeof header !== 'string' || !header) return null;
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1]);
+    } catch {
+      /* 编码不符规范时走回退 */
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header);
+  return plain ? plain[1] : null;
+}
+
+/**
+ * 导出单报告 PDF（后端渲染并落「因子研究」档案，同 run 幂等覆盖）。
+ *
+ * 成功返回 `{ blob, filename }`：文件名优先取 Content-Disposition（后端按
+ * 「因子回测_因子名_市场_运行ID」确定性命名），取不到回退 run_id 前 8 位。
+ * 失败时后端回的是 JSON（409 带 reason / 404 等），但本请求 `responseType`
+ * 是 blob——axios 会把错误正文也包成 Blob，需读回文本再解出 `detail`，
+ * 否则用户只会看到通用文案。
+ */
+export async function downloadRunReportPdf(
+  runId: string,
+): Promise<ApiResponse<{ blob: Blob; filename: string }>> {
+  try {
+    const res = await apiClient.get(
+      `${BASE}/report/${encodeURIComponent(runId)}/pdf`,
+      { responseType: 'blob' },
+    );
+    const filename =
+      parseContentDisposition(res.headers?.['content-disposition']) ??
+      `因子回测报告_${runId.slice(0, 8)}.pdf`;
+    return ok({ blob: res.data as Blob, filename });
+  } catch (err) {
+    const data = (err as { response?: { data?: unknown } })?.response?.data;
+    if (data instanceof Blob) {
+      try {
+        const parsed = JSON.parse(await data.text()) as { detail?: unknown };
+        if (typeof parsed?.detail === 'string' && parsed.detail) {
+          return fail(parsed.detail);
+        }
+      } catch {
+        /* 非 JSON 错误正文：走通用文案 */
+      }
+    }
+    return fail(errorText(err, '导出报告 PDF 失败'));
+  }
+}

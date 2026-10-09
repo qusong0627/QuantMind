@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   listRuns: vi.fn(),
   getRunSeries: vi.fn(),
   getRunReport: vi.fn(),
+  downloadRunReportPdf: vi.fn(),
 }));
 
 vi.mock('../../services-v2/api', async (importOriginal) => {
@@ -39,6 +40,7 @@ vi.mock('../../services-v2/factorBacktestApi', () => ({
   listRuns: mocks.listRuns,
   getRunSeries: mocks.getRunSeries,
   getRunReport: mocks.getRunReport,
+  downloadRunReportPdf: mocks.downloadRunReportPdf,
 }));
 // jsdom 无 canvas
 vi.mock('../../../../components/common/EChartsChart', () => ({

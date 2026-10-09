@@ -19,12 +19,14 @@ import type { DrillTarget, RunReport, RunSeries } from '../../../types-v2/backte
 const mocks = vi.hoisted(() => ({
   getRunSeries: vi.fn(),
   getRunReport: vi.fn(),
+  downloadRunReportPdf: vi.fn(),
   fetchMatrix: vi.fn(),
 }));
 
 vi.mock('../../../services-v2/factorBacktestApi', () => ({
   getRunSeries: mocks.getRunSeries,
   getRunReport: mocks.getRunReport,
+  downloadRunReportPdf: mocks.downloadRunReportPdf,
   fetchMatrix: mocks.fetchMatrix,
 }));
 // jsdom 无 canvas
@@ -157,6 +159,11 @@ beforeEach(() => {
     success: true,
     data: { run: mkRun(), report: REPORT_OK },
   });
+  mocks.downloadRunReportPdf.mockReset();
+  mocks.downloadRunReportPdf.mockResolvedValue({
+    success: true,
+    data: { blob: new Blob(['%PDF-1.4']), filename: '因子回测_因子A_fa_us_stock_run-1.pdf' },
+  });
 });
 
 afterEach(() => {
@@ -175,6 +182,8 @@ describe('因子报告抽屉', () => {
     expect((screen.getByRole('button', { name: '分组' }) as HTMLButtonElement).disabled).toBe(true);
     expect(mocks.getRunSeries).not.toHaveBeenCalled();
     expect(mocks.getRunReport).not.toHaveBeenCalled();
+    // 降级终态没有机构报告可导——按钮不出现
+    expect(screen.queryByTestId('export-report-pdf')).toBeNull();
   });
 
   test('完成：拉序列、概览出标量卡，等权兜底显著标注', async () => {
@@ -248,6 +257,51 @@ describe('因子报告抽屉', () => {
     expect(screen.queryByTestId('report-significance')).toBeNull();
     expect(screen.queryByTestId('report-cost-grid')).toBeNull();
     expect(screen.queryByTestId('report-headline')).toBeNull();
+    // 不可用块没有可导出的数字面——导出按钮不渲染
+    expect(screen.queryByTestId('export-report-pdf')).toBeNull();
+  });
+
+  test('导出 PDF：available 时按钮出现，点击触发下载且无错误行', async () => {
+    const createObjectURL = vi.fn(() => 'blob:mock-url');
+    const revokeObjectURL = vi.fn();
+    const origCreate = window.URL.createObjectURL;
+    const origRevoke = window.URL.revokeObjectURL;
+    window.URL.createObjectURL = createObjectURL as typeof window.URL.createObjectURL;
+    window.URL.revokeObjectURL = revokeObjectURL;
+    try {
+      render(<FactorMarketReport target={TARGET_COMPLETED} onClose={vi.fn()} />);
+      await act(async () => {});
+
+      const btn = screen.getByTestId('export-report-pdf');
+      await act(async () => {
+        fireEvent.click(btn);
+      });
+
+      expect(mocks.downloadRunReportPdf).toHaveBeenCalledWith('run-1');
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId('export-pdf-error')).toBeNull();
+      // 按钮恢复可用（非导出中）
+      expect((screen.getByTestId('export-report-pdf') as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      window.URL.createObjectURL = origCreate;
+      window.URL.revokeObjectURL = origRevoke;
+    }
+  });
+
+  test('导出 PDF 失败（如降级竞态 409）：amber 错误行带原因原文', async () => {
+    mocks.downloadRunReportPdf.mockResolvedValue({
+      success: false,
+      error: '报告不可导出：series_not_stored',
+    });
+    render(<FactorMarketReport target={TARGET_COMPLETED} onClose={vi.fn()} />);
+    await act(async () => {});
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('export-report-pdf'));
+    });
+
+    const err = screen.getByTestId('export-pdf-error');
+    expect(err.textContent).toContain('报告不可导出：series_not_stored');
   });
 
   test('报告块加载失败：amber 提示，曲线与标量卡不受影响', async () => {

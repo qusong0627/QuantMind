@@ -18,9 +18,13 @@
  * 降级终态与序列缺失由报告端点自述（available=false + reason），照实陈列。
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, BarChart3, AlertCircle, Loader2, Table2, TrendingUp, Layers, Scale } from 'lucide-react';
+import { X, BarChart3, AlertCircle, FileDown, Loader2, Table2, TrendingUp, Layers, Scale } from 'lucide-react';
 import { EChartsChart } from '../../../../components/common/EChartsChart';
-import { getRunReport, getRunSeries } from '../../services-v2/factorBacktestApi';
+import {
+  downloadRunReportPdf,
+  getRunReport,
+  getRunSeries,
+} from '../../services-v2/factorBacktestApi';
 import type { DrillTarget, RunReport, RunSeriesResult } from '../../types-v2/backtestCenter';
 import {
   BACKTEST_STATUS_LABELS,
@@ -178,6 +182,8 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
   const [seriesLoading, setSeriesLoading] = useState(false);
   const [report, setReport] = useState<RunReport | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('overview');
 
   // Esc 关闭
@@ -197,6 +203,7 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
     setSeriesError(null);
     setReport(null);
     setReportError(null);
+    setExportError(null);
     if (!target?.runId) return;
     if (target.status && target.status !== 'completed') return; // 降级：无序列可拉
     let alive = true;
@@ -260,6 +267,31 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
   const headline = report?.available ? (report.headline ?? null) : null;
   const costGrid = report?.available ? (report.costGrid ?? null) : null;
 
+  // 导出 PDF：后端渲染并落「报告档案 → 因子研究」（同 run 幂等覆盖），前端触发下载
+  const handleExportPdf = async () => {
+    if (!target?.runId || exporting) return;
+    setExporting(true);
+    setExportError(null);
+    try {
+      const resp = await downloadRunReportPdf(target.runId);
+      if (resp.success && resp.data) {
+        const url = URL.createObjectURL(resp.data.blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = resp.data.filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // 延迟回收：部分浏览器在 click() 同步返回后仍需片刻才能发起下载
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } else {
+        setExportError(resp.error ?? '未知错误');
+      }
+    } finally {
+      setExporting(false);
+    }
+  };
+
   if (!target) return null;
 
   return (
@@ -299,14 +331,33 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
               {target.runId && <span className="font-mono">{target.runId}</span>}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-muted/60"
-            aria-label="关闭报告"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {report?.available && (
+              <button
+                type="button"
+                onClick={handleExportPdf}
+                disabled={exporting}
+                data-testid="export-report-pdf"
+                title="导出机构报告 PDF（同时留档到「报告档案 → 因子研究」）"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {exporting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <FileDown className="h-3.5 w-3.5" />
+                )}
+                {exporting ? '导出中…' : '导出 PDF'}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md p-1.5 text-muted-foreground hover:bg-muted/60"
+              aria-label="关闭报告"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </header>
 
         {/* 页签 */}
@@ -369,6 +420,15 @@ export const FactorMarketReport: React.FC<FactorMarketReportProps> = ({ target, 
             <p className="flex items-center gap-2 py-3 text-sm text-amber-600">
               <AlertCircle className="h-4 w-4" /> 机构报告块加载失败：{reportError}
               （曲线与台账指标不受影响）
+            </p>
+          )}
+
+          {exportError && (
+            <p
+              className="flex items-center gap-2 py-3 text-sm text-amber-600"
+              data-testid="export-pdf-error"
+            >
+              <AlertCircle className="h-4 w-4" /> 导出报告 PDF 失败：{exportError}
             </p>
           )}
 
