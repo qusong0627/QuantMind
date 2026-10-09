@@ -614,8 +614,9 @@ class TestQqDigestWiring:
         assert all("持仓监控" in c["footer"] for c in calls)
 
     def test_persist_source_guards_digest_after_notify(self):
-        """源码守卫：摘要行只在站内通知**成功后**收集（通知失败的告警不进摘要），
-        收集完逐用户入队。_persist 依赖真库会话，用源码顺序钉住接线。"""
+        """源码守卫：先尝试站内通知、再收集摘要行、最后逐用户入队；且摘要
+        **不挂在投递结果上**（投递失败/库故障也进摘要——手机 QQ 是最终告警面，
+        2026-10-09 code review HIGH-1）。_persist 依赖真库会话，用源码顺序钉住。"""
         import inspect
 
         src = inspect.getsource(HoldingSentinel._persist)
@@ -623,3 +624,5 @@ class TestQqDigestWiring:
         idx_digest = src.index("format_holding_digest_line(")
         idx_enqueue = src.index("self._enqueue_qq_digest(")
         assert idx_notify < idx_digest < idx_enqueue
+        # 旧形态 `... and self._notify(alert, cfg):` 会在这条断言上失败
+        assert "and self._notify(" not in src

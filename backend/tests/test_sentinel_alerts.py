@@ -7,6 +7,18 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _silence_qq_digest(monkeypatch):
+    """默认不触真实摘要缓冲（要断言的测试自设捕获覆盖本桩）。
+
+    _decide_push 放行即入队——不隔离的话单测会留下真实缓冲与 120s 定时器，
+    且会把跨测试残留冲进 test_qq_digest 的断言（2026-10-09 排序暴露）。
+    """
+    import backend.shared.qq_digest as qq_digest
+
+    monkeypatch.setattr(qq_digest, "enqueue", lambda **kw: None)
+
+
 # ── 口径纯函数 ──────────────────────────────────────────────────────
 
 
@@ -342,10 +354,40 @@ def test_throttled_event_does_not_feed_digest(monkeypatch):
 
     assert svc._decide_push(holder["cfg"], fake, _storm_row()) == "pushed"
     assert svc._decide_push(holder["cfg"], fake, _storm_row()) == "throttled_cooldown"
-    assert svc._decide_push(
-        holder["cfg"], fake, _storm_row(symbol="000001.SZ", severity="info")
-    ) == "below_level"
+    assert (
+        svc._decide_push(
+            holder["cfg"], fake, _storm_row(symbol="000001.SZ", severity="info")
+        )
+        == "below_level"
+    )
     assert len(calls) == 1  # 只有放行的那条
+
+
+def test_delivery_failure_still_feeds_digest(monkeypatch):
+    """站内投递失败（库故障/无管理员）不吞 QQ 面告警——摘要在投递**之前**入队。
+
+    notification_publisher 的旁路纪律：QQ 是最终告警面，与库/流成败解耦
+    （2026-10-09 code review HIGH-1：摘要曾挂在投递成功之后，库写失败时
+    手机上整条消失，而交易台卡片/留痕全绿，无人发现）。"""
+    import backend.shared.qq_digest as qq_digest
+    from backend.services.trade.services.sentinel_alert_service import (
+        SentinelAlertService,
+        SentinelConfig,
+    )
+
+    calls: list[dict] = []
+    monkeypatch.setattr(qq_digest, "enqueue", lambda **kw: calls.append(kw))
+    svc = SentinelAlertService(
+        config_loader=lambda: SentinelConfig(enabled=True),
+        notifier=lambda **kw: False,  # 投递失败
+        record_fn=lambda row: True,
+        now_fn=lambda: 1789600000.0,
+    )
+    assert (
+        svc._decide_push(SentinelConfig(enabled=True), _FakeRedis(), _storm_row())
+        == "no_audience"
+    )
+    assert [c["digest_key"] for c in calls] == ["sentinel:CN"]  # 仍进摘要
 
 
 def test_default_notify_disables_per_event_qq(monkeypatch):

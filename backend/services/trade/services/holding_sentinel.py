@@ -842,8 +842,12 @@ class HoldingSentinel:
                 recorded += 1
                 if meets_min_severity(
                     str(alert["severity"]), str(cfg["min_severity"])
-                ) and self._notify(alert, cfg):
-                    notified += 1
+                ) and bool(cfg.get("notify_inapp", True)):
+                    if self._notify(alert, cfg):
+                        notified += 1
+                    # QQ 面与站内投递解耦：库写/投递失败也入摘要（手机 QQ 是
+                    # 最终告警面——沿用 notification_publisher 旁路先行纪律；
+                    # 投递成功与否只影响 notified 计数，不拦摘要，HIGH-1）
                     digest_lines.append(format_holding_digest_line(alert))
             if digest_lines:
                 self._enqueue_qq_digest(tenant, user_id, digest_lines)

@@ -96,15 +96,20 @@ def _notify_fill_qq(fill: dict) -> None:
         label = f"{name}({prefix})" if name else (prefix or "?")
         volume = int(float(fill.get("filled_volume") or 0))
         price = float(fill.get("filled_price") or 0)
-        amount = volume * price
-        title = f"{arrow} {side_cn} {label} {volume}股 @¥{price:.2f}"
-        body = f"金额 ¥{amount:,.0f}"
+        if price > 0:
+            amount = volume * price
+            title = f"{arrow} {side_cn} {label} {volume}股 @¥{price:.2f}"
+            body = f"金额 ¥{amount:,.0f}"
+        else:
+            # 市价单成交价未回报：宁缺数字不端 0 元假账（MED-3，2026-10-09）
+            title = f"{arrow} {side_cn} {label} {volume}股"
+            body = "成交价待回报"
         exchange_id = str(fill.get("exchange_order_id") or "").strip()
         if exchange_id:
             body += f" · 委托 {exchange_id}"
         notify_async(title, body)
     except Exception:  # noqa: BLE001 通知失败不许反噬成交落库
-        logger.debug("[TdxPush] 成交 QQ 回执降级跳过", exc_info=True)
+        logger.warning("[TdxPush] 成交 QQ 回执降级跳过", exc_info=True)
 
 
 class TdxPushError(Exception):

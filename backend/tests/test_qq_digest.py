@@ -15,7 +15,11 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
-    """隔离模块全局缓冲与真实网络：不起定时器、不发 QQ。"""
+    """隔离模块全局缓冲与真实网络：不起定时器、不发 QQ。
+
+    setup 直接**丢弃**其它测试的残留缓冲（不可经 flush_all 走到捕获列表——
+    那会把残留冲进本测试要断言的 ``sent``，文件执行顺序一变就假失败）。
+    """
     sent: list[tuple[str, str]] = []
 
     def _capture(title, content="", channel="default"):
@@ -23,7 +27,8 @@ def _isolate(monkeypatch):
 
     monkeypatch.setattr("backend.shared.qq_notify.notify_async", _capture)
     monkeypatch.setattr(qd, "_start_timer", lambda *a, **k: None)
-    qd.flush_all()  # 清掉其它测试可能残留的缓冲（此时 notify 已被捕获，不会外发）
+    with qd._lock:
+        qd._buffers.clear()  # 丢弃残留（迟到 Timer 因身份校验静默退出）
     yield sent
     qd.flush_all()
 

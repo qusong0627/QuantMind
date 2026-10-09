@@ -81,6 +81,16 @@ def test_falls_back_to_symbol_when_name_mapper_down(monkeypatch):
     assert "SH600036" in calls[0][0]
 
 
+def test_missing_fill_price_never_prints_zero_amount(monkeypatch):
+    # 市价单成交价未回报：宁缺数字不端 0 元假账（code review MED-3）
+    calls = _capture(monkeypatch)
+    tps._notify_fill_qq(_fill(filled_price=0))
+    title, content = calls[0]
+    assert "¥0.00" not in title and "金额" not in content
+    assert "待回报" in content
+    assert "300股" in title.replace(" ", "")
+
+
 def test_never_raises_when_notify_explodes(monkeypatch):
     # 推送层炸了不许带走成交落库（同步循环里抛出去会中断整轮账户同步）
 

@@ -382,6 +382,24 @@ class SentinelAlertService:
         # （2026-09-24 实测），标的是裸代码。信封照旧留在 sentinel_alerts.detail 里
         # 给机器读；要下钻原始字段去交易台 → 实时情报。文案构造见 shared/alert_text。
         title, content = format_sentinel_alert(row)
+        # QQ 面：并入窗口摘要（站内卡片/留痕表照旧逐条——摘要只压缩推送面）。
+        # 入队在投递**之前**：notification_publisher 的旁路纪律是「与库/流成败
+        # 解耦——手机 QQ 才是真正的告警面」，站内投递失败（库故障/无管理员）
+        # 不该让告警在 QQ 面整条消失（2026-10-09 code review HIGH-1）。
+        try:
+            from backend.shared.market_labels import market_label
+            from backend.shared.qq_digest import enqueue as _digest_enqueue
+
+            market = str(row.get("market") or "CN")
+            label = market_label(market) or market
+            _digest_enqueue(
+                digest_key=f"sentinel:{market}",
+                header=f"实时情报 · {label}",
+                line=format_sentinel_digest_line(row),
+                footer="详情见交易台 · 实时情报。",
+            )
+        except Exception as exc:  # noqa: BLE001 - 摘要失败不影响站内投递（两边独立）
+            self._note_error(f"digest: {exc}")
         ok = False
         try:
             ok = bool(
@@ -395,21 +413,6 @@ class SentinelAlertService:
             self._note_error(f"notify: {exc}")
         if not ok:
             return "no_audience"
-        # QQ 面：并入窗口摘要（站内卡片/留痕表照旧逐条——摘要只压缩推送面）
-        try:
-            from backend.shared.market_labels import market_label
-            from backend.shared.qq_digest import enqueue as _digest_enqueue
-
-            market = str(row.get("market") or "CN")
-            label = market_label(market) or market
-            _digest_enqueue(
-                digest_key=f"sentinel:{market}",
-                header=f"实时情报 · {label}",
-                line=format_sentinel_digest_line(row),
-                footer="详情见交易台 · 实时情报。",
-            )
-        except Exception as exc:  # noqa: BLE001 - 摘要失败不算推送失败（站内已送达）
-            self._note_error(f"digest: {exc}")
         return "pushed"
 
     def _bump(self, key: str, delta: int = 1) -> None:
