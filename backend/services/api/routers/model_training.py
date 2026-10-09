@@ -41,6 +41,10 @@ from backend.services.engine.inference.batch_aggregator import aggregate_batch
 from backend.services.engine.inference.batch_orchestrator import (
     batch_inference_orchestrator,
 )
+from backend.services.engine.inference.fusion_orchestrator import (
+    build_fusion_preview,
+    create_fusion_model,
+)
 from backend.services.engine.inference.router_service import InferenceRouterService
 from backend.services.engine.inference.script_runner import InferenceScriptRunner
 from backend.services.engine.services.model_inference_batch_persistence import (
@@ -53,7 +57,10 @@ from backend.shared.database_manager_v2 import get_session
 from backend.shared.inference_stats import compute_score_distribution
 from backend.shared.inference_coverage import find_inference_gap_dates
 from backend.shared.model_assets import model_asset_gaps
-from backend.shared.model_registry import model_registry_service
+from backend.shared.model_registry import (
+    MAX_DISPLAY_NAME_LENGTH,
+    model_registry_service,
+)
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.trading_calendar import calendar_service
 
@@ -299,6 +306,10 @@ def _load_production_models() -> list[dict[str, Any]]:
 
 class SetDefaultModelRequest(BaseModel):
     model_id: str
+
+
+class RenameModelRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=MAX_DISPLAY_NAME_LENGTH)
 
 
 class SetStrategyBindingRequest(BaseModel):
@@ -603,6 +614,99 @@ async def list_system_models(
         return {"status": "success", "count": len(models), "models": models}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 模型融合（机构级，v2）—— 预览无副作用；创建即进日更推理名单
+# 见 docs/机构级模型融合_设计方案.md；编排逻辑在 fusion_orchestrator
+# ═══════════════════════════════════════════════════════════════════════════
+
+_ENSEMBLE_WEIGHT_STRATEGIES = ("icir_shrunk", "equal", "manual", "recent_ic")
+_ENSEMBLE_FUSION_STRATEGIES = (
+    "linear",
+    "majority_vote",
+    "periodic_hierarchy",
+    "confidence_gate",
+)
+
+
+class EnsemblePreviewRequest(BaseModel):
+    """融合预览入参（成员 ≥2；权重策略默认机构级 icir_shrunk）。"""
+
+    source_model_ids: list[str] = Field(..., min_length=2, description="成员模型 ID 列表")
+    weight_strategy: str = Field(
+        "icir_shrunk", description="icir_shrunk / equal / manual / recent_ic"
+    )
+    manual_weights: dict[str, float] | None = Field(
+        None, description="manual 策略的成员权重（自动归一化）"
+    )
+
+
+class EnsembleCreateRequest(EnsemblePreviewRequest):
+    display_name: str = Field("", description="融合模型展示名（自动追加 _市场 后缀）")
+    fusion_strategy: str = Field("linear")
+    strategy_config: dict[str, float] | None = None
+
+
+def _validate_ensemble_request(payload: EnsemblePreviewRequest) -> None:
+    if payload.weight_strategy not in _ENSEMBLE_WEIGHT_STRATEGIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"weight_strategy 应为 {'/'.join(_ENSEMBLE_WEIGHT_STRATEGIES)}",
+        )
+    if payload.weight_strategy == "manual" and not payload.manual_weights:
+        raise HTTPException(status_code=422, detail="manual 策略必须提供 manual_weights")
+
+
+@router.post("/ensemble/preview", summary="融合预览：成员证据/权重/OOS 回放（无副作用）")
+async def preview_ensemble_model(
+    payload: EnsemblePreviewRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """模型管理多选入口的预览面：不建模型、不落盘，供融合面板展示与警示。"""
+    _validate_ensemble_request(payload)
+    tenant_id, user_id = _owner_scope(current_user)
+    try:
+        return await build_fusion_preview(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_ids=payload.source_model_ids,
+            weight_strategy=payload.weight_strategy,
+            manual_weights=payload.manual_weights,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/ensemble/create", summary="创建多模型融合模型（用户态）")
+async def create_ensemble_model(
+    payload: EnsembleCreateRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """将多个已训练模型融合为一个持久化融合模型；创建即进入日更推理名单。
+
+    权重由服务器端权威计算（预览同口径），客户端不持有权重的决定权。
+    """
+    _validate_ensemble_request(payload)
+    if payload.fusion_strategy not in _ENSEMBLE_FUSION_STRATEGIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"fusion_strategy 应为 {'/'.join(_ENSEMBLE_FUSION_STRATEGIES)}",
+        )
+    tenant_id, user_id = _owner_scope(current_user)
+    try:
+        return await create_fusion_model(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_ids=payload.source_model_ids,
+            display_name=payload.display_name,
+            weight_strategy=payload.weight_strategy,
+            manual_weights=payload.manual_weights,
+            fusion_strategy=payload.fusion_strategy,
+            strategy_config=payload.strategy_config,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/feature-catalog", summary="获取模型训练特征字典（用户态）")
@@ -1788,6 +1892,29 @@ async def activate_user_model(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return model
+
+
+@router.patch("/{model_id}/display-name", summary="重命名用户模型展示名（用户态）")
+async def rename_user_model(
+    model_id: str,
+    body: RenameModelRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """只改展示名（display_name/model_name 双写 DB 与磁盘），model_id 不动。"""
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    try:
+        model = await model_registry_service.update_display_name(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=model_id,
+            display_name=body.display_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if model is None:
+        raise HTTPException(status_code=404, detail="模型不存在或不属于当前用户")
     return model
 
 

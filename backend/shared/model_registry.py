@@ -39,6 +39,10 @@ _ALLOWED_MODEL_STATUSES = {
 _READY_STATUSES = {"ready", "active"}
 _SYSTEM_MODEL_METADATA = {"system_default": True, "readonly": True}
 
+# 展示名长度上限（用户态重命名；与前端 maxLength 同口径）。
+# 只约束展示层字段，不约束 model_id（model_id 另有 ASCII 校验）。
+MAX_DISPLAY_NAME_LENGTH = 80
+
 
 @dataclass
 class ResolvedModel:
@@ -107,6 +111,92 @@ def _model_market_of(model: dict[str, Any]) -> str:
                 raw = market
                 break
     return _canonical_market(raw)
+
+
+def _majority_choice(values: list[str], *, prefer: str = "") -> str | None:
+    """多数票（并列时优先 ``prefer``，否则取字典序最小者）—— 确定性，无随机。"""
+    clean = [str(v) for v in values if str(v or "").strip()]
+    if not clean:
+        return None
+    counts: dict[str, int] = {}
+    for v in clean:
+        counts[v] = counts.get(v, 0) + 1
+    top = max(counts.values())
+    candidates = sorted(v for v, c in counts.items() if c == top)
+    if prefer and prefer in candidates:
+        return prefer
+    return candidates[0]
+
+
+def _merge_field_sources(
+    maps: list[dict[str, Any]], warnings: list[str]
+) -> dict[str, str]:
+    """合并成员的 ``factor_field_sources``（逐键多数票；冲突对账后可见）。"""
+    per_key: dict[str, list[str]] = {}
+    for m in maps:
+        if not isinstance(m, dict):
+            continue
+        for k, v in m.items():
+            per_key.setdefault(str(k), []).append(str(v))
+    merged: dict[str, str] = {}
+    conflicts: list[str] = []
+    for key in sorted(per_key):
+        vals = per_key[key]
+        merged[key] = _majority_choice(vals) or vals[0]
+        if len(set(vals)) > 1:
+            conflicts.append(key)
+    if conflicts:
+        warnings.append(f"factor_field_sources_conflict: {conflicts[:8]}")
+    return merged
+
+
+def _inherit_data_plane_from_members(
+    member_metas: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[str]]:
+    """融合模型数据面继承：成员 metadata 多数票，**绝不硬编码**。
+
+    历史缺陷（2026-10-09 E2E 实锤）：``register_ensemble_model`` 硬编码
+    ``data_source="parquet"`` 的融合模型，runner 会路由到 feature_snapshots
+    （本机停更于 2026-08）并以其最新日期为推理日 —— 「能推理但读陈旧数据」。
+    成员的 data_source=quantdb_factors 时，融合模型必须继承同一数据面
+    （含 quantdb_dir pin / factor_source / 字段映射 / schema 哈希），否则
+    模板取数、就绪检查、日期回退三处口径不一致。
+
+    Returns:
+        (要并入融合 metadata 的键值, 警告列表)。
+    """
+    warnings: list[str] = []
+    out: dict[str, Any] = {}
+    sources = [str(m.get("data_source") or "") for m in member_metas]
+    # 平票时倾向 quantdb_factors：该面带 pin 与就绪检查，可对账；parquet 面
+    # 无版本信息，误选只会静默读陈旧快照（本函数要消灭的症状）。
+    data_source = _majority_choice(sources, prefer="quantdb_factors") or "parquet"
+    out["data_source"] = data_source
+    distinct = sorted({v for v in sources if v})
+    if len(distinct) > 1:
+        warnings.append(f"mixed_data_source: {distinct} (取 {data_source})")
+
+    if data_source == "quantdb_factors":
+        for key in ("quantdb_dir", "factor_source", "factor_schema_hash"):
+            chosen = _majority_choice([str(m.get(key) or "") for m in member_metas])
+            if chosen:
+                out[key] = chosen
+            vals = sorted({str(m.get(key) or "") for m in member_metas} - {""})
+            if len(vals) > 1:
+                warnings.append(f"mixed_{key}: {vals} (取 {chosen or '缺省'})")
+        merged = _merge_field_sources(
+            [m.get("factor_field_sources") or {} for m in member_metas], warnings
+        )
+        if merged:
+            out["factor_field_sources"] = merged
+    elif data_source == "parquet":
+        # parquet 面沿用成员的 data_dir 位置（相对路径由 runner 重定位）
+        chosen_dir = _majority_choice(
+            [str(m.get("data_dir") or "") for m in member_metas]
+        )
+        if chosen_dir:
+            out["data_dir"] = chosen_dir
+    return out, warnings
 
 
 class ModelRegistryService:
@@ -736,6 +826,142 @@ class ModelRegistryService:
         if model is None:
             raise ValueError("model not found after update")
         return model
+
+    def _resolve_owned_model_dir(self, model: dict[str, Any]) -> Path | None:
+        """storage_path → 用户模型根内的受控目录；越界/缺失一律 None（防任意路径写）。"""
+        raw = str(model.get("storage_path") or "").strip()
+        if not raw:
+            return None
+        path = Path(raw)
+        if not path.is_absolute():
+            path = Path("/app") / path
+        try:
+            resolved = path.resolve()
+            root = Path(self.user_models_root).resolve()
+        except OSError:
+            return None
+        if resolved != root and root not in resolved.parents:
+            return None
+        return resolved
+
+    def _read_disk_metadata(self, model: dict[str, Any]) -> dict[str, Any] | None:
+        """读模型目录磁盘 metadata.json；目录/文件缺失或损坏 → None。"""
+        model_dir = self._resolve_owned_model_dir(model)
+        if model_dir is None:
+            return None
+        meta_path = model_dir / "metadata.json"
+        if not meta_path.is_file():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return meta if isinstance(meta, dict) else None
+
+    def _write_disk_display_name(self, model: dict[str, Any], name: str) -> bool:
+        """展示名双写磁盘 metadata.json（原子替换）；目录缺失跳过（返回 False）。"""
+        model_dir = self._resolve_owned_model_dir(model)
+        if model_dir is None or not model_dir.is_dir():
+            logger.warning(
+                "重命名跳过磁盘写入：模型目录缺失 %s", model.get("storage_path")
+            )
+            return False
+        meta = dict(self._read_disk_metadata(model) or {})
+        meta["display_name"] = name
+        meta["model_name"] = name
+        meta_path = model_dir / "metadata.json"
+        tmp_path = meta_path.with_name("metadata.json.tmp")
+        tmp_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(tmp_path, meta_path)
+        return True
+
+    async def update_display_name(
+        self, *, tenant_id: str, user_id: str, model_id: str, display_name: str
+    ) -> dict[str, Any] | None:
+        """重命名模型展示名（用户态）。
+
+        双写口径（改一处都不够）：前端模型管理列表读 DB `metadata_json`；
+        滚动训练派生描述（`model_recipe.py`）读磁盘 `metadata.json` 的
+        `model_name`。两份存储的 `display_name` 与 `model_name` 必须同步更新，
+        其余键（hub_name、market 等）原样保留。
+
+        model_id 不动：滚动训练校验器仅允许 ASCII，且 ID 已进各台账引用。
+        幂等：同名 = 空操作（不写盘、不落库）。写后回读复验两份存储。
+        返回更新后的模型记录；不存在 / 不属本人 → None；
+        名称非法 / 系统模型（readonly）→ ValueError。
+        """
+        tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
+        mid = str(model_id).strip()
+        if not mid:
+            raise ValueError("model_id is required")
+        name = str(display_name or "").strip()
+        if not name:
+            raise ValueError("展示名不能为空")
+        if len(name) > MAX_DISPLAY_NAME_LENGTH:
+            raise ValueError(f"展示名过长（≤{MAX_DISPLAY_NAME_LENGTH} 字符）")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+            raise ValueError("展示名不能包含控制字符")
+
+        model = await self.get_model(tenant_id=tenant, user_id=user, model_id=mid)
+        if model is None:
+            return None
+        metadata = (
+            model.get("metadata_json")
+            if isinstance(model.get("metadata_json"), dict)
+            else {}
+        )
+        if bool(metadata.get("readonly")):
+            raise ValueError("system model cannot be renamed")
+
+        def _both_keys_are(meta: dict[str, Any] | None, target: str) -> bool:
+            if not isinstance(meta, dict):
+                return False
+            return (
+                str(meta.get("display_name") or "").strip() == target
+                and str(meta.get("model_name") or "").strip() == target
+            )
+
+        disk_meta = self._read_disk_metadata(model)
+        if _both_keys_are(metadata, name) and (
+            disk_meta is None or _both_keys_are(disk_meta, name)
+        ):
+            return model
+
+        # 先盘后库：磁盘原子写失败会抛错且不留半态，此时 DB 保持旧值（两份不劈叉）
+        self._write_disk_display_name(model, name)
+
+        new_metadata = {**metadata, "display_name": name, "model_name": name}
+        now = datetime.now(timezone.utc)
+        async with get_session() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE qm_user_models
+                    SET metadata_json = CAST(:metadata_json AS JSONB), updated_at = :updated_at
+                    WHERE tenant_id = :tenant_id AND user_id = :user_id AND model_id = :model_id
+                    """
+                ),
+                {
+                    "tenant_id": tenant,
+                    "user_id": user,
+                    "model_id": mid,
+                    "updated_at": now,
+                    "metadata_json": json.dumps(new_metadata, ensure_ascii=False),
+                },
+            )
+
+        # 写后回读复验：两份存储都要落成新名，否则算失败（不改测试，改实现）
+        readback = await self.get_model(tenant_id=tenant, user_id=user, model_id=mid)
+        if readback is None:
+            raise RuntimeError("重命名回读失败：模型记录消失")
+        if not _both_keys_are(readback.get("metadata_json"), name):
+            raise RuntimeError("重命名回读不一致（DB metadata_json）")
+        disk_readback = self._read_disk_metadata(readback)
+        if disk_readback is not None and not _both_keys_are(disk_readback, name):
+            raise RuntimeError("重命名回读不一致（磁盘 metadata.json）")
+        return readback
 
     async def archive_model(
         self, *, tenant_id: str, user_id: str, model_id: str
@@ -2256,19 +2482,32 @@ class ModelRegistryService:
         manual_weights: dict[str, float] | None = None,
         fusion_strategy: str = "linear",
         strategy_config: dict[str, float] | None = None,
+        weights_override: dict[str, float] | None = None,
+        weight_diagnostics: list[dict[str, Any]] | None = None,
+        fusion_eval: dict[str, Any] | None = None,
+        target_horizon_days: int | None = None,
     ) -> dict[str, Any]:
         """创建持久化融合模型（推理时融合多个源模型的预测）。
 
         源模型可以是任意类型（单模型 / stacking 融合 / 不同周期）。
         融合模型不包含二进制权重，其目录含：
-          - ensemble_config.json  源模型引用 + 权重 + 策略
+          - ensemble_config.json  源模型引用 + 权重 + 策略（v2）
+          - weight_snapshot.json  v2 权重快照（模板动态权重读取）
+          - weight_history.jsonl  权重审计流水（每次刷新/重建一行）
+          - fusion_eval.json      OOS 回放结论（可选）
           - metadata.json         融合元信息
           - inference.py          融合推理脚本（复用 inference_ensemble_src 模板）
 
         权重策略：
+          - icir_shrunk  机构级（orchestrator 传入 weights_override，见
+                         backend/services/engine/inference/fusion_orchestrator.py）
           - equal        每个源模型等权
-          - icir         按源模型 Val Rank ICIR 归一化加权
+          - icir         按源模型 Val Rank ICIR 归一化加权（创建时静态）
           - manual       使用 manual_weights（自动归一化到和为 1）
+
+        创建即写 qm_model_inference_settings(enabled=TRUE) —— 融合模型进入日更
+        推理名单（历史「融合模型没有预测能力」根因 = 该行为缺失）。写入失败不
+        阻断创建，但通过返回值 daily_inference.error 显式暴露。
         """
         tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
         await self.ensure_tables()
@@ -2292,7 +2531,24 @@ class ModelRegistryService:
             sources.append(model)
 
         # 权重计算
-        if weight_strategy == "icir":
+        if weights_override is not None:
+            # 机构级引擎（fusion_orchestrator）已算好最终权重：这里只做防御性校验
+            # 与重归一，不再走任何静态策略（创建时 val_icir 之类已废弃）。
+            cleaned_w: dict[str, float] = {}
+            for mid in source_model_ids:
+                v = weights_override.get(mid)
+                try:
+                    fv = float(v)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    raise ValueError(f"融合权重缺失或非法: {mid}={v!r}") from None
+                if not math.isfinite(fv) or fv < 0:
+                    raise ValueError(f"融合权重非法: {mid}={v!r}")
+                cleaned_w[mid] = fv
+            total_w = sum(cleaned_w.values())
+            if total_w <= 0:
+                raise ValueError("融合权重全为 0")
+            weights = {k: v / total_w for k, v in cleaned_w.items()}
+        elif weight_strategy == "icir":
             weights: dict[str, float] = {}
             for src in sources:
                 mid = str(src["model_id"])
@@ -2404,9 +2660,19 @@ class ModelRegistryService:
                     unified_features.append(f)
         feature_count = len(unified_features)
 
-        raw_display_name = str(display_name or "").strip() or "Ensemble"
+        raw_display_name = str(display_name or "").strip() or "融合模型"
         if not raw_display_name.upper().endswith(f"_{market}"):
             raw_display_name = f"{raw_display_name}_{market}"
+
+        # 数据面继承（绝不硬编码 parquet，见 _inherit_data_plane_from_members）——
+        # 融合模型与成员必须读同一面数据，否则 runner 会按错误的数据源路由
+        # （表现为「能推理但读停更快照」）。
+        source_metas = [
+            self._parse_json_field(s.get("metadata_json")) for s in sources
+        ]
+        data_plane, plane_warnings = _inherit_data_plane_from_members(source_metas)
+        for warn in plane_warnings:
+            logger.warning("融合模型数据面提示: %s", warn)
 
         metadata: dict[str, Any] = {
             "model_type": "ensemble",
@@ -2416,7 +2682,6 @@ class ModelRegistryService:
             "is_ensemble": True,
             "model_file": "ensemble_config.json",
             "framework": "ensemble",
-            "ensemble_method": "fusion",
             "fusion_strategy": fusion_strategy,
             "strategy_config": strategy_config or {},
             "source_models": source_meta_list,
@@ -2432,9 +2697,9 @@ class ModelRegistryService:
             "context": context,
             "benchmark": benchmark,
             "market": market,
-            "target_horizon_days": 15,
+            "target_horizon_days": int(target_horizon_days or 15),
             "target_mode": "return",
-            "data_source": "parquet",
+            **data_plane,
             "generated_at": now.isoformat(),
             "metrics": {
                 "val_ic": 0.0,
@@ -2442,6 +2707,8 @@ class ModelRegistryService:
                 "score_direction": "normal",
             },
         }
+        if plane_warnings:
+            metadata["data_plane_warnings"] = plane_warnings
 
         # 创建模型目录（非 CN 市场按市场子目录分段）
         model_dir = self.user_models_root / tenant / user / model_id
@@ -2453,11 +2720,15 @@ class ModelRegistryService:
 
         # 写入 ensemble_config.json（源模型用绝对路径）
         ensemble_config = {
-            "version": 1,
+            "version": 2,
             "created_at": now.isoformat(),
             "weight_strategy": weight_strategy,
             "fusion_strategy": fusion_strategy,
             "strategy_config": strategy_config or {},
+            "horizon_days": int(target_horizon_days or 15),
+            "weights": {
+                str(k): round(float(v), 6) for k, v in weights.items()
+            },
             "models": [
                 {
                     "model_id": str(s["model_id"]),
@@ -2503,6 +2774,43 @@ class ModelRegistryService:
             shutil.copy2(template_path, model_dir / "inference.py")
         else:
             logger.warning("融合推理模板不存在: %s，模型推理可能失败", template_path)
+
+        # v2 权重快照（模板 _load_dynamic_weights 兼容嵌套格式）+ 审计流水 + 回放结论。
+        # 原子写：推理进程可能随时在读，绝不允许半截 JSON。
+        snapshot = {
+            "version": 2,
+            "as_of": now.date().isoformat(),
+            "strategy": str(weight_strategy),
+            "weights": {str(k): round(float(v), 6) for k, v in weights.items()},
+            "diagnostics": weight_diagnostics or [],
+            "updated_at": now.isoformat(),
+        }
+        snap_path = model_dir / "weight_snapshot.json"
+        snap_tmp = snap_path.with_suffix(".json.tmp")
+        snap_tmp.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        snap_tmp.replace(snap_path)
+        with (model_dir / "weight_history.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "as_of": snapshot["as_of"],
+                        "strategy": snapshot["strategy"],
+                        "weights": snapshot["weights"],
+                        "event": "created",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        if fusion_eval is not None:
+            eval_path = model_dir / "fusion_eval.json"
+            eval_tmp = eval_path.with_suffix(".json.tmp")
+            eval_tmp.write_text(
+                json.dumps(fusion_eval, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            eval_tmp.replace(eval_path)
 
         # 写库
         now_db = datetime.now(timezone.utc)
@@ -2588,12 +2896,30 @@ class ModelRegistryService:
                     },
                 )
 
+        # 创建即进日更推理名单 —— 历史「融合模型没有预测能力」的根因就是缺这一行
+        # （qm_model_inference_dispatch_logs 零 ensemble 行）。写入失败不阻断创建，
+        # 但必须以 daily_inference.error 显式外露，不许静默。
+        daily_inference: dict[str, Any] = {"enabled": False, "error": None}
+        try:
+            from backend.services.engine.services.model_inference_persistence import (
+                model_inference_persistence,
+            )
+
+            await model_inference_persistence.update_settings(
+                tenant_id=tenant, user_id=user, model_id=model_id, enabled=True
+            )
+            daily_inference["enabled"] = True
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("融合模型 %s 未能写入日更推理名单", model_id)
+            daily_inference["error"] = str(exc)
+
         logger.info(
-            "[%s] 融合模型已创建: %s (%d 个源模型, 权重策略=%s)",
+            "[%s] 融合模型已创建: %s (%d 个源模型, 权重策略=%s, 日更=%s)",
             model_id,
             raw_display_name,
             len(sources),
             weight_strategy,
+            daily_inference["enabled"],
         )
         return {
             "model_id": model_id,
@@ -2601,6 +2927,7 @@ class ModelRegistryService:
             "storage_path": str(model_dir.resolve()),
             "model_file": "ensemble_config.json",
             "metadata": metadata,
+            "daily_inference": daily_inference,
         }
 
     def _sync_candidate_artifacts(

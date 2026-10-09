@@ -117,28 +117,110 @@ def _resolve_parquet_path(data_dir: Path, trade_date: str, market: str = "CN") -
     return p if p.exists() else None
 
 
-def load_day_data(trade_date: str, data_dir: Path, market: str = "CN") -> pd.DataFrame | None:
-    """加载指定交易日的全市场特征数据。"""
-    parquet_path = _resolve_parquet_path(data_dir, trade_date, market=market)
-    if parquet_path is None:
-        logger.warning("找不到 parquet 文件 (data_dir=%s)", data_dir)
+def filter_untradable_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """过滤不可交易记录（停牌、零成交、ST 股等）。与 inference_parquet.py 同口径。"""
+    if df.empty:
+        return df
+
+    filtered = df.copy()
+
+    if "close" in filtered.columns:
+        filtered = filtered.loc[
+            pd.to_numeric(filtered["close"], errors="coerce") > 0
+        ].copy()
+
+    if "volume" in filtered.columns:
+        filtered = filtered.loc[
+            pd.to_numeric(filtered["volume"], errors="coerce") > 0
+        ].copy()
+
+    # 排除 ST / *ST / 退市股
+    if "is_st" in filtered.columns:
+        filtered = filtered.loc[
+            pd.to_numeric(filtered["is_st"], errors="coerce") != 1
+        ].copy()
+
+    return filtered
+
+
+def _quantdb_reader(meta: dict, data_dir: Path):
+    """QuantDB 直读 reader（口径与 inference_parquet.py._quantdb_reader 逐字一致）。
+
+    数据面必须由**本模型 metadata** 决定，绝不硬编码：历史缺陷是融合 metadata
+    写死 data_source=parquet，而成员全部读 quantdb_factors —— runner 按 wrong
+    数据源路由 → 融合模型「能推理但读停更快照」。修复后 register_ensemble_model
+    从成员继承数据面，本模板按同一 metadata 读数。
+    """
+    if str(meta.get("data_source") or "").lower() != "quantdb_factors":
+        return None
+    try:
+        from backend.services.engine.data_platform.quantdb_factor_reader import (
+            QuantDBFactorReader,
+        )
+        from backend.shared.quantdb_paths import resolve_pinned_data_dir
+
+        # pin 口径唯一实现见 backend/shared/quantdb_paths.resolve_pinned_data_dir
+        pinned_dir = resolve_pinned_data_dir(meta.get("quantdb_dir"))
+        return QuantDBFactorReader(str(pinned_dir) if pinned_dir else data_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("QuantDB reader 初始化失败，回退 parquet 布局: %s", exc)
         return None
 
-    df = pd.read_parquet(parquet_path, engine="pyarrow")
-    if "symbol" not in df.columns and "instrument" in df.columns:
-        df = df.rename(columns={"instrument": "symbol"})
-    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
-    day_df = df[df["trade_date"] == trade_date].copy()
+
+def load_day_data(trade_date: str, data_dir: Path, market: str = "CN",
+                  meta: dict | None = None) -> pd.DataFrame | None:
+    """加载指定交易日的全市场特征数据。
+
+    数据面分派与成员模板（inference_parquet.py.load_date_data）同源：
+    data_source=quantdb_factors → 读 pin 目录的 QuantDB 因子；否则读
+    model_features_{year}.parquet 布局。
+    """
+    meta = meta or {}
+    reader = _quantdb_reader(meta, data_dir)
+    if reader is not None:
+        features = list(meta.get("feature_columns") or meta.get("features") or [])
+        source = str(meta.get("factor_source") or "l1_l2_factors")
+        try:
+            status = reader.assert_ready(source, start=trade_date, end=trade_date)
+            expected_hash = str(meta.get("factor_schema_hash") or "")
+            if expected_hash and expected_hash != status.schema_hash:
+                # 漂移 ≠ 错误（哈希只覆盖列名集合）：与成员模板同口径只警告，
+                # 硬失败由 read_day 的按名缺列检查给出。
+                logger.warning(
+                    "QuantDB schema drift for %s: expected %s, got %s (按名取数，继续)",
+                    source,
+                    expected_hash[:16],
+                    str(status.schema_hash or "")[:16],
+                )
+            day_df = reader.read_day(
+                source, features=features, trade_date=trade_date,
+                feature_sources=meta.get("factor_field_sources") or None,
+            )
+            day_df["trade_date"] = pd.to_datetime(day_df["trade_date"]).dt.strftime("%Y-%m-%d")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("QuantDB 直读失败: %s", exc)
+            return None
+    else:
+        parquet_path = _resolve_parquet_path(data_dir, trade_date, market=market)
+        if parquet_path is None:
+            logger.warning("找不到 parquet 文件 (data_dir=%s)", data_dir)
+            return None
+
+        df = pd.read_parquet(parquet_path, engine="pyarrow")
+        if "symbol" not in df.columns and "instrument" in df.columns:
+            df = df.rename(columns={"instrument": "symbol"})
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
+        day_df = df[df["trade_date"] == trade_date].copy()
 
     if len(day_df) == 0:
         logger.warning("日期 %s 无数据", trade_date)
         return None
 
-    # 过滤不可交易：价格/成交量为零或负
-    if "close" in day_df.columns:
-        day_df = day_df[pd.to_numeric(day_df["close"], errors="coerce") > 0]
-    if "volume" in day_df.columns:
-        day_df = day_df[pd.to_numeric(day_df["volume"], errors="coerce") > 0]
+    # 过滤不可交易记录（停牌、零成交、ST）
+    before_filter = len(day_df)
+    day_df = filter_untradable_rows(day_df)
+    if before_filter != len(day_df):
+        logger.info("过滤不可交易记录: %d -> %d", before_filter, len(day_df))
 
     if len(day_df) == 0:
         logger.warning("日期 %s 过滤后无可交易数据", trade_date)
@@ -234,6 +316,71 @@ def _load_base_model(model_path: Path, model_type: str):
     return _load_plain_pickle(model_path)
 
 
+# 模型目录里权重与训练产物同处一室（pred.parquet / pred.pkl / result.json …）。
+# 盲搜权重必须排除非权重文件：训练端 metadata 记 per-algorithm 名
+# （model_nativetft.pth）而产物按白名单落通用名（model.pth），声明名找不到就
+# 掉进盲搜，*.pkl 会先命中 61MB 的 pred.pkl（预测结果 DataFrame），被当 sklearn
+# 模型加载后崩在 predict() —— 成员被静默跳过（2026-10-09 融合 E2E：DL 成员
+# 全程零贡献，只出 LGB 成员的覆盖数）。口径与 inference_parquet.py 一致
+# （本模板独立运行，不 import 后端包，故留副本）。
+_ARTIFACT_STEMS = frozenset({
+    "pred", "result", "metadata", "config", "inference",
+    "shap_summary", "feature_importance", "training_log",
+})
+
+# 权重扩展名：专用格式优先；.pkl 是任意对象的通用容器（预测产物也常用它），排最后
+_MODEL_GLOBS = ("*.xgb", "*.lgb", "*.cbm", "*.bin", "*.pth", "*.pt", "*.txt", "*.pkl")
+
+
+def _is_model_weight(path: Path) -> bool:
+    """该文件是否可能是模型权重（排除预测产物、配置脚本等训练副产品）。"""
+    stem = path.stem.lower()
+    return stem not in _ARTIFACT_STEMS and not stem.startswith("pred_")
+
+
+def _model_candidates(model_dir: Path) -> list[Path]:
+    """按扩展名列候选权重：通用名 model.* 优先，带算法后缀的（拆分产物）随后。"""
+    generic: list[Path] = []
+    suffixed: list[Path] = []
+    for pattern in _MODEL_GLOBS:
+        for path in sorted(model_dir.glob(pattern)):
+            if not _is_model_weight(path):
+                continue
+            (generic if path.stem.lower() == "model" else suffixed).append(path)
+    return generic + suffixed
+
+
+def _resolve_member_model_path(model_dir: Path, meta: dict) -> Path | None:
+    """定位成员权重文件；确实不是权重时返回 None（由调用方报错），绝不盲选产物。"""
+    declared = str(meta.get("model_file") or "").strip()
+    if declared:
+        model_path = model_dir / declared
+        if model_path.is_file():
+            return model_path
+        # per-algorithm 名与 model.<ext> 指的是同一个文件：先试同后缀通用名，
+        # 命中就不必盲搜（与 inference_parquet._resolve_model_path 同口径）。
+        if "." in declared:
+            same_ext = model_dir / f"model.{declared.rsplit('.', 1)[1]}"
+            if same_ext.is_file():
+                logger.warning(
+                    "成员 metadata.model_file=%s 不存在，改用同后缀的 %s",
+                    declared, same_ext.name,
+                )
+                return same_ext
+        logger.warning("成员 metadata.model_file=%s 不存在，按权重白名单搜索", declared)
+
+    candidates = _model_candidates(model_dir)
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        logger.warning(
+            "成员目录存在多个候选权重，取 %s（其余: %s）",
+            candidates[0].name,
+            ", ".join(p.name for p in candidates[1:]),
+        )
+    return candidates[0]
+
+
 def load_source_model(model_dir: Path) -> tuple[object, dict]:
     """加载源模型。返回 (model, meta)。
 
@@ -250,15 +397,8 @@ def load_source_model(model_dir: Path) -> tuple[object, dict]:
         model = _load_stacking(model_dir, meta)
         return model, meta
 
-    model_file = meta.get("model_file", "")
-    model_path = model_dir / model_file if model_file else None
-    if not model_path or not model_path.exists():
-        for ext in ("*.xgb", "*.lgb", "*.cbm", "*.pkl", "*.txt", "*.pth", "*.pt"):
-            candidates = list(model_dir.glob(ext))
-            if candidates:
-                model_path = candidates[0]
-                break
-    if not model_path or not model_path.exists():
+    model_path = _resolve_member_model_path(model_dir, meta)
+    if model_path is None:
         raise FileNotFoundError(f"未找到模型文件: {model_dir}")
 
     model_type = str(meta.get("model_type", "")).lower()
@@ -538,15 +678,42 @@ def _apply_time_smoothing(ranked: dict[str, float], history: dict[str, dict] | N
     return out
 
 
+def _parse_snapshot_weights(data) -> dict[str, float] | None:
+    """解析 weight_snapshot.json 的两种形态，返回原始权重（未归一）；无法解析 → None。
+
+    - v2（机构级）：嵌套格式 {"version": 2, "weights": {mid: w}, "diagnostics": [...]}
+    - v1（旧扁平）：{mid: w, ..., "_updated_at": ...}
+    v1 只取数值项（与原实现一致，跳过 _ 前缀元数据键）；v2 只认 weights 段，
+    防止把 version/as_of 这类顶层标量误当成员权重。
+    """
+    if not isinstance(data, dict):
+        return None
+    nested = data.get("weights")
+    if isinstance(nested, dict):
+        out = {}
+        for k, v in nested.items():
+            if isinstance(v, (int, float)) and v is not None:
+                out[str(k)] = float(v)
+        return out or None
+    flat = {
+        str(k): float(v)
+        for k, v in data.items()
+        if not str(k).startswith("_") and isinstance(v, (int, float))
+    }
+    return flat or None
+
+
 def _load_dynamic_weights(model_dir: Path, static_weights: dict[str, float]) -> dict[str, float]:
-    """读 weight_snapshot.json 动态权重；缺失/异常回退静态权重。"""
+    """读 weight_snapshot.json 动态权重（v1 扁平 / v2 嵌套）；缺失/异常回退静态权重。"""
     snap = model_dir / "weight_snapshot.json"
     if not snap.exists():
         return dict(static_weights)
     try:
         with open(snap, encoding="utf-8") as f:
             data = json.load(f)
-        weights = {k: float(v) for k, v in data.items() if k != "_updated_at" and v is not None}
+        weights = _parse_snapshot_weights(data)
+        if not weights:
+            return dict(static_weights)
         tot = sum(weights.values())
         if tot <= 0:
             return dict(static_weights)
@@ -745,8 +912,20 @@ def main():
     logger.info("融合 %d 个源模型: %s", len(model_configs),
                 [m.get("model_id", "?") for m in model_configs])
 
+    # 自身 metadata：数据面（data_source/quantdb pin/字段映射）由此决定，
+    # 与成员模板共用一份继承口径（register_ensemble_model 写入）。
+    model_meta: dict = {}
+    meta_path = model_dir / "metadata.json"
+    if meta_path.is_file():
+        try:
+            with open(meta_path, encoding="utf-8") as fh:
+                model_meta = json.load(fh)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("metadata.json 读取失败，按 parquet 数据面处理: %s", exc)
+    logger.info("  data_source: %s", model_meta.get("data_source") or "(未声明→parquet)")
+
     # 2. 加载当日数据
-    day_df = load_day_data(trade_date, data_dir, market=market)
+    day_df = load_day_data(trade_date, data_dir, market=market, meta=model_meta)
     if day_df is None:
         msg = f"日期 {trade_date} 无数据"
         logger.warning(msg)
