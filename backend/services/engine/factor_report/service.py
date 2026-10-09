@@ -15,8 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +28,14 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from . import blocks as BLK
-from .datasets import DATASETS, DEFAULT_DATASET, dataset_dir, label_dir
+from .datasets import (
+    DATASETS,
+    DEFAULT_DATASET,
+    dataset_dir,
+    disk_state,
+    label_dir,
+    report_dir,
+)
 
 log = logging.getLogger(__name__)
 
@@ -504,4 +515,145 @@ def correlation_clusters(dataset: str, threshold: float = 0.9, keep: str = "icir
         "summary": summarize(len(names), clusters),
         "diversity": _diversity_before_after(names, matrix, clusters),
         "clusters": clusters,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 快照重建（一键）与滞后探测 —— 报告快照是构建产物，不是每次读盘现算的。
+# 因子挖掘每天往盘上落新因子后，不重建就永远看不见；「刷新」只是重读同一份快照。
+# 这里给出：盘上 vs 快照的滞后（freshness）+ 后台重建入口（build），
+# 与 factor_research 的 start_build/snapshot_status 同一套模式（全部本地计算）。
+# ---------------------------------------------------------------------------
+_BUILD_LOG = "build.log"
+_BUILD_PID = "build.pid"
+_BUILD_SCRIPT = Path("backend") / "scripts" / "build_factor_report.py"
+
+
+def build_running(dataset: str) -> int | None:
+    """返回正在运行的构建进程 PID（无则 None）。带 cmdline 校验防 PID 复用。"""
+    d = report_dir(normalize_dataset(dataset))
+    pf = d / _BUILD_PID
+    if not pf.exists():
+        return None
+    try:
+        pid = int(pf.read_text().strip())
+        os.kill(pid, 0)
+    except (ValueError, ProcessLookupError, PermissionError, OSError):
+        return None
+    try:  # PID 复用防护：必须是 build_factor_report 的进程
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="ignore")
+        if "build_factor_report" not in cmdline:
+            return None
+    except OSError:
+        pass
+    return pid
+
+
+def build_status(dataset: str = DEFAULT_DATASET) -> dict:
+    """快照状态：是否已生成 / 构建中 / 元信息 / 日志最新一行（页面「重建快照」入口用）。
+
+    快照/日志/PID 三件套都在 ``report_dir`` 下 —— 这里直接按目录读，
+    不走 ``load_snapshot``（后者经 dataset_dir 解析，两条路径在测试与替换目录下会分叉）。
+    """
+    ds = normalize_dataset(dataset)
+    d = report_dir(ds)
+    snap_file = d / "factor_report.json"
+    meta: dict = {}
+    exists = snap_file.exists()
+    if exists:
+        try:
+            meta = (json.loads(snap_file.read_text(encoding="utf-8")).get("meta")) or {}
+        except Exception:  # noqa: BLE001 - 元信息损坏不阻塞状态查询
+            meta = {}
+    pid = build_running(ds)
+    log_tail: list[str] = []
+    step = ""
+    lf = d / _BUILD_LOG
+    if lf.exists():
+        try:
+            lines = [
+                ln for ln in lf.read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()
+            ]
+            log_tail = lines[-12:]
+            step = lines[-1][:160] if lines else ""
+        except OSError:
+            pass
+    return {
+        "dataset": ds,
+        "exists": exists,
+        "running": pid is not None,
+        "pid": pid,
+        "built_at": meta.get("generated_at"),
+        "n_factors": meta.get("n_factors"),
+        "start": meta.get("start"),
+        "end": meta.get("end"),
+        "step": step,
+        "log_tail": log_tail,
+    }
+
+
+def start_build(dataset: str) -> dict:
+    """启动快照重建（后台子进程；已在构建则直接返回运行中）。全部本地计算。
+
+    命令带 ``--start``（取注册表 build_start，如 rd_mined 的 20200102）——
+    构建器缺省只回看 5 年，会把这些因子库的早段静默砍掉。
+    """
+    ds = str(dataset or "").strip()
+    if ds not in DATASETS:  # 构建入口严格校验：normalize 的兜底会静默改建默认数据集
+        return {"error": f"未知数据集: {dataset!r}"}
+    d = report_dir(ds)
+    if (pid := build_running(ds)) is not None:
+        return {"started": False, "running": True, "pid": pid, "dataset": ds}
+    d.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[4]  # …/factor_report → 仓库根
+    script = root / _BUILD_SCRIPT
+    if not script.exists():
+        return {"error": f"构建脚本缺失: {script}"}
+    cmd = [sys.executable, str(script), "--dataset", ds]
+    start = DATASETS[ds].get("build_start")
+    if start:
+        cmd += ["--start", str(start)]
+    log = open(d / _BUILD_LOG, "a", encoding="utf-8")  # noqa: SIM115 - 交给子进程持有
+    log.write(
+        f"\n===== build started {datetime.now(timezone.utc).isoformat(timespec='seconds')} =====\n"
+    )
+    proc = subprocess.Popen(  # noqa: S603 - 固定脚本路径，无用户输入
+        cmd,
+        cwd=str(root),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    (d / _BUILD_PID).write_text(str(proc.pid), encoding="utf-8")
+    return {"started": True, "running": True, "pid": proc.pid, "dataset": ds}
+
+
+def dataset_freshness(dataset: str) -> dict:
+    """盘上分区（最新列集/日期）vs 快照元信息 → 快照是否落后。只读 parquet footer。
+
+    快照缺失时不叠「落后」噪声（available=False 已说明问题）；两者都有才比较。
+    """
+    ds = normalize_dataset(dataset)
+    snap = load_snapshot(ds)
+    meta = (snap or {}).get("meta") or {}
+    st = disk_state(ds)
+    snap_n = meta.get("n_factors")
+    snap_end = meta.get("end")
+    reasons: list[str] = []
+    if snap and st.get("n_factors") is not None and snap_n is not None:
+        try:
+            extra = int(st["n_factors"]) - int(snap_n)
+        except (TypeError, ValueError):
+            extra = 0
+        if extra > 0:
+            reasons.append(f"盘上已有 {st['n_factors']} 个因子（快照 {snap_n} 个，新增 {extra}）")
+    if snap and st.get("last_dt") and snap_end and str(st["last_dt"]) > str(snap_end):
+        reasons.append(f"数据已更新至 {st['last_dt']}（快照截至 {snap_end}）")
+    return {
+        "disk_n_factors": st.get("n_factors"),
+        "disk_last_dt": st.get("last_dt"),
+        "snapshot_n_factors": snap_n,
+        "snapshot_end": snap_end,
+        "stale": bool(reasons),
+        "stale_reason": "；".join(reasons) or None,
     }

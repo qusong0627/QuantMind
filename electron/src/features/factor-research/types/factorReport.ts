@@ -42,7 +42,7 @@ export interface FactorSummary {
   style_corr?: Record<string, number | null> | null;
 }
 
-/** 报告页可选的数据集及其快照状态 */
+/** 报告页可选的数据集及其快照状态 + 盘上滞后探测（freshness） */
 export interface FactorDatasetInfo {
   dataset: string;
   label: string;
@@ -52,11 +52,37 @@ export interface FactorDatasetInfo {
   start?: string | null;
   end?: string | null;
   generated_at?: string | null;
+  /** 盘上最新分区的因子数（只读 footer；读不到为 null） */
+  disk_n_factors?: number | null;
+  /** 盘上最新分区日期 */
+  disk_last_dt?: string | null;
+  /** 快照记的因子数 / 截止日（对比用） */
+  snapshot_n_factors?: number | null;
+  snapshot_end?: string | null;
+  /** 盘上比快照新（新因子或新日期）→ 建议重建快照 */
+  stale?: boolean;
+  /** 人话原因，如「盘上已有 102 个因子（快照 80 个，新增 22）」 */
+  stale_reason?: string | null;
 }
 
 export interface FactorDatasetList {
   default: string;
   items: FactorDatasetInfo[];
+}
+
+/** 快照构建状态（GET /factor-report/build-status） */
+export interface FactorBuildStatus {
+  dataset: string;
+  exists: boolean;
+  running: boolean;
+  pid?: number | null;
+  built_at?: string | null;
+  n_factors?: number | null;
+  start?: string | null;
+  end?: string | null;
+  /** 构建日志最新一行 */
+  step?: string;
+  log_tail?: string[];
 }
 
 export interface FactorReportMeta {

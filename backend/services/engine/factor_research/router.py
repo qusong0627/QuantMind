@@ -160,6 +160,25 @@ async def post_build(dataset: FactorDataset = "classic"):
     return out
 
 
+@router.post("/promote")
+async def post_promote():
+    """一键毕业：CUSTOM 挖掘因子库 →（镜像 + 字段注册）→ CN 盘面。
+
+    刻意不发布 CN 训练目录（--publish 留给人/训练页）：这个按钮只让因子
+    到达「因子研究/报告」的取数面。跑完重建快照即可见。
+    """
+    out = await _run(service.start_promote)
+    if out.get("error"):
+        raise HTTPException(status_code=500, detail=out["error"])
+    return out
+
+
+@router.get("/promote-status")
+async def get_promote_status():
+    """毕业桥状态（是否运行中 / 日志最新一行）—— 供扫描面板一键毕业入口轮询。"""
+    return await _run(service.promote_status)
+
+
 @router.get("/correlation")
 async def get_correlation(codes: str | None = None):
     lst = [c.strip() for c in codes.split(",") if c.strip()] if codes else None

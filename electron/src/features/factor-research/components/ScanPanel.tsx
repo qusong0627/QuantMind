@@ -13,8 +13,8 @@
  * 承诺一个重算根本不会发生的结果。
  */
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, RefreshCw, ScanSearch } from 'lucide-react';
-import { getScanSources } from '../services/factorResearchService';
+import { AlertTriangle, CheckCircle2, GraduationCap, Loader2, RefreshCw, ScanSearch } from 'lucide-react';
+import { getPromoteStatus, getScanSources, postPromote } from '../services/factorResearchService';
 import type { ScanDiff, ScanDiffItem } from '../services/factorResearchService';
 import { Card } from './common';
 
@@ -48,6 +48,10 @@ export const ScanPanel: React.FC<Props> = ({ onRebuild, onClose }) => {
   const [err, setErr] = useState<string | null>(null);
   // 初值即「扫描中」：首屏就是一次在途请求，否则会先闪一下空态
   const [scanning, setScanning] = useState(true);
+  // 一键毕业（毕业桥子进程）：promoting=轮询中；完成后自动重新扫描
+  const [promoting, setPromoting] = useState(false);
+  const [promoteStep, setPromoteStep] = useState('');
+  const [promoteErr, setPromoteErr] = useState<string | null>(null);
 
   const scan = useCallback(async () => {
     setScanning(true);
@@ -65,10 +69,50 @@ export const ScanPanel: React.FC<Props> = ({ onRebuild, onClose }) => {
     void scan();
   }, [scan]);
 
+  const startPromote = useCallback(async () => {
+    if (promoting) return;
+    setPromoteErr(null);
+    setPromoteStep('');
+    try {
+      await postPromote();
+      setPromoting(true);
+    } catch (e: unknown) {
+      setPromoteErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [promoting]);
+
+  // 毕业轮询：子进程结束后重新扫描 —— 待毕业数应清零，新增列表里也会出现
+  // 刚毕业的挖掘因子（下一步就是「重算快照」把它们收进目录）。
+  useEffect(() => {
+    if (!promoting) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const st = await getPromoteStatus();
+        if (cancelled) return;
+        setPromoteStep(st.step || '');
+        if (!st.running) {
+          setPromoting(false);
+          setPromoteStep('');
+          void scan();
+        }
+      } catch {
+        /* 轮询失败不中断 —— 下一拍再试 */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [promoting, scan]);
+
   const nNew = diff?.new.length ?? 0;
   const nMissing = diff?.missing.length ?? 0;
   const isLatest = !!diff && nNew === 0 && nMissing === 0;
   const groups = groupByLibrary(diff?.new ?? []);
+  const pipeline = diff?.pipeline || null;
 
   return (
     <div className="flex-1 min-h-0 flex items-start justify-center pt-6">
@@ -131,6 +175,71 @@ export const ScanPanel: React.FC<Props> = ({ onRebuild, onClose }) => {
                 本快照是按「{diff.snapshot_source}」建的，而重算走的是**全量扫描（auto）**：
                 下面的「新增」包含 auto 会收进来、而当初这次构建故意没收的因子，属正常。
               </span>
+            </div>
+          )}
+
+          {/* 毕业管道：新挖到的因子在这里「卡住」—— CUSTOM 挖掘库有、CN 盘面没有。
+              不把这一站显出来，用户只会看到「挖掘跑完了但哪都没有」。
+              一键毕业 = 毕业桥 --register（镜像 + 登记字段）；**不做 --publish**
+              （发布进训练目录是人工闸门，不在此自动化）。 */}
+          {pipeline && pipeline.state !== 'empty' && (
+            <div
+              data-testid="scan-pipeline"
+              className={`shrink-0 mt-1.5 rounded-lg border px-2.5 py-1.5 ${
+                pipeline.state === 'pending' ? 'border-indigo-100 bg-indigo-50/50' : 'border-emerald-100 bg-emerald-50/40'
+              }`}
+            >
+              {pipeline.state === 'pending' ? (
+                <>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <GraduationCap className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                    <span className="text-[11px] font-bold text-indigo-700">毕业管道：挖掘库 → 盘面</span>
+                    <Stat label="CUSTOM 挖掘库" value={pipeline.custom_n_factors ?? '—'} />
+                    <Stat label="CN 盘面" value={pipeline.cn_n_factors ?? '—'} />
+                    <Stat label="待毕业" value={pipeline.pending_factors} tone="text-indigo-600" />
+                    <Stat label="涉及分区" value={pipeline.pending_partitions} tone="text-slate-500" />
+                    {pipeline.custom_last_dt && (
+                      <span className="text-[10px] text-slate-400">数据至 {pipeline.custom_last_dt}</span>
+                    )}
+                    <button
+                      data-testid="scan-promote"
+                      onClick={() => void startPromote()}
+                      disabled={promoting}
+                      className="ml-auto flex items-center gap-1 rounded-full bg-indigo-600 px-3 py-0.5 text-[10px] font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
+                      title="把 CUSTOM 挖掘库镜像到 CN 并刷新字段注册（后台运行，完成后自动重新扫描）。不发布训练目录。"
+                    >
+                      {promoting ? <Loader2 className="w-3 h-3 animate-spin" /> : <GraduationCap className="w-3 h-3" />}
+                      {promoting ? '毕业中…' : '一键毕业（镜像 + 登记字段）'}
+                    </button>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {pipeline.pending_factor_names.slice(0, 24).map((name) => (
+                      <span
+                        key={name}
+                        className="rounded border border-indigo-100 bg-white px-1.5 py-0.5 text-[10px] font-mono text-slate-600"
+                        title={name}
+                      >
+                        {name}
+                      </span>
+                    ))}
+                    {pipeline.pending_factors > 24 && (
+                      <span className="text-[10px] text-slate-400">… 共 {pipeline.pending_factors} 个</span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-[10px] text-indigo-500/80">
+                    新挖到的因子先落在 CUSTOM 挖掘库，镜像 + 登记后才在 CN 盘面可见；毕业后再点右上「重算快照」，
+                    它们才会进入因子目录与报告。
+                    {promoting && promoteStep ? <span className="ml-1 font-mono text-indigo-400">{promoteStep}</span> : null}
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center gap-1.5 text-[10px] text-emerald-700">
+                  <CheckCircle2 className="w-3 h-3 shrink-0" />
+                  毕业管道：CUSTOM 挖掘库与 CN 盘面已同步（{pipeline.cn_n_factors ?? '—'} 个因子）
+                  {pipeline.custom_last_dt ? `，数据至 ${pipeline.custom_last_dt}` : ''}。
+                </div>
+              )}
+              {promoteErr && <div className="mt-1 text-[10px] text-rose-500 break-all">{promoteErr}</div>}
             </div>
           )}
 

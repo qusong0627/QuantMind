@@ -1,10 +1,12 @@
 """因子报告 REST 端点（引擎服务，经 api 网关 /api/v1/factor-report/* 转发）。
 
-- GET /datasets    可选数据集清单（报告页顶部切换器用）
-- GET /summary     快照摘要：因子排行（IC/ICIR/分位价差/单调性/换手）+ 元数据
-- GET /detail      单因子明细：分位净值、分位平均收益、IC 序列、换手序列
-- GET /correlation 相关性子矩阵（从快照取，按请求顺序）
-- GET /related     某因子的高相关因子 TopN
+- GET /datasets      可选数据集清单 + 滞后探测（报告页顶部切换器用）
+- GET /build-status  快照状态：已生成 / 构建中 / 日志最新一行
+- POST /build        一键重建某数据集快照（后台子进程，全部本地计算）
+- GET /summary       快照摘要：因子排行（IC/ICIR/分位价差/单调性/换手）+ 元数据
+- GET /detail        单因子明细：分位净值、分位平均收益、IC 序列、换手序列
+- GET /correlation   相关性子矩阵（从快照取，按请求顺序）
+- GET /related       某因子的高相关因子 TopN
 
 所有端点都接受 dataset 参数（alpha_library / l1_factors / l2_factors / l1_l2_factors），
 缺省 alpha_library。
@@ -24,7 +26,11 @@ _DATASET_DESC = "数据集：alpha_library / l1_factors / l2_factors / l1_l2_fac
 
 @router.get("/datasets")
 async def list_datasets():
-    """可选数据集及其快照状态（页面据此禁用尚未生成的数据集）。"""
+    """可选数据集及其快照状态（页面据此禁用尚未生成的数据集）。
+
+    每个条目附带 freshness：盘上因子数/最新日期 vs 快照 → ``stale`` +
+    ``stale_reason``（「盘上 102 个、快照 80 个」这类人话，页面据此提示重建）。
+    """
     items = []
     for name, cfg in DATASETS.items():
         snap = service.load_snapshot(name)
@@ -38,8 +44,28 @@ async def list_datasets():
             "start": meta.get("start"),
             "end": meta.get("end"),
             "generated_at": meta.get("generated_at"),
+            **service.dataset_freshness(name),
         })
     return {"default": DEFAULT_DATASET, "items": items}
+
+
+@router.get("/build-status")
+async def build_status(
+    dataset: str = Query(default=DEFAULT_DATASET, description=_DATASET_DESC),
+):
+    """快照状态：是否已生成 / 构建中 / 日志最新一行（「重建快照」入口用）。"""
+    return service.build_status(dataset)
+
+
+@router.post("/build")
+async def start_build(
+    dataset: str = Query(default=DEFAULT_DATASET, description=_DATASET_DESC),
+):
+    """一键重建快照（后台子进程，全部本地计算；已在构建则返回运行中）。"""
+    out = service.start_build(dataset)
+    if "error" in out:
+        raise HTTPException(status_code=400, detail=out["error"])
+    return out
 
 
 @router.get("/summary")

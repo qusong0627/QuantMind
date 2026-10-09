@@ -18,13 +18,17 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ScanPanel } from '../ScanPanel';
 import type { ScanDiff } from '../../services/factorResearchService';
 
-const { scanMock } = vi.hoisted(() => ({ scanMock: vi.fn() }));
+const { scanMock, promoteMock, promoteStatusMock } = vi.hoisted(() => ({
+  scanMock: vi.fn(),
+  promoteMock: vi.fn(),
+  promoteStatusMock: vi.fn(),
+}));
 
 vi.mock('../../services/factorResearchService', async () => {
   const actual = await vi.importActual<typeof import('../../services/factorResearchService')>(
     '../../services/factorResearchService',
   );
-  return { ...actual, getScanSources: scanMock };
+  return { ...actual, getScanSources: scanMock, postPromote: promoteMock, getPromoteStatus: promoteStatusMock };
 });
 
 const DIFF: ScanDiff = {
@@ -50,8 +54,22 @@ function renderPanel(over: Partial<React.ComponentProps<typeof ScanPanel>> = {})
   return { onRebuild, onClose };
 }
 
+/** 毕业管道快照：CUSTOM 102 个、CN 80 个 → 22 个卡在桥前（2026-10-09 实测形态） */
+const PIPELINE_PENDING = {
+  state: 'pending' as const,
+  custom_n_factors: 102,
+  cn_n_factors: 80,
+  pending_factors: 22,
+  pending_factor_names: ['rd_alpha_001', 'rd_alpha_002'],
+  pending_partitions: 1637,
+  custom_last_dt: '20261008',
+  cn_last_dt: '20260929',
+};
+
 beforeEach(() => {
   scanMock.mockReset();
+  promoteMock.mockReset();
+  promoteStatusMock.mockReset();
   scanMock.mockResolvedValue(DIFF);
 });
 
@@ -164,5 +182,52 @@ describe('ScanPanel', () => {
     fireEvent.click(screen.getByTestId('scan-close'));
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ScanPanel：毕业管道（2026-10-09）', () => {
+  test('有因子卡在毕业桥：漏斗数与因子名摆出来，一键毕业后自动重扫并转安静绿行', async () => {
+    scanMock.mockResolvedValueOnce({ ...DIFF, pipeline: PIPELINE_PENDING });
+    scanMock.mockResolvedValue({
+      ...DIFF,
+      pipeline: { ...PIPELINE_PENDING, state: 'synced', cn_n_factors: 102, pending_factors: 0, pending_factor_names: [] },
+    });
+    promoteMock.mockResolvedValue({ started: true, running: true });
+    // 轮询首拍即完成态：无需推进计时器
+    promoteStatusMock.mockResolvedValue({ running: false, pid: null, step: '', log_tail: [] });
+
+    renderPanel();
+
+    const block = await screen.findByTestId('scan-pipeline');
+    expect(block.textContent).toContain('22'); // 待毕业
+    expect(block.textContent).toContain('1637'); // 涉及分区
+    expect(screen.getByText('rd_alpha_001')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('scan-promote'));
+    await waitFor(() => expect(promoteMock).toHaveBeenCalledTimes(1));
+    // 毕业完成后自动重扫（scanMock 第 2 次），状态转 synced
+    await waitFor(() => expect(scanMock).toHaveBeenCalledTimes(2));
+    expect((await screen.findByTestId('scan-pipeline')).textContent).toContain('已同步');
+    expect(screen.queryByTestId('scan-promote')).toBeNull();
+  });
+
+  test('没有任何卡住：只留一行绿字，不给按钮（没有可点的动作）', async () => {
+    scanMock.mockResolvedValue({
+      ...DIFF,
+      pipeline: { ...PIPELINE_PENDING, state: 'synced', cn_n_factors: 102, pending_factors: 0, pending_factor_names: [] },
+    });
+
+    renderPanel();
+
+    const block = await screen.findByTestId('scan-pipeline');
+    expect(block.textContent).toContain('已同步');
+    expect(screen.queryByTestId('scan-promote')).toBeNull();
+  });
+
+  test('pipeline 为 null（部署没有毕业桥脚本）时整段隐藏，不凭空造状态', async () => {
+    renderPanel();
+
+    await screen.findByTestId('scan-summary');
+    expect(screen.queryByTestId('scan-pipeline')).toBeNull();
   });
 });

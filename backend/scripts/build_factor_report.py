@@ -62,6 +62,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 from backend.services.engine.factor_report.datasets import (  # noqa: E402
     DATASETS,
     dataset_dir,
+    donor_dir as dataset_donor_dir,
     label_dir as dataset_label_dir,
     library_of,
 )
@@ -248,6 +249,9 @@ def compute_one_date(args: tuple) -> dict | None:
       "labels_table" —— label_ref 为标签目录，读 dt 分区的 horizon 列
       "close_fwd"    —— label_ref 为**未来第 k 个交易日**的分区日期，
                         用本表 close 算 close_{T+k}/close_T - 1（与训练侧 return_Nd 同口径）
+      "close_fwd_donor" —— 同上，但本表无行情列；label_ref =
+                        {"donor_dir": str, "dates": {k: T+k 分区日期}}，
+                        收盘价从 donor 库（如 l1_factors）取（rd_mined 走这条）
     """
     dt, horizons, primary, factor_dir, factor_cols, meta_ignore, label_mode, label_ref = args[:8]
     options: dict = args[8] if len(args) > 8 else {}
@@ -256,7 +260,7 @@ def compute_one_date(args: tuple) -> dict | None:
     except FileNotFoundError:
         return None
 
-    # 各前瞻期的收益 y：labels_table 一次读全；close_fwd 逐 k 读 T+k 分区收盘价
+    # 各前瞻期的收益 y：labels_table 一次读全；close_fwd(_donor) 逐 k 读 T+k 分区收盘价
     ys: dict[str, np.ndarray] = {}
     if label_mode == "labels_table":
         try:
@@ -267,18 +271,34 @@ def compute_one_date(args: tuple) -> dict | None:
         for h in horizons:
             if h in merged.columns and merged[h].notna().sum() > 0:
                 ys[h] = merged[h].to_numpy(dtype=np.float64)
-    else:  # close_fwd：label_ref = {k: T+k 分区日期}
-        base = fac[["symbol", "close"]].rename(columns={"close": "close_t"})
+    else:  # close_fwd / close_fwd_donor：label_ref = T+k 分区日期（donor 另带来源目录）
+        if label_mode == "close_fwd_donor":
+            donor = str((label_ref or {}).get("donor_dir") or "")
+            if not donor:
+                return None
+            try:
+                d0 = pq.read_table(f"{donor}/dt={dt}/data.parquet", columns=["symbol", "close"]).to_pandas()
+            except FileNotFoundError:
+                return None
+            ref_dates = (label_ref or {}).get("dates") or {}
+            # base = 因子表的行集 + donor 当日收盘价（left join：donor 缺行留 NaN 由公式筛掉）
+            base = fac[["symbol"]].merge(
+                d0.rename(columns={"close": "close_t"}), on="symbol", how="left"
+            )
+        else:
+            donor = factor_dir
+            ref_dates = label_ref or {}
+            base = fac[["symbol", "close"]].rename(columns={"close": "close_t"})
         c0 = base["close_t"].to_numpy(dtype=np.float64)
         # 先与因子表对齐成最终行集，再逐期 **left join** 取 T+k 收盘价 ——
         # 必须用 left join：各期交集大小不同（有的股票 T+k 当天停牌缺行），
         # 用 inner join + 截断会静默错位（实测形状 5195 vs 5193 直接抛错，还好没静默）。
         merged = base.merge(fac.drop(columns=["close"], errors="ignore"), on="symbol", how="inner")
-        for h, target_dt in (label_ref or {}).items():
+        for h, target_dt in ref_dates.items():
             if not target_dt:
                 continue
             try:
-                fut = pq.read_table(f"{factor_dir}/dt={target_dt}/data.parquet", columns=["symbol", "close"]).to_pandas()
+                fut = pq.read_table(f"{donor}/dt={target_dt}/data.parquet", columns=["symbol", "close"]).to_pandas()
             except FileNotFoundError:
                 continue
             tmp = base.merge(fut.rename(columns={"close": "close_tk"}), on="symbol", how="left")
@@ -843,7 +863,8 @@ def main() -> int:
                     help="主前瞻期（分位/换手/明细序列以它为准）")
     ap.add_argument("--horizons", default="fwd_ret_1,fwd_ret_2,fwd_ret_5,fwd_ret_10,fwd_ret_20",
                     help="一趟同时计算的多个前瞻期（逗号分隔）；主前瞻期必须在其中")
-    ap.add_argument("--years", type=int, default=5, help="回看年数（默认近 5 年；0 = 全历史）")
+    ap.add_argument("--years", type=int, default=None,
+                    help="回看年数（缺省：注册表 build_start 优先，无则近 5 年；0 = 全历史）")
     ap.add_argument("--start", default=None, help="起始日期 YYYYMMDD（优先于 --years）")
     ap.add_argument("--end", default=None, help="结束日期 YYYYMMDD")
     ap.add_argument("--step", type=int, default=1, help="抽样步长：每 N 个交易日取一天")
@@ -883,9 +904,16 @@ def main() -> int:
     dts = list(all_dts)
     if args.start:
         dts = [d for d in dts if d >= args.start]
-    elif args.years > 0:
-        cut = int(all_dts[-1][:4]) - args.years
-        dts = [d for d in dts if int(d[:4]) > cut]
+    elif args.years is None and cfg.get("build_start"):
+        # 未显式给 --start/--years 时，注册表 build_start 优先于默认 5 年 ——
+        # rd_mined 数据自 2020-01 起，默认 5 年会把它静默砍掉前 21 个月（只小不报错）。
+        dts = [d for d in dts if d >= str(cfg["build_start"])]
+        log.info(f"[{args.dataset}] 起点取注册表 build_start={cfg['build_start']}")
+    else:
+        years = 5 if args.years is None else args.years
+        if years > 0:
+            cut = int(all_dts[-1][:4]) - years
+            dts = [d for d in dts if int(d[:4]) > cut]
     if args.end:
         dts = [d for d in dts if d <= args.end]
     dts = dts[:: max(args.step, 1)]
@@ -941,6 +969,26 @@ def main() -> int:
              "labels_table", label_dir, options)
             for dt in dts
         ]
+    elif cfg["label_mode"] == "close_fwd_donor":
+        donor = dataset_donor_dir(args.dataset)
+        if donor is None:
+            log.error(f"[{args.dataset}] close_fwd_donor 模式需要注册表声明 donor_parts")
+            return 1
+        if not donor.is_dir():
+            log.error(f"[{args.dataset}] donor 库目录不存在: {donor}")
+            return 1
+        log.info(f"[{args.dataset}] 行情列来自 donor 库：{donor}")
+        idx = {d: i for i, d in enumerate(all_dts)}
+        tasks = []
+        for dt in dts:
+            j0 = idx[dt]
+            dates = {}
+            for h in horizons:
+                kk = int(h.split("_")[-1])
+                jj = j0 + kk
+                dates[h] = all_dts[jj] if jj < len(all_dts) else None
+            tasks.append((dt, horizons, args.horizon, str(factor_dir), factor_cols, meta_cols,
+                          "close_fwd_donor", {"donor_dir": str(donor), "dates": dates}, options))
     else:
         idx = {d: i for i, d in enumerate(all_dts)}
         tasks = []

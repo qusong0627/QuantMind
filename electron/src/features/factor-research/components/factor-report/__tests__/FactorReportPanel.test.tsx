@@ -12,15 +12,17 @@
  */
 import React from 'react';
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { FactorReportPanel } from '../FactorReportPanel';
 
-const { summaryMock, datasetsMock, detailMock, relatedMock, corrMock } = vi.hoisted(() => ({
+const { summaryMock, datasetsMock, detailMock, relatedMock, corrMock, buildStatusMock, startBuildMock } = vi.hoisted(() => ({
   summaryMock: vi.fn(),
   datasetsMock: vi.fn(),
   detailMock: vi.fn(),
   relatedMock: vi.fn(),
   corrMock: vi.fn(),
+  buildStatusMock: vi.fn(),
+  startBuildMock: vi.fn(),
 }));
 
 vi.mock('../../../services/factorReportService', () => ({
@@ -29,6 +31,8 @@ vi.mock('../../../services/factorReportService', () => ({
   getFactorDetail: detailMock,
   getFactorRelated: relatedMock,
   getFactorCorrelation: corrMock,
+  getFactorReportBuildStatus: buildStatusMock,
+  startFactorReportBuild: startBuildMock,
 }));
 
 // 重子组件换成桩：本文件测的是面板选谁，不是子组件怎么画
@@ -83,11 +87,16 @@ beforeEach(() => {
   detailMock.mockReset();
   relatedMock.mockReset();
   corrMock.mockReset();
+  buildStatusMock.mockReset();
+  startBuildMock.mockReset();
   datasetsMock.mockResolvedValue(DATASETS);
   summaryMock.mockResolvedValue(summaryFor([{ name: 'f1' }, { name: 'f2' }]));
   detailMock.mockResolvedValue({ factor: 'f1' });
   relatedMock.mockResolvedValue({ related: [] });
   corrMock.mockResolvedValue({});
+  // 重建完成态（running:false）：轮询首拍即收敛，测试无需推进计时器
+  buildStatusMock.mockResolvedValue({ dataset: 'alpha_library', exists: true, running: false, step: '' });
+  startBuildMock.mockResolvedValue({ started: true, running: true });
 });
 
 describe('FactorReportPanel：深链', () => {
@@ -152,7 +161,9 @@ describe('FactorReportPanel：深链', () => {
 
     // 深链落到 alpha_library（大快照，慢），它还没回来用户就切到了 L2
     render(<FactorReportPanel initialDataset="alpha_library" />);
-    fireEvent.click(await screen.findByRole('button', { name: 'L2 因子' }));
+    // 数据集切换 2026-10-09 收敛到顶栏下拉：先展开再点选项
+    fireEvent.click(await screen.findByTestId('report-dataset-dropdown'));
+    fireEvent.click(await screen.findByTestId('report-dataset-option-l2_factors'));
 
     const detail = await screen.findByTestId('detail');
     expect(detail.getAttribute('data-factor')).toBe('l2_only');
@@ -167,5 +178,80 @@ describe('FactorReportPanel：深链', () => {
     expect(screen.getByTestId('rank-list').getAttribute('data-selected')).toBe('l2_only');
     expect(screen.getByTestId('detail').getAttribute('data-factor')).toBe('l2_only');
     expect(screen.getByTestId('rank-list').getAttribute('data-n')).toBe('1');
+  });
+});
+
+describe('FactorReportPanel：快照落后与重建（2026-10-09）', () => {
+  test('盘上有新因子：顶栏徽章报出差额，点「重建快照」发起构建并自动刷新', async () => {
+    datasetsMock.mockResolvedValue({
+      default: 'alpha_library',
+      items: [
+        {
+          dataset: 'alpha_library', label: 'Alpha 库', available: true,
+          stale: true, stale_reason: '盘上已有 102 个因子（快照 80 个，新增 22）',
+          disk_n_factors: 102, snapshot_n_factors: 80, n_factors: 80,
+        },
+        { dataset: 'l2_factors', label: 'L2 因子', available: true },
+      ],
+    });
+    const datasetsCallsBefore = () => datasetsMock.mock.calls.length;
+
+    render(<FactorReportPanel />);
+
+    // 徽章：把「102 vs 80」的差额直接摆出来，而不是只有一句「落后了」
+    const badge = await screen.findByTestId('report-stale-badge');
+    expect(badge.textContent).toContain('+22');
+
+    // 下拉里同样标了落后 + 原因（切数据集之前就能看到值不值得重建）
+    fireEvent.click(screen.getByTestId('report-dataset-dropdown'));
+    expect(await screen.findByText('快照落后')).toBeTruthy();
+    expect(screen.getByText(/盘上已有 102 个因子/)).toBeTruthy();
+
+    const before = datasetsCallsBefore();
+    fireEvent.click(screen.getByTestId('report-rebuild'));
+
+    // 发起的构建目标 = 正在浏览的数据集（不是「第一个可用集」）
+    await waitFor(() => expect(startBuildMock).toHaveBeenCalledWith('alpha_library'));
+    // 轮询首拍即 running:false → 重新拉数据集清单（徽章数据源随之更新）
+    await waitFor(() => expect(datasetsCallsBefore()).toBeGreaterThan(before));
+  });
+
+  test('盘上无变化：不出现落后徽章（避免「永远是脏的」噪声）', async () => {
+    render(<FactorReportPanel />);
+    await screen.findByTestId('detail');
+    expect(screen.queryByTestId('report-stale-badge')).toBeNull();
+    expect(startBuildMock).not.toHaveBeenCalled();
+  });
+
+  test('快照尚未生成的数据集也可选中：选中 → 横幅给重建入口，重建目标就是它', async () => {
+    // 回归（2026-10-09 实跑抓获）：选项曾对 unavailable 数据集 disabled ——
+    // 而重建按钮的目标 = 当前数据集，禁选 = 把唯一需要重建的数据集锁死，死路。
+    datasetsMock.mockResolvedValue({
+      default: 'alpha_library',
+      items: [
+        { dataset: 'alpha_library', label: 'Alpha 库', available: true },
+        { dataset: 'rd_mined', label: 'RD-Agent 挖掘因子', available: false, disk_n_factors: 102, stale: false },
+      ],
+    });
+    summaryMock.mockImplementation((p: { dataset: string }) =>
+      p.dataset === 'rd_mined'
+        ? Promise.resolve({ available: false, dataset: 'rd_mined', reason: '数据集 rd_mined 的快照尚未生成' })
+        : Promise.resolve(summaryFor([{ name: 'f1' }])),
+    );
+
+    render(<FactorReportPanel />);
+    await screen.findByTestId('detail');
+
+    fireEvent.click(screen.getByTestId('report-dataset-dropdown'));
+    const opt = await screen.findByTestId('report-dataset-option-rd_mined');
+    expect(opt.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(opt);
+
+    // 选中后：横幅说明不可用 + 带重建按钮；且下拉项里提示了盘上已有多少因子
+    expect(await screen.findByText('因子报告快照不可用')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('report-unavailable-rebuild'));
+
+    // 重建目标 = rd_mined（不是「第一个可用数据集」）
+    await waitFor(() => expect(startBuildMock).toHaveBeenCalledWith('rd_mined'));
   });
 });

@@ -50,6 +50,8 @@ LIB_LABELS = {
     "features_daily": "每日特征（技术+估值）",
     "factor_research": "经典因子（demo 复刻）",
     "gap_mined": "空档挖掘因子",  # GAP_MINED_MARK
+    "rd_mined": "RD-Agent 挖掘因子",  # RD_MINED_MARK：缺条目时分类直接显示原始目录名
+    "cand_factors": "候选因子池",
 }
 
 # 数值因子列少于这个数的目录视为记录/元数据目录，跳过（不是因子库）

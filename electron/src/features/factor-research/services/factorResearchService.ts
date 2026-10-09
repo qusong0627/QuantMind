@@ -170,9 +170,47 @@ export interface ScanDiff {
   snapshot_at: string | null;
   /** 当前快照按哪个来源建的（auto/l1l2/kept）。非 auto 时「新增」会偏多，因为重算走 auto 全量 */
   snapshot_source: string | null;
+  /** 毕业管道状态（CUSTOM 挖掘库 → CN 盘面）；脚本不可用的部署为 null，前端隐藏该段 */
+  pipeline?: PipelineState | null;
+}
+
+/**
+ * 毕业管道：新挖到的因子从 CUSTOM 走到 CN 盘面的这一站。
+ *
+ * 判据与毕业桥脚本共用实现（后端 pipeline_state ↔ promote_rd_mined.plan_sync），
+ * 前端只做展示 —— 不在这里重算任何「待毕业数」。
+ */
+export interface PipelineState {
+  /** empty=挖掘库还没产出；pending=有新的卡在桥前；synced=已全部毕业 */
+  state: 'empty' | 'pending' | 'synced';
+  custom_n_factors: number | null;
+  cn_n_factors: number | null;
+  pending_factors: number;
+  pending_factor_names: string[];
+  pending_partitions: number;
+  custom_last_dt: string | null;
+  cn_last_dt: string | null;
 }
 
 /** 扫描 quantdb 的因子来源，列出与快照目录的差异（只读，不触发重算） */
 export function getScanSources(dataset: FactorDataset = 'private'): Promise<ScanDiff> {
   return requestJson<ScanDiff>(`/scan?dataset=${dataset}`, {}, 30000);
+}
+
+// ---------------------------------------------------------------------------
+// 一键毕业（CUSTOM 挖掘库 → CN：镜像 + 刷新字段注册；不发布训练目录）
+// ---------------------------------------------------------------------------
+export interface PromoteStatus {
+  running: boolean;
+  pid: number | null;
+  step: string;
+  log_tail: string[];
+}
+
+export function getPromoteStatus(): Promise<PromoteStatus> {
+  return requestJson<PromoteStatus>('/promote-status');
+}
+
+export function postPromote(): Promise<{ started: boolean; running: boolean; pid?: number }> {
+  return requestJson('/promote', { method: 'POST' }, 30000);
 }

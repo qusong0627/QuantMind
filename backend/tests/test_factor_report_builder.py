@@ -137,9 +137,10 @@ def _labels(fac_dir: Path, lab_dir: Path, dt: str) -> pd.DataFrame:
 # ─────────────────────────── 运行器 ───────────────────────────
 
 def _run(monkeypatch, tmp_path: Path, name: str, fac_dir: Path, lab_dir: Path | None,
-         label_mode: str, extra: list[str] | None = None) -> tuple[dict, pd.DataFrame]:
+         label_mode: str, extra: list[str] | None = None,
+         donor: Path | None = None) -> tuple[dict, pd.DataFrame]:
     """按数据集注册表的口径跑一遍 main()，返回 (报告 JSON, 明细序列 DataFrame)。"""
-    monkeypatch.setitem(bfr.DATASETS, name, {
+    cfg = {
         "label": "pytest 合成数据集",
         "dir_parts": ("pytest", name),
         "label_mode": label_mode,
@@ -147,7 +148,11 @@ def _run(monkeypatch, tmp_path: Path, name: str, fac_dir: Path, lab_dir: Path | 
         "meta_cols": ("symbol", "date", "time", "dt", "open", "high", "low", "close", "volume", "amount"),
         "library_rule": "fixed:pytest",
         "universe": "pytest",
-    })
+    }
+    if donor is not None:
+        cfg["donor_parts"] = ("pytest", "donor")
+        monkeypatch.setattr(bfr, "dataset_donor_dir", lambda _ds: donor)
+    monkeypatch.setitem(bfr.DATASETS, name, cfg)
     monkeypatch.setattr(bfr, "dataset_dir", lambda _ds: fac_dir)
     if lab_dir is not None:
         monkeypatch.setattr(bfr, "dataset_label_dir", lambda _ds: lab_dir)
@@ -477,6 +482,56 @@ def test_close_fwd_labels_use_the_t_plus_k_close(monkeypatch, tmp_path):
     assert report["meta"]["label_mode"] == "close_fwd"
     assert _factor(report, "f_rank")["ic_mean"] == pytest.approx(1.0, abs=RND)
     # 分位均值恒等式在 close_fwd 下同样成立（y 均值为 0.001 × 均秩）
+    q = _factor(report, "f_rank")["quantiles"]
+    assert float(np.mean(q)) == pytest.approx(0.001 * 99.5, abs=RND)
+
+
+def _close_fwd_donor_fixture(root: Path) -> tuple[Path, Path]:
+    """close_fwd_donor 路径（rd_mined 走这条）：因子表**无任何行情列**，
+    close 由 donor 库（l1_factors）提供 —— 与真实 rd_mined 落盘形状一致
+    （101 列全是 rd_* 因子，没有 OHLCV）。
+
+    收益口径与 E1 相同：日收益恒为 0.001·i，且**故意让两张表的分区日期集合
+    完全一致**（真实场景 l1_factors 覆盖 2016 起、比 rd_mined 更宽，T+k 网格
+    按因子库自己的分区历算 —— 这里不制造差异，只锁「donor 取数」这一件事）。
+    """
+    fac_dir, donor_dir = root / "factor", root / "donor"
+    i = _rank_grid()
+    close = np.full(N_SYMBOLS, 100.0)
+    for dt in DAYS:
+        _write(fac_dir, dt, pd.DataFrame({          # 故意不带 OHLCV —— 带 close 就测不出 donor
+            "symbol": _symbols(),
+            "f_rank": i,
+            "f_noise": np.random.default_rng(int(dt)).standard_normal(N_SYMBOLS),
+        }))
+        _write(donor_dir, dt, pd.DataFrame({        # donor 只有 symbol + close
+            "symbol": _symbols(),
+            "close": close,
+        }))
+        close = close * (1.0 + 0.001 * i)   # 次日收盘 → 日收益严格单调递增
+    return fac_dir, donor_dir
+
+
+def test_close_fwd_donor_reads_close_from_donor_library(monkeypatch, tmp_path):
+    """E2：close_fwd_donor 模式的 T+k 对齐 + donor 取数与 close_fwd 同口径。
+
+    因子表无 close 列 → 实现若走回自表取行情必抛 KeyError（没人会用 0 兜底）；
+    日收益 0.001·i → f_rank 的 IC 必须恰好 = +1。
+    """
+    # Arrange
+    fac_dir, donor_dir = _close_fwd_donor_fixture(tmp_path)
+    # 断言夹具确实踩在「无行情列」上 —— 否则这个用例测不到 donor 分支
+    fac_schema = pq.ParquetFile(fac_dir / f"dt={DAYS[0]}" / "data.parquet").schema_arrow
+    assert "close" not in fac_schema.names
+
+    # Act
+    report, _ = _run(monkeypatch, tmp_path, "pytest_close_fwd_donor", fac_dir, None,
+                     "close_fwd_donor", ["--horizon", "fwd_ret_1", "--horizons", "fwd_ret_1"],
+                     donor=donor_dir)
+
+    # Assert
+    assert report["meta"]["label_mode"] == "close_fwd_donor"
+    assert _factor(report, "f_rank")["ic_mean"] == pytest.approx(1.0, abs=RND)
     q = _factor(report, "f_rank")["quantiles"]
     assert float(np.mean(q)) == pytest.approx(0.001 * 99.5, abs=RND)
 

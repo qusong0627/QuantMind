@@ -660,6 +660,9 @@ def scan_sources(dataset: str = "private") -> dict:
     out["dataset"] = dataset
     out["snapshot_at"] = meta.get("built_at")
     out["snapshot_source"] = meta.get("source")
+    # 毕业管道状态（CUSTOM → CN 镜像差）：新挖的因子若卡在桥前，扫描面板要指出来，
+    # 否则用户只看到「快照差异」却不知道差异的源头在哪一站。
+    out["pipeline"] = pipeline_state()
     return out
 
 
@@ -755,6 +758,139 @@ def start_build(dataset: str = "classic") -> dict:
     )
     (d / _BUILD_PID).write_text(str(proc.pid), encoding="utf-8")
     return {"started": True, "running": True, "pid": proc.pid, "dataset": dataset}
+
+
+# ---------------------------------------------------------------------------
+# 挖掘→研究 毕业管道：CUSTOM rd_mined →（毕业桥）→ CN rd_mined
+# ---------------------------------------------------------------------------
+# 「新挖到的因子怎么进研究报告」的完整旅程（每一站都在这里可观测）：
+#   RD-Agent 演化 → PG rd_agent_factors → 物化 quantcustom/rd_mined
+#   →【毕业桥 promote_rd_mined.py --register】镜像到 quantdb/rd_mined + 刷新字段注册
+#   →【重建私人库快照 / 报告快照】→ 因子研究 / 因子报告可见
+# 这条链上任一站没走完，因子研究页的扫描面板就报哪一站（见 pipeline_state）。
+_PROMOTE_LOG = "promote.log"
+_PROMOTE_PID = "promote.pid"
+
+
+def _numeric_cols_of_latest(root: Path, parts: dict) -> set[str] | None:
+    """目录下最新分区的数值列集合（只读 footer）；读不了返回 None。"""
+    if not parts:
+        return None
+    latest = root / max(parts) / "data.parquet"
+    try:
+        import pyarrow.parquet as pq
+
+        sch = pq.ParquetFile(str(latest)).schema_arrow
+    except Exception:  # noqa: BLE001 - 管道状态是提示性的，读不到就置 None
+        return None
+    numeric = ("float", "double", "int", "decimal")
+    return {c for c in sch.names if str(sch.field(c).type).startswith(numeric)}
+
+
+def pipeline_state() -> dict | None:
+    """毕业管道状态：CUSTOM 盘上 vs CN 盘上（**只读**，绝不做任何写入）。
+
+    判据与毕业桥共用实现（``promote_rd_mined.plan_sync`` / ``scan_partitions``），
+    避免这里说「已同步」而毕业桥还在报「待拷贝」的两套口径。
+    脚本不可用（部署形态变动）返回 None —— 前端隐藏该段，不报假状态。
+    """
+    try:
+        from backend.scripts.promote_rd_mined import plan_sync, resolve_roots, scan_partitions
+    except Exception:  # noqa: BLE001
+        return None
+    src_root, dst_root = resolve_roots()
+    src = scan_partitions(src_root)
+    dst = scan_partitions(dst_root)
+    plan = plan_sync(src, dst)
+    src_cols = _numeric_cols_of_latest(src_root, src)
+    dst_cols = _numeric_cols_of_latest(dst_root, dst)
+    pending_factors = (
+        sorted(src_cols - dst_cols) if src_cols is not None and dst_cols is not None else []
+    )
+    if not src:
+        state = "empty"       # CUSTOM 还没有产出（未启用挖掘 / 挖掘线程空闲）
+    elif pending_factors or plan.to_copy:
+        state = "pending"     # 有新的没毕业
+    else:
+        state = "synced"      # 已毕业（快照收没收是另一件事，由扫描差异告诉用户）
+    return {
+        "state": state,
+        "custom_n_factors": len(src_cols) if src_cols is not None else None,
+        "cn_n_factors": len(dst_cols) if dst_cols is not None else None,
+        "pending_factors": len(pending_factors),
+        "pending_factor_names": pending_factors[:50],
+        "pending_partitions": len(plan.to_copy),
+        # scan_partitions 的键是分区目录名（"dt=20240102"），对外只给日期
+        "custom_last_dt": max(src).split("=", 1)[1] if src else None,
+        "cn_last_dt": max(dst).split("=", 1)[1] if dst else None,
+    }
+
+
+def _promote_running(d: Path) -> int | None:
+    """毕业桥进程 PID（无则 None）。带 cmdline 校验防 PID 复用。"""
+    pf = d / _PROMOTE_PID
+    if not pf.exists():
+        return None
+    try:
+        pid = int(pf.read_text().strip())
+        os.kill(pid, 0)
+    except (ValueError, ProcessLookupError, PermissionError, OSError):
+        return None
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="ignore")
+        if "promote_rd_mined" not in cmdline:
+            return None
+    except OSError:
+        pass
+    return pid
+
+
+def promote_status() -> dict:
+    """毕业桥状态：是否运行中 / 日志最新一行（跑完看最后一行就知道结果）。"""
+    d = store.artifact_dir("private")
+    pid = _promote_running(d)
+    log_tail: list[str] = []
+    step = ""
+    lf = d / _PROMOTE_LOG
+    if lf.exists():
+        try:
+            lines = [
+                ln for ln in lf.read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()
+            ]
+            log_tail = lines[-12:]
+            step = lines[-1][:160] if lines else ""
+        except OSError:
+            pass
+    return {"running": pid is not None, "pid": pid, "step": step, "log_tail": log_tail}
+
+
+def start_promote() -> dict:
+    """一键毕业：``promote_rd_mined.py --register``（镜像 + 刷新 CN 字段）。
+
+    **刻意不带 --publish**：发布 CN 训练目录是决定「这批因子进不进训练口径」的
+    显式闸门，留给「训练数据集」页或人手工执行 —— 研究页的按钮只把因子带到盘面。
+    """
+    d = store.artifact_dir("private")
+    if (pid := _promote_running(d)) is not None:
+        return {"started": False, "running": True, "pid": pid}
+    d.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[4]
+    script = root / "backend" / "scripts" / "promote_rd_mined.py"
+    if not script.exists():
+        return {"error": f"毕业桥脚本缺失: {script}"}
+    log = open(d / _PROMOTE_LOG, "a", encoding="utf-8")  # noqa: SIM115 - 交给子进程持有
+    log.write(
+        f"\n===== promote started {pd.Timestamp.now().isoformat(timespec='seconds')} =====\n"
+    )
+    proc = subprocess.Popen(  # noqa: S603 - 固定脚本路径，无用户输入
+        [sys.executable, str(script), "--register"],
+        cwd=str(root),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    (d / _PROMOTE_PID).write_text(str(proc.pid), encoding="utf-8")
+    return {"started": True, "running": True, "pid": proc.pid}
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 import { SERVICE_ENDPOINTS } from '../../../config/services';
 import type {
+  FactorBuildStatus,
   FactorClusterResponse,
   FactorPortfolioResponse,
   FactorCorrelation,
@@ -34,9 +35,42 @@ async function getJson<T>(path: string, timeoutMs = 60000): Promise<T> {
   }
 }
 
-/** 可选数据集及各自快照状态 */
+/** 可选数据集及各自快照状态（含盘上滞后探测：stale / stale_reason） */
 export function getFactorDatasets(): Promise<FactorDatasetList> {
   return getJson<FactorDatasetList>('/datasets');
+}
+
+async function postJson<T>(path: string, timeoutMs = 60000): Promise<T> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method: 'POST',
+      headers: authHeaders(),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`因子报告接口失败 ${res.status}: ${detail.slice(0, 120)}`);
+    }
+    return (await res.json()) as T;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+/** 快照状态：已生成 / 构建中 / 日志最新一行（「重建快照」入口轮询用） */
+export function getFactorReportBuildStatus(dataset: string): Promise<FactorBuildStatus> {
+  const qs = new URLSearchParams({ dataset });
+  return getJson<FactorBuildStatus>(`/build-status?${qs}`);
+}
+
+/** 一键重建快照（后台子进程，全部本地计算；已在构建则返回 running） */
+export function startFactorReportBuild(
+  dataset: string,
+): Promise<{ started: boolean; running: boolean; pid?: number; dataset?: string }> {
+  const qs = new URLSearchParams({ dataset });
+  return postJson(`/build?${qs}`, 30000);
 }
 
 /** 快照摘要：因子排行（IC / ICIR / 分位价差 / 换手） */
