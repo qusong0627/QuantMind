@@ -422,8 +422,10 @@ const RiskPanel: React.FC<{ ctx: RealTradingTabContext }> = ({ ctx }) => (
             <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
             阈值口径与后端 /risk-status 同源；只读，不改风控参数（改参数走「策略管理」）。
         </div>
-        {/* compact：宿主是 380px 右栏，`lg:grid-cols-4` 会按视口断点把四张卡各挤到 ~80px */}
-        <RiskLayer status={ctx.status} enabled compact />
+        {/* 不再传 compact（2026-10-09）：宿主右栏已随用户「一半一半」要求改为与左板
+            1:1（≥2xl ~2×380px），紧凑两列列宽反而稀疏；四指标恢复 lg:grid-cols-4。
+            窄栏场景在现布局下已不存在——堆叠态的右栏卡也 ≥490px。 */}
+        <RiskLayer status={ctx.status} enabled />
     </div>
 );
 

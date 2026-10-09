@@ -173,8 +173,11 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
                 这两块原本挂在「系统健康」页脚：它们讲的全是**持仓**的风险与盘中情报，
                 跟持仓明细分在两页看，等于风险永远和平仓对不上号；且刻意不按市场门控——
                 切到港股/美股页签时 A 股持仓的风险并不会消失。
-                并排只在 ≥2xl 生效：主卡内部还有固定的图表列（430~470px），
-                再窄并排会把明细列压到读不了；不足 2xl 时右栏落到下方、两卡并排。 */}
+                **2026-10-09 用户要求「一半一半」（右侧哨兵/风控与风险锁太挤、很重要）**：
+                ≥2xl 两栏 1:1 —— 两边都是 `flex-1`（flex-basis 0%），右栏拿掉原 380px
+                固定宽。右栏各卡因此约翻倍宽（哨兵列表/风控四指标/副驾驶都吃到），
+                左板在 1536~1920 仍有 ~630~820px，明细列的最窄口径据此复核过（探针量过
+                价格/盈亏列不截断）。不足 2xl 时右栏落到下方、xl 两卡并排 —— 形态不变。 */}
             <div className="flex-1 min-h-0 flex flex-col 2xl:flex-row gap-2 overflow-y-auto 2xl:overflow-hidden custom-scrollbar">
                 <div className={`${STACKED_BOARD_MIN_H} shrink-0 min-w-0 flex flex-col gap-2 2xl:h-auto 2xl:min-h-0 2xl:flex-1 2xl:shrink`}>
                     {/* 持仓可视化主卡（2026-09-17 重设计：KPI + 市值占比条形列表，替代 分布饼图+宽表格 两块） */}
@@ -193,11 +196,12 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
                 </div>
 
                 {/* 右栏：风险与情报。grid 让「不足 2xl」时两卡并排（4 列 → 2 列），
-                    ≥2xl 收成单列窄栏并各自内部滚动（不撑破页面高度）。 */}
+                    ≥2xl 与左板 1:1（`flex-1` basis 0% vs 左列同为 flex-1），整栏自己
+                    滚动（不撑破页面高度）。 */}
                 <aside
                     data-testid="position-rail"
                     aria-label="持仓风险与情报"
-                    className="shrink-0 min-h-0 grid content-start grid-cols-1 xl:grid-cols-2 2xl:grid-cols-1 gap-2 2xl:w-[380px] 2xl:overflow-y-auto custom-scrollbar"
+                    className="shrink-0 min-h-0 grid content-start grid-cols-1 xl:grid-cols-2 2xl:grid-cols-1 gap-2 2xl:flex-1 2xl:shrink 2xl:min-w-0 2xl:overflow-y-auto custom-scrollbar"
                 >
                     <HoldingAlertPanel />
                     {/* 追加区块（调用方注入，缺省时不产出节点） */}
