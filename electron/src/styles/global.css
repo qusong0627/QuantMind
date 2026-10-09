@@ -920,51 +920,41 @@ html.platform-win32.os-win10 .module-grid-container {
   font-family: var(--font-secondary) !important;
 }
 
-/* Admin Menu Modern Style */
-.admin-menu-modern {
-  border-right: none !important;
-  background: transparent !important;
+/* ==================== 后台机构版工具类（2026-10-09 改版） ==================== */
+
+/*
+ * 等宽数字（KPI / 台账 / 序号）。
+ * 必须放在上面 .text-xs/.text-[11px]/… 的字体强制规则之后：两边同为 !important，
+ * 该类与 .text-[11px] 特异性相同（0,1,0），靠源码顺序反超。--font-mono 变量在
+ * :root 里自引用（var(--font-mono) 指向自己）不可用，这里写显式字体栈。
+ */
+.admin-num {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace !important;
+  font-variant-numeric: tabular-nums;
 }
 
-.admin-menu-modern .ant-menu-item {
-  border-radius: 12px;
-  margin: 4px 8px;
-  padding-left: 16px !important;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+/* 细滚动条：深色导航轴与密排表格共用（浅色轨道上不发光） */
+.admin-dark-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.25) transparent;
 }
 
-.admin-menu-modern .ant-menu-item:hover {
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.02));
+.admin-dark-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
 
-.admin-menu-modern .ant-menu-item-selected {
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.04)) !important;
-  color: #4f46e5 !important;
-  font-weight: 600;
+.admin-dark-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.admin-menu-modern .ant-menu-submenu-title {
-  border-radius: 12px;
-  margin: 4px 8px;
-  padding-left: 16px !important;
+.admin-dark-scrollbar::-webkit-scrollbar-thumb {
+  background-color: rgba(148, 163, 184, 0.25);
+  border-radius: 3px;
 }
 
-.admin-menu-modern .ant-menu-submenu-title:hover {
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.06), rgba(99, 102, 241, 0.01));
-}
-
-.admin-menu-modern .ant-menu-sub {
-  background: transparent !important;
-}
-
-.admin-menu-modern .ant-menu-sub .ant-menu-item {
-  padding-left: 40px !important;
-  font-size: 13px;
-}
-
-.admin-menu-modern .ant-menu-item-divider {
-  margin: 8px 16px;
-  border-color: rgba(148, 163, 184, 0.2);
+.admin-dark-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(148, 163, 184, 0.45);
 }
 
 /* ==================== 后台管理页输入框统一高度(32px)与圆角(8px) ==================== */

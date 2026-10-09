@@ -1,174 +1,129 @@
-import React, { useEffect, useState } from 'react';
-import { Typography, Tooltip, Progress } from 'antd';
-import {
-  Cpu, HardDrive, Server, Activity, AlertCircle, CheckCircle2
-} from 'lucide-react';
-import { adminService } from '../services/adminService';
-import { SystemLoadSummary } from '../types';
-
-const { Text } = Typography;
+/**
+ * 深色导航轴底部的系统负载读数（2026-10-09 机构版改版）。
+ *
+ * 纯展示组件：数据由 AdminPage 统一轮询后下发（顶栏健康告示与这里同源，
+ * 避免同一接口两个轮询器）。深色底上数值统一 admin-num（等宽数字）。
+ */
+import React from 'react';
+import { Tooltip } from 'antd';
+import { Activity } from 'lucide-react';
+import type { SystemLoadSummary } from '../types';
 
 interface AdminSystemLoadWidgetProps {
-  collapsed?: boolean;
+    collapsed?: boolean;
+    load: SystemLoadSummary | null;
 }
 
-export const AdminSystemLoadWidget: React.FC<AdminSystemLoadWidgetProps> = ({ collapsed = false }) => {
-  const [load, setLoad] = useState<SystemLoadSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+/** 深色底阈值色（与浅色面同名语义，亮度上调一档）。 */
+const barColor = (percent: number): string => {
+    if (percent < 60) return '#34d399'; // emerald-400
+    if (percent < 85) return '#fbbf24'; // amber-400
+    return '#fb7185'; // rose-400
+};
 
-  useEffect(() => {
-    let isMounted = true;
+const healthDot = (score: number): string => {
+    if (score >= 80) return 'bg-emerald-400';
+    if (score >= 60) return 'bg-amber-400';
+    return 'bg-rose-400';
+};
 
-    const fetchLoad = async () => {
-      try {
-        const data = await adminService.getSystemLoad();
-        if (isMounted && data?.workload) {
-          setLoad(data);
-        }
-      } catch (e) {
-        // 静默处理轮询错误
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    };
-
-    fetchLoad();
-    const timer = setInterval(fetchLoad, 15000); // 15秒静默轮询
-
-    return () => {
-      isMounted = false;
-      clearInterval(timer);
-    };
-  }, []);
-
-  const cpuPercent = load?.workload?.cpu_percent ?? 0;
-  const memPercent = load?.workload?.memory_percent ?? 0;
-  const diskPercent = load?.workload?.disk_percent ?? 0;
-  const cpuCount = load?.workload?.cpu_count ?? 1;
-  const memUsed = load?.workload?.memory_used_gb ?? 0;
-  const memTotal = load?.workload?.memory_total_gb ?? 0;
-  const healthScore = load?.health_score ?? 100;
-  const healthyServices = load?.services_summary?.healthy ?? 0;
-  const totalServices = load?.services_summary?.total ?? 0;
-  const uptimeDays = load?.uptime_days ?? 0;
-
-  const getStatusColor = (percent: number) => {
-    if (percent < 60) return '#10b981'; // 正常 绿色
-    if (percent < 85) return '#f59e0b'; // 警告 黄色
-    return '#f43f5e'; // 高负荷 红色
-  };
-
-  const getHealthBadgeColor = (score: number) => {
-    if (score >= 80) return 'bg-emerald-500';
-    if (score >= 60) return 'bg-amber-500';
-    return 'bg-rose-500';
-  };
-
-  const tooltipContent = (
-    <div className="space-y-1.5 p-1 text-xs font-mono">
-      <div className="font-bold border-b border-slate-700 pb-1 text-slate-200 flex items-center justify-between gap-4">
-        <span>宿主机系统负载详情</span>
-        <span className="text-[10px] text-emerald-400">运行 {uptimeDays} 天</span>
-      </div>
-      <div className="flex justify-between gap-4 text-slate-300">
-        <span>CPU 负载:</span>
-        <span className="font-bold text-white">{cpuPercent}% ({cpuCount} 逻辑核心)</span>
-      </div>
-      <div className="flex justify-between gap-4 text-slate-300">
-        <span>内存占用:</span>
-        <span className="font-bold text-white">{memPercent}% ({memUsed}G / {memTotal}G)</span>
-      </div>
-      <div className="flex justify-between gap-4 text-slate-300">
-        <span>数据盘空间:</span>
-        <span className="font-bold text-white">{diskPercent}%</span>
-      </div>
-      <div className="flex justify-between gap-4 text-slate-300">
-        <span>微服务集群:</span>
-        <span className="font-bold text-emerald-400">{healthyServices}/{totalServices} 正常</span>
-      </div>
+const Bar: React.FC<{ label: string; value: string; percent: number }> = ({ label, value, percent }) => (
+    <div className="space-y-1">
+        <div className="flex items-center justify-between">
+            <span className="text-[10px] text-slate-500">{label}</span>
+            <span className="admin-num text-[10px] font-medium text-slate-300">{value}</span>
+        </div>
+        <div className="h-1 w-full overflow-hidden rounded-full bg-white/10">
+            <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(100, Math.max(2, percent))}%`, backgroundColor: barColor(percent) }}
+            />
+        </div>
     </div>
-  );
+);
 
-  // 折叠侧边栏状态下的紧凑微型卡片
-  if (collapsed) {
-    return (
-      <Tooltip title={tooltipContent} placement="right">
-        <div className="p-2 border-t border-slate-100 flex flex-col items-center gap-2 cursor-pointer hover:bg-slate-50 transition-colors">
-          <div className="relative">
-            <Activity className="w-5 h-5 text-slate-600" />
-            <span className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ${getHealthBadgeColor(healthScore)} ring-2 ring-white`} />
-          </div>
-          <span className="text-[9px] font-mono font-bold text-slate-600">
-            {cpuPercent}%
-          </span>
+export const AdminSystemLoadWidget: React.FC<AdminSystemLoadWidgetProps> = ({ collapsed = false, load }) => {
+    const cpu = load?.workload?.cpu_percent ?? 0;
+    const mem = load?.workload?.memory_percent ?? 0;
+    const disk = load?.workload?.disk_percent ?? 0;
+    const cpuCount = load?.workload?.cpu_count ?? 0;
+    const memUsed = load?.workload?.memory_used_gb ?? 0;
+    const memTotal = load?.workload?.memory_total_gb ?? 0;
+    const healthScore = load?.health_score ?? 100;
+    const healthy = load?.services_summary?.healthy ?? 0;
+    const total = load?.services_summary?.total ?? 0;
+    const uptimeDays = load?.uptime_days ?? 0;
+
+    const detail = (
+        <div className="admin-num space-y-1 p-1 text-[11px] leading-4">
+            <div className="border-b border-slate-600 pb-1 font-semibold text-slate-100">宿主机负载</div>
+            <div className="flex justify-between gap-6 text-slate-300">
+                <span>CPU</span>
+                <span>
+                    {cpu}% · {cpuCount} 核
+                </span>
+            </div>
+            <div className="flex justify-between gap-6 text-slate-300">
+                <span>内存</span>
+                <span>
+                    {mem}% · {memUsed}G / {memTotal}G
+                </span>
+            </div>
+            <div className="flex justify-between gap-6 text-slate-300">
+                <span>数据盘</span>
+                <span>{disk}%</span>
+            </div>
+            <div className="flex justify-between gap-6 text-slate-300">
+                <span>服务</span>
+                <span>
+                    {healthy}/{total} 在线
+                </span>
+            </div>
         </div>
-      </Tooltip>
     );
-  }
 
-  // 展开侧边栏状态下的系统负载仪表卡片
-  return (
-    <Tooltip title={tooltipContent} placement="right" mouseEnterDelay={0.5}>
-      <div className="p-3.5 border-t border-slate-100 bg-white">
-        <div className="bg-slate-50/90 rounded-2xl p-3 border border-slate-100 hover:border-slate-200 transition-all shadow-2xs space-y-2.5">
-          {/* 标题行 */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-full ${getHealthBadgeColor(healthScore)} animate-pulse`} />
-              <Text className="text-[10px] font-black text-slate-500 uppercase tracking-wider">系统真实负载</Text>
+    if (collapsed) {
+        return (
+            <Tooltip title={detail} placement="right">
+                <div className="flex cursor-pointer flex-col items-center gap-1.5 border-t border-white/[0.06] px-2 py-3 hover:bg-white/[0.04]">
+                    <div className="relative">
+                        <Activity className="h-4 w-4 text-slate-400" />
+                        <span
+                            className={`absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full ring-2 ring-[#0B1220] ${healthDot(healthScore)}`}
+                        />
+                    </div>
+                    <span className="admin-num text-[9px] font-medium text-slate-400">{cpu}%</span>
+                </div>
+            </Tooltip>
+        );
+    }
+
+    return (
+        <div className="border-t border-white/[0.06] px-4 py-3">
+            <div className="mb-2.5 flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                    <span className={`h-1.5 w-1.5 rounded-full ${healthDot(healthScore)} ${load ? 'animate-pulse' : ''}`} />
+                    <span className="text-[10px] font-semibold tracking-wider text-slate-400">系统负载</span>
+                </div>
+                <span className="admin-num text-[10px] text-slate-500">
+                    {load ? `运行 ${uptimeDays} 天` : '检测中…'}
+                </span>
             </div>
-            {totalServices > 0 && (
-              <span className="text-[10px] font-mono font-bold text-slate-400 bg-white px-1.5 py-0.2 rounded border border-slate-100">
-                {healthyServices}/{totalServices} 在线
-              </span>
+            <div className="space-y-2">
+                <Bar label="CPU" value={`${cpu}%`} percent={cpu} />
+                <Bar label="内存" value={`${mem}%`} percent={mem} />
+                <Bar label="数据盘" value={`${disk}%`} percent={disk} />
+            </div>
+            {total > 0 && (
+                <div className="mt-2.5 flex items-center justify-between border-t border-white/[0.06] pt-2">
+                    <span className="text-[10px] text-slate-500">服务在线</span>
+                    <span className="admin-num text-[10px] font-medium text-slate-300">
+                        {healthy}/{total}
+                    </span>
+                </div>
             )}
-          </div>
-
-          {/* CPU 进度 */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-slate-500 flex items-center gap-1 font-medium">
-                <Cpu className="w-3 h-3 text-slate-400" /> CPU
-              </span>
-              <span className="font-mono font-bold text-slate-700">
-                {cpuPercent}% <span className="text-[9px] text-slate-400 font-normal">({cpuCount}核)</span>
-              </span>
-            </div>
-            <div className="h-1.5 w-full bg-slate-200/80 rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all duration-500"
-                style={{
-                  width: `${Math.min(100, Math.max(2, cpuPercent))}%`,
-                  backgroundColor: getStatusColor(cpuPercent),
-                }}
-              />
-            </div>
-          </div>
-
-          {/* 内存 进度 */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-slate-500 flex items-center gap-1 font-medium">
-                <HardDrive className="w-3 h-3 text-slate-400" /> 内存
-              </span>
-              <span className="font-mono font-bold text-slate-700">
-                {memPercent}% <span className="text-[9px] text-slate-400 font-normal">({memUsed}G)</span>
-              </span>
-            </div>
-            <div className="h-1.5 w-full bg-slate-200/80 rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all duration-500"
-                style={{
-                  width: `${Math.min(100, Math.max(2, memPercent))}%`,
-                  backgroundColor: getStatusColor(memPercent),
-                }}
-              />
-            </div>
-          </div>
         </div>
-      </div>
-    </Tooltip>
-  );
+    );
 };
 
 export default AdminSystemLoadWidget;

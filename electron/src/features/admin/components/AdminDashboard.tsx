@@ -1,34 +1,53 @@
+/**
+ * 系统概览（2026-10-09 机构版改版：异常优先 + 密排信息面）。
+ *
+ * 旧版是 13 张同构服务卡（每张一条绿色进度条）+ 4 张居中统计卡 —— 全绿时
+ * 一片噪声，坏的时候要逐张找。改版后：
+ * - 顶部异常横幅只在不健康时出现，点名道姓；
+ * - 服务集群按平面分组（核心/数据/调度/接入生态），组内异常排前，
+ *   健康行只剩一个状态点 + 一行描述，异常行整行染色；
+ * - 指标条换成一条面板里的等宽数字格；事件改为左对齐的严重度流。
+ * 数据逻辑（鉴权错误态 / 更新确认弹窗 / 30s 性能轮询）保持不变。
+ */
 import React, { useEffect, useState } from 'react';
-import { Card, Row, Col, Statistic, Spin, message, Result, Button, Space, Typography, Tag, Progress, List, Badge, Divider, Modal } from 'antd';
+import { Button, Modal, Result, Spin, message } from 'antd';
 import {
-    UserOutlined, 
-    LineChartOutlined, 
-    MessageOutlined, 
-    HeartOutlined, 
-    LoginOutlined, 
-    HomeOutlined,
-    ThunderboltOutlined,
-    DeploymentUnitOutlined,
-    DatabaseOutlined,
-    GlobalOutlined,
-    ApiOutlined,
-    SwapOutlined,
-    CheckCircleFilled,
-    ClockCircleOutlined,
-    AreaChartOutlined,
     CloudSyncOutlined,
-    SyncOutlined
+    HomeOutlined,
+    LoginOutlined,
+    SyncOutlined,
+    ThunderboltOutlined,
+    AreaChartOutlined,
+    ClockCircleOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { EChartsChart } from '../../../components/common/EChartsChart';
 import { adminService } from '../services/adminService';
-import { authService } from '../../auth/services/authService';
 import { useAppDispatch } from '../../../store';
 import { logout } from '../../auth/store/authSlice';
 import { DashboardMetrics, DashboardServiceInfo } from '../types';
+import { groupServicesByPlane, sortAnomalyFirst } from './servicePlanes';
+import { KpiCell, Panel, StatusDot, type DotTone } from './ui/AdminPrimitives';
 
-const { Title, Text } = Typography;
+const SERVICE_PORT: Record<string, string> = {
+    api: '8000',
+    engine: '8001',
+    trade: '8002',
+    stream: '8003',
+};
+
+const SERVICE_DESC: Record<string, string> = {
+    api: '用户认证 · 策略管理 · 社区',
+    engine: 'Qlib 回测 · AI 策略 · 模型推理',
+    trade: '订单管理 · 持仓 · 风控',
+    stream: '实时行情 · WebSocket 推送',
+};
+
+const isServiceHealthy = (s: DashboardServiceInfo) => s.healthy && s.status === 'healthy';
+
+const serviceTone = (s: DashboardServiceInfo): DotTone =>
+    isServiceHealthy(s) ? 'ok' : s.status === 'unreachable' ? 'bad' : 'warn';
 
 export const AdminDashboard: React.FC = () => {
     const dispatch = useAppDispatch();
@@ -36,6 +55,8 @@ export const AdminDashboard: React.FC = () => {
     const location = useLocation();
     const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
     const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const [loadedAt, setLoadedAt] = useState('');
     const [authError, setAuthError] = useState<{ status: number; message: string } | null>(null);
     const [updating, setUpdating] = useState(false);
     const [perfHistory, setPerfHistory] = useState<Array<{ ts: number; cpu: number; mem: number; disk: number }>>([]);
@@ -51,22 +72,38 @@ export const AdminDashboard: React.FC = () => {
             setAuthError(null);
             const data = await adminService.getMetrics();
             setMetrics(data);
+            setLoadedAt(
+                new Date().toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }),
+            );
         } catch (err: any) {
             const status = err?.response?.status;
             const isLocked = String(err?.message || '').includes('ADMIN_METRICS_UNAUTHORIZED_LOCKED');
-            const isAuthError = isLocked || status === 401 || status === 403 || (axios.isAxiosError(err) && (err.response?.status === 401 || err.response?.status === 403));
-            
+            const isAuthError =
+                isLocked ||
+                status === 401 ||
+                status === 403 ||
+                (axios.isAxiosError(err) && (err.response?.status === 401 || err.response?.status === 403));
+
             if (isAuthError) {
                 adminService.markMetricsUnauthorized();
                 setAuthError({
                     status: status || 401,
-                    message: status === 403 ? '您没有访问管理面板的权限。' : '您的登录会话已过期，请重新登录。'
+                    message: status === 403 ? '您没有访问管理面板的权限。' : '您的登录会话已过期，请重新登录。',
                 });
                 return;
             }
             message.error('加载系统指标失败');
         } finally {
             setLoading(false);
+        }
+    };
+
+    const handleRefresh = async () => {
+        setRefreshing(true);
+        try {
+            await loadMetrics();
+        } finally {
+            setRefreshing(false);
         }
     };
 
@@ -79,10 +116,12 @@ export const AdminDashboard: React.FC = () => {
             title: '确认更新系统？',
             icon: <CloudSyncOutlined className="text-blue-500" />,
             content: (
-                <div className="text-sm space-y-2">
-                    <p className="m-0">将执行宿主机 <b>deploy/update.sh</b>：拉取最新代码、重建镜像并重启服务。</p>
+                <div className="space-y-2 text-sm">
+                    <p className="m-0">
+                        将执行宿主机 <b>deploy/update.sh</b>：拉取最新代码、重建镜像并重启服务。
+                    </p>
                     <p className="m-0 text-amber-600">⚠️ 重启过程中当前连接可能中断，请勿在交易时段执行，并确保已保存数据。</p>
-                    <p className="m-0 text-slate-400 text-xs">更新完成后，页面会在一段时间后自动恢复。</p>
+                    <p className="m-0 text-xs text-slate-400">更新完成后，页面会在一段时间后自动恢复。</p>
                 </div>
             ),
             okText: '开始更新',
@@ -114,8 +153,8 @@ export const AdminDashboard: React.FC = () => {
             try {
                 const pts = await adminService.getNodeHistory(180);
                 if (!cancelled) setPerfHistory(pts);
-            } catch (e) {
-                // 静默，保留上次数据
+            } catch {
+                /* 静默，保留上次数据 */
             } finally {
                 if (!cancelled) setPerfLoading(false);
             }
@@ -128,22 +167,20 @@ export const AdminDashboard: React.FC = () => {
         };
     }, []);
 
-
-
     if (authError) {
         return (
-            <div className="flex items-center justify-center py-20 bg-white border border-slate-200 rounded-3xl shadow-sm">
+            <div className="flex items-center justify-center rounded-lg border border-slate-200 bg-white py-20 shadow-sm">
                 <Result
                     status="403"
                     title={<span className="text-xl font-bold text-slate-800">访问受限</span>}
                     subTitle={<span className="text-slate-500">{authError.message}</span>}
                     extra={[
-                        <Button 
-                            type="primary" 
-                            key="login" 
+                        <Button
+                            type="primary"
+                            key="login"
                             icon={<LoginOutlined />}
                             size="large"
-                            className="h-11 rounded-xl px-8 bg-slate-900 border-none shadow-sm"
+                            className="h-11 rounded-xl border-none bg-slate-900 px-8 shadow-sm"
                             onClick={async () => {
                                 await dispatch(logout());
                                 navigate('/auth/login', { state: { from: location } });
@@ -151,60 +188,35 @@ export const AdminDashboard: React.FC = () => {
                         >
                             重新登录
                         </Button>,
-                        <Button 
-                            key="home" 
+                        <Button
+                            key="home"
                             icon={<HomeOutlined />}
                             size="large"
-                            className="h-11 rounded-xl px-8 text-slate-600 font-bold hover:bg-slate-50 transition-all border-slate-200"
+                            className="h-11 rounded-xl border-slate-200 px-8 font-bold text-slate-600 transition-all hover:bg-slate-50"
                             onClick={() => navigate('/')}
                         >
                             返回首页
-                        </Button>
+                        </Button>,
                     ]}
                 />
             </div>
         );
     }
 
-    if (loading || !metrics) return (
-        <div className="w-full flex flex-col items-center justify-center py-32 space-y-4">
-            <Spin size="large" />
-            <Text className="text-slate-400 font-bold text-xs">正在加载指标数据...</Text>
-        </div>
-    );
+    if (loading || !metrics) {
+        return (
+            <div className="flex w-full flex-col items-center justify-center space-y-4 py-32">
+                <Spin size="large" />
+                <span className="text-xs font-bold text-slate-400">正在加载指标数据...</span>
+            </div>
+        );
+    }
 
-    const serviceStats: DashboardServiceInfo[] = metrics.system?.services || [];
-
-    const iconMap: Record<string, React.ReactNode> = {
-        api: <ApiOutlined />,
-        engine: <ThunderboltOutlined />,
-        trade: <SwapOutlined />,
-        stream: <GlobalOutlined />,
-        postgres: <DatabaseOutlined />,
-        redis: <DatabaseOutlined />,
-        data_gateway: <DeploymentUnitOutlined />,
-        web: <HomeOutlined />,
-        qwenpaw: <MessageOutlined />,
-        rsshub: <GlobalOutlined />,
-        huntly: <MessageOutlined />,
-        dashboard: <AreaChartOutlined />,
-        celery: <ThunderboltOutlined />,
-        celery_beat: <ClockCircleOutlined />,
-    };
-
-    const serviceDescMap: Record<string, string> = {
-        api: '用户认证 · 策略管理 · 社区',
-        engine: 'Qlib回测 · AI策略 · 模型推理',
-        trade: '订单管理 · 持仓 · 风控',
-        stream: '实时行情 · WebSocket推送',
-    };
-
-    const servicePortMap: Record<string, string> = {
-        api: '8000',
-        engine: '8001',
-        trade: '8002',
-        stream: '8003',
-    };
+    const services: DashboardServiceInfo[] = metrics.system?.services || [];
+    const unhealthy = sortAnomalyFirst(services.filter((s) => !isServiceHealthy(s)));
+    const planes = groupServicesByPlane(services);
+    const healthyCount = services.filter(isServiceHealthy).length;
+    const { users, strategies, models, system } = metrics;
 
     const perfOption = {
         backgroundColor: 'transparent',
@@ -212,7 +224,6 @@ export const AdminDashboard: React.FC = () => {
         tooltip: {
             trigger: 'axis',
             formatter: (params: any) => {
-                // 类目轴下 params[i].axisValue 是当前类目(xAxis.data)标签；value 为纯值
                 const axisValue = params?.[0]?.axisValue;
                 const head = axisValue ?? '';
                 const rows = (params || []).map((p: any) => `${p.marker}${p.seriesName}: <b>${p.value}%</b>`).join('<br/>');
@@ -222,7 +233,9 @@ export const AdminDashboard: React.FC = () => {
         legend: { top: 4, right: 8, itemWidth: 12, itemHeight: 8, textStyle: { fontSize: 10, color: '#94a3b8' } },
         xAxis: {
             type: 'category',
-            data: perfHistory.map((p) => new Date(p.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })),
+            data: perfHistory.map((p) =>
+                new Date(p.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }),
+            ),
             axisLabel: { fontSize: 9, color: '#94a3b8', interval: perfHistory.length > 40 ? Math.ceil(perfHistory.length / 10) : 0 },
             axisLine: { lineStyle: { color: '#e2e8f0' } },
             axisTick: { show: false },
@@ -240,7 +253,6 @@ export const AdminDashboard: React.FC = () => {
                 type: 'line',
                 smooth: true,
                 showSymbol: false,
-                // 类目轴(xAxis.type='category')要求 series 为与 xAxis.data 索引对齐的纯值数组
                 data: perfHistory.map((p) => p.cpu),
                 lineStyle: { width: 1.5, color: '#6366f1' },
                 areaStyle: { color: 'rgba(99,102,241,0.12)' },
@@ -270,173 +282,158 @@ export const AdminDashboard: React.FC = () => {
     };
 
     return (
-        <div className="space-y-8 animate-in fade-in duration-500">
-            {/* Header */}
-            <div className="flex items-center justify-between mb-2">
+        <div className="flex animate-in flex-col gap-3 fade-in duration-500">
+            {/* 页头 */}
+            <div className="flex items-center justify-between">
                 <div>
-                    <Title level={4} className="!m-0 !font-black !text-slate-800 text-lg">系统控制台</Title>
-                    <Text className="text-slate-400 text-xs font-medium">基础设施节点监控与管理</Text>
+                    <h2 className="text-[16px] font-semibold text-slate-800">系统控制台</h2>
+                    <p className="mt-0.5 text-[12px] text-slate-400">
+                        基础设施节点监控与管理{loadedAt ? ` · 更新于 ${loadedAt}` : ''}
+                    </p>
                 </div>
-                <Space size={10}>
+                <div className="flex items-center gap-2">
                     <Button
+                        size="small"
+                        danger
                         icon={<SyncOutlined spin={updating} />}
                         loading={updating}
                         onClick={handleUpdateSystem}
-                        danger
-                        className="rounded-xl font-bold shadow-sm h-10 px-6"
+                        className="rounded-md"
                     >
                         更新系统
                     </Button>
                     <Button
+                        size="small"
                         icon={<ThunderboltOutlined />}
-                        onClick={loadMetrics}
-                        className="rounded-xl font-bold bg-white text-slate-800 border-slate-200 hover:border-slate-800 hover:text-slate-800 shadow-sm h-10 px-6"
+                        loading={refreshing}
+                        onClick={() => void handleRefresh()}
+                        className="rounded-md"
                     >
                         刷新数据
                     </Button>
-                </Space>
+                </div>
             </div>
 
-            {/* Core Services Grid */}
-            <Row gutter={[20, 20]}>
-                {serviceStats.map((s, idx) => {
-                    const isHealthy = s.healthy && s.status === 'healthy';
-                    const isUnreachable = s.status === 'unreachable';
-                    return (
-                        <Col xs={24} sm={12} lg={8} xl={6} key={s.service || idx}>
-                            <Card className="rounded-2xl border-slate-200 shadow-sm hover:shadow-md transition-all">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div className="flex items-center gap-3">
-                                        <div className={`w-10 h-10 rounded-xl ${isHealthy ? 'bg-emerald-50' : isUnreachable ? 'bg-rose-50' : 'bg-amber-50'} flex items-center justify-center ${isHealthy ? 'text-emerald-600' : isUnreachable ? 'text-rose-500' : 'text-amber-500'} border ${isHealthy ? 'border-emerald-100' : isUnreachable ? 'border-rose-100' : 'border-amber-100'}`}>
-                                            {iconMap[s.service] || <ApiOutlined />}
-                                        </div>
-                                        <div>
-                                            <div className="flex items-center gap-1.5">
-                                                <Text className="font-black text-slate-800 text-sm">{s.service.toUpperCase()}</Text>
-                                                <Badge status={isHealthy ? 'processing' : 'error'} color={isHealthy ? '#10b981' : '#ef4444'} />
-                                            </div>
-                                            <Text className="text-[10px] text-slate-400 font-bold">
-                                                {s.port ? `端口 ${s.port}` : s.service === 'celery' ? '异步任务' : s.service === 'celery_beat' ? '定时调度' : `端口 ${servicePortMap[s.service] || '—'}`}
-                                            </Text>
-                                        </div>
-                                    </div>
-                                    <Tag color={isHealthy ? 'success' : isUnreachable ? 'error' : 'warning'} className="m-0 border-none rounded-full px-2 text-[9px] font-black">
-                                        {isHealthy ? '运行中' : isUnreachable ? '不可达' : '异常'}
-                                    </Tag>
+            {/* 异常横幅：只在有服务不健康时出现 */}
+            {unhealthy.length > 0 && (
+                <div className="flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2.5 text-[12px] text-rose-700">
+                    <StatusDot tone="bad" pulse />
+                    <span className="font-semibold">{unhealthy.length} 项服务异常：</span>
+                    <span className="min-w-0 truncate">
+                        {unhealthy.map((s) => `${s.service.toUpperCase()}（${s.status}）`).join('、')}
+                    </span>
+                </div>
+            )}
+
+            {/* 指标条 */}
+            <Panel bodyClassName="grid grid-cols-2 divide-y divide-slate-100 lg:grid-cols-5 lg:divide-x lg:divide-y-0">
+                <KpiCell label="总用户数" value={users.total} sub={`今日新增 ${users.new_today} 人`} />
+                <KpiCell label="模拟策略" value={strategies.live} sub={`共 ${strategies.total} 个策略`} />
+                <KpiCell label="模型数量" value={models.total} sub="累计训练产出模型" />
+                <KpiCell label="系统运行" value={`${system.uptime_days} 天`} sub={`健康度 ${system.health_score}%`} />
+                <KpiCell
+                    label="服务健康"
+                    value={`${healthyCount}/${services.length}`}
+                    tone={unhealthy.length > 0 ? 'bad' : 'ok'}
+                    sub="服务集群探测"
+                />
+            </Panel>
+
+            {/* 服务集群（按平面分组，异常优先） */}
+            <Panel title="服务集群" sub={`${healthyCount}/${services.length} 健康`}>
+                <div className="grid grid-cols-1 gap-x-8 px-4 py-2 lg:grid-cols-2">
+                    {planes.map((plane) => {
+                        const okCount = plane.services.filter(isServiceHealthy).length;
+                        return (
+                            <div key={plane.key} className="py-1.5">
+                                <div className="flex items-center justify-between border-b border-slate-100 px-2 pb-1">
+                                    <span className="text-[11px] font-semibold tracking-wide text-slate-400">{plane.label}</span>
+                                    <span className="admin-num text-[10px] text-slate-300">
+                                        {okCount}/{plane.services.length}
+                                    </span>
                                 </div>
-                                <div className="space-y-1.5">
-                                    <div className="flex justify-between items-center text-[10px] font-black mb-1">
-                                        <span className="text-slate-400">健康评分</span>
-                                        <span className={s.score < 60 ? "text-rose-500" : s.score < 90 ? "text-amber-500" : "text-emerald-600"}>{s.score}%</span>
-                                    </div>
-                                    <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                                {plane.services.map((s) => {
+                                    const ok = isServiceHealthy(s);
+                                    const portText = s.port
+                                        ? String(s.port)
+                                        : SERVICE_PORT[s.service] ||
+                                          (s.service === 'celery' ? '异步' : s.service === 'celery_beat' ? '定时' : '—');
+                                    const desc =
+                                        s.desc || SERVICE_DESC[s.service] || s.url?.replace(/^https?:\/\//, '') || '—';
+                                    return (
                                         <div
-                                            className={`h-full rounded-full transition-all duration-1000 ${s.score < 60 ? 'bg-rose-500' : s.score < 90 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                                            style={{ width: `${s.score}%` }}
-                                        />
-                                    </div>
-                                    <Text className="text-[10px] text-slate-400 font-medium block pt-1">{s.desc || serviceDescMap[s.service] || s.url || '—'}</Text>
-                                </div>
-                            </Card>
-                        </Col>
-                    );
-                })}
-            </Row>
-
-            <Divider className="!m-0 border-slate-100" />
-
-            <Row gutter={[24, 24]}>
-                {/* Main Stats */}
-                <Col span={24} lg={16}>
-                    <div className="space-y-6">
-                        <Title level={5} className="!m-0 !font-black !text-slate-800 text-xs opacity-50">全局统计</Title>
-                        <Row gutter={[16, 16]}>
-                            {[
-                                { title: "总用户数", value: metrics.users.total, sub: `今日新增 ${metrics.users.new_today} 人`, icon: <UserOutlined /> },
-                                { title: "模拟策略", value: metrics.strategies.live, sub: `共 ${metrics.strategies.total} 个策略`, icon: <LineChartOutlined /> },
-                                { title: "模型数量", value: metrics.models?.total ?? 0, sub: "累计训练产出模型", icon: <DatabaseOutlined /> },
-                                { title: "系统运行", value: metrics.system.uptime_days, suffix: "天", sub: `健康度: ${metrics.system.health_score}%`, icon: <HeartOutlined /> }
-                            ].map((item, idx) => (
-                                <Col xs={24} sm={12} lg={6} key={idx}>
-                                    <Card className="rounded-2xl border-slate-100 bg-white shadow-sm">
-                                        <Statistic 
-                                            title={<span className="text-[10px] font-black text-slate-400">{item.title}</span>}
-                                            value={item.value}
-                                            suffix={item.suffix}
-                                            valueStyle={{ fontWeight: 900, color: '#1e293b', fontSize: '24px', letterSpacing: '-0.025em' }}
-                                            prefix={<div className="text-slate-300 mr-2">{item.icon}</div>}
-                                            style={{ textAlign: 'center' }}
-                                        />
-                                        <div className="mt-2 text-[11px] font-bold text-slate-400 flex items-center gap-1 justify-center">
-                                            <div className="w-1 h-1 rounded-full bg-slate-200" />
-                                            {item.sub}
+                                            key={s.service}
+                                            className={`flex h-9 items-center gap-2.5 rounded-sm px-2 ${ok ? '' : 'bg-rose-50/70'}`}
+                                        >
+                                            <StatusDot tone={serviceTone(s)} pulse={!ok} />
+                                            <span className="w-[110px] shrink-0 truncate text-[12px] font-semibold text-slate-700">
+                                                {s.service.toUpperCase()}
+                                            </span>
+                                            <span className="admin-num w-[44px] shrink-0 text-[10px] text-slate-400">
+                                                {portText}
+                                            </span>
+                                            <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400" title={desc}>
+                                                {desc}
+                                            </span>
+                                            <span
+                                                className={`admin-num shrink-0 text-[11px] ${
+                                                    ok ? 'text-slate-400' : 'font-semibold text-rose-600'
+                                                }`}
+                                            >
+                                                {s.score}%
+                                            </span>
                                         </div>
-                                    </Card>
-                                </Col>
-                            ))}
-                        </Row>
-                        
-                        <Card className="rounded-2xl border-slate-100 shadow-sm" title={<span className="text-xs font-black text-slate-500">节点性能历史</span>}>
-                            {perfLoading && perfHistory.length === 0 ? (
-                                <div className="py-16 flex flex-col items-center justify-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                                    <AreaChartOutlined className="text-slate-300 text-3xl mb-3" />
-                                    <Text className="text-slate-400 font-bold text-xs">实时吞吐量数据收集中...</Text>
-                                </div>
-                            ) : perfHistory.length >= 2 ? (
-                                <div className="h-64 w-full">
-                                    <EChartsChart option={perfOption} />
-                                </div>
-                            ) : (
-                                <div className="py-16 flex flex-col items-center justify-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                                    <AreaChartOutlined className="text-slate-300 text-3xl mb-3" />
-                                    <Text className="text-slate-400 font-bold text-xs">数据采集中，稍后展示曲线…</Text>
-                                </div>
-                            )}
-                        </Card>
-                    </div>
-                </Col>
+                                    );
+                                })}
+                            </div>
+                        );
+                    })}
+                </div>
+            </Panel>
 
-                {/* Side Activity */}
-                <Col span={24} lg={8}>
-                    <div className="space-y-6">
-                        <Title level={5} className="!m-0 !font-black !text-slate-800 text-xs opacity-50">最近事件</Title>
-                        <Card className="rounded-2xl border-slate-200 shadow-sm p-2">
-                            {metrics.recent_events && metrics.recent_events.length > 0 ? (
-                                <>
-                                    <List
-                                        itemLayout="horizontal"
-                                        dataSource={metrics.recent_events}
-                                        renderItem={(item: any) => (
-                                            <List.Item className="!px-4 !py-3 hover:bg-slate-50 rounded-xl transition-all cursor-pointer">
-                                                <List.Item.Meta
-                                                    avatar={
-                                                        <div className={`mt-1.5 w-2 h-2 rounded-full ${
-                                                            item.type === 'success' ? 'bg-emerald-500' : 
-                                                            item.type === 'warning' ? 'bg-rose-500' : 'bg-blue-500'
-                                                        }`} />
-                                                    }
-                                                    title={<span className="text-xs font-bold text-slate-700">{item.title}</span>}
-                                                    description={<span className="text-[10px] text-slate-400 font-bold">{item.time}</span>}
-                                                />
-                                            </List.Item>
-                                        )}
+            {/* 性能历史 + 最近事件 */}
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+                <Panel className="lg:col-span-8" title="节点性能历史" sub="CPU / 内存 / 磁盘 · 采样 1 分钟">
+                    {perfLoading && perfHistory.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 py-16 mx-4 my-3">
+                            <AreaChartOutlined className="mb-3 text-3xl text-slate-300" />
+                            <span className="text-xs font-bold text-slate-400">数据采集中，稍后展示曲线…</span>
+                        </div>
+                    ) : perfHistory.length >= 2 ? (
+                        <div className="h-64 w-full px-1 py-2">
+                            <EChartsChart option={perfOption} />
+                        </div>
+                    ) : (
+                        <div className="mx-4 my-3 flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 py-16">
+                            <AreaChartOutlined className="mb-3 text-3xl text-slate-300" />
+                            <span className="text-xs font-bold text-slate-400">数据采集中，稍后展示曲线…</span>
+                        </div>
+                    )}
+                </Panel>
+
+                <Panel className="lg:col-span-4" title="最近事件" sub={`${metrics.recent_events?.length || 0} 条`}>
+                    {metrics.recent_events && metrics.recent_events.length > 0 ? (
+                        <div className="admin-dark-scrollbar max-h-[276px] divide-y divide-slate-50 overflow-y-auto">
+                            {metrics.recent_events.map((item, idx) => (
+                                <div key={idx} className="flex items-center gap-2.5 px-4 py-2">
+                                    <StatusDot
+                                        tone={item.type === 'warning' ? 'warn' : item.type === 'success' ? 'ok' : 'info'}
                                     />
-                                    <div className="p-4 pt-2">
-                                        <Button block className="rounded-xl border-slate-200 text-slate-500 font-bold text-xs h-10 hover:border-slate-800 hover:text-slate-800">
-                                            查看审计日志
-                                        </Button>
-                                    </div>
-                                </>
-                            ) : (
-                                <div className="py-12 flex flex-col items-center justify-center">
-                                    <ClockCircleOutlined className="text-slate-300 text-3xl mb-3" />
-                                    <Text className="text-slate-400 font-bold text-xs">暂无事件记录</Text>
+                                    <span className="min-w-0 flex-1 truncate text-[12px] text-slate-600" title={item.title}>
+                                        {item.title}
+                                    </span>
+                                    <span className="admin-num shrink-0 text-[10px] text-slate-400">{item.time}</span>
                                 </div>
-                            )}
-                        </Card>
-                    </div>
-                </Col>
-            </Row>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="flex flex-col items-center justify-center py-12">
+                            <ClockCircleOutlined className="mb-3 text-3xl text-slate-300" />
+                            <span className="text-xs font-bold text-slate-400">暂无事件记录</span>
+                        </div>
+                    )}
+                </Panel>
+            </div>
         </div>
     );
 };
