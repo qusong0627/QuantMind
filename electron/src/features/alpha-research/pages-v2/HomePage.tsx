@@ -9,10 +9,12 @@ import { Layout } from '../components-v2/layout/Layout';
 import type { PageId } from '../components-v2/layout/Layout';
 import { useTaskContext } from '../context-v2/TaskContext';
 import { getDataSummary } from '../services-v2/api';
-import type { DataSummary } from '../types-v2';
+import type { DataSummary, MiningRetryDraft } from '../types-v2';
 
 interface HomePageProps {
   onNavigate?: (page: PageId) => void;
+  /** 「挖掘历史 → 重跑」回填草稿：按 key 把当时的方向/市场/数据源放回输入框 */
+  retryDraft?: MiningRetryDraft | null;
 }
 
 const PRESET_PROMPTS = [
@@ -22,7 +24,7 @@ const PRESET_PROMPTS = [
   '基于多周期均线发散度与流动性溢价挖掘中短线稳健因子',
 ];
 
-export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
+export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft }) => {
   const {
     backendAvailable,
     miningTask: task,
@@ -52,6 +54,15 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
       .then((res) => setDataSummary(res.data ?? null))
       .catch(() => {});
   }, []);
+
+  // 「重跑」回填：方向放回输入框（市场/数据源由 ChatInput 的 initialConfig 回填）。
+  // 依赖 key 代次而非内容：同方向连点两次「重跑」也必须重新应用；
+  // 方向为空（legacy 行）只回填配置，不清掉用户已敲的内容。
+  useEffect(() => {
+    if (!retryDraft) return;
+    if (retryDraft.userInput) setActivePrompt(retryDraft.userInput);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retryDraft?.key]);
 
   const universeCount = dataSummary?.universes
     ? Object.keys(dataSummary.universes).length
@@ -155,6 +166,8 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
           <ChatInput
             inline={true}
             initialPrompt={activePrompt}
+            initialConfig={retryDraft ?? undefined}
+            initialConfigKey={retryDraft?.key}
             onSubmit={startMining}
             onStop={stopMining}
             isRunning={taskActive}

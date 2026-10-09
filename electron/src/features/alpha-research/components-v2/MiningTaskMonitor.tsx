@@ -21,6 +21,9 @@
  * 4. **未登录不轮询**（`enabled`，2026-10-09）：壳在公开路由（登录页）也会挂载，
  *    无 token 的 `GET /tasks` 每 5 秒打一发 401 + 控制台报错。由壳传入登录态；
  *    `enabled` 翻 true 的那一挂立刻拉一次，不等下一个节拍。
+ * 5. **每条任务带方向摘要**（2026-10-09）：「每次挖了什么」在监视器里也要看得见。
+ *    方向来自后端 `direction`（经 `normalizeAgentTask` 落进 `config.userInput`），
+ *    空方向不渲染这一行——不编造占位文案。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, CircleDashed, Loader2, X } from 'lucide-react';
@@ -245,6 +248,15 @@ const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true })
                           : ''}
                       </span>
                     </div>
+                    {/* 方向摘要（「每次挖了什么」）：空方向不渲染，不编造占位 */}
+                    {t.config?.userInput ? (
+                      <div
+                        className="mt-0.5 truncate text-[11px] font-medium text-slate-600"
+                        title={t.config.userInput}
+                      >
+                        {t.config.userInput}
+                      </div>
+                    ) : null}
                     <div className="mt-0.5 truncate text-[10px] text-slate-400" title={reason}>
                       {formatStarted(t.createdAt)}
                       {reason && !isRunning && ` · ${reason.slice(0, REASON_MAX)}`}

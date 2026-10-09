@@ -47,6 +47,17 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
+# 进度落库节流：内存心跳每 3s，DB 写 ≥15s 一次（轮询写库会把库压成热点）。
+_DB_SYNC_INTERVAL_S = 15.0
+
+
+def _task_store():
+    """任务记录层 store（模块级函数便于测试替换；失败语义见 _db_* 系列）。"""
+    from backend.services.engine.alpha_agent.task_store import get_mining_task_store
+
+    return get_mining_task_store()
+
+
 @dataclass
 class EvolutionTask:
     task_id: str
@@ -54,6 +65,7 @@ class EvolutionTask:
     market: str = "a_share"
     data_source: str = ""
     universe: str = "csi300"
+    direction: str = ""
     status: TaskStatus = TaskStatus.PENDING
     progress: str = ""
     phase: str = "pending"
@@ -67,6 +79,8 @@ class EvolutionTask:
     _cancel_requested: bool = False
     timeline: list[dict[str, Any]] = field(default_factory=list)
     token_usage: dict[str, Any] = field(default_factory=dict)
+    # 上次进度落库时刻（epoch 秒）。3s 内存心跳不变，DB 写节流见 _DB_SYNC_INTERVAL_S。
+    _last_db_sync: float = 0.0
 
 
 class AlphaAgentLauncher:
@@ -97,10 +111,13 @@ class AlphaAgentLauncher:
         provider_uri: str | None = None,
         direction: str | None = None,
         data_source: str | None = None,
+        source: str = "text",
+        doc_id: str | None = None,
         llm_overrides: dict[str, str] | None = None,
     ) -> str:
         """Start a factor evolution task. Returns task_id.
 
+        source/doc_id: 输入来源（text=文字指令，doc=文档解析链），落任务记录行。
         llm_overrides: 用户级 LLM 环境变量覆盖（如个人中心配置的 API Key），
         优先于容器全局 env 注入子进程。
         """
@@ -112,8 +129,12 @@ class AlphaAgentLauncher:
         task = EvolutionTask(
             task_id=task_id, user_id=user_id, market=market,
             universe=universe, loop_n=loop_n, data_source=data_source or "",
+            direction=direction or "",
         )
         self._tasks[task_id] = task
+
+        # 记录层落行（失败只告警）：历史页第一秒就要能看见这个任务
+        await self._db_create(task, source=source, doc_id=doc_id)
 
         # Determine provider URI from market adapter if not specified
         if not provider_uri:
@@ -173,6 +194,7 @@ class AlphaAgentLauncher:
             "market": task.market,
             "universe": task.universe,
             "data_source": task.data_source,
+            "direction": task.direction,
             "error_message": task.error_message,
             "result": task.result,
             "timeline": task.timeline,
@@ -205,6 +227,7 @@ class AlphaAgentLauncher:
         task.status = TaskStatus.FAILED
         task.error_message = "Cancelled by user"
         self._persist_task(task)
+        await self._db_cancel(task)
         return True
 
     async def get_task_log(self, task_id: str, tail: int = 0) -> str | None:
@@ -247,6 +270,76 @@ class AlphaAgentLauncher:
                 by_user[task.user_id] = by_user.get(task.user_id, 0) + 1
         return {"global": total, "by_user": by_user}
 
+    # ------------------------------------------------------------------
+    # 任务记录层（rd_agent_mining_tasks）——任何失败只告警，绝不拦挖掘主链
+    # ------------------------------------------------------------------
+
+    async def _db_create(
+        self, task: EvolutionTask, *, source: str = "text", doc_id: str | None = None
+    ) -> None:
+        try:
+            await _task_store().create_task(
+                task_id=task.task_id,
+                user_id=task.user_id,
+                market=task.market,
+                universe=task.universe,
+                data_source=task.data_source,
+                direction=task.direction,
+                loop_n=task.loop_n,
+                source=source,
+                doc_id=doc_id,
+            )
+        except Exception as e:
+            logger.warning("mining task row create failed for %s: %s", task.task_id, e)
+
+    async def _db_sync_progress(self, task: EvolutionTask) -> None:
+        try:
+            await _task_store().update_progress(
+                task.task_id,
+                status=task.status.value,
+                progress_pct=task.progress_pct,
+                current_loop=task.current_loop,
+            )
+        except Exception as e:
+            logger.warning(
+                "mining task progress sync failed for %s: %s", task.task_id, e
+            )
+
+    async def _db_sync_progress_throttled(self, task: EvolutionTask) -> None:
+        """内存心跳每 3s 照旧；落到 DB 的进度 ≥_DB_SYNC_INTERVAL_S 一次。"""
+        if time.time() - task._last_db_sync < _DB_SYNC_INTERVAL_S:
+            return
+        task._last_db_sync = time.time()
+        await self._db_sync_progress(task)
+
+    async def _db_finish(self, task: EvolutionTask) -> None:
+        """终态收尾。取消路径已由 :meth:`_db_cancel` 落 ``cancelled``，此处必须让路。"""
+        if task._cancel_requested:
+            return
+        try:
+            store = _task_store()
+            factor_count = await store.count_factors(task.task_id)
+            await store.mark_terminal(
+                task.task_id,
+                status=task.status.value,
+                error=task.error_message,
+                factor_count=factor_count,
+            )
+        except Exception as e:
+            logger.warning(
+                "mining task terminal write failed for %s: %s", task.task_id, e
+            )
+
+    async def _db_cancel(self, task: EvolutionTask) -> None:
+        try:
+            await _task_store().mark_terminal(
+                task.task_id, status="cancelled", error="Cancelled by user"
+            )
+        except Exception as e:
+            logger.warning(
+                "mining task cancel write failed for %s: %s", task.task_id, e
+            )
+
     def _persist_task(self, task: EvolutionTask) -> None:
         """Save task state to disk so it survives restarts."""
         state_file = self._log_dir / task.task_id / "task_state.json"
@@ -258,6 +351,7 @@ class AlphaAgentLauncher:
                 "market": task.market,
                 "data_source": task.data_source,
                 "universe": task.universe,
+                "direction": task.direction,
                 "status": task.status.value,
                 "progress": task.progress,
                 "phase": task.phase,
@@ -290,6 +384,7 @@ class AlphaAgentLauncher:
                         market=data.get("market", "a_share"),
                         data_source=data.get("data_source", ""),
                         universe=data.get("universe", "csi300"),
+                        direction=data.get("direction", ""),
                         status=TaskStatus(data.get("status", "pending")),
                         progress=data.get("progress", ""),
                         phase=data.get("phase", "pending"),
@@ -340,6 +435,8 @@ class AlphaAgentLauncher:
         task.progress_pct = 2
         task.progress = "正在启动因子挖掘..."
         self._persist_task(task)
+        task._last_db_sync = time.time()
+        await self._db_sync_progress(task)
 
         task_log_dir = self._log_dir / task.task_id
         task_log_dir.mkdir(parents=True, exist_ok=True)
@@ -491,6 +588,7 @@ class AlphaAgentLauncher:
                         pass
                     break
                 self._update_progress(task, task_log_dir)
+                await self._db_sync_progress_throttled(task)
                 await asyncio.sleep(3)
 
             if process.poll() is None:
@@ -514,12 +612,14 @@ class AlphaAgentLauncher:
                 logger.error("Factor mining failed for task %s: %s", task.task_id, task.error_message)
 
             self._persist_task(task)
+            await self._db_finish(task)
 
         except Exception as e:
             task.status = TaskStatus.FAILED
             task.error_message = str(e)
             logger.exception("Factor mining exception for task %s", task.task_id)
             self._persist_task(task)
+            await self._db_finish(task)
 
     _PHASE_ORDER = [
         ("scenario", "scenario", "初始化场景"),

@@ -18,6 +18,10 @@ interface ChatInputProps {
   isRunning?: boolean;
   inline?: boolean;
   initialPrompt?: string;
+  /** 「重跑」回填：市场/池/数据源。只在有值时覆盖，空值不动用户当前选择。 */
+  initialConfig?: Partial<Pick<TaskConfig, 'miningMarket' | 'universe' | 'dataSource'>>;
+  /** 回填代次（`MiningRetryDraft.key`）：同内容连点两次「重跑」也要重新应用 */
+  initialConfigKey?: number;
   onSelectPrompt?: (prompt: string) => void;
 }
 
@@ -27,6 +31,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   isRunning = false,
   inline = false,
   initialPrompt = '',
+  initialConfig,
+  initialConfigKey,
 }) => {
   const [input, setInput] = useState(initialPrompt);
   const [useCustomMiningDirection, setUseCustomMiningDirection] = useState(false);
@@ -39,10 +45,22 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
+    // 空串不清空：legacy 历史行方向为空是常态，不能把用户打了一半的字擦掉；
+    // initialConfigKey 一起看：key 前进（又点了一次「重跑」）时同文案也要重放。
     if (initialPrompt) {
       setInput(initialPrompt);
     }
-  }, [initialPrompt]);
+  }, [initialPrompt, initialConfigKey]);
+
+  useEffect(() => {
+    if (!initialConfig) return;
+    if (initialConfig.miningMarket) setMiningMarket(initialConfig.miningMarket);
+    if (initialConfig.universe) setUniverse(initialConfig.universe);
+    if (initialConfig.dataSource) setDataSource(initialConfig.dataSource);
+    // 依赖只认代次 key，不认对象身份/内容——同内容连点两次「重跑」
+    // 也必须把用户手改过的选项复原（对象比内容会被 React 判成无变化而跳过）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialConfigKey]);
 
   useEffect(() => {
     alphaAgentService.listMarkets().then(setMarkets).catch(() => {});

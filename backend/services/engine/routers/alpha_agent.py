@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
 from backend.services.engine.alpha_agent.launcher import get_launcher
+from backend.services.engine.alpha_agent.task_store import get_mining_task_store
 from backend.services.engine.auth_context import (
     assert_identity_not_spoofed,
     get_authenticated_identity,
@@ -555,6 +556,56 @@ async def start_evolution(
             "status": "pending",
             "message": f"{adapter.market_name} 因子挖掘任务已启动",
         },
+    }
+
+
+@router.get("/tasks/history")
+async def mining_task_history(
+    request: Request,
+    user_id: str | None = Query(
+        None, description="已废弃：身份取自 JWT，仅用于防伪校验"
+    ),
+    market: str | None = Query(None, description="按市场过滤"),
+    status: str | None = Query(
+        None, description="按状态过滤: pending/running/completed/failed/cancelled"
+    ),
+    limit: int = Query(50, ge=1, le=200, description="分页大小"),
+    offset: int = Query(0, ge=0, description="偏移"),
+):
+    """挖掘历史（PG 权威，重启不失忆）。
+
+    与内存版 ``GET /tasks`` 的分工：``/tasks`` 服务运行中监控（带 timeline /
+    token 明细，进程重启即失忆）；这里是历史页数据源——direction / 状态 /
+    因子数全部来自 ``rd_agent_mining_tasks``。
+
+    路由顺序纪律：本端点必须注册在 ``/tasks/{task_id}`` **之前**（FastAPI 按
+    注册顺序匹配，否则 history 会被当作 task_id 吞掉）。
+    """
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    assert_identity_not_spoofed(
+        auth_user_id=auth_user_id,
+        auth_tenant_id=auth_tenant_id,
+        provided_user_id=user_id,
+    )
+    try:
+        store = get_mining_task_store()
+        tasks = await store.list_history(
+            user_id=auth_user_id,
+            market=market,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+        # total 是过滤后的全量行数（分页器用），不是本页行数
+        total = await store.count_history(
+            user_id=auth_user_id, market=market, status=status
+        )
+    except ValueError as exc:
+        # 未知状态是客户端错误，不是 500，更不是静默空列表
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "code": 200,
+        "data": {"tasks": tasks, "total": total, "limit": limit, "offset": offset},
     }
 
 

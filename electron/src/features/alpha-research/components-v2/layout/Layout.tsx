@@ -1,11 +1,12 @@
 import React from 'react';
-import { Sparkles, Database, BarChart3, Settings as SettingsIcon, Network } from 'lucide-react';
+import { Sparkles, Database, BarChart3, Settings as SettingsIcon, Network, History } from 'lucide-react';
 
 export type PageId =
   | 'home'
   | 'library'
   | 'pool'
   | 'backtest'
+  | 'history'
   | 'settings'
   | 'mining_dashboard';
 
@@ -33,6 +34,7 @@ export const Layout: React.FC<LayoutProps> = ({
     { id: 'library' as const, label: '因子库', icon: Database },
     { id: 'pool' as const, label: '因子池', icon: Network },
     { id: 'backtest' as const, label: '回测', icon: BarChart3 },
+    { id: 'history' as const, label: '挖掘历史', icon: History },
     { id: 'settings' as const, label: '设置', icon: SettingsIcon },
   ];
 

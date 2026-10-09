@@ -101,6 +101,22 @@ describe('MiningTaskMonitor：后台进度在刷新之后仍然存在', () => {
     await waitFor(() => expect(container.firstChild).toBeNull());
   });
 
+  test('每条任务带方向摘要（后端 direction 落在 config.userInput 上）', async () => {
+    listTasksMock.mockResolvedValue(
+      ok({
+        tasks: [
+          { ...RUNNING, config: { userInput: '尾盘主力资金净流入 × 换手率背离' } },
+          DONE,
+        ],
+      }),
+    );
+
+    render(<MiningTaskMonitor />);
+    fireEvent.click(await screen.findByText(/因子挖掘 47%/));
+
+    expect(screen.getByText('尾盘主力资金净流入 × 换手率背离')).toBeTruthy();
+  });
+
   test('展开面板后运行中/失败/完成都在，且失败行带后端给的原因', async () => {
     listTasksMock.mockResolvedValue(ok({ tasks: [RUNNING, FAILED, DONE] }));
 

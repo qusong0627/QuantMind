@@ -95,6 +95,19 @@ export interface TaskConfig {
   backtestTimeout?: number;
 }
 
+/**
+ * 「挖掘历史 → 重跑」的回填草稿（AppRoot 交给 HomePage → ChatInput）。
+ * `key` 是代次不是内容：同方向连点两次「重跑」也要重新应用，
+ * 只比对象内容会被 React 判成无变化而跳过。
+ */
+export interface MiningRetryDraft {
+  key: number;
+  userInput: string;
+  miningMarket?: TaskConfig['miningMarket'];
+  universe?: UniverseId;
+  dataSource?: TaskConfig['dataSource'];
+}
+
 // Real-time metrics
 export interface RealtimeMetrics {
   // IC metrics —— 一律可选：后端没算过 → undefined → 界面显「—」，禁止补 0

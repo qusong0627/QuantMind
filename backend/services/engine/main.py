@@ -89,6 +89,18 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ QuantBot tasks table ensure failed: {e}")
 
     try:
+        # 挖掘任务中心（机构级 P0）：建表 + 重启对账——本进程此刻没有任何活任务，
+        # 表里还挂着 pending/running 的行必然是上次进程留下的孤儿（见 store docstring）
+        from backend.services.engine.alpha_agent.task_store import get_mining_task_store
+
+        _mining_store = get_mining_task_store()
+        await _mining_store.ensure_tables()
+        await _mining_store.reconcile_orphans()
+    except Exception as e:
+        app.state.startup_healthy = False
+        logger.error(f"❌ Mining task center ensure/reconcile failed: {e}")
+
+    try:
         from backend.shared.model_registry import model_registry_service
 
         await model_registry_service.ensure_tables()

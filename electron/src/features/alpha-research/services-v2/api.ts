@@ -121,7 +121,9 @@ function normalizeAgentTask(raw: any, configHint?: any): Task {
   return {
     taskId: raw?.task_id ?? raw?.taskId ?? '',
     status,
-    config: configHint ?? { userInput: '' },
+    // configHint 优先（提交瞬间的意图）；否则用后端返回的 direction——
+    // /tasks 与 /tasks/{id} 现在都带它，监视器与恢复的任务行据此显示方向摘要。
+    config: configHint ?? { userInput: raw?.direction ?? '' },
     progress: {
       phase,
       currentRound,
@@ -303,6 +305,69 @@ export async function listTasks(): Promise<ApiResponse<{ tasks: Task[] }>> {
     normalizeAgentTask(t),
   );
   return makeOk({ tasks });
+}
+
+// ========================== Mining History API ==========================
+
+/**
+ * 任务状态（PG `rd_agent_mining_tasks`）。与 launcher 内存状态**不同名**：
+ * 任务有 cancelled、没有 idle——不要拿 Task['status'] 去套历史行。
+ */
+export type MiningHistoryStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/** 历史行：direction / status / factor_count 全部来自 PG，重启不失忆。 */
+export interface MiningHistoryRow {
+  task_id: string;
+  user_id: string;
+  market: string;
+  universe: string;
+  data_source: string;
+  direction: string;
+  /** text=文字指令 / doc=文档解析链（P1）/ legacy=历史回填 */
+  source: string;
+  doc_id: string | null;
+  status: MiningHistoryStatus;
+  progress_pct: number;
+  current_loop: number;
+  loop_n: number;
+  error: string | null;
+  factor_count: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface MiningHistoryParams {
+  market?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export const MINING_HISTORY_PAGE_SIZE = 50;
+
+export async function getMiningHistory(
+  params: MiningHistoryParams = {},
+): Promise<ApiResponse<{ tasks: MiningHistoryRow[]; total: number }>> {
+  const qs = new URLSearchParams();
+  // 过滤参数只在有值时出现：undefined 不能变成 "undefined" 打到后端
+  //（后端把未知状态当 400，乱串会让历史页整页报错）。
+  if (params.market) qs.set('market', params.market);
+  if (params.status) qs.set('status', params.status);
+  qs.set('limit', String(params.limit ?? MINING_HISTORY_PAGE_SIZE));
+  qs.set('offset', String(params.offset ?? 0));
+  const res = await apiClient.get(`/alpha-agent/tasks/history?${qs.toString()}`);
+  const data = res.data?.data ?? {};
+  return makeOk({
+    tasks: (data.tasks ?? []) as MiningHistoryRow[],
+    // total 是过滤后的全量 COUNT（后端 count_history），分页器用它
+    total: (data.total ?? 0) as number,
+  });
 }
 
 export async function getTaskLog(

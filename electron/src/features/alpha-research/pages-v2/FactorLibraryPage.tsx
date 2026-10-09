@@ -23,6 +23,7 @@ import {
   Copy,
   Check,
   List,
+  ListFilter,
   LayoutGrid,
 } from 'lucide-react';
 import { useTaskContext } from '../context-v2/TaskContext';
@@ -59,7 +60,19 @@ const LIBRARY_LIST_LIMIT = 200;
 // Layout 都是这么写的，只有这里松了一格。松的代价是实打实的——回调最终落到
 // `setCurrentPage`，收 `string` 就意味着任何拼错的页面名都能编译通过，
 // 然后静默切到一个不存在的页（`currentPage === 'xxx'` 全不命中，白屏）。
-export const FactorLibraryPage: React.FC<{ onNavigate?: (page: PageId) => void }> = ({ onNavigate }) => {
+export interface FactorLibraryPageProps {
+  onNavigate?: (page: PageId) => void;
+  /** 「挖掘历史 → 查看结果」带过来的任务过滤：只列该挖掘任务产出的因子 */
+  taskFilter?: { taskId: string; label: string } | null;
+  /** 清除任务过滤（回到全量清单） */
+  onClearTaskFilter?: () => void;
+}
+
+export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
+  onNavigate,
+  taskFilter,
+  onClearTaskFilter,
+}) => {
   const { attachBacktestTask } = useTaskContext();
   const backtestQueue = useBacktestQueue();
   const materialize = useMaterializeRun();
@@ -94,7 +107,7 @@ export const FactorLibraryPage: React.FC<{ onNavigate?: (page: PageId) => void }
 
   useEffect(() => {
     loadFactors();
-  }, [marketFilter, universeFilter]);
+  }, [marketFilter, universeFilter, taskFilter?.taskId]);
 
   useEffect(() => {
     filterFactors();
@@ -108,9 +121,13 @@ export const FactorLibraryPage: React.FC<{ onNavigate?: (page: PageId) => void }
         getFactors({
           market: marketFilter !== 'all' ? marketFilter : undefined,
           universe: universeFilter !== 'all' ? universeFilter : undefined,
+          // 任务过滤是服务端口径（metadata_json->>'task_id'），不是本地筛
+          taskId: taskFilter?.taskId,
           limit: LIBRARY_LIST_LIMIT,
         }),
-        getFactoryFactors().catch(() => null),
+        // 工厂因子是全库批量产出、不带 task_id——任务过滤下并入会破坏
+        // 「只列该任务产出」的语义，所以过滤态不拉工厂清单
+        taskFilter?.taskId ? Promise.resolve(null) : getFactoryFactors().catch(() => null),
       ]);
       if (resp.success && resp.data) {
         const apiFactors: Factor[] = resp.data.factors.map((f: any) => {
@@ -180,7 +197,7 @@ export const FactorLibraryPage: React.FC<{ onNavigate?: (page: PageId) => void }
     } finally {
       setIsLoading(false);
     }
-  }, [marketFilter, universeFilter]);
+  }, [marketFilter, universeFilter, taskFilter?.taskId]);
 
   const filterFactors = () => {
     let filtered = factors;
@@ -373,7 +390,9 @@ export const FactorLibraryPage: React.FC<{ onNavigate?: (page: PageId) => void }
     ? '加载中…'
     : searchQuery || qualityFilter !== 'all'
       ? '没有符合筛选条件的因子'
-      : '开始挖掘因子后，结果将显示在这里';
+      : taskFilter
+        ? '该任务没有已落库的因子（可能尚未物化或被门禁拒绝）'
+        : '开始挖掘因子后，结果将显示在这里';
 
   return (
     <div className="space-y-4 animate-fade-in-up">
@@ -432,6 +451,23 @@ export const FactorLibraryPage: React.FC<{ onNavigate?: (page: PageId) => void }
         <div className="glass rounded-lg p-3 flex items-center gap-3 bg-warning/10 border-warning/50">
           <AlertCircle className="h-4 w-4 text-warning flex-shrink-0" />
           <span className="text-xs text-warning">{error}</span>
+        </div>
+      )}
+
+      {/* 任务过滤横幅（挖掘历史 → 查看结果） */}
+      {taskFilter && (
+        <div className="glass rounded-lg p-3 flex items-center gap-3 bg-primary/5 border-primary/30">
+          <ListFilter className="h-4 w-4 text-primary flex-shrink-0" />
+          <span className="min-w-0 flex-1 truncate text-xs text-foreground" title={`任务 ${taskFilter.taskId}`}>
+            只显示挖掘任务「{taskFilter.label}」产出的因子
+            <span className="ml-2 font-mono text-[10px] text-muted-foreground">
+              {taskFilter.taskId.slice(0, 8)}
+            </span>
+          </span>
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onClearTaskFilter}>
+            <X className="h-3 w-3 mr-1" />
+            清除过滤
+          </Button>
         </div>
       )}
 
