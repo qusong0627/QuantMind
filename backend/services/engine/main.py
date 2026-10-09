@@ -101,6 +101,25 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Mining task center ensure/reconcile failed: {e}")
 
     try:
+        # 文档中心（T-FM-07）：建表 + 重启续轮询（parsing 行是 MinerU 队列里的
+        # 活任务，本进程接管；超龄 uploaded 对账定格）+ 留存 GC。
+        # 文档链默认关（ENABLE_DOC_MINING=false），失败只告警不阻启动。
+        from backend.services.engine.alpha_agent.doc_parse_service import (
+            get_doc_parse_service,
+        )
+        from backend.services.engine.alpha_agent.doc_store import get_doc_store
+
+        await get_doc_store().ensure_tables()
+        _doc_svc = get_doc_parse_service()
+        _resumed = await _doc_svc.resume_pending()
+        _gc = await _doc_svc.gc_expired()
+        logger.info(
+            "✅ Doc center ready (resumed=%d parsing, gc=%d expired)", _resumed, _gc
+        )
+    except Exception as e:
+        logger.error(f"❌ Doc center ensure/resume failed: {e} (non-fatal)")
+
+    try:
         from backend.shared.model_registry import model_registry_service
 
         await model_registry_service.ensure_tables()
@@ -539,6 +558,18 @@ try:
     logger.info("✅ AlphaAgent integration routers loaded")
 except ImportError as e:
     logger.error(f"❌ Failed to load AlphaAgent routers: {e}")
+
+try:
+    # 文档中心（T-FM-08）：整组端点自带 ENABLE_DOC_MINING 闸门（router 级依赖），
+    # 默认关时全部 403，注册本身无副作用
+    from backend.services.engine.routers.alpha_agent_docs import (
+        router as alpha_agent_docs_router,
+    )
+
+    app.include_router(alpha_agent_docs_router)
+    logger.info("✅ AlphaAgent docs routers loaded (gated by ENABLE_DOC_MINING)")
+except ImportError as e:
+    logger.error(f"❌ Failed to load AlphaAgent docs routers: {e}")
 
 try:
     from backend.services.engine.routers.trading_agents import router as trading_agents_router

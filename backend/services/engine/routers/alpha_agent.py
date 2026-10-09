@@ -17,9 +17,11 @@ if TYPE_CHECKING:  # pandas 在函数内按需 import；这里只为字符串注
     import pandas as pd
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from backend.services.engine.alpha_agent.doc_gate import require_doc_mining
+from backend.services.engine.alpha_agent.doc_store import get_doc_store
 from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
 from backend.services.engine.alpha_agent.launcher import get_launcher
 from backend.services.engine.alpha_agent.task_store import get_mining_task_store
@@ -40,6 +42,30 @@ persistence = RDAgentFactorPersistence()
 # P2：CN 可选股票池由 shared.stock_pool.builtins 派生（唯一事实源），
 # 与 quantdb_hub.UNIVERSE_MAP / Strategy Lab 白名单同源，不再各写一份。
 _VALID_CN_UNIVERSES: list[str] = list(cn_index_symbols().keys())
+
+#: 提交前 direction 的长度闸（T-FM-10）。task_store 的 20k 是**存储层**兜底
+#: （静默截断）；这里 8k 是**提交层**显式拒绝——文档整理草稿可长，但方向文本
+#: 塞给 RD-Agent 子进程是有成本的，超限要让用户看到并自己精简，不是被截。
+MAX_SUBMIT_DIRECTION_CHARS = 8000
+
+
+class EvolveRequest(BaseModel):
+    """evolve 的 JSON body 变体（T-FM-10）。
+
+    老前端只带 query（payload=None），行为一字不变；新前端走 body 并带
+    ``doc_id`` 记录文档血统。合并语义：body 里**非 None** 的字段覆盖 query。
+    """
+
+    market: str | None = None
+    universe: str | None = None
+    loop_n: int | None = Field(None, ge=1, le=20)
+    direction: str | None = None
+    directions: list[str] | None = None
+    direction_mode: str | None = None
+    data_source: str | None = None
+    #: 文档血统：来自文档链的挖掘任务带上它（写 rd_agent_mining_tasks.doc_id +
+    #: 回写 rd_agent_docs.task_id）；需 ENABLE_DOC_MINING=true
+    doc_id: str | None = None
 
 
 def _normalize_pool_ref(universe: str) -> str:
@@ -448,6 +474,9 @@ async def start_evolution(
     data_source: str = Query(
         "", description="数据源: qlib_bin, parquet, pg (留空使用默认)"
     ),
+    payload: EvolveRequest | None = Body(
+        default=None, description="JSON body 变体（新前端；含 doc_id 血统）"
+    ),
 ):
     """启动因子演化任务"""
     auth_user_id, auth_tenant_id = get_authenticated_identity(request)
@@ -456,6 +485,40 @@ async def start_evolution(
         auth_tenant_id=auth_tenant_id,
         provided_user_id=user_id,
     )
+
+    # JSON body 覆盖 query（老前端 payload=None，行为不变）
+    if payload is not None:
+        if payload.market:
+            market = payload.market
+        if payload.universe:
+            universe = payload.universe
+        if payload.loop_n is not None:
+            loop_n = payload.loop_n
+        if payload.direction is not None:
+            direction = payload.direction
+        if payload.directions is not None:
+            directions = payload.directions
+        if payload.direction_mode:
+            direction_mode = payload.direction_mode
+        if payload.data_source is not None:
+            data_source = payload.data_source
+    doc_id = ((payload.doc_id or "").strip() or None) if payload is not None else None
+
+    # 文档血统闸门 + 归属 + 状态（T-FM-10）：文档链没开的地方不存在
+    # 「合法的 doc_id」；他人/未解析完的 doc_id 不许挂任务
+    if doc_id:
+        require_doc_mining()
+        doc_row = await get_doc_store().get_doc(doc_id, user_id=auth_user_id)
+        if not doc_row or doc_row.get("status") == "deleted":
+            raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+        if doc_row.get("status") not in ("parsed", "organized"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"文档尚未解析完成（当前状态 {doc_row.get('status') or '未知'}），"
+                    "无法发起挖掘"
+                ),
+            )
 
     # Validate market
     try:
@@ -483,6 +546,33 @@ async def start_evolution(
             ),
         )
 
+    # 类别方向下发：前端传多选类别 + 模式，服务端解析成单条 direction
+    # （放在长度闸与 LLM 解析之前：纯函数先算完，超长在烧 token 前就被拒）
+    clean_dirs = [d.strip() for d in directions if isinstance(d, str) and d.strip()]
+    if clean_dirs:
+        import random as _random
+
+        direction = (
+            _random.choice(clean_dirs) if direction_mode == "random" else clean_dirs[0]
+        )
+        logger.info(
+            "[alpha-agent] evolve directions=%d mode=%s -> %s",
+            len(clean_dirs),
+            direction_mode,
+            direction,
+        )
+
+    # 提交前长度闸：超长显式拒绝（task_store 的 20k 存储兜底是静默截断，
+    # 不该让用户的编辑止步于「怎么少了半段」）
+    if len(direction) > MAX_SUBMIT_DIRECTION_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"挖掘方向过长（{len(direction)} 字，上限 {MAX_SUBMIT_DIRECTION_CHARS} 字），"
+                "请精简后重试"
+            ),
+        )
+
     llm_config, llm_source, embedding_env = await _resolve_effective_llm_config(
         auth_user_id, auth_tenant_id
     )
@@ -498,21 +588,6 @@ async def start_evolution(
         llm_config.model,
         "user_profile" if embedding_env else "container",
     )
-
-    # 类别方向下发：前端传多选类别 + 模式，服务端解析成单条 direction
-    clean_dirs = [d.strip() for d in directions if isinstance(d, str) and d.strip()]
-    if clean_dirs:
-        import random as _random
-
-        direction = (
-            _random.choice(clean_dirs) if direction_mode == "random" else clean_dirs[0]
-        )
-        logger.info(
-            "[alpha-agent] evolve directions=%d mode=%s -> %s",
-            len(clean_dirs),
-            direction_mode,
-            direction,
-        )
 
     launcher = get_launcher()
     # 并发上限：每个任务是 RD-Agent 子进程（烧 LLM token + Qlib 回测），
@@ -539,6 +614,9 @@ async def start_evolution(
             loop_n=loop_n,
             direction=direction or None,
             data_source=data_source or None,
+            # 文档血统：落 rd_agent_mining_tasks.source/doc_id（历史页可见出处）
+            source="doc" if doc_id else "text",
+            doc_id=doc_id,
             # embedding 独立于 chat 的来源：chat 走容器 env 时，用户在个人中心
             # 配的向量检索同样要下发（否则配置页显示「已保存」，挖掘却按容器
             # 默认供应商检索）。两组变量同源时值相同，覆盖幂等。
@@ -546,6 +624,15 @@ async def start_evolution(
         )
     except HardwareLockError as exc:
         raise HTTPException(status_code=412, detail=str(exc)) from exc
+
+    # 血统回写（T-FM-10）：doc → task 的反向指针，供文档列表显示「已挖掘」。
+    # 回写失败只告警——它是审计面，不是主链；任务已经起来了。
+    if doc_id:
+        try:
+            await get_doc_store().update_doc(doc_id, task_id=task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("[alpha-agent] doc %s task_id 回写失败", doc_id)
+
     return {
         "code": 200,
         "data": {
@@ -554,6 +641,8 @@ async def start_evolution(
             "universe": universe,
             "market_name": adapter.market_name,
             "status": "pending",
+            "source": "doc" if doc_id else "text",
+            "doc_id": doc_id,
             "message": f"{adapter.market_name} 因子挖掘任务已启动",
         },
     }
