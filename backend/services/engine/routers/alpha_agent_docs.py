@@ -1200,13 +1200,18 @@ async def delete_doc(request: Request, doc_id: str) -> dict:
     hit = await store.soft_delete(doc_id, user_id=user_id)
     if not hit:
         raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
-    # H1（安全审查修订）：只在 **MinerU 从未拿到文件** 时退预留——判据是
-    # mineru_batch_id 未落库。已提交的行（parsing 等）MinerU 无取消 API，
-    # 云端照常解析并按页扣平台账号，退预留 = 账面与真实账单脱钩（且每用户
-    # 日限、余量告警全部失真——上传→秒删循环能在账面为零的情况下烧穿平台
-    # 额度）。已 settle 的行（parsed/organized）退 = no-op，天然无害。
-    # 预留键 24h TTL 自回收，不会永久占账。
-    if not doc.get("mineru_batch_id"):
+    # H1（2026-10-09 修订）：批次已建（MinerU 拿到文件、无取消 API、照常
+    # 计费）→ 不退预留（退 = 账面与真实账单脱钩；每用户日限、余量告警全部
+    # 失真——上传→秒删循环能在账面为零的情况下烧穿平台额度），改挂**只记
+    # 账收尾**盯批次到终态：云端实际只烧了几页就结到几页。绝不再即刻把
+    # 预留原样记成已用——docx 预留 200 页、云端只烧 2 页，删后无人收账就是
+    # 幽灵占账、当日配额假性用尽（实案见 doc_parse_service 的 _reconcile_gone）。
+    # 从未提交的行（无批次号）费用没发生 → 全退。已 settle 的行
+    # （parsed/organized）收尾查批次已是终态，结算 = 对已取走的预留如实补记
+    # （幂等无害）；预留键 24h TTL 是进程停机的最后兜底。
+    if doc.get("mineru_batch_id"):
+        svc.schedule_quota_reconcile(doc)
+    else:
         try:
             get_doc_quota().release(doc_id, user_id, accounting=doc_accounting(doc))
         except Exception as exc:  # noqa: BLE001 —— 释放失败只告警（TTL 兜底回收）

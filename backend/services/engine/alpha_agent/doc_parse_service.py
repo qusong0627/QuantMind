@@ -518,10 +518,21 @@ class DocParseService:
         )
         if not hit:
             # 但 MinerU **已经拿到文件**（批次已建、上传已完成），会照常解析
-            # 并计费——预留转已用，不许全退（退=账面与真实账单脱钩）。
+            # 并计费——不许全退（退=账面与真实账单脱钩），也不许即刻
+            # commit（预留 200 页的 docx 云端可能只烧 2 页：即刻转已用就是
+            # 幽灵占账，当日配额假性用尽，2026-10-09 实案）——补挂只记账
+            # 收尾，盯批次到终态结到实际页数。
             shutil.rmtree(self.doc_dir(doc_id), ignore_errors=True)
-            self._commit_quota(doc)
-            logger.info("doc %s 上传期间已被删除，放弃解析", doc_id)
+            self.schedule_quota_reconcile(
+                {
+                    **doc,
+                    "mineru_batch_id": batch_id,
+                    "mineru_token_src": token_src,
+                    "mineru_mode": mode,
+                },
+                batch_id,
+            )
+            logger.info("doc %s 上传期间已被删除，放弃解析（配额收尾盯批次）", doc_id)
             return
         self.start_poll(doc_id)
         logger.info(
@@ -826,9 +837,8 @@ class DocParseService:
         hit = await self._store.update_doc(doc_id, **fields)
         if not hit:
             # H2：下载/解包期间用户删了文档（写被 deleted 守卫拦下）。
-            # 产物刚被写回已删目录 → 再清一次；删除端点对已建批次的行不退
-            # 预留（MinerU 照常计费），此处也不再结算——预留留在账上
-            # （保守上界，24h TTL 自回收），账面与真实账单一致。
+            # 产物刚被写回已删目录 → 再清一次；账由 ``_poll_loop`` 的 gone
+            # 分支统一收（纯记账收尾盯批次到终态，结到实际页数）。
             shutil.rmtree(doc_dir, ignore_errors=True)
             logger.info("doc %s 完成前已被删除，丢弃产物", doc_id)
             return "gone"
@@ -917,8 +927,8 @@ class DocParseService:
         hit = await self._store.update_doc(doc_id, **fields)
         if not hit:
             # H2：下载/合并期间用户删了文档（写被 deleted 守卫拦下）。
-            # 产物刚被写回已删目录 → 再清一次；删除端点对已建批次的行不退
-            # 预留（MinerU 照常计费），预留留在账上（保守上界）不再结算。
+            # 产物刚被写回已删目录 → 再清一次；账由 ``_poll_loop`` 的 gone
+            # 分支统一收（纯记账收尾盯批次到终态，结到实际页数）。
             shutil.rmtree(doc_dir, ignore_errors=True)
             logger.info("doc %s 完成前已被删除，丢弃产物", doc_id)
             return "gone"
@@ -939,9 +949,14 @@ class DocParseService:
 
     async def _poll_loop(self, doc_id: str) -> None:
         deadline = self._clock() + self._parse_timeout_s
+        # 行随时可能被删（用户删除/硬清）：收尾要靠这份启动期快照——
+        # gone 时行已读不到了。
+        snapshot = await self._store.get_doc(doc_id)
         while True:
             if self._clock() >= deadline:
-                await self._mark_timeout(doc_id)
+                if not await self._mark_timeout(doc_id):
+                    # 到点这一拍行刚好消失：超时定格没写成，账不能没人收
+                    await self._reconcile_gone_if_batch(snapshot)
                 return
             try:
                 state = await self._poll_once(doc_id)
@@ -953,6 +968,10 @@ class DocParseService:
                         parse_state="failed",
                         error=str(exc),
                     )
+                    # 凭据失效等永久错误查不到批次终态：批次可能已烧页 →
+                    # 预留转已用（保守上界）。不显式收口的账会一直悬着，
+                    # 删除时也没有行轮询可依赖。
+                    self._commit_quota(snapshot or {"doc_id": doc_id})
                     return
                 logger.warning("doc %s 轮询暂态失败（%s），按节拍重试", doc_id, exc)
                 state = "retry"
@@ -961,18 +980,152 @@ class DocParseService:
                 # 变成永久失败才是真的损失；总时限兜底。
                 logger.exception("doc %s 轮询意外异常，继续等待: %s", doc_id, exc)
                 state = "retry"
-            if state in ("parsed", "parse_failed", "gone"):
+            if state in ("parsed", "parse_failed"):
+                return
+            if state == "gone":
+                # 行没了但 MinerU 的账还在跑：把预留盯到批次终态结到实际
+                # （只记账，绝不写行/碰产物）。
+                await self._reconcile_gone_if_batch(snapshot)
                 return
             await self._sleep(self._poll_interval_s)
 
-    async def _mark_timeout(self, doc_id: str) -> None:
+    async def _reconcile_gone_if_batch(
+        self, snapshot: Mapping[str, Any] | None
+    ) -> None:
+        """快照上有批次号才收尾（没有 = MinerU 从未拿到文件，无账可收）。"""
+        batch_id = str((snapshot or {}).get("mineru_batch_id") or "")
+        if snapshot is not None and batch_id:
+            await self._reconcile_gone(snapshot, batch_id)
+
+    async def _reconcile_gone(self, doc: Mapping[str, Any], batch_id: str) -> None:
+        """行已消失后的**只记账**收尾：盯批次到终态，把预留结到实际。
+
+        删除/硬清后没有行可写、没有产物可碰（行上的世界已结束），唯一欠账
+        是 MinerU 的真实计费：docx 预留 200 页实际只烧 2 页，不结算就是
+        198 页幽灵占满当日配额（2026-10-09 实案）。终态判据与
+        :meth:`_fail_parts` 同口径——按实际烧掉的页记：
+
+        - 任一部件 failed：有 done 部件照常结算、还有在途则预留转已用、
+          全员失败才全退；
+        - 全部 done：按总页数结算（未报页数则预留转已用）；
+        - 到总时限仍在途：预留转已用（保守上界——它可能随后完成并计费）；
+        - 凭据失效等永久错误：预留转已用（不知道烧没烧，保守留账）。
+
+        本方法**绝不**调 ``update_doc`` / 碰产物目录；预留键 24h TTL 是
+        最后兜底（如进程在收尾完成前停机）。
+
+        入口先查预留是否还没收口：已 settle/commit/release 过的行（比如已
+        parsed 的文档被删除、删除与解析完成擦肩）直接跳过——重复结算会把
+        页数再加一遍。查不到预留（从未预留/键已过期）同样不动账。
+        """
+        doc_id = str(doc["doc_id"])
+        try:
+            outstanding = self._quota.has_reservation(
+                doc_id, accounting=doc_accounting(doc)
+            )
+        except Exception as exc:  # noqa: BLE001 —— 查不到就宁可不动账（TTL 兜底）
+            logger.warning("doc %s 配额收尾查预留失败（%s），跳过收尾", doc_id, exc)
+            return
+        if not outstanding:
+            logger.info("doc %s 已删除，配额已收口，收尾无事可做", doc_id)
+            return
+        deadline = self._clock() + self._parse_timeout_s
+        while True:
+            try:
+                client = await self._client_for_doc(doc)
+                items = await client.get_batch_results(batch_id)
+            except MineruError as exc:
+                if exc.retryable and self._clock() < deadline:
+                    await self._sleep(self._poll_interval_s)
+                    continue
+                self._commit_quota(doc)
+                logger.warning(
+                    "doc %s 已删除，配额收尾查不到批次（%s）：预留转已用",
+                    doc_id,
+                    exc,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 —— 与轮询循环同款兜底
+                if self._clock() < deadline:
+                    logger.warning(
+                        "doc %s 配额收尾查询异常（%s），按节拍重试", doc_id, exc
+                    )
+                    await self._sleep(self._poll_interval_s)
+                    continue
+                self._commit_quota(doc)
+                logger.warning(
+                    "doc %s 已删除，配额收尾到点仍查不到批次：预留转已用", doc_id
+                )
+                return
+
+            states = [(item.state or "").strip().lower() for item in items]
+            if any(state == "failed" for state in states):
+                done_items = [
+                    item
+                    for item, state in zip(items, states, strict=True)
+                    if state == "done"
+                ]
+                inflight = any(state not in ("done", "failed") for state in states)
+                if inflight:
+                    self._commit_quota(doc)
+                elif done_items:
+                    pages = sum(int(item.total_pages or 0) for item in done_items)
+                    await self._settle_or_commit_quota(doc, pages)
+                else:
+                    self._release_quota(doc)
+                logger.info("doc %s 已删除，配额收尾完成（批次失败）", doc_id)
+                return
+            if states and all(state == "done" for state in states):
+                pages = sum(int(item.total_pages or 0) for item in items)
+                await self._settle_or_commit_quota(doc, pages)
+                logger.info(
+                    "doc %s 已删除，配额收尾完成（批次完成，%d 页）", doc_id, pages
+                )
+                return
+            if self._clock() >= deadline:
+                self._commit_quota(doc)
+                logger.warning("doc %s 已删除，批次超时仍在途：预留转已用", doc_id)
+                return
+            await self._sleep(self._poll_interval_s)
+
+    def schedule_quota_reconcile(
+        self, doc: Mapping[str, Any], batch_id: str | None = None
+    ) -> None:
+        """给**行已消失**的文档补挂只记账收尾（不写行、不碰产物）。
+
+        删除端点专用：``cancel()`` 会把原轮询停掉（防止删后复活），随后账
+        不能没人收——MinerU 无取消 API，批次照常计费，预留必须盯到终态结到
+        实际。轮询还活着的路径由 ``_poll_loop`` 的 gone 分支自行收尾，这里
+        直接跳过（双收尾者并发结算会重复记账）。
+        """
+        doc_id = str(doc["doc_id"])
+        batch = str(batch_id or doc.get("mineru_batch_id") or "")
+        if not batch:
+            return
+        existing = self._tasks.get(doc_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._reconcile_gone(dict(doc), batch), name=f"doc-quota-{doc_id}"
+        )
+
+        def _discard(done: asyncio.Task, key: str = doc_id) -> None:
+            if self._tasks.get(key) is done:
+                self._tasks.pop(key, None)
+
+        task.add_done_callback(_discard)
+        self._tasks[doc_id] = task
+
+    async def _mark_timeout(self, doc_id: str) -> bool:
+        """超时定格；返回 False = 行已消失/已定型（调用方据此补收配额）。"""
         doc = await self._store.get_doc(doc_id)
         if not doc or doc.get("status") != "parsing":
-            return
+            return False
         await self._fail(
             doc,
             f"解析超时（超过 {_format_duration(self._parse_timeout_s)} 未完成），请稍后重新提交",
         )
+        return True
 
     # -- sha256 幂等复用 ------------------------------------------------
 

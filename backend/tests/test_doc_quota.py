@@ -73,6 +73,10 @@ class StubRedis:
     def get(self, key: str) -> str | None:
         return self.data.get(key)
 
+    def exists(self, key: str) -> int:
+        self.calls.append(("exists", key))
+        return 1 if key in self.data else 0
+
     def set(self, key: str, value, *, nx: bool = False, ex: int | None = None):
         self.calls.append(("set", key, value, nx, ex))
         if nx and key in self.data:
@@ -285,6 +289,30 @@ def test_settle_missing_value_tolerates_garbage_pages() -> None:
     st = q.settle("d1", "u1", 7)
     assert st.user_used == 7
     assert "qm:docmining:reserve:d1" not in r.data
+
+
+def test_has_reservation_reflects_open_and_closed_books() -> None:
+    """只读探针：预留未收口 True；settle/commit/release 任一收口后 False。"""
+    r = StubRedis()
+    q = mk_quota(r, now=FIXED)
+    assert q.has_reservation("d1") is False, "从未预留 = 无账可收"
+
+    q.reserve("u1", 200, doc_id="d1")
+    assert q.has_reservation("d1") is True
+    before = dict(r.data)
+    q.has_reservation("d1")
+    assert r.data == before, "探针只读，不许消费预留键"
+
+    q.settle("d1", "u1", 2)
+    assert q.has_reservation("d1") is False, "已收口"
+
+    q.reserve("u1", 5, doc_id="d2")
+    q.commit_reservation("d2")
+    assert q.has_reservation("d2") is False, "预留转已用也是收口"
+
+    q.reserve("u1", 5, doc_id="d3")
+    q.release("d3", "u1")
+    assert q.has_reservation("d3") is False, "全额退也是收口"
 
 
 # ── 释放（失败/删除全额退） ─────────────────────────────────────────

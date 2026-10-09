@@ -162,17 +162,26 @@ class FakeQuota:
         self.committed: list[str] = []
         self.accounting_calls: list[tuple[str, bool | None]] = []
         self.settle_status = None
+        #: 未收口的预留（真实 DocQuota 里是 Redis 预留键的存在性）；
+        #: settle/commit/release 都会消费它，收尾据此防重复记账。
+        self.reserved: dict[str, bool] = {}
+
+    def has_reservation(self, doc_id, *, accounting=None):
+        return self.reserved.get(str(doc_id), False)
 
     def settle(self, doc_id, user_id, pages, *, accounting=None):
+        self.reserved.pop(str(doc_id), None)
         self.recorded.append((user_id, int(pages)))
         self.accounting_calls.append(("settle", accounting))
         return self.settle_status
 
     def commit_reservation(self, doc_id, *, accounting=None):
+        self.reserved.pop(str(doc_id), None)
         self.committed.append(str(doc_id))
         self.accounting_calls.append(("commit", accounting))
 
     def release(self, doc_id, user_id, *, accounting=None):
+        self.reserved.pop(str(doc_id), None)
         self.released.append((doc_id, user_id))
         self.accounting_calls.append(("release", accounting))
 
@@ -677,6 +686,181 @@ async def test_poll_loop_timeout_marks_failed(tmp_path: Path) -> None:
     assert client.calls == 3, "t=0/1/2 三次轮询后到点定格"
 
 
+# ── 行消失后的配额收尾（幽灵占账修复，2026-10-09） ──────────────────
+
+
+class _DeleteAfterFirstPoll(FakeMineru):
+    """第一次轮询返回后把行标记删除：模拟「解析中用户在别处点了删除」。"""
+
+    def __init__(self, store: FakeStore) -> None:
+        super().__init__()
+        self._store = store
+        self._deleted = False
+
+    async def get_batch_results(self, batch_id):
+        items = await super().get_batch_results(batch_id)
+        if not self._deleted:
+            self._deleted = True
+            self._store.rows[DOC_ID]["status"] = "deleted"
+        return items
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_gone_settles_quota_to_actual_when_batch_done(
+    tmp_path: Path,
+) -> None:
+    """删后批次完成：轮询器不许静默退出——把预留结到实际页数。
+
+    实案：docx 预留 200 页、云端只烧 2 页，删后无人收账 → 当日配额幽灵
+    用尽（账本 200/200 vs 云端 2 页）。
+    """
+    store = FakeStore({DOC_ID: mk_doc(tmp_path)})
+    quota = FakeQuota()
+    client = _DeleteAfterFirstPoll(store)
+    client.results_queue = [
+        [MineruBatchItem(file_name="paper.pdf", state="running", data_id=DOC_ID)],
+        [
+            MineruBatchItem(
+                file_name="paper.pdf", state="done", data_id=DOC_ID, total_pages=2
+            )
+        ],
+    ]
+    quota.reserved[DOC_ID] = True  # 预留还没收口
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    await svc._poll_loop(DOC_ID)
+
+    assert quota.recorded == [("u1", 2)], "预留结到云端实际烧掉的页数"
+    assert quota.committed == [], "不许把 200 页预留原样留在账上"
+    assert quota.released == []
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_gone_releases_quota_when_batch_failed(
+    tmp_path: Path,
+) -> None:
+    """删后批次失败且无已完成部件：费用没发生，预留全额退回。"""
+    store = FakeStore({DOC_ID: mk_doc(tmp_path)})
+    quota = FakeQuota()
+    client = _DeleteAfterFirstPoll(store)
+    client.results_queue = [
+        [MineruBatchItem(file_name="paper.pdf", state="running", data_id=DOC_ID)],
+        [
+            MineruBatchItem(
+                file_name="paper.pdf", state="failed", data_id=DOC_ID, err_msg="boom"
+            )
+        ],
+    ]
+    quota.reserved[DOC_ID] = True  # 预留还没收口
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    await svc._poll_loop(DOC_ID)
+
+    assert quota.released == [(DOC_ID, "u1")]
+    assert quota.recorded == [] and quota.committed == []
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_gone_without_batch_touches_no_quota(tmp_path: Path) -> None:
+    """行消失了但批次号从未落库：没有可盯的批次，不动账（预留键 TTL 兜底）。"""
+    store = FakeStore(
+        {DOC_ID: mk_doc(tmp_path, status="deleted", mineru_batch_id=None)}
+    )
+    quota = FakeQuota()
+    client = FakeMineru()
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    await svc._poll_loop(DOC_ID)
+
+    assert client.calls == 0
+    assert quota.recorded == [] and quota.released == [] and quota.committed == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_quota_reconcile_commits_when_batch_never_ends(
+    tmp_path: Path,
+) -> None:
+    """补挂的收尾盯到总时限批次仍在途 → 预留转已用（保守上界，不许全退）。"""
+    quota = FakeQuota()
+    quota.reserved[DOC_ID] = True  # 预留还没收口
+    client = FakeMineru()  # 永远 running
+    svc, clock = mk_service(
+        tmp_path,
+        FakeStore({}),
+        client=client,
+        quota=quota,
+        poll_interval_s=1.0,
+        parse_timeout_s=2.5,
+    )
+    svc.schedule_quota_reconcile(mk_doc(tmp_path))
+
+    await svc._tasks[DOC_ID]
+
+    assert quota.committed == [DOC_ID]
+    assert quota.recorded == [] and quota.released == []
+    assert clock.slept == [1.0, 1.0, 1.0], "按轮询节拍盯，不空转"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_gone_skips_when_reservation_already_closed(
+    tmp_path: Path,
+) -> None:
+    """预留已收口（如已 parsed 的文档被删除）→ 收尾直接跳过：
+
+    settle 对取不到预留键的文档会走「如实补记」把页数再加一遍——已结算的
+    行再收尾一次就是双倍记账。
+    """
+    quota = FakeQuota()  # reserved 为空 = 账已收口
+    client = FakeMineru()
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="paper.pdf", state="done", data_id=DOC_ID, total_pages=2
+            )
+        ]
+    ]
+    svc, _ = mk_service(tmp_path, FakeStore({}), client=client, quota=quota)
+    svc.schedule_quota_reconcile(mk_doc(tmp_path))
+
+    await svc._tasks[DOC_ID]
+
+    assert client.calls == 0, "账已收口就别再打 MinerU"
+    assert quota.recorded == [] and quota.committed == [] and quota.released == []
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_permanent_error_commits_quota(tmp_path: Path) -> None:
+    """凭据失效等永久错误：批次可能已烧页 → 预留转已用（账不悬着）。"""
+    store = FakeStore({DOC_ID: mk_doc(tmp_path)})
+    quota = FakeQuota()
+    quota.reserved[DOC_ID] = True
+    client = FakeMineru()
+    client.results_queue = [MineruError("token 无效", code="A0202", retryable=False)]
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    await svc._poll_loop(DOC_ID)
+
+    assert quota.committed == [DOC_ID]
+    assert quota.released == [], "查不到终态不许全退"
+    assert quota.reserved == {}, "显式收口：预留键必须被消费"
+
+
+@pytest.mark.asyncio
+async def test_schedule_quota_reconcile_skips_when_poller_alive(
+    tmp_path: Path,
+) -> None:
+    """轮询还活着就别双开收尾者：两个收尾者并发结算会重复记账。"""
+    store = FakeStore({DOC_ID: mk_doc(tmp_path)})
+    svc, _ = mk_service(tmp_path, store, client=FakeMineru())
+    svc.start_poll(DOC_ID)
+    task = svc._tasks[DOC_ID]
+
+    svc.schedule_quota_reconcile(store.rows[DOC_ID])
+
+    assert svc._tasks[DOC_ID] is task, "活着的轮询者自己会收尾，不许顶掉"
+    await svc.shutdown()
+
+
 # ── 提交 ────────────────────────────────────────────────────────────
 
 
@@ -732,11 +916,12 @@ async def test_submit_parse_failure_marks_row_and_raises(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_submit_parse_deleted_during_upload_aborts_and_commits(
+async def test_submit_parse_deleted_during_upload_schedules_quota_reconcile(
     tmp_path: Path,
 ) -> None:
-    """H2：上传窗口内被删除 → 写 parsing 被守卫拦下，清目录、预留转已用
-    （MinerU 已拿到文件会照常计费）、不挂轮询。"""
+    """H2：上传窗口内被删除 → 写 parsing 被守卫拦下，清目录，**补挂只记账
+    收尾**（MinerU 已拿到文件会照常计费，但账要结到实际页数而非 200 页上
+    限——即刻 commit 就是幽灵占账，2026-10-09 实案），不挂行轮询。"""
     doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None)
     store = FakeStore({DOC_ID: dict(doc)})
     quota = FakeQuota()
@@ -749,16 +934,31 @@ async def test_submit_parse_deleted_during_upload_aborts_and_commits(
             await super().upload_file(url, content)
             store.rows[DOC_ID]["status"] = "deleted"  # 上传慢，用户此刻点了删除
 
-    svc, _ = mk_service(tmp_path, store, client=DeletingClient(), quota=quota)
+    client = DeletingClient()
+    quota.reserved[DOC_ID] = True  # 预留还没收口（真实账本里的预留键）
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
 
     await svc.submit_parse(doc)  # 不抛：放弃解析是正常收尾
 
     assert store.rows[DOC_ID]["status"] == "deleted", "已删行不许被写回 parsing"
     assert not doc_dir.exists(), "上传窗口放弃解析必须清目录"
-    assert quota.committed == [DOC_ID], "MinerU 已拿到文件：预留转已用，不许全退"
+    assert quota.committed == [], "不再即刻把 200 页预留记成已用：账等批次终态"
     assert quota.released == []
-    assert svc._tasks == {}, "放弃解析不许挂轮询（挂上就是删后复活）"
+    assert DOC_ID in svc._tasks, "放弃解析要补挂收尾任务（盯批次结账，不写行）"
     assert any("parsing" == f.get("status") for _, f in store.rejected_writes)
+
+    # 云端批次实际只烧 2 页 → 收尾把预留结到实际
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="paper.pdf", state="done", data_id=DOC_ID, total_pages=2
+            )
+        ]
+    ]
+    await svc._tasks[DOC_ID]
+
+    assert quota.recorded == [("u1", 2)], "预留结到 MinerU 实际烧掉的页数"
+    assert quota.committed == [] and quota.released == []
 
 
 # ── 多文件（一文档多件，T-FM-19a） ──────────────────────────────────

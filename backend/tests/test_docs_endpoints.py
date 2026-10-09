@@ -182,6 +182,7 @@ class FakeParseService:
         self.reuse_result = False
         self.reuse_calls: list[dict] = []
         self.cancelled: list[str] = []
+        self.scheduled: list[str] = []
 
     def doc_dir(self, doc_id: str) -> Path:
         return self._root / doc_id
@@ -203,6 +204,9 @@ class FakeParseService:
     async def cancel(self, doc_id: str) -> bool:
         self.cancelled.append(doc_id)
         return True
+
+    def schedule_quota_reconcile(self, doc, batch_id: str | None = None) -> None:
+        self.scheduled.append(str(doc["doc_id"]))
 
 
 class FakeQuota:
@@ -2092,9 +2096,12 @@ async def test_delete_cancels_poll_then_removes_dir_and_soft_deletes(
     assert svc.cancelled == ["d1"], "必须先取消在途轮询（否则删完又被写回 parsed）"
     assert not doc_dir.exists()
     assert store.soft_deleted == [("d1", "u-1")]
+    assert svc.scheduled == ["d1"], (
+        "批次已建的删除：轮询停了但账不能没人收——补挂只记账收尾盯批次到终态"
+    )
     assert quota.released == [], (
         "批次已建（MinerU 已拿到文件、照常计费）→ 不许退预留："
-        "上传→秒删循环能在账面为零的情况下烧穿平台额度"
+        "上传→秒删循环能在账面为零的情况下烧穿平台额度；账由收尾结到实际页数"
     )
 
 
@@ -2115,6 +2122,8 @@ async def test_delete_uploaded_without_batch_releases_reservation(
     out = await docs_mod.delete_doc(request=FakeRequest(), doc_id="d1")
 
     assert out["data"] == {"doc_id": "d1", "deleted": True}
+    assert svc.cancelled == ["d1"]
+    assert svc.scheduled == [], "没有批次号就没有可盯的账，不补挂收尾"
     assert quota.released == [("d1", "u-1")], "从未提交 MinerU：预留要退"
 
 

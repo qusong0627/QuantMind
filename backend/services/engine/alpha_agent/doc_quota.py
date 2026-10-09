@@ -215,6 +215,18 @@ class DocQuota:
             logger.warning("预留键 %s 含非法值 %r，忽略预留部分", rkey, raw)
             return (day or quota_day(self._now()), 0)
 
+    def has_reservation(self, doc_id: str, *, accounting: bool | None = None) -> bool:
+        """预留是否尚未收口（settle/commit/release 均未碰过）。只读，不消费。
+
+        删除后的配额收尾（``_reconcile_gone``）用来防重复记账：已 settle 过
+        的行收尾再 settle 一次，取不到预留键会走「如实补记」分支把实际页数
+        **再加一遍**；已 release 过的则会把全退款再补记回来。预留键过期
+        （24h TTL）后本方法为 False——账已不可考，宁可不动。
+        """
+        if not self._accounting_enabled(accounting):
+            return False
+        return bool(self._client().exists(self._reserve_key(doc_id)))
+
     def _bump(self, day: str, user_id: str, delta: int) -> None:
         if not delta:
             return
