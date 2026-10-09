@@ -13,8 +13,11 @@
    下次扫描把它当成未知文件）。
 5. **单分区失败不中断整批**，但要记进 ``failed`` 让调用方拿到非零退出码 ——
    毕业一半而日志说「完成」是最坏的结果。
+6. **注册按字典契约**。``discover()`` 返回 ``{source: to_dict()}``；把这个
+   dict 当对象用（``status.files``）不会在镜像阶段暴露 —— 镜像成功而字段
+   注册缺席，训练页只会看到一座空库。
 
-纯文件系统测试（tmp_path），不碰 DB、不碰真实数据根。
+纯文件系统测试（tmp_path）；注册环节用 monkeypatch 断 DB，不碰真实数据根。
 """
 
 from __future__ import annotations
@@ -271,3 +274,91 @@ def test_resolve_roots_falls_back_to_env(tmp_path, monkeypatch):
 
     assert src == tmp_path / "envsrc" / "6_ml_datasets" / "rd_mined"
     assert dst == tmp_path / "envdst" / "6_ml_datasets" / "rd_mined"
+
+
+# ---------------------------------------------------------------------------
+# 注册移交：discover() 的契约是 dict[str, dict]
+# ---------------------------------------------------------------------------
+class _FakeSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def test_register_fields_consumes_dict_shaped_discover(monkeypatch):
+    """``discover()`` 返回 ``{source: to_dict()}``；注册必须按字典取值。
+
+    历史 bug：把 status 当对象用（``status.files``），``--register`` 一跑就
+    AttributeError —— 镜像成功了，字段注册却整段缺席。
+    """
+    from backend.services.api.routers.admin import quantdb_factor_catalog as qfc
+    from backend.services.engine.data_platform import quantdb_factor_reader as qfr
+    from backend.shared import database_manager_v2 as dbm
+
+    fake_status = {
+        "dataset_id": prm.DATASET,
+        "path": "/data/quantdb/6_ml_datasets/rd_mined",
+        "files": 1637,
+        "columns": ["symbol", "date", "alpha_001"],
+        "column_types": {"symbol": "object", "alpha_001": "double"},
+        "schema_hash": "deadbeef",
+        "min_date": "2020-01-02",
+        "max_date": "2026-09-30",
+        "ready": True,
+        "missing_required": [],
+        "reason": None,
+    }
+
+    class FakeReader:
+        def __init__(self, market=None):
+            assert market == prm.TARGET_MARKET
+
+        def discover(self, market=None):
+            return {prm.DATASET: fake_status}
+
+    seen: dict = {}
+
+    async def fake_ensure_schema(session):
+        seen["ensured"] = True
+
+    async def fake_record(session, source, status, market):
+        seen["source"], seen["status"], seen["market"] = source, status, market
+
+    monkeypatch.setattr(qfr, "QuantDBFactorReader", FakeReader)
+    monkeypatch.setattr(qfc, "_ensure_schema", fake_ensure_schema)
+    monkeypatch.setattr(qfc, "record_source_fields", fake_record)
+    monkeypatch.setattr(dbm, "get_session", _FakeSession)
+
+    assert prm._register_fields() == 0
+    assert seen["ensured"] is True
+    assert seen["source"] == prm.DATASET
+    assert seen["market"] == prm.TARGET_MARKET
+    assert seen["status"] is fake_status, "扫描结果要原样透传，别复制、别翻译"
+
+
+def test_register_fields_missing_dataset_writes_nothing(monkeypatch):
+    """CN 侧没发现该库 → 非零退出，且绝不进入 DB 会话。"""
+    from backend.services.api.routers.admin import quantdb_factor_catalog as qfc
+    from backend.services.engine.data_platform import quantdb_factor_reader as qfr
+    from backend.shared import database_manager_v2 as dbm
+
+    class FakeReader:
+        def __init__(self, market=None):
+            pass
+
+        def discover(self, market=None):
+            return {}
+
+    def _must_not_open_session():
+        raise AssertionError("未发现目标库时不该进入 DB 会话")
+
+    async def _must_not_record(*args, **kwargs):
+        raise AssertionError("未发现目标库时不该写注册表")
+
+    monkeypatch.setattr(qfr, "QuantDBFactorReader", FakeReader)
+    monkeypatch.setattr(qfc, "record_source_fields", _must_not_record)
+    monkeypatch.setattr(dbm, "get_session", _must_not_open_session)
+
+    assert prm._register_fields() == 1

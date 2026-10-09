@@ -357,21 +357,23 @@ def _register_fields() -> int:
         if status is None:
             logger.error("CN 侧未发现 %s —— 目标根下没有该库或其分区不可读", DATASET)
             return 1
+        # discover() 按契约返回 {source: to_dict()}（dict[str, dict]），与下方
+        # record_source_fields 的入参同形——一律按字典取值，勿用属性访问。
         logger.info(
             "CN/%s: files=%s cols=%s ready=%s reason=%s",
             DATASET,
-            status.files,
-            len(status.columns),
-            status.ready,
-            status.reason,
+            status["files"],
+            len(status["columns"]),
+            status["ready"],
+            status["reason"],
         )
-        if not status.ready:
+        if not status["ready"]:
             logger.error("CN 侧未就绪，仍写注册表（便于前端显示原因），但不要发布")
         async with get_session() as session:
             await _ensure_schema(session)
             await record_source_fields(session, DATASET, status, TARGET_MARKET)
         logger.info("CN 字段注册已刷新（%s）。", DATASET)
-        return 0 if status.ready else 1
+        return 0 if status["ready"] else 1
 
     return asyncio.run(_run())
 
