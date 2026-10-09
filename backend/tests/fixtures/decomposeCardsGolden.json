@@ -1,0 +1,96 @@
+{
+  "comment": "拆解卡片归一化金样：validate_cards 的唯一契约。任何过滤/去重/截断/省略口径的改动都必须同步本文件，否则测试红。",
+  "prompt_version": "decompose_v1",
+  "max_cards": 6,
+  "allowed_categories": ["momentum", "volatility", "liquidity", "value", "quality"],
+  "input": {
+    "cards": [
+      {
+        "title": "  动量反转  ",
+        "hypothesis": " 短期超跌个股存在均值回复 ",
+        "rationale": " 行为偏差：短期过度反应与处置效应 ",
+        "categories": ["  momentum  "],
+        "evaluation_hint": " 5 日收益 rank IC "
+      },
+      {
+        "title": "波动率压缩",
+        "hypothesis": "低波动异象在 A 股长期存在",
+        "categories": ["momentum", "momentum", "unknown_cat", "volatility", "liquidity", "quality"],
+        "rationale": "",
+        "evaluation_hint": "   "
+      },
+      {
+        "title": "量价背离",
+        "hypothesis": "价升量缩预示短期反转",
+        "categories": "liquidity"
+      },
+      {
+        "title": "换手冲击",
+        "hypothesis": "高换手之后的短期反转",
+        "categories": ["nope", "zzz"]
+      },
+      {
+        "title": "估值分位",
+        "hypothesis": "低估分位组合长期跑赢高估分位",
+        "categories": ["value", "quality"]
+      },
+      {
+        "title": "盈利质量",
+        "hypothesis": "应计质量高的公司后续超额收益更高",
+        "categories": []
+      },
+      {
+        "title": "截断一",
+        "hypothesis": "超出上限的卡片不该出现在结果里",
+        "categories": ["momentum"]
+      },
+      {
+        "title": "截断二",
+        "hypothesis": "超出上限的卡片不该出现在结果里",
+        "categories": ["momentum"]
+      },
+      {
+        "title": "截断三",
+        "hypothesis": "超出上限的卡片不该出现在结果里",
+        "categories": ["momentum"]
+      }
+    ]
+  },
+  "expected": {
+    "dropped": 3,
+    "cards": [
+      {
+        "title": "动量反转",
+        "hypothesis": "短期超跌个股存在均值回复",
+        "rationale": "行为偏差：短期过度反应与处置效应",
+        "categories": ["momentum"],
+        "evaluation_hint": "5 日收益 rank IC"
+      },
+      {
+        "title": "波动率压缩",
+        "hypothesis": "低波动异象在 A 股长期存在",
+        "categories": ["momentum", "volatility", "liquidity"]
+      },
+      {
+        "title": "量价背离",
+        "hypothesis": "价升量缩预示短期反转",
+        "categories": ["liquidity"]
+      },
+      {
+        "title": "换手冲击",
+        "hypothesis": "高换手之后的短期反转",
+        "categories": []
+      },
+      {
+        "title": "估值分位",
+        "hypothesis": "低估分位组合长期跑赢高估分位",
+        "categories": ["value", "quality"]
+      },
+      {
+        "title": "盈利质量",
+        "hypothesis": "应计质量高的公司后续超额收益更高",
+        "categories": []
+      }
+    ]
+  }
+}

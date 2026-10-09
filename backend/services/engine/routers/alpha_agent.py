@@ -21,6 +21,10 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from backend.services.engine.alpha_agent import profile_gateway
+from backend.services.engine.alpha_agent.direction_decompose import (
+    MAX_CARDS_DEFAULT,
+    MAX_CARDS_LIMIT,
+)
 from backend.services.engine.alpha_agent.doc_gate import require_doc_mining
 from backend.services.engine.alpha_agent.doc_store import get_doc_store
 from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
@@ -67,6 +71,22 @@ class EvolveRequest(BaseModel):
     #: 文档血统：来自文档链的挖掘任务带上它（写 rd_agent_mining_tasks.doc_id +
     #: 回写 rd_agent_docs.task_id）；需 ENABLE_DOC_MINING=true
     doc_id: str | None = None
+
+
+class DecomposeRequest(BaseModel):
+    """拆解请求：一段粗方向 → N 张正交子假设卡片（只拆解，不启动挖掘）。"""
+
+    direction: str = Field(
+        "", description="待拆解的粗方向（研报摘录/长文指令），上限与存储闸同一口径"
+    )
+    market: str = Field("a_share", description="目标市场")
+    universe: str = Field("csi300", description="股票池")
+    max_cards: int | None = Field(
+        None,
+        description=(
+            f"卡片数上限（默认 {MAX_CARDS_DEFAULT}、上限 {MAX_CARDS_LIMIT}，越界自动收敛）"
+        ),
+    )
 
 
 def _normalize_pool_ref(universe: str) -> str:
@@ -661,6 +681,68 @@ async def start_evolution(
             "message": f"{adapter.market_name} 因子挖掘任务已启动",
         },
     }
+
+
+@router.post("/directions/decompose")
+async def decompose_directions(request: Request, payload: DecomposeRequest):
+    """把一个粗挖掘方向拆成多张正交子假设卡片（只拆解，不启动任何任务）。
+
+    挖掘是钱（LLM token + Qlib 回测 + 子进程名额）：先拆明白，再批量派发
+    （派发走 POST /mining/batch）。本端点不落任何任务行——拆解失败没有
+    半张卡片会开跑。LLM 取值链与 evolve 完全同一条（无配置 412）。
+    """
+    from backend.services.engine.alpha_agent.direction_decompose import (
+        DecomposeError,
+        decompose_direction,
+    )
+
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+
+    # 市场有效性：拆解本身不吃市场，但因子池摘要按市场取——假市场会静默空注入
+    try:
+        from backend.services.engine.rd_agent.market_adapters import (
+            get_adapter,
+            list_markets,
+        )
+
+        get_adapter(payload.market)
+    except ValueError as e:
+        available = [m["market_id"] for m in list_markets()]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown market: {payload.market}. Available: {available}",
+        ) from e
+
+    llm_config, llm_source, _embedding_env = await _resolve_effective_llm_config(
+        auth_user_id, auth_tenant_id
+    )
+    if llm_config is None:
+        raise HTTPException(
+            status_code=412,
+            detail="未配置 LLM API Key：可在个人中心「其他设置 → AI 服务配置」填写（与 AI-IDE 共用），"
+            "或在服务器 .env 配置 DEEPSEEK_API_KEY / AI_IDE_LLM_API_KEY / OPENAI_API_KEY。",
+        )
+
+    try:
+        result = await decompose_direction(
+            direction=(payload.direction or "").strip(),
+            user_id=auth_user_id,
+            llm_config=llm_config,
+            market=payload.market,
+            universe=payload.universe,
+            max_cards=payload.max_cards,
+        )
+    except DecomposeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    logger.info(
+        "[alpha-agent] decompose source=%s model=%s cards=%d dropped=%d",
+        llm_source,
+        llm_config.model,
+        len(result["cards"]),
+        result["dropped"],
+    )
+    return {"code": 200, "data": result}
 
 
 @router.get("/tasks/history")
