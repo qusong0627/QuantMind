@@ -37,6 +37,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from backend.services.engine.alpha_agent.doc_alerts import maybe_alert_quota_low
 from backend.services.engine.alpha_agent.doc_quota import DocQuota, get_doc_quota
 from backend.services.engine.alpha_agent.doc_store import DocStore, get_doc_store
 from backend.services.engine.alpha_agent.mineru_client import (
@@ -359,13 +360,19 @@ class DocParseService:
             logger.warning("doc %s 配额预留释放失败: %s", doc.get("doc_id"), exc)
 
     def _settle_quota(self, doc: Mapping[str, Any], pages: int) -> None:
-        """产物落定后的结算：预留 → 实际（多退少补）。"""
+        """产物落定后的结算：预留 → 实际（多退少补）。
+
+        结算是用量**真正落地**的唯一时点——平台余量告警挂在这里
+        （失败路径 release 全退后条件可能不再成立，不在那里判）。
+        """
         try:
-            self._quota.settle(
+            status = self._quota.settle(
                 str(doc["doc_id"]), str(doc.get("user_id") or ""), int(pages or 0)
             )
         except Exception as exc:  # noqa: BLE001 —— 产物已落盘，记账失败只告警不回滚
             logger.warning("doc %s 配额结算失败: %s", doc.get("doc_id"), exc)
+            return
+        maybe_alert_quota_low(status, quota=self._quota)
 
     async def _fail(
         self,
@@ -383,6 +390,7 @@ class DocParseService:
         )
         if release_quota:
             self._release_quota(doc)
+        logger.warning("doc %s 解析失败：%s", doc.get("doc_id"), message)
 
     async def _poll_once(self, doc_id: str) -> str:
         """一次轮询：parsed / parse_failed / active / pending / gone。

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # QuantMind 前端部署脚本
-# 用法: bash scripts/deploy_frontend.sh [--skip-build] [--allow-local-live]
+# 用法: bash scripts/deploy_frontend.sh [--skip-build] [--allow-local-live] [--allow-doc-mining]
 #
 # 解决问题: docker cp 不会清理已删除的旧 chunk，且 main 文件名 hash 每次变化，
 #           零散 cp 会留下"旧 main 找不到 + 新 main 没复制"的混合状态。
@@ -10,6 +10,8 @@
 #   --skip-build        跳过 npm run build，直接部署当前 dist-react/
 #   --allow-local-live  允许部署**实盘 UI 可见**的产物（构建时 VITE_ENABLE_REAL_TRADING=true，
 #                       底部栏会出现「实盘交易」入口）。默认拒绝，见第 0 步。
+#   --allow-doc-mining  允许部署**文档挖掘 UI 可见**的产物（构建时 VITE_ENABLE_DOC_MINING=true，
+#                       因子挖掘首页会出现「上传文档」入口）。默认拒绝，见第 0b 步。
 set -euo pipefail
 
 # ── 配置 ──────────────────────────────────────────────────────
@@ -20,6 +22,7 @@ WEB_CONTAINER="quantmind-web"
 NGINX_ROOT="/usr/share/nginx/html"
 SKIP_BUILD=""
 ALLOW_LOCAL_LIVE="${ALLOW_LOCAL_LIVE:-}"
+ALLOW_DOC_MINING="${ALLOW_DOC_MINING:-}"
 
 # ── 工具函数 ──────────────────────────────────────────────────
 log()   { echo -e "\033[36m[deploy]\033[0m $*"; }
@@ -32,7 +35,8 @@ for arg in "$@"; do
     case "$arg" in
         --skip-build)        SKIP_BUILD="--skip-build" ;;
         --allow-local-live)  ALLOW_LOCAL_LIVE=1 ;;
-        *) fail "未知参数：$arg（可用：--skip-build / --allow-local-live）" ;;
+        --allow-doc-mining)  ALLOW_DOC_MINING=1 ;;
+        *) fail "未知参数：$arg（可用：--skip-build / --allow-local-live / --allow-doc-mining）" ;;
     esac
 done
 
@@ -60,6 +64,24 @@ if [[ "${REAL_TRADING_FLAG}" == "true" && -z "${ALLOW_LOCAL_LIVE}" ]]; then
 fi
 # （这是**提前**失败：省掉一次白构建。放行的提示与真正权威的判据在第 3 步——
 #   那里读的是**产物里的内联标记**，`--skip-build` 与「env 与产物不一致」都跑不掉。）
+
+# ── 0b. 文档挖掘 UI 可见的构建：默认拒绝，显式放行 ─────────────
+# `VITE_ENABLE_DOC_MINING=true` 构建出来的产物，因子挖掘首页会出现「上传文档」
+# 输入方式、挖掘历史出现「文档解析」栏。它本身不是危险面，但**文档会被上传到
+# MinerU 云端解析（数据出网）**——与实盘 UI 同一个理由：面向公网的部署里出现
+# 这一栏必须是**决定**，不能是**意外**（构建脚本里残留的 env / 复制的 shell 环境）。
+# 判据 = 构建开关本身，默认拒绝，加 --allow-doc-mining 放行。
+# 后端还有独立的 ENABLE_DOC_MINING 闸门（默认关）；两端同时开才对用户可用。
+# 启用流程见 docs/文档挖掘_启用与通道指南.md。
+DOC_MINING_FLAG="$(echo "${VITE_ENABLE_DOC_MINING:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${DOC_MINING_FLAG}" == "true" && -z "${ALLOW_DOC_MINING}" ]]; then
+    fail "本次构建打开了文档挖掘 UI（VITE_ENABLE_DOC_MINING=true）。
+       部署后因子挖掘首页会出现「上传文档」入口，上传的原件会送往 MinerU 云端
+       解析（数据出网）。两种出路：
+         · 就是要发布文档挖掘 UI：VITE_ENABLE_DOC_MINING=true bash scripts/deploy_frontend.sh --allow-doc-mining
+         · 部署默认版本（不显示该入口）：去掉 VITE_ENABLE_DOC_MINING 重新构建
+             bash scripts/deploy_frontend.sh"
+fi
 
 # ── 1. 检查 web 容器在跑 ───────────────────────────────────────
 log "检查 quantmind-web 容器..."
@@ -106,6 +128,21 @@ if grep -rqs 'VITE_ENABLE_REAL_TRADING:"true"' "${DIST_DIR}/assets"; then
     fi
     warn "部署产物**实盘 UI 可见**（产物内联 VITE_ENABLE_REAL_TRADING=true）——底部栏会出现「实盘交易」入口。"
     warn "容器：${WEB_CONTAINER}（$(docker port "${WEB_CONTAINER}" 80/tcp 2>/dev/null | head -1 || echo '端口未知')）"
+fi
+
+# ── 3c. 文档挖掘 UI 判据（权威）：读产物里的**内联开关标记** ──────
+# 同 3b 的机制：Vite 把构建期 env 内联进 bundle，`VITE_ENABLE_DOC_MINING:"true"`
+# 逐字可查。env 与产物不一致、--skip-build 拿旧产物，都拦得住。
+if grep -rqs 'VITE_ENABLE_DOC_MINING:"true"' "${DIST_DIR}/assets"; then
+    if [[ -z "${ALLOW_DOC_MINING}" ]]; then
+        fail "dist-react/ 是**文档挖掘 UI 可见**的构建（产物内联标记 VITE_ENABLE_DOC_MINING:\"true\"），拒绝部署。
+       这就是「因子挖掘首页出现上传文档入口、原件送往 MinerU 云端」的那一类产物。
+       两种出路：
+         · 就是要发布文档挖掘 UI：VITE_ENABLE_DOC_MINING=true bash scripts/deploy_frontend.sh --allow-doc-mining
+         · 部署默认版本：删掉 dist-react/ 后不带该 env 重新构建"
+    fi
+    warn "部署产物**文档挖掘 UI 可见**（产物内联 VITE_ENABLE_DOC_MINING=true）——上传的原件将送往 MinerU 云端解析。"
+    warn "后端还需 ENABLE_DOC_MINING=true 才能真正可用（只开前端 = 界面在但端点 403）。"
 fi
 
 # ── 4. 清空容器旧 assets ─────────────────────────────────────

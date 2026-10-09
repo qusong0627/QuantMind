@@ -336,6 +336,31 @@ services:
       # AlphaAgent 因子编码专家系统提示词
       - ALPHA_AGENT_SYSTEM_PROMPT=${ALPHA_AGENT_SYSTEM_PROMPT:-}
 
+      # 因子挖掘文档链（上传文档/图片 → MinerU 云端解析 → 提示词整理 → RD-Agent 挖掘）。
+      # ⚠️ 数据出网：上传的原件会送到 MinerU 云端 API。ENABLE_DOC_MINING 默认 false
+      # （端点 403 doc_mining_disabled）；未申请 token 的部署请保持关闭。
+      # 本 compose 是 environment 白名单（无 env_file）——不在此转发的键，.env 里
+      # 填了也读不到（静默不生效）。启用流程（前后端两端同时打开）见
+      # docs/文档挖掘_启用与通道指南.md。
+      - ENABLE_DOC_MINING=${ENABLE_DOC_MINING:-false}
+      # mineru.net/apiManage/token 申请；缺省 = 上传/整理 503（界面提示 token 未配置）
+      - MINERU_API_TOKEN=${MINERU_API_TOKEN:-}
+      - MINERU_MODEL_VERSION=${MINERU_MODEL_VERSION:-vlm}
+      # 私有化/代理部署才需要改（默认官方 https://mineru.net）
+      - MINERU_BASE_URL=${MINERU_BASE_URL:-https://mineru.net}
+      # 平台账号日页数额度（预警基准）与每用户日页数上限
+      - MINERU_DAILY_PAGE_BUDGET=${MINERU_DAILY_PAGE_BUDGET:-1000}
+      - MINERU_USER_DAILY_PAGES=${MINERU_USER_DAILY_PAGES:-200}
+      # 按用户整点小时桶频控（上传/整理）
+      - DOC_UPLOAD_RATE_PER_HOUR=${DOC_UPLOAD_RATE_PER_HOUR:-30}
+      - DOC_ORGANIZE_RATE_PER_HOUR=${DOC_ORGANIZE_RATE_PER_HOUR:-60}
+      # 文档原件与解析产物目录（随 ./data:/data 卷持久化）
+      - RD_AGENT_DOCS_DIR=${RD_AGENT_DOCS_DIR:-/data/rd_agent_docs}
+      - RD_AGENT_DOC_RETENTION_DAYS=${RD_AGENT_DOC_RETENTION_DAYS:-90}
+      # 单文件上传上限（MB）；api → engine 代理体限默认为其上 + 余量（210）
+      - RD_AGENT_DOC_MAX_MB=${RD_AGENT_DOC_MAX_MB:-200}
+      - ENGINE_PROXY_MAX_BODY_MB=${ENGINE_PROXY_MAX_BODY_MB:-210}
+
       # 市值单位配置：数据库存储单位为元，1亿=100,000,000
       - AI_STRATEGY_TOTAL_MV_PER_YI=100000000.0
 

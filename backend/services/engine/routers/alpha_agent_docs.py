@@ -94,6 +94,7 @@ from backend.services.engine.alpha_agent.doc_quota import (
     get_doc_quota,
 )
 from backend.services.engine.alpha_agent.doc_store import (
+    DOC_STATUSES,
     get_doc_store,
     resolve_list_filters,
 )
@@ -503,6 +504,52 @@ async def doc_quota_status(request: Request) -> dict:
     data = asdict(st)
     data["token_configured"] = resolve_mineru_config() is not None
     return {"code": 200, "data": data}
+
+
+#: 统计面的状态桶（不含 deleted：已删行既不可见也不该进失败率分母）
+STATS_STATUSES = tuple(s for s in DOC_STATUSES if s != "deleted")
+
+
+@router.get("/docs/stats")
+async def docs_stats(request: Request) -> dict:
+    """本人文档的解析计数与失败率 + 平台配额快照（可观测面）。
+
+    - ``counts``：各状态行数（不含 deleted）；
+    - ``attempted`` = 解析已定局的行（parsed/organized/parse_failed/expired，
+      含 GC 转 expired 的——它们都真实占过页）；在途的 uploaded/parsing 不计，
+      否则失败率被在途稀释；
+    - ``failure_rate`` = parse_failed / attempted（attempted=0 → 0.0，不虚报）；
+    - ``quota``：与 ``/docs/quota`` 同一份（平台余量 + token 是否配置）。
+
+    ⚠️ 必须注册在 ``/docs/{doc_id}`` **之前**，否则被参数路由吞掉
+    （与 /docs/quota 同一路由顺序教训，有回归测试钉住）。
+    """
+    user_id, _tenant_id = get_authenticated_identity(request)
+    store = get_doc_store()
+    counts: dict[str, int] = {}
+    for status in STATS_STATUSES:
+        counts[status] = await store.count_docs(user_id=user_id, status=status)
+    total = await store.count_docs(user_id=user_id, status=None)
+    attempted = (
+        counts["parsed"]
+        + counts["organized"]
+        + counts["parse_failed"]
+        + counts["expired"]
+    )
+    failed = counts["parse_failed"]
+    quota_data = asdict(get_doc_quota().status(user_id))
+    quota_data["token_configured"] = resolve_mineru_config() is not None
+    return {
+        "code": 200,
+        "data": {
+            "total": total,
+            "counts": counts,
+            "attempted": attempted,
+            "parse_failed": failed,
+            "failure_rate": round(failed / attempted, 4) if attempted else 0.0,
+            "quota": quota_data,
+        },
+    }
 
 
 @router.get("/docs/{doc_id}")

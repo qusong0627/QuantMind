@@ -145,8 +145,17 @@ class FakeStore:
         return rows
 
     async def count_docs(self, **kw):
+        # 镜像真实 store：显式 status 优先；status=None 时排除 deleted
         self.count_calls.append(kw)
-        return len([r for r in self.rows.values() if r["user_id"] == kw["user_id"]])
+        st = kw.get("status")
+        return len(
+            [
+                r
+                for r in self.rows.values()
+                if r["user_id"] == kw["user_id"]
+                and (r["status"] == st if st is not None else r["status"] != "deleted")
+            ]
+        )
 
 
 class FakeParseService:
@@ -755,6 +764,80 @@ async def test_quota_endpoint_serializes_status(monkeypatch) -> None:
     assert data["exhausted"] is False and data["warning"] is False
     assert data["token_configured"] is False
     assert quota.status_user == "u-1"
+
+
+# ── 统计 ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stats_counts_failure_rate_and_quota(monkeypatch) -> None:
+    store = FakeStore(
+        [
+            mk_row(doc_id="d1", user_id="u-1", status="parsed"),
+            mk_row(doc_id="d2", user_id="u-1", status="parsed"),
+            mk_row(doc_id="d3", user_id="u-1", status="organized"),
+            mk_row(doc_id="d4", user_id="u-1", status="parse_failed"),
+            mk_row(doc_id="d5", user_id="u-1", status="parsing"),
+            mk_row(doc_id="d6", user_id="u-1", status="deleted"),
+            mk_row(doc_id="d9", user_id="other", status="parse_failed"),
+        ]
+    )
+    st = QuotaStatus(
+        day="20261009",
+        user_id="u-1",
+        user_used=1,
+        user_limit=200,
+        platform_used=2,
+        platform_budget=1000,
+        user_remaining=199,
+        platform_remaining=998,
+        exhausted=False,
+        warning=False,
+    )
+    _wire(monkeypatch, store, FakeParseService(Path("/n")), FakeQuota(status_obj=st))
+    monkeypatch.setattr(docs_mod, "resolve_mineru_config", lambda: None)
+
+    out = await docs_mod.docs_stats(request=FakeRequest())
+
+    data = out["data"]
+    assert data["total"] == 5, "deleted 与他人行都不入总数"
+    assert data["counts"] == {
+        "uploaded": 0,
+        "parsing": 1,
+        "parsed": 2,
+        "parse_failed": 1,
+        "organized": 1,
+        "expired": 0,
+    }
+    assert data["attempted"] == 4, "2 parsed + 1 organized + 1 failed；parsing 在途不计"
+    assert data["parse_failed"] == 1
+    assert data["failure_rate"] == 0.25
+    assert data["quota"]["platform_budget"] == 1000
+    assert data["quota"]["token_configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_stats_failure_rate_zero_when_nothing_attempted(monkeypatch) -> None:
+    """全在途（uploaded/parsing）：attempted=0 → 失败率 0.0，不能除零。"""
+    store = FakeStore([mk_row(doc_id="d1", user_id="u-1", status="uploaded")])
+    st = QuotaStatus(
+        day="20261009",
+        user_id="u-1",
+        user_used=0,
+        user_limit=200,
+        platform_used=0,
+        platform_budget=1000,
+        user_remaining=200,
+        platform_remaining=1000,
+        exhausted=False,
+        warning=False,
+    )
+    _wire(monkeypatch, store, FakeParseService(Path("/n")), FakeQuota(status_obj=st))
+    monkeypatch.setattr(docs_mod, "resolve_mineru_config", lambda: None)
+
+    data = (await docs_mod.docs_stats(request=FakeRequest()))["data"]
+
+    assert data["attempted"] == 0 and data["failure_rate"] == 0.0
 
 
 # ── 整理 ────────────────────────────────────────────────────────────

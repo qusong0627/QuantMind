@@ -93,6 +93,7 @@ async def test_gate_off_all_docs_routes_403(monkeypatch) -> None:
         ("POST", "/api/v1/alpha-agent/docs/upload"),
         ("GET", "/api/v1/alpha-agent/docs"),
         ("GET", "/api/v1/alpha-agent/docs/quota"),
+        ("GET", "/api/v1/alpha-agent/docs/stats"),
         ("GET", "/api/v1/alpha-agent/docs/d-1"),
         ("GET", "/api/v1/alpha-agent/docs/d-1/file"),
         ("POST", "/api/v1/alpha-agent/docs/d-1/organize"),
@@ -106,8 +107,8 @@ async def test_gate_off_all_docs_routes_403(monkeypatch) -> None:
 
 
 def test_docs_route_order_quota_before_doc_id() -> None:
-    """/docs/quota 必须先于 /docs/{doc_id} 注册，否则被参数路由吞掉（P0 同款教训）。"""
+    """/docs/quota、/docs/stats 必须先于 /docs/{doc_id} 注册，否则被参数路由吞掉（P0 同款教训）。"""
     paths = [r.path for r in docs_mod.router.routes]
-    quota_idx = paths.index("/api/v1/alpha-agent/docs/quota")
     doc_id_idx = paths.index("/api/v1/alpha-agent/docs/{doc_id}")
-    assert quota_idx < doc_id_idx
+    assert paths.index("/api/v1/alpha-agent/docs/quota") < doc_id_idx
+    assert paths.index("/api/v1/alpha-agent/docs/stats") < doc_id_idx

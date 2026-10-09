@@ -135,14 +135,20 @@ class FakeMineru:
 
 
 class FakeQuota:
-    """镜像 DocQuota 的 settle/release 契约（H1：预留-结算取代直达记账）。"""
+    """镜像 DocQuota 的 settle/release 契约（H1：预留-结算取代直达记账）。
+
+    ``settle_status``：真 settle 返回结算后的 QuotaStatus（告警钩子拿它判余量），
+    默认 None 表示「不关心」——老用例不受影响。
+    """
 
     def __init__(self) -> None:
         self.recorded: list[tuple[str, int]] = []
         self.released: list[tuple[str, str]] = []
+        self.settle_status = None
 
     def settle(self, doc_id, user_id, pages):
         self.recorded.append((user_id, int(pages)))
+        return self.settle_status
 
     def release(self, doc_id, user_id):
         self.released.append((doc_id, user_id))
@@ -445,6 +451,37 @@ async def test_poll_once_download_failure_settles_actual_without_release(
     assert quota.released == [], "不许再退（会把真实消耗洗掉）"
     _, fields = store.updates[-1]
     assert "产物下载/解包失败" in fields["error"]
+
+
+def test_settle_quota_hands_status_to_alert_hook(tmp_path: Path, monkeypatch) -> None:
+    """余量告警挂在结算点（T-FM-14）：settle 返回的状态原样递钩子；
+    结算抛错则没有状态可递——不告警、不上抛。"""
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+
+    alerts: list = []
+    monkeypatch.setattr(
+        parse_mod,
+        "maybe_alert_quota_low",
+        lambda st, *, quota: alerts.append((st, quota)),
+    )
+    doc = mk_doc(tmp_path)
+
+    quota = FakeQuota()
+    sentinel = object()
+    quota.settle_status = sentinel
+    svc, _ = mk_service(tmp_path, FakeStore(), client=FakeMineru(), quota=quota)
+
+    svc._settle_quota(doc, 7)
+    assert quota.recorded == [("u1", 7)]
+    assert alerts == [(sentinel, quota)], "结算状态要带着同一个 quota 实例递钩子"
+
+    class Boom(FakeQuota):
+        def settle(self, doc_id, user_id, pages):
+            raise RuntimeError("redis down")
+
+    svc2, _ = mk_service(tmp_path, FakeStore(), client=FakeMineru(), quota=Boom())
+    svc2._settle_quota(doc, 7)  # 不抛
+    assert len(alerts) == 1, "结算失败没有状态可递，不许告警"
 
 
 @pytest.mark.asyncio

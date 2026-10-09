@@ -6,6 +6,13 @@ COPY .npmrc electron/package*.json ./electron/
 COPY scripts/frontend ./scripts/frontend
 
 WORKDIR /app/electron
+# npm 版本钉死（2026-10-09）：node:22-alpine 自带的 npm 10.9.x 在解析本依赖树时
+# arborist 崩溃（Cannot read properties of null (reading 'edgesOut')，10.9.2/10.9.9
+# 均复现；11.21.0 通过）。依赖范围浮动 + npm 浮动 = 构建随上游随机成败，这里把
+# npm 这一半钉死。npm 11 默认不跑未审批的 install 脚本（@swc/core、esbuild、
+# core-js 的 postinstall 被跳过）——三者都靠平台可选依赖供二进制/无必要，vite
+# 构建不依赖其 postinstall（2026-10-09 重建实证：8375 modules，31s 构建通过）。
+RUN npm install -g npm@11.21.0
 # Strip the `overrides` block from package.json — newer npm flags
 # `monaco-editor` override against direct `^0.55.1` dep as EOVERRIDE.
 # Override is only meaningful for transitive dedupe and not needed for the web build.
