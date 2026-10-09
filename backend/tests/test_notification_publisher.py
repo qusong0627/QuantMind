@@ -100,3 +100,37 @@ async def test_fanout_async_wrapper_delegates(monkeypatch):
     monkeypatch.setattr(np, "publish_notification_to_admins", _fake)
     result = await np.publish_notification_to_admins_async(title="t", content="c")
     assert result == (1, 1) and captured["title"] == "t"
+
+
+# ── QQ 旁路开关（2026-10-09 降噪）───────────────────────────────────
+
+
+@pytest.mark.unit
+def test_qq_alert_false_skips_per_event_bypass(monkeypatch):
+    """``qq_alert=False`` 只关 QQ 旁路：站内写库照旧、逐条旁路不触发。
+
+    批量告警生产者（市场情报/持仓预警）用它把 QQ 面让给摘要合并——
+    2026-10-09 实测一段行情 26 条逐条推送把手机淹没。
+    """
+    alerts = []
+    monkeypatch.setattr(np, "_maybe_qq_alert", lambda **kw: alerts.append(kw))
+    monkeypatch.setattr(np, "get_db", None)  # 写库路径不参与本测：跳过即返回 False
+    assert (
+        np.publish_notification(
+            user_id="1", tenant_id="default", title="t", content="c",
+            level="warning", qq_alert=False,
+        )
+        is False
+    )
+    assert alerts == []
+
+
+@pytest.mark.unit
+def test_qq_alert_default_still_bypasses(monkeypatch):
+    alerts = []
+    monkeypatch.setattr(np, "_maybe_qq_alert", lambda **kw: alerts.append(kw))
+    monkeypatch.setattr(np, "get_db", None)
+    np.publish_notification(
+        user_id="1", tenant_id="default", title="t", content="c", level="warning"
+    )
+    assert len(alerts) == 1

@@ -50,6 +50,7 @@ from backend.shared.holding_alert_contract import (
     cooldown_bucket,
     dedupe_alert_rows,
     evaluate_score_transition,
+    format_holding_digest_line,
     make_holding_dedupe_key,
     meets_min_severity,
     notification_level,
@@ -819,6 +820,7 @@ class HoldingSentinel:
         recorded = notified = duplicates = 0
         for (tenant, user_id), group in by_user.items():
             cfg = parse_alert_config(self._config_raw(tenant, user_id))
+            digest_lines: list[str] = []
             for alert in dedupe_alert_rows(group)[:MAX_ALERTS_PER_SCAN]:
                 try:
                     with sync_session() as session:
@@ -842,7 +844,26 @@ class HoldingSentinel:
                     str(alert["severity"]), str(cfg["min_severity"])
                 ) and self._notify(alert, cfg):
                     notified += 1
+                    digest_lines.append(format_holding_digest_line(alert))
+            if digest_lines:
+                self._enqueue_qq_digest(tenant, user_id, digest_lines)
         return {"recorded": recorded, "notified": notified, "duplicates": duplicates}
+
+    @staticmethod
+    def _enqueue_qq_digest(tenant: str, user_id: str, lines: list[str]) -> None:
+        """本轮预警 → QQ 摘要（窗口内多次扫描自动再合并，见 qq_digest）。永不抛。"""
+        try:
+            from backend.shared.qq_digest import enqueue
+
+            for line in lines:
+                enqueue(
+                    digest_key=f"holding:{tenant}:{user_id}",
+                    header="持仓预警",
+                    line=line,
+                    footer="详情见交易台 · 持仓监控。",
+                )
+        except Exception as exc:  # noqa: BLE001 - 摘要失败不影响留痕与站内卡片
+            logger.warning("[holding_sentinel] QQ 摘要入队失败: %s", exc)
 
     @staticmethod
     def _insert_params(alert: Mapping[str, Any]) -> dict[str, Any]:
@@ -877,6 +898,8 @@ class HoldingSentinel:
                     level=notification_level(str(alert["severity"])),
                     action_url=str(alert["action_url"]),
                     expire_days=7,
+                    # QQ 面不逐条发：_persist 把本轮预警合并成一条摘要（2026-10-09 降噪）
+                    qq_alert=False,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - 通知失败不影响留痕

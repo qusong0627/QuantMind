@@ -186,12 +186,19 @@ def publish_notification(
     level: str = "info",
     action_url: str | None = None,
     expire_days: int | None = None,
+    qq_alert: bool = True,
 ) -> bool:
     """
     同步发布通知。失败时返回 False，不抛出异常阻断主业务。
+
+    ``qq_alert=False``：本站内通知**不触发**逐条的 QQ 告警旁路——给「批量告警」
+    生产者用（市场情报/持仓预警）：站内卡片照旧逐条落库+推送，QQ 面由生产者
+    改走 ``backend.shared.qq_digest`` 合并成摘要（2026-10-09 降噪：一段行情
+    26 条逐条推送把手机淹没）。单发告警（桥健康/风控）保持默认 True 即时送达。
     """
     # 告警旁路先行：与库/流成败解耦（低等级在 alert_async 内部即被过滤）
-    _maybe_qq_alert(type=type, level=level, title=title, content=content)
+    if qq_alert:
+        _maybe_qq_alert(type=type, level=level, title=title, content=content)
 
     if get_db is None:
         logger.warning("notification publish skipped: database pool unavailable")
@@ -326,6 +333,7 @@ def publish_notification_to_admins(
     level: str = "info",
     action_url: str | None = None,
     expire_days: int | None = None,
+    qq_alert: bool = True,
 ) -> tuple[int, int]:
     """向全部管理员 fanout 通知，返回 ``(送达条数, 收件人数)``。
 
@@ -354,6 +362,7 @@ def publish_notification_to_admins(
             level=level,
             action_url=action_url,
             expire_days=expire_days,
+            qq_alert=qq_alert,
         ):
             sent += 1
     return sent, len(admins)

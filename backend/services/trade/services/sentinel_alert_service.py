@@ -28,7 +28,10 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from backend.shared.alert_text import format_sentinel_alert
+from backend.shared.alert_text import (
+    format_sentinel_alert,
+    format_sentinel_digest_line,
+)
 
 logger = logging.getLogger(__name__)
 _SH_TZ = ZoneInfo("Asia/Shanghai")
@@ -219,6 +222,9 @@ class SentinelAlertService:
                 content=content,
                 type="sentinel",
                 level=level,
+                # 站内卡片逐条落库；QQ 面改走摘要合并（_decide_push 末尾入队），
+                # 防「一段行情几十条逐条推送」把手机淹没（2026-10-09 降噪）
+                qq_alert=False,
             )
         except Exception as exc:  # noqa: BLE001 - 查询失败按无受众处理并留痕
             logger.warning("[sentinel] 推送失败: %s", exc)
@@ -389,6 +395,21 @@ class SentinelAlertService:
             self._note_error(f"notify: {exc}")
         if not ok:
             return "no_audience"
+        # QQ 面：并入窗口摘要（站内卡片/留痕表照旧逐条——摘要只压缩推送面）
+        try:
+            from backend.shared.market_labels import market_label
+            from backend.shared.qq_digest import enqueue as _digest_enqueue
+
+            market = str(row.get("market") or "CN")
+            label = market_label(market) or market
+            _digest_enqueue(
+                digest_key=f"sentinel:{market}",
+                header=f"实时情报 · {label}",
+                line=format_sentinel_digest_line(row),
+                footer="详情见交易台 · 实时情报。",
+            )
+        except Exception as exc:  # noqa: BLE001 - 摘要失败不算推送失败（站内已送达）
+            self._note_error(f"digest: {exc}")
         return "pushed"
 
     def _bump(self, key: str, delta: int = 1) -> None:

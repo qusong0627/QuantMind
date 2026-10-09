@@ -289,3 +289,82 @@ def test_run_once_disabled_and_malformed(monkeypatch):
     result = svc2.run_once()
     assert result["scanned"] == 1 and svc2.counters["malformed"] == 1
     assert acked == ["1-0"]
+
+
+# ── QQ 摘要接线（2026-10-09 降噪）────────────────────────────────────
+
+
+def _storm_row(**over):
+    row = {
+        "alert_type": "anomaly:price_surge",
+        "symbol": "600503.SH",
+        "severity": "warn",
+        "ts": 1790233748.213,
+        "market": "CN",
+        "targets": ["600503.SH"],
+        "title": "600503.SH 大幅下行",
+        "direction": "down",
+        "detail": {"payload": {"metrics": {"pct_chg": -0.09863945578231292}}},
+    }
+    row.update(over)
+    return row
+
+
+def test_pushed_event_feeds_digest_and_keeps_inapp_per_event(monkeypatch):
+    """一次行情几十条同类告警：站内卡片逐条，QQ 面进摘要（一条一只票=26 条的真实形态）。"""
+    import backend.shared.qq_digest as qq_digest
+    from backend.services.trade.services.sentinel_alert_service import SentinelConfig
+
+    calls: list[dict] = []
+    monkeypatch.setattr(qq_digest, "enqueue", lambda **kw: calls.append(kw))
+    svc, notes, holder = _service(cfg=SentinelConfig(enabled=True))
+    fake = _FakeRedis()
+
+    assert svc._decide_push(holder["cfg"], fake, _storm_row()) == "pushed"
+
+    assert len(notes) == 1  # 站内通知照旧逐条（卡片/留痕表全量可查）
+    assert len(calls) == 1
+    assert calls[0]["digest_key"] == "sentinel:CN"
+    assert "实时情报" in calls[0]["header"]
+    line = calls[0]["line"]
+    assert line.startswith("▼") and "SH600503" in line and "-9.86%" in line
+
+
+def test_throttled_event_does_not_feed_digest(monkeypatch):
+    """冷却/配额/等级闸门拦下的事件不进摘要——摘要折叠的是**已放行**的告警。"""
+    import backend.shared.qq_digest as qq_digest
+    from backend.services.trade.services.sentinel_alert_service import SentinelConfig
+
+    calls: list[dict] = []
+    monkeypatch.setattr(qq_digest, "enqueue", lambda **kw: calls.append(kw))
+    svc, notes, holder = _service(cfg=SentinelConfig(enabled=True))
+    fake = _FakeRedis()
+
+    assert svc._decide_push(holder["cfg"], fake, _storm_row()) == "pushed"
+    assert svc._decide_push(holder["cfg"], fake, _storm_row()) == "throttled_cooldown"
+    assert svc._decide_push(
+        holder["cfg"], fake, _storm_row(symbol="000001.SZ", severity="info")
+    ) == "below_level"
+    assert len(calls) == 1  # 只有放行的那条
+
+
+def test_default_notify_disables_per_event_qq(monkeypatch):
+    """站内 fanout 不得再触发逐条 QQ 旁路（QQ 面归摘要，防手机被淹没）。"""
+    import backend.services.trade.services.sentinel_alert_service as mod
+
+    captured: dict = {}
+
+    def _fake_admins(**kw):
+        captured.update(kw)
+        return (1, 1)
+
+    monkeypatch.setattr(
+        "backend.shared.notification_publisher.publish_notification_to_admins",
+        _fake_admins,
+    )
+    svc = mod.SentinelAlertService(
+        config_loader=lambda: mod.SentinelConfig(enabled=True)
+    )
+    assert svc._default_notify(title="t", content="c", level="warning") is True
+    assert captured["qq_alert"] is False
+    assert captured["type"] == "sentinel"

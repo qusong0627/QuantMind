@@ -308,10 +308,7 @@ def evaluate_score_transition(
                 anchor_f = float(anchor)
             except (TypeError, ValueError):
                 anchor_f = None
-            if (
-                anchor_f is not None
-                and anchor_f - now_f >= drop_f > anchor_f - prev_f
-            ):
+            if anchor_f is not None and anchor_f - now_f >= drop_f > anchor_f - prev_f:
                 return KIND_SCORE_DROP, SEVERITY_WARNING
     threshold_f = float(threshold or 0.0)
     if threshold_f > 0 and prev_f >= threshold_f > now_f:
@@ -377,6 +374,46 @@ def build_alert_title(
 
 def format_score(value: float | None) -> str:
     return "—" if value is None else f"{float(value):+.3f}"
+
+
+#: 风险类 kind → 摘要行短语（分数类不在这里——它们走「分数 x → y」格式）
+_DIGEST_RISK_LABELS: dict[str, str] = {
+    KIND_RISK_NEWS: "出现重大利空",
+    KIND_RISK_ANOMALY: "盘中异动",
+    KIND_RISK_LIST: "进入排除名单",
+}
+
+
+def format_holding_digest_line(alert: Mapping[str, Any]) -> str:
+    """预警 → QQ 摘要**单行**（批量降噪用，见 ``backend/shared/qq_digest``）。
+
+    形如 ``▼ 麦格米特(SZ002851) 分数 +0.021 → -0.008``（分数类）或
+    ``⚑ 麦格米特(SZ002851) 盘中异动``（风险类）。代码统一前缀式（与前端/委托
+    台账/成交回执一致）；名字缺失退化为代码。纯函数、绝不抛。
+    """
+    symbol = str(alert.get("symbol") or "").strip()
+    name = str(alert.get("stock_name") or "").strip()
+    prefix = symbol
+    if symbol:
+        try:
+            from backend.shared.stock_utils import StockCodeUtil
+
+            prefix = StockCodeUtil.to_prefix(symbol) or symbol
+        except Exception:  # noqa: BLE001 - 代码转换失败就用原样，不丢告警
+            pass
+    ident = f"{name}({prefix})" if name and prefix else (prefix or name or "?")
+    kind = str(alert.get("kind") or "")
+    if kind in _DIGEST_RISK_LABELS:
+        return f"⚑ {ident} {_DIGEST_RISK_LABELS[kind]}"
+    prev = alert.get("score_prev")
+    now = alert.get("score_now")
+    if prev is not None and now is not None:
+        try:
+            arrow = "▼" if float(now) < float(prev) else "▲"
+        except (TypeError, ValueError):
+            arrow = "•"
+        return f"{arrow} {ident} 分数 {format_score(prev)} → {format_score(now)}"
+    return f"• {ident} {str(alert.get('title') or '持仓预警').strip()}"
 
 
 def build_alert_content(

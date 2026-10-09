@@ -203,3 +203,53 @@ def test_market_label_covers_all_platform_markets_and_keeps_unknown_verbatim():
     ]
     assert market_label("SG") == "SG"  # 未收录回原样，不编名字
     assert market_label(None) == ""
+
+
+# ── 摘要行（QQ 降噪，2026-10-09）─────────────────────────────────────
+
+
+def test_digest_line_substitutes_raw_code_with_prefix_identity():
+    """一行一眼可读：方向 + 名称(前缀码) + 事实 + 涨跌幅；代码不出现两遍。
+
+    检测器写的标题常自带裸代码（本条金样就是 ``600503.SH 大幅下行``）——
+    摘要行把裸代码换成 ``名称(前缀码)``（前缀式与前端/委托台账/成交回执一致）。
+    """
+    from backend.shared.alert_text import format_sentinel_digest_line
+
+    line = format_sentinel_digest_line(_REAL_ROW, name_resolver=lambda _s: "华丽家族")
+    assert line == "▼ 华丽家族(SH600503) 大幅下行 -9.86%"
+
+
+def test_digest_line_prepends_identity_when_title_has_no_code():
+    from backend.shared.alert_text import format_sentinel_digest_line
+
+    row = {**_REAL_ROW, "title": "大幅下行"}
+    line = format_sentinel_digest_line(row, name_resolver=lambda _s: "华丽家族")
+    assert line == "▼ 华丽家族(SH600503) 大幅下行 -9.86%"
+
+
+def test_digest_line_unknown_direction_and_missing_name_degrade_honestly():
+    from backend.shared.alert_text import format_sentinel_digest_line
+
+    row = {**_REAL_ROW, "direction": "none", "detail": {"payload": {"metrics": {}}}}
+    line = format_sentinel_digest_line(row, name_resolver=lambda _s: "")
+    assert line.startswith("• SH600503 ")  # 方向未知不编造；名字缺退化为代码
+    assert "%" not in line  # 无 pct_chg 不硬加涨跌幅
+
+
+def test_digest_line_truncates_long_news_titles():
+    from backend.shared.alert_text import format_sentinel_digest_line
+
+    row = {
+        "symbol": "*",
+        "direction": "down",
+        "title": (
+            "据《日经亚洲》报道，苹果因需求疲软削减了 iPhone 18 Pro 与 "
+            "iPhone 18 Pro Max 的全部订单，并波及上游多家供应链厂商"
+        ),
+        "detail": {"payload": {}},
+    }
+    line = format_sentinel_digest_line(row, name_resolver=lambda _s: "X")
+    assert line.startswith("▼ 据《日经亚洲》")
+    assert line.endswith("…")
+    assert len(line) <= 45  # 摘要行不允许长成一篇文章

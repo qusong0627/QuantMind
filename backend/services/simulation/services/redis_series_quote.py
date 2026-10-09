@@ -169,7 +169,19 @@ async def fetch_series_ticks(
     policy: FreshnessPolicy | None = None,
     volume_window_sec: int = 60,
 ) -> dict[str, dict[str, Any]]:
-    """Batch-load fresh ticks and recent incremental volume in one pipeline."""
+    """Batch-load fresh ticks and recent incremental volume in one pipeline.
+
+    **价格判定与单只取价（:func:`fetch_series_tick`）同答案**：最新成员直接
+    ``zrevrange`` 取，可用性一律由 :func:`parse_series_member` 按新鲜度策略分级
+    （stale≤300s 可用须标注）。量能窗（``volume_window_sec``）只用于
+    ``recent_volume`` 增量，**不参与价格取舍**。
+
+    2026-10-09 事故：本函数原用一条 ``zrangebyscore(now-60s, now)`` 同时承担取价
+    与量差——桥席按 ~100s/只轮转写 series，最新 tick 常态落在 60s 窗外，批量取价
+    整批漏掉「stale 但策略判定可用」的合法 tick（而单只取价正常返回），决策轮
+    买单因此全拒「无法获取实时行情，模拟单拒绝成交」。硬窗不能顶着**快照/帧
+    节拍**的下限设——节拍一变，窗就变成静默的取价门禁。
+    """
     policy = policy or quote_policy()
     try:
         volume_window_sec = int(
@@ -186,27 +198,30 @@ async def fetch_series_ticks(
     try:
         pipe = client.pipeline(transaction=False)
         for _, key in keyed:
+            pipe.zrevrange(key, 0, 0, withscores=True)
             pipe.zrangebyscore(
                 key,
                 now_ts - max(1, volume_window_sec),
                 now_ts,
                 withscores=True,
             )
-        rows_by_symbol = await pipe.execute()
+        flat = await pipe.execute()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RedisSeriesQuote] 批量读取失败: %s", exc)
         return {}
 
     result: dict[str, dict[str, Any]] = {}
-    for (symbol, _), rows in zip(keyed, rows_by_symbol, strict=True):
-        if not rows:
+    for idx, (symbol, _) in enumerate(keyed):
+        latest_rows = flat[idx * 2]
+        window_rows = flat[idx * 2 + 1]
+        if not latest_rows:
             continue
-        member, score = rows[-1]
+        member, score = latest_rows[0]
         tick = parse_series_member(member, float(score), now_ts, policy)
         if tick is None:
             continue
         volumes: list[float] = []
-        for raw_member, _raw_score in rows:
+        for raw_member, _raw_score in window_rows:
             try:
                 payload = json.loads(raw_member)
                 volume = float(payload.get("volume"))

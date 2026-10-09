@@ -559,3 +559,67 @@ class TestScoreScan:
         )
 
         assert alerts == []
+
+
+# ── QQ 摘要接线（2026-10-09 降噪）────────────────────────────────────
+
+
+class TestQqDigestWiring:
+    """一轮几十条持仓预警 → 站内逐条、QQ 一条摘要（防手机被淹没）。"""
+
+    @staticmethod
+    def _alert(**over):
+        base = {
+            "tenant_id": "default",
+            "user_id": "10000001",
+            "symbol": "SH600036",
+            "stock_name": "招商银行",
+            "kind": KIND_SCORE_CROSS_ZERO,
+            "severity": SEVERITY_CRITICAL,
+            "title": "招商银行 分数降至 0 及以下",
+            "content": "SH600036 信号分 +0.120 → -0.030 详情见交易台 · 持仓监控。",
+            "score_prev": 0.12,
+            "score_now": -0.03,
+            "action_url": "/trading?tab=position&symbol=SH600036",
+        }
+        base.update(over)
+        return base
+
+    def test_notify_keeps_qq_off_for_inapp(self, monkeypatch):
+        """站内卡片照旧逐条落库；QQ 面不得逐条旁路（归 _persist 的摘要）。"""
+        captured: dict = {}
+
+        def _fake_publish(**kw):
+            captured.update(kw)
+            return True
+
+        monkeypatch.setattr(
+            "backend.shared.notification_publisher.publish_notification", _fake_publish
+        )
+        sentinel = HoldingSentinel(redis=FakeRedis())
+        assert sentinel._notify(self._alert(), {"notify_inapp": True}) is True
+        assert captured["qq_alert"] is False
+        assert captured["type"] == "holding_alert"
+
+    def test_enqueue_digest_folds_lines_under_one_key(self, monkeypatch):
+        import backend.shared.qq_digest as qq_digest
+
+        calls: list[dict] = []
+        monkeypatch.setattr(qq_digest, "enqueue", lambda **kw: calls.append(kw))
+        HoldingSentinel._enqueue_qq_digest("default", "10000001", ["行1", "行2"])
+
+        assert [c["line"] for c in calls] == ["行1", "行2"]
+        assert {c["digest_key"] for c in calls} == {"holding:default:10000001"}
+        assert all(c["header"] == "持仓预警" for c in calls)
+        assert all("持仓监控" in c["footer"] for c in calls)
+
+    def test_persist_source_guards_digest_after_notify(self):
+        """源码守卫：摘要行只在站内通知**成功后**收集（通知失败的告警不进摘要），
+        收集完逐用户入队。_persist 依赖真库会话，用源码顺序钉住接线。"""
+        import inspect
+
+        src = inspect.getsource(HoldingSentinel._persist)
+        idx_notify = src.index("self._notify(")
+        idx_digest = src.index("format_holding_digest_line(")
+        idx_enqueue = src.index("self._enqueue_qq_digest(")
+        assert idx_notify < idx_digest < idx_enqueue

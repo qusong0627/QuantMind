@@ -65,6 +65,9 @@ TYPE_LABELS: dict[str, str] = {
 #: 所以不显示——把「判不出来」写成「中性」是一种编造。
 DIRECTION_LABELS: dict[str, str] = {"down": "利空", "up": "利多"}
 
+#: 方向 → 摘要行箭头（未知方向用「•」，不编造涨跌）
+DIRECTION_ARROWS: dict[str, str] = {"down": "▼", "up": "▲"}
+
 #: `metrics` 键 → (中文标签, 格式化函数)。**只登记会进正文的键**；
 #: 其余键（orders/cancelled/date/top_symbol…）留在 detail 里，正文不出现。
 METRIC_LABELS: dict[str, tuple[str, Callable[[Any], str]]] = {
@@ -175,6 +178,55 @@ def _context_line(row: Mapping[str, Any]) -> str:
     if isinstance(ts, (int, float)) and ts > 0:
         parts.append(datetime.fromtimestamp(float(ts), tz=_CST).strftime("%m-%d %H:%M"))
     return " · ".join(p for p in parts if p)
+
+
+def format_sentinel_digest_line(
+    row: Mapping[str, Any],
+    *,
+    name_resolver: Callable[[str], str] | None = None,
+) -> str:
+    """告警行 → 摘要**单行**（批量降噪用，见 ``backend/shared/qq_digest``）。
+
+    形如 ``▼ 麦格米特(SZ002851) 大幅下行 -5.12%``：方向箭头 + 身份 + 事实 +
+    （有则）涨跌幅。身份口径与 :func:`format_sentinel_alert` 相同（``名称(代码)``，
+    名字查不到退化为代码），但代码统一**前缀式**（与前端/委托台账/成交回执一致；
+    本函数只服务 QQ 摘要面，不回改站内通知的口径）。新闻类标题过长截断。
+    纯函数、绝不抛。
+    """
+    resolve = name_resolver or _resolve_name
+    symbol = str(row.get("symbol") or "").strip()
+    if symbol == "*":
+        symbol = ""
+    ident = ""
+    fact = str(row.get("title") or "").strip()
+    if symbol:
+        name = resolve(symbol)
+        prefix = symbol
+        try:
+            from backend.shared.stock_utils import StockCodeUtil
+
+            prefix = StockCodeUtil.to_prefix(symbol) or symbol
+        except Exception:  # noqa: BLE001 - 代码转换失败就用原样，不丢告警
+            pass
+        ident = _identity(prefix, name)
+        if symbol in fact:
+            # 标题里已含裸代码（检测器写的就是 "002851.SZ 大幅下行"）→ 换成
+            # 「名称(前缀码)」，别让同一只票在一行里出现两遍代码
+            fact = fact.replace(symbol, ident, 1)
+            ident = ""
+    arrow = DIRECTION_ARROWS.get(str(row.get("direction") or "").strip(), "•")
+    if len(fact) > 42:  # 新闻标题可能是一整句话；摘要行只留一眼可读的开头
+        fact = fact[:41] + "…"
+    pct = ""
+    payload = row.get("detail")
+    payload = payload.get("payload") if isinstance(payload, Mapping) else None
+    metrics = payload.get("metrics") if isinstance(payload, Mapping) else None
+    if isinstance(metrics, Mapping) and metrics.get("pct_chg") is not None:
+        try:
+            pct = f" {float(metrics['pct_chg']) * 100:+.2f}%"
+        except (TypeError, ValueError):
+            pct = ""
+    return " ".join(part for part in (arrow, ident, fact) if part) + pct
 
 
 def format_sentinel_alert(

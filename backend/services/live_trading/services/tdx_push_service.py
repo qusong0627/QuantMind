@@ -50,6 +50,63 @@ def estimate_order_fee(filled_value: float, side: str = "buy") -> float:
     return CN_RULES.compute_real_order_fee(float(filled_value), 1.0, side)
 
 
+def _fill_transitioned(
+    prior_status: str, order_status: str, filled_volume: float
+) -> bool:
+    """是否「首次」转为全量成交（决定推不推 QQ 成交回执）。
+
+    桥是成交权威源，30s 轮询会反复刷新同一行——只有首次（prior 非 filled → filled）
+    才算新成交事件；prior 缺失 = 首次见到该委托（补插），已成即算。
+    部分成交不推（一次委托推两条是噪音，成交回执只报落定的事）。
+    """
+    if str(order_status or "").lower() != "filled":
+        return False
+    if float(filled_volume or 0) <= 0:
+        return False
+    return str(prior_status or "").lower() != "filled"
+
+
+def _notify_fill_qq(fill: dict) -> None:
+    """真单成交 → QQ 回执（执行面用词保留「买入/卖出」；失败只降级绝不反噬）。
+
+    触发点：``_sync_orders_to_pg`` 里订单首次转 FILLED 的那次同步。QM 原生栈的
+    成交确认走 notifications ``level=success``，而 ``qq_notify.alert_async`` 只
+    放行 warning/error——**成交回执从来到不了 QQ**（2026-10-09 用户实感「交易
+    信息都没有」）；本函数把这层补回真单落库权威点。
+
+    ``qq_notify.notify_async`` 内部走守护线程，永不阻塞同步循环；这里额外兜一层
+    异常：通知面坏了不许带走成交落库。
+    """
+    try:
+        from backend.shared.qq_notify import notify_async
+        from backend.shared.stock_utils import StockCodeUtil
+
+        side = str(fill.get("side") or "buy").strip().lower()
+        is_sell = side in ("sell", "s")
+        side_cn = "卖出" if is_sell else "买入"
+        arrow = "▼" if is_sell else "▲"
+        prefix = StockCodeUtil.to_prefix(str(fill.get("symbol") or "").strip())
+        name = ""
+        try:
+            from backend.shared.stock_name_mapper import resolve_name
+
+            name = str(resolve_name(prefix) or "").strip()
+        except Exception:  # noqa: BLE001 名称缺失只影响可读性，照推
+            name = ""
+        label = f"{name}({prefix})" if name else (prefix or "?")
+        volume = int(float(fill.get("filled_volume") or 0))
+        price = float(fill.get("filled_price") or 0)
+        amount = volume * price
+        title = f"{arrow} {side_cn} {label} {volume}股 @¥{price:.2f}"
+        body = f"金额 ¥{amount:,.0f}"
+        exchange_id = str(fill.get("exchange_order_id") or "").strip()
+        if exchange_id:
+            body += f" · 委托 {exchange_id}"
+        notify_async(title, body)
+    except Exception:  # noqa: BLE001 通知失败不许反噬成交落库
+        logger.debug("[TdxPush] 成交 QQ 回执降级跳过", exc_info=True)
+
+
 class TdxPushError(Exception):
     """通达信推送失败"""
 
@@ -379,7 +436,9 @@ class TdxPushService:
                     payload_json=payload,
                 )
             )
-            await self._sync_orders_to_pg(
+            # 本笔委托里「首次转 FILLED」的成交事件；commit 成功后才推 QQ
+            # （事务没提交就推 = 可能推一笔回滚掉的成交；见 _notify_fill_qq 口径）
+            fill_events = await self._sync_orders_to_pg(
                 db=db,
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -479,6 +538,9 @@ class TdxPushService:
                 payload_json=payload,
             )
             await db.commit()
+        # 落库已提交才推成交回执（真单成交 → QQ 的唯一出口；模拟层不重复推）
+        for fill in fill_events:
+            _notify_fill_qq(fill)
         logger.info(
             "[TdxPush] 通达信账户已落库 PG: asset=%.2f cash=%.2f positions=%d",
             total_asset,
@@ -501,14 +563,18 @@ class TdxPushService:
         tenant_id: str,
         user_id: str,
         now,
-    ) -> None:
+    ) -> list[dict]:
         """把通达信当日委托同步到 orders 表（REAL 模式交易记录展示）。
 
         幂等 + 增量修正：按 exchange_order_id（桥的委托编号）去重；
         已存在的行用桥的最新状态/成交回报刷新。桥是真实成交的权威来源，
         若只插不更新，订单会永远停在 SUBMITTED，随后被超时扫描器误判为
         EXPIRED（表现为"交易记录全部已过期、成交为 0"）。
+
+        返回本轮**首次转 FILLED** 的成交事件（供调用方在 commit 后推 QQ；
+        事件不在这里推送——事务没提交就推送=可能推一笔没落库的成交）。
         """
+        fills: list[dict] = []
         try:
             from sqlalchemy import select, text
 
@@ -522,14 +588,19 @@ class TdxPushService:
 
             orders = await self.pull_orders()
             if not orders:
-                return
+                return []
 
-            # 桥委托的 order_id 是字符串（如 "160356"），映射为 exchange_order_id
+            # 桥委托的 order_id 是字符串（如 "160356"），映射为 exchange_order_id；
+            # 带出既有 status 供「首次转 FILLED」判定（轮询刷新不许重复当新成交推）
             existing = {
-                str(r[0]): str(r[1])
+                str(r[0]): (str(r[1]), r[2])
                 for r in (
                     await db.execute(
-                        select(Order.exchange_order_id, Order.order_id).where(
+                        select(
+                            Order.exchange_order_id,
+                            Order.order_id,
+                            Order.status,
+                        ).where(
                             Order.exchange_order_id.is_not(None),
                             Order.tenant_id == tenant_id,
                             Order.user_id == str(user_id),
@@ -589,8 +660,13 @@ class TdxPushService:
                     submitted_at if order_status == OrderStatus.FILLED else None
                 )
 
-                existing_id = existing.get(exchange_id)
-                if existing_id:
+                prior = existing.get(exchange_id)
+                prior_status = getattr(prior[1], "value", prior[1]) if prior else None
+                became_filled = _fill_transitioned(
+                    str(prior_status or ""), order_status.value, filled_volume
+                )
+
+                if prior:
                     # 已存在 → 用桥最新状态刷新（成交回报追平，避免被超时扫描器误标过期）
                     await db.execute(
                         text(
@@ -613,68 +689,82 @@ class TdxPushService:
                             "filled_value": filled_value,
                             "filled_at": filled_at,
                             "commission": fee,
-                            "order_id": existing_id,
+                            "order_id": prior[0],
                         },
                     )
-                    continue
+                else:
+                    result = await db.execute(
+                        text(
+                            """
+                            INSERT INTO orders (
+                                order_id, tenant_id, user_id, portfolio_id, strategy_id, symbol,
+                                side, trade_action, position_side, is_margin_trade,
+                                order_type, trading_mode, status,
+                                quantity, filled_quantity, price, average_price,
+                                order_value, filled_value, commission,
+                                submitted_at, filled_at,
+                                client_order_id, exchange_order_id, remarks
+                            ) VALUES (
+                                :order_id, :tenant_id, :user_id, :portfolio_id, NULL, :symbol,
+                                :side, :trade_action, :position_side, FALSE,
+                                :order_type, :trading_mode, :status,
+                                :quantity, :filled_quantity, :price, :average_price,
+                                :order_value, :filled_value, :commission,
+                                :submitted_at, :filled_at,
+                                :client_order_id, :exchange_order_id, :remarks
+                            )
+                            RETURNING order_id
+                            """
+                        ),
+                        {
+                            "order_id": uuid.uuid4(),
+                            "tenant_id": tenant_id,
+                            "user_id": user_id or "0",
+                            "portfolio_id": 0,
+                            "symbol": symbol,
+                            "side": order_side.value,
+                            # PG tradeaction enum: OPEN/CLOSE（与 Python 命名不同）
+                            "trade_action": "OPEN"
+                            if order_side == OrderSide.BUY
+                            else "CLOSE",
+                            # PG positionside enum: LONG/SHORT（大写）
+                            "position_side": "LONG",
+                            "order_type": order_type.value,
+                            "trading_mode": TradingMode.REAL.value,
+                            "status": order_status.value,
+                            "quantity": total_volume,
+                            "filled_quantity": filled_volume,
+                            "price": price if price > 0 else None,
+                            "average_price": filled_price if filled_volume > 0 else None,
+                            "order_value": round(total_volume * price, 2),
+                            "filled_value": filled_value,
+                            "commission": fee,
+                            "submitted_at": submitted_at,
+                            "filled_at": filled_at,
+                            "client_order_id": f"tdx-{exchange_id}",
+                            "exchange_order_id": exchange_id,
+                            "remarks": "通达信桥委托",
+                        },
+                    )
+                    new_id = result.scalar()
+                    if new_id:
+                        existing[exchange_id] = (str(new_id), order_status)
 
-                result = await db.execute(
-                    text(
-                        """
-                        INSERT INTO orders (
-                            order_id, tenant_id, user_id, portfolio_id, strategy_id, symbol,
-                            side, trade_action, position_side, is_margin_trade,
-                            order_type, trading_mode, status,
-                            quantity, filled_quantity, price, average_price,
-                            order_value, filled_value, commission,
-                            submitted_at, filled_at,
-                            client_order_id, exchange_order_id, remarks
-                        ) VALUES (
-                            :order_id, :tenant_id, :user_id, :portfolio_id, NULL, :symbol,
-                            :side, :trade_action, :position_side, FALSE,
-                            :order_type, :trading_mode, :status,
-                            :quantity, :filled_quantity, :price, :average_price,
-                            :order_value, :filled_value, :commission,
-                            :submitted_at, :filled_at,
-                            :client_order_id, :exchange_order_id, :remarks
-                        )
-                        RETURNING order_id
-                        """
-                    ),
-                    {
-                        "order_id": uuid.uuid4(),
-                        "tenant_id": tenant_id,
-                        "user_id": user_id or "0",
-                        "portfolio_id": 0,
-                        "symbol": symbol,
-                        "side": order_side.value,
-                        # PG tradeaction enum: OPEN/CLOSE（与 Python 命名不同）
-                        "trade_action": "OPEN" if order_side == OrderSide.BUY else "CLOSE",
-                        # PG positionside enum: LONG/SHORT（大写）
-                        "position_side": "LONG",
-                        "order_type": order_type.value,
-                        "trading_mode": TradingMode.REAL.value,
-                        "status": order_status.value,
-                        "quantity": total_volume,
-                        "filled_quantity": filled_volume,
-                        "price": price if price > 0 else None,
-                        "average_price": filled_price if filled_volume > 0 else None,
-                        "order_value": round(total_volume * price, 2),
-                        "filled_value": filled_value,
-                        "commission": fee,
-                        "submitted_at": submitted_at,
-                        "filled_at": filled_at,
-                        "client_order_id": f"tdx-{exchange_id}",
-                        "exchange_order_id": exchange_id,
-                        "remarks": "通达信桥委托",
-                    },
-                )
-                new_id = result.scalar()
-                if new_id:
-                    existing[exchange_id] = str(new_id)
+                if became_filled:
+                    fills.append(
+                        {
+                            "side": side,
+                            "symbol": symbol,
+                            "filled_volume": filled_volume,
+                            "filled_price": filled_price,
+                            "exchange_order_id": exchange_id,
+                        }
+                    )
             logger.info("[TdxSync] 通达信委托落库 %d 笔 (user=%s)", len(orders), user_id)
+            return fills
         except Exception as exc:
             logger.warning("[TdxSync] 通达信委托落库失败: %s", exc)
+            return []
 
     async def check_order_success(self, wtbh: str) -> dict:
         """检查下单是否成功.

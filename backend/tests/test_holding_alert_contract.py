@@ -438,3 +438,58 @@ class TestSeverityAndText:
         assert normalize_status("EXECUTED") == "executed"
         assert normalize_status("nonsense") == "active"
         assert normalize_status(None) == "active"
+
+
+class TestDigestLine:
+    """QQ 摘要行（2026-10-09 降噪）：一轮几十条逐条推 → 合并成一条里的单行。"""
+
+    def test_score_line_reads_prev_now_with_direction_arrow(self):
+        from backend.shared.holding_alert_contract import format_holding_digest_line
+
+        line = format_holding_digest_line(
+            {
+                "symbol": "002851.SZ",
+                "stock_name": "麦格米特",
+                "kind": KIND_SCORE_DROP,
+                "score_prev": 0.021,
+                "score_now": -0.008,
+            }
+        )
+        assert line == "▼ 麦格米特(SZ002851) 分数 +0.021 → -0.008"
+
+    def test_score_rise_points_up(self):
+        from backend.shared.holding_alert_contract import format_holding_digest_line
+
+        line = format_holding_digest_line(
+            {
+                "symbol": "600036.SH",
+                "stock_name": "招商银行",
+                "kind": KIND_SCORE_CROSS_ZERO,
+                "score_prev": -0.2,
+                "score_now": 0.1,
+            }
+        )
+        assert line.startswith("▲ ")
+
+    def test_risk_kinds_use_chinese_phrase(self):
+        from backend.shared.holding_alert_contract import format_holding_digest_line
+
+        for kind, phrase in (
+            (KIND_RISK_ANOMALY, "盘中异动"),
+            (KIND_RISK_NEWS, "出现重大利空"),
+            (KIND_RISK_LIST, "进入排除名单"),
+        ):
+            line = format_holding_digest_line(
+                {"symbol": "002851.SZ", "stock_name": "麦格米特", "kind": kind}
+            )
+            assert line == f"⚑ 麦格米特(SZ002851) {phrase}"
+
+    def test_missing_name_degrades_to_code_and_never_raises(self):
+        from backend.shared.holding_alert_contract import format_holding_digest_line
+
+        line = format_holding_digest_line(
+            {"symbol": "002851.SZ", "kind": KIND_RISK_ANOMALY}
+        )
+        assert line == "⚑ SZ002851 盘中异动"
+        # 符号坏了也不抛（标题兜底）
+        assert format_holding_digest_line({"symbol": "", "kind": "unknown"})
