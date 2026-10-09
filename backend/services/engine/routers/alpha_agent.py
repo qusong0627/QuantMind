@@ -1054,13 +1054,19 @@ async def list_factors(
     ),
     task_id: str | None = Query(None, description="只返回该挖掘任务产出的因子"),
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0, description="最新窗口内的分页偏移（翻更早的因子）"),
 ):
-    """列出当前用户已生成的因子。
+    """列出当前用户已生成的因子（最新窗口 + 全量统计）。
 
     ``task_id`` 走 ``metadata_json->>'task_id'``；查询本身已按认证用户收口
     （``user_id = auth_user_id``），他人 task_id 天然查空——不需要也不应该
     对 task_id 另做归属校验（多一次查询只会多一个存在性泄露面）。
-    响应带 ``limit`` 供界面诚实显示「已达上限」。
+
+    ``factors`` 是 ``created_at DESC`` 的最新窗口（limit/offset 分页），
+    ``total`` 与 ``quality_counts`` 则覆盖**同一过滤域的全量**——界面统计
+    瓦片必须用全量口径：拿窗口长度当总数会制造「越挖、中等因子越少」的
+    假象（窗口滑动把老因子挤出可视范围，不是质量真的下降）。阈值与前端
+    ``classifyQuality`` 同一口径（金样双端钉死）。
     """
     auth_user_id, auth_tenant_id = get_authenticated_identity(request)
     assert_identity_not_spoofed(
@@ -1075,10 +1081,29 @@ async def list_factors(
         universe=universe,
         task_id=task_id,
         limit=limit,
+        offset=offset,
+    )
+    scope = await persistence.factor_scope_stats(
+        user_id=auth_user_id,
+        status=status,
+        market=market,
+        universe=universe,
+        task_id=task_id,
     )
     return {
         "code": 200,
-        "data": {"factors": factors, "total": len(factors), "limit": limit},
+        "data": {
+            "factors": factors,
+            "total": scope["total"],
+            "limit": limit,
+            "offset": offset,
+            "quality_counts": {
+                "high": scope["high"],
+                "medium": scope["medium"],
+                "low": scope["low"],
+                "unknown": scope["unknown"],
+            },
+        },
     }
 
 

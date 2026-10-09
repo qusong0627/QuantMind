@@ -1,0 +1,17 @@
+{
+  "_comment": "因子质量分档口径金样：|IC| >= highMinAbsIc -> high；>= mediumMinAbsIc -> medium；其余 low；缺失（null/NaN/±Inf）-> unknown。前后端各持一份实现（Python classify_quality / TS classifyQuality），两侧测试都读本文件——改任一侧阈值，两侧测试立刻红。",
+  "highMinAbsIc": 0.05,
+  "mediumMinAbsIc": 0.02,
+  "cases": [
+    { "ic": null, "quality": "unknown" },
+    { "ic": 0.0, "quality": "low" },
+    { "ic": 0.019, "quality": "low" },
+    { "ic": 0.02, "quality": "medium" },
+    { "ic": 0.049, "quality": "medium" },
+    { "ic": 0.05, "quality": "high" },
+    { "ic": -0.01, "quality": "low" },
+    { "ic": -0.02, "quality": "medium" },
+    { "ic": -0.07, "quality": "high" },
+    { "ic": 0.88, "quality": "high" }
+  ]
+}

@@ -547,6 +547,13 @@ export interface FactorListParams {
   taskId?: string;
 }
 
+export interface FactorQualityCounts {
+  high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+}
+
 export interface FactorListResponse {
   factors: Factor[];
   total: number;
@@ -556,6 +563,12 @@ export interface FactorListResponse {
   libraries?: string[];
   /** 服务端本页实际上限（界面据此显示「已达上限」） */
   serverLimit?: number;
+  /**
+   * 同一过滤域内的**全量**质量分档计数（与 factors 窗口长度解耦）。
+   * 统计瓦片必须用这份数字——拿窗口长度当总数会制造「越挖、中等因子越少」
+   * 的假象（窗口滑动挤出老因子，不是质量真的下降）。旧后端可能缺省。
+   */
+  qualityCounts?: FactorQualityCounts | null;
 }
 
 /** 与服务端 Query(le=500) 对齐的客户端上限（请求超过会被 422）。 */
@@ -570,6 +583,10 @@ export async function getFactors(
   const requested = params.limit ?? FACTOR_LIST_MAX_LIMIT;
   const clamped = Math.min(Math.max(requested, 1), FACTOR_LIST_MAX_LIMIT);
   qs.set('limit', String(clamped));
+  // 服务端分页（created_at DESC 最新窗口上的 offset）——旧实现把 offset 只做
+  // 本地 slice，既拿不到窗口外的行，又会把服务端返回的整页再切一次（offset>0 时切空）。
+  const offset = Math.max(params.offset ?? 0, 0);
+  if (offset > 0) qs.set('offset', String(offset));
   if (params.market) qs.set('market', params.market);
   if (params.universe) qs.set('universe', params.universe);
   if (params.taskId) qs.set('task_id', params.taskId);
@@ -589,9 +606,13 @@ export async function getFactors(
         f.factorDescription.toLowerCase().includes(s),
     );
   }
-  const total = factors.length;
-  const offset = params.offset ?? 0;
-  if (params.limit) factors = factors.slice(offset, offset + params.limit);
+  // total：无客户端过滤时用服务端**全量**口径（与窗口长度解耦）；带
+  // quality/search 这类客户端过滤时只能如实返回过滤后行数。服务端缺字段
+  // （旧后端/异常载荷）退回窗口长度——宁可退回旧口径，不编造数字。
+  const serverTotal = res.data?.data?.total;
+  const hasClientFilter = Boolean(params.quality || params.search);
+  const total =
+    !hasClientFilter && typeof serverTotal === 'number' ? serverTotal : factors.length;
 
   return makeOk({
     factors,
@@ -600,6 +621,7 @@ export async function getFactors(
     offset,
     libraries: ['default'],
     serverLimit,
+    qualityCounts: res.data?.data?.quality_counts ?? null,
   });
 }
 

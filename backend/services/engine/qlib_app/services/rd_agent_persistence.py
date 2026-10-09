@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
@@ -11,6 +12,33 @@ from sqlalchemy import text
 from backend.shared.database_manager_v2 import get_session
 
 logger = logging.getLogger(__name__)
+
+# 因子质量分档阈值（|IC| 绝对值）。与前端 `classifyQuality`
+# （electron/.../services-v2/api.ts）同一口径，由金样
+# ``backend/tests/fixtures/factorQualityGolden.json`` 双端钉死——改一边，
+# 两侧测试都红。阈值只在此处定义一次，SQL 侧不另写一份。
+QUALITY_HIGH_MIN_ABS_IC = 0.05
+QUALITY_MEDIUM_MIN_ABS_IC = 0.02
+
+
+def classify_quality(ic_value: Any) -> str:
+    """|IC| 分档：``high`` / ``medium`` / ``low``；缺失（None/NaN/±Inf）为 ``unknown``。
+
+    与前端 ``classifyQuality`` 语义逐条对齐（含缺失一律 unknown、不落 low）。
+    """
+    if ic_value is None:
+        return "unknown"
+    try:
+        v = abs(float(ic_value))
+    except (TypeError, ValueError):
+        return "unknown"
+    if not math.isfinite(v):
+        return "unknown"
+    if v >= QUALITY_HIGH_MIN_ABS_IC:
+        return "high"
+    if v >= QUALITY_MEDIUM_MIN_ABS_IC:
+        return "medium"
+    return "low"
 
 
 class RDAgentFactorPersistence:
@@ -160,18 +188,17 @@ class RDAgentFactorPersistence:
                 },
             )
 
-    async def list_factors(
-        self,
+    @staticmethod
+    def _factor_filters(
         user_id: str | None = None,
         status: str | None = None,
         market: str | None = None,
         universe: str | None = None,
-        limit: int = 50,
         task_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """列出因子（支持按状态、用户、市场、宇宙、来源任务过滤）"""
+    ) -> tuple[str, dict[str, Any]]:
+        """构造 rd_agent_factors 的 WHERE 子句与绑定参数（列表/统计共用一份）。"""
         conditions = []
-        params: dict[str, Any] = {"limit": limit}
+        params: dict[str, Any] = {}
         if user_id:
             conditions.append("user_id = :user_id")
             params["user_id"] = user_id
@@ -187,8 +214,28 @@ class RDAgentFactorPersistence:
         if task_id:
             conditions.append("metadata_json->>'task_id' = :task_id")
             params["task_id"] = task_id
-
         where = " AND ".join(conditions) if conditions else "1=1"
+        return where, params
+
+    async def list_factors(
+        self,
+        user_id: str | None = None,
+        status: str | None = None,
+        market: str | None = None,
+        universe: str | None = None,
+        limit: int = 50,
+        task_id: str | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """列出因子（支持按状态、用户、市场、宇宙、来源任务过滤）。
+
+        排序恒为 ``created_at DESC``（最新在前）；``limit``/``offset`` 是
+        「最新窗口」上的分页——界面靠 ``factor_scope_stats`` 的 ``total``
+        知道窗口外还有多少，不要拿本方法的返回长度当总数。
+        """
+        where, params = self._factor_filters(user_id, status, market, universe, task_id)
+        params["limit"] = limit
+        params["offset"] = max(0, int(offset))
         async with get_session(read_only=True) as session:
             rows = await session.execute(
                 text(f"""
@@ -199,6 +246,7 @@ class RDAgentFactorPersistence:
                     WHERE {where}
                     ORDER BY created_at DESC
                     LIMIT :limit
+                    OFFSET :offset
                     """),
                 params,
             )
@@ -218,6 +266,34 @@ class RDAgentFactorPersistence:
                     item["metadata"] = {}
                 results.append(item)
             return results
+
+    async def factor_scope_stats(
+        self,
+        user_id: str | None = None,
+        status: str | None = None,
+        market: str | None = None,
+        universe: str | None = None,
+        task_id: str | None = None,
+    ) -> dict[str, int]:
+        """同一过滤域内的**全量**因子统计：总数 + 质量分档计数。
+
+        与 ``list_factors`` 共用 ``_factor_filters``，不带 LIMIT——界面统计瓦片
+        与「共 N 个」一律用这里的数字，绝不能拿列表窗口（最新 200/500 条）长度
+        冒充总数（「越挖、中等越少」的根因即窗口滑动，不是质量真的下降）。
+        只取 ``ic_value`` 一列全量行（单用户量级 O(千)，开销可忽略），
+        分档走 ``classify_quality``——阈值唯一出处，SQL 里不再写一份。
+        """
+        where, params = self._factor_filters(user_id, status, market, universe, task_id)
+        async with get_session(read_only=True) as session:
+            rows = await session.execute(
+                text(f"SELECT ic_value FROM rd_agent_factors WHERE {where}"),
+                params,
+            )
+            values = [r[0] for r in rows]
+        stats = {"total": len(values), "high": 0, "medium": 0, "low": 0, "unknown": 0}
+        for v in values:
+            stats[classify_quality(v)] += 1
+        return stats
 
     async def get_factor(self, factor_id: str) -> dict[str, Any] | None:
         """获取单个因子详情"""

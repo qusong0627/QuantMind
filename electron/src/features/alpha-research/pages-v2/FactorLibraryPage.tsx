@@ -6,7 +6,7 @@ import { Factor, FactorQuality, UniverseInfo } from '../types-v2';
 import type { PageId } from '../components-v2/layout/Layout';
 import { formatNumber, getQualityBadgeClass, metricToneClass } from '../utils-v2';
 import { formatMetricValue } from '../services-v2/metricRegistry';
-import { getFactors, getFactorDetail, getUniverses, getFactoryFactors, classifyQuality, UNIVERSE_LABELS } from '../services-v2/api';
+import { getFactors, getFactorDetail, getUniverses, getFactoryFactors, classifyQuality, UNIVERSE_LABELS, type FactorQualityCounts } from '../services-v2/api';
 import { alphaAgentService, MarketInfo } from '../services/alphaAgentService';
 import {
   Database,
@@ -53,8 +53,83 @@ const QUALITY_FULL: Record<string, string> = { high: '高质量', medium: '中�
 const VIEW_STORAGE_KEY = 'qa_factor_lib_view';
 type LibraryView = 'list' | 'cards';
 
-/** 清单单次上限（与 loadFactors 的 limit 一致，供表格诚实提示） */
-const LIBRARY_LIST_LIMIT = 200;
+/**
+ * 清单单页上限（与后端 Query(le=500) 对齐）。超出单页时由「加载更多」
+ * 按服务端 offset 向前翻页；总数/质量统计恒用服务端**全量**口径（apiScope），
+ * 不随单页大小漂移——旧实现 200 条硬窗口把「最新 200」当成全库，
+ * 既是「为啥就显示 200」的直接原因，也是「越挖、中等因子越少」的假象来源。
+ */
+const LIBRARY_LIST_LIMIT = 500;
+
+/** /alpha-agent/factors 行 → 列表 Factor（回测指标优先级链；缺失保持
+ *  undefined，界面显「—」，禁止 `|| 0` 把「没算过」伪造成「算出来是 0」）。 */
+function normalizeLibraryFactor(f: any): Factor {
+  const bt = f.backtestResults || {};
+  return {
+    // 先透传 normalizeAgentFactor 产出的全部键（rre/pfsQuality/annTurnover…），
+    // 下面的显式赋值再覆盖需要归一化的字段——漏字段=新指标在列表页静默消失。
+    ...f,
+    factorId: f.factorId || '',
+    factorName: f.factorName || 'Unknown',
+    factorExpression: f.factorExpression || '',
+    factorDescription: f.factorDescription || '',
+    quality: (f.quality || classifyQuality(f.ic)) as FactorQuality,
+    market: f.market || f.metadata?.market || undefined,
+    universe: f.universe || f.metadata?.universe || undefined,
+    ic: (typeof bt['IC'] === 'number' ? bt['IC'] : (f.ic ?? bt['1day.excess_return_without_cost.information_coefficient'])),
+    icir: (typeof bt['ICIR'] === 'number' ? bt['ICIR'] : (f.icir ?? bt['1day.excess_return_without_cost.information_coefficient_ir'])),
+    rankIc: (typeof bt['Rank IC'] === 'number' ? bt['Rank IC'] : (f.rankIc ?? bt['rank_ic'] ?? bt['1day.excess_return_without_cost.rank_ic'])),
+    rankIcir: (typeof bt['Rank ICIR'] === 'number' ? bt['Rank ICIR'] : (f.rankIcir ?? bt['rank_ic_ir'] ?? bt['1day.excess_return_without_cost.rank_ic_ir'])),
+    round: f.round || 0,
+    direction: String(f.direction ?? ''),
+    createdAt: f.createdAt || new Date().toISOString(),
+    // Extra fields from API
+    backtestResults: f.backtestResults,
+    factorFormulation: f.factorFormulation,
+    annualReturn: f.annualReturn,
+    maxDrawdown: f.maxDrawdown,
+    sharpeRatio: f.sharpeRatio,
+  };
+}
+
+/** 因子工厂产出（只读、共享）：并入列表，禁用回测/物化操作；
+ *  工厂只评估了 ic/icir，其余指标**不存在**（旧实现补 0 是伪造）。 */
+function normalizeFactoryFactor(f: any, generatedAt: string): Factor {
+  return {
+    factorId: f.factorId,
+    factorName: f.factorName,
+    factorExpression: f.factorExpression,
+    factorDescription: `因子工厂产出 · 字段 ${f.field || '—'} · 覆盖率 ${(f.coverage * 100).toFixed(0)}%`,
+    quality: classifyQuality(f.ic),
+    market: 'a_share',
+    universe: 'all_a',
+    ic: f.ic,
+    icir: f.icir,
+    round: 0,
+    direction: f.ic != null ? (f.ic >= 0 ? '正向' : '反向') : '',
+    createdAt: generatedAt || new Date().toISOString(),
+    readOnly: true,
+    source: 'factor_factory',
+    coverage: f.coverage,
+  };
+}
+
+interface QualityTally {
+  total: number;
+  high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+}
+
+function tallyQuality(rows: Factor[]): QualityTally {
+  const counts: QualityTally = { total: rows.length, high: 0, medium: 0, low: 0, unknown: 0 };
+  for (const f of rows) {
+    const q = f.quality;
+    if (q === 'high' || q === 'medium' || q === 'low' || q === 'unknown') counts[q] += 1;
+  }
+  return counts;
+}
 
 // `onNavigate` 收 `PageId` 而不是 `string`：同级的 HomePage / MiningDashboardPage /
 // Layout 都是这么写的，只有这里松了一格。松的代价是实打实的——回调最终落到
@@ -96,7 +171,15 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [copiedExpr, setCopiedExpr] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 服务端全量口径：总数 + 四档质量计数（与已加载窗口解耦）；null = 旧后端未提供
+  const [apiScope, setApiScope] = useState<{
+    total: number;
+    qualityCounts: FactorQualityCounts | null;
+  } | null>(null);
+  // 已取回的挖掘因子行数（= 下一页的 offset；按取回行数推进，不按去重后计数）
+  const [apiNextOffset, setApiNextOffset] = useState(0);
 
   useEffect(() => {
     alphaAgentService.listMarkets().then(setMarkets).catch(() => {});
@@ -130,57 +213,17 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
         taskFilter?.taskId ? Promise.resolve(null) : getFactoryFactors().catch(() => null),
       ]);
       if (resp.success && resp.data) {
-        const apiFactors: Factor[] = resp.data.factors.map((f: any) => {
-          const bt = f.backtestResults || {};
-          return {
-            // 先透传 normalizeAgentFactor 产出的全部键（rre/pfsQuality/annTurnover…），
-            // 下面的显式赋值再覆盖需要归一化的字段——漏字段=新指标在列表页静默消失。
-            ...f,
-            factorId: f.factorId || '',
-            factorName: f.factorName || 'Unknown',
-            factorExpression: f.factorExpression || '',
-            factorDescription: f.factorDescription || '',
-            quality: (f.quality || classifyQuality(f.ic)) as FactorQuality,
-            market: f.market || f.metadata?.market || undefined,
-            universe: f.universe || f.metadata?.universe || undefined,
-            // 回测指标优先级链；**缺失保持 undefined**（界面显「—」），禁止 `|| 0`
-            // 把「没算过」伪造成「算出来是 0」（用户实测指标显示错误的根因之一）
-            ic: (typeof bt['IC'] === 'number' ? bt['IC'] : (f.ic ?? bt['1day.excess_return_without_cost.information_coefficient'])),
-            icir: (typeof bt['ICIR'] === 'number' ? bt['ICIR'] : (f.icir ?? bt['1day.excess_return_without_cost.information_coefficient_ir'])),
-            rankIc: (typeof bt['Rank IC'] === 'number' ? bt['Rank IC'] : (f.rankIc ?? bt['rank_ic'] ?? bt['1day.excess_return_without_cost.rank_ic'])),
-            rankIcir: (typeof bt['Rank ICIR'] === 'number' ? bt['Rank ICIR'] : (f.rankIcir ?? bt['rank_ic_ir'] ?? bt['1day.excess_return_without_cost.rank_ic_ir'])),
-            round: f.round || 0,
-            direction: String(f.direction ?? ''),
-            createdAt: f.createdAt || new Date().toISOString(),
-            // Extra fields from API
-            backtestResults: f.backtestResults,
-            factorFormulation: f.factorFormulation,
-            annualReturn: f.annualReturn,
-            maxDrawdown: f.maxDrawdown,
-            sharpeRatio: f.sharpeRatio,
-          };
-        });
-        // 因子工厂产出（只读、共享）：并入列表，禁用回测/物化操作；
-        // 工厂只评估了 ic/icir，其余指标**不存在**（旧实现补 0 是伪造）
+        const apiFactors: Factor[] = resp.data.factors.map(normalizeLibraryFactor);
         const generatedAt = factoryResp?.data?.generatedAt ?? '';
-        const factoryFactors: Factor[] = (factoryResp?.data?.factors ?? []).map((f) => ({
-          factorId: f.factorId,
-          factorName: f.factorName,
-          factorExpression: f.factorExpression,
-          factorDescription: `因子工厂产出 · 字段 ${f.field || '—'} · 覆盖率 ${(f.coverage * 100).toFixed(0)}%`,
-          quality: classifyQuality(f.ic),
-          market: 'a_share',
-          universe: 'all_a',
-          ic: f.ic,
-          icir: f.icir,
-          round: 0,
-          direction: f.ic != null ? (f.ic >= 0 ? '正向' : '反向') : '',
-          createdAt: generatedAt || new Date().toISOString(),
-          readOnly: true,
-          source: 'factor_factory',
-          coverage: f.coverage,
-        }));
+        const factoryFactors: Factor[] = (factoryResp?.data?.factors ?? []).map((f) =>
+          normalizeFactoryFactor(f, generatedAt),
+        );
         setFactors([...factoryFactors, ...apiFactors]);
+        setApiNextOffset(apiFactors.length);
+        setApiScope({
+          total: resp.data.total,
+          qualityCounts: resp.data.qualityCounts ?? null,
+        });
       }
     } catch (err: any) {
       console.error('Failed to load factors from API:', err);
@@ -194,10 +237,45 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
       }
       // Show empty state with error message instead of mock data
       setFactors([]);
+      setApiScope(null);
+      setApiNextOffset(0);
     } finally {
       setIsLoading(false);
     }
   }, [marketFilter, universeFilter, taskFilter?.taskId]);
+
+  // 「加载更多」：按创建时间倒序向前翻页（服务端 offset），追加并按 factorId
+  // 去重（并发新挖掘会让窗口边界轻微漂移，重复行在这里吞掉）。失败不清列表
+  // ——已加载内容是用户正在看的，清掉等于把失败代价翻倍；按钮可重试。
+  const loadMoreFactors = useCallback(async () => {
+    if (isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const resp = await getFactors({
+        market: marketFilter !== 'all' ? marketFilter : undefined,
+        universe: universeFilter !== 'all' ? universeFilter : undefined,
+        taskId: taskFilter?.taskId,
+        limit: LIBRARY_LIST_LIMIT,
+        offset: apiNextOffset,
+      });
+      if (resp.success && resp.data) {
+        const rows = resp.data.factors.map(normalizeLibraryFactor);
+        setFactors((prev) => {
+          const seen = new Set(prev.map((f) => f.factorId));
+          return [...prev, ...rows.filter((f) => !seen.has(f.factorId))];
+        });
+        setApiNextOffset((c) => c + rows.length);
+        setApiScope({
+          total: resp.data.total,
+          qualityCounts: resp.data.qualityCounts ?? null,
+        });
+      }
+    } catch (err) {
+      console.error('[alpha-research] load more factors failed:', err);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [marketFilter, universeFilter, taskFilter?.taskId, apiNextOffset, isLoadingMore]);
 
   const filterFactors = () => {
     let filtered = factors;
@@ -355,12 +433,30 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
     setSelectedFactor(factor);
   };
 
-  const stats = {
-    total: factors.length,
-    high: factors.filter((f) => f.quality === 'high').length,
-    medium: factors.filter((f) => f.quality === 'medium').length,
-    low: factors.filter((f) => f.quality === 'low').length,
-  };
+  // 统计瓦片/页签计数恒用「全量口径」：服务端同一过滤域的 quality_counts
+  // （与列表窗口解耦）+ 工厂清单本地计数（按当前市场/股票池取子集，与列表
+  // 口径一致）。拿窗口长度当总数会随挖掘进度越挖越「少」——那是老因子被
+  // 挤出可视窗口，不是质量下降。服务端字段缺失（旧后端/异常）才退回窗口
+  // 计数——宁可退回旧口径，不编造数字。
+  const stats = useMemo(() => {
+    const factoryRows = factors.filter(
+      (f) =>
+        f.source === 'factor_factory' &&
+        (marketFilter === 'all' || f.market === marketFilter) &&
+        (universeFilter === 'all' || f.universe === universeFilter),
+    );
+    const factory = tallyQuality(factoryRows);
+    const base = apiScope?.qualityCounts
+      ? { ...apiScope.qualityCounts, total: apiScope.total }
+      : tallyQuality(factors.filter((f) => f.source !== 'factor_factory'));
+    return {
+      total: base.total + factory.total,
+      high: base.high + factory.high,
+      medium: base.medium + factory.medium,
+      low: base.low + factory.low,
+      unknown: base.unknown + factory.unknown,
+    };
+  }, [apiScope, factors, marketFilter, universeFilter]);
 
   const StatTile = ({
     icon: Icon,
@@ -368,12 +464,15 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
     value,
     tone,
     iconTone,
+    sub,
   }: {
     icon: typeof BarChart3;
     label: string;
     value: number;
     tone: string;
     iconTone: string;
+    /** 补充说明（如「含待评估 N」）——让四档与总数对得上账 */
+    sub?: string;
   }) => (
     <Card className="glass card-hover">
       <CardContent className="flex h-[96px] flex-col items-center justify-center gap-0.5 p-3 text-center">
@@ -382,6 +481,7 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
         </div>
         <div className="text-[11px] text-muted-foreground">{label}</div>
         <div className={`text-lg font-bold leading-tight ${tone}`}>{value}</div>
+        {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
       </CardContent>
     </Card>
   );
@@ -473,7 +573,14 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatTile icon={BarChart3} label="总因子数" value={stats.total} tone="" iconTone="bg-primary/20 text-primary" />
+        <StatTile
+          icon={BarChart3}
+          label="总因子数"
+          value={stats.total}
+          tone=""
+          iconTone="bg-primary/20 text-primary"
+          sub={stats.unknown > 0 ? `含待评估 ${stats.unknown}` : undefined}
+        />
         <StatTile icon={TrendingUp} label="高质量" value={stats.high} tone="text-success" iconTone="bg-success/20 text-success" />
         <StatTile icon={BarChart3} label="中等质量" value={stats.medium} tone="text-warning" iconTone="bg-warning/20 text-warning" />
         <StatTile icon={BarChart3} label="低质量" value={stats.low} tone="text-destructive" iconTone="bg-destructive/20 text-destructive" />
@@ -554,6 +661,7 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
                     ['high', `高质量 (${stats.high})`],
                     ['medium', `中等 (${stats.medium})`],
                     ['low', `低质量 (${stats.low})`],
+                    ['unknown', `待评估 (${stats.unknown})`],
                   ] as Array<[FactorQuality | 'all', string]>
                 ).map(([value, label]) => (
                   <Button
@@ -571,6 +679,25 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
           </div>
         </CardContent>
       </Card>
+
+      {/* 窗口提示：单页装不下时给出口——「最新 N 条」不是全部 */}
+      {apiScope && apiScope.total > apiNextOffset && (
+        <div className="glass rounded-lg p-3 flex items-center gap-3 bg-warning/10 border-warning/50">
+          <AlertCircle className="h-4 w-4 text-warning flex-shrink-0" />
+          <span className="min-w-0 flex-1 text-xs text-foreground">
+            共 {apiScope.total} 个因子，列表当前加载最新 {apiNextOffset} 个（按创建时间倒序）
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 px-2 text-xs"
+            onClick={loadMoreFactors}
+            disabled={isLoadingMore}
+          >
+            {isLoadingMore ? '加载中…' : `加载更多（还有 ${apiScope.total - apiNextOffset} 个）`}
+          </Button>
+        </div>
+      )}
 
       {/* Factor List */}
       {view === 'list' ? (
@@ -597,7 +724,6 @@ export const FactorLibraryPage: React.FC<FactorLibraryPageProps> = ({
               onMaterialize={handleMaterialize}
               onViewBacktest={handleViewBacktest}
               emptyText={emptyListText}
-              serverLimit={LIBRARY_LIST_LIMIT}
             />
           </CardContent>
         </Card>

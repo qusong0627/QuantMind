@@ -71,6 +71,50 @@ describe('getFactors：task_id 透传与 limit 夹取', () => {
   test('FACTOR_LIST_MAX_LIMIT 与服务端 Query(le=500) 对齐', () => {
     expect(FACTOR_LIST_MAX_LIMIT).toBe(500);
   });
+
+  test('offset 透传到查询串（服务端分页）并回显；offset=0 不写查询串', async () => {
+    apiGetMock.mockResolvedValue({
+      data: { data: { factors: [], limit: 200, offset: 200 } },
+    });
+    const res = await getFactors({ limit: 200, offset: 200 });
+    expect(apiGetMock.mock.calls[0][0]).toContain('offset=200');
+    expect(res.data?.offset).toBe(200);
+
+    await getFactors({ limit: 500 });
+    expect(apiGetMock.mock.calls[1][0]).not.toContain('offset=');
+  });
+
+  test('total 用服务端全量口径、quality_counts 透传（「为啥就显示 200」回归锚）', async () => {
+    // 窗口只回 1 行、全量 291——total 必须是 291 而不是窗口长度
+    apiGetMock.mockResolvedValue({
+      data: {
+        data: {
+          factors: [{ factor_id: 'f1' }],
+          total: 291,
+          limit: 200,
+          offset: 0,
+          quality_counts: { high: 0, medium: 47, low: 199, unknown: 45 },
+        },
+      },
+    });
+    const res = await getFactors({ limit: 200 });
+    expect(res.data?.total).toBe(291);
+    expect(res.data?.qualityCounts).toEqual({
+      high: 0,
+      medium: 47,
+      low: 199,
+      unknown: 45,
+    });
+  });
+
+  test('服务端缺 total（旧后端）退回窗口长度；qualityCounts 为 null，不编造', async () => {
+    apiGetMock.mockResolvedValue({
+      data: { data: { factors: [{ factor_id: 'f1' }, { factor_id: 'f2' }], limit: 200 } },
+    });
+    const res = await getFactors({ limit: 200 });
+    expect(res.data?.total).toBe(2);
+    expect(res.data?.qualityCounts).toBeNull();
+  });
 });
 
 describe('cancelBacktest：真调取消端点（旧实现是空 stub）', () => {
