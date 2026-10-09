@@ -57,6 +57,17 @@ ENV_MINERU_TOKEN = "MINERU_API_TOKEN"
 ENV_MINERU_MODEL_VERSION = "MINERU_MODEL_VERSION"
 ENV_MINERU_BASE_URL = "MINERU_BASE_URL"
 
+#: 解析通道模式（T-FM-21）：cloud=云端 v4 协议（默认）；local=本地/局域网
+#: MinerU 4.x 自托管 V1 HTTP API（mineru-kit api-server，数据不出内网）。
+ENV_MINERU_MODE = "MINERU_MODE"
+MODE_CLOUD = "cloud"
+MODE_LOCAL = "local"
+VALID_MODES = frozenset({MODE_CLOUD, MODE_LOCAL})
+
+ENV_MINERU_LOCAL_URL = "MINERU_LOCAL_URL"
+ENV_MINERU_LOCAL_API_KEY = "MINERU_LOCAL_API_KEY"
+ENV_MINERU_LOCAL_TIER = "MINERU_LOCAL_TIER"
+
 DEFAULT_BASE_URL = "https://mineru.net"
 DEFAULT_MODEL_VERSION = "vlm"
 
@@ -182,14 +193,72 @@ class MineruConfig:
     token: str
     base_url: str = DEFAULT_BASE_URL
     model_version: str = DEFAULT_MODEL_VERSION
+    #: cloud（默认）或 local；本地模式下 token 承载 MINERU_LOCAL_API_KEY（可空）
+    mode: str = MODE_CLOUD
+    #: 本地服务解析档位（flash|basic|standard|advanced）；None=用服务端默认
+    local_tier: str | None = None
 
     def __post_init__(self) -> None:
+        if self.mode not in VALID_MODES:
+            raise ValueError(f"未知 MinerU 模式: {self.mode!r}")
+        if self.mode == MODE_LOCAL:
+            if not self.base_url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"本地 MinerU 服务地址必须是 http(s) URL: {self.base_url!r}"
+                )
+            return
         if not self.token:
             raise ValueError("MinerU token 不能为空")
 
 
+def is_local_mode() -> bool:
+    """当前是否本地/局域网解析模式（**调用时读**，归一后精确匹配）。"""
+    return (os.getenv(ENV_MINERU_MODE) or "").strip().lower() == MODE_LOCAL
+
+
+def mineru_unconfigured_message() -> str:
+    """通道未配置 → 指路「因子挖掘 → 文档解析设置」+ env 兜底（服务层与端点共用）。
+
+    2026-10-09 起用户级配置入口在因子挖掘内（``doc_mining_settings``），
+    不再提用户中心；文案同时保留部署级 env 兜底，两种配法都告诉用户。
+    """
+    if is_local_mode():
+        return (
+            "本地 MinerU 服务未配置，文档解析不可用：请在「因子挖掘 → 文档解析设置」"
+            "填写本地/局域网 MinerU 服务地址，或在服务器 .env 配置 MINERU_LOCAL_URL"
+        )
+    return (
+        "MinerU 解析通道未配置，文档解析不可用：请在「因子挖掘 → 文档解析设置」"
+        "填写 MinerU API Token，或在服务器 .env 配置 MINERU_API_TOKEN"
+    )
+
+
 def resolve_mineru_config() -> MineruConfig | None:
-    """env → 配置；token 缺失返回 None（端点据此转 503）。**调用时读**。"""
+    """env → 配置；不可用返回 None（端点据此转 503）。**调用时读**。
+
+    本地模式（``MINERU_MODE=local``）：读 ``MINERU_LOCAL_URL`` /
+    ``MINERU_LOCAL_API_KEY`` / ``MINERU_LOCAL_TIER``——**绝不**回落到云端
+    配置（没配 URL 就是未配置；云端 token 绝不渗进本地客户端，防漏给内网
+    服务）。未知 mode 值按 cloud 处理（打日志），不臆造第三种通道。
+    """
+    mode_raw = (os.getenv(ENV_MINERU_MODE) or "").strip().lower()
+    if mode_raw and mode_raw not in VALID_MODES:
+        logger.warning("MINERU_MODE=%r 无法识别，按 %s 处理", mode_raw, MODE_CLOUD)
+        mode_raw = MODE_CLOUD
+    if mode_raw == MODE_LOCAL:
+        base_url = (os.getenv(ENV_MINERU_LOCAL_URL) or "").strip()
+        if not base_url:
+            return None
+        try:
+            return MineruConfig(
+                token=(os.getenv(ENV_MINERU_LOCAL_API_KEY) or "").strip(),
+                base_url=base_url.rstrip("/"),
+                mode=MODE_LOCAL,
+                local_tier=(os.getenv(ENV_MINERU_LOCAL_TIER) or "").strip() or None,
+            )
+        except ValueError as e:
+            logger.warning("MINERU_LOCAL_URL=%r 非法：%s", base_url, e)
+            return None
     token = (os.getenv(ENV_MINERU_TOKEN) or "").strip()
     if not token:
         return None
@@ -213,6 +282,8 @@ class MineruFileSpec:
     data_id: str | None = None
     is_ocr: bool = False
     page_ranges: str | None = None
+    #: 原件字节数：云端 v4 请求用不到；本地 V1 create 必填（T-FM-21）
+    size_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -285,12 +356,16 @@ def _validated_parts(filename: str) -> list[str]:
     return parts
 
 
+#: md 产物两种命名：云端 zip 用 full.md；本地 4.x 自托管用 markdown.md
+_MD_BASENAMES = ("full.md", "markdown.md")
+
+
 def _classify_member(parts: list[str]) -> tuple[str, str] | None:
     """(类别, 目的相对路径) 或 None（白名单外，静默跳过）。"""
     if not parts:
         return None
     base = parts[-1]
-    if base == "full.md":
+    if base in _MD_BASENAMES:
         return "md", "full.md"
     if base.endswith("_content_list.json"):
         return "content_list", base
@@ -322,7 +397,7 @@ def extract_zip_whitelist(
             raise MineruZipError(f"zip 条目数 {len(infos)} 超上限 {max_entries}")
 
         plan: list[tuple[zipfile.ZipInfo, str, str]] = []
-        md_seen = False
+        md_candidates: list[tuple[zipfile.ZipInfo, str, str]] = []
         for info in infos:
             parts = _validated_parts(info.filename)
             mode = (info.external_attr >> 16) & _S_IFMT
@@ -335,15 +410,25 @@ def extract_zip_whitelist(
                 continue
             kind, rel = hit
             if kind == "md":
-                if md_seen:  # 多份 full.md：取第一份，其余跳过（确定性）
-                    continue
-                md_seen = True
+                md_candidates.append((info, kind, rel))
+                continue
             plan.append((info, kind, rel))
 
-        if not md_seen:
+        if not md_candidates:
             raise MineruZipError(
-                "解析产物里没有 full.md（MinerU 4.0 命名 markdown.md 不再使用）"
+                "解析产物里没有 full.md/markdown.md（MinerU markdown 产物缺失）"
             )
+        # full.md（云端命名）与 markdown.md（本地 4.x 命名）并存时 full.md 优先；
+        # 同名的多份取第一份（确定性）。落地一律归一为 full.md。
+        md_chosen = next(
+            (
+                c
+                for c in md_candidates
+                if c[0].filename.replace("\\", "/").rsplit("/", 1)[-1] == "full.md"
+            ),
+            md_candidates[0],
+        )
+        plan.append(md_chosen)
 
         declared = sum(info.file_size for info, _, _ in plan)
         if declared > max_total_bytes:
@@ -382,7 +467,7 @@ def extract_zip_whitelist(
 
             shutil.rmtree(dest_dir, ignore_errors=True)
             raise
-        # plan 里已有 md_seen，这里不可能为 None；断言式收口防未来改坏
+        # plan 里已有 md_chosen，这里不可能为 None；断言式收口防未来改坏
         if md_path is None:  # pragma: no cover
             raise MineruZipError("内部错误：白名单计划含 full.md 但未解出")
         return ZipExtractResult(
@@ -643,6 +728,15 @@ class MineruClient:
         if not isinstance(file_urls, list) or len(file_urls) != len(files):
             raise MineruError(f"{context}: file_urls 数量与请求不一致", retryable=False)
         return batch_id, [str(u) for u in file_urls]
+
+    async def finalize_submission(self, batch_id: str) -> str:
+        """上传完成后的收尾钩子：返回要落库/轮询的「解析任务号」。
+
+        云端 v4 建批次即定 batch_id，无需收尾（恒等返回）；本地 V1 服务
+        需要上传完成后以 file_id 建解析任务，由 `mineru_local.MineruLocalClient`
+        覆盖。调用点固定在 submit_parse 的上传循环之后、落库之前。
+        """
+        return batch_id
 
     async def upload_file(self, url: str, content: bytes | Path) -> None:
         """PUT 预签名链接。**不带 Content-Type / Authorization**（否则签名失败）。"""

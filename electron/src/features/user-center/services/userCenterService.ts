@@ -861,39 +861,6 @@ export class UserCenterService extends BaseApiClient {
     return this.post('/ai-ide/config/llm/test', { qwen_api_key: apiKey, model, base_url: baseUrl, extra_headers: extraHeaders });
   }
 
-  // ============ MinerU 文档解析 Token 管理 ============
-
-  /**
-   * 获取 MinerU Token 状态：用户自带（掩码）+ 服务器 env 兜底 + 有效来源。
-   *
-   * profile_readable=false 表示 Profile 读不到（网关故障），与「没配」不同，
-   * 前端必须进「状态未加载」态，不能显示成未配置。
-   */
-  async getDocParseConfig(): Promise<{
-    profile_readable: boolean;
-    has_user_token: boolean;
-    masked_token: string;
-    env_configured: boolean;
-    effective_source: 'user' | 'env' | 'none';
-  }> {
-    const response = await this.get<any>('/ai-ide/config/doc-parse');
-    return {
-      profile_readable: response?.profile_readable ?? true,
-      has_user_token: response?.has_user_token || false,
-      masked_token: response?.masked_token || '',
-      env_configured: response?.env_configured || false,
-      effective_source: response?.effective_source || 'none',
-    };
-  }
-
-  /**
-   * 保存 / 清除用户自带 MinerU Token（空串 = 清除，回落服务器配置）
-   */
-  async saveDocParseConfig(token: string): Promise<{ success: boolean; message?: string }> {
-    return this.post('/ai-ide/config/doc-parse', { mineru_api_token: token });
-  }
-
-
   // ============ 手机号管理 ============
 
   /**

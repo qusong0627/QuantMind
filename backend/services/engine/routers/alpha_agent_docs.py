@@ -92,15 +92,20 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile
 
 from backend.services.engine.alpha_agent.doc_credentials import (
-    resolve_effective_mineru_token,
+    resolve_effective_mineru_config,
 )
 from backend.services.engine.alpha_agent.doc_gate import require_doc_mining
+from backend.services.engine.alpha_agent.doc_mining_settings import (
+    DocMiningSettingsError,
+    get_doc_mining_settings_store,
+)
 from backend.services.engine.alpha_agent.doc_organize import (
     ORGANIZE_KINDS,
     OrganizeError,
     organize_and_store,
 )
 from backend.services.engine.alpha_agent.doc_parse_service import (
+    doc_accounting,
     get_doc_parse_service,
 )
 from backend.services.engine.alpha_agent.doc_quota import (
@@ -114,9 +119,11 @@ from backend.services.engine.alpha_agent.doc_store import (
     resolve_list_filters,
 )
 from backend.services.engine.alpha_agent.mineru_client import (
+    MODE_LOCAL,
     MAX_PAGES_PER_FILE,
     MineruError,
     count_pdf_pages,
+    resolve_mineru_config,
     run_pdf_job,
 )
 from backend.services.engine.alpha_agent.task_store import get_mining_task_store
@@ -538,16 +545,17 @@ async def upload_doc(request: Request) -> dict:
 
     store = get_doc_store()
     svc = get_doc_parse_service()
-    # 通道预检走「有效 Token」口径（用户自带 > env）：没配就别收文件——
+    # 通道预检走「有效配置」口径（因子挖掘设置 > env）：没配就别收文件——
     # 先收再发现不可用会留下永远解析不了的孤儿。
-    token, _token_src = await resolve_effective_mineru_token(user_id, tenant_id)
-    if not token:
+    effective_cfg, _cfg_src = await resolve_effective_mineru_config(user_id, tenant_id)
+    if effective_cfg is None:
         raise HTTPException(
             status_code=503,
             detail=(
-                "文档解析服务未就绪：未配置 MinerU 解析 Token。"
-                "可在个人中心「其他设置 → AI 服务配置」填写自己的 Token，"
-                "或在服务器 .env 配置 MINERU_API_TOKEN。"
+                "文档解析服务未就绪：未配置 MinerU 解析通道。"
+                "请在「因子挖掘 → 文档解析设置」配置 MinerU API Token"
+                "（或本地/局域网 MinerU 服务地址），"
+                "或在服务器 .env 配置 MINERU_API_TOKEN / MINERU_LOCAL_URL。"
             ),
         )
 
@@ -621,7 +629,13 @@ async def upload_doc(request: Request) -> dict:
                 )
             pages += estimate
         try:
-            quota.reserve(user_id, pages, doc_id=doc_id)
+            # 本地/局域网通道不烧平台云配额：按有效配置传按次开关
+            quota.reserve(
+                user_id,
+                pages,
+                doc_id=doc_id,
+                accounting=effective_cfg.mode != MODE_LOCAL,
+            )
         except QuotaExceeded as exc:
             # 从未进入解析链的行：连根清（目录 + 行），不留「永远解析不了」的滞留
             shutil.rmtree(doc_dir, ignore_errors=True)
@@ -695,7 +709,11 @@ async def list_docs(
 
 @router.get("/docs/quota")
 async def doc_quota_status(request: Request) -> dict:
-    """当日解析配额（北京时间日界）：已用/上限/余量 + token 是否配置。
+    """当日解析配额（北京时间日界）：已用/上限/余量 + 通道是否配置。
+
+    ``token_configured`` = 解析通道已配（云端 Token 或本地服务地址，
+    用户设置 > env）；``mineru_mode`` = 生效通道（cloud/local/None）。
+    本地通道的文档不计平台云配额，前端据此把页数配额显示为「不限」。
 
     ⚠️ 必须注册在 ``/docs/{doc_id}`` **之前**，否则被参数路由吞掉
     （P0 的 /tasks/history 同款教训，有路由顺序回归测试钉住）。
@@ -703,9 +721,10 @@ async def doc_quota_status(request: Request) -> dict:
     user_id, tenant_id = get_authenticated_identity(request)
     st = get_doc_quota().status(user_id)
     data = asdict(st)
-    # 有效 Token 口径（用户自带 > env）：前端据此提示「去哪配」
-    token, _src = await resolve_effective_mineru_token(user_id, tenant_id)
-    data["token_configured"] = token is not None
+    # 有效配置口径（因子挖掘设置 > env）：前端据此提示「去哪配」
+    cfg, _src = await resolve_effective_mineru_config(user_id, tenant_id)
+    data["token_configured"] = cfg is not None
+    data["mineru_mode"] = cfg.mode if cfg is not None else None
     return {"code": 200, "data": data}
 
 
@@ -741,8 +760,9 @@ async def docs_stats(request: Request) -> dict:
     )
     failed = counts["parse_failed"]
     quota_data = asdict(get_doc_quota().status(user_id))
-    token, _src = await resolve_effective_mineru_token(user_id, tenant_id)
-    quota_data["token_configured"] = token is not None
+    cfg, _src = await resolve_effective_mineru_config(user_id, tenant_id)
+    quota_data["token_configured"] = cfg is not None
+    quota_data["mineru_mode"] = cfg.mode if cfg is not None else None
     return {
         "code": 200,
         "data": {
@@ -754,6 +774,86 @@ async def docs_stats(request: Request) -> dict:
             "quota": quota_data,
         },
     }
+
+
+class MineruSettingsPayload(BaseModel):
+    """PUT /docs/mineru-settings 请求体。
+
+    密钥字段（api_token / local_api_key）**留空 = 保留原值**：前端回显的
+    是掩码，回存掩码会把真密钥写坏；清除走整条 DELETE。
+    ``local_tier=""`` = 清为服务端默认档。
+    """
+
+    mode: str
+    api_token: str | None = None
+    local_url: str | None = None
+    local_api_key: str | None = None
+    local_tier: str | None = None
+
+
+async def _mineru_settings_view(user_id: str, tenant_id: str) -> dict:
+    """设置页视图：掩码后的用户设置 + 生效来源 + 部署 env 概览。
+
+    ``readable=False``（Redis 读不到）必须与「没配」区分开——把读故障
+    显示成空设置会诱导用户覆盖掉自己已存的密钥（旧 Profile 网关同款纪律）。
+    """
+    store = get_doc_mining_settings_store()
+    try:
+        settings = store.get(user_id, tenant_id, strict=True)
+        readable = True
+    except DocMiningSettingsError:
+        settings = None
+        readable = False
+    effective_cfg, src = await resolve_effective_mineru_config(user_id, tenant_id)
+    env_cfg = resolve_mineru_config()
+    return {
+        "settings": settings.to_public() if settings is not None else None,
+        "readable": readable,
+        "source": src,
+        "effective_mode": effective_cfg.mode if effective_cfg is not None else None,
+        "env_configured": env_cfg is not None,
+        "env_mode": env_cfg.mode if env_cfg is not None else None,
+    }
+
+
+@router.get("/docs/mineru-settings")
+async def get_mineru_settings(request: Request) -> dict:
+    """读取本人 MinerU 解析设置（因子挖掘内配置；密钥只回掩码）。
+
+    ⚠️ 与 /docs/quota 同一路由顺序纪律：必须注册在 ``/docs/{doc_id}`` 之前。
+    """
+    user_id, tenant_id = get_authenticated_identity(request)
+    return {"code": 200, "data": await _mineru_settings_view(user_id, tenant_id)}
+
+
+@router.put("/docs/mineru-settings")
+async def save_mineru_settings(
+    request: Request, payload: MineruSettingsPayload
+) -> dict:
+    """保存本人 MinerU 解析设置（保存即校验，失败 400 带可读原因）。"""
+    user_id, tenant_id = get_authenticated_identity(request)
+    store = get_doc_mining_settings_store()
+    try:
+        store.save(user_id, tenant_id, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 —— Redis 写失败：固定文案，不回显内部错误
+        logger.exception("[docs] 解析设置保存失败 user=%s", user_id)
+        raise HTTPException(status_code=500, detail="保存失败，请稍后重试") from exc
+    return {"code": 200, "data": await _mineru_settings_view(user_id, tenant_id)}
+
+
+@router.delete("/docs/mineru-settings")
+async def clear_mineru_settings(request: Request) -> dict:
+    """清除本人 MinerU 解析设置（回到部署默认通道）。"""
+    user_id, tenant_id = get_authenticated_identity(request)
+    store = get_doc_mining_settings_store()
+    try:
+        store.clear(user_id, tenant_id)
+    except Exception as exc:  # noqa: BLE001 —— 同上：固定文案
+        logger.exception("[docs] 解析设置清除失败 user=%s", user_id)
+        raise HTTPException(status_code=500, detail="清除失败，请稍后重试") from exc
+    return {"code": 200, "data": await _mineru_settings_view(user_id, tenant_id)}
 
 
 @router.get("/docs/{doc_id}")
@@ -899,7 +999,7 @@ async def delete_doc(request: Request, doc_id: str) -> dict:
     # 预留键 24h TTL 自回收，不会永久占账。
     if not doc.get("mineru_batch_id"):
         try:
-            get_doc_quota().release(doc_id, user_id)
+            get_doc_quota().release(doc_id, user_id, accounting=doc_accounting(doc))
         except Exception as exc:  # noqa: BLE001 —— 释放失败只告警（TTL 兜底回收）
             logger.warning("[docs] 删除释放配额预留失败 doc=%s: %s", doc_id, exc)
     # H2：软删落地后二次清扫——抓在途写（下载/解包）在 status 检查与 rmtree

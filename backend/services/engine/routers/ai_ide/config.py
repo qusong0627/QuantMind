@@ -5,7 +5,6 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from backend.services.engine.alpha_agent.profile_gateway import fetch_profile_raw
 from backend.shared.auth import get_internal_call_secret
 
 logger = logging.getLogger(__name__)
@@ -289,82 +288,7 @@ async def test_llm_config(request: Request, config: LLMTestConfig):
         return {"success": False, "message": f"连接失败: {e}"}
 
 
-class DocParseConfig(BaseModel):
-    """用户自带 MinerU 文档解析 Token（照 LLM Key 用户级模式）。"""
-
-    mineru_api_token: str | None = None
-
-
-@router.get("/doc-parse")
-async def get_doc_parse_config(request: Request):
-    """MinerU Token 状态：用户自带（掩码）+ 服务器 env 兜底 + 有效来源。"""
-    user = _get_user_info(request)
-    user_id = user["user_id"]
-    tenant_id = user.get("tenant_id", "default")
-
-    data = await fetch_profile_raw(user_id, tenant_id)
-    profile_token = str((data or {}).get("mineru_api_token") or "").strip()
-    env_token = (os.getenv("MINERU_API_TOKEN") or "").strip()
-    has_user_token = bool(profile_token)
-    return {
-        "success": True,
-        # data is None = Profile 读不到（网关故障）：前端进「状态未加载」态，
-        # 不许把「读不到」显示成「没配」——那会诱导用户覆盖掉自己的 Token。
-        "profile_readable": data is not None,
-        "has_user_token": has_user_token,
-        "masked_token": (
-            f"{profile_token[:3]}****{profile_token[-4:]}"
-            if has_user_token and len(profile_token) > 8
-            else ""
-        ),
-        "env_configured": bool(env_token),
-        "effective_source": (
-            "user" if has_user_token else ("env" if env_token else "none")
-        ),
-    }
-
-
-@router.post("/doc-parse")
-async def save_doc_parse_config(request: Request, config: DocParseConfig):
-    """保存/清除用户自带 MinerU Token。
-
-    三态（与 embedding Key 同款）：不传字段=400；空串=清除（回落服务器
-    env 配置）；有值=覆盖。
-    """
-    user = _get_user_info(request)
-    user_id = user["user_id"]
-    tenant_id = user.get("tenant_id", "default")
-
-    if config.mineru_api_token is None:
-        raise HTTPException(
-            status_code=400, detail="缺少 mineru_api_token（空串=清除）"
-        )
-    token = str(config.mineru_api_token).strip()
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.put(
-                f"{_get_api_gateway_url()}/api/v1/profiles/{user_id}",
-                headers={
-                    "X-Internal-Call": get_internal_call_secret(),
-                    "X-User-Id": user_id,
-                    "X-Tenant-Id": tenant_id,
-                },
-                json={"mineru_api_token": token},
-            )
-        if resp.status_code != 200:
-            # 不打印 resp.text：FastAPI 422 的 detail[].input 会把 Token 明文
-            # 原样回显，等于把凭据写进服务端日志。只记状态码与出错字段名。
-            logger.error(
-                f"Failed to update profile for user {user_id}: "
-                f"HTTP {resp.status_code}, 校验失败字段={_validation_fields(resp)}"
-            )
-            raise HTTPException(status_code=resp.status_code, detail="同步到用户服务失败")
-    except HTTPException:
-        raise
-    except Exception as e:
-        # 不把异常原文回吐：httpx 异常链可能带请求体（含 Token）
-        logger.error(f"Failed to save doc-parse config for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="保存失败，请稍后重试") from None
-
-    return {"success": True, "message": "已保存" if token else "已清除"}
+# 注：用户自带 MinerU 解析配置的端点（/doc-parse）已于 2026-10-09 迁至
+# 因子挖掘侧（/api/v1/alpha-agent/docs/mineru-settings，实现见
+# backend/services/engine/alpha_agent/doc_mining_settings.py）——配置入口
+# 只留「因子挖掘 → 文档解析设置」一处，用户中心不再承载。

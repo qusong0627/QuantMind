@@ -48,7 +48,7 @@ from backend.services.engine.alpha_agent.doc_alerts import maybe_alert_quota_low
 from backend.services.engine.alpha_agent.doc_credentials import (
     TOKEN_SRC_ENV,
     TOKEN_SRC_USER,
-    resolve_effective_mineru_token,
+    resolve_effective_mineru_config,
 )
 from backend.services.engine.alpha_agent.doc_merge import MergePart, merge_parts
 from backend.services.engine.alpha_agent.doc_quota import (
@@ -62,8 +62,8 @@ from backend.services.engine.alpha_agent.doc_store import (
     get_doc_store,
 )
 from backend.services.engine.alpha_agent.mineru_client import (
-    DEFAULT_BASE_URL,
-    DEFAULT_MODEL_VERSION,
+    MODE_CLOUD,
+    MODE_LOCAL,
     MineruBatchItem,
     MineruClient,
     MineruConfig,
@@ -71,9 +71,11 @@ from backend.services.engine.alpha_agent.mineru_client import (
     MineruFileSpec,
     extract_err_code,
     extract_zip_whitelist,
+    mineru_unconfigured_message,
     resolve_mineru_config,
     run_pdf_job,
 )
+from backend.services.engine.alpha_agent.mineru_local import MineruLocalClient
 
 logger = logging.getLogger(__name__)
 
@@ -96,11 +98,11 @@ STALE_UPLOADED_MINUTES = 30
 SCAN_SAMPLE_PAGES = 3
 SCAN_DETECT_MAX_BYTES = 64 * 1024 * 1024
 
-#: 用户自带 MinerU Token 的解析缓存 TTL：轮询每 5s 一跳，不能每跳打一次
-#: Profile 网关；负结果（用户清掉了）同样缓存——清掉后 ≤TTL 内定格失败。
-USER_TOKEN_CACHE_TTL_S = 300.0
+#: 用户解析设置（mode+端点+凭据）的解析缓存 TTL：轮询每 5s 一跳，不能每跳
+#: 读一次 Redis/设置存储；负结果（用户清掉了）同样缓存——清掉后 ≤TTL 内定格。
+USER_CONFIG_CACHE_TTL_S = 300.0
 #: 两个内存缓存的容量护栏（超过就整体清空，防止多用户长跑无界增长）
-USER_TOKEN_CACHE_MAX = 256
+USER_CONFIG_CACHE_MAX = 256
 USER_CLIENT_CACHE_MAX = 64
 
 #: 多文件部件 data_id 前缀截断长度（MinerU data_id 上限 128，给 ``_p{i}`` 留位）
@@ -197,6 +199,31 @@ def _link_or_copy(src: str, dst: str) -> str:
         return shutil.copy2(src, dst)
 
 
+def build_mineru_client(cfg: MineruConfig) -> MineruClient:
+    """配置 → 客户端（默认工厂）：本地/局域网模式走 V1 HTTP 版实现。
+
+    注入 ``client_factory`` 的调用方（测试/定制）拿到的仍是同一 ``cfg``；
+    云端与本地两条协议在同一接口后面，编排层不感知差异。
+    """
+    if cfg.mode == MODE_LOCAL:
+        return MineruLocalClient(cfg)
+    return MineruClient(cfg)
+
+
+def doc_accounting(doc: Mapping[str, Any]) -> bool | None:
+    """行上的通道 → 是否计平台云配额（本地通道不计）。
+
+    行上没定格模式（新列之前的存量行）→ ``None`` = 用部署级默认
+    （实例 ``page_accounting``，与它们提交当时的判据一致）。
+    """
+    mode = str(doc.get("mineru_mode") or "").strip().lower()
+    if mode == MODE_LOCAL:
+        return False
+    if mode == MODE_CLOUD:
+        return True
+    return None
+
+
 def _env_float(name: str, default: float) -> float:
     raw = (os.getenv(name) or "").strip()
     if not raw:
@@ -239,7 +266,7 @@ class DocParseService:
         self._store = store or get_doc_store()
         self._quota = quota or get_doc_quota()
         self._client = client
-        self._client_factory = client_factory or (lambda cfg: MineruClient(cfg))
+        self._client_factory = client_factory or build_mineru_client
         self._built_client: MineruClient | None = None
         self._docs_root = Path(docs_root) if docs_root is not None else None
         self._poll_interval_s = (
@@ -256,9 +283,11 @@ class DocParseService:
         self._sleep = sleep or asyncio.sleep
         self._parse_sem = asyncio.Semaphore(max_concurrent or MAX_CONCURRENT_PARSES)
         self._tasks: dict[str, asyncio.Task] = {}
-        # 用户自带 token：解析结果与按 token 建的客户端各带缓存（TTL/容量见常量）
-        self._user_token_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
-        self._user_clients: dict[str, MineruClient] = {}
+        # 用户解析设置：解析结果与按配置建的客户端各带缓存（TTL/容量见常量）
+        self._user_config_cache: dict[
+            tuple[str, str], tuple[float, MineruConfig | None]
+        ] = {}
+        self._config_clients: dict[tuple, MineruClient] = {}
 
     # -- 路径 ----------------------------------------------------------
 
@@ -283,67 +312,54 @@ class DocParseService:
         if self._built_client is None:
             config = resolve_mineru_config()
             if config is None:
-                raise MineruError(
-                    "MINERU_API_TOKEN 未配置，文档解析不可用（请配置后重试）",
-                    retryable=False,
-                )
+                raise MineruError(mineru_unconfigured_message(), retryable=False)
             self._built_client = self._client_factory(config)
         return self._built_client
 
     def ensure_ready(self) -> None:
-        """预检解析通道（env token 已配 / 注入了替身）。缺 token 抛 MineruError。
+        """预检解析通道（env 已配 / 注入了替身）。缺配置抛 MineruError。
 
         上传端点在**落盘之前**调这里：先收文件再发现通道不可用，会留下
         一堆「上传成功但永远解析不了」的孤儿目录与行。
         """
         self._resolve_client()
 
-    def _client_for_token(self, token: str) -> MineruClient:
-        """用户自带 token 的客户端：env 的 base_url/model 仍生效，只换凭证。"""
-        client = self._user_clients.get(token)
+    def _client_for_config(self, cfg: MineruConfig) -> MineruClient:
+        """按完整配置建/取客户端（用户设置路径；配置即缓存键）。"""
+        key = (cfg.mode, cfg.base_url, cfg.model_version, cfg.token, cfg.local_tier)
+        client = self._config_clients.get(key)
         if client is None:
-            env_cfg = resolve_mineru_config()
-            base_url = env_cfg.base_url if env_cfg is not None else DEFAULT_BASE_URL
-            model_version = (
-                env_cfg.model_version if env_cfg is not None else DEFAULT_MODEL_VERSION
-            )
-            if len(self._user_clients) >= USER_CLIENT_CACHE_MAX:
-                self._user_clients.clear()
-            client = self._client_factory(
-                MineruConfig(
-                    token=token, base_url=base_url, model_version=model_version
-                )
-            )
-            self._user_clients[token] = client
+            if len(self._config_clients) >= USER_CLIENT_CACHE_MAX:
+                self._config_clients.clear()
+            client = self._client_factory(cfg)
+            self._config_clients[key] = client
         return client
 
     async def _client_for_submit(
         self, doc: Mapping[str, Any]
-    ) -> tuple[MineruClient, str]:
-        """提交期建客户端，并返回凭据来源（写进行上的 ``mineru_token_src``）。
+    ) -> tuple[MineruClient, str, str | None]:
+        """提交期建客户端 → ``(client, 凭据来源, 通道模式)``。
 
-        注入替身（测试）直接短路，不做任何 Token 解析。任何来源都没有
-        token → 抛 MineruError（``submit_parse`` 的 except 会定格行 + 退预留）。
+        后两项写进行上的 ``mineru_token_src`` / ``mineru_mode``（重启续轮询
+        按来源重建同一客户端；记账按模式判是否计云配额）。注入替身（测试）
+        直接短路，模式未知回 None。任何来源都没配置 → 抛 MineruError
+        （``submit_parse`` 的 except 会定格行 + 退预留）。
         """
         if self._client is not None:
-            return self._client, TOKEN_SRC_ENV
-        token, src = await resolve_effective_mineru_token(
+            return self._client, TOKEN_SRC_ENV, None
+        cfg, src = await resolve_effective_mineru_config(
             str(doc.get("user_id") or ""), str(doc.get("tenant_id") or ""), strict=False
         )
-        if not token:
-            raise MineruError(
-                "文档解析 Token 未配置（个人中心「其他设置 → AI 服务配置」或服务器 "
-                "MINERU_API_TOKEN），文档解析不可用（请配置后重试）",
-                retryable=False,
-            )
+        if cfg is None:
+            raise MineruError(mineru_unconfigured_message(), retryable=False)
         if src == TOKEN_SRC_USER:
-            return self._client_for_token(token), TOKEN_SRC_USER
-        return self._resolve_client(), TOKEN_SRC_ENV
+            return self._client_for_config(cfg), TOKEN_SRC_USER, cfg.mode
+        return self._resolve_client(), TOKEN_SRC_ENV, cfg.mode
 
-    async def _cached_user_token(self, doc: Mapping[str, Any]) -> str | None:
-        """行上来源为 user 的文档：解析用户 Token（TTL 缓存）。
+    async def _cached_user_config(self, doc: Mapping[str, Any]) -> MineruConfig | None:
+        """行上来源为 user 的文档：解析用户设置（TTL 缓存）。
 
-        strict 解析：Profile 网关读不到 → ProfileGatewayError 上抛，轮询层
+        strict 解析：设置存储读不到 → DocMiningSettingsError 上抛，轮询层
         按可重试处理——「读不到」绝不当成「用户清掉了」定格失败。
         """
         user_id = str(doc.get("user_id") or "")
@@ -352,17 +368,17 @@ class DocParseService:
             return None
         key = (user_id, tenant_id)
         now = self._clock()
-        entry = self._user_token_cache.get(key)
-        if entry is not None and now - entry[0] < USER_TOKEN_CACHE_TTL_S:
+        entry = self._user_config_cache.get(key)
+        if entry is not None and now - entry[0] < USER_CONFIG_CACHE_TTL_S:
             return entry[1]
-        token, src = await resolve_effective_mineru_token(
+        cfg, src = await resolve_effective_mineru_config(
             user_id, tenant_id, strict=True
         )
-        # 只认 user 来源：批次建在用户账号下，换 env 账号查不到结果
-        effective = token if src == TOKEN_SRC_USER else None
-        if len(self._user_token_cache) >= USER_TOKEN_CACHE_MAX:
-            self._user_token_cache.clear()
-        self._user_token_cache[key] = (now, effective)
+        # 只认 user 来源：批次建在用户配置的通道上，换 env 配置查不到结果
+        effective = cfg if src == TOKEN_SRC_USER else None
+        if len(self._user_config_cache) >= USER_CONFIG_CACHE_MAX:
+            self._user_config_cache.clear()
+        self._user_config_cache[key] = (now, effective)
         return effective
 
     async def _client_for_doc(self, doc: Mapping[str, Any]) -> MineruClient:
@@ -375,12 +391,21 @@ class DocParseService:
         if self._client is not None:
             return self._client
         if str(doc.get("mineru_token_src") or "") == TOKEN_SRC_USER:
-            token = await self._cached_user_token(doc)
-            if token:
-                return self._client_for_token(token)
+            cfg = await self._cached_user_config(doc)
+            if cfg is not None:
+                row_mode = str(doc.get("mineru_mode") or "").strip().lower()
+                if row_mode and cfg.mode != row_mode:
+                    # 批次建在旧通道上：本地/云端互切后批次号在新通道查不到，
+                    # 与其拿 404 当「任务消失」，不如点名说清是通道换了。
+                    raise MineruError(
+                        "解析通道在解析期间被更改，无法继续查询该批次："
+                        "请在「因子挖掘 → 文档解析设置」确认通道后重新上传",
+                        retryable=False,
+                    )
+                return self._client_for_config(cfg)
             raise MineruError(
-                "用户 MinerU Token 已失效（可能已被清除），解析无法继续："
-                "请在个人中心「其他设置 → AI 服务配置」重新配置 Token 后重新上传",
+                "用户 MinerU 解析设置已失效（可能已被清除或更改），解析无法继续："
+                "请在「因子挖掘 → 文档解析设置」重新配置后重新上传",
                 retryable=False,
             )
         return self._resolve_client()
@@ -429,25 +454,32 @@ class DocParseService:
         parts = decode_original_paths(doc)
         specs: list[MineruFileSpec] = []
         for idx, part in enumerate(parts, 1):
+            part_path = Path(str(part.get("path") or ""))
+            try:  # 本地 V1 协议建上传单必填字节数；stat 不动内容
+                size_bytes: int | None = part_path.stat().st_size
+            except OSError:
+                size_bytes = None  # 文件不在：upload_file 会以 ENOENT 定格失败
             specs.append(
                 MineruFileSpec(
                     name=str(part.get("name") or "document"),
                     data_id=part_data_id(doc_id, idx, len(parts)),
                     is_ocr=await self._detect_is_ocr_for(
                         str(part.get("ext") or ""),
-                        Path(str(part.get("path") or "")),
+                        part_path,
                     ),
+                    size_bytes=size_bytes,
                 )
             )
+        mode: str | None = None
         try:
             if not specs:
                 raise MineruError(
                     "缺少原件路径（提交未完成），请重新上传", retryable=False
                 )
-            # 凭据解析放在 try 内：任何来源都没有 token 也要走 except 定格
+            # 凭据解析放在 try 内：任何来源都没配置也要走 except 定格
             # parse_failed + 退预留——留在 try 外会留下「uploaded 但永远
             # 解析不了」且预留被占死的孤儿行。
-            client, token_src = await self._client_for_submit(doc)
+            client, token_src, mode = await self._client_for_submit(doc)
             batch_id, urls = await client.create_upload_batch(specs)
             if len(urls) < len(specs):
                 raise MineruError(
@@ -459,6 +491,9 @@ class DocParseService:
             # 上面已保证 len(urls) >= len(specs)；多余链接忽略即可
             for part, url in zip(parts, urls, strict=False):
                 await client.upload_file(url, Path(str(part.get("path") or "")))
+            # 收尾钩子：本地 V1 上传完成后才建解析任务（云 v4 是恒等——
+            # 批次提交即任务），返回的号才是落库与轮询用的号。
+            batch_id = await client.finalize_submission(batch_id)
         except Exception as exc:
             await self._store.update_doc(
                 doc_id,
@@ -466,7 +501,9 @@ class DocParseService:
                 parse_state="upload_failed",
                 error=user_facing_error(exc),
             )
-            self._release_quota(doc)
+            self._release_quota(
+                doc, accounting=None if mode is None else mode != MODE_LOCAL
+            )
             raise
         # H2：从落盘到 MinerU 上传完成可以很久，用户可能已在这个窗口里删除。
         # 行已删 → 写 no-op（返回值 False），放弃解析，不留产物。
@@ -477,6 +514,7 @@ class DocParseService:
             parse_state="pending",
             error=None,
             mineru_token_src=token_src,
+            mineru_mode=mode,
         )
         if not hit:
             # 但 MinerU **已经拿到文件**（批次已建、上传已完成），会照常解析
@@ -555,17 +593,29 @@ class DocParseService:
             matched.append(hit)
         return matched
 
-    def _release_quota(self, doc: Mapping[str, Any]) -> None:
-        """失败/删除路径：全额退回预留（没预留过 = no-op）。"""
+    def _release_quota(
+        self, doc: Mapping[str, Any], *, accounting: bool | None = None
+    ) -> None:
+        """失败/删除路径：全额退回预留（没预留过 = no-op）。
+
+        记账开关默认按行上定格的通道（本地通道从没预留过，天然 no-op）；
+        提交失败且模式未知时由调用方显式传（None → 部署级默认）。
+        """
         try:
-            self._quota.release(str(doc["doc_id"]), str(doc.get("user_id") or ""))
+            self._quota.release(
+                str(doc["doc_id"]),
+                str(doc.get("user_id") or ""),
+                accounting=doc_accounting(doc) if accounting is None else accounting,
+            )
         except Exception as exc:  # noqa: BLE001 —— 释放失败只告警（TTL 会回收）
             logger.warning("doc %s 配额预留释放失败: %s", doc.get("doc_id"), exc)
 
     def _commit_quota(self, doc: Mapping[str, Any]) -> None:
         """页数不可知但费用已发生（MinerU done / 文件已上传）→ 预留转已用。"""
         try:
-            self._quota.commit_reservation(str(doc["doc_id"]))
+            self._quota.commit_reservation(
+                str(doc["doc_id"]), accounting=doc_accounting(doc)
+            )
         except Exception as exc:  # noqa: BLE001 —— 记账失败只告警不回滚
             logger.warning("doc %s 配额预留转已用失败: %s", doc.get("doc_id"), exc)
 
@@ -574,10 +624,14 @@ class DocParseService:
 
         结算是用量**真正落地**的唯一时点——平台余量告警挂在结算之后的
         调用方（失败路径 release 全退后条件可能不再成立，不在那里判）。
+        本地通道（行上 mode=local）不计平台云配额，settle 直接 no-op。
         """
         try:
             return self._quota.settle(
-                str(doc["doc_id"]), str(doc.get("user_id") or ""), int(pages or 0)
+                str(doc["doc_id"]),
+                str(doc.get("user_id") or ""),
+                int(pages or 0),
+                accounting=doc_accounting(doc),
             )
         except Exception as exc:  # noqa: BLE001 —— 产物已落盘，记账失败只告警不回滚
             logger.warning("doc %s 配额结算失败: %s", doc.get("doc_id"), exc)

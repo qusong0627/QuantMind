@@ -348,6 +348,13 @@ services:
       - MINERU_MODEL_VERSION=${MINERU_MODEL_VERSION:-vlm}
       # 私有化/代理部署才需要改（默认官方 https://mineru.net）
       - MINERU_BASE_URL=${MINERU_BASE_URL:-https://mineru.net}
+      # 部署级本地解析硬顶：MINERU_MODE=local 时文档一律走内网 MinerU 服务，
+      # 用户存的云端 Token 不生效（数据不出网的隐私承诺）；用户自己的本地
+      # 地址仍可覆盖 URL（如各自指向自己网段的机器）。填 local 以外的值按云端处理。
+      - MINERU_MODE=${MINERU_MODE:-}
+      - MINERU_LOCAL_URL=${MINERU_LOCAL_URL:-}
+      - MINERU_LOCAL_API_KEY=${MINERU_LOCAL_API_KEY:-}
+      - MINERU_LOCAL_TIER=${MINERU_LOCAL_TIER:-}
       # 平台账号日页数额度（预警基准）与每用户日页数上限
       - MINERU_DAILY_PAGE_BUDGET=${MINERU_DAILY_PAGE_BUDGET:-1000}
       - MINERU_USER_DAILY_PAGES=${MINERU_USER_DAILY_PAGES:-200}

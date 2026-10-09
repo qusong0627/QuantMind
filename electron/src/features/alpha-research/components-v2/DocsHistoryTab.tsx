@@ -218,8 +218,10 @@ export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refres
         >
           {!quota.token_configured ? (
             <span>
-              解析服务未配置（MinerU Token 缺失）：可在个人中心「其他设置 → AI 服务配置」填写自己的 Token，或联系管理员配置服务器
+              解析服务未配置：请在「解析设置」配置 MinerU 通道（云端 Token 或本地 / 局域网服务地址），或联系管理员配置服务器
             </span>
+          ) : quota.mineru_mode === 'local' ? (
+            <span>本地 / 局域网解析通道：不消耗平台页数配额</span>
           ) : (
             <>
               <span>今日已用 {quota.user_used}/{quota.user_limit} 页</span>
@@ -489,7 +491,7 @@ export const DocsHistoryTab: React.FC<DocsHistoryTabProps> = ({ onResume, refres
       </div>
 
       <span className="text-[10px] text-slate-400">
-        文档由 MinerU 云端解析；删除会同时清除服务器上的解析文件
+        解析通道按上传时的「解析设置」执行（云端 / 本地 / 局域网）；删除会同时清除服务器上的解析文件
       </span>
     </div>
   );

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { message, Input, Button, Spin, Select, Radio } from 'antd';
-import { Key, Save, Eye, EyeOff, CheckCircle, AlertCircle, Trash2, Zap, FileText } from 'lucide-react';
+import { Key, Save, Eye, EyeOff, CheckCircle, AlertCircle, Trash2, Zap } from 'lucide-react';
 import { userCenterService } from '../services/userCenterService';
 
 interface OtherSettingsProps {
@@ -89,70 +89,10 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
   // 自定义请求头（JSON 文本），用于自建网关鉴权等（如 x-opencode-session）
   const [extraHeaders, setExtraHeaders] = useState('');
 
-  // MinerU 文档解析 Token（因子挖掘文档链）
-  const [docToken, setDocToken] = useState('');
-  const [docMasked, setDocMasked] = useState('');
-  const [docHasToken, setDocHasToken] = useState(false);
-  const [docEnvConfigured, setDocEnvConfigured] = useState(false);
-  const [docProfileReadable, setDocProfileReadable] = useState(true);
-  const [showDocToken, setShowDocToken] = useState(false);
-  const [isDocSaving, setIsDocSaving] = useState(false);
-
   useEffect(() => {
     loadApiKeyStatus();
-    loadDocParseStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
-
-  const loadDocParseStatus = async () => {
-    try {
-      const result = await userCenterService.getDocParseConfig();
-      setDocProfileReadable(result.profile_readable);
-      setDocHasToken(result.has_user_token);
-      setDocMasked(result.masked_token || '');
-      setDocEnvConfigured(result.env_configured);
-    } catch (error: any) {
-      console.error('Failed to load doc parse config:', error);
-      // 查询失败 ≈ Profile 读不到：进「状态读取失败」态，不许显示成「未配置」
-      setDocProfileReadable(false);
-    }
-  };
-
-  const handleSaveDocToken = async () => {
-    const trimmed = docToken.trim();
-    if (!trimmed) {
-      message.warning('请输入 MinerU Token，或使用「清除」按钮');
-      return;
-    }
-    setIsDocSaving(true);
-    try {
-      await userCenterService.saveDocParseConfig(trimmed);
-      message.success('MinerU Token 已保存');
-      setDocToken('');
-      await loadDocParseStatus();
-    } catch (error: any) {
-      console.error('Failed to save doc parse config:', error);
-      message.error(error.message || '保存失败');
-    } finally {
-      setIsDocSaving(false);
-    }
-  };
-
-  const handleClearDocToken = async () => {
-    setIsDocSaving(true);
-    try {
-      await userCenterService.saveDocParseConfig('');
-      message.success(docEnvConfigured ? '已清除，将使用服务器配置' : 'MinerU Token 已清除');
-      setDocHasToken(false);
-      setDocMasked('');
-      await loadDocParseStatus();
-    } catch (error: any) {
-      console.error('Failed to clear doc parse config:', error);
-      message.error(error.message || '清除失败');
-    } finally {
-      setIsDocSaving(false);
-    }
-  };
 
   const loadApiKeyStatus = async () => {
     setIsLoading(true);
@@ -514,107 +454,6 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
         </div>
       </div>
 
-      {/* 文档解析（MinerU）：因子挖掘的文档输入链共用这一份 Token */}
-      <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-        <div className="p-4 space-y-3">
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 bg-sky-100 rounded-md">
-              <FileText className="w-4 h-4 text-sky-600" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-gray-800">文档解析（MinerU）</h3>
-              <p className="text-[11px] text-gray-500">上传 PDF / Word / 图片到因子挖掘进行解析与因子挖掘时使用；不填则使用服务器配置</p>
-            </div>
-          </div>
-
-          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-            docHasToken
-              ? 'bg-green-50 text-green-700 border border-green-100'
-              : docEnvConfigured
-                ? 'bg-sky-50 text-sky-700 border border-sky-100'
-                : 'bg-amber-50 text-amber-700 border border-amber-100'
-          }`}>
-            {docHasToken || docEnvConfigured
-              ? <CheckCircle className="w-3.5 h-3.5 shrink-0" />
-              : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
-            {docHasToken ? (
-              <>
-                <span className="font-medium">已配置</span>
-                {docMasked && (
-                  <span className="font-mono text-gray-500 bg-white/60 px-1.5 py-0.5 rounded">{docMasked}</span>
-                )}
-                <Button
-                  type="text"
-                  size="small"
-                  danger
-                  className="ml-auto !text-[11px] !px-2 !h-6"
-                  icon={<Trash2 className="w-3 h-3" />}
-                  onClick={handleClearDocToken}
-                  loading={isDocSaving}
-                >
-                  清除
-                </Button>
-              </>
-            ) : docEnvConfigured ? (
-              <>
-                <span className="font-medium">使用服务器配置</span>
-                <span className="text-[11px] opacity-80">（未设置个人 Token 时自动回落）</span>
-              </>
-            ) : !docProfileReadable ? (
-              <>
-                <span className="font-medium">状态读取失败</span>
-                <button
-                  type="button"
-                  className="ml-auto text-[11px] underline hover:no-underline"
-                  onClick={loadDocParseStatus}
-                >
-                  重试
-                </button>
-              </>
-            ) : (
-              <span className="font-medium">未配置：文档解析与文档挖掘不可用</span>
-            )}
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-gray-600">MinerU Token</label>
-            <div className="flex gap-2 items-center">
-              <div className="relative flex-1">
-                <Input
-                  type={showDocToken ? 'text' : 'password'}
-                  value={docToken}
-                  onChange={(e) => setDocToken(e.target.value)}
-                  placeholder={docHasToken ? '输入新 Token 以更新' : '粘贴 MinerU 控制台的 API Token'}
-                  className="!pr-9 !h-8 !rounded-[8px]"
-                  onPressEnter={handleSaveDocToken}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowDocToken(!showDocToken)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 z-10"
-                >
-                  {showDocToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              <Button
-                type="primary"
-                icon={<Save className="w-4 h-4" />}
-                onClick={handleSaveDocToken}
-                loading={isDocSaving}
-                disabled={!docToken.trim()}
-                className="!h-8 !rounded-[8px]"
-              >
-                保存
-              </Button>
-            </div>
-          </div>
-
-          <div className="text-[11px] text-gray-400 space-y-0.5 pt-1 border-t border-gray-100">
-            <p>• Token 安全存储在您的个人档案中，仅用于因子挖掘的文档解析，不会展示给其他用户</p>
-            <p>• 获取 Token：<a href="https://mineru.net/apiManage/docs" target="_blank" rel="noopener noreferrer" className="text-sky-600 hover:underline">MinerU 控制台</a>；清除后自动回落到服务器 <span className="font-mono">MINERU_API_TOKEN</span></p>
-          </div>
-        </div>
-      </div>
     </div>
   );
 };

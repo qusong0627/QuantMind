@@ -15,14 +15,17 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { DocMiningPanel, DOC_POLL_INTERVAL_MS } from '../DocMiningPanel';
 import type { DocRow } from '../../services-v2/docMiningApi';
 
-const { uploadDocsMock, getDocMock, getDocQuotaMock, organizeDocMock, getDocFileTextMock } =
-  vi.hoisted(() => ({
-    uploadDocsMock: vi.fn(),
-    getDocMock: vi.fn(),
-    getDocQuotaMock: vi.fn(),
-    organizeDocMock: vi.fn(),
-    getDocFileTextMock: vi.fn(),
-  }));
+const {
+  uploadDocsMock, getDocMock, getDocQuotaMock, organizeDocMock, getDocFileTextMock,
+  getMineruSettingsMock,
+} = vi.hoisted(() => ({
+  uploadDocsMock: vi.fn(),
+  getDocMock: vi.fn(),
+  getDocQuotaMock: vi.fn(),
+  organizeDocMock: vi.fn(),
+  getDocFileTextMock: vi.fn(),
+  getMineruSettingsMock: vi.fn(),
+}));
 
 vi.mock('../../services-v2/docMiningApi', async (importOriginal) => {
   const actual =
@@ -34,6 +37,7 @@ vi.mock('../../services-v2/docMiningApi', async (importOriginal) => {
     getDocQuota: getDocQuotaMock,
     organizeDoc: organizeDocMock,
     getDocFileText: getDocFileTextMock,
+    getMineruSettings: getMineruSettingsMock,
   };
 });
 
@@ -120,8 +124,17 @@ beforeEach(() => {
   getDocQuotaMock.mockReset();
   organizeDocMock.mockReset();
   getDocFileTextMock.mockReset();
+  getMineruSettingsMock.mockReset();
   getDocQuotaMock.mockResolvedValue(QUOTA);
   getDocFileTextMock.mockResolvedValue('原文内容');
+  getMineruSettingsMock.mockResolvedValue({
+    settings: null,
+    readable: true,
+    source: 'none',
+    effective_mode: null,
+    env_configured: false,
+    env_mode: null,
+  });
 });
 
 afterEach(() => {
@@ -593,5 +606,51 @@ describe('「继续挖掘」带回：按 key 代次恢复', () => {
 
     await advance(DOC_POLL_INTERVAL_MS);
     expect(screen.getByRole('button', { name: /开始整理/ })).toBeTruthy();
+  });
+});
+
+describe('解析通道（MinerU）感知与解析设置入口', () => {
+  test('本地通道：上传披露与配额条都换本地口径（云端提示不出现）', async () => {
+    getDocQuotaMock.mockResolvedValue({ ...QUOTA, mineru_mode: 'local' });
+    renderPanel();
+    await flush();
+
+    expect(
+      screen.getByText('文档将由本地 / 局域网 MinerU 服务解析（数据不出网）'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText('本地 / 局域网解析通道：不消耗平台页数配额'),
+    ).toBeTruthy();
+    expect(screen.queryByText(/文档将上传至 MinerU 云端服务/)).toBeNull();
+  });
+
+  test('通道未配置：设置区自动展开一次；「收起设置」后隐藏', async () => {
+    getDocQuotaMock.mockResolvedValue({
+      ...QUOTA,
+      token_configured: false,
+      mineru_mode: null,
+    });
+    renderPanel();
+    await flush();
+
+    expect(getMineruSettingsMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('解析设置（MinerU）')).toBeTruthy();
+    expect(screen.getByText(/解析服务未配置：请在「解析设置」配置/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText('收起设置'));
+    expect(screen.queryByText('解析设置（MinerU）')).toBeNull();
+  });
+
+  test('解析步：本地通道文档给出本地耗时提示（不是云端文案）', async () => {
+    getDocMock.mockResolvedValue(
+      mkDoc({ status: 'parsing', mineru_mode: 'local' }),
+    );
+    renderPanel({ resume: { key: 1, docId: 'd-loc', filename: 'x.pdf' } });
+    await flush();
+
+    expect(
+      screen.getByText(/本地 MinerU 解析通常需要 10~60 秒/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/MinerU 云端解析通常需要/)).toBeNull();
   });
 });

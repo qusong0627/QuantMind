@@ -39,7 +39,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from backend.services.engine.alpha_agent.mineru_client import MineruQuotaError
+from backend.services.engine.alpha_agent.mineru_client import (
+    MineruQuotaError,
+    is_local_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,9 +144,15 @@ class DocQuota:
         daily_budget: int | None = None,
         upload_per_hour: int | None = None,
         organize_per_hour: int | None = None,
+        page_accounting: bool | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._redis = redis_client
+        #: 页数记账开关（T-FM-21）：本地/局域网 MinerU 无平台账单，默认停用；
+        #: 频控（check_rate）与在途锁（try_lock）不受影响，始终生效。
+        self.page_accounting = (
+            not is_local_mode() if page_accounting is None else bool(page_accounting)
+        )
         self.user_limit = (
             user_daily_pages
             if user_daily_pages is not None
@@ -216,6 +225,21 @@ class DocQuota:
         client.incrby(ukey, delta)
         client.expire(ukey, TTL_S)
 
+    def _disabled_status(self, user_id: str) -> QuotaStatus:
+        """记账停用时的零状态（不触 Redis——本地模式要求零写入）。"""
+        return QuotaStatus(
+            day=quota_day(self._now()),
+            user_id=user_id,
+            user_used=0,
+            user_limit=self.user_limit,
+            platform_used=0,
+            platform_budget=self.budget,
+            user_remaining=self.user_limit,
+            platform_remaining=self.budget,
+            exhausted=False,
+            warning=False,
+        )
+
     # -- 公开面 --------------------------------------------------------
 
     def status(self, user_id: str) -> QuotaStatus:
@@ -239,12 +263,22 @@ class DocQuota:
             warning=platform_remaining < self.budget * _WARN_FRACTION,
         )
 
-    def reserve(self, user_id: str, pages: int, *, doc_id: str) -> QuotaStatus:
+    def _accounting_enabled(self, accounting: bool | None) -> bool:
+        """按次开关（None=用实例默认）。用户自带本地 MinerU 的文档不烧平台
+        云配额：router 在 reserve 时按有效配置传入，服务层在 settle/release
+        时按行上定格的 ``mineru_mode`` 传入——两侧同一判据，绝不半途换账。"""
+        return self.page_accounting if accounting is None else bool(accounting)
+
+    def reserve(
+        self, user_id: str, pages: int, *, doc_id: str, accounting: bool | None = None
+    ) -> QuotaStatus:
         """原子预留（先 INCR 后判，超限即回滚）。不足即抛 :class:`QuotaExceeded`。
 
         返回的是**已含预留**的状态（展示面保守：在途的也算已用）。
         """
         pages = max(1, int(pages or 0))
+        if not self._accounting_enabled(accounting):
+            return self._disabled_status(user_id)
         day = quota_day(self._now())
         pkey, ukey = self._keys(day, user_id)
         client = self._client()
@@ -277,13 +311,22 @@ class DocQuota:
         client.set(self._reserve_key(doc_id), f"{day}:{pages}", ex=TTL_RESERVE_S)
         return self.status(user_id)
 
-    def settle(self, doc_id: str, user_id: str, pages: int) -> QuotaStatus:
+    def settle(
+        self,
+        doc_id: str,
+        user_id: str,
+        pages: int,
+        *,
+        accounting: bool | None = None,
+    ) -> QuotaStatus:
         """页数已知后结算：把预留替换成实际值（多退少补）。
 
         预留被取走/过期（重复结算、复用路径）时：实际页数 > 0 仍如实补记
         （账必须是真的），0 则纯 no-op。
         """
         pages = max(0, int(pages or 0))
+        if not self._accounting_enabled(accounting):
+            return self._disabled_status(user_id)
         held = self._take_reservation(doc_id)
         if held is None:
             if pages:
@@ -293,16 +336,24 @@ class DocQuota:
         self._bump(day, user_id, pages - reserved)
         return self.status(user_id)
 
-    def commit_reservation(self, doc_id: str) -> None:
+    def commit_reservation(
+        self, doc_id: str, *, accounting: bool | None = None
+    ) -> None:
         """预留转已用：页数不可知但**费用已发生**（MinerU done 已计费）时的兜底。
 
         预留额本来就是保守上界，直接留在账上、清掉预留键——不 settle(0) 全额
         退回（那是把已发生的平台扣费记成 0，账面与真实账单脱钩）。
         """
+        if not self._accounting_enabled(accounting):
+            return
         self._take_reservation(doc_id)  # 取走即留账，不 _bump
 
-    def release(self, doc_id: str, user_id: str) -> QuotaStatus:
+    def release(
+        self, doc_id: str, user_id: str, *, accounting: bool | None = None
+    ) -> QuotaStatus:
         """失败/删除：全额退回预留（从未预留过 = no-op）。"""
+        if not self._accounting_enabled(accounting):
+            return self._disabled_status(user_id)
         held = self._take_reservation(doc_id)
         if held is not None:
             day, reserved = held

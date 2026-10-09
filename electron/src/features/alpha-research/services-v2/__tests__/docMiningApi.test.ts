@@ -3,10 +3,14 @@
  *
  * 钉死的边：
  * - **错误文案优先取后端 detail 原文**（用户看到的拒绝理由不是「请求失败」）；
- * - 上传是 multipart（FormData），不要手写 Content-Type（boundary 归浏览器）；
+ * - 上传是 multipart：请求必须显式声明 `Content-Type: multipart/form-data`。
+ *   apiClient 实例默认 application/json，axios≥1 的 transformRequest 会把
+ *   FormData 直接 JSON.stringify（formDataToJSON）——那是 2026-10-09 线上
+ *   上传 400「缺少文件（multipart 字段名 file）」的根因，别再把显式头删掉；
  * - 响应缺 doc / 缺 markdown 时显式抛错，不许编一个空壳让界面假成功；
  * - 常量与后端同字面量（8000 字方向闸 / 扩展名白名单），改一处必须改两处。
  */
+import axios, { type AxiosResponse } from 'axios';
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 
 const { apiGetMock, apiPostMock, apiDeleteMock } = vi.hoisted(() => ({
@@ -104,6 +108,9 @@ describe('uploadDoc', () => {
     expect(url).toBe('/alpha-agent/docs/upload');
     expect(form).toBeInstanceOf(FormData);
     expect((form as FormData).get('file')).toBeInstanceOf(File);
+    // 显式 multipart 头是刚需（实例默认 application/json 会让 FormData 被
+    // JSON.stringify——见文件头注释），谁删谁把上传打回 400
+    expect(opts.headers['Content-Type']).toBe('multipart/form-data');
     expect(out.doc.doc_id).toBe('d-1');
     expect(out.reused).toBe(true);
 
@@ -135,6 +142,48 @@ describe('uploadDoc', () => {
     const sent = (form as FormData).getAll('file');
     expect(sent.map((f) => (f as File).name)).toEqual(['正文.pdf', '附录.pdf']);
     expect(out.doc.files_count).toBe(2);
+  });
+});
+
+describe('axios 契约（实证）：FORMData 与 JSON 默认头的相互陷害', () => {
+  /** 复刻 apiClient 的实例默认值（services/aiStrategyClients.ts）。 */
+  const makeInstance = () => {
+    const inst = axios.create({ headers: { 'Content-Type': 'application/json' } });
+    const seen: { data?: unknown } = {};
+    inst.defaults.adapter = async (config) => {
+      seen.data = config.data;
+      return {
+        data: { ok: true },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      } as AxiosResponse;
+    };
+    return { inst, seen };
+  };
+  const makeForm = () => {
+    const f = new FormData();
+    f.append('file', new File(['abc'], 'paper.pdf'));
+    return f;
+  };
+
+  test('旧写法（不声明 Content-Type）：FormData 被 JSON.stringify 成字符串体', async () => {
+    const { inst, seen } = makeInstance();
+    await inst.post('/u', makeForm());
+    // 陷阱实证：到达适配器的是 JSON 字符串而不是 FormData——multipart 解析
+    // 出空表单，后端只能回 400「缺少文件（multipart 字段名 file）」。
+    // 若某天 axios 改了 transformRequest 使此断言失败：说明陷阱消失，
+    // 可移除 uploadDocs 的显式头与本用例（届时头注释一并更新）。
+    expect(typeof seen.data).toBe('string');
+  });
+
+  test('修复写法（显式 multipart/form-data）：FormData 原样到达适配器', async () => {
+    const { inst, seen } = makeInstance();
+    await inst.post('/u', makeForm(), {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    expect(seen.data).toBeInstanceOf(FormData);
   });
 });
 

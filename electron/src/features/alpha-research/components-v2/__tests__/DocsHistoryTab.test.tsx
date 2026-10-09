@@ -148,6 +148,14 @@ describe('列表渲染', () => {
     render(<DocsHistoryTab />);
     expect(await screen.findByText(/解析服务未配置/)).toBeTruthy();
   });
+
+  test('本地通道：配额条换「不消耗平台页数配额」（云配额对本地不适用）', async () => {
+    getDocQuotaMock.mockResolvedValue({ ...QUOTA, mineru_mode: 'local' });
+    render(<DocsHistoryTab />);
+    expect(
+      await screen.findByText('本地 / 局域网解析通道：不消耗平台页数配额'),
+    ).toBeTruthy();
+  });
 });
 
 describe('看文本 / 继续挖掘：只对解析完成的开放', () => {

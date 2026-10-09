@@ -6,7 +6,9 @@
  *    「整理后直通」开关默认关（打开 = 整理完立即开始挖掘，跳过确认步）。
  * 2. **状态只信后端**：解析进度来自 3s 轮询 GET /docs/{id}，不做本地乐观推断；
  *    轮询失败照常重试并明示，解析失败带后端 error 原文。
- * 3. **数据出网明示**：文档会走 MinerU 云端解析，上传区固定披露，不藏在折叠里。
+ * 3. **解析通道明示**：上传区固定披露当前生效通道——云端（数据出网，
+ *    mineru.net）或本地 / 局域网（数据不出网）；通道在「解析设置」内按
+ *    账号配置，披露不藏在折叠里。
  *
  * 开始挖掘走 TaskContext.startMining（携带 docId 记录血统），
  * 提交后由 AppRoot 的 miningStartSeq 效应自动进入演化台（既有机制）。
@@ -17,6 +19,7 @@ import remarkGfm from 'remark-gfm';
 import {
   UploadCloud, FileText, Loader2, CheckCircle2, AlertCircle,
   RotateCcw, Wand2, Play, CloudUpload, ArrowUp, ArrowDown, X,
+  Server, Settings,
 } from 'lucide-react';
 import type { DocMiningResume, TaskConfig } from '../types-v2';
 import type { DocQuotaStatus, DocRow, OrganizeResult } from '../services-v2/docMiningApi';
@@ -35,6 +38,7 @@ import {
   organizeDoc,
   uploadDocs,
 } from '../services-v2/docMiningApi';
+import { MineruSettingsSection } from './MineruSettingsSection';
 
 type Step = 'upload' | 'parse' | 'organize' | 'confirm';
 
@@ -91,6 +95,9 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
   /** 待上传清单（多文件先攒后传：顺序=合并顺序，可调可删，配额只烧一次） */
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  /** 解析设置折叠区（通道未配置时自动展开一次，之后由用户控制） */
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const autoOpenedSettingsRef = useRef(false);
 
   const refreshQuota = useCallback(async () => {
     try {
@@ -104,6 +111,14 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
   useEffect(() => {
     void refreshQuota();
   }, [refreshQuota]);
+
+  // 通道未配置：自动展开设置区一次——只自动一次，用户手动收起后不再抢焦点
+  useEffect(() => {
+    if (quota && !quota.token_configured && !autoOpenedSettingsRef.current) {
+      autoOpenedSettingsRef.current = true;
+      setSettingsOpen(true);
+    }
+  }, [quota]);
 
   /** 解析完成 → 进入整理步：拉原文对照（增强，失败不拦）；已整理过的预填草稿。 */
   const enterOrganize = useCallback(async (fresh: DocRow) => {
@@ -531,14 +546,38 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
               </div>
             )}
 
-            <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-500">
-              <CloudUpload className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-              <span>
-                文档将上传至 MinerU 云端服务（mineru.net）解析，请勿上传涉密材料
-              </span>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5 text-[11px] text-slate-500 min-w-0">
+                {quota?.mineru_mode === 'local' ? (
+                  <>
+                    <Server className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                    <span>文档将由本地 / 局域网 MinerU 服务解析（数据不出网）</span>
+                  </>
+                ) : (
+                  // 通道未知（quota 拿不到）时按云端披露：宁可多提醒一句数据出网
+                  <>
+                    <CloudUpload className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                    <span>
+                      文档将上传至 MinerU 云端服务（mineru.net）解析，请勿上传涉密材料
+                    </span>
+                  </>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen((v) => !v)}
+                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-bold text-slate-500 hover:border-blue-300 hover:text-blue-600 cursor-pointer"
+              >
+                <Settings className="h-3 w-3" />
+                {settingsOpen ? '收起设置' : '解析设置'}
+              </button>
             </div>
 
-            {/* 配额条 */}
+            {settingsOpen && (
+              <MineruSettingsSection onChanged={() => void refreshQuota()} />
+            )}
+
+            {/* 配额条：本地通道不计云配额，展示口径随生效通道切换 */}
             {quota && (
               <div
                 className={`flex items-center justify-center gap-3 text-[11px] font-bold ${
@@ -547,8 +586,10 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
               >
                 {!quota.token_configured ? (
                   <span>
-                    解析服务未配置（MinerU Token 缺失）：可在个人中心「其他设置 → AI 服务配置」填写自己的 Token，或联系管理员配置服务器
+                    解析服务未配置：请在「解析设置」配置 MinerU 通道（云端 Token 或本地 / 局域网服务地址），或联系管理员配置服务器
                   </span>
+                ) : quota.mineru_mode === 'local' ? (
+                  <span>本地 / 局域网解析通道：不消耗平台页数配额</span>
                 ) : (
                   <>
                     <span>
@@ -579,7 +620,9 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
               {doc.page_count ? ` · 已识别 ${doc.page_count} 页` : ''}
             </span>
             <span className="text-[11px] text-slate-400">
-              MinerU 云端解析通常需要 10~60 秒，页面会自动刷新进度
+              {doc.mineru_mode === 'local'
+                ? '本地 MinerU 解析通常需要 10~60 秒（视服务性能），页面会自动刷新进度'
+                : 'MinerU 云端解析通常需要 10~60 秒，页面会自动刷新进度'}
             </span>
             <button
               type="button"

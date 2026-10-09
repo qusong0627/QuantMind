@@ -113,6 +113,10 @@ class FakeMineru:
         self.zip_payloads: dict[str, bytes] = {}
         self.download_calls: list[str] = []
         self.download_error: Exception | None = None
+        #: 收尾钩子（T-FM-21）：默认恒等（云端口径，老用例逐字节不变）；
+        #: 设了 final_batch_id 就模拟本地模式「收尾后任务号变了」
+        self.final_batch_id: str | None = None
+        self.finalized: list[str] = []
 
     async def create_upload_batch(self, files, **kwargs):
         self.batches.append(list(files))
@@ -120,6 +124,10 @@ class FakeMineru:
 
     async def upload_file(self, url, content):
         self.uploads.append((url, content))
+
+    async def finalize_submission(self, batch_id):
+        self.finalized.append(batch_id)
+        return self.final_batch_id or batch_id
 
     async def get_batch_results(self, batch_id):
         self.calls += 1
@@ -144,23 +152,29 @@ class FakeQuota:
 
     ``settle_status``：真 settle 返回结算后的 QuotaStatus（告警钩子拿它判余量），
     默认 None 表示「不关心」——老用例不受影响。
+    ``accounting_calls``：逐次记录 (op, accounting)——本地通道（mode=local）
+    必须一路传 False，否则平台云配额会被本地解析悄悄吃掉。
     """
 
     def __init__(self) -> None:
         self.recorded: list[tuple[str, int]] = []
         self.released: list[tuple[str, str]] = []
         self.committed: list[str] = []
+        self.accounting_calls: list[tuple[str, bool | None]] = []
         self.settle_status = None
 
-    def settle(self, doc_id, user_id, pages):
+    def settle(self, doc_id, user_id, pages, *, accounting=None):
         self.recorded.append((user_id, int(pages)))
+        self.accounting_calls.append(("settle", accounting))
         return self.settle_status
 
-    def commit_reservation(self, doc_id):
+    def commit_reservation(self, doc_id, *, accounting=None):
         self.committed.append(str(doc_id))
+        self.accounting_calls.append(("commit", accounting))
 
-    def release(self, doc_id, user_id):
+    def release(self, doc_id, user_id, *, accounting=None):
         self.released.append((doc_id, user_id))
+        self.accounting_calls.append(("release", accounting))
 
 
 class FakeClock:
@@ -1451,9 +1465,9 @@ async def test_poll_once_uses_user_own_token_for_user_sourced_doc(
 
     async def fake_resolve(user_id, tenant_id, *, strict=False):
         assert (user_id, tenant_id) == ("u1", "t-1")
-        return "user-tok", "user"
+        return MineruConfig(token="user-tok"), "user"
 
-    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_config", fake_resolve)
     monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
 
     store = FakeStore(
@@ -1481,9 +1495,9 @@ async def test_poll_once_user_token_resolution_cached_within_ttl(
 
     async def fake_resolve(user_id, tenant_id, *, strict=False):
         calls.append((user_id, tenant_id, strict))
-        return "user-tok", "user"
+        return MineruConfig(token="user-tok"), "user"
 
-    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_config", fake_resolve)
     monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
 
     store = FakeStore(
@@ -1514,12 +1528,9 @@ async def test_poll_loop_fails_doc_when_user_token_removed(
     from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
 
     async def fake_resolve(user_id, tenant_id, *, strict=False):
-        return "env-tok", "env"  # 用户已清除 → 有效来源落回 env
+        return MineruConfig(token="env-tok"), "env"  # 用户已清除 → 有效来源落回 env
 
-    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
-    monkeypatch.setattr(
-        parse_mod, "resolve_mineru_config", lambda: MineruConfig(token="env-tok")
-    )
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_config", fake_resolve)
 
     store = FakeStore(
         {DOC_ID: mk_doc(tmp_path, mineru_token_src="user", tenant_id="t-1")}
@@ -1532,28 +1543,31 @@ async def test_poll_loop_fails_doc_when_user_token_removed(
     row = store.rows[DOC_ID]
     assert row["status"] == "parse_failed"
     assert row["parse_state"] == "failed"
-    assert "Token" in row["error"], "失败文案必须指向 Token（可操作）"
+    assert "解析设置已失效" in row["error"], "失败文案必须指路设置页（可操作）"
+    assert "因子挖掘" in row["error"], "说清去哪重配"
     assert factory.client.calls == 0, "没有可信凭据就不该打 MinerU"
 
 
 @pytest.mark.asyncio
-async def test_poll_loop_retries_when_profile_gateway_down(
+async def test_poll_loop_retries_when_settings_store_down(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Profile 网关短暂不可用 ≠ 用户没配：strict 解析抛错 → 按节拍重试到成功。"""
+    """设置存储短暂不可用 ≠ 用户没配：strict 解析抛错 → 按节拍重试到成功。"""
     from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
-    from backend.services.engine.alpha_agent.profile_gateway import ProfileGatewayError
+    from backend.services.engine.alpha_agent.doc_mining_settings import (
+        DocMiningSettingsError,
+    )
 
     attempts: list[int] = []
 
     async def flaky_resolve(user_id, tenant_id, *, strict=False):
         attempts.append(1)
         if len(attempts) == 1:
-            raise ProfileGatewayError("gateway down")
-        return "user-tok", "user"
+            raise DocMiningSettingsError("redis down")
+        assert strict is True
+        return MineruConfig(token="user-tok"), "user"
 
-    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", flaky_resolve)
-    monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_config", flaky_resolve)
 
     store = FakeStore(
         {DOC_ID: mk_doc(tmp_path, mineru_token_src="user", tenant_id="t-1")}
@@ -1587,9 +1601,9 @@ async def test_submit_parse_records_user_token_source(tmp_path, monkeypatch) -> 
     from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
 
     async def fake_resolve(user_id, tenant_id, *, strict=False):
-        return "user-tok", "user"
+        return MineruConfig(token="user-tok"), "user"
 
-    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_config", fake_resolve)
     monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
 
     doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None, tenant_id="t-1")
@@ -1602,6 +1616,7 @@ async def test_submit_parse_records_user_token_source(tmp_path, monkeypatch) -> 
     assert factory.configs[-1].token == "user-tok"
     assert store.rows[DOC_ID]["status"] == "parsing"
     assert store.rows[DOC_ID]["mineru_token_src"] == "user"
+    assert store.rows[DOC_ID]["mineru_mode"] == "cloud", "通道随提交定格在行上"
     assert store.rows[DOC_ID]["mineru_batch_id"] == "b-1"
     await svc.shutdown()
 
@@ -1617,7 +1632,7 @@ async def test_submit_parse_no_token_anywhere_marks_row_and_raises(
     async def fake_resolve(user_id, tenant_id, *, strict=False):
         return None, "none"
 
-    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_token", fake_resolve)
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_config", fake_resolve)
     monkeypatch.setattr(parse_mod, "resolve_mineru_config", lambda: None)
 
     doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None, tenant_id="t-1")
@@ -1629,8 +1644,141 @@ async def test_submit_parse_no_token_anywhere_marks_row_and_raises(
     with pytest.raises(MineruError) as ei:
         await svc.submit_parse(store.rows[DOC_ID])
 
-    assert "Token" in str(ei.value) or "TOKEN" in str(ei.value)
+    assert "因子挖掘" in str(ei.value), "未配置文案必须指路设置入口（可操作）"
+    assert "MinerU" in str(ei.value)
     assert store.rows[DOC_ID]["status"] == "parse_failed"
     assert quota.released == [(DOC_ID, "u1")], "提交失败全额退预留"
     assert svc._tasks == {}, "提交失败不该挂轮询"
     assert factory.client.calls == 0
+
+
+# ── 收尾钩子与本地模式（T-FM-21） ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_submit_stores_finalized_batch_id(tmp_path: Path) -> None:
+    """收尾钩子返回的任务号（本地模式=job_id）才是落库与轮询用的号。"""
+    doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None)
+    store = FakeStore({DOC_ID: doc})
+    client = FakeMineru()
+    client.final_batch_id = "job-77"
+    svc, _ = mk_service(tmp_path, store, client=client)
+
+    await svc.submit_parse(doc)
+
+    assert client.finalized == ["b-1"], "上传完成后必须过收尾钩子"
+    assert store.rows[DOC_ID]["mineru_batch_id"] == "job-77"
+    await svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_finalize_failure_marks_row_and_releases(tmp_path: Path) -> None:
+    """收尾失败（建解析任务没成）与提交失败同待遇：定格 + 退预留 + 不挂轮询。"""
+    doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None)
+    store = FakeStore({DOC_ID: doc})
+    quota = FakeQuota()
+
+    class FinalizeBoom(FakeMineru):
+        async def finalize_submission(self, batch_id):
+            raise MineruError("建解析任务失败", retryable=False)
+
+    svc, _ = mk_service(tmp_path, store, client=FinalizeBoom(), quota=quota)
+
+    with pytest.raises(MineruError):
+        await svc.submit_parse(doc)
+
+    assert store.rows[DOC_ID]["status"] == "parse_failed"
+    assert quota.released == [(DOC_ID, "u1")], "收尾失败全额退预留"
+    assert svc._tasks == {}, "收尾失败不该挂轮询"
+
+
+@pytest.mark.asyncio
+async def test_env_local_mode_submit_records_mode_on_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """本地模式（env）：提交走本地客户端，行上定格 mode=local。
+
+    「env 本地是隐私硬顶、压过用户云 token」的判定在 doc_credentials 用例；
+    这里盯服务侧落行：mineru_mode 是配额记账与中途换通道检测的唯一依据，
+    漏记一次 = 本地解析悄悄吃平台云配额。
+    """
+    from backend.services.engine.alpha_agent import doc_parse_service as parse_mod
+    from backend.services.engine.alpha_agent.mineru_client import MODE_LOCAL
+
+    monkeypatch.setenv("MINERU_MODE", "local")
+    monkeypatch.setenv("MINERU_LOCAL_URL", "http://192.168.31.9:8000")
+
+    async def fake_resolve(user_id, tenant_id, *, strict=False):
+        return (
+            MineruConfig(
+                token="", base_url="http://192.168.31.9:8000", mode=MODE_LOCAL
+            ),
+            "env",
+        )
+
+    monkeypatch.setattr(parse_mod, "resolve_effective_mineru_config", fake_resolve)
+
+    doc = mk_doc(tmp_path, status="uploaded", mineru_batch_id=None, tenant_id="t-1")
+    store = FakeStore({DOC_ID: doc})
+    factory = FakeClientFactory()
+    svc, _ = mk_factory_service(tmp_path, store, factory)
+
+    await svc.submit_parse(store.rows[DOC_ID])
+
+    assert factory.configs and factory.configs[0].mode == "local"
+    _, fields = store.updates[-1]
+    assert fields["mineru_token_src"] == "env", (
+        "本地行来源恒为 env（无用户 Token 概念）"
+    )
+    assert fields["mineru_mode"] == "local"
+    await svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_local_row_settle_skips_cloud_accounting(tmp_path: Path) -> None:
+    """行上 mode=local：done 结算一路 accounting=False——本地解析不吃云配额。"""
+    from backend.services.engine.alpha_agent.mineru_client import MODE_LOCAL
+
+    doc = mk_doc(tmp_path, mineru_token_src="env", mineru_mode=MODE_LOCAL)
+    store = FakeStore({DOC_ID: doc})
+    client = FakeMineru()
+    client.zip_payload = make_zip()
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="paper.pdf",
+                state="done",
+                data_id=DOC_ID,
+                full_zip_url="https://cdn.test/a.zip",
+                total_pages=2,
+            )
+        ]
+    ]
+    quota = FakeQuota()
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    assert await svc._poll_once(DOC_ID) == "parsed"
+
+    assert store.rows[DOC_ID]["status"] == "parsed"
+    assert quota.accounting_calls == [("settle", False)], (
+        "本地行 settle 必须显式 accounting=False"
+    )
+
+
+def test_build_mineru_client_picks_class_by_mode() -> None:
+    from backend.services.engine.alpha_agent.doc_parse_service import (
+        build_mineru_client,
+    )
+    from backend.services.engine.alpha_agent.mineru_client import (
+        MODE_LOCAL,
+        MineruClient,
+    )
+    from backend.services.engine.alpha_agent.mineru_local import MineruLocalClient
+
+    cloud = build_mineru_client(MineruConfig(token="t"))
+    local = build_mineru_client(
+        MineruConfig(token="", base_url="http://192.168.31.9:8000", mode=MODE_LOCAL)
+    )
+    assert isinstance(cloud, MineruClient)
+    assert type(cloud) is not MineruLocalClient
+    assert isinstance(local, MineruLocalClient)

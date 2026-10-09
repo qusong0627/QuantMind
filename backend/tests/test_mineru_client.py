@@ -35,6 +35,8 @@ if str(ROOT) not in sys.path:
 
 from backend.services.engine.alpha_agent.mineru_client import (  # noqa: E402
     AUTH_CODES,
+    MODE_CLOUD,
+    MODE_LOCAL,
     PERMANENT_CODES,
     QUOTA_CODES,
     TERMINAL_STATES,
@@ -53,6 +55,8 @@ from backend.services.engine.alpha_agent.mineru_client import (  # noqa: E402
     count_pdf_pages,
     extract_err_code,
     extract_zip_whitelist,
+    is_local_mode,
+    mineru_unconfigured_message,
     resolve_mineru_config,
     run_pdf_job,
 )
@@ -815,6 +819,128 @@ def test_resolve_mineru_config_reads_env_at_call_time(monkeypatch) -> None:
 def test_mineru_config_rejects_empty_token_construction() -> None:
     with pytest.raises(ValueError):
         MineruConfig(token="", base_url="https://mineru.net", model_version="vlm")
+
+
+# ── 模式切换（cloud | local，T-FM-21） ──────────────────────────────
+
+
+@pytest.fixture()
+def clean_mineru_env(monkeypatch):
+    for key in (
+        "MINERU_API_TOKEN",
+        "MINERU_MODE",
+        "MINERU_LOCAL_URL",
+        "MINERU_LOCAL_API_KEY",
+        "MINERU_LOCAL_TIER",
+        "MINERU_BASE_URL",
+        "MINERU_MODEL_VERSION",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    return monkeypatch
+
+
+def test_resolve_config_local_mode_reads_lan_env(clean_mineru_env) -> None:
+    clean_mineru_env.setenv("MINERU_MODE", " local ")
+    clean_mineru_env.setenv("MINERU_LOCAL_URL", " http://192.168.31.9:8000/ ")
+    clean_mineru_env.setenv("MINERU_LOCAL_API_KEY", " lan-key ")
+
+    cfg = resolve_mineru_config()
+    assert cfg is not None
+    assert cfg.mode == MODE_LOCAL
+    assert cfg.base_url == "http://192.168.31.9:8000", "尾斜杠剥掉，拼 /v1/* 才不双斜杠"
+    assert cfg.token == "lan-key", "本地模式下 token 字段承载本地 API key"
+    assert cfg.local_tier is None
+
+    clean_mineru_env.setenv("MINERU_LOCAL_TIER", "flash")
+    assert resolve_mineru_config().local_tier == "flash"
+
+
+def test_resolve_config_local_requires_url_and_ignores_cloud_token(
+    clean_mineru_env,
+) -> None:
+    """本地模式没配 URL 就是未配置（转 503）——绝不许静默回落到云端出网。"""
+    clean_mineru_env.setenv("MINERU_MODE", "local")
+    clean_mineru_env.setenv("MINERU_API_TOKEN", "sk-cloud")
+    assert resolve_mineru_config() is None
+
+    clean_mineru_env.setenv("MINERU_LOCAL_URL", "http://192.168.31.9:8000")
+    cfg = resolve_mineru_config()
+    assert cfg is not None
+    assert cfg.token == "", "云端 token 绝不渗进本地客户端（防漏给内网服务）"
+
+
+def test_resolve_config_local_rejects_url_without_scheme(clean_mineru_env) -> None:
+    clean_mineru_env.setenv("MINERU_MODE", "local")
+    clean_mineru_env.setenv("MINERU_LOCAL_URL", "192.168.31.9:8000")
+    assert resolve_mineru_config() is None, "裸主机名不是合法 URL：按未配置处理"
+
+
+def test_resolve_config_unknown_mode_falls_back_to_cloud(clean_mineru_env) -> None:
+    clean_mineru_env.setenv("MINERU_MODE", "lan")
+    clean_mineru_env.setenv("MINERU_API_TOKEN", "sk-cloud")
+    cfg = resolve_mineru_config()
+    assert cfg is not None and cfg.mode == MODE_CLOUD
+
+
+def test_is_local_mode_normalizes(clean_mineru_env) -> None:
+    assert is_local_mode() is False
+    clean_mineru_env.setenv("MINERU_MODE", "LOCAL ")
+    assert is_local_mode() is True
+    clean_mineru_env.setenv("MINERU_MODE", "cloud")
+    assert is_local_mode() is False
+
+
+def test_unconfigured_message_points_at_mode_specific_key(clean_mineru_env) -> None:
+    assert "MINERU_API_TOKEN" in mineru_unconfigured_message()
+    clean_mineru_env.setenv("MINERU_MODE", "local")
+    msg = mineru_unconfigured_message()
+    assert "MINERU_LOCAL_URL" in msg and "MINERU_API_TOKEN" not in msg
+
+
+@pytest.mark.asyncio
+async def test_cloud_finalize_submission_is_identity() -> None:
+    """云端 v4 建批次即定 batch_id：收尾钩子恒等返回、零请求。"""
+
+    def handler(req: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("恒等收尾不应产生任何请求")
+
+    client = make_client(handler, fake_clock())
+    assert await client.finalize_submission("b-9") == "b-9"
+
+
+# ── 本地 zip 布局别名（markdown.md，T-FM-21） ───────────────────────
+
+
+def test_extract_accepts_markdown_md_alias(tmp_path: Path) -> None:
+    """自托管 4.x 的 zip 里 md 叫 markdown.md——落地统一存成 full.md。"""
+    payload = make_zip({"markdown.md": b"# local", "images/f1.png": b"png"})
+    zip_path = write_zip(tmp_path, payload)
+
+    out = extract_zip_whitelist(zip_path, tmp_path / "dest")
+
+    assert out.md_path == tmp_path / "dest" / "full.md"
+    assert out.md_path.read_text() == "# local"
+    assert out.image_count == 1
+
+
+def test_extract_prefers_full_md_over_markdown_md(tmp_path: Path) -> None:
+    payload = make_zip(
+        {"markdown.md": b"# alias", "nested/full.md": b"# canonical"}
+    )
+    zip_path = write_zip(tmp_path, payload)
+
+    out = extract_zip_whitelist(zip_path, tmp_path / "dest")
+
+    assert out.md_path.read_text() == "# canonical", "两份并存时 full.md 优先（确定性）"
+
+
+def test_extract_without_any_md_names_both_candidates(tmp_path: Path) -> None:
+    payload = make_zip({"junk.json": b"{}"})
+    zip_path = write_zip(tmp_path, payload)
+
+    with pytest.raises(MineruZipError) as ei:
+        extract_zip_whitelist(zip_path, tmp_path / "dest")
+    assert "full.md" in str(ei.value) and "markdown.md" in str(ei.value)
 
 
 if __name__ == "__main__":  # pragma: no cover

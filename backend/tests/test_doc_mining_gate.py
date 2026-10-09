@@ -94,6 +94,9 @@ async def test_gate_off_all_docs_routes_403(monkeypatch) -> None:
         ("GET", "/api/v1/alpha-agent/docs"),
         ("GET", "/api/v1/alpha-agent/docs/quota"),
         ("GET", "/api/v1/alpha-agent/docs/stats"),
+        ("GET", "/api/v1/alpha-agent/docs/mineru-settings"),
+        ("PUT", "/api/v1/alpha-agent/docs/mineru-settings"),
+        ("DELETE", "/api/v1/alpha-agent/docs/mineru-settings"),
         ("GET", "/api/v1/alpha-agent/docs/d-1"),
         ("GET", "/api/v1/alpha-agent/docs/d-1/file"),
         ("POST", "/api/v1/alpha-agent/docs/d-1/organize"),
@@ -101,14 +104,33 @@ async def test_gate_off_all_docs_routes_403(monkeypatch) -> None:
     ]
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         for method, path in endpoints:
-            resp = await client.request(method, path)
+            resp = await client.request(method, path, json={})
             assert resp.status_code == 403, (method, path, resp.status_code)
             assert resp.json()["detail"] == "doc_mining_disabled", (method, path)
 
 
-def test_docs_route_order_quota_before_doc_id() -> None:
-    """/docs/quota、/docs/stats 必须先于 /docs/{doc_id} 注册，否则被参数路由吞掉（P0 同款教训）。"""
-    paths = [r.path for r in docs_mod.router.routes]
-    doc_id_idx = paths.index("/api/v1/alpha-agent/docs/{doc_id}")
-    assert paths.index("/api/v1/alpha-agent/docs/quota") < doc_id_idx
-    assert paths.index("/api/v1/alpha-agent/docs/stats") < doc_id_idx
+def test_docs_route_order_literals_before_doc_id() -> None:
+    """字面量路由（quota/stats/mineru-settings 的**每一种方法**）必须先于
+    /docs/{doc_id} 注册，否则被参数路由吞掉（P0 同款教训）。
+
+    按 (path, method) 逐条比对而非 paths.index：同路径多方法时 index 只
+    看第一个，PUT/DELETE 落在 {doc_id} 之后也会漏网。
+    """
+    doc_id_idx = next(
+        i
+        for i, r in enumerate(docs_mod.router.routes)
+        if r.path == "/api/v1/alpha-agent/docs/{doc_id}"
+    )
+    literal_paths = (
+        "/api/v1/alpha-agent/docs/quota",
+        "/api/v1/alpha-agent/docs/stats",
+        "/api/v1/alpha-agent/docs/mineru-settings",
+    )
+    seen = 0
+    for i, route in enumerate(docs_mod.router.routes):
+        if route.path in literal_paths:
+            seen += 1
+            assert i < doc_id_idx, (
+                f"{route.path} [{sorted(route.methods)}] 注册在 {{doc_id}} 之后"
+            )
+    assert seen >= 5, "字面量路由疑似缺失（quota×1 + stats×1 + settings×3）"

@@ -41,7 +41,11 @@ from backend.services.engine.alpha_agent.doc_quota import (  # noqa: E402
     RateLimited,
 )
 from backend.services.engine.alpha_agent.doc_organize import OrganizeError  # noqa: E402
-from backend.services.engine.alpha_agent.mineru_client import MineruError  # noqa: E402
+from backend.services.engine.alpha_agent.mineru_client import (  # noqa: E402
+    MODE_LOCAL,
+    MineruConfig,
+    MineruError,
+)
 from backend.services.engine.routers import alpha_agent_docs as docs_mod  # noqa: E402
 
 NOW = "2026-10-09T00:00:00Z"
@@ -217,6 +221,7 @@ class FakeQuota:
         self.reserve_doc_ids: list[str] = []
         self.released: list[tuple[str, str]] = []
         self.committed: list[str] = []
+        self.accounting_calls: list[tuple[str, bool | None]] = []
         self.rate_checks: list[tuple[str, str]] = []
         self.locks: list[str] = []
         self.unlocks: list[tuple[str, str | None]] = []
@@ -228,18 +233,21 @@ class FakeQuota:
         self.events = events if events is not None else []
         self._lock_seq = 0
 
-    def reserve(self, user_id, pages, *, doc_id):
+    def reserve(self, user_id, pages, *, doc_id, accounting=None):
         self.events.append("guard")
         self.guards.append((user_id, int(pages)))
         self.reserve_doc_ids.append(str(doc_id))
+        self.accounting_calls.append(("reserve", accounting))
         if self.exc is not None:
             raise self.exc
 
-    def release(self, doc_id, user_id):
+    def release(self, doc_id, user_id, *, accounting=None):
         self.released.append((str(doc_id), str(user_id)))
+        self.accounting_calls.append(("release", accounting))
 
-    def commit_reservation(self, doc_id):
+    def commit_reservation(self, doc_id, *, accounting=None):
         self.committed.append(str(doc_id))
+        self.accounting_calls.append(("commit", accounting))
 
     def check_rate(self, user_id, action):
         self.rate_checks.append((user_id, action))
@@ -325,17 +333,27 @@ def _blank_pdf_bytes(pages: int = 3) -> bytes:
     return buf.getvalue()
 
 
-class FakeTokenResolver:
-    """有效 MinerU Token 解析替身（上传预检 / quota / stats 共用）。"""
+class FakeConfigResolver:
+    """有效 MinerU 配置解析替身（上传预检 / quota / stats / 设置页共用）。
 
-    def __init__(self, token="test-tok", src="env") -> None:
-        self.token = token
+    ``spec = (mode, value)``：cloud → ``MineruConfig(token=value)``；
+    local → ``MineruConfig(base_url=value, mode=local)``；``None`` → 未配置
+    ``(None, src)``（src 恒为字符串，"none"）。
+    """
+
+    def __init__(self, spec=("cloud", "test-tok"), src="env") -> None:
+        self.spec = spec
         self.src = src
         self.calls: list[tuple] = []
 
     async def __call__(self, user_id, tenant_id, *, strict=False):
         self.calls.append((user_id, tenant_id, strict))
-        return self.token, self.src
+        if self.spec is None:
+            return None, self.src
+        mode, value = self.spec
+        if mode == MODE_LOCAL:
+            return MineruConfig(token="", base_url=value, mode=MODE_LOCAL), self.src
+        return MineruConfig(token=value), self.src
 
 
 class FakeTaskStore:
@@ -381,7 +399,8 @@ def _wire(
     quota,
     user_id="u-1",
     *,
-    token=("test-tok", "env"),
+    cfg=("cloud", "test-tok"),
+    cfg_src="env",
     tasks_store=None,
 ):
     monkeypatch.setattr(docs_mod, "get_doc_store", lambda: store)
@@ -389,8 +408,8 @@ def _wire(
     monkeypatch.setattr(docs_mod, "get_doc_quota", lambda: quota)
     fake_tasks = tasks_store if tasks_store is not None else FakeTaskStore()
     monkeypatch.setattr(docs_mod, "get_mining_task_store", lambda: fake_tasks)
-    resolver = FakeTokenResolver(*token)
-    monkeypatch.setattr(docs_mod, "resolve_effective_mineru_token", resolver)
+    resolver = FakeConfigResolver(cfg, src=cfg_src)
+    monkeypatch.setattr(docs_mod, "resolve_effective_mineru_config", resolver)
     _auth_as(monkeypatch, user_id)
     return resolver
 
@@ -694,17 +713,18 @@ async def test_upload_rejects_oversize_and_cleans_dir(
 
 @pytest.mark.asyncio
 async def test_upload_503_when_token_missing(monkeypatch, tmp_path: Path) -> None:
-    """任何来源（用户 Profile / env）都没有 Token：落盘之前 503，并说清去哪配。"""
+    """任何来源（因子挖掘设置 / env）都没配通道：落盘之前 503，并说清去哪配。"""
     store = FakeStore()
     svc = FakeParseService(tmp_path, store=store)
-    resolver = _wire(monkeypatch, store, svc, FakeQuota(), token=(None, "none"))
+    resolver = _wire(monkeypatch, store, svc, FakeQuota(), cfg=None, cfg_src="none")
 
     with pytest.raises(HTTPException) as ei:
         await docs_mod.upload_doc(request=_upload(PDF_BYTES, "p.pdf"))
     assert ei.value.status_code == 503
     assert "MINERU_API_TOKEN" in str(ei.value.detail)
-    assert "个人中心" in str(ei.value.detail), "必须给出用户自助配置入口"
-    assert resolver.calls == [("u-1", "t-1", False)], "预检按有效 Token 口径"
+    assert "因子挖掘" in str(ei.value.detail), "必须给出用户自助配置入口"
+    assert "个人中心" not in str(ei.value.detail), "配置入口已迁出用户中心"
+    assert resolver.calls == [("u-1", "t-1", False)], "预检按有效配置口径"
     assert store.created == [] and list(tmp_path.iterdir()) == []
 
 
@@ -1135,7 +1155,8 @@ async def test_quota_endpoint_serializes_status(monkeypatch) -> None:
         FakeStore(),
         FakeParseService(Path("/n")),
         quota,
-        token=(None, "none"),
+        cfg=None,
+        cfg_src="none",
     )
 
     out = await docs_mod.doc_quota_status(request=FakeRequest())
@@ -1168,13 +1189,271 @@ async def test_quota_token_configured_uses_effective_token(monkeypatch) -> None:
         FakeStore(),
         FakeParseService(Path("/n")),
         FakeQuota(status_obj=st),
-        token=("user-tok", "user"),
+        cfg=("cloud", "user-tok"),
+        cfg_src="user",
     )
 
     data = (await docs_mod.doc_quota_status(request=FakeRequest()))["data"]
 
     assert data["token_configured"] is True
+    assert data["mineru_mode"] == "cloud"
     assert resolver.calls == [("u-1", "t-1", False)]
+
+
+@pytest.mark.asyncio
+async def test_quota_endpoint_reports_cloud_mode_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("MINERU_MODE", raising=False)
+    _wire(
+        monkeypatch,
+        FakeStore(),
+        FakeParseService(Path("/n")),
+        FakeQuota(
+            status_obj=QuotaStatus(
+                day="20261009",
+                user_id="u-1",
+                user_used=0,
+                user_limit=200,
+                platform_used=0,
+                platform_budget=1000,
+                user_remaining=200,
+                platform_remaining=1000,
+                exhausted=False,
+                warning=False,
+            )
+        ),
+    )
+
+    data = (await docs_mod.doc_quota_status(request=FakeRequest()))["data"]
+    assert data["mineru_mode"] == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_quota_endpoint_reports_local_channel_ready_and_mode(monkeypatch) -> None:
+    """本地通道就绪：token_configured=True 且 mineru_mode=local（前端据此把
+    页数配额显示为「不限」——本地解析不烧平台云配额）。"""
+    monkeypatch.setenv("MINERU_MODE", "local")
+    monkeypatch.setenv("MINERU_LOCAL_URL", "http://192.168.31.9:8000")
+
+    def _quota_stub() -> FakeQuota:
+        return FakeQuota(
+            status_obj=QuotaStatus(
+                day="20261009",
+                user_id="u-1",
+                user_used=0,
+                user_limit=200,
+                platform_used=0,
+                platform_budget=1000,
+                user_remaining=200,
+                platform_remaining=1000,
+                exhausted=False,
+                warning=False,
+            )
+        )
+
+    resolver = _wire(
+        monkeypatch,
+        FakeStore(),
+        FakeParseService(Path("/n")),
+        _quota_stub(),
+        cfg=("local", "http://192.168.31.9:8000"),
+        cfg_src="env",
+    )
+
+    data = (await docs_mod.doc_quota_status(request=FakeRequest()))["data"]
+    assert data["mineru_mode"] == "local"
+    assert data["token_configured"] is True
+    assert resolver.calls == [("u-1", "t-1", False)], "按身份解析（本地/云端同口径）"
+
+
+@pytest.mark.asyncio
+async def test_upload_503_channel_unconfigured_points_at_local_env(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """本地模式没配 MINERU_LOCAL_URL（= 未配置任何通道）：落盘之前 503，
+    文案同时给出设置页入口与本地配置键。"""
+    monkeypatch.setenv("MINERU_MODE", "local")
+    monkeypatch.delenv("MINERU_LOCAL_URL", raising=False)
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    resolver = _wire(monkeypatch, store, svc, FakeQuota(), cfg=None, cfg_src="none")
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.upload_doc(request=_upload(PDF_BYTES, "p.pdf"))
+    assert ei.value.status_code == 503
+    assert "MINERU_LOCAL_URL" in str(ei.value.detail)
+    assert "因子挖掘" in str(ei.value.detail), "设置页入口（本地/云端都在这配）"
+    assert resolver.calls == [("u-1", "t-1", False)]
+    assert store.created == [] and list(tmp_path.iterdir()) == []
+
+
+# ── MinerU 解析设置（因子挖掘内，2026-10-09 自用户中心迁入） ────────
+
+
+class FakeSettingsStore:
+    """设置存储替身：读（可注入故障）/写（可注入校验错）/清。"""
+
+    def __init__(self, settings=None, *, read_error=None, save_error=None) -> None:
+        self.settings = settings
+        self.read_error = read_error
+        self.save_error = save_error
+        self.saved: list[dict] = []
+        self.cleared = 0
+
+    def get(self, user_id, tenant_id, *, strict=False):
+        if self.read_error is not None:
+            raise self.read_error
+        return self.settings
+
+    def save(self, user_id, tenant_id, payload):
+        if self.save_error is not None:
+            raise self.save_error
+        self.saved.append({"user_id": user_id, "tenant_id": tenant_id, **payload})
+
+    def clear(self, user_id, tenant_id):
+        self.cleared += 1
+        return True
+
+
+def _wire_settings(
+    monkeypatch, settings_store, *, env_cfg=None, cfg=None, cfg_src="none"
+):
+    monkeypatch.setattr(
+        docs_mod, "get_doc_mining_settings_store", lambda: settings_store
+    )
+    monkeypatch.setattr(docs_mod, "resolve_mineru_config", lambda: env_cfg)
+    resolver = FakeConfigResolver(cfg, src=cfg_src)
+    monkeypatch.setattr(docs_mod, "resolve_effective_mineru_config", resolver)
+    _auth_as(monkeypatch)
+    return resolver
+
+
+@pytest.mark.asyncio
+async def test_get_mineru_settings_masks_secrets_and_reports_sources(
+    monkeypatch,
+) -> None:
+    from backend.services.engine.alpha_agent.doc_mining_settings import (
+        MineruUserSettings,
+    )
+
+    store = FakeSettingsStore(
+        MineruUserSettings(
+            mode="cloud",
+            api_token="user-token-abcdef123456",
+            local_url="http://10.0.0.5:8000",
+            local_api_key="localkey-1234567890",
+            local_tier="standard",
+        )
+    )
+    _wire_settings(
+        monkeypatch,
+        store,
+        env_cfg=MineruConfig(token="env-tok"),  # env 概览仅展示，不参与来源
+        cfg=("cloud", "user-token-abcdef123456"),
+        cfg_src="user",
+    )
+
+    data = (await docs_mod.get_mineru_settings(request=FakeRequest()))["data"]
+
+    assert data["readable"] is True
+    assert data["source"] == "user"
+    assert data["effective_mode"] == "cloud"
+    assert data["env_configured"] is True and data["env_mode"] == "cloud"
+    s = data["settings"]
+    assert s["mode"] == "cloud"
+    assert s["api_token_set"] is True
+    assert s["api_token_masked"] == "use****3456", "只回掩码，绝不回明文"
+    assert s["local_api_key_masked"] == "loc****7890"
+    assert s["local_url"] == "http://10.0.0.5:8000"
+    assert s["local_tier"] == "standard"
+    assert "api_token" not in s and "local_api_key" not in s, "公开视图不许带明文字段名"
+
+
+@pytest.mark.asyncio
+async def test_get_mineru_settings_unreadable_is_not_empty_settings(
+    monkeypatch,
+) -> None:
+    """存储读故障 ≠ 没配：readable=False 必须与「空设置」可区分——把故障显示成
+    空设置会诱导用户覆盖掉自己已存的密钥（旧 Profile 网关同款纪律）。"""
+    from backend.services.engine.alpha_agent.doc_mining_settings import (
+        DocMiningSettingsError,
+    )
+
+    store = FakeSettingsStore(read_error=DocMiningSettingsError("redis down"))
+    _wire_settings(monkeypatch, store)
+
+    data = (await docs_mod.get_mineru_settings(request=FakeRequest()))["data"]
+
+    assert data["readable"] is False
+    assert data["settings"] is None
+    assert data["source"] == "none" and data["effective_mode"] is None
+
+
+@pytest.mark.asyncio
+async def test_put_mineru_settings_saves_scoped_and_returns_view(monkeypatch) -> None:
+    store = FakeSettingsStore()
+    _wire_settings(monkeypatch, store, cfg=("cloud", "new-tok"), cfg_src="user")
+
+    out = await docs_mod.save_mineru_settings(
+        request=FakeRequest(),
+        payload=docs_mod.MineruSettingsPayload(mode="cloud", api_token="new-tok"),
+    )
+
+    assert out["code"] == 200
+    assert store.saved == [
+        {
+            "user_id": "u-1",
+            "tenant_id": "t-1",
+            "mode": "cloud",
+            "api_token": "new-tok",
+            "local_url": None,
+            "local_api_key": None,
+            "local_tier": None,
+        }
+    ], "写侧按 (user, tenant) 收口，payload 原样透传（校验在 store）"
+    assert out["data"]["source"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_put_mineru_settings_validation_error_maps_400(monkeypatch) -> None:
+    store = FakeSettingsStore(save_error=ValueError("mode 必须是 cloud 或 local"))
+    _wire_settings(monkeypatch, store)
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.save_mineru_settings(
+            request=FakeRequest(),
+            payload=docs_mod.MineruSettingsPayload(mode="bogus"),
+        )
+    assert ei.value.status_code == 400
+    assert "mode" in str(ei.value.detail), "校验失败原因要透出（可操作）"
+
+
+@pytest.mark.asyncio
+async def test_put_mineru_settings_store_failure_maps_500_fixed_text(
+    monkeypatch,
+) -> None:
+    store = FakeSettingsStore(save_error=RuntimeError("redis conn refused secret"))
+    _wire_settings(monkeypatch, store)
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.save_mineru_settings(
+            request=FakeRequest(),
+            payload=docs_mod.MineruSettingsPayload(mode="cloud", api_token="t"),
+        )
+    assert ei.value.status_code == 500
+    assert ei.value.detail == "保存失败，请稍后重试"
+    assert "secret" not in str(ei.value.detail), "内部错误不回显"
+
+
+@pytest.mark.asyncio
+async def test_delete_mineru_settings_clears_and_returns_view(monkeypatch) -> None:
+    store = FakeSettingsStore()
+    _wire_settings(monkeypatch, store)
+
+    out = await docs_mod.clear_mineru_settings(request=FakeRequest())
+
+    assert out["code"] == 200
+    assert store.cleared == 1
+    assert out["data"]["settings"] is None
 
 
 # ── 统计 ────────────────────────────────────────────────────────────
@@ -1210,7 +1489,8 @@ async def test_stats_counts_failure_rate_and_quota(monkeypatch) -> None:
         store,
         FakeParseService(Path("/n")),
         FakeQuota(status_obj=st),
-        token=(None, "none"),
+        cfg=None,
+        cfg_src="none",
     )
 
     out = await docs_mod.docs_stats(request=FakeRequest())
@@ -1253,7 +1533,8 @@ async def test_stats_failure_rate_zero_when_nothing_attempted(monkeypatch) -> No
         store,
         FakeParseService(Path("/n")),
         FakeQuota(status_obj=st),
-        token=(None, "none"),
+        cfg=None,
+        cfg_src="none",
     )
 
     data = (await docs_mod.docs_stats(request=FakeRequest()))["data"]

@@ -439,5 +439,76 @@ def test_env_overrides(monkeypatch) -> None:
     assert q2.user_limit == 200, "脏 env 回落默认值，不许 import 期炸"
 
 
+# ── 本地/局域网模式（T-FM-21）：页数记账停用，频控与锁保留 ──────────
+
+
+def test_local_mode_disables_page_accounting(monkeypatch) -> None:
+    """本地 MinerU 没有平台账单：页数记账零写入、不受云配额上限约束。"""
+    stub = StubRedis()
+    q = DocQuota(redis_client=stub, page_accounting=False, now=lambda: FIXED)
+
+    st = q.reserve("u1", 500, doc_id="d1")
+    assert st.user_used == 0 and st.user_remaining == 200, (
+        "500 页也放行——本地模式不许被云日限卡死"
+    )
+    assert stub.calls == [], "页数记账零 Redis 写入"
+
+    assert q.settle("d1", "u1", 500).user_used == 0
+    q.commit_reservation("d1")
+    assert q.release("d1", "u1").user_used == 0
+    assert stub.calls == []
+
+    # 频控不随页数记账一起关：同一批 Redis 键仍要防刷
+    q.check_rate("u1", "upload", limit=2)
+    q.check_rate("u1", "upload", limit=2)
+    assert any(call[0] == "incr" for call in stub.calls)
+    with pytest.raises(RateLimited):
+        q.check_rate("u1", "upload", limit=2)
+
+
+def test_page_accounting_default_follows_mineru_mode_env(monkeypatch) -> None:
+    monkeypatch.delenv("MINERU_MODE", raising=False)
+    assert DocQuota(redis_client=StubRedis()).page_accounting is True
+
+    monkeypatch.setenv("MINERU_MODE", " local ")  # 归一后判定
+    assert DocQuota(redis_client=StubRedis()).page_accounting is False
+
+
+# ── 按次记账开关（2026-10-09）：通道定格在行上，而不是部署默认 ──────
+
+
+def test_per_call_accounting_false_skips_books_on_cloud_instance() -> None:
+    """云部署上用户自带本地 MinerU 的文档：按次关账——零写入、不受日限约束。"""
+    stub = StubRedis()
+    q = DocQuota(redis_client=stub, now=lambda: FIXED)  # 实例默认=记账
+
+    st = q.reserve("u1", 500, doc_id="d1", accounting=False)
+    assert st.user_used == 0 and st.user_remaining == 200, (
+        "500 页也放行——本地通道不许被云日限卡死"
+    )
+    assert stub.calls == []
+
+    q.settle("d1", "u1", 500, accounting=False)
+    q.commit_reservation("d1", accounting=False)
+    q.release("d1", "u1", accounting=False)
+    assert stub.calls == [], "关账调用零 Redis 写入"
+
+
+def test_per_call_accounting_true_books_on_local_instance() -> None:
+    """实例默认关账（部署切了 local）+ 行上定格 cloud：按次开账仍如实记账。"""
+    stub = StubRedis()
+    q = DocQuota(redis_client=stub, page_accounting=False, now=lambda: FIXED)
+
+    with pytest.raises(QuotaExceeded):
+        q.reserve("u1", 500, doc_id="d1", accounting=True)
+    assert stub.calls, "开账调用照常读写"
+
+    st = q.reserve("u1", 10, doc_id="d1", accounting=True)
+    assert st.user_used == 10, "预留即入账"
+
+    st2 = q.settle("d1", "u1", 12, accounting=True)
+    assert st2.user_used == 12, "结算按实际页数多退少补（10 → 12）"
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))

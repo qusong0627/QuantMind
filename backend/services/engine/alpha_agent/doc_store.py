@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS rd_agent_docs (
   task_id       TEXT,
   error         TEXT,
   mineru_token_src TEXT,
+  mineru_mode   TEXT,
   tenant_id     TEXT,
   files_count   INTEGER DEFAULT 1,
   original_paths TEXT,
@@ -86,6 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_rd_docs_user ON rd_agent_docs (user_id, created_a
 CREATE INDEX IF NOT EXISTS idx_rd_docs_sha ON rd_agent_docs (user_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_rd_docs_status ON rd_agent_docs (status);
 ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS mineru_token_src TEXT;
+ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS mineru_mode TEXT;
 ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS tenant_id TEXT;
 ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS files_count INTEGER DEFAULT 1;
 ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS original_paths TEXT;
@@ -268,6 +270,9 @@ class DocStore:
             "task_id",
             # 凭据来源（"user"/"env"）：提交时定格，重启续轮询按它重建同一 Token
             "mineru_token_src",
+            # 解析通道（"cloud"/"local"）：提交时定格。settle/release 按它判
+            # 是否计平台云配额（本地通道不计）；中途换通道轮询时对照检出。
+            "mineru_mode",
             # 多文件件数（幂等复用要把它抄到新行上；部件清单 original_paths
             # 是各文档自己的磁盘事实，绝不跨行复制）
             "files_count",

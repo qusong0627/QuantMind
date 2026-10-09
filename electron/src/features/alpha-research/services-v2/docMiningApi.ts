@@ -67,6 +67,11 @@ export interface DocRow {
   organized_at: string | null;
   task_id: string | null;
   /**
+   * 该文档解析时走的上传通道（cloud/local），随行冻结。历史行未记录时为
+   * null/undefined——按「通道未知」展示，不许拿当前设置反推。
+   */
+  mineru_mode?: 'cloud' | 'local' | null;
+  /**
    * 该文档关联的挖掘任务数（一文档多方向）。列表/详情端点批量带出；
    * **undefined = 后端未返回（查询失败），0 = 确认没挖过**——两者绝不混。
    */
@@ -111,6 +116,61 @@ export interface DocQuotaStatus {
   warning: boolean;
   /** MinerU token 是否已配置：false 时上传会 503，入口应先提示 */
   token_configured: boolean;
+  /**
+   * 生效解析通道（cloud/local/None）：local = 本地/局域网 MinerU，
+   * 文档不出网、**不消耗平台云页数配额**（配额口径按它切换展示）。
+   */
+  mineru_mode?: MineruMode | null;
+}
+
+// ========================== 解析设置（MinerU） ==========================
+
+/** 解析通道：cloud=mineru.net 云端；local=自建/局域网 MinerU（数据不出网）。 */
+export type MineruMode = 'cloud' | 'local';
+
+/** 本地 MinerU 服务端 supported 档位；'' = 服务端默认。与后端 VALID_TIERS 同词表。 */
+export const MINERU_LOCAL_TIERS: Array<{ value: string; label: string }> = [
+  { value: '', label: '服务端默认' },
+  { value: 'flash', label: 'flash（极速，精度最低）' },
+  { value: 'basic', label: 'basic（基础）' },
+  { value: 'standard', label: 'standard（标准）' },
+  { value: 'advanced', label: 'advanced（最高精度，最慢）' },
+];
+
+/** 用户解析设置（GET/PUT/DELETE /docs/mineru-settings 的 settings 段）。 */
+export interface MineruUserSettings {
+  mode: MineruMode;
+  /** 该通道必填项是否齐（cloud=token，local=URL） */
+  configured: boolean;
+  api_token_set: boolean;
+  /** 掩码回显（前3****后4）；明文绝不回传 */
+  api_token_masked: string;
+  local_url: string;
+  local_api_key_set: boolean;
+  local_api_key_masked: string;
+  local_tier: string | null;
+}
+
+export interface MineruSettingsView {
+  /** null = 没配过（readable=false 时也为 null——两者用 readable 区分） */
+  settings: MineruUserSettings | null;
+  /** false = 设置存储读不到（Redis 故障）：不是「没配」，界面须区分 */
+  readable: boolean;
+  /** 生效来源：user=本页设置；env=部署默认（服务器 .env）；none=未配置 */
+  source: 'user' | 'env' | 'none';
+  effective_mode: MineruMode | null;
+  env_configured: boolean;
+  env_mode: MineruMode | null;
+}
+
+export interface MineruSettingsPayload {
+  mode: MineruMode;
+  /** 留空 = 保留已存密钥（回显的是掩码，回存掩码会把真密钥写坏）；清除整条走 clear */
+  api_token?: string;
+  local_url?: string;
+  local_api_key?: string;
+  /** '' = 清为服务端默认档 */
+  local_tier?: string;
 }
 
 export interface OrganizeResult {
@@ -151,9 +211,16 @@ export async function uploadDocs(
 ): Promise<{ doc: DocRow; reused: boolean }> {
   const form = new FormData();
   for (const file of files) form.append('file', file);
-  // axios 1.x 的 XHR 适配器对 FormData 会自动让浏览器设置 multipart boundary
-  //（quantbot agentApi 同款路径），不要手写 Content-Type。
+  // ⚠️ 必须显式声明 multipart/form-data，不能依赖「浏览器自动设置」：
+  // apiClient 实例带默认 Content-Type: application/json，而 axios 1.x 的
+  // transformRequest（lib/defaults/index.js）对 FormData 的处理是
+  // 「content-type 含 application/json → JSON.stringify(formDataToJSON(...))」
+  // ——照原样发出就成了 JSON 体，服务端 multipart 解析出空表单，上传必 400
+  //「缺少文件（multipart 字段名 file）」。显式写成 multipart/form-data 后
+  // transformRequest 原样放行 FormData，resolveConfig 清掉该头交给浏览器
+  // 补 boundary（aiStrategyServiceFiles / aiStrategyService 同款写法）。
   const res = await apiClient.post('/alpha-agent/docs/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
     onUploadProgress: (evt) => {
       if (onProgress && evt.total) {
         onProgress(Math.round((evt.loaded * 100) / evt.total));
@@ -206,6 +273,55 @@ export async function getDoc(docId: string): Promise<DocRow> {
 export async function getDocQuota(): Promise<DocQuotaStatus> {
   const res = await apiClient.get('/alpha-agent/docs/quota');
   return res.data?.data as DocQuotaStatus;
+}
+
+// ========================== 解析设置端点 ==========================
+
+/**
+ * 读取解析设置（因子挖掘专属，租户+用户维度）。明文密钥绝不回传——
+ * 回显的是掩码（前3****后4），保存时留空即「保留已存密钥」。
+ */
+export async function getMineruSettings(): Promise<MineruSettingsView> {
+  const res = await apiClient.get('/alpha-agent/docs/mineru-settings');
+  const data = res.data?.data ?? {};
+  return {
+    settings: (data.settings ?? null) as MineruUserSettings | null,
+    readable: data.readable !== false,
+    source: (data.source ?? 'none') as MineruSettingsView['source'],
+    effective_mode: (data.effective_mode ?? null) as MineruSettingsView['effective_mode'],
+    env_configured: Boolean(data.env_configured),
+    env_mode: (data.env_mode ?? null) as MineruSettingsView['env_mode'],
+  };
+}
+
+/** 保存解析设置（部分更新：密钥字段留空 = 保留已存；'' → local_tier 清为服务端默认）。 */
+export async function saveMineruSettings(
+  payload: MineruSettingsPayload,
+): Promise<MineruSettingsView> {
+  const res = await apiClient.put('/alpha-agent/docs/mineru-settings', payload);
+  const data = res.data?.data ?? {};
+  return {
+    settings: (data.settings ?? null) as MineruUserSettings | null,
+    readable: data.readable !== false,
+    source: (data.source ?? 'none') as MineruSettingsView['source'],
+    effective_mode: (data.effective_mode ?? null) as MineruSettingsView['effective_mode'],
+    env_configured: Boolean(data.env_configured),
+    env_mode: (data.env_mode ?? null) as MineruSettingsView['env_mode'],
+  };
+}
+
+/** 清除本用户全部解析设置（云端+本地一起），回落到部署默认。 */
+export async function clearMineruSettings(): Promise<MineruSettingsView> {
+  const res = await apiClient.delete('/alpha-agent/docs/mineru-settings');
+  const data = res.data?.data ?? {};
+  return {
+    settings: (data.settings ?? null) as MineruUserSettings | null,
+    readable: data.readable !== false,
+    source: (data.source ?? 'none') as MineruSettingsView['source'],
+    effective_mode: (data.effective_mode ?? null) as MineruSettingsView['effective_mode'],
+    env_configured: Boolean(data.env_configured),
+    env_mode: (data.env_mode ?? null) as MineruSettingsView['env_mode'],
+  };
 }
 
 /** 读取解析产物文本（默认 full.md）。返回原始文本，不做 markdown 渲染。 */
