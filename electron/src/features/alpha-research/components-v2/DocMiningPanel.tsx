@@ -65,6 +65,31 @@ function formatSize(bytes: number): string {
   return `${bytes}B`;
 }
 
+const CLIPBOARD_MIME_EXT: Record<string, string> = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'image/bmp': '.bmp',
+  'image/tiff': '.tif',
+  'image/avif': '.avif',
+  'application/pdf': '.pdf',
+};
+
+/** 剪贴板文件常常没有名字（截图/复制的图片）→ 按 MIME 补一个可解析的名字。
+ *  扩展名只是给前端白名单看的，后端按内容定形还会再纠一次。 */
+function ensureClipboardFileName(f: File): File {
+  if (/\.[a-z0-9]+$/i.test(f.name || '')) return f;
+  const ext =
+    CLIPBOARD_MIME_EXT[f.type] ??
+    (f.type ? `.${f.type.split('/').pop()}` : '.png');
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:T]/g, '')
+    .slice(0, 14);
+  return new File([f], `粘贴文件-${stamp}${ext}`, { type: f.type });
+}
+
 export interface DocMiningPanelProps {
   /** 开始挖掘（TaskContext.startMining）；docId 一并下发记录文档血统 */
   onStartMining: (config: TaskConfig) => void;
@@ -95,6 +120,8 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
   const [notice, setNotice] = useState<string | null>(null);
   /** 待上传清单（多文件先攒后传：顺序=合并顺序，可调可删，配额只烧一次） */
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
+  /** 拖拽悬停中（给上传区高亮；离开/落下即清） */
+  const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   /** 解析设置折叠区（通道未配置时自动展开一次，之后由用户控制） */
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -264,6 +291,59 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
     [stagedFiles],
   );
 
+  /** 拖拽/粘贴只在「上传」步、非忙时收件；其余时刻仍拦浏览器默认（别把文件当网页打开）。 */
+  const canDrop = step === 'upload' && !busy;
+
+  const handleDragOver = useCallback(
+    (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes('Files')) return; // 文本拖拽走默认
+      e.preventDefault(); // 不拦 = 浏览器直接打开文件（拖图片变导航的根因）
+      if (canDrop) {
+        e.dataTransfer.dropEffect = 'copy';
+        setDragActive(true);
+      }
+    },
+    [canDrop],
+  );
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    // 拖过子元素也会冒 dragleave：仍在本面板内就不熄高亮
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setDragActive(false);
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes('Files')) return;
+      e.preventDefault();
+      setDragActive(false);
+      if (!canDrop) return;
+      stageFiles(Array.from(e.dataTransfer.files));
+    },
+    [canDrop, stageFiles],
+  );
+
+  // Ctrl/⌘+V 粘贴：截图/复制的图片直接进待上传清单（面板在上传步时才接管；
+  // 纯文本粘贴一律放行给默认行为）
+  useEffect(() => {
+    if (!canDrop) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const dt = e.clipboardData;
+      if (!dt) return;
+      const files: File[] = [];
+      for (const item of Array.from(dt.items ?? [])) {
+        if (item.kind !== 'file') continue;
+        const f = item.getAsFile();
+        if (f) files.push(ensureClipboardFileName(f));
+      }
+      if (!files.length) return; // 纯文本：不拦，输入框正常粘贴
+      e.preventDefault();
+      stageFiles(files);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [canDrop, stageFiles]);
+
   /** 调序（合并顺序=清单顺序；diff 越界为 no-op）。 */
   const moveStaged = useCallback((index: number, delta: number) => {
     setStagedFiles((prev) => {
@@ -365,7 +445,10 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
   return (
     <div
       id="doc-mining-panel"
-      className="w-full max-w-4xl mx-auto flex flex-col gap-3 select-none"
+      className="w-full max-w-4xl mx-auto flex flex-col gap-3"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
       {/* ============ Stepper 头 ============ */}
       <ol className="flex items-center justify-center gap-1.5 m-0 p-0 list-none">
@@ -448,7 +531,9 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
               className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors ${
                 busy
                   ? 'border-blue-200 bg-blue-50/40 cursor-wait'
-                  : 'border-slate-200 bg-slate-50/60 hover:border-blue-300 hover:bg-blue-50/40 cursor-pointer'
+                  : dragActive
+                    ? 'border-blue-400 bg-blue-50/70 cursor-copy'
+                    : 'border-slate-200 bg-slate-50/60 hover:border-blue-300 hover:bg-blue-50/40 cursor-pointer'
               }`}
             >
               {busy ? (
@@ -469,6 +554,9 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
                   <UploadCloud className="h-7 w-7 text-slate-400" />
                   <span className="text-sm font-black text-slate-700">
                     点击选择文件，或拖入此区域
+                  </span>
+                  <span className="text-[11px] font-bold text-blue-600/80">
+                    截图 / 复制的图片可直接 Ctrl/⌘+V 粘贴
                   </span>
                   <span className="text-[11px] text-slate-500">
                     支持 PDF / Word（doc、docx）/ PPT（ppt、pptx）/ 图片（png、jpg、webp、gif、bmp、tif、avif；

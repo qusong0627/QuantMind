@@ -39,7 +39,7 @@ export const Layout: React.FC<LayoutProps> = ({
   ];
 
   return (
-    <div className="min-h-screen bg-transparent gradient-mesh p-4 pt-2 select-none">
+    <div className="min-h-screen bg-transparent gradient-mesh p-4 pt-2">
       {/* 顶部悬浮圆角磨砂胶囊顶栏 (Preserves window rounded corners and window controls) */}
       <header className="sticky top-[38px] z-40 max-w-6xl mx-auto w-full px-5 py-2 rounded-2xl bg-white/80 backdrop-blur-xl border border-white/90 shadow-xs flex items-center justify-between transition-all">
         {/* Left: Brand Logo & Title */}

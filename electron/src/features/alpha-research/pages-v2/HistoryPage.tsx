@@ -127,7 +127,7 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({
   }, [total, offset]);
 
   return (
-    <div className="flex flex-col gap-4 py-6 select-none animate-fade-in-up">
+    <div className="flex flex-col gap-4 py-6 animate-fade-in-up">
       <PageHeader
         icon={History}
         title="挖掘历史"

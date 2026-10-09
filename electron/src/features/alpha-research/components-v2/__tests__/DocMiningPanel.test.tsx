@@ -6,10 +6,15 @@
  *   「整理后直通」打开才跳过确认步；
  * - **提交携带血统**：onStartMining 必须带 {userInput: 草稿, docId}，
  *   docId 丢了历史页就再也连不回文档。
+ * - **上传不止文件选择器一条路**：拖拽与 Ctrl/⌘+V 粘贴都能进待上传清单；
+ *   拖 Files 必须 preventDefault（不拦 = 浏览器把图片当网页打开），
+ *   纯文本拖拽/粘贴一律放行默认行为。
  *
  * 时间用 fake timers：轮询间隔 3s 的推进必须是显式的，测试不许等真实秒数。
  */
 import React from 'react';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { DocMiningPanel, DOC_POLL_INTERVAL_MS } from '../DocMiningPanel';
@@ -664,5 +669,149 @@ describe('解析通道（MinerU）感知与解析设置入口', () => {
       screen.getByText(/本地 MinerU 解析通常需要 10~60 秒/),
     ).toBeTruthy();
     expect(screen.queryByText(/MinerU 云端解析通常需要/)).toBeNull();
+  });
+});
+
+// —— 拖拽/粘贴：jsdom 没有 DragEvent 构造器，直接给原生 Event 挂 dataTransfer ——
+
+function dragEvent(
+  type: 'dragover' | 'drop',
+  dataTransfer: Record<string, unknown>,
+): Event {
+  const ev = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer });
+  return ev;
+}
+
+function pasteEvent(clipboardData: Record<string, unknown>): Event {
+  const ev = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(ev, 'clipboardData', { value: clipboardData });
+  return ev;
+}
+
+/** 原生派发要走 act：React 8 的 setState 在事件回调里同步发生 */
+function dispatch(target: EventTarget, ev: Event) {
+  act(() => {
+    target.dispatchEvent(ev);
+  });
+}
+
+describe('拖拽与粘贴：上传不止文件选择器一条路', () => {
+  test('拖文件到面板高亮并入清单；dragover 显式 dropEffect=copy', async () => {
+    const { container } = renderPanel();
+    await flush();
+    const panel = container.querySelector('#doc-mining-panel') as HTMLElement;
+
+    const dt = { types: ['Files'], files: [mkFile('drop.pdf')], dropEffect: '' };
+    dispatch(panel, dragEvent('dragover', dt));
+    expect(dt.dropEffect).toBe('copy');
+    expect(
+      screen.getByText(/点击选择文件，或拖入此区域/).closest('label')?.className,
+    ).toContain('cursor-copy');
+
+    dispatch(panel, dragEvent('drop', dt));
+    await flush();
+
+    expect(screen.getByText(/待上传 1 个文件/)).toBeTruthy();
+    expect(screen.getByText('drop.pdf')).toBeTruthy();
+    expect(uploadDocsMock).not.toHaveBeenCalled(); // 与选择器一致：先攒后传
+  });
+
+  test('Files 拖拽被拦下（不拦 = 浏览器把图片当网页打开）；纯文本拖拽放行', async () => {
+    const { container } = renderPanel();
+    await flush();
+    const panel = container.querySelector('#doc-mining-panel') as HTMLElement;
+
+    const fileDrag = dragEvent('dragover', { types: ['Files'], dropEffect: '' });
+    dispatch(panel, fileDrag);
+    expect(fileDrag.defaultPrevented).toBe(true);
+
+    const textDrag = dragEvent('dragover', { types: ['text/plain'] });
+    dispatch(panel, textDrag);
+    expect(textDrag.defaultPrevented).toBe(false);
+  });
+
+  test('非上传步拖入：仍拦浏览器默认，但不收件', async () => {
+    getDocMock.mockResolvedValue(mkDoc({ status: 'parsing' }));
+    const { container } = renderPanel({
+      resume: { key: 1, docId: 'd-run', filename: 'run.pdf' },
+    });
+    await flush();
+    const panel = container.querySelector('#doc-mining-panel') as HTMLElement;
+
+    const ev = dragEvent('drop', {
+      types: ['Files'],
+      files: [mkFile('late.pdf')],
+      dropEffect: '',
+    });
+    dispatch(panel, ev);
+    await flush();
+
+    expect(ev.defaultPrevented).toBe(true);
+    expect(screen.queryByText(/待上传/)).toBeNull();
+  });
+
+  test('Ctrl/⌘+V 粘贴剪贴板图片：拦默认并入清单；无名截图按 MIME 补名', async () => {
+    renderPanel();
+    await flush();
+    const shot = new File(['img'], '', { type: 'image/png' });
+
+    const ev = pasteEvent({ items: [{ kind: 'file', getAsFile: () => shot }] });
+    dispatch(window, ev);
+    await flush();
+
+    expect(ev.defaultPrevented).toBe(true);
+    expect(screen.getByText(/待上传 1 个文件/)).toBeTruthy();
+    // 截图没有文件名 → 补「粘贴文件-时间戳.png」，.png 过前端白名单
+    expect(screen.getByText(/^粘贴文件-\d{14}\.png$/)).toBeTruthy();
+  });
+
+  test('剪贴板文件已有名字：原样保留，不重命名', async () => {
+    renderPanel();
+    await flush();
+    const pdf = new File(['p'], 'report.pdf', { type: 'application/pdf' });
+
+    dispatch(
+      window,
+      pasteEvent({ items: [{ kind: 'file', getAsFile: () => pdf }] }),
+    );
+    await flush();
+
+    expect(screen.getByText('report.pdf')).toBeTruthy();
+  });
+
+  test('纯文本粘贴不拦（输入框照常粘贴文字）', async () => {
+    renderPanel();
+    await flush();
+
+    const ev = pasteEvent({ items: [{ kind: 'string', getAsFile: () => null }] });
+    dispatch(window, ev);
+    await flush();
+
+    expect(ev.defaultPrevented).toBe(false);
+    expect(screen.queryByText(/待上传/)).toBeNull();
+  });
+
+  test('面板根节点不再 select-none（整页可框选/复制文本）', async () => {
+    const { container } = renderPanel();
+    await flush();
+    const panel = container.querySelector('#doc-mining-panel') as HTMLElement;
+    expect(panel.className).not.toContain('select-none');
+  });
+
+  test('界面四文件源码不含 select-none（回归守卫：它就是「全界面不能复制」的根因）', () => {
+    const files = [
+      '../DocMiningPanel.tsx',
+      '../layout/Layout.tsx',
+      '../../pages-v2/HomePage.tsx',
+      '../../pages-v2/HistoryPage.tsx',
+    ];
+    for (const rel of files) {
+      const src = readFileSync(
+        fileURLToPath(new URL(rel, import.meta.url)),
+        'utf8',
+      );
+      expect(src.includes('select-none'), `${rel} 不应再有 select-none`).toBe(false);
+    }
   });
 });

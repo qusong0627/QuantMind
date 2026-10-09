@@ -95,7 +95,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
       onNavigate={onNavigate || (() => {})}
       showNavigation={!!onNavigate}
     >
-      <div className="max-w-5xl mx-auto flex flex-col items-center gap-8 py-6 pb-12 select-none animate-fade-in-up">
+      <div className="max-w-5xl mx-auto flex flex-col items-center gap-8 py-6 pb-12 animate-fade-in-up">
         {/* ================= 1. Hero Title & Headline ================= */}
         <div className="text-center max-w-2xl flex flex-col items-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50/90 border border-blue-100/80 text-blue-600 text-xs font-bold mb-3 shadow-2xs">
