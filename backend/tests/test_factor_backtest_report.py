@@ -284,3 +284,37 @@ def test_金样数值比对():
         n_trials_source="param",
     )
     _assert_close(fam_block, golden["expected_family"], "family_block")
+
+
+@pytest.mark.xfail(
+    reason=(
+        "已知缺陷（2026-10-10 发现，metrics_eval.deflated_sharpe 多重校正项"
+        "多乘了一次 √(T-1)）：z 应为 SR·√(T-1)/√denom − e_max，现实现为"
+        "(SR − e_max)·√(T-1)/√denom。n_trials>1 时现实现把 e_max 放大约 "
+        "√(T-1)≈16..27 倍，任何现实输入 DSR 恒塌到 ≈0（实测 TB 数据 "
+        "1273 个标的 crypto 强信号 z 从 -0.71 变 -24.43）。修复 metrics_eval "
+        "后本用例转 xpass，届时重生成金样并移除本标记。"
+    ),
+    strict=False,
+)
+def test_DSR规范式对照_已知缺陷():
+    """独立实现 Bailey-LdP 规范式（不调 metrics_eval），与装配值对照。
+
+    规范式：z = SR·√(T-1)/√(1 − γ₃·SR + (γ₄−1)/4·SR²) − e_max，
+    e_max = (1−γ)·Φ⁻¹(1−1/N) + γ·Φ⁻¹(1−1/(N·e))。
+    """
+    from statistics import NormalDist
+
+    run, series = _golden_inputs()
+    block = rp.build_report_block(run, series, n_trials=8, n_trials_source="param")
+    h = block["headline"]
+    _, _, ls_daily = _series_arrays(series)
+    skew, kurt = rp._skew_kurt_of(ls_daily)
+
+    sr = h["ir"] / math.sqrt(252.0)
+    nd = NormalDist()
+    g = 0.5772156649015329
+    e_max = (1 - g) * nd.inv_cdf(1 - 1 / 8) + g * nd.inv_cdf(1 - 1 / (8 * math.e))
+    denom = math.sqrt(1 - skew * sr + (kurt - 1) / 4 * sr * sr)
+    z = sr * math.sqrt(h["n_days"] - 1) / denom - e_max
+    assert block["significance"]["dsr"] == pytest.approx(nd.cdf(z), abs=1e-9)
