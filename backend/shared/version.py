@@ -10,6 +10,12 @@
 更新检查：容器内没有 .git，也无法 git fetch，故改走上游平台（默认 gitee）的
 compare HTTP API，比较「本地部署 commit」与「上游分支」算出落后提交数。
 结果做本地磁盘缓存，避免每次请求都访问上游。
+
+**只有走过 deploy/update.sh 的部署（version.json 在场）才参与更新检查**：
+version.txt 是遗留回退，它的 commit 冻结在写入那一刻，开发机（bind mount
+恒最新）拿它对比上游会把「本地其实最新」误报成落后几百提交。宁可不提示，
+也不误报。上游对比分支默认 next（本项目开发主线；main 只读、推送走 next），
+可用 QUANTMIND_UPSTREAM_BRANCH 覆盖。
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ _VERSION_JSON = _BASE_DIR / "version.json"
 _UPSTREAM_HOST = os.getenv("QUANTMIND_UPSTREAM_HOST", "https://gitee.com")
 _UPSTREAM_OWNER = os.getenv("QUANTMIND_UPSTREAM_OWNER", "qusong0627")
 _UPSTREAM_REPO = os.getenv("QUANTMIND_UPSTREAM_REPO", "quantmind")
-_UPSTREAM_BRANCH = os.getenv("QUANTMIND_UPSTREAM_BRANCH", "master")
+_UPSTREAM_BRANCH = os.getenv("QUANTMIND_UPSTREAM_BRANCH", "next")
 
 # 检查结果缓存在运行时可写目录（STORAGE_ROOT 默认 /data，挂载持久化）。
 _CACHE_FILE = os.getenv(
@@ -109,8 +115,9 @@ async def check_updates(force: bool = False) -> dict | None:
     """
     info = get_version_info()
     commit, branch = info.get("commit"), info.get("branch")
-    # 无版本文件（本地 dev 环境）或不走 update.sh 时无法对比，跳过。
-    if not commit:
+    # 只有走 update.sh 的部署（version.json 在场）才能对比：遗留 version.txt 的
+    # commit 冻结在打包时刻，开发机拿它对比上游 = 把恒最新的本地误报成落后。
+    if not commit or not _VERSION_JSON.is_file():
         return None
 
     cache = _load_cache()
