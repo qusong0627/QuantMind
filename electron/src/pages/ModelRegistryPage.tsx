@@ -5,7 +5,7 @@ import {
   Archive, Brain, Clock, XCircle, X,
   ChevronRight, Play, Download, ChevronDown,
   ChevronUp, Shield, Zap, ListFilter, Activity,
-  Compass, Sparkles,
+  Compass, Sparkles, Pencil,
 } from 'lucide-react';
 import {
   Button, Card, Tag, Typography, Empty, Spin, message,
@@ -45,6 +45,7 @@ import {
   TrainingSourcePanel,
   AttributionAnalysisPanel,
 } from './modelRegistryPanels';
+import { FusionModal } from './FusionModal';
 import { PublishModelModal } from './hub/PublishModelModal';
 import { DriftTabPanel } from './DriftTabPanel';
 import { MarketRegimePanel } from './MarketRegimePanel';
@@ -76,6 +77,12 @@ export const ModelRegistryPage: React.FC = () => {
   const [settingDefault, setSettingDefault] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [activating, setActivating] = useState(false);
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [renaming, setRenaming] = useState(false);
+  const [fusionMode, setFusionMode] = useState(false);
+  const [fusionSelected, setFusionSelected] = useState<string[]>([]);
+  const [showFusionModal, setShowFusionModal] = useState(false);
   const [mainTab, setMainTab] = useState('detail');
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [activeConfigTab, setActiveConfigTab] = useState<'meta' | 'metrics'>('meta');
@@ -118,6 +125,32 @@ export const ModelRegistryPage: React.FC = () => {
   const metrics = selectedModel ? getMetrics(selectedModel) : {} as ReturnType<typeof getMetrics>;
   const timePeriods = selectedModel ? extractTimePeriods(getMeta(selectedModel)) : null;
   const horizonDays = Number(meta?.target_horizon_days ?? meta?.horizon_days ?? 3);
+
+  // ─── 融合模式（成员门槛与后端 resolve_fusion_members 对齐：本租户 ready/active，系统模型不可选） ───
+  const isFusionEligible = (m: UserModelRecord) =>
+    !isSystemModel(m) && ['ready', 'active'].includes(String(m.status));
+  const fusionSelectedModels = userModels.filter((m) => fusionSelected.includes(m.model_id));
+  const fusionMarkets = new Set(
+    fusionSelectedModels.map((m) => String(getMeta(m).market || 'CN').toUpperCase()),
+  );
+  const canFuse = fusionSelectedModels.length >= 2 && fusionMarkets.size === 1;
+
+  const toggleFusionMode = () => {
+    setFusionMode((prev) => {
+      if (prev) setFusionSelected([]);
+      return !prev;
+    });
+  };
+
+  const toggleFusionSelect = (m: UserModelRecord) => {
+    if (!isFusionEligible(m)) {
+      message.warning('该模型不可作为融合成员（需为本人 ready/active 用户模型，系统模型与未就绪模型除外）');
+      return;
+    }
+    setFusionSelected((prev) =>
+      prev.includes(m.model_id) ? prev.filter((id) => id !== m.model_id) : [...prev, m.model_id],
+    );
+  };
 
   const loadModels = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -183,6 +216,15 @@ export const ModelRegistryPage: React.FC = () => {
   }, [currentMarket]);
 
   useEffect(() => { loadModels(); }, [loadModels]);
+
+  const handleFusionCreated = async (modelId: string) => {
+    setShowFusionModal(false);
+    setFusionMode(false);
+    setFusionSelected([]);
+    await loadModels(true);
+    setSelectedId(modelId);
+    message.success('已切换至新融合模型详情');
+  };
 
   useEffect(() => {
     setMainTab('detail');
@@ -398,6 +440,30 @@ export const ModelRegistryPage: React.FC = () => {
     });
   };
 
+  const openRenameModal = () => {
+    if (!selectedModel) return;
+    const meta = getMeta(selectedModel);
+    setRenameValue(String(meta.display_name || meta.model_name || selectedModel.model_id));
+    setShowRenameModal(true);
+  };
+
+  const handleRename = async () => {
+    if (!selectedModel) return;
+    const next = renameValue.trim();
+    if (!next) { message.warning('展示名不能为空'); return; }
+    if (next.length > 80) { message.warning('展示名过长（≤80 字符）'); return; }
+    setRenaming(true);
+    try {
+      await modelTrainingService.renameUserModel(selectedModel.model_id, next);
+      message.success(`已重命名为「${next}」`);
+      setShowRenameModal(false);
+      await loadModels(true);
+      setSelectedId(selectedModel.model_id);
+    } catch (err: any) {
+      message.error(`重命名失败: ${err?.response?.data?.detail ?? err?.message ?? '未知'}`);
+    } finally { setRenaming(false); }
+  };
+
   const handleRunInference = async () => {
     if (!selectedModel || !inferenceDate) return;
     setInferenceRunning(true);
@@ -494,12 +560,29 @@ export const ModelRegistryPage: React.FC = () => {
                   </div>
                   <span className="text-[15px] font-black text-slate-800 tracking-tight">模型资产库 ({marketConfig.label})</span>
                 </div>
-                <button
-                  onClick={() => loadModels()}
-                  className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all"
-                >
-                  <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
-                </button>
+                <div className="flex items-center gap-0.5">
+                  <Tooltip title={fusionMode ? '退出融合模式' : '模型融合（多选 ≥2 个模型）'}>
+                    <button
+                      onClick={toggleFusionMode}
+                      title="模型融合"
+                      aria-label="模型融合"
+                      className={clsx(
+                        'w-7 h-7 flex items-center justify-center rounded-lg transition-all',
+                        fusionMode
+                          ? 'text-purple-600 bg-purple-50 ring-1 ring-purple-200'
+                          : 'text-slate-400 hover:text-purple-600 hover:bg-purple-50',
+                      )}
+                    >
+                      <Layers2 size={13} />
+                    </button>
+                  </Tooltip>
+                  <button
+                    onClick={() => loadModels()}
+                    className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all"
+                  >
+                    <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+                  </button>
+                </div>
               </div>
               <Input
                 prefix={<Search size={13} className="text-slate-300" />}
@@ -547,15 +630,25 @@ export const ModelRegistryPage: React.FC = () => {
                       <Brain size={10} className="text-blue-500" />
                       <span className="text-[9px] font-black text-blue-500 tracking-widest">我的模型资产</span>
                     </div>
+                    {fusionMode && (
+                      <span className="text-[9px] font-black text-purple-600 tracking-widest">融合模式 · 勾选成员</span>
+                    )}
                   </div>
                   {displayModels.map(model => (
                     <ModelCard
                       key={model.model_id}
                       model={model}
                       isSelected={selectedId === model.model_id}
-                      onClick={() => setSelectedId(model.model_id)}
+                      onClick={() => {
+                        if (fusionMode) toggleFusionSelect(model);
+                        else setSelectedId(model.model_id);
+                      }}
                       onSetDefault={() => void handleSetDefaultById(model.model_id)}
-                      canSetDefault={!model.is_default && model.status !== 'archived'}
+                      canSetDefault={!fusionMode && !model.is_default && model.status !== 'archived'}
+                      selectable={fusionMode}
+                      selected={fusionSelected.includes(model.model_id)}
+                      onToggleSelect={() => toggleFusionSelect(model)}
+                      selectDisabled={fusionMode && !isFusionEligible(model)}
                     />
                   ))}
                 </>
@@ -563,14 +656,43 @@ export const ModelRegistryPage: React.FC = () => {
             </div>
             {/* 底部操作 */}
             <div className="px-4 pb-4 pt-3 border-t border-slate-100 bg-slate-50/50">
-              <Button
-                type="primary"
-                icon={<Compass size={15} />}
-                className="w-full rounded-xl h-9 bg-blue-600 hover:bg-blue-500 border-none font-bold text-xs shadow-sm flex items-center justify-center gap-1.5"
-                onClick={() => navigate('/model-hub')}
-              >
-                模型广场
-              </Button>
+              {fusionMode ? (
+                <div className="space-y-2">
+                  <div className="text-[9px] text-slate-500 font-bold leading-snug">
+                    已选 <span className="text-purple-600 font-black">{fusionSelectedModels.length}</span> 个成员
+                    {!canFuse && fusionSelectedModels.length < 2 && '（需 ≥2 个本人 ready/active 模型，同市场）'}
+                    {fusionSelectedModels.length >= 2 && fusionMarkets.size > 1 && '（成员跨市场，不可融合）'}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="small"
+                      className="rounded-xl h-9 px-3 font-bold text-xs border-slate-200 text-slate-500"
+                      onClick={toggleFusionMode}
+                    >
+                      取消
+                    </Button>
+                    <Button
+                      type="primary"
+                      size="small"
+                      icon={<Layers2 size={13} />}
+                      disabled={!canFuse}
+                      className="flex-1 rounded-xl h-9 bg-purple-600 hover:bg-purple-500 border-none font-black text-xs shadow-sm flex items-center justify-center gap-1.5"
+                      onClick={() => setShowFusionModal(true)}
+                    >
+                      融合为集成模型
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  type="primary"
+                  icon={<Compass size={15} />}
+                  className="w-full rounded-xl h-9 bg-blue-600 hover:bg-blue-500 border-none font-bold text-xs shadow-sm flex items-center justify-center gap-1.5"
+                  onClick={() => navigate('/model-hub')}
+                >
+                  模型广场
+                </Button>
+              )}
             </div>
           </div>
           {/* ═══ 右侧主区 ═══ */}
@@ -629,6 +751,18 @@ export const ModelRegistryPage: React.FC = () => {
                       </div>
                       <h2 className="text-2xl font-black text-slate-900 tracking-tight m-0 font-mono leading-tight">
                         {modelDisplayName(selectedModel)}
+                        {!isSystemModel(selectedModel) && (
+                          <Tooltip title="修改展示名">
+                            <button
+                              type="button"
+                              onClick={openRenameModal}
+                              aria-label="修改展示名"
+                              className="ml-2 align-middle inline-flex items-center justify-center w-7 h-7 rounded-lg text-slate-300 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                            >
+                              <Pencil size={14} />
+                            </button>
+                          </Tooltip>
+                        )}
                       </h2>
                       <p className="text-xs text-slate-400 mt-1 font-mono">
                         {selectedModel.model_id}
@@ -873,6 +1007,50 @@ export const ModelRegistryPage: React.FC = () => {
           </div>
         </div>
       </Modal>
+
+      {/* ═══ 修改展示名 Modal ═══ */}
+      <Modal
+        title={null}
+        open={showRenameModal}
+        onCancel={() => setShowRenameModal(false)}
+        onOk={handleRename}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={renaming}
+        width={460}
+        centered
+        okButtonProps={{ className: 'rounded-xl font-bold' }}
+        cancelButtonProps={{ className: 'rounded-xl' }}
+        styles={{ mask: { backdropFilter: 'blur(4px)', backgroundColor: 'rgba(0,0,0,0.2)' } }}
+      >
+        <div className="pt-2">
+          <h3 className="text-lg font-black text-slate-800 m-0 tracking-tight flex items-center gap-2 mb-1">
+            <Pencil size={18} className="text-blue-500" />
+            修改展示名
+          </h3>
+          <p className="text-[11px] text-slate-400 m-0 mb-4">
+            只改展示名（模型列表 / 详情 / 滚动训练派生描述）；模型 ID 与台账绑定不动。
+          </p>
+          <Input
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onPressEnter={handleRename}
+            maxLength={80}
+            showCount
+            placeholder="给模型起一个能看懂的名字，如：沪深300增强-低波"
+            className="rounded-xl"
+            autoFocus
+          />
+        </div>
+      </Modal>
+
+      {/* ═══ 模型融合 Modal（机构级 v2：预览 → 创建即进日更推理） ═══ */}
+      <FusionModal
+        open={showFusionModal}
+        models={fusionSelectedModels}
+        onCancel={() => setShowFusionModal(false)}
+        onCreated={(modelId) => void handleFusionCreated(modelId)}
+      />
 
       {/* 发布到广场对话框 */}
       <PublishModelModal

@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
-import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Table, Drawer, Collapse, Select, Pagination, message, Space, Alert } from 'antd';
+import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Table, Drawer, Collapse, Select, Pagination, message, Space, Alert, Checkbox } from 'antd';
 import { clsx } from 'clsx';
 import { EvalScoreBadge } from '../components/shared/EvalScoreBadge';
 import dayjs from 'dayjs';
@@ -27,6 +27,7 @@ import {
   modelDisplayName,
   resolveMetricNumber,
 } from './modelRegistryUtils';
+import { ensembleMemberIds, isEnsembleModel } from './fusionUtils';
 const { Text } = Typography;
 
 const MARKET_LABELS: Record<string, string> = {
@@ -118,25 +119,47 @@ export const ModelCard: React.FC<{
   onClick: () => void;
   onSetDefault: () => void;
   canSetDefault: boolean;
-}> = ({ model, isSelected, onClick, onSetDefault, canSetDefault }) => {
+  /** 融合模式：卡片显示复选框，点击行为交回页面（选中/取消）。 */
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
+  /** 融合模式下该模型不可作成员（系统模型/未就绪）：复选框置灰，点击给警告。 */
+  selectDisabled?: boolean;
+}> = ({ model, isSelected, onClick, onSetDefault, canSetDefault, selectable = false, selected = false, onToggleSelect, selectDisabled = false }) => {
   const sc = getStatusConfig(model.status);
   const mt = extractModelType(model);
   const fc = getMeta(model).feature_count ?? null;
+  const ensemble = isEnsembleModel(model);
+  const memberCount = ensemble ? ensembleMemberIds(model).length : 0;
   return (
     <div
       onClick={onClick}
       className={clsx(
         'p-3.5 rounded-2xl cursor-pointer transition-all duration-200 border select-none',
-        isSelected
+        (selectable ? selected : isSelected)
           ? 'bg-white border-blue-500 shadow-lg shadow-blue-100 ring-1 ring-blue-400'
-          : 'bg-transparent border-transparent hover:bg-white hover:border-slate-200 hover:shadow-sm'
+          : 'bg-transparent border-transparent hover:bg-white hover:border-slate-200 hover:shadow-sm',
+        selectable && 'pl-2.5'
       )}
     >
       <div className="flex justify-between items-start mb-1.5 gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
+          {selectable && (
+            <Checkbox
+              checked={selected}
+              disabled={selectDisabled}
+              onClick={(e) => e.stopPropagation()}
+              onChange={() => (onToggleSelect ?? onClick)()}
+            />
+          )}
           <span className={clsx('px-1.5 py-0.5 rounded-md text-[8px] font-black tracking-wider flex items-center gap-0.5', sc.bg, sc.color)}>
             {sc.icon}{sc.label}
           </span>
+          {ensemble && (
+            <span className="px-1.5 py-0.5 rounded-md text-[8px] font-black tracking-wider bg-purple-50 text-purple-600 flex items-center gap-0.5">
+              <Layers size={8} />融合×{memberCount}
+            </span>
+          )}
           {model.is_default && <Star size={9} fill="#fbbf24" className="text-amber-400" />}
         </div>
         <Text className="text-[8px] text-slate-400 font-mono">{dayjs(model.created_at).format('YY/MM/DD')}</Text>
@@ -176,12 +199,91 @@ export const ModelCard: React.FC<{
   );
 };
 
+// ─── 融合模型详情（成员 / 权重 / 融合配置） ─────────────────────────────────
+const WEIGHT_STRATEGY_LABELS: Record<string, string> = {
+  icir_shrunk: '机构级 ICIR 收缩',
+  equal: '等权',
+  manual: '手工权重',
+  recent_ic: '近期 IC（旧口径）',
+};
+
+export const EnsembleDetailPanel: React.FC<{ model: UserModelRecord }> = ({ model }) => {
+  const meta = getMeta(model);
+  const sourceModels = Array.isArray(meta.source_models) ? (meta.source_models as Array<Record<string, any>>) : [];
+  const weights: Record<string, number> =
+    meta.weights && typeof meta.weights === 'object' ? (meta.weights as Record<string, number>) : {};
+  const strategy = String(meta.weight_strategy || '');
+  const memberCount = sourceModels.length || ensembleMemberIds(model).length;
+
+  const memberWeight = (m: Record<string, any>) => {
+    const w = m.weight ?? weights[String(m.model_id)];
+    const num = Number(w);
+    return Number.isFinite(num) ? num : null;
+  };
+
+  return (
+    <div className="pt-2 space-y-5">
+      <div className="grid grid-cols-3 gap-4">
+        {[
+          { label: '权重策略', value: WEIGHT_STRATEGY_LABELS[strategy] || strategy || '—' },
+          { label: '融合方式', value: String(meta.fusion_strategy || 'linear') === 'linear' ? '线性加权（rank 百分位）' : String(meta.fusion_strategy) },
+          { label: '成员数量', value: `${memberCount} 个` },
+        ].map((it) => (
+          <div key={it.label} className="rounded-2xl p-4 border bg-gradient-to-br from-purple-50/50 to-slate-100/80 border-purple-100/60">
+            <Text className="text-[10px] font-black text-slate-500 uppercase tracking-widest opacity-80 block mb-2">{it.label}</Text>
+            <Text className="text-sm font-black text-slate-800">{it.value}</Text>
+          </div>
+        ))}
+      </div>
+
+      <div className="glass-panel rounded-3xl p-6 border border-slate-100/50">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="h-4 w-1 bg-purple-500 rounded-full" />
+          <Text className="text-xs font-black text-slate-800 uppercase">融合成员与权重 ({memberCount})</Text>
+        </div>
+        {sourceModels.length === 0 ? (
+          <Text className="text-[11px] text-slate-400 block">成员明细缺失（模型元数据未携带 source_models）。</Text>
+        ) : (
+          <div className="space-y-3">
+            {sourceModels.map((m) => {
+              const w = memberWeight(m);
+              return (
+                <div key={String(m.model_id)} className="rounded-xl border border-slate-100 bg-white/60 px-4 py-3">
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <div className="min-w-0">
+                      <Text className="font-black text-[12px] text-slate-800 truncate block">{String(m.model_name || m.model_id)}</Text>
+                      <Text className="text-[9px] text-slate-400 font-mono truncate block">{String(m.model_id)}</Text>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {m.model_type && <Tag className="m-0 rounded-md border-0 px-1.5 py-0 text-[8px] font-black bg-slate-100 text-slate-500">{String(m.model_type)}</Tag>}
+                      <Text className="text-sm font-black font-mono text-purple-700">{w === null ? '—' : `${(w * 100).toFixed(1)}%`}</Text>
+                    </div>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                    <div className="h-full rounded-full bg-gradient-to-r from-purple-400 to-purple-600" style={{ width: `${w === null ? 0 : Math.round(w * 100)}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <Text className="block mt-4 text-[10px] text-slate-400 leading-relaxed">
+          权重按滚动 ICIR × 多样性惩罚 × 样本量收缩在创建时计算，快照与审计流水随模型落盘（weight_snapshot.json / weight_history.jsonl）。创建即进日更推理名单，可在「自动推理」中关闭。
+        </Text>
+      </div>
+    </div>
+  );
+};
+
 // ─── 模型详情面板 ────────────────────────────────────────────────────────────
 export const ModelDetailPanel: React.FC<{ model: UserModelRecord }> = ({ model }) => {
   const meta = getMeta(model);
   const metrics = getMetrics(model);
   const timePeriods = extractTimePeriods(meta);
   const [featExpanded, setFeatExpanded] = useState(false);
+  if (isEnsembleModel(model)) {
+    return <EnsembleDetailPanel model={model} />;
+  }
   const splitPerformance = meta.performance_metrics && typeof meta.performance_metrics === 'object'
     ? meta.performance_metrics as Record<string, any>
     : null;

@@ -45,6 +45,84 @@ export interface UserModelRecord {
   asset_gaps?: string[];
 }
 
+/** ─── 模型融合（机构级 v2，见 docs/机构级模型融合_设计方案.md） ─── */
+
+export interface FusionMemberRow {
+  model_id: string;
+  display_name: string;
+  model_type: string;
+  market: string;
+  horizon_days: number;
+  ic_days: number;
+  ic_mean: number | null;
+  icir: number | null;
+  replay_icir: number | null;
+  weight: number | null;
+}
+
+/** 逐成员权重诊断（与后端 MemberWeightDiagnostic 同构）。 */
+export interface FusionDiagnosticRow {
+  member_id: string;
+  n_days: number;
+  ic_mean: number | null;
+  ic_std: number | null;
+  icir: number | null;
+  corr_penalty: number;
+  raw: number;
+  weight: number;
+  dropped: boolean;
+  reason: string;
+}
+
+export interface FusionReplaySummaryRow {
+  ic_mean: number | null;
+  icir: number | null;
+  n_days: number;
+}
+
+export interface FusionReplayVerdict {
+  fused_icir: number;
+  fused_ic_days: number;
+  best_member_icir: number;
+  median_member_icir: number;
+  beats_best: boolean;
+  beats_median: boolean;
+}
+
+export interface FusionPreviewResponse {
+  status: string;
+  as_of: string;
+  market: string;
+  horizon_days: number;
+  weight_strategy: string;
+  weights: Record<string, number>;
+  diagnostics: FusionDiagnosticRow[];
+  members: FusionMemberRow[];
+  corr: Record<string, Record<string, number>>;
+  corr_warnings: { a: string; b: string; corr: number }[];
+  replay: {
+    dates: number;
+    summary: Record<string, FusionReplaySummaryRow>;
+    verdict: FusionReplayVerdict | null;
+  } | null;
+  warnings: string[];
+}
+
+export interface EnsembleCreatePayload {
+  source_model_ids: string[];
+  display_name?: string;
+  weight_strategy?: 'icir_shrunk' | 'equal' | 'manual' | 'recent_ic';
+  manual_weights?: Record<string, number>;
+  fusion_strategy?: 'linear' | 'majority_vote' | 'periodic_hierarchy' | 'confidence_gate';
+  strategy_config?: Record<string, number>;
+}
+
+export interface FusionCreateResult {
+  model_id: string;
+  status: string;
+  preview: FusionPreviewResponse;
+}
+
 export interface ModelShapSummaryItem {
   rank: number;
   feature: string;
@@ -651,6 +729,36 @@ class ModelTrainingService {
 
   async activateUserModel(modelId: string): Promise<UserModelRecord> {
     const resp = await this.client.post<UserModelRecord>(`/models/${modelId}/activate`);
+    return resp.data;
+  }
+
+  async renameUserModel(modelId: string, displayName: string): Promise<UserModelRecord> {
+    const resp = await this.client.patch<UserModelRecord>(
+      `/models/${encodeURIComponent(modelId)}/display-name`,
+      { display_name: displayName },
+    );
+    return resp.data;
+  }
+
+  /** 融合预览（无副作用）：成员证据 / 相关性 / 权重诊断 / OOS 回放。 */
+  async previewEnsemble(payload: {
+    source_model_ids: string[];
+    weight_strategy?: string;
+    manual_weights?: Record<string, number>;
+  }): Promise<FusionPreviewResponse> {
+    const resp = await this.client.post<FusionPreviewResponse>(
+      `/models/ensemble/preview`,
+      payload,
+    );
+    return resp.data;
+  }
+
+  /** 创建融合模型；创建即进入日更推理名单，权重由服务器端权威计算。 */
+  async createEnsemble(payload: EnsembleCreatePayload): Promise<FusionCreateResult> {
+    const resp = await this.client.post<FusionCreateResult>(
+      `/models/ensemble/create`,
+      payload,
+    );
     return resp.data;
   }
 
