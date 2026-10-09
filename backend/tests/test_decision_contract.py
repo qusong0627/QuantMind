@@ -464,6 +464,33 @@ class TestSchemaLiterals:
         assert "只输出 JSON" in JSON_ONLY_HINT
         assert JSON_ONLY_HINT.startswith("\n\n")
 
+    def test_json_only_hint_carries_zero_holdings_escape(self) -> None:
+        """登记分叉 ``zero_holdings_retry_hint``：纠正语必须给零持仓模型留出路。
+
+        前段与隔壁 ``live_llm_trade.JSON_ONLY_HINT`` **逐字一致**（下方字面量即
+        隔壁原文，改前段 = 改了与隔壁的字节基线，得走金样分叉登记）；尾部是本仓
+        补的出路。没有它时，零持仓 + 池空模型只能把空数组重发一遍，被
+        ``parse_decisions`` 按设计判负、整轮 ``llm_failed``（2026-10-09 实测
+        glm-5.3-flash 两轮空转 + 告警）。
+        """
+        baymax = (
+            "\n\n【纠正】上一次输出无法解析为决策 JSON（没有 JSON / decisions 为空 / "
+            "格式不符）。请**只输出 JSON 对象本身**（不要 markdown 代码块、不要任何"
+            "解释文字），且 decisions 数组必须逐只列出现有持仓的判断，格式同上面的 schema。"
+        )
+        assert JSON_ONLY_HINT.startswith(baymax)
+        tail = JSON_ONLY_HINT[len(baymax) :]
+        assert "不带 code 的 hold" in tail
+        assert "不得输出空的 decisions 数组" in tail
+        # 出路必须真的可过解析：照抄提示里的示例行（无码 hold 三层本就支持——
+        # `_rows` 空 code 合法 / `plan_orders` 主循环按无码跳过 / `build_records`
+        # 明写「含 hold 与无码行」）。
+        (d,) = parse_decisions(
+            '{"decisions": [{"action": "hold", "reason": "无持仓无候选，本轮观望"}]}',
+            schema=SCHEMA_REBALANCE,
+        ).decisions
+        assert d.action == "hold" and d.code == ""
+
     def test_schema_values_are_the_two_documented_ones(self) -> None:
         assert (SCHEMA_REBALANCE, SCHEMA_INTRADAY) == ("rebalance", "intraday")
 

@@ -14,7 +14,8 @@
    "cost_nonpositive": "隔壁照抄非正成本（真语料见过 -11.02 → 盈亏 -164.27%）；QM 渲染 `—`/`—`",
    "pool_score_missing": "隔壁 score 缺键默认 0 渲染 `0.000`（像「评分极低」）；QM 渲染 `—`",
    "llm_not_configured": "隔壁 call_llm 缺 base/key 时返回 (\"\", None) → 一路滑成 empty_output（去查模型）；QM 抛 LLMNotConfigured（去查配置）",
-   "usage_missing_keys": "隔壁 int(usage.get(k) or 0) 把**缺席**的键记成 0（llm_request.reasoning_content_usage 里 completion/total 都是 0，实际是 provider 没报）；QM 缺席的键不进结果。数字本身两边一致（含字符串形式 \"12\"，见 llm_request.string_token_usage）"
+   "usage_missing_keys": "隔壁 int(usage.get(k) or 0) 把**缺席**的键记成 0（llm_request.reasoning_content_usage 里 completion/total 都是 0，实际是 provider 没报）；QM 缺席的键不进结果。数字本身两边一致（含字符串形式 \"12\"，见 llm_request.string_token_usage）",
+   "zero_holdings_retry_hint": "隔壁 JSON_ONLY_HINT 只推「decisions 数组必须逐只列出现有持仓的判断」→ 零持仓模型（名下无票、候选池又空）重试无路可走，只能把空数组重发一遍，被 parse_decisions 按设计判负、整轮 llm_failed（2026-10-09 实测 glm-5.3-flash 两轮空转 + QQ 告警）；QM 尾部补「无持仓且无意买入 → 一条不带 code 的 hold 行」——无码 hold 在解析/执行/审计三层本就是一等公民。前段与隔壁逐字一致，断言见 test_decision_contract.TestSchemaLiterals"
   }
  },
  "cases": [

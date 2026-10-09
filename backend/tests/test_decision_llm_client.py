@@ -553,8 +553,10 @@ def test_end_to_end_decide_with_retry_over_fake_http(monkeypatch) -> None:
     assert attempt.ok and attempt.calls == 2
     assert attempt.usage == {"total_tokens": 1200}
     assert attempt.decisions[0].code == "600036.SH"
+    # 纠正语尾部（= JSON_ONLY_HINT 结尾）：2026-10-09 起带零持仓出路，
+    # 登记分叉 zero_holdings_retry_hint（断言在 test_decision_contract.TestSchemaLiterals）
     assert post.calls[1]["payload"]["messages"][1]["content"].endswith(
-        "格式同上面的 schema。"
+        "不得输出空的 decisions 数组。"
     )
 
 

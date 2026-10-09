@@ -185,6 +185,8 @@ def test_divergence_recorded_in_golden(golden: dict) -> None:
         # P2.3a 调用侧（详情与断言在 test_decision_llm_client.py）
         "llm_not_configured",
         "usage_missing_keys",
+        # 2026-10-09 重试纠正语（断言在 test_decision_contract.TestSchemaLiterals）
+        "zero_holdings_retry_hint",
     }
     by_name = {c["name"]: c for c in golden["divergent_cases"]}
     assert by_name["day_chg_none"]["baymax_raises"] == "TypeError"

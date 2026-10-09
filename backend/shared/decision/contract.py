@@ -114,10 +114,23 @@ INTRADAY_SCHEMA_JSON = (
 )
 
 #: 解析失败重试时追加的纠正语（**后缀**，不是新提示词——同一次对话继续）。
+#:
+#: 前段与隔壁 ``live_llm_trade.JSON_ONLY_HINT`` **逐字一致**；尾部是 2026-10-09
+#: 登记分叉 ``zero_holdings_retry_hint``（见 ``decision_prompt_golden.json`` 的
+#: ``_meta.divergences``）：隔壁只推「逐只列出现有持仓的判断」——零持仓模型
+#: （名下无票、候选池又空）重试无路可走，只能把空数组重发一遍，被
+#: :func:`parse_decisions` 按设计判负、整轮 ``llm_failed``（实测 glm-5.3-flash
+#: 空转两轮 + 告警）。补上「无持仓且无意买入 → 一条不带 code 的 hold 行」：
+#: 无码 hold 在解析（``_rows`` 允许空 code）/ 执行（``plan_orders`` 主循环按
+#: 无码跳过）/ 审计（``build_records``「含 hold 与无码行」）三层本就是一等公民，
+#: 缺的只是这句话。断言见 ``test_decision_contract.TestSchemaLiterals``。
 JSON_ONLY_HINT = (
     "\n\n【纠正】上一次输出无法解析为决策 JSON（没有 JSON / decisions 为空 / "
     "格式不符）。请**只输出 JSON 对象本身**（不要 markdown 代码块、不要任何"
     "解释文字），且 decisions 数组必须逐只列出现有持仓的判断，格式同上面的 schema。"
+    "若你没有持仓可判断、本轮也不打算买入，输出一条不带 code 的 hold 决策"
+    '（如 {"action": "hold", "reason": "无持仓无候选，本轮观望"}）说明本轮无操作，'
+    "不得输出空的 decisions 数组。"
 )
 
 # ── 解析状态 ─────────────────────────────────────────────────────────
