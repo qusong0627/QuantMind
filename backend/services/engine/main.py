@@ -92,6 +92,17 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ AlphaAgent factors table ensure failed: {e}")
 
     try:
+        # 批量回测重启可重入（T-FB-09）：中断批次重新入队，孤儿 running 行收口。
+        # 数据面是台账行，恢复失败只告警（状态轮询还有兜底入口）。
+        from backend.services.engine.factor_backtest import batch as factor_backtest_batch
+
+        resumed = await factor_backtest_batch.resume_interrupted()
+        if resumed:
+            logger.info(f"♻️ Factor backtest batches resumed: {resumed}")
+    except Exception as e:
+        logger.error(f"❌ Factor backtest batch resume failed: {e} (non-fatal)")
+
+    try:
         # 因子池三表（P1）：池是增益层不是主链路，建表失败只告警不阻启动
         from backend.shared.factor_pool_contract import ensure_factor_pool_tables_async
 

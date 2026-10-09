@@ -183,6 +183,92 @@ def test_finish_run_rejects_unknown_status_and_accepts_degraded_states():
     asyncio.run(runner())
 
 
+def test_batch_lifecycle_persistence_and_running_pairs():
+    """批次头/台账 batch_id/孤儿收口/幂等收口（T-FB-08/09 持久化契约）。"""
+    fid = f"fbx-test-{uuid.uuid4().hex[:12]}"
+    batch_id = f"fbb-test-{uuid.uuid4().hex[:12]}"
+
+    async def runner():
+        await _fresh_pool()
+        from sqlalchemy import text
+
+        from backend.services.engine.factor_backtest import store
+        from backend.shared.database_manager_v2 import get_session
+
+        try:
+            spec = {
+                "factor_ids": [fid],
+                "markets": ["us_stock"],
+                "units": [{"factor_id": fid, "market": "us_stock"}],
+                "kinds": {fid: "functional"},
+                "skipped": [],
+            }
+            await store.create_batch(batch_id, user_id="t-fb-test", spec=spec)
+            row = await store.get_batch(batch_id)
+            assert row["status"] == "running"
+            assert row["spec"]["units"][0]["factor_id"] == fid
+            assert row["finished_at"] is None
+
+            run_id = await store.start_run(
+                fid, kind="functional", market="us_stock", batch_id=batch_id
+            )
+            runs = await store.batch_runs(batch_id)
+            assert [r["run_id"] for r in runs] == [run_id]  # batch_id 已挂上
+
+            pairs = await store.running_factor_pairs([fid, "fbx-none"])
+            assert {"factor_id": fid, "market": "us_stock"} in [dict(p) for p in pairs]
+
+            # 重启恢复：孤儿 running 行收口（恰一行），批次仍 running
+            assert (
+                await store.settle_orphan_running(
+                    batch_id, error="engine_restarted_mid_run"
+                )
+                == 1
+            )
+            run = await store.get_run(run_id)
+            assert run["status"] == "failed"
+            assert run["error"] == "engine_restarted_mid_run"
+            assert await store.settle_orphan_running(batch_id, error="x") == 0
+
+            # 收口幂等：running → aborted 只生效一次
+            assert (
+                await store.finish_batch(batch_id, "aborted", error="circuit_breaker")
+                is True
+            )
+            assert await store.finish_batch(batch_id, "completed") is False
+            with pytest.raises(ValueError):
+                await store.finish_batch(batch_id, "exploded")
+
+            assert all(
+                b["batch_id"] != batch_id for b in await store.list_running_batches()
+            )
+            listed = await store.list_batches(user_id="t-fb-test", limit=50)
+            assert any(b["batch_id"] == batch_id for b in listed)
+            assert (await store.get_batch("fbb-not-exists")) is None
+        finally:
+            async with get_session() as session:
+                await session.execute(
+                    text(
+                        "DELETE FROM rd_agent_factor_backtest_series "
+                        "WHERE factor_id = :f"
+                    ),
+                    {"f": fid},
+                )
+                await session.execute(
+                    text("DELETE FROM rd_agent_factor_backtests WHERE factor_id = :f"),
+                    {"f": fid},
+                )
+                await session.execute(
+                    text(
+                        "DELETE FROM rd_agent_factor_backtest_batches "
+                        "WHERE batch_id = :b"
+                    ),
+                    {"b": batch_id},
+                )
+
+    asyncio.run(runner())
+
+
 def test_latest_cells_takes_most_recent_even_if_degraded():
     fid = f"fbx-test-{uuid.uuid4().hex[:12]}"
 

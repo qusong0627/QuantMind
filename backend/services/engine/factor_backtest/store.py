@@ -43,6 +43,9 @@ TERMINAL_STATUSES: tuple[str, ...] = (
 
 _ALL_STATUSES: tuple[str, ...] = ("running",) + TERMINAL_STATUSES
 
+#: 批量任务终态（T-FB-08/09）：aborted = 熔断/台账不可用主动中止（≠ 用户取消）。
+BATCH_TERMINAL_STATUSES: tuple[str, ...] = ("completed", "cancelled", "aborted")
+
 
 async def ensure_tables() -> None:
     """扩展列 + 七态词表 + 序列表（幂等；基表先由 RDAgentFactorPersistence 建好）。"""
@@ -100,7 +103,45 @@ async def ensure_tables() -> None:
                 "ON rd_agent_factor_backtest_series(factor_id, market)"
             )
         )
-    logger.info("factor_backtest tables ensured (kind/params_json/series/7-status)")
+        # T-FB-08/09 批量引擎：台账行挂 batch_id（行终态回读 = 批次进度的唯一事实源），
+        # 批次头表只存 spec 与批次级终态（running → completed/cancelled/aborted）。
+        await session.execute(
+            text(
+                "ALTER TABLE rd_agent_factor_backtests "
+                "ADD COLUMN IF NOT EXISTS batch_id TEXT"
+            )
+        )
+        await session.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_rd_agent_factor_backtests_batch "
+                "ON rd_agent_factor_backtests(batch_id, status)"
+            )
+        )
+        await session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS rd_agent_factor_backtest_batches (
+                  batch_id TEXT PRIMARY KEY,
+                  user_id TEXT,
+                  status TEXT NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'completed', 'cancelled', 'aborted')),
+                  spec_json JSONB NOT NULL,
+                  error TEXT,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                  finished_at TIMESTAMPTZ
+                )
+                """
+            )
+        )
+        await session.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_rd_agent_fb_batches_status "
+                "ON rd_agent_factor_backtest_batches(status, created_at DESC)"
+            )
+        )
+    logger.info(
+        "factor_backtest tables ensured (kind/params_json/series/7-status/batch)"
+    )
 
 
 async def start_run(
@@ -113,6 +154,7 @@ async def start_run(
     params: dict[str, Any] | None = None,
     factor_name: str | None = None,
     user_id: str | None = None,
+    batch_id: str | None = None,
 ) -> str:
     """登记一次跨市场回测运行（status='running'）。返回 run_id。"""
     run_id = f"fb-{uuid4().hex}"
@@ -122,11 +164,11 @@ async def start_run(
                 """
                 INSERT INTO rd_agent_factor_backtests
                     (run_id, factor_id, factor_name, user_id, status,
-                     market, universe, data_source, kind, params_json)
+                     market, universe, data_source, kind, params_json, batch_id)
                 VALUES
                     (:run_id, :factor_id, :factor_name, :user_id, 'running',
                      :market, :universe, :data_source, :kind,
-                     CAST(:params_json AS JSONB))
+                     CAST(:params_json AS JSONB), :batch_id)
                 """
             ),
             {
@@ -139,6 +181,7 @@ async def start_run(
                 "data_source": data_source,
                 "kind": kind,
                 "params_json": json.dumps(params or {}, ensure_ascii=False),
+                "batch_id": batch_id,
             },
         )
     return run_id
@@ -388,6 +431,209 @@ async def get_factor_meta(factor_ids: list[str]) -> list[dict[str, Any]]:
             {"ids": list(factor_ids)},
         )
         return [dict(r) for r in rows.mappings().all()]
+
+
+# ── 批量任务（T-FB-08/09）────────────────────────────────────────────
+
+
+async def create_batch(
+    batch_id: str, *, user_id: str | None, spec: dict[str, Any]
+) -> None:
+    """登记批次头（status='running'）；进度唯一事实源仍是各 run 行（batch_id）。"""
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO rd_agent_factor_backtest_batches
+                    (batch_id, user_id, status, spec_json)
+                VALUES (:batch_id, :user_id, 'running', CAST(:spec_json AS JSONB))
+                """
+            ),
+            {
+                "batch_id": batch_id,
+                "user_id": user_id,
+                "spec_json": json.dumps(spec, ensure_ascii=False),
+            },
+        )
+
+
+async def get_batch(batch_id: str) -> dict[str, Any] | None:
+    """取批次头（spec 解包为 ``spec``）。"""
+    async with get_session(read_only=True) as session:
+        rows = await session.execute(
+            text(
+                """
+                SELECT batch_id, user_id, status, spec_json, error,
+                       created_at, finished_at
+                FROM rd_agent_factor_backtest_batches
+                WHERE batch_id = :batch_id
+                """
+            ),
+            {"batch_id": batch_id},
+        )
+        row = rows.mappings().first()
+    if row is None:
+        return None
+    item = dict(row)
+    raw = item.pop("spec_json", None)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    item["spec"] = raw if isinstance(raw, dict) else {}
+    return item
+
+
+async def finish_batch(batch_id: str, status: str, *, error: str | None = None) -> bool:
+    """批次收口（幂等：仅当仍在 running 时生效）。第二次调用返回 False。"""
+    if status not in BATCH_TERMINAL_STATUSES:
+        raise ValueError(f"invalid batch terminal status: {status!r}")
+    async with get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                UPDATE rd_agent_factor_backtest_batches
+                SET status = :status, error = :error, finished_at = now()
+                WHERE batch_id = :batch_id
+                  AND status = 'running'
+                """
+            ),
+            {"batch_id": batch_id, "status": status, "error": error},
+        )
+        return (result.rowcount or 0) > 0
+
+
+async def list_batches(
+    *, user_id: str | None = None, limit: int = 20
+) -> list[dict[str, Any]]:
+    """批次列表（新→旧）。``user_id`` 给定时按其过滤（历史空属主行只读可见）。"""
+    params: dict[str, Any] = {"limit": int(limit)}
+    where = ""
+    if user_id is not None:
+        where = "WHERE (user_id = :user_id OR user_id IS NULL OR user_id = '')"
+        params["user_id"] = user_id
+    async with get_session(read_only=True) as session:
+        rows = await session.execute(
+            text(
+                f"""
+                SELECT batch_id, user_id, status, spec_json, error,
+                       created_at, finished_at
+                FROM rd_agent_factor_backtest_batches
+                {where}
+                ORDER BY created_at DESC, batch_id DESC
+                LIMIT :limit
+                """
+            ),
+            params,
+        )
+        out = []
+        for r in rows.mappings().all():
+            item = dict(r)
+            raw = item.pop("spec_json", None)
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except ValueError:
+                    raw = None
+            item["spec"] = raw if isinstance(raw, dict) else {}
+            out.append(item)
+        return out
+
+
+async def list_running_batches(limit: int = 20) -> list[dict[str, Any]]:
+    """重启可重入扫描：所有仍未收口的批次（engine 启动/状态轮询时续跑）。"""
+    async with get_session(read_only=True) as session:
+        rows = await session.execute(
+            text(
+                """
+                SELECT batch_id, user_id, status, spec_json, error,
+                       created_at, finished_at
+                FROM rd_agent_factor_backtest_batches
+                WHERE status = 'running'
+                ORDER BY created_at ASC
+                LIMIT :limit
+                """
+            ),
+            {"limit": int(limit)},
+        )
+        out = []
+        for r in rows.mappings().all():
+            item = dict(r)
+            raw = item.pop("spec_json", None)
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except ValueError:
+                    raw = None
+            item["spec"] = raw if isinstance(raw, dict) else {}
+            out.append(item)
+        return out
+
+
+async def batch_runs(batch_id: str) -> list[dict[str, Any]]:
+    """批次全部 run 行（含各状态）——状态端点的「行终态回读」数据面。"""
+    async with get_session(read_only=True) as session:
+        rows = await session.execute(
+            text(
+                """
+                SELECT run_id, factor_id, factor_name, status, kind,
+                       market, universe, data_source, date_range,
+                       ic_value, rank_ic, icir, rank_icir,
+                       sharpe_ratio, annual_return, max_drawdown,
+                       metrics_json, error, created_at, finished_at
+                FROM rd_agent_factor_backtests
+                WHERE batch_id = :batch_id
+                ORDER BY created_at ASC, run_id ASC
+                """
+            ),
+            {"batch_id": batch_id},
+        )
+        return [_unpack(dict(r)) for r in rows.mappings().all()]
+
+
+async def running_factor_pairs(factor_ids: list[str]) -> list[dict[str, Any]]:
+    """这些因子当前的活跃运行（按 factor 粒度：子进程登记以 factor_id 为键，
+    同一因子不得跨市场并发——背压判据比 (factor, market) 更粗也更强）。"""
+    if not factor_ids:
+        return []
+    async with get_session(read_only=True) as session:
+        rows = await session.execute(
+            text(
+                """
+                SELECT factor_id, market
+                FROM rd_agent_factor_backtests
+                WHERE factor_id = ANY(:ids)
+                  AND status = 'running'
+                  AND finished_at IS NULL
+                """
+            ),
+            {"ids": list(factor_ids)},
+        )
+        return [dict(r) for r in rows.mappings().all()]
+
+
+async def settle_orphan_running(batch_id: str, *, error: str) -> int:
+    """重启恢复：把该批次遗留的 running 行收口为 failed。
+
+    仅在「进程内无该批次状态」时调用（重启/重建路径）——此时这些 running 行
+    的子进程已随旧进程消亡，纯孤儿；行终态回读纪律要求先把它们关闭断案，
+    绝不留下永不收口的 running 行。返回收口行数。
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                UPDATE rd_agent_factor_backtests
+                SET status = 'failed', error = :error, finished_at = now()
+                WHERE batch_id = :batch_id
+                  AND status = 'running'
+                  AND finished_at IS NULL
+                """
+            ),
+            {"batch_id": batch_id, "error": error},
+        )
+        return result.rowcount or 0
 
 
 def _unpack(item: dict[str, Any]) -> dict[str, Any]:
