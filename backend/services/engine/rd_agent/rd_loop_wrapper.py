@@ -23,6 +23,7 @@ import pandas as pd
 
 from .market_adapters import get_adapter, list_markets
 from .market_adapters.base import MarketAdapter
+from .stage_prompt import STAGE_BLOCK_MARKER, render_eval_criteria_block
 
 logger = logging.getLogger(__name__)
 
@@ -125,14 +126,21 @@ class RDLoopWrapper:
         build_llm_env(env)
         return env
 
-    # 需要注入中文/研究方向指令的 prompt key（RD-Agent prompts.yaml 中的顶层键）
+    # 需要注入中文/研究方向指令的 prompt key（RD-Agent prompts.yaml 中的顶层键）。
+    # 这些键在 Scenario 构造时被读进 ``_background`` 并冻结——只放**静态**内容
+    # （语言/方向/评估口径/池记忆）；动态内容（阶段块）挂阶段键，见下。
     _INJECT_TARGET_KEYS = ("qlib_factor_background", "qlib_quant_background")
+
+    #: 阶段块注入目标：假设生成规范。该键在 ``QlibFactorHypothesisGen
+    #: .prepare_context`` 里**每轮实时加载**——阶段块必须走这里；挂到背景键上
+    #: 会永远停在「第 1 轮」（背景在任务开始时冻结）。
+    _STAGE_TARGET_KEYS = ("factor_hypothesis_specification",)
 
     #: 因子池注入文件路径（launcher 在 spawn 前写好、经 env 传入）
     _ENV_POOL_CONTEXT = "QMF_POOL_CONTEXT_PATH"
 
     def _build_prompt_suffix(self) -> str:
-        """构造追加到因子背景 prompt 末尾的中文与研究方向指令。"""
+        """构造追加到因子背景 prompt 末尾的静态指令（读时一次，随背景冻结）。"""
         suffix = (
             "\n\n====== 语言要求 / Language Requirement ======\n"
             "所有因子的 description 字段必须使用中文撰写。"
@@ -148,8 +156,26 @@ class RDLoopWrapper:
                 f"User's research direction/hypothesis: {direction}\n"
                 "请围绕此方向进行因子探索。Focus factor exploration on this theme.\n"
             )
+        suffix += render_eval_criteria_block()
         suffix += self._pool_context_block()
         return suffix
+
+    def _build_stage_block(self) -> str:
+        """读时计算的阶段块（当前轮次：RD-Agent 日志 tag 优先，目录数兜底）。
+
+        RD-Agent 每轮都会重新经 ``load_content`` 读 ``factor_hypothesis_
+        specification``，此时的 ContextVar tag 形如 ``Loop_{li}.{step}``——
+        据此精确判定「当前第几轮」；tag 不在（例如手工调用）才退化为数
+        ``Loop_*`` 目录。任何异常由 patched_load 兜住，不拦提示词。
+        """
+        from .stage_prompt import current_round, rdagent_tag, render_stage_block
+
+        cur = current_round(
+            tag=rdagent_tag(), log_dir=getattr(self, "_task_log_dir", "")
+        )
+        return render_stage_block(
+            total_loops=getattr(self, "_loop_n", None), current_loop=cur
+        )
 
     def _pool_context_block(self) -> str:
         """历史挖掘记忆段（因子池 top-k 摘要，launcher 交付的文件）。
@@ -172,38 +198,59 @@ class RDLoopWrapper:
         return f"\n\n====== 历史挖掘记忆 / Past Mining Memory ======\n{content}\n"
 
     def _patch_prompts_for_chinese(self):
-        """注入中文与研究方向指令到 RD-Agent 提示词。
+        """注入中文/方向/评估口径（静态）与阶段化课程（动态）到 RD-Agent 提示词。
 
         RD-Agent 的 prompt 存于各包内的 prompts.yaml，经 `utils.agent.tpl.load_content`
         每次按需读取（无缓存），因此在该函数返回值上追加指令是唯一可靠的注入点 ——
         早期实现 import `...experiment.prompts` 模块，但该模块并不存在，注入从未生效。
+
+        两类注入点（详见 ``stage_prompt`` 模块 docstring）：
+        - 静态后缀（语言/方向/评估口径/池记忆）→ 背景键，随 ``_background``
+          在 Scenario 构造时冻结；
+        - 阶段块 → ``factor_hypothesis_specification``（每轮实时加载），
+          读时按当前 loop 判定阶段（``_build_stage_block``）。
         """
         try:
             from rdagent.utils.agent import tpl as _tpl
 
+            _tpl._qm_suffix = self._build_prompt_suffix()
+            _tpl._qm_stage_fn = self._build_stage_block
             if getattr(_tpl, "_qm_patched", False):
-                _tpl._qm_suffix = self._build_prompt_suffix()
                 return
 
-            suffix_holder = self._build_prompt_suffix()
-            _tpl._qm_suffix = suffix_holder
             original_load = _tpl.load_content
-            target_keys = self._INJECT_TARGET_KEYS
+            suffix_keys = self._INJECT_TARGET_KEYS
+            stage_keys = self._STAGE_TARGET_KEYS
 
             def patched_load(uri: str, *args, **kwargs):
                 content = original_load(uri, *args, **kwargs)
                 if not isinstance(content, str):
                     return content
-                if not any(uri.endswith(f":{k}") for k in target_keys):
-                    return content
-                if "语言要求" in content:
-                    return content
-                return content + getattr(_tpl, "_qm_suffix", "")
+                if any(uri.endswith(f":{k}") for k in suffix_keys):
+                    if "语言要求" in content:
+                        return content
+                    return content + getattr(_tpl, "_qm_suffix", "")
+                if any(uri.endswith(f":{k}") for k in stage_keys):
+                    if STAGE_BLOCK_MARKER in content:
+                        return content
+                    stage_fn = getattr(_tpl, "_qm_stage_fn", None)
+                    if stage_fn is None:
+                        return content
+                    try:
+                        return content + stage_fn()
+                    except Exception as exc:  # noqa: BLE001 — 阶段块失败不拦提示词
+                        logger.warning(
+                            "[%s] 阶段块渲染失败（本轮跳过阶段注入）: %s",
+                            self.market,
+                            exc,
+                        )
+                        return content
+                return content
 
             _tpl.load_content = patched_load
             _tpl._qm_patched = True
             logger.info(
-                "[%s] Patched RD-Agent prompt loader (Chinese + direction=%s)",
+                "[%s] Patched RD-Agent prompt loader (Chinese + direction=%s + stages)",
                 self.market,
                 bool(getattr(self, "_direction", "")),
             )
@@ -245,6 +292,9 @@ class RDLoopWrapper:
         self._running = True
         self._cancelled = False
         self._direction = direction
+        # 阶段块读时取用：总轮数进课程表进度，日志目录做 tag 缺失时的兜底
+        self._loop_n = loop_n
+        self._task_log_dir = task_log_dir
 
         try:
             # 配置环境变量

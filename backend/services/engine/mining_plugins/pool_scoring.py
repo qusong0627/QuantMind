@@ -161,7 +161,30 @@ class DigestEntry:
     ic: float | None = None
     icir: float | None = None
     pfs: float | None = None
+    max_pool_corr: float | None = None
     round_label: str | None = None
+
+
+@dataclass(frozen=True)
+class PoolSota:
+    """池整体水平线（给 LLM 一个「要超越的标杆」，进摘要标题下方一行）。
+
+    ``best_ic`` 语义是**最大 |IC|**（因子方向可翻转，负号不是强弱）；
+    icir/pfs 取原始最大值。缺失一律「—」——写 0 会教 LLM 把缺失当事实。
+    """
+
+    count: int
+    best_ic: float | None = None
+    best_icir: float | None = None
+    best_pfs: float | None = None
+
+    def render(self) -> str:
+        return (
+            f"池内共 {self.count} 条已完成回测因子；当前标杆："
+            f"max|IC|={_fmt(self.best_ic)}、ICIR={_fmt(self.best_icir)}、"
+            f"PFS={_fmt(self.best_pfs)}。"
+            "新因子需在这些口径上具备竞争力，且与池内因子保持正交。"
+        )
 
 
 def _fmt(value: float | None) -> str:
@@ -171,7 +194,8 @@ def _fmt(value: float | None) -> str:
 def _render_entry(index: int, entry: DigestEntry) -> str:
     parts = [
         f"{index}. `{entry.factor_name}`",
-        f"IC={_fmt(entry.ic)} ICIR={_fmt(entry.icir)} PFS={_fmt(entry.pfs)}",
+        f"IC={_fmt(entry.ic)} ICIR={_fmt(entry.icir)} PFS={_fmt(entry.pfs)}"
+        f" 池内max|ρ|={_fmt(entry.max_pool_corr)}",
     ]
     if entry.round_label:
         parts.append(entry.round_label)
@@ -185,11 +209,13 @@ def render_digest(
     *,
     max_chars: int = DEFAULT_MAX_DIGEST_CHARS,
     include: list[DigestEntry] | None = None,
+    sota: PoolSota | None = None,
 ) -> str:
     """渲染注入块。entries 须已按 score 降序（低分在尾部先被砍）。
 
     截断策略：从高分往低分累积，放不下下一条即停；重新编号保证无空洞；
-    标题行永远保留（调用方据空串判定「无池可注入」）。
+    标题行永远保留（调用方据空串判定「无池可注入」）。``sota`` 给定时插在
+    标题下方、参与同一字符预算（标杆线先于条目保留）。
 
     ``include`` 给定时按序收集**真正进入文本**的条目——疲劳计数只许给
     真注入的（被截掉的也计数会把疲劳加到没进 prompt 的因子上）。
@@ -197,8 +223,13 @@ def render_digest(
     if not entries:
         return ""
     lines = [DIGEST_TITLE, ""]
+    if sota is not None:
+        lines.append(sota.render())
+        lines.append("")
+    fitted = 0
     for entry in entries:
-        candidate_line = _render_entry(len(lines) - 1, entry)
+        # 编号只数**条目**（SOTA 行不占序号），保证无空洞
+        candidate_line = _render_entry(fitted + 1, entry)
         # 预留尾部提示的行数（只有真截断时提示才重要）
         tail_reserve = len(DIGEST_HINT) + 2 if len(lines) > 2 else len(DIGEST_HINT) + 2
         if (
@@ -210,10 +241,11 @@ def render_digest(
         ):
             break
         lines.append(candidate_line)
+        fitted += 1
         if include is not None:
             include.append(entry)
-    if len(lines) == 2:
-        # 连一条都放不下：保留标题+提示，让调用方看得见「被截空」的原因
+    if fitted == 0:
+        # 连一条都放不下：保留标题（+标杆线，若有）+提示，让调用方看得见截空
         return "\n".join(lines + [DIGEST_HINT])
     lines.append("")
     lines.append(DIGEST_HINT)

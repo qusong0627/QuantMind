@@ -429,6 +429,7 @@ class TestInjection:
             monkeypatch.delenv("QM_FACTOR_POOL_INJECT_DISABLED")
 
             assert "历史挖掘记忆" in digest
+            assert "池内共 2 条" in digest, "SOTA 标杆线未接入摘要"
             assert set(ids) == {f1, f2}
             assert ids2 == (f2,), "exclude_task_id 没排掉本任务的因子"
             assert f1 not in only2

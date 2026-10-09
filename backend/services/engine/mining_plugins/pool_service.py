@@ -44,12 +44,13 @@ from . import pool_panels
 from .pool_edges import DEFAULT_TOP_K as _FORMULA_TOP_K
 from .pool_edges import formula_tokens, similar_pairs
 from .pool_scoring import (
-    PoolCandidate,
-    ScoringParams,
-    select_topk,
-    render_digest,
     DigestEntry,
+    PoolCandidate,
+    PoolSota,
+    ScoringParams,
     rank_candidates,
+    render_digest,
+    select_topk,
 )
 
 logger = logging.getLogger(__name__)
@@ -715,6 +716,27 @@ class PoolInjection:
     factor_ids: tuple[str, ...] = ()
 
 
+def _pool_sota(rows) -> PoolSota:
+    """池整体水平线：条数 + 各口径最大值（|IC| 取绝对——方向可翻转；
+    icir/pfs 取原始值）。缺失(None)不进 max；全缺 → None → 渲染成「—」。"""
+    ics: list[float] = []
+    icirs: list[float] = []
+    pfss: list[float] = []
+    for r in rows:
+        if (v := _as_float(r["ic_value"])) is not None:
+            ics.append(abs(v))
+        if (v := _as_float(r["icir"])) is not None:
+            icirs.append(v)
+        if (v := _as_float(r["pfs"])) is not None:
+            pfss.append(v)
+    return PoolSota(
+        count=len(rows),
+        best_ic=max(ics) if ics else None,
+        best_icir=max(icirs) if icirs else None,
+        best_pfs=max(pfss) if pfss else None,
+    )
+
+
 async def build_injection_digest(
     *,
     user_id: str,
@@ -804,11 +826,14 @@ async def build_injection_digest(
             ic=_as_float(by_id[s.candidate.factor_id]["ic_value"]),
             icir=_as_float(by_id[s.candidate.factor_id]["icir"]),
             pfs=_as_float(by_id[s.candidate.factor_id]["pfs"]),
+            # 已取绝对值入 candidate（打分口径），展示同一口径，不另算
+            max_pool_corr=s.candidate.max_pool_corr,
         )
         for s in picked
     ]
+    sota = _pool_sota(rows)
     included: list[DigestEntry] = []
-    text_out = render_digest(entries, include=included)
+    text_out = render_digest(entries, include=included, sota=sota)
     fid_by_entry = {
         id(e): s.candidate.factor_id for e, s in zip(entries, picked, strict=True)
     }

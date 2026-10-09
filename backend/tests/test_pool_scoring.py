@@ -18,6 +18,7 @@ import pytest
 from backend.services.engine.mining_plugins.pool_scoring import (
     DigestEntry,
     PoolCandidate,
+    PoolSota,
     ScoringParams,
     freshness_score,
     icir_percentiles,
@@ -186,3 +187,59 @@ class TestRenderDigest:
 
     def test_empty_entries_returns_empty_string(self):
         assert render_digest([]) == ""
+
+
+class TestSotaAndCorrelationRendering:
+    """注入摘要的两处机构级增强：池标杆线 + 每条因子的池内相关性。
+
+    缺失一律「—」（与既有显示纪律同款）——写进 prompt 的「0.0000」会教坏
+    LLM 把缺失当事实；相关性缺席不编造。
+    """
+
+    def _entries(self, n=1):
+        return [
+            DigestEntry(
+                factor_name=f"factor_{i}",
+                formula=f"close/mean(close,{i + 5})",
+                ic=0.01 * (i + 1),
+                icir=0.5 - 0.05 * i,
+                pfs=0.9,
+            )
+            for i in range(n)
+        ]
+
+    def test_entry_renders_pool_correlation_when_present(self):
+        entry = DigestEntry(
+            factor_name="f", formula="x", ic=0.01, icir=0.3, pfs=0.9, max_pool_corr=0.42
+        )
+        text = render_digest([entry])
+        assert "池内max|ρ|=0.4200" in text
+
+    def test_entry_pool_correlation_missing_shows_dash(self):
+        text = render_digest(self._entries())
+        assert "池内max|ρ|=—" in text
+
+    def test_sota_line_renders_before_entries(self):
+        sota = PoolSota(count=12, best_ic=0.06, best_icir=0.9, best_pfs=1.2)
+        text = render_digest(self._entries(), sota=sota)
+        assert "池内共 12 条" in text
+        assert "0.0600" in text and "0.9000" in text
+        assert text.index("池内共 12 条") < text.index("factor_0")
+
+    def test_sota_missing_metrics_show_dash_never_zero(self):
+        text = render_digest(self._entries(), sota=PoolSota(count=3))
+        assert "0.0000" not in text
+        assert "—" in text
+
+    def test_sota_alone_without_entries_still_empty(self):
+        # 调用方据空串判定「无池可注入」——只有标杆线没有条目不得产出文本
+        assert render_digest([], sota=PoolSota(count=3, best_ic=0.1)) == ""
+
+    def test_sota_counts_into_char_budget(self):
+        entries = self._entries(8)
+        sota = PoolSota(count=99, best_ic=0.2, best_icir=1.0, best_pfs=1.5)
+        full = render_digest(entries, max_chars=100000, sota=sota)
+        short = render_digest(entries, max_chars=len(full) // 2, sota=sota)
+        assert len(short) <= len(full) // 2
+        assert "池内共 99 条" in short  # 标杆线永远保留（预算里先于条目）
+        assert "factor_0" in short and "factor_7" not in short
