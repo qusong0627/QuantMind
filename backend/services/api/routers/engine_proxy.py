@@ -240,6 +240,14 @@ async def _proxy(request: Request, user: dict | None = None) -> Response:
     "/api/v1/alpha-agent", methods=["GET", "POST", "OPTIONS"], include_in_schema=False
 )
 @router.api_route(
+    "/api/v1/factor-backtest/{p:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    include_in_schema=False,
+)
+@router.api_route(
+    "/api/v1/factor-backtest", methods=["GET", "POST", "OPTIONS"], include_in_schema=False
+)
+@router.api_route(
     "/api/v1/trading-agents/{p:path}",
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     include_in_schema=False,

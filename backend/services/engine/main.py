@@ -82,6 +82,11 @@ async def lifespan(app: FastAPI):
         from backend.services.engine.qlib_app.services.rd_agent_persistence import RDAgentFactorPersistence
 
         await RDAgentFactorPersistence().ensure_tables()
+        # 跨市场回测台账扩展（T-FB-06）：kind/params_json 列、七态词表、序列表。
+        # 依赖上一步的基表，次序不可颠倒。
+        from backend.services.engine.factor_backtest import store as factor_backtest_store
+
+        await factor_backtest_store.ensure_tables()
     except Exception as e:
         app.state.startup_healthy = False
         logger.error(f"❌ AlphaAgent factors table ensure failed: {e}")
@@ -671,6 +676,15 @@ try:
     logger.info("✅ Factor Research router loaded")
 except ImportError as e:
     logger.error(f"❌ Failed to load Factor Research router: {e}")
+
+try:
+    # 跨市场回测中心（T-FB）：矩阵/单因子/台账/曲线
+    from backend.services.engine.factor_backtest.router import router as factor_backtest_router
+
+    app.include_router(factor_backtest_router)
+    logger.info("✅ Factor Backtest router loaded")
+except ImportError as e:
+    logger.error(f"❌ Failed to load Factor Backtest router: {e}")
 
 
 @app.get("/health")

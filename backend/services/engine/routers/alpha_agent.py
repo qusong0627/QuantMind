@@ -3515,6 +3515,8 @@ async def _run_functional_factor_subprocess(
     import tempfile
     from pathlib import Path
 
+    import pandas as _pd  # 只在回退分支的层序归位用（模块级刻意不引 pandas）
+
     run_dir = tempfile.mkdtemp(prefix=f"bt_{factor_id[:8]}_")
     h5_path = os.path.join(run_dir, "daily_pv.h5")
     try:
@@ -3531,6 +3533,23 @@ async def _run_functional_factor_subprocess(
                     plain = col[1:]
                     if plain not in df_out.columns:
                         df_out[plain] = df_out[col]
+            # 层序归位：D.features 给的是 (instrument, datetime)，挖掘契约是
+            # (datetime, instrument)。挖掘出来的因子按**位置**取 level1 当
+            # instrument（pv_sync_10 的 ``get_level_values(1).str.upper()``），
+            # 层序不归位时拿到 datetime64，``.str`` 直接在它上面炸——非 CN 市场
+            # 全走本分支，2026-10-09 美股首跑实测 AttributeError（CN 走挖掘 h5，
+            # 层序本来就是对的不受影响）。层序按**值**判（_detect_datetime_level），
+            # instrument 层统一转 str（长度相等，不引入缺列）。
+            if isinstance(df_out.index, _pd.MultiIndex) and df_out.index.nlevels == 2:
+                dt_i = _detect_datetime_level(df_out.index)
+                inst_i = 1 - dt_i
+                df_out.index = _pd.MultiIndex.from_arrays(
+                    [
+                        df_out.index.get_level_values(dt_i),
+                        df_out.index.get_level_values(inst_i).astype(str),
+                    ],
+                    names=["datetime", "instrument"],
+                )
             df_out.to_hdf(h5_path, key="data", mode="w")
     except Exception as e:
         raise RuntimeError(f"准备 daily_pv.h5 失败: {e}") from e

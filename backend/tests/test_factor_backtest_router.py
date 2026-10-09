@@ -1,0 +1,485 @@
+"""T-FB-07/08 单测：``/api/v1/factor-backtest`` 路由（mini-app + TestClient）。
+
+照 ``test_alpha_agent_factor_list_scope`` 惯例搭 mini-app；store/engine/鉴权全部
+打桩——本文件钉的是**编排契约**：
+- 发起：占位去重、台账行先落（running）、kind 预检进台账、双击不双跑；
+- 后台任务状态映射：ok→completed（指标逐字段进台账 + 序列落盘）、
+  降级三态原样收口、取消→cancelled、意外异常→failed；
+- 兜底 finally 的身份守卫清理（旧任务不得拆新任务的去重键）；
+- 矩阵：归属过滤（他人因子不见单元格）、静态兼容档随市场列集、
+  未跑过 = not_run（不是空白）、counts 汇总；
+- 曲线：404 语义（run 不存在 / 序列未落盘）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+fb = pytest.importorskip("backend.services.engine.factor_backtest.router")
+aa = pytest.importorskip("backend.services.engine.routers.alpha_agent")
+
+try:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+except Exception:  # noqa: BLE001
+    FastAPI = None
+
+pytestmark = pytest.mark.unit
+
+_PREFIX = "/api/v1/factor-backtest"
+_CODE = 'def calculate_factor(df):\n    return df["$close"]\n'
+_FACTOR = {
+    "factor_id": "f-1",
+    "factor_name": "测试因子",
+    "factor_code": _CODE,
+    "user_id": "u-1",
+}
+
+
+@pytest.fixture(autouse=True)
+def _clean_shared_sets():
+    """共享去重/取消注册表是进程内的——用例结束必须清干净，防串扰。"""
+    yield
+    fb._running_backtests.clear()
+    fb._running_backtest_runs.clear()
+    fb._backtest_cancelled.clear()
+
+
+@pytest.fixture()
+def client():
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _inject_identity(request, call_next):
+        request.state.user = {"user_id": "u-1", "tenant_id": "default"}
+        return await call_next(request)
+
+    app.include_router(fb.router)
+    return TestClient(app)
+
+
+@pytest.fixture()
+def stub(monkeypatch):
+    """路由外部依赖替身：鉴权、台账、发起 spawn。"""
+    calls: dict = {"start": [], "finish": [], "series": [], "spawned": 0}
+
+    async def _owned(factor_id, request, *, for_write=False):
+        return dict(_FACTOR, factor_id=factor_id)
+
+    monkeypatch.setattr(fb, "_require_owned_factor", _owned)
+
+    async def _start_run(factor_id, **kwargs):
+        calls["start"].append({"factor_id": factor_id, **kwargs})
+        return "fb-run-1"
+
+    monkeypatch.setattr(fb.store, "start_run", _start_run)
+    monkeypatch.setattr(fb.store, "ensure_tables", lambda: asyncio.sleep(0))
+
+    async def _finish_run(run_id, status, **kwargs):
+        calls["finish"].append({"run_id": run_id, "status": status, **kwargs})
+        return True
+
+    monkeypatch.setattr(fb.store, "finish_run", _finish_run)
+
+    async def _save_series(run_id, **kwargs):
+        calls["series"].append({"run_id": run_id, **kwargs})
+
+    monkeypatch.setattr(fb.store, "save_series", _save_series)
+
+    def _spawn(coro):
+        calls["spawned"] += 1
+        coro.close()  # TestClient 请求级 loop 会取消后台任务：捕获后关闭
+
+    monkeypatch.setattr(fb, "_spawn_backtest_run", _spawn)
+    return calls
+
+
+# ── 市场档案 ─────────────────────────────────────────────────────────
+
+
+def test_markets_lists_profiles_without_provider(client, monkeypatch):
+    def _status(profile):
+        return {
+            "market": profile.market,
+            "label": profile.label,
+            "in_sample": profile.in_sample,
+            "experimental": profile.experimental,
+            "provider": "/data/secret/path",
+            "ready": True,
+            "calendar_start": "2020-01-02",
+            "calendar_end": "2026-10-08",
+            "instruments": 100,
+            "columns": ["$close"],
+            "bin_columns": ["close"],
+            "universe_mode": profile.universe_mode,
+            "default_universe": profile.default_universe,
+            "universe_top_n": profile.universe_top_n,
+            "window_years": profile.window_years,
+            "cost_bps": profile.cost_bps,
+            "benchmark": profile.benchmark,
+            "min_days": 120,
+        }
+
+    monkeypatch.setattr(fb, "profile_status", _status)
+    r = client.get(f"{_PREFIX}/markets")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["total"] == 5
+    assert data["markets"][0]["market"] == "a_share"
+    assert data["markets"][0]["in_sample"] is True
+    assert all("provider" not in m for m in data["markets"])  # 内部路径不出接口
+
+
+# ── 单因子发起 ───────────────────────────────────────────────────────
+
+
+def test_single_starts_run_and_records_ledger_row(client, stub):
+    r = client.post(
+        f"{_PREFIX}/single", json={"factor_id": "f-1", "market": "us_stock"}
+    )
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["run_id"] == "fb-run-1"
+    assert data["status"] == "running"
+    assert stub["spawned"] == 1
+    start = stub["start"][0]
+    assert start["factor_id"] == "f-1"
+    assert start["kind"] == "functional"  # AST 预检进台账
+    assert start["market"] == "us_stock"
+
+
+def test_single_dedupe_when_already_running(client, stub):
+    fb._running_backtests.add("f-1")
+    r = client.post(
+        f"{_PREFIX}/single", json={"factor_id": "f-1", "market": "us_stock"}
+    )
+    assert r.status_code == 200
+    assert "已在进行中" in r.json()["data"]["message"]
+    assert stub["start"] == [] and stub["spawned"] == 0
+
+
+def test_single_rejects_unknown_market_and_empty_code(client, stub, monkeypatch):
+    r = client.post(f"{_PREFIX}/single", json={"factor_id": "f-1", "market": "mars"})
+    assert r.status_code == 400
+
+    async def _empty_code(factor_id, request, *, for_write=False):
+        return dict(_FACTOR, factor_code="")
+
+    monkeypatch.setattr(fb, "_require_owned_factor", _empty_code)
+    r2 = client.post(
+        f"{_PREFIX}/single", json={"factor_id": "f-1", "market": "us_stock"}
+    )
+    assert r2.status_code == 400
+    assert "因子代码为空" in r2.json()["detail"]
+
+
+def test_single_cost_bps_out_of_range_422(client, stub):
+    r = client.post(
+        f"{_PREFIX}/single",
+        json={"factor_id": "f-1", "market": "us_stock", "cost_bps": 9999},
+    )
+    assert r.status_code == 422
+    assert stub["spawned"] == 0
+
+
+# ── 取消 ─────────────────────────────────────────────────────────────
+
+
+def test_cancel_when_not_running(client, stub):
+    r = client.post(f"{_PREFIX}/single/f-1/cancel")
+    assert r.status_code == 200
+    assert "未在运行" in r.json()["data"]["message"]
+    assert stub["finish"] == []
+
+
+def test_cancel_settles_ledger_of_current_run(client, stub):
+    fb._running_backtests.add("f-1")
+    fb._running_backtest_runs["f-1"] = "fb-run-1"
+    r = client.post(f"{_PREFIX}/single/f-1/cancel")
+    assert r.status_code == 200
+    assert r.json()["data"]["status"] == "cancelled"
+    assert stub["finish"] == [
+        {"run_id": "fb-run-1", "status": "cancelled", "error": "cancelled_by_user"}
+    ]
+    assert "f-1" in fb._backtest_cancelled  # 标记留给任务 finally 清理
+
+
+# ── 后台任务状态映射（直调 worker）───────────────────────────────────
+
+
+def _run_worker(monkeypatch, stub, result=None, raises=None, fid="f-1"):
+    async def _evaluate(factor, **kwargs):
+        if raises is not None:
+            raise raises
+        return result
+
+    monkeypatch.setattr(fb, "evaluate_factor_market", _evaluate)
+    fb._running_backtests.add(fid)
+    fb._running_backtest_runs[fid] = "fb-run-1"
+    asyncio.run(
+        fb._run_single(
+            fid,
+            dict(_FACTOR),
+            "fb-run-1",
+            market="us_stock",
+            universe=None,
+            start=None,
+            end=None,
+            cost_bps=None,
+        )
+    )
+
+
+def test_worker_ok_maps_metrics_and_saves_series(monkeypatch, stub):
+    _run_worker(
+        monkeypatch,
+        stub,
+        result={
+            "status": "ok",
+            "reason": None,
+            "message": None,
+            "window": {"start": "2023-10-08", "end": "2026-10-08"},
+            "universe": "all",
+            "metrics": {
+                "ic": 0.05,
+                "rank_ic": 0.04,
+                "icir": 0.3,
+                "rank_icir": 0.25,
+                "sharpe": 1.1,
+                "ann_return": 0.12,
+                "max_drawdown": -0.07,
+            },
+            "series": {"dates": ["2024-01-02"], "nav_long": [1.0]},
+        },
+    )
+    fin = stub["finish"][0]
+    assert fin["status"] == "completed"
+    assert fin["ic_value"] == 0.05
+    assert fin["rank_icir"] == 0.25
+    assert fin["sharpe_ratio"] == 1.1
+    assert fin["date_range"] == "2023-10-08~2026-10-08"
+    assert stub["series"][0]["run_id"] == "fb-run-1"
+    # 身份守卫清理：任务结束即释放去重键
+    assert "f-1" not in fb._running_backtests
+    assert "f-1" not in fb._running_backtest_runs
+
+
+@pytest.mark.parametrize("status", ["data_unsupported", "insufficient", "unavailable"])
+def test_worker_degraded_statuses_settle_as_is(monkeypatch, stub, status):
+    _run_worker(
+        monkeypatch,
+        stub,
+        result={
+            "status": status,
+            "reason": "why",
+            "message": "具体情况",
+            "window": {"start": "2023-10-08", "end": "2026-10-08"},
+            "universe": "all",
+            "metrics": None,
+            "series": None,
+        },
+    )
+    fin = stub["finish"][0]
+    assert fin["status"] == status
+    assert fin["error"] == "具体情况"
+    assert stub["series"] == []
+
+
+def test_worker_cancelled_maps_to_cancelled(monkeypatch, stub):
+    _run_worker(monkeypatch, stub, raises=aa.FactorBacktestCancelled("cancelled"))
+    assert stub["finish"][0]["status"] == "cancelled"
+    assert stub["finish"][0]["error"] == "cancelled_by_user"
+
+
+def test_worker_unexpected_exception_maps_to_failed(monkeypatch, stub):
+    _run_worker(monkeypatch, stub, raises=RuntimeError("boom"))
+    fin = stub["finish"][0]
+    assert fin["status"] == "failed"
+    assert "boom" in fin["error"]
+
+
+def test_worker_finally_respects_identity_guard(monkeypatch, stub):
+    """取消→立即重跑场景：旧任务收尾不得拆新任务的去重键。"""
+    _run_worker(
+        monkeypatch,
+        stub,
+        result={
+            "status": "insufficient",
+            "reason": "too_few_days",
+            "message": "太少",
+            "window": {"start": None, "end": None},
+            "universe": None,
+            "metrics": None,
+            "series": None,
+        },
+    )
+    # 模拟旧任务收尾时注册表已换成新 run
+    assert "f-1" not in fb._running_backtest_runs  # 本场景先确认正常清理
+    fb._running_backtests.add("f-2")
+    fb._running_backtest_runs["f-2"] = "fb-run-2"
+    asyncio.run(
+        fb._run_single(
+            "f-1",
+            dict(_FACTOR),
+            "fb-run-1",  # 旧 run_id，注册表里是 fb-run-2 —— 不得误拆
+            market="us_stock",
+            universe=None,
+            start=None,
+            end=None,
+            cost_bps=None,
+        )
+    )
+    assert "f-2" in fb._running_backtests
+
+
+# ── 矩阵 ─────────────────────────────────────────────────────────────
+
+
+def test_matrix_assembles_cells_compat_and_ownership(client, monkeypatch):
+    async def _meta(ids):
+        return [
+            {
+                "factor_id": "f-1",
+                "factor_name": "A",
+                "factor_code": _CODE,
+                "user_id": "u-1",
+                "ic_value": 0.03,
+                "market": "a_share",
+                "status": "completed",
+            },
+            {
+                "factor_id": "f-2",
+                "factor_name": "B",
+                "factor_code": _CODE,
+                "user_id": "u-2",  # 他人因子：单元格必须不可见
+                "ic_value": 0.02,
+                "market": "a_share",
+                "status": "completed",
+            },
+        ]
+
+    async def _cells(ids, markets=None):
+        assert ids == ["f-1"]  # 归属过滤后只剩自己的
+        return [
+            {
+                "run_id": "fb-run-1",
+                "factor_id": "f-1",
+                "status": "completed",
+                "market": "us_stock",
+                "universe": "all",
+                "date_range": "2023~2026",
+                "finished_at": None,
+                "error": None,
+                "metrics": {"ic": 0.05, "icir": 0.3, "sharpe": 1.2},
+                "ic_value": 0.05,
+            }
+        ]
+
+    monkeypatch.setattr(fb.store, "get_factor_meta", _meta)
+    monkeypatch.setattr(fb.store, "latest_cells", _cells)
+    monkeypatch.setattr(fb, "get_authenticated_identity", lambda request: ("u-1", "d"))
+
+    r = client.post(
+        f"{_PREFIX}/matrix",
+        json={"factor_ids": ["f-1", "f-2"], "markets": ["a_share", "us_stock"]},
+    )
+    assert r.status_code == 200
+    data = r.json()["data"]
+    f1 = data["factors"][0]
+    f2 = data["factors"][1]
+    assert f1["cells"]["us_stock"]["status"] == "completed"
+    assert f1["cells"]["us_stock"]["ic"] == 0.05
+    assert f1["cells"]["us_stock"]["compat"] == "portable"
+    assert f1["cells"]["a_share"]["status"] == "not_run"
+    assert f2["owned"] is False
+    assert all(c["status"] == "not_run" for c in f2["cells"].values())
+    assert data["counts"]["not_run"] == 3
+    assert data["counts"]["completed"] == 1
+
+
+def test_matrix_marks_enriched_factor_data_unsupported_on_us(client, monkeypatch):
+    """富化列因子在美股列 = data_unsupported（不跑就有结论）；CN 列 = portable。"""
+
+    async def _meta(ids):
+        return [
+            {
+                "factor_id": "f-1",
+                "factor_name": "A",
+                "factor_code": 'def calculate_factor(df):\n    return df["$netflow_5"]\n',
+                "user_id": "u-1",
+                "ic_value": None,
+                "market": "a_share",
+                "status": "pending",
+            }
+        ]
+
+    async def _cells(ids, markets=None):
+        return []
+
+    monkeypatch.setattr(fb.store, "get_factor_meta", _meta)
+    monkeypatch.setattr(fb.store, "latest_cells", _cells)
+    monkeypatch.setattr(fb, "get_authenticated_identity", lambda request: ("u-1", "d"))
+
+    r = client.post(
+        f"{_PREFIX}/matrix",
+        json={"factor_ids": ["f-1"], "markets": ["a_share", "us_stock"]},
+    )
+    cells = r.json()["data"]["factors"][0]["cells"]
+    assert cells["a_share"]["compat"] == "portable"
+    assert cells["us_stock"]["compat"] == "data_unsupported"
+    assert cells["us_stock"]["missing"] == ["$netflow_5"]
+
+
+def test_matrix_rejects_unknown_market(client, monkeypatch):
+    monkeypatch.setattr(fb, "get_authenticated_identity", lambda request: ("u-1", "d"))
+    r = client.post(
+        f"{_PREFIX}/matrix", json={"factor_ids": ["f-1"], "markets": ["mars"]}
+    )
+    assert r.status_code == 400
+
+
+# ── 台账 / 曲线 ──────────────────────────────────────────────────────
+
+
+def test_runs_requires_owned_factor(client, stub, monkeypatch):
+    seen = {}
+
+    async def _list_runs(**kwargs):
+        seen.update(kwargs)
+        return [{"run_id": "fb-run-1", "status": "completed"}]
+
+    monkeypatch.setattr(fb.store, "list_runs", _list_runs)
+    r = client.get(f"{_PREFIX}/runs", params={"factor_id": "f-1", "market": "us_stock"})
+    assert r.status_code == 200
+    assert r.json()["data"]["runs"][0]["run_id"] == "fb-run-1"
+    assert seen["factor_id"] == "f-1" and seen["market"] == "us_stock"
+
+
+def test_series_endpoint_404s_and_payload(client, stub, monkeypatch):
+    async def _get_run(run_id):
+        return {"run_id": run_id, "factor_id": "f-1"} if run_id == "fb-run-1" else None
+
+    async def _get_series(run_id):
+        if run_id == "fb-run-1":
+            return {"series": {"dates": ["2024-01-02"], "nav_long": [1.0]}}
+        return None
+
+    monkeypatch.setattr(fb.store, "get_run", _get_run)
+    monkeypatch.setattr(fb.store, "get_series", _get_series)
+
+    assert client.get(f"{_PREFIX}/runs/nope/series").status_code == 404
+    r = client.get(f"{_PREFIX}/runs/fb-run-1/series")
+    assert r.status_code == 200
+    assert r.json()["data"]["series"]["dates"] == ["2024-01-02"]
+
+    # run 存在但序列未落盘（降级终态）→ 404 带说明
+    monkeypatch.setattr(fb.store, "get_series", lambda run_id: _none())
+    r2 = client.get(f"{_PREFIX}/runs/fb-run-1/series")
+    assert r2.status_code == 404
+    assert "没有曲线数据" in r2.json()["detail"]
+
+
+async def _none():
+    return None

@@ -335,6 +335,50 @@ def test_zero_arg_calculate_factor_still_runs() -> None:
     assert np.allclose(s.to_numpy(dtype="float64"), df["$close"].to_numpy() + 1.0)
 
 
+# 位置型取 instrument：挖掘出来的因子普遍按**位置**取 level1 当 instrument
+# （老契约里它就是 instrument 层），pv_sync_10 的
+# ``get_level_values(1).str.upper()`` 是线上实测样张。
+POSITIONAL_INSTRUMENT_FACTOR = """
+import pandas as pd
+
+
+def calculate_probe():
+    df = pd.read_hdf("daily_pv.h5")
+    out = df["$close"].to_frame("probe")
+    out.index = pd.MultiIndex.from_arrays(
+        [out.index.get_level_values(0), out.index.get_level_values(1).str.upper()],
+        names=out.index.names,
+    )
+    return out
+"""
+
+
+def test_fallback_input_is_written_in_mining_layer_order(tmp_path) -> None:
+    """非 CN 市场走 fallback：``D.features`` 的 (instrument, datetime) 帧在写盘前
+    必须归位成挖掘契约 (datetime, instrument)。
+
+    挖掘因子按位置取 level1 当 instrument；层序不归位时拿到的是 datetime64，
+    ``.str`` 访问器直接在 datetime64 上炸——2026-10-09 美股首跑实测：
+    ``AttributeError: Can only use .str accessor with string values``（pv_sync_10）。
+    """
+    dates = pd.date_range("2024-01-01", periods=5)
+    instruments = ["us_aapl", "us_msft"]
+    idx = pd.MultiIndex.from_product(
+        [instruments, dates], names=["instrument", "datetime"]
+    )
+    qlib_df = pd.DataFrame({"$close": np.linspace(10.0, 20.0, len(idx))}, index=idx)
+
+    s = asyncio.run(
+        aa._run_functional_factor_subprocess(  # noqa: SLF001
+            "t_qliblayer_0000", POSITIONAL_INSTRUMENT_FACTOR, qlib_df
+        )
+    )
+
+    assert s is not None, "qlib 层序的帧走 fallback 必须能跑出结果"
+    assert len(s) == len(qlib_df)
+    assert set(s.index.get_level_values("instrument")) == {"US_AAPL", "US_MSFT"}
+
+
 def test_mining_source_only_for_a_share() -> None:
     """富化缓存目前只有 A 股（QuantDB parquet）；其他市场必须老实返回 None 走回退。
 
