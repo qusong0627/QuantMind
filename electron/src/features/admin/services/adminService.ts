@@ -661,11 +661,15 @@ class AdminService {
             progress: number;
             instance_id: string | null;
             model_type: string;
+            /** 用户在训练表单起的名字（job_name 是机器名，展示优先 display_name） */
+            display_name: string;
             job_name: string;
             features_count: number;
             train_start: string;
             train_end: string;
             registered_model_id: string;
+            /** 注册模型显示名（qm_user_models.metadata_json.display_name，缺失为空串） */
+            registered_model_display_name: string;
             has_logs: boolean;
             created_at: string;
             updated_at: string;

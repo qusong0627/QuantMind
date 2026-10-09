@@ -370,7 +370,11 @@ async def get_training_run(
     run_id: str,
     current_user: dict[str, Any] = Depends(require_admin),
 ):
-    return await get_training_run_for_owner(run_id, current_user)
+    # 后台详情走 admin 口径：列表已展示全部用户的任务，详情不能再按 owner 过滤
+    #（否则点他人任务必 404）；同时补齐弹窗要用的展示字段（任务名/用户/租户/请求参数）。
+    from .admin_training_utils import get_training_run_for_admin
+
+    return await get_training_run_for_admin(run_id)
 
 
 @router.post("/training-runs/{run_id}/cancel", summary="取消训练任务（管理员）")
@@ -463,16 +467,31 @@ async def list_training_jobs(
                 "progress": int(row["progress"] or 0),
                 "instance_id": row["instance_id"],
                 "model_type": req_payload.get("model_type", ""),
+                # display_name 是用户在训练表单里起的名字；job_name 是机器名（model_train_t{N}_{ts}）。
+                # 前端展示优先 display_name，回落后两者（缺名任务由前端按类型+时间兜底）。
+                "display_name": str(req_payload.get("display_name") or "").strip(),
                 "job_name": req_payload.get("job_name", ""),
                 "features_count": len(req_payload.get("features") or []),
                 "train_start": req_payload.get("train_start", ""),
                 "train_end": req_payload.get("train_end", ""),
                 "registered_model_id": model_reg.get("model_id") or "",
+                "registered_model_display_name": "",
                 "has_logs": bool(str(row["logs"] or "").strip()),
                 "created_at": str(row["created_at"] or ""),
                 "updated_at": str(row["updated_at"] or ""),
             }
         )
+
+    # 注册模型显示名批量回填（权威源 = qm_user_models.metadata_json.display_name；
+    # 与实时面板共用 realtime._load_model_display_names，不在本处造第二套口径）。
+    registered_ids = [item["registered_model_id"] for item in items if item["registered_model_id"]]
+    if registered_ids:
+        from .realtime import _load_model_display_names
+
+        display_names = await _load_model_display_names(registered_ids)
+        for item in items:
+            if item["registered_model_id"]:
+                item["registered_model_display_name"] = display_names.get(item["registered_model_id"], "")
 
     return {
         "total": int(total_row or 0),

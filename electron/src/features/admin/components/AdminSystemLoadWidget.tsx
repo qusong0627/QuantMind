@@ -1,8 +1,8 @@
 /**
- * 深色导航轴底部的系统负载读数（2026-10-09 机构版改版）。
+ * 浅色导航轴底部的系统负载读数（2026-10-09 机构版改版）。
  *
  * 纯展示组件：数据由 AdminPage 统一轮询后下发（顶栏健康告示与这里同源，
- * 避免同一接口两个轮询器）。深色底上数值统一 admin-num（等宽数字）。
+ * 避免同一接口两个轮询器）。数值统一 admin-num（等宽数字）。
  */
 import React from 'react';
 import { Tooltip } from 'antd';
@@ -14,26 +14,26 @@ interface AdminSystemLoadWidgetProps {
     load: SystemLoadSummary | null;
 }
 
-/** 深色底阈值色（与浅色面同名语义，亮度上调一档）。 */
+/** 阈值色（浅色底取 -500 档，保证白底对比度）。 */
 const barColor = (percent: number): string => {
-    if (percent < 60) return '#34d399'; // emerald-400
-    if (percent < 85) return '#fbbf24'; // amber-400
-    return '#fb7185'; // rose-400
+    if (percent < 60) return '#10b981'; // emerald-500
+    if (percent < 85) return '#f59e0b'; // amber-500
+    return '#f43f5e'; // rose-500
 };
 
 const healthDot = (score: number): string => {
-    if (score >= 80) return 'bg-emerald-400';
-    if (score >= 60) return 'bg-amber-400';
-    return 'bg-rose-400';
+    if (score >= 80) return 'bg-emerald-500';
+    if (score >= 60) return 'bg-amber-500';
+    return 'bg-rose-500';
 };
 
 const Bar: React.FC<{ label: string; value: string; percent: number }> = ({ label, value, percent }) => (
     <div className="space-y-1">
         <div className="flex items-center justify-between">
             <span className="text-[10px] text-slate-500">{label}</span>
-            <span className="admin-num text-[10px] font-medium text-slate-300">{value}</span>
+            <span className="admin-num text-[10px] font-medium text-slate-700">{value}</span>
         </div>
-        <div className="h-1 w-full overflow-hidden rounded-full bg-white/10">
+        <div className="h-1 w-full overflow-hidden rounded-full bg-slate-200/60">
             <div
                 className="h-full rounded-full transition-all duration-500"
                 style={{ width: `${Math.min(100, Math.max(2, percent))}%`, backgroundColor: barColor(percent) }}
@@ -85,27 +85,27 @@ export const AdminSystemLoadWidget: React.FC<AdminSystemLoadWidgetProps> = ({ co
     if (collapsed) {
         return (
             <Tooltip title={detail} placement="right">
-                <div className="flex cursor-pointer flex-col items-center gap-1.5 border-t border-white/[0.06] px-2 py-3 hover:bg-white/[0.04]">
+                <div className="flex cursor-pointer flex-col items-center gap-1.5 border-t border-slate-200 px-2 py-3 hover:bg-slate-50">
                     <div className="relative">
                         <Activity className="h-4 w-4 text-slate-400" />
                         <span
-                            className={`absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full ring-2 ring-[#0B1220] ${healthDot(healthScore)}`}
+                            className={`absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full ring-2 ring-white ${healthDot(healthScore)}`}
                         />
                     </div>
-                    <span className="admin-num text-[9px] font-medium text-slate-400">{cpu}%</span>
+                    <span className="admin-num text-[9px] font-medium text-slate-500">{cpu}%</span>
                 </div>
             </Tooltip>
         );
     }
 
     return (
-        <div className="border-t border-white/[0.06] px-4 py-3">
+        <div className="border-t border-slate-200 px-4 py-3">
             <div className="mb-2.5 flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                     <span className={`h-1.5 w-1.5 rounded-full ${healthDot(healthScore)} ${load ? 'animate-pulse' : ''}`} />
-                    <span className="text-[10px] font-semibold tracking-wider text-slate-400">系统负载</span>
+                    <span className="text-[10px] font-semibold tracking-wider text-slate-500">系统负载</span>
                 </div>
-                <span className="admin-num text-[10px] text-slate-500">
+                <span className="admin-num text-[10px] text-slate-400">
                     {load ? `运行 ${uptimeDays} 天` : '检测中…'}
                 </span>
             </div>
@@ -115,9 +115,9 @@ export const AdminSystemLoadWidget: React.FC<AdminSystemLoadWidgetProps> = ({ co
                 <Bar label="数据盘" value={`${disk}%`} percent={disk} />
             </div>
             {total > 0 && (
-                <div className="mt-2.5 flex items-center justify-between border-t border-white/[0.06] pt-2">
+                <div className="mt-2.5 flex items-center justify-between border-t border-slate-100 pt-2">
                     <span className="text-[10px] text-slate-500">服务在线</span>
-                    <span className="admin-num text-[10px] font-medium text-slate-300">
+                    <span className="admin-num text-[10px] font-medium text-slate-700">
                         {healthy}/{total}
                     </span>
                 </div>

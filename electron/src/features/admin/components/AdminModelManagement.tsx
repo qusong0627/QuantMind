@@ -1,25 +1,30 @@
+/**
+ * 后台「模型管理」页（模型目录 / 训练任务 两个页签，2026-10-10 展示名改版）。
+ *
+ * 展示口径：一切列表/标题以**人能读懂的名字**为主 —— 模型目录优先
+ * metadata.display_name → model_name → job_name；训练任务优先
+ * request_payload.display_name → job_name；长 ID（model_id / run_id）一律
+ * 降级为副行 admin-num 小字（保留工程师核对用）。无名字段不回填假名，
+ * 训练任务缺名时按「类型 + 创建时间」生成兜底名。
+ */
 import React, { useMemo, useState, useCallback } from 'react';
 import {
     Table, Button, message, Space, Tag, Modal, Collapse, Descriptions,
-    Badge, Tooltip, Typography, Spin, Tabs, Progress, Select, Segmented
+    Tooltip, Typography, Spin, Tabs, Progress, Select, Segmented
 } from 'antd';
 import {
     ScanOutlined, FolderOpenOutlined,
-    CheckCircleOutlined, FileOutlined, ReloadOutlined,
+    FileOutlined, ReloadOutlined,
     ThunderboltOutlined, HistoryOutlined,
-    GlobalOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useNavigate } from 'react-router-dom';
-import { useDispatch } from 'react-redux';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { adminService } from '../services/adminService';
 import { ModelDirectoryInfo, ModelScanResult } from '../types';
-import { setCurrentTab } from '../../../store/slices/aiStrategySlice';
+import { Panel } from './ui/AdminPrimitives';
 
-const { Panel } = Collapse;
-const { Text, Link } = Typography;
+const { Text } = Typography;
 
 const MODEL_MARKET_OPTIONS = [
     { value: 'all', label: '全部', color: 'default' },
@@ -45,6 +50,25 @@ function extractModelMarket(model: ModelDirectoryInfo): string {
     if (raw.includes('cn') || raw.includes('a_share') || raw.includes('a股') || raw.includes('sh') || raw.includes('sz')) return 'a_share';
     return 'a_share'; // default
 }
+
+/** 模型展示名：磁盘 metadata 的 display_name → model_name → job_name 依次回落（无名为空串）。 */
+const resolveModelDisplayName = (
+    meta?: Record<string, any> | null,
+    qlib?: Record<string, any> | null,
+): string => String(meta?.display_name || meta?.model_name || meta?.job_name || qlib?.job_name || '').trim();
+
+/** 训练任务状态中文名（筛选下拉与表格 Tag 共用一份，避免两处口径漂移）。 */
+const JOB_STATUS_META: Record<string, { label: string; color: string }> = {
+    pending: { label: '待执行', color: 'default' },
+    provisioning: { label: '分配中', color: 'purple' },
+    running: { label: '训练中', color: 'blue' },
+    waiting_callback: { label: '等待回调', color: 'gold' },
+    completed: { label: '已完成', color: 'green' },
+    failed: { label: '已失败', color: 'red' },
+    cancelled: { label: '已取消', color: 'default' },
+};
+
+const jobStatusLabel = (status: string): string => JOB_STATUS_META[status]?.label ?? status;
 
 // 格式化文件大小
 const fmtSize = (bytes: number) => {
@@ -170,8 +194,6 @@ const PerformanceOverview: React.FC<{ metrics: Record<string, any> }> = ({ metri
 };
 
 export const AdminModelManagement: React.FC = () => {
-    const navigate = useNavigate();
-    const dispatch = useDispatch();
     const [scanResult, setScanResult] = useState<ModelScanResult | null>(null);
     const [scanning, setScanning] = useState(false);
     const [scanError, setScanError] = useState<string | null>(null);
@@ -210,16 +232,6 @@ export const AdminModelManagement: React.FC = () => {
     const handleViewDetail = (model: ModelDirectoryInfo) => {
         setDetailModel(model);
         setDetailVisible(true);
-    };
-
-
-    const handleGoBacktestCenter = () => {
-        dispatch(setCurrentTab('backtest'));
-        navigate('/');
-    };
-
-    const handleQuickRescan = async () => {
-        await handleScan(true);
     };
 
     // ── 训练任务 Tab 状态 ──────────────────────────────────────────────────
@@ -280,50 +292,36 @@ export const AdminModelManagement: React.FC = () => {
 
     const columns = [
         {
-            title: '模型目录',
+            title: '模型',
             dataIndex: 'model_id',
             key: 'model_id',
-            width: 280,
+            width: 300,
             render: (id: string, record: ModelDirectoryInfo) => {
                 const meta = record.metadata || {};
                 const qlib = record.qlib_config || {};
-                const jobName = String(meta.job_name || qlib.job_name || '');
-                const modelType = String(meta.model_type || qlib.model?.type || '');
+                const name = resolveModelDisplayName(meta, qlib);
                 return (
-                    <div className="max-w-full">
-                        <Space size={4} className="w-full">
-                            <FolderOpenOutlined className="text-amber-500 shrink-0" />
-                            <Tooltip title={id}>
-                                <Text
-                                    strong
-                                    className="text-slate-700 text-xs"
-                                    ellipsis={{ tooltip: false }}
-                                    style={{ width: record.is_production ? 120 : 200 }}
-                                >
-                                    {id}
-                                </Text>
-                            </Tooltip>
+                    <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                            {name ? (
+                                <Tooltip title={`${name}（${id}）`}>
+                                    <span className="truncate text-[12px] font-semibold text-slate-800">{name}</span>
+                                </Tooltip>
+                            ) : (
+                                <Tooltip title={id}>
+                                    <span className="truncate admin-num text-[11px] text-slate-500">{id}</span>
+                                </Tooltip>
+                            )}
                             {record.is_production && (
-                                <Tag color="green" className="text-[9px] font-bold px-1 m-0 shrink-0 border-none bg-green-50 text-green-600">
-                                    PROD
+                                <Tag color="green" className="m-0 shrink-0 border-none bg-green-50 px-1 text-[9px] font-bold text-green-600">
+                                    生产
                                 </Tag>
                             )}
                             {record.error && (
-                                <Tag color="red" className="text-[9px] m-0 shrink-0">ERR</Tag>
+                                <Tag color="red" className="m-0 shrink-0 text-[9px]">ERR</Tag>
                             )}
-                        </Space>
-                        {(jobName || modelType) && (
-                            <div className="flex items-center gap-1 mt-0.5 pl-4">
-                                {modelType && (
-                                    <Tag color="cyan" className="text-[9px] font-bold m-0">{modelType}</Tag>
-                                )}
-                                {jobName && (
-                                    <Text className="text-[10px] text-slate-400 font-mono" ellipsis style={{ maxWidth: 140 }}>
-                                        {jobName}
-                                    </Text>
-                                )}
-                            </div>
-                        )}
+                        </div>
+                        {name && <div className="mt-0.5 truncate admin-num text-[10px] text-slate-400">{id}</div>}
                     </div>
                 );
             },
@@ -331,47 +329,59 @@ export const AdminModelManagement: React.FC = () => {
         {
             title: '市场',
             key: 'market',
-            width: 80,
+            width: 72,
             render: (_: any, record: ModelDirectoryInfo) => {
                 const mkt = extractModelMarket(record);
                 const opt = MODEL_MARKET_OPTIONS.find(o => o.value === mkt);
                 return opt && opt.value !== 'all' ? (
-                    <Tag color={opt.color} className="text-[10px] m-0">{opt.label}</Tag>
+                    <Tag color={opt.color} className="m-0 text-[10px]">{opt.label}</Tag>
                 ) : <span className="text-slate-300 text-xs">—</span>;
             },
         },
         {
-            title: '模型类',
-            dataIndex: 'resolved_class',
-            key: 'resolved_class',
-            render: (cls: string | null) => cls ? (
-                <Tooltip title={cls}>
-                    <Text code className="text-[10px]">{cls.split('.').pop()}</Text>
-                </Tooltip>
-            ) : <span className="text-slate-300 text-xs">—</span>,
+            // 模型类 / 算法类型 / 格式三合一一列，避免一列一个短语把表格拉散
+            title: '类型',
+            key: 'model_type',
+            width: 132,
+            render: (_: any, record: ModelDirectoryInfo) => {
+                const meta = record.metadata || {};
+                const modelType = String(meta.model_type || '');
+                const clsShort = record.resolved_class ? record.resolved_class.split('.').pop() : '';
+                const sub = [clsShort, record.model_format].filter(Boolean).join(' · ');
+                if (!modelType && !sub) return <span className="text-slate-300 text-xs">—</span>;
+                return (
+                    <div className="flex flex-col items-start gap-0.5">
+                        {modelType && (
+                            <Tag color="cyan" className="m-0 text-[10px] font-bold">{modelType}</Tag>
+                        )}
+                        {sub && <span className="admin-num text-[10px] text-slate-400">{sub}</span>}
+                    </div>
+                );
+            },
         },
         {
-            title: '特征维度',
+            title: '特征',
             dataIndex: 'feature_count',
             key: 'feature_count',
             align: 'center' as const,
+            width: 72,
             render: (n: number | null) => n != null ? (
-                <Tag color="blue" className="font-mono font-bold">{n}D</Tag>
+                <Tag color="blue" className="admin-num m-0 font-bold">{n}D</Tag>
             ) : <span className="text-slate-300 text-xs">—</span>,
         },
         {
-            title: '训练/测试区间',
+            title: '训练 / 测试区间',
             key: 'train_range',
             render: (_: any, r: ModelDirectoryInfo) => (
-                <div className="flex flex-col">
+                <div className="flex flex-col gap-0.5">
                     {r.train_start ? (
-                        <span className="text-[10px] text-slate-500 font-mono">
-                            <Tag className="m-0 text-[10px] scale-90" color="default">TRAIN</Tag> {r.train_start} → {r.train_end}
+                        <span className="admin-num text-[10px] text-slate-500">
+                            <Tag className="m-0 text-[10px] scale-90" color="default">训练</Tag> {r.train_start} → {r.train_end}
                         </span>
                     ) : null}
                     {r.test_start ? (
-                        <span className="text-[10px] text-indigo-500 font-mono mt-0.5">
-                            <Tag className="m-0 text-[10px] scale-90" color="indigo">TEST</Tag> {r.test_start} → {r.test_end}
+                        <span className="admin-num mt-0.5 text-[10px] text-indigo-500">
+                            <Tag className="m-0 text-[10px] scale-90" color="indigo">测试</Tag> {r.test_start} → {r.test_end}
                         </span>
                     ) : null}
                     {!r.train_start && !r.test_start && <span className="text-xs text-slate-300 italic">未记录</span>}
@@ -382,52 +392,34 @@ export const AdminModelManagement: React.FC = () => {
             title: '训练目标',
             key: 'target',
             align: 'center' as const,
+            width: 96,
             render: (_: any, r: ModelDirectoryInfo) => {
                 const targetMeta = resolveTrainingTargetMeta(r.metadata);
                 if (!targetMeta.horizonDays) {
                     return <span className="text-slate-300 text-xs">—</span>;
                 }
-
+                // 标签公式过长会把行撑高，收进 Tooltip（详情弹窗里有完整版）
                 return (
-                    <div className="flex flex-col gap-1 items-center text-center">
-                        <Tag color="blue" className="m-0 font-bold">
-                            T+{targetMeta.horizonDays}
-                        </Tag>
-                        <span className="text-[10px] text-slate-500">
-                            {targetMeta.targetMode === 'classification' ? '分类' : '回归'}
-                        </span>
-                        {targetMeta.labelFormula && (
-                            <Text code className="text-[10px] break-all text-center">
-                                {targetMeta.labelFormula}
-                            </Text>
-                        )}
-                    </div>
+                    <Tooltip title={targetMeta.labelFormula || undefined}>
+                        <div className="flex flex-col items-center gap-0.5">
+                            <Tag color="blue" className="m-0 font-bold">
+                                T+{targetMeta.horizonDays}
+                            </Tag>
+                            <span className="text-[10px] text-slate-500">
+                                {targetMeta.targetMode === 'classification' ? '分类' : '回归'}
+                            </span>
+                        </div>
+                    </Tooltip>
                 );
             },
-        },
-        {
-            title: '格式',
-            dataIndex: 'model_format',
-            key: 'model_format',
-            render: (fmt: string | null) => fmt ? (
-                <Tag color="purple" className="text-[10px] uppercase">{fmt}</Tag>
-            ) : <span className="text-slate-300 text-xs">—</span>,
-        },
-        {
-            title: '文件数',
-            key: 'files',
-            align: 'center' as const,
-            render: (_: any, r: ModelDirectoryInfo) => (
-                <Badge count={r.files?.length || 0} color="geekblue"
-                    className="font-mono" />
-            ),
         },
         {
             title: '最近更新',
             dataIndex: 'updated_at',
             key: 'updated_at',
+            width: 128,
             render: (d: string) => (
-                <span className="text-xs text-slate-400 font-mono">
+                <span className="admin-num text-[11px] text-slate-400">
                     {dayjs(d).format('YYYY-MM-DD HH:mm')}
                 </span>
             ),
@@ -436,11 +428,12 @@ export const AdminModelManagement: React.FC = () => {
             title: '操作',
             key: 'action',
             align: 'right' as const,
+            width: 88,
             render: (_: any, record: ModelDirectoryInfo) => (
                 <Button
                     size="small"
                     type="link"
-                    className="font-bold"
+                    className="px-0 text-[12px] font-medium"
                     onClick={() => handleViewDetail(record)}
                 >
                     查看详情
@@ -448,6 +441,146 @@ export const AdminModelManagement: React.FC = () => {
             ),
         },
     ];
+
+    // 任务展示名：display_name（用户起名）→ job_name（机器名）→ 类型+时间兜底
+    const jobDisplayName = (r: any): string => {
+        const name = String(r?.display_name || r?.job_name || '').trim();
+        if (name) return name;
+        const typeLabel = String(r?.model_type || '').trim();
+        const when = r?.created_at ? dayjs(r.created_at).format('MM-DD HH:mm') : '—';
+        return `${typeLabel ? `${typeLabel} ` : ''}训练任务 · ${when}`;
+    };
+
+    const jobColumns = [
+        {
+            title: '任务名称',
+            key: 'name',
+            width: 300,
+            render: (_: any, r: any) => {
+                const hasName = Boolean(String(r.display_name || r.job_name || '').trim());
+                return (
+                    <div className="min-w-0">
+                        <Tooltip title={hasName ? jobDisplayName(r) : undefined}>
+                            <div className={`truncate text-[12px] ${hasName ? 'font-semibold text-slate-800' : 'text-slate-600'}`}>
+                                {jobDisplayName(r)}
+                            </div>
+                        </Tooltip>
+                        <div className="truncate admin-num text-[10px] text-slate-400">{r.run_id}</div>
+                    </div>
+                );
+            },
+        },
+        {
+            title: '用户',
+            key: 'user',
+            width: 130,
+            render: (_: any, r: any) => (
+                <div>
+                    <div className="admin-num text-xs font-semibold text-slate-700">{r.user_id}</div>
+                    <div className="text-[10px] text-slate-400">{r.tenant_id}</div>
+                </div>
+            ),
+        },
+        {
+            title: '状态',
+            dataIndex: 'status',
+            key: 'status',
+            width: 130,
+            // 中文状态名与筛选下拉共用 JOB_STATUS_META；running 另带进度条
+            render: (status: string, r: any) => (
+                <div>
+                    <Tag color={JOB_STATUS_META[status]?.color ?? 'default'} className="m-0 text-[10px] font-bold">
+                        {jobStatusLabel(status)}
+                    </Tag>
+                    {status === 'running' && (
+                        <Progress percent={r.progress} size="small" className="mt-1 w-24" />
+                    )}
+                </div>
+            ),
+        },
+        {
+            title: '模型 / 特征',
+            key: 'model_info',
+            width: 120,
+            render: (_: any, r: any) => (
+                <div className="flex flex-col items-start gap-0.5">
+                    {r.model_type && <Tag color="cyan" className="m-0 text-[10px] font-bold">{r.model_type}</Tag>}
+                    {r.features_count > 0 && <span className="admin-num text-[10px] text-slate-400">{r.features_count} 特征</span>}
+                </div>
+            ),
+        },
+        {
+            title: '训练区间',
+            key: 'train_range',
+            width: 180,
+            render: (_: any, r: any) => r.train_start ? (
+                <span className="admin-num text-[10px] text-slate-500">
+                    {r.train_start} → {r.train_end}
+                </span>
+            ) : <span className="text-slate-300">—</span>,
+        },
+        {
+            title: '注册模型',
+            dataIndex: 'registered_model_id',
+            key: 'registered_model_id',
+            width: 220,
+            render: (id: string, r: any) => {
+                if (!id) return <span className="text-slate-300 text-xs">—</span>;
+                const name = String(r.registered_model_display_name || '').trim();
+                return (
+                    <Tooltip title={id}>
+                        <div className="min-w-0">
+                            {name ? (
+                                <>
+                                    <div className="truncate text-[11px] font-medium text-slate-700">{name}</div>
+                                    <div className="truncate admin-num text-[10px] text-slate-400">{id}</div>
+                                </>
+                            ) : (
+                                <div className="truncate admin-num text-[10px] text-slate-500">{id}</div>
+                            )}
+                        </div>
+                    </Tooltip>
+                );
+            },
+        },
+        {
+            title: '创建时间',
+            dataIndex: 'created_at',
+            key: 'created_at',
+            width: 110,
+            render: (d: string) => (
+                <Tooltip title={d || undefined}>
+                    <span className="admin-num text-[11px] text-slate-400">
+                        {d ? dayjs(d).format('MM-DD HH:mm') : '—'}
+                    </span>
+                </Tooltip>
+            ),
+        },
+        {
+            title: '操作',
+            key: 'action',
+            align: 'right' as const,
+            width: 64,
+            render: (_: any, r: any) => (
+                <Button
+                    type="link"
+                    size="small"
+                    className="px-0 text-[12px] font-medium"
+                    onClick={() => handleOpenJobDetail(r.run_id)}
+                >
+                    详情
+                </Button>
+            ),
+        },
+    ];
+
+    // 详情弹窗标题名：admin 详情接口顶层 display_name → 请求参数里的原始名
+    const jobDetailDisplayName = String(
+        jobDetail?.display_name
+        || jobDetail?.request_payload?.display_name
+        || jobDetail?.request_payload?.job_name
+        || '',
+    ).trim();
 
     return (
         <div className="space-y-4">
@@ -459,90 +592,62 @@ export const AdminModelManagement: React.FC = () => {
                 key: 'models',
                 label: <span className="font-bold text-xs px-1"><ScanOutlined className="mr-1.5" />模型目录</span>,
                 children: (
-                  <div className="space-y-6 pt-2">
-            {/* 标题栏 */}
-            <div className="flex justify-between items-center">
-                <div>
-                    <h3 className="text-xl font-black text-slate-800 tracking-tight">模型库管理</h3>
-                    <p className="text-slate-400 text-xs mt-1 italic">
-                        自动扫描 models/ 目录，聚合 metadata.json / workflow_config.yaml / best_params.yaml
-                    </p>
-                </div>
-                <Space size="middle">
-                    {scanResult && (
-                        <Button
-                            icon={<ReloadOutlined />}
-                            loading={scanning}
-                            className="rounded-xl h-10 px-4 font-bold"
-                            onClick={() => handleScan(true)}
-                            title="跳过 5 分钟缓存，强制重新扫描磁盘"
-                        >
-                            强制刷新
-                        </Button>
-                    )}
-                    <Button
-                        type="primary"
-                        icon={<ScanOutlined />}
-                        loading={scanning}
-                        className="rounded-xl h-10 px-6 bg-slate-900 border-none font-bold shadow-lg shadow-slate-200"
-                        onClick={() => handleScan(false)}
+                  <div className="pt-2">
+                    <Panel
+                        title="模型目录"
+                        sub={scanResult
+                            ? `共 ${scanResult.total} 个目录 · 生产 ${scanResult.models.filter(m => m.is_production).length} 个`
+                            : '自动扫描 models 产物目录，聚合 metadata / 配置 / 性能指标'}
+                        right={
+                            <Space size={8}>
+                                {modelMarketFilter !== 'all' && (
+                                    <span className="text-[11px] text-slate-400">筛选 {filteredModels.length} 个</span>
+                                )}
+                                <Segmented
+                                    size="small"
+                                    value={modelMarketFilter}
+                                    onChange={(val) => setModelMarketFilter(val as string)}
+                                    options={MODEL_MARKET_OPTIONS.map(m => ({ value: m.value, label: m.label }))}
+                                />
+                                <Button
+                                    size="small"
+                                    icon={<ReloadOutlined />}
+                                    loading={scanning}
+                                    onClick={() => handleScan(true)}
+                                    title="跳过 5 分钟缓存，强制重新扫描磁盘"
+                                >
+                                    强制刷新
+                                </Button>
+                                <Button
+                                    size="small"
+                                    type="primary"
+                                    icon={<ScanOutlined />}
+                                    loading={scanning}
+                                    onClick={() => handleScan(false)}
+                                >
+                                    {scanning ? '扫描中…' : '重新扫描'}
+                                </Button>
+                            </Space>
+                        }
+                        bodyClassName="p-0"
                     >
-                        {scanning ? '扫描中…' : scanResult ? '重新扫描' : '开始扫描'}
-                    </Button>
-                </Space>
-            </div>
-
-            {/* 错误提示 */}
-            {scanError && !scanning && (
-                <div className="px-4 py-3 bg-rose-50 border border-rose-100 rounded-2xl text-xs text-rose-700">
-                    <strong className="font-bold">扫描失败：</strong>{scanError}
-                </div>
-            )}
-
-            {/* 首次未扫描提示 */}
-            {!scanResult && !scanning && !scanError && (
-                <div className="px-4 py-8 bg-slate-50 rounded-2xl text-center text-slate-500">
-                    <ScanOutlined className="text-3xl text-slate-300 mb-2" />
-                    <p className="text-sm">点击右上角 <strong className="text-slate-700">"开始扫描"</strong> 加载模型目录</p>
-                    <p className="text-xs text-slate-400 mt-1">扫描结果会缓存 5 分钟，重复点击不会再次读盘</p>
-                </div>
-            )}
-
-            {/* 扫描统计 */}
-            {scanResult && !scanning && (
-                <div className="flex items-center justify-between px-4 py-2 bg-slate-50 rounded-2xl text-xs text-slate-500">
-                    <Space>
-                        <CheckCircleOutlined className="text-green-500" />
-                        共发现 <span className="font-bold text-slate-800">{scanResult.total}</span> 个模型目录
-                        （生产：{scanResult.models.filter(m => m.is_production).length} 个）
-                        {scanResult.from_cache && (
-                            <Tag color="blue" className="text-[10px] m-0">缓存命中</Tag>
+                        {scanError && !scanning && (
+                            <div className="mx-4 mt-3 rounded-md border border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                <strong className="font-semibold">扫描失败：</strong>{scanError}
+                            </div>
                         )}
-                        {modelMarketFilter !== 'all' && (
-                            <span>· 当前筛选：<Tag color={MODEL_MARKET_OPTIONS.find(o => o.value === modelMarketFilter)?.color} className="m-0">{MODEL_MARKET_OPTIONS.find(o => o.value === modelMarketFilter)?.label}</Tag> {filteredModels.length} 个</span>
-                        )}
-                    </Space>
-                    <Segmented
-                        size="small"
-                        value={modelMarketFilter}
-                        onChange={(val) => setModelMarketFilter(val as string)}
-                        options={MODEL_MARKET_OPTIONS.map(m => ({ value: m.value, label: m.label }))}
-                    />
-                </div>
-            )}
-
-            {/* 模型列表 */}
-            <Spin spinning={scanning} tip="正在扫描模型目录…">
-                <Table
-                    columns={columns.map(c => ({ ...c, align: 'center' as const }))}
-                    dataSource={filteredModels}
-                    rowKey="model_id"
-                    pagination={{ pageSize: 10 }}
-                    scroll={{ x: 'max-content' }}
-                    className="admin-table border-none shadow-sm rounded-3xl overflow-hidden"
-                    locale={{ emptyText: scanning ? ' ' : '暂无模型，点击"重新扫描"加载' }}
-                />
-            </Spin>
+                        <Spin spinning={scanning} tip="正在扫描模型目录…">
+                            <Table
+                                columns={columns}
+                                dataSource={filteredModels}
+                                rowKey="model_id"
+                                size="small"
+                                pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 条` }}
+                                scroll={{ x: 'max-content' }}
+                                locale={{ emptyText: scanning ? ' ' : '暂无模型，点击「重新扫描」加载' }}
+                            />
+                        </Spin>
+                    </Panel>
                   </div>
                 ),
               },
@@ -550,155 +655,61 @@ export const AdminModelManagement: React.FC = () => {
                 key: 'training-jobs',
                 label: <span className="font-bold text-xs px-1"><HistoryOutlined className="mr-1.5" />训练任务</span>,
                 children: (
-                  <div className="space-y-4 pt-2">
-                    <div className="flex justify-between items-center">
-                        <div>
-                            <h3 className="text-xl font-black text-slate-800 tracking-tight">训练任务历史</h3>
-                            <p className="text-slate-400 text-xs mt-1 italic">管理员查看所有用户的模型训练任务记录</p>
-                        </div>
-                        <Space>
-                            <Select
-                                placeholder="按状态筛选"
-                                allowClear
-                                value={jobsStatusFilter}
-                                onChange={(val) => {
-                                    setJobsStatusFilter(val);
-                                    setJobsPage(1);
-                                    loadTrainingJobs(1, val);
+                  <div className="pt-2">
+                    <Panel
+                        title="训练任务"
+                        sub={jobsData ? `共 ${jobsData.total} 条 · 全部用户` : '管理员查看所有用户的模型训练任务记录'}
+                        right={
+                            <Space size={8}>
+                                <Select
+                                    size="small"
+                                    placeholder="按状态筛选"
+                                    allowClear
+                                    value={jobsStatusFilter}
+                                    onChange={(val) => {
+                                        setJobsStatusFilter(val);
+                                        setJobsPage(1);
+                                        loadTrainingJobs(1, val);
+                                    }}
+                                    className="w-32"
+                                    options={[
+                                        { value: 'pending', label: '待执行' },
+                                        { value: 'provisioning', label: '分配中' },
+                                        { value: 'running', label: '训练中' },
+                                        { value: 'waiting_callback', label: '等待回调' },
+                                        { value: 'completed', label: '已完成' },
+                                        { value: 'failed', label: '已失败' },
+                                    ]}
+                                />
+                                <Button
+                                    size="small"
+                                    icon={<ReloadOutlined />}
+                                    loading={jobsLoading}
+                                    onClick={() => loadTrainingJobs(jobsPage, jobsStatusFilter)}
+                                >
+                                    刷新
+                                </Button>
+                            </Space>
+                        }
+                        bodyClassName="p-0"
+                    >
+                        <Spin spinning={jobsLoading}>
+                            <Table
+                                columns={jobColumns}
+                                dataSource={jobsData?.items ?? []}
+                                rowKey="run_id"
+                                size="small"
+                                pagination={{
+                                    current: jobsPage,
+                                    pageSize: 20,
+                                    total: jobsData?.total ?? 0,
+                                    onChange: (p) => { setJobsPage(p); loadTrainingJobs(p, jobsStatusFilter); },
+                                    showTotal: (t) => `共 ${t} 条`,
                                 }}
-                                className="w-36"
-                                options={[
-                                    { value: 'pending', label: '待执行' },
-                                    { value: 'provisioning', label: '分配中' },
-                                    { value: 'running', label: '训练中' },
-                                    { value: 'waiting_callback', label: '等待回调' },
-                                    { value: 'completed', label: '已完成' },
-                                    { value: 'failed', label: '已失败' },
-                                ]}
+                                locale={{ emptyText: jobsLoading ? ' ' : '暂无训练任务记录，点击「刷新」加载' }}
                             />
-                            <Button
-                                icon={<ReloadOutlined />}
-                                className="rounded-xl h-9 border-slate-200 font-bold text-xs"
-                                loading={jobsLoading}
-                                onClick={() => loadTrainingJobs(jobsPage, jobsStatusFilter)}
-                            >
-                                刷新
-                            </Button>
-                        </Space>
-                    </div>
-                    <Spin spinning={jobsLoading}>
-                        <Table
-                            columns={[
-                                {
-                                    title: '任务 ID',
-                                    dataIndex: 'run_id',
-                                    key: 'run_id',
-                                    render: (id: string) => (
-                                        <Tooltip title={id}>
-                                            <Typography.Text code className="text-[10px]">
-                                                {id.length > 28 ? `${id.slice(0, 28)}…` : id}
-                                            </Typography.Text>
-                                        </Tooltip>
-                                    ),
-                                },
-                                {
-                                    title: '用户',
-                                    key: 'user',
-                                    render: (_: any, r: any) => (
-                                        <div>
-                                            <div className="text-xs font-bold text-slate-700">{r.user_id}</div>
-                                            <div className="text-[10px] text-slate-400">{r.tenant_id}</div>
-                                        </div>
-                                    ),
-                                },
-                                {
-                                    title: '状态',
-                                    dataIndex: 'status',
-                                    key: 'status',
-                                    render: (status: string, r: any) => {
-                                        const colorMap: Record<string, string> = {
-                                            completed: 'green', failed: 'red', running: 'blue',
-                                            pending: 'default', provisioning: 'purple', waiting_callback: 'gold',
-                                        };
-                                        return (
-                                            <div>
-                                                <Tag color={colorMap[status] ?? 'default'} className="font-bold text-[10px]">
-                                                    {status}
-                                                </Tag>
-                                                {status === 'running' && (
-                                                    <Progress percent={r.progress} size="small" className="mt-1 w-24" />
-                                                )}
-                                            </div>
-                                        );
-                                    },
-                                },
-                                {
-                                    title: '模型类型 / 特征数',
-                                    key: 'model_info',
-                                    render: (_: any, r: any) => (
-                                        <div>
-                                            {r.model_type && <Tag color="cyan" className="text-[10px] font-bold">{r.model_type}</Tag>}
-                                            {r.features_count > 0 && (
-                                                <span className="text-[10px] text-slate-400">{r.features_count} 个特征</span>
-                                            )}
-                                        </div>
-                                    ),
-                                },
-                                {
-                                    title: '训练区间',
-                                    key: 'train_range',
-                                    render: (_: any, r: any) => r.train_start ? (
-                                        <span className="text-[10px] font-mono text-slate-500">
-                                            {r.train_start} → {r.train_end}
-                                        </span>
-                                    ) : <span className="text-slate-300">—</span>,
-                                },
-                                {
-                                    title: '注册模型',
-                                    dataIndex: 'registered_model_id',
-                                    key: 'registered_model_id',
-                                    render: (id: string) => id ? (
-                                        <Tag color="green" className="text-[10px] font-mono font-bold">{id}</Tag>
-                                    ) : <span className="text-slate-300 text-xs">—</span>,
-                                },
-                                {
-                                    title: '创建时间',
-                                    dataIndex: 'created_at',
-                                    key: 'created_at',
-                                    render: (d: string) => (
-                                        <span className="text-xs text-slate-400 font-mono">
-                                            {d ? new Date(d).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}
-                                        </span>
-                                    ),
-                                },
-                                {
-                                    title: '操作',
-                                    key: 'action',
-                                    render: (_: any, r: any) => (
-                                        <Button
-                                            type="link"
-                                            size="small"
-                                            className="font-bold"
-                                            onClick={() => handleOpenJobDetail(r.run_id)}
-                                        >
-                                            详情
-                                        </Button>
-                                    ),
-                                },
-                            ]}
-                            dataSource={jobsData?.items ?? []}
-                            rowKey="run_id"
-                            pagination={{
-                                current: jobsPage,
-                                pageSize: 20,
-                                total: jobsData?.total ?? 0,
-                                onChange: (p) => { setJobsPage(p); loadTrainingJobs(p, jobsStatusFilter); },
-                                showTotal: (t) => `共 ${t} 条`,
-                            }}
-                            className="admin-table border-none shadow-sm rounded-3xl overflow-hidden"
-                            locale={{ emptyText: jobsLoading ? ' ' : '暂无训练任务记录，点击刷新加载' }}
-                        />
-                    </Spin>
+                        </Spin>
+                    </Panel>
                   </div>
                 ),
               },
@@ -712,42 +723,54 @@ export const AdminModelManagement: React.FC = () => {
                 footer={null}
                 width={720}
                 title={
-                    <div className="font-black text-slate-800 flex items-center gap-2">
+                    <div className="flex items-center gap-2 text-[14px] font-semibold text-slate-800">
                         <ThunderboltOutlined className="text-blue-500" />
-                        训练任务详情
+                        {jobDetailDisplayName || '训练任务详情'}
                     </div>
                 }
             >
                 {jobDetailLoading ? (
                     <div className="flex items-center justify-center h-40"><Spin /></div>
                 ) : jobDetail ? (
-                    <div className="space-y-4 mt-4">
+                    <div className="mt-4 space-y-4">
                         <Descriptions column={2} size="small" bordered>
+                            {jobDetail.display_name && (
+                                <Descriptions.Item label="展示名" span={2}>
+                                    {jobDetail.display_name}
+                                </Descriptions.Item>
+                            )}
                             <Descriptions.Item label="任务 ID" span={2}>
                                 <Typography.Text code className="text-[10px] break-all">{jobDetail.run_id}</Typography.Text>
                             </Descriptions.Item>
                             <Descriptions.Item label="状态">
-                                <Tag color={{ completed: 'green', failed: 'red', running: 'blue', pending: 'default' }[jobDetail.status as string] ?? 'default'} className="font-bold">
-                                    {jobDetail.status}
+                                <Tag color={JOB_STATUS_META[jobDetail.status as string]?.color ?? 'default'} className="font-bold">
+                                    {jobStatusLabel(jobDetail.status as string)}
                                 </Tag>
                             </Descriptions.Item>
                             <Descriptions.Item label="进度">
                                 {jobDetail.status === 'running' ? (
                                     <Progress percent={jobDetail.progress} size="small" />
-                                ) : <span className="text-slate-500 text-xs">{jobDetail.progress ?? 0}%</span>}
+                                ) : <span className="admin-num text-xs text-slate-500">{jobDetail.progress ?? 0}%</span>}
                             </Descriptions.Item>
                             <Descriptions.Item label="用户">{jobDetail.user_id}</Descriptions.Item>
                             <Descriptions.Item label="租户">{jobDetail.tenant_id}</Descriptions.Item>
                             <Descriptions.Item label="创建时间" span={2}>
-                                {jobDetail.created_at ? new Date(jobDetail.created_at).toLocaleString('zh-CN') : '—'}
+                                <span className="admin-num">
+                                    {jobDetail.created_at ? new Date(jobDetail.created_at).toLocaleString('zh-CN') : '—'}
+                                </span>
                             </Descriptions.Item>
                         </Descriptions>
                         {jobDetail.result?.model_registration && (
-                            <div className="p-3 bg-green-50 rounded-xl border border-green-200">
-                                <div className="text-xs font-bold text-green-700 mb-1">✅ 已注册模型</div>
-                                <div className="text-xs font-mono text-green-600">
-                                    model_id: {jobDetail.result.model_registration.model_id}
+                            <div className="rounded-lg border border-green-200 bg-green-50 p-3">
+                                <div className="mb-1 text-xs font-semibold text-green-700">已注册模型</div>
+                                <div className="text-xs font-medium text-green-800">
+                                    {jobDetail.registered_model_display_name || jobDetail.result.model_registration.model_id}
                                 </div>
+                                {jobDetail.registered_model_display_name && (
+                                    <div className="mt-0.5 truncate admin-num text-[10px] text-green-600">
+                                        {jobDetail.result.model_registration.model_id}
+                                    </div>
+                                )}
                             </div>
                         )}
                         {jobDetail.logs && (
@@ -782,11 +805,11 @@ export const AdminModelManagement: React.FC = () => {
                 footer={null}
                 width={780}
                 title={
-                    <div className="font-black text-slate-800 flex items-center gap-2">
+                    <div className="flex items-center gap-2 text-[14px] font-semibold text-slate-800">
                         <FolderOpenOutlined className="text-amber-500" />
-                        {detailModel?.model_id}
+                        {resolveModelDisplayName(detailModel?.metadata, detailModel?.qlib_config) || detailModel?.model_id}
                         {detailModel?.is_production && (
-                            <Tag color="green" className="ml-2 text-[10px]">PRODUCTION</Tag>
+                            <Tag color="green" className="ml-2 text-[10px]">生产</Tag>
                         )}
                     </div>
                 }
@@ -795,7 +818,10 @@ export const AdminModelManagement: React.FC = () => {
                     <div className="space-y-4 mt-2">
                         {/* 基本信息 */}
                         <Descriptions size="small" column={2} bordered>
-                            <Descriptions.Item label="模型目录">
+                            <Descriptions.Item label="模型 ID" span={2}>
+                                <Text code className="text-[10px] break-all">{detailModel.model_id}</Text>
+                            </Descriptions.Item>
+                            <Descriptions.Item label="模型目录" span={2}>
                                 <Text code className="text-[10px] break-all">{detailModel.dir_path}</Text>
                             </Descriptions.Item>
                             <Descriptions.Item label="特征维度">

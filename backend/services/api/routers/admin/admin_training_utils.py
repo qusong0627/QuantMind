@@ -1221,21 +1221,13 @@ async def cancel_training_run(run_id: str, current_user: dict[str, Any]) -> dict
     return {"runId": run_id, "status": "cancelled", "cancelled": True}
 
 
-async def get_training_run_for_owner(run_id: str, current_user: dict[str, Any]) -> dict[str, Any]:
-    tenant_id = str(current_user.get("tenant_id") or "default")
-    user_id = str(current_user.get("user_id") or current_user.get("sub") or "unknown")
+async def _build_training_run_detail(record: TrainingJobRecord) -> dict[str, Any]:
+    """由任务记录组装详情（DB 记录 + 实时流快照 + 结果归一化）。
 
-    async with get_session(read_only=True) as session:
-        stmt = select(TrainingJobRecord).where(
-            TrainingJobRecord.id == run_id,
-            TrainingJobRecord.tenant_id == tenant_id,
-            TrainingJobRecord.user_id == user_id,
-        )
-        record = (await session.execute(stmt)).scalar_one_or_none()
-
-    if not record:
-        raise HTTPException(status_code=404, detail="Training run not found")
-
+    所有权校验收在调用方：owner 路径（用户训练页）与 admin 路径（后台详情弹窗）
+    共用这段收尾逻辑，避免两套状态判定各自漂移。
+    """
+    run_id = record.id
     effective_status = str(record.status or "")
     raw_result = record.result if isinstance(record.result, dict) else {}
     normalized_result, normalize_error = _normalize_training_result_payload(
@@ -1288,6 +1280,68 @@ async def get_training_run_for_owner(run_id: str, current_user: dict[str, Any]) 
         "result": normalized_result,
         "isCompleted": effective_status in ["completed", "failed", "cancelled"],
     }
+
+
+async def get_training_run_for_owner(run_id: str, current_user: dict[str, Any]) -> dict[str, Any]:
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "unknown")
+
+    async with get_session(read_only=True) as session:
+        stmt = select(TrainingJobRecord).where(
+            TrainingJobRecord.id == run_id,
+            TrainingJobRecord.tenant_id == tenant_id,
+            TrainingJobRecord.user_id == user_id,
+        )
+        record = (await session.execute(stmt)).scalar_one_or_none()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Training run not found")
+
+    return await _build_training_run_detail(record)
+
+
+async def get_training_run_for_admin(run_id: str) -> dict[str, Any]:
+    """后台训练任务详情：管理员看全部用户（列表已是全量，详情不再按 owner 过滤）。
+
+    在共用收尾段之上补弹窗展示字段：任务展示名 / 用户 / 租户 / 创建时间 / 请求参数，
+    以及注册模型显示名（权威源 = qm_user_models.metadata_json.display_name）。
+    """
+    async with get_session(read_only=True) as session:
+        stmt = select(TrainingJobRecord).where(TrainingJobRecord.id == run_id)
+        record = (await session.execute(stmt)).scalar_one_or_none()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Training run not found")
+
+    detail = await _build_training_run_detail(record)
+
+    req_payload = record.request_payload if isinstance(record.request_payload, dict) else {}
+    display_name = str(req_payload.get("display_name") or req_payload.get("job_name") or "").strip()
+
+    model_registration = (detail.get("result") or {}).get("model_registration") or {}
+    registered_model_id = (
+        str(model_registration.get("model_id") or "").strip() if isinstance(model_registration, dict) else ""
+    )
+    registered_model_display_name = ""
+    if registered_model_id:
+        from .realtime import _load_model_display_names
+
+        names = await _load_model_display_names([registered_model_id])
+        registered_model_display_name = names.get(registered_model_id, "")
+
+    detail.update(
+        {
+            "run_id": record.id,
+            "tenant_id": record.tenant_id,
+            "user_id": record.user_id,
+            "display_name": display_name,
+            "created_at": str(record.created_at or ""),
+            "updated_at": str(record.updated_at or ""),
+            "request_payload": req_payload,
+            "registered_model_display_name": registered_model_display_name,
+        }
+    )
+    return detail
 
 
 async def get_latest_training_run_for_owner(

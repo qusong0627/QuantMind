@@ -1,9 +1,10 @@
 /**
- * 后台管理外壳（2026-10-09 机构版改版：深色导航轴 + 浅色密排内容）。
+ * 后台管理外壳（2026-10-09 机构版改版：浅色统一导航轴 + 浅色密排内容）。
  *
  * 改版要点：
- * - 导航从 antd Menu 换成自绘导航轴（#0B1220）：分组标题、左缘选中指示条、
- *   折叠态图标 + 右侧 Tooltip；分组与路由键**不变**，其余 23 个面板只换外壳。
+ * - 导航从 antd Menu 换成自绘导航轴（白底 + slate 边框 + indigo 选中）：
+ *   分组标题、左缘选中指示条、折叠态图标 + 右侧 Tooltip；分组与路由键**不变**，
+ *   其余 23 个面板只换外壳。
  * - 顶栏压到 48px，标题跟随当前路由（分组名做弱化的面包屑尾）；右侧健康告示
  *   与左下负载读数**同源**（AdminPage 统一轮询 getSystemLoad，20s）。
  * - 内容区包装类沿用旧逻辑（orders/risk/inference/profile 的滚动与宽度特例），
@@ -223,14 +224,14 @@ const AdminPage: React.FC = () => {
 
     return (
         <div className="admin-page flex h-screen w-full overflow-hidden bg-[#F4F6F8] font-sans">
-            {/* 深色导航轴 */}
+            {/* 浅色导航轴（与内容区同色系；选中态用 indigo 口音） */}
             <aside
-                className={`flex h-full shrink-0 flex-col bg-[#0B1220] transition-[width] duration-200 ${
+                className={`flex h-full shrink-0 flex-col border-r border-slate-200 bg-white transition-[width] duration-200 ${
                     collapsed ? 'w-16' : 'w-[236px]'
                 }`}
             >
                 <div
-                    className={`flex h-14 shrink-0 items-center gap-2.5 border-b border-white/[0.06] ${
+                    className={`flex h-14 shrink-0 items-center gap-2.5 border-b border-slate-100 ${
                         collapsed ? 'justify-center' : 'px-4'
                     }`}
                 >
@@ -239,10 +240,10 @@ const AdminPage: React.FC = () => {
                     </div>
                     {!collapsed && (
                         <div className="min-w-0">
-                            <div className="truncate text-[13px] font-bold leading-tight tracking-wide text-white">
+                            <div className="truncate text-[13px] font-bold leading-tight tracking-wide text-slate-800">
                                 QuantMind
                             </div>
-                            <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                            <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                                 管理后台
                             </div>
                         </div>
@@ -253,7 +254,7 @@ const AdminPage: React.FC = () => {
                     {NAV_GROUPS.map((group, gi) => (
                         <div key={group.label || `g${gi}`}>
                             {group.label && !collapsed && (
-                                <div className="mb-1 px-2 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                                <div className="mb-1 px-2 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
                                     {group.label}
                                 </div>
                             )}
@@ -268,22 +269,22 @@ const AdminPage: React.FC = () => {
                                                 collapsed
                                                     ? `relative mx-auto flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
                                                           active
-                                                              ? 'bg-white/[0.08] text-indigo-300'
-                                                              : 'text-slate-500 hover:bg-white/[0.04] hover:text-slate-300'
+                                                              ? 'bg-indigo-50 text-indigo-600'
+                                                              : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
                                                       }`
                                                     : `relative flex h-[34px] w-full items-center gap-2.5 rounded-md pl-3 pr-2 text-[13px] transition-colors ${
                                                           active
-                                                              ? 'bg-white/[0.08] font-semibold text-white'
-                                                              : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200'
+                                                              ? 'bg-indigo-50 font-semibold text-indigo-700'
+                                                              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
                                                       }`
                                             }
                                         >
                                             {active && !collapsed && (
-                                                <span className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r bg-indigo-400" />
+                                                <span className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r bg-indigo-500" />
                                             )}
                                             <span
                                                 className={`flex h-4 w-4 shrink-0 items-center justify-center text-[14px] ${
-                                                    active ? 'text-indigo-300' : 'text-slate-500'
+                                                    active ? 'text-indigo-600' : 'text-slate-400'
                                                 }`}
                                             >
                                                 {item.icon}
@@ -309,7 +310,7 @@ const AdminPage: React.FC = () => {
                     <button
                         type="button"
                         onClick={() => setCollapsed((v) => !v)}
-                        className="flex h-9 w-full items-center justify-center gap-2 border-t border-white/[0.06] text-[11px] text-slate-500 transition-colors hover:bg-white/[0.04] hover:text-slate-300"
+                        className="flex h-9 w-full items-center justify-center gap-2 border-t border-slate-200 text-[11px] text-slate-400 transition-colors hover:bg-slate-50 hover:text-slate-600"
                     >
                         {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
                         {!collapsed && <span>收起导航</span>}
