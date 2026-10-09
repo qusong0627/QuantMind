@@ -7,6 +7,9 @@
  *   2. 策略下拉**不含非当前市场**的策略（旧版漏传 market，港股策略混进 A 股视图）
  *   3. 守护条常驻 + 关联「关闭页面不影响运行」的明示
  *   4. 切走再回来策略仍在运行；停止入口必须弹二次确认
+ *   5. 托管档位 / 配置生效徽章（2026-10-09 改版新增）：档位 chip 常显于运行态、
+ *      配置版本与生效状态合并为一枚徽章、CONTROL 台不再携带 USER: 噪声；
+ *      实盘栏 × 沙箱档位必须成对出现解释句（用户 2026-10-09「有些还是模拟运行？」）
  *
  * ⚠️ **本探针绝不真停策略**：第 4 项只打开确认弹窗并校验文案与原因选择器，随后
  * 点「取消」。生产环境上确认键按下去就是真停机——自动化探针没有这个权限。
@@ -200,10 +203,17 @@ if (!landing.found) {
 
 // ── 1. 模式文案一致性：当前模式下「模拟」字样是否该出现 ───────────────────────
 {
-  const scan = await page.evaluate(() => ({
-    text: document.querySelector('[data-testid="strategy-console"]')?.innerText || '',
-    mode: document.querySelector('[data-testid="strategy-console"]')?.getAttribute('data-mode'),
-  }));
+  const scan = await page.evaluate(() => {
+    const root = document.querySelector('[data-testid="strategy-console"]');
+    if (!root) return { text: '', mode: null };
+    // 托管档位 chip 与沙箱解释句是**后端事实的转述**（托管档位启动时选定，实盘栏里
+    // 也可能真的是沙箱），不是「界面把实盘说成模拟」的回归——2026-10-09 改版起它们
+    // 会合法地出现在实盘控制台里。扫描前整体剔除；剔除不是放过，专项断言在 1b/6。
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll('[data-testid="console-tier-chip"], [data-testid="sandbox-tier-note"]')
+      .forEach((el) => el.remove());
+    return { text: clone.textContent || '', mode: root.getAttribute('data-mode') };
+  });
   // 「实盘/模拟」是把两种模式并列说的正当措辞（如空态引导「在实盘/模拟页启动策略」），
   // 先剔掉再扫，避免把正当措辞当回归——但剔的只是这一个并列词组，单说的「模拟」照抓。
   const cleaned = scan.text.replace(/实盘\s*[/／]\s*模拟|模拟\s*[/／]\s*实盘/g, '');
@@ -221,6 +231,41 @@ if (!landing.found) {
       '模拟页签下必须能看出这是模拟盘（否则用户以为在下真单）',
     );
   }
+}
+
+// ── 1b. 托管档位 / 配置生效徽章 / 工程噪声（2026-10-09 改版）──────────────────
+{
+  const chips = await page.evaluate(() => {
+    const root = document.querySelector('[data-testid="strategy-console"]');
+    const textOf = (el) => (el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : null);
+    return {
+      runState: document.querySelector('[data-testid="command-bar"]')?.getAttribute('data-run-state') || null,
+      tier: textOf(root?.querySelector('[data-testid="console-tier-chip"]')),
+      config: textOf(root?.querySelector('[data-testid="config-effect-chip"]')),
+      userNoise: /USER:\s*\d+/.test(root?.innerText || ''),
+    };
+  });
+  const liveStates = ['running', 'starting', 'config_pending'];
+  if (liveStates.includes(chips.runState)) {
+    record(
+      '运行中可见托管档位 chip（「钱进哪个池子」一眼可见）',
+      /沙箱模拟|影子运行|实盘运行|未登记|未知/.test(chips.tier || ''),
+      `档位 chip=${chips.tier || '未渲染'}`,
+    );
+    record(
+      '配置版本与生效状态合并为一枚徽章',
+      /配置 v\d+ · (已生效|待下个周期生效)/.test(chips.config || ''),
+      `配置徽章=${chips.config || '未渲染'}`,
+    );
+  } else {
+    record('运行中可见托管档位 chip', 'NA', `runState=${chips.runState}：未运行时不展示档位是设计内行为`);
+    record('配置版本与生效状态合并为一枚徽章', 'NA', `runState=${chips.runState}`);
+  }
+  record(
+    '控制台不再携带 USER: 工程噪声',
+    !chips.userNoise,
+    chips.userNoise ? '仍出现 USER: 字样' : '未出现',
+  );
 }
 
 // ── 2. 市场闸门：下拉里的策略必须全部属于当前市场 ─────────────────────────────
@@ -448,6 +493,64 @@ if (!landing.found) {
       panel.entries > 0 || /等待第一个周期|启动策略后|暂无运行日志/.test(panel.text),
       panel.text.slice(0, 70) + '…',
     );
+  }
+}
+
+// ── 6. 实盘栏 × 托管档位一致性（2026-10-09 用户之问）────────────────────────
+// 用户 2026-10-09 拿「实盘运行台」与「沙箱模拟」对不出来，问「有些还是模拟运行？」。
+// 事实：托管档位启动时选定、不随页签变。所以实盘栏里档位真是沙箱时，页内必须给出
+// 解释句（sandbox-tier-note）；档位不是沙箱时解释句不能出现——两个方向都断言。
+{
+  let real = null;
+  try {
+    await page.goto(`${BASE}/#/live`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(5000);
+    await dismissModals();
+    const liveTab = page.locator('button', { hasText: /^策略管理$/ }).first();
+    if (await liveTab.count()) await liveTab.click({ timeout: 8000 }).catch(() => {});
+    await page.waitForSelector('[data-testid="strategy-console"]', { timeout: 20000 });
+    // 等 status 落地：档位/配置徽章出现，或（未运行的合法情形）「加载中…」消失。
+    // 固定 2.5s 等法实测在实盘栏会读空（首轮 2026-10-09 就量到「档位未渲染」假象）。
+    await page.waitForFunction(() => {
+      const root = document.querySelector('[data-testid="strategy-console"]');
+      if (!root) return false;
+      if (root.querySelector('[data-testid="console-tier-chip"], [data-testid="config-effect-chip"]')) return true;
+      return !/加载中…/.test(root.innerText || '');
+    }, { timeout: 15000 }).catch(() => {});
+    real = await page.evaluate(() => {
+      const root = document.querySelector('[data-testid="strategy-console"]');
+      const textOf = (el) => (el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : null);
+      return {
+        mode: root?.getAttribute('data-mode') || null,
+        tier: textOf(root?.querySelector('[data-testid="console-tier-chip"]')),
+        note: textOf(root?.querySelector('[data-testid="sandbox-tier-note"]')),
+      };
+    });
+  } catch (e) {
+    real = { error: String((e && e.message) || e).split('\n')[0].slice(0, 120) };
+  }
+  if (!real || real.error) {
+    record('实盘栏档位与沙箱解释句成对', 'NA', `实盘栏未取到（${real?.error || '无控制台'}）`);
+  } else if (String(real.mode).toLowerCase() !== 'real') {
+    record('实盘栏档位与沙箱解释句成对', 'NA', `实盘栏 data-mode=${real.mode}（非 REAL，形态不符）`);
+  } else {
+    const tierIsSandbox = /沙箱模拟/.test(real.tier || '');
+    record(
+      '实盘栏档位与沙箱解释句成对（沙箱档位必有解释，非沙箱必无）',
+      tierIsSandbox === !!real.note,
+      tierIsSandbox
+        ? `档位=${real.tier} → 解释句${real.note ? '已给出' : '缺失'}`
+        : `档位=${real.tier || '未渲染（未运行？）'} → 解释句${real.note ? '不应出现却出现' : '未出现'}`,
+    );
+    if (tierIsSandbox && real.note) {
+      record(
+        '沙箱解释句说清「不碰真钱」与切换路径',
+        /不碰真钱|模拟账户/.test(real.note) && /停止|重新启动/.test(real.note),
+        real.note.slice(0, 80) + '…',
+      );
+    } else {
+      record('沙箱解释句说清「不碰真钱」与切换路径', 'NA', '当前档位非沙箱，无解释句可验');
+    }
   }
 }
 

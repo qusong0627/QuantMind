@@ -25,6 +25,19 @@ import { checkDiversification } from '../../../components/shared/compliance/dive
 import { StockLabel } from './StockLabel';
 import { CARD, CardHeader } from './cardKit';
 
+/** plan.mode 是后端枚举——raw 英文枚举铺在中文界面上，用户看不出这单进的是哪个账户
+ *  （2026-10-09 起改中文；未知值按原样显示，不猜）。 */
+const PLAN_MODE_LABELS: Record<string, string> = {
+  SIMULATION: '模拟盘',
+  SHADOW: '影子运行',
+  REAL: '实盘',
+};
+
+const planModeLabel = (mode?: string | null): string => {
+  const key = String(mode || 'SIMULATION');
+  return PLAN_MODE_LABELS[key] || key;
+};
+
 interface PlanCardProps {
   plan: PlanBlock | null | undefined;
   onDrillDown?: () => void;
@@ -151,7 +164,7 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onOrderDr
             )}
             {plan?.strategy_name && (
               <span className="text-[11px] text-slate-400 truncate max-w-[200px]">
-                {plan.strategy_name}（{plan.mode || 'SIMULATION'}）
+                {plan.strategy_name}（{planModeLabel(plan.mode)}）
               </span>
             )}
           </>

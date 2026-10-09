@@ -131,7 +131,6 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                     loading={!ready.status}
                     runState={runState}
                     lastUpdatedAt={overview.lastUpdatedAt}
-                    userId={userId}
                     strategyOptions={strategyOptions}
                     strategiesLoading={overview.strategiesLoading}
                     selectedStrategyId={selectedStrategyId}
@@ -153,6 +152,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                     loading={!ready.status}
                     latestRun={latestRun}
                     defaultModelName={defaultModelName}
+                    consoleMode={copyMode}
                 />
 
                 {/* L3 节奏层：频率档位 / 调仓 / 时段 / 响应 */}

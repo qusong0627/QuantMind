@@ -1,5 +1,6 @@
 import React from 'react';
 import { Skeleton } from 'antd';
+import { Eye, ShieldAlert, ShieldCheck } from 'lucide-react';
 import type { RealTradingStatus } from '../../../../../services/realTradingService';
 import type { LatestInferenceRunInfo } from '../../../../../services/modelTrainingService';
 import { RUN_STATE_META } from '../topologyTypes';
@@ -11,6 +12,10 @@ interface RuntimeLayerProps {
     loading: boolean;
     latestRun: LatestInferenceRunInfo | null;
     defaultModelName: string;
+    /** 本页签属于哪个控制台（REAL=实盘栏）。托管档位由启动时选定、不随页签变：
+     *  实盘栏里托管策略却跑在沙箱档位时，必须有一句显式解释，否则「实盘运行台
+     *  ＋沙箱模拟」摆在一起就是自相矛盾（2026-10-09 用户原话「有些还是模拟运行？」）。 */
+    consoleMode: 'REAL' | 'SIMULATION';
 }
 
 const ParamCell: React.FC<{ label: string; value: string; title?: string }> = ({ label, value, title }) => (
@@ -40,9 +45,70 @@ const taskLabel = (value?: string | null): string => {
     return value || '-';
 };
 
+/** 托管档位（后端 `mode`，启动时选定）的展示元数据。
+ *
+ *  档位回答的是「钱在哪个池子里」，是整页最要紧的一句话，所以独立成语义色
+ *  chip：实盘=rose（危险）、影子=violet（中间态）、沙箱=sky（安全）。
+ *  未登记的档位值按原样显示——绝不用「实盘运行」兜底，否则未知值会被渲染得
+ *  比沙箱更吓人，方向就反了。 */
+const TIER_META: Record<string, { label: string; sub: string; tone: string; tip: string; icon: React.ReactNode }> = {
+    SIMULATION: {
+        label: '沙箱模拟',
+        sub: '不碰真钱',
+        tone: 'bg-sky-50 text-sky-700 border-sky-200',
+        tip: '策略运行档位（启动时选定，不随页签切换）：委托只落模拟账户，不碰真实资金',
+        icon: <ShieldCheck size={13} />,
+    },
+    SHADOW: {
+        label: '影子运行',
+        sub: '真行情不下单',
+        tone: 'bg-violet-50 text-violet-700 border-violet-200',
+        tip: '策略运行档位（启动时选定，不随页签切换）：用真实行情算信号，但不向券商发单',
+        icon: <Eye size={13} />,
+    },
+    REAL: {
+        label: '实盘运行',
+        sub: '真实资金',
+        tone: 'bg-rose-50 text-rose-700 border-rose-200',
+        tip: '策略运行档位（启动时选定，不随页签切换）：委托会进券商真实下单',
+        icon: <ShieldAlert size={13} />,
+    },
+};
+
+const tierMeta = (mode?: string | null) => TIER_META[String(mode ?? '')] ?? {
+    label: mode ? String(mode) : '未知档位',
+    sub: mode ? '未登记档位' : '后端未给出档位',
+    tone: 'bg-slate-50 text-slate-600 border-slate-200',
+    tip: '后端 mode 返回了界面未登记的值，按原样显示以免误读',
+    icon: <ShieldAlert size={13} />,
+};
+
+/** ISO 时间戳转本地可读——后端给的是 UTC ISO，直接铺给用户看是工程噪声。 */
+const fmtStamp = (iso: string): string => {
+    const t = new Date(iso);
+    return Number.isNaN(t.getTime()) ? iso : t.toLocaleString();
+};
+
+const Stat: React.FC<{ label: string; value: number; tone: string }> = ({ label, value, tone }) => (
+    <span className="flex items-baseline gap-1.5">
+        <span className="text-xs font-bold text-slate-400">{label}</span>
+        <span className={`text-lg font-black tabular-nums ${tone}`}>{value}</span>
+    </span>
+);
+
 /**
- * L2 运行层：左列运行策略 + 策略参数，右列下个交易日计划 + 任务汇报。
- * 交易记录已下沉到独立全宽 section，本层只保留状态与计划。
+ * L2 运行层：状态机横幅（内嵌托管档位 chip）→ 配置生效 chip → 运行策略 + 下个
+ * 交易日计划 + 任务汇报。交易记录与调仓计划已下沉到独立全宽 section。
+ *
+ * 2026-10-09 改版（用户：「杂乱的很、不专业、不知道重点在哪里、布局不合理」）：
+ * 1. 档位从 11px 灰字升级为横幅内语义色 chip（钱进哪个池子是第一重点），
+ *    实盘栏 × 沙箱档位时补一句显式解释；
+ * 2. 配置版本 + 生效状态合并为一枚 chip（热更新的「新版本何时生效」一眼可见），
+ *    删除 CommandBar 里重复的「配置 v{n}」；
+ * 3. 删除「策略参数」卡——其 4 格（调仓周期/买卖时点/委托方式/单轮最大委托）
+ *    与 L3 节奏层逐项重复，「大跌拦截|止损」条与 L4 风控层重复；
+ * 4. 任务汇报改全宽横条并只在有托管任务时渲染——旧版无任务时铺 0/0/0，
+ *    把「没有数据」显示成「真实的 0」。
  */
 const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
     runState,
@@ -50,22 +116,30 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
     loading,
     latestRun,
     defaultModelName,
+    consoleMode,
 }) => {
     const meta = RUN_STATE_META[runState];
     const live = status?.live_trade_config;
-    const exec = status?.execution_config;
     // 「有活跃策略」的唯一口径：后端要么回了策略身份，要么状态机说在跑。
     // 二者皆无时 `status.mode` 是缺省值，不能当作运行档位展示。
     const active = !!status?.strategy?.id
         || ['running', 'starting'].includes(String(status?.status || '').toLowerCase());
+    const isLiveState = ['running', 'starting', 'config_pending'].includes(runState);
+
+    const tier = tierMeta(status?.mode);
+    const configVersion = status?.config_version;
+    const hasConfig = typeof configVersion === 'number' && configVersion > 0;
+    const configPending = runState === 'config_pending';
+    const configChangedAt = status?.config_updated_at ? fmtStamp(status.config_updated_at) : null;
+    const configTip = configPending
+        ? `托管调度器在下一个周期读取新配置，本轮仍按原参数执行${configChangedAt ? `｜最近一次配置变更：${configChangedAt}` : ''}`
+        : configChangedAt
+            ? `最近一次配置变更：${configChangedAt}`
+            : '每次热更新 +1；新版本在下一个调仓周期生效';
 
     const scheduleText = live?.schedule_type === 'weekly'
         ? (live.trade_weekdays && live.trade_weekdays.length > 0 ? `每周 ${live.trade_weekdays.join(' / ')}` : '每周执行')
         : (live?.rebalance_days ? `每 ${live.rebalance_days} 个交易日` : '-');
-    const timeText = live?.sell_time && live?.buy_time ? `${live.sell_time} / ${live.buy_time}` : '-';
-    const orderText = live?.order_type
-        ? `${live.order_type === 'MARKET' ? '市价' : '限价'}${typeof live.max_price_deviation === 'number' ? ` / 偏离 ${(live.max_price_deviation * 100).toFixed(1)}%` : ''}`
-        : '-';
     const strategyName = status?.strategy?.name || status?.strategy?.id
         || (status?.latest_hosted_task as unknown as Record<string, unknown> | null)?.strategy_name as string
         || '-';
@@ -99,57 +173,64 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                 <h3 className="font-bold text-slate-800 text-sm">运行状态</h3>
             </div>
 
-            {/* 状态机横幅 */}
-            <div className={`rounded-xl border px-4 py-2.5 mb-3 flex items-center gap-2.5 ${meta.banner}`}>
-                <span className={`w-2.5 h-2.5 rounded-full ${meta.dot}`} />
-                <span className="text-sm font-black">{loading && !status ? '加载中…' : meta.label}</span>
-                {runState === 'observing' && (
-                    <span className="text-xs font-medium">当前无可交易信号，只跑观察链路，不自动下单</span>
-                )}
-                {active && (
-                    <span className="ml-auto text-[11px] font-bold opacity-70">
-                        {status.mode === 'SIMULATION' ? '模拟运行' : status.mode === 'SHADOW' ? '影子运行' : '实盘运行'}
-                        {status.orchestration_mode ? ` · ${status.orchestration_mode}` : ''}
-                    </span>
-                )}
+            {/* 状态机横幅 + 托管档位 chip。档位由启动时选定、不随页签切换——未运行时
+                不显示（后端缺省值是 SIMULATION，照抄会变成「界面把系统默认值说成
+                用户的选择」）。 */}
+            <div className={`rounded-xl border px-4 py-2.5 mb-3 ${meta.banner}`}>
+                <div className="flex flex-wrap items-center gap-2.5">
+                    <span className={`w-2.5 h-2.5 rounded-full ${meta.dot}`} />
+                    <span className="text-sm font-black">{loading && !status ? '加载中…' : meta.label}</span>
+                    {runState === 'observing' && (
+                        <span className="text-xs font-medium">当前无可交易信号，只跑观察链路，不自动下单</span>
+                    )}
+                    {status && active && (
+                        <span
+                            data-testid="console-tier-chip"
+                            title={tier.tip}
+                            className={`ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-black ${tier.tone}`}
+                        >
+                            {tier.icon}
+                            {tier.label}
+                            <span className="font-bold opacity-60">· {tier.sub}</span>
+                        </span>
+                    )}
+                </div>
             </div>
 
-            {/* 运行档位 / 配置版本 / 生效状态：热更新的「新版本什么时候生效」必须一眼可见。
-                仅在有活跃策略时显示档位——未运行时后端返回的 `mode` 是个缺省值
-                （SIMULATION），照抄会在实盘页签里写「沙箱模拟」，正是本次要消灭的
-                「界面把系统默认值说成用户的选择」。 */}
-            {status && active && (
-                <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-bold text-slate-500">
-                    <span title="运行档位由后端 mode 决定，不随页签切换而变">
-                        档位：
-                        <span className="text-slate-700">
-                            {status.mode === 'SIMULATION' ? '沙箱模拟（不碰真钱）'
-                                : status.mode === 'SHADOW' ? '影子运行（真行情不下单）'
-                                    : '实盘运行'}
-                        </span>
-                    </span>
-                    <span className="text-slate-200">|</span>
-                    <span>托管方式：{status.orchestration_mode || '进程内调度'}</span>
-                    {status.config_version !== undefined && status.config_version > 0 && (
-                        <>
-                            <span className="text-slate-200">|</span>
-                            <span title={status.config_updated_at ? `最近一次配置变更：${status.config_updated_at}` : undefined}>
-                                配置版本：v{status.config_version}
-                            </span>
-                        </>
-                    )}
-                    <span className="text-slate-200">|</span>
-                    {runState === 'config_pending' ? (
-                        <span className="text-amber-700" title="托管调度器在下一个周期读取新配置；本轮仍按原参数执行">
-                            生效状态：新版本待下个周期生效
-                        </span>
-                    ) : (
-                        <span className="text-emerald-700">生效状态：当前版本已生效</span>
-                    )}
+            {/* 实盘栏 × 沙箱档位：这不是矛盾而是事实（托管档位启动时选定，本页签改不了
+                它），必须解释——否则「实盘运行台 + 沙箱模拟」只会更困惑。 */}
+            {consoleMode === 'REAL' && isLiveState && String(status?.mode) === 'SIMULATION' && (
+                <div
+                    data-testid="sandbox-tier-note"
+                    className="mb-3 rounded-xl border border-sky-100 bg-sky-50/70 px-3.5 py-2 text-[11px] font-bold text-sky-800"
+                >
+                    本页签只是观测视图，不改变托管档位：该策略启动时选定的是沙箱档位，信号与委托只进模拟账户，不碰真钱。如需真钱执行，请先停止本策略，再在实盘页签重新启动。
                 </div>
             )}
 
-            {/* 两行网格：同行两卡自动等高，第二行即 策略参数 vs 任务汇报 底部对齐 */}
+            {/* 配置生效 chip + 托管方式：热更新的「新版本什么时候生效」必须一眼可见。 */}
+            {status && active && (
+                <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] font-bold text-slate-500">
+                    {hasConfig && (
+                        <span
+                            data-testid="config-effect-chip"
+                            title={configTip}
+                            className={`inline-flex items-center px-2 py-0.5 rounded-lg border font-black ${
+                                configPending
+                                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            }`}
+                        >
+                            配置 v{configVersion} · {configPending ? '待下个周期生效' : '已生效'}
+                        </span>
+                    )}
+                    <span title="策略由服务端调度器托管推进；关闭本页面不影响运行">
+                        托管方式：{status.orchestration_mode || '进程内调度'}
+                    </span>
+                </div>
+            )}
+
+            {/* 两行网格：第一行 运行策略（3/5）+ 下个交易日计划（2/5），第二行 任务汇报全宽条 */}
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 items-stretch">
                 {loading && !status ? (
                     <div className="lg:col-span-5">
@@ -212,51 +293,21 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                                 </div>
                             )}
                         </div>
-                        {!showIdleGuide && (
-                            <div className="lg:col-span-3 rounded-xl border border-slate-100 p-3 text-center">
-                                <div className="text-xs font-bold text-slate-500 mb-2">策略参数</div>
-                                <div className="grid grid-cols-2 gap-2">
-                                    <ParamCell label="调仓周期" value={scheduleText} title={scheduleText} />
-                                    <ParamCell label="买卖时点" value={timeText} />
-                                    <ParamCell label="委托方式" value={orderText} title={orderText} />
-                                    <ParamCell
-                                        label="单轮最大委托"
-                                        value={typeof live?.max_orders_per_cycle === 'number' ? `${live.max_orders_per_cycle} 单/轮` : '-'}
-                                    />
-                                </div>
-                                {exec && (
-                                    <div className="mt-2 rounded-xl border border-indigo-100 bg-indigo-50/30 px-2.5 py-2 text-[11px] font-bold text-indigo-700">
-                                        大跌拦截 {typeof exec.max_buy_drop === 'number' ? `${(exec.max_buy_drop * 100).toFixed(1)}%` : 'N/A'}
-                                        <span className="mx-2 text-indigo-200">|</span>
-                                        止损 {typeof exec.stop_loss === 'number' ? `${(exec.stop_loss * 100).toFixed(1)}%` : 'N/A'}
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                        <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4">
-                            <div className="flex items-center justify-between mb-2.5">
-                                <span className="text-sm font-black text-slate-700">任务汇报</span>
-                                {task && (
+                        {task && (
+                            <div className="lg:col-span-5 rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                                    <span className="text-sm font-black text-slate-700">任务汇报</span>
                                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-black border ${taskTone(task.status)}`}>
                                         {taskLabel(task.status)}
                                     </span>
-                                )}
-                            </div>
-                            <div className="grid grid-cols-3 gap-2.5 text-center">
-                                <div className="rounded-xl bg-emerald-50 border border-emerald-100 py-3 px-2">
-                                    <div className="text-xs font-bold text-emerald-600/80 mb-0.5">成功</div>
-                                    <div className="text-xl font-black text-emerald-700">{success}</div>
-                                </div>
-                                <div className="rounded-xl bg-rose-50 border border-rose-100 py-3 px-2">
-                                    <div className="text-xs font-bold text-rose-600/80 mb-0.5">失败</div>
-                                    <div className="text-xl font-black text-rose-700">{failed}</div>
-                                </div>
-                                <div className="rounded-xl bg-slate-50 border border-slate-200 py-3 px-2">
-                                    <div className="text-xs font-bold text-slate-500 mb-0.5">跳过</div>
-                                    <div className="text-xl font-black text-slate-700">{skipped}</div>
+                                    <div className="ml-auto flex items-center gap-6">
+                                        <Stat label="成功" value={success} tone="text-emerald-700" />
+                                        <Stat label="失败" value={failed} tone={failed > 0 ? 'text-rose-700' : 'text-slate-400'} />
+                                        <Stat label="跳过" value={skipped} tone="text-slate-600" />
+                                    </div>
                                 </div>
                             </div>
-                        </div>
+                        )}
                     </>
                 )}
             </div>

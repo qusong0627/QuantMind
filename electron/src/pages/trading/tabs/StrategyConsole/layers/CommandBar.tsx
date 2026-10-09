@@ -32,7 +32,6 @@ interface CommandBarProps {
     loading: boolean;
     runState: RunState;
     lastUpdatedAt: string | null;
-    userId: string;
     strategyOptions: Array<{ value: string; label: string }>;
     strategiesLoading: boolean;
     selectedStrategyId: string;
@@ -59,7 +58,6 @@ const CommandBar: React.FC<CommandBarProps> = ({
     loading,
     runState,
     lastUpdatedAt,
-    userId,
     strategyOptions,
     strategiesLoading,
     selectedStrategyId,
@@ -123,16 +121,6 @@ const CommandBar: React.FC<CommandBarProps> = ({
                                 <span>持仓 {portfolio.position_count} 只</span>
                             </>
                         )}
-                        {status?.config_version !== undefined && status.config_version > 0 && (
-                            <>
-                                <span className="text-slate-200">|</span>
-                                <span title="每次热更新 +1；新版本在下一个调仓周期生效">
-                                    配置 v{status.config_version}
-                                </span>
-                            </>
-                        )}
-                        <span className="text-slate-200">|</span>
-                        <span className="font-mono">USER: {userId}</span>
                         {lastUpdatedAt && (
                             <>
                                 <span className="text-slate-200">|</span>

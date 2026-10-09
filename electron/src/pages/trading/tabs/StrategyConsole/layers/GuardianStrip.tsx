@@ -17,7 +17,10 @@ interface GuardianStripProps {
  */
 const SHORT_LABEL: Record<string, string> = {
     sim_hosted: '沙箱托管',
-    manual_execution: '实盘托管',
+    // 「手动执行」= 手动执行任务消费链（后端 JobSpec 名）。旧短名「实盘托管」在
+    // 沙箱档位策略下会被读成「这条链正在实盘下单」，与 RUNTIME 档位 chip 直接
+    // 打架——2026-10-09 用户就是拿它和「沙箱模拟」对不上才问「有些还是模拟运行？」。
+    manual_execution: '手动执行',
     sentinel_push: '哨兵',
 };
 
