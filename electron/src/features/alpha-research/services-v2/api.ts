@@ -696,6 +696,66 @@ export interface BacktestStatusData {
   error?: string;
 }
 
+/** 回测指标键词表（camelCase）；缺失一律不写键、页面显「—」，禁止补 0 */
+export type BacktestMetricKey =
+  | 'ic'
+  | 'icir'
+  | 'rankIc'
+  | 'rankIcir'
+  | 'annualReturn'
+  | 'sharpeRatio'
+  | 'maxDrawdown'
+  | 'rre'
+  | 'pfs'
+  | 'pfsGauss'
+  | 'pfsT'
+  | 'turnoverDaily'
+  | 'annTurnover'
+  | 'annReturnNet'
+  | 'sharpeNet'
+  | 'maxDrawdownNet'
+  | 'nObs';
+
+/**
+ * 因子行 / 回测历史行 → camelCase 指标（两处共用同一套映射）。
+ *
+ * - ICIR / Rank ICIR：qlib 路径表字段与 metadata_json 双写；H5 路径只在表字段。
+ *   两个源都认（旧实现只读 metadata，H5 因子的 ICIR 永远显示不出来）。
+ * - 机构级指标（mining_plugins 评估器链 → metadata）：缺失一律不写键，
+ *   页面以「—」呈现——换手 0 与没算过是两回事，禁止补 0。
+ * - 所有数值一律过 pickNumber 归一（字符串数字转换、NaN 视为缺失）——
+ *   直接赋值会把 "0.03"/NaN 带进界面，对比高亮按 `typeof === number` 判缺席。
+ */
+export function extractBacktestMetrics(
+  raw: any,
+): Partial<Record<BacktestMetricKey, number>> {
+  const metrics: Partial<Record<BacktestMetricKey, number>> = {};
+  const meta = raw.metadata ?? {};
+  const setMetric = (key: BacktestMetricKey, ...sources: any[]) => {
+    const value = pickNumber(...sources);
+    if (value != null) metrics[key] = value;
+  };
+  setMetric('ic', raw.ic_value);
+  setMetric('sharpeRatio', raw.sharpe_ratio);
+  setMetric('annualReturn', raw.annual_return);
+  setMetric('maxDrawdown', raw.max_drawdown);
+  setMetric('rankIc', raw.rank_ic);
+  setMetric('icir', raw.icir, meta.icir);
+  setMetric('rankIcir', raw.rank_icir, meta.rank_icir);
+  setMetric('rre', meta.rre);
+  setMetric('nObs', meta.n_obs);
+  const quality = meta.quality ?? {};
+  setMetric('pfs', quality.pfs);
+  setMetric('pfsGauss', quality.pfs_gauss);
+  setMetric('pfsT', quality.pfs_t);
+  setMetric('turnoverDaily', meta.turnover_daily);
+  setMetric('annTurnover', meta.ann_turnover);
+  setMetric('annReturnNet', meta.ann_return_net);
+  setMetric('sharpeNet', meta.sharpe_net);
+  setMetric('maxDrawdownNet', meta.max_drawdown_net);
+  return metrics;
+}
+
 export async function getBacktestStatus(
   taskId: string,
 ): Promise<ApiResponse<BacktestStatusData>> {
@@ -717,37 +777,7 @@ export async function getBacktestStatus(
       typeof raw.metadata?.backtest_error === 'string' && raw.metadata.backtest_error
         ? (raw.metadata.backtest_error as string)
         : undefined;
-    // Extract metrics from factor detail response
-    const metrics: Record<string, any> = {};
-    if (raw.ic_value != null) metrics.ic = raw.ic_value;
-    if (raw.sharpe_ratio != null) metrics.sharpeRatio = raw.sharpe_ratio;
-    if (raw.annual_return != null) metrics.annualReturn = raw.annual_return;
-    if (raw.max_drawdown != null) metrics.maxDrawdown = raw.max_drawdown;
-    if (raw.rank_ic != null) metrics.rankIc = raw.rank_ic;
-    // ICIR / Rank ICIR：qlib 路径表字段与 metadata_json 双写；H5 路径只在表字段。
-    // 两个源都认（旧实现只读 metadata，H5 因子的 ICIR 永远显示不出来）。
-    const meta = raw.metadata ?? {};
-    const icir = pickNumber(raw.icir, meta.icir);
-    const rankIcir = pickNumber(raw.rank_icir, meta.rank_icir);
-    if (icir != null) metrics.icir = icir;
-    if (rankIcir != null) metrics.rankIcir = rankIcir;
-    // 机构级指标（mining_plugins 评估器链 → metadata_json；缺失一律不写，
-    // 页面以「—」呈现——换手 0 与没算过是两回事，禁止补 0）
-    const setMetric = (key: string, ...sources: any[]) => {
-      const value = pickNumber(...sources);
-      if (value != null) metrics[key] = value;
-    };
-    setMetric('rre', meta.rre);
-    setMetric('nObs', meta.n_obs);
-    const quality = meta.quality ?? {};
-    setMetric('pfs', quality.pfs);
-    setMetric('pfsGauss', quality.pfs_gauss);
-    setMetric('pfsT', quality.pfs_t);
-    setMetric('turnoverDaily', meta.turnover_daily);
-    setMetric('annTurnover', meta.ann_turnover);
-    setMetric('annReturnNet', meta.ann_return_net);
-    setMetric('sharpeNet', meta.sharpe_net);
-    setMetric('maxDrawdownNet', meta.max_drawdown_net);
+    const metrics = extractBacktestMetrics(raw);
     return makeOk({
       task: normalizeAgentTask({
         task_id: taskId,
@@ -780,6 +810,58 @@ export async function cancelBacktest(taskId: string): Promise<ApiResponse> {
   // 页面点了「停止回测」后端子进程照跑，属假动作。
   const res = await apiClient.post(`/alpha-agent/factors/${taskId}/cancel`);
   return makeOk(res.data?.data ?? {});
+}
+
+// ========================== 回测历史（一次运行一行） ==========================
+
+/** 一次回测运行的历史记录（后端 rd_agent_factor_backtests 行）。 */
+export interface BacktestHistoryRun {
+  runId: string;
+  status: string;
+  market: string | null;
+  universe: string | null;
+  dataSource: string | null;
+  dateRange: string | null;
+  /** 发起时间（ISO，带 Z） */
+  startedAt: string;
+  /** 收口时间；未收口（进行中）为 null */
+  finishedAt: string | null;
+  error: string | null;
+  /** camelCase 指标（与 getBacktestStatus 同一套映射；缺失不写键） */
+  metrics: Partial<Record<BacktestMetricKey, number>>;
+}
+
+const BACKTEST_HISTORY_MAX_LIMIT = 100;
+
+export async function listFactorBacktests(
+  factorId: string,
+  limit = 20,
+): Promise<ApiResponse<{ runs: BacktestHistoryRun[] }>> {
+  try {
+    const clamped = Math.min(Math.max(Math.floor(limit) || 1, 1), BACKTEST_HISTORY_MAX_LIMIT);
+    const res = await apiClient.get(
+      `/alpha-agent/factors/${encodeURIComponent(factorId)}/backtests?limit=${clamped}`,
+    );
+    const rows: any[] = res.data?.data?.runs ?? [];
+    const runs: BacktestHistoryRun[] = rows.map((row) => ({
+      runId: row.run_id,
+      status: row.status ?? '',
+      market: row.market ?? null,
+      universe: row.universe ?? null,
+      dataSource: row.data_source ?? null,
+      dateRange: row.date_range ?? null,
+      startedAt: row.created_at ?? '',
+      finishedAt: row.finished_at ?? null,
+      error: typeof row.error === 'string' && row.error ? row.error : null,
+      metrics: extractBacktestMetrics(row),
+    }));
+    return makeOk({ runs });
+  } catch (err: any) {
+    // 归属 404 / 网络错都带原文回来——历史面板要显示错误，不能静默空表
+    const detail = err?.response?.data?.detail;
+    const message = typeof detail === 'string' && detail ? detail : '查询回测历史失败';
+    return { success: false, error: message } as ApiResponse<any>;
+  }
 }
 
 // ========================== LLM Config ==========================

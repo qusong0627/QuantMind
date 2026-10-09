@@ -24,6 +24,7 @@ import {
 import type { FactorLibraryOption } from '../services-v2/api';
 import type { UniverseId, UniverseInfo } from '../types-v2';
 import { PageHeader } from '../components-v2/layout/PageHeader';
+import { BacktestHistoryPanel } from '../components-v2/BacktestHistoryPanel';
 import {
   AreaChart,
   Area,
@@ -650,6 +651,13 @@ export const BacktestPage: React.FC = () => {
           </CardContent>
         </Card>
       )}
+
+      {/* 回测历史：每次运行一行，勾选 2–5 条对比；key 保证换因子时重置勾选 */}
+      <BacktestHistoryPanel
+        key={task?.taskId ?? 'none'}
+        factorId={task?.taskId ?? null}
+        taskStatus={task?.status ?? null}
+      />
 
       {/* Logs Panel */}
       {(logs.length > 0 || isRunning) && (

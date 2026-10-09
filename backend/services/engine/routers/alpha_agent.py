@@ -113,6 +113,11 @@ _running_backtests: set[str] = set()
 # 回测子进程句柄 + 取消标记：cancel 接口据此真正 kill 子进程
 _backtest_processes: dict[str, subprocess.Popen] = {}
 _backtest_cancelled: set[str] = set()
+# 本进程内「因子 → 当前未完结运行的 run_id」注册表：历史台账按 run_id 精确收口。
+# 不用「最新未完结行」启发式——取消会先放行去重闸（允许立即重跑），旧任务延迟
+# 收尾时若按「最新」找行，会把**新任务**的行收错（真结果永久丢失）；按 run_id
+# 收口后旧任务对自己的行幂等无操作，新任务不受影响。
+_running_backtest_runs: dict[str, str | None] = {}
 
 
 # 向量检索（embedding）通道的 profile 字段。三个通道彼此独立：chat 供应商
@@ -1187,6 +1192,54 @@ SCORE: 50 到 100 的整数（50-70 逻辑牵强/易过拟合，70-85 逻辑合�
     }
 
 
+async def _record_backtest_start(
+    factor_id: str,
+    factor: dict,
+    *,
+    market: str,
+    universe: str,
+    data_source: str,
+) -> str | None:
+    """回测发起时登记历史台账（一次运行一行，供后续对比）。
+
+    增益层纪律（照 pool_service 先例）：台账写失败只告警，绝不拦回测。
+
+    Returns: run_id（收口的行身份，登记进 ``_running_backtest_runs``；
+    登记失败返回 None，收口时跳过——不按 factor 猜行）。
+    """
+    try:
+        return await persistence.start_backtest_run(
+            factor_id,
+            factor_name=factor.get("factor_name"),
+            user_id=factor.get("user_id"),
+            market=market,
+            universe=universe,
+            data_source=data_source,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[alpha-backtest] 历史台账登记失败（不拦回测）%s: %s", factor_id, exc
+        )
+        return None
+
+
+async def _record_backtest_finish(run_id: str | None, status: str, **kwargs) -> None:
+    """回测到达终态时收口历史台账（增益层：异常只告警）。
+
+    按 run_id 精确收口（不是按 factor 找「最新未完结行」）：取消端点与后台任务
+    可能先后收口同一行，第二次因行已非 running 而幂等返回 False。
+    run_id 为空（发起时登记失败）则无行可收口，直接跳过。
+    """
+    if not run_id:
+        return
+    try:
+        await persistence.finish_backtest_run(run_id, status, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[alpha-backtest] 历史台账收口失败（不拦回测）%s: %s", run_id, exc
+        )
+
+
 @router.post("/factors/{factor_id}/backtest")
 async def backtest_factor(
     factor_id: str,
@@ -1222,8 +1275,25 @@ async def backtest_factor(
         }
 
     market = factor.get("market") or "a_share"
-    await persistence.update_factor_metrics(factor_id, status="backtesting")
+    # 先占位再 await：check（上方）→ add 之间不得出现让出点，否则双击「回测」
+    # 两个请求都通过检查、并发跑两个子进程（旧实现 add 在 update 之后）。
     _running_backtests.add(factor_id)
+    try:
+        await persistence.update_factor_metrics(factor_id, status="backtesting")
+    except Exception:
+        _running_backtests.discard(factor_id)
+        raise
+    # 历史台账：发起即登记 running 行（收口在 _run_factor_backtest 的终态写入点）。
+    # run_id 是本进程内收口该行的唯一身份——不能等到收口时再按 factor「找最新」，
+    # 取消→立即重跑后旧任务收尾会收错行。
+    run_id = await _record_backtest_start(
+        factor_id,
+        factor,
+        market=market,
+        universe=universe or "csi300",
+        data_source=data_source or "qlib_bin",
+    )
+    _running_backtest_runs[factor_id] = run_id
 
     asyncio.create_task(
         _run_factor_backtest(
@@ -1234,6 +1304,7 @@ async def backtest_factor(
             start_date=start_date,
             end_date=end_date,
             universe=universe or "csi300",
+            run_id=run_id,
         )
     )
 
@@ -1278,7 +1349,6 @@ async def cancel_backtest(factor_id: str, request: Request):
             pass
         except Exception as e:
             logger.warning("[alpha-backtest] cancel kill %s failed: %s", factor_id, e)
-    _running_backtests.discard(factor_id)
     try:
         await persistence.update_factor_metrics(
             factor_id,
@@ -1287,7 +1357,31 @@ async def cancel_backtest(factor_id: str, request: Request):
         )
     except Exception:
         pass
+    # 历史台账收口本**次**运行（注册表里的 run_id；若后台任务已先收口，
+    # 该行已非 running，这里幂等无操作）。
+    await _record_backtest_finish(
+        _running_backtest_runs.get(factor_id), "cancelled", error="cancelled_by_user"
+    )
+    # 去重标记不在这里拆：kill 后任务还要走 DB 收尾，若此刻放行重跑，旧任务
+    # finally 的清理判断可能仍指着旧 run_id，会把**新任务**的标记一起拆掉
+    # （随后可并发双跑同因子）。标记归任务 finally 以身份守卫独占清理——
+    # 收尾期间的重复提交得到「回测已在进行中」，等它真正停稳再放行。
     return {"code": 200, "data": {"factor_id": factor_id, "status": "cancelled"}}
+
+
+@router.get("/factors/{factor_id}/backtests")
+async def list_factor_backtests(
+    factor_id: str,
+    request: Request,
+    limit: int = Query(20, ge=1, le=100, description="最多返回的回测次数"),
+):
+    """列出该因子的历次回测记录（新→旧，一次运行一行；含指标与配置）。
+
+    供回测页「回测历史」对比：universe / data_source / 窗口 / 全量指标。
+    """
+    await _require_owned_factor(factor_id, request)
+    runs = await persistence.list_backtest_runs(factor_id, limit=limit)
+    return {"code": 200, "data": {"factor_id": factor_id, "runs": runs}}
 
 
 @router.post("/factors/{factor_id}/export")
@@ -2156,6 +2250,18 @@ def _default_backtest_window(market: str = "a_share") -> tuple[str, str]:
     )
 
 
+def _format_backtest_error(exc: BaseException) -> str:
+    """失败原文（含 traceback 尾段，封顶 1500 字符）——因子行 metadata 与历史
+    台账共用同一份（尾段保留异常发生点，头段多是无关的调用栈顶）。"""
+    tb = getattr(exc, "__traceback__", None)
+    tb_text = ""
+    if tb:
+        import traceback as _tb
+
+        tb_text = "".join(_tb.format_tb(tb))[-1500:]
+    return f"{type(exc).__name__}: {exc}" + (f"\n{tb_text}" if tb_text else "")
+
+
 async def _run_factor_backtest(
     factor_id: str,
     factor_code: str,
@@ -2164,12 +2270,14 @@ async def _run_factor_backtest(
     start_date: str | None = None,
     end_date: str | None = None,
     universe: str | None = "csi300",
+    run_id: str | None = None,
 ) -> None:
     """统一回测入口（多市场 + 数据源可选）。
 
     Args:
         market: 'a_share' | 'hong_kong' | 'us_stock' | 'crypto' | 'futures'
         data_source: 'qlib_bin' (默认) | 'h5'
+        run_id: 历史台账里本次运行的行身份（发起端点登记并透传）
     """
     market_upper = _MARKET_TO_QLIB.get(market, "CN")
     _default_start, _default_end = _default_backtest_window(market)
@@ -2193,10 +2301,20 @@ async def _run_factor_backtest(
 
         if data_source == "qlib_bin":
             await _backtest_via_qlib(
-                factor_id, factor_code, kind, market, market_upper, universe, start, end
+                factor_id,
+                factor_code,
+                kind,
+                market,
+                market_upper,
+                universe,
+                start,
+                end,
+                run_id=run_id,
             )
         else:
-            await _backtest_via_h5(factor_id, factor_code, kind, universe, start, end)
+            await _backtest_via_h5(
+                factor_id, factor_code, kind, universe, start, end, run_id=run_id
+            )
     except FactorBacktestCancelled:
         logger.info("[alpha-backtest] %s cancelled by user", factor_id)
         try:
@@ -2207,15 +2325,17 @@ async def _run_factor_backtest(
             )
         except Exception:
             pass
+        await _record_backtest_finish(
+            run_id,
+            "cancelled",
+            error="cancelled_by_user",
+            universe=universe,
+            data_source=data_source,
+            date_range=f"{start}~{end}",
+        )
     except Exception as exc:
         logger.exception("[alpha-backtest] %s failed", factor_id)
-        tb = getattr(exc, "__traceback__", None)
-        tb_text = ""
-        if tb:
-            import traceback as _tb
-
-            tb_text = "".join(_tb.format_tb(tb))[-1500:]
-        err_msg = f"{type(exc).__name__}: {exc}" + (f"\n{tb_text}" if tb_text else "")
+        err_msg = _format_backtest_error(exc)
         try:
             await persistence.update_factor_metrics(
                 factor_id,
@@ -2224,9 +2344,25 @@ async def _run_factor_backtest(
             )
         except Exception:
             pass
+        await _record_backtest_finish(
+            run_id,
+            "failed",
+            error=err_msg[-1500:],
+            universe=universe,
+            data_source=data_source,
+            date_range=f"{start}~{end}",
+        )
     finally:
-        _running_backtests.discard(factor_id)
-        _backtest_cancelled.discard(factor_id)
+        # 只有注册在册的仍是本次运行才清理：取消→立即重跑后，旧任务延迟收尾
+        # 不得拆新任务的台（清掉它的去重键/取消标记）。无注册条目 = 直接调用
+        # （测试/遗留路径），维持旧的无条件清理语义。
+        if (
+            factor_id not in _running_backtest_runs
+            or _running_backtest_runs[factor_id] == run_id
+        ):
+            _running_backtest_runs.pop(factor_id, None)
+            _running_backtests.discard(factor_id)
+            _backtest_cancelled.discard(factor_id)
 
 
 # ── 层序归位（2026-10-07）─────────────────────────────────────────────
@@ -2403,6 +2539,7 @@ async def _backtest_via_qlib(
     universe: str,
     start: str,
     end: str,
+    run_id: str | None = None,
 ) -> None:
     """Qlib 二进制回测（默认路径，所有 5 个市场支持）。"""
     import numpy as np
@@ -2527,6 +2664,35 @@ async def _backtest_via_qlib(
         f_clean, r_clean, market=market, universe=universe, factor_id=factor_id
     )
 
+    # 因子行 metadata 与历史台账 metrics_json 同一份（手抄两份必漂移：评估器加键漏一边）
+    metrics_payload = {
+        "data_source": "qlib_bin",
+        "market": market,
+        "icir": icir,
+        "rank_icir": rank_icir,
+        "n_obs": n_obs,
+        **({"quality": pfs_quality} if pfs_quality else {}),
+        **eval_metrics,
+    }
+
+    # 历史台账先收口、再翻因子行终态：前端轮询到终态后立刻拉历史，必然能看到
+    # 刚收口的这一行（反序则存在「因子行已终态、台账尚未收口」的粘性窗口）。
+    await _record_backtest_finish(
+        run_id,
+        "completed",
+        ic_value=ic_mean,
+        rank_ic=rank_ic_median,
+        icir=icir,
+        rank_icir=rank_icir,
+        sharpe_ratio=sharpe,
+        annual_return=ann_ret,
+        max_drawdown=max_dd,
+        universe=universe,
+        data_source="qlib_bin",
+        date_range=f"{start}~{end}",
+        metrics=metrics_payload,
+    )
+
     await persistence.update_factor_metrics(
         factor_id,
         status="completed",
@@ -2537,15 +2703,7 @@ async def _backtest_via_qlib(
         max_drawdown=max_dd,
         universe=universe,
         date_range=f"{start}~{end}",
-        metadata={
-            "data_source": "qlib_bin",
-            "market": market,
-            "icir": icir,
-            "rank_icir": rank_icir,
-            "n_obs": n_obs,
-            **({"quality": pfs_quality} if pfs_quality else {}),
-            **eval_metrics,
-        },
+        metadata=metrics_payload,
     )
 
     # 因子池登记（P1）：面板落盘（进程内有 f_clean，恰好是最全的一份）+ 池行 +
@@ -2879,6 +3037,7 @@ async def _backtest_via_h5(
     universe: str,
     start: str,
     end: str,
+    run_id: str | None = None,
 ) -> None:
     """H5 路径（仅 A 股 / 美股 / 港股支持；其他市场回退）。"""
     h5_path = _resolve_factor_h5_path(universe)
@@ -2893,7 +3052,9 @@ async def _backtest_via_h5(
         or Path(tmp_h5).stat().st_mtime < Path(h5_path).stat().st_mtime
     ):
         shutil.copy2(h5_path, tmp_h5)
-    await _backtest_functional_factor(factor_id, factor_code, start, end, universe)
+    await _backtest_functional_factor(
+        factor_id, factor_code, start, end, universe, run_id=run_id
+    )
 
 
 def _resolve_factor_h5_path_for_market(market: str) -> str | None:
@@ -2914,195 +3075,13 @@ def _resolve_factor_h5_path_for_market(market: str) -> str | None:
     return None
 
 
-async def _run_lightweight_backtest(
-    factor_id: str,
-    factor_code: str,
-    start_date: str | None,
-    end_date: str | None,
-    universe: str | None = "csi300",
-) -> None:
-    """轻量回测（支持多股票池）"""
-    try:
-        import numpy as np
-        import pandas as pd
-        from qlib.data import D
-
-        # 因子识别：优先 Qlib Factor 类；否则 RD-Agent 函数式（calculate_* 返回 DataFrame）。
-        # AST 预检，不执行代码。
-        kind = _detect_factor_kind(factor_code)
-        if kind == "functional":
-            await _backtest_functional_factor(
-                factor_id, factor_code, start_date, end_date, universe
-            )
-            return
-        if kind != "factor_class":
-            raise RuntimeError("因子代码中未找到可调用的 Factor 类")
-
-        _default_start, _default_end = _default_backtest_window("a_share")
-        end = end_date or _default_end
-        start = start_date or _default_start
-
-        # Universes with a native Qlib instruments file can be passed straight through;
-        # the rest (sse50, gem, star, all_a) are resolved from QuantDB index weights.
-        QLIB_NATIVE_MARKETS = ("csi300", "csi500", "csi1000", "csi800")
-        if universe in QLIB_NATIVE_MARKETS:
-            instruments = D.instruments(market=universe)
-        else:
-            from backend.shared.stock_utils import StockCodeUtil
-
-            try:
-                from backend.services.engine.data_platform.quantdb_hub import (
-                    QuantDBDataHub,
-                )
-
-                hub = QuantDBDataHub.get_instance()
-                universe_df = hub.fetch_universe_stocks(universe or "csi300")
-                if universe_df.empty:
-                    raise RuntimeError(
-                        f"QuantDB returned no constituents for {universe}"
-                    )
-                # Qlib instrument files use prefix format (SZ000001), not suffix (000001.SZ)
-                instruments = sorted(
-                    {
-                        StockCodeUtil.to_prefix(s)
-                        for s in universe_df["symbol"].tolist()[:500]
-                    }
-                )
-            except Exception as e:
-                logger.warning(
-                    "QuantDB universe %s unavailable, falling back to csi300: %s",
-                    universe,
-                    e,
-                )
-                instruments = D.instruments(market="csi300")
-
-        fields = ["$open", "$high", "$low", "$close", "$volume", "$factor"]
-        df = D.features(instruments, fields, start_time=start, end_time=end, freq="day")
-        if df.empty:
-            raise RuntimeError("Qlib 数据为空，请检查 QLIB_PROVIDER_URI")
-
-        # 因子计算在 subprocess 内逐股执行，主进程只读结果序列
-        factor_series = await _run_factor_class_subprocess(factor_id, factor_code, df)
-        if factor_series is None or len(factor_series) == 0:
-            raise RuntimeError("因子计算无输出，请检查 Factor 类实现")
-
-        sample_codes = df.index.get_level_values(0).unique()[:50]
-        ic_list: list[float] = []
-        rank_ic_list: list[float] = []
-        ret_list: list[float] = []
-        equity_curve: list[float] = [1.0]
-
-        for code in sample_codes:
-            sub = df.xs(code, level=0).copy()
-            if len(sub) < 30:
-                continue
-            try:
-                fv_col = factor_series.xs(code, level=0)
-            except KeyError:
-                continue
-            if not isinstance(fv_col, pd.Series) or fv_col.dropna().empty:
-                continue
-            fwd_ret = sub["$close"].pct_change(5).shift(-5)
-            paired = pd.concat([fv_col, fwd_ret], axis=1).dropna()
-            if len(paired) < 10:
-                continue
-            # Pearson IC
-            ic = paired.iloc[:, 0].corr(paired.iloc[:, 1])
-            if np.isfinite(ic):
-                ic_list.append(float(ic))
-            # Spearman Rank IC
-            try:
-                from scipy.stats import spearmanr
-
-                rank_ic, _ = spearmanr(paired.iloc[:, 0], paired.iloc[:, 1])
-                if np.isfinite(rank_ic):
-                    rank_ic_list.append(float(rank_ic))
-            except Exception:
-                pass
-            # Long portfolio return (top 30%)
-            cutoff = fv_col.quantile(0.7)
-            longs = fwd_ret[fv_col >= cutoff].dropna()
-            if len(longs) > 0:
-                ret_list.append(float(longs.mean()))
-                equity_curve.append(equity_curve[-1] * (1 + longs.mean()))
-
-        if not ic_list:
-            raise RuntimeError("所有股票都无法计算 IC，因子可能与数据列不匹配")
-
-        ic_mean = float(np.mean(ic_list))
-        rank_ic_mean = float(np.mean(rank_ic_list)) if rank_ic_list else None
-        sharpe = (
-            float(np.mean(ret_list) / (np.std(ret_list) + 1e-8) * np.sqrt(252))
-            if ret_list
-            else None
-        )
-        annual_return = float(np.mean(ret_list) * 252) if ret_list else None
-
-        # Max drawdown from equity curve
-        max_drawdown = None
-        if len(equity_curve) > 1:
-            peak = equity_curve[0]
-            max_dd = 0.0
-            for val in equity_curve[1:]:
-                if val > peak:
-                    peak = val
-                dd = (peak - val) / peak if peak > 0 else 0
-                if dd > max_dd:
-                    max_dd = dd
-            max_drawdown = float(max_dd)
-
-        await persistence.update_factor_metrics(
-            factor_id,
-            status="completed",
-            ic_value=ic_mean,
-            sharpe_ratio=sharpe,
-            annual_return=annual_return,
-            max_drawdown=max_drawdown,
-            rank_ic=rank_ic_mean,
-            universe=universe,
-            date_range=f"{start}~{end}",
-        )
-        logger.info(
-            "[alpha-backtest] %s done ic=%.4f rank_ic=%s sharpe=%s max_dd=%s universe=%s",
-            factor_id,
-            ic_mean,
-            f"{rank_ic_mean:.4f}" if rank_ic_mean is not None else "N/A",
-            f"{sharpe:.3f}" if sharpe is not None else "N/A",
-            f"{max_drawdown:.3f}" if max_drawdown is not None else "N/A",
-            universe,
-        )
-
-    except FactorBacktestCancelled:
-        logger.info("[alpha-backtest] %s cancelled by user", factor_id)
-        try:
-            await persistence.update_factor_metrics(
-                factor_id,
-                status="cancelled",
-                metadata={"backtest_error": "cancelled_by_user"},
-            )
-        except Exception:
-            pass
-    except Exception as exc:
-        logger.exception("[alpha-backtest] %s failed", factor_id)
-        try:
-            await persistence.update_factor_metrics(
-                factor_id,
-                status="failed",
-                metadata={"backtest_error": str(exc)[:500]},
-            )
-        except Exception:
-            pass
-    finally:
-        _running_backtests.discard(factor_id)
-        _backtest_cancelled.discard(factor_id)
-
-
 async def _backtest_functional_factor(
     factor_id: str,
     factor_code: str,
     start_date: str | None,
     end_date: str | None,
     universe: str | None = "csi300",
+    run_id: str | None = None,
 ) -> None:
     """回测 RD-Agent 函数式因子（calculate_* 返回 DataFrame，读 daily_pv.h5）。
 
@@ -3352,6 +3331,32 @@ except Exception as e:
         if ic_mean is None:
             raise RuntimeError(f"因子回测失败: {out[-500:]}")
 
+        # 因子行 metadata 与历史台账 metrics_json 同一份（手抄两份必漂移）
+        metrics_payload = {
+            "data_source": "h5",
+            "icir": icir,
+            "rank_icir": rank_icir,
+            **({"quality": pfs_quality} if pfs_quality else {}),
+            **eval_metrics,
+        }
+
+        # 历史台账先收口、再翻因子行终态（与 qlib 路径同序：终态可见 ⇒ 台账已收口）
+        await _record_backtest_finish(
+            run_id,
+            "completed",
+            ic_value=ic_mean,
+            rank_ic=rank_ic_mean,
+            icir=icir,
+            rank_icir=rank_icir,
+            sharpe_ratio=sharpe,
+            annual_return=ann_ret,
+            max_drawdown=max_dd,
+            universe=universe,
+            data_source="h5",
+            date_range=f"{start}~{end}",
+            metrics=metrics_payload,
+        )
+
         await persistence.update_factor_metrics(
             factor_id,
             status="completed",
@@ -3364,11 +3369,7 @@ except Exception as e:
             max_drawdown=max_dd,
             universe=universe,
             date_range=f"{start}~{end}",
-            metadata={
-                "data_source": "h5",
-                **({"quality": pfs_quality} if pfs_quality else {}),
-                **eval_metrics,
-            },
+            metadata=metrics_payload,
         )
         # 因子池登记（P1）：h5 路径进程内无因子序列（值在子进程 result.h5 里），
         # values=None → 只建池行 + 公式/task 边，面板留待 mining_pool_rebuild --panels。
@@ -3413,19 +3414,42 @@ except Exception as e:
             )
         except Exception:
             pass
+        await _record_backtest_finish(
+            run_id,
+            "cancelled",
+            error="cancelled_by_user",
+            universe=universe,
+            data_source="h5",
+            date_range=f"{start}~{end}",
+        )
     except Exception as exc:
         logger.exception("[alpha-backtest-fn] %s failed", factor_id)
+        err_msg = _format_backtest_error(exc)
         try:
             await persistence.update_factor_metrics(
                 factor_id,
                 status="failed",
-                metadata={"backtest_error": str(exc)[:500]},
+                metadata={"backtest_error": err_msg[-1500:]},
             )
         except Exception:
             pass
+        await _record_backtest_finish(
+            run_id,
+            "failed",
+            error=err_msg[-1500:],
+            universe=universe,
+            data_source="h5",
+            date_range=f"{start}~{end}",
+        )
     finally:
-        _running_backtests.discard(factor_id)
-        _backtest_cancelled.discard(factor_id)
+        # 同 _run_factor_backtest：旧任务收尾不得清掉新任务的登记
+        if (
+            factor_id not in _running_backtest_runs
+            or _running_backtest_runs[factor_id] == run_id
+        ):
+            _running_backtest_runs.pop(factor_id, None)
+            _running_backtests.discard(factor_id)
+            _backtest_cancelled.discard(factor_id)
 
 
 def _resolve_factor_h5_path(universe: str = "csi300") -> str:
@@ -3442,14 +3466,22 @@ async def _startup_recover_stuck_factors() -> None:
     """模块加载时启动一次性恢复任务：把超时的 backtesting 状态清理为 failed。
 
     在事件循环里 schedule 一个后台协程，等 3s DB 就绪后执行一次。
+    因子行与历史台账同口径收口（引擎崩溃后两边都不留 running）。
     """
     try:
         await asyncio.sleep(3)
+        # 先确保表存在再对账：本钩子与 lifespan 的建表并发，刚升级/刚重建时
+        # recover 的 UPDATE 可能先撞上「表不存在」被吞掉，等于这次启动没恢复。
+        await persistence.ensure_tables()
         count = await persistence.recover_stuck_factors(max_age_min=15)
         if count:
             logger.info("[alpha-agent startup] recovered %d stuck backtests", count)
+        runs = await persistence.recover_stuck_backtest_runs(max_age_min=15)
+        if runs:
+            logger.info("[alpha-agent startup] recovered %d stuck backtest runs", runs)
     except Exception as e:
-        logger.debug("[alpha-agent startup] recovery skipped: %s", e)
+        # 恢复没跑成必须可见（静默吞掉 = 孤儿 running 行一直挂到下次重启）
+        logger.warning("[alpha-agent startup] recovery skipped: %s", e)
 
 
 # 模块加载时自动注册启动恢复任务（如果事件循环已运行）

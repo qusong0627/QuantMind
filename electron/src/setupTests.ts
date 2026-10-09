@@ -95,3 +95,8 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
   configurable: true,
   value: MockResizeObserver,
 });
+
+// jsdom 不实现 Element.scrollIntoView（日志面板等挂载即调），测试环境补空实现
+if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = vi.fn();
+}

@@ -101,12 +101,14 @@ def test_backtest_pipelines_emit_quality() -> None:
     assert 'elif line.startswith("PFS="):' in src
     # IC/ICIR/组合指标改走 _metric 助手后，PFS_GAUSS 成为 PFS 解析循环的首分支
     assert 'if line.startswith("PFS_GAUSS="):' in src
-    # h5 路径的 metadata 同样被 ruff 折行，按空白容忍匹配同一形状
+    # h5 路径：quality 进共享 metrics_payload（同一对象既写台账也写因子行，
+    # 防手抄漂移），因子行 metadata 收口自该对象——块内短距匹配同一形状
     assert re.search(
-        r'metadata=\{\s*"data_source": "h5",\s*'
+        r'metrics_payload = \{\s*"data_source": "h5",[\s\S]{0,400}?'
         r'\*\*\(\{"quality": pfs_quality\} if pfs_quality else \{\}\),',
         src,
     )
+    assert "metadata=metrics_payload" in src
 
 
 def test_explain_requests_and_persists_logic_score() -> None:
