@@ -131,6 +131,12 @@ interface TaskContextValue {
   focusedTaskId: string | null;
   /** 切换聚焦任务（认不出的 id 忽略，不产生悬空焦点） */
   focusMiningTask: (taskId: string) => void;
+  /**
+   * 接纳一批已派发任务（拆解面板批量派发回执）：逐条入库并绑定传输，
+   * 焦点给该批最后一条。**不**触发「开始后自动进演化台」——那 bump
+   * miningStartSeq 的待遇只属于用户在输入框亲手提交的单条任务。
+   */
+  adoptDispatchedTasks: (tasks: Task[]) => void;
   /** POST /evolve 提交进行中（后端同步建缓存时可能耗时较长） */
   miningStarting: boolean;
   /** 最近一次提交失败的原文（429 并发上限 / 建缓存失败等）；新提交时清空 */
@@ -280,7 +286,19 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         switch (msg.type) {
           case 'progress':
             updated.progress = msg.data;
-            updated.status = msg.data.phase === 'completed' ? 'completed' : 'running';
+            // 状态以传输携带的后端原始状态为准：queued 不是 running——
+            // 批量派发的排队任务绑定伪 WS 后，首条 progress 曾把排队行
+            // 直接翻成运行中（位次显示随之消失）
+            updated.status =
+              msg.data.phase === 'completed'
+                ? 'completed'
+                : msg.data.status === 'queued'
+                  ? 'queued'
+                  : 'running';
+            updated.queuePosition =
+              updated.status === 'queued' && typeof msg.data.queuePosition === 'number'
+                ? msg.data.queuePosition
+                : null;
             if (msg.data.timeline) updated.timeline = msg.data.timeline;
             if (msg.data.tokenUsage) updated.tokenUsage = msg.data.tokenUsage;
             // 结构化因子（后端已落库，走 normalizeAgentFactor 全量合并）
@@ -351,10 +369,16 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const r = await getMiningStatus(taskId);
           if (!mountedRef.current || !r.data?.task) return;
           const t = r.data.task as Task;
-          if (t.status === 'completed' || t.status === 'failed') {
-            upsertMiningTask(t);
-            teardownMiningTransport(taskId);
-          }
+          const terminal = t.status === 'completed' || t.status === 'failed';
+          // 兜底轮询只在「状态/排队位次变化」或终态时权威对齐：排队期
+          // 每 10s 无条件 upsert 会用 /tasks 的 20 条载荷覆盖掉 2s 伪 WS
+          // 刚送进来的完整进度；位次前移与 queued→running 仍由这里兜住
+          const local = miningTasksRef.current.find((x) => x.taskId === taskId);
+          const changed =
+            t.status !== local?.status ||
+            (t.queuePosition ?? null) !== (local?.queuePosition ?? null);
+          if (changed || terminal) upsertMiningTask(t);
+          if (terminal) teardownMiningTransport(taskId);
         } catch {
           // ignore
         }
@@ -364,8 +388,8 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [handleMiningWsMessage, teardownMiningTransport, patchMiningTask, upsertMiningTask],
   );
 
-  // 恢复：刷新/离开再回来时，把后端仍在运行的全部挖掘任务接管回来（逐条绑定
-  // 传输；焦点给最新一条）。历史已完成任务走「挖掘历史」页，不在这里铺。
+  // 恢复：刷新/离开再回来时，把后端仍在运行/排队的全部挖掘任务接管回来
+  // （逐条绑定传输；焦点给最新一条）。历史已完成任务走「挖掘历史」页，不在这里铺。
   const miningRecoveredRef = useRef(false);
   useEffect(() => {
     if (miningRecoveredRef.current) return;
@@ -375,11 +399,13 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!mountedRef.current) return;
         // 用户可能在请求在途时已自己提交了任务——注册表非空就不恢复（不夺焦点）
         if (miningTasksRef.current.length > 0) return;
-        const running = (r.data?.tasks ?? []).filter((t) => t.status === 'running');
-        if (running.length === 0) return;
-        setMiningTasks(running);
-        for (const t of running) bindMiningTransport(t.taskId);
-        const newest = running.reduce((a, b) =>
+        const adoptable = (r.data?.tasks ?? []).filter(
+          (t) => t.status === 'running' || t.status === 'queued',
+        );
+        if (adoptable.length === 0) return;
+        setMiningTasks(adoptable);
+        for (const t of adoptable) bindMiningTransport(t.taskId);
+        const newest = adoptable.reduce((a, b) =>
           Date.parse(b.createdAt) >= Date.parse(a.createdAt) ? b : a,
         );
         setFocusedTaskId(newest.taskId);
@@ -496,6 +522,24 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!miningTasksRef.current.some((t) => t.taskId === taskId)) return;
     setFocusedTaskId(taskId);
   }, []);
+
+  /**
+   * 批量派发接纳：拆解面板拿到逐条回执后，把任务并进注册表并绑定传输。
+   * queued 任务同样绑定——传输是 2s 状态流 + 10s 兜底轮询，排队期渲染
+   * 「排队中 · 第 N 位」，排到后同一传输无缝续流（状态翻转由传输的
+   * 变化检测处理，见 handleMiningWsMessage / 轮询兜底）。
+   */
+  const adoptDispatchedTasks = useCallback(
+    (tasks: Task[]) => {
+      if (tasks.length === 0) return;
+      for (const t of tasks) {
+        upsertMiningTask(t);
+        bindMiningTransport(t.taskId);
+      }
+      setFocusedTaskId(tasks[tasks.length - 1].taskId);
+    },
+    [bindMiningTransport, upsertMiningTask],
+  );
 
   const dismissMiningStartError = useCallback(() => setMiningStartError(null), []);
 
@@ -679,6 +723,7 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
     miningTasks,
     focusedTaskId,
     focusMiningTask,
+    adoptDispatchedTasks,
     miningStarting,
     miningStartError,
     dismissMiningStartError,

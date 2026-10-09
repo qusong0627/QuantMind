@@ -1,5 +1,6 @@
 // Task status
-export type TaskStatus = 'idle' | 'running' | 'completed' | 'failed';
+// queued：批量派发满员时的排队态（后端 TaskStatus.QUEUED）；排到后转 running
+export type TaskStatus = 'idle' | 'queued' | 'running' | 'completed' | 'failed';
 
 // Execution phase
 export type ExecutionPhase =
@@ -337,6 +338,8 @@ export interface Task {
   tokenUsage?: TokenUsage;
   /** 后端随任务状态返回的已落库因子（结构化，优先于日志解析） */
   factors?: Factor[];
+  /** 排队位次（本用户队列内 1-based，仅 status==='queued' 时有值） */
+  queuePosition?: number | null;
 }
 
 // API Response

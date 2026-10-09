@@ -72,6 +72,9 @@ function normalizeTaskStatus(raw: string | undefined): TaskStatus {
     case 'failed':
     case 'cancelled':
       return 'failed';
+    case 'queued':
+      // 批量派发的排队态是一等状态（有「第 N 位」语义），不并进 running
+      return 'queued';
     case 'running':
     case 'pending':
       return 'running';
@@ -92,7 +95,7 @@ const PHASE_MAP: Record<string, ExecutionPhase> = {
   completed: 'completed',
 };
 
-function normalizeAgentTask(raw: any, configHint?: any): Task {
+export function normalizeAgentTask(raw: any, configHint?: any): Task {
   const status = normalizeTaskStatus(raw?.status);
   const backendPhase: string = typeof raw?.phase === 'string' ? raw.phase : '';
   let phase: ExecutionPhase = PHASE_MAP[backendPhase] || 'parsing';
@@ -117,6 +120,8 @@ function normalizeAgentTask(raw: any, configHint?: any): Task {
 
   const currentRound = typeof raw?.current_loop === 'number' ? raw.current_loop : 0;
   const totalRounds = typeof raw?.loop_n === 'number' ? raw.loop_n : 0;
+  const queuePosition =
+    typeof raw?.queue_position === 'number' ? raw.queue_position : null;
 
   return {
     taskId: raw?.task_id ?? raw?.taskId ?? '',
@@ -130,11 +135,15 @@ function normalizeAgentTask(raw: any, configHint?: any): Task {
       totalRounds,
       progress: progressNum,
       message:
-        typeof raw?.progress === 'string'
-          ? raw.progress
-          : raw?.error_message || (status === 'completed' ? '完成' : '运行中'),
+        // 排队态后端 progress 为空串——文案归一到中文「排队中（第 N 位）」
+        status === 'queued'
+          ? `排队中${queuePosition ? `（第 ${queuePosition} 位）` : ''}`
+          : typeof raw?.progress === 'string'
+            ? raw.progress
+            : raw?.error_message || (status === 'completed' ? '完成' : '运行中'),
       timestamp: raw?.updated_at ?? new Date().toISOString(),
     },
+    queuePosition,
     // 回测任务由 getBacktestStatus 把后端 factor 详情里的指标放进 raw.metrics；
     // 此前这里无条件用 emptyMetrics() 覆盖，导致「回测结果」面板永远显示 0.0000 / --。
     // 保留后端给的字段（缺失的键保持 undefined，前端据此显示 "--" 而不是伪造 0）。
@@ -318,6 +327,124 @@ export async function getMiningStatus(
 export async function cancelMining(taskId: string): Promise<ApiResponse> {
   await apiClient.post(`/alpha-agent/tasks/${taskId}/cancel`);
   return makeOk({});
+}
+
+// ========================== 方向拆解 & 批量派发 ==========================
+
+/** 拆解卡片（后端 validate_cards 归一后的形状；可选字段为空则缺席） */
+export interface DecomposeCard {
+  title: string;
+  hypothesis: string;
+  rationale?: string;
+  categories: string[];
+  evaluation_hint?: string;
+}
+
+export interface DecomposeResult {
+  promptVersion: string;
+  cards: DecomposeCard[];
+  /** 超出卡片数上限被截断的数量（如实上报，不静默丢） */
+  dropped: number;
+  maxCards: number;
+  context: {
+    categories: number;
+    poolDigestChars: number;
+    poolFactors: number;
+    model?: string | null;
+  };
+}
+
+export interface DecomposeParams {
+  direction: string;
+  market?: string;
+  universe?: string;
+  maxCards?: number;
+}
+
+/**
+ * 粗方向 → 正交子假设卡片（只拆解，不落任务）。
+ * 失败（无 LLM 配置 412 / 超长或截断 400）由调用方 catch，
+ * `err.response.data.detail` 是可直接上屏的中文文案。
+ */
+export async function decomposeDirection(
+  params: DecomposeParams,
+): Promise<ApiResponse<DecomposeResult>> {
+  const res = await apiClient.post('/alpha-agent/directions/decompose', {
+    direction: params.direction,
+    market: params.market || 'a_share',
+    universe: params.universe || 'csi300',
+    ...(params.maxCards ? { max_cards: params.maxCards } : {}),
+  });
+  const data = res.data?.data ?? {};
+  const cards: DecomposeCard[] = (data.cards ?? []).map((c: any) => ({
+    title: c?.title ?? '',
+    hypothesis: c?.hypothesis ?? '',
+    ...(c?.rationale ? { rationale: c.rationale } : {}),
+    categories: Array.isArray(c?.categories) ? c.categories : [],
+    ...(c?.evaluation_hint ? { evaluation_hint: c.evaluation_hint } : {}),
+  }));
+  return makeOk({
+    promptVersion: data.prompt_version ?? '',
+    cards,
+    dropped: data.dropped ?? 0,
+    maxCards: data.max_cards ?? cards.length,
+    context: {
+      categories: data.context?.categories ?? 0,
+      poolDigestChars: data.context?.pool_digest_chars ?? 0,
+      poolFactors: data.context?.pool_factors ?? 0,
+      model: data.context?.model ?? null,
+    },
+  });
+}
+
+export interface BatchDispatchReceipt {
+  index: number;
+  taskId: string | null;
+  status: 'running' | 'queued' | 'failed';
+  queuePosition: number | null;
+  directionPreview: string;
+  error: string | null;
+}
+
+export interface BatchDispatchResult {
+  items: BatchDispatchReceipt[];
+  started: number;
+  queued: number;
+  failed: number;
+}
+
+export interface BatchDispatchParams {
+  directions: string[];
+  market?: string;
+  universe?: string;
+  loopN?: number;
+}
+
+/** 批量派发：逐条排队成任务；运行期失败逐条回传（HTTP 恒 200）。 */
+export async function dispatchMiningBatch(
+  params: BatchDispatchParams,
+): Promise<ApiResponse<BatchDispatchResult>> {
+  const res = await apiClient.post('/alpha-agent/mining/batch', {
+    directions: params.directions,
+    market: params.market || 'a_share',
+    universe: params.universe || 'csi300',
+    ...(params.loopN ? { loop_n: params.loopN } : {}),
+  });
+  const data = res.data?.data ?? {};
+  const items: BatchDispatchReceipt[] = (data.items ?? []).map((it: any) => ({
+    index: it?.index ?? 0,
+    taskId: it?.task_id ?? null,
+    status: it?.status ?? 'failed',
+    queuePosition: typeof it?.queue_position === 'number' ? it.queue_position : null,
+    directionPreview: it?.direction_preview ?? '',
+    error: it?.error ?? null,
+  }));
+  return makeOk({
+    items,
+    started: data.started ?? 0,
+    queued: data.queued ?? 0,
+    failed: data.failed ?? 0,
+  });
 }
 
 export async function listTasks(): Promise<ApiResponse<{ tasks: Task[] }>> {
@@ -1567,6 +1694,7 @@ export function connectMiningWs(
 ): WebSocket {
   let stopped = false;
   let lastStatus = '';
+  let lastQueuePos = -1;
   const fakeWs: any = {
     readyState: 1,
     send: (_data: string) => {},
@@ -1662,6 +1790,9 @@ export function connectMiningWs(
       const phaseChanged = backendPhase !== lastPhase;
       const pctChanged = progressPct !== lastPct;
       const statusChanged = status !== lastStatus;
+      // 排队位次进变化检测：前面任务开跑时位次前移也要推送新文案
+      const queuePos = typeof data.queue_position === 'number' ? data.queue_position : -1;
+      const queuePosChanged = queuePos !== lastQueuePos;
       // 后端随任务状态返回的结构化因子（rd_agent_factors 已落库），优先于日志正则解析
       const backendFactors: any[] = Array.isArray(data.factors) ? data.factors : [];
       // 载荷恒为「最新 20 条」（ORDER BY created_at DESC）：数量饱和在 20 后，新因子
@@ -1670,10 +1801,11 @@ export function connectMiningWs(
       const factorsChanged =
         backendFactors.length !== lastFactorsCount || factorsHead !== lastFactorsHead;
 
-      if (statusChanged || phaseChanged || pctChanged || factorsChanged) {
+      if (statusChanged || phaseChanged || pctChanged || factorsChanged || queuePosChanged) {
         lastStatus = status;
         lastPhase = backendPhase;
         lastPct = progressPct;
+        lastQueuePos = queuePos;
         lastFactorsCount = backendFactors.length;
         lastFactorsHead = factorsHead;
         const phase: ExecutionPhase =
@@ -1686,10 +1818,17 @@ export function connectMiningWs(
           taskId,
           data: {
             phase,
+            // 后端原始状态：排队任务绑定传输后，消费方不能凭 phase 把 queued 当 running
+            status,
             currentRound,
             totalRounds,
             progress: progressPct,
-            message: progressText || status,
+            queuePosition: queuePos >= 0 ? queuePos : null,
+            message:
+              progressText ||
+              (status === 'queued'
+                ? `排队中${queuePos >= 0 ? `（第 ${queuePos} 位）` : ''}`
+                : status),
             timestamp: new Date().toISOString(),
             timeline: data.timeline ?? undefined,
             tokenUsage: data.token_usage ?? undefined,

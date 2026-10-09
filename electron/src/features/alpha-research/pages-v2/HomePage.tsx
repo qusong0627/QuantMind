@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Sparkles, Bot, Database, BarChart3, ArrowRight, Zap,
   Layers, CheckCircle2, TrendingUp, Shield, Activity, Cpu,
   Loader2, Square, MessageSquareText, FileUp, AlertCircle
 } from 'lucide-react';
 import { ChatInput } from '../components-v2/ChatInput';
+import { DecomposePanel } from '../components-v2/DecomposePanel';
+import type { DecomposeRequest } from '../components-v2/DecomposePanel';
 import { DocMiningPanel } from '../components-v2/DocMiningPanel';
 import { Layout } from '../components-v2/layout/Layout';
 import type { PageId } from '../components-v2/layout/Layout';
@@ -51,9 +53,14 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
   // 输入方式：文字指令 / 上传文档（文档链构建期开关关时不存在第二态）
   const docsEnabled = isDocMiningEnabled();
   const [inputMode, setInputMode] = useState<'text' | 'doc'>('text');
+  // 智能拆解面板请求（key 是代次：同方向连点两次也要重开重拆）
+  const [decomposeReq, setDecomposeReq] = useState<DecomposeRequest | null>(null);
+  const decomposeSeqRef = useRef(0);
 
   // 运行中的任务（多任务并行、相互独立）：逐行展示、逐行可停可查看
   const runningTasks = miningTasks.filter((t) => t.status === 'running');
+  // 排队任务（并发满员被批量派发放进队列的）：显示位次，排到后自动转运行
+  const queuedTasks = miningTasks.filter((t) => t.status === 'queued');
 
   // 「AI 因子挖掘」入口：有任务（运行中/已完成）才进演化台；
   // 无任务时滚动到输入框，避免打开空的进度页。
@@ -139,8 +146,8 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
 
         {/* ================= 2. Central Integrated Prompt Input ================= */}
         <div id="mining-input" className="w-full flex flex-col gap-3">
-          {/* 多任务：提交在途一行 + 每个运行中任务一行（相互独立，逐行可停/可查看） */}
-          {(miningStarting || runningTasks.length > 0) && (
+          {/* 多任务：提交在途一行 + 每个运行中/排队任务一行（相互独立，逐行可停） */}
+          {(miningStarting || runningTasks.length > 0 || queuedTasks.length > 0) && (
             <div className="w-full max-w-4xl mx-auto flex flex-col gap-2">
               {miningStarting && (
                 <div className="w-full flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50/70 px-4 py-2.5 shadow-2xs">
@@ -200,9 +207,40 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
                   </div>
                 );
               })}
-              {runningTasks.length > 1 && (
+              {/* 排队任务行（批量派发满员时入队）：显示位次，排到自动转运行 */}
+              {queuedTasks.map((t) => (
+                <div
+                  key={t.taskId}
+                  className="w-full flex items-center gap-3 rounded-xl border border-amber-100 bg-amber-50/70 px-4 py-2.5 shadow-2xs"
+                >
+                  <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-amber-400" />
+                  <span className="text-xs font-bold text-amber-700 whitespace-nowrap">
+                    排队中{t.queuePosition ? ` · 第 ${t.queuePosition} 位` : ''}
+                  </span>
+                  <span
+                    className="text-xs text-amber-700/70 truncate flex-1 min-w-0"
+                    title={taskDirectionLabel(t)}
+                  >
+                    {taskDirectionLabel(t)}
+                  </span>
+                  <span className="text-[11px] text-amber-600/70 whitespace-nowrap hidden sm:block">
+                    等待并发名额，排到后自动开始
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void stopMining(t.taskId)}
+                    className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold text-red-600 bg-white hover:bg-red-50 border border-red-100 transition-colors whitespace-nowrap cursor-pointer"
+                    title="从队列中取消这个任务，其它任务不受影响"
+                  >
+                    <Square className="w-3 h-3" />
+                    取消排队
+                  </button>
+                </div>
+              ))}
+              {runningTasks.length + queuedTasks.length > 1 && (
                 <p className="m-0 text-center text-[11px] text-slate-400">
-                  {runningTasks.length} 个任务各自独立运行；可在下方继续提交新想法
+                  {runningTasks.length} 个任务运行中{queuedTasks.length > 0 ? `、${queuedTasks.length} 个排队中` : ''}
+                  ；彼此独立，可在下方继续提交新想法
                 </p>
               )}
             </div>
@@ -278,6 +316,22 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate, retryDraft, docR
               onSubmit={startMining}
               isSubmitting={miningStarting}
               runningCount={runningTasks.length}
+              onDecomposeRequest={(p) => {
+                decomposeSeqRef.current += 1;
+                setDecomposeReq({ key: decomposeSeqRef.current, ...p });
+              }}
+            />
+          )}
+
+          {/* 智能拆解面板（文字指令态）：粗方向 → 正交卡片 → 批量派发 */}
+          {decomposeReq && (!docsEnabled || inputMode === 'text') && (
+            <DecomposePanel
+              key={decomposeReq.key}
+              request={decomposeReq}
+              onClose={() => setDecomposeReq(null)}
+              onOpenDashboard={
+                onNavigate ? () => onNavigate('mining_dashboard') : undefined
+              }
             />
           )}
 

@@ -37,10 +37,12 @@ const MAX_ROWS = 20;
 /** 失败原因在行内只留这么长，全文放进 title。 */
 const REASON_MAX = 72;
 
-type Bucket = 'running' | 'completed' | 'failed' | 'other';
+type Bucket = 'running' | 'queued' | 'completed' | 'failed' | 'other';
 
 const BUCKET_OF: Record<Task['status'], Bucket> = {
   running: 'running',
+  // 批量派发满员时的排队态：是一等状态（带 1-based 位次），不并进「未知」
+  queued: 'queued',
   completed: 'completed',
   failed: 'failed',
   idle: 'other',
@@ -48,6 +50,7 @@ const BUCKET_OF: Record<Task['status'], Bucket> = {
 
 const BUCKET_LABEL: Record<Bucket, string> = {
   running: '运行中',
+  queued: '排队中',
   completed: '已完成',
   failed: '失败',
   other: '未知',
@@ -64,9 +67,15 @@ function formatStarted(iso: string): string {
   return `开始于 ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hhmm}`;
 }
 
-/** 完成/失败任务按创建时间倒序排在前面，运行中的永远置顶。 */
+/** 完成/失败任务按创建时间倒序排在前面，运行中/排队中的永远置顶。 */
 function sortForDisplay(tasks: Task[]): Task[] {
-  const rank: Record<Bucket, number> = { running: 0, other: 1, failed: 2, completed: 3 };
+  const rank: Record<Bucket, number> = {
+    running: 0,
+    queued: 1,
+    other: 2,
+    failed: 3,
+    completed: 4,
+  };
   return [...tasks].sort((a, b) => {
     const byBucket = rank[BUCKET_OF[a.status]] - rank[BUCKET_OF[b.status]];
     if (byBucket !== 0) return byBucket;
@@ -120,6 +129,7 @@ const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true })
   }, [refresh, enabled]);
 
   const running = useMemo(() => tasks.filter((t) => BUCKET_OF[t.status] === 'running'), [tasks]);
+  const queued = useMemo(() => tasks.filter((t) => BUCKET_OF[t.status] === 'queued'), [tasks]);
   const ordered = useMemo(() => sortForDisplay(tasks).slice(0, MAX_ROWS), [tasks]);
 
   // 指纹只包含「任务集合 + 各自状态」，跟进度无关：进度每 5 秒都在变，
@@ -166,7 +176,9 @@ const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true })
     ? `因子挖掘 ${primary.progress.progress}%${
         primary.progress.totalRounds ? ` · Loop ${primary.progress.currentRound}/${primary.progress.totalRounds}` : ''
       }`
-    : '无运行中的挖掘任务';
+    : queued.length > 0
+      ? `因子挖掘 · ${queued.length} 个任务排队中`
+      : '无运行中的挖掘任务';
 
   // 收起后只在「任务集合或状态变了」时回来（见上面的 signature）。
   // 别在这里顺手把「有任务在跑」当成重新冒头的条件：它会跟 signature 打架，
@@ -186,7 +198,8 @@ const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true })
           <header className="flex items-center gap-2 border-b border-slate-100 px-3 py-2">
             <span className="text-xs font-bold text-slate-700">后台挖掘任务</span>
             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">
-              {running.length} 运行中 / {tasks.length} 总计
+              {running.length} 运行中
+              {queued.length > 0 ? ` · ${queued.length} 排队` : ''} / {tasks.length} 总计
             </span>
             <div className="flex-1" />
             <button
@@ -213,12 +226,15 @@ const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true })
             {ordered.map((t) => {
               const bucket = BUCKET_OF[t.status];
               const isRunning = bucket === 'running';
+              const isQueued = bucket === 'queued';
               const reason = t.progress.message || '';
               return (
                 <li key={t.taskId} className="flex items-start gap-2 px-3 py-2">
                   <span className="mt-0.5 shrink-0">
-                    {bucket === 'running' ? (
+                    {isRunning ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
+                    ) : isQueued ? (
+                      <CircleDashed className="h-3.5 w-3.5 text-amber-500" />
                     ) : bucket === 'completed' ? (
                       <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
                     ) : bucket === 'failed' ? (
@@ -235,17 +251,20 @@ const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true })
                         className={`text-[11px] font-bold ${
                           isRunning
                             ? 'text-indigo-600'
-                            : bucket === 'completed'
-                              ? 'text-emerald-600'
-                              : bucket === 'failed'
-                                ? 'text-rose-600'
-                                : 'text-slate-500'
+                            : isQueued
+                              ? 'text-amber-600'
+                              : bucket === 'completed'
+                                ? 'text-emerald-600'
+                                : bucket === 'failed'
+                                  ? 'text-rose-600'
+                                  : 'text-slate-500'
                         }`}
                       >
                         {BUCKET_LABEL[bucket]}
                         {isRunning && t.progress.totalRounds
                           ? ` ${t.progress.progress}% · Loop ${t.progress.currentRound}/${t.progress.totalRounds}`
                           : ''}
+                        {isQueued && t.queuePosition ? ` · 第 ${t.queuePosition} 位` : ''}
                       </span>
                     </div>
                     {/* 方向摘要（「每次挖了什么」）：空方向不渲染，不编造占位 */}
@@ -259,12 +278,13 @@ const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true })
                     ) : null}
                     <div className="mt-0.5 truncate text-[10px] text-slate-400" title={reason}>
                       {formatStarted(t.createdAt)}
-                      {reason && !isRunning && ` · ${reason.slice(0, REASON_MAX)}`}
+                      {/* 排队态的 message 就是「排队中（第 N 位）」，上面行已展示，不重复 */}
+                      {reason && !isRunning && !isQueued && ` · ${reason.slice(0, REASON_MAX)}`}
                       {isRunning && t.progress.message && ` · ${t.progress.message.slice(0, REASON_MAX)}`}
                     </div>
                   </div>
 
-                  {isRunning && (
+                  {(isRunning || isQueued) && (
                     <button
                       onClick={() => void handleCancel(t.taskId)}
                       disabled={cancelling.includes(t.taskId)}
@@ -292,11 +312,15 @@ const MiningTaskMonitor: React.FC<MiningTaskMonitorProps> = ({ enabled = true })
           className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-bold shadow-lg backdrop-blur ${
             primary
               ? 'border-indigo-200 bg-white/95 text-indigo-600'
-              : 'border-slate-200 bg-white/90 text-slate-500'
+              : queued.length > 0
+                ? 'border-amber-200 bg-white/95 text-amber-600'
+                : 'border-slate-200 bg-white/90 text-slate-500'
           }`}
         >
           {primary ? (
             <Loader2 className="h-3 w-3 animate-spin" />
+          ) : queued.length > 0 ? (
+            <CircleDashed className="h-3 w-3 text-amber-500" />
           ) : (
             <CheckCircle2 className="h-3 w-3 text-slate-400" />
           )}

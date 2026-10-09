@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Compass } from 'lucide-react';
+import { Send, Compass, Sparkles } from 'lucide-react';
 import { TaskConfig, UniverseId, UniverseInfo } from '../types-v2';
 import { alphaAgentService, MarketInfo } from '../services/alphaAgentService';
 import { getUniverses } from '../services-v2/api';
+import type { DecomposeRequestPayload } from './DecomposePanel';
 
 const MARKET_LABELS: Record<string, string> = {
   a_share: 'A股',
@@ -28,6 +29,11 @@ interface ChatInputProps {
   /** 回填代次（`MiningRetryDraft.key`）：同内容连点两次「重跑」也要重新应用 */
   initialConfigKey?: number;
   onSelectPrompt?: (prompt: string) => void;
+  /**
+   * 「智能拆解」：把当前输入的方向 + 当前市场/池交给拆解面板（HomePage 持状态）。
+   * 缺省不渲染拆解按钮。
+   */
+  onDecomposeRequest?: (payload: DecomposeRequestPayload) => void;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -38,6 +44,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   initialPrompt = '',
   initialConfig,
   initialConfigKey,
+  onDecomposeRequest,
 }) => {
   const [input, setInput] = useState(initialPrompt);
   const [useCustomMiningDirection, setUseCustomMiningDirection] = useState(false);
@@ -113,6 +120,24 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       ];
 
   const selectedNotReady = marketList.find(m => m.id === miningMarket)?.ready === false;
+
+  // 拆解按钮可用性：与发送同门槛，另要求有非空输入且未开「自选方向」
+  // （自选模式下输入框内容被忽略，拆解它没有意义）
+  const decomposeEnabled =
+    !!onDecomposeRequest &&
+    !isSubmitting &&
+    !selectedNotReady &&
+    !useCustomMiningDirection &&
+    input.trim().length > 0;
+
+  const handleDecompose = () => {
+    if (!decomposeEnabled || !onDecomposeRequest) return;
+    onDecomposeRequest({
+      direction: input.trim(),
+      market: miningMarket,
+      universe: String(universe),
+    });
+  };
 
   const content = (
     <div className={`relative w-full ${inline ? 'max-w-4xl mx-auto' : 'container mx-auto px-6 max-w-3xl'}`}>
@@ -231,6 +256,25 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               rows={2}
               style={{ minHeight: '44px', maxHeight: '100px' }}
             />
+
+            {/* 智能拆解：粗方向 → 多张正交卡片 → 批量派发（满员自动排队）。
+                仅在有输入、未开「自选方向」、市场就绪时可点 */}
+            {onDecomposeRequest && (
+              <button
+                onClick={handleDecompose}
+                disabled={!decomposeEnabled}
+                className="flex-shrink-0 p-2.5 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white hover:from-indigo-600 hover:to-purple-700 disabled:from-slate-300 disabled:to-slate-400 disabled:cursor-not-allowed transition-all duration-200 hover:scale-105 active:scale-95 shadow-lg shadow-indigo-500/25 disabled:shadow-none cursor-pointer"
+                title={
+                  useCustomMiningDirection
+                    ? '已开「自选方向」：拆解针对输入框方向，请先关闭'
+                    : input.trim()
+                      ? '智能拆解：把当前方向拆成多张正交卡片后批量派发'
+                      : '先输入要拆解的挖掘方向'
+                }
+              >
+                <Sparkles className="h-4 w-4" />
+              </button>
+            )}
 
             {/* Send button：多任务下「停止」不属于输入框（每行任务各有自己的停止），
                 这里只负责提交；仅在提交在途或市场未就绪时禁用 */}
