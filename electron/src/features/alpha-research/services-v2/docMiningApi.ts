@@ -23,6 +23,16 @@ export const DOC_MAX_DIRECTION_CHARS = 8000;
 /** 与后端 `RD_AGENT_DOC_MAX_MB` 默认值（200MB）对齐——前端早拒只是省一次白传。 */
 export const DOC_MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 
+/** 与后端 `MAX_DOC_FILES`（alpha_agent_docs.py）同字面量。 */
+export const DOC_MAX_FILES = 20;
+
+/**
+ * 与后端 `RD_AGENT_DOC_MAX_TOTAL_MB` 默认值（200MB）对齐——多文件合计早拒。
+ * 抬后端合计上限要求 nginx / api→engine 代理体一起抬（部署链同卡一个请求），
+ * 届时本常量与面板文案也要同步改（见 docs/文档挖掘_启用与通道指南.md 第四节）。
+ */
+export const DOC_MAX_TOTAL_UPLOAD_BYTES = 200 * 1024 * 1024;
+
 export const ORGANIZE_KIND_LABELS: Record<string, string> = {
   free: '主题研究简报',
   paper: '论文复现解读',
@@ -45,6 +55,8 @@ export interface DocRow {
   filename: string;
   ext: string | null;
   size_bytes: number | null;
+  /** 单次上传的文件件数（多文件合并解析：正文+附录/多图） */
+  files_count?: number | null;
   parse_state: string | null;
   page_count: number | null;
   status: string;
@@ -106,13 +118,19 @@ export function extractDetail(err: unknown): string {
 
 // ========================== 端点 ==========================
 
-/** 上传文档（multipart）。进度回调仅在浏览器能算出 total 时触发。 */
-export async function uploadDoc(
-  file: File,
+/**
+ * 上传文档（multipart，单/多文件）。进度回调仅在浏览器能算出 total 时触发。
+ *
+ * 多文件：同一字段 `file` 重复提交，**数组顺序 = 合并顺序**（正文在前、
+ * 附录/附图在后由调用方决定）；后端一次 MinerU 批次解析后合并为一份
+ * full.md（合并处插入「第 i/N 部分」章节标记）。
+ */
+export async function uploadDocs(
+  files: File[],
   onProgress?: (pct: number) => void,
 ): Promise<{ doc: DocRow; reused: boolean }> {
   const form = new FormData();
-  form.append('file', file);
+  for (const file of files) form.append('file', file);
   // axios 1.x 的 XHR 适配器对 FormData 会自动让浏览器设置 multipart boundary
   //（quantbot agentApi 同款路径），不要手写 Content-Type。
   const res = await apiClient.post('/alpha-agent/docs/upload', form, {
@@ -125,6 +143,14 @@ export async function uploadDoc(
   const data = res.data?.data ?? {};
   if (!data.doc) throw new Error('上传响应缺少文档信息');
   return { doc: data.doc as DocRow, reused: Boolean(data.reused) };
+}
+
+/** 单文件便捷包装（保持旧签名：老调用方零改动）。 */
+export async function uploadDoc(
+  file: File,
+  onProgress?: (pct: number) => void,
+): Promise<{ doc: DocRow; reused: boolean }> {
+  return uploadDocs([file], onProgress);
 }
 
 export async function listDocs(params?: {

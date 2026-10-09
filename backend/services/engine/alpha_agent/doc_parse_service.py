@@ -20,6 +20,13 @@
 下载重试不会烧 MinerU（重轮询结果幂等），把一次磁盘抖动变成永久失败才是
 真正的损失；总时限到了统一定格「解析超时」。永久性 MinerUError 立即定格。
 
+多文件（T-FM-19a）：一份文档 = 一个 MinerU 批次里的多个文件，data_id
+``{doc_id}_p{i}`` 把批次项钉回部件序号（不拿文件名猜）。任一部件 failed →
+整份定格并点名部件（记账按实际烧掉的页：已 done 部件照常 settle，在途部件
+预留转已用）；全 done → 逐件下载解包 → ``doc_merge`` 合并成一份 full.md
+（图片去重/改名、引用重写）→ 单次 settle。单文件路径与历史批次逐字节同口径
+（``decode_original_paths`` 把单文件行合成为一件）。
+
 时钟/睡眠可注入（测试用 FakeClock 把 2 小时超时压成毫秒级）。
 """
 
@@ -43,12 +50,17 @@ from backend.services.engine.alpha_agent.doc_credentials import (
     TOKEN_SRC_USER,
     resolve_effective_mineru_token,
 )
+from backend.services.engine.alpha_agent.doc_merge import MergePart, merge_parts
 from backend.services.engine.alpha_agent.doc_quota import (
     DocQuota,
     QuotaStatus,
     get_doc_quota,
 )
-from backend.services.engine.alpha_agent.doc_store import DocStore, get_doc_store
+from backend.services.engine.alpha_agent.doc_store import (
+    DocStore,
+    decode_original_paths,
+    get_doc_store,
+)
 from backend.services.engine.alpha_agent.mineru_client import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL_VERSION,
@@ -91,6 +103,9 @@ USER_TOKEN_CACHE_TTL_S = 300.0
 USER_TOKEN_CACHE_MAX = 256
 USER_CLIENT_CACHE_MAX = 64
 
+#: 多文件部件 data_id 前缀截断长度（MinerU data_id 上限 128，给 ``_p{i}`` 留位）
+MULTI_DATA_ID_MAX = 120
+
 _DOC_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 #: MinerU 常见失败码 → 人话（原文照旧拼接在前，排查锚点不丢）
@@ -103,6 +118,17 @@ _CODE_HINTS: dict[str, str] = {
 
 
 # ── 纯函数 ──────────────────────────────────────────────────────────
+
+
+def part_data_id(doc_id: str, index: int, total: int) -> str:
+    """部件 data_id：单文件保持裸 ``doc_id``（历史批次口径不变）。
+
+    多文件 ``{doc_id 截断}_p{i}``（i 从 1 起，与「第 i/N 部分」同序）——
+    提交与轮询共用本函数，批次项因此能精确钉回部件，不靠文件名猜。
+    """
+    if total <= 1:
+        return doc_id
+    return f"{doc_id[:MULTI_DATA_ID_MAX]}_p{index}"
 
 
 def parse_failure_message(item: MineruBatchItem) -> str:
@@ -359,18 +385,17 @@ class DocParseService:
             )
         return self._resolve_client()
 
-    async def _detect_is_ocr(self, doc: Mapping[str, Any]) -> bool:
+    async def _detect_is_ocr_for(self, ext: str, path: Path) -> bool:
         """非 PDF → 不 OCR（图片/office 各有直解通路）；PDF 探测文本层。
 
         探测读不动或文件过大 → **保守送 OCR**：漏 OCR 的扫描件会产出空壳
         文本（静默的坏结果），多 OCR 电子件只是慢一点。
         """
-        ext = str(doc.get("ext") or "").lower()
+        ext = str(ext or "").lower()
         if ext and not ext.startswith("."):
             ext = f".{ext}"
         if ext != ".pdf":
             return False
-        path = Path(str(doc.get("original_path") or ""))
         try:
             size = path.stat().st_size
         except OSError:
@@ -385,28 +410,55 @@ class DocParseService:
         verdict = await run_pdf_job(detect_scanned_pdf, content)
         return verdict if verdict is not None else True
 
+    async def _detect_is_ocr(self, doc: Mapping[str, Any]) -> bool:
+        """单文件行入口（兼容保留）；提交链统一走 :meth:`_detect_is_ocr_for`。"""
+        return await self._detect_is_ocr_for(
+            str(doc.get("ext") or ""), Path(str(doc.get("original_path") or ""))
+        )
+
     async def submit_parse(self, doc: Mapping[str, Any]) -> None:
-        """提交解析：建批次 → 上传原件 → parsing 落库 → 挂轮询。
+        """提交解析：建批次（全部部件一次成批）→ 上传原件 → parsing 落库 → 挂轮询。
+
+        单文件与多文件同一条部件流水线（``decode_original_paths`` 把单文件
+        行合成为一件）；data_id 单文件=裸 doc_id、多文件 ``{doc_id}_p{i}``。
 
         任何提交期异常都把行定格 parse_failed（带原文），再向上抛——调用方
         （端点）据此返回错误，用户看到的是「这份文档为什么没解析」。
         """
         doc_id = str(doc["doc_id"])
-        is_ocr = await self._detect_is_ocr(doc)
-        spec = MineruFileSpec(
-            name=str(doc.get("filename") or "document"),
-            data_id=doc_id,
-            is_ocr=is_ocr,
-        )
+        parts = decode_original_paths(doc)
+        specs: list[MineruFileSpec] = []
+        for idx, part in enumerate(parts, 1):
+            specs.append(
+                MineruFileSpec(
+                    name=str(part.get("name") or "document"),
+                    data_id=part_data_id(doc_id, idx, len(parts)),
+                    is_ocr=await self._detect_is_ocr_for(
+                        str(part.get("ext") or ""),
+                        Path(str(part.get("path") or "")),
+                    ),
+                )
+            )
         try:
+            if not specs:
+                raise MineruError(
+                    "缺少原件路径（提交未完成），请重新上传", retryable=False
+                )
             # 凭据解析放在 try 内：任何来源都没有 token 也要走 except 定格
             # parse_failed + 退预留——留在 try 外会留下「uploaded 但永远
             # 解析不了」且预留被占死的孤儿行。
             client, token_src = await self._client_for_submit(doc)
-            batch_id, urls = await client.create_upload_batch([spec])
-            if not urls:
-                raise MineruError("MinerU 未返回上传链接", retryable=False)
-            await client.upload_file(urls[0], Path(str(doc.get("original_path") or "")))
+            batch_id, urls = await client.create_upload_batch(specs)
+            if len(urls) < len(specs):
+                raise MineruError(
+                    "MinerU 未返回上传链接"
+                    if len(specs) == 1
+                    else f"MinerU 未返回全部上传链接（{len(urls)}/{len(specs)}）",
+                    retryable=False,
+                )
+            # 上面已保证 len(urls) >= len(specs)；多余链接忽略即可
+            for part, url in zip(parts, urls, strict=False):
+                await client.upload_file(url, Path(str(part.get("path") or "")))
         except Exception as exc:
             await self._store.update_doc(
                 doc_id,
@@ -435,7 +487,12 @@ class DocParseService:
             return
         self.start_poll(doc_id)
         logger.info(
-            "doc %s 已提交 MinerU（batch=%s, is_ocr=%s）", doc_id, batch_id, is_ocr
+            "doc %s 已提交 MinerU（batch=%s, %s）",
+            doc_id,
+            batch_id,
+            f"is_ocr={specs[0].is_ocr}"
+            if len(specs) == 1
+            else f"{len(specs)} 个文件, is_ocr={[s.is_ocr for s in specs]}",
         )
 
     # -- 轮询 ----------------------------------------------------------
@@ -466,6 +523,37 @@ class DocParseService:
             if not item.data_id and item.file_name == filename:
                 return item
         return None
+
+    @staticmethod
+    def _match_part_items(
+        items: list[MineruBatchItem],
+        doc: Mapping[str, Any],
+        parts: list[dict[str, str]],
+    ) -> list[MineruBatchItem | None]:
+        """批次项 → 部件序列对齐（与上传顺序同长，缺项为 None）。
+
+        data_id 精确匹配优先（我们提交时写了 ``{doc_id}_p{i}``）；老批次
+        没有 data_id 时按文件名兜底——同名多件按出现顺序一一认领。
+        """
+        doc_id = str(doc.get("doc_id") or "")
+        total = len(parts)
+        by_data: dict[str, MineruBatchItem] = {}
+        by_name: dict[str, list[MineruBatchItem]] = {}
+        for item in items:
+            did = str(item.data_id or "")
+            if did:
+                by_data.setdefault(did, item)
+            elif item.file_name:
+                by_name.setdefault(str(item.file_name), []).append(item)
+        matched: list[MineruBatchItem | None] = []
+        for idx, part in enumerate(parts, 1):
+            hit = by_data.get(part_data_id(doc_id, idx, total))
+            if hit is None:
+                queued = by_name.get(str(part.get("name") or ""))
+                if queued:
+                    hit = queued.pop(0)
+            matched.append(hit)
+        return matched
 
     def _release_quota(self, doc: Mapping[str, Any]) -> None:
         """失败/删除路径：全额退回预留（没预留过 = no-op）。"""
@@ -527,6 +615,45 @@ class DocParseService:
             self._release_quota(doc)
         logger.warning("doc %s 解析失败：%s", doc.get("doc_id"), message)
 
+    async def _fail_parts(
+        self,
+        doc: Mapping[str, Any],
+        failed_part: Mapping[str, str],
+        failed_item: MineruBatchItem,
+        matched: list[MineruBatchItem | None],
+    ) -> None:
+        """多文件：某部件 failed → 整份定格（点名是哪一件）。
+
+        记账按**实际烧掉的页**：同批已 done 部件 MinerU 照常计费（settle
+        页数，页数不可知则预留转已用）；还有在途部件时按最坏情况把预留转为
+        已用（它可能随后完成并计费）；全员失败才全退（与单文件同口径）。
+        """
+        name = str(failed_part.get("name") or "文件")
+        message = f"「{name}」：{parse_failure_message(failed_item)}"
+        await self._store.update_doc(
+            str(doc["doc_id"]),
+            status="parse_failed",
+            parse_state="failed",
+            error=message,
+        )
+        done_items = [
+            item
+            for item in matched
+            if item is not None and (item.state or "").strip().lower() == "done"
+        ]
+        inflight = any(
+            item is None or (item.state or "").strip().lower() not in ("done", "failed")
+            for item in matched
+        )
+        if inflight:
+            self._commit_quota(doc)
+        elif done_items:
+            pages = sum(int(item.total_pages or 0) for item in done_items)
+            await self._settle_or_commit_quota(doc, pages)
+        else:
+            self._release_quota(doc)
+        logger.warning("doc %s 解析失败：%s", doc.get("doc_id"), message)
+
     async def _poll_once(self, doc_id: str) -> str:
         """一次轮询：parsed / parse_failed / active / pending / gone。
 
@@ -542,6 +669,10 @@ class DocParseService:
 
         client = await self._client_for_doc(doc)
         items = await client.get_batch_results(str(batch_id))
+        parts = decode_original_paths(doc)
+        if len(parts) > 1:
+            return await self._poll_once_multi(doc, items, parts)
+
         item = self._match_item(items, doc)
         if item is None:
             return "pending"  # 自己那条还没出现在结果里：只等待，不动状态
@@ -557,6 +688,35 @@ class DocParseService:
         if item.total_pages:
             fields["page_count"] = int(item.total_pages)
         await self._store.update_doc(doc_id, **fields)
+        return "active"
+
+    async def _poll_once_multi(
+        self,
+        doc: Mapping[str, Any],
+        items: list[MineruBatchItem],
+        parts: list[dict[str, str]],
+    ) -> str:
+        """多文件轮询：任一部件 failed → 整份定格；缺件 → 等；全 done → 合并落盘。"""
+        matched = self._match_part_items(
+            items, doc, parts
+        )  # 与 parts 同长，缺项为 None
+        for part, item in zip(parts, matched, strict=True):
+            if item is None:
+                continue
+            if (item.state or "").strip().lower() == "failed":
+                await self._fail_parts(doc, part, item, matched)
+                return "parse_failed"
+        if any(item is None for item in matched):
+            return "pending"  # 有部件还没出现在结果里：只等待，不动状态
+
+        if all((item.state or "").strip().lower() == "done" for item in matched):
+            return await self._finish_done_multi(doc, parts, matched)
+
+        fields: dict[str, Any] = {"parse_state": "running"}
+        pages = sum(int(item.total_pages or 0) for item in matched)
+        if pages:
+            fields["page_count"] = pages
+        await self._store.update_doc(str(doc["doc_id"]), **fields)
         return "active"
 
     async def _settle_or_commit_quota(self, doc: Mapping[str, Any], pages: int) -> None:
@@ -622,6 +782,104 @@ class DocParseService:
         await self._settle_or_commit_quota(doc, pages)
         logger.info(
             "doc %s 解析完成（%d 页，%d 张图）", doc_id, pages, result.image_count
+        )
+        return "parsed"
+
+    async def _finish_done_multi(
+        self,
+        doc: Mapping[str, Any],
+        parts: list[dict[str, str]],
+        items: list[MineruBatchItem],
+    ) -> str:
+        """全部 done → 逐件下载解包 → 合并成一份 full.md → parsed + 单次结算。
+
+        中间物（``mineru_p{i}.zip`` / ``parts/p{i}/``）成功后清掉；进函数先清
+        一次旧残留——轮询层对意外异常按可重试处理，重试必须幂等：同一份产物
+        合并同一遍，绝不让两次尝试的产出混起来。
+        """
+        doc_id = str(doc["doc_id"])
+        doc_dir = self.doc_dir(doc_id)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        dest = doc_dir / "parsed"
+        parts_root = doc_dir / "parts"
+        shutil.rmtree(parts_root, ignore_errors=True)
+        shutil.rmtree(dest, ignore_errors=True)
+        for idx in range(1, len(parts) + 1):
+            (doc_dir / f"mineru_p{idx}.zip").unlink(missing_ok=True)
+
+        for part, item in zip(parts, items, strict=True):  # 调用方保证同长（matched）
+            if not item.full_zip_url:
+                await self._fail(
+                    doc,
+                    f"「{part.get('name')}」解析完成但未返回 full_zip_url"
+                    "（响应结构异常）",
+                )
+                return "parse_failed"
+
+        pages = sum(int(item.total_pages or 0) for item in items)
+        merge_inputs: list[MergePart] = []
+        async with self._parse_sem:
+            try:
+                client = await self._client_for_doc(doc)
+                for idx, (part, item) in enumerate(zip(parts, items, strict=True), 1):
+                    zip_path = doc_dir / f"mineru_p{idx}.zip"
+                    part_dir = parts_root / f"p{idx}"
+                    try:
+                        await client.download_zip(str(item.full_zip_url), zip_path)
+                        await asyncio.to_thread(
+                            extract_zip_whitelist, zip_path, part_dir
+                        )
+                    except MineruError as exc:
+                        raise MineruError(
+                            f"「{part.get('name')}」{exc}", retryable=exc.retryable
+                        ) from exc
+                    merge_inputs.append(
+                        MergePart(
+                            name=str(part.get("name") or f"第 {idx} 部分"),
+                            parsed_dir=part_dir,
+                        )
+                    )
+                result = await asyncio.to_thread(merge_parts, merge_inputs, dest)
+            except MineruError as exc:
+                # MinerU 真扣了页才给 zip（done），按实际页数结算而不是全退
+                await self._settle_or_commit_quota(doc, pages)
+                await self._fail(
+                    doc,
+                    f"产物下载/解包失败：{exc}",
+                    release_quota=False,
+                )
+                return "parse_failed"
+
+        fields: dict[str, Any] = {
+            "status": "parsed",
+            "parse_state": "done",
+            "error": None,
+            "md_path": str(result.md_path),
+            # 多文件的 content_list 不合并：整理链只认 full.md，合并 json 无消费方
+            "content_list_path": None,
+        }
+        if pages:
+            fields["page_count"] = pages
+        hit = await self._store.update_doc(doc_id, **fields)
+        if not hit:
+            # H2：下载/合并期间用户删了文档（写被 deleted 守卫拦下）。
+            # 产物刚被写回已删目录 → 再清一次；删除端点对已建批次的行不退
+            # 预留（MinerU 照常计费），预留留在账上（保守上界）不再结算。
+            shutil.rmtree(doc_dir, ignore_errors=True)
+            logger.info("doc %s 完成前已被删除，丢弃产物", doc_id)
+            return "gone"
+
+        # 中间物清掉：合并产物已定型在 parsed/
+        shutil.rmtree(parts_root, ignore_errors=True)
+        for idx in range(1, len(parts) + 1):
+            (doc_dir / f"mineru_p{idx}.zip").unlink(missing_ok=True)
+        await self._settle_or_commit_quota(doc, pages)
+        logger.info(
+            "doc %s 多文件解析完成（%d 件 / %d 页 / %d 张图）",
+            doc_id,
+            len(parts),
+            pages,
+            result.image_count,
         )
         return "parsed"
 
@@ -704,6 +962,10 @@ class DocParseService:
             fields["content_list_path"] = str(dst_dir / Path(str(donor_cl)).name)
         if donor.get("page_count") is not None:
             fields["page_count"] = int(donor["page_count"])
+        if donor.get("files_count") is not None:
+            # 件数要抄到新行（列表页展示用）；original_paths 是各文档自己的
+            # 磁盘事实，绝不跨行复制（新行保留自己刚上传的部件清单）
+            fields["files_count"] = int(donor["files_count"])
         hit = await self._store.update_doc(doc_id, **fields)
         if not hit:
             # H2：复制产物期间行已被删除 → 清掉刚复制的目录，回落真解析路径

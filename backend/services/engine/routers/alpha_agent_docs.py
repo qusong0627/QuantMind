@@ -19,9 +19,21 @@
 - 大小**两道闸**（安全审查 C1）：handler 里先从 ``request.stream()`` 拿不到
   就拒——先用 ``Content-Length`` 粗拦（缺头 411：不支持 chunked），再分块
   计数精验（不信任声明值）。**不能**用 ``file: UploadFile = File(...)`` 参数：
-  FastAPI 会在进入 handler 前把整个 multipart 无上限落临时文件，200MB 上限
-  就变成「收完之后才生效」；
+  FastAPI 会在进入 handler 前把整个 multipart 无上限落临时文件，上限就变成
+  「收完之后才生效」。多文件后粗闸按**合计上限**（``RD_AGENT_DOC_MAX_TOTAL_MB``，
+  默认 200MB——单文件上限×N 可能合法超过它）；单文件 200MB 由流式落盘时的
+  分块计数精验拦截；
 - 拒绝后**连根清**：目录 rmtree、行不落库或 hard_delete（见下）。
+
+多文件合并（T-FM-19a）
+----------------------
+同一字段 ``file`` 可重复出现（≤ ``MAX_DOC_FILES`` 件，**顺序=合并顺序**，
+正文在前附录在后由用户决定）。单文件走历史路径（``original{ext}``，行不写
+manifest，逐字节同口径）；多文件落 ``originals/p{i}{ext}``（i 从 1 起，与
+MinerU data_id 的 ``_p{i}`` 部件序号对齐），行上 ``original_paths`` 记部件
+清单、``files_count`` 记件数、显示名缀「（共N个文件）」。复用键 = 各
+(name, sha256) 按顺序拼接的复合 sha256（顺序/文件名敏感：同集合换序或改名
+不命中复用——宁可重解析一次，也不把产物章节标题贴错名）。
 
 配额顺序（先预留后提交；安全审查 H1）
 -------------------------------------
@@ -122,6 +134,17 @@ router = APIRouter(
 MAX_UPLOAD_ENV = "RD_AGENT_DOC_MAX_MB"
 DEFAULT_MAX_UPLOAD_MB = 200
 
+#: 单次上传**合计**上限的 env 名（MB）。默认 200 = 与部署链同口径：nginx
+#: client_max_body_size 210m（镜像内）与 api→engine 代理体 ENGINE_PROXY_MAX_BODY_MB
+#: 默认 210MB 都卡在同一个请求上——合计上限抬过 210 之前必须先把那两处一起
+#: 抬高（见 docs/文档挖掘_启用与通道指南.md 第四节），否则多文件会在更外层
+#: 吃 413（且 nginx 报的是裸 HTML 错误页）。
+MAX_TOTAL_UPLOAD_ENV = "RD_AGENT_DOC_MAX_TOTAL_MB"
+DEFAULT_MAX_TOTAL_UPLOAD_MB = 200
+
+#: 单次上传文件数上限（一批提交给 MinerU；批上限 50，这里留足余量）
+MAX_DOC_FILES = 20
+
 #: multipart 编码在文件字节之外的开销上限（boundary/头/文件名等）：Content-Length
 #: 粗拦时按「文件上限 + 本余量」封顶（安全审查 C1）
 MULTIPART_OVERHEAD_BYTES = 8 * 1024 * 1024
@@ -168,6 +191,7 @@ _INTERNAL_FIELDS = (
     "user_id",
     "sha256",
     "original_path",
+    "original_paths",
     "md_path",
     "content_list_path",
     "mineru_batch_id",
@@ -213,32 +237,50 @@ def sanitize_upload_filename(raw: str | None) -> str:
     return name
 
 
-def max_upload_bytes() -> int:
-    """上传上限（字节）。env 脏值回落默认——import/构造期绝不炸。"""
-    raw = (os.getenv(MAX_UPLOAD_ENV) or "").strip()
-    mb = DEFAULT_MAX_UPLOAD_MB
+def _env_mb(name: str, default_mb: int) -> int:
+    """env 的 MB 值 → 正整数；脏值回落默认——import/构造期绝不炸。"""
+    raw = (os.getenv(name) or "").strip()
     if raw:
         try:
             parsed = int(raw)
-            mb = parsed if parsed > 0 else DEFAULT_MAX_UPLOAD_MB
+            if parsed > 0:
+                return parsed
         except ValueError:
-            logger.warning(
-                "%s=%r 不是整数，回落默认 %d",
-                MAX_UPLOAD_ENV,
-                raw,
-                DEFAULT_MAX_UPLOAD_MB,
-            )
-    return mb * 1024 * 1024
+            pass
+        logger.warning("%s=%r 不是正整数，回落默认 %d", name, raw, default_mb)
+    return default_mb
+
+
+def max_upload_bytes() -> int:
+    """单文件上传上限（字节）。"""
+    return _env_mb(MAX_UPLOAD_ENV, DEFAULT_MAX_UPLOAD_MB) * 1024 * 1024
+
+
+def max_total_upload_bytes() -> int:
+    """单次上传**合计**上限（字节；多文件按逐件累计精验）。
+
+    永不低于单文件上限：配置 ``RD_AGENT_DOC_MAX_MB=800`` 而合计没跟着抬时，
+    单文件 600MB 合法却过不了粗闸——取 max 消除这个自相矛盾。
+    """
+    return (
+        max(
+            _env_mb(MAX_TOTAL_UPLOAD_ENV, DEFAULT_MAX_TOTAL_UPLOAD_MB),
+            _env_mb(MAX_UPLOAD_ENV, DEFAULT_MAX_UPLOAD_MB),
+        )
+        * 1024
+        * 1024
+    )
 
 
 def _enforce_upload_content_length(request: Request) -> None:
     """C1：在读 body **之前**按 Content-Length 粗拦（缺头=411）。
 
-    Starlette 解析 multipart 会先把整个文件写进临时文件（无内置上限），
-    所以 200MB 上限必须在「解析之前」就生效；文件部分的实际字节数仍由
-    ``_stream_to_disk`` 分块计数精验（声明值只是提前拒绝的粗筛，不可信）。
-    缺 Content-Length（chunked）无法粗筛 → 411 拒绝，浏览器/axios/网关
-    转发都带 Content-Length，正常客户端不受影响。
+    Starlette 解析 multipart 会先把整个请求体写进临时文件（无内置上限），
+    所以上限必须在「解析之前」就生效。多文件后粗闸用**合计上限**（单文件
+    上限 × N 可能合法超过它，用单文件上限粗筛会误杀多文件上传）；单文件
+    上限由 ``_stream_to_disk`` 流式落盘时分块计数精验（声明值只是提前拒绝
+    的粗筛，不可信）。缺 Content-Length（chunked）无法粗筛 → 411 拒绝，
+    浏览器/axios/网关转发都带 Content-Length，正常客户端不受影响。
     """
     raw = request.headers.get("content-length")
     if raw is None:
@@ -250,9 +292,9 @@ def _enforce_upload_content_length(request: Request) -> None:
         declared = int(raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Content-Length 非法") from exc
-    limit = max_upload_bytes() + MULTIPART_OVERHEAD_BYTES
+    limit = max_total_upload_bytes() + MULTIPART_OVERHEAD_BYTES
     if declared < 0 or declared > limit:
-        max_mb = max_upload_bytes() // (1024 * 1024)
+        max_mb = max_total_upload_bytes() // (1024 * 1024)
         raise HTTPException(status_code=413, detail=f"文件过大（上限 {max_mb}MB）")
 
 
@@ -284,6 +326,74 @@ async def _stream_to_disk(
             fh.write(chunk)
             hasher.update(chunk)
     return written, hasher.hexdigest()
+
+
+def _composite_sha256(pairs: list[tuple[str, str]]) -> str:
+    """多文件复用键 = sha256(按顺序拼接的 ``name\\0file_sha256\\0``)。
+
+    顺序敏感（文件顺序就是合并顺序，正文/附录互换不是同一份文档）；文件名
+    也参与（复用产物里的章节分隔标记贴的原名，同内容改名命中复用会贴错名
+    ——宁可重解析一次）。
+    """
+    hasher = hashlib.sha256()
+    for name, digest in pairs:
+        hasher.update(f"{name}\0{digest}\0".encode())
+    return hasher.hexdigest()
+
+
+async def _store_uploaded_files(
+    files: list[UploadFile],
+    filenames: list[str],
+    exts: list[str],
+    doc_dir: Path,
+) -> tuple[list[dict[str, str]], list[int], str]:
+    """单/多文件落盘 → (部件清单, 各部件字节数, 复用键 sha256)。
+
+    - 单文件：``original{ext}``（历史逐字节同路径），sha256 = 内容哈希；
+    - 多文件：``originals/p{i}{ext}``（i 从 1 起，与 MinerU 部件序号对齐），
+      逐件精验单文件上限、累计精验合计上限，复用键 = 复合 sha256。
+
+    任何异常（含 413/400）由调用方 rmtree 整个文档目录。
+    """
+    if len(files) == 1:
+        dest = doc_dir / f"original{exts[0]}"
+        size, sha256 = await _stream_to_disk(
+            files[0],
+            dest,
+            max_bytes=max_upload_bytes(),
+            magic=ALLOWED_EXTENSIONS[exts[0]],
+        )
+        return (
+            [{"path": str(dest), "name": filenames[0], "ext": exts[0]}],
+            [size],
+            sha256,
+        )
+
+    originals_dir = doc_dir / "originals"
+    originals_dir.mkdir(parents=True, exist_ok=True)
+    total_cap = max_total_upload_bytes()
+    manifest: list[dict[str, str]] = []
+    sizes: list[int] = []
+    pairs: list[tuple[str, str]] = []
+    total = 0
+    # filenames/exts 由 files 逐件推导，三列表天然同长
+    for idx, (file, name, ext) in enumerate(
+        zip(files, filenames, exts, strict=True), 1
+    ):
+        dest = originals_dir / f"p{idx}{ext}"
+        size, sha256 = await _stream_to_disk(
+            file, dest, max_bytes=max_upload_bytes(), magic=ALLOWED_EXTENSIONS[ext]
+        )
+        total += size
+        if total > total_cap:
+            max_mb = total_cap // (1024 * 1024)
+            raise HTTPException(
+                status_code=413, detail=f"文件合计过大（上限 {max_mb}MB）"
+            )
+        manifest.append({"path": str(dest), "name": name, "ext": ext})
+        sizes.append(size)
+        pairs.append((name, sha256))
+    return manifest, sizes, _composite_sha256(pairs)
 
 
 async def _estimate_pages(path: Path, ext: str, size: int) -> int:
@@ -353,7 +463,11 @@ def _require_owned_doc(doc: dict | None, doc_id: str) -> dict:
 
 @router.post("/docs/upload")
 async def upload_doc(request: Request) -> dict:
-    """multipart 上传 → 落盘 + 建行 → sha256 复用或提交 MinerU 解析。
+    """multipart 上传（单/多文件）→ 落盘 + 建行 → sha256 复用或提交 MinerU 解析。
+
+    多文件（T-FM-19a）：同一字段 ``file`` 重复出现（≤ ``MAX_DOC_FILES`` 件，
+    顺序=合并顺序）。单文件与历史逐字节同口径（``original{ext}``、行不写
+    manifest）。
 
     刻意**不**声明 ``file: UploadFile = File(...)`` 参数（安全审查 C1）：
     FastAPI 会在进入 handler 前把整个 multipart 无上限落临时文件。这里先
@@ -367,15 +481,23 @@ async def upload_doc(request: Request) -> dict:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     _enforce_upload_content_length(request)
     form = await request.form()
-    file = form.get("file")
+    raw_files = form.getlist("file")
     # 比对的必须是 starlette.datastructures.UploadFile：request.form() 产出的
     # 文件对象是 starlette 类，不是它的子类 fastapi.UploadFile——比子类会让
     # 真请求全数 400（测试替身用 starlette 类，钉住这一条）。
-    if not isinstance(file, UploadFile):
+    if not raw_files or any(not isinstance(f, UploadFile) for f in raw_files):
         raise HTTPException(status_code=400, detail="缺少文件（multipart 字段名 file）")
-    filename = sanitize_upload_filename(file.filename)
-    ext = PurePosixPath(filename).suffix.lower()
-    magic = ALLOWED_EXTENSIONS[ext]
+    if len(raw_files) > MAX_DOC_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次最多上传 {MAX_DOC_FILES} 个文件（收到 {len(raw_files)} 个）",
+        )
+    filenames = [sanitize_upload_filename(f.filename) for f in raw_files]
+    exts = [PurePosixPath(name).suffix.lower() for name in filenames]
+    multi = len(raw_files) > 1
+    display_name = (
+        f"{filenames[0]}（共{len(filenames)}个文件）" if multi else filenames[0]
+    )
 
     store = get_doc_store()
     svc = get_doc_parse_service()
@@ -395,10 +517,9 @@ async def upload_doc(request: Request) -> dict:
     doc_id = uuid.uuid4().hex[:16]
     doc_dir = svc.doc_dir(doc_id)
     doc_dir.mkdir(parents=True, exist_ok=True)
-    original_path = doc_dir / f"original{ext}"
     try:
-        size, sha256 = await _stream_to_disk(
-            file, original_path, max_bytes=max_upload_bytes(), magic=magic
+        parts, sizes, sha256 = await _store_uploaded_files(
+            raw_files, filenames, exts, doc_dir
         )
     except HTTPException:
         shutil.rmtree(doc_dir, ignore_errors=True)
@@ -407,20 +528,25 @@ async def upload_doc(request: Request) -> dict:
         shutil.rmtree(doc_dir, ignore_errors=True)
         logger.exception("[docs] 上传落盘失败 doc=%s", doc_id)
         raise HTTPException(status_code=500, detail="上传写入失败，请重试") from exc
+    size = sum(sizes)
+    ext = exts[0]
 
-    # L5：建行/复用抛错时已落盘的原件不许变成孤儿（≤200MB）。
+    # L5：建行/复用抛错时已落盘的原件不许变成孤儿（≤ 合计上限）。
     try:
         await store.create_doc(
             doc_id=doc_id,
             user_id=user_id,
-            filename=filename,
+            filename=display_name,
             ext=ext,
             size_bytes=size,
             sha256=sha256,
-            original_path=str(original_path),
+            original_path=parts[0]["path"],
             status="uploaded",
             # 行上带 tenant：重启续轮询时凭 (user_id, tenant_id) 重读用户 Token
             tenant_id=tenant_id,
+            files_count=len(parts),
+            # 单文件行不写 manifest（历史逐字节同口径）；多文件记部件清单
+            original_paths=parts if multi else None,
         )
         doc = await store.get_doc(doc_id, user_id=user_id)
         reused = False
@@ -439,14 +565,24 @@ async def upload_doc(request: Request) -> dict:
         if latest is None or latest.get("status") == "deleted":
             shutil.rmtree(doc_dir, ignore_errors=True)
             raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
-        pages = await _estimate_pages(original_path, ext, size)
-        if pages > MAX_PAGES_PER_FILE:
-            shutil.rmtree(doc_dir, ignore_errors=True)
-            await store.hard_delete(doc_id, user_id=user_id)
-            raise HTTPException(
-                status_code=400,
-                detail=f"文件超过单文件 {MAX_PAGES_PER_FILE} 页上限，请拆分后重试",
-            )
+        # 页数预估：conservative，单文件上限逐件判（多文件 = 各件之和）
+        pages = 0
+        for part, part_size in zip(parts, sizes, strict=True):  # 同一函数返回，逐件对齐
+            estimate = await _estimate_pages(Path(part["path"]), part["ext"], part_size)
+            if estimate > MAX_PAGES_PER_FILE:
+                shutil.rmtree(doc_dir, ignore_errors=True)
+                await store.hard_delete(doc_id, user_id=user_id)
+                if multi:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"「{part['name']}」超过单文件 {MAX_PAGES_PER_FILE} 页上限，"
+                        "请拆分后重试",
+                    )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"文件超过单文件 {MAX_PAGES_PER_FILE} 页上限，请拆分后重试",
+                )
+            pages += estimate
         try:
             quota.reserve(user_id, pages, doc_id=doc_id)
         except QuotaExceeded as exc:
@@ -466,7 +602,7 @@ async def upload_doc(request: Request) -> dict:
         "[docs] 上传完成 doc=%s user=%s file=%s size=%d reused=%s",
         doc_id,
         user_id,
-        filename,
+        display_name,
         size,
         reused,
     )

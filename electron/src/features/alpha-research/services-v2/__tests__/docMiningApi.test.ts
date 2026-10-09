@@ -21,6 +21,8 @@ vi.mock('../../../../services/aiStrategyClients', () => ({
 
 import {
   DOC_MAX_DIRECTION_CHARS,
+  DOC_MAX_FILES,
+  DOC_MAX_TOTAL_UPLOAD_BYTES,
   DOC_MAX_UPLOAD_BYTES,
   DOC_UPLOAD_ACCEPT,
   deleteDoc,
@@ -29,6 +31,7 @@ import {
   getDocFileText,
   organizeDoc,
   uploadDoc,
+  uploadDocs,
 } from '../docMiningApi';
 
 beforeEach(() => {
@@ -55,9 +58,11 @@ const DOC = {
 };
 
 describe('常量：与后端同字面量', () => {
-  test('方向上限 8000 字、上传上限 200MB', () => {
+  test('方向上限 8000 字、单件 200MB、合计 200MB（链同口径）、件数 20', () => {
     expect(DOC_MAX_DIRECTION_CHARS).toBe(8000);
     expect(DOC_MAX_UPLOAD_BYTES).toBe(200 * 1024 * 1024);
+    expect(DOC_MAX_TOTAL_UPLOAD_BYTES).toBe(200 * 1024 * 1024);
+    expect(DOC_MAX_FILES).toBe(20);
   });
 
   test('扩展名白名单覆盖后端 ALLOWED_EXTENSIONS', () => {
@@ -112,6 +117,23 @@ describe('uploadDoc', () => {
     await expect(uploadDoc(new File(['a'], 'a.pdf'))).rejects.toThrow(
       '上传响应缺少文档信息',
     );
+  });
+
+  test('uploadDocs：同字段 file 重复提交，数组顺序=合并顺序', async () => {
+    apiPostMock.mockResolvedValue({
+      data: { data: { doc: { ...DOC, files_count: 2 }, reused: false } },
+    });
+
+    const out = await uploadDocs([
+      new File(['a'], '正文.pdf'),
+      new File(['b'], '附录.pdf'),
+    ]);
+
+    const [url, form] = apiPostMock.mock.calls[0];
+    expect(url).toBe('/alpha-agent/docs/upload');
+    const sent = (form as FormData).getAll('file');
+    expect(sent.map((f) => (f as File).name)).toEqual(['正文.pdf', '附录.pdf']);
+    expect(out.doc.files_count).toBe(2);
   });
 });
 

@@ -16,12 +16,14 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   UploadCloud, FileText, Loader2, CheckCircle2, AlertCircle,
-  RotateCcw, Wand2, Play, CloudUpload,
+  RotateCcw, Wand2, Play, CloudUpload, ArrowUp, ArrowDown, X,
 } from 'lucide-react';
 import type { DocMiningResume, TaskConfig } from '../types-v2';
 import type { DocQuotaStatus, DocRow, OrganizeResult } from '../services-v2/docMiningApi';
 import {
   DOC_MAX_DIRECTION_CHARS,
+  DOC_MAX_FILES,
+  DOC_MAX_TOTAL_UPLOAD_BYTES,
   DOC_MAX_UPLOAD_BYTES,
   DOC_STATUS_LABELS,
   DOC_UPLOAD_ACCEPT,
@@ -31,7 +33,7 @@ import {
   getDocFileText,
   getDocQuota,
   organizeDoc,
-  uploadDoc,
+  uploadDocs,
 } from '../services-v2/docMiningApi';
 
 type Step = 'upload' | 'parse' | 'organize' | 'confirm';
@@ -50,6 +52,13 @@ const KIND_HINTS: Record<string, string> = {
   free: '提炼摘要、可挖掘假设与数据要求，适合研报/资讯/书籍',
   paper: '按「方法—因子—复现要点—数据需求」拆解，适合论文复现',
 };
+
+/** 文件大小展示（列表行用，只求可读不精确到字节）。 */
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${bytes}B`;
+}
 
 export interface DocMiningPanelProps {
   /** 开始挖掘（TaskContext.startMining）；docId 一并下发记录文档血统 */
@@ -79,6 +88,8 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** 待上传清单（多文件先攒后传：顺序=合并顺序，可调可删，配额只烧一次） */
+  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const refreshQuota = useCallback(async () => {
@@ -186,48 +197,96 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
     setDirectionDraft('');
     setError(null);
     setNotice(null);
+    setStagedFiles([]);
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
-  const handleFile = useCallback(
-    async (file: File) => {
+  /** 选择文件 → 进待上传清单：前端先闸（白名单/单件/合计/件数），省一次白传。 */
+  const stageFiles = useCallback(
+    (picked: File[]) => {
+      if (!picked.length) return;
       setError(null);
       setNotice(null);
-      setOrganize(null);
-      setRawText(null);
-      setDirectionDraft('');
-      const ext = file.name.includes('.')
-        ? `.${file.name.split('.').pop()!.toLowerCase()}`
-        : '';
-      if (!DOC_UPLOAD_ACCEPT.split(',').includes(ext)) {
-        setError(`不支持的文件类型 ${ext || '（无后缀）'}：仅支持 PDF / Word / PPT / 图片`);
+      const next = [...stagedFiles, ...picked];
+      if (next.length > DOC_MAX_FILES) {
+        setError(`单次最多上传 ${DOC_MAX_FILES} 个文件（已选 ${next.length} 个）`);
         return;
       }
-      if (file.size > DOC_MAX_UPLOAD_BYTES) {
-        setError(`文件超过 ${Math.round(DOC_MAX_UPLOAD_BYTES / 1024 / 1024)}MB 上限，请拆分后上传`);
-        return;
-      }
-      setBusy(true);
-      setUploadPct(0);
-      try {
-        const { doc: fresh, reused } = await uploadDoc(file, (pct) => setUploadPct(pct));
-        setDoc(fresh);
-        if (reused) setNotice('该文件此前已解析过，直接复用已有的解析结果。');
-        if (fresh.status === 'parsed' || fresh.status === 'organized') {
-          await enterOrganize(fresh);
-        } else {
-          setStep('parse');
+      for (const f of picked) {
+        const ext = f.name.includes('.')
+          ? `.${f.name.split('.').pop()!.toLowerCase()}`
+          : '';
+        if (!DOC_UPLOAD_ACCEPT.split(',').includes(ext)) {
+          setError(
+            `「${f.name}」不支持的文件类型 ${ext || '（无后缀）'}：仅支持 PDF / Word / PPT / 图片`,
+          );
+          return;
         }
-        void refreshQuota();
-      } catch (e: unknown) {
-        setError(extractDetail(e));
-      } finally {
-        setBusy(false);
-        setUploadPct(null);
+        if (f.size > DOC_MAX_UPLOAD_BYTES) {
+          setError(
+            `「${f.name}」文件超过 ${Math.round(DOC_MAX_UPLOAD_BYTES / 1024 / 1024)}MB 上限，请拆分后上传`,
+          );
+          return;
+        }
       }
+      const total = next.reduce((sum, f) => sum + f.size, 0);
+      if (total > DOC_MAX_TOTAL_UPLOAD_BYTES) {
+        setError(
+          `文件合计超过 ${Math.round(DOC_MAX_TOTAL_UPLOAD_BYTES / 1024 / 1024)}MB 上限：请减少文件或分两次上传`,
+        );
+        return;
+      }
+      setStagedFiles(next);
     },
-    [enterOrganize, refreshQuota],
+    [stagedFiles],
   );
+
+  /** 调序（合并顺序=清单顺序；diff 越界为 no-op）。 */
+  const moveStaged = useCallback((index: number, delta: number) => {
+    setStagedFiles((prev) => {
+      const target = index + delta;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }, []);
+
+  const removeStaged = useCallback((index: number) => {
+    setStagedFiles((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  /** 提交清单：一次 multipart 多文件（数组顺序=合并顺序），进度按整批算。 */
+  const handleUpload = useCallback(async () => {
+    if (!stagedFiles.length || busy) return;
+    setError(null);
+    setNotice(null);
+    setOrganize(null);
+    setRawText(null);
+    setDirectionDraft('');
+    setBusy(true);
+    setUploadPct(0);
+    try {
+      const { doc: fresh, reused } = await uploadDocs(stagedFiles, (pct) =>
+        setUploadPct(pct),
+      );
+      setStagedFiles([]);
+      setDoc(fresh);
+      if (reused) setNotice('该文件此前已解析过，直接复用已有的解析结果。');
+      if (fresh.status === 'parsed' || fresh.status === 'organized') {
+        await enterOrganize(fresh);
+      } else {
+        setStep('parse');
+      }
+      void refreshQuota();
+    } catch (e: unknown) {
+      // 失败保留清单：清掉的那件是「哪一件坏了」无从知道，整批原样重试
+      setError(extractDetail(e));
+    } finally {
+      setBusy(false);
+      setUploadPct(null);
+    }
+  }, [stagedFiles, busy, enterOrganize, refreshQuota]);
 
   const startWith = useCallback(
     (draft: string) => {
@@ -352,10 +411,13 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
               id="doc-mining-file"
               type="file"
               accept={DOC_UPLOAD_ACCEPT}
+              multiple
               className="hidden"
               onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void handleFile(f);
+                const picked = Array.from(e.target.files ?? []);
+                stageFiles(picked);
+                // 清 value：移除后重选同一文件也要能触发 change
+                e.target.value = '';
               }}
             />
             <label
@@ -386,11 +448,88 @@ export const DocMiningPanel: React.FC<DocMiningPanelProps> = ({
                     点击选择文件，或拖入此区域
                   </span>
                   <span className="text-[11px] text-slate-500">
-                    支持 PDF / Word（doc、docx）/ PPT（ppt、pptx）/ 图片（png、jpg），单文件 ≤ 200MB / 200 页
+                    支持 PDF / Word（doc、docx）/ PPT（ppt、pptx）/ 图片（png、jpg），单文件 ≤ 200MB / 200 页；
+                    可多选一次上传（正文+附录、多图自动合并解析，合计 ≤ 200MB）
                   </span>
                 </>
               )}
             </label>
+
+            {/* 待上传清单：合并顺序=列表顺序（正文在前、附录/附图在后） */}
+            {stagedFiles.length > 0 && !busy && (
+              <div className="flex flex-col gap-2 rounded-xl border border-blue-100 bg-blue-50/40 px-3 py-2.5">
+                <span className="text-[11px] font-black text-slate-600">
+                  待上传 {stagedFiles.length} 个文件 · 顺序即合并顺序（正文在前，附录 / 附图在后）
+                </span>
+                <ol className="m-0 flex list-none flex-col gap-1.5 p-0">
+                  {stagedFiles.map((f, i) => (
+                    <li
+                      key={`${f.name}-${f.size}-${f.lastModified}-${i}`}
+                      className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px]"
+                    >
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[10px] font-black text-slate-500">
+                        {i + 1}
+                      </span>
+                      <span
+                        className="min-w-0 flex-1 truncate font-bold text-slate-700"
+                        title={f.name}
+                      >
+                        {f.name}
+                      </span>
+                      <span className="shrink-0 font-mono text-slate-400">
+                        {formatSize(f.size)}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={`上移 ${f.name}`}
+                        title="上移（提前合并）"
+                        disabled={i === 0}
+                        onClick={() => moveStaged(i, -1)}
+                        className="shrink-0 rounded p-0.5 text-slate-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-400 cursor-pointer disabled:cursor-not-allowed"
+                      >
+                        <ArrowUp className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`下移 ${f.name}`}
+                        title="下移（延后合并）"
+                        disabled={i === stagedFiles.length - 1}
+                        onClick={() => moveStaged(i, 1)}
+                        className="shrink-0 rounded p-0.5 text-slate-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-400 cursor-pointer disabled:cursor-not-allowed"
+                      >
+                        <ArrowDown className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`移除 ${f.name}`}
+                        title="移除"
+                        onClick={() => removeStaged(i)}
+                        className="shrink-0 rounded p-0.5 text-slate-400 hover:text-rose-600 cursor-pointer"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setStagedFiles([])}
+                    className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-bold text-slate-500 hover:border-slate-300 hover:text-slate-600 cursor-pointer"
+                  >
+                    清空
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleUpload()}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-1.5 text-xs font-black text-white shadow-sm hover:from-blue-700 hover:to-indigo-700 cursor-pointer"
+                  >
+                    <UploadCloud className="h-3.5 w-3.5" />
+                    上传并解析
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-500">
               <CloudUpload className="h-3.5 w-3.5 text-slate-400 shrink-0" />

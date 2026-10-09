@@ -90,6 +90,12 @@ class FakeStore:
 
     async def create_doc(self, **kw):
         self.created.append(kw)
+        # 行上 original_paths 与真 store 同口径：JSON 文本（created 记录的是
+        # router 传参原样，行是持久化形态——两者断言面不同）
+        from backend.services.engine.alpha_agent.doc_store import (
+            encode_original_paths,
+        )
+
         self.rows.setdefault(
             kw["doc_id"],
             mk_row(
@@ -101,6 +107,8 @@ class FakeStore:
                 sha256=kw.get("sha256"),
                 size_bytes=kw.get("size_bytes"),
                 original_path=kw.get("original_path"),
+                files_count=kw.get("files_count", 1),
+                original_paths=encode_original_paths(kw.get("original_paths")),
             ),
         )
 
@@ -282,10 +290,22 @@ def _upload(
     data: bytes, filename: str, *, declared_length: int | None = None
 ) -> FakeRequest:
     """上传请求替身：multipart 字段 file + Content-Length 头（C1 粗闸用它）。"""
-    declared = len(data) if declared_length is None else declared_length
+    return _upload_many([(data, filename)], declared_length=declared_length)
+
+
+def _upload_many(
+    files: list[tuple[bytes, str]], *, declared_length: int | None = None
+) -> FakeRequest:
+    """多文件上传替身：同一字段 file 重复出现（顺序=上传顺序；T-FM-19a）。"""
+    from starlette.datastructures import FormData
+
+    total = sum(len(data) for data, _ in files)
+    declared = total if declared_length is None else declared_length
     return FakeRequest(
         headers={"content-length": str(declared)},
-        form_data={"file": _upload_file(data, filename)},
+        form_data=FormData(
+            [("file", _upload_file(data, name)) for data, name in files]
+        ),
     )
 
 
@@ -516,8 +536,9 @@ async def test_upload_missing_content_length_411_before_form_parse(
 async def test_upload_declared_length_over_hard_cap_413_before_form_parse(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """C1：Content-Length 超「文件上限+multipart 余量」→ 解析前 413。"""
+    """C1：Content-Length 超「合计上限+multipart 余量」→ 解析前 413。"""
     monkeypatch.setenv(docs_mod.MAX_UPLOAD_ENV, "1")
+    monkeypatch.setenv(docs_mod.MAX_TOTAL_UPLOAD_ENV, "1")
     store = FakeStore()
     svc = FakeParseService(tmp_path, store=store)
     _wire(monkeypatch, store, svc, FakeQuota())
@@ -532,6 +553,28 @@ async def test_upload_declared_length_over_hard_cap_413_before_form_parse(
     assert ei.value.status_code == 413
     assert req.form_called == 0, "粗闸不过就别解析 multipart"
     assert store.created == []
+
+
+@pytest.mark.asyncio
+async def test_upload_declared_over_single_cap_but_under_total_passes_coarse(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """粗闸按**合计**上限：声明值超单文件上限不等于拒——多文件合计合法超它。"""
+    monkeypatch.setenv(docs_mod.MAX_UPLOAD_ENV, "1")
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+    req = _upload(
+        PDF_BYTES,
+        "p.pdf",
+        declared_length=3 * 1024 * 1024,  # > 1MB 单件上限，< 默认 500MB 合计
+    )
+
+    out = await docs_mod.upload_doc(request=req)
+
+    assert out["code"] == 200
+    assert req.form_called == 1, "合计上限内必须放行进解析"
+    assert store.created != []
 
 
 @pytest.mark.asyncio
@@ -673,6 +716,165 @@ async def test_upload_png_estimates_one_page(monkeypatch, tmp_path: Path) -> Non
     await docs_mod.upload_doc(request=_upload(PNG_BYTES, "chart.png"))
     assert quota.guards == [("u-1", 1)], "图片按 MinerU 单页处理，恒预留 1"
     assert store.created[0]["ext"] == ".png"
+
+
+# ── 上传：多文件（T-FM-19a） ────────────────────────────────────────
+
+
+def test_composite_sha256_order_and_name_sensitive() -> None:
+    """复用键顺序/文件名敏感：换序或改名 = 另一份文档（不复用）。"""
+    a = ("正文.pdf", "a" * 64)
+    b = ("附录.pdf", "b" * 64)
+    assert docs_mod._composite_sha256([a, b]) == docs_mod._composite_sha256([a, b])
+    assert docs_mod._composite_sha256([a, b]) != docs_mod._composite_sha256([b, a])
+    renamed = ("正文(1).pdf", "a" * 64)
+    assert docs_mod._composite_sha256([a, b]) != docs_mod._composite_sha256(
+        [renamed, b]
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_multi_files_records_manifest_and_reserves_summed_pages(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """多文件：originals/p{i}{ext} 落盘、manifest/files_count 落行、页数求和预留。"""
+    events: list[str] = []
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store, events=events)
+    quota = FakeQuota(events=events)
+    _wire(monkeypatch, store, svc, quota)
+    body = _blank_pdf_bytes(3)
+    annex = _blank_pdf_bytes(2)
+
+    out = await docs_mod.upload_doc(
+        request=_upload_many([(body, "正文.pdf"), (annex, "附录.pdf")])
+    )
+
+    doc_id = store.created[0]["doc_id"]
+    doc = out["data"]["doc"]
+    assert out["code"] == 200 and out["data"]["reused"] is False
+    assert doc["filename"] == "正文.pdf（共2个文件）"
+    assert doc["files_count"] == 2
+    assert doc["size_bytes"] == len(body) + len(annex)
+    # manifest：顺序=上传顺序，路径 originals/p{i}{ext}（与 MinerU 部件序号对齐）
+    assert store.created[0]["original_paths"] == [
+        {
+            "path": str(tmp_path / doc_id / "originals" / "p1.pdf"),
+            "name": "正文.pdf",
+            "ext": ".pdf",
+        },
+        {
+            "path": str(tmp_path / doc_id / "originals" / "p2.pdf"),
+            "name": "附录.pdf",
+            "ext": ".pdf",
+        },
+    ]
+    assert store.created[0]["original_path"] == str(
+        tmp_path / doc_id / "originals" / "p1.pdf"
+    )
+    assert store.created[0]["sha256"] == docs_mod._composite_sha256(
+        [
+            ("正文.pdf", hashlib.sha256(body).hexdigest()),
+            ("附录.pdf", hashlib.sha256(annex).hexdigest()),
+        ]
+    )
+    # 落盘
+    assert (tmp_path / doc_id / "originals" / "p1.pdf").read_bytes() == body
+    assert (tmp_path / doc_id / "originals" / "p2.pdf").read_bytes() == annex
+    # 配额先于提交；页数 = 各件之和（3+2）
+    assert events == ["guard", "submit"]
+    assert quota.guards == [("u-1", 5)]
+    # 提交链拿到的是真 store 形态（JSON 文本 manifest）且能解码出两件
+    from backend.services.engine.alpha_agent.doc_store import decode_original_paths
+
+    assert [p["name"] for p in decode_original_paths(svc.submitted[0])] == [
+        "正文.pdf",
+        "附录.pdf",
+    ]
+    # API 输出不吐磁盘布局
+    assert "original_paths" not in doc and "original_path" not in doc
+
+
+@pytest.mark.asyncio
+async def test_upload_multi_rejects_over_max_files_400_before_disk(
+    monkeypatch, tmp_path: Path
+) -> None:
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+    files = [(PDF_BYTES, f"p{i}.pdf") for i in range(docs_mod.MAX_DOC_FILES + 1)]
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.upload_doc(request=_upload_many(files))
+    assert ei.value.status_code == 400
+    assert str(docs_mod.MAX_DOC_FILES) in str(ei.value.detail)
+    assert store.created == [] and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_multi_total_size_over_cap_413_cleans_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """合计精验：各件都在单件上限内，累计超合计 → 413 且连根清。"""
+    monkeypatch.setenv(docs_mod.MAX_UPLOAD_ENV, "1")
+    monkeypatch.setenv(docs_mod.MAX_TOTAL_UPLOAD_ENV, "1")
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+    part = b"\x89PNG\r\n\x1a\n" + b"0" * (700 * 1024)
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.upload_doc(
+            request=_upload_many(
+                [(part, "a.png"), (part, "b.png")],
+                declared_length=1_400_000,  # 粗闸（1MB+余量）内，靠逐件累计精验拦
+            )
+        )
+    assert ei.value.status_code == 413
+    assert "合计" in str(ei.value.detail)
+    assert store.created == [] and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_multi_magic_failure_midway_cleans_everything(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """第二件 magic 不符：第一件已落盘也要连根清（不留半批孤儿）。"""
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    _wire(monkeypatch, store, svc, FakeQuota())
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.upload_doc(
+            request=_upload_many([(PDF_BYTES, "ok.pdf"), (PNG_BYTES, "fake.pdf")])
+        )
+    assert ei.value.status_code == 400 and "magic" in str(ei.value.detail)
+    assert store.created == [] and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_multi_over_page_cap_names_offending_part(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """多文件页数上限逐件判：超限的是哪件要在消息里点名（不然无从拆）。"""
+    store = FakeStore()
+    svc = FakeParseService(tmp_path, store=store)
+    quota = FakeQuota()
+    _wire(monkeypatch, store, svc, quota)
+    over = _blank_pdf_bytes(docs_mod.MAX_PAGES_PER_FILE + 1)
+
+    with pytest.raises(HTTPException) as ei:
+        await docs_mod.upload_doc(
+            request=_upload_many(
+                [(_blank_pdf_bytes(2), "正文.pdf"), (over, "附录.pdf")]
+            )
+        )
+    assert ei.value.status_code == 400
+    assert "附录.pdf" in str(ei.value.detail)
+    assert str(docs_mod.MAX_PAGES_PER_FILE) in str(ei.value.detail)
+    assert quota.guards == [] and svc.submitted == []
+    assert len(store.hard_deleted) == 1 and store.rows == {}
+    assert list(tmp_path.iterdir()) == []
 
 
 # ── 列表 / 详情 ──────────────────────────────────────────────────────

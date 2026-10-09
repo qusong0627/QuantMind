@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import sys
 import uuid
 import zipfile
@@ -36,6 +37,7 @@ from backend.services.engine.alpha_agent.doc_parse_service import (  # noqa: E40
     DocParseService,
     detect_scanned_pdf,
     parse_failure_message,
+    part_data_id,
     user_facing_error,
 )
 from backend.services.engine.alpha_agent.mineru_client import (  # noqa: E402
@@ -107,12 +109,14 @@ class FakeMineru:
         self.results_queue: list[object] = []
         self.calls = 0
         self.zip_payload: bytes = b""
+        #: 按 URL 分派产物 zip（多文件一批多件）；未命中的 URL 用 zip_payload
+        self.zip_payloads: dict[str, bytes] = {}
         self.download_calls: list[str] = []
         self.download_error: Exception | None = None
 
     async def create_upload_batch(self, files, **kwargs):
         self.batches.append(list(files))
-        return "b-1", ["https://upload.test/0"]
+        return "b-1", [f"https://upload.test/{i}" for i in range(len(files))]
 
     async def upload_file(self, url, content):
         self.uploads.append((url, content))
@@ -131,7 +135,7 @@ class FakeMineru:
         if self.download_error is not None:
             raise self.download_error
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(self.zip_payload)
+        dest.write_bytes(self.zip_payloads.get(url, self.zip_payload))
         return dest
 
 
@@ -743,6 +747,339 @@ async def test_submit_parse_deleted_during_upload_aborts_and_commits(
     assert any("parsing" == f.get("status") for _, f in store.rejected_writes)
 
 
+# ── 多文件（一文档多件，T-FM-19a） ──────────────────────────────────
+
+
+def test_part_data_id_single_keeps_bare_doc_id_and_multi_indexes() -> None:
+    assert part_data_id("d-1", 1, 1) == "d-1", "单文件保持历史批次口径"
+    assert part_data_id("d-1", 1, 2) == "d-1_p1"
+    assert part_data_id("d-1", 2, 2) == "d-1_p2"
+    got = part_data_id("a" * 128, 3, 5)
+    assert len(got) <= 128 and got.endswith("_p3"), "长 doc_id 截断给后缀留位"
+
+
+def _mk_multi_doc(tmp_path: Path, *, status: str = "parsing", **overrides) -> dict:
+    """两件文档行：正文.pdf + 附录.pdf（原件真实落盘，OCR 探测能跑）。"""
+    p1 = tmp_path / "orig_p1.pdf"
+    p2 = tmp_path / "orig_p2.pdf"
+    for p in (p1, p2):
+        if not p.exists():
+            p.write_bytes(b"%PDF-1.4 fake")
+    parts = [
+        {"path": str(p1), "name": "正文.pdf", "ext": ".pdf"},
+        {"path": str(p2), "name": "附录.pdf", "ext": ".pdf"},
+    ]
+    return mk_doc(
+        tmp_path,
+        status=status,
+        original_path=str(p1),
+        original_paths=json.dumps(parts, ensure_ascii=False),
+        files_count=2,
+        **overrides,
+    )
+
+
+def _zip_with(md: bytes, images: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("full.md", md)
+        for name, content in images.items():
+            zf.writestr(f"images/{name}", content)
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_submit_parse_multi_one_batch_with_part_data_ids(
+    tmp_path: Path,
+) -> None:
+    doc = _mk_multi_doc(tmp_path, status="uploaded", mineru_batch_id=None)
+    store = FakeStore({DOC_ID: doc})
+    client = FakeMineru()
+    svc, _ = mk_service(tmp_path, store, client=client)
+
+    await svc.submit_parse(store.rows[DOC_ID])
+
+    specs = client.batches[0]
+    assert [s.name for s in specs] == ["正文.pdf", "附录.pdf"]
+    assert [s.data_id for s in specs] == [f"{DOC_ID}_p1", f"{DOC_ID}_p2"]
+    assert [u for u, _ in client.uploads] == [
+        "https://upload.test/0",
+        "https://upload.test/1",
+    ]
+    assert [str(c) for _, c in client.uploads] == [
+        str(tmp_path / "orig_p1.pdf"),
+        str(tmp_path / "orig_p2.pdf"),
+    ], "上传顺序 = 部件顺序"
+    assert store.rows[DOC_ID]["status"] == "parsing"
+    assert store.rows[DOC_ID]["mineru_batch_id"] == "b-1"
+    await svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_poll_multi_missing_part_keeps_waiting(tmp_path: Path) -> None:
+    store = FakeStore({DOC_ID: _mk_multi_doc(tmp_path)})
+    client = FakeMineru()
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="正文.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p1",
+                full_zip_url="https://cdn.test/p1.zip",
+                total_pages=3,
+            )
+        ]
+    ]
+    svc, _ = mk_service(tmp_path, store, client=client)
+
+    assert await svc._poll_once(DOC_ID) == "pending"
+    assert store.updates == [], "缺件只等待，不动状态"
+
+
+@pytest.mark.asyncio
+async def test_poll_multi_partial_progress_sums_pages(tmp_path: Path) -> None:
+    store = FakeStore({DOC_ID: _mk_multi_doc(tmp_path)})
+    client = FakeMineru()
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="正文.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p1",
+                full_zip_url="https://cdn.test/p1.zip",
+                total_pages=3,
+            ),
+            MineruBatchItem(
+                file_name="附录.pdf",
+                state="running",
+                data_id=f"{DOC_ID}_p2",
+                total_pages=2,
+            ),
+        ]
+    ]
+    svc, _ = mk_service(tmp_path, store, client=client)
+
+    assert await svc._poll_once(DOC_ID) == "active"
+    assert store.rows[DOC_ID]["page_count"] == 5, "进度 = 各部件页数之和"
+    assert store.rows[DOC_ID]["parse_state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_poll_multi_failed_part_fails_whole_doc_and_names_it(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore({DOC_ID: _mk_multi_doc(tmp_path)})
+    client = FakeMineru()
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="正文.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p1",
+                full_zip_url="https://cdn.test/p1.zip",
+                total_pages=3,
+            ),
+            MineruBatchItem(
+                file_name="附录.pdf",
+                state="failed",
+                data_id=f"{DOC_ID}_p2",
+                err_msg="over page limit (-60006)",
+            ),
+        ]
+    ]
+    quota = FakeQuota()
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    assert await svc._poll_once(DOC_ID) == "parse_failed"
+    row = store.rows[DOC_ID]
+    assert row["status"] == "parse_failed"
+    assert "附录.pdf" in row["error"], "失败必须点名是哪一件"
+    assert "-60006" in row["error"] and "200 页" in row["error"]
+    assert quota.recorded == [("u1", 3)], "已 done 部件烧掉的页照常结算"
+    assert quota.released == [], "不许把已计费的页全退"
+
+
+@pytest.mark.asyncio
+async def test_poll_multi_all_failed_releases_reservation(tmp_path: Path) -> None:
+    store = FakeStore({DOC_ID: _mk_multi_doc(tmp_path)})
+    client = FakeMineru()
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="正文.pdf",
+                state="failed",
+                data_id=f"{DOC_ID}_p1",
+                err_msg="boom",
+            ),
+            MineruBatchItem(
+                file_name="附录.pdf",
+                state="failed",
+                data_id=f"{DOC_ID}_p2",
+                err_msg="boom",
+            ),
+        ]
+    ]
+    quota = FakeQuota()
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    assert await svc._poll_once(DOC_ID) == "parse_failed"
+    assert quota.released == [(DOC_ID, "u1")], "全员失败 = 一分没烧，全退"
+
+
+@pytest.mark.asyncio
+async def test_poll_multi_failed_with_inflight_commits_reservation(
+    tmp_path: Path,
+) -> None:
+    """一件失败、一件还在跑：在途部件可能随后完成并计费 → 预留转已用（保守上界）。"""
+    store = FakeStore({DOC_ID: _mk_multi_doc(tmp_path)})
+    client = FakeMineru()
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="正文.pdf", state="running", data_id=f"{DOC_ID}_p1"
+            ),
+            MineruBatchItem(
+                file_name="附录.pdf",
+                state="failed",
+                data_id=f"{DOC_ID}_p2",
+                err_msg="boom",
+            ),
+        ]
+    ]
+    quota = FakeQuota()
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    assert await svc._poll_once(DOC_ID) == "parse_failed"
+    assert quota.committed == [DOC_ID]
+    assert quota.released == [] and quota.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_poll_multi_all_done_merges_parsed_and_cleans_intermediates(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore({DOC_ID: _mk_multi_doc(tmp_path)})
+    client = FakeMineru()
+    client.zip_payloads = {
+        "https://cdn.test/p1.zip": _zip_with(
+            "# 正文\n\n![fp1](images/pic.jpg)\n".encode(), {"pic.jpg": b"v1"}
+        ),
+        "https://cdn.test/p2.zip": _zip_with(
+            "# 附录\n\n![fp2](images/pic.jpg)\n".encode(), {"pic.jpg": b"v2"}
+        ),
+    }
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="正文.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p1",
+                full_zip_url="https://cdn.test/p1.zip",
+                total_pages=3,
+            ),
+            MineruBatchItem(
+                file_name="附录.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p2",
+                full_zip_url="https://cdn.test/p2.zip",
+                total_pages=2,
+            ),
+        ]
+    ]
+    quota = FakeQuota()
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    assert await svc._poll_once(DOC_ID) == "parsed"
+
+    row = store.rows[DOC_ID]
+    assert row["parse_state"] == "done" and row["error"] is None
+    md_path = Path(row["md_path"])
+    assert md_path == tmp_path / DOC_ID / "parsed" / "full.md"
+    md = md_path.read_text(encoding="utf-8")
+    assert "<!-- 合并文档 第 1/2 部分：正文.pdf -->" in md
+    assert "<!-- 合并文档 第 2/2 部分：附录.pdf -->" in md
+    assert md.index("正文") < md.index("附录"), "合并顺序 = 上传顺序"
+    images = sorted(p.name for p in (md_path.parent / "images").iterdir())
+    assert images == ["p2_pic.jpg", "pic.jpg"], "同名不同内容第二份改名保留"
+    assert "images/p2_pic.jpg" in md, "改名后引用重写"
+    assert row["page_count"] == 5
+    assert row["content_list_path"] is None, "多文件不合并 content_list"
+    assert quota.recorded == [("u1", 5)]
+
+    doc_dir = tmp_path / DOC_ID
+    assert not (doc_dir / "parts").exists(), "中间物 parts/ 用完即清"
+    assert not list(doc_dir.glob("mineru_p*.zip")), "部件 zip 用完即清"
+
+
+@pytest.mark.asyncio
+async def test_poll_multi_download_failure_settles_pages_and_fails(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore({DOC_ID: _mk_multi_doc(tmp_path)})
+    client = FakeMineru()
+    client.download_error = MineruError(
+        "HTTP 404（结果链接可能已失效）", retryable=False
+    )
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="正文.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p1",
+                full_zip_url="https://cdn.test/p1.zip",
+                total_pages=3,
+            ),
+            MineruBatchItem(
+                file_name="附录.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p2",
+                full_zip_url="https://cdn.test/p2.zip",
+                total_pages=2,
+            ),
+        ]
+    ]
+    quota = FakeQuota()
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    assert await svc._poll_once(DOC_ID) == "parse_failed"
+    row = store.rows[DOC_ID]
+    assert "产物下载/解包失败" in row["error"]
+    assert "正文.pdf" in row["error"], "失败文案点名哪件下载失败"
+    assert quota.recorded == [("u1", 5)], "下载失败但 MinerU 已扣页：按实际页数结算"
+    assert quota.released == []
+
+
+@pytest.mark.asyncio
+async def test_poll_multi_missing_zip_url_fails_and_releases(tmp_path: Path) -> None:
+    store = FakeStore({DOC_ID: _mk_multi_doc(tmp_path)})
+    client = FakeMineru()
+    client.results_queue = [
+        [
+            MineruBatchItem(
+                file_name="正文.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p1",
+                full_zip_url="https://cdn.test/p1.zip",
+                total_pages=3,
+            ),
+            MineruBatchItem(
+                file_name="附录.pdf",
+                state="done",
+                data_id=f"{DOC_ID}_p2",
+                full_zip_url=None,
+                total_pages=2,
+            ),
+        ]
+    ]
+    quota = FakeQuota()
+    svc, _ = mk_service(tmp_path, store, client=client, quota=quota)
+
+    assert await svc._poll_once(DOC_ID) == "parse_failed"
+    row = store.rows[DOC_ID]
+    assert "full_zip_url" in row["error"] and "附录.pdf" in row["error"]
+    assert quota.released == [(DOC_ID, "u1")], "与单文件缺链接同口径：全退"
+
+
 # ── sha256 幂等复用 ─────────────────────────────────────────────────
 
 
@@ -790,6 +1127,20 @@ async def test_maybe_reuse_copies_artifacts_without_quota(tmp_path: Path) -> Non
 
     # donor 的目录不因复用被移动/删除（生命周期独立）
     assert (tmp_path / "donor0000000000" / "parsed" / "full.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_maybe_reuse_copies_files_count(tmp_path: Path) -> None:
+    """复用要抄件数（列表页展示）——但绝不抄 donor 的部件清单。"""
+    store, new_doc = _mk_donor(tmp_path)
+    store.rows["donor0000000000"]["files_count"] = 3
+    svc, _ = mk_service(tmp_path, store, client=FakeMineru())
+
+    assert await svc.maybe_reuse(new_doc) is True
+
+    _, fields = store.updates[-1]
+    assert fields["files_count"] == 3
+    assert "original_paths" not in fields, "部件清单是各文档自己的磁盘事实"
 
 
 @pytest.mark.asyncio

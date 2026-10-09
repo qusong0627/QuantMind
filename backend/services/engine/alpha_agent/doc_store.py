@@ -23,6 +23,7 @@ GC 靠 ``list_expired_candidates``/``mark_expired``。
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -76,6 +77,8 @@ CREATE TABLE IF NOT EXISTS rd_agent_docs (
   error         TEXT,
   mineru_token_src TEXT,
   tenant_id     TEXT,
+  files_count   INTEGER DEFAULT 1,
+  original_paths TEXT,
   created_at    TIMESTAMPTZ NOT NULL,
   updated_at    TIMESTAMPTZ NOT NULL
 );
@@ -84,6 +87,8 @@ CREATE INDEX IF NOT EXISTS idx_rd_docs_sha ON rd_agent_docs (user_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_rd_docs_status ON rd_agent_docs (status);
 ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS mineru_token_src TEXT;
 ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS files_count INTEGER DEFAULT 1;
+ALTER TABLE rd_agent_docs ADD COLUMN IF NOT EXISTS original_paths TEXT;
 """
 
 _UNSET = object()
@@ -117,6 +122,61 @@ def row_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def decode_original_paths(row: Mapping[str, Any]) -> list[dict[str, str]]:
+    """行 → 部件清单 ``[{"path","name","ext"}]``（上传顺序）。
+
+    多文件行按 ``original_paths``（JSON 文本）还原；单文件行（含历史行）
+    没有该列值 → 用 ``original_path`` 合成为一件——解析链因此只有「部件
+    列表」一条口径，单/多文件走同一套提交与轮询分支。
+    JSON 坏值按缺失处理（绝不抛：解析链不该因一行脏数据整体崩）。
+    """
+    raw = row.get("original_paths")
+    if raw:
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            logger.warning(
+                "doc %s original_paths JSON 损坏，按单文件处理", row.get("doc_id")
+            )
+            data = None
+        if isinstance(data, list):
+            parts = [
+                p
+                for p in data
+                if isinstance(p, dict) and str(p.get("path") or "").strip()
+            ]
+            if parts:
+                return parts
+    path = str(row.get("original_path") or "").strip()
+    if not path:
+        return []
+    return [
+        {
+            "path": path,
+            "name": str(row.get("filename") or "document"),
+            "ext": str(row.get("ext") or ""),
+        }
+    ]
+
+
+def encode_original_paths(parts: list[Mapping[str, str]] | None) -> str | None:
+    """部件清单 → JSON 文本（中文原名不转义，便于运维直读）。None/空 = 不写。"""
+    if not parts:
+        return None
+    clean = [
+        {
+            "path": str(p.get("path") or ""),
+            "name": str(p.get("name") or "document"),
+            "ext": str(p.get("ext") or ""),
+        }
+        for p in parts
+        if str(p.get("path") or "").strip()
+    ]
+    if not clean:
+        return None
+    return json.dumps(clean, ensure_ascii=False)
+
+
 class DocStore:
     async def ensure_tables(self) -> None:
         async with get_session() as session:
@@ -136,6 +196,8 @@ class DocStore:
         original_path: str | None = None,
         status: str = "uploaded",
         tenant_id: str | None = None,
+        files_count: int = 1,
+        original_paths: list[Mapping[str, str]] | None = None,
     ) -> None:
         if status not in DOC_STATUSES:
             raise ValueError(f"unknown doc status: {status!r}")
@@ -145,10 +207,12 @@ class DocStore:
                 text("""
                     INSERT INTO rd_agent_docs
                       (doc_id, user_id, filename, ext, size_bytes, sha256,
-                       original_path, status, tenant_id, created_at, updated_at)
+                       original_path, status, tenant_id, files_count,
+                       original_paths, created_at, updated_at)
                     VALUES
                       (:doc_id, :user_id, :filename, :ext, :size_bytes, :sha256,
-                       :original_path, :status, :tenant_id, :now, :now)
+                       :original_path, :status, :tenant_id, :files_count,
+                       :original_paths, :now, :now)
                     ON CONFLICT (doc_id) DO NOTHING
                     """),
                 {
@@ -161,6 +225,8 @@ class DocStore:
                     "original_path": original_path,
                     "status": status,
                     "tenant_id": tenant_id,
+                    "files_count": max(1, int(files_count or 1)),
+                    "original_paths": encode_original_paths(original_paths),
                     "now": now,
                 },
             )
@@ -202,6 +268,9 @@ class DocStore:
             "task_id",
             # 凭据来源（"user"/"env"）：提交时定格，重启续轮询按它重建同一 Token
             "mineru_token_src",
+            # 多文件件数（幂等复用要把它抄到新行上；部件清单 original_paths
+            # 是各文档自己的磁盘事实，绝不跨行复制）
+            "files_count",
         )
         unknown = set(fields) - set(allowed)
         if unknown:

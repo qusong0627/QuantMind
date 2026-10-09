@@ -468,5 +468,91 @@ async def test_real_db_expired_candidates_and_mark() -> None:
         await _close()
 
 
+@pytest.mark.asyncio
+async def test_real_db_multi_file_parts_roundtrip() -> None:
+    """多文件文档：件数 + 部件清单（路径/原名/扩展名）落库并按 JSON 还原。"""
+    from backend.services.engine.alpha_agent.doc_store import decode_original_paths
+
+    store = await _ready()
+    user = _scope()
+    doc_id = f"t-doc-{uuid.uuid4().hex[:12]}"
+    parts = [
+        {
+            "path": f"/data/rd_agent_docs/{doc_id}/originals/p1.pdf",
+            "name": "正文.pdf",
+            "ext": ".pdf",
+        },
+        {
+            "path": f"/data/rd_agent_docs/{doc_id}/originals/p2.pdf",
+            "name": "附录.pdf",
+            "ext": ".pdf",
+        },
+    ]
+    try:
+        await _mk_doc(
+            store,
+            doc_id,
+            user,
+            filename="正文.pdf（共2个文件）",
+            original_path=parts[0]["path"],
+            files_count=2,
+            original_paths=parts,
+        )
+        row = await store.get_doc(doc_id, user_id=user)
+        assert row["files_count"] == 2
+        assert decode_original_paths(row) == parts
+    finally:
+        await _cleanup(user)
+        await _close()
+
+
+def test_single_file_row_synthesizes_one_part() -> None:
+    """单文件（无论新旧行）没有 original_paths → 用 original_path 合成一件。"""
+    from backend.services.engine.alpha_agent.doc_store import decode_original_paths
+
+    row = {
+        "filename": "paper.pdf",
+        "ext": ".pdf",
+        "original_path": "/x/original.pdf",
+    }
+    assert decode_original_paths(row) == [
+        {"path": "/x/original.pdf", "name": "paper.pdf", "ext": ".pdf"}
+    ]
+    assert decode_original_paths({"filename": "x"}) == []
+    assert decode_original_paths(
+        {"original_paths": "not json", "original_path": "/x/a.pdf", "filename": "a.pdf"}
+    ) == [{"path": "/x/a.pdf", "name": "a.pdf", "ext": ""}]
+
+
+@pytest.mark.asyncio
+async def test_real_db_single_file_defaults_to_one() -> None:
+    store = await _ready()
+    user = _scope()
+    doc_id = f"t-doc-{uuid.uuid4().hex[:12]}"
+    try:
+        row = await _mk_doc(store, doc_id, user)
+        assert row["files_count"] == 1
+        assert row["original_paths"] is None
+    finally:
+        await _cleanup(user)
+        await _close()
+
+
+@pytest.mark.asyncio
+async def test_real_db_update_doc_accepts_files_count() -> None:
+    """复用（maybe_reuse）要能把 donor 的件数抄到新行上。"""
+    store = await _ready()
+    user = _scope()
+    doc_id = f"t-doc-{uuid.uuid4().hex[:12]}"
+    try:
+        await _mk_doc(store, doc_id, user)
+        assert await store.update_doc(doc_id, files_count=3) is True
+        row = await store.get_doc(doc_id, user_id=user)
+        assert row["files_count"] == 3
+    finally:
+        await _cleanup(user)
+        await _close()
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))

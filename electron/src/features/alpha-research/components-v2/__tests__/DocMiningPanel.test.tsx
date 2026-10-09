@@ -15,9 +15,9 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { DocMiningPanel, DOC_POLL_INTERVAL_MS } from '../DocMiningPanel';
 import type { DocRow } from '../../services-v2/docMiningApi';
 
-const { uploadDocMock, getDocMock, getDocQuotaMock, organizeDocMock, getDocFileTextMock } =
+const { uploadDocsMock, getDocMock, getDocQuotaMock, organizeDocMock, getDocFileTextMock } =
   vi.hoisted(() => ({
-    uploadDocMock: vi.fn(),
+    uploadDocsMock: vi.fn(),
     getDocMock: vi.fn(),
     getDocQuotaMock: vi.fn(),
     organizeDocMock: vi.fn(),
@@ -29,7 +29,7 @@ vi.mock('../../services-v2/docMiningApi', async (importOriginal) => {
     await importOriginal<typeof import('../../services-v2/docMiningApi')>();
   return {
     ...actual,
-    uploadDoc: uploadDocMock,
+    uploadDocs: uploadDocsMock,
     getDoc: getDocMock,
     getDocQuota: getDocQuotaMock,
     organizeDoc: organizeDocMock,
@@ -109,13 +109,13 @@ function renderPanel(props: {
 
 /** upload(parsing) → tick(parsed) 的标准铺垫：返回后即处于整理步 */
 function primeUploadThenParsed(parsedOver: Partial<DocRow> = {}) {
-  uploadDocMock.mockResolvedValue({ doc: mkDoc({ status: 'parsing' }), reused: false });
+  uploadDocsMock.mockResolvedValue({ doc: mkDoc({ status: 'parsing' }), reused: false });
   getDocMock.mockResolvedValue(mkDoc({ status: 'parsed', page_count: 12, ...parsedOver }));
 }
 
 beforeEach(() => {
   vi.useFakeTimers();
-  uploadDocMock.mockReset();
+  uploadDocsMock.mockReset();
   getDocMock.mockReset();
   getDocQuotaMock.mockReset();
   organizeDocMock.mockReset();
@@ -137,7 +137,7 @@ describe('上传闸：白名单与大小在前端先拦（省一次白传）', (
     await flush();
 
     expect(screen.getByText(/不支持的文件类型 .txt/)).toBeTruthy();
-    expect(uploadDocMock).not.toHaveBeenCalled();
+    expect(uploadDocsMock).not.toHaveBeenCalled();
   });
 
   test('超过 200MB 显式报错，不发请求', async () => {
@@ -148,11 +148,11 @@ describe('上传闸：白名单与大小在前端先拦（省一次白传）', (
     await flush();
 
     expect(screen.getByText(/文件超过 200MB 上限/)).toBeTruthy();
-    expect(uploadDocMock).not.toHaveBeenCalled();
+    expect(uploadDocsMock).not.toHaveBeenCalled();
   });
 
   test('后端拒绝（如额度用尽）时显示 detail 原文', async () => {
-    uploadDocMock.mockRejectedValue({
+    uploadDocsMock.mockRejectedValue({
       response: { data: { detail: '今日上传额度已用尽' } },
     });
     const { input } = renderPanel();
@@ -160,8 +160,96 @@ describe('上传闸：白名单与大小在前端先拦（省一次白传）', (
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
+    await flush();
 
     expect(screen.getByText('今日上传额度已用尽')).toBeTruthy();
+  });
+});
+
+describe('多文件：待上传清单（顺序=合并顺序）', () => {
+  test('多选两件先进清单（先攒后传）；上传按清单顺序一次提交', async () => {
+    uploadDocsMock.mockResolvedValue({ doc: mkDoc({ status: 'parsing' }), reused: false });
+    getDocMock.mockResolvedValue(mkDoc({ status: 'parsed', page_count: 12 }));
+    const { input } = renderPanel();
+    await flush();
+
+    fireEvent.change(input, {
+      target: { files: [mkFile('正文.pdf'), mkFile('附录.pdf')] },
+    });
+    await flush();
+
+    expect(uploadDocsMock).not.toHaveBeenCalled(); // 选完不立刻上传
+    expect(screen.getByText(/待上传 2 个文件/)).toBeTruthy();
+    expect(screen.getByText('正文.pdf')).toBeTruthy();
+    expect(screen.getByText('附录.pdf')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
+    await flush();
+
+    const files = uploadDocsMock.mock.calls[0][0] as File[];
+    expect(files.map((f) => f.name)).toEqual(['正文.pdf', '附录.pdf']);
+  });
+
+  test('上移改变合并顺序（选反了就换回来）', async () => {
+    uploadDocsMock.mockResolvedValue({ doc: mkDoc({ status: 'parsing' }), reused: false });
+    getDocMock.mockResolvedValue(mkDoc({ status: 'parsed' }));
+    const { input } = renderPanel();
+    await flush();
+
+    fireEvent.change(input, {
+      target: { files: [mkFile('附录.pdf'), mkFile('正文.pdf')] },
+    });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上移 正文.pdf/ }));
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
+    await flush();
+
+    const files = uploadDocsMock.mock.calls[0][0] as File[];
+    expect(files.map((f) => f.name)).toEqual(['正文.pdf', '附录.pdf']);
+  });
+
+  test('移除与清空：清单收缩，空清单不再显示上传按钮', async () => {
+    const { input } = renderPanel();
+    await flush();
+    fireEvent.change(input, {
+      target: { files: [mkFile('a.pdf'), mkFile('b.pdf')] },
+    });
+    await flush();
+
+    fireEvent.click(screen.getByRole('button', { name: /移除 a.pdf/ }));
+    expect(screen.getByText(/待上传 1 个文件/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '清空' }));
+    expect(screen.queryByText(/待上传/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /上传并解析/ })).toBeNull();
+  });
+
+  test('合计超上限：显式报错、不入清单（不发请求）', async () => {
+    const { input } = renderPanel();
+    await flush();
+
+    // 每件都在单件 200MB 内，两件合计 300MB 超 200MB 合计上限
+    const heavy = 150 * 1024 * 1024;
+    fireEvent.change(input, {
+      target: { files: [mkFile('a.pdf', heavy), mkFile('b.pdf', heavy)] },
+    });
+    await flush();
+
+    expect(screen.getByText(/文件合计超过 200MB 上限/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /上传并解析/ })).toBeNull();
+    expect(uploadDocsMock).not.toHaveBeenCalled();
+  });
+
+  test('超过 20 件：显式报错、不入清单', async () => {
+    const { input } = renderPanel();
+    await flush();
+    const many = Array.from({ length: 21 }, (_, i) => mkFile(`p${i}.pdf`));
+
+    fireEvent.change(input, { target: { files: many } });
+    await flush();
+
+    expect(screen.getByText(/单次最多上传 20 个文件/)).toBeTruthy();
+    expect(uploadDocsMock).not.toHaveBeenCalled();
   });
 });
 
@@ -172,6 +260,8 @@ describe('解析轮询：状态只信后端', () => {
     await flush();
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
     await flush();
 
     // 已是整理步：能看到原文入口与整理按钮
@@ -184,7 +274,7 @@ describe('解析轮询：状态只信后端', () => {
   });
 
   test('复用命中的上传直接进整理步，不经过解析轮询', async () => {
-    uploadDocMock.mockResolvedValue({
+    uploadDocsMock.mockResolvedValue({
       doc: mkDoc({ status: 'parsed', page_count: 3 }),
       reused: true,
     });
@@ -193,6 +283,8 @@ describe('解析轮询：状态只信后端', () => {
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
+    await flush();
 
     expect(screen.getByText(/该文件此前已解析过/)).toBeTruthy();
     expect(getDocMock).not.toHaveBeenCalled();
@@ -200,7 +292,7 @@ describe('解析轮询：状态只信后端', () => {
   });
 
   test('解析失败：显示后端原因 + 重新上传可回到上传步', async () => {
-    uploadDocMock.mockResolvedValue({ doc: mkDoc({ status: 'parsing' }), reused: false });
+    uploadDocsMock.mockResolvedValue({ doc: mkDoc({ status: 'parsing' }), reused: false });
     getDocMock.mockResolvedValue(
       mkDoc({ status: 'parse_failed', error: '文档页数超限（800 页）' }),
     );
@@ -209,6 +301,8 @@ describe('解析轮询：状态只信后端', () => {
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
+    await flush();
 
     expect(screen.getByText('文档页数超限（800 页）')).toBeTruthy();
     fireEvent.click(screen.getByText('重新上传'));
@@ -216,7 +310,7 @@ describe('解析轮询：状态只信后端', () => {
   });
 
   test('轮询瞬态失败挂提示不换步；下一拍恢复即照常推进', async () => {
-    uploadDocMock.mockResolvedValue({ doc: mkDoc({ status: 'parsing' }), reused: false });
+    uploadDocsMock.mockResolvedValue({ doc: mkDoc({ status: 'parsing' }), reused: false });
     getDocMock
       .mockRejectedValueOnce(new TypeError('fetch failed'))
       .mockResolvedValue(mkDoc({ status: 'parsed' }));
@@ -224,6 +318,8 @@ describe('解析轮询：状态只信后端', () => {
     await flush();
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
     await flush();
 
     expect(screen.getByText(/状态查询失败（自动重试中）：fetch failed/)).toBeTruthy();
@@ -249,6 +345,8 @@ describe('整理与确认：人工确认是默认', () => {
     await flush();
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
     await flush();
     fireEvent.click(screen.getByRole('button', { name: /开始整理/ }));
     await flush();
@@ -283,6 +381,8 @@ describe('整理与确认：人工确认是默认', () => {
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
+    await flush();
     fireEvent.click(screen.getByRole('radio', { name: /论文复现解读/ }));
     fireEvent.change(screen.getByPlaceholderText(/可选：补充关注点/), {
       target: { value: '只看动量类因子' },
@@ -312,6 +412,8 @@ describe('整理与确认：人工确认是默认', () => {
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
+    await flush();
     fireEvent.click(screen.getByRole('checkbox'));
     fireEvent.click(screen.getByRole('button', { name: /开始整理/ }));
     await flush();
@@ -339,6 +441,8 @@ describe('整理与确认：人工确认是默认', () => {
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
+    await flush();
     fireEvent.click(screen.getByRole('button', { name: /开始整理/ }));
     await flush();
 
@@ -360,6 +464,8 @@ describe('整理与确认：人工确认是默认', () => {
     await flush();
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
     await flush();
     fireEvent.click(screen.getByRole('button', { name: /开始整理/ }));
     await flush();
@@ -388,6 +494,8 @@ describe('整理与确认：人工确认是默认', () => {
     await flush();
 
     fireEvent.change(input, { target: { files: [mkFile('paper.pdf')] } });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: /上传并解析/ }));
     await flush();
     fireEvent.click(screen.getByRole('checkbox'));
     fireEvent.click(screen.getByRole('button', { name: /开始整理/ }));

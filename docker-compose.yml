@@ -366,6 +366,10 @@ services:
       - RD_AGENT_DOC_RETENTION_DAYS=${RD_AGENT_DOC_RETENTION_DAYS:-90}
       # 单文件上传上限（MB）；api → engine 代理体限默认为其上 + 余量（210）
       - RD_AGENT_DOC_MAX_MB=${RD_AGENT_DOC_MAX_MB:-200}
+      # 单次上传合计上限（MB；多文件正文+附录共用一批）。默认 200 与部署链
+      # 同口径——要抬过 210 必须同时抬 nginx client_max_body_size（镜像内，
+      # 需重建 quantmind-web）与 ENGINE_PROXY_MAX_BODY_MB，否则外层先 413。
+      - RD_AGENT_DOC_MAX_TOTAL_MB=${RD_AGENT_DOC_MAX_TOTAL_MB:-200}
       - ENGINE_PROXY_MAX_BODY_MB=${ENGINE_PROXY_MAX_BODY_MB:-210}
 
       # 市值单位配置：数据库存储单位为元，1亿=100,000,000
