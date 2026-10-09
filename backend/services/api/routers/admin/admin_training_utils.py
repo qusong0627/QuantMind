@@ -16,7 +16,12 @@ from sqlalchemy import select, text
 from backend.services.api.routers.admin.db import TrainingJobRecord
 from backend.services.api.training_explain import normalize_explain
 from backend.services.api.user_app.middleware.auth import require_admin
-from backend.services.engine.training.orchestrator_base import get_orchestrator, REGISTRY
+from backend.services.engine.training.orchestrator_base import (
+    get_orchestrator,
+    REGISTRY,
+    attach_singleflight_release,
+    supervised_launch,
+)
 from backend.services.engine.training.local_docker_orchestrator import LocalDockerOrchestrator
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
 from backend.services.engine.data_platform.quantdb_factor_reader import (
@@ -419,6 +424,15 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         normalized["factor_schema_hash"] = str(payload.get("factor_schema_hash") or "")
         normalized["factor_catalog_published_at"] = str(payload.get("factor_catalog_published_at") or "")
         normalized["factor_coverage"] = dict(payload.get("factor_coverage") or {})
+
+    # 滚动训练溯源（P1）：campaign 关联信息透传（白名单成员，见
+    # recipe_registry.build_rolling_meta），随 config.yaml 落到 metadata.json。
+    # sanitize_rolling_meta 只保留六个合法键，防请求方夹带任意负载进训练产物。
+    from backend.shared.training.recipe_registry import sanitize_rolling_meta
+
+    rolling_meta = sanitize_rolling_meta(payload.get("rolling_meta"))
+    if rolling_meta:
+        normalized["rolling_meta"] = rolling_meta
 
     # 训练起止（split gap 推导用； TrainingRequest 已校验可解析，此处不再抛错）
     dt_train_start = _parse_date(req.train_start, "train_start")
@@ -847,6 +861,151 @@ def _merge_log_text(*parts: str, max_lines: int = 600) -> str:
     return "\n".join(merged_lines).strip()
 
 
+# ── P0-3：训练单飞锁（串行约束代码化；宿主内存 ~44G 真上限 + 全局 OOM 血泪）──
+
+
+async def _holder_job_is_stale(holder_run_id: str) -> bool:
+    """锁持有者是否陈旧（终态/行丢失）→ 可自愈释放。查询异常按占用处理（保守）。"""
+    from backend.shared.training_singleflight import holder_is_stale
+
+    try:
+        async with get_session(read_only=True) as session:
+            rec = await session.get(TrainingJobRecord, str(holder_run_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Singleflight] 持有者状态查询失败，按占用处理: %s", exc)
+        return False
+    return holder_is_stale(getattr(rec, "status", None) if rec else None)
+
+
+async def _acquire_training_singleflight(run_id: str, normalized_payload: dict) -> None:
+    """取训练单飞锁；占用中 → 409（含持有者 run_id）。
+
+    自愈：持有者已终态/行丢失（上次进程异常退出没释放 → 锁卡死）→ CAS 释放后重试一次。
+    Redis 不可达时**软降级放行**（告警）：串行是内存保护，但不该变成新的单点故障。
+    """
+    from backend.shared.training_singleflight import (
+        get_holder,
+        lock_ttl_seconds,
+        release,
+        try_acquire,
+    )
+
+    try:
+        from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+
+        redis_client = get_redis_sentinel_client()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Singleflight] Redis 客户端不可用，训练锁软降级放行: %s", exc)
+        return
+
+    ttl = lock_ttl_seconds(normalized_payload.get("max_time_minutes"))
+
+    def _attempt() -> tuple[bool, str | None]:
+        acq = try_acquire(redis_client, run_id, ttl)
+        return acq, (None if acq else get_holder(redis_client))
+
+    try:
+        acquired, holder = _attempt()
+        if not acquired and holder is None:
+            # SET NX 失败但读不到持有者：要么锁刚过期（重试即得），要么 Redis
+            # 写路径异常（客户端 set 吞异常 → False；复审 HIGH-3）。重试一次
+            # 仍失败且仍无持有者 → 按基础设施故障**软降级放行**，绝不把
+            # Redis 故障误报成「训练进行中」把提交入口全锁死。
+            acquired, holder = _attempt()
+            if not acquired and holder is None:
+                logger.warning(
+                    "[Singleflight] 取锁失败且无持有者（Redis 写路径异常？），软降级放行"
+                )
+                return
+        if (
+            not acquired
+            and holder
+            and holder != run_id
+            and await _holder_job_is_stale(holder)
+        ):
+            logger.warning(
+                "[Singleflight] 持有者 %s 已陈旧（终态/行丢失），自愈释放后重试", holder
+            )
+            release(redis_client, holder)
+            acquired, holder = _attempt()
+            if not acquired and holder is None:
+                logger.warning("[Singleflight] 自愈后 Redis 失联，软降级放行")
+                return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Singleflight] 取锁异常，软降级放行: %s", exc)
+        return
+
+    if not acquired:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"训练进行中（run_id={holder or 'unknown'}）：训练为串行资源"
+                "（宿主内存上限），请等待完成或取消后再提交"
+            ),
+        )
+
+
+def _release_training_singleflight(run_id: str) -> None:
+    """best-effort 释放（CAS 属主校验，错删不了他人的锁）。"""
+    try:
+        from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+        from backend.shared.training_singleflight import release
+
+        release(get_redis_sentinel_client(), run_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Singleflight] release %s failed: %s", run_id, exc)
+
+
+async def _mark_never_launched_failed(run_id: str, exc: Exception) -> None:
+    """提交期失败且任务从未进入编排 → 把残留 pending 行标 failed（best-effort）。
+
+    不标的话该行会被单飞锁自愈判定视为「活跃持有者」（pending 属活跃态），
+    新提交将一直 409 直到回收器扫到或用户手动取消。
+    """
+    try:
+        async with get_session() as session:
+            rec = await session.get(TrainingJobRecord, run_id)
+            if rec and str(rec.status or "") in ("pending", "provisioning"):
+                rec.status = "failed"
+                rec.progress = 100
+                rec.logs = (
+                    rec.logs or ""
+                ) + f"[ERROR] 提交期失败，任务未进入编排: {exc}\n"
+                await session.commit()
+    except Exception as inner:  # noqa: BLE001
+        logger.warning("[Singleflight] 失败标记写入失败 %s: %s", run_id, inner)
+
+
+async def _delete_unlaunched_job(run_id: str) -> None:
+    """提交被 409 拒绝时清除刚落的 holder 行（任务从未发生，不留残留）。
+
+    HIGH-2 修复后提交顺序是「先落行、再取锁」，取锁失败必须回收该行，
+    否则 admin 列表会积压永远为 pending 的幽灵任务。仅删 pending 且无
+    instance_id 的行（防御：状态若已被并发方推进则不动）。
+    """
+    try:
+        async with get_session() as session:
+            rec = await session.get(TrainingJobRecord, run_id)
+            if (
+                rec is not None
+                and str(rec.status or "") == "pending"
+                and not rec.instance_id
+            ):
+                await session.delete(rec)
+                await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Singleflight] 清理未启动任务行失败 %s: %s", run_id, exc)
+
+
+def _new_training_run_id() -> str:
+    """训练 run_id 唯一构造点：UTC 时钟源（naive 会被 TZ/DST 抖动污染 run_id 排序）。
+
+    独立成函数是为了可测：运行时测试以固定 UTC 时钟 + 断言「必须传 timezone.utc」
+    的 mock 直接调用本函数（naive 写法（``now`` 不传 tz）会当场炸，而不是静默偏 8 小时）。
+    """
+    return f"train_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+
 async def submit_training_job(
     payload: dict[str, Any],
     background_tasks: BackgroundTasks,
@@ -859,7 +1018,7 @@ async def submit_training_job(
     market = _resolve_market(context.get("market"), benchmark_hint)
     payload, allowed_features = await _resolve_quantdb_factor_payload(payload, market)
     normalized_payload = _normalize_payload(payload, allowed_features)
-    run_id = f"train_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    run_id = _new_training_run_id()
 
     tenant_id = str(current_user.get("tenant_id") or "default")
     user_id = str(current_user.get("user_id") or current_user.get("sub") or "unknown")
@@ -869,6 +1028,11 @@ async def submit_training_job(
     normalized_payload["tenant_id"] = tenant_id
     normalized_payload["user_id"] = user_id
 
+    # ── P0-3 单飞锁：训练串行是内存保护（~44G 真上限），占用即 409 ────────────
+    # 顺序纪律（复审 HIGH-2，2026-10-08）：**先落 holder 行并提交，再取锁**。
+    # 反序存在「锁已发布、holder 行未提交」窗口：并发提交在窗口内
+    # session.get 读不到持有者行 → 被 _holder_job_is_stale 误判「行丢失」
+    # → 自愈抢占 → 双跑（44G 宿主最恶性的失败模式）。
     async with get_session() as session:
         record = TrainingJobRecord(
             id=run_id,
@@ -881,41 +1045,113 @@ async def submit_training_job(
         session.add(record)
         await session.commit()
 
-    _training_log_stream.append_log(
-        run_id=run_id,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        line=f"[SYSTEM] 训练任务已创建: {run_id}",
-        status="pending",
-        progress=0,
+    try:
+        await _acquire_training_singleflight(run_id, normalized_payload)
+    except HTTPException:
+        # 占用被拒 409：任务从未发生，回收刚落的 holder 行
+        await _delete_unlaunched_job(run_id)
+        raise
+
+    # 取锁成功 → 启动续租心跳（设计 §4.3；HIGH-4）。心跳自终止：
+    # 锁被释放/易主后连续两次续租被拒即退出。
+    from backend.shared.training_singleflight import (
+        lock_ttl_seconds as _lock_ttl,
+        start_renewal as _start_renewal,
     )
 
-    # 训练节点选择（payload.node_id: "local" 或 "autodl-xxx"，默认本地）
-    node_id = str(normalized_payload.get("node_id") or payload.get("node_id") or "local")
-    orchestrator = get_orchestrator(node_id=node_id)
-    logger.warning(f"[SYSTEM] Dispatching training job {run_id}. node={node_id} payload_keys={list(normalized_payload.keys())}")
-    REGISTRY.register(
-        orchestrator.launch_training_job(run_id=run_id, payload=normalized_payload),
-        run_id=run_id,
-    )
+    _start_renewal(run_id, _lock_ttl(normalized_payload.get("max_time_minutes")))
 
-    # 预检特征可用性，告知前端哪些特征在 parquet 中不存在
-    valid_features, missing_features = LocalDockerOrchestrator._filter_features_by_parquet(
-        run_id, normalized_payload.get("features", [])
-    )
+    launch_task = None
+    try:
+        _training_log_stream.append_log(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            line=f"[SYSTEM] 训练任务已创建: {run_id}",
+            status="pending",
+            progress=0,
+        )
 
-    return {
-        "runId": run_id,
-        "status": "pending",
-        "payload": normalized_payload,
-        "validFeatureCount": len(valid_features),
-        "missingFeatureCount": len(missing_features),
-        "missingFeatures": missing_features[:30],
-    }
+        # 训练节点选择（payload.node_id: "local" 或 "autodl-xxx"，默认本地）
+        node_id = str(
+            normalized_payload.get("node_id") or payload.get("node_id") or "local"
+        )
+        orchestrator = get_orchestrator(node_id=node_id)
+        logger.warning(
+            f"[SYSTEM] Dispatching training job {run_id}. node={node_id} payload_keys={list(normalized_payload.keys())}"
+        )
+        launch_task = REGISTRY.register(
+            supervised_launch(
+                orchestrator,
+                run_id=run_id,
+                payload=normalized_payload,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            ),
+            run_id=run_id,
+        )
+        # 编排 task 全部结束后释放单飞锁（launch 协程结束时轮询循环仍在管 → 不释放）
+        attach_singleflight_release(launch_task, run_id)
+
+        # 预检特征可用性，告知前端哪些特征在 parquet 中不存在
+        valid_features, missing_features = (
+            LocalDockerOrchestrator._filter_features_by_parquet(
+                run_id, normalized_payload.get("features", [])
+            )
+        )
+
+        return {
+            "runId": run_id,
+            "status": "pending",
+            "payload": normalized_payload,
+            "validFeatureCount": len(valid_features),
+            "missingFeatureCount": len(missing_features),
+            "missingFeatures": missing_features[:30],
+        }
+    except Exception as exc:  # noqa: BLE001
+        # 任务从未进入编排（建行失败 / 编排器构造失败）→ 立即释放锁并把残留
+        # 的 pending 行标 failed，否则它会以「活跃持有者」姿态卡死后续提交
+        if launch_task is None:
+            _release_training_singleflight(run_id)
+            await _mark_never_launched_failed(run_id, exc)
+        raise
 
 
 
 _CANCELABLE_STATUSES = ("pending", "provisioning", "running", "waiting_callback")
+
+
+async def _stop_run_container_best_effort(
+    run_id: str, tenant_id: str, user_id: str
+) -> None:
+    """取消兜底：该 run 无受管 task 时直接停容器（复审 HIGH-1 次生路径）。
+
+    正常路径由编排器轮询循环读取消标记后停容器；但 API 重启后尚未重挂、
+    或编排 task 已消亡时没有任何循环可读标记——容器会继续训练，而单飞锁
+    已被释放 → 下次提交即双跑。此处用判尸模块的探针 + 编排器取消原语
+    直接停（含恢复被暂停的其它容器）。进程模式无重挂语义，不做兜底。
+    """
+    try:
+        from backend.services.engine.training.job_reaper import (
+            _orchestrator,
+            _probe_docker,
+        )
+
+        state, cid = await asyncio.to_thread(_probe_docker, run_id)
+        if state in ("running", "created", "paused") and cid:
+            orchestrator = _orchestrator()
+            await orchestrator._cancel_container(run_id, cid, tenant_id, user_id)
+            work_dir = (
+                Path(os.getenv("HOST_DATA_DIR") or "/data") / "training_jobs" / run_id
+            )
+            await asyncio.to_thread(orchestrator._resume_others, work_dir, run_id)
+            logger.warning(
+                "[Singleflight] 取消兜底：无受管 task，已直接停容器 %s (%s)",
+                run_id,
+                cid[:12],
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Singleflight] 取消兜底停容器失败 %s: %s", run_id, exc)
 
 
 async def cancel_training_run(run_id: str, current_user: dict[str, Any]) -> dict[str, Any]:
@@ -929,10 +1165,19 @@ async def cancel_training_run(run_id: str, current_user: dict[str, Any]) -> dict
     user_id = str(current_user.get("user_id") or current_user.get("sub") or "unknown")
 
     async with get_session() as session:
-        stmt = select(TrainingJobRecord).where(
-            TrainingJobRecord.id == run_id,
-            TrainingJobRecord.tenant_id == tenant_id,
-            TrainingJobRecord.user_id == user_id,
+        # FOR UPDATE：与 complete_training_run 的回调锁同序（双方都锁行）——
+        # 「取消 vs 完成回调」竞态谁先锁谁赢：先锁的回调把状态落 completed，
+        # 取消方读到后 409；先锁的取消落 cancelled，回调读到后忽略（不注册
+        # 模型）。无锁时两边各自读到旧状态，取消会把 completed 覆写回
+        # cancelled 而模型已注册（复审 HIGH-1 次生面，2026-10-08）。
+        stmt = (
+            select(TrainingJobRecord)
+            .where(
+                TrainingJobRecord.id == run_id,
+                TrainingJobRecord.tenant_id == tenant_id,
+                TrainingJobRecord.user_id == user_id,
+            )
+            .with_for_update()
         )
         record = (await session.execute(stmt)).scalar_one_or_none()
 
@@ -951,8 +1196,20 @@ async def cancel_training_run(run_id: str, current_user: dict[str, Any]) -> dict
         record.progress = max(int(record.progress or 0), 0)
         await session.commit()
 
-    _training_log_stream.mark_cancel_requested(run_id)
-    REGISTRY.cancel(run_id)
+    # 滚动重训台账回流（P1 · §4.2）：取消 = run 终态。台账行不能停在
+    # dispatched——那会把该窗口装成「仍在跑」挡掉真正需要的重派发。
+    # best-effort：台账回流失败绝不能把取消请求变成 500。
+    from backend.shared.rolling_campaigns import mark_outcome_by_run_safe
+
+    await mark_outcome_by_run_safe(run_id, status="failed", reason="cancelled")
+
+    cancel_flag_confirmed = _training_log_stream.mark_cancel_requested(run_id)
+    task_cancelled = REGISTRY.cancel(run_id)
+    if not task_cancelled or cancel_flag_confirmed is False:
+        # 无受管 task → 没有轮询循环会读取消标记，直接停容器兜底。
+        # 标记未确认落库（Redis 不可用，NEW-E）同样必须直杀：取消处理器读不到
+        # 标记会把取消当进程关停，资源不会被停（远端训练继续跑 = 双跑隐患）。
+        await _stop_run_container_best_effort(run_id, tenant_id, user_id)
     _training_log_stream.append_log(
         run_id=run_id,
         tenant_id=tenant_id,
@@ -1166,11 +1423,35 @@ async def complete_training_run(
     status = incoming_status if incoming_status in ("completed", "failed") else "completed"
 
     async with get_session() as session:
+        # FOR UPDATE：与 cancel_training_run 同序互斥（见该函数注释），
+        # 保证「取消 vs 完成回调」竞态有确定赢家，不会走出「显示 cancelled
+        # 但模型已注册」或「已取消又被翻回 completed」的撕裂终态。
         record = (
-            await session.execute(select(TrainingJobRecord).where(TrainingJobRecord.id == run_id))
+            await session.execute(
+                select(TrainingJobRecord)
+                .where(TrainingJobRecord.id == run_id)
+                .with_for_update()
+            )
         ).scalar_one_or_none()
         if not record:
             raise HTTPException(status_code=404, detail="Training run not found")
+
+        if str(record.status or "") == "cancelled":
+            # 用户已取消（容器可能正在退出）：迟到的完成回调不得把终态翻回
+            # completed 并注册模型（复审 HIGH-1 次生面，2026-10-08）
+            record.logs = (
+                record.logs or ""
+            ) + "[SYSTEM] 任务已取消，忽略迟到的完成回调\n"
+            await session.commit()
+            _training_log_stream.update_state(
+                run_id=run_id,
+                tenant_id=str(record.tenant_id or "default"),
+                user_id=str(record.user_id or ""),
+                status="cancelled",
+                progress=100,
+                last_line="[CANCELLED] late callback ignored",
+            )
+            return {"ok": True, "runId": run_id, "status": "cancelled", "ignored": True}
 
         normalized_result, validation_error = _normalize_training_result_payload(
             result,
@@ -1294,5 +1575,25 @@ async def complete_training_run(
             logger.info("[%s] removed training container: %s", run_id, container_name)
     except Exception as exc:
         logger.warning("[%s] failed to remove container %s: %s", run_id, container_name, exc)
+
+    # 滚动重训台账回流（P1 · §4.2）：run 终态 → campaign registered/failed。
+    # 只对滚动派发的 run 生效（非滚动 run 无台账行，是无害 no-op）；
+    # best-effort——台账回流失败绝不能把训练回调变成 500。
+    from backend.shared.rolling_campaigns import mark_outcome_by_run_safe
+
+    reg_payload = normalized_result.get("model_registration")
+    registered_model_id = (
+        str(reg_payload.get("model_id") or "") if isinstance(reg_payload, dict) else ""
+    )
+    await mark_outcome_by_run_safe(
+        run_id,
+        status="registered" if status == "completed" else "failed",
+        model_id=registered_model_id or None,
+        reason=(
+            ""
+            if status == "completed"
+            else str(normalized_result.get("error") or "training_failed")
+        ),
+    )
 
     return {"ok": True, "runId": run_id, "status": status}

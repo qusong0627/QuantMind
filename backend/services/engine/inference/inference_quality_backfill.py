@@ -37,7 +37,9 @@ def _as_date(value: Any) -> date:
     return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
 
 
-def _rank_ic_from_scores(df: pd.DataFrame, pred_col: str = "score", label_col: str = "label") -> float:
+def _rank_ic_from_scores(
+    df: pd.DataFrame, pred_col: str = "score", label_col: str = "label"
+) -> float:
     """单日截面 Rank IC（Spearman）。与 train.py _rank_ic_series 同算法。"""
     df = df[[pred_col, label_col]].dropna()
     if len(df) < 10:
@@ -54,7 +56,9 @@ def _rank_ic_from_scores(df: pd.DataFrame, pred_col: str = "score", label_col: s
     return float((rp_centered * rl_centered).sum() / denom)
 
 
-def _pearson_ic_from_scores(df: pd.DataFrame, pred_col: str = "score", label_col: str = "label") -> float:
+def _pearson_ic_from_scores(
+    df: pd.DataFrame, pred_col: str = "score", label_col: str = "label"
+) -> float:
     df = df[[pred_col, label_col]].dropna()
     if len(df) < 3:
         return float("nan")
@@ -76,18 +80,21 @@ def _resolve_parquet_path(data_dir: str, trade_date: str, market: str) -> str | 
     if market_upper in _MARKET_PARQUET:
         p = f"{data_dir}/{_MARKET_PARQUET[market_upper]}"
         import os
+
         if os.path.exists(p):
             return p
     year = int(trade_date[:4])
     p = f"{data_dir}/model_features_{year}.parquet"
     import os
+
     if os.path.exists(p):
         return p
     return None
 
 
-def _load_real_returns_snapshot(data_dir: str, trade_date: str, market: str,
-                                horizon: int) -> pd.DataFrame:
+def _load_real_returns_snapshot(
+    data_dir: str, trade_date: str, market: str, horizon: int
+) -> pd.DataFrame:
     """读特征快照，构造 T 日对未来 H 日真实收益（复用 train.py 标签构造）。
 
     返回 DataFrame: [symbol, label] where label = 未来 H 日收益（截面 rank 前原始值）。
@@ -105,58 +112,109 @@ def _load_real_returns_snapshot(data_dir: str, trade_date: str, market: str,
         cols = ["instrument", "trade_date"]
     if "mom_ret_1d" in names:
         cols.append("mom_ret_1d")
-    if horizon_col in names:
+    if horizon_col in names and horizon_col not in cols:
+        # horizon=1 时 horizon_col == "mom_ret_1d"，重复选列会让
+        # groupby[col] 变成 DataFrame → df["label"] 赋值崩溃
         cols.append(horizon_col)
 
     df = pq.read_table(parquet_path, columns=cols).to_pandas()
     if "instrument" in df.columns and "symbol" not in df.columns:
         df = df.rename(columns={"instrument": "symbol"})
-    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df = df[df["trade_date"] == trade_date].copy()
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.strftime(
+        "%Y-%m-%d"
+    )
+    # 按 (symbol, 日期) 排序：shift(-H) 的组内配对依赖时间顺序
+    df = df.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
 
-    # 构造未来 H 日收益：mom_ret_{H}d 是过去收益，shift(-H) 后为未来 H 日收益
+    # 构造未来 H 日收益：mom_ret_{H}d 是过去收益，shift(-H) 后为未来 H 日收益。
+    # 注意：单日过滤必须放在标签构造**之后** —— 先滤到单日会让每个 symbol
+    # 只剩 1 行，groupby.shift(-H) 全为 NaN，主源静默退化为永远空结果
+    # （修复前的行为，2026-10-08 修正）。
     if horizon_col in df.columns:
         df["label"] = df.groupby("symbol")[horizon_col].shift(-horizon)
     elif "mom_ret_1d" in df.columns:
-        df["label"] = (
-            df.groupby("symbol")["mom_ret_1d"]
-            .transform(lambda s: (1 + s).rolling(horizon).apply(np.prod, raw=True) - 1)
-            .shift(-horizon)
+        # shift 必须在组内做（复审 MEDIUM-8，2026-10-08）：对 transform 的
+        # 结果再 .shift(-H) 是**全局**位移，会在每个 symbol 块尾部取到下一个
+        # 标的的数值（跨标的串味标签）
+        df["label"] = df.groupby("symbol")["mom_ret_1d"].transform(
+            lambda s: ((1 + s).rolling(horizon).apply(np.prod, raw=True) - 1).shift(
+                -horizon
+            )
         )
     else:
         logger.warning("特征快照无 mom_ret_1d/%s，无法计算真实收益", horizon_col)
         return pd.DataFrame(columns=["symbol", "label"])
 
+    df = df[df["trade_date"] == trade_date]
     df = df[df["label"].notna()][["symbol", "label"]].copy()
-    df["symbol"] = df["symbol"].astype(str)
+    # symbol 必须与 scores 侧（_get_scores_for_date 同样 to_prefix）同函数归一：
+    # 真实快照存裸 6 位（如 "000001"），scores 读取侧转 prefix —— 只归一单侧
+    # 会让 merge 在 on="symbol" 上静默全空（回填出不了质量行）。
+    from backend.shared.stock_utils import StockCodeUtil
+
+    df["symbol"] = df["symbol"].map(lambda s: StockCodeUtil.to_prefix(str(s)))
     return df
 
 
-def _load_real_returns_quantdb(trade_date: str, horizon: int) -> pd.DataFrame:
-    """从 QuantDB 后复权日线构造 T 日 → 未来 H 个交易日的真实收益。
+def _load_real_returns_quantdb(
+    trade_date: str,
+    horizon: int,
+    *,
+    market: str = "CN",
+    quantdb_dir: str | None = None,
+) -> pd.DataFrame:
+    """从 QuantDB **前复权（qfq, daily_forward）** 日线构造 T 日 → 未来 H 个交易日真实收益。
 
     A 股训练/推理已改为直读 QuantDB，feature_snapshots 目录在新部署里是空的，
     旧路径取不到数据时用这里兜底。symbol 统一转 prefix 口径，与 PG 中的
     推理分数（engine_signal_scores）对齐。
+
+    P0-2 口径修复（2026-10-08，docs/滚动训练与模型生命周期_设计方案.md §2.2-2）：
+    - **只读 `daily_forward`（qfq）**：旧实现兜底 `daily_backward`（已知复权
+      缺陷序列，拼接缝长假跳变）与 `daily_unadjusted`（除权日假跌），
+      生产 IC 曾可能算在坏收益上——两者一律不读，缺失即 fail-closed；
+    - **d0 必须精确等于 trade_date**：旧实现取「第一个 >= trade_date 的
+      分区」会在该日不在库中时静默换窗（T 日错位无告警）——不匹配即
+      返回空 + warning；
+    - **market 参数化**：本函数只服务 CN QuantDB 目录，非 CN 一律
+      fail-closed（由调用方走对应市场的 feature_snapshots 路径）。
     """
     import glob as _glob
     import os as _os
     from backend.shared.stock_utils import StockCodeUtil
 
-    data_dir = _os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb")
-    base = _os.path.join(data_dir, "1_kline_data", "daily_backward")
+    if str(market or "").upper() not in ("CN", "A", ""):
+        logger.warning(
+            "QuantDB 收益兜底仅服务 CN 市场（market=%s 拒绝）: date=%s",
+            market,
+            trade_date,
+        )
+        return pd.DataFrame(columns=["symbol", "label"])
+
+    data_dir = quantdb_dir or _os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb")
+    base = _os.path.join(data_dir, "1_kline_data", "daily_forward")
     if not _os.path.isdir(base):
-        base = _os.path.join(data_dir, "1_kline_data", "daily_unadjusted")
-    if not _os.path.isdir(base):
-        logger.warning("QuantDB 日线目录不存在: dir=%s", data_dir)
+        # 不回退 daily_backward / daily_unadjusted：坏序列宁缺毋滥
+        logger.warning(
+            "QuantDB daily_forward 目录不存在（禁止回退坏复权序列）: dir=%s", base
+        )
         return pd.DataFrame(columns=["symbol", "label"])
 
     start = str(trade_date).replace("-", "")
     dts = sorted(
         p.split("=", 1)[1]
         for p in _os.listdir(base)
-        if p.startswith("dt=") and p.split("=", 1)[1].isdigit() and p.split("=", 1)[1] >= start
+        if p.startswith("dt=")
+        and p.split("=", 1)[1].isdigit()
+        and p.split("=", 1)[1] >= start
     )
+    if not dts or dts[0] != start:
+        logger.warning(
+            "QuantDB 无 trade_date 当日分区，拒绝静默换窗: date=%s first_ge=%s",
+            trade_date,
+            dts[0] if dts else "(无)",
+        )
+        return pd.DataFrame(columns=["symbol", "label"])
     if len(dts) <= horizon:
         logger.warning(
             "QuantDB 无足够的未来交易日: date=%s horizon=%d available=%d",
@@ -174,7 +232,10 @@ def _load_real_returns_quantdb(trade_date: str, horizon: int) -> pd.DataFrame:
             return pd.DataFrame(columns=["symbol", "label"])
         frames.append(
             pd.concat(
-                [pq.read_table(f, columns=["symbol", "close"]).to_pandas() for f in files]
+                [
+                    pq.read_table(f, columns=["symbol", "close"]).to_pandas()
+                    for f in files
+                ]
             ).assign(_dt=d)
         )
 
@@ -189,17 +250,27 @@ def _load_real_returns_quantdb(trade_date: str, horizon: int) -> pd.DataFrame:
     return out[["symbol", "label"]]
 
 
-def _load_real_returns(data_dir: str, trade_date: str, market: str,
-                       horizon: int) -> pd.DataFrame:
-    """真实收益入口：优先 feature_snapshots，取不到时回退 QuantDB（A 股）。"""
+def _load_real_returns(
+    data_dir: str,
+    trade_date: str,
+    market: str,
+    horizon: int,
+    *,
+    quantdb_dir: str | None = None,
+) -> pd.DataFrame:
+    """真实收益入口：优先 feature_snapshots，取不到时回退 QuantDB（仅 CN，qfq）。"""
     df = _load_real_returns_snapshot(data_dir, trade_date, market, horizon)
     if not df.empty:
         return df
     if str(market or "").upper() in ("CN", "A", ""):
         logger.info(
-            "特征快照无 %s/%s 的真实收益，回退 QuantDB 日线", trade_date, market
+            "特征快照无 %s/%s 的真实收益，回退 QuantDB daily_forward（qfq）",
+            trade_date,
+            market,
         )
-        return _load_real_returns_quantdb(trade_date, horizon)
+        return _load_real_returns_quantdb(
+            trade_date, horizon, market=market, quantdb_dir=quantdb_dir
+        )
     return df
 
 
@@ -231,16 +302,18 @@ class InferenceQualityBackfill:
             for stmt in statements:
                 await session.execute(text(stmt))
 
-    async def _get_scores_for_date(self, tenant_id: str, user_id: str, model_id: str,
-                                   trade_date: str) -> pd.DataFrame | None:
+    async def _get_scores_for_date(
+        self, tenant_id: str, user_id: str, model_id: str, trade_date: str
+    ) -> pd.DataFrame | None:
         """读某模型某日推理分数（engine_signal_scores via run 定位）。"""
         # data_trade_date 是 DATE 列，asyncpg 不接受字符串，统一转成 date
         trade_date = _as_date(trade_date)
         async with get_session(read_only=True) as session:
             run_row = (
-                await session.execute(
-                    text(
-                        """
+                (
+                    await session.execute(
+                        text(
+                            """
                         SELECT r.run_id, r.signals_count
                         FROM qm_model_inference_runs r
                         WHERE r.tenant_id = :tenant_id
@@ -252,27 +325,39 @@ class InferenceQualityBackfill:
                         ORDER BY r.created_at DESC
                         LIMIT 1
                         """
-                    ),
-                    {"tenant_id": tenant_id, "user_id": user_id, "model_id": model_id, "trade_date": trade_date},
+                        ),
+                        {
+                            "tenant_id": tenant_id,
+                            "user_id": user_id,
+                            "model_id": model_id,
+                            "trade_date": trade_date,
+                        },
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             if not run_row:
                 return None
             run_id = run_row["run_id"]
             rows = (
-                await session.execute(
-                    text(
-                        """
+                (
+                    await session.execute(
+                        text(
+                            """
                         SELECT symbol, fusion_score
                         FROM engine_signal_scores
                         WHERE run_id = :run_id
                           AND tenant_id = :tenant_id
                           AND user_id = :user_id
                         """
-                    ),
-                    {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},
+                        ),
+                        {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         if not rows:
             return None
         df = pd.DataFrame([dict(r) for r in rows])
@@ -283,24 +368,49 @@ class InferenceQualityBackfill:
         df["symbol"] = df["symbol"].map(lambda s: StockCodeUtil.to_prefix(str(s)))
         return df
 
-    async def backfill_date(self, *, tenant_id: str = "default", user_id: str = "",
-                            model_id: str, trade_date: str, market: str = "CN",
-                            horizon: int = 5, data_dir: str = _DEFAULT_DATA_DIR) -> dict[str, Any]:
+    async def backfill_date(
+        self,
+        *,
+        tenant_id: str = "default",
+        user_id: str = "",
+        model_id: str,
+        trade_date: str,
+        market: str = "CN",
+        horizon: int = 5,
+        data_dir: str = _DEFAULT_DATA_DIR,
+    ) -> dict[str, Any]:
         """回填单个 (model_id, trade_date) 的质量数据。幂等 upsert。"""
         # 落库用 date，parquet 路径/日志继续用 YYYY-MM-DD 字符串
         trade_date_db = _as_date(trade_date)
-        scores_df = await self._get_scores_for_date(tenant_id, user_id, model_id, trade_date)
+        scores_df = await self._get_scores_for_date(
+            tenant_id, user_id, model_id, trade_date
+        )
         if scores_df is None or scores_df.empty:
-            return {"model_id": model_id, "trade_date": trade_date, "status": "no_scores", "rank_ic": None}
+            return {
+                "model_id": model_id,
+                "trade_date": trade_date,
+                "status": "no_scores",
+                "rank_ic": None,
+            }
 
         returns_df = _load_real_returns(data_dir, trade_date, market, horizon)
         if returns_df.empty:
-            return {"model_id": model_id, "trade_date": trade_date, "status": "no_returns", "rank_ic": None}
+            return {
+                "model_id": model_id,
+                "trade_date": trade_date,
+                "status": "no_returns",
+                "rank_ic": None,
+            }
 
         merged = scores_df.merge(returns_df, on="symbol", how="inner")
         if len(merged) < 10:
-            return {"model_id": model_id, "trade_date": trade_date, "status": "too_few",
-                    "rank_ic": None, "matched": int(len(merged))}
+            return {
+                "model_id": model_id,
+                "trade_date": trade_date,
+                "status": "too_few",
+                "rank_ic": None,
+                "matched": int(len(merged)),
+            }
 
         rank_ic = _rank_ic_from_scores(merged)
         ic = _pearson_ic_from_scores(merged)
@@ -340,21 +450,34 @@ class InferenceQualityBackfill:
             )
             await session.commit()
 
-        return {"model_id": model_id, "trade_date": trade_date, "status": "ok",
-                "rank_ic": float(rank_ic) if np.isfinite(rank_ic) else None,
-                "ic": float(ic) if np.isfinite(ic) else None,
-                "matched": int(len(merged))}
+        return {
+            "model_id": model_id,
+            "trade_date": trade_date,
+            "status": "ok",
+            "rank_ic": float(rank_ic) if np.isfinite(rank_ic) else None,
+            "ic": float(ic) if np.isfinite(ic) else None,
+            "matched": int(len(merged)),
+        }
 
-    async def backfill_recent(self, *, tenant_id: str = "default", user_id: str = "",
-                              model_id: str, market: str = "CN", horizon: int = 5,
-                              days: int = 60, data_dir: str = _DEFAULT_DATA_DIR) -> dict[str, Any]:
+    async def backfill_recent(
+        self,
+        *,
+        tenant_id: str = "default",
+        user_id: str = "",
+        model_id: str,
+        market: str = "CN",
+        horizon: int = 5,
+        days: int = 60,
+        data_dir: str = _DEFAULT_DATA_DIR,
+    ) -> dict[str, Any]:
         """回填某模型最近 N 天（截至 H 天前的交易日）的质量数据。"""
         # 收集该模型最近的推理交易日（已完成、有信号）
         async with get_session(read_only=True) as session:
             rows = (
-                await session.execute(
-                    text(
-                        """
+                (
+                    await session.execute(
+                        text(
+                            """
                         SELECT DISTINCT ON (data_trade_date) data_trade_date
                         FROM qm_model_inference_runs
                         WHERE tenant_id = :tenant_id
@@ -365,17 +488,30 @@ class InferenceQualityBackfill:
                         ORDER BY data_trade_date DESC
                         LIMIT :limit
                         """
-                    ),
-                    {"tenant_id": tenant_id, "user_id": user_id, "model_id": model_id, "limit": int(days)},
+                        ),
+                        {
+                            "tenant_id": tenant_id,
+                            "user_id": user_id,
+                            "model_id": model_id,
+                            "limit": int(days),
+                        },
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         dates = [str(r["data_trade_date"])[:10] for r in rows]
 
         results = []
         for d in dates:
             res = await self.backfill_date(
-                tenant_id=tenant_id, user_id=user_id, model_id=model_id,
-                trade_date=d, market=market, horizon=horizon, data_dir=data_dir,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                model_id=model_id,
+                trade_date=d,
+                market=market,
+                horizon=horizon,
+                data_dir=data_dir,
             )
             results.append(res)
         ok = [r for r in results if r.get("status") == "ok"]
@@ -383,7 +519,12 @@ class InferenceQualityBackfill:
             "model_id": model_id,
             "processed": len(dates),
             "ok": len(ok),
-            "rank_ic_mean": float(np.mean([r["rank_ic"] for r in ok if r.get("rank_ic") is not None])) if ok else None,
+            "rank_ic_mean": float(
+                np.mean([r["rank_ic"] for r in ok if r.get("rank_ic") is not None])
+            )
+            if ok
+            else None,
         }
+
 
 inference_quality_backfill = InferenceQualityBackfill()

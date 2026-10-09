@@ -364,3 +364,132 @@ export function evidenceFootnote(row: EvalScoreRow | null | undefined): Evidence
     missing: missingLabels.length ? missingLabels.join('、') : '无',
   };
 }
+
+// ── 状态依赖（P3 §6.3：模型卡 inputs_version.regime_dependency） ──────
+
+/** 状态顺序按后端 `market_regime.STATES` 写死（jsonb 重排不改展示顺序） */
+const REGIME_STATE_ORDER = ['bull', 'neutral', 'bear'];
+
+const REGIME_STATE_LABELS: Record<string, string> = {
+  bull: '多头',
+  neutral: '震荡',
+  bear: '空头',
+};
+
+/** 状态 key → 中文标签（未知 key 原样显示，不吞） */
+export function regimeStateLabel(state: string): string {
+  return REGIME_STATE_LABELS[state] || state;
+}
+
+export interface RegimeBucketView {
+  state: string;
+  label: string;
+  nDays: number;
+  meanIc: number | null;
+  hitRate: number | null;
+  /** 后端弱区谓词（mean IC≤0 且 ≥15 天）；前端不重算 */
+  weak: boolean;
+}
+
+export interface RegimeDependencyView {
+  available: boolean;
+  market: string | null;
+  index: string | null;
+  /** available=false 的原因（缺省也有位置有原因，不许留白） */
+  reason: string | null;
+  buckets: RegimeBucketView[];
+  weakBuckets: string[];
+  worstMonth: { month: string; meanIc: number | null; nDays: number } | null;
+  monthStd: number | null;
+  nMonths: number;
+  coverage: { icDays: number; joinedDays: number; missingRegimeDays: number } | null;
+  notes: string[];
+}
+
+/**
+ * 模型行 → 状态依赖视图；非模型卡/未落该块 → null（调用方不渲染，而不是渲染空框）。
+ *
+ * 展示口径（后端强制同款）：最差月与月间 std 优先；弱区单独标注；缺失一律 `—`。
+ */
+export function regimeDependencyFor(
+  row: EvalScoreRow | null | undefined
+): RegimeDependencyView | null {
+  const version = (row?.inputs_version || {}) as Record<string, unknown>;
+  const raw = version.regime_dependency;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+  const market = typeof obj.market === 'string' ? obj.market : null;
+  const index = typeof obj.index === 'string' ? obj.index : null;
+  if (obj.available !== true) {
+    return {
+      available: false,
+      market,
+      index,
+      reason: String(obj.reason ?? '').trim() || '状态依赖缺省（后端未给原因）',
+      buckets: [],
+      weakBuckets: [],
+      worstMonth: null,
+      monthStd: null,
+      nMonths: 0,
+      coverage: null,
+      notes: [],
+    };
+  }
+  const rawBuckets = (
+    obj.buckets && typeof obj.buckets === 'object' ? obj.buckets : {}
+  ) as Record<string, unknown>;
+  const knownKeys = REGIME_STATE_ORDER.filter((key) => key in rawBuckets);
+  const extraKeys = Object.keys(rawBuckets)
+    .filter((key) => !REGIME_STATE_ORDER.includes(key))
+    .sort();
+  const buckets: RegimeBucketView[] = [...knownKeys, ...extraKeys].map((state) => {
+    const bucket = (
+      rawBuckets[state] && typeof rawBuckets[state] === 'object' ? rawBuckets[state] : {}
+    ) as Record<string, unknown>;
+    return {
+      state,
+      label: regimeStateLabel(state),
+      nDays: toNumber(bucket.n_days) ?? 0,
+      meanIc: toNumber(bucket.mean_ic),
+      hitRate: toNumber(bucket.hit_rate),
+      weak: bucket.weak === true,
+    };
+  });
+  const rawWeak = Array.isArray(obj.weak_buckets)
+    ? obj.weak_buckets.filter((state): state is string => typeof state === 'string')
+    : null;
+  const rawWorst = (
+    obj.worst_month && typeof obj.worst_month === 'object' ? obj.worst_month : null
+  ) as Record<string, unknown> | null;
+  const rawCoverage = (
+    obj.coverage && typeof obj.coverage === 'object' ? obj.coverage : null
+  ) as Record<string, unknown> | null;
+  return {
+    available: true,
+    market,
+    index,
+    reason: null,
+    buckets,
+    weakBuckets: rawWeak ?? buckets.filter((bucket) => bucket.weak).map((b) => b.state),
+    worstMonth:
+      rawWorst && typeof rawWorst.month === 'string'
+        ? {
+            month: rawWorst.month,
+            meanIc: toNumber(rawWorst.mean_ic),
+            nDays: toNumber(rawWorst.n_days) ?? 0,
+          }
+        : null,
+    monthStd: toNumber(obj.month_std),
+    nMonths: toNumber(obj.n_months) ?? 0,
+    coverage: rawCoverage
+      ? {
+          icDays: toNumber(rawCoverage.ic_days) ?? 0,
+          joinedDays: toNumber(rawCoverage.joined_days) ?? 0,
+          missingRegimeDays: toNumber(rawCoverage.missing_regime_days) ?? 0,
+        }
+      : null,
+    notes: Array.isArray(obj.notes)
+      ? obj.notes.filter((note): note is string => typeof note === 'string')
+      : [],
+  };
+}

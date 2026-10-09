@@ -244,11 +244,10 @@ export class PerformanceProfiler {
 // 全局性能分析器
 export const globalProfiler = new PerformanceProfiler();
 
-// React命名空间修复
-declare global {
-  namespace React {
-    function useState<T>(initialState: T | (() => T)): [T, (value: T) => void];
-  }
-}
-
+// 曾有过一段 `declare global { namespace React { function useState<T>(...) } }`，
+// 号称「React 命名空间修复」。它不是修复：`@types/react` 已经导出 `useState`，
+// 这段只是往全局 React 命名空间里**再叠一个重载**，而它的 setter 签名是
+// `(value: T) => void` —— 没有函数式更新。全局重载一旦胜出，全仓的
+// `setX(prev => ...)` 都会报 TS2345，而 `setX(true)` 照样通过，所以它能一直潜伏：
+// 删掉之前整个仓库**一处函数式 setState 都写不出来**（grep 实测 0 处）。
 import * as React from 'react';

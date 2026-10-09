@@ -77,6 +77,11 @@ logs/
 # keeper 运行时产物（2026-09-29 由 quant-Trader 迁入 scripts/）
 /configs/
 config/keeper.env
+# 桥运行时配置（桥 token / QMT Redis 密码）：由 UI 设置页与桥自动发现写入。
+# 两个模块的注释都声明「不入库（.gitignore）」，但规则此前缺失——补上。
+# 见 agent_tools/brokers/bridge_discovery.py 与 qmt_bridge.py 的 _OVERRIDE_FILE。
+config/tdx_bridge.json
+config/qmt_bridge.json
 # Databases
 *.duckdb
 *.duckdb.tmp/
@@ -311,6 +316,15 @@ docs/local/
 backend/services/agent_arena/
 backend/services/api/routers/agent_arena/
 backend/tests/test_agent_arena_native.py
+# arena 行情回测宿主链路（2026-10-08 随 B2 worker 迁移，同一纪律）：Pine 转写 CLI +
+# 两个文件队列 worker + 索引构建器；宿主 pynecore 运行时目录（122MB，不进仓）。
+# 公开仓无这些文件时，只读面与新挂写端点会在导入/入队处如实报错，不产生假活。
+scripts/pine_to_pyne.py
+scripts/pine_transpile_worker.py
+scripts/pine_chat_worker.py
+scripts/pine_library_index.py
+backend/tests/test_pine_*.py
+pine_lab/
 # 导出的实盘增量包（推理结果 + 策略的 CSV，属业务数据；CSV 已被 *.csv 覆盖，
 # 这里连 manifest.json/目录本身一起挡掉）
 deploy/portable/live-out/

@@ -7,10 +7,23 @@
  */
 
 import React, { useMemo } from 'react';
-import { Info, TrendingUp } from 'lucide-react';
+import { Activity, Info, TrendingUp } from 'lucide-react';
 import type { EvalScoreRow } from '../types/evalCenter';
-import { gradeColor, gradeMeta, historySeries, rowLabels } from './evalCenterModel';
-import { evidenceFootnote, insightFor, orderedDimensionViews } from './evalInsightModel';
+import {
+  formatNumber,
+  formatPercent,
+  gradeColor,
+  gradeMeta,
+  historySeries,
+  rowLabels,
+} from './evalCenterModel';
+import {
+  evidenceFootnote,
+  insightFor,
+  orderedDimensionViews,
+  regimeDependencyFor,
+  regimeStateLabel,
+} from './evalInsightModel';
 import { RED_LINE_BAR, TONE_CHIP, TONE_TEXT } from './evalTones';
 import { DimensionCoverageBar } from './DimensionCoverageBar';
 import { CostCompareBars } from './CostCompareBars';
@@ -147,6 +160,79 @@ const DimensionRows: React.FC<{ row: EvalScoreRow; color: string }> = ({ row, co
   );
 };
 
+/**
+ * 状态依赖（P3 §6.3）：最差月与月间 std 优先；弱区单独标注；缺省也有位置有原因。
+ * 非模型卡 / 未落该块 → 不渲染（不画空框）。
+ */
+const RegimeDependencySection: React.FC<{ row: EvalScoreRow }> = ({ row }) => {
+  const view = useMemo(() => regimeDependencyFor(row), [row]);
+  if (!view) return null;
+
+  const caliber = [view.market, view.index].filter(Boolean).join(' · ') || '—';
+  if (!view.available) {
+    return (
+      <section className={CARD}>
+        <CardHeader
+          icon={<Activity className="h-4 w-4" />}
+          title="状态依赖"
+          meta={<span className="text-[10px] text-slate-400">按信号日 join 市场状态</span>}
+        />
+        <p className="text-xs text-slate-400">缺省（{view.reason}）</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className={CARD}>
+      <CardHeader
+        icon={<Activity className="h-4 w-4" />}
+        title="状态依赖"
+        meta={<span className="text-[10px] text-slate-400">{caliber} · 按信号日 join</span>}
+      />
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span className="text-[10px] font-semibold tracking-wide text-slate-400">最差月</span>
+        <span className="text-sm font-bold tabular-nums text-slate-800">
+          {view.worstMonth
+            ? `${view.worstMonth.month} IC ${formatNumber(view.worstMonth.meanIc, 4)}（${view.worstMonth.nDays} 天）`
+            : '—（无月度数据）'}
+        </span>
+        <span className="ml-2 text-[10px] font-semibold tracking-wide text-slate-400">月间 std</span>
+        <span className="text-sm font-bold tabular-nums text-slate-800">
+          {view.monthStd === null
+            ? `不可算（${view.nMonths} 个月）`
+            : `${formatNumber(view.monthStd, 4)}（${view.nMonths} 个月）`}
+        </span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {view.buckets.map((bucket) => (
+          <span
+            key={bucket.state}
+            className={`rounded-full border px-2 py-0.5 text-[10px] tabular-nums ${
+              bucket.weak ? TONE_CHIP.risk : TONE_CHIP.flat
+            }`}
+          >
+            {bucket.label} {bucket.nDays} 天 · IC {formatNumber(bucket.meanIc, 4)}
+            {bucket.hitRate === null ? '' : ` · 命中 ${formatPercent(bucket.hitRate, 0)}`}
+            {bucket.weak ? ' · 弱区' : ''}
+          </span>
+        ))}
+      </div>
+      {view.weakBuckets.length > 0 && (
+        <p className="mt-2 text-xs text-amber-700">
+          弱区：{view.weakBuckets.map(regimeStateLabel).join('、')}
+          （均值 IC≤0 且 ≥15 天）——该状态下无正向预测力
+        </p>
+      )}
+      {view.coverage && view.coverage.missingRegimeDays > 0 && (
+        <p className="mt-1 text-[10px] text-slate-400">
+          覆盖 {view.coverage.joinedDays}/{view.coverage.icDays} 个 IC 日 join 到状态（
+          {view.coverage.missingRegimeDays} 日无 regime 行，未计桶）
+        </p>
+      )}
+    </section>
+  );
+};
+
 export const EvalDetail: React.FC<EvalDetailProps> = ({ row, objectType, history, isSimple }) => {
   const labels = row ? rowLabels(row) : null;
   const meta = row ? gradeMeta(row.grade, row.low_confidence) : null;
@@ -222,6 +308,8 @@ export const EvalDetail: React.FC<EvalDetailProps> = ({ row, objectType, history
             } />
             <DimensionRows row={row} color={color} />
           </section>
+
+          <RegimeDependencySection row={row} />
 
           <section className={CARD}>
             <CostCompareBars row={row} />

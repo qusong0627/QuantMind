@@ -607,7 +607,9 @@ def test_health_alert_notification_wiring_source_guards():
     pub = (Path(__file__).resolve().parents[1] / "shared/notification_publisher.py").read_text(
         encoding="utf-8"
     )
-    assert '"health"' in pub.split("_ALLOWED_TYPES")[1].split("\n")[0]
+    # 白名单是多行集合字面量：取 `_ALLOWED_TYPES` 之后第一个 `}` 之前的整块，
+    # 别钉死在紧跟等号的那一行（2026-10-08 多行化后旧写法假红过一次）。
+    assert '"health"' in pub.split("_ALLOWED_TYPES", 1)[1].split("}", 1)[0]
 
     pref = (Path(__file__).resolve().parents[1] / "shared/notification_preference.py").read_text(
         encoding="utf-8"
@@ -638,7 +640,7 @@ async def _ensure_pool_tp406():
 
 
 @pytest.mark.asyncio
-async def test_degradation_notification_e2e_real_db():
+async def test_degradation_notification_e2e_real_db(monkeypatch):
     """真库 E2E：策略 owner（int 形态）→ users 实查解析 → notifications 落行（type=health）→ 清理。
 
     覆盖两个静默风险：① 收件人 FK（策略 user_id=1 vs users.user_id=00000001）；
@@ -653,9 +655,20 @@ async def test_degradation_notification_e2e_real_db():
     )
     from backend.shared.database_manager_v2 import close_database, get_session
 
+    from backend.shared import qq_notify
+    from backend.shared.admin_identity import ADMIN_USER_ID
+
+    # 真库 E2E 只验 DB 链路（FK/白名单）；QQ 旁路另有单测，这里静音防推测试告警
+    monkeypatch.setattr(qq_notify, "alert_async", lambda **kw: True)
+
     marker = "E2E体检策略（T-P4-06 接线验证）"
     resolved = await _resolve_notification_user_id("1")
-    assert resolved == "00000001", f"策略 owner 1 应解析为 00000001，实际 {resolved!r}"
+    # admin 族别名 '1' → 规范 ID '10000001'（2026-09 身份口径改名；旧断言的
+    # '00000001' 是退役形态——health_recheck 旧候选表漏跟这次改名，曾让本 E2E
+    # 与生产通知同时静默失败）
+    assert resolved == ADMIN_USER_ID, (
+        f"策略 owner 1 应解析为 {ADMIN_USER_ID}，实际 {resolved!r}"
+    )
     try:
         await _publish_degradation_notification(
             tenant_id="default",
@@ -674,10 +687,10 @@ async def test_degradation_notification_e2e_real_db():
                 await session.execute(
                     sa_text(
                         "SELECT notification_type, level, action_url, title, content "
-                        "FROM notifications WHERE user_id = '00000001' AND title LIKE :m "
+                        "FROM notifications WHERE user_id = :uid AND title LIKE :m "
                         "ORDER BY id DESC LIMIT 1"
                     ),
-                    {"m": f"%{marker}%"},
+                    {"m": f"%{marker}%", "uid": ADMIN_USER_ID},
                 )
             ).fetchone()
         assert row is not None, "退化告警未落到通知中心（FK/白名单静默失败）"

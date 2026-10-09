@@ -44,6 +44,7 @@ _SHARED_FIELDS: dict[str, Any] = {
     "auto_feature_filter": (Any, None),
     "max_time_minutes": (Any, None),
     "wfa": (Any, None),
+    "rolling_meta": (Any, None),
     "factor_source": (Any, None),
     "factor_catalog_version": (Any, None),
     "factor_catalog_versions": (Any, None),

@@ -87,6 +87,46 @@ def test_build_state_series_window_guard():
     assert build_state_series(closes, volumes, dates, window=20) == {}
 
 
+@pytest.mark.unit
+def test_build_state_rows_tail_row_uses_last_bar_formula():
+    """尾行（§6.4 必要条件）：末根 bar 标注到给定「下一交易日」，统计与 pandas 原式末行一致。
+
+    缺省 / 不晚于末根 bar 的标注 → 与旧版逐位一致（防御：不让时间线自相矛盾）；
+    短序列早退不受尾行参数影响。
+    """
+    from backend.shared.market_regime import build_state_rows, classify_regime
+
+    closes, volumes, dates = _synth()
+    window = 20
+    legacy = build_state_rows(closes, volumes, dates, window)
+    assert build_state_rows(closes, volumes, dates, window, tail_effective_date=dates[-1]) == legacy
+    assert build_state_rows(closes, volumes, dates, window, tail_effective_date="2020-01-01") == legacy
+
+    rows = build_state_rows(closes, volumes, dates, window, tail_effective_date="2026-10-09")
+    assert rows[:-1] == legacy  # 自然配对行逐位不变
+    tail = rows[-1]
+    assert tail["effective_date"] == "2026-10-09"
+
+    roll_ret, roll_vol, vratio = _pandas_daily_inputs(closes, volumes, window)
+    i = len(closes) - 1  # 末根 bar（尾行的窗口止点）
+    assert tail["ret_window"] == pytest.approx(float(roll_ret.iloc[i]), rel=1e-9)
+    assert tail["vol_window"] == pytest.approx(float(roll_vol.iloc[i]), rel=1e-9)
+    assert tail["volume_ratio"] == pytest.approx(float(vratio.iloc[i]), rel=1e-9)
+    assert tail["state"] == classify_regime(
+        float(roll_ret.iloc[i]), float(roll_vol.iloc[i]), float(vratio.iloc[i])
+    )
+
+    # 短序列（n=window+1）早退：给了尾行参数也不产生任何行
+    short_n = window + 1
+    assert (
+        build_state_rows(
+            closes[:short_n], volumes[:short_n], dates[:short_n], window,
+            tail_effective_date="2026-10-09",
+        )
+        == []
+    )
+
+
 # ── 3. 核心验收：live 终值收敛 == 日频当日行 ────────────────────────
 
 

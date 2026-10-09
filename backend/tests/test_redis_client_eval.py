@@ -63,11 +63,23 @@ class TestSentinelClientExposesEval:
         )
 
     def test_inference_lock_still_uses_lua_cas(self):
-        # 防「修」成客户端 GET+DEL：那会把属主校验退化成检查-使用竞态
-        import backend.shared.inference_lock as il
+        # 防「修」成客户端 GET+DEL：那会把属主校验退化成检查-使用竞态。
+        # P0-3 起 CAS 释放收敛到 redis_lock **单源**（inference_lock 与训练单飞锁
+        # 共用同一段 Lua），断言两件事：单源 Lua 本身是 CAS；inference_lock.release
+        # 委托该单源，不得自建 GET+DEL。
+        import inspect
 
-        assert il._RELEASE_LUA.strip().startswith("local current"), "CAS 释放必须留在 Lua 里"
-        assert "redis.call(\"DEL\"" in il._RELEASE_LUA
+        import backend.shared.inference_lock as il
+        from backend.shared import redis_lock
+
+        lua = redis_lock.RELEASE_LUA
+        assert lua.strip().startswith("local current"), "CAS 释放必须留在 Lua 里"
+        assert 'redis.call("DEL"' in lua
+        src = inspect.getsource(il.release)
+        assert "_redis_lock.release" in src, (
+            "inference_lock.release 必须委托 redis_lock 单源（含 CAS），"
+            "不得自建 GET+DEL"
+        )
 
 
 class TestReleaseThroughWrapper:

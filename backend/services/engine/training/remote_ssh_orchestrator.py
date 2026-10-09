@@ -25,7 +25,15 @@ from typing import Any
 
 import yaml
 
-from backend.services.engine.training.orchestrator_base import TrainingOrchestrator, REGISTRY
+from backend.services.engine.training.orchestrator_base import (
+    TrainingOrchestrator,
+    REGISTRY,
+    attach_singleflight_release,
+    log_task_exception,
+    mark_graceful_stop,
+    mark_user_cancel_confirmed,
+    spawn_compensation,
+)
 from backend.services.engine.training.pool_binding import resolve_training_pool
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
 from backend.services.api.training_explain import DEFAULT_EXPLAIN_CFG
@@ -226,7 +234,8 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 if heartbeat_fn and (time.monotonic() - last_out) >= heartbeat_sec:
                     heartbeat_fn(int(time.monotonic() - started))
 
-        hb_task = asyncio.create_task(_heartbeat())
+        # 经 REGISTRY 注册（防 GC 裸 create_task 守卫；无 run_id → 不进 cancel 索引）
+        hb_task = REGISTRY.register(_heartbeat())
         try:
             await asyncio.wait_for(
                 asyncio.gather(
@@ -241,11 +250,12 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             await proc.wait()
             raise
         finally:
+            # 只 cancel 不 await（复审 NEW-8）：finally 里 await 一个刚被取消的
+            # 任务，会把恰好落在该 await 上的**外部取消**一并吞掉（except 里
+            # CancelledError 与 Exception 同catch，取消变「正常返回」）。异常经
+            # done 回调消费；任务在 REGISTRY 有强引用（register 时已挂）。
+            hb_task.add_done_callback(log_task_exception)
             hb_task.cancel()
-            try:
-                await hb_task
-            except (asyncio.CancelledError, Exception):
-                pass
         return (
             proc.returncode or 0,
             "\n".join(stdout_parts),
@@ -630,12 +640,15 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 self._log(run_id, f"[SYSTEM] 训练容器已启动: {container_name} ({container_id})", progress=22)
 
             # 6. 后台轮询训练进度（native 与 docker 共用，内部按 exec_mode 区分日志/状态取法）
-            REGISTRY.register(
+            _poll_task = REGISTRY.register(
                 self._poll_process(run_id, label)
                 if is_process
                 else self._poll_remote(run_id, run_key),
                 run_id=run_id,
             )
+            # P0-3：该 run 不再受管时释放训练单飞锁（远程作业的判尸本机不可验证，
+            # 由锁的 TTL 与提交侧自愈兜底；此处只保证正常结束时释放）
+            attach_singleflight_release(_poll_task, run_id)
         except Exception as exc:  # noqa: BLE001
             logger.error("[%s] 远程训练编排失败: %s", run_id, exc, exc_info=True)
             self._log(
@@ -815,7 +828,15 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         """
         if not self.pack_root:
             raise RuntimeError("executor=process 节点必须配置 pack_root")
-        run_cmd = f"cd {self.pack_root} && export TRAINING_WORKSPACE_DIR={self.work_dir} && bash run_one.sh {self.work_dir}"
+        # 先写 workspace 归属标记再启动（复审 NEW-A）：重杀/清理按此判定
+        # 「workspace 还是本 run 的」，防止尾巴误杀接管 workspace 的新 run。
+        marker = shlex.quote(f"{self.work_dir}/.qm_active_run")
+        run_cmd = (
+            f"cd {self.pack_root} && "
+            f"export TRAINING_WORKSPACE_DIR={self.work_dir} && "
+            f"printf '%s' {shlex.quote(run_id)} > {marker} && "
+            f"bash run_one.sh {self.work_dir}"
+        )
         self._log(run_id, "[SYSTEM] 在远端启动 runtime 训练(免 Docker)...", progress=20)
         try:
             code, out, err = await self._ssh_exec(run_cmd, timeout=120)
@@ -839,6 +860,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         dead_streak = 0  # 连续确认进程结束的次数(ssh 抖动不算)
         try:
             while True:
+                if self.log_stream.is_cancel_requested(run_id):
+                    await self._cancel_remote(run_id, label)
+                    return
                 code, out, err = await self._ssh_exec(
                     f"tail -n {self._LOG_TAIL_LINES} {work}/train.log 2>/dev/null",
                     timeout=120,
@@ -891,15 +915,21 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                         progress=0,
                     )
                     # 杀远端残留训练进程:失败 run 的进程若不清理会继续占资源,
-                    # 且与下一个 run 共享 workspace 造成交错误杀(真机事故两次)
-                    await self._ssh_exec(
-                        f"pid=$(cat {work}/train.pid 2>/dev/null); "
-                        f"if [ -n \"$pid\" ]; then kill -9 $pid 2>/dev/null || true; fi",
-                        timeout=60,
-                    )
-                await self._ssh_exec(f"rm -f {work}/train.pid 2>/dev/null || true", timeout=60)
+                    # 且与下一个 run 共享 workspace 造成交错误杀(真机事故两次)。
+                    # 走归属守卫（复审 NEW-A）：workspace 已被新 run 接管时不碰。
+                    await self._kill_remote_resource(run_id, label)
+                pid_file = shlex.quote(f"{work}/train.pid")
+                await self._ssh_exec(
+                    self._process_workspace_guarded(
+                        run_id, f"rm -f {pid_file} 2>/dev/null || true"
+                    ),
+                    timeout=60,
+                )
                 return
         except asyncio.CancelledError:
+            # 复审 HIGH-1：REGISTRY.cancel 打断轮询时，仅用户取消（有标记）
+            # 才杀远端资源；API 进程正常关停（无标记）留给重启后判尸处理。
+            await self._cancel_remote_guarded(run_id, label)
             raise
         except Exception as exc:  # noqa: BLE001
             logger.error("[%s] 远端 runtime 轮询异常: %s", run_id, exc, exc_info=True)
@@ -952,6 +982,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
 
                 await asyncio.sleep(self._POLL_INTERVAL)
         except asyncio.CancelledError:
+            await self._cancel_remote_guarded(run_id, container_name)
             raise
         except Exception as exc:  # noqa: BLE001
             logger.error("[%s] 远程轮询异常: %s", run_id, exc, exc_info=True)
@@ -1064,6 +1095,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
 
                 await asyncio.sleep(self._POLL_INTERVAL)
         except asyncio.CancelledError:
+            await self._cancel_remote_guarded(run_id, f"native-{run_id}")
             raise
         except Exception as exc:  # noqa: BLE001
             logger.error("[%s] 原生进程轮询异常: %s", run_id, exc, exc_info=True)
@@ -1090,9 +1122,49 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             logger.error("[%s] 容器结束处理失败: %s", run_id, exc, exc_info=True)
             self._log(run_id, f"[ERROR] 容器结束处理失败: {exc}", status="failed", progress=0)
 
-    async def _cancel_remote(self, run_id: str, run_key: str) -> None:
-        """用户取消：杀远端进程/容器，落 cancelled 状态并清理取消标记。"""
-        if self.exec_mode == "native_python":
+    def _process_workspace_guarded(self, run_id: str, body: str) -> str:
+        """把命令体限定在「本 run 仍是 workspace 当前作业」时执行（复审 NEW-A）。
+
+        节点包 runtime 的 ``train.pid`` 是共享 workspace 里的**固定文件名**，
+        不按 run 隔离：创建在途重杀尾巴可能在新 run B 已接管 workspace 后仍在
+        跑——按 B 的 pid 文件杀会把 B 的进程组整个打死（与「共享 workspace 交
+        错误杀」真机事故同族）。启动路径在发出 ``run_one.sh`` 之前先写
+        ``.qm_active_run`` 标记（内容=本 run 的 run_id），此处仅当标记等于本
+        run、或标记缺失（兼容本次修复前启动的旧运行）才执行。B 启动必然先写
+        自己的标记 → 尾巴对新 run 天然失效。
+        """
+        marker = shlex.quote(f"{self.work_dir}/.qm_active_run")
+        return (
+            f"want=$(cat {marker} 2>/dev/null || true); "
+            f'if [ -z "$want" ] || [ "$want" = {shlex.quote(run_id)} ]; '
+            f"then {body}; fi"
+        )
+
+    async def _kill_remote_resource(self, run_id: str, run_key: str) -> None:
+        """按启动路径同序杀远端资源（纯远端命令，全部幂等 ``|| true``）。
+
+        分派与启动路径同序（is_process → native_python → docker），否则
+        executor=process 的节点包运行会落进 docker 分支空杀（复审 HIGH-1 补）。
+        不含 DB/日志/取消标记收尾——创建在途重杀（_retry_remote_kill）要能
+        安全地反复调用它。process 分支经 ``_process_workspace_guarded`` 限定
+        （复审 NEW-A）；native/docker 分支的目标（``train_{run_id}.pid`` /
+        容器名）本就地按 run 隔离。
+        """
+        if self.executor == "process":
+            # 节点包 runtime（run_one.sh）：杀 train.pid 记载的训练进程
+            pid_file = f"{self.work_dir}/train.pid"
+            kill_body = (
+                f"pid=$(cat {shlex.quote(pid_file)} 2>/dev/null || true); "
+                f'if [ -n "$pid" ]; then '
+                f'kill -TERM -- -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true; '
+                f"sleep 1; "
+                f'kill -9 -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true; fi; '
+                f"rm -f {shlex.quote(pid_file)} 2>/dev/null || true"
+            )
+            await self._ssh_exec(
+                self._process_workspace_guarded(run_id, kill_body), timeout=30
+            )
+        elif self.exec_mode == "native_python":
             pid_file = f"{self.work_dir}/train_{run_id}.pid"
             kill_cmd = (
                 f"pid=$(cat {shlex.quote(pid_file)} 2>/dev/null || true); "
@@ -1110,11 +1182,20 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 timeout=60,
             )
 
+    async def _cancel_remote(self, run_id: str, run_key: str) -> None:
+        """用户取消：杀远端进程/容器，落 cancelled 状态并清理取消标记。"""
+        # NEW-B：进入即记录「已确认用户取消」——本方法最后会 clear_cancel，
+        # supervised_launch 若在此之后才读 Redis 标记会把取消误判成关停。
+        mark_user_cancel_confirmed(run_id)
+        await self._kill_remote_resource(run_id, run_key)
+
         from backend.services.api.routers.admin.db import TrainingJobRecord
         from backend.shared.database_manager_v2 import get_session
 
         async with get_session() as db:
-            r = await db.get(TrainingJobRecord, run_id)
+            # with_for_update（复审 NEW-7）：防「回调落终态」与「取消写 cancelled」
+            # 并发交错——completed 判定读的是行锁下的当前值，不是过期快照。
+            r = await db.get(TrainingJobRecord, run_id, with_for_update=True)
             if r and str(r.status or "") not in ("completed", "failed"):
                 r.status = "cancelled"
                 r.logs = (r.logs or "") + "[SYSTEM] 训练已被用户取消，远端进程已停止\n"
@@ -1122,6 +1203,69 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 await db.commit()
         self._log(run_id, "[SYSTEM] 训练已被用户取消，远端进程已停止", status="cancelled", progress=0)
         self.log_stream.clear_cancel(run_id)
+
+    async def _cancel_remote_guarded(self, run_id: str, run_key: str) -> None:
+        """CancelledError 处理器专用：仅用户取消标记已置才杀远端资源。
+
+        - 用户取消（API 落标记后 REGISTRY.cancel 打断轮询）→ 杀进程/容器；
+        - API 进程正常关停（无标记）→ 不动远端资源，留给重启后判尸重挂/收尸，
+          并置 ``mark_graceful_stop`` 保住单飞锁（复审 HIGH-4）。
+        异常不外抛（在取消处理器里吞掉，保证 CancelledError 继续向上传播）。
+        """
+        if not self.log_stream.is_cancel_requested(run_id):
+            logger.info(
+                "[%s] 远端轮询取消但无用户取消标记（进程关停）：保留单飞锁", run_id
+            )
+            mark_graceful_stop(run_id)
+            return
+        try:
+            await self._cancel_remote(run_id, run_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] 取消清理失败: %s", run_id, exc)
+
+    # 创建在途重杀节拍：远端启动（ssh 里的 docker run / nohup）无法被本地取消
+    # 打断，首杀对「尚未出现的资源」是安全 no-op，需按间隔重发覆盖出现窗口。
+    _KILL_RETRY_ATTEMPTS = 6
+    _KILL_RETRY_DELAY_SECONDS = 20.0
+
+    async def _retry_remote_kill(self, run_id: str, run_key: str) -> None:
+        """创建在途取消的延时重杀（复审 HIGH-1 残窗）。
+
+        命令全部幂等（``|| true``），重发对已死/未生的资源均无副作用。不检查
+        取消标记（首杀时 ``_cancel_remote`` 已 clear_cancel），尾巴对新 run 的
+        安全性由目标隔离保证：native/docker 分支按 ``train_{run_id}.pid`` /
+        容器名（本就地 run 级），process 分支按 workspace 归属标记
+        ``.qm_active_run``（复审 NEW-A：``train.pid`` 是共享固定名，旧实现
+        会在新 run 接管 workspace 后误杀其进程组）。
+        """
+        for _ in range(self._KILL_RETRY_ATTEMPTS):
+            await asyncio.sleep(self._KILL_RETRY_DELAY_SECONDS)
+            try:
+                await self._kill_remote_resource(run_id, run_key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] 创建在途重杀失败（下轮重试）: %s", run_id, exc)
+
+    async def cleanup_cancelled_provisioning(
+        self, run_id: str, *, tenant_id: str = "default", user_id: str = "unknown"
+    ) -> None:
+        """supervised_launch 在 provisioning 窗口收到取消时的清理（复审 HIGH-1）。
+
+        三个启动分支的 kill/rm 命令对「远端资源尚不存在」都是安全 no-op
+        （``|| true``）；仅在用户取消标记已置时动手（见 _cancel_remote_guarded）。
+        用户取消时额外发射延时重杀（spawn_compensation）：outbound ssh 里的
+        启动命令不受本地取消影响，此刻资源可能尚未出现、首杀是空枪——重杀
+        覆盖资源浮现的窗口（复审 HIGH-1 创建在途残窗），目标隔离见
+        _retry_remote_kill（复审 NEW-A 归属守卫）。
+        """
+        run_key = (
+            f"native-{run_id}"
+            if self.exec_mode == "native_python"
+            else f"qm-train-{run_id}"
+        )
+        flagged = self.log_stream.is_cancel_requested(run_id)
+        await self._cancel_remote_guarded(run_id, run_key)
+        if flagged:
+            spawn_compensation(self._retry_remote_kill(run_id, run_key))
 
     async def _pull_artifacts(self, run_id: str) -> None:
         """拉取模型产物到本地工作目录 /data/training_jobs/{run_id}。
@@ -1281,6 +1425,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             config["preprocessing"] = pp_cfg
         elif str(payload.get("enable_cross_sectional_prep", "false")).lower() in ("1", "true", "yes", "on"):
             config["preprocessing"] = {"enabled": True, "winsor": True}
+        # 滚动训练溯源（P1）：与本地编排器同款透传（train.py 写入 metadata.json）
+        if isinstance(payload.get("rolling_meta"), dict):
+            config["rolling_meta"] = payload["rolling_meta"]
         return config
 
     def _resolve_feature_files(self, payload: dict) -> list[str]:

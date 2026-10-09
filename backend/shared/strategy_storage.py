@@ -867,17 +867,14 @@ class StrategyStorageService:
                     where.append(f"tags::text ILIKE :{key}")
                     params[key] = f"%{t}%"
             # 市场过滤(市场存 parameters.jsonb.market;历史无 market 行一律视为 A 股)
-            # 必须并入 where 列表:此前在 ORDER BY 之后追加 AND 导致 SQL 语法错误
+            # 必须并入 where 列表:此前在 ORDER BY 之后追加 AND 导致 SQL 语法错误。
+            # 口径唯一实现 qm_market_of（= _canonical_market；别名归一、未知→CN），
+            # 旧实现只认字面 'A'/'CN'，别名（A股/SSE/HKEX…）行会从自己的市场里消失。
             if market:
-                mkt = str(market).upper()
-                if mkt in ("A", "CN"):
-                    where.append(
-                        "(parameters->>'market' IS NULL"
-                        " OR UPPER(parameters->>'market') IN ('A','CN'))"
-                    )
-                else:
-                    where.append("UPPER(parameters->>'market') = :mkt")
-                    params["mkt"] = mkt
+                from backend.shared.model_registry import _canonical_market
+
+                where.append("qm_market_of(parameters) = :mkt")
+                params["mkt"] = _canonical_market(market)
             where_sql = " AND ".join(where)
             sql = f"""
                 SELECT id, name, description, status, cos_url, {cos_key_expr},

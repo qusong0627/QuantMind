@@ -27,7 +27,7 @@ const SECRET_FIELD_PATTERN = /(^|_)(api_?key|password|secret|token)$/i;
 /**
  * 日志脱敏：递归把密钥字段替换成 `***`。
  *
- * 保存向量检索配置的请求体里必然带 `embedding_api_key` 明文，直接 console.log
+ * 保存 LLM 配置的请求体里必然带 `qwen_api_key` 明文，直接 console.log
  * 等于把密钥写进开发者工具、Electron 日志以及任何一张截图里。
  */
 function redactSecrets(value: unknown): unknown {
@@ -822,7 +822,11 @@ export class UserCenterService extends BaseApiClient {
   // ============ LLM API Key 管理 ============
 
   /**
-   * 获取 LLM 配置状态
+   * 获取 LLM 配置状态（chat 通道）
+   *
+   * 不含 embedding 段：向量检索配置已随 UI 迁到因子挖掘
+   * （`GET /alpha-agent/llm-config` 的 `embedding` 段 +
+   * `PUT /alpha-agent/llm-config/embedding`），这里只服务「AI 服务配置」。
    */
   async getLLMConfig(): Promise<{
     has_key: boolean;
@@ -831,10 +835,6 @@ export class UserCenterService extends BaseApiClient {
     base_url: string;
     provider: string;
     extra_headers: string;
-    embedding_model: string;
-    embedding_base_url: string;
-    has_embedding_key: boolean;
-    masked_embedding_key: string;
   }> {
     const response = await this.get<any>('/ai-ide/config/llm');
     return {
@@ -844,10 +844,6 @@ export class UserCenterService extends BaseApiClient {
       base_url: response?.base_url || '',
       provider: response?.provider || '',
       extra_headers: response?.extra_headers || '',
-      embedding_model: response?.embedding_model || '',
-      embedding_base_url: response?.embedding_base_url || '',
-      has_embedding_key: response?.has_embedding_key || false,
-      masked_embedding_key: response?.masked_embedding_key || '',
     };
   }
 
@@ -856,25 +852,6 @@ export class UserCenterService extends BaseApiClient {
    */
   async saveLLMConfig(apiKey: string, model?: string, baseUrl?: string, provider?: string, extraHeaders?: string): Promise<{ success: boolean; message?: string }> {
     return this.post('/ai-ide/config/llm', { qwen_api_key: apiKey, model, base_url: baseUrl, provider, extra_headers: extraHeaders });
-  }
-
-  /**
-   * 保存向量检索（embedding）配置 —— 与 chat 独立。
-   *
-   * 只提交显式传入的字段（undefined = 不动，'' = 清除），未提交的项由容器级
-   * EMBEDDING_* 继续兜底。chat 供应商（如 DeepSeek）通常不提供 embedding 接口，
-   * 因此这里允许指向完全不同的供应商或本地服务。
-   */
-  async saveEmbeddingConfig(embedding: {
-    model?: string;
-    baseUrl?: string;
-    apiKey?: string;
-  }): Promise<{ success: boolean; message?: string }> {
-    const payload: Record<string, unknown> = {};
-    if (embedding.model !== undefined) payload.embedding_model = embedding.model;
-    if (embedding.baseUrl !== undefined) payload.embedding_base_url = embedding.baseUrl;
-    if (embedding.apiKey !== undefined) payload.embedding_api_key = embedding.apiKey;
-    return this.post('/ai-ide/config/llm', payload);
   }
 
   /**

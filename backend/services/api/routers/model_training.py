@@ -1908,30 +1908,18 @@ async def compare_models(
     if not meta_a or not meta_b:
         raise HTTPException(status_code=404, detail="对比模型不存在")
 
-    def _metrics_of(m: dict) -> dict:
-        md = m.get("metadata") or {}
-        metrics = md.get("metrics") or {}
-        return {
-            "val_ic": metrics.get("val_ic"),
-            "val_rank_ic": metrics.get("val_rank_ic"),
-            "val_rank_icir": metrics.get("val_rank_icir"),
-            "test_ic": metrics.get("test_ic"),
-            "test_rank_ic": metrics.get("test_rank_ic"),
-            "test_rank_icir": metrics.get("test_rank_icir"),
-            "model_type": md.get("model_type"),
-            "target_horizon_days": md.get("target_horizon_days"),
-            "feature_count": md.get("feature_count"),
-            "created_at": str(m.get("created_at") or "")[:19],
-            "is_default": bool(m.get("is_default")),
-            "status": m.get("status"),
-        }
+    # P0-1 修复：取值统一走 model_eval_contract（注册表返回的真实键是
+    # metadata_json/metrics_json；旧实现读 m["metadata"] → 对比指标恒空）
+    from backend.shared.model_eval_contract import (
+        artifact_independence,
+        compare_metrics_of,
+        features_of,
+        file_md5,
+        resolve_oos_metrics,
+        resolve_pred_path,
+    )
 
-    def _features_of(m: dict) -> set[str]:
-        md = m.get("metadata") or {}
-        feats = md.get("features") or md.get("feature_columns") or []
-        return {str(f) for f in feats}
-
-    feats_a, feats_b = _features_of(meta_a), _features_of(meta_b)
+    feats_a, feats_b = features_of(meta_a), features_of(meta_b)
     common = feats_a & feats_b
     only_a = feats_a - feats_b
     only_b = feats_b - feats_a
@@ -1968,9 +1956,38 @@ async def compare_models(
     quality_a = await _quality_series(model_a)
     quality_b = await _quality_series(model_b)
 
+    # P0-4：样本外口径 + 产物独立性预检（md5 流式读取放线程池避免阻塞事件循环）
+    def _raw_metrics(m: dict) -> dict:
+        mj = m.get("metrics_json")
+        if isinstance(mj, dict) and mj:
+            return mj
+        meta = m.get("metadata_json")
+        if isinstance(meta, dict) and isinstance(meta.get("metrics"), dict):
+            return meta["metrics"]
+        return {}
+
+    def _pred_md5(m: dict) -> str | None:
+        return file_md5(resolve_pred_path(m))
+
+    md5_a = await asyncio.to_thread(_pred_md5, meta_a)
+    md5_b = await asyncio.to_thread(_pred_md5, meta_b)
+    independence = artifact_independence(
+        {"model_id": model_a, "metrics": _raw_metrics(meta_a), "pred_md5": md5_a},
+        {"model_id": model_b, "metrics": _raw_metrics(meta_b), "pred_md5": md5_b},
+    )
+
     return {
-        "model_a": {"model_id": model_a, "metrics": _metrics_of(meta_a)},
-        "model_b": {"model_id": model_b, "metrics": _metrics_of(meta_b)},
+        "model_a": {
+            "model_id": model_a,
+            "metrics": compare_metrics_of(meta_a),
+            "oos": resolve_oos_metrics(meta_a.get("metadata_json"), meta_a.get("metrics_json")),
+        },
+        "model_b": {
+            "model_id": model_b,
+            "metrics": compare_metrics_of(meta_b),
+            "oos": resolve_oos_metrics(meta_b.get("metadata_json"), meta_b.get("metrics_json")),
+        },
+        "artifact_independence": independence,
         "feature_overlap": {
             "common_count": len(common),
             "common": sorted(common)[:200],

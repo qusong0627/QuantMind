@@ -1046,8 +1046,14 @@ def backfill_inference_quality(horizon_days: int = 5, limit: int = 500) -> dict[
                     await session.execute(
                         text(
                             """
-                            SELECT DISTINCT r.tenant_id, r.user_id, r.model_id, r.data_trade_date
+                            SELECT DISTINCT r.tenant_id, r.user_id, r.model_id,
+                                   r.data_trade_date,
+                                   COALESCE(m.metadata_json->>'market', 'CN') AS market
                             FROM qm_model_inference_runs r
+                            LEFT JOIN qm_user_models m
+                              ON m.tenant_id = r.tenant_id
+                             AND m.user_id = r.user_id
+                             AND m.model_id = r.model_id
                             WHERE r.status = 'completed'
                               AND r.signals_count > 0
                               AND r.data_trade_date <= :cutoff
@@ -1064,9 +1070,12 @@ def backfill_inference_quality(horizon_days: int = 5, limit: int = 500) -> dict[
                 ).mappings().all()
             results = []
             for row in rows:
+                # P0-2：按模型注册表的 market 回填（旧实现硬编码 CN，
+                # HK/US 模型的快照路径永不生效 → 质量行从未落库）
                 res = await inference_quality_backfill.backfill_date(
                     tenant_id=row["tenant_id"], user_id=row["user_id"], model_id=row["model_id"],
-                    trade_date=str(row["data_trade_date"])[:10], market="CN", horizon=horizon_days,
+                    trade_date=str(row["data_trade_date"])[:10],
+                    market=str(row.get("market") or "CN"), horizon=horizon_days,
                 )
                 results.append(res)
             ok = [r for r in results if r.get("status") == "ok"]
@@ -1084,6 +1093,33 @@ def backfill_inference_quality(horizon_days: int = 5, limit: int = 500) -> dict[
             loop.close()
     except Exception as e:
         logger.exception("[QualityBackfill] 失败: %s", e)
+        return {"status": "failed", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# 市场状态日更持久化（P3 · 设计 §6.2）
+# ---------------------------------------------------------------------------
+@celery_app.task(name="engine.tasks.regime_daily_persist")
+def regime_daily_persist(markets: list[str] | None = None) -> dict[str, Any]:
+    """市场状态日更：指数历史 → ``qm_regime_daily``（生效日口径，历史行冻结）。
+
+    每次重算各市场尾部 ``TAIL_EFFECTIVE_DATES`` 个生效日（吸收迟到数据），
+    写入口径与选择逻辑全在 ``backend/services/engine/regime_persist.py``——
+    本任务只负责「按日跑一次 + 心跳」。表外市场诚实拒绝（计入摘要），
+    拒绝是设计不是故障；单市场取数/写库失败也如实进摘要。
+    """
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("regime_persist")
+    try:
+        from backend.services.engine.regime_persist import DEFAULT_MARKETS, persist_all
+
+        summaries = _run_async(
+            persist_all(tuple(markets) if markets else DEFAULT_MARKETS)
+        )
+        return {"status": "ok", "summaries": summaries}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[RegimePersist] 失败: %s", e)
         return {"status": "failed", "error": str(e)}
 
 
@@ -1184,6 +1220,31 @@ def dispatch_market_sync() -> dict[str, Any]:
         logger.exception("[FactorFill] 派发检查失败: %s", e)
         out["factor_fill"] = {"status": "failed", "error": str(e)}
     return out
+
+
+# ---------------------------------------------------------------------------
+# 滚动重训调度（P1：beat 每分钟 tick，读 Redis 配置 → HTTP POST 内部端点；
+# 真正的训练提交在 API 进程 —— celery worker 无 docker.sock）
+# ---------------------------------------------------------------------------
+@celery_app.task(name="engine.tasks.dispatch_retrain")
+def dispatch_retrain() -> dict[str, Any]:
+    """每分钟检查各市场滚动重训调度，到点派发（mark-after-dispatch，见调度器模块）。
+
+    心跳**每 tick 都写**（不是只在派发成功时）：C07 按心跳新鲜度判活，月度任务
+    若只在 2xx 那一刻写一次 1800s 心跳，一个月里有 29 天会被误报 stale。
+    """
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("retrain_dispatch")
+    try:
+        from backend.services.engine.tasks.retrain_scheduler import (
+            dispatch_due_retrains,
+        )
+
+        return dispatch_due_retrains()
+    except Exception as e:
+        logger.exception("[RetrainSchedule] 派发检查失败: %s", e)
+        return {"status": "failed", "error": str(e)}
 
 
 @celery_app.task(

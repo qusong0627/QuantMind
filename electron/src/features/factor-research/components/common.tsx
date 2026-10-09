@@ -197,10 +197,19 @@ const TAG_STYLES: Record<string, string> = {
   持续低效: 'bg-slate-100 text-slate-400 border-slate-200',
 };
 
+/** 环境标签（因子报告口径，离线：沪深300 滚动 3 月 ±5%）。
+ * 与平台 regime 时间线（20 日量价三态，qm_regime_daily / market_regime）是**两套口径**，
+ * 设计 §6.1 词表收编：不并入、不可互比——悬停提示写明。 */
+export const ENV_TAGS = ['牛市进攻型', '熊市防御型', '震荡占优型', '全天候型'];
+const ENV_TAG_HINT =
+  '因子报告口径（离线：沪深300 滚动 3 月累计 >+5% 牛 / <−5% 熊 / 其余震荡）——' +
+  '非平台 regime 时间线（20 日量价三态），两套口径不并入、不可互比';
+
 export const TagChip: React.FC<{ tag: string; small?: boolean }> = ({ tag, small }) => {
   if (!tag) return null;
   return (
     <span
+      title={ENV_TAGS.includes(tag) ? ENV_TAG_HINT : undefined}
       className={`inline-flex items-center rounded-full border font-bold whitespace-nowrap ${
         small ? 'px-1.5 py-0 text-[9px]' : 'px-2 py-[1px] text-[10px]'
       } ${TAG_STYLES[tag] || 'bg-slate-50 text-slate-500 border-slate-200'}`}
@@ -211,7 +220,7 @@ export const TagChip: React.FC<{ tag: string; small?: boolean }> = ({ tag, small
 };
 
 export const ALL_TAGS = [
-  '牛市进攻型', '熊市防御型', '震荡占优型', '全天候型',
+  ...ENV_TAGS,
   '长期稳定型', '近期转强', '近期失效', '持续低效',
 ];
 

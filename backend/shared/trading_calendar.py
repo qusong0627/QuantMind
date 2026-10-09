@@ -212,6 +212,63 @@ def is_trading_day_xcal(market_code: str, trade_date: date) -> bool | None:
         return None
 
 
+def next_trading_day_xcal(market_code: str, after: date) -> date | None:
+    """``after`` **之后**的首个交易日；``None`` = 这把尺子答不了（越界/库缺失/异常）。
+
+    存在理由：``qm_regime_daily`` 的尾行（生效日 = 数据末根 bar 的下一交易日，
+    由截至该 bar 的窗口算出）必须在当晚 16:30 日更时就能落库——次日盘前推理
+    才拿得到「当日生效值」（设计 §6.4 的必要条件）。日历答不了就不写行（照旧
+    晚一天落库），**绝不按「下一自然日/工作日」猜**：把节假日当交易日会给假日
+    标上状态，是假行。降级纪律与 :func:`is_trading_day_xcal` 一致。
+    """
+    cal = _get_xcal_calendar(market_code)
+    if cal is None:
+        return None
+    try:
+        return cal.date_to_session(after + timedelta(days=1), direction="next").date()
+    except Exception:  # noqa: BLE001 - 越界等一律「答不了」，由调用方定降级
+        return None
+
+
+def trading_days_xcal(market_code: str, start: date, end: date) -> list[date] | None:
+    """同步取 ``[start, end]`` 闭区间的交易日列表；``None`` = 这把尺子答不了。
+
+    滚动训练窗口（``rolling_window.compute_window``）的日历来源。降级纪律与
+    ``is_trading_day_xcal`` 一致——**不许静默缩窗**：
+
+    - 库缺失 / 求值异常 → ``None``；
+    - ``end`` 越过日历覆盖年限 → ``None``（拿部分覆盖的日历算整体窗口会把
+      anchor 悄悄挪走，宁可不答）；
+    - ``start`` 早于覆盖起点 → 只裁剪 start（窗口只用尾部区间，尾部完整即正确；
+      若裁完不够整窗，``compute_window`` 会抛错，调用方跳过并告警）。
+    """
+    cal = _get_xcal_calendar(market_code)
+    if cal is None:
+        return None
+    try:
+        first = cal.first_session.date()
+        last = cal.last_session.date()
+    except Exception:  # noqa: BLE001 - 取不到覆盖边界即答不了
+        return None
+    if end > last:
+        logger.warning(
+            "trading_days_xcal: end %s 越过日历覆盖末年 %s（market=%s），拒绝作答",
+            end,
+            last,
+            market_code,
+        )
+        return None
+    start = max(start, first)
+    if start > end:
+        return None
+    try:
+        sessions = cal.sessions_in_range(start, end)
+    except Exception as exc:  # noqa: BLE001 - 越界等一律「答不了」
+        logger.warning("trading_days_xcal 求值失败 market=%s: %s", market_code, exc)
+        return None
+    return [session.date() for session in sessions]
+
+
 #: 全仓跑决策/训练/推理的三个市场 → 真日历名（与
 #: ``admin_training_utils._MARKET_TO_XCAL`` 同口径：CN/HK/US）。
 #: C13 体检按这张表逐历查覆盖年限。

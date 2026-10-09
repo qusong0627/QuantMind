@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -65,7 +66,13 @@ class TrainingRunLogStream:
         )
 
         self._client = None
-        self._client_init_failed = False
+        # 初始化失败的冷却时间戳（monotonic）；0 = 未失败/已恢复。
+        self._client_init_failed_at = 0.0
+
+    # 初始化失败后的重试冷却（秒）。此前是一次失败永久拉黑（NEW-E）：Redis
+    # 瞬断后取消标记**整个进程生命周期**静默失效（mark/is 均返回失败方向），
+    # 用户取消落不进轮询。改为冷却后重试，瞬断可自愈。
+    _CLIENT_RETRY_COOLDOWN_SECONDS = 30.0
 
     def _get_client(self):
         if not self.enabled:
@@ -74,7 +81,11 @@ class TrainingRunLogStream:
             return None
         if self._client is not None:
             return self._client
-        if self._client_init_failed:
+        if (
+            self._client_init_failed_at
+            and (time.monotonic() - self._client_init_failed_at)
+            < self._CLIENT_RETRY_COOLDOWN_SECONDS
+        ):
             return None
         try:
             self._client = redis_lib.Redis(
@@ -88,9 +99,11 @@ class TrainingRunLogStream:
                 health_check_interval=30,
             )
             self._client.ping()
+            self._client_init_failed_at = 0.0
             return self._client
         except Exception as exc:
-            self._client_init_failed = True
+            self._client = None
+            self._client_init_failed_at = time.monotonic()
             logger.warning(
                 "training log redis unavailable host=%s port=%s db=%s err=%s",
                 self.redis_host,
@@ -238,15 +251,20 @@ class TrainingRunLogStream:
         except Exception:
             return
 
-    def mark_cancel_requested(self, run_id: str) -> None:
-        """置取消标记（训练编排器轮询循环据此 kill 容器/进程）。"""
+    def mark_cancel_requested(self, run_id: str) -> bool:
+        """置取消标记（训练编排器轮询循环据此 kill 容器/进程）。
+
+        返回标记是否**确认落库**（NEW-E）：False = Redis 不可用或写入失败，
+        调用方（取消端点）应走直杀兜底——否则取消会静默失效。
+        """
         client = self._get_client()
         if client is None:
-            return
+            return False
         try:
             client.setex(self._cancel_key(run_id), self.state_ttl_sec, "1")
+            return True
         except Exception:
-            return
+            return False
 
     def is_cancel_requested(self, run_id: str) -> bool:
         """查询取消标记是否存在。"""

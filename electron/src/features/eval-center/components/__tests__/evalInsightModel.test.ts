@@ -6,6 +6,8 @@ import {
   evidenceFootnote,
   insightFor,
   overviewStats,
+  regimeDependencyFor,
+  regimeStateLabel,
 } from '../evalInsightModel';
 
 function makeRow(overrides: Partial<EvalScoreRow> = {}): EvalScoreRow {
@@ -426,5 +428,108 @@ describe('evidenceFootnote 页脚（来源 / 口径 / 时间戳）', () => {
 
     expect(foot.source).toBe('eval_scores');
     expect(foot.missing).toBe('无');
+  });
+});
+
+describe('regimeDependencyFor 状态依赖（P3 §6.3）', () => {
+  it('非模型卡 / 未落该块 → null（不渲染空框）', () => {
+    expect(regimeDependencyFor(makeRow({ inputs_version: {} }))).toBeNull();
+    expect(regimeDependencyFor(null)).toBeNull();
+    expect(
+      regimeDependencyFor(makeRow({ object_type: 'factor', inputs_version: { dataset: 'x' } }))
+    ).toBeNull();
+  });
+
+  it('available=false：原样带出原因；后端没给原因也不留白', () => {
+    const row = makeRow({
+      inputs_version: {
+        regime_dependency: {
+          available: false,
+          market: 'HK',
+          reason: 'HK 无 regime 指数口径（诚实缺省，不拿 000300 冒充）',
+        },
+      },
+    });
+
+    const view = regimeDependencyFor(row);
+
+    expect(view?.available).toBe(false);
+    expect(view?.market).toBe('HK');
+    expect(view?.reason).toContain('无 regime 指数口径');
+    expect(view?.buckets).toEqual([]);
+
+    const noReason = regimeDependencyFor(
+      makeRow({ inputs_version: { regime_dependency: { available: false } } })
+    );
+    expect(noReason?.reason).toBe('状态依赖缺省（后端未给原因）');
+  });
+
+  it('available=true：桶按固定顺序（jsonb 字母序不能照抄）、弱区/最差月/std 原样解析', () => {
+    // Arrange：后端 jsonb 回来后 buckets 键是字母序 bear/bull/neutral
+    const row = makeRow({
+      inputs_version: {
+        regime_dependency: {
+          available: true,
+          market: 'CN',
+          index: '000300.SH',
+          buckets: {
+            bear: { n_days: 0, mean_ic: null, ic_std: null, hit_rate: null, weak: false },
+            bull: { n_days: 723, mean_ic: 0.021, ic_std: 0.05, hit_rate: 0.53, weak: false },
+            neutral: { n_days: 1400, mean_ic: -0.004, ic_std: 0.06, hit_rate: 0.48, weak: true },
+          },
+          weak_buckets: ['neutral'],
+          worst_month: { month: '2026-08', mean_ic: -0.0312, n_days: 20 },
+          month_std: 0.018,
+          n_months: 9,
+          coverage: { ic_days: 2123, joined_days: 2100, missing_regime_days: 23 },
+          notes: ['弱区标注：neutral（IC=-0.004，1400 天）——该状态下模型无正向预测力'],
+        },
+      },
+    });
+
+    // Act
+    const view = regimeDependencyFor(row);
+
+    // Assert
+    expect(view?.available).toBe(true);
+    expect(view?.buckets.map((b) => b.state)).toEqual(['bull', 'neutral', 'bear']);
+    expect(view?.buckets.map((b) => b.label)).toEqual(['多头', '震荡', '空头']);
+    expect(view?.buckets[1].weak).toBe(true);
+    expect(view?.buckets[0].meanIc).toBeCloseTo(0.021);
+    expect(view?.buckets[2].meanIc).toBeNull(); // 空桶缺失 ≠ 0
+    expect(view?.weakBuckets).toEqual(['neutral']);
+    expect(view?.worstMonth).toEqual({ month: '2026-08', meanIc: -0.0312, nDays: 20 });
+    expect(view?.monthStd).toBeCloseTo(0.018);
+    expect(view?.nMonths).toBe(9);
+    expect(view?.coverage?.missingRegimeDays).toBe(23);
+    expect(view?.notes).toHaveLength(1);
+    expect(regimeStateLabel('bull')).toBe('多头');
+    expect(regimeStateLabel('custom')).toBe('custom'); // 未知 key 不吞
+  });
+
+  it('month_std 缺失 → null（不能画成 0）；weak_buckets 缺失时从桶谓词回退', () => {
+    const row = makeRow({
+      inputs_version: {
+        regime_dependency: {
+          available: true,
+          market: 'CN',
+          index: '000300.SH',
+          buckets: {
+            bull: { n_days: 10, mean_ic: 0.01, hit_rate: 0.5, weak: false },
+            bear: { n_days: 20, mean_ic: -0.02, hit_rate: 0.4, weak: true },
+          },
+          month_std: Number.NaN,
+          n_months: 1,
+        },
+      },
+    });
+
+    const view = regimeDependencyFor(row);
+
+    expect(view?.monthStd).toBeNull();
+    expect(view?.nMonths).toBe(1);
+    expect(view?.worstMonth).toBeNull(); // 无月度数据有位置（渲染成 —）
+    expect(view?.weakBuckets).toEqual(['bear']);
+    expect(view?.coverage).toBeNull();
   });
 });

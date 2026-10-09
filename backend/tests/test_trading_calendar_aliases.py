@@ -81,3 +81,28 @@ async def test_verdict_reports_the_exchange_calendar_as_its_source(market: str):
     )
     assert verdict is True
     assert source == SRC_EXCHANGE_CALENDAR, f"{market} 走了降级判定（{source}）"
+
+
+# qm_regime_daily 尾行（§6.4 必要条件）用的「下一交易日」：挑**已知休市段之后的复市日**
+NEXT_CASES = [
+    ("CN", "2026-09-30", "2026-10-08", "国庆休市（10-01~10-07）后复市日（工作日判断会答 10-01）"),
+    ("CN", "2026-10-08", "2026-10-09", "复市后的普通次一交易日"),
+    ("HK", "2026-06-30", "2026-07-02", "香港回归纪念日（07-01）休市后复市"),
+    ("US", "2026-07-02", "2026-07-06", "独立日观察日（07-03 周五）+ 周末后复市"),
+]
+
+
+@pytest.mark.parametrize("market,after,expected,why", NEXT_CASES)
+def test_next_trading_day_xcal_known_boundaries(market: str, after: str, expected: str, why: str):
+    from backend.shared.trading_calendar import next_trading_day_xcal
+
+    got = next_trading_day_xcal(market, date.fromisoformat(after))
+    assert got == date.fromisoformat(expected), f"{market} {after} 的下一交易日应为 {expected}（{why}），实得 {got}"
+
+
+def test_next_trading_day_xcal_honest_null():
+    """答不了就 None（调用方少写一行、绝不猜）：词汇表外市场 / 越过日历覆盖年限。"""
+    from backend.shared.trading_calendar import next_trading_day_xcal
+
+    assert next_trading_day_xcal("CRYPTO", date(2026, 9, 30)) is None
+    assert next_trading_day_xcal("CN", date(2035, 1, 1)) is None

@@ -23,6 +23,8 @@ from backend.shared.model_algorithm_meta import (
     comparison_index,
     read_xgboost_best_iteration,
 )
+from backend.shared.model_retirement import AUDIT_ACTION_ARCHIVE
+from backend.shared.model_rollout_store import latest_promotion_of
 
 logger = logging.getLogger(__name__)
 
@@ -161,9 +163,34 @@ class ModelRegistryService:
             CREATE INDEX IF NOT EXISTS idx_qm_strategy_model_bindings_model
             ON qm_strategy_model_bindings (tenant_id, user_id, model_id)
             """,
+            # 默认模型唯一性**按市场**（§5.5）：口径 = qm_market_of(metadata_json)
+            # （与下方 _canonical_market 等价，见 data/upgrade_v1.1.4.sql 同源 DDL）。
+            # 启动期这里还主动 DROP 旧全局索引——进程内旧代码的 ensure 会把它复活，
+            # 不主动清会让多市场默认互相顶掉（P2 验收③演练实测）。全部幂等。
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_qm_user_models_default_per_user
-            ON qm_user_models (tenant_id, user_id)
+            CREATE OR REPLACE FUNCTION qm_market_of(meta jsonb) RETURNS text
+            LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+                SELECT CASE
+                    WHEN m IN ('HK', 'HONG_KONG', '港股', 'HKEX', 'XHKG') THEN 'HK'
+                    WHEN m IN ('US', '美股', 'NYSE', 'XNYS', 'NASDAQ', 'XNAS', 'AMEX') THEN 'US'
+                    WHEN m IN ('CRYPTO', '加密', '加密货币', '24/7') THEN 'CRYPTO'
+                    WHEN m IN ('FUTURES', '期货', 'CME', 'SHFE') THEN 'FUTURES'
+                    ELSE 'CN'
+                END
+                FROM (
+                    SELECT upper(btrim(coalesce(
+                               nullif(meta ->> 'market', ''),
+                               nullif(meta -> 'context' ->> 'market', '')
+                           , ''))) AS m
+                ) t
+            $$
+            """,
+            """
+            DROP INDEX IF EXISTS uq_qm_user_models_default_per_user
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_qm_user_models_default_per_market
+            ON qm_user_models (tenant_id, user_id, qm_market_of(metadata_json))
             WHERE is_default = TRUE
             """,
             """
@@ -511,9 +538,9 @@ class ModelRegistryService:
         where_extra = "" if include_archived else "AND status <> 'archived'"
         params: dict[str, Any] = {"tenant_id": tenant, "user_id": user}
         if market:
-            market_upper = str(market).upper().strip()
-            where_extra += " AND COALESCE(metadata_json->>'market', 'CN') = :market"
-            params["market"] = market_upper
+            market_canonical = _canonical_market(market)
+            where_extra += " AND qm_market_of(metadata_json) = :market"
+            params["market"] = market_canonical
         async with get_session(read_only=True) as session:
             rows = (
                 (
@@ -572,8 +599,8 @@ class ModelRegistryService:
         market_clause = ""
         params: dict[str, Any] = {"tenant_id": tenant, "user_id": user}
         if market:
-            market_clause = " AND COALESCE(metadata_json->>'market', 'CN') = :market"
-            params["market"] = str(market).upper().strip()
+            market_clause = " AND qm_market_of(metadata_json) = :market"
+            params["market"] = _canonical_market(market)
         async with get_session(read_only=True) as session:
             row = (
                 (
@@ -747,6 +774,9 @@ class ModelRegistryService:
                 },
             )
 
+            # 回退只在**本市场**找继任（§5.5：CN 归档不许动 HK/US 的默认；
+            # 旧实现不分区，跨市场「最近更新 ready」会被错误扶上马）
+            market = _model_market_of(model)
             default_exists = (
                 (
                     await session.execute(
@@ -756,52 +786,120 @@ class ModelRegistryService:
                         FROM qm_user_models
                         WHERE tenant_id = :tenant_id AND user_id = :user_id
                           AND is_default = TRUE AND status IN ('ready', 'active')
+                          AND qm_market_of(metadata_json) = :market
                         LIMIT 1
                         """
                         ),
-                        {"tenant_id": tenant, "user_id": user},
+                        {"tenant_id": tenant, "user_id": user, "market": market},
                     )
                 )
                 .mappings()
                 .first()
             )
+            # 继承任候选：跨分支供 §7 退役审计描述使用（回退去向写进 user_audit_logs）
+            successor: str | None = None
             if not default_exists:
-                candidate = (
-                    (
+                # ① 备任链优先：该模型经 rollout 晋升时记录的前任（§5.4）
+                promotion = await latest_promotion_of(
+                    mid, tenant_id=tenant, user_id=user, market=market, session=session
+                )
+                prior = str((promotion or {}).get("prior_default_model_id") or "")
+                if prior:
+                    prior_row = (
                         await session.execute(
                             text(
                                 """
-                            SELECT model_id
-                            FROM qm_user_models
-                            WHERE tenant_id = :tenant_id AND user_id = :user_id
-                              AND status IN ('ready', 'active') AND model_id <> :archived_id
-                            ORDER BY updated_at DESC
-                            LIMIT 1
-                            """
+                                SELECT model_id FROM qm_user_models
+                                WHERE tenant_id = :tenant_id AND user_id = :user_id
+                                  AND model_id = :model_id
+                                  AND status IN ('ready', 'active')
+                                LIMIT 1
+                                """
                             ),
-                            {"tenant_id": tenant, "user_id": user, "archived_id": mid},
+                            {
+                                "tenant_id": tenant,
+                                "user_id": user,
+                                "model_id": prior,
+                            },
                         )
+                    ).first()
+                    if prior_row:
+                        successor = str(prior_row[0])
+                if successor is None:
+                    # ② 兜底：同市场最近更新的 ready（排除归档者）
+                    candidate = (
+                        (
+                            await session.execute(
+                                text(
+                                    """
+                                SELECT model_id
+                                FROM qm_user_models
+                                WHERE tenant_id = :tenant_id AND user_id = :user_id
+                                  AND status IN ('ready', 'active') AND model_id <> :archived_id
+                                  AND qm_market_of(metadata_json) = :market
+                                ORDER BY updated_at DESC
+                                LIMIT 1
+                                """
+                                ),
+                                {
+                                    "tenant_id": tenant,
+                                    "user_id": user,
+                                    "archived_id": mid,
+                                    "market": market,
+                                },
+                            )
+                        )
+                        .mappings()
+                        .first()
                     )
-                    .mappings()
-                    .first()
-                )
-                if candidate:
+                    if candidate:
+                        successor = str(candidate.get("model_id"))
+                if successor:
                     await session.execute(
                         text(
                             """
                             UPDATE qm_user_models
                             SET is_default = TRUE, activated_at = :activated_at, updated_at = :updated_at
                             WHERE tenant_id = :tenant_id AND user_id = :user_id AND model_id = :model_id
+                              AND qm_market_of(metadata_json) = :market
                             """
                         ),
                         {
                             "tenant_id": tenant,
                             "user_id": user,
-                            "model_id": str(candidate.get("model_id")),
+                            "model_id": successor,
+                            "market": market,
                             "activated_at": now,
                             "updated_at": now,
                         },
                     )
+
+            # §7 退役审计：归档与审计同事务落 user_audit_logs（谁归档了谁 + 默认回退去向）
+            if successor:
+                fallback = f"；默认位回退至 {successor}"
+            elif default_exists:
+                fallback = "；本市场已有默认，无回退动作"
+            else:
+                fallback = "；本市场无 ready 继任，默认位空缺"
+            await session.execute(
+                text(
+                    "INSERT INTO user_audit_logs "
+                    "(user_id, tenant_id, action, resource, resource_id, description, success, created_at) "
+                    "VALUES (:user_id, :tenant_id, :action, :resource, :resource_id, :description, TRUE, :created_at)"
+                ),
+                {
+                    "user_id": user,
+                    "tenant_id": tenant,
+                    "action": AUDIT_ACTION_ARCHIVE,
+                    "resource": "qm_user_models",
+                    "resource_id": mid,
+                    "description": (
+                        f"归档模型 {mid}（market={market}，原为默认={bool(model.get('is_default'))}）"
+                        + fallback
+                    )[:2000],
+                    "created_at": now,
+                },
+            )
 
         archived = await self.get_model(tenant_id=tenant, user_id=user, model_id=mid)
         if archived is None:
@@ -1208,8 +1306,8 @@ class ModelRegistryService:
         market_clause = ""
         params: dict[str, Any] = {"tenant_id": tenant, "user_id": user}
         if market:
-            market_clause = " AND COALESCE(metadata_json->>'market', 'CN') = :market"
-            params["market"] = str(market).upper().strip()
+            market_clause = " AND qm_market_of(metadata_json) = :market"
+            params["market"] = _canonical_market(market)
         with get_db() as session:
             row = (
                 session.execute(
@@ -2686,33 +2784,21 @@ class ModelRegistryService:
     def _extract_test_rank_icir(metadata: dict, metrics: dict) -> float | None:
         """从模型 metadata/metrics 提取 test 集 Rank ICIR（样本外验证指标）。
 
-        优先取 metadata.metrics.test_rank_icir（train.py 写入）；回退 metrics_json。
+        P0-4 起统一走样本外口径契约（model_eval_contract.resolve_oos_metrics）：
+        `eval_report.by_split.test.icir` 优先，扁平 `test_rank_icir` 仅作老批次
+        回退；headline / train / valid 段永不参与（合并窗口实测虚高 1.47×）。
         无法确定时返回 None（软门禁不生效，模型按原流程进入 ready）。
         """
-        for src in (metrics, metadata.get("metrics"), metadata):
-            if not isinstance(src, dict):
-                continue
-            v = src.get("test_rank_icir")
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    pass
-        return None
+        from backend.shared.model_eval_contract import resolve_oos_metrics
+
+        return resolve_oos_metrics(metadata, metrics).get("rank_icir")
 
     @staticmethod
     def _extract_test_rank_ic(metadata: dict, metrics: dict) -> float | None:
-        """从训练 metadata/metrics 提取 test 集 Rank IC。"""
-        for src in (metrics, metadata.get("metrics"), metadata):
-            if not isinstance(src, dict):
-                continue
-            v = src.get("test_rank_ic")
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    pass
-        return None
+        """从训练 metadata/metrics 提取 test 集 Rank IC（口径同 `_extract_test_rank_icir`）。"""
+        from backend.shared.model_eval_contract import resolve_oos_metrics
+
+        return resolve_oos_metrics(metadata, metrics).get("rank_ic")
 
     @staticmethod
     def _validate_synced_model(

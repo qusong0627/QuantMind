@@ -21,6 +21,8 @@ from fastapi import HTTPException
 
 from backend.services.api.routers.admin import quantdb_factor_catalog as qfc
 from backend.services.engine.data_platform.quantdb_factor_reader import (
+    EXCLUDED_FROM_DISCOVERY,
+    EXCLUDED_FROM_TRAINING,
     sources_for_market,
 )
 
@@ -168,3 +170,71 @@ async def test_catalog_rejects_source_absent_from_statuses(patch_env):
         await qfc.load_quantdb_training_catalog("l2_factors", market="CUSTOM")
 
     assert excinfo.value.status_code == 422
+
+
+# CN 私人因子库（数据集 private）各来源库的因子数，2026-10-07 实测：
+#   store.factors_meta('private')['factors'] 的 l2 计数
+# 写死而不是运行时读快照：每个来源库都必须被逐一断言，漏一个就是一条静默死路，
+# 而快照文件在哪台机器上缺席都不该让这条不变量悄悄变成「跳过」。
+CN_PRIVATE_LIBRARIES: dict[str, int] = {
+    "factor_defs": 1336,
+    "alpha_library": 429,
+    "alpha360": 360,
+    "l2_factors": 211,
+    "l1_factors": 110,
+    "jq110": 109,
+    "tdxgs": 88,
+    "gap_mined": 69,
+    "features_daily": 42,
+}
+
+
+@pytest.mark.unit
+def test_every_registerable_library_is_reachable_from_the_training_page():
+    """**可注册的来源库必须看得到**——写进去的草稿不能落进死胡同。
+
+    这是一条跨模块的不变量，两侧各自看都没问题，只有合起来才出错：
+
+    - 写侧 ``research_factor_registration.resolve_registrable`` 只拦
+      ``EXCLUDED_FROM_TRAINING``（标签/泄漏库）。它**不知道**训练页能显示什么。
+    - 读侧认哪些源，由 ``MARKET_FACTOR_SOURCES``（静态清单）加上
+      「状态表里有、且不在 ``EXCLUDED_FROM_DISCOVERY``」的动态源共同决定。
+
+    一个库只要**两样都占不上**——既不在静态清单里，又被挡在自动发现之外——
+    就成了一条只进不出的管道：注册接口照收，草稿写进 ``qm_training_factor_mapping``，
+    而 ``load_quantdb_training_catalog`` 对它 422「不属于市场 CN」，
+    源列表里也没有它。用户看到的是「注册了但一直没有」。
+
+    ``factor_defs`` 正是这样：1336/2754（49%）的私人因子库因子都在里面，
+    2026-10-07 实测撞上（``feat_dstd_va_diff`` / ``feat_ridge_wpx`` 两个因子
+    写进了 ``qdb-cn-factor_defs-c3ed2082cb35`` 却无处可看）。
+    它的同类 ``alpha_library`` 两个集合都占了，所以一直正常——
+    这条测试就是要求两者保持一致。
+    """
+    static = set(sources_for_market("CN"))
+
+    unreachable = {
+        lib
+        for lib in CN_PRIVATE_LIBRARIES
+        if lib not in EXCLUDED_FROM_TRAINING  # 可注册（写侧放行）
+        and lib not in static  # 静态清单里没有
+        and lib in EXCLUDED_FROM_DISCOVERY  # 自动发现也被挡住
+    }
+
+    assert unreachable == set(), (
+        "这些来源库可注册却无法在训练页显示/读取，注册进去的草稿会静默失效："
+        f"{sorted(unreachable)}"
+    )
+
+
+@pytest.mark.unit
+def test_leaky_libraries_stay_unregisterable():
+    """对照：安全边界不能被上一条的修复方向带松。
+
+    上一条要求「可注册 ⇒ 可见」，最省事的假修复是**把库挪出
+    ``EXCLUDED_FROM_TRAINING``**（那会让标签库变成训练特征源）或
+    把 ``EXCLUDED_FROM_DISCOVERY`` 整个清空。两条都不许：
+    ``features_daily`` 含未来收益标签列，任何路径都不得当特征源。
+    """
+    assert "features_daily" in EXCLUDED_FROM_TRAINING
+    assert "alpha_library_labels" in EXCLUDED_FROM_TRAINING

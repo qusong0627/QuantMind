@@ -67,6 +67,20 @@ def _setting(broker: str, field: str, env_key: str, default: str = "") -> str:
     return _env(env_key) or default
 
 
+def opend_connection() -> tuple[str, str, str]:
+    """FutuOpenD 连接参数 (host, port, rsa_key)——FutuBroker 与直连服务共用。
+
+    0.0.0.0 是监听地址不是连接地址；127.0.0.1/localhost 在 QM 容器内连不到
+    OpenD 容器——一律回退同网络的容器名（quantmind-net 内按名字直达）。
+    """
+    host = _setting("futu", "opend_host", "FUTU_OPEND_HOST", "").strip()
+    if host in {"", "0.0.0.0", "127.0.0.1", "localhost"}:
+        host = "futu-opend"
+    port = _setting("futu", "opend_port", "FUTU_OPEND_PORT", "11111")
+    rsa_key = _setting("futu", "rsa_key", "FUTU_RSA_KEY", "/data/futu-opend/rsa.key")
+    return host, port, rsa_key
+
+
 def _futu_code(symbol: str) -> str:
     """QuantMind 符号 → 富途代码（HK.0001 / US.AAPL / SH.600036）。"""
     upper = symbol.upper()
@@ -352,13 +366,7 @@ class FutuBroker(_StreamQuoteMixin, BaseBroker):
         import subprocess
         import sys as _sys
 
-        host = _setting("futu", "opend_host", "FUTU_OPEND_HOST", "").strip()
-        # 0.0.0.0 是监听地址不是连接地址；127.0.0.1 在本容器内连不到 OpenD——
-        # 两者一律回退同网络的容器名（quantmind-net 内直接可达）
-        if host in {"", "0.0.0.0", "127.0.0.1", "localhost"}:
-            host = "futu-opend"
-        port = _setting("futu", "opend_port", "FUTU_OPEND_PORT", "11111")
-        rsa_key = _setting("futu", "rsa_key", "FUTU_RSA_KEY", "/data/futu-opend/rsa.key")
+        host, port, rsa_key = opend_connection()
         script_path = Path(__file__).resolve().parent / "futu_subprocess.py"
         import tempfile
 

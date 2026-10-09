@@ -43,7 +43,11 @@ async def _save_result(result: dict[str, Any], *, snapshot_date: Any = None) -> 
     """统一落表：因子/模型/策略/账户结果 → eval_scores（object_type 自描述）。"""
     from backend.shared.eval_contract import save_eval_score
 
-    if result.get("error") or result.get("score") is None:
+    if result.get("error"):
+        return False
+    # 产物不在盘的缺省卡 score=None **也要写**：它是「旧 A 级现形」的载体，
+    # 不写回旧分就永远留在榜上（语义同 model_card.py --all 的 _save）。
+    if result.get("score") is None and not result.get("artifact_missing"):
         return False
     return await save_eval_score(
         object_type=str(result["object_type"]),
@@ -72,21 +76,25 @@ async def _run_model_card(save: bool, *, limit: int = 50) -> dict[str, Any]:
     from backend.scripts.eval.model_card import (
         list_production_models,
         list_user_models,
+        partition_user_models,
         score_model,
     )
 
     targets: list[tuple[str, Path | None]] = [
         (model_id, None) for model_id in list_production_models(limit=limit)
     ]
+    results: list[dict[str, Any]] = []
     try:
-        targets += [
-            (item["model_id"], Path(item["meta_path"]))
-            for item in await list_user_models()
-        ]
+        # 产物不在盘的用户模型出缺省卡（要覆盖写回，否则旧 A 级永远留着）。
+        # 2026-10-09 修复：此前这里直接 ``Path(item["meta_path"])``，只要清单里
+        # 有一个清理过产物的行（meta_path=None）就整段抛错被 except 吞掉——
+        # 4/90 个模型把**全部 90 个用户模型**从每日 EOD 评分里静默剔除了。
+        cards, user_targets = partition_user_models(await list_user_models())
+        results.extend(cards)
+        targets += user_targets
     except Exception as exc:  # noqa: BLE001 - 用户模型清单失败不拖垮系统模型卡
         logger.warning("[EvalRunAll] 用户模型清单获取失败: %s", exc)
 
-    results: list[dict[str, Any]] = []
     for model_id, meta_path in targets:
         try:
             results.append(score_model(model_id, meta_path=meta_path))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -9,6 +10,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.shared.database_manager_v2 import get_session
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/engine", tags=["Realtime Contract"])
 
@@ -38,7 +41,8 @@ class SignalScoreItem(BaseModel):
     tft_score: float | None = None
     fusion_score: float
     risk_weight: float | None = 1.0
-    regime: str | None = "normal"
+    # §6.4（P3）：缺省 None = 由写侧填当日 qm_regime_daily 生效值（此前默认 "normal" 是撒谎）
+    regime: str | None = None
     score_rank: int | None = None
     universe_tag: str | None = None
     signal_side: Literal["BUY", "SELL", "HOLD"] | None = None
@@ -251,6 +255,13 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
 
     rank_pcts = compute_rank_pct([item.fusion_score for item in payload.scores])
 
+    # §6.4（P3）：regime 缺省填当日生效值（qm_regime_daily）；表外市场/缺行 → NULL。
+    # 按 (market, trade_date) 缓存——同批各标的 market 通常一致，只读一次库。
+    from backend.shared.market_regime import REGIME_INDEX_BY_MARKET
+    from backend.shared.regime_daily_store import load_day_state_async
+
+    regime_cache: dict[tuple[str, date], str | None] = {}
+
     # T-P1-01：契约列自愈（独立会话，进程内一次；不混入下方业务事务）
     await ensure_signal_contract_columns_async()
 
@@ -260,6 +271,22 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
             raise HTTPException(status_code=404, detail=f"run_id 不存在: {run_id}")
 
         for idx, item in enumerate(payload.scores):
+            item_market = normalize_market(item.market or item.universe_tag)
+            regime_value = item.regime
+            if regime_value is None and item_market in REGIME_INDEX_BY_MARKET:
+                cache_key = (item_market, payload.trade_date)
+                if cache_key not in regime_cache:
+                    try:
+                        regime_cache[cache_key] = await load_day_state_async(
+                            db, item_market, payload.trade_date
+                        )
+                    except Exception as regime_err:  # noqa: BLE001 — 读失败写 NULL，不阻断
+                        logger.warning(
+                            "[RealtimeContract] regime 生效值读取失败（regime 写 NULL）: %s",
+                            regime_err,
+                        )
+                        regime_cache[cache_key] = None
+                regime_value = regime_cache[cache_key]
             await db.execute(
                 insert_score_sql,
                 {
@@ -274,13 +301,13 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
                     "tft_score": item.tft_score,
                     "fusion_score": item.fusion_score,
                     "risk_weight": item.risk_weight if item.risk_weight is not None else 1.0,
-                    "regime": item.regime or "normal",
+                    "regime": regime_value,
                     "score_rank": item.score_rank,
                     "universe_tag": item.universe_tag,
                     "signal_side": item.signal_side,
                     "expected_price": item.expected_price,
                     "quality": json.dumps(item.quality or {}, ensure_ascii=False),
-                    "market": normalize_market(item.market or item.universe_tag),
+                    "market": item_market,
                     "rank_pct": item.rank_pct if item.rank_pct is not None else rank_pcts[idx],
                     "source": SOURCE_REALTIME,
                 },

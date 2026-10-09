@@ -14,6 +14,7 @@ import { API_ENDPOINTS } from './config';
 export type HoldingAlertKind =
   | 'score_cross_zero'
   | 'score_below_threshold'
+  | 'score_drop'
   | 'risk_news'
   | 'risk_anomaly'
   | 'risk_list';
@@ -50,6 +51,8 @@ export interface HoldingAlertConfig {
   enabled: boolean;
   /** 跌破该值告警；0 = 关闭该规则（由正转负仍然报） */
   score_threshold: number;
+  /** 分数较当日基准（当天第一眼的分）跌落该幅度告警；0 = 关闭该规则 */
+  score_drop_threshold: number;
   watch_sim: boolean;
   watch_real: boolean;
   watch_manual: boolean;
@@ -81,6 +84,7 @@ export interface HoldingAlertListResult {
 export const DEFAULT_ALERT_CONFIG: HoldingAlertConfig = {
   enabled: true,
   score_threshold: 0,
+  score_drop_threshold: 0.35,
   watch_sim: true,
   watch_real: true,
   watch_manual: true,

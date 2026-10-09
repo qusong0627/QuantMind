@@ -1204,8 +1204,11 @@ def _humanize_model_name(model_id: str) -> str:
 
 async def get_available_models(tid: str, uid: str, market: str | None = None) -> dict[str, Any]:
     async with get_session(read_only=True) as session:
-        market_upper = market.upper() if market else "CN"
-        params: dict[str, Any] = {"tid": tid, "uid": uid, "market": market_upper}
+        # 市场口径唯一实现（SQL 侧 qm_market_of 同源 DDL，见 data/upgrade_v1.1.4.sql）
+        from backend.shared.model_registry import _canonical_market
+
+        market_canonical = _canonical_market(market)
+        params: dict[str, Any] = {"tid": tid, "uid": uid, "market": market_canonical}
 
         # 优化：先查 qm_user_models（小表 38 行），再用 EXISTS 检查快照（大表 162K 行）
         # market 过滤与模型管理页一致：metadata_json.market 与 context.market 都认，
@@ -1231,11 +1234,7 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
             FROM qm_user_models um
             WHERE um.tenant_id = :tid AND um.user_id = :uid AND um.status != 'archived'
               AND BTRIM(COALESCE(um.model_id, '')) <> ''
-              AND COALESCE(
-                    NULLIF(UPPER(BTRIM(um.metadata_json->>'market')), ''),
-                    NULLIF(UPPER(BTRIM(um.metadata_json->'context'->>'market')), ''),
-                    'CN'
-                  ) = :market
+              AND qm_market_of(um.metadata_json) = :market
             ORDER BY has_inference DESC, um.updated_at DESC
         """)
         res = await session.execute(sql, params)
@@ -1277,8 +1276,10 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
                 if mid in seen_mids:
                     continue
                 meta = json.loads(p.read_text(encoding="utf-8"))
-                m_market = str((meta.get("context") or {}).get("market") or meta.get("market") or "CN").upper()
-                if m_market == market_upper or not market:
+                m_market = _canonical_market(
+                    (meta.get("context") or {}).get("market") or meta.get("market")
+                )
+                if m_market == market_canonical or not market:
                     seen_mids.add(mid)
                     name = meta.get("job_name") or meta.get("display_name") or _humanize_model_name(mid)
                     metrics = meta.get("metrics") or meta.get("performance_metrics") or {}

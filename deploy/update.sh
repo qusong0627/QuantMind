@@ -2,12 +2,13 @@
 # QuantMind 一键更新脚本
 # 核心流程：拉代码 → 重建/重启后端容器 → 跑 data/upgrade_*.sql → 健康检查。
 # db/redis/qwenpaw 等基础设施容器不强制重启（仅 compose 配置漂移时按需重建）。
-# 用法：sudo bash deploy/update.sh [--ref master] [--remote gitee|github|origin] [--force] [--no-build] [--skip-backup]
+# 用法：sudo bash deploy/update.sh [--ref <branch>] [--remote gitee|github|origin] [--force] [--no-build] [--skip-backup]
+# 不传 --ref 时默认更新到**当前 checkout 的分支**（见 default_ref）。
 
 set -Eeuo pipefail
 
 PROJECT_DIR="${QUANTMIND_PROJECT_DIR:-/opt/quantmind}"
-REF="${QUANTMIND_REF:-master}"
+REF="${QUANTMIND_REF:-}"               # 空 = 未指定，main 里按当前 checkout 的分支解析
 REMOTE="${QUANTMIND_REMOTE:-origin}"   # 项目实际远端是 gitee/github；默认 origin 兼容旧配置
 FORCE=false
 BUILD=true
@@ -15,12 +16,31 @@ SKIP_BACKUP=false
 
 log() { printf '[quantmind-update] %s\n' "$*"; }
 die() { log "错误: $*" >&2; exit 1; }
+# 诊断信息必须走 stderr：default_ref 的结果是经 $( ) 取的，混进 stdout 会被
+# 当成 REF 的一部分（多行字符串），后面 fetch/checkout 会以一个不存在的 ref 失败。
+warn() { printf '[quantmind-update] %s\n' "$*" >&2; }
+
+# 未显式 --ref/QUANTMIND_REF 时的默认版本 = 宿主机当前 checkout 的分支。
+# 裸跑 update.sh **不应该切换分支**：本仓 next 与 master 已分叉（双向都有独有提交），
+# 原先硬编码的默认 master 会把 next 上的部署整体倒退到 master，而且没有任何确认提示，
+# 表现就是「点了一下更新系统，功能少了一批」。要换分支必须显式 --ref。
+default_ref() {
+    local br
+    br="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    # 非 git 仓库（未走部署脚本的裸目录）或 detached HEAD 都返回 "HEAD"/空，
+    # 此时无法「跟随当前分支」，退回 master 保持旧行为。
+    if [[ -z "$br" || "$br" == "HEAD" ]]; then
+        warn "无法识别 $PROJECT_DIR 的当前分支（非 git 仓库或 detached HEAD），回退 master"
+        br="master"
+    fi
+    printf '%s' "$br"
+}
 
 usage() {
     cat <<'EOF'
 用法: sudo bash deploy/update.sh [选项]
 
-  --ref <branch|tag>    更新到指定版本（默认 master）
+  --ref <branch|tag>    更新到指定版本（默认：当前 checkout 的分支；识别不到时为 master）
   --remote <name>       远端名（默认 origin；项目实际远端是 gitee/github）
   --force               覆盖服务器上的未提交代码改动，不删除业务数据
   --no-build            跳过核心镜像构建（仅代码改动时用，bind mount 已生效）
@@ -40,6 +60,11 @@ while [[ $# -gt 0 ]]; do
         *) die "未知参数: $1（force 请用 --force）" ;;
     esac
 done
+
+if [[ -z "$REF" ]]; then
+    REF="$(default_ref)"
+    log "未指定 --ref，更新到当前 checkout 的分支：$REF"
+fi
 
 require_root() {
     if [[ $EUID -eq 0 ]]; then return; fi

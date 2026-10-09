@@ -53,19 +53,24 @@ def should_alert(previous: dict[str, Any] | None, current: dict[str, Any]) -> bo
 
 
 async def _resolve_notification_user_id(raw: str) -> str:
-    """策略 owner（int 归一形态，如 "1"）→ users 表实际存在的 user_id（如 "00000001"）。
+    """策略 owner（int 归一形态，如 "1"）→ users 表实际存在的 user_id（如 "10000001"）。
 
     notifications 表对 users(user_id) 有 FK——直接拿策略 owner 发通知会 FK 失败且被
     publisher 的 best-effort 吞掉（静默无通知）。此处在 users 候选键形中实查，
+    admin 族别名（'0'/'1'/'00000001'/'admin'）先经 admin_identity 规范为
+    '10000001'（2026-09 身份口径改名，旧候选表 [zfill(8)] 已跟丢：实测本库
+    users 只有 '10000001'，旧实现让 admin 策略的退化告警**全部静默丢失**）。
     查不到返回空串（调用方跳过发布并告警，不静默发错人）。
     """
     base = str(raw or "").strip()
     if not base:
         return ""
-    candidates = [base]
+    from backend.shared.admin_identity import normalize_admin_user_id
+
+    candidates = [base, normalize_admin_user_id(base)]
     if base.isdigit():
         candidates.extend([base.zfill(8), str(int(base))])
-    candidates = list(dict.fromkeys(candidates))
+    candidates = [c for c in dict.fromkeys(candidates) if c]
     try:
         from sqlalchemy import text as _text
 
@@ -86,9 +91,15 @@ async def _resolve_notification_user_id(raw: str) -> str:
         for c in candidates:
             if c in found:
                 return c
+        logger.warning(
+            "[HealthRecheck] 收件人 %r 在 users 表无匹配候选 %s，跳过通知",
+            base,
+            candidates,
+        )
+        return ""
     except Exception as exc:  # noqa: BLE001 - 解析失败按原值兜底（发布失败只告警）
         logger.warning("[HealthRecheck] 通知收件人解析失败: %s", exc)
-    return base
+        return base
 
 
 async def _publish_degradation_notification(

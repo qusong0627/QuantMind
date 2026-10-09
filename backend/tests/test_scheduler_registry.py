@@ -61,6 +61,8 @@ _HEARTBEAT_WIRED = {
     "leverage_trim": "services/trade/services/leverage_trim_runner.py",
     # 实盘净值分钟采样（实况图数据源写入方）：曲线停更时 C07 是唯一可观测信号
     "live_equity_sampler": "services/live_trading/services/live_equity_sampler.py",
+    # P0-3 训练僵尸作业回收器（住在 API 进程；心跳写在清扫循环里）
+    "training_reaper": "services/engine/training/job_reaper.py",
 }
 
 #: 心跳用模块常量（``_sched_heartbeat(SCHEDULER_NAME)``）间接引用的任务：
@@ -73,7 +75,8 @@ def test_registry_integrity():
     assert len(keys) == len(set(keys)), "任务 key 必须唯一"
     for j in JOBS:
         assert j.kind in {"worker", "celery_beat"}
-        assert j.owner in {"trade", "celery"}
+        # api = 常驻在 API 进程内的任务（P0-3 训练回收器），owner 是枚举不是自由文本
+        assert j.owner in {"trade", "celery", "api"}
         assert j.schedule
         if j.heartbeat_ttl is not None:
             assert j.heartbeat_ttl >= 60, f"{j.key} 心跳 TTL 过小"
@@ -179,6 +182,8 @@ def test_all_jobs_heartbeat_wired_in_source():
         "backfill_quality",
         "market_sync_dispatch",
         "tca_report",
+        "retrain_dispatch",
+        "regime_persist",
     ):
         assert f'_sched_heartbeat("{job_key}")' in celery_src, f"{job_key} 未接心跳"
 
@@ -191,6 +196,8 @@ def test_all_jobs_heartbeat_wired_in_source():
         "backfill_quality",
         "market_sync_dispatch",
         "tca_report",
+        "retrain_dispatch",
+        "regime_persist",
     }
     registry = {j.key for j in JOBS if j.heartbeat_ttl is not None}
     assert registry == wired, f"注册表与接线不一致: {registry ^ wired}"
@@ -230,6 +237,12 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "leverage_trim",
         # P1.6 执行损耗读数面（纯读，重跑无副作用）
         "tca_report",
+        # P0-3 训练僵尸作业回收（重跑 = 立刻真扫真标；判死不重投）
+        "training_reaper",
+        # P1 滚动重训派发（重跑 = 按配置试一轮；--force 不看 enabled/到点）
+        "retrain_dispatch",
+        # P3 Regime 状态日更（纯台账写入且冻结幂等：重跑对已写生效日 = 0 新行）
+        "regime_persist",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）

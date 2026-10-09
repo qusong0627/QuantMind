@@ -34,6 +34,7 @@ from backend.services.api.market_analysis_hk.router import router as market_anal
 from backend.services.api.market_analysis_us.router import router as market_analysis_us_router
 from backend.services.api.routers.market_kline import router as market_kline_router
 from backend.services.api.routers.model_training import router as model_training_router
+from backend.services.api.routers.model_rollouts import router as model_rollouts_router
 from backend.services.api.routers.training_per_model import build_per_model_router
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.services.api.routers.news import (
@@ -45,6 +46,7 @@ from backend.services.api.routers.desk import router as desk_router
 from backend.services.api.routers.eval_scores import router as eval_router
 from backend.services.api.routers.sentinel import router as sentinel_router
 from backend.services.api.routers.copilot import router as copilot_router
+from backend.services.api.routers.internal_rolling import router as internal_rolling_router
 from backend.services.api.routers.holding_alerts import router as holding_alerts_router
 from backend.services.api.routers.stocks_search import router as stocks_search_router
 from backend.services.api.routers.exclusion_admin import router as exclusion_admin_router
@@ -119,6 +121,15 @@ async def lifespan(app: FastAPI):
         )
 
         await model_inference_batch_persistence.ensure_tables()
+        from backend.shared.rolling_campaigns import ensure_tables as ensure_rolling_campaign_tables
+
+        await ensure_rolling_campaign_tables()
+        from backend.shared.model_rollout_store import ensure_tables as ensure_rollout_tables
+
+        await ensure_rollout_tables()
+        from backend.shared.regime_daily_store import ensure_tables as ensure_regime_tables
+
+        await ensure_regime_tables()
         # from backend.services.api.routers.research import ensure_research_tables
         # await ensure_research_tables()
 
@@ -138,6 +149,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ node-history sampler start failed: {e}", exc_info=True)
 
+    # P0-3 训练僵尸作业回收器（启动即扫一轮 + 每小时周期；判尸不动活作业，默认不重投）
+    try:
+        from backend.services.engine.training.job_reaper import (
+            start_training_job_reaper,
+            stop_training_job_reaper,
+        )
+
+        start_training_job_reaper()
+    except Exception as e:
+        logger.error(f"❌ training job reaper start failed: {e}", exc_info=True)
+
     try:
         from backend.shared.system_events import record_system_event_async
 
@@ -156,6 +178,12 @@ async def lifespan(app: FastAPI):
     yield
     try:
         await stop_node_history_sampler()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from backend.services.engine.training.job_reaper import stop_training_job_reaper
+
+        await stop_training_job_reaper()
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -405,6 +433,7 @@ app.include_router(admin_router, prefix="/api/v1/admin")
 app.include_router(
     model_training_router, prefix="/api/v1/models", tags=["ModelTraining"]
 )
+app.include_router(model_rollouts_router)  # 晋升流程（/api/v1/models/rollouts/*）
 app.include_router(
     build_per_model_router(get_current_user),
     prefix="/api/v1/models",
@@ -449,6 +478,7 @@ app.include_router(desk_router)  # T-P1-05 今日交易台（/api/v1/desk/today�
 app.include_router(eval_router)  # FE-E 评估读 API（/api/v1/eval/*，评分卡/体检档案）
 app.include_router(sentinel_router)  # 哨兵告警 API（/api/v1/sentinel/*，T-P6-15）
 app.include_router(copilot_router)  # 副驾驶 API（/api/v1/copilot/*，T-P6-16）
+app.include_router(internal_rolling_router)  # 滚动重训内部端点（/api/v1/internal/rolling/*，P1）
 app.include_router(holding_alerts_router)  # 持仓预警（/api/v1/trading/holding-alerts/*）
 
 # CORS

@@ -268,6 +268,7 @@ async def load_real_positions(
 
 async def load_signal_scores(
     tenant_id: str,
+    user_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any]]:
     """信号日正分候选 + 全量分数映射。
 
@@ -279,8 +280,9 @@ async def load_signal_scores(
     - ``score_map``：该日**全部**标的的最新一条分数（同 symbol 多 run 时按
       ``created_at`` 取最新——混着取会让分数不确定），供持仓/自选行显示分数；
       ``source='realtime'`` 的行即盘中实时分（热集推理落库）。
+    - ``user_id`` 透传给快照取数（P2-0 桶隔离的生效模型解析用）。
     """
-    score_map, meta = await load_score_snapshot(tenant_id)
+    score_map, meta = await load_score_snapshot(tenant_id, user_id=user_id)
     meta.setdefault("candidate_total", 0)
     candidates: list[dict[str, Any]] = []
     for sym, entry in score_map.items():
@@ -341,7 +343,7 @@ async def build_unified_watchlist(
         ({}, {"sources": {}, "snapshot_at": None, "active_broker": None}),
     )
     candidates, score_map, sig_meta = await _guard(
-        "candidate", load_signal_scores(tenant_id), ([], {}, {})
+        "candidate", load_signal_scores(tenant_id, user_id), ([], {}, {})
     )
 
     items, counts = merge_sources(

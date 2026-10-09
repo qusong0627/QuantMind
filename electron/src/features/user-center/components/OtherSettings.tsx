@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { message, Input, Button, Spin, Select, Radio } from 'antd';
-import { Key, Save, Eye, EyeOff, CheckCircle, AlertCircle, Trash2, Zap, Layers } from 'lucide-react';
+import { Key, Save, Eye, EyeOff, CheckCircle, AlertCircle, Trash2, Zap } from 'lucide-react';
 import { userCenterService } from '../services/userCenterService';
 
 interface OtherSettingsProps {
@@ -89,16 +89,6 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
   // 自定义请求头（JSON 文本），用于自建网关鉴权等（如 x-opencode-session）
   const [extraHeaders, setExtraHeaders] = useState('');
 
-  // 向量检索（embedding）—— 与 chat 独立。DeepSeek 这类 chat 供应商没有 embedding
-  // 接口，必须能单独指向 SiliconFlow / 本地 ollama 等，否则因子挖掘的记忆检索无通道。
-  const [embeddingModel, setEmbeddingModel] = useState('');
-  const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState('');
-  const [embeddingApiKey, setEmbeddingApiKey] = useState('');
-  const [hasEmbeddingKey, setHasEmbeddingKey] = useState(false);
-  const [maskedEmbeddingKey, setMaskedEmbeddingKey] = useState('');
-  const [showEmbeddingKey, setShowEmbeddingKey] = useState(false);
-  const [isSavingEmbedding, setIsSavingEmbedding] = useState(false);
-
   useEffect(() => {
     loadApiKeyStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -111,11 +101,6 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
       setHasKey(result.has_key || false);
       setMaskedKey(result.masked_key || '');
       setExtraHeaders(((result as any).extra_headers as string) || '');
-      setEmbeddingModel(result.embedding_model || '');
-      setEmbeddingBaseUrl(result.embedding_base_url || '');
-      setHasEmbeddingKey(result.has_embedding_key || false);
-      setMaskedEmbeddingKey(result.masked_embedding_key || '');
-      setEmbeddingApiKey('');
 
       // 恢复供应商
       const savedProvider = (result.provider as string) || '';
@@ -264,55 +249,6 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
       message.error(error.message || '测试失败');
     } finally {
       setIsTesting(false);
-    }
-  };
-
-  // 向量检索配置：单独保存，不依赖 chat 的 Key
-  const handleSaveEmbedding = async () => {
-    const model = embeddingModel.trim();
-    const baseUrl = embeddingBaseUrl.trim();
-    const key = embeddingApiKey.trim();
-    if (!model && !baseUrl && !key) {
-      message.warning('请至少填写 Embedding 模型或接口地址');
-      return;
-    }
-    setIsSavingEmbedding(true);
-    try {
-      // 只提交用户实际填写的项：留空表示「不动」，沿用容器级 EMBEDDING_* 或已存值。
-      // 要清空请用「清除 Key」。
-      //
-      // ⚠️ model/baseUrl 也必须走条件展开，不能直接提交空串：后端的三态是
-      // 缺省=不动 / ''=清除 / 值=设置，而 loadApiKeyStatus 失败时表单是**空的**
-      // （catch 只弹提示，state 不被填充）。此时用户只补一个 Key 保存，就会把
-      // 已存的 model/base_url 静默清掉。
-      await userCenterService.saveEmbeddingConfig({
-        ...(model ? { model } : {}),
-        ...(baseUrl ? { baseUrl } : {}),
-        ...(key ? { apiKey: key } : {}),
-      });
-      message.success('向量检索配置已保存');
-      await loadApiKeyStatus();
-    } catch (error: any) {
-      console.error('Failed to save embedding config:', error);
-      message.error(error.message || '保存失败');
-    } finally {
-      setIsSavingEmbedding(false);
-    }
-  };
-
-  const handleClearEmbeddingKey = async () => {
-    setIsSavingEmbedding(true);
-    try {
-      await userCenterService.saveEmbeddingConfig({ apiKey: '' });
-      message.success('Embedding Key 已清除');
-      setHasEmbeddingKey(false);
-      setMaskedEmbeddingKey('');
-      setEmbeddingApiKey('');
-    } catch (error: any) {
-      console.error('Failed to clear embedding key:', error);
-      message.error(error.message || '清除失败');
-    } finally {
-      setIsSavingEmbedding(false);
     }
   };
 
@@ -510,130 +446,10 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
           </div>
 
           <div className="text-[11px] text-gray-400 space-y-0.5 pt-1 border-t border-gray-100">
-            <p>• API Key 安全存储在您的个人档案中，仅用于 AI-IDE 智能助手</p>
+            <p>• API Key 安全存储在您的个人档案中，由 AI-IDE 智能助手与因子挖掘共用</p>
             <p>• 支持多供应商：DeepSeek、阿里云百炼，可自定义接口地址与模型</p>
             <p>• 获取 Key：<a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">DeepSeek</a> | <a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">阿里云百炼</a></p>
-          </div>
-        </div>
-      </div>
-
-      {/* 向量检索（embedding）—— 与上面的 chat 配置相互独立 */}
-      <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-        <div className="p-4 space-y-3">
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 bg-emerald-100 rounded-md">
-              <Layers className="w-4 h-4 text-emerald-600" />
-            </div>
-            <div className="flex-1">
-              <h3 className="text-sm font-semibold text-gray-800">向量检索（Embedding）</h3>
-              <p className="text-[11px] text-gray-400 mt-0.5">
-                因子挖掘的记忆检索使用，与上面的对话模型相互独立
-              </p>
-            </div>
-          </div>
-
-          {/* 快速填充 */}
-          <div className="flex flex-wrap items-center gap-2 border-t border-gray-100 pt-3">
-            <span className="text-[11px] text-gray-500">快速填充：</span>
-            <button
-              type="button"
-              onClick={() => {
-                setEmbeddingModel('BAAI/bge-m3');
-                setEmbeddingBaseUrl('https://api.siliconflow.cn/v1');
-              }}
-              className="px-2 py-1 text-[11px] rounded-md border border-gray-200 text-gray-600 hover:border-emerald-300 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
-            >
-              SiliconFlow · bge-m3
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setEmbeddingModel('bge-m3');
-                // 不能填 127.0.0.1：挖掘子进程跑在容器里，那是**容器自己**。
-                // host.docker.internal 由 compose 的 extra_hosts 映射到宿主机。
-                setEmbeddingBaseUrl('http://host.docker.internal:11434/v1');
-              }}
-              className="px-2 py-1 text-[11px] rounded-md border border-gray-200 text-gray-600 hover:border-emerald-300 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
-            >
-              本地 ollama · bge-m3
-            </button>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-gray-600">模型名称</label>
-            <Input
-              value={embeddingModel}
-              onChange={(e) => setEmbeddingModel(e.target.value)}
-              placeholder="BAAI/bge-m3"
-              className="!h-8 !rounded-[8px] !font-mono !text-xs"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-gray-600">接口地址</label>
-            <Input
-              value={embeddingBaseUrl}
-              onChange={(e) => setEmbeddingBaseUrl(e.target.value)}
-              placeholder="https://api.siliconflow.cn/v1"
-              className="!h-8 !rounded-[8px] !font-mono !text-xs"
-            />
-            <p className="text-[11px] text-gray-400">
-              OpenAI 兼容端点。留空则沿用容器级 EMBEDDING_BASE_URL；本地 ollama 用
-              http://host.docker.internal:11434/v1（且 ollama 需监听 0.0.0.0，默认只监听
-              127.0.0.1 时容器够不到）
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-gray-600">
-              API Key
-              {hasEmbeddingKey && maskedEmbeddingKey && (
-                <span className="ml-2 font-normal text-gray-400">已保存 {maskedEmbeddingKey}</span>
-              )}
-            </label>
-            <div className="flex gap-2 items-center">
-              <div className="relative flex-1">
-                <Input
-                  type={showEmbeddingKey ? 'text' : 'password'}
-                  value={embeddingApiKey}
-                  onChange={(e) => setEmbeddingApiKey(e.target.value)}
-                  placeholder={hasEmbeddingKey ? '输入新 Key 以更新（留空则不变）' : 'sk-xxxxxxxxxxxxxxxx'}
-                  className="!pr-9 !h-8 !rounded-[8px]"
-                  onPressEnter={handleSaveEmbedding}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowEmbeddingKey(!showEmbeddingKey)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 z-10"
-                >
-                  {showEmbeddingKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              <Button
-                type="primary"
-                icon={<Save className="w-4 h-4" />}
-                onClick={handleSaveEmbedding}
-                loading={isSavingEmbedding}
-                className="!h-8 !rounded-[8px]"
-              >
-                保存
-              </Button>
-              {hasEmbeddingKey && (
-                <Button
-                  icon={<Trash2 className="w-4 h-4" />}
-                  onClick={handleClearEmbeddingKey}
-                  loading={isSavingEmbedding}
-                  className="!h-8 !rounded-[8px]"
-                >
-                  清除 Key
-                </Button>
-              )}
-            </div>
-          </div>
-
-          <div className="text-[11px] text-gray-400 space-y-0.5 pt-1 border-t border-gray-100">
-            <p>• 对话模型供应商（如 DeepSeek）通常不提供向量接口，需在此单独指定</p>
-            <p>• 留空的字段沿用容器级 EMBEDDING_* 配置；未配置任何向量通道时，记忆检索会明确报错而非静默返回噪声</p>
+            <p>• 因子挖掘的向量检索（Embedding）另在「因子挖掘 → 设置 → 配置 API」中配置</p>
           </div>
         </div>
       </div>

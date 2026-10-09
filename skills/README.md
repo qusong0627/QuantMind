@@ -65,6 +65,7 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 | [rd-agent-factor-mining](rd-agent-factor-mining/) | RD-Agent 因子挖掘端到端流水线：preflight → 演化 → 回测评估 → IC/Sharpe 排序 → 入库，支持五市场 | 挖因子、因子挖掘、RD-Agent、一键挖因子 |
 | [model-train-infer-backtest-report](model-train-infer-backtest-report/) | 训练-推理-组合回测-专业报告全流程：13 种模型类型、批量推理全年、自定义组合回测（阈值+大盘MA+止损）、研报 MD+PDF | 训练模型、推理全年、T+3、止损、出报告 |
 | [factor-train-pipeline](factor-train-pipeline/) | 因子训练链路：因子研究筛选保留集（可按库剔除，如去 L2）→ 合并自定义市场数据集 → 发布训练目录 → 生产级 LightGBM 训练全流程与实战坑清单 | 因子训练、筛选因子拿去训练、去L2训练、合并因子训练、自定义市场训练 |
+| [factor-materialize-catalog](factor-materialize-catalog/) | 挖掘后半程：物化（值级查重，相关系数≥0.9 拒收）→ 字段发现/草稿播种 → 发布（=替换）→ 跨库训练载荷四道门；含只读体检脚本（候选四桶/草稿差集/从未尝试清单） | 物化、因子没加进来、值级查重、发布因子目录、跨库训练、rd_mined |
 
 ### 交易
 
@@ -99,6 +100,27 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 | [a-share-hypothesis-lab](a-share-hypothesis-lab/) | 假设库实验室：定性认知 → 带胜率的可验证假设（walk-forward OOS 纪律） | 验证想法、假设库、胜率复测 |
 | [a-share-pit-financial](a-share-pit-financial/) | 财务 PIT 快照与防前视审计：按公告日还原历史时点财务，naive-vs-PIT 泄漏审计 | 财务因子回测、前视偏差 |
 | [a-share-tradability-audit](a-share-tradability-audit/) | 可交易性约束审计：涨停买不进/跌停卖不出/停牌/T+1/碎股逐笔判定 | 回测能成交吗、涨停买不进 |
+
+### 量化研究方法（移植自 quantskills，2026-10）
+
+> 方法论移植自 [quantskills](https://github.com/quantskills/quantskills) 组织的技能仓库：数据层由 PandaData SDK 换为**本地 QuantDB 直读**（CN/HK/US 本地 parquet），脚本「纯标准库引擎 + 容器装配层」双模式（`--demo`/`--input` 宿主机可跑，`--quantdb` 在 quantmind 容器跑）。
+> **许可提示**：各技能许可不同——brinson-performance-attribution / cross-listing-parity / corporate-action-adjustment-auditor / factor-ic-decay / factor-drift-monitor / factor-quality-audit / factor-orthogonalization / portfolio-optimizer / barra-risk-model / transaction-cost-analysis（双源合并）为 GPL-3.0-only；ml-purged-cv 为 MIT；institutional-concentration 源仓库未声明许可（仅方法论改写）；backtesting-bias-avoidance 为 NOASSERTION。对外分发前先读各 SKILL.md「来源与许可」。
+
+| 技能 | 功能 | 触发词示例 |
+|------|------|-----------|
+| [corporate-action-adjustment-auditor](corporate-action-adjustment-auditor/) | 公司行动复权审计：CN 除权日总收益等式、HK/US 跳点与拆股对齐、复权因子断点、双来源重复行 | 复权审计、除权核对、复权因子、除权跳点、拆股 |
+| [factor-ic-decay](factor-ic-decay/) | 因子 IC 衰减诊断：Spearman IC、ICIR、NW-t、滚动/分段稳定性、多周期衰减曲线与半衰期 | IC 衰减、IC 半衰期、ICIR、预测力衰退 |
+| [backtesting-bias-avoidance](backtesting-bias-avoidance/) | 回测偏差审计：前视偏差量化、PBO（CSCV）、DSR、HAC 夏普显著性、成本敏感性、样本外走查 | 回测可信吗、过拟合、PBO、DSR、数据窥探、前视偏差 |
+| [brinson-performance-attribution](brinson-performance-attribution/) | Brinson 业绩归因（Fachler/BHB）：配置/选股/交互三效应、Carino 多期链接、行业聚合 | 业绩归因、配置还是选股、归因残差 |
+| [ml-purged-cv](ml-purged-cv/) | 金融 ML 防泄漏交叉验证：Purged K-Fold、Embargo、CPCV、因果走查（López de Prado 口径） | purged CV、CV 泄漏、embargo、CPCV |
+| [institutional-concentration](institutional-concentration/) | 机构集中度（CCASS 直读）：席位结构面板、HHI、南向持股同日/T-1 双对齐核验 | 机构集中度、CCASS、席位集中度、南向持股核验 |
+| [cross-listing-parity](cross-listing-parity/) | A/H 跨市场平价：全配对溢价表、溢价分布、重算校验（汇率×拆股比） | AH溢价、A+H、溢价合理吗 |
+| [factor-drift-monitor](factor-drift-monitor/) | 因子面板漂移监测：分区连续性/断更、覆盖与缺失率、列集增删与列序变化、PSI/KS 分布漂移、标签回填前沿 | 面板断更、列集变更、缺失率飙升、PSI 漂移、数据哨兵 |
+| [factor-quality-audit](factor-quality-audit/) | 单因子质量裁决：票池/PIT 对齐/IC·IR/换手成本/中性化五道检查，裁决 alpha / 行业暴露 / 泄漏 / 样本幻觉四类 | 因子质检、数据泄漏、未来函数、行业暴露、样本幻觉 |
+| [factor-orthogonalization](factor-orthogonalization/) | 因子正交化/中性化：Löwdin 对称正交、Gram-Schmidt、行业+规模+风格回归残差化（FWL），暴露清零 + IC 保真 | 因子正交化、中性化、残差因子、去行业暴露、因子太像 |
+| [portfolio-optimizer](portfolio-optimizer/) | 组合优化：五种凸目标（min-var/MVO/最大夏普/ERC/最大分散）× 单票上限/行业/暴露/换手约束，事前风险分解 | 组合优化、最优权重、最小方差、风险平价、ERC、换手约束 |
+| [barra-risk-model](barra-risk-model/) | Barra 式多因子风险模型：风格+行业暴露、日度截面 WLS 因子收益、LW 收缩协方差、因子 vs 特异风险分解、极小方差验证 | 风险模型、组合风险、风险分解、因子暴露、特异风险、Ledoit-Wolf、Barra |
+| [transaction-cost-analysis](transaction-cost-analysis/) | 交易成本分析（TCA）：IS 五分解、VWAP/TWAP/到达价对标与超越基准率、参与率-√滑点校准，CN 分钟线直读 | 滑点、交易成本、实施缺口、VWAP 基准、成交复盘 |
 
 ### 通达信（TDX）数据研究套件（45 个，导入自 dsh 技能库）
 

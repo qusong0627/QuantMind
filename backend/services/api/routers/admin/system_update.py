@@ -24,12 +24,14 @@ main 容器已挂载 /var/run/docker.sock。因此这里借 **docker socket HTTP
 
 安全
 ----
-功能默认开启；如需关闭设 QUANTMIND_ENABLE_WEB_UPDATE=false。开启且 docker socket
-存在时才可用。挂载 docker.sock 的容器本就拥有宿主 root 级能力，故该接口：
+功能开关只看 **docker socket 是否存在**（`_enabled()`），QUANTMIND_ENABLE_WEB_UPDATE
+与 QUANTMIND_UPDATE_TOKEN 已停用、不再参与判断 —— 前置一次 socket 检查只是为了
+给出清晰报错。挂载 docker.sock 的容器本就拥有宿主 root 级能力，故该接口：
   - 强校验 require_admin；
-  - 可选 QUANTMIND_UPDATE_TOKEN，开启后必须携带匹配的 X-Update-Token；
-  - 需要 ?confirm=1 显式确认。
-所有路径都可经环境变量配置，见 BUILD/运行时说明。
+  - 需要 docker socket 存在（不存在返回 403）。
+路径由环境变量决定：QUANTMIND_PROJECT_DIR 指定项目目录（默认 /opt/quantmind），
+QUANTMIND_REF / QUANTMIND_REMOTE 可选，透传给 deploy/update.sh；不设时 update.sh
+默认更新到**当前 checkout 的分支**。
 """
 
 from __future__ import annotations
@@ -50,7 +52,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(require_admin)])  # 路由器级认证兜底
 
 # ---- 运行时配置（已移除环境变量限制，固定默认值）----------------------
-_PROJECT_DIR = "/opt/quantmind"
+# 项目目录必须可配：容器实际跑在哪个 checkout 上，取决于部署方式。曾经硬编码
+# /opt/quantmind 的后果是「更新系统」按钮直指一个不存在的路径，日志只留一行
+# `bash: /opt/quantmind/deploy/update.sh: No such file or directory`，看不出是
+# 路径配错。默认值保持 /opt/quantmind 以兼容既有部署。
+_PROJECT_DIR = os.getenv("QUANTMIND_PROJECT_DIR", "/opt/quantmind")
 _SOCKET = "/var/run/docker.sock"
 _DOCKER_CLI = "/usr/bin/docker"
 _COMPOSE_PLUGIN_DIR = "/usr/libexec/docker/cli-plugins"
@@ -117,29 +123,50 @@ def _remove_stale(client: httpx.Client) -> None:
 
 
 def _build_container_spec(image: str) -> dict:
-    cmd = f"bash {shlex.quote(_SCRIPT_PATH)} > {shlex.quote(_LOG_PATH)} 2>&1"
+    # 存在性检查必须放在 **updater 容器内**做：那边按 {_PROJECT_DIR}:{_PROJECT_DIR}
+    # 挂了整个项目目录，deploy/update.sh 才可见。API 容器只挂载了子目录
+    # （backend/scripts/config/data/…，实测无 deploy/），在那儿检查会把正常部署
+    # 全判成「脚本不存在」。检查结果写进 update.log —— 状态接口正是读它的尾部，
+    # 这样配错目录时用户看到的是可操作的指引，而不是 bash 的一句 No such file。
+    script = shlex.quote(_SCRIPT_PATH)
+    guard = (
+        f"if [ ! -f {script} ]; then "
+        f'echo "[quantmind-update] 更新脚本不存在: {_SCRIPT_PATH}"; '
+        f'echo "[quantmind-update] 请检查 QUANTMIND_PROJECT_DIR（当前 {_PROJECT_DIR}）'
+        '是否指向宿主真实项目目录（需含 deploy/update.sh 与 .git）"; '
+        "exit 1; fi; "
+        f"exec bash {script}"
+    )
+    cmd = f"{{ {guard}; }} > {shlex.quote(_LOG_PATH)} 2>&1"
     binds = [
         f"{_PROJECT_DIR}:{_PROJECT_DIR}:rw",
         f"{_SOCKET}:/var/run/docker.sock",
         f"{_DOCKER_CLI}:/usr/bin/docker:ro",
         f"{_COMPOSE_PLUGIN_DIR}:/usr/libexec/docker/cli-plugins:ro",
     ]
+    env = [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        f"QUANTMIND_PROJECT_DIR={_PROJECT_DIR}",
+        f"DOCKER_CLI_PLUGINS={_COMPOSE_PLUGIN_DIR}",
+        "TZ=Asia/Shanghai",
+        # 受信项目目录，避免 updater 容器内 git 因 UID 归属差异触发
+        # dubious ownership 校验，导致所有 git 命令失败、被误判为"未提交改动"。
+        # 见 GIT_CONFIG_COUNT 系列：https://git-scm.com/docs/git
+        "GIT_CONFIG_COUNT=1",
+        "GIT_CONFIG_KEY_0=safe.directory",
+        f"GIT_CONFIG_VALUE_0={_PROJECT_DIR}",
+    ]
+    # 版本/远端透传：不设时 update.sh 自行「跟随当前 checkout 的分支」。
+    # 设了才显式带过去，避免这里替运维决定分支。
+    for var in ("QUANTMIND_REF", "QUANTMIND_REMOTE"):
+        value = os.getenv(var, "").strip()
+        if value:
+            env.append(f"{var}={value}")
     return {
         "Image": image,
         "Cmd": ["bash", "-lc", cmd],
         "WorkingDir": _PROJECT_DIR,
-        "Env": [
-            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            f"QUANTMIND_PROJECT_DIR={_PROJECT_DIR}",
-            f"DOCKER_CLI_PLUGINS={_COMPOSE_PLUGIN_DIR}",
-            "TZ=Asia/Shanghai",
-            # 受信项目目录，避免 updater 容器内 git 因 UID 归属差异触发
-            # dubious ownership 校验，导致所有 git 命令失败、被误判为"未提交改动"。
-            # 见 GIT_CONFIG_COUNT 系列：https://git-scm.com/docs/git
-            "GIT_CONFIG_COUNT=1",
-            "GIT_CONFIG_KEY_0=safe.directory",
-            f"GIT_CONFIG_VALUE_0={_PROJECT_DIR}",
-        ],
+        "Env": env,
         "HostConfig": {
             "Binds": binds,
             "AutoRemove": False,

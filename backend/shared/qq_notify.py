@@ -18,6 +18,14 @@ appId/owner，无需向腾讯重新绑定）。本仓为公共仓库：appId / s
 * ``notify`` 不抛异常，只写日志；markdown 被拒时自动剥 ``**`` 降级纯文本；
 * 告警接线走 :func:`alert_async`（daemon 线程旁路，调用方零阻塞）；
 * 令牌缓存在盘上（多进程/重启共享）+ 进程内，过期自动重取。
+
+分市场通道（2026-10-08，用户裁决「每市场一台官方机器人」）
+--------------------------------------------------------
+默认通道 = 既有机器人（``QQ_BOT_APP_ID/SECRET/OWNER_OPENID``）；``hk``/``us``
+为市场通道，各用独立机器人三键（``QQ_BOT_HK_*`` / ``QQ_BOT_US_*``，写入
+config/runtime.env，``set_secret`` 热生效）。市场通道三键未配齐 → **回退默认
+通道**发送且标题自动带 ``[港股]/[美股]`` 前缀——宁可落到旧聊天窗，不可静默
+丢失。令牌缓存按通道独立（``qqbot_token.json`` → ``qqbot_token_hk.json``）。
 """
 
 from __future__ import annotations
@@ -45,23 +53,54 @@ APP_ID_KEY = "QQ_BOT_APP_ID"
 APP_SECRET_KEY = "QQ_BOT_APP_SECRET"
 OWNER_OPENID_KEY = "QQ_BOT_OWNER_OPENID"
 
+_DEFAULT_KEYS = (APP_ID_KEY, APP_SECRET_KEY, OWNER_OPENID_KEY)
+
+#: 分市场通道 → 凭据三键。三键齐备才走本通道，否则回退默认（见 _resolve_channel）。
+#: us 通道先行落地：用户注册好第二台机器人后写入三键即生效，代码零改动。
+_MARKET_CHANNELS: dict[str, tuple[str, str, str]] = {
+    "hk": ("QQ_BOT_HK_APP_ID", "QQ_BOT_HK_APP_SECRET", "QQ_BOT_HK_OWNER_OPENID"),
+    "us": ("QQ_BOT_US_APP_ID", "QQ_BOT_US_APP_SECRET", "QQ_BOT_US_OWNER_OPENID"),
+}
+_CHANNEL_TAG = {"hk": "[港股]", "us": "[美股]"}
+
 
 def _cfg(key: str) -> str:
     """读取配置（env > runtime.env），测试可经 monkeypatch 注入。"""
     return get_secret(key, "").strip()
 
 
-def is_configured() -> bool:
-    return bool(_cfg(APP_ID_KEY) and _cfg(APP_SECRET_KEY) and _cfg(OWNER_OPENID_KEY))
+def _resolve_channel(channel: str | None) -> tuple[tuple[str, str, str], str]:
+    """通道归一 →（凭据键组, 实际生效通道）。
+
+    请求市场通道但三键未配齐 → 回退默认通道（生效通道 = ``default``），
+    调用方据生效通道决定是否加市场前缀。
+    """
+    ch = str(channel or "default").strip().lower() or "default"
+    keys = _MARKET_CHANNELS.get(ch)
+    if keys and all(_cfg(k) for k in keys):
+        return keys, ch
+    if keys:
+        logger.warning("[QQNotify] %s 通道凭据未配齐，回退默认通道", ch)
+    return _DEFAULT_KEYS, "default"
 
 
-def _token_cache_path() -> Path:
-    return Path(os.getenv("QM_QQ_TOKEN_CACHE", DEFAULT_TOKEN_CACHE))
+def is_configured(channel: str = "default") -> bool:
+    """通道是否可发（市场通道未配齐但默认通道在 → 也算可发：回退 + 前缀）。"""
+    keys, _ = _resolve_channel(channel)
+    return all(_cfg(k) for k in keys)
 
 
-def _read_cached_token() -> str | None:
+def _token_cache_path(channel: str = "default") -> Path:
+    base = Path(os.getenv("QM_QQ_TOKEN_CACHE", DEFAULT_TOKEN_CACHE))
+    if channel == "default":
+        return base
+    # 分市场通道令牌缓存独立：qqbot_token.json → qqbot_token_hk.json
+    return base.with_name(f"{base.stem}_{channel}{base.suffix}")
+
+
+def _read_cached_token(cache: Path) -> str | None:
     try:
-        data = json.loads(_token_cache_path().read_text(encoding="utf-8"))
+        data = json.loads(cache.read_text(encoding="utf-8"))
         if float(data.get("expires_at") or 0) > time.time() + 120:
             token = str(data.get("token") or "")
             return token or None
@@ -70,11 +109,10 @@ def _read_cached_token() -> str | None:
     return None
 
 
-def _write_cached_token(token: str, expires_in: float) -> None:
+def _write_cached_token(cache: Path, token: str, expires_in: float) -> None:
     try:
-        path = _token_cache_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
             json.dumps({"token": token, "expires_at": time.time() + expires_in - 60}),
             encoding="utf-8",
         )
@@ -82,16 +120,23 @@ def _write_cached_token(token: str, expires_in: float) -> None:
         pass  # 缓存在盘上只是加速项，写失败不影响发送
 
 
-def _get_token() -> str:
-    """取 access_token（缓存优先）。失败抛异常，由 notify 的统一兜底接住。"""
-    cached = _read_cached_token()
+def _get_token(
+    channel: str = "default", keys: tuple[str, str, str] | None = None
+) -> str:
+    """取通道 access_token（缓存优先）。失败抛异常，由 notify 的统一兜底接住。
+
+    ``keys`` 缺省时按通道自行解析（老调用点 ``_get_token()`` 兼容默认通道）。
+    """
+    if keys is None:
+        keys, channel = _resolve_channel(channel)
+    cache = _token_cache_path(channel)
+    cached = _read_cached_token(cache)
     if cached:
         return cached
-    secret = _cfg(APP_SECRET_KEY)
-    app_id = _cfg(APP_ID_KEY)
+    app_id, secret = _cfg(keys[0]), _cfg(keys[1])
     if not secret or not app_id:
         raise RuntimeError(
-            f"未配置 {APP_ID_KEY}/{APP_SECRET_KEY}（写入 config/runtime.env）"
+            f"未配置 {keys[0]}/{keys[1]}（写入 config/runtime.env）"
         )
     import requests
 
@@ -105,7 +150,7 @@ def _get_token() -> str:
     token = str(data.get("access_token") or "")
     if not token:
         raise RuntimeError(f"令牌接口未返回 access_token: {str(data)[:200]}")
-    _write_cached_token(token, float(data.get("expires_in") or 7200))
+    _write_cached_token(cache, token, float(data.get("expires_in") or 7200))
     return token
 
 
@@ -122,7 +167,7 @@ def _api_code(body: object) -> int:
     return 0
 
 
-def _send_message(payload: dict) -> dict:
+def _send_message(payload: dict, channel: str, keys: tuple[str, str, str]) -> dict:
     """发一条 C2C 消息给所有者，并**校验接口的业务返回码**。
 
     为什么要看 body：腾讯的失败**不一定给非 2xx**——配额/频控这类错误可以是
@@ -135,15 +180,15 @@ def _send_message(payload: dict) -> dict:
     """
     import requests
 
-    openid = _cfg(OWNER_OPENID_KEY)
+    openid = _cfg(keys[2])
     if not openid:
-        raise RuntimeError(f"未配置 {OWNER_OPENID_KEY}（写入 config/runtime.env）")
+        raise RuntimeError(f"未配置 {keys[2]}（写入 config/runtime.env）")
     resp = requests.post(
         SEND_URL.format(openid=openid),
         timeout=TIMEOUT_SECONDS,
         headers={
             # v2 要求 QQBot 前缀（Bearer → 11241）
-            "Authorization": f"QQBot {_get_token()}",
+            "Authorization": f"QQBot {_get_token(channel, keys)}",
             "Content-Type": "application/json",
         },
         json=payload,
@@ -164,29 +209,43 @@ def _send_message(payload: dict) -> dict:
     return body if isinstance(body, dict) else {}
 
 
-def send_text(content: str) -> dict:
-    """发一条 C2C 纯文本给所有者；失败抛异常（notify 层兜底）。"""
+def send_text(content: str, channel: str = "default") -> dict:
+    """发一条 C2C 纯文本；失败抛异常（notify 层兜底）。"""
+    keys, effective = _resolve_channel(channel)
     return _send_message(
         {
             "content": content,
             "msg_type": 0,
             "msg_seq": int(time.time() * 1000) % (2**31),
-        }
+        },
+        effective,
+        keys,
     )
 
 
-def send_markdown(content: str) -> dict:
+def send_markdown(content: str, channel: str = "default") -> dict:
     """发一条 C2C markdown；失败抛异常（notify 层会降级纯文本重发）。"""
-    return _send_message({"msg_type": 2, "markdown": {"content": content}})
+    keys, effective = _resolve_channel(channel)
+    return _send_message(
+        {"msg_type": 2, "markdown": {"content": content}}, effective, keys
+    )
 
 
 def _strip_bold(text: str) -> str:
     return text.replace("**", "")
 
 
-def notify(title: str, content: str = "") -> bool:
-    """最外层安全网：发 QQ 通知。任何失败只写日志，返回 False，绝不抛异常。"""
-    if not is_configured():
+def notify(title: str, content: str = "", channel: str = "default") -> bool:
+    """最外层安全网：发 QQ 通知。任何失败只写日志，返回 False，绝不抛异常。
+
+    ``channel``：``default``/``hk``/``us``；市场通道未配齐时回退默认通道并给
+    标题加 ``[港股]/[美股]`` 前缀（见模块 docstring）。
+    """
+    requested = str(channel or "default").strip().lower() or "default"
+    keys, effective = _resolve_channel(requested)
+    if requested != "default" and effective == "default":
+        title = f"{_CHANNEL_TAG.get(requested, f'[{requested}]')} {title}"
+    if not all(_cfg(k) for k in keys):
         logger.info("[QQNotify] 未配置凭据，跳过推送: %s", title)
         return False
     body = "\n".join(line for line in (content or "").splitlines() if line.strip())
@@ -194,16 +253,31 @@ def notify(title: str, content: str = "") -> bool:
     if len(message) > MAX_CONTENT_LEN:
         message = message[: MAX_CONTENT_LEN - 10] + "…"
     try:
-        send_markdown(message)
+        send_markdown(message, channel=effective)
     except Exception as exc:  # noqa: BLE001 - 降级重发，不外抛
         logger.warning("[QQNotify] markdown 推送失败，降级纯文本: %s → %s", title, exc)
         try:
-            send_text(_strip_bold(message))
+            send_text(_strip_bold(message), channel=effective)
         except Exception as exc2:  # noqa: BLE001
             logger.warning("[QQNotify] 推送失败: %s → %s", title, exc2)
             return False
     logger.info("[QQNotify] 已推送: %s", title)
     return True
+
+
+def notify_async(title: str, content: str = "", channel: str = "default") -> None:
+    """普通事件旁路：daemon 线程发送，调用方零阻塞（请求/交易热路径用）。
+
+    与 :func:`alert_async` 分工：本函数**不做等级过滤**，供非告警的常态事件
+    （委托回执/分析摘要）使用；告警语义仍走 alert_async。
+    """
+    threading.Thread(
+        target=notify,
+        args=(title, content),
+        kwargs={"channel": channel},
+        name="qq-notify-event",
+        daemon=True,
+    ).start()
 
 
 def alert_async(
@@ -213,6 +287,7 @@ def alert_async(
     content: str = "",
     alert_type: str = "system",
     force: bool = False,
+    channel: str = "default",
 ) -> bool:
     """告警旁路：warning/error 等级才外发，daemon 线程发送、调用方零阻塞。
 
@@ -222,16 +297,19 @@ def alert_async(
     ``force=True`` 供**告警恢复类**事件显式越过等级过滤：等级过滤的本意是
     不让日常 success（回测完成/成交回执）淹没手机，而「掉线后恢复」是掉线
     告警的闭环，必须送到同一面。普通 success 生产者不得使用。
+
+    ``channel`` 同 :func:`notify`（分市场机器人；未配齐回退默认 + 市场前缀）。
     """
     if not force and str(level or "").strip().lower() not in ALERT_LEVELS:
         return False
-    if not is_configured():
+    if not is_configured(channel):
         logger.info("[QQNotify] 告警未推送（凭据未配置）: %s", title)
         return False
     prefix = f"[{alert_type}] " if alert_type and alert_type != "system" else ""
     threading.Thread(
         target=notify,
         args=(f"{prefix}{title}", content),
+        kwargs={"channel": channel},
         name="qq-notify-alert",
         daemon=True,
     ).start()

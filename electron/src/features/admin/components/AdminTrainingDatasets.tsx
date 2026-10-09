@@ -64,6 +64,24 @@ type FactorDirectoryRow = {
   mapping?: Mapping;
 };
 
+/**
+ * 数一份目录版本里**启用**的特征数（草稿与已发布版本同一形状，一个函数通吃）。
+ *
+ * 口径必须是 enabled，**不能**用后端给的 `feature_count`：那个字段是
+ * `sum(category.feature_count)`，而计数器在遍历 mapping 时每个都 +1，
+ * 不按 enabled 过滤（`quantdb_factor_catalog.py:471`）；训练侧却只用启用的
+ * （`trainingUtils.tsx:1145` 的 `feature.enabled !== false`）。发布确认里拿
+ * 含 disabled 的数去比大小，会在口径其实没变时报「减少」、真减少时又少报。
+ *
+ * 这里用 `!== false` 而不是真值判断，是为了和训练侧**逐字同口径**：
+ * 后端两个入口都发 `bool(...)`，正常不会有 undefined，但比较口径一旦分家，
+ * 这个确认框就开始撒谎。
+ */
+const countEnabledFeatures = (catalog: any): number =>
+  (catalog?.categories || [])
+    .flatMap((category: any) => category.features || [])
+    .filter((feature: any) => feature.enabled !== false).length;
+
 function unavailableSourceHint(status: Record<string, any>, sourceLabel: string): string {
   if (!status.files) {
     return `尚未同步 ${sourceLabel} 数据`;
@@ -173,8 +191,34 @@ export const AdminTrainingDatasets: React.FC = () => {
         setPublished(await adminService.getQuantDBFactorCatalog(activeSource, undefined, market));
       } catch { setPublished(null); }
       if (draft) {
+        // 手上已经有草稿：只按 id 刷新它，**不**再去问「这个库有哪些版本」。
+        // 无条件重新认领的话，一个后来出现的更新草稿会把用户正在编辑的这份顶掉，
+        // 而左侧目录里已经改好的分类与中文解释会**静默失去落点**（用户不会收到
+        // 任何提示，只会发现改动没了）。
         try { setDraft(await adminService.getQuantDBFactorCatalog(activeSource, draft.version_id, market)); }
         catch { setDraft(null); }
+      } else {
+        // 首屏 / 换库：认领该来源库现有的最新草稿。
+        //
+        // 这一支此前根本不存在——取草稿的逻辑只挂在 `if (draft)` 下，而首屏 `draft`
+        // 恒为 null。于是本页**只认自己当场新建的草稿**，别处写进来的（因子研究页
+        // 「注册到训练目录」就是典型）一律看不见；而发布按钮只在这一页，整条链就
+        // 死在这里：注册进去了 → 看不见 → 发布不了 → 训练永远用不上。
+        try {
+          const versions = await adminService.listQuantDBFactorVersions(activeSource, market);
+          const existing = (versions?.versions || []).find((v: any) => v.status === 'draft');
+          // 认领失败就保持「未创建」，不静默假装成功。
+          // 这里不会和上面的分支来回弹成死循环：认领失败时 draft 本就是 null，
+          // 再置一次 null 不触发重渲染，依赖不变也就不会重跑。
+          setDraft(
+            existing
+              ? await adminService.getQuantDBFactorCatalog(activeSource, existing.version_id, market)
+              : null,
+          );
+        } catch (error: any) {
+          message.error(error?.response?.data?.detail || '读取目录版本失败，草稿可能未显示');
+          setDraft(null);
+        }
       }
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '加载训练数据集失败');
@@ -236,14 +280,51 @@ export const AdminTrainingDatasets: React.FC = () => {
     }
   };
 
-  const publish = async () => {
+  const publish = () => {
     if (!draft) return;
-    try {
-      await adminService.publishQuantDBFactorDraft(draft.version_id);
-      message.success('映射版本已发布；仅后续训练任务会使用它');
-      setDraft(null);
-      await load();
-    } catch (error: any) { message.error(error?.response?.data?.detail || '发布失败'); }
+    // 发布是**即时改变线上口径**的动作：后端把当前 published 转 archived、
+    // 把这份草稿扶正（quantdb_factor_catalog.py:866-890），此后新的训练任务
+    // 就用新口径了。此前这里直接 POST、没有确认——但直到草稿能在这页显示之前，
+    // 这个按钮根本够不着，所以它其实是修复草稿发现之后**才第一次真正可点**的，
+    // 确认框是随那次修复一起必须补上的。
+    const nextEnabled = countEnabledFeatures(draft);
+    const currentEnabled = countEnabledFeatures(published);
+    // 只在「有旧版本可比」且「确实变小」时告警。首次发布（published 为空）
+    // 不是缩小，不该吓人。
+    const shrinks = Boolean(published) && nextEnabled < currentEnabled;
+    Modal.confirm({
+      title: '发布这份草稿？',
+      okText: '发布',
+      cancelText: '取消',
+      okButtonProps: shrinks ? { danger: true } : undefined,
+      content: <div className="space-y-2">
+        <div>
+          将把「<Text strong>{draft.version_name}</Text>」发布为线上版本
+          （启用 <Text strong>{nextEnabled}</Text> 个特征）
+          {published ? <>，替换当前「<Text strong>{published.version_name}</Text>」</> : null}。
+          仅后续训练任务使用它。
+        </div>
+        {shrinks ? (
+          <div className="text-red-600">
+            注意：线上启用特征将从 <Text strong>{currentEnabled}</Text> 个
+            减少到 <Text strong>{nextEnabled}</Text> 个。
+          </div>
+        ) : null}
+        {published ? (
+          <div className="text-xs text-gray-500">
+            当前版本会转为「已归档」，仍保留在库里，可再复制为草稿发回来。
+          </div>
+        ) : null}
+      </div>,
+      onOk: async () => {
+        try {
+          await adminService.publishQuantDBFactorDraft(draft.version_id);
+          message.success('映射版本已发布；仅后续训练任务会使用它');
+          setDraft(null);
+          await load();
+        } catch (error: any) { message.error(error?.response?.data?.detail || '发布失败'); }
+      },
+    });
   };
 
   const clonePublished = async () => {
@@ -317,7 +398,7 @@ export const AdminTrainingDatasets: React.FC = () => {
       })}
     </Row>
 
-    <Alert type="info" showIcon message="单次任务只能选择一个数据源" description="默认 L1 因子。L1、L2 是独立训练源，禁止跨源自由拼接；数据或 OHLCV 覆盖不完整时，直读训练入口会拒绝提交。" />
+    <Alert type="info" showIcon message="每份目录版本只对应一个来源库" description="默认 L1 因子。跨源训练不在本页拼接：请在「模型训练」页选好锚库后，用「附加因子库」加入其他已发布目录的库（各库版本仍是各自独立发布的这一份）。数据或 OHLCV 覆盖不完整时，直读训练入口会拒绝提交。" />
 
     <Row gutter={[16, 16]}>
       <Col xs={24} lg={18}><Card title="因子目录" extra={<Space><Input allowClear value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索因子、分类或中文解释" style={{ width: 220 }} /><Tag>{factorRows.length} 个已发现字段</Tag>{draft && <Tag color="orange">{pending.length} 个待分类</Tag>}</Space>}>

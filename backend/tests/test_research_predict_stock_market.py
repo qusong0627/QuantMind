@@ -105,7 +105,7 @@ def _us_model_with_pred() -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "SELECT model_id, storage_path FROM qm_user_models "
-                "WHERE COALESCE(metadata_json->>'market','CN') = %s AND status IN ('ready','active') "
+                "WHERE qm_market_of(metadata_json) = %s AND status IN ('ready','active') "
                 "ORDER BY updated_at DESC",
                 ["US"],
             )
@@ -302,7 +302,7 @@ def _find_cn_model() -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "SELECT model_id, storage_path FROM qm_user_models "
-                "WHERE COALESCE(metadata_json->>'market','CN') = 'CN' AND status IN ('ready','active') "
+                "WHERE qm_market_of(metadata_json) = 'CN' AND status IN ('ready','active') "
                 "ORDER BY updated_at DESC LIMIT 30"
             )
             rows = [dict(r) for r in cur.fetchall()]

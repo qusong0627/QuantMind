@@ -434,6 +434,83 @@ async def test_run_all_isolates_card_failures(monkeypatch):
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_run_model_card_keeps_missing_artifact_models(monkeypatch):
+    """清单里有 meta_path=None 的行时，**其余用户模型必须照评**。
+
+    回归（2026-10-09 实锤）：旧实现 `Path(item["meta_path"])` 遇 None 整段抛错被
+    except 吞掉——4/90 个清理过产物的模型把全部 90 个用户模型从每日 EOD 评分里
+    静默剔除了（缺省卡也从未写回，旧 A 级永远留在榜上）。
+    """
+    from backend.scripts.eval import model_card
+    from backend.scripts.eval import run_all as run_all_mod
+
+    monkeypatch.setattr(model_card, "list_production_models", lambda limit=50: ["model_qlib"])
+
+    async def _user_models():
+        return [
+            {"model_id": "gone", "meta_path": None, "storage_path": "/app/models/users/u/p/gone"},
+            {"model_id": "m1", "meta_path": "/tmp/x/m1/metadata.json", "storage_path": ""},
+        ]
+
+    monkeypatch.setattr(model_card, "list_user_models", _user_models)
+    monkeypatch.setattr(
+        model_card,
+        "score_model",
+        lambda model_id, meta_path=None: {
+            "object_type": "model",
+            "object_id": model_id,
+            "score": 61.0,
+            "grade": "C",
+            "dimensions": {},
+            "inputs_version": {},
+        },
+    )
+    saved: list[dict] = []
+
+    async def _fake_save(result, *, snapshot_date=None):
+        saved.append(result)
+        return True
+
+    monkeypatch.setattr(run_all_mod, "_save_result", _fake_save)
+
+    summary = await run_all_mod._run_model_card(save=True)
+
+    # 缺省卡在最前 + 生产模型 + 用户模型，一个都没被吞
+    assert [r["object_id"] for r in saved] == ["gone", "model_qlib", "m1"]
+    assert saved[0].get("artifact_missing") is True and saved[0]["score"] is None
+    assert summary["n"] == 3 and summary["scored"] == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_save_result_writes_missing_artifact_card(monkeypatch):
+    """缺省卡（score=None + artifact_missing）必须写回；普通无分结果仍不写。"""
+    from backend.scripts.eval import run_all as run_all_mod
+    from backend.shared import eval_contract
+
+    captured: list[dict] = []
+
+    async def _fake_save_eval_score(**kwargs):
+        captured.append(kwargs)
+        return True
+
+    monkeypatch.setattr(eval_contract, "save_eval_score", _fake_save_eval_score)
+
+    ok = await run_all_mod._save_result(
+        {"object_type": "model", "object_id": "gone", "score": None, "artifact_missing": True}
+    )
+    assert ok is True and captured[0]["score"] is None
+    assert (
+        await run_all_mod._save_result(
+            {"object_type": "model", "object_id": "x", "score": None}
+        )
+        is False
+    )
+    assert len(captured) == 1
+
+
+@pytest.mark.unit
 def test_eval_worker_config_and_time(monkeypatch):
     from backend.services.trade.services import eval_scores_service as svc
 

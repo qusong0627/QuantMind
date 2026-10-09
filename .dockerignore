@@ -90,3 +90,5 @@ dexter-finance/
 tools/
 openbb-cn/
 user_pools_local/
+# pynecore 宿主运行时（122MB，宿主 worker 专用；容器里没有 bwrap，不执行模型产物）
+pine_lab/

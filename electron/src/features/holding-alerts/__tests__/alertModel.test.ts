@@ -43,6 +43,7 @@ const mkItem = (over: Partial<HoldingAlertItem> = {}): HoldingAlertItem => ({
 describe('展示口径', () => {
   test('未知 kind 原样回显而不是显示空白', () => {
     expect(kindLabel('score_cross_zero')).toBe('分数转负');
+    expect(kindLabel('score_drop')).toBe('分数骤降');
     expect(kindLabel('unknown_kind')).toBe('unknown_kind');
     expect(kindLabel('')).toBe('预警');
   });

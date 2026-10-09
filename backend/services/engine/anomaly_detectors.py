@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Any
 from collections.abc import Mapping, Sequence
@@ -315,6 +315,61 @@ def _iso_date(value: Any) -> date | None:
         return None
 
 
+def attribute_ic_anomaly(
+    detection: Detection,
+    *,
+    current_state: str | None,
+    states: Mapping[str, str] | None,
+    daily_ic: Sequence[Any] | None,
+    k: float = 2.0,
+) -> Detection:
+    """§6.4 regime 归因：当期 IC 落在「当前状态的历史弱区」kσ 内 → 降级 info + 标注。
+
+    规则（设计 §6.4，纯函数）：
+    - **必要条件：当日 regime 可得**（生效日口径——状态由截至前一交易日的行情算出，
+      前一交易日 16:30 已落库，盘前 08:00 可用，无前视）。缺任何一环 → 原样返回
+      （照常告警：证不出「在期望内」就不降级，这是「用 regime 降误报」与
+      「用 regime 掩盖真断链」的分界）。
+    - 当前状态是该模型历史**弱区**（桶 mean IC ≤ 0 且 ≥15 天，`regime_buckets`
+      唯一谓词）且当期 IC（detection.metrics.ic_short，即触发告警的短窗 IC）
+      落在弱区历史分布 kσ 内 → 降级 ``LEVEL_INFO``，描述附归因、metrics 附弱区统计；
+    - 否则原样返回（severity 不变）。
+    """
+    if detection.kind != KIND_MODEL_IC_DROP:
+        return detection
+    if not current_state or not states or not daily_ic:
+        return detection
+    from backend.shared.regime_buckets import bucket_of, within_expectation
+
+    stats = bucket_of(daily_ic, dict(states), str(current_state))
+    if not stats.get("weak"):
+        return detection
+    current = _f((detection.metrics or {}).get("ic_short"))
+    if current is None or not within_expectation(current, stats, k=k):
+        return detection
+    attribution = {
+        "state": str(current_state),
+        "bucket_mean_ic": stats["mean_ic"],
+        "bucket_ic_std": stats["ic_std"],
+        "bucket_days": stats["n_days"],
+        "current_ic": current,
+        "k": k,
+    }
+    note = (
+        f"regime 归因（弱区，在期望内）：当前 {current_state} 属该模型历史弱区"
+        f"（桶 mean IC={stats['mean_ic']}，{stats['n_days']} 天），"
+        f"当期 IC={current:+.3f} 在弱区 {k:g}σ 内——该状态下无正向预测力，非模型失能"
+    )
+    metrics = dict(detection.metrics or {})
+    metrics["regime_attribution"] = attribution
+    return replace(
+        detection,
+        severity=LEVEL_INFO,
+        description=f"{detection.description}；{note}",
+        metrics=metrics,
+    )
+
+
 def detect_model_anomaly(
     model_id: str,
     ic_stats: Mapping[str, Any],
@@ -326,6 +381,7 @@ def detect_model_anomaly(
     min_samples: int = 5,
     stale_after_days: int = 21,
     today: date | None = None,
+    regime_context: Mapping[str, Any] | None = None,
 ) -> list[Detection]:
     """模型异常：短窗 IC 低于绝对阈，或相对长窗骤降。
 
@@ -338,6 +394,10 @@ def detect_model_anomaly(
     lag+horizon+同步 个交易日（T+10 模型可达 ~3 周），故阈值须覆盖该滞后，
     默认 21 天；0 = 关闭闸门。无 ``latest_ic_date`` / 无 ``today`` 时无从判断
     时效，维持原判据（宁报警不静默吞）。
+
+    ``regime_context``（可选，§6.4）：``{current_state, states, daily_ic}``——
+    命中「该模型历史弱区 + 当期 IC 在 2σ 内」时降级 info（见
+    :func:`attribute_ic_anomaly`）；缺省 = 不做归因（行为与旧版一致）。
     """
     out: list[Detection] = []
     latest = _iso_date((ic_stats or {}).get("latest_ic_date"))
@@ -365,17 +425,24 @@ def detect_model_anomaly(
         desc += f"（相对骤降 > {drop_ratio_max:.0%}）"
     if latest is not None:
         desc += f"（数据截至 {latest.isoformat()}）"
-    out.append(
-        Detection(
-            kind=KIND_MODEL_IC_DROP,
-            subject=str(model_id),
-            severity=severity,
-            title=f"模型 {model_id} IC 异常",
-            description=desc,
-            metrics={"ic_short": short, "ic_long": long, "short_window": short_window,
-                     "latest_ic_date": (ic_stats or {}).get("latest_ic_date")},
-            targets=(str(model_id),),
-            actions_hint=("model_review",),
-        )
+    detection = Detection(
+        kind=KIND_MODEL_IC_DROP,
+        subject=str(model_id),
+        severity=severity,
+        title=f"模型 {model_id} IC 异常",
+        description=desc,
+        metrics={"ic_short": short, "ic_long": long, "short_window": short_window,
+                 "latest_ic_date": (ic_stats or {}).get("latest_ic_date")},
+        targets=(str(model_id),),
+        actions_hint=("model_review",),
     )
+    # §6.4 归因在**发报前**：弱区内在期望 → 降级 info，否则原样（见 attribute_ic_anomaly）
+    if regime_context:
+        detection = attribute_ic_anomaly(
+            detection,
+            current_state=regime_context.get("current_state"),
+            states=regime_context.get("states"),
+            daily_ic=regime_context.get("daily_ic"),
+        )
+    out.append(detection)
     return out

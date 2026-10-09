@@ -115,7 +115,9 @@ def test_realtime_writer_includes_contract_columns():
     src = (_BACKEND / "services/engine/routers/realtime_contract.py").read_text(encoding="utf-8")
     assert "rank_pct" in src and "SOURCE_REALTIME" in src
     assert "ensure_signal_contract_columns_async()" in src
-    assert '"market": normalize_market(item.market or item.universe_tag)' in src
+    # §6.4 起 market 先归一进 item_market（regime 派生同用），再进 INSERT 参数
+    assert "item_market = normalize_market(item.market or item.universe_tag)" in src
+    assert '"market": item_market' in src
 
 
 def test_migration_is_idempotent_and_db_init_in_sync():

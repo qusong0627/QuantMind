@@ -263,6 +263,52 @@ def _persist_series(model_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
     return light
 
 
+def _regime_dependency(
+    model_id: str, meta: dict[str, Any], series_payload: Any
+) -> dict[str, Any]:
+    """「状态依赖」区块（P3 §6.3）：daily IC × ``qm_regime_daily`` 按信号日 join。
+
+    缺任何一环都如实降级成 ``{available: False, reason}``——不猜、不补、不拿
+    000300 冒充；区块缺省绝不拖垮评分本身。
+    """
+    from backend.shared.market_regime import REGIME_INDEX_BY_MARKET
+    from backend.shared.model_registry import _model_market_of
+    from backend.shared.regime_buckets import compute_regime_block
+
+    market = _model_market_of({"model_id": model_id, "metadata_json": meta})
+    if market not in REGIME_INDEX_BY_MARKET:
+        return {
+            "available": False,
+            "market": market,
+            "reason": f"{market} 无 regime 指数口径（诚实缺省，不拿 000300 冒充）",
+        }
+    points = ((series_payload or {}).get("series") or {}).get("daily_ic") or []
+    if not points:
+        return {
+            "available": False,
+            "market": market,
+            "reason": "无逐日 IC 序列（只有 pred.parquet 一级证据产序列；见 series_sidecar.note）",
+        }
+    try:
+        from backend.shared.regime_daily_store import load_states_sync
+
+        states = load_states_sync(market)
+    except Exception as exc:  # noqa: BLE001 — 区块缺省，评分照常
+        return {"available": False, "market": market, "reason": f"regime 时间线不可读: {exc}"}
+    if not states:
+        return {
+            "available": False,
+            "market": market,
+            "reason": "qm_regime_daily 无行（回填未跑：regime_backfill.py）",
+        }
+    return {
+        "available": True,
+        **compute_regime_block(
+            points, states, market=market, index=REGIME_INDEX_BY_MARKET[market]
+        ),
+    }
+
+
 def score_model(model_id: str, *, meta_path: Path | None = None) -> dict[str, Any]:
     meta_file = meta_path or (PRODUCTION_DIR / model_id / "metadata.json")
     if not meta_file.is_file():
@@ -276,6 +322,11 @@ def score_model(model_id: str, *, meta_path: Path | None = None) -> dict[str, An
     real_dims, evidence = resolve_dims(
         model_id, meta=meta, model_dir=meta_file.parent, collect_series=True
     )
+    # 状态依赖区块（§6.3）：随侧车落盘（series 载荷 `regime` 键）——
+    # 先算再注入，原始载荷是新 dict，不就地改共享对象。
+    regime_block = _regime_dependency(model_id, meta, evidence.get("series"))
+    if isinstance(evidence.get("series"), dict):
+        evidence["series"] = {**evidence["series"], "regime": regime_block}
     dims = [score_oos(metrics)] + [real_dims[key] for key in DIM_ORDER]
     combined = combine_dimension_scores(dims)
     return {
@@ -296,6 +347,9 @@ def score_model(model_id: str, *, meta_path: Path | None = None) -> dict[str, An
             # 长序列在此**已摘除**：它走 `data/eval_series/model/<id>.json`，
             # 进了这里就等于每次列表刷新都拖着上千点走。
             "evidence": _persist_series(model_id, evidence),
+            # 「状态依赖」区块（§6.3）：小载荷（桶统计+最差月+覆盖计数），
+            # 与 evidence 同乘 inputs_version 进 eval_scores；长序列仍在侧车。
+            "regime_dependency": regime_block,
         },
         **combined,
     }
@@ -317,6 +371,27 @@ def render_card(result: dict[str, Any]) -> str:
         )
     if result.get("missing_dims"):
         lines.append(f"缺省维度（权重归一）: {result['missing_dims']}")
+    regime = (result.get("inputs_version") or {}).get("regime_dependency") or {}
+    if regime.get("available"):
+        from backend.shared.regime_buckets import MIN_BUCKET_DAYS
+
+        worst = regime.get("worst_month") or {}
+        lines.append(
+            "状态依赖: 最差月 "
+            + (
+                f"{worst.get('month')} IC={worst.get('mean_ic')}（{worst.get('n_days')} 天）"
+                if worst.get("month")
+                else "—"
+            )
+            + f" ｜ 月间 std {regime.get('month_std')}（{regime.get('n_months')} 个月）"
+        )
+        if regime.get("weak_buckets"):
+            lines.append(
+                f"  弱区: {'、'.join(regime['weak_buckets'])}"
+                f"（IC≤0 且 ≥{MIN_BUCKET_DAYS} 天）——该状态下无正向预测力"
+            )
+    elif regime:
+        lines.append(f"状态依赖: 缺省（{regime.get('reason')}）")
     return "\n".join(lines)
 
 

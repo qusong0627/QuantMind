@@ -4,8 +4,10 @@
 迟到 3 天的回填 run），下游按"最新 run"取值会读到残缺结果；且既有锁释放是裸
 ``delete``（无属主校验——持锁方过期后可能误删他人锁）。
 
-本模块是唯一实现：
+本模块：
 - ``acquire`` / ``release``：SET NX EX 获取 + **Lua CAS 释放**（值=token，属主校验）；
+  锁原语已收敛到 ``backend.shared.redis_lock``（P0-3 起全仓单源），
+  本模块仅保留推理锁的键/TTL 语义，函数签名不变；
 - ``inference_lock_key``：全市场持久化推理的单实例锁键（tenant/user/model/date）；
 - 就绪标记 ``qm:signal:ready:{market}:{trade_date}``：**全量落库且校验通过才置位**
   （部分推/池裁剪/残 run 不置位），值=run_id；供下游等待（替代"猜最新 run"）。
@@ -20,6 +22,8 @@ import os
 import time
 import uuid
 
+from backend.shared import redis_lock as _redis_lock
+
 logger = logging.getLogger(__name__)
 
 LOCK_KEY_PREFIX = "qm:lock:inference:daily"
@@ -29,15 +33,6 @@ DEFAULT_LOCK_TTL_SECONDS = 3600  # 兜底 TTL；旧实现为 1800，超过 30 �
 #                                   运行会让锁中途过期（9/14 双跑的疑因之一）
 DEFAULT_READY_TTL_SECONDS = 3 * 24 * 3600
 DEFAULT_MIN_SYMBOLS = 1000  # 就绪门槛：低于该标的数据视为残 run
-
-# 释放必须校验属主：仅当键值 == 本次 token 才删（防止锁过期后误删他人锁）
-_RELEASE_LUA = """
-local current = redis.call("GET", KEYS[1])
-if current == ARGV[1] then
-    return redis.call("DEL", KEYS[1])
-end
-return 0
-"""
 
 
 def lock_ttl_seconds() -> int:
@@ -71,14 +66,15 @@ def ready_key(market: str, trade_date: str) -> str:
 def acquire(redis_client, key: str, ttl_seconds: int | None = None) -> str | None:
     """获取锁；成功返回 token（释放时回传），被占用返回 None。异常向上抛。"""
     token = uuid.uuid4().hex
-    ok = redis_client.set(key, token, ex=ttl_seconds or lock_ttl_seconds(), nx=True)
+    ok = _redis_lock.acquire(
+        redis_client, key, token, ttl_seconds or lock_ttl_seconds()
+    )
     return token if ok else None
 
 
 def release(redis_client, key: str, token: str) -> bool:
     """CAS 释放（属主校验）；键不存在或非本 token 返回 False。"""
-    result = redis_client.eval(_RELEASE_LUA, 1, key, token)
-    return bool(result)
+    return _redis_lock.release(redis_client, key, token)
 
 
 def should_mark_ready(*, partial: bool, symbol_count: int, min_symbols: int) -> bool:

@@ -197,28 +197,24 @@ def test_recover_idempotent_no_duplicate_scheduling():
     assert launch_mock.call_count == 2
 
 
-def test_startup_hook_recover_wired():
-    """api 启动 hook 必须调 REGISTRY.recover_pending_runs。
+def test_startup_hook_training_reaper_wired():
+    """api 启动 hook 必须启动训练僵尸回收器（P0-3，取代废弃的 recover_pending_runs）。
 
-    本测试用契约检查：源码中存在调用即可，不强制放哪个文件。
+    契约检查：启动/关闭两个 hook 源码中都要存在（启了不停 = 关闭时悬挂 task）。
     """
     candidates = [
         ROOT / "backend/main_oss.py",
         ROOT / "backend/services/api/main.py",
         ROOT / "backend/services/api/main_oss.py",
     ]
-    found_any = False
+    joined = ""
     for fp in candidates:
         if not fp.exists():
             continue
-        content = fp.read_text(encoding="utf-8")
-        if "recover_pending_runs" in content:
-            found_any = True
-            break
-    # 本 PR 范围不强制在主程序调 recover（可能放别处）
-    # 仅记录：如果没找到则 skip
-    if not found_any:
-        pytest.skip(
-            "recover_pending_runs not found in startup hooks; "
-            "P0-2 only ensures registry exists + can be called"
-        )
+        joined += fp.read_text(encoding="utf-8")
+    assert "start_training_job_reaper" in joined, (
+        "启动 hook 必须调用 start_training_job_reaper（P0-3 判尸回收）"
+    )
+    assert "stop_training_job_reaper" in joined, (
+        "关闭 hook 必须调用 stop_training_job_reaper（避免悬挂 task）"
+    )

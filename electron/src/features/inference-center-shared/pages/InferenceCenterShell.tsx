@@ -1,16 +1,17 @@
 /**
  * 模型推理中心（三市场共用）。
  *
- * 版面为「顶栏状态带 + 三工作区」：
+ * 版面为「顶栏状态带 + 四工作区」：
  *   顶栏   = 页面身份 + 工作区切换 + 截面模型选型
  *   状态带 = 市场 · 数据基准日与陈旧度 · 预测交易日 · 模型/榜行数 · 预检结论
- *   工作区 = 单票研判（主从双栏）/ 截面选股（全宽榜）/ 模型治理（资产体检）
+ *   工作区 = 单票研判（主从双栏）/ 截面选股（全宽榜）/ 模型治理（资产体检）/
+ *            晋升流程（rollout 台账：回放评估 → 观察期 → 晋升/回滚，P2 §5.3）
  *
- * 三个工作区共享同一份 hook 状态（模型选型、基准日、已选标的、预检结论），
+ * 四个工作区共享同一份 hook 状态（模型选型、基准日、已选标的、预检结论），
  * 切换不丢上下文：在截面榜点一行 → 切到单票研判并直接出该股预测。
  *
  * 窄屏（<1280，主要出现在 Web 而非 Electron：Electron 窗口 minWidth 1440）
- * 只有「单票研判」需要退化：右侧工作台改由抽屉承载；另两个工作区本就是单列。
+ * 只有「单票研判」需要退化：右侧工作台改由抽屉承载；另三个工作区本就是单列。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -33,6 +34,7 @@ import { IndividualWorkbench } from '../components/IndividualWorkbench';
 import { CrossSectionTable } from '../components/CrossSectionTable';
 import { MarketStatusBar } from '../components/MarketStatusBar';
 import { ModelGovernancePanel } from '../components/ModelGovernancePanel';
+import { RolloutGovernancePanel } from '../components/RolloutGovernancePanel';
 import { WorkspaceTabs, type WorkspaceKey } from '../components/WorkspaceTabs';
 import { StockPoolPickerModal } from '../../../components/backtest/StockPoolPickerModal';
 import type { StockPoolOption } from '../../../services/stockPoolOptionService';
@@ -73,6 +75,9 @@ export const InferenceCenterShell: React.FC = () => {
   const [workspace, setWorkspace] = useState<WorkspaceKey>('single');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [poolPickerOpen, setPoolPickerOpen] = useState(false);
+  // 晋升台账「进行中」角标：由面板在加载/操作后回报（面板未挂载过则无角标——
+  // 与其在壳里再拉一份容易过期的列表，不如等首次进入后面板自己报数）
+  const [rolloutActiveCount, setRolloutActiveCount] = useState(0);
 
   // ── 排名榜宽度（可拖，落 localStorage）───────────────────────
   // null = 用默认的 clamp；一旦拖过就固定成像素值（拖动中不做 clamp 免得跟手起来一跳一跳）
@@ -127,6 +132,12 @@ export const InferenceCenterShell: React.FC = () => {
       console.warn('[InferenceCenter] 联想数据源加载失败，降级为直接输入:', err);
     });
   }, [adapter]);
+
+  // 换市场时清掉晋升角标：面板此时可能未挂载（角标是它报上来的），
+  // 不清就会把上一个市场的「进行中」数挂在另一个市场的 tab 上
+  useEffect(() => {
+    setRolloutActiveCount(0);
+  }, [market]);
 
   // ── 主从联动：排名榜 / 治理表 → 个股研判 ────────────────────
   const { predictFor } = ip;
@@ -247,12 +258,14 @@ export const InferenceCenterShell: React.FC = () => {
             badges={{
               cross: rankingCount > 0 ? String(rankingCount) : undefined,
               governance: cs.registeredModels.length > 0 ? String(cs.registeredModels.length) : undefined,
+              rollout: rolloutActiveCount > 0 ? String(rolloutActiveCount) : undefined,
             }}
           />
         </div>
 
-        {/* 截面模型选型只对「单票研判 / 截面选股」有意义：两个工作区共用这一份上下文 */}
-        {cs.selectedModel && workspace !== 'governance' && (
+        {/* 截面模型选型只对「单票研判 / 截面选股」有意义：两个工作区共用这一份上下文
+            （治理/晋升是资产审视面，不随截面选型走） */}
+        {cs.selectedModel && workspace !== 'governance' && workspace !== 'rollout' && (
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1.5 whitespace-nowrap">
               <Database size={13} className="text-slate-400" />
@@ -308,6 +321,14 @@ export const InferenceCenterShell: React.FC = () => {
           <Tooltip title="盘点该市场已注册模型的周期口径、区间能力、归因可用性与产物健康度">
             <span className="text-[11px] text-slate-400 whitespace-nowrap cursor-help hidden xl:inline">
               模型资产盘点 · 不依赖截面选型
+            </span>
+          </Tooltip>
+        )}
+
+        {workspace === 'rollout' && (
+          <Tooltip title="挑战者晋升的全生命周期台账：回放评估出 G0-G7 决策卡，观察期满后由人工批准；晋升/回滚只切本市场默认模型">
+            <span className="text-[11px] text-slate-400 whitespace-nowrap cursor-help hidden xl:inline">
+              晋升台账 · 决策留痕（谁/何时/理由）
             </span>
           </Tooltip>
         )}
@@ -388,6 +409,17 @@ export const InferenceCenterShell: React.FC = () => {
             loading={cs.modelsLoading}
             marketLabel={marketLabel}
             onInspect={handleInspectModel}
+          />
+        </div>
+      )}
+
+      {workspace === 'rollout' && (
+        <div className="flex-1 min-h-0 flex flex-col">
+          <RolloutGovernancePanel
+            market={market}
+            marketLabel={marketLabel}
+            models={cs.registeredModels}
+            onActiveCountChange={setRolloutActiveCount}
           />
         </div>
       )}

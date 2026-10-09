@@ -75,7 +75,9 @@ def _ccass_source_result(days: int) -> dict[str, Any]:
     try:
         from backend.shared.data_source_config import is_source_enabled
 
-        enabled = is_source_enabled("HK", "ccass_top50")
+        # 配置键是 "ccass"（不是落盘数据集名 ccass_top50）；写错键会恒 False，
+        # 每日同步静默跳过 CCASS（2026-09-12 起断更 4 周的根因）
+        enabled = is_source_enabled("HK", "ccass")
     except Exception:  # noqa: BLE001
         enabled = True
     if not enabled:

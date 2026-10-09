@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from typing import Any
 
@@ -28,8 +30,37 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
 }
 DEFAULT_WINDOW = 20
 DEFAULT_REGIME_INDEX = "000300.SH"  # 与 backtest_health.DEFAULT_REGIME_INDEX 同源
+
+#: 各市场 regime 指数映射（设计 §6.1，2026-10-09 实测数据可得性）。
+#: CN=沪深300（QuantDB qdb_index_daily）；HK=恒生指数、US=标普 500
+#: （各自 ``1_kline_data/index_daily``，HK 2013-08 起 / US 2004-01 起）。
+#: **取不到就缺行，禁止拿 000300 冒充**；表外的市场（CRYPTO/FUTURES）没有
+#: 指数口径，persist 侧一律诚实拒绝，不猜。
+REGIME_INDEX_BY_MARKET: dict[str, str] = {
+    "CN": DEFAULT_REGIME_INDEX,
+    "HK": "HSI.HK",
+    "US": "SPX.US",
+}
 STATES = ("bull", "neutral", "bear")
 POSITION_BY_STATE: dict[str, float] = {"bull": 1.0, "neutral": 0.7, "bear": 0.3}
+
+
+def thresholds_fingerprint(
+    window: int = DEFAULT_WINDOW,
+    thresholds: dict[str, float] | None = None,
+) -> str:
+    """计算参数指纹（sha256 十六进制）：window + 阈值全集，排序规范化。
+
+    ``qm_regime_daily.thresholds_hash`` 用——口径改动 = 指纹变化向前生效；
+    存量行的指纹即「写入当时的口径」审计证据（历史行不重算）。
+    """
+    th = thresholds or DEFAULT_THRESHOLDS
+    payload = json.dumps(
+        {"window": int(window), "thresholds": {k: th[k] for k in sorted(th)}},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def classify_regime(
@@ -54,6 +85,56 @@ def classify_regime(
     return "neutral"
 
 
+def build_state_rows(
+    closes: list[float],
+    volumes: list[float] | None,
+    dates: list[str],
+    window: int = DEFAULT_WINDOW,
+    thresholds: dict[str, float] | None = None,
+    *,
+    tail_effective_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """日频序列构造（行版，唯一滚动循环）：dates 与 closes 等长升序；第 i 行状态标注到 dates[i+1]。
+
+    与 MarketStateService.build_market_state_series 的 qlib 取数层解耦——口径在
+    classify_regime，本函数只负责滚动窗口与标注位移。行带三输入统计
+    （ret/vol/vratio），供 ``qm_regime_daily`` 持久化留痕（设计 §6.2）。
+
+    ``tail_effective_date``（可选）：额外把**末根 bar** 标注到该日期——用于
+    「数据末根 bar 的下一交易日」尾行（日历给定；节假日/周末期间数据里没有
+    那根 bar，自然配对写不出这一行，次日盘前推理就拿不到当日生效值，见
+    §6.4 必要条件）。仅当它**严格晚于** ``dates[-1]`` 时生效（防御：不早于
+    末根 bar 的标注会让时间线自相矛盾）；数据补齐后，自然配对
+    (末根 → 真实下一根) 会算出同一状态 → ``insert_frozen_rows`` 冻结冲突，
+    天然幂等。缺省 None = 行为与旧版逐位一致。
+    """
+    n = len(closes)
+    if n != len(dates):
+        raise ValueError("closes 与 dates 长度必须一致")
+    use_vol = volumes if volumes and len(volumes) == n else [1.0] * n
+    rows: list[dict[str, Any]] = []
+    if n <= window + 1:
+        return rows
+
+    def _row_at(i: int, effective: str) -> dict[str, Any]:
+        ret = _roll_ret(closes, i, window)
+        vol = _roll_std(closes, i, window)
+        vratio = _roll_vratio(use_vol, i, window)
+        return {
+            "effective_date": effective,
+            "state": classify_regime(ret, vol, vratio, thresholds),
+            "ret_window": ret,
+            "vol_window": vol,
+            "volume_ratio": vratio,
+        }
+
+    for i in range(window, n - 1):
+        rows.append(_row_at(i, str(dates[i + 1])))
+    if tail_effective_date is not None and str(tail_effective_date) > str(dates[-1]):
+        rows.append(_row_at(n - 1, str(tail_effective_date)))
+    return rows
+
+
 def build_state_series(
     closes: list[float],
     volumes: list[float] | None,
@@ -63,22 +144,12 @@ def build_state_series(
 ) -> dict[str, str]:
     """日频序列构造（纯 list 版）：dates 与 closes 等长升序；第 i 行状态标注到 dates[i+1]。
 
-    与 MarketStateService.build_market_state_series 的 qlib 取数层解耦——口径在
-    classify_regime，本函数只负责滚动窗口与标注位移。
+    薄封装 ``build_state_rows``（口径与滚动实现在那里，本函数只做投影）。
     """
-    n = len(closes)
-    if n != len(dates):
-        raise ValueError("closes 与 dates 长度必须一致")
-    use_vol = volumes if volumes and len(volumes) == n else [1.0] * n
-    series: dict[str, str] = {}
-    if n <= window + 1:
-        return series
-    for i in range(window, n - 1):
-        ret = _roll_ret(closes, i, window)
-        vol = _roll_std(closes, i, window)
-        vratio = _roll_vratio(use_vol, i, window)
-        series[str(dates[i + 1])] = classify_regime(ret, vol, vratio, thresholds)
-    return series
+    return {
+        row["effective_date"]: row["state"]
+        for row in build_state_rows(closes, volumes, dates, window, thresholds)
+    }
 
 
 def forming_inputs(

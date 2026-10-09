@@ -1,6 +1,9 @@
-import React from 'react';
-import { Wallet, Wifi, Activity, Layers, Cpu, Server } from 'lucide-react';
+import React, { useState } from 'react';
+import { Wallet, Wifi, Activity, Layers, Cpu, Server, ChevronDown, ChevronUp } from 'lucide-react';
 import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
+
+// 折叠偏好落 localStorage：跨页签、跨刷新保持（命名与 qm:trading_mode_pref 同风格）。
+const COLLAPSE_STORAGE_KEY = 'qm:trading:topbar:collapsed';
 
 interface AccountInfo {
     total_asset: number;
@@ -76,6 +79,18 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
     const strategyStatusLabel = strategyStatus === 'running' ? '策略运行中' : (strategyStatus === 'starting' ? '正在启动' : '策略已停止');
     const strategyStatusColor = strategyStatus === 'running' ? 'text-emerald-500' : (strategyStatus === 'starting' ? 'text-amber-500' : 'text-slate-400');
 
+    // 折叠（用户 2026-10-08 要求）：收起的是 8 卡片数字区，标题行（模式/状态徽章、
+    // 合规免责小字）保持常显——合规文案窄屏消失等于没写，不能跟着数字一起折叠。
+    // 折叠态在标题旁挂一行紧凑数字（总资产 + 今日盈亏），关键数不看卡片也能拿到。
+    const [collapsed, setCollapsed] = useState(() => {
+        try { return localStorage.getItem(COLLAPSE_STORAGE_KEY) === '1'; } catch { return false; }
+    });
+    const toggleCollapsed = () => {
+        const next = !collapsed;
+        setCollapsed(next);
+        try { localStorage.setItem(COLLAPSE_STORAGE_KEY, next ? '1' : '0'); } catch { /* 写入失败不致命，仅本次不持久 */ }
+    };
+
     // 保留早期 4×2 信息密度：每张卡只消费已由 accountAdapter 归一化的账户字段，
     // 不新增接口或改变现有账户/行情刷新链路。
     const metrics = [
@@ -146,6 +161,24 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                     <div className="flex items-baseline gap-2">
                         <span className="text-base font-bold text-slate-800 tracking-tight">资产概览</span>
                     </div>
+                    {/* 折叠态紧凑数字：总资产 + 今日盈亏（沿用卡片同款红涨绿跌着色） */}
+                    {collapsed && (
+                        <span className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                            <span className="flex items-baseline gap-1.5">
+                                <span className="text-[11px] font-bold text-slate-400">总资产</span>
+                                <span className="font-mono text-sm font-black tracking-tight text-slate-900">
+                                    ¥{formatMoney(info?.total_asset)}
+                                </span>
+                            </span>
+                            <span className="flex items-baseline gap-1.5">
+                                <span className="text-[11px] font-bold text-slate-400">今日盈亏</span>
+                                <span className={`font-mono text-sm font-black tracking-tight ${getPnLColor(info?.daily_pnl || 0)}`}>
+                                    {(info?.daily_pnl || 0) > 0 ? '+' : ''}{formatMoney(info?.daily_pnl)}
+                                    <span className="ml-1 text-[10px] font-bold">{formatPercent(info?.daily_pnl_percent)}</span>
+                                </span>
+                            </span>
+                        </span>
+                    )}
                     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200/80 rounded-full text-xs text-slate-600 font-medium">
                         <Layers size={13} className="text-slate-400" />
                         <span>{modeLabel}</span>
@@ -177,10 +210,22 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                         <Activity size={13} className={strategyStatusColor} />
                         <span>{strategyStatusLabel}</span>
                     </div>
+                    <button
+                        type="button"
+                        onClick={toggleCollapsed}
+                        aria-expanded={!collapsed}
+                        title={collapsed ? '展开资产概览' : '收起资产概览'}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-full border border-slate-200/80 bg-slate-50 text-xs text-slate-600 font-medium hover:border-slate-300 hover:text-slate-900 transition-colors"
+                    >
+                        {collapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+                        <span>{collapsed ? '展开' : '收起'}</span>
+                    </button>
                 </div>
             </div>
 
-            {/* 8 卡片单行（桌面 lg 起 8 列；窄屏 4 列/2 列自然折行），高度贴合内容，不再占据 30% 版面 */}
+            {/* 8 卡片单行（桌面 lg 起 8 列；窄屏 4 列/2 列自然折行），高度贴合内容，不再占据 30% 版面；
+                折叠时整区收起，摘要数字由上方标题行紧凑展示 */}
+            {!collapsed && (
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
                 {metrics.map((metric) => {
                     const pnl = metric.pnl || 0;
@@ -208,6 +253,7 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                     );
                 })}
             </div>
+            )}
         </div>
     );
 };

@@ -185,3 +185,113 @@ def test_trading_elapsed_fraction_bounds():
     assert trading_elapsed_fraction(at(10, 30)) == pytest.approx(0.25)
     assert trading_elapsed_fraction(at(12, 0)) == pytest.approx(0.5)
     assert trading_elapsed_fraction(at(15, 30)) == pytest.approx(1.0)
+
+
+# ── §6.5-L2：弱区降险建议接线（默认关；只建议不执行）──────────────────────
+
+_L2_MODEL_ID = "mdl_l2_train_20261008000000_aaaaaaaabbbbbbbb_cccccccc"  # 市场由 monkeypatch 定
+
+
+def _wire_l2_regime(monkeypatch, *, weak: bool):
+    """[§6.5-L2] 桩掉 regime 取数：模型属 CN、状态表含 today（now_fn 钉在 2026-10-08）。"""
+    days = [f"2026-09-{d:02d}" for d in range(1, 17)]
+    values = [-0.01, -0.03] * 8 if weak else [0.01, 0.03] * 8
+    daily_ic = [{"date": day, "value": v} for day, v in zip(days, values, strict=True)]
+    states = dict.fromkeys(days, "neutral")
+    states["2026-10-08"] = "neutral"  # _SESSION_EPOCH 的 SH 日期 = today_iso
+
+    monkeypatch.setattr(
+        "backend.shared.model_registry._model_market_of", lambda m: "CN"
+    )
+    monkeypatch.setattr(
+        "backend.shared.regime_daily_store.load_states_sync", lambda m: states
+    )
+    row = {
+        "model_id": _L2_MODEL_ID,
+        "ic_stats": {"ic_5": -0.02 if weak else 0.01, "ic_20": 0.03,
+                     "n_5": 6, "n_20": 20},
+        "daily_ic": daily_ic,
+    }
+    return row
+
+
+def test_l2_weak_regime_attaches_advice_even_when_l1_downgraded_to_info(monkeypatch):
+    """弱区命中的模型检测：L1 归因降级 info 不削减 L2 建议；建议只落建议面，不执行。"""
+    from backend.services.engine.anomaly_engine import AnomalyConfig
+
+    row = _wire_l2_regime(monkeypatch, weak=True)
+    engine, calls, holder = _engine(
+        cfg=AnomalyConfig(enabled=True, reduce_enabled=True),
+        model_fetcher=lambda cfg: [row],
+    )
+    engine.build_once()
+
+    assert len(calls["published"]) == 1
+    d = calls["published"][0]
+    assert d.kind == "model_ic_drop"
+    assert d.severity == "info"  # L1：弱区 + 2σ 内 → 归因降级
+    advice = d.metrics["position_advice"]
+    assert advice["state"] == "neutral"
+    assert advice["from_factor"] == 1.0 and advice["to_factor"] == 0.7
+    assert "降险建议" in d.description and "仅建议不执行" in d.description
+
+    # info 级别也进降险通道（v1 闸门只看 critical；L2 认弱区标记）
+    assert [x.kind for x in calls["reduced"]] == ["model_ic_drop"]
+
+    # 审计文案含阶梯前后系数（拦 _audit：单测不碰真库）
+    captured: dict = {}
+    engine._audit = lambda detection, **kw: captured.update(kw)
+    out = engine._default_reduce(d)
+    assert out == {"reduced": False, "suggested": True}
+    assert captured["action"] == "reduce_suggested" and captured["status"] == "pending"
+    assert "仓位系数 1→0.7" in captured["message"]
+
+
+def test_l2_off_by_default_keeps_detection_face_identical(monkeypatch):
+    """级关（默认）：弱区检测面与旧版逐位一致（无建议键、无降险动作）。"""
+    from backend.services.engine.anomaly_engine import AnomalyConfig
+
+    row = _wire_l2_regime(monkeypatch, weak=True)
+    engine, calls, holder = _engine(
+        cfg=AnomalyConfig(enabled=True, reduce_enabled=False),
+        model_fetcher=lambda cfg: [row],
+    )
+    engine.build_once()
+    d = calls["published"][0]
+    assert "position_advice" not in (d.metrics or {})
+    assert "降险建议" not in d.description
+    assert calls["reduced"] == []
+
+
+def test_l2_not_weak_no_advice(monkeypatch):
+    """级开但非弱区：不出建议；warn（IC 为正的回撤）不进降险通道。"""
+    from backend.services.engine.anomaly_engine import AnomalyConfig
+
+    row = _wire_l2_regime(monkeypatch, weak=False)
+    engine, calls, holder = _engine(
+        cfg=AnomalyConfig(enabled=True, reduce_enabled=True),
+        model_fetcher=lambda cfg: [row],
+    )
+    engine.build_once()
+    d = calls["published"][0]
+    assert d.severity == "warn"
+    assert "position_advice" not in (d.metrics or {})
+    assert calls["reduced"] == []
+
+
+def test_l2_no_regime_context_no_advice(monkeypatch):
+    """取不到 regime（无 daily_ic）→ 上下文 None → 照常告警，无建议、无降险。"""
+    from backend.services.engine.anomaly_engine import AnomalyConfig
+
+    row = {"model_id": _L2_MODEL_ID,
+           "ic_stats": {"ic_5": -0.05, "ic_20": 0.03, "n_5": 6, "n_20": 20}}
+    engine, calls, holder = _engine(
+        cfg=AnomalyConfig(enabled=True, reduce_enabled=True),
+        model_fetcher=lambda cfg: [row],
+    )
+    engine.build_once()
+    d = calls["published"][0]
+    assert d.severity == "critical"  # short < 0 且无归因
+    assert "position_advice" not in (d.metrics or {})
+    # v1 语义保留：critical 仍进降险通道（无建议文案）
+    assert len(calls["reduced"]) == 1

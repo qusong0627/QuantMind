@@ -135,7 +135,22 @@ def _window_stats(s: pd.Series, n: int) -> dict:
     }
 
 
-def monitor(model_id: str, days: int, windows: list[int]) -> dict:
+def _series_points(ic: pd.Series) -> list[dict]:
+    """日 IC 序列 → ``[{"date": "YYYY-MM-DD", "value": float}]``（§6.4 归因消费形状）。"""
+    return [
+        {"date": str(idx)[:10], "value": round(float(val), 6)}
+        for idx, val in ic.items()
+    ]
+
+
+def monitor(
+    model_id: str,
+    days: int,
+    windows: list[int],
+    *,
+    include_series: bool = False,
+    quiet: bool = False,
+) -> dict:
     from backend.shared.stock_utils import StockCodeUtil
 
     model_dir = _find_model_dir(model_id)
@@ -176,7 +191,12 @@ def monitor(model_id: str, days: int, windows: list[int]) -> dict:
             str(k): round(float(v), 4) for k, v in monthly.tail(8).items()
         },
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if include_series:
+        # §6.4 归因消费（anomaly engine）；短键名入 result 会随 CLI 打印长序列——
+        # 程序内消费走 quiet=True（服务日志里 90 点 × N 模型是纯噪声）。
+        result["daily_ic"] = _series_points(ic)
+    if not quiet:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
 

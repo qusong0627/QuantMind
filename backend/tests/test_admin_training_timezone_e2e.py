@@ -67,7 +67,7 @@ SOURCE_GRAPH = {
 EXPECTED_UTC_LOCATIONS = [
     # (file_relpath, line_keyword)
     ("backend/services/api/routers/admin/admin_training_utils.py", "generated_at"),
-    ("backend/services/api/routers/admin/admin_training_utils.py", "run_id = f\"train_"),
+    ("backend/services/api/routers/admin/admin_training_utils.py", "f\"train_"),
     ("backend/services/engine/training/local_docker_orchestrator.py", '"paused_at"'),
     ("backend/services/engine/training/local_docker_orchestrator.py", '"resumed_at"'),
 ]

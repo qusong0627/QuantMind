@@ -4,9 +4,10 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { 
   Zap, Activity, BarChart, Database, ListFilter, Filter, LayoutGrid, CheckCircle2, Clock, Archive, XCircle
 } from 'lucide-react';
-import { 
-  AdminModelFeatureCatalog, 
-  AdminModelFeatureSuggestedPeriods 
+import {
+  AdminModelFeatureCatalog,
+  AdminModelFeatureSuggestedPeriods,
+  QuantDBTrainingSource,
 } from '../../features/admin/types';
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
@@ -411,6 +412,8 @@ export interface TrainingDraft {
   poolRef?: string | null;
   poolName?: string | null;
   poolId?: string | null;
+  /** 附加因子库（跨源训练）；锚库不在其中，锚库由 factor_source 承载 */
+  extraFactorSources?: string[];
   lastSavedAt: string;
 }
 
@@ -422,7 +425,11 @@ export interface TrainingConfigFile {
   market: TrainingContext['market'];
   factor_source?: string;
   factor_catalog_version?: string | null;
-  configuration: Omit<TrainingDraft, 'lastSavedAt'>;
+  /** 附加因子库清单（跨源训练）。顶层唯一出处，configuration 里不重复一份。 */
+  extra_factor_sources?: string[];
+  /** 附加库的目录版本 pin（只含附加库，与后端 factor_catalog_versions 同义） */
+  extra_factor_catalog_versions?: Record<string, string>;
+  configuration: Omit<TrainingDraft, 'lastSavedAt' | 'extraFactorSources'>;
 }
 
 export interface ImportedTrainingConfig {
@@ -430,6 +437,10 @@ export interface ImportedTrainingConfig {
   market: TrainingContext['market'];
   factorSource?: string;
   factorCatalogVersion?: string | null;
+  /** 配置里声明的附加因子库（已去重；是否可用于当前市场由调用方按来源列表过滤） */
+  extraFactorSources: string[];
+  /** 附加库的目录版本 pin；导入端只用于对账提示，实际版本按当前已发布目录重新解析 */
+  extraFactorCatalogVersions: Record<string, string>;
 }
 
 export interface FeatureOption {
@@ -439,6 +450,14 @@ export interface FeatureOption {
   defaultSelected?: boolean;
   /** B 特征字典用户编辑的长描述（A 目录回退合并后透出），缺省为空。*/
   explanation?: string;
+  /** 该特征来自哪个因子库（跨源训练时用于标注来源） */
+  sourceId?: string;
+  /** 来源库显示名 */
+  sourceName?: string;
+  /** 跨库同名时被其他库占用的副本：不可勾选（后端按裸名去重，同名必然 422） */
+  disabled?: boolean;
+  /** 不可勾选的原因（点明是与哪个库同名） */
+  disabledReason?: string;
 }
 
 export interface FeatureCategory {
@@ -853,6 +872,36 @@ const readStringArray = (value: unknown, label: string): string[] => {
   return Array.from(new Set(value.map((item) => item.trim())));
 };
 
+/**
+ * 归一附加因子库清单：去重、剔除空值与非字符串，并剔除锚库自身
+ * （后端会忽略与锚库同名的声明，但前端不该给出「自己配自己」的重复源）。
+ * 用于草稿恢复/导入/切换锚库等所有进入 state 的入口，容忍脏数据。
+ */
+export const sanitizeExtraFactorSources = (
+  value: unknown,
+  anchorSource: string,
+): string[] => {
+  if (!Array.isArray(value)) return [];
+  const result: string[] = [];
+  value.forEach((item) => {
+    if (typeof item !== 'string') return;
+    const id = item.trim();
+    if (!id || id === anchorSource || result.includes(id)) return;
+    result.push(id);
+  });
+  return result;
+};
+
+const readStringMap = (value: unknown, label: string): Record<string, string> => {
+  if (value === undefined || value === null) return {};
+  if (!isRecord(value)) throw new Error(`${label} 必须是 {库: 版本} 映射`);
+  const entries = Object.entries(value);
+  if (entries.some(([, item]) => typeof item !== 'string' || !item.trim())) {
+    throw new Error(`${label} 的版本号必须是非空字符串`);
+  }
+  return Object.fromEntries(entries.map(([key, item]) => [key.trim(), (item as string).trim()]));
+};
+
 const readDateRange = (value: unknown, label: string): [string, string] => {
   if (!Array.isArray(value) || value.length !== 2 || value.some((item) => typeof item !== 'string')) {
     throw new Error(`${label} 必须包含起止日期`);
@@ -867,16 +916,27 @@ const readDateRange = (value: unknown, label: string): [string, string] => {
 /** 将当前前端草稿转换为可在其他设备导入的 YAML 配置。 */
 export const buildTrainingConfigFile = (
   draft: Omit<TrainingDraft, 'lastSavedAt'>,
-  options: Pick<TrainingConfigFile, 'market' | 'factor_source' | 'factor_catalog_version'>,
-): TrainingConfigFile => ({
-  schema_version: TRAINING_CONFIG_SCHEMA_VERSION,
-  kind: TRAINING_CONFIG_KIND,
-  exported_at: new Date().toISOString(),
-  market: options.market,
-  ...(options.factor_source ? { factor_source: options.factor_source } : {}),
-  ...(options.factor_catalog_version ? { factor_catalog_version: options.factor_catalog_version } : {}),
-  configuration: draft,
-});
+  options: Pick<
+    TrainingConfigFile,
+    'market' | 'factor_source' | 'factor_catalog_version' | 'extra_factor_catalog_versions'
+  >,
+): TrainingConfigFile => {
+  // 附加库清单在顶层，configuration 里不再重复（两个出处迟早不一致）
+  const { extraFactorSources, ...configuration } = draft;
+  const extraSources = sanitizeExtraFactorSources(extraFactorSources, options.factor_source || '');
+  const extraVersions = options.extra_factor_catalog_versions || {};
+  return {
+    schema_version: TRAINING_CONFIG_SCHEMA_VERSION,
+    kind: TRAINING_CONFIG_KIND,
+    exported_at: new Date().toISOString(),
+    market: options.market,
+    ...(options.factor_source ? { factor_source: options.factor_source } : {}),
+    ...(options.factor_catalog_version ? { factor_catalog_version: options.factor_catalog_version } : {}),
+    ...(extraSources.length > 0 ? { extra_factor_sources: extraSources } : {}),
+    ...(Object.keys(extraVersions).length > 0 ? { extra_factor_catalog_versions: extraVersions } : {}),
+    configuration,
+  };
+};
 
 export const serializeTrainingConfig = (config: TrainingConfigFile): string =>
   stringifyYaml(config, { lineWidth: 0 });
@@ -966,6 +1026,11 @@ export const parseTrainingConfig = (source: string): ImportedTrainingConfig => {
     market: raw.market as TrainingContext['market'],
     factorSource: typeof raw.factor_source === 'string' ? raw.factor_source : undefined,
     factorCatalogVersion: typeof raw.factor_catalog_version === 'string' ? raw.factor_catalog_version : null,
+    // 旧配置没有这两个字段：缺省即「单库训练」，不是错误
+    extraFactorSources: raw.extra_factor_sources === undefined || raw.extra_factor_sources === null
+      ? []
+      : readStringArray(raw.extra_factor_sources, 'extra_factor_sources'),
+    extraFactorCatalogVersions: readStringMap(raw.extra_factor_catalog_versions, 'extra_factor_catalog_versions'),
   };
 };
 
@@ -1040,7 +1105,9 @@ export const buildAutoDisplayName = (referenceDate: Dayjs, target: TrainingTarge
 
 export const summarizeFeatureCategories = (features: string[], categories: FeatureCategory[]) => {
   return categories
-    .filter((category) => features.some((featureKey) => category.features.some((feature) => feature.key === featureKey)))
+    // 跨库同名的影子副本（disabled）不算归属：否则一个纯锚库特征会把
+    // 副库的同名分类也写进 feature_categories，来源标注凭空多一个库
+    .filter((category) => features.some((featureKey) => category.features.some((feature) => feature.key === featureKey && !feature.disabled)))
     .map((category) => category.name);
 };
 
@@ -1134,6 +1201,219 @@ export const resolveDefaultSelectedFeatures = (
   return valid.length > 0 ? valid : preset;
 };
 
+// ─── 跨源因子库（锚库 + 附加库） ──────────────────────────────────────────────
+//
+// 后端 `_resolve_quantdb_factor_payload` 的跨库契约：
+// - `factor_source` = 锚库，`factor_catalog_version` = 锚库已发布版本；
+// - `factor_catalog_versions` = 附加库 {库: 已发布版本 id}（后端显式排除锚库）；
+// - features 裸名按「锚库 → 声明序」首个命中者胜，`"库:feature_key"` 显式限定；
+// - 去重键是**裸 feature_key**：同一个 key 从两个库被请求 → 直接 422；
+// - 后端会把 features 重写成裸 feature_key 再做 allowed 校验。
+//
+// 因此「哪个库拥有这个 key」必须在前端单选定死，且锚库发裸名、附加库发限定名：
+// 归属一旦算错，失败形态不是报错而是静默换源（列名相同、日志无痕）。
+
+export type FeatureOwnershipMap = Record<string, string>;
+
+export interface CrossSourceFeatureConflict {
+  featureKey: string;
+  /** 暴露该 key 的库 id，按「锚库 → 附加库声明序」排列（≥2 项） */
+  sources: string[];
+}
+
+export interface CrossSourceFeaturePlan {
+  /** 锚库特征为裸名，附加库特征为 `库:feature_key` */
+  features: string[];
+  /** 仅附加库：库 id → 目录版本 id，且只含被选中特征真正用到的库 */
+  factorCatalogVersions: Record<string, string>;
+  /** 归属表里查不到的选中键；调用方必须阻断提交，绝不能当锚库裸名发出去 */
+  unresolved: string[];
+  /** 有特征被选中、却没有 pin 目录版本的附加库；调用方应阻断提交 */
+  unversionedSources: string[];
+}
+
+const collectFeatureKeys = (categories: FeatureCategory[]): string[] =>
+  categories.flatMap((category) => category.features.map((feature) => feature.key));
+
+/**
+ * feature_key → 归属库：锚库优先，其次按附加库声明序，首个命中者胜
+ * —— 与后端裸名解析同序，保证前端认定的来源就是后端实际取到的来源。
+ */
+export const buildFeatureOwnershipMap = (
+  anchorSource: string,
+  anchorCategories: FeatureCategory[],
+  extraCategories: Record<string, FeatureCategory[]>,
+): FeatureOwnershipMap => {
+  const ownership: FeatureOwnershipMap = {};
+  const claim = (lib: string, categories: FeatureCategory[]) => {
+    collectFeatureKeys(categories).forEach((key) => {
+      if (ownership[key] === undefined) ownership[key] = lib;
+    });
+  };
+  claim(anchorSource, anchorCategories);
+  Object.entries(extraCategories).forEach(([lib, categories]) => claim(lib, categories));
+  return ownership;
+};
+
+/**
+ * 跨库同名 feature_key（锚库 vs 附加库、附加库之间）。后端按裸 key 去重，
+ * 同名必然 422，所以要在选择阶段就拦住而不是等提交。
+ * 同一个库内部的重名不算冲突（后端同来源重复是静默去重）。
+ */
+export const findCrossSourceFeatureConflicts = (
+  anchorSource: string,
+  anchorCategories: FeatureCategory[],
+  extraCategories: Record<string, FeatureCategory[]>,
+): CrossSourceFeatureConflict[] => {
+  const sourcesByKey = new Map<string, string[]>();
+  const record = (lib: string, categories: FeatureCategory[]) => {
+    collectFeatureKeys(categories).forEach((key) => {
+      const libs = sourcesByKey.get(key);
+      if (!libs) {
+        sourcesByKey.set(key, [lib]);
+        return;
+      }
+      if (!libs.includes(lib)) libs.push(lib);
+    });
+  };
+  record(anchorSource, anchorCategories);
+  Object.entries(extraCategories).forEach(([lib, categories]) => record(lib, categories));
+
+  return Array.from(sourcesByKey.entries())
+    .filter(([, libs]) => libs.length > 1)
+    .map(([featureKey, sources]) => ({ featureKey, sources }));
+};
+
+/** 冲突的用户可读文案：点名是哪两个库，不用裸 id 让人猜。 */
+export const formatCrossSourceConflictMessage = (
+  conflict: CrossSourceFeatureConflict,
+  sourceLabels: Record<string, string>,
+): string => {
+  const labels = conflict.sources.map((id) => sourceLabels[id] || id);
+  return `特征「${conflict.featureKey}」同时来自 ${labels.join('、')}：后端按裸特征名去重，`
+    + '同一特征只能来自一个库，请在其中一处取消选择。';
+};
+
+/**
+ * 把选中的（裸）feature_key 组装成后端载荷：
+ * 锚库裸名 + 附加库 `库:feature_key`，并给出只含附加库的版本映射。
+ */
+export const buildCrossSourceFeaturePlan = (
+  selectedFeatures: string[],
+  anchorSource: string,
+  ownership: FeatureOwnershipMap,
+  extraCatalogVersions: Record<string, string>,
+): CrossSourceFeaturePlan => {
+  const features: string[] = [];
+  const factorCatalogVersions: Record<string, string> = {};
+  const unresolved: string[] = [];
+  const unversionedSources: string[] = [];
+  const emitted = new Set<string>();
+  const reportedUnresolved = new Set<string>();
+
+  selectedFeatures.forEach((rawKey) => {
+    const featureKey = String(rawKey).trim();
+    if (!featureKey || emitted.has(featureKey)) return;
+    const owner = ownership[featureKey];
+    if (!owner) {
+      // 归属未知：不猜。裸名发出去可能被后端解析成别的库的同名因子（静默换源）
+      if (!reportedUnresolved.has(featureKey)) {
+        reportedUnresolved.add(featureKey);
+        unresolved.push(featureKey);
+      }
+      return;
+    }
+    emitted.add(featureKey);
+    if (owner === anchorSource) {
+      features.push(featureKey);
+      return;
+    }
+    const version = extraCatalogVersions[owner];
+    if (!version) {
+      // 未声明版本时后端会取该库当前 active 发布版本：能跑，但没有 pin，提交前应阻断
+      if (!unversionedSources.includes(owner)) unversionedSources.push(owner);
+      features.push(`${owner}:${featureKey}`);
+      return;
+    }
+    features.push(`${owner}:${featureKey}`);
+    factorCatalogVersions[owner] = version;
+  });
+
+  return { features, factorCatalogVersions, unresolved, unversionedSources };
+};
+
+export interface ExtraFactorSourceOption {
+  value: string;
+  label: string;
+  disabled: boolean;
+  /** 不可选时的原因（未发布目录 / 没有目录版本），可选时为空 */
+  reason: string | null;
+}
+
+/**
+ * 把锚库与附加库目录合并成一份可渲染的分类表：
+ * - 附加库分类 id 加 `库::` 前缀，避免与锚库同名分类撞 React key / 折叠状态；
+ * - 附加库分类名后缀来源库显示名，让用户一眼看出特征来自哪个库；
+ * - 跨库同名的副本（非归属库那一份）标记 disabled，点明与哪个库同名。
+ */
+export const mergeSourceFeatureCategories = (
+  anchorSource: string,
+  anchorCategories: FeatureCategory[],
+  extraCategories: Record<string, FeatureCategory[]>,
+  sourceLabels: Record<string, string>,
+): FeatureCategory[] => {
+  const labelOf = (lib: string) => sourceLabels[lib] || lib;
+  const ownership = buildFeatureOwnershipMap(anchorSource, anchorCategories, extraCategories);
+
+  const decorate = (lib: string, categories: FeatureCategory[], namespaced: boolean): FeatureCategory[] =>
+    categories.map((category) => ({
+      id: namespaced ? `${lib}::${category.id}` : category.id,
+      name: namespaced ? `${category.name} · ${labelOf(lib)}` : category.name,
+      icon: category.icon,
+      features: category.features.map((feature) => {
+        const owner = ownership[feature.key];
+        const shadowed = owner !== undefined && owner !== lib;
+        return {
+          ...feature,
+          sourceId: lib,
+          sourceName: labelOf(lib),
+          ...(shadowed
+            ? {
+                disabled: true,
+                disabledReason:
+                  `与 ${labelOf(owner)} 的「${feature.key}」同名：后端按裸特征名去重，`
+                  + '同一特征只能来自一个库，请在归属库里选择。',
+              }
+            : {}),
+        };
+      }),
+    }));
+
+  return [
+    ...decorate(anchorSource, anchorCategories, false),
+    ...Object.entries(extraCategories).flatMap(([lib, categories]) => decorate(lib, categories, true)),
+  ];
+};
+
+/** 附加因子库下拉的候选：排除锚库；未发布或无目录版本的库保留但置灰并说明原因。 */
+export const buildExtraFactorSourceOptions = (
+  sources: QuantDBTrainingSource[],
+  anchorSource: string,
+): ExtraFactorSourceOption[] =>
+  sources
+    .filter((source) => source.id !== anchorSource)
+    .map((source) => {
+      const reason = !source.published || !source.catalog_version
+        ? (source.reason || '尚未发布因子目录')
+        : null;
+      return {
+        value: source.id,
+        label: source.name || source.id,
+        disabled: reason !== null,
+        reason,
+      };
+    });
+
 export const buildTrainingRequest = (
   selectedFeatures: string[],
   categories: FeatureCategory[],
@@ -1190,12 +1470,37 @@ export const DEFAULT_FACTOR_FILTER: TrainingFactorFilterConfig = {
   correlationThreshold: 0.9,
 };
 
+export interface CrossSourcePayloadOptions {
+  /** 锚库 id（调用方会写进 payload.factor_source） */
+  anchorSource: string;
+  /** 选中特征的归属表（buildFeatureOwnershipMap 产出） */
+  ownership: FeatureOwnershipMap;
+  /** 附加库 → 已发布目录版本 id */
+  extraCatalogVersions: Record<string, string>;
+}
+
 export const buildBackendTrainingPayload = (
   request: TrainingRequestPayload,
   timePeriods: TimePeriodMap,
-  options?: { nodeId?: string; maxTimeMinutes?: number; pauseOthers?: boolean; factorFilter?: TrainingFactorFilterConfig },
+  options?: {
+    nodeId?: string;
+    maxTimeMinutes?: number;
+    pauseOthers?: boolean;
+    factorFilter?: TrainingFactorFilterConfig;
+    /** 跨源训练：锚库发裸名、附加库发 `库:feature_key` 并 pin 版本 */
+    crossSource?: CrossSourcePayloadOptions;
+  },
 ): any => {
-  const features = Array.from(new Set(request.selectedFeatures));
+  const baseFeatures = Array.from(new Set(request.selectedFeatures));
+  const crossSourcePlan = options?.crossSource
+    ? buildCrossSourceFeaturePlan(
+        baseFeatures,
+        options.crossSource.anchorSource,
+        options.crossSource.ownership,
+        options.crossSource.extraCatalogVersions,
+      )
+    : null;
+  const features = crossSourcePlan ? crossSourcePlan.features : baseFeatures;
   const trainStart = dayjs(request.timePeriods.train[0]).format('YYYY-MM-DD');
   const trainEnd = dayjs(request.timePeriods.train[1]).format('YYYY-MM-DD');
   const validStart = dayjs(request.timePeriods.val[0]).format('YYYY-MM-DD');
@@ -1299,6 +1604,12 @@ export const buildBackendTrainingPayload = (
         : {}),
     },
   };
+
+  // 附加因子库版本 pin（只含被选中特征真正用到的库；锚库由 factor_catalog_version 承载，
+  // 后端也会显式把锚库从 factor_catalog_versions 里排除掉）
+  if (crossSourcePlan && Object.keys(crossSourcePlan.factorCatalogVersions).length > 0) {
+    payload.factor_catalog_versions = crossSourcePlan.factorCatalogVersions;
+  }
 
   if (modelTypes) {
     payload.model_types = modelTypes;

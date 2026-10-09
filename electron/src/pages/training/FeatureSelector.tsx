@@ -3,7 +3,7 @@ import { Button, Card, Divider, Checkbox, Tag, Empty, Typography, Tooltip } from
 import { Database, ShieldCheck, ChevronRight, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
 import { AnimatePresence, motion } from 'framer-motion';
-import { FeatureCategory, TRAINING_BASE_FEATURES } from './trainingUtils';
+import { FeatureCategory, FeatureOption, TRAINING_BASE_FEATURES } from './trainingUtils';
 
 const { Text } = Typography;
 
@@ -14,6 +14,11 @@ interface FeatureSelectorProps {
   loading: boolean;
   /** 未创建因子集时跳转后台训练服务的引导回调（刷新字段执行数据扫描） */
   onGuide?: () => void;
+  /**
+   * 锚库 id。跨源训练时传入：非锚库特征会标注来源库，
+   * 且被别库占用的同名副本渲染为不可勾选（后端按裸名去重，同名必然 422）。
+   */
+  anchorSource?: string;
 }
 
 const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactNode }> = ({ title, desc, icon }) => (
@@ -32,17 +37,20 @@ const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactN
   </div>
 );
 
-export const FeatureSelector: React.FC<FeatureSelectorProps> = ({ 
-  categories, 
-  selectedFeatures, 
-  onChange, 
+export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
+  categories,
+  selectedFeatures,
+  onChange,
   loading,
-  onGuide
+  onGuide,
+  anchorSource
 }) => {
   const [expandedId, setExpandedId] = useState<string>(categories[0]?.id || '');
 
-  const toggleFeature = (key: string) => {
-    if (TRAINING_BASE_FEATURES.includes(key)) return;
+  const toggleFeature = (feature: FeatureOption) => {
+    const key = feature.key;
+    // 被别库占用的同名副本不可勾选：勾了后端也会按裸名去重报 422
+    if (feature.disabled || TRAINING_BASE_FEATURES.includes(key)) return;
     if (selectedFeatures.includes(key)) {
       onChange(selectedFeatures.filter(f => f !== key));
     } else {
@@ -51,11 +59,13 @@ export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
   };
 
   const toggleCategory = (category: FeatureCategory) => {
-    const categoryKeys = category.features.map(f => f.key);
+    // 只对可勾选的副本生效：把别库占用的同名副本算进来，
+    // 取消全选会连带删掉「归属库那一份」的勾选（同一个裸 key）
+    const categoryKeys = category.features.filter(f => !f.disabled).map(f => f.key);
     const mandatoryKeysInCategory = categoryKeys.filter(k => TRAINING_BASE_FEATURES.includes(k));
-    
-    const allSelected = categoryKeys.every(k => selectedFeatures.includes(k));
-    
+
+    const allSelected = categoryKeys.length > 0 && categoryKeys.every(k => selectedFeatures.includes(k));
+
     if (allSelected) {
       // Unselect all EXCEPT mandatory ones
       onChange([
@@ -95,7 +105,10 @@ export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
             </div>
           )}
           {categories.map((category) => {
-            const categoryFeatureKeys = new Set(category.features.map((feature) => feature.key));
+            // 被别库占用的同名副本不计入本类已选：同一个裸 key 只在归属库里算一次
+            const categoryFeatureKeys = new Set(
+              category.features.filter((feature) => !feature.disabled).map((feature) => feature.key),
+            );
             const categorySelectedCount = selectedFeatures.filter((featureKey) => categoryFeatureKeys.has(featureKey)).length;
             const isExpanded = expandedId === category.id;
             
@@ -153,15 +166,15 @@ export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
                       <div className="border-t border-gray-100 bg-gray-50/70 px-5 py-4">
                         <div className="mb-3 flex items-center justify-between">
                           <Checkbox
-                            checked={category.features.every((f) => selectedFeatures.includes(f.key))}
+                            checked={category.features.filter((f) => !f.disabled).every((f) => selectedFeatures.includes(f.key))}
                             indeterminate={
-                              category.features.some((f) => selectedFeatures.includes(f.key)) &&
-                              !category.features.every((f) => selectedFeatures.includes(f.key))
+                              category.features.some((f) => !f.disabled && selectedFeatures.includes(f.key)) &&
+                              !category.features.filter((f) => !f.disabled).every((f) => selectedFeatures.includes(f.key))
                             }
                             onChange={() => toggleCategory(category)}
                             className="text-xs font-medium text-slate-600"
                           >
-                            全选本类特征 ({category.features.length})
+                            全选本类特征 ({category.features.filter((f) => !f.disabled).length})
                           </Checkbox>
                           <Text type="secondary" className="text-[10px] uppercase tracking-wider">
                             {categorySelectedCount} / {category.features.length}
@@ -171,40 +184,57 @@ export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
                           {category.features.map((feature) => {
                             const value = feature.key;
                             const isMandatory = TRAINING_BASE_FEATURES.includes(value);
+                            const isBlocked = Boolean(feature.disabled);
                             const checked = isMandatory || selectedFeatures.includes(value);
+                            const showSource = Boolean(anchorSource && feature.sourceId && feature.sourceId !== anchorSource);
                             const tile = (
                               <div
                                 key={value}
                                 className={clsx(
                                   'flex items-center gap-2.5 rounded-2xl border px-3 py-2.5 transition-colors select-none',
-                                  isMandatory ? 'cursor-not-allowed opacity-80' : 'cursor-pointer',
-                                  checked
-                                    ? 'border-blue-200 bg-blue-50/80 shadow-sm'
-                                    : 'border-gray-200 bg-white hover:border-blue-200 hover:bg-blue-50/40',
+                                  isMandatory || isBlocked ? 'cursor-not-allowed opacity-80' : 'cursor-pointer',
+                                  isBlocked
+                                    ? 'border-amber-200 bg-amber-50/60'
+                                    : checked
+                                      ? 'border-blue-200 bg-blue-50/80 shadow-sm'
+                                      : 'border-gray-200 bg-white hover:border-blue-200 hover:bg-blue-50/40',
                                 )}
-                                onClick={() => !isMandatory && toggleFeature(value)}
+                                onClick={() => toggleFeature(feature)}
                               >
                                 <Checkbox
                                   checked={checked}
-                                  disabled={isMandatory}
+                                  disabled={isMandatory || isBlocked}
                                   onClick={(event) => event.stopPropagation()}
-                                  onChange={() => !isMandatory && toggleFeature(value)}
+                                  onChange={() => toggleFeature(feature)}
                                   className="m-0 shrink-0"
                                 />
                                 <div className="flex-1 flex items-center justify-between min-w-0 gap-2">
                                   <span className={clsx('text-xs truncate', checked ? 'text-blue-700 font-medium' : 'text-gray-600')}>
                                     {feature.label}
                                   </span>
-                                  {isMandatory && (
-                                    <Tag className="m-0 px-1 py-0 border-0 bg-blue-100 text-blue-600 text-[10px] scale-90 flex items-center gap-0.5">
-                                      <Lock size={8} /> 必选
-                                    </Tag>
-                                  )}
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {showSource && (
+                                      <Tag className="m-0 px-1 py-0 border-0 bg-slate-100 text-slate-500 text-[10px] scale-90">
+                                        {feature.sourceName || feature.sourceId}
+                                      </Tag>
+                                    )}
+                                    {isBlocked && (
+                                      <Tag className="m-0 px-1 py-0 border-0 bg-amber-100 text-amber-700 text-[10px] scale-90">
+                                        同名
+                                      </Tag>
+                                    )}
+                                    {isMandatory && (
+                                      <Tag className="m-0 px-1 py-0 border-0 bg-blue-100 text-blue-600 text-[10px] scale-90 flex items-center gap-0.5">
+                                        <Lock size={8} /> 必选
+                                      </Tag>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
                             );
-                            return feature.explanation ? (
-                              <Tooltip key={value} title={feature.explanation} placement="topLeft" mouseEnterDelay={0.4}>
+                            const hint = isBlocked ? feature.disabledReason : feature.explanation;
+                            return hint ? (
+                              <Tooltip key={value} title={hint} placement="topLeft" mouseEnterDelay={0.4}>
                                 {tile}
                               </Tooltip>
                             ) : tile;
@@ -237,7 +267,10 @@ export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
           ) : (
             <div className="space-y-3">
               {categories.map((category) => {
-                const items = category.features.filter((feature) => selectedFeatures.includes(feature.key));
+                // 只列归属库那一份：同名副本在这里出现会让「已选字段」看起来多了一份
+                const items = category.features.filter(
+                  (feature) => !feature.disabled && selectedFeatures.includes(feature.key),
+                );
                 if (items.length === 0) return null;
                 return (
                   <div key={category.id} className="rounded-2xl border border-white bg-white p-3 shadow-sm">
@@ -247,7 +280,7 @@ export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
                         <Tag
                           key={item.key}
                           closable={!TRAINING_BASE_FEATURES.includes(item.key)}
-                          onClose={() => toggleFeature(item.key)}
+                          onClose={() => toggleFeature(item)}
                           className={clsx(
                             "m-0 rounded-lg text-[10px] py-0.5 flex items-center gap-1",
                             TRAINING_BASE_FEATURES.includes(item.key) 

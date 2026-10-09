@@ -190,7 +190,7 @@ def test_notify_falls_back_to_text_when_markdown_rejected(configured, monkeypatc
     def _boom(*a, **k):
         raise RuntimeError("markdown not allowed")
 
-    def _text(content):
+    def _text(content, **kw):
         sent["text"] = content
         return {"id": "1"}
 
@@ -231,7 +231,7 @@ def test_alert_async_sends_warning_via_thread(configured, monkeypatch):
 
     q: Queue = Queue()
     monkeypatch.setattr(
-        qq_notify, "notify", lambda title, content="": q.put((title, content)) or True
+        qq_notify, "notify", lambda title, content="", **kw: q.put((title, content)) or True
     )
     assert (
         qq_notify.alert_async(
@@ -256,7 +256,7 @@ def test_alert_async_force_bypasses_level_filter(configured, monkeypatch):
 
     q: Queue = Queue()
     monkeypatch.setattr(
-        qq_notify, "notify", lambda title, content="": q.put((title, content)) or True
+        qq_notify, "notify", lambda title, content="", **kw: q.put((title, content)) or True
     )
     assert (
         qq_notify.alert_async(

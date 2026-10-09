@@ -186,10 +186,15 @@ services:
       # 融资融券股票池文件路径（容器内）
       - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
 
-      # 系统一键更新（web 控制台「更新系统」）。默认开启；如需关闭可设
-      # QUANTMIND_ENABLE_WEB_UPDATE=false。开启表示允许管理后台通过 docker socket
+      # 系统一键更新（web 控制台「更新系统」）。表示允许管理后台通过 docker socket
       # 执行宿主 deploy/update.sh（≈宿主机 root 能力，见部署说明）。
+      # 注意：代码里只看 docker socket 是否存在，不再读这个变量；保留仅为兼容旧配置。
       - QUANTMIND_ENABLE_WEB_UPDATE=${QUANTMIND_ENABLE_WEB_UPDATE:-true}
+      # 「更新系统」要执行的宿主项目目录（需含 deploy/update.sh 与 .git）。
+      # 默认 /opt/quantmind；非标准路径的部署必须用 .env 覆盖，否则按钮会报
+      # 「更新脚本不存在」。QUANTMIND_REF/QUANTMIND_REMOTE 可选：不设时
+      # update.sh 更新到**当前 checkout 的分支**。
+      - QUANTMIND_PROJECT_DIR=${QUANTMIND_PROJECT_DIR:-/opt/quantmind}
 
       # 服务端口
       - API_PORT=8000
@@ -252,6 +257,11 @@ services:
       - TRAINING_DOCKER_NETWORK=${TRAINING_DOCKER_NETWORK:-quantmind_quantmind-net}
       - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
       - QUANTMIND_API_BASE_URL=${QUANTMIND_API_BASE_URL:-http://quantmind:8000}
+
+      # P1 滚动重训：调度开关（celery-beat 注册每分钟 tick 用；默认关）与
+      # MemAvailable 守卫下限（GB；体检 C07 按该 env 判定任务开关状态）
+      - RETRAIN_SCHEDULER_ENABLED=${RETRAIN_SCHEDULER_ENABLED:-false}
+      - RETRAIN_MEM_MIN_GB=${RETRAIN_MEM_MIN_GB:-50}
 
       # AutoDL 远程训练节点
       - TRAINING_AUTODL_HOST=${TRAINING_AUTODL_HOST:-}
@@ -493,6 +503,11 @@ services:
       - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
       - QUANTMIND_API_BASE_URL=${QUANTMIND_API_BASE_URL:-http://quantmind:8000}
 
+      # P1 滚动重训：调度开关（celery-beat 注册每分钟 tick 用；默认关）与
+      # MemAvailable 守卫下限（GB；体检 C07 按该 env 判定任务开关状态）
+      - RETRAIN_SCHEDULER_ENABLED=${RETRAIN_SCHEDULER_ENABLED:-false}
+      - RETRAIN_MEM_MIN_GB=${RETRAIN_MEM_MIN_GB:-50}
+
       # AutoDL 远程训练节点
       - TRAINING_AUTODL_HOST=${TRAINING_AUTODL_HOST:-}
       - TRAINING_AUTODL_SSH_PORT=${TRAINING_AUTODL_SSH_PORT:-22}
@@ -646,6 +661,10 @@ services:
 
       # 数据同步定时任务
       - DAILY_SYNC_ENABLED=true
+
+      # P1 滚动重训派发 tick（每分钟；due 判定按前端「重训调度」配置）。
+      # 默认关：打开前先确认配方（cn_nativetft_base）与训练镜像可用。
+      - RETRAIN_SCHEDULER_ENABLED=${RETRAIN_SCHEDULER_ENABLED:-false}
     volumes:
       - ./backend:/app/backend
       - ./config:/app/config

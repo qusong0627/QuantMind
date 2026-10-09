@@ -53,6 +53,7 @@ class AlertConfigUpdate(BaseModel):
 
     enabled: bool | None = None
     score_threshold: float | None = None
+    score_drop_threshold: float | None = None
     watch_sim: bool | None = None
     watch_real: bool | None = None
     watch_manual: bool | None = None

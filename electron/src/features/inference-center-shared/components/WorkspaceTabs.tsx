@@ -1,19 +1,20 @@
 /**
- * 推理中心工作区切换（三工作区顶栏切换 IA）。
+ * 推理中心工作区切换（四工作区顶栏切换 IA）。
  *
- * 机构级推理平台的三类使用场景在**操作节奏**上完全不同，混在一屏里会让每一类都别扭：
+ * 机构级推理平台的四类使用场景在**操作节奏**上完全不同，混在一屏里会让每一类都别扭：
  *   - 单票研判：慢，反复调参看同一只票（改基准日 / 换模型 / 换周期）
  *   - 截面选股：快，扫全市场找标的（排序 / 过滤 / 导出）
  *   - 模型治理：离线，审模型资产（哪个模型能出区间、哪个归因不可用、哪个批次失败）
+ *   - 晋升流程：更慢，挑战者从回放评估到观察期到晋升/回滚的全生命周期台账（P2 §5.3）
  *
- * 因此拆成三个并列工作区，共享同一份市场上下文与顶栏状态带（切换不丢上下文）。
+ * 因此拆成四个并列工作区，共享同一份市场上下文与顶栏状态带（切换不丢上下文）。
  */
 
 import React from 'react';
 import { clsx } from 'clsx';
-import { Target, Table2, ShieldCheck } from 'lucide-react';
+import { Target, Table2, ShieldCheck, GitBranch } from 'lucide-react';
 
-export type WorkspaceKey = 'single' | 'cross' | 'governance';
+export type WorkspaceKey = 'single' | 'cross' | 'governance' | 'rollout';
 
 interface WorkspaceMeta {
   key: WorkspaceKey;
@@ -40,6 +41,12 @@ export const WORKSPACES: WorkspaceMeta[] = [
     label: '模型治理',
     hint: '模型资产盘点：周期口径、区间能力、归因可用性、批次健康度',
     icon: ShieldCheck,
+  },
+  {
+    key: 'rollout',
+    label: '晋升流程',
+    hint: '挑战者晋升台账：回放评估（G0-G7 决策卡）→ 观察期 → 人工批准 / 拒绝 / 回滚',
+    icon: GitBranch,
   },
 ];
 

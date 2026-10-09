@@ -61,13 +61,6 @@ class Layer3RiskGateConfig(BaseModel):
     external_risk_source: ExternalRiskSourceConfig = Field(default_factory=ExternalRiskSourceConfig)
 
 
-class RegimeWeightConfig(BaseModel):
-    """某一 regime 下 LightGBM 与 TFT 的权重分配。"""
-
-    lgbm: float = Field(0.65, ge=0.0, le=1.0)
-    tft: float = Field(0.35, ge=0.0, le=1.0)
-
-
 class MergeConfig(BaseModel):
     mode: Literal["weighted", "rank"] = "weighted"
     lgbm_weight: float = Field(0.65, ge=0, le=1)
@@ -83,18 +76,6 @@ class FusionRulesConfig(BaseModel):
     layer2_tft: Layer2TftConfig = Field(default_factory=Layer2TftConfig)
     layer3_risk_gate: Layer3RiskGateConfig = Field(default_factory=Layer3RiskGateConfig)
     merge: MergeConfig = Field(default_factory=MergeConfig)
-    regime_weights: dict[str, RegimeWeightConfig] = Field(
-        default_factory=lambda: {
-            "normal": RegimeWeightConfig(lgbm=0.65, tft=0.35),
-            "trending": RegimeWeightConfig(lgbm=0.40, tft=0.60),
-            "volatile": RegimeWeightConfig(lgbm=0.80, tft=0.20),
-            "crash": RegimeWeightConfig(lgbm=0.90, tft=0.10),
-        }
-    )
-
-    def get_regime_weights(self, regime: str) -> RegimeWeightConfig:
-        """返回指定 regime 的权重配置，未知 regime 回退到 normal。"""
-        return self.regime_weights.get(regime, self.regime_weights["normal"])
 
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "fusion_rules.json"

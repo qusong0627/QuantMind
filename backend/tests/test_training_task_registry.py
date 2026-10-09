@@ -397,12 +397,18 @@ def test_remote_ssh_orchestrator_uses_registry():
 
 
 def test_admin_training_utils_uses_registry():
-    """admin_training_utils.py submit_training_job 的 asyncio.create_task 必须改。"""
+    """admin_training_utils.py 的提交路径必须走 REGISTRY.register（防裸 create_task 被 GC）。
+
+    旧断言写死「≥2 处」（历史上有两处裸 create_task）；重构后提交路径收敛为
+    单处 register 调用（launch task 一并挂单飞锁回调），旧计数恒红。真正的不变量
+    是：register 存在，且文件里**不得有裸 asyncio.create_task**。
+    """
     fp = ROOT / "backend/services/api/routers/admin/admin_training_utils.py"
     content = fp.read_text(encoding="utf-8")
-    # submit_training_job 内 2 处 asyncio.create_task
-    if "REGISTRY.register" in content:
-        assert content.count("REGISTRY.register") >= 2  # 至少 2 处
+    assert "REGISTRY.register(" in content, "提交路径未接 REGISTRY.register"
+    assert "asyncio.create_task(" not in content, (
+        "提交路径必须用 REGISTRY.register（强引用防 GC），不得裸 asyncio.create_task"
+    )
 
 
 def test_orphan_container_cleanup_in_launch():
@@ -434,8 +440,13 @@ def test_orphan_container_cleanup_in_launch():
 # 5. 启动 hook 验证
 # ============================================================================
 
-def test_api_main_calls_recover_pending_runs():
-    """api main_oss / services/api/main.py 启动时必须调 REGISTRY.recover_pending_runs。"""
+def test_api_main_starts_training_job_reaper():
+    """API 启动 hook 必须启动训练僵尸回收器（P0-3）。
+
+    取代已废弃的 ``REGISTRY.recover_pending_runs``（「重启即重投」有双跑风险）：
+    P0-3 起由 job_reaper 在启动期判尸——在管/探针存活一律不动，判死才标 failed
+    且默认不重投。硬断言：接线被摘掉就红（残留 running 作业将永远无人收敛）。
+    """
     candidates = [
         ROOT / "backend/main_oss.py",
         ROOT / "backend/services/api/main.py",
@@ -445,12 +456,10 @@ def test_api_main_calls_recover_pending_runs():
         if not fp.exists():
             continue
         content = fp.read_text(encoding="utf-8")
-        if "recover_pending_runs" in content:
+        if "start_training_job_reaper" in content:
             found = True
             break
-    # 不强制：可能启动 hook 放在别处；仅 warn
-    if not found:
-        pytest.skip(
-            "recover_pending_runs not found in main_oss.py / services/api/main.py; "
-            "may be wired elsewhere"
-        )
+    assert found, (
+        "启动 hook 必须调用 start_training_job_reaper（P0-3 判尸回收，"
+        "重启后残留 pending/running 作业的唯一收敛点）"
+    )

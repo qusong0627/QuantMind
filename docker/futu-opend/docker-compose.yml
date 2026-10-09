@@ -1,0 +1,35 @@
+# 富途 OpenD 的独立运行配方（**不并进根 docker-compose.yml**）。
+#
+# 为什么不并进主栈：① 它只在港股通道需要时运行，随时可 stop 而不影响 A 股链路；
+# ② 11111 端口除 RSA 外**没有鉴权**，只能发布到回环，不该出现在主栈的端口面里。
+#
+#   up：   docker compose -f docker/futu-opend/docker-compose.yml up -d
+#   探活： docker exec futu-opend bash -c 'timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/11111" && echo OK'
+#         之后再用 quantmind 容器里的 futu_subprocess.py 查一次 account（见 README）
+#   停：   docker stop futu-opend      ← 只 stop/restart，**永远不要 docker rm**
+#          （设备绑定与登录态在数据卷里，rm 掉要重新走短信验证）
+#
+# 首次登录：docker attach futu-opend → 按提示输入账号/密码/短信码 → **Ctrl+P Ctrl+Q** 分离
+#           （Ctrl+C 会把 OpenD 打断）。看是否已登录：docker logs futu-opend 末行不再是「请输入账号」。
+services:
+  futu-opend:
+    build: .
+    image: quantmind-futu-opend:latest
+    container_name: futu-opend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11111:11111"   # 只回环；quantmind 容器走 docker 网络按名字直连 futu-opend:11111
+    volumes:
+      # 用绝对路径：compose 的相对路径是相对**本文件**目录，不是仓库根
+      - /home/zbox/projects/quantmind/data/futu-opend:/opt/futu/data
+        # ↑ rsa.key + OpenD -data_dir。quantmind 容器共享同一份（挂到 /data/futu-opend），
+        #   两边的 RSA 私钥必须是同一把，否则 SDK 连不上
+      - /home/zbox/projects/quantmind/data/futu-opend-home:/root/.com.futunn.FutuOpenD
+        # ↑ 登录态/设备绑定（-login_by_remember 落盘处）；丢了要重新短信验证
+    networks:
+      - quantmind
+
+networks:
+  quantmind:
+    name: quantmind_quantmind-net   # 主栈 compose 创建的网络，这里按外部网络接入
+    external: true

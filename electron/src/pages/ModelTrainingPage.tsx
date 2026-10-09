@@ -15,7 +15,7 @@ import { modelTrainingService } from '../services/modelTrainingService';
 import { useAppDispatch, useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket, setMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
-import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, DEFAULT_FEATURE_CATEGORIES, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER, TrainingMarket, TRAINING_MARKET_OPTIONS, resolveTrainingMarket } from './training/trainingUtils';
+import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, DEFAULT_FEATURE_CATEGORIES, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER, TrainingMarket, TRAINING_MARKET_OPTIONS, resolveTrainingMarket, buildCrossSourceFeaturePlan, buildExtraFactorSourceOptions, buildFeatureOwnershipMap, findCrossSourceFeatureConflicts, formatCrossSourceConflictMessage, mergeSourceFeatureCategories, sanitizeExtraFactorSources } from './training/trainingUtils';
 import { AdminModelFeatureDataCoverage, QuantDBTrainingSource } from '../features/admin/types';
 import { adminService } from '../features/admin/services/adminService';
 import { FeatureSelector } from './training/FeatureSelector';
@@ -43,7 +43,26 @@ const TRAINING_PAGE_BOTTOM_SAFE_CLASS = 'pb-[30px]';
 // quantdb_factor_reader.MARKET_FACTOR_SOURCES 保持一致。
 const QUANTDB_DIRECT_MARKETS = ['CN', 'HK', 'US', 'FUTURES', 'CRYPTO', 'CUSTOM'];
 const isQuantDBMarket = (market: string) => QUANTDB_DIRECT_MARKETS.includes(market);
+const DEFAULT_FACTOR_SOURCE = 'l1_factors';
 let draftRestoreNoticeShown = false;
+
+/**
+ * 同步读草稿里的附加因子库。
+ *
+ * 必须放在 state 初始化里而不是 mount effect 里：目录加载 effect 在 mount 时就开始跑，
+ * 等 effect 再补附加库，首轮加载会按「只有锚库」的可用集合过滤勾选，
+ * 把草稿里来自副库的特征静默剔掉（用户看到的是「草稿恢复了，但少了一批特征」）。
+ */
+const readDraftExtraFactorSources = (): string[] => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return [];
+    const parsed = JSON.parse(saved) as TrainingDraft;
+    return sanitizeExtraFactorSources(parsed.extraFactorSources, DEFAULT_FACTOR_SOURCE);
+  } catch {
+    return [];
+  }
+};
 
 const MetricCard: React.FC<{
   label: string;
@@ -83,6 +102,8 @@ interface ImportPreview {
   unavailableFeatures: string[];
   marketChanged: boolean;
   catalogVersionChanged: boolean;
+  /** 配置里声明、但当前市场不可用（未发布 / 无目录版本）的附加因子库 */
+  unavailableExtraSources: string[];
 }
 
 type FormAction =
@@ -202,11 +223,16 @@ export const ModelTrainingPage: React.FC = () => {
   // ── useState: 训练运行时 state（不参与草稿持久化） ──
   const [currentStep, setCurrentStep] = useState(0);
   // A 股 QuantDB 的字段、分类与默认勾选只来自后端已发布目录。
-  const [featureCategories, setFeatureCategories] = useState<FeatureCategory[]>([]);
+  const [anchorFeatureCategories, setAnchorFeatureCategories] = useState<FeatureCategory[]>([]);
   const [featureCatalogLoading, setFeatureCatalogLoading] = useState(false);
-  const [factorSource, setFactorSource] = useState('l1_factors');
+  const [factorSource, setFactorSource] = useState(DEFAULT_FACTOR_SOURCE);
   const [factorSources, setFactorSources] = useState<QuantDBTrainingSource[]>([]);
   const [factorCatalogVersion, setFactorCatalogVersion] = useState<string | null>(null);
+  // 附加因子库（跨源训练）：锚库仍由 factorSource 承载，这里只放副库 id。
+  // 副库的目录版本不落 state：统一从 factorSources 现读当前已发布版本，避免 pin 到过期版本。
+  const [extraFactorSources, setExtraFactorSources] = useState<string[]>(readDraftExtraFactorSources);
+  const [extraFeatureCategories, setExtraFeatureCategories] = useState<Record<string, FeatureCategory[]>>({});
+  const [extraCatalogErrors, setExtraCatalogErrors] = useState<Record<string, string>>({});
   const [dataCoverage, setDataCoverage] = useState<AdminModelFeatureDataCoverage | null>(null);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus>('draft');
   const [executionStage, setExecutionStage] = useState('待配置');
@@ -237,6 +263,8 @@ export const ModelTrainingPage: React.FC = () => {
   const logsRef = useRef<string[]>([]);
   const serverLogSeenRef = useRef<Set<string>>(new Set());
   const catalogSuggestionAppliedRef = useRef(false);
+  // 上一次目录加载对应的「市场|锚库」：用来区分「换锚库」与「只是增删附加库」
+  const catalogAnchorKeyRef = useRef('');
   const importInputRef = useRef<HTMLInputElement>(null);
   const importedFeaturesRef = useRef<string[] | null>(null);
   // 草稿恢复的特征勾选：目录异步加载完成前 HYDRATE 已写入表单，
@@ -247,6 +275,56 @@ export const ModelTrainingPage: React.FC = () => {
 
   // Derive individual fields from formState for inline use
   const { selectedFeatures, timePeriods, wfaConfig, target, params, context, displayName, displayNameMode } = formState;
+
+  // 目录加载 effect 要读「当前勾选」来决定增删附加库后是否保留选择。
+  // 用 effect 同步（声明在目录加载 effect 之前，同一 commit 内先执行），避免读到上一轮的值。
+  const selectedFeaturesRef = useRef<string[]>(selectedFeatures);
+  useEffect(() => {
+    selectedFeaturesRef.current = selectedFeatures;
+  }, [selectedFeatures]);
+
+  // ── 跨源因子库（锚库 + 附加库）派生值 ──
+  // 锚库/附加库目录合并成一份可渲染分类表（附加库分类名带来源后缀、id 带库前缀）
+  const sourceLabels = useMemo<Record<string, string>>(
+    () => Object.fromEntries(factorSources.map((item) => [item.id, item.name || item.id])),
+    [factorSources],
+  );
+  const featureCategories = useMemo(
+    () => mergeSourceFeatureCategories(factorSource, anchorFeatureCategories, extraFeatureCategories, sourceLabels),
+    [factorSource, anchorFeatureCategories, extraFeatureCategories, sourceLabels],
+  );
+  // 副库版本只从当前来源列表现读（catalog_version 就是该库已发布版本 id）
+  const extraCatalogVersions = useMemo(() => {
+    const versions: Record<string, string> = {};
+    extraFactorSources.forEach((lib) => {
+      const version = factorSources.find((item) => item.id === lib)?.catalog_version;
+      if (version) versions[lib] = version;
+    });
+    return versions;
+  }, [extraFactorSources, factorSources]);
+  const featureOwnership = useMemo(
+    () => buildFeatureOwnershipMap(factorSource, anchorFeatureCategories, extraFeatureCategories),
+    [factorSource, anchorFeatureCategories, extraFeatureCategories],
+  );
+  const crossSourceConflicts = useMemo(
+    () => findCrossSourceFeatureConflicts(factorSource, anchorFeatureCategories, extraFeatureCategories),
+    [factorSource, anchorFeatureCategories, extraFeatureCategories],
+  );
+  // 选中特征 → 后端 features 数组：锚库裸名、附加库 "库:feature_key"，并给出副库版本 pin
+  const crossSourcePlan = useMemo(
+    () => buildCrossSourceFeaturePlan(selectedFeatures, factorSource, featureOwnership, extraCatalogVersions),
+    [selectedFeatures, factorSource, featureOwnership, extraCatalogVersions],
+  );
+  const extraSourceOptions = useMemo(
+    () => buildExtraFactorSourceOptions(factorSources, factorSource),
+    [factorSources, factorSource],
+  );
+  const hasSelectableExtraSource = extraSourceOptions.some((option) => !option.disabled);
+  const extraSourcesKey = extraFactorSources.join('|');
+  const isExtraFactorSourceUsable = (lib: string) => {
+    const source = factorSources.find((item) => item.id === lib);
+    return Boolean(source && source.published && source.catalog_version);
+  };
 
   const labelFormula = useMemo(() => buildLabelFormula(target), [target]);
   const effectiveTradeDate = useMemo(() => buildEffectiveTradeDate(target, timePeriods.test[0]), [target, timePeriods.test]);
@@ -270,6 +348,12 @@ export const ModelTrainingPage: React.FC = () => {
     }
     setCustomMarketOverride(false);
     if (next !== currentMarket) appDispatch(setMarket(next));
+  };
+
+  // 换锚库：把新锚库从附加库里剔除，避免「自己配自己」
+  const handleFactorSourceChange = (next: string) => {
+    setFactorSource(next);
+    setExtraFactorSources((prev) => sanitizeExtraFactorSources(prev, next));
   };
 
   const featureCount = selectedFeatures.length;
@@ -303,7 +387,17 @@ export const ModelTrainingPage: React.FC = () => {
   const isSelectedNodeReady = selectedNodeObj
     ? NODE_READY.has(String(selectedNodeObj.readiness || ''))
     : trainingNodes.length === 0;
-  const isReadyToTrain = selectedFeatures.length > 0 && target.horizonDays >= 1 && totalDays > 0 && isDirectCatalogReady && isSelectedNodeReady;
+  // 跨源提交前必须闭合的两件事：归属未知的选中特征（会被后端当别库同名因子解析）、
+  // 以及有特征被选中但没 pin 版本的附加库
+  const crossSourceBlocker = crossSourcePlan.unresolved.length > 0
+    ? `以下已选特征不在当前因子库目录中：${crossSourcePlan.unresolved.join('、')}。请取消选择或重新启用对应因子库。`
+    : crossSourcePlan.unversionedSources.length > 0
+      ? `附加因子库缺少已发布目录版本：${crossSourcePlan.unversionedSources
+          .map((lib) => sourceLabels[lib] || lib)
+          .join('、')}。请先在后台发布该库目录。`
+      : '';
+  const isCrossSourceReady = crossSourceBlocker === '';
+  const isReadyToTrain = selectedFeatures.length > 0 && target.horizonDays >= 1 && totalDays > 0 && isDirectCatalogReady && isSelectedNodeReady && isCrossSourceReady;
   // 只看本页训练态，不用后端残留的 pending 把「开始训练」锁死
   const isTrainingInProgress = trainingStatus === 'running';
   const disableStartTraining = (isTrainingInProgress || !isSelectedNodeReady) && currentStep === 3;
@@ -354,57 +448,111 @@ export const ModelTrainingPage: React.FC = () => {
   }, [trainingNodes, selectedNode]);
 
   // 直读市场（CN/HK）训练目录完全由后端发布版本驱动；不回退到任何内置字段。
+  // 锚库与附加库目录在同一次加载里取齐后一起落地：拆成两个 effect 会互相覆盖勾选，
+  // 也会让「归属表 / 冲突检测 / 默认勾选」看到不同步的目录快照。
   useEffect(() => {
     let active = true;
     const loadCatalog = async () => {
       setFeatureCatalogLoading(true);
       setFactorCatalogVersion(null);
       setDataCoverage(null);
+      const anchorKey = `${trainingMarket}|${factorSource}`;
+      // 换锚库/换市场才重算默认勾选；只是增删附加库时必须保住用户已勾的特征
+      const anchorChanged = catalogAnchorKeyRef.current !== anchorKey;
+      catalogAnchorKeyRef.current = anchorKey;
       try {
+        let effectiveExtras = sanitizeExtraFactorSources(extraFactorSources, factorSource);
         if (isQuantDBMarket(trainingMarket)) {
           const sourceResult = await modelTrainingService.getQuantDBTrainingSources(trainingMarket);
           if (!active) return;
-          setFactorSources(sourceResult.sources || []);
-          const selectedSource = sourceResult.sources.find((item) => item.id === factorSource);
+          const availableSources = sourceResult.sources || [];
+          setFactorSources(availableSources);
+          const selectedSource = availableSources.find((item) => item.id === factorSource);
           if (!selectedSource) {
-            const defaultSource = sourceResult.sources.find((item) => item.default)?.id
+            const defaultSource = availableSources.find((item) => item.default)?.id
               || sourceResult.default_source;
             if (defaultSource && defaultSource !== factorSource) setFactorSource(defaultSource);
             return;
           }
+          // 副库必须是本市场里「已发布且有目录版本」的库：换市场/导错配置后自愈，
+          // 也保证下面用的版本映射与目录来自同一份来源列表
+          effectiveExtras = effectiveExtras.filter((lib) => {
+            const source = availableSources.find((item) => item.id === lib);
+            return Boolean(source && source.published && source.catalog_version);
+          });
+          if (effectiveExtras.join('|') !== extraFactorSources.join('|')) {
+            setExtraFactorSources(effectiveExtras);
+          }
         }
 
-        const catalog = await modelTrainingService.getFeatureCatalog(
+        const anchorCatalog = await modelTrainingService.getFeatureCatalog(
           trainingMarket,
           false,
           isQuantDBMarket(trainingMarket) ? factorSource : undefined,
         );
+
+        // 附加库目录：并行拉取。单个库失败只影响该库，且必须显式提示，
+        // 不能静默吞掉后假装本次训练只有锚库（特征会凭空少一截）。
+        const extraLibs = isQuantDBMarket(trainingMarket) ? effectiveExtras : [];
+        const extraResults = await Promise.all(extraLibs.map(async (lib) => {
+          try {
+            const catalog = await modelTrainingService.getFeatureCatalog(trainingMarket, false, lib);
+            return { lib, categories: toDynamicCategories(catalog), error: '' };
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : '目录加载失败';
+            return { lib, categories: [] as FeatureCategory[], error: reason };
+          }
+        }));
         if (!active) return;
-        const dynamicCats = toDynamicCategories(catalog);
-        setFeatureCategories(dynamicCats);
-        setDataCoverage(catalog.data_coverage || null);
+
+        const nextExtraCategories: Record<string, FeatureCategory[]> = {};
+        const nextExtraErrors: Record<string, string> = {};
+        extraResults.forEach((item) => {
+          if (item.error) nextExtraErrors[item.lib] = item.error;
+          else nextExtraCategories[item.lib] = item.categories;
+        });
+        setExtraFeatureCategories(nextExtraCategories);
+        setExtraCatalogErrors(nextExtraErrors);
+        if (Object.keys(nextExtraErrors).length > 0) {
+          const failed = Object.entries(nextExtraErrors)
+            .map(([lib, reason]) => `${sourceLabels[lib] || lib}（${reason}）`)
+            .join('、');
+          message.warning(`附加因子库目录加载失败，本次训练已排除：${failed}`);
+        }
+
+        const dynamicCats = toDynamicCategories(anchorCatalog);
+        setAnchorFeatureCategories(dynamicCats);
+        setDataCoverage(anchorCatalog.data_coverage || null);
         setFactorCatalogVersion(
-          catalog.source === 'quantdb_factor_catalog' && catalog.catalog_status === 'ready'
-            ? catalog.version_id
+          anchorCatalog.source === 'quantdb_factor_catalog' && anchorCatalog.catalog_status === 'ready'
+            ? anchorCatalog.version_id
             : null,
         );
+        const availableKeys = new Set([
+          ...dynamicCats.flatMap((category) => category.features.map((feature) => feature.key)),
+          ...Object.values(nextExtraCategories)
+            .flatMap((categories) => categories.flatMap((category) => category.features.map((feature) => feature.key))),
+        ]);
         const importedFeatures = importedFeaturesRef.current;
         const restoredFeatures = restoredDraftFeaturesRef.current;
         if (importedFeatures) {
-          const availableKeys = new Set(dynamicCats.flatMap((category) => category.features.map((feature) => feature.key)));
           dispatch({ type: 'SET_FEATURES', payload: importedFeatures.filter((key) => availableKeys.has(key)) });
           importedFeaturesRef.current = null;
           restoredDraftFeaturesRef.current = null;
         } else if (restoredFeatures) {
           // 目录加载晚于草稿恢复：保留草稿里勾选且在当前目录可用的特征，而非重置为默认勾选
-          const availableKeys = new Set(dynamicCats.flatMap((category) => category.features.map((feature) => feature.key)));
           dispatch({ type: 'SET_FEATURES', payload: restoredFeatures.filter((key) => availableKeys.has(key)) });
           restoredDraftFeaturesRef.current = null;
+        } else if (!anchorChanged) {
+          // 只是增删附加库：保留当前勾选，仅剔除随库一起消失的特征
+          const current = selectedFeaturesRef.current;
+          const kept = current.filter((key) => availableKeys.has(key));
+          if (kept.length !== current.length) dispatch({ type: 'SET_FEATURES', payload: kept });
         } else {
           dispatch({ type: 'SET_FEATURES', payload: resolveDefaultSelectedFeatures(dynamicCats, trainingMarket) });
         }
-        if (catalog.data_coverage?.suggested_periods && !catalogSuggestionAppliedRef.current) {
-          const suggested = parseSuggestedTimePeriods(catalog.data_coverage.suggested_periods);
+        if (anchorCatalog.data_coverage?.suggested_periods && !catalogSuggestionAppliedRef.current) {
+          const suggested = parseSuggestedTimePeriods(anchorCatalog.data_coverage.suggested_periods);
           if (suggested) {
             dispatch({ type: 'SET_TIME', key: 'train', value: suggested.train });
             dispatch({ type: 'SET_TIME', key: 'val', value: suggested.val });
@@ -418,10 +566,14 @@ export const ModelTrainingPage: React.FC = () => {
           // 拿 A 股预设去猜自定义数据（rd_mined 挖掘因子）是在编造特征。
           // 此分支刻意不弹提示（页面会以「目录未就绪」呈现），日志留痕供排查。
           console.warn('[ModelTrainingPage] 训练目录加载失败，特征已清空（禁止回退内置字段）:', trainingMarket, error);
-          setFeatureCategories([]);
+          setAnchorFeatureCategories([]);
+          setExtraFeatureCategories({});
+          setExtraCatalogErrors({});
           dispatch({ type: 'SET_FEATURES', payload: [] });
         } else if (active) {
-          setFeatureCategories(DEFAULT_FEATURE_CATEGORIES);
+          setAnchorFeatureCategories(DEFAULT_FEATURE_CATEGORIES);
+          setExtraFeatureCategories({});
+          setExtraCatalogErrors({});
           dispatch({ type: 'SET_FEATURES', payload: getDefaultFeaturesForMarket(trainingMarket) });
           message.warning('特征字典加载失败，已回退到内置字段');
         }
@@ -431,7 +583,9 @@ export const ModelTrainingPage: React.FC = () => {
     };
     loadCatalog();
     return () => { active = false; };
-  }, [trainingMarket, factorSource]);
+    // sourceLabels 只用于报错文案，不参与加载语义，故意不入依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trainingMarket, factorSource, extraSourcesKey]);
 
   // P0-4: 草稿恢复 — 一次 dispatch 原子化写入（替代 7 个 setState）
   useEffect(() => {
@@ -445,6 +599,9 @@ export const ModelTrainingPage: React.FC = () => {
       if (Array.isArray(parsed.selectedFeatures)) {
         restoredDraftFeaturesRef.current = parsed.selectedFeatures;
       }
+      // 附加因子库不在这里恢复：它已在 useState 初始化器（readDraftExtraFactorSources）里
+      // 同步读出，否则首轮目录加载会按「只有锚库」过滤掉草稿里副库的特征。
+      // 是否可用由目录加载时按当前市场的来源列表再过滤一次。
       if (!draftRestoreNoticeShown) {
         draftRestoreNoticeShown = true;
         message.success('已恢复上次训练草稿');
@@ -474,11 +631,12 @@ export const ModelTrainingPage: React.FC = () => {
       poolRef: formState.poolRef,
       poolName: formState.poolName,
       poolId: formState.poolId,
+      extraFactorSources,
       lastSavedAt: new Date().toISOString(),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
     setDraftSavedAt(draft.lastSavedAt);
-  }, [formState.draftHydrated, formState.poolRef, formState.poolName, formState.poolId, displayName, displayNameMode, selectedFeatures, timePeriods, target, params, context, wfaConfig]);
+  }, [formState.draftHydrated, formState.poolRef, formState.poolName, formState.poolId, displayName, displayNameMode, selectedFeatures, timePeriods, target, params, context, wfaConfig, extraFactorSources]);
 
   const clearTimers = () => {
     timersRef.current.forEach(t => window.clearTimeout(t));
@@ -516,7 +674,10 @@ export const ModelTrainingPage: React.FC = () => {
       return;
     }
     if (!isReadyToTrain) {
-      message.warning(isQuantDBMarket(trainingMarket) ? '数据源、映射版本或覆盖范围尚未就绪' : '配置不完整');
+      message.warning(
+        crossSourceBlocker
+          || (isQuantDBMarket(trainingMarket) ? '数据源、映射版本或覆盖范围尚未就绪' : '配置不完整'),
+      );
       return;
     }
     clearTimers();
@@ -531,7 +692,15 @@ export const ModelTrainingPage: React.FC = () => {
     pushLog(`正在提交训练请求：${displayName}`);
 
     try {
-      const payload = buildBackendTrainingPayload(requestPreview, timePeriods, { nodeId: selectedNode, maxTimeMinutes, factorFilter });
+      const payload = buildBackendTrainingPayload(requestPreview, timePeriods, {
+        nodeId: selectedNode,
+        maxTimeMinutes,
+        factorFilter,
+        // 跨源：锚库发裸名、附加库发 "库:feature_key"，并 pin 副库目录版本
+        crossSource: isQuantDBMarket(trainingMarket)
+          ? { anchorSource: factorSource, ownership: featureOwnership, extraCatalogVersions }
+          : undefined,
+      });
       if (isQuantDBMarket(trainingMarket) && factorCatalogVersion) {
         payload.factor_source = factorSource;
         payload.factor_catalog_version = factorCatalogVersion;
@@ -683,10 +852,12 @@ export const ModelTrainingPage: React.FC = () => {
 
   const handleResetAll = () => {
     clearTimers();
-    const features = featureCategories.length > 0
-      ? resolveDefaultSelectedFeatures(featureCategories, trainingMarket)
+    // 默认勾选只认锚库目录：附加库的 default_selected 不参与，避免一开附加库就自动多勾一片
+    const features = anchorFeatureCategories.length > 0
+      ? resolveDefaultSelectedFeatures(anchorFeatureCategories, trainingMarket)
       : getDefaultFeaturesForMarket(trainingMarket);
     dispatch({ type: 'SET_FEATURES', payload: features });
+    setExtraFactorSources([]);
     const coveragePeriods = parseSuggestedTimePeriods(dataCoverage?.suggested_periods);
     dispatch({ type: 'SET_TIME',  key: 'train', value: coveragePeriods?.train || DEFAULT_TIME_PERIODS.train });
     dispatch({ type: 'SET_TIME',  key: 'val',   value: coveragePeriods?.val || DEFAULT_TIME_PERIODS.val });
@@ -722,6 +893,10 @@ export const ModelTrainingPage: React.FC = () => {
           && isQuantDBMarket(config.market)
           && Boolean(config.factorCatalogVersion)
           && config.factorCatalogVersion !== factorCatalogVersion,
+        // 换市场时来源列表还是旧市场的，判不了，交给目录加载后再过滤
+        unavailableExtraSources: config.market === trainingMarket
+          ? config.extraFactorSources.filter((lib) => !isExtraFactorSourceUsable(lib))
+          : [],
       });
     } catch (error) {
       message.error(error instanceof Error ? `导入失败：${error.message}` : '导入失败：文件格式错误');
@@ -757,6 +932,17 @@ export const ModelTrainingPage: React.FC = () => {
         importedFeaturesRef.current = null;
       }
     }
+    // 附加因子库：换市场时来源列表还没加载，先原样带入，目录加载时按新市场的来源过滤；
+    // 同市场就地过滤，避免带着一个已下线的库去提交
+    const importedAnchor = isQuantDBMarket(config.market) && config.factorSource
+      ? config.factorSource
+      : factorSource;
+    const importedExtras = sanitizeExtraFactorSources(config.extraFactorSources, importedAnchor);
+    setExtraFactorSources(
+      config.market === trainingMarket
+        ? importedExtras.filter((lib) => isExtraFactorSourceUsable(lib))
+        : importedExtras,
+    );
     setTrainingStatus('draft');
     setResult(null);
     setResultError('');
@@ -779,11 +965,14 @@ export const ModelTrainingPage: React.FC = () => {
       params,
       context,
       wfa: wfaConfig,
+      // 附加库清单随配置走，否则另一台机器导入后静默退化成单库训练
+      extraFactorSources: isQuantDBMarket(trainingMarket) ? extraFactorSources : [],
     };
     const content = serializeTrainingConfig(buildTrainingConfigFile(draft, {
       market: trainingMarket,
       factor_source: isQuantDBMarket(trainingMarket) ? factorSource : undefined,
       factor_catalog_version: isQuantDBMarket(trainingMarket) ? factorCatalogVersion : undefined,
+      extra_factor_catalog_versions: isQuantDBMarket(trainingMarket) ? extraCatalogVersions : undefined,
     }));
     const safeName = (displayName || 'model-training').replace(/[\\/:*?"<>|]/g, '_');
     const filename = `模型训练配置_${safeName}_${dayjs().format('YYYYMMDD')}.yml`;
@@ -951,7 +1140,7 @@ export const ModelTrainingPage: React.FC = () => {
                       <span className="font-medium text-slate-600 shrink-0">数据源</span>
                       <Select
                         value={factorSource}
-                        onChange={setFactorSource}
+                        onChange={handleFactorSourceChange}
                         className="min-w-52"
                         loading={featureCatalogLoading && factorSources.length === 0}
                         options={factorSources.map((item) => ({
@@ -971,6 +1160,38 @@ export const ModelTrainingPage: React.FC = () => {
                               {factorSources.find((item) => item.id === factorSource)?.reason || '尚未发布因子目录'} →
                             </Tag>
                           </Tooltip>}
+                      {factorSources.length > 0 && (
+                        <>
+                          <span className="font-medium text-slate-600 shrink-0">附加因子库</span>
+                          <Select
+                            mode="multiple"
+                            value={extraFactorSources}
+                            onChange={(next: string[]) => setExtraFactorSources(sanitizeExtraFactorSources(next, factorSource))}
+                            className="min-w-48"
+                            placeholder={hasSelectableExtraSource ? '可跨库组合因子' : '无可用附加因子库'}
+                            disabled={isTrainingInProgress || !hasSelectableExtraSource}
+                            loading={featureCatalogLoading && factorSources.length === 0}
+                            maxTagCount="responsive"
+                            options={extraSourceOptions.map((option) => ({
+                              value: option.value,
+                              label: option.label,
+                              disabled: option.disabled,
+                              // 置灰原因：鼠标悬停即可看到，不用去猜为什么点不动
+                              title: option.reason || undefined,
+                            }))}
+                          />
+                          {!hasSelectableExtraSource && (
+                            <Tooltip title="附加因子库需要先在该库发布因子目录（后台『训练服务 → 模型训练数据集』执行『刷新字段』并发布）">
+                              <Tag color="warning" className="cursor-pointer hover:opacity-80" onClick={() => navigate('/admin/training-datasets')}>
+                                {extraSourceOptions.find((option) => option.disabled)?.reason || '无可用附加因子库'} →
+                              </Tag>
+                            </Tooltip>
+                          )}
+                          {extraFactorSources.length > 0 && (
+                            <Tag color="geekblue">跨源训练 {extraFactorSources.length + 1} 库</Tag>
+                          )}
+                        </>
+                      )}
                       </div>
                     )}
                     <Space className="ml-auto shrink-0">
@@ -1057,7 +1278,33 @@ export const ModelTrainingPage: React.FC = () => {
                             )}
                           </Space>
                         </Card>
-                        <FeatureSelector categories={featureCategories} selectedFeatures={selectedFeatures} onChange={(f) => dispatch({ type: 'SET_FEATURES', payload: f })} loading={featureCatalogLoading} onGuide={() => navigate('/admin/training-datasets')} />
+                        {extraFactorSources.length > 0 && Object.keys(extraCatalogErrors).length > 0 && (
+                          <Alert
+                            type="warning"
+                            showIcon
+                            className="mb-4"
+                            message={`${Object.keys(extraCatalogErrors).length} 个附加因子库目录加载失败，本次训练已排除`}
+                            description={Object.entries(extraCatalogErrors)
+                              .map(([lib, reason]) => `${sourceLabels[lib] || lib}：${reason}`)
+                              .join('；')}
+                          />
+                        )}
+                        {extraFactorSources.length > 0 && crossSourceConflicts.length > 0 && (
+                          <Alert
+                            type="info"
+                            showIcon
+                            className="mb-4"
+                            message={`${crossSourceConflicts.length} 个特征名在多个因子库中重名，非归属库的那一份已置灰`}
+                            description={(
+                              <div className="space-y-1">
+                                {crossSourceConflicts.map((conflict) => (
+                                  <div key={conflict.featureKey}>{formatCrossSourceConflictMessage(conflict, sourceLabels)}</div>
+                                ))}
+                              </div>
+                            )}
+                          />
+                        )}
+                        <FeatureSelector categories={featureCategories} selectedFeatures={selectedFeatures} onChange={(f) => dispatch({ type: 'SET_FEATURES', payload: f })} loading={featureCatalogLoading} onGuide={() => navigate('/admin/training-datasets')} anchorSource={factorSource} />
                       </>
                     )}
                     {currentStep === 1 && <TrainingTargetConfig target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} factorFilter={factorFilter} onFactorFilterChange={setFactorFilter} />}
@@ -1110,6 +1357,18 @@ export const ModelTrainingPage: React.FC = () => {
                 showIcon
                 message="因子目录版本与当前环境不同"
                 description="导入后会使用当前已发布目录；不可用特征会被自动排除。"
+              />
+            )}
+            {importPreview.config.extraFactorSources.length > 0 && (
+              <Alert
+                type="info"
+                showIcon
+                message={`配置包含 ${importPreview.config.extraFactorSources.length} 个附加因子库（跨源训练）`}
+                description={importPreview.config.extraFactorSources
+                  .map((lib) => (importPreview.unavailableExtraSources.includes(lib)
+                    ? `${lib}（当前环境不可用，导入后会被排除）`
+                    : lib))
+                  .join('、')}
               />
             )}
           </div>

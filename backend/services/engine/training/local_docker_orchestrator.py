@@ -31,7 +31,14 @@ except (ImportError, AttributeError):
 import yaml
 
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
-from backend.services.engine.training.orchestrator_base import TrainingOrchestrator, REGISTRY
+from backend.services.engine.training.orchestrator_base import (
+    TrainingOrchestrator,
+    REGISTRY,
+    attach_singleflight_release,
+    mark_graceful_stop,
+    mark_user_cancel_confirmed,
+    spawn_compensation,
+)
 from backend.services.api.training_explain import DEFAULT_EXPLAIN_CFG
 from backend.services.engine.data_platform.quantdb_factor_reader import (
     MARKET_DATA_DIR_ENV as _MARKET_DATA_DIR_ENV,
@@ -401,6 +408,118 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             )
         return resumed
 
+    async def _resume_paused_others(
+        self,
+        work_dir: Path | None,
+        *,
+        run_id: str,
+        container_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        """恢复本 run 暂停过的容器（轮询收尾与取消清理共用；幂等）。"""
+        if work_dir is None:
+            return
+        try:
+            # docker start 可能阻塞数秒，丢到线程池避免卡住 event loop
+            resumed = await asyncio.to_thread(self._resume_others, work_dir, run_id)
+            if resumed:
+                self.log_stream.append_log(
+                    run_id=run_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    line=f"[SYSTEM] Resumed {len(resumed)} containers: "
+                    + ", ".join(resumed),
+                    status=None,
+                    progress=None,
+                    container_id=container_id[:12],
+                )
+        except Exception as exc:
+            logger.warning("[%s] resume others failed: %s", run_id, exc)
+
+    async def _poll_container_supervised(
+        self,
+        run_id: str,
+        container_id: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        work_dir: Path | None = None,
+        max_time_minutes: int = 120,
+    ) -> None:
+        """_poll_container 的取消清理包装（复审 HIGH-1，2026-10-08）。
+
+        REGISTRY.cancel 的 CancelledError 打断的是轮询循环里的某个 await，
+        循环内的取消标记检查可能永远轮不到 → 容器继续训练而单飞锁已随
+        task 结束释放 → 下一次提交双跑。此包装在 CancelledError 上补做
+        资源回收；**仅在「用户取消标记已置」时停容器**——API 进程正常
+        关停（无标记）绝不停容器，那是重启后被重挂要救回的在训作业。
+        """
+        try:
+            await self._poll_container(
+                run_id,
+                container_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                work_dir=work_dir,
+                max_time_minutes=max_time_minutes,
+            )
+        except asyncio.CancelledError:
+            if self.log_stream.is_cancel_requested(run_id):
+                try:
+                    await self._cancel_container(
+                        run_id, container_id, tenant_id, user_id
+                    )
+                    await self._resume_paused_others(
+                        work_dir,
+                        run_id=run_id,
+                        container_id=container_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[%s] cancel cleanup on task cancel failed: %s", run_id, exc
+                    )
+            else:
+                # 进程关停（无用户取消标记）：容器还在跑，保住单飞锁供重启后
+                # 重挂续租（复审 HIGH-4）；绝不停容器——那是重挂要救回的作业。
+                mark_graceful_stop(run_id)
+            raise
+
+    async def cleanup_cancelled_provisioning(
+        self, run_id: str, *, tenant_id: str = "default", user_id: str = "unknown"
+    ) -> None:
+        """launch 窗口（容器已建、轮询未挂）被取消时的清理（复审 HIGH-1）。
+
+        容器名确定（qm-train-{run_id}）→ 按名回查；在 running/created/paused
+        则停。无取消标记（进程关停）不动，留给重启后的判尸重挂。
+        """
+        if not self.log_stream.is_cancel_requested(run_id):
+            return
+        container_work_dir = (
+            Path(os.getenv("HOST_DATA_DIR") or "/data") / "training_jobs" / run_id
+        )
+        try:
+            probe = await asyncio.to_thread(
+                self.docker.containers.get, f"qm-train-{run_id}"
+            )
+            probe.reload()
+            state = str((probe.attrs.get("State") or {}).get("Status") or "")
+            if state in ("running", "created", "paused"):
+                await self._cancel_container(run_id, probe.id, tenant_id, user_id)
+        except docker.errors.NotFound:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] cleanup cancelled provisioning probe failed: %s", run_id, exc
+            )
+        # 无论容器在否，把本 run 暂停过的其它容器恢复（幂等：无状态文件即返回）
+        try:
+            await asyncio.to_thread(self._resume_others, container_work_dir, run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] resume others after cancel failed: %s", run_id, exc)
+
     @staticmethod
     def _parse_docker_log_entry(raw_line: str) -> tuple[float, str]:
         """解析 `docker logs --timestamps` 单行，返回 (timestamp, message)。"""
@@ -661,6 +780,9 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 ),
                 cache={"dir": "/tmp" if data_source_mode == "LOCAL" else None},
                 wfa=payload.get("wfa") if isinstance(payload.get("wfa"), dict) else None,
+                rolling_meta=payload.get("rolling_meta")
+                if isinstance(payload.get("rolling_meta"), dict)
+                else None,
                 max_time_minutes=payload.get("max_time_minutes"),
                 factor_selection=factor_selection,
                 preprocessing=preprocessing,
@@ -1001,36 +1123,56 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             # 计时：训练容器的 run（create+start）在 17GB 镜像 + 多挂载下可能数十秒，
             # 记录耗时便于区分「真的慢」与「客户端超时误报」
             _t_run = time.monotonic()
-            container = await asyncio.to_thread(
-                self.docker.containers.run,
-                _TRAINING_IMAGE,
-                # 显式覆盖镜像 ENTRYPOINT（train.py）：bootstrap 需要真正的 shell 环境，
-                # 否则 sh -c 会被 train.py 当作 CLI 参数忽略（旧镜像无 ENTRYPOINT 也兼容）。
-                entrypoint=["sh", "-c"],
-                command=[
-                    f"{bootstrap_cmd} && exec python /app/train.py --config /workspace/config.yaml",
-                ],
-                environment={
-                    "INTERNAL_CALL_SECRET": self.internal_secret,
-                    "USE_LOCAL_DATA": "true",
-                    "TRAINING_LOCAL_DATA_DIR": _LOCAL_DATA_MOUNT_DIR,
-                    "TRAINING_CACHE_DIR": "/tmp",
-                    "QLIB_PROVIDER_URI": os.getenv("QLIB_PROVIDER_URI", ""),
-                    # 市场数据根目录（train.py 按 context.market 选择读哪个 env）
-                    _MARKET_MOUNT_ENV_VARS[_train_market]: _market_data_mount(_train_market)[1],
-                    # 透传 IC 并行度覆盖（不设置时 parallel_utils 按剩余内存预算收缩）
-                    "TRAIN_IC_WORKERS": os.getenv("TRAIN_IC_WORKERS", ""),
-                    # 透传树模型线程数覆盖（不设置时 train.py 默认 -1 用满所有核心）。
-                    # 宿主环境可设 TRAIN_NTHREADS=4 限流，避免训练抢破产线/行情等其它服务。
-                    "TRAIN_NTHREADS": os.getenv("TRAIN_NTHREADS", ""),
-                },
-                volumes=volumes,
-                network=_DOCKER_NETWORK,
-                detach=True,
-                name=container_name,
-                device_requests=device_requests,
-                mem_limit=_host_mem_limit_gb(),
+            _create_task = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self.docker.containers.run,
+                    _TRAINING_IMAGE,
+                    # 显式覆盖镜像 ENTRYPOINT（train.py）：bootstrap 需要真正的 shell 环境，
+                    # 否则 sh -c 会被 train.py 当作 CLI 参数忽略（旧镜像无 ENTRYPOINT 也兼容）。
+                    entrypoint=["sh", "-c"],
+                    command=[
+                        f"{bootstrap_cmd} && exec python /app/train.py --config /workspace/config.yaml",
+                    ],
+                    environment={
+                        "INTERNAL_CALL_SECRET": self.internal_secret,
+                        "USE_LOCAL_DATA": "true",
+                        "TRAINING_LOCAL_DATA_DIR": _LOCAL_DATA_MOUNT_DIR,
+                        "TRAINING_CACHE_DIR": "/tmp",
+                        "QLIB_PROVIDER_URI": os.getenv("QLIB_PROVIDER_URI", ""),
+                        # 市场数据根目录（train.py 按 context.market 选择读哪个 env）
+                        _MARKET_MOUNT_ENV_VARS[_train_market]: _market_data_mount(
+                            _train_market
+                        )[1],
+                        # 透传 IC 并行度覆盖（不设置时 parallel_utils 按剩余内存预算收缩）
+                        "TRAIN_IC_WORKERS": os.getenv("TRAIN_IC_WORKERS", ""),
+                        # 透传树模型线程数覆盖（不设置时 train.py 默认 -1 用满所有核心）。
+                        # 宿主环境可设 TRAIN_NTHREADS=4 限流，避免训练抢破产线/行情等其它服务。
+                        "TRAIN_NTHREADS": os.getenv("TRAIN_NTHREADS", ""),
+                    },
+                    volumes=volumes,
+                    network=_DOCKER_NETWORK,
+                    detach=True,
+                    name=container_name,
+                    device_requests=device_requests,
+                    mem_limit=_host_mem_limit_gb(),
+                )
             )
+            try:
+                container = await asyncio.shield(_create_task)
+            except asyncio.CancelledError:
+                # 创建在途残窗（复审 HIGH-1）：取消只打断 await，打不断线程里的
+                # containers.run；此刻直接退出会留下无锁无监管的孤儿容器。等创建
+                # 返回句柄后按取消标记补杀（无标记=进程关停，留给重启判尸重挂）。
+                spawn_compensation(
+                    self._kill_container_when_created(
+                        run_id,
+                        _create_task,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        work_dir=container_work_dir,
+                    )
+                )
+                raise
         except Exception as e:
             from backend.shared.database_manager_v2 import get_session
             from backend.services.api.routers.admin.db import TrainingJobRecord
@@ -1067,6 +1209,17 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                         line=f"[SYSTEM] Container ID: {probe.id[:12]}（客户端超时但容器已在运行）",
                         status="running",
                         progress=12,
+                    )
+                    # 恢复路径同样要挂监管（复审 HIGH-1 残窗）：此前直接 return，
+                    # 容器无轮询（超时预算/kill/回调收敛全失效）且单飞锁随 launch
+                    # 结束即释放。
+                    self._register_container_supervision(
+                        run_id,
+                        probe.id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        work_dir=container_work_dir,
+                        payload=payload,
                     )
                     return
             except Exception as probe_err:
@@ -1127,22 +1280,184 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         # 训练时长预算在 launch 作用域计算后透传给轮询循环。
         # （_poll_container 作用域内无 payload，此前直接引用触发 NameError
         # 被 except 兜底吞掉，用户选 12 小时也会在 120 分钟被杀）
+        self._register_container_supervision(
+            run_id,
+            container.id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            work_dir=container_work_dir,
+            payload=payload,
+        )
+
+    def _register_container_supervision(
+        self,
+        run_id: str,
+        container_id: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        work_dir: Path | None,
+        payload: dict,
+    ) -> None:
+        """注册容器轮询监管 + 单飞锁回调（正常启动与客户端超时恢复共用）。
+
+        客户端超时恢复路径此前直接 ``return`` 不注册监管（复审 HIGH-1 残窗）：
+        launch 结束即释放单飞锁、容器无监管（超时预算/kill/回调收敛全失效）。
+        """
         try:
             max_time_minutes = max(10, int(payload.get("max_time_minutes") or 120))
-        except Exception:
+        except (TypeError, ValueError):
             max_time_minutes = 120
 
-        REGISTRY.register(
-            self._poll_container(
+        _poll_task = REGISTRY.register(
+            self._poll_container_supervised(
                 run_id,
-                container.id,
+                container_id,
                 tenant_id=tenant_id,
                 user_id=user_id,
-                work_dir=container_work_dir,
+                work_dir=work_dir,
                 max_time_minutes=max_time_minutes,
             ),
             run_id=run_id,
         )
+        # P0-3：该 run 不再受管时释放训练单飞锁（轮询循环是最后一张 task）
+        attach_singleflight_release(_poll_task, run_id)
+
+    async def _kill_container_when_created(
+        self,
+        run_id: str,
+        create_task: asyncio.Task[Any],
+        *,
+        tenant_id: str,
+        user_id: str,
+        work_dir: Path | None = None,
+    ) -> None:
+        """创建在途取消的补杀（复审 HIGH-1 残窗）。
+
+        ``containers.run`` 在线程中执行，取消只打断 await、打不断创建。等创建
+        任务返回句柄后：用户取消标记已置 → 停/删容器并恢复被暂停的其它容器；
+        无标记（进程关停）→ 不动，容器浮现后判尸按名可见、重挂接回；创建最终
+        失败 → 无资源可杀。
+        """
+        try:
+            container = await create_task
+        except asyncio.CancelledError:
+            # 本补杀自身被取消（如 loop 关停）：创建仍在途，无从接管
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] 创建在途取消：创建最终失败，无需补杀: %s", run_id, exc)
+            return
+        if not self.log_stream.is_cancel_requested(run_id):
+            return
+        try:
+            await self._cancel_container(run_id, container.id, tenant_id, user_id)
+            await asyncio.to_thread(self._resume_others, work_dir, run_id)
+            logger.info("[%s] 创建在途取消：容器已补杀", run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] 创建在途取消补杀失败: %s", run_id, exc)
+
+    async def reattach_training_job(
+        self,
+        *,
+        run_id: str,
+        payload: dict,
+        container_id: str,
+        tenant_id: str = "default",
+        user_id: str = "unknown",
+        supervise: bool = True,
+    ) -> None:
+        """判尸回收的重挂路径（P0-3）：把仍在运行的孤儿容器接回轮询监管。
+
+        进程重启后 launch 与 _poll_container 均已消亡，但训练容器可能仍在跑。
+        重挂**不重投、不重算**：以既有 _poll_container 语义继续监管
+        （exit0 → 等回调；异常退出 → failed；超预算 → kill）。
+        调用方（job_reaper）保证该 run 不在 REGISTRY 中（无双重轮询）。
+
+        ``supervise=False``（运维 CLI 路径，复审 MEDIUM-6）：CLI 进程转瞬退出，
+        注册的轮询 task 会在 ``asyncio.run`` 关停时被取消 → done 回调看到
+        「不再受管」→ **删掉 API 进程持有的单飞锁**（token=run_id 是共享标识）。
+        因此 CLI 只探测不接管：不动 REGISTRY、不挂释放回调、不启续租。
+        """
+        from backend.services.api.routers.admin.db import TrainingJobRecord
+        from backend.shared.database_manager_v2 import get_session
+
+        max_time_minutes = 120
+        try:
+            max_time_minutes = max(10, int(payload.get("max_time_minutes") or 120))
+        except (TypeError, ValueError):
+            pass
+        work_dir = (
+            Path(os.getenv("HOST_DATA_DIR") or "/data") / "training_jobs" / run_id
+        )
+
+        # 状态校准：pending/provisioning 的孤儿容器按 running 收敛（waiting_callback 不动）
+        async with get_session() as db:
+            r = await db.get(TrainingJobRecord, run_id)
+            if r and str(r.status or "") in ("pending", "provisioning"):
+                r.status = "running"
+                r.instance_id = container_id[:12]
+                r.logs = (r.logs or "") + "[REAPER] 进程重启后重挂容器，恢复监管\n"
+                await db.commit()
+        self.log_stream.append_log(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            line=(
+                f"[REAPER] Reattached container {container_id[:12]}, resuming supervision"
+                if supervise
+                else f"[REAPER] Container {container_id[:12]} present (probe-only, not supervised)"
+            ),
+            status="running",
+            progress=None,
+            container_id=container_id[:12],
+        )
+        if not supervise:
+            # CLI 只探测：注册的 task 会随 CLI 退出被取消并误删锁（MEDIUM-6）
+            return
+        _poll_task = REGISTRY.register(
+            self._poll_container_supervised(
+                run_id,
+                container_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                work_dir=work_dir,
+                max_time_minutes=max_time_minutes,
+            ),
+            run_id=run_id,
+        )
+        attach_singleflight_release(_poll_task, run_id)
+        # 重挂即重续租（HIGH-4）：API 重启会带走旧心跳；重挂后运行可能远超
+        # 提交时算出的 TTL（预算时钟从重挂时刻重新计时），必须重启心跳。
+        from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+        from backend.shared.training_singleflight import (
+            get_holder,
+            lock_ttl_seconds,
+            start_renewal,
+            try_acquire,
+        )
+
+        # 重挂补锁（复审 HIGH-4 残窗）：停机窗口锁可能已被误删或自然过期，
+        # 而续租只能延长「存在的键」——不补锁则整个训练期无互斥。空闲才补取，
+        # 不抢占他人（他人持有=异常双跑，让提交侧的 409 语义收敛）；失败只告警
+        # （TTL / 提交侧陈旧自愈兜底）。
+        try:
+            redis = get_redis_sentinel_client()
+            acquired = False
+            if get_holder(redis) is None:
+                acquired = bool(
+                    try_acquire(redis, run_id, lock_ttl_seconds(max_time_minutes))
+                )
+            if acquired:
+                logger.info("[Singleflight] 重挂补锁成功 %s", run_id)
+            else:
+                logger.info(
+                    "[Singleflight] 重挂未补锁（他人持有或取锁失败，续租兜底）%s",
+                    run_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Singleflight] 重挂补锁失败 %s: %s", run_id, exc)
+
+        start_renewal(run_id, lock_ttl_seconds(max_time_minutes))
 
     # ── 轮询容器状态 ─────────────────────────────────────────────────────────────
     async def _cancel_container(
@@ -1153,6 +1468,9 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         user_id: str,
     ) -> None:
         """用户取消：优雅停 + 删容器，落 cancelled 状态并清理取消标记。"""
+        # NEW-B：进入即记录「已确认用户取消」——本方法最后会 clear_cancel，
+        # supervised_launch 若在此之后才读 Redis 标记会把取消误判成关停。
+        mark_user_cancel_confirmed(run_id)
         try:
             c = self.docker.containers.get(container_id)
             c.reload()
@@ -1168,7 +1486,9 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         from backend.shared.database_manager_v2 import get_session
 
         async with get_session() as db:
-            r = await db.get(TrainingJobRecord, run_id)
+            # with_for_update（复审 NEW-7）：防「回调落终态」与「取消写 cancelled」
+            # 并发交错——completed 判定读的是行锁下的当前值，不是过期快照。
+            r = await db.get(TrainingJobRecord, run_id, with_for_update=True)
             if r and str(r.status or "") not in ("completed", "failed"):
                 r.status = "cancelled"
                 r.logs = (r.logs or "") + "[SYSTEM] 训练已被用户取消，容器已停止\n"
@@ -1199,26 +1519,13 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         from backend.shared.database_manager_v2 import get_session
 
         async def _try_resume() -> None:
-            if work_dir is None:
-                return
-            try:
-                # docker start 可能阻塞数秒，丢到线程池避免卡住 event loop
-                resumed = await asyncio.to_thread(
-                    self._resume_others, work_dir, run_id
-                )
-                if resumed:
-                    self.log_stream.append_log(
-                        run_id=run_id,
-                        tenant_id=tenant_id,
-                        user_id=user_id,
-                        line=f"[SYSTEM] Resumed {len(resumed)} containers: "
-                        + ", ".join(resumed),
-                        status=None,
-                        progress=None,
-                        container_id=container_id[:12],
-                    )
-            except Exception as exc:
-                logger.warning("[%s] resume others failed: %s", run_id, exc)
+            await self._resume_paused_others(
+                work_dir,
+                run_id=run_id,
+                container_id=container_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
 
         # 训练时长预算：由 launch_training_job 透传（默认 120 分钟）
         deadline = time.time() + max_time_minutes * 60

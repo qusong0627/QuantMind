@@ -164,6 +164,9 @@ class TrainingConfig(BaseModel):
     cache: dict | None = None
     split: SplitCfg | None = None
     wfa: dict | None = None
+    # 滚动训练溯源（P1）：campaign_id/window_index/anchor_date/recipe_hash/
+    # purge_days/dispatched_by。与 wfa 同族——现状缺失时不发射（CONDITIONAL_KEYS）。
+    rolling_meta: dict | None = None
     max_time_minutes: int = 120
     factor_selection: dict | None = None
     preprocessing: dict | None = None
@@ -186,7 +189,7 @@ class TrainingConfig(BaseModel):
 
 
 # 条件键：现状缺失时不发射（无键），schema 侧以 None 占位。
-CONDITIONAL_KEYS = ("split", "wfa", "factor_selection", "preprocessing")
+CONDITIONAL_KEYS = ("split", "wfa", "rolling_meta", "factor_selection", "preprocessing")
 
 
 def dump_contract_dict(cfg: TrainingConfig) -> dict:

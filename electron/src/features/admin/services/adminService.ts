@@ -23,6 +23,7 @@ import {
     AdminInferenceMonitor,
     RdMinedMaterializeStatus,
     RdMinedMaterializeStartResult,
+    ResearchFactorRegistrationResult,
 } from '../types';
 import { authService } from '../../auth/services/authService';
 import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../../config/services';
@@ -277,6 +278,20 @@ class AdminService {
         return resp.data?.catalog === null ? null : resp.data;
     }
 
+    /**
+     * 列出某来源库在某市场下的目录版本（**含草稿**），最新在前。
+     *
+     * `getQuantDBFactorCatalog` 不带 versionId 时只解析「活动发布版本」，所以要
+     * 发现一份草稿就必须先知道它的 id——而别处（因子研究页的「注册到训练目录」）
+     * 写进来的草稿，页面手上恰恰没有这个 id。这个端点就是补这个缺口的。
+     */
+    async listQuantDBFactorVersions(sourceDataset: string, market = 'CN'): Promise<any> {
+        const resp = await this.axiosInstance.get('/admin/training-data/versions', {
+            params: { source_dataset: sourceDataset, market },
+        });
+        return resp.data;
+    }
+
     async createQuantDBFactorDraft(versionName: string, sourceDataset: string, market = 'CN'): Promise<any> {
         const resp = await this.axiosInstance.post('/admin/training-data/versions', {
             version_name: versionName,
@@ -297,6 +312,25 @@ class AdminService {
 
     async publishQuantDBFactorDraft(versionId: string): Promise<any> {
         const resp = await this.axiosInstance.post(`/admin/training-data/versions/${versionId}/publish`);
+        return resp.data;
+    }
+
+    /**
+     * 因子研究页多选的因子 → 训练因子目录**草稿**（研究页的正式出口）。
+     * 只写草稿，发布仍走 publishQuantDBFactorDraft；未指定版本时按来源库各自找/建草稿。
+     */
+    async registerResearchFactorsToTraining(payload: {
+        dataset: string;
+        codes: string[];
+        market?: string;
+        version_id?: string;
+        version_name?: string;
+    }): Promise<ResearchFactorRegistrationResult> {
+        const resp = await this.axiosInstance.post<ResearchFactorRegistrationResult>(
+            '/admin/training-data/register-from-research',
+            { market: 'CN', ...payload },
+            { timeout: 60_000 },
+        );
         return resp.data;
     }
 

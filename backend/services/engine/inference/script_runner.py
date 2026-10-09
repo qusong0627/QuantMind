@@ -2018,15 +2018,16 @@ class InferenceScriptRunner:
 
     @staticmethod
     def _normalize_model_bucket(model_id: str | None) -> str:
-        raw = str(model_id or "").strip().lower()
-        if not raw:
-            return "inference_script"
-        slug = re.sub(r"[^a-z0-9_]+", "_", raw).strip("_")
-        return slug[:48] if slug else "inference_script"
+        # 口径已上收 backend/shared/signal_buckets（P2-0：读写两侧唯一实现）
+        from backend.shared.signal_buckets import normalize_model_bucket
+
+        return normalize_model_bucket(model_id)
 
     @classmethod
     def _resolve_feature_version(cls, model_id: str | None) -> str:
-        return f"script_v1_{cls._normalize_model_bucket(model_id)}"
+        from backend.shared.signal_buckets import resolve_feature_version
+
+        return resolve_feature_version(model_id)
 
     def _persist_and_publish(
         self,
@@ -2463,6 +2464,21 @@ class InferenceScriptRunner:
         contract_market = normalize_market(market)
         rank_pcts = compute_rank_pct(scores)
 
+        # §6.4（P3）：regime 列填**当日生效值**（qm_regime_daily——前一日 16:30 已落库，
+        # 盘前推理可用，无前视）。此前硬编码 'normal' 是撒谎（已核 0 消费方，2026-10-09）。
+        # 表外市场（CRYPTO/FUTURES 无 regime 指数口径）与缺行一律 NULL（诚实缺省）。
+        regime_value = None
+        try:
+            from backend.shared.market_regime import REGIME_INDEX_BY_MARKET
+            from backend.shared.regime_daily_store import load_day_state
+
+            if contract_market in REGIME_INDEX_BY_MARKET:
+                regime_value = load_day_state(db, contract_market, prediction_day)
+        except Exception as regime_err:  # noqa: BLE001 — 读失败写 NULL，不阻断信号落库
+            logger.warning(
+                f"[InferenceScriptRunner] regime 生效值读取失败（regime 写 NULL）: {regime_err}"
+            )
+
         import redis as redis_lib
 
         # 行情 Redis 地址走共享配置（compose 以空串表示「用默认/公共行情服」）。
@@ -2505,13 +2521,14 @@ class InferenceScriptRunner:
             ) VALUES (
                 :run_id, :tenant_id, :user_id, :trade_date, :symbol,
                 'inference_script', :feature_version, :universe_tag,
-                NULL, NULL, :score, 1.0, 'normal',
+                NULL, NULL, :score, 1.0, :regime,
                 :signal_side, :expected_price, CAST(:quality AS jsonb), NOW(),
                 :market, :rank_pct, :source, NOW()
             )
             ON CONFLICT (tenant_id, user_id, trade_date, symbol, model_version, feature_version, run_id)
             DO UPDATE SET
                 fusion_score = EXCLUDED.fusion_score,
+                regime = EXCLUDED.regime,
                 signal_side = EXCLUDED.signal_side,
                 expected_price = EXCLUDED.expected_price,
                 quality = EXCLUDED.quality,
@@ -2571,6 +2588,7 @@ class InferenceScriptRunner:
                     "feature_version": feature_version,
                     "universe_tag": universe_tag,
                     "score": score,
+                    "regime": regime_value,
                     "signal_side": signal_side,
                     "expected_price": expected_price,
                     "quality": quality,

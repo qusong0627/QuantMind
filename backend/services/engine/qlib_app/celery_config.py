@@ -105,6 +105,10 @@ NEWS_TAG_WINDOW_DAYS = int(os.getenv("NEWS_TAG_WINDOW_DAYS", "20"))
 # NEWS_TAG_ROLLUP_ENABLED：注册表按 switch_env 判「关闭」还是「停摆」，
 # 借别人的开关会让体检把「本就没开」报成「停摆」。
 TCA_REPORT_ENABLED = os.getenv("TCA_REPORT_ENABLED", "true").lower() == "true"
+# 市场状态日更持久化（P3 · 设计 §6.2）：交易日 16:30 写 qm_regime_daily。
+# 开关独立（同上理由）：关掉它只影响「状态时间线」的日频留痕，不影响推理/回测
+# 里的 regime 计算（那些是即时算的）。
+REGIME_PERSIST_ENABLED = os.getenv("REGIME_PERSIST_ENABLED", "true").lower() == "true"
 # 滚动窗口天数（含产出当天）。取数走 orders.ref_price（决策链取价时刻），
 # 补写是 2026-09-24 上的，故窗口开头的成交天然落在「不可定价」——报告里如实分列。
 TCA_REPORT_DAYS = int(os.getenv("TCA_REPORT_DAYS", "30"))
@@ -139,6 +143,15 @@ if TCA_REPORT_ENABLED:
         "kwargs": {"days": TCA_REPORT_DAYS},
     }
 
+# 市场状态日更（P3 · 设计 §6.2）：交易日 16:30 写 qm_regime_daily（生效日口径，
+# 历史行冻结）。16:30 = 盘后半小时：日线数据（指数）此时已可读；与 TCA 的 16:40
+# 错开一分钟，避免盘后同一分钟挤两个任务。只跑工作日：周末没有新生效日。
+if REGIME_PERSIST_ENABLED:
+    beat_schedule["regime-daily-persist"] = {
+        "task": "engine.tasks.regime_daily_persist",
+        "schedule": crontab(minute="30", hour="16", day_of_week="1-5"),
+    }
+
 if NEWS_ENRICH_ENABLED:
     beat_schedule["news-enrich-recent"] = {
         "task": "engine.tasks.news_enrich_recent",
@@ -171,6 +184,15 @@ if DAILY_SYNC_ENABLED:
 if os.getenv("MARKET_SYNC_SCHEDULE_ENABLED", "true").lower() == "true":
     beat_schedule["market-sync-dispatch"] = {
         "task": "engine.tasks.dispatch_market_sync",
+        "schedule": crontab(minute="*", hour="*"),
+    }
+
+# 滚动重训调度检查（P1，每分钟 tick；是否真正到点派发由 Redis
+# quantmind:retrain_schedule:{market} 配置决定）。默认**关**：开启自动月度重训
+# 是一次显式运维动作（与实盘双开关同哲学——代码全留，仅收敛入口）。
+if os.getenv("RETRAIN_SCHEDULER_ENABLED", "false").lower() == "true":
+    beat_schedule["retrain-dispatch"] = {
+        "task": "engine.tasks.dispatch_retrain",
         "schedule": crontab(minute="*", hour="*"),
     }
 

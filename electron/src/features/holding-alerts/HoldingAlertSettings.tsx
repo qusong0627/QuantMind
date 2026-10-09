@@ -116,15 +116,17 @@ interface ColumnProps {
   patch: (partial: Partial<HoldingAlertConfig>) => void;
 }
 
-/** 左列：什么值得盯（总开关 / 监控范围 / 分数阈值） */
+/** 左列：什么值得盯（总开关 / 监控范围 / 分数预警线） */
 const MonitorColumn: React.FC<
   ColumnProps & {
     headline: { text: string; warn: boolean };
     thresholdDraft: number;
     onThresholdDraft: (value: number) => void;
-    onSaveThreshold: () => void;
+    dropDraft: number;
+    onDropDraft: (value: number) => void;
+    onSaveThresholds: () => void;
   }
-> = ({ config, disabled, patch, headline, thresholdDraft, onThresholdDraft, onSaveThreshold }) => (
+> = ({ config, disabled, patch, headline, thresholdDraft, onThresholdDraft, dropDraft, onDropDraft, onSaveThresholds }) => (
   <section data-testid="holding-monitor-card" className={CARD_CLS}>
     <CardHead icon={<ShieldAlert size={14} />} title="持仓监控与提醒" tone="rose" />
 
@@ -165,19 +167,31 @@ const MonitorColumn: React.FC<
 
     {/* mt-auto：把阈值块压到卡底，与右列的试听行齐平——两列的底边因此对齐 */}
     <div className="mt-auto pt-3">
-      <div className="text-[11px] font-bold text-gray-600">分数阈值</div>
+      <div className="text-[11px] font-bold text-gray-600">分数预警线</div>
       <div className="mt-1 flex items-center gap-2">
+        <span className="w-10 shrink-0 text-[11px] text-gray-500">跌破</span>
         <InputNumber
           value={thresholdDraft}
           step={0.05}
           disabled={disabled || !config.enabled}
           onChange={(v) => onThresholdDraft(Number(v ?? 0))}
-          className="w-28"
+          className="w-24"
+          size="small"
+        />
+      </div>
+      <div className="mt-1 flex items-center gap-2">
+        <span className="w-10 shrink-0 text-[11px] text-gray-500">骤降</span>
+        <InputNumber
+          value={dropDraft}
+          step={0.05}
+          disabled={disabled || !config.enabled}
+          onChange={(v) => onDropDraft(Number(v ?? 0))}
+          className="w-24"
           size="small"
         />
         <button
           type="button"
-          onClick={onSaveThreshold}
+          onClick={onSaveThresholds}
           disabled={disabled || !config.enabled}
           className="flex items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-blue-700 disabled:bg-gray-300"
         >
@@ -186,7 +200,7 @@ const MonitorColumn: React.FC<
         </button>
       </div>
       <p className="mt-1 text-[10px] leading-relaxed text-gray-400">
-        分数下穿 0 始终提醒；此处是额外的预警线，填 0 = 只报下穿 0
+        分数下穿 0 始终提醒。「跌破」= 额外预警线，填 0 = 只报下穿 0；「骤降」= 较当日基准（当天第一眼的分）回落超过该值，填 0 = 关闭
       </p>
     </div>
   </section>
@@ -271,6 +285,7 @@ export const HoldingAlertSettings: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [thresholdDraft, setThresholdDraft] = useState<number>(0);
+  const [dropDraft, setDropDraft] = useState<number>(DEFAULT_ALERT_CONFIG.score_drop_threshold);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
@@ -282,6 +297,7 @@ export const HoldingAlertSettings: React.FC = () => {
       ]);
       setConfig(cfg);
       setThresholdDraft(cfg.score_threshold);
+      setDropDraft(cfg.score_drop_threshold);
       setSentinel(status);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -303,6 +319,7 @@ export const HoldingAlertSettings: React.FC = () => {
       const merged = await holdingAlertService.updateConfig(partial);
       setConfig(merged);
       setThresholdDraft(merged.score_threshold);
+      setDropDraft(merged.score_drop_threshold);
       message.success('预警设置已更新');
     } catch (e) {
       setConfig(before);
@@ -312,14 +329,15 @@ export const HoldingAlertSettings: React.FC = () => {
     }
   }, [config]);
 
-  const saveThreshold = useCallback(async () => {
-    const value = Number(thresholdDraft);
-    if (!Number.isFinite(value)) {
+  const saveThresholds = useCallback(async () => {
+    const below = Number(thresholdDraft);
+    const drop = Number(dropDraft);
+    if (!Number.isFinite(below) || !Number.isFinite(drop)) {
       message.warning('阈值必须是数字');
       return;
     }
-    await patch({ score_threshold: value });
-  }, [thresholdDraft, patch]);
+    await patch({ score_threshold: below, score_drop_threshold: drop });
+  }, [thresholdDraft, dropDraft, patch]);
 
   const headline = sentinelHeadline(sentinel);
   const perm = desktopPermission();
@@ -343,7 +361,9 @@ export const HoldingAlertSettings: React.FC = () => {
         headline={headline}
         thresholdDraft={thresholdDraft}
         onThresholdDraft={setThresholdDraft}
-        onSaveThreshold={() => void saveThreshold()}
+        dropDraft={dropDraft}
+        onDropDraft={setDropDraft}
+        onSaveThresholds={() => void saveThresholds()}
       />
 
       <ChannelColumn

@@ -635,3 +635,20 @@ export interface RdMinedMaterializeStartResult {
     log_path: string;
     message: string;
 }
+
+/** 因子研究页「注册到训练目录」：逐条明细，部分成功不吞。 */
+export interface ResearchFactorRegistrationResult {
+    dataset: string;
+    market: string;
+    /** 已写入草稿的映射行（code 即来源物理列名） */
+    registered: Array<{
+        code: string;
+        source_dataset: string;
+        version_id: string;
+        feature_key: string;
+    }>;
+    /** 未写入的因子与原因（缺来源库 / 泄漏库 / 列未发现 等） */
+    skipped: Array<{ code: string; reason: string }>;
+    /** 来源库 → 目标草稿版本号 */
+    versions: Record<string, string>;
+}

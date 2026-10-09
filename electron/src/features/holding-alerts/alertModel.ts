@@ -20,6 +20,7 @@ export interface ToneMeta {
 const KIND_LABEL: Record<HoldingAlertKind, string> = {
   score_cross_zero: '分数转负',
   score_below_threshold: '跌破阈值',
+  score_drop: '分数骤降',
   risk_news: '盘中利空',
   risk_anomaly: '盘中异动',
   risk_list: '名单/利空命中',

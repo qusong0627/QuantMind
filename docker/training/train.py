@@ -141,6 +141,7 @@ from diagnostics.explain import _compute_shap_summary, _normalize_explain_cfg
 from diagnostics.utils import _sanitize_nan_inf, detect_hardware
 from diagnostics.wfa import train_wfa
 from data.factor_selection import _log_factor_selection_summary, select_top_factors
+from data.fingerprint import build_data_fingerprint
 from data.loading import load_data
 from data.memprobe import log_rss, peak_gb, reset_peak, rss_gb
 from data.splits import _EXECUTION_LAG_DAYS, _prepare_arrays, _split_data
@@ -1525,6 +1526,13 @@ def main() -> int:
                 "label_formula": str((cfg.get("label", {}) or {}).get("label_formula") or ""),
                 "effective_trade_date": str((cfg.get("label", {}) or {}).get("effective_trade_date") or ""),
                 "training_window": str((cfg.get("label", {}) or {}).get("training_window") or ""),
+                # 滚动训练溯源（P1）：campaign 关联（config.yaml 透传；缺失为 None）
+                "rolling_meta": cfg.get("rolling_meta") if isinstance(cfg.get("rolling_meta"), dict) else None,
+                # 数据指纹（P1 · §4.5）：可复现三件套的数据面——实况区间/行数、
+                # 价格与标签截止日、因子源 manifest 摘要。best-effort，绝不炸训练。
+                "data_fingerprint": build_data_fingerprint(
+                    cfg=cfg, split_frames=split_frames, market=market
+                ),
                 "metrics": {
                     "train_ic": train_m["ic"], "train_rank_ic": train_m["rank_ic"], "train_rank_icir": train_m["rank_icir"],
                     "val_ic": val_m["ic"], "val_rank_ic": val_m["rank_ic"], "val_rank_icir": val_m["rank_icir"],
@@ -1767,6 +1775,13 @@ def main() -> int:
                 "label_formula": str((cfg.get("label", {}) or {}).get("label_formula") or ""),
                 "effective_trade_date": str((cfg.get("label", {}) or {}).get("effective_trade_date") or ""),
                 "training_window": str((cfg.get("label", {}) or {}).get("training_window") or ""),
+                # 滚动训练溯源（P1）：campaign 关联（config.yaml 透传；缺失为 None）
+                "rolling_meta": cfg.get("rolling_meta") if isinstance(cfg.get("rolling_meta"), dict) else None,
+                # 数据指纹（P1 · §4.5）：可复现三件套的数据面——实况区间/行数、
+                # 价格与标签截止日、因子源 manifest 摘要。best-effort，绝不炸训练。
+                "data_fingerprint": build_data_fingerprint(
+                    cfg=cfg, split_frames=split_frames, market=market
+                ),
                 "metrics": {
                     "train_ic": train_m["ic"], "train_rank_ic": train_m["rank_ic"], "train_rank_icir": train_m["rank_icir"],
                     "val_ic": val_m["ic"], "val_rank_ic": val_m["rank_ic"], "val_rank_icir": val_m["rank_icir"],

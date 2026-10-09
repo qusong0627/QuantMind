@@ -2314,8 +2314,34 @@ CREATE INDEX IF NOT EXISTS idx_qm_user_models_user_status
 CREATE INDEX IF NOT EXISTS idx_qm_strategy_model_bindings_model
     ON qm_strategy_model_bindings (tenant_id, user_id, model_id);
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_qm_user_models_default_per_user
-    ON qm_user_models (tenant_id, user_id)
+-- 默认模型唯一性**按市场**（§5.5 多市场冠军）：旧全局索引
+-- uq_qm_user_models_default_per_user (tenant_id, user_id) 让 CN/HK 默认互相顶掉。
+-- 口径 = qm_market_of(metadata_json)（与 model_registry._canonical_market 等价：
+-- 别名归一、未知一律 CN——裸值 COALESCE 会把 'CUSTOM' 等未知标记行漏在市场之外，
+-- P2 验收③演练实测过这个故障）。函数/迁移同源：data/upgrade_v1.1.4.sql；
+-- 老库索引若还是 COALESCE 表达式由该脚本重建。旧全局索引这里也再清一次
+-- （旧代码进程内的 ensure_tables 会复活它；全部幂等）。
+CREATE OR REPLACE FUNCTION qm_market_of(meta jsonb) RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT CASE
+        WHEN m IN ('HK', 'HONG_KONG', '港股', 'HKEX', 'XHKG') THEN 'HK'
+        WHEN m IN ('US', '美股', 'NYSE', 'XNYS', 'NASDAQ', 'XNAS', 'AMEX') THEN 'US'
+        WHEN m IN ('CRYPTO', '加密', '加密货币', '24/7') THEN 'CRYPTO'
+        WHEN m IN ('FUTURES', '期货', 'CME', 'SHFE') THEN 'FUTURES'
+        ELSE 'CN'
+    END
+    FROM (
+        SELECT upper(btrim(coalesce(
+                   nullif(meta ->> 'market', ''),
+                   nullif(meta -> 'context' ->> 'market', '')
+               , ''))) AS m
+    ) t
+$$;
+
+DROP INDEX IF EXISTS uq_qm_user_models_default_per_user;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qm_user_models_default_per_market
+    ON qm_user_models (tenant_id, user_id, qm_market_of(metadata_json))
     WHERE is_default = TRUE;
 
 -- 彻底清除存量硬编码 model_qlib 与 alpha158 假数据记录
@@ -2802,3 +2828,57 @@ ON qm_rolling_campaigns (status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qm_rolling_campaigns_run
 ON qm_rolling_campaigns (run_id)
 WHERE run_id IS NOT NULL;
+
+-- ── P2 晋升流程台账：qm_model_rollouts ────────────────────────────────
+-- 权威出处：backend/shared/model_rollout_store.py 的 _DDL_STATEMENTS（本段是
+-- 逐字镜像，由 backend/tests/test_observation_lifecycle.py 守着两份不漂移）。
+-- 老库自愈走 api 启动期的 model_rollout_store.ensure_tables()。
+CREATE TABLE IF NOT EXISTS qm_model_rollouts (
+    rollout_id             TEXT PRIMARY KEY,
+    tenant_id              VARCHAR(64)  NOT NULL,
+    user_id                VARCHAR(64)  NOT NULL,
+    market                 VARCHAR(16)  NOT NULL,
+    campaign_id            VARCHAR(128),
+    champion_model_id      VARCHAR(128) NOT NULL,
+    challenger_model_id    VARCHAR(128) NOT NULL,
+    stage                  VARCHAR(16)  NOT NULL,
+    gate_result            JSONB,
+    evidence               JSONB,
+    prior_default_model_id VARCHAR(128),
+    decided_by             VARCHAR(128),
+    decided_at             TIMESTAMPTZ,
+    created_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    notes                  TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qm_model_rollouts_active
+ON qm_model_rollouts (tenant_id, user_id, market, challenger_model_id)
+WHERE stage IN ('replay_eval', 'observing', 'gate_passed');
+
+CREATE INDEX IF NOT EXISTS idx_qm_model_rollouts_roster
+ON qm_model_rollouts (tenant_id, user_id, market, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_qm_model_rollouts_challenger
+ON qm_model_rollouts (challenger_model_id, stage);
+
+-- ── P3 Regime 感知：市场状态日表 qm_regime_daily ──────────────────────
+-- 权威出处：backend/shared/regime_daily_store.py 的 _DDL_STATEMENTS（本段是
+-- 逐字镜像，由 backend/tests/test_regime_daily_persist.py 守着两份不漂移）。
+-- 老库自愈走 api 启动期的 regime_daily_store.ensure_tables()；受控升级链另有
+-- data/upgrade_v1.1.5.sql（同一 DDL，幂等）。
+-- 语义：行 (market, trade_date) = 该交易日开盘前即可确定的状态（由截至前一
+-- 交易日的行情按 i→i+1 标注算出）；写入冻结——历史行一经写入不得事后重算覆盖
+-- （INSERT … ON CONFLICT DO NOTHING，computed_at 留痕）。
+CREATE TABLE IF NOT EXISTS qm_regime_daily (
+    market          VARCHAR(16) NOT NULL,
+    trade_date      DATE        NOT NULL,
+    state           VARCHAR(16) NOT NULL,
+    ret_window      DOUBLE PRECISION,
+    vol_window      DOUBLE PRECISION,
+    volume_ratio    DOUBLE PRECISION,
+    thresholds_hash VARCHAR(64),
+    computed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (market, trade_date),
+    CONSTRAINT ck_qm_regime_daily_state CHECK (state IN ('bull', 'neutral', 'bear'))
+);

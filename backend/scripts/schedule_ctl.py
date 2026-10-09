@@ -142,6 +142,38 @@ def _run_data_sync(date_str: str | None, force: bool) -> int:
     return 0 if completed.returncode == 0 else 1
 
 
+def _run_retrain_dispatch(date_str: str | None, force: bool) -> int:
+    """滚动重训「重跑」= 按配置试一轮（``--force`` 不看 enabled/到点/本期标记）。
+
+    走 ``dispatch_due_retrains`` → HTTP POST 内部端点 —— 真正的训练提交发生在
+    API 进程。本进程**绝不** in-process 调 execute_dispatch：CLI 提交后立刻退出，
+    会把训练启动的监管与回调甩在身后（还占着训练单飞锁）。内存/busy/数据就绪
+    三道守卫不受 ``--force`` 影响；同窗口重复派发由 campaign 幂等键挡住。
+    """
+    from backend.services.engine.tasks.retrain_scheduler import dispatch_due_retrains
+
+    out = dispatch_due_retrains(force=force)
+    failed = False
+    for entry in out.get("results", []):
+        status = str(entry.get("status") or "")
+        line = f"{entry.get('market')}: {status}"
+        if entry.get("campaign_id"):
+            line += f" campaign={entry['campaign_id']}"
+        if entry.get("run_id"):
+            line += f" run={entry['run_id']}"
+        if entry.get("detail") and status not in ("dispatched", "duplicate"):
+            line += f" detail={str(entry['detail'])[:200]}"
+        print(line)
+        if status == "error" or status == "http_error":
+            failed = True
+    dispatched = out.get("dispatched") or []
+    print(
+        f"retrain_dispatch {out.get('now')}: 已派发/复用={len(dispatched)} "
+        f"检查={len(out.get('results') or [])}"
+    )
+    return 1 if failed else 0
+
+
 def _run_dual_book(date_str: str | None, force: bool) -> int:
     import asyncio
 
@@ -377,6 +409,78 @@ def _run_tca_report(date_str: str | None, force: bool) -> int:
     return 0
 
 
+def _run_training_reaper(date_str: str | None, force: bool) -> int:
+    """跑一轮僵尸训练作业回收（P0-3）：真扫真标——判死标 failed、存活重挂，**不重投**。
+
+    ``date_str`` 语义不适用（判尸依据是作业龄与探针实况，与某一天无关）。
+    ``--force`` 无额外语义（本任务没有 paused 软开关，重跑本身即执行）。
+
+    注意本入口在独立进程里跑：``REGISTRY`` 是空的（在管的活作业只有 API 进程
+    内可见）。**与 job_reaper CLI 同纪律（复审 MEDIUM-6/LOW-10）：只探测不监管**
+    ——容器在场的作业只报「在场」，不建立轮询/不挂释放回调/不写 C07 心跳：
+    一次性 CLI 进程退出会取消其 task → done 回调把 **API 进程持有的单飞锁**
+    误删；写心跳则把 API 内循环的停摆掩盖成新鲜。重挂监管由 API 进程内回收
+    循环负责恢复。
+    """
+    import asyncio
+
+    from backend.services.engine.training.job_reaper import reconcile_training_jobs
+    from backend.shared.database_manager_v2 import close_database
+
+    async def _run():
+        try:
+            return await reconcile_training_jobs(
+                apply=True, write_heartbeat=False, supervise_reattach=False
+            )
+        finally:
+            await close_database()
+
+    summary = asyncio.run(_run())
+    print(
+        f"training_reaper: 扫描={summary['scanned']} 重挂={summary['reattached']} "
+        f"判死={summary['failed']}"
+    )
+    if summary.get("planned_reattach"):
+        print(
+            f"  存活待监管: {summary['planned_reattach']}"
+            "（本入口只探测；API 内回收循环会重挂监管）"
+        )
+    if summary["skipped"]:
+        print(f"  跳过: {summary['skipped']}")
+    if summary["errors"]:
+        print(f"  错误: {summary['errors']}")
+    return 0 if not summary["errors"] else 1
+
+
+def _run_regime_persist(date_str: str | None, force: bool) -> int:
+    """市场状态日更（P3 §6.2）：重跑 = 立刻按日更形态再写一遍。
+
+    历史行冻结（``INSERT … ON CONFLICT DO NOTHING``），所以重跑对已写入的生效日
+    = 0 新行（幂等），只会补尾部尚未写入的生效日。``date_str`` 语义不适用
+    （每次重算的是"尾部 10 个生效日"而不是某一天，给了会被静默忽略——这里明说）。
+    回填/区间重算请用读数面本身：``python backend/scripts/regime_backfill.py``。
+    """
+    import asyncio
+    import json
+
+    from backend.services.engine.regime_persist import persist_all
+    from backend.shared.database_manager_v2 import close_database
+
+    async def _run():
+        try:
+            return await persist_all()
+        finally:
+            await close_database()
+
+    summaries = asyncio.run(_run())
+    rc = 0
+    for summary in summaries:
+        print(json.dumps(summary, ensure_ascii=False, default=str))
+        if summary.get("reason") != "ok":
+            rc = 1
+    return rc
+
+
 _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     # 键 = 注册表任务键（唯一标识，禁止别名——测试防止漂移）
     "sim_eod": _run_sim_eod,
@@ -398,6 +502,13 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "leverage_trim": _run_leverage_trim,
     # P1.6 TCA 读数面：纯读，重跑 = 重算并覆盖当日报告（无副作用）。
     "tca_report": _run_tca_report,
+    # P0-3 训练僵尸作业回收：重跑 = 立刻真扫真标（判死不重投，容器在场只重挂）。
+    "training_reaper": _run_training_reaper,
+    # P3 Regime 状态日更：纯台账写入且冻结幂等（重跑对已写生效日 = 0 新行）。
+    "regime_persist": _run_regime_persist,
+    # P1 滚动重训派发：重跑 = 按配置试一轮（--force 不看 enabled/到点/本期标记；
+    # 真正提交在 API 进程，同窗口重复派发被 campaign 幂等键挡住）。
+    "retrain_dispatch": _run_retrain_dispatch,
 }
 
 
@@ -427,6 +538,12 @@ def _force_notice(job_key: str) -> str:
             "提示：--force = 忽略 paused 软开关，**会真的提交减仓委托**"
             "（交易时段/实盘闸门/券商选定三道判据不受 --force 影响；"
             "当日幂等号与同标的尝试上限仍然生效）"
+        )
+    if job_key == "retrain_dispatch":
+        return (
+            "提示：--force = 不看 enabled/到点/本期已派发标记，立刻试派发一轮"
+            "（内存/busy/数据就绪三道守卫与真实提交不受影响；真正提交在 API 进程，"
+            "同窗口的重复派发被 campaign 幂等键挡住，不会重复训练）"
         )
     return f"提示：--force 已传给 {job_key}；该任务的重跑本身不看这个参数"
 

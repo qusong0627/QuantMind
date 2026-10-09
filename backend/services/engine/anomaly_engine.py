@@ -10,7 +10,10 @@
         → 动作① 告警：intel 总线事件（type=anomaly，WS 实时）+ qm_market_anomalies 落表
         → 动作② 否决：severity=critical 时按标的/账户写 risk lock（fail-closed；
           模拟撮合买单即刻受阻，带 risk_events 审计行）
-        → 动作③ 降仓：默认关（config.reduce_enabled）；开启后仅记审计建议，
+        → 动作③ 降仓（§6.5-L2 弱区降险建议）：默认关（config.reduce_enabled）；开启后
+          **仅记审计建议**（status=pending，人工确认）。模型检测命中「当前状态属该模型
+          历史弱区」（§6.4 同一谓词）→ 描述与审计文案带 ``POSITION_BY_STATE``
+          （1.0/0.7/0.3，与实时轨 position_hint 同源）下调系数（如 neutral 1.0→0.7）；
           实际减仓执行由风控链（risk_trigger_service flatten）承接——本服务不直接下单
 
 **门控** ``qm:engine:anomaly:config``（enabled/cadence_s/各类阈值/deny_enabled/reduce_enabled，
@@ -28,7 +31,7 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time as dtime
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -513,10 +516,66 @@ class AnomalyEngine:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[anomaly] 审计写入失败: %s", exc)
 
+    @staticmethod
+    def _should_reduce(detection: Detection) -> bool:
+        """动作③闸门：v1 原语义（severity=critical，量价/账户族）∪ §6.5-L2
+        （模型弱区下调建议，**任何级别**——弱区标记本身即判据，L1 已把「在期望内」
+        降级 info 不削减建议；建议落审计 status=pending，人工确认后由风控链执行）。"""
+        if detection.severity == "critical":
+            return True
+        return detection.kind == KIND_MODEL_IC_DROP and bool(
+            (detection.metrics or {}).get("position_advice")
+        )
+
+    @staticmethod
+    def _attach_position_advice(
+        detection: Detection, regime_context: Mapping[str, Any] | None
+    ) -> Detection:
+        """§6.5-L2：弱区判定 → POSITION_BY_STATE 下调建议（挂 metrics + 描述，不执行）。
+
+        判据与 §6.4 同源：``bucket_of`` 对**当前状态**分桶 → ``position_reduction_advice``
+        只对弱区出建议（bull 阶梯 1.0 无下调空间 → 不出）。缺 regime 上下文 → 原样返回。
+        **只在 ``cfg.reduce_enabled`` 开启时被调用**——缺省关 = 检测面与旧版逐位一致。
+        """
+        if detection.kind != KIND_MODEL_IC_DROP or not regime_context:
+            return detection
+        state = regime_context.get("current_state")
+        from backend.shared.regime_buckets import bucket_of, position_reduction_advice
+
+        stats = None
+        if state:
+            stats = bucket_of(
+                regime_context.get("daily_ic") or [],
+                dict(regime_context.get("states") or {}),
+                str(state),
+            )
+        advice = position_reduction_advice(state, stats)
+        if advice is None:
+            return detection
+        metrics = dict(detection.metrics or {})
+        metrics["position_advice"] = advice
+        note = (
+            f"降险建议（弱区，人工确认）：仓位系数自 {advice['from_factor']:g} "
+            f"下调至 {advice['to_factor']:g}"
+            f"（POSITION_BY_STATE[{advice['state']}]，仅建议不执行）"
+        )
+        return replace(detection, description=f"{detection.description}；{note}", metrics=metrics)
+
     def _default_reduce(self, detection: Detection) -> dict[str, Any]:
-        """动作③ 降仓：v1 只记审计建议（不直接下单；实际减仓由风控链承接）。"""
-        self._audit(detection, action="reduce_suggested", status="pending",
-                    message=detection.title)
+        """动作③ 降仓：只记审计建议（status=pending 人工确认；不直接下单）。
+
+        §6.5-L2：检测带 ``position_advice``（弱区）时，审计文案含 POSITION_BY_STATE
+        前后仓位系数；其余维持 v1（title 原文）。
+        """
+        message = detection.title
+        advice = (detection.metrics or {}).get("position_advice")
+        if advice:
+            message = (
+                f"{message}；弱区降险建议：仓位系数 {advice['from_factor']:g}→"
+                f"{advice['to_factor']:g}（POSITION_BY_STATE[{advice['state']}]，"
+                "人工确认后由风控链执行）"
+            )
+        self._audit(detection, action="reduce_suggested", status="pending", message=message)
         with self._lock:
             self.counters["reduce_suggested"] += 1
         return {"reduced": False, "suggested": True}
@@ -670,15 +729,30 @@ class AnomalyEngine:
         if self._last_model_ts is None or now - self._last_model_ts >= cfg.model_every_s:
             self._last_model_ts = now
             try:
+                # §6.4 归因原料按市场缓存一轮；缺任何一环 → 上下文 None → 照常告警
+                regime_cache: dict[str, Mapping[str, str] | None] = {}
+                today_iso = now_dt.date().isoformat()
                 for row in self._model_fetcher(cfg) or []:
-                    detections += detect_model_anomaly(
-                        str(row.get("model_id") or ""),
+                    model_id = str(row.get("model_id") or "")
+                    regime_context = self._regime_context_for(
+                        model_id, row, regime_cache, today_iso
+                    )
+                    model_dets = detect_model_anomaly(
+                        model_id,
                         row.get("ic_stats") or {},
                         short_min=cfg.ic_short_min,
                         drop_ratio_max=cfg.ic_drop_ratio_max,
                         stale_after_days=cfg.ic_stale_days,
                         today=now_dt.date(),
+                        regime_context=regime_context,
                     )
+                    if cfg.reduce_enabled:
+                        # §6.5-L2：仅级开时挂弱区下调建议（默认关 = 检测面与旧版逐位一致）
+                        model_dets = [
+                            self._attach_position_advice(d, regime_context)
+                            for d in model_dets
+                        ]
+                    detections += model_dets
             except Exception as exc:  # noqa: BLE001
                 self._note_error(f"model fetch: {exc}")
 
@@ -706,7 +780,7 @@ class AnomalyEngine:
                         self._note_error(f"deny no_targets: {d.kind}:{d.subject}")
                 except Exception as exc:  # noqa: BLE001
                     self._note_error(f"deny: {exc}")
-            if cfg.reduce_enabled and d.severity == "critical":
+            if cfg.reduce_enabled and self._should_reduce(d):
                 try:
                     self.reducer(d)
                 except Exception as exc:  # noqa: BLE001
@@ -1033,7 +1107,7 @@ class AnomalyEngine:
         for pred_file in picked:
             model_id = pred_file.parent.name
             try:
-                result = ic_monitor(model_id, 90, [5, 20])
+                result = ic_monitor(model_id, 90, [5, 20], include_series=True, quiet=True)
             except BaseException as exc:  # noqa: BLE001 - SystemExit 一并兜住
                 self._note_error(f"ic monitor {model_id}: {exc}")
                 continue
@@ -1050,9 +1124,54 @@ class AnomalyEngine:
                         "n_20": long.get("days"),
                         "latest_ic_date": result.get("latest_ic_date"),
                     },
+                    # §6.4 归因原料：日 IC 序列（join qm_regime_daily 求弱区）
+                    "daily_ic": result.get("daily_ic") or [],
                 }
             )
         return out
+
+    def _regime_context_for(
+        self,
+        model_id: str,
+        row: Mapping[str, Any],
+        cache: dict[str, Mapping[str, str] | None],
+        today_iso: str,
+    ) -> Mapping[str, Any] | None:
+        """§6.4 归因上下文 ``{current_state, states, daily_ic}``；缺任一环 → None。
+
+        - 当日状态行由前一交易日 16:30 的 ``regime_daily_persist`` 落库（生效日
+          口径：状态由截至前一交易日的行情算出）——盘前推理可用，无前视；
+        - 无 regime 指数口径的市场（CRYPTO/FUTURES）→ None（诚实缺省，照常告警）；
+        - states 按市场缓存一轮（同一市场多模型只读一次库）；读失败仅记 errors。
+        """
+        daily_ic = row.get("daily_ic")
+        if not daily_ic:
+            return None
+        try:
+            from backend.shared.market_regime import REGIME_INDEX_BY_MARKET
+            from backend.shared.model_registry import _model_market_of
+
+            market = _model_market_of({"model_id": model_id})
+        except Exception:  # noqa: BLE001 — 归因缺省，告警照常
+            return None
+        if market not in REGIME_INDEX_BY_MARKET:
+            return None
+        if market not in cache:
+            try:
+                from backend.shared.regime_daily_store import load_states_sync
+
+                cache[market] = load_states_sync(market)
+            except Exception as exc:  # noqa: BLE001 — 归因缺省，告警照常
+                self._note_error(f"regime states {market}: {exc}")
+                cache[market] = None
+        states = cache[market]
+        if not states:
+            return None
+        return {
+            "current_state": states.get(today_iso),
+            "states": states,
+            "daily_ic": daily_ic,
+        }
 
     def _default_account_inputs(self, cfg: AnomalyConfig) -> Sequence[Mapping[str, Any]]:
         """模拟账户：持仓（集中度）+ 当日委托（撤单率，sim_orders 真库）。"""

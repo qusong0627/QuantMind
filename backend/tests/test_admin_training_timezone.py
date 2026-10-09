@@ -101,16 +101,16 @@ def test_admin_training_utils_build_default_metadata_uses_utc():
 
 
 def test_admin_training_utils_submit_run_id_uses_utc():
-    """submit_training_job run_id 时钟源必须用 datetime.now(timezone.utc).strftime。"""
+    """run_id 构造点（_new_training_run_id）必须用 datetime.now(timezone.utc).strftime。"""
     fp = ROOT / "backend/services/api/routers/admin/admin_training_utils.py"
     content = fp.read_text(encoding="utf-8")
     for ln, line in enumerate(content.splitlines(), start=1):
-        if "run_id = f\"train_" in line or "run_id = f'train_" in line:
+        if "f\"train_" in line or "f'train_" in line:
             assert "timezone.utc" in line, (
                 f"line {ln} missing timezone.utc: {line!r}"
             )
             return
-    pytest.fail("could not find run_id line in submit_training_job")
+    pytest.fail("could not find run_id f-string in _new_training_run_id")
 
 
 # ---------- 2. admin_training_utils 真实模块行为（如果能 import） ----------
@@ -133,7 +133,13 @@ def test_build_default_metadata_runtime_uses_utc():
 
 
 def test_submit_training_job_run_id_uses_utc_clock():
-    """模拟 TZ=Asia/Shanghai，验证 run_id 时钟源来自 UTC。"""
+    """模拟 TZ=Asia/Shanghai + 固定 UTC 时钟，直接调用 run_id 构造点验证时钟源。
+
+    旧版断言的是**测试进程自己的真实时钟**（`datetime.now(timezone.utc)`），
+    与固定时刻比较，除恰好在那一刻运行外必然失败——是结构性坏测试（假红）。
+    这里替换模块时钟并**直接调用生产代码** ``_new_training_run_id()``；
+    mock 对 ``tz=None``（naive 写法）直接抛错，比数值差更早、更明确地拦住回归。
+    """
     mod = _load_module_safe(
         "backend/services/api/routers/admin/admin_training_utils.py",
         "admin_training_utils_for_test",
@@ -143,18 +149,23 @@ def test_submit_training_job_run_id_uses_utc_clock():
     os.environ["TZ"] = "Asia/Shanghai"
     try:
         fixed_now = datetime(2026, 8, 10, 5, 0, 0, tzinfo=timezone.utc)
-        with patch.object(mod, "datetime") as dt_mock:
-            dt_mock.now.side_effect = lambda tz=None: fixed_now
-            dt_mock.timezone = timezone
-            # 直接调 datetime.now(UTC) 看是否得 05:00
-            got = datetime.now(timezone.utc)
-            formatted = got.strftime("%Y%m%d%H%M%S")
-            # UTC 5:00 → 20260810050000（naive 写法在 TZ=Shanghai 下会得 20260810130000）
-            assert formatted == "20260810050000", (
-                f"expected UTC 5:00 → 20260810050000, got {formatted}"
+
+        def _now(tz=None):
+            assert tz is timezone.utc, (
+                f"run_id 时钟源必须传 timezone.utc（收到 tz={tz!r}）；"
+                "naive 写法在 TZ=Shanghai 下会偏成墙钟 13:00"
             )
+            return fixed_now
+
+        with patch.object(mod, "datetime") as dt_mock:
+            dt_mock.now.side_effect = _now
+            dt_mock.timezone = timezone
+            run_id = mod._new_training_run_id()
     finally:
         os.environ.pop("TZ", None)
+    # UTC 5:00 → 20260810050000（naive 写法在 TZ=Shanghai 下会得 20260810130000）
+    assert run_id.startswith("train_20260810050000_"), run_id
+    assert len(run_id.split("_")[-1]) == 8  # hex 序号段仍在
 
 
 # ---------- 3. local_docker_orchestrator.py 源码回归（不真导入） ----------

@@ -32,7 +32,7 @@ class JobSpec:
     key: str
     name: str
     kind: str  # worker | celery_beat
-    owner: str  # trade | celery
+    owner: str  # trade | celery | api（api=常驻在 API 进程内的任务，如训练回收器）
     schedule: str  # 人类可读周期
     switch_env: str | None  # 开关环境变量（None=常开）
     switch_default_on: bool
@@ -164,6 +164,17 @@ JOBS: tuple[JobSpec, ...] = (
         "python backend/scripts/schedule_ctl.py run market_sync_dispatch",
         "按 Redis 同步调度配置派发各市场数据同步",
     ),
+    # P1 滚动训练：beat 只做「到点判定 + HTTP POST 内部端点」，真正的训练提交在
+    # API 进程（celery worker 无 docker.sock）。心跳每 tick 都写（月度任务若只在
+    # 派发成功时写一次，C07 会误报 29 天 stale）。**默认关**：开启自动月度重训
+    # 是显式运维动作；--force = 不看 enabled/到点/本期标记，立刻试一轮。
+    JobSpec(
+        "retrain_dispatch", "滚动重训派发", "celery_beat", "celery",
+        "每分钟 tick（due 判定按配置）",
+        "RETRAIN_SCHEDULER_ENABLED", False, 1800,
+        "python backend/scripts/schedule_ctl.py run retrain_dispatch",
+        "滚动训练：窗口计算→内部派发→campaign 记账；mark-after-dispatch",
+    ),
     JobSpec(
         "news_enrich", "新闻富化", "celery_beat", "celery", "~30s",
         None, True, 900, None, "Huntly 新闻入库富化",
@@ -235,6 +246,27 @@ JOBS: tuple[JobSpec, ...] = (
         "python backend/scripts/schedule_ctl.py run leverage_trim --force",
         "总杠杆越过档位 ``leverage_max`` → 减到 ``leverage_trim_to``（整手/T+1/跌停/在途都复核）。"
         "真钱风控动作，默认关。重跑 = 立刻真减一次（当日幂等号与同标的尝试上限仍然生效）",
+    ),
+    # P0-3 训练僵尸作业回收器：宿主内存 OOM 血泪后的判尸机制。先探活（在管 task /
+    # docker 容器 / PID 三探针）再判死——可验证存活的容器重挂监管，判死标 failed 且
+    # **默认不自动重投**（防双跑）。住在 api 服务（启动即扫 + 每小时）。
+    JobSpec(
+        "training_reaper", "训练僵尸作业回收", "worker", "api",
+        "API 启动即扫 + 每小时（``TRAINING_JOB_REAPER_INTERVAL_SECONDS`` 可调）",
+        "TRAINING_JOB_REAPER_ENABLED", True, 7200,
+        "python backend/scripts/schedule_ctl.py run training_reaper",
+        "重启/宕机后残留 pending/running 训练作业的判尸回收：在管或探针存活一律不动；"
+        "判死 → 标 failed（reason 落日志）+ 释放训练单飞锁；重跑 = 立刻真扫真标",
+    ),
+    # P3 Regime 感知（设计 §6.2）：市场状态日表 qm_regime_daily 的日更。
+    # 心跳 TTL 4 天（同 backfill_quality）：cron 是 mon-fri，周末最长间隔 72h。
+    JobSpec(
+        "regime_persist", "市场状态日更（P3）", "celery_beat", "celery",
+        "交易日 16:30",
+        "REGIME_PERSIST_ENABLED", True, 345600,
+        "python backend/scripts/schedule_ctl.py run regime_persist",
+        "指数历史 → qm_regime_daily（生效日口径，历史行冻结）：每市场重算尾部 10 个"
+        "生效日吸收迟到数据；表外市场诚实拒绝；重跑 = 立刻按日更形态再写一遍（0 新行即幂等）",
     ),
 )
 

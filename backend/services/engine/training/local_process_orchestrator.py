@@ -29,7 +29,13 @@ from backend.services.engine.training.local_docker_orchestrator import (
     _CALLBACK_CHECK_INTERVAL,
     _CALLBACK_TIMEOUT,
 )
-from backend.services.engine.training.orchestrator_base import REGISTRY
+from backend.services.engine.training.orchestrator_base import (
+    REGISTRY,
+    attach_singleflight_release,
+    mark_graceful_stop,
+    mark_user_cancel_confirmed,
+    spawn_compensation,
+)
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
 from backend.shared.training_runtime import (
     default_api_base_url,
@@ -240,17 +246,34 @@ class LocalProcessOrchestrator(LocalDockerOrchestrator):
 
         # 启动训练子进程（-u 无缓冲，保证日志流实时可读）
         try:
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-u",
-                str(self.train_script),
-                "--config",
-                str(config_path),
-                cwd=str(self.train_script.parent),
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+            _spawn_task = asyncio.ensure_future(
+                asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-u",
+                    str(self.train_script),
+                    "--config",
+                    str(config_path),
+                    cwd=str(self.train_script.parent),
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
             )
+            try:
+                proc = await asyncio.shield(_spawn_task)
+            except asyncio.CancelledError:
+                # spawn 在途残窗（复审 HIGH-1）：取消打不断已在执行的 spawn，等
+                # 句柄出来后按取消标记补杀；无标记（进程关停）留给重启后判尸
+                # /回调收敛。
+                spawn_compensation(
+                    self._kill_proc_when_spawned(
+                        run_id,
+                        _spawn_task,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                    )
+                )
+                raise
         except Exception as e:  # noqa: BLE001
             logger.error("[%s] spawn train.py failed: %s", run_id, e)
             await self._mark_failed(
@@ -258,32 +281,147 @@ class LocalProcessOrchestrator(LocalDockerOrchestrator):
             )
             return
 
+        try:
+            async with get_session() as db:
+                record = await db.get(TrainingJobRecord, run_id)
+                if record:
+                    record.status = "running"
+                    record.progress = max(int(record.progress or 0), 12)
+                    record.instance_id = str(proc.pid)
+                    record.logs = (record.logs or "") + f"Process PID: {proc.pid}\n"
+                    await db.commit()
+            self.log_stream.append_log(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                line=f"[SYSTEM] Process PID: {proc.pid}",
+                status="running",
+                progress=12,
+            )
+
+            try:
+                max_time_minutes = max(10, int(payload.get("max_time_minutes") or 120))
+            except Exception:  # noqa: BLE001
+                max_time_minutes = 120
+
+            _poll_task = REGISTRY.register(
+                self._monitor_process_supervised(
+                    run_id,
+                    proc,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    work_dir=work_dir,
+                    max_time_minutes=max_time_minutes,
+                ),
+                run_id=run_id,
+            )
+            # P0-3：该 run 不再受管时释放训练单飞锁
+            attach_singleflight_release(_poll_task, run_id)
+        except asyncio.CancelledError:
+            # provisioning 窗口（子进程已 spawn、监管未挂）被取消（复审 HIGH-1）：
+            # 仅在用户取消标记已置时杀进程；进程关停留给回调/判尸收敛。
+            if self.log_stream.is_cancel_requested(run_id):
+                try:
+                    await self._cancel_process(run_id, proc, tenant_id, user_id)
+                except Exception as exc:  # noqa: BLE001
+                    # NEW-5：清理异常不得顶替 CancelledError 传播（吞掉取消）
+                    logger.warning(
+                        "[%s] cancel cleanup on launch cancel failed: %s", run_id, exc
+                    )
+            else:
+                # 进程关停：保住单飞锁供重启后重挂续租（复审 HIGH-4）
+                mark_graceful_stop(run_id)
+            raise
+
+    # ── 取消清理（复审 HIGH-1：CancelledError 打断 await 时循环内标记检查轮不到）──
+
+    async def _cancel_process(
+        self,
+        run_id: str,
+        proc: asyncio.subprocess.Process,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        """用户取消：杀子进程 + 落 cancelled 状态 + 清理取消标记（幂等）。"""
+        # NEW-B：进入即记录「已确认用户取消」——本方法最后会 clear_cancel，
+        # supervised_launch 若在此之后才读 Redis 标记会把取消误判成关停。
+        mark_user_cancel_confirmed(run_id)
+        try:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] cancel kill process failed: %s", run_id, exc)
+
+        from backend.services.api.routers.admin.db import TrainingJobRecord
+        from backend.shared.database_manager_v2 import get_session
+
         async with get_session() as db:
-            record = await db.get(TrainingJobRecord, run_id)
-            if record:
-                record.status = "running"
-                record.progress = max(int(record.progress or 0), 12)
-                record.instance_id = str(proc.pid)
-                record.logs = (
-                    record.logs or ""
-                ) + f"Process PID: {proc.pid}\n"
+            # with_for_update（复审 NEW-7）：防「回调落终态」与「取消写 cancelled」
+            # 并发交错——completed 判定读的是行锁下的当前值，不是过期快照。
+            r = await db.get(TrainingJobRecord, run_id, with_for_update=True)
+            if r and str(r.status or "") not in ("completed", "failed"):
+                r.status = "cancelled"
+                r.logs = (r.logs or "") + "[SYSTEM] 训练已被用户取消，进程已停止\n"
                 await db.commit()
         self.log_stream.append_log(
             run_id=run_id,
             tenant_id=tenant_id,
             user_id=user_id,
-            line=f"[SYSTEM] Process PID: {proc.pid}",
-            status="running",
-            progress=12,
+            line="[SYSTEM] 训练已被用户取消，进程已停止",
+            status="cancelled",
+            progress=0,
         )
+        self.log_stream.clear_cancel(run_id)
 
+    async def _kill_proc_when_spawned(
+        self,
+        run_id: str,
+        spawn_task: asyncio.Task,
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        """spawn 在途取消的补杀（复审 HIGH-1 残窗，语义同 docker 版）。
+
+        ``create_subprocess_exec`` 无法被取消打断；等 spawn 任务返回句柄后：
+        用户取消标记已置 → 补 ``_cancel_process``；无标记（进程关停）→ 不动；
+        spawn 最终失败 → 无进程可杀。
+        """
         try:
-            max_time_minutes = max(10, int(payload.get("max_time_minutes") or 120))
-        except Exception:  # noqa: BLE001
-            max_time_minutes = 120
+            proc = await spawn_task
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] 创建在途取消：spawn 最终失败，无需补杀: %s", run_id, exc
+            )
+            return
+        if not self.log_stream.is_cancel_requested(run_id):
+            return
+        try:
+            await self._cancel_process(run_id, proc, tenant_id, user_id)
+            logger.info("[%s] 创建在途取消：子进程已补杀", run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] 创建在途取消补杀失败: %s", run_id, exc)
 
-        REGISTRY.register(
-            self._monitor_process(
+    async def _monitor_process_supervised(
+        self,
+        run_id: str,
+        proc: asyncio.subprocess.Process,
+        *,
+        tenant_id: str,
+        user_id: str,
+        work_dir: Path,
+        max_time_minutes: int = 120,
+    ) -> None:
+        """_monitor_process 的取消清理包装（语义同 docker 版，见 HIGH-1）。
+
+        仅在「用户取消标记已置」时杀进程——API 进程正常关停（无标记）
+        不动训练子进程，回调到达时自会收敛终态。
+        """
+        try:
+            await self._monitor_process(
                 run_id,
                 proc,
                 tenant_id=tenant_id,
@@ -291,7 +429,31 @@ class LocalProcessOrchestrator(LocalDockerOrchestrator):
                 work_dir=work_dir,
                 max_time_minutes=max_time_minutes,
             )
-        )
+        except asyncio.CancelledError:
+            if self.log_stream.is_cancel_requested(run_id):
+                try:
+                    await self._cancel_process(run_id, proc, tenant_id, user_id)
+                except Exception as exc:  # noqa: BLE001
+                    # NEW-5：清理异常不得顶替 CancelledError 传播（吞掉取消）
+                    logger.warning(
+                        "[%s] cancel cleanup on task cancel failed: %s", run_id, exc
+                    )
+            else:
+                # 进程关停（无用户取消标记）：子进程还在跑，保住单飞锁供重启后
+                # 重挂续租（复审 HIGH-4）。
+                mark_graceful_stop(run_id)
+            raise
+
+    async def cleanup_cancelled_provisioning(
+        self, run_id: str, *, tenant_id: str = "default", user_id: str = "unknown"
+    ) -> None:
+        """launch 早期（配置写盘/GPU 探测窗口）被取消时的兜底（HIGH-1）。
+
+        该窗口子进程尚未 spawn（无 pid 可查）→ 无事可做；子进程存在但 pid
+        未落库的极小窗口由 launch 内的 CancelledError 包装覆盖。保留本方法
+        使 supervised_launch 对两种编排器同构。
+        """
+        return
 
     # ── 轮询训练子进程：增量日志 → 状态落库 → 等待回调 ────────────────────────
     async def _monitor_process(
@@ -313,6 +475,10 @@ class LocalProcessOrchestrator(LocalDockerOrchestrator):
 
         # 增量读取 stdout（含 stderr），实时写日志流并推断进度
         while True:
+            if self.log_stream.is_cancel_requested(run_id):
+                # 用户取消（与 docker/remote 的循环内标记检查对齐）
+                await self._cancel_process(run_id, proc, tenant_id, user_id)
+                return
             remain = deadline - time.time()
             if remain <= 0:
                 try:

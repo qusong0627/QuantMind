@@ -48,23 +48,5 @@
     "lgbm_weight": 0.0,
     "tft_weight": 1.0,
     "fallback": "reject"
-  },
-  "regime_weights": {
-    "normal": {
-      "lgbm": 0.65,
-      "tft": 0.35
-    },
-    "trending": {
-      "lgbm": 0.4,
-      "tft": 0.6
-    },
-    "volatile": {
-      "lgbm": 0.8,
-      "tft": 0.2
-    },
-    "crash": {
-      "lgbm": 0.9,
-      "tft": 0.1
-    }
   }
 }
