@@ -174,4 +174,26 @@ describe('accountAdapter', () => {
 
     expect(view.initial_equity).toBeCloseTo(21_007_999);
   });
+
+  it('should derive floating pnl from dict positions (simulation account shape)', () => {
+    const view = buildTradingTopBarAccountInfo(
+      {
+        total_asset: 1_010_000,
+        cash: 900_000,
+        market_value: 110_000,
+        daily_pnl: 5_000,
+        total_pnl: 10_000,
+        // 无显式 floating_pnl：走派生分支
+        positions: {
+          '600036.SH': { volume: 10000, available_volume: 10000, cost: 10.0, price: 11.0, market_value: 110000 },
+          '000001.SZ': { volume: 0, available_volume: 0, cost: 0, price: 0, market_value: 0 },
+        },
+      } as any,
+      null,
+    );
+
+    // (11 - 10) * 10000 = 10000，空仓不计入
+    expect(view.floating_pnl).toBe(10000);
+    expect(view.floating_pnl_percent).toBeCloseTo(10000 / 110000);
+  });
 });

@@ -133,7 +133,14 @@ const deriveFloatingPnl = (accountInfo: AccountInfo | null): number => {
   if (Number.isFinite(explicitFloating)) return explicitFloating;
 
   const raw = (accountInfo as any)?.positions;
-  const positions: any[] = Array.isArray(raw) ? raw : [];
+  // 实盘持仓是数组，模拟盘持仓是 {symbol: {volume/cost/price}} 字典：归一化为数组
+  const positions: any[] = Array.isArray(raw)
+    ? raw
+    : (raw && typeof raw === 'object'
+      ? Object.entries(raw).map(([symbol, pos]) => (
+        pos && typeof pos === 'object' ? { symbol, ...(pos as Record<string, unknown>) } : null
+      )).filter(Boolean)
+      : []);
   if (positions.length === 0) return 0;
 
   return positions.reduce((sum: number, pos: any) => {
