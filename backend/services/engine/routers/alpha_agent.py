@@ -91,6 +91,13 @@ class DecomposeRequest(BaseModel):
             f"卡片数上限（默认 {MAX_CARDS_DEFAULT}、上限 {MAX_CARDS_LIMIT}，越界自动收敛）"
         ),
     )
+    seed_factor_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "种子（父本）因子 id（≤3，取自本用户本市场因子池）：拆解围绕父本做"
+            "受控变异，卡片带 seed_factor_id 血统；超量整包 400"
+        ),
+    )
 
 
 class MiningBatchRequest(BaseModel):
@@ -750,16 +757,19 @@ async def decompose_directions(request: Request, payload: DecomposeRequest):
             market=payload.market,
             universe=payload.universe,
             max_cards=payload.max_cards,
+            seed_factor_ids=payload.seed_factor_ids,
         )
     except DecomposeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     logger.info(
-        "[alpha-agent] decompose source=%s model=%s cards=%d dropped=%d",
+        "[alpha-agent] decompose source=%s model=%s cards=%d dropped=%d seeds=%d/%d",
         llm_source,
         llm_config.model,
         len(result["cards"]),
         result["dropped"],
+        (result.get("context", {}).get("seeds") or {}).get("used", 0),
+        (result.get("context", {}).get("seeds") or {}).get("requested", 0),
     )
     return {"code": 200, "data": result}
 

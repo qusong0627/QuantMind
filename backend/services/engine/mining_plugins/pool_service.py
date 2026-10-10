@@ -13,6 +13,9 @@
   ``QMF_POOL_CONTEXT_PATH`` 传给挖掘子进程，由 ``rd_loop_wrapper`` 读入
   提示词——**只走提示词通道，零运行时副作用**（不碰 base_factors.json，
   否则 LLM 会把摘要文本当可用基础特征，见 P1 计划的关键约束）。
+* 种子摘要 ``build_seed_digest``（T-MV-01 父本定向演化的注入源）：与
+  ``build_injection_digest`` 同 scope，但不做池评分排序（父本由用户点名，
+  保序 = 请求顺序），scope 外 id 进 dropped 如实上报。
 * 读接口 ``pool_overview`` / ``list_pool_factors`` / ``pool_graph``
   （alpha_agent 路由的面板数据源）。
 
@@ -33,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +49,7 @@ from .pool_cleanup import CleanupCandidate, CleanupCriteria, evaluate_cleanup
 from .pool_edges import DEFAULT_TOP_K as _FORMULA_TOP_K
 from .pool_edges import formula_tokens, similar_pairs
 from .pool_scoring import (
+    MISSING_TEXT,
     DigestEntry,
     PoolCandidate,
     PoolSota,
@@ -872,6 +877,92 @@ async def build_injection_digest(
     return text_out, injected
 
 
+def _seed_fmt(value: float | None) -> str:
+    """种子摘要的指标格式化（口径与 ``pool_scoring._fmt`` 一致：缺失=「—」）。"""
+    return MISSING_TEXT if value is None else f"{float(value):.4f}"
+
+
+async def build_seed_digest(
+    seed_factor_ids: Iterable[str],
+    *,
+    user_id: str,
+    market: str,
+    universe: str,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """种子（父本）id → markdown 清单 + used ids + dropped ids（T-MV-01）。
+
+    与 :func:`build_injection_digest` 同一 scope（本用户 × 本市场 × 本池、
+    completed、未归档），差别有二：
+
+    * **不做池评分排序**——父本由用户点名，used 保序 = 请求顺序（提示词
+      清单与卡片血统 ``seed_factor_id`` 要能逐条对照）；
+    * scope 外的 id **不硬失败**，进 ``dropped`` 如实上报（前端选取与提交
+      之间存在归档/换池竞态；静默丢弃才是缺陷）。
+    """
+    ids: list[str] = []
+    for raw in seed_factor_ids or ():
+        fid = str(raw or "").strip()
+        if fid and fid not in ids:
+            ids.append(fid)
+    if not ids:
+        return "", (), ()
+
+    from sqlalchemy import bindparam, text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    async with get_session(read_only=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(f"""
+                    SELECT p.factor_id, f.factor_name, f.factor_formulation,
+                           f.ic_value,
+                           f.metadata_json->>'icir' AS icir,
+                           f.metadata_json->'quality'->>'pfs' AS pfs,
+                           p.max_pool_corr
+                    FROM {POOL_TABLE} p
+                    JOIN rd_agent_factors f ON f.factor_id = p.factor_id
+                    WHERE p.user_id = :user_id
+                      AND p.market = :market
+                      AND p.universe = :universe
+                      AND f.status = 'completed'
+                      AND p.archived_at IS NULL
+                      AND p.factor_id IN :ids
+                    """).bindparams(bindparam("ids", expanding=True)),
+                    {
+                        "user_id": str(user_id),
+                        "market": market,
+                        "universe": universe,
+                        "ids": ids,
+                    },
+                )
+            )
+            .mappings()
+            .all()
+        )
+    by_id = {str(r["factor_id"]): r for r in rows}
+    used = tuple(fid for fid in ids if fid in by_id)
+    dropped = tuple(fid for fid in ids if fid not in by_id)
+
+    lines: list[str] = []
+    for i, fid in enumerate(used, start=1):
+        r = by_id[fid]
+        corr = _as_float(r["max_pool_corr"])
+        lines.append(
+            f"{i}. `{r['factor_name'] or fid}`（因子 ID：{fid}） | "
+            f"IC={_seed_fmt(_as_float(r['ic_value']))}"
+            f" ICIR={_seed_fmt(_as_float(r['icir']))}"
+            f" PFS={_seed_fmt(_as_float(r['pfs']))}"
+            f" 池内max|ρ|={_seed_fmt(None if corr is None else abs(corr))}"
+        )
+        formula = str(r["factor_formulation"] or "").strip().replace("\n", " ")
+        lines.append(
+            f"   公式: {formula or MISSING_TEXT}（父本仅作变异起点，勿原样复述）"
+        )
+    return "\n".join(lines), used, dropped
+
+
 async def prepare_injection(
     *,
     user_id: str,
@@ -1574,6 +1665,7 @@ __all__ = [
     "PoolInjection",
     "archive_factors",
     "build_injection_digest",
+    "build_seed_digest",
     "cleanup_suggestions",
     "inject_k",
     "injection_enabled",

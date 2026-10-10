@@ -338,6 +338,8 @@ export interface DecomposeCard {
   rationale?: string;
   categories: string[];
   evaluation_hint?: string;
+  /** 父本血统（T-MV-01）：该卡所变异父本的因子 id；不在请求种子集内则缺席 */
+  seed_factor_id?: string;
 }
 
 export interface DecomposeResult {
@@ -350,6 +352,8 @@ export interface DecomposeResult {
     categories: number;
     poolDigestChars: number;
     poolFactors: number;
+    /** 种子父本命中情况（requested/used/dropped 均为条数，如实上报） */
+    seeds: { requested: number; used: number; dropped: number };
     model?: string | null;
   };
 }
@@ -359,11 +363,13 @@ export interface DecomposeParams {
   market?: string;
   universe?: string;
   maxCards?: number;
+  /** 父本种子 id（≤3）：拆解围绕父本做受控变异，卡片带血统 */
+  seedFactorIds?: string[];
 }
 
 /**
  * 粗方向 → 正交子假设卡片（只拆解，不落任务）。
- * 失败（无 LLM 配置 412 / 超长或截断 400）由调用方 catch，
+ * 失败（无 LLM 配置 412 / 超长、种子超量或截断 400）由调用方 catch，
  * `err.response.data.detail` 是可直接上屏的中文文案。
  */
 export async function decomposeDirection(
@@ -374,6 +380,9 @@ export async function decomposeDirection(
     market: params.market || 'a_share',
     universe: params.universe || 'csi300',
     ...(params.maxCards ? { max_cards: params.maxCards } : {}),
+    ...(params.seedFactorIds?.length
+      ? { seed_factor_ids: params.seedFactorIds }
+      : {}),
   });
   const data = res.data?.data ?? {};
   const cards: DecomposeCard[] = (data.cards ?? []).map((c: any) => ({
@@ -382,6 +391,9 @@ export async function decomposeDirection(
     ...(c?.rationale ? { rationale: c.rationale } : {}),
     categories: Array.isArray(c?.categories) ? c.categories : [],
     ...(c?.evaluation_hint ? { evaluation_hint: c.evaluation_hint } : {}),
+    ...(c?.seed_factor_id
+      ? { seed_factor_id: String(c.seed_factor_id) }
+      : {}),
   }));
   return makeOk({
     promptVersion: data.prompt_version ?? '',
@@ -392,6 +404,11 @@ export async function decomposeDirection(
       categories: data.context?.categories ?? 0,
       poolDigestChars: data.context?.pool_digest_chars ?? 0,
       poolFactors: data.context?.pool_factors ?? 0,
+      seeds: {
+        requested: data.context?.seeds?.requested ?? 0,
+        used: data.context?.seeds?.used ?? 0,
+        dropped: data.context?.seeds?.dropped ?? 0,
+      },
       model: data.context?.model ?? null,
     },
   });

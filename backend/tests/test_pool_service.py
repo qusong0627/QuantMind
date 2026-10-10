@@ -892,3 +892,88 @@ class TestFactorCategory:
         finally:
             await _cleanup([f_mom, f_ovn], [user])
             await close_database()
+
+
+class TestSeedDigest:
+    """种子（父本）摘要（T-MV-01）：保序 used、如实 dropped、scope 与池一致。"""
+
+    @pytest.mark.asyncio
+    async def test_seed_digest_orders_used_and_reports_dropped(self):
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        run = _run_id()
+        user = run
+        f1, f2 = f"{run}_f1", f"{run}_f2"
+        ghost = f"{run}_ghost"
+        try:
+            async with get_session() as session:
+                await _seed_factor(
+                    session,
+                    factor_id=f1,
+                    user_id=user,
+                    formula="rank(close/ref(close,20)-1)",
+                    ic=0.05,
+                    icir=0.7,
+                )
+                await _seed_factor(session, factor_id=f2, user_id=user)
+                await _seed_pool_row(session, factor_id=f1, user_id=user)
+                await _seed_pool_row(session, factor_id=f2, user_id=user)
+
+            digest, used, dropped = await pool_service.build_seed_digest(
+                [f2, ghost, f1], user_id=user, market=MARKET, universe=UNIVERSE
+            )
+
+            assert used == (f2, f1), "used 必须保序 = 请求顺序（卡片血统要能对照）"
+            assert dropped == (ghost,)
+            assert f"name-{f2}" in digest and f"name-{f1}" in digest
+            assert "rank(close/ref(close,20)-1)" in digest, "父本公式要进摘要"
+            assert ghost not in digest
+        finally:
+            await _cleanup([f1, f2], [user])
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_seed_digest_scope_isolation_and_archive(self):
+        """跨用户 / 已归档的因子绝不进别人（或自己）的种子摘要。"""
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        run = _run_id()
+        user, other = f"{run}_u", f"{run}_u2"
+        f_mine, f_other, f_arch = f"{run}_m", f"{run}_o", f"{run}_a"
+        try:
+            async with get_session() as session:
+                await _seed_factor(session, factor_id=f_mine, user_id=user)
+                await _seed_factor(session, factor_id=f_other, user_id=other)
+                await _seed_factor(session, factor_id=f_arch, user_id=user)
+                await _seed_pool_row(session, factor_id=f_mine, user_id=user)
+                await _seed_pool_row(session, factor_id=f_other, user_id=other)
+                await _seed_pool_row(session, factor_id=f_arch, user_id=user)
+                await session.execute(
+                    text(
+                        f"UPDATE {POOL_TABLE} SET archived_at = now() "
+                        "WHERE factor_id = :f"
+                    ),
+                    {"f": f_arch},
+                )
+
+            digest, used, dropped = await pool_service.build_seed_digest(
+                [f_mine, f_other, f_arch],
+                user_id=user,
+                market=MARKET,
+                universe=UNIVERSE,
+            )
+
+            assert used == (f_mine,)
+            assert dropped == (f_other, f_arch)
+            assert f"name-{f_other}" not in digest and f"name-{f_arch}" not in digest
+        finally:
+            await _cleanup([f_mine, f_other, f_arch], [user, other])
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_seed_digest_empty_request_returns_blank(self):
+        assert await pool_service.build_seed_digest(
+            [], user_id="u", market=MARKET, universe=UNIVERSE
+        ) == ("", (), ())

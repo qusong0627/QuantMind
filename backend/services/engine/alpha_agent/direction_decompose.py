@@ -15,9 +15,11 @@
 2. **坏输出显式失败**：非对象/空 cards/卡片缺必填 → ``DecomposeSchemaError``；
    半截 JSON（输出预算被思考耗尽）→ ``DecomposeTruncatedError`` 并指路
    ``DECOMPOSE_MAX_TOKENS`` 旋钮——绝不静默降级成「没有卡片」。
-3. **上下文注入是增益层，不是主链**：L1 类别清单（QuantDB feature catalog）
-   与因子池摘要（``pool_service.build_injection_digest``，让新假设避开已挖
-   构造）任一加载失败只告警，提示词用显式占位，拆解照跑。
+3. **上下文注入是增益层，不是主链**：L1 类别清单（QuantDB feature catalog）、
+   因子池摘要（``pool_service.build_injection_digest``，让新假设避开已挖构造）
+   与种子父本摘要（``pool_service.build_seed_digest``，T-MV-01 父本定向演化）
+   任一加载失败只告警，提示词用显式占位（「未指定」与「取不到」分开如实渲染），
+   拆解照跑；种子可用数如实在 ``context.seeds`` 上报（requested/used/dropped）。
 4. **LLM 单通道**：复用 ``llm_client.chat_with_meta``（用户 Profile Key 优先，
    config 由路由注入）；默认关思考（``DECOMPOSE_DISABLE_THINKING=false``
    归一后精确等值才恢复）；所有调用经 ``chat_fn`` 可替身注入（测试不碰网络）。
@@ -48,7 +50,8 @@ from backend.services.engine.alpha_agent.task_store import (
 logger = logging.getLogger(__name__)
 
 #: 模板版本：提示词文本改动必须 bump（历史拆解结果按它追溯「哪版模板拆的」）
-PROMPT_VERSION = "decompose_v1"
+#: v2（T-MV-01）：种子父本注入段 + 变异纪律 + 卡片 seed_factor_id 血统。
+PROMPT_VERSION = "decompose_v2"
 
 #: 卡片数：默认值 / 硬上限（上限的读取点收敛在 resolve_max_cards）
 MAX_CARDS_DEFAULT = 6
@@ -59,6 +62,10 @@ CATEGORIES_PER_CARD_MAX = 3
 CATEGORY_RENDER_MAX = 20
 #: 因子池摘要注入的字符上限（超出截断并标记）
 POOL_DIGEST_MAX_CHARS = 3000
+#: 种子父本摘要注入的字符上限（≤3 条，上限兜底防公式超长撑爆提示词）
+SEED_DIGEST_MAX_CHARS = 1500
+#: 种子父本数上限默认值（env ``DECOMPOSE_SEED_MAX`` 覆盖；读取点=resolve_seed_max）
+SEED_MAX_DEFAULT = 3
 
 DECOMPOSE_LLM_TEMPERATURE = 0.4
 DECOMPOSE_LLM_TIMEOUT_S = 120.0
@@ -70,6 +77,22 @@ _MAX_TOKENS = max(1, int(os.getenv("DECOMPOSE_MAX_TOKENS", "4000") or "4000"))
 _CLIP_MARKER = "\n…（已截断，完整摘要见「因子池」页）"
 _NO_CATEGORIES = "（L1 类别清单不可用——本卡 categories 请留空数组）"
 _NO_POOL = "（因子池为空或不可用——按经典因子逻辑展开即可）"
+_NO_SEEDS = "（本轮未指定父本——按经典因子逻辑展开即可）"
+#: 请求了种子但一条都没解析出来：与「未指定」分开渲染，不冒充用户没选
+_SEEDS_UNAVAILABLE = "（请求的种子因子不在本池范围内或已归档——按经典因子逻辑展开即可）"
+
+#: 种子纪律（仅给种子时进系统提示词；编号 6 接在既有 1–5 条之后）
+_SEED_RULE = (
+    "\n6. 围绕父本变异：本轮给出了种子因子（父本）清单。每张卡片围绕其中一个"
+    "父本做一个**系统变异**——如滞后、窗长、标准化、差分、比值、非线性变换；"
+    "hypothesis/rationale 要说明与父本的区别，不得原样复述父本，并在 "
+    "seed_factor_id 里标注所用父本的 id（必须取自种子清单）。"
+)
+#: JSON 结构里的 seed_factor_id 字段行（仅给种子时出现，无种子保持 v1 形状）
+_SEED_FIELD = (
+    ',\n      "seed_factor_id": "所变异父本的因子 ID'
+    '（仅当给出了种子因子时填写，必须取自种子清单）"'
+)
 
 _TRUNCATION_HINT = (
     "请调大 DECOMPOSE_MAX_TOKENS（当前 %d）后重试，或调小拆解卡片数让输出更短。"
@@ -115,11 +138,21 @@ def _normalize_categories(value: Any, allowed: set[str]) -> list[str]:
     return out
 
 
+def _normalize_seed(value: Any, allowed: set[str]) -> str | None:
+    """``seed_factor_id`` 白名单归一：白名单外/非字符串 → None（省略字段，
+    绝不静默改写成别的 id）。白名单为空（本轮没给种子）→ 一律不保留。"""
+    if not allowed or not isinstance(value, str):
+        return None
+    sid = value.strip()
+    return sid if sid in allowed else None
+
+
 def validate_cards(
     payload: Any,
     *,
     max_cards: int,
     allowed_categories: Iterable[str] = (),
+    allowed_seeds: Iterable[str] = (),
 ) -> dict[str, Any]:
     """LLM 输出 → 归一卡片列表。
 
@@ -133,6 +166,7 @@ def validate_cards(
         raise DecomposeSchemaError("拆解输出缺少 cards 数组（或为空）")
 
     allowed = {str(c).strip() for c in allowed_categories if str(c).strip()}
+    allowed_seed_set = {str(s).strip() for s in allowed_seeds if str(s).strip()}
     cards: list[dict[str, Any]] = []
     for i, raw in enumerate(raw_cards):
         if not isinstance(raw, Mapping):
@@ -154,6 +188,9 @@ def validate_cards(
         hint = str(raw.get("evaluation_hint") or "").strip()
         if hint:
             card["evaluation_hint"] = hint
+        seed = _normalize_seed(raw.get("seed_factor_id"), allowed_seed_set)
+        if seed:
+            card["seed_factor_id"] = seed
         cards.append(card)
 
     kept = cards[:max_cards]
@@ -165,6 +202,32 @@ def resolve_max_cards(value: int | None) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         return MAX_CARDS_DEFAULT
     return max(1, min(value, MAX_CARDS_LIMIT))
+
+
+def resolve_seed_max() -> int:
+    """种子父本上限（env ``DECOMPOSE_SEED_MAX``，默认 3）；坏 env 回默认不炸。"""
+    raw = os.getenv("DECOMPOSE_SEED_MAX", "").strip()
+    if not raw:
+        return SEED_MAX_DEFAULT
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "[decompose] DECOMPOSE_SEED_MAX 非法（%r），回默认 %d",
+            raw,
+            SEED_MAX_DEFAULT,
+        )
+        return SEED_MAX_DEFAULT
+
+
+def _normalize_seed_ids(seed_factor_ids: Iterable[str] | None) -> list[str]:
+    """请求种子 id：strip + 去重保序，空项剔除（None/坏类型容错）。"""
+    out: list[str] = []
+    for raw in seed_factor_ids or ():
+        fid = str(raw or "").strip()
+        if fid and fid not in out:
+            out.append(fid)
+    return out
 
 
 # ── 上下文源（增益层，失败不拦拆解）─────────────────────────────────
@@ -240,6 +303,23 @@ async def _load_pool_digest(
         return "", ()
 
 
+async def _load_seed_digest(
+    *, seed_factor_ids: list[str], user_id: str, market: str, universe: str
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """种子父本摘要；失败返回空 + 全部进 dropped（如实上报，不冒充未指定）。"""
+    try:
+        from backend.services.engine.mining_plugins.pool_service import (
+            build_seed_digest,
+        )
+
+        return await build_seed_digest(
+            seed_factor_ids, user_id=user_id, market=market, universe=universe
+        )
+    except Exception as exc:  # noqa: BLE001 —— 注入是增益层，绝不拦拆解
+        logger.warning("[decompose] 种子父本摘要加载失败（不拦拆解）: %s", exc)
+        return "", (), tuple(seed_factor_ids)
+
+
 # ── 提示词 ──────────────────────────────────────────────────────────
 
 _SYSTEM_TEMPLATE = Template(
@@ -256,7 +336,7 @@ _SYSTEM_TEMPLATE = Template(
 3. 与已有因子错位：参考「因子池现状」，避开池中已覆盖的构造，优先补缺位维度；\
 池为空时按经典因子逻辑展开。
 4. 不虚构：只使用给定信息；引用资料时忠实原意，不添数字，不编造数据字段。
-5. 宁缺毋滥：能拆几张拆几张，凑数卡片会浪费一次挖掘任务。
+5. 宁缺毋滥：能拆几张拆几张，凑数卡片会浪费一次挖掘任务。$seed_rule
 
 输出必须是且仅是一个 JSON 对象（不含任何 JSON 以外的文字、解说或代码围栏）：
 {
@@ -266,7 +346,7 @@ _SYSTEM_TEMPLATE = Template(
       "hypothesis": "一句话可检验的因子假设",
       "rationale": "为何可能有效（行为/结构/制度逻辑，≤120 字）",
       "categories": ["最相关的 L1 类别 id（取自给定清单，可为空数组，至多 3 个）"],
-      "evaluation_hint": "验证建议：评估指标 / 分组方式 / 换手预期（≤80 字）"
+      "evaluation_hint": "验证建议：评估指标 / 分组方式 / 换手预期（≤80 字）"$seed_field
     }
   ]
 }"""
@@ -284,6 +364,9 @@ $categories
 
 ## 因子池现状（本用户已挖出的因子摘要——新假设请避开重复构造）
 $pool
+
+## 种子因子（父本——围绕其做系统变异，产出须与父本显著不同）
+$seeds
 
 ## 任务
 把「挖掘方向」拆解成不超过 $max_cards 张正交、可检验的子假设卡片，按系统提示词给出的 JSON 结构输出。"""
@@ -304,11 +387,27 @@ def _build_messages(
     max_cards: int,
     categories: Mapping | None,
     pool_digest: str | None,
+    seed_digest: str | None = None,
+    seeds_requested: bool = False,
 ) -> list[dict[str, str]]:
-    """组装 system+user 消息（提示词单通道：上下文只从这里进）。"""
+    """组装 system+user 消息（提示词单通道：上下文只从这里进）。
+
+    ``seeds_requested`` 区分两种空种子：用户没选（渲染「未指定」）vs 选了但
+    一条都没解析出来（渲染「不在本池」）——占位不冒充，模板保持单份。
+    """
     cats_md, _ = render_categories(categories)
     digest = _clip((pool_digest or "").strip(), POOL_DIGEST_MAX_CHARS)
-    system = _SYSTEM_TEMPLATE.substitute(max_cards=max_cards)
+    seeds_md = _clip((seed_digest or "").strip(), SEED_DIGEST_MAX_CHARS)
+    has_seeds = bool(seeds_md)
+    if has_seeds:
+        seeds_block = seeds_md
+    else:
+        seeds_block = _SEEDS_UNAVAILABLE if seeds_requested else _NO_SEEDS
+    system = _SYSTEM_TEMPLATE.substitute(
+        max_cards=max_cards,
+        seed_rule=_SEED_RULE if has_seeds else "",
+        seed_field=_SEED_FIELD if has_seeds else "",
+    )
     # Template.substitute 只扫描模板本身，值里的 $ / {} 原样落地（方向可能含公式）
     user = _USER_TEMPLATE.substitute(
         direction=direction,
@@ -317,6 +416,7 @@ def _build_messages(
         max_cards=max_cards,
         categories=cats_md or _NO_CATEGORIES,
         pool=digest or _NO_POOL,
+        seeds=seeds_block,
     )
     return [
         {"role": "system", "content": system},
@@ -408,12 +508,16 @@ async def decompose_direction(
     max_cards: int | None = None,
     categories: Mapping | None = None,
     pool_digest: str | None = None,
+    seed_factor_ids: Iterable[str] | None = None,
+    seed_digest: str | None = None,
     chat_fn: ChatFn | None = None,
 ) -> dict[str, Any]:
     """粗方向 → 正交卡片。只拆解，不落任何任务行。
 
-    ``categories``/``pool_digest`` 为 None 时从真实源加载（失败自动降级为空
-    注入）；测试显式传入可完全离线。``chat_fn`` 为 None 时走默认 LLM 通道。
+    ``categories``/``pool_digest``/``seed_digest`` 为 None 时从真实源加载
+    （失败自动降级）；测试显式传入可完全离线。``seed_factor_ids`` 是本轮
+    父本种子（≤ ``DECOMPOSE_SEED_MAX``），超量在碰任何 IO 前拒绝。
+    ``chat_fn`` 为 None 时走默认 LLM 通道。
     """
     direction = (direction or "").strip()
     if not direction:
@@ -422,6 +526,13 @@ async def decompose_direction(
         raise DecomposeError(
             f"拆解方向过长（{len(direction)} 字，上限 {MAX_DECOMPOSE_DIRECTION_CHARS} 字），"
             "请精简后重试"
+        )
+    seeds_requested = _normalize_seed_ids(seed_factor_ids)
+    seed_max = resolve_seed_max()
+    if len(seeds_requested) > seed_max:
+        raise DecomposeError(
+            f"种子父本过多（{len(seeds_requested)} 个，上限 {seed_max} 个）："
+            "请精简后重试（上限可用 DECOMPOSE_SEED_MAX 调整）"
         )
     n_cards = resolve_max_cards(max_cards)
 
@@ -434,6 +545,21 @@ async def decompose_direction(
         digest, pool_ids = pool_digest, ()
     digest = (digest or "").strip()
 
+    if seed_digest is None:
+        if seeds_requested:
+            seeds_md, seeds_used, seeds_dropped = await _load_seed_digest(
+                seed_factor_ids=seeds_requested,
+                user_id=user_id,
+                market=market,
+                universe=universe,
+            )
+        else:
+            seeds_md, seeds_used, seeds_dropped = "", (), ()
+    else:
+        # 显式注入（测试/调用方已自行取好摘要）：视为请求的种子全部可用
+        seeds_md, seeds_used, seeds_dropped = seed_digest, tuple(seeds_requested), ()
+    seeds_md = (seeds_md or "").strip()
+
     _, cats_n = render_categories(ctx_categories)
     pool_chars = len(_clip(digest, POOL_DIGEST_MAX_CHARS))
 
@@ -444,6 +570,8 @@ async def decompose_direction(
         max_cards=n_cards,
         categories=ctx_categories,
         pool_digest=digest,
+        seed_digest=seeds_md,
+        seeds_requested=bool(seeds_requested),
     )
     chat_call = chat_fn or _default_chat_factory(llm_config)
     raw = await _chat_once(chat_call, messages)
@@ -452,15 +580,19 @@ async def decompose_direction(
         payload,
         max_cards=n_cards,
         allowed_categories=_allowed_category_ids(ctx_categories),
+        allowed_seeds=seeds_used,
     )
 
     logger.info(
-        "[decompose] direction=%d字 -> %d 卡片（超限丢弃 %d）categories=%d pool=%d字",
+        "[decompose] direction=%d字 -> %d 卡片（超限丢弃 %d）categories=%d "
+        "pool=%d字 seeds=%d/%d",
         len(direction),
         len(result["cards"]),
         result["dropped"],
         cats_n,
         pool_chars,
+        len(seeds_used),
+        len(seeds_requested),
     )
     return {
         "prompt_version": PROMPT_VERSION,
@@ -471,6 +603,11 @@ async def decompose_direction(
             "categories": cats_n,
             "pool_digest_chars": pool_chars,
             "pool_factors": len(pool_ids),
+            "seeds": {
+                "requested": len(seeds_requested),
+                "used": len(seeds_used),
+                "dropped": len(seeds_dropped),
+            },
             "model": getattr(llm_config, "model", None),
         },
     }

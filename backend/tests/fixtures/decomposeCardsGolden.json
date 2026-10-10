@@ -1,8 +1,9 @@
 {
-  "comment": "拆解卡片归一化金样：validate_cards 的唯一契约。任何过滤/去重/截断/省略口径的改动都必须同步本文件，否则测试红。",
-  "prompt_version": "decompose_v1",
+  "comment": "拆解卡片归一化金样：validate_cards 的唯一契约。任何过滤/去重/截断/省略口径的改动（含 seed_factor_id 白名单归一）都必须同步本文件，否则测试红。",
+  "prompt_version": "decompose_v2",
   "max_cards": 6,
   "allowed_categories": ["momentum", "volatility", "liquidity", "value", "quality"],
+  "allowed_seeds": ["seed-mom", "seed-abc"],
   "input": {
     "cards": [
       {
@@ -10,19 +11,22 @@
         "hypothesis": " 短期超跌个股存在均值回复 ",
         "rationale": " 行为偏差：短期过度反应与处置效应 ",
         "categories": ["  momentum  "],
-        "evaluation_hint": " 5 日收益 rank IC "
+        "evaluation_hint": " 5 日收益 rank IC ",
+        "seed_factor_id": "  seed-mom  "
       },
       {
         "title": "波动率压缩",
         "hypothesis": "低波动异象在 A 股长期存在",
         "categories": ["momentum", "momentum", "unknown_cat", "volatility", "liquidity", "quality"],
         "rationale": "",
-        "evaluation_hint": "   "
+        "evaluation_hint": "   ",
+        "seed_factor_id": "seed-unknown"
       },
       {
         "title": "量价背离",
         "hypothesis": "价升量缩预示短期反转",
-        "categories": "liquidity"
+        "categories": "liquidity",
+        "seed_factor_id": "seed-abc"
       },
       {
         "title": "换手冲击",
@@ -32,7 +36,8 @@
       {
         "title": "估值分位",
         "hypothesis": "低估分位组合长期跑赢高估分位",
-        "categories": ["value", "quality"]
+        "categories": ["value", "quality"],
+        "seed_factor_id": 123
       },
       {
         "title": "盈利质量",
@@ -64,7 +69,8 @@
         "hypothesis": "短期超跌个股存在均值回复",
         "rationale": "行为偏差：短期过度反应与处置效应",
         "categories": ["momentum"],
-        "evaluation_hint": "5 日收益 rank IC"
+        "evaluation_hint": "5 日收益 rank IC",
+        "seed_factor_id": "seed-mom"
       },
       {
         "title": "波动率压缩",
@@ -74,7 +80,8 @@
       {
         "title": "量价背离",
         "hypothesis": "价升量缩预示短期反转",
-        "categories": ["liquidity"]
+        "categories": ["liquidity"],
+        "seed_factor_id": "seed-abc"
       },
       {
         "title": "换手冲击",

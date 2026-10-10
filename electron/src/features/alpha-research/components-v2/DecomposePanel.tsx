@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  Dna,
   Layers,
   Loader2,
   RefreshCw,
@@ -17,6 +18,12 @@ import type { BatchDispatchResult, DecomposeCard } from '../services-v2/api';
 import { useTaskContext } from '../context-v2/TaskContext';
 import type { Task } from '../types-v2';
 
+/** 种子（父本）因子引用：id 用于下发，name 用于卡片徽章展示 */
+export interface SeedFactorRef {
+  id: string;
+  name: string;
+}
+
 /**
  * 拆解请求（HomePage 持状态；`key` 是代次——同方向连点两次「智能拆解」
  * 也要重开面板重新发起，而不是复用上一次的结果）。
@@ -26,6 +33,8 @@ export interface DecomposeRequest {
   direction: string;
   market: string;
   universe: string;
+  /** 父本种子（≤3）：拆解围绕其做受控变异（T-MV-01） */
+  seeds?: SeedFactorRef[];
 }
 
 /** ChatInput「智能拆解」按钮交给 HomePage 的载荷（key 由 HomePage 补） */
@@ -93,6 +102,8 @@ export const DecomposePanel: React.FC<DecomposePanelProps> = ({
   const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [cards, setCards] = useState<EditableCard[]>([]);
   const [dropped, setDropped] = useState(0);
+  /** 请求的父本中不在本池（已归档/跨池）的条数——如实提示，不静默 */
+  const [seedsDropped, setSeedsDropped] = useState(0);
   const [result, setResult] = useState<BatchDispatchResult | null>(null);
 
   // 拆解：挂载/重试时发起（组件由 HomePage 按 request.key 重挂，代次语义天然成立）
@@ -102,10 +113,12 @@ export const DecomposePanel: React.FC<DecomposePanelProps> = ({
     setLoadError(null);
     setDispatchError(null);
     setResult(null);
+    const seedIds = request.seeds?.map((s) => s.id) ?? [];
     decomposeDirection({
       direction: request.direction,
       market: request.market,
       universe: request.universe,
+      ...(seedIds.length ? { seedFactorIds: seedIds } : {}),
     })
       .then((res) => {
         if (cancelled) return;
@@ -114,6 +127,7 @@ export const DecomposePanel: React.FC<DecomposePanelProps> = ({
           res.data.cards.map((c, i) => ({ ...c, id: i, selected: true })),
         );
         setDropped(res.data.dropped);
+        setSeedsDropped(res.data.context.seeds?.dropped ?? 0);
         setPhase('preview');
       })
       .catch((err) => {
@@ -124,7 +138,7 @@ export const DecomposePanel: React.FC<DecomposePanelProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [request.direction, request.market, request.universe, attempt]);
+  }, [request, attempt]);
 
   const toggleCard = useCallback((id: number) => {
     setCards((prev) =>
@@ -138,6 +152,8 @@ export const DecomposePanel: React.FC<DecomposePanelProps> = ({
 
   const selected = cards.filter((c) => c.selected);
   const allSelected = cards.length > 0 && selected.length === cards.length;
+  /** 父本 id → 名称（卡片徽章展示用；查不到回 id 本身，不伪造名字） */
+  const seedNameById = new Map((request.seeds ?? []).map((s) => [s.id, s.name]));
   /** 勾选但内容被编辑空的卡片：派发前必须拦住（空方向后端整包 400） */
   const hasBlankSelected = selected.some((c) => !composeDirection(c).trim());
   const canDispatch =
@@ -257,6 +273,11 @@ export const DecomposePanel: React.FC<DecomposePanelProps> = ({
                 另有 {dropped} 张超卡片数上限未展示
               </span>
             )}
+            {seedsDropped > 0 && (
+              <span className="text-[11px] font-bold text-amber-600">
+                {seedsDropped} 个父本不在本池（可能已归档），已忽略
+              </span>
+            )}
           </div>
 
           <div className="flex flex-col gap-2 px-4 max-h-[420px] overflow-y-auto">
@@ -308,6 +329,17 @@ export const DecomposePanel: React.FC<DecomposePanelProps> = ({
                             {cid}
                           </span>
                         ))}
+                      </div>
+                    )}
+                    {card.seed_factor_id && (
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <Dna className="h-3 w-3 text-amber-500 shrink-0" />
+                        <span
+                          className="rounded-full bg-amber-50 border border-amber-200 px-2 py-[1px] text-[10px] font-bold text-amber-700"
+                          title={`父本因子 ID：${card.seed_factor_id}（该卡围绕其做受控变异）`}
+                        >
+                          父本：{seedNameById.get(card.seed_factor_id) || card.seed_factor_id}
+                        </span>
                       </div>
                     )}
                     {card.evaluation_hint && (

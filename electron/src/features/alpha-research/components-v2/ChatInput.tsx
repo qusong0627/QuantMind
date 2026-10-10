@@ -1,9 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Compass, Sparkles } from 'lucide-react';
+import { Send, Compass, Dna, Loader2, Sparkles } from 'lucide-react';
 import { TaskConfig, UniverseId, UniverseInfo } from '../types-v2';
 import { alphaAgentService, MarketInfo } from '../services/alphaAgentService';
-import { getUniverses } from '../services-v2/api';
-import type { DecomposeRequestPayload } from './DecomposePanel';
+import { getPoolFactors, getUniverses } from '../services-v2/api';
+import type { PoolFactorRow } from '../services-v2/api';
+import type { DecomposeRequestPayload, SeedFactorRef } from './DecomposePanel';
+
+/** 父本选择上限（服务端 DECOMPOSE_SEED_MAX 是硬闸：更严时以它的 400 文案为准） */
+const SEED_MAX = 3;
 
 const MARKET_LABELS: Record<string, string> = {
   a_share: 'A股',
@@ -55,6 +59,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [markets, setMarkets] = useState<MarketInfo[]>([]);
   const [config] = useState<Partial<TaskConfig>>({ librarySuffix: '' });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 父本（种子）选择器：展开时拉本市场本池 pool_score 前 50；选择数 ≤3
+  const [seedPanelOpen, setSeedPanelOpen] = useState(false);
+  const [seedOptions, setSeedOptions] = useState<PoolFactorRow[]>([]);
+  const [seedsLoading, setSeedsLoading] = useState(false);
+  const [seedsError, setSeedsError] = useState<string | null>(null);
+  const [seeds, setSeeds] = useState<SeedFactorRef[]>([]);
 
   useEffect(() => {
     // 空串不清空：legacy 历史行方向为空是常态，不能把用户打了一半的字擦掉；
@@ -80,6 +90,50 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       .then((res) => setUniverses(res.data?.universes ?? []))
       .catch(() => {});
   }, []);
+
+  // 种子按「本市场 × 本池」隔离：切市场/池即清空（旧池的父本对新池无意义）
+  useEffect(() => {
+    setSeeds([]);
+  }, [miningMarket, universe]);
+
+  // 展开时拉池内因子（pool_score 降序 = 池内最强优先）；开着时切市场/池自动重拉
+  useEffect(() => {
+    if (!seedPanelOpen || !onDecomposeRequest) return;
+    let cancelled = false;
+    setSeedsLoading(true);
+    setSeedsError(null);
+    getPoolFactors({
+      market: miningMarket,
+      universe: String(universe),
+      limit: 50,
+      sort: 'pool_score',
+    })
+      .then((res) => {
+        if (cancelled) return;
+        if (!res.success) throw new Error(res.error || '因子池列表获取失败');
+        setSeedOptions(res.data?.items ?? []);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setSeedsError(err instanceof Error ? err.message : '因子池列表获取失败');
+      })
+      .finally(() => {
+        if (!cancelled) setSeedsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [seedPanelOpen, miningMarket, universe, onDecomposeRequest]);
+
+  const toggleSeed = (row: PoolFactorRow) => {
+    setSeeds((prev) => {
+      if (prev.some((s) => s.id === row.factorId)) {
+        return prev.filter((s) => s.id !== row.factorId);
+      }
+      if (prev.length >= SEED_MAX) return prev;
+      return [...prev, { id: row.factorId, name: row.factorName }];
+    });
+  };
 
   const handleSubmit = () => {
     if (isSubmitting) return;
@@ -136,6 +190,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       direction: input.trim(),
       market: miningMarket,
       universe: String(universe),
+      ...(seeds.length ? { seeds } : {}),
     });
   };
 
@@ -226,7 +281,117 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               <Compass className="h-3 w-3" />
               <span>方向</span>
             </button>
+
+            {/* 父本定向演化：拆解围绕选中的池内因子做受控变异 */}
+            {onDecomposeRequest && (
+              <button
+                type="button"
+                onClick={() => setSeedPanelOpen((v) => !v)}
+                disabled={isSubmitting}
+                title={
+                  seeds.length > 0
+                    ? `已选 ${seeds.length} 个父本：拆解围绕其做受控变异（点开调整）`
+                    : '父本定向演化：选 1–3 个池内因子，拆解围绕其做受控变异（滞后/窗长/标准化/差分…）'
+                }
+                className={`ml-1 pl-1 border-l border-slate-200 flex items-center gap-1 rounded-full px-2.5 py-[3px] text-[11px] font-semibold transition-all duration-200 disabled:opacity-40 ${
+                  seedPanelOpen || seeds.length > 0
+                    ? 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-200 shadow-xs'
+                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <Dna className="h-3 w-3" />
+                <span>父本</span>
+                {seeds.length > 0 && (
+                  <span className="rounded-full bg-indigo-600 text-white px-1.5 text-[10px] font-bold leading-4">
+                    {seeds.length}/{SEED_MAX}
+                  </span>
+                )}
+              </button>
+            )}
           </div>
+
+          {/* 父本选择面板（在流内展开：卡片 overflow-hidden 裁掉绝对定位下拉） */}
+          {onDecomposeRequest && seedPanelOpen && (
+            <div className="px-4 pb-2.5">
+              <div className="rounded-xl border border-indigo-100 bg-indigo-50/40 px-3 py-2.5">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="flex-1 min-w-0 text-[11px] font-bold text-slate-600">
+                    父本因子（可选，最多 {SEED_MAX} 个）：拆解将围绕父本做受控变异（滞后 / 窗长 / 标准化 / 差分 / 比值 / 非线性）
+                  </span>
+                  {seeds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSeeds([])}
+                      className="shrink-0 text-[10px] font-bold text-slate-400 hover:text-rose-500 transition-colors cursor-pointer"
+                    >
+                      清空
+                    </button>
+                  )}
+                </div>
+                {seedsLoading ? (
+                  <div className="flex items-center gap-2 py-1.5 text-[11px] font-bold text-slate-400">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    正在读取本池因子…
+                  </div>
+                ) : seedsError ? (
+                  <div className="py-1.5 text-[11px] font-bold text-rose-500 break-all">
+                    {seedsError}
+                  </div>
+                ) : seedOptions.length === 0 ? (
+                  <div className="py-1.5 text-[11px] text-slate-400">
+                    本池暂无已完成回测的因子——先挖出因子、回测入池后即可选作父本
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1 max-h-44 overflow-y-auto pr-0.5">
+                    {seedOptions.map((row) => {
+                      const selectedIdx = seeds.findIndex((s) => s.id === row.factorId);
+                      const isSelected = selectedIdx >= 0;
+                      const atLimit = !isSelected && seeds.length >= SEED_MAX;
+                      return (
+                        <button
+                          key={row.factorId}
+                          type="button"
+                          onClick={() => toggleSeed(row)}
+                          disabled={atLimit}
+                          title={atLimit ? `最多选 ${SEED_MAX} 个父本` : row.factorFormulation || row.factorId}
+                          className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+                            isSelected
+                              ? 'bg-white ring-1 ring-indigo-300 shadow-xs cursor-pointer'
+                              : atLimit
+                                ? 'opacity-40 cursor-not-allowed'
+                                : 'hover:bg-white/70 cursor-pointer'
+                          }`}
+                        >
+                          <span
+                            className={`shrink-0 inline-flex items-center justify-center h-4 w-4 rounded-full text-[9px] font-black ${
+                              isSelected ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-500'
+                            }`}
+                          >
+                            {isSelected ? selectedIdx + 1 : ''}
+                          </span>
+                          <span className="flex-1 min-w-0 flex flex-col">
+                            <span className="text-[11px] font-bold text-slate-700 truncate">
+                              {row.factorName}
+                            </span>
+                            <span className="text-[10px] font-mono text-slate-400 truncate">
+                              {row.factorFormulation || row.factorId}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-[10px] font-mono text-slate-400">
+                            {row.icir != null
+                              ? `ICIR ${row.icir.toFixed(2)}`
+                              : row.ic != null
+                                ? `IC ${row.ic.toFixed(3)}`
+                                : '—'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Divider */}
           <div className="mx-4 border-t border-slate-100" />

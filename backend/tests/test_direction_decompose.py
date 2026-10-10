@@ -10,17 +10,23 @@
 
 1. **卡片归一金样**（decomposeCardsGolden.json，PROMPT_VERSION 与金样同步）：
    title/hypothesis 必填、空白清理、categories 收敛（单值容忍/去重/剔未知 id/
-   每卡至多 3 个）、可选字段空则省略、超量按上限截断并把 dropped 如实上报
-   （不静默丢）。
+   每卡至多 3 个）、`seed_factor_id` 白名单归一（不在请求种子集内/非字符串 →
+   省略字段，不静默改写成别的 id）、可选字段空则省略、超量按上限截断并把
+   dropped 如实上报（不静默丢）。
 2. **坏输出显式失败**：非对象 / cards 非数组 / 空数组 / 卡片缺必填 → SchemaError
    （SchemaError ⊂ DecomposeError，路由一条 400 映射）。
 3. **截断可操作**：finish_reason=length 或「只有推理、可见输出为空」升级为指路
    DECOMPOSE_MAX_TOKENS 的报错；半截 JSON 绝不静默变成「没有卡片」。
 4. **上下文注入单通道 + 容错**：L1 类别清单 + 因子池摘要（避开已挖因子）进
    user 消息；池摘要超长截断并标记；两个上下文源任一失败只告警不拦拆解。
-5. **输入先拒**：方向为空 / 超长（与 task_store 存储闸同一上限）在碰任何 IO 前拒绝。
-6. **端点**：无 LLM 配置 412（与 evolve 同文案）；未知市场 400；DecomposeError
-   → 400；成功 {code:200, data:{prompt_version, cards, dropped, max_cards, context}}。
+5. **输入先拒**：方向为空 / 超长（与 task_store 存储闸同一上限）在碰任何 IO 前拒绝；
+   种子父本超上限（DECOMPOSE_SEED_MAX，默认 3）同样在碰 IO 前 400。
+6. **种子父本（T-MV-01）**：种子块进 user 消息（无种子/取不到分别占位，如实在
+   context.seeds{requested,used,dropped} 上报）；seed 加载失败按增益层纪律降级；
+   卡片 seed_factor_id 只在 used 白名单内保留。
+7. **端点**：无 LLM 配置 412（与 evolve 同文案）；未知市场 400；DecomposeError
+   → 400；成功 {code:200, data:{prompt_version, cards, dropped, max_cards, context}}；
+   seed_factor_ids 原样透传进拆解链。
 """
 
 from __future__ import annotations
@@ -95,6 +101,7 @@ def test_validate_cards_golden() -> None:
         GOLDEN["input"],
         max_cards=GOLDEN["max_cards"],
         allowed_categories=GOLDEN["allowed_categories"],
+        allowed_seeds=GOLDEN["allowed_seeds"],
     )
     assert out["cards"] == GOLDEN["expected"]["cards"]
     assert out["dropped"] == GOLDEN["expected"]["dropped"]
@@ -149,6 +156,38 @@ def test_validate_cards_unknown_whitelist_still_filters() -> None:
         allowed_categories=["momentum"],
     )
     assert out["cards"][0]["categories"] == ["momentum"]
+
+
+def test_validate_cards_normalizes_seed_against_whitelist() -> None:
+    """seed_factor_id：白名单内（strip 后）保留；白名单外/非字符串 → 省略字段。"""
+    out = dd.validate_cards(
+        {
+            "cards": [
+                {"title": "t1", "hypothesis": "h", "seed_factor_id": " seed-a "},
+                {"title": "t2", "hypothesis": "h", "seed_factor_id": "not-in-list"},
+                {"title": "t3", "hypothesis": "h", "seed_factor_id": 7},
+                {"title": "t4", "hypothesis": "h"},
+            ]
+        },
+        max_cards=6,
+        allowed_categories=(),
+        allowed_seeds=["seed-a"],
+    )
+    cards = out["cards"]
+    assert cards[0]["seed_factor_id"] == "seed-a"
+    assert "seed_factor_id" not in cards[1]
+    assert "seed_factor_id" not in cards[2]
+    assert "seed_factor_id" not in cards[3]
+
+
+def test_validate_cards_without_seed_whitelist_drops_seed() -> None:
+    """没请求种子（白名单为空）→ LLM 自说自话的 seed_factor_id 一律省略。"""
+    out = dd.validate_cards(
+        {"cards": [{"title": "t", "hypothesis": "h", "seed_factor_id": "seed-a"}]},
+        max_cards=6,
+        allowed_categories=(),
+    )
+    assert "seed_factor_id" not in out["cards"][0]
 
 
 # ── 提示词组装 ──────────────────────────────────────────────────────
@@ -239,6 +278,73 @@ def test_build_messages_tolerates_template_like_direction() -> None:
         pool_digest="",
     )
     assert weird in messages[1]["content"]
+
+
+def test_build_messages_injects_seed_block() -> None:
+    messages = dd._build_messages(
+        direction="方向",
+        market="a_share",
+        universe="csi300",
+        max_cards=6,
+        categories=CATEGORIES,
+        pool_digest="",
+        seed_digest="1. `mom_20d`（因子 ID：f-1） | IC=0.0300",
+        seeds_requested=True,
+    )
+    system, user = messages[0]["content"], messages[1]["content"]
+    assert "围绕父本变异" in system  # 种子纪律进系统提示词
+    assert "seed_factor_id" in system  # JSON 结构里给出该字段
+    assert "种子因子（父本" in user and "mom_20d" in user
+
+
+def test_build_messages_without_seeds_stays_v1_shape() -> None:
+    """无种子：纪律不加、JSON 结构不出现 seed_factor_id、user 用「未指定」占位。"""
+    messages = dd._build_messages(
+        direction="方向",
+        market="a_share",
+        universe="csi300",
+        max_cards=6,
+        categories=CATEGORIES,
+        pool_digest="",
+    )
+    system, user = messages[0]["content"], messages[1]["content"]
+    assert "围绕父本变异" not in system
+    assert "seed_factor_id" not in system
+    assert "未指定父本" in user
+
+
+def test_build_messages_marks_unavailable_seeds_honestly() -> None:
+    """请求了种子但一条都没解析出来 → 占位如实说「不在池中」，不冒充未指定。"""
+    messages = dd._build_messages(
+        direction="方向",
+        market="a_share",
+        universe="csi300",
+        max_cards=6,
+        categories=CATEGORIES,
+        pool_digest="",
+        seed_digest="",
+        seeds_requested=True,
+    )
+    user = messages[1]["content"]
+    assert "不在本池" in user
+    assert "未指定父本" not in user
+
+
+def test_build_messages_clips_seed_digest_with_marker() -> None:
+    digest = "B" * (dd.SEED_DIGEST_MAX_CHARS + 300) + "TAIL-SEED"
+    messages = dd._build_messages(
+        direction="方向",
+        market="a_share",
+        universe="csi300",
+        max_cards=6,
+        categories=CATEGORIES,
+        pool_digest="",
+        seed_digest=digest,
+        seeds_requested=True,
+    )
+    user = messages[1]["content"]
+    assert "TAIL-SEED" not in user
+    assert "截断" in user
 
 
 # ── decompose_direction 主链 ────────────────────────────────────────
@@ -467,6 +573,98 @@ async def test_decompose_survives_context_source_failures(monkeypatch) -> None:
     assert "类别清单不可用" in user and "因子池为空" in user
 
 
+# ── 种子父本（T-MV-01）──────────────────────────────────────────────
+
+
+def test_normalize_seed_ids_dedupes_and_strips() -> None:
+    assert dd._normalize_seed_ids([" a ", "a", "", None, "b"]) == ["a", "b"]
+    assert dd._normalize_seed_ids(None) == []
+
+
+def test_resolve_seed_max_env(monkeypatch) -> None:
+    monkeypatch.delenv("DECOMPOSE_SEED_MAX", raising=False)
+    assert dd.SEED_MAX_DEFAULT == 3
+    assert dd.resolve_seed_max() == 3
+    monkeypatch.setenv("DECOMPOSE_SEED_MAX", "5")
+    assert dd.resolve_seed_max() == 5
+    monkeypatch.setenv("DECOMPOSE_SEED_MAX", "坏值")  # 坏 env 回默认，不炸导入
+    assert dd.resolve_seed_max() == dd.SEED_MAX_DEFAULT
+
+
+@pytest.mark.asyncio
+async def test_decompose_with_seeds_injects_and_normalizes_lineage() -> None:
+    """显式注入 seed_digest：种子块进 user 消息；卡片血统只在 used 白名单内保留。"""
+    record: list = []
+    chat = _chat_returning(
+        [
+            {"title": "变异一", "hypothesis": "h1", "seed_factor_id": "s-1"},
+            {"title": "变异二", "hypothesis": "h2", "seed_factor_id": "s-ghost"},
+        ],
+        record=record,
+    )
+    out = await dd.decompose_direction(
+        direction="围绕动量做受控变异",
+        user_id="u-1",
+        llm_config=CFG,
+        chat_fn=chat,
+        categories=CATEGORIES,
+        pool_digest="",
+        seed_factor_ids=["s-1", "s-2"],
+        seed_digest="1. `mom_20d`（因子 ID：s-1） | IC=0.0300",
+    )
+
+    assert out["context"]["seeds"] == {"requested": 2, "used": 2, "dropped": 0}
+    user = record[0]["messages"][1]["content"]
+    assert "mom_20d" in user and "种子因子（父本" in user
+    assert out["cards"][0]["seed_factor_id"] == "s-1"
+    assert "seed_factor_id" not in out["cards"][1]
+
+
+@pytest.mark.asyncio
+async def test_decompose_seed_over_limit_rejected_before_io(monkeypatch) -> None:
+    monkeypatch.setenv("DECOMPOSE_SEED_MAX", "2")
+
+    async def _must_not_call(messages, **kwargs):
+        raise AssertionError("种子超限时不该碰 LLM")
+
+    with pytest.raises(dd.DecomposeError) as ei:
+        await dd.decompose_direction(
+            direction="方向",
+            user_id="u-1",
+            llm_config=CFG,
+            chat_fn=_must_not_call,
+            seed_factor_ids=["a", "b", "c"],
+        )
+    assert "上限" in str(ei.value) and "2" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_decompose_seed_source_failure_degrades_with_report(monkeypatch) -> None:
+    """种子源挂 → 拆解照跑；requested/used/dropped 如实上报，占位不冒充。"""
+    from backend.services.engine.mining_plugins import pool_service
+
+    async def _seed_down(*args, **kwargs):
+        raise RuntimeError("seed db down")
+
+    monkeypatch.setattr(pool_service, "build_seed_digest", _seed_down)
+
+    record: list = []
+    chat = _chat_returning([{"title": "t", "hypothesis": "h"}], record=record)
+    out = await dd.decompose_direction(
+        direction="方向",
+        user_id="u-1",
+        llm_config=CFG,
+        chat_fn=chat,
+        categories=CATEGORIES,
+        pool_digest="",
+        seed_factor_ids=["s-1"],
+    )
+
+    assert out["context"]["seeds"] == {"requested": 1, "used": 0, "dropped": 1}
+    user = record[0]["messages"][1]["content"]
+    assert "不在本池" in user
+
+
 # ── 路由端点 ────────────────────────────────────────────────────────
 
 
@@ -510,7 +708,7 @@ async def test_decompose_endpoint_happy(monkeypatch) -> None:
     async def fake_decompose(**kwargs):
         seen.update(kwargs)
         return {
-            "prompt_version": "decompose_v1",
+            "prompt_version": "decompose_v2",
             "cards": [{"title": "t", "hypothesis": "h", "categories": []}],
             "dropped": 0,
             "max_cards": 6,
@@ -518,13 +716,16 @@ async def test_decompose_endpoint_happy(monkeypatch) -> None:
                 "categories": 0,
                 "pool_digest_chars": 0,
                 "pool_factors": 0,
+                "seeds": {"requested": 1, "used": 1, "dropped": 0},
                 "model": "m1",
             },
         }
 
     monkeypatch.setattr(dd, "decompose_direction", fake_decompose)
     out = await _call_decompose(
-        router_mod.DecomposeRequest(direction="  粗方向  ", max_cards=3)
+        router_mod.DecomposeRequest(
+            direction="  粗方向  ", max_cards=3, seed_factor_ids=["s-1"]
+        )
     )
 
     assert out["code"] == 200
@@ -533,6 +734,7 @@ async def test_decompose_endpoint_happy(monkeypatch) -> None:
     assert seen["user_id"] == "u-1"
     assert seen["market"] == "a_share" and seen["universe"] == "csi300"
     assert seen["max_cards"] == 3
+    assert seen["seed_factor_ids"] == ["s-1"]  # 种子原样透传
     assert seen["llm_config"] is CFG
 
 

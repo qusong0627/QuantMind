@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { DecomposePanel, composeDirection } from '../DecomposePanel';
+import type { DecomposeRequest } from '../DecomposePanel';
 import { normalizeAgentTask } from '../../services-v2/api';
 import type { DecomposeCard } from '../../services-v2/api';
 
@@ -43,14 +44,28 @@ const CARD_B: DecomposeCard = {
   categories: ['liquidity'],
 };
 
-const okDecompose = (cards: DecomposeCard[], dropped = 0) => ({
+const okDecompose = (
+  cards: DecomposeCard[],
+  dropped = 0,
+  seeds: { requested: number; used: number; dropped: number } = {
+    requested: 0,
+    used: 0,
+    dropped: 0,
+  },
+) => ({
   success: true,
   data: {
-    promptVersion: 'decompose_v1',
+    promptVersion: 'decompose_v2',
     cards,
     dropped,
     maxCards: 6,
-    context: { categories: 5, poolDigestChars: 120, poolFactors: 3, model: 'm1' },
+    context: {
+      categories: 5,
+      poolDigestChars: 120,
+      poolFactors: 3,
+      model: 'm1',
+      seeds,
+    },
   },
 });
 
@@ -64,10 +79,16 @@ const receipt = (over: Record<string, unknown>) => ({
   ...over,
 });
 
-const renderPanel = () =>
+const renderPanel = (over: Partial<DecomposeRequest> = {}) =>
   render(
     <DecomposePanel
-      request={{ key: 1, direction: '动量与波动率方向', market: 'a_share', universe: 'csi300' }}
+      request={{
+        key: 1,
+        direction: '动量与波动率方向',
+        market: 'a_share',
+        universe: 'csi300',
+        ...over,
+      }}
       onClose={vi.fn()}
       onOpenDashboard={vi.fn()}
     />,
@@ -190,6 +211,76 @@ describe('DecomposePanel', () => {
 
     expect(await screen.findByDisplayValue('短期反转')).toBeTruthy();
     expect(apiMocks.decomposeDirection).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('父本种子（T-MV-01）', () => {
+  it('带父本拆解：seedFactorIds 随请求下发，卡片血统徽章显示父本名', async () => {
+    apiMocks.decomposeDirection.mockResolvedValue(
+      okDecompose([{ ...CARD_A, seed_factor_id: 's-1' }], 0, {
+        requested: 2,
+        used: 2,
+        dropped: 0,
+      }),
+    );
+    renderPanel({
+      seeds: [
+        { id: 's-1', name: 'mom_20d 动量' },
+        { id: 's-2', name: 'vol_ratio_10' },
+      ],
+    });
+
+    await screen.findByDisplayValue('短期反转');
+    expect(apiMocks.decomposeDirection).toHaveBeenCalledWith({
+      direction: '动量与波动率方向',
+      market: 'a_share',
+      universe: 'csi300',
+      seedFactorIds: ['s-1', 's-2'],
+    });
+    const badge = screen.getByText('父本：mom_20d 动量');
+    expect(badge.getAttribute('title')).toContain('s-1');
+  });
+
+  it('未选父本：请求不携带 seedFactorIds 键（条件展开，非 undefined 占位）', async () => {
+    apiMocks.decomposeDirection.mockResolvedValue(okDecompose([CARD_A]));
+    renderPanel();
+
+    await screen.findByDisplayValue('短期反转');
+    const [payload] = apiMocks.decomposeDirection.mock.calls[0];
+    expect('seedFactorIds' in payload).toBe(false);
+  });
+
+  it('徽章查不到父本名时回退显示因子 ID（不伪造名字）', async () => {
+    apiMocks.decomposeDirection.mockResolvedValue(
+      okDecompose([{ ...CARD_A, seed_factor_id: 's-9' }]),
+    );
+    renderPanel({ seeds: [{ id: 's-1', name: 'mom_20d 动量' }] });
+
+    await screen.findByDisplayValue('短期反转');
+    expect(screen.getByText('父本：s-9')).toBeTruthy();
+  });
+
+  it('池外父本如实提示：context.seeds.dropped>0 时提示已忽略条数', async () => {
+    apiMocks.decomposeDirection.mockResolvedValue(
+      okDecompose([CARD_A], 0, { requested: 2, used: 1, dropped: 1 }),
+    );
+    renderPanel({
+      seeds: [
+        { id: 's-1', name: 'mom_20d 动量' },
+        { id: 'ghost', name: '幽灵因子' },
+      ],
+    });
+
+    await screen.findByDisplayValue('短期反转');
+    expect(screen.getByText('1 个父本不在本池（可能已归档），已忽略')).toBeTruthy();
+  });
+
+  it('dropped=0 不出现忽略提示', async () => {
+    apiMocks.decomposeDirection.mockResolvedValue(okDecompose([CARD_A]));
+    renderPanel({ seeds: [{ id: 's-1', name: 'mom_20d 动量' }] });
+
+    await screen.findByDisplayValue('短期反转');
+    expect(screen.queryByText(/个父本不在本池/)).toBeNull();
   });
 });
 
