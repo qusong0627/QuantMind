@@ -30,12 +30,19 @@ logger = logging.getLogger(__name__)
 
 
 async def _extract_ws_auth_metadata(websocket: WebSocket) -> dict[str, Any]:
-    """解析并校验 WS 鉴权信息，返回连接元数据。"""
+    """解析并校验 WS 鉴权信息，返回连接元数据。
+
+    身份事实源只有一枚：**校验通过的 JWT 声明**。请求头/查询参数里的
+    ``x-tenant-id``/``x-user-id``/``tenant_id``/``user_id`` 一律是客户端自称值，
+    未登录时仅作展示兜底（tenant 默认 default、user=anonymous），**绝不参与鉴权**。
+    2026-10-10 审计 H16：旧实现自称头优先于 JWT 声明，且
+    ``authenticated = bool(user_id and token)`` 对任意非空（含伪造）token 恒真——
+    客户端凭 ``x-tenant-id`` + 假 token 即可越权订阅他人 intel/notification 主题。
+    """
     headers = websocket.headers
     params = websocket.query_params
 
-    tenant_id = str(headers.get("x-tenant-id") or params.get("tenant_id") or "").strip()
-    user_id = str(headers.get("x-user-id") or params.get("user_id") or "").strip()
+    claimed_tenant = str(headers.get("x-tenant-id") or params.get("tenant_id") or "").strip()
 
     auth_header = str(headers.get("authorization") or "").strip()
     token = str(params.get("token") or "").strip()
@@ -45,21 +52,29 @@ async def _extract_ws_auth_metadata(websocket: WebSocket) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if token:
         try:
-            payload = auth_manager.verify_token(token)
+            payload = auth_manager.verify_token(token) or {}
         except Exception:
-            payload = decode_jwt_token(token)
-        tenant_id = tenant_id or str(payload.get("tenant_id") or "").strip()
-        user_id = user_id or str(payload.get("sub") or payload.get("user_id") or "").strip()
+            try:
+                payload = decode_jwt_token(token) or {}
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
 
-    if not tenant_id:
-        tenant_id = "default"
+    jwt_tenant = str(payload.get("tenant_id") or "").strip()
+    jwt_user = str(payload.get("sub") or payload.get("user_id") or "").strip()
+    authenticated = bool(jwt_user and jwt_tenant)
 
-    authenticated = bool(user_id and token)
+    if authenticated:
+        tenant_id, user_id = jwt_tenant, jwt_user
+    else:
+        tenant_id, user_id = claimed_tenant or "default", "anonymous"
+
     return {
         "tenant_id": tenant_id,
-        "user_id": user_id or "anonymous",
+        "user_id": user_id,
         "authenticated": authenticated,
-        "auth_source": "jwt" if token else "anonymous",
+        "auth_source": "jwt" if authenticated else "anonymous",
         "connected_at": time.time(),
     }
 
@@ -110,6 +125,27 @@ async def handle_message(connection_id: str, message: dict):
                                 "type": "error",
                                 "error_code": "SUBSCRIPTION_FORBIDDEN",
                                 "error_message": "Forbidden notification subscription",
+                            },
+                            use_queue=False,
+                        )
+                        return
+                elif topic.startswith("trade.updates.") or topic.startswith("strategy."):
+                    # 私有域 topic（成交回报/策略运行）仅限本人——旧实现无门，
+                    # 任意连接可订阅他人推送（2026-10-10 审计 H16 同族；前端恒订阅本人 ID）。
+                    expected_topic = (
+                        f"{topic[: topic.rindex('.') + 1]}{metadata.get('user_id')}"
+                    )
+                    if not metadata.get("authenticated") or topic != expected_topic:
+                        logger.warning(
+                            "私有域订阅被拒: conn=%s topic=%s user=%s",
+                            connection_id, topic, metadata.get("user_id"),
+                        )
+                        await manager.send_message(
+                            connection_id,
+                            {
+                                "type": "error",
+                                "error_code": "SUBSCRIPTION_FORBIDDEN",
+                                "error_message": "Forbidden private subscription",
                             },
                             use_queue=False,
                         )
