@@ -1162,6 +1162,7 @@ export const NewsPanel: React.FC = () => {
                     <div style={{ marginBottom: 8 }}>
                       <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>情感:</Text>
                       <Tag color={articleDetail.enrichment.sentiment_label === 'bullish' ? 'red' : articleDetail.enrichment.sentiment_label === 'bearish' ? 'green' : 'default'}
+                        title="情绪分（-1~1）= 金融词典/FinBERT 融合加权分，非校准概率（小数位 ≠ 事件概率）"
                         style={{ margin: 0, fontWeight: Math.abs(articleDetail.enrichment.sentiment_score ?? 0) >= 0.5 ? 700 : 500 }}>
                         {articleDetail.enrichment.sentiment_label === 'bullish' && <><RiseOutlined /> 利好</>}
                         {articleDetail.enrichment.sentiment_label === 'bearish' && <><ArrowDownOutlined /> 利空</>}

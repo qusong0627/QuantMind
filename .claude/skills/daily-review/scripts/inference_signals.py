@@ -75,7 +75,7 @@ def resolve_latest_model_id(conn=None) -> str:
     """最近一次 celery 自动推理成功用的每日推理用户模型 id（复盘/补跑跟随）。
 
     数据源用 qm_model_inference_dispatch_logs（celery 链路不写 qm_model_inference_runs，
-    且补跑会污染 run 表最新记录）；sys-/model_qlib 为系统模型（读 model_features
+    且补跑会污染 run 表最新记录）；sys- 前缀系统模型（读 model_features
     派生层，非每日推理链路）不在此列。无记录时回退 DEFAULT_MODEL_ID。
     """
     need_close = conn is None

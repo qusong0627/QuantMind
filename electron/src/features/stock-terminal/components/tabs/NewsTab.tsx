@@ -104,14 +104,20 @@ export function NewsTab({ symbol }: { symbol: string }) {
             <Rss className="w-3 h-3 text-orange-400 mt-0.5 shrink-0" />
             <span className="flex-1 min-w-0">
               <span className="flex flex-wrap items-center gap-1.5 min-w-0">
-                {/* 情绪标签（红=利好 绿=利空） */}
+                {/* 情绪标签（红=利好 绿=利空）；分数=非校准加权分，两小数≠概率（T6-5 审计 M17） */}
                 {it.sentiment_label === 'bullish' && (
-                  <span className={`shrink-0 inline-flex items-center gap-0.5 text-[9px] font-bold rounded border px-1 py-0.5 ${SENT_TONE.bullish}`}>
+                  <span
+                    className={`shrink-0 inline-flex items-center gap-0.5 text-[9px] font-bold rounded border px-1 py-0.5 ${SENT_TONE.bullish}`}
+                    title="情绪分（-1~1）= 金融词典/FinBERT 融合加权分，非校准概率（两位小数 ≠ 事件概率）"
+                  >
                     <TrendingUp className="w-2.5 h-2.5" /> 利好{it.sentiment_score != null && Math.abs(it.sentiment_score) >= 0.5 ? ` ${it.sentiment_score.toFixed(2)}` : ''}
                   </span>
                 )}
                 {it.sentiment_label === 'bearish' && (
-                  <span className={`shrink-0 inline-flex items-center gap-0.5 text-[9px] font-bold rounded border px-1 py-0.5 ${SENT_TONE.bearish}`}>
+                  <span
+                    className={`shrink-0 inline-flex items-center gap-0.5 text-[9px] font-bold rounded border px-1 py-0.5 ${SENT_TONE.bearish}`}
+                    title="情绪分（-1~1）= 金融词典/FinBERT 融合加权分，非校准概率（两位小数 ≠ 事件概率）"
+                  >
                     <TrendingDown className="w-2.5 h-2.5" /> 利空{it.sentiment_score != null && Math.abs(it.sentiment_score) >= 0.5 ? ` ${it.sentiment_score.toFixed(2)}` : ''}
                   </span>
                 )}

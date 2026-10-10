@@ -34,7 +34,7 @@ def main() -> int:
         # 与每日推理链路一致：取 celery 自动推理最近成功记录的
         # (tenant, user, model) —— 用户每日推理模型（直读 QuantDB，训练推理特征同源）。
         # 注意不能从 qm_model_inference_runs 取（celery 链路不写该表，且补跑会污染
-        # 最新记录）；sys-/model_qlib 是系统模型（读 model_features 派生层），排除。
+        # 最新记录）；sys- 前缀为系统模型（读 model_features 派生层），排除。
         try:
             import asyncpg
             import os

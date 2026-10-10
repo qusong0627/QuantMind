@@ -4,7 +4,7 @@
     docker exec quantmind python3 /app/skills/daily-review/scripts/news_review.py --date 20260819
 
 产出 <repo>/data/reports/daily_review/{date}_news.json（daily_review.py 读它渲染「六、新闻情绪」章节，
-并让方向引擎的「新闻情绪」维度生效、置信度提到 ★★★★★）。宿主机与容器 /app 挂载同一份 repo，
+并让方向引擎的「新闻情绪」维度生效、数据完整度提到 ★★★★★）。宿主机与容器 /app 挂载同一份 repo，
 写完即可被宿主机侧的 daily_review.py 读到。
 """
 from __future__ import annotations

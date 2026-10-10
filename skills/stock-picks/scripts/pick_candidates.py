@@ -410,7 +410,7 @@ def load_news(data_date: date | None, buy_date: date) -> dict[str, dict]:
 
 
 def load_market_direction(data_date: date | None, buy_date: date) -> dict | None:
-    """复盘六维方向：{direction, total_score, confidence}；无复盘返回 None。
+    """复盘六维方向：{direction, total_score, data_completeness}；无复盘返回 None。
 
     当日无复盘时回退到 ≤ 该日的最近复盘（往前最多找 7 天），保证看空门不因
     复盘缺跑而漏掉暴跌日。
@@ -429,7 +429,8 @@ def load_market_direction(data_date: date | None, buy_date: date) -> dict | None
                         return {
                             "direction": dr["direction"],
                             "total_score": dr.get("total_score"),
-                            "confidence": dr.get("confidence"),
+                            # 旧键 `confidence` 仅作存量 stats JSON 的过渡回退（T6-4 改名 数据完整度）
+                            "data_completeness": dr.get("data_completeness", dr.get("confidence")),
                             "review_date": fmt,
                         }
                 except Exception:
@@ -861,7 +862,7 @@ def main():
     gate_note = None
     if market_dir and market_dir.get("direction") in ("看空", "强烈看空"):
         cands = []
-        gate_note = f"复盘判{market_dir['direction']}（{market_dir.get('total_score')}/11，置信{'★' * (market_dir.get('confidence') or 0)}）→ 清空选股，不推荐"
+        gate_note = f"复盘判{market_dir['direction']}（{market_dir.get('total_score')}/11，数据完整度{'★' * (market_dir.get('data_completeness') or 0)}）→ 清空选股，不推荐"
         print(f"[info] ⚠️ {gate_note}")
     elif market_dir:
         gate_note = f"复盘判{market_dir['direction']}（{market_dir.get('total_score')}/11）"

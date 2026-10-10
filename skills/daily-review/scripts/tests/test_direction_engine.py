@@ -54,12 +54,13 @@ def test_bearish_market_gives_bearish_direction():
     assert d["total_score"] < 0
 
 
-def test_missing_news_lowers_confidence_but_not_direction():
+def test_missing_news_lowers_data_completeness_but_not_direction():
     s = _base_stats()
     s["news"] = None
     d = score_dimensions(s)
-    assert d["confidence"] <= 3  # 缺新闻 → 星级降级
+    assert d["data_completeness"] <= 3  # 缺新闻 → 覆盖星级降级（≠模型置信度）
     assert d["direction"] is not None
+    assert "confidence" not in d  # T6-4：旧键已改名，防回潮
 
 
 def test_strong_signal_pct_high_and_super_inflow_supports_bullish_l2():

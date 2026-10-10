@@ -1,10 +1,10 @@
-"""次日走势方向引擎：多维度信号加权 → 明确方向 + 置信度 + 每维依据。
+"""次日走势方向引擎：多维度信号加权 → 明确方向 + 数据完整度星级 + 每维依据。
 
 纯函数、无 I/O，输入 daily_review 的 stats 字典，输出：
     {
-      "date", "total_score", "direction", "confidence",
+      "date", "total_score", "direction", "data_completeness",
       "dimensions": [{key, name, score, weight, evidence}],
-      "stars"  # 数据完整度：缺 news/L2 时降级
+      "stars"  # = data_completeness：数据覆盖星级（缺 news/L2 时降级），非模型信心
     }
 
 方向阈值（total_score 归一在 [-10, +10]）：
@@ -236,10 +236,12 @@ def score_dimensions(stats: dict) -> dict[str, Any]:
     total = sum(d["score"] for d in dims)
     direction = _direction(total)
 
-    # 数据完整度：影响置信度星级
-    missing = [d["name"] for d in dims if not (stats.get("news") if d["key"] == "新闻情绪" else
-                                               stats.get("factors") if d["key"] == "L2 微观" else True)]
-    # 简化：看 news 与 l2 是否存在决定星级
+    # 数据完整度星级（≠ 模型置信度）：只由数据覆盖决定 ——
+    # 新闻 + L2 都在 → 5；缺其一 → 3；都缺 → 2。
+    # T6-4 审计（2026-10-10）：字段名原为 `confidence`，与语义（数据覆盖）不符，
+    # 改为 `data_completeness`；原先末尾还有一段「数据全且维度高度一致 → 5」的分支，
+    # 经推演为恒等 no-op（stars ∈ {5,3,2}，`stars >= 4` 只可能是 5，赋值 5→5），
+    # 已删除——一致性由报告正文的维度依据表达，不混入覆盖星级。
     has_news = bool(stats.get("news"))
     has_factors = bool((stats.get("factors") or {}).get("l2"))
     if has_news and has_factors:
@@ -251,18 +253,11 @@ def score_dimensions(stats: dict) -> dict[str, Any]:
     else:
         stars = 2
 
-    # 维度一致性：同向维度数影响置信度说明
-    pos = sum(1 for d in dims if d["raw"] >= 0.4)
-    neg = sum(1 for d in dims if d["raw"] <= -0.4)
-    agree = max(pos, neg)
-    if stars >= 4 and (pos == 0 or neg == 0) and agree >= 4:
-        stars = 5  # 数据全 + 高度一致
-
     return {
         "date": stats.get("meta", {}).get("trade_date"),
         "total_score": round(total, 2),
         "direction": direction,
-        "confidence": stars,
+        "data_completeness": stars,
         "max_score": round(sum(d["weight"] for d in dims), 2),
         "dimensions": dims,
     }

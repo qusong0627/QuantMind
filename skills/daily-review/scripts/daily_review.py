@@ -1090,7 +1090,8 @@ def render_facts(stats: dict) -> str:
         L.append("## 十、次日走势研判\n")
         L.append(
             f"> **方向：{d['direction']}**（得分 {d['total_score']:+.2f} / 满分 {d['max_score']:.1f}）"
-            f" · **置信度 {'★' * int(d.get('confidence') or 0)}**（{d.get('confidence')}/5）\n"
+            f" · **数据完整度 {'★' * int(d.get('data_completeness', d.get('confidence')) or 0)}**"
+            f"（{d.get('data_completeness', d.get('confidence'))}/5）\n"
         )
         L.append("| 维度 | 得分 | 权重 | 依据 |")
         L.append("|---|---|---|---|")
@@ -1098,7 +1099,8 @@ def render_facts(stats: dict) -> str:
             L.append(f"| {dim['name']} | {dim['score']:+.2f} | {dim['weight']} | {dim['evidence']} |")
         L.append("")
         L.append("**研判口径**：正分=看多证据、负分=看空证据、±0=中性/数据缺失；")
-        L.append("方向只是六维信号的可解释合成，非预测承诺。明日以指数/广度验证：方向 + 置信度星级 + 各维依据。")
+        L.append("**数据完整度星级只反映数据覆盖**（新闻/L2 是否在，非模型信心）；")
+        L.append("方向只是六维信号的可解释合成，非预测承诺。明日以指数/广度验证：方向 + 数据完整度星级 + 各维依据。")
         L.append("")
 
     # ── 十一、模型推理信号（昨日验证 + 明日 Top5）──
@@ -1405,7 +1407,7 @@ def main() -> None:
         "sector_multiday": sector_multiday,
         "sector_flow": sector_flow,
     }
-    # 次日走势方向：六维加权 → 明确方向 + 置信度（news 缺失时自动降级提示）
+    # 次日走势方向：六维加权 → 明确方向 + 数据完整度星级（news 缺失时自动降级提示）
     from direction_engine import score_dimensions
 
     stats["direction"] = score_dimensions(stats)
@@ -1425,7 +1427,7 @@ def main() -> None:
     if d.get("direction"):
         print(
             f"次日方向研判：{d['direction']}（得分 {d['total_score']}/{d['max_score']}）"
-            f"置信度 {'★' * int(d.get('confidence') or 0)}"
+            f"数据完整度 {'★' * int(d.get('data_completeness', d.get('confidence')) or 0)}"
         )
 
 
