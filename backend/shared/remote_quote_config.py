@@ -18,10 +18,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 # 官方公共免费行情服（公开信息；覆盖方式见模块 docstring）
+# ⚠️ 口令为**公开信息**（OSS 开箱默认），不是部署私密凭据；私有部署必须在
+# .env 配 REMOTE_QUOTE_REDIS_HOST/PASSWORD 覆盖（2026-10-10 审计 M3：默认值
+# 合法但必须可见——仍走公共服时 resolve 打一次 warning）。
 FREE_FEED_HOST = "www.quantmindai.cn"
 FREE_FEED_PORT = 6379
 FREE_FEED_PASSWORD = "quantmind2026"
@@ -30,6 +36,7 @@ FREE_FEED_DB = 3
 _DISABLED_VALUES = {"1", "true", "yes", "on"}
 
 _root_env_cache: dict[str, str] | None = None
+_warned_builtin_default = False
 
 
 def _load_root_env_map() -> dict[str, str]:
@@ -66,6 +73,29 @@ def remote_quote_disabled() -> bool:
     return str(os.getenv("REMOTE_QUOTE_DISABLED", "")).strip().lower() in _DISABLED_VALUES
 
 
+def using_builtin_free_feed() -> bool:
+    """是否按内置公网免费行情服解析（host 为内置默认）。
+
+    私有部署应显式配 REMOTE_QUOTE_REDIS_HOST/PASSWORD；仍落回公共服时
+    resolve 会打一次 warning（无 SLA、口令为公开信息）。
+    """
+    if remote_quote_disabled():
+        return False
+    return _read("REMOTE_QUOTE_REDIS_HOST", FREE_FEED_HOST) == FREE_FEED_HOST
+
+
+def _warn_once_if_builtin_default(host: str) -> None:
+    global _warned_builtin_default
+    if _warned_builtin_default or host != FREE_FEED_HOST:
+        return
+    _warned_builtin_default = True
+    logger.warning(
+        "远端行情仍在使用内置公共免费行情服（%s）——该地址与口令为公开信息、无 SLA，"
+        "私有部署请在 .env 配置 REMOTE_QUOTE_REDIS_HOST/PASSWORD 覆盖",
+        host,
+    )
+
+
 def resolve_remote_quote_redis() -> tuple[str, int, str | None, int] | None:
     """解析 (host, port, password, db)；显式关闭或主机为空返回 None。"""
     if remote_quote_disabled():
@@ -82,6 +112,7 @@ def resolve_remote_quote_redis() -> tuple[str, int, str | None, int] | None:
     except (TypeError, ValueError):
         db = FREE_FEED_DB
     password = _read("REMOTE_QUOTE_REDIS_PASSWORD", FREE_FEED_PASSWORD) or None
+    _warn_once_if_builtin_default(host)
     return host, port, password, db
 
 

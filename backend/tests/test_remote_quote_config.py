@@ -5,8 +5,12 @@
    各写一份，现收敛到 backend/shared/remote_quote_config.py；
 2) AI-IDE 用户代码容器此前透传 SECRET_KEY/JWT_SECRET_KEY/INTERNAL_CALL_SECRET/
    DASHSCOPE_API_KEY/QWEN_API_KEY，runner 不需要这些签钥与 LLM Key。
+
+2026-10-10 追加（审计 M3）：内置公共服默认值显性化——落回公共服必须打
+warn-once、可用 using_builtin_free_feed() 观测；env 覆盖链不变。
 """
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -99,6 +103,38 @@ def test_root_env_fallback(monkeypatch):
         rqc, "_root_env_cache", {"REMOTE_QUOTE_REDIS_HOST": "from-root-env"}
     )
     assert rqc.resolve_remote_quote_redis()[0] == "from-root-env"
+
+
+# ── 2026-10-10 审计 M3：内置公共服默认值显性化 ──────────────────────────
+
+
+def test_env_override_not_seen_as_builtin(monkeypatch):
+    """host 显式覆盖后不再视为「使用内置公共服」。"""
+    _clear(monkeypatch)
+    monkeypatch.setenv("REMOTE_QUOTE_REDIS_HOST", "quote.internal")
+    assert rqc.resolve_remote_quote_redis()[0] == "quote.internal"
+    assert rqc.using_builtin_free_feed() is False
+
+
+def test_builtin_default_warns_once(monkeypatch, caplog):
+    """落回公共服：恰好一条 warning（warn-once，不在热路径刷日志）。"""
+    _clear(monkeypatch)
+    monkeypatch.setattr(rqc, "_warned_builtin_default", False, raising=False)
+    with caplog.at_level(logging.WARNING, logger=rqc.__name__):
+        first = rqc.resolve_remote_quote_redis()
+        second = rqc.resolve_remote_quote_redis()
+    assert first is not None and second is not None
+    assert rqc.using_builtin_free_feed() is True
+    warnings = [r for r in caplog.records if "公共免费行情服" in r.getMessage()]
+    assert len(warnings) == 1, f"warn-once 失效（{len(warnings)} 条）"
+
+
+def test_disabled_not_seen_as_builtin(monkeypatch):
+    """DISABLED 短路：解析 None，且不算「使用公共服」。"""
+    _clear(monkeypatch)
+    monkeypatch.setenv("REMOTE_QUOTE_DISABLED", "true")
+    assert rqc.resolve_remote_quote_redis() is None
+    assert rqc.using_builtin_free_feed() is False
 
 
 _EXECUTOR = (
