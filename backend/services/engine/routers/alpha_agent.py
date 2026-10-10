@@ -80,6 +80,9 @@ class EvolveRequest(BaseModel):
     #: 并行方向数（T-MV-04）：仅类别路径（directions 非空）且 >1 时一次派 N 条
     #: 任务；自由文本/文档血统路径忽略（单方向是它们的事实）。
     num_directions: int | None = Field(None, ge=1, le=10)
+    #: 入库闸门模式（T-MV-05）：off/soft/hard；None=未指定（入池时叠
+    #: env ALPHA_GATE_MODE 解析，两层都没指定则回落逐门禁配置）
+    quality_gate_mode: str | None = None
     #: 文档血统：来自文档链的挖掘任务带上它（写 rd_agent_mining_tasks.doc_id +
     #: 回写 rd_agent_docs.task_id）；需 ENABLE_DOC_MINING=true
     doc_id: str | None = None
@@ -120,6 +123,10 @@ class MiningBatchRequest(BaseModel):
     universe: str = Field("csi300", description="股票池")
     loop_n: int | None = Field(
         None, ge=1, le=20, description="每任务演化轮数（默认 5）"
+    )
+    #: 入库闸门模式（T-MV-05）：off/soft/hard；None=未指定（入池时叠 env 解析）
+    quality_gate_mode: str | None = Field(
+        None, description="入库闸门模式: off/soft/hard；空=未指定（回落默认软闸）"
     )
 
 
@@ -566,6 +573,7 @@ async def _dispatch_direction_items(
     picks: list[tuple[str, str | None]],
     direction_mode: str | None,
     data_source: str | None = None,
+    quality_gate_mode: str | None = None,
     overrides: dict | None = None,
 ) -> tuple[list[dict], int, int, int]:
     """逐条 ``start_or_queue`` 派发的单源派发环（/mining/batch 与 evolve N>1 共用）。
@@ -585,6 +593,7 @@ async def _dispatch_direction_items(
                 direction=direction,
                 direction_mode=direction_mode,
                 direction_meta=meta_json,
+                quality_gate_mode=quality_gate_mode,
                 data_source=data_source,
                 llm_overrides=overrides,
                 tenant_id=tenant_id,
@@ -663,6 +672,13 @@ async def start_evolution(
     num_directions: int = Query(
         1, ge=1, le=10, description="并行方向数：类别路径一次派 N 条任务（T-MV-04）"
     ),
+    quality_gate_mode: str = Query(
+        "",
+        description=(
+            "入库闸门模式（T-MV-05）: off/soft/hard；留空=未指定"
+            "（入池判定叠 ALPHA_GATE_MODE，默认软闸）"
+        ),
+    ),
     data_source: str = Query(
         "", description="数据源: qlib_bin, parquet, pg (留空使用默认)"
     ),
@@ -694,9 +710,22 @@ async def start_evolution(
             direction_mode = payload.direction_mode
         if payload.num_directions is not None:
             num_directions = payload.num_directions
+        if payload.quality_gate_mode:
+            quality_gate_mode = payload.quality_gate_mode
         if payload.data_source is not None:
             data_source = payload.data_source
     doc_id = ((payload.doc_id or "").strip() or None) if payload is not None else None
+
+    # 入库闸门模式（T-MV-05）：纯参数校验先做——非法值显式 400（静默当
+    # 「未指定」会让用户以为硬闸已开却走了软闸）。''（未指定）原样保留，
+    # 生效模式在入池时由 resolve_admission_gate_mode 叠 env 解析——任务行
+    # 只存请求意图，不冻结当时的 env。
+    try:
+        from backend.services.engine.mining_plugins.config import normalize_gate_mode
+
+        gate_mode = normalize_gate_mode(quality_gate_mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # 文档血统闸门 + 归属 + 状态（T-FM-10）：文档链没开的地方不存在
     # 「合法的 doc_id」；他人/未解析完的 doc_id 不许挂任务
@@ -853,6 +882,7 @@ async def start_evolution(
             picks=picked_pairs,
             direction_mode=record_mode,
             data_source=data_source or None,
+            quality_gate_mode=gate_mode or None,
             overrides=build_subprocess_overrides(llm_config, embedding_env),
         )
         first_task_id = next((it["task_id"] for it in items if it["task_id"]), None)
@@ -909,6 +939,7 @@ async def start_evolution(
             direction=direction or None,
             direction_mode=record_mode,
             direction_meta=direction_meta_json,
+            quality_gate_mode=gate_mode or None,
             data_source=data_source or None,
             # 文档血统：落 rd_agent_mining_tasks.source/doc_id（历史页可见出处）
             source="doc" if doc_id else "text",
@@ -1040,6 +1071,14 @@ async def dispatch_mining_batch(request: Request, payload: MiningBatchRequest):
                 ),
             )
 
+    # 入库闸门模式（T-MV-05）：与 evolve 同一条校验（非法显式 400，不静默降级）
+    try:
+        from backend.services.engine.mining_plugins.config import normalize_gate_mode
+
+        gate_mode = normalize_gate_mode(payload.quality_gate_mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         from backend.services.engine.rd_agent.market_adapters import (
             get_adapter,
@@ -1087,6 +1126,7 @@ async def dispatch_mining_batch(request: Request, payload: MiningBatchRequest):
         loop_n=loop_n,
         picks=[(d, None) for d in directions],
         direction_mode=None,
+        quality_gate_mode=gate_mode or None,
         overrides=overrides,
     )
 

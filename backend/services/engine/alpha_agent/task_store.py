@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS rd_agent_mining_tasks (
   direction TEXT NOT NULL DEFAULT '',
   direction_mode TEXT,
   direction_meta TEXT,
+  quality_gate_mode TEXT,
   loop_n INTEGER,
   source TEXT NOT NULL DEFAULT 'text',
   doc_id TEXT,
@@ -143,15 +144,15 @@ class MiningTaskStore:
         """建表 + 索引 + 老库补列（幂等；engine 启动期调用）。
 
         ``CREATE TABLE IF NOT EXISTS`` 不会给已存在的表补列——老库（列进
-        CREATE 语句之前建的）缺 ``direction_mode``/``direction_meta`` 时，
-        create_task 的 INSERT 引用该列会整行失败（记录层失败只告警 →
-        表现为「历史页凭空缺任务」）。补列走 ``ADD COLUMN IF NOT EXISTS``
-        （同 doc_store 先例）。
+        CREATE 语句之前建的）缺 ``direction_mode``/``direction_meta``/
+        ``quality_gate_mode`` 时，create_task 的 INSERT 引用该列会整行失败
+        （记录层失败只告警 → 表现为「历史页凭空缺任务」）。补列走
+        ``ADD COLUMN IF NOT EXISTS``（同 doc_store 先例）。
         """
         async with get_session() as session:
             for stmt in [s.strip() for s in _CREATE_TABLE_SQL.split(";") if s.strip()]:
                 await session.execute(text(stmt))
-            for column in ("direction_mode", "direction_meta"):
+            for column in ("direction_mode", "direction_meta", "quality_gate_mode"):
                 await session.execute(
                     text(
                         "ALTER TABLE rd_agent_mining_tasks "
@@ -172,6 +173,7 @@ class MiningTaskStore:
         direction: str = "",
         direction_mode: str | None = None,
         direction_meta: str | None = None,
+        quality_gate_mode: str | None = None,
         loop_n: int = 5,
         source: str = "text",
         doc_id: str | None = None,
@@ -180,7 +182,10 @@ class MiningTaskStore:
 
         ``status`` 只收初始态（pending/queued）——校验发生在开 session 之前
         （无库环境里也要红/绿分明）。``direction_meta`` 是加权抽样（T-MV-03）
-        的复现凭证（JSON 文本），没抽样就是 NULL。
+        的复现凭证（JSON 文本），没抽样就是 NULL。``quality_gate_mode``
+        （T-MV-05）存**请求意图**：显式 off/soft/hard 才落值，未指定 =
+        NULL（入池时由 ``resolve_admission_gate_mode`` 再叠 env 决定生效
+        模式——任务行不冻结当时的 env）。
         """
         if status not in _INITIAL_STATUSES:
             raise ValueError(
@@ -193,11 +198,13 @@ class MiningTaskStore:
                 text("""
                     INSERT INTO rd_agent_mining_tasks
                       (task_id, user_id, market, universe, data_source, direction,
-                       direction_mode, direction_meta, loop_n, source, doc_id, status,
+                       direction_mode, direction_meta, quality_gate_mode, loop_n,
+                       source, doc_id, status,
                        progress_pct, current_loop, created_at, updated_at)
                     VALUES
                       (:task_id, :user_id, :market, :universe, :data_source, :direction,
-                       :direction_mode, :direction_meta, :loop_n, :source, :doc_id, :status,
+                       :direction_mode, :direction_meta, :quality_gate_mode, :loop_n,
+                       :source, :doc_id, :status,
                        0, 0, :now, :now)
                     ON CONFLICT (task_id) DO NOTHING
                     """),
@@ -211,6 +218,7 @@ class MiningTaskStore:
                     "direction": clamp_direction(direction),
                     "direction_mode": direction_mode,
                     "direction_meta": direction_meta,
+                    "quality_gate_mode": quality_gate_mode or None,
                     "loop_n": int(loop_n),
                     "source": source or "text",
                     "doc_id": doc_id,

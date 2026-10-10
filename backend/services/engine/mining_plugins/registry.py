@@ -105,14 +105,24 @@ class PluginRegistry:
             for p in self._gates.values()
         ]
 
-    def run_gates(self, ctx: GateContext) -> GateDecision:
+    def run_gates(
+        self, ctx: GateContext, mode_override: str | None = None
+    ) -> GateDecision:
         """执行全部启用门禁；``rejected`` 只因 **hard 且 fail** 而真。
 
         与评估器同哲学：门禁异常 → skipped + 告警，不中断物化流程——hard
         拦的是「指标差」，不是「门禁坏了」。逐门禁的 enabled/mode/threshold
         走 ``config.get_gate_settings``（yaml > 默认，env 全局覆盖）。
+
+        ``mode_override``（T-MV-05）：入池判定的全局模式，∈ {"soft","hard"}
+        时覆盖**逐门禁 mode**；enabled/threshold 仍走 get_gate_settings——
+        运维关掉的门禁不因覆盖复活。「off」不在此函数职责内（调用方直接
+        跳过 run_gates），传进来是契约错误必须炸。
         """
         from .config import get_gate_settings
+
+        if mode_override is not None and mode_override not in ("soft", "hard"):
+            raise ValueError(f"run_gates mode_override 非法: {mode_override!r}")
 
         outcomes: list[GateOutcome] = []
         rejected = False
@@ -120,7 +130,7 @@ class PluginRegistry:
             settings = get_gate_settings(name, plugin.descriptor)
             if not settings["enabled"]:
                 continue
-            mode = settings["mode"]
+            mode = mode_override or settings["mode"]
             threshold = settings["threshold"]
             if threshold is None:
                 threshold = float(plugin.default_threshold)
@@ -198,5 +208,5 @@ def list_gate_descriptors() -> list[dict]:
     return _DEFAULT.list_gate_descriptors()
 
 
-def run_gates(ctx: GateContext) -> GateDecision:
-    return _DEFAULT.run_gates(ctx)
+def run_gates(ctx: GateContext, mode_override: str | None = None) -> GateDecision:
+    return _DEFAULT.run_gates(ctx, mode_override)

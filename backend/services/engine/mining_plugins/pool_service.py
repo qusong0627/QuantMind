@@ -271,6 +271,128 @@ async def _upsert_edge(
 # ── 回测完成钩子 ─────────────────────────────────────────────────────
 
 
+async def _admission_gate_decision(
+    *,
+    factor_id: str,
+    user_id: str,
+    task_id: str | None,
+    market: str,
+    universe: str,
+    metrics: dict[str, float | None],
+    candidate_ic: float | None,
+) -> tuple[str | None, Any, dict[str, Any]]:
+    """入池判定（T-MV-05）：读请求意图 → 解析生效模式 → 跑五门禁。
+
+    模式解析链（单源 ``config.resolve_admission_gate_mode``）：任务行
+    ``quality_gate_mode``（请求意图）> env ``ALPHA_GATE_MODE`` > None
+    （逐门禁配置，默认软闸）。
+
+    返回 ``(mode, decision, trace)``：``mode`` = 生效全局模式（None=未指定/
+    逐门禁，'off'=显式跳过）；``decision`` = GateDecision，仅 off 或判定
+    整体故障时为 None；``trace`` = 落 ``metadata.admission_gate`` 的留痕
+    （任何情况都给出一份——soft 留痕是默认行为）。
+
+    **绝不抛**：门禁是增益层，任何环节故障按「没判定」放行（fail-open），
+    与「门禁异常 → skipped 不中断物化」同一哲学。
+    """
+    from backend.shared.utc_datetime import to_utc_iso, utc_now
+
+    from .config import normalize_gate_mode, resolve_admission_gate_mode
+
+    requested: str = ""
+    if task_id:
+        try:
+            from sqlalchemy import text
+
+            from backend.shared.database_manager_v2 import get_session
+
+            async with get_session(read_only=True) as session:
+                raw = (
+                    await session.execute(
+                        text(
+                            "SELECT quality_gate_mode FROM rd_agent_mining_tasks "
+                            "WHERE task_id = :task_id"
+                        ),
+                        {"task_id": str(task_id)},
+                    )
+                ).scalar()
+            try:
+                requested = normalize_gate_mode(str(raw) if raw else "")
+            except ValueError as exc:  # 库里的脏值不许炸池登记（按未指定）
+                logger.warning(
+                    "[factor-pool] 任务 %s 闸门模式非法（按未指定处理）: %s",
+                    task_id,
+                    exc,
+                )
+        except Exception as exc:  # noqa: BLE001 — 读不到意图按未指定
+            logger.warning(
+                "[factor-pool] 闸门模式读取失败（按未指定处理）%s: %s", factor_id, exc
+            )
+    mode = resolve_admission_gate_mode(requested or None)
+
+    trace: dict[str, Any] = {
+        "requested": requested or None,
+        "mode": mode,
+        "rejected": False,
+        "evaluated_at": to_utc_iso(utc_now()),
+        "gates": [],
+    }
+    if mode == "off":
+        return mode, None, trace
+
+    pool_ic_pct: float | None = None
+    try:
+        pool_ic_pct = await ic_pool_percentile(
+            user_id=user_id,
+            market=market,
+            universe=universe,
+            factor_id=factor_id,
+            candidate_ic=candidate_ic,
+        )
+    except Exception as exc:  # noqa: BLE001 — 分位不可得 → 该门禁判 skipped
+        logger.warning(
+            "[factor-pool] 入池 IC 分位查询失败（按不可得）%s: %s", factor_id, exc
+        )
+
+    try:
+        from .base import GateContext
+        from .registry import run_gates
+
+        ctx = GateContext(
+            factor_id=factor_id,
+            market=market,
+            universe=universe,
+            metrics=metrics,
+            pool_ic_pct=pool_ic_pct,
+        )
+        decision = run_gates(ctx, mode)
+    except Exception as exc:  # noqa: BLE001 — 判定故障按放行（不拦登记）
+        logger.warning("[factor-pool] 入库闸门执行失败（按放行）%s: %s", factor_id, exc)
+        return mode, None, trace
+
+    trace["rejected"] = bool(decision.rejected)
+    trace["gates"] = [o.to_dict() for o in decision.outcomes]
+    return mode, decision, trace
+
+
+async def _write_admission_trace(factor_id: str, trace: dict[str, Any]) -> None:
+    """留痕写 ``rd_agent_factors.metadata_json.admission_gate``（顶层浅合并）。
+
+    走 ``RDAgentFactorPersistence.update_factor_metrics`` 现有合并语义——
+    只加新键，不碰回测指标。失败只告警：留痕是审计面，不是主链。
+    """
+    try:
+        from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+            RDAgentFactorPersistence,
+        )
+
+        await RDAgentFactorPersistence().update_factor_metrics(
+            factor_id, metadata={"admission_gate": trace}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[factor-pool] 入库闸门留痕失败 %s: %s", factor_id, exc)
+
+
 async def record_backtested_factor(
     factor_id: str,
     *,
@@ -303,6 +425,11 @@ async def record_backtested_factor(
                                COALESCE(universe, '') AS universe,
                                factor_formulation,
                                metadata_json->>'task_id' AS task_id,
+                               ic_value,
+                               metadata_json->'quality'->>'pfs' AS pfs,
+                               metadata_json->>'rre' AS rre,
+                               metadata_json->>'ann_turnover' AS ann_turnover,
+                               metadata_json->>'ann_return_net' AS ann_return_net,
                                created_at
                         FROM rd_agent_factors
                         WHERE factor_id = :factor_id
@@ -324,6 +451,39 @@ async def record_backtested_factor(
             return False
         scope_market = str(row["market"] or market)
         scope_universe = str(row["universe"] or universe or "")
+
+        # 入库闸门（T-MV-05）：回测完 → 进池前的硬/软判定。指标口径与物化器
+        # 同一份（metadata 扁平键），池内分位带候选自身做「虚拟入池」。
+        # 硬拒 → 不写面板/池行/边（返回 False），留痕仍写（拒因可查）；
+        # soft fail / 未指定 / off → 照常登记，留痕为审计。判定故障 fail-open。
+        gate_mode, gate_decision, gate_trace = await _admission_gate_decision(
+            factor_id=factor_id,
+            user_id=user_id,
+            task_id=(str(row["task_id"]) if row["task_id"] else None),
+            market=scope_market,
+            universe=scope_universe,
+            metrics={
+                "pfs": _as_float(row["pfs"]),
+                "rre": _as_float(row["rre"]),
+                "ann_turnover": _as_float(row["ann_turnover"]),
+                "ann_return_net": _as_float(row["ann_return_net"]),
+            },
+            candidate_ic=_as_float(row["ic_value"]),
+        )
+        await _write_admission_trace(factor_id, gate_trace)
+        if gate_decision is not None and gate_decision.rejected:
+            failed = [
+                f"{o.key}[{o.mode}]: {o.message}"
+                for o in gate_decision.outcomes
+                if o.status == "fail"
+            ]
+            logger.warning(
+                "[factor-pool] 入库闸门硬拒，不登记池 %s（mode=%s）: %s",
+                factor_id,
+                gate_mode,
+                "; ".join(failed),
+            )
+            return False
 
         panel_ref: str | None = None
         if values is not None:
@@ -440,6 +600,10 @@ async def refresh_pool(
     边界：面板两两相关按 60 日采样；多样性用 zscore 相关矩阵（缺测按
     成对完整观测），无 ``factor_quality``（精简部署未挂 docker/training）
     时多样性整体跳过并记 warning。
+
+    入库闸门硬拒（``metadata.admission_gate.rejected=true``）的因子被
+    过滤在重算之外（``stats.admission_blocked`` 报数）——refresh 会为
+    scope 内全部 completed 因子补建池行，不过滤等于把硬闸拒过的复活。
     """
     from sqlalchemy import text
 
@@ -457,6 +621,7 @@ async def refresh_pool(
         "task_edges": 0,
         "scored": 0,
         "icir_missing": 0,
+        "admission_blocked": 0,
         "diversity": None,
         "dry_run": dry_run,
     }
@@ -474,6 +639,7 @@ async def refresh_pool(
                            f.factor_formulation,
                            f.metadata_json->>'task_id' AS task_id,
                            f.metadata_json->>'icir' AS icir,
+                           f.metadata_json->'admission_gate'->>'rejected' AS admission_rejected,
                            f.created_at
                     FROM rd_agent_factors f
                     WHERE {where}
@@ -496,9 +662,26 @@ async def refresh_pool(
             )
         ).all()
 
-    factors = [dict(r) for r in rows if str(r["user_id"] or "").strip()]
+    # 入库闸门硬拒过滤（T-MV-05）：refresh 会对 scope 内全部 completed 因子
+    # 补建池行——不过滤的话硬闸拒过的因子会被「复活」。只挡「从未进池」与
+    # 「最近一次判定拒」的因子；已存在的旧池行不删（清退是 pool_cleanup 的
+    # 职责，闸门不做破坏性动作），但也就不再被重算刷新。
+    factors: list[dict[str, Any]] = []
+    skipped_no_user = 0
+    admission_blocked = 0
+    for r in rows:
+        if not str(r["user_id"] or "").strip():
+            skipped_no_user += 1
+            continue
+        if str(r["admission_rejected"] or "").strip().lower() == "true":
+            admission_blocked += 1
+            continue
+        entry = dict(r)
+        entry.pop("admission_rejected", None)
+        factors.append(entry)
+
     stats["factors"] = len(factors)
-    skipped_no_user = len(rows) - len(factors)
+    stats["admission_blocked"] = admission_blocked
     if skipped_no_user:
         logger.warning(
             "[factor-pool] %d 个因子无 user_id，跳过（隔离硬约束）", skipped_no_user
@@ -1026,7 +1209,12 @@ async def mark_retrieved(factor_ids: tuple[str, ...] | list[str]) -> int:
 
 
 async def ic_pool_percentile(
-    *, user_id: str, market: str, universe: str, factor_id: str
+    *,
+    user_id: str,
+    market: str,
+    universe: str,
+    factor_id: str,
+    candidate_ic: float | None = None,
 ) -> float | None:
     """因子 IC 在同池（同 user/market/universe、已完成、IC 非空）内的分位。
 
@@ -1034,6 +1222,12 @@ async def ic_pool_percentile(
     少于 2 个、本因子不在池中或其 IC 缺失 → None（物化门禁判 skipped，
     **绝不按 0 判**——缺口径不是算出来很差）。异常同样降级为 None，由
     调用方告警，不让分位查询拖挂物化。
+
+    入池判定分支（T-MV-05）：候选因子**还没进池**时（首次登记）可传
+    ``candidate_ic`` 做「虚拟入池」——把它当作池成员之一参与分位：分位 =
+    被它严格胜过的池成员数 ÷ 池成员数（即 N_total−1，与在池公式同分母
+    口径）。池为空/候选 IC 缺失仍 → None。``candidate_ic=None`` 时行为
+    与旧版一字不差（「不在池中的因子没有分位」契约不变）。
     """
     from sqlalchemy import text
 
@@ -1042,7 +1236,7 @@ async def ic_pool_percentile(
     conds, params = _scope_conds(user_id, market, universe)
     where = " AND ".join(conds)
     params["factor_id"] = str(factor_id)
-    sql = f"""
+    scope_sql = f"""
         WITH scope AS (
             SELECT p.factor_id, f.ic_value
               FROM {POOL_TABLE} p
@@ -1051,6 +1245,10 @@ async def ic_pool_percentile(
                AND f.status = 'completed'
                AND f.ic_value IS NOT NULL
         )
+    """
+    sql = (
+        scope_sql
+        + """
         SELECT (
             (SELECT COUNT(*) FROM scope WHERE ic_value < me.ic_value)::float
             / NULLIF((SELECT COUNT(*) FROM scope) - 1, 0)
@@ -1058,8 +1256,22 @@ async def ic_pool_percentile(
           FROM scope me
          WHERE me.factor_id = :factor_id
     """
+    )
     async with get_session(read_only=True) as session:
         row = (await session.execute(text(sql), params)).first()
+        if row is None and candidate_ic is not None:
+            # 不在池（或 IC 缺失/未完成）→ 虚拟入池分支：候选 IC 对全池成员
+            params["candidate_ic"] = float(candidate_ic)
+            cand_sql = (
+                scope_sql
+                + """
+                SELECT (
+                    COUNT(*) FILTER (WHERE ic_value < :candidate_ic)
+                )::float / NULLIF(COUNT(*), 0) AS pct
+                  FROM scope
+            """
+            )
+            row = (await session.execute(text(cand_sql), params)).first()
     if row is None or row[0] is None:
         return None
     return max(0.0, min(1.0, float(row[0])))

@@ -8,6 +8,8 @@
   QM_MINING_COST_RATE       扣成本口径（研究用）
   QM_MINING_GATES_MODE      门禁全局升级：strict → 全部 hard；soft → 全部 soft
   QM_MINING_GATES_DISABLED  门禁逐条关闭（逗号分隔 key），优先于 yaml
+  ALPHA_GATE_MODE           入库闸门（T-MV-05）全局默认模式：off/soft/hard；
+                            空=未指定（入池判定回落逐门禁配置，默认 soft）
 """
 
 from __future__ import annotations
@@ -27,6 +29,47 @@ _ENV_GATES_DISABLED = "QM_MINING_GATES_DISABLED"
 DEFAULT_CONFIG_REL = Path("config") / "factor_mining" / "plugins.yaml"
 
 _VALID_GATE_MODES = ("soft", "hard")
+
+# ── 入库闸门模式（T-MV-05）─────────────────────────────────────────────
+# 与逐门禁 mode（soft/hard，get_gate_settings）不同，这里是「入池判定」的
+# 全局模式，多一个 off（显式跳过整套门禁）。解析链（单源）：
+#   请求参数 quality_gate_mode > env ALPHA_GATE_MODE > None（不覆盖，
+#   回落逐门禁配置）。None 语义 = 「两层都未指定」——绝不当作 soft 强制
+#   覆盖，否则会压掉 QM_MINING_GATES_MODE=strict/yaml 的运维升级。
+GATE_MODES = ("off", "soft", "hard")
+_ENV_ALPHA_GATE_MODE = "ALPHA_GATE_MODE"
+
+
+def normalize_gate_mode(value: str | None) -> str:
+    """归一请求值：None/空白 → ``""``（未指定）；白名单外**显式报错**。
+
+    静默把未知值当「未指定」会让用户以为硬闸已开却实际走了软闸——
+    这类误判必须炸出来（路由层转 400）。
+    """
+    mode = (value or "").strip().lower()
+    if mode and mode not in GATE_MODES:
+        raise ValueError(
+            f"unknown quality_gate_mode: {value!r}; expected one of {GATE_MODES} or empty"
+        )
+    return mode
+
+
+def resolve_admission_gate_mode(request_mode: str | None = None) -> str | None:
+    """入池生效模式：请求 > env ``ALPHA_GATE_MODE`` > None（未指定）。
+
+    env 非法只告警忽略（运维错字不该拦业务）；请求非法走
+    :func:`normalize_gate_mode` 抛 ValueError，由路由层转 400。
+    """
+    mode = normalize_gate_mode(request_mode)
+    if mode:
+        return mode
+    env_mode = (os.environ.get(_ENV_ALPHA_GATE_MODE) or "").strip().lower()
+    if not env_mode:
+        return None
+    if env_mode not in GATE_MODES:
+        logger.warning("ALPHA_GATE_MODE=%r 非法（收 %s），忽略", env_mode, GATE_MODES)
+        return None
+    return env_mode
 
 
 def _repo_root() -> Path:

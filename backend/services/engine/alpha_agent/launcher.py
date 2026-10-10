@@ -198,6 +198,9 @@ class EvolutionTask:
     #: 加权抽样的复现凭证（T-MV-03，JSON 文本）：seed/候选/权重/命中；
     #: ''=没抽样（自由文本、selected、抽样降级）→ 落库为 NULL
     direction_meta: str = ""
+    #: 入库闸门请求意图（T-MV-05）：'off'/'soft'/'hard'；''=未指定
+    #: （入池时再叠 env ALPHA_GATE_MODE 解析生效模式）→ 落库为 NULL
+    quality_gate_mode: str = ""
     status: TaskStatus = TaskStatus.PENDING
     progress: str = ""
     phase: str = "pending"
@@ -246,6 +249,7 @@ class AlphaAgentLauncher:
         direction: str | None = None,
         direction_mode: str | None = None,
         direction_meta: str | None = None,
+        quality_gate_mode: str | None = None,
         data_source: str | None = None,
         source: str = "text",
         doc_id: str | None = None,
@@ -258,6 +262,8 @@ class AlphaAgentLauncher:
         direction_mode: 方向如何被选中（'selected'/'random'）；None=模式未参与，
         落库为 NULL——调用方只在类别选择真正发生时传值（T-MV-02）。
         direction_meta: 加权抽样的复现凭证（JSON 文本，T-MV-03）；None=没抽样。
+        quality_gate_mode: 入库闸门请求意图（'off'/'soft'/'hard'，T-MV-05）；
+        None=未指定，落库为 NULL（入池时由 resolve_admission_gate_mode 解析）。
         llm_overrides: 用户级 LLM 环境变量覆盖（如个人中心配置的 API Key），
         优先于容器全局 env 注入子进程。
 
@@ -275,6 +281,7 @@ class AlphaAgentLauncher:
             data_source=data_source or "", direction=direction or "",
             direction_mode=direction_mode or "",
             direction_meta=direction_meta or "",
+            quality_gate_mode=quality_gate_mode or "",
         )
         self._tasks[task_id] = task
 
@@ -302,6 +309,7 @@ class AlphaAgentLauncher:
         direction: str | None = None,
         direction_mode: str | None = None,
         direction_meta: str | None = None,
+        quality_gate_mode: str | None = None,
         data_source: str | None = None,
         source: str = "text",
         doc_id: str | None = None,
@@ -337,6 +345,7 @@ class AlphaAgentLauncher:
             data_source=data_source or "", direction=direction or "",
             direction_mode=direction_mode or "",
             direction_meta=direction_meta or "",
+            quality_gate_mode=quality_gate_mode or "",
             status=TaskStatus.PENDING if has_slot else TaskStatus.QUEUED,
         )
         self._tasks[task_id] = task
@@ -664,6 +673,8 @@ class AlphaAgentLauncher:
                 direction_mode=task.direction_mode or None,
                 # 没抽样（''）→ NULL：抽样证据是事实不是占位，空就不写
                 direction_meta=task.direction_meta or None,
+                # 未指定（''）→ NULL：任务行存请求意图，不冻结入池时点的 env
+                quality_gate_mode=task.quality_gate_mode or None,
                 loop_n=task.loop_n,
                 source=source,
                 doc_id=doc_id,

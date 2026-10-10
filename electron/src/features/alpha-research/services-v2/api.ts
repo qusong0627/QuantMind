@@ -255,6 +255,13 @@ export interface MiningStartParams {
   maxLoops?: number;
   factorsPerHypothesis?: number;
   librarySuffix?: string;
+  /**
+   * 入库闸门开关（T-MV-05）。只表达「关」：false → 显式下发
+   * ``quality_gate_mode=off``（该任务回测后跳过五门禁直接入池）；
+   * true/未给 → 不下发（任务行 NULL，生效模式由后端 env
+   * ``ALPHA_GATE_MODE`` / 逐门禁配置兜底——前端不代填 soft/hard，
+   * 否则会压掉运维侧的全局升级）。
+   */
   qualityGateEnabled?: boolean;
   parallelEnabled?: boolean;
   /** L1 因子类别方向（多选，label） */
@@ -305,6 +312,10 @@ export async function startMining(
       directions: params.directions ?? [],
       direction_mode: params.directionMode || 'selected',
       doc_id: params.docId,
+      // 入库闸门（T-MV-05）：只在关闭时携带 off；开启=不下发（默认行为）
+      ...(params.qualityGateEnabled === false
+        ? { quality_gate_mode: 'off' }
+        : {}),
     });
   } else {
     const qs = new URLSearchParams({
@@ -322,6 +333,11 @@ export async function startMining(
     // N>1 是否真正多派由后端按路径判定（类别方向生效，自由文本恒 1 条）
     if ((params.numDirections ?? 1) > 1) {
       qs.set('num_directions', String(params.numDirections));
+    }
+    // 入库闸门（T-MV-05）：只在关闭时携带 off；开启=不下发（任务行 NULL，
+    // 后端 env ALPHA_GATE_MODE / 逐门禁配置兜底——前端不代填 soft/hard）
+    if (params.qualityGateEnabled === false) {
+      qs.set('quality_gate_mode', 'off');
     }
     res = await apiClient.post(`/alpha-agent/evolve?${qs.toString()}`);
   }
@@ -494,6 +510,8 @@ export interface BatchDispatchParams {
   market?: string;
   universe?: string;
   loopN?: number;
+  /** 入库闸门（T-MV-05）：false → 显式 off；true/未给 → 不下发（同 startMining） */
+  qualityGateEnabled?: boolean;
 }
 
 /** 批量派发：逐条排队成任务；运行期失败逐条回传（HTTP 恒 200）。 */
@@ -505,6 +523,9 @@ export async function dispatchMiningBatch(
     market: params.market || 'a_share',
     universe: params.universe || 'csi300',
     ...(params.loopN ? { loop_n: params.loopN } : {}),
+    ...(params.qualityGateEnabled === false
+      ? { quality_gate_mode: 'off' }
+      : {}),
   });
   const data = res.data?.data ?? {};
   const items: BatchDispatchReceipt[] = (data.items ?? []).map((it: any) => ({

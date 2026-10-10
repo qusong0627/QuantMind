@@ -3,8 +3,10 @@
 家族：
 - evaluators：单因子回测评估器（RRE／换手扣成本），回测完成时由
   ``routers/alpha_agent.py`` 两条回测路径统一调用 ``evaluate_paired()``；
-- gates：物化门禁（软告警默认），``rd_mined_materialize`` 经 ``run_gates()``
-  调用，结果落 manifest 与 factor metadata；
+- gates：物化门禁（软告警默认），两个调用方——``rd_mined_materialize``
+  经 ``run_gates()`` 落 manifest；``pool_service`` 入池判定（T-MV-05）
+  经 ``run_gates(ctx, mode_override)`` 硬闸拦入池 / soft 留痕，全局模式
+  env ``ALPHA_GATE_MODE``（off/soft/hard），请求级 ``quality_gate_mode``；
 - pool_scoring：池检索打分纯函数（``pool_service`` 组装数据后调用）。
 
 注册表仿 ``rd_agent/market_adapters`` 的「_registry + register_*」先例；
@@ -84,9 +86,13 @@ def get_evaluator_names() -> list[str]:
     return _registry.evaluator_names()
 
 
-def run_gates(ctx: GateContext) -> GateDecision:
-    """门面：物化门禁判定（软告警默认，hard 失败才 ``rejected``）。"""
-    return _registry.run_gates(ctx)
+def run_gates(ctx: GateContext, mode_override: str | None = None) -> GateDecision:
+    """门面：物化门禁判定（软告警默认，hard 失败才 ``rejected``）。
+
+    ``mode_override`` ∈ {"soft","hard"} 覆盖逐门禁 mode（T-MV-05 入池判定
+    用）；None=走逐门禁配置。
+    """
+    return _registry.run_gates(ctx, mode_override)
 
 
 def get_gate_names() -> list[str]:

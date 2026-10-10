@@ -16,7 +16,7 @@ vi.mock('../../../../services/aiStrategyClients', () => ({
   apiClient: { post: apiPostMock, get: vi.fn(), delete: vi.fn() },
 }));
 
-import { startMining } from '../api';
+import { dispatchMiningBatch, startMining } from '../api';
 
 beforeEach(() => {
   apiPostMock.mockReset();
@@ -267,5 +267,84 @@ describe('startMining：并行方向数（T-MV-04）', () => {
     const [url, body] = apiPostMock.mock.calls[0];
     expect(url).toBe('/alpha-agent/evolve');
     expect(body).not.toHaveProperty('num_directions');
+  });
+});
+
+describe('startMining / dispatchMiningBatch：入库闸门模式（T-MV-05）', () => {
+  test('未指定或开启 → 两形态都不下发（任务行 NULL，生效模式归后端 env 兜底）', async () => {
+    await startMining({ direction: 'd' });
+    let [url] = apiPostMock.mock.calls[0];
+    expect(queryPairs(String(url)).some(([k]) => k === 'quality_gate_mode')).toBe(
+      false,
+    );
+
+    apiPostMock.mockClear();
+    await startMining({ direction: 'd', qualityGateEnabled: true });
+    [url] = apiPostMock.mock.calls[0];
+    expect(queryPairs(String(url)).some(([k]) => k === 'quality_gate_mode')).toBe(
+      false,
+    );
+
+    apiPostMock.mockClear();
+    await startMining({ direction: 'd', docId: 'd-1', qualityGateEnabled: true });
+    const [, body] = apiPostMock.mock.calls[0];
+    expect(body).not.toHaveProperty('quality_gate_mode');
+  });
+
+  test('关闭 → query 形态追加 quality_gate_mode=off（在 num_directions 之后）', async () => {
+    await startMining({
+      direction: '',
+      directions: ['动量', '波动率'],
+      directionMode: 'random',
+      numDirections: 2,
+      qualityGateEnabled: false,
+    });
+
+    const [url] = apiPostMock.mock.calls[0];
+    expect(queryPairs(String(url))).toEqual([
+      ['loop_n', '3'],
+      ['direction', ''],
+      ['directions', '动量'],
+      ['directions', '波动率'],
+      ['direction_mode', 'random'],
+      ['num_directions', '2'],
+      ['quality_gate_mode', 'off'],
+    ]);
+  });
+
+  test('关闭 + docId → body 带 quality_gate_mode=off，其余字段逐条不变', async () => {
+    await startMining({
+      direction: 'd',
+      docId: 'd-1',
+      qualityGateEnabled: false,
+    });
+
+    const [url, body] = apiPostMock.mock.calls[0];
+    expect(url).toBe('/alpha-agent/evolve');
+    expect(body).toEqual({
+      direction: 'd',
+      market: 'a_share',
+      universe: 'csi300',
+      data_source: '',
+      loop_n: 3,
+      directions: [],
+      direction_mode: 'selected',
+      doc_id: 'd-1',
+      quality_gate_mode: 'off',
+    });
+  });
+
+  test('dispatchMiningBatch：关闭 → body 带 off；未指定 → 不携带', async () => {
+    await dispatchMiningBatch({
+      directions: ['方向一'],
+      qualityGateEnabled: false,
+    });
+    let body = apiPostMock.mock.calls[0][1];
+    expect(body.quality_gate_mode).toBe('off');
+
+    apiPostMock.mockClear();
+    await dispatchMiningBatch({ directions: ['方向一'] });
+    body = apiPostMock.mock.calls[0][1];
+    expect(body).not.toHaveProperty('quality_gate_mode');
   });
 });

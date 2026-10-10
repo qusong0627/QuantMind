@@ -106,6 +106,7 @@ def _call(payload=None, **over):
         "direction_mode": "selected",
         # 直调必须显式传全部 Query 参数：缺省值是 Query() 对象不是 1
         "num_directions": 1,
+        "quality_gate_mode": "",
         "data_source": "",
     }
     kwargs.update(over)

@@ -74,14 +74,20 @@ async def _seed_factor(
     task_id: str | None = None,
     ic: float | None = 0.03,
     description: str | None = None,
+    pfs: float | None = 0.95,
+    extra_meta: dict | None = None,
 ) -> None:
     import json
 
-    meta = {"task_id": task_id, "quality": {"pfs": 0.95}}
+    meta: dict = {"task_id": task_id}
+    if pfs is not None:
+        meta["quality"] = {"pfs": pfs}
     if icir is not None:
         meta["icir"] = icir
     if description is not None:
         meta["description"] = description
+    if extra_meta:
+        meta.update(extra_meta)
     await session.execute(
         text("""
             INSERT INTO rd_agent_factors
@@ -148,6 +154,10 @@ async def _cleanup(factor_ids: list[str], users: list[str]) -> None:
             )
             await session.execute(
                 text(f"DELETE FROM {POOL_TABLE} WHERE user_id = :u"), {"u": user}
+            )
+            await session.execute(
+                text("DELETE FROM rd_agent_mining_tasks WHERE user_id = :u"),
+                {"u": user},
             )
 
 
@@ -590,6 +600,322 @@ class TestIcPoolPercentile:
             await _cleanup(
                 [f_low, f_mid, f_high, f_nul, f_out, f_solo], [user, user_solo]
             )
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_candidate_virtual_inclusion_keeps_pooled_path_unchanged(self):
+        """虚拟入池（T-MV-05）：不在池的候选带 ``candidate_ic`` → 被它严格
+        胜过的池成员数 ÷ 池成员数（N_total−1 同分母口径）；已在池的查询传给
+        `candidate_ic` 也必须回旧口径（「不在池没有分位」契约一字不变）。"""
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        run = _run_id()
+        user = f"{run}-u"
+        f_low, f_mid, f_high = f"{run}_l", f"{run}_m", f"{run}_h"
+        f_cand = f"{run}_c"  # 不在池的候选（因子行在，无池行）
+        try:
+            async with get_session() as session:
+                await _seed_factor(session, factor_id=f_low, user_id=user, ic=0.01)
+                await _seed_factor(session, factor_id=f_mid, user_id=user, ic=0.02)
+                await _seed_factor(session, factor_id=f_high, user_id=user, ic=0.03)
+                await _seed_factor(session, factor_id=f_cand, user_id=user, ic=0.025)
+                for fid in (f_low, f_mid, f_high):
+                    await _seed_pool_row(session, factor_id=fid, user_id=user)
+
+            args = {"market": MARKET, "universe": UNIVERSE}
+            pct_of = pool_service.ic_pool_percentile
+
+            assert await pct_of(
+                user_id=user, factor_id=f_cand, candidate_ic=0.025, **args
+            ) == pytest.approx(2 / 3), "胜过 0.01/0.02 两个池成员 ÷ 池成员数 3"
+            assert await pct_of(
+                user_id=user, factor_id=f_cand, candidate_ic=0.005, **args
+            ) == pytest.approx(0.0)
+            assert await pct_of(
+                user_id=user, factor_id=f_cand, candidate_ic=0.05, **args
+            ) == pytest.approx(1.0)
+            assert await pct_of(user_id=user, factor_id=f_cand, **args) is None, (
+                "candidate_ic 缺省时不在池仍是 None（旧契约）"
+            )
+            assert await pct_of(
+                user_id=user, factor_id=f_mid, candidate_ic=0.999, **args
+            ) == pytest.approx(0.5), "已在池的查询忽略 candidate_ic（旧口径 1/(3−1)）"
+            assert (
+                await pct_of(
+                    user_id=f"{run}-empty",
+                    factor_id=f_cand,
+                    candidate_ic=0.5,
+                    **args,
+                )
+                is None
+            ), "池为空的用户：虚拟入池无池可参照 → None（不判不拦）"
+        finally:
+            await _cleanup([f_low, f_mid, f_high, f_cand], [user])
+            await close_database()
+
+
+class TestAdmissionGate:
+    """入池判定（T-MV-05）：soft 留痕放行 / hard 硬拒不进池 / off 跳过 / env 兜底。
+
+    判定发生在「回测完 → 进池前」：硬拒的因子既无池行也无面板（返回 False），
+    soft fail 照常登记但 ``metadata.admission_gate`` 留痕。模式解析链（单源
+    ``resolve_admission_gate_mode``）：任务行（请求意图）> env ``ALPHA_GATE_MODE``
+    > None（逐门禁配置，默认软闸）。
+
+    硬拒样本用 pfs=0.1（低于 0.9 默认阈值）——阈值单源在 gates/builtin，
+    本文件只信「明显不合格就 fail」。
+    """
+
+    def _clean_gate_env(self, monkeypatch):
+        for key in (
+            "ALPHA_GATE_MODE",
+            "QM_MINING_GATES_MODE",
+            "QM_MINING_GATES_DISABLED",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+    async def _seed_task(self, *, task_id: str, user_id: str, mode: str | None) -> None:
+        from backend.services.engine.alpha_agent.task_store import (
+            get_mining_task_store,
+        )
+
+        store = get_mining_task_store()
+        await store.ensure_tables()
+        await store.create_task(
+            task_id=task_id, user_id=user_id, quality_gate_mode=mode
+        )
+
+    async def _read_trace(self, factor_id: str) -> dict:
+        import json
+
+        from backend.shared.database_manager_v2 import get_session
+
+        async with get_session(read_only=True) as session:
+            raw = (
+                await session.execute(
+                    text(
+                        "SELECT metadata_json FROM rd_agent_factors "
+                        "WHERE factor_id = :f"
+                    ),
+                    {"f": factor_id},
+                )
+            ).scalar()
+        meta = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return meta.get("admission_gate") or {}
+
+    async def _pool_row_exists(self, factor_id: str) -> bool:
+        from backend.shared.database_manager_v2 import get_session
+
+        async with get_session(read_only=True) as session:
+            return (
+                await session.execute(
+                    text(f"SELECT 1 FROM {POOL_TABLE} WHERE factor_id = :f"),
+                    {"f": factor_id},
+                )
+            ).first() is not None
+
+    @pytest.mark.asyncio
+    async def test_soft_fail_admits_with_trace(self, tmp_path, monkeypatch):
+        """soft 失败：照常入池，但留痕记下哪个门禁 fail（审计「为什么放它进来」）。"""
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        monkeypatch.setenv("QM_FACTOR_POOL_PANEL_DIR", str(tmp_path / "panels"))
+        self._clean_gate_env(monkeypatch)
+        run = _run_id()
+        user, task = run, f"{run}-t"
+        fid = f"{run}_soft"
+        try:
+            async with get_session() as session:
+                await _seed_factor(
+                    session, factor_id=fid, user_id=user, task_id=task, pfs=0.1
+                )
+            await self._seed_task(task_id=task, user_id=user, mode="soft")
+
+            ok = await pool_service.record_backtested_factor(fid, market=MARKET)
+
+            assert ok is True, "soft 失败只留痕不拦（默认行为）"
+            assert await self._pool_row_exists(fid), "soft 模式必须入池"
+            trace = await self._read_trace(fid)
+            assert trace.get("mode") == "soft"
+            assert trace.get("requested") == "soft"
+            assert trace.get("rejected") is False
+            assert str(trace.get("evaluated_at", "")).endswith("Z"), (
+                "留痕时间戳走 utc_datetime 契约（Z 后缀 ISO）"
+            )
+            by_key = {g["key"]: g for g in trace.get("gates") or []}
+            assert by_key["pfs_floor"]["status"] == "fail"
+            assert by_key["pfs_floor"]["mode"] == "soft"
+            assert by_key["pfs_floor"]["observed"] == pytest.approx(0.1)
+            assert by_key["ic_pool_pct"]["status"] == "skipped", (
+                "空池 → 分位不可得，判 skipped 不判 0"
+            )
+        finally:
+            await _cleanup([fid], [user])
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_hard_reject_blocks_pool_row_panel_and_edges(
+        self, tmp_path, monkeypatch
+    ):
+        """hard 失败：返回 False，池行/面板/边一概不写——硬闸就是硬闸。"""
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        monkeypatch.setenv("QM_FACTOR_POOL_PANEL_DIR", str(tmp_path / "panels"))
+        self._clean_gate_env(monkeypatch)
+        run = _run_id()
+        user, task = run, f"{run}-t"
+        fid = f"{run}_hard"
+        try:
+            async with get_session() as session:
+                await _seed_factor(
+                    session, factor_id=fid, user_id=user, task_id=task, pfs=0.1
+                )
+            await self._seed_task(task_id=task, user_id=user, mode="hard")
+
+            ok = await pool_service.record_backtested_factor(
+                fid, market=MARKET, values=_values(seed=3)
+            )
+
+            assert ok is False, "hard 失败必须拦在池外"
+            assert not await self._pool_row_exists(fid)
+            assert not pool_panels.panel_path(MARKET, fid).is_file(), (
+                "被硬拒的因子连面板都不许写"
+            )
+            async with get_session(read_only=True) as session:
+                edges = (
+                    await session.execute(
+                        text(f"SELECT COUNT(*) FROM {EDGES_TABLE} WHERE user_id = :u"),
+                        {"u": user},
+                    )
+                ).scalar()
+            assert edges == 0
+            trace = await self._read_trace(fid)
+            assert trace.get("mode") == "hard"
+            assert trace.get("rejected") is True, "拒单也要留痕（拒因可查）"
+            by_key = {g["key"]: g for g in trace.get("gates") or []}
+            assert by_key["pfs_floor"]["status"] == "fail"
+            assert by_key["pfs_floor"]["mode"] == "hard"
+        finally:
+            await _cleanup([fid], [user])
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_off_skips_gates_with_trace(self, tmp_path, monkeypatch):
+        """off：不跑门禁直接入池，留痕 mode='off'、gates=[]（「显式跳过」可审计）。"""
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        monkeypatch.setenv("QM_FACTOR_POOL_PANEL_DIR", str(tmp_path / "panels"))
+        self._clean_gate_env(monkeypatch)
+        run = _run_id()
+        user, task = run, f"{run}-t"
+        fid = f"{run}_off"
+        try:
+            async with get_session() as session:
+                await _seed_factor(
+                    session, factor_id=fid, user_id=user, task_id=task, pfs=0.1
+                )
+            await self._seed_task(task_id=task, user_id=user, mode="off")
+
+            ok = await pool_service.record_backtested_factor(fid, market=MARKET)
+
+            assert ok is True
+            assert await self._pool_row_exists(fid)
+            trace = await self._read_trace(fid)
+            assert trace.get("mode") == "off"
+            assert trace.get("requested") == "off"
+            assert trace.get("rejected") is False
+            assert trace.get("gates") == [], "off 不跑门禁，gates 空"
+        finally:
+            await _cleanup([fid], [user])
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_env_mode_applies_when_task_unspecified(self, tmp_path, monkeypatch):
+        """任务行 NULL（未指定）→ env ALPHA_GATE_MODE 兜底；合格因子不受影响。"""
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        monkeypatch.setenv("QM_FACTOR_POOL_PANEL_DIR", str(tmp_path / "panels"))
+        self._clean_gate_env(monkeypatch)
+        monkeypatch.setenv("ALPHA_GATE_MODE", "hard")
+        run = _run_id()
+        user = run
+        task = f"{run}-t"
+        f_rej, f_ok = f"{run}_rej", f"{run}_ok"
+        try:
+            async with get_session() as session:
+                await _seed_factor(
+                    session, factor_id=f_rej, user_id=user, task_id=task, pfs=0.1
+                )
+                # 无任务血统（task_id=None）：env 同样兜底；pfs 合格 → 放行
+                await _seed_factor(session, factor_id=f_ok, user_id=user)
+
+            await self._seed_task(task_id=task, user_id=user, mode=None)
+
+            ok_rej = await pool_service.record_backtested_factor(f_rej, market=MARKET)
+            ok_ok = await pool_service.record_backtested_factor(f_ok, market=MARKET)
+
+            assert ok_rej is False, "任务未指定 + env hard → env 生效"
+            assert ok_ok is True, "合格因子（pfs 0.95 ≥ 0.9）不受 hard 误伤"
+            trace = await self._read_trace(f_rej)
+            assert trace.get("mode") == "hard"
+            assert trace.get("requested") is None, "任务没说过 → requested=NULL"
+            assert trace.get("rejected") is True
+        finally:
+            await _cleanup([f_rej, f_ok], [user])
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_refresh_skips_admission_rejected(self, tmp_path, monkeypatch):
+        """refresh 防复活：留痕 rejected 的因子不补建池行（stats.admission_blocked 报数）。"""
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        monkeypatch.setenv("QM_FACTOR_POOL_PANEL_DIR", str(tmp_path / "panels"))
+        self._clean_gate_env(monkeypatch)
+        run = _run_id()
+        user = run
+        f_rej, f_ok = f"{run}_rej", f"{run}_ok"
+        try:
+            async with get_session() as session:
+                await _seed_factor(
+                    session,
+                    factor_id=f_rej,
+                    user_id=user,
+                    extra_meta={"admission_gate": {"rejected": True, "mode": "hard"}},
+                )
+                await _seed_factor(session, factor_id=f_ok, user_id=user)
+
+            dry = await pool_service.refresh_pool(
+                user_id=user, market=MARKET, universe=UNIVERSE, dry_run=True
+            )
+            assert dry["admission_blocked"] == 1
+            assert dry["factors"] == 1, "被拒因子不进重算名单"
+
+            stats = await pool_service.refresh_pool(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+            assert stats["admission_blocked"] == 1
+            async with get_session(read_only=True) as session:
+                pool_ids = [
+                    str(r[0])
+                    for r in (
+                        await session.execute(
+                            text(
+                                f"SELECT factor_id FROM {POOL_TABLE} "
+                                "WHERE factor_id = ANY(:ids)"
+                            ),
+                            {"ids": [f_rej, f_ok]},
+                        )
+                    ).all()
+                ]
+            assert pool_ids == [f_ok], "硬拒的因子被 refresh 复活了"
+        finally:
+            await _cleanup([f_rej, f_ok], [user])
             await close_database()
 
 

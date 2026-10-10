@@ -173,6 +173,24 @@ async def test_db_create_blank_direction_mode_is_null(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_db_create_forwards_quality_gate_mode(monkeypatch) -> None:
+    """入库闸门请求意图（T-MV-05）：显式模式随任务落档；未指定 → NULL。
+
+    NULL 的语义是「任务行不冻结请求时点的意图」——入池时再叠 env 解析；
+    落成 soft 会把「没说过」伪记成「说过要软闸」。
+    """
+    store = _RecordingStore()
+    monkeypatch.setattr(launcher_module, "_task_store", lambda: store)
+    launcher = _launcher_with()
+
+    await launcher._db_create(_task(quality_gate_mode="hard"))
+    assert store.calls[0][1]["quality_gate_mode"] == "hard"
+
+    await launcher._db_create(_task(task_id="t-2"))
+    assert store.calls[1][1]["quality_gate_mode"] is None
+
+
+@pytest.mark.asyncio
 async def test_db_progress_is_throttled(monkeypatch) -> None:
     """刚同步过就再心跳 → 不写库；间隔够了 → 写且带上进度。"""
     store = _RecordingStore()
@@ -307,12 +325,15 @@ async def test_start_or_queue_forwards_direction_mode(monkeypatch) -> None:
         direction="方向A",
         direction_mode="selected",
         direction_meta='{"seed": 3, "picked": "方向A"}',
+        quality_gate_mode="soft",
     )
 
     task = launcher._tasks[receipt.task_id]
     assert task.direction_mode == "selected"
+    assert task.quality_gate_mode == "soft", "批量路径同样带闸门意图（T-MV-05）"
     assert store.calls[0][1]["direction_mode"] == "selected"
     assert store.calls[0][1]["direction_meta"] == '{"seed": 3, "picked": "方向A"}'
+    assert store.calls[0][1]["quality_gate_mode"] == "soft"
 
 
 # ── 任务日志根与留存 GC（T-FM-20）────────────────────────────────────

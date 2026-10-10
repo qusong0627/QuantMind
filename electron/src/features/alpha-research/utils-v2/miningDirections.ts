@@ -50,6 +50,8 @@ interface StoredMiningDirectionConfig {
   miningDirectionMode?: 'selected' | 'random';
   /** 选中的挖掘方向（存 label，避免与动态 L1 类别列表下标错位） */
   selectedMiningDirections?: string[];
+  /** 入库闸门开关（T-MV-05，设置页写） */
+  qualityGateEnabled?: boolean;
 }
 
 /** 读取本地保存的挖掘方向选择（label 列表 + 模式） */
@@ -87,6 +89,22 @@ export function getDefaultMiningDirection(
   return mode === 'random'
     ? usable[Math.floor(Math.random() * usable.length)]
     : usable[0];
+}
+
+/**
+ * 读取设置页的入库闸门开关（T-MV-05）。默认开（true）；设置页存储损坏 /
+ * 未读过 → 同默认。语义只表达「关」：true → 调用方不下发 quality_gate_mode
+ * （任务行 NULL，生效模式由后端 env ALPHA_GATE_MODE / 逐门禁配置兜底）。
+ */
+export function getStoredQualityGateEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem('quantaalpha_config');
+    if (!raw) return true;
+    const config = JSON.parse(raw) as StoredMiningDirectionConfig;
+    return config?.qualityGateEnabled !== false;
+  } catch {
+    return true;
+  }
 }
 
 /** Feature catalog category structure */

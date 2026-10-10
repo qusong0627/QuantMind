@@ -907,7 +907,7 @@ export const SettingsPage: React.FC = () => {
                       启用质量门控
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      自动检测并过滤低质量因子，防止其进入下一轮迭代，保证最终结果质量 · <span className="text-warning">后端暂未生效</span>
+                      控制新任务的入库闸门：关闭后回测完直接入池；开启时按后端门禁配置执行（默认软闸——不合格因子告警放行并留痕，硬闸由运维配置）
                     </div>
                   </div>
                 </label>

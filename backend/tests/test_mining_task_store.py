@@ -188,6 +188,7 @@ async def test_real_db_create_get_roundtrip_is_user_scoped() -> None:
             doc_id="doc-abc",
             direction_mode="random",
             direction_meta='{"seed": 42, "picked": "动量反转 × 波动率过滤"}',
+            quality_gate_mode="hard",
         )
 
         row = await store.get_task(tid)
@@ -197,6 +198,9 @@ async def test_real_db_create_get_roundtrip_is_user_scoped() -> None:
         assert row["direction_mode"] == "random"
         assert row["direction_meta"] == '{"seed": 42, "picked": "动量反转 × 波动率过滤"}', (
             "抽样证据（T-MV-03）原样往返——它是「方向怎么抽出来的」唯一复现凭证"
+        )
+        assert row["quality_gate_mode"] == "hard", (
+            "入库闸门请求意图（T-MV-05）原样往返——入池判定从这里读"
         )
         assert row["source"] == "doc" and row["doc_id"] == "doc-abc"
         assert row["status"] == "pending" and row["progress_pct"] == 0
@@ -272,6 +276,7 @@ async def test_real_db_create_is_idempotent_on_task_id() -> None:
         assert row["direction"] == "测试方向", "首次写入赢，重放不覆盖已有记录"
         assert row["direction_mode"] is None, "模式没参与 → NULL（不伪记默认 selected）"
         assert row["direction_meta"] is None, "没抽样就没有证据——NULL 不是空 JSON 字符串"
+        assert row["quality_gate_mode"] is None, "闸门未指定 → NULL（不伪记 soft）"
     finally:
         await _cleanup(user)
         await _close()

@@ -16,6 +16,7 @@ import {
 } from '../services-v2/api';
 import type { BatchDispatchResult, DecomposeCard } from '../services-v2/api';
 import { useTaskContext } from '../context-v2/TaskContext';
+import { getStoredQualityGateEnabled } from '../utils-v2/miningDirections';
 import type { Task } from '../types-v2';
 
 /** 种子（父本）因子引用：id 用于下发，name 用于卡片徽章展示 */
@@ -170,6 +171,8 @@ export const DecomposePanel: React.FC<DecomposePanelProps> = ({
         market: request.market,
         universe: request.universe,
         loopN: DECOMPOSE_LOOP_N,
+        // 入库闸门（T-MV-05）：派发时读设置页开关（关闭 → 任务带 off）
+        qualityGateEnabled: getStoredQualityGateEnabled(),
       });
       if (!res.success || !res.data) throw new Error(res.error || '派发失败');
       // 回执 index 对齐派发顺序（请求级错误整包 400，不存在错位半批）
