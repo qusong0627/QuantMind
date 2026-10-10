@@ -212,6 +212,11 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
             updated_at = NOW()
         WHERE run_id = :run_id
         """)
+    # 写入语义（审计 M1 / T4-3）：created_at 只在 INSERT 列出 = 首次落库时刻，
+    # DO UPDATE **有意不刷**；signal_ts 进 DO UPDATE = 真实最后写入时刻。判「写侧
+    # 是否活跃」用 signal_ts（或 engine_feature_runs.updated_at），勿用 created_at
+    # ——实时行每周期被 upsert，created_at 仍冻结在当日首次入热集时刻（假停更）。
+    # 巡检模板见 docs/engine-signal-scores-runbook.md。
     insert_score_sql = text("""
         INSERT INTO engine_signal_scores (
             run_id, tenant_id, user_id, trade_date, symbol,

@@ -2511,6 +2511,10 @@ class InferenceScriptRunner:
             )
             quote_redis = None
 
+        # 写入语义同 realtime_contract.mark_signal_ready（审计 M1 / T4-3）：
+        # created_at 只在 INSERT 落 = 首次落库；DO UPDATE 只刷 signal_ts（真实最后
+        # 写入）。判写侧活跃用 signal_ts，勿用 created_at（见 docs/
+        # engine-signal-scores-runbook.md）。
         score_sql = text("""
             INSERT INTO engine_signal_scores (
                 run_id, tenant_id, user_id, trade_date, symbol,
