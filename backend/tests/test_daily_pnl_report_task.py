@@ -77,6 +77,9 @@ class _FakeRedis:
     def exists(self, key):
         return 1 if key in self.store else 0
 
+    def delete(self, key):
+        self.store.pop(key, None)
+
 
 def _fake_redis():
     """包裹形态同 trade_shared RedisClient：真身挂在 ``.client`` 上。"""
@@ -226,6 +229,21 @@ class TestRunDailyReport:
 
         monkeypatch.setattr(task, "collect_day_channels", fake_collect)
 
+    def _patch_fanout(self, monkeypatch, *, delivered=1, audience=1, exc=None):
+        """隔离通知面登记（审计 H11）：记录调用，不碰真库。"""
+        calls: list[dict] = []
+
+        async def fake_fanout(**kwargs):
+            calls.append(kwargs)
+            if exc is not None:
+                raise exc
+            return delivered, audience
+
+        import backend.shared.notification_publisher as np
+
+        monkeypatch.setattr(np, "publish_notification_to_admins_async", fake_fanout)
+        return calls
+
     @pytest.mark.asyncio
     async def test_sends_and_stores_report(self, monkeypatch):
         # Arrange
@@ -235,6 +253,7 @@ class TestRunDailyReport:
             sent["title"], sent["content"] = title, content
             return True
 
+        self._patch_fanout(monkeypatch)
         self._patch_channels(
             monkeypatch,
             [
@@ -269,6 +288,7 @@ class TestRunDailyReport:
     @pytest.mark.asyncio
     async def test_notify_failure_is_not_success(self, monkeypatch):
         """QQ 未送达 → sent=False（调用方据此不落 done，下一周期重试）。"""
+        self._patch_fanout(monkeypatch)
         self._patch_channels(
             monkeypatch,
             [
@@ -297,6 +317,7 @@ class TestRunDailyReport:
 
     @pytest.mark.asyncio
     async def test_no_rows_skips_without_sending(self, monkeypatch):
+        self._patch_fanout(monkeypatch)
         self._patch_channels(monkeypatch, [])
         called: list = []
         import backend.shared.qq_notify as qq
@@ -310,7 +331,171 @@ class TestRunDailyReport:
 
         assert result["sent"] is False
         assert result["skipped"] == "no_ledger_rows"
-        assert called == [] and redis.client.store == {}
+        assert called == [], "无数据不得推 QQ"
+        assert "trade:daily-pnl-report:20261008" not in redis.client.store, (
+            "无数据不得落报表（只允许登记通知面的痕）"
+        )
+
+
+# ── 通知面登记（审计 H11）：发送/失败都落痕，每（日, 结果）至多一条 ──
+
+
+def _channel_tdx():
+    return {
+        "key": "tdx",
+        "label": "通达信桥",
+        "total_asset": 918_397.51,
+        "cash": 889_591.51,
+        "market_value": 28_806.0,
+        "position_count": 4,
+        "day_pnl": 441.86,
+        "day_pnl_pct": 0.0481,
+    }
+
+
+class TestNotificationRegistration:
+    def _setup(self, monkeypatch, *, notify_result, channels, **fanout_kw):
+        async def fake_collect(db, day):
+            return channels
+
+        monkeypatch.setattr(task, "collect_day_channels", fake_collect)
+        import backend.shared.qq_notify as qq
+
+        monkeypatch.setattr(qq, "notify", lambda *a, **k: notify_result)
+        calls = TestRunDailyReport()._patch_fanout(monkeypatch, **fanout_kw)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_delivered_report_registers_a_success_row(self, monkeypatch):
+        """H11 核心：送达后通知面能查到「已送达」（此前只有 QQ 侧/done 键）。"""
+        calls = self._setup(monkeypatch, notify_result=True, channels=[_channel_tdx()])
+        redis = _fake_redis()
+
+        result = await task.run_daily_pnl_report(
+            redis, today=date(2026, 10, 8), db=object()
+        )
+
+        assert result["sent"] is True
+        assert len(calls) == 1
+        row = calls[0]
+        assert row["level"] == "success"
+        assert row["type"] == "trading"
+        assert "已送达" in row["title"] and "2026-10-08" in row["title"]
+        assert "¥918,397.51" in row["content"]
+        assert row["qq_alert"] is False, "报表本身已走 QQ，登记不得二次推送"
+        assert "trade:daily-pnl-report:registered:20261008:sent" in redis.client.store
+
+    @pytest.mark.asyncio
+    async def test_failed_delivery_registers_an_error_row(self, monkeypatch):
+        """QQ 未送达 → 通知面落 error 痕并放行 QQ 旁路（手机才是告警面）。"""
+        calls = self._setup(monkeypatch, notify_result=False, channels=[_channel_tdx()])
+        redis = _fake_redis()
+
+        result = await task.run_daily_pnl_report(
+            redis, today=date(2026, 10, 8), db=object()
+        )
+
+        assert result["sent"] is False
+        assert len(calls) == 1
+        row = calls[0]
+        assert row["level"] == "error"
+        assert "未送达" in row["title"]
+        assert "重试" in row["content"]
+        assert row["qq_alert"] is True
+        assert "trade:daily-pnl-report:registered:20261008:unsent" in redis.client.store
+
+    @pytest.mark.asyncio
+    async def test_repeated_failed_attempts_register_once_per_day(self, monkeypatch):
+        """未送达时任务每周期重试：登记键把「逐次刷屏」压成一日一条。"""
+        calls = self._setup(monkeypatch, notify_result=False, channels=[_channel_tdx()])
+        redis = _fake_redis()
+
+        await task.run_daily_pnl_report(redis, today=date(2026, 10, 8), db=object())
+        await task.run_daily_pnl_report(redis, today=date(2026, 10, 8), db=object())
+
+        assert len(calls) == 1, "同（日, 结果）至多登记一条"
+
+    @pytest.mark.asyncio
+    async def test_unsent_then_delivered_registers_both_outcomes(self, monkeypatch):
+        """先败后成：通知面保留完整时间线（先 error 后 success），互不吞并。"""
+        state = {"ok": False}
+
+        async def fake_collect(db, day):
+            return [_channel_tdx()]
+
+        monkeypatch.setattr(task, "collect_day_channels", fake_collect)
+        import backend.shared.qq_notify as qq
+
+        monkeypatch.setattr(qq, "notify", lambda *a, **k: state["ok"])
+        calls = TestRunDailyReport()._patch_fanout(monkeypatch)
+        redis = _fake_redis()
+
+        await task.run_daily_pnl_report(redis, today=date(2026, 10, 8), db=object())
+        state["ok"] = True
+        await task.run_daily_pnl_report(redis, today=date(2026, 10, 8), db=object())
+
+        assert [c["level"] for c in calls] == ["error", "success"]
+
+    @pytest.mark.asyncio
+    async def test_no_data_day_registers_a_warning_row(self, monkeypatch):
+        """桥停更日：报表发不出也不该无声——通知面落一条「无数据」（一日一条）。"""
+        calls = self._setup(monkeypatch, notify_result=True, channels=[])
+        redis = _fake_redis()
+
+        result = await task.run_daily_pnl_report(
+            redis, today=date(2026, 10, 8), db=object()
+        )
+        await task.run_daily_pnl_report(redis, today=date(2026, 10, 8), db=object())
+
+        assert result["skipped"] == "no_ledger_rows"
+        assert len(calls) == 1
+        row = calls[0]
+        assert row["level"] == "warning"
+        assert "无数据" in row["title"]
+        assert row["qq_alert"] is False, "数据迟到是常事，先站内留痕不惊动手机"
+        assert "trade:daily-pnl-report:registered:20261008:nodata" in redis.client.store
+
+    @pytest.mark.asyncio
+    async def test_registration_failure_never_breaks_sending(self, monkeypatch):
+        """登记是旁路：fanout 炸了，QQ 送达判定与报表落盘都不受影响。"""
+        self._setup(
+            monkeypatch,
+            notify_result=True,
+            channels=[_channel_tdx()],
+            exc=RuntimeError("db down"),
+        )
+        redis = _fake_redis()
+
+        result = await task.run_daily_pnl_report(
+            redis, today=date(2026, 10, 8), db=object()
+        )
+
+        assert result["sent"] is True
+        assert "trade:daily-pnl-report:20261008" in redis.client.store
+        assert (
+            "trade:daily-pnl-report:registered:20261008:sent" not in redis.client.store
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_registration_releases_the_claim_for_retry(self, monkeypatch):
+        """登记本身失败（库不可达/无管理员）→ 释放占位，下个周期补登记。"""
+        calls = self._setup(
+            monkeypatch,
+            notify_result=True,
+            channels=[_channel_tdx()],
+            exc=RuntimeError("db down"),
+        )
+        redis = _fake_redis()
+
+        await task.run_daily_pnl_report(redis, today=date(2026, 10, 8), db=object())
+        assert len(calls) == 1
+
+        # 下一次运行（登记恢复正常）必须还能登记，而不是被失败的占位键挡住
+        monkeypatch.undo()
+        self._setup(monkeypatch, notify_result=True, channels=[_channel_tdx()])
+        await task.run_daily_pnl_report(redis, today=date(2026, 10, 8), db=object())
+
+        assert "trade:daily-pnl-report:registered:20261008:sent" in redis.client.store
 
 
 # ── 配置解析 ─────────────────────────────────────────────────────────

@@ -20,7 +20,10 @@ user 别名，与实盘账户页/风控档位同一口径，禁另起一套）�
 * QQ 未送达（未配置/被拒）→ ``sent=False``，不落 done 标记，下周期重试；
 * 当日行总资产为 0（空快照/读错）→ 跳过该通道，绝不发 ¥0 报表；
 * 发送走 ``qq_notify.notify``（常态事件，不走告警等级过滤）后台线程，
-  不阻塞交易事件循环。
+  不阻塞交易事件循环；
+* 发送结果登记进站内通知面（``notification_publisher`` 管理员 fanout，与
+  sentinel/桥告警同口径）：已送达/未送达/无数据都落一条痕，每（日, 结果）
+  至多一条——审计 H11「报表送达与否不在通知登记处」的修复。
 
 环境变量：
   DAILY_PNL_REPORT_ENABLED      默认 "1"
@@ -44,6 +47,9 @@ logger = logging.getLogger(__name__)
 _REPORT_KEY = "trade:daily-pnl-report:{date}"
 _DONE_KEY = "trade:daily-pnl-report:done:{date}"
 _REPORT_TTL_SECONDS = 30 * 24 * 3600
+
+#: 通知面登记去重键：每（日, 结果）至多一条痕（结果 ∈ sent/unsent/nodata）。
+_REGISTERED_KEY = "trade:daily-pnl-report:registered:{date}:{outcome}"
 
 #: 决策账户 user 的 env 名（与 decision_round_core / live_family 同源口径）。
 ENV_ACCOUNT_USER = "QM_DECISION_ACCOUNT_USER_ID"
@@ -231,6 +237,78 @@ def _save_report(redis, date_str: str, title: str, content: str) -> None:
         logger.warning("[DailyPnlReport] 报表写入失败: %s", exc)
 
 
+# ---------- 通知面登记（审计 H11） ----------
+
+#: 结果 → 通知等级：已送达 success / 未送达 error / 无数据 warning。
+_REGISTER_LEVELS = {"sent": "success", "unsent": "error", "nodata": "warning"}
+
+
+def _claim_registration(redis, date_str: str, outcome: str) -> bool:
+    """抢占当日该结果的登记权（SET NX）。Redis 不可用不拦截——痕迹优先于去重。"""
+    client = _redis_client(redis)
+    if client is None:
+        return True
+    try:
+        return bool(
+            client.set(
+                _REGISTERED_KEY.format(date=date_str, outcome=outcome),
+                "1",
+                ex=_REPORT_TTL_SECONDS,
+                nx=True,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DailyPnlReport] 登记去重键写入失败（放行）: %s", exc)
+        return True
+
+
+def _release_registration(redis, date_str: str, outcome: str) -> None:
+    """登记未成功（库不可达/无管理员）时释放占位，让下个周期可补登记。"""
+    client = _redis_client(redis)
+    if client is None:
+        return
+    try:
+        client.delete(_REGISTERED_KEY.format(date=date_str, outcome=outcome))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DailyPnlReport] 登记去重键释放失败: %s", exc)
+
+
+async def _register_delivery(
+    redis, date_str: str, *, outcome: str, title: str, content: str
+) -> bool:
+    """把当日发送结果登记进站内通知面（管理员 fanout，通知中心可查）。
+
+    审计 H11：报表送达与否此前只能看 QQ 侧 / done 键，通知面无痕。已送达
+    （``qq_alert=False``——报表本身已走 QQ，不再二次推送）、未送达（error，
+    QQ 旁路把失败告警到手机）、无数据（warning，桥停更日通知面不再空白）
+    三种结果各落一条；每（日, 结果）至多一条——未送达时任务每周期重试，
+    逐次登记会把通知中心刷屏。登记是旁路：任何失败只记日志、释放占位，
+    绝不回冲发送主链。
+    """
+    if not _claim_registration(redis, date_str, outcome):
+        return False
+    delivered = 0
+    try:
+        from backend.shared import notification_publisher as np
+
+        delivered, audience = await np.publish_notification_to_admins_async(
+            title=title,
+            content=content,
+            type="trading",
+            level=_REGISTER_LEVELS[outcome],
+            qq_alert=outcome == "unsent",
+        )
+        if audience == 0:
+            logger.warning("[DailyPnlReport] 无管理员用户可登记: %s", title)
+    except Exception as exc:  # noqa: BLE001 - 登记失败不回冲主链
+        logger.warning("[DailyPnlReport] 通知面登记失败: %s", exc)
+    if delivered <= 0:
+        _release_registration(redis, date_str, outcome)
+        return False
+    logger.info("[DailyPnlReport] 已登记进通知面（%s）: %s", outcome, title)
+    return True
+
+
 async def run_daily_pnl_report(redis, *, today: date | None = None, db=None) -> dict:
     """生成并推送当日收盘收益报表。
 
@@ -253,6 +331,18 @@ async def run_daily_pnl_report(redis, *, today: date | None = None, db=None) -> 
 
     built = build_report(channels, day)
     if built is None:
+        # 无数据不是失败、也不算送达，但桥停更日通知面不该依旧空白（H11）
+        await _register_delivery(
+            redis,
+            date_str,
+            outcome="nodata",
+            title=f"收盘收益报表无数据 · {day.isoformat()}",
+            content=(
+                "到点仍无当日实盘台账行，报表未发送；数据迟到仍会补发（过 0 点作废）。"
+                "若持续无行，先查桥是否在写 real_account_ledger_daily_snapshots"
+                "（结算 finalize 应在 15:05 前完成）。"
+            ),
+        )
         return {"date": date_str, "sent": False, "skipped": "no_ledger_rows"}
 
     title, content = built
@@ -268,6 +358,18 @@ async def run_daily_pnl_report(redis, *, today: date | None = None, db=None) -> 
         date_str,
         "已推送" if sent else "未送达，稍后重试",
         ",".join(c["key"] for c in channels),
+    )
+    # 送达/未送达都登记进通知面（H11），每（日, 结果）至多一条
+    await _register_delivery(
+        redis,
+        date_str,
+        outcome="sent" if sent else "unsent",
+        title=f"收盘收益报表{'已送达' if sent else '未送达'} · {day.isoformat()}",
+        content=(
+            content
+            if sent
+            else f"{content}\n\nQQ 推送未成功（每周期重试，送达后补登「已送达」）。"
+        ),
     )
     return {
         "date": date_str,
