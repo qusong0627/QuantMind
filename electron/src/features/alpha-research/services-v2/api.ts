@@ -495,6 +495,12 @@ export interface MiningHistoryRow {
   direction: string;
   /** 方向如何被选中（T-MV-02）：'selected'/'random'=类别选择路径；null=模式未参与 */
   direction_mode: string | null;
+  /**
+   * 加权抽样的复现凭证（T-MV-03，JSON 文本）：{mode, weighting, seed, picked,
+   * candidates:[{direction,attempts,weight}]}；null=没抽样（自由文本/selected）。
+   * 解析失败按无证据处理——工具提示宁缺勿错。
+   */
+  direction_meta: string | null;
   /** text=文字指令 / doc=文档解析链（P1）/ legacy=历史回填 */
   source: string;
   doc_id: string | null;

@@ -257,11 +257,28 @@ async def test_evolve_records_effective_direction_mode(monkeypatch) -> None:
 
     assert launcher.started["direction"] == "方向A"
     assert launcher.started["direction_mode"] == "selected"
+    assert launcher.started["direction_meta"] is None, (
+        "selected 是确定性取第一条——没有抽样，就没有抽样证据（NULL 不是空 JSON）"
+    )
 
 
 @pytest.mark.asyncio
 async def test_evolve_random_mode_is_recorded(monkeypatch) -> None:
-    """random 模式抽取的方向与模式一起落档（单条候选排除随机抖动）。"""
+    """random 模式抽取的方向、模式与抽样证据一起落档（单条候选排除随机抖动）。
+
+    计数用假 store：本文件是纯路由单测，不碰真库——asyncpg 池按 loop 绑定，
+    单测里开的池会毒化后续真库用例的探活（表现为静默 skip）。
+    """
+    import json
+
+    from backend.services.engine.alpha_agent import task_store as task_store_mod
+
+    class _FakeStore:
+        async def count_by_direction(self, *, user_id, market, directions):
+            return {}
+
+    monkeypatch.setattr(task_store_mod, "get_mining_task_store", lambda: _FakeStore())
+
     launcher = FakeLauncher()
     _wire(monkeypatch, launcher)
 
@@ -269,6 +286,66 @@ async def test_evolve_random_mode_is_recorded(monkeypatch) -> None:
 
     assert launcher.started["direction"] == "唯一方向"
     assert launcher.started["direction_mode"] == "random"
+    meta = json.loads(launcher.started["direction_meta"])
+    assert meta["mode"] == "random" and meta["picked"] == "唯一方向"
+    assert isinstance(meta["seed"], int)
+    assert [c["direction"] for c in meta["candidates"]] == ["唯一方向"]
+
+
+@pytest.mark.asyncio
+async def test_evolve_random_meta_reflects_mining_history_weights(monkeypatch) -> None:
+    """加权抽样（T-MV-03）：权重的数据源 = 本用户×本市场的方向挖掘史次数。
+
+    用假 store 固定计数（真库有残留行会让权重不可测），断言 meta 里逐候选的
+    attempts/weight 与 w=1/(1+n) 完全一致、且命中可重放。
+    """
+    import json
+    import random
+
+    from backend.services.engine.alpha_agent import task_store as task_store_mod
+
+    class _FakeStore:
+        async def count_by_direction(self, *, user_id, market, directions):
+            assert user_id == "u-1" and market == "a_share"
+            return {"方向A": 9}
+
+    monkeypatch.setattr(task_store_mod, "get_mining_task_store", lambda: _FakeStore())
+
+    launcher = FakeLauncher()
+    _wire(monkeypatch, launcher)
+
+    await _call(directions=["方向A", "方向B"], direction_mode="random")
+
+    meta = json.loads(launcher.started["direction_meta"])
+    by_dir = {c["direction"]: c for c in meta["candidates"]}
+    assert by_dir["方向A"]["attempts"] == 9
+    assert by_dir["方向A"]["weight"] == pytest.approx(0.1)
+    assert by_dir["方向B"]["attempts"] == 0 and by_dir["方向B"]["weight"] == 1.0
+    assert meta["weighting"] == "blankness" and meta["picked"] == launcher.started["direction"]
+    replayed = random.Random(meta["seed"]).choices(
+        [c["direction"] for c in meta["candidates"]],
+        weights=[c["weight"] for c in meta["candidates"]],
+        k=1,
+    )[0]
+    assert replayed == meta["picked"], "落档证据可复现（验收条款的机器化表达）"
+
+
+@pytest.mark.asyncio
+async def test_evolve_sampler_failure_falls_back_to_plain_choice(monkeypatch) -> None:
+    """抽样模块整体炸了也不许拦任务创建：退普通均匀 choice，meta NULL（诚实留白）。"""
+    launcher = FakeLauncher()
+    _wire(monkeypatch, launcher)
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("import exploded")
+
+    monkeypatch.setattr(router_mod, "sample_weighted_direction", _boom)
+
+    await _call(directions=["方向A", "方向B"], direction_mode="random")
+
+    assert launcher.started["direction"] in {"方向A", "方向B"}
+    assert launcher.started["direction_mode"] == "random"
+    assert launcher.started["direction_meta"] is None
 
 
 @pytest.mark.asyncio
@@ -282,3 +359,4 @@ async def test_evolve_free_text_records_no_mode(monkeypatch) -> None:
 
     assert launcher.started["direction"] == "自由文本方向"
     assert launcher.started["direction_mode"] is None
+    assert launcher.started["direction_meta"] is None

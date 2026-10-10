@@ -38,6 +38,7 @@ function mkRow(over: Partial<MiningHistoryRow> = {}): MiningHistoryRow {
     data_source: 'parquet',
     direction: '动量反转 × 波动率过滤',
     direction_mode: null,
+    direction_meta: null,
     source: 'text',
     doc_id: null,
     status: 'completed',
@@ -141,6 +142,50 @@ describe('HistoryPage：每一行都是「当时挖了什么」的事实', () =>
     expect(await screen.findByText('动量反转 × 波动率过滤')).toBeTruthy();
     expect(screen.queryByText('类别选定')).toBeNull();
     expect(screen.queryByText('随机抽取')).toBeNull();
+  });
+
+  test('抽样证据（T-MV-03）压进徽章工具提示：加权口径/seed/候选次数可见', async () => {
+    getMiningHistoryMock.mockResolvedValue(
+      ok({
+        tasks: [
+          mkRow({
+            direction_mode: 'random',
+            direction_meta: JSON.stringify({
+              mode: 'random',
+              weighting: 'blankness',
+              seed: 987654321,
+              picked: '动量反转 × 波动率过滤',
+              candidates: [
+                { direction: '动量反转 × 波动率过滤', attempts: 0, weight: 1 },
+                { direction: '波动类方向', attempts: 9, weight: 0.1 },
+              ],
+            }),
+          }),
+        ],
+        total: 1,
+      }),
+    );
+
+    render(<HistoryPage />);
+
+    const badge = await screen.findByTitle(/方向如何被选中/);
+    expect(badge.getAttribute('title')).toContain('按空白度加权');
+    expect(badge.getAttribute('title')).toContain('seed=987654321');
+    expect(badge.getAttribute('title')).toContain('波动类方向=9次');
+  });
+
+  test('抽样证据是坏 JSON 时退回基础提示（宁缺勿错，不炸行）', async () => {
+    getMiningHistoryMock.mockResolvedValue(
+      ok({
+        tasks: [mkRow({ direction_mode: 'random', direction_meta: '{not json' })],
+        total: 1,
+      }),
+    );
+
+    render(<HistoryPage />);
+
+    const badge = await screen.findByTitle('方向如何被选中（类别选择路径）');
+    expect(badge.textContent).toBe('随机抽取');
   });
 
   test('没有记录时给出空态说明，而不是空白表格', async () => {

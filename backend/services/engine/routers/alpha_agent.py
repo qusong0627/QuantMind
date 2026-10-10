@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -24,6 +25,9 @@ from backend.services.engine.alpha_agent import profile_gateway
 from backend.services.engine.alpha_agent.direction_decompose import (
     MAX_CARDS_DEFAULT,
     MAX_CARDS_LIMIT,
+)
+from backend.services.engine.alpha_agent.direction_sampling import (
+    sample_weighted_direction,
 )
 from backend.services.engine.alpha_agent.doc_gate import require_doc_mining
 from backend.services.engine.alpha_agent.doc_store import get_doc_store
@@ -610,15 +614,28 @@ async def start_evolution(
     # （放在长度闸与 LLM 解析之前：纯函数先算完，超长在烧 token 前就被拒）
     clean_dirs = [d.strip() for d in directions if isinstance(d, str) and d.strip()]
     # 方向历史（T-MV-02）：只有类别选择真正参与时才记录生效模式；自由文本/
-    # 卡片派发路径保持 NULL——mode 列是「方向怎么来的」的事实，不是参数回声
+    # 卡片派发路径保持 NULL——mode 列是「方向怎么来的」的事实，不是参数回声。
+    # random 不是均匀随机（T-MV-03）：按空白度（该方向在本用户×本市场的挖掘史
+    # 次数）加权抽样，seed/候选/权重/命中落 direction_meta 供复现。
     record_mode: str | None = None
+    direction_meta_json: str | None = None
     if clean_dirs:
-        import random as _random
-
         record_mode = "random" if direction_mode == "random" else "selected"
-        direction = (
-            _random.choice(clean_dirs) if record_mode == "random" else clean_dirs[0]
-        )
+        if record_mode == "random":
+            try:
+                direction, _sampling_meta = await sample_weighted_direction(
+                    clean_dirs, user_id=auth_user_id, market=market
+                )
+                direction_meta_json = json.dumps(_sampling_meta, ensure_ascii=False)
+            except Exception as e:  # noqa: BLE001 - 抽样证据不许拦任务创建
+                logger.warning(
+                    "[alpha-agent] weighted sampling failed, plain choice: %s", e
+                )
+                import random as _random
+
+                direction = _random.choice(clean_dirs)
+        else:
+            direction = clean_dirs[0]
         logger.info(
             "[alpha-agent] evolve directions=%d mode=%s -> %s",
             len(clean_dirs),
@@ -679,6 +696,7 @@ async def start_evolution(
             loop_n=loop_n,
             direction=direction or None,
             direction_mode=record_mode,
+            direction_meta=direction_meta_json,
             data_source=data_source or None,
             # 文档血统：落 rd_agent_mining_tasks.source/doc_id（历史页可见出处）
             source="doc" if doc_id else "text",

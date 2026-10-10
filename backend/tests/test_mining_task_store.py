@@ -187,6 +187,7 @@ async def test_real_db_create_get_roundtrip_is_user_scoped() -> None:
             source="doc",
             doc_id="doc-abc",
             direction_mode="random",
+            direction_meta='{"seed": 42, "picked": "动量反转 × 波动率过滤"}',
         )
 
         row = await store.get_task(tid)
@@ -194,6 +195,9 @@ async def test_real_db_create_get_roundtrip_is_user_scoped() -> None:
         assert row["task_id"] == tid and row["user_id"] == user
         assert row["direction"] == "动量反转 × 波动率过滤"
         assert row["direction_mode"] == "random"
+        assert row["direction_meta"] == '{"seed": 42, "picked": "动量反转 × 波动率过滤"}', (
+            "抽样证据（T-MV-03）原样往返——它是「方向怎么抽出来的」唯一复现凭证"
+        )
         assert row["source"] == "doc" and row["doc_id"] == "doc-abc"
         assert row["status"] == "pending" and row["progress_pct"] == 0
         assert row["created_at"].endswith("Z") and row["updated_at"].endswith("Z")
@@ -267,8 +271,51 @@ async def test_real_db_create_is_idempotent_on_task_id() -> None:
         assert row is not None
         assert row["direction"] == "测试方向", "首次写入赢，重放不覆盖已有记录"
         assert row["direction_mode"] is None, "模式没参与 → NULL（不伪记默认 selected）"
+        assert row["direction_meta"] is None, "没抽样就没有证据——NULL 不是空 JSON 字符串"
     finally:
         await _cleanup(user)
+        await _close()
+
+
+@pytest.mark.asyncio
+async def test_real_db_count_by_direction_scopes_user_and_market() -> None:
+    """空白度计数（T-MV-03）：按 user × market 收口、全状态计、只回非零项。
+
+    - 同方向挖过两次（含 failed——挖过就是挖过）→ 2；
+    - 同方向跨市场（crypto）不抵扣 a_share 的计数；
+    - 别人的同方向任务不计入（方向史按用户隔离）；
+    - 没出现的候选语义 = 0 次（真零，不是「查不到」）；空入参零 SQL 直返。
+    """
+    await _ready()
+    user = _scope()
+    other = _scope()
+    try:
+        store = get_mining_task_store()
+        t1 = f"t-cbd-{uuid.uuid4().hex[:12]}"
+        t2 = f"t-cbd-{uuid.uuid4().hex[:12]}"
+        t_other_market = f"t-cbd-{uuid.uuid4().hex[:12]}"
+        t_other_user = f"t-cbd-{uuid.uuid4().hex[:12]}"
+        await _create(store, t1, user, direction="方向A")
+        await _create(store, t2, user, direction="方向A")
+        await store.mark_terminal(t2, status="failed", error="boom")
+        await _create(store, t_other_market, user, market="crypto", direction="方向A")
+        await _create(store, t_other_user, other, direction="方向A")
+
+        counts = await store.count_by_direction(
+            user_id=user, market="a_share", directions=["方向A", "方向B"]
+        )
+        assert counts == {"方向A": 2}, "全状态计数、market 收口、只回非零项"
+        assert (
+            await store.count_by_direction(
+                user_id=user, market="crypto", directions=["方向A"]
+            )
+        ) == {"方向A": 1}, "跨市场不互相抵扣"
+        assert (
+            await store.count_by_direction(user_id=user, market="a_share", directions=[])
+        ) == {}, "空入参零 SQL 直返"
+    finally:
+        await _cleanup(user)
+        await _cleanup(other)
         await _close()
 
 

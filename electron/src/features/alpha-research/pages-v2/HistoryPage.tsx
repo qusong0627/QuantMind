@@ -65,6 +65,30 @@ function directionModeLabel(mode: string): string {
   return DIRECTION_MODE_LABELS[mode] ?? mode;
 }
 
+/**
+ * 抽样证据摘要（T-MV-03）：把 direction_meta 的复现凭证压成一行工具提示文案。
+ * 解析失败/无证据 → null（宁缺勿错）；权重只标注口径，不铺数值。
+ */
+function directionMetaSummary(metaJson: string | null | undefined): string | null {
+  if (!metaJson) return null;
+  try {
+    const meta = JSON.parse(metaJson);
+    const weighting =
+      meta?.weighting === 'uniform_fallback'
+        ? '均匀兜底（史读取失败）'
+        : '按空白度加权（挖得越少权重越高）';
+    const candidates = Array.isArray(meta?.candidates)
+      ? meta.candidates
+          .map((c: { direction?: string; attempts?: number }) => `${c.direction}=${c.attempts}次`)
+          .join('，')
+      : '';
+    const seed = typeof meta?.seed === 'number' ? `seed=${meta.seed}` : '';
+    return [weighting, seed, candidates].filter(Boolean).join('；');
+  } catch {
+    return null;
+  }
+}
+
 const STATUS_FILTERS: Array<{ value: string; label: string }> = [
   { value: 'all', label: '全部状态' },
   { value: 'pending', label: '排队中' },
@@ -310,7 +334,12 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({
                         {row.direction_mode && (
                           <span
                             className="mt-0.5 inline-flex items-center rounded-full border border-indigo-100 bg-indigo-50/70 px-1.5 py-px text-[10px] font-bold text-indigo-600"
-                            title="方向如何被选中（类别选择路径）"
+                            title={[
+                              '方向如何被选中（类别选择路径）',
+                              directionMetaSummary(row.direction_meta),
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}
                           >
                             {directionModeLabel(row.direction_mode)}
                           </span>

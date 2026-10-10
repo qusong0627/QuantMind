@@ -8,9 +8,12 @@
  *     自由文本路径的行**不得**出现任何模式徽章（mode 列是事实，不是参数回声）。
  *
  * 依赖前置（探针前置数据由 API 探针写入，见本次交付记录）：
- *  - 一条 direction_mode=random 的任务（方向=动量类因子 (38)）
+ *  - 一条 direction_mode=random 的任务（方向=动量类因子 (38)，无 direction_meta证据——
+ *    T-MV-02 时代落档，早于抽样证据列）
+ *  - 一条 direction_mode=random + direction_meta 齐全的任务（方向=基础行情类因子 (6)，
+ *    T-MV-03 加权抽样落档）；其徽章工具提示必须含加权口径/seed/候选次数，不得标「均匀兜底」
  *  - 一条自由文本方向的任务（无 directions → mode NULL）
- * 两者均已 cancel，历史页应显示「已取消」。
+ * 均已 cancel，历史页应显示「已取消」。
  *
  * 用法：node electron/tests/probe_supply_face_direction_history.mjs
  */
@@ -119,6 +122,29 @@ if (await randomRow.count()) {
     (await randomRow.locator('span:text-is("类别选定")').count()) === 0,
     '该行不带「类别选定」徽章',
   );
+  // 无抽样证据的旧行（T-MV-02 落档，meta=NULL）：工具提示只有基础句，不编造证据
+  const legacyTitle = (await badge.first().getAttribute('title')) || '';
+  ok(
+    legacyTitle.includes('方向如何被选中') && !legacyTitle.includes('seed='),
+    '无 meta 行工具提示不编造抽样证据',
+    legacyTitle.slice(0, 60),
+  );
+}
+
+// T-MV-03：带完整抽样证据的行 → 工具提示呈现加权口径/seed/候选次数
+const metaRow = page.locator('tr').filter({ hasText: '基础行情类因子 (6)' }).first();
+ok((await metaRow.count()) > 0, '历史行存在（T-MV-03 加权抽样方向）');
+if (await metaRow.count()) {
+  const metaBadge = metaRow.locator('span:text-is("随机抽取")');
+  ok((await metaBadge.count()) > 0, '该行带「随机抽取」徽章');
+  const title = (await metaBadge.first().getAttribute('title')) || '';
+  ok(title.includes('按空白度加权'), '工具提示标注加权口径', title.slice(0, 80));
+  ok(/seed=\d+/.test(title), '工具提示含可复现 seed');
+  ok(
+    title.includes('动量类因子 (38)=1次'),
+    '工具提示含逐候选挖掘史次数（权重数据源可见）',
+  );
+  ok(!title.includes('均匀兜底'), '该行走通真加权路径（非 read-failure 兜底）');
 }
 
 const textRow = page

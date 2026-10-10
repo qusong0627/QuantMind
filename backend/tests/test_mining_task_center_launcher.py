@@ -147,16 +147,21 @@ async def test_db_create_forwards_direction_mode(monkeypatch) -> None:
     monkeypatch.setattr(launcher_module, "_task_store", lambda: store)
     launcher = _launcher_with()
 
-    await launcher._db_create(_task(direction_mode="random"))
+    await launcher._db_create(
+        _task(direction_mode="random", direction_meta='{"seed": 7, "picked": "方向A"}')
+    )
 
     kind, kwargs = store.calls[0]
     assert kind == "create"
     assert kwargs["direction_mode"] == "random"
+    assert kwargs["direction_meta"] == '{"seed": 7, "picked": "方向A"}', (
+        "抽样证据（T-MV-03）随任务落档——审计「方向怎么抽出来的」"
+    )
 
 
 @pytest.mark.asyncio
 async def test_db_create_blank_direction_mode_is_null(monkeypatch) -> None:
-    """模式没参与（自由文本/卡片派发）→ NULL，不伪记成 selected。"""
+    """模式没参与（自由文本/卡片派发）→ NULL，不伪记成 selected；抽样证据同理。"""
     store = _RecordingStore()
     monkeypatch.setattr(launcher_module, "_task_store", lambda: store)
     launcher = _launcher_with()
@@ -164,6 +169,7 @@ async def test_db_create_blank_direction_mode_is_null(monkeypatch) -> None:
     await launcher._db_create(_task())
 
     assert store.calls[0][1]["direction_mode"] is None
+    assert store.calls[0][1]["direction_meta"] is None
 
 
 @pytest.mark.asyncio
@@ -267,16 +273,19 @@ async def test_start_evolution_records_direction_and_source(monkeypatch) -> None
         source="doc",
         doc_id="doc-9",
         direction_mode="random",
+        direction_meta='{"seed": 9, "picked": "动量 × 波动率"}',
     )
 
     task = launcher._tasks[task_id]
     assert task.direction == "动量 × 波动率", "内存任务也要带着方向（监控器直接读它）"
     assert task.direction_mode == "random"
+    assert task.direction_meta == '{"seed": 9, "picked": "动量 × 波动率"}'
 
     kind, kwargs = store.calls[0]
     assert kind == "create" and kwargs["task_id"] == task_id
     assert kwargs["direction"] == "动量 × 波动率"
     assert kwargs["direction_mode"] == "random"
+    assert kwargs["direction_meta"] == '{"seed": 9, "picked": "动量 × 波动率"}'
     assert kwargs["source"] == "doc" and kwargs["doc_id"] == "doc-9"
 
 
@@ -294,12 +303,16 @@ async def test_start_or_queue_forwards_direction_mode(monkeypatch) -> None:
     monkeypatch.setattr(launcher, "_launch", lambda *a, **k: None)
 
     receipt = await launcher.start_or_queue(
-        "u-1", direction="方向A", direction_mode="selected"
+        "u-1",
+        direction="方向A",
+        direction_mode="selected",
+        direction_meta='{"seed": 3, "picked": "方向A"}',
     )
 
     task = launcher._tasks[receipt.task_id]
     assert task.direction_mode == "selected"
     assert store.calls[0][1]["direction_mode"] == "selected"
+    assert store.calls[0][1]["direction_meta"] == '{"seed": 3, "picked": "方向A"}'
 
 
 # ── 任务日志根与留存 GC（T-FM-20）────────────────────────────────────

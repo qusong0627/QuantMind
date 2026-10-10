@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS rd_agent_mining_tasks (
   data_source TEXT,
   direction TEXT NOT NULL DEFAULT '',
   direction_mode TEXT,
+  direction_meta TEXT,
   loop_n INTEGER,
   source TEXT NOT NULL DEFAULT 'text',
   doc_id TEXT,
@@ -142,19 +143,21 @@ class MiningTaskStore:
         """建表 + 索引 + 老库补列（幂等；engine 启动期调用）。
 
         ``CREATE TABLE IF NOT EXISTS`` 不会给已存在的表补列——老库（列进
-        CREATE 语句之前建的）缺 ``direction_mode`` 时，create_task 的 INSERT
-        引用该列会整行失败（记录层失败只告警 → 表现为「历史页凭空缺任务」）。
-        补列走 ``ADD COLUMN IF NOT EXISTS``（同 doc_store 先例）。
+        CREATE 语句之前建的）缺 ``direction_mode``/``direction_meta`` 时，
+        create_task 的 INSERT 引用该列会整行失败（记录层失败只告警 →
+        表现为「历史页凭空缺任务」）。补列走 ``ADD COLUMN IF NOT EXISTS``
+        （同 doc_store 先例）。
         """
         async with get_session() as session:
             for stmt in [s.strip() for s in _CREATE_TABLE_SQL.split(";") if s.strip()]:
                 await session.execute(text(stmt))
-            await session.execute(
-                text(
-                    "ALTER TABLE rd_agent_mining_tasks "
-                    "ADD COLUMN IF NOT EXISTS direction_mode TEXT"
+            for column in ("direction_mode", "direction_meta"):
+                await session.execute(
+                    text(
+                        "ALTER TABLE rd_agent_mining_tasks "
+                        f"ADD COLUMN IF NOT EXISTS {column} TEXT"
+                    )
                 )
-            )
         logger.info("rd_agent_mining_tasks table ensured")
 
     async def create_task(
@@ -168,6 +171,7 @@ class MiningTaskStore:
         data_source: str = "",
         direction: str = "",
         direction_mode: str | None = None,
+        direction_meta: str | None = None,
         loop_n: int = 5,
         source: str = "text",
         doc_id: str | None = None,
@@ -175,7 +179,8 @@ class MiningTaskStore:
         """落任务行。task_id 撞键是无操作（重放/重试不该把首次写入覆盖掉）。
 
         ``status`` 只收初始态（pending/queued）——校验发生在开 session 之前
-        （无库环境里也要红/绿分明）。
+        （无库环境里也要红/绿分明）。``direction_meta`` 是加权抽样（T-MV-03）
+        的复现凭证（JSON 文本），没抽样就是 NULL。
         """
         if status not in _INITIAL_STATUSES:
             raise ValueError(
@@ -188,11 +193,11 @@ class MiningTaskStore:
                 text("""
                     INSERT INTO rd_agent_mining_tasks
                       (task_id, user_id, market, universe, data_source, direction,
-                       direction_mode, loop_n, source, doc_id, status,
+                       direction_mode, direction_meta, loop_n, source, doc_id, status,
                        progress_pct, current_loop, created_at, updated_at)
                     VALUES
                       (:task_id, :user_id, :market, :universe, :data_source, :direction,
-                       :direction_mode, :loop_n, :source, :doc_id, :status,
+                       :direction_mode, :direction_meta, :loop_n, :source, :doc_id, :status,
                        0, 0, :now, :now)
                     ON CONFLICT (task_id) DO NOTHING
                     """),
@@ -205,6 +210,7 @@ class MiningTaskStore:
                     "data_source": data_source or "",
                     "direction": clamp_direction(direction),
                     "direction_mode": direction_mode,
+                    "direction_meta": direction_meta,
                     "loop_n": int(loop_n),
                     "source": source or "text",
                     "doc_id": doc_id,
@@ -385,6 +391,40 @@ class MiningTaskStore:
                 .all()
             )
         return {str(r["doc_id"]): int(r["n"]) for r in rows}
+
+    async def count_by_direction(
+        self, *, user_id: str, market: str, directions: list[str]
+    ) -> dict[str, int]:
+        """按方向批量计挖掘史次数（T-MV-03 空白度权重的数据源），**只回非零项**。
+
+        口径：
+        - **全状态计数**——failed/cancelled 也是「挖过」，方向的新鲜度由
+          尝试次数决定，不是成败；
+        - 按 **user × market** 收口——方向词表是市场级的（动量类因子 在 A股
+          挖过不代表港股挖过），跨市场不互相抵扣；按用户隔离同
+          :meth:`count_tasks_by_docs`（别人的史不参与我的抽样分布）；
+        - 没出现的方向语义 = 0 次（真零，不是「查不到」）；空入参零 SQL 直返。
+        """
+        ids = [d for d in directions if d]
+        if not ids:
+            return {}
+        async with get_session(read_only=True) as session:
+            rows = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT direction, count(*) AS n FROM rd_agent_mining_tasks "
+                            "WHERE user_id = :user_id AND market = :market "
+                            "AND direction = ANY(:directions) "
+                            "GROUP BY direction"
+                        ),
+                        {"user_id": user_id, "market": market, "directions": ids},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return {str(r["direction"]): int(r["n"]) for r in rows}
 
     async def list_by_doc(
         self, *, user_id: str, doc_id: str, limit: int = DOC_TASKS_LIMIT

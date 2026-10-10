@@ -195,6 +195,9 @@ class EvolutionTask:
     #: 方向模式（T-MV-02）：'selected'/'random'=类别选择路径；''=模式未参与
     #: （自由文本/卡片派发）→ 落库为 NULL，历史页如实呈现
     direction_mode: str = ""
+    #: 加权抽样的复现凭证（T-MV-03，JSON 文本）：seed/候选/权重/命中；
+    #: ''=没抽样（自由文本、selected、抽样降级）→ 落库为 NULL
+    direction_meta: str = ""
     status: TaskStatus = TaskStatus.PENDING
     progress: str = ""
     phase: str = "pending"
@@ -242,6 +245,7 @@ class AlphaAgentLauncher:
         provider_uri: str | None = None,
         direction: str | None = None,
         direction_mode: str | None = None,
+        direction_meta: str | None = None,
         data_source: str | None = None,
         source: str = "text",
         doc_id: str | None = None,
@@ -253,6 +257,7 @@ class AlphaAgentLauncher:
         source/doc_id: 输入来源（text=文字指令，doc=文档解析链），落任务记录行。
         direction_mode: 方向如何被选中（'selected'/'random'）；None=模式未参与，
         落库为 NULL——调用方只在类别选择真正发生时传值（T-MV-02）。
+        direction_meta: 加权抽样的复现凭证（JSON 文本，T-MV-03）；None=没抽样。
         llm_overrides: 用户级 LLM 环境变量覆盖（如个人中心配置的 API Key），
         优先于容器全局 env 注入子进程。
 
@@ -269,6 +274,7 @@ class AlphaAgentLauncher:
             market=market, universe=universe, loop_n=loop_n,
             data_source=data_source or "", direction=direction or "",
             direction_mode=direction_mode or "",
+            direction_meta=direction_meta or "",
         )
         self._tasks[task_id] = task
 
@@ -295,6 +301,7 @@ class AlphaAgentLauncher:
         seed: str | None = None,
         direction: str | None = None,
         direction_mode: str | None = None,
+        direction_meta: str | None = None,
         data_source: str | None = None,
         source: str = "text",
         doc_id: str | None = None,
@@ -329,6 +336,7 @@ class AlphaAgentLauncher:
             market=market, universe=universe, loop_n=loop_n,
             data_source=data_source or "", direction=direction or "",
             direction_mode=direction_mode or "",
+            direction_meta=direction_meta or "",
             status=TaskStatus.PENDING if has_slot else TaskStatus.QUEUED,
         )
         self._tasks[task_id] = task
@@ -654,6 +662,8 @@ class AlphaAgentLauncher:
                 direction=task.direction,
                 # 模式未参与（''）→ NULL：历史页不把自由文本伪记成「类别选定」
                 direction_mode=task.direction_mode or None,
+                # 没抽样（''）→ NULL：抽样证据是事实不是占位，空就不写
+                direction_meta=task.direction_meta or None,
                 loop_n=task.loop_n,
                 source=source,
                 doc_id=doc_id,
