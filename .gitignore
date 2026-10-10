@@ -291,6 +291,16 @@ backend/scripts/quanthk_south_sync.py
 backend/scripts/build_ml_signal_datasets.py
 backend/scripts/evaluate_signal_factors.py
 
+# L1 因子重生成代码/公式与配套测试（内部资产，2026-10-10 重建）：代码即公式，
+# 一律不入仓（公开仓有 gitee/upstream 镜像）；交付备份走 NAS-NSF（rsync 须
+# --inplace + md5 逐文件比对）。今后 L2 因子生成代码同样处理。
+backend/scripts/l1_factors/
+backend/scripts/l2_factors/
+backend/tests/test_l1_*.py
+backend/tests/fixtures/l1_*
+# 新增因子研发工作区（研发期代码/公式，不进仓）
+backend/scripts/l1_factors_dev/
+
 # 内部发布脚本（含 COS 上传与 CDN 刷新，不进开源仓库）
 scripts/cos-publish/
 REFACTOR_PLAN.md
