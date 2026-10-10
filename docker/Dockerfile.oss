@@ -123,7 +123,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
 
 # 安装 QuantDB SDK（付费高质量数据源：K线/Tick/财报/估值/315维AI因子）
 RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
-    python -m pip install --root-user-action=ignore "quantdb-sdk==0.3.3"
+    python -m pip install --root-user-action=ignore "quantdb-sdk==0.4.3"
 
 # 修复 qlib 0.9.7 bug: position.py 中 price=None 导致 TypeError
 COPY docker/patch_qlib.py /tmp/patch_qlib.py

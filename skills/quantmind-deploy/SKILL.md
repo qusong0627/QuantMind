@@ -388,7 +388,7 @@ pip install torch==2.9.1 -i https://mirrors.aliyun.com/pypi/simple/
 
 # 4. 其余依赖（与 Dockerfile.oss 同清单，requirements/*.txt + quantdb-sdk + patch_qlib）
 pip install -r requirements.txt -r requirements/production.txt -r requirements/ai.txt
-pip install "quantdb-sdk==0.3.3" && python docker/patch_qlib.py
+pip install "quantdb-sdk==0.4.3" && python docker/patch_qlib.py
 
 # 5. PG 初始化（实例内无 systemd，用 pg_ctlcluster 拉起）
 pg_ctlcluster 14 main start
@@ -552,7 +552,7 @@ docker exec quantmind-db pg_isready -U quantmind
 | **容器起不来**               | 端口冲突 / 配置        | `docker compose logs quantmind` 看日志                      |
 | **数据库连接失败**             | PG 未就绪           | `docker exec quantmind-db pg_isready -U quantmind`       |
 | **前端 502**              | Nginx/PM2        | `nginx -t` + `pm2 status` + `pm2 restart quantmind-web`  |
-| **quantdb-sdk 安装失败**    | 版本兼容             | Dockerfile 用 `quantdb-sdk==0.3.3`，换源重装                   |
+| **quantdb-sdk 安装失败**    | 版本兼容             | Dockerfile 用 `quantdb-sdk==0.4.3`，换源重装                   |
 | **北向/南向无数据**            | 未同步              | 跑 `quantdb_north_sync` / `quanthk_south_sync`            |
 | **GPU 训练不生效**           | 未配 AutoDL 节点     | `training-nodes/config` 配置后选 node\_id                    |
 | **AutoDL 节点连不上**        | SSH 配置错          | `training-nodes/test` 诊断 SSH/docker                      |
