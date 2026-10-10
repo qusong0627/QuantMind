@@ -137,6 +137,157 @@ def test_abort_with_orders_already_out_is_not_alerted() -> None:
     assert A.round_alert(_result(status=STATUS_OK, legs=2, submitted=1)) is None
 
 
+# ── 零输出可见性（2026-10-10 审计 H3/M10）：跑成了、但没产出 ─────────────
+# 以上四类都以「哪一步做砸了」为前提；这一组的前提是「每一步都没炸，但今天就是
+# 零产出」——空候选池 / 调仓轮零提交。此前这两种在状态键、日志、告警三面全绿。
+def _ok_meta(
+    pool_rows: int = 30,
+    *,
+    direction: str = "震荡偏多",
+    in_session: bool = True,
+    **extra,
+) -> dict:
+    """生产 OK 轮 meta 的同形（字段名与 ``decision_round`` 的构造处逐字对齐）。"""
+    meta: dict = {
+        "in_session": in_session,
+        "vetoes": 0,
+        "noops": 0,
+        "watches": 0,
+        "duplicates": 0,
+        "pool": {
+            "file": "/data/reports/stock_picks/20260924_picks.json",
+            "rows": pool_rows,
+            "shown": max(pool_rows - 2, 0),
+            "dropped": min(2, pool_rows),
+            "direction": direction,
+            "total_score": 2.5,
+        },
+    }
+    meta.update(extra)
+    return meta
+
+
+def test_a_missing_pool_is_reported_as_empty_pool() -> None:
+    """供给链断（池文件都不在）此前只留一行 warning 日志——状态键写着 ok，而今天
+    一个候选都没有：新开仓整条停摆。必须推，且要给出查因入口。"""
+    alert = A.round_alert(
+        _result(
+            decisions=0,
+            legs=0,
+            submitted=0,
+            meta={"in_session": True, "pool": {"file": "", "rows": 0}},
+        )
+    )
+    assert alert is not None
+    assert alert.kind == A.ALERT_EMPTY_POOL
+    assert alert.level == "error"
+    assert "文件不存在" in alert.content
+    assert A.MANUAL_DIAGNOSE_HINT in alert.content
+
+
+def test_an_empty_pool_file_is_reported_too() -> None:
+    """文件在但 0 行同样要报——「池文件存在」不是健康判据（2026-10-09 实锤：
+    文件在、30 只候选、rows=0、无告警）。"""
+    alert = A.round_alert(
+        _result(decisions=0, legs=0, submitted=0, meta=_ok_meta(0, direction="—"))
+    )
+    assert alert is not None and alert.kind == A.ALERT_EMPTY_POOL
+    assert "0 行" in alert.content
+
+
+def test_a_bearish_cleared_pool_is_by_design_and_not_pushed() -> None:
+    """看空清空是**设计内**的空池（方向门主动不建仓）：推它=每逢看空日误报一次，
+    几次之后整条告警链就被静音了。留痕由轮次 note 承担。"""
+    assert (
+        A.round_alert(
+            _result(decisions=0, legs=0, submitted=0, meta=_ok_meta(0, direction="看空"))
+        )
+        is None
+    )
+    # 强看空同族（子串覆盖）
+    assert (
+        A.round_alert(
+            _result(
+                decisions=0, legs=0, submitted=0, meta=_ok_meta(0, direction="强烈看空")
+            )
+        )
+        is None
+    )
+
+
+def test_zero_submit_on_a_rebalance_round_is_reported() -> None:
+    """池里有票、盘中、调仓轮零腿——2026-09-24「全 HOLD」断链事故正是这一类的
+    极端，此前在这里全绿。"""
+    alert = A.round_alert(_result(decisions=0, legs=0, submitted=0, meta=_ok_meta(30)))
+    assert alert is not None
+    assert alert.kind == A.ALERT_NO_LEGS
+    assert alert.level == "warning"
+    assert "零提交" in alert.title and "30" in alert.title
+    assert "未提出任何决策" in alert.content  # 头号成因分流：全 HOLD
+
+
+def test_zero_submit_with_vetoes_names_the_vetoes() -> None:
+    """计划了腿、全被否决：正文必须点名否决数——和「全 HOLD」的排查方向完全不同。"""
+    alert = A.round_alert(
+        _result(decisions=3, legs=3, submitted=0, meta=_ok_meta(30, vetoes=3))
+    )
+    assert alert is not None and alert.kind == A.ALERT_NO_LEGS
+    assert "否决" in alert.content and "3 条" in alert.content
+
+
+def test_intraday_zero_submit_is_by_design_and_silent() -> None:
+    """守护槽（intraday）本职是挂 watch 规则：零腿是常态，判它=每天固定误报。"""
+    intraday = next(s for s in SLOTS if s.hhmm == "1445")
+    assert (
+        A.round_alert(
+            _result(slot=intraday, decisions=0, legs=0, submitted=0, meta=_ok_meta(30))
+        )
+        is None
+    )
+
+
+def test_non_session_zero_submit_is_silent() -> None:
+    """非交易时段的轮次按设计不发腿（盘前规划轮）——只有「时段内零提交」才值得推。"""
+    assert (
+        A.round_alert(
+            _result(
+                decisions=0, legs=0, submitted=0, meta=_ok_meta(30, in_session=False)
+            )
+        )
+        is None
+    )
+
+
+def test_results_without_the_new_meta_are_not_judged() -> None:
+    """**向后兼容的判据**：meta 缺 ``rows``/``in_session``（老结果、替身）时一律不判
+    ——「取不到」不许被当成「空池/零产出」报出来（同 ``_exec_summary`` 纪律）。"""
+    assert A.round_alert(_result(decisions=0, legs=0, submitted=0)) is None
+    # 只带一半（有 pool.rows 没 in_session）：空池照报，零提交仍不判
+    half = _result(
+        decisions=0, legs=0, submitted=0, meta={"pool": {"file": "", "rows": 0}}
+    )
+    alert = A.round_alert(half)
+    assert alert is not None and alert.kind == A.ALERT_EMPTY_POOL
+
+
+def test_a_submitted_round_is_still_clean_under_the_new_meta() -> None:
+    """正向对照：同一套新 meta、submitted>0 ⇒ 两类新告警都不响（防判据恒真）。"""
+    assert (
+        A.round_alert(_result(decisions=2, legs=2, submitted=2, meta=_ok_meta(30)))
+        is None
+    )
+
+
+def test_zero_output_kinds_get_their_own_dedupe_keys() -> None:
+    """两类新告警各推各的（键含 kind 段）：空池不许把零提交那条吃掉，反之亦然。"""
+    r = _result(decisions=0, legs=0, submitted=0, meta=_ok_meta(30))
+    k_pool = A.alert_key(r, A.ALERT_EMPTY_POOL)
+    k_legs = A.alert_key(r, A.ALERT_NO_LEGS)
+    assert k_pool != k_legs
+    assert A.ALERT_EMPTY_POOL in k_pool and A.ALERT_NO_LEGS in k_legs
+    assert "2026-09-24" in k_pool and "pro" in k_pool
+
+
 # ── 去重与送达 ────────────────────────────────────────────────────────
 class FakeRedis:
     """``SET NX EX`` 语义的字典替身（与 redis-py 同形）。"""
@@ -181,6 +332,22 @@ async def test_the_same_kind_is_pushed_once_a_day_per_agent() -> None:
     assert await A.alert_round(result, notifier=notifier, redis=redis, user_id="u1")
     assert not await A.alert_round(result, notifier=notifier, redis=redis, user_id="u1")
     assert len(notifier.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_empty_pool_is_pushed_once_a_day() -> None:
+    """零输出类走同一套投递纪律：一天一次，第二轮回轮不再打扰。"""
+    redis, notifier = FakeRedis(), SpyNotifier()
+    result = _result(
+        decisions=0,
+        legs=0,
+        submitted=0,
+        meta={"in_session": True, "pool": {"file": "", "rows": 0}},
+    )
+    assert await A.alert_round(result, notifier=notifier, redis=redis, user_id="u1")
+    assert not await A.alert_round(result, notifier=notifier, redis=redis, user_id="u1")
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0][3] == "error"  # 空池是 error 档（会旁路到 QQ）
 
 
 def test_two_agents_are_pushed_separately() -> None:

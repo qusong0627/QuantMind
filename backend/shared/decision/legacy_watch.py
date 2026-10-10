@@ -216,7 +216,7 @@ def _owner_of(agent: str) -> str:
 def has_rules(plan: WatchPlan) -> bool:
     """这一家本轮有没有可写的东西（**空集不写**）。
 
-    与决策层的口径一字不差（``decision_round._maybe_write_watch``：本轮一条 ``watch``
+    与决策层的口径一字不差（``decision_round_io.maybe_write_watch``：本轮一条 ``watch``
     都没有时**整组保留**）：``write_watch_plan`` 是整组替换，拿空集去写等于把该 agent
     已挂上的守护规则全摘掉。「没提到」不等于「撤销全部守护」——迁移重复跑一次就把
     上一次挂好的止损全清了，是这个工具最难用肉眼发现的失效形态（跑完一切正常）。

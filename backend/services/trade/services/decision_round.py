@@ -122,7 +122,6 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 
-from backend.shared.decision.contract import SCHEMA_INTRADAY
 from backend.shared.decision.gates import (
     RULE_POOL_ROW_INVALID,
     RULE_UNAFFORDABLE,
@@ -153,6 +152,7 @@ from backend.services.trade.services.decision_round_core import (
     snap_price,
     tier_numbers,
 )
+from backend.services.trade.services.decision_round_io import maybe_write_watch
 
 logger = logging.getLogger(__name__)
 
@@ -601,7 +601,7 @@ async def _run_once_inner(
                 )
                 notes.append("执行段 aborted 且零提交：守护规则表整组保留")
             else:
-                watch_result = _maybe_write_watch(
+                watch_result = maybe_write_watch(
                     deps=deps, slot=slot, decisions=decisions, agent=agent, notes=notes
                 )
             # 「取不到」与「真的是空」必须分开（同 ``summary`` 那条纪律）：没有
@@ -695,12 +695,28 @@ async def _run_once_inner(
             audit_rows=audit_rows,
             watch_armed=len(getattr(watch_result, "armed", ()) or ()),
         )
+    # 轮终注记（2026-10-10 审计 H3/M10）：「跑成了但零产出」必须在读侧与「一切正常」
+    # 区分开——空池要能看出是**设计内的看空清空**还是供给链断了；交易时段内一条腿
+    # 都没提交时，note 不再含糊地说「提交完成」。判据与告警（``decision_round_alerts``）
+    # 共用同一对 meta 字段（``pool.rows`` / ``in_session``），那边据此决定推不推。
+    direction_text = str(getattr(direction, "direction", "") or "")
+    bearish_clear = len(pool_rows) == 0 and "看空" in direction_text
+    if aborted:
+        note = aborted
+    elif bearish_clear:
+        note = f"空池（看空清空）：方向「{direction_text}」→ 本轮不建仓"
+    elif not in_session:
+        note = "非交易时段：未提交腿"
+    elif submitted > 0:
+        note = "提交完成"
+    else:
+        note = "提交完成（0 腿）"
     return RoundResult(
         status=STATUS_OK,
         day=day,
         slot=slot,
         round_id=round_id,
-        note=aborted or ("提交完成" if in_session else "非交易时段：未提交腿"),
+        note=note,
         errors=(outcomes_gap,) if outcomes_gap else (),
         agent=agent,
         mode=mode,
@@ -720,9 +736,17 @@ async def _run_once_inner(
             "plan_notes": list(summary.get("notes") or [])[:5],
             "pool": {
                 "file": pool_file,
+                # 原始行数（供给面）。**必须显式带出来**：告警侧靠「键在不在」区分
+                # 「真的是 0 行」与「取不到」（同 ``_exec_summary`` 纪律）。
+                "rows": len(pool_rows),
                 "shown": len(kept_rows),
                 "dropped": len(dropped_rows),
+                # 大盘方向文本（看空清空判据；"—"=缺失，绝不编一个方向出来）。
+                "direction": direction_text,
+                "total_score": getattr(direction, "total_score", None),
             },
+            # 告警判据：非交易时段的零腿是**设计内**（盘前规划轮不发腿）。
+            "in_session": bool(in_session),
             "quota": {
                 "cash": account.cash,
                 "market_value": account.market_value,
@@ -748,52 +772,3 @@ def _exec_summary(outcome: Any) -> tuple[str, dict[str, Any]]:
     else:
         summary = {}
     return str(getattr(outcome, "aborted", "") or ""), summary
-
-
-def _maybe_write_watch(
-    *,
-    deps: RoundDeps,
-    slot: RoundSlot,
-    decisions: Sequence[Any],
-    agent: str,
-    notes: list[str],
-) -> Any:
-    """守护规则（``watch`` → 规则表，整组替换）。
-
-    两条纪律：
-
-    * **rebalance schema 的轮次不碰守护规则**：它的 action 白名单里没有 ``watch``，
-      而 ``write_watch_plan`` 是**整组替换**——拿建仓轮的手去写守护层，等于把 09:00
-      挂上的止损单全清掉。
-    * **本轮一条 ``watch`` 都没有时也不写**：整组替换在空集上会把该 agent 全部规则
-      摘掉。零条 watch 更可能是「模型这轮没提守护」而不是「撤销全部守护」——要撤
-      也得先有一条明确的规则。这一条是本仓**有意**比隔壁保守的地方（隔壁整组替换
-      不问空集）。
-    """
-    if slot.schema != SCHEMA_INTRADAY:
-        return None
-    from backend.shared.decision.watch_map import plan_watch
-
-    watch_plan = plan_watch(decisions, agent=agent)
-    if not getattr(watch_plan, "rules", ()):
-        notes.append("本轮无 watch 决策：守护规则表**整组保留**（不写空集）")
-        return None
-    try:
-        result = deps.write_watch(agent, watch_plan)
-    except Exception as exc:  # noqa: BLE001 守护段失败不拖垮买卖段
-        logger.error("[DecisionRound] 守护规则写入异常: %s", exc, exc_info=True)
-        notes.append(f"守护规则写入异常：{type(exc).__name__}: {exc}")
-        return None
-    if not getattr(result, "ok", False):
-        # 只写日志是不够的：``watch_armed`` 只是**少了一个数**，运营读状态键时看不出
-        # 「少的那条是没挂上还是本轮就没提」。P2.4 的 ok 定义是
-        # ``not (errors or unverified or problems)``——写被静默丢弃恰恰不以 errors
-        # 的形式出现（unverified/problems），所以这三项都要进 notes 留痕。
-        detail = (
-            f"errors={list(getattr(result, 'errors', ()) or ())} "
-            f"unverified={list(getattr(result, 'unverified', ()) or ())} "
-            f"problems={list(getattr(result, 'problems', ()) or ())}"
-        )
-        logger.warning("[DecisionRound] 守护规则未全部落库：%s", detail)
-        notes.append(f"守护规则未全部落库：{detail}")
-    return result

@@ -38,9 +38,11 @@ from backend.services.trade.services.decision_round_core import (
     LLMBinding,
     RoundDeps,
     RoundResult,
+    RoundSlot,
     as_float,
 )
 from backend.shared.decision.agent_ledger import DEFAULT_AGENT_QUOTA
+from backend.shared.decision.contract import SCHEMA_INTRADAY
 
 logger = logging.getLogger(__name__)
 
@@ -408,3 +410,52 @@ def write_status(
         native.ltrim(LOG_KEY, 0, LOG_KEEP - 1)
     except Exception as exc:  # noqa: BLE001 状态写失败不该影响已完成的决策
         logger.warning("[DecisionRound] 状态键写入失败: %s", exc)
+
+
+def maybe_write_watch(
+    *,
+    deps: RoundDeps,
+    slot: RoundSlot,
+    decisions: Sequence[Any],
+    agent: str,
+    notes: list[str],
+) -> Any:
+    """守护规则（``watch`` → 规则表，整组替换）。
+
+    两条纪律：
+
+    * **rebalance schema 的轮次不碰守护规则**：它的 action 白名单里没有 ``watch``，
+      而 ``write_watch_plan`` 是**整组替换**——拿建仓轮的手去写守护层，等于把 09:00
+      挂上的止损单全清掉。
+    * **本轮一条 ``watch`` 都没有时也不写**：整组替换在空集上会把该 agent 全部规则
+      摘掉。零条 watch 更可能是「模型这轮没提守护」而不是「撤销全部守护」——要撤
+      也得先有一条明确的规则。这一条是本仓**有意**比隔壁保守的地方（隔壁整组替换
+      不问空集）。
+    """
+    if slot.schema != SCHEMA_INTRADAY:
+        return None
+    from backend.shared.decision.watch_map import plan_watch
+
+    watch_plan = plan_watch(decisions, agent=agent)
+    if not getattr(watch_plan, "rules", ()):
+        notes.append("本轮无 watch 决策：守护规则表**整组保留**（不写空集）")
+        return None
+    try:
+        result = deps.write_watch(agent, watch_plan)
+    except Exception as exc:  # noqa: BLE001 守护段失败不拖垮买卖段
+        logger.error("[DecisionRound] 守护规则写入异常: %s", exc, exc_info=True)
+        notes.append(f"守护规则写入异常：{type(exc).__name__}: {exc}")
+        return None
+    if not getattr(result, "ok", False):
+        # 只写日志是不够的：``watch_armed`` 只是**少了一个数**，运营读状态键时看不出
+        # 「少的那条是没挂上还是本轮就没提」。P2.4 的 ok 定义是
+        # ``not (errors or unverified or problems)``——写被静默丢弃恰恰不以 errors
+        # 的形式出现（unverified/problems），所以这三项都要进 notes 留痕。
+        detail = (
+            f"errors={list(getattr(result, 'errors', ()) or ())} "
+            f"unverified={list(getattr(result, 'unverified', ()) or ())} "
+            f"problems={list(getattr(result, 'problems', ()) or ())}"
+        )
+        logger.warning("[DecisionRound] 守护规则未全部落库：%s", detail)
+        notes.append(f"守护规则未全部落库：{detail}")
+    return result

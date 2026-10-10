@@ -81,7 +81,7 @@ TICK_1005 = datetime(2026, 9, 24, 10, 47, tzinfo=CST)
 SLOT_0830 = next(s for s in SLOTS if s.hhmm == "0830")
 SLOT_0935 = next(s for s in SLOTS if s.hhmm == "0935")
 #: 10:00 **intraday**（守护轮）；10:05 是 rebalance 补跑槽——两者别混，
-#: 守护规则该不该写按 schema 分（见 ``_maybe_write_watch``）。
+#: 守护规则该不该写按 schema 分（见 ``decision_round_io.maybe_write_watch``）。
 SLOT_1000 = next(s for s in SLOTS if s.hhmm == "1000")
 SLOT_1005 = next(s for s in SLOTS if s.hhmm == "1005")
 
@@ -920,6 +920,64 @@ async def test_run_once_pool_missing_still_runs_and_leaves_a_trace():
     assert result.status == R.STATUS_OK  # 守护轮不依赖池：没有池也要跑
     meta = h.log["ledger"][0][0].context_meta
     assert meta["pool"]["file"] == "" and meta["pool"]["shown"] == 0
+
+
+# ── 零输出可见性（2026-10-10 审计 H3/M10）：轮终 meta/note 的取证字段 ──
+# 判据在 ``decision_round_alerts``；这里钉的是**取数**：轮次必须把
+# ``pool.rows``（供给面原始行数）与 ``in_session`` 显式写进 meta，
+# 读侧才能区分「真的是 0」与「取不到」；note 不再对零产出说「提交完成」。
+@pytest.mark.asyncio
+async def test_bearish_cleared_pool_marks_the_note_as_designed_empty():
+    """看空清空：note 写「空池（看空清空）」+ meta 带 rows=0/direction——
+    与「供给链断了」在状态键上从此可区分（旧版两者都是一句「提交完成」）。"""
+    cleared = PoolDoc(
+        rows=(),
+        direction=DirectionBlock(direction="看空", total_score=-2.5),
+        missing_columns=(),
+        source="/data/reports/stock_picks/20260924_picks.json",
+    )
+    h = make_harness(pool=cleared, outcome=FakeOutcome(legs=0, submitted=0))
+    result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+
+    assert result.status == R.STATUS_OK and result.submitted == 0
+    assert "空池（看空清空）" in result.note and "看空" in result.note
+    assert result.meta["pool"]["rows"] == 0
+    assert result.meta["pool"]["direction"] == "看空"
+    assert result.meta["pool"]["total_score"] == -2.5
+    assert result.meta["in_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_in_session_zero_submit_note_says_zero_legs():
+    """时段内零腿：note 必须显式带「（0 腿）」——旧版与正常完成同为「提交完成」。"""
+    h = make_harness(outcome=FakeOutcome(legs=0, submitted=0))
+    result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+
+    assert result.status == R.STATUS_OK
+    assert result.note == "提交完成（0 腿）"
+    assert result.meta["pool"]["rows"] == 2  # 池非空：这是「有票却没出去」那一类
+    assert result.meta["in_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_pool_missing_meta_carries_rows_zero_and_the_empty_file():
+    """缺池轮：meta 键**在且为 0**（告警判据的「真的是 0」），file 为空可再分因。"""
+    h = make_harness(pool=None, outcome=FakeOutcome(legs=0, submitted=0))
+    result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+
+    assert result.status == R.STATUS_OK
+    assert result.meta["pool"]["rows"] == 0
+    assert result.meta["pool"]["file"] == ""
+    assert result.meta["in_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_submitted_round_keeps_the_plain_note():
+    """正向对照：有腿提交的轮次 note 一字不改（本次改动不许波及正常路径）。"""
+    h = make_harness()  # 默认替身 outcome：legs=1, submitted=1
+    result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+    assert result.status == R.STATUS_OK and result.submitted == 1
+    assert result.note == "提交完成"
 
 
 @pytest.mark.asyncio

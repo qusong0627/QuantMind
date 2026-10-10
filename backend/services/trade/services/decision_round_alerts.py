@@ -7,6 +7,13 @@
 「计划要卖、单没出去」这条完整链条在系统里的唯一痕迹是审计表的 ``reject_reason``
 一列：要人到场才看得见，而人不在场正是需要它的场合。本模块补的就是这一条。
 
+2026-10-10 审计 H3/M10 又补了**第二类**不可见：上面四类都以「哪一步做砸了」为前提
+（判据吃 ``RoundResult`` 的失败字段），而「每一步都没炸、但今天就是零产出」——
+空候选池、或池里有票却一条腿都没提交——此前在状态键、日志、告警三面全是绿的。
+判据在 :func:`round_alert` 尾部（``empty_pool`` / ``no_legs_rejected``），
+取数依赖轮次写进 ``meta`` 的两个显式字段（``pool.rows`` 与 ``in_session``）：
+**字段缺失 = 取不到，不判**（老结果/替身不许被误报成空池，同 ``_exec_summary`` 纪律）。
+
 **不做什么**（同属判据，写在这里免得后来者以为漏了）:
 
 * **不重放已出的决策**。腿提交失败**不**自动重发：同 ``round_id`` 的幂等键是**稳定**
@@ -27,7 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import MutableSet, Sequence
+from collections.abc import Mapping, MutableSet, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -37,11 +44,13 @@ from backend.shared.alert_delivery import (
     Notifier,
     deliver_alert,
 )
+from backend.shared.decision.contract import SCHEMA_REBALANCE
 from backend.services.trade.services.decision_round_core import (
     SLOTS,
     STATUS_ABORTED,
     STATUS_ERROR,
     STATUS_LLM_FAILED,
+    STATUS_OK,
     STATUS_SKIPPED,
     TENANT_ID,
     RoundResult,
@@ -58,6 +67,19 @@ ALERT_ERROR = "error"
 #: **整天一条轮次都没跑成**——与上面四类不是一回事：那四类都以「跑过一轮」为前提
 #: （判据吃的是 ``RoundResult``），而这一类的前提恰恰是**没有** ``RoundResult``。
 ALERT_STALLED = "stalled"
+#: **跑成了、但零产出**（2026-10-10 审计 H3/M10）。与上面所有类的前提都不同：
+#: 它们以「哪一步做砸了」为前提，这两类的前提是「每一步都没炸，但今天就是没产出」
+#: ——面板全绿、状态键写 ok，没人知道候选池是空的 / 一条腿都没出去。
+#: ``empty_pool``：供给链（postmarket_pipeline → pick_candidates）没把候选送到；
+#: ``no_legs_rejected``：池里有票、在交易时段内、调仓轮却一条腿都没提交
+#: （全 HOLD 或全被否决——2026-09-24「全 HOLD」断链事故正是这一类的极端）。
+ALERT_EMPTY_POOL = "empty_pool"
+ALERT_NO_LEGS = "no_legs_rejected"
+
+#: 「看空清空」判据与生产侧同一词表（``skills/stock-picks/scripts/pick_candidates.py``
+#: 的方向门：direction ∈ {看空, 强烈看空} ⇒ 清空选股）——那是**设计内的空池**，
+#: 不推告警，由轮次的 note 留痕「空池（看空清空）」。子串匹配覆盖「强烈看空」。
+_BEARISH_MARKER = "看空"
 
 #: 去重键存活期（秒）：与 ``alert_delivery.ALERT_TTL_S`` 同值（保留本名给既有读者）。
 _ALERT_TTL_S = ALERT_TTL_S
@@ -148,7 +170,95 @@ def round_alert(result: RoundResult) -> RoundAlert | None:
             ),
         )
 
+    if result.status != STATUS_OK:
+        return None  # 其余状态各有其类；下面两类只针对「跑成了」的轮
+
+    meta = result.meta if isinstance(result.meta, Mapping) else {}
+    pool = meta.get("pool")
+    pool = dict(pool) if isinstance(pool, Mapping) else {}
+    direction_text = str(pool.get("direction") or "").strip()
+
+    # ① 空池：供给链送来「0 个候选」。只在 meta **显式带 rows** 时判——「取不到」
+    #    与「真的是 0」必须分开（同 ``_exec_summary`` 纪律），老结果/替身不判，
+    #    免得把「不知道」报成「空池」。
+    if "rows" in pool and int(pool.get("rows") or 0) == 0:
+        if _BEARISH_MARKER in direction_text:
+            # 看空清空：池是**故意**清空的（方向门），note 已在轮里留痕。
+            return None
+        where = (
+            f"池文件在，但 0 行（direction={direction_text or '—'}）"
+            if pool.get("file")
+            else "当日候选池文件不存在"
+        )
+        return RoundAlert(
+            kind=ALERT_EMPTY_POOL,
+            level="error",
+            title=f"决策轮 {label} 空池：今天没有候选可供决策",
+            content=(
+                f"{where}。\n上游供给链（postmarket_pipeline → pick_candidates）"
+                "可能断了；空池下模型点任何池外票都会被 l2.pool_not_member 拦下，"
+                "新开仓整条停摆。\n"
+                f"{MANUAL_DIAGNOSE_HINT}"
+            ),
+        )
+
+    # ② 零提交：池里有票、在交易时段内、调仓轮却一条腿都没出去。只判**调仓槽**
+    #    （rebalance）——守护槽（intraday）的本职是挂 watch 规则，零腿是常态，
+    #    判它等于每个守护槽固定误报一次。
+    if (
+        result.slot is not None
+        and result.slot.schema == SCHEMA_REBALANCE
+        and meta.get("in_session") is True
+        and int(pool.get("rows") or 0) > 0
+        and int(result.submitted or 0) == 0
+    ):
+        return RoundAlert(
+            kind=ALERT_NO_LEGS,
+            level="warning",
+            title=(
+                f"决策轮 {label} 零提交：池 {int(pool.get('rows') or 0)} 行、"
+                "一条腿都没出去"
+            ),
+            content=(
+                f"轮次 {result.round_id}：池 {int(pool.get('rows') or 0)} 行、"
+                f"展示 {pool.get('shown', '—')}（滤除 {pool.get('dropped', '—')}）、"
+                f"模型决策 {int(result.decisions or 0)} 条、计划腿 {int(result.legs or 0)} 条、"
+                "提交 0。\n"
+                f"{_zero_leg_cause(result)}\n"
+                "若本轮是「全 HOLD 且无异常」可视作正常；连续多轮如此，先查信号链与执行段。"
+            ),
+        )
+
     return None
+
+
+def _zero_leg_cause(result: RoundResult) -> str:
+    """零提交的头号成因——只读轮次已带的分段计数，不猜。
+
+    分流依据（哪一项非零说哪一项）：模型没给决策（全 HOLD）／决策没成形为腿
+    （计划层闸门）／腿全被否决（执行层闸门）／全是幂等重复（此前轮次已在途）。
+    分不清的落最后一条：指人去查执行段与 orders，而不是编一个原因。
+    """
+    decisions = int(result.decisions or 0)
+    legs = int(result.legs or 0)
+    meta = result.meta if isinstance(result.meta, Mapping) else {}
+    vetoes = int(meta.get("vetoes") or 0)
+    duplicates = int(meta.get("duplicates") or 0)
+    if decisions == 0:
+        return "本轮模型未提出任何决策（可能全 HOLD）。"
+    if legs == 0:
+        return (
+            f"模型给了 {decisions} 条决策但 0 条腿成形"
+            "（可能全被计划层闸门挡回，逐条原因见审计行的结果列）。"
+        )
+    if vetoes:
+        return f"计划 {legs} 条腿、{vetoes} 条被否决（l2/vcash/行情等闸门），全部未新增提交。"
+    if duplicates:
+        return (
+            f"计划 {legs} 条腿、{duplicates} 条为幂等重复（此前轮次已提交在途），"
+            "未新增提交。"
+        )
+    return f"计划 {legs} 条腿但提交数 0——查执行段日志与 orders 里的实际委托。"
 
 
 def alert_key(result: RoundResult, kind: str) -> str:
