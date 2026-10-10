@@ -43,6 +43,8 @@ import { MarketSwitcher } from '../components/Navbar';
 import { fmtMoney, fmtPct, fmtPrice, pnlClass } from '../utils/format';
 import { stockLabel, stockName } from '../utils/symbols';
 import { toLiveAdjust, toLiveFill } from '../utils/liveFills';
+// T6-3：账户快照时刻统一北京口径（aware 换算 / naive 原样）
+import { fmtBeijingDateTime } from '../../../../../utils/timeBeijing';
 import { displayAgentName, rankPerformers } from '../utils/agents';
 import { dayHit, dayOf, dayOptions } from '../utils/dayFilter';
 import { deriveBuyTimes } from '../utils/buyTime';
@@ -988,7 +990,7 @@ export default function Live() {
       // 桥实时通道读不到持仓时的 A 股兜底：用 quantmind 侧落库的账户快照
       // （含快照时刻），比直接掉到模拟盘回放有信息量——那是别的账户。
       if (market === 'cn' && tdxPos.length > 0) {
-        const snapTs = realTdxAcct.data?.ts ? realTdxAcct.data.ts.slice(0, 16).replace('T', ' ') : '—';
+        const snapTs = realTdxAcct.data?.ts ? fmtBeijingDateTime(realTdxAcct.data.ts, { withSeconds: false }) : '—';
         const snapValue = tdxPos.reduce((s, p) => s + Number(p.market_value ?? 0), 0);
         return (
           <div style={{ padding: '8px 12px' }}>

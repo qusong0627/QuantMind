@@ -4,6 +4,8 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { NOTE_STATUSES, type NoteStatus } from '../../api/client';
+// T6-3：备注更新时刻统一北京口径（aware 换算 / naive 原样）
+import { fmtBeijingDateTime } from '../../../../../../utils/timeBeijing';
 import type { Workbench } from './useWorkbench';
 
 export default function NotePanel({ wb }: { wb: Workbench }) {
@@ -84,7 +86,7 @@ export default function NotePanel({ wb }: { wb: Workbench }) {
       </div>
       {wb.note?.updated && (
         <div className="lab-note-stamp">
-          更新于 {wb.note.updated.replace('T', ' ').slice(0, 19)} · {wb.note.by}
+          更新于 {fmtBeijingDateTime(wb.note.updated)} · {wb.note.by}
         </div>
       )}
     </>

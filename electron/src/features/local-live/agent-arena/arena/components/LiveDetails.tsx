@@ -1,6 +1,8 @@
 import { MarketId, LiveAccount, OverviewRow, fetchRealAccounts } from '../api/client';
 import { usePolling } from '../hooks/usePolling';
 import { fmtDate, fmtPct } from '../utils/format';
+// T6-3：快照时刻统一北京口径（aware 换算 / naive 原样）
+import { fmtBeijingDateTime } from '../../../../../utils/timeBeijing';
 import ChannelStatus from './ChannelStatus';
 import './LiveDetails.css';
 
@@ -235,7 +237,7 @@ export default function LiveDetails({
         <dd>
           {market === 'cn'
             ? tdxSnapshotTs
-              ? `${tdxSnapshotTs.slice(0, 19).replace('T', ' ')}（通达信账户）`
+              ? `${fmtBeijingDateTime(tdxSnapshotTs)}（通达信账户）`
               : '暂无快照'
             : market === 'hk'
               ? futuBoth?.real

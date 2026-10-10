@@ -3,6 +3,9 @@ import { BrokerMarketInfo, fetchBrokerMarket, saveBrokerMarket } from '../api/cl
 import { api } from '../api/client';
 import { usePolling } from '../hooks/usePolling';
 import './TradingSettings.css';
+
+// T6-3：桥 server_time 可能是 aware UTC——只取时钟列的裸截断会把 UTC 当北京展示
+import { fmtBeijingClock } from '../../../../../utils/timeBeijing';
 import { asUpdater } from '../reactCompat';
 
 /** 交易所设置 —— 通达信交易桥 / 券商接入（QuantMind trade 服务 /api/v1/tdx/* 服务层）。
@@ -456,7 +459,7 @@ export default function TradingSettings({ embedded = false }: { embedded?: boole
                   <span className="ts-op-label">
                     模型推理选股 → 通达信板块 / 预警
                     <span className="dim">
-                      {' '}· 同步于 {overview.data.bridge?.server_time ? String(overview.data.bridge.server_time).slice(11, 19) : '实时'}
+                      {' '}· 同步于 {overview.data.bridge?.server_time ? fmtBeijingClock(overview.data.bridge.server_time) : '实时'}
                     </span>
                   </span>
                   <div className="ts-op-btns">

@@ -24,14 +24,9 @@ import { researchService } from '../../../services/researchService';
 import { stockTerminalService as cnTerminalService } from '../../../features/stock-terminal/services/stockTerminalService';
 import type { PositionKind } from '../../../features/stock-terminal/components/StockSidebar';
 import { websocketService, MessageType } from '../../../services/websocketService';
-
-/** A 股交易时段（含集合竞价尾段与尾盘），用于自选池实时刷新节流 */
-function isCnTradingHours(d = new Date()): boolean {
-  const day = d.getDay();
-  if (day === 0 || day === 6) return false;
-  const m = d.getHours() * 60 + d.getMinutes();
-  return (m >= 9 * 60 + 25 && m <= 11 * 60 + 35) || (m >= 12 * 60 + 55 && m <= 15 * 60 + 5);
-}
+// 交易时段判定收口到北京口径唯一实现（T6-3）：此前页内版用设备时区 getHours，
+// 设备不在北京时整段节流窗口偏移。
+import { isCnTradingHours } from '../../../utils/timeBeijing';
 
 /** stream 服务实时行情（topic stock.{code}，2s 推一次；与持仓监控同管道） */
 interface LiveQuote {

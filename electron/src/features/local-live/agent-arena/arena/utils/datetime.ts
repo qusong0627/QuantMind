@@ -1,9 +1,13 @@
 /** 时间显示工具（复盘口径：秒级一致优先）。
  *
- *  日志时间戳带时区（`2026-09-10T14:45:02.140557+08:00`）——一律按原始
- *  字符串截取展示，不做本地时区换算，避免与日志原文/券商回报对不上；
- *  只有「距今多久 / 星期几」这类相对值才做时间运算（按 UTC+8 日历日）。
+ *  规则（T6-3 审计 H7c 起与 `src/utils/timeBeijing.ts` 同口径，经 `beijingPartsOf` 收口）：
+ *  - **带时区**的时间戳（`…Z` / `…+00:00`）→ 换算成北京墙钟展示（设备时区无关）；
+ *  - **无时区（naive）** → 原样截取展示，不做换算——naive 多为写入侧已按 +08:00
+ *    墙钟落的值（日志原文/券商回报），擅自 +8 会与原文对不上；
+ *  - 「距今多久 / 星期几」这类相对值按绝对时刻运算（UTC+8 日历日）。
  */
+
+import { beijingPartsOf } from '../../../../../utils/timeBeijing';
 
 const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const RE_TS = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)/;
@@ -17,6 +21,11 @@ interface Parts {
 
 function partsOf(iso: string | null | undefined): Parts | null {
   if (!iso) return null;
+  // aware（Z/±HH:MM）→ 换算北京；naive → null，落到下面原样截取分支
+  const bj = beijingPartsOf(iso);
+  if (bj) {
+    return { y: bj.y, m: bj.m, d: bj.d, clock: `${two(bj.hh)}:${two(bj.mm)}:${two(bj.ss)}` };
+  }
   const m = String(iso).match(RE_TS);
   if (!m) return null;
   return { y: +m[1], m: +m[2], d: +m[3], clock: m[4] };

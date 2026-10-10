@@ -104,12 +104,17 @@ describe('copilotModel', () => {
     expect(stalenessLabel(172800)).toBe('2 天前');
   });
 
-  it('eventTimeLabel：同日 HH:MM:SS，跨日 MM-DD HH:MM，不可解析原样返回', () => {
-    const d = new Date(2026, 9, 10, 9, 30, 5); // 本地时区构造，断言与运行机时区无关
-    expect(eventTimeLabel(d.toISOString(), d.getTime() + 3_600_000)).toBe('09:30:05');
-    const nextDay = new Date(2026, 9, 11, 10, 0, 0);
-    expect(eventTimeLabel(d.toISOString(), nextDay.getTime())).toBe('10-10 09:30');
-    expect(eventTimeLabel('garbage', d.getTime())).toBe('garbage');
+  it('eventTimeLabel：aware 一律换算北京（同日 HH:MM:SS / 跨日 MM-DD HH:MM），naive 墙钟原样，不可解析原样', () => {
+    // 全部用显式时刻断言，与运行机时区无关（T6-3：此前用设备本地钟，非北京设备整列偏移）
+    const now = Date.parse('2026-10-10T02:00:00Z'); // 北京 2026-10-10 10:00
+    expect(eventTimeLabel('2026-10-10T01:30:05Z', now)).toBe('09:30:05');
+    // PG timestamptz::text 形态（2 位偏移）同按 aware 换算
+    expect(eventTimeLabel('2026-10-10 09:30:05+08', now)).toBe('09:30:05');
+    // 跨日：now 为北京 10-11 凌晨（UTC 10-10 17:00），事件仍是北京 10-10 09:30
+    expect(eventTimeLabel('2026-10-10T01:30:05Z', Date.parse('2026-10-10T17:00:00Z'))).toBe('10-10 09:30');
+    // naive：写入侧已是北京墙钟，原样展示（不 +8）
+    expect(eventTimeLabel('2026-10-10 09:30:05', now)).toBe('09:30:05');
+    expect(eventTimeLabel('garbage', now)).toBe('garbage');
   });
 
   it('建议战绩行：含胜率与平均超额；无兑现如实标注', () => {

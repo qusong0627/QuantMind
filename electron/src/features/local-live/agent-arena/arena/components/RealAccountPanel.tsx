@@ -15,6 +15,8 @@ import {
 import { fmtAgeSec, freshnessState, ChanState } from '../utils/channelStatus';
 import { fmtMoney } from '../utils/format';
 import { usePolling } from '../hooks/usePolling';
+// T6-3：快照 ts 可能是 aware UTC（Z）——裸截断会把 UTC 当北京展示，统一走北京口径
+import { fmtBeijingDateTime } from '../../../../../utils/timeBeijing';
 import EquityChart, { ChartLine } from './EquityChart';
 
 /** 通道状态灯文案（与 ChannelStatus 同阈值口径：≤3min 实时 / ≤1h 滞后 / 更久停更） */
@@ -283,7 +285,7 @@ export default function RealAccountPanel({
           </span>
           {acc?.ts && (
             <span className="real-account-ts">
-              快照 {acc.ts.slice(0, 16).replace('T', ' ')}
+              快照 {fmtBeijingDateTime(acc.ts, { withSeconds: false })}
               {curSum?.age_sec != null ? `（${fmtAgeSec(curSum.age_sec)}）` : ''}
             </span>
           )}

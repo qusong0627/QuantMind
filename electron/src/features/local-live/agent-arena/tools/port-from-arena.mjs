@@ -551,6 +551,83 @@ export const fetchFutuOrders = async (
     find: `        );\n      })}\n    </div>\n  );\n}\n`,
     replace: `        );\n      })}\n      <McDisclaimer />\n    </div>\n  );\n}\n`,
   },
+
+  // ===== T6-3（2026-10-10）时间显示统一北京口径（审计 H7c）=====
+  // aware（Z / ±HH:MM）→ 换算北京墙钟；naive（无时区）→ 原样——与宿主
+  // src/utils/timeBeijing.ts 同口径收口。此前这些点用裸 slice/截断展示，
+  // aware UTC 值在非北京设备上整列偏移（JST 设备实测差 1h，UTC 差 8h）。
+  {
+    file: 'utils/datetime.ts',
+    why: 'T6-3：头注释改「aware 换算北京 / naive 原样」规则（原口径是"一律原始截取"）',
+    find: `/** 时间显示工具（复盘口径：秒级一致优先）。\n *\n *  日志时间戳带时区（\`2026-09-10T14:45:02.140557+08:00\`）——一律按原始\n *  字符串截取展示，不做本地时区换算，避免与日志原文/券商回报对不上；\n *  只有「距今多久 / 星期几」这类相对值才做时间运算（按 UTC+8 日历日）。\n */`,
+    replace: `/** 时间显示工具（复盘口径：秒级一致优先）。\n *\n *  规则（T6-3 审计 H7c 起与 \`src/utils/timeBeijing.ts\` 同口径，经 \`beijingPartsOf\` 收口）：\n *  - **带时区**的时间戳（\`…Z\` / \`…+00:00\`）→ 换算成北京墙钟展示（设备时区无关）；\n *  - **无时区（naive）** → 原样截取展示，不做换算——naive 多为写入侧已按 +08:00\n *    墙钟落的值（日志原文/券商回报），擅自 +8 会与原文对不上；\n *  - 「距今多久 / 星期几」这类相对值按绝对时刻运算（UTC+8 日历日）。\n */\n\nimport { beijingPartsOf } from '../../../../../utils/timeBeijing';`,
+  },
+  {
+    file: 'utils/datetime.ts',
+    why: 'T6-3：partsOf 先过 beijingPartsOf（aware 换算北京）；naive 落到原样截取分支',
+    find: `function partsOf(iso: string | null | undefined): Parts | null {\n  if (!iso) return null;\n  const m = String(iso).match(RE_TS);\n  if (!m) return null;\n  return { y: +m[1], m: +m[2], d: +m[3], clock: m[4] };\n}`,
+    replace: `function partsOf(iso: string | null | undefined): Parts | null {\n  if (!iso) return null;\n  // aware（Z/±HH:MM）→ 换算北京；naive → null，落到下面原样截取分支\n  const bj = beijingPartsOf(iso);\n  if (bj) {\n    return { y: bj.y, m: bj.m, d: bj.d, clock: \`\${two(bj.hh)}:\${two(bj.mm)}:\${two(bj.ss)}\` };\n  }\n  const m = String(iso).match(RE_TS);\n  if (!m) return null;\n  return { y: +m[1], m: +m[2], d: +m[3], clock: m[4] };\n}`,
+  },
+  {
+    file: 'components/LiveDetails.tsx',
+    why: 'T6-3：宿主 timeBeijing 导入（aware 换算 / naive 原样）',
+    find: `import { fmtDate, fmtPct } from '../utils/format';\nimport ChannelStatus from './ChannelStatus';`,
+    replace: `import { fmtDate, fmtPct } from '../utils/format';\n// T6-3：快照时刻统一北京口径（aware 换算 / naive 原样）\nimport { fmtBeijingDateTime } from '../../../../../utils/timeBeijing';\nimport ChannelStatus from './ChannelStatus';`,
+  },
+  {
+    file: 'components/LiveDetails.tsx',
+    why: 'T6-3：通达信账户快照时刻从裸 slice(0,19) 改 fmtBeijingDateTime（aware UTC 曾被当北京展示）',
+    find: '`${tdxSnapshotTs.slice(0, 19).replace(\'T\', \' \')}（通达信账户）`',
+    replace: '`${fmtBeijingDateTime(tdxSnapshotTs)}（通达信账户）`',
+  },
+  {
+    file: 'components/RealAccountPanel.tsx',
+    why: 'T6-3：宿主 timeBeijing 导入（acc.ts 可能是 aware UTC）',
+    find: `import { usePolling } from '../hooks/usePolling';\nimport EquityChart, { ChartLine } from './EquityChart';`,
+    replace: `import { usePolling } from '../hooks/usePolling';\n// T6-3：快照 ts 可能是 aware UTC（Z）——裸截断会把 UTC 当北京展示，统一走北京口径\nimport { fmtBeijingDateTime } from '../../../../../utils/timeBeijing';\nimport EquityChart, { ChartLine } from './EquityChart';`,
+  },
+  {
+    file: 'components/RealAccountPanel.tsx',
+    why: 'T6-3：账户卡快照时刻从裸 slice(0,16) 改 fmtBeijingDateTime',
+    find: '快照 {acc.ts.slice(0, 16).replace(\'T\', \' \')}',
+    replace: '快照 {fmtBeijingDateTime(acc.ts, { withSeconds: false })}',
+  },
+  {
+    file: 'components/lab/NotePanel.tsx',
+    why: 'T6-3：宿主 timeBeijing 导入（备注 updated 可能是 aware UTC）',
+    find: `import { NOTE_STATUSES, type NoteStatus } from '../../api/client';\nimport type { Workbench } from './useWorkbench';`,
+    replace: `import { NOTE_STATUSES, type NoteStatus } from '../../api/client';\n// T6-3：备注更新时刻统一北京口径（aware 换算 / naive 原样）\nimport { fmtBeijingDateTime } from '../../../../../../utils/timeBeijing';\nimport type { Workbench } from './useWorkbench';`,
+  },
+  {
+    file: 'components/lab/NotePanel.tsx',
+    why: 'T6-3：更新时刻从裸 replace+slice(0,19) 改 fmtBeijingDateTime',
+    find: `更新于 {wb.note.updated.replace('T', ' ').slice(0, 19)} · {wb.note.by}`,
+    replace: `更新于 {fmtBeijingDateTime(wb.note.updated)} · {wb.note.by}`,
+  },
+  {
+    file: 'pages/Live.tsx',
+    why: 'T6-3：宿主 timeBeijing 导入（实盘账户 ts 可能是 aware UTC）',
+    find: `import { toLiveAdjust, toLiveFill } from '../utils/liveFills';\nimport { displayAgentName, rankPerformers } from '../utils/agents';`,
+    replace: `import { toLiveAdjust, toLiveFill } from '../utils/liveFills';\n// T6-3：账户快照时刻统一北京口径（aware 换算 / naive 原样）\nimport { fmtBeijingDateTime } from '../../../../../utils/timeBeijing';\nimport { displayAgentName, rankPerformers } from '../utils/agents';`,
+  },
+  {
+    file: 'pages/Live.tsx',
+    why: 'T6-3：持仓 tab 快照时刻从裸 slice(0,16) 改 fmtBeijingDateTime',
+    find: `const snapTs = realTdxAcct.data?.ts ? realTdxAcct.data.ts.slice(0, 16).replace('T', ' ') : '—';`,
+    replace: `const snapTs = realTdxAcct.data?.ts ? fmtBeijingDateTime(realTdxAcct.data.ts, { withSeconds: false }) : '—';`,
+  },
+  {
+    file: 'pages/TradingSettings.tsx',
+    why: 'T6-3：宿主 timeBeijing 导入（桥 server_time 可能是 aware UTC）',
+    find: `import './TradingSettings.css';\n`,
+    replace: `import './TradingSettings.css';\n\n// T6-3：桥 server_time 可能是 aware UTC——只取时钟列的裸截断会把 UTC 当北京展示\nimport { fmtBeijingClock } from '../../../../../utils/timeBeijing';\n`,
+  },
+  {
+    file: 'pages/TradingSettings.tsx',
+    why: 'T6-3：桥同步时刻从裸 slice(11,19) 改 fmtBeijingClock',
+    find: `String(overview.data.bridge.server_time).slice(11, 19)`,
+    replace: `fmtBeijingClock(overview.data.bridge.server_time)`,
+  },
 ];
 
 // ────────────────────────────── 闭包解析 ──────────────────────────────

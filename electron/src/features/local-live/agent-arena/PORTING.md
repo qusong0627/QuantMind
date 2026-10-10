@@ -1,7 +1,7 @@
 # arena → QuantMind 实盘栏 移植清单（自动生成，勿手改）
 
 - 源：`/home/zbox/quant-Trader/arena/src`（arena 仓库 bd228b7，2026-10-08T12:42:46+09:00，工作区 干净）
-- 生成时间：2026-10-10T04:25:27.847Z
+- 生成时间：2026-10-10T06:09:09.255Z
 - 重新同步：`node electron/src/features/local-live/agent-arena/tools/port-from-arena.mjs`
 
 ## 搬运的文件（68 个）
@@ -108,6 +108,8 @@
 - components/EquityChart.tsx：E1 对账台阶标注的可见窗口判断同样换算联合轴序号
 - components/LiveDetails.tsx：A6-① 美股执行通道说明 → 通道已下线
 - components/LiveDetails.tsx：富途恢复（2026-10-08）：账户快照时效行 hk 换回「未读通」，只留 us「通道已下线」
+- components/LiveDetails.tsx：T6-3：宿主 timeBeijing 导入（aware 换算 / naive 原样）
+- components/LiveDetails.tsx：T6-3：通达信账户快照时刻从裸 slice(0,19) 改 fmtBeijingDateTime（aware UTC 曾被当北京展示）
 - components/ModelCard.tsx：品牌色 --model-accent 由「仅选中时注入」改为**恒注入**：宿主打磨层（qm-arena-theme.css）要靠它给每张卡上左侧竖条/logo 底色（未选中时也得有值）。选中态的 inline 边框/底色/投影逻辑不变
 - components/ModelChat.tsx：A6-③ 工具调用行注释去 baymax_memory 字面量
 - components/Navbar.tsx ← tools/overrides/Navbar.tsx.tpl（整文件替身）
@@ -116,6 +118,10 @@
 - components/RealAccountPanel.tsx：A6-① 美股说明块 → 通道已下线口径
 - components/RealAccountPanel.tsx：A6-③ 通达信桥通道说明去 BayMax
 - components/RealAccountPanel.tsx：日终账本曲线改金额口径（2026-10-08）。pct 以「首个记录日」=100 归一，而首日 08-13 是中途起点（账户在建账前已在交易）：曲线读成「自 08-13 亏 6.1%」，与同屏卡片（总资产 ¥918,398 / 日收益 +0.05%）、桥「累计盈亏」互相打架。实账总资产本身就是唯一连续的真实金额序列，改 dollar 后金额轴直接可读、曲线右端=卡片总资产（虚账曲线的 ¥10 万起点归一保留在净值图，两边口径不再混淆）
+- components/RealAccountPanel.tsx：T6-3：宿主 timeBeijing 导入（acc.ts 可能是 aware UTC）
+- components/RealAccountPanel.tsx：T6-3：账户卡快照时刻从裸 slice(0,16) 改 fmtBeijingDateTime
+- components/lab/NotePanel.tsx：T6-3：宿主 timeBeijing 导入（备注 updated 可能是 aware UTC）
+- components/lab/NotePanel.tsx：T6-3：更新时刻从裸 replace+slice(0,19) 改 fmtBeijingDateTime
 - pages/About.tsx：A6-③ 展示层架构块去「FastAPI 8091 / Arena 8092 / nginx token」
 - pages/Control.tsx：useNavigate 指向 arena 自己的路由（/model/:market/:agent），改成宿主的栏内下钻
 - pages/Control.tsx：同上：nav(...) 由宿主 context 接管（调用点一行不改）
@@ -127,6 +133,8 @@
 - pages/Live.tsx：下单面板（QM 本地新增 2026-10-08）：import HkOrderPanel（生成物外的本地组件，勿由 arena 覆盖）
 - pages/Live.tsx：下单面板：实盘 tab 港股分支在账户双卡后追加最小下单/撤单面板
 - pages/Live.tsx：对话 tab「立即分析」按钮提示语改 QM 口径（复活后只出观点，不下单）
+- pages/Live.tsx：T6-3：宿主 timeBeijing 导入（实盘账户 ts 可能是 aware UTC）
+- pages/Live.tsx：T6-3：持仓 tab 快照时刻从裸 slice(0,16) 改 fmtBeijingDateTime
 - pages/ModelDetail.tsx：详情页由路由参数改为宿主传入的 props（栏内下钻，不再注册路由）
 - pages/ModelDetail.tsx：同上：签名收 props
 - pages/ModelDetail.tsx：同上：useParams 取值删掉（改由 props）
@@ -134,8 +142,12 @@
 - pages/TradingSettings.tsx：A6-③ 交易所设置头注释去 BayMax（改 QuantMind trade 服务口径）
 - pages/TradingSettings.tsx：A6-③ 实时交易状态卡描述去 BayMax
 - pages/TradingSettings.tsx：A6-③ 用户信息单元格去 BayMax-Trader
+- pages/TradingSettings.tsx：T6-3：宿主 timeBeijing 导入（桥 server_time 可能是 aware UTC）
+- pages/TradingSettings.tsx：T6-3：桥同步时刻从裸 slice(11,19) 改 fmtBeijingClock
 - utils/channelStatus.ts：A6-③ 通道状态注释去 BayMax
 - utils/channelStatus.ts：A6-① ibkrChannel 注释与文案 →「已下线」
+- utils/datetime.ts：T6-3：头注释改「aware 换算北京 / naive 原样」规则（原口径是"一律原始截取"）
+- utils/datetime.ts：T6-3：partsOf 先过 beijingPartsOf（aware 换算北京）；naive 落到原样截取分支
 - 函数式 setState 共 24 处裹 `asUpdater()`（本仓 tsc 的类型简化，运行时无影响）：
   - `components/ChatStream.tsx:121 setOpen`
   - `components/ChatStream.tsx:132 setSections`
@@ -155,12 +167,12 @@
   - `components/lab/useWorkbench.ts:613 setShowMarkers`
   - `components/lab/useWorkbench.ts:615 setShowIndicators`
   - `pages/DataPlatform.tsx:544 setSelected`
-  - `pages/Live.tsx:352 setCompletedDates`
-  - `pages/Live.tsx:1404 setSelectedModel`
-  - `pages/TradingSettings.tsx:231 setBrokerCfgs`
-  - `pages/TradingSettings.tsx:766 setValues`
-  - `pages/TradingSettings.tsx:804 setValues`
-  - `pages/TradingSettings.tsx:860 setValues`
+  - `pages/Live.tsx:354 setCompletedDates`
+  - `pages/Live.tsx:1406 setSelectedModel`
+  - `pages/TradingSettings.tsx:234 setBrokerCfgs`
+  - `pages/TradingSettings.tsx:769 setValues`
+  - `pages/TradingSettings.tsx:807 setValues`
+  - `pages/TradingSettings.tsx:863 setValues`
 
 ## 与 arena 原版的行为差异（有意的）
 

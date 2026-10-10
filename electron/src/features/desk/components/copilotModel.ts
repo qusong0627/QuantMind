@@ -1,5 +1,7 @@
 /** 副驾驶面板展示模型（纯函数，可单测）：事件流/建议卡/指标 → 展示结构。 */
 
+import { beijingPartsOf, naivePartsOf } from '../../../utils/timeBeijing';
+
 export type Severity = 'info' | 'warn' | 'critical' | string;
 
 export interface CopilotEvent {
@@ -101,17 +103,17 @@ export function stalenessLabel(seconds: number): string {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 
-/** 事件/数据时刻 ts（ISO+Z）→ 本地时区紧凑标签：同日 HH:MM:SS，跨日 MM-DD HH:MM；不可解析原样返回。 */
+/** 事件/数据时刻 ts（ISO+Z）→ **北京时区**紧凑标签：同日 HH:MM:SS，跨日 MM-DD HH:MM；不可解析原样返回。
+ *  T6-3 审计 H7c：此前用设备本地 getHours/getDate——设备时区非北京时整列偏移，改为北京口径。 */
 export function eventTimeLabel(ts: string, nowMs: number): string {
-  const t = Date.parse(ts);
-  if (Number.isNaN(t)) return ts;
-  const d = new Date(t);
-  const n = new Date(nowMs);
+  const n = beijingPartsOf(nowMs);
+  // aware（Z / ±HH:MM / PG +08 形态）→ 换算北京；naive → 墙钟原样；都拿不到 → 原样返回
+  const d = beijingPartsOf(ts) ?? naivePartsOf(ts);
+  if (!d || !n) return ts;
   const p = (v: number) => String(v).padStart(2, '0');
-  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
-  const sameDay =
-    d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
-  return sameDay ? `${hm}:${p(d.getSeconds())}` : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
+  const hm = `${p(d.hh)}:${p(d.mm)}`;
+  const sameDay = d.y === n.y && d.m === n.m && d.d === n.d;
+  return sameDay ? `${hm}:${p(d.ss)}` : `${p(d.m)}-${p(d.d)} ${hm}`;
 }
 
 /** 严重度 → 色调 + 中文 */

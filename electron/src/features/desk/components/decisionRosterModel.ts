@@ -7,6 +7,8 @@
  * 这里只保留两件**纯展示**的事：把服务端返回的状态翻成中文，以及把编辑草稿组装成载荷。
  */
 
+import { fmtBeijingDateTime } from '../../../utils/timeBeijing';
+
 /** 与后端 `order_contract.normalize_agent` 同口径（去空白 + 截断），仅用于展示分组。 */
 export const AGENT_LEN = 64;
 
@@ -203,7 +205,9 @@ export function roundStatusTone(status: string | undefined): Tone {
 /** 某家最后一条状态镜像的一句话（时间 + 槽位 + 结果 + 提交腿数）。 */
 export function entryStatusLine(status: RoundStatus | null): string {
   if (!status) return '无状态镜像';
-  const when = String(status.ts || '').replace('T', ' ').slice(0, 16);
+  // T6-3：状态镜像 ts 是 aware UTC（decision_round_core.as_status → at.isoformat()），
+  // 裸截断会把 UTC 当北京展示（差 8 小时）；aware 换算北京、naive 保持原样。
+  const when = status.ts ? fmtBeijingDateTime(status.ts, { withSeconds: false }) : '';
   const bits = [when, status.slot_label || status.slot || '', roundStatusLabel(status.status)];
   if (typeof status.legs === 'number') bits.push(`腿 ${status.legs}`);
   if (typeof status.submitted === 'number') bits.push(`提交 ${status.submitted}`);
