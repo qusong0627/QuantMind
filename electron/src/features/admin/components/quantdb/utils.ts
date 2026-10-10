@@ -1,3 +1,11 @@
+// 前端隐藏的数据集：1分/5分/Tick 体积大、日常训练/回测不用，面板不展示、
+// 不参与默认勾选/同步（后端接口仍保留，预览/按需调用不受影响）。
+export const HIDDEN_DATASETS = new Set([
+    'min1_kline',
+    'min5_kline',
+    'tick_data',
+]);
+
 export function describeError(error: unknown): string {
     return error instanceof Error ? error.message : '未知错误';
 }

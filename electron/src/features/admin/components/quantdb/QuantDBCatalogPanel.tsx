@@ -12,19 +12,12 @@ import {
     dataPlatformService, QuantDBDataset, QuantDBGroup, QuantDBSyncJob,
     QuantDBDiffResult,
 } from '../../services/dataPlatformService';
-import { describeError, formatPartitionDate, formatSize } from './utils';
+import { describeError, formatPartitionDate, formatSize, HIDDEN_DATASETS } from './utils';
 import { QuantDBDiffSummary } from './QuantDBDiffSummary';
 
 const { Text } = Typography;
 
 const JOB_POLL_INTERVAL_MS = 3000;
-
-// 默认勾选：除 1分/5分/Tick 外，其余数据集默认勾选（便于开箱即用）。
-const EXCLUDED_BY_DEFAULT = new Set([
-    'min1_kline',
-    'min5_kline',
-    'tick_data',
-]);
 
 // 前端隐藏的大类：后端 catalog 仍返回，但面板不展示、也不参与默认勾选/同步。
 // bond_etf = 债券/ETF（category 4）。
@@ -75,15 +68,13 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0, e
                 (g) => !HIDDEN_GROUP_IDS.has(g.id),
             );
             const visibleDatasets = (resp.datasets ?? []).filter(
-                (d) => !HIDDEN_GROUP_IDS.has(d.group),
+                (d) => !HIDDEN_GROUP_IDS.has(d.group) && !HIDDEN_DATASETS.has(d.dataset),
             );
             setGroups(visibleGroups);
             setDatasets(visibleDatasets);
             setDataDir(resp.data_dir ?? '');
             if (!hasAppliedDefaultSelection.current) {
-                setSelected(visibleDatasets
-                    .filter((dataset) => !EXCLUDED_BY_DEFAULT.has(dataset.dataset))
-                    .map((dataset) => dataset.dataset));
+                setSelected(visibleDatasets.map((dataset) => dataset.dataset));
                 hasAppliedDefaultSelection.current = true;
             }
         } catch (error: unknown) {
@@ -153,12 +144,14 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0, e
     }, []);
 
     const handleSyncFromDiff = useCallback(async (datasets: string[]) => {
-        setSelected(datasets);
-        if (datasets.length === 0) return;
+        // diff 结果可能含前端隐藏的数据集（如 1分/5分/Tick），一律过滤
+        const visible = datasets.filter((n) => !HIDDEN_DATASETS.has(n));
+        setSelected(visible);
+        if (visible.length === 0) return;
         setSubmitting(true);
         try {
             const resp = await dataPlatformService.syncQuantDBDatasets({
-                datasets,
+                datasets: visible,
             });
             setActiveJob(resp.job);
             message.success(`已启动同步任务 ${resp.job.job_id}（后台执行）`);
@@ -362,7 +355,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0, e
                                 >
                                     <Text strong>{group.name}</Text>
                                 </Checkbox>
-                                <Tag>{group.synced_count}/{group.dataset_count} 已同步</Tag>
+                                <Tag>{members.filter((d) => d.synced).length}/{members.length} 已同步</Tag>
                                 <Text type="secondary" className="text-xs">{formatSize(group.size_mb)}</Text>
                             </Space>
                         ),

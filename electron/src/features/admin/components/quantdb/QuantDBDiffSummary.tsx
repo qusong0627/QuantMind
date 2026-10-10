@@ -8,6 +8,7 @@ import {
     SyncOutlined,
 } from '@ant-design/icons';
 import { QuantDBDiffResult, QuantDBDatasetDiff } from '../../services/dataPlatformService';
+import { HIDDEN_DATASETS } from './utils';
 
 const { Text } = Typography;
 
@@ -41,10 +42,10 @@ export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
     const summary = diff?.summary;
 
     const behindDatasets = diff
-        ? diff.datasets.filter(d => d.status === 'updates_available')
+        ? diff.datasets.filter(d => d.status === 'updates_available' && !HIDDEN_DATASETS.has(d.dataset))
         : [];
     const notSyncedDatasets = diff
-        ? diff.datasets.filter(d => d.status === 'not_synced')
+        ? diff.datasets.filter(d => d.status === 'not_synced' && !HIDDEN_DATASETS.has(d.dataset))
         : [];
 
     const syncableDatasets = [...behindDatasets, ...notSyncedDatasets];
