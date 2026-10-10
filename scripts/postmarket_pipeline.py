@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""盘后 23:00（北京）复盘 + 明日备选链编排（幂等）。
+"""盘后复盘 + 明日备选链编排（幂等）。
 
 链：news_review（新闻情绪）→ daily_review（复盘 + 持仓 --watch）→ pick_candidates（明日候选池）
 数据全走本机 QuantDB（duckdb 直查 parquet）+ PG；daily_review 缺推理信号时自动补跑。
 
-⚠️ L2 因子 T+1：QuantDB l2_factors/l1_l2_factors 每天 ~00:31（本机 JST）落地。
-   推理门禁依赖 l1_l2_factors → 当晚 23:00（北京）复盘可出，但「明日备选」必须等 L2 落地。
-   → 两段式调度（本机 JST）：
-     · 00:00（=北京 23:00）：本脚本（复盘；L2 未落地时备选步骤优雅跳过）
-     · 00:35（=北京 23:35）：本脚本 --picks-only --wait-l2-min 30（等 L2 → 补推理 → 明日备选）
+⚠️ L2 因子 T+1：QuantDB l2_factors/l1_l2_factors 每天凌晨落地
+   （2026-10-10 实测 ~01:18 北京）。推理门禁依赖 l1_l2_factors。
+   → 两段式调度（宿主 crontab，本机 JST 周二~周六）：
+     · 04:00（=北京 03:00）：本脚本全量（复盘 + 备选）
+     · 05:00（=北京 04:00）：本脚本 --picks-only --wait-l2-min 30（补跑）
 
-幂等：当日 news/stats/picks 已存在 → 跳过对应步骤（--force 重跑）。
+幂等：当日 news/stats 已存在 → 跳过对应步骤（--force 重跑）；picks 恒重算
+（产物按 buy_date 命名，按数据日判存在会错位跳过——见 step_picks docstring）。
 持仓：读 BayMax-Trader logs/live_ledger.json 全部 agent 持仓 → daily_review --watch 传入。
 
 用法：
@@ -121,13 +122,14 @@ def step_review(trade_date: str, watch: str, args) -> None:
 
 
 def step_picks(trade_date: str, args) -> None:
-    """明日备选：等 L2 → 补推理 → pick_candidates（失败自动补跑推理重试一次）。"""
-    picks_out = PICKS_DIR / f"{trade_date}_picks.json"
-    if not args.force and picks_out.exists():
-        log("③ pick_candidates 已产出，跳过")
-        return
+    """明日备选：等 L2 → 补推理 → pick_candidates（失败自动补跑推理重试一次）。
 
-    # L2 因子 T+1（~00:31 JST 落地），未落地时按模式处理
+    恒重算、不做「已产出」跳过：产物按 buy_date（信号日=目标交易日）命名，而这里的
+    ``trade_date`` 是数据截止日——按 ``{trade_date}_picks.json`` 判存在会**错位跳过**
+    次日的产出（2026-10-10 实锤：10-09 的补救池文件令 10-12 的池在 04:00/05:00 两跑
+    都被跳过，周一空池）。该步幂等、无 LLM 成本，重算最稳。
+    """
+    # L2 因子 T+1（凌晨落地），未落地时按模式处理
     if not L2_PART(trade_date).exists():
         if args.wait_l2_min > 0 and not args.dry_run:
             for i in range(args.wait_l2_min):
@@ -138,7 +140,7 @@ def step_picks(trade_date: str, args) -> None:
             if not L2_PART(trade_date).exists():
                 sys.exit(f"③ L2 分区 {L2_PART(trade_date)} 超时未落地")
         elif not args.picks_only:
-            log("③ L2 因子 T+1 未落地（正常），备选由 00:35 --picks-only cron 完成")
+            log("③ L2 因子 T+1 未落地（正常），备选由 05:00（JST）--picks-only cron 完成")
             return
         # picks-only 且未等待：直接尝试，推理门禁会失败并给出明确错误
 
