@@ -58,8 +58,19 @@ class NewsVerdict:
 
 
 def normalize_targets(tickers: Iterable[Any], *, limit: int = _MAX_TARGETS) -> tuple[str, ...]:
-    """允许的标的口径：CN 后缀式（600000.SH / 8xxxxx.BJ）/ 港股（00700.HK）/ 美股纯字母；
-    其余（债券 IB、指数点、空串）剔除。保持序、去重、截断。"""
+    """允许的标的口径：CN 后缀式（600000.SH / 8xxxxx.BJ）/ 港股（4-5 位 + .HK，
+    如 1113.HK / 00700.HK，平台统一 4 位）/ 美股裸字母（ASCII，3-6 位）；其余
+    （债券 IB、指数点、空串）剔除。保持序、去重、截断。
+
+    T4-2（审计 H9）收紧——上游 tickers 全部来自 stock_aliases 词表命中的 canonical
+    大写代码，曾有三类实测污染：① code 别名 "IP"/"PG"（国际纸业/宝洁）在中文语流
+    被「不限IP」这类子串命中 → 1-2 位裸字母在本层一律拒绝（误杀波音 BA/高盛 GS 等
+    2 位真码为已记录取舍：假目标会对真实持仓触发错误 veto/热度信号，假阴性只丢一条
+    新闻，风险不对称）；② 港股 4 位码（长实 1113.HK、领展 1997.HK）曾被「仅 5 位」
+    规则静默丢光，事件只剩发文方——平台港股统一 4 位 +.HK；③ Unicode 全域 isalpha
+    让 CJK 混排 token 冒充美股代码。来源署名类误配（「… - 新华网」→ name 别名
+    603888.SH）形态合法、本层不收——归因层残留，见整改方案 T4-2 执行记录。
+    """
     out: list[str] = []
     seen: set[str] = set()
     for raw in tickers or []:
@@ -69,9 +80,9 @@ def normalize_targets(tickers: Iterable[Any], *, limit: int = _MAX_TARGETS) -> t
         ok = False
         if len(text) == 9 and text[6] == "." and text[:6].isdigit() and text[7:] in {"SH", "SZ", "BJ"}:
             ok = True
-        elif text.endswith(".HK") and len(text) == 8 and text[:5].isdigit():
+        elif text.endswith(".HK") and 4 <= len(text) - 3 <= 5 and text[:-3].isdigit():
             ok = True
-        elif text.isalpha() and 1 <= len(text) <= 6:
+        elif text.isascii() and text.isalpha() and 3 <= len(text) <= 6:
             ok = True
         if ok:
             seen.add(text)

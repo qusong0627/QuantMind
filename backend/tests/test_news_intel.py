@@ -78,6 +78,69 @@ def test_normalize_targets_caps_at_64():
     assert len(out) == 64
 
 
+# ── T4-2（审计 H9）：ticker 归属收紧——审计三样例 ──────────────────
+
+
+def test_normalize_targets_t4_2_rejects_one_two_letter_bare_alpha():
+    """① 「不限IP免实名网址 8k2517.COM」spam 行 tickers=['IP','PG']——「IP」是
+    stock_aliases 的 code 别名，在中文语流里被「不限IP」子串命中（边界校验对 ASCII
+    词只看 [A-Za-z0-9] 邻接，CJK 邻接放行）。1-2 位裸字母在本层一律拒绝；误杀
+    BA/GS 等 2 位真码为已记录取舍（见 normalize_targets docstring）。"""
+    from backend.services.engine.news_intel import normalize_targets
+
+    assert normalize_targets(["IP", "PG"]) == ()
+    assert normalize_targets(["PG", "IP", "T", "GE"]) == ()
+    # 3-6 位 ASCII 美股照常
+    assert normalize_targets(["JPM", "AAPL", "TSLA"]) == ("JPM", "AAPL", "TSLA")
+    # 非 ASCII 字母（CJK 混排 token）不是美股代码
+    assert normalize_targets(["不限IP"]) == ()
+
+
+def test_normalize_targets_t4_2_keeps_four_digit_hk():
+    """② 「小摩：长实集团维持增持」真主语 1113.HK 曾被「仅 5 位」规则静默丢光，
+    事件目标只剩发文方 JPM——平台港股统一 4 位+.HK，必须收；旧 5 位形态兼容。"""
+    from backend.services.engine.news_intel import normalize_targets
+
+    assert normalize_targets(["1113.HK", "JPM"]) == ("1113.HK", "JPM")
+    assert normalize_targets(["JPM", "1997.HK", "9896.HK"]) == (
+        "JPM",
+        "1997.HK",
+        "9896.HK",
+    )
+    assert normalize_targets(["00700.HK"]) == ("00700.HK",)
+    # 非港码位数（3 位 / 6 位）仍拒
+    assert normalize_targets(["123.HK", "123456.HK", "ABCD.HK"]) == ()
+
+
+def test_classify_t4_2_audit_samples_no_longer_misfire():
+    """审计三样例端到端：spam 行不推总线；小摩行真主语在位。603888.SH 为形态对照
+    ——来源署名「- 新华网」经 name 别名（priority 90）命中的误配形态合法，本层
+    不收，属归因层残留（见整改方案 T4-2 执行记录）。"""
+    from backend.services.engine.news_intel import classify_news
+
+    # spam：全目标被收紧 → 无实体 → 不推（即便有正标签 / 情绪分 0.9992）
+    spam = _row(
+        tickers=["IP", "PG"], event_tags=["大涨"], sentiment_score=0.9992,
+        sentiment_label="bullish", title="不限IP免实名网址 8k2517.COM",
+    )
+    assert classify_news(spam) is None
+
+    # 小摩：真主语 1113.HK 不再丢（旧实现只剩 ["JPM"]）
+    v = classify_news(_row(
+        tickers=["1113.HK", "JPM"], event_tags=["增持"], sentiment_score=0.8,
+        sentiment_label="bullish", title="小摩：长实集团维持增持评级",
+    ))
+    assert v is not None and v.kind == "positive"
+    assert v.targets == ("1113.HK", "JPM")
+
+    # 603888.SH 对照：CN 后缀式不受本层收紧影响（残留已记录）
+    v2 = classify_news(_row(
+        tickers=["603888.SH"], event_tags=["大涨"], sentiment_score=0.9783,
+        sentiment_label="bullish", title="前三季度全国城镇新增就业1052万人",
+    ))
+    assert v2 is not None and v2.targets == ("603888.SH",)
+
+
 def test_is_fresh_window_and_bad_input():
     from backend.services.engine.news_intel import is_fresh
 
