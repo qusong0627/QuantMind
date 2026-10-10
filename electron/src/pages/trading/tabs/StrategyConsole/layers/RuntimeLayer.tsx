@@ -178,14 +178,6 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                                         <span className="text-slate-400 font-semibold text-xs">触发窗口</span>
                                         <span className="text-sm font-black text-slate-800">{phaseLabel(nextTrigger.phase)} {formatTriggerAt(nextTrigger.target_at)}</span>
                                     </div>
-                                    <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
-                                        <span className="text-slate-400 font-semibold text-xs">调仓周期</span>
-                                        <span className="text-sm font-black text-slate-800">{scheduleText}</span>
-                                    </div>
-                                    <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
-                                        <span className="text-slate-400 font-semibold text-xs">买卖时点</span>
-                                        <span className="text-sm font-black text-slate-800">{timeText}</span>
-                                    </div>
                                 </div>
                             ) : (
                                 <div className="space-y-2.5 text-sm font-bold text-slate-700">
