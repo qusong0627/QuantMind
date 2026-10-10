@@ -974,6 +974,78 @@ async def ic_pool_percentile(
     return max(0.0, min(1.0, float(row[0])))
 
 
+def _category_breakdown(rows, *, total: int) -> list[dict[str, Any]]:
+    """按因子大类聚合（归类单源 = ``factor_classify``）。
+
+    ``rows`` 是 scope 内活跃池行（factor_name/description/ic_value/icir/
+    pool_score/novelty）。聚合值是**有值样本的均值**（n_ic/n_icir 回传覆盖率，
+    缺失不按 0 计——与全站「缺失显 —」纪律一致）。``other`` 永远垫底。
+    """
+    from backend.services.engine.mining_plugins.factor_classify import classify_factor
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        cls = classify_factor(
+            factor_name=str(r.get("factor_name") or ""),
+            description=r.get("description"),
+        )
+        b = buckets.setdefault(
+            cls.category_id,
+            {
+                "category": cls.category_id,
+                "label": cls.category_label,
+                "count": 0,
+                "ic": [],
+                "icir": [],
+                "pool_score": [],
+                "novelty": [],
+                "names": [],
+            },
+        )
+        b["count"] += 1
+        if r.get("ic_value") is not None:
+            b["ic"].append(float(r["ic_value"]))
+        if r.get("icir") is not None:
+            b["icir"].append(float(r["icir"]))
+        if r.get("pool_score") is not None:
+            b["pool_score"].append(float(r["pool_score"]))
+        if r.get("novelty") is not None:
+            b["novelty"].append(float(r["novelty"]))
+        if r.get("factor_name"):
+            b["names"].append((r.get("pool_score"), str(r["factor_name"])))
+
+    def _avg(values: list[float]) -> float | None:
+        return sum(values) / len(values) if values else None
+
+    out: list[dict[str, Any]] = []
+    for b in buckets.values():
+        n = int(b["count"])
+        ranked = sorted(
+            b["names"],
+            key=lambda t: (
+                -(t[0] if t[0] is not None else float("-inf")),
+                t[1],
+            ),
+        )
+        out.append(
+            {
+                "category": b["category"],
+                "label": b["label"],
+                "count": n,
+                "share": (n / total) if total else 0.0,
+                "avg_ic": _avg(b["ic"]),
+                "n_ic": len(b["ic"]),
+                "avg_icir": _avg(b["icir"]),
+                "n_icir": len(b["icir"]),
+                "avg_pool_score": _avg(b["pool_score"]),
+                "avg_novelty": _avg(b["novelty"]),
+                "top_factors": [name for _, name in ranked[:3]],
+            }
+        )
+    out.sort(key=lambda d: (d["category"] == "other", -d["count"], d["category"]))
+    return out
+
+
 async def pool_overview(
     *, user_id: str, market: str, universe: str | None = None
 ) -> dict[str, Any]:
@@ -1037,6 +1109,25 @@ async def pool_overview(
             .mappings()
             .first()
         )
+        cat_rows = (
+            (
+                await session.execute(
+                    text(f"""
+                    SELECT f.factor_name,
+                           f.metadata_json->>'description' AS description,
+                           f.ic_value, p.pool_score, p.novelty,
+                           CASE WHEN f.metadata_json->>'icir' ~ :numeric
+                                THEN (f.metadata_json->>'icir')::float8 END AS icir
+                    FROM {POOL_TABLE} p
+                    LEFT JOIN rd_agent_factors f ON f.factor_id = p.factor_id
+                    WHERE {where}
+                """),
+                    {**params, "numeric": numeric},
+                )
+            )
+            .mappings()
+            .all()
+        )
     out = dict(agg or {})
     out["pool_diversity"] = None
     out["n_eff"] = None
@@ -1052,6 +1143,10 @@ async def pool_overview(
             out["n_eff"] = float(div["n_eff"])
         except (TypeError, ValueError):
             pass
+    # 因子分类分布（池总览「因子分类」区块；归类单源 = factor_classify）
+    out["category_breakdown"] = _category_breakdown(
+        cat_rows, total=int(out.get("total") or 0)
+    )
     return out
 
 
@@ -1074,8 +1169,9 @@ async def list_pool_factors(
     offset: int = 0,
     sort: str = "pool_score",
     include_archived: bool = False,
+    category: str | None = None,
 ) -> dict[str, Any]:
-    from sqlalchemy import text
+    from sqlalchemy import bindparam, text
 
     from backend.shared.database_manager_v2 import get_session
 
@@ -1083,23 +1179,74 @@ async def list_pool_factors(
     if not include_archived:
         # 归档因子默认退出列表（UI 显式勾选「含已归档」才可见）
         conds.append("p.archived_at IS NULL")
-    where = " AND ".join(conds)
     order = _SORT_COLUMNS.get(sort, _SORT_COLUMNS["pool_score"])
     limit = max(1, min(int(limit), 500))
     offset = max(0, int(offset))
     numeric = "^-?[0-9]+(\\.[0-9]+)?$"
+
+    from backend.services.engine.mining_plugins.factor_classify import classify_factor
+
     async with get_session(read_only=True) as session:
+        if category:
+            # 分类是 Python 侧归类（factor_classify 单源）：先取 scope 内
+            # (id, name, description) 归出该类因子 id 集，再让主查询按 id 过滤
+            # ——分页语义（total/limit/offset）保持不变。
+            scope_rows = (
+                (
+                    await session.execute(
+                        text(f"""
+                        SELECT p.factor_id, f.factor_name,
+                               f.metadata_json->>'description' AS description
+                        FROM {POOL_TABLE} p
+                        LEFT JOIN rd_agent_factors f ON f.factor_id = p.factor_id
+                        WHERE {" AND ".join(conds)}
+                    """),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            cat_ids = [
+                str(r["factor_id"])
+                for r in scope_rows
+                if classify_factor(
+                    factor_name=str(r.get("factor_name") or ""),
+                    description=r.get("description"),
+                ).category_id
+                == category
+            ]
+            if not cat_ids:
+                return {
+                    "total": 0,
+                    "items": [],
+                    "limit": limit,
+                    "offset": offset,
+                    "category": category,
+                }
+            conds.append("p.factor_id IN :cat_ids")
+            params = {**params, "cat_ids": cat_ids}
+        where = " AND ".join(conds)
+        use_expanding = bool(category)
+
+        def _stmt(sql: str):
+            stmt = text(sql)
+            if use_expanding:
+                stmt = stmt.bindparams(bindparam("cat_ids", expanding=True))
+            return stmt
+
         total = (
             await session.execute(
-                text(f"SELECT COUNT(*)::int FROM {POOL_TABLE} p WHERE {where}"),
+                _stmt(f"SELECT COUNT(*)::int FROM {POOL_TABLE} p WHERE {where}"),
                 params,
             )
         ).scalar()
         rows = (
             (
                 await session.execute(
-                    text(f"""
+                    _stmt(f"""
                     SELECT p.factor_id, f.factor_name, f.factor_formulation,
+                           f.metadata_json->>'description' AS description,
                            f.ic_value, f.rank_ic,
                            CASE WHEN f.metadata_json->>'icir' ~ :numeric
                                 THEN (f.metadata_json->>'icir')::float8 END AS icir,
@@ -1127,8 +1274,21 @@ async def list_pool_factors(
     for r in rows:
         item = dict(r)
         item["has_panel"] = bool(item.pop("panel_ref", None))
+        cls = classify_factor(
+            factor_name=str(item.get("factor_name") or ""),
+            description=item.get("description"),
+        )
+        item["category"] = cls.category_id
+        item["category_label"] = cls.category_label
+        item["raw_category_label"] = cls.raw_label
         items.append(item)
-    return {"total": int(total or 0), "items": items, "limit": limit, "offset": offset}
+    return {
+        "total": int(total or 0),
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "category": category,
+    }
 
 
 async def pool_graph(

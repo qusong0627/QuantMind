@@ -7,6 +7,9 @@
  * - 刷新是后台子进程（单飞）：409=已有刷新在跑，按钮置灰靠 running 位；
  *   预演与执行严格两键，执行键带 confirm——刷新会重写池行与谱系边；
  * - 组合实验室（ComboLabTab）自持状态与轮询，作用域随页头市场/股票池走。
+ * - 因子分类（总览概览块 / 页签类别 chips / 行内徽章）来自后端单源
+ *   （描述标签归一 + 名字兜底，见 factor_classify.py）；前端只展示与下钻，
+ *   不另维护类别映射；归类不明 = 「其他」如实呈现。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -28,6 +31,7 @@ import {
   refreshPool,
   unarchivePoolFactors,
   type MiningGateDescriptor,
+  type PoolCategoryStat,
   type PoolFactorList,
   type PoolFactorRow,
   type PoolGateOutcome,
@@ -82,6 +86,41 @@ const SORT_OPTIONS: { key: PoolSortKey; label: string }[] = [
 
 const PAGE_SIZE = 20;
 const STATUS_POLL_MS = 5000;
+
+/** 分类色（克制的语义点缀：同 hue 用于总览色点/进度条与行内徽章）。 */
+const CATEGORY_TONES: Record<string, { bar: string; chip: string }> = {
+  momentum: { bar: 'bg-violet-500', chip: 'border-violet-500/30 bg-violet-500/10 text-violet-700' },
+  reversal: { bar: 'bg-amber-500', chip: 'border-amber-500/30 bg-amber-500/10 text-amber-700' },
+  volatility: { bar: 'bg-rose-500', chip: 'border-rose-500/30 bg-rose-500/10 text-rose-700' },
+  volume: { bar: 'bg-sky-500', chip: 'border-sky-500/30 bg-sky-500/10 text-sky-700' },
+  price_volume: { bar: 'bg-cyan-500', chip: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-700' },
+  liquidity: { bar: 'bg-teal-500', chip: 'border-teal-500/30 bg-teal-500/10 text-teal-700' },
+  overnight: { bar: 'bg-indigo-500', chip: 'border-indigo-500/30 bg-indigo-500/10 text-indigo-700' },
+  position: { bar: 'bg-fuchsia-500', chip: 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-700' },
+  moneyflow: { bar: 'bg-emerald-500', chip: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700' },
+  sentiment: { bar: 'bg-orange-500', chip: 'border-orange-500/30 bg-orange-500/10 text-orange-700' },
+  interaction: { bar: 'bg-lime-500', chip: 'border-lime-500/30 bg-lime-500/10 text-lime-700' },
+  return_dist: { bar: 'bg-blue-500', chip: 'border-blue-500/30 bg-blue-500/10 text-blue-700' },
+  valuation: { bar: 'bg-slate-500', chip: 'border-slate-500/30 bg-slate-500/10 text-slate-600' },
+  other: { bar: 'bg-slate-400', chip: 'border-slate-400/30 bg-slate-400/10 text-slate-500' },
+};
+
+function categoryTone(id: string | null | undefined): { bar: string; chip: string } {
+  return (id ? CATEGORY_TONES[id] : undefined) ?? CATEGORY_TONES.other;
+}
+
+function fmtShare(share: number): string {
+  const pct = share * 100;
+  return `${pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)}%`;
+}
+
+function categoryChipClass(active: boolean): string {
+  return `inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+    active
+      ? 'border-violet-500/40 bg-violet-500/15 text-violet-700'
+      : 'border-border/60 bg-secondary/20 text-muted-foreground hover:text-foreground hover:bg-secondary/40'
+  }`;
+}
 
 function fmtNum(value: number | null | undefined, digits = 4): string {
   return value == null || !Number.isFinite(value) ? MISSING_METRIC_TEXT : value.toFixed(digits);
@@ -148,6 +187,8 @@ export const FactorPoolPage: React.FC = () => {
   const [sort, setSort] = useState<PoolSortKey>('pool_score');
   const [page, setPage] = useState(0);
   const [includeArchived, setIncludeArchived] = useState(false);
+  /** 因子大类过滤（'' = 全部；总览点类别卡/池因子页签 chip 都在改它） */
+  const [categoryFilter, setCategoryFilter] = useState('');
   const [restorePending, setRestorePending] = useState<string | null>(null);
   const [graph, setGraph] = useState<PoolGraph | null>(null);
   const [graphError, setGraphError] = useState<string | null>(null);
@@ -159,6 +200,9 @@ export const FactorPoolPage: React.FC = () => {
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const statusTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** 池因子列表请求序号：切类别/市场会在同一次 commit 里连发多个请求，
+   *  只有最后一次的响应允许落表（迟到响应会把旧页/旧类别的切片画进新视图）。 */
+  const loadSeqRef = useRef(0);
 
   // ── 静态选项（市场/股票池/门禁描述符）：进页一次 ──
   useEffect(() => {
@@ -208,6 +252,7 @@ export const FactorPoolPage: React.FC = () => {
 
   const loadFactors = useCallback(
     async (targetPage: number, targetSort: PoolSortKey) => {
+      const seq = ++loadSeqRef.current;
       const res = await getPoolFactors({
         market,
         universe,
@@ -215,7 +260,9 @@ export const FactorPoolPage: React.FC = () => {
         offset: targetPage * PAGE_SIZE,
         sort: targetSort,
         includeArchived,
+        category: categoryFilter || undefined,
       });
+      if (seq !== loadSeqRef.current) return; // 迟到的旧响应：丢弃，不覆盖新结果
       if (res.success && res.data) {
         setFactors(res.data);
         setFactorsError(null);
@@ -223,7 +270,7 @@ export const FactorPoolPage: React.FC = () => {
         setFactorsError(res.error ?? '池因子列表加载失败');
       }
     },
-    [market, universe, includeArchived],
+    [market, universe, includeArchived, categoryFilter],
   );
 
   useEffect(() => {
@@ -236,7 +283,12 @@ export const FactorPoolPage: React.FC = () => {
 
   useEffect(() => {
     setPage(0);
-  }, [market, universe, includeArchived]);
+  }, [market, universe, includeArchived, categoryFilter]);
+
+  // 作用域切换后旧类别过滤无意义（类别计数随市场/池变）→ 清掉
+  useEffect(() => {
+    setCategoryFilter('');
+  }, [market, universe]);
 
   // ── 归档行恢复（池因子表内联动作；确认动作在「清理建议」tab） ──
   const handleRestoreRow = useCallback(
@@ -318,6 +370,22 @@ export const FactorPoolPage: React.FC = () => {
     () => graph?.nodes.find((n) => n.factorId === selectedNodeId) ?? null,
     [graph, selectedNodeId],
   );
+
+  // ── 因子分类（总览概览块 ↔ 池因子页签的类别过滤共用一份口径） ──
+  const categoryStats = useMemo(() => overview?.categoryBreakdown ?? [], [overview]);
+  const activeCategoryStat = useMemo(
+    () => categoryStats.find((c) => c.category === categoryFilter) ?? null,
+    [categoryStats, categoryFilter],
+  );
+  // 进度条按最大类归一（other 垫底但计数可能最大，不能拿 categoryStats[0] 当上限）
+  const maxCategoryCount = useMemo(
+    () => Math.max(...categoryStats.map((c) => c.count), 1),
+    [categoryStats],
+  );
+  const handleCategoryDrillDown = useCallback((category: string) => {
+    setCategoryFilter(category);
+    setTab('factors');
+  }, []);
 
   const refreshRunning = refreshState?.running === true;
   const refreshIsDry = (refreshState?.args as { dry_run?: unknown } | undefined)?.dry_run === true;
@@ -526,6 +594,76 @@ export const FactorPoolPage: React.FC = () => {
                 <KpiTile label="平均 ICIR" value={fmtNum(overview?.avgIcir, 3)} />
                 <KpiTile label="平均 PFS" value={fmtNum(overview?.avgPfs)} />
               </div>
+
+              {/* 因子分类概览：按大类聚合（计数/占比/均值/代表因子），点类别下钻 */}
+              {categoryStats.length > 0 && (
+                <Card className="glass">
+                  <CardHeader className="pb-2">
+                    <div className="flex flex-wrap items-baseline justify-between gap-1">
+                      <CardTitle className="text-sm">因子分类概览</CardTitle>
+                      <span className="text-[11px] text-muted-foreground">
+                        按挖掘描述标签归一（无描述回退因子名）；点击类别下钻到池因子列表
+                      </span>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+                      {categoryStats.map((cat) => {
+                        const tone = categoryTone(cat.category);
+                        return (
+                          <button
+                            key={cat.category}
+                            type="button"
+                            title={`查看「${cat.label}」因子`}
+                            onClick={() => handleCategoryDrillDown(cat.category)}
+                            className="group rounded-lg border border-border/60 bg-secondary/20 p-3 text-left transition-all cursor-pointer hover:border-violet-400/50 hover:bg-secondary/40 hover:shadow-xs"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className={`h-2 w-2 shrink-0 rounded-full ${tone.bar}`} />
+                              <span className="text-sm font-bold text-foreground">
+                                {cat.label}
+                              </span>
+                              <span className="ml-auto font-mono text-xs text-muted-foreground">
+                                {cat.count} · {fmtShare(cat.share)}
+                              </span>
+                            </div>
+                            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200/80">
+                              <div
+                                className={`h-full rounded-full ${tone.bar}`}
+                                style={{
+                                  width: `${Math.max(4, (cat.count / maxCategoryCount) * 100)}%`,
+                                }}
+                              />
+                            </div>
+                            <div className="mt-2 flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
+                              <span title={`IC 均值（有值样本 ${cat.nIc}/${cat.count}）`}>
+                                IC <b className="text-foreground">{fmtNum(cat.avgIc)}</b>
+                              </span>
+                              <span title={`ICIR 均值（有值样本 ${cat.nIcir}/${cat.count}）`}>
+                                ICIR <b className="text-foreground">{fmtNum(cat.avgIcir, 3)}</b>
+                              </span>
+                              <span title="池评分均值">
+                                池分 <b className="text-foreground">{fmtNum(cat.avgPoolScore, 3)}</b>
+                              </span>
+                            </div>
+                            <div className="mt-1.5 flex items-center gap-2 text-[10px] text-muted-foreground">
+                              <span className="truncate">
+                                代表：
+                                {cat.topFactors.length > 0
+                                  ? cat.topFactors.join('、')
+                                  : MISSING_METRIC_TEXT}
+                              </span>
+                              <span className="ml-auto shrink-0 inline-flex items-center gap-0.5 font-medium transition-colors group-hover:text-violet-600">
+                                下钻 <ChevronRight className="h-3 w-3" />
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
               {overview && overview.total === 0 && (
                 <Card className="glass">
                   <CardContent className="p-8 text-center text-sm text-muted-foreground">
@@ -545,6 +683,11 @@ export const FactorPoolPage: React.FC = () => {
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm">
                 池内因子 {factors ? `（${factors.total}）` : ''}
+                {activeCategoryStat && (
+                  <span className="ml-1.5 font-normal text-muted-foreground">
+                    · 类别「{activeCategoryStat.label}」
+                  </span>
+                )}
               </CardTitle>
               <div className="flex items-center gap-2 text-xs">
                 <label className="flex items-center gap-1.5 cursor-pointer text-muted-foreground">
@@ -573,6 +716,33 @@ export const FactorPoolPage: React.FC = () => {
                 </select>
               </div>
             </div>
+            {categoryStats.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-muted-foreground">类别</span>
+                <button
+                  type="button"
+                  onClick={() => setCategoryFilter('')}
+                  className={categoryChipClass(categoryFilter === '')}
+                >
+                  全部
+                </button>
+                {categoryStats.map((cat) => (
+                  <button
+                    key={cat.category}
+                    type="button"
+                    title={`${cat.count} 个因子 · 占比 ${fmtShare(cat.share)}${includeArchived ? '（不含已归档）' : ''}`}
+                    onClick={() =>
+                      setCategoryFilter(categoryFilter === cat.category ? '' : cat.category)
+                    }
+                    className={categoryChipClass(categoryFilter === cat.category)}
+                  >
+                    <span className={`h-1.5 w-1.5 rounded-full ${categoryTone(cat.category).bar}`} />
+                    {cat.label}
+                    <span className="font-mono opacity-70">{cat.count}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </CardHeader>
           <CardContent>
             {factorsError ? (
@@ -609,6 +779,18 @@ export const FactorPoolPage: React.FC = () => {
                               <span className="truncate font-mono text-[10px] text-muted-foreground">
                                 {row.factorId.slice(0, 12)}
                               </span>
+                              {row.categoryLabel && (
+                                <span
+                                  className={`shrink-0 rounded border px-1 py-0 text-[9px] font-medium ${categoryTone(row.category).chip}`}
+                                  title={
+                                    row.rawCategoryLabel
+                                      ? `原始标签：${row.rawCategoryLabel}`
+                                      : '按因子名归类（无描述标签）'
+                                  }
+                                >
+                                  {row.categoryLabel}
+                                </span>
+                              )}
                               {row.archivedAt != null && (
                                 <>
                                   <Badge variant="outline" className="shrink-0 text-[9px] px-1 py-0">
@@ -669,7 +851,20 @@ export const FactorPoolPage: React.FC = () => {
                   </table>
                 </div>
                 {(factors?.items ?? []).length === 0 && (
-                  <div className="p-8 text-center text-sm text-muted-foreground">没有符合条件的池因子</div>
+                  <div className="p-8 text-center text-sm text-muted-foreground">
+                    {categoryFilter
+                      ? `「${activeCategoryStat?.label ?? categoryFilter}」类别下没有符合当前条件的因子`
+                      : '没有符合条件的池因子'}
+                    {categoryFilter && (
+                      <button
+                        type="button"
+                        className="ml-2 text-primary hover:underline"
+                        onClick={() => setCategoryFilter('')}
+                      >
+                        清除类别过滤
+                      </button>
+                    )}
+                  </div>
                 )}
                 <div className="flex items-center justify-end gap-2 mt-3 text-xs">
                   <span className="text-muted-foreground">

@@ -1158,6 +1158,26 @@ export async function healthCheck(): Promise<
 // 作用域约定：`universe` 空串/缺省 = 全部（后端把它归一为 None），
 // 非空 = 精确作用域。刷新端点的 owner 恒为登录身份，前端没有 user_id 参数。
 
+/** 因子大类聚合（分类单源 = 后端 factor_classify，按池内活跃因子归桶）。 */
+export interface PoolCategoryStat {
+  /** 大类 id（momentum/reversal/…；无法归类 = 'other'，如实呈现） */
+  category: string;
+  /** 大类中文名（后端单源下发，前端不另维护映射） */
+  label: string;
+  count: number;
+  /** 占池内因子比例（0..1） */
+  share: number;
+  avgIc: number | null;
+  /** avgIc 的有值样本数（缺失不按 0 计——覆盖率随行可见） */
+  nIc: number;
+  avgIcir: number | null;
+  nIcir: number;
+  avgPoolScore: number | null;
+  avgNovelty: number | null;
+  /** 该类池评分最高的因子名（≤3 个，仅作代表） */
+  topFactors: string[];
+}
+
 export interface PoolOverview {
   total: number;
   withPanel: number;
@@ -1175,6 +1195,8 @@ export interface PoolOverview {
   nEff: number | null;
   /** 已归档因子数（默认聚合只算活跃因子；此数给「已归档 N」提示） */
   archivedCount: number;
+  /** 因子分类聚合（计数降序；other 垫底）。旧后端无此字段 = []（界面不渲染区块） */
+  categoryBreakdown: PoolCategoryStat[];
 }
 
 export interface PoolGateOutcome {
@@ -1212,6 +1234,12 @@ export interface PoolFactorRow {
   updatedAt: string | null;
   /** 归档时间戳（NULL = 活跃）；仅「含已归档」视图下有值 */
   archivedAt: string | null;
+  /** 因子大类 id（分类单源=后端；无法归类 = 'other'） */
+  category: string | null;
+  /** 大类中文名（展示用） */
+  categoryLabel: string | null;
+  /** 原始描述标签（如「隔夜信息因子」）；无描述 = null */
+  rawCategoryLabel: string | null;
   /** 物化门禁裁决（metadata.materialization.gates）；未物化过 = null */
   gates: PoolFactorGates | null;
 }
@@ -1336,6 +1364,9 @@ function mapPoolFactorRow(raw: any): PoolFactorRow {
     createdAt: raw?.created_at != null ? String(raw.created_at) : null,
     updatedAt: raw?.updated_at != null ? String(raw.updated_at) : null,
     archivedAt: raw?.archived_at != null ? String(raw.archived_at) : null,
+    category: raw?.category != null ? String(raw.category) : null,
+    categoryLabel: raw?.category_label != null ? String(raw.category_label) : null,
+    rawCategoryLabel: raw?.raw_category_label != null ? String(raw.raw_category_label) : null,
     gates:
       raw?.gates && Array.isArray(raw.gates?.gates)
         ? {
@@ -1352,6 +1383,29 @@ function mapPoolFactorRow(raw: any): PoolFactorRow {
           }
         : null,
   };
+}
+
+/** 总览分类区块映射。``share`` 缺失时按 count / 计数和推导——缺失绝不渲染成
+ *  伪造的 0.0%（同一卡片族的 avgIc 等缺失都落「—」）。 */
+function mapCategoryBreakdown(raw: unknown): PoolCategoryStat[] {
+  const rows: any[] = Array.isArray(raw) ? raw : [];
+  const counted = rows.reduce((sum, c) => sum + (Number(c?.count ?? 0) || 0), 0);
+  return rows.map((c): PoolCategoryStat => {
+    const count = Number(c?.count ?? 0) || 0;
+    return {
+      category: String(c?.category ?? 'other'),
+      label: String(c?.label ?? c?.category ?? '其他'),
+      count,
+      share: poolNum(c?.share) ?? (counted > 0 ? count / counted : 0),
+      avgIc: poolNum(c?.avg_ic),
+      nIc: Number(c?.n_ic ?? 0) || 0,
+      avgIcir: poolNum(c?.avg_icir),
+      nIcir: Number(c?.n_icir ?? 0) || 0,
+      avgPoolScore: poolNum(c?.avg_pool_score),
+      avgNovelty: poolNum(c?.avg_novelty),
+      topFactors: Array.isArray(c?.top_factors) ? c.top_factors.map(String) : [],
+    };
+  });
 }
 
 /** 池总览（KPI + 多样性熵）。失败返回 success=false，面板显错误而不是假 0。 */
@@ -1378,6 +1432,7 @@ export async function getPoolOverview(params: {
       poolDiversity: poolNum(raw.pool_diversity),
       nEff: poolNum(raw.n_eff),
       archivedCount: Number(raw.archived_count ?? 0) || 0,
+      categoryBreakdown: mapCategoryBreakdown(raw.category_breakdown),
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : '因子池总览获取失败';
@@ -1394,6 +1449,8 @@ export async function getPoolFactors(params: {
   sort?: PoolSortKey;
   /** 勾选「含已归档」才带出归档行（行里 archivedAt 有值） */
   includeArchived?: boolean;
+  /** 因子大类过滤（空/缺省 = 全部；取值 = 后端 CANONICAL_CLASSES 的 id） */
+  category?: string;
 }): Promise<ApiResponse<PoolFactorList>> {
   try {
     const qs = new URLSearchParams(poolQs(params.market, params.universe));
@@ -1401,6 +1458,7 @@ export async function getPoolFactors(params: {
     qs.set('offset', String(params.offset ?? 0));
     if (params.sort) qs.set('sort', params.sort);
     if (params.includeArchived) qs.set('include_archived', 'true');
+    if (params.category) qs.set('category', params.category);
     const res = await apiClient.get(`/alpha-agent/pool/factors?${qs.toString()}`);
     const raw = res.data?.data ?? {};
     return makeOk({

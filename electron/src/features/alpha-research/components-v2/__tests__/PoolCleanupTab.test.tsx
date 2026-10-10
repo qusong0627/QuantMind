@@ -60,6 +60,9 @@ function mkArchivedRow(factorId: string, factorName: string): PoolFactorRow {
     createdAt: null,
     updatedAt: '2026-10-09T03:00:00Z',
     archivedAt: '2026-10-09T03:00:00Z',
+    category: null,
+    categoryLabel: null,
+    rawCategoryLabel: null,
     gates: null,
   };
 }

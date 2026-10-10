@@ -435,6 +435,8 @@ class TestPoolReadEndpoints:
             return {"total": 0, "items": []}
 
         monkeypatch.setattr(pool_service, "list_pool_factors", fake_list)
+        # 直调契约：FastAPI 默认值不参与直调，所有 Query 参数必须显式传，
+        # 否则拿到的是 Query(...) 对象（.strip() 会直接 AttributeError）
         await aa.get_pool_factors(
             _fake_request("u1"),
             market="a_share",
@@ -442,6 +444,8 @@ class TestPoolReadEndpoints:
             limit=20,
             offset=40,
             sort="ic",
+            include_archived=False,
+            category="",
         )
         assert calls == [
             {
@@ -451,8 +455,33 @@ class TestPoolReadEndpoints:
                 "limit": 20,
                 "offset": 40,
                 "sort": "ic",
+                "include_archived": False,
+                "category": None,
             }
         ]
+
+    @pytest.mark.asyncio
+    async def test_factors_rejects_unknown_category(self, monkeypatch) -> None:
+        """未知大类显式 400（不静默空列表），且不得触达 service。"""
+        from backend.services.engine.mining_plugins import pool_service
+
+        async def fake_list(**kwargs):  # pragma: no cover - 不应被调用
+            raise AssertionError("list_pool_factors 不应被调用")
+
+        monkeypatch.setattr(pool_service, "list_pool_factors", fake_list)
+        with pytest.raises(HTTPException) as err:
+            await aa.get_pool_factors(
+                _fake_request("u1"),
+                market="a_share",
+                universe="",
+                limit=20,
+                offset=0,
+                sort="pool_score",
+                include_archived=False,
+                category="MOMENTUM",
+            )
+        assert err.value.status_code == 400
+        assert "momentum" in err.value.detail
 
     @pytest.mark.asyncio
     async def test_graph_passes_max_nodes(self, monkeypatch) -> None:
@@ -466,11 +495,21 @@ class TestPoolReadEndpoints:
 
         monkeypatch.setattr(pool_service, "pool_graph", fake_graph)
         resp = await aa.get_pool_graph(
-            _fake_request("u1"), market="a_share", universe="", max_nodes=50
+            _fake_request("u1"),
+            market="a_share",
+            universe="",
+            max_nodes=50,
+            include_archived=False,  # 直调契约：Query 默认值不参与直调，必须显式传
         )
         assert resp["data"] == {"nodes": [], "edges": []}
         assert calls == [
-            {"user_id": "u1", "market": "a_share", "universe": None, "max_nodes": 50}
+            {
+                "user_id": "u1",
+                "market": "a_share",
+                "universe": None,
+                "max_nodes": 50,
+                "include_archived": False,
+            }
         ]
 
 

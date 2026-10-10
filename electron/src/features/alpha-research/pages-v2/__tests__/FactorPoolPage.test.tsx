@@ -10,7 +10,7 @@
  */
 import React from 'react';
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { FactorPoolPage } from '../FactorPoolPage';
 
 const {
@@ -90,6 +90,48 @@ const OVERVIEW = {
   avgPfs: 0.88,
   poolDiversity: 0.77,
   nEff: 5.2,
+  archivedCount: 0,
+  categoryBreakdown: [
+    {
+      category: 'momentum',
+      label: '动量与趋势',
+      count: 7,
+      share: 7 / 12,
+      avgIc: 0.021,
+      nIc: 6, // 7 个里只有 6 个有 IC → title 里可见覆盖率
+      avgIcir: 0.4,
+      nIcir: 6,
+      avgPoolScore: 0.55,
+      avgNovelty: 0.4,
+      topFactors: ['alpha_001'],
+    },
+    {
+      category: 'overnight',
+      label: '隔夜与跳空',
+      count: 3,
+      share: 3 / 12,
+      avgIc: null, // 该类全部缺 IC → 卡片显「—」而不是 0
+      nIc: 0,
+      avgIcir: null,
+      nIcir: 0,
+      avgPoolScore: 0.4,
+      avgNovelty: 0.3,
+      topFactors: [],
+    },
+    {
+      category: 'other',
+      label: '其他',
+      count: 2,
+      share: 2 / 12,
+      avgIc: 0.01,
+      nIc: 2,
+      avgIcir: 0.1,
+      nIcir: 2,
+      avgPoolScore: 0.2,
+      avgNovelty: 0.2,
+      topFactors: ['misc_1'],
+    },
+  ],
 };
 
 const GATE_FACTOR = {
@@ -110,6 +152,10 @@ const GATE_FACTOR = {
   hasPanel: true,
   createdAt: '2026-09-20T00:00:00Z',
   updatedAt: '2026-10-01T00:00:00Z',
+  archivedAt: null,
+  category: 'momentum',
+  categoryLabel: '动量与趋势',
+  rawCategoryLabel: '动量因子',
   gates: {
     rejected: false,
     gates: [
@@ -142,6 +188,9 @@ const NO_GATE_FACTOR = {
   hasPanel: false,
   timesRetrieved: 0, // 从未被检索 → 列表显「—」而不是「0 次」
   gates: null,
+  category: 'overnight',
+  categoryLabel: '隔夜与跳空',
+  rawCategoryLabel: null, // 无描述标签 → 名字兜底；徽章 title 提示按名归类
 };
 
 const FACTORS_PAGE = {
@@ -238,6 +287,81 @@ describe('FactorPoolPage 池总览', () => {
     await waitFor(() =>
       expect(getPoolOverviewMock).toHaveBeenCalledWith({ market: 'us_stock', universe: '' }),
     );
+  });
+});
+
+describe('FactorPoolPage 因子分类', () => {
+  const lastFactorsCall = () =>
+    getPoolFactorsMock.mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
+
+  test('分类概览按后端顺序渲染；类内指标缺失显「—」而不是 0', async () => {
+    render(<FactorPoolPage />);
+    await screen.findByText('因子分类概览');
+
+    const titles = Array.from(
+      document.querySelectorAll('button[title^="查看「"]'),
+    ).map((el) => el.getAttribute('title'));
+    expect(titles).toEqual([
+      '查看「动量与趋势」因子',
+      '查看「隔夜与跳空」因子',
+      '查看「其他」因子',
+    ]);
+
+    // 动量卡：7 · 58%（7/12→58%），IC 0.0210
+    const momentumCard = screen.getByTitle('查看「动量与趋势」因子');
+    expect(momentumCard.textContent).toContain('7 · 58%');
+    expect(momentumCard.textContent).toContain('0.0210');
+
+    // 隔夜卡：IC/ICIR 全缺 → 显「—」，代表因子为空也显「—」
+    const overnightCard = screen.getByTitle('查看「隔夜与跳空」因子');
+    expect(within(overnightCard).getAllByText('—').length).toBeGreaterThan(0);
+    expect(overnightCard.textContent).not.toContain('0.0000');
+  });
+
+  test('点类别卡下钻：切到池因子页签、按该类过滤、行内出类别徽章', async () => {
+    render(<FactorPoolPage />);
+    await screen.findByText('因子分类概览');
+
+    fireEvent.click(screen.getByTitle('查看「动量与趋势」因子'));
+    await waitFor(() =>
+      expect(lastFactorsCall()).toMatchObject({ category: 'momentum' }),
+    );
+
+    // 页签标题带出当前类别
+    expect(await screen.findByText(/类别「动量与趋势」/)).toBeTruthy();
+    // 行内徽章：title 显示原始描述标签；名字兜底行提示按名归类
+    expect((await screen.findByTitle('原始标签：动量因子')).textContent).toBe('动量与趋势');
+    expect(
+      screen.getByTitle('按因子名归类（无描述标签）').textContent,
+    ).toBe('隔夜与跳空');
+  });
+
+  test('chip 过滤/清除；切换市场自动清除类别过滤', async () => {
+    render(<FactorPoolPage />);
+    await screen.findByText('12');
+    fireEvent.click(screen.getByRole('button', { name: /池因子/ }));
+
+    // 点「隔夜与跳空」chip → 带 category=overnight 拉取
+    fireEvent.click(await screen.findByRole('button', { name: /隔夜与跳空/ }));
+    await waitFor(() =>
+      expect(lastFactorsCall()).toMatchObject({ category: 'overnight' }),
+    );
+
+    // 点「全部」→ 清除过滤（category=undefined 不成行）
+    fireEvent.click(screen.getByRole('button', { name: '全部' }));
+    await waitFor(() => expect(lastFactorsCall()?.category).toBeUndefined());
+
+    // 再选一类后切市场：旧类别随作用域清掉
+    fireEvent.click(screen.getByRole('button', { name: /隔夜与跳空/ }));
+    await waitFor(() =>
+      expect(lastFactorsCall()).toMatchObject({ category: 'overnight' }),
+    );
+    fireEvent.change(screen.getByLabelText('市场'), { target: { value: 'us_stock' } });
+    await waitFor(() => {
+      const call = lastFactorsCall();
+      expect(call?.market).toBe('us_stock');
+      expect(call?.category).toBeUndefined();
+    });
   });
 });
 

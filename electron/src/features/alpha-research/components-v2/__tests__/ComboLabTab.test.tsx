@@ -66,6 +66,9 @@ function mkPoolRow(over: Partial<PoolFactorRow> & { factorId: string }): PoolFac
     createdAt: null,
     updatedAt: null,
     archivedAt: null,
+    category: null,
+    categoryLabel: null,
+    rawCategoryLabel: null,
     gates: null,
     ...over,
   };

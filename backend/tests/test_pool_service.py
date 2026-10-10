@@ -73,12 +73,15 @@ async def _seed_factor(
     icir: float | None = 0.5,
     task_id: str | None = None,
     ic: float | None = 0.03,
+    description: str | None = None,
 ) -> None:
     import json
 
     meta = {"task_id": task_id, "quality": {"pfs": 0.95}}
     if icir is not None:
         meta["icir"] = icir
+    if description is not None:
+        meta["description"] = description
     await session.execute(
         text("""
             INSERT INTO rd_agent_factors
@@ -769,4 +772,123 @@ class TestArchiveCleanup:
             assert stolen_restore["skipped"] == [fid]
         finally:
             await _cleanup([fid], [owner, intruder])
+            await close_database()
+
+
+class TestFactorCategory:
+    """因子分类：总览分类区块 + 列表分类过滤（归类单源 factor_classify）。"""
+
+    def test_category_breakdown_aggregates_and_ranks(self):
+        """纯函数聚合：计数/占比/有值均值/覆盖率/代表因子/other 垫底。"""
+        rows = [
+            # 动量族 ×2（一个无 IC 无池评分——缺失不按 0 计）
+            {
+                "factor_name": "Momentum_5D",
+                "description": "[动量因子] 5日动量",
+                "ic_value": 0.02,
+                "icir": 0.5,
+                "pool_score": 0.8,
+                "novelty": 0.9,
+            },
+            {
+                "factor_name": "mom_x",
+                "description": "[动量因子] 变体",
+                "ic_value": None,
+                "icir": None,
+                "pool_score": None,
+                "novelty": None,
+            },
+            # 隔夜族 ×1
+            {
+                "factor_name": "OvernightReturn",
+                "description": "[隔夜信息因子] 隔夜收益",
+                "ic_value": 0.01,
+                "icir": 0.2,
+                "pool_score": 0.5,
+                "novelty": 0.4,
+            },
+            # 前缀未命中规则 → other（如实呈现，不猜）
+            {
+                "factor_name": "mystery",
+                "description": "[某种全新因子] x",
+                "ic_value": 0.03,
+                "icir": None,
+                "pool_score": 0.9,
+                "novelty": 0.1,
+            },
+        ]
+        out = pool_service._category_breakdown(rows, total=4)
+        assert [d["category"] for d in out] == ["momentum", "overnight", "other"]
+        mom = out[0]
+        assert mom["label"] == "动量与趋势"
+        assert mom["count"] == 2 and mom["share"] == pytest.approx(0.5)
+        assert mom["avg_ic"] == pytest.approx(0.02) and mom["n_ic"] == 1
+        assert mom["n_icir"] == 1
+        assert mom["avg_pool_score"] == pytest.approx(0.8)
+        # 代表因子按池评分降序（None 垫底）
+        assert mom["top_factors"] == ["Momentum_5D", "mom_x"]
+        other = out[-1]
+        assert other["category"] == "other" and other["label"] == "其他"
+        assert other["top_factors"] == ["mystery"]
+
+    @pytest.mark.asyncio
+    async def test_overview_breakdown_and_list_filter(self, tmp_path, monkeypatch):
+        """真库：overview 带分类分布；列表按类过滤且行带类标签；类别隔离。"""
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        monkeypatch.setenv("QM_FACTOR_POOL_PANEL_DIR", str(tmp_path / "panels"))
+        run = _run_id()
+        user = f"{run}-u"
+        f_mom, f_ovn = f"{run}_m1", f"{run}_o1"
+        try:
+            async with get_session() as session:
+                await _seed_factor(
+                    session,
+                    factor_id=f_mom,
+                    user_id=user,
+                    description="[动量因子] 5日动量",
+                    ic=0.02,
+                )
+                await _seed_factor(
+                    session,
+                    factor_id=f_ovn,
+                    user_id=user,
+                    description="[隔夜信息因子] 隔夜收益",
+                    ic=0.01,
+                )
+                await _seed_pool_row(session, factor_id=f_mom, user_id=user)
+                await _seed_pool_row(session, factor_id=f_ovn, user_id=user)
+
+            overview = await pool_service.pool_overview(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+            cats = {d["category"]: d for d in overview["category_breakdown"]}
+            assert cats["momentum"]["count"] == 1
+            assert cats["overnight"]["count"] == 1
+            assert sum(d["count"] for d in overview["category_breakdown"]) == (
+                overview["total"]
+            )
+
+            only_ovn = await pool_service.list_pool_factors(
+                user_id=user, market=MARKET, universe=UNIVERSE, category="overnight"
+            )
+            assert [i["factor_id"] for i in only_ovn["items"]] == [f_ovn]
+            assert only_ovn["total"] == 1
+            assert only_ovn["items"][0]["category"] == "overnight"
+            assert only_ovn["items"][0]["category_label"] == "隔夜与跳空"
+            assert only_ovn["items"][0]["raw_category_label"] == "隔夜信息因子"
+
+            only_mom = await pool_service.list_pool_factors(
+                user_id=user, market=MARKET, universe=UNIVERSE, category="momentum"
+            )
+            assert [i["factor_id"] for i in only_mom["items"]] == [f_mom]
+
+            # 空类：合法类名但池内没有该类因子 → 空列表（不抛错）
+            empty = await pool_service.list_pool_factors(
+                user_id=user, market=MARKET, universe=UNIVERSE, category="valuation"
+            )
+            assert empty["total"] == 0 and empty["items"] == []
+        finally:
+            await _cleanup([f_mom, f_ovn], [user])
             await close_database()
