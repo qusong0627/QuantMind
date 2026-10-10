@@ -288,6 +288,7 @@ class AnomalyEngine:
         data_fetcher: Callable[[AnomalyConfig], Sequence[Mapping[str, Any]]] | None = None,
         model_fetcher: Callable[[AnomalyConfig], Sequence[Mapping[str, Any]]] | None = None,
         publisher: Callable[[Detection], None] | None = None,
+        bus_key: str | None = None,
         recorder: Callable[[Detection], Any] | None = None,
         denier: Callable[[Detection], dict[str, Any]] | None = None,
         reducer: Callable[[Detection], dict[str, Any]] | None = None,
@@ -303,6 +304,11 @@ class AnomalyEngine:
         self._data_fetcher = data_fetcher or self._default_data_inputs
         self._model_fetcher = model_fetcher or self._default_model_inputs
         self.publisher = publisher or self._default_publish
+        # 总线 stream 键（默认 intel:events）。**测试专用口**（T7-1，审计 H5）：
+        # 集成测试借真 Redis 验发布路径时，事件若落生产 intel:events，会被容器内
+        # 生产的 sentinel 消费组当成真告警——写 sentinel_alerts + 管理员真推送
+        # （2026-10-10 实测 36+ 条假行）。测试传隔离键，生产恒 None（走默认）。
+        self._bus_key = str(bus_key).strip() if bus_key else None
         self.recorder = recorder or self._default_record
         self.denier = denier or self._default_deny
         self.reducer = reducer or self._default_reduce
@@ -357,7 +363,7 @@ class AnomalyEngine:
         非 symbol 族发空数组（消费端 sentinel_alert_service 按 "*" 兜底），完整 subject 走
         payload.subject（机器可读；title 里也有）。
         """
-        from backend.shared.intel_events import publish_event
+        from backend.shared.intel_events import STREAM_KEY, publish_event
 
         client = _main_redis()
         try:
@@ -381,6 +387,7 @@ class AnomalyEngine:
                     "actions_hint": list(detection.actions_hint)[:8],
                     "source": SOURCE,
                 },
+                key=self._bus_key or STREAM_KEY,
             )
         finally:
             client.close()

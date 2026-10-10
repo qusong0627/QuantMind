@@ -196,6 +196,28 @@ def publish_notification(
     改走 ``backend.shared.qq_digest`` 合并成摘要（2026-10-09 降噪：一段行情
     26 条逐条推送把手机淹没）。单发告警（桥健康/风控）保持默认 True 即时送达。
     """
+    tid = str(tenant_id or "default").strip() or "default"
+
+    # T7-1 出口闸（审计 H5）：测试租户（t-*/*_t_*）的告警曾从夹具直抵值班面——
+    # 集成测试的假 critical（"fake-model" 等）真推 QQ + 落 notifications 表 +
+    # 进 notification_events。本函数是全部站内通知/QQ 推送的单一出口，在此拒写
+    # 一处收敛；夹具若要验发送行为应注入替身，而非借真通道。前缀清单唯一事实源
+    # = backend/shared/risk/ghost.py（QM_GHOST_EXCLUDE_TENANTS 可追加）。
+    # 结构性 t-/_t_ 判定叠在清单之上：测试词汇实测远超清单五项（t-1*/t-doc-/
+    # t-run-/t-ms-* …），而生产表里真实租户只有 default——推送面直通真人手机，
+    # 宁可多拦（拒写有 WARNING 日志 + refused_test_tenant 计数，可诊断）。
+    from backend.shared.risk.ghost import is_test_tenant as _is_test_tenant
+
+    if _is_test_tenant(tid) or tid.startswith(("t-", "_t_")):
+        logger.warning(
+            "notification refused: test tenant=%s type=%s title=%s（T7-1 出口闸）",
+            tid,
+            type,
+            str(title or "")[:64],
+        )
+        inc_counter(notification_publish_total, "refused_test_tenant")
+        return False
+
     # 告警旁路先行：与库/流成败解耦（低等级在 alert_async 内部即被过滤）
     if qq_alert:
         _maybe_qq_alert(type=type, level=level, title=title, content=content)
@@ -206,7 +228,6 @@ def publish_notification(
         return False
 
     uid = str(user_id or "").strip()
-    tid = str(tenant_id or "default").strip() or "default"
     if not uid:
         logger.warning("notification publish skipped: empty user_id")
         inc_counter(notification_publish_total, "skipped")

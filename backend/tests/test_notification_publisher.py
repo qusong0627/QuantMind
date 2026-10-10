@@ -3,7 +3,9 @@
 防回退要点：
 - fanout 逐条投递、计数如实（部分失败不得报满）；
 - 无管理员=``(0, 0)``（不是异常，由调用方决定是否告警）；
-- 查询失败**向上抛**（不许伪装成「没有管理员」，否则库挂了反而静默）。
+- 查询失败**向上抛**（不许伪装成「没有管理员」，否则库挂了反而静默）；
+- 测试租户（``t-*``/``_t_*`` + ghost 清单 + env 追加）在出口拒写——QQ 旁路/
+  库/流全不碰（T7-1，审计 H5）。
 """
 
 from __future__ import annotations
@@ -134,3 +136,44 @@ def test_qq_alert_default_still_bypasses(monkeypatch):
         user_id="1", tenant_id="default", title="t", content="c", level="warning"
     )
     assert len(alerts) == 1
+
+
+# ── 测试租户出口闸（T7-1，审计 H5）─────────────────────────────────
+
+
+@pytest.mark.unit
+def test_test_tenant_pushes_are_refused_before_qq_and_db(monkeypatch):
+    """夹具租户的告警一律不出口：QQ 旁路不触发、库/流不写、返回 False。
+
+    实测背景（2026-10-10）：集成测试的假 critical（t-* 夹具、"fake-model" 决策轮
+    告警）真推 QQ + 落 notifications 表。推送出口唯一 = ``publish_notification``，
+    在此一处拒写；夹具若要验发送行为应注入替身。
+    """
+    alerts = []
+    counters = []
+    monkeypatch.setattr(np, "_maybe_qq_alert", lambda **kw: alerts.append(kw))
+    monkeypatch.setattr(np, "inc_counter", lambda _c, r: counters.append(r))
+    monkeypatch.setattr(np, "get_db", None)  # 库路径若被走到也会在计数里现形
+    for tid in ("t-pending-life-4e4040", "t-1abc", "t-doc-9x", "t-run-abc", "_t_p206"):
+        assert (
+            np.publish_notification(
+                user_id="1", tenant_id=tid, title="t", content="c", level="error"
+            )
+            is False
+        ), tid
+    assert alerts == [], "测试租户连 QQ 旁路都不许走"
+    assert counters == ["refused_test_tenant"] * 5, "拒写必须留 refused_test_tenant 计数"
+
+
+@pytest.mark.unit
+def test_real_tenants_still_pass_the_gate(monkeypatch):
+    """拒收不能拒过头：default 与普通租户照常走旁路（近失配不得误伤）。"""
+    alerts = []
+    monkeypatch.setattr(np, "_maybe_qq_alert", lambda **kw: alerts.append(kw))
+    monkeypatch.setattr(np, "get_db", None)  # 写库路径不参与：跳过即返回 False
+    for tid in ("default", "team-alpha", "tenant-b", "test-lab"):
+        np.publish_notification(
+            user_id="1", tenant_id=tid, title="t", content="c", level="warning"
+        )
+    # get_db=None 时旁路先行、随后返回 False（与闸无关的既有语义）；只要旁路都触发了
+    assert len(alerts) == 4

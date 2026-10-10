@@ -3,8 +3,10 @@
 覆盖验收口径：
 - 四类检测（此处用确定性夹具走 账户异常/市场量价 两类 + 契约/动作；检测器正反例见
   test_anomaly_detectors）；
-- 动作真实生效：告警落**真 intel 总线**（intel:events）、留痕落**真 PG**
-  （qm_market_anomalies + risk_events）、否决写**真 risk lock**（fail-closed 通道）；
+- 动作真实生效：告警走**真 publish_event 路径**落**本次运行私有的隔离流**
+  （itest:intel:events:{tag}；生产键 intel:events 会被容器内 sentinel 消费组当
+  真告警消费——写 sentinel_alerts + 推管理员，2026-10-10 审计 H5/T7-1）、留痕落
+  **真 PG**（qm_market_anomalies + risk_events）、否决写**真 risk lock**（fail-closed 通道）；
 - 契约自愈：ensure_anomaly_types 让新 anomaly_type 可写。
 """
 
@@ -111,6 +113,10 @@ def test_anomaly_engine_real_actions_end_to_end():
         return [{"model_id": model_id,
                  "ic_stats": {"ic_5": -0.05, "ic_20": 0.03, "n_5": 6, "n_20": 20}}]
 
+    # 隔离总线键（T7-1，审计 H5）：发布走真 publish_event，但写给**本次运行私有**
+    # 的流；生产的 sentinel 消费组只读 intel:events，不会把夹具消费成真告警。
+    bus_key = f"itest:intel:events:{tag}"
+
     engine = AnomalyEngine(
         config_loader=lambda: AnomalyConfig(enabled=True, volume_ratio_min=3.0,
                                             cancel_ratio_min=0.6, min_orders=5,
@@ -119,6 +125,7 @@ def test_anomaly_engine_real_actions_end_to_end():
         account_fetcher=account_fetcher,
         data_fetcher=data_fetcher,
         model_fetcher=model_fetcher,
+        bus_key=bus_key,
         status_writer=_no_status_write,
         now_fn=_session_now,
     )
@@ -133,8 +140,8 @@ def test_anomaly_engine_real_actions_end_to_end():
         result = engine.build_once()
         assert result["enabled"] is True and result["detections"] >= 2
 
-        # ① 告警 → 真 intel 总线（intel:events）
-        events = bus.xrevrange("intel:events", count=60)
+        # ① 告警 → 真发布路径 → 本次运行的隔离流（T7-1：不落生产 intel:events）
+        events = bus.xrevrange(bus_key, count=60)
         mine = []
         for _eid, fields in events:
             try:
@@ -189,7 +196,8 @@ def test_anomaly_engine_real_actions_end_to_end():
         actions = {r[0] for r in audits}
         assert "deny" in actions and "reduce_suggested" in actions
     finally:
-        # 清理：账户锁 + 去重冷却键 + 审计行（总线事件为追加流，按 MAXLEN 自然淘汰，不动）
+        # 清理：账户锁 + 去重冷却键 + 审计行 + 隔离流（生产总线是追加流，按 MAXLEN
+        # 自然淘汰，不动；隔离流是测试私产，整键删）
         try:
             trade.delete(account_lock_key)
             # 去重冷却键（qm:anomaly:last_fired:*，TTL 30min）按夹具 subject 清掉：
@@ -199,6 +207,7 @@ def test_anomaly_engine_real_actions_end_to_end():
                     bus.delete(key)
             # 异动源集合同样按自造 subject 清（TTL 1h，留着会喂给热集构建器的"异动源"）
             bus.srem("qm:anomaly:recent_symbols", symbol)
+            bus.delete(bus_key)
             bus.close()
             trade.close()
         except Exception:  # noqa: BLE001
@@ -219,6 +228,18 @@ def test_anomaly_engine_real_actions_end_to_end():
                         "DELETE FROM qm_market_anomalies "
                         "WHERE details->>'source' = 'anomaly_engine' "
                         "AND details->>'subject' IN (:sym, :uid, :mid)"
+                    ),
+                    {"sym": symbol, "uid": user_id, "mid": model_id},
+                )
+                # T7-1：清理段覆盖 sentinel_alerts——隔离后夹具事件不再被生产消费组
+                # 消费（不该有新行），这段兜住隔离前的历史窗口与未来回归（按本次夹具
+                # subject 钉死，绝不碰生产引擎的真告警行）。
+                session.execute(
+                    sql_text(
+                        "DELETE FROM sentinel_alerts "
+                        "WHERE source = 'anomaly_engine' "
+                        "AND (detail->'payload'->>'subject' IN (:sym, :uid, :mid) "
+                        "     OR symbol = :sym)"
                     ),
                     {"sym": symbol, "uid": user_id, "mid": model_id},
                 )

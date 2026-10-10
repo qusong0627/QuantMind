@@ -215,4 +215,10 @@ def test_sentinel_alert_backfill_report_annotation_cycle(monkeypatch):
                 bus.xdel("intel:events", event_id)
             except Exception:  # noqa: BLE001
                 pass
+        # T7-1：销毁本次运行的隔离消费组——此前每跑一次留一个 sentinel-itest-{tag}
+        # 组（2026-10-10 实测生产 intel:events 上积了 70 个，审计 H5/M15）。
+        try:
+            bus.xgroup_destroy("intel:events", f"sentinel-itest-{tag}")
+        except Exception:  # noqa: BLE001
+            pass
         bus.close()
