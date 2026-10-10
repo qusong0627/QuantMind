@@ -347,6 +347,15 @@ def alert_action_url(symbol: str | None = None) -> str:
     return f"{base}&symbol={sym}" if sym else base
 
 
+def _freq_tag(freq: Any) -> str:
+    """分数类文案的频度后缀：非实时分一律标「（日频分）」。
+
+    站内标题与 QQ 摘要**同用这一份**——两处曾各写各的，摘要漏标（审计 M11），
+    用户会把手里的隔夜分数误读成盘中实况。
+    """
+    return "（日频分）" if str(freq) != "realtime" else ""
+
+
 def build_alert_title(
     kind: str, stock_name: str | None, symbol: str, *, freq: str = "daily"
 ) -> str:
@@ -356,7 +365,7 @@ def build_alert_title(
     买卖方向或祈使句**——这类提醒是「把位置如实告诉用户」，不是操作指令。
     """
     name = str(stock_name or "").strip() or symbol
-    tag = "（日频分）" if str(freq) != "realtime" else ""
+    tag = _freq_tag(freq)
     if kind == KIND_SCORE_CROSS_ZERO:
         return f"{name} 分数降至 0 及以下{tag}"
     if kind == KIND_SCORE_BELOW_THRESHOLD:
@@ -387,9 +396,11 @@ _DIGEST_RISK_LABELS: dict[str, str] = {
 def format_holding_digest_line(alert: Mapping[str, Any]) -> str:
     """预警 → QQ 摘要**单行**（批量降噪用，见 ``backend/shared/qq_digest``）。
 
-    形如 ``▼ 麦格米特(SZ002851) 分数 +0.021 → -0.008``（分数类）或
-    ``⚑ 麦格米特(SZ002851) 盘中异动``（风险类）。代码统一前缀式（与前端/委托
-    台账/成交回执一致）；名字缺失退化为代码。纯函数、绝不抛。
+    形如 ``▼ 麦格米特(SZ002851) 分数 +0.021 → -0.008（日频分）``（分数类）或
+    ``⚑ 麦格米特(SZ002851) 盘中异动``（风险类）。分数类带频度后缀，与站内
+    标题同一口径（``_freq_tag``，审计 M11——摘要漏标会被读成盘中实况）。
+    代码统一前缀式（与前端/委托台账/成交回执一致）；名字缺失退化为代码。
+    纯函数、绝不抛。
     """
     symbol = str(alert.get("symbol") or "").strip()
     name = str(alert.get("stock_name") or "").strip()
@@ -412,7 +423,13 @@ def format_holding_digest_line(alert: Mapping[str, Any]) -> str:
             arrow = "▼" if float(now) < float(prev) else "▲"
         except (TypeError, ValueError):
             arrow = "•"
-        return f"{arrow} {ident} 分数 {format_score(prev)} → {format_score(now)}"
+        # 频度取自 detail.freq（哨兵写分数类预警时必填；缺省按日频，与
+        # build_alert_title 的默认同一口径）
+        freq = str((alert.get("detail") or {}).get("freq") or "daily")
+        return (
+            f"{arrow} {ident} 分数 {format_score(prev)} → "
+            f"{format_score(now)}{_freq_tag(freq)}"
+        )
     return f"• {ident} {str(alert.get('title') or '持仓预警').strip()}"
 
 

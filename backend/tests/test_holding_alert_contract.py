@@ -453,9 +453,41 @@ class TestDigestLine:
                 "kind": KIND_SCORE_DROP,
                 "score_prev": 0.021,
                 "score_now": -0.008,
+                "detail": {"freq": "daily"},
             }
         )
-        assert line == "▼ 麦格米特(SZ002851) 分数 +0.021 → -0.008"
+        # 分数类带频度后缀，与站内标题同一口径（审计 M11：摘要漏标被读成盘中实况）
+        assert line == "▼ 麦格米特(SZ002851) 分数 +0.021 → -0.008（日频分）"
+
+    def test_score_line_realtime_freq_has_no_tag(self):
+        from backend.shared.holding_alert_contract import format_holding_digest_line
+
+        line = format_holding_digest_line(
+            {
+                "symbol": "600036.SH",
+                "stock_name": "招商银行",
+                "kind": KIND_SCORE_DROP,
+                "score_prev": 0.1,
+                "score_now": 0.05,
+                "detail": {"freq": "realtime"},
+            }
+        )
+        assert "日频" not in line
+
+    def test_score_line_missing_freq_defaults_daily_like_title(self):
+        """detail 缺失按日频处理——与 build_alert_title 的默认 freq="daily" 对齐。"""
+        from backend.shared.holding_alert_contract import format_holding_digest_line
+
+        line = format_holding_digest_line(
+            {
+                "symbol": "600036.SH",
+                "stock_name": "招商银行",
+                "kind": KIND_SCORE_DROP,
+                "score_prev": 0.1,
+                "score_now": 0.05,
+            }
+        )
+        assert line.endswith("（日频分）")
 
     def test_score_rise_points_up(self):
         from backend.shared.holding_alert_contract import format_holding_digest_line
