@@ -137,6 +137,25 @@ COPY backend backend
 COPY config config
 COPY strategy_templates strategy_templates
 
+# ── P2-6 不可变发布：以下 COPY 让生产模式（docker-compose.prod.yml，无代码挂载）
+# 仍有完整运行面。本地开发对同名路径全量挂载、覆盖这里的烘焙内容，行为不变。
+# 「prod 移除的挂载目标 → 此段烘焙」的映射由 backend/tests/test_release_immutable.py
+# 钉住：若在 compose 里新增一个代码挂载而不在此处烘焙，该测试变红。
+COPY docs /app/docs
+COPY scripts /app/scripts
+COPY deploy/release_lib.sh /app/deploy/release_lib.sh
+COPY docker-compose.prod.yml /app/docker-compose.prod.yml
+# 出厂配置两份（公开默认密钥护栏 test_public_default_secrets 在容器内扫的就是它们）
+COPY .env.example /app/.env.example
+COPY docker-compose.yml /app/docker-compose.yml
+# 训练脚本整目录：training_runtime 的候选与 factor_quality 的按路径加载都锚定
+# /app/docker/training（根级 /app/train.py 老布局保留在上一段，仅为兼容探测）
+COPY docker/training /app/docker/training
+# RD-Agent conda shim（把 rdagent4qlib 环境映射到容器当前 python）
+COPY docker/conda-shim /usr/local/bin/conda
+# litellm+pydantic 兼容补丁（因子挖掘 LLM 调用用，见 docker/litellm_sitecustomize.py）
+COPY docker/litellm_sitecustomize.py /usr/local/lib/python3.10/site-packages/sitecustomize.py
+
 # 创建数据目录 & Qlib 符号链接（运行时由 rd_loop_wrapper 按实际缓存路径创建）
 RUN mkdir -p /data/models /data/qlib_data /data/uploads /data/strategies /tmp \
     && mkdir -p /root/.qlib/qlib_data

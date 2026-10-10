@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # QuantMind 一键更新脚本
-# 核心流程：拉代码 → 重建/重启后端容器 → 跑 data/upgrade_*.sql → 健康检查。
+# 核心流程（P2-6 不可变发布）：拉代码 → 构建（注戳）→ 晋级 :latest → 强制重建容器
+# → 发布断言（无代码挂载 / 运行态戳==检出，不过则自动回滚上一镜像）→ 跑
+# data/upgrade_*.sql → 健康检查。
+# 生成容器默认走 docker-compose.prod.yml 覆盖层（去全部代码 bind mount）；
+# 本地开发不经过本脚本（直接裸用 docker-compose.yml 热更新）。
 # db/redis/qwenpaw 等基础设施容器不强制重启（仅 compose 配置漂移时按需重建）。
-# 用法：sudo bash deploy/update.sh [--ref <branch>] [--remote gitee|github|origin] [--force] [--no-build] [--skip-backup]
+# 用法：sudo bash deploy/update.sh [--ref <branch>] [--remote gitee|github|origin] [--force] [--no-build] [--mounts] [--skip-backup]
 # 不传 --ref 时默认更新到**当前 checkout 的分支**（见 default_ref）。
 
 set -Eeuo pipefail
@@ -12,6 +16,7 @@ REF="${QUANTMIND_REF:-}"               # 空 = 未指定，main 里按当前 che
 REMOTE="${QUANTMIND_REMOTE:-origin}"   # 项目实际远端是 gitee/github；默认 origin 兼容旧配置
 FORCE=false
 BUILD=true
+MOUNTS_MODE=false                      # --mounts：应急退回 bind-mount 模式（默认不可变发布）
 SKIP_BACKUP=false
 
 log() { printf '[quantmind-update] %s\n' "$*"; }
@@ -43,7 +48,8 @@ usage() {
   --ref <branch|tag>    更新到指定版本（默认：当前 checkout 的分支；识别不到时为 master）
   --remote <name>       远端名（默认 origin；项目实际远端是 gitee/github）
   --force               覆盖服务器上的未提交代码改动，不删除业务数据
-  --no-build            跳过核心镜像构建（仅代码改动时用，bind mount 已生效）
+  --no-build            跳过镜像构建（仅当镜像身份==检出 commit 时允许；代码变更必须重建）
+  --mounts              应急：退回 bind-mount 模式（默认走 docker-compose.prod.yml 不可变发布）
   --skip-backup         跳过升级前数据库备份
   -h, --help            显示帮助
 EOF
@@ -55,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --remote) REMOTE="${2:-}"; shift 2 ;;
         --force|-force) FORCE=true; shift ;;
         --no-build) BUILD=false; shift ;;
+        --mounts|-mounts) MOUNTS_MODE=true; shift ;;
         --skip-backup) SKIP_BACKUP=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "未知参数: $1（force 请用 --force）" ;;
@@ -186,63 +193,53 @@ EOF
 }
 
 build_core() {
-    # 智能判断：只有"会改变镜像层"的文件变更才触发 build。
-    # 触发条件（与 docker/Dockerfile.oss / docker-compose.yml 实际 COPY + build 段对齐）：
-    #   1) Dockerfile 自身变更
-    #      - docker/Dockerfile*
-    #      - docker/*.build-args (buildkit 缓存标记)
-    #   2) Dockerfile.oss 实际 COPY 的 3 个 requirements 文件
-    #      - requirements.txt / requirements/production.txt / requirements/ai.txt
-    #   3) docker-compose.yml 中 quantmind.build 段变更（影响 build 行为）
-    #      - build.args（如 TORCH_DEVICE skip → cu121）
-    #      - build.context / build.dockerfile
-    #      - build.target / build.platform / build.cache_from
-    # 不触发 build（绝大多数情况）：
-    #   - backend/、config/、scripts/ 等都是 bind mount，**不**需要重 build
-    #   - ports/volumes/environment 改了只影响运行时，重启即可（restart_services 会处理）
-    #   - 子项目 tools/rd-agent/dashboard/... 下的 requirements.txt 各自独立
-    # 这样 95% 的纯代码升级从 5min 缩到 30s。
+    # 不可变发布（P2-6）构建闸门：镜像身份（qm.git.commit Label）== 检出 HEAD 才允许
+    # 复用；不等（含旧镜像无戳）→ 重建。requirements 指纹不再单独触发——依赖变化必然
+    # 伴随 commit 变化，commit 相等即镜像层输入全等。
+    # bind-mount 回退模式（--mounts / 旧 tag 检出无覆盖层 / compose 过旧）维持旧语义：
+    # 镜像存在即跳过，代码由挂载活供。
+    local head_sha=''
+    if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+        head_sha="$(qm_release_head_sha "$PROJECT_DIR")"
+        [[ -n "$head_sha" && "$head_sha" != "unknown" ]] \
+            || die '无法确定检出 commit（git rev-parse 失败），不可变发布中止'
+    fi
+
     if ! $BUILD; then
+        if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+            local cur_sha
+            cur_sha="$(qm_image_git_commit quantmind-oss:latest)"
+            [[ "$cur_sha" == "$head_sha" ]] \
+                || die "--no-build 与不可变发布不兼容（镜像身份 ${cur_sha:-无} ≠ 检出 ${head_sha:0:12}）：去掉 --no-build 重建，或 --mounts 显式回退"
+        fi
         log '2/4 跳过镜像构建（--no-build 显式指定）'
         return
     fi
 
-    # 触发源：仅影响镜像层的文件（与 Dockerfile.oss 实际 COPY/ARG 对齐）。
-    # 不依赖 git reflog / HEAD@{1}——首次部署、浅克隆、--force 下都有效。
-    local trigger files build_blk
-    trigger=''
-    files=(
-        "$PROJECT_DIR/requirements.txt"
-        "$PROJECT_DIR/requirements/production.txt"
-        "$PROJECT_DIR/requirements/ai.txt"
-        "$PROJECT_DIR/docker/Dockerfile.oss"
-    )
-    # Dockerfile + build-args
-    for f in "$PROJECT_DIR"/docker/Dockerfile* "$PROJECT_DIR"/docker/*.build-args; do
-        [[ -e "$f" ]] && files+=("$f")
-    done
-    # 计算文件签名：存在则取 sha256（前 64 位），缺失则记 missing
-    for f in "${files[@]}"; do
-        if [[ -f "$f" ]]; then
-            local h
-            h="$(sha256sum "$f" 2>/dev/null | awk '{print $1}' | head -c 64 || echo missing)"
-            trigger="${trigger}${f}=${h}\n"
-        else
-            trigger="${trigger}${f}=missing\n"
+    # 是否重建：不可变模式 = 镜像身份 == 检出 HEAD；回退模式 = 仅镜像缺失时建。
+    local need_build=false reason=''
+    if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -qx 'quantmind-oss:latest'; then
+        need_build=true; reason='镜像不存在'
+    elif [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+        local image_sha
+        image_sha="$(qm_image_git_commit quantmind-oss:latest)"
+        if [[ -z "$image_sha" ]]; then
+            need_build=true; reason='镜像无身份戳（T7-3 之前的旧镜像或手工构建）'
+        elif [[ "$image_sha" != "$head_sha" ]]; then
+            need_build=true; reason="镜像身份 ${image_sha:0:12} ≠ 检出 ${head_sha:0:12}"
         fi
-    done
+    fi
+    if ! $need_build; then
+        if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+            log "2/4 镜像已对应当前检出（${head_sha:0:12}），跳过重建"
+        else
+            log '2/4 跳过镜像构建（bind-mount 回退模式：镜像已存在）'
+        fi
+        return
+    fi
 
-    # docker-compose.yml 仅参与"build 段"签名，不再整文件比对：
-    # compose 里端口/环境变量/卷等改动不影响镜像层，改动它们不应触发镜像重建。
-    # 注意：
-    #   1) 禁用 grep -n —— 行号会随文件任意位置的编辑而漂移，导致签名每次都变、
-    #      每次部署白白全量重建。
-    #   2) 用 awk 只截取 quantmind 服务块，其他服务的 build 段变更不误伤本镜像。
-    #   3) build args 在 compose 里是 ${TORCH_DEVICE:-skip} 这类静态插值文本，
-    #      .env 里切 cpu/gpu 不会改变该文本，故把 TORCH_DEVICE 生效值单独计入签名。
-    local svc_blk torch_val
-    svc_blk="$(awk '/^  quantmind:/{f=1;next} f && /^  [A-Za-z0-9_-]+:/{exit} f' \
-        "$PROJECT_DIR/docker-compose.yml" 2>/dev/null || true)"
+    # torch 形态解析（构建参数口径；写入 .env 避免下次再推断）
+    local torch_val
     torch_val="${TORCH_DEVICE:-$(grep -E '^[[:space:]]*TORCH_DEVICE=' "$PROJECT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' " || true)}"
     if [[ -z "$torch_val" ]]; then
         # 唯一推断实现：deploy/req-fingerprint.sh --infer-torch
@@ -261,84 +258,59 @@ build_core() {
                 fi
             fi
         else
-            log '2/4 未指定 TORCH_DEVICE 且无可用镜像推断，构建签名按 skip'
+            log '2/4 未指定 TORCH_DEVICE 且无可用镜像推断，按 skip 形态构建'
         fi
     fi
-    build_blk="$(printf '%s' "$svc_blk" \
-        | grep -aE 'build:|context:|dockerfile:|args:|target:|platform:|cache_from:|TORCH_DEVICE|TORCH_CPU_INDEX_URL' \
-        | sha256sum | awk '{print $1}')${torch_val:-skip}"
-    build_blk="$(printf '%s' "$build_blk" | sha256sum | awk '{print $1}' | head -c 64)"
-    build_blk="${build_blk:-missing}"
-    trigger="${trigger}docker-compose-build=${build_blk}\n"
 
-    local marker marker_dir
-    marker_dir="$PROJECT_DIR/.update"
-    marker="$marker_dir/deps.sha256"
-    local prev
-    prev=''
-    [[ -f "$marker" ]] && prev="$(cat "$marker" 2>/dev/null || true)"
-
-    # 判定是否需要重建
-    local need_build=false need_seed=false
-    if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -qx 'quantmind-oss:latest'; then
-        # 镜像根本不存在 → 必须 build（且本次 build 用于初始化镜像）
-        need_build=true; need_seed=false
-    elif [[ -n "$prev" && "$prev" != "$trigger" ]]; then
-        # 有基线且签名变了 → 依赖/构建配置变更 → 需 build
-        need_build=true
-    elif [[ -z "$prev" ]]; then
-        # 镜像已在用、又无签名基线（首次启用新版脚本）→ 仅建基线，不白 rebuild
-        need_build=false; need_seed=true
-        log "2/4 首次启用构建基线：镜像已存在，仅记录签名，跳过镜像重建"
+    log "2/4 重建核心后端镜像（$reason）"
+    # 旧依赖指纹 marker（.update/deps.sha256）已废弃：镜像身份改由 commit 决定；
+    # 残留文件无害，可手动删除。
+    # 把依赖指纹同步写入镜像 Label（qm.req.sha），与 full-deploy 的指纹闸门共用一套口径。
+    local req_sha
+    req_sha="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" "$PROJECT_DIR" 2>/dev/null || true)"
+    # 部署真相戳（T7-3）：构建时刻的代码身份一并写进镜像 LABEL/戳文件，
+    # docker inspect 与容器内启动打点都能核对「镜像由哪版代码构建」。
+    local git_commit git_branch git_dirty
+    git_commit="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    git_branch="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ]]; then
+        git_dirty=true
     else
-        # 签名未变 → 跳过
-        log "2/4 跳过镜像构建（依赖/构建配置无变化；后端代码 bind mount 已生效）"
-        return
+        git_dirty=false
     fi
+    QM_REQ_SHA="${req_sha:-unknown}" QM_GIT_COMMIT="$git_commit" \
+        QM_GIT_BRANCH="$git_branch" QM_GIT_DIRTY="$git_dirty" \
+        docker compose -f "$PROJECT_DIR/docker-compose.yml" build quantmind || {
+        die "镜像构建失败，请检查以上日志"
+    }
 
-    if $need_build; then
-        log "2/4 重建核心后端镜像（检测到依赖/构建配置变更）"
-        # 把依赖指纹同步写入镜像 Label（qm.req.sha），与 full-deploy 的指纹闸门共用一套口径。
-        local req_sha
-        req_sha="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" "$PROJECT_DIR" 2>/dev/null || true)"
-        # 部署真相戳（T7-3）：构建时刻的代码身份一并写进镜像 LABEL/戳文件，
-        # docker inspect 与容器内启动打点都能核对「镜像由哪版代码构建」。
-        local git_commit git_branch git_dirty
-        git_commit="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
-        git_branch="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-        if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ]]; then
-            git_dirty=true
-        else
-            git_dirty=false
-        fi
-        QM_REQ_SHA="${req_sha:-unknown}" QM_GIT_COMMIT="$git_commit" \
-            QM_GIT_BRANCH="$git_branch" QM_GIT_DIRTY="$git_dirty" \
-            docker compose -f "$PROJECT_DIR/docker-compose.yml" build quantmind || {
-            die "镜像构建失败，请检查以上日志"
-        }
+    # 构建后立即做身份断言（尚未触碰运行容器，fail-fast 在重启之前）
+    if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+        local built_sha
+        built_sha="$(qm_image_git_commit quantmind-oss:latest)"
+        [[ "$built_sha" == "$head_sha" ]] \
+            || die "构建产物身份断言失败：镜像=${built_sha:-无} 检出=${head_sha:0:12}（检查构建侧 QM_GIT_COMMIT 注入）"
+        log "2/4 镜像已注戳：quantmind-oss:latest @ ${head_sha:0:12}"
     fi
-    # build 成功（或无需 build）才落盘新签名（失败不记录，下次重试）
-    mkdir -p "$marker_dir"
-    printf '%s' "$trigger" > "$marker"
 }
 
-# 关键步骤：强制重建 application 层容器（bind mount 代码需进程重启才生效），
-# 其余服务（含 db/redis/dsh）不强制重启，仅在 compose 配置发生漂移时按需重建。
+# 关键步骤：强制重建 application 层容器（不可变模式下让新镜像生效；回退模式下让
+# 挂载代码随进程重启生效），其余服务（含 db/redis/dsh）不强制重启，仅在 compose
+# 配置发生漂移时按需重建。
 restart_services() {
     log '3/4 重启后端服务（强制重建 quantmind + celery）'
-    cd "$PROJECT_DIR"
     local services=(quantmind)
     local service
     for service in celery-worker celery-beat; do
-        if docker compose config --services | grep -qx "$service"; then
+        if "${QM_COMPOSE[@]}" config --services | grep -qx "$service"; then
             services+=("$service")
         fi
     done
-    docker compose up -d --no-deps --force-recreate "${services[@]}"
+    "${QM_COMPOSE[@]}" up -d --no-deps --force-recreate "${services[@]}"
 
     # legacy 迁移（一次性）：QuantBot 后端已由 qwenpaw 切换为 dsh；旧 qwenpaw 若仍在
     # 运行会与 dsh 抢宿主 8088 → 自动停掉（数据卷保留；回滚见 compose 中 qwenpaw 注释）。
-    if docker compose config --services 2>/dev/null | grep -qx dsh \
+    if "${QM_COMPOSE[@]}" config --services 2>/dev/null | grep -qx dsh \
         && docker ps --format '{{.Names}}' | grep -qx qwenpaw; then
         log '    停止 legacy qwenpaw 容器（已由 dsh 接管 8088；回滚用 --profile legacy）'
         docker stop qwenpaw >/dev/null 2>&1 || true
@@ -356,10 +328,49 @@ restart_services() {
         # 服务的 config --services 过滤行为不一致，显式跳过最稳）
         [[ "$service" == "qwenpaw" ]] && continue
         others+=("$service")
-    done < <(docker compose config --services)
+    done < <("${QM_COMPOSE[@]}" config --services)
     if (( ${#others[@]} > 0 )); then
-        docker compose up -d --no-deps "${others[@]}"
+        "${QM_COMPOSE[@]}" up -d --no-deps "${others[@]}"
     fi
+}
+
+# 载入发布共享库并初始化 compose 文件组（生产覆盖层 or bind-mount 回退）。
+load_release_lib() {
+    local lib="$PROJECT_DIR/deploy/release_lib.sh"
+    [[ -f "$lib" ]] || die "缺少 $lib（代码未同步完整？）"
+    # shellcheck source=/dev/null
+    source "$lib"
+    qm_compose_init "$PROJECT_DIR" "$MOUNTS_MODE" \
+        || die 'compose 文件组初始化失败（见上方指引：升级 docker compose 或 --mounts 临时回退）'
+    if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+        log '发布模式：不可变（docker-compose.prod.yml，容器无代码挂载）'
+    else
+        log '发布模式：bind-mount 回退（本次不做不可变断言）'
+    fi
+}
+
+# 发布断言（P2-6）：核心判定在 release_lib.sh 的 qm_release_verify_runtime（与
+# full-deploy 共用）；这里只加「失败 → 回滚上一镜像」。prev_image 为空时只报错不回滚。
+assert_release_runtime() {
+    local prev_image="$1"
+    [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]] || return 0
+    local head_sha fail_msg=''
+    head_sha="$(qm_release_head_sha "$PROJECT_DIR")"
+
+    if ! fail_msg="$(qm_release_verify_runtime "$PROJECT_DIR" "$head_sha")"; then
+        record_system_event "error" "发布断言失败" "$fail_msg"
+        log "发布断言失败：$fail_msg" >&2
+        if [[ -n "$prev_image" ]] && docker image inspect "$prev_image" >/dev/null 2>&1; then
+            log "回滚：quantmind-oss:latest ← $prev_image（上一镜像）" >&2
+            if docker tag "$prev_image" quantmind-oss:latest; then
+                restart_services || true
+            fi
+        else
+            log '无可回滚的上一镜像（首次不可变发布），容器留在现场待排查' >&2
+        fi
+        die "发布断言失败（已回滚到上一镜像）：$fail_msg"
+    fi
+    log '发布断言通过：三容器零代码挂载，运行态戳==检出 HEAD'
 }
 
 # 跑 data/upgrade_*.sql —— 这是用户最关心的"执行 SQL"主流程。
@@ -375,7 +386,7 @@ update_database() {
     # 确认 db 容器在跑
     if ! docker ps --format '{{.Names}}' | grep -qx 'quantmind-db'; then
         log '  启动 quantmind-db'
-        docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps db \
+        "${QM_COMPOSE[@]}" up -d --no-deps db \
             || die "启动 quantmind-db 失败"
     fi
 
@@ -461,8 +472,13 @@ main() {
     record_system_event "info" "系统更新开始" "分支 $REF 远端 $REMOTE"
     backup_database
     sync_code
+    load_release_lib
     build_core
+    # 重启前记住当前镜像 ID——发布断言失败时按它回滚（首次部署/容器不存在时为空）
+    local prev_image=''
+    prev_image="$(docker inspect --format '{{.Image}}' quantmind 2>/dev/null || true)"
     restart_services
+    assert_release_runtime "$prev_image"
     update_database
 
     # 健康检查：API + celery worker/beat 均就绪才算升级成功。

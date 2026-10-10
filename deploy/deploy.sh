@@ -168,10 +168,28 @@ verify_dsh_runtime() {
 start_services() {
     log '4/5 构建并启动服务'
     cd "$PROJECT_DIR"
+    # P2-6：加载发布共享库并解析 compose 文件组（生产覆盖层=不可变发布；
+    # 旧 REF 无 release_lib/覆盖层时回退 bind-mount，行为与旧版一致）。
+    local lib="$PROJECT_DIR/deploy/release_lib.sh"
+    if [[ -f "$lib" ]]; then
+        # shellcheck source=/dev/null
+        source "$lib"
+        qm_compose_init "$PROJECT_DIR" "${QUANTMIND_BIND_MOUNTS:-false}" \
+            || die 'compose 文件组初始化失败：升级 docker compose（!override 需 ≥2.24.4）或 QUANTMIND_BIND_MOUNTS=true 回退'
+        if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+            log '发布模式：不可变（docker-compose.prod.yml，容器无代码挂载）'
+        else
+            log '发布模式：bind-mount 回退（本次不做不可变断言）'
+        fi
+    else
+        QM_COMPOSE=(docker compose -f "$PROJECT_DIR/docker-compose.yml")
+        QM_PROD_OVERLAY_OK=false
+        log '警告：代码无 deploy/release_lib.sh（旧 REF？），按 bind-mount 模式继续'
+    fi
     # 仅预拉取第三方外部镜像（postgres/redis/huntly/rsshub/ib-gateway）。
     # 自研镜像（quantmind-oss / data-gateway / dashboard 等）未上传镜像仓库，
     # 由下方 docker compose build 本地构建，不可对它们执行 pull。
-    docker compose pull db redis huntly rsshub ib-gateway \
+    "${QM_COMPOSE[@]}" pull db redis huntly rsshub ib-gateway \
         || log '部分外部镜像未能预拉取，将在启动时重试'
     # 构建时注入 pip 源加速（国内网络），可通过 QUANTMIND_PIP_MIRROR 覆盖
     # 依赖指纹 QM_REQ_SHA 写入镜像 Label，供 full-deploy/update 比对复用还是重建。
@@ -185,7 +203,7 @@ start_services() {
     else
         git_dirty=false
     fi
-    docker compose build \
+    "${QM_COMPOSE[@]}" build \
         --build-arg PIP_INDEX_URL="$PIP_MIRROR" \
         --build-arg PIP_TRUSTED_HOST="$PIP_TRUSTED_HOST" \
         --build-arg QM_REQ_SHA="${req_sha:-unknown}" \
@@ -195,8 +213,19 @@ start_services() {
         quantmind
     # dsh（QuantBot 默认后端）：镜像内已烘焙 python3/nginx/docker CLI（docker/Dockerfile.dsh），
     # buildkit 自动拉取 node:22-slim 基础层后叠加。旧 QwenPaw 服务/镜像已退役删除。
-    docker compose build dsh
-    docker compose up -d --remove-orphans
+    "${QM_COMPOSE[@]}" build dsh
+    "${QM_COMPOSE[@]}" up -d --remove-orphans
+
+    # P2-6 发布断言（覆盖层模式）：三容器零代码挂载 + 运行态戳==检出 HEAD。
+    # 构建与启动就在本函数内，断言不过直接 die（全新安装语境，无上一镜像可回滚）。
+    if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+        local head_sha fail_msg=''
+        head_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+        if ! fail_msg="$(qm_release_verify_runtime "$PROJECT_DIR" "$head_sha")"; then
+            die "发布断言失败：$fail_msg"
+        fi
+        log '发布断言通过：三容器零代码挂载，运行态戳==检出 HEAD'
+    fi
     verify_dsh_runtime
 }
 
@@ -205,13 +234,13 @@ health_check() {
     local attempt
     for attempt in {1..30}; do
         if curl --fail --silent --max-time 3 http://127.0.0.1:8000/health >/dev/null; then
-            docker compose -f "$PROJECT_DIR/docker-compose.yml" ps
+            "${QM_COMPOSE[@]}" ps
             log "部署完成：$PROJECT_DIR"
             return
         fi
         sleep 2
     done
-    docker compose -f "$PROJECT_DIR/docker-compose.yml" ps || true
+    "${QM_COMPOSE[@]}" ps || true
     die '服务未在 60 秒内通过健康检查，请查看 docker compose logs quantmind'
 }
 

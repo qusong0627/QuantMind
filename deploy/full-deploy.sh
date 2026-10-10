@@ -18,6 +18,9 @@
 #     自动重建对齐依赖，避免旧镜像缺新依赖导致运行时崩溃。
 #   QUANTMIND_COMPOSE_OVERLAY  已验证 docker-compose.yml 的本地路径（可选）
 #   QUANTMIND_DEPLOY_OVERLAY_DIR  受控 Dockerfile 覆盖目录（可选）
+#   QUANTMIND_BIND_MOUNTS=true 应急回退 bind-mount 模式（P2-6：默认走
+#     docker-compose.prod.yml 不可变发布）。离线包内的 quantmind-oss 镜像必须与
+#     随包代码同 commit 出片（qm.git.commit == 检出 HEAD），否则会强制重建对齐。
 
 set -euo pipefail
 
@@ -506,29 +509,56 @@ ensure_torch_device() {
 build_and_start() {
     log '步骤 8/8：基于最新代码重新构建并启动服务'
     cd "$PROJECT_DIR"
+    # P2-6：加载发布共享库并解析 compose 文件组（生产覆盖层=不可变发布；
+    # 旧 REF 无 release_lib/覆盖层时回退 bind-mount，行为与旧版一致）。
+    local lib="$PROJECT_DIR/deploy/release_lib.sh"
+    if [[ -f "$lib" ]]; then
+        # shellcheck source=/dev/null
+        source "$lib"
+        qm_compose_init "$PROJECT_DIR" "${QUANTMIND_BIND_MOUNTS:-false}" \
+            || die 'compose 文件组初始化失败：升级 docker compose（!override 需 ≥2.24.4）或 QUANTMIND_BIND_MOUNTS=true 回退'
+        if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+            log '发布模式：不可变（docker-compose.prod.yml，容器无代码挂载）'
+        else
+            log '发布模式：bind-mount 回退（本次不做不可变断言）'
+        fi
+    else
+        QM_COMPOSE=(docker compose -f "$PROJECT_DIR/docker-compose.yml")
+        QM_PROD_OVERLAY_OK=false
+        log '警告：代码无 deploy/release_lib.sh（旧 REF？），按 bind-mount 模式继续'
+    fi
     # rsshub 不在离线包内（避免历史损坏镜像），此处在线拉取健康镜像。
     # 仅拉 rsshub，绝不触碰离线包内 qwenpaw 定制镜像。
     if ! docker image inspect diygod/rsshub:latest >/dev/null 2>&1; then
         log 'rsshub 镜像不可用，在线拉取（不影响离线包内其他镜像）...'
-        docker compose pull rsshub \
+        "${QM_COMPOSE[@]}" pull rsshub \
             || docker pull diygod/rsshub:latest \
             || log '警告：rsshub 拉取失败（不影响核心服务，RSS 源功能将不可用）'
     fi
-    # 依赖指纹闸门：代码已在步骤 5 更新，此处比对「代码 requirements 指纹 vs 镜像 Label」。
-    #   一致   → 复用成品镜像（纯代码更新永远走这条，秒级）；
-    #   不一致 → 离线包镜像已落后代码依赖（如 QMT 事件），自动重建对齐，
-    #            杜绝「新代码 + 缺依赖旧镜像」的运行时 import 崩溃。
-    # 重建需要 PyPI 访问（已配国内源与 wheel 缓存）；纯离线机若触发重建，
-    # 说明离线包过旧，应重新生成镜像包，而非静默带病上线。
+    # 依赖指纹 + 部署身份闸门：代码已在步骤 5 更新，此处比对「代码 requirements
+    # 指纹 vs 镜像 Label」与「检出 HEAD vs 镜像 qm.git.commit」。
+    #   一致   → 复用成品镜像（纯代码更新且依赖未变时秒级）；
+    #   不一致 → 自动重建对齐（需 PyPI 访问；离线机应让镜像包与代码同 commit 出片），
+    #            杜绝「新代码 + 缺依赖旧镜像」与「旧镜像内旧代码（不可变模式下无
+    #            挂载兜底）」两类带病上线。
     local want have need_build=false reason=''
     want="$(requirements_fingerprint)"
     have="$(image_req_sha quantmind-oss:latest)"
+    local head_sha='' image_commit=''
+    if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+        head_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+        image_commit="$(qm_image_git_commit quantmind-oss:latest)"
+    fi
     if [[ ${QUANTMIND_REBUILD_IMAGE:-false} == true ]]; then
         need_build=true; reason='QUANTMIND_REBUILD_IMAGE=true 强制重建'
-    elif [[ -z "$want" ]]; then
-        log '警告：无法计算代码依赖指纹（requirements 清单缺失？），复用现有镜像'
     elif [[ "$have" == notloaded ]]; then
         need_build=true; reason='quantmind-oss 镜像不存在'
+    elif [[ "${QM_PROD_OVERLAY_OK:-false}" == true && -z "$image_commit" ]]; then
+        need_build=true; reason='镜像无部署身份戳（qm.git.commit 缺失，早于 P2-6 的离线包/手工构建）'
+    elif [[ "${QM_PROD_OVERLAY_OK:-false}" == true && "$image_commit" != "$head_sha" ]]; then
+        need_build=true; reason="镜像身份 ${image_commit:0:12} ≠ 检出 ${head_sha:0:12}（镜像包须与随包代码同 commit 出片）"
+    elif [[ -z "$want" ]]; then
+        log '警告：无法计算代码依赖指纹（requirements 清单缺失？），复用现有镜像'
     elif [[ "$have" == none ]]; then
         need_build=true; reason='镜像无依赖指纹（早于指纹机制的离线包/手工构建）'
     elif [[ "$have" != "$want" ]]; then
@@ -551,10 +581,27 @@ build_and_start() {
             QM_GIT_BRANCH="$git_branch" QM_GIT_DIRTY="$git_dirty" \
             docker compose build --pull=false quantmind \
             || die "quantmind 镜像重建失败（$reason）。离线环境请重新生成与代码匹配的镜像包后重试"
+        # 构建后立即做身份断言（fail-fast 在启动之前）
+        if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+            local built_sha
+            built_sha="$(qm_image_git_commit quantmind-oss:latest)"
+            [[ "$built_sha" == "$head_sha" ]] \
+                || die "构建产物身份断言失败：镜像=${built_sha:-无} 检出=${head_sha:0:12}"
+        fi
     fi
-    docker compose up -d --pull never
+    "${QM_COMPOSE[@]}" up -d --pull never
     configure_qwenpaw_runtime
-    docker compose ps
+
+    # P2-6 发布断言（覆盖层模式）：三容器零代码挂载 + 运行态戳==检出 HEAD。
+    # full-deploy 是整机安装/首次部署语境，失败只报错不回滚（回滚语义在 update.sh）。
+    if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
+        local fail_msg=''
+        if ! fail_msg="$(qm_release_verify_runtime "$PROJECT_DIR" "$head_sha")"; then
+            die "发布断言失败：$fail_msg"
+        fi
+        log '发布断言通过：三容器零代码挂载，运行态戳==检出 HEAD'
+    fi
+    "${QM_COMPOSE[@]}" ps
 }
 
 main() {

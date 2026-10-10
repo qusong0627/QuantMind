@@ -1,0 +1,49 @@
+# QuantMind 不可变发布覆盖层（P2-6 / 审计 H10 根治）——生产发布路径使用。
+#
+# 目的：生产容器**不再 bind-mount 任何代码/出厂文件**——容器里跑的代码 = 镜像里
+# 烘焙的代码，与 `qm.git.commit` Label / `/app/deploy_stamp.json` 可逐位核对，
+# 从结构上消灭「热修 / 并行改动 / 挂载 inode 陈旧」造成的运行态与镜像身份脱节。
+# 发布 = 构建（注戳）→ 晋级（:latest）→ 断言（deploy/update.sh，断言不过自动回滚）。
+#
+# 用法：docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#   deploy/{update,full-deploy,deploy}.sh 已内建该文件组合与构建/晋级/断言；
+#   本地开发继续裸用 docker-compose.yml（全量挂载热更新，行为完全不变）。
+#   应急回退挂载模式：update.sh --mounts / 环境变量 QUANTMIND_BIND_MOUNTS=true。
+#
+# 保留的挂载 = 数据与宿主集成面（非代码）：
+#   data / models / db / logs（运行数据）、configs（操作员私有配置，gitignore）、
+#   user_pools_local（用户股票池）、alphaagent（scenarios/*.h5 是训练/挖矿模板数据，
+#   *.h5 在 .gitignore，非代码）、tdx-aidata / docker.sock / tdx-shared（宿主集成）。
+# 被移除的每个代码挂载，其容器内路径均由 docker/Dockerfile.oss「P2-6」段烘焙；
+# 回归测试 backend/tests/test_release_immutable.py 钉住本文件的「零代码挂载」。
+services:
+  quantmind:
+    volumes: !override
+      - ./data:/data
+      # TdxAiData 安装目录（rw：前端「数据源设置」需写 TdxAiData.ini 的 Token）
+      - /opt/tdx-aidata:/opt/tdx-aidata
+      - ./models:/app/models
+      - ./db:/app/db
+      - ./logs:/app/logs
+      # 操作员私有配置（本仓 .gitignore 忽略 /configs/，属数据不属代码）
+      - ./configs:/app/configs:ro
+      - ./user_pools_local:/app/user_pools_local
+      - ./alphaagent:/app/alphaagent
+      # 允许 API 容器调用宿主机 Docker 启动训练容器
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 通达信桥共享目录（宿主 CIFS 挂 //<win>/PYPlugins）
+      - /mnt/tdx-shared:/mnt/tdx-shared
+
+  celery-worker:
+    volumes: !override
+      - ./data:/data
+      - ./models:/app/models
+      - ./db:/app/db
+      - ./logs:/app/logs
+      - ./user_pools_local:/app/user_pools_local
+
+  celery-beat:
+    volumes: !override
+      - ./logs:/app/logs
+      - ./data:/data
+      - ./db:/app/db

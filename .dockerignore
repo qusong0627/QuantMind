@@ -74,12 +74,20 @@ dist/
 node_modules/
 package-lock.json
 
-# Documentation (Optional to exclude for production)
-docs/
+# Documentation（docs/ 例外：P2-6 不可变发布要求烘焙进镜像——管理后台
+# 「打开部署指南」（/app/docs）与 prod 覆盖层去挂载后都读镜像内这份）
 research/
 README.md
 FRONTEND_CONFIG.md
 AGENTS.md
+
+# 回测产物（86MB parquet/csv；scripts/ 其余部分需烘焙进镜像，仅排除该产物目录）
+scripts/ensemble_bt_202408_202508/
+
+# 部署产物与打包工作区（~50GB；不进构建上下文。镜像只取 deploy/release_lib.sh 单文件）
+deploy/portable/
+deploy/live-win/
+deploy/qmt-bridge-kit/
 
 # Large non-essential directories
 models/
