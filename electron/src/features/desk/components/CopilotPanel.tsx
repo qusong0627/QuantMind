@@ -14,9 +14,13 @@ import {
   adviceStatsLine,
   adviceStatusMeta,
   alertTypeLabel,
+  COPILOT_STALE_SECONDS,
+  dataAgeSeconds,
+  eventTimeLabel,
   outcomeMeta,
   panelMetrics,
   severityMeta,
+  stalenessLabel,
   type AdviceStats,
   type CopilotAdvice,
   type CopilotPanel as CopilotPanelData,
@@ -79,6 +83,18 @@ export const CopilotPanel: React.FC = () => {
 
   const metrics = panelMetrics(panel);
   const events = panel?.events?.items ?? [];
+  // 新鲜度按**数据时刻**（as_of=窗口内最新事件 ts）判定，不是响应时刻（审计 H15）：
+  // 哨兵/总线停摆时响应时刻仍新，会让面板看着「实时」。60s 轮询触发重渲即刷新年龄。
+  const nowMs = Date.now();
+  const ageSec = dataAgeSeconds(panel?.as_of, nowMs);
+  const isStale = ageSec !== null && ageSec > COPILOT_STALE_SECONDS;
+  const asOfLabel = panel?.as_of
+    ? `截至 ${eventTimeLabel(panel.as_of, nowMs)}`
+    : panel?.events?.available === false
+      ? ''
+      : panel
+        ? '窗口内无事件'
+        : '';
 
   const onAnnotate = async (alertId: string, annotation: 'true_positive' | 'false_positive') => {
     setBusy(alertId);
@@ -121,7 +137,7 @@ export const CopilotPanel: React.FC = () => {
       <CardHeader
         icon={<BellRing size={15} />}
         title="副驾驶 · 实时情报"
-        meta={<span className="text-[10px] text-slate-400">{panel?.as_of ? `截至 ${panel.as_of.slice(11, 19)}` : ''}</span>}
+        meta={<span data-testid="copilot-asof" className="text-[10px] text-slate-400">{asOfLabel}</span>}
         extra={
           <button
             type="button"
@@ -136,6 +152,15 @@ export const CopilotPanel: React.FC = () => {
       {error && (
         <div className="mb-2 rounded-lg border border-red-100 bg-red-50 px-2 py-1 text-[11px] text-red-600">
           {error}
+        </div>
+      )}
+      {isStale && ageSec !== null && (
+        <div
+          role="alert"
+          data-testid="copilot-stale-banner"
+          className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700"
+        >
+          ⚠️ 情报数据陈旧：最新事件在 {stalenessLabel(ageSec)}（超过 {COPILOT_STALE_SECONDS / 60} 分钟）——按旧数据对待，勿当实时
         </div>
       )}
 
@@ -186,6 +211,10 @@ export const CopilotPanel: React.FC = () => {
                       {alertTypeLabel(event.alert_type)}
                     </span>
                     <span className="font-mono text-slate-500">{event.symbol}</span>
+                    {/* 事件自带 ts（本地时区；title=原始 ISO）——事件流自身的「何时」，不靠面板 as_of */}
+                    <span className="font-mono text-[10px] text-slate-400" title={event.ts}>
+                      {eventTimeLabel(event.ts, nowMs)}
+                    </span>
                     <Chip tone={outcome.tone}>{outcome.label}</Chip>
                     {event.pushed && <Chip tone="blue">已推送</Chip>}
                   </div>

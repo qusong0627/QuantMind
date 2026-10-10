@@ -26,6 +26,7 @@ from sqlalchemy import text
 
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.utc_datetime import to_utc_iso
 
 logger = logging.getLogger(__name__)
 _CST = timezone(timedelta(hours=8))
@@ -488,32 +489,38 @@ async def copilot_panel(
     hours: int = Query(24, ge=1, le=168),
     current_user: dict = Depends(get_current_user),
 ):
-    """交易台副驾驶面板聚合：总线事件流 + 时延 + 推理预算 + 误报率摘要（无 mock，缺失如实）。"""
-    panel: dict[str, Any] = {"as_of": datetime.now(_CST).isoformat()}
+    """交易台副驾驶面板聚合：总线事件流 + 时延 + 推理预算 + 误报率摘要（无 mock，缺失如实）。
+
+    `as_of` = **数据时刻**（窗口内最新告警 ts；无事件为 null），不是响应时刻——审计 H15：
+    旧实现写响应时刻，哨兵/总线停摆时面板仍显示「截至 <现在>」，前台无从察觉数据已停。
+    """
+    panel: dict[str, Any] = {}
     # 事件流（哨兵留痕 = 总线全量落表）
     try:
         async with get_session(read_only=True) as session:
             rows = (await session.execute(
                 text(
-                    "SELECT alert_id::text, ts::text, alert_type, severity, market, symbol, title, "
+                    "SELECT alert_id::text, ts, alert_type, severity, market, symbol, title, "
                     "       targets, pushed, outcome_status, hit, annotation "
                     "FROM sentinel_alerts WHERE ts > NOW() - make_interval(hours => :h) "
                     "ORDER BY ts DESC LIMIT 50"
                 ),
                 {"h": hours},
             )).fetchall()
-        panel["events"] = {
-            "available": True,
-            "items": [
-                {"alert_id": r[0], "ts": r[1], "alert_type": r[2], "severity": r[3],
-                 "market": r[4], "symbol": r[5], "title": r[6], "targets": r[7],
-                 "pushed": bool(r[8]), "outcome_status": r[9], "hit": r[10], "annotation": r[11]}
-                for r in rows
-            ],
-            "source": "db:sentinel_alerts",
-        }
+        items = [
+            # ts 走 to_utc_iso（ISO-8601 + Z）——旧实现 ts::text 无时区后缀，
+            # 前端 Date.parse 在非 UTC 环境会按本地解释错年龄
+            {"alert_id": r[0], "ts": to_utc_iso(r[1]), "alert_type": r[2], "severity": r[3],
+             "market": r[4], "symbol": r[5], "title": r[6], "targets": r[7],
+             "pushed": bool(r[8]), "outcome_status": r[9], "hit": r[10], "annotation": r[11]}
+            for r in rows
+        ]
+        panel["events"] = {"available": True, "items": items, "source": "db:sentinel_alerts"}
+        # as_of = 数据时刻：ts DESC 首行即窗口内最新事件；无事件 → None（如实，不冒充新鲜）
+        panel["as_of"] = to_utc_iso(rows[0][1]) if rows else None
     except Exception as exc:  # noqa: BLE001
         panel["events"] = {"available": False, "reason": str(exc)[:200], "items": []}
+        panel["as_of"] = None
     # 时延（T-P6-05 双通道口径：展示用 _fresh 档——全量档含停牌/夜盘陈旧重放帧，
     # 不是传输时延；2026-09-18 面板曾因读全量档显示 15.3min 误报）
     try:

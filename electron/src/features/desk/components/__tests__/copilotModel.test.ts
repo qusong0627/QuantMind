@@ -6,9 +6,13 @@ import {
   adviceStatsLine,
   adviceStatusMeta,
   alertTypeLabel,
+  COPILOT_STALE_SECONDS,
+  dataAgeSeconds,
+  eventTimeLabel,
   outcomeMeta,
   panelMetrics,
   severityMeta,
+  stalenessLabel,
   type CopilotAdvice,
   type CopilotEvent,
 } from '../copilotModel';
@@ -79,6 +83,33 @@ describe('copilotModel', () => {
     const unavailable = panelMetrics({ events: { available: false, reason: 'db down' } });
     expect(unavailable.latencyP95).toBe('—');
     expect(unavailable.events).toBe(0);
+  });
+
+  it('数据时刻年龄与陈旧阈值（审计 H15）：as_of=数据时刻，缺失/坏值 → null 不冒充新鲜', () => {
+    const now = Date.parse('2026-10-10T02:00:00Z');
+    expect(COPILOT_STALE_SECONDS).toBe(300);
+    expect(dataAgeSeconds('2026-10-10T01:59:30Z', now)).toBe(30);
+    expect(dataAgeSeconds('2026-10-10T09:00:00+08:00', now)).toBe(3600); // 带偏移的旧形态同样可算
+    expect(dataAgeSeconds('2026-10-10T02:00:05Z', now)).toBe(0); // 未来时刻不出负数
+    expect(dataAgeSeconds(null, now)).toBeNull();
+    expect(dataAgeSeconds(undefined, now)).toBeNull();
+    expect(dataAgeSeconds('', now)).toBeNull();
+    expect(dataAgeSeconds('not-a-date', now)).toBeNull();
+  });
+
+  it('stalenessLabel 人话分级', () => {
+    expect(stalenessLabel(30)).toBe('30 秒前');
+    expect(stalenessLabel(120)).toBe('2 分钟前');
+    expect(stalenessLabel(5400)).toBe('1.5 小时前');
+    expect(stalenessLabel(172800)).toBe('2 天前');
+  });
+
+  it('eventTimeLabel：同日 HH:MM:SS，跨日 MM-DD HH:MM，不可解析原样返回', () => {
+    const d = new Date(2026, 9, 10, 9, 30, 5); // 本地时区构造，断言与运行机时区无关
+    expect(eventTimeLabel(d.toISOString(), d.getTime() + 3_600_000)).toBe('09:30:05');
+    const nextDay = new Date(2026, 9, 11, 10, 0, 0);
+    expect(eventTimeLabel(d.toISOString(), nextDay.getTime())).toBe('10-10 09:30');
+    expect(eventTimeLabel('garbage', d.getTime())).toBe('garbage');
   });
 
   it('建议战绩行：含胜率与平均超额；无兑现如实标注', () => {

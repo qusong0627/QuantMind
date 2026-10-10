@@ -81,6 +81,91 @@ def test_copilot_client_order_id_stable_and_scoped():
     assert k1 != build_copilot_client_order_id("ab12cd34", "600036.SH", "sell")
 
 
+@pytest.mark.unit
+def test_panel_as_of_is_data_moment_not_response_time(monkeypatch):
+    """审计 H15：面板 as_of 必须是**数据时刻**（窗口内最新告警 ts），不是响应时刻。
+
+    旧实现 as_of=datetime.now()：哨兵/总线停摆数小时，面板仍写「截至 <现在>」，
+    看着新鲜。修复后口径：有事件 → ts DESC 首行（max ts）；无事件 → None（如实）；
+    DB 挂 → None + events.available=False。事件 ts 一律 ISO-8601 + Z（前端按 UTC 解析年龄）。
+    """
+    from backend.services.api.routers import copilot as mod
+
+    ts_max = datetime(2026, 10, 10, 3, 20, tzinfo=timezone.utc)
+    ts_old = datetime(2026, 10, 10, 1, 5, tzinfo=timezone.utc)
+
+    def row(ts: datetime, aid: str) -> tuple:
+        return (
+            aid,
+            ts,
+            "news:risk_event",
+            "warn",
+            "CN",
+            "600036.SH",
+            "标题",
+            [],
+            True,
+            "filled",
+            True,
+            None,
+        )
+
+    class _Res:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _Sess:
+        """双查询假会话：事件流按注入行返回；误报率块（30d 汇总）恒空。"""
+
+        def __init__(self, rows, *, raise_on_events):
+            self._rows = rows
+            self._raise = raise_on_events
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, stmt, params=None):
+            sql = str(stmt)
+            if "trade_date >= CURRENT_DATE - 30" in sql:
+                return _Res([])
+            if self._raise:
+                raise RuntimeError("db down")
+            return _Res(self._rows)
+
+    def run(rows, *, raise_on_events=False):
+        monkeypatch.setattr(
+            mod,
+            "get_session",
+            lambda **kw: _Sess(rows, raise_on_events=raise_on_events),
+        )
+        return asyncio.run(
+            mod.copilot_panel(
+                hours=24, current_user={"user_id": "1", "tenant_id": "default"}
+            )
+        )
+
+    data = run([row(ts_max, "a2"), row(ts_old, "a1")])["data"]
+    assert data["as_of"] == "2026-10-10T03:20:00Z", (
+        "as_of 必须是数据时刻（首行=max ts），不是响应时刻"
+    )
+    assert data["events"]["items"][0]["ts"] == "2026-10-10T03:20:00Z", (
+        "事件 ts 必须 ISO-8601 + Z"
+    )
+
+    empty = run([])["data"]
+    assert empty["as_of"] is None, "窗口内无事件必须如实 null——不得冒充新鲜"
+
+    down = run([], raise_on_events=True)["data"]
+    assert down["as_of"] is None
+    assert down["events"]["available"] is False
+
+
 @pytest.mark.integration
 def test_advice_execute_via_router_with_audit_and_cleanup():
     import asyncio as _asyncio_early  # noqa: F401
@@ -148,8 +233,6 @@ def test_advice_execute_via_router_with_audit_and_cleanup():
         assert StockCodeUtil.to_suffix(order[3]) == "600036.SH"
 
         # ③ 状态机：重复执行 → 409；reject 已定局 → 409
-        from fastapi import HTTPException
-
         with pytest.raises(HTTPException) as exc1:
             await execute_advice(advice_id, current_user=user)
         assert exc1.value.status_code == 409

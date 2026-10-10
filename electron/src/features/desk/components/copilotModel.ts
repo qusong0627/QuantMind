@@ -65,7 +65,8 @@ export interface AdviceStats {
 }
 
 export interface CopilotPanel {
-  as_of?: string;
+  /** 数据时刻（后端 = 窗口内最新事件 ts，ISO+Z）；无事件为 null。不是响应时刻（审计 H15）。 */
+  as_of?: string | null;
   events?: { available?: boolean; items?: CopilotEvent[]; reason?: string; source?: string };
   latency?: {
     available?: boolean;
@@ -79,6 +80,38 @@ export interface CopilotPanel {
   };
   budget?: { available?: boolean; detail?: Record<string, unknown> | null; reason?: string };
   miss_rate?: { available?: boolean; miss_rate?: number | null; filled?: number; hit?: number; reason?: string };
+}
+
+/** 面板陈旧阈值（秒）：as_of（数据时刻）距今超过 → 按旧数据对待（审计 H15）。 */
+export const COPILOT_STALE_SECONDS = 300;
+
+/** 面板数据年龄（秒）。as_of 缺失/不可解析 → null（无从判断 ≠ 新鲜）。 */
+export function dataAgeSeconds(asOf: string | null | undefined, nowMs: number): number | null {
+  if (!asOf) return null;
+  const t = Date.parse(asOf);
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, Math.round((nowMs - t) / 1000));
+}
+
+/** 年龄秒 → 人话（「23 分钟前」形态）。 */
+export function stalenessLabel(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒前`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} 小时前`;
+  return `${Math.floor(seconds / 86400)} 天前`;
+}
+
+/** 事件/数据时刻 ts（ISO+Z）→ 本地时区紧凑标签：同日 HH:MM:SS，跨日 MM-DD HH:MM；不可解析原样返回。 */
+export function eventTimeLabel(ts: string, nowMs: number): string {
+  const t = Date.parse(ts);
+  if (Number.isNaN(t)) return ts;
+  const d = new Date(t);
+  const n = new Date(nowMs);
+  const p = (v: number) => String(v).padStart(2, '0');
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const sameDay =
+    d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  return sameDay ? `${hm}:${p(d.getSeconds())}` : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
 }
 
 /** 严重度 → 色调 + 中文 */
