@@ -60,7 +60,7 @@ def _patch_ctx(monkeypatch, **over):
     base.update(over)
     ctx = RiskContext(**base)
 
-    async def _b(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _b(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         return ctx
 
     monkeypatch.setattr(rgs, "build_context", _b)

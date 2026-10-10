@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -564,6 +565,40 @@ async def _real_daily_pnl_pct(
     return resolve_daily_pnl_pct(total_asset=total_asset, day_open_equity=row[0])
 
 
+# ── 自成交/重复单窗口（l3.self_trade / l3.duplicate_fingerprint 的输入，P2-1 定档）──
+# 生产者缺席时这两条规则恒不触发（登记表 spec 已注明「空窗口 = 不判」）——本块是它们的
+# 唯一喂数点。两个窗口语义不同：
+#  - **自成交面**（recent_symbol_sides）= 仍"活的"委托（pending/submitted/partially_filled）
+#    且**今日创建**——一笔 10:00 挂出的限价卖单 14:00 仍是新买单的对手盘；限今日是隔离
+#    对账滞后留下的陈年 stale 行（A 股委托当日有效，隔日的"活单"只可能是坏账）。
+#  - **重复面**（recent_fingerprints）= 最近 `_DUP_WINDOW_S` 内已"落账"的委托（含已成）——
+#    撤单/拒单不算（撤了再下、被拒重下都不是重复单）；指纹含 side，卖后买不误伤。
+_DUP_WINDOW_S = 300.0
+_OPEN_STATUSES = ("pending", "submitted", "partially_filled")
+_TOOK_STATUSES = ("pending", "submitted", "partially_filled", "filled")
+
+
+def order_fingerprint(
+    symbol: Any, side: Any, quantity: Any, price: Any, order_type: Any
+) -> str:
+    """同参数指纹（l3.duplicate_fingerprint 的生产与比对**同一实现**）。
+
+    入库行与入参两侧都过这一个函数——换算口径（符号归一 to_prefix、数量/价格定点化、
+    大小写折叠）写两遍必然漂移成"同参数的两次下单指纹不同"（规则静默失效）。
+    价格 None 与 0 同归一为空段（市价单两来源写法不一不应产生不同指纹）；**没有**价格
+    的市价单不会与任何带着同价的限价单撞指纹（含 order_type 段）。
+    """
+    from backend.shared.stock_utils import StockCodeUtil
+
+    sym = StockCodeUtil.to_prefix(str(symbol or ""))
+    s = str(side or "").strip().lower()
+    q = float(quantity or 0)
+    p = "" if price in (None, 0) else f"{float(price):.4f}"
+    t = str(order_type or "market").strip().lower()
+    raw = f"{sym}|{s}|{q:.4f}|{p}|{t}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
 async def build_context(
     req: Any,
     *,
@@ -571,11 +606,14 @@ async def build_context(
     redis: Any,
     need_counts: bool = False,
     need_daily_pnl: bool = False,
+    need_windows: bool = False,
 ) -> RiskContext:
     """OrderRequest → RiskContext（纯读；任何子项失败仅缺省该字段并留痕于 evidence）。
 
-    ``need_counts`` / ``need_daily_pnl`` = "配置里启用了对应规则"，只在为真时才发那几条
-    查询——规则没启用时读到的数字没有任何消费者，白付一次库往返。
+    ``need_counts`` / ``need_daily_pnl`` / ``need_windows`` = "配置里启用了对应规则"，
+    只在为真时才发那几条查询——规则没启用时读到的数字没有任何消费者，白付一次库往返。
+    ``need_windows`` 喂 `l3.self_trade` / `l3.duplicate_fingerprint` 两个窗口（见本函数
+    尾部窗口块的语义说明）。
     """
     now_ts = time.time()
     side = str(getattr(req, "side", "") or "").strip().upper()
@@ -981,6 +1019,111 @@ async def build_context(
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RiskGate] 频率计数查询失败: %s", exc)
 
+    # 自成交/重复单窗口（l3.self_trade / l3.duplicate_fingerprint，P2-1 定档生产者）：
+    # 只在对应规则启用时查（need_windows）。**读失败保持空窗口并告警**（空窗 = 不判，
+    # 登记表 spec 同口径）——这两条是"窗口内存在即拒"的存在性判据，读失败造不出反向单
+    # 只是漏报；fail-closed（按"存在"处理）会拒掉一切双向策略，比漏报糟。与
+    # opened_today 的 fail-closed 方向相反是有意的：那条是资金上限（漏 = 超买）。
+    # 闸在落库**之前**判定（OrderRouter「任何建单动作前」/ 直连链「报单前」），所以
+    # 本单自己不会出现在自己的窗口里——顺序翻掉时重复面会把每一单都判成重复单。
+    recent_symbol_sides: tuple[tuple[str, str], ...] = ()
+    recent_fingerprints: tuple[str, ...] = ()
+    fingerprint = order_fingerprint(symbol, side, qty, price, order_type)
+    if need_windows:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            win_start = now_utc - timedelta(seconds=_DUP_WINDOW_S)
+            window_sides: list[tuple[str, str]] = []
+            window_fps: list[str] = []
+            if trading_mode == "REAL":
+                from sqlalchemy import text as _sql_text
+
+                # orders.created_at 为 naive UTC（写入侧惯例）——与既有计数查询同口径
+                day_start_naive = day_start_cst.astimezone(timezone.utc).replace(
+                    tzinfo=None
+                )
+                win_naive = win_start.replace(tzinfo=None)
+                rows = (
+                    await db.execute(
+                        _sql_text(
+                            "SELECT symbol, side, status, quantity, price, order_type,"
+                            " created_at FROM orders "
+                            "WHERE tenant_id = :t AND user_id = :u "
+                            "AND trading_mode::text = 'REAL' "
+                            "AND created_at >= :floor "
+                            "AND status IN ('pending','submitted','partially_filled',"
+                            "'filled')"
+                        ),
+                        {
+                            "t": tenant,
+                            "u": str(uid),
+                            "floor": min(day_start_naive, win_naive),
+                        },
+                    )
+                ).fetchall()
+                for r in rows:
+                    st = str(r[2] or "").lower()
+                    created = r[6]
+                    if created is None:
+                        continue
+                    if st in _OPEN_STATUSES and created >= day_start_naive:
+                        window_sides.append((str(r[0] or ""), str(r[1] or "").lower()))
+                    if st in _TOOK_STATUSES and created >= win_naive:
+                        window_fps.append(
+                            order_fingerprint(r[0], r[1], r[3], r[4], r[5])
+                        )
+            else:
+                from sqlalchemy import String as _S
+                from sqlalchemy import cast as _cast
+                from sqlalchemy import select as _select
+
+                from backend.services.simulation.models.order import SimOrder
+
+                # sim_orders 的 created_at 为 timestamptz（aware）——同一零点直接比
+                floor_aware = min(day_start_cst, win_start)
+                rows = (
+                    await db.execute(
+                        _select(
+                            SimOrder.symbol,
+                            SimOrder.side,
+                            SimOrder.status,
+                            SimOrder.quantity,
+                            SimOrder.price,
+                            SimOrder.order_type,
+                            SimOrder.created_at,
+                        ).where(
+                            SimOrder.tenant_id == tenant,
+                            _cast(SimOrder.user_id, _S) == str(uid),
+                            SimOrder.created_at >= floor_aware,
+                            # sim 的 OrderStatus 枚举**没有** partially_filled——bind 时
+                            # 未知值直接 LookupError（不是静默不匹配），绝不能照抄 REAL 的
+                            # 四值清单；`_OPEN_STATUSES` 的 Python 侧成员判断不受影响
+                            SimOrder.status.in_(("pending", "submitted", "filled")),
+                        )
+                    )
+                ).fetchall()
+                for r in rows:
+                    st = str(getattr(r[2], "value", r[2]) or "").lower()
+                    side_v = getattr(r[1], "value", r[1])
+                    ot_v = getattr(r[5], "value", r[5])
+                    created = r[6]
+                    if created is None:
+                        continue
+                    if st in _OPEN_STATUSES and created >= day_start_cst:
+                        window_sides.append(
+                            (str(r[0] or ""), str(side_v or "").lower())
+                        )
+                    if st in _TOOK_STATUSES and created >= win_start:
+                        window_fps.append(
+                            order_fingerprint(r[0], side_v, r[3], r[4], ot_v)
+                        )
+            recent_symbol_sides = tuple(window_sides)
+            recent_fingerprints = tuple(window_fps)
+        except Exception as exc:  # noqa: BLE001 - 空窗口 = 不判（见块首说明）
+            logger.warning(
+                "[RiskGate] 自成交/重复单窗口查询失败（两条规则按空窗口不判）: %s", exc
+            )
+
     amount = None
     if price is not None and qty:
         amount = price * qty
@@ -1014,6 +1157,9 @@ async def build_context(
         orders_today=orders_today,
         cancels_today=cancels_today,
         opened_today=opened_today,
+        fingerprint=fingerprint,
+        recent_symbol_sides=recent_symbol_sides,
+        recent_fingerprints=recent_fingerprints,
         now_ts=now_ts,
         kill_switch=kill,
     )
@@ -1265,6 +1411,9 @@ async def evaluate_order(
             redis=redis,
             need_counts=need_counts,
             need_daily_pnl="l1.daily_loss_limit" in cfg.rules,
+            need_windows=any(
+                k in cfg.rules for k in ("l3.self_trade", "l3.duplicate_fingerprint")
+            ),
         )
         verdict = _CORE.evaluate(ctx, cfg.rules, version=cfg.version)
     except Exception as exc:  # noqa: BLE001 - 判定异常 = fail-closed

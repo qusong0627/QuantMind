@@ -835,7 +835,7 @@ async def test_new_buys_rule_in_config_triggers_count_query(monkeypatch):
     )
     seen: dict = {}
 
-    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         from backend.shared.risk import RiskContext
 
         seen["need_counts"] = need_counts
@@ -859,7 +859,7 @@ async def test_check_order_unconfigured_passes():
 async def test_check_order_shadow_records_but_passes():
     redis = FakeRedis(config=_cfg())
 
-    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         from backend.shared.risk import RiskContext
 
         return RiskContext(
@@ -897,7 +897,7 @@ async def test_decision_record_carries_checked_rules(monkeypatch):
     # Arrange
     redis = FakeRedis(config=_cfg())
 
-    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         from backend.shared.risk import RiskContext
 
         return RiskContext(
@@ -929,7 +929,7 @@ async def test_decision_record_carries_checked_rules(monkeypatch):
 async def test_check_order_enforce_rejects(monkeypatch):
     redis = FakeRedis(config=_cfg(shadow="false"))
 
-    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         from backend.shared.risk import RiskContext
 
         return RiskContext(
@@ -1233,7 +1233,7 @@ async def test_preflight_returns_full_verdict_without_any_trace(monkeypatch):
     # Arrange：急停触发 HALT
     redis = FakeRedis(config=_cfg())
 
-    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         from backend.shared.risk import RiskContext
 
         return RiskContext(
@@ -1274,7 +1274,7 @@ async def test_preflight_matches_check_order_verdict(monkeypatch):
 
     # Arrange
     def _ctx_factory():
-        async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+        async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
             from backend.shared.risk import RiskContext
 
             return RiskContext(
@@ -1795,7 +1795,7 @@ async def test_decision_record_carries_tier(monkeypatch, _reset_tier_memo):
         config=_cfg(rules=json.dumps(rules)), tier=_tier_doc("defensive", today)
     )
 
-    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         from backend.shared.risk import RiskContext
 
         return RiskContext(market="CN", symbol="600036.SH", side="BUY", quantity=100)
@@ -1829,7 +1829,7 @@ async def test_decision_record_marks_untrusted_tier(monkeypatch, _reset_tier_mem
         config=_cfg(), tier={"date": "2026-09-23", "budget": "{不是 JSON"}
     )
 
-    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         from backend.shared.risk import RiskContext
 
         return RiskContext(market="CN", symbol="600036.SH", side="BUY", quantity=100)
@@ -1853,7 +1853,7 @@ async def test_decision_record_omits_tier_when_absent(monkeypatch, _reset_tier_m
     # Arrange
     redis = FakeRedis(config=_cfg())
 
-    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False):
+    async def _ctx(req, *, db, redis, need_counts=False, need_daily_pnl=False, need_windows=False):
         from backend.shared.risk import RiskContext
 
         return RiskContext(market="CN", symbol="600036.SH", side="BUY", quantity=100)

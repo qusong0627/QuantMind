@@ -637,8 +637,16 @@ def l3_cancel_ratio(ctx: RiskContext, params: Mapping[str, Any]) -> Decision | N
 @rule("l3.self_trade", "L3", "自成交防范（窗口内同标的反向单存在即拒）")
 def l3_self_trade(ctx: RiskContext, params: Mapping[str, Any]) -> Decision | None:
     opposite = "SELL" if str(ctx.side).upper() == "BUY" else "BUY"
+    # 代码口径：窗口行是行情/后缀口径（600036.SH）或库内形态，ctx.symbol 随调用方——
+    # 两侧都过 `to_prefix` 归一后再比（与 l1.new_buys_per_day 同纪律）：跨层等值匹配
+    # 不做归一的后果是静默不触发（漏报自成交，收紧方向失效）。
+    from backend.shared.stock_utils import StockCodeUtil
+
+    code = StockCodeUtil.to_prefix(str(ctx.symbol or ""))
+    if not code:
+        return None  # 空代码的委托由 l3.lot_size 等前置规则处理，不该在这里判"同标的"
     for sym, side in ctx.recent_symbol_sides:
-        if str(sym) == str(ctx.symbol) and str(side).upper() == opposite:
+        if StockCodeUtil.to_prefix(str(sym)) == code and str(side).upper() == opposite:
             return _reject(
                 "l3.self_trade",
                 "L3",
