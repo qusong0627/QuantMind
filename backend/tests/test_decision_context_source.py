@@ -138,6 +138,54 @@ def test_load_pool_doc_marks_columns_present_when_producer_supplies_them(
     assert doc.direction.total_score == 3
 
 
+def test_load_pool_doc_reads_pick_candidates_generation(pool_env: Path) -> None:
+    """在产的一代是 ``{d}_picks.json``：行数组键 ``candidates``、代码字段 ``symbol``（裸码）。
+
+    2026-10-09 实锤：postmarket_pipeline/pick_candidates 的产物键是
+    ``candidates``/``symbol``，而本函数只认 ``picks``/``code`` → 行全被静默跳过
+    （rows=0，连告警都没有）。后果：池文件明明在，轮次拿到的却是空池，
+    ``l2.pool_not_member`` 拦下所有新开仓——且文件在时**不触发**「无候选池文件」告警，
+    故障没有任何出口。
+    """
+    (pool_env / "20260106_picks.json").write_text(
+        json.dumps(
+            {
+                "date": "20260106",
+                "buy_date": "2026-01-06",
+                "data_date": "2026-01-05",
+                "market_direction": None,
+                "gate": None,
+                "candidates": [
+                    {
+                        "symbol": "002664",  # 裸码，_to_suffix 推 SZ
+                        "name": "信质集团",
+                        "industry": "汽车零部件",
+                        "score": 0.6442,
+                        "fusion": 0.6152,
+                        "rank": 1,
+                    },
+                    {
+                        "symbol": "SH600282",  # prefix 形态也照收
+                        "name": "南钢股份",
+                        "industry": "普钢",
+                        "score": 0.621,
+                        "fusion": 0.6895,
+                        "rank": 2,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    doc = load_pool_doc("20260106")
+    assert doc is not None
+    assert [r.code for r in doc.rows] == ["002664.SZ", "600282.SH"]  # 出口一律 suffix
+    assert doc.missing_columns == ()  # candidates 代带 rank/industry/fusion
+    assert [r.rank for r in doc.rows] == [1, 2]
+    assert doc.rows[0].fusion == 0.6152 and doc.rows[0].industry == "汽车零部件"
+
+
 def test_load_pool_doc_top_and_absent_day(pool_env: Path) -> None:
     _write_pool(
         pool_env,
