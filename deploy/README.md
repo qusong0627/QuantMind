@@ -74,9 +74,41 @@ docker compose build quantmind
 ```
 
 指纹只覆盖 `requirements.txt`、`requirements/{production,ai}.txt`、
-`docker/Dockerfile.oss` 与 `TORCH_DEVICE` 取值；**业务代码走 bind mount，
-纯代码更新不需要重新制作镜像包**。requirements/Dockerfile 变更后才需重打
-images.tar.zst；来不及重打包时，联网部署机会自动重建补齐（保持服务可用）。
+`docker/Dockerfile.oss` 与 `TORCH_DEVICE` 取值。**出片纪律（P2-6 起）**：
+images.tar.zst 内的 `quantmind-oss:latest` 必须与随包代码**同一 commit** 构建
+（上面示例已含 QM_GIT_COMMIT），否则部署侧身份闸门判定不一致会强制重建——
+纯离线机将直接失败停工（fail-closed，见下节）。requirements/Dockerfile 变更后
+必须重打 images.tar.zst；联网部署机会自动重建补齐（保持服务可用）。
+
+## 不可变发布（P2-6）
+
+生产发布路径 = `docker-compose.yml` + `docker-compose.prod.yml` 覆盖层：三个应用
+容器（quantmind / celery-worker / celery-beat）**不再挂载任何代码或出厂文件**，
+容器里跑的代码 = 镜像里烘焙的代码，与 `qm.git.commit` Label 和
+`/app/deploy_stamp.json` 可逐位核对——结构上消灭「热修 / 并行改动 / 挂载 inode
+陈旧」导致的运行态与镜像身份脱节。本地开发不受影响（裸 `docker-compose.yml`
+仍是全量挂载热更新）。
+
+发布流程 = **构建（注戳）→ 晋级（:latest）→ 重启 → 断言**：
+
+- `update.sh`：镜像身份（`qm.git.commit`）== 检出 HEAD 才允许复用，不等即重建；
+  重启后断言三个容器零代码挂载且运行态戳==检出，**不过则自动回滚上一镜像并重启**，
+  不执行任何 SQL；`--no-build` 仅在镜像身份==检出时允许。
+- `full-deploy.sh` / `deploy.sh`：同一断言；构建前额外比对镜像身份与检出
+  HEAD（不一致强制重建），失败即停（全新安装语境无上一镜像可回滚）。
+
+验证探针：
+
+```bash
+docker inspect --format '{{ index .Config.Labels "qm.git.commit" }}' quantmind-oss:latest
+docker inspect --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' quantmind   # 只应有数据类路径
+docker exec quantmind cat /app/deploy_stamp.json
+```
+
+要求 docker compose ≥ 2.24.4（卷替换标签 `!override`）；过旧时脚本会明确报错并给出
+升级指引。应急回退挂载模式（仅排障用）：`update.sh --mounts` 或
+`QUANTMIND_BIND_MOUNTS=true`。回归测试：`backend/tests/test_release_immutable.py`
+（覆盖层零代码挂载、剥离↔烘焙映射、挂载过滤器行为）。
 
 ## 在线源码部署
 
@@ -104,6 +136,7 @@ sudo bash deploy/update.sh
 sudo bash deploy/update.sh --ref NEXT
 sudo bash deploy/update.sh --force
 sudo bash deploy/update.sh --no-build
+sudo bash deploy/update.sh --mounts   # 应急：退回 bind-mount 模式（仅排障）
 ```
 
 更新脚本只同步代码和核心容器，不会默认删除 PostgreSQL、Redis、`data/`、`models/` 或 `db/qlib_data/`，并会自动导入 `data/upgrade_*.sql` 数据库升级补丁（补丁需保持幂等，可重复执行）。
