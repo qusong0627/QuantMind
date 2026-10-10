@@ -264,7 +264,7 @@ async def cancel_single_backtest(factor_id: str, request: Request):
     return {"code": 200, "data": {"factor_id": factor_id, "status": "cancelled"}}
 
 
-async def _run_single(
+async def evaluate_and_record(
     factor_id: str,
     factor: dict,
     run_id: str,
@@ -274,8 +274,16 @@ async def _run_single(
     start: str | None,
     end: str | None,
     cost_bps: int | None,
-) -> None:
-    """单因子回测后台任务：engine 求值 → 台账收口（+ 序列落盘）→ 去重清理。"""
+) -> dict:
+    """engine 求值 → 台账收口（+ 序列落盘）；返回求值结果。
+
+    收口映射是**唯一实现**：路由后台任务（:func:`_run_single`）与 T-MV-09
+    验证脚本（``backend/scripts/mining_factor_validate.py``）都经本函数写
+    ``rd_agent_factor_backtests`` 台账——两份调用方拿到的终态语义逐字一致。
+
+    异常路径：先记终态（cancelled/failed）再**原样抛出**；调用方决定吞或续
+    （路由后台任务吞掉，验证脚本据此降级报告）。
+    """
     try:
         res = await evaluate_factor_market(
             factor,
@@ -327,11 +335,13 @@ async def _run_single(
                 data_source="qlib_bin",
                 date_range=date_range,
             )
+        return res
     except FactorBacktestCancelled:
         try:
             await store.finish_run(run_id, "cancelled", error="cancelled_by_user")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[factor-backtest] cancelled 收口失败 %s: %s", run_id, exc)
+        raise
     except Exception as exc:  # noqa: BLE001 — 兜底：任何异常都得有终态
         logger.exception("[factor-backtest] %s 后台任务异常", factor_id)
         try:
@@ -340,6 +350,39 @@ async def _run_single(
             )
         except Exception as exc2:  # noqa: BLE001
             logger.error("[factor-backtest] failed 收口失败 %s: %s", run_id, exc2)
+        raise
+
+
+async def _run_single(
+    factor_id: str,
+    factor: dict,
+    run_id: str,
+    *,
+    market: str,
+    universe: str | None,
+    start: str | None,
+    end: str | None,
+    cost_bps: int | None,
+) -> None:
+    """单因子回测后台任务：engine 求值 → 台账收口（+ 序列落盘）→ 去重清理。
+
+    求值与台账收口的唯一实现在 :func:`evaluate_and_record`；本函数只承担
+    后台任务语义：异常已由收口侧记终态，这里吞掉不再外抛（后台任务无处可
+    抛），finally 做身份守卫清理。
+    """
+    try:
+        await evaluate_and_record(
+            factor_id,
+            factor,
+            run_id,
+            market=market,
+            universe=universe,
+            start=start,
+            end=end,
+            cost_bps=cost_bps,
+        )
+    except Exception:  # noqa: BLE001 — 终态已收口（含 cancelled），后台任务无处可抛
+        pass
     finally:
         # 身份守卫清理（照旧链 finally 注释）：取消→立即重跑后，旧任务延迟收尾
         # 不得拆新任务的去重键/取消标记。

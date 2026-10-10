@@ -3436,14 +3436,16 @@ def _alignment_failure_message(factor_series, close, aligned_rows: int) -> str:
     )
 
 
-def _forward_return(close):
-    """次日收益：按 **instrument 组内**前移一天。
+def _forward_return(close, periods: int = 1):
+    """前瞻收益：按 **instrument 组内**前移 ``periods`` 个交易日（默认次日）。
 
     两个坑都在这一行里：
     · 分组键必须**按名字**取。层序归位后 level 0 是 datetime，`groupby(level=0)`
       会变成按日期分组（每天每只票一组，pct_change 恒为 NaN）；
     · shift 必须落在 **groupby 之内**。`groupby(level=0).pct_change().shift(-1)`
       的 shift 在 groupby 之外，是整表位移，上一只股票的末日会拿到下一只的首日收益。
+    ``periods>1`` 供 T-MV-09 多视界衰减复用同一实现（同规整、同分组，h 日收益）；
+    h=1 的既有调用方行为逐位不变。
     """
     import pandas as _pd
 
@@ -3451,7 +3453,7 @@ def _forward_return(close):
         raise ValueError(f"价格索引缺少 instrument 层：{list(close.index.names)}")
     ordered = _canonicalize_multiindex(close)
     grouped = ordered.groupby(level="instrument", sort=False)
-    return grouped.shift(-1) / ordered - 1.0
+    return grouped.shift(-int(periods)) / ordered - 1.0
 
 
 def _canonicalize_factor_for_alignment(result):

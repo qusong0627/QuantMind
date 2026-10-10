@@ -642,7 +642,16 @@ class RDLoopWrapper:
         project_data = Path(__file__).resolve().parents[4] / "data" / Path(container_path).name
         return project_data
 
-    def _generate_h5_from_parquet(self, quantdb_dir: str, output_path: str, *, debug: bool = False) -> bool:
+    def _generate_h5_from_parquet(
+        self,
+        quantdb_dir: str,
+        output_path: str,
+        *,
+        debug: bool = False,
+        symbols_limit: int | None = None,
+        end_date: date | None = None,
+        use_cache: bool = True,
+    ) -> bool:
         """从 QuantDB parquet 生成 RD-Agent 期望的 daily_pv.h5 文件。
 
         H5 格式:
@@ -653,8 +662,15 @@ class RDLoopWrapper:
           （L2 全量列见 ``l2_factor_columns``，T-MV-07 起并入）
         - instrument 格式: Qlib 格式 sh600036
 
-        生成的富化文件先写入共享缓存 ``<quantdb_dir>/.h5_cache/``（按最新分区
-        自动失效），再硬链/软链到任务目录，避免每个挖掘任务重复生成 GB 级文件。
+        常规模式（``use_cache=True``，默认）：生成的富化文件先写入共享缓存
+        ``<quantdb_dir>/.h5_cache/``（按最新分区自动失效），再硬链/软链到任务
+        目录，避免每个挖掘任务重复生成 GB 级文件；生成失败回退旧缓存不阻断任务。
+
+        探测模式（``use_cache=False``，T-MV-09 截断不变性探针用）：确定性抽样
+        ``symbols_limit`` 只标的（排序后取前 N，两次生成必须同一批标的）、数据
+        截断到 ``end_date``，**直写 ``output_path``**——不落共享缓存、不建链接、
+        失败不降级旧缓存。旧全量缓存冒充「截断数据」会让「全量 vs 截断」对比
+        退化成「全量 vs 全量」假通过，故此处失败即返回 False。
 
         Returns:
             True if h5 file was generated/already current, False on failure.
@@ -664,8 +680,12 @@ class RDLoopWrapper:
             cache_dir, "daily_pv_debug.h5" if debug else "daily_pv_all.h5"
         )
 
-        # 共享缓存命中：直接链接到任务目录（避免重复生成）
-        if os.path.exists(cache_path) and self._h5_cache_fresh(quantdb_dir, cache_path):
+        # 共享缓存命中：直接链接到任务目录（避免重复生成）；探测模式禁用
+        if (
+            use_cache
+            and os.path.exists(cache_path)
+            and self._h5_cache_fresh(quantdb_dir, cache_path)
+        ):
             logger.info("[%s] h5 cache hit: %s", self.market, cache_path)
             self._link_h5(cache_path, output_path)
             return True
@@ -675,13 +695,13 @@ class RDLoopWrapper:
             hub = QuantDBDataHub(quantdb_dir)
             if not hub.available:
                 logger.error("[%s] QuantDBDataHub not available for h5 generation", self.market)
-                return self._use_stale_cache(cache_path, output_path)
+                return self._use_stale_cache(cache_path, output_path, allow=use_cache)
 
             # 获取股票列表
             df_stocks = hub.fetch_stock_list()
             if df_stocks.empty:
                 logger.error("[%s] No stock list from QuantDB", self.market)
-                return self._use_stale_cache(cache_path, output_path)
+                return self._use_stale_cache(cache_path, output_path, allow=use_cache)
 
             symbol_col = "Symbol" if "Symbol" in df_stocks.columns else "symbol"
             symbols = df_stocks[symbol_col].dropna().unique()
@@ -693,14 +713,18 @@ class RDLoopWrapper:
             import numpy as np
 
             symbols = [str(s) for s in symbols]
-            start_d, end_d = date(2020, 1, 1), date(2026, 12, 31)
+            if symbols_limit is not None:
+                # 探测模式确定性抽样：排序后取前 N——全量/截断两次生成必须
+                # 拿到同一批标的，否则探针对比无意义（set 迭代序不保证）
+                symbols = sorted(symbols)[: int(symbols_limit)]
+            start_d, end_d = date(2020, 1, 1), end_date or date(2026, 12, 31)
 
             # 批量读取：一次查全部 symbol，避免逐股票 N 次分区扫描
             # （早期实现对 ~5400 只股票各查 2 次，单次生成需 40 分钟以上）
             df = hub.fetch_daily_kline_batch(symbols, start_d, end_d, adjust="qfq")
             if df is None or df.empty:
                 logger.error("[%s] No K-line data read from QuantDB", self.market)
-                return self._use_stale_cache(cache_path, output_path)
+                return self._use_stale_cache(cache_path, output_path, allow=use_cache)
             df_unadj = hub.fetch_daily_kline_batch(symbols, start_d, end_d, adjust="none")
 
             # 前复权价可能为负（高分红股票多年除权后 qfq 价转负），会污染 Qlib 因子
@@ -716,7 +740,7 @@ class RDLoopWrapper:
                 df = df.loc[valid].reset_index(drop=True)
             if df.empty:
                 logger.error("[%s] No positive-price K-line rows from QuantDB", self.market)
-                return self._use_stale_cache(cache_path, output_path)
+                return self._use_stale_cache(cache_path, output_path, allow=use_cache)
 
             # 按 (symbol, trade_date) 对齐不复权收盘价以计算 $factor
             if df_unadj is not None and not df_unadj.empty:
@@ -734,13 +758,13 @@ class RDLoopWrapper:
                 factor = np.ones(len(df))
 
             # 合并 QuantDB 富化列（技术指标/估值/资金流/筹码等），供因子直接引用
-            df = self._merge_enrich(
-                df, hub, start_d, end_d, None if not debug else symbols
-            )
+            # （子集模式=debug 或探测抽样：只拉这批标的的富化数据）
+            enrich_symbols = symbols if (debug or symbols_limit is not None) else None
+            df = self._merge_enrich(df, hub, start_d, end_d, enrich_symbols)
 
             # L2 微观结构因子全量接入（T-MV-07）：列清单现场读盘，分块左连接
             df, l2_cols = self._merge_l2_factors(
-                df, hub, quantdb_dir, start_d, end_d, None if not debug else symbols
+                df, hub, quantdb_dir, start_d, end_d, enrich_symbols
             )
 
             instruments = [self._to_qlib_symbol(str(s)) for s in df["symbol"]]
@@ -770,20 +794,32 @@ class RDLoopWrapper:
             del df, instruments
             combined = combined.sort_index()
 
-            os.makedirs(cache_dir, exist_ok=True)
-            tmp_path = cache_path + ".tmp"
+            if use_cache:
+                target = cache_path
+                os.makedirs(cache_dir, exist_ok=True)
+            else:
+                # 探测模式：直写 output_path（原子替换），不落共享缓存不建链接
+                target = output_path
+                os.makedirs(
+                    os.path.dirname(os.path.abspath(target)) or ".", exist_ok=True
+                )
+            tmp_path = target + ".tmp"
             combined.to_hdf(tmp_path, key="data", mode="w")
-            os.replace(tmp_path, cache_path)
-            self._link_h5(cache_path, output_path)
+            os.replace(tmp_path, target)
+            if use_cache:
+                self._link_h5(cache_path, output_path)
             logger.info(
                 "[%s] Generated enriched h5 from parquet: %s (%d rows, %d cols)",
-                self.market, cache_path, len(combined), combined.shape[1],
+                self.market,
+                target,
+                len(combined),
+                combined.shape[1],
             )
             return True
 
         except Exception as exc:
             logger.error("[%s] Failed to generate h5 from parquet: %s", self.market, exc)
-            return self._use_stale_cache(cache_path, output_path)
+            return self._use_stale_cache(cache_path, output_path, allow=use_cache)
 
     def _merge_enrich(
         self,
@@ -992,8 +1028,17 @@ class RDLoopWrapper:
                 continue
         logger.warning("[RDLoopWrapper] Failed to link/copy h5 %s -> %s", src, dst)
 
-    def _use_stale_cache(self, cache_path: str, output_path: str) -> bool:
-        """生成失败时回退到已有（可能过期）缓存，尽量不阻断任务。"""
+    def _use_stale_cache(
+        self, cache_path: str, output_path: str, *, allow: bool = True
+    ) -> bool:
+        """生成失败时回退到已有（可能过期）缓存，尽量不阻断任务。
+
+        ``allow=False``（探测 h5 直建，``use_cache=False``）绝不降级：调用方
+        要的是「截断到探针日」的数据面，递旧的全量缓存会让截断探针对比变成
+        「全量 vs 全量」→ 假通过。此处是防假通过的收口点。
+        """
+        if not allow:
+            return False
         if os.path.exists(cache_path):
             logger.warning("[%s] Reusing stale h5 cache: %s", self.market, cache_path)
             self._link_h5(cache_path, output_path)

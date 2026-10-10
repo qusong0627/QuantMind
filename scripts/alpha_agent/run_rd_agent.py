@@ -165,6 +165,50 @@ def _maybe_spawn_materialize(args, log_dir: str, data_path: str, persisted: int)
         logger.warning("自动物化启动失败：%s", exc)
 
 
+def _maybe_spawn_validate(args, log_dir: str, data_path: str, persisted: int) -> None:
+    """落库后自动验证（T-MV-09 六节报告）——后台子进程，不阻塞收尾。
+
+    ``RD_AGENT_AUTO_VALIDATE=false`` 可关闭。全市场可触发：T-FB 阶段引擎
+    五市场通吃，h5 阶段（衰减/PIT）非 a_share 自动降级，报告如实标 degraded。
+    失败只告警——可事后用同一脚本手工补跑（--task-id/--factor-ids）。
+
+    与物化器可并行跑（各自落不同表）；验证脚本自带全局 flock 串行化。
+    """
+    if persisted <= 0:
+        return
+    flag = os.getenv("RD_AGENT_AUTO_VALIDATE", "true").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        logger.info("自动验证已关闭（RD_AGENT_AUTO_VALIDATE=%s）", flag)
+        return
+    script = _project_root / "backend" / "scripts" / "mining_factor_validate.py"
+    if not script.is_file():
+        logger.warning("验证器脚本不存在，跳过自动验证：%s", script)
+        return
+    cmd = [
+        sys.executable,
+        str(script),
+        "--task-id",
+        str(args.task_id),
+        "--market",
+        str(args.market),
+    ]
+    if data_path and Path(data_path).exists():
+        cmd += ["--h5-path", str(data_path)]
+    log_file = Path(log_dir) / "validate.log"
+    try:
+        with open(log_file, "ab") as handle:
+            subprocess.Popen(
+                cmd,
+                cwd=str(_project_root),
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        logger.info("自动验证已启动（后台）：log=%s", log_file)
+    except Exception as exc:  # noqa: BLE001 - 自动链路失败不阻断挖掘结果
+        logger.warning("自动验证启动失败：%s", exc)
+
+
 def _near_one_year_window() -> tuple[str, str]:
     """近一年回测窗口（end=数据最新交易日，start=end 往前一年）。
 
@@ -616,6 +660,9 @@ def main():
 
         # 落库后自动物化（rd_mined 库，训练直读链路）——后台子进程，不阻塞收尾
         _maybe_spawn_materialize(args, log_dir, data_path, count)
+
+        # 落库后自动验证（T-MV-09 六节报告）——后台子进程，不阻塞收尾
+        _maybe_spawn_validate(args, log_dir, data_path, count)
 
     except Exception as e:
         logger.exception("RD-Agent runner failed: %s", e)
