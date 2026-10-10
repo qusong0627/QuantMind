@@ -149,11 +149,6 @@ services:
       - MARKET_REDIS_PASSWORD=${MARKET_REDIS_PASSWORD:-}
       - QM_MARKET_REDIS_FERNET_KEY=${QM_MARKET_REDIS_FERNET_KEY:-}
       - QM_MARKET_REDIS_CT=${QM_MARKET_REDIS_CT:-}
-      # 模拟撮合实时行情；生产可覆盖为独立行情 Redis，禁止在源码中内置凭据。
-      - REMOTE_QUOTE_REDIS_HOST=${REMOTE_QUOTE_REDIS_HOST:-redis}
-      - REMOTE_QUOTE_REDIS_PORT=${REMOTE_QUOTE_REDIS_PORT:-6379}
-      - REMOTE_QUOTE_REDIS_PASSWORD=${REMOTE_QUOTE_REDIS_PASSWORD:-}
-      - REMOTE_QUOTE_REDIS_DB=${REMOTE_QUOTE_REDIS_DB:-3}
       # 行情新鲜度分级（T-P6-05 唯一谓词：fresh<=60s（默认）<stale<=300s（默认）；>stale 不可用）
       - QM_QUOTE_FRESH_WITHIN_S=${QM_QUOTE_FRESH_WITHIN_S:-60}
       - QM_QUOTE_STALE_WITHIN_S=${QM_QUOTE_STALE_WITHIN_S:-300}
@@ -161,7 +156,10 @@ services:
       - SIMULATION_MAX_PARTICIPATION_RATE=${SIMULATION_MAX_PARTICIPATION_RATE:-0.10}
       - SIM_LIQUIDITY_UNVERIFIED_MAX_NOTIONAL=${SIM_LIQUIDITY_UNVERIFIED_MAX_NOTIONAL:-100000}
 
-      # 远端行情 Redis（模拟撮合 L0 快照取价 / 实盘预检直连；两处共用一个配置源）。
+      # 远端行情 Redis（模拟撮合 L0 取价 / 实盘预检 / WS 快照源 / 手工执行 / arena 补价，
+      # 全部经 backend/shared/remote_quote_config.py 统一解析；2026-10-10 T4-4 去掉本文件
+      # 上方重复的 env 块——后定义的块会整段覆盖前者，曾致容器内全部值为空串、读侧静默
+      # 回落本机 Redis 与写侧分裂）。
       # 留空 = 使用官方公共免费行情服（默认值在 backend/shared/remote_quote_config.py）；
       # 私有部署可在此/.env 覆盖；REMOTE_QUOTE_DISABLED=true 时可整体关闭（走本地日线兜底）。
       - REMOTE_QUOTE_REDIS_HOST=${REMOTE_QUOTE_REDIS_HOST:-}

@@ -41,13 +41,25 @@ _SH_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _get_quote_redis():
+    """行情快照 Redis 客户端（T4-4 审计 H14：与写侧统一走 resolve_remote_quote_redis）。
+
+    此前裸读 REDIS_HOST → 容器里恒指本机，而快照写侧（桥/席位）全部落远端公网
+    Redis → 本路径永远查空，实际只靠 QuantDB 日线兜底（全链零提示）。
+    仅 REMOTE_QUOTE_DISABLED 显式停用远端时，才回落部署内 Redis。
+    """
     global _quote_redis
     if _quote_redis is None:
-        try:
+        from backend.shared.remote_quote_config import resolve_remote_quote_redis
+
+        resolved = resolve_remote_quote_redis()
+        if resolved is not None:
+            host, port, password, db = resolved
+        else:
             host = os.getenv("REDIS_HOST", "quantmind-redis")
             port = int(os.getenv("REDIS_PORT", "6379"))
-            password = os.getenv("REDIS_PASSWORD", "")
+            password = os.getenv("REDIS_PASSWORD", "") or None
             db = int(os.getenv("REDIS_DB_MARKET", "3"))
+        try:
             _quote_redis = redis_lib.Redis(
                 host=host,
                 port=port,

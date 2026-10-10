@@ -28,15 +28,21 @@
 **当前版本使用远程 Redis 行情快照作为主数据来源：**
 
 ```
-远程 Redis (REMOTE_QUOTE_REDIS_HOST)
+远程行情 Redis（resolve_remote_quote_redis：env > 根 .env > 官方公共免费服）
   market:snapshot:{symbol} (主路径)
   stock:{code}.{market} (兼容回退)
-                         →  RemoteRedisDataSource.fetch_quotes()
+                         →  RemoteRedisDataSource.fetch_quotes()（透传快照 source）
                          →  QuotePusher._centralized_push_loop()
-                         →  append_series_point() 写入 market:series:{symbol}
-                         →  quotes 表落库（PostgreSQL）
-                         →  manager.publish("stock.{code}", {...})
+                         →  quotes 表落库（PostgreSQL，data_source 标注来源）
+                         →  manager.publish("stock.{code}", {...含 data_source})
                          →  已订阅的 WebSocket 客户端
+
+兜底：快照缺失的标的回退 QuantDB 本地日线（data_source=quantdb，仅落库/推送）。
+
+T4-4（2026-10-10，审计 H14）：不再回写 market:series——此前 QuantDB 兜底
+（当日零点时间戳 + is_stale=false）被当盘中时序点写进行情 Redis 市场键，与真实
+席位点混杂（伪实时、全链零提示）。market:series 的唯一写侧 = 行情席位
+（tdx_hot_set_feed / qmt_quote_backup / tdx_aidata），本服务只是消费方。
 ```
 
 当前采用中心化轮询，不再按股票创建独立协程；默认 `push_interval=2.0秒`，仅当价格变化时才推送。

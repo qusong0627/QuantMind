@@ -2,7 +2,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import List
 
 from cryptography.fernet import Fernet
 from pydantic import AliasChoices, Field, field_validator, model_validator
@@ -135,7 +134,9 @@ class Settings(BaseSettings):
         default=MARKET_REDIS_DB, validation_alias=AliasChoices("REDIS_DB", "REDIS_DB_MARKET")
     )
 
-    # 远程行情快照 Redis (OSS: 使用统一 Redis)
+    # 远程行情快照 Redis——注意：代码消费端不读这几个字段（T4-4 审计 H14 后全部经
+    # backend/shared/remote_quote_config.resolve_remote_quote_redis 解析；本组仅为
+    # 历史配置兼容与启动期 env 校验保留）。
     REMOTE_QUOTE_REDIS_HOST: str = Field(default=MARKET_REDIS_HOST)
     REMOTE_QUOTE_REDIS_PORT: int = Field(default=MARKET_REDIS_PORT)
     REMOTE_QUOTE_REDIS_PASSWORD: str = Field(default=MARKET_REDIS_PASSWORD)

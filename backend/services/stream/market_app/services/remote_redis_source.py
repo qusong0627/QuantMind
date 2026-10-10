@@ -26,23 +26,26 @@ logger = logging.getLogger(__name__)
 class RemoteRedisDataSource(DataSourceAdapter):
     """
     第三方行情快照 Redis 数据源 (OSS Edition)
-    使用统一 Redis 实例 (REDIS_DB_MARKET)
+    端点解析唯一源 = backend/shared/remote_quote_config.resolve_remote_quote_redis
+    （env > 项目根 .env > 内置公共免费行情服；REMOTE_QUOTE_DISABLED=true 停用后
+    回落部署内 Redis）
     """
 
     def __init__(self):
-        # 行情 Redis 必须显式配置；未配置远端时仅回退部署内 Redis。
-        self._host = (
-            os.getenv("REMOTE_QUOTE_REDIS_HOST")
-            or os.getenv("REDIS_HOST")
-            or "redis"
-        ).strip()
-        self._port = int(os.getenv("REMOTE_QUOTE_REDIS_PORT") or "6379")
-        self._password = (
-            os.getenv("REMOTE_QUOTE_REDIS_PASSWORD")
-            or os.getenv("REDIS_PASSWORD")
-            or ""
-        ).strip() or None
-        self._db = int(os.getenv("REMOTE_QUOTE_REDIS_DB") or "3")
+        # T4-4（审计 H14）：此前本类裸读 REMOTE_QUOTE_* env——docker-compose 的重复
+        # env 块把值覆盖成空串后静默回落本机 Redis，而快照写侧（席位/桥）全部落远端，
+        # 形成读写分裂：本读路径永远查空、WS 实质只吃 QuantDB 日线兜底。现与写侧同源。
+        from backend.shared.remote_quote_config import resolve_remote_quote_redis
+
+        resolved = resolve_remote_quote_redis()
+        if resolved is not None:
+            self._host, self._port, self._password, self._db = resolved
+        else:
+            # 仅显式停用远端时回落部署内 Redis（本地日线兜底场）
+            self._host = (os.getenv("REDIS_HOST") or "redis").strip()
+            self._port = int(os.getenv("REDIS_PORT") or "6379")
+            self._password = (os.getenv("REDIS_PASSWORD") or "").strip() or None
+            self._db = int(os.getenv("REDIS_DB_MARKET") or "3")
         self._client: aioredis.Redis | None = None
 
     def _get_client(self) -> aioredis.Redis:
@@ -185,7 +188,9 @@ class RemoteRedisDataSource(DataSourceAdapter):
                     "volume": int(_f("Volume") or 0),
                     "amount": _f("Amount"),
                     "is_stale": is_stale,
-                    "data_source": "remote_redis",
+                    # T4-4：透传快照自带的 source（席位写侧写入：tdx_bridge/qmt_big/...），
+                    # 缺省 remote_redis——WS 推送载荷与 quotes 表落库都吃这个标注
+                    "data_source": data.get("source") or "remote_redis",
                 }
             )
 
@@ -232,55 +237,6 @@ class RemoteRedisDataSource(DataSourceAdapter):
         except Exception as e:
             logger.error(f"[RemoteRedis] 拉取时序数据失败 {symbol}: {e}")
             return []
-
-    async def append_series_point(
-        self,
-        symbol: str,
-        quote: dict[str, Any],
-        max_points: int = 6000,
-        ttl_seconds: int = 172800,
-    ) -> bool:
-        """将实时行情追加到时序 ZSET，形成可回放序列闭环。"""
-        client = self._get_client()
-        normalized = self._normalize_symbol(symbol)
-        series_key = f"market:series:{normalized}"
-
-        dt = quote.get("timestamp")
-        if isinstance(dt, datetime):
-            aware_dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-            ts = int(aware_dt.timestamp())
-            dt_iso = aware_dt.astimezone(timezone.utc).isoformat()
-        else:
-            ts = int(time.time())
-            dt_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-
-        payload = {
-            "symbol": symbol,
-            "normalized_symbol": normalized,
-            "timestamp": ts,
-            "datetime": dt_iso,
-            "price": quote.get("current_price"),
-            "open": quote.get("open_price"),
-            "high": quote.get("high_price"),
-            "low": quote.get("low_price"),
-            "volume": quote.get("volume"),
-            "amount": quote.get("amount"),
-            "is_stale": quote.get("is_stale", False),
-            "source": quote.get("data_source", "remote_redis"),
-        }
-
-        try:
-            encoded = json.dumps(payload, ensure_ascii=False)
-            async with client.pipeline(transaction=False) as pipe:
-                pipe.zadd(series_key, {encoded: ts})
-                # 保留最近 max_points 条，删除更旧数据
-                pipe.zremrangebyrank(series_key, 0, -(max_points + 1))
-                pipe.expire(series_key, ttl_seconds)
-                await pipe.execute()
-            return True
-        except Exception as e:
-            logger.error(f"[RemoteRedis] 写入时序数据失败 {symbol}: {e}")
-            return False
 
     async def fetch_symbols(self, market: str | None = None) -> list[dict[str, Any]]:
         """扫描远程 Redis 返回全部股票代码列表（优先新规范 key）"""
