@@ -175,12 +175,23 @@ start_services() {
         || log '部分外部镜像未能预拉取，将在启动时重试'
     # 构建时注入 pip 源加速（国内网络），可通过 QUANTMIND_PIP_MIRROR 覆盖
     # 依赖指纹 QM_REQ_SHA 写入镜像 Label，供 full-deploy/update 比对复用还是重建。
-    local req_sha
+    local req_sha git_commit git_branch git_dirty
     req_sha="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" "$PROJECT_DIR" 2>/dev/null || true)"
+    # 部署真相戳（T7-3）：构建时刻的代码身份一并写进镜像 LABEL/戳文件。
+    git_commit="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    git_branch="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ]]; then
+        git_dirty=true
+    else
+        git_dirty=false
+    fi
     docker compose build \
         --build-arg PIP_INDEX_URL="$PIP_MIRROR" \
         --build-arg PIP_TRUSTED_HOST="$PIP_TRUSTED_HOST" \
         --build-arg QM_REQ_SHA="${req_sha:-unknown}" \
+        --build-arg QM_GIT_COMMIT="$git_commit" \
+        --build-arg QM_GIT_BRANCH="$git_branch" \
+        --build-arg QM_GIT_DIRTY="$git_dirty" \
         quantmind
     # dsh（QuantBot 默认后端）：镜像内已烘焙 python3/nginx/docker CLI（docker/Dockerfile.dsh），
     # buildkit 自动拉取 node:22-slim 基础层后叠加。旧 QwenPaw 服务/镜像已退役删除。

@@ -90,12 +90,14 @@ RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
   && rm -rf /tmp/requirements*.txt
 
 # 安装 QuantDB SDK（付费高质量数据源：K线/Tick/财报/估值/315维AI因子）
-<<<<<<< Updated upstream
+# 钉版 ==0.3.3 + 共享 pip 缓存（id=quantmind-pip，与上方 requirements 层同设计）。
+# 2026-10-10 解冲突：cb81f137（并行会话 stash-pop 冲突后带病提交）把
+# `<<<<<<< Updated upstream / >>>>>>> Stashed changes` 留在此处，任何镜像重建
+# （含服务器 update.sh / full-deploy）都会以 dockerfile parse error 失败。保留
+# 本支侧（钉版+缓存挂载）——与在跑镜像实际安装的 0.3.3、d64d1296 的缓存设计一致；
+# stashed 侧（--no-cache-dir + >=0.3.1 范围）是被弃的旧 WIP，不迁回。
 RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
     python -m pip install --root-user-action=ignore "quantdb-sdk==0.3.3"
-=======
-RUN python -m pip install --no-cache-dir --root-user-action=ignore "quantdb-sdk>=0.3.1"
->>>>>>> Stashed changes
 
 # 修复 qlib 0.9.7 bug: position.py 中 price=None 导致 TypeError
 COPY docker/patch_qlib.py /tmp/patch_qlib.py
@@ -146,7 +148,21 @@ RUN mkdir -p /data/models /data/qlib_data /data/uploads /data/strategies /tmp \
 # 放在文件末尾：ARG 值变化只影响此元数据层，不会打断上方依赖层的构建缓存链
 #（真正由依赖引起的变化，本就会从对应 COPY/ARG 层开始正常失效重建）。
 ARG QM_REQ_SHA=unknown
+# 部署真相戳（T7-3）：构建侧由 deploy/{update,full-deploy,deploy}.sh 注入代码身份。
+# LABEL 供 `docker inspect` 核对；/app/deploy_stamp.json 供容器内运行探针读取镜像侧
+# 身份（bind mount 部署以运行处 .git 为准，此戳是「镜像由哪版代码、按哪个 SOP 构建」
+# 的兜底证据——qm.torch.device 直接把 TORCH_DEVICE 构建开关暴露给 docker inspect）。
+ARG QM_GIT_COMMIT=unknown
+ARG QM_GIT_BRANCH=unknown
+ARG QM_GIT_DIRTY=unknown
 LABEL qm.req.sha=${QM_REQ_SHA}
+LABEL qm.git.commit=${QM_GIT_COMMIT}
+LABEL qm.git.branch=${QM_GIT_BRANCH}
+LABEL qm.git.dirty=${QM_GIT_DIRTY}
+LABEL qm.torch.device=${TORCH_DEVICE}
+RUN printf '{"commit":"%s","branch":"%s","dirty":"%s","torch_device":"%s","built_at":"%s"}\n' \
+        "${QM_GIT_COMMIT}" "${QM_GIT_BRANCH}" "${QM_GIT_DIRTY}" "${TORCH_DEVICE}" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /app/deploy_stamp.json
 
 # 暴露端口
 EXPOSE 8000 8001 8002 8003

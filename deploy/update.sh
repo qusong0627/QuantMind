@@ -301,7 +301,19 @@ build_core() {
         # 把依赖指纹同步写入镜像 Label（qm.req.sha），与 full-deploy 的指纹闸门共用一套口径。
         local req_sha
         req_sha="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" "$PROJECT_DIR" 2>/dev/null || true)"
-        QM_REQ_SHA="${req_sha:-unknown}" docker compose -f "$PROJECT_DIR/docker-compose.yml" build quantmind || {
+        # 部署真相戳（T7-3）：构建时刻的代码身份一并写进镜像 LABEL/戳文件，
+        # docker inspect 与容器内启动打点都能核对「镜像由哪版代码构建」。
+        local git_commit git_branch git_dirty
+        git_commit="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+        git_branch="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+        if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ]]; then
+            git_dirty=true
+        else
+            git_dirty=false
+        fi
+        QM_REQ_SHA="${req_sha:-unknown}" QM_GIT_COMMIT="$git_commit" \
+            QM_GIT_BRANCH="$git_branch" QM_GIT_DIRTY="$git_dirty" \
+            docker compose -f "$PROJECT_DIR/docker-compose.yml" build quantmind || {
             die "镜像构建失败，请检查以上日志"
         }
     fi

@@ -10,7 +10,7 @@ from backend.shared.programmatic_trading_disclosure import (
     disclosure_text,
     software_version,
 )
-from backend.shared.version import get_version_info, check_updates
+from backend.shared.version import get_version_info, get_deploy_truth, check_updates
 
 router = APIRouter(prefix="/api/v1/system", tags=["System"])
 
@@ -36,6 +36,18 @@ async def system_version(force: bool = False):
         "branch": info["branch"],
         "update": update,
     }
+
+
+@router.get("/deploy-truth")
+async def deploy_truth():
+    """运行处部署真相（T7-3 / H10）：此刻实际在跑的工作树 commit/脏标记。
+
+    与 /version 的分工：/version 读的是部署脚本落盘的**声明**（version.json，
+    合规披露的版本号口径也冻结在彼）；本端点走**运行处探针**——容器与服务器
+    都是 bind mount 活代码，只有工作树说了算；声明与运行分叉（热修/并行改动）
+    也会一并暴露。探针只读；读不到 .git（源码包部署）时如实报 source=unknown。
+    """
+    return get_deploy_truth()
 
 
 @router.get("/programmatic-trading-disclosure")

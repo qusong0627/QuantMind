@@ -17,10 +17,6 @@ from typing import Dict, List, Optional
 
 # 添加配置管理器路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
-<<<<<<< HEAD
-from config_manager import ConfigManager
-=======
->>>>>>> refactor/service-cleanup
 
 
 @dataclass
@@ -62,12 +58,7 @@ class ServiceManager:
 
     def _signal_handler(self, signum, frame):
         """信号处理器"""
-<<<<<<< HEAD
         self.logger.info(f"Received signal {signum}, shutting down services...")
-=======
-        self.logger.info(
-            f"Received signal {signum}, shutting down services...")
->>>>>>> refactor/service-cleanup
         self.running = False
         self.stop_all_services()
         sys.exit(0)
@@ -115,12 +106,7 @@ class ServiceManager:
                     )
 
             except Exception as e:
-<<<<<<< HEAD
                 self.logger.debug(f"Health check failed for {service_name}: {e}")
-=======
-                self.logger.debug(
-                    f"Health check failed for {service_name}: {e}")
->>>>>>> refactor/service-cleanup
 
             if attempt < max_attempts - 1:
                 time.sleep(2)
@@ -134,12 +120,7 @@ class ServiceManager:
         """启动单个服务"""
         try:
             # 获取服务配置
-<<<<<<< HEAD
             service_config = self.config_manager.get_service_config(service_name)
-=======
-            service_config = self.config_manager.get_service_config(
-                service_name)
->>>>>>> refactor/service-cleanup
 
             self.logger.info(f"Starting service: {service_name}")
 
@@ -147,12 +128,7 @@ class ServiceManager:
             dependencies = self.get_service_dependencies(service_name)
             for dep_service in dependencies:
                 if dep_service not in self.services:
-<<<<<<< HEAD
                     self.logger.info(f"Starting dependency service: {dep_service}")
-=======
-                    self.logger.info(
-                        f"Starting dependency service: {dep_service}")
->>>>>>> refactor/service-cleanup
                     if not self.start_service(dep_service):
                         self.logger.error(
                             f"Failed to start dependency service: {dep_service}"
@@ -162,12 +138,7 @@ class ServiceManager:
 
                     # 构建启动命令
             project_root = Path(__file__).parent.parent.parent.parent
-<<<<<<< HEAD
             service_path = project_root / "backend" / service_name.replace("-", "_")
-=======
-            service_path = project_root / "backend" / \
-                service_name.replace("-", "_")
->>>>>>> refactor/service-cleanup
 
             if not service_path.exists():
                 self.logger.error(f"Service path not found: {service_path}")
@@ -175,12 +146,7 @@ class ServiceManager:
 
                 # 设置环境变量
             env = os.environ.copy()
-<<<<<<< HEAD
             env["PYTHONPATH"] = str(project_root) + ":" + env.get("PYTHONPATH", "")
-=======
-            env["PYTHONPATH"] = str(project_root) + \
-                ":" + env.get("PYTHONPATH", "")
->>>>>>> refactor/service-cleanup
 
             # 启动服务
             cmd = [sys.executable, "main.py"]
@@ -194,21 +160,11 @@ class ServiceManager:
             )
 
             self.services[service_name] = process
-<<<<<<< HEAD
             self.logger.info(f"Service {service_name} started with PID: {process.pid}")
 
             # 等待服务启动并进行健康检查
             if not self.check_service_health(service_name, service_config.port):
                 self.logger.error(f"Service {service_name} failed health check")
-=======
-            self.logger.info(
-                f"Service {service_name} started with PID: {process.pid}")
-
-            # 等待服务启动并进行健康检查
-            if not self.check_service_health(service_name, service_config.port):
-                self.logger.error(
-                    f"Service {service_name} failed health check")
->>>>>>> refactor/service-cleanup
                 self.stop_service(service_name)
                 return False
 
@@ -222,12 +178,7 @@ class ServiceManager:
         """停止单个服务"""
         if service_name in self.services:
             process = self.services[service_name]
-<<<<<<< HEAD
             self.logger.info(f"Stopping service: {service_name} (PID: {process.pid})")
-=======
-            self.logger.info(
-                f"Stopping service: {service_name} (PID: {process.pid})")
->>>>>>> refactor/service-cleanup
 
             try:
                 # 发送SIGTERM信号
@@ -236,29 +187,15 @@ class ServiceManager:
                 # 等待进程结束
                 try:
                     process.wait(timeout=10)
-<<<<<<< HEAD
                     self.logger.info(f"Service {service_name} stopped gracefully")
-=======
-                    self.logger.info(
-                        f"Service {service_name} stopped gracefully")
->>>>>>> refactor/service-cleanup
                 except subprocess.TimeoutExpired:
                     # 强制杀死进程
                     process.kill()
                     process.wait()
-<<<<<<< HEAD
                     self.logger.warning(f"Service {service_name} forced to stop")
 
             except Exception as e:
                 self.logger.error(f"Error stopping service {service_name}: {e}")
-=======
-                    self.logger.warning(
-                        f"Service {service_name} forced to stop")
-
-            except Exception as e:
-                self.logger.error(
-                    f"Error stopping service {service_name}: {e}")
->>>>>>> refactor/service-cleanup
 
             del self.services[service_name]
 

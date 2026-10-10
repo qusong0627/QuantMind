@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # 后台管理页面写入的运行时密钥（config/runtime.env），真实环境变量优先
 from backend.shared.runtime_secrets import load_runtime_env
+
 _runtime_loaded = load_runtime_env()
 if _runtime_loaded:
     logger.info("Loaded %d runtime secrets from runtime.env", _runtime_loaded)
@@ -114,6 +115,7 @@ if os.path.isdir(_qlib_cn):
 def get_workers_config() -> dict:
     """获取各服务的 worker 数量配置"""
     import os
+
     # OSS 默认保持 engine 单 worker。
     # 原因：AI-IDE 执行任务状态保存在进程内存中，多 worker 会导致
     # /start 与 /execute/logs/{job_id} 命中不同进程，返回 404 Job not found。
@@ -224,12 +226,14 @@ def run_celery_worker():
 
     logger.info("Starting Celery Worker for async backtest tasks")
     # 使用 solo 模式单进程执行，避免多进程复杂度
-    celery_app.worker_main([
-        "worker",
-        "--loglevel=info",
-        "--concurrency=1",
-        "--pool=solo",
-    ])
+    celery_app.worker_main(
+        [
+            "worker",
+            "--loglevel=info",
+            "--concurrency=1",
+            "--pool=solo",
+        ]
+    )
 
 
 def run_all_services():
@@ -276,7 +280,9 @@ def run_all_services():
             logger.info(f"Started celery worker (PID: {p.pid})")
         else:
             port, workers = args
-            logger.info(f"Started {name} service (PID: {p.pid}) on port {port} with {workers} workers")
+            logger.info(
+                f"Started {name} service (PID: {p.pid}) on port {port} with {workers} workers"
+            )
 
     logger.info("=" * 60)
     logger.info("QuantMind OSS Edition - All services started")
@@ -372,7 +378,11 @@ def run_all_services():
                     logger.info(f"♻️  Restarted {name} service (new PID: {new_p.pid})")
 
             # Health check watchdog (runs every HEALTH_CHECK_INTERVAL seconds, after startup grace)
-            if now - last_health_check >= HEALTH_CHECK_INTERVAL and (now - state[list(state.keys())[0]]["last_restart"]) > startup_grace_sec:
+            if (
+                now - last_health_check >= HEALTH_CHECK_INTERVAL
+                and (now - state[list(state.keys())[0]]["last_restart"])
+                > startup_grace_sec
+            ):
                 last_health_check = now
                 for name, info in list(state.items()):
                     if name == "celery":
@@ -397,7 +407,9 @@ def run_all_services():
                             f"({info['health_failures']}/{MAX_HEALTH_FAILURES})"
                         )
                         if info["health_failures"] >= MAX_HEALTH_FAILURES:
-                            _restart_service(name, info, "unresponsive to health checks")
+                            _restart_service(
+                                name, info, "unresponsive to health checks"
+                            )
     except KeyboardInterrupt:
         SHUTTING_DOWN = True
         logger.info("Shutting down all services...")
@@ -440,15 +452,31 @@ def _ensure_database_schema():
     db_port = os.getenv("DB_PORT", "5432")
     db_name = os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "quantmind"))
     db_user = os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind"))
-    db_password = os.getenv("DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "quantmind2026"))
+    db_password = os.getenv(
+        "DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "quantmind2026")
+    )
 
     env = os.environ.copy()
     env["PGPASSWORD"] = db_password
 
     try:
         result = subprocess.run(
-            ["psql", "-h", db_host, "-p", db_port, "-U", db_user, "-d", db_name,
-             "-f", init_sql, "--quiet", "-v", "ON_ERROR_STOP=0"],
+            [
+                "psql",
+                "-h",
+                db_host,
+                "-p",
+                db_port,
+                "-U",
+                db_user,
+                "-d",
+                db_name,
+                "-f",
+                init_sql,
+                "--quiet",
+                "-v",
+                "ON_ERROR_STOP=0",
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -458,8 +486,10 @@ def _ensure_database_schema():
             logger.info("数据库表结构自检完成")
         else:
             # 部分表可能已存在，返回非零但无碍
-            logger.warning("数据库初始化有警告（可忽略，表可能已存在）: %s",
-                           result.stderr[:200] if result.stderr else "")
+            logger.warning(
+                "数据库初始化有警告（可忽略，表可能已存在）: %s",
+                result.stderr[:200] if result.stderr else "",
+            )
         # 执行市场分析模块建表（qm_market_sectors 等，不在 db_init.sql 内）
         _ensure_market_analysis_tables(env)
         # 执行增量升级脚本（system_events、news title 等，不在 db_init.sql 内，幂等可重放）
@@ -527,7 +557,9 @@ def _upgrade_sql_files() -> list[str]:
                 with open(path, encoding="utf-8", errors="replace") as f:
                     text = f.read()
             except OSError as e:
-                logger.warning("增量升级脚本不可读，跳过 %s: %s", os.path.basename(path), e)
+                logger.warning(
+                    "增量升级脚本不可读，跳过 %s: %s", os.path.basename(path), e
+                )
                 continue
             if _is_destructive_sql(text):
                 logger.warning(
@@ -557,11 +589,22 @@ def _ensure_upgrade_scripts(env: dict) -> None:
     for sql_path in sql_files:
         try:
             result = _sp.run(
-                ["psql", "-h", os.getenv("DB_HOST", os.getenv("POSTGRES_HOST", "db")),
-                 "-p", os.getenv("DB_PORT", "5432"),
-                 "-U", os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind")),
-                 "-d", os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "quantmind")),
-                 "-f", sql_path, "--quiet", "-v", "ON_ERROR_STOP=0"],
+                [
+                    "psql",
+                    "-h",
+                    os.getenv("DB_HOST", os.getenv("POSTGRES_HOST", "db")),
+                    "-p",
+                    os.getenv("DB_PORT", "5432"),
+                    "-U",
+                    os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind")),
+                    "-d",
+                    os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "quantmind")),
+                    "-f",
+                    sql_path,
+                    "--quiet",
+                    "-v",
+                    "ON_ERROR_STOP=0",
+                ],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -570,7 +613,11 @@ def _ensure_upgrade_scripts(env: dict) -> None:
             if result.returncode == 0:
                 logger.info("增量升级已执行: %s", os.path.basename(sql_path))
             else:
-                logger.warning("增量升级有警告 %s: %s", os.path.basename(sql_path), (result.stderr or "")[:200])
+                logger.warning(
+                    "增量升级有警告 %s: %s",
+                    os.path.basename(sql_path),
+                    (result.stderr or "")[:200],
+                )
         except FileNotFoundError:
             _ensure_upgrade_scripts_python(sql_path)
         except Exception as e:  # noqa: BLE001
@@ -583,11 +630,20 @@ def _ensure_upgrade_scripts_python(sql_path: str) -> None:
     db_port = os.getenv("DB_PORT", "5432")
     db_name = os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "quantmind"))
     db_user = os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind"))
-    db_password = os.getenv("DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "quantmind2026"))
+    db_password = os.getenv(
+        "DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "quantmind2026")
+    )
     try:
         import psycopg2  # type: ignore
+
         sql_text = open(sql_path, encoding="utf-8").read()
-        conn = psycopg2.connect(host=db_host, port=db_port, dbname=db_name, user=db_user, password=db_password)
+        conn = psycopg2.connect(
+            host=db_host,
+            port=db_port,
+            dbname=db_name,
+            user=db_user,
+            password=db_password,
+        )
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(sql_text)
@@ -616,8 +672,22 @@ def _ensure_market_analysis_tables(env: dict) -> None:
     db_user = os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind"))
     try:
         result = subprocess.run(
-            ["psql", "-h", db_host, "-p", db_port, "-U", db_user, "-d", db_name,
-             "-f", migration_sql, "--quiet", "-v", "ON_ERROR_STOP=0"],
+            [
+                "psql",
+                "-h",
+                db_host,
+                "-p",
+                db_port,
+                "-U",
+                db_user,
+                "-d",
+                db_name,
+                "-f",
+                migration_sql,
+                "--quiet",
+                "-v",
+                "ON_ERROR_STOP=0",
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -626,8 +696,10 @@ def _ensure_market_analysis_tables(env: dict) -> None:
         if result.returncode == 0:
             logger.info("市场分析表结构自检完成")
         else:
-            logger.warning("市场分析建表有警告（可忽略）: %s",
-                           result.stderr[:200] if result.stderr else "")
+            logger.warning(
+                "市场分析建表有警告（可忽略）: %s",
+                result.stderr[:200] if result.stderr else "",
+            )
     except Exception as e:  # noqa: BLE001
         logger.warning("市场分析建表失败（不影响启动）: %s", e)
 
@@ -662,12 +734,20 @@ def _ensure_database_schema_python():
     db_port = os.getenv("DB_PORT", "5432")
     db_name = os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "quantmind"))
     db_user = os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind"))
-    db_password = os.getenv("DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "quantmind2026"))
+    db_password = os.getenv(
+        "DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "quantmind2026")
+    )
 
     try:
         import psycopg2
-        conn = psycopg2.connect(host=db_host, port=db_port, dbname=db_name,
-                                user=db_user, password=db_password)
+
+        conn = psycopg2.connect(
+            host=db_host,
+            port=db_port,
+            dbname=db_name,
+            user=db_user,
+            password=db_password,
+        )
         conn.autocommit = True
         with conn.cursor() as cur:
             _exec_sql_python(cur, init_sql, "数据库表结构自检完成 (Python psycopg2)")
@@ -676,7 +756,9 @@ def _ensure_database_schema_python():
                 "services/api/market_analysis/migrations/001_create_market_analysis.sql"
             )
             if os.path.isfile(market_sql):
-                _exec_sql_python(cur, market_sql, "市场分析表结构自检完成 (Python psycopg2)")
+                _exec_sql_python(
+                    cur, market_sql, "市场分析表结构自检完成 (Python psycopg2)"
+                )
             # 增量升级（system_events、news title 等，幂等）
             for _up in _upgrade_sql_files():
                 _exec_sql_python(
@@ -711,7 +793,10 @@ def _ensure_admin_identity() -> None:
                 report = asyncio.run(fix_admin_user_id())
                 logger.info("admin 身份自愈完成: %s", report.get("updated"))
             except Exception as exc:  # noqa: BLE001
-                logger.warning("admin 身份自愈失败（可手动跑 scripts/fix_admin_user_id.py）: %s", exc)
+                logger.warning(
+                    "admin 身份自愈失败（可手动跑 scripts/fix_admin_user_id.py）: %s",
+                    exc,
+                )
 
         threading.Thread(target=_run, name="admin-identity-heal", daemon=True).start()
     except Exception as e:  # noqa: BLE001
@@ -783,6 +868,13 @@ def _ensure_stock_pool() -> None:
 
 def main():
     """主入口"""
+    # ── T7-3 部署真相打点（H10）：第一行日志 = 本进程实际在跑哪版代码 ──
+    # 容器/服务器均为 bind mount 活代码（compose 挂 ./.git:ro）：镜像 commit 与
+    # version.json 声明都可能与运行工作树脱节，这里如实落 commit/branch/脏标记，
+    # 并对照声明暴露分叉。先于一切启动逻辑——即使后续初始化失败，日志里也有身份。
+    from backend.shared.version import log_deploy_truth
+
+    log_deploy_truth(logger)
     # 启动前确保数据库表结构完整
     _ensure_database_schema()
     # 启动期 admin 身份收口（legacy user_id 遗留自愈；后台线程，不阻塞启动）
@@ -801,7 +893,9 @@ def main():
     if service_mode == "all":
         run_all_services()
     elif service_mode in ("api", "engine", "trade", "stream"):
-        run_single_service(service_mode, ports[service_mode], workers_config[service_mode])
+        run_single_service(
+            service_mode, ports[service_mode], workers_config[service_mode]
+        )
     else:
         logger.error(f"Unknown SERVICE_MODE: {service_mode}")
         logger.info("Valid modes: all, api, engine, trade, stream")

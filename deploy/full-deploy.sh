@@ -538,7 +538,18 @@ build_and_start() {
     fi
     if $need_build; then
         log "重建 quantmind 镜像（$reason）；需 PyPI 访问，纯离线机请改用与代码匹配的新离线包"
-        QM_REQ_SHA="${want:-unknown}" docker compose build --pull=false quantmind \
+        # 部署真相戳（T7-3）：构建时刻的代码身份一并写进镜像 LABEL/戳文件。
+        local git_commit git_branch git_dirty
+        git_commit="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+        git_branch="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+        if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ]]; then
+            git_dirty=true
+        else
+            git_dirty=false
+        fi
+        QM_REQ_SHA="${want:-unknown}" QM_GIT_COMMIT="$git_commit" \
+            QM_GIT_BRANCH="$git_branch" QM_GIT_DIRTY="$git_dirty" \
+            docker compose build --pull=false quantmind \
             || die "quantmind 镜像重建失败（$reason）。离线环境请重新生成与代码匹配的镜像包后重试"
     fi
     docker compose up -d --pull never

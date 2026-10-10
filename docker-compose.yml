@@ -63,6 +63,11 @@ services:
         TORCH_DEVICE: ${TORCH_DEVICE:-skip}
         TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}
         QM_REQ_SHA: ${QM_REQ_SHA:-unknown}
+        # 部署真相戳（T7-3）：构建侧由 deploy/{update,full-deploy,deploy}.sh 注入
+        # 代码身份；写进镜像 LABEL（docker inspect 核对）与 /app/deploy_stamp.json。
+        QM_GIT_COMMIT: ${QM_GIT_COMMIT:-unknown}
+        QM_GIT_BRANCH: ${QM_GIT_BRANCH:-unknown}
+        QM_GIT_DIRTY: ${QM_GIT_DIRTY:-unknown}
         APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
     platform: linux/amd64
     # GPU 直通：宿主机已安装 nvidia-container-toolkit 时可开启
@@ -436,6 +441,11 @@ services:
       - ./logs:/app/logs
       # 后端代码 (外挂载解决热更新问题)
       - ./backend:/app/backend
+      # 部署真相探针（T7-3）：只读挂 .git，启动打点/状态端点在容器内直接
+      # rev-parse/status 出运行工作树的真实 commit 与脏标记（bind mount 活代码
+      # 下 version.json 只是部署时声明，热修/并行改动会让二者脱节）。
+      # 无 .git 的部署（源码包）Docker 会建空目录，探针如实回退 unknown，不拦启动。
+      - ./.git:/app/.git:ro
       # 内置文档（供管理后台「打开部署指南」等渲染 /static/docs 使用）
       - ./docs:/app/docs:ro
       # 出厂配置（只读）。测试跑在容器里，而「公开默认密钥」护栏要扫的就是这两份

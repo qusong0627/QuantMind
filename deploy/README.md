@@ -59,6 +59,20 @@ QM_REQ_SHA=$(bash deploy/req-fingerprint.sh) docker compose build quantmind
 docker save quantmind-oss:latest <其余镜像...> | zstd -T0 -o images.tar.zst
 ```
 
+**部署真相戳（T7-3）**：`deploy/{update,full-deploy,deploy}.sh` 构建时会自动注入
+`QM_GIT_COMMIT/QM_GIT_BRANCH/QM_GIT_DIRTY`，写入镜像 Label（`docker inspect` 可核对
+`qm.git.*`、`qm.torch.device`）与 `/app/deploy_stamp.json`。手工构建建议同样传入
+（不传=unknown；容器启动日志与 `/api/v1/system/deploy-truth` 会如实报告身份，
+不伪造成某版）：
+
+```bash
+QM_REQ_SHA=$(bash deploy/req-fingerprint.sh) \
+QM_GIT_COMMIT=$(git rev-parse HEAD) \
+QM_GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD) \
+QM_GIT_DIRTY=$(test -n "$(git status --porcelain)" && echo true || echo false) \
+docker compose build quantmind
+```
+
 指纹只覆盖 `requirements.txt`、`requirements/{production,ai}.txt`、
 `docker/Dockerfile.oss` 与 `TORCH_DEVICE` 取值；**业务代码走 bind mount，
 纯代码更新不需要重新制作镜像包**。requirements/Dockerfile 变更后才需重打
