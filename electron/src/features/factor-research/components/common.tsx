@@ -224,6 +224,24 @@ export const ALL_TAGS = [
   '长期稳定型', '近期转强', '近期失效', '持续低效',
 ];
 
+/** 时效标签组（与 ENV_TAGS 构成两个筛选维度；顺序与 ALL_TAGS 的尾部一致） */
+export const TIME_TAGS = ['长期稳定型', '近期转强', '近期失效', '持续低效'];
+
+/**
+ * 标签筛选语义（排行榜与左侧目录**同一份实现**，两边不许分叉）：
+ * 组内 OR、组间 AND —— 选「牛市进攻型 + 近期转强」要的是同时满足两者的因子，
+ * 而不是两个集合的并集（并集在几百个因子里基本等于没筛）。
+ * 只点一个标签 = 纯按该标签筛，这就是「标签单个筛选」。
+ */
+export function matchTagFilter(envTag: string, timeTag: string, filter: string[]): boolean {
+  if (!filter.length) return true;
+  const envSel = filter.filter((t) => ENV_TAGS.includes(t));
+  const timeSel = filter.filter((t) => TIME_TAGS.includes(t));
+  const envOk = envSel.length === 0 || envSel.includes(envTag);
+  const timeOk = timeSel.length === 0 || timeSel.includes(timeTag);
+  return envOk && timeOk;
+}
+
 /** 卡片壳 */
 export const Card: React.FC<{ title: string; extra?: React.ReactNode; children: React.ReactNode; className?: string }> = ({
   title,

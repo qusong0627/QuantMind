@@ -571,6 +571,7 @@ const FactorResearchPage: React.FC = () => {
                 tagFilter={tagFilter}
                 categoryFilter={categoryFilter}
                 onClearCategoryFilter={() => setCategoryFilter(null)}
+                onClearTagFilter={() => setTagFilter([])}
                 n={lbN}
                 onNChange={setLbN}
                 onToggle={toggleSelected}

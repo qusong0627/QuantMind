@@ -10,7 +10,7 @@
 import React, { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, LayoutList, ListTree, Loader2, Search } from 'lucide-react';
 import type { CategoryFilter, FactorMeta, LeaderboardRow } from '../types/factorResearch';
-import { fmtNum, TagChip } from './common';
+import { fmtNum, matchTagFilter, TagChip } from './common';
 
 interface Props {
   factors: FactorMeta[];
@@ -48,9 +48,12 @@ export const CatalogSidebar: React.FC<Props> = ({
     return factors.filter((f) => {
       if (q && !`${f.code} ${f.name_cn} ${f.l2}`.toLowerCase().includes(q)) return false;
       if (tagFilter.length) {
+        // 与排行榜同一 matchTagFilter（组内 OR / 组间 AND）——两边分叉会让左侧目录
+        // 仍列出右侧已滤掉的因子，点进去「查无此人」。
         const row = rowsByCode.get(f.code);
-        const tags = row ? [row.env_tag, row.time_tag] : [f.env_tag, f.time_tag];
-        if (!tags.some((t) => tagFilter.includes(t))) return false;
+        const envTag = row ? row.env_tag : f.env_tag;
+        const timeTag = row ? row.time_tag : f.time_tag;
+        if (!matchTagFilter(envTag, timeTag, tagFilter)) return false;
       }
       return true;
     });

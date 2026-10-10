@@ -139,3 +139,53 @@ describe('CatalogSidebar：分类点击与视图模式', () => {
     expect(screen.getByText('无匹配因子')).toBeTruthy();
   });
 });
+
+/**
+ * 标签筛选语义必须与排行榜一致（同一 matchTagFilter）：组内 OR、组间 AND。
+ * 两边不一致 = 左侧目录还列着右侧榜单已经滤掉的因子，用户点进去会「查无此人」。
+ */
+describe('CatalogSidebar：标签筛选与排行榜同语义', () => {
+  const TAGGED_FACTORS: FactorMeta[] = [
+    meta({ code: 'tA', name_cn: '因子TA' }),
+    meta({ code: 'tB', name_cn: '因子TB' }),
+    meta({ code: 'tC', name_cn: '因子TC' }),
+  ];
+  const TAGGED_ROWS = [
+    { ...lbRow('tA', 0.9), env_tag: '牛市进攻型', time_tag: '近期转强' },
+    { ...lbRow('tB', 0.5), env_tag: '牛市进攻型', time_tag: '长期稳定型' },
+    { ...lbRow('tC', 0.1), env_tag: '熊市防御型', time_tag: '近期转强' },
+  ] as LeaderboardRow[];
+
+  function renderTagged(tagFilter: string[]) {
+    render(
+      <CatalogSidebar
+        factors={TAGGED_FACTORS}
+        l1Order={['大类甲']}
+        rowsByCode={new Map(TAGGED_ROWS.map((r) => [r.code, r]))}
+        selected={[]}
+        activeCode={null}
+        tagFilter={tagFilter}
+        categoryFilter={null}
+        onSelectCategory={vi.fn()}
+        onToggle={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+  }
+
+  test('组间 AND：环境 + 时效同时满足的因子才留下', () => {
+    renderTagged(['牛市进攻型', '近期转强']);
+
+    expect(screen.getByText('因子TA')).toBeTruthy();
+    expect(screen.queryByText('因子TB')).toBeNull(); // 环境匹配、时效不匹配
+    expect(screen.queryByText('因子TC')).toBeNull(); // 时效匹配、环境不匹配
+  });
+
+  test('组内 OR：同组两个标签取并集', () => {
+    renderTagged(['牛市进攻型', '熊市防御型']);
+
+    expect(screen.getByText('因子TA')).toBeTruthy();
+    expect(screen.getByText('因子TB')).toBeTruthy();
+    expect(screen.getByText('因子TC')).toBeTruthy();
+  });
+});

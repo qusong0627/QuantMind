@@ -2,13 +2,29 @@
  * 因子研究 —— 排行榜页签：区间内全列排序（综合分 = 0.5×有效性 + 0.5×业绩）、
  * 双标签展示与筛选、勾选带入对比 / 合成。
  *
+ * 2026-10-10 筛选能力整改（用户：几百个因子「不知道怎么挑」）：
+ * - **列头漏斗**：每列可筛（数值区间 / 文本 / 下拉），阈值按显示单位输入
+ *   （年化填 15 = 15%）；回撤按幅度、RankIC 可切「按绝对值」；
+ * - **标签单个筛选**：点一个标签就只看它；组内 OR、组间 AND（见 common.matchTagFilter），
+ *   行内标签芯片也可直接点；
+ * - **筛选栏**：搜索（名/代码）+ 命中计数 + 一键清除，替代原先「只能靠目录分类」的窄路径。
+ *
  * 分类限定：左侧目录点 L1/L2 后，这里只排那一类（榜单内的名次/综合分本就是
  * 全库截面口径，分类只是过滤视图）；顶部徽章可一键清除。
  */
 import React, { useMemo, useState } from 'react';
-import { ArrowRightLeft, CheckSquare, Layers, Loader2, PackagePlus, Square, TrendingUp, X } from 'lucide-react';
+import { ArrowRightLeft, CheckSquare, Filter, Layers, Loader2, PackagePlus, Search, Square, TrendingUp, X } from 'lucide-react';
 import type { CategoryFilter, LeaderboardRow } from '../types/factorResearch';
-import { ALL_TAGS, Card, fmtNum, fmtPct, TagChip } from './common';
+import { Card, ENV_TAGS, TIME_TAGS, TagChip, fmtNum, fmtPct } from './common';
+import {
+  COL_FILTERS,
+  EMPTY_LEADERBOARD_FILTERS,
+  applyLeaderboardFilters,
+  countActiveFilters,
+} from './leaderboardFilters';
+import type { LeaderboardFilters } from './leaderboardFilters';
+import { ColumnFilterPopover } from './ColumnFilterPopover';
+import type { ColFilterValue } from './ColumnFilterPopover';
 
 interface Props {
   rows: LeaderboardRow[];
@@ -23,6 +39,8 @@ interface Props {
   /** 左侧目录选中的分类限定（null=全部） */
   categoryFilter: CategoryFilter | null;
   onClearCategoryFilter: () => void;
+  /** 清除全部标签筛选（页面持有 tagFilter，组件只发请求） */
+  onClearTagFilter?: () => void;
   onSendCompare: () => void;
   onSendCompose: () => void;
   onOpenSingle: (code: string) => void;
@@ -58,24 +76,40 @@ const COLS: Col[] = [
   { key: 'median_mv_yi', label: '中位市值(亿)', width: 'w-20', align: 'right', fmt: (v) => fmtNum(v as number, 0) },
 ];
 
+/** 列 key → 人话标签（浮层标题用；mv_style / industry 不在 COLS 里） */
+const LABELS: Record<string, string> = {
+  ...Object.fromEntries(COLS.map((c) => [String(c.key), c.label])),
+  mv_style: '市值风格',
+  industry: '前三行业',
+};
+
+/** 标签开关（组内 OR / 组间 AND 由 common.matchTagFilter 定义）；count = 当前其他条件下命中数 */
+const TagToggle: React.FC<{ tag: string; count: number; on: boolean; onClick: () => void }> = ({ tag, count, on, onClick }) => (
+  <button
+    onClick={onClick}
+    aria-pressed={on}
+    title={on ? `取消筛选：${tag}` : `只看「${tag}」的因子（当前其他条件下命中 ${count} 个）`}
+    className={`inline-flex items-center gap-0.5 rounded-full transition-all ${
+      on ? 'ring-2 ring-indigo-300' : 'opacity-75 hover:opacity-100'
+    }`}
+  >
+    <TagChip tag={tag} small />
+    <span className={`font-mono text-[9px] ${on ? 'text-indigo-500 font-bold' : 'text-slate-400'}`}>{count}</span>
+  </button>
+);
+
 export const LeaderboardTab: React.FC<Props> = ({
   rows, loading, error, selected, tagFilter, n, onNChange, onToggle, onToggleTag,
-  categoryFilter, onClearCategoryFilter,
+  categoryFilter, onClearCategoryFilter, onClearTagFilter,
   onSendCompare, onSendCompose, onOpenSingle, meta, onRegisterToTraining,
 }) => {
   const [sortKey, setSortKey] = useState<string>('composite');
   const [asc, setAsc] = useState(false);
+  const [filters, setFilters] = useState<LeaderboardFilters>(EMPTY_LEADERBOARD_FILTERS);
+  const [filterOpen, setFilterOpen] = useState<{ key: string; x: number; y: number } | null>(null);
 
   const view = useMemo(() => {
-    let filtered = rows;
-    if (categoryFilter) {
-      filtered = filtered.filter(
-        (r) => r.l1 === categoryFilter.l1 && (!categoryFilter.l2 || r.l2 === categoryFilter.l2),
-      );
-    }
-    if (tagFilter.length) {
-      filtered = filtered.filter((r) => tagFilter.includes(r.env_tag) || tagFilter.includes(r.time_tag));
-    }
+    const filtered = applyLeaderboardFilters(rows, filters, tagFilter, categoryFilter);
     const sorted = [...filtered];
     sorted.sort((a, b) => {
       if (sortKey === 'name') {
@@ -88,7 +122,17 @@ export const LeaderboardTab: React.FC<Props> = ({
       return asc ? na - nb : nb - na;
     });
     return sorted;
-  }, [rows, sortKey, asc, tagFilter, categoryFilter]);
+  }, [rows, sortKey, asc, tagFilter, categoryFilter, filters]);
+
+  /** 每个标签的命中数：在「除标签外」的当前筛选下，该标签能捞到多少行 */
+  const tagCounts = useMemo(() => {
+    const base = applyLeaderboardFilters(rows, filters, [], categoryFilter);
+    const counts: Record<string, number> = {};
+    for (const t of [...ENV_TAGS, ...TIME_TAGS]) {
+      counts[t] = base.filter((r) => r.env_tag === t || r.time_tag === t).length;
+    }
+    return counts;
+  }, [rows, filters, categoryFilter]);
 
   const range = meta?.range as { start?: string; end?: string; n_months?: number } | undefined;
 
@@ -101,8 +145,91 @@ export const LeaderboardTab: React.FC<Props> = ({
     }
   };
 
+  const colActive = (key: string): boolean => {
+    const cfg = COL_FILTERS[key];
+    if (!cfg) return false;
+    if (cfg.kind === 'text') return (key === 'industry' ? filters.industry : filters.name).trim() !== '';
+    if (cfg.kind === 'select') return filters.mvStyle !== '';
+    const f = filters.numeric[key];
+    return !!f && (f.min !== undefined || f.max !== undefined);
+  };
+
+  const openFilter = (e: React.MouseEvent<HTMLButtonElement>, key: string) => {
+    e.stopPropagation();
+    if (filterOpen?.key === key) {
+      setFilterOpen(null);
+      return;
+    }
+    const r = e.currentTarget.getBoundingClientRect();
+    setFilterOpen({ key, x: r.left, y: r.bottom + 4 });
+  };
+
+  const valueFor = (key: string): ColFilterValue => {
+    const cfg = COL_FILTERS[key];
+    if (cfg.kind === 'text') return { kind: 'text', text: key === 'industry' ? filters.industry : filters.name };
+    if (cfg.kind === 'select') return { kind: 'select', value: filters.mvStyle };
+    return { kind: 'range', filter: filters.numeric[key] || {} };
+  };
+
+  const applyValue = (prev: LeaderboardFilters, key: string, v: ColFilterValue): LeaderboardFilters => {
+    if (v.kind === 'text') {
+      return key === 'industry' ? { ...prev, industry: v.text } : { ...prev, name: v.text };
+    }
+    if (v.kind === 'select') return { ...prev, mvStyle: v.value };
+    return { ...prev, numeric: { ...prev.numeric, [key]: v.filter } };
+  };
+
+  const activeCount = countActiveFilters(filters) + tagFilter.length + (categoryFilter ? 1 : 0);
+  const clearAll = () => {
+    setFilters(EMPTY_LEADERBOARD_FILTERS);
+    setFilterOpen(null);
+    if (tagFilter.length && onClearTagFilter) onClearTagFilter();
+    if (categoryFilter) onClearCategoryFilter();
+  };
+
+  const tabFiltered = countActiveFilters(filters) > 0 || tagFilter.length > 0;
+  const emptyHint =
+    categoryFilter && !tabFiltered
+      ? '该分类下没有因子——点上方「分类」徽章清除限定'
+      : '没有符合当前筛选的因子——点「清除筛选」回到全量';
+
+  /** 表头单元格：点文字排序 + 漏斗筛选（无配置的列只有排序） */
+  const headCell = (key: string, width: string, align: 'left' | 'right', sortable = true) => {
+    const cfg = COL_FILTERS[key];
+    const active = colActive(key);
+    return (
+      <th key={key} className={`py-0.5 ${width} ${align === 'right' ? 'text-right' : 'text-left'}`}>
+        <div className={`flex items-center gap-0.5 ${align === 'right' ? 'justify-end' : ''}`}>
+          {sortable ? (
+            <button onClick={() => clickSort(key)} title="点击排序" className="hover:text-slate-600">
+              {LABELS[key]}
+              {sortKey === key ? (
+                <span className="ml-0.5 text-indigo-500">{asc ? '↑' : '↓'}</span>
+              ) : (
+                <span className="ml-0.5 text-slate-200">↕</span>
+              )}
+            </button>
+          ) : (
+            <span>{LABELS[key]}</span>
+          )}
+          {cfg && (
+            <button
+              data-lb-funnel
+              onClick={(e) => openFilter(e, key)}
+              aria-label={`筛选 ${LABELS[key]}`}
+              title={`筛选「${LABELS[key]}」`}
+              className={active ? 'text-indigo-500' : 'text-slate-300 hover:text-indigo-400'}
+            >
+              <Filter className="w-2.5 h-2.5" />
+            </button>
+          )}
+        </div>
+      </th>
+    );
+  };
+
   return (
-    <div className="flex-1 min-h-0 flex flex-col gap-2">
+    <div className="flex-1 min-h-0 flex flex-col gap-1.5">
       {/* 工具条 */}
       <div className="shrink-0 flex items-center gap-2 flex-wrap">
         <span className="flex items-center gap-1">
@@ -161,6 +288,53 @@ export const LeaderboardTab: React.FC<Props> = ({
         )}
       </div>
 
+      {/* 筛选栏：搜索 + 分类徽章 + 标签（环境/时效两组）+ 计数与清除 */}
+      <div className="shrink-0 rounded-xl border border-slate-200/80 bg-white px-2.5 py-1.5 flex items-center gap-2 flex-wrap">
+        <div className="relative shrink-0">
+          <Search className="w-3 h-3 text-slate-400 absolute left-2 top-1/2 -translate-y-1/2" />
+          <input
+            data-testid="lb-search"
+            value={filters.name}
+            onChange={(e) => setFilters((prev) => ({ ...prev, name: e.target.value }))}
+            placeholder="搜索因子名 / 代码…"
+            className="w-40 rounded-lg border border-slate-200 bg-slate-50/70 pl-7 pr-2 py-0.5 text-[11px] outline-none focus:border-indigo-300 focus:bg-white"
+          />
+        </div>
+        {categoryFilter && (
+          <button
+            onClick={onClearCategoryFilter}
+            title="清除分类限定（回到全部因子）"
+            className="flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-600 hover:bg-blue-100"
+          >
+            分类：{categoryFilter.l1}
+            {categoryFilter.l2 ? ` / ${categoryFilter.l2}` : ''}
+            <X className="w-2.5 h-2.5" />
+          </button>
+        )}
+        <span className="h-3.5 w-px bg-slate-200" />
+        <span className="text-[10px] font-bold text-slate-400">环境</span>
+        {ENV_TAGS.map((t) => (
+          <TagToggle key={t} tag={t} count={tagCounts[t] ?? 0} on={tagFilter.includes(t)} onClick={() => onToggleTag(t)} />
+        ))}
+        <span className="h-3.5 w-px bg-slate-200" />
+        <span className="text-[10px] font-bold text-slate-400">时效</span>
+        {TIME_TAGS.map((t) => (
+          <TagToggle key={t} tag={t} count={tagCounts[t] ?? 0} on={tagFilter.includes(t)} onClick={() => onToggleTag(t)} />
+        ))}
+        <div className="flex-1" />
+        <span className="font-mono text-[10px] text-slate-500">{`命中 ${view.length} / ${rows.length}`}</span>
+        {activeCount > 0 && (
+          <button
+            data-testid="lb-clear-filters"
+            onClick={clearAll}
+            className="flex items-center gap-0.5 rounded-full border border-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-500 hover:border-indigo-200 hover:text-indigo-600"
+          >
+            <X className="w-2.5 h-2.5" />
+            清除筛选（{activeCount}）
+          </button>
+        )}
+      </div>
+
       {/* 说明 */}
       <details className="shrink-0 rounded-xl border border-slate-200/80 bg-white px-3 py-1.5 text-[10px] text-slate-500">
         <summary className="cursor-pointer font-bold text-slate-600 select-none">
@@ -183,9 +357,13 @@ export const LeaderboardTab: React.FC<Props> = ({
             不并入、不可互比。
           </p>
           <p>
-            点左侧目录的分类名（L1/L2）= 榜单只看该类，再点一次或点顶部「分类」徽章取消；
-            点击列头可改排序（如点「最大回撤」看最抗跌、点「年化」看最赚钱）；勾选因子后可一键带入对比 /
-            合成
+            <b>筛选</b>：点列头漏斗按列筛（阈值按显示单位填——年化填 15 表示 15%；回撤按幅度；
+            RankIC 可勾「按绝对值」找强因子，正反不限）；上方搜索框 = 因子名/代码包含。
+            <b>标签</b>：点一个只看它；同组多选取并集（环境内 / 时效内），两组同时选取得交集。
+            点行内标签、市值风格芯片同样能直接筛。
+            <b>排序</b>：点列头文字（如「最大回撤」看最抗跌、「年化」看最赚钱）。
+            点左侧目录的分类名（L1/L2）= 只看该类，再点一次或点「分类」徽章取消；
+            勾选因子后一键带入对比 / 合成
             {/* 只在实际有入口时提这句：经典因子库不提供注册（后端会逐条跳过），
                 写死这句话会把用户指向一个刷不出来的「刷新字段」流程。 */}
             {onRegisterToTraining && '；管理员还可「注册到训练目录」，把勾选的因子写进训练特征库的草稿'}。
@@ -193,35 +371,9 @@ export const LeaderboardTab: React.FC<Props> = ({
         </div>
       </details>
 
-      {/* 分类限定 + 标签筛选 */}
-      <div className="shrink-0 flex items-center gap-1 flex-wrap">
-        {categoryFilter && (
-          <button
-            onClick={onClearCategoryFilter}
-            title="清除分类限定（回到全部因子）"
-            className="flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-600 hover:bg-blue-100"
-          >
-            分类：{categoryFilter.l1}
-            {categoryFilter.l2 ? ` / ${categoryFilter.l2}` : ''}
-            <X className="w-2.5 h-2.5" />
-          </button>
-        )}
-        <span className="text-[10px] font-bold text-slate-400 mr-0.5">标签筛选</span>
-        {ALL_TAGS.map((t) => {
-          const on = tagFilter.includes(t);
-          return (
-            <button key={t} onClick={() => onToggleTag(t)} className="transition-transform hover:scale-105">
-              <span className={on ? 'ring-1 ring-indigo-400 rounded-full inline-block' : 'opacity-70'}>
-                <TagChip tag={t} />
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
       {/* 表格 */}
       <Card
-        title={`因子排行榜（${view.length}${categoryFilter ? ` / 全部 ${rows.length}` : ''}）`}
+        title={`因子排行榜（${view.length}${activeCount > 0 ? ` / 全部 ${rows.length}` : ''}）`}
         className="flex-1"
         extra={
           loading && rows.length ? (
@@ -229,7 +381,7 @@ export const LeaderboardTab: React.FC<Props> = ({
               <Loader2 className="w-3 h-3 animate-spin" /> 重算中…
             </span>
           ) : (
-            <span className="text-[10px] text-slate-400">点击行看单因子 · 点列头排序</span>
+            <span className="text-[10px] text-slate-400">点击行看单因子 · 点列头排序 · 漏斗按列筛选</span>
           )
         }
       >
@@ -246,35 +398,25 @@ export const LeaderboardTab: React.FC<Props> = ({
             </div>
           </div>
         ) : (
-          <div className={`h-full overflow-y-auto custom-scrollbar ${loading ? 'opacity-60 pointer-events-none' : ''}`}>
+          <div
+            className={`h-full overflow-y-auto custom-scrollbar ${loading ? 'opacity-60 pointer-events-none' : ''}`}
+            onScroll={() => filterOpen && setFilterOpen(null)}
+          >
             <table className="w-full text-[11px]">
-              <thead className="sticky top-0 bg-white z-10">
+              <thead className="sticky top-0 z-10 bg-white/95 backdrop-blur-sm shadow-[0_1px_0_0_#e2e8f0]">
                 <tr className="text-slate-400 font-bold">
                   <th className="text-left py-1.5 pl-1 w-8"></th>
-                  {COLS.map((c) => (
-                    <th
-                      key={String(c.key)}
-                      onClick={() => clickSort(String(c.key))}
-                      className={`py-1.5 cursor-pointer select-none hover:text-slate-600 ${c.width || ''} ${
-                        c.align === 'right' ? 'text-right' : 'text-left'
-                      }`}
-                    >
-                      {c.label}
-                      {sortKey === String(c.key) && <span className="ml-0.5 text-indigo-500">{asc ? '↑' : '↓'}</span>}
-                    </th>
-                  ))}
-                  <th className="py-1.5 text-right w-14">市值风格</th>
+                  {COLS.map((c) => headCell(String(c.key), c.width || '', c.align || 'left'))}
+                  {headCell('mv_style', 'w-16', 'right', false)}
                   <th className="text-left py-1.5 pl-1">标签</th>
-                  <th className="text-left py-1.5 pl-1">前三行业（最新选股）</th>
+                  {headCell('industry', '', 'left', false)}
                 </tr>
               </thead>
               <tbody>
                 {view.length === 0 && (
                   <tr>
-                    <td colSpan={16} className="py-4 text-center text-[11px] text-slate-400">
-                      {categoryFilter
-                        ? '该分类下没有因子——点上方「分类」徽章清除限定'
-                        : '没有符合当前筛选的因子'}
+                    <td colSpan={16} className="py-6 text-center text-[11px] text-slate-400">
+                      {emptyHint}
                     </td>
                   </tr>
                 )}
@@ -283,13 +425,15 @@ export const LeaderboardTab: React.FC<Props> = ({
                   return (
                     <tr
                       key={r.code}
-                      className={`border-t border-slate-100 hover:bg-slate-50/70 cursor-pointer ${isSel ? 'bg-blue-50/50' : ''}`}
+                      className={`border-t border-slate-100 cursor-pointer transition-colors ${
+                        isSel ? 'bg-indigo-50/60' : 'even:bg-slate-50/40 hover:bg-slate-100/50'
+                      }`}
                       onClick={() => onOpenSingle(r.code)}
                     >
                       <td className="py-1.5 pl-1" onClick={(e) => { e.stopPropagation(); onToggle(r.code); }}>
                         {isSel ? <CheckSquare className="w-3.5 h-3.5 text-blue-600" /> : <Square className="w-3.5 h-3.5 text-slate-300" />}
                       </td>
-                      <td className="py-1.5 font-mono text-slate-400">{r.rank}</td>
+                      <td className={`py-1.5 font-mono ${r.rank <= 3 ? 'text-amber-600 font-bold' : 'text-slate-400'}`}>{r.rank}</td>
                       <td className="py-1.5 w-[13rem] max-w-[13rem]">
                         {/* flex-wrap：正常一行放得下；带徽章的少数行让徽章折到第二行，
                             而不是把徽章裁掉（它们是数据质量告警，被裁等于没告警）。 */}
@@ -343,17 +487,44 @@ export const LeaderboardTab: React.FC<Props> = ({
                       <td className="py-1.5 text-right font-mono text-slate-600">{fmtNum(r.median_mv_yi, 0)}</td>
                       <td className="py-1.5 text-right">
                         {r.mv_style ? (
-                          <span className="rounded-full bg-slate-50 border border-slate-200 px-1.5 py-[1px] text-[9px] font-bold text-slate-500">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setFilters((prev) => ({ ...prev, mvStyle: prev.mvStyle === r.mv_style ? '' : (r.mv_style as string) }));
+                            }}
+                            title={filters.mvStyle === r.mv_style ? '取消该市值风格筛选' : `只看「${r.mv_style}」的因子`}
+                            className={`rounded-full border px-1.5 py-[1px] text-[9px] font-bold transition-colors ${
+                              filters.mvStyle === r.mv_style
+                                ? 'border-indigo-200 bg-indigo-50 text-indigo-600'
+                                : 'border-slate-200 bg-slate-50 text-slate-500 hover:border-indigo-200 hover:text-indigo-500'
+                            }`}
+                          >
                             {r.mv_style}
-                          </span>
+                          </button>
                         ) : (
                           <span className="text-slate-300">—</span>
                         )}
                       </td>
                       <td className="py-1.5 pl-1">
                         <span className="flex items-center gap-1">
-                          <TagChip tag={r.env_tag} small />
-                          <TagChip tag={r.time_tag} small />
+                          {r.env_tag && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onToggleTag(r.env_tag); }}
+                              title={tagFilter.includes(r.env_tag) ? `取消筛选：${r.env_tag}` : `只看「${r.env_tag}」的因子`}
+                              className="transition-transform hover:scale-105"
+                            >
+                              <TagChip tag={r.env_tag} small />
+                            </button>
+                          )}
+                          {r.time_tag && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onToggleTag(r.time_tag); }}
+                              title={tagFilter.includes(r.time_tag) ? `取消筛选：${r.time_tag}` : `只看「${r.time_tag}」的因子`}
+                              className="transition-transform hover:scale-105"
+                            >
+                              <TagChip tag={r.time_tag} small />
+                            </button>
+                          )}
                         </span>
                       </td>
                       <td className="py-1.5 pl-1 text-[10px] text-slate-500 whitespace-nowrap">
@@ -371,6 +542,18 @@ export const LeaderboardTab: React.FC<Props> = ({
         <TrendingUp className="w-3 h-3" />
         口径：全 A 非 ST/退市池，月末调仓 Top-N 等权（持仓数可切换），双边成本 0.2%（按换手计），前复权价 · 与 factor-lib-demo 一致
       </div>
+
+      {/* 列筛选浮层（fixed 定位，逃出表格滚动容器的裁剪） */}
+      {filterOpen && COL_FILTERS[filterOpen.key] && (
+        <ColumnFilterPopover
+          label={LABELS[filterOpen.key]}
+          config={COL_FILTERS[filterOpen.key]}
+          value={valueFor(filterOpen.key)}
+          anchor={filterOpen}
+          onChange={(v) => setFilters((prev) => applyValue(prev, filterOpen.key, v))}
+          onClose={() => setFilterOpen(null)}
+        />
+      )}
     </div>
   );
 };

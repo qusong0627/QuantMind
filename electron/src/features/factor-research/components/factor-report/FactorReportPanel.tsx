@@ -433,11 +433,12 @@ export const FactorReportPanel: React.FC<Props> = ({ initialDataset, initialCode
 
       {/* 主体：左因子榜 + 右详情 */}
       <div className="flex flex-1 min-h-0">
-        <aside className="w-[280px] shrink-0 border-r border-gray-200 bg-white flex flex-col min-h-0">
+        <aside className="w-[300px] shrink-0 border-r border-gray-200 bg-white flex flex-col min-h-0">
           <FactorRankList
             factors={factors}
             selected={selected}
             onSelect={setSelected}
+            dataset={dataset}
             loading={listLoading}
           />
         </aside>
