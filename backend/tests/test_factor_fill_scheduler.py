@@ -113,6 +113,56 @@ def test_normalize_filters_unknown_dataset_names() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 到点判据（审计 H4）：迟到仍派发（当日不重复）、未到不抢跑
+# ---------------------------------------------------------------------------
+
+
+def _freeze_at(monkeypatch: pytest.MonkeyPatch, cfg_time: str, at: datetime) -> None:
+    class _At(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at
+
+    monkeypatch.setattr(sched, "datetime", _At)
+    monkeypatch.setattr(
+        sched,
+        "get_schedule",
+        lambda _m: {"enabled": True, "time": cfg_time, "datasets": []},
+    )
+
+
+def test_tick_late_by_minutes_still_dispatches_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, dispatch_env: dict[str, Any]
+) -> None:
+    """H4 核心回归：worker 忙过 60s 迟到 5 分钟仍派发，「落后才建」才有机会自愈；
+    当日日键仍锁住「至多一次」。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"HK": "QuantHK 港股"})
+    _freeze_at(monkeypatch, "04:30", datetime(2026, 10, 10, 4, 35, 20))
+
+    first = sched.dispatch_due_factor_fills()
+    second = sched.dispatch_due_factor_fills()
+
+    assert first["dispatched"] == ["HK"], "迟到 5 分钟必须仍派发"
+    assert second["dispatched"] == [], "补跑仍受当日日键约束，不得重复"
+    assert fake.sent == ["HK"]
+
+
+def test_before_the_configured_time_still_waits(
+    monkeypatch: pytest.MonkeyPatch, dispatch_env: dict[str, Any]
+) -> None:
+    """反向守卫：未到点不得抢跑。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"HK": "QuantHK 港股"})
+    _freeze_at(monkeypatch, "04:30", datetime(2026, 10, 10, 4, 25, 0))
+
+    assert sched.dispatch_due_factor_fills()["dispatched"] == []
+    assert fake.sent == []
+
+
+# ---------------------------------------------------------------------------
 # run_factor_fill：「落后才建」判据
 # ---------------------------------------------------------------------------
 

@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from backend.services.engine.tasks.schedule_gate import not_due_yet
+
 logger = logging.getLogger(__name__)
 
 _SCHEDULE_KEY = "quantmind:factor_fill_schedule:{market}"
@@ -283,6 +285,10 @@ def dispatch_due_factor_fills() -> dict[str, Any]:
     之后写**。先写标记再派发，一次 broker 抖动就会留下「今天跑过了」的假记录，
     当天永不重试——因子集静默停在昨天的正是这类失效形态（2026-09-12~10-07
     事故的历史形态）。
+
+    到点判据 = ``now >= 配置时刻``（``schedule_gate.not_due_yet``；审计 H4）：
+    旧「精确分钟相等」判据下 worker 忙过 60s 就整天静默跳发，「落后才建」的
+    自愈能力再强也没有机会启动。迟到仍是当日首次到点，日键保证至多一次。
     """
     from backend.services.engine.qlib_app.celery_config import celery_app
 
@@ -295,7 +301,7 @@ def dispatch_due_factor_fills() -> dict[str, Any]:
         cfg = get_schedule(market)
         if not cfg.get("enabled"):
             continue
-        if cfg.get("time") != now_hm:
+        if not_due_yet(now, str(cfg.get("time") or "")):
             continue
         if _last_run_today(market, date_str):
             continue

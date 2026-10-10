@@ -17,6 +17,8 @@ import os
 from datetime import datetime
 from typing import Any
 
+from backend.services.engine.tasks.schedule_gate import not_due_yet
+
 logger = logging.getLogger(__name__)
 
 _SCHEDULE_KEY = "quantmind:sync_schedule:{market}"
@@ -288,6 +290,10 @@ def dispatch_due_syncs() -> dict[str, Any]:
 
     反过来的代价是：派发成功但进程随后崩溃会丢掉标记，下一分钟重复派发一次。
     各市场同步都是增量落分区，重复执行的代价远小于整天不执行。
+
+    到点判据 = ``now >= 配置时刻``（``schedule_gate.not_due_yet``；审计 H4）：
+    旧「精确分钟相等」判据下 worker 忙过 60s 就整天静默跳发，上面这句「下一
+    分钟重复派发」根本不成立。迟到分钟/小时仍是当日首次到点，日键保证至多一次。
     """
     from backend.services.engine.qlib_app.celery_config import celery_app
 
@@ -300,7 +306,7 @@ def dispatch_due_syncs() -> dict[str, Any]:
         cfg = get_schedule(market)
         if not cfg.get("enabled"):
             continue
-        if cfg.get("time") != now_hm:
+        if not_due_yet(now, str(cfg.get("time") or "")):
             continue
         if _last_run_today(market, date_str):
             continue

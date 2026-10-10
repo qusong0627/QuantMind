@@ -113,3 +113,84 @@ def test_one_market_failure_does_not_block_others(
 
     assert result["dispatched"] == ["US"]
     assert {market for market, _date in env["marks"]} == {"US"}, "失败的市场不得被标记"
+
+
+# ---------------------------------------------------------------------------
+# 到点判据（审计 H4）：迟到仍派发、未到不抢跑、日键仍锁当日一次
+# ---------------------------------------------------------------------------
+
+
+class _FrozenDatetime(datetime):
+    """固定时钟替身：dispatch 内部的 ``datetime.now()`` 走这里。"""
+
+    fixed = datetime(2026, 10, 10, 4, 35, 20)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.fixed
+
+
+def _freeze_uniform_schedule(
+    monkeypatch: pytest.MonkeyPatch, cfg_time: str, at: datetime
+) -> None:
+    class _At(_FrozenDatetime):
+        fixed = at
+
+    monkeypatch.setattr(sched, "datetime", _At)
+    monkeypatch.setattr(
+        sched,
+        "get_schedule",
+        lambda _m: {
+            "enabled": True,
+            "time": cfg_time,
+            "days": 5,
+            "datasets": [],
+            "with_qlib": False,
+        },
+    )
+
+
+def test_tick_late_by_minutes_still_dispatches_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """H4 核心回归：worker 忙过 60s，beat 迟到 5 分钟仍要派发。
+
+    旧「精确分钟相等」判据下这一天整班静默跳发；修后迟到即补跑，
+    且当日日键仍锁住「至多一次」。
+    """
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"US": "QuantUS 美股"})
+    _freeze_uniform_schedule(monkeypatch, "04:30", datetime(2026, 10, 10, 4, 35, 20))
+
+    first = sched.dispatch_due_syncs()
+    second = sched.dispatch_due_syncs()
+
+    assert first["dispatched"] == ["US"], "迟到 5 分钟必须仍派发"
+    assert second["dispatched"] == [], "补跑仍受当日日键约束，不得重复"
+    assert fake.sent == ["US"]
+
+
+def test_missed_by_hours_catches_up_after_restart(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """重启补齐：过点数小时且当日无标记，仍是当日首次到点。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"US": "QuantUS 美股"})
+    _freeze_uniform_schedule(monkeypatch, "04:30", datetime(2026, 10, 10, 9, 10, 0))
+
+    assert sched.dispatch_due_syncs()["dispatched"] == ["US"]
+
+
+def test_before_the_configured_time_still_waits(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """反向守卫：`>=` 不是「随时都跑」——未到点不得抢跑。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"US": "QuantUS 美股"})
+    _freeze_uniform_schedule(monkeypatch, "04:30", datetime(2026, 10, 10, 4, 25, 0))
+
+    assert sched.dispatch_due_syncs()["dispatched"] == []
+    assert fake.sent == []
