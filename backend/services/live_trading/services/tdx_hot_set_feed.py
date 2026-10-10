@@ -47,16 +47,23 @@ BACKOFF_START_S = 30.0
 BACKOFF_MAX_S = 300.0
 
 # 运行状态（供 GET /tdx/quote-feed/status 的 hot_set 段读取）
+# 失败分账（审计 M4/M8）：errors = 三类失败之和，逐类计数供定位
+# （call_failed=桥调用抛错 / map_failed=快照映射失败 / write_failed=写键失败）。
 hot_set_feed_status: dict = {
     "enabled": False,
     "universe": 0,
     "cursor": 0,
     "written": 0,
     "errors": 0,
+    "call_failed": 0,
+    "map_failed": 0,
+    "write_failed": 0,
     "rate_limited": False,
     "backoff_s": 0.0,
+    "backoff_reason": None,
     "last_symbol": None,
     "last_cycle_s": None,
+    "last_cycle_stats": None,
     "last_feed_at": None,
     "last_error": None,
     "bridge_ok": None,
@@ -214,6 +221,43 @@ def map_snapshot_with_book(result: dict) -> dict | None:
     return snap
 
 
+def cycle_outcome(
+    cycle: dict, *, rate_limited: bool, prev_backoff: float
+) -> dict:
+    """整批结果 → 健康判定 + 退避（纯函数；审计 M4/M8 验收点）。
+
+    旧实现在批末无条件 ``bridge_ok=True``：桥面半死（60 只全抛错）或契约漂移
+    （全映射失败、零写入）时状态照标健康，监控全绿而 ``market:snapshot`` 已断流。
+    判定改为「**本批至少写入 1 只**才算健康」；整批零写入与限流同样进退避阶梯
+    （30s→300s 封顶），退避原因随 status 暴露（rate_limited / no_write）。
+    """
+    if rate_limited:
+        nxt = BACKOFF_START_S if prev_backoff <= 0 else min(BACKOFF_MAX_S, prev_backoff * 2)
+        return {
+            "bridge_ok": False,
+            "backoff": nxt,
+            "backoff_reason": "rate_limited",
+            "rate_limited": True,
+            "should_sleep_backoff": True,
+        }
+    if int(cycle.get("written") or 0) == 0:
+        nxt = BACKOFF_START_S if prev_backoff <= 0 else min(BACKOFF_MAX_S, prev_backoff * 2)
+        return {
+            "bridge_ok": False,
+            "backoff": nxt,
+            "backoff_reason": "no_write",
+            "rate_limited": False,
+            "should_sleep_backoff": True,
+        }
+    return {
+        "bridge_ok": True,
+        "backoff": 0.0,
+        "backoff_reason": None,
+        "rate_limited": False,
+        "should_sleep_backoff": False,
+    }
+
+
 async def run_tdx_hot_set_feed_task() -> None:
     """常驻轮转：热集逐只取快照 → 标准键；预算内节奏 + 限流退避；盘外低频探测。"""
     logger.info(
@@ -244,6 +288,15 @@ async def run_tdx_hot_set_feed_task() -> None:
 
             cycle_t0 = time.monotonic()
             rate_limited = False
+            # 逐只失败分账（审计 M4/M8）：「循环在跑」不等于「有数据落库」，
+            # 每一类失败单独计数，整批结果进 last_cycle_stats
+            cycle = {
+                "attempted": 0,
+                "written": 0,
+                "call_failed": 0,
+                "map_failed": 0,
+                "write_failed": 0,
+            }
             for _ in range(BATCH_PER_LOOP):
                 symbol = symbols[cursor % len(symbols)]
                 cursor += 1
@@ -252,6 +305,7 @@ async def run_tdx_hot_set_feed_task() -> None:
                 # 与持仓馈送 _write_snapshot 的入参口径一致——2026-09-17 实测键形状错）
                 suffix = StockCodeUtil.to_suffix(symbol) or symbol
                 prefix = StockCodeUtil.to_prefix(symbol) or symbol
+                cycle["attempted"] += 1
                 call_t0 = time.monotonic()
                 try:
                     result = await tdx_pusher.tdx_call(
@@ -262,42 +316,69 @@ async def run_tdx_hot_set_feed_task() -> None:
                     if "RATE_LIMITED" in msg:
                         rate_limited = True
                         break
+                    cycle["call_failed"] += 1
+                    hot_set_feed_status["call_failed"] += 1
                     hot_set_feed_status["errors"] += 1
                     hot_set_feed_status["last_error"] = f"{symbol}: {msg[:120]}"
-                    continue
-                snap = map_snapshot_with_book(result if isinstance(result, dict) else {})
-                if snap is None:
-                    continue
-                if await _write_snapshot(prefix, snap):
-                    hot_set_feed_status["written"] += 1
-                    hot_set_feed_status["last_symbol"] = symbol
-                    hot_set_feed_status["last_feed_at"] = _now_sh().isoformat(timespec="seconds")
-                    # L0.5 同源归档（写失败只计数不抛出，不阻断实时链）
-                    _ensure_archiver().append(snapshot_l05_record(suffix, snap))
-                    _latency_observe((time.monotonic() - call_t0) * 1000.0)
                 else:
-                    hot_set_feed_status["errors"] += 1
+                    snap = map_snapshot_with_book(
+                        result if isinstance(result, dict) else {}
+                    )
+                    if snap is None:
+                        # 单只失败不再静默（审计 M4/M8）：计数 + 留痕，不算成功
+                        cycle["map_failed"] += 1
+                        hot_set_feed_status["map_failed"] += 1
+                        hot_set_feed_status["errors"] += 1
+                        hot_set_feed_status["last_error"] = (
+                            f"{symbol}: 桥快照映射失败（空载荷/字段缺失）"
+                        )
+                    elif await _write_snapshot(prefix, snap):
+                        cycle["written"] += 1
+                        hot_set_feed_status["written"] += 1
+                        hot_set_feed_status["last_symbol"] = symbol
+                        hot_set_feed_status["last_feed_at"] = _now_sh().isoformat(
+                            timespec="seconds"
+                        )
+                        # L0.5 同源归档（写失败只计数不抛出，不阻断实时链）
+                        _ensure_archiver().append(snapshot_l05_record(suffix, snap))
+                        _latency_observe((time.monotonic() - call_t0) * 1000.0)
+                    else:
+                        cycle["write_failed"] += 1
+                        hot_set_feed_status["write_failed"] += 1
+                        hot_set_feed_status["errors"] += 1
+                # 失败路径同样占桥预算：统一节奏，不因失败连环抢跑（旧实现
+                # 失败即 continue 跳过 sleep，桥半死时反而打得更猛）
                 await asyncio.sleep(PACING_S)
 
             hot_set_feed_status["last_cycle_s"] = round(time.monotonic() - cycle_t0, 2)
+            hot_set_feed_status["last_cycle_stats"] = dict(cycle)
             _refresh_l05_status()
             if _latency is not None:
                 hot_set_feed_status["latency"] = {
                     "stage": BRIDGE_LATENCY_STAGE,
                     **_latency.counters,
                 }
-            if rate_limited:
-                backoff = BACKOFF_START_S if backoff <= 0 else min(BACKOFF_MAX_S, backoff * 2)
-                hot_set_feed_status["rate_limited"] = True
-                hot_set_feed_status["backoff_s"] = backoff
-                hot_set_feed_status["bridge_ok"] = False
+            outcome = cycle_outcome(cycle, rate_limited=rate_limited, prev_backoff=backoff)
+            backoff = outcome["backoff"]
+            hot_set_feed_status["rate_limited"] = outcome["rate_limited"]
+            hot_set_feed_status["bridge_ok"] = outcome["bridge_ok"]
+            hot_set_feed_status["backoff_s"] = backoff
+            hot_set_feed_status["backoff_reason"] = outcome["backoff_reason"]
+            if outcome["backoff_reason"] == "rate_limited":
                 logger.warning("[TdxHotSet] 桥限流，退避 %.0fs", backoff)
+            elif outcome["backoff_reason"] == "no_write":
+                logger.warning(
+                    "[TdxHotSet] 整批零写入（attempted=%d call_failed=%d map_failed=%d "
+                    "write_failed=%d），退避 %.0fs",
+                    cycle["attempted"],
+                    cycle["call_failed"],
+                    cycle["map_failed"],
+                    cycle["write_failed"],
+                    backoff,
+                )
+            if outcome["should_sleep_backoff"]:
                 await asyncio.sleep(backoff)
                 continue
-            backoff = 0.0
-            hot_set_feed_status["rate_limited"] = False
-            hot_set_feed_status["backoff_s"] = 0.0
-            hot_set_feed_status["bridge_ok"] = True
         except asyncio.CancelledError:
             _flush_archiver_if_pending()  # 停机终刷（与订阅侧归档器同纪律）
             raise

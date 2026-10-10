@@ -165,6 +165,90 @@ def test_l05_archiver_roundtrip(tmp_path):
     assert str(row["source"]) == "tdx_bridge"
 
 
+# ── 整批结果判定（审计 M4/M8 验收点）：全 None 批次不得标健康 ───────────
+
+
+def _cycle(written: int, **extra) -> dict:
+    base = {"attempted": 60, "written": written, "call_failed": 0, "map_failed": 0, "write_failed": 0}
+    base.update(extra)
+    return base
+
+
+@pytest.mark.unit
+def test_cycle_outcome_all_none_batch_is_not_healthy():
+    """验收点：60 只全映射失败（written=0）→ bridge_ok=False + 退避，绝不标健康。"""
+    from backend.services.live_trading.services.tdx_hot_set_feed import cycle_outcome
+
+    outcome = cycle_outcome(
+        _cycle(0, map_failed=60), rate_limited=False, prev_backoff=0.0
+    )
+
+    assert outcome["bridge_ok"] is False
+    assert outcome["backoff"] == 30.0 and outcome["should_sleep_backoff"] is True
+    assert outcome["backoff_reason"] == "no_write"
+
+
+@pytest.mark.unit
+def test_cycle_outcome_all_call_failed_is_not_healthy():
+    """桥面半死（调用全抛错，非限流）与全映射失败同判：零写入即不健康。"""
+    from backend.services.live_trading.services.tdx_hot_set_feed import cycle_outcome
+
+    outcome = cycle_outcome(
+        _cycle(0, call_failed=60), rate_limited=False, prev_backoff=0.0
+    )
+
+    assert outcome["bridge_ok"] is False
+    assert outcome["backoff_reason"] == "no_write"
+
+
+@pytest.mark.unit
+def test_cycle_outcome_one_write_is_healthy_and_resets_backoff():
+    from backend.services.live_trading.services.tdx_hot_set_feed import cycle_outcome
+
+    outcome = cycle_outcome(
+        _cycle(1, map_failed=59), rate_limited=False, prev_backoff=120.0
+    )
+
+    assert outcome["bridge_ok"] is True
+    assert outcome["backoff"] == 0.0 and outcome["backoff_reason"] is None
+    assert outcome["should_sleep_backoff"] is False
+
+
+@pytest.mark.unit
+def test_cycle_outcome_no_write_backoff_escalates_to_cap():
+    from backend.services.live_trading.services.tdx_hot_set_feed import cycle_outcome
+
+    assert cycle_outcome(_cycle(0), rate_limited=False, prev_backoff=0.0)["backoff"] == 30.0
+    assert cycle_outcome(_cycle(0), rate_limited=False, prev_backoff=30.0)["backoff"] == 60.0
+    assert cycle_outcome(_cycle(0), rate_limited=False, prev_backoff=300.0)["backoff"] == 300.0
+
+
+@pytest.mark.unit
+def test_cycle_outcome_rate_limited_takes_priority_over_no_write():
+    """限流批次（可能已有写入）退避原因如实标 rate_limited，不吞成 no_write。"""
+    from backend.services.live_trading.services.tdx_hot_set_feed import cycle_outcome
+
+    outcome = cycle_outcome(_cycle(5), rate_limited=True, prev_backoff=0.0)
+
+    assert outcome["bridge_ok"] is False
+    assert outcome["rate_limited"] is True and outcome["backoff_reason"] == "rate_limited"
+    assert outcome["backoff"] == 30.0
+
+
+@pytest.mark.unit
+def test_loop_applies_cycle_outcome_not_unconditional_healthy():
+    """防回潮：循环体内不得再出现无条件的 ``bridge_ok = True`` 赋值。"""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "services/live_trading/services/tdx_hot_set_feed.py"
+    ).read_text(encoding="utf-8")
+    body = src.split("async def run_tdx_hot_set_feed_task", 1)[1]
+    assert 'hot_set_feed_status["bridge_ok"] = outcome["bridge_ok"]' in body
+    assert 'hot_set_feed_status["bridge_ok"] = True' not in body
+
+
 @pytest.mark.unit
 def test_latency_observe_records_bridge_stage(monkeypatch):
     """时延打点：桥源席走 stage=market_snapshot_bridge；关闭开关时静默 no-op。"""
