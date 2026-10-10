@@ -7,10 +7,15 @@
   → 按模式放行/拦截；
 - **先影子后生效（ADR-0009）**：`shadow=true`（默认）时判定照跑、留痕照记、**不拦单**；
   翻闸 = 一次配置变更（`shadow=false`），全程留版本号；
+- **灰度档位（P2-1 / H6）**：翻闸不必再"一翻全开"——`enforce`（JSON：rule_id → 档位）
+  逐规则放行 `off`（影子）→ `warn`（观察）→ `reject`(拦单) → `halt`（熔断全权）；
+  档位对规则**原生动作封顶**（reject 档下原生 HALT 压成拒单，不触发全局熔断语义）。
+  无 `enforce` 条目时缺省 = 影子期 `off` / 全权期 `halt`——与旧二值翻闸逐字节一致；
 - **fail-closed**：判定/上下文构建异常或配置不可读 → 拒单（错误如实入决策流与计数）。
 
 配置：`qm:risk:config`（Hash）字段 `enabled`("true") / `shadow`("true") / `version`(int) /
-`rules`(JSON：rule_id → params；不在表内的规则不启用，L0 急停/时段 always_on)。
+`rules`(JSON：rule_id → params；不在表内的规则不启用，L0 急停/时段 always_on) /
+`enforce`(JSON：rule_id → 档位 off|warn|reject|halt，见上；非法档位回退缺省并告警)。
 档位：`qm:risk:tier`（Hash，见 `shared/risk/tiers.py`）——全账户**买入侧**参数的动态
 上限，与配置取"更严者"合入 `rules`（只收紧，永不放宽）；档位未配置时不影响任何行为。
 """
@@ -58,6 +63,29 @@ CONFIG_KEY = "qm:risk:config"
 DECISIONS_KEY = "qm:risk:decisions:{date}"
 METRICS_KEY = "qm:risk:metrics:{date}"
 DECISIONS_MAXLEN = 20000
+
+# ── 灰度档位（P2-1 / H6）────────────────────────────────────────────
+# 档位对规则**原生动作**封顶（rank 比较）：off/warn 不拦单（观察档）；reject 拦单但把
+# 原生 HALT 压成拒单（不动全局熔断语义）；halt 全权（原生 HALT 才真正以 halt 级拦）。
+# 缺省解析（无 enforce 条目）= 影子期 off / 全权期 halt —— 旧二值翻闸的行为逐字节保留。
+STAGES = ("off", "warn", "reject", "halt")
+_STAGE_CAP = {"off": 0, "warn": 0, "reject": 1, "halt": 2}
+#: PASS 在 0 档：契约上它不进 decisions，但真出现了也绝不等于拦单——不给条目的话
+#: `_effective` 的字典取值会 KeyError，把一次放行炸成判定异常（未知字符串仍响亮 KeyError）。
+_ACTION_RANK = {"PASS": 0, "WARN": 0, "REJECT": 1, "HALT": 2}
+
+
+def resolve_stage(rule_id: str, *, enforce: dict[str, str], shadow: bool) -> str:
+    """该规则此刻的生效档位：enforce 显式条目 > 全局缺省（影子=off / 全权=halt）。
+
+    非法档位（拼写错、手改 Redis）在此回退缺省并留一条告警（`_warn_if_bad_enforce`）——
+    **绝不**因拼错而按更严档位悄悄生效，也绝不静默当作 off。
+    """
+    level = str(enforce.get(rule_id) or "").strip().lower()
+    if level in STAGES:
+        return level
+    return "off" if shadow else "halt"
+
 
 # 初始启用规则（配置初始化用；影子期只留痕不拦单，翻闸前按影子报告校准参数）
 DEFAULT_RULES: dict[str, dict[str, Any]] = {
@@ -126,6 +154,8 @@ class RiskConfig:
     shadow: bool = True
     version: int = 0
     rules: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 灰度档位表（rule_id → off|warn|reject|halt）；空 = 全部走全局缺省（旧行为）。
+    enforce: dict[str, str] = field(default_factory=dict)
     # 档位（`shared/risk/tiers.py`）：level/source 进留痕，供事后回答"这单是在哪个档位下判的"；
     # applied = 档位实际改写了哪些规则参数（空 = 档位未生效或未收紧任何东西）。
     tier_level: str = ""
@@ -154,6 +184,19 @@ def load_config(redis: Any) -> RiskConfig | None:
         version = int(raw.get("version") or 0)
     except (TypeError, ValueError):
         version = 0
+    # 灰度档位表（P2-1 / H6）：结构坏 = 配置不可信 → fail-closed（与 rules 同纪律）；
+    # 单条值非法不拒载——回退缺省 + 告警（见 resolve_stage / _warn_if_bad_enforce），
+    # 一条拼写错不该把全部下单拒死。
+    enforce: dict[str, str] = {}
+    raw_enforce = raw.get("enforce")
+    if raw_enforce:
+        try:
+            data = json.loads(raw_enforce)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"qm:risk:config.enforce 解析失败: {exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("qm:risk:config.enforce 不是对象（应为 rule_id → 档位）")
+        enforce = {str(k): str(v).strip().lower() for k, v in data.items()}
     from backend.shared.risk.tiers import apply_to_rules, load_tier
 
     tier = load_tier(redis)  # 内部收敛一切失效姿态，绝不抛（见 tiers 模块 docstring）
@@ -162,12 +205,14 @@ def load_config(redis: Any) -> RiskConfig | None:
     _warn_if_unknown_rules(rules)
     # 档位启用的规则不算"配置漏配"——那是档位对买入侧的权威，不是错位
     _warn_if_missing_rules(rules, exempt=frozenset(applied))
+    _warn_if_bad_enforce(enforce, merged)
     _warn_if_tier_problems(tier, applied, tier_problems)
     return RiskConfig(
         enabled=_as_bool(raw.get("enabled"), False),
         shadow=_as_bool(raw.get("shadow"), True),
         version=version,
         rules=merged,
+        enforce=enforce,
         tier_level=tier.level,
         tier_source=tier.source,
         tier_applied=applied,
@@ -249,6 +294,43 @@ def _warn_if_missing_rules(
     _missing_rules_warned = missing
 
 
+_bad_enforce_warned: frozenset[str] = frozenset()
+
+
+def _warn_if_bad_enforce(
+    enforce: dict[str, str], rules: dict[str, dict[str, Any]]
+) -> None:
+    """enforce 档位表的失效形态 → 告警（同集合只打一次，不逐单刷屏）。
+
+    三类，全部是"写了配置却不会按预期生效"的静默形态：
+    ① 非法档位值（拼写错）→ `resolve_stage` 回退全局缺省（影子期 off / 全权期 halt）——
+       回退本身是安全的，但操作员以为已按写明档位生效，必须可见；
+    ② 未注册规则 id → 该条目永远匹配不到任何规则（配置比代码新）；
+    ③ 规则未启用（不在 config.rules 且非 always_on）→ 写了档位也不会跑
+       （`RiskGateCore.evaluate` 只跑配置列出的规则）。
+
+    只告警、不改配置、不拒载：一条拼写错不该把全部下单拒死（拒载=全员 fail-closed）。
+    """
+    global _bad_enforce_warned
+    marks: set[str] = set()
+    for rid, level in enforce.items():
+        if level not in STAGES:
+            marks.add(f"档位非法 {rid}={level!r}")
+            continue
+        spec = get_rule(rid)
+        if spec is None:
+            marks.add(f"未注册规则 {rid}")
+        elif rid not in rules and not spec.always_on:
+            marks.add(f"规则未启用 {rid}")
+    marks_f = frozenset(marks)
+    if marks_f and marks_f != _bad_enforce_warned:
+        logger.warning(
+            "[RiskGate] enforce 档位表含无效条目（按缺省档位执行/不生效）: %s",
+            sorted(marks_f),
+        )
+    _bad_enforce_warned = marks_f
+
+
 _tier_warned: frozenset[str] = frozenset()
 
 
@@ -285,7 +367,7 @@ def _warn_if_tier_problems(
                 "[RiskTier] 档位 %s（%s）收紧生效：%s",
                 tier.level or "-",
                 tier.source,
-                {rid: p for rid, p in applied.items()},
+                dict(applied),
             )
     _tier_warned = marks
 
@@ -1134,6 +1216,14 @@ async def evaluate_order(
     预检必须走 `record=False`：`_record` 每次调用都会 `hincrby evaluated`，逐笔预检一次
     10 只候选就等于往当日 metrics 里灌 10 次判定，影子报告会显示「今天拦了 N 单」而
     实际一单未发 —— 那是把「没发生的事」写进了证据。见 `preflight_order`。
+
+    灰度档位（P2-1 / H6）：每条规则的原生动作先被 `cfg.enforce` 档位封顶、再计是否生效
+    （见 `resolve_stage`/`_effective`）。无 enforce 条目时 passed/verdict/enforced/计数桶
+    与旧二值翻闸逐字节一致；**唯一有意差异是阻断归因**——`rule_id`/`reason` 取首条
+    **生效**拦截（旧实现取 decisions[0]，WARN 条目排在前时会把观察项误报成拒单原因）。
+    `RiskVerdict.verdict`：拦下时取**生效**等级（halt 仅当确有生效熔断）、未拦下时取
+    **原生**等级（旧影子留痕逐字兼容）；档位细节在 decisions[].stage，逐条是否生效在
+    decisions[].enforced（影子报告按它分臂计价）。
     """
     try:
         cfg = load_config(redis)
@@ -1196,26 +1286,57 @@ async def evaluate_order(
             version=cfg.version,
         )
 
-    decisions = [
-        {
-            "rule_id": d.rule_id,
-            "level": d.level,
-            "action": d.action,
-            "reason": d.reason,
-            "evidence": dict(d.evidence),
-        }
-        for d in verdict.decisions
-    ]
-    if verdict.halt:
-        v, primary = "halt", next((d for d in decisions if d["action"] == "HALT"), None)
-    elif verdict.rejects:
-        v, primary = "reject", decisions[0] if decisions else None
-    elif verdict.warns:
-        v, primary = "warn", None
-    else:
-        v, primary = "pass", None
+    decisions: list[dict[str, Any]] = []
+    for d in verdict.decisions:
+        decisions.append(
+            {
+                "rule_id": d.rule_id,
+                "level": d.level,
+                "action": d.action,
+                "stage": resolve_stage(
+                    d.rule_id, enforce=cfg.enforce, shadow=bool(cfg.shadow)
+                ),
+                "reason": d.reason,
+                "evidence": dict(d.evidence),
+            }
+        )
 
-    enforced = (not cfg.shadow) and v in ("reject", "halt")
+    def _effective(d: dict[str, Any]) -> int:
+        """档位封顶后的动作等级：0=只记录/观察，1=拒单，2=熔断全权。
+
+        封顶只降不升：WARN 原生规则在 reject 档下仍只是 warn——档位是刹车不是油门。
+        """
+        return min(_ACTION_RANK[d["action"]], _STAGE_CAP[d["stage"]])
+
+    blocking = [d for d in decisions if _effective(d) >= 1]
+    halted_eff = [d for d in decisions if _effective(d) == 2]
+    enforced = bool(blocking)
+    for d in decisions:
+        # 逐条生效标记（评审 M1）：影子报告按「这条规则此刻真拦了没有」分臂计价。
+        # 只有 entry 级标记是不够的——灰度期一条 off/warn 档规则会跟着**被别的规则
+        # 拦下**的单一起拿到 entry 级 enforced=true，被记账进「已实现代价」臂，而
+        # 定档恰恰要看它的影子样本。旧留痕没有这个字段，消费侧按「缺字段 → 回退
+        # entry 级」处理（那时配置全局同档，两级恒等）。
+        d["enforced"] = _effective(d) >= 1
+    if enforced:
+        # 拦下时记录词取**生效**等级：halt 仅当确有生效的熔断级拦截——原生 HALT 被
+        # reject 档压成拒单后若仍记 halt，"halted 计数>0" 会被误读成系统熔断发生过。
+        v = "halt" if halted_eff else "reject"
+    elif verdict.halt:
+        # 未拦下（影子/观察档）保留**原生**等级词：与旧影子留痕逐字兼容，
+        # 影子报告口径不因引入档位而漂移（旧行为=记录原生等级但放行）。
+        v = "halt"
+    elif verdict.rejects:
+        v = "reject"
+    elif verdict.warns:
+        v = "warn"
+    else:
+        v = "pass"
+    # 无 enforce 条目时：影子期全 off → blocking 恒空→v=原生（旧影子逐字节一致）；
+    # 全权期全 halt → blocking=原生拦项、halted_eff=原生 HALT、v=原生等级——verdict/
+    # enforced/计数同样逐字节一致。primary（归因）新旧有差：取首条**生效**熔断，否则
+    # 首条生效拦截（跳过豁免的与纯 WARN）——旧实现取 decisions[0]，WARN 前置时误报。
+    primary = halted_eff[0] if halted_eff else (blocking[0] if blocking else None)
     if record:
         _record(
             redis,
@@ -1228,7 +1349,7 @@ async def evaluate_order(
             tier=cfg,
         )
 
-    if cfg.shadow or v == "pass" or v == "warn":
+    if not enforced:
         return RiskVerdict(
             passed=True,
             verdict=v,

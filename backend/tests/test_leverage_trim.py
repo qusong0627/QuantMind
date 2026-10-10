@@ -1128,9 +1128,23 @@ def test_trim_status_endpoint_is_reachable() -> None:
     assert "get" in paths.get("/api/v1/risk/trim", {})
 
 
-def test_trim_status_endpoint_payload_shape() -> None:
-    """面板要的三块：最近一轮摘要、配置、当日计数（含逐腿明细）。"""
+def test_trim_status_endpoint_payload_shape(monkeypatch) -> None:
+    """面板要的三块：最近一轮摘要、配置、当日计数（含逐腿明细）。
+
+    周期用假钟 `_NOW`（2026-09-24）把状态写在 `_DAY` 键下；端点 `risk_trim_status`
+    的当日段按**墙钟**取日（生产语义，不动）——测试必须把端点读的钟也冻到同一天，
+    否则真实日期一过就键位错位，`today.submitted` 恒为空 {}（2026-09-24 落地当天
+    能过、之后每天红，属墙钟依赖而非被测逻辑，2026-10-10 实测确认）。
+    """
+    from backend.services.trade.routers import risk_ctl
     from backend.services.trade.routers.risk_ctl import risk_trim_status
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _NOW if tz is not None else _NOW.replace(tzinfo=None)
+
+    monkeypatch.setattr(risk_ctl, "datetime", _FrozenDatetime)
 
     client, _ = _over_limit_account()
     deps, _, _, redis = _deps(client, tier=FakeTier(_tier_budget()))

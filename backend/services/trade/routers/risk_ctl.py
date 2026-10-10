@@ -1,12 +1,13 @@
 """风控运维权（T-RC-02）：状态 / 配置 / 全撤——require_admin 收口。
 
-- `GET  /api/v1/risk/status`     —— 配置 + 当日决策计数（含影子拒绝数，翻闸判据）
+- `GET  /api/v1/risk/status`     —— 配置 + 当日决策计数（含影子拒绝数）+ 逐规则生效档位
 - `GET  /api/v1/risk/tier`       —— 当前档位（原文 + 新鲜度 + 改写了哪些规则参数）
 - `GET  /api/v1/risk/trim`       —— 减仓执行器最近一轮摘要（P2.6，含逐腿与当日计数）
-- `POST /api/v1/risk/config`     —— 改配置（enabled/shadow/rules），version 自增 + 留痕
+- `POST /api/v1/risk/config`     —— 改配置（enabled/shadow/rules/enforce），version 自增 + 留痕
 - `POST /api/v1/risk/cancel-all` —— HALT 全撤指定账户全部未成交模拟单（OrderRouter.cancel_all）
 
-纪律：影子→强制翻闸是一次显式配置变更（shadow=false），版本号随变更自增并写入 Redis
+纪律：影子→强制翻闸是一次显式配置变更（shadow=false）；**灰度开拦（P2-1）**用 `enforce`
+逐规则放行 off→warn→reject→halt，不必一翻全开。版本号随变更自增并写入 Redis
 `qm:risk:config`；决策流与计数见 `qm:risk:decisions|metrics:{date}`。
 """
 
@@ -52,7 +53,13 @@ async def risk_status(
     redis: Any = Depends(get_redis),
     auth: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
-    """配置 + 当日计数（影子报告基础数据）。"""
+    """配置 + 当日计数（影子报告基础数据）+ 逐规则**生效档位**（P2-1 灰度可见面）。
+
+    档位表用 `risk.resolve_stage` 同一实现：操作员在这里看到的「这条规则现在拦不拦」
+    与下单那一刻判定所见的必须同源，否则面板又是另一个口径。`enabled=false` 的规则
+    写了档位也不会跑（引擎只跑**合并视图**里列出的规则——含档位 tier 启用的；
+    always_on 除外）——表中如实标注。
+    """
     try:
         client = _client(redis)
         raw = client.hgetall(risk.CONFIG_KEY) or {}
@@ -63,6 +70,45 @@ async def risk_status(
             rules = json.loads(raw.get("rules") or "{}")
         except (TypeError, ValueError):
             rules = {}
+        try:
+            enforce = json.loads(raw.get("enforce") or "{}")
+        except (TypeError, ValueError):
+            enforce = {}
+        if not isinstance(enforce, dict):
+            enforce = {}
+        enforce = {str(k): str(v).strip().lower() for k, v in enforce.items()}
+        # 影子解析走判定侧同一实现（评审 M2a）：手改的 "1"/"yes"/"on"/空串在两边
+        # 曾是相反的结论——面板显示全 halt 档而闸门实际在影子放行，是「操作员读到的
+        # 与下单那一刻所见相反」的事故面。
+        shadow = risk._as_bool(raw.get("shadow"), True)
+
+        from backend.shared.risk import all_rules
+
+        # 生效规则表 = 引擎同一读取路径（含档位 tier 合并，评审 M2b）：档位会启用
+        # 配置未列的规则（apply_to_rules），拿原始 rules 判 enabled 会把「档位正在
+        # 管这条规则」显示成不会跑。配置损坏时判定侧已 fail-closed（l0.config 拒单），
+        # 面板不二次 503：退回原始 rules 并如实显影（宁可少标 enabled，不谎报会跑）。
+        try:
+            cfg = risk.load_config(redis)
+            merged_rules = cfg.rules if cfg is not None else {}
+        except Exception:  # noqa: BLE001
+            merged_rules = rules
+
+        stages: dict[str, dict[str, Any]] = {}
+        for spec in all_rules():
+            stages[spec.rule_id] = {
+                "stage": risk.resolve_stage(
+                    spec.rule_id, enforce=enforce, shadow=shadow
+                ),
+                "enabled": bool(spec.always_on) or spec.rule_id in merged_rules,
+            }
+        for rid in enforce:
+            # 配置比代码新：写了档位的未知 id 也要显影（判定侧会告警、此处置空档位占位）
+            if rid not in stages:
+                stages[rid] = {
+                    "stage": risk.resolve_stage(rid, enforce=enforce, shadow=shadow),
+                    "enabled": False,
+                }
         return {
             "success": True,
             "data": {
@@ -71,8 +117,18 @@ async def risk_status(
                 "shadow": str(raw.get("shadow", "true")),
                 "version": str(raw.get("version", "0")),
                 "rules": rules,
+                "enforce": enforce,
+                # stage=该规则逐单生效档位（off 影子/warn 观察/reject 拦单/halt 全权）；
+                # enabled=false 或未知 id 的档位条目不会生效（引擎不跑合并视图外的规则）。
+                "stages": stages,
                 "today": metrics,
-                "caliber": "影子=判定留痕不拦单；rejected=全量拒绝计数，shadow_rejected=其中未拦的",
+                "caliber": (
+                    "影子=判定留痕不拦单；rejected=全量拒绝计数，shadow_rejected=其中未拦的；"
+                    "halted=原生 HALT 判定留痕（影子期含未生效、灰度期含被降档豁免的——"
+                    "是否真熔断以决策流留痕的 enforced 字段为准）；"
+                    "stages.stage 是逐规则生效档位（enforce 显式条目 > 缺省：影子 off / 全权 halt），"
+                    "warn 与 off 都不拦单，reject 封顶到拒单，halt 按原生动作全权"
+                ),
             },
         }
     except Exception as exc:  # noqa: BLE001
@@ -215,6 +271,9 @@ class RiskConfigUpdate(BaseModel):
     enabled: bool | None = None
     shadow: bool | None = None
     rules: dict[str, dict[str, Any]] | None = None
+    #: 灰度档位表（rule_id → off|warn|reject|halt）。整表替换语义：`{}` = 清空回缺省
+    #: （影子全 off / 全权全 halt）。缺省缺省——不传该字段 = 不动现有档位表。
+    enforce: dict[str, str] | None = None
 
 
 @router.post("/risk/config")
@@ -223,7 +282,12 @@ async def risk_config_update(
     redis: Any = Depends(get_redis),
     auth: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
-    """改风控配置（version 自增；rules 只允许已注册规则 id）。"""
+    """改风控配置（version 自增；rules 只允许已注册规则 id；enforce 值限 STAGES）。
+
+    enforce 的**写侧纪律**：非法档位值/未注册规则 id 一律 400（写错档位=放行或误拦，
+    是交易面的事故不是告警——拒早于生效）。「合法 id 但规则未启用」不拦：档位可能与
+    rules/档位(tier) 的启用同批写入，判定侧 `_warn_if_bad_enforce` 会在加载时暴露。
+    """
     from backend.shared.risk import get_rule
 
     updates: dict[str, str] = {}
@@ -236,6 +300,20 @@ async def risk_config_update(
         if unknown:
             raise HTTPException(status_code=400, detail=f"未注册规则 id: {unknown[:6]}")
         updates["rules"] = json.dumps(payload.rules, ensure_ascii=False)
+    if payload.enforce is not None:
+        enforce = {str(k): str(v).strip().lower() for k, v in payload.enforce.items()}
+        bad_levels = {
+            rid: lvl for rid, lvl in enforce.items() if lvl not in risk.STAGES
+        }
+        if bad_levels:
+            raise HTTPException(
+                status_code=400,
+                detail=f"非法档位（可用 {list(risk.STAGES)}）: {bad_levels}",
+            )
+        unknown = [rid for rid in enforce if get_rule(rid) is None]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"未注册规则 id: {unknown[:6]}")
+        updates["enforce"] = json.dumps(enforce, ensure_ascii=False)
     if not updates:
         raise HTTPException(status_code=400, detail="无更新字段")
 
@@ -247,13 +325,15 @@ async def risk_config_update(
         except (TypeError, ValueError):
             version = 1
         updates["version"] = str(version)
-        # 首次配置：缺省填齐 enabled/shadow/rules（enabled=true, shadow=true 起步）
+        # 首次配置：缺省填齐 enabled/shadow/rules/enforce（enabled=true, shadow=true 起步，
+        # 档位表置空 = 显式走全局缺省）
         if not current:
             updates.setdefault("enabled", "true")
             updates.setdefault("shadow", "true")
             updates.setdefault(
                 "rules", json.dumps(risk.DEFAULT_RULES, ensure_ascii=False)
             )
+            updates.setdefault("enforce", "{}")
         client.hset(risk.CONFIG_KEY, mapping=updates)
         logger.warning(
             "[RiskCtl] 配置变更 by=%s version=%d updates=%s",

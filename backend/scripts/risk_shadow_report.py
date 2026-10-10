@@ -4,6 +4,9 @@
 用途：影子期（shadow=true，判定留痕不拦单）积累数据后，翻闸前审阅——
 样本量（尤其**盘中申报时段**样本）、verdict 分布、各规则会拦/告警条数、逐日趋势。
 
+灰度档位（P2-1）后留痕自带生效/未生效两态：``would_block`` 只计**未生效**的
+reject/halt（假设会拦），``blocked_enforced`` 计**已生效**拦截（事实）。
+
 翻闸建议阈值（机构口径，仅作初筛，最终人工审阅）：
 - 盘中样本 ≥ 50 单且 ≥ 1 个完整交易日 → "可进入人工审阅"；
 - 盘中样本不足 → "继续累积"（盘后入队单（queued_intent）不计入盘中判定样本）。
@@ -103,7 +106,18 @@ def collect(days: int = 7, *, today: datetime | None = None) -> dict[str, Any]:
             elif action == "WARN":
                 rule_warn[rule] += 1
 
-    would_block = verdicts.get("reject", 0) + verdicts.get("halt", 0)
+    # 「会拦」只计**未生效**的 reject/halt 留痕。灰度档位（P2-1）后每条留痕自带
+    # enforced 两态：已生效拦截是事实不是假设，混进「会拦 N」会把翻闸后预计新增的
+    # 拦截数算高（旧配置全局同档，两字段必有其一为零，语义与旧「会拦 N」一致）。
+    would_block = 0
+    blocked_enforced = 0
+    for e in entries:
+        if str(e.get("verdict") or "") not in ("reject", "halt"):
+            continue
+        if str(e.get("enforced") or "").lower() == "true":
+            blocked_enforced += 1
+        else:
+            would_block += 1
     if not entries:
         advice = "无样本：影子尚未评估任何订单（检查订单是否过 OrderRouter / 直连闸接线）"
     elif intr_samples < MIN_INTRADAY_SAMPLES:
@@ -121,6 +135,7 @@ def collect(days: int = 7, *, today: datetime | None = None) -> dict[str, Any]:
         "verdicts": dict(verdicts),
         "intraday_verdicts": dict(intraday_verdicts),
         "would_block": would_block,
+        "blocked_enforced": blocked_enforced,
         "rule_reject": dict(rule_reject.most_common()),
         "rule_warn": dict(rule_warn.most_common()),
         "sources": dict(sources.most_common()),
@@ -132,7 +147,10 @@ def collect(days: int = 7, *, today: datetime | None = None) -> dict[str, Any]:
 def _print_human(rep: dict[str, Any]) -> None:
     print(f"=== 风控影子报告（近 {rep['days']} 天）===")
     print(f"样本总量: {rep['total']}（盘中 {rep['intraday_samples']}）")
-    print(f"verdict: {rep['verdicts']}  （会拦 {rep['would_block']}）")
+    print(
+        f"verdict: {rep['verdicts']}  （会拦 {rep['would_block']}"
+        f"｜已生效拦截 {rep['blocked_enforced']}）"
+    )
     if rep["intraday_verdicts"]:
         print(f"盘中 verdict: {rep['intraday_verdicts']}")
     print(f"来源分布: {rep['sources']}")

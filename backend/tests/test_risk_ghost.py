@@ -506,3 +506,56 @@ def test_empty_exclusion_list_is_the_escape_hatch():
     assert rows_from_decision_entry(e, exclude_tenants=None) == []
     assert extract_rows([e], exclude_tenants=()) != []
     assert extract_rows([e]) == []
+
+
+# ── P2-1 灰度：分臂按逐条生效标记（评审 M1）────────────────────────
+
+
+def test_per_decision_enforced_flag_decides_the_arm():
+    """灰度期一条影子规则会随**被别的规则拦下**的单一起挂 entry 级 enforced=true——
+    分臂必须按逐条标记判，否则它会被记账进「已实现代价」臂，污染定档样本。"""
+    entry = {
+        **LIVE_ENTRY,
+        "verdict": "reject",
+        "enforced": "true",  # 单被拦（entry 级）
+        "decisions": json.dumps(
+            [
+                {
+                    "rule_id": "l1.new_buys_per_day",
+                    "level": "L1",
+                    "action": "REJECT",
+                    "reason": "当日新开仓已达上限",
+                    "evidence": {},
+                    "enforced": False,  # 影子规则：记录但没拦 → 影子臂
+                },
+                {
+                    "rule_id": "l3.order_frequency",
+                    "level": "L3",
+                    "action": "REJECT",
+                    "reason": "下单频率超限",
+                    "evidence": {},
+                    "enforced": True,  # 真拦 → 已实现代价臂
+                },
+            ],
+            ensure_ascii=False,
+        ),
+    }
+
+    rows = rows_from_decision_entry(entry)
+
+    assert {r.rule_id: r.enforced for r in rows} == {
+        "l1.new_buys_per_day": False,
+        "l3.order_frequency": True,
+    }
+
+
+def test_legacy_records_without_per_decision_flag_fall_back_to_entry_level():
+    """旧留痕（决策无 enforced 字段）：回退 entry 级——那时配置全局同档，两级恒等。
+    回退而不是默认 False：否则全权期的旧账会被整体误迁进影子臂。
+    """
+    legacy_shadow = {**LIVE_ENTRY, "enforced": "false"}
+    assert all(r.enforced is False for r in rows_from_decision_entry(legacy_shadow))
+
+    legacy_enforced = {**LIVE_ENTRY, "enforced": "true"}
+    rows = rows_from_decision_entry(legacy_enforced)
+    assert rows and all(r.enforced is True for r in rows)

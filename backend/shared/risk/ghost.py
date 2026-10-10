@@ -316,7 +316,7 @@ def rows_from_decision_entry(
     uid = str(entry.get("uid") or "")
     quantity = num(entry.get("qty"))
     source = str(entry.get("source") or "")
-    enforced = str(entry.get("enforced") or "").lower() == "true"
+    entry_enforced = str(entry.get("enforced") or "").lower() == "true"
     try:
         version = int(entry.get("version") or 0)
     except (TypeError, ValueError):
@@ -331,6 +331,16 @@ def rows_from_decision_entry(
         rule_id = str(d.get("rule_id") or "").strip()
         if not rule_id:
             continue
+        # 逐条生效标记（P2-1 灰度，评审 M1）：新留痕的决策带 d["enforced"]（该规则
+        # 此刻真拦没有）；旧留痕没有该字段——那时配置全局同档，逐条与 entry 级恒等，
+        # 回退无损。分臂必须按逐条判：灰度期一条 off/warn 档影子规则会跟着**被别的
+        # 规则拦下**的单一起挂 entry 级 enforced=true，误进「已实现代价」臂会污染定档样本。
+        raw_enforced = d.get("enforced")
+        row_enforced = (
+            entry_enforced
+            if raw_enforced is None
+            else str(raw_enforced).strip().lower() == "true"
+        )
         evidence = d.get("evidence")
         rows.append(
             GhostRow(
@@ -345,7 +355,7 @@ def rows_from_decision_entry(
                 source=source,
                 reason=str(d.get("reason") or "")[:REASON_MAX],
                 evidence=dict(evidence) if isinstance(evidence, Mapping) else {},
-                enforced=enforced,
+                enforced=row_enforced,
                 version=version,
                 ts=ts,
                 registered=gate_spec(rule_id) is not None,
