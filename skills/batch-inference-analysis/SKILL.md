@@ -32,6 +32,8 @@ description: "批量推理结果分析 — 用 QuantMind 选股策略方法论�
 - **单日 run**：`/models/inference/runs/{run_id}`
   - `items`：5377+ 只股票信号，每只含 `fusion_score`（分数）/`board`（板块）/`industry`（行业）/`market_cap_tier`（市值分档）/`trend`（趋势）/`prev_score`/`prev2_score`/`next_score`
 
+> **缺失值口径（勿跳）**：`fusion_score` 为 `null`/缺失 **≠ 0**（0 是模型的「中性」分；缺失=该模型没给这只票打分）。缺失标的绝不按 0 参与排序/统计——下文所有代码一律**先显式过滤缺失再分析**，并如实报告被过滤的数量。
+
 ## 认证
 
 ```bash
@@ -83,19 +85,23 @@ def fetch_run(run_id):
         headers={"Authorization": f"Bearer {TOKEN}"})
     return json.load(urllib.request.urlopen(req))  # 顶层直接含 items/total
 
-def market_signal(items, top_n=20):
+def market_signal(items_raw, top_n=20):
+    # 缺失分 ≠ 0：先显式过滤（缺失=未打分，不参与排序）
+    items = [it for it in items_raw if it.get("fusion_score") is not None]
     # 取 Top20 按分数
-    top = sorted(items, key=lambda x: -(x.get("fusion_score") or 0))[:top_n]
+    top = sorted(items, key=lambda x: -x["fusion_score"])[:top_n]
     # 按行业分组，取每行业最高分
     ind_top = {}
     for it in top:
         ind = it.get("industry", "") or "未知"
-        s = it.get("fusion_score") or 0
+        s = it["fusion_score"]
         if ind not in ind_top or s > ind_top[ind]:
             ind_top[ind] = s
     ind_avg_top1 = sum(ind_top.values()) / max(1, len(ind_top))
     strong = sum(1 for s in ind_top.values() if s >= 0.10)
-    return {"ind_avg_top1": ind_avg_top1, "strong_industries": strong, "top_industries": dict(sorted(ind_top.items(), key=lambda x:-x[1])[:5])}
+    return {"ind_avg_top1": ind_avg_top1, "strong_industries": strong,
+            "scored": len(items), "missing": len(items_raw) - len(items),
+            "top_industries": dict(sorted(ind_top.items(), key=lambda x:-x[1])[:5])}
 ```
 
 **入场阈值**（参数扫描优化）：
@@ -128,24 +134,27 @@ curl -s -H "$AUTH" "$BASE/api/v1/market/kline?symbol=000001.SH&market=A&period=d
 
 ## 3. 个股选股（分数区间）
 
-### 核心分数区间
+### 核心分数区间（历史观察——实盘阈值一律以第 8 节校准为准）
 | 个股分数 | 操作 | 理由 |
 |---------|------|------|
-| **0.10-0.12** | **首选（黄金区间）** | 胜率64.8%，均收+1.19%，最大亏损-10.4% |
+| **0.10-0.12** | **历史观察的「黄金区间」（旧模型）** | 胜率64.8%，均收+1.19%，最大亏损-10.4%（另一套模型的样本内回测） |
 | 0.12-0.15 | 可选（主板优先） | 胜率79%但样本少，警惕追高 |
 | 0.15-0.20 | 谨慎 | 仅强市有效 |
 | ≥0.20 | 极谨慎 | 趋势加速，样本少 |
 | <0.10 | 不买 | 信号太弱 |
 
 **注意**：0.12-0.14 是"追高陷阱"（动量特征强，易买山顶）；0.10-0.11 假信号区必须配合行业确认。
-**重要**：以上绝对阈值基于特定模型分布，换模型后先看 `score_distribution`（第7节）用分位数映射。
+**重要（与 §8 收敛，勿矛盾使用）**：下表阈值来自**旧模型**的样本内回测；对当前模型用同一口径实测，0.10~0.12 档均收为 **-0.387%**（负，见 §8.3）——**两处数字必须以同模型校准结果为准**：先跑 `score-calibration`，用 `recommended_band` 替换这里的绝对阈值（当前模型实测最优档为 0.05~0.08）；分位数映射见第 7 节。换模型不校准直接用下表，是已知会出错的做法。
 
 ```python
-def pick_stocks(items, market_sig):
+def pick_stocks(items, market_sig, lo=0.10, hi=0.12):
+    # lo/hi 用 score-calibration 的 recommended_band 替换（§8），此处默认值仅示例
     picks = []
     for it in items:
-        s = it.get("fusion_score") or 0
-        if not (0.10 <= s <= 0.12): continue
+        s = it.get("fusion_score")
+        if s is None:  # 缺失≠0：未打分的标的不参与
+            continue
+        if not (lo <= s <= hi): continue
         if market_sig["ind_avg_top1"] < 0.09 and s < 0.11: continue  # 假信号区
         # 主板优先
         board = it.get("board", "")
@@ -154,7 +163,7 @@ def pick_stocks(items, market_sig):
         name = it.get("stock_name", "")
         if "ST" in name or "退" in name: continue
         picks.append(it)
-    picks.sort(key=lambda x: -(x.get("fusion_score") or 0))
+    picks.sort(key=lambda x: -x["fusion_score"])
     return picks[:5]  # 每天选3-5只
 ```
 
@@ -192,13 +201,15 @@ def pick_stocks(items, market_sig):
 def short_candidates(items):
     shorts = []
     for it in items:
-        s = it.get("fusion_score") or 0
+        s = it.get("fusion_score")
+        if s is None:  # 缺失≠0：未打分的标的不参与
+            continue
         if s > -0.15: continue
         tier = it.get("market_cap_tier", "")
         if tier in ("大盘", "超大盘"): continue  # 错杀
         if "科创" in it.get("board", ""): continue  # 抗跌
         shorts.append(it)
-    shorts.sort(key=lambda x: x.get("fusion_score") or 0)
+    shorts.sort(key=lambda x: x["fusion_score"])
     return shorts[:10]
 ```
 
@@ -211,9 +222,10 @@ def sector_rotation(batch_runs):
     ind_days = Counter()
     for run in batch_runs[:30]:  # 最近30个交易日
         items = fetch_run(run["run_id"]).get("items", [])
-        top = sorted(items, key=lambda x: -(x.get("fusion_score") or 0))[:20]
+        scored = [it for it in items if it.get("fusion_score") is not None]  # 缺失≠0
+        top = sorted(scored, key=lambda x: -x["fusion_score"])[:20]
         for it in top:
-            if (it.get("fusion_score") or 0) >= 0.10:
+            if it["fusion_score"] >= 0.10:
                 ind_days[it.get("industry", "")] += 1
     return ind_days.most_common(10)
 ```
@@ -229,7 +241,7 @@ def sector_rotation(batch_runs):
 2. **拿 member_runs**：`/models/inference/batch/{id}` 得到每日 run_id
 3. **拉今日信号**：取最新 run 的 items
 4. **市场状态**：行业 avg Top1 + 强行业数 + 大盘均线
-5. **选股**：分数 0.10-0.12 + 主板 + 3天趋势"先升后降"
+5. **选股**：按校准档（§8 `recommended_band`）定位黄金区间 + 主板 + 3天趋势"先升后降"（模板代码里的 0.10-0.12 是旧模型的历史观察，用校准结果替换）
 6. **负分参考**：微盘/小盘极端负分列出做空候选
 7. **行业轮动**：跨日统计强行业
 8. **输出决策**：入场/仓位/个股清单/做空清单/规避
@@ -239,10 +251,17 @@ def sector_rotation(batch_runs):
 **每个模型训练后分数范围不同**（实测：这个融合模型 fusion_score 范围 -0.996 ~ 0.965，而方法论假设 0-0.2 是另一套模型）。**绝对阈值不能直接套用**，必须先了解当前模型的分数分布。
 
 ```python
-def score_distribution(items):
-    scores = sorted(x.get("fusion_score") or 0 for x in items)
+def score_distribution(items_raw):
+    # 缺失≠0：缺失标的不进分布；全缺失时返回 None（不得凭空给分布）
+    scores = sorted(
+        it["fusion_score"] for it in items_raw if it.get("fusion_score") is not None
+    )
+    if not scores:
+        return None
     n = len(scores)
     return {
+        "scored": n,
+        "missing": len(items_raw) - n,
         "min": round(scores[0], 3),
         "max": round(scores[-1], 3),
         "p10": round(scores[int(n*0.1)], 3),

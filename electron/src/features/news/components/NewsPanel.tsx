@@ -229,6 +229,8 @@ export const NewsPanel: React.FC = () => {
   const [latestPublishedAt, setLatestPublishedAt] = useState<string | null>(null);
   const [lastSyncTick, setLastSyncTick] = useState<number>(Date.now());
   const [stats, setStats] = useState<NewsEnrichmentStats | null>(null);
+  // FinBERT 口径（T5-4 审计 M12）：未启用时情绪标签=纯词典法，统计条如实标注；未知不标注
+  const [finbertOff, setFinbertOff] = useState(false);
 
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -459,6 +461,15 @@ export const NewsPanel: React.FC = () => {
 
   // —— effects ——
   useEffect(() => { checkHealth(); loadSources(); loadStats(); }, [checkHealth, loadSources, loadStats]);
+
+  // FinBERT 口径提示（T5-4 审计 M12）：默认词典法时在统计条如实标注；接口失败静默（提示只是注解，宁缺勿假）
+  useEffect(() => {
+    let cancelled = false;
+    newsService.adminFinbertStatus()
+      .then(s => { if (!cancelled) setFinbertOff(s.use_finbert === false); })
+      .catch(() => { /* 状态未知时不标注 */ });
+    return () => { cancelled = true; };
+  }, []);
 
   // auto-resume rebuild progress
   useEffect(() => {
@@ -1021,6 +1032,14 @@ export const NewsPanel: React.FC = () => {
                   <span style={{ width: pct(stats.sentiment_counts.bearish || 0), background: COLOR_BEARISH, height: '100%' }} />
                   <span style={{ flex: 1, background: '#cbd5e1', height: '100%' }} />
                 </span>
+                {finbertOff && (
+                  <span
+                    style={{ fontSize: 10, color: '#94a3b8', cursor: 'help' }}
+                    title="情绪标签由金融词典法生成（FinBERT 未启用）。可在「管理后台 → 系统设置」开启 FinBERT+词典融合。"
+                  >
+                    情绪=词典法口径
+                  </span>
+                )}
               </div>
             );
           })()}

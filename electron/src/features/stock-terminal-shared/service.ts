@@ -374,6 +374,22 @@ export class StockTerminalService {
     }
   }
 
+  /**
+   * FinBERT 情绪引擎状态（T5-4 审计 M12）：情绪标签「口径来源」提示用。
+   * 未启用时（OSS 默认 FINBERT_DEVICE=-1）情绪标签=纯词典法，UI 须如实标注；
+   * 失败/未知返回 null——提示只是注解，链路不通时不打扰（宁缺勿假）。
+   */
+  async getFinbertStatus(): Promise<{ use_finbert: boolean; available: boolean; tip: string } | null> {
+    try {
+      const resp = await this.client.get('/news/enrichment/finbert-status');
+      const d = resp.data?.data ?? resp.data;
+      if (!d || typeof d.use_finbert !== 'boolean') return null;
+      return { use_finbert: d.use_finbert, available: !!d.available, tip: String(d.tip ?? '') };
+    } catch {
+      return null;
+    }
+  }
+
   async getAiBacktest(symbol: string, hint = ''): Promise<any> {
     const resp = await this.client.get('/stock-terminal/ai-backtest', { params: { symbol, hint }, timeout: 60000 });
     return resp.data?.data;

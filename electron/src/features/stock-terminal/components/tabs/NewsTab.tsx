@@ -66,6 +66,16 @@ function EventTags({ tags }: { tags: NewsItem['event_tags'] }) {
 export function NewsTab({ symbol }: { symbol: string }) {
   const [items, setItems] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(false);
+  // FinBERT 状态（T5-4 审计 M12）：未启用时情绪标签=纯词典法，须如实标注口径；未知则不标注
+  const [finbertOff, setFinbertOff] = useState(false);
+
+  useEffect(() => {
+    let c = false;
+    stockTerminalService.getFinbertStatus().then(s => {
+      if (!c && s) setFinbertOff(s.use_finbert === false);
+    });
+    return () => { c = true; };
+  }, []);
 
   useEffect(() => {
     if (!symbol) return;
@@ -125,6 +135,14 @@ export function NewsTab({ symbol }: { symbol: string }) {
             <ExternalLink className="w-3 h-3 text-slate-300 group-hover:text-blue-400 shrink-0 mt-1" />
           </a>
         ))}
+        {finbertOff && items.length > 0 && (
+          <div
+            className="pt-1 pb-0.5 text-center text-[10px] text-slate-400"
+            title="情绪标签由金融词典法生成（FinBERT 未启用）。可在「管理后台 → 系统设置」开启 FinBERT+词典融合。"
+          >
+            情绪标签 = 金融词典法口径（FinBERT 未启用）
+          </div>
+        )}
       </div>
     </Spin>
   );
