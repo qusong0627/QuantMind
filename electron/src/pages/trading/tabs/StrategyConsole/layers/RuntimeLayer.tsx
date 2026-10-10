@@ -231,7 +231,7 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                                 )}
                             </div>
                         )}
-                        <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4">
+                        <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4 flex flex-col">
                             <div className="flex items-center justify-between mb-2.5">
                                 <span className="text-sm font-black text-slate-700">任务汇报</span>
                                 {task && (
@@ -240,7 +240,7 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                                     </span>
                                 )}
                             </div>
-                            <div className="grid grid-cols-3 gap-2.5 text-center">
+                            <div className="grid grid-cols-3 gap-2.5 text-center flex-1 content-center">
                                 <div className="rounded-xl bg-emerald-50 border border-emerald-100 py-3 px-2">
                                     <div className="text-xs font-bold text-emerald-600/80 mb-0.5">成功</div>
                                     <div className="text-xl font-black text-emerald-700">{success}</div>
