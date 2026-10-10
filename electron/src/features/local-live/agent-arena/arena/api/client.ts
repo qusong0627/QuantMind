@@ -104,6 +104,9 @@ export interface LogLine {
   kind?: string;
   usage?: LogUsage | null;
   new_messages?: { role?: string; content?: string }[];
+  /** 本轮的数据缺口标记（QuantMind 侧写入；当前取值 'account_unreachable'）。
+   *  AI 生成的分析若缺原料，卡片必须显式挂横幅——不靠正文文本刮擦。 */
+  data_gaps?: string[];
 }
 
 /** /agents/{name}/trades 返回：顶层 action/symbol/amount/cash_after（price/notional 由后端重算） */

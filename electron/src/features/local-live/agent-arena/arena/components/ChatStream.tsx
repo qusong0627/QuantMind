@@ -8,6 +8,10 @@ import { FillLike, renderActionTags } from '../utils/actionTags';
 import { parseAnalysis } from '../utils/parseAnalysis';
 import { ProtoSpec, isGateAgent, protoSpecOf, protoSummary } from '../utils/newsProtocol';
 import NewsProtocolView from './NewsProtocolView';
+import {
+  COMPLIANCE_AI_GENERATED_TEXT,
+  ComplianceStrip,
+} from '../../../../../components/shared/compliance/ComplianceChrome';
 import { asUpdater } from '../reactCompat';
 
 /** 一个分析回合：单条日志（一次 LLM 分析 = user prompt + assistant 总结） */
@@ -20,6 +24,20 @@ interface MixedRound {
   ts: string | null;
   user: string;
   thought: string;
+  /** 本轮数据缺口（分析端写入日志条目；'account_unreachable' = 桥挂无账户数据） */
+  dataGaps?: string[];
+}
+
+/** 模型对话的合规尾注：AI 生成提示 + 统一免责（文案走 compliance 单一来源，勿抄字面量）。 */
+function McDisclaimer() {
+  return (
+    <div className="mc-disclaimer border-t-2 border-black pt-2">
+      <div className="mc-ai-note font-mono text-[10px] leading-4 text-slate-500">
+        {COMPLIANCE_AI_GENERATED_TEXT}
+      </div>
+      <ComplianceStrip className="mt-0.5" />
+    </div>
+  );
 }
 
 /** 模型对话 — 全部模型混合流：
@@ -78,6 +96,9 @@ export default function ChatStream({
             cur.thought += (cur.thought ? '\n\n' : '') + content;
             if (!cur.ts) cur.ts = lineTs;
           }
+          if (line.data_gaps?.length && cur) {
+            cur.dataGaps = [...new Set([...(cur.dataGaps ?? []), ...line.data_gaps])];
+          }
         }
       }
       flush();
@@ -121,7 +142,13 @@ export default function ChatStream({
   /** 四段式解析（总结/链路/决策/推理），与 rounds 对齐 */
   const parsed = useMemo(() => rounds.map((r) => parseAnalysis(r.thought)), [rounds]);
 
-  if (!rounds.length) return <div className="empty-state">暂无分析记录</div>;
+  if (!rounds.length)
+    return (
+      <div className="mc-list">
+        <div className="empty-state">暂无分析记录</div>
+        <McDisclaimer />
+      </div>
+    );
 
   return (
     <div className="mc-list">
@@ -171,6 +198,14 @@ export default function ChatStream({
               <span className="mc-date">{r.ts ? r.ts.slice(5, 16) : '—'}</span>
               <span className={`mc-expand ${isOpen ? 'open' : ''}`}>{isOpen ? '▼' : '▶'}</span>
             </div>
+            {r.dataGaps?.includes('account_unreachable') && (
+              <div
+                className="mc-gap-banner border-b-2 border-black bg-amber-100 px-3.5 py-1.5 font-mono text-[11px] leading-4 text-amber-900"
+                role="alert"
+              >
+                ⚠️ 本轮无实盘账户数据（桥不可达）：分析仅基于新闻面，未点评持仓
+              </div>
+            )}
             <div className="mc-summary"><span className="mc-sum-label">总结</span><span className="mc-sum-text">
                   {isReview
                     ? '盘后复盘：展开查看逐笔归因 / 行为审计 / 明日预案'
@@ -313,6 +348,7 @@ export default function ChatStream({
           </div>
         );
       })}
+      <McDisclaimer />
     </div>
   );
 }

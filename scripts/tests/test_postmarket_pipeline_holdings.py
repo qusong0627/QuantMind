@@ -1,6 +1,6 @@
-"""盘后链持仓源的单测（**宿主侧**运行）——审计 H1「复盘读僵尸账本」的回归闸。
+"""盘后链持仓源的单测——审计 H1「复盘读僵尸账本」的回归闸。
 
-跑法（``scripts/`` 不在容器挂载里，容器里跑不了）::
+跑法（scripts/ 是 bind mount，宿主/容器都可；容器：``docker exec -w /app``）::
 
     python3 -m pytest scripts/tests/ -q
 

@@ -11,6 +11,13 @@
 代码；QM 的下单走决策轮/信号链，与对话轮解耦（上游「时段内可真下单」语义
 不在此恢复）。
 
+真话纪律（T3-2，审计 C5/H13）：
+* **桥挂 = 无账户模板**：没有账户数据时提示词**禁止要求点评持仓**（也不许模型
+  编造持仓/账户数字），并给日志落 ``data_gaps=['account_unreachable']`` 机器
+  可读标记 → 前端卡片挂「无实盘账户数据」横幅；
+* **截断不落盘**：``finish_reason=='length'`` 的回复整轮作废（重试 1 次后仍截断
+  即放弃并如实报错）——半截分析混进「模型对话」与完整分析无法区分。
+
 用法：
     python3 scripts/live_model_analysis.py                 # 全部模型（名册）
     python3 scripts/live_model_analysis.py --agents deepseek-v4-flash
@@ -162,14 +169,31 @@ def _news_block() -> str:
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-def build_user_content(env: dict[str, str]) -> str:
-    """拼账户 + 持仓 + 新闻的提示词正文（供所有模型共用）。"""
+def build_user_content(
+    env: dict[str, str],
+    *,
+    account_reader=None,
+    price_reader=None,
+) -> tuple[str, list[str]]:
+    """拼账户 + 持仓 + 新闻的提示词正文（供所有模型共用）。
+
+    返回 ``(正文, data_gaps)``——``data_gaps`` 是**机器可读的数据缺口标记**
+    （当前唯一取值 ``account_unreachable``），随日志落盘供前端挂横幅；提示词
+    同时降级为「无账户模板」（**绝不要求点评持仓**，C5：编出来的持仓点评比
+    不分析更坏）。
+
+    ``account_reader``/``price_reader`` 缺省走真实桥；测试注入替身。
+    """
+    read_account = account_reader or _bridge_account
+    read_price = price_reader or _bridge_price
     now = datetime.now(CN_TZ)
+    gaps: list[str] = []
     parts = [
         f"【时间】{now.strftime('%Y-%m-%d %H:%M')}（北京时间，{_session_label(now)}）"
     ]
 
-    acct = _bridge_account(env)
+    acct = read_account(env)
+    has_positions = False
     if acct:
         asset = acct.get("asset") or {}
         positions = acct.get("positions") or []
@@ -179,6 +203,7 @@ def build_user_content(env: dict[str, str]) -> str:
             f"｜ 持仓市值 {asset.get('market_value', '?')}"
         )
         if positions:
+            has_positions = True
             rows = [
                 "【当前持仓】",
                 "| 代码 | 名称 | 持仓 | 可用 | 成本 | 现价 | 浮动盈亏 |",
@@ -190,7 +215,7 @@ def build_user_content(env: dict[str, str]) -> str:
                 total = p.get("total_volume")
                 avail = p.get("available_volume")
                 cost = float(p.get("cost_price") or 0)
-                last = _bridge_price(env, code) if code else 0.0
+                last = read_price(env, code) if code else 0.0
                 if last > 0 and cost > 0:
                     pnl = f"{(last / cost - 1) * 100:+.2f}%"
                     last_s = f"{last:.2f}"
@@ -203,6 +228,7 @@ def build_user_content(env: dict[str, str]) -> str:
         else:
             parts.append("【当前持仓】空仓")
     else:
+        gaps.append("account_unreachable")
         parts.append("【实盘账户】桥不可达，本轮无账户/持仓数据（只按新闻面分析）")
 
     news = _news_block()
@@ -210,14 +236,50 @@ def build_user_content(env: dict[str, str]) -> str:
         parts.append("【当日新闻分子】\n" + news)
 
     parts.append(
-        "【要求】围绕上述实盘账户给出本轮盘中分析：\n"
-        "1) 逐一点评持仓（结合成本与现价）；\n"
-        "2) 结合新闻面指出风险与机会；\n"
-        "3) 给出操作倾向（加仓/减仓/持有）与触发条件。\n"
+        _requirement_block(has_account=bool(acct), has_positions=has_positions)
+    )
+    return "\n\n".join(parts), gaps
+
+
+def _requirement_block(*, has_account: bool, has_positions: bool) -> str:
+    """尾段要求模板——**随数据齐缺三态降级**（C5 核心）。
+
+    无账户数据时逐字禁止「点评持仓/编造持仓」：桥挂的轮次只许按新闻面说话。
+    """
+    tail = (
         "输出中文 markdown，简洁、先结论后理由；你的输出展示在实盘看板的「模型对话」里，"
         "只输出观点与建议（本系统不会据此自动下单）。"
     )
-    return "\n\n".join(parts)
+    if not has_account:
+        return (
+            "【要求】本轮**没有**实盘账户与持仓数据（桥不可达），给出本轮盘中分析：\n"
+            "1) **禁止**点评持仓、禁止编造任何持仓或账户数字——你没有这些数据；\n"
+            "2) 只按上述新闻面分析大盘与板块的风险与机会；\n"
+            "3) 明确说明本轮结论缺少账户上下文，仅供参考。\n" + tail
+        )
+    if not has_positions:
+        return (
+            "【要求】账户当前**空仓**（无持仓），给出本轮盘中分析：\n"
+            "1) 不要点评持仓——当前没有持仓，也禁止编造；\n"
+            "2) 结合新闻面指出风险与机会；\n"
+            "3) 如认为值得关注，给出候选方向与入场触发条件（仅为观察，不是指令）。\n" + tail
+        )
+    return (
+        "【要求】围绕上述实盘账户给出本轮盘中分析：\n"
+        "1) 逐一点评持仓（结合成本与现价）；\n"
+        "2) 结合新闻面指出风险与机会；\n"
+        "3) 给出操作倾向（加仓/减仓/持有）与触发条件。\n" + tail
+    )
+
+
+class TruncatedOutputError(RuntimeError):
+    """输出被 max_tokens 截断（与 ``news_brief.TruncatedOutputError`` 同语义）：
+    半截分析混进「模型对话」与完整分析无法区分，**整轮作废、绝不落盘**。"""
+
+    def __init__(self, content: str, usage: dict | None):
+        super().__init__("输出被 max_tokens 截断，整轮作废")
+        self.content = content
+        self.usage = usage
 
 
 def call_model(
@@ -259,17 +321,23 @@ def call_model(
             )
             resp.raise_for_status()
             data = resp.json()
-            msg = (data.get("choices") or [{}])[0].get("message", {}) or {}
+            choice = (data.get("choices") or [{}])[0]
+            msg = choice.get("message", {}) or {}
             content = (
                 str(msg.get("content") or "").strip()
                 or str(msg.get("reasoning_content") or "").strip()
             )
+            finish = str(choice.get("finish_reason") or "")
             usage = data.get("usage") or None
             if usage:
                 usage = {
                     k: int(usage.get(k) or 0)
                     for k in ("prompt_tokens", "completion_tokens", "total_tokens")
                 }
+            # max_tokens 截断：半截答案（含 reasoning 兜底捞出的思考草稿）整轮作废
+            # ——重试 1 次后仍截断即放弃，绝不落盘（照 news_brief.call_llm 的 TRUNC 语义）
+            if finish == "length":
+                raise TruncatedOutputError(content, usage)
             if not content:
                 raise RuntimeError("空回复")
             return content, usage
@@ -280,8 +348,18 @@ def call_model(
     raise last_exc  # type: ignore[misc]
 
 
-def append_log(user: str, content: str, sig: str, usage: dict | None = None) -> Path:
-    """落盘对话日志（与 news_brief.append_log 同结构 → 前端直接可读）。"""
+def append_log(
+    user: str,
+    content: str,
+    sig: str,
+    usage: dict | None = None,
+    data_gaps: list[str] | None = None,
+) -> Path:
+    """落盘对话日志（与 news_brief.append_log 同结构 → 前端直接可读）。
+
+    ``data_gaps`` 随条目落盘（前端据此在卡片挂「无实盘账户数据」横幅）；
+    截断轮**根本不会走到这里**（call_model 直接 raise）。
+    """
     now = datetime.now(CN_TZ)
     log_dir = LOG_DIR / sig / "log" / now.strftime("%Y-%m-%d")
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -295,6 +373,8 @@ def append_log(user: str, content: str, sig: str, usage: dict | None = None) -> 
     }
     if usage:
         entry["usage"] = usage
+    if data_gaps:
+        entry["data_gaps"] = list(data_gaps)
     path = log_dir / "log.jsonl"
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -327,13 +407,18 @@ def main() -> int:
             print("没有可运行的模型")
             return 2
 
-        user_content = build_user_content(env)
+        user_content, data_gaps = build_user_content(env)
+        if data_gaps:
+            print(
+                "⚠️ 数据缺口：" + ",".join(data_gaps)
+                + "（提示词已降级为无账户模板，日志将带缺口标记）"
+            )
         ok, failed = [], []
         for sig in runnable:
             _, model = ROSTER[sig]
             try:
                 content, usage = call_model(env, sig, model, user_content)
-                append_log(user_content, content, sig, usage)
+                append_log(user_content, content, sig, usage, data_gaps)
                 ok.append(f"{sig} {len(content)}字")
                 print(f"✅ {sig} 完成（{len(content)} 字）")
             except Exception as e:  # noqa: BLE001 单模型失败不挡其余

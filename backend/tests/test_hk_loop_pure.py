@@ -672,3 +672,99 @@ class TestRunAnalysis:
 
         titles = [t for t, _, _ in no_real_qq]
         assert any("港股盘中分析" in t for t in titles), "每轮必发一条摘要（用户裁决的事件类型）"
+
+
+class TestCallModelTruncation:
+    """H13（2026-10-10）：``finish_reason=='length'`` 的半截分析不许冒充完整分析。
+
+    A 股同款修复在 ``scripts/tests/test_live_model_analysis.py``；港股这里是同一缺陷
+    类的第二实例（审计未点名，随 T3-2 主动补齐）。降级链：截断 → 重试 1 次 → 仍截断
+    则抛错，调用侧落 ``fallback_summary`` 数据摘要（对话不断流，但绝无半截正文）。
+    """
+
+    ENV = {"OPENAI_API_BASE": "http://fake", "OPENAI_API_KEY": "k"}
+
+    @staticmethod
+    def _payload(finish: str, content: str = "分析正文") -> dict:
+        return {
+            "choices": [{"message": {"content": content}, "finish_reason": finish}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    def _patch_post(self, monkeypatch, payloads: list[dict]) -> list[str]:
+        calls: list[str] = []
+
+        class _Resp:
+            def __init__(self, payload: dict):
+                self._payload = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._payload
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            return _Resp(payloads[min(len(calls) - 1, len(payloads) - 1)])
+
+        monkeypatch.setattr("requests.post", fake_post)
+        return calls
+
+    def test_length_finish_retries_once_then_raises_with_content(self, monkeypatch):
+        calls = self._patch_post(
+            monkeypatch, [self._payload("length"), self._payload("length")]
+        )
+
+        with pytest.raises(hk.TruncatedOutputError) as ei:
+            hk.call_model(self.ENV, "deepseek-v4-flash", "deepseek-v4-flash", "p", "s")
+
+        assert len(calls) == 2  # 恰好重试一次
+        assert ei.value.content == "分析正文"  # 原文随异常携带供审计
+
+    def test_truncated_then_complete_retry_recovers(self, monkeypatch):
+        calls = self._patch_post(
+            monkeypatch, [self._payload("length"), self._payload("stop", "完整分析")]
+        )
+
+        content, usage = hk.call_model(
+            self.ENV, "deepseek-v4-flash", "deepseek-v4-flash", "p", "s"
+        )
+
+        assert content == "完整分析"
+        assert len(calls) == 2
+        assert usage["total_tokens"] == 15
+
+    def test_run_analysis_degrades_truncation_to_data_digest(
+        self, monkeypatch, no_real_qq
+    ):
+        """截断轮：落盘的是数据摘要（LLM 分析不可用），半截正文一个字都不许进日志。"""
+        sim = {
+            "total_asset": 120000.0,
+            "cash": 30000.0,
+            "positions": {
+                "00700.HK": {"volume": 100, "cost": 350.0, "price": 380.0, "name": "腾讯控股"}
+            },
+        }
+        monkeypatch.setattr(hk, "fetch_account_both", lambda: (sim, ""), raising=False)
+        monkeypatch.setattr(
+            hk,
+            "fetch_snapshot",
+            lambda codes: {"00700.HK": {"last_price": 385.0, "day_chg": 1.1}},
+            raising=False,
+        )
+        monkeypatch.setattr(hk, "load_news", lambda names: [], raising=False)
+
+        def _truncate(*args, **kwargs):
+            raise hk.TruncatedOutputError("半截正文不该出现", None)
+
+        monkeypatch.setattr(hk, "call_model", _truncate, raising=False)
+
+        rc = hk.run_analysis(dry_run=True, agents=["deepseek-v4-flash"], ask_decisions=False)
+        assert rc == 2  # 该模型计失败
+
+        log = next(hk.DATA_DIR.glob("deepseek-v4-flash/log/*/log.jsonl"))
+        entry = json.loads(log.read_text(encoding="utf-8").strip())
+        assert "LLM 分析暂不可用" in entry["new_messages"][1]["content"]
+        assert "半截正文不该出现" not in entry["new_messages"][1]["content"]
+        assert entry.get("usage") is None  # 未调通 API 不计 token

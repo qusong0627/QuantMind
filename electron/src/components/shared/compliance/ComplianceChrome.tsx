@@ -14,6 +14,13 @@ export const COMPLIANCE_TOOL_BOUNDARY_TEXT =
 
 export const COMPLIANCE_HISTORY_TEXT = '历史数据与回测结果不代表未来收益。';
 
+/**
+ * AI 生成内容的免责句（与根目录 DISCLAIMER.md 同口径）。用于「模型对话」等
+ * **LLM 直接产出正文**的展示面：正文由模型生成，可能带错误或偏差，不等于事实。
+ */
+export const COMPLIANCE_AI_GENERATED_TEXT =
+  '本模块内容由 AI 自动生成，可能存在错误或偏差，仅供研究参考。';
+
 /** 注册页必须勾选的确认项文案（资质边界原句复用，勿另写一份） */
 export const COMPLIANCE_CONSENT_TEXT = `我已阅读并理解：${COMPLIANCE_TOOL_BOUNDARY_TEXT}`;
 

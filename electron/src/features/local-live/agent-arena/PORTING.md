@@ -1,7 +1,7 @@
 # arena → QuantMind 实盘栏 移植清单（自动生成，勿手改）
 
 - 源：`/home/zbox/quant-Trader/arena/src`（arena 仓库 bd228b7，2026-10-08T12:42:46+09:00，工作区 干净）
-- 生成时间：2026-10-08T07:56:45.034Z
+- 生成时间：2026-10-10T04:25:27.847Z
 - 重新同步：`node electron/src/features/local-live/agent-arena/tools/port-from-arena.mjs`
 
 ## 搬运的文件（68 个）
@@ -96,6 +96,13 @@
 - api/client.ts：A6-① 美股实盘注释 → 通道已下线
 - api/client.ts：A6-① fetchIbkrAccount 函数体 → 直接失败
 - api/client.ts：A6-① fetchIbkrOrders → 直接失败（不发请求）
+- api/client.ts：T3-2（审计 C5）：LogLine 增 data_gaps —— 数据缺口标记随日志条目走，横幅判据=字段存在（不靠正文刮擦）
+- components/ChatStream.tsx：T3-2：合规尾注引入宿主 compliance 单一来源组件（AI 生成提示 + 统一免责横条，勿抄字面量）
+- components/ChatStream.tsx：T3-2（审计 C5）：MixedRound 增 dataGaps 字段（跨行日志把缺口标记并进回合）+ McDisclaimer 合规尾注组件
+- components/ChatStream.tsx：T3-2（审计 C5）：缺口标记按日志行并进当前回合（去重）——A股单行含 user+assistant，标记挂在同一行也要能落到回合上
+- components/ChatStream.tsx：T3-2：空态也挂免责尾注（列表空时同样是 AI 展示面口径）
+- components/ChatStream.tsx：T3-2（审计 C5）：桥不可达轮挂「无实盘账户数据」横幅（判据=data_gaps 字段；常显不折叠），防 LLM 幻觉持仓点评被当事实读
+- components/ChatStream.tsx：T3-2：列表尾部挂 McDisclaimer（有分析记录时也出免责）
 - components/EquityChart.tsx：日终账本线（real-ledger-*）的 tooltip 尾注（2026-10-08）：该线是实盘账户金额序列，不带前缀会落到「虚拟净值（¥10万起步）」兜底文案（对 ¥91.8 万实账是假的）；dollar 口径下 ±% 是「自首个记录日」，把窗口写清楚
 - components/EquityChart.tsx：E1 成交标记 x 先换算到联合轴序号（nearestIdxOfTime 给的是本线序号）
 - components/EquityChart.tsx：E1 对账台阶标注的可见窗口判断同样换算联合轴序号
@@ -130,11 +137,11 @@
 - utils/channelStatus.ts：A6-③ 通道状态注释去 BayMax
 - utils/channelStatus.ts：A6-① ibkrChannel 注释与文案 →「已下线」
 - 函数式 setState 共 24 处裹 `asUpdater()`（本仓 tsc 的类型简化，运行时无影响）：
-  - `components/ChatStream.tsx:100 setOpen`
-  - `components/ChatStream.tsx:111 setSections`
-  - `components/ChatStream.tsx:197 setExp`
-  - `components/ChatStream.tsx:234 setExp`
-  - `components/ChatStream.tsx:301 setExp`
+  - `components/ChatStream.tsx:121 setOpen`
+  - `components/ChatStream.tsx:132 setSections`
+  - `components/ChatStream.tsx:232 setExp`
+  - `components/ChatStream.tsx:269 setExp`
+  - `components/ChatStream.tsx:336 setExp`
   - `components/CompConfigPanel.tsx:43 setDraft`
   - `components/ModelChat.tsx:166 setOpen`
   - `components/ModelChat.tsx:385 setFolded`

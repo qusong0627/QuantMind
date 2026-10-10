@@ -36,8 +36,8 @@ import {
 } from './set-wrap.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const DEST = path.resolve(HERE, '..', 'arena'); // 搬完的代码落在这里（arena/src 的镜像）
-const SRC = process.env.ARENA_SRC || '/home/zbox/quant-Trader/arena/src';
+export const DEST = path.resolve(HERE, '..', 'arena'); // 搬完的代码落在这里（arena/src 的镜像）
+export const SRC = process.env.ARENA_SRC || '/home/zbox/quant-Trader/arena/src';
 const OVERRIDES = path.resolve(HERE, 'overrides');
 const ARENA_REPO = path.resolve(SRC, '..', '..');
 /** JSX 上挂的类名（不含点） */
@@ -504,6 +504,53 @@ export const fetchFutuOrders = async (
     find: `                  if (pre < winStartIdx || post < 0 || post > winEndIdx) return diamond;`,
     replace: `                  // 同主标记：pre/post 是本线序号，先换算到联合轴序号再比可见窗口\n                  const uPre = pre >= 0 ? idxOf(l.points[pre].t) : -1;\n                  const uPost = post >= 0 ? idxOf(l.points[post].t) : -1;\n                  if (uPre < winStartIdx || uPost < 0 || uPost > winEndIdx) return diamond;`,
   },
+
+  // ===== T3-2（2026-10-10）盘中实况链（审计 C5/H13）：桥挂提示词降级 + 数据缺口横幅 + 合规尾注 =====
+  // 分析端（scripts/live_model_analysis.py）桥不可达时改写提示词（禁止编造持仓）并给
+  // 日志条目写 data_gaps=['account_unreachable']；展示端（本组补丁）据此挂横幅，
+  // 并给「模型对话」这个 LLM 直接产出正文的展示面补 AI 生成提示 + 统一免责。
+  {
+    file: 'api/client.ts',
+    why: 'T3-2（审计 C5）：LogLine 增 data_gaps —— 数据缺口标记随日志条目走，横幅判据=字段存在（不靠正文刮擦）',
+    find: `  new_messages?: { role?: string; content?: string }[];\n}`,
+    replace: `  new_messages?: { role?: string; content?: string }[];\n  /** 本轮的数据缺口标记（QuantMind 侧写入；当前取值 'account_unreachable'）。\n   *  AI 生成的分析若缺原料，卡片必须显式挂横幅——不靠正文文本刮擦。 */\n  data_gaps?: string[];\n}`,
+  },
+  {
+    file: 'components/ChatStream.tsx',
+    why: 'T3-2：合规尾注引入宿主 compliance 单一来源组件（AI 生成提示 + 统一免责横条，勿抄字面量）',
+    find: `import NewsProtocolView from './NewsProtocolView';\n`,
+    replace: `import NewsProtocolView from './NewsProtocolView';\nimport {\n  COMPLIANCE_AI_GENERATED_TEXT,\n  ComplianceStrip,\n} from '../../../../../components/shared/compliance/ComplianceChrome';\n`,
+  },
+  {
+    file: 'components/ChatStream.tsx',
+    why: 'T3-2（审计 C5）：MixedRound 增 dataGaps 字段（跨行日志把缺口标记并进回合）+ McDisclaimer 合规尾注组件',
+    find: `  ts: string | null;\n  user: string;\n  thought: string;\n}\n`,
+    replace: `  ts: string | null;\n  user: string;\n  thought: string;\n  /** 本轮数据缺口（分析端写入日志条目；'account_unreachable' = 桥挂无账户数据） */\n  dataGaps?: string[];\n}\n\n/** 模型对话的合规尾注：AI 生成提示 + 统一免责（文案走 compliance 单一来源，勿抄字面量）。 */\nfunction McDisclaimer() {\n  return (\n    <div className="mc-disclaimer border-t-2 border-black pt-2">\n      <div className="mc-ai-note font-mono text-[10px] leading-4 text-slate-500">\n        {COMPLIANCE_AI_GENERATED_TEXT}\n      </div>\n      <ComplianceStrip className="mt-0.5" />\n    </div>\n  );\n}\n`,
+  },
+  {
+    file: 'components/ChatStream.tsx',
+    why: 'T3-2（审计 C5）：缺口标记按日志行并进当前回合（去重）——A股单行含 user+assistant，标记挂在同一行也要能落到回合上',
+    find: `          } else if (role === 'assistant' || role === 'ai') {\n            if (!cur) cur = { model: ag.name, modelId: ag.id, ts: lineTs, user: '', thought: '' };\n            cur.thought += (cur.thought ? '\\n\\n' : '') + content;\n            if (!cur.ts) cur.ts = lineTs;\n          }\n`,
+    replace: `          } else if (role === 'assistant' || role === 'ai') {\n            if (!cur) cur = { model: ag.name, modelId: ag.id, ts: lineTs, user: '', thought: '' };\n            cur.thought += (cur.thought ? '\\n\\n' : '') + content;\n            if (!cur.ts) cur.ts = lineTs;\n          }\n          if (line.data_gaps?.length && cur) {\n            cur.dataGaps = [...new Set([...(cur.dataGaps ?? []), ...line.data_gaps])];\n          }\n`,
+  },
+  {
+    file: 'components/ChatStream.tsx',
+    why: 'T3-2：空态也挂免责尾注（列表空时同样是 AI 展示面口径）',
+    find: `  if (!rounds.length) return <div className="empty-state">暂无分析记录</div>;`,
+    replace: `  if (!rounds.length)\n    return (\n      <div className="mc-list">\n        <div className="empty-state">暂无分析记录</div>\n        <McDisclaimer />\n      </div>\n    );`,
+  },
+  {
+    file: 'components/ChatStream.tsx',
+    why: 'T3-2（审计 C5）：桥不可达轮挂「无实盘账户数据」横幅（判据=data_gaps 字段；常显不折叠），防 LLM 幻觉持仓点评被当事实读',
+    find: `            </div>\n            <div className="mc-summary"><span className="mc-sum-label">总结</span><span className="mc-sum-text">`,
+    replace: `            </div>\n            {r.dataGaps?.includes('account_unreachable') && (\n              <div\n                className="mc-gap-banner border-b-2 border-black bg-amber-100 px-3.5 py-1.5 font-mono text-[11px] leading-4 text-amber-900"\n                role="alert"\n              >\n                ⚠️ 本轮无实盘账户数据（桥不可达）：分析仅基于新闻面，未点评持仓\n              </div>\n            )}\n            <div className="mc-summary"><span className="mc-sum-label">总结</span><span className="mc-sum-text">`,
+  },
+  {
+    file: 'components/ChatStream.tsx',
+    why: 'T3-2：列表尾部挂 McDisclaimer（有分析记录时也出免责）',
+    find: `        );\n      })}\n    </div>\n  );\n}\n`,
+    replace: `        );\n      })}\n      <McDisclaimer />\n    </div>\n  );\n}\n`,
+  },
 ];
 
 // ────────────────────────────── 闭包解析 ──────────────────────────────
@@ -525,7 +572,7 @@ function resolveRel(fromRel, spec) {
   return null;
 }
 
-function buildClosure() {
+export function buildClosure() {
   const seen = new Set();
   const missing = [];
   const queue = [...ENTRIES];
@@ -552,7 +599,7 @@ function buildClosure() {
 
 const KEYFRAMES_RE = /(-\s*)?animation(-name)?\s*:/;
 
-function collectKeyframes(cssFiles) {
+export function collectKeyframes(cssFiles) {
   const names = new Set();
   for (const { rel } of cssFiles) {
     const css = fs.readFileSync(path.join(SRC, rel), 'utf8');
@@ -617,6 +664,32 @@ function applyPatches(rel, code) {
   return { code, applied };
 }
 
+/**
+ * 逐文件渲染最终落盘内容。**主流程与移植一致性测试共用同一实现** —— 测试要是自己
+ * 抄一份转换链，两处迟早漂移，闸门就变成了摆设。
+ */
+export async function renderFile(rel, kfMap) {
+  if (OVERRIDE_FILES.has(rel)) {
+    const base = path.basename(rel);
+    const tplAbs = path.join(OVERRIDES, `${base}.tpl`);
+    const overrideAbs = fs.existsSync(tplAbs) ? tplAbs : path.join(OVERRIDES, base);
+    return {
+      content: fs.readFileSync(overrideAbs, 'utf8'),
+      patchLog: [`${rel} ← tools/overrides/${path.basename(overrideAbs)}（整文件替身）`],
+      wrapLog: [],
+    };
+  }
+  if (rel.endsWith('.css')) {
+    const scoped = await scopeCss(fs.readFileSync(path.join(SRC, rel), 'utf8'), kfMap);
+    const header = `/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 ${ROOT_SEL}，勿手改 */\n`;
+    return { content: header + scoped, patchLog: [], wrapLog: [] };
+  }
+  const { code, applied } = applyPatches(rel, fs.readFileSync(path.join(SRC, rel), 'utf8'));
+  const { code: wrapped, sites } = wrapFunctionalSetters(code, rel);
+  const final = sites.length ? ensureCompatImport(wrapped, compatSpec(rel)) : wrapped;
+  return { content: final, patchLog: applied.map((why) => `${rel}：${why}`), wrapLog: sites };
+}
+
 // ────────────────────────────── 主流程 ──────────────────────────────
 
 function arenaRevision() {
@@ -661,31 +734,10 @@ async function main() {
   for (const rel of files) {
     const destAbs = path.join(DEST, rel);
     fs.mkdirSync(path.dirname(destAbs), { recursive: true });
-
-    if (OVERRIDE_FILES.has(rel)) {
-      const base = path.basename(rel);
-      const tplAbs = path.join(OVERRIDES, `${base}.tpl`);
-      const overrideAbs = fs.existsSync(tplAbs) ? tplAbs : path.join(OVERRIDES, base);
-      fs.copyFileSync(overrideAbs, destAbs);
-      patchLog.push(`${rel} ← tools/overrides/${path.basename(overrideAbs)}（整文件替身）`);
-      written++;
-      continue;
-    }
-
-    if (rel.endsWith('.css')) {
-      const scoped = await scopeCss(fs.readFileSync(path.join(SRC, rel), 'utf8'), kfMap);
-      const header = `/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 ${ROOT_SEL}，勿手改 */\n`;
-      fs.writeFileSync(destAbs, header + scoped);
-      written++;
-      continue;
-    }
-
-    const { code, applied } = applyPatches(rel, fs.readFileSync(path.join(SRC, rel), 'utf8'));
-    const { code: wrapped, sites } = wrapFunctionalSetters(code, rel);
-    const final = sites.length ? ensureCompatImport(wrapped, compatSpec(rel)) : wrapped;
-    fs.writeFileSync(destAbs, final);
-    applied.forEach((why) => patchLog.push(`${rel}：${why}`));
-    sites.forEach((s) => wrapLog.push(s));
+    const rendered = await renderFile(rel, kfMap);
+    fs.writeFileSync(destAbs, rendered.content);
+    patchLog.push(...rendered.patchLog);
+    wrapLog.push(...rendered.wrapLog);
     written++;
   }
 
@@ -751,4 +803,7 @@ ${wrapLog.map((l) => `  - \`${l}\``).join('\n')}
   patchLog.forEach((l) => console.log(`   · ${l}`));
 }
 
-await main();
+// 直接运行（node port-from-arena.mjs）才执行主流程；被 import（移植一致性测试）时只暴露函数。
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}

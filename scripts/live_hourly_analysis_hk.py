@@ -487,6 +487,16 @@ def system_prompt_for(model: str, mode: dict) -> str:
 # ---------------------------------------------------------------- LLM / 落盘
 
 
+class TruncatedOutputError(RuntimeError):
+    """输出被 max_tokens 截断（与 A 股 ``live_model_analysis`` / ``news_brief`` 同语义）：
+    半截分析不许冒充完整分析——抛错走调用侧的降级链（fallback_summary 数据摘要）。"""
+
+    def __init__(self, content: str, usage: dict | None):
+        super().__init__("输出被 max_tokens 截断，整轮作废")
+        self.content = content
+        self.usage = usage
+
+
 def call_model(
     env: dict[str, str], sig: str, model: str, user_content: str, system: str
 ) -> tuple[str, dict | None]:
@@ -523,17 +533,22 @@ def call_model(
             )
             resp.raise_for_status()
             data = resp.json()
-            msg = (data.get("choices") or [{}])[0].get("message", {}) or {}
+            choice = (data.get("choices") or [{}])[0]
+            msg = choice.get("message", {}) or {}
             content = (
                 str(msg.get("content") or "").strip()
                 or str(msg.get("reasoning_content") or "").strip()
             )
+            finish = str(choice.get("finish_reason") or "")
             usage = data.get("usage") or None
             if usage:
                 usage = {
                     k: int(usage.get(k) or 0)
                     for k in ("prompt_tokens", "completion_tokens", "total_tokens")
                 }
+            # max_tokens 截断：半截分析（含 reasoning 兜底捞出的思考草稿）整轮作废
+            if finish == "length":
+                raise TruncatedOutputError(content, usage)
             if not content:
                 raise RuntimeError("空回复")
             return content, usage
