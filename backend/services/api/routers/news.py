@@ -26,6 +26,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
+from fastapi.security import HTTPAuthorizationCredentials
 
 from backend.shared.trusted_headers import sanitize_forward_headers
 from backend.services.api.user_app.middleware.auth import (
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 # - public_router 浏览器直取的资源，无法携带 Authorization 头，只能保持公开：
 #                 /health、/rsshub/*（连接器图标以 <img src> 加载）、
 #                 /huntly-ui*（新标签页直接打开的 Huntly UI 及其内部 API 调用）。
+#                 Huntly UI 的 **写方法**（POST/PUT/PATCH/DELETE）例外：在处理器内
+#                 要求登录态（2026-10-10 审计 C3——此前任何无凭据客户端都能借
+#                 后端注入的管理员会话写 Huntly）；内嵌 UI 的写请求由重写脚本注入
+#                 localStorage 里的 access_token 携带 JWT，读资源保持公开。
 router = APIRouter(
     prefix="/api/v1/news",
     tags=["News"],
@@ -1951,6 +1956,8 @@ async def admin_create_tag(payload: dict, _admin: dict = Depends(require_admin))
     event_tag = (payload or {}).get("event_tag") or None
     weight = float((payload or {}).get("weight") or 1.0)
     note = (payload or {}).get("note") or None
+    import psycopg2  # 局部导入模式（同 _pg_conn）；except 引用它，缺导入会 NameError
+
     try:
         with _pg_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -1980,6 +1987,8 @@ async def admin_update_tag(tag_id: int, payload: dict, _admin: dict = Depends(re
     if not fields:
         raise HTTPException(status_code=400, detail="无更新字段")
     params.append(tag_id)
+    import psycopg2  # 局部导入模式（同 _pg_conn）；except 引用它，缺导入会 NameError
+
     try:
         with _pg_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -2060,10 +2069,29 @@ _HUNTLY_UI_REWRITE_SCRIPT = r"""<script>
     if(u.charAt(0)==='/'&&u.indexOf('/api/')===0)return P+u.slice(5);
     return u;
   }
+  function needsAuth(u){return typeof u==='string'&&(u.indexOf('/api/')===0||u.indexOf(P)===0);}
+  function tok(){try{return localStorage.getItem('access_token')||''}catch(e){return ''}}
+  // 代理的写方法要求登录态：把 QuantMind JWT 带进内嵌 UI 的请求
+  function authHeaders(h){
+    var t=tok();
+    if(!t)return h;
+    try{
+      var H=new Headers(h||{});
+      if(!H.has('Authorization'))H.set('Authorization','Bearer '+t);
+      return H;
+    }catch(e){return h}
+  }
   var of=window.fetch;
-  window.fetch=function(u,o){return of(rw(u),o);};
+  window.fetch=function(u,o){
+    if(needsAuth(u)){o=o||{};o.headers=authHeaders(o.headers);}
+    return of(rw(u),o);
+  };
   var ox=XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open=function(m,u){return ox.call(this,m,rw(u));};
+  XMLHttpRequest.prototype.open=function(m,u){
+    var r=ox.call(this,m,rw(u));
+    if(needsAuth(u)){try{var t=tok();if(t)this.setRequestHeader('Authorization','Bearer '+t);}catch(e){}}
+    return r;
+  };
   var _ws=window.WebSocket;
   window.WebSocket=function(u,p){if(typeof u==='string'&&u.indexOf('/api/')===0)u=P+u.slice(5);return new _ws(u,p);};
   window.WebSocket.prototype=_ws.prototype;
@@ -2123,8 +2151,29 @@ async def _huntly_ui_proxy_static(path: str, accept: str) -> Response:
     return Response(content=body, status_code=resp.status_code, headers=resp_headers)
 
 
+#: Huntly UI 代理中视为「写」的方法——要求登录态后才注入管理员会话转发。
+_HUNTLY_UI_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
 async def _huntly_ui_proxy_api(request: Request) -> Response:
-    """代理 /api/v1/news/huntly-ui/api/* → Huntly /api/*（带 JWT 会话）。"""
+    """代理 /api/v1/news/huntly-ui/api/* → Huntly /api/*（带 JWT 会话）。
+
+    写方法要求登录态（2026-10-10 审计 C3）：此前该前缀全方法匿名可达，任何
+    无凭据客户端都能借后端注入的管理员会话写 Huntly（增删连接器/数据）。
+    读方法保持公开——新标签页 SPA 的资源加载无法携带 Authorization。
+    内嵌 UI 的写请求由 `_HUNTLY_UI_REWRITE_SCRIPT` 注入 localStorage 的
+    access_token 携带 JWT。
+    """
+    if request.method in _HUNTLY_UI_WRITE_METHODS:
+        auth = request.headers.get("authorization", "")
+        creds = (
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials=auth[7:])
+            if auth.lower().startswith("bearer ") and len(auth) > 7
+            else None
+        )
+        # 匿名/无效凭据在此 401，不再落到下面的管理员会话注入
+        await get_current_user(request, creds)
+
     sub = request.url.path
     prefix = "/api/v1/news/huntly-ui/api/"
     idx = sub.find(prefix)

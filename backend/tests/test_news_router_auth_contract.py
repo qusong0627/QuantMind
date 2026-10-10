@@ -197,3 +197,61 @@ def test_rsshub_proxy_rejects_path_escape() -> None:
     body = src[start : start + 1400]
     assert '".."' in body or "'..'" in body, "rsshub 代理未拦截 .. 路径穿越"
     assert "://" in body, "rsshub 代理未拦截带 scheme 的绝对地址"
+
+
+def _module_assign_source(src: str, tree: ast.AST, name: str) -> str | None:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            return ast.get_source_segment(src, node)
+    return None
+
+
+def test_huntly_ui_writes_require_login() -> None:
+    """Huntly UI 代理的写方法必须要求登录态（审计 C3）：
+
+    此前该前缀全方法匿名可达，任何无凭据客户端都能借后端注入的管理员会话
+    写 Huntly（增删连接器/数据）。读方法保持公开（新标签页 SPA 资源加载）。
+    """
+    src = NEWS_PY.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    write_methods = _module_assign_source(src, tree, "_HUNTLY_UI_WRITE_METHODS")
+    assert write_methods, "未定义 _HUNTLY_UI_WRITE_METHODS——写方法集合缺失"
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        assert method in write_methods, f"写方法集合缺少 {method}"
+
+    handler = None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_huntly_ui_proxy_api"
+        ):
+            handler = ast.get_source_segment(src, node)
+    assert handler, "未找到 _huntly_ui_proxy_api"
+    assert "get_current_user" in handler, "Huntly UI 写方法未要求登录态"
+    assert 'startswith("bearer ")' in handler or "startswith('bearer ')" in handler, (
+        "写门未从 Authorization: Bearer 头解析凭据"
+    )
+
+
+def test_huntly_ui_rewrite_injects_access_token() -> None:
+    """内嵌 UI 重写脚本必须把 localStorage 的 access_token 注入请求头。
+
+    后端写门要求登录态后，内嵌 UI 的写请求（fetch/XHR）若不携带 JWT 会 401；
+    重写脚本运行在 QuantMind 同源页面里，可直读登录态。
+    """
+    tree = ast.parse(NEWS_PY.read_text(encoding="utf-8"))
+    script = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_HUNTLY_UI_REWRITE_SCRIPT"
+            for t in node.targets
+        ):
+            script = ast.literal_eval(node.value)
+    assert script, "未找到 _HUNTLY_UI_REWRITE_SCRIPT"
+    assert "access_token" in script, "重写脚本未注入 QuantMind JWT（写方法将 401）"
+    assert "Authorization" in script, "重写脚本未设置 Authorization 头"
+    assert "WebSocket" in script, "WS 重写丢失"
+    assert "/api/v1/news/huntly-ui/api/" in script, "API 路径重写丢失"
