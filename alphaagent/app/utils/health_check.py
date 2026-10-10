@@ -1,4 +1,5 @@
 import socket
+import uuid
 
 import docker
 
@@ -6,19 +7,31 @@ from alphaagent.log import logger
 
 
 def check_docker() -> None:
+    container = None
     try:
         client = docker.from_env()
         client.images.pull("hello-world")
-        container = client.containers.run("hello-world", detach=True)
+        container = client.containers.run(
+            "hello-world", detach=True, name=f"alphaagent-health-{uuid.uuid4().hex[:8]}"
+        )
         logs = container.logs().decode("utf-8")
         print(logs)
-        container.remove()
         logger.info(f"The docker status is normal")
     except docker.errors.DockerException as e:
         logger.error(f"An error occurred: {e}")
         logger.warning(
             f"Docker status is exception, please check the docker configuration or reinstall it. Refs: https://docs.docker.com/engine/install/ubuntu/."
         )
+    finally:
+        if container is not None:
+            try:
+                try:
+                    container.stop(timeout=5)
+                except Exception:
+                    pass
+                container.remove(force=True)
+            except Exception:
+                pass
 
 
 def is_port_in_use(port):

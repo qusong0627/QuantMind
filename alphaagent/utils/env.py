@@ -359,7 +359,9 @@ class DockerEnv(Env[DockerConf]):
             ),
         }
         try:
-            client.containers.run(self.conf.image, "nvidia-smi", **gpu_kwargs)
+            # 探针容器必须自清理：remove=True 使 daemon 在退出后自动删除，
+            # 否则每次因子挖掘都会残留一个 Exited 随机名容器。
+            client.containers.run(self.conf.image, "nvidia-smi", remove=True, **gpu_kwargs)
             logger.info("GPU Devices are available.")
         except docker.errors.APIError:
             return {}
@@ -388,6 +390,7 @@ class DockerEnv(Env[DockerConf]):
                 volumns[lp] = {"bind": rp, "mode": "rw"}
 
         log_output = ""
+        container = None
 
         try:
             container: docker.models.containers.Container = client.containers.run(
@@ -398,6 +401,7 @@ class DockerEnv(Env[DockerConf]):
                 detach=True,
                 working_dir=self.conf.mount_path,
                 # auto_remove=True, # remove too fast might cause the logs not to be get
+                name=f"alphaagent-{uuid.uuid4().hex[:12]}",
                 network=self.conf.network,
                 shm_size=self.conf.shm_size,
                 mem_limit=self.conf.mem_limit,  # Set memory limit
@@ -423,6 +427,7 @@ class DockerEnv(Env[DockerConf]):
             container.wait()
             container.stop()
             container.remove()
+            container = None
             return log_output
         except docker.errors.ContainerError as e:
             raise RuntimeError(f"Error while running the container: {e}")
@@ -430,6 +435,17 @@ class DockerEnv(Env[DockerConf]):
             raise RuntimeError("Docker image not found.")
         except docker.errors.APIError as e:
             raise RuntimeError(f"Error while running the container: {e}")
+        finally:
+            # 异常/中断路径也必须清理，否则残留 Exited 随机名容器。
+            if container is not None:
+                try:
+                    try:
+                        container.stop(timeout=5)
+                    except Exception:
+                        pass
+                    container.remove(force=True)
+                except Exception:
+                    pass
 
     def run(
         self,
