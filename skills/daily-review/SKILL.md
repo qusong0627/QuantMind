@@ -43,6 +43,7 @@ description: "A股每日复盘（专业版）— 基于 QuantDB 本地数据 + �
 cd <repo>/skills/daily-review/scripts
 python3 daily_review.py --date 20260814              # 指定日；不带 --date 则取最新交易日
 python3 daily_review.py --watch 601138.SH,600519.SH  # 可选：自选/持仓股必带
+python3 daily_review.py --watch-note "持仓源停更说明"  # 盘后流水线注入：该段可只含注记（快照停更/缺失时）
 python3 daily_review.py --model mdl_cn_train_xxx     # 可选：指定推理模型，默认每日推理模型(5eea5418)
 #   ↑ 模型推理信号自动查询 PG：昨日推理→今日信号命中率复盘 + 今日推理→明日信号 Top5；
 #     无推理 run 时脚本**自动补跑**（docker exec trigger_inference.py，10-30 秒），
@@ -110,8 +111,10 @@ VPIN 家族分位、量价背离、超级大单净额及前日对比；板块超
 ## 九、个股榜
 涨幅/跌幅/成交额/换手榜解读（facts 八），挑 3-5 只有代表性的说原因判断（无新闻佐证时只描述数据，不编原因）
 
-## 十、自选/持仓复盘（自带 --watch 时才有）
+## 十、自选/持仓复盘（自带 --watch 或注入 --watch-note 时才有）
 逐只：涨跌幅、量能、技术位（MA20 上下）、当日状态（涨停/炸板/大涨/异动）
+**若该段只有一行 ⚠️ 注记（持仓源停更/缺失/读取失败）：照实转述注记，禁止编造持仓表现**
+（盘后流水线只在实盘快照覆盖复盘日时才注入 --watch 名单）
 
 ## 十一、昨日复盘回顾（复盘闭环，连续性的核心）
 读上一份复盘（同目录 {上一交易日}.md 或 PDF 前的 md）的「要点与明日关注」，

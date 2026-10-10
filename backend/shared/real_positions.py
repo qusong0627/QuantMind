@@ -20,6 +20,10 @@
    毫无察觉，历史实现正是如此）。
 4. ``payload_json`` 实测是**双层编码**（JSON 字符串套 JSON），两种形态都容忍；
    解不开就在日志里说清楚，不静默当空仓。
+5. **宿主机盘后链**（``scripts/postmarket_pipeline.py``，无 asyncpg 的 cron 环境）走
+   :func:`load_real_positions_sync`：同一段 SQL、同一个 :func:`merge_real_sources`，
+   只换 psycopg2 驱动与连接注入——复盘与决策轮必须看到同一份持仓，否则复盘是按
+   另一座账户名册编的。
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from backend.shared.logging_config import get_logger
@@ -42,12 +47,17 @@ _REAL_SOURCE_STALE_MINUTES = 60
 #: ``trade_shared`` 的 RedisClient，db=``REDIS_DB_TRADE``）。
 _SELECTED_BROKER_KEY = "broker:selected:CN"
 
-_SNAPSHOT_SQL = (
+#: 快照行查询模板：两种参数风格（sqlalchemy ``:name`` / psycopg2 ``%(name)s``）从
+#: 同一模板渲染——两处各写一份 SQL 才是真正的漂移起点（过滤条件只改一边，读到的
+#: 账户集合就与决策轮不是同一份，且不报错）。
+_SNAPSHOT_SQL_TPL = (
     "SELECT DISTINCT ON (source) source, snapshot_at, payload_json "
     "FROM real_account_snapshots "
-    "WHERE tenant_id = :tid AND user_id = :uid "
+    "WHERE tenant_id = {tid} AND user_id = {uid} "
     "ORDER BY source, snapshot_at DESC"
 )
+_SNAPSHOT_SQL = _SNAPSHOT_SQL_TPL.format(tid=":tid", uid=":uid")
+_SNAPSHOT_SQL_SYNC = _SNAPSHOT_SQL_TPL.format(tid="%(tid)s", uid="%(uid)s")
 
 #: 交易库连接：惰性单例 + 失败冷却。本函数在订单与盯盘热路径上，Redis 不可达时
 #: 每次调用都重连一遍要各等一个 connect 超时（默认 5s）——那是把「读不到券商」
@@ -300,4 +310,36 @@ async def load_real_positions(
         ).fetchall()
     return merge_real_sources(
         [(str(r[0]), r[1], r[2]) for r in rows], active_source=active_broker_type()
+    )
+
+
+def load_real_positions_sync(
+    tenant_id: str,
+    user_id: str,
+    *,
+    connect: Callable[[], Any],
+    active_source: str | None = None,
+) -> tuple[dict[str, dict], dict]:
+    """宿主机（无 asyncpg 的盘后 cron）**同步**读法：psycopg2 + 同一段 SQL、同一 merge。
+
+    盘后复盘链跑在宿主机（``scripts/postmarket_pipeline.py``，crontab 给
+    ``POSTGRES_*`` env），装不了 asyncpg；而复盘持仓必须与决策轮**同源同口径**——
+    这里只换驱动，行 → 持仓表的全部语义（多源并集 / 相对停更剔除 / 同票取量）
+    依旧走 :func:`merge_real_sources`，与 :func:`load_real_positions` 一字不差。
+
+    ``connect``：连接工厂由调用方注入（宿主链给 psycopg2；测试给替身）——本模块
+    不猜连接策略，免得把另一套环境变量口径又复制一遍。查询失败抛异常，不吞。
+    """
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_SNAPSHOT_SQL_SYNC, {"tid": tenant_id, "uid": user_id})
+            rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 关连接失败不许污染/吞掉查询结果
+            logger.debug("real_positions 同步连接关闭失败", exc_info=True)
+    return merge_real_sources(
+        [(str(r[0]), r[1], r[2]) for r in rows], active_source=active_source
     )

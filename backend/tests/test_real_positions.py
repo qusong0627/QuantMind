@@ -113,6 +113,95 @@ class TestMergeRealSources:
         assert meta == {"sources": {}, "snapshot_at": None, "active_broker": None}
 
 
+class _FakeCursor:
+    """最小 psycopg2 游标替身：记下 SQL/参数，回放给定行。"""
+
+    def __init__(self, rows: list, fail: bool = False):
+        self.rows = rows
+        self.fail = fail
+        self.calls: list[tuple[str, dict]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params):
+        self.calls.append((sql, params))
+        if self.fail:
+            raise RuntimeError("boom: 连接被掐")
+
+    def fetchall(self):
+        return self.rows
+
+
+class _FakeConn:
+    def __init__(self, rows: list, fail: bool = False):
+        self.cursor_obj = _FakeCursor(rows, fail=fail)
+        self.closed = False
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def close(self):
+        self.closed = True
+
+
+class TestLoadRealPositionsSync:
+    """宿主机盘后链的**同步**读法（T3-1）：psycopg2 驱动，SQL 与 merge 与决策轮同源。"""
+
+    def test_reads_through_the_shared_sql_with_pyformat_params(self):
+        rows = [
+            ("qmt_exec", datetime(2026, 10, 9, 6, 0), {"positions": [_pos("600036.SH", 200)]}),
+            (
+                "tdx_bridge",
+                datetime(2026, 10, 9, 5, 59),
+                _payload(_pos("000001.SZ", 500)),
+            ),
+        ]
+        conn = _FakeConn(rows)
+
+        positions, meta = rp.load_real_positions_sync(
+            "default", "10000001", connect=lambda: conn
+        )
+
+        sql, params = conn.cursor_obj.calls[0]
+        assert "FROM real_account_snapshots" in sql
+        assert "%(tid)s" in sql  # psycopg2 参数风格（sqlalchemy 版是 :tid，同一模板渲染）
+        assert params == {"tid": "default", "uid": "10000001"}  # 过滤口径 == 决策轮
+        assert conn.closed is True
+        assert set(positions) == {"SH600036", "SZ000001"}
+        assert meta["sources"]["qmt_exec"]["positions"] == 1
+
+    def test_sync_loader_and_merge_stay_byte_for_byte_same_result(self):
+        """sync 路径只许换驱动——结果必须与直接 merge 完全一致（口径单源守卫）。"""
+        rows = [
+            ("qmt_exec", datetime(2026, 10, 9, 6, 0), {"positions": [_pos("600036.SH", 200)]}),
+            (
+                "tdx_bridge",
+                datetime(2026, 10, 9, 2, 0),  # 落后 4h：相对停更，不并入
+                _payload(_pos("000001.SZ", 500)),
+            ),
+        ]
+        conn = _FakeConn(rows)
+
+        positions, meta = rp.load_real_positions_sync(
+            "default", "10000001", connect=lambda: conn
+        )
+
+        assert (positions, meta) == merge_real_sources(rows)  # active_source 均缺省
+        assert set(positions) == {"SH600036"}  # 停更源照旧不并入，如实报 stale
+        assert meta["sources"]["tdx_bridge"]["stale"] is True
+
+    def test_query_failure_propagates_but_connection_still_closes(self):
+        conn = _FakeConn([], fail=True)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            rp.load_real_positions_sync("default", "10000001", connect=lambda: conn)
+        assert conn.closed is True
+
+
 class TestSnapshotSourceForBroker:
     def test_unknown_broker_has_no_snapshot_source(self):
         assert snapshot_source_for_broker("tiger") is None

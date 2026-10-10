@@ -4,6 +4,7 @@
     python3 daily_review.py                  # 最新交易日
     python3 daily_review.py --date 20260814  # 指定交易日
     python3 daily_review.py --watch 601138.SH,600519.SH
+    python3 daily_review.py --watch-note "持仓源停更说明"   # 盘后流水线传入；无 --watch 也渲染该段
 
 输出（out_dir 默认 <repo>/data/reports/daily_review/）:
     {YYYY-MM-DD}_stats.json   结构化统计（后续阶段/智能体消费）
@@ -781,6 +782,33 @@ def load_factor_stats(
     return out
 
 
+def render_watch_section(stats: dict) -> str:
+    """§九 自选/持仓复盘（含**持仓源注记**）。整段独立成函数：注记是数据可信度声明，
+    单独可测——快照停更/缺失时该段必须「标注 + 空表」，绝不拿旧名单编（T3-1，
+    2026-10-10：盘后链曾读 2026-09-29 起停更的僵尸账本，每晚照编）。"""
+    watch = stats.get("watch") or []
+    note = str(stats.get("watch_note") or "").strip()
+    if not watch and not note:
+        return ""
+    parts = ["## 九、自选/持仓复盘\n"]
+    if note:
+        parts.append(f"> {note}\n")
+    if watch:
+        parts.append("| 名称 | 代码 | 收盘 | 涨跌幅 | 成交额 | 换手率 | MA20 | 行业 | 状态 |")
+        parts.append("|---|---|---|---|---|---|---|---|---|")
+        for r in watch:
+            if r.get("note"):
+                parts.append(f"| {r['name']} | {r['symbol']} | {r['note']} |")
+                continue
+            ma20_s = f"{r['ma20']:.2f}" if r.get("ma20") else "[缺失]"
+            parts.append(
+                f"| {r['name']} | {r['symbol']} | {r['close']} | {r['pct']:+.2f}% | {_yi(r['amount_yi'])}"
+                f" | {r['turnover_pct']:.2f}% | {ma20_s} | {r['industry']} | {r['category']} |"
+            )
+    parts.append("")
+    return "\n".join(parts)
+
+
 def render_facts(stats: dict) -> str:
     L: list[str] = []
     meta = stats["meta"]
@@ -1052,20 +1080,9 @@ def render_facts(stats: dict) -> str:
         L.append(f"| {r['name']} | {r['symbol']} | {r['turnover_pct']:.2f}% | {r['industry']} |")
     L.append("")
 
-    if stats.get("watch"):
-        L.append("## 九、自选/持仓复盘\n")
-        L.append("| 名称 | 代码 | 收盘 | 涨跌幅 | 成交额 | 换手率 | MA20 | 行业 | 状态 |")
-        L.append("|---|---|---|---|---|---|---|---|---|")
-        for r in stats["watch"]:
-            if r.get("note"):
-                L.append(f"| {r['name']} | {r['symbol']} | {r['note']} |")
-                continue
-            ma20_s = f"{r['ma20']:.2f}" if r.get("ma20") else "[缺失]"
-            L.append(
-                f"| {r['name']} | {r['symbol']} | {r['close']} | {r['pct']:+.2f}% | {_yi(r['amount_yi'])}"
-                f" | {r['turnover_pct']:.2f}% | {ma20_s} | {r['industry']} | {r['category']} |"
-            )
-        L.append("")
+    watch_md = render_watch_section(stats)
+    if watch_md:
+        L.append(watch_md)
 
     # ── 十、次日走势研判（方向引擎，六维加权）──
     d = stats.get("direction") or {}
@@ -1159,6 +1176,7 @@ def main() -> None:
     ap.add_argument("--data-dir", help="QuantDB 数据目录，默认自动探测")
     ap.add_argument("--out-dir", help="输出目录，默认 <repo>/data/reports/daily_review")
     ap.add_argument("--watch", help="自选/持仓股逗号分隔，如 601138.SH,600519.SH")
+    ap.add_argument("--watch-note", help="持仓段注记（盘后流水线传入：快照时刻/停更说明；无 --watch 也渲染该段）")
     ap.add_argument("--include-st", action="store_true", help="个股榜保留 ST")
     ap.add_argument("--model", help="模型推理信号 model_id，默认每日推理模型")
     args = ap.parse_args()
@@ -1383,6 +1401,7 @@ def main() -> None:
         "model_inference": model_inference,
         "top": top,
         "watch": watch,
+        "watch_note": (args.watch_note or "").strip() or None,
         "sector_multiday": sector_multiday,
         "sector_flow": sector_flow,
     }
