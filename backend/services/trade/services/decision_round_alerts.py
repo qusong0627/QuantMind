@@ -14,6 +14,14 @@
 取数依赖轮次写进 ``meta`` 的两个显式字段（``pool.rows`` 与 ``in_session``）：
 **字段缺失 = 取不到，不判**（老结果/替身不许被误报成空池，同 ``_exec_summary`` 纪律）。
 
+2026-10-10 审计 T2-5 补了**第三类**不可见：上面两类都是「出事才响」，而**跑得正常
+的一轮在状态键之外没有任何读者**——面板没有决策页、QQ 不响、日志不留摘要，值班
+想回答「今天 09:35 到底决策了什么」只能手翻 Redis。补法是**常态回执**：
+:func:`round_summary` 把每轮干的事（池 rows / 决策 / 腿 / 提交）落成摘要——
+日志**每轮**都落（最低成本的时间轴），QQ 只推**动钱或本该动钱的轮**
+（:func:`summary_due`），且失败告警已送达的轮不重复推（告警文案已带池/腿数）。
+它也是 P2-5「值班摘要 + dead-man」的籽：日汇总与「该响没响」将在这条出口上长。
+
 **不做什么**（同属判据，写在这里免得后来者以为漏了）:
 
 * **不重放已出的决策**。腿提交失败**不**自动重发：同 ``round_id`` 的幂等键是**稳定**
@@ -32,6 +40,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Mapping, MutableSet, Sequence
@@ -451,3 +460,117 @@ async def alert_round(
         else default_notifier,
         log_prefix="[DecisionRound]",
     )
+
+
+# ── 值班摘要（T2-5）：轮次的**常态回执**——不只报丧，也报平安 ─────────────
+# 上面全部函数的判据都是「哪一步做砸了」；本节的判据反过来：**跑完就得有句话**。
+# 一条安静的调仓轮（池有票、模型出了决策、腿提交成功）此前在状态键之外没有读者，
+# 值班复盘时连「这轮纳没纳过」都要手翻 Redis。摘要出口给它的就是这条时间轴。
+
+#: 状态 → 摘要里的人话（``skipped`` 不产摘要，见 :func:`round_summary`）。
+_STATUS_WORD = {
+    STATUS_OK: "跑完",
+    STATUS_LLM_FAILED: "模型未出决策",
+    STATUS_ERROR: "执行段异常",
+    STATUS_ABORTED: "中止（未发单）",
+}
+
+
+def round_summary(result: RoundResult) -> str | None:
+    """一轮干完活之后的**值班摘要**正文（纯函数）；``skipped`` 没有摘要。
+
+    T2-5 验收点：正文必须含**池行数**与**腿数**（``pool.rows`` / ``legs``）——
+    「今天这轮到底看没看到东西」要能一眼答出来。取数纪律同 ``round_alert``：
+    ``meta`` 里没有 ``pool`` 就如实写「未记录」，绝不把「不知道」编成「0 行」。
+    """
+    if result.status == STATUS_SKIPPED:
+        return None
+    word = _STATUS_WORD.get(result.status, result.status)
+    meta = result.meta if isinstance(result.meta, Mapping) else {}
+    pool = meta.get("pool")
+    pool = dict(pool) if isinstance(pool, Mapping) else {}
+    if "rows" in pool:
+        seg = f"池 {int(pool.get('rows') or 0)} 行"
+        bits: list[str] = []
+        if "shown" in pool:
+            bits.append(f"展示 {int(pool.get('shown') or 0)}")
+        if "dropped" in pool:
+            bits.append(f"滤除 {int(pool.get('dropped') or 0)}")
+        direction = str(pool.get("direction") or "").strip()
+        if direction:
+            bits.append(f"方向={direction}")
+        if bits:
+            seg += "（" + "，".join(bits) + "）"
+    else:
+        seg = "池 —（未记录）"
+    lines = [
+        f"轮次 {result.round_id} ｜ 状态：{word}",
+        seg,
+        (
+            f"决策 {int(result.decisions or 0)} ｜ 腿 {int(result.legs or 0)} ｜ "
+            f"提交 {int(result.submitted or 0)}（失败 {int(result.failed or 0)}）"
+        ),
+    ]
+    if int(result.watch_armed or 0) > 0:
+        lines.append(f"守护规则 {int(result.watch_armed)} 条")
+    note = str(result.note or "").strip()
+    if note:
+        lines.append(f"说明：{note}")
+    return "\n".join(lines)
+
+
+def summary_due(result: RoundResult) -> bool:
+    """摘要要不要**推 QQ**（纯函数；日志不走本闸门——每轮都落）。
+
+    只推**动钱或本该动钱**的轮：调仓轮（09:35 主槽 + 两个补跑，一天至多三轮），
+    或任何**真提交了腿**的轮——守护槽（intraday）的本职是挂 watch 规则、零腿是
+    常态，八个守护槽逐槽推 QQ 等于把值班训练成不看通知；真出了腿则不在此列，
+    那正是要人知道的。
+    """
+    if result.status == STATUS_SKIPPED:
+        return False
+    if int(result.submitted or 0) > 0:
+        return True
+    return result.slot is not None and result.slot.schema == SCHEMA_REBALANCE
+
+
+async def _send_summary_qq(title: str, content: str) -> bool:
+    """摘要 QQ 真发送口：``qq_notify.notify``（**常态事件**，不走告警等级过滤；
+    同步 HTTP 放线程里跑，不占交易事件循环）。**测试逐项换替身**——本仓测试容器
+    里 QQ 凭据是活的（``config/runtime.env``），不打桩就会把测试摘要真推给值班。
+    """
+    from backend.shared import qq_notify
+
+    return bool(await asyncio.to_thread(qq_notify.notify, title, content))
+
+
+async def summarize_round(result: RoundResult, *, alerted: bool) -> bool:
+    """值班摘要出口（T2-5；日汇总与 dead-man 并入 P2-5）。**绝不抛**。
+
+    调用点在刚跑完的一轮之后（同 ``alert_round``，此刻单可能已经真出去了）：
+
+    * **日志：每轮**（``skipped`` 除外）落一条——这是「状态键无程序化读者」的
+      最低成本补法，grep 就有时间轴；
+    * **QQ**：只推 ``summary_due`` 的轮，且 ``alerted=True``（失败告警**已送达**）
+      的轮不重复推——告警文案已带池/腿数，再推摘要就是双响。告警被去重挡下
+      （当日同类第二条）或送达失败（``alerted=False``）时，摘要正好是补位的
+      那声回执：值班至少知道「又有一轮跑完了、结果是什么」。
+    """
+    body = round_summary(result)
+    if body is None:
+        return False
+    label = _label(result)
+    logger.info("[DecisionRound] 值班摘要 %s：\n%s", label, body)
+    if alerted or not summary_due(result):
+        return False
+    try:
+        sent = await _send_summary_qq(f"决策轮摘要 · {label}", body)
+    except Exception as exc:  # noqa: BLE001 通知层的毛病不许带走跑完的一轮
+        logger.warning("[DecisionRound] 摘要推送异常 %s: %s", label, exc)
+        return False
+    if not sent:
+        logger.warning(
+            "[DecisionRound] 摘要 QQ 未送达（%s：通道未配置或发送失败），摘要已落日志",
+            label,
+        )
+    return sent

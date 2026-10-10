@@ -38,6 +38,21 @@ from backend.services.trade.services.decision_round_core import (
 
 DAY = date(2026, 9, 24)
 SLOT_REBALANCE = next(s for s in SLOTS if s.hhmm == "0935")
+SLOT_INTRADAY = next(s for s in SLOTS if s.hhmm == "1000")
+
+
+@pytest.fixture(autouse=True)
+def _stub_summary_qq(monkeypatch):
+    """摘要 QQ 真发送口**一律打桩**：本仓测试容器里 QQ 凭据是活的
+    （``config/runtime.env``，``qq_notify.is_configured()`` 为真），任何走到
+    ``round_tick`` 的用例不打桩就会把摘要真推给值班。默认桩 = 通道不可用
+    （返回 False，与未配置环境同形）；要验发送行为的用例自行覆盖本桩。
+    """
+
+    async def _unavailable(title: str, content: str) -> bool:
+        return False
+
+    monkeypatch.setattr(A, "_send_summary_qq", _unavailable)
 
 
 def _result(**over) -> RoundResult:
@@ -600,6 +615,232 @@ async def test_a_broken_account_lookup_does_not_break_the_round(monkeypatch) -> 
     assert len(out) == 1 and out[0].status == STATUS_ABORTED
     assert notifier.calls == []
     assert any(c[0] == "set" and c[2] is False for c in native.calls)  # 状态键写了
+
+
+# ── 值班摘要（T2-5）：状态键的常态消费方 ──────────────────────────────
+# 审计原话：``trade:decision-round:*`` 状态键**一个读者也没有**。失败告警
+# （上面几组）只覆盖「出事了」，安静的调仓轮在状态键之外没有痕迹。摘要出口给
+# 每轮一条时间轴：日志每轮都落，QQ 只推动钱或本该动钱的轮（``summary_due``），
+# 失败告警已送达的轮不重复推。
+def _pool_meta(rows=30, shown=12, dropped=18, direction="看多") -> dict:
+    return {
+        "pool": {
+            "file": "pool.json",
+            "rows": rows,
+            "shown": shown,
+            "dropped": dropped,
+            "direction": direction,
+        },
+        "in_session": True,
+    }
+
+
+def test_summary_carries_the_pool_rows_and_legs() -> None:
+    """T2-5 验收点：摘要正文必须含**池行数**与**腿数**（审计的验收列）。"""
+    body = A.round_summary(
+        _result(
+            round_id="rnd-20260924-0935",
+            decisions=5,
+            legs=2,
+            submitted=2,
+            failed=0,
+            watch_armed=1,
+            note="提交完成",
+            meta=_pool_meta(),
+        )
+    )
+    assert body is not None
+    assert "池 30 行" in body  # pool.rows
+    assert "展示 12" in body and "滤除 18" in body and "方向=看多" in body
+    assert "决策 5" in body and "腿 2" in body and "提交 2" in body
+    assert "守护规则 1 条" in body
+    assert "rnd-20260924-0935" in body and "提交完成" in body
+
+
+def test_a_skipped_round_has_no_summary() -> None:
+    """按设计跳过（补跑槽看到当日已有决策）没有摘要：那不是一轮事，是没跑。"""
+    skipped = _result(status=STATUS_SKIPPED, legs=0, submitted=0)
+    assert A.round_summary(skipped) is None
+    assert A.summary_due(skipped) is False
+
+
+def test_summary_without_meta_says_not_recorded_rather_than_zero() -> None:
+    """取数纪律：meta 里没有 pool 就如实写「未记录」——不许把「不知道」编成 0 行。"""
+    body = A.round_summary(_result(legs=0, submitted=0))
+    assert body is not None
+    assert "池 —（未记录）" in body
+
+
+def test_summary_qq_is_only_for_rounds_that_touch_money() -> None:
+    """QQ 闸门：调仓轮（动钱）与真提交了腿的轮才推；守护槽零腿是常态不推。"""
+    assert A.summary_due(_result(slot=SLOT_REBALANCE, submitted=0)) is True
+    assert A.summary_due(_result(slot=SLOT_INTRADAY, submitted=0)) is False
+    assert A.summary_due(_result(slot=SLOT_INTRADAY, submitted=1)) is True
+
+
+@pytest.mark.asyncio
+async def test_a_clean_rebalance_round_pushes_the_summary(monkeypatch) -> None:
+    """安静的正常轮（无告警）恰好是此前全绿无痕的一类——摘要就是它的回执。"""
+    sent: list[tuple[str, str]] = []
+
+    async def _record(title: str, content: str) -> bool:
+        sent.append((title, content))
+        return True
+
+    monkeypatch.setattr(A, "_send_summary_qq", _record)
+    pushed = await A.summarize_round(
+        _result(legs=2, submitted=2, note="提交完成", meta=_pool_meta()),
+        alerted=False,
+    )
+
+    assert pushed is True and len(sent) == 1
+    title, content = sent[0]
+    assert "决策轮摘要" in title and "09:35" in title and "pro" in title
+    assert "池 30 行" in content and "腿 2" in content
+
+
+@pytest.mark.asyncio
+async def test_an_alerted_round_logs_the_summary_but_never_double_pushes(
+    monkeypatch, caplog
+) -> None:
+    """失败告警已送达的轮：摘要落日志、不推 QQ（告警文案已带池/腿数，避免双响）。"""
+    calls: list[tuple[str, str]] = []
+
+    async def _record(title: str, content: str) -> bool:
+        calls.append((title, content))
+        return True
+
+    monkeypatch.setattr(A, "_send_summary_qq", _record)
+    with caplog.at_level("INFO"):
+        pushed = await A.summarize_round(
+            _result(status=STATUS_ABORTED, legs=2, submitted=0, meta=_pool_meta()),
+            alerted=True,
+        )
+
+    assert pushed is False and calls == []
+    assert any("值班摘要" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_an_intraday_zero_leg_round_only_lands_in_the_log(
+    monkeypatch, caplog
+) -> None:
+    """守护槽零腿：日志有、QQ 无——八个守护槽逐槽推 QQ 会把值班训练成不看通知。"""
+    calls: list[tuple[str, str]] = []
+
+    async def _record(title: str, content: str) -> bool:
+        calls.append((title, content))
+        return True
+
+    monkeypatch.setattr(A, "_send_summary_qq", _record)
+    with caplog.at_level("INFO"):
+        pushed = await A.summarize_round(
+            _result(slot=SLOT_INTRADAY, legs=0, submitted=0), alerted=False
+        )
+
+    assert pushed is False and calls == []
+    assert any("值班摘要" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_broken_summary_sender_never_escapes(monkeypatch, caplog) -> None:
+    """摘要层炸了不许带走跑完的一轮（同 alert_round 的绝不抛纪律），日志仍要落。"""
+
+    async def _boom(title: str, content: str) -> bool:
+        raise RuntimeError("qq 通道炸了")
+
+    monkeypatch.setattr(A, "_send_summary_qq", _boom)
+    with caplog.at_level("INFO"):
+        pushed = await A.summarize_round(
+            _result(legs=1, submitted=1, meta=_pool_meta()), alerted=False
+        )
+
+    assert pushed is False
+    assert any("值班摘要" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_tick_summarizes_after_the_round(monkeypatch) -> None:
+    """接线判据：一轮跑完（tick 层）→ 摘要真的发出去，且用的是本轮的结果。"""
+
+    async def fake_run_once(slot, *, deps, now, day):
+        return RoundResult(
+            status=STATUS_OK,
+            day=day,
+            slot=slot,
+            round_id="rnd-x-0935",
+            agent="pro",
+            legs=2,
+            submitted=2,
+            meta=_pool_meta(),
+        )
+
+    monkeypatch.setattr(TICK, "run_once", fake_run_once)
+    sent: list[tuple[str, str]] = []
+
+    async def _record(title: str, content: str) -> bool:
+        sent.append((title, content))
+        return True
+
+    monkeypatch.setattr(A, "_send_summary_qq", _record)
+    runs = (AgentRun(agent="pro", load_llm=lambda: None),)
+    deps = _bare_deps(
+        is_trading_day=_trading_day, roster=lambda: runs, now=lambda: None
+    )
+    out = await TICK.round_tick(
+        deps=deps,
+        native=FakeNative(),
+        grace_min=0,  # 只让 09:35 到点：09:00 还在宽限窗里（那会让一轮变两轮）
+        now=datetime(2026, 9, 24, 9, 35, tzinfo=CST),
+    )
+
+    assert len(out) == 1 and out[0].status == STATUS_OK
+    assert len(sent) == 1 and "池 30 行" in sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_tick_does_not_double_push_when_the_alert_went_out(
+    monkeypatch, caplog
+) -> None:
+    """aborted 轮：告警（SpyNotifier 送达）与摘要不双响，但摘要仍进日志。"""
+
+    async def fake_run_once(slot, *, deps, now, day):
+        return RoundResult(
+            status=STATUS_ABORTED,
+            day=day,
+            slot=slot,
+            round_id="rnd-x-0935",
+            agent="pro",
+            legs=2,
+            note="在途委托不可信：本轮不下单（fail-closed）",
+            meta=_pool_meta(),
+        )
+
+    monkeypatch.setattr(TICK, "run_once", fake_run_once)
+    calls: list[tuple[str, str]] = []
+
+    async def _record(title: str, content: str) -> bool:
+        calls.append((title, content))
+        return True
+
+    monkeypatch.setattr(A, "_send_summary_qq", _record)
+    runs = (AgentRun(agent="pro", load_llm=lambda: None),)
+    deps = _bare_deps(
+        is_trading_day=_trading_day, roster=lambda: runs, now=lambda: None
+    )
+    notifier = SpyNotifier()
+    with caplog.at_level("INFO"):
+        out = await TICK.round_tick(
+            deps=deps,
+            native=FakeNative(),
+            grace_min=0,
+            now=datetime(2026, 9, 24, 9, 35, tzinfo=CST),
+            notify=notifier,
+        )
+
+    assert len(out) == 1 and len(notifier.calls) == 1  # 告警照发
+    assert calls == []  # 摘要 QQ 不双响
+    assert any("值班摘要" in r.getMessage() for r in caplog.records)
 
 
 # ── 停滞：worker 活着，但整天一轮都没跑成 ──────────────────────────────

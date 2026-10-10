@@ -28,6 +28,7 @@ from backend.shared.decision.llm_call import decide_with_retry
 from backend.shared.decision.watch_writer import WatchWriteResult
 from backend.shared.decision_context_source import PoolDoc
 from backend.services.trade.services import decision_round as R
+from backend.services.trade.services import decision_round_alerts as A
 from backend.services.trade.services import decision_round_io as IO
 from backend.services.trade.services import decision_round_runner as RUN
 from backend.services.trade.services import decision_round_tick as TICK
@@ -1394,6 +1395,26 @@ async def test_unexpected_orchestration_error_is_error_status_not_a_crash():
 
 
 # ══ F. tick：认领 → 跑 → 置键 → 状态 ════════════════════════════════
+@pytest.fixture(autouse=True)
+def _stub_summary_qq(monkeypatch):
+    """通知面两处真发送口在**本文件一律打桩**：
+
+    * 值班摘要（T2-5）：tick 每轮跑完都发——日志每轮落、QQ 只推动钱的轮；
+    * 失败告警的 ``default_notifier``：不上报桩就会走 ``publish_notification``
+      （落库）并触发 error 级 QQ 旁路——本仓测试容器里 QQ 凭据是活的
+      （``config/runtime.env``），下面这些跑真实一轮的用例会把测试消息真推给值班。
+
+    默认桩 = 通道不可用（返回 False，与未配置环境同形），deliver_alert/摘要的
+    失败分支照走；单项测试要验发送行为的自行覆盖。
+    """
+
+    async def _unavailable(*args, **kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(A, "_send_summary_qq", _unavailable)
+    monkeypatch.setattr(A, "default_notifier", lambda: _unavailable)
+
+
 @pytest.mark.asyncio
 async def test_tick_does_not_run_on_a_non_trading_day():
     h = make_harness(trading_day=False)

@@ -44,6 +44,7 @@ from backend.services.trade.services.decision_round_alerts import (
     MANUAL_RERUN_HINT,
     Notifier,
     alert_round,
+    summarize_round,
 )
 from backend.services.trade.services.decision_round_core import (
     DEFAULT_GRACE_MIN,
@@ -160,6 +161,8 @@ async def round_tick(
     （落库 → 前端通知中心；无事的一轮连它都不碰）；测试逐项换替身。只在真出了事时
     用：aborted / 有腿失败 / 模型未出决策 / 执行段异常——「按设计跳过」不推。同一家
     同一类失败一天一条，去重键走本层的原生客户端（同认领/状态键，理由见模块 docstring）。
+    轮次跑完另落一条**值班摘要**（T2-5）：日志每轮都落、QQ 只推动钱的轮，失败告警
+    已送达的轮不重复推——见 ``decision_round_alerts.summarize_round``。
 
     ``force``：**手动重跑**——抢占槽位认领（覆盖写）并忽略当日 done 键。只忽略 done
     键是不够的（认领键在 done 之前就把它挡住了，CLI 于是报「无到点槽位」）；覆盖写
@@ -316,9 +319,14 @@ async def round_tick(
                 # done 键与返回值——一轮真跑完的结果不许被通知层吃掉。
                 # ``notifier`` 留空交给 alert_round 现造：没有要推的事就连通知设施
                 # 都不碰（正常的一轮不该在通知链路上留足迹）。
-                await alert_round(
+                alerted = await alert_round(
                     result, notifier=notify, user_id=_alert_user(deps), redis=client
                 )
+                # 值班摘要（T2-5）：状态键此前没有程序化读者——摘要把它变成日志
+                # （每轮）与 QQ（动钱或本该动钱的轮，见 ``summary_due``）。失败告警
+                # 已送达的轮不重复推 QQ，但摘要仍落日志：告警被当日去重挡下（同类
+                # 第二条）时，摘要就是补位的那声回执。摘要层炸了同样不影响本轮结果。
+                await summarize_round(result, alerted=alerted)
                 out.append(result)
         return tuple(out)
     finally:
