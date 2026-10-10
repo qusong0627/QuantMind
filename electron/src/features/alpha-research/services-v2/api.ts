@@ -1599,6 +1599,9 @@ export async function getPoolFactors(params: {
   includeArchived?: boolean;
   /** 因子大类过滤（空/缺省 = 全部；取值 = 后端 CANONICAL_CLASSES 的 id） */
   category?: string;
+  /** 方向过滤：pos=正向（IC≥0）/ neg=反向（IC<0）；缺省 = 全部
+   *  （口径 = ic_value 符号，与因子库「方向」列同一口径） */
+  direction?: 'pos' | 'neg';
 }): Promise<ApiResponse<PoolFactorList>> {
   try {
     const qs = new URLSearchParams(poolQs(params.market, params.universe));
@@ -1607,6 +1610,7 @@ export async function getPoolFactors(params: {
     if (params.sort) qs.set('sort', params.sort);
     if (params.includeArchived) qs.set('include_archived', 'true');
     if (params.category) qs.set('category', params.category);
+    if (params.direction) qs.set('direction', params.direction);
     const res = await apiClient.get(`/alpha-agent/pool/factors?${qs.toString()}`);
     const raw = res.data?.data ?? {};
     return makeOk({

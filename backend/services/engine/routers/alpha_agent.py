@@ -2473,12 +2473,15 @@ async def get_pool_factors(
     sort: str = Query("pool_score"),
     include_archived: bool = Query(False),
     category: str = Query(""),
+    direction: str = Query(""),
 ):
     """池内因子分页列表（含门禁裁决、被检索次数、面板有无标记、因子大类）。
 
     默认不含已归档；``include_archived=true`` 时行里带 ``archived_at``
     （UI 用它渲染「已归档」徽章与恢复入口）。``category`` 按因子大类过滤
     （总览分类区块点击下钻；未知类名显式 400，不静默空列表）。
+    ``direction`` 按方向过滤（pos=正向 IC≥0 / neg=反向 IC<0；口径与因子库
+    「方向」列一致，父本选择器「正反各前 N」用；未知取值显式 400）。
     """
     auth_user_id, _ = get_authenticated_identity(request)
     market, universe = _pool_scope(market, universe)
@@ -2495,16 +2498,20 @@ async def get_pool_factors(
             detail=f"未知因子大类：{category}（可选：{', '.join(CANONICAL_CLASSES)}）",
         )
 
-    data = await pool_service.list_pool_factors(
-        user_id=auth_user_id,
-        market=market,
-        universe=universe,
-        limit=limit,
-        offset=offset,
-        sort=sort,
-        include_archived=include_archived,
-        category=(category or None),
-    )
+    try:
+        data = await pool_service.list_pool_factors(
+            user_id=auth_user_id,
+            market=market,
+            universe=universe,
+            limit=limit,
+            offset=offset,
+            sort=sort,
+            include_archived=include_archived,
+            category=(category or None),
+            direction=(direction or None),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"code": 200, "data": data}
 
 

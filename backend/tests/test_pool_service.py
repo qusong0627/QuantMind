@@ -1268,7 +1268,9 @@ class TestFactorCategory:
         by = {d["category"]: d for d in out}
 
         mom = by["momentum"]
-        assert mom["median_ic"] == pytest.approx(0.02), "中位≠均值（0.11）——分布中心必须用中位"
+        assert mom["median_ic"] == pytest.approx(0.02), (
+            "中位≠均值（0.11）——分布中心必须用中位"
+        )
         assert mom["saturation"] == pytest.approx(1.0), "最满的真实类饱和度=1"
         assert by["overnight"]["saturation"] == pytest.approx(1 / 3)
         # 单样本类：中位=该样本；无 IC 样本 → None（缺失绝不当 0）
@@ -1329,8 +1331,9 @@ class TestFactorCategory:
             cats = {d["category"]: d for d in overview["category_breakdown"]}
             assert cats["momentum"]["count"] == 1
             assert cats["overnight"]["count"] == 1
-            assert sum(d["count"] for d in overview["category_breakdown"]) == (
-                overview["total"]
+            assert (
+                sum(d["count"] for d in overview["category_breakdown"])
+                == (overview["total"])
             )
 
             only_ovn = await pool_service.list_pool_factors(
@@ -1440,3 +1443,115 @@ class TestSeedDigest:
         assert await pool_service.build_seed_digest(
             [], user_id="u", market=MARKET, universe=UNIVERSE
         ) == ("", (), ())
+
+
+class TestPoolDirectionFilter:
+    """方向过滤（父本选择器「正反各前 N」契约）。
+
+    方向口径 = ``rd_agent_factors.ic_value`` 符号（与因子库「方向」列同一口径）；
+    ``ic_value`` 为 NULL 的因子**不进任一侧**——静默混入会把「方向未知」冒充
+    成「已定向」。边界 0 归正向（ic >= 0）；未知取值显式 ValueError（宁 400
+    不静默退化全量——静默会把反向因子混进正向选择面）。
+    """
+
+    def test_normalize_pool_direction_accepts_blank_and_known(self):
+        assert pool_service.normalize_pool_direction(None) is None
+        assert pool_service.normalize_pool_direction("") is None
+        assert pool_service.normalize_pool_direction("  ") is None
+        assert pool_service.normalize_pool_direction("pos") == "pos"
+        assert pool_service.normalize_pool_direction("NEG") == "neg"
+
+    def test_normalize_pool_direction_rejects_unknown(self):
+        with pytest.raises(ValueError, match="未知因子方向"):
+            pool_service.normalize_pool_direction("up")
+        with pytest.raises(ValueError, match="pos, neg"):
+            pool_service.normalize_pool_direction("正向")
+
+    @pytest.mark.asyncio
+    async def test_list_pool_factors_direction_split(self):
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        run = _run_id()
+        user = f"{run}_u"
+        # 覆盖：正（含边界 0）/ 负 / IC 缺失（缺失两侧都不许出现）
+        f_pos_hot, f_pos, f_zero, f_neg, f_null = (
+            f"{run}_ph",
+            f"{run}_p",
+            f"{run}_z",
+            f"{run}_n",
+            f"{run}_nl",
+        )
+        scores = {f_pos_hot: 0.9, f_pos: 0.5, f_zero: 0.1, f_neg: 0.7, f_null: 0.3}
+        try:
+            async with get_session() as session:
+                await _seed_factor(session, factor_id=f_pos_hot, user_id=user, ic=0.08)
+                await _seed_factor(session, factor_id=f_pos, user_id=user, ic=0.03)
+                await _seed_factor(session, factor_id=f_zero, user_id=user, ic=0.0)
+                await _seed_factor(session, factor_id=f_neg, user_id=user, ic=-0.05)
+                await _seed_factor(session, factor_id=f_null, user_id=user, ic=None)
+                for fid, score in scores.items():
+                    await _seed_pool_row(session, factor_id=fid, user_id=user)
+                    await session.execute(
+                        text(
+                            f"UPDATE {POOL_TABLE} SET pool_score = :s "
+                            "WHERE factor_id = :f"
+                        ),
+                        {"s": score, "f": fid},
+                    )
+
+            pos = await pool_service.list_pool_factors(
+                user_id=user,
+                market=MARKET,
+                universe=UNIVERSE,
+                limit=50,
+                sort="pool_score",
+                direction="pos",
+            )
+            neg = await pool_service.list_pool_factors(
+                user_id=user,
+                market=MARKET,
+                universe=UNIVERSE,
+                limit=50,
+                sort="pool_score",
+                direction="neg",
+            )
+            all_rows = await pool_service.list_pool_factors(
+                user_id=user, market=MARKET, universe=UNIVERSE, limit=50
+            )
+
+            # 正侧：ic >= 0（含边界 0）按 pool_score 降序；负/缺失必不在
+            assert pos["direction"] == "pos"
+            assert pos["total"] == 3
+            assert [i["factor_id"] for i in pos["items"]] == [
+                f_pos_hot,
+                f_pos,
+                f_zero,
+            ]
+            assert all(i["ic_value"] >= 0 for i in pos["items"])
+            # 负侧：严格 ic < 0；边界 0 与缺失不许混进反向
+            assert neg["direction"] == "neg"
+            assert neg["total"] == 1
+            assert [i["factor_id"] for i in neg["items"]] == [f_neg]
+            # 不过滤：5 行全在（含 ic NULL——只是不进任一侧）
+            assert all_rows["direction"] is None
+            assert all_rows["total"] == 5
+        finally:
+            await _cleanup([f_pos_hot, f_pos, f_zero, f_neg, f_null], [user])
+            await close_database()
+
+    @pytest.mark.asyncio
+    async def test_list_pool_factors_direction_rejects_unknown(self):
+        from backend.shared.database_manager_v2 import close_database
+
+        await _skip_if_no_db()
+        try:
+            with pytest.raises(ValueError, match="未知因子方向"):
+                await pool_service.list_pool_factors(
+                    user_id=_run_id(),
+                    market=MARKET,
+                    universe=UNIVERSE,
+                    direction="up",
+                )
+        finally:
+            await close_database()

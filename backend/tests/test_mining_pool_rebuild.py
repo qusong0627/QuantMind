@@ -446,6 +446,7 @@ class TestPoolReadEndpoints:
             sort="ic",
             include_archived=False,
             category="",
+            direction="pos",
         )
         assert calls == [
             {
@@ -457,6 +458,7 @@ class TestPoolReadEndpoints:
                 "sort": "ic",
                 "include_archived": False,
                 "category": None,
+                "direction": "pos",
             }
         ]
 
@@ -479,9 +481,32 @@ class TestPoolReadEndpoints:
                 sort="pool_score",
                 include_archived=False,
                 category="MOMENTUM",
+                direction="",
             )
         assert err.value.status_code == 400
         assert "momentum" in err.value.detail
+
+    @pytest.mark.asyncio
+    async def test_factors_rejects_unknown_direction(self) -> None:
+        """未知方向显式 400（service 归一抛 ValueError，路由翻译），不静默全量。
+
+        不 monkeypatch：真 service 的 ``normalize_pool_direction`` 在开库前就
+        抛错，这里验证的正是路由的 ValueError→400 翻译链。
+        """
+        with pytest.raises(HTTPException) as err:
+            await aa.get_pool_factors(
+                _fake_request("u1"),
+                market="a_share",
+                universe="",
+                limit=20,
+                offset=0,
+                sort="pool_score",
+                include_archived=False,
+                category="",
+                direction="up",
+            )
+        assert err.value.status_code == 400
+        assert "未知因子方向" in err.value.detail
 
     @pytest.mark.asyncio
     async def test_graph_passes_max_nodes(self, monkeypatch) -> None:

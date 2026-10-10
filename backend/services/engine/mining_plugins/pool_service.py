@@ -1538,6 +1538,23 @@ _SORT_COLUMNS = {
 }
 
 
+def normalize_pool_direction(value: str | None) -> str | None:
+    """方向过滤归一（单源）：空白 → None（不过滤）；pos/neg 透传（大小写不敏感）。
+
+    方向口径 = ``rd_agent_factors.ic_value`` 符号（与因子库「方向」列同一口径；
+    边界 0 归正向）。未知取值显式 ValueError——静默退化全量会把反向因子混进
+    正向选择面（父本选择器「正反各前 N」契约），宁 400 不静默。
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in ("pos", "neg"):
+        return text
+    raise ValueError(f"未知因子方向：{value}（可选：pos, neg）")
+
+
 async def list_pool_factors(
     *,
     user_id: str,
@@ -1548,12 +1565,20 @@ async def list_pool_factors(
     sort: str = "pool_score",
     include_archived: bool = False,
     category: str | None = None,
+    direction: str | None = None,
 ) -> dict[str, Any]:
     from sqlalchemy import bindparam, text
 
     from backend.shared.database_manager_v2 import get_session
 
+    direction = normalize_pool_direction(direction)
     conds, params = _scope_conds(user_id, market, universe)
+    # 方向过滤：NULL ic_value 两条分支都不满足（NULL 比较恒 NULL）→ 方向未知的
+    # 因子不进任一侧，只出现在不过滤的列表里。
+    if direction == "pos":
+        conds.append("f.ic_value >= 0")
+    elif direction == "neg":
+        conds.append("f.ic_value < 0")
     if not include_archived:
         # 归档因子默认退出列表（UI 显式勾选「含已归档」才可见）
         conds.append("p.archived_at IS NULL")
@@ -1601,6 +1626,7 @@ async def list_pool_factors(
                     "limit": limit,
                     "offset": offset,
                     "category": category,
+                    "direction": direction,
                 }
             conds.append("p.factor_id IN :cat_ids")
             params = {**params, "cat_ids": cat_ids}
@@ -1615,7 +1641,13 @@ async def list_pool_factors(
 
         total = (
             await session.execute(
-                _stmt(f"SELECT COUNT(*)::int FROM {POOL_TABLE} p WHERE {where}"),
+                _stmt(
+                    # 与行查询同 join：direction 条件引用 f.ic_value，COUNT 缺 join
+                    # 会直接 SQL 报错；factor_id 是因子表主键，LEFT JOIN 不改基数。
+                    f"SELECT COUNT(*)::int FROM {POOL_TABLE} p "
+                    "LEFT JOIN rd_agent_factors f ON f.factor_id = p.factor_id "
+                    f"WHERE {where}"
+                ),
                 params,
             )
         ).scalar()
@@ -1666,6 +1698,7 @@ async def list_pool_factors(
         "limit": limit,
         "offset": offset,
         "category": category,
+        "direction": direction,
     }
 
 

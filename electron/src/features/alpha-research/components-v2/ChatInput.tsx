@@ -59,9 +59,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [markets, setMarkets] = useState<MarketInfo[]>([]);
   const [config] = useState<Partial<TaskConfig>>({ librarySuffix: '' });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // 父本（种子）选择器：展开时拉本市场本池 pool_score 前 50；选择数 ≤3
+  // 父本（种子）选择器：展开时拉本市场本池「正向 / 反向」各 pool_score 前 50；选择数 ≤3
   const [seedPanelOpen, setSeedPanelOpen] = useState(false);
-  const [seedOptions, setSeedOptions] = useState<PoolFactorRow[]>([]);
+  const [seedPos, setSeedPos] = useState<PoolFactorRow[]>([]);
+  const [seedNeg, setSeedNeg] = useState<PoolFactorRow[]>([]);
   const [seedsLoading, setSeedsLoading] = useState(false);
   const [seedsError, setSeedsError] = useState<string | null>(null);
   const [seeds, setSeeds] = useState<SeedFactorRef[]>([]);
@@ -96,22 +97,30 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setSeeds([]);
   }, [miningMarket, universe]);
 
-  // 展开时拉池内因子（pool_score 降序 = 池内最强优先）；开着时切市场/池自动重拉
+  // 展开时并行拉「正向 / 反向」各 pool_score 前 50（方向口径 = ic_value 符号，
+  // 与因子库「方向」列一致）；开着时切市场/池自动重拉。任一侧失败显式报错——
+  // 只显示一半候选会让用户以为选择了完整的前 N 强，静默漏掉另一方向。
   useEffect(() => {
     if (!seedPanelOpen || !onDecomposeRequest) return;
     let cancelled = false;
     setSeedsLoading(true);
     setSeedsError(null);
-    getPoolFactors({
+    const base = {
       market: miningMarket,
       universe: String(universe),
       limit: 50,
-      sort: 'pool_score',
-    })
-      .then((res) => {
+      sort: 'pool_score' as const,
+    };
+    Promise.all([
+      getPoolFactors({ ...base, direction: 'pos' }),
+      getPoolFactors({ ...base, direction: 'neg' }),
+    ])
+      .then(([posRes, negRes]) => {
         if (cancelled) return;
-        if (!res.success) throw new Error(res.error || '因子池列表获取失败');
-        setSeedOptions(res.data?.items ?? []);
+        if (!posRes.success) throw new Error(posRes.error || '正向因子获取失败');
+        if (!negRes.success) throw new Error(negRes.error || '反向因子获取失败');
+        setSeedPos(posRes.data?.items ?? []);
+        setSeedNeg(negRes.data?.items ?? []);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -133,6 +142,65 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       if (prev.length >= SEED_MAX) return prev;
       return [...prev, { id: row.factorId, name: row.factorName }];
     });
+  };
+
+  // 方向分组渲染（空组整组不渲染——空标题会被误读成「本侧拉取失败」）
+  const renderSeedGroup = (label: string, rows: PoolFactorRow[]) => {
+    if (rows.length === 0) return null;
+    return (
+      <div key={label} className="flex flex-col gap-1">
+        <div className="flex items-center gap-1.5 px-0.5">
+          <span className="text-[10px] font-bold text-slate-400">
+            {label}（{rows.length}）
+          </span>
+          <span className="h-px flex-1 bg-slate-200/70" />
+        </div>
+        {rows.map((row) => {
+          const selectedIdx = seeds.findIndex((s) => s.id === row.factorId);
+          const isSelected = selectedIdx >= 0;
+          const atLimit = !isSelected && seeds.length >= SEED_MAX;
+          return (
+            <button
+              key={row.factorId}
+              type="button"
+              onClick={() => toggleSeed(row)}
+              disabled={atLimit}
+              title={atLimit ? `最多选 ${SEED_MAX} 个父本` : row.factorFormulation || row.factorId}
+              className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+                isSelected
+                  ? 'bg-white ring-1 ring-indigo-300 shadow-xs cursor-pointer'
+                  : atLimit
+                    ? 'opacity-40 cursor-not-allowed'
+                    : 'hover:bg-white/70 cursor-pointer'
+              }`}
+            >
+              <span
+                className={`shrink-0 inline-flex items-center justify-center h-4 w-4 rounded-full text-[9px] font-black ${
+                  isSelected ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-500'
+                }`}
+              >
+                {isSelected ? selectedIdx + 1 : ''}
+              </span>
+              <span className="flex-1 min-w-0 flex flex-col">
+                <span className="text-[11px] font-bold text-slate-700 truncate">
+                  {row.factorName}
+                </span>
+                <span className="text-[10px] font-mono text-slate-400 truncate">
+                  {row.factorFormulation || row.factorId}
+                </span>
+              </span>
+              <span className="shrink-0 text-[10px] font-mono text-slate-400">
+                {row.icir != null
+                  ? `ICIR ${row.icir.toFixed(2)}`
+                  : row.ic != null
+                    ? `IC ${row.ic.toFixed(3)}`
+                    : '—'}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    );
   };
 
   const handleSubmit = () => {
@@ -337,56 +405,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   <div className="py-1.5 text-[11px] font-bold text-rose-500 break-all">
                     {seedsError}
                   </div>
-                ) : seedOptions.length === 0 ? (
+                ) : seedPos.length === 0 && seedNeg.length === 0 ? (
                   <div className="py-1.5 text-[11px] text-slate-400">
                     本池暂无已完成回测的因子——先挖出因子、回测入池后即可选作父本
                   </div>
                 ) : (
-                  <div className="flex flex-col gap-1 max-h-44 overflow-y-auto pr-0.5">
-                    {seedOptions.map((row) => {
-                      const selectedIdx = seeds.findIndex((s) => s.id === row.factorId);
-                      const isSelected = selectedIdx >= 0;
-                      const atLimit = !isSelected && seeds.length >= SEED_MAX;
-                      return (
-                        <button
-                          key={row.factorId}
-                          type="button"
-                          onClick={() => toggleSeed(row)}
-                          disabled={atLimit}
-                          title={atLimit ? `最多选 ${SEED_MAX} 个父本` : row.factorFormulation || row.factorId}
-                          className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
-                            isSelected
-                              ? 'bg-white ring-1 ring-indigo-300 shadow-xs cursor-pointer'
-                              : atLimit
-                                ? 'opacity-40 cursor-not-allowed'
-                                : 'hover:bg-white/70 cursor-pointer'
-                          }`}
-                        >
-                          <span
-                            className={`shrink-0 inline-flex items-center justify-center h-4 w-4 rounded-full text-[9px] font-black ${
-                              isSelected ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-500'
-                            }`}
-                          >
-                            {isSelected ? selectedIdx + 1 : ''}
-                          </span>
-                          <span className="flex-1 min-w-0 flex flex-col">
-                            <span className="text-[11px] font-bold text-slate-700 truncate">
-                              {row.factorName}
-                            </span>
-                            <span className="text-[10px] font-mono text-slate-400 truncate">
-                              {row.factorFormulation || row.factorId}
-                            </span>
-                          </span>
-                          <span className="shrink-0 text-[10px] font-mono text-slate-400">
-                            {row.icir != null
-                              ? `ICIR ${row.icir.toFixed(2)}`
-                              : row.ic != null
-                                ? `IC ${row.ic.toFixed(3)}`
-                                : '—'}
-                          </span>
-                        </button>
-                      );
-                    })}
+                  <div className="flex flex-col gap-1.5 max-h-44 overflow-y-auto pr-0.5">
+                    {renderSeedGroup('正向', seedPos)}
+                    {renderSeedGroup('反向', seedNeg)}
                   </div>
                 )}
               </div>
