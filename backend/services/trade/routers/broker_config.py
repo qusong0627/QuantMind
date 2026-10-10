@@ -43,11 +43,6 @@ BROKER_FIELDS: dict[str, dict[str, bool]] = {
         "trade_pwd_md5": True,
         "trade_env": False,  # REAL / SIMULATE
     },
-    "ib": {
-        "gateway_host": False,
-        "gateway_port": False,
-        "client_id": False,
-    },
     # 通达信 Windows 桥（TdxBroker）
     "tdx": {
         "bridge_url": False,
@@ -72,7 +67,6 @@ BROKER_FIELDS: dict[str, dict[str, bool]] = {
 BROKER_LABELS = {
     "tiger": "老虎证券",
     "futu": "富途证券",
-    "ib": "盈透证券(IB)",
     "tdx": "通达信(TDX 桥)",
     "qmt_exec": "大 QMT(执行端)",
 }
@@ -80,9 +74,9 @@ BROKER_LABELS = {
 # 各市场可选的实盘券商（前端「券商接入」卡片按此渲染）
 MARKET_BROKERS: dict[str, list[str]] = {
     "CN": ["qmt_exec", "tdx"],
-    "HK": ["futu", "tiger", "ib"],
-    "US": ["tiger", "ib", "futu"],
-    "FUTURES": ["ib"],
+    "HK": ["futu", "tiger"],
+    "US": ["tiger", "futu"],
+    "FUTURES": [],
     "CRYPTO": [],
 }
 
@@ -120,10 +114,8 @@ _URL_PATTERN = re.compile(
 FIELD_PATTERNS: dict[str, re.Pattern] = {
     "redis_host": _HOST_PATTERN,
     "opend_host": _HOST_PATTERN,
-    "gateway_host": _HOST_PATTERN,
     "redis_port": _PORT_PATTERN,
     "opend_port": _PORT_PATTERN,
-    "gateway_port": _PORT_PATTERN,
     "redis_db": _DB_PATTERN,
     "bridge_url": _URL_PATTERN,
 }
@@ -279,7 +271,7 @@ async def get_broker_config_status(
 
 class BrokerSelectUpdate(BaseModel):
     broker: str = Field(
-        ..., description="该市场使用的券商（tiger/futu/ib/tdx/qmt_exec），空串=取消选择"
+        ..., description="该市场使用的券商（tiger/futu/tdx/qmt_exec），空串=取消选择"
     )
 
 
@@ -319,7 +311,7 @@ async def test_broker_connection(
     auth: AuthContext = Depends(require_admin),
     redis: RedisClient = Depends(get_redis),
 ) -> dict[str, Any]:
-    """测试券商连通性（真实调用 SDK；OpenD/Gateway 未启动会明确报错）。
+    """测试券商连通性（真实调用 SDK；OpenD 未启动会明确报错）。
 
     测试前自动保存表单值；trade_env 可临时覆盖（测试 REAL 环境无需先改配置）。
     """
@@ -355,14 +347,6 @@ async def test_broker_connection(
                 env = "实盘" if broker_obj.trade_env_real else "模拟"
                 return {"success": True, "message": f"FutuOpenD 已连接（{env}环境），账户总资产 {account['total_asset']:.2f}"}
             return {"success": False, "message": "FutuOpenD 未连接：请确认 OpenD 已启动并登录（扫码/设备验证），地址端口正确"}
-        if broker == "ib":
-            from backend.services.trade.services.overseas_brokers import IBBroker
-
-            broker_obj = IBBroker()
-            ib = await broker_obj._get_ib()
-            accounts = ib.managedAccounts()
-            broker_obj._ib.disconnect()  # 同步方法，不可 await
-            return {"success": True, "message": f"IB Gateway 已连接，账户: {', '.join(accounts) or '未知'}"}
         if broker == "tdx":
             from backend.services.live_trading.services.broker_client import TdxBroker
 
@@ -417,7 +401,6 @@ async def test_broker_connection(
     except Exception as exc:
         hint = {
             "futu": "FutuOpenD 未运行或未登录（需在 OpenD 客户端扫码/设备验证），并检查局域网 IP 与端口",
-            "ib": "IB Gateway 未运行（4002=模拟 / 4001=实盘），并检查局域网 IP 与端口",
             "tiger": "检查 Tiger ID / RSA 私钥 / 账户号是否正确",
             "tdx": "检查 Windows 桥是否启动、桥地址/token 是否与桥端一致、防火墙是否放行 8550",
             "qmt_exec": "检查 QMT 是否开机登录、big-convert RPC 服务端是否启动、桥 Redis 地址/密码是否正确、防火墙是否放行",

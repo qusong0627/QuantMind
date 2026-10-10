@@ -1,7 +1,7 @@
-"""海外/港美股实盘券商 Broker 三件套：老虎(Tiger) / 富途(Futu) / 盈透(IB)。
+"""海外/港美股实盘券商 Broker 二件套：老虎(Tiger) / 富途(Futu)。
 
 统一实现 broker_client.BaseBroker 接口，由 live_trade_config 的 broker 字段
-路由。三家 SDK 均为同步阻塞，全部经 asyncio.to_thread 包装，不阻塞事件循环。
+路由。两家 SDK 均为同步阻塞，全部经 asyncio.to_thread 包装，不阻塞事件循环。
 
 部署前提（各自独立）：
 - TigerBroker:  pip install tigeropen；.env 提供 TIGER_ID / TIGER_RSA_PRIVATE_KEY
@@ -12,13 +12,10 @@
   （.env: FUTU_OPEND_HOST/PORT，默认 127.0.0.1:11111）。FUTU_TRADE_ENV
   = REAL/SIMULATE；下单前需 unlock_trade（FUTU_TRADE_PWD_MD5）。
   OpenD 登录需人工扫码/设备验证一次，掉线需重登——日志会显式提示。
-- IBBroker:     pip install ib_async（原 ib_insync）；常驻 IB Gateway
-  容器（.env: IB_GATEWAY_HOST/PORT，paper 4002 / real 4001，IB_CLIENT_ID）。
-  账户需在 IB 端开通对应市场行情/交易权限。
 
 QuantMind 符号 → 券商代码映射：
-  AAPL    → Tiger: AAPL        / Futu: US.AAPL   / IB: Stock(AAPL, SMART, USD)
-  0001.HK → Tiger: 0001        / Futu: HK.0001   / IB: Stock(0700, SEHK, HKD)
+  AAPL    → Tiger: AAPL        / Futu: US.AAPL
+  0001.HK → Tiger: 0001        / Futu: HK.0001
 """
 
 from __future__ import annotations
@@ -94,19 +91,6 @@ def _tiger_contract(symbol: str) -> tuple[str, str, str]:
     if "." in upper:
         return upper.split(".")[0], "USD", "SMART"
     return upper, "USD", "SMART"
-
-
-def _ib_contract_params(symbol: str) -> tuple[str, str, str]:
-    """QuantMind 符号 → (IB symbol, exchange, currency)。"""
-    upper = symbol.upper()
-    if upper.endswith(".HK"):
-        return upper.split(".")[0], "SEHK", "HKD"
-    if upper.endswith(".US"):
-        return upper.split(".")[0], "SMART", "USD"
-    if "." in upper:
-        code, suffix = upper.split(".", 1)
-        return code, suffix, "USD"
-    return upper, "SMART", "USD"
 
 
 class _StreamQuoteMixin:
@@ -435,106 +419,6 @@ class FutuBroker(_StreamQuoteMixin, BaseBroker):
             return False
 
 
-class IBBroker(_StreamQuoteMixin, BaseBroker):
-    """盈透证券 TWS API（ib_async / ib_insync + IB Gateway）。
-
-    IB_GATEWAY_HOST/PORT 指向常驻 IB Gateway 容器（paper 4002 / real 4001）。
-    IB 连接为长连接，懒建立、断线自动重连。
-    """
-
-    def __init__(self) -> None:
-        self.host = _setting("ib", "gateway_host", "IB_GATEWAY_HOST", "127.0.0.1")
-        try:
-            self.port = int(_setting("ib", "gateway_port", "IB_GATEWAY_PORT", "4002"))
-        except ValueError:
-            self.port = 4002
-        try:
-            self.client_id = int(_setting("ib", "client_id", "IB_CLIENT_ID", "7"))
-        except ValueError:
-            self.client_id = 7
-        self._ib: Any = None
-        self._lock = asyncio.Lock()
-
-    async def _get_ib(self) -> Any:
-        async with self._lock:
-            if self._ib is None or not self._ib.isConnected():
-                from ib_async import IB
-
-                ib = IB()
-                await ib.connectAsync(self.host, self.port, clientId=self.client_id)
-                self._ib = ib
-            return self._ib
-
-    async def place_order(
-        self,
-        user_id: int,
-        symbol: str,
-        side: str,
-        quantity: float,
-        order_type: str,
-        price: float | None = None,
-        tenant_id: str = "default",
-    ) -> BrokerResult:
-        try:
-            from ib_async import LimitOrder, MarketOrder, Stock
-
-            ib = await self._get_ib()
-            ib_symbol, exchange, currency = _ib_contract_params(symbol)
-            contract = Stock(ib_symbol, exchange, currency)
-            action = "BUY" if str(side).upper() == "BUY" else "SELL"
-            if str(order_type).lower() == "market" or not price:
-                order = MarketOrder(action, float(quantity))
-            else:
-                order = LimitOrder(action, float(quantity), float(price))
-            trade = ib.placeOrder(contract, order)
-            return BrokerResult(
-                success=True,
-                exchange_order_id=str(trade.order.orderId),
-                message=str(getattr(trade.orderStatus, "status", "Submitted")),
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.error("[IBBroker] place_order %s failed: %s", symbol, e)
-            return BrokerResult(success=False, message=str(e))
-
-    async def query_account(self, user_id: str, tenant_id: str = "default") -> dict[str, Any]:
-        try:
-            ib = await self._get_ib()
-            summary = await ib.accountSummaryAsync()
-            values = {item.tag: item.value for item in summary}
-            positions: dict[str, Any] = {}
-            for pos in await ib.reqPositionsAsync():
-                contract = pos.contract
-                key = getattr(contract, "localSymbol", "") or contract.symbol
-                positions[key] = {
-                    "volume": float(pos.position),
-                    "available_volume": float(pos.position),
-                    "price": float(getattr(pos, "marketPrice", 0) or 0),
-                    "market_value": float(pos.position) * float(getattr(pos, "marketPrice", 0) or 0),
-                    "cost": float(pos.avgCost),
-                }
-            return {
-                "total_asset": float(values.get("NetLiquidation", 0) or 0),
-                "cash": float(values.get("AvailableFunds", values.get("TotalCashValue", 0)) or 0),
-                "market_value": float(values.get("GrossPositionValue", 0) or 0),
-                "positions": positions,
-            }
-        except Exception as e:  # noqa: BLE001
-            logger.error("[IBBroker] query_account failed: %s", e)
-            return {}
-
-    async def cancel_order(self, exchange_order_id: str, **kwargs) -> bool:
-        try:
-            ib = await self._get_ib()
-            for trade in ib.openTrades():
-                if str(trade.order.orderId) == str(exchange_order_id):
-                    ib.cancelOrder(trade.order)
-                    return True
-            return False
-        except Exception as e:  # noqa: BLE001
-            logger.error("[IBBroker] cancel_order %s failed: %s", exchange_order_id, e)
-            return False
-
-
 def get_overseas_broker(broker_type: str) -> BaseBroker:
     """按 broker_type 构建海外券商 broker（live_trade_config.broker 路由）。"""
     broker_type = str(broker_type or "").lower().strip()
@@ -542,8 +426,6 @@ def get_overseas_broker(broker_type: str) -> BaseBroker:
         return TigerBroker()
     if broker_type == "futu":
         return FutuBroker()
-    if broker_type == "ib":
-        return IBBroker()
     raise ValueError(
-        f"未知券商类型: {broker_type}（可选 tiger / futu / ib）"
+        f"未知券商类型: {broker_type}（可选 tiger / futu）"
     )

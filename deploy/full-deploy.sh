@@ -210,7 +210,6 @@ import_images() {
         quantmind-data-gateway:latest \
         postgres:15-alpine redis:7-alpine \
         lcomplete/huntly:latest agentscope/qwenpaw:latest \
-        ghcr.io/gnzsnz/ib-gateway:latest \
         python:3.10-slim-bookworm; do
         if ! docker image inspect "$image" >/dev/null 2>&1; then
             images_ready=false
@@ -232,7 +231,6 @@ import_images() {
         quantmind-data-gateway:latest \
         postgres:15-alpine redis:7-alpine \
         lcomplete/huntly:latest agentscope/qwenpaw:latest \
-        ghcr.io/gnzsnz/ib-gateway:latest \
         python:3.10-slim-bookworm; do
         docker image inspect "$image" >/dev/null 2>&1 \
             || die "离线镜像包未包含必需镜像: $image"

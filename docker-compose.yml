@@ -762,27 +762,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
-  # ── IB Gateway（盈透证券官方安装包 + IBC 自动登录，社区标准镜像）─────────
-  # 在 .env 配置 IB_ACCOUNT / IB_PASSWORD / IB_TRADING_MODE(paper|live)。
-  # 4001=实盘 API，4002=模拟 API，5901=VNC（首次登录/2FA 用）。
-  # 安全提示：端口仅限局域网/内网使用，切勿暴露公网。
-  ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:latest
-    container_name: ib-gateway
-    environment:
-      IB_ACCOUNT: ${IB_ACCOUNT:-}
-      IB_PASSWORD: ${IB_PASSWORD:-}
-      TRADING_MODE: ${IB_TRADING_MODE:-paper}
-      VNC_SERVER_PASSWORD: ${IB_VNC_PASSWORD:-quantmind-vnc}
-      TWOFA_TIMEOUT_ACTION: restart
-    ports:
-      - "127.0.0.1:4001:4001"
-      - "127.0.0.1:4002:4002"
-      - "127.0.0.1:15901:5901"
-    restart: unless-stopped
-    networks:
-      - quantmind-net
-
 networks:
   quantmind-net:
     driver: bridge

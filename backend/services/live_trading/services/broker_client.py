@@ -1438,8 +1438,8 @@ def create_broker(enable_real: bool, **kwargs) -> BaseBroker:
                 strategy_name=kwargs.get("qmt_exec_strategy_name") or "",
                 timeout=float(kwargs.get("qmt_exec_timeout") or 0),
             )
-        if broker_type in ("tiger", "futu", "ib"):
-            # 海外券商（港/美/期货实盘）：SDK 懒加载，密钥见 overseas_brokers 模块注释
+        if broker_type in ("tiger", "futu"):
+            # 海外券商（港/美实盘）：SDK 懒加载，密钥见 overseas_brokers 模块注释
             from backend.services.trade.services.overseas_brokers import (
                 get_overseas_broker,
             )
@@ -1447,7 +1447,7 @@ def create_broker(enable_real: bool, **kwargs) -> BaseBroker:
             return get_overseas_broker(broker_type)
         raise ValueError(
             f"[create_broker] 未知 broker_type='{broker_type}'，"
-            "有效值: 'bridge'（默认）, 'redis', 'qmt', 'tdx', 'qmt_exec', 'tiger', 'futu', 'ib'。"
+            "有效值: 'bridge'（默认）, 'redis', 'qmt', 'tdx', 'qmt_exec', 'tiger', 'futu'。"
             "请检查 REAL_BROKER_TYPE 环境变量配置。"
         )
 

@@ -17,16 +17,12 @@ const BROKERS_BY_MARKET: Record<string, { key: BrokerKey; label: string; desc: s
   HK: [
     { key: 'futu', label: '富途证券', desc: '需本机常驻 FutuOpenD 网关；港股行情强；支持模拟环境' },
     { key: 'tiger', label: '老虎证券', desc: '纯云端 API，无需网关；SIM 模拟账户可直接演练' },
-    { key: 'ib', label: '盈透 IB', desc: '需常驻 IB Gateway 容器（paper 4002 / real 4001）' },
   ],
   US: [
     { key: 'tiger', label: '老虎证券', desc: '纯云端 API，无需网关；美股主力' },
-    { key: 'ib', label: '盈透 IB', desc: '需常驻 IB Gateway 容器；全球市场' },
     { key: 'futu', label: '富途证券', desc: '需本机常驻 FutuOpenD 网关' },
   ],
-  FUTURES: [
-    { key: 'ib', label: '盈透 IB', desc: '外盘期货（CME 等）经 IB 接入；内盘期货暂不支持' },
-  ],
+  FUTURES: [],
   CRYPTO: [],
 };
 
@@ -77,11 +73,6 @@ const FIELD_DEFS: Record<BrokerKey, FieldDef[]> = {
       { value: 'SIMULATE', label: 'SIMULATE（模拟）' },
       { value: 'REAL', label: 'REAL（实盘）' },
     ] },
-  ],
-  ib: [
-    { name: 'gateway_host', label: 'Gateway 地址', placeholder: '127.0.0.1' },
-    { name: 'gateway_port', label: 'Gateway 端口', placeholder: '4002=模拟 / 4001=实盘' },
-    { name: 'client_id', label: 'Client ID', placeholder: '7' },
   ],
 };
 
@@ -189,7 +180,7 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
         type="info"
         showIcon
         message="当前市场暂无支持的实盘券商通道"
-        description="加密货币市场暂未接入实盘交易；A 股使用通达信/QMT 通道。"
+        description="当前市场暂未接入实盘交易；A 股使用通达信/QMT 通道。"
       />
     );
   }
@@ -203,7 +194,7 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
           </div>
           <p className="text-xs text-gray-500 mt-1">
             配置保存在服务器（敏感字段只写不回显）。下单前请确认已在券商侧开通 OpenAPI 权限；
-            富途需先人工登录 FutuOpenD；IB 需先启动 IB Gateway；A 股需先启动 QMT 执行端或 TDX 桥。
+            富途需先人工登录 FutuOpenD；A 股需先启动 QMT 执行端或 TDX 桥。
           </p>
         </div>
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>刷新</Button>
@@ -224,7 +215,6 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
               <BankOutlined className={selected === key ? 'text-indigo-500' : 'text-gray-400'} />
               {label}
               {key === 'futu' && <Tag className="!text-[10px] !mr-0">需 FutuOpenD</Tag>}
-              {key === 'ib' && <Tag className="!text-[10px] !mr-0">需 IB Gateway</Tag>}
               {key === 'tiger' && <Tag color="green" className="!text-[10px] !mr-0">免网关</Tag>}
             </div>
             <div className="text-[10px] font-normal text-gray-400 mt-0.5 max-w-[240px]">{desc}</div>
@@ -243,11 +233,6 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
           {selected === 'futu' && (
             <div className="text-[11px] leading-5 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
               配置步骤：① 在本地或局域网机器上安装并启动 <b>FutuOpenD</b>（富途官网下载，支持 Windows/Mac/Linux）；② 在 OpenD 客户端<b>扫码登录</b>富途账号（首次需设备验证）；③ 上方填写 OpenD 所在机器的<b>局域网 IP 和端口</b>（默认 11111）；④ 填写交易密码 MD5 后点「测试连接」。
-            </div>
-          )}
-          {selected === 'ib' && (
-            <div className="text-[11px] leading-5 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
-              配置步骤：① 启动 <b>IB Gateway</b>（或 TWS），端口 4002=模拟账户 / 4001=实盘；② Gateway 启动时用 IB 账号密码登录（每次会话需重新登录，可用自动化容器托管）；③ 上方填写 Gateway 所在机器的<b>局域网 IP 和端口</b>；④ 点「测试连接」。需在 IB 端开通对应市场行情与交易权限。
             </div>
           )}
           {selected === 'tiger' && (

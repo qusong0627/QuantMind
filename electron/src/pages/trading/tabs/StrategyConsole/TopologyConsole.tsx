@@ -29,9 +29,9 @@ interface TopologyConsoleProps {
 
 const MARKET_BROKER_LABEL: Record<string, string> = {
     CN: '通达信实盘交易',
-    HK: '券商实盘交易（富途/老虎/IB）',
-    US: '券商实盘交易（老虎/IB/富途）',
-    FUTURES: '券商实盘交易（IB）',
+    HK: '券商实盘交易（富途/老虎）',
+    US: '券商实盘交易（老虎/富途）',
+    FUTURES: '暂无券商通道',
     CRYPTO: '暂无券商通道',
 };
 

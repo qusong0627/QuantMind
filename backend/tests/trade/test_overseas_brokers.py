@@ -1,4 +1,4 @@
-"""海外券商（老虎/盈透/富途）：符号映射、RSA 私钥处理、账户查询字段映射、
+"""海外券商（老虎/富途）：符号映射、RSA 私钥处理、账户查询字段映射、
 下单参数构造、按市场路由券商（broker:selected:{market}）。
 
 tigeropen SDK 未安装的环境用最小 fake 模块树模拟（模块内均为懒加载 import）。
@@ -16,9 +16,7 @@ import pytest
 
 from backend.services.trade_shared.models.order import TradingMode
 from backend.services.trade.services.overseas_brokers import (
-    IBBroker,
     TigerBroker,
-    _ib_contract_params,
     _tiger_contract,
 )
 from backend.services.live_trading.services.trading_engine import (
@@ -45,18 +43,6 @@ def test_tiger_contract_hk_padded_to_5_digits():
 
 def test_tiger_contract_hk_keeps_5_digits():
     assert _tiger_contract("0700.HK") == ("00700", "HKD", "SEHK")
-
-
-def test_ib_contract_params_us_stock():
-    assert _ib_contract_params("AAPL") == ("AAPL", "SMART", "USD")
-
-
-def test_ib_contract_params_us_suffix_smart_exchange():
-    assert _ib_contract_params("AAPL.US") == ("AAPL", "SMART", "USD")
-
-
-def test_ib_contract_params_hk():
-    assert _ib_contract_params("0700.HK") == ("0700", "SEHK", "HKD")
 
 
 # ── RSA 私钥处理 ─────────────────────────────────────────────────────────
@@ -353,12 +339,14 @@ def test_get_broker_real_routes_to_selected_tiger_for_us():
     assert isinstance(broker, TigerBroker)
 
 
-def test_get_broker_real_routes_to_selected_ib_for_hk():
-    engine = _engine_with_redis({"HK": "ib"})
+def test_get_broker_real_routes_to_selected_futu_for_hk():
+    from backend.services.trade.services.overseas_brokers import FutuBroker
+
+    engine = _engine_with_redis({"HK": "futu"})
     with mock.patch("backend.services.trade.services.trading_engine.settings.ENABLE_REAL_TRADING", True), \
          mock.patch("backend.services.trade.services.trading_engine.settings.REAL_BROKER_TYPE", "tdx"):
         broker = engine._get_broker(TradingMode.REAL, "0700.HK")
-    assert isinstance(broker, IBBroker)
+    assert isinstance(broker, FutuBroker)
 
 
 def test_get_broker_real_disabled_uses_paper_broker():
@@ -375,10 +363,12 @@ def test_get_broker_simulation_uses_paper_broker():
 
 
 def test_get_broker_cache_respects_market_and_type():
-    engine = _engine_with_redis({"US": "tiger", "HK": "ib"})
+    from backend.services.trade.services.overseas_brokers import FutuBroker
+
+    engine = _engine_with_redis({"US": "tiger", "HK": "futu"})
     with mock.patch("backend.services.trade.services.trading_engine.settings.ENABLE_REAL_TRADING", True):
         us_broker = engine._get_broker(TradingMode.REAL, "AAPL")
         hk_broker = engine._get_broker(TradingMode.REAL, "0700.HK")
     assert isinstance(us_broker, TigerBroker)
-    assert isinstance(hk_broker, IBBroker)
+    assert isinstance(hk_broker, FutuBroker)
     assert len(engine._broker_cache) == 2

@@ -71,7 +71,7 @@
     <text x="142" y="56" text-anchor="middle" font-size="11" font-weight="600" fill="#334155">订单持仓 · 本地优先落库 · T+1 撮合</text>
     <text x="142" y="73" text-anchor="middle" font-size="11" fill="#64748b">portfolio / simulation / replay / sandbox</text>
     <text x="142" y="90" text-anchor="middle" font-size="11" fill="#64748b">TDX 桥推送 · 实时 Feed · 账户同步</text>
-    <text x="142" y="107" text-anchor="middle" font-size="11" fill="#64748b">IB Gateway · 镜像单（默认关）</text>
+    <text x="142" y="107" text-anchor="middle" font-size="11" fill="#64748b">镜像单（默认关）</text>
     <text x="142" y="124" text-anchor="middle" font-size="11" fill="#64748b">结算 / T+1 解锁 / 公司行动 / EOD</text>
     <text x="142" y="143" text-anchor="middle" font-size="10" fill="#94a3b8">风控评分卡在 API 层，不在这里</text>
     <text x="142" y="159" text-anchor="middle" font-size="10" fill="#94a3b8">UTC 落库：sim_trades 全 TIMESTAMPTZ</text>
