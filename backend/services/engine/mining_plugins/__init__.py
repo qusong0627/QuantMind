@@ -9,7 +9,9 @@
   env ``ALPHA_GATE_MODE``（off/soft/hard），请求级 ``quality_gate_mode``；
 - pool_scoring：池检索打分纯函数（``pool_service`` 组装数据后调用）；
 - factor_libraries：因子值库目录加载器（T-MV-06，``config/factor_libraries.yaml``
-  → ``/factor-categories`` 载荷；非插件家族、无注册副作用，调用方直接 import）。
+  → ``/factor-categories`` 载荷；非插件家族、无注册副作用，调用方直接 import）；
+- orthogonalize：残差正交引擎（T-MV-08，纯函数；``pool_service.refresh_pool``
+  装配调用，留痕 ``metadata_json.orthogonality``，验证面 T-MV-09）。
 
 注册表仿 ``rd_agent/market_adapters`` 的「_registry + register_*」先例；
 新增指标 = 新文件 + 注册调用，不回改调用方。

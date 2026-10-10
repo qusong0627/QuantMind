@@ -182,8 +182,14 @@ def sample_days(days: Sequence[str] | set[str], n: int = SAMPLE_DAYS) -> list[st
     return [seq[i] for i in sorted(set(idx.tolist()))]
 
 
-def pair_corr(a: pd.DataFrame, b: pd.DataFrame) -> tuple[float, int] | None:
-    """两面板逐日截面秩相关 → (日均 rho, 有效日数)；样本不足返回 None。"""
+def daily_rank_corr(a: pd.DataFrame, b: pd.DataFrame) -> tuple[float, int] | None:
+    """两帧逐日截面秩相关 → (日均 rho, 有效日数)；样本不足返回 None。
+
+    帧需含 ``trade_date/symbol/rank_pct``；写侧已按日算好 rank_pct，本函数
+    只做「逐日皮尔逊 ≡ 逐日 Spearman」再对日均值。每天 ≥``MIN_PAIRS_PER_DAY``
+    对、≥``MIN_SAMPLE_DAYS`` 个有效日才算数——**池两两相关（``pair_corr``）
+    与残差正交引擎（``orthogonalize``）共用这一份实现**，口径只此一处。
+    """
     merged = a[["trade_date", "symbol", "rank_pct"]].merge(
         b[["trade_date", "symbol", "rank_pct"]],
         on=["trade_date", "symbol"],
@@ -205,6 +211,11 @@ def pair_corr(a: pd.DataFrame, b: pd.DataFrame) -> tuple[float, int] | None:
     if n_valid < MIN_SAMPLE_DAYS:
         return None
     return float(rho_day.mean()), n_valid
+
+
+def pair_corr(a: pd.DataFrame, b: pd.DataFrame) -> tuple[float, int] | None:
+    """池内两两相关唯一口径——薄委托 ``daily_rank_corr``（别处勿另起实现）。"""
+    return daily_rank_corr(a, b)
 
 
 def pairwise_corr(

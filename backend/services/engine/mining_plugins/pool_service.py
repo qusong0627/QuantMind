@@ -44,7 +44,7 @@ from typing import Any
 
 from backend.shared.factor_pool_contract import EDGES_TABLE, POOL_TABLE
 
-from . import pool_panels
+from . import orthogonalize, pool_panels
 from .pool_cleanup import CleanupCandidate, CleanupCriteria, evaluate_cleanup
 from .pool_edges import DEFAULT_TOP_K as _FORMULA_TOP_K
 from .pool_edges import formula_tokens, similar_pairs
@@ -393,6 +393,24 @@ async def _write_admission_trace(factor_id: str, trace: dict[str, Any]) -> None:
         logger.warning("[factor-pool] 入库闸门留痕失败 %s: %s", factor_id, exc)
 
 
+async def _write_orthogonality_trace(factor_id: str, trace: dict[str, Any]) -> None:
+    """留痕写 ``rd_agent_factors.metadata_json.orthogonality``（顶层浅合并）。
+
+    与入库闸门留痕同款：只看增量键、不碰回测指标；best-effort——留痕是
+    验证面（T-MV-09 消费），不是主链，失败只告警。
+    """
+    try:
+        from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+            RDAgentFactorPersistence,
+        )
+
+        await RDAgentFactorPersistence().update_factor_metrics(
+            factor_id, metadata={"orthogonality": trace}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[factor-pool] 残差正交留痕失败 %s: %s", factor_id, exc)
+
+
 async def record_backtested_factor(
     factor_id: str,
     *,
@@ -623,6 +641,7 @@ async def refresh_pool(
         "icir_missing": 0,
         "admission_blocked": 0,
         "diversity": None,
+        "orthogonality": None,
         "dry_run": dry_run,
     }
 
@@ -781,6 +800,18 @@ async def refresh_pool(
     stats["diversity"] = diversity
     stats["n_eff"] = n_eff
 
+    # 4.5) 残差正交（T-MV-08）：对强父本逐日截面 OLS 取残差 → 增量 IC + 正交证据
+    ortho_traces: dict[str, dict[str, Any]] = {}
+    ortho_stats: dict[str, Any] = {}
+    try:
+        ortho_traces, ortho_stats = orthogonalize.build_traces(
+            factors, frames, days=sample
+        )
+    except Exception as exc:  # noqa: BLE001 — 增益层，绝不拖垮池刷新
+        logger.warning("[factor-pool] 残差正交计算失败（跳过）: %s", exc)
+        ortho_stats = {"error": str(exc)}
+    stats["orthogonality"] = ortho_stats
+
     # 5) pool_score（q_norm × 疲劳 × 冗余 × 新鲜度）
     params_scoring = _scoring_params()
     candidates = [
@@ -906,6 +937,20 @@ async def refresh_pool(
                 weight=1.0,
                 extra=_pair_extra(src, dst),
             )
+
+    # 7) 残差正交留痕（best-effort；dry_run 在上方提前返回不会走到这里。
+    #    统计口径在 stats["orthogonality"]，这里只落 rd_agent_factors.metadata_json）
+    for fid, trace in ortho_traces.items():
+        trace["evaluated_at"] = now_iso
+        await _write_orthogonality_trace(fid, trace)
+    if ortho_traces:
+        logger.info(
+            "[factor-pool] 残差正交留痕 %d 条（ok=%d / orthogonal=%d / no_panel=%d）",
+            len(ortho_traces),
+            ortho_stats.get("evaluated", 0),
+            ortho_stats.get("orthogonal", 0),
+            ortho_stats.get("no_panel", 0),
+        )
     logger.info(
         "[factor-pool] refresh 完成 market=%s universe=%s: %d 因子 / %d 面板 / %d 对 / "
         "%d 相关边 / %d 公式边 / %d task 边 / 多样性 %s",

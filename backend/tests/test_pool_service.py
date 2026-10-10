@@ -382,6 +382,65 @@ class TestRefresh:
             await _cleanup([f1, f2, f3], [user])
             await close_database()
 
+    @pytest.mark.asyncio
+    async def test_refresh_writes_orthogonality_trace(self, tmp_path, monkeypatch):
+        """T-MV-08：refresh 逐因子写 metadata_json.orthogonality（真库回读）。
+
+        25 天 × 40 股面板 ≥ 引擎默认门槛（20 天 × 30 股）；三个独立值序列
+        → 残差与父本低相关 → orthogonal=True；父本按 ICIR 降序（0.9/0.5/0.1）
+        取，每个因子的父集合不含自身。
+        """
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        await _skip_if_no_db()
+        monkeypatch.setenv("QM_FACTOR_POOL_PANEL_DIR", str(tmp_path / "panels"))
+        run = _run_id()
+        user = run
+        f1, f2, f3 = f"{run}_f1", f"{run}_f2", f"{run}_f3"
+        try:
+            async with get_session() as session:
+                await _seed_factor(session, factor_id=f1, user_id=user, icir=0.9)
+                await _seed_factor(session, factor_id=f2, user_id=user, icir=0.5)
+                await _seed_factor(session, factor_id=f3, user_id=user, icir=0.1)
+            for fid, seed in ((f1, 1), (f2, 2), (f3, 3)):
+                await pool_service.record_backtested_factor(
+                    fid, market=MARKET, values=_values(days=25, symbols=40, seed=seed)
+                )
+
+            stats = await pool_service.refresh_pool(
+                user_id=user, market=MARKET, universe=UNIVERSE
+            )
+
+            async with get_session(read_only=True) as session:
+                traces = {
+                    str(r["factor_id"]): r["orthogonality"]
+                    for r in (
+                        await session.execute(
+                            text(
+                                "SELECT factor_id, "
+                                "metadata_json->'orthogonality' AS orthogonality "
+                                "FROM rd_agent_factors WHERE factor_id = ANY(:ids)"
+                            ),
+                            {"ids": [f1, f2, f3]},
+                        )
+                    ).mappings()
+                }
+
+            assert stats["orthogonality"]["evaluated"] == 3, stats["orthogonality"]
+            assert stats["orthogonality"]["orthogonal"] == 3
+            for fid in (f1, f2, f3):
+                trace = traces[fid]
+                assert trace is not None, f"{fid} 未写正交留痕"
+                assert trace["status"] == "ok", trace
+                assert trace["orthogonal"] is True, trace
+                assert trace["evaluated_at"]
+                parent_ids = [p["factor_id"] for p in trace["parents"]]
+                assert parent_ids and fid not in parent_ids
+                assert all(p["name"] for p in trace["parents"])
+        finally:
+            await _cleanup([f1, f2, f3], [user])
+            await close_database()
+
 
 class TestInjection:
     @pytest.mark.asyncio
