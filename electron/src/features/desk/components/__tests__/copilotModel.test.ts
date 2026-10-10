@@ -56,10 +56,11 @@ describe('copilotModel', () => {
       .toBe('卖出 600036.SH × 100  限价 42.5');
   });
 
-  it('adviceStatusMeta 状态映射', () => {
+  it('adviceStatusMeta 状态映射：执行类标签必须带「模拟」（一键执行=模拟盘，审计 C4）', () => {
     expect(adviceStatusMeta('pending')).toEqual({ label: '待决', tone: 'blue' });
-    expect(adviceStatusMeta('executed').tone).toBe('green');
-    expect(adviceStatusMeta('failed').tone).toBe('red');
+    expect(adviceStatusMeta('executed')).toEqual({ label: '已模拟执行', tone: 'green' });
+    expect(adviceStatusMeta('partial').label).toBe('部分模拟执行');
+    expect(adviceStatusMeta('failed')).toEqual({ label: '模拟失败', tone: 'red' });
     expect(adviceStatusMeta('whatever').label).toBe('whatever');
   });
 
@@ -95,7 +96,7 @@ describe('copilotModel', () => {
         '5': { n: 0, hits: 0, hit_rate: null, avg_excess: null },
       },
     });
-    expect(filled).toContain('已决 4（执行 3 / 拒绝 1）');
+    expect(filled).toContain('已决 4（模拟 3 / 拒绝 1）');
     expect(filled).toContain('T+1 胜率 75%');
     expect(filled).toContain('平均超额 +1.2%');
 

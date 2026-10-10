@@ -398,7 +398,8 @@ async def reject_advice(
 
 @router.post("/advice/{advice_id}/execute")
 async def execute_advice(advice_id: str, current_user: dict = Depends(get_current_user)):
-    """一键执行（接受）：逐动作走 OrderRouter（来源 co_pilot，幂等键 cop-*，同用户临界区）。"""
+    """模拟执行（接受）：逐动作走 OrderRouter（**模拟盘撮合，不触真单**；
+    来源 co_pilot，幂等键 cop-*，同用户临界区）。信封带 mode=simulation 供前端标注。"""
     from backend.services.simulation.services.order_router import (
         OrderRequest,
         submit_order,
@@ -478,6 +479,7 @@ async def execute_advice(advice_id: str, current_user: dict = Depends(get_curren
         )
         await session.commit()
     return {"success": True, "data": {"advice_id": advice_id, "status": status,
+                                      "mode": "simulation",
                                       "executed": ok, "total": len(results), "results": results}}
 
 

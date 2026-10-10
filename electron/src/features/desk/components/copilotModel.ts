@@ -130,9 +130,11 @@ export function actionLine(action: CopilotAdviceAction): string {
 export function adviceStatusMeta(status: string): { label: string; tone: 'blue' | 'green' | 'red' | 'amber' | 'slate' } {
   const map: Record<string, { label: string; tone: 'blue' | 'green' | 'red' | 'amber' | 'slate' }> = {
     pending: { label: '待决', tone: 'blue' },
-    executed: { label: '已执行', tone: 'green' },
-    partial: { label: '部分执行', tone: 'amber' },
-    failed: { label: '执行失败', tone: 'red' },
+    // 「一键执行」实走 OrderRouter=**模拟盘撮合**，不触真单——标签必须带「模拟」
+    // （2026-10-10 审计 C4：实盘栏里无标注的「已执行」会被读成真单成交）。
+    executed: { label: '已模拟执行', tone: 'green' },
+    partial: { label: '部分模拟执行', tone: 'amber' },
+    failed: { label: '模拟失败', tone: 'red' },
     rejected: { label: '已拒绝', tone: 'slate' },
   };
   return map[status] || { label: status, tone: 'slate' };
@@ -181,7 +183,7 @@ export function adviceStatsLine(stats: AdviceStats | null): string {
   if (!stats || stats.available === false) return '建议战绩：暂不可用';
   const total = stats.total ?? 0;
   if (!total) return '暂无建议卡';
-  const head = `近 ${stats.days ?? 90} 天：发出 ${total} · 已决 ${stats.decided ?? 0}（执行 ${stats.executed ?? 0} / 拒绝 ${stats.rejected ?? 0}）`;
+  const head = `近 ${stats.days ?? 90} 天：发出 ${total} · 已决 ${stats.decided ?? 0}（模拟 ${stats.executed ?? 0} / 拒绝 ${stats.rejected ?? 0}）`;
   const t1 = stats.by_horizon?.['1'];
   if (!stats.scored || !t1 || !t1.n) {
     return `${head} · 兑现回填次日凌晨产出`;

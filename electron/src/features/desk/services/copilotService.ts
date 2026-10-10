@@ -56,7 +56,7 @@ export async function getAdviceStats(days = 90): Promise<AdviceStats> {
   return res.data;
 }
 
-/** 一键执行（OrderRouter，来源 co_pilot） */
+/** 模拟执行（OrderRouter=模拟盘撮合，来源 co_pilot；不触真单） */
 export async function executeAdvice(adviceId: string): Promise<{
   status: string;
   executed: number;

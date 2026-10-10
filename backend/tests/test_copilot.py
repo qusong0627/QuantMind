@@ -123,10 +123,12 @@ def test_advice_execute_via_router_with_audit_and_cleanup():
         created_advice.append(advice_id)
         assert created["data"]["status"] == "pending"
 
-        # ② 一键执行（真 OrderRouter）——无论成交或拒单，都必须留下 source=co_pilot 的委托记录
+        # ② 模拟执行（OrderRouter=模拟盘撮合，不触真单）——无论成交或拒单，都必须留下
+        #    source=co_pilot 的委托记录
         result = await execute_advice(advice_id, current_user=user)
         assert result["success"] is True
         data = result["data"]
+        assert data["mode"] == "simulation", "执行信封必须标注 mode=simulation（审计 C4）"
         assert data["total"] == 1
         assert data["status"] in {"executed", "failed"}  # 行情不可用时可失败，但链路必须走通
         row = data["results"][0]

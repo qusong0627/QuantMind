@@ -275,7 +275,7 @@ export const CopilotPanel: React.FC = () => {
                   <div className="mt-1 space-y-0.5">
                     {item.execution.map((exec, idx) => (
                       <div key={`${item.advice_id}-ex-${idx}`} className={`text-[10px] ${exec.success ? 'text-emerald-600' : 'text-red-500'}`}>
-                        {exec.symbol} {exec.side}：{exec.success ? '已受理' : exec.message || '失败'}
+                        {exec.symbol} {exec.side}：{exec.success ? '模拟已受理' : exec.message || '失败'}
                         {exec.duplicate ? '（幂等命中）' : ''}
                       </div>
                     ))}
@@ -304,7 +304,7 @@ export const CopilotPanel: React.FC = () => {
                         onClick={() => void onExecute(item.advice_id)}
                         className="rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
                       >
-                        {busy === item.advice_id ? '执行中…' : '一键执行（OrderRouter）'}
+                        {busy === item.advice_id ? '模拟执行中…' : '模拟执行（不触真单）'}
                       </button>
                     )}
                     <button
