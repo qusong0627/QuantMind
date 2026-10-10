@@ -24,8 +24,8 @@ import numpy as np
 
 from backend.services.engine.inference.realtime_core import (
     compute_cycle,
-    digits,
     effective_override,
+    identity,
     load_baseline_for_model,
     load_window_for_model,
     matrix_digest,
@@ -71,13 +71,18 @@ def load_ledger(day_key: str, *, redis_client: Any | None = None) -> list[dict[s
 
 
 def group_frames(frames: Any) -> dict[str, list[dict[str, Any]]]:
-    """L0.5 归档行 → {纯数字: [帧dict 按 ts 升序]}（回放指针的依据）。"""
+    """L0.5 归档行 → {**后缀身份**: [帧dict 按 ts 升序]}（回放指针的依据）。
+
+    归档 ``symbol`` 列即后缀式（l05_store 契约）——此处**不再经 digits() 折叠**
+    （审计 M2）：000001.SH 与 000001.SZ 的归档帧必须各归各的指针序列，
+    折叠会把指数与平安银行的帧混进同一指针列表（帧序/水位全乱）。
+    """
     if frames is None or len(frames) == 0:
         return {}
     df = frames.sort_values(["symbol", "ts"]) if hasattr(frames, "sort_values") else frames
     out: dict[str, list[dict[str, Any]]] = {}
     for _, row in df.iterrows():
-        sym = digits(str(row.get("symbol")))
+        sym = identity(str(row.get("symbol")))
         record = {k: row.get(k) for k in df.columns}
         out.setdefault(sym, []).append(record)
     return out
@@ -105,16 +110,17 @@ def verify_entry(
     cuts = list(entry.get("cuts") or [])
     snapshots: dict[str, dict[str, Any]] = {}
     for i, sym in enumerate(symbols):
+        ident = identity(sym)  # 指针/快照与 compute_cycle 身份空间一致（审计 M2）
         cut = cuts[i] if i < len(cuts) else None
         if cut is None:
             continue
-        frames = frames_by_symbol.get(sym) or []
-        ptr = pointers.get(sym, 0)
+        frames = frames_by_symbol.get(ident) or []
+        ptr = pointers.get(ident, 0)
         while ptr < len(frames) and float(frames[ptr].get("ts") or 0) <= float(cut):
             ptr += 1
-        pointers[sym] = ptr
+        pointers[ident] = ptr
         if ptr > 0:
-            snapshots[sym] = frames[ptr - 1]
+            snapshots[ident] = frames[ptr - 1]
     override = set(entry.get("override") or []) & set(cols)
     result = compute_cycle(
         session=session,

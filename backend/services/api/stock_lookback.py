@@ -300,7 +300,7 @@ WHERE tenant_id = :tid AND trade_date >= CURRENT_DATE - INTERVAL '180 days'
   {awhere}
   {mwhere}
 GROUP BY trade_date
-HAVING COUNT(DISTINCT symbol) >= :min_cov
+HAVING COUNT(DISTINCT {sym_key}) >= :min_cov
 ORDER BY trade_date DESC
 LIMIT :k
 """
@@ -338,7 +338,11 @@ async def fetch_signal_ladder(
         awhere = "AND trade_date <= :asof"
         params["asof"] = asof_d  # 必须是 date：asyncpg 不吃字符串（见 parse_asof）
 
-    sql = _M_DATE_COVERAGE_SQL.format(awhere=awhere, mwhere=mwhere)
+    # 覆盖计数折叠市场段（与 signal_scores.SYMBOL_COUNT_KEY 同一判据）：
+    # 实时行后缀身份与批量行裸码是同一只，不折叠会把覆盖日注水（T4-1 审计 M2）
+    from backend.shared.signal_scores import SYMBOL_COUNT_KEY
+
+    sql = _M_DATE_COVERAGE_SQL.format(awhere=awhere, mwhere=mwhere, sym_key=SYMBOL_COUNT_KEY)
     async with get_session() as session:
         rows = (await session.execute(text(sql), params)).fetchall()
     return [_iso(r[0]) for r in rows]

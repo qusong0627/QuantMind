@@ -35,8 +35,8 @@ from backend.shared.load_governor import LoadGovernor
 
 from backend.services.engine.inference.realtime_core import (
     compute_cycle,
-    digits as _digits,
     effective_override,
+    identity as _identity,
     ledger_entry,
     ledger_json,
     live_coverage,
@@ -297,7 +297,7 @@ class RealtimeInferenceService:
             return bundle.get("frames") or {}
         model_dir = self._current_model_dir()
         cache_key = f"{day.isoformat()}|{model_dir}|{seq_len}"
-        wanted = {_digits(s) for s in symbols}
+        wanted = {_identity(s) for s in symbols}  # 覆盖集与窗口帧键同用身份空间（审计 M2）
         with self._lock:
             cached = self._windows.get(cache_key)
         covered = set(cached.get("covered") or ()) if cached else set()

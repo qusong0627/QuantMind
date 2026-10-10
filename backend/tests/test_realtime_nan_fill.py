@@ -48,7 +48,8 @@ class _Session:
 def _cycle(value):
     """把单个标的的单个特征值喂进 compute_cycle，返回 (结果, 会话)。"""
     session = _Session()
-    baseline = {rc.digits("600519"): {_COL: value}}
+    # 基线键=后缀身份（identity；引擎侧身份空间，000001.SH≠000001.SZ——审计 M2）
+    baseline = {rc.identity("600519"): {_COL: value}}
     result = rc.compute_cycle(
         session=session,
         input_name="features",

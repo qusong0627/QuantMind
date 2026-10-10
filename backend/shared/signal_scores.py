@@ -6,9 +6,10 @@
 
 口径（与候选信号页 `/stock-terminal/list` 同源）：
 
-1. 取「覆盖充分日」：``COUNT(DISTINCT symbol) >= MIN_SIGNAL_COVERAGE`` 的最近
-   ``trade_date``；当日覆盖不足（推理刚跑到一半/降级日）时回退到最近一天，
-   并把回退事实交给调用方（``meta.fallback=True``）。
+1. 取「覆盖充分日」：``COUNT(DISTINCT <标的归一键>) >= MIN_SIGNAL_COVERAGE`` 的最近
+   ``trade_date``（计数把后缀身份折叠到裸 6 位——实时行 ``600036.SH`` 与批量行
+   ``600036`` 是同一只，同股只算一次；T4-1 审计 M2）；当日覆盖不足（推理刚跑到
+   一半/降级日）时回退到最近一天，并把回退事实交给调用方（``meta.fallback=True``）。
 2. 该日每标的取**最新一条**（``DISTINCT ON (symbol) ORDER BY created_at DESC, id DESC``）：
    同一天可能既有日频批次行、又有盘中实时行（``source='realtime'``），
    混着取会让分数不确定。
@@ -48,17 +49,29 @@ logger = get_logger(__name__)
 #: 「信号日覆盖充分」判据（全市场 CN 标的数千只，覆盖不足说明推理残缺）
 MIN_SIGNAL_COVERAGE = 1000
 
-_CN_PREFIX_RE = re.compile(r"^(SH|SZ|BJ)\d{6}$")
+#: 覆盖计数用的标的归一表达式（T4-1 审计 M2）：实时行 symbol 是**后缀身份**
+#: （``600036.SH``，000001.SH≠000001.SZ），批量行是裸 6 位——同一只股票两种形态
+#: 在 ``COUNT(DISTINCT symbol)`` 下会算成两只，把覆盖闸门注水抬高（热集 ~500 只
+#: 足以让一批残留日假过线）。覆盖日计数一律折叠到裸 6 位；非 A 股形态原样参与。
+#: **跨模块共享**（stock_lookback 阶梯 / stock_terminal 默认信号日同判据）。
+SYMBOL_COUNT_KEY = (
+    "CASE WHEN symbol ~ '^[0-9]{6}[.](SH|SZ|BJ)$' THEN left(symbol, 6) ELSE symbol END"
+)
 
-#: 三条 SQL 的模板：``{bucket}`` 占位在 ``_BUCKET_SQL`` 渲染时带上「前导 AND +
-#: 尾随空格」，空串渲染与旧常量**逐字节相同**（off 路径行为零变化）。
 SQL_LATEST_COVERED_DATE_TMPL = (
     "SELECT trade_date FROM engine_signal_scores "
     "WHERE tenant_id = :tid AND (market IS NULL OR market = 'CN') {bucket}"
-    "GROUP BY trade_date HAVING COUNT(DISTINCT symbol) >= :min_cov "
+    "GROUP BY trade_date HAVING COUNT(DISTINCT {sym_key}) >= :min_cov "
     "ORDER BY trade_date DESC LIMIT 1"
 )
 
+_CN_PREFIX_RE = re.compile(r"^(SH|SZ|BJ)\d{6}$")
+
+#: 三条 SQL 的模板：``{bucket}`` 占位在 ``_BUCKET_SQL`` 渲染时带上「前导 AND +
+#: 尾随空格」。仅覆盖日模板的 DISTINCT 计数带市场段折叠（T4-1 审计 M2，见
+#: ``SYMBOL_COUNT_KEY``——该表达式含正则量词 ``{6}``，必须经 ``{sym_key}``
+#: 占位传入：str.format 不重扫替换值，内联进模板则会被当替换字段报错）；
+#: 其余两条与旧口径逐字节相同。
 SQL_LATEST_ANY_DATE_TMPL = (
     "SELECT trade_date FROM engine_signal_scores "
     "WHERE tenant_id = :tid AND (market IS NULL OR market = 'CN') {bucket}"
@@ -76,7 +89,9 @@ SQL_SCORES_BY_DATE_TMPL = (
 _BUCKET_SQL = "AND feature_version = :bucket "
 
 #: 无桶过滤渲染结果（旧口径常量照旧导出——存量引用与单测依赖其字面内容）
-SQL_LATEST_COVERED_DATE = SQL_LATEST_COVERED_DATE_TMPL.format(bucket="")
+SQL_LATEST_COVERED_DATE = SQL_LATEST_COVERED_DATE_TMPL.format(
+    bucket="", sym_key=SYMBOL_COUNT_KEY
+)
 SQL_LATEST_ANY_DATE = SQL_LATEST_ANY_DATE_TMPL.format(bucket="")
 SQL_SCORES_BY_DATE = SQL_SCORES_BY_DATE_TMPL.format(bucket="")
 
@@ -158,7 +173,10 @@ async def _fetch_snapshot(
         params["bucket"] = bucket
     d0 = (
         await session.execute(
-            text(SQL_LATEST_COVERED_DATE_TMPL.format(bucket=clause)), params
+            text(
+                SQL_LATEST_COVERED_DATE_TMPL.format(bucket=clause, sym_key=SYMBOL_COUNT_KEY)
+            ),
+            params,
         )
     ).scalar_one_or_none()
     fallback = False

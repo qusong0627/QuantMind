@@ -138,6 +138,14 @@ class TestSqlConstants:
         assert ":min_cov" in SQL_LATEST_COVERED_DATE
         assert MIN_SIGNAL_COVERAGE == 1000
 
+    def test_coverage_count_folds_symbol_identity(self):
+        # T4-1 审计 M2：实时行=后缀身份（600036.SH）、批量行=裸 6 位——同一只股
+        # 在 COUNT(DISTINCT symbol) 下算成两只，覆盖日闸门会被热集注水假过线。
+        # 计数必须先折叠市场段再 DISTINCT。
+        assert "COUNT(DISTINCT CASE" in SQL_LATEST_COVERED_DATE
+        assert "[.](SH|SZ|BJ)$" in SQL_LATEST_COVERED_DATE
+        assert "left(symbol, 6)" in SQL_LATEST_COVERED_DATE
+
     def test_scores_query_picks_latest_row_per_symbol(self):
         assert "DISTINCT ON (symbol)" in SQL_SCORES_BY_DATE
         assert "created_at DESC" in SQL_SCORES_BY_DATE

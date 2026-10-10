@@ -80,7 +80,7 @@ def _history(closes: list[float]):
     n = len(closes)
     return pd.DataFrame(
         {
-            "symbol": ["600036"] * n,
+            "symbol": ["600036.SH"] * n,
             "trade_date": pd.date_range("2026-08-01", periods=n, freq="B"),
             "open": closes, "high": [c * 1.01 for c in closes],
             "low": [c * 0.99 for c in closes], "close": closes,
@@ -103,13 +103,14 @@ def _fake_engine_inputs(price: float = 12.0):
             "timestamp": str(int(datetime.now(tz=_CST).timestamp())),
         },
     }
+    # 基线键=后缀身份（compute_cycle 身份空间，审计 M2；指数与同数字股票不互串）
     rows = {
-        "600036": {"mom_ret_1d": 0.01, "f1": 0.2, "f2": -0.1, "f3": 0.05, "f4": 0.3, "f5": 0.0},
-        "000001": {"mom_ret_1d": -0.02, "f1": 0.1, "f2": 0.4, "f3": -0.2, "f4": 0.0, "f5": 0.2},
+        "600036.SH": {"mom_ret_1d": 0.01, "f1": 0.2, "f2": -0.1, "f3": 0.05, "f4": 0.3, "f5": 0.0},
+        "000001.SZ": {"mom_ret_1d": -0.02, "f1": 0.1, "f2": 0.4, "f3": -0.2, "f4": 0.0, "f5": 0.2},
     }
     history = {
-        "600036": _history([10.0 + 0.04 * i for i in range(25)]),  # 末位≈10.96
-        "000001": _history([10.4] * 25),
+        "600036.SH": _history([10.0 + 0.04 * i for i in range(25)]),  # 末位≈10.96
+        "000001.SZ": _history([10.4] * 25),
     }
     return hot, snaps, {"rows": rows, "history": history}
 
@@ -134,7 +135,7 @@ def test_build_cycle_with_override_whitelist(tmp_path):
     assert p_plain is not None
     assert p_plain["run_id"].startswith("rt-mdl_rt_test-")
     assert p_plain["feature_dim"] == 6 and p_plain["ready_symbols"] == 2
-    assert {s["symbol"] for s in p_plain["scores"]} == {"600036", "000001"}
+    assert {s["symbol"] for s in p_plain["scores"]} == {"600036.SH", "000001.SZ"}
     ranks = sorted(s["score_rank"] for s in p_plain["scores"])
     assert ranks == [1, 2]
     assert p_plain["quality"]["override_whitelist"] == []
@@ -212,7 +213,8 @@ async def test_publish_end_to_end_real_db(tmp_path):
             ).all()
         assert len(rows) == 2
         assert all(r[2] == "realtime" for r in rows)
-        assert {r[0] for r in rows} == {"600036", "000001"}
+        # 落库 symbol=后缀身份（审计 M2：mark_signal_ready 冲突键以它为准，指数不并股票行）
+        assert {r[0] for r in rows} == {"600036.SH", "000001.SZ"}
         assert all(0.0 <= float(r[3]) <= 1.0 for r in rows)  # rank_pct 端点现算
     finally:
         async with get_session(read_only=False) as db:
@@ -373,10 +375,11 @@ def test_baseline_loader_tolerates_unknown_feature_columns(tmp_path):
         ["600036.SH"], __import__("datetime").date(2026, 9, 17),
         parquet_path=parquet, cols=["f1", "JQ110_52week_rank", "not_in_parquet"],
     )
-    row = bundle["rows"]["600036"]
+    # 键=后缀身份（identity(源行纯数字)；审计 M2）
+    row = bundle["rows"]["600036.SH"]
     assert row["f1"] == 0.3           # 存在的列正常取到
     assert row.get("JQ110_52week_rank") is None  # 未收录列不崩、交 fill 兜底
-    assert len(bundle["history"]["600036"]) == 3
+    assert len(bundle["history"]["600036.SH"]) == 3
 
 
 # ── 基线分派（2026-09-17 迁移）：quantdb 直读 / 遗留快照 ──────────────────────
@@ -482,16 +485,16 @@ def test_load_baseline_for_model_quantdb_dispatch():
     assert calls["read_day"][2] == ("f1", "open")           # f9 源内不存在 → 不请求
     assert calls["read_day"][3] == "2026-09-14"             # 最近可用日
     rows = bundle["rows"]
-    assert set(rows) == {"600036", "000001"}                # 前缀式返回 → 归一纯数字键
-    assert rows["600036"]["f1"] == pytest.approx(0.5)
-    assert rows["600036"]["f9"] is None                     # 缺列交 fill 兜底
+    assert set(rows) == {"600036.SH", "000001.SZ"}          # 前缀式返回 → 归一后缀身份键（审计 M2）
+    assert rows["600036.SH"]["f1"] == pytest.approx(0.5)
+    assert rows["600036.SH"]["f9"] is None                  # 缺列交 fill 兜底
     # 历史走 daily_forward 前复权直读（与快照价/批量特征同口径；后复权混用会致 mom_* 偏负），
     # 结束日放宽到「≤ day-1 的最新 K 线可用日」（09-16，因子源只到 09-14）
     assert len(hub.calls) == 1
     _syms, h_start, h_end, h_adjust = hub.calls[0]
     assert h_start.isoformat() == "2026-08-01" and h_end.isoformat() == "2026-09-16"
     assert h_adjust == "qfq"
-    assert len(bundle["history"]["600036"]) == 45           # tail(45)
+    assert len(bundle["history"]["600036.SH"]) == 45        # tail(45)
 
 
 @pytest.mark.unit
@@ -516,8 +519,8 @@ def test_load_baseline_for_model_legacy_keeps_parquet(tmp_path):
         cols=["f1"],
         parquet_path=parquet,
     )
-    assert bundle["rows"]["600036"]["f1"] == pytest.approx(0.3)
-    assert len(bundle["history"]["600036"]) == 1
+    assert bundle["rows"]["600036.SH"]["f1"] == pytest.approx(0.3)
+    assert len(bundle["history"]["600036.SH"]) == 1
 
 
 @pytest.mark.unit
@@ -561,9 +564,9 @@ def test_quantdb_baseline_real_source():
     )
     rows = bundle["rows"]
     assert rows, "最近可用日应触达热集标的"
-    assert "600036" in rows and "000001" in rows
-    assert rows["600036"]["mom_ret_1d"] is not None
-    hist = bundle["history"]["600036"]
+    assert "600036.SH" in rows and "000001.SZ" in rows  # 键=后缀身份（审计 M2）
+    assert rows["600036.SH"]["mom_ret_1d"] is not None
+    hist = bundle["history"]["600036.SH"]
     assert 1 <= len(hist) <= 45
     assert {"open", "high", "low", "close", "volume", "amount"} <= set(hist.columns)
 
@@ -605,7 +608,7 @@ def test_quantdb_baseline_cross_lib_real_source():
         ["600036.SH"], day, meta=meta, cols=["mom_ret_1d", cross_col]
     )
 
-    row = bundle["rows"]["600036"]
+    row = bundle["rows"]["600036.SH"]  # 键=后缀身份（审计 M2）
     assert row["mom_ret_1d"] is not None, "锚库列必须照常取到"
     assert row[cross_col] is not None, "副库列被静默丢弃——跨库判可用性回归了"
 

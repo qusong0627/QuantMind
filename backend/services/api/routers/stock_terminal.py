@@ -1981,16 +1981,19 @@ async def list_stocks(
             async with get_session() as session:
                 from sqlalchemy import text as _txt
 
-                # 默认信号日：优先最近一个覆盖充分的推理日（COUNT(DISTINCT symbol)
+                # 默认信号日：优先最近一个覆盖充分的推理日（COUNT(DISTINCT 归一键)
                 # >= _MIN_SIGNAL_COVERAGE），避免最新日只推理了少数股票导致列表
-                # 第 1 页之后分数全空；无覆盖达标日时回退最近任意有分数日
+                # 第 1 页之后分数全空；无覆盖达标日时回退最近任意有分数日。
+                # 归一键折叠市场段（T4-1 审计 M2）：实时行后缀身份与批量行裸码同股只算一次。
+                from backend.shared.signal_scores import SYMBOL_COUNT_KEY as _sym_key
+
                 _d0 = (
                     await session.execute(
                         _txt(
                             "SELECT trade_date FROM engine_signal_scores e "
                             f"WHERE e.tenant_id='default' {mwhere} "
                             "GROUP BY trade_date "
-                            "HAVING COUNT(DISTINCT symbol) >= :min_cov "
+                            f"HAVING COUNT(DISTINCT {_sym_key}) >= :min_cov "
                             "ORDER BY trade_date DESC LIMIT 1"
                         ),
                         {**mparams, "min_cov": _MIN_SIGNAL_COVERAGE},

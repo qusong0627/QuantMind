@@ -253,6 +253,10 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
         normalize_market,
     )
 
+    # 身份归一唯一入口（审计 M2）：symbol 一律后缀身份（600036.SH）——000001.SH（指数）
+    # 与 000001.SZ（平安银行）在上方冲突键里必须是两行，绝不被折叠合并。
+    from backend.services.engine.inference.realtime_core import identity
+
     rank_pcts = compute_rank_pct([item.fusion_score for item in payload.scores])
 
     # §6.4（P3）：regime 缺省填当日生效值（qm_regime_daily）；表外市场/缺行 → NULL。
@@ -296,7 +300,7 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
                     "trade_date": payload.trade_date,  # date 对象（asyncpg 原生；勿转字符串）
                     "model_version": payload.model_version,
                     "feature_version": payload.feature_version,
-                    "symbol": item.symbol.upper().strip(),
+                    "symbol": identity(item.symbol),
                     "light_score": item.light_score,
                     "tft_score": item.tft_score,
                     "fusion_score": item.fusion_score,

@@ -25,7 +25,14 @@ from backend.shared.feature_incremental import TIER_COLUMNS, is_missing
 
 
 def digits(symbol: str) -> str:
-    """后缀式/前缀式/纯数字 → 纯数字（快照 parquet 与 engine_signal_scores 口径）。"""
+    """后缀式/前缀式/纯数字 → 纯数字（**只用于连因子源/快照 parquet 的行键**）。
+
+    ⚠️ **不得当身份键**（审计 M2）：``000001.SH``（上证指数，热集常驻）与
+    ``000001.SZ``（平安银行）会折叠成同一字符串——指数吃到股票的基线行、账本
+    两行无法区分、engine_signal_scores 冲突键把两行并成一行。身份一律走
+    :func:`identity`；本函数只允许出现在「连到天然以纯数字为键的源行」这一步，
+    且映射回身份空间必须经 :func:`identity`。
+    """
     s = str(symbol or "").strip().upper()
     for suf in (".SH", ".SZ", ".BJ"):
         if s.endswith(suf):
@@ -33,6 +40,37 @@ def digits(symbol: str) -> str:
     if s[:2] in ("SH", "SZ", "BJ") and s[2:].isdigit():
         return s[2:]
     return s
+
+
+def identity(symbol: str) -> str:
+    """任意形态 → **后缀身份**（``600036.SH``；市场段是身份的一部分，审计 M2）。
+
+    热集/矩阵行序/账本/回放指针/engine_signal_scores 冲突键统一用本形态。后缀式、
+    前缀式、纯数字都收敛到后缀式（纯数字按代码前缀推断市场：6/9→SH、0/3/2→SZ、
+    4/8/92→BJ）——纯数字推断对**股票**正确，指数（000001.SH）在股票因子源里因此
+    正确地查不到行，而不是串吃平安银行。识别不了的形态原样返回（实时链仅 CN，
+    热集不出现其他形态）。
+
+    **场内基金**（热集实测含 159518.SZ、501018.SH——ETF/LOF 不属股票前缀规则、
+    ``to_suffix`` 对纯数字基金码原样返回）：补一条基金码推断——``15/16/18`` 开头
+    → SZ（深市基金），``5`` 开头 → SH（沪市基金 50/51/52/56/58）。范围刻意收窄
+    （不含 ``1`` 全段：``11/12`` 是沪/深可转债号段，不猜市场，走到下面原样返回）。
+    """
+    s = str(symbol or "").strip().upper()
+    if not s:
+        return ""
+    try:
+        from backend.shared.stock_utils import StockCodeUtil
+
+        out = StockCodeUtil.to_suffix(s)
+        if out != s:
+            return str(out)
+        # 基金码（股票规则未覆盖）：深市 15x/16x/18x、沪市 5xxxxx
+        if len(s) == 6 and s.isdigit() and (s[:2] in ("15", "16", "18") or s[0] == "5"):
+            return f"{s}.{'SZ' if s[0] == '1' else 'SH'}"
+        return str(out) if out else s
+    except Exception:  # noqa: BLE001 - 识别失败不丢符号（原样当身份用）
+        return s
 
 
 def snapshot_key(symbol: str) -> str | None:
@@ -73,7 +111,7 @@ class CycleResult:
     """单周期装配结果（含回放对账所需的全部摘要物质）。"""
 
     x: np.ndarray
-    symbols: list[str]  # 纯数字，行序=矩阵行序（账本据此重放）
+    symbols: list[str]  # 后缀身份（identity()，000001.SH≠000001.SZ），行序=矩阵行序（账本据此重放）
     cols: list[str]
     scores: np.ndarray
     ranks: np.ndarray
@@ -240,6 +278,11 @@ def compute_cycle(
 
     在线服务与离线回放共用本函数——任何装配逻辑改动两侧同时生效（结构纪律）。
 
+    **身份口径（审计 M2）**：``baseline/histories/window/snapshots`` 的键与
+    ``CycleResult.symbols`` 一律**后缀身份**（:func:`identity`）——``000001.SH``
+    （指数）与 ``000001.SZ``（平安银行）绝不折叠成同一键；``digits()`` 只用于
+    源行键转换。引擎句柄仍按入参 ``sym`` 原样（同一账本代次两侧一致即可）。
+
     时序模型（``seq_len > 1``，如 NativeTFT；``metadata`` 经 :func:`sequence_len_of` 裁定）：
     矩阵升为三维 ``[n, seq_len, d]``——前 seq_len-1 帧来自 ``window``（:func:`load_window_for_model`
     按因子日对齐，整帧缺席为 None），最后一帧 = 基线行 + live 覆盖（覆盖只作用于最后一帧：
@@ -258,18 +301,18 @@ def compute_cycle(
     symbols_norm: list[str] = []
     cuts: list[float | None] = []
     for i, sym in enumerate(hot):
-        norm = digits(sym)
-        symbols_norm.append(norm)
-        row = dict(baseline.get(norm) or {})
+        ident = identity(sym)
+        symbols_norm.append(ident)
+        row = dict(baseline.get(ident) or {})
         if sym not in bootstrapped:
-            hist = histories.get(norm)
+            hist = histories.get(ident)
             if hist is not None and len(hist):
                 try:
                     engine.bootstrap(sym, hist)
                 except Exception:  # noqa: BLE001 - 单标的引导失败不拖垮周期
                     pass
             bootstrapped.add(sym)
-        snap = snapshots.get(sym)
+        snap = snapshots.get(ident)
         cuts.append(snapshot_watermark(snap))
         if snap:
             engine.on_snapshot(sym, snap)
@@ -289,7 +332,7 @@ def compute_cycle(
                     overridden += 1
             vals.append(float(val) if not is_missing(val) else None)
         if seq > 1:
-            frames = list((window or {}).get(norm) or [])
+            frames = list((window or {}).get(ident) or [])
             gap = False
             for j in range(seq - 1):
                 frame = frames[j] if j < len(frames) else None
@@ -341,7 +384,11 @@ def load_baseline_bundle(
     cols: list[str],
     history_len: int = 45,
 ) -> dict[str, Any]:
-    """T-1 行 + 价格历史（单次 parquet 读取）。返回 {rows, history}；缺文件返回空。"""
+    """T-1 行 + 价格历史（单次 parquet 读取）。返回 {rows, history}；缺文件返回空。
+
+    rows/history 的键 = **后缀身份**（``identity(源行纯数字)``——源 parquet 行键是
+    纯数字，指数代码在股票源里忠实缺席而非串到同数字股票行；审计 M2）。
+    """
     import pandas as pd
 
     path = Path(parquet_path)
@@ -374,11 +421,12 @@ def load_baseline_bundle(
     history: dict[str, Any] = {}
     for sym, g in past.groupby("symbol"):
         g = g.sort_values("trade_date")
-        history[str(sym)] = g[raw].tail(history_len).reset_index(drop=True)
+        ident = identity(str(sym))
+        history[ident] = g[raw].tail(history_len).reset_index(drop=True)
         last = g[g["trade_date"] == latest]
         if not last.empty:
             row = last.iloc[-1]
-            rows[str(sym)] = {c: row.get(c) for c in cols}
+            rows[ident] = {c: row.get(c) for c in cols}
     return {"rows": rows, "history": history}
 
 
@@ -420,11 +468,11 @@ def _load_qfq_history(
         return history
     raw = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
     keep = [c for c in raw if c in df.columns]
-    wanted = {digits(s) for s in symbols}
-    work = df.assign(_norm=df["symbol"].map(digits))
+    wanted = {identity(s) for s in symbols}
+    work = df.assign(_norm=df["symbol"].map(identity))
     work = work[work["_norm"].isin(wanted)]
-    for norm, g in work.groupby("_norm"):
-        history[str(norm)] = (
+    for ident, g in work.groupby("_norm"):
+        history[str(ident)] = (
             g.sort_values("trade_date")[keep].tail(history_len).reset_index(drop=True)
         )
     return history
@@ -490,7 +538,7 @@ def load_baseline_quantdb(
         mapping,
         anchor=source,
     )
-    wanted = {digits(s) for s in symbols}
+    wanted = {identity(s) for s in symbols}
 
     rows: dict[str, dict[str, Any]] = {}
     if requested:
@@ -500,11 +548,11 @@ def load_baseline_quantdb(
             trade_date=latest,
             feature_sources=mapping or None,
         )
-        day_df = day_df.assign(_norm=day_df["symbol"].map(digits))
+        day_df = day_df.assign(_norm=day_df["symbol"].map(identity))
         day_df = day_df[day_df["_norm"].isin(wanted)]
-        for norm, g in day_df.groupby("_norm"):
+        for ident, g in day_df.groupby("_norm"):
             last = g.iloc[-1]
-            rows[str(norm)] = {c: last.get(c) for c in cols}
+            rows[str(ident)] = {c: last.get(c) for c in cols}
 
     history: dict[str, Any] = {}
     hist_dates = dates[-max(1, int(history_len)):]
@@ -567,7 +615,8 @@ def load_window_quantdb(
     （新库/次新上市）时**前部补 None**，绝不把缺失帧挤到新端——错位一帧整窗就移了位。
 
     取数源/列过滤/副库映射与基线完全同规（``split_features_by_availability`` + 库:列映射）。
-    返回 ``{"dates": [因子日或 None × (step_len-1)], "frames": {纯数字码: [帧或 None]}}``。
+    返回 ``{"dates": [因子日或 None × (step_len-1)], "frames": {后缀身份: [帧或 None]}}``
+    （键经 :func:`identity`——指数与同数字股票绝不串帧；审计 M2）。
     """
     from backend.services.engine.data_platform.quantdb_factor_reader import (
         split_features_by_availability,
@@ -595,7 +644,7 @@ def load_window_quantdb(
         mapping,
         anchor=source,
     )
-    wanted = {digits(s) for s in symbols}
+    wanted = {identity(s) for s in symbols}
     by_date: dict[str, dict[str, dict[str, Any]]] = {d: {} for d in prior}
     if requested and prior:
         try:
@@ -610,16 +659,16 @@ def load_window_quantdb(
         except Exception as exc:  # noqa: BLE001 - 与基线同纪律：直读失败显式抛出记 last_error
             raise RuntimeError(f"QuantDB 时序窗口读取失败: {exc}") from exc
         df = df.assign(
-            _norm=df["symbol"].map(digits),
+            _norm=df["symbol"].map(identity),
             _date=df["trade_date"].astype(str).str[:10],
         )
         df = df[df["_norm"].isin(wanted)]
-        for (norm, dt), g in df.groupby(["_norm", "_date"]):
+        for (ident, dt), g in df.groupby(["_norm", "_date"]):
             slot = by_date.get(str(dt))
             if slot is None:
                 continue
             last = g.iloc[-1]
-            slot[str(norm)] = {c: last.get(c) for c in cols}
+            slot[str(ident)] = {c: last.get(c) for c in cols}
     return {
         "dates": dates_out,
         "frames": {

@@ -145,12 +145,12 @@ def _seq_args(**over):
         "model_version": "seq-test",
         "hot": ["600036.SH"],
         "snapshots": {},
-        "baseline": {"600036": {"a": 1.0, "b": 2.0}},
+        "baseline": {"600036.SH": {"a": 1.0, "b": 2.0}},
         "histories": {},
         "override": set(),
         "engine": _Engine(),
         "bootstrapped": set(),
-        "window": {"600036": [{"a": 0.1, "b": 0.2}, {"a": 0.3, "b": 0.4}]},
+        "window": {"600036.SH": [{"a": 0.1, "b": 0.2}, {"a": 0.3, "b": 0.4}]},
         "seq_len": 3,
         "feat_norm": {"mean": [1.0, 2.0], "std": [1.0, 2.0]},
     }
@@ -183,7 +183,7 @@ def test_sequence_cycle_missing_frames_counted_and_zeroed():
     """整帧缺席 → NaN → 标准化后归零；window_missing 如实计数。"""
     args = _seq_args(window={}, seq_len=3)
     # window 为空：两帧全缺；末帧 b 改为缺失（走 NaN 而非 fill——时序口径不填 fill_values）
-    args["baseline"] = {"600036": {"a": 1.0, "b": np.nan}}
+    args["baseline"] = {"600036.SH": {"a": 1.0, "b": np.nan}}
 
     result = rc.compute_cycle(**args)
 
@@ -224,7 +224,7 @@ def test_flat_cycle_default_is_still_2d_with_fill():
     result = rc.compute_cycle(
         session=session, input_name="features", cols=["a"], fill={"a": -7.0},
         model_version="flat", hot=["600036.SH"], snapshots={},
-        baseline={"600036": {}}, histories={}, override=set(),
+        baseline={"600036.SH": {}}, histories={}, override=set(),
         engine=_Engine(), bootstrapped=set(),
     )
 
@@ -303,11 +303,11 @@ def test_load_window_quantdb_aligns_frames_by_date():
     )
 
     assert got["dates"] == ["2026-09-28", "2026-09-29"]  # D=09-30 是基线帧，窗口只取前 2 帧
-    assert got["frames"]["600036"] == [
+    assert got["frames"]["600036.SH"] == [
         {"a": 1.0, "b": 10.0},
         {"a": 2.0, "b": 20.0},
     ]
-    assert got["frames"]["000001"] == [None, {"a": 9.0, "b": 90.0}]  # 09-28 缺行
+    assert got["frames"]["000001.SZ"] == [None, {"a": 9.0, "b": 90.0}]  # 09-28 缺行
     # 区间读下界/上界=前帧日期两端（不含 D），OHLCV 不捎带
     assert reader.calls[0]["start"] == "2026-09-28" and reader.calls[0]["end"] == "2026-09-29"
     assert reader.calls[0]["include_ohlcv"] is False
@@ -324,7 +324,7 @@ def test_load_window_quantdb_front_pads_when_history_short():
     )
 
     assert got["dates"] == [None, None, "2026-09-29"]
-    assert got["frames"]["600036"] == [None, None, {"a": 2.0, "b": 20.0}]
+    assert got["frames"]["600036.SH"] == [None, None, {"a": 2.0, "b": 20.0}]
 
 
 @pytest.mark.unit
@@ -410,7 +410,7 @@ def test_build_cycle_sequence_wiring(tmp_path, monkeypatch):
     def _window_loader(symbols, day, *, meta, cols, seq_len):
         window_calls.append({"symbols": list(symbols), "seq_len": seq_len})
         return {"dates": ["d1", "d2"],
-                "frames": {"600036": [{"a": 0.1, "b": 0.2}, {"a": 0.3, "b": 0.4}]}}
+                "frames": {"600036.SH": [{"a": 0.1, "b": 0.2}, {"a": 0.3, "b": 0.4}]}}
 
     svc = RealtimeInferenceService(
         config_loader=lambda: RealtimeInferConfig(
@@ -419,7 +419,7 @@ def test_build_cycle_sequence_wiring(tmp_path, monkeypatch):
         hot_set_fetcher=lambda: ["600036.SH"],
         snapshot_fetcher=lambda syms: {"600036.SH": _fresh_snapshot()},
         baseline_loader=lambda syms, day: {
-            "rows": {"600036": {"a": 1.0, "b": 2.0}}, "history": {},
+            "rows": {"600036.SH": {"a": 1.0, "b": 2.0}}, "history": {},
         },
         window_loader=_window_loader,
         ledger_sink=ledger.append,
@@ -440,7 +440,8 @@ def test_build_cycle_sequence_wiring(tmp_path, monkeypatch):
     assert payload["quality"]["window_missing"] == 0
     assert ledger and ledger[0]["seq_len"] == 3
     # 分数 = 标准化后整窗求和：末帧归零 + 前两帧定值
-    assert payload["scores"][0]["symbol"] == "600036"
+    # 行符号=后缀身份（审计 M2；账本/落库冲突键以它为身份）
+    assert payload["scores"][0]["symbol"] == "600036.SH"
     assert len(payload["scores"]) == 1
 
 
@@ -526,7 +527,7 @@ def test_sequence_replay_diff_zero(tmp_path):
     model_dir = _seq_model_dir(tmp_path)
     session = _FakeSession()
     ledger: list[dict] = []
-    frames = {"600036": [{"a": 0.1, "b": 0.2}, {"a": 0.3, "b": 0.4}]}
+    frames = {"600036.SH": [{"a": 0.1, "b": 0.2}, {"a": 0.3, "b": 0.4}]}
 
     svc = RealtimeInferenceService(
         config_loader=lambda: RealtimeInferConfig(
@@ -535,7 +536,7 @@ def test_sequence_replay_diff_zero(tmp_path):
         hot_set_fetcher=lambda: ["600036.SH"],
         snapshot_fetcher=lambda syms: {"600036.SH": _fresh_snapshot()},
         baseline_loader=lambda syms, day: {
-            "rows": {"600036": {"a": 1.0, "b": 2.0}}, "history": {},
+            "rows": {"600036.SH": {"a": 1.0, "b": 2.0}}, "history": {},
         },
         window_loader=lambda symbols, day, *, meta, cols, seq_len: {
             "dates": ["d1", "d2"], "frames": frames,
@@ -550,7 +551,7 @@ def test_sequence_replay_diff_zero(tmp_path):
     l05 = pd.DataFrame([{"symbol": "600036.SH", "ts": int(snap["timestamp"]), **snap}])
     report = verify_day(
         day=day, model_dir=model_dir, ledger=ledger, frames=l05,
-        baseline_bundle={"rows": {"600036": {"a": 1.0, "b": 2.0}}, "history": {}},
+        baseline_bundle={"rows": {"600036.SH": {"a": 1.0, "b": 2.0}}, "history": {}},
         window_frames=frames,
         session_factory=lambda _p, _n: _FakeSession(),
     )
