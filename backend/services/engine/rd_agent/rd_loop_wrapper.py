@@ -70,6 +70,68 @@ _ENRICH_OUTPUT_COLUMNS: tuple[str, ...] = tuple(
     _ENRICH_FEATURES_DAILY.values()
 ) + tuple(_ENRICH_L1.values())
 
+# L2 微观结构因子全量接入挖掘数据面（T-MV-07）：l2_factors 的真因子列经
+# _merge_l2_factors 并入 daily_pv.h5，LLM 因子表达式可直接引用 $<真列名>。
+# 列清单每次现场读盘（l2_factor_columns）：「数据面列清单与目录一致」的验收
+# 即此谓词；这里不维护静态名单，避免与上游发布漂移。
+_L2_LIBRARY = "l2_factors"
+_L2_SKIP_COLUMNS: frozenset[str] = frozenset(
+    {
+        # 键列
+        "symbol",
+        "date",
+        "datetime",
+        "instrument",
+        "dt",
+        "trade_date",
+        # OHLCV 锚列：与 base h5 的 $open/$high/$low/$close/$volume/$amount 同名
+        # （且口径为原始未复权价），混入会让 $ 引用静默指向错数据
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+    }
+)
+# 分块 fetch：200+ 列一次性 DuckDB→pandas 的峰值内存约 8GB（float64），
+# 48 列/块把单块峰值压到 ~2GB 以内，逐块 merge 后立即释放
+_L2_FETCH_CHUNK = 48
+
+
+def l2_factor_columns(quantdb_dir: str) -> list[str]:
+    """读 l2_factors 最新分区 schema，返回可并入数据面的真因子列（字母序）。
+
+    T-MV-07 单源：挖掘数据面（``_merge_l2_factors``）与 LLM 提示面
+    （``a_share._l2_referenceable_columns``）共用此清单。按字母序而非文件列序
+    ——parquet 物理列序随日漂移（历史教训），依赖文件序会在某天静默换序。
+    目录缺失/分区不可读返回 []（调用方降级为不接 L2，不拦挖掘）。
+    """
+    import pyarrow.parquet as pq
+
+    if not quantdb_dir:
+        return []
+    base = Path(quantdb_dir) / "6_ml_datasets" / _L2_LIBRARY
+    if not base.is_dir():
+        return []
+    try:
+        parts = sorted(
+            (d for d in base.iterdir() if d.is_dir() and d.name.startswith("dt=")),
+            key=lambda d: d.name,
+        )
+    except OSError:
+        return []
+    for part in reversed(parts):  # 最新分区优先；最新分区损坏则退到早先分区
+        files = sorted(part.glob("*.parquet"))
+        if not files:
+            continue
+        try:
+            names = pq.read_schema(files[0]).names
+        except Exception:
+            continue
+        return sorted(c for c in names if c not in _L2_SKIP_COLUMNS)
+    return []
+
 
 class RDLoopWrapper:
     """封装 RD-Agent FactorRDLoop，提供 QuantMind 兼容接口"""
@@ -587,7 +649,8 @@ class RDLoopWrapper:
         - Key: "data"
         - Index: MultiIndex [datetime, instrument]
         - Columns: ["$open", "$high", "$low", "$close", "$volume", "$amount",
-          "$factor", <QuantDB 富化列 ...>]
+          "$factor", <QuantDB 富化列 ...>, <L2 微观结构因子列 ...>]
+          （L2 全量列见 ``l2_factor_columns``，T-MV-07 起并入）
         - instrument 格式: Qlib 格式 sh600036
 
         生成的富化文件先写入共享缓存 ``<quantdb_dir>/.h5_cache/``（按最新分区
@@ -675,6 +738,11 @@ class RDLoopWrapper:
                 df, hub, start_d, end_d, None if not debug else symbols
             )
 
+            # L2 微观结构因子全量接入（T-MV-07）：列清单现场读盘，分块左连接
+            df, l2_cols = self._merge_l2_factors(
+                df, hub, quantdb_dir, start_d, end_d, None if not debug else symbols
+            )
+
             instruments = [self._to_qlib_symbol(str(s)) for s in df["symbol"]]
             data: dict[str, Any] = {
                 "$open": df["open"].to_numpy(dtype="float64"),
@@ -686,7 +754,7 @@ class RDLoopWrapper:
             }
             if "amount" in df.columns:
                 data["$amount"] = df["amount"].to_numpy(dtype="float64")
-            for out_col in _ENRICH_OUTPUT_COLUMNS:
+            for out_col in (*_ENRICH_OUTPUT_COLUMNS, *l2_cols):
                 if out_col in df.columns:
                     data[f"${out_col}"] = df[out_col].to_numpy(dtype="float32")
 
@@ -697,6 +765,9 @@ class RDLoopWrapper:
                     names=["datetime", "instrument"],
                 ),
             )
+            # sort_index 会整表复制；combined 与 df 共享列内存（CoW），先释放
+            # df/instruments 再排序，峰值内存省一份全表（L2 全量后 ~10GB 级）
+            del df, instruments
             combined = combined.sort_index()
 
             os.makedirs(cache_dir, exist_ok=True)
@@ -746,6 +817,84 @@ class RDLoopWrapper:
             )
         return df
 
+    def _merge_l2_factors(
+        self,
+        df: pd.DataFrame,
+        hub: Any,
+        quantdb_dir: str,
+        start: date,
+        end: date,
+        symbols: list[str] | None,
+    ) -> tuple[pd.DataFrame, list[str]]:
+        """把 l2_factors 全量因子列按 (symbol, trade_date) 左连接进 K 线表（T-MV-07）。
+
+        与 ``_merge_enrich`` 的差异：列清单现场读盘（``l2_factor_columns`` 单源）；
+        按 ``_L2_FETCH_CHUNK`` 分块 fetch+merge（200+ 列一次拉取峰值内存 ~8GB）；
+        每块先转 float32 再 merge（终态本就是 float32，先降再并峰值减半）。任一
+        块失败只跳过该块——宁可少几列，不炸整个 h5 生成。返回 (df, 并入的列名)。
+        """
+        cols = l2_factor_columns(quantdb_dir)
+        if not cols:
+            logger.warning("[%s] l2_factors 列清单为空，跳过 L2 接入", self.market)
+            return df, []
+        merged: list[str] = []
+        for i in range(0, len(cols), _L2_FETCH_CHUNK):
+            chunk = cols[i : i + _L2_FETCH_CHUNK]
+            try:
+                sub = hub.fetch_ml_columns(
+                    _L2_LIBRARY, chunk, start, end, symbols=symbols
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Enrich from %s failed (chunk %d): %s",
+                    self.market,
+                    _L2_LIBRARY,
+                    i,
+                    exc,
+                )
+                continue
+            if sub is None or sub.empty:
+                logger.warning(
+                    "[%s] No enrich data from %s (chunk %d)",
+                    self.market,
+                    _L2_LIBRARY,
+                    i,
+                )
+                continue
+            sub["trade_date"] = pd.to_datetime(sub["trade_date"])
+            present = [c for c in chunk if c in sub.columns]
+            for c in present:
+                if sub[c].dtype != "float32":
+                    sub[c] = sub[c].astype("float32")
+            n_before = len(df)
+            joined = df.merge(
+                sub[["symbol", "trade_date", *present]],
+                on=["symbol", "trade_date"],
+                how="left",
+            )
+            # 左连接不得改变行数；行数变了 = l2 有重复键分区（HK daily_forward
+            # 双来源旧坑同型），整块跳过也不把错行写进 GB 级共享缓存
+            if len(joined) != n_before:
+                logger.error(
+                    "[%s] %s chunk %d changed row count %d->%d (dup keys?); skipped",
+                    self.market,
+                    _L2_LIBRARY,
+                    i,
+                    n_before,
+                    len(joined),
+                )
+                continue
+            df = joined
+            merged.extend(present)
+        if merged:
+            logger.info(
+                "[%s] Enriched h5 with %d L2 factor cols from %s",
+                self.market,
+                len(merged),
+                _L2_LIBRARY,
+            )
+        return df, merged
+
     @staticmethod
     def _latest_partition_mtime(quantdb_dir: str, rel_path: str) -> float:
         """返回某数据集最新分区内 parquet 的最大 mtime（无则 0）。"""
@@ -762,8 +911,43 @@ class RDLoopWrapper:
         except OSError:
             return 0.0
 
-    def _h5_cache_fresh(self, quantdb_dir: str, cache_path: str) -> bool:
-        """判断共享缓存是否仍是最新（K 线/features_daily/l1 最新分区均不晚于缓存）。"""
+    @staticmethod
+    def _h5_columns(cache_path: str) -> set[str]:
+        """读 fixed 格式 h5 的列名集合（pytables 轴数组；损坏/缺失返回空集）。
+
+        axis0 在本仓缓存布局里即列名（含 $ 前缀）；union 两轴是防布局漂移的
+        兜底——读空 → 覆盖检查失败 → 重生成（安全方向：宁重算不放行）。
+        """
+        import tables
+
+        names: set[str] = set()
+        try:
+            with tables.open_file(cache_path, mode="r") as f:
+                for axis in ("axis0", "axis1"):
+                    node = getattr(f.root.data, axis, None)
+                    if node is None:
+                        continue
+                    try:
+                        names.update(
+                            c.decode() if isinstance(c, bytes) else str(c)
+                            for c in node[:]
+                        )
+                    except Exception:
+                        continue
+        except Exception:
+            return set()
+        return names
+
+    @staticmethod
+    def _h5_cache_fresh(quantdb_dir: str, cache_path: str) -> bool:
+        """判断共享缓存是否仍是最新。
+
+        mtime 维度：K 线/features_daily/l1/l2 最新分区均不晚于缓存；列覆盖
+        维度：L2 接入（T-MV-07）改的是「数据面有哪些列」——存量缓存在此之前
+        生成时 mtime 仍可能新鲜但缺整批 L2 列，必须按 schema 重生成，否则
+        「数据面列清单与目录一致」在存量缓存上永远不成立。覆盖检查只在 L2
+        库存在时生效（部分块失败留下的残面会在下次启动重试补齐）。
+        """
         try:
             cache_mtime = os.path.getmtime(cache_path)
         except OSError:
@@ -772,9 +956,18 @@ class RDLoopWrapper:
             "1_kline_data/daily_forward",
             "6_ml_datasets/features_daily",
             "6_ml_datasets/l1_factors",
+            "6_ml_datasets/l2_factors",  # T-MV-07：L2 全量列已入面，随其更新
         )
-        latest = max(self._latest_partition_mtime(quantdb_dir, rel) for rel in sources)
-        return latest > 0 and cache_mtime >= latest
+        latest = max(
+            RDLoopWrapper._latest_partition_mtime(quantdb_dir, rel) for rel in sources
+        )
+        if not (latest > 0 and cache_mtime >= latest):
+            return False
+        l2_expected = l2_factor_columns(quantdb_dir)
+        if not l2_expected:
+            return True  # 本机无 L2 库：无覆盖义务
+        present = RDLoopWrapper._h5_columns(cache_path)
+        return all(f"${c}" in present for c in l2_expected)
 
     @staticmethod
     def _link_h5(src: str, dst: str) -> None:

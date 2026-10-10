@@ -101,9 +101,9 @@ class AShareAdapter(MarketAdapter):
         参考已有因子作为构建基础。
 
         L2 高频因子（资金流/微观结构/已实现波动率）在 QuantDB 已预计算为日频值，
-        RD-Agent coder 可读取 daily_pv.h5 中已接入的 QuantDB 预计算列，因此这里
-        同时给出「可直接引用」的列清单（$<列名>）与需要自行用 Qlib 表达式实现的
-        近似模板，供 LLM 在微观结构/资金流概念空间里挖掘并改造因子。
+        T-MV-07 起已全量接入 daily_pv.h5——这里给出「可直接引用」的完整列清单
+        （$<真列名>，列清单与数据面同一单源、中文释义取自 quantdb_factor_dictionary）；
+        另有少量 Qlib 日频近似模板（MicroSeed_*），仅作概念改造种子，不冒充 L2 实列。
 
         Returns:
             生成的文件路径，失败返回 None。
@@ -140,9 +140,10 @@ class AShareAdapter(MarketAdapter):
             known_expr = self._fallback_factors()
             factors.update(known_expr)
 
-            # L2 高频因子的 Qlib 表达式近似（核心增量：让 AI 能挖 L2 概念因子）
-            l2_expr = self._l2_factor_expressions()
-            factors.update(l2_expr)
+            # 微观结构概念的日频近似模板（MicroSeed_*）：T-MV-07 起 L2 真列已可直接
+            # 引用（见下方 $ 清单），本组仅作改造种子
+            micro_seed = self._l2_factor_expressions()
+            factors.update(micro_seed)
 
             # QuantDB 已接入 daily_pv.h5 的预计算列：可在因子表达式中直接引用
             for out_col, desc in self._usable_quantdb_columns().items():
@@ -175,8 +176,8 @@ class AShareAdapter(MarketAdapter):
                 _json.dump(factors, f, ensure_ascii=False, indent=2)
             import logging
             logging.getLogger(__name__).info(
-                "[%s] Generated base_factors.json: %d factors (L2 expr: %d) -> %s",
-                self.market_id, len(factors), len(l2_expr), json_path,
+                "[%s] Generated base_factors.json: %d factors (micro seeds: %d) -> %s",
+                self.market_id, len(factors), len(micro_seed), json_path,
             )
             return json_path
 
@@ -189,48 +190,50 @@ class AShareAdapter(MarketAdapter):
 
     @staticmethod
     def _l2_factor_expressions() -> dict[str, str]:
-        """L2 高频因子的 Qlib 表达式近似（日频 OHLCV+amount 可计算的部分）。
+        """微观结构概念的 Qlib 日频近似模板（T-MV-07 起定位为种子，非 L2 实列）。
 
-        QuantDB 的 L2 parquet 有 219 列真实高频因子，但 RD-Agent coder 只能写
-        Qlib 表达式，无法引用这些列。这里把可近似的 L2 概念翻译成 Qlib 表达式，
-        作为 LLM 挖掘微观结构/资金流/已实现波动率类因子的种子。LLM 可在此基础上
-        改造、组合、调参。不可近似的（如档口深度、VPIN 桶）不列入。
+        L2 真列（micro_*/flow_*/vol_* 等）已全量接入 daily_pv.h5，LLM 应优先
+        直接引用 $<真列名>；本组把日频 OHLCV+amount 可近似的概念翻译成 Qlib
+        表达式，供在意念层面改造/组合/调参。命名以 MicroSeed_ 前缀与 L2 实列
+        区分——不可近似的高频量（档口深度、VPIN 桶等）不列入，它们的真列在
+        上面的 $ 清单里。
         """
         return {
             # ---- 已实现波动率族（L2 高频波动率的日频近似）----
-            "L2_RV5": "Std($close/Ref($close,1)-1, 5) * Sqrt(252)",
-            "L2_RV20": "Std($close/Ref($close,1)-1, 20) * Sqrt(252)",
-            "L2_Jump": "Abs($close/Ref($close,1)-1) - Std($close/Ref($close,1)-1, 20)",
-            "L2_RetSkew": "Mean(Power($close/Ref($close,1)-1, 3), 20) / Power(Std($close/Ref($close,1)-1, 20), 3)",
-            "L2_RetKurt": "Mean(Power($close/Ref($close,1)-1, 4), 20) / Power(Std($close/Ref($close,1)-1, 20), 4)",
-            "L2_VolPersist": "Corr(Std($close/Ref($close,1)-1, 5), Ref(Std($close/Ref($close,1)-1, 5), 5), 20)",
-            "L2_UpDnVolRatio": "Sum($volume * ($close>Ref($close,1)), 5) / (Sum($volume * ($close<Ref($close,1)), 5) + 1)",
+            "MicroSeed_RV5": "Std($close/Ref($close,1)-1, 5) * Sqrt(252)",
+            "MicroSeed_RV20": "Std($close/Ref($close,1)-1, 20) * Sqrt(252)",
+            "MicroSeed_Jump": "Abs($close/Ref($close,1)-1) - Std($close/Ref($close,1)-1, 20)",
+            "MicroSeed_RetSkew": "Mean(Power($close/Ref($close,1)-1, 3), 20) / Power(Std($close/Ref($close,1)-1, 20), 3)",
+            "MicroSeed_RetKurt": "Mean(Power($close/Ref($close,1)-1, 4), 20) / Power(Std($close/Ref($close,1)-1, 20), 4)",
+            "MicroSeed_VolPersist": "Corr(Std($close/Ref($close,1)-1, 5), Ref(Std($close/Ref($close,1)-1, 5), 5), 20)",
+            "MicroSeed_UpDnVolRatio": "Sum($volume * ($close>Ref($close,1)), 5) / (Sum($volume * ($close<Ref($close,1)), 5) + 1)",
             # ---- 资金流族（L2 逐单资金流的日频近似）----
-            "L2_FlowNetRatio": "Sum($amount * ($close-Ref($close,1))/Ref($close,1), 5) / Sum($amount, 5)",
-            "L2_FlowLarge": "Sum($amount * ($close>Ref($close,1)) * ($volume > Mean($volume, 20)), 10) / Sum($amount, 10)",
-            "L2_FlowImbalance": "(Sum($volume * ($close>=Ref($close,1)), 10) - Sum($volume * ($close<Ref($close,1)), 10)) / Sum($volume, 10)",
-            "L2_FlowConsistency": "Corr($close/Ref($close,1)-1, $volume/Ref($volume,1)-1, 10)",
-            "L2_MFI": "Mean($amount * ($close-Ref($close,1))/Ref($close,1), 14) / (Std($amount, 14) + 1e-12)",
-            "L2_BigTradeRatio": "Sum($volume * ($volume > Mean($volume, 20) * 2), 10) / Sum($volume, 10)",
+            "MicroSeed_FlowNetRatio": "Sum($amount * ($close-Ref($close,1))/Ref($close,1), 5) / Sum($amount, 5)",
+            "MicroSeed_FlowLarge": "Sum($amount * ($close>Ref($close,1)) * ($volume > Mean($volume, 20)), 10) / Sum($amount, 10)",
+            "MicroSeed_FlowImbalance": "(Sum($volume * ($close>=Ref($close,1)), 10) - Sum($volume * ($close<Ref($close,1)), 10)) / Sum($volume, 10)",
+            "MicroSeed_FlowConsistency": "Corr($close/Ref($close,1)-1, $volume/Ref($volume,1)-1, 10)",
+            "MicroSeed_MFI": "Mean($amount * ($close-Ref($close,1))/Ref($close,1), 14) / (Std($amount, 14) + 1e-12)",
+            "MicroSeed_BigTradeRatio": "Sum($volume * ($volume > Mean($volume, 20) * 2), 10) / Sum($volume, 10)",
             # ---- 微观结构族（L2 档口/价差的日频近似）----
-            "L2_Amihud": "Mean(Abs($close/Ref($close,1)-1)/($amount + 1e-12), 20)",
-            "L2_PriceImpact": "Abs($close/Ref($close,1)-1) / (Log($volume/Ref($volume,1)+1) + 1e-12)",
-            "L2_KyleLambda": "Cov($close/Ref($close,1)-1, $volume/Ref($volume,1)-1, 20) / (Var($volume/Ref($volume,1)-1, 20) + 1e-12)",
-            "L2_SpreadProxy": "($high - $low) / ($close + 1e-12)",
-            "L2_BidAskVolRatio": "Sum($volume * ($close>Ref($close,1)), 5) / Sum($volume * ($close<Ref($close,1)), 5)",
-            "L2_OpenGap": "($open - Ref($close, 1)) / Ref($close, 1)",
-            "L2_BuyPressure": "Sum(($close-$low)/($high-$low+1e-12) * $volume, 10) / Sum($volume, 10)",
-            "L2_SellPressure": "Sum(($high-$close)/($high-$low+1e-12) * $volume, 10) / Sum($volume, 10)",
-            "L2_OrderToxicity": "Abs($close/Ref($close,1)-1) * $volume / (Mean(Abs($close/Ref($close,1)-1), 20) * Mean($volume, 20) + 1e-12)",
-            "L2_InformedRatio": "Sum(Abs($close/Ref($close,1)-1) * $volume, 5) / (Std(Abs($close/Ref($close,1)-1), 20) * Sum($volume, 5) + 1e-12)",
-            "L2_JumpCount": "Sum(Abs($close/Ref($close,1)-1) > Mean(Abs($close/Ref($close,1)-1), 20) * 3, 20)",
+            "MicroSeed_Amihud": "Mean(Abs($close/Ref($close,1)-1)/($amount + 1e-12), 20)",
+            "MicroSeed_PriceImpact": "Abs($close/Ref($close,1)-1) / (Log($volume/Ref($volume,1)+1) + 1e-12)",
+            "MicroSeed_KyleLambda": "Cov($close/Ref($close,1)-1, $volume/Ref($volume,1)-1, 20) / (Var($volume/Ref($volume,1)-1, 20) + 1e-12)",
+            "MicroSeed_SpreadProxy": "($high - $low) / ($close + 1e-12)",
+            "MicroSeed_BidAskVolRatio": "Sum($volume * ($close>Ref($close,1)), 5) / Sum($volume * ($close<Ref($close,1)), 5)",
+            "MicroSeed_OpenGap": "($open - Ref($close, 1)) / Ref($close, 1)",
+            "MicroSeed_BuyPressure": "Sum(($close-$low)/($high-$low+1e-12) * $volume, 10) / Sum($volume, 10)",
+            "MicroSeed_SellPressure": "Sum(($high-$close)/($high-$low+1e-12) * $volume, 10) / Sum($volume, 10)",
+            "MicroSeed_OrderToxicity": "Abs($close/Ref($close,1)-1) * $volume / (Mean(Abs($close/Ref($close,1)-1), 20) * Mean($volume, 20) + 1e-12)",
+            "MicroSeed_InformedRatio": "Sum(Abs($close/Ref($close,1)-1) * $volume, 5) / (Std(Abs($close/Ref($close,1)-1), 20) * Sum($volume, 5) + 1e-12)",
+            "MicroSeed_JumpCount": "Sum(Abs($close/Ref($close,1)-1) > Mean(Abs($close/Ref($close,1)-1), 20) * 3, 20)",
         }
 
     @staticmethod
     def _usable_quantdb_columns() -> dict[str, str]:
         """已接入 daily_pv.h5 的 QuantDB 预计算列（输出列名 -> 简述）。
 
-        与 rd_loop_wrapper._ENRICH_* 白名单保持一致，避免提示与数据漂移。
+        与 rd_loop_wrapper._ENRICH_* 白名单保持一致，避免提示与数据漂移；
+        T-MV-07 起并入 L2 微观结构真列（见 ``_l2_referenceable_columns``）。
         """
         desc = {
             "rsi_14": "14日RSI",
@@ -274,7 +277,35 @@ class AShareAdapter(MarketAdapter):
             names = list(_ENRICH_FEATURES_DAILY.values()) + list(_ENRICH_L1.values())
         except Exception:
             names = list(desc.keys())
-        return {n: desc.get(n, "QuantDB 预计算特征") for n in names}
+        result = {n: desc.get(n, "QuantDB 预计算特征") for n in names}
+        result.update(AShareAdapter._l2_referenceable_columns())
+        return result
+
+    @staticmethod
+    def _l2_referenceable_columns() -> dict[str, str]:
+        """L2 微观结构真列名 -> 中文释义（T-MV-07 正名）。
+
+        列清单现场读盘（rd_loop_wrapper.l2_factor_columns，与挖掘数据面同一
+        单源——「列清单与目录一致」），释义取自 quantdb_factor_dictionary
+        （与研究界面同一字典源）。任一步失败返回 {}：L2 提示降级，不拦挖掘。
+        """
+        try:
+            from backend.services.engine.data_platform.quantdb_factor_dictionary import (
+                definition_for,
+            )
+            from backend.services.engine.rd_agent.rd_loop_wrapper import l2_factor_columns
+
+            quantdb_dir = AShareAdapter._get_quantdb_dir() or ""
+            out: dict[str, str] = {}
+            for col in l2_factor_columns(quantdb_dir):
+                defn = definition_for(col)
+                out[col] = (
+                    f"L2 微观结构列（{defn.get('category_name', '微观结构')}）："
+                    f"{defn.get('display_name', col)}"
+                )
+            return out
+        except Exception:
+            return {}
 
     @staticmethod
     def _fallback_factors() -> dict[str, str]:
