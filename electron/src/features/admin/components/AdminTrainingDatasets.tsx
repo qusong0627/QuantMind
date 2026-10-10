@@ -1,25 +1,38 @@
 /** Versioned QuantDB factor sources for model training. */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
-  Alert, Button, Card, Col, Form, Input, Modal, Row, Select, Space, Statistic,
-  Switch, Table, Tag, Tooltip, Typography, message,
+  Alert, Button, Card, Checkbox, Form, Input, Modal, Popover, Select, Space, Table, Tag, Tooltip, Typography, message,
 } from 'antd';
-import { DatabaseOutlined, EditOutlined, InfoCircleOutlined, PlusOutlined, ReloadOutlined, RocketOutlined } from '@ant-design/icons';
-import type { ColumnsType } from 'antd/es/table';
+import { DatabaseOutlined, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
 import { adminService } from '../services/adminService';
+import type { QuantDBFactorStat, QuantDBFactorStatsMeta } from '../types';
 import { RdMinedMaterializePanel } from './RdMinedMaterializePanel';
+import { TrainingCatalogStatusBar } from './quantdb/TrainingCatalogStatusBar';
+import { SourceVitalStrip } from './quantdb/SourceVitalStrip';
+import {
+  FACTOR_COLUMN_SETTINGS,
+  buildFactorColumns,
+  filterFactorColumns,
+  type FactorDirectoryRow,
+  type TrainingMapping,
+} from './quantdb/factorDirectoryColumns';
+import { attachStatsToRows, countEnabledFeatures } from './quantdb/catalogMath';
+import { MISSING, fmtSigned } from './quantdb/statFormat';
+import { formatPartitionDate } from './quantdb/utils';
+import { StatusDot } from './ui/AdminPrimitives';
 
 const { Title, Text } = Typography;
 
 // 市场切换（数据源选项以后端 /sources labels 为准，此表仅作加载前的占位）
-  const MARKET_OPTIONS = [
-    { value: 'CN', label: 'A股' },
-    { value: 'HK', label: '港股' },
-    { value: 'US', label: '美股' },
-    { value: 'CRYPTO', label: '区块链' },
-    { value: 'FUTURES', label: '期货' },
-    { value: 'CUSTOM', label: '自定义市场' },
-  ];
+const MARKET_OPTIONS = [
+  { value: 'CN', label: 'A股' },
+  { value: 'HK', label: '港股' },
+  { value: 'US', label: '美股' },
+  { value: 'CRYPTO', label: '区块链' },
+  { value: 'FUTURES', label: '期货' },
+  { value: 'CUSTOM', label: '自定义市场' },
+];
 
 const MARKET_SOURCE_FALLBACK: Record<string, { value: string; label: string }[]> = {
   CN: [
@@ -46,71 +59,64 @@ const CATEGORY_OPTIONS = [
   ['toxicity', '信息不对称与毒性'], ['microstructure', '价差与微观结构'], ['holding_structure', '持仓结构'], ['other', '其他因子'],
 ].map(([value, label]) => ({ value, label }));
 
-type Mapping = {
-  mapping_id: string; source_dataset: string; source_column: string; key: string;
-  feature_name: string; enabled: boolean; default_selected: boolean; required: boolean;
-  category_id?: string; category_name?: string; order_no?: number;
-  /** 长描述：B 特征字典用户编辑优先，缺省回退代码字典精确条目 */
-  explanation?: string;
-};
+/** 草稿映射行（与 factorDirectoryColumns 的 TrainingMapping 同型）。 */
+type Mapping = TrainingMapping;
 
-type FactorDirectoryRow = {
-  row_no: number;
-  source_column: string;
-  factor: string;
-  style: string;
-  explanation: string;
-  is_present: boolean;
-  mapping?: Mapping;
-};
+/** 列设置偏好（列可见性）的本地存储键；值 = 被隐藏列的 key 数组。 */
+const COL_SETTINGS_STORAGE_KEY = 'qm.admin.trainingDatasets.cols.v1';
 
 /**
- * 数一份目录版本里**启用**的特征数（草稿与已发布版本同一形状，一个函数通吃）。
- *
- * 口径必须是 enabled，**不能**用后端给的 `feature_count`：那个字段是
- * `sum(category.feature_count)`，而计数器在遍历 mapping 时每个都 +1，
- * 不按 enabled 过滤（`quantdb_factor_catalog.py:471`）；训练侧却只用启用的
- * （`trainingUtils.tsx:1145` 的 `feature.enabled !== false`）。发布确认里拿
- * 含 disabled 的数去比大小，会在口径其实没变时报「减少」、真减少时又少报。
- *
- * 这里用 `!== false` 而不是真值判断，是为了和训练侧**逐字同口径**：
- * 后端两个入口都发 `bool(...)`，正常不会有 undefined，但比较口径一旦分家，
- * 这个确认框就开始撒谎。
+ * 深链 source 参数的合法形状，与后端 `_validate_source`
+ * （quantdb_factor_catalog.py：正则放行，另查排除列表）对齐。
+ * 这里只做形状预检，真实存在性由 /sources 返回的库清单兜底（不在清单里
+ * 会走 load() 的「切到市场默认源」分支，不会把页面卡在空态）。
  */
-const countEnabledFeatures = (catalog: any): number =>
-  (catalog?.categories || [])
-    .flatMap((category: any) => category.features || [])
-    .filter((feature: any) => feature.enabled !== false).length;
-
-function unavailableSourceHint(status: Record<string, any>, sourceLabel: string): string {
-  if (!status.files) {
-    return `尚未同步 ${sourceLabel} 数据`;
-  }
-  if ((status.missing_required || []).length > 0) {
-    return '数据字段尚未满足训练条件';
-  }
-  return '暂未满足直读训练条件';
-}
-
-function unavailableSourceAction(status: Record<string, any>): string {
-  if (!status.files) return '请在“数据下载”中勾选并同步，完成后点击“字段发现”。';
-  if ((status.missing_required || []).length > 0) return '请补齐行情字段后重新执行“字段发现”。';
-  return '请刷新字段状态后重试。';
-}
+const SOURCE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export const AdminTrainingDatasets: React.FC = () => {
-  const [market, setMarket] = useState('CN');
-  const [source, setSource] = useState('l1_factors');
+  // 深链预选：因子研究页「去发布」带 ?market&source 跳进来（见 FactorResearchPage）。
+  // 惰性初始化只读首挂载的 searchParams；非法值一律回落默认，不阻塞加载。
+  const [searchParams] = useSearchParams();
+  const [market, setMarket] = useState(() => {
+    const fromUrl = searchParams.get('market');
+    return fromUrl && MARKET_OPTIONS.some((option) => option.value === fromUrl) ? fromUrl : 'CN';
+  });
+  const [source, setSource] = useState(() => {
+    const fromUrl = searchParams.get('source');
+    return fromUrl && SOURCE_PATTERN.test(fromUrl) ? fromUrl : 'l1_factors';
+  });
+  /**
+   * 已应用的深链参数键（`market|source`）。首挂载的键已由上面的惰性初始化
+   * 消费，ref 就以它开局——否则 follow-up effect 会把首屏参数再应用一遍，
+   * 把正在进行的首次 load() 重置掉。
+   */
+  const appliedParamsKeyRef = useRef<string>(
+    `${searchParams.get('market') || ''}|${searchParams.get('source') || ''}`,
+  );
   const [sources, setSources] = useState<Record<string, any>>({});
   const [sourceLabels, setSourceLabels] = useState<Record<string, string>>({});
   const [fields, setFields] = useState<any[]>([]);
+  const [stats, setStats] = useState<Record<string, QuantDBFactorStat | null>>({});
+  const [statsMeta, setStatsMeta] = useState<QuantDBFactorStatsMeta | null>(null);
   const [published, setPublished] = useState<any | null>(null);
   const [draft, setDraft] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<Mapping | null>(null);
   const [keyword, setKeyword] = useState('');
-  const [form] = Form.useForm();
+  const [hiddenCols, setHiddenCols] = useState<ReadonlySet<string>>(() => {
+    try {
+      const raw = localStorage.getItem(COL_SETTINGS_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return new Set(
+        Array.isArray(parsed) ? parsed.filter((value: unknown) => typeof value === 'string') : [],
+      );
+    } catch {
+      // localStorage 不可用/内容损坏：默认全列可见，不因偏好读失败拖垮页面
+      return new Set();
+    }
+  });
+  const [editForm] = Form.useForm();
 
   const sourceOptions = useMemo(() => {
     const ids = Object.keys(sources);
@@ -126,6 +132,8 @@ export const AdminTrainingDatasets: React.FC = () => {
     setSources({});
     setSourceLabels({});
     setFields([]);
+    setStats({});
+    setStatsMeta(null);
     setDraft(null);
     setPublished(null);
   };
@@ -142,7 +150,7 @@ export const AdminTrainingDatasets: React.FC = () => {
   }, [fields, mappings]);
   const factorRows = useMemo<FactorDirectoryRow[]>(() => {
     const mappingsByColumn = new Map(mappings.map(mapping => [mapping.source_column, mapping]));
-    return fields
+    const base = fields
       .map((field) => {
         const mapping = mappingsByColumn.get(field.column_name);
         return {
@@ -152,12 +160,15 @@ export const AdminTrainingDatasets: React.FC = () => {
           style: mapping?.category_name || field.dictionary?.category_name || '待分类',
           explanation: mapping?.explanation || mapping?.feature_name || field.dictionary?.explanation || '尚未填写中文解释',
           is_present: Boolean(field.is_present),
+          field,
           mapping,
         };
       })
       .sort((a, b) => a.factor.localeCompare(b.factor))
       .map((row, index) => ({ ...row, row_no: index + 1 }));
-  }, [fields, mappings]);
+    // 统计挂接：物理列名直接命中，逻辑因子 ID 兜底（撞列守卫在 catalogMath 内）
+    return attachStatsToRows(base, stats);
+  }, [fields, mappings, stats]);
   const visibleFactorRows = useMemo(() => {
     const term = keyword.trim().toLowerCase();
     if (!term) return factorRows;
@@ -180,6 +191,8 @@ export const AdminTrainingDatasets: React.FC = () => {
           ? sourceResult.default_source : ids[0];
         setSource(activeSource);
         setFields([]);
+        setStats({});
+        setStatsMeta(null);
         setDraft(null);
         setPublished(null);
         setLoading(false);
@@ -187,6 +200,8 @@ export const AdminTrainingDatasets: React.FC = () => {
       }
       const fieldsResult = await adminService.getQuantDBFactorFields(activeSource, market);
       setFields(fieldsResult.fields || []);
+      setStats(fieldsResult.stats || {});
+      setStatsMeta(fieldsResult.stats_meta || null);
       try {
         setPublished(await adminService.getQuantDBFactorCatalog(activeSource, undefined, market));
       } catch { setPublished(null); }
@@ -227,6 +242,25 @@ export const AdminTrainingDatasets: React.FC = () => {
 
   useEffect(() => { load(); }, [load]);
 
+  // 深链参数在**挂载之后**的变化（同路由重导航：页面还挂着，只是 URL 换了）。
+  // 键没变就放行——URL 里残留的旧参数不压过用户手动切过的库（抢库保护）。
+  useEffect(() => {
+    const rawMarket = searchParams.get('market');
+    const rawSource = searchParams.get('source');
+    const nextKey = `${rawMarket || ''}|${rawSource || ''}`;
+    if (nextKey === appliedParamsKeyRef.current) return;
+    appliedParamsKeyRef.current = nextKey;
+    const nextMarket = rawMarket && MARKET_OPTIONS.some((option) => option.value === rawMarket) ? rawMarket : null;
+    const nextSource = rawSource && SOURCE_PATTERN.test(rawSource) ? rawSource : null;
+    if (nextMarket && nextMarket !== market) handleMarketChange(nextMarket);
+    if (nextSource && nextSource !== source) {
+      // 与 switchSource 同语义：连同旧库草稿一起清掉，防止 load() 拿旧草稿 id
+      // 去新库下拉取（那是张冠李戴）。
+      setSource(nextSource);
+      setDraft(null);
+    }
+  }, [searchParams, market, source]);
+
   const refreshDiscovery = async () => {
     setLoading(true);
     try {
@@ -238,11 +272,16 @@ export const AdminTrainingDatasets: React.FC = () => {
     } finally { setLoading(false); }
   };
 
-  const createDraft = async () => {
+  const switchSource = (value: string) => {
+    if (value === source) return;
+    setSource(value);
+    setDraft(null);
+  };
+
+  const createDraft = async (versionName: string) => {
     try {
-      const values = await form.validateFields();
       setCreating(true);
-      const created = await adminService.createQuantDBFactorDraft(values.version_name, source, market);
+      const created = await adminService.createQuantDBFactorDraft(versionName, source, market);
       const seeded = await adminService.seedQuantDBFactorDraft(created.version_id);
       setDraft(await adminService.getQuantDBFactorCatalog(source, created.version_id, market));
       setCreating(false);
@@ -253,7 +292,6 @@ export const AdminTrainingDatasets: React.FC = () => {
       );
     } catch (error: any) {
       setCreating(false);
-      if (error?.errorFields) return;
       message.error(error?.response?.data?.detail || error?.message || '创建草稿失败；请先执行字段刷新');
     }
   };
@@ -278,6 +316,16 @@ export const AdminTrainingDatasets: React.FC = () => {
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '保存映射失败');
     }
+  };
+
+  const openEdit = (mapping: Mapping) => {
+    setEditing(mapping);
+    editForm.setFieldsValue({
+      feature_key: mapping.key,
+      display_name: mapping.feature_name,
+      category_id: mapping.category_id,
+      category_name: mapping.category_name,
+    });
   };
 
   const publish = () => {
@@ -338,23 +386,103 @@ export const AdminTrainingDatasets: React.FC = () => {
     } catch (error: any) { message.error(error?.response?.data?.detail || '复制发布版本失败'); }
   };
 
-  const factorColumns: ColumnsType<FactorDirectoryRow> = [
-    { title: '编号', dataIndex: 'row_no', width: 68, align: 'center' },
-    { title: '因子', dataIndex: 'factor', width: 200, render: (value) => <Text code>{value}</Text> },
-    { title: '风格', dataIndex: 'style', width: 130, render: (value) => <Tag color={value === '待分类' ? 'default' : 'blue'}>{value}</Tag> },
-    { title: '中文解释', dataIndex: 'explanation', ellipsis: true, render: (value) => (
-      <Tooltip title={value} placement="topLeft"><Text ellipsis className="text-xs">{value}</Text></Tooltip>
-    ) },
-    { title: '状态', width: 80, render: (_, row) => row.is_present ? <Tag color="green">已发现</Tag> : <Tag>已删除</Tag> },
-    { title: '训练配置', width: 230, render: (_, row) => row.mapping ? <Space size={8} wrap>
-      <Tooltip title="启用：该因子参与训练（左开关）"><Space size={2}>启用<Switch size="small" checked={row.mapping.enabled} onChange={checked => saveMapping({ ...row.mapping!, enabled: checked })} /></Space></Tooltip>
-      <Tooltip title="默认：训练时默认勾选该因子（右开关）"><Space size={2}>默认<Switch size="small" checked={row.mapping.default_selected} disabled={!row.mapping.enabled} onChange={checked => saveMapping({ ...row.mapping!, default_selected: checked })} /></Space></Tooltip>
-      <Button type="text" size="small" icon={<EditOutlined />} onClick={() => {
-        setEditing(row.mapping!);
-        form.setFieldsValue({ feature_key: row.mapping!.key, display_name: row.mapping!.feature_name, category_id: row.mapping!.category_id, category_name: row.mapping!.category_name });
-      }} />
-    </Space> : <Text type="secondary" className="text-xs">创建草稿后配置</Text> },
-  ];
+  const toggleColumn = (key: string, visible: boolean) => {
+    setHiddenCols((prev) => {
+      const next = new Set(prev);
+      if (visible) next.delete(key); else next.add(key);
+      try {
+        localStorage.setItem(COL_SETTINGS_STORAGE_KEY, JSON.stringify([...next]));
+      } catch {
+        // localStorage 不可用（隐私模式等）：本次会话内内存生效即可
+      }
+      return next;
+    });
+  };
+
+  const factorColumns = filterFactorColumns(
+    buildFactorColumns({
+      statsNDates: statsMeta?.window?.n_dates ?? null,
+      onToggleEnabled: (row, checked) => {
+        if (row.mapping) void saveMapping({ ...row.mapping, enabled: checked });
+      },
+      onToggleDefault: (row, checked) => {
+        if (row.mapping) void saveMapping({ ...row.mapping, default_selected: checked });
+      },
+      onEdit: (row) => {
+        if (row.mapping) openEdit(row.mapping);
+      },
+    }),
+    hiddenCols,
+  );
+
+  /** 展开行：身份与释义 + 质量口径注释（表内列放不下的长文本与出处都在这）。 */
+  const renderExpandedRow = (row: FactorDirectoryRow) => {
+    const field = row.field || {};
+    const dictionary = (field as any).dictionary || {};
+    const stat = row.stat;
+    const qualitySource = stat
+      ? stat.source === 'report'
+        ? `因子报告日频口径（评估期 ${statsMeta?.window?.start || MISSING} ~ ${statsMeta?.window?.end || MISSING}`
+          + `${statsMeta?.window?.n_dates != null ? ` · ${statsMeta.window.n_dates} 交易日` : ''}`
+          + `${statsMeta?.window?.horizon ? ` · ${statsMeta.window.horizon}` : ''}），快照 ${statsMeta?.report_date || MISSING}`
+        : '私域研究快照口径：82 采样日、方向已统一为“越大越好”——与日频因子报告的 IC 不可比'
+      : statsMeta?.available
+        ? '该因子未命中因子报告快照（报告中没有这一列）'
+        : statsMeta?.reason || '质量统计不可用';
+    return (
+      <div className="grid gap-x-10 gap-y-2 px-2 py-1 text-xs leading-5 text-slate-600 md:grid-cols-2">
+        <div className="space-y-1">
+          <div><span className="text-slate-400">完整释义：</span>{row.explanation}</div>
+          <div>
+            <span className="text-slate-400">物理列名：</span>
+            <Text code className="text-[11px]">{row.source_column}</Text>
+            <span className="ml-3 text-slate-400">数据类型：</span>
+            <span className="admin-num">{(field as any).data_type || MISSING}</span>
+          </div>
+          <div>
+            <span className="text-slate-400">库级登记覆盖：</span>
+            <span className="admin-num">
+              {formatPartitionDate((field as any).min_date)} ~ {formatPartitionDate((field as any).max_date)}
+            </span>
+            <span className="text-slate-400">（字段注册值，非逐日有效性）</span>
+          </div>
+          <div><span className="text-slate-400">字典分类：</span>{dictionary.category_name || MISSING}</div>
+        </div>
+        <div className="space-y-1">
+          <div><span className="text-slate-400">质量口径：</span>{qualitySource}</div>
+          <div>
+            <span className="text-slate-400">t 值：</span>
+            <span className="admin-num">{stat ? fmtSigned(stat.t_value) : MISSING}</span>
+            <span className="ml-3 text-slate-400">子库：</span>
+            {stat?.library || MISSING}
+          </div>
+          <div className="text-slate-400">
+            统计缺失一律显示「—」，不代表 0；「窗口覆盖」= 有效天数 ÷ 该库报告评估期总天数。
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const columnSettingsPanel = (
+    <div className="w-52 space-y-2">
+      {FACTOR_COLUMN_SETTINGS.map(({ group, columns }) => (
+        <div key={group}>
+          <div className="mb-1 text-[11px] font-medium text-slate-400">{group}</div>
+          {columns.map(({ key, label }) => (
+            <div key={key} className="leading-6">
+              <Checkbox
+                checked={!hiddenCols.has(key)}
+                onChange={(event) => toggleColumn(key, event.target.checked)}
+              >
+                <span className="text-xs">{label}</span>
+              </Checkbox>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
 
   return <div className="p-6 space-y-4">
     <div className="flex items-center justify-between">
@@ -362,7 +490,7 @@ export const AdminTrainingDatasets: React.FC = () => {
         <Text type="secondary">仅读取各市场 ML 数据集原始因子；映射草稿发布后才影响新的训练任务。</Text></div>
       <Space wrap>
         <Select value={market} options={MARKET_OPTIONS} style={{ width: 100 }} onChange={handleMarketChange} />
-        <Select value={source} options={sourceOptions} style={{ width: 220 }} loading={loading && !sourceOptions.length} onChange={value => { setSource(value); setDraft(null); }} />
+        <Select value={source} options={sourceOptions} style={{ width: 220 }} loading={loading && !sourceOptions.length} onChange={switchSource} />
         <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>刷新</Button>
         <Button type="primary" icon={<ReloadOutlined />} loading={loading} onClick={refreshDiscovery}>字段发现</Button>
       </Space>
@@ -382,53 +510,105 @@ export const AdminTrainingDatasets: React.FC = () => {
       <RdMinedMaterializePanel onCompleted={() => { void load(); }} />
     )}
 
-    <Row gutter={[16, 16]}>
-      {sourceOptions.map(option => {
+    {/* 发布状态条：线上口径 vs 草稿口径的主任务区（原右侧草稿栏 + 底部版本卡） */}
+    <TrainingCatalogStatusBar
+      published={published}
+      draft={draft}
+      creating={creating}
+      onCreateDraft={(name) => { void createDraft(name); }}
+      onClonePublished={() => { void clonePublished(); }}
+      onPublish={publish}
+    />
+
+    {/* 数据与质量快照态势条（选中库） */}
+    <SourceVitalStrip
+      label={(sourceLabels[source] || source).replace('（默认）', '')}
+      status={sources[source] || {}}
+      fieldCount={fields.length}
+      statsMeta={statsMeta}
+    />
+
+    {/* 库状态速览：单行 chips，点击切库；未就绪原因挂在 Tooltip 上 */}
+    <div className="flex flex-wrap items-center gap-2">
+      {sourceOptions.map((option) => {
         const status = sources[option.value] || {};
-        const unavailableHint = unavailableSourceHint(status, option.label.replace('（默认）', ''));
-        const unavailableAction = unavailableSourceAction(status);
-        return <Col xs={24} md={8} key={option.value}><Card size="small" title={option.label}>
-          <Statistic title={status.ready ? '可用于直读训练' : '等待数据同步'} value={status.files || 0} suffix="个分区文件" valueStyle={{ color: status.ready ? '#3f8600' : '#cf1322', fontSize: 18 }} />
-          <div className="mt-2 text-xs text-gray-500">覆盖：{status.min_date || '--'} ～ {status.max_date || '--'} · {status.column_count || 0} 字段</div>
-          {!status.ready && <div className="mt-3 flex items-start gap-1.5 text-xs leading-5 text-amber-700">
-            <InfoCircleOutlined className="mt-1 shrink-0" />
-            <span><span className="font-medium">{unavailableHint}</span> · {unavailableAction}</span>
-          </div>}
-        </Card></Col>;
+        const active = option.value === source;
+        const hint = !status.files
+          ? `尚未同步 ${option.label.replace('（默认）', '')} 数据`
+          : (status.missing_required || []).length > 0
+            ? '数据字段尚未满足训练条件'
+            : '暂未满足直读训练条件';
+        const action = !status.files
+          ? '请在“数据下载”中勾选并同步，完成后点击“字段发现”。'
+          : (status.missing_required || []).length > 0
+            ? '请补齐行情字段后重新执行“字段发现”。'
+            : '请刷新字段状态后重试。';
+        const chip = (
+          <button
+            type="button"
+            onClick={() => switchSource(option.value)}
+            className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors ${
+              active
+                ? 'border-sky-300 bg-sky-50 text-slate-800'
+                : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+            }`}
+          >
+            <StatusDot tone={status.ready ? 'ok' : status.files ? 'warn' : 'bad'} />
+            <span className="font-medium">{option.label}</span>
+            <span className="admin-num text-slate-400">{status.files || 0} 分区</span>
+            {status.ready ? (
+              <Tag color="green" className="!mr-0 !px-1 !text-[10px] !leading-4">就绪</Tag>
+            ) : (
+              <Tag className="!mr-0 !px-1 !text-[10px] !leading-4">未就绪</Tag>
+            )}
+          </button>
+        );
+        return status.ready ? (
+          <React.Fragment key={option.value}>{chip}</React.Fragment>
+        ) : (
+          <Tooltip key={option.value} title={`${hint} · ${action}`}>{chip}</Tooltip>
+        );
       })}
-    </Row>
+    </div>
 
     <Alert type="info" showIcon message="每份目录版本只对应一个来源库" description="默认 L1 因子。跨源训练不在本页拼接：请在「模型训练」页选好锚库后，用「附加因子库」加入其他已发布目录的库（各库版本仍是各自独立发布的这一份）。数据或 OHLCV 覆盖不完整时，直读训练入口会拒绝提交。" />
 
-    <Row gutter={[16, 16]}>
-      <Col xs={24} lg={18}><Card title="因子目录" extra={<Space><Input allowClear value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索因子、分类或中文解释" style={{ width: 220 }} /><Tag>{factorRows.length} 个已发现字段</Tag>{draft && <Tag color="orange">{pending.length} 个待分类</Tag>}</Space>}>
-        <div className="mb-3 text-xs text-gray-500">内置字典已依据 300 因子设计方案填充默认分类与中文解释；草稿中的修改优先于字典，发布后才影响新训练任务。</div>
-        <Table size="small" rowKey="source_column" dataSource={visibleFactorRows} columns={factorColumns} pagination={{ pageSize: 20, showSizeChanger: false }} scroll={{ x: 880, y: 500 }} />
-      </Card></Col>
-      <Col xs={24} lg={6}><Card size="small" title="分类映射草稿" extra={draft ? <Tag color="blue">编辑中</Tag> : <Tag>未创建</Tag>}>
-        {draft ? <div className="space-y-3">
-          <div><Text strong className="block truncate">{draft.version_name}</Text><Text type="secondary" className="text-xs">{mappings.length} 个映射 · {mappings.filter(item => item.enabled).length} 个启用</Text></div>
-          <Alert type="info" showIcon message="在左侧目录完成分类与中文解释" className="text-xs" />
-          <Button block type="primary" icon={<RocketOutlined />} onClick={publish}>发布此草稿</Button>
-        </div> : <Form form={form} layout="vertical" onFinish={createDraft}>
-          <Text type="secondary" className="block mb-3 text-xs">新建后自动导入当前数据源全部字段。</Text>
-          <Form.Item name="version_name" rules={[{ required: true, message: '请输入版本名称' }]}><Input placeholder="例如：2026-08 默认因子集" /></Form.Item>
-          <Button block type="primary" htmlType="submit" loading={creating} icon={<PlusOutlined />}>新建草稿</Button>
-        </Form>}
-      </Card></Col>
-    </Row>
-
-    <Card title="已发布特征集版本" extra={published ? <Space><Tag color="green">当前活动版本</Tag><Button size="small" disabled={!!draft} onClick={clonePublished}>复制为草稿</Button></Space> : <Tag>未发布</Tag>}>
-      {published ? <Space wrap><Text strong>{published.version_name}</Text><Tag>{published.version_id}</Tag><Tag>{published.feature_count} 个映射字段</Tag><Text type="secondary">发布后不可修改；需要调整时创建新的草稿版本。</Text></Space> : <Text type="secondary">此数据源尚未发布映射版本，训练页不会将它作为 QuantDB 直读训练集。</Text>}
+    <Card
+      title="因子目录"
+      extra={<Space wrap>
+        <Input allowClear value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索因子、分类或中文解释" style={{ width: 220 }} />
+        <Tag>{factorRows.length} 个已发现字段</Tag>
+        {draft && <Tag color="orange">{pending.length} 个待分类</Tag>}
+        <Popover trigger="click" placement="bottomRight" content={columnSettingsPanel}>
+          <Button icon={<SettingOutlined />}>列设置</Button>
+        </Popover>
+      </Space>}
+    >
+      <div className="mb-3 text-xs text-slate-400">
+        内置字典已依据 300 因子设计方案填充默认分类与中文解释；草稿中的修改优先于字典，发布后才影响新训练任务。
+        质量指标与数据量来自因子报告快照（仅 A 股口径），缺失显示「—」；点击行首箭头可展开完整释义与口径注释。
+      </div>
+      <Table
+        size="small"
+        rowKey="source_column"
+        dataSource={visibleFactorRows}
+        columns={factorColumns}
+        pagination={{ pageSize: 50, showSizeChanger: false }}
+        scroll={{ x: 1720, y: 560 }}
+        expandable={{ expandedRowRender: renderExpandedRow }}
+      />
     </Card>
 
     <Modal title="编辑逻辑映射" open={!!editing} onCancel={() => setEditing(null)} onOk={async () => {
-      const values = await form.validateFields(); if (editing) { await saveMapping({ ...editing, ...values }); setEditing(null); }
+      const values = await editForm.validateFields();
+      if (editing) { await saveMapping({ ...editing, ...values }); setEditing(null); }
     }}>
-      <Form form={form} layout="vertical"><Form.Item name="feature_key" label="逻辑因子 ID" rules={[{ required: true }]}><Input /></Form.Item>
+      <Form form={editForm} layout="vertical">
+        <Form.Item name="feature_key" label="逻辑因子 ID" rules={[{ required: true }]}><Input /></Form.Item>
         <Form.Item name="display_name" label="中文解释" rules={[{ required: true }]}><Input.TextArea rows={3} /></Form.Item>
-        <Form.Item name="category_id" label="分类" rules={[{ required: true }]}><Select options={CATEGORY_OPTIONS} onChange={(value) => form.setFieldValue('category_name', CATEGORY_OPTIONS.find(item => item.value === value)?.label)} /></Form.Item>
-        <Form.Item name="category_name" hidden rules={[{ required: true }]}><Input /></Form.Item></Form>
+        <Form.Item name="category_id" label="分类" rules={[{ required: true }]}><Select options={CATEGORY_OPTIONS} onChange={(value) => editForm.setFieldValue('category_name', CATEGORY_OPTIONS.find(item => item.value === value)?.label)} /></Form.Item>
+        <Form.Item name="category_name" hidden rules={[{ required: true }]}><Input /></Form.Item>
+      </Form>
     </Modal>
   </div>;
 };

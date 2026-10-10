@@ -14,8 +14,16 @@
  */
 import React from 'react';
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { Modal } from 'antd';
+
+// 本文件是全仓最重的渲染型测试之一（antd 表格 13 列 × 50 行 + 状态条 + RTL
+// 角色查询逐个算可访问名），满负载并行跑全套时单用例可累计到 6s+——vitest 默认
+// 5s testTimeout 下「点发布先弹确认」曾偶发假失败（2026-10-10 实测，单跑必绿）。
+// 这是环境噪声不是死锁：放宽上限，条件达成立即返回。
+vi.setConfig({ testTimeout: 20000, hookTimeout: 20000 });
+configure({ asyncUtilTimeout: 5000 });
 
 import { AdminTrainingDatasets } from '../AdminTrainingDatasets';
 import { adminService } from '../../services/adminService';
@@ -84,6 +92,17 @@ beforeEach(async () => {
   versionsMock.mockResolvedValue({ versions: [] });
 });
 
+/**
+ * 页面用 useSearchParams 读深链预选（?market&source），必须在 Router 里渲染。
+ * 默认路由 = 无参数的常规入口；深链用例传 initialEntries。
+ */
+const renderPage = (initialEntry = '/admin/training-datasets') =>
+  render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <AdminTrainingDatasets />
+    </MemoryRouter>,
+  );
+
 describe('AdminTrainingDatasets：草稿发现', () => {
   test('首屏认领该来源库现有的草稿（别处注册进来的也要看得见）', async () => {
     versionsMock.mockResolvedValue({
@@ -97,7 +116,7 @@ describe('AdminTrainingDatasets：草稿发现', () => {
         : null,
     );
 
-    render(<AdminTrainingDatasets />);
+    renderPage();
 
     // 认领到位：右侧「分类映射草稿」变成编辑态，且发布按钮可用
     expect(await screen.findByText('因子研究注册 private 2026-10-07')).toBeTruthy();
@@ -114,7 +133,7 @@ describe('AdminTrainingDatasets：草稿发现', () => {
       ],
     });
 
-    render(<AdminTrainingDatasets />);
+    renderPage();
 
     expect(await screen.findByRole('button', { name: /新建草稿/ })).toBeTruthy();
     expect(screen.queryByText('编辑中')).toBeNull();
@@ -135,7 +154,7 @@ describe('AdminTrainingDatasets：草稿发现', () => {
       vid ? draftPayload(vid, vid === 'D' ? '草稿 D' : '草稿 NEWER') : null,
     );
 
-    render(<AdminTrainingDatasets />);
+    renderPage();
     expect(await screen.findByText('草稿 D')).toBeTruthy();
 
     // 用正则而不是精确串：antd 的图标会以 role=img + aria-label 计入可访问名，
@@ -207,7 +226,7 @@ describe('AdminTrainingDatasets：发布前确认口径增减', () => {
   test('点发布先弹确认，确认之前不发 POST', async () => {
     stagePublish(featuresPayload('PUB', '线上 v1', 'published', { enabled: 5 }));
 
-    render(<AdminTrainingDatasets />);
+    renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /发布此草稿/ }));
 
     // 弹了确认，且**还没**写库——误点一次就是换线上口径
@@ -222,7 +241,7 @@ describe('AdminTrainingDatasets：发布前确认口径增减', () => {
   test('口径缩小时两个数都摆出来，并给危险按钮', async () => {
     stagePublish(featuresPayload('PUB', '线上 v1', 'published', { enabled: 5 }));
 
-    render(<AdminTrainingDatasets />);
+    renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /发布此草稿/ }));
 
     const dialog = await screen.findByText(/线上启用特征将从/);
@@ -239,7 +258,7 @@ describe('AdminTrainingDatasets：发布前确认口径增减', () => {
       { enabled: 7 },
     );
 
-    render(<AdminTrainingDatasets />);
+    renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /发布此草稿/ }));
     await screen.findByRole('dialog', { name: '发布这份草稿？' });
 
@@ -257,7 +276,7 @@ describe('AdminTrainingDatasets：发布前确认口径增减', () => {
       { enabled: 10 },
     );
 
-    render(<AdminTrainingDatasets />);
+    renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /发布此草稿/ }));
     await screen.findByRole('dialog', { name: '发布这份草稿？' });
 
@@ -267,12 +286,179 @@ describe('AdminTrainingDatasets：发布前确认口径增减', () => {
   test('首次发布不算缩小：没有旧版本可比', async () => {
     stagePublish(null); // 该源从未发布过
 
-    render(<AdminTrainingDatasets />);
+    renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /发布此草稿/ }));
 
     await screen.findByRole('dialog', { name: '发布这份草稿？' });
     expect(screen.queryByText(/线上启用特征将从/)).toBeNull();
     expect(screen.queryByText(/替换当前/)).toBeNull();
     expect(screen.getByRole('button', { name: /^发\s*布$/ }).className).not.toContain('dangerous');
+  });
+});
+
+/**
+ * per-feature 统计与发布状态条（2026-10-10 机构级重排）。
+ *
+ * 锁三件事：
+ * 1) 统计值渲染在对应行（物理列名 join），缺失一律「—」——绝不出现 0；
+ * 2) 数值排序把缺失行排在最后（没有数据的不许插在中间冒充）；
+ * 3) 状态条的启用数与 delta 与发布确认框同一口径（countEnabledFeatures）。
+ */
+describe('AdminTrainingDatasets：统计列与状态条', () => {
+  const fieldRow = (column: string) => ({
+    column_name: column,
+    data_type: 'float64',
+    schema_hash: 'h',
+    min_date: '20170103',
+    max_date: '20260917',
+    is_present: true,
+    discovered_at: null,
+    dictionary: { display_name: column, explanation: `${column} 的释义`, category_name: '波动与风险' },
+  });
+
+  const stageStats = () => {
+    fieldsMock.mockResolvedValue({
+      fields: [fieldRow('AMT20'), fieldRow('VOL20')],
+      stats: {
+        VOL20: {
+          source: 'report', ic_mean: 0.0512, icir: 0.31, t_value: 2.2, turnover: 0.25,
+          monotonicity: 0.61, win_rate: 0.55, n_valid_mean: 4204, ic_neutral_days: 2355, library: 'price',
+        },
+        AMT20: null,
+      },
+      stats_meta: {
+        available: true, reason: null, dataset: 'l1_factors', report_date: '2026-09-17',
+        window: { n_dates: 2359, start: '2017-01-03', end: '2026-09-17', horizon: 'fwd_ret_5' },
+        matched: 1, total: 2, fallback_used: 0, fallback_window: null, stale: false, rebuild_hint: null,
+      },
+    } as any);
+  };
+
+  const dataRows = async (): Promise<HTMLElement[]> => {
+    await waitFor(() => {
+      expect(document.querySelectorAll('tr.ant-table-row').length).toBe(2);
+    });
+    return Array.from(document.querySelectorAll('tr.ant-table-row')) as HTMLElement[];
+  };
+
+  test('统计值挂在对应行；无统计的行整行「—」而不是 0', async () => {
+    stageStats();
+    renderPage();
+
+    // 初始按因子名排序：AMT20 在前、VOL20 在后
+    const rows = await dataRows();
+    const amtRow = rows[0];
+    const volRow = rows[1];
+    expect(amtRow.textContent).toContain('AMT20');
+
+    // VOL20 命中：带符号 IC、千分位样本量、窗口覆盖（2355/2359）
+    expect(within(volRow).getByText('+0.051')).toBeTruthy();
+    expect(within(volRow).getByText('4,204')).toBeTruthy();
+    expect(within(volRow).getByText('99.8%')).toBeTruthy();
+
+    // AMT20 未命中：统计单元格全部「—」，且没有任何 0 值冒充
+    expect(within(amtRow).getAllByText('—').length).toBeGreaterThanOrEqual(8);
+    expect(within(amtRow).queryByText('0.000')).toBeNull();
+    expect(within(amtRow).queryByText('0.00')).toBeNull();
+
+    // 态势条给出快照口径（评估期 / 指标匹配）
+    expect(await screen.findByText('质量快照')).toBeTruthy();
+    expect(screen.getByText(/2,359/)).toBeTruthy();
+  });
+
+  test('IC 排序时缺失行永远排最后（升序也不许插队）', async () => {
+    stageStats();
+    renderPage();
+
+    const before = await dataRows();
+    expect(before[0].textContent).toContain('AMT20'); // 字母序在前
+
+    // 不能用 getByText('IC')：antd 的隐藏测量行（tr.ant-table-measure-row）会把
+    // 每个列标题复制进 div.ant-table-measure-cell-content，'IC' 会命中两处。
+    // 点击必须落在真实表头 th 上。
+    const icHeader = Array.from(document.querySelectorAll('th.ant-table-column-has-sorters'))
+      .find((th) => th.textContent?.trim() === 'IC');
+    expect(icHeader).toBeTruthy();
+    fireEvent.click(icHeader!);
+
+    await waitFor(() => {
+      const rows = document.querySelectorAll('tr.ant-table-row');
+      expect(rows[0].textContent).toContain('VOL20'); // 有值的升到最前，缺失沉底
+      expect(rows[1].textContent).toContain('AMT20');
+    });
+  });
+
+  test('状态条：草稿启用数大于线上时显示 +delta，按钮可用', async () => {
+    stagePublish(featuresPayload('PUB', '线上 v1', 'published', { enabled: 5 }), { enabled: 7 });
+
+    renderPage();
+
+    expect(await screen.findByText('+2')).toBeTruthy();
+    expect(screen.getByText(/启用 5/)).toBeTruthy();
+    expect(screen.getByText(/启用 7/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: /发布此草稿/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('状态条：缩小显示 −delta；草稿 0 启用时发布按钮禁用', async () => {
+    stagePublish(featuresPayload('PUB', '线上 v1', 'published', { enabled: 5 }), { enabled: 2 });
+
+    renderPage();
+
+    expect(await screen.findByText('−3')).toBeTruthy();
+    expect((screen.getByRole('button', { name: /发布此草稿/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('草稿启用数为 0：按钮禁用并给出原因，防呆不靠后端 400', async () => {
+    stagePublish(featuresPayload('PUB', '线上 v1', 'published', { enabled: 5 }), { enabled: 0 });
+
+    renderPage();
+
+    const button = await screen.findByRole('button', { name: /发布此草稿/ });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('启用数为 0 不可发布')).toBeTruthy();
+  });
+});
+
+/**
+ * 深链预选（2026-10-10）：因子研究「注册到训练目录」成功弹窗的「去发布」
+ * 会带 ?market&source 跳到本页，直达刚写入草稿的那个来源库。锁三件事：
+ * 1) 合法参数生效：首屏就按预选的 market+source 拉字段（不是先拉默认源再切）；
+ * 2) source 形状不合法（对齐后端 _validate_source 的正则）回落默认源，
+ *    不拿非法值去请求；
+ * 3) market 不在白名单回落 CN。
+ */
+describe('AdminTrainingDatasets：深链预选 market/source', () => {
+  const stageTwoSources = () => {
+    sourcesMock.mockResolvedValue({
+      sources: {
+        l1_factors: { ready: true, files: 10, column_count: 33 },
+        l2_factors: { ready: true, files: 4, column_count: 12 },
+      },
+      labels: { l1_factors: 'L1 因子（默认）', l2_factors: 'L2 因子' },
+      default_source: 'l1_factors',
+    });
+  };
+
+  test('合法 ?market&source：首屏按预选源加载字段', async () => {
+    stageTwoSources();
+    renderPage('/admin/training-datasets?market=CN&source=l2_factors');
+
+    await waitFor(() => expect(fieldsMock).toHaveBeenCalledWith('l2_factors', 'CN'));
+    expect(fieldsMock).not.toHaveBeenCalledWith('l1_factors', 'CN');
+  });
+
+  test('source 形状不合法：回落默认源，不按非法值请求', async () => {
+    stageTwoSources();
+    renderPage('/admin/training-datasets?market=CN&source=9bad-name');
+
+    await waitFor(() => expect(fieldsMock).toHaveBeenCalledWith('l1_factors', 'CN'));
+    expect(fieldsMock).not.toHaveBeenCalledWith('9bad-name', 'CN');
+  });
+
+  test('market 不在白名单：回落 CN，source 仍生效', async () => {
+    stageTwoSources();
+    renderPage('/admin/training-datasets?market=NOPE&source=l2_factors');
+
+    await waitFor(() => expect(fieldsMock).toHaveBeenCalledWith('l2_factors', 'CN'));
   });
 });

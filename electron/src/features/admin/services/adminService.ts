@@ -24,6 +24,7 @@ import {
     RdMinedMaterializeStatus,
     RdMinedMaterializeStartResult,
     ResearchFactorRegistrationResult,
+    QuantDBFactorFieldsResponse,
 } from '../types';
 import { authService } from '../../auth/services/authService';
 import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../../config/services';
@@ -263,8 +264,8 @@ class AdminService {
         return resp.data;
     }
 
-    async getQuantDBFactorFields(sourceDataset: string, market = 'CN'): Promise<any> {
-        const resp = await this.axiosInstance.get('/admin/training-data/fields', {
+    async getQuantDBFactorFields(sourceDataset: string, market = 'CN'): Promise<QuantDBFactorFieldsResponse> {
+        const resp = await this.axiosInstance.get<QuantDBFactorFieldsResponse>('/admin/training-data/fields', {
             params: { source_dataset: sourceDataset, market },
         });
         return resp.data;

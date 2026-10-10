@@ -6,6 +6,7 @@ import asyncio
 import re
 import uuid
 import json
+import logging
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -35,10 +36,13 @@ from backend.services.api.routers.admin.research_factor_registration import (
     register_research_factors,
 )
 from backend.services.engine.data_platform.quantdb_factor_dictionary import definition_for
+from backend.services.engine.factor_report.training_stats import build_fields_stats
 from backend.services.engine.factor_research.store import FactorDataset
 from backend.shared.database_manager_v2 import get_session
 
 router = APIRouter(dependencies=[Depends(require_admin)])
+
+log = logging.getLogger(__name__)
 
 _VALID_SOURCE = set(FACTOR_SOURCE_DIRS)
 _VALID_STATUS = {"draft", "published", "archived"}
@@ -674,7 +678,31 @@ async def list_factor_fields(
     ]
     if not include_keys:
         fields = [row for row in fields if row["column_name"] not in KEY_COLUMNS | set(REQUIRED_COLUMNS)]
-    return {"source_dataset": source_dataset, "fields": fields}
+    # per-feature 质量统计（因子报告快照口径，2026-10-10）：纯新增键，仅后台
+    # 「模型训练数据集」页消费。build_fields_stats 自身承诺不抛，这里仍兜一层——
+    # 统计层任何故障都不许把字段列表本身拖垮（它是这一页的主数据）。
+    field_columns = [str(row["column_name"]) for row in fields]
+    try:
+        aggregated = await asyncio.to_thread(
+            build_fields_stats, market, source_dataset, field_columns
+        )
+        stats = aggregated.get("stats") or {}
+        stats_meta = aggregated.get("meta") or {}
+    except Exception:  # noqa: BLE001
+        log.exception("训练目录统计聚合失败(%s/%s)", market, source_dataset)
+        stats = {}
+        stats_meta = {
+            "available": False,
+            "reason": "统计聚合异常，请查看服务日志",
+            "matched": 0,
+            "total": len(field_columns),
+        }
+    return {
+        "source_dataset": source_dataset,
+        "fields": fields,
+        "stats": stats,
+        "stats_meta": stats_meta,
+    }
 
 
 async def create_catalog_draft(

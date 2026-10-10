@@ -363,7 +363,11 @@ const AdminPage: React.FC = () => {
                                             ? 'mx-auto flex w-full max-w-[1400px] flex-1 flex-col'
                                             : 'h-full w-full'
                                   }`
-                                : 'mx-auto max-w-[1400px] animate-in fade-in slide-in-from-bottom-4 duration-500'
+                                : currentKey === 'training-datasets'
+                                    // 因子目录是 1720px 宽的列组表（三组指标 + 双侧固定列），
+                                    // 1400px 阅读宽度会把「质量指标/数据量」两组挤进横向滚动
+                                    ? 'mx-auto w-full max-w-[1720px] animate-in fade-in slide-in-from-bottom-4 duration-500'
+                                    : 'mx-auto max-w-[1400px] animate-in fade-in slide-in-from-bottom-4 duration-500'
                         }
                     >
                         <Outlet />

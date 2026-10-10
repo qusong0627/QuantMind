@@ -145,3 +145,50 @@ describe('RegisterToTrainingModal', () => {
     );
   });
 });
+
+/**
+ * 「去发布」出口（2026-10-10）：注册只写草稿，能不能进训练要看训练数据集页的
+ * 发布闸门。成功结果里逐来源库给一条直达该页的路径（带 ?market&source 预选），
+ * 但**只导航、不发布**。锁三件事：
+ * 1) 每个有写入的来源库一行一个按钮，点击把 {market, source} 交给回调；
+ * 2) 点击不关闭弹窗——关闭由页面在导航时处理（这里把「不越权」钉住）；
+ * 3) 页面没注入回调时整排按钮不渲染（例如未来的非管理员入口）。
+ */
+describe('RegisterToTrainingModal：去发布出口', () => {
+  const REGISTERED = {
+    dataset: 'private',
+    market: 'CN',
+    registered: [
+      { code: 'mom_5d', source_dataset: 'l1_factors', version_id: 'V1', feature_key: 'mom_5d' },
+      { code: 'vol_20d', source_dataset: 'l2_factors', version_id: 'V2', feature_key: 'vol_20d' },
+    ],
+    skipped: [],
+    versions: { l1_factors: 'V1', l2_factors: 'V2' },
+  };
+
+  test('注册成功后逐来源库渲染「去发布」，点击回调 {market, source}', async () => {
+    registerMock.mockResolvedValue(REGISTERED);
+    const onGoPublish = vi.fn();
+    const { onClose } = renderModal({ onGoPublish });
+
+    fireEvent.click(screen.getByRole('button', { name: /注册 2 个/ }));
+
+    const buttons = await screen.findAllByRole('button', { name: '去发布' });
+    expect(buttons).toHaveLength(2);
+
+    fireEvent.click(buttons[1]); // versions 插入序：第 2 个 = l2_factors 行
+    expect(onGoPublish).toHaveBeenCalledWith({ market: 'CN', source: 'l2_factors' });
+    // 只导航：弹窗关闭交给页面（navigate 前 setRegisterTarget(null)）
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test('未注入回调时不渲染「去发布」', async () => {
+    registerMock.mockResolvedValue(REGISTERED);
+    renderModal();
+
+    fireEvent.click(screen.getByRole('button', { name: /注册 2 个/ }));
+
+    await screen.findByText('已写入草稿');
+    expect(screen.queryAllByRole('button', { name: '去发布' })).toHaveLength(0);
+  });
+});

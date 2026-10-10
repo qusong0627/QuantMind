@@ -22,6 +22,16 @@ interface Props {
   /** 与后端 `store.factors_meta()` 的数据集口径一致：classic | private */
   dataset: FactorDataset;
   onClose: () => void;
+  /**
+   * 「去发布」出口（done 阶段逐来源库）：把管理员送到训练数据集页并预选
+   * market/source，发布那一份刚写入的草稿。**只导航、不发布**——发布仍是
+   * 训练数据集页上的显式人工闸门。
+   *
+   * 刻意做成可选回调而不是内部 useNavigate：本弹窗的测试是裸 render（无
+   * Router），组件内直接调 useNavigate 会把既有 8 个用例打挂；回调由页面
+   *（FactorResearchPage，天然在 Router 内）注入。不传则整排按钮不渲染。
+   */
+  onGoPublish?: (target: { market: string; source: string }) => void;
 }
 
 type Phase = 'confirm' | 'submitting' | 'done';
@@ -36,7 +46,7 @@ const FOCUSABLE =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), ' +
   'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-export const RegisterToTrainingModal: React.FC<Props> = ({ codes, factors, dataset, onClose }) => {
+export const RegisterToTrainingModal: React.FC<Props> = ({ codes, factors, dataset, onClose, onGoPublish }) => {
   const [phase, setPhase] = useState<Phase>('confirm');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ResearchFactorRegistrationResult | null>(null);
@@ -218,6 +228,15 @@ export const RegisterToTrainingModal: React.FC<Props> = ({ codes, factors, datas
                       <span className="font-mono text-[10px] text-indigo-600 truncate">{vid}</span>
                       <div className="flex-1" />
                       <span className="shrink-0 text-[10px] font-mono text-slate-500">{n} 列</span>
+                      {onGoPublish && n > 0 && (
+                        <button
+                          onClick={() => onGoPublish({ market: result.market || 'CN', source: lib })}
+                          title={`打开「训练数据集」页并预选 ${result.market || 'CN'} / ${lib}，在发布状态条上发布这份草稿`}
+                          className="shrink-0 rounded-full bg-indigo-600 px-2.5 py-0.5 text-[10px] font-bold text-white hover:bg-indigo-500"
+                        >
+                          去发布
+                        </button>
+                      )}
                     </div>
                   );
                 })}

@@ -7,7 +7,7 @@
  * 数据：/api/v1/factor-research（引擎服务，快照由 build_factor_research.py 构建）
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowRightLeft, Award, BarChart3, Database, Filter, Layers, LineChart, ScanSearch, Sigma, TableProperties } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { ApiError, getCatalog, getLeaderboard } from '../services/factorResearchService';
@@ -47,6 +47,7 @@ const isValidTab = (v: string | null): v is Tab => TABS.some((t) => t.key === v)
 const FactorResearchPage: React.FC = () => {
   // 页签支持深链（如评估徽章跳 /factor-research?tab=eval）；切换时同步回 URL
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const [tab, setTabState] = useState<Tab>(() => {
     const fromUrl = searchParams.get('tab');
     return isValidTab(fromUrl) ? fromUrl : 'leaderboard';
@@ -613,6 +614,14 @@ const FactorResearchPage: React.FC = () => {
             factors={catalogCache[registerTarget.dataset] || []}
             dataset={registerTarget.dataset}
             onClose={() => setRegisterTarget(null)}
+            // 「去发布」只导航：跳到训练数据集页并预选 market/source，
+            // 发布本身仍是那一页的人工闸门（先关弹窗，避免跨页残留）。
+            onGoPublish={({ market, source }) => {
+              setRegisterTarget(null);
+              navigate(
+                `/admin/training-datasets?market=${encodeURIComponent(market)}&source=${encodeURIComponent(source)}`,
+              );
+            }}
           />
         )}
       </div>

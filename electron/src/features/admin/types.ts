@@ -652,3 +652,69 @@ export interface ResearchFactorRegistrationResult {
     /** 来源库 → 目标草稿版本号 */
     versions: Record<string, string>;
 }
+
+/** /admin/training-data/fields 的 per-feature 统计条目（2026-10-10 新增）。
+ *
+ * source 两个口径**不可比**：report=因子报告日频口径（如 2359 个交易日）；
+ * research_snapshot=私域快照 82 采样日、方向已统一为「越大越好」。前端必须
+ * 按 source 加徽标区分。所有数值缺失一律 null（渲染「—」），绝不落回 0。
+ */
+export interface QuantDBFactorStat {
+    source: 'report' | 'research_snapshot';
+    ic_mean: number | null;
+    icir: number | null;
+    t_value: number | null;
+    turnover: number | null;
+    monotonicity: number | null;
+    win_rate: number | null;
+    n_valid_mean: number | null;
+    ic_neutral_days: number | null;
+    library: string | null;
+}
+
+export interface QuantDBStatsWindow {
+    n_dates: number | null;
+    start: string | null;
+    end: string | null;
+    horizon?: string | null;
+}
+
+/** 统计聚合的库级元信息（快照窗口 / 匹配数 / 兜底与降级原因）。 */
+export interface QuantDBFactorStatsMeta {
+    available: boolean;
+    reason: string | null;
+    dataset: string | null;
+    report_date: string | null;
+    window: QuantDBStatsWindow | null;
+    matched: number;
+    total: number;
+    fallback_used: number;
+    fallback_window: QuantDBStatsWindow | null;
+    stale: boolean;
+    rebuild_hint: string | null;
+}
+
+/** /fields 的单行：物理列登记值 + 代码字典释义（dictionary 可能为 null）。 */
+export interface QuantDBFactorField {
+    column_name: string;
+    data_type: string | null;
+    schema_hash: string | null;
+    min_date: string | null;
+    max_date: string | null;
+    is_present: boolean;
+    discovered_at: string | null;
+    dictionary: {
+        display_name?: string | null;
+        explanation?: string | null;
+        category_id?: string | null;
+        category_name?: string | null;
+        [key: string]: unknown;
+    } | null;
+}
+
+export interface QuantDBFactorFieldsResponse {
+    source_dataset: string;
+    fields: QuantDBFactorField[];
+    stats: Record<string, QuantDBFactorStat | null>;
+    stats_meta: QuantDBFactorStatsMeta;
+}
