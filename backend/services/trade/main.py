@@ -17,7 +17,6 @@ from backend.services.trade.routers import (
     internal_strategy,
     portfolios,
     positions,
-    simulation_batch,
     trading_history,
     trading_orders,
 )
@@ -478,7 +477,7 @@ app.include_router(positions.router, prefix="/api/v1", tags=["Positions"])
 app.include_router(simulation.router, prefix="/api/v1/simulation", tags=["Simulation-Account"])
 app.include_router(simulation_orders.router, prefix="/api/v1/simulation", tags=["Simulation-Orders"])
 app.include_router(simulation_history.router, prefix="/api/v1/simulation", tags=["Simulation-Trades"])
-app.include_router(simulation_batch.router)
+# simulation_batch（无鉴权测试桩 POST /api/v1/simulation/batch/step）已下线，不再挂载
 app.include_router(internal_strategy.router)
 app.include_router(replay_router)
 

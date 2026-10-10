@@ -331,6 +331,29 @@ class SandboxSignalConsumer:
             order.submitted_at = datetime.now()
             await db.commit()
 
+            # 管理后台闸门风控（与托管调仓同口径），不通过落 REJECTED 跳过执行
+            from backend.services.simulation.engine import check_sim_order_gate
+
+            gate_violations = await check_sim_order_gate(
+                db,
+                redis_client,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                symbol=symbol,
+                quantity=quantity,
+                price=price,
+            )
+            if gate_violations:
+                await exec_engine.mark_rejected(
+                    order, ("risk_blocked: " + "; ".join(gate_violations))[:500]
+                )
+                logger.warning(
+                    "[SandboxSignalConsumer] 闸门风控拦截: %s %s %s - %s",
+                    symbol, side.value, quantity, "; ".join(gate_violations)[:200],
+                )
+                await db.commit()
+                return
+
             # 执行订单
             result = await exec_engine.execute_order(order)
             if result.success:

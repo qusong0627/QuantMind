@@ -122,6 +122,113 @@ class ExecutionReport:
     error: str | None = None
 
 
+async def count_sim_orders_today(db: AsyncSession, tenant: str, uid_int: int) -> int:
+    """当日模拟单计数（排除已拒绝，与实盘口径对齐），失败返回 0。"""
+    try:
+        from datetime import datetime as _dt
+
+        from sqlalchemy import func, select
+
+        from backend.services.simulation.models.order import OrderStatus, SimOrder
+
+        today_start = _dt.combine(_dt.now().date(), _dt.min.time())
+        stmt = (
+            select(func.count(SimOrder.id))
+            .where(SimOrder.tenant_id == tenant)
+            .where(SimOrder.user_id == uid_int)
+            .where(SimOrder.created_at >= today_start)
+            .where(SimOrder.status != OrderStatus.REJECTED)
+        )
+        res = await db.execute(stmt)
+        return int(res.scalar() or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("SimulationEngine: 当日订单计数失败, 按 0 处理: %s", exc)
+        return 0
+
+
+async def check_sim_order_gate(
+    db: AsyncSession,
+    redis,
+    *,
+    tenant_id: str,
+    user_id: object,
+    symbol: str,
+    quantity: float,
+    price: float | None,
+    market_str: str | None = None,
+) -> list[str]:
+    """手动下单 / 沙箱信号共用的模拟闸门检查，返回 violations（空=放行）。
+
+    与托管调仓（SimulationEngine.run_cycle）同一规则口径。市价单无价
+    格时算不出金额，只执行日笔数限制，其余 fail-open。永不抛异常。
+    """
+    try:
+        import os as _os
+
+        if _os.getenv("SIM_GATE_RISK_ENABLED", "true").strip().lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            return []
+
+        from backend.services.live_trading.services.risk_rule_types import (
+            GATE_RULE_TYPES,
+            rule_matches_market,
+            rule_matches_trading_mode,
+        )
+        from backend.services.live_trading.services.risk_service import RiskService
+        from backend.services.simulation.services.market_rules import (
+            infer_market_from_symbols,
+        )
+        from backend.services.simulation.services.simulation_manager import (
+            SimulationAccountManager,
+            canonical_sim_uid,
+        )
+
+        tenant = (tenant_id or "").strip() or "default"
+        uid_int = canonical_sim_uid(user_id)
+        mkt = market_str or infer_market_from_symbols([symbol]).value
+
+        rules = await RiskService(db, redis).get_applicable_rules(uid_int)
+        gate_rules = []
+        for rule in rules:
+            if str(getattr(rule, "rule_type", "")) not in GATE_RULE_TYPES:
+                continue
+            params = getattr(rule, "parameters", None) or {}
+            if not isinstance(params, dict):
+                continue
+            if not rule_matches_trading_mode(params.get("trading_mode"), "SIMULATION"):
+                continue
+            if not rule_matches_market(params.get("markets"), mkt):
+                continue
+            gate_rules.append(rule)
+        if not gate_rules:
+            return []
+
+        account = await SimulationAccountManager(redis).get_account(
+            user_id=uid_int, tenant_id=tenant, market=mkt
+        )
+        portfolio_value = float((account or {}).get("total_asset") or 0)
+        day_count = await count_sim_orders_today(db, tenant, uid_int)
+
+        order_value = float(quantity or 0) * float(price or 0)
+        if order_value <= 0:
+            # 市价无价单：金额类规则无法评估，只执行日笔数限制
+            gate_rules = [
+                r for r in gate_rules if str(getattr(r, "rule_type", "")) == "max_daily_trades"
+            ]
+            if not gate_rules:
+                return []
+        return RiskService.eval_gate_violations(
+            order_value, portfolio_value, day_count, gate_rules
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("SimulationEngine: 手动单闸门检查失败, fail-open: %s", exc)
+        return []
+
+
 class SimulationEngine:
     """
     统一模拟盘引擎：
@@ -801,67 +908,17 @@ class SimulationEngine:
         gate_rules: list,
     ) -> list[str]:
         """评估 4 类闸门规则，与 RiskService.check_order_risk 同口径（仅闸门部分）。"""
-        violations: list[str] = []
-        for rule in gate_rules:
-            params = getattr(rule, "parameters", None) or {}
-            if not isinstance(params, dict):
-                continue
-            rule_type = str(getattr(rule, "rule_type", ""))
-            rule_name = str(getattr(rule, "rule_name", rule_type))
-            if rule_type == "max_order_size":
-                max_size = params.get("max_value", settings.MAX_ORDER_SIZE)
-                if order_value > max_size:
-                    violations.append(
-                        f"{rule_name}: Order value {order_value:.2f} exceeds maximum {max_size}"
-                    )
-            elif rule_type == "min_order_size":
-                min_size = params.get("min_value", settings.MIN_ORDER_SIZE)
-                if order_value < min_size:
-                    violations.append(
-                        f"{rule_name}: Order value {order_value:.2f} below minimum {min_size}"
-                    )
-            elif rule_type == "max_position_size":
-                max_pct = params.get("max_percentage", settings.MAX_POSITION_SIZE)
-                if portfolio_value > 0:
-                    position_pct = order_value / portfolio_value
-                    if position_pct > max_pct:
-                        violations.append(
-                            f"{rule_name}: Position size {position_pct:.1%} "
-                            f"exceeds maximum {max_pct:.1%}"
-                        )
-            elif rule_type == "max_daily_trades":
-                max_trades = params.get("max_count", settings.MAX_DAILY_TRADES)
-                if daily_count >= max_trades:
-                    violations.append(
-                        f"{rule_name}: Daily trade count {daily_count} "
-                        f"reached maximum {max_trades}"
-                    )
-        return violations
+        from backend.services.live_trading.services.risk_service import RiskService
+
+        return RiskService.eval_gate_violations(
+            order_value, portfolio_value, daily_count, gate_rules
+        )
 
     async def _sim_daily_order_count(
         self, db: AsyncSession, tenant: str, uid_int: int
     ) -> int:
         """当日模拟单计数（排除已拒绝，与实盘口径对齐），失败返回 0。"""
-        try:
-            from datetime import datetime as _dt
-
-            from sqlalchemy import func, select
-
-            from backend.services.simulation.models.order import OrderStatus, SimOrder
-
-            today_start = _dt.combine(_dt.now().date(), _dt.min.time())
-            stmt = (
-                select(func.count(SimOrder.id))
-                .where(SimOrder.tenant_id == tenant)
-                .where(SimOrder.user_id == uid_int)
-                .where(SimOrder.created_at >= today_start)
-                .where(SimOrder.status != OrderStatus.REJECTED)
-            )
-            res = await db.execute(stmt)
-            return int(res.scalar() or 0)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SimulationEngine: 当日订单计数失败, 按 0 处理: %s", exc)
-            return 0
+        return await count_sim_orders_today(db, tenant, uid_int)
 
     def _apply_risk_buy_locks(
         self,

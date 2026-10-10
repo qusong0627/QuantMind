@@ -30,6 +30,54 @@ class RiskService:
         self.redis = redis
 
     @staticmethod
+    def eval_gate_violations(
+        order_value: float,
+        portfolio_value: float,
+        daily_count: int,
+        gate_rules: list,
+    ) -> list[str]:
+        """评估 4 类闸门规则（max/min_order_size/max_position_size/max_daily_trades）。
+
+        模拟三入口（托管调仓/手动下单/沙箱信号）与实盘分发共用，保证口径一致。
+        """
+        violations: list[str] = []
+        for rule in gate_rules:
+            params = getattr(rule, "parameters", None) or {}
+            if not isinstance(params, dict):
+                continue
+            rule_type = str(getattr(rule, "rule_type", ""))
+            rule_name = str(getattr(rule, "rule_name", rule_type))
+            if rule_type == "max_order_size":
+                max_size = params.get("max_value", settings.MAX_ORDER_SIZE)
+                if order_value > max_size:
+                    violations.append(
+                        f"{rule_name}: Order value {order_value:.2f} exceeds maximum {max_size}"
+                    )
+            elif rule_type == "min_order_size":
+                min_size = params.get("min_value", settings.MIN_ORDER_SIZE)
+                if order_value < min_size:
+                    violations.append(
+                        f"{rule_name}: Order value {order_value:.2f} below minimum {min_size}"
+                    )
+            elif rule_type == "max_position_size":
+                max_pct = params.get("max_percentage", settings.MAX_POSITION_SIZE)
+                if portfolio_value > 0:
+                    position_pct = order_value / portfolio_value
+                    if position_pct > max_pct:
+                        violations.append(
+                            f"{rule_name}: Position size {position_pct:.1%} "
+                            f"exceeds maximum {max_pct:.1%}"
+                        )
+            elif rule_type == "max_daily_trades":
+                max_trades = params.get("max_count", settings.MAX_DAILY_TRADES)
+                if daily_count >= max_trades:
+                    violations.append(
+                        f"{rule_name}: Daily trade count {daily_count} "
+                        f"reached maximum {max_trades}"
+                    )
+        return violations
+
+    @staticmethod
     def _normalize_trade_action_value(value: Any) -> str:
         if value is None:
             return ""
@@ -342,49 +390,50 @@ class RiskService:
                     }
                 )
 
-        for rule in rules:
-            params = rule.parameters
+        # 规则按 trading_mode/markets 生效（与模拟盘闸门口径对齐）。
+        # 兼容：REAL 沿用旧行为（存量规则默认 SIMULATION，过滤会静默摘掉
+        # 实盘保护）；仅 SIMULATION 订单做精确过滤，修 REAL 域规则误拦模拟单。
+        # 订单无明确模式时沿用旧行为（全量执行，fail-open）。
+        gate_rules = rules
+        if trading_mode_value.upper() == "SIMULATION":
+            try:
+                from backend.services.live_trading.services.risk_rule_types import (
+                    rule_matches_market,
+                    rule_matches_trading_mode,
+                )
+                from backend.services.simulation.services.market_rules import infer_market
 
-            if rule.rule_type == "max_order_size":
-                max_size = params.get("max_value", settings.MAX_ORDER_SIZE)
-                if order.order_value > max_size:
-                    violations.append(
-                        {
-                            "rule": rule.rule_name,
-                            "message": f"Order value {order.order_value} exceeds maximum {max_size}",
-                        }
-                    )
-
-            elif rule.rule_type == "min_order_size":
-                min_size = params.get("min_value", settings.MIN_ORDER_SIZE)
-                if order.order_value < min_size:
-                    violations.append(
-                        {
-                            "rule": rule.rule_name,
-                            "message": f"Order value {order.order_value} below minimum {min_size}",
-                        }
-                    )
-
-            elif rule.rule_type == "max_position_size":
-                max_pct = params.get("max_percentage", settings.MAX_POSITION_SIZE)
-                if portfolio_value > 0:
-                    position_pct = order.order_value / portfolio_value
-                    if position_pct > max_pct:
-                        violations.append(
-                            {
-                                "rule": rule.rule_name,
-                                "message": f"Position size {position_pct:.1%} exceeds maximum {max_pct:.1%}",
-                            }
+                _order_market = infer_market(
+                    str(getattr(order, "symbol", "") or "")
+                ).value
+                gate_rules = [
+                    rule
+                    for rule in rules
+                    if not isinstance(getattr(rule, "parameters", None), dict)
+                    or (
+                        rule_matches_trading_mode(
+                            (getattr(rule, "parameters", None) or {}).get(
+                                "trading_mode"
+                            ),
+                            "SIMULATION",
                         )
-
-            elif rule.rule_type == "max_daily_trades":
-                max_trades = params.get("max_count", settings.MAX_DAILY_TRADES)
-                if daily_trade_count >= max_trades:
-                    violations.append(
-                        {
-                            "rule": rule.rule_name,
-                            "message": f"Daily trade count {daily_trade_count} reached maximum {max_trades}",
-                        }
+                        and rule_matches_market(
+                            (getattr(rule, "parameters", None) or {}).get("markets"),
+                            _order_market,
+                        )
                     )
+                ]
+            except Exception as exc:  # noqa: BLE001 - 过滤失败时全量执行
+                logger.warning("RiskService: 规则模式过滤失败, 全量执行: %s", exc)
+                gate_rules = rules
+
+        violations.extend(
+            RiskService.eval_gate_violations(
+                float(order.order_value or 0.0),
+                portfolio_value,
+                daily_trade_count,
+                gate_rules,
+            )
+        )
 
         return {"passed": len(violations) == 0, "violations": violations}

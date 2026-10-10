@@ -74,6 +74,25 @@ async def create_order(
             await db.commit()
             await db.refresh(order)
 
+            # 管理后台闸门风控（与托管调仓同口径），不通过落 REJECTED 可审计
+            from backend.services.simulation.engine import check_sim_order_gate
+
+            gate_violations = await check_sim_order_gate(
+                db,
+                redis,
+                tenant_id=auth.tenant_id,
+                user_id=user_id,
+                symbol=order.symbol,
+                quantity=order.quantity,
+                price=order.price,
+            )
+            if gate_violations:
+                await engine.mark_rejected(
+                    order, ("risk_blocked: " + "; ".join(gate_violations))[:500]
+                )
+                await db.refresh(order)
+                return order
+
             result = await engine.execute_order(order)
             if not result.success:
                 await engine.mark_rejected(order, result.message)
