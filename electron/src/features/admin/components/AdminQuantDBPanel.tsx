@@ -40,6 +40,14 @@ interface QuantDBInfo {
         remaining_gb: number;
         credit_gb?: number;
         subscription?: { status: string };
+        // SDK 0.4.4+ 拆分：套餐额度（月度重置）/ 流量包额度（一年有效可叠加）
+        total_gb?: number;
+        plan_used_gb?: number;
+        plan_total_gb?: number;
+        plan_remaining_gb?: number;
+        package_used_gb?: number;
+        package_total_gb?: number;
+        package_remaining_gb?: number;
     };
     error?: string;
 }
@@ -106,8 +114,19 @@ export const AdminQuantDBPanel: React.FC = () => {
         loadInfo();
     }, [loadInfo]);
 
-    const usagePercent = info?.usage && info.usage.limit_gb > 0
-        ? Math.round((info.usage.used_gb / info.usage.limit_gb) * 100)
+    const usage = info?.usage;
+    const hasSplit = usage !== undefined
+        && usage.total_gb !== undefined && usage.total_gb > 0
+        && usage.plan_total_gb !== undefined;
+    const totalGb = hasSplit ? (usage!.total_gb as number) : (usage?.limit_gb ?? 0);
+    const usagePercent = usage && totalGb > 0
+        ? Math.round((usage.used_gb / totalGb) * 100)
+        : 0;
+    const planPercent = hasSplit && (usage!.plan_total_gb as number) > 0
+        ? Math.round(((usage!.plan_used_gb ?? 0) / (usage!.plan_total_gb as number)) * 100)
+        : 0;
+    const packagePercent = hasSplit && (usage!.package_total_gb ?? 0) > 0
+        ? Math.round(((usage!.package_used_gb ?? 0) / (usage!.package_total_gb as number)) * 100)
         : 0;
 
     return (
@@ -198,12 +217,12 @@ export const AdminQuantDBPanel: React.FC = () => {
                     )}
                 </div>
 
-                {/* 流量条（有数据时才显示） */}
+                {/* 流量条（有数据时才显示）：SDK 0.4.4+ 拆套餐/流量包两行，老版本回退单行 */}
                 {info?.usage && (
                     <div className="bg-slate-50 rounded-xl border border-slate-100 px-3 py-2.5 mb-4">
                         <div className="flex items-center justify-between mb-1.5">
                             <Text type="secondary" className="text-xs">流量使用</Text>
-                            <Text type="secondary" className="text-xs font-mono">{info.usage.used_gb.toFixed(1)} / {info.usage.limit_gb} GB · 剩余 {info.usage.remaining_gb.toFixed(1)} GB</Text>
+                            <Text type="secondary" className="text-xs font-mono">{info.usage.used_gb.toFixed(1)} / {totalGb.toFixed(1)} GB · 剩余 {info.usage.remaining_gb.toFixed(1)} GB</Text>
                         </div>
                         <Progress
                             percent={usagePercent}
@@ -211,6 +230,38 @@ export const AdminQuantDBPanel: React.FC = () => {
                             size="small"
                             status={usagePercent > USAGE_DANGER_PERCENT ? 'exception' : usagePercent > USAGE_WARN_PERCENT ? 'active' : 'normal'}
                         />
+                        {hasSplit && (
+                            <div className="mt-2 space-y-1.5">
+                                <div className="flex items-center gap-2">
+                                    <Text type="secondary" className="text-xs w-10 shrink-0">套餐</Text>
+                                    <Progress
+                                        percent={planPercent}
+                                        showInfo={false}
+                                        size="small"
+                                        className="flex-1"
+                                        status={planPercent > USAGE_DANGER_PERCENT ? 'exception' : 'normal'}
+                                    />
+                                    <Text type="secondary" className="text-xs font-mono shrink-0">
+                                        {(usage!.plan_used_gb ?? 0).toFixed(1)} / {(usage!.plan_total_gb ?? 0).toFixed(1)} GB · 剩 {(usage!.plan_remaining_gb ?? 0).toFixed(1)}
+                                    </Text>
+                                </div>
+                                {(usage!.package_total_gb ?? 0) > 0 && (
+                                    <div className="flex items-center gap-2">
+                                        <Text type="secondary" className="text-xs w-10 shrink-0">流量包</Text>
+                                        <Progress
+                                            percent={packagePercent}
+                                            showInfo={false}
+                                            size="small"
+                                            className="flex-1"
+                                            status={packagePercent > USAGE_DANGER_PERCENT ? 'exception' : 'normal'}
+                                        />
+                                        <Text type="secondary" className="text-xs font-mono shrink-0">
+                                            {(usage!.package_used_gb ?? 0).toFixed(1)} / {(usage!.package_total_gb ?? 0).toFixed(1)} GB · 剩 {(usage!.package_remaining_gb ?? 0).toFixed(1)}
+                                        </Text>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         <div className="flex gap-2 mt-2 flex-wrap">
                             {info.usage.subscription && <Tag color="blue" className="rounded-full text-[11px] m-0">订阅: {info.usage.subscription.status}</Tag>}
                             {info.usage.credit_gb !== undefined && info.usage.credit_gb > 0 && <Tag color="green" className="rounded-full text-[11px] m-0">赠送 {info.usage.credit_gb} GB</Tag>}
