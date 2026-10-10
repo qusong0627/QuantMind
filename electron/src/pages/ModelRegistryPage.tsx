@@ -103,7 +103,7 @@ export const ModelRegistryPage: React.FC = () => {
   const allModels = userModels;
   const activeModels = allModels.filter(m => m.status !== 'archived');
   const archivedModels = allModels.filter(m => m.status === 'archived');
-  const displayModels = (showArchived ? allModels : activeModels).filter(m =>
+  const displayModels = (showArchived ? archivedModels : activeModels).filter(m =>
     !searchQuery ||
     m.model_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
     modelDisplayName(m).toLowerCase().includes(searchQuery.toLowerCase())
