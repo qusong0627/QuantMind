@@ -1085,3 +1085,11 @@ html.platform-win32.os-win10 .module-grid-container {
 .admin-page .stock-pool-table .ant-pagination .ant-pagination-options .ant-select-selection-placeholder {
   line-height: 30px !important;
 }
+
+/* 滚动重训对照表：差异行浅蓝底 */
+.rolling-row-changed > td {
+  background: rgba(239, 246, 255, 0.9) !important;
+}
+.rolling-row-changed:hover > td {
+  background: rgba(219, 234, 254, 0.9) !important;
+}

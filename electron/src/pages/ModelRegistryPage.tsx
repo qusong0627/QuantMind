@@ -43,6 +43,7 @@ import {
   ModelDetailPanel,
   TrainingSourcePanel,
   AttributionAnalysisPanel,
+  RollingRetrainPanel,
 } from './modelRegistryPanels';
 import { PublishModelModal } from './hub/PublishModelModal';
 import { DriftTabPanel } from './DriftTabPanel';
@@ -208,8 +209,13 @@ export const ModelRegistryPage: React.FC = () => {
     }
   };
 
-  const loadTrainingRun = useCallback(async (runId: string) => {
-    setTrainingRunLoading(true);
+  const handleRollingRegistered = useCallback(async (newModelId: string) => {
+    await loadModels(true);
+    setSelectedId(newModelId);
+    setMainTab('detail');
+  }, [loadModels]);
+
+  const loadTrainingRun = useCallback(async (runId: string) => {    setTrainingRunLoading(true);
     try {
       const run = await modelTrainingService.getTrainingRun(runId);
       setTrainingRun(run);
@@ -675,6 +681,16 @@ export const ModelRegistryPage: React.FC = () => {
                             model={selectedModel}
                             trainingRun={trainingRun}
                             loading={trainingRunLoading}
+                          />
+                        ),
+                      }] : []),
+                      ...(selectedModel.source_run_id ? [{
+                        key: 'rolling',
+                        label: <span className="text-xs font-black uppercase tracking-widest px-1">滚动重训</span>,
+                        children: (
+                          <RollingRetrainPanel
+                            model={selectedModel}
+                            onModelRegistered={handleRollingRegistered}
                           />
                         ),
                       }] : []),

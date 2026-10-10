@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
-import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, DatePicker, Table, Drawer, Badge, Tooltip, Collapse, Select, Pagination, message, Space, Alert } from 'antd';
+import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, InputNumber, Modal, Tabs, DatePicker, Table, Drawer, Badge, Tooltip, Collapse, Select, Pagination, message, Space, Alert } from 'antd';
 import { clsx } from 'clsx';
 import dayjs from 'dayjs';
 import {
@@ -11,6 +11,9 @@ import {
 import {
   UserModelRecord,
   ModelTrainingRunStatus,
+  RollingRetrainPreview,
+  RollingRetrainWindow,
+  RollingParamSet,
   InferenceRunRecord,
   InferencePrecheckResult,
   InferenceRankingResult,
@@ -377,7 +380,7 @@ export const ModelDetailPanel: React.FC<{ model: UserModelRecord }> = ({ model }
                 <div className="relative pl-6 space-y-8 before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-100">
                   {segments.map((s, idx) => (
                     <div key={idx} className="relative">
-                      <div className={clsx("absolute -left-[19px] top-1.5 h-2 w-2 rounded-full ring-4 ring-white", s.color)} />
+                      <div className={clsx("absolute -left-[16px] top-1.5 h-2 w-2 rounded-full ring-4 ring-white", s.color)} />
                       <div className="flex flex-col">
                         <div className="flex items-center justify-between mb-1">
                           <Text className="text-xs font-black text-slate-800">{s.label}</Text>
@@ -1337,6 +1340,373 @@ export const ProductionMonitorPanel: React.FC<{ model: UserModelRecord }> = ({ m
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+};
+
+
+const ROLLING_LIVE_STATUSES = ['pending', 'provisioning', 'running', 'waiting_callback'];
+
+/** 参数值短格式：对象只显示摘要（完整值进 Tooltip title）。 */
+const fmtParamValue = (v: unknown): string => {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'boolean') return v ? '开' : '关';
+  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(Math.round(v * 10000) / 10000);
+  if (typeof v === 'object') {
+    const keys = Object.keys(v as Record<string, unknown>);
+    if (Array.isArray(v)) return `${(v as unknown[]).length} 项`;
+    return keys.length > 0 ? `${keys.length} 项` : '—';
+  }
+  return String(v);
+};
+
+/** 参数值完整格式（Tooltip 用）。 */
+const fmtParamFull = (v: unknown): string => {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+};
+
+const sameParamValue = (a: unknown, b: unknown): boolean =>
+  JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+interface CompareRow {
+  group: string;
+  label: string;
+  original: unknown;
+  target: unknown;
+  changed: boolean;
+}
+
+const WINDOW_LABELS: Record<string, string> = {
+  train_start: '训练开始', train_end: '训练结束',
+  valid_start: '验证开始', valid_end: '验证结束',
+  test_start: '测试开始', test_end: '测试结束',
+};
+
+/** 原/目标扁平对照行：窗口六边界 + 名称 + 其余标量；对象型（超参包/预处理/context）只比摘要。 */
+const buildCompareRows = (original: RollingParamSet, target: RollingParamSet): CompareRow[] => {
+  const rows: CompareRow[] = [];
+  const w0 = original.window ?? {};
+  const w1 = target.window ?? {};
+  (Object.keys(WINDOW_LABELS) as Array<keyof RollingRetrainWindow>).forEach((k) => {
+    const a = w0[k] ?? '';
+    const b = w1[k] ?? '';
+    rows.push({ group: '时间切分', label: WINDOW_LABELS[k], original: a, target: b, changed: !sameParamValue(a, b) });
+  });
+  const push = (group: string, label: string, a: unknown, b: unknown) => {
+    rows.push({ group, label, original: a, target: b, changed: !sameParamValue(a, b) });
+  };
+  push('模型', '展示名', original.display_name, target.display_name);
+  push('模型', '模型类型', original.model_type, target.model_type);
+  const h0 = original.hyperparams ?? {};
+  const h1 = target.hyperparams ?? {};
+  Object.keys(h1).forEach((k) => {
+    const a = (h0 as Record<string, unknown>)[k];
+    const b = (h1 as Record<string, unknown>)[k];
+    if (typeof b === 'object' && b !== null) return; // 超参包（xgb/catboost/dl）太长，只在摘要说明
+    push('模型', k, a, b);
+  });
+  const t0 = (original.target ?? {}) as Record<string, unknown>;
+  const t1 = (target.target ?? {}) as Record<string, unknown>;
+  push('目标', '预测跨度(天)', t0.target_horizon_days, t1.target_horizon_days);
+  push('目标', '目标模式', t0.target_mode, t1.target_mode);
+  push('目标', '标签公式', t0.label_formula, t1.label_formula);
+  const tr0 = (original.training ?? {}) as Record<string, unknown>;
+  const tr1 = (target.training ?? {}) as Record<string, unknown>;
+  push('训练', '特征数', original.feature_count, target.feature_count);
+  push('训练', '自动特征过滤', tr0.auto_feature_filter, tr1.auto_feature_filter);
+  push('训练', '训练节点', tr0.node_id, tr1.node_id);
+  push('训练', '最长耗时(分)', tr0.max_time_minutes, tr1.max_time_minutes);
+  const f0 = (original.factor ?? { source: '', catalog_version: '' });
+  const f1 = (target.factor ?? { source: '', catalog_version: '' });
+  push('因子', '因子源', f0.source, f1.source);
+  push('因子', '目录版本', f0.catalog_version, f1.catalog_version);
+  return rows;
+};
+
+/** 对照表：参数 / 原值 / 新值；默认只看差异，可展开全部。 */
+const RollingCompareTable: React.FC<{
+  original: RollingParamSet;
+  target: RollingParamSet;
+  shiftMonths: number;
+  latestDate: string;
+}> = ({ original, target, shiftMonths, latestDate }) => {
+  const [showAll, setShowAll] = useState(false);
+  const rows = buildCompareRows(original, target);
+  const changed = rows.filter((r) => r.changed);
+  const visible = showAll ? rows : changed;
+  const columns = [
+    { title: '参数', dataIndex: 'label', key: 'label', width: 150, align: 'center' as const,
+      render: (_: unknown, r: CompareRow) => (
+        <span>{r.label}</span>
+      ) },
+    { title: '原值', dataIndex: 'original', key: 'original', width: 260, align: 'center' as const,
+      ellipsis: true,
+      render: (_: unknown, r: CompareRow) => (
+        <Tooltip title={fmtParamFull(r.original)}>
+          <span className="font-mono text-slate-600">{fmtParamValue(r.original)}</span>
+        </Tooltip>
+      ) },
+    { title: `新值（+${shiftMonths}月，截至${latestDate}）`, dataIndex: 'target', key: 'target', align: 'center' as const,
+      ellipsis: true,
+      render: (_: unknown, r: CompareRow) => (
+        <Tooltip title={fmtParamFull(r.target)}>
+          <span className={clsx('font-mono', r.changed ? 'text-slate-800 font-bold' : 'text-slate-600')}>
+            {fmtParamValue(r.target)}
+          </span>
+        </Tooltip>
+      ) },
+  ];
+  return (
+    <div className="rounded-2xl border border-slate-100/60 bg-white/70 p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <Text className="text-xs font-black text-slate-700">参数对照</Text>
+        <Tag color={changed.length > 0 ? 'blue' : undefined} className="text-[10px]">
+          {changed.length > 0 ? `${changed.length} 项变化` : '与原始一致'}
+        </Tag>
+        <span className="flex-1" />
+        <Button type="link" size="small" className="text-[11px] p-0 h-auto" onClick={() => setShowAll(!showAll)}>
+          {showAll ? '只看差异' : `查看全部 ${rows.length} 项`}
+        </Button>
+      </div>
+      <Table
+        size="small"
+        tableLayout="fixed"
+        rowKey={(r: CompareRow) => `${r.group}.${r.label}`}
+        columns={columns as any}
+        dataSource={visible}
+        pagination={false}
+        locale={{ emptyText: '无差异（参数与原始完全一致）' }}
+        rowClassName={(r: CompareRow) => (r.changed ? 'rolling-row-changed' : '')}
+      />
+      <div className="mt-2 text-[11px] text-slate-400">
+        超参包（xgb/catboost/dl）、截面预处理、context 等长文本未逐项列出——提交时与原任务完全一致；特征清单
+        <span className="font-mono font-bold text-slate-500"> {target.feature_count} 项</span>复用原目录，
+        详见原模型「模型详情」。
+      </div>
+    </div>
+  );
+};
+
+/** 滚动重训：读原任务全部参数整体平移窗口，以最新数据为基准重训并自动注册新模型 */
+export const RollingRetrainPanel: React.FC<{
+  model: UserModelRecord;
+  onModelRegistered: (modelId: string) => void;
+}> = ({ model, onModelRegistered }) => {
+  const [preview, setPreview] = useState<RollingRetrainPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  const [shiftMonths, setShiftMonths] = useState<number | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [runStatus, setRunStatus] = useState<ModelTrainingRunStatus | null>(null);
+
+  const hasSource = Boolean(model.source_run_id);
+
+  const loadPreview = useCallback(async (shift?: number | null) => {
+    if (!model.model_id || !model.source_run_id) return;
+    setPreviewLoading(true);
+    setPreviewError('');
+    try {
+      const data = await modelTrainingService.getRollingRetrainPreview(
+        model.model_id,
+        typeof shift === 'number' ? shift : undefined,
+      );
+      setPreview(data);
+    } catch (err: any) {
+      setPreview(null);
+      const detail = err?.response?.data?.detail;
+      setPreviewError(String(detail || err?.message || '加载滚动预览失败'));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [model.model_id, model.source_run_id]);
+
+  useEffect(() => {
+    setPreview(null);
+    setPreviewError('');
+    setRunId(null);
+    setRunStatus(null);
+    void loadPreview();
+  }, [model.model_id, loadPreview]);
+
+  const handleRegistered = useCallback(async (rid: string) => {
+    try {
+      const resp = await modelTrainingService.listUserModels(true);
+      const fresh = (resp.items ?? []).find((m) => m.source_run_id === rid);
+      if (fresh) {
+        message.success(`滚动重训完成，新模型 ${fresh.model_id} 已自动注册`);
+        onModelRegistered(fresh.model_id);
+      } else {
+        message.warning('训练完成，但未在模型列表中找到新模型，请手动刷新');
+      }
+    } catch {
+      message.warning('训练完成，刷新模型列表失败，请手动刷新');
+    }
+  }, [onModelRegistered]);
+
+  useEffect(() => {
+    if (!runId) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const s = await modelTrainingService.getTrainingRun(runId);
+        if (!alive) return false;
+        setRunStatus(s);
+        if (s.isCompleted || !ROLLING_LIVE_STATUSES.includes(s.status)) {
+          if (s.status === 'completed') void handleRegistered(runId);
+          else if (s.status) message.error(`滚动重训${s.status}，详见日志`);
+          return false;
+        }
+      } catch { /* 下次 tick 重试 */ }
+      return true;
+    };
+    void tick();
+    const timer = window.setInterval(() => {
+      void tick().then((cont) => { if (!cont) window.clearInterval(timer); });
+    }, 3000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [runId, handleRegistered]);
+
+  const handleSubmit = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      const resp = await modelTrainingService.submitRollingRetrain(model.model_id, {
+        shift_months: shiftMonths,
+      });
+      setRunId(resp.runId);
+      setRunStatus(null);
+      message.success(`滚动重训已提交：${resp.runId}`);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      message.error(`提交失败：${String(detail || err?.message || '未知错误')}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!hasSource) {
+    return <Empty description="该模型没有训练溯源 run，无法滚动重训（只能重训经本平台训练入库的模型）" />;
+  }
+
+  const running = runId != null && runStatus != null && ROLLING_LIVE_STATUSES.includes(runStatus.status);
+
+  return (
+    <div className="space-y-4 pt-6 pb-2">
+      <div className="flex gap-4 px-1">
+        <div className="glass-panel flex-1 rounded-2xl p-4 border border-slate-100/50 flex items-center gap-3">
+          <div className="bg-blue-500/10 p-2.5 rounded-xl text-blue-500">
+            <RefreshCw size={20} />
+          </div>
+          <div>
+            <Text className="text-[10px] text-slate-400 font-black uppercase tracking-widest block mb-0.5">基准模型</Text>
+            <Text className="text-sm font-mono font-bold text-slate-700">{modelDisplayName(model)}</Text>
+            <Text className="text-[10px] text-slate-400 font-mono block">源任务 {model.source_run_id}</Text>
+            {preview && preview.param_source === 'dir' && (
+              <Tag color="orange" className="text-[10px] mt-1">参数来自模型目录重建</Tag>
+            )}
+          </div>
+        </div>
+        <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 shrink-0">
+          <Text className="text-[10px] text-slate-400 font-black uppercase tracking-widest block text-center mb-1.5">前移月数（空 = 按最新数据 auto）</Text>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              <InputNumber
+                min={1}
+                max={120}
+                value={shiftMonths}
+                placeholder="auto"
+                onChange={(v) => setShiftMonths(typeof v === 'number' ? v : null)}
+                disabled={previewLoading || submitting || running}
+                className="w-20"
+              />
+              <span className="text-[11px] text-slate-400">月</span>
+            </div>
+            <Button size="small" onClick={() => void loadPreview(shiftMonths)} loading={previewLoading}>
+              刷新预览
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {previewError && (() => {
+        // 人话与技术细节分离：括号内的 ssh/rsync 原文进 Tooltip，主行只留结论
+        const cut = previewError.indexOf('（');
+        const headline = cut > 0 ? previewError.slice(0, cut).trim() : previewError;
+        const tech = cut > 0 ? previewError.slice(cut).trim() : '';
+        return (
+          <div className="mx-1 rounded-xl border border-slate-200/70 bg-slate-50/60 px-3.5 py-2.5 flex items-start gap-2">
+            <AlertCircle size={14} className="text-slate-400 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <Text className="text-xs font-bold text-slate-600 block">无法滚动</Text>
+              <Tooltip title={tech || undefined}>
+                <Text className="text-[11px] text-slate-500 leading-relaxed block">
+                  {headline}{tech ? '（详情悬停查看）' : ''}
+                </Text>
+              </Tooltip>
+            </div>
+          </div>
+        );
+      })()}
+      {previewLoading && <div className="py-8 text-center"><Spin /></div>}
+      {preview && preview.original && preview.target && (
+        <div className="px-1">
+          <RollingCompareTable
+            original={preview.original}
+            target={preview.target}
+            shiftMonths={preview.shift_months}
+            latestDate={preview.latest_date}
+          />
+        </div>
+      )}
+      {(preview?.warnings ?? []).length > 0 && (
+        <div className="mx-1 rounded-xl border border-slate-200/70 bg-slate-50/60 px-3.5 py-2.5 flex items-start gap-2">
+          <AlertCircle size={14} className="text-slate-400 shrink-0 mt-0.5" />
+          <div className="min-w-0 space-y-1">
+            {(preview?.warnings ?? []).map((w, i) => (
+              <Text key={i} className="text-[11px] text-slate-500 leading-relaxed block">{w}</Text>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="px-1">
+        <Button
+          type="primary"
+          icon={<Play size={14} />}
+          loading={submitting}
+          disabled={!preview || previewLoading || running}
+          onClick={() => void handleSubmit()}
+        >
+          {running ? '训练中…' : '提交滚动重训'}
+        </Button>
+      </div>
+
+      {runId && (
+        <div className="glass-panel rounded-2xl border border-slate-100/50 p-4 mx-1">
+          <div className="flex items-center gap-3 mb-2">
+            {runStatus && ROLLING_LIVE_STATUSES.includes(runStatus.status)
+              ? <Spin size="small" />
+              : runStatus?.status === 'completed'
+                ? <CheckCircle2 size={16} className="text-emerald-500" />
+                : <Clock size={16} className="text-slate-400" />}
+            <Text className="text-xs font-mono text-slate-500">{runId}</Text>
+            <Text className="text-xs font-black text-slate-700 uppercase">{runStatus?.status ?? 'pending'}</Text>
+            {runStatus && (
+              <div className="flex-1 min-w-0">
+                <Progress percent={runStatus.progress ?? 0} size="small" showInfo={false} />
+              </div>
+            )}
+          </div>
+          {runStatus?.logs && (
+            <pre className="max-h-48 overflow-y-auto custom-scrollbar text-[10px] font-mono bg-slate-900/90 text-slate-200 rounded-xl p-3 whitespace-pre-wrap">
+              {String(runStatus.logs).slice(-3000)}
+            </pre>
+          )}
+        </div>
       )}
     </div>
   );

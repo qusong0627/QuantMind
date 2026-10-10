@@ -38,6 +38,59 @@ export interface UserModelRecord {
   activated_at?: string | null;
 }
 
+export interface RollingRetrainWindow {
+  train_start: string;
+  train_end: string;
+  valid_start: string;
+  valid_end: string;
+  test_start: string;
+  test_end: string;
+}
+
+export interface RollingParamSet {
+  window: RollingRetrainWindow;
+  display_name: string;
+  job_name: string;
+  model_type: string;
+  hyperparams: Record<string, unknown>;
+  target: Record<string, unknown>;
+  features: string[];
+  feature_count: number;
+  training: Record<string, unknown>;
+  context: Record<string, unknown>;
+  factor: { source: string; catalog_version: string };
+}
+
+export interface RollingRetrainPreview {
+  model_id: string;
+  source_run_id: string;
+  /** 参数来源：job=原训练任务记录，dir=模型目录重建（集市/导入模型） */
+  param_source: 'job' | 'dir';
+  market: string;
+  factor_source: string;
+  node_id: string;
+  model_type: string;
+  feature_count: number;
+  latest_date: string;
+  shift_months: number;
+  original_window: RollingRetrainWindow;
+  new_window: RollingRetrainWindow;
+  /** 上：原始参数；下：目标参数（仅窗口/名称/目录 pin 不同，其余一致） */
+  original: RollingParamSet;
+  target: RollingParamSet;
+  warnings: string[];
+}
+
+export interface RollingRetrainSubmitResponse extends ModelTrainingRunResponse {
+  rolling?: {
+    base_model_id: string;
+    shift_months: number;
+    original_window: RollingRetrainWindow;
+    new_window: RollingRetrainWindow;
+    warnings: string[];
+  };
+}
+
 export interface ModelShapSummaryItem {
   rank: number;
   feature: string;
@@ -578,6 +631,24 @@ class ModelTrainingService {
   async cancelTrainingRun(runId: string): Promise<{ runId: string; status: string; cancelled: boolean }> {
     const resp = await this.client.post<{ runId: string; status: string; cancelled: boolean }>(
       `/models/training-runs/${runId}/cancel`,
+    );
+    return resp.data;
+  }
+
+  /** 滚动重训预览：原窗口 → 以最新数据为基准平移后的新窗口（不提交）。 */
+  async getRollingRetrainPreview(modelId: string, shiftMonths?: number): Promise<RollingRetrainPreview> {
+    const resp = await this.client.get<RollingRetrainPreview>(
+      `/models/${encodeURIComponent(modelId)}/rolling-retrain-preview`,
+      { params: typeof shiftMonths === 'number' ? { shift_months: shiftMonths } : undefined },
+    );
+    return resp.data;
+  }
+
+  /** 提交滚动重训：复用原任务全部参数，只换窗口；完成后自动注册为新模型。 */
+  async submitRollingRetrain(modelId: string, body?: { shift_months?: number | null }): Promise<RollingRetrainSubmitResponse> {
+    const resp = await this.client.post<RollingRetrainSubmitResponse>(
+      `/models/${encodeURIComponent(modelId)}/rolling-retrain`,
+      body ?? {},
     );
     return resp.data;
   }
