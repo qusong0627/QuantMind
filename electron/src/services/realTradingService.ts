@@ -138,6 +138,14 @@ export interface RealTradingStatus {
     execution_config?: ExecutionConfig | null;
     live_trade_config?: LiveTradeConfig | null;
     latest_hosted_task?: ManualExecutionTaskRecord | null;
+    next_trigger?: {
+        phase?: string;
+        trade_date?: string;
+        target_at?: string;
+        window_start_at?: string;
+        window_end_at?: string;
+        reason?: string;
+    } | null;
     latest_signal_run_id?: string | null;
     signal_source_status?: {
         available: boolean;
