@@ -55,6 +55,16 @@ function marketLabel(row: MiningHistoryRow): string {
   return row.universe ? `${market} · ${row.universe}` : market;
 }
 
+/** 方向模式文案（T-MV-02）。未知值原样呈现——后端将来加模式不能静默消失。 */
+const DIRECTION_MODE_LABELS: Record<string, string> = {
+  selected: '类别选定',
+  random: '随机抽取',
+};
+
+function directionModeLabel(mode: string): string {
+  return DIRECTION_MODE_LABELS[mode] ?? mode;
+}
+
 const STATUS_FILTERS: Array<{ value: string; label: string }> = [
   { value: 'all', label: '全部状态' },
   { value: 'pending', label: '排队中' },
@@ -297,6 +307,14 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({
                         <div className="truncate font-bold text-slate-700" title={row.direction}>
                           {row.direction || '—'}
                         </div>
+                        {row.direction_mode && (
+                          <span
+                            className="mt-0.5 inline-flex items-center rounded-full border border-indigo-100 bg-indigo-50/70 px-1.5 py-px text-[10px] font-bold text-indigo-600"
+                            title="方向如何被选中（类别选择路径）"
+                          >
+                            {directionModeLabel(row.direction_mode)}
+                          </span>
+                        )}
                         {row.error && (
                           <div
                             className="mt-0.5 truncate text-[10px] text-rose-500"

@@ -37,6 +37,7 @@ function mkRow(over: Partial<MiningHistoryRow> = {}): MiningHistoryRow {
     universe: 'csi300',
     data_source: 'parquet',
     direction: '动量反转 × 波动率过滤',
+    direction_mode: null,
     source: 'text',
     doc_id: null,
     status: 'completed',
@@ -112,6 +113,34 @@ describe('HistoryPage：每一行都是「当时挖了什么」的事实', () =>
     render(<HistoryPage />);
 
     expect(await screen.findByText(/文档 d0c12345/)).toBeTruthy();
+  });
+
+  test('方向模式徽章：类别选定/随机抽取；未知值原样呈现（不静默吞掉）', async () => {
+    getMiningHistoryMock.mockResolvedValue(
+      ok({
+        tasks: [
+          mkRow({ task_id: 't-sel', direction_mode: 'selected' }),
+          mkRow({ task_id: 't-rnd', direction_mode: 'random' }),
+          mkRow({ task_id: 't-fut', direction_mode: 'cards' }),
+        ],
+        total: 3,
+      }),
+    );
+
+    render(<HistoryPage />);
+
+    const table = within(await screen.findByRole('table'));
+    expect(await table.findByText('类别选定')).toBeTruthy();
+    expect(table.getByText('随机抽取')).toBeTruthy();
+    expect(table.getByText('cards')).toBeTruthy();
+  });
+
+  test('模式未参与（null：自由文本/卡片派发/legacy）不渲染模式徽章', async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText('动量反转 × 波动率过滤')).toBeTruthy();
+    expect(screen.queryByText('类别选定')).toBeNull();
+    expect(screen.queryByText('随机抽取')).toBeNull();
   });
 
   test('没有记录时给出空态说明，而不是空白表格', async () => {

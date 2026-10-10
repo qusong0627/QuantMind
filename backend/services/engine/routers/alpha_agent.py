@@ -609,16 +609,20 @@ async def start_evolution(
     # 类别方向下发：前端传多选类别 + 模式，服务端解析成单条 direction
     # （放在长度闸与 LLM 解析之前：纯函数先算完，超长在烧 token 前就被拒）
     clean_dirs = [d.strip() for d in directions if isinstance(d, str) and d.strip()]
+    # 方向历史（T-MV-02）：只有类别选择真正参与时才记录生效模式；自由文本/
+    # 卡片派发路径保持 NULL——mode 列是「方向怎么来的」的事实，不是参数回声
+    record_mode: str | None = None
     if clean_dirs:
         import random as _random
 
+        record_mode = "random" if direction_mode == "random" else "selected"
         direction = (
-            _random.choice(clean_dirs) if direction_mode == "random" else clean_dirs[0]
+            _random.choice(clean_dirs) if record_mode == "random" else clean_dirs[0]
         )
         logger.info(
             "[alpha-agent] evolve directions=%d mode=%s -> %s",
             len(clean_dirs),
-            direction_mode,
+            record_mode,
             direction,
         )
 
@@ -674,6 +678,7 @@ async def start_evolution(
             universe=universe,
             loop_n=loop_n,
             direction=direction or None,
+            direction_mode=record_mode,
             data_source=data_source or None,
             # 文档血统：落 rd_agent_mining_tasks.source/doc_id（历史页可见出处）
             source="doc" if doc_id else "text",

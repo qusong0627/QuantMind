@@ -10,6 +10,7 @@ import { REFERENCE_MINING_DIRECTIONS, getDirectionLabel, type MiningDirectionIte
 import { buildEmbeddingSavePayload } from '../utils-v2/embeddingPayload';
 import type { DataSummary, UniverseId, UniverseInfo } from '../types-v2';
 import { PageHeader } from '../components-v2/layout/PageHeader';
+import { SupplyFacePanel } from '../components-v2/SupplyFacePanel';
 import { Modal } from 'antd';
 
 interface SystemConfig {
@@ -1014,6 +1015,9 @@ export const SettingsPage: React.FC = () => {
                   已选 {config.selectedMiningDirections.length} / {activeDirections.length} 项。
                 </p>
               </div>
+
+              {/* 池内供给面（T-MV-02）：选方向前先看哪类挖过、哪类还空着 */}
+              <SupplyFacePanel />
 
               {/* Import from Feature Catalog */}
               <div className="pt-4 border-t border-border/50">

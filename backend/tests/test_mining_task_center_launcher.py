@@ -141,6 +141,32 @@ async def test_db_create_forwards_identity_and_source(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_db_create_forwards_direction_mode(monkeypatch) -> None:
+    """方向模式（T-MV-02）：类别选择路径要随之落档，历史页能看到「随机/选定」。"""
+    store = _RecordingStore()
+    monkeypatch.setattr(launcher_module, "_task_store", lambda: store)
+    launcher = _launcher_with()
+
+    await launcher._db_create(_task(direction_mode="random"))
+
+    kind, kwargs = store.calls[0]
+    assert kind == "create"
+    assert kwargs["direction_mode"] == "random"
+
+
+@pytest.mark.asyncio
+async def test_db_create_blank_direction_mode_is_null(monkeypatch) -> None:
+    """模式没参与（自由文本/卡片派发）→ NULL，不伪记成 selected。"""
+    store = _RecordingStore()
+    monkeypatch.setattr(launcher_module, "_task_store", lambda: store)
+    launcher = _launcher_with()
+
+    await launcher._db_create(_task())
+
+    assert store.calls[0][1]["direction_mode"] is None
+
+
+@pytest.mark.asyncio
 async def test_db_progress_is_throttled(monkeypatch) -> None:
     """刚同步过就再心跳 → 不写库；间隔够了 → 写且带上进度。"""
     store = _RecordingStore()
@@ -236,16 +262,44 @@ async def test_start_evolution_records_direction_and_source(monkeypatch) -> None
 
     launcher = _launcher_with()
     task_id = await launcher.start_evolution(
-        "u-1", direction="动量 × 波动率", source="doc", doc_id="doc-9"
+        "u-1",
+        direction="动量 × 波动率",
+        source="doc",
+        doc_id="doc-9",
+        direction_mode="random",
     )
 
     task = launcher._tasks[task_id]
     assert task.direction == "动量 × 波动率", "内存任务也要带着方向（监控器直接读它）"
+    assert task.direction_mode == "random"
 
     kind, kwargs = store.calls[0]
     assert kind == "create" and kwargs["task_id"] == task_id
     assert kwargs["direction"] == "动量 × 波动率"
+    assert kwargs["direction_mode"] == "random"
     assert kwargs["source"] == "doc" and kwargs["doc_id"] == "doc-9"
+
+
+@pytest.mark.asyncio
+async def test_start_or_queue_forwards_direction_mode(monkeypatch) -> None:
+    """批量派发路径同样把模式带上（子进程与心跳不打真）。"""
+    store = _RecordingStore()
+    monkeypatch.setattr(launcher_module, "_task_store", lambda: store)
+
+    from backend.services.engine.alpha_agent import hw_lock
+
+    monkeypatch.setattr(hw_lock, "assert_factor_mining_hardware", lambda: None)
+
+    launcher = _launcher_with()
+    monkeypatch.setattr(launcher, "_launch", lambda *a, **k: None)
+
+    receipt = await launcher.start_or_queue(
+        "u-1", direction="方向A", direction_mode="selected"
+    )
+
+    task = launcher._tasks[receipt.task_id]
+    assert task.direction_mode == "selected"
+    assert store.calls[0][1]["direction_mode"] == "selected"
 
 
 # ── 任务日志根与留存 GC（T-FM-20）────────────────────────────────────

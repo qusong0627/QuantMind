@@ -1071,8 +1071,19 @@ def _category_breakdown(rows, *, total: int) -> list[dict[str, Any]]:
     ``rows`` 是 scope 内活跃池行（factor_name/description/ic_value/icir/
     pool_score/novelty）。聚合值是**有值样本的均值**（n_ic/n_icir 回传覆盖率，
     缺失不按 0 计——与全站「缺失显 —」纪律一致）。``other`` 永远垫底。
+
+    供给面字段（T-MV-02，池页与设置页共用单源）：
+
+    - ``median_ic``：IC 中位数（有值样本；偶数样本取中间两值均值）。均值会被
+      离群值拖走，中位才是「这类因子典型质量」的稳健读数；
+    - ``saturation``：**相对供给饱和度** = 该类计数 ÷ 池内最满**真实类**的计数
+      （0..1，最满真实类=1.0）。「其他」不是挖掘方向 → 恒 None，也不做分母；
+      配额制（T-MV-13）落地后分母升级为 count/quota，字段语义不变。
     """
-    from backend.services.engine.mining_plugins.factor_classify import classify_factor
+    from backend.services.engine.mining_plugins.factor_classify import (
+        OTHER_CLASS,
+        classify_factor,
+    )
 
     buckets: dict[str, dict[str, Any]] = {}
     for r in rows:
@@ -1108,6 +1119,15 @@ def _category_breakdown(rows, *, total: int) -> list[dict[str, Any]]:
     def _avg(values: list[float]) -> float | None:
         return sum(values) / len(values) if values else None
 
+    def _median(values: list[float]) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[mid]
+        return (ordered[mid - 1] + ordered[mid]) / 2
+
     out: list[dict[str, Any]] = []
     for b in buckets.values():
         n = int(b["count"])
@@ -1125,6 +1145,7 @@ def _category_breakdown(rows, *, total: int) -> list[dict[str, Any]]:
                 "count": n,
                 "share": (n / total) if total else 0.0,
                 "avg_ic": _avg(b["ic"]),
+                "median_ic": _median(b["ic"]),
                 "n_ic": len(b["ic"]),
                 "avg_icir": _avg(b["icir"]),
                 "n_icir": len(b["icir"]),
@@ -1133,6 +1154,15 @@ def _category_breakdown(rows, *, total: int) -> list[dict[str, Any]]:
                 "top_factors": [name for _, name in ranked[:3]],
             }
         )
+
+    # 相对饱和度：分母=最满真实类（other 不参与）；没有真实类 → 一律 None
+    real_counts = [d["count"] for d in out if d["category"] != OTHER_CLASS]
+    max_real = max(real_counts) if real_counts else None
+    for d in out:
+        d["saturation"] = (
+            d["count"] / max_real if max_real and d["category"] != OTHER_CLASS else None
+        )
+
     out.sort(key=lambda d: (d["category"] == "other", -d["count"], d["category"]))
     return out
 

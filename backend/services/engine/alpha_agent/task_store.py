@@ -139,10 +139,22 @@ class MiningTaskStore:
     """``rd_agent_mining_tasks`` 的读写。所有写入失败都由调用方吞掉（不拦挖掘主链）。"""
 
     async def ensure_tables(self) -> None:
-        """建表 + 索引（幂等；engine 启动期调用）。"""
+        """建表 + 索引 + 老库补列（幂等；engine 启动期调用）。
+
+        ``CREATE TABLE IF NOT EXISTS`` 不会给已存在的表补列——老库（列进
+        CREATE 语句之前建的）缺 ``direction_mode`` 时，create_task 的 INSERT
+        引用该列会整行失败（记录层失败只告警 → 表现为「历史页凭空缺任务」）。
+        补列走 ``ADD COLUMN IF NOT EXISTS``（同 doc_store 先例）。
+        """
         async with get_session() as session:
             for stmt in [s.strip() for s in _CREATE_TABLE_SQL.split(";") if s.strip()]:
                 await session.execute(text(stmt))
+            await session.execute(
+                text(
+                    "ALTER TABLE rd_agent_mining_tasks "
+                    "ADD COLUMN IF NOT EXISTS direction_mode TEXT"
+                )
+            )
         logger.info("rd_agent_mining_tasks table ensured")
 
     async def create_task(

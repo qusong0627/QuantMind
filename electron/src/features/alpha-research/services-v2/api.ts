@@ -493,6 +493,8 @@ export interface MiningHistoryRow {
   universe: string;
   data_source: string;
   direction: string;
+  /** 方向如何被选中（T-MV-02）：'selected'/'random'=类别选择路径；null=模式未参与 */
+  direction_mode: string | null;
   /** text=文字指令 / doc=文档解析链（P1）/ legacy=历史回填 */
   source: string;
   doc_id: string | null;
@@ -1185,12 +1187,19 @@ export interface PoolCategoryStat {
   /** 占池内因子比例（0..1） */
   share: number;
   avgIc: number | null;
+  /** IC 中位数（有值样本；均值会被离群值拖走，中位是稳健读数） */
+  medianIc: number | null;
   /** avgIc 的有值样本数（缺失不按 0 计——覆盖率随行可见） */
   nIc: number;
   avgIcir: number | null;
   nIcir: number;
   avgPoolScore: number | null;
   avgNovelty: number | null;
+  /**
+   * 相对供给饱和度 = 该类计数 ÷ 池内最满真实类计数（0..1，最满=1.0）；
+   * 「other」恒 null（不是挖掘方向，也不做分母）。
+   */
+  saturation: number | null;
   /** 该类池评分最高的因子名（≤3 个，仅作代表） */
   topFactors: string[];
 }
@@ -1415,11 +1424,13 @@ function mapCategoryBreakdown(raw: unknown): PoolCategoryStat[] {
       count,
       share: poolNum(c?.share) ?? (counted > 0 ? count / counted : 0),
       avgIc: poolNum(c?.avg_ic),
+      medianIc: poolNum(c?.median_ic),
       nIc: Number(c?.n_ic ?? 0) || 0,
       avgIcir: poolNum(c?.avg_icir),
       nIcir: Number(c?.n_icir ?? 0) || 0,
       avgPoolScore: poolNum(c?.avg_pool_score),
       avgNovelty: poolNum(c?.avg_novelty),
+      saturation: poolNum(c?.saturation),
       topFactors: Array.isArray(c?.top_factors) ? c.top_factors.map(String) : [],
     };
   });

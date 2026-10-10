@@ -831,6 +831,84 @@ class TestFactorCategory:
         assert other["category"] == "other" and other["label"] == "其他"
         assert other["top_factors"] == ["mystery"]
 
+    def test_category_breakdown_median_and_saturation(self):
+        """供给面（T-MV-02）：中位 IC 取有值样本；饱和度=计数÷最满真实类；other 恒 None。
+
+        饱和度是「相对最满真实类别的填充度」（T-MV-13 配额制到来自会换成
+        count/quota）；「其他」不是挖掘方向，不参与饱和度语义。
+        """
+        rows = [
+            {
+                "factor_name": "Momentum_5D",
+                "description": "[动量因子] a",
+                "ic_value": 0.01,
+                "icir": None,
+                "pool_score": 0.8,
+                "novelty": None,
+            },
+            {
+                "factor_name": "mom_x",
+                "description": "[动量因子] b",
+                "ic_value": 0.02,
+                "icir": None,
+                "pool_score": 0.7,
+                "novelty": None,
+            },
+            {
+                "factor_name": "mom_y",
+                "description": "[动量因子] c",
+                "ic_value": 0.30,
+                "icir": None,
+                "pool_score": 0.6,
+                "novelty": None,
+            },
+            {
+                "factor_name": "OvernightReturn",
+                "description": "[隔夜信息因子] d",
+                "ic_value": 0.05,
+                "icir": None,
+                "pool_score": 0.5,
+                "novelty": None,
+            },
+            {
+                "factor_name": "mystery",
+                "description": "[某种全新因子] x",
+                "ic_value": None,
+                "icir": None,
+                "pool_score": None,
+                "novelty": None,
+            },
+        ]
+        out = pool_service._category_breakdown(rows, total=5)
+        by = {d["category"]: d for d in out}
+
+        mom = by["momentum"]
+        assert mom["median_ic"] == pytest.approx(0.02), "中位≠均值（0.11）——分布中心必须用中位"
+        assert mom["saturation"] == pytest.approx(1.0), "最满的真实类饱和度=1"
+        assert by["overnight"]["saturation"] == pytest.approx(1 / 3)
+        # 单样本类：中位=该样本；无 IC 样本 → None（缺失绝不当 0）
+        assert by["overnight"]["median_ic"] == pytest.approx(0.05)
+        other = by["other"]
+        assert other["saturation"] is None, "「其他」不是挖掘方向，不给饱和度"
+        assert other["median_ic"] is None, "无 IC 样本 → None"
+
+    def test_category_breakdown_saturation_none_when_no_real_category(self):
+        """整池全落 other：没有真实类做分母 → 饱和度一律 None（不伪造 1.0）。"""
+        rows = [
+            {
+                "factor_name": "mystery",
+                "description": "[某种全新因子] x",
+                "ic_value": 0.03,
+                "icir": None,
+                "pool_score": None,
+                "novelty": None,
+            }
+        ]
+        out = pool_service._category_breakdown(rows, total=1)
+        assert out[0]["category"] == "other"
+        assert out[0]["saturation"] is None
+        assert out[0]["median_ic"] == pytest.approx(0.03)
+
     @pytest.mark.asyncio
     async def test_overview_breakdown_and_list_filter(self, tmp_path, monkeypatch):
         """真库：overview 带分类分布；列表按类过滤且行带类标签；类别隔离。"""

@@ -186,12 +186,14 @@ async def test_real_db_create_get_roundtrip_is_user_scoped() -> None:
             direction="动量反转 × 波动率过滤",
             source="doc",
             doc_id="doc-abc",
+            direction_mode="random",
         )
 
         row = await store.get_task(tid)
         assert row is not None
         assert row["task_id"] == tid and row["user_id"] == user
         assert row["direction"] == "动量反转 × 波动率过滤"
+        assert row["direction_mode"] == "random"
         assert row["source"] == "doc" and row["doc_id"] == "doc-abc"
         assert row["status"] == "pending" and row["progress_pct"] == 0
         assert row["created_at"].endswith("Z") and row["updated_at"].endswith("Z")
@@ -264,6 +266,7 @@ async def test_real_db_create_is_idempotent_on_task_id() -> None:
         row = await store.get_task(tid)
         assert row is not None
         assert row["direction"] == "测试方向", "首次写入赢，重放不覆盖已有记录"
+        assert row["direction_mode"] is None, "模式没参与 → NULL（不伪记默认 selected）"
     finally:
         await _cleanup(user)
         await _close()

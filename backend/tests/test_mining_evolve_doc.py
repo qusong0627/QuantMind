@@ -245,3 +245,40 @@ async def test_evolve_directions_selection_then_cap_applies(monkeypatch) -> None
 
     assert ei.value.status_code == 400
     assert launcher.started is None
+
+
+@pytest.mark.asyncio
+async def test_evolve_records_effective_direction_mode(monkeypatch) -> None:
+    """方向历史（T-MV-02）：类别方向实际被选中时，生效模式随任务落档。"""
+    launcher = FakeLauncher()
+    _wire(monkeypatch, launcher)
+
+    await _call(directions=["方向A", "方向B"], direction_mode="selected")
+
+    assert launcher.started["direction"] == "方向A"
+    assert launcher.started["direction_mode"] == "selected"
+
+
+@pytest.mark.asyncio
+async def test_evolve_random_mode_is_recorded(monkeypatch) -> None:
+    """random 模式抽取的方向与模式一起落档（单条候选排除随机抖动）。"""
+    launcher = FakeLauncher()
+    _wire(monkeypatch, launcher)
+
+    await _call(directions=["唯一方向"], direction_mode="random")
+
+    assert launcher.started["direction"] == "唯一方向"
+    assert launcher.started["direction_mode"] == "random"
+
+
+@pytest.mark.asyncio
+async def test_evolve_free_text_records_no_mode(monkeypatch) -> None:
+    """自由文本方向：类别选择没参与 → 模式 NULL，不伪记 query 的默认 selected。"""
+    launcher = FakeLauncher()
+    _wire(monkeypatch, launcher)
+
+    # _call 默认 direction_mode="selected"——但它不该被记进任务
+    await _call(direction="自由文本方向")
+
+    assert launcher.started["direction"] == "自由文本方向"
+    assert launcher.started["direction_mode"] is None
