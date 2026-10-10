@@ -44,6 +44,26 @@ export interface FactorCategory {
   sampleFeatures: string[];
 }
 
+// Per-market disk facts of a factor library (columns / date range), read live
+// from the backend's parquet partitions at request time — never curated.
+export interface FactorLibraryMarketFacts {
+  columns: number | null;
+  start: string | null;
+  end: string | null;
+}
+
+// Curated factor library entry from /factor-categories API (config/factor_libraries.yaml).
+// `excluded` marks label/leakage libraries: shown in the directory for honesty,
+// never selectable as a mining direction.
+export interface FactorLibrary {
+  id: string;
+  name: string;
+  kind: string;
+  description: string;
+  excluded: boolean;
+  markets: Record<string, FactorLibraryMarketFacts | null>;
+}
+
 // QuantDB data availability summary from /data-summary API
 export interface DataSummary {
   available: boolean;

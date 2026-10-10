@@ -1,0 +1,100 @@
+# 因子值库目录（T-MV-06）——6_ml_datasets/ 因子值宽表包的人工策展目录。
+#
+# 消费者：设置页「挖掘方向 → 因子值库」组（经 /alpha-agent/factor-categories
+# 合并返回）。目录只管**策展**：名称 / 性质（kind）/ 说明 / 市场归属 / 治理
+# 标记（excluded）。每库的**实际列数与日期范围一律接口层现场读磁盘**
+# （单分区 schema + 分区目录名）——数字写死必漂移，get_data_summary 的旧
+# 硬编码（l1_factors 记 101 实为 121）就是实证。
+#
+# 与 quantdb_factor_reader 的分工：那边的 discover()/FACTOR_SOURCE_DIRS 是
+# 「机器可发现性」（后台刷新字段）；本目录是「人工策展 + 治理」——例如标签/
+# 泄露库不出现在 discover 面，但在这里显式收录并标 excluded=true，让设置页
+# 能诚实展示「存在但不开放」。
+#
+# 修改纪律：本文件是金样 backend/tests/fixtures/factor_libraries_golden.json
+# 的上游——改这里必须同步金样，test_factor_libraries.py 红/绿钉住。
+#
+# kind 词表（mining_plugins/factor_libraries.py KINDS 校验）：
+#   training_features 训练特征落表 | microstructure 微观结构 | alpha_zoo 经典
+#   Alpha 集 | mined 挖掘产出 | manifest 清单库 | auxiliary 辅助数据 |
+#   labels 标签/泄露库（强制 excluded: true）
+version: 1
+checked_at: "2026-10-10"
+libraries:
+  - id: l1_factors
+    name: L1 因子
+    kind: training_features
+    description: 训练特征目录（15 类）的因子值落表，各市场均含 OHLCV 锚列
+    markets: [CN, HK, US, CRYPTO, FUTURES, CUSTOM]
+  - id: l2_factors
+    name: L2 因子
+    kind: microstructure
+    description: 2018 起 L2 高频行情聚合的日内微观结构因子（逐单/盘口/已实现波动率族）
+    markets: [CN]
+  - id: l1_l2_factors
+    name: L1+L2 合并宽表
+    kind: microstructure
+    description: l1_factors ∪ l2_factors 的冗余并集；跨库组合读取请直接走「库:列」拼接，不必依赖本表
+    markets: [CN]
+  - id: alpha_library
+    name: Alpha 因子库
+    kind: alpha_zoo
+    description: 历史策略预计算 Alpha 清单库（千级列）；训练直读可用
+    markets: [CN]
+  - id: alpha360
+    name: Alpha360 量价
+    kind: alpha_zoo
+    description: Alpha360 量价因子集（多窗口展开）
+    markets: [CN]
+  - id: jq110
+    name: 聚宽 JQ110
+    kind: alpha_zoo
+    description: 聚宽 110 因子集
+    markets: [CN]
+  - id: tdxgs
+    name: 通达信指标
+    kind: alpha_zoo
+    description: 通达信公式指标因子集
+    markets: [CN]
+  - id: rd_mined
+    name: RD-Agent 挖掘因子
+    kind: mined
+    description: RD-Agent 挖掘并毕业镜像的因子（挖矿闭环产出）
+    markets: [CN]
+  - id: gap_mined
+    name: 空档挖掘因子
+    kind: mined
+    description: 供给面缺口定向挖掘的因子（gap 系列）
+    markets: [CN]
+  - id: cand_factors
+    name: 候选因子池
+    kind: mined
+    description: 候选因子库（跨库训练基线习用的锚库）
+    markets: [CN]
+  - id: factor_defs
+    name: 因子清单库
+    kind: manifest
+    description: 研究/报告同源因子清单（千级列）；训练直读可用，但不在「刷新字段」自动发现面
+    markets: [CN]
+  - id: ccass_factors
+    name: 港股 CCASS 持仓
+    kind: auxiliary
+    description: 港股中央结算系统（CCASS）机构持仓因子
+    markets: [HK]
+  - id: south_factors
+    name: 南向资金
+    kind: auxiliary
+    description: 南向（港股通）资金流因子
+    markets: [HK]
+  - id: features_daily
+    name: 每日特征（技术+估值）
+    kind: labels
+    excluded: true
+    description: 含未来收益标签列（return_Nd）与 OHLCV 重复列——标签/泄露库，不可作因子来源或挖掘方向
+    markets: [CN]
+  - id: alpha_library_labels
+    name: Alpha 标签库
+    kind: labels
+    excluded: true
+    description: 纯标签库——不可作因子来源或挖掘方向
+    markets: [CN]

@@ -2232,16 +2232,42 @@ async def get_data_summary():
 
 @router.get("/factor-categories")
 async def get_factor_categories():
-    """返回 L1 因子类别（从 feature catalog 加载）"""
+    """返回 L1 因子类别（feature catalog）+ 因子值库目录（T-MV-06）。
+
+    两段独立降级：任一段失败只空自己那一段（``logger.warning``），不互相
+    拖挂——设置页「挖掘方向」两组各有各的兜底展示。``libraries`` 的列数/
+    日期范围由目录加载器现场读磁盘（``factor_libraries.library_disk_facts``）。
+    """
+    categories: list = []
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
         hub = QuantDBDataHub.get_instance()
-        categories = hub.fetch_l1_factor_categories()
-        return {"code": 200, "data": categories}
+        categories = hub.fetch_l1_factor_categories().get("categories", [])
     except Exception as e:
         logger.warning("Failed to get factor categories: %s", e)
-        return {"code": 200, "data": {"categories": []}}
+
+    libraries: list = []
+    libraries_checked_at = ""
+    try:
+        from backend.services.engine.mining_plugins.factor_libraries import (
+            factor_libraries_payload,
+        )
+
+        payload = factor_libraries_payload()
+        libraries = payload["libraries"]
+        libraries_checked_at = payload["checked_at"]
+    except Exception as e:
+        logger.warning("Failed to get factor libraries: %s", e)
+
+    return {
+        "code": 200,
+        "data": {
+            "categories": categories,
+            "libraries": libraries,
+            "libraries_checked_at": libraries_checked_at,
+        },
+    }
 
 
 @router.get("/universes")

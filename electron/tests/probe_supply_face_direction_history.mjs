@@ -2,7 +2,7 @@
  * T-MV-02 验收探针（2026-10-10）：类别供给面 + 方向历史模式徽章。
  *
  * 断言的是「用户实际看到的」两面：
- *  1) 设置页「L1 因子类别」tab → 池内供给面面板：真实池数据（A股·csi300 共 191 个）
+ *  1) 设置页「挖掘方向」tab → 池内供给面面板：真实池数据（A股·csi300 共 191 个）
  *     渲染类名/计数/均值·中位 IC/饱和度；最满类（动量与趋势）饱和 = 100%。
  *  2) 挖掘历史页：类别选择路径的行带模式徽章（random → 「随机抽取」）；
  *     自由文本路径的行**不得**出现任何模式徽章（mode 列是事实，不是参数回声）。
@@ -75,8 +75,8 @@ await page.waitForTimeout(3000);
 await page.locator('span:text-is("设置")').first().click();
 await page.waitForTimeout(3000);
 
-// ── 1) 设置页：切到「L1 因子类别」tab → 池内供给面面板 ──
-const l1Tab = page.locator('button:has-text("L1 因子类别")').first();
+// ── 1) 设置页：切到「挖掘方向」tab → 池内供给面面板 ──（tab 名随 T-MV-06 目录化改版）
+const l1Tab = page.locator('button:has-text("挖掘方向")').first();
 if (await l1Tab.count()) {
   await l1Tab.click();
   await page.waitForTimeout(1500);

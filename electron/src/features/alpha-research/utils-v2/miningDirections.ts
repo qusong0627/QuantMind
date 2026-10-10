@@ -3,6 +3,8 @@
  * Each direction can attach up to 3 factors' "short name", "expression", "meaning", displayed on hover
  */
 
+import type { FactorLibrary } from '../types-v2';
+
 export interface FactorHint {
   shortName: string;
   expression: string;
@@ -134,26 +136,88 @@ export function importFeatureCatalogDirections(catalog: FeatureCatalog): MiningD
   }));
 }
 
+// ── 因子值库目录（T-MV-06）────────────────────────────────────────────
+
+export interface LibraryDirectionItem extends MiningDirectionItem {
+  library: FactorLibrary;
+}
+
+export interface MiningDirectionGroups {
+  /** 训练特征目录组（feature catalog 类别；后端不可达时为内置参考） */
+  catalog: MiningDirectionItem[];
+  catalogSource: 'feature_catalog' | 'reference';
+  /** 因子值库组（可勾选方向，label 稳定不带磁盘数字） */
+  libraries: LibraryDirectionItem[];
+  /** 标签/泄露库——目录里显式展示但不可选（治理透明） */
+  excludedLibraries: FactorLibrary[];
+  /** 目录策展核对日期（后端 checked_at，可空） */
+  checkedAt: string;
+}
+
 /**
- * Load mining directions from the QuantDB L1 factor categories API.
- * Falls back to REFERENCE_MINING_DIRECTIONS when the backend is unreachable
- * or returns no categories, so the settings UI always has options.
+ * 方向标签：只含策展文本（name），**绝不带列数/日期**——label 会存进
+ * localStorage 并在派发时作为 direction 下发；塞磁盘数字，盘面一变
+ * （219→221 列）已存 label 就与列表失配被静默丢弃（日切白名单旧坑）。
+ * 磁盘事实走 libraryFactSummary 的副行展示，每次拉取即刷新。
  */
-export async function fetchMiningDirections(): Promise<MiningDirectionItem[]> {
+export function libraryDirectionLabel(lib: FactorLibrary): string {
+  return `${lib.name} · 因子值库`;
+}
+
+/**
+ * 库的磁盘事实摘要（展示副行，非存储）：市场按 CN > HK > US > 其余 的
+ * 优先级取第一个有数据的；全无数据 → 诚实说明「本机无数据目录」。
+ */
+export function libraryFactSummary(lib: FactorLibrary): string {
+  const priority = ['CN', 'HK', 'US', ...Object.keys(lib.markets)];
+  const market = priority.find((m) => lib.markets[m]);
+  if (!market) return '本机无数据目录';
+  const facts = lib.markets[market];
+  if (!facts) return '本机无数据目录';
+  const parts = [market];
+  if (facts.columns != null) parts.push(`${facts.columns} 列`);
+  if (facts.start && facts.end) parts.push(`${facts.start} ~ ${facts.end}`);
+  else if (facts.start) parts.push(`${facts.start} 起`);
+  return parts.join(' · ');
+}
+
+/**
+ * 一次拉齐设置页「挖掘方向」两组：训练特征目录（L1 类别）+ 因子值库。
+ * 后端不可达时回落到内置参考列表且如实标注 source='reference'（组标题
+ * 据此改文案，不把内置参考冒充成 feature catalog）。
+ */
+export async function fetchMiningDirectionGroups(): Promise<MiningDirectionGroups> {
+  const fallback: MiningDirectionGroups = {
+    catalog: REFERENCE_MINING_DIRECTIONS,
+    catalogSource: 'reference',
+    libraries: [],
+    excludedLibraries: [],
+    checkedAt: '',
+  };
   try {
     const { getFactorCategories } = await import('../services-v2/api');
     const res = await getFactorCategories();
     const categories = res.data?.categories ?? [];
-    if (!categories.length) return REFERENCE_MINING_DIRECTIONS;
-    return categories.map((cat) => ({
-      label: `${cat.name}类因子 (${cat.featureCount})`,
-      factors: cat.sampleFeatures.slice(0, 3).map((key) => ({
-        shortName: key,
-        expression: key,
-        meaning: `${cat.name}类特征`,
-      })),
-    }));
+    const libraries = res.data?.libraries ?? [];
+    return {
+      catalog: categories.length
+        ? categories.map((cat) => ({
+            label: `${cat.name}类因子 (${cat.featureCount})`,
+            factors: cat.sampleFeatures.slice(0, 3).map((key) => ({
+              shortName: key,
+              expression: key,
+              meaning: `${cat.name}类特征`,
+            })),
+          }))
+        : REFERENCE_MINING_DIRECTIONS,
+      catalogSource: categories.length ? 'feature_catalog' : 'reference',
+      libraries: libraries
+        .filter((lib) => !lib.excluded)
+        .map((lib) => ({ label: libraryDirectionLabel(lib), library: lib })),
+      excludedLibraries: libraries.filter((lib) => lib.excluded),
+      checkedAt: res.data?.librariesCheckedAt ?? '',
+    };
   } catch {
-    return REFERENCE_MINING_DIRECTIONS;
+    return fallback;
   }
 }

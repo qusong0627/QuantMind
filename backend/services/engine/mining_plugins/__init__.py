@@ -7,7 +7,9 @@
   经 ``run_gates()`` 落 manifest；``pool_service`` 入池判定（T-MV-05）
   经 ``run_gates(ctx, mode_override)`` 硬闸拦入池 / soft 留痕，全局模式
   env ``ALPHA_GATE_MODE``（off/soft/hard），请求级 ``quality_gate_mode``；
-- pool_scoring：池检索打分纯函数（``pool_service`` 组装数据后调用）。
+- pool_scoring：池检索打分纯函数（``pool_service`` 组装数据后调用）；
+- factor_libraries：因子值库目录加载器（T-MV-06，``config/factor_libraries.yaml``
+  → ``/factor-categories`` 载荷；非插件家族、无注册副作用，调用方直接 import）。
 
 注册表仿 ``rd_agent/market_adapters`` 的「_registry + register_*」先例；
 新增指标 = 新文件 + 注册调用，不回改调用方。

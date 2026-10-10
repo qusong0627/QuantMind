@@ -15,6 +15,8 @@ import type {
   DataSummary,
   Factor,
   FactorCategory,
+  FactorLibrary,
+  FactorLibraryMarketFacts,
   Task,
   TaskStatus,
   ExecutionPhase,
@@ -848,9 +850,13 @@ export async function getDataSummary(): Promise<ApiResponse<DataSummary>> {
   }
 }
 
-/** L1 factor categories from QuantDB feature catalog */
+/** L1 factor categories (feature catalog) + curated factor libraries (T-MV-06) */
 export async function getFactorCategories(): Promise<
-  ApiResponse<{ categories: FactorCategory[] }>
+  ApiResponse<{
+    categories: FactorCategory[];
+    libraries: FactorLibrary[];
+    librariesCheckedAt: string;
+  }>
 > {
   try {
     const res = await apiClient.get(`/alpha-agent/factor-categories`);
@@ -861,9 +867,37 @@ export async function getFactorCategories(): Promise<
       featureCount: c.feature_count ?? 0,
       sampleFeatures: c.sample_features ?? [],
     }));
-    return makeOk({ categories });
+    const rawLibs = res.data?.data?.libraries ?? [];
+    const libraries: FactorLibrary[] = rawLibs.map((l: any) => {
+      const markets: Record<string, FactorLibraryMarketFacts | null> = {};
+      if (l.markets && typeof l.markets === 'object') {
+        for (const [code, facts] of Object.entries<any>(l.markets)) {
+          markets[code] =
+            facts && typeof facts === 'object'
+              ? {
+                  columns: typeof facts.columns === 'number' ? facts.columns : null,
+                  start: facts.start ?? null,
+                  end: facts.end ?? null,
+                }
+              : null;
+        }
+      }
+      return {
+        id: l.id ?? '',
+        name: l.name ?? '',
+        kind: l.kind ?? '',
+        description: l.description ?? '',
+        excluded: l.excluded === true,
+        markets,
+      };
+    });
+    return makeOk({
+      categories,
+      libraries,
+      librariesCheckedAt: res.data?.data?.libraries_checked_at ?? '',
+    });
   } catch {
-    return makeOk({ categories: [] });
+    return makeOk({ categories: [], libraries: [], librariesCheckedAt: '' });
   }
 }
 

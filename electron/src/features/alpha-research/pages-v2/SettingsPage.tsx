@@ -6,7 +6,7 @@ import { Settings, Save, RotateCcw, Check, X, AlertCircle, Loader2, Database, Sl
 import { healthCheck, getDataSummary, getUniverses, getLlmConfig, saveEmbeddingConfig, type LlmConfigStatus } from '../services-v2/api';
 import { extractApiError } from '../../../utils/apiError';
 import { apiClient } from '../../../services/aiStrategyClients';
-import { REFERENCE_MINING_DIRECTIONS, getDirectionLabel, type MiningDirectionItem, importFeatureCatalogDirections, fetchMiningDirections } from '../utils-v2/miningDirections';
+import { REFERENCE_MINING_DIRECTIONS, getDirectionLabel, type MiningDirectionItem, type LibraryDirectionItem, type MiningDirectionGroups, importFeatureCatalogDirections, fetchMiningDirectionGroups, libraryFactSummary } from '../utils-v2/miningDirections';
 import { buildEmbeddingSavePayload } from '../utils-v2/embeddingPayload';
 import type { DataSummary, UniverseId, UniverseInfo } from '../types-v2';
 import { PageHeader } from '../components-v2/layout/PageHeader';
@@ -55,6 +55,40 @@ const DEFAULT_CONFIG: SystemConfig = {
 
 type SettingsTab = 'api' | 'data' | 'params' | 'directions';
 
+/**
+ * 方向勾选行（T-MV-06）：训练特征目录与因子值库两组共用。模块级定义
+ * （非组件内闭包），避免父组件每次 setState 把它当新类型整棵重挂。
+ * 勾选值 = label（存 localStorage、派发时作为 direction 下发）；
+ * secondary 只做展示（库的磁盘事实副行），绝不参与存储。
+ */
+const DirectionCheckbox: React.FC<{
+  item: MiningDirectionItem;
+  checked: boolean;
+  onToggle: (label: string, checked: boolean) => void;
+  secondary?: string;
+  secondaryTitle?: string;
+}> = ({ item, checked, onToggle, secondary, secondaryTitle }) => {
+  const dirLabel = getDirectionLabel(item);
+  return (
+    <label className={`flex ${secondary ? 'items-start' : 'items-center'} gap-2 p-2 rounded-lg hover:bg-secondary/20 cursor-pointer`}>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onToggle(dirLabel, e.target.checked)}
+        className={`h-4 w-4 rounded border-input text-primary focus:ring-primary ${secondary ? 'mt-0.5' : ''}`}
+      />
+      {secondary ? (
+        <span className="min-w-0 flex-1">
+          <span className="text-sm block truncate" title={dirLabel}>{dirLabel}</span>
+          <span className="text-[11px] text-muted-foreground block truncate" title={secondaryTitle || secondary}>{secondary}</span>
+        </span>
+      ) : (
+        <span className="text-sm truncate flex-1" title={dirLabel}>{dirLabel}</span>
+      )}
+    </label>
+  );
+};
+
 export const SettingsPage: React.FC = () => {
   const [config, setConfig] = useState<SystemConfig>(DEFAULT_CONFIG);
   const [activeTab, setActiveTab] = useState<SettingsTab>('api');
@@ -68,7 +102,7 @@ export const SettingsPage: React.FC = () => {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [dataSummary, setDataSummary] = useState<DataSummary | null>(null);
   const [universes, setUniverses] = useState<UniverseInfo[]>([]);
-  const [l1Directions, setL1Directions] = useState<MiningDirectionItem[]>([]);
+  const [directionGroups, setDirectionGroups] = useState<MiningDirectionGroups | null>(null);
   const [llmConfig, setLlmConfig] = useState<LlmConfigStatus | null>(null);
   const [llmLoading, setLlmLoading] = useState(false);
   // 向量检索（embedding）—— 因子挖掘的记忆检索走这条通道，与 chat 独立。
@@ -88,8 +122,8 @@ export const SettingsPage: React.FC = () => {
     getUniverses()
       .then((res) => setUniverses(res.data?.universes ?? []))
       .catch(() => {});
-    fetchMiningDirections()
-      .then(setL1Directions)
+    fetchMiningDirectionGroups()
+      .then(setDirectionGroups)
       .catch(() => {});
     refreshLlmConfig();
   }, []);
@@ -267,8 +301,22 @@ export const SettingsPage: React.FC = () => {
     setIsDirty(true);
   };
 
-  /** L1 categories from QuantDB when available, else the static reference list */
-  const activeDirections = l1Directions.length > 0 ? l1Directions : REFERENCE_MINING_DIRECTIONS;
+  /** 方向勾选：label 进出 selectedMiningDirections（存储与派发共用同一 label） */
+  const toggleDirection = (label: string, checked: boolean) => {
+    const next = checked
+      ? [...config.selectedMiningDirections, label]
+      : config.selectedMiningDirections.filter((l) => l !== label);
+    updateConfigField('selectedMiningDirections', next);
+  };
+
+  /** 「挖掘方向」两组：训练特征目录（feature catalog / 内置参考回落）+ 因子值库 */
+  const catalogGroup = directionGroups?.catalog ?? REFERENCE_MINING_DIRECTIONS;
+  const catalogIsReference = !directionGroups || directionGroups.catalogSource === 'reference';
+  const libraryDirections = directionGroups?.libraries ?? [];
+  const excludedLibraries = directionGroups?.excludedLibraries ?? [];
+  /** 可勾选方向 = 两组之和（「全选 / 计数」口径；标签库不可选，不在内） */
+  const selectableDirections: MiningDirectionItem[] = [...catalogGroup, ...libraryDirections];
+  const directionsCheckedAt = directionGroups?.checkedAt ?? '';
 
   if (isLoading) {
     return (
@@ -349,7 +397,7 @@ export const SettingsPage: React.FC = () => {
         <TabButton id="api" label="配置 API" icon={Cpu} />
         <TabButton id="data" label="数据路径" icon={Database} />
         <TabButton id="params" label="默认参数" icon={Sliders} />
-        <TabButton id="directions" label={l1Directions.length > 0 ? 'L1 因子类别' : '挖掘方向'} icon={Compass} />
+        <TabButton id="directions" label="挖掘方向" icon={Compass} />
       </div>
 
       {/* Tab Content */}
@@ -922,12 +970,11 @@ export const SettingsPage: React.FC = () => {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Compass className="h-5 w-5" />
-                {l1Directions.length > 0 ? 'L1 因子类别' : '挖掘方向（内置参考）'}
+                挖掘方向
               </CardTitle>
               <p className="text-sm text-muted-foreground mt-1">
-                {l1Directions.length > 0
-                  ? `来自 QuantDB L1 因子集的 ${l1Directions.length} 个类别；启动任务时可从中选用或随机一条`
-                  : '选择作为默认参考的挖掘方向；启动任务时可从中选用或随机一条'}
+                两类可选来源：训练特征目录（L1 因子类别）与因子值库（各市场 6_ml_datasets 因子值宽表；副行为磁盘实况，接口现场读取）。
+                启动任务时可从中选用或随机一条；标签/泄露库仅作目录透明展示，不可选。
               </p>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -970,7 +1017,7 @@ export const SettingsPage: React.FC = () => {
                       onClick={() => {
                         updateConfigField(
                           'selectedMiningDirections',
-                          activeDirections.map((d: MiningDirectionItem) => getDirectionLabel(d))
+                          selectableDirections.map((d: MiningDirectionItem) => getDirectionLabel(d))
                         );
                       }}
                     >
@@ -985,34 +1032,83 @@ export const SettingsPage: React.FC = () => {
                     </Button>
                   </div>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[320px] overflow-y-auto rounded-lg border border-border/50 bg-secondary/10 p-3">
-                  {activeDirections.map((item: MiningDirectionItem, idx: number) => {
-                    const label = getDirectionLabel(item);
-                    return (
-                      <label
-                        key={idx}
-                        className="flex items-center gap-2 p-2 rounded-lg hover:bg-secondary/20 cursor-pointer"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={config.selectedMiningDirections.includes(label)}
-                          onChange={(e) => {
-                            const next = e.target.checked
-                              ? [...config.selectedMiningDirections, label]
-                              : config.selectedMiningDirections.filter((l) => l !== label);
-                            updateConfigField('selectedMiningDirections', next);
-                          }}
-                          className="h-4 w-4 rounded border-input text-primary focus:ring-primary"
+                <div className="max-h-[380px] overflow-y-auto rounded-lg border border-border/50 bg-secondary/10 p-3 space-y-4">
+                  {/* 组一：训练特征目录（feature catalog 类别；不可达时为内置参考） */}
+                  <div>
+                    <div className="flex items-center justify-between px-1 mb-2">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        {catalogIsReference ? '内置参考方向（后端目录不可达）' : '训练特征目录（L1 因子类别）'}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">{catalogGroup.length} 项</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {catalogGroup.map((item: MiningDirectionItem, idx: number) => (
+                        <DirectionCheckbox
+                          key={`cat-${idx}`}
+                          item={item}
+                          checked={config.selectedMiningDirections.includes(getDirectionLabel(item))}
+                          onToggle={toggleDirection}
                         />
-                        <span className="text-sm truncate flex-1" title={label}>
-                          {label}
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 组二：因子值库（可勾选；副行 = 磁盘事实，接口现场读，不进存储） */}
+                  {libraryDirections.length > 0 && (
+                    <div>
+                      <div className="flex items-center justify-between px-1 mb-2">
+                        <span className="text-xs font-medium text-muted-foreground">因子值库（6_ml_datasets 宽表）</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {libraryDirections.length} 库{directionsCheckedAt ? ` · 目录核对 ${directionsCheckedAt}` : ''}
                         </span>
-                      </label>
-                    );
-                  })}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {libraryDirections.map((item: LibraryDirectionItem) => (
+                          <DirectionCheckbox
+                            key={item.library.id}
+                            item={item}
+                            checked={config.selectedMiningDirections.includes(getDirectionLabel(item))}
+                            onToggle={toggleDirection}
+                            secondary={libraryFactSummary(item.library)}
+                            secondaryTitle={item.library.description}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 组三：标签/泄露库——目录透明展示，勾不了 */}
+                  {excludedLibraries.length > 0 && (
+                    <div>
+                      <div className="flex items-center justify-between px-1 mb-2">
+                        <span className="text-xs font-medium text-muted-foreground">标签/泄露库（不可选）</span>
+                        <span className="text-[11px] text-muted-foreground">{excludedLibraries.length} 库</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {excludedLibraries.map((lib) => (
+                          <div
+                            key={lib.id}
+                            className="flex items-start gap-2 p-2 rounded-lg bg-secondary/10 border border-border/40"
+                          >
+                            <Badge variant="outline" className="mt-0.5 shrink-0 text-[10px]">
+                              已排除
+                            </Badge>
+                            <span className="min-w-0 flex-1">
+                              <span className="text-sm text-muted-foreground block truncate" title={lib.name}>
+                                {lib.name}
+                              </span>
+                              <span className="text-[11px] text-muted-foreground block truncate" title={lib.description}>
+                                {lib.description}
+                              </span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  已选 {config.selectedMiningDirections.length} / {activeDirections.length} 项。
+                  已选 {config.selectedMiningDirections.length} / {selectableDirections.length} 项。标签/泄露库（含未来收益列）不可作为挖掘方向。
                 </p>
               </div>
 
