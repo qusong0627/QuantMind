@@ -71,6 +71,7 @@ async def lifespan(app: FastAPI):
     advice_backfill_task = None
     advice_generator_task = None
     tdx_hot_set_feed_task = None
+    quote_freshness_watch_task = None
     health_recheck_task = None
     close_audit_task = None
     daily_pnl_report_task = None
@@ -344,6 +345,25 @@ async def lifespan(app: FastAPI):
         else:
             tdx_hot_set_feed_task = None
             logger.info("tdx hot-set feed disabled (TDX_HOTSET_FEED_ENABLED=false)")
+
+        # 行情快照断流监视（审计 M8）：写侧循环心跳证明不了「有数据落库」，
+        # 本任务按 freshness 谓词给 market:snapshot 数据本身判活，断流/恢复告警
+        if str(os.getenv("QM_QUOTE_WATCH_ENABLED", "true")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            from backend.services.live_trading.services.quote_freshness_watch import (
+                run_quote_freshness_watch_task,
+            )
+
+            quote_freshness_watch_task = asyncio.create_task(
+                run_quote_freshness_watch_task(), name="quote-freshness-watch"
+            )
+        else:
+            quote_freshness_watch_task = None
+            logger.info("quote freshness watch disabled (QM_QUOTE_WATCH_ENABLED=false)")
 
         # 哨兵告警（T-P6-15）：总线消费→留痕→分级推送 + T+1 回填（Redis 门控热读）
         if str(os.getenv("QM_SENTINEL_WORKER_ENABLED", "true")).strip().lower() not in {
@@ -871,6 +891,7 @@ async def lifespan(app: FastAPI):
         advice_backfill_task,
         advice_generator_task,
         tdx_hot_set_feed_task,
+        quote_freshness_watch_task,
         risk_tier_task,
         decision_round_task,
         leverage_trim_task,

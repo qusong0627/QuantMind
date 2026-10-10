@@ -65,6 +65,13 @@ JOBS: tuple[JobSpec, ...] = (
         "热集 529 只经通达信桥(.13:8550/L2)取快照 → market:snapshot/series（T-P6-02 桥源席）",
     ),
     JobSpec(
+        "quote_freshness_watch", "行情快照断流监视（M8）", "worker", "trade",
+        "盘中每 60s（采样热集前 120 只）",
+        "QM_QUOTE_WATCH_ENABLED", True, 600, None,
+        "market:snapshot 数据心跳：按 freshness 谓词判最新写入年龄，断流/恢复边沿告警"
+        "（数据面判活，与 tdx_hot_set_feed 的循环心跳互补）",
+    ),
+    JobSpec(
         "sentinel_push", "哨兵告警消费（P6）", "worker", "trade", "5s 长轮询（消费组 sentinel）",
         "QM_SENTINEL_WORKER_ENABLED", True, 600,
         None,  # 常驻消费循环，无「跑一次」语义 → 不可重跑（此前声明命令但无分发，守卫为红）

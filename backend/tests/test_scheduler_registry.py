@@ -61,6 +61,8 @@ _HEARTBEAT_WIRED = {
     "leverage_trim": "services/trade/services/leverage_trim_runner.py",
     # 实盘净值分钟采样（实况图数据源写入方）：曲线停更时 C07 是唯一可观测信号
     "live_equity_sampler": "services/live_trading/services/live_equity_sampler.py",
+    # M8 行情快照断流监视：给**数据**判活（写侧循环心跳证明不了「有数据落库」）
+    "quote_freshness_watch": "services/live_trading/services/quote_freshness_watch.py",
     # P0-3 训练僵尸作业回收器（住在 API 进程；心跳写在清扫循环里）
     "training_reaper": "services/engine/training/job_reaper.py",
 }

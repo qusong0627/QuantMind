@@ -50,13 +50,18 @@ async def get_quote_feed_status(
     ),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """实时行情 Feed 状态：持仓馈送 + **热集轮询（hot_set 段）** + **真实供数源（quote_sources 段）**。
+    """实时行情 Feed 状态：持仓馈送 + **热集轮询（hot_set 段）** + **真实供数源（quote_sources 段）** + **数据心跳（quote_freshness 段）**。
 
     quote_sources 回答「谁在喂我的持仓」：按标的采样 ``market:snapshot:*`` 的 source 字段
     （桥 / QMT 备源 / TDX 订阅）聚合。WS 推送不带 source，页面此前只能拿本馈送的心跳
     （bridge_ok）冒充行情来源，两个写席轮转时文案就来回切——故在此按真实写侧字段聚合。
+    quote_freshness 回答「数据还在不在写」：由断流监视任务按 freshness 谓词判活
+    （hot_set 段只证明循环在跑，证明不了有数据落库，审计 M8）。
     采样读的是同步 Redis 客户端，放线程里跑，避免阻塞事件循环。
     """
+    from backend.services.live_trading.services.quote_freshness_watch import (
+        quote_freshness_status,
+    )
     from backend.services.live_trading.services.quote_source_audit import (
         collect_quote_sources,
     )
@@ -66,6 +71,7 @@ async def get_quote_feed_status(
 
     status = dict(feed_status)
     status["hot_set"] = dict(hot_set_feed_status)
+    status["quote_freshness"] = dict(quote_freshness_status)
     status["is_trading_time"] = is_trading_time()
     status["server_time"] = datetime.now(timezone.utc).isoformat()
     if status.get("last_feed_at"):
