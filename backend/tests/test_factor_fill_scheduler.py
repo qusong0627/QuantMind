@@ -52,6 +52,8 @@ def dispatch_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
         sched, "_mark_run", lambda market, date_str: marks.add((market, date_str))
     )
+    # 交易日历门换替身：既有测试与真实日历解耦（到点/标记纪律与日历无关）
+    monkeypatch.setattr(sched, "no_data_window", lambda market, now: None)
     return state
 
 
@@ -160,6 +162,33 @@ def test_before_the_configured_time_still_waits(
 
     assert sched.dispatch_due_factor_fills()["dispatched"] == []
     assert fake.sent == []
+
+
+# ---------------------------------------------------------------------------
+# 交易日历门（P2-3 / 审计 M7）：连续非交易日跳发、留原因、不落标记
+# ---------------------------------------------------------------------------
+
+
+def test_idle_calendar_window_skips_with_reason_and_no_marker(
+    monkeypatch: pytest.MonkeyPatch, dispatch_env: dict[str, Any]
+) -> None:
+    """{今日, 昨日} 都非交易日 → 不派发、不写标记、skipped 带原因。
+
+    HK 04:30 / US 07:30 的建议时刻恰是「周六凌晨补周五」形态：昨日是交易日
+    就不跳（那条路径由 test_schedule_gate 的单测锁定）；这里锁跳发纪律。
+    """
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"HK": "QuantHK 港股"})
+    reason = "连续非交易日（2026-10-10、2026-10-11 均非交易日），无新数据可同步"
+    monkeypatch.setattr(sched, "no_data_window", lambda market, now: reason)
+
+    result = sched.dispatch_due_factor_fills()
+
+    assert result["dispatched"] == []
+    assert result["skipped"] == {"HK": reason}
+    assert fake.sent == []
+    assert dispatch_env["marks"] == set(), "跳发不是「跑过了」，不得写 last_run 标记"
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ import os
 from datetime import datetime
 from typing import Any
 
-from backend.services.engine.tasks.schedule_gate import not_due_yet
+from backend.services.engine.tasks.schedule_gate import no_data_window, not_due_yet
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +294,10 @@ def dispatch_due_syncs() -> dict[str, Any]:
     到点判据 = ``now >= 配置时刻``（``schedule_gate.not_due_yet``；审计 H4）：
     旧「精确分钟相等」判据下 worker 忙过 60s 就整天静默跳发，上面这句「下一
     分钟重复派发」根本不成立。迟到分钟/小时仍是当日首次到点，日键保证至多一次。
+
+    交易日历门（P2-3 / M7）：``no_data_window``——{今日, 昨日} 两个自然日
+    按该市场日历都非交易日（周日、长假内部日）时跳过并留 ``skipped`` 原因；
+    周六凌晨取周五收盘的班次**不跳**（D-1 是交易日）。日历答不了 = 放行。
     """
     from backend.services.engine.qlib_app.celery_config import celery_app
 
@@ -301,12 +305,17 @@ def dispatch_due_syncs() -> dict[str, Any]:
     now_hm = now.strftime("%H:%M")
     date_str = now.strftime("%Y-%m-%d")
     dispatched: list[str] = []
+    skipped: dict[str, str] = {}
 
     for market in MARKETS:
         cfg = get_schedule(market)
         if not cfg.get("enabled"):
             continue
         if not_due_yet(now, str(cfg.get("time") or "")):
+            continue
+        idle_reason = no_data_window(market, now)
+        if idle_reason:
+            skipped[market] = idle_reason
             continue
         if _last_run_today(market, date_str):
             continue
@@ -330,4 +339,4 @@ def dispatch_due_syncs() -> dict[str, Any]:
             "[SyncSchedule] %s 到点 %s，已派发同步任务", MARKETS[market], now_hm
         )
 
-    return {"now": now_hm, "dispatched": dispatched}
+    return {"now": now_hm, "dispatched": dispatched, "skipped": skipped}

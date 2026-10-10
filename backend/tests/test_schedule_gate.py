@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from backend.services.engine.tasks.schedule_gate import not_due_yet
+import pytest
+
+from backend.services.engine.tasks import schedule_gate as gate
+from backend.services.engine.tasks.schedule_gate import no_data_window, not_due_yet
 
 
 def _at(hour: int, minute: int) -> datetime:
@@ -48,3 +51,93 @@ def test_garbage_time_fails_closed() -> None:
     assert not_due_yet(_at(4, 35), "") is True
     assert not_due_yet(_at(4, 35), "abc") is True
     assert not_due_yet(_at(4, 35), "04-30") is True
+
+
+# ── 交易日历门（P2-3 / 审计 M7）──────────────────────────────────────────
+
+
+def _stub_calendar(monkeypatch, table: dict[str, bool | None]):
+    """按日期表换掉日历探针；表外日期探不到（None）。返回调用记录供断言。"""
+    calls: list[tuple[str, str]] = []
+
+    def fake(calendar_market: str, day) -> bool | None:
+        calls.append((calendar_market, day.isoformat()))
+        return table.get(day.isoformat())
+
+    monkeypatch.setattr(gate, "_probe_trading_day", fake)
+    return calls
+
+
+def test_sunday_skips_when_saturday_is_also_closed(monkeypatch) -> None:
+    """2026-10-11 是周日：昨天（周六）与今天都不是交易日 → 无新数据可同步。"""
+    _stub_calendar(monkeypatch, {"2026-10-10": False, "2026-10-11": False})
+    reason = no_data_window("A", datetime(2026, 10, 11, 1, 0, 30))
+    assert reason is not None
+    assert "2026-10-10" in reason
+    assert "2026-10-11" in reason
+
+
+def test_saturday_morning_still_fetches_fridays_close(monkeypatch) -> None:
+    """过夜同步取上一交易日数据：周六凌晨补周五收盘（昨日是交易日）绝不跳。"""
+    _stub_calendar(monkeypatch, {"2026-10-09": True, "2026-10-10": False})
+    assert no_data_window("A", datetime(2026, 10, 10, 1, 0, 30)) is None
+
+
+def test_holiday_interior_day_skips(monkeypatch) -> None:
+    """长假内部（前日/今日都非交易日）→ 跳。"""
+    _stub_calendar(monkeypatch, {"2026-10-05": False, "2026-10-06": False})
+    reason = no_data_window("A", datetime(2026, 10, 6, 3, 0, 30))
+    assert reason is not None
+
+
+def test_first_day_back_from_holiday_runs(monkeypatch) -> None:
+    """节后首日（今日是交易日）→ 放行（幂等增量，空跑代价远小于误拦）。"""
+    _stub_calendar(monkeypatch, {"2026-10-07": False, "2026-10-08": True})
+    assert no_data_window("A", datetime(2026, 10, 8, 1, 0, 30)) is None
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        {"2026-10-10": None, "2026-10-11": None},  # 日历整体答不了
+        {"2026-10-10": False, "2026-10-11": None},  # 一侧答不了
+        {"2026-10-10": None, "2026-10-11": False},
+    ],
+)
+def test_unanswerable_calendar_fails_open(monkeypatch, table) -> None:
+    """日历答不了 = 放行：此闸只许省掉注定为空的空跑，绝不许拦掉可能有新数据的班次。"""
+    _stub_calendar(monkeypatch, table)
+    assert no_data_window("A", datetime(2026, 10, 11, 1, 0, 30)) is None
+
+
+@pytest.mark.parametrize(
+    ("market", "calendar_market"),
+    [
+        ("A", "CN"),
+        ("CUSTOM", "CN"),  # CUSTOM 重建的是 A 股派生数据集，同 A 股口径
+        ("FUTURES", "CFFEX"),  # 国内期货与 A 股同一套法定节假日
+        ("HK", "HK"),
+        ("US", "US"),
+        ("us", "US"),  # 大小写不敏感
+    ],
+)
+def test_market_is_probed_with_its_calendar(
+    monkeypatch, market: str, calendar_market: str
+) -> None:
+    calls = _stub_calendar(monkeypatch, {"2026-10-09": True, "2026-10-10": False})
+    assert no_data_window(market, datetime(2026, 10, 10, 4, 0, 30)) is None
+    assert {m for m, _ in calls} == {calendar_market}
+    assert {d for _, d in calls} == {"2026-10-09", "2026-10-10"}
+
+
+def test_always_on_market_has_no_gate(monkeypatch) -> None:
+    """BC（加密货币全天候）不设日历门，探针一次都不调。"""
+    calls = _stub_calendar(monkeypatch, {})
+    assert no_data_window("BC", datetime(2026, 10, 11, 4, 15, 30)) is None
+    assert calls == []
+
+
+def test_unknown_market_fails_open(monkeypatch) -> None:
+    calls = _stub_calendar(monkeypatch, {})
+    assert no_data_window("XYZ", datetime(2026, 10, 11, 4, 15, 30)) is None
+    assert calls == []

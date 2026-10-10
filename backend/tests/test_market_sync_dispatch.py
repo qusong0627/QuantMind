@@ -53,6 +53,8 @@ def env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         sched, "_last_run_today", lambda market, date_str: (market, date_str) in marks
     )
     monkeypatch.setattr(sched, "_mark_run", lambda market, date_str: marks.add((market, date_str)))
+    # 交易日历门换替身：既有测试与真实日历解耦（到点/标记纪律与日历无关）
+    monkeypatch.setattr(sched, "no_data_window", lambda market, now: None)
     return state
 
 
@@ -194,3 +196,47 @@ def test_before_the_configured_time_still_waits(
 
     assert sched.dispatch_due_syncs()["dispatched"] == []
     assert fake.sent == []
+
+
+# ---------------------------------------------------------------------------
+# 交易日历门（P2-3 / 审计 M7）：连续非交易日跳发、留原因、不落标记
+# ---------------------------------------------------------------------------
+
+
+def test_idle_calendar_window_skips_with_reason_and_no_marker(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """{今日, 昨日} 都非交易日 → 不派发、不写标记、skipped 带原因（值班面可见）。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"US": "QuantUS 美股"})
+    reason = "连续非交易日（2026-10-10、2026-10-11 均非交易日），无新数据可同步"
+    monkeypatch.setattr(sched, "no_data_window", lambda market, now: reason)
+
+    result = sched.dispatch_due_syncs()
+
+    assert result["dispatched"] == []
+    assert result["skipped"] == {"US": reason}
+    assert fake.sent == []
+    assert env["marks"] == set(), "跳发不是「跑过了」，不得写 last_run 标记"
+
+
+def test_calendar_skip_leaves_the_day_open_for_a_later_tick(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """跳发不烧当日名额：后续 tick 门放行时仍是当日首次到点，照常派发。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"US": "QuantUS 美股"})
+    answer: dict[str, str | None] = {"reason": "连续非交易日"}
+    monkeypatch.setattr(sched, "no_data_window", lambda market, now: answer["reason"])
+
+    first = sched.dispatch_due_syncs()
+    assert first["dispatched"] == [] and first["skipped"] == {"US": "连续非交易日"}
+
+    answer["reason"] = None
+    second = sched.dispatch_due_syncs()
+
+    assert second["dispatched"] == ["US"]
+    assert second["skipped"] == {}
+    assert fake.sent == ["US"]

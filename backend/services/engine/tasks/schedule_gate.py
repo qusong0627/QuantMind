@@ -18,7 +18,7 @@ HH:MM 解析成 ``(时, 分)`` 元组比较，不接受字符串比较：``_norm
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 
 def not_due_yet(now: datetime, cfg_time: str) -> bool:
@@ -34,3 +34,65 @@ def not_due_yet(now: datetime, cfg_time: str) -> bool:
     except (TypeError, ValueError):
         return True
     return (now.hour, now.minute) < (hh, mm)
+
+
+# ── 交易日历门（P2-3 / 审计 M7）────────────────────────────────────────
+#: 同步/填充市场 → 交易日历口径（``trading_calendar.is_trading_day_xcal`` 的
+#: 入参）。``None`` = 无日历门（全天候市场）。FUTURES 用 CFFEX（XSHG 历）：
+#: 国内期货与 A 股同一套法定节假日（夜盘只改变「一夜算哪个交易日」，
+#: 不改变「哪些自然日有交易」）；CUSTOM 重建的是 A 股派生数据集，同 A 股口径。
+_SYNC_MARKET_CALENDAR: dict[str, str | None] = {
+    "A": "CN",
+    "CUSTOM": "CN",
+    "FUTURES": "CFFEX",
+    "HK": "HK",
+    "US": "US",
+    "BC": None,
+}
+
+
+def _probe_trading_day(calendar_market: str, day: date) -> bool | None:
+    """单个自然日的交易日探针；``None`` = 日历答不了（库缺失/越界）。
+
+    实现唯一（``trading_calendar.is_trading_day_xcal``，同步语境的正规出口）；
+    单独成函数只为测试可换替身。延迟 import：调度模块的 import 面不带 DB。
+    """
+    from backend.shared.trading_calendar import is_trading_day_xcal
+
+    return is_trading_day_xcal(calendar_market, day)
+
+
+def no_data_window(market: str, now: datetime) -> str | None:
+    """「今日与昨日都不是交易日」→ 跳过原因；否则 ``None``（照常派发）。
+
+    语义（M7 的「过夜同步取上一交易日数据」微妙点）：这些调度时刻按平台约定
+    都排在次日凌晨（建议值 01:00–07:30）——D 日凌晨跑的同步取的是 **D-1 那个
+    自然日收盘**的数据。所以闸门问的不是「今天是不是交易日」：
+
+    * D-1 是交易日（含**周六凌晨取周五**）→ 必须跑；
+    * D 是交易日（当天傍晚/夜里的配置）→ 必须跑；
+    * 只有 {今日, 昨日} **两个自然日都非交易日**（周日、长假内部日）才是
+      「不可能有新数据」的空转，跳过。
+
+    若按「今天不是交易日就跳」，周六凌晨取周五收盘的那班会被拦掉——周五的
+    数据要等到周一凌晨才落，这正是要避免的假省。
+
+    日历答不了 / 市场无日历门（BC 全天候）→ ``None``（放行）：与取数闸
+    「未知即放行」同哲学——这个闸只许省掉注定为空的空跑，绝不许拦掉可能
+    有新数据的班次。DB 手工覆盖（``qm_market_calendar_day``）不参与本闸：
+    临时交易日请走界面手动触发同步（已知边界，见 P2-3 执行记录）。
+    """
+    calendar_market = _SYNC_MARKET_CALENDAR.get(str(market or "").upper())
+    if not calendar_market:
+        return None
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    probes = [_probe_trading_day(calendar_market, d) for d in (yesterday, today)]
+    if any(v is True for v in probes):
+        return None
+    if all(v is False for v in probes):
+        return (
+            f"连续非交易日（{yesterday.isoformat()}、{today.isoformat()} 均非交易日），"
+            "无新数据可同步"
+        )
+    return None

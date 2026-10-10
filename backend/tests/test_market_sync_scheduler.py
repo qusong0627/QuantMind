@@ -132,6 +132,8 @@ def test_dispatch_fires_custom_once_per_day(stub_redis, monkeypatch):
             return cls(2026, 9, 15, 3, 0, 0)
 
     monkeypatch.setattr(ms, "datetime", _FrozenDateTime)
+    # 交易日历门与真实日历解耦：本测试锁的是派发纪律（日键去重），不是日历
+    monkeypatch.setattr(ms, "no_data_window", lambda market, now: None)
 
     # Arrange：CUSTOM 配置为每天 03:00
     save_schedule("CUSTOM", {"enabled": True, "time": "03:00"})
