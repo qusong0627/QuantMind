@@ -17,6 +17,7 @@
 import React, { useMemo, useState } from 'react';
 import { Search, Star } from 'lucide-react';
 import type { FactorSummary } from '../../types/factorReport';
+import { loadFavs, saveFavs, toggleInFavs } from '../favorites';
 
 interface FactorRankListProps {
   factors: FactorSummary[];
@@ -62,26 +63,6 @@ const MAX_TURNOVER_OPTS = ['', '20', '30', '50', '80'];
 
 const favKey = (ds: string): string => `qm:factor-report:favs:${ds}`;
 
-/** 读自选（坏数据一律当空，不把解析异常带进界面） */
-function loadFavs(ds: string): string[] {
-  try {
-    const raw = localStorage.getItem(favKey(ds));
-    const arr = raw ? (JSON.parse(raw) as unknown) : [];
-    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-/** 写自选（隐私模式/配额满等写入失败静默——收藏是便利功能，不阻断浏览） */
-function saveFavs(ds: string, arr: string[]): void {
-  try {
-    localStorage.setItem(favKey(ds), JSON.stringify(arr));
-  } catch {
-    /* ignore */
-  }
-}
-
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 function valueOf(f: FactorSummary, key: SortKey): number | string | null {
@@ -107,17 +88,17 @@ export const FactorRankList: React.FC<FactorRankListProps> = ({ factors, selecte
   const [favsOnly, setFavsOnly] = useState(false);
 
   // 收藏按数据集隔离：切换数据集时同步换库（render 期调整派生状态，官方推荐模式）
-  const [favs, setFavs] = useState<string[]>(() => loadFavs(dataset));
+  const [favs, setFavs] = useState<string[]>(() => loadFavs(favKey(dataset)));
   const [favsDs, setFavsDs] = useState(dataset);
   if (favsDs !== dataset) {
     setFavsDs(dataset);
-    setFavs(loadFavs(dataset));
+    setFavs(loadFavs(favKey(dataset)));
   }
 
   const toggleFav = (name: string) => {
-    const next = favs.includes(name) ? favs.filter((x) => x !== name) : [...favs, name];
+    const next = toggleInFavs(favs, name);
     setFavs(next);
-    saveFavs(dataset, next);
+    saveFavs(favKey(dataset), next);
   };
 
   const onSortKeyChange = (k: SortKey) => {

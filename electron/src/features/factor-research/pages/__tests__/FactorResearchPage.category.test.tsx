@@ -137,4 +137,19 @@ describe('FactorResearchPage 分类限定接线', () => {
     fireEvent.click(screen.getByText('经典因子'));
     await waitFor(() => expect(screen.getByTestId('sidebar-filter').textContent).toBe('none'));
   });
+
+  test('目录可收起（给榜单让出宽度），再点展开还原；收起不影响榜单限定', async () => {
+    renderPage();
+
+    fireEvent.click(screen.getByText('桩-选分类'));
+    await waitFor(() => expect(screen.getByTestId('tab-leaderboard').textContent).toBe('限定:rd_mined'));
+
+    fireEvent.click(screen.getByTestId('toggle-catalog'));
+    expect(screen.queryByTestId('sidebar')).toBeNull();
+    // 收起目录只是腾地方：限定状态不该被清掉
+    expect(screen.getByTestId('tab-leaderboard').textContent).toBe('限定:rd_mined');
+
+    fireEvent.click(screen.getByTestId('toggle-catalog'));
+    expect(screen.getByTestId('sidebar')).toBeTruthy();
+  });
 });

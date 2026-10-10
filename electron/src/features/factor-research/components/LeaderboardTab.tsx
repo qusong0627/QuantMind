@@ -13,7 +13,7 @@
  * 全库截面口径，分类只是过滤视图）；顶部徽章可一键清除。
  */
 import React, { useMemo, useState } from 'react';
-import { ArrowRightLeft, CheckSquare, Filter, Layers, Loader2, PackagePlus, Search, Square, TrendingUp, X } from 'lucide-react';
+import { ArrowRightLeft, CheckSquare, Filter, Layers, Loader2, PackagePlus, Search, Square, Star, X } from 'lucide-react';
 import type { CategoryFilter, LeaderboardRow } from '../types/factorResearch';
 import { Card, ENV_TAGS, TIME_TAGS, TagChip, fmtNum, fmtPct } from './common';
 import {
@@ -25,6 +25,7 @@ import {
 import type { LeaderboardFilters } from './leaderboardFilters';
 import { ColumnFilterPopover } from './ColumnFilterPopover';
 import type { ColFilterValue } from './ColumnFilterPopover';
+import { loadFavs, saveFavs, toggleInFavs } from './favorites';
 
 interface Props {
   rows: LeaderboardRow[];
@@ -41,6 +42,8 @@ interface Props {
   onClearCategoryFilter: () => void;
   /** 清除全部标签筛选（页面持有 tagFilter，组件只发请求） */
   onClearTagFilter?: () => void;
+  /** 当前数据集（private / classic）：自选收藏按数据集隔离存储 */
+  dataset: string;
   onSendCompare: () => void;
   onSendCompose: () => void;
   onOpenSingle: (code: string) => void;
@@ -76,6 +79,9 @@ const COLS: Col[] = [
   { key: 'median_mv_yi', label: '中位市值(亿)', width: 'w-20', align: 'right', fmt: (v) => fmtNum(v as number, 0) },
 ];
 
+/** 排行榜自选的存储键（按数据集隔离；与因子报告左栏的收藏是两套集合） */
+const favKeyOf = (ds: string): string => `qm:factor-research:lb-favs:${ds}`;
+
 /** 列 key → 人话标签（浮层标题用；mv_style / industry 不在 COLS 里） */
 const LABELS: Record<string, string> = {
   ...Object.fromEntries(COLS.map((c) => [String(c.key), c.label])),
@@ -100,16 +106,30 @@ const TagToggle: React.FC<{ tag: string; count: number; on: boolean; onClick: ()
 
 export const LeaderboardTab: React.FC<Props> = ({
   rows, loading, error, selected, tagFilter, n, onNChange, onToggle, onToggleTag,
-  categoryFilter, onClearCategoryFilter, onClearTagFilter,
+  categoryFilter, onClearCategoryFilter, onClearTagFilter, dataset,
   onSendCompare, onSendCompose, onOpenSingle, meta, onRegisterToTraining,
 }) => {
   const [sortKey, setSortKey] = useState<string>('composite');
   const [asc, setAsc] = useState(false);
   const [filters, setFilters] = useState<LeaderboardFilters>(EMPTY_LEADERBOARD_FILTERS);
   const [filterOpen, setFilterOpen] = useState<{ key: string; x: number; y: number } | null>(null);
+  const [favsOnly, setFavsOnly] = useState(false);
+  // 自选按数据集隔离：切换数据集时同步换库（render 期调整派生状态的官方模式）
+  const [favs, setFavs] = useState<string[]>(() => loadFavs(favKeyOf(dataset)));
+  const [favsDs, setFavsDs] = useState(dataset);
+  if (favsDs !== dataset) {
+    setFavsDs(dataset);
+    setFavs(loadFavs(favKeyOf(dataset)));
+  }
+  const toggleFav = (code: string) => {
+    const next = toggleInFavs(favs, code);
+    setFavs(next);
+    saveFavs(favKeyOf(dataset), next);
+  };
 
   const view = useMemo(() => {
-    const filtered = applyLeaderboardFilters(rows, filters, tagFilter, categoryFilter);
+    const scoped = favsOnly ? rows.filter((r) => favs.includes(r.code)) : rows;
+    const filtered = applyLeaderboardFilters(scoped, filters, tagFilter, categoryFilter);
     const sorted = [...filtered];
     sorted.sort((a, b) => {
       if (sortKey === 'name') {
@@ -122,17 +142,18 @@ export const LeaderboardTab: React.FC<Props> = ({
       return asc ? na - nb : nb - na;
     });
     return sorted;
-  }, [rows, sortKey, asc, tagFilter, categoryFilter, filters]);
+  }, [rows, sortKey, asc, tagFilter, categoryFilter, filters, favsOnly, favs]);
 
   /** 每个标签的命中数：在「除标签外」的当前筛选下，该标签能捞到多少行 */
   const tagCounts = useMemo(() => {
-    const base = applyLeaderboardFilters(rows, filters, [], categoryFilter);
+    const scoped = favsOnly ? rows.filter((r) => favs.includes(r.code)) : rows;
+    const base = applyLeaderboardFilters(scoped, filters, [], categoryFilter);
     const counts: Record<string, number> = {};
     for (const t of [...ENV_TAGS, ...TIME_TAGS]) {
       counts[t] = base.filter((r) => r.env_tag === t || r.time_tag === t).length;
     }
     return counts;
-  }, [rows, filters, categoryFilter]);
+  }, [rows, filters, categoryFilter, favsOnly, favs]);
 
   const range = meta?.range as { start?: string; end?: string; n_months?: number } | undefined;
 
@@ -179,26 +200,30 @@ export const LeaderboardTab: React.FC<Props> = ({
     return { ...prev, numeric: { ...prev.numeric, [key]: v.filter } };
   };
 
-  const activeCount = countActiveFilters(filters) + tagFilter.length + (categoryFilter ? 1 : 0);
+  const activeCount =
+    countActiveFilters(filters) + tagFilter.length + (categoryFilter ? 1 : 0) + (favsOnly ? 1 : 0);
   const clearAll = () => {
     setFilters(EMPTY_LEADERBOARD_FILTERS);
     setFilterOpen(null);
+    setFavsOnly(false);
     if (tagFilter.length && onClearTagFilter) onClearTagFilter();
     if (categoryFilter) onClearCategoryFilter();
   };
 
   const tabFiltered = countActiveFilters(filters) > 0 || tagFilter.length > 0;
   const emptyHint =
-    categoryFilter && !tabFiltered
-      ? '该分类下没有因子——点上方「分类」徽章清除限定'
-      : '没有符合当前筛选的因子——点「清除筛选」回到全量';
+    favsOnly && favs.length === 0
+      ? '还没有收藏因子——点每行最前面的 ★ 收藏，这里就会显示它们'
+      : categoryFilter && !tabFiltered
+        ? '该分类下没有因子——点上方「分类」徽章清除限定'
+        : '没有符合当前筛选的因子——点「清除筛选」回到全量';
 
   /** 表头单元格：点文字排序 + 漏斗筛选（无配置的列只有排序） */
   const headCell = (key: string, width: string, align: 'left' | 'right', sortable = true) => {
     const cfg = COL_FILTERS[key];
     const active = colActive(key);
     return (
-      <th key={key} className={`py-0.5 ${width} ${align === 'right' ? 'text-right' : 'text-left'}`}>
+      <th key={key} className={`group/th py-1 ${width} ${align === 'right' ? 'text-right' : 'text-left'}`}>
         <div className={`flex items-center gap-0.5 ${align === 'right' ? 'justify-end' : ''}`}>
           {sortable ? (
             <button onClick={() => clickSort(key)} title="点击排序" className="hover:text-slate-600">
@@ -218,7 +243,11 @@ export const LeaderboardTab: React.FC<Props> = ({
               onClick={(e) => openFilter(e, key)}
               aria-label={`筛选 ${LABELS[key]}`}
               title={`筛选「${LABELS[key]}」`}
-              className={active ? 'text-indigo-500' : 'text-slate-300 hover:text-indigo-400'}
+              className={
+                active
+                  ? 'text-indigo-500'
+                  : 'text-slate-300 opacity-0 group-hover/th:opacity-100 focus-visible:opacity-100 hover:text-indigo-400'
+              }
             >
               <Filter className="w-2.5 h-2.5" />
             </button>
@@ -288,8 +317,8 @@ export const LeaderboardTab: React.FC<Props> = ({
         )}
       </div>
 
-      {/* 筛选栏：搜索 + 分类徽章 + 标签（环境/时效两组）+ 计数与清除 */}
-      <div className="shrink-0 rounded-xl border border-slate-200/80 bg-white px-2.5 py-1.5 flex items-center gap-2 flex-wrap">
+      {/* 筛选栏：搜索 + 自选 + 分类徽章 + 标签（环境/时效两组）+ 计数与清除 */}
+      <div className="shrink-0 rounded-xl border border-slate-200/80 bg-white px-2 py-1 flex items-center gap-1.5 flex-wrap">
         <div className="relative shrink-0">
           <Search className="w-3 h-3 text-slate-400 absolute left-2 top-1/2 -translate-y-1/2" />
           <input
@@ -297,9 +326,23 @@ export const LeaderboardTab: React.FC<Props> = ({
             value={filters.name}
             onChange={(e) => setFilters((prev) => ({ ...prev, name: e.target.value }))}
             placeholder="搜索因子名 / 代码…"
-            className="w-40 rounded-lg border border-slate-200 bg-slate-50/70 pl-7 pr-2 py-0.5 text-[11px] outline-none focus:border-indigo-300 focus:bg-white"
+            className="w-36 rounded-lg border border-slate-200 bg-slate-50/70 pl-7 pr-2 py-0.5 text-[11px] outline-none focus:border-indigo-300 focus:bg-white"
           />
         </div>
+        <button
+          data-testid="lb-favs-only"
+          onClick={() => setFavsOnly(!favsOnly)}
+          aria-pressed={favsOnly}
+          title={favsOnly ? '取消：显示全部因子' : '只看收藏的因子（点每行最前面的 ★ 收藏）'}
+          className={`flex items-center gap-0.5 rounded-full border px-2 py-0.5 text-[10px] font-bold transition-colors ${
+            favsOnly
+              ? 'border-amber-300 bg-amber-50 text-amber-600'
+              : 'border-slate-200 text-slate-500 hover:border-amber-200 hover:text-amber-500'
+          }`}
+        >
+          <Star className="w-2.5 h-2.5" fill={favsOnly ? 'currentColor' : 'none'} />
+          自选 {favs.length}
+        </button>
         {categoryFilter && (
           <button
             onClick={onClearCategoryFilter}
@@ -346,7 +389,7 @@ export const LeaderboardTab: React.FC<Props> = ({
             (z-score) 后加权，方向已统一（数值越大越好）。有效性 = RankIC 均值与 IC_IR；业绩 = 年化 / 夏普 /
             −最大回撤 / 月度胜率。业绩口径：top-N 等权（持仓数可切换）、月末调仓、0.2% 双边成本（按换手计）；
             区间选择会整体重算。中位市值 / 市值风格（大盘≥500亿 · 中盘100-500亿 · 小盘&lt;100亿）与前三行业
-            按最新截面的 Top-N 持仓统计。
+            按最新截面的 Top-N 持仓统计。股票池为全 A 非 ST/退市、前复权价。
           </p>
           <p>
             标签（每个因子 2 个，按当前区间自动判定，基准 top-30）：市场环境——沪深300 滚动 3 月涨跌 &gt;+5% 记牛、&lt;−5% 记熊、其余震荡，
@@ -361,6 +404,7 @@ export const LeaderboardTab: React.FC<Props> = ({
             RankIC 可勾「按绝对值」找强因子，正反不限）；上方搜索框 = 因子名/代码包含。
             <b>标签</b>：点一个只看它；同组多选取并集（环境内 / 时效内），两组同时选取得交集。
             点行内标签、市值风格芯片同样能直接筛。
+            <b>自选</b>：行首 ★ 收藏（按数据集记住），「自选 N」一键只看收藏。
             <b>排序</b>：点列头文字（如「最大回撤」看最抗跌、「年化」看最赚钱）。
             点左侧目录的分类名（L1/L2）= 只看该类，再点一次或点「分类」徽章取消；
             勾选因子后一键带入对比 / 合成
@@ -405,36 +449,53 @@ export const LeaderboardTab: React.FC<Props> = ({
             <table className="w-full text-[11px]">
               <thead className="sticky top-0 z-10 bg-white/95 backdrop-blur-sm shadow-[0_1px_0_0_#e2e8f0]">
                 <tr className="text-slate-400 font-bold">
-                  <th className="text-left py-1.5 pl-1 w-8"></th>
+                  <th className="w-6 py-1" aria-label="自选"></th>
+                  <th className="text-left py-1 pl-1 w-8"></th>
                   {COLS.map((c) => headCell(String(c.key), c.width || '', c.align || 'left'))}
                   {headCell('mv_style', 'w-16', 'right', false)}
-                  <th className="text-left py-1.5 pl-1">标签</th>
+                  <th className="text-left py-1 pl-1">标签</th>
                   {headCell('industry', '', 'left', false)}
                 </tr>
               </thead>
               <tbody>
                 {view.length === 0 && (
                   <tr>
-                    <td colSpan={16} className="py-6 text-center text-[11px] text-slate-400">
+                    <td colSpan={17} className="py-6 text-center text-[11px] text-slate-400">
                       {emptyHint}
                     </td>
                   </tr>
                 )}
                 {view.map((r) => {
                   const isSel = selected.includes(r.code);
+                  const isFav = favs.includes(r.code);
                   return (
                     <tr
                       key={r.code}
-                      className={`border-t border-slate-100 cursor-pointer transition-colors ${
+                      className={`group border-t border-slate-100 cursor-pointer transition-colors ${
                         isSel ? 'bg-indigo-50/60' : 'even:bg-slate-50/40 hover:bg-slate-100/50'
                       }`}
                       onClick={() => onOpenSingle(r.code)}
                     >
-                      <td className="py-1.5 pl-1" onClick={(e) => { e.stopPropagation(); onToggle(r.code); }}>
+                      <td className="py-1 pl-1.5 w-6">
+                        <button
+                          data-testid={`lb-fav-${r.code}`}
+                          onClick={(e) => { e.stopPropagation(); toggleFav(r.code); }}
+                          aria-label={isFav ? `取消收藏 ${r.name_cn}` : `收藏 ${r.name_cn}`}
+                          title={isFav ? '取消收藏' : '收藏（可用「只看自选」收窄）'}
+                          className={`transition-colors ${
+                            isFav
+                              ? 'text-amber-400 hover:text-amber-500'
+                              : 'text-slate-300 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-amber-400'
+                          }`}
+                        >
+                          <Star className="w-3 h-3" fill={isFav ? 'currentColor' : 'none'} />
+                        </button>
+                      </td>
+                      <td className="py-1 pl-1" onClick={(e) => { e.stopPropagation(); onToggle(r.code); }}>
                         {isSel ? <CheckSquare className="w-3.5 h-3.5 text-blue-600" /> : <Square className="w-3.5 h-3.5 text-slate-300" />}
                       </td>
-                      <td className={`py-1.5 font-mono ${r.rank <= 3 ? 'text-amber-600 font-bold' : 'text-slate-400'}`}>{r.rank}</td>
-                      <td className="py-1.5 w-[13rem] max-w-[13rem]">
+                      <td className={`py-1 font-mono ${r.rank <= 3 ? 'text-amber-600 font-bold' : 'text-slate-400'}`}>{r.rank}</td>
+                      <td className="py-1 w-[13rem] max-w-[13rem]">
                         {/* flex-wrap：正常一行放得下；带徽章的少数行让徽章折到第二行，
                             而不是把徽章裁掉（它们是数据质量告警，被裁等于没告警）。 */}
                         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
@@ -467,25 +528,25 @@ export const LeaderboardTab: React.FC<Props> = ({
                           )}
                         </div>
                       </td>
-                      <td className="py-1.5 text-right font-mono font-bold text-indigo-600">{fmtNum(r.composite, 3)}</td>
-                      <td className={`py-1.5 text-right font-mono font-bold ${(r.annual_return || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                      <td className="py-1 text-right font-mono font-bold text-indigo-600">{fmtNum(r.composite, 3)}</td>
+                      <td className={`py-1 text-right font-mono font-bold ${(r.annual_return || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
                         {fmtPct(r.annual_return)}
                       </td>
-                      <td className="py-1.5 text-right font-mono text-slate-600">{fmtNum(r.sharpe)}</td>
-                      <td className="py-1.5 text-right font-mono text-slate-500">{fmtPct(r.max_drawdown)}</td>
-                      <td className="py-1.5 text-right font-mono text-slate-500">{fmtPct(r.win_rate)}</td>
-                      <td className={`py-1.5 text-right font-mono ${(r.excess_300 || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                      <td className="py-1 text-right font-mono text-slate-600">{fmtNum(r.sharpe)}</td>
+                      <td className="py-1 text-right font-mono text-slate-500">{fmtPct(r.max_drawdown)}</td>
+                      <td className="py-1 text-right font-mono text-slate-500">{fmtPct(r.win_rate)}</td>
+                      <td className={`py-1 text-right font-mono ${(r.excess_300 || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
                         {fmtPct(r.excess_300)}
                       </td>
-                      <td className={`py-1.5 text-right font-mono ${(r.excess_800 || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                      <td className={`py-1 text-right font-mono ${(r.excess_800 || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
                         {fmtPct(r.excess_800)}
                       </td>
-                      <td className={`py-1.5 text-right font-mono ${(r.ic_mean || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                      <td className={`py-1 text-right font-mono ${(r.ic_mean || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
                         {fmtNum(r.ic_mean, 3)}
                       </td>
-                      <td className="py-1.5 text-right font-mono text-slate-500">{fmtNum(r.ic_ir)}</td>
-                      <td className="py-1.5 text-right font-mono text-slate-600">{fmtNum(r.median_mv_yi, 0)}</td>
-                      <td className="py-1.5 text-right">
+                      <td className="py-1 text-right font-mono text-slate-500">{fmtNum(r.ic_ir)}</td>
+                      <td className="py-1 text-right font-mono text-slate-600">{fmtNum(r.median_mv_yi, 0)}</td>
+                      <td className="py-1 text-right">
                         {r.mv_style ? (
                           <button
                             onClick={(e) => {
@@ -505,7 +566,7 @@ export const LeaderboardTab: React.FC<Props> = ({
                           <span className="text-slate-300">—</span>
                         )}
                       </td>
-                      <td className="py-1.5 pl-1">
+                      <td className="py-1 pl-1">
                         <span className="flex items-center gap-1">
                           {r.env_tag && (
                             <button
@@ -527,7 +588,7 @@ export const LeaderboardTab: React.FC<Props> = ({
                           )}
                         </span>
                       </td>
-                      <td className="py-1.5 pl-1 text-[10px] text-slate-500 whitespace-nowrap">
+                      <td className="py-1 pl-1 text-[10px] text-slate-500 whitespace-nowrap">
                         {(r.top_industries || []).map((x) => `${x.name} ${x.count}`).join('、') || '—'}
                       </td>
                     </tr>
@@ -538,10 +599,6 @@ export const LeaderboardTab: React.FC<Props> = ({
           </div>
         )}
       </Card>
-      <div className="shrink-0 text-[10px] text-slate-400 flex items-center gap-1">
-        <TrendingUp className="w-3 h-3" />
-        口径：全 A 非 ST/退市池，月末调仓 Top-N 等权（持仓数可切换），双边成本 0.2%（按换手计），前复权价 · 与 factor-lib-demo 一致
-      </div>
 
       {/* 列筛选浮层（fixed 定位，逃出表格滚动容器的裁剪） */}
       {filterOpen && COL_FILTERS[filterOpen.key] && (

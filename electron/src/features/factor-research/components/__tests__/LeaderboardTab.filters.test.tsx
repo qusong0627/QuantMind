@@ -57,6 +57,7 @@ function renderTab(
       onSendCompose={vi.fn()}
       onOpenSingle={vi.fn()}
       meta={{}}
+      dataset="private"
       {...over}
     />,
   );

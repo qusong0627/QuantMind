@@ -8,7 +8,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowRightLeft, Award, BarChart3, Database, Filter, Layers, LineChart, ScanSearch, Sigma, TableProperties } from 'lucide-react';
+import { ArrowRightLeft, Award, BarChart3, ChevronsLeft, ChevronsRight, Database, Filter, Layers, LineChart, ScanSearch, Sigma, TableProperties } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { ApiError, getCatalog, getLeaderboard } from '../services/factorResearchService';
 import type { FactorDataset, RangeParams } from '../services/factorResearchService';
@@ -81,6 +81,8 @@ const FactorResearchPage: React.FC = () => {
   const meta = useMemo(() => ({ ...catalogMeta, ...lbMeta }), [catalogMeta, lbMeta]);
   const [range, setRange] = useState<RangeValue>({ preset: 'all', start: null, end: null });
   const [tagFilter, setTagFilter] = useState<string[]>([]);
+  /** 左侧目录可收起：目录固定 248px，榜单列多时让它给表格让宽度（会话内记忆即可） */
+  const [catalogOpen, setCatalogOpen] = useState(true);
   const [lbN, setLbN] = useState(30);
   const [selected, setSelected] = useState<string[]>([]);
   const [activeCode, setActiveCode] = useState<string | null>(null);
@@ -453,25 +455,37 @@ const FactorResearchPage: React.FC = () => {
 
         {!isTool && (
         <div className="flex-1 min-h-0 min-w-0 flex gap-2 p-3">
-          {/* 左侧目录 */}
-          <CatalogSidebar
-            factors={factors}
-            l1Order={l1Order}
-            rowsByCode={rowsByCode}
-            selected={selected}
-            activeCode={activeCode}
-            tagFilter={tagFilter}
-            loading={catalogLoading}
-            categoryFilter={categoryFilter}
-            onSelectCategory={handleSelectCategory}
-            onToggle={toggleSelected}
-            onOpen={openSingle}
-          />
+          {/* 左侧目录（可收起：给榜单让宽度） */}
+          {catalogOpen && (
+            <CatalogSidebar
+              factors={factors}
+              l1Order={l1Order}
+              rowsByCode={rowsByCode}
+              selected={selected}
+              activeCode={activeCode}
+              tagFilter={tagFilter}
+              loading={catalogLoading}
+              categoryFilter={categoryFilter}
+              onSelectCategory={handleSelectCategory}
+              onToggle={toggleSelected}
+              onOpen={openSingle}
+            />
+          )}
 
           {/* 主区 */}
           <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-2">
             {/* 数据集 + 区间工具条 */}
             <div className="shrink-0 flex items-center gap-2 flex-wrap rounded-xl border border-slate-200/80 bg-white px-3 py-1.5">
+              <button
+                data-testid="toggle-catalog"
+                onClick={() => setCatalogOpen(!catalogOpen)}
+                title={catalogOpen ? '收起目录，给榜单让出宽度' : '展开因子目录'}
+                aria-pressed={!catalogOpen}
+                className="flex items-center gap-0.5 rounded-lg border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-500 hover:border-slate-300 hover:text-slate-700"
+              >
+                {catalogOpen ? <ChevronsLeft className="w-3 h-3" /> : <ChevronsRight className="w-3 h-3" />}
+                目录
+              </button>
               <div className="flex items-center gap-0.5 rounded-full bg-slate-100 border border-slate-200 p-0.5">
                 {([
                   { key: 'classic', label: '经典因子' },
@@ -572,6 +586,7 @@ const FactorResearchPage: React.FC = () => {
                 categoryFilter={categoryFilter}
                 onClearCategoryFilter={() => setCategoryFilter(null)}
                 onClearTagFilter={() => setTagFilter([])}
+                dataset={dataset}
                 n={lbN}
                 onNChange={setLbN}
                 onToggle={toggleSelected}
