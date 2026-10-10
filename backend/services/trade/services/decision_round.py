@@ -617,6 +617,18 @@ async def _run_once_inner(
                 getattr(outcome, "outcomes", None),
                 watch_result.outcomes() if watch_result is not None else None,
             )
+            # 真单镜像就绪探测（P2-2，H2/M9）：与镜像链路同一实现（``RoundDeps`` 接线到
+            # ``real_mirror_service.real_trading_ready``）。探测失败记 None——审计里
+            # 「探不到」与「不就绪」是两件事；探测本身绝不阻断本轮落账。
+            mirror_probe: tuple[bool, str] | None = None
+            probe = getattr(deps, "mirror_ready", None)
+            if probe is not None:
+                try:
+                    mirror_probe = probe()
+                except Exception as exc:  # noqa: BLE001 探不到就如实记 None
+                    logger.warning(
+                        "[DecisionRound] %s 镜像就绪探测失败: %s", round_id, exc
+                    )
             ctx_meta = context_meta(
                 slot=slot,
                 round_id=round_id,
@@ -640,6 +652,7 @@ async def _run_once_inner(
                 quota_used=quota_used,
                 excluded=excluded,
                 in_session=in_session,
+                mirror=mirror_probe,
                 notes=notes,
             )
             records = build_records(

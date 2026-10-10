@@ -1516,3 +1516,128 @@ async def test_default_funder_keeps_the_redis_bump_when_the_ledger_write_fails(
     assert rec.commits == 0
     assert out["funded"] == 500.0
     assert any("台账" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 镜像段（P2-2，审计 H2/M9）：意图与事实分列，缺失不粉饰
+# ---------------------------------------------------------------------------
+
+
+def _mirror_leg_holdings():
+    return dict([_held("600036.SH")])
+
+
+_MIRROR_QUOTES = {"600036.SH": Quote(symbol="600036.SH", price=10.0)}
+
+
+@pytest.mark.asyncio
+async def test_outcomes_mirror_segment_normalizes_the_receipt() -> None:
+    """real 轮带回执 → 白名单归一 + intent=True：引擎内部字段（symbol/内部 id）
+    不进审计列，收据的六个契约键原样保留。"""
+    submitter = _FakeSubmitter(
+        results={
+            "600036.SH": _FakeOutcome(
+                order_id="ord-1",
+                mirror={
+                    "status": "skipped",
+                    "reason": "broker_not_qmt_exec:tdx_bridge",
+                    "order_id": "",
+                    "client_order_id": "mir-lld-1",
+                    "limit_price": 10.1,
+                    "order_value": 1010.0,
+                    "symbol": "600036.SH",  # 白名单外：丢弃
+                    "internal_seq": 7,  # 白名单外：丢弃
+                },
+            )
+        }
+    )
+    outcome = await dx.execute_batch(
+        _batch(_sell("600036.SH", 1.0)),
+        round_id="rnd-1",
+        holdings=_mirror_leg_holdings(),
+        quotes=_MIRROR_QUOTES,
+        real=True,
+        submitter=submitter,
+    )
+    assert outcome.real is True
+    assert outcome.outcomes[0]["mirror"] == {
+        "status": "skipped",
+        "reason": "broker_not_qmt_exec:tdx_bridge",
+        # 空串是「没走到那一步」的如实值（None 才剔除），读侧按契约键读
+        "order_id": "",
+        "client_order_id": "mir-lld-1",
+        "limit_price": 10.1,
+        "order_value": 1010.0,
+        "intent": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_outcomes_mirror_unknown_when_real_round_has_no_receipt() -> None:
+    """real 轮但回执缺席（提交异常/替身未接）→ status=unknown：发单意图存在、
+    镜像结果不可知，写 None 或 skipped 都是说谎。"""
+    submitter = _FakeSubmitter(results={"600036.SH": RuntimeError("通道超时")})
+    outcome = await dx.execute_batch(
+        _batch(_sell("600036.SH", 1.0)),
+        round_id="rnd-1",
+        holdings=_mirror_leg_holdings(),
+        quotes=_MIRROR_QUOTES,
+        real=True,
+        submitter=submitter,
+    )
+    assert outcome.outcomes[0]["mirror"] == {"intent": True, "status": "unknown"}
+
+
+@pytest.mark.asyncio
+async def test_outcomes_mirror_duplicate_names_the_sim_dedup() -> None:
+    """real 轮撞模拟幂等键 → 没产生新委托、也没镜像：原因如实写 sim_duplicate
+    （`duplicate` 才是事实，不许写成 skipped/failed）。"""
+    submitter = _FakeSubmitter(
+        results={
+            "600036.SH": _FakeOutcome(
+                duplicate=True, message="duplicate client_order_id"
+            )
+        }
+    )
+    outcome = await dx.execute_batch(
+        _batch(_sell("600036.SH", 1.0)),
+        round_id="rnd-1",
+        holdings=_mirror_leg_holdings(),
+        quotes=_MIRROR_QUOTES,
+        real=True,
+        submitter=submitter,
+    )
+    assert outcome.outcomes[0]["mirror"] == {
+        "intent": True,
+        "status": "duplicate",
+        "reason": "sim_duplicate",
+    }
+
+
+@pytest.mark.asyncio
+async def test_outcomes_mirror_is_none_on_a_sim_round() -> None:
+    """模拟轮没有镜像面（即使替身塞了回执也不认）——None 与 real 轮的
+    status=unknown 是两件事。"""
+    submitter = _FakeSubmitter(
+        results={
+            "600036.SH": _FakeOutcome(mirror={"status": "submitted", "order_id": "r"})
+        }
+    )
+    outcome = await dx.execute_batch(
+        _batch(_sell("600036.SH", 1.0)),
+        round_id="rnd-1",
+        holdings=_mirror_leg_holdings(),
+        quotes=_MIRROR_QUOTES,
+        real=False,
+        submitter=submitter,
+    )
+    assert outcome.real is False
+    assert outcome.outcomes[0]["mirror"] is None
+
+
+def test_mirror_segment_keeps_status_unknown_for_an_empty_receipt() -> None:
+    """回执是空映射（替身只给 `mirror={}`）→ 也得带 status，读侧才不用猜形状。"""
+    assert dx._mirror_segment({}, real=True, duplicate=False) == {
+        "status": "unknown",
+        "intent": True,
+    }

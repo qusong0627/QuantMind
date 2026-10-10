@@ -346,6 +346,49 @@ class TestFieldCarry:
         )
         assert rows[0].armed is False and rows[0].reject_reason == ""
 
+    def test_mirror_outcome_lands_on_the_row(self) -> None:
+        """P2-2：执行段的逐条 mirror 段原样落行（real 面回执的持久面）。"""
+        seg = {"intent": True, "status": "skipped", "reason": "whitelist"}
+        rows = build_records(
+            _rows({"action": "buy", "code": "600519.SH", "pct": 0.1}),
+            round_id="r1",
+            agent="m",
+            trade_date=date(2026, 9, 23),
+            decided_at=_TS,
+            outcomes={0: {"armed": False, "mirror": seg}},
+        )
+        assert rows[0].mirror == seg
+
+    def test_missing_mirror_is_none_not_fabricated(self) -> None:
+        """没有 mirror 段（模拟轮/守护段）→ None：不许拿 `{"intent": False}` 之类
+        的默认形状冒充「记录过了」。"""
+        rows = build_records(
+            _rows({"action": "buy", "code": "600519.SH", "pct": 0.1}),
+            round_id="r1",
+            agent="m",
+            trade_date=date(2026, 9, 23),
+            decided_at=_TS,
+            outcomes={0: {"armed": True}},
+        )
+        assert rows[0].mirror is None
+
+    def test_unreadable_mirror_is_treated_as_missing_with_a_warning(
+        self, caplog
+    ) -> None:
+        """怪值（生产方接线错了）→ 按缺失处理但留 warning：静默吞掉会让审计行
+        看起来像「没镜像过」。"""
+        with caplog.at_level("WARNING"):
+            rows = build_records(
+                _rows({"action": "buy", "code": "600519.SH", "pct": 0.1}),
+                round_id="r1",
+                agent="m",
+                trade_date=date(2026, 9, 23),
+                decided_at=_TS,
+                outcomes={0: {"mirror": "skipped"}},
+            )
+        assert rows[0].mirror is None
+        assert any("mirror" in r.getMessage() for r in caplog.records)
+
     def test_pool_ctx_absent_is_null_not_off(self) -> None:
         """未插桩 = NULL；「池外」是**插桩后**的一种取值，两者不可混同。"""
         rows = build_records(
@@ -415,6 +458,9 @@ class TestUpdateCols:
             "reject_reason",
             "notes",
             "order_id",
+            # P2-2：镜像段是**执行结果**（real 面的回执），随执行拨刷新；
+            # 它记录的是「真单出去没有」，与决策原文无关，不违反先写为准。
+            "mirror",
         }
         assert set(update_cols(priced=True)) == {
             "entry_date",
@@ -543,6 +589,7 @@ class TestRoundTrip:
             notes=("注记一",),
             context_meta={"prompt": "sha256:abc"},
             pool_ctx={"state": "shown"},
+            mirror={"intent": True, "status": "submitted", "order_id": "real-1"},
         )
         assert from_record(record_values(rec)) == rec
 
@@ -559,16 +606,27 @@ class TestRoundTrip:
     def test_jsonb_columns_read_back_from_text_mode(self) -> None:
         """psycopg2 文本模式下 JSONB 读回来是 **str**——不能当 dict 用。"""
         row = record_values(
-            _rec(notes=("a",), context_meta={"k": 1}, pool_ctx={"state": "off"})
+            _rec(
+                notes=("a",),
+                context_meta={"k": 1},
+                pool_ctx={"state": "off"},
+                mirror={"intent": True, "status": "skipped", "reason": "whitelist"},
+            )
         )
         as_text = {
             **row,
             "notes": json.dumps(row["notes"]),
             "context_meta": json.dumps(row["context_meta"]),
             "pool_ctx": json.dumps(row["pool_ctx"]),
+            "mirror": json.dumps(row["mirror"]),
         }
         back = from_record(as_text)
         assert back.notes == ("a",)
+        assert back.mirror == {
+            "intent": True,
+            "status": "skipped",
+            "reason": "whitelist",
+        }
         assert back.context_meta == {"k": 1}
         assert back.pool_ctx == {"state": "off"}
 

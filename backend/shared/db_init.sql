@@ -2594,7 +2594,9 @@ CREATE INDEX IF NOT EXISTS idx_ghost_ledger_user ON qm_risk_ghost_ledger (tenant
 -- 找错过一次），送达可靠性低一档——理由详见 contract 模块 docstring。
 --
 -- decided_at 一律 TIMESTAMPTZ + aware UTC（瞬时列口径）；审计字段先写为准，
--- 只有执行结果（armed/reject_reason/notes/order_id）与定价列可被后续写入刷新。
+-- 只有执行结果（armed/reject_reason/notes/order_id/mirror）与定价列可被后续写入刷新。
+-- mirror（P2-2 real 面回执）：逐条镜像段 {"intent", "status", "reason", …}；NULL =
+-- 无镜像面（模拟轮/无腿），与 real 轮的 status="unknown"（结果不可知）是两件事。
 -- fwd 存各期收益明细，未到期/不可成交一律 null 而非 0；tags 存入场前形态标签
 -- （「追高/超跌」这类归因分组），历史不足时为空数组而不是猜一个。
 -- ---------------------------------------------------------------------------
@@ -2626,6 +2628,7 @@ CREATE TABLE IF NOT EXISTS qm_decision_ledger (
     reject_reason  TEXT NOT NULL DEFAULT '',
     notes          JSONB NOT NULL DEFAULT '[]',
     order_id       VARCHAR(64) NOT NULL DEFAULT '',
+    mirror         JSONB,
     pool_ctx       JSONB,
     context_meta   JSONB NOT NULL DEFAULT '{}',
     entry_date     DATE,

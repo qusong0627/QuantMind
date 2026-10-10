@@ -427,6 +427,10 @@ class RoundDeps:
     real_enabled: Callable[[], bool]
     #: () → 当前北京时间（aware）
     now: Callable[[], datetime]
+    #: () → (真单镜像通道是否就绪, 不就绪原因)（P2-2）。口径与镜像链路同一实现
+    #: （``real_mirror_service.real_trading_ready``）。``None``/探测失败 = 探不到，
+    #: 审计记 None——绝不把「没探测」粉饰成「就绪」。生产接线见 `default_round_deps`。
+    mirror_ready: Callable[[], tuple[bool, str]] | None = None
     #: () → 名册（P2.9）：**一家一项**，顺序即执行顺序（``None``/空 = 单家路径，
     #: 走 ``load_llm`` 那一条）。解析失败上抛，由 tick 收成「一家都跑不动」。
     roster: Callable[[], Sequence[AgentRun]] | None = None
@@ -714,10 +718,32 @@ def context_meta(**kw: Any) -> dict[str, Any]:
             "present": excluded.present,
             "symbols": len(excluded.symbols),
         },
+        "mirror": mirror_meta(kw.get("mirror")),
         "ledger": ledger_meta(kw.get("ledger")),
         "sources": dict(position_source_meta(kw["pos_meta"])),
         "notes": list(kw["notes"]),
     }
+
+
+def mirror_meta(probe: Any) -> dict[str, Any] | None:
+    """真单镜像就绪段（P2-2，审计 H2/M9）：``{"ready": bool, "reason": str}``。
+
+    ``ready`` 语义 = 「此刻若发真单，镜像闸门放不放行」（``ENABLE_REAL_TRADING`` +
+    该市场选定 ``qmt_exec``，与镜像链路同一实现）。区别于逐腿 mirror 段（那是**结果**），
+    这段是**通道就绪**——两段合读才能回答「模拟轮为什么没镜像出去」与「real 轮单为什么
+    没出去」这两个不同的问题。
+
+    ``probe`` 不是 ``(bool, 原因)`` 形状（未接线/探测失败/老替身）→ ``None``：
+    探不到**不许**回落 True——那会把「没探测」写成「通道就绪」，正是真单面静默
+    （H2）要消灭的形态。
+    """
+    if (
+        isinstance(probe, (tuple, list))
+        and len(probe) == 2
+        and isinstance(probe[0], bool)
+    ):
+        return {"ready": probe[0], "reason": str(probe[1] or "")}
+    return None
 
 
 def ledger_meta(read: Any) -> dict[str, Any]:

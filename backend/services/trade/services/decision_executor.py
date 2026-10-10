@@ -456,6 +456,45 @@ async def _read_real_pending(
 
 
 # ── 结果对象 ─────────────────────────────────────────────────────────
+#: 镜像回执落审计行的白名单（P2-2）：收据原文可能夹带引擎内部字段，审计列是全量
+#: 取证面、宁窄勿宽；``intent`` 由 :func:`_mirror_segment` 补写（「这腿想过镜像没有」）。
+_MIRROR_KEEP: tuple[str, ...] = (
+    "status",
+    "reason",
+    "order_id",
+    "client_order_id",
+    "limit_price",
+    "order_value",
+)
+
+
+def _mirror_segment(
+    mirror: Mapping[str, Any] | None, *, real: bool, duplicate: bool
+) -> dict[str, Any] | None:
+    """一条腿的镜像段（P2-2，审计 H2/M9）：**意图与事实分列**，缺失绝不粉饰。
+
+    - ``real=False``（模拟轮）→ ``None``：镜像面不存在，不是「未回执」；
+    - ``real=True`` 且有回执 → 白名单归一 + ``intent=True``（status 取值见
+      ``real_mirror_service``：skipped/queued/submitted/duplicate/failed/error）；
+    - ``real=True`` 且模拟侧幂等命中 → 没产生新委托、也没镜像：原因如实写
+      ``sim_duplicate``（收据的 ``duplicate`` 才是事实，不许写成 skipped/failed）；
+    - ``real=True`` 而回执缺席（提交异常/替身未接）→ ``status=unknown``：
+      发单意图存在、镜像结果不可知，写 None 或 skipped 都是说谎。
+    """
+    if not real:
+        return None
+    if isinstance(mirror, Mapping):
+        seg: dict[str, Any] = {
+            k: mirror[k] for k in _MIRROR_KEEP if mirror.get(k) is not None
+        }
+        seg.setdefault("status", "unknown")
+        seg["intent"] = True
+        return seg
+    if duplicate:
+        return {"intent": True, "status": "duplicate", "reason": "sim_duplicate"}
+    return {"intent": True, "status": "unknown"}
+
+
 @dataclass(frozen=True)
 class LegReceipt:
     """一条腿的提交回执（成功失败同构；``duplicate`` 是幂等命中，**不是**失败）。"""
@@ -495,6 +534,9 @@ class ExecutionOutcome:
     #: 非空 = 本轮**一张单都没发**（目前只有「在途账读不到」一种成因）。整段文案直接
     #: 写进审计行的 ``reject_reason``，让「为什么这一轮什么都没做」可查。
     aborted: str = ""
+    #: 本轮是否 real 轮（镜像意图的口径）：:attr:`outcomes` 的逐腿 mirror 段据此把
+    #: 「想镜像但没回执」与「模拟轮根本没有镜像面」分开。缺省 False = 无镜像面。
+    real: bool = False
 
     @property
     def outcomes(self) -> dict[int, dict[str, Any]]:
@@ -503,6 +545,8 @@ class ExecutionOutcome:
         覆盖「有腿的」与「被拦的」两类；``noop``/``watch`` 故意不进：它们的
         「为什么没单」就在决策原文里（模型说了 hold / watch），系统再编一条
         ``reject_reason`` 等于把模型的话复述成系统的话，反而分不清是谁的决定。
+        有回执的腿附带 ``mirror`` 段（P2-2）：真实意图与镜像结果分列，口径见
+        :func:`_mirror_segment`。
         """
         out: dict[int, dict[str, Any]] = {}
         for veto in self.plan.vetoes:
@@ -520,6 +564,9 @@ class ExecutionOutcome:
                 "reject_reason": "" if receipt.success else receipt.message,
                 "notes": (),
                 "order_id": receipt.order_id,
+                "mirror": _mirror_segment(
+                    receipt.mirror, real=self.real, duplicate=receipt.duplicate
+                ),
             }
         for leg in self.plan.legs:
             # 有腿但没回执 = 提交循环还没轮到它就结束了（aborted / 异常上抛）
@@ -934,7 +981,9 @@ async def execute_batch(
                     message=f"{type(exc).__name__}: {exc}"[:300],
                 )
             )
-    return ExecutionOutcome(round_id=round_id, plan=plan, receipts=tuple(receipts))
+    return ExecutionOutcome(
+        round_id=round_id, plan=plan, receipts=tuple(receipts), real=bool(real)
+    )
 
 
 async def run_round(

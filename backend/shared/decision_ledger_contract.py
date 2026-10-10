@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     reject_reason  TEXT NOT NULL DEFAULT '',
     notes          JSONB NOT NULL DEFAULT '[]',
     order_id       VARCHAR(64) NOT NULL DEFAULT '',
+    mirror         JSONB,
     pool_ctx       JSONB,
     context_meta   JSONB NOT NULL DEFAULT '{{}}',
     entry_date     DATE,
@@ -125,9 +126,13 @@ CREATE INDEX IF NOT EXISTS idx_decision_ledger_unpriced ON {TABLE} (trade_date) 
 #: 报错要等到线上第一次写入（`UndefinedColumn`）。故每加一列就在此登记一行，
 #: 并同步 ``db_init.sql``；契约测试逐列比对两份 DDL。
 #:
-#: 本表当前无写入方（P2.2 才接），补列是一次性的冷表 DDL；表一旦热起来，加列要先
-#: 按 ``signal_contract`` 那套（锁窗口 + 调用方事务纪律）评估，不能无条件 ADD。
-_COLUMN_TOPUPS: tuple[tuple[str, str], ...] = (("tags", "JSONB NOT NULL DEFAULT '[]'"),)
+#: ``tags`` 登记时本表尚无增量写压，补列是一次性的冷表 DDL；表热起来后加列要先按
+#: ``signal_contract`` 那套（锁窗口 + 调用方事务纪律）评估，不能无条件 ADD。
+#: ``mirror``（P2-2 real 面回执）自接入起即有写入，本地/线上老表靠这条补列长出来。
+_COLUMN_TOPUPS: tuple[tuple[str, str], ...] = (
+    ("tags", "JSONB NOT NULL DEFAULT '[]'"),
+    ("mirror", "JSONB"),
+)
 
 
 _COLUMNS_SQL = (

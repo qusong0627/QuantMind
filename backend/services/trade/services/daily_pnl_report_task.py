@@ -14,6 +14,12 @@
 user 别名，与实盘账户页/风控档位同一口径，禁另起一套）。当日盈亏金额 =
 总资产 − 日初权益；百分比走 ``resolve_daily_pnl_pct`` 与卡片逐位同源。
 
+当日有真单镜像事件时（P2-2），附一段**镜像台账**（``mirror:skipped`` /
+``mirror:failed`` 两本账的当日计数，按原因聚合 Top-N）——镜像跳过/失败此前只在
+双轨对账里可见，而那份报告只在**有未解释缺口**时才推 QQ；一切都被解释的「安静日」
+里运营看不到「今天其实跳过了 N 笔真单」。两本账都空则不出该段（空段会被读成
+「镜像在跑且一切正常」，而「镜像根本没跑」由决策审计行的 mirror 段回答）。
+
 纪律：
 * 当日无台账行（节假日 / 桥停更）→ **不发送、不造假报表**，不落 done 标记，
   稍后周期继续等（数据迟到仍以当天口径补发，过 0 点作废）；
@@ -114,8 +120,46 @@ def _fmt_signed_pct(value: float) -> str:
     return f"{sign}{abs(rounded):.2f}%"
 
 
-def build_report(channels: list[dict], day: date) -> tuple[str, str] | None:
-    """组装 (title, content)；无任何通道数据返回 None（调用方据此不发送）。"""
+def _format_reason_counts(counts: dict, limit: int = 5) -> str:
+    """``{"symbol:reason": n}`` → ``reason×n、reason×n``（按原因聚合、Top-N）。
+
+    ``reason`` 自身可能带冒号（``broker_not_qmt_exec:tdx_bridge``），故只按**第一个**
+    冒号切符号段；切不出结构（无冒号）的字段名原样当原因——宁可显示得糙，不可静默丢。
+    """
+    by_reason: dict[str, int] = {}
+    for field, n in (counts or {}).items():
+        name = str(field)
+        reason = name.split(":", 1)[1] if ":" in name else name
+        try:
+            by_reason[reason] = by_reason.get(reason, 0) + int(n)
+        except (TypeError, ValueError):
+            continue
+    top = sorted(by_reason.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    return "、".join(f"{reason}×{n}" for reason, n in top)
+
+
+def _mirror_block(mirror: dict) -> str:
+    """镜像台账段（P2-2）：跳过/失败计数 + 原因 Top-N（失败带对账提示）。"""
+    skipped = int(mirror.get("skipped_total") or 0)
+    failed = int(mirror.get("failed_total") or 0)
+    lines = ["**真单镜像 · 当日**", f"跳过 {skipped} 笔 ｜ 失败 {failed} 笔"]
+    if skipped:
+        lines.append(f"跳过原因：{_format_reason_counts(mirror.get('skipped') or {})}")
+    if failed:
+        lines.append(
+            f"失败原因：{_format_reason_counts(mirror.get('failed') or {})}"
+            "（模拟已成交而真单未成，缺口以双轨对账为准）"
+        )
+    return "\n".join(lines)
+
+
+def build_report(
+    channels: list[dict], day: date, mirror: dict | None = None
+) -> tuple[str, str] | None:
+    """组装 (title, content)；无任何通道数据返回 None（调用方据此不发送）。
+
+    ``mirror`` 为 :func:`collect_mirror_stats` 的当日镜像统计（无事件 = None）。
+    """
     if not channels:
         return None
     title = f"收盘收益 · {day.isoformat()}"
@@ -156,6 +200,10 @@ def build_report(channels: list[dict], day: date) -> tuple[str, str] | None:
             if base_sum > 0 and all(c.get("day_pnl_pct") is not None for c in channels):
                 total_line += f"（{_fmt_signed_pct(sum_pnl / base_sum * 100.0)}）"
         blocks.append(total_line)
+    if mirror and (
+        int(mirror.get("skipped_total") or 0) or int(mirror.get("failed_total") or 0)
+    ):
+        blocks.append(_mirror_block(mirror))
     return title, "\n\n".join(blocks)
 
 
@@ -210,6 +258,32 @@ async def collect_day_channels(db, day: date) -> list[dict]:
             }
         )
     return channels
+
+
+def collect_mirror_stats(redis, day: date) -> dict | None:
+    """当日真单镜像台账（P2-2）：跳过/失败计数，供报表出镜像段。
+
+    读侧走 ``real_mirror_service.load_skips`` / ``load_failures``（两本台账的
+    唯一出处，与双轨对账同一口径）。**两本账都空 → None**：当日无镜像事件，
+    报表不出镜像段——空段会被读成「镜像在跑且一切正常」，而「镜像根本没跑」
+    这个问题归决策审计行的 mirror 段回答，不归日报。
+    """
+    from backend.services.live_trading.services.real_mirror_service import (
+        load_failures,
+        load_skips,
+    )
+
+    date_str = day.strftime("%Y%m%d")
+    skips = load_skips(redis, date_str)
+    failures = load_failures(redis, date_str)
+    if not skips and not failures:
+        return None
+    return {
+        "skipped": skips,
+        "failed": failures,
+        "skipped_total": int(sum(skips.values())),
+        "failed_total": int(sum(failures.values())),
+    }
 
 
 # ---------- 发送 ----------
@@ -329,7 +403,16 @@ async def run_daily_pnl_report(redis, *, today: date | None = None, db=None) -> 
         logger.error("[DailyPnlReport] 台账读取失败: %s", exc, exc_info=True)
         return {"date": date_str, "sent": False, "error": f"ledger_read_failed: {exc}"}
 
-    built = build_report(channels, day)
+    # 镜像台账（P2-2）：读失败只是缺一段增量信息，**不拖垮报表**（与台账读的
+    # fail-closed 相反——那份是报表本体，这份是旁注）。
+    mirror = None
+    if channels:
+        try:
+            mirror = collect_mirror_stats(redis, day)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DailyPnlReport] 镜像台账读取失败（报表照发）: %s", exc)
+
+    built = build_report(channels, day, mirror=mirror)
     if built is None:
         # 无数据不是失败、也不算送达，但桥停更日通知面不该依旧空白（H11）
         await _register_delivery(

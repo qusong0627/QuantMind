@@ -64,6 +64,7 @@ class _FakeSession:
 class _FakeRedis:
     def __init__(self):
         self.store: dict = {}
+        self.hashes: dict = {}
 
     def set(self, key, value, ex=None, nx=False):
         if nx and key in self.store:
@@ -79,6 +80,9 @@ class _FakeRedis:
 
     def delete(self, key):
         self.store.pop(key, None)
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
 
 
 def _fake_redis():
@@ -160,7 +164,122 @@ class TestBuildReport:
         assert "当日 +¥0.00（+0.00%）" in content
 
 
-# ── 数据收集：当日行 + 家族读 ─────────────────────────────────────────
+# ── 镜像段（P2-2）：跳过/失败台账进日报 ──────────────────────────────
+
+
+class TestMirrorBlock:
+    def _mirror(self, **kw):
+        base = {
+            "skipped": {"SH600036:whitelist": 2, "SZ000001:outside_trading_hours": 1},
+            "failed": {"SH600519:timeout": 1},
+            "skipped_total": 3,
+            "failed_total": 1,
+        }
+        base.update(kw)
+        return base
+
+    def test_block_appears_when_mirror_events_exist(self):
+        _, content = task.build_report(
+            [TestBuildReport()._tdx()], date(2026, 10, 8), mirror=self._mirror()
+        )
+
+        assert "**真单镜像 · 当日**" in content
+        assert "跳过 3 笔 ｜ 失败 1 笔" in content
+        assert "whitelist×2" in content
+        assert "timeout×1" in content
+
+    def test_no_block_without_mirror(self):
+        """模拟轮/无镜像事件 → 无镜像段（空段会被读成「镜像在跑且正常」）。"""
+        _, content = task.build_report([TestBuildReport()._tdx()], date(2026, 10, 8))
+
+        assert "真单镜像" not in content
+
+    def test_no_block_when_both_ledgers_are_empty(self):
+        mirror = self._mirror(skipped={}, failed={}, skipped_total=0, failed_total=0)
+
+        _, content = task.build_report(
+            [TestBuildReport()._tdx()], date(2026, 10, 8), mirror=mirror
+        )
+
+        assert "真单镜像" not in content
+
+    def test_reason_with_colon_keeps_its_tail(self):
+        """拒因自身带冒号（broker_not_qmt_exec:tdx_bridge）→ 按**第一个**冒号切，
+        符号段不吞拒因。"""
+        mirror = self._mirror(
+            skipped={"SH600036:broker_not_qmt_exec:tdx_bridge": 1},
+            skipped_total=1,
+            failed={},
+            failed_total=0,
+        )
+
+        _, content = task.build_report(
+            [TestBuildReport()._tdx()], date(2026, 10, 8), mirror=mirror
+        )
+
+        assert "broker_not_qmt_exec:tdx_bridge×1" in content
+
+
+class TestCollectMirrorStats:
+    def test_reads_both_ledgers_and_aggregates(self):
+        redis = _fake_redis()
+        redis.client.hashes["mirror:skipped:20261008"] = {
+            "SH600036:whitelist": "2",
+            "SH600036:whitelist:detail": '{"side": "buy"}',  # detail 行不算计数
+        }
+        redis.client.hashes["mirror:failed:20261008"] = {"SH600519:timeout": "1"}
+
+        stats = task.collect_mirror_stats(redis, date(2026, 10, 8))
+
+        assert stats["skipped"] == {"SH600036:whitelist": 2}
+        assert stats["failed"] == {"SH600519:timeout": 1}
+        assert stats["skipped_total"] == 2
+        assert stats["failed_total"] == 1
+
+    def test_empty_ledgers_yield_none(self):
+        assert task.collect_mirror_stats(_fake_redis(), date(2026, 10, 8)) is None
+
+    @pytest.mark.asyncio
+    async def test_report_carries_the_mirror_block_end_to_end(self, monkeypatch):
+        """发送链：台账有镜像事件 → QQ 文案带镜像段。"""
+        TestRunDailyReport()._patch_fanout(monkeypatch)
+        TestRunDailyReport()._patch_channels(monkeypatch, [_channel_tdx()])
+        sent: dict = {}
+        import backend.shared.qq_notify as qq
+
+        monkeypatch.setattr(
+            qq,
+            "notify",
+            lambda title, content, **k: sent.update(content=content) or True,
+        )
+        redis = _fake_redis()
+        redis.client.hashes["mirror:skipped:20261008"] = {"SH600036:blacklist": "1"}
+
+        await task.run_daily_pnl_report(redis, today=date(2026, 10, 8), db=object())
+
+        assert "真单镜像 · 当日" in sent["content"]
+        assert "blacklist×1" in sent["content"]
+
+    @pytest.mark.asyncio
+    async def test_mirror_read_failure_never_breaks_the_report(self, monkeypatch):
+        """镜像台账读挂（Redis 抖动）→ 报表照发（镜像段是旁注，不是本体）。"""
+        TestRunDailyReport()._patch_fanout(monkeypatch)
+        TestRunDailyReport()._patch_channels(monkeypatch, [_channel_tdx()])
+        import backend.shared.qq_notify as qq
+
+        monkeypatch.setattr(qq, "notify", lambda *a, **k: True)
+
+        def boom(redis, day):
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr(task, "collect_mirror_stats", boom)
+        redis = _fake_redis()
+
+        result = await task.run_daily_pnl_report(
+            redis, today=date(2026, 10, 8), db=object()
+        )
+
+        assert result["sent"] is True
 
 
 class TestCollectDayChannels:

@@ -294,6 +294,16 @@ def default_round_deps() -> RoundDeps:
     async def _run_exec(*, db: Any, **kwargs: Any) -> Any:
         return await run_round(db=db, redis=get_redis(), **kwargs)
 
+    def _mirror_ready() -> tuple[bool, str]:
+        """真单镜像就绪探测（P2-2）：与镜像链路同一实现，**不复刻判定**。
+
+        决策轮是 CN 市场（``build_records(market="CN")``），就绪口径按 CN 读
+        ``broker:selected:CN``；跨市场决策轮落地时这里要跟着市场走。
+        """
+        from backend.services.live_trading.services import real_mirror_service
+
+        return real_mirror_service.real_trading_ready(get_redis(), "CN")
+
     def _write_watch(agent: str, plan: Any) -> Any:
         return write_watch_plan(get_redis(), plan, agent=agent)
 
@@ -343,6 +353,7 @@ def default_round_deps() -> RoundDeps:
         is_trading_day=_is_trading_day,
         is_trading_time=is_trading_time,
         real_enabled=is_real_trading_enabled,
+        mirror_ready=_mirror_ready,
         now=now_cn,
     )
 

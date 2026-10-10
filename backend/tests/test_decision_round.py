@@ -57,6 +57,7 @@ from backend.services.trade.services.decision_round_core import (
     due_slots,
     gate_row_to_pool_row,
     merge_outcomes,
+    mirror_meta,
     pool_row_to_gate_row,
     position_source_meta,
     positions_consistency_issue,
@@ -402,6 +403,9 @@ def make_harness(**over) -> Harness:
         is_trading_time=over.pop("is_trading_time", lambda now: True),
         real_enabled=over.pop("real_enabled", lambda: False),
         now=over.pop("now", lambda: NOW),
+        # 默认不接线镜像探测 = 「探不到」（老替身/未接线），审计段落 None。
+        # 要钉就绪段口径的用例自己传 ``mirror_ready=lambda: (False, "…")``。
+        mirror_ready=over.pop("mirror_ready", None),
         # 默认无名册 = 单家路径（历史行为）。多模型用例自己传 ``roster=``。
         roster=over.pop("roster", None),
     )
@@ -1274,6 +1278,67 @@ async def test_missing_exclusion_list_is_noted_but_does_not_stop_the_round():
     assert result.status == R.STATUS_OK
     notes = h.log["ledger"][0][0].context_meta["notes"]
     assert any("排除名单未导入" in n for n in notes)
+
+
+# ── 真单镜像就绪段（P2-2，审计 H2/M9）───────────────────────────────
+# 这段记的是**通道就绪**（此刻发真单，镜像闸门放不放行），与逐腿 mirror 段
+# （那是结果）是两件事；两段合读才能答「模拟轮为什么没镜像出去」。
+# 核心纪律：探不到 → None，绝不回落 True（那正是真单面静默要消灭的形态）。
+def test_mirror_meta_only_accepts_a_bool_and_a_reason():
+    """归一：``(bool, 原因)`` 两种序列形态收，怪形状一律 None（不猜）。"""
+    assert mirror_meta((True, "")) == {"ready": True, "reason": ""}
+    assert mirror_meta((False, "real_trading_disabled")) == {
+        "ready": False,
+        "reason": "real_trading_disabled",
+    }
+    assert mirror_meta([False, None]) == {"ready": False, "reason": ""}
+    # 原因自身可含冒号（如 broker_not_qmt_exec:tdx_bridge）：原样保留
+    assert mirror_meta((False, "broker_not_qmt_exec:tdx_bridge"))["reason"] == (
+        "broker_not_qmt_exec:tdx_bridge"
+    )
+    # 怪形状：探不到就是探不到，不许编
+    assert mirror_meta(None) is None
+    assert mirror_meta("ready") is None
+    assert mirror_meta((True,)) is None
+    assert mirror_meta(("yes", "就绪")) is None  # 1/0、"yes" 不算 bool
+    assert mirror_meta((1, "就绪")) is None
+
+
+@pytest.mark.asyncio
+async def test_context_meta_records_the_mirror_readiness_probe():
+    """接线了就绪探测 → 审计行 mirror 段如实落 ``ready``+原因（含冒号的尾段保留）。"""
+    h = make_harness(mirror_ready=lambda: (False, "broker_not_qmt_exec:tdx_bridge"))
+    await run_once(SLOT_0935, deps=h.deps, now=NOW)
+    meta = h.log["ledger"][0][0].context_meta
+    assert meta["mirror"] == {
+        "ready": False,
+        "reason": "broker_not_qmt_exec:tdx_bridge",
+    }
+
+
+@pytest.mark.asyncio
+async def test_context_meta_mirror_is_none_when_the_probe_is_unwired():
+    """未接线（老替身/旧部署）= 探不到：写 None，**绝不**写成就绪（H2 的静默形态）。"""
+    h = make_harness()
+    await run_once(SLOT_0935, deps=h.deps, now=NOW)
+    meta = h.log["ledger"][0][0].context_meta
+    assert "mirror" in meta and meta["mirror"] is None
+
+
+@pytest.mark.asyncio
+async def test_mirror_probe_failure_is_none_with_a_warning_and_never_blocks(caplog):
+    """探测抛异常：记 None + warning（轮照跑、账照落）——探测绝不阻断决策轮。"""
+
+    def boom():
+        raise RuntimeError("Redis 没连上")
+
+    h = make_harness(mirror_ready=boom)
+    with caplog.at_level(logging.WARNING):
+        result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+    assert result.status == R.STATUS_OK
+    meta = h.log["ledger"][0][0].context_meta
+    assert meta["mirror"] is None
+    assert any("镜像就绪探测失败" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

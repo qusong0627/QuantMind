@@ -16,7 +16,7 @@
 `ON CONFLICT` 时能覆盖哪些列由 :func:`update_cols` **唯一表达**，分两拨：
 
 * 决策拨（未定价）：命中已有行只刷新 ``armed`` / ``reject_reason`` / ``notes`` /
-  ``order_id``——**不碰**「模型说了什么」（action/code/pct/价位/reason/invalidation）。
+  ``order_id`` / ``mirror``——**不碰**「模型说了什么」（action/code/pct/价位/reason/invalidation）。
   重跑一轮时，第一次真的下过单、第二次因故没下，覆盖决策字段就等于抹掉「当时它
   说了什么」这件**只有审计表能回答**的事；而执行结果刷新是对的（后一次才是现状）。
 * 定价拨（带 ``fwd``）：命中已有行只刷新定价列。与 P1.6 影子账同形——
@@ -62,7 +62,13 @@ KIND_SELL = "sell"
 KIND_NONE = "none"
 
 #: 执行结果列（可刷新；写纪律 1）
-_OUTCOME_COLS: tuple[str, ...] = ("armed", "reject_reason", "notes", "order_id")
+_OUTCOME_COLS: tuple[str, ...] = (
+    "armed",
+    "reject_reason",
+    "notes",
+    "order_id",
+    "mirror",
+)
 
 #: 定价列（只在行确已定过价时写入；写纪律 1）
 #: `tags` 与 `tradable` 同批：它们都由**入场日那天之前/当天**的行情推出，是定价的
@@ -190,6 +196,10 @@ class DecisionRecord:
     reject_reason: str = ""
     notes: tuple[str, ...] = ()
     order_id: str = ""
+    #: 逐条镜像段（P2-2）：``{"intent": bool, "status": str, "reason"/"order_id"/…}``。
+    #: ``None`` = 无镜像面（模拟轮/无腿），与「real 轮的镜像结果不可知」
+    #: （``status="unknown"``）是两件事，读侧不许互相顶替。
+    mirror: Mapping[str, Any] | None = None
     #: 上下文快照（`pool_ctx` 为 None = 本轮未插桩，与「池外」是两件事）
     pool_ctx: Mapping[str, Any] | None = None
     context_meta: Mapping[str, Any] = field(default_factory=dict)
@@ -216,6 +226,22 @@ def _sym(code: str) -> str:
         return raw
 
 
+def _as_mirror(v: Any) -> dict[str, Any] | None:
+    """镜像段入列前收口：只收 Mapping，其余按缺失处理并告警。
+
+    「没有镜像面」（``None``）是正常值；非 None 又读不懂的怪值说明生产方接线错了，
+    静默吞掉会让审计行看起来像「没镜像过」——记一条 warning 留线索。
+    """
+    if v is None:
+        return None
+    if isinstance(v, Mapping):
+        return dict(v)
+    logger.warning(
+        "[DecisionLedger] mirror 段不是映射（%s），按缺失处理", type(v).__name__
+    )
+    return None
+
+
 def build_records(
     decisions: Iterable[Decision],
     *,
@@ -233,8 +259,8 @@ def build_records(
 ) -> list[DecisionRecord]:
     """一轮决策 → 审计行（**逐条不丢**：含 ``hold`` 与无码行，含被拒的）。
 
-    :param outcomes: 序号 → 执行结果（``armed``/``reject_reason``/``notes``/``order_id``），
-        由 ``watch_map.WatchPlan.outcomes()`` 之类的映射层给出；缺席 = 尚无结果。
+    :param outcomes: 序号 → 执行结果（``armed``/``reject_reason``/``notes``/``order_id``/
+        ``mirror``），由 ``watch_map.WatchPlan.outcomes()`` 之类的映射层给出；缺席 = 尚无结果。
     :param pool_ctx: 代码（**原始写法**）→ 该行本轮候选池位置戳；缺席 = 写 NULL
         （NULL 与「池外」不是一回事，见 :attr:`DecisionRecord.pool_ctx`）。
     """
@@ -285,6 +311,7 @@ def build_records(
                 reject_reason=str(res.get("reject_reason") or ""),
                 notes=tuple(str(n)[:_NOTE_LIMIT] for n in notes),
                 order_id=str(res.get("order_id") or ""),
+                mirror=_as_mirror(res.get("mirror")),
                 pool_ctx=dict(stamps[code_raw]) if code_raw in stamps else None,
                 context_meta=dict(ctx),
             )
@@ -441,6 +468,7 @@ def record_values(rec: DecisionRecord) -> dict[str, Any]:
         "reject_reason": rec.reject_reason,
         "notes": list(rec.notes),
         "order_id": rec.order_id,
+        "mirror": dict(rec.mirror) if rec.mirror is not None else None,
         "pool_ctx": dict(rec.pool_ctx) if rec.pool_ctx is not None else None,
         "context_meta": dict(rec.context_meta or {}),
         "entry_date": _to_date(rec.entry_date),
@@ -517,6 +545,7 @@ def from_record(rec: Any) -> DecisionRecord:
     meta = _as_json(m.get("context_meta"))
     fwd = _as_json(m.get("fwd"))
     tags = _as_json(m.get("tags"))
+    mirror = _as_json(m.get("mirror"))
     return DecisionRecord(
         id=str(m.get("id") or ""),
         pool_key=str(m.get("pool_key") or ""),
@@ -545,6 +574,7 @@ def from_record(rec: Any) -> DecisionRecord:
         reject_reason=str(m.get("reject_reason") or ""),
         notes=tuple(str(n) for n in notes) if isinstance(notes, list) else (),
         order_id=str(m.get("order_id") or ""),
+        mirror=dict(mirror) if isinstance(mirror, dict) else None,
         pool_ctx=dict(pool_ctx) if isinstance(pool_ctx, dict) else None,
         context_meta=dict(meta) if isinstance(meta, dict) else {},
         entry_date=_to_date(m.get("entry_date")),
@@ -610,8 +640,8 @@ _COLS = (
     "id, pool_key, round_id, tenant_id, user_id, agent, market, trade_date, decided_at, "
     "code, code_raw, action, kind, pct, pct_state, pct_raw, confidence, stop_loss, "
     "take_profit, move_stop, invalidation, risk_amount, reason, armed, reject_reason, "
-    "notes, order_id, pool_ctx, context_meta, entry_date, entry_px, tradable, fwd, tags, "
-    "priced_at"
+    "notes, order_id, mirror, pool_ctx, context_meta, entry_date, entry_px, tradable, "
+    "fwd, tags, priced_at"
 )
 
 
@@ -793,6 +823,7 @@ def _table() -> Any:
         Column("reject_reason", String),
         Column("notes", JSONB),
         Column("order_id", String(64)),
+        Column("mirror", JSONB),
         Column("pool_ctx", JSONB),
         Column("context_meta", JSONB),
         Column("entry_date", Date),
