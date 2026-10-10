@@ -107,7 +107,7 @@ describe('startMining：带 docId 时 JSON body 变体', () => {
     });
     expect(resp.success).toBe(true);
     expect(resp.data?.taskId).toBe('t-99');
-    expect(resp.data?.task.config.userInput).toBe('按论文复现动量因子');
+    expect(resp.data?.task?.config.userInput).toBe('按论文复现动量因子');
   });
 
   test('缺省字段在 body 里补齐后端默认值（请求仍完整）', async () => {
@@ -124,5 +124,148 @@ describe('startMining：带 docId 时 JSON body 变体', () => {
       direction_mode: 'selected',
       doc_id: 'd-1',
     });
+  });
+});
+
+describe('startMining：并行方向数（T-MV-04）', () => {
+  test('N>1 才下发 num_directions（追加在 direction_mode 之后），N=1 不下发', async () => {
+    await startMining({
+      direction: '',
+      directions: ['动量', '波动率', '流动性'],
+      directionMode: 'random',
+      numDirections: 2,
+    });
+
+    const [url] = apiPostMock.mock.calls[0];
+    expect(queryPairs(String(url))).toEqual([
+      ['loop_n', '3'],
+      ['direction', ''],
+      ['directions', '动量'],
+      ['directions', '波动率'],
+      ['directions', '流动性'],
+      ['direction_mode', 'random'],
+      ['num_directions', '2'],
+    ]);
+
+    apiPostMock.mockClear();
+    await startMining({ direction: 'd', numDirections: 1 });
+    const [url1] = apiPostMock.mock.calls[0];
+    expect(queryPairs(String(url1)).some(([k]) => k === 'num_directions')).toBe(false);
+  });
+
+  test('N>1 回执逐条归一：成功进 tasks（各自方向）、失败进 failures、摘要原样', async () => {
+    apiPostMock.mockResolvedValueOnce({
+      data: {
+        data: {
+          task_id: 't-0',
+          items: [
+            {
+              index: 0,
+              task_id: 't-0',
+              status: 'running',
+              queue_position: null,
+              direction: '动量因子',
+              direction_meta: '{"mode":"random"}',
+              error: null,
+            },
+            {
+              index: 1,
+              task_id: 't-1',
+              status: 'queued',
+              queue_position: 2,
+              direction: '波动率因子',
+              direction_meta: null,
+              error: null,
+            },
+            {
+              index: 2,
+              task_id: null,
+              status: 'failed',
+              queue_position: null,
+              direction: '流动性因子',
+              direction_meta: null,
+              error: '队列已满（上限 8）',
+            },
+          ],
+          started: 1,
+          queued: 1,
+          failed: 1,
+          message: 'A股 已派发 2 条方向任务（启动 1 / 排队 1 / 失败 1）',
+        },
+      },
+    });
+
+    const resp = await startMining({
+      direction: '',
+      directions: ['动量因子', '波动率因子', '流动性因子'],
+      directionMode: 'random',
+      numDirections: 3,
+    });
+
+    expect(resp.success).toBe(true);
+    expect(resp.data?.taskId).toBe('t-0');
+    expect(resp.data?.tasks?.map((t) => t.taskId)).toEqual(['t-0', 't-1']);
+    // 每条任务带自己的方向（不是首条方向的回声）
+    expect(resp.data?.tasks?.[0].config.userInput).toBe('动量因子');
+    expect(resp.data?.tasks?.[1].config.userInput).toBe('波动率因子');
+    // 排队条目保留位次语义
+    expect(resp.data?.tasks?.[1].status).toBe('queued');
+    expect(resp.data?.tasks?.[1].queuePosition).toBe(2);
+    expect(resp.data?.failures).toEqual([
+      { direction: '流动性因子', error: '队列已满（上限 8）' },
+    ]);
+    expect(resp.data?.message).toContain('失败 1');
+  });
+
+  test('N>1 全部失败：无任务可展示——taskId 空串、tasks 空、failures 全量、task 缺席', async () => {
+    apiPostMock.mockResolvedValueOnce({
+      data: {
+        data: {
+          task_id: null,
+          items: [
+            {
+              index: 0,
+              task_id: null,
+              status: 'failed',
+              direction: '方向一',
+              error: '队列已满',
+            },
+            {
+              index: 1,
+              task_id: null,
+              status: 'failed',
+              direction: '方向二',
+              error: '硬件锁被占用',
+            },
+          ],
+          started: 0,
+          queued: 0,
+          failed: 2,
+        },
+      },
+    });
+
+    const resp = await startMining({ direction: '', directions: ['方向一', '方向二'], numDirections: 2 });
+
+    expect(resp.data?.taskId).toBe('');
+    expect(resp.data?.task).toBeUndefined();
+    expect(resp.data?.tasks).toEqual([]);
+    expect(resp.data?.failures).toEqual([
+      { direction: '方向一', error: '队列已满' },
+      { direction: '方向二', error: '硬件锁被占用' },
+    ]);
+  });
+
+  test('文档血统不下发 num_directions（body 形态逐字段不变）', async () => {
+    await startMining({
+      direction: 'd',
+      docId: 'd-1',
+      directions: ['动量'],
+      numDirections: 3,
+    });
+
+    const [url, body] = apiPostMock.mock.calls[0];
+    expect(url).toBe('/alpha-agent/evolve');
+    expect(body).not.toHaveProperty('num_directions');
   });
 });

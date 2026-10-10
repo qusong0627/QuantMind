@@ -104,6 +104,8 @@ def _call(payload=None, **over):
         "direction": "",
         "directions": [],
         "direction_mode": "selected",
+        # 直调必须显式传全部 Query 参数：缺省值是 Query() 对象不是 1
+        "num_directions": 1,
         "data_source": "",
     }
     kwargs.update(over)
@@ -321,7 +323,10 @@ async def test_evolve_random_meta_reflects_mining_history_weights(monkeypatch) -
     assert by_dir["方向A"]["attempts"] == 9
     assert by_dir["方向A"]["weight"] == pytest.approx(0.1)
     assert by_dir["方向B"]["attempts"] == 0 and by_dir["方向B"]["weight"] == 1.0
-    assert meta["weighting"] == "blankness" and meta["picked"] == launcher.started["direction"]
+    assert (
+        meta["weighting"] == "blankness"
+        and meta["picked"] == launcher.started["direction"]
+    )
     replayed = random.Random(meta["seed"]).choices(
         [c["direction"] for c in meta["candidates"]],
         weights=[c["weight"] for c in meta["candidates"]],

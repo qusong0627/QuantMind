@@ -269,13 +269,33 @@ export interface MiningStartParams {
   docId?: string;
 }
 
+/** 并行方向数（T-MV-04）：N>1 逐条派发回执里的失败条目（方向 + 后端原文原因） */
+export interface MiningDispatchFailure {
+  direction: string;
+  error: string;
+}
+
+export interface MiningStartResult {
+  /** 单条路径 = 新任务 id；N>1 = 首条成功任务 id（全部失败为空串） */
+  taskId: string;
+  /** 单条路径恒有；N>1 时 = tasks[0]（全部失败时缺席——没有任务可展示） */
+  task?: Task;
+  /** N>1 成功条目（顺序 = 派发顺序）；单条路径缺席 */
+  tasks?: Task[];
+  /** N>1 失败条目：部分成功也如实逐条上报，不装全成功 */
+  failures?: MiningDispatchFailure[];
+  /** 后端回执摘要（启动/排队/失败计数），原样上屏 */
+  message?: string;
+}
+
 export async function startMining(
   params: MiningStartParams,
-): Promise<ApiResponse<{ taskId: string; task: Task }>> {
+): Promise<ApiResponse<MiningStartResult>> {
   const loopN = params.maxRounds ?? params.maxLoops ?? 3;
-  let res: { data?: { data?: { task_id?: string; status?: string } } };
+  let res: { data?: { data?: any } };
   if (params.docId) {
-    // JSON body 变体（与后端 EvolveRequest 字段对齐）；query 路径保持原样
+    // JSON body 变体（与后端 EvolveRequest 字段对齐）；query 路径保持原样。
+    // 文档血统恒为单条（后端 task_id 单列回写）——不下发 num_directions
     res = await apiClient.post('/alpha-agent/evolve', {
       direction: params.direction || '',
       market: params.market || 'a_share',
@@ -298,21 +318,60 @@ export async function startMining(
       if (d && d.trim()) qs.append('directions', d.trim());
     }
     if (params.directionMode) qs.set('direction_mode', params.directionMode);
+    // 并行方向数（T-MV-04）：仅 N>1 才下发——N≤1 的 query 与旧版逐键一致。
+    // N>1 是否真正多派由后端按路径判定（类别方向生效，自由文本恒 1 条）
+    if ((params.numDirections ?? 1) > 1) {
+      qs.set('num_directions', String(params.numDirections));
+    }
     res = await apiClient.post(`/alpha-agent/evolve?${qs.toString()}`);
   }
   const data = res.data?.data ?? {};
+  const configHint = {
+    userInput: params.direction,
+    numDirections: params.numDirections,
+    maxRounds: loopN,
+    universe: params.universe,
+    librarySuffix: params.librarySuffix,
+    qualityGateEnabled: params.qualityGateEnabled,
+    parallelExecution: params.parallelEnabled,
+  };
+  // 并行方向数（T-MV-04）：N>1 的回执带 items（逐条任务/失败）——成功条目归一
+  // 为任务（各自方向进 configHint.userInput），失败条目原样逐条上报
+  if (Array.isArray(data.items)) {
+    const tasks: Task[] = [];
+    const failures: MiningDispatchFailure[] = [];
+    for (const row of data.items) {
+      const itemTaskId = typeof row?.task_id === 'string' ? row.task_id : '';
+      if (!itemTaskId) {
+        failures.push({
+          direction: typeof row?.direction === 'string' ? row.direction : '',
+          error: (typeof row?.error === 'string' && row.error) || '派发失败',
+        });
+        continue;
+      }
+      tasks.push(
+        normalizeAgentTask(
+          {
+            task_id: itemTaskId,
+            status: row?.status,
+            queue_position: row?.queue_position,
+          },
+          { ...configHint, userInput: row?.direction ?? params.direction },
+        ),
+      );
+    }
+    return makeOk({
+      taskId: tasks[0]?.taskId ?? '',
+      task: tasks[0],
+      tasks,
+      failures,
+      message: typeof data.message === 'string' ? data.message : undefined,
+    });
+  }
   const taskId: string = data.task_id ?? '';
   const task = normalizeAgentTask(
     { task_id: taskId, status: data.status ?? 'pending' },
-    {
-      userInput: params.direction,
-      numDirections: params.numDirections,
-      maxRounds: loopN,
-      universe: params.universe,
-      librarySuffix: params.librarySuffix,
-      qualityGateEnabled: params.qualityGateEnabled,
-      parallelExecution: params.parallelEnabled,
-    },
+    configHint,
   );
   return makeOk({ taskId, task });
 }

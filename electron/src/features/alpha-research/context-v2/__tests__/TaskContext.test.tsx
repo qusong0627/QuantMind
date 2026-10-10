@@ -443,3 +443,94 @@ describe('TaskContext：多任务相互独立', () => {
     expect(wsClosed.get('t1')).not.toHaveBeenCalled();
   });
 });
+
+describe('TaskContext：并行方向数（T-MV-04）', () => {
+  test('N>1 回执逐条接纳：全进注册表、各绑传输、焦点给第一条、seq 触发进演化台', async () => {
+    render(
+      <TaskProvider>
+        <Probe />
+      </TaskProvider>,
+    );
+    await flush();
+    const seq0 = handle.ctx.miningStartSeq;
+
+    startMiningMock.mockResolvedValue({
+      success: true,
+      data: {
+        taskId: 'm1',
+        task: mkTask('m1'),
+        tasks: [mkTask('m1'), mkTask('m2', { status: 'queued' }), mkTask('m3')],
+        failures: [],
+        message: 'A股 已派发 3 条方向任务（启动 2 / 排队 1 / 失败 0）',
+      },
+    });
+    await act(async () => {
+      handle.ctx.startMining({ userInput: '' } as any);
+    });
+
+    expect(screen.getByTestId('tasks').textContent).toBe(
+      'm1:running:40,m2:queued:40,m3:running:40',
+    );
+    expect(screen.getByTestId('focused').textContent).toBe('m1');
+    expect([...wsHandlers.keys()].sort()).toEqual(['m1', 'm2', 'm3']);
+    expect(handle.ctx.miningStartSeq).toBe(seq0 + 1);
+    expect(screen.getByTestId('start-error').textContent).toBe('none');
+  });
+
+  test('部分失败：成功条目照常入库，失败摘要进 miningStartError（不装全成功）', async () => {
+    render(
+      <TaskProvider>
+        <Probe />
+      </TaskProvider>,
+    );
+    await flush();
+
+    startMiningMock.mockResolvedValue({
+      success: true,
+      data: {
+        taskId: 'm1',
+        tasks: [mkTask('m1')],
+        failures: [{ direction: '方向二', error: '队列已满（上限 8）' }],
+      },
+    });
+    await act(async () => {
+      handle.ctx.startMining({ userInput: '' } as any);
+    });
+
+    expect(screen.getByTestId('tasks').textContent).toBe('m1:running:40');
+    expect(screen.getByTestId('focused').textContent).toBe('m1');
+    expect(screen.getByTestId('start-error').textContent).toContain('方向二');
+    expect(screen.getByTestId('start-error').textContent).toContain('队列已满');
+  });
+
+  test('全部失败：不留假任务行、焦点不动、不触发自动进演化台，错误逐条上屏', async () => {
+    render(
+      <TaskProvider>
+        <Probe />
+      </TaskProvider>,
+    );
+    await flush();
+    const seq0 = handle.ctx.miningStartSeq;
+
+    startMiningMock.mockResolvedValue({
+      success: true,
+      data: {
+        taskId: '',
+        tasks: [],
+        failures: [
+          { direction: '方向一', error: '队列已满' },
+          { direction: '方向二', error: '硬件锁被占用' },
+        ],
+      },
+    });
+    await act(async () => {
+      handle.ctx.startMining({ userInput: '' } as any);
+    });
+
+    expect(screen.getByTestId('tasks').textContent).toBe('');
+    expect(screen.getByTestId('focused').textContent).toBe('none');
+    expect(handle.ctx.miningStartSeq).toBe(seq0);
+    expect(screen.getByTestId('start-error').textContent).toContain('启动失败');
+    expect(screen.getByTestId('start-error').textContent).toContain('硬件锁被占用');
+  });
+});

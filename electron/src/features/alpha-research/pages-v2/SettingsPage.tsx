@@ -786,7 +786,7 @@ export const SettingsPage: React.FC = () => {
                     className="w-full rounded-lg border border-input bg-background px-4 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary transition-all"
                   />
                   <p className="text-xs text-muted-foreground mt-1">
-                    单次实验同时探索的独立方向数量 (1-10) · <span className="text-warning">后端暂未生效</span>
+                    单次实验同时探索的独立方向数量 (1-10) · 类别方向生效：顺序模式取前 N 条、随机模式优先抽没挖过的方向；自由文本方向恒为 1 条，超出并发上限的任务自动排队
                   </p>
                 </div>
 
@@ -890,7 +890,7 @@ export const SettingsPage: React.FC = () => {
                       启用并行执行
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      允许多个挖掘方向同时运行，显著加快实验速度，但会增加系统负载 · <span className="text-warning">后端暂未生效</span>
+                      多方向并行由「并行方向数」驱动（逐条派发、超限自动排队）；本开关暂未接入后端
                     </div>
                   </div>
                 </label>

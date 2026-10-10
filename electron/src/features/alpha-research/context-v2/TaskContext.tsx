@@ -481,7 +481,36 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
         if (!resp.success || !resp.data) throw new Error(resp.error || 'Failed');
 
-        const taskData = resp.data.task as Task;
+        // 并行方向数（T-MV-04）：N>1 的回执逐条接纳——每任务进注册表并绑定
+        // 自己的传输（与拆解面板 adoptDispatchedTasks 同一语义），焦点给第一条，
+        // 同样触发「开始后自动进演化台」。部分失败随摘要上屏；全失败不留假任务行
+        const dispatched = resp.data.tasks;
+        if (dispatched) {
+          for (const t of dispatched) {
+            upsertMiningTask(t);
+            bindMiningTransport(t.taskId);
+          }
+          if (dispatched.length > 0) {
+            setFocusedTaskId(dispatched[0].taskId);
+            miningStartSeqRef.current += 1;
+            setMiningStartSeq(miningStartSeqRef.current);
+          }
+          const failures = resp.data.failures ?? [];
+          if (failures.length > 0) {
+            const detail = failures
+              .map((f) => `${f.direction || '未指明方向'}：${f.error}`)
+              .join('；');
+            setMiningStartError(
+              dispatched.length > 0
+                ? `已派发 ${dispatched.length} 条方向任务，另有 ${failures.length} 条失败——${detail}`
+                : `启动失败——${detail}`,
+            );
+          }
+          return;
+        }
+
+        const taskData = resp.data.task;
+        if (!taskData) throw new Error(resp.error || 'Failed');
         // 新任务从零开始：清掉任何残留清单与 IC 族头条（缺失=undefined→界面显「—」；
         // 旧实现只清 top10Factors，IC 族残留 0 值，统计卡永远显示 0.0000）
         taskData.metrics = emptyMetrics();

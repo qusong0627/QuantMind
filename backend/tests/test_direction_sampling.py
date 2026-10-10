@@ -36,6 +36,7 @@ from backend.services.engine.alpha_agent.direction_sampling import (  # noqa: E4
     WEIGHTING_UNIFORM_FALLBACK,
     blankness_weights,
     sample_weighted_direction,
+    sample_weighted_directions_n,
 )
 
 
@@ -44,7 +45,9 @@ def _counter(counts: dict[str, int], calls: list | None = None):
 
     async def _c(*, user_id, market, directions):
         if calls is not None:
-            calls.append({"user_id": user_id, "market": market, "directions": directions})
+            calls.append(
+                {"user_id": user_id, "market": market, "directions": directions}
+            )
         return {k: v for k, v in counts.items() if k in directions}
 
     return _c
@@ -83,16 +86,22 @@ async def test_sample_meta_carries_seed_candidates_weights_and_replays() -> None
     assert isinstance(meta["seed"], int)
 
     by_dir = {c["direction"]: c for c in meta["candidates"]}
-    assert [c["direction"] for c in meta["candidates"]] == ["方向A", "方向B", "方向C"], (
-        "候选顺序 = 传入顺序（choices 的累计权重按序展开，重放依赖它）"
-    )
+    assert [c["direction"] for c in meta["candidates"]] == [
+        "方向A",
+        "方向B",
+        "方向C",
+    ], "候选顺序 = 传入顺序（choices 的累计权重按序展开，重放依赖它）"
     assert by_dir["方向A"]["attempts"] == 0 and by_dir["方向A"]["weight"] == 1.0
-    assert by_dir["方向B"]["attempts"] == 4 and by_dir["方向B"]["weight"] == pytest.approx(0.2)
+    assert by_dir["方向B"]["attempts"] == 4 and by_dir["方向B"][
+        "weight"
+    ] == pytest.approx(0.2)
     assert by_dir["方向C"]["weight"] == 1.0
 
     replay_dirs = [c["direction"] for c in meta["candidates"]]
     replay_weights = [c["weight"] for c in meta["candidates"]]
-    replayed = random.Random(meta["seed"]).choices(replay_dirs, weights=replay_weights, k=1)[0]
+    replayed = random.Random(meta["seed"]).choices(
+        replay_dirs, weights=replay_weights, k=1
+    )[0]
     assert replayed == picked, "同 seed 同权重必得同一命中——meta 就是复现凭证"
 
 
@@ -177,3 +186,101 @@ async def test_default_counter_wiring_uses_task_store(monkeypatch) -> None:
 
     assert calls == [{"user_id": "u-7", "market": "crypto", "directions": ["方向A"]}]
     assert meta["candidates"][0]["attempts"] == 2
+
+
+# ── 并行方向数（T-MV-04）：不放回抽 N 条 ─────────────────────────────
+
+
+def _replay_n(meta: dict) -> str:
+    return random.Random(meta["seed"]).choices(
+        [c["direction"] for c in meta["candidates"]],
+        weights=[c["weight"] for c in meta["candidates"]],
+        k=1,
+    )[0]
+
+
+@pytest.mark.asyncio
+async def test_n_picks_are_distinct_and_each_meta_replays_independently() -> None:
+    """逐步不放回：每步 meta 的 candidates = 该步剩余集合，任何一条独立可重放。"""
+    picks = await sample_weighted_directions_n(
+        ["方向A", "方向B", "方向C"],
+        2,
+        user_id="u-1",
+        market="a_share",
+        counter=_counter({"方向A": 2}),
+    )
+
+    assert len(picks) == 2
+    dirs = [d for d, _ in picks]
+    assert len(set(dirs)) == 2, "并行方向互不相同（不放回）"
+
+    for meta in (m for _, m in picks):
+        assert meta is not None
+        assert meta["weighting"] == WEIGHTING_BLANKNESS
+        assert _replay_n(meta) == meta["picked"]
+    # 第 1 步候选 = 全集；第 2 步候选 = 全集减去第 1 步命中
+    first_meta = picks[0][1]
+    second_meta = picks[1][1]
+    assert [c["direction"] for c in first_meta["candidates"]] == [
+        "方向A",
+        "方向B",
+        "方向C",
+    ]
+    assert {c["direction"] for c in second_meta["candidates"]} == {
+        "方向A",
+        "方向B",
+        "方向C",
+    } - {picks[0][0]}
+    # 权重按剩余集合重算，但口径不变：A 挖过 2 次 → 1/3
+    a_first = next(c for c in first_meta["candidates"] if c["direction"] == "方向A")
+    assert a_first["attempts"] == 2 and a_first["weight"] == pytest.approx(1 / 3)
+
+
+@pytest.mark.asyncio
+async def test_n_covering_all_candidates_is_exhaustive_without_lottery() -> None:
+    """N >= 候选数：全集直派（保序去重）、meta=None——没抽签就没有抽签凭证。"""
+    picks = await sample_weighted_directions_n(
+        ["方向B", "方向A", "方向B"],
+        5,
+        user_id="u-1",
+        market="a_share",
+        counter=_counter({}),
+    )
+
+    assert picks == [("方向B", None), ("方向A", None)]
+
+
+@pytest.mark.asyncio
+async def test_n_equals_one_delegates_to_single_sampler() -> None:
+    picks = await sample_weighted_directions_n(
+        ["唯一方向"], 1, user_id="u-1", market="a_share", counter=_counter({})
+    )
+
+    assert len(picks) == 1
+    picked, meta = picks[0]
+    assert picked == "唯一方向" and meta is not None and meta["picked"] == picked
+
+
+@pytest.mark.asyncio
+async def test_n_history_failure_marks_every_meta_uniform_fallback() -> None:
+    async def _boom(*, user_id, market, directions):
+        raise RuntimeError("pg down")
+
+    picks = await sample_weighted_directions_n(
+        ["方向A", "方向B", "方向C"], 2, user_id="u-1", market="a_share", counter=_boom
+    )
+
+    assert len(picks) == 2
+    for _d, meta in picks:
+        assert meta["weighting"] == WEIGHTING_UNIFORM_FALLBACK
+        assert [c["weight"] for c in meta["candidates"]] == [
+            1.0 for _ in meta["candidates"]
+        ]
+
+
+@pytest.mark.asyncio
+async def test_n_rejects_empty_after_cleaning() -> None:
+    with pytest.raises(ValueError):
+        await sample_weighted_directions_n(
+            ["", "   "], 2, user_id="u-1", market="a_share", counter=_counter({})
+        )

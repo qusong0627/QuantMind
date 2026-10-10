@@ -28,6 +28,7 @@ from backend.services.engine.alpha_agent.direction_decompose import (
 )
 from backend.services.engine.alpha_agent.direction_sampling import (
     sample_weighted_direction,
+    sample_weighted_directions_n,
 )
 from backend.services.engine.alpha_agent.doc_gate import require_doc_mining
 from backend.services.engine.alpha_agent.doc_store import get_doc_store
@@ -76,6 +77,9 @@ class EvolveRequest(BaseModel):
     directions: list[str] | None = None
     direction_mode: str | None = None
     data_source: str | None = None
+    #: 并行方向数（T-MV-04）：仅类别路径（directions 非空）且 >1 时一次派 N 条
+    #: 任务；自由文本/文档血统路径忽略（单方向是它们的事实）。
+    num_directions: int | None = Field(None, ge=1, le=10)
     #: 文档血统：来自文档链的挖掘任务带上它（写 rd_agent_mining_tasks.doc_id +
     #: 回写 rd_agent_docs.task_id）；需 ENABLE_DOC_MINING=true
     doc_id: str | None = None
@@ -514,6 +518,127 @@ async def list_markets():
     return {"code": 200, "data": {"markets": markets, "total": len(markets)}}
 
 
+async def _resolve_multi_picks(
+    clean_dirs: list[str],
+    num_directions: int,
+    record_mode: str,
+    *,
+    user_id: str,
+    market: str,
+) -> list[tuple[str, str | None]]:
+    """并行方向数（T-MV-04）：解析一次派发的 N 条方向，返回 ``(direction, meta_json)``。
+
+    纪律与单条路径同型：
+
+    - selected：按传入顺序取前 N——确定性，没抽签就没有抽签凭证（meta=None）。
+    - random：空白度加权抽 N 条**互不相同**（T-MV-03/04 同一权重口径），
+      逐条带可独立重放的 meta；抽样模块整体异常 → 普通不放回随机 + meta=None
+      （last-resort fail-open：抽样证据绝不拦任务创建）。
+    """
+    if record_mode != "random":
+        return [(d, None) for d in clean_dirs[:num_directions]]
+    try:
+        pairs = await sample_weighted_directions_n(
+            clean_dirs, num_directions, user_id=user_id, market=market
+        )
+        return [
+            (d, json.dumps(meta, ensure_ascii=False) if meta else None)
+            for d, meta in pairs
+        ]
+    except Exception as e:  # noqa: BLE001 - 抽样证据不许拦任务创建
+        logger.warning("[alpha-agent] weighted sampling failed, plain sample: %s", e)
+        import random as _random
+
+        return [
+            (d, None)
+            for d in _random.sample(clean_dirs, k=min(num_directions, len(clean_dirs)))
+        ]
+
+
+async def _dispatch_direction_items(
+    launcher,
+    user_id: str,
+    tenant_id: str | None,
+    *,
+    market: str,
+    universe: str,
+    loop_n: int,
+    picks: list[tuple[str, str | None]],
+    direction_mode: str | None,
+    data_source: str | None = None,
+    overrides: dict | None = None,
+) -> tuple[list[dict], int, int, int]:
+    """逐条 ``start_or_queue`` 派发的单源派发环（/mining/batch 与 evolve N>1 共用）。
+
+    运行期错误（排队满/硬件锁/意外异常）逐条回传、**绝不拖垮整批**；
+    items 顺序 = picks 顺序。返回 ``(items, started, queued, failed)``。
+    """
+    items: list[dict] = []
+    started = queued = failed = 0
+    for idx, (direction, meta_json) in enumerate(picks):
+        try:
+            receipt = await launcher.start_or_queue(
+                user_id,
+                market=market,
+                universe=universe,
+                loop_n=loop_n,
+                direction=direction,
+                direction_mode=direction_mode,
+                direction_meta=meta_json,
+                data_source=data_source,
+                llm_overrides=overrides,
+                tenant_id=tenant_id,
+            )
+        except (QueueFullError, HardwareLockError) as exc:
+            items.append(
+                {
+                    "index": idx,
+                    "task_id": None,
+                    "status": "failed",
+                    "queue_position": None,
+                    "direction": direction,
+                    "direction_preview": direction[:80],
+                    "direction_meta": meta_json,
+                    "error": str(exc),
+                }
+            )
+            failed += 1
+            continue
+        except Exception as exc:  # noqa: BLE001 —— 单条失败不拖垮整批，错误随条目回传
+            logger.warning("[alpha-agent] batch dispatch item %d failed: %s", idx, exc)
+            items.append(
+                {
+                    "index": idx,
+                    "task_id": None,
+                    "status": "failed",
+                    "queue_position": None,
+                    "direction": direction,
+                    "direction_preview": direction[:80],
+                    "direction_meta": meta_json,
+                    "error": f"派发失败：{exc}",
+                }
+            )
+            failed += 1
+            continue
+        if receipt.status == "queued":
+            queued += 1
+        else:
+            started += 1
+        items.append(
+            {
+                "index": idx,
+                "task_id": receipt.task_id,
+                "status": receipt.status,
+                "queue_position": receipt.queue_position,
+                "direction": direction,
+                "direction_preview": direction[:80],
+                "direction_meta": meta_json,
+                "error": None,
+            }
+        )
+    return items, started, queued, failed
+
+
 @router.post("/evolve")
 async def start_evolution(
     request: Request,
@@ -534,6 +659,9 @@ async def start_evolution(
     ),
     direction_mode: str = Query(
         "selected", description="类别选择模式: selected=取第一条, random=随机一条"
+    ),
+    num_directions: int = Query(
+        1, ge=1, le=10, description="并行方向数：类别路径一次派 N 条任务（T-MV-04）"
     ),
     data_source: str = Query(
         "", description="数据源: qlib_bin, parquet, pg (留空使用默认)"
@@ -564,6 +692,8 @@ async def start_evolution(
             directions = payload.directions
         if payload.direction_mode:
             direction_mode = payload.direction_mode
+        if payload.num_directions is not None:
+            num_directions = payload.num_directions
         if payload.data_source is not None:
             data_source = payload.data_source
     doc_id = ((payload.doc_id or "").strip() or None) if payload is not None else None
@@ -610,16 +740,47 @@ async def start_evolution(
             ),
         )
 
-    # 类别方向下发：前端传多选类别 + 模式，服务端解析成单条 direction
-    # （放在长度闸与 LLM 解析之前：纯函数先算完，超长在烧 token 前就被拒）
-    clean_dirs = [d.strip() for d in directions if isinstance(d, str) and d.strip()]
+    # 类别方向下发：前端传多选类别 + 模式，服务端解析成方向
+    # （放在长度闸与 LLM 解析之前：纯函数先算完，超长在烧 token 前就被拒）。
     # 方向历史（T-MV-02）：只有类别选择真正参与时才记录生效模式；自由文本/
     # 卡片派发路径保持 NULL——mode 列是「方向怎么来的」的事实，不是参数回声。
     # random 不是均匀随机（T-MV-03）：按空白度（该方向在本用户×本市场的挖掘史
     # 次数）加权抽样，seed/候选/权重/命中落 direction_meta 供复现。
+    # 并行方向数（T-MV-04）：N>1 且类别路径且非文档血统 → 一次派 N 条任务
+    # （selected=按序取前 N；random=空白度加权抽 N 条互不相同）。自由文本/
+    # 文档血统路径 N 不适用——单方向是它们的事实（文档 task_id 反写单列）。
+    clean_dirs = [d.strip() for d in directions if isinstance(d, str) and d.strip()]
+    multi_dispatch = bool(clean_dirs) and num_directions > 1 and doc_id is None
     record_mode: str | None = None
     direction_meta_json: str | None = None
-    if clean_dirs:
+    picked_pairs: list[tuple[str, str | None]] = []
+    if multi_dispatch:
+        record_mode = "random" if direction_mode == "random" else "selected"
+        picked_pairs = await _resolve_multi_picks(
+            clean_dirs,
+            num_directions,
+            record_mode,
+            user_id=auth_user_id,
+            market=market,
+        )
+        # 请求级长度闸：一条超长整包 400（与 /mining/batch 同纪律——不半批派）
+        for idx, (picked_dir, _meta) in enumerate(picked_pairs, start=1):
+            if len(picked_dir) > MAX_SUBMIT_DIRECTION_CHARS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"第 {idx} 条方向过长（{len(picked_dir)} 字，上限 "
+                        f"{MAX_SUBMIT_DIRECTION_CHARS} 字），请精简后重试"
+                    ),
+                )
+        logger.info(
+            "[alpha-agent] evolve multi-dispatch directions=%d mode=%s n=%d -> %s",
+            len(clean_dirs),
+            record_mode,
+            len(picked_pairs),
+            [d for d, _ in picked_pairs],
+        )
+    elif clean_dirs:
         record_mode = "random" if direction_mode == "random" else "selected"
         if record_mode == "random":
             try:
@@ -642,10 +803,17 @@ async def start_evolution(
             record_mode,
             direction,
         )
+    elif num_directions > 1:
+        # 自由文本路径：N 不适用（并行的是「方向」，不是同一条方向的副本）。
+        # 显式记一笔，免得用户按设置页 N>1 却只见 1 个任务时无从排查。
+        logger.info(
+            "[alpha-agent] evolve num_directions=%d ignored (free-text path)",
+            num_directions,
+        )
 
     # 提交前长度闸：超长显式拒绝（task_store 的 20k 存储兜底是静默截断，
     # 不该让用户的编辑止步于「怎么少了半段」）
-    if len(direction) > MAX_SUBMIT_DIRECTION_CHARS:
+    if not multi_dispatch and len(direction) > MAX_SUBMIT_DIRECTION_CHARS:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -671,6 +839,50 @@ async def start_evolution(
     )
 
     launcher = get_launcher()
+    if multi_dispatch:
+        # 并行方向数（T-MV-04）：批量语义——逐条 start_or_queue，满额排队而
+        # 非 429（N 条是一次提交的组成部分，整批背压会在半途留下残缺的方向集）；
+        # 运行期错误逐条回传，绝不拖垮整批（与 /mining/batch 同一派发环）。
+        items, started, queued, failed = await _dispatch_direction_items(
+            launcher,
+            auth_user_id,
+            auth_tenant_id,
+            market=market,
+            universe=universe,
+            loop_n=loop_n,
+            picks=picked_pairs,
+            direction_mode=record_mode,
+            data_source=data_source or None,
+            overrides=build_subprocess_overrides(llm_config, embedding_env),
+        )
+        first_task_id = next((it["task_id"] for it in items if it["task_id"]), None)
+        logger.info(
+            "[alpha-agent] evolve multi-dispatch started=%d queued=%d failed=%d",
+            started,
+            queued,
+            failed,
+        )
+        return {
+            "code": 200,
+            "data": {
+                "task_id": first_task_id,
+                "items": items,
+                "started": started,
+                "queued": queued,
+                "failed": failed,
+                "direction_mode": record_mode,
+                "market": market,
+                "universe": universe,
+                "market_name": adapter.market_name,
+                "source": "text",
+                "doc_id": None,
+                "message": (
+                    f"{adapter.market_name} 已派发 {started + queued} 条方向任务"
+                    f"（启动 {started} / 排队 {queued} / 失败 {failed}）"
+                ),
+            },
+        }
+
     # 并发上限：每个任务是 RD-Agent 子进程（烧 LLM token + Qlib 回测），
     # 必须限流防止 fork 风暴。读取点收敛到 launcher（与排队判断同一份口径，
     # 坏值回落默认而非 ValueError 炸路由）。本端点保持 429 背压——满了立即
@@ -864,60 +1076,19 @@ async def dispatch_mining_batch(request: Request, payload: MiningBatchRequest):
 
     launcher = get_launcher()
     loop_n = payload.loop_n or 5
-    items: list[dict] = []
-    started = queued = failed = 0
-    for idx, direction in enumerate(directions):
-        try:
-            receipt = await launcher.start_or_queue(
-                auth_user_id,
-                market=payload.market,
-                universe=payload.universe,
-                loop_n=loop_n,
-                direction=direction,
-                llm_overrides=overrides,
-                tenant_id=auth_tenant_id,
-            )
-        except (QueueFullError, HardwareLockError) as exc:
-            items.append(
-                {
-                    "index": idx,
-                    "task_id": None,
-                    "status": "failed",
-                    "queue_position": None,
-                    "direction_preview": direction[:80],
-                    "error": str(exc),
-                }
-            )
-            failed += 1
-            continue
-        except Exception as exc:  # noqa: BLE001 —— 单条失败不拖垮整批，错误随条目回传
-            logger.warning("[alpha-agent] batch dispatch item %d failed: %s", idx, exc)
-            items.append(
-                {
-                    "index": idx,
-                    "task_id": None,
-                    "status": "failed",
-                    "queue_position": None,
-                    "direction_preview": direction[:80],
-                    "error": f"派发失败：{exc}",
-                }
-            )
-            failed += 1
-            continue
-        if receipt.status == "queued":
-            queued += 1
-        else:
-            started += 1
-        items.append(
-            {
-                "index": idx,
-                "task_id": receipt.task_id,
-                "status": receipt.status,
-                "queue_position": receipt.queue_position,
-                "direction_preview": direction[:80],
-                "error": None,
-            }
-        )
+    # 派发环与 evolve 并行方向数共用单源实现（direction_mode/direction_meta 仅
+    # evolve 的类别路径会传——卡片路径 direction 是唯一载体，模式/证据均为空）
+    items, started, queued, failed = await _dispatch_direction_items(
+        launcher,
+        auth_user_id,
+        auth_tenant_id,
+        market=payload.market,
+        universe=payload.universe,
+        loop_n=loop_n,
+        picks=[(d, None) for d in directions],
+        direction_mode=None,
+        overrides=overrides,
+    )
 
     logger.info(
         "[alpha-agent] batch dispatch source=%s model=%s n=%d started=%d queued=%d failed=%d",
