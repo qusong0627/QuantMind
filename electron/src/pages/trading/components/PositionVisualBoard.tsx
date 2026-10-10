@@ -13,6 +13,7 @@ import ReactECharts from 'echarts-for-react';
 import { Activity, ArrowDownUp, ChevronDown, ChevronUp, PieChart, Search } from 'lucide-react';
 import { Checkbox, message } from 'antd';
 import type { NormalizedHolding, PositionSummary } from '../utils/positionMetrics';
+import { quoteAgeText, type QuoteFreshness } from '../utils/quoteFreshness';
 import { getDeskToday } from '../../../features/desk/services/deskService';
 import { executionUnavailableReason } from '../../../features/desk/deskModel';
 import type { ExecutionItem } from '../../../features/desk/types';
@@ -54,9 +55,21 @@ export const PositionVisualBoard: React.FC<{
   summary: PositionSummary;
   /** 卖出预检的默认通道（跟随页面顶栏 模拟/实盘） */
   defaultChannels?: PushChannel[];
-}> = ({ holdings, summary, defaultChannels = ['sim'] }) => {
+  /**
+   * 每只持仓的行情新鲜度（T6-1 审计 H7a；前缀式代码为键）。缺省（无实时管道时）
+   * 整段徽标不渲染，公开形态与本机制引入前一致。
+   */
+  quoteFreshness?: Record<string, QuoteFreshness>;
+}> = ({ holdings, summary, defaultChannels = ['sim'], quoteFreshness }) => {
   const [sortKey, setSortKey] = useState<SortKey>('value');
   const [q, setQ] = useState('');
+
+  // 断流可见性：KPI 行单列一格「行情陈旧 N 只」——逐行徽标会被滚动埋掉，
+  // 这一格保证「有价在过期」在任何滚动位置都一眼可见。
+  const staleCount = useMemo(
+    () => holdings.filter((h) => !h.priceMissing && quoteFreshness?.[h.code]?.kind === 'stale').length,
+    [holdings, quoteFreshness],
+  );
 
   // 卖出入口：勾选集合 + 当前要卖的标的（null = 面板关闭）
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -241,6 +254,15 @@ export const PositionVisualBoard: React.FC<{
               缺价 <span className="font-mono">{missingCount}</span>
             </span>
           )}
+          {/* 行情陈旧（T6-1）：交易时段内最后一条行情超 60s——显示价不是实时价 */}
+          {staleCount > 0 && (
+            <span
+              className="rounded-full border border-amber-300 bg-amber-100/70 px-2.5 py-1 text-amber-800"
+              title="这些持仓的最后一条行情超过 60 秒未更新（交易时段内判定）——当前显示的价不是实时价，市值与盈亏按该价计"
+            >
+              行情陈旧 <span className="font-mono">{staleCount}</span> 只
+            </span>
+          )}
           <span
             className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600"
             title={summary.cashRatio > 1.5 ? '现金/总资产 > 100%，账户口径数据异常，暂显 —' : undefined}
@@ -334,6 +356,27 @@ export const PositionVisualBoard: React.FC<{
       <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-2 pt-0.5 space-y-1">
         {sorted.map((h) => {
           const pct = Math.max(0, Math.min(1, (h.value || 0) / base));
+          // T6-1：这一行的行情新鲜度（fresh 不渲染任何东西）
+          const fresh = quoteFreshness?.[h.code];
+          const freshTag = h.priceMissing || !fresh || fresh.kind === 'fresh'
+            ? null
+            : fresh.kind === 'stale'
+              ? (
+                <span
+                  className="shrink-0 rounded border border-amber-200 bg-amber-50 px-1 py-px text-[9px] font-bold text-amber-700"
+                  title={`最后一条行情${fresh.ageSec !== null ? `在 ${quoteAgeText(fresh.ageSec)} 前` : ''}${fresh.source ? `（源：${fresh.source}）` : ''}——不是实时价，市值与盈亏按该价计`}
+                >
+                  已陈旧{fresh.ageSec !== null ? ` ${quoteAgeText(fresh.ageSec)}` : ''}
+                </span>
+              )
+              : (
+                <span
+                  className="shrink-0 rounded border border-slate-200 bg-slate-50 px-1 py-px text-[9px] font-bold text-slate-500"
+                  title="实时行情不可用，现价来自最近交易日收盘（QuantDB 日线兜底）——市值与盈亏按收盘价计"
+                >
+                  日线兜底
+                </span>
+              );
           return (
             <div
               key={h.code}
@@ -354,9 +397,15 @@ export const PositionVisualBoard: React.FC<{
                 </span>
               </div>
               {/* 缺价行：现价与盈亏一律出 `—`。市值占比同理——0% 会读成「这只票不值钱」，
-                  它其实只是「不知道」。成本价照常显示，缺的是价不是成本。 */}
+                  它其实只是「不知道」。成本价照常显示，缺的是价不是成本。
+                  T6-1：陈旧行现价置灰 + 徽标（已陈旧 Xs / 日线兜底）——断流后帧必须看得出来。 */}
               <div className="min-w-0 text-right">
-                <div className="truncate font-mono text-xs font-bold text-slate-800">{h.priceMissing ? '—' : fmtMoney(h.current)}</div>
+                <div className="flex items-center justify-end gap-1">
+                  <span className={`truncate font-mono text-xs font-bold ${fresh?.kind === 'stale' ? 'text-slate-400' : 'text-slate-800'}`}>
+                    {h.priceMissing ? '—' : fmtMoney(h.current)}
+                  </span>
+                  {freshTag}
+                </div>
                 <div className="truncate font-mono text-[10px] text-slate-400">成本 {fmtMoney(h.cost)}</div>
               </div>
               <div className="min-w-0 text-right">
@@ -470,9 +519,15 @@ export const ExecutionStrip: React.FC = () => {
   const [items, setItems] = useState<ExecutionItem[]>([]);
   const [unavailableReason, setUnavailableReason] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // T6-2 审计 H7b：此前 catch(() => {}) 吞掉失败——`loaded` 永远 false，
+  // 摘要行「加载中…」永驻；展开还被渲染成「今日暂无委托/成交记录」。
+  // 抓取失败必须说出来，且给重试；「失败」与「没有」是两回事。
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setLoadError(null);
     getDeskToday({ health: false, plan: false })
       .then((resp) => {
         if (!cancelled) {
@@ -483,11 +538,13 @@ export const ExecutionStrip: React.FC = () => {
           setLoaded(true);
         }
       })
-      .catch(() => {});
+      .catch((e: unknown) => {
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadTick]);
 
   const filled = items.filter((it) => String(it.status).toUpperCase() === 'FILLED').length;
   const rejected = items.filter((it) => String(it.status).toUpperCase() === 'REJECTED').length;
@@ -504,18 +561,31 @@ export const ExecutionStrip: React.FC = () => {
         </span>
         <span className="text-xs font-bold text-slate-700">今日执行</span>
         <span className="text-[11px] text-slate-400">
-          {unavailableReason
-            ? '暂不可按市场归集'
-            : loaded
-              ? `共 ${items.length} 单`
-              : '加载中…'}
-          {!unavailableReason && loaded && items.length > 0 && ` · 成交 ${filled} · 拒单 ${rejected}`}
+          {loadError
+            ? '加载失败'
+            : unavailableReason
+              ? '暂不可按市场归集'
+              : loaded
+                ? `共 ${items.length} 单`
+                : '加载中…'}
+          {!unavailableReason && loaded && !loadError && items.length > 0 && ` · 成交 ${filled} · 拒单 ${rejected}`}
         </span>
         <span className="ml-auto text-slate-400">{open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}</span>
       </button>
       {open && (
         <div className="max-h-52 overflow-y-auto px-3 pb-2 space-y-0.5 border-t border-slate-100 pt-1.5">
-          {unavailableReason ? (
+          {loadError ? (
+            <div className="py-3 px-2 text-[11px] leading-relaxed text-rose-600">
+              今日执行数据加载失败：{loadError}
+              <button
+                type="button"
+                onClick={() => setReloadTick((t) => t + 1)}
+                className="ml-2 rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 font-bold text-rose-700 hover:bg-rose-100"
+              >
+                重试
+              </button>
+            </div>
+          ) : unavailableReason ? (
             <div className="py-3 px-2 text-[11px] leading-relaxed text-slate-500">{unavailableReason}</div>
           ) : (
             items.length === 0 && <div className="py-3 text-center text-[11px] text-slate-400">今日暂无委托/成交记录</div>

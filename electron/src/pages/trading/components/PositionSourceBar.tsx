@@ -78,6 +78,11 @@ export const PositionSourceBar: React.FC<PositionSourceBarProps> = ({
     const [pendingBroker, setPendingBroker] = useState<AccountSourceItem | null>(null);
     const [switching, setSwitching] = useState(false);
     const [notice, setNotice] = useState<string | null>(null);
+    // T6-2 审计 H7b：此前两个 fetch 都 `.catch(() => null)` 静默吞掉——
+    // 接口挂了会渲染成「暂无券商快照上报 / 行情源未采样」，把「失败」伪装成「没有」。
+    // 失败必须显式说出来（旧数据保留展示），并给重试入口；15s 轮询自动兜底恢复。
+    const [sourcesFailed, setSourcesFailed] = useState(false);
+    const [feedFailed, setFeedFailed] = useState(false);
 
     const authHeaders = useCallback(() => {
         const token = authService.getAccessToken();
@@ -94,14 +99,25 @@ export const PositionSourceBar: React.FC<PositionSourceBarProps> = ({
         const statusUrl = sampleSymbols
             ? `${apiBase}/tdx/quote-feed/status?symbols=${encodeURIComponent(sampleSymbols)}`
             : `${apiBase}/tdx/quote-feed/status`;
-        const [sourcePayload, feedStatus] = await Promise.all([
-            isReal ? realTradingService.getAccountSources().catch(() => null) : Promise.resolve(null),
-            fetch(statusUrl, { headers: authHeaders() })
-                .then(res => (res.ok ? res.json() : null))
-                .catch(() => null),
+        const [sourceRes, feedRes] = await Promise.allSettled([
+            isReal ? realTradingService.getAccountSources() : Promise.resolve(null),
+            fetch(statusUrl, { headers: authHeaders() }).then(res => {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.json() as Promise<QuoteFeedStatusPayload>;
+            }),
         ]);
-        setSources(sourcePayload);
-        setFeed(feedStatus);
+        if (sourceRes.status === 'fulfilled') {
+            setSources(sourceRes.value);
+            setSourcesFailed(false);
+        } else {
+            setSourcesFailed(true); // 保留旧数据展示：行内显式标注不可达
+        }
+        if (feedRes.status === 'fulfilled') {
+            setFeed(feedRes.value);
+            setFeedFailed(false);
+        } else {
+            setFeedFailed(true);
+        }
     }, [isReal, authHeaders, sampleSymbols]);
 
     useEffect(() => {
@@ -167,7 +183,15 @@ export const PositionSourceBar: React.FC<PositionSourceBarProps> = ({
                     <span className="inline-flex items-center gap-1 font-black text-slate-500 shrink-0">
                         <Wallet className="w-3 h-3" /> 持仓账户
                     </span>
-                    {(sources?.sources || []).length === 0 ? (
+                    {sourcesFailed ? (
+                        <span className="inline-flex items-center gap-1.5 font-bold text-rose-600">
+                            <AlertTriangle className="w-3 h-3" />
+                            账户源接口不可达{sources ? '（下方为上次成功数据）' : ''}
+                            <button type="button" onClick={() => void load()} className="font-bold underline hover:no-underline">
+                                重试
+                            </button>
+                        </span>
+                    ) : (sources?.sources || []).length === 0 ? (
                         <span className="text-slate-400">暂无券商快照上报</span>
                     ) : (
                         (sources?.sources || []).map(item => {
@@ -243,7 +267,15 @@ export const PositionSourceBar: React.FC<PositionSourceBarProps> = ({
                 <span className="inline-flex items-center gap-1 font-black text-slate-500 shrink-0">
                     <Radio className="w-3 h-3" /> 行情来源
                 </span>
-                {quote?.error ? (
+                {feedFailed ? (
+                    <span className="inline-flex items-center gap-1.5 font-bold text-rose-600">
+                        <AlertTriangle className="w-3 h-3" />
+                        行情采样接口不可达{feed ? '（下方为上次成功数据）' : ''}
+                        <button type="button" onClick={() => void load()} className="font-bold underline hover:no-underline">
+                            重试
+                        </button>
+                    </span>
+                ) : quote?.error ? (
                     <span className="inline-flex items-center gap-1.5 font-bold text-rose-600">
                         <AlertTriangle className="w-3 h-3" />
                         {quote.error}

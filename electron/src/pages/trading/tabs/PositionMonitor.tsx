@@ -6,6 +6,13 @@ import { AccountInfo } from '../../../services/realTradingService';
 import { marketDataService } from '../../../services/marketDataService';
 import { websocketService, MessageType } from '../../../services/websocketService';
 import { buildNormalizedHoldings, extractPositionCodes, getPositionSummary, NormalizedHolding } from '../utils/positionMetrics';
+import {
+    classifyQuote,
+    parseQuoteTs,
+    type QuoteFreshness,
+    type QuoteMeta,
+} from '../utils/quoteFreshness';
+import { isCnTradingHours } from '../../../utils/timeBeijing';
 import { PositionVisualBoard, ExecutionStrip } from '../components/PositionVisualBoard';
 import { PositionSourceBar } from '../components/PositionSourceBar';
 import { HoldingAlertPanel } from '../../../features/holding-alerts/HoldingAlertPanel';
@@ -35,7 +42,7 @@ interface PositionMonitorProps {
     railPanels?: React.ReactNode;
 }
 
-/** stream 服务推送的实时行情消息（topic stock.{code}） */
+/** stream 服务推送的实时行情消息（topic stock.{code}；push_data 见 quote_pusher.py） */
 interface LiveQuote {
     stock_code: string;
     data?: {
@@ -43,7 +50,10 @@ interface LiveQuote {
         open?: number | null;
         high?: number | null;
         low?: number | null;
+        /** 服务端 freshness 谓词判定（T6-1：此前声明了但被忽略——帧不会变灰） */
         is_stale?: boolean;
+        /** tdx_bridge / qmt_big / remote_redis / quantdb…（quantdb = 日线兜底，非实时） */
+        data_source?: string;
         timestamp?: string | number;
     };
 }
@@ -52,9 +62,9 @@ interface LiveQuote {
 const STACKED_BOARD_MIN_H = 'h-[560px]';
 
 /** 持仓明细叠加实时价：现价/市值/盈亏全部按 live price 重算 */
-const mergeLivePrices = (holdings: NormalizedHolding[], live: Record<string, number>): NormalizedHolding[] => {
+const mergeLivePrices = (holdings: NormalizedHolding[], live: Record<string, QuoteMeta>): NormalizedHolding[] => {
     return holdings.map(h => {
-        const price = live[h.code];
+        const price = live[h.code]?.price;
         if (price == null || !Number.isFinite(price) || price <= 0) return h;
         const value = h.shares * price;
         const profit = h.cost > 0 ? (price - h.cost) * h.shares : 0;
@@ -74,9 +84,17 @@ const mergeLivePrices = (holdings: NormalizedHolding[], live: Record<string, num
 const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isActive, accountInfo, accountMode = 'simulation', railPanels }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [stockNames, setStockNames] = useState<Record<string, string>>({});
-    const [livePrices, setLivePrices] = useState<Record<string, number>>({});
-    const livePricesRef = useRef<Record<string, number>>({});
+    // 键 = 前缀式代码；值是带元信息的最后一条行情（价 + 服务端新鲜度 + 源 + 行情时刻，T6-1）
+    const [liveQuotes, setLiveQuotes] = useState<Record<string, QuoteMeta>>({});
+    const liveQuotesRef = useRef<Record<string, QuoteMeta>>({});
     const subscribedRef = useRef<string[]>([]);
+    // 心跳：每 5s 自走一格，让「已陈旧 Xs」在断流（没有新消息）时也会长大
+    const [nowMs, setNowMs] = useState(() => Date.now());
+    useEffect(() => {
+        if (!isActive) return;
+        const id = window.setInterval(() => setNowMs(Date.now()), 5000);
+        return () => window.clearInterval(id);
+    }, [isActive]);
 
     React.useEffect(() => {
         if (!accountInfo || !accountInfo.positions) return;
@@ -121,9 +139,23 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
             const code = String(msg?.stock_code || '').toUpperCase();
             const price = Number(msg?.data?.price);
             if (!code || !Number.isFinite(price) || price <= 0) return;
-            const next = { ...livePricesRef.current, [code]: price };
-            livePricesRef.current = next;
-            setLivePrices(next);
+            const meta: QuoteMeta = {
+                price,
+                isStale: msg?.data?.is_stale === true,
+                source: String(msg?.data?.data_source || ''),
+                tsMs: parseQuoteTs(msg?.data?.timestamp),
+            };
+            const prev = liveQuotesRef.current[code];
+            if (
+                prev
+                && prev.price === meta.price
+                && prev.isStale === meta.isStale
+                && prev.source === meta.source
+                && prev.tsMs === meta.tsMs
+            ) return; // 逐位相同的重复推送不再触发重渲
+            const next = { ...liveQuotesRef.current, [code]: meta };
+            liveQuotesRef.current = next;
+            setLiveQuotes(next);
         };
         websocketService.addMessageHandler('quote' as MessageType, handler);
         return () => {
@@ -139,8 +171,19 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
     }, [isActive]);
 
     const holdings = React.useMemo(() => {
-        return mergeLivePrices(buildNormalizedHoldings(accountInfo, stockNames), livePrices);
-    }, [accountInfo, stockNames, livePrices]);
+        return mergeLivePrices(buildNormalizedHoldings(accountInfo, stockNames), liveQuotes);
+    }, [accountInfo, stockNames, liveQuotes]);
+
+    // 展示级新鲜度（T6-1）：按最后一条行情的时刻计时，断流时随 nowMs 心跳长大。
+    // 时段门控在 classifyQuote 内按北京墙钟判定——安静标的无推送 ≠ 断流。
+    const quoteFreshness = React.useMemo(() => {
+        const inSession = isCnTradingHours();
+        const out: Record<string, QuoteFreshness> = {};
+        for (const [code, meta] of Object.entries(liveQuotes)) {
+            out[code] = classifyQuote(meta, nowMs, inSession);
+        }
+        return out;
+    }, [liveQuotes, nowMs]);
 
     // 行情源采样的标的集 = 当前显示的持仓（换源后自动变成另一个账户的持仓）
     const positionCodes = React.useMemo(() => extractPositionCodes(accountInfo), [accountInfo]);
@@ -184,6 +227,7 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
                     <PositionVisualBoard
                         holdings={holdings}
                         summary={summary}
+                        quoteFreshness={quoteFreshness}
                         defaultChannels={
                             // 实盘开关关闭时恒为模拟盘：这里是实盘关闭后最容易漏的一处——
                             // 账户态仍可能是 real（历史数据），默认通道若不跟着收敛，
