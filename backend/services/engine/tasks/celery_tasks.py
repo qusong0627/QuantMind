@@ -1195,6 +1195,42 @@ def tca_daily_report(days: int = 30, tenant_id: str = "default") -> dict[str, An
 # ---------------------------------------------------------------------------
 # 市场定时同步调度（前端每市场配置 HH:MM，beat 每分钟派发检查）
 # ---------------------------------------------------------------------------
+def _record_skip_ledger(out: dict[str, Any]) -> None:
+    """把一次派发 tick 的 ``skipped``/``dispatched`` 落 P2-5 跳发台账（db0）。
+
+    台账是值班摘要（P2-5）回答「今天哪些市场被跳过、为什么」的唯一持久面——
+    beat 任务的返回值进 celery result backend，没有常态读者（见
+    ``backend/shared/scheduler_skip_ledger.py`` 模块头）。幂等最新态：重复
+    skip 只覆盖原因；已派发市场清残留。失败段（status=failed）跳过——
+    「派发检查本身炸了」不是「日历门跳过」，混进台账是两回事。
+
+    本函数只负责写；best-effort 由调用方兜（台账故障不许拖垮派发）。
+    """
+    import redis as _redis_lib
+
+    from backend.shared.scheduler_skip_ledger import clear_skips, record_skips
+
+    client = _redis_lib.from_url(
+        os.getenv("REDIS_URL", "redis://redis:6379/0"),
+        socket_timeout=2,
+        decode_responses=True,
+    )
+    day = datetime.now().date()
+    try:
+        for job, segment in (
+            ("market_sync", out),
+            ("factor_fill", out.get("factor_fill") or {}),
+        ):
+            if not isinstance(segment, dict) or segment.get("status") == "failed":
+                continue
+            record_skips(client, day=day, job=job, skipped=segment.get("skipped") or {})
+            clear_skips(
+                client, day=day, job=job, dispatched=segment.get("dispatched") or []
+            )
+    finally:
+        client.close()
+
+
 @celery_app.task(name="engine.tasks.dispatch_market_sync")
 def dispatch_market_sync() -> dict[str, Any]:
     """每分钟检查各市场定时同步/因子填充配置，到点派发任务。"""
@@ -1219,6 +1255,11 @@ def dispatch_market_sync() -> dict[str, Any]:
     except Exception as e:
         logger.exception("[FactorFill] 派发检查失败: %s", e)
         out["factor_fill"] = {"status": "failed", "error": str(e)}
+    # P2-5 跳发台账：返回值没有常态读者，跳发事实必须落持久面（值班摘要取数）
+    try:
+        _record_skip_ledger(out)
+    except Exception as e:  # noqa: BLE001 - 台账故障不影响派发结果本身
+        logger.warning("[SyncSchedule] 跳发台账写入失败（不影响派发）: %s", e)
     return out
 
 
@@ -1266,6 +1307,25 @@ def refresh_fusion_weights_task() -> dict[str, Any]:
         return _run_async(refresh_fusion_weights())
     except Exception as e:
         logger.exception("[FusionRefresh] 刷新失败: %s", e)
+        return {"status": "failed", "error": str(e)}
+
+
+@celery_app.task(name="engine.tasks.duty_deadman_check")
+def duty_deadman_check_task() -> dict[str, Any]:
+    """P2-5 值班死手：核对当日回执，「该响没响」告警（详见 ``duty_deadman`` 模块头）。
+
+    住 celery 的意义就是跨进程树——trade 整体死亡时本任务照样跑、照样响。
+    开关 ``DUTY_DEADMAN_ENABLED``（默认开；beat 条目加载期也判一次）；
+    非交易日由 ``run_duty_deadman_check`` 任务体秒退（beat 条目不分交易日）。
+    """
+    if os.getenv("DUTY_DEADMAN_ENABLED", "true").lower() != "true":
+        return {"status": "disabled"}
+    try:
+        from backend.services.engine.tasks.duty_deadman import run_duty_deadman_check
+
+        return _run_async(run_duty_deadman_check())
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[DutyDeadman] 检查失败: %s", e)
         return {"status": "failed", "error": str(e)}
 
 

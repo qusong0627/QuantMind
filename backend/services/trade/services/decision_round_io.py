@@ -423,6 +423,42 @@ def write_status(
         logger.warning("[DecisionRound] 状态键写入失败: %s", exc)
 
 
+def write_stall_check(
+    native: Any,
+    *,
+    day: date,
+    rounds: int,
+    alerted: bool,
+    at: datetime,
+    note: str = "",
+) -> bool:
+    """停滞检查回执（P2-5）：「今天已过最后槽位+宽限后查过一遍」的持久痕。
+
+    值 = 检查结论 JSON（``rounds`` 在册轮次数 / ``alerted`` 是否推了告警 /
+    ``note`` 日历附注）。死手检查（celery 侧，跨进程树）只核对**键存在**——
+    内容供人查。与状态键同纪律：写失败只返回 False（调用方记日志），
+    **绝不抛**——回执是可见性旁路，不许掀翻停滞检查本身。
+    """
+    from backend.shared.duty_receipts import STALL_CHECK_TTL_SECONDS, stall_check_key
+
+    payload = json.dumps(
+        {
+            "at": at.isoformat(),
+            "day": day.isoformat(),
+            "rounds": int(rounds),
+            "alerted": bool(alerted),
+            "note": str(note or ""),
+        },
+        ensure_ascii=False,
+    )
+    try:
+        native.set(stall_check_key(day), payload, ex=STALL_CHECK_TTL_SECONDS)
+        return True
+    except Exception as exc:  # noqa: BLE001 回执写失败不抛（见 docstring）
+        logger.warning("[DecisionRound] 停滞检查回执写入失败: %s", exc)
+        return False
+
+
 def maybe_write_watch(
     *,
     deps: RoundDeps,

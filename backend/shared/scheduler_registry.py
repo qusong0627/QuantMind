@@ -191,6 +191,36 @@ JOBS: tuple[JobSpec, ...] = (
         "python backend/scripts/schedule_ctl.py run fusion_refresh",
         "融合模型重算权重 → weight_snapshot.json（防抖；manual/equal 与缺员跳过）",
     ),
+    # P2-5 值班摘要（trade 常驻，与收盘报表同侪）：全天七段盘点 → QQ + 通知面。
+    # 心跳写在常驻循环里；它同时是死手检查核对的「15:40 done 键」生产者。
+    JobSpec(
+        "duty_summary",
+        "值班摘要（P2-5）",
+        "worker",
+        "trade",
+        "每交易日 15:40（60s 轮询）",
+        "QM_DUTY_SUMMARY_ENABLED",
+        True,
+        345600,
+        "python backend/scripts/schedule_ctl.py run duty_summary",
+        "收盘报表/池/轮次/精确否决/镜像/跳发/实时信号七段盘点 → QQ；读不到的段如实标"
+        "「不可读」，绝不渲染成 0",
+    ),
+    # P2-5 值班死手检查：**住 celery（跨进程树）**——trade 整体死亡时它还得能响。
+    # 核对当日四类回执（报表/摘要/停滞检查/实时信号），缺失集收缩语义告警。
+    JobSpec(
+        "duty_deadman",
+        "值班死手检查（P2-5）",
+        "celery_beat",
+        "celery",
+        "每交易日 16:00~23:30（每 30min；非交易日任务体秒退）",
+        "DUTY_DEADMAN_ENABLED",
+        True,
+        345600,
+        "python backend/scripts/schedule_ctl.py run duty_deadman [--force]",
+        "「该响没响」告警：四类回执缺失/不可读 → QQ；补齐发恢复并当日封账（--force 跳过"
+        "非交易日闸门与封账键）",
+    ),
     JobSpec(
         "news_enrich", "新闻富化", "celery_beat", "celery", "~30s",
         None, True, 900, None, "Huntly 新闻入库富化",

@@ -140,11 +140,12 @@ async def _stall_watch() -> None:
     except Exception as exc:  # noqa: BLE001 读不到日志 ⇒ 交给判据（空集 = 报）
         logger.warning("[DecisionRound] 停滞检查读 log 失败: %s", exc)
 
+    delivered = False
     try:
         from backend.shared.simulation_account_keys import resolve_db_account_user
         from backend.services.trade.services.decision_round_core import ENV_ACCOUNT_USER
 
-        await alerts.alert_stall(
+        delivered = await alerts.alert_stall(
             now=now,
             raw_entries=raw,
             expect_rounds=expect,
@@ -155,6 +156,27 @@ async def _stall_watch() -> None:
         )
     except Exception as exc:  # noqa: BLE001 可见性失败不许弄死循环
         logger.warning("[DecisionRound] 停滞告警失败: %s", exc)
+
+    # P2-5 回执：本检查「已执行」这件事要留下持久痕——死手检查（celery 侧，
+    # 跨进程树）核对它判「trade 侧到底有没有人做过这次检查」。alert_stall 抛过
+    # 也算执行过（delivered=False 如实记）。读 Redis 都失败（redis=None）时写
+    # 不进去，留给死手报「无痕」——那正是该报的场合。
+    if redis is not None:
+        try:
+            from backend.services.trade.services.decision_round_io import (
+                write_stall_check,
+            )
+
+            write_stall_check(
+                redis,
+                day=now.date(),
+                rounds=alerts.count_rounds_for_day(raw, now.date()),
+                alerted=bool(delivered),
+                at=now,
+                note=note,
+            )
+        except Exception as exc:  # noqa: BLE001 回执不许弄死循环
+            logger.warning("[DecisionRound] 停滞检查回执失败: %s", exc)
 
 
 async def run_decision_round_worker() -> None:

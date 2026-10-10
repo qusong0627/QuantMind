@@ -516,6 +516,45 @@ def _run_regime_persist(date_str: str | None, force: bool) -> int:
     return rc
 
 
+def _run_duty_summary(date_str: str | None, force: bool) -> int:
+    """值班摘要「重跑」= 立刻生成并推送一次（会真的再推一条 QQ）。
+
+    ``--force`` 无特殊语义（摘要本就无条件生成）；``--date`` 指定归属日（默认今天）。
+    """
+    import asyncio
+    from datetime import date as _date
+
+    from backend.services.trade.services.duty_summary import run_duty_summary
+    from backend.services.trade_shared.deps import get_redis
+
+    day = _date.fromisoformat(date_str) if date_str else None
+    result = asyncio.run(run_duty_summary(get_redis(), today=day))
+    err = f" error={result['error']}" if result.get("error") else ""
+    print(f"duty_summary {result.get('date')}: sent={result.get('sent')}{err}")
+    return 0 if result.get("sent") else 1
+
+
+def _run_duty_deadman(date_str: str | None, force: bool) -> int:
+    """值班死手「重跑」= 核对一遍；``--force`` 跳过非交易日闸门与当日封账键。
+
+    告警仍走缺失集收缩语义：与已告警台账相同不重复响；退出码 1 = 有缺失项。
+    """
+    import asyncio
+    from datetime import date as _date
+
+    from backend.services.engine.tasks.duty_deadman import run_duty_deadman_check
+
+    day = _date.fromisoformat(date_str) if date_str else None
+    result = asyncio.run(run_duty_deadman_check(day=day, force=force))
+    print(
+        f"duty_deadman {result.get('date')}: status={result.get('status')} "
+        f"missing={result.get('missing') or []}"
+    )
+    if result.get("reason") == "non_trading_day":
+        print("  （非交易日；要强制核对加 --force）", file=sys.stderr)
+    return 1 if result.get("missing") else 0
+
+
 _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     # 键 = 注册表任务键（唯一标识，禁止别名——测试防止漂移）
     "sim_eod": _run_sim_eod,
@@ -546,6 +585,11 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "retrain_dispatch": _run_retrain_dispatch,
     # P2-4 融合权重刷新：重跑 = 立刻扫一轮（幂等；防抖阈值挡住无变动写盘）。
     "fusion_refresh": _run_fusion_refresh,
+    # P2-5 值班摘要：重跑 = 立刻生成并真的再推一条 QQ（纯读侧，无真钱副作用）。
+    "duty_summary": _run_duty_summary,
+    # P2-5 值班死手：重跑 = 核对一遍（--force 跳过非交易日闸门与当日封账键；
+    # 告警按缺失集收缩语义去重，不重复响）。
+    "duty_deadman": _run_duty_deadman,
 }
 
 
@@ -581,6 +625,16 @@ def _force_notice(job_key: str) -> str:
             "提示：--force = 不看 enabled/到点/本期已派发标记，立刻试派发一轮"
             "（内存/busy/数据就绪三道守卫与真实提交不受影响；真正提交在 API 进程，"
             "同窗口的重复派发被 campaign 幂等键挡住，不会重复训练）"
+        )
+    if job_key == "duty_summary":
+        return (
+            "提示：--force 对该任务无额外语义；重跑会**真的再推一条 QQ 摘要**"
+            "（通知面登记按（日, 结果）去重，但 QQ 没有去重）"
+        )
+    if job_key == "duty_deadman":
+        return (
+            "提示：--force = 跳过非交易日闸门与当日封账键，强制重核一遍；"
+            "告警仍按缺失集收缩语义去重（集合与已告警台账相同则不重复响）"
         )
     return f"提示：--force 已传给 {job_key}；该任务的重跑本身不看这个参数"
 

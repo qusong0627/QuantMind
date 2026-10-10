@@ -298,6 +298,27 @@ def stall_due(
     return now >= last.due_at(now.date()) + timedelta(minutes=max(0, grace_min))
 
 
+def count_rounds_for_day(raw_entries: Sequence[object], day: date) -> int:
+    """数 ``day`` 的轮次条数（P2-5 停滞检查回执用）。**纯函数**。
+
+    与 :func:`stall_alert` 同纪律：读不懂的条目跳过而不抛、解析失败不算「跑过了」。
+    ``LOG_KEEP``（20 条）之外的轮次不在 log 里——本函数数的是**在册**轮次，
+    回执里如实记这个口径（死手核对只看回执行不存在，计数供人查）。
+    """
+    today = day.isoformat()
+    count = 0
+    for entry in raw_entries:
+        if not isinstance(entry, (str, bytes)):
+            continue
+        try:
+            parsed = json.loads(entry)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and str(parsed.get("day") or "") == today:
+            count += 1
+    return count
+
+
 def stall_alert(
     *,
     now: datetime,

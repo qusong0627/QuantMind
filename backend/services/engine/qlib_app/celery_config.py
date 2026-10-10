@@ -205,6 +205,17 @@ if os.getenv("FUSION_REFRESH_ENABLED", "true").lower() == "true":
         "schedule": crontab(minute="30", hour="22"),
     }
 
+# 值班死手检查（P2-5）：16:00~23:30 每 30 分钟核对当日回执（收盘报表/值班摘要/
+# 决策轮停滞检查/实时信号覆盖），缺失集收缩语义告警 + 补齐恢复 + 当日封账。
+# **住在 celery（跨进程树）**：trade 整体死亡时它是唯一还能响的裁判位——「该响
+# 没响」的检查绝不能与被检查对象同生共死。16:00 = 值班摘要（15:40）后首个半点；
+# 23:30 收尾（过 0 点换日键，不再核对）。非交易日由任务体秒退。
+if os.getenv("DUTY_DEADMAN_ENABLED", "true").lower() == "true":
+    beat_schedule["duty-deadman-check"] = {
+        "task": "engine.tasks.duty_deadman_check",
+        "schedule": crontab(minute="0,30", hour="16-23"),
+    }
+
 # Strategy Lab daily scan — runs after the data sync settles (Day 16)
 if os.getenv("STRATEGY_LAB_SCAN_ENABLED", "true").lower() == "true":
     beat_schedule["strategy-lab-daily-scan"] = {

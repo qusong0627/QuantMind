@@ -65,6 +65,12 @@ _HEARTBEAT_WIRED = {
     "quote_freshness_watch": "services/live_trading/services/quote_freshness_watch.py",
     # P0-3 训练僵尸作业回收器（住在 API 进程；心跳写在清扫循环里）
     "training_reaper": "services/engine/training/job_reaper.py",
+    # P2-5 值班摘要（trade 常驻，15:40）：心跳写在常驻循环里；它同时是死手
+    # 核对的回执生产者（「摘要到底有没有人在跑」的唯一信号）。
+    "duty_summary": "services/trade/services/duty_summary.py",
+    # P2-5 值班死手（celery beat，16:00~23:30）：心跳写在核对函数里——它是
+    # 「该响没响」的裁判位，自身停摆没有任何下游能发现，心跳是唯一观测面。
+    "duty_deadman": "services/engine/tasks/duty_deadman.py",
 }
 
 #: 心跳用模块常量（``_sched_heartbeat(SCHEDULER_NAME)``）间接引用的任务：
@@ -249,6 +255,10 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "regime_persist",
         # P2-4 融合权重刷新（重跑 = 立刻扫一轮；防抖阈值挡住无变动写盘）
         "fusion_refresh",
+        # P2-5 值班摘要（重跑 = 立刻生成并真的再推一条 QQ）
+        "duty_summary",
+        # P2-5 值班死手（重跑 = 核对一遍；--force 跳过非交易日闸门与封账键）
+        "duty_deadman",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）
