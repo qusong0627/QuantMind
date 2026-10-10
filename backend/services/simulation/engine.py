@@ -646,11 +646,16 @@ class SimulationEngine:
         code_kwargs: dict[str, Any] = {}
 
         try:
-            # 尝试从策略存储服务加载
+            # 尝试从策略存储服务加载。注意身份口径：托管链路传的是运行时
+            # 补零 id（如 00000042），而策略按 JWT 原始 sub（如 42）归属存储；
+            # 直传补零 id 会使 _ensure_int_user_id 命中错误主键甚至串户，
+            # 策略查不到就静默回退默认（topk=10）。数字 id 一律去前导零。
+            raw_uid = str(user_id or "").strip()
+            storage_uid = str(int(raw_uid)) if raw_uid.isdigit() else raw_uid
             storage_svc = get_strategy_storage_service()
             strategy = await storage_svc.get(
                 strategy_id=int(strategy_id) if strategy_id.isdigit() else strategy_id,
-                user_id=user_id,
+                user_id=storage_uid,
             )
 
             if strategy:
@@ -662,9 +667,18 @@ class SimulationEngine:
                 for key in _STRATEGY_KWARG_KEYS:
                     if key not in params and key in code_kwargs:
                         params[key] = code_kwargs[key]
+                try:
+                    _weight_mode = WeightMode(params.get("weight_mode", "equal"))
+                except ValueError:
+                    # 单个非法值只回退该字段，不连累整组参数回默认
+                    logger.warning(
+                        "SimulationEngine: weight_mode 非法 %r, 回退 equal",
+                        params.get("weight_mode"),
+                    )
+                    _weight_mode = WeightMode.EQUAL
                 config = StrategyConfig(
                     topk=int(params.get("topk", 10)),
-                    weight_mode=WeightMode(params.get("weight_mode", "equal")),
+                    weight_mode=_weight_mode,
                     custom_weights=params.get("custom_weights", {}),
                     min_score=float(params.get("min_score", 0.0)),
                     max_position_pct=float(params.get("max_position_pct", 0.15)),
