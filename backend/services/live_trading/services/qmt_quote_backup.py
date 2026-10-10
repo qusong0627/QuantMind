@@ -15,6 +15,12 @@
 - 心跳/断线重放由 big-convert ``WholeQuoteClientSession`` 自管；本模块只管：**热集差分订阅维护**
   + tick→标准键映射 + 席位写 + 时延打点（独立 stage ``market_snapshot_qmt``，不混主源口径）
   + 状态面（``qm:qmt:quote:backup:status``，含桥在线态）。
+- **交易时段门（M14，2026-10-10）**：只在**本链路交易时段**（``trading_session`` 单源，
+  09:15–11:35 / 12:55–15:05，与桥 feed/QMT 执行端/真单镜像同口径）内写标准键；
+  盘外推送照收不写（订阅/心跳/状态面不断，仅落键被门挡下并计数 ``skipped_out_of_session``）。
+  为什么必须挡：盘外 QMT 全推不静默——服务重启/热集变更触发的重订阅会带来 prime 全量批，
+  其 ``time`` 是上一交易时段的冻结时刻，落键即「冻结价盖新写」（series 点还标
+  ``is_stale: False``，消费侧会当成真实 tick）；备源的职责是时段内可用性兜底，不是盘外造数。
 - 量纲说明：QMT volume/amount 为原样透传（volume=手口径、amount=元），备源定位=可用性兜底，
   与主源逐值对齐不在本席范围（消费方按 ``source`` 字段可区分）。
 
@@ -32,6 +38,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 from typing import Any
+
+from backend.services.live_trading.services import trading_session
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +324,7 @@ class QmtQuoteBackupService:
             "records_invalid": 0,
             "written": 0,
             "skipped_fresh": 0,
+            "skipped_out_of_session": 0,
             "write_errors": 0,
             "last_push_ts": None,
             "last_error": None,
@@ -433,6 +442,18 @@ class QmtQuoteBackupService:
                 self.counters["last_push_ts"] = now
             return
 
+        # 交易时段门（M14）：盘外不落键——重订阅 prime 批的 time 是上一时段冻结时刻，
+        # 写入即「冻结价盖新写」。照收（计数/状态面/时延不打点），不读现值也不写。
+        # 注入口径与 trading_session 全链路一致：monkeypatch 该模块的 is_trading_time。
+        if not trading_session.is_trading_time():
+            with self._lock:
+                self.counters["batches"] += 1
+                self.counters["records_mapped"] += len(mapped)
+                self.counters["records_invalid"] += invalid
+                self.counters["skipped_out_of_session"] += len(mapped)
+                self.counters["last_push_ts"] = now
+            return
+
         # 席位判定：读取现值（同批 pipeline）
         snap_keys = [f"market:snapshot:{r['symbol'].lower()}" for r in mapped]
         pipe = client.pipeline(transaction=False)
@@ -545,6 +566,7 @@ class QmtQuoteBackupService:
             return {
                 "enabled": cfg.enabled,
                 "stale_after_s": cfg.stale_after_s,
+                "in_session": trading_session.is_trading_time(),
                 "bridge_ok": self._bridge_ok,
                 "subscribed": len(self._subscribed_codes),
                 "last_push_age_s": (

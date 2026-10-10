@@ -95,9 +95,15 @@ async def save_tdx_aidata_config(
         await asyncio.to_thread(tdx_config.write_token, ini, str(req.token).strip())
         token_written = True
 
-    # 3) 配置变更后重启全部 worker 分片（SDK 在 start() 读 ini/目录）
-    from backend.shared.tdx_aidata.client import default_cluster
+    # 3) 配置变更后重启全部 worker 分片（SDK 在 start() 读 ini/目录）。
+    #    构造期配置（分片数）变了必须先重置进程内单例——否则 restart()/后续自检
+    #    只作用于旧分片数（"保存后重启全分片生效"退化成"重启 api 进程才生效"）。
+    #    restart() 只杀不拉（新配置须新进程读到）：面板标准流程 = 保存并重启 → 自检
+    #    拉起；容器重启后同样需一次自检触发（P6 细案 T-P6-10 待办）。
+    from backend.shared.tdx_aidata.client import default_cluster, reset_default_cluster
 
+    if updates:
+        reset_default_cluster()
     cluster = default_cluster()
     restarted: Any = False
     try:

@@ -549,3 +549,82 @@ def test_engine_hot_set_reader_failure_is_visible_and_non_fatal():
     assert result["reason"] == "hot_set_unreadable"
     assert "hot_set read" in (engine.counters.get("last_error") or "")
     assert not calls["subscribe"]
+
+
+# ── 6. 单例与配置保存接线（2026-10-10：分片数变小动作只在旧单例上的修复）────
+
+
+@pytest.mark.unit
+def test_default_cluster_cached_until_reset(monkeypatch):
+    """分片数在构造时定死：不重置不重建（旧语义保持），reset 后按新值重建。"""
+    from backend.shared.tdx_aidata import client as client_mod
+
+    monkeypatch.setattr(client_mod.config, "socket_path", lambda: "/tmp/qm-test-sock")
+    monkeypatch.setattr(client_mod.config, "shard_count", lambda: 2)
+    monkeypatch.setattr(client_mod, "_default_cluster", None)
+
+    c1 = client_mod.default_cluster()
+    assert c1 is client_mod.default_cluster(), "单例语义保持"
+    assert c1.shard_count == 2 and len(c1.clients) == 2
+
+    monkeypatch.setattr(client_mod.config, "shard_count", lambda: 5)
+    assert client_mod.default_cluster() is c1, "不重置不重建（防止瞬时读失败误重建）"
+
+    client_mod.reset_default_cluster()
+    c2 = client_mod.default_cluster()
+    assert c2 is not c1 and c2.shard_count == 5 and len(c2.clients) == 5
+    assert client_mod.default_cluster() is c2
+    client_mod.reset_default_cluster()  # 不留跨用例单例
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_save_config_resets_cluster_singleton_only_for_construction_updates(
+    monkeypatch,
+):
+    """保存端点：构造期项（如分片数）更新 → save → reset → restart 顺序；
+    纯 Token 保存（非构造期）不重置单例。"""
+    from backend.shared.tdx_aidata import client as client_mod
+    from backend.shared.tdx_aidata import config as config_mod
+    from backend.services.api.routers.admin import tdx_aidata as router_mod
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(router_mod, "_redis_sync", lambda: object())
+    monkeypatch.setattr(
+        config_mod,
+        "save_config_sync",
+        lambda redis, updates: (
+            calls.append(f"save:{updates.get('shard_count')}") or updates
+        ),
+    )
+    monkeypatch.setattr(
+        client_mod, "reset_default_cluster", lambda: calls.append("reset")
+    )
+
+    class _FakeCluster:
+        async def restart(self):
+            calls.append("restart")
+            return {"s0": True}
+
+        async def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(
+        client_mod, "default_cluster", lambda: calls.append("cluster") or _FakeCluster()
+    )
+    monkeypatch.setattr(router_mod, "_config_and_status", lambda: {"shard_count": 7})
+
+    req = router_mod.TdxAiDataConfigRequest(shard_count=7)
+    resp = await router_mod.save_tdx_aidata_config(req, current_user={"is_admin": True})
+    assert resp["success"] is True
+    assert calls == ["save:7", "reset", "cluster", "restart", "close"]
+
+    # 纯 Token 保存：非构造期 → 不重置
+    calls.clear()
+    monkeypatch.setattr(
+        config_mod, "write_token", lambda ini, tok: calls.append("token")
+    )
+    req2 = router_mod.TdxAiDataConfigRequest(token="tok-x")
+    await router_mod.save_tdx_aidata_config(req2, current_user={"is_admin": True})
+    assert "token" in calls and "reset" not in calls

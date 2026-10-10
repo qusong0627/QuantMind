@@ -570,3 +570,19 @@ def default_cluster() -> TdxAiDataCluster:
     if _default_cluster is None:
         _default_cluster = TdxAiDataCluster()
     return _default_cluster
+
+
+def reset_default_cluster() -> None:
+    """丢弃进程内单例——**构造期配置（分片数/目录）变更后必须调用**（2026-10-10）。
+
+    分片数在构造时定死（clients 列表长度 + 各分片 socket 路径）。配置保存端点改了
+    shard_count 却沿用旧单例时，restart()/ensure_all() 只作用于旧分片数——
+    "保存后重启全分片生效"退化成"重启 api 进程才生效"。面板标准流程「保存并重启 →
+    自检」在旧单例下会把自检也带偏（拉起旧片数）。
+
+    为什么不做成 default_cluster() 里比较重建：``config.shard_count()`` 读失败
+    静默回落 1——瞬时 Redis 抖动会误重建为单分片。显式重置只在配置**写入成功后**
+    发生，方向确定。
+    """
+    global _default_cluster
+    _default_cluster = None

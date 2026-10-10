@@ -1,8 +1,12 @@
-"""T-P6-02 备源席（大 QMT 全推行情）测试：映射/席位判定 + 双半真链路 E2E。
+"""T-P6-02 备源席（大 QMT 全推行情）测试：映射/席位判定 + 时段门 + 双半真链路 E2E。
 
 覆盖：
 1. U：qmt_tick_to_record（字段/五档数组/符号形态/无效票价/时间解析）与
    standby_decision 席位矩阵（absent/primary_fresh/primary_stale/backup_owns）；
+1b. U：时段门（M14）——盘外推送照收不写（零 Redis 往返 + skipped_out_of_session 计数、
+   映射/invalid 计数语义不漂移）、盘内放行照写；status 带 in_session。
+   **写入用例一律注入 ``trading_session.is_trading_time``（模块属性）**——不注入的用例
+   是「白天绿、收盘后红」，测的是墙上钟（trading_session 文档同款陷阱）。
 2. I（**双半真链路**）：kit 真服务端订阅管理器 + 真客户端会话（WholeQuoteClientSession），
    经真 Redis pub/sub 推送 → 适配器席位写：主源新鲜跳过 / 陈旧接管（source=qmt_big +
    五档逐值 + series ZSET）/ 自持续写 / 无效票计数 / 时延打点被调；
@@ -157,6 +161,104 @@ class _FakeLatency:
         self.flushes += 1
 
 
+# ── 1b. 时段门（M14）────────────────────────────────────────────────
+
+
+class _FakePipe:
+    """按服务真实调用序列记账的最小管道桩（hgetall 应答数=请求数，zip 不缺行）。"""
+
+    def __init__(self, client: _FakeClient):
+        self._client = client
+        self._reads: list[str] = []
+
+    def hgetall(self, key):
+        self._reads.append(key)
+        return self
+
+    def hset(self, key, mapping=None):
+        self._client.hset_keys.append(key)
+        return self
+
+    def expire(self, key, ttl):
+        return self
+
+    def zadd(self, key, mapping):
+        self._client.zadd_keys.append(key)
+        return self
+
+    def zremrangebyrank(self, key, start, stop):
+        return self
+
+    def execute(self):
+        return [{} for _ in self._reads]
+
+
+class _FakeClient:
+    def __init__(self):
+        self.pipelines = 0
+        self.hset_keys: list[str] = []
+        self.zadd_keys: list[str] = []
+
+    def pipeline(self, transaction=False):
+        self.pipelines += 1
+        return _FakePipe(self)
+
+
+def _backup_svc(client, hot_set=("600036.SH",)):
+    from backend.services.live_trading.services.qmt_quote_backup import (
+        BackupConfig,
+        QmtQuoteBackupService,
+    )
+
+    return QmtQuoteBackupService(
+        config_loader=lambda: BackupConfig(enabled=True),
+        hot_set_fetcher=lambda: list(hot_set),
+        subscribe_fn=lambda codes, callback: "sub-1",
+        writer_client_factory=lambda: client,
+        latency_recorder=_FakeLatency(),
+    )
+
+
+@pytest.mark.unit
+def test_out_of_session_pushes_received_but_not_written(monkeypatch):
+    """盘外 prime/增量批照收不落键（M14）：冻结价连判席都不判——零 Redis 往返。"""
+    from backend.services.live_trading.services import trading_session
+
+    monkeypatch.setattr(trading_session, "is_trading_time", lambda now=None: False)
+    client = _FakeClient()
+    svc = _backup_svc(client)
+    svc.on_ticks({"600036.SH": _tick(price=41.0), "000001.SZ": _tick(price=10.5)})
+    st = svc.status()
+    assert st["in_session"] is False
+    assert st["written"] == 0 and st["skipped_out_of_session"] == 2
+    assert st["batches"] == 1 and st["records_mapped"] == 2
+    assert st["last_push_ts"] is not None
+    assert client.pipelines == 0, "盘外不读现值——不占 Redis、省往返"
+    assert client.hset_keys == [] and client.zadd_keys == []
+
+    # 无效票仍计入 invalid（映射先于门发生）——计数语义不因门漂移
+    svc.on_ticks({"600036.SH": {**_tick(), "lastPrice": 0}})
+    st = svc.status()
+    assert st["records_invalid"] == 1 and st["skipped_out_of_session"] == 2
+    assert st["batches"] == 2
+
+
+@pytest.mark.unit
+def test_in_session_pushes_write_and_status_reports_session(monkeypatch):
+    from backend.services.live_trading.services import trading_session
+
+    monkeypatch.setattr(trading_session, "is_trading_time", lambda now=None: True)
+    client = _FakeClient()
+    svc = _backup_svc(client)
+    svc.on_ticks({"600036.SH": _tick(price=41.0)})
+    st = svc.status()
+    assert st["in_session"] is True
+    assert st["written"] == 1 and st["skipped_out_of_session"] == 0
+    assert client.pipelines == 2  # 读现值 + 写
+    assert client.hset_keys == ["market:snapshot:sh600036"]
+    assert client.zadd_keys == ["market:series:SH600036"]
+
+
 # ── 2. 双半真链路 ───────────────────────────────────────────────────
 
 
@@ -183,7 +285,7 @@ def _wait_for(cond, timeout: float = 8.0, interval: float = 0.05):
 
 
 @pytest.mark.integration
-def test_backup_standby_write_via_real_pubsub():
+def test_backup_standby_write_via_real_pubsub(monkeypatch):
     """kit 真服务端管理器 + 真客户端会话 → 真 Redis pub/sub → 席位写断言。"""
     import redis as redis_lib
 
@@ -191,10 +293,15 @@ def test_backup_standby_write_via_real_pubsub():
     from bigqmt_signal_trader.quote_subscription_manager import QuoteSubscriptionManager
     from bigqmt_signal_trader.whole_quote_session import WholeQuoteClientSession
 
+    from backend.services.live_trading.services import trading_session
     from backend.services.live_trading.services.qmt_quote_backup import (
         BackupConfig,
         QmtQuoteBackupService,
     )
+
+    # 时段门注入（必须）：本用例验证席位写语义，与墙上钟无关——不注入则时段外
+    # 批次全被门挡下（written 恒 0 → 断言红），变成"白天绿、收盘后红"。
+    monkeypatch.setattr(trading_session, "is_trading_time", lambda now=None: True)
 
     account = f"pytest-qmt-{uuid.uuid4().hex[:6]}"
     try:
