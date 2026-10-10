@@ -7,8 +7,11 @@ import logging
 from typing import Any
 
 from backend.services.trade_shared.redis_client import RedisClient
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
+
+_SH_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class SimulationRuntimeRestorer:
@@ -20,6 +23,16 @@ class SimulationRuntimeRestorer:
     async def restore_all(self) -> int:
         if not self.redis.client:
             return 0
+
+        # 先补齐老账户：有 simulation:account(+strategy_id) 但无
+        # trade:active_strategy 的，做一次默认托管配置回填（幂等，SET NX），
+        # 否则旧调度器下线后这批账户永远不会被托管调度扫到。
+        try:
+            migrated = await self.backfill_legacy_accounts()
+            if migrated > 0:
+                logger.info("simulation runtime backfilled legacy accounts: %s", migrated)
+        except Exception as exc:
+            logger.warning("simulation legacy backfill failed: %s", exc)
 
         restored = 0
         for raw_key in self.redis.client.scan_iter(
@@ -37,6 +50,123 @@ class SimulationRuntimeRestorer:
         if restored > 0:
             logger.info("simulation runtime restored active sandboxes: %s", restored)
         return restored
+
+    async def backfill_legacy_accounts(self) -> int:
+        """回填老账户缺失的 active_strategy（幂等）。
+
+        扫描 simulation:account:*，取 payload.strategy_id；若该用户
+        经 active_strategy_lookup_keys 找不到任何运行态键，则按托管
+        默认配置建一个 canonical 键（SET NX，不覆盖用户已有配置）。
+        CN 优先；同用户多市场多策略时只取第一个（CN > 其它）。
+        """
+        from datetime import datetime
+
+        from backend.shared.simulation_account_keys import (
+            active_strategy_key,
+            active_strategy_lookup_keys,
+            normalize_runtime_tenant,
+            normalize_runtime_user,
+            parse_account_key,
+        )
+        from backend.services.simulation.services.simulation_hosted_scheduler import (
+            _DEFAULT_LIVE_TRADE_CONFIG,
+        )
+
+        client = self.redis.client
+        if client is None:
+            return 0
+
+        # user 维度收敛：(tenant, runtime_user) -> (strategy_id, market)
+        candidates: dict[tuple[str, str], dict[str, str]] = {}
+        try:
+            keys = list(client.scan_iter(match="simulation:account:*", count=500))
+        except Exception as exc:
+            logger.warning("simulation legacy backfill scan failed: %s", exc)
+            return 0
+
+        for raw_key in keys:
+            try:
+                parsed = parse_account_key(str(raw_key))
+                if not parsed:
+                    continue
+                tenant, user_raw, market = parsed
+                raw = client.get(str(raw_key))
+                if not raw:
+                    continue
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    continue
+                strategy_id = str(data.get("strategy_id") or "").strip()
+                if not strategy_id:
+                    continue
+                tenant_n = normalize_runtime_tenant(tenant)
+                user_n = normalize_runtime_user(user_raw)
+                key = (tenant_n, user_n)
+                prev = candidates.get(key)
+                # CN 优先覆盖非 CN；同市场先到先得
+                if prev is None or (prev.get("market") != "CN" and market == "CN"):
+                    candidates[key] = {"strategy_id": strategy_id, "market": market}
+            except Exception as exc:
+                logger.debug("simulation legacy backfill parse skipped: %s", exc)
+                continue
+
+        migrated = 0
+        now_iso = datetime.now(_SH_TZ).isoformat()
+        for (tenant_n, user_n), info in candidates.items():
+            try:
+                exists = False
+                for cand_key in active_strategy_lookup_keys(tenant_n, user_n):
+                    try:
+                        if client.get(cand_key):
+                            exists = True
+                            break
+                    except Exception:
+                        continue
+                if exists:
+                    continue
+                payload = {
+                    "strategy_id": info["strategy_id"],
+                    "run_id": f"migrated_{datetime.now(_SH_TZ).strftime('%Y%m%d')}",
+                    "mode": "SIMULATION",
+                    "strategy_name": info["strategy_id"],
+                    "execution_config": {},
+                    "live_trade_config": dict(_DEFAULT_LIVE_TRADE_CONFIG),
+                    "trading_permission": "trade_enabled",
+                    "auto_trade_enabled": True,
+                    "started_at": now_iso,
+                    "runtime_tenant_id": tenant_n,
+                    "runtime_user_id": user_n,
+                    "migrated_from_legacy": True,
+                    "migrate_market": info.get("market") or "CN",
+                }
+                try:
+                    ok = client.set(
+                        active_strategy_key(tenant_n, user_n),
+                        json.dumps(payload, ensure_ascii=False),
+                        nx=True,
+                    )
+                except TypeError:
+                    # 某些 RedisClient.set 签名不支持 nx（如测试替身）：退化为存在性检查后写
+                    if client.get(active_strategy_key(tenant_n, user_n)):
+                        continue
+                    client.set(
+                        active_strategy_key(tenant_n, user_n),
+                        json.dumps(payload, ensure_ascii=False),
+                    )
+                    ok = True
+                if ok:
+                    migrated += 1
+                    logger.info(
+                        "simulation legacy migrated tenant=%s user=%s strategy=%s market=%s",
+                        tenant_n, user_n, info["strategy_id"], info.get("market"),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "simulation legacy backfill skipped tenant=%s user=%s: %s",
+                    tenant_n, user_n, exc,
+                )
+                continue
+        return migrated
 
     async def restore_key(self, key: str) -> bool:
         raw = self.redis.client.get(key)

@@ -374,6 +374,28 @@ class SimulationEngine:
                     orders = self._truncate_orders(orders, int(max_orders))
                 report.order_count = len(orders)
 
+                # 闸门风控（管理后台 risk_rules）：规则只加载一次，逐单评估。
+                # SELL 同样受单笔上下限约束（与 RiskService 口径一致）。
+                market_str = str(getattr(market, "value", market) or "CN")
+                gate_rules: list = []
+                sim_day_count = 0
+                if self._sim_gate_enabled():
+                    gate_rules = await self._load_sim_gate_rules(
+                        db, canonical_sim_uid(uid), market_str
+                    )
+                    if gate_rules:
+                        sim_day_count = await self._sim_daily_order_count(
+                            db, tenant, canonical_sim_uid(uid)
+                        )
+                        logger.info(
+                            "SimulationEngine: 闸门风控生效 tenant=%s user=%s "
+                            "rules=%d day_count=%d",
+                            tenant,
+                            uid,
+                            len(gate_rules),
+                            sim_day_count,
+                        )
+
                 if not orders:
                     logger.info(
                         "SimulationEngine: 无需调仓, tenant=%s user=%s",
@@ -405,7 +427,17 @@ class SimulationEngine:
                                 live_ticks, order.symbol
                             ),
                             allow_stale_fill=stale_ok,
+                            gate_rules=gate_rules,
+                            portfolio_value=float(getattr(account, "total_asset", 0) or 0),
+                            daily_trade_count=sim_day_count,
                         )
+                        # 被闸门拦截的不计入当日笔数（与实盘排除 REJECTED 口径对齐），
+                        # 其余（成交/撮合失败）均计入，避免同轮内笔数限制被绕过。
+                        if not (
+                            not result.success
+                            and str(result.message or "").startswith("risk_blocked:")
+                        ):
+                            sim_day_count += 1
                     except Exception as exc:  # noqa: BLE001
                         failed_orders.append(str(order.symbol))
                         logger.exception(
@@ -717,6 +749,120 @@ class SimulationEngine:
             positions=data.get("positions", {}) or {},
         )
 
+    def _sim_gate_enabled(self) -> bool:
+        """模拟盘闸门风控开关（默认开，SIM_GATE_RISK_ENABLED=0 可逃生）。"""
+        import os as _os
+
+        return _os.getenv("SIM_GATE_RISK_ENABLED", "true").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+
+    async def _load_sim_gate_rules(
+        self, db: AsyncSession, uid_int: int, market_str: str
+    ) -> list:
+        """加载适用于模拟盘的闸门类规则（SIMULATION/BOTH + 市场匹配）。
+
+        失败时 fail-open 返回 []，避免风控表异常拖垮整轮调仓。
+        """
+        try:
+            from backend.services.live_trading.services.risk_rule_types import (
+                GATE_RULE_TYPES,
+                rule_matches_market,
+                rule_matches_trading_mode,
+            )
+            from backend.services.live_trading.services.risk_service import RiskService
+
+            rules = await RiskService(db, self.redis).get_applicable_rules(uid_int)
+            gated = []
+            for rule in rules:
+                if str(getattr(rule, "rule_type", "")) not in GATE_RULE_TYPES:
+                    continue
+                params = getattr(rule, "parameters", None) or {}
+                if not isinstance(params, dict):
+                    continue
+                if not rule_matches_trading_mode(params.get("trading_mode"), "SIMULATION"):
+                    continue
+                if not rule_matches_market(params.get("markets"), market_str):
+                    continue
+                gated.append(rule)
+            return gated
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SimulationEngine: 加载闸门风控规则失败, fail-open: %s", exc)
+            return []
+
+    @staticmethod
+    def _eval_sim_gate(
+        order_value: float,
+        portfolio_value: float,
+        daily_count: int,
+        gate_rules: list,
+    ) -> list[str]:
+        """评估 4 类闸门规则，与 RiskService.check_order_risk 同口径（仅闸门部分）。"""
+        violations: list[str] = []
+        for rule in gate_rules:
+            params = getattr(rule, "parameters", None) or {}
+            if not isinstance(params, dict):
+                continue
+            rule_type = str(getattr(rule, "rule_type", ""))
+            rule_name = str(getattr(rule, "rule_name", rule_type))
+            if rule_type == "max_order_size":
+                max_size = params.get("max_value", settings.MAX_ORDER_SIZE)
+                if order_value > max_size:
+                    violations.append(
+                        f"{rule_name}: Order value {order_value:.2f} exceeds maximum {max_size}"
+                    )
+            elif rule_type == "min_order_size":
+                min_size = params.get("min_value", settings.MIN_ORDER_SIZE)
+                if order_value < min_size:
+                    violations.append(
+                        f"{rule_name}: Order value {order_value:.2f} below minimum {min_size}"
+                    )
+            elif rule_type == "max_position_size":
+                max_pct = params.get("max_percentage", settings.MAX_POSITION_SIZE)
+                if portfolio_value > 0:
+                    position_pct = order_value / portfolio_value
+                    if position_pct > max_pct:
+                        violations.append(
+                            f"{rule_name}: Position size {position_pct:.1%} "
+                            f"exceeds maximum {max_pct:.1%}"
+                        )
+            elif rule_type == "max_daily_trades":
+                max_trades = params.get("max_count", settings.MAX_DAILY_TRADES)
+                if daily_count >= max_trades:
+                    violations.append(
+                        f"{rule_name}: Daily trade count {daily_count} "
+                        f"reached maximum {max_trades}"
+                    )
+        return violations
+
+    async def _sim_daily_order_count(
+        self, db: AsyncSession, tenant: str, uid_int: int
+    ) -> int:
+        """当日模拟单计数（排除已拒绝，与实盘口径对齐），失败返回 0。"""
+        try:
+            from datetime import datetime as _dt
+
+            from sqlalchemy import func, select
+
+            from backend.services.simulation.models.order import OrderStatus, SimOrder
+
+            today_start = _dt.combine(_dt.now().date(), _dt.min.time())
+            stmt = (
+                select(func.count(SimOrder.id))
+                .where(SimOrder.tenant_id == tenant)
+                .where(SimOrder.user_id == uid_int)
+                .where(SimOrder.created_at >= today_start)
+                .where(SimOrder.status != OrderStatus.REJECTED)
+            )
+            res = await db.execute(stmt)
+            return int(res.scalar() or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SimulationEngine: 当日订单计数失败, 按 0 处理: %s", exc)
+            return 0
+
     def _apply_risk_buy_locks(
         self,
         orders: list[Order],
@@ -909,8 +1055,15 @@ class SimulationEngine:
         run_id: str = "",
         live_tick: dict[str, Any] | None = None,
         allow_stale_fill: bool = False,
+        gate_rules: list | None = None,
+        portfolio_value: float = 0.0,
+        daily_trade_count: int = 0,
     ) -> ExecutionResult:
-        """执行单个订单（虚拟撮合；成功后按开关镜像一笔真单到 QMT）"""
+        """执行单个订单（虚拟撮合；成功后按开关镜像一笔真单到 QMT）
+
+        gate_rules 非空时先过管理后台闸门风控，不通过则落 REJECTED
+       （remarks 带 risk_blocked，前端交易记录可见），不进撮合。
+        """
         from backend.services.simulation.models.order import (
             OrderSide,
             OrderType,
@@ -963,6 +1116,27 @@ class SimulationEngine:
             )
         )
         await db.flush()
+
+        # 闸门风控（管理后台 risk_rules）：在撮合前拦截，落 REJECTED 可审计。
+        if gate_rules:
+            order_value = float(order.quantity or 0) * float(order.price or 0)
+            violations = self._eval_sim_gate(
+                order_value, portfolio_value, daily_trade_count, gate_rules
+            )
+            if violations:
+                message = ("risk_blocked: " + "; ".join(violations))[:500]
+                logger.info(
+                    "SimulationEngine: 闸门风控拦截 tenant=%s user=%s "
+                    "symbol=%s side=%s value=%.2f: %s",
+                    tenant_id,
+                    user_id,
+                    order.symbol,
+                    order.side,
+                    order_value,
+                    message,
+                )
+                await exec_engine.mark_rejected(sim_order, message)
+                return ExecutionResult(success=False, message=message)
 
         # allow_stale_fill 分支下不会走 assess_execution_window，此处先置 None，
         # 避免下游部分成交排队时引用未初始化变量（历史 UnboundLocalError）。

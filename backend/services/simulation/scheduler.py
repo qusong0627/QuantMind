@@ -1,38 +1,33 @@
 """
-Simulation Scheduler - 模拟盘定时调度器
-每日固定时间自动执行调仓，支持多用户多策略并行调度
+SimulationScheduler - 模拟盘手动运维触发器（已下线自动循环）。
 
-每日流程：unlock_t1() → 触发推理（如无当日信号）→ run_cycle()
+自动调仓唯一触发源：SimulationHostedScheduler（按 trade:active_strategy 的
+live_trade_config 触发，见 services/simulation_hosted_scheduler.py）。
+本类仅保留 run_all_users，供运维手动补跑全量账户调仓，不再有定时循环、
+整分命中、T+1 解锁（T+1 已解耦到 simulation_t1_unlock_task 独立任务）。
 """
 
 import asyncio
 import json
 import logging
-import os
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
-
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.simulation.engine import SimulationEngine, simulation_engine
 from backend.services.simulation.services.simulation_manager import (
-    SimulationAccountManager,
     canonical_sim_uid,
 )
-from backend.shared.database_manager_v2 import get_db_manager
+from backend.shared.database_manager_v2 import get_db_manager  # noqa: F401 保留：手动补跑脚本可能用到
 
 logger = logging.getLogger(__name__)
-
-_SH_TZ = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass
 class ActiveSimulationAccount:
     """激活的模拟盘账户"""
+
     tenant_id: str
     user_id: str
     strategy_id: str
@@ -41,10 +36,13 @@ class ActiveSimulationAccount:
 
 class SimulationScheduler:
     """
-    模拟盘定时调度器：
-    - 每日固定时间（如 9:35）自动执行调仓
-    - 支持多用户、多策略并行调度
-    - 仅在交易日运行
+    手动补跑器（无自动循环）：
+
+    - 触发源：遍历 simulation:account:* 中绑定了 strategy_id 的账户，
+      逐个调用 SimulationEngine.run_cycle。
+    - 与托管链路差异：不读 enabled_sessions/sell-buy 窗口/rebalance_days，
+      不写 simulation_rebalance_jobs，不做信号批次严格校验。
+      仅用于故障后补跑，日常自动调仓请走托管调度器。
     """
 
     def __init__(
@@ -54,78 +52,6 @@ class SimulationScheduler:
     ):
         self.engine = engine or simulation_engine
         self.redis = redis or RedisClient()
-        self.is_running = False
-        self._task: asyncio.Task | None = None
-
-        # 调度时间配置（上海时区）
-        self.schedule_time = self._parse_schedule_time()
-        self.poll_interval = 60  # 每分钟检查一次
-
-    def _parse_schedule_time(self) -> time:
-        """解析调度时间配置"""
-        time_str = os.getenv("SIMULATION_SCHEDULE_TIME", "09:35")
-        try:
-            parts = time_str.split(":")
-            return time(int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-        except Exception:
-            return time(9, 35)
-
-    async def start(self) -> None:
-        """启动调度器"""
-        if self.is_running:
-            logger.warning("SimulationScheduler: 已在运行中")
-            return
-
-        self.is_running = True
-        self._task = asyncio.create_task(self._run_loop(), name="simulation-scheduler")
-        logger.info(
-            "SimulationScheduler: 已启动, 调度时间=%s",
-            self.schedule_time.strftime("%H:%M"),
-        )
-
-    async def stop(self) -> None:
-        """停止调度器"""
-        self.is_running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-        logger.info("SimulationScheduler: 已停止")
-
-    async def _run_loop(self) -> None:
-        """调度循环"""
-        last_executed_date: str | None = None
-
-        while self.is_running:
-            try:
-                now = datetime.now(_SH_TZ)
-                today = now.strftime("%Y-%m-%d")
-                current_time = now.time()
-
-                # 检查是否到达调度时间
-                if (
-                    self._is_trading_day(now)
-                    and today != last_executed_date
-                    and current_time.hour == self.schedule_time.hour
-                    and current_time.minute == self.schedule_time.minute
-                ):
-                    logger.info(
-                        "SimulationScheduler: 到达调度时间 %s, 开始执行",
-                        self.schedule_time.strftime("%H:%M"),
-                    )
-                    await self.run_all_users()
-                    last_executed_date = today
-
-                await asyncio.sleep(self.poll_interval)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("SimulationScheduler: 调度循环异常 %s", e, exc_info=True)
-                await asyncio.sleep(self.poll_interval)
 
     def _is_trading_day(self, dt: datetime) -> bool:
         """检查是否为交易日（XSHG 日历；日历不可用时回退周一至周五）"""
@@ -141,12 +67,9 @@ class SimulationScheduler:
 
     async def run_all_users(self) -> dict[str, Any]:
         """
-        遍历所有激活的模拟盘账户，执行调仓。
+        手动补跑：遍历所有绑定了策略的模拟盘账户，执行调仓。
 
-        每日开盘流程：
-        1. 解除 T+1 锁定（available_volume = volume）
-        2. 遍历账户执行调仓
-
+        注意：不做 T+1 解锁（独立任务负责），不做去重锁。
         Returns:
             执行统计
         """
@@ -160,9 +83,6 @@ class SimulationScheduler:
         }
 
         try:
-            # 步骤 0: 解除所有账户的 T+1 锁定
-            await self._unlock_all_accounts()
-
             # 加载所有激活的模拟盘账户
             active_accounts = await self._load_active_accounts()
             stats["total"] = len(active_accounts)
@@ -172,7 +92,7 @@ class SimulationScheduler:
                 return stats
 
             logger.info(
-                "SimulationScheduler: 开始执行 %d 个账户的调仓",
+                "SimulationScheduler: 手动补跑 %d 个账户的调仓",
                 len(active_accounts),
             )
 
@@ -199,7 +119,7 @@ class SimulationScheduler:
 
             elapsed = (datetime.now() - start_time).total_seconds()
             logger.info(
-                "SimulationScheduler: 执行完成, total=%d success=%d failed=%d skipped=%d elapsed=%.2fs",
+                "SimulationScheduler: 补跑完成, total=%d success=%d failed=%d skipped=%d elapsed=%.2fs",
                 stats["total"],
                 stats["success"],
                 stats["failed"],
@@ -231,7 +151,6 @@ class SimulationScheduler:
                             # 获取账户数据，检查是否有绑定策略
                             raw = self.redis.client.get(key)
                             if raw:
-                                import json
                                 data = json.loads(raw)
                                 # 检查是否有策略绑定
                                 strategy_id = data.get("strategy_id")
@@ -251,12 +170,7 @@ class SimulationScheduler:
         return accounts
 
     def _live_trade_config(self, account: ActiveSimulationAccount) -> dict:
-        """读取运行时 active_strategy 的 live_trade_config（与托管链路同一事实源）。
-
-        前端「模拟盘托管」保存的配置存在 trade:active_strategy:{tenant}:{user}。
-        此前 SimulationScheduler 每日调仓几乎不读它，导致配置只对托管链路生效、
-        对本调度器静默失效。
-        """
+        """读取运行时 active_strategy 的 live_trade_config（与托管链路同一事实源）。"""
         try:
             if not self.redis.client:
                 return {}
@@ -286,19 +200,11 @@ class SimulationScheduler:
             return {}
 
     def _resolve_pool_ref(self, account: ActiveSimulationAccount) -> str | None:
-        """从运行时 active_strategy 配置取全局股票池引用（P3 接线）。
-
-        与 hosted scheduler / 手动托管同一事实源；此前本调度器从不读它，
-        配置的池只对托管链路生效、本调度器静默按全市场信号调仓。
-        """
+        """从运行时 active_strategy 配置取全局股票池引用。"""
         return str(self._live_trade_config(account).get("pool_id") or "").strip() or None
 
     def _resolve_max_orders(self, account: ActiveSimulationAccount) -> int | None:
-        """从运行时 active_strategy 配置取单轮订单上限。
-
-        max_orders_per_cycle 在模拟盘此前只被归一化、无任何消费点：用户设 20，
-        实际仍按 topk 下满 50 单。本调度器与托管链路共用同一口径。
-        """
+        """从运行时 active_strategy 配置取单轮订单上限。"""
         try:
             value = int(self._live_trade_config(account).get("max_orders_per_cycle") or 0)
         except (TypeError, ValueError):
@@ -324,34 +230,6 @@ class SimulationScheduler:
                 e,
             )
             return False
-
-    async def _unlock_all_accounts(self) -> None:
-        """解除所有模拟账户的 T+1 锁定：把 available_volume 补齐为 volume。"""
-        manager = SimulationAccountManager(self.redis)
-        try:
-            if not self.redis.client:
-                return
-            keys = list(self.redis.client.scan_iter(match="simulation:account:*", count=500))
-            unlocked_count = 0
-            for key in keys:
-                try:
-                    parts = str(key).split(":")
-                    if len(parts) >= 4:
-                        tenant_id = parts[2]
-                        user_id_str = parts[3]
-                        if user_id_str.isdigit():
-                            result = await manager.sync_t1_from_ledger(
-                                user_id=int(user_id_str),
-                                tenant_id=tenant_id,
-                            )
-                            if result.get("success") and result.get("unlocked", 0) > 0:
-                                unlocked_count += 1
-                except Exception as e:
-                    logger.debug("SimulationScheduler: unlock_t1 失败 key=%s: %s", key, e)
-            if unlocked_count > 0:
-                logger.info("SimulationScheduler: T+1 解锁完成, %d 个账户有新解锁持仓", unlocked_count)
-        except Exception as e:
-            logger.error("SimulationScheduler: T+1 批量解锁失败 %s", e, exc_info=True)
 
 
 simulation_scheduler = SimulationScheduler()

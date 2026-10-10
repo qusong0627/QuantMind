@@ -120,6 +120,10 @@ async def list_risk_events(
             stmt = stmt.where(RiskEvent.trade_date == trade_date)
         if status:
             stmt = stmt.where(RiskEvent.status == status)
+        else:
+            # 预演（dry_run）只用于单次试算，不应污染“最近触发”列表；
+            # 需要查看时显式传 ?status=dry_run。
+            stmt = stmt.where(RiskEvent.status != "dry_run")
         stmt = stmt.limit(limit)
         rows = list((await db.execute(stmt)).scalars().all())
         return _ok([RiskEventResponse.model_validate(row).model_dump() for row in rows])

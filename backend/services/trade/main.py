@@ -312,17 +312,20 @@ async def lifespan(app: FastAPI):
         app.state.startup_healthy = False
         logger.error("trade sandbox signal consumer start failed: %s", e, exc_info=True)
 
-    # 启动模拟盘定时调度器
+    # 旧每日定点调度器（SimulationScheduler）已下线：唯一触发源为下面的
+    # 托管调度器（按 trade:active_strategy 的 live_trade_config 触发）。
+    # 若仍配置了 ENABLE_SIMULATION_SCHEDULER=true，仅告警提示迁移，不再启动，
+    # 避免与托管链路双跑重复下单。
     try:
-        enabled = os.getenv("ENABLE_SIMULATION_SCHEDULER", "false").lower() in {"1", "true", "yes", "on"}
-        if enabled:
-            from backend.services.simulation.scheduler import simulation_scheduler
-
-            await simulation_scheduler.start()
-            app.state.simulation_scheduler = simulation_scheduler
-            logger.info("Simulation scheduler started")
+        legacy_enabled = os.getenv("ENABLE_SIMULATION_SCHEDULER", "false").lower() in {"1", "true", "yes", "on"}
+        if legacy_enabled:
+            logger.warning(
+                "ENABLE_SIMULATION_SCHEDULER 已废弃且不会启动："
+                "模拟盘自动调仓只走托管调度器（trade:active_strategy），"
+                "请改用前端策略托管配置 rebalance_days/sell_time/buy_time"
+            )
     except Exception as e:
-        logger.error("trade simulation scheduler start failed: %s", e, exc_info=True)
+        logger.warning("trade legacy simulation scheduler flag check failed: %s", e)
 
     # 启动模拟盘策略级托管调度器（按前端弹窗配置的调仓周期/时间点触发）
     try:
@@ -390,13 +393,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade sandbox signal consumer stop failed: %s", e)
 
-    # 停止模拟盘调度器
-    simulation_scheduler = getattr(app.state, "simulation_scheduler", None)
-    if simulation_scheduler is not None:
+    # 旧 SimulationScheduler 循环已删除（托管调度器为唯一触发源），此处无须停止。
+    # 兼容滚动升级：若 app.state 残留旧实例则顺手停掉。
+    _legacy_scheduler = getattr(app.state, "simulation_scheduler", None)
+    if _legacy_scheduler is not None:
         try:
-            await simulation_scheduler.stop()
+            await _legacy_scheduler.stop()
         except Exception as e:
-            logger.warning("trade simulation scheduler stop failed: %s", e)
+            logger.warning("trade legacy simulation scheduler stop failed: %s", e)
 
     # 停止模拟盘持久化权益结算 worker
     equity_settle_worker = getattr(app.state, "sim_equity_settle_worker", None)
