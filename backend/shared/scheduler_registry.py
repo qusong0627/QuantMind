@@ -182,6 +182,15 @@ JOBS: tuple[JobSpec, ...] = (
         "python backend/scripts/schedule_ctl.py run retrain_dispatch",
         "滚动训练：窗口计算→内部派发→campaign 记账；mark-after-dispatch",
     ),
+    # P2-4 融合权重周期刷新（设计《机构级模型融合》§7）：每日 22:30 扫全部融合
+    # 模型按成员近窗 IC 重算权重，防抖阈值（0.02）下实际写盘呈周更节律。
+    JobSpec(
+        "fusion_refresh", "融合权重刷新", "celery_beat", "celery",
+        "每日 22:30（防抖后实际周更）",
+        "FUSION_REFRESH_ENABLED", True, 345600,
+        "python backend/scripts/schedule_ctl.py run fusion_refresh",
+        "融合模型重算权重 → weight_snapshot.json（防抖；manual/equal 与缺员跳过）",
+    ),
     JobSpec(
         "news_enrich", "新闻富化", "celery_beat", "celery", "~30s",
         None, True, 900, None, "Huntly 新闻入库富化",

@@ -92,6 +92,25 @@ def schedule_spy(monkeypatch):
     monkeypatch.setattr(
         rr, "load_recipe", lambda rid: SimpleNamespace(market="CN", recipe_id=rid)
     )
+    # 派发器心跳读替换成确定值（真实 read_heartbeats 会碰 Redis；其判定语义
+    # 已由 test_scheduler_registry 锁定，这里只验证路由把它原样透出）。
+    from backend.shared import scheduler_registry as sreg
+
+    monkeypatch.setattr(
+        sreg,
+        "read_heartbeats",
+        lambda keys, **kw: [
+            {
+                "key": k,
+                "name": "滚动重训派发",
+                "enabled": True,
+                "state": "ok",
+                "age": 5,
+                "ttl": 1800,
+            }
+            for k in keys
+        ],
+    )
     return saved
 
 
@@ -249,6 +268,39 @@ def test_schedule_get_passthrough(client, schedule_spy):
     assert resp.status_code == 200
     assert resp.json()["markets"] == ["CN"]
     assert resp.json()["schedules"]["CN"]["enabled"] is False
+    # 心跳块随调度一起返回（默认替身为 ok）；面板据此渲染派发器状态
+    assert resp.json()["dispatch"]["state"] == "ok"
+
+
+@pytest.mark.unit
+def test_schedule_get_reports_stale_dispatch_heartbeat(
+    client, schedule_spy, monkeypatch
+):
+    """派发器心跳过期原样透出：调度保存了 enabled 但没人派发的真相出口（M5）。"""
+    from backend.shared import scheduler_registry as sreg
+
+    monkeypatch.setattr(
+        sreg,
+        "read_heartbeats",
+        lambda keys, **kw: [
+            {
+                "key": "retrain_dispatch",
+                "name": "滚动重训派发",
+                "enabled": True,
+                "state": "stale",
+                "age": 4000,
+                "ttl": 1800,
+            }
+        ],
+    )
+
+    resp = client.get(f"{BASE}/schedule")
+
+    assert resp.status_code == 200
+    dispatch = resp.json()["dispatch"]
+    assert dispatch["state"] == "stale"
+    assert dispatch["enabled"] is True
+    assert dispatch["age"] == 4000
 
 
 @pytest.mark.unit

@@ -653,6 +653,42 @@ class ModelRegistryService:
             )
         return [self._row_to_model(dict(row)) for row in rows]
 
+    async def scan_ensemble_models(self) -> list[dict[str, Any]]:
+        """全部租户的融合模型行（P2-4 周期权重刷新的扫描面）。
+
+        与 ``list_models`` 不同，这里是**跨用户**的平台级扫描，只收 ready/active。
+        判据两条并列（实测缺一不可）：``is_ensemble=true`` **且** 带
+        ``source_model_ids`` —— 训练管线落库的 stacking 模型也会带
+        ``is_ensemble=true``（模型族意义上的「集成」），但它不是
+        register_ensemble_model 产出的融合模型，没有 weight_snapshot 可刷。
+        """
+        async with get_session(read_only=True) as session:
+            rows = (
+                (
+                    await session.execute(
+                        text(
+                            """
+                        SELECT tenant_id, user_id, model_id, status, storage_path, metadata_json
+                        FROM qm_user_models
+                        WHERE status IN ('ready', 'active')
+                          AND metadata_json ->> 'is_ensemble' = 'true'
+                          AND metadata_json ? 'source_model_ids'
+                        ORDER BY updated_at DESC
+                        """
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [
+            {
+                **dict(row),
+                "metadata_json": self._parse_json_field(row.get("metadata_json")),
+            }
+            for row in rows
+        ]
+
     async def get_model(
         self, *, tenant_id: str, user_id: str, model_id: str
     ) -> dict[str, Any] | None:
@@ -2607,7 +2643,8 @@ class ModelRegistryService:
             total = sum(raw.values()) or 1.0
             weights = {k: v / total for k, v in raw.items()}
         elif weight_strategy == "recent_ic":
-            # 初始等权；每日回填任务按近30日生产 rank_ic 动态刷新 weight_snapshot.json
+            # 初始等权；周期刷新任务（fusion_refresh，P2-4 重建，旧任务随 6c469eb7
+            # 删除）按成员近窗 IC 动态刷新 weight_snapshot.json
             weights = {str(s["model_id"]): 1.0 / len(sources) for s in sources}
         else:
             weights = {str(s["model_id"]): 1.0 / len(sources) for s in sources}

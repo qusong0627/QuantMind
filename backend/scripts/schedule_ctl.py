@@ -174,6 +174,41 @@ def _run_retrain_dispatch(date_str: str | None, force: bool) -> int:
     return 1 if failed else 0
 
 
+def _run_fusion_refresh(date_str: str | None, force: bool) -> int:
+    """融合权重刷新「重跑」= 立刻扫一轮（幂等：防抖阈值挡住无变动写盘）。
+
+    纯本地重算 + 原子写快照，无真钱副作用；manual/equal、缺成员记录与
+    证据不可得的模型跳过并留原因。``--force`` 无特殊语义（本任务重跑本就
+    不看 any 开关）。"""
+    import asyncio
+
+    from backend.services.engine.inference.fusion_refresh import (
+        refresh_fusion_weights,
+    )
+
+    out = asyncio.run(refresh_fusion_weights())
+    print(
+        f"fusion_refresh: 扫描={out.get('scanned')} "
+        f"更新={len(out.get('updated') or [])} "
+        f"防抖={len(out.get('debounced') or [])} "
+        f"跳过={len(out.get('skipped') or [])} "
+        f"错误={len(out.get('errors') or [])}"
+    )
+    for entry in out.get("updated") or []:
+        print(f"  updated {entry.get('model_id')} max_delta={entry.get('max_delta')}")
+    for entry in out.get("skipped") or []:
+        print(
+            f"  skipped {entry.get('model_id')}: "
+            f"{entry.get('status')} {entry.get('reason')}"
+        )
+    for entry in out.get("errors") or []:
+        print(
+            f"  error {entry.get('model_id')}: {entry.get('error')}",
+            file=sys.stderr,
+        )
+    return 1 if out.get("errors") else 0
+
+
 def _run_dual_book(date_str: str | None, force: bool) -> int:
     import asyncio
 
@@ -509,6 +544,8 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     # P1 滚动重训派发：重跑 = 按配置试一轮（--force 不看 enabled/到点/本期标记；
     # 真正提交在 API 进程，同窗口重复派发被 campaign 幂等键挡住）。
     "retrain_dispatch": _run_retrain_dispatch,
+    # P2-4 融合权重刷新：重跑 = 立刻扫一轮（幂等；防抖阈值挡住无变动写盘）。
+    "fusion_refresh": _run_fusion_refresh,
 }
 
 

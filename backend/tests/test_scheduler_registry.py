@@ -186,6 +186,7 @@ def test_all_jobs_heartbeat_wired_in_source():
         "tca_report",
         "retrain_dispatch",
         "regime_persist",
+        "fusion_refresh",
     ):
         assert f'_sched_heartbeat("{job_key}")' in celery_src, f"{job_key} 未接心跳"
 
@@ -200,6 +201,7 @@ def test_all_jobs_heartbeat_wired_in_source():
         "tca_report",
         "retrain_dispatch",
         "regime_persist",
+        "fusion_refresh",
     }
     registry = {j.key for j in JOBS if j.heartbeat_ttl is not None}
     assert registry == wired, f"注册表与接线不一致: {registry ^ wired}"
@@ -245,6 +247,8 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "retrain_dispatch",
         # P3 Regime 状态日更（纯台账写入且冻结幂等：重跑对已写生效日 = 0 新行）
         "regime_persist",
+        # P2-4 融合权重刷新（重跑 = 立刻扫一轮；防抖阈值挡住无变动写盘）
+        "fusion_refresh",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）

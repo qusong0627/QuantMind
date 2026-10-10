@@ -79,6 +79,16 @@ export interface RetrainSchedule {
   last_run: string | null;
 }
 
+/** 派发器心跳（后端 scheduler_registry.read_heartbeats 判定，与体检 C07 同口径） */
+export interface SchedulerHeartbeat {
+  key: string;
+  name: string;
+  enabled: boolean;
+  state: 'ok' | 'stale' | 'off' | 'missing';
+  age: number | null;
+  ttl: number | null;
+}
+
 export interface ScheduleUpdateBody {
   enabled?: boolean;
   day_rule?: string;
@@ -234,10 +244,15 @@ class ModelRollingService {
     return resp.data.campaigns ?? [];
   }
 
-  async getSchedules(): Promise<{ schedules: Record<string, RetrainSchedule>; markets: string[] }> {
+  async getSchedules(): Promise<{
+    schedules: Record<string, RetrainSchedule>;
+    markets: string[];
+    dispatch: SchedulerHeartbeat | null;
+  }> {
     const resp = await this.client.get<{
       schedules: Record<string, RetrainSchedule>;
       markets: string[];
+      dispatch: SchedulerHeartbeat | null;
     }>('/models/rolling/schedule');
     return resp.data;
   }

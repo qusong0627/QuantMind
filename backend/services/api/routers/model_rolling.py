@@ -142,9 +142,18 @@ async def list_rolling_campaigns(
 @router.get("/schedule")
 async def get_retrain_schedules(current_user: dict = Depends(get_current_user)):
     from backend.services.engine.tasks import retrain_scheduler as rts
+    from backend.shared.scheduler_registry import read_heartbeats
 
     schedules = rts.get_all_schedules()
-    return {"schedules": schedules, "markets": sorted(schedules)}
+    # 派发器心跳（与体检 C07 同一判定：ok/stale/off/missing，不产生第二口径）。
+    # 调度保存了 enabled 但 ticker 死掉时（M5 复盘：调度存了、没人派发），
+    # 本面板是用户唯一能看见真相的地方。读不到如实报 missing，不假装 ok。
+    heartbeats = read_heartbeats(["retrain_dispatch"])
+    return {
+        "schedules": schedules,
+        "markets": sorted(schedules),
+        "dispatch": heartbeats[0] if heartbeats else None,
+    }
 
 
 @router.put("/schedule/{market}")

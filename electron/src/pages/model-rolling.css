@@ -448,6 +448,11 @@
 .rp-pill--muted  { background: #f1f5f9; color: #64748b; }
 .rp-pill--violet { background: #f5f3ff; color: #6d28d9; }
 
+/* 派发器心跳标记（M5 可见性）：调度区块标题与表单之间的一行状态 */
+.rp-dispatch-health {
+  margin: 0 0 10px;
+}
+
 /* ── 坏配方提示条 ───────────────────────────────────────────── */
 
 .rp-notice {

@@ -1247,6 +1247,28 @@ def dispatch_retrain() -> dict[str, Any]:
         return {"status": "failed", "error": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# 融合模型权重周期刷新（P2-4；设计《机构级模型融合》§7）：每日 22:30 扫全部
+# 融合模型 → 成员近窗 IC → 权重引擎重算 → 防抖（< 0.02 不落盘）后原子写
+# weight_snapshot.json。心跳每 tick 都写（C07 判活）；单模型失败隔离在
+# fusion_refresh 模块内（errors 桶），任务层只兜整体异常。
+# ---------------------------------------------------------------------------
+@celery_app.task(name="engine.tasks.refresh_fusion_weights")
+def refresh_fusion_weights_task() -> dict[str, Any]:
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("fusion_refresh")
+    try:
+        from backend.services.engine.inference.fusion_refresh import (
+            refresh_fusion_weights,
+        )
+
+        return _run_async(refresh_fusion_weights())
+    except Exception as e:
+        logger.exception("[FusionRefresh] 刷新失败: %s", e)
+        return {"status": "failed", "error": str(e)}
+
+
 @celery_app.task(
     name="engine.tasks.run_market_scheduled_sync",
     # 上游数据源（yfinance 等）被限流时会把单个 ticker 拖到分钟级；acks_late=False

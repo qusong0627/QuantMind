@@ -196,6 +196,15 @@ if os.getenv("RETRAIN_SCHEDULER_ENABLED", "false").lower() == "true":
         "schedule": crontab(minute="*", hour="*"),
     }
 
+# 融合模型权重周期刷新（P2-4；设计《机构级模型融合》§7）：每日 22:30 扫全部
+# 融合模型，按成员近窗 IC 重算权重；最大权重变动 < 0.02 不落盘（防抖）——
+# 阈值下实际写盘自然呈周更节律。纯本地重算 + 原子写快照，默认开，可关。
+if os.getenv("FUSION_REFRESH_ENABLED", "true").lower() == "true":
+    beat_schedule["fusion-weights-refresh"] = {
+        "task": "engine.tasks.refresh_fusion_weights",
+        "schedule": crontab(minute="30", hour="22"),
+    }
+
 # Strategy Lab daily scan — runs after the data sync settles (Day 16)
 if os.getenv("STRATEGY_LAB_SCAN_ENABLED", "true").lower() == "true":
     beat_schedule["strategy-lab-daily-scan"] = {

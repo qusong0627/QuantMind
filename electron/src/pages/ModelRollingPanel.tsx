@@ -33,6 +33,7 @@ import {
   type RollingCampaign,
   type RollingRecipeSummary,
   type RollingWindowPolicy,
+  type SchedulerHeartbeat,
   type ScheduleUpdateBody,
   rollingErrorMessage,
 } from '../services/modelRollingService';
@@ -144,6 +145,8 @@ export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model 
   const [loading, setLoading] = useState(true);
 
   const [schedules, setSchedules] = useState<Record<string, RetrainSchedule>>({});
+  // 派发器心跳（后端口径）：调度存了 enabled≠到点真会跑——M5 复盘可见性
+  const [dispatchHealth, setDispatchHealth] = useState<SchedulerHeartbeat | null>(null);
   const [draft, setDraft] = useState<ScheduleUpdateBody | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -191,6 +194,7 @@ export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model 
   const loadSchedules = useCallback(async (): Promise<Record<string, RetrainSchedule>> => {
     const data = await modelRollingService.getSchedules();
     setSchedules(data.schedules ?? {});
+    setDispatchHealth(data.dispatch ?? null);
     return data.schedules ?? {};
   }, []);
 
@@ -399,6 +403,22 @@ export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model 
 
   const lastRun = schedules[market]?.last_run;
 
+  // 派发器心跳 → 状态标记（口径 = 后端 read_heartbeats/体检 C07，前端不做二次判定）。
+  // 「调度存了 enabled 但没人派发」曾经整月不可见（M5 复盘），此标记即真相出口。
+  const dispatchHealthChip = (() => {
+    if (!dispatchHealth) return { cls: 'rp-pill--muted', label: '派发器状态未知（心跳读取失败）' };
+    switch (dispatchHealth.state) {
+      case 'ok':
+        return { cls: 'rp-pill--ok', label: `派发器正常 · ${dispatchHealth.age ?? 0}s 前心跳` };
+      case 'stale':
+        return { cls: 'rp-pill--err', label: `派发器心跳过期 ${dispatchHealth.age ?? '?'}s —— 调度不会触发，检查 celery-beat` };
+      case 'off':
+        return { cls: 'rp-pill--warn', label: '派发总闸未开（RETRAIN_SCHEDULER_ENABLED）——保存调度也不会自动派发' };
+      default:
+        return { cls: 'rp-pill--warn', label: '派发器无心跳记录 —— 尚未运行，到点不会自动派发' };
+    }
+  })();
+
   return (
     <div className="rp-board">
       {/* 头部：标题 + 实时统计 */}
@@ -548,6 +568,9 @@ export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model 
             <span className="rp-pill rp-pill--muted">{market}</span>
             <span className="rp-step__rule" />
           </div>
+          <div className="rp-dispatch-health">
+            <span className={`rp-pill ${dispatchHealthChip.cls}`}>{dispatchHealthChip.label}</span>
+          </div>
           {draft ? (
             <div className="rp-form">
               <div className="rp-field rp-field--power">
@@ -600,7 +623,7 @@ export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model 
                 </div>
               </div>
               <div className="rp-foot">
-                窗口策略（训练/验证/测试天数）归配方所有，在配方里改；此处保存即对该市场生效（调度总闸 RETRAIN_SCHEDULER_ENABLED 见部署配置）。
+                窗口策略（训练/验证/测试天数）归配方所有，在配方里改；此处保存即对该市场生效。是否真的到点派发，以上方派发器心跳标记为准。
               </div>
             </div>
           ) : (
