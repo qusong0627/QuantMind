@@ -49,6 +49,10 @@ from backend.services.engine.inference.realtime_core import (
 
 logger = logging.getLogger(__name__)
 
+#: 平铺 + preprocessing.enabled 的模型只告警一次：实时链（单帧 fill 口径）没有复现
+#: 训练端截面变换，分数与批量口径不同。当前在役模型均为窗口模型（走截面预处理）。
+_flat_prep_warned: set[str] = set()
+
 CST = timezone(timedelta(hours=8))
 CONFIG_KEY = "qm:realtime:infer:config"
 STATUS_KEY = "qm:realtime:infer:status"  # 状态镜像（api/admin 面板读；与 qm:anomaly:status 同范式）
@@ -434,6 +438,16 @@ class RealtimeInferenceService:
             self.counters["last_skip"] = None
         today = _now().date()
         seq_len = sequence_len_of(meta)
+        prep = meta.get("preprocessing")
+        if seq_len == 1 and isinstance(prep, dict) and prep.get("enabled"):
+            key = str(model_dir)
+            if key not in _flat_prep_warned:
+                _flat_prep_warned.add(key)
+                logger.warning(
+                    "平铺模型启用了 preprocessing，实时链未复现截面变换（%s）："
+                    "实时分数与批量口径不一致，仅作排名参考；批量/日频推理不受影响",
+                    key,
+                )
         bundle = (self._baseline_loader or self._default_baseline)(hot, today)
         baseline = bundle.get("rows") or {}
         histories = bundle.get("history") or {}
@@ -474,6 +488,7 @@ class RealtimeInferenceService:
             window=window_frames,
             seq_len=seq_len,
             feat_norm=meta.get("feat_norm") if seq_len > 1 else None,
+            preprocessing=meta.get("preprocessing") if seq_len > 1 else None,
         )
         cycle_ts = time.time()
         run_id = f"rt-{model_id}-{today.strftime('%Y%m%d')}"

@@ -168,6 +168,49 @@ def apply_feat_norm(x: np.ndarray, feat_norm: dict[str, Any] | None) -> np.ndarr
     return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def apply_cross_sectional_prep(
+    x: np.ndarray, preprocessing: dict[str, Any] | None
+) -> np.ndarray:
+    """逐帧截面预处理（批量模板 ``_cross_sectional_preprocess_window`` 的实时镜像）。
+
+    训练端每个交易日做 winsor(1%/99%) + 截面 Z-score（总体标准差），``feat_norm``
+    又在**标准化后**的数据上统计。实时链只做 ``feat_norm`` 时，原始尺度因子
+    （成交额 1e8~1e10）会把输入整片推到 OOD —— 2026-10-23 默认模型实时 ledger
+    实测 ``x_mean=1.0e+32``、``scores_mean=0.244``（训练期约 0.095 / 0.01）。
+
+    ``x`` 形如 ``[n_symbols, seq_len, d_feat]``：逐帧（历史日）在热集截面上做变换，
+    与批量「逐日截面」同口径。NaN/±inf 视作缺失：不参与统计，输出置 NaN，随后
+    :func:`apply_feat_norm` 统一归零。``preprocessing.enabled`` 为假时原样返回。
+    """
+    if not isinstance(preprocessing, dict) or not preprocessing.get("enabled"):
+        return x
+    winsor = preprocessing.get("winsor", True)
+    arr = np.asarray(x, dtype=np.float64)
+    frames = arr if arr.ndim == 3 else arr.reshape(arr.shape[0], 1, arr.shape[1])
+    out = np.empty_like(frames)
+    for j in range(frames.shape[1]):
+        for k in range(frames.shape[2]):
+            col = frames[:, j, k].copy()
+            valid = np.isfinite(col)
+            if not valid.any():
+                out[:, j, k] = np.nan
+                continue
+            vals = col[valid]
+            if winsor and valid.sum() >= 10:
+                lo = float(np.quantile(vals, 0.01))
+                hi = float(np.quantile(vals, 0.99))
+                if np.isfinite(lo) and np.isfinite(hi) and lo < hi:
+                    vals = np.clip(vals, lo, hi)
+            mu = float(vals.mean())
+            sd = float(vals.std())
+            z = np.zeros_like(vals) if (sd == 0 or not np.isfinite(sd)) else (vals - mu) / sd
+            col[valid] = z
+            col[~valid] = np.nan
+            out[:, j, k] = col
+    restored = out.reshape(arr.shape)
+    return restored.astype(x.dtype, copy=False)
+
+
 def matrix_digest(x: np.ndarray, cols: list[str], model_version: str) -> str:
     """输入矩阵摘要：模型版本 + 列序 + float32 原始字节（行序由 symbols 锚定）。"""
     h = hashlib.sha256()
@@ -273,6 +316,7 @@ def compute_cycle(
     window: dict[str, list[dict[str, Any] | None]] | None = None,
     seq_len: int = 1,
     feat_norm: dict[str, Any] | None = None,
+    preprocessing: dict[str, Any] | None = None,
 ) -> CycleResult:
     """单周期装配：引导(每标的一次) → 喂当前快照一帧 → live 覆盖 → 矩阵 → 推理 → 排名。
 
@@ -287,7 +331,8 @@ def compute_cycle(
     矩阵升为三维 ``[n, seq_len, d]``——前 seq_len-1 帧来自 ``window``（:func:`load_window_for_model`
     按因子日对齐，整帧缺席为 None），最后一帧 = 基线行 + live 覆盖（覆盖只作用于最后一帧：
     历史帧是既成事实）。装配口径**镜像批量 DL 路径**（``templates/inference_parquet.py``）：
-    **不填 fill_values**，统一 :func:`apply_feat_norm`（训练集 mean/std）后 NaN/Inf 归零。
+    **不填 fill_values**，先按 ``preprocessing``（训练端逐日截面 winsor+Z-score）逐帧变换，
+    再统一 :func:`apply_feat_norm`（训练集 mean/std）后 NaN/Inf 归零。
     批量对整窗不足的标的是弃打分（NaN），实时不弃——热集池固定、分数行必须对齐；缺帧只
     影响该标的自身分数并记入 ``window_missing``（如实计数，不装没发生）。
     """
@@ -360,6 +405,8 @@ def compute_cycle(
         if row:
             ready += 1
     if seq > 1:
+        # 顺序与训练/批量一致：先逐日截面 winsor+Z-score，再 feat_norm。
+        x = apply_cross_sectional_prep(x, preprocessing)
         x = apply_feat_norm(x, feat_norm)
     out = session.run(None, {input_name: x})[0]
     scores = np.asarray(out, dtype=float).reshape(-1)

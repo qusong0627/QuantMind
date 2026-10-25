@@ -715,6 +715,69 @@ def _cross_sectional_preprocess_inline(X_df: pd.DataFrame, meta: dict) -> pd.Dat
     return X_df
 
 
+def _cross_sectional_preprocess_window(
+    window_df: pd.DataFrame, features: list[str], meta: dict
+) -> pd.DataFrame:
+    """时序窗口的逐日截面预处理（训练端 ``_prepare_arrays`` 的同口径复现）。
+
+    ``preprocess()`` 只处理**单日**截面；时序分支拿到的是 step_len 天的多日窗口，
+    必须按 ``trade_date`` 分组逐日 winsor+Z-score 再拼回原行序 —— 行序就是
+    ``_predict_dl_sequence`` 取「每 symbol 最后一天」的依据，不能重排。
+
+    为什么非做不可：``metadata.feat_norm`` 是训练端在**已截面标准化**的数据上统计的
+    （mean≈0 / std≈1）。把原始尺度的因子直接喂 ``_apply_feat_norm``，等于用训练期
+    统计量标准化另一个分布 —— 2026-10-25 实测 273 特征 TFT T+20 的预测 std 由
+    0.095 跳到 0.31，与训练期预测的 Spearman 为 -0.19（补上本函数后 +0.93）。
+
+    旧模型（无 ``preprocessing.enabled``）原样返回，行为不变。
+    """
+    prep = meta.get("preprocessing")
+    if not isinstance(prep, dict) or not prep.get("enabled"):
+        return window_df
+    feats = [f for f in features if f in window_df.columns]
+    if not feats or "trade_date" not in window_df.columns:
+        return window_df
+
+    pos_col = "__qm_window_row__"
+    work = window_df.copy()
+    work[pos_col] = np.arange(len(work))
+    parts: list[pd.DataFrame] = []
+    for _, group in work.groupby("trade_date", sort=False):
+        block = group[feats].copy()
+        block = _cross_sectional_preprocess_inline(block, meta)
+        block[pos_col] = group[pos_col].to_numpy()
+        parts.append(block)
+    prepped = pd.concat(parts).sort_values(pos_col)
+    for feat in feats:
+        work[feat] = prepped[feat].to_numpy()
+    return work.drop(columns=[pos_col])
+
+
+def _infer_sequence(
+    inner_model, trade_date: str, data_dir: Path, meta: dict
+) -> tuple[np.ndarray, list[str]]:
+    """时序模型单日推理：装窗 → 逐日截面预处理 → 滑窗前向 → 对齐 symbol。
+
+    截面预处理必须在装窗之后、前向之前（见
+    :func:`_cross_sectional_preprocess_window`）；窗口不足仍是 exit 2 触发兜底。
+    """
+    features = list(meta.get("feature_columns") or meta.get("features", []))
+    step_len = int((meta.get("dl_params") or {}).get("dl_step_len", 20))
+    window_df = load_window_data(trade_date, data_dir, meta, step_len)
+    if len(window_df) == 0:
+        logger.warning("日期 %s 无足够历史窗口供 DL 时序推理，触发兜底", trade_date)
+        print("DL sequence inference: no window data", file=sys.stderr)
+        sys.exit(2)
+    window_df = _cross_sectional_preprocess_window(window_df, features, meta)
+    scores = _predict_dl_sequence(inner_model, window_df, features, meta, step_len)
+    # symbols 与窗口同序（_predict_dl_sequence 也按这个顺序逐组前向）
+    symbols = []
+    for sym, grp in window_df.groupby("symbol", sort=False):
+        _ = grp.sort_values("trade_date")
+        symbols.append(str(sym))
+    return scores, symbols
+
+
 def preprocess(df: pd.DataFrame, meta: dict) -> tuple[pd.DataFrame, list[str]]:
     """按 metadata.json 预处理，返回 (X_df, symbols)。
 
@@ -909,20 +972,8 @@ def main():
         inner_model.eval()
         is_seq = bool(meta.get("is_sequence_model", False))
         if is_seq:
-            # 时序模型：读历史窗口 → 按 symbol 滑窗 → 标准化 → 前向
-            step_len = int((meta.get("dl_params") or {}).get("dl_step_len", 20))
-            window_df = load_window_data(trade_date, data_dir, meta, step_len)
-            if len(window_df) == 0:
-                logger.warning("日期 %s 无足够历史窗口供 DL 时序推理，触发兜底", trade_date)
-                print("DL sequence inference: no window data", file=sys.stderr)
-                sys.exit(2)
-            features_meta = meta.get("feature_columns") or meta.get("features", [])
-            scores = _predict_dl_sequence(inner_model, window_df, list(features_meta), meta, step_len)
-            # symbols 对齐 window_df 每 symbol 最后一个交易日
-            symbols = []
-            for sym, grp in window_df.groupby("symbol", sort=False):
-                _ = grp.sort_values("trade_date")
-                symbols.append(str(sym))
+            # 时序模型：读历史窗口 → 逐日截面预处理 → 按 symbol 滑窗 → 标准化 → 前向
+            scores, symbols = _infer_sequence(inner_model, trade_date, data_dir, meta)
         else:
             # 扁平模型（TabNet 等）：单日二维输入
             x_tensor = torch.from_numpy(X_values)

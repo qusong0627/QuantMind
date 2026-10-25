@@ -558,3 +558,93 @@ def test_sequence_replay_diff_zero(tmp_path):
 
     assert report["diff_zero"] is True, report.get("mismatch_details")
     assert report["entries"] == 1
+
+
+# ── 6. 截面预处理（训练端逐日 winsor+Z-score 的实时镜像）──────────────
+
+
+@pytest.mark.unit
+def test_apply_cross_sectional_prep_matches_batch_template():
+    """实时镜像与批量模板逐值对拍：NaN/inf 口径、缩尾分位、总体标准差必须同值。
+
+    训练端每个交易日做截面 winsor(1%/99%)+Z-score，``feat_norm`` 又在标准化后的
+    数据上统计。实时链只做 ``feat_norm`` 时，原始尺度因子（成交额 1e8~1e10）
+    直接把输入推到 OOD —— 2026-10-23 默认模型实时 ledger: x_mean=1.0e+32、
+    scores_mean=0.244。
+    """
+    from backend.services.engine.inference.templates.inference_parquet import (
+        _cross_sectional_preprocess_inline as batch_prep,
+    )
+    import pandas as pd
+
+    rng = np.random.default_rng(11)
+    n, frames, d = 40, 3, 4
+    x = rng.lognormal(mean=3.0, sigma=1.0, size=(n, frames, d)).astype(np.float32)
+    x[0, 0, 0] = np.nan
+    x[1, 2, 3] = np.inf
+    prep = {"enabled": True, "winsor": True}
+    cols = [f"f{i}" for i in range(d)]
+
+    got = rc.apply_cross_sectional_prep(x, prep)
+
+    for j in range(frames):
+        df = pd.DataFrame(x[:, j, :].astype(np.float64), columns=cols)
+        want = batch_prep(df, {"preprocessing": prep}).to_numpy()
+        valid = np.isfinite(want)
+        assert np.array_equal(np.isfinite(got[:, j, :]), valid)
+        assert np.allclose(got[:, j, :][valid], want[valid], atol=1e-6)
+
+
+@pytest.mark.unit
+def test_apply_cross_sectional_prep_identity_when_disabled():
+    x = np.array([[[1.0, 2.0]], [[3.0, 4.0]]], dtype=np.float32)
+    for prep in (None, {}, {"enabled": False}):
+        assert np.array_equal(rc.apply_cross_sectional_prep(x, prep), x)
+
+
+@pytest.mark.unit
+def test_sequence_cycle_applies_cross_sectional_prep_when_enabled():
+    """启用 preprocessing 的窗口模型：每帧每列在热集截面内均值≈0、标准差≈1。"""
+    hot = [f"6000{i:02d}.SH" for i in range(12)]
+    baseline = {
+        sym: {"a": float(i) * 100.0, "b": float(i % 5) + 1.0} for i, sym in enumerate(hot)
+    }
+    window = {
+        sym: [{"a": float(i) * 50.0, "b": float(i % 3)}, {"a": float(i) * 70.0, "b": float(i % 4)}]
+        for i, sym in enumerate(hot)
+    }
+    args = _seq_args(
+        hot=hot,
+        snapshots={},
+        baseline=baseline,
+        window=window,
+        feat_norm={"mean": [0.0, 0.0], "std": [1.0, 1.0]},
+        preprocessing={"enabled": True, "winsor": True},
+    )
+
+    rc.compute_cycle(**args)
+
+    seen = args["session"].seen
+    assert seen.shape == (len(hot), 3, 2)
+    for j in range(3):
+        for k in range(2):
+            col = seen[:, j, k]
+            assert abs(float(col.mean())) < 1e-4, (j, k)
+            assert abs(float(col.std()) - 1.0) < 1e-3, (j, k)
+
+
+@pytest.mark.unit
+def test_sequence_cycle_without_preprocessing_keeps_raw_scale():
+    """不传 preprocessing（旧模型）行为不变：原始值直接 feat_norm。"""
+    hot = [f"6000{i:02d}.SH" for i in range(12)]
+    baseline = {sym: {"a": float(i) * 100.0, "b": 1.0} for i, sym in enumerate(hot)}
+    args = _seq_args(
+        hot=hot,
+        baseline=baseline,
+        window={sym: [{"a": 0.0, "b": 0.0}, {"a": 0.0, "b": 0.0}] for sym in hot},
+        feat_norm={"mean": [0.0, 0.0], "std": [1.0, 1.0]},
+    )
+
+    rc.compute_cycle(**args)
+
+    assert float(args["session"].seen[:, -1, 0].mean()) > 1.0

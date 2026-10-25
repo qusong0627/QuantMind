@@ -104,6 +104,7 @@ def verify_entry(
     window: dict[str, list[dict[str, Any] | None]] | None = None,
     seq_len: int = 1,
     feat_norm: dict[str, Any] | None = None,
+    preprocessing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """单周期对账：按 cuts 推进指针 → 共享装配 → 双摘要比对。"""
     symbols = list(entry.get("symbols") or [])
@@ -138,6 +139,7 @@ def verify_entry(
         window=window,
         seq_len=seq_len,
         feat_norm=feat_norm,
+        preprocessing=preprocessing,
     )
     x_match = matrix_digest(result.x, cols, str(entry.get("model_version") or "")) == entry.get("x_digest")
     scores_match = scores_digest(result.scores) == entry.get("scores_digest")
@@ -248,6 +250,7 @@ def verify_day(
             pointers=pointers, engine=engine, bootstrapped=bootstrapped,
             window=window, seq_len=seq_len,
             feat_norm=meta.get("feat_norm") if seq_len > 1 else None,
+            preprocessing=meta.get("preprocessing") if seq_len > 1 else None,
         )
         results.append(outcome)
         if not outcome["matched"] and len(mismatches) < detail_limit:
