@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from .base import tobtind
-from ..utils import TYPE_CHECKING, np, LineStyle, LineDash
+from ..utils import TYPE_CHECKING, np, LineStyle, LineDash, CandleStyle, Colors
 
 if TYPE_CHECKING:
     from typing_ import *
     from .core import *
+
 
 class PandasTa:
     """## pandas_ta指标指引
@@ -393,7 +394,8 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['open', 'high', 'low', 'close'], overlap=False, category="candles", lib='pta')
+    @tobtind(lines=['open', 'high', 'low', 'close'], overlap=False, category="candles",
+             candlestyle=CandleStyle(bear=Colors.bear_color, bull=Colors.bull_color), lib='pta')
     def ha(self, length=0, offset=0, **kwargs) -> IndFrame:
         """
         平均K线图 (Heikin Ashi Candles)
@@ -1664,7 +1666,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['macdx', 'macdh', 'macds'], lib='pta', linestyle=dict(macdh=LineStyle(line_dash=LineDash.vbar)))
+    @tobtind(lines=['macdx', 'macdh', 'macds'], lib='pta', linestyle=dict(macdh=LineStyle(line_dash=LineDash.vbar, vbar_base=0.)))
     def macd(self, fast=12, slow=26, signal=9, talib=True, offset=0, **kwargs) -> IndFrame:
         """
         指数平滑移动平均线 (Moving Average Convergence Divergence, MACD)
@@ -2794,7 +2796,7 @@ class PandasTa:
     #     >>> # 计算汤姆·迪马克序列
     #     >>> td_seq_data = self.data.td_seq()
     #     >>> td_seq_up, td_seq_dn = td_seq_data.td_seq_up, td_seq_data.td_seq_dn
-    #     >>> 
+    #     >>>
     #     >>> # 使用TD序列识别反转点
     #     >>> def td_sequential_reversal(self):
     #     >>>     td_seq = self.data.td_seq()
@@ -3157,7 +3159,7 @@ class PandasTa:
         ...
 
     @tobtind(lines=None, overlap=True, lib='pta')
-    def ema(self, length=10, talib=True, offset=0, **kwargs) -> IndSeries:
+    def ema(self, length=10, talib=True, presma: bool = None, offset=0, **kwargs) -> IndSeries:
         """
         指数移动平均线 (Exponential Moving Average, EMA)
         ---------
@@ -3179,6 +3181,8 @@ class PandasTa:
         参数:
         ---------
         >>> length (int): 周期. 默认: 10
+            talib (bool, 可选): 如果为True，使用TA Lib. 默认: True
+            presma (bool, 可选): 初始化时是否使用SMA. 默认: None
             offset (int): 结果偏移周期数. 默认: 0
 
         可选参数:
@@ -5249,7 +5253,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['toslr', 'tosl1', 'tosu1', 'tosl2', 'tosu2', 'tosl3', 'tosu3'],overlap=True,  lib='pta')
+    @tobtind(lines=['toslr', 'tosl1', 'tosu1', 'tosl2', 'tosu2', 'tosl3', 'tosu3'], overlap=True,  lib='pta')
     def tos_stdevall(self, length=30, stds=[1, 2, 3], ddof=1, offset=0, **kwargs) -> IndFrame:
         """
         TD Ameritrade Think or Swim 全标准差通道 (TOS_STDEV)
@@ -5409,7 +5413,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['adxx', 'adxr','dmp', 'dmn'], lib='pta')
+    @tobtind(lines=['adxx', 'adxr', 'dmp', 'dmn'], lib='pta')
     def adx(self, length=14, lensig=14, scalar=100, mamode="rma", drift=1, offset=0, **kwargs) -> IndFrame:
         """
         平均趋向指数 (Average Directional Movement, ADX)
@@ -5935,7 +5939,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['psarl', 'psars', 'psaraf', 'psarr'],overlap=dict(psarl=True, psars=True, psaraf=False, psarr=False), lib='pta')
+    @tobtind(lines=['psarl', 'psars', 'psaraf', 'psarr'], overlap=dict(psarl=True, psars=True, psaraf=False, psarr=False), lib='pta')
     def psar(self, af0=0.02, af=0.02, max_af=0.2, offset=0, **kwargs) -> IndFrame:
         """
         抛物线转向指标 (Parabolic Stop and Reverse, PSAR)
@@ -6052,7 +6056,7 @@ class PandasTa:
         ...
 
     @tobtind(lines=None, lib='pta')
-    def short_run(self, slow:pd.Series=None, length=2, offset=0, **kwargs) -> IndSeries:
+    def short_run(self, slow: pd.Series = None, length=2, offset=0, **kwargs) -> IndSeries:
         """
         短期运行指标 (Short Run)
         ---------
@@ -6297,7 +6301,7 @@ class PandasTa:
         ...
 
     @tobtind(lines=['xs_long', 'xs_short'], lib='pta')
-    def xsignals(self, xa:pd.Series=None, xb:pd.Series=None, above=None, long=None, asbool=None, trend_reset=None,
+    def xsignals(self, xa: pd.Series = None, xb: pd.Series = None, above=None, long=None, asbool=None, trend_reset=None,
                  trend_offset=0, offset=0, **kwargs) -> IndFrame:
         """
         交叉信号 (Cross Signals, XSIGNALS)
@@ -6521,7 +6525,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['aber_zg', 'aber_sg', 'aber_xg', 'aber_atr'],overlap=dict(aber_zg=True,aber_sg=True,aber_xg=True,aber_atr=False), lib='pta')
+    @tobtind(lines=['aber_zg', 'aber_sg', 'aber_xg', 'aber_atr'], overlap=dict(aber_zg=True, aber_sg=True, aber_xg=True, aber_atr=False), lib='pta')
     def aberration(self, length=5, atr_length=15, offset=0, **kwargs) -> IndFrame:
         """
         偏差通道指标 (Aberration)
@@ -6576,7 +6580,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['acc_lower', 'acc_mid', 'acc_upper'],overlap=True, lib='pta')
+    @tobtind(lines=['acc_lower', 'acc_mid', 'acc_upper'], overlap=True, lib='pta')
     def accbands(self, length=10, c=4, drift=1, mamode="sma", offset=0, **kwargs) -> IndFrame:
         """
         加速带指标 (Acceleration Bands, ACCBANDS)
@@ -6704,7 +6708,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['bb_lower', 'bb_mid', 'bb_upper', 'bb_width', 'bb_percent'], overlap=dict(bb_lower=True,bb_mid=True,bb_upper=True,bb_width=False,bb_percent=False), lib='pta')
+    @tobtind(lines=['bb_lower', 'bb_mid', 'bb_upper', 'bb_width', 'bb_percent'], overlap=dict(bb_lower=True, bb_mid=True, bb_upper=True, bb_width=False, bb_percent=False), lib='pta')
     def bbands(self, length=10, std=2., ddof=0, mamode="sma", talib=True, offset=0, **kwargs) -> IndFrame:
         """
         布林带 (Bollinger Bands, BBANDS)
@@ -6769,7 +6773,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['dc_lower', 'dc_mid', 'dc_upper'],overlap=True, lib='pta')
+    @tobtind(lines=['dc_lower', 'dc_mid', 'dc_upper'], overlap=True, lib='pta')
     def donchian(self, lower_length=20, upper_length=20, offset=0, **kwargs) -> IndFrame:
         """
         唐奇安通道 (Donchian Channels, DC)
@@ -6821,7 +6825,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['hwc', 'hwc_upper', 'hwc_lower','hwc_width','hwc_pctwidth'], overlap=dict(hwc=True,hwc_upper=True,hwc_lower=True,hwc_width=False,hwc_pctwidth=False), lib='pta')
+    @tobtind(lines=['hwc', 'hwc_upper', 'hwc_lower', 'hwc_width', 'hwc_pctwidth'], overlap=dict(hwc=True, hwc_upper=True, hwc_lower=True, hwc_width=False, hwc_pctwidth=False), lib='pta')
     def hwc(self, na=0.2, nb=0.1, nc=0.1, nd=0.1, scalar=1., channel_eval=False, offset=0, **kwargs) -> IndFrame:
         """
         霍尔特-温特斯通道 (Holt-Winter Channel, HWC)
@@ -6883,7 +6887,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['kc_lower', 'kc_basis', 'kc_upper'], overlap=True,lib='pta')
+    @tobtind(lines=['kc_lower', 'kc_basis', 'kc_upper'], overlap=True, lib='pta')
     def kc(self, length=20, scalar=2., mamode="ema", offset=0, **kwargs) -> IndFrame:
         """
         凯尔特纳通道 (Keltner Channels, KC)
@@ -7161,7 +7165,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['thermo', 'thermo_ma', 'thermo_long', 'thermo_short'],overlap=dict(thermo=True,thermo_ma=True,thermo_long=False,thermo_short=False), lib='pta')
+    @tobtind(lines=['thermo', 'thermo_ma', 'thermo_long', 'thermo_short'], overlap=dict(thermo=True, thermo_ma=True, thermo_long=False, thermo_short=False), lib='pta')
     def thermo(self, length=20, long=2., short=0.5, mamode="ema", drift=1, offset=0, **kwargs) -> IndFrame:
         """
         埃尔德温度计 (Elder's Thermometer, THERMO)
@@ -8087,7 +8091,7 @@ class PandasTa:
         ...
 
     @tobtind(lines=['low_price', 'mean_price', 'high_price', 'pos_volume', 'neg_volume', 'total_volume'],
-             overlap=dict(low_price=True,mean_price=True,high_price=True,pos_volume=False,neg_volume=False,total_volume=False),lib='pta')
+             overlap=dict(low_price=True, mean_price=True, high_price=True, pos_volume=False, neg_volume=False, total_volume=False), lib='pta')
     def vp(self, width=10, **kwargs) -> IndFrame:
         """
         成交量分布图 (Volume Profile, VP)
@@ -8301,7 +8305,7 @@ class PandasTa:
         >>>         return "内包线缩量，突破放量，信号可靠"
         """
         ...
-    
+
     # 2026-5-17 更新
 
     @tobtind(lines=None, category="candles", lib='pta')
@@ -8383,7 +8387,7 @@ class PandasTa:
         >>>     return "检测到内含线，市场可能盘整"
         """
         ...
-    
+
     @tobtind(lines=None, overlap=False, category="candles", lib='pta')
     def cdl(self, name: str | list[str] | PRFNameTtype = "2crows", scalar: int | float = 100, offset: int = 0, **kwargs) -> IndFrame:
         """
@@ -8427,7 +8431,6 @@ class PandasTa:
         """
         ...
 
-
     @tobtind(lines=None, category="cycles")
     def reflex(self, length: int = 20, smooth: int = 20, alpha: int | float = 0.04, pi: int | float = 3.14159, sqrt2: int | float = 1.414, offset: int = 0, **kwargs) -> IndSeries:
         """
@@ -8469,7 +8472,6 @@ class PandasTa:
             分别侧重于周期和趋势。
         """
         ...
-
 
     @tobtind(lines=None, category="momentum", lib='pta')
     def crsi(self, rsi_length: int = 3, streak_length: int = 2, rank_length: int = 100, scalar: int | float = 100, talib: bool = True, drift: int = 1, offset: int = 0, **kwargs) -> IndSeries:
@@ -8543,7 +8545,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=["smchv","smcbf","smcbi","smcbp","smctf","smcti","smctp"], category="momentum", lib='pta')
+    @tobtind(lines=["smchv", "smcbf", "smcbi", "smcbp", "smctf", "smcti", "smctp"], category="momentum", lib='pta')
     def smc(self, abr_length: int = 14, close_length: int = 50, vol_length: int = 20, percent: int = 5, vol_ratio: int | float = 1.5, asint: bool = True, mamode: str = "sma", talib: bool = True, offset: int = 0, **kwargs) -> IndFrame:
         """
         聪明钱概念 (Smart Money Concept)
@@ -8576,7 +8578,7 @@ class PandasTa:
         >>> IndFrame: 7列 ['smchv','smcbf','smcbi','smcbp','smctf','smcti','smctp']
         """
         ...
-    
+
     @tobtind(lines=['stochf_k', 'stochf_d'], category="momentum", lib='pta')
     def stochf(self, k: int = 14, d: int = 3, mamode: str = "sma", talib: bool = True, offset: int = 0, **kwargs) -> IndFrame:
         """
@@ -8611,7 +8613,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=['tmox', 'tmos', 'tmom','tmoms'], category="momentum", lib='pta')
+    @tobtind(lines=['tmox', 'tmos', 'tmom', 'tmoms'], category="momentum", lib='pta')
     def tmo(self, tmo_length: int = 14, calc_length: int = 5, smooth_length: int = 3, momentum: bool = False, normalize: bool = False, exclusive: bool = False, mamode: str = "ema", offset: int = 0, **kwargs) -> IndFrame:
         """
         真实动量振荡器 (True Momentum Oscillator)
@@ -8686,7 +8688,7 @@ class PandasTa:
             它由三条线组成：Jaw(下颌)、Teeth(牙齿)和Lips(嘴唇)，周期各不相同。
         """
         ...
-    
+
     @tobtind(lines=["mama_slow", "mama_fast"], overlap=True, category="overlap", lib='pta')
     def mama(self, fastlimit: int | float = 0.5, slowlimit: int | float = 0.05, prenan: int = 3, talib: bool = True, offset: int = 0, **kwargs) -> IndFrame:
         """
@@ -8724,9 +8726,9 @@ class PandasTa:
             同时输出FAMA(快速自适应移动平均线)
         """
         ...
-    
-    @tobtind(lines=["pivots_trad_d_p", "pivots_trad_d_s1", "pivots_trad_d_s2", "pivots_trad_d_s3", 
-            "pivots_trad_d_s4", "pivots_trad_d_r1", "pivots_trad_d_r2", "pivots_trad_d_r3", "pivots_trad_d_r4"], overlap=True, category="overlap", lib='pta')
+
+    @tobtind(lines=["pivots_trad_d_p", "pivots_trad_d_s1", "pivots_trad_d_s2", "pivots_trad_d_s3",
+                    "pivots_trad_d_s4", "pivots_trad_d_r1", "pivots_trad_d_r2", "pivots_trad_d_r3", "pivots_trad_d_r4"], overlap=True, category="overlap", lib='pta')
     def pivots(self, method: str = 'traditional', anchor: str = 'D', **kwargs) -> IndFrame:
         """
         枢轴点 (Pivot Points)
@@ -8836,7 +8838,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=["dd","dd_pct","dd_log"], category="performance", lib='pta')
+    @tobtind(lines=["dd", "dd_pct", "dd_log"], category="performance", lib='pta')
     def drawdown(self, offset: int = 0, **kwargs) -> IndFrame:
         """
         回撤 (Drawdown)
@@ -8864,8 +8866,8 @@ class PandasTa:
         >>> IndFrame: 3列
         """
         ...
-    
-    @tobtind(lines=["alphat","alphatl"], overlap=True, category="trend", lib='pta')
+
+    @tobtind(lines=["alphat", "alphatl"], overlap=True, category="trend", lib='pta')
     def alphatrend(self, src: str = "close", length: int = 14, multiplier: int | float = 1, threshold: int | float = 50, lag: int = 2, mamode: str = "sma", talib: bool = True, offset: int = 0, **kwargs) -> IndFrame:
         """
         Alpha趋势指标 (Alpha Trend)
@@ -8971,7 +8973,7 @@ class PandasTa:
         >>> IndFrame: 2列 ['rwi_h', 'rwi_l']
         """
         ...
-    
+
     @tobtind(lines=None, category="trend", lib='pta')
     def trendflex(self, length: int = 20, smooth: int = 20, alpha: int | float = 0.04, pi: int | float = 3.14159, sqrt2: int | float = 1.414, offset: int = 0, **kwargs) -> IndSeries:
         """
@@ -9013,8 +9015,7 @@ class PandasTa:
         """
         ...
 
-
-    @tobtind(lines=["zigzags", "zigzagv","zigzagd"], category="trend", lib='pta')
+    @tobtind(lines=["zigzags", "zigzagv", "zigzagd"], category="trend", lib='pta')
     def zigzag(self, legs: int = 10, deviation: int | float = 5, backtest: bool = False, offset: int = 0, **kwargs) -> IndFrame:
         """
         锯齿形指标 (Zigzag)
@@ -9056,8 +9057,7 @@ class PandasTa:
         """
         ...
 
-
-    @tobtind(lines=["xsa","xsb"], category="utils", lib='pta')
+    @tobtind(lines=["xsa", "xsb"], category="utils", lib='pta')
     def signals(self, xa: int | float = None, xb: int | float = None, cross_values: bool = None, xseries=None, xseries_a=None, xseries_b=None, cross_series: bool = None, offset: int = 0, **kwargs) -> IndFrame:
         """
         信号检测器 (Signals)
@@ -9089,7 +9089,7 @@ class PandasTa:
         """
         ...
 
-    @tobtind(lines=None,overlap=True, category="volatility", lib='pta')
+    @tobtind(lines=None, overlap=True, category="volatility", lib='pta')
     def atrts(self, length: int = 14, ma_length: int = 20, k: int | float = 3, mamode: str = "ema", talib: bool = True, drift: int = 1, offset: int = 0, **kwargs) -> IndSeries:
         """
         ATR追踪止损 (ATR Trailing Stop)
@@ -9125,9 +9125,8 @@ class PandasTa:
         """
         ...
 
-
     @tobtind(lines=["chandelier_long", "chandelier_short", "chandelier_direction"],
-             overlap=dict(chandelier_long=True, chandelier_short=True, chandelier_direction=False),category="volatility", lib='pta')
+             overlap=dict(chandelier_long=True, chandelier_short=True, chandelier_direction=False), category="volatility", lib='pta')
     def chandelier_exit(self, high_length: int = 22, low_length: int = 22, atr_length: int = 14, multiplier: int | float = 2., mamode: str = "rma", talib: bool = True, use_close: bool = False, drift: int = 1, offset: int = 0, **kwargs) -> IndFrame:
         """
         吊灯止损 (Chandelier Exit)
@@ -9165,8 +9164,7 @@ class PandasTa:
         """
         ...
 
-
-    @tobtind(lines=["tsv","tsvs","tsvr"], category="volume", lib="pta")
+    @tobtind(lines=["tsv", "tsvs", "tsvr"], category="volume", lib="pta")
     def tsv(self, length: int = 18, signal: int = 10, mamode: str = "sma", drift: int = 1, offset: int = 0, **kwargs) -> IndFrame:
         """
         时间段成交量 (Time Segmented Volume)
@@ -9290,6 +9288,6 @@ class PandasTa:
         """
         ...
 
-    NON_KLINE_INDICATORS = ["ZeroDivision","short_run","tsignals","xsignals","above","below",
-                            "cross","cross_up","cross_down","line_trhend","pivots","zigzag",
-                            "signals","vwap"]
+    NON_KLINE_INDICATORS = ["ZeroDivision", "short_run", "tsignals", "xsignals", "above", "below",
+                            "cross", "cross_up", "cross_down", "line_trhend", "pivots", "zigzag",
+                            "signals", "vwap"]

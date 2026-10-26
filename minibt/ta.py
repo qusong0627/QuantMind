@@ -1,27 +1,116 @@
 # -*- coding: utf-8 -*-
-import pandas_ta as pta
-# get_offset, , verify_series, get_drift,
-from pandas_ta.utils import non_zero_range, v_offset, v_drift
-from pandas_ta.core import AnalysisIndicators  # , BasePandasObject, pd
-# from pandas_ta.core import *
+from .ta_ import LazyImport, Callable, _LazyModule
+from numpy.random import RandomState
+from numpy import array as npArray
+from typing import Any
+from numpy.version import version as npVersion
+from numpy.lib.stride_tricks import as_strided
+joblib = _LazyModule('joblib')
+from functools import partial, reduce
+# scipy / pandas_ta 延迟导入：`import minibt` 会经
+# `indicators.tradingview -> ta` 到达这里，顶层 import 它们要多花 ~2s
+# （scipy.signal ~1.2s + pandas_ta/numba ~0.8s），而绝大多数指标用不到。
+scipy_signal = _LazyModule('scipy.signal')
+scipy_stats = _LazyModule('scipy.stats')
+pta = _LazyModule('pandas_ta')
+non_zero_range = _LazyModule('pandas_ta.utils', 'non_zero_range')
+v_offset = _LazyModule('pandas_ta.utils', 'v_offset')
+v_drift = _LazyModule('pandas_ta.utils', 'v_drift')
 from inspect import signature, _empty
 from copy import deepcopy
 from collections.abc import Sequence, Generator, Iterable
 from .other import *
 from . import zigzag as zig
 import math
-import statsmodels.api as sm
-from scipy import stats as scipy_stats
-import scipy.signal as scipy_signal
-from functools import partial, reduce
-from joblib import Parallel, delayed
-from numpy.lib.stride_tricks import as_strided
-from numpy.version import version as npVersion
-from numpy_ext import prepend_na, rolling
-from typing import Any
-from numpy import array as npArray
-from numpy.random import RandomState
-from .ta_ import LazyImport, Callable
+# statsmodels 延迟导入: 顶层 import 会经 scipy.signal 内部 _support_alternative_backends
+# 的 FunctionDoc/deepcopy, 在部分 numpy/scipy 组合下触发 MemoryError 崩溃;
+# 且绝大多数指标不依赖 statsmodels, 按需加载也能显著加快 from minibt import *
+
+
+class _LazyStatsmodels:
+    """惰性加载 statsmodels.api: 首次属性访问时才真正导入"""
+    _sm = None
+
+    def __getattr__(self, name):
+        if _LazyStatsmodels._sm is None:
+            import statsmodels.api as _sm_api
+            _LazyStatsmodels._sm = _sm_api
+        return getattr(_LazyStatsmodels._sm, name)
+
+
+# ---------------------------------------------------------------------------
+# 纯 Python 标量递归（Pine rma / Wilder 累加器）用 numba 加速。
+# numba 与纯 Python 的运算顺序完全一致，所以结果**逐位相同**（实测 array_equal），
+# 但 10000 根的循环从 ~26ms 降到 ~0.03ms。numba 仍**惰性导入**（首次调用才编译），
+# 不影响 `import minibt`；没装 numba 时回退纯 Python。
+_JIT_CACHE: dict = {}
+
+
+def _jit_call(name: str, py_func, *args):
+    func = _JIT_CACHE.get(name)
+    if func is None:
+        try:
+            from numba import njit
+            func = njit(cache=True)(py_func)
+        except Exception:
+            func = py_func
+        _JIT_CACHE[name] = func
+    return func(*args)
+
+
+def _rma_kernel(arr, sma, alpha):
+    size = len(arr)
+    out = np.full(size, np.nan)
+    prev = np.nan
+    for i in range(size):
+        s = sma[i]
+        if np.isnan(s):
+            out[i] = prev
+            continue
+        if np.isnan(prev):
+            prev = s
+        else:
+            prev = prev + alpha * (arr[i] - prev)
+        out[i] = prev
+    return out
+
+
+def _accumulate_kernel(x, n):
+    size = len(x)
+    sm = np.zeros(size, dtype=np.float64)
+    for i in range(size):
+        sm[i] = sm[i - 1] - sm[i - 1] / n + x[i]
+    return sm
+
+
+def _rolling_mad(values: np.ndarray, n: int,
+                 min_periods: int | None = None) -> np.ndarray:
+    """滚动平均绝对偏差 mean(|x - rolling_mean(x)|)（向量化）。
+
+    :param values: 1D 数组
+    :param n: 窗口
+    :param min_periods: 不足窗口也计算时传 0（finta 口径）；默认 None = n
+    :return: 与 `values` 等长，前 n-1 个为 NaN（min_periods=0 时为前 n-1 个
+        用不完整窗口计算）
+    """
+    values = np.asarray(values, dtype=float)
+    total = len(values)
+    out = np.full(total, np.nan)
+    if n <= 0 or total == 0:
+        return out
+    if min_periods == 0:
+        # 头部不足一个窗口的几根（最多 n-1 根）逐个算，代价很小
+        for i in range(min(n - 1, total)):
+            window = values[:i + 1]
+            out[i] = np.abs(window - window.mean()).mean()
+    if total >= n:
+        windows = sliding_window_view(values, n)
+        out[n - 1:] = np.abs(
+            windows - windows.mean(axis=1, keepdims=True)).mean(axis=1)
+    return out
+
+
+sm = _LazyStatsmodels()
 if npVersion >= "1.20.0":
     from numpy.lib.stride_tricks import sliding_window_view
 np.seterr(divide='ignore', invalid='ignore')
@@ -385,8 +474,8 @@ def rolling_apply(
         if n_jobs == 1:
             arr = list(map(func, rolls))
         else:
-            arr = Parallel(n_jobs=n_jobs)(
-                delayed(func)(roll) for roll in rolls
+            arr = joblib.Parallel(n_jobs=n_jobs)(
+                joblib.delayed(func)(roll) for roll in rolls
             )
         result = np.array(arr)
 
@@ -401,8 +490,8 @@ def rolling_apply(
                 # arr = [func(roll, **kwargs) for roll in rolls]
                 arr = list(map(func, rolls))
             else:
-                arr = Parallel(n_jobs=n_jobs)(
-                    delayed(func)(roll) for roll in rolls
+                arr = joblib.Parallel(n_jobs=n_jobs)(
+                    joblib.delayed(func)(roll) for roll in rolls
                 )
         else:
             # 多列DataFrame→按列生成有效窗口后合并
@@ -415,8 +504,8 @@ def rolling_apply(
             if n_jobs == 1:
                 arr = [func(*cols) for cols in merged_rolls]
             else:
-                arr = Parallel(n_jobs=n_jobs)(
-                    delayed(func)(*cols) for cols in merged_rolls
+                arr = joblib.Parallel(n_jobs=n_jobs)(
+                    joblib.delayed(func)(*cols) for cols in merged_rolls
                 )
         result = np.array(arr)
 
@@ -429,7 +518,7 @@ def rolling_apply(
         if n_jobs == 1:
             arr = list(map(func, col_rolls))
         else:
-            arr = Parallel(n_jobs=n_jobs)(delayed(func)(
+            arr = joblib.Parallel(n_jobs=n_jobs)(joblib.delayed(func)(
                 cols) for cols in col_rolls)
         result = np.array(arr)
 
@@ -1229,7 +1318,11 @@ class BtFunc(LazyImport):
         # Calculate Results
         m = close.size
         dir_, trend = [1] * m, [0] * m
-        long, short = [npInf] * m, [npInf] * m
+        # ★ 未确定方向的一侧必须是 **NaN**（“缺失”），不能是 inf：
+        #   pandas_ta 原版就是 `[nan]*m`；写成 inf 时 `_has_missing` 检测不到
+        #   （`pd.isna(inf)` 为 False）→ 走 base64 路径把 Infinity 原样下发，
+        #   自动缩放/图例读数全乱 ✗
+        long, short = [np.nan] * m, [np.nan] * m
 
         hhv = (weights*high+low)/(weights+1.)
         llv = (weights*low+high)/(weights+1.)
@@ -2081,8 +2174,7 @@ class BtFunc(LazyImport):
 
         return vwap_series
 
-
-    def gaussian_smoothed(close:pd.Series, window:int=11,**kwargs):
+    def gaussian_smoothed(close: pd.Series, window: int = 11, **kwargs):
         """高斯核卷积平滑"""
         sigma = window / 6.0
         half = window // 2
@@ -2096,11 +2188,11 @@ class BtFunc(LazyImport):
         if len(smoothed) > len(close):
             smoothed = smoothed[:len(close)]
         elif len(smoothed) < len(close):
-            smoothed = np.pad(smoothed, (0, len(close) - len(smoothed)), mode='edge')
+            smoothed = np.pad(
+                smoothed, (0, len(close) - len(smoothed)), mode='edge')
         return smoothed
-    
-    
-    def varma(close: pd.Series, length: int=10, var_length: int=10,**kwargs) -> np.ndarray:
+
+    def varma(close: pd.Series, length: int = 10, var_length: int = 10, **kwargs) -> np.ndarray:
         """VAR (Variable Moving Average) — 基于 CMO 的自适应 EMA"""
         src = close.values
         n = len(close)
@@ -2110,8 +2202,8 @@ class BtFunc(LazyImport):
         diff = close.diff().fillna(0)
         # vud1 = pd.Series(np.maximum(diff.values, 0.0), index=close.index)
         # vdd1 = pd.Series(np.maximum(-diff.values, 0.0), index=close.index)
-        vud1 = TqFunc.max(diff,0.)
-        vdd1 = TqFunc.max(-diff,0.)
+        vud1 = TqFunc.max(diff, 0.)
+        vdd1 = TqFunc.max(-diff, 0.)
         # sum(vud1, var_length) / sum(vdd1, var_length) — Chande Momentum Oscillator
         vUD = pta.sma(vud1, var_length).values * var_length   # rolling sum
         vDD = pta.sma(vdd1, var_length).values * var_length
@@ -2129,7 +2221,7 @@ class BtFunc(LazyImport):
             prev = a * src[i] + (1.0 - a) * prev
             out[i] = prev
         return out
-    
+
     def rsswma(close: pd.Series, length: int = 10, **kwargs):
         """
         RSS_WMA (Lazy Line) — 三重级联 WMA 平滑器。
@@ -2155,9 +2247,8 @@ class BtFunc(LazyImport):
         L1 = pta.wma(close, w1)
         L2 = pta.wma(L1, w2)
         return pta.wma(L2, w3)
-    
-    
-    def pivot_high(high: pd.Series, left: int=5, right: int=5,**kwargs) -> pd.Series:
+
+    def pivot_high(high: pd.Series, left: int = 5, right: int = 5, **kwargs) -> pd.Series:
         """
         Pine Script pivothigh 等价：当前 bar 的 high 严格大于左右各 left/right 根 bar 的 high。
         返回值放在确认 bar（pivot bar + right）处。
@@ -2168,13 +2259,12 @@ class BtFunc(LazyImport):
         if left <= 0 or right <= 0 or n <= left + right:
             return result
         for i in range(left, n - right):
-            if np.all(high[i - left : i] < high[i]) and \
-            np.all(high[i + 1 : i + right + 1] < high[i]):
+            if np.all(high[i - left: i] < high[i]) and \
+                    np.all(high[i + 1: i + right + 1] < high[i]):
                 result[i + right] = high[i]
         return pd.Series(result, name="pivot_high")
 
-
-    def pivot_low(low: pd.Series, left: int=5, right: int=5,**kwargs) -> pd.Series:
+    def pivot_low(low: pd.Series, left: int = 5, right: int = 5, **kwargs) -> pd.Series:
         """Pine Script pivotlow 等价"""
         low = low.values
         n = len(low)
@@ -2182,32 +2272,32 @@ class BtFunc(LazyImport):
         if left <= 0 or right <= 0 or n <= left + right:
             return result
         for i in range(left, n - right):
-            if np.all(low[i - left : i] > low[i]) and \
-            np.all(low[i + 1 : i + right + 1] > low[i]):
+            if np.all(low[i - left: i] > low[i]) and \
+                    np.all(low[i + 1: i + right + 1] > low[i]):
                 result[i + right] = low[i]
         return pd.Series(result, name="pivot_low")
-    
-    def linreg_slope(close: pd.Series, length: int=10, **kwargs) -> pd.Series:
+
+    def linreg_slope(close: pd.Series, length: int = 10, **kwargs) -> pd.Series:
         """Pine Script linreg 等价"""
         src = close.values
         n = len(close)
         bar_index = np.arange(1, n + 1, dtype=np.float64)
         result = np.full(n, np.nan, dtype=np.float64)
         for i in range(length - 1, n):
-            x = bar_index[i - length + 1 : i + 1]
-            y = src[i - length + 1 : i + 1]
+            x = bar_index[i - length + 1: i + 1]
+            y = src[i - length + 1: i + 1]
             cov = float(np.mean(y * x) - np.mean(y) * np.mean(x))
             var = float(np.var(x))  # Pine ta.variance = 总体方差
             if var > 1e-12:
                 result[i] = abs(cov / var)
         return pd.Series(result, name="linreg_slope")
-    
+
     def vwap_high(high: pd.Series, close: pd.Series, volume: pd.Series,
-                   length:int=10,**kwargs) -> pd.Series:
+                  length: int = 10, **kwargs) -> pd.Series:
         """锚定 VWAP：anchor=True 时重置累计"""
         price = close.values
         volume = volume.values
-        hst= TqFunc.tqfunc().hhv(high, length)
+        hst = TqFunc.tqfunc().hhv(high, length)
         anchor = np.where(np.isnan(hst), False, high == hst)
         n = len(close)
         vwap = np.zeros(n)
@@ -2221,13 +2311,13 @@ class BtFunc(LazyImport):
             cum_v += volume[i]
             vwap[i] = cum_pv / max(cum_v, 1e-12)
         return pd.Series(vwap, name="vwap_high")
-    
+
     def vwap_low(low: pd.Series, close: pd.Series, volume: pd.Series,
-                   length:int=10,**kwargs) -> pd.Series:
+                 length: int = 10, **kwargs) -> pd.Series:
         """锚定 VWAP：anchor=True 时重置累计"""
         price = close.values
         volume = volume.values
-        lst= TqFunc.tqfunc().llv(low, length)
+        lst = TqFunc.tqfunc().llv(low, length)
         anchor = np.where(np.isnan(lst), False, low == lst)
         n = len(close)
         vwap = np.zeros(n)
@@ -2241,6 +2331,833 @@ class BtFunc(LazyImport):
             cum_v += volume[i]
             vwap[i] = cum_pv / max(cum_v, 1e-12)
         return pd.Series(vwap, name="vwap_low")
+
+    def divergence(close: pd.Series, kline: pd.DataFrame = None,
+                   pivot_period: int = 5, div_type: str = 'Regular',
+                   max_bars: int = 100, **kwargs) -> pd.DataFrame:
+        """指标背离: 返回 rsi_line / ind_div / price_div 三列"""
+        close = np.asarray(close, dtype=np.float64)
+        n = len(close)
+
+        ind_div = np.full(n, np.nan, dtype=np.float64)
+        price_div = np.full(n, np.nan, dtype=np.float64)
+        prd = max(1, int(pivot_period))
+        if n >= 2 * prd + 2:
+            def _pivots(src, want_high):
+                idx, vals = [], []
+                for i in range(prd, n - prd):
+                    v = src[i]
+                    if np.isnan(v):
+                        continue
+                    if want_high:
+                        if v >= src[i - prd:i].max() and v > src[i + 1:i + prd + 1].max():
+                            idx.append(i)
+                            vals.append(v)
+                    else:
+                        if v <= src[i - prd:i].min() and v < src[i + 1:i + prd + 1].min():
+                            idx.append(i)
+                            vals.append(v)
+                return idx, vals
+
+            if hasattr(kline, "shape") and len(kline.shape) == 2 and kline.shape[0] == n:
+                lo_src, hi_src = kline.low.values, kline.high.values
+            else:
+                _close = kline.close.values
+                lo_src, hi_src = _close, _close
+            lo_idx, lo_vals = _pivots(lo_src, False)
+            hi_idx, hi_vals = _pivots(hi_src, True)
+
+            div_t = str(div_type)
+            check_reg = div_t != 'Hidden'
+            check_hid = div_t != 'Regular'
+
+            def _seg(arr, a, b, va, vb):
+                arr[a:b + 1] = np.linspace(va, vb, b - a + 1)
+
+            for k in range(1, len(lo_idx)):
+                a, b = lo_idx[k - 1], lo_idx[k]
+                if b - a > max_bars:
+                    continue
+                pa, pb, ia, ib = lo_vals[k - 1], lo_vals[k], close[a], close[b]
+                if not all(np.isfinite(v) for v in (pa, pb, ia, ib)):
+                    continue
+                if (check_reg and pb < pa and ib > ia) or (check_hid and pb > pa and ib < ia):
+                    _seg(ind_div, a, b, ia, ib)
+                    _seg(price_div, a, b, pa, pb)
+            for k in range(1, len(hi_idx)):
+                a, b = hi_idx[k - 1], hi_idx[k]
+                if b - a > max_bars:
+                    continue
+                pa, pb, ia, ib = hi_vals[k - 1], hi_vals[k], close[a], close[b]
+                if not all(np.isfinite(v) for v in (pa, pb, ia, ib)):
+                    continue
+                if (check_reg and pb > pa and ib < ia) or (check_hid and pb < pa and ib > ia):
+                    _seg(ind_div, a, b, ia, ib)
+                    _seg(price_div, a, b, pa, pb)
+
+        return pd.DataFrame(dict(ind_divergenc=close, ind_div=ind_div, price_div=price_div))
+
+
+class PineFunc(LazyImport):
+
+    def normalize(close: pd.Series, lo=0.0, hi=1.0, **kwargs):
+        """MLExtensions normalize: 扩展窗口历史 min/max 归一化"""
+        src = np.nan_to_num(np.asarray(close, dtype=np.float64), nan=0.0)
+        hist_min = np.minimum.accumulate(src)
+        hist_max = np.maximum.accumulate(src)
+        return lo + (hi - lo) * (src - hist_min) / np.maximum(hist_max - hist_min, 1e-9)
+
+    def cci(close: pd.Series, length: int = 10, **kwargs):
+        """Pine ta.cci: (src - sma) / (0.015 * mean|src - sma|)"""
+        ma = pta.sma(close, length)
+        dev = pta.sma(np.abs(close - ma), length)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            cci = np.where(dev > 0.0, (close - ma) / (0.015 * dev), np.nan)
+        return cci
+
+    @classmethod
+    def ema(cls, close: pd.Series, n: int = 10, **kwargs):
+        # Pine ta.ema: alpha=2/(n+1), 首值直接播种, NaN 不衰减权重
+        return close.ewm(span=n, adjust=False, ignore_na=True).mean()
+
+    @classmethod
+    def wavetrend(cls, high: pd.Series, low: pd.Series, close: pd.Series, n1=10, n2=11, talib: bool | None = None, **kwargs):
+        """n_wt = normalize(wt1 - sma(wt1,4), 0, 1)
+
+        注意: Pine ta.ema 为首值播种 (y[0]=x[0]), 而 pta.ema 默认 presma=True
+        (SMA 播种 + 前 length-1 根 NaN), 两者头部不一致, 故此处用 ewm 显式还原。
+        """
+
+        hlc3 = pta.hlc3(high, low, close, talib=talib)
+        ema1 = cls.ema(hlc3, n1)
+        ema2 = cls.ema((hlc3 - ema1).abs(), n1)
+        ci = ((hlc3 - ema1) / (0.015 * ema2)).where(ema2 > 0.0, 0.0)
+        wt1 = cls.ema(ci, n2)
+        wt2 = pta.sma(wt1, 4)
+        return (wt1 - wt2).fillna(0.0)
+
+    @classmethod
+    def rsi(cls, close: pd.Series, n=20, **kwargs):
+        """Pine ta.rsi: Wilder 平滑 RSI"""
+        diff = close.diff()
+        up = np.maximum(diff, 0.0)
+        down = -np.minimum(diff, 0.0)
+        rma_up = cls.rma(up, n)
+        rma_down = cls.rma(down, n)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rs = rma_up / rma_down
+            rsi = np.where(rma_down == 0.0, 100.0,
+                           np.where(rma_up == 0.0, 0.0, 100.0 - 100.0 / (1.0 + rs)))
+        return rsi
+
+    @classmethod
+    def rma(cls, close: pd.Series, n=20, **kwargs):
+        """Pine ta.rma: alpha=1/n, 以最初 n 个非NaN值的 SMA 播种, 之后递归。
+
+        与 ``minibt/indicators`` 内各指标手写的 ``_rma``/``_wilder`` 保持
+        **位级一致**（同样的 pandas rolling 播种 + ``prev + alpha*(x-prev)`` 递归），
+        以便安全地用本函数替换那些重复实现。na 输入使结果变 na，并在下一个
+        满窗口 bar 重新用 SMA 播种（Pine ``na(sum[1])`` 语义）。
+        """
+        arr = np.asarray(close, dtype=np.float64)
+        size = len(arr)
+        n = int(n)
+        if size == 0 or n <= 0:
+            return np.full(size, np.nan)
+        sma = pd.Series(arr).rolling(n).mean().values
+        alpha = 1.0 / float(n)
+        return _jit_call('rma', _rma_kernel, arr, sma, alpha)
+
+    # Wilder 累加器: sm[i] = sm[i-1] - sm[i-1]/n + x[i]
+    # Pine: nz(sm[1]) 在首根返回 0, 等价于 sm[-1]=0, 即从 i=0 开始
+    @classmethod
+    def _accumulate(cls, x: pd.Series | np.ndarray, size: int, n: int):
+        return _jit_call('accumulate', _accumulate_kernel,
+                         np.asarray(x, dtype=np.float64), n)
+
+    @classmethod
+    def adx_wilder(cls, high: pd.Series, low: pd.Series, close: pd.Series, n=20, **kwargs):
+        """MLExtensions 风格的 Wilder ADX (累加器平滑 + rma)"""
+        size = close.size
+        tr = pta.true_range(high, low, close)
+        high, low = high.values, low.values
+        dm_plus = np.zeros(size, dtype=np.float64)
+        dm_minus = np.zeros(size, dtype=np.float64)
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        dm_plus[1:] = np.where(up_move > down_move,
+                               np.maximum(up_move, 0.0), 0.0)
+        dm_minus[1:] = np.where(down_move > up_move,
+                                np.maximum(down_move, 0.0), 0.0)
+
+        tr_s = cls._accumulate(tr, size, n)
+        dm_plus_s = cls._accumulate(dm_plus, size, n)
+        dm_minus_s = cls._accumulate(dm_minus, size, n)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            di_plus = np.where(tr_s > 0.0, dm_plus_s / tr_s * 100.0, 0.0)
+            di_minus = np.where(tr_s > 0.0, dm_minus_s / tr_s * 100.0, 0.0)
+            di_sum = di_plus + di_minus
+            dx = np.where(di_sum > 0.0, np.abs(
+                di_plus - di_minus) / di_sum * 100.0, 0.0)
+        # Pine ta.rma: alpha=1/n, 以最初 n 个非 NaN 值的 SMA 播种后递归
+        # pta.rma 用 ewm(adjust=False) 从首值开始, 无 SMA 播种, 两者不等价
+        return cls.rma(dx, n)
+
+    @classmethod
+    def barssince(cls, cond: pd.Series | np.ndarray, **kwargs):
+        """Pine ta.barssince: 距上次 cond 为 True 的 bar 数, 从未发生为 NaN"""
+        arr = np.asarray(cond)
+        if arr.dtype != bool:
+            cond = np.nan_to_num(np.asarray(arr, dtype=np.float64),
+                                 nan=0.0) != 0.0
+        else:
+            cond = arr
+        n = len(cond)
+        out = np.full(n, np.nan)
+        last = -1
+        for i in range(n):
+            if cond[i]:
+                last = i
+            if last >= 0:
+                out[i] = i - last
+        return out
+
+    # ==================================================================
+    # Pine ta.* 全量补全（逐 bar 语义对齐 TradingView）
+    # ------------------------------------------------------------------
+    # 说明：
+    #   * 所有函数均返回 pandas.Series / pandas.DataFrame，与旧有方法一致；
+    #   * 均遵循 Pine 的“满窗口才输出、窗口内含 na 则结果 na”原则；
+    #   * 除法一律用 `_safe_div`，分母为 0 / na 时结果为 na（非 inf）。
+    # ==================================================================
+
+    @staticmethod
+    def _as_series(x):
+        """统一转为 float64 的 pandas.Series（保留原 index）。"""
+        if isinstance(x, pd.Series):
+            return x.astype(np.float64)
+        return pd.Series(np.asarray(x, dtype=np.float64))
+
+    @staticmethod
+    def _safe_div(num, den):
+        """Pine 风格除法：分母为 0 / na 时返回 na。"""
+        num = np.asarray(num, dtype=np.float64)
+        den = np.asarray(den, dtype=np.float64)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            out = num / den
+        return np.where(np.isfinite(out), out, np.nan)
+
+    @staticmethod
+    def _ranks(x):
+        """平均秩（并列取均值），供 rci 的 Spearman 相关使用。"""
+        x = np.asarray(x, dtype=np.float64)
+        n = len(x)
+        order = np.argsort(x, kind='mergesort')
+        ranks = np.empty(n, dtype=np.float64)
+        ranks[order] = np.arange(1, n + 1, dtype=np.float64)
+        xs = x[order]
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and xs[j + 1] == xs[i]:
+                j += 1
+            if j > i:
+                ranks[order[i:j + 1]] = (i + 1 + j + 1) / 2.0
+            i = j + 1
+        return ranks
+
+    # ---------------- 均线 / 平滑 ----------------
+    @classmethod
+    def sma(cls, source, length=10, **kwargs):
+        """Pine ta.sma(source, length): 简单移动平均。"""
+        s = cls._as_series(source)
+        n = int(length)
+        return s.rolling(n, min_periods=n).mean()
+
+    @classmethod
+    def wma(cls, source, length=10, **kwargs):
+        """Pine ta.wma(source, length): 线性加权移动平均（最新值权重最大）。"""
+        s = cls._as_series(source)
+        n = int(length)
+        w = np.arange(1, n + 1, dtype=np.float64)
+        w = w / w.sum()
+        return s.rolling(n, min_periods=n).apply(
+            lambda x: float(np.dot(x, w)), raw=True)
+
+    @classmethod
+    def hma(cls, source, length=10, **kwargs):
+        """Pine ta.hma(source, length): Hull 移动平均。"""
+        s = cls._as_series(source)
+        n = int(length)
+        half = cls.wma(s, max(1, int(n / 2)))
+        full = cls.wma(s, n)
+        return cls.wma(2.0 * half - full, max(1, int(round(np.sqrt(n)))))
+
+    @classmethod
+    def vwma(cls, source, volume, length=20, **kwargs):
+        """Pine ta.vwma(source, length): 成交量加权移动平均。"""
+        s = cls._as_series(source)
+        v = cls._as_series(volume)
+        n = int(length)
+        pv = (s * v).rolling(n, min_periods=n).sum()
+        vv = v.rolling(n, min_periods=n).sum()
+        return pd.Series(cls._safe_div(pv, vv), index=s.index)
+
+    @classmethod
+    def swma(cls, source, **kwargs):
+        """Pine ta.swma(source): 对称加权均线，权重 1/6,2/6,2/6,1/6。"""
+        s = cls._as_series(source)
+        w = np.array([1.0, 2.0, 2.0, 1.0]) / 6.0
+        return s.rolling(4, min_periods=4).apply(
+            lambda x: float(np.dot(x, w)), raw=True)
+
+    @classmethod
+    def alma(cls, source, length=9, offset=0.85, sigma=6.0, **kwargs):
+        """Pine ta.alma(source, length, offset, sigma): Arnaud Legoux 均线。"""
+        s = cls._as_series(source)
+        n = int(length)
+        m = float(offset) * (n - 1)
+        sig = n / float(sigma)
+        i = np.arange(n, dtype=np.float64)
+        w = np.exp(-((i - m) ** 2) / (2.0 * sig * sig))
+        w = w / w.sum()
+        return s.rolling(n, min_periods=n).apply(
+            lambda x: float(np.dot(x, w)), raw=True)
+
+    @classmethod
+    def linreg(cls, source, length=14, offset=0, **kwargs):
+        """Pine ta.linreg(source, length, offset): 线性回归末端值。"""
+        s = cls._as_series(source)
+        n = int(length)
+        off = int(offset)
+        x = np.arange(n, dtype=np.float64)
+        xm = x.mean()
+        denom = float(((x - xm) ** 2).sum())
+
+        def f(y):
+            if denom == 0:
+                return np.nan
+            ym = y.mean()
+            slope = float(((x - xm) * (y - ym)).sum()) / denom
+            intercept = ym - slope * xm
+            return intercept + slope * (n - 1 - off)
+        return s.rolling(n, min_periods=n).apply(f, raw=True)
+
+    @classmethod
+    def median(cls, source, length=10, **kwargs):
+        """Pine ta.median(source, length): 滚动中位数。"""
+        s = cls._as_series(source)
+        n = int(length)
+        return s.rolling(n, min_periods=n).median()
+
+    # ---------------- 变换 / 差分 ----------------
+    @classmethod
+    def cum(cls, source, **kwargs):
+        """Pine ta.cum(source): 累计和（na 按 0 处理）。"""
+        return cls._as_series(source).fillna(0.0).cumsum()
+
+    @classmethod
+    def change(cls, source, length=1, **kwargs):
+        """Pine ta.change(source, length): source - source[length]。"""
+        s = cls._as_series(source)
+        n = int(length)
+        if n <= 0:
+            return s * 0.0
+        return s - s.shift(n)
+
+    @classmethod
+    def roc(cls, source, length=1, **kwargs):
+        """Pine ta.roc(source, length): 变动率（%）。"""
+        s = cls._as_series(source)
+        n = int(length)
+        if n <= 0:
+            return s * 0.0
+        prev = s.shift(n)
+        return pd.Series(cls._safe_div(100.0 * (s - prev), prev), index=s.index)
+
+    @classmethod
+    def mom(cls, source, length=1, **kwargs):
+        """Pine ta.mom(source, length): 动量 = source - source[length]。"""
+        return cls.change(source, length)
+
+    @classmethod
+    def cog(cls, source, length=10, **kwargs):
+        """Pine ta.cog(source, length): 重心振荡器（当前 bar 权重最大）。"""
+        s = cls._as_series(source)
+        n = int(length)
+        idx = np.arange(1, n + 1, dtype=np.float64)  # 最新 bar 权重 n
+
+        def f(x):
+            den = x.sum()
+            if den == 0 or not np.isfinite(den):
+                return np.nan
+            return -float(np.dot(x, idx)) / float(den)
+        return s.rolling(n, min_periods=n).apply(f, raw=True)
+
+    @classmethod
+    def range(cls, source, length=10, **kwargs):
+        """Pine ta.range(source, length): highest - lowest。"""
+        s = cls._as_series(source)
+        n = int(length)
+        return s.rolling(n, min_periods=n).max() - s.rolling(n, min_periods=n).min()
+
+    # ---------------- 波动率 / 统计 ----------------
+    @classmethod
+    def tr(cls, high, low, close, handle_na=False, **kwargs):
+        """Pine ta.tr(handle_na): 真实波幅。handle_na=False 时首根为 na。
+
+        tr = max(high-low, |high-close[1]|, |low-close[1]|)
+        """
+        h = cls._as_series(high)
+        l = cls._as_series(low)
+        c = cls._as_series(close)
+        pc = c.shift(1)
+        tr = pd.concat([(h - l).abs(), (h - pc).abs(), (l - pc).abs()],
+                       axis=1).max(axis=1)
+        if not handle_na:
+            tr = tr.copy()
+            tr.iloc[0] = np.nan
+        return tr
+
+    @classmethod
+    def atr(cls, high, low, close, length=14, handle_na=True, **kwargs):
+        """Pine ta.atr(length): rma(tr(true), length)。"""
+        v = cls.rma(cls.tr(high, low, close, handle_na=handle_na), int(length))
+        return pd.Series(np.asarray(v, dtype=np.float64),
+                         index=cls._as_series(close).index)
+
+    @classmethod
+    def stdev(cls, source, length=10, biased=True, **kwargs):
+        """Pine ta.stdev(source, length): 标准差（biased=True 为总体/除 N）。"""
+        s = cls._as_series(source)
+        n = int(length)
+        return s.rolling(n, min_periods=n).std(ddof=0 if biased else 1)
+
+    @classmethod
+    def variance(cls, source, length=10, biased=True, **kwargs):
+        """Pine ta.variance(source, length): 方差（除 N 或 N-1）。"""
+        s = cls._as_series(source)
+        n = int(length)
+        return s.rolling(n, min_periods=n).var(ddof=0 if biased else 1)
+
+    @classmethod
+    def dev(cls, source, length=10, **kwargs):
+        """Pine ta.dev(source, length): 平均绝对偏差。"""
+        s = cls._as_series(source)
+        n = int(length)
+        ma = s.rolling(n, min_periods=n).mean()
+        return (s - ma).abs().rolling(n, min_periods=n).mean()
+
+    @classmethod
+    def correlation(cls, source1, source2, length=10, **kwargs):
+        """Pine ta.correlation(source1, source2, length): 滚动皮尔逊相关。
+
+        r = (E[xy] - E[x]E[y]) / (sd(x)*sd(y))，均在同一窗口内计算。
+        """
+        x = cls._as_series(source1)
+        y = cls._as_series(source2)
+        n = int(length)
+        mx = x.rolling(n, min_periods=n).mean()
+        my = y.rolling(n, min_periods=n).mean()
+        exy = (x * y).rolling(n, min_periods=n).mean()
+        cov = exy - mx * my
+        sx = x.rolling(n, min_periods=n).std(ddof=0)
+        sy = y.rolling(n, min_periods=n).std(ddof=0)
+        return pd.Series(cls._safe_div(cov, sx * sy), index=x.index)
+
+    @classmethod
+    def percentrank(cls, source, length=10, **kwargs):
+        """Pine ta.percentrank(source, length): 当前值在窗口内的百分位。"""
+        s = cls._as_series(source)
+        n = int(length)
+
+        def f(x):
+            return 100.0 * float(np.sum(x <= x[-1])) / len(x)
+        return s.rolling(n, min_periods=n).apply(f, raw=True)
+
+    @classmethod
+    def percentile_nearest_rank(cls, source, length=10, percentage=50.0, **kwargs):
+        """Pine ta.percentile_nearest_rank(source, length, percentage)。"""
+        s = cls._as_series(source)
+        n = int(length)
+        pct = float(percentage)
+
+        def f(x):
+            rank = int(np.ceil(pct / 100.0 * n))
+            rank = max(1, min(rank, len(x)))
+            return float(np.sort(x)[rank - 1])
+        return s.rolling(n, min_periods=n).apply(f, raw=True)
+
+    # ---------------- 极值 ----------------
+    @classmethod
+    def highest(cls, source, length=10, **kwargs):
+        """Pine ta.highest(source, length): 窗口最高值。"""
+        s = cls._as_series(source)
+        n = int(length)
+        return s.rolling(n, min_periods=n).max()
+
+    @classmethod
+    def lowest(cls, source, length=10, **kwargs):
+        """Pine ta.lowest(source, length): 窗口最低值。"""
+        s = cls._as_series(source)
+        n = int(length)
+        return s.rolling(n, min_periods=n).min()
+
+    @classmethod
+    def highestbars(cls, source, length=10, **kwargs):
+        """Pine ta.highestbars(source, length): 距最高值的 bar 数（0=当前最高）。"""
+        s = cls._as_series(source)
+        n = int(length)
+
+        def f(x):
+            return float(len(x) - 1 - int(np.argmax(x)))
+        return s.rolling(n, min_periods=n).apply(f, raw=True)
+
+    @classmethod
+    def lowestbars(cls, source, length=10, **kwargs):
+        """Pine ta.lowestbars(source, length): 距最低值的 bar 数（0=当前最低）。"""
+        s = cls._as_series(source)
+        n = int(length)
+
+        def f(x):
+            return float(len(x) - 1 - int(np.argmin(x)))
+        return s.rolling(n, min_periods=n).apply(f, raw=True)
+
+    @classmethod
+    def max(cls, source, b=None, **kwargs):
+        """Pine ta.max(source1, source2): 逐点较大值（na 传播）。"""
+        a = cls._as_series(source)
+        if b is None:
+            return a
+        if np.isscalar(b):
+            return pd.Series(np.maximum(a.to_numpy(), float(b)), index=a.index)
+        bb = cls._as_series(b)
+        return pd.Series(np.maximum(a.to_numpy(), bb.to_numpy()), index=a.index)
+
+    @classmethod
+    def min(cls, source, b=None, **kwargs):
+        """Pine ta.min(source1, source2): 逐点较小值（na 传播）。"""
+        a = cls._as_series(source)
+        if b is None:
+            return a
+        if np.isscalar(b):
+            return pd.Series(np.minimum(a.to_numpy(), float(b)), index=a.index)
+        bb = cls._as_series(b)
+        return pd.Series(np.minimum(a.to_numpy(), bb.to_numpy()), index=a.index)
+
+    # ---------------- 交叉 / 逻辑 ----------------
+    @classmethod
+    def cross(cls, source1, source2=None, **kwargs):
+        """Pine ta.cross(source1, source2): 双向穿越。"""
+        a = cls._as_series(source1)
+        if source2 is None:
+            return pd.Series(np.zeros(len(a)), index=a.index)
+        b = cls._as_series(source2)
+        a1, b1 = a.shift(1), b.shift(1)
+        up = (a > b) & (a1 <= b1)
+        dn = (a < b) & (a1 >= b1)
+        return (up | dn).astype(np.float64)
+
+    @classmethod
+    def crossover(cls, source1, source2=None, **kwargs):
+        """Pine ta.crossover(source1, source2): source1 上穿 source2。"""
+        a = cls._as_series(source1)
+        if source2 is None:
+            return pd.Series(np.zeros(len(a)), index=a.index)
+        b = cls._as_series(source2)
+        return ((a > b) & (a.shift(1) <= b.shift(1))).astype(np.float64)
+
+    @classmethod
+    def crossunder(cls, source1, source2=None, **kwargs):
+        """Pine ta.crossunder(source1, source2): source1 下穿 source2。"""
+        a = cls._as_series(source1)
+        if source2 is None:
+            return pd.Series(np.zeros(len(a)), index=a.index)
+        b = cls._as_series(source2)
+        return ((a < b) & (a.shift(1) >= b.shift(1))).astype(np.float64)
+
+    @classmethod
+    def rising(cls, source, length=1, **kwargs):
+        """Pine ta.rising(source, length): 连续 length 根上涨。"""
+        s = cls._as_series(source)
+        n = int(length)
+        if n <= 0:
+            return pd.Series(np.ones(len(s)), index=s.index)
+        return (s.diff() > 0).rolling(n, min_periods=n).sum().eq(n).astype(np.float64)
+
+    @classmethod
+    def falling(cls, source, length=1, **kwargs):
+        """Pine ta.falling(source, length): 连续 length 根下跌。"""
+        s = cls._as_series(source)
+        n = int(length)
+        if n <= 0:
+            return pd.Series(np.ones(len(s)), index=s.index)
+        return (s.diff() < 0).rolling(n, min_periods=n).sum().eq(n).astype(np.float64)
+
+    @classmethod
+    def valuewhen(cls, cond, source, occurrence=0, **kwargs):
+        """Pine ta.valuewhen(condition, source, occurrence): 条件第 n 次成立时的 source。
+
+        occurrence=0 表示最近一次成立。
+        """
+        arr = np.asarray(cond)
+        if arr.dtype != bool:
+            c = np.nan_to_num(np.asarray(arr, dtype=np.float64), nan=0.0) != 0.0
+        else:
+            c = arr
+        s = cls._as_series(source)
+        occ = int(occurrence)
+        m = len(s)
+        out = np.full(m, np.nan)
+        hist: list[float] = []
+        for i in range(m):
+            if c[i]:
+                hist.append(float(s.iloc[i]))
+            k = len(hist) - 1 - occ
+            if k >= 0:
+                out[i] = hist[k]
+        return pd.Series(out, index=s.index)
+
+    @classmethod
+    def pivothigh(cls, source, leftbars=5, rightbars=5, **kwargs):
+        """Pine ta.pivothigh(source, leftbars, rightbars): 摆动高点（右侧确认后落值）。"""
+        s = cls._as_series(source)
+        n = len(s)
+        L, R = int(leftbars), int(rightbars)
+        out = np.full(n, np.nan)
+        for i in range(L, n - R):
+            v = s.iloc[i]
+            if not np.isfinite(v):
+                continue
+            ok = True
+            for k in range(1, L + 1):
+                w = s.iloc[i - k]
+                if not np.isfinite(w) or not (v > w):
+                    ok = False
+                    break
+            if ok:
+                for k in range(1, R + 1):
+                    w = s.iloc[i + k]
+                    if not np.isfinite(w) or not (v > w):
+                        ok = False
+                        break
+            if ok:
+                out[i + R] = v
+        return pd.Series(out, index=s.index)
+
+    @classmethod
+    def pivotlow(cls, source, leftbars=5, rightbars=5, **kwargs):
+        """Pine ta.pivotlow(source, leftbars, rightbars): 摆动低点（右侧确认后落值）。"""
+        s = cls._as_series(source)
+        n = len(s)
+        L, R = int(leftbars), int(rightbars)
+        out = np.full(n, np.nan)
+        for i in range(L, n - R):
+            v = s.iloc[i]
+            if not np.isfinite(v):
+                continue
+            ok = True
+            for k in range(1, L + 1):
+                w = s.iloc[i - k]
+                if not np.isfinite(w) or not (v < w):
+                    ok = False
+                    break
+            if ok:
+                for k in range(1, R + 1):
+                    w = s.iloc[i + k]
+                    if not np.isfinite(w) or not (v < w):
+                        ok = False
+                        break
+            if ok:
+                out[i + R] = v
+        return pd.Series(out, index=s.index)
+
+    # ---------------- 振荡器 ----------------
+    @classmethod
+    def cmo(cls, source, length=14, **kwargs):
+        """Pine ta.cmo(source, length): Chande 动量振荡器。"""
+        s = cls._as_series(source)
+        n = int(length)
+        chg = s.diff()
+        up = chg.clip(lower=0.0).rolling(n, min_periods=n).sum()
+        down = (-chg.clip(upper=0.0)).rolling(n, min_periods=n).sum()
+        return pd.Series(cls._safe_div(100.0 * (up - down), up + down), index=s.index)
+
+    @classmethod
+    def wpr(cls, high, low, close, length=14, **kwargs):
+        """Pine ta.wpr(length): Williams %R（-100..0）。"""
+        c = cls._as_series(close)
+        hh = cls.highest(high, int(length))
+        ll = cls.lowest(low, int(length))
+        return pd.Series(cls._safe_div(-100.0 * (hh - c), hh - ll), index=c.index)
+
+    @classmethod
+    def mfi(cls, high, low, close, volume, length=14, **kwargs):
+        """Pine ta.mfi(series, length): 资金流量指标（series=hlc3）。"""
+        h = cls._as_series(high)
+        l = cls._as_series(low)
+        c = cls._as_series(close)
+        v = cls._as_series(volume)
+        src = (h + l + c) / 3.0
+        n = int(length)
+        chg = src.diff()
+        # Pine: 条件含 na 时走 else 分支（na 比较为 false）
+        upper_val = pd.Series(np.where((chg <= 0).to_numpy(), 0.0, src.to_numpy()), index=src.index)
+        lower_val = pd.Series(np.where((chg >= 0).to_numpy(), 0.0, src.to_numpy()), index=src.index)
+        upper = (v * upper_val).rolling(n, min_periods=n).sum()
+        lower = (v * lower_val).rolling(n, min_periods=n).sum()
+        return pd.Series(100.0 - cls._safe_div(100.0, 1.0 + cls._safe_div(upper, lower)), index=src.index)
+
+    @classmethod
+    def rci(cls, source, length=14, **kwargs):
+        """Pine ta.rci(source, length): 与时间序的秩相关（Spearman）×100。"""
+        s = cls._as_series(source)
+        n = int(length)
+        t = np.arange(1, n + 1, dtype=np.float64)
+        denom = n * (n * n - 1)
+
+        def f(x):
+            if denom == 0:
+                return np.nan
+            d = cls._ranks(x) - t
+            return (1.0 - 6.0 * float(np.sum(d * d)) / denom) * 100.0
+        return s.rolling(n, min_periods=n).apply(f, raw=True)
+
+    @classmethod
+    def tsi(cls, source, short_length=13, long_length=25, **kwargs):
+        """Pine ta.tsi(source, short_length, long_length): 真实强度指数。"""
+        s = cls._as_series(source)
+        m = s.diff()
+        ema1 = cls.ema(m, int(long_length))
+        ema2 = cls.ema(ema1, int(short_length))
+        a1 = cls.ema(m.abs(), int(long_length))
+        a2 = cls.ema(a1, int(short_length))
+        return pd.Series(cls._safe_div(100.0 * ema2, a2), index=s.index)
+
+    @classmethod
+    def accdist(cls, high, low, close, volume, **kwargs):
+        """Pine ta.accdist: 累积/派发线。"""
+        h = cls._as_series(high)
+        l = cls._as_series(low)
+        c = cls._as_series(close)
+        v = cls._as_series(volume)
+        num = 2.0 * c - l - h
+        ratio = pd.Series(cls._safe_div(num, h - l), index=c.index).fillna(0.0)
+        return (v * ratio).cumsum()
+
+    @classmethod
+    def vwap(cls, high, low, close, volume, source=None, **kwargs):
+        """Pine ta.vwap(source): 成交量加权均价（自序列起点累计，不做日切重置）。"""
+        h = cls._as_series(high)
+        l = cls._as_series(low)
+        c = cls._as_series(close)
+        v = cls._as_series(volume)
+        s = (h + l + c) / 3.0 if source is None else cls._as_series(source)
+        pv = (s * v).cumsum()
+        vv = v.cumsum()
+        return pd.Series(cls._safe_div(pv, vv), index=s.index)
+
+    @classmethod
+    def stoch(cls, high, low, close, length=14, **kwargs):
+        """Pine ta.stoch(source, high, low, length): 随机指标 %K（source=close）。"""
+        s = cls._as_series(close)
+        hh = cls.highest(high, int(length))
+        ll = cls.lowest(low, int(length))
+        return pd.Series(cls._safe_div(100.0 * (s - ll), hh - ll), index=s.index)
+
+    @classmethod
+    def bbw(cls, source, length=20, mult=2.0, **kwargs):
+        """Pine ta.bbw(source, length, mult): 布林带宽度（%）。"""
+        s = cls._as_series(source)
+        basis = cls.sma(s, int(length))
+        dev = float(mult) * cls.stdev(s, int(length))
+        return pd.Series(cls._safe_div(2.0 * dev, basis) * 100.0, index=s.index)
+
+    # ---------------- 多输出 ----------------
+    @classmethod
+    def bb(cls, source, length=20, mult=2.0, **kwargs):
+        """Pine ta.bb(source, length, mult): [middle, upper, lower]。"""
+        s = cls._as_series(source)
+        basis = cls.sma(s, int(length))
+        dev = float(mult) * cls.stdev(s, int(length))
+        return pd.DataFrame({'bb_middle': basis, 'bb_upper': basis + dev,
+                             'bb_lower': basis - dev}, index=s.index)
+
+    @classmethod
+    def macd(cls, source, fast=12, slow=26, signal=9, **kwargs):
+        """Pine ta.macd(source, fastlen, slowlen, siglen): [macd, signal, hist]。"""
+        s = cls._as_series(source)
+        fast_ma = cls.ema(s, int(fast))
+        slow_ma = cls.ema(s, int(slow))
+        macd_line = fast_ma - slow_ma
+        sig = cls.sma(macd_line, int(signal))
+        return pd.DataFrame({'macd': macd_line, 'signal': sig,
+                             'hist': macd_line - sig}, index=s.index)
+
+    @classmethod
+    def sar(cls, high, low, start=0.02, inc=0.02, maximum=0.2, **kwargs):
+        """Pine ta.sar(start, inc, max): 抛物线 SAR。"""
+        h = cls._as_series(high)
+        l = cls._as_series(low)
+        hv, lv = h.to_numpy(), l.to_numpy()
+        n = len(hv)
+        out = np.full(n, np.nan)
+        if n == 0:
+            return pd.Series(out, index=h.index)
+        af = float(start)
+        maxaf = float(maximum)
+        is_long = True
+        ep = hv[0]
+        sar_v = lv[0]
+        out[0] = sar_v
+        for i in range(1, n):
+            sar_v = sar_v + af * (ep - sar_v)
+            if is_long:
+                floor_v = min(lv[i - 1], lv[i - 2]) if i >= 2 else lv[i - 1]
+                if sar_v > floor_v:
+                    sar_v = floor_v
+                if lv[i] < sar_v:
+                    is_long = False
+                    sar_v = ep
+                    ep = lv[i]
+                    af = float(start)
+                elif hv[i] > ep:
+                    ep = hv[i]
+                    af = min(af + float(inc), maxaf)
+            else:
+                ceil_v = max(hv[i - 1], hv[i - 2]) if i >= 2 else hv[i - 1]
+                if sar_v < ceil_v:
+                    sar_v = ceil_v
+                if hv[i] > sar_v:
+                    is_long = True
+                    sar_v = ep
+                    ep = hv[i]
+                    af = float(start)
+                elif lv[i] < ep:
+                    ep = lv[i]
+                    af = min(af + float(inc), maxaf)
+            out[i] = sar_v
+        return pd.Series(out, index=h.index)
+
+    @classmethod
+    def dmi(cls, high, low, close, di_length=14, adx_length=14, **kwargs):
+        """Pine ta.dmi(diLength, adxSmoothing): [+DI, -DI, ADX]。"""
+        h = cls._as_series(high)
+        l = cls._as_series(low)
+        c = cls._as_series(close)
+        up = h.diff()
+        dn = -l.diff()
+        plus_dm = pd.Series(np.where((up > dn).to_numpy() & (up > 0).to_numpy(),
+                                     up.to_numpy(), 0.0), index=h.index)
+        minus_dm = pd.Series(np.where((dn > up).to_numpy() & (dn > 0).to_numpy(),
+                                      dn.to_numpy(), 0.0), index=h.index)
+        atr = cls.rma(cls.tr(h, l, c, handle_na=True), int(di_length))
+        plus_di = 100.0 * cls._safe_div(cls.rma(plus_dm, int(di_length)), atr)
+        minus_di = 100.0 * cls._safe_div(cls.rma(minus_dm, int(di_length)), atr)
+        dx = 100.0 * cls._safe_div(np.abs(plus_di - minus_di), plus_di + minus_di)
+        adx = cls.rma(pd.Series(dx, index=h.index), int(adx_length))
+        return pd.DataFrame({'plus_di': plus_di, 'minus_di': minus_di,
+                             'adx': adx}, index=h.index)
 
 
 # 天勤指标
@@ -2466,7 +3383,15 @@ class TqTa(LazyImport):
 
     def CCI(df, n=14, **kwargs):
         # hlc
-        return TqTa.tqta().CCI(df, n).cci
+        # 向量化实现（与 tqsdk.ta.CCI 等价）：tqsdk 用 `rolling(n).apply(mad)`
+        # 逐窗口 Python 回调，10000 根要 ~100ms；这里用 sliding_window_view
+        # 一次算完，实测 ~1.5ms，数值逐位一致。
+        typ = (df['high'] + df['low'] + df['close']) / 3
+        values = typ.to_numpy(dtype=float)
+        ma = typ.rolling(n).mean()
+        mad = _rolling_mad(values, n)
+        md = pd.Series(mad, index=df.index)
+        return (typ - ma) / (md * 0.015)
 
     def OBV(df, **kwargs) -> pd.Series:
         # cv

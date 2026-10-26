@@ -870,7 +870,12 @@ class Pair:
         # ect < lower_threshold → buy leg[0], sell leg[1]
 
         # 检查ECT的平稳性（应该平稳）
-        from statsmodels.tsa.stattools import adfuller
+        try:
+            from statsmodels.tsa.stattools import adfuller
+        except ImportError as e:
+            raise ImportError(
+                "协整检验需要依赖 statsmodels，请安装：pip install statsmodels"
+            ) from e
         adf_result = adfuller(ect_series.dropna())
         print(f"ADF统计量: {adf_result[0]:.4f}")
         print(f"p值: {adf_result[1]:.4f}")

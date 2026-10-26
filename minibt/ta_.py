@@ -1,13 +1,63 @@
 # -*- coding: utf-8 -*-
 from warnings import simplefilter
-import pandas_ta as pta
 import numpy as np
 import pandas as pd
 from typing import Callable, Any,  Literal,TYPE_CHECKING
 from collections.abc import Iterable,Sequence, Mapping, Generator,Iterator
 # from numpy.random import RandomState
 import threading
-from pandas_ta.utils import signed_series, v_bool, v_pos_default, v_series
+
+
+class _LazyModule(object):
+    """延迟导入的模块/属性代理（首次访问才真正 `import`）。
+
+    可传 ``patches={name: value}``，在真正导入后把这些属性打到模块上
+    （用于 ``pta.vp = vp`` 这种 monkeypatch）。
+    """
+
+    def __init__(self, import_name, attr=None, patches=None):
+        object.__setattr__(self, '_import_name', import_name)
+        object.__setattr__(self, '_attr', attr)
+        object.__setattr__(self, '_patches', dict(patches or {}))
+        object.__setattr__(self, '_module', None)
+
+    def _load(self):
+        module = object.__getattribute__(self, '_module')
+        if module is None:
+            import importlib
+            module = importlib.import_module(
+                object.__getattribute__(self, '_import_name'))
+            attr = object.__getattribute__(self, '_attr')
+            if attr is not None:
+                module = getattr(module, attr)
+            else:
+                for name, value in object.__getattribute__(
+                        self, '_patches').items():
+                    setattr(module, name, value)
+            object.__setattr__(self, '_module', module)
+        return module
+
+    def patch(self, name, value):
+        """注册一个 monkeypatch，首次导入后自动生效。"""
+        object.__getattribute__(self, '_patches')[name] = value
+        module = object.__getattribute__(self, '_module')
+        if module is not None:
+            setattr(module, name, value)
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+    def __call__(self, *args, **kwargs):
+        return self._load()(*args, **kwargs)
+
+
+# pandas_ta 延迟导入：`import minibt` 会经 `indicators.tradingview -> ta -> ta_`
+# 到达这里，顶层 `import pandas_ta` 要 ~0.6s（含 numba），而多数指标用不到。
+pta = _LazyModule('pandas_ta')
+signed_series = _LazyModule('pandas_ta.utils', 'signed_series')
+v_bool = _LazyModule('pandas_ta.utils', 'v_bool')
+v_pos_default = _LazyModule('pandas_ta.utils', 'v_pos_default')
+v_series = _LazyModule('pandas_ta.utils', 'v_series')
 if TYPE_CHECKING:
     from finta import TA as FinTa
     import talib
@@ -166,7 +216,7 @@ def vp(
 
     return vpdf
 
-pta.vp=vp
+pta.patch('vp', vp)
 
 def ZLEMA(
     ohlc: pd.DataFrame,
@@ -330,7 +380,7 @@ class LazyImport(object):
                     _StatsmodelsApi = sm
                 except ImportError as e:
                     raise RuntimeError(
-                        "需要安装statsmodels才能使用此功能: pip install statsmodels"
+                        '需要安装 statsmodels 才能使用此功能: pip install statsmodels'
                     ) from e
         return _StatsmodelsApi
 
@@ -346,7 +396,7 @@ class LazyImport(object):
                         _TqFunc = tafunc
                 except ImportError as e:
                     raise RuntimeError(
-                        "需要安装tqsdk才能使用此功能: pip install tqsdk"
+                        '需要安装 tqsdk 才能使用此功能: pip install tqsdk'
                     ) from e
         return _TqFunc
 
@@ -362,7 +412,7 @@ class LazyImport(object):
                         _TqTa = ta
                 except ImportError as e:
                     raise RuntimeError(
-                        "需要安装tqsdk才能使用此功能: pip install tqsdk"
+                        '需要安装 tqsdk 才能使用此功能: pip install tqsdk'
                     ) from e
         return _TqTa
 
@@ -376,7 +426,7 @@ class LazyImport(object):
                     _sklearn_preprocessing = sp
                 except ImportError as e:
                     raise RuntimeError(
-                        "需要安装sklearn才能使用此功能: pip install sklearn"
+                        '需要安装 scikit-learn 才能使用此功能: pip install scikit-learn'
                     ) from e
         return _sklearn_preprocessing
 
@@ -390,7 +440,7 @@ class LazyImport(object):
                     _sklearn_decomposition = sd
                 except ImportError as e:
                     raise RuntimeError(
-                        "需要安装sklearn才能使用此功能: pip install sklearn"
+                        '需要安装 scikit-learn 才能使用此功能: pip install scikit-learn'
                     ) from e
         return _sklearn_decomposition
 
@@ -404,7 +454,7 @@ class LazyImport(object):
                     _arch_model = arch_model
                 except ImportError as e:
                     raise RuntimeError(
-                        "需要安装arch才能使用此功能: pip install arch"
+                        '需要安装 arch 才能使用此功能: pip install arch'
                     ) from e
         return _arch_model
 
@@ -418,7 +468,7 @@ class LazyImport(object):
                     _KalmanFilter = KalmanFilter
                 except ImportError as e:
                     raise RuntimeError(
-                        "需要安装pykalman才能使用此功能: pip install pykalman"
+                        '需要安装 pykalman 才能使用此功能: pip install pykalman'
                     ) from e
         return _KalmanFilter
 

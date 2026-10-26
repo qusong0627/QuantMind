@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 minibt: 一站式量化交易策略开发库
-=====================================
+
 - minibt 是一个专注于简化量化交易全流程的开发库，支持从策略编写、指标计算、
 - 回测分析到实盘对接的完整链路，提供极简的API设计和丰富的工具链，助力快速落地量化想法。
 
@@ -13,7 +13,7 @@ minibt: 一站式量化交易策略开发库
 
 相关资源:
 - 作者: owen
-- 版本信息: v1.2.7
+- 版本信息: v1.3.3
 - 许可证: MIT License
 - GitHub仓库: https://github.com/MiniBtMaster/minibt
 - PyPI仓库: https://pypi.org/project/minibt/
@@ -21,7 +21,6 @@ minibt: 一站式量化交易策略开发库
 - 联系邮箱：407841129@qq.com
 """
 from .logger import LogLevel
-# [pilot-prune] from .elegantrl.agents import Agents, BestAgents
 from .stop import BtStop
 from .bt import Bt
 from .callback import stop_callback
@@ -38,9 +37,12 @@ from .utils import (
     CandleStyle,
     LineStyle,
     SignalStyle,
+    TradeStyle,
+    TradeMarkerStyle,
     SpanStyle,
     Markers,
     WaterMark,
+    BandStyle,
     PlotInfo,
     MaType,
     SignalLabel,
@@ -84,12 +86,11 @@ from .indicators import (
 __author__ = "owen"
 __copyright__ = "Copyright (c) 2025 minibt开发团队"
 __license__ = "MIT"
-__version__ = "1.2.7"
-__version_info__ = (1, 2, 7)
+__version__ = "1.3.3"
+__version_info__ = (1, 3, 1)
 __description__ = "一站式量化交易策略开发库，简化从策略搭建到实盘交易的全流程"
 __url__ = "https://www.minibt.cn"
 __email__ = "407841129@qq.com"
-
 
 
 # ------------------------------
@@ -114,10 +115,13 @@ __all__ = [
     # 订单类型
     'OrderType',
     # 可视化样式
-    'LineDash', 'Colors', 'Markers', 'WaterMark','Line','SeriesType',
-    'CandleStyle', 'LineStyle', 'SignalStyle', 'SpanStyle', 'PlotInfo', 'MaType', "SignalLabel",
-    # 强化学习
-    'Agents', 'BestAgents',
+    'BandStyle',
+    'LineDash', 'Colors', 'Markers', 'WaterMark', 'Line', 'SeriesType',
+    'CandleStyle', 'LineStyle', 'SignalStyle', 'TradeStyle', 'TradeMarkerStyle',
+    'SpanStyle', 'PlotInfo', 'MaType', "SignalLabel",
+    # 强化学习（Agents / BestAgents 已改为惰性加载，不放入 __all__，
+    # 避免 `from minibt import *` 触发 torch；仍可用 `minibt.Agents`
+    # 或 `from minibt import Agents` 访问）
     # 类型
     'IndSeries', 'IndFrame', 'IndSeries', 'IndFrame',
     # 日志相关
@@ -135,6 +139,39 @@ __all__ = [
     'TradeTimeFilter',
 ]
 
-
-# 初始化本地数据源
+# 初始化本地数据源索引（``minibt/data/utils.py``）：
+# 两个数据目录里的 CSV 会写成 ``LocalDatas`` 的类属性，方便用户查看
+# 有哪些本地数据可调用；集合没变时不会重写文件。
 LocalDatas.rewrite(True)
+
+
+# ------------------------------
+# 惰性属性（PEP 562）
+# Agents / BestAgents 会连带导入 torch（约 1.5 秒），而绝大多数用户
+# 并不使用强化学习，因此改为按需加载。
+# ------------------------------
+_LAZY_ATTRS = {
+    'Agents': ('.elegantrl.agents', 'Agents'),
+    'BestAgents': ('.elegantrl.agents', 'BestAgents'),
+}
+
+
+def __getattr__(name):
+    """模块级惰性属性：首次访问 minibt.Agents / minibt.BestAgents 时才导入 torch。"""
+    if name in _LAZY_ATTRS:
+        import importlib
+        module_name, attr = _LAZY_ATTRS[name]
+        try:
+            module = importlib.import_module(module_name, __name__)
+        except ImportError as e:
+            raise ImportError(
+                f"强化学习功能（{name}）需要依赖 torch，请安装： pip install torch"
+            ) from e
+        value = getattr(module, attr)
+        globals()[name] = value  # 缓存，后续访问不再走 __getattr__
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY_ATTRS))

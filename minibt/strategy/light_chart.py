@@ -21,24 +21,57 @@ from PyQt6.QtWidgets import (QApplication, QSplitter, QWidget, QVBoxLayout, QSiz
 from PyQt6.QtGui import QColor, QFont, QPainter, QIcon, QPen, QGuiApplication
 from PyQt6.QtCore import Qt, QSize, QTimer, QUrl, QObject, QThread, QMetaObject, QEvent, pyqtSignal
 
-# 阻止 lightweight_charts 自动加载 PySide6（强制使用 PyQt6）
-import builtins as _builtins
-_original_import = _builtins.__import__
+# 图表库：pylightcharts（TradingView Lightweight Charts v5 的 Python 绑定）。
+#
+# 这里以前是 import lightweight_charts，并在导入前用 _builtins.__import__ 拦掉
+# PySide6、导入后再把 lightweight_charts.widgets 里的 Qt 名字逐个换成 PyQt6 的，
+# 目的是“强制使用 PyQt6”。pylightcharts 的绑定选择是内建的，不需要这些手术：
+#
+#   * 环境变量 $PYLIGHTCHARTS_QT，或 pylightcharts.qt.prepare_qt('PyQt6')
+#   * prepare_qt() 还会导入 QtWebEngineWidgets，而 Qt 要求它早于 QApplication
+#
+# get_chart_class() 和 main() 里都已经按这个顺序处理。
+from pylightcharts import util
+from pylightcharts.abstract import Line, Candlestick, AbstractChart
+from pylightcharts.drawings import HorizontalLine
+from pylightcharts.toolbox import ToolBox, json
+def check_environment(verbose: bool = True) -> dict:
+    """启动自检：确认在用哪一份 pylightcharts、键盘功能在不在 bundle 里。
 
-def _blocked_import(name, *args, **kwargs):
-    if name.startswith('PySide6'):
-        raise ImportError(f'PySide6 blocked (PyQt6): {name}')
-    return _original_import(name, *args, **kwargs)
+    以前踩过的坑：跑的是另一个目录里的 minibt 副本 /（更早的）lightweight_charts，
+    于是"明明改好了却没反应"。这里把关键事实打出来，出问题一眼可见：
 
-_builtins.__import__ = _blocked_import
+    * ``pylightcharts``、``minibt`` 实际来自哪个文件；
+    * bundle 里有没有 ``_handleArrowKey`` / ``removePane``（键盘与 pane 支持）；
+    * 图表建好后 ``chart.keyboardNavigation`` 是否为真（见 ``Chart.__init__``）。
+    """
+    import pathlib as _pathlib
 
-from lightweight_charts.toolbox import ToolBox, json
-from lightweight_charts.drawings import HorizontalLine
-from lightweight_charts.abstract import Line, Candlestick, AbstractChart
-from lightweight_charts import util
+    import pylightcharts
+    info = {
+        'pylightcharts': getattr(pylightcharts, '__file__', '?'),
+        'version': getattr(pylightcharts, '__version__', '?'),
+    }
+    try:
+        import minibt as _minibt
+        info['minibt'] = getattr(_minibt, '__file__', '?')
+    except Exception:                      # 单文件运行时没有包
+        info['minibt'] = __file__
+    bundle = _pathlib.Path(str(info['pylightcharts'])).parent / 'js' / 'bundle.js'
+    info['bundle'] = str(bundle)
+    try:
+        text = bundle.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        text = ''
+    info['keyboard'] = '_handleArrowKey' in text
+    # pane support is python side (`Lib.invoke(..., 'addPane')`), so ask the class
+    from pylightcharts.abstract import AbstractChart as _Chart
+    info['panes'] = hasattr(_Chart, 'add_pane') and hasattr(_Chart, 'remove_pane')
+    if verbose:
+        print('[pylightcharts]', info)
+    return info
 
-# 恢复正常导入
-_builtins.__import__ = _original_import
+
 # 延迟导入QtChart类
 ChartClass = None
 QtChart = None
@@ -46,10 +79,23 @@ QtChart = None
 
 def get_chart_class():
     """
-    延迟导入Chart类
+    延迟导入Chart类（PyQt6）
+
+    pylightcharts 用 $PYLIGHTCHARTS_QT 选绑定，这里用 prepare_qt('PyQt6') 显式指定。
+    顺序很重要：prepare_qt() 会导入 pylightcharts.widgets，而它 import 时就要导入
+    QtWebEngineWidgets —— Qt 要求这件事发生在 QApplication 之前，所以先 prepare_qt()，
+    再创建 QApplication。
+
+    以前这里是把 lightweight_charts.widgets 里的 QWebEngineView/QWebChannel/QObject/
+    Slot/QUrl/QTimer/Qt/Bridge 逐个替换成 PyQt6 的对象来达到同样的目的；pylightcharts
+    的 Qt 绑定是内建的，不需要再替换模块属性。
     """
     global ChartClass, QtChart
     if ChartClass is None:
+        # 选定绑定，并在此刻导入 QtWebEngineWidgets（必须早于 QApplication）
+        from pylightcharts.qt import prepare_qt
+        prepare_qt('PyQt6')
+
         # 确保QApplication实例存在
         app = QApplication.instance()
         if app is None:
@@ -58,47 +104,9 @@ def get_chart_class():
                 Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
             app = QApplication([])
 
-        # 先导入PyQt6的QtWebEngineWidgets模块，确保使用的是PyQt6
-        from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtWebChannel import QWebChannel
-        from PyQt6.QtCore import Qt, QObject, pyqtSlot, QUrl, QTimer
-
-        # 定义一个使用PyQt6 QObject的Bridge类
-        class Bridge(QObject):
-            def __init__(self, chart):
-                super().__init__()
-                self.win = chart.win
-
-            @pyqtSlot(str)
-            def callback(self, message):
-                from lightweight_charts.util import parse_event_message
-
-                def emit_callback(window, string):
-                    func, args = parse_event_message(window, string)
-                    import asyncio
-                    asyncio.create_task(
-                        func(*args)) if asyncio.iscoroutinefunction(func) else func(*args)
-                emit_callback(self.win, message)
-
-        # 手动设置lightweight_charts.widgets模块的using_pyside6变量为False（使用PyQt6）
-        import lightweight_charts
-        lightweight_charts.using_pyside6 = False
-
-        # 导入lightweight_charts.widgets模块
-        import lightweight_charts.widgets
-
-        # 直接使用我们导入的PyQt6模块，而不是让lightweight_charts.widgets模块自己导入
-        lightweight_charts.widgets.QWebEngineView = QWebEngineView
-        lightweight_charts.widgets.QWebChannel = QWebChannel
-        lightweight_charts.widgets.QObject = QObject
-        lightweight_charts.widgets.Slot = pyqtSlot
-        lightweight_charts.widgets.QUrl = QUrl
-        lightweight_charts.widgets.QTimer = QTimer
-        lightweight_charts.widgets.Qt = Qt
-        lightweight_charts.widgets.Bridge = Bridge
-
         # 获取Chart类
-        ChartClass = lightweight_charts.widgets.QtChart
+        from pylightcharts.widgets import QtChart as _QtChart
+        ChartClass = _QtChart
         QtChart = ChartClass
     return ChartClass
 
@@ -526,8 +534,8 @@ class MainWindow(FluentWindow):
                 self.light_chart_window.chart_window.cleanup()
             if hasattr(self.light_chart_window, 'close_api'):
                 self.light_chart_window.close_api()
-        except Exception as e:
-            print(f"closeEvent执行失败: {e}")
+        except Exception as err:
+            print(f"closeEvent执行失败: {err}")
         return super().closeEvent(e)
 
     def resizeEvent(self, event):
@@ -936,24 +944,14 @@ class LightChartWindow(QWidget):
             # 确保事件来自webview或者窗口本身
             if obj == webview or obj == self:
                 key = event.key()
-                # modifiers = event.modifiers()
-
-                # ========== 完善键盘事件映射 ==========
-                # 放大：上箭头 或 + 键
-                if key == Qt.Key.Key_Up or key == Qt.Key.Key_Plus or key == Qt.Key.Key_Equal:
+                # 方向键留给 pylightcharts 的内置导航（页面内监听 keydown，
+                # 缩放锚在窗口中心、平移按 keyboard_step，行为一致），这里只补
+                # 它没有的键；返回 True 会吞掉事件，所以不能拦方向键。
+                if key == Qt.Key.Key_Plus or key == Qt.Key.Key_Equal:
                     self.chart_window.zoom_in()
-                    return True  # 拦截事件，避免传递给其他组件
-                # 缩小：下箭头 或 - 键
-                elif key == Qt.Key.Key_Down or key == Qt.Key.Key_Minus:
+                    return True
+                elif key == Qt.Key.Key_Minus:
                     self.chart_window.zoom_out()
-                    return True
-                # 向左平移：左箭头
-                elif key == Qt.Key.Key_Left:
-                    self.chart_window.pan_left()
-                    return True
-                # 向右平移：右箭头
-                elif key == Qt.Key.Key_Right:
-                    self.chart_window.pan_right()
                     return True
                 elif key == Qt.Key.Key_Space:
                     self.chart_window.center_on_latest()
@@ -1289,9 +1287,221 @@ class MultiStrategyTimer(QObject):
         self.trading_timer = None
 
 
+class IndicatorPane:
+    """指标副图：以前是 ``create_subchart(...)`` 出来的独立图表，现在落在主图的
+    **原生 pane**（lightweight-charts v5）上 —— 一条 webview、共享时间轴与十字线。
+
+    保留原来副图对象的方法名，所以上层业务代码基本不用改：
+
+    * 建序列：``create_line`` / ``create_histogram`` / ``set``（OHLC → 蜡烛图）；
+    * 更新：``update`` / ``update_from_tick``（转发给本 pane 的"主序列"）；
+    * 样式：``layout`` / ``grid`` / ``legend`` / ``crosshair`` / ``watermark``
+      （pane 与主图共用同一个 chart，所以转发给主图即可）；
+    * ``resize`` 是空实现：高度由引擎按 pane 自动分配，不再手工算每个 webview；
+    * ``remove()``：逐个 ``series.delete()``，最后一个删掉后空 pane 由引擎自动去掉；
+    * ``is_pane = True``：主图里那些"按图表切分 DOM / 固定价格轴宽度"的老逻辑会跳过它。
+    """
+
+    #: 让主图的 DOM / 坐标轴相关老逻辑认得它
+    is_pane = True
+
+    def __init__(self, wrapper, name: str = ''):
+        self._wrapper = wrapper
+        self._chart = wrapper.chart              # pylightcharts 的 QtChart
+        self.name = name or 'indicator'
+        self.pane = self._chart.add_pane()
+        self.series = []                         # 本 pane 里的所有序列
+        self.main = None                         # 第一个（"主"）序列
+
+    # ---- 身份 / 桥接 ---------------------------------------------------
+    @property
+    def id(self) -> str:
+        return self._chart.id
+
+    @property
+    def win(self):
+        return self._chart.win
+
+    @property
+    def run_script(self):
+        return self._chart.run_script
+
+    def get_webview(self):
+        return self._chart.get_webview()
+
+    @property
+    def _last_bar(self):
+        """本 pane 主序列的最后一根 K 线（``is_changing``/``is_key_changing`` 用）。"""
+        series = self.main
+        if series is None:
+            return {}
+        if getattr(series, '_last_bar', None) is None:
+            frame = getattr(series, 'data', None)
+            if frame is not None and len(frame):
+                series._last_bar = frame.iloc[-1]
+        last = getattr(series, '_last_bar', None)
+        # `_last_bar` is a pandas Series: `or {}` would raise on its truth value
+        return {} if last is None else last
+
+    def __repr__(self):
+        return (f'<IndicatorPane {self.name!r} pane={self.pane} '
+                f'series={len(self.series)}>')
+
+    # ---- 建序列 --------------------------------------------------------
+    def _add(self, kind: str, name: str = '', **options):
+        if not name:
+            # 名字留空：图例文本由 `setSubChartTheme`/`legend` 给
+            name = ''
+        series = self._chart.pane_add_series(self.pane, kind, name=name,
+                                             **options)
+        self.series.append(series)
+        if self.main is None:
+            self.main = series
+        return series
+
+    def create_line(self, name='', color='rgba(214, 237, 255, 0.6)',
+                    style='solid', width=2, price_line=True, price_label=True,
+                    price_scale_id=None, **options):
+        if price_scale_id:
+            options.setdefault('price_scale_id', price_scale_id)
+        return self._add(
+            'Line', name, color=color, line_width=width,
+            # 'solid' 这类字符串必须转成引擎要的数字（solid → 0）：直接传字符串会
+            # 让 applyOptions 抛错，而脚本是批量下发的，一个 JS 错误会把同一批后面
+            # 的语句（包括主图数据）全部跳过 —— 表现就是"图表一片空白"
+            line_style=util.as_enum(style, util.LINE_STYLE),
+            price_line_visible=price_line,
+            last_value_visible=price_label, **options)
+
+    def create_histogram(self, name='', color='rgba(214, 237, 255, 0.6)',
+                         price_line=True, price_label=True,
+                         scale_margin_top=0.0, scale_margin_bottom=0.0,
+                         price_scale_id=None, **options):
+        if price_scale_id:
+            options.setdefault('price_scale_id', price_scale_id)
+        series = self._add('Histogram', name, color=color,
+                           price_line_visible=price_line,
+                           last_value_visible=price_label, **options)
+        if scale_margin_top or scale_margin_bottom:
+            # keyword names, not positional: the repo's signature guard test reads
+            # positional forwards like this one as suspicious
+            series.set_scale_margins(top=scale_margin_top,
+                                     bottom=scale_margin_bottom)
+        return series
+
+    def set(self, df=None, **kwargs):
+        """OHLC 数据 → 蜡烛图主序列；否则用单值 Line 主序列。
+
+        （副图的蜡烛图指标走这里，和以前 ``chart.set(candles_df)`` 一样；单值
+        序列本文件里都是 ``create_line``/``create_histogram``，不走 ``set``。）
+        """
+        if self.main is not None:
+            self.main.set(df, **kwargs)
+            return self.main
+        if df is None or len(df) == 0:
+            return None
+        columns = {str(column).lower() for column in df.columns}
+        kind = 'Candlestick' if {'open', 'high', 'low', 'close'} <= columns else 'Line'
+        series = self._add(kind, '')
+        series.set(df, **kwargs)
+        return series
+
+    # ---- 更新 ----------------------------------------------------------
+    UPDATE_INDEX = ('time', 'open', 'high', 'low', 'close', 'volume')
+
+    def update(self, row):
+        """更新本 pane 的主序列（完整的一根 K 线/一个点）。
+
+        ``SeriesCommon.update`` 收的是 pandas Series（内部按标签取列），传 dict
+        会在 ``_series_datetime_format`` 里炸，所以这里统一转一下。
+        """
+        if self.main is None:
+            return None
+        if isinstance(row, dict):
+            row = pd.Series(row)
+        return self.main.update(row)
+
+    def update_from_tick(self, row, cumulative_volume: bool = False):
+        """像主图那样把 tick 合并进主序列的最后一根 K 线。
+
+        旧实现是 "tick 先合并进最后一根（high/low/close），时间推进时才开新 bar"，
+        这里保持同一语义；时间统一过一遍 ``_single_datetime_format``，避免把
+        纳秒时间戳直接塞给引擎。
+        """
+        series = self.main
+        if series is None:
+            return None
+        values = dict(row)
+        price = values.get('price', values.get('close'))
+        time_value = values.get('time')
+        if time_value is not None:
+            time_value = self._chart._single_datetime_format(time_value)
+        frame = getattr(series, 'data', None)
+        if frame is None or not len(frame) or time_value is None:
+            return series.update(pd.Series(values))
+        # `series._last_bar` is the bar that is still open: `update()` keeps the
+        # running high/low there and only writes it into `series.data` once the
+        # next bar arrives, so merging from `data` would lose them
+        last_frame = getattr(series, '_last_bar', None)
+        if last_frame is None or len(last_frame) == 0:
+            last_frame = frame.iloc[-1]
+        last = dict(last_frame)
+        if time_value != last.get('time'):
+            # 新的一根：open/high/low/close 都从 tick 价格开始
+            bar = {'time': time_value, 'open': price, 'high': price,
+                   'low': price, 'close': price}
+        else:
+            bar = dict(last)
+            bar['high'] = max(last.get('high', price), price)
+            bar['low'] = min(last.get('low', price), price)
+            bar['close'] = price
+        if 'volume' in values:
+            if cumulative_volume:
+                bar['volume'] = last.get('volume', 0) + values['volume']
+            else:
+                bar['volume'] = values['volume']
+        return series.update(pd.Series(bar))
+
+    # ---- 样式：pane 与主图共用一个 chart，转发 --------------------------
+    def layout(self, **options):
+        self._chart.layout(**options)
+
+    def grid(self, **options):
+        self._chart.grid(**options)
+
+    def legend(self, *args, **options):
+        """图例是 chart 级的（pane 与主图共用），转发即可，重复调用幂等。"""
+        self._chart.legend(*args, **options)
+
+    def crosshair(self, **options):
+        self._chart.crosshair(**options)
+
+    def watermark(self, *args, **options):
+        self._chart.watermark(*args, **options)
+
+    def time_scale(self, **options):
+        self._chart.time_scale(**options)
+
+    def fit(self):
+        """时间轴与主图共用，拟合交给主图（``Chart.fit``/``_fit_chart``）。"""
+
+    def resize(self, *args, **kwargs):
+        """空实现：pane 的高度由引擎自动分配，不再手工算 webview 高度。"""
+
+    # ---- 移除 ----------------------------------------------------------
+    def remove(self):
+        """逐个删掉本 pane 的序列，最后一个删掉后空 pane 由引擎自动去掉。"""
+        for series in list(self.series):
+            try:
+                series.delete()
+            except Exception as error:       # 已经删过 / 图表已销毁
+                print(f'[minibt] 移除副图序列失败: {error}')
+        self.series.clear()
+        self.main = None
+
 class Chart:
     """
-    lightweight_charts Chart类，负责单个策略图表的显示和数据更新
+    pylightcharts Chart类，负责单个策略图表的显示和数据更新
 
     主要功能：
     - 绘制K线图表
@@ -1304,7 +1514,8 @@ class Chart:
     toolbox: CustomToolBox
     position_horizontal_line: HorizontalLine
     chart_indicators: dict[str, dict[str, Line]]
-    subcharts: dict[str, AbstractChart]
+    # 副图：pane 模式下是 IndicatorPane，旧路径下还是 AbstractChart
+    subcharts: dict[str, object]
 
     def __init__(self, widget: LightChartWindow = None, inner_width: float = 1.0, inner_height: float = 1.0,
                  scale_candles_only: bool = False, strategy: Strategy = None, period_milliseconds: int = 1000,
@@ -1328,6 +1539,7 @@ class Chart:
         # 创建图表实例，使用None作为第一个参数，避免类型错误
         self.chart = chart_class(
             None, inner_width, inner_height, scale_candles_only, toolbox)
+        print(f'[minibt] Chart 已创建: {self.chart.id}', flush=True)
         self.light_chart_window = widget
         self.period_milliseconds = max(period_milliseconds, 100)
         self.strategy = strategy
@@ -1348,6 +1560,14 @@ class Chart:
         webview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         webview.customContextMenuRequested.connect(
             self._on_webview_custom_context_menu)
+        # 键盘：pylightcharts 的方向键是页面内监听 keydown，只有 webview 有焦点
+        # 才收得到。窗口原来把 eventFilter 装在自己身上，而 Qt 把按键发给焦点控件，
+        # 所以 "obj == webview" 那一支永远不成立（死代码）。这里把过滤器装到
+        # webview 上，并让 webview 默认拿到焦点；方向键交给页面（见 eventFilter）。
+        webview.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        if self.light_chart_window is not None:
+            webview.installEventFilter(self.light_chart_window)
+        webview.setFocus()
         if strategy:
             self._init_chart_data()
 
@@ -1371,9 +1591,61 @@ class Chart:
         """调整图表以适应数据"""
         return self.chart.fit()
 
-    def create_line(self, name='', color='rgba(214, 237, 255, 0.6)', style='solid', width=2, price_line=True, price_label=True, price_scale_id=None):
-        """创建线条"""
-        return self.chart.create_line(name, color, style, width, price_line, price_label, price_scale_id)
+    def create_line(self, name='', color='rgba(214, 237, 255, 0.6)', style='solid', width=2, price_line=True, price_label=True, price_scale_id=None, legend=True):
+        """创建线条（``legend=False`` = 不建图例行，只画线 ✓）"""
+        return self.chart.create_line(name, color, style, width, price_line, price_label, price_scale_id,
+                                      legend=legend)
+
+    def diagnose(self) -> None:
+        """把图表内部状态读回来打印（空白图排查用）。
+
+        在 webview 加载 3 秒后自动跑一次：pane 数、主序列 K 线数、图例行数、chart
+        对象是否存在 —— 空白的三种可能（页面没加载 / 数据没进引擎 / pane 报错）一眼
+        就能分开。
+        """
+        try:
+            webview = self.get_webview()
+        except Exception as error:
+            print('[minibt] diagnose failed:', error)
+            return
+        script = f"""(function () {{
+            try {{
+                var c = {self.id};
+                if (!c) return 'chart object missing (page not loaded?)';
+                var panes = c.chart ? c.chart.panes().length : -1;
+                var bars = (c.series && c.series.data) ? c.series.data().length : -1;
+                var rows = c.legend ? c.legend._lines.length : -1;
+                return 'chart=' + !!c.chart + ' panes=' + panes
+                    + ' mainBars=' + bars + ' legendRows=' + rows;
+            }} catch (e) {{ return 'probe error: ' + e; }}
+        }})()"""
+        try:
+            webview.page().runJavaScript(
+                script, lambda result: print('[minibt] diagnose:', result))
+        except Exception as error:
+            print('[minibt] diagnose failed:', error)
+
+    def _indicator_pane(self, name: str = '') -> 'IndicatorPane':
+        """指标副图：主图上的一个原生 pane（替代 create_subchart）。
+
+        上层原来的写法——``chart = self._indicator_pane()`` 之后
+        在 chart 上 ``create_line`` / ``create_histogram`` / ``set`` / ``update``——
+        全部照旧，只是这个 ``chart`` 变成了 :class:`IndicatorPane`：一条 webview、
+        共享时间轴与十字线，移除指标时连图例标签和空 pane 一起走。
+        """
+        # 注意：这里刻意不再调用 set_pane_stretch —— pane 的默认比例已经是
+        # 主图 2 : 副图 1（引擎默认），而多一次 fire-and-forget 的 JS 调用一旦
+        # 出错，会把同一批脚本后面的语句（包括主图数据）一起跳过，风险大于收益。
+        if os.environ.get('MINIBT_SUBCHART'):
+            # 回退开关：pane 模式出问题时可以用它切回"独立子图"做 A/B
+            print('[minibt] MINIBT_SUBCHART=1 -> 使用旧的 create_subchart 子图')
+            return self.create_subchart('bottom', sync=True)
+        return IndicatorPane(self, name)
+
+    def _uses_panes(self) -> bool:
+        """副图是否已经是原生 pane（``self.subcharts`` 里放的是 IndicatorPane）。"""
+        return any(getattr(chart, 'is_pane', False)
+                   for chart in self.subcharts.values())
 
     def create_subchart(self, position='left', width=0.5, height=0.5, sync=None, scale_candles_only=False, sync_crosshairs_only=False, toolbox=False):
         """创建子图表"""
@@ -1486,86 +1758,35 @@ class Chart:
         """获取窗口实例"""
         return self.chart.win
 
-    def set_price_scale_fixed_width(self, chart, width):
-        """设置价格刻度固定宽度"""
-        return self.chart.set_price_scale_fixed_width(chart, width)
 
-    def set_only_last_chart_xaxis_visible(self):
-        """只显示最后一个图表的X轴"""
-        return self.chart.set_only_last_chart_xaxis_visible()
 
-    def add_chart_separator_lines(self):
-        """添加图表分隔线"""
-        return self.chart.add_chart_separator_lines()
 
-    def _restore_visible_range(self):
-        """恢复可见范围"""
-        return self.chart._restore_visible_range()
 
-    def set_all_charts_crosshair_label_background(self):
-        """设置所有图表的十字光标标签背景"""
-        return self.chart.set_all_charts_crosshair_label_background()
 
-    def set_watermark(self, **kwargs):
-        """设置水印"""
-        return self.chart.watermark(**kwargs)
 
-    def setSubChartTheme(self, chart, name):
-        """设置子图表主题"""
-        return self.chart.setSubChartTheme(chart, name)
 
-    def create_histogram(self, name='', color='rgba(214, 237, 255, 0.6)', price_line=True, price_label=True, price_scale_id=None):
-        """创建直方图"""
-        return self.chart.create_histogram(name, color, price_line, price_label, price_scale_id)
+    def create_histogram(self, name='', color='rgba(214, 237, 255, 0.6)',
+                         price_line=True, price_label=True,
+                         scale_margin_top=0.0, scale_margin_bottom=0.0,
+                         legend=True):
+        """创建直方图（``legend=False`` = 不建图例行 ✓）
 
-    def cleanup(self):
-        """清理资源"""
-        if hasattr(self, 'qtimer') and self.qtimer:
-            self.qtimer.stop()
-        if hasattr(self, 'toolbox') and self.toolbox:
-            self.toolbox.cleanup()
+        直方图自带独立价格轴，``create_histogram`` 没有 ``price_scale_id`` 参数；
+        第 5/6 个位置参数是价格轴上下边距。
+        """
+        return self.chart.create_histogram(name, color, price_line, price_label,
+                                           scale_margin_top, scale_margin_bottom,
+                                           legend=legend)
 
-    def on_search(self, text):
-        """搜索处理"""
-        pass
 
-    def _on_alert_settings_changed(self, settings, is_new=False):
-        """预警设置变更处理"""
-        pass
+
 
     @property
     def price_alert(self):
         """获取价格预警设置"""
         return self.light_chart_window.price_alert.get(self.contract, {})
 
-    def setTheme(self):
-        """设置所有chart的样式"""
-        charts = [self, *self.subcharts.values()]
-        for chart in charts:
-            self.setChartTheme(chart)
-        if self.water_mark:
-            self.set_watermark(**self.water_mark)
-        if self._webview_loadfinished:
-            self.add_chart_separator_lines()
 
-    def setChartTheme(self, chart=None):
-        """设置对应chart的样式"""
-        if chart is None:
-            chart = self
-        from qfluentwidgets import isDarkTheme
-        dark = isDarkTheme()
-        if dark:
-            chart.layout(background_color='rgb(6, 6, 6)', text_color='rgb(249, 249, 249)', font_size=14,
-                         font_family='Microsoft YaHei')  # 'Helvetica')
-            chart.grid(color="rgb(26, 26, 26)")
-            chart.legend(visible=True, font_size=14,
-                         color='rgb(249, 249, 249)')
-        else:
-            chart.layout(background_color='rgb(249, 249, 249)', text_color='rgb(6, 6, 6)', font_size=14,
-                         font_family='Microsoft YaHei')  # 'Helvetica')
-            chart.grid(color="rgb(229, 229, 229)")
-            chart.legend(visible=True, font_size=14,
-                         color='rgb(6, 6, 6)')
 
     # def on_chart_click(self, chart, time, price):
     #    ...
@@ -1574,9 +1795,17 @@ class Chart:
     #     self._save_current_visible_range()
 
     def _on_webview_loaded(self, success: bool):
+        # 页面加载结果一定要打出来：空白图最常见的原因就是 loadFinished(False)
+        try:
+            url = self.get_webview().url().toString()
+        except Exception:
+            url = '?'
+        print(f'[minibt] loadFinished success={success} url={url}', flush=True)
         """WebView加载完成回调（增加图表初始化延迟，避开时序差）"""
         if success:
             QTimer.singleShot(500, self.loadsetting)
+            # 空白图排查：稍后读回图表内部状态（pane 数 / 主序列 K 线数 / 图例行数）
+            QTimer.singleShot(3000, self.diagnose)
             # 多策略模式下不创建独立 QuoteQTimer（由 MultiStrategyTimer 统一管理）
             if self._use_qtimer:
                 self.qtimer = QuoteQTimer(self)
@@ -1697,9 +1926,12 @@ class Chart:
         for k, v in self.strategy._btindicatordataset.items():
             if v.plot_id == self.current_index:
                 plot_id, isplot, name, lines, _lines, ind_names, overlaps, \
-                    categorys, indicators, doubles, _ind_plotinfo, span, _signal = v._get_plot_datas(
+                    categorys, indicators, doubles, _ind_plotinfo, span, _signal, band = v._get_plot_datas(
                         k)
                 lineinfo = _ind_plotinfo.get('linestyle', {})
+                # 指标级图例开关（`class Xxx(BtIndicator): legend = False` ✓）
+                legend = bool(_ind_plotinfo.get('legend', True))
+                print(f'[light_chart] 指标 "{name}" legend_visible={legend}')
                 signal_info: dict = _ind_plotinfo.get('signalstyle', {})
                 indicator = v.pandas_object
                 if doubles:
@@ -1710,9 +1942,8 @@ class Chart:
                             if overlaps[j]:
                                 chart = self
                             else:
-                                chart = self.create_subchart(
-                                    'bottom', sync=True)
-                                self.setSubChartTheme(chart, name[j])
+                                chart = self._indicator_pane()
+                                self.setSubChartTheme(chart, name[j], legend)
                                 self.subcharts.update({name[j]: chart})
                             for i, plot in enumerate(isplot[j]):
                                 if plot:
@@ -1734,7 +1965,8 @@ class Chart:
                                     if style == "vbar":
                                         # 创建柱状图
                                         line = chart.create_histogram(
-                                            name=col, color=color, price_line=price_line, price_label=price_label)
+                                            name=col, color=color, price_line=price_line, price_label=price_label,
+                                            legend=legend)
 
                                         # 准备数据
                                         hist_data = pd.concat(
@@ -1754,7 +1986,8 @@ class Chart:
 
                                     else:
                                         line = partial(chart.create_line,
-                                                       name=col, color=color, style=style, width=width, price_line=price_line, price_label=price_label)
+                                                       name=col, color=color, style=style, width=width, price_line=price_line, price_label=price_label,
+                                                       legend=legend)
                                         line.vdata = pd.concat(
                                             [df["time"], indicator[col]], axis=1)
                                     cache_dict[col] = line
@@ -1783,9 +2016,8 @@ class Chart:
                             if set(indicator.columns) != set(FILED.OHLC):
                                 print(f"蜡烛图指标列名必须为{FILED.OHLC}")
                                 continue
-                            chart = self.create_subchart(
-                                'bottom', sync=True)
-                            self.setSubChartTheme(chart, name)
+                            chart = self._indicator_pane()
+                            self.setSubChartTheme(chart, name, legend)
                             self.subcharts.update({name: chart})
                             candles_df = indicator.copy()
                             candles_df["time"] = df["time"]
@@ -1795,9 +2027,8 @@ class Chart:
                             if overlaps:
                                 chart = self
                             else:
-                                chart = self.create_subchart(
-                                    'bottom', sync=True)
-                                self.setSubChartTheme(chart, name)
+                                chart = self._indicator_pane()
+                                self.setSubChartTheme(chart, name, legend)
                                 self.subcharts.update({name: chart})
 
                             for i, plot in enumerate(isplot):
@@ -1819,7 +2050,8 @@ class Chart:
                                     if style == "vbar":
                                         # 创建柱状图
                                         line = chart.create_histogram(
-                                            name=col, color=color, price_line=price_line, price_label=price_label)
+                                            name=col, color=color, price_line=price_line, price_label=price_label,
+                                            legend=legend)
 
                                         # 准备数据
                                         hist_data = pd.concat(
@@ -1838,7 +2070,8 @@ class Chart:
                                         line.set(hist_data)
                                     else:
                                         line = partial(chart.create_line,
-                                                       name=col, color=color, style=style, width=width, price_line=price_line, price_label=price_label)
+                                                       name=col, color=color, style=style, width=width, price_line=price_line, price_label=price_label,
+                                                       legend=legend)
                                         line.vdata = pd.concat(
                                             [df["time"], indicator[col]], axis=1)
                                     ind_dict[col] = line
@@ -1917,6 +2150,109 @@ class Chart:
         self._resizes()
         if self.toolbox and hasattr(self, 'symbol'):
             self.toolbox.load_drawings(tag=self.symbol)
+        self._wire_indicator_menus()
+
+    def _wire_indicator_menus(self):
+        """给指标标签挂齿轮菜单 + 收起按钮（JS 版，复刻 miniqt ✓）。
+
+        齿轮的视觉设置（线型/线宽/线颜色/价格线）由 JS 即时生效；参数页目前
+        只记录（minibt 没有单条指标重算接口）。整段尽力而为，不抛异常。
+        """
+        try:
+            from types import SimpleNamespace
+
+            from . import indicator_menu
+        except Exception:                                        # noqa: BLE001
+            return
+        style_names = {0: 'solid', 1: 'dotted', 2: 'dashed',
+                       3: 'large_dashed', 4: 'sparse_dotted'}
+        recompute = indicator_menu.recompute_enabled(
+            getattr(self, 'strategy', None))
+        datasets = getattr(getattr(self, 'strategy', None),
+                           '_btindicatordataset', {}) or {}
+        self._menu_sources = {}
+        charts = [getattr(self, 'chart', None)]
+        charts += [getattr(c, 'chart', c) or c
+                   for c in (getattr(self, 'subcharts', {}) or {}).values()]
+        for chart in charts:
+            if chart is not None:
+                indicator_menu.enable_collapse(chart)
+        for name, lines in (getattr(self, 'chart_indicators', {}) or {}).items():
+            source_key = name if name in datasets else None
+            if source_key is None:
+                for key, value in datasets.items():
+                    if name in (getattr(value, 'sname', None),
+                                getattr(value, 'name', None),
+                                getattr(value, 'ind_name', None)):
+                        source_key = key
+                        break
+            params = None
+            if recompute and source_key is not None:
+                params = indicator_menu.params_for_dataset(
+                    datasets.get(source_key)) or None
+            for col, series in (lines or {}).items():
+                obj = series
+                if callable(obj) and not hasattr(obj, 'enable_legend_menu'):
+                    try:
+                        obj = obj()
+                    except Exception:                            # noqa: BLE001
+                        continue
+                if obj is None or not hasattr(obj, 'enable_legend_menu'):
+                    continue
+                try:
+                    options = obj.options() if hasattr(obj, 'options') else {}
+                except Exception:                                # noqa: BLE001
+                    options = {}
+                spec = SimpleNamespace(
+                    name=str(col),
+                    kind='Histogram' if 'base' in (options or {}) else 'Line',
+                    line_style=style_names.get(
+                        (options or {}).get('lineStyle'), 'solid'),
+                    line_width=(options or {}).get('lineWidth', 2),
+                    color=(options or {}).get('color'),
+                    price_line=bool((options or {}).get('priceLineVisible', False)),
+                    price_label=bool((options or {}).get('lastValueVisible', False)),
+                    menu_params=params)
+                if source_key is not None:
+                    self._menu_sources[id(obj)] = source_key
+                indicator_menu.pin_row(obj)
+                indicator_menu.enable_menu(obj,
+                                           indicator_menu.build_config(spec),
+                                           self._on_indicator_menu)
+
+    def _on_indicator_menu(self, series, kind, payload):
+        """图例菜单回调（旧 light_chart 路径）：参数页确认 → 重算并重画。"""
+        if kind != 'params':
+            return
+        try:
+            from . import indicator_menu
+        except Exception:                                        # noqa: BLE001
+            return
+        source_key = (getattr(self, '_menu_sources', {}) or {}).get(id(series))
+        datasets = getattr(getattr(self, 'strategy', None),
+                           '_btindicatordataset', None)
+        dataset = (datasets or {}).get(source_key) if source_key else None
+        if dataset is None:
+            print(f'[light_chart] 找不到指标 {source_key!r}，无法重算参数')
+            return
+        new = indicator_menu.recompute_indicator(
+            dataset, payload.get('values') or {})
+        if new is None:
+            print(f'[light_chart] 指标重算失败: {payload.get("values")}')
+            return
+        try:
+            if hasattr(datasets, 'add_data'):
+                datasets.add_data(source_key, new)
+            else:
+                datasets[source_key] = new
+        except Exception as error:                               # noqa: BLE001
+            print(f'[light_chart] 替换指标失败: {error!r}')
+            return
+        try:
+            self._init_chart_data()
+        except Exception as error:                               # noqa: BLE001
+            print(f'[light_chart] 重画失败: {error!r}')
+        print('[light_chart] 指标已按新参数重算 ✓')
 
     def reset_update_queue(self):
         self.update_queue.clear()
@@ -2163,12 +2499,17 @@ class Chart:
         color: str = 'rgba(180, 180, 200, 0.2)' if dark else 'rgba(75, 75, 55, 0.2)'
         self.watermark(text, font_size, color)
 
-    def sub_legend_params(self, name, dark):
-        """指标参数显示"""
-        return dict(text=name, color='rgb(249, 249, 249)' if dark else 'rgb(6, 6, 6)', lines=True, font_size=14, color_based_on_candle=True)
+    def sub_legend_params(self, name, dark, lines=True):
+        """指标参数显示（``lines=False`` = 只留面板文本、不列每行名字 ✓）"""
+        return dict(text=name, color='rgb(249, 249, 249)' if dark else 'rgb(6, 6, 6)', lines=lines, font_size=14, color_based_on_candle=True)
 
     def _resizes(self):
-        """指标窗口高度设置,主图占3,副图占1"""
+        """指标窗口高度设置,主图占3,副图占1（pane 模式交给引擎自动分配）"""
+        if self._uses_panes():
+            # 副图现在是主图里的原生 pane：只有一个 webview，高度由引擎按 pane
+            # 拉伸自动分配，原来的"每个副图一个 webview，手工算高度"不再需要
+            self.resize(1, 1)
+            return
         num_sub_chart = len(self.subcharts)
         if num_sub_chart == 0:
             self.resize(1, 1)
@@ -2191,36 +2532,84 @@ class Chart:
             self.add_chart_separator_lines()
 
     def setChartTheme(self, chart: AbstractChart = None):
-        """设置对应chart的样式"""
+        """设置对应chart的样式
+
+        ⚠ ``legend=False`` 的指标：``setTheme()`` 会遍历**所有** chart 调这里 ✗，
+        以前统一 `chart.legend(visible=True)` 会把刚关掉的图例**又打开** ✗，
+        所以用 ``_no_legend_charts`` 记住它们，这里保持关闭 ✓。
+        """
         if chart is None:
             chart = self
         dark = self.light_chart_window.main_window.isdark
+        no_legend = id(chart) in getattr(self, '_no_legend_charts', set())
         if dark:
             chart.layout(background_color='rgb(6, 6, 6)', text_color='rgb(249, 249, 249)', font_size=14,
                          font_family='Microsoft YaHei')  # 'Helvetica')
             chart.grid(color="rgb(26, 26, 26)")
-            chart.legend(visible=True, font_size=14,
-                         color='rgb(249, 249, 249)')
+            chart.legend(visible=not no_legend, font_size=14,
+                         color='rgb(249, 249, 249)', lines=not no_legend)
         else:
             chart.layout(background_color='rgb(249, 249, 249)', text_color='rgb(6, 6, 6)', font_size=14,
                          font_family='Microsoft YaHei')  # 'Helvetica')
             chart.grid(color="rgb(229, 229, 229)")
-            chart.legend(visible=True, font_size=14,
-                         color='rgb(6, 6, 6)')
+            chart.legend(visible=not no_legend, font_size=14,
+                         color='rgb(6, 6, 6)', lines=not no_legend)
 
-    def setSubChartTheme(self, chart: AbstractChart, text: str = ""):
-        """设置对应子图的样式"""
+    def setSubChartTheme(self, chart: AbstractChart, text: str = "", legend: bool = True):
+        """设置对应子图的样式（``legend=False`` = 不显示该副图的指标名 ✓）"""
+        # 登记一份：`setTheme()`/`setChartTheme()` 以后不能再把它打开 ✓
+        if not hasattr(self, '_no_legend_charts'):
+            self._no_legend_charts = set()
+        if legend:
+            self._no_legend_charts.discard(id(chart))
+        else:
+            self._no_legend_charts.add(id(chart))
+        # ★ 兜底：用户看到的其实是**每条指标线的名字**（macd / signal / hist ✓），
+        #   它同时出现在两个地方 ✗：序列自己的图例行 ✓（建序列时已摘 ✓）
+        #   和面板 legend 的 `lines` 列表名 ✓ —— 这里直接把这一副图的
+        #   图例关掉 + 不列线名 ✓，并在图表加载完成后再重申一次 ✓
+        #   （`setTheme()`/首帧渲染可能把它重新打开 ✗）
+        if not legend:
+            def _kill_legend(_chart=chart):
+                try:
+                    _chart.legend(False, lines=False, text='')
+                except Exception:                                # noqa: BLE001
+                    pass
+                # 再把这一副图的图例块从 DOM 上关掉 ✓（`legend.div` 是整块、
+                # `legend.text` 是「指标名」那一行 ✗、`legend.seriesContainer`
+                # 是每条线的名字行 ✗）—— 这样无论标签是哪种，都不会显示 ✓
+                try:
+                    _chart.run_script(f'''
+                        (function() {{
+                            var lg = {_chart.id}.legend;
+                            if (!lg) return;
+                            if (lg.div) lg.div.style.display = 'none';
+                            if (lg.text) lg.text.textContent = '';
+                            if (lg.seriesContainer) {{
+                                lg.seriesContainer.style.display = 'none';
+                            }}
+                        }})()
+                    ''')
+                except Exception:                                # noqa: BLE001
+                    pass
+            _kill_legend()
+            try:
+                from PyQt6.QtCore import QTimer
+                for _delay in (300, 900, 2000):
+                    QTimer.singleShot(_delay, _kill_legend)
+            except Exception:                                    # noqa: BLE001
+                pass
         dark = self.light_chart_window.main_window.isdark
         if dark:
             chart.layout(background_color='rgb(6, 6, 6)', text_color='rgb(249, 249, 249)', font_size=14,
                          font_family='Microsoft YaHei')  # 'Helvetica')
             chart.grid(color="rgb(26, 26, 26)")
-            chart.legend(True, **self.sub_legend_params(text, dark))
+            chart.legend(visible=bool(legend), **self.sub_legend_params(text if legend else '', dark, legend))
         else:
             chart.layout(background_color='rgb(249, 249, 249)', text_color='rgb(6, 6, 6)', font_size=14,
                          font_family='Microsoft YaHei')  # 'Helvetica')
             chart.grid(color="rgb(229, 229, 229)")
-            chart.legend(True, **self.sub_legend_params(text, dark))
+            chart.legend(visible=bool(legend), **self.sub_legend_params(text if legend else '', dark, legend))
 
     def _set_price_scale_fixed_width(self, chart: AbstractChart, target_width: int = None):
         """
@@ -2238,6 +2627,9 @@ class Chart:
         ''')
 
     def set_price_scale_fixed_width(self, chart: AbstractChart, target_width: int = None):
+        if getattr(chart, 'is_pane', False):
+            # pane 模式：副图在主图内部，价格轴宽度由主图统一决定
+            return
         """固定副图价格轴宽度（优化容错与性能，避免无效执行）"""
         target_width = target_width if (
             target_width is not None and target_width > 0) else 80
@@ -2266,6 +2658,9 @@ class Chart:
         """
         遍历所有主图+副图，仅最后一个图表显示X轴时间，其余隐藏X轴
         """
+        if self._uses_panes():
+            # pane 模式：所有 pane 共享同一个时间轴，本来就只有一条
+            return
         # 1. 收集所有图表：主图 + 所有副图
         all_charts = [self]  # 主图
         all_charts.extend(self.subcharts.values())  # 所有副图
@@ -2303,7 +2698,8 @@ class Chart:
         """
         通过lightweight-charts的容器结构添加分隔线
         """
-        if not self.subcharts:
+        if not self.subcharts or self._uses_panes():
+            # pane 模式：副图在主图内部，引擎自带 1px 分隔条，不需要这些 DOM 线
             return
         dark_theme = self.light_chart_window.main_window.isdark
         border_color = "rgba(180, 180, 180, 0.3)" if dark_theme else "rgba(80, 80, 80, 0.3)"
@@ -3147,7 +3543,8 @@ class Chart:
         """
         bg = self.light_chart_window.mouse_label_color
         if bg:
-            charts = [self, *self.subcharts.values()]
+            # pane 模式：十字线是 chart 级的，主图设一次就够了
+            charts = [self] if self._uses_panes() else [self, *self.subcharts.values()]
             for chart in charts:
                 self.set_crosshair_label_background(chart, bg)
 
@@ -3244,6 +3641,11 @@ class Chart:
                 print(f"清理 WebView 时出错: {e}")
         for name, subchart in list(self.subcharts.items()):
             try:
+                if getattr(subchart, 'is_pane', False):
+                    # pane 模式：删掉序列，空 pane 由引擎自动去掉，没有额外的
+                    # webview/事件需要清理
+                    subchart.remove()
+                    continue
                 subchart_id = subchart.id
                 if hasattr(self.win, 'handlers'):
                     keys_to_delete = []
@@ -3609,10 +4011,16 @@ def main(strategies, period_milliseconds: int = 1000):
         # 安装消息处理器
         qInstallMessageHandler(message_handler)
 
-        # 先导入PyQt6的所有必要模块，确保使用的是PyQt6
+        # pylightcharts：显式选定 PyQt6 绑定，并在此刻导入 QtWebEngineWidgets
+        # （Qt 要求它早于 QApplication；prepare_qt 同时会设置 $PYLIGHTCHARTS_QT）
+        # 先按文档顺序选绑定、导入 QtWebEngineWidgets，再自检（自检会 import
+        # pylightcharts，放在 prepare_qt 之前可能影响绑定选择）
+        from pylightcharts.qt import prepare_qt
+        prepare_qt('PyQt6')
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         from PyQt6.QtWebChannel import QWebChannel
         from PyQt6.QtCore import Qt, QObject, pyqtSlot, QUrl, QTimer
+        check_environment()
 
         # 在主线程中创建QApplication实例
         app = QApplication.instance()
@@ -3627,8 +4035,8 @@ def main(strategies, period_milliseconds: int = 1000):
         # 设置Qt属性以避免QWidgetWindow警告
         app.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
 
-        # 提前加载lightweight_charts.widgets模块，确保在创建任何QWidget实例之前，Qt的模块已经被正确初始化
-        import lightweight_charts.widgets
+        # 提前加载 pylightcharts.widgets 模块，确保在创建任何QWidget实例之前，Qt的模块已经被正确初始化
+        import pylightcharts.widgets
 
         w = MainWindow(strategies, period_milliseconds)
         w.show()

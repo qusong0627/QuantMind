@@ -6,15 +6,33 @@ from rich import box
 from rich.align import Align
 from rich.traceback import install as install_traceback
 from enum import Enum
+import sys
 import time
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Callable
-from .utils import BtAccount, pd, qs_stats, os, BASE_DIR
+from .utils import BtAccount, pd, qs_stats, os, BASE_DIR, user_dir
 from .strategy.strategy import Strategy
 
 __all__ = ["Logger", "LogLevel", "get_logger"]
+
+
+def _ensure_console_encoding() -> None:
+    """保证控制台输出不会因无法编码的字符而崩溃。
+
+    Windows 默认 GBK 控制台无法编码 emoji(🎯/📊/💰 等), rich 写入时会抛
+    ``UnicodeEncodeError: 'gbk' codec can't encode character ...``。
+    把标准输出的编码错误策略改为 ``replace``(不可编码字符退化为 ``?``),
+    即可避免回测打印账户/报告时直接中断。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None and hasattr(stream, "reconfigure"):
+                stream.reconfigure(errors="replace")
+        except Exception:
+            # 非标准流(重定向/被捕获)时忽略, 不影响主流程
+            pass
 
 
 class LogLevel(Enum):
@@ -45,8 +63,12 @@ class Logger:
     ):
         self.name = name
         self.log_to_file = log_to_file
-        self.log_dir = Path(BASE_DIR, log_dir)
+        # 日志默认写到用户目录 ``~/.minibt/logs``（与 setting.json 同目录），
+        # 不随包升级被覆盖；传绝对路径时按原样使用。
+        self.log_dir = (Path(log_dir) if os.path.isabs(str(log_dir))
+                        else Path(user_dir(), log_dir))
         self.log_level = log_level
+        _ensure_console_encoding()
         self.console = Console()
         self._header_printed = False
         self.auto_clean_days = auto_clean_days  # 保存清理天数设置
@@ -544,13 +566,15 @@ class Logger:
         """## 开仓操作"""
         self.log_operation(operation, datetime, self.message(
             sname, cont, price, quantity, fee, capital))
+        self._record_trade(operation, sname, cont, datetime,
+                           price, quantity, None, capital, fee)
 
     def close(self, operation: str, pnl: float, sname: str, cont: str, datetime: str, price: float, quantity: int, fee: float, capital: float, **kwargs):
         """## 平仓操作"""
         self.log_operation(operation, datetime, self.message(
             sname, cont, price, quantity, fee, capital), pnl)
         self._record_trade(operation, sname, cont, datetime,
-                           price, quantity, pnl, capital)
+                           price, quantity, pnl, capital, fee)
 
     # 具体的交易方法
     def open_long(self, sname: str, cont: str, datetime: str, price: float, quantity: int, fee: float, capital: float, **kwargs):
@@ -593,7 +617,7 @@ class Logger:
         self.open("创建", sname, cont, datetime, price,
                   quantity, fee, capital, **kwargs)
 
-    def _record_trade(self, operation: str, sname: str, cont: str, datetime: str, price: float, quantity: int, pnl: float, capital: float):
+    def _record_trade(self, operation: str, sname: str, cont: str, datetime: str, price: float, quantity: int, pnl: float | None, capital: float, fee: float = 0.0):
         """## 记录交易到历史"""
         trade = {
             "strategy_name": sname,
@@ -603,7 +627,8 @@ class Logger:
             "price": price,
             "quantity": quantity,
             "pnl": pnl,
-            "capital": capital
+            "capital": capital,
+            "fee": fee,
         }
         self.trade_history.append(trade)
         self.debug(f"记录交易: {operation} 价格{price} 盈亏{pnl}")

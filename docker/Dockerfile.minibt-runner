@@ -27,6 +27,10 @@ RUN pip install --no-deps "numpy-ext==0.9.9" "joblib" \
     && pip install "numpy==2.2.6" "pandas==2.3.3" \
     && python -c "import numpy; assert numpy.__version__=='2.2.6', numpy.__version__"
 
+# 模拟盘侧车（backend/shared/minibt_sim_agent.py）读请求/写目标键；单独一层，
+# 不改变上面依赖层的缓存。
+RUN pip install --no-cache-dir "redis>=5,<9"
+
 COPY minibt/ /app/minibt/
 WORKDIR /app
 RUN python /app/minibt/_build_exts.py build_ext --inplace \
@@ -37,6 +41,9 @@ ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     QM_QUANTDB_DATA_DIR=/data/quantdb \
     PIP_DISABLE_PIP_VERSION_CHECK=1
+# minibt 1.3.x 的 Logger 在首次取 logger 时 mkdir ~/.minibt/logs（不带 parents），
+# LocalDatas 索引也写在 ~/.minibt/datas；容器内 HOME=/root，目录必须预建。
+RUN mkdir -p /root/.minibt/logs /root/.minibt/datas
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /app/minibt /app/minibt
 CMD ["python", "-c", "import minibt; print('minibt runner ready', minibt.__version__)"]

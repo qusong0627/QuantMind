@@ -21,6 +21,7 @@ class BtStop(base, metaclass=Meta):
     - **FixedStop**: 固定点数止损，同时设置止损价和目标价
     - **FSStop**: 仅固定点数止损，不设置目标价
     - **FTStop**: 仅固定点数目标价，不设置止损价
+    - **ThreeCommasStop**: 3Commas Bot 风控（摆动点+ATR 跟踪止损+盈亏比止盈）
 
     ### 使用示例:
     ```python
@@ -68,6 +69,9 @@ class BtStop(base, metaclass=Meta):
 
     # 仅固定点数目标价策略，不设置止损价
     FTStop = FTStop
+
+    # 3Commas Bot 风控策略：摆动点+ATR 跟踪止损+盈亏比止盈
+    ThreeCommasStop = ThreeCommasStop
 
 
 # 创建单例实例

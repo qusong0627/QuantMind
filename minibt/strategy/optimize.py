@@ -261,11 +261,15 @@ class GAOptimizer:
         # print(optimizing_params)
         # return optimizing_params
 
-    def go(self, weights, dir='./minibt/op_params/'):
+    def go(self, weights, dir=None):
         '''
         启动优化器\n
         @markerfile 标记文件名，回测完成以后分析会用到
         '''
+        if dir is None:                     # 默认 ~/.minibt/op_params/（与 setting.json 同目录）
+            import os
+            from ..utils import user_dir
+            dir = os.path.join(user_dir(), 'op_params') + os.sep
         self.run_ga_optimizer()
 
         # 获取所有的值

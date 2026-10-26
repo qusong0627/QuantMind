@@ -29,23 +29,41 @@
     推荐直接使用 Python 数值运算以实现最快 C 编译速度。
 """
 
-from numba import cfunc, types
+def _load_numba():
+    """惰性导入 numba，缺失时给出安装提示。"""
+    try:
+        from numba import cfunc, types
+    except ImportError as e:
+        raise ImportError(
+            "使用 @stop_callback 需要额外依赖 numba，请先安装：\n"
+            "    pip install numba"
+        ) from e
+    return cfunc, types
 
 
 # ===== stop_callback 类型签名（与 backtrader_from_signals.pyx 中 stop_callback_t 一致）=====
-_STOP_CALLBACK_SIG = types.float64(
-    types.int64,        # bar_idx
-    types.int64,        # direction
-    types.float64,      # entry_price
-    types.float64,      # current_price
-    types.float64,      # ref_price
-    types.float64,      # current_distance
-    types.float64,      # price_tick
-    types.float64,      # volume_multiple
-    types.float64,      # size
-    types.CPointer(types.float64),  # args_data
-    types.int64,        # args_count
-)
+_STOP_CALLBACK_SIG = None
+
+
+def _get_stop_callback_sig():
+    """首次使用时构建 stop_callback 的 numba 类型签名。"""
+    global _STOP_CALLBACK_SIG
+    if _STOP_CALLBACK_SIG is None:
+        _, types = _load_numba()
+        _STOP_CALLBACK_SIG = types.float64(
+            types.int64,        # bar_idx
+            types.int64,        # direction
+            types.float64,      # entry_price
+            types.float64,      # current_price
+            types.float64,      # ref_price
+            types.float64,      # current_distance
+            types.float64,      # price_tick
+            types.float64,      # volume_multiple
+            types.float64,      # size
+            types.CPointer(types.float64),  # args_data
+            types.int64,        # args_count
+        )
+    return _STOP_CALLBACK_SIG
 
 
 def stop_callback(func):
@@ -72,7 +90,8 @@ def stop_callback(func):
     """
     # 使用 functools.wraps 保留原函数名和 docstring
     import functools
-    compiled = cfunc(_STOP_CALLBACK_SIG)(func)
+    cfunc, _ = _load_numba()
+    compiled = cfunc(_get_stop_callback_sig())(func)
     # cfunc 已经包装好了，额外保留原函数引用
     compiled.__wrapped__ = func
     return compiled

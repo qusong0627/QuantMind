@@ -25,143 +25,20 @@ from PyQt6.QtGui import QColor, QFont, QIcon, QGuiApplication, QPainter, QPen, Q
 from PyQt6.QtCore import QPointF
 from PyQt6.QtCore import Qt, QSize, QTimer, QUrl, QObject, pyqtSignal
 
-# 阻止 lightweight_charts 自动加载 PySide6（强制使用 PyQt6）
-import builtins as _builtins
-_original_import = _builtins.__import__
+# 图表库：pylightcharts（TradingView Lightweight Charts v5 的 Python 绑定）。
+#
+# 这里以前是 import lightweight_charts，并在导入前用 _builtins.__import__ 拦掉
+# PySide6、导入后再把 lightweight_charts.widgets 里的 Qt 名字逐个换成 PyQt6 的，
+# 目的是“强制使用 PyQt6”。pylightcharts 的绑定选择是内建的，不需要这些手术：
+#
+#   * 环境变量 $PYLIGHTCHARTS_QT，或 pylightcharts.qt.prepare_qt('PyQt6')
+#   * prepare_qt() 还会导入 QtWebEngineWidgets，而 Qt 要求它早于 QApplication
+#
+# get_chart_class() 和 main() 里都已经按这个顺序处理。
+from pylightcharts import util
+from pylightcharts.abstract import Line, Candlestick, AbstractChart
+from pylightcharts.drawings import HorizontalLine
 
-def _blocked_import(name, *args, **kwargs):
-    if name.startswith('PySide6'):
-        raise ImportError(f'PySide6 blocked (PyQt6): {name}')
-    return _original_import(name, *args, **kwargs)
-
-_builtins.__import__ = _blocked_import
-
-from lightweight_charts.toolbox import ToolBox, json as lw_json
-from lightweight_charts.drawings import HorizontalLine
-from lightweight_charts.abstract import Line, Candlestick, AbstractChart, SeriesCommon
-from lightweight_charts import util
-
-# 恢复正常导入
-_builtins.__import__ = _original_import
-
-# ---- Monkey-patch: NaN 断线处理（多系列分割法）----
-# lightweight-charts 的 LineSeries 会跨 NaN 间隙连线，无法通过空白数据点实现断线。
-# 此补丁采用多系列分割法：检测 NaN 位置，将数据分割为多个连续片段，
-# 每个片段用独立的 Line 系列显示，实现真正的断线效果。
-import numpy as _np
-
-_original_series_set = SeriesCommon.set
-
-def _split_df_by_nan(df, value_col='value'):
-    """
-    将 DataFrame 根据 NaN 值分割成多个连续片段。
-    返回：[(片段索引, DataFrame片段), ...]
-    """
-    if df.empty or value_col not in df.columns:
-        return [(0, df)]
-
-    # 找出 NaN 位置
-    is_nan = df[value_col].isna()
-    segments = []
-    segment_start = None
-
-    for i in range(len(df)):
-        if not is_nan.iloc[i]:
-            # 有效值：如果还没开始片段，开始新片段
-            if segment_start is None:
-                segment_start = i
-        else:
-            # NaN 值：如果有正在进行的片段，结束它
-            if segment_start is not None:
-                segments.append((len(segments), df.iloc[segment_start:i].copy()))
-                segment_start = None
-
-    # 处理最后一个片段
-    if segment_start is not None:
-        segments.append((len(segments), df.iloc[segment_start:].copy()))
-
-    return segments
-
-def _patched_series_set(self, df=None, format_cols=True):
-    """补丁版 set()：Line 数据含 NaN 时用多系列分割法实现断线。"""
-    # 清理之前的分段线（如果存在）
-    if hasattr(self, '_segment_lines') and self._segment_lines:
-        for seg_line in self._segment_lines:
-            try:
-                # 清空分段线的数据
-                seg_line.run_script(f'{seg_line.id}.series.setData([]); ')
-            except Exception:
-                pass
-        self._segment_lines = []
-
-    if df is None or df.empty:
-        return _original_series_set(self, df, format_cols)
-
-    # 仅处理 Line（不处理 Histogram）
-    if not isinstance(self, Line):
-        return _original_series_set(self, df, format_cols)
-
-    # 检测值列是否有 NaN
-    val_cols = [c for c in df.columns if c != 'time']
-    has_nan = val_cols and any(
-        str(df[c].dtype).startswith('float') and df[c].isna().any()
-        for c in val_cols
-    )
-
-    # 无 NaN 或只有一个片段：直接用原方法
-    if not has_nan:
-        return _original_series_set(self, df, format_cols)
-
-    # 格式化 DataFrame
-    if format_cols:
-        df_formatted = self._df_datetime_format(df, exclude_lowercase=self.name)
-    else:
-        df_formatted = df.copy()
-
-    if self.name:
-        if self.name not in df_formatted:
-            raise NameError(f'No column named "{self.name}".')
-        df_formatted = df_formatted.rename(columns={self.name: 'value'})
-
-    # 分割 DataFrame
-    segments = _split_df_by_nan(df_formatted, 'value')
-
-    # 如果只有一个片段（全是有效值），用原方法（需先重命名回原列名）
-    if len(segments) <= 1:
-        self.data = df_formatted.copy()
-        self._last_bar = df_formatted.iloc[-1] if len(df_formatted) > 0 else None
-        df_renamed = df_formatted.rename(columns={'value': self.name})
-        return _original_series_set(self, df_renamed, format_cols=False)
-
-    # 多片段：第一个片段用原 Line，其他片段创建新的 Line 系列
-    self._segment_lines = []
-
-    for seg_idx, seg_df in segments:
-        if seg_idx == 0:
-            # 第一个片段：用原 Line 对象
-            self.data = df_formatted.copy()
-            self._last_bar = df_formatted.iloc[-1] if len(df_formatted) > 0 else None
-            # 修复：将 value 列重命名回原列名，避免 NameError
-            seg_df_renamed = seg_df.rename(columns={'value': self.name})
-            _original_series_set(self, seg_df_renamed, format_cols=False)
-        else:
-            # 其他片段：创建新的 Line 系列
-            # 使用原 Line 的样式（color），其他参数用默认值
-            seg_line = self._chart.create_line(
-                name=f"{self.name}_seg{seg_idx}",
-                color=self.color if hasattr(self, 'color') else 'rgba(214, 237, 255, 0.6)',
-                style='solid',
-                width=2,
-                price_line=False,
-                price_label=False
-            )
-            # 修复：将 value 列重命名为分段线的列名
-            seg_df_renamed = seg_df.rename(columns={'value': seg_line.name})
-            # 设置分段数据
-            _original_series_set(seg_line, seg_df_renamed, format_cols=False)
-            self._segment_lines.append(seg_line)
-
-# SeriesCommon.set = _patched_series_set
 
 # 延迟导入QtChart类
 ChartClass = None
@@ -175,9 +52,23 @@ Colors: list[str] = ['fuchsia', 'lime', 'olive', 'blue', 'purple', 'silver', 'te
 
 
 def get_chart_class():
-    """延迟导入Chart类"""
+    """延迟导入Chart类（PyQt6）
+
+    pylightcharts 用 $PYLIGHTCHARTS_QT 选绑定，这里用 prepare_qt('PyQt6') 显式指定。
+    顺序很重要：prepare_qt() 会导入 pylightcharts.widgets，而它 import 时就要导入
+    QtWebEngineWidgets —— Qt 要求这件事发生在 QApplication 之前，所以先 prepare_qt()，
+    再创建 QApplication。
+
+    以前这里是把 lightweight_charts.widgets 里的 QWebEngineView/QWebChannel/QObject/
+    Slot/QUrl/QTimer/Qt/Bridge 逐个替换成 PyQt6 的对象来达到同样的目的；pylightcharts
+    的 Qt 绑定是内建的，不需要再替换模块属性。
+    """
     global ChartClass, QtChart
     if ChartClass is None:
+        # 选定绑定，并在此刻导入 QtWebEngineWidgets（必须早于 QApplication）
+        from pylightcharts.qt import prepare_qt
+        prepare_qt('PyQt6')
+
         app = QApplication.instance()
         if app is None:
             QApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -186,39 +77,9 @@ def get_chart_class():
             QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
             app = QApplication([])
 
-        from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtWebChannel import QWebChannel
-        from PyQt6.QtCore import Qt, QObject, pyqtSlot, QUrl, QTimer
-
-        class Bridge(QObject):
-            def __init__(self, chart):
-                super().__init__()
-                self.win = chart.win
-
-            @pyqtSlot(str)
-            def callback(self, message):
-                from lightweight_charts.util import parse_event_message
-
-                def emit_callback(window, string):
-                    func, args = parse_event_message(window, string)
-                    import asyncio
-                    asyncio.create_task(
-                        func(*args)) if asyncio.iscoroutinefunction(func) else func(*args)
-                emit_callback(self.win, message)
-
-        import lightweight_charts
-        lightweight_charts.using_pyside6 = False
-        import lightweight_charts.widgets
-        lightweight_charts.widgets.QWebEngineView = QWebEngineView
-        lightweight_charts.widgets.QWebChannel = QWebChannel
-        lightweight_charts.widgets.QObject = QObject
-        lightweight_charts.widgets.Slot = pyqtSlot
-        lightweight_charts.widgets.QUrl = QUrl
-        lightweight_charts.widgets.QTimer = QTimer
-        lightweight_charts.widgets.Qt = Qt
-        lightweight_charts.widgets.Bridge = Bridge
-
-        ChartClass = lightweight_charts.widgets.QtChart
+        # 获取Chart类
+        from pylightcharts.widgets import QtChart as _QtChart
+        ChartClass = _QtChart
         QtChart = ChartClass
     return ChartClass
 
@@ -471,106 +332,218 @@ class ReplayTimer(QObject):
 
 
 # ============================================================
-# CustomToolBox - 画线工具箱（保持原有逻辑）
-# ============================================================
-class CustomToolBox(ToolBox):
-    def __init__(self, chart):
-        self.run_script = chart.run_script
-        self.id = chart.id
-        self.drawings = {}
-        self.chart = chart
-        self.window = chart.replay_window
-        self._save_under = self.window
-        chart.win.handlers[f'save_drawings{self.id}'] = self._save_drawings
-        self.run_script(f'{self.id}.createToolBox()')
+class IndicatorPane:
+    """指标副图：以前是 ``create_subchart(...)`` 出来的独立图表，现在落在主图的
+    **原生 pane**（lightweight-charts v5）上 —— 一条 webview、共享时间轴与十字线。
 
-    def load_drawings(self, tag: str):
-        target_drawings = self.window.drawings.get(tag)
-        if not target_drawings:
-            target_drawings = self.drawings.get(tag)
-        if not target_drawings:
-            return
-        self.run_script(
-            f'if ({self.id}.toolBox) {self.id}.toolBox.loadDrawings({json.dumps(target_drawings)})'
-        )
+    保留原来副图对象的方法名，所以上层业务代码基本不用改：
 
-    def _save_drawings(self, drawings: str):
-        if not self._save_under:
-            return
-        parsed_drawings = json.loads(drawings)
-        tag = self._save_under.current_chart_name
-        self.drawings[tag] = parsed_drawings
-        self.window.drawings[tag] = parsed_drawings
+    * 建序列：``create_line`` / ``create_histogram`` / ``set``（OHLC → 蜡烛图）；
+    * 更新：``update`` / ``update_from_tick``（转发给本 pane 的"主序列"）；
+    * 样式：``layout`` / ``grid`` / ``legend`` / ``crosshair`` / ``watermark``
+      （pane 与主图共用同一个 chart，所以转发给主图即可）；
+    * ``resize`` 是空实现：高度由引擎按 pane 自动分配，不再手工算每个 webview；
+    * ``remove()``：逐个 ``series.delete()``，最后一个删掉后空 pane 由引擎自动去掉；
+    * ``is_pane = True``：主图里那些"按图表切分 DOM / 固定价格轴宽度"的老逻辑会跳过它。
+    """
 
-    def clear_drawings(self):
-        js_script = f"""
-        try {{
-            if ({self.id}.toolBox) {{
-                {self.id}.toolBox.clearDrawings();
-            }}
-        }} catch (e) {{
-            console.error('清空画线失败：', e);
-        }}
+    #: 让主图的 DOM / 坐标轴相关老逻辑认得它
+    is_pane = True
+
+    def __init__(self, wrapper, name: str = ''):
+        self._wrapper = wrapper
+        self._chart = wrapper.chart              # pylightcharts 的 QtChart
+        self.name = name or 'indicator'
+        self.pane = self._chart.add_pane()
+        self.series = []                         # 本 pane 里的所有序列
+        self.main = None                         # 第一个（"主"）序列
+
+    # ---- 身份 / 桥接 ---------------------------------------------------
+    @property
+    def id(self) -> str:
+        return self._chart.id
+
+    @property
+    def win(self):
+        return self._chart.win
+
+    @property
+    def run_script(self):
+        return self._chart.run_script
+
+    def get_webview(self):
+        return self._chart.get_webview()
+
+    @property
+    def _last_bar(self):
+        """本 pane 主序列的最后一根 K 线（``is_changing``/``is_key_changing`` 用）。"""
+        series = self.main
+        if series is None:
+            return {}
+        if getattr(series, '_last_bar', None) is None:
+            frame = getattr(series, 'data', None)
+            if frame is not None and len(frame):
+                series._last_bar = frame.iloc[-1]
+        last = getattr(series, '_last_bar', None)
+        # `_last_bar` is a pandas Series: `or {}` would raise on its truth value
+        return {} if last is None else last
+
+    def __repr__(self):
+        return (f'<IndicatorPane {self.name!r} pane={self.pane} '
+                f'series={len(self.series)}>')
+
+    # ---- 建序列 --------------------------------------------------------
+    def _add(self, kind: str, name: str = '', **options):
+        if not name:
+            # 名字留空：图例文本由 `setSubChartTheme`/`legend` 给
+            name = ''
+        series = self._chart.pane_add_series(self.pane, kind, name=name,
+                                             **options)
+        self.series.append(series)
+        if self.main is None:
+            self.main = series
+        return series
+
+    def create_line(self, name='', color='rgba(214, 237, 255, 0.6)',
+                    style='solid', width=2, price_line=True, price_label=True,
+                    price_scale_id=None, **options):
+        if price_scale_id:
+            options.setdefault('price_scale_id', price_scale_id)
+        return self._add(
+            'Line', name, color=color, line_width=width,
+            # 'solid' 这类字符串必须转成引擎要的数字（solid → 0）：直接传字符串会
+            # 让 applyOptions 抛错，而脚本是批量下发的，一个 JS 错误会把同一批后面
+            # 的语句（包括主图数据）全部跳过 —— 表现就是"图表一片空白"
+            line_style=util.as_enum(style, util.LINE_STYLE),
+            price_line_visible=price_line,
+            last_value_visible=price_label, **options)
+
+    def create_histogram(self, name='', color='rgba(214, 237, 255, 0.6)',
+                         price_line=True, price_label=True,
+                         scale_margin_top=0.0, scale_margin_bottom=0.0,
+                         price_scale_id=None, **options):
+        if price_scale_id:
+            options.setdefault('price_scale_id', price_scale_id)
+        series = self._add('Histogram', name, color=color,
+                           price_line_visible=price_line,
+                           last_value_visible=price_label, **options)
+        if scale_margin_top or scale_margin_bottom:
+            # keyword names, not positional: the repo's signature guard test reads
+            # positional forwards like this one as suspicious
+            series.set_scale_margins(top=scale_margin_top,
+                                     bottom=scale_margin_bottom)
+        return series
+
+    def set(self, df=None, **kwargs):
+        """OHLC 数据 → 蜡烛图主序列；否则用单值 Line 主序列。
+
+        （副图的蜡烛图指标走这里，和以前 ``chart.set(candles_df)`` 一样；单值
+        序列本文件里都是 ``create_line``/``create_histogram``，不走 ``set``。）
         """
-        self.run_script(js_script)
-        tag = self._save_under.current_chart_name
-        self.drawings.pop(tag, None)
-        self.window.drawings.pop(tag, None)
+        if self.main is not None:
+            self.main.set(df, **kwargs)
+            return self.main
+        if df is None or len(df) == 0:
+            return None
+        columns = {str(column).lower() for column in df.columns}
+        kind = 'Candlestick' if {'open', 'high', 'low', 'close'} <= columns else 'Line'
+        series = self._add(kind, '')
+        series.set(df, **kwargs)
+        return series
 
-    def hide_toolbox(self):
-        js_script = f"""
-        try {{
-            if ({self.id}.toolBox) {{
-                {self.id}.toolBox.clearDrawings();
-            }}
-            const style = document.createElement('style');
-            style.id = '{self.id}-toolbox-hide-style';
-            style.textContent = `
-                .tv-lightweight-charts-toolbox,
-                .tv-toolbox-container,
-                [class*="toolbox"],
-                [data-toolbox="true"] {{
-                    display: none !important;
-                    visibility: hidden !important;
-                    pointer-events: none !important;
-                    opacity: 0 !important;
-                }}
-            `;
-            const oldStyle = document.getElementById('{self.id}-toolbox-hide-style');
-            if (oldStyle) oldStyle.remove();
-            document.head.appendChild(style);
-            {self.id}.toolBox = null;
-        }} catch (e) {{
-            console.error('隐藏工具箱失败：', e);
-        }}
+    # ---- 更新 ----------------------------------------------------------
+    UPDATE_INDEX = ('time', 'open', 'high', 'low', 'close', 'volume')
+
+    def update(self, row):
+        """更新本 pane 的主序列（完整的一根 K 线/一个点）。
+
+        ``SeriesCommon.update`` 收的是 pandas Series（内部按标签取列），传 dict
+        会在 ``_series_datetime_format`` 里炸，所以这里统一转一下。
         """
-        self.run_script(js_script)
+        if self.main is None:
+            return None
+        if isinstance(row, dict):
+            row = pd.Series(row)
+        return self.main.update(row)
 
-    def show_toolbox(self):
-        js_script = f"""
-        try {{
-            const style = document.getElementById('{self.id}-toolbox-hide-style');
-            if (style) style.remove();
-        }} catch (e) {{
-            console.error('恢复工具箱样式失败：', e);
-        }}
+    def update_from_tick(self, row, cumulative_volume: bool = False):
+        """像主图那样把 tick 合并进主序列的最后一根 K 线。
+
+        旧实现是 "tick 先合并进最后一根（high/low/close），时间推进时才开新 bar"，
+        这里保持同一语义；时间统一过一遍 ``_single_datetime_format``，避免把
+        纳秒时间戳直接塞给引擎。
         """
-        self.run_script(js_script)
+        series = self.main
+        if series is None:
+            return None
+        values = dict(row)
+        price = values.get('price', values.get('close'))
+        time_value = values.get('time')
+        if time_value is not None:
+            time_value = self._chart._single_datetime_format(time_value)
+        frame = getattr(series, 'data', None)
+        if frame is None or not len(frame) or time_value is None:
+            return series.update(pd.Series(values))
+        # `series._last_bar` is the bar that is still open: `update()` keeps the
+        # running high/low there and only writes it into `series.data` once the
+        # next bar arrives, so merging from `data` would lose them
+        last_frame = getattr(series, '_last_bar', None)
+        if last_frame is None or len(last_frame) == 0:
+            last_frame = frame.iloc[-1]
+        last = dict(last_frame)
+        if time_value != last.get('time'):
+            # 新的一根：open/high/low/close 都从 tick 价格开始
+            bar = {'time': time_value, 'open': price, 'high': price,
+                   'low': price, 'close': price}
+        else:
+            bar = dict(last)
+            bar['high'] = max(last.get('high', price), price)
+            bar['low'] = min(last.get('low', price), price)
+            bar['close'] = price
+        if 'volume' in values:
+            if cumulative_volume:
+                bar['volume'] = last.get('volume', 0) + values['volume']
+            else:
+                bar['volume'] = values['volume']
+        return series.update(pd.Series(bar))
 
-    def cleanup(self):
-        self.hide_toolbox()
-        handler_key = f'save_drawings{self.id}'
-        if hasattr(self.chart.win, 'handlers') and handler_key in self.chart.win.handlers:
-            del self.chart.win.handlers[handler_key]
-        self.drawings.clear()
-        self.window.drawings.clear()
+    # ---- 样式：pane 与主图共用一个 chart，转发 --------------------------
+    def layout(self, **options):
+        self._chart.layout(**options)
 
+    def grid(self, **options):
+        self._chart.grid(**options)
 
-# ReplayChart - 适配回放模式的Chart
+    def legend(self, *args, **options):
+        """图例是 chart 级的（pane 与主图共用），转发即可，重复调用幂等。"""
+        self._chart.legend(*args, **options)
 
-# ============================================================
-# ReplayChart - 适配回放模式的Chart
-# ============================================================
+    def crosshair(self, **options):
+        self._chart.crosshair(**options)
+
+    def watermark(self, *args, **options):
+        self._chart.watermark(*args, **options)
+
+    def time_scale(self, **options):
+        self._chart.time_scale(**options)
+
+    def fit(self):
+        """时间轴与主图共用，拟合交给主图（``Chart.fit``/``_fit_chart``）。"""
+
+    def resize(self, *args, **kwargs):
+        """空实现：pane 的高度由引擎自动分配，不再手工算 webview 高度。"""
+
+    # ---- 移除 ----------------------------------------------------------
+    def remove(self):
+        """逐个删掉本 pane 的序列，最后一个删掉后空 pane 由引擎自动去掉。"""
+        for series in list(self.series):
+            try:
+                series.delete()
+            except Exception as error:       # 已经删过 / 图表已销毁
+                print(f'[minibt] 移除副图序列失败: {error}')
+        self.series.clear()
+        self.main = None
+
 class ReplayChart:
     """
     回放模式下的Chart类
@@ -579,7 +552,8 @@ class ReplayChart:
     2. 数据来源于回测结果
     3. 通过replay_step()逐K线推进
     """
-    toolbox: CustomToolBox = None
+    # 工具箱已移除：replay 从不创建 CustomToolBox，self.toolbox 始终为 None
+    toolbox = None
     position_horizontal_line: HorizontalLine = None
     chart_indicators: dict = {}
     subcharts: dict = {}
@@ -609,6 +583,7 @@ class ReplayChart:
         # 创建底层QtChart
         chart_class = get_chart_class()
         self.chart = chart_class(None, 1.0, 1.0, False, False)
+        print(f'[minibt] Chart 已创建: {self.chart.id}', flush=True)
         self.light_chart_window = replay_window  # 兼容性
         self.period_milliseconds = 100
         self.strategy = strategy
@@ -643,14 +618,67 @@ class ReplayChart:
                     width=2, price_line=True, price_label=True, price_scale_id=None):
         return self.chart.create_line(name, color, style, width, price_line, price_label, price_scale_id)
 
+    def diagnose(self) -> None:
+        """把图表内部状态读回来打印（空白图排查用）。
+
+        在 webview 加载 3 秒后自动跑一次：pane 数、主序列 K 线数、图例行数、chart
+        对象是否存在 —— 空白的三种可能（页面没加载 / 数据没进引擎 / pane 报错）一眼
+        就能分开。
+        """
+        try:
+            webview = self.get_webview()
+        except Exception as error:
+            print('[minibt] diagnose failed:', error)
+            return
+        script = f"""(function () {{
+            try {{
+                var c = {self.id};
+                if (!c) return 'chart object missing (page not loaded?)';
+                var panes = c.chart ? c.chart.panes().length : -1;
+                var bars = (c.series && c.series.data) ? c.series.data().length : -1;
+                var rows = c.legend ? c.legend._lines.length : -1;
+                return 'chart=' + !!c.chart + ' panes=' + panes
+                    + ' mainBars=' + bars + ' legendRows=' + rows;
+            }} catch (e) {{ return 'probe error: ' + e; }}
+        }})()"""
+        try:
+            webview.page().runJavaScript(
+                script, lambda result: print('[minibt] diagnose:', result))
+        except Exception as error:
+            print('[minibt] diagnose failed:', error)
+
+    def _indicator_pane(self, name: str = '') -> 'IndicatorPane':
+        """指标副图：主图上的一个原生 pane（替代 create_subchart）。
+
+        上层原来的写法——``chart = self._indicator_pane()`` 之后
+        在 chart 上 ``create_line`` / ``create_histogram`` / ``set`` / ``update``——
+        全部照旧，只是这个 ``chart`` 变成了 :class:`IndicatorPane`：一条 webview、
+        共享时间轴与十字线，移除指标时连图例标签和空 pane 一起走。
+        """
+        # 注意：这里刻意不再调用 set_pane_stretch —— pane 的默认比例已经是
+        # 主图 2 : 副图 1（引擎默认），而多一次 fire-and-forget 的 JS 调用一旦
+        # 出错，会把同一批脚本后面的语句（包括主图数据）一起跳过，风险大于收益。
+        if os.environ.get('MINIBT_SUBCHART'):
+            # 回退开关：pane 模式出问题时可以用它切回"独立子图"做 A/B
+            print('[minibt] MINIBT_SUBCHART=1 -> 使用旧的 create_subchart 子图')
+            return self.create_subchart('bottom', sync=True)
+        return IndicatorPane(self, name)
+
+    def _uses_panes(self) -> bool:
+        """副图是否已经是原生 pane（``self.subcharts`` 里放的是 IndicatorPane）。"""
+        return any(getattr(chart, 'is_pane', False)
+                   for chart in self.subcharts.values())
+
     def create_subchart(self, position='left', width=0.5, height=0.5, sync=None,
                         scale_candles_only=False, sync_crosshairs_only=False, toolbox=False):
         return self.chart.create_subchart(position, width, height, sync,
                                           scale_candles_only, sync_crosshairs_only, toolbox)
 
     def create_histogram(self, name='', color='rgba(214, 237, 255, 0.6)',
-                         price_line=True, price_label=True, price_scale_id=None):
-        return self.chart.create_histogram(name, color, price_line, price_label, price_scale_id)
+                         price_line=True, price_label=True,
+                         scale_margin_top=0.0, scale_margin_bottom=0.0):
+        return self.chart.create_histogram(name, color, price_line, price_label,
+                                           scale_margin_top, scale_margin_bottom)
 
     def marker(self, time=None, position='below', shape='arrow_up', color='#2196F3', text=''):
         return self.chart.marker(time, position, shape, color, text)
@@ -714,8 +742,16 @@ class ReplayChart:
 
     # ---- WebView加载回调 ----
     def _on_webview_loaded(self, success: bool):
+        # 页面加载结果一定要打出来：空白图最常见的原因就是 loadFinished(False)
+        try:
+            url = self.get_webview().url().toString()
+        except Exception:
+            url = '?'
+        print(f'[minibt] loadFinished success={success} url={url}', flush=True)
         if success:
             QTimer.singleShot(300, self._post_load_setup)
+            # 空白图排查：稍后读回图表内部状态
+            QTimer.singleShot(3000, self.diagnose)
 
     def _post_load_setup(self):
         """WebView加载完成后设置主题等"""
@@ -842,7 +878,7 @@ class ReplayChart:
                     if gj_overlap:
                         chart = self
                     else:
-                        chart = self.create_subchart('bottom', sync=True)
+                        chart = self._indicator_pane()
                         key_name = gj_name if isinstance(gj_name, str) else f"{gj_name}_{j}"
                         self.setSubChartTheme(chart, key_name)
                         self.subcharts[key_name] = chart
@@ -932,7 +968,7 @@ class ReplayChart:
                     if overlaps[j] if isinstance(overlaps, (list, tuple)) else overlaps:
                         chart = self
                     else:
-                        chart = self.create_subchart('bottom', sync=True)
+                        chart = self._indicator_pane()
                         self.setSubChartTheme(chart, name[j] if isinstance(name, (list, tuple)) else name)
                         key_name = name[j] if isinstance(name, (list, tuple)) else f"{name}_{j}"
                         self.subcharts[key_name] = chart
@@ -982,7 +1018,7 @@ class ReplayChart:
                 is_candles = ind_data.get("iscandles", False)
 
                 if is_candles:
-                    chart = self.create_subchart('bottom', sync=True)
+                    chart = self._indicator_pane()
                     self.setSubChartTheme(chart, name if isinstance(name, str) else name[0])
                     self.subcharts[name] = chart
                     candles_df = indicator.copy()
@@ -993,7 +1029,7 @@ class ReplayChart:
                     if overlaps:
                         chart = self
                     else:
-                        chart = self.create_subchart('bottom', sync=True)
+                        chart = self._indicator_pane()
                         self.setSubChartTheme(chart, name if isinstance(name, str) else name[0])
                         self.subcharts[name] = chart
 
@@ -1228,7 +1264,10 @@ class ReplayChart:
                          font_size=14, color_based_on_candle=True)
 
     def _resizes(self):
-        """副图高度分配"""
+        """副图高度分配（pane 模式交给引擎自动分配）"""
+        if self._uses_panes():
+            self.resize(1, 1)
+            return
         num_sub_chart = len(self.subcharts)
         if num_sub_chart == 0:
             self.resize(1, 1)
@@ -1241,6 +1280,8 @@ class ReplayChart:
         self.resize(1., chart_size)
 
     def set_only_last_chart_xaxis_visible(self):
+        if self._uses_panes():
+            return
         all_charts = [self] + list(self.subcharts.values())
         last_index = len(all_charts) - 1
         for idx, chart in enumerate(all_charts):
@@ -1255,7 +1296,8 @@ class ReplayChart:
             ''')
 
     def add_chart_separator_lines(self):
-        if not self.subcharts:
+        if not self.subcharts or self._uses_panes():
+            # pane 模式：副图在主图内部，引擎自带 1px 分隔条
             return
         dark = self.replay_window.isdark if hasattr(self.replay_window, 'isdark') else False
         border_color = "rgba(180, 180, 180, 0.3)" if dark else "rgba(80, 80, 80, 0.3)"
@@ -1299,6 +1341,8 @@ class ReplayChart:
         self.get_webview().page().runJavaScript(script, handle_result)
 
     def set_price_scale_fixed_width(self, chart, target_width: int = None):
+        if getattr(chart, 'is_pane', False):
+            return
         target_width = target_width if (target_width is not None and target_width > 0) else 80
         if not chart or not hasattr(chart, 'id'):
             return
@@ -1362,6 +1406,9 @@ class ReplayChart:
         if self.toolbox:
             self.toolbox.cleanup()
         self.chart_indicators.clear()
+        for subchart in self.subcharts.values():
+            if getattr(subchart, 'is_pane', False):
+                subchart.remove()
         self.subcharts.clear()
         self.markers.clear()
         self.signal_indicators.clear()
@@ -1847,7 +1894,7 @@ class ReplayWindow(QWidget):
                         if iv.plot_id == plot_id:
                             try:
                                 pid, isplot, name, lines, _lines, ind_names, overlaps, \
-                                    categorys, ind_indicators, doubles, _ind_plotinfo, span, _signal = \
+                                    categorys, ind_indicators, doubles, _ind_plotinfo, span, _signal, band = \
                                     iv._get_plot_datas(ik)
                                 indicators.append({
                                     "sname": iv.sname,
@@ -1919,7 +1966,7 @@ class ReplayWindow(QWidget):
                         if iv.plot_id == plot_id:
                             try:
                                 pid, isplot, name, lines, _lines, ind_names, overlaps, \
-                                    categorys, ind_indicators, doubles, _ind_plotinfo, span, _signal = \
+                                    categorys, ind_indicators, doubles, _ind_plotinfo, span, _signal, band = \
                                     iv._get_plot_datas(ik)
                                 indicators.append({
                                     "sname": iv.sname,
@@ -1965,7 +2012,12 @@ class ReplayWindow(QWidget):
                         plot_id=cdata["plot_id"],
                     )
                     self.all_charts[chart_key] = chart
-                    self.chart_stack.addWidget(chart.get_webview())
+                    _webview = chart.get_webview()
+                    # 键盘：方向键由 pylightcharts 在页面内处理，webview 有焦点
+                    # 才会收到按键（replay 里没有别的键盘入口）
+                    _webview.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                    _webview.setFocus()
+                    self.chart_stack.addWidget(_webview)
                 except Exception as e:
                     print(f"创建Chart失败 [{self.strategy_names[s_idx]}/{ck}]: {e}")
 
@@ -2766,6 +2818,43 @@ class ResultPanel(QWidget):
 # ============================================================
 # CustomTitleBar - 自定义标题栏
 # ============================================================
+def check_environment(verbose: bool = True) -> dict:
+    """启动自检：确认在用哪一份 pylightcharts、键盘功能在不在 bundle 里。
+
+    以前踩过的坑：跑的是另一个目录里的 minibt 副本 /（更早的）lightweight_charts，
+    于是"明明改好了却没反应"。这里把关键事实打出来，出问题一眼可见：
+
+    * ``pylightcharts``、``minibt`` 实际来自哪个文件；
+    * bundle 里有没有 ``_handleArrowKey`` / ``removePane``（键盘与 pane 支持）；
+    * 图表建好后 ``chart.keyboardNavigation`` 是否为真（见 ``Chart.__init__``）。
+    """
+    import pathlib as _pathlib
+
+    import pylightcharts
+    info = {
+        'pylightcharts': getattr(pylightcharts, '__file__', '?'),
+        'version': getattr(pylightcharts, '__version__', '?'),
+    }
+    try:
+        import minibt as _minibt
+        info['minibt'] = getattr(_minibt, '__file__', '?')
+    except Exception:                      # 单文件运行时没有包
+        info['minibt'] = __file__
+    bundle = _pathlib.Path(str(info['pylightcharts'])).parent / 'js' / 'bundle.js'
+    info['bundle'] = str(bundle)
+    try:
+        text = bundle.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        text = ''
+    info['keyboard'] = '_handleArrowKey' in text
+    # pane support is python side (`Lib.invoke(..., 'addPane')`), so ask the class
+    from pylightcharts.abstract import AbstractChart as _Chart
+    info['panes'] = hasattr(_Chart, 'add_pane') and hasattr(_Chart, 'remove_pane')
+    if verbose:
+        print('[pylightcharts]', info)
+    return info
+
+
 class CustomTitleBar(FluentTitleBar):
     def __init__(self, parent):
         super().__init__(parent)
@@ -2945,6 +3034,12 @@ def main(strategies: list, initial_candles: int = 300, replay_speed_ms: int = 50
 
         qInstallMessageHandler(message_handler)
 
+        # pylightcharts：显式选定 PyQt6 绑定，并在此刻导入 QtWebEngineWidgets
+        # （Qt 要求它早于 QApplication；prepare_qt 同时会设置 $PYLIGHTCHARTS_QT）
+        # 先按文档顺序选绑定、导入 QtWebEngineWidgets，再自检
+        from pylightcharts.qt import prepare_qt
+        prepare_qt('PyQt6')
+        check_environment()
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         from PyQt6.QtWebChannel import QWebChannel
         from PyQt6.QtCore import Qt, QObject, pyqtSlot, QUrl, QTimer
@@ -2956,7 +3051,7 @@ def main(strategies: list, initial_candles: int = 300, replay_speed_ms: int = 50
             app = QApplication(sys.argv)
 
         app.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
-        import lightweight_charts.widgets
+        import pylightcharts.widgets
 
         w = MainWindow(strategies, initial_candles, replay_speed_ms,
                        backtest_completed=backtest_completed,

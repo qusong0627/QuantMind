@@ -99,6 +99,43 @@ class OrderSide(IntEnum):
         return 'Buy' if side == cls.Buy else 'Sell'
 
 
+#: 视作 **卖** 的写法（下单方向归一化用，见 :func:`resolve_order_side`）
+_SELL_NAMES = frozenset({'sell', 's', 'short', '1', '卖', '卖出', '开空', '平多'})
+#: 视作 **买** 的写法
+_BUY_NAMES = frozenset({'buy', 'b', 'long', '0', '买', '买入', '开多', '平空'})
+
+
+def resolve_order_side(direction) -> str:
+    """把下单方向归一化成 ``"BUY"`` / ``"SELL"`` ✓。
+
+    兼容 ``OrderSide``（IntEnum）/ ``int``（0/1）/ 字符串（``"BUY"`` / ``"SELL"``
+    / ``"buy"`` / ``"long"`` / ``"short"`` / ``"买"`` / ``"卖"`` …）。
+
+    ⚠ 回归背景：``strategy/base.py::insert_order`` 以前只写
+    ``if direction == OrderSide.Sell`` —— 而 ``OrderSide`` 是 **IntEnum**，字符串
+    ``"SELL"`` 跟它**永远不相等**（``'SELL' == OrderSide.Sell`` → ``False``）→
+    一律落进 ``else`` 变成 ``"BUY"`` → minibt 二级报价的「**开空**」实际挂的是
+    **开多**单 ✗（用户反馈；「平多」也同理錯 ✗）。
+
+    识别不了时返回 ``"BUY"``（与 ``direction`` 默认值 ``OrderSide.Buy`` 一致 ✓）。
+    """
+    if isinstance(direction, OrderSide):
+        return 'SELL' if direction == OrderSide.Sell else 'BUY'
+    name = str(getattr(direction, 'name', direction) or '').strip().lower()
+    if name in _SELL_NAMES:
+        return 'SELL'
+    if name in _BUY_NAMES:
+        return 'BUY'
+    try:                       # 兼底：数值比较（OrderSide.Sell == 1）
+        if direction == OrderSide.Sell:
+            return 'SELL'
+        if direction == OrderSide.Buy:
+            return 'BUY'
+    except Exception:                                        # noqa: BLE001
+        pass
+    return 'BUY'
+
+
 @dataclass
 class Order:
     """

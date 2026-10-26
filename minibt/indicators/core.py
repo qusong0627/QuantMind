@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from networkx import dfs_successors
 from .factors import Factors
 from .pair import Pair
 from .finta import FinTa
@@ -15,18 +14,18 @@ from .talib import TaLib
 from .pandas_ta import PandasTa
 from .base import IndicatorsBase, KLineSetting
 from ..utils import \
-    (TYPE_CHECKING, PlotInfo, np, pd, Callable, BtID,
+    (TYPE_CHECKING, PlotInfo, TableStyle, np, pd, Callable, BtID,
      partial, Iterable, Lines,  Meta, LineStyle, IndSetting, SymbolInfo, Broker,
-     DataFrameSet, Addict, common, LineDash, Colors, field,
-     Multiply, ispandasojb, Literal, LineStyleType,
+     DataFrameSet, Addict, common, LineDash, Colors, field, SignalText,
+     Multiply, ispandasojb, Literal, LineStyleType, BandStyle, BandList,
      Category, SIGNAL_Str, set_property, Cache, FILED, SignalStyleType,
-     default_symbol_info, CandlesCategory, Quotes, Quote, BtAccount, TqAccount, Position, warnings,
+     default_symbol_info, CandlesCategory, Quotes, BtAccount, warnings,
      BtPosition, getsourcelines, TqObjs, SpanStyle, default_signal_style,
      time_to_datetime, CandleStyle, SignalStyle, LineAttrType,
      SignalAttrType, CategoryString, SpanList, TradeTimeFilter,
      PandasDataFrame, PandasSeries,  SignalLabel,  Orders, Markers,
      options, SPECIAL_FUNC, datetime, OrderType, Order, WaterMark, DataSetBase)
-from ..other import ProcessedAttribute
+from ..other import ProcessedAttribute, ensure_core_loaded
 from pandas.core.indexing import _iLocIndexer, _LocIndexer
 from .base import tobtind
 from ..order import OrderSide
@@ -40,6 +39,7 @@ if TYPE_CHECKING:
     from ..utils import CoreFunc, corefunc, Params
     from ..other import SizeType, CommissionType
     from tqsdk.objs import Order as TqOrder
+    from tqsdk.objs import Quote, Position, Account as TqAccount
 
 
 # 前向引用（避免循环导入）
@@ -61,6 +61,34 @@ class KLine:
 
 class SignalBacktestResult:
     pass
+
+
+def _fast_time_to_datetime(series):
+    """向量化版的 `time_to_datetime`（天勤 kline 的 datetime 列）。
+
+    `time_to_datetime` 是逐元素 Python 调用（`datetime.fromtimestamp`），每 tick
+    对一列调用一次只有几百行但开销明显。这里对**数值型**（天勤纳秒/秒时间戳）
+    用 `pd.to_datetime` 向量化，并补上本地时区偏移以对齐 `fromtimestamp`。
+    非数值、或本地时区有夏令时（`time.daylight`，偏移因日期而异）时回退逐元素。
+    """
+    import time as _time
+    try:
+        is_numeric = pd.api.types.is_numeric_dtype(series)
+    except Exception:
+        is_numeric = False
+    if not is_numeric or _time.daylight:
+        return series.apply(time_to_datetime)
+    try:
+        values = series.astype('int64')
+        last = abs(int(values.iloc[-1])) if len(values) else 0
+        unit = 'ns' if last >= 10 ** 17 else 's'
+        converted = pd.to_datetime(values, unit=unit)
+        offset = -_time.timezone            # 秒，东八区为 +28800
+        if offset:
+            converted = converted + pd.Timedelta(seconds=offset)
+        return converted
+    except Exception:
+        return series.apply(time_to_datetime)
 
 
 # 保存原始函数
@@ -343,6 +371,7 @@ class CoreIndicators:
         merged_factor = calc.factor_optimizer(factor1, factor2, factor3)
         ```
         """
+        ensure_core_loaded()
         return self._df.ta
 
 
@@ -498,38 +527,61 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         iscandles = "candles" in category
         sname = kwargs.pop('sname', 'name')
         ind_name = kwargs.pop("ind_name", sname)
-        candlestyle = iscandles and CandleStyle() or None
+        # ==============================================================
+        # [修改] 允许外部(class 属性 / kwargs)传入 candlestyle。
+        #   原代码无条件新建默认 CandleStyle(), 于是蜡烛型指标无法自定义
+        #   涨/跌配色(类级 candlestyle 被丢弃, btind_info 里也拿不到)。
+        #   现在: 只有"未传入且属于蜡烛类别"时才回退默认 CandleStyle()。
+        #   原始代码(保留备查):
+        # candlestyle = iscandles and CandleStyle() or None
+        # ==============================================================
+        _in_candlestyle = kwargs.pop('candlestyle', None)
+        if iscandles:
+            candlestyle = (_in_candlestyle
+                           if _in_candlestyle is not None else CandleStyle())
+        else:
+            candlestyle = None
         is_mir = kwargs.pop('_is_mir', False)
         ismain = bool(kwargs.pop('ismain', False))
         isreplay = bool(kwargs.pop('isreplay', False))
         isresample = bool(kwargs.pop('isresample', False))
         isindicator = True
         iscustom = bool(kwargs.pop('iscustom', False))
-        height = kwargs.pop("height", iscandles and 300 or 150)
+        height = kwargs.pop("height", iscandles and 450 or 150)
         linestyle = kwargs.pop("linestyle", {})
+        tablestyle = kwargs.pop("tablestyle", None)
         signalstyle = Addict(kwargs.pop("signalstyle", {}))
         isMDim = True
         dim_match = kwargs.pop("dim_match", True)
         span = kwargs.pop("spanstyle", np.nan)
+        bandstyle = BandList(kwargs.pop("bandstyle", tuple()))
+        # 成交量分布图风格（**只有 category == 'vp' 的指标会读**；见 VPStyle）
+        vpstyle = kwargs.pop("vpstyle", None)
+        legend = kwargs.pop("legend", None)
         # 指标是否有交易信号
         signallines = [string for string in SIGNAL_Str if string in lines]
         # 将IndFrame每列设置为Line
         line_filed: list[str] = list(
             map(lambda x: f"_{x}", lines))
         self._plotinfo = PlotInfo(
-            height=height,
+            # height 已废弃：不再写入（参数已在上面 pop 吞掉 ✓）
+            length=self.length,
             sname=sname,
             ind_name=ind_name,
             lines=lines,
             line_filed=line_filed,
             signallines=signallines,
             category=category,
+            legend=legend,
             isplot=isplot,
             overlap=overlap,
             candlestyle=candlestyle,
             linestyle=linestyle,
             signalstyle=signalstyle,
             spanstyle=span,
+            bandstyle=bandstyle,
+            tablestyle=tablestyle,
+            vpstyle=vpstyle,
         )
 
         self._indsetting = IndSetting(
@@ -554,7 +606,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             if not isinstance(_overlap, bool):
                 _overlap = _overlap[lines[i]]
             # 直接用列索引从底层numpy数组取值,
-            # 避免 self[lines[i]] / pd.DataFrame.__getitem__ 
+            # 避免 self[lines[i]] / pd.DataFrame.__getitem__
             # 经过 IndicatorsBase.__getitem__ 包装成新 IndFrame 导致无限递归
             _raw_values = self.values[:, i]
             setattr(self, line, Line(
@@ -565,6 +617,28 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     isresample=isresample, overlap=_overlap))
         # 邦定property函数,IndFrame每列返回的是Line指标数据
         [set_property(self.__class__, attr) for attr in lines]
+        # 逐点文本: 声明需要逐点文本的信号线
+        _sig_text = kwargs.pop("signal_text", None)
+        if callable(_sig_text):
+            import types as _types
+            if not isinstance(_sig_text, _types.MethodType):
+                # cls.signal_text 是普通函数, 需绑定到实例, 否则调用时缺 self
+                _sig_text = _types.MethodType(_sig_text, self)
+            try:
+                # 数值行就绪后调用一次(静态派生)。返回 {k: 文本数组} 由框架统一
+                # 收口写入; 也可在方法内就地写 self.signaltext 后返回 None。
+                text = _sig_text() or {}
+                for k, v in text.items():
+                    if k in self.signallines:
+                        # 统一经 SignalText.set_signal: 长度校验 + object 化,
+                        # np.nan 哨兵不被字符串化
+                        self.signaltext.set_signal(k, v)
+            except Exception as error:
+                # 信号文本派生异常不拖垮绘图, 但要**说出来**：以前完全静默，
+                # 结果"文本一个都没有"时无从排查。
+                print(f'[minibt] signal_text() 派生失败（该指标改用统一文本）: '
+                      f'{type(error).__name__}: {error}')
+        #
         kline = kwargs.pop("kline", None)
         if kline is not None and hasattr(kline, "_indsetting"):
             self._indsetting.id = kline._indsetting.id.copy()
@@ -576,6 +650,10 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         if self._indsetting.iscustom:
             self._dataset.custom_object = self.values
         self.cache = Cache(maxsize=np.inf)
+
+    @property
+    def signaltext(self) -> SignalText:
+        return self._plotinfo.signal_texts
 
     @property
     def series(self) -> SeriesType:
@@ -595,6 +673,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     def long_signal(self, value) -> None:
         if isinstance(value, Iterable) and len(value) == self.V:
             self["long_signal"] = value
+            self.pandas_object["long_signal"] = value
 
     @property
     def exitlong_signal(self) -> Line:
@@ -605,6 +684,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     def exitlong_signal(self, value) -> None:
         if isinstance(value, Iterable) and len(value) == self.V:
             self["exitlong_signal"] = value
+            self.pandas_object["exitlong_signal"] = value
 
     @property
     def short_signal(self) -> Line:
@@ -615,6 +695,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     def short_signal(self, value) -> None:
         if isinstance(value, Iterable) and len(value) == self.V:
             self["short_signal"] = value
+            self.pandas_object["short_signal"] = value
 
     @property
     def exitshort_signal(self) -> Line:
@@ -625,6 +706,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     def exitshort_signal(self, value) -> None:
         if isinstance(value, Iterable) and len(value) == self.V:
             self["exitshort_signal"] = value
+            self.pandas_object["exitshort_signal"] = value
 
     @property
     def signal_style(self) -> SignalStyleType:
@@ -678,8 +760,23 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
     @signal_style.setter
     def signal_style(self, value):
-        """## 设置所有信号线的统一样式"""
-        self._plotinfo.signal_style = value
+        """## 设置所有信号线的统一样式
+
+        - ``{线名: SignalStyle}``：批量更新（未提及的信号保持原样）；
+        - 单个 ``SignalStyle``：应用到所有信号线。
+
+        注：原实现写的是 ``self._plotinfo.signal_style``，而 PlotInfo 里真正的
+        字段叫 ``signalstyle``（无下划线），等于把值赋到一个不存在的键上，
+        所以 ``self.cci.signal_style = {...}`` 一直不生效。
+        """
+        style = getattr(self._plotinfo, 'signalstyle', None)
+        if style is None:
+            return
+        if hasattr(value, 'items'):
+            style.update(value)
+        else:
+            for key in list(style):
+                style[key] = value
 
     @property
     def signal_key(self) -> SignalAttrType:
@@ -729,7 +826,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     @signal_key.setter
     def signal_key(self, value):
         """## 设置所有信号线的统一价格位置"""
-        self._plotinfo.signal_key = value
+        for _line in list(self._plotinfo.signalstyle):
+            self._plotinfo.set_signal_attr('key', _line, value)
 
     @property
     def signal_show(self) -> SignalAttrType:
@@ -779,7 +877,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     @signal_show.setter
     def signal_show(self, value):
         """设置所有信号线的统一显示状态"""
-        self._plotinfo.signal_show = value
+        for _line in list(self._plotinfo.signalstyle):
+            self._plotinfo.set_signal_attr('show', _line, value)
 
     @property
     def signal_color(self) -> SignalAttrType:
@@ -834,7 +933,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     @signal_color.setter
     def signal_color(self, value):
         """## 设置所有信号线的统一颜色"""
-        self._plotinfo.signal_color = value
+        for _line in list(self._plotinfo.signalstyle):
+            self._plotinfo.set_signal_attr('color', _line, value)
 
     @property
     def signal_overlap(self) -> SignalAttrType:
@@ -885,7 +985,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     @signal_overlap.setter
     def signal_overlap(self, value):
         """## 设置所有信号线的统一重叠显示模式"""
-        self._plotinfo.signal_overlap = value
+        for _line in list(self._plotinfo.signalstyle):
+            self._plotinfo.set_signal_attr('overlap', _line, value)
 
     @property
     def signal_size(self) -> SignalAttrType:
@@ -940,7 +1041,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     @signal_size.setter
     def signal_size(self, value):
         """## 设置所有信号线的统一标记大小"""
-        self._plotinfo.signal_size = value
+        for _line in list(self._plotinfo.signalstyle):
+            self._plotinfo.set_signal_attr('size', _line, value)
 
     @property
     def signal_label(self) -> SignalAttrType:
@@ -988,7 +1090,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
     @signal_label.setter
     def signal_label(self, value):
         """## 设置所有信号线的统一标签"""
-        self._plotinfo.signal_label = value
+        for _line in list(self._plotinfo.signalstyle):
+            self._plotinfo.set_signal_attr('label', _line, value)
 
     @property
     def line_style(self) -> LineStyleType:
@@ -1037,6 +1140,45 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             if self._indsetting.isMDim:
                 for line in self.line:
                     line._plotinfo.line_style = value
+
+    def set_stop_lines_style(self, stop: LineStyle = None,
+                             target: LineStyle = None, **styles) -> "IndFrame":
+        """## 设置止损/止盈线型
+
+        可在绑定停止器之前调用。作用在 ``stop_lines`` 上时，它首次访问
+        会自动创建（KLine.stop_lines 懒创建），因此样式不会丢失。
+
+        支持多种写法：
+
+        ```python
+        # 1) 直接作用在 stop_lines 上
+        self.data.stop_lines.set_stop_lines_style(
+            stop=LineStyle(line_color='#2962FF', line_width=1.2, line_dash=LineDash.dashed),
+            target=LineStyle(line_color='#00E676', line_width=1.5, line_dash=LineDash.dashed))
+
+        # 2) 作用在 KLine 上（内部转发到 self.stop_lines）
+        self.data.set_stop_lines_style(stop=..., target=...)
+
+        # 3) 想改哪条线就传哪条线
+        self.data.stop_lines.set_stop_lines_style(stop_price=LineStyle(...))
+        ```
+
+        Args:
+            stop (LineStyle, optional): ``stop_price`` 线的样式.
+            target (LineStyle, optional): ``target_price`` 线的样式.
+            **styles: 其它“线名 -> LineStyle”，如 ``stop_price=...``.
+
+        Returns:
+            IndFrame: self，支持链式调用。
+        """
+        if stop is not None:
+            styles.setdefault('stop_price', stop)
+        if target is not None:
+            styles.setdefault('target_price', target)
+        for name, style in styles.items():
+            if name in self._plotinfo.linestyle:
+                self._plotinfo.linestyle[name] = style
+        return self
 
     @property
     def line_dash(self) -> LineAttrType:
@@ -1226,6 +1368,41 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 for line in self.line:
                     line._plotinfo.price_label = value
 
+    @property
+    def bandstyle(self) -> BandList[BandStyle]:
+        """## 指标线带填充配置
+
+        - 用于配置指标线带的填充样式，支持以下两种使用方式：
+
+        1. **链式调用**：为特定指标线单独设置填充样式
+        2. **统一设置**：为当前指标实例下所有线统一设置填充样式
+
+        Returns:
+            LineAttrType: 线型属性配置对象，支持链式调用设置单个属性值
+
+        ```python
+        # 链式调用：为long_signal指标线开启填充显示
+        indicator.bandstyle.long_signal = True
+
+        Args:
+            value (LineAttrType): 线型属性配置对象，支持链式调用设置单个属性值
+
+        Note:
+            - 仅对指标实例生效
+            - 对于多维指标(isMDim=True)，会遍历设置所有子线样式
+        """
+        return self._plotinfo.bandstyle
+
+    @bandstyle.setter
+    def bandstyle(self, value):
+        if len(self) < 2:
+            return
+        if self.isindicator:
+            if isinstance(value, Iterable) and all([isinstance(item, BandStyle) for item in value]):
+                self._plotinfo.bandstyle = BandList(value)
+            elif isinstance(value, BandStyle):
+                self._plotinfo.bandstyle = BandList([value,])
+
     def to_lines(self, *args: int | str) -> tuple[Line]:
         """### 返回多列Line"""
         if not args:
@@ -1365,7 +1542,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         Returns:
             IndSeries: 平仓信号
         """
-        exitlong_signal = self.exitlong_signal if self.exitlong_signal is not None  and not self.exitlong_signal.empty else self.short_signal
+        exitlong_signal = self.exitlong_signal if self.exitlong_signal is not None and not self.exitlong_signal.empty else self.short_signal
         exitshort_signal = self.exitshort_signal if self.exitshort_signal is not None and not self.exitshort_signal.empty else self.long_signal
         if exitlong_signal is None or exitshort_signal is None:
             return
@@ -1525,6 +1702,12 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         if name.startswith('_'):
             object.__setattr__(self, name, value)
             return
+        # 类上带 property/描述符的（span_style、bandstyle、linestyle 等 API）
+        # 走标准赋值让 setter 生效，否则会被 __setitem__ 当成新增数据列
+        descriptor = getattr(type(self), name, None)
+        if isinstance(descriptor, property) or hasattr(descriptor, '__set__'):
+            object.__setattr__(self, name, value)
+            return
         # 可迭代值（排除 str/bytes/dict/Cache/DataSetBase）通过 __setitem__ 路由为列赋值
         # DataSetBase(LineStyle/CandleStyle/SignalStyle/SpanStyle 等)虽有 __iter__
         # 但它们是配置对象而非数据容器，应作为属性存储而非列赋值
@@ -1583,15 +1766,18 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             isplot = True
             overlap = False
             if isinstance(self._plotinfo.isplot, bool):
-                isplot=self._plotinfo.isplot
+                isplot = self._plotinfo.isplot
                 self._plotinfo.isplot = Addict()
-                
+            elif isinstance(self._plotinfo.isplot, dict) and self._plotinfo.isplot:
+                isplot = next(iter(self._plotinfo.isplot.values()))
+
             if isinstance(self._plotinfo.overlap, bool):
-                overlap=self._plotinfo.overlap
+                overlap = self._plotinfo.overlap
                 self._plotinfo.overlap = Addict()
+            elif isinstance(self._plotinfo.overlap, dict) and self._plotinfo.overlap:
+                overlap = next(iter(self._plotinfo.overlap.values()))
             self._plotinfo.isplot[key] = isplot
             self._plotinfo.overlap[key] = overlap
-            
 
             for i, line_field in enumerate(self._plotinfo.line_filed):
                 try:
@@ -1614,17 +1800,18 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         if source_obj is not None:
             self._dataset.set_source_obj(source_obj)
 
-    def signal_backtest(self, 
-                        size: float = 1.0, 
+    def signal_backtest(self,
+                        size: float = 1.0,
                         size_type: SizeType | None = None,
-                        commission: float | None = None, 
-                        com_type: int | CommissionType | None = None, 
+                        commission: float | None = None,
+                        com_type: int | CommissionType | None = None,
                         slip_point: float | None = None,
-                        prices: np.ndarray | IndSeries | None = None, 
+                        prices: np.ndarray | IndSeries | None = None,
                         init_cash: float = 1000000.0,
                         min_start_length: int | None = None,
                         isplot: bool = True,
                         isreport: bool = True,
+                        gui: str | None = None,
                         sl_stop: float = 0.0,
                         tp_stop: float = 0.0,
                         stop_mode: Literal[0, 1, 2] = 0,
@@ -1668,6 +1855,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         | `min_start_length` | `int | None` | `None` | 最小启动K线数（在此之前不交易），默认取自关联KLine的 `_klinesetting` |
         | `isplot` | `bool` | `True` | 是否绘制回测图表 |
         | `isreport` | `bool` | `True` | 是否生成回测报告 |
+        | `gui` | `str` / `Gui` / `None` | `None` | 出图引擎：`None` / `'pylightcharts'`（默认，原生窗口）/ `'pylightcharts_web'`（= `'browser'`，浏览器标签）/ `'jupyter'`（Notebook 内联）/ `'bokeh'`（bokeh 交互图）。Jupyter 里 pylightcharts 自动内联；入口脚本缺 `__main__` 保护时自动换网页版 |
         | `sl_stop` | `float` | `0.0` | 止损值，0 表示不使用止损，含义取决于 `stop_mode` |
         | `tp_stop` | `float` | `0.0` | 止盈值，0 表示不使用止盈，含义取决于 `stop_mode` |
         | `stop_mode` | `Literal[0,1,2]` | `0` | 止损/止盈模式：`0` 按最小波动单位 / `1` 按金额 / `2` 按合约价值百分比 |
@@ -1721,7 +1909,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         """
         kline = None
         for sig_name in ('_long_signal', '_short_signal',
-                            '_exitlong_signal', '_exitshort_signal'):
+                         '_exitlong_signal', '_exitshort_signal'):
             sig = getattr(self, sig_name, None)
             if sig is not None and sig.kline is not None:
                 kline = sig.kline
@@ -1759,7 +1947,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
         # entries = long_signal - short_signal
         #   >0 → 多头(1), <0 → 空头(-1), ==0 → 无信号
-        ntries= None
+        ntries = None
         if short_sig is None:
             entries = long_sig
         elif long_sig is None:
@@ -1769,7 +1957,6 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
         # exits = -exitlong_signal + exitshort_signal
         #   <0(-1) → 平多头, >0(+1) → 平空头, ==0 → 无离场
-        exits = None
         if exitlong_sig is None:
             exits = exitshort_sig
         elif exitshort_sig is None:
@@ -1780,7 +1967,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             # exitlong_sig = short_sig
             # exitshort_sig = long_sig
             # exits = -short_sig + long_sig
-            exits= entries
+            exits = entries
 
         # ---- 检测 entries/exits 是否包含有效交易信号 ----
         def _has_valid_signals(arr):
@@ -1797,7 +1984,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 "  ind.long_signal = ind.ma5.cross_up(ind.ma10)\n"
                 "  ind.short_signal = ind.ma5.cross_down(ind.ma10)"
             )
-        
+
         # margin_rate = float(kline.margin_rate) if kline.margin_rate else 0.1
         # price_tick = float(kline.price_tick) if kline.price_tick else 1.0
         # volume_multiple = float(kline.volume_multiple) if kline.volume_multiple else 1.0
@@ -1841,6 +2028,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
             class _SignalBacktestStrategy(Strategy):
                 config = Config(value=init_cash)
+
                 def __init__(self_):
                     if min_start_length is not None and min_start_length > 0:
                         self_.min_start_length = min_start_length
@@ -1875,16 +2063,42 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             if isplot or isreport:
                 sbr._print_account, sbr.richprint
             if isplot:
-                from ..strategy.bokeh_plot import plot
-                trade_signal: bool = kwargs.get("trade_signal", True)
-                black_style: bool = kwargs.get("black_style", False)
-                open_browser: bool = kwargs.get("open_browser", False)
-                plot_width: int = kwargs.get("plot_width", None)
-                plot_cwd = kwargs.get("plot_cwd", "")
-                plot_name: str = kwargs.get("plot_name", "")
-                save_plot: bool = kwargs.get("save_plot", False)
-                plot([sbr,], trade_signal, black_style,
-                     open_browser, plot_width, plot_cwd, plot_name, save_plot)
+                # 出图引擎：默认 pylightcharts（与 `Bt.run()` / `btplot` 一致），
+                # 只有显式 `gui='bokeh'` 才走 bokeh。
+                from ..btplot import _resolve_btplot_gui
+                _gui = _resolve_btplot_gui(gui)
+                if _gui == 'bokeh':
+                    from ..strategy.bokeh_plot import plot
+                    trade_signal: bool = kwargs.get("trade_signal", True)
+                    black_style: bool | None = kwargs.get("black_style", None)
+                    theme: str | None = kwargs.get("theme", None)
+                    open_browser: bool = kwargs.get("open_browser", False)
+                    plot_width: int = kwargs.get("plot_width", None)
+                    plot_cwd = kwargs.get("plot_cwd", "")
+                    plot_name: str = kwargs.get("plot_name", "")
+                    save_plot: bool = kwargs.get("save_plot", False)
+                    plot([sbr,], trade_signal, black_style,
+                         open_browser, plot_width, plot_cwd, plot_name,
+                         save_plot, theme=theme)
+                else:
+                    # pylightcharts：复用回测展示那套 `RealtimeChart`
+                    #（原生窗口 / 浏览器 / Notebook 内联）
+                    from ..bt import (_force_browser_without_guard,
+                                      _use_jupyter_inline)
+                    from ..strategy.realtime import RealtimeChart
+                    _gui = _force_browser_without_guard(_gui)
+                    jupyter = _use_jupyter_inline(_gui)
+                    chart = RealtimeChart(
+                        [sbr],
+                        browser=_gui in ('pylightcharts_web', 'browser'),
+                        jupyter=jupyter,
+                        title='pylightcharts - 回测图表',
+                        info_pages=True, realtime=False, live=False,
+                        bars='chart', theme=kwargs.get('theme'),
+                        y_margin=kwargs.get('y_margin'),
+                        trade_signal=bool(kwargs.get('trade_signal', True)))
+                    chart.set_backtest_from_strategy(sbr)
+                    chart.show(block=not jupyter)
             if isreport:
                 sbr._qs_reports(show=True)
             return sbr
@@ -1896,7 +2110,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             # ---- 解析优化配置参数 ----
             if isinstance(optimize, OptimizeConfig):
                 # 从 OptimizeConfig 实例提取参数
-                _opt_params = optimize.params  if optimize.params  else kwargs.pop('optimize_params', {})             # 待优化参数范围
+                _opt_params = optimize.params if optimize.params else kwargs.pop(
+                    'optimize_params', {})             # 待优化参数范围
                 _opt_target = optimize.target               # 优化目标指标
                 _opt_method = optimize.method               # 'grid' | 'optuna'
                 _opt_weights_data = optimize.weights        # 优化权重
@@ -1907,12 +2122,18 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 _opt_weights = _opt_weights_data if _opt_weights_data is not None else optimize_weights
             else:
                 # 旧版 kwargs 方式（向后兼容：optimize=True + kwargs）
-                _opt_params = kwargs.pop('optimize_params', None)       # 待优化参数范围
-                _opt_target = kwargs.pop('optimize_target', 'sharpe')   # 优化目标指标
-                _opt_method = kwargs.pop('optimize_method', 'optuna')   # 'grid' | 'optuna'
-                _opt_config = kwargs.pop('optimize_config', None)       # 优化配置(n_trials/n_jobs等)
-                _opt_n_jobs = kwargs.pop('n_jobs', 1)                   # 并行线程数，-1=全核
-                _opt_output = kwargs.pop('output_dir', '')              # CSV输出目录
+                _opt_params = kwargs.pop(
+                    'optimize_params', None)       # 待优化参数范围
+                _opt_target = kwargs.pop(
+                    'optimize_target', 'sharpe')   # 优化目标指标
+                _opt_method = kwargs.pop(
+                    'optimize_method', 'optuna')   # 'grid' | 'optuna'
+                # 优化配置(n_trials/n_jobs等)
+                _opt_config = kwargs.pop('optimize_config', None)
+                _opt_n_jobs = kwargs.pop(
+                    'n_jobs', 1)                   # 并行线程数，-1=全核
+                _opt_output = kwargs.pop(
+                    'output_dir', '')              # CSV输出目录
                 # 解析权重：优先取显式参数 optimize_weights，其次 kwargs 中的 optimize_weights
                 _opt_weights = kwargs.pop('optimize_weights', None)
                 if _opt_weights is None:
@@ -1926,23 +2147,29 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             if isinstance(entries, IndSeries):
                 entries_arr = entries.values.reshape(-1, 1)
             else:
-                entries_arr = np.atleast_2d(entries.values if hasattr(entries, 'values') else entries)
+                entries_arr = np.atleast_2d(
+                    entries.values if hasattr(entries, 'values') else entries)
             if isinstance(exits, IndSeries):
                 exits_arr = exits.values.reshape(-1, 1)
             else:
-                exits_arr = np.atleast_2d(exits.values if hasattr(exits, 'values') else exits)
+                exits_arr = np.atleast_2d(
+                    exits.values if hasattr(exits, 'values') else exits)
 
             _close_arr = np.atleast_2d(kline.close.values).T
-            _margin_rate = float(kline.margin_rate) if kline.margin_rate else 0.1
+            _margin_rate = float(
+                kline.margin_rate) if kline.margin_rate else 0.1
             _price_tick = float(kline.price_tick) if kline.price_tick else 1.0
-            _vol_mult = float(kline.volume_multiple) if kline.volume_multiple else 1.0
-            _msl = self.min_start_length if hasattr(self, 'min_start_length') else min_start_length
+            _vol_mult = float(
+                kline.volume_multiple) if kline.volume_multiple else 1.0
+            _msl = self.min_start_length if hasattr(
+                self, 'min_start_length') else min_start_length
             if _msl is None:
                 _msl = 1
 
             _prices_arr = None
             if prices is not None:
-                _prices_arr = prices.values.reshape(-1, 1) if isinstance(prices, IndSeries) else np.atleast_2d(prices)
+                _prices_arr = prices.values.reshape(-1, 1) if isinstance(
+                    prices, IndSeries) else np.atleast_2d(prices)
 
             from ..cython_functions.backtrader_from_signals import from_signals
             # 提取回调函数 C 地址
@@ -1980,14 +2207,16 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 total_fee_val = res[0][-1, 5]    # 累计手续费
                 return eq_curve, total_fee_val
 
-
             # ---- 计算 quantstats 指标 ----
+
             def _calc_qs_metrics(equity_curve):
                 """从权益曲线计算 quantstats 核心指标"""
-                profits = pd.Series(equity_curve, index=_base_kline.datetime.values[:len(equity_curve)])
+                profits = pd.Series(
+                    equity_curve, index=_base_kline.datetime.values[:len(equity_curve)])
                 returns = profits.pct_change().fillna(0.)
                 returns.iloc[0] = 0.
-                returns.index = pd.Index(_base_kline.datetime.values[:len(returns)])
+                returns.index = pd.Index(
+                    _base_kline.datetime.values[:len(returns)])
                 try:
                     from quantstats import stats as qs_stats
                 except ImportError:
@@ -1997,21 +2226,25 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     if len(returns.dropna()) > 1:
                         m['sharpe'] = float(qs_stats.sharpe(returns) or 0.)
                         m['sortino'] = float(qs_stats.sortino(returns) or 0.)
-                        m['max_drawdown'] = float(qs_stats.max_drawdown(returns) or -1.)
+                        m['max_drawdown'] = float(
+                            qs_stats.max_drawdown(returns) or -1.)
                         m['calmar'] = float(qs_stats.calmar(returns) or 0.)
                         m['win_rate'] = float(qs_stats.win_rate(returns) or 0.)
-                        m['profit_factor'] = float(qs_stats.profit_factor(returns) or 0.)
+                        m['profit_factor'] = float(
+                            qs_stats.profit_factor(returns) or 0.)
                         m['cagr'] = float(qs_stats.cagr(returns) or 0.)
-                        m['value_at_risk'] = float(qs_stats.value_at_risk(returns) or 0.)
-                        m['risk_return_ratio'] = float(qs_stats.risk_return_ratio(returns) or 0.)
+                        m['value_at_risk'] = float(
+                            qs_stats.value_at_risk(returns) or 0.)
+                        m['risk_return_ratio'] = float(
+                            qs_stats.risk_return_ratio(returns) or 0.)
                     else:
-                        for k in ('sharpe','sortino','calmar','win_rate','profit_factor','cagr',
-                                  'value_at_risk','risk_return_ratio'):
+                        for k in ('sharpe', 'sortino', 'calmar', 'win_rate', 'profit_factor', 'cagr',
+                                  'value_at_risk', 'risk_return_ratio'):
                             m[k] = 0.
                         m['max_drawdown'] = -1.
                 except Exception:
-                    for k in ('sharpe','sortino','calmar','win_rate','profit_factor','cagr',
-                              'value_at_risk','risk_return_ratio'):
+                    for k in ('sharpe', 'sortino', 'calmar', 'win_rate', 'profit_factor', 'cagr',
+                              'value_at_risk', 'risk_return_ratio'):
                         m[k] = 0.
                     m['max_drawdown'] = -1.
                 return m, returns, profits
@@ -2020,55 +2253,58 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             # BtIndicator.__new__ 返回 IndFrame，需要用保存的原始指标类
             ind_cls = getattr(self, '_bt_indicator_cls', None)
             assert ind_cls is not None, "未设置 _bt_indicator_cls"
-            _has_next = (hasattr(ind_cls, '_is_method_overridden') 
+            _has_next = (hasattr(ind_cls, '_is_method_overridden')
                          and ind_cls._is_method_overridden('next'))
             # 保存原始类级 params（若有）
-            _orig_cls_params = getattr(ind_cls, 'params', Addict()).copy() if _has_next else None
+            _orig_cls_params = getattr(
+                ind_cls, 'params', Addict()).copy() if _has_next else None
             # 线程安全锁（BtIndicator.__new__ 会修改 cls.params）
             import threading
             _param_lock = threading.Lock()
+
             def _single_trial(params_dict: dict, trial_id: int = 0) -> dict:
                 """对一组参数运行回测，返回指标字典和权益曲线"""
                 p = params_dict.copy()
                 eq, fee = None, 0.
 
                 if _has_next and ind_cls is not BtIndicator:
-                # if ind_cls is not BtIndicator:
+                    # if ind_cls is not BtIndicator:
                     # 通过 params 重新运行指标，生成新信号
                     # 使用锁保护 cls.params 修改（并行场景下线程安全）
                     # try:
-                        with _param_lock:
-                            ind_cls.params = Addict({**(_orig_cls_params or {}), **p})
-                            #params = Addict({**(_orig_cls_params or {}), **p})
-                            new_ind = ind_cls(_base_kline)
-                            #print(ind_cls.params,new_ind.tail())
-                        # 从新指标提取信号
-                        ls = getattr(new_ind, 'long_signal', None)
-                        ss = getattr(new_ind, 'short_signal', None)
-                        els = getattr(new_ind, 'exitlong_signal', None)
-                        exs = getattr(new_ind, 'exitshort_signal', None)
-                        _e = np.zeros(len(_close_arr))
-                        _x = np.zeros(len(_close_arr))
-                        if ls is not None:
-                            _e += ls.values if hasattr(ls, 'values') else ls
-                        if ss is not None:
-                            sv = ss.values if hasattr(ss, 'values') else ss
-                            _e -= sv
-                        if els is not None:
-                            ev = els.values if hasattr(els, 'values') else els
-                            _x -= ev
-                        if exs is not None:
-                            xv = exs.values if hasattr(exs, 'values') else exs
-                            _x += xv
-                        if _x is None or np.all(_x == 0):
-                            _x = _e
-                        # 检查是否有有效信号：entries 全为零则跳过回测
-                        if np.all(_e == 0):
-                            return {'params': p, 'trial': trial_id,
-                                    'error': '无有效交易信号',
-                                    'equity': np.full(len(_close_arr), init_cash),
-                                    'total_fee': 0.}
-                        eq, fee = _run_backtest(_e, _x, _prices_arr)
+                    with _param_lock:
+                        ind_cls.params = Addict(
+                            {**(_orig_cls_params or {}), **p})
+                        # params = Addict({**(_orig_cls_params or {}), **p})
+                        new_ind = ind_cls(_base_kline)
+                        # print(ind_cls.params,new_ind.tail())
+                    # 从新指标提取信号
+                    ls = getattr(new_ind, 'long_signal', None)
+                    ss = getattr(new_ind, 'short_signal', None)
+                    els = getattr(new_ind, 'exitlong_signal', None)
+                    exs = getattr(new_ind, 'exitshort_signal', None)
+                    _e = np.zeros(len(_close_arr))
+                    _x = np.zeros(len(_close_arr))
+                    if ls is not None:
+                        _e += ls.values if hasattr(ls, 'values') else ls
+                    if ss is not None:
+                        sv = ss.values if hasattr(ss, 'values') else ss
+                        _e -= sv
+                    if els is not None:
+                        ev = els.values if hasattr(els, 'values') else els
+                        _x -= ev
+                    if exs is not None:
+                        xv = exs.values if hasattr(exs, 'values') else exs
+                        _x += xv
+                    if _x is None or np.all(_x == 0):
+                        _x = _e
+                    # 检查是否有有效信号：entries 全为零则跳过回测
+                    if np.all(_e == 0):
+                        return {'params': p, 'trial': trial_id,
+                                'error': '无有效交易信号',
+                                'equity': np.full(len(_close_arr), init_cash),
+                                'total_fee': 0.}
+                    eq, fee = _run_backtest(_e, _x, _prices_arr)
                     # except Exception as exc:
                     #     return {'params': p, 'trial': trial_id, 'error': str(exc),
                     #             'equity': eq, 'total_fee': 0.}
@@ -2079,13 +2315,17 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                                 'error': '无有效交易信号',
                                 'equity': np.full(len(_close_arr), init_cash),
                                 'total_fee': 0.}
-                    eq, fee = _run_backtest(entries_arr, exits_arr, _prices_arr)
+                    eq, fee = _run_backtest(
+                        entries_arr, exits_arr, _prices_arr)
 
-                metrics, returns, profits = _calc_qs_metrics(eq) if eq is not None else ({}, None, None)
+                metrics, returns, profits = _calc_qs_metrics(
+                    eq) if eq is not None else ({}, None, None)
                 metrics['params'] = p
                 metrics['trial'] = trial_id
-                metrics['final_equity'] = float(eq[-1]) if eq is not None else 0.
-                metrics['total_return_pct'] = (metrics['final_equity'] / init_cash - 1.) * 100.
+                metrics['final_equity'] = float(eq[-1]
+                                                ) if eq is not None else 0.
+                metrics['total_return_pct'] = (
+                    metrics['final_equity'] / init_cash - 1.) * 100.
                 metrics['total_fee'] = float(fee) if fee is not None else 0.
                 metrics['equity'] = eq
                 metrics['returns'] = returns
@@ -2093,7 +2333,7 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
             # ---- 无优化参数：仅跑一次 ----
             if not _opt_params:
-                base_params = (getattr(self, 'params', Addict()).copy() 
+                base_params = (getattr(self, 'params', Addict()).copy()
                                if hasattr(self, 'params') else {})
                 result_dict = _single_trial(base_params)
                 if 'error' in result_dict:
@@ -2102,7 +2342,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 eq = result_dict.get('equity')
                 sbr = SignalBacktestResult(
                     result_df=pd.DataFrame(result_dict),
-                    profits=pd.Series(eq, index=_base_kline.datetime.values[:len(eq)]) if eq is not None else pd.Series(),
+                    profits=pd.Series(eq, index=_base_kline.datetime.values[:len(
+                        eq)]) if eq is not None else pd.Series(),
                     init_cash=init_cash,
                     total_fee=result_dict.get('total_fee', 0.),
                     total_profit=result_dict.get('final_equity', init_cash),
@@ -2117,7 +2358,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
             # ---- 解析待优化参数 ----
             if not isinstance(_opt_params, dict):
-                raise ValueError("optimize_params 必须为 dict，如 {'length': (5,50,5)}")
+                raise ValueError(
+                    "optimize_params 必须为 dict，如 {'length': (5,50,5)}")
             param_defs: dict = {}  # {param_name: {type:'int'|'float'|'cat', low, high, step/choices}}
             for k, v in _opt_params.items():
                 if isinstance(v, (list, tuple)) and len(v) >= 2:
@@ -2133,9 +2375,11 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                             param_defs[k] = {'type': 'int', 'low': int(low), 'high': int(high),
                                              'step': int(step) if step is not None else 1}
                         else:
-                            param_defs[k] = {'type': 'float', 'low': low, 'high': high, 'step': step}
+                            param_defs[k] = {
+                                'type': 'float', 'low': low, 'high': high, 'step': step}
                 else:
-                    raise ValueError(f"optimize_params['{k}'] 格式错误，需要 (low,high) / (low,high,step) / [选项列表]")
+                    raise ValueError(
+                        f"optimize_params['{k}'] 格式错误，需要 (low,high) / (low,high,step) / [选项列表]")
 
             # ---- 解析优化目标和方向 ----
             if isinstance(_opt_target, str):
@@ -2164,7 +2408,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     f"targets={targets}"
                 )
             # 方向：正权重 = 最大化，负权重 = 最小化
-            directions = ["maximize" if w >= 0.0 else "minimize" for w in _opt_weights]
+            directions = ["maximize" if w >=
+                          0.0 else "minimize" for w in _opt_weights]
 
             # 计算加权分数（用于 grid 搜索排序 / 综合评分）
             def _weighted_score(r: dict) -> float:
@@ -2196,7 +2441,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     if pd_['type'] == 'cat':
                         param_ranges.append([(k, c) for c in pd_['choices']])
                     elif pd_['type'] == 'int':
-                        vals = list(range(pd_['low'], pd_['high'] + 1, pd_.get('step', 1)))
+                        vals = list(
+                            range(pd_['low'], pd_['high'] + 1, pd_.get('step', 1)))
                         param_ranges.append([(k, v) for v in vals])
                     else:  # float
                         step = pd_.get('step')
@@ -2208,7 +2454,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                                 v += step
                         else:
                             # 均匀 20 点
-                            vals = np.linspace(pd_['low'], pd_['high'], 20).tolist()
+                            vals = np.linspace(
+                                pd_['low'], pd_['high'], 20).tolist()
                         param_ranges.append([(k, round(v, 6)) for v in vals])
 
                 param_combos = []
@@ -2219,9 +2466,10 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     param_combos.append(full)
 
                 n_combos = len(param_combos)
-                weights_info = ", ".join(f"{t}({'max' if w>=0 else 'min'},w={abs(w):.1f})" 
-                                          for t, w in zip(targets, _opt_weights))
-                print(f"网格搜索：{n_combos} 组参数组合，目标={targets}，权重=[{weights_info}]，并行进程={n_jobs}")
+                weights_info = ", ".join(f"{t}({'max' if w >= 0 else 'min'},w={abs(w):.1f})"
+                                         for t, w in zip(targets, _opt_weights))
+                print(
+                    f"网格搜索：{n_combos} 组参数组合，目标={targets}，权重=[{weights_info}]，并行进程={n_jobs}")
 
                 all_results = []
                 if n_jobs in (-1, 'max'):
@@ -2232,14 +2480,15 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                         all_results.append(_single_trial(p, i))
                 else:
                     with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-                        futures = {executor.submit(_single_trial, p, i): i for i, p in enumerate(param_combos)}
+                        futures = {executor.submit(
+                            _single_trial, p, i): i for i, p in enumerate(param_combos)}
                         for fut in as_completed(futures):
                             try:
                                 all_results.append(fut.result())
                             except Exception as exc:
                                 idx = futures[fut]
                                 all_results.append({'params': param_combos[idx], 'trial': idx,
-                                                     'error': str(exc)})
+                                                    'error': str(exc)})
 
                 # 过滤错误结果并排序
                 valid_results = [r for r in all_results if 'error' not in r]
@@ -2250,14 +2499,17 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 valid_results.sort(key=_weighted_score, reverse=True)
 
                 best = valid_results[0]
-                best_params = {k: v for k, v in best['params'].items() if k in _opt_params}
+                best_params = {k: v for k,
+                               v in best['params'].items() if k in _opt_params}
 
                 print(f"\n{'='*60}")
-                print(f"网格搜索最优参数 (n={len(valid_results)}/{len(all_results)})，加权得分={_weighted_score(best):.4f}:")
+                print(
+                    f"网格搜索最优参数 (n={len(valid_results)}/{len(all_results)})，加权得分={_weighted_score(best):.4f}:")
                 for k, v in best_params.items():
                     print(f"  {k}: {v}")
                 for t, w in zip(targets, _opt_weights):
-                    print(f"  {t}: {best.get(t, 'N/A')}  (权重={'最大化' if w>=0 else '最小化'}, |w|={abs(w):.1f})")
+                    print(
+                        f"  {t}: {best.get(t, 'N/A')}  (权重={'最大化' if w >= 0 else '最小化'}, |w|={abs(w):.1f})")
                 print(f"{'='*60}")
 
                 # 输出 CSV
@@ -2267,11 +2519,13 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     df_rows = []
                     for r in valid_results[:50]:
                         row = {k: r[k] for k in targets}
-                        row.update({k: v for k, v in r['params'].items() if k in _opt_params})
+                        row.update(
+                            {k: v for k, v in r['params'].items() if k in _opt_params})
                         row['_weighted_score'] = _weighted_score(r)
                         df_rows.append(row)
                     df = pd.DataFrame(df_rows)
-                    csv_path = os.path.join(_opt_output, f"grid_search_{targets[0]}.csv")
+                    csv_path = os.path.join(
+                        _opt_output, f"grid_search_{targets[0]}.csv")
                     df.to_csv(csv_path, index=False)
                     print(f"结果已保存至: {csv_path}")
                     print(df.head(10).to_string())
@@ -2279,7 +2533,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 # 用最优参数重新运行指标，获取最优信号
                 if _has_next and ind_cls is not BtIndicator:
                     with _param_lock:
-                        ind_cls.params = Addict({**(_orig_cls_params or {}), **best_params})
+                        ind_cls.params = Addict(
+                            {**(_orig_cls_params or {}), **best_params})
                     best_ind = ind_cls(_base_kline)
                 else:
                     best_ind = self
@@ -2287,7 +2542,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
                 # 策略构建模式运行，得到丰富的结果展示
                 if _has_valid_signals(post_entries):
-                    t = _build_strategy_result(post_entries, post_exits, best_ind)
+                    t = _build_strategy_result(
+                        post_entries, post_exits, best_ind)
                 else:
                     print(f"[警告] 最优参数未产生有效交易信号，跳过策略构建与绘图。最优参数={best_params}")
                     t = None
@@ -2315,10 +2571,12 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
                 # 采样器
                 if sampler_name and hasattr(optuna.samplers, sampler_name):
-                    study_kwargs['sampler'] = getattr(optuna.samplers, sampler_name)()
+                    study_kwargs['sampler'] = getattr(
+                        optuna.samplers, sampler_name)()
                 # 剪枝器
                 if pruner_name and hasattr(optuna.pruners, pruner_name):
-                    study_kwargs['pruner'] = getattr(optuna.pruners, pruner_name)()
+                    study_kwargs['pruner'] = getattr(
+                        optuna.pruners, pruner_name)()
 
                 # 日志控制
                 if not _cfg.get('verbose', True):
@@ -2334,13 +2592,16 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                             p[k] = trial.suggest_categorical(k, pd_['choices'])
                         elif pd_['type'] == 'int':
                             step = pd_.get('step', 1)
-                            p[k] = trial.suggest_int(k, pd_['low'], pd_['high'], step=step)
+                            p[k] = trial.suggest_int(
+                                k, pd_['low'], pd_['high'], step=step)
                         else:  # float
                             step = pd_.get('step')
                             if step is not None:
-                                p[k] = trial.suggest_float(k, pd_['low'], pd_['high'], step=step)
+                                p[k] = trial.suggest_float(
+                                    k, pd_['low'], pd_['high'], step=step)
                             else:
-                                p[k] = trial.suggest_float(k, pd_['low'], pd_['high'])
+                                p[k] = trial.suggest_float(
+                                    k, pd_['low'], pd_['high'])
                     return p
 
                 # 定义目标函数
@@ -2357,17 +2618,20 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                         return vals[0]
                     return tuple(vals)
 
-                weights_info = ", ".join(f"{t}({'max' if w>=0 else 'min'},w={abs(w):.1f})"
-                                          for t, w in zip(targets, _opt_weights))
-                print(f"Optuna 优化：n_trials={n_trials}, targets={targets}, 权重=[{weights_info}], n_jobs={n_jobs}")
+                weights_info = ", ".join(f"{t}({'max' if w >= 0 else 'min'},w={abs(w):.1f})"
+                                         for t, w in zip(targets, _opt_weights))
+                print(
+                    f"Optuna 优化：n_trials={n_trials}, targets={targets}, 权重=[{weights_info}], n_jobs={n_jobs}")
                 study.optimize(_objective, n_trials=n_trials, n_jobs=n_jobs,
-                               show_progress_bar=_cfg.get('show_progress_bar', True))
+                               show_progress_bar=_cfg.get('show_progress_bar', True),
+                               callbacks=_cfg.get('callbacks'))
 
                 # 提取最优结果
                 if len(targets) == 1:
                     best_trial = study.best_trial
                 else:
-                    trials_sorted = sorted(study.best_trials, key=lambda t: t.values, reverse=True)
+                    trials_sorted = sorted(
+                        study.best_trials, key=lambda t: t.values, reverse=True)
                     best_trial = trials_sorted[-1] if trials_sorted else None
 
                 if best_trial is None:
@@ -2380,21 +2644,26 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     if k in _opt_params:
                         print(f"  {k}: {v}")
                 if len(targets) == 1:
-                    print(f"  {targets[0]}: {best_trial.value}  (权重={'最大化' if _opt_weights[0]>=0 else '最小化'}, |w|={abs(_opt_weights[0]):.1f})")
+                    print(
+                        f"  {targets[0]}: {best_trial.value}  (权重={'最大化' if _opt_weights[0] >= 0 else '最小化'}, |w|={abs(_opt_weights[0]):.1f})")
                 else:
                     value_dict = dict(zip(targets, best_trial.values))
                     for t, w in zip(targets, _opt_weights):
-                        print(f"  {t}: {value_dict.get(t, 'N/A')}  (权重={'最大化' if w>=0 else '最小化'}, |w|={abs(w):.1f})")
+                        print(
+                            f"  {t}: {value_dict.get(t, 'N/A')}  (权重={'最大化' if w >= 0 else '最小化'}, |w|={abs(w):.1f})")
                 print(f"{'='*60}")
 
                 # 保存 CSV
                 if _opt_output:
                     import os
                     os.makedirs(_opt_output, exist_ok=True)
-                    df = study.trials_dataframe(attrs=('number', 'value', 'params'))
+                    df = study.trials_dataframe(
+                        attrs=('number', 'value', 'params'))
                     value_cols = [c for c in df.columns if 'value' in c]
-                    df.sort_values(by=value_cols, ascending=False, inplace=True, ignore_index=True)
-                    csv_path = os.path.join(_opt_output, f"optuna_{targets[0]}.csv")
+                    df.sort_values(by=value_cols, ascending=False,
+                                   inplace=True, ignore_index=True)
+                    csv_path = os.path.join(
+                        _opt_output, f"optuna_{targets[0]}.csv")
                     df.to_csv(csv_path, index=False)
                     print(f"结果已保存至: {csv_path}")
                     print(df.head(10).to_string())
@@ -2403,7 +2672,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 best_metrics = _single_trial(dict(best_params))
                 if _has_next and ind_cls is not BtIndicator:
                     with _param_lock:
-                        ind_cls.params = Addict({**(_orig_cls_params or {}), **best_params})
+                        ind_cls.params = Addict(
+                            {**(_orig_cls_params or {}), **best_params})
                     best_ind = ind_cls(_base_kline)
                 else:
                     best_ind = self
@@ -2411,32 +2681,39 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
                 # 策略构建模式运行，得到丰富的结果展示
                 if _has_valid_signals(post_entries):
-                    t = _build_strategy_result(post_entries, post_exits, best_ind)
+                    t = _build_strategy_result(
+                        post_entries, post_exits, best_ind)
                 else:
                     print(f"[警告] 最优参数未产生有效交易信号，跳过策略构建与绘图。最优参数={best_params}")
                     t = None
                 return OptimizationResult(best_params=best_params,
-                                          best_score=_weighted_score(best_metrics),
+                                          best_score=_weighted_score(
+                                              best_metrics),
                                           best_metrics=best_metrics,
                                           study=study, method='optuna',
                                           target=targets, weights=_opt_weights, result=t)
 
             else:
-                raise ValueError(f"不支持的优化方法: {_opt_method}，可选 'grid' 或 'optuna'")
-        else:#策略构建模式，更丰富的结果展示
+                raise ValueError(
+                    f"不支持的优化方法: {_opt_method}，可选 'grid' 或 'optuna'")
+        else:  # 策略构建模式，更丰富的结果展示
             return _build_strategy_result(entries, exits)
 
     def pair_backtest(self,
-                     kline_a: KLine = None,
-                     kline_b: KLine = None,
-                     size: float = 1.0,
-                     size_type: SizeType | None = None,
-                     commission: list[float] | tuple[float, float] | None = None,
+                      kline_a: KLine = None,
+                      kline_b: KLine = None,
+                      size: float = 1.0,
+                      size_type: SizeType | None = None,
+                      commission: list[float] | tuple[float,
+                                                      float] | None = None,
                       com_type: int | CommissionType | None = None,
                       slip_point: float | None = None,
-                      margin_rate: list[float] | tuple[float, float] | None = None,
-                      price_tick: list[float] | tuple[float, float] | None = None,
-                      volume_multiple: list[float] | tuple[float, float] | None = None,
+                      margin_rate: list[float] | tuple[float,
+                                                       float] | None = None,
+                      price_tick: list[float] | tuple[float,
+                                                      float] | None = None,
+                      volume_multiple: list[float] | tuple[float,
+                                                           float] | None = None,
                       leg_size_ratio: float | tuple[float, float] = 1.0,
                       prices: np.ndarray | IndSeries | None = None,
                       init_cash: float = 1000000.0,
@@ -2481,14 +2758,14 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         | ``optimize`` | ``bool | OptimizeConfig`` | ``False`` | 参数优化模式 |
 
         ### Example:
-            >>> close1 = LocalDatas.v2609_60.kline.close.values
+            >>> close1 = LocalDatas.l2609_60.kline.close.values
             >>> close2 = LocalDatas.pp2609_60.kline.close.values
             >>> df = IndFrame(dict(v_close=close2, pp_close=close1))
             >>> kf = KalmanFilter(df)
             >>> # 设置信号
             >>> kf = KalmanFilter(df)
             >>> result = df.pair_backtest(
-            ...     kline_a=LocalDatas.v2609_60.kline,
+            ...     kline_a=LocalDatas.l2609_60.kline,
             ...     kline_b=LocalDatas.pp2609_60.kline,
             ...     optimize=True,
             ...     optimize_params={'OPEN_H': (1.5, 3.0, 0.1), 'OPEN_L': (-3.0, -1.5, 0.1)},
@@ -2514,14 +2791,19 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         if size_type is None:
             size_type = SizeType.Amount
 
-        _margin_rate = _get_dual_param(kline_a, kline_b, margin_rate, 'margin_rate', 0.1, 0.1)
-        _price_tick = _get_dual_param(kline_a, kline_b, price_tick, 'price_tick', 1.0, 1.0)
-        _vol_mult = _get_dual_param(kline_a, kline_b, volume_multiple, 'volume_multiple', 5.0, 5.0)
+        _margin_rate = _get_dual_param(
+            kline_a, kline_b, margin_rate, 'margin_rate', 0.1, 0.1)
+        _price_tick = _get_dual_param(
+            kline_a, kline_b, price_tick, 'price_tick', 1.0, 1.0)
+        _vol_mult = _get_dual_param(
+            kline_a, kline_b, volume_multiple, 'volume_multiple', 5.0, 5.0)
 
         if commission is None:
-            _commission = _get_dual_param(kline_a, kline_b, None, 'commission', 1.0, 1.0)
+            _commission = _get_dual_param(
+                kline_a, kline_b, None, 'commission', 1.0, 1.0)
         else:
-            _commission = _get_dual_param(kline_a, kline_b, commission, '', 0.0, 0.0)
+            _commission = _get_dual_param(
+                kline_a, kline_b, commission, '', 0.0, 0.0)
 
         if com_type is None:
             ct = None
@@ -2581,7 +2863,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             #   多头腿(dir=+1)直接匹配 exits<0 触发平仓 → 级联平空头腿
             #   空头腿(dir=-1)不直接匹配，但对侧多头腿先平 → 级联平仓
             try:
-                _ev = exits.values if hasattr(exits, 'values') else np.asarray(exits)
+                _ev = exits.values if hasattr(
+                    exits, 'values') else np.asarray(exits)
                 if exitlong_sig is not None and np.all(_ev == 0):
                     exits = -exitlong_sig
             except Exception:
@@ -2604,13 +2887,15 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         if isinstance(entries, IndSeries):
             entries_arr = entries.values
         else:
-            entries_arr = entries.values if hasattr(entries, 'values') else np.asarray(entries)
+            entries_arr = entries.values if hasattr(
+                entries, 'values') else np.asarray(entries)
         entries_arr = np.atleast_1d(entries_arr)
 
         if isinstance(exits, IndSeries):
             exits_arr = exits.values
         else:
-            exits_arr = exits.values if hasattr(exits, 'values') else np.asarray(exits)
+            exits_arr = exits.values if hasattr(
+                exits, 'values') else np.asarray(exits)
         exits_arr = np.atleast_1d(exits_arr)
 
         # ---- 获取价格数据 ----
@@ -2799,7 +3084,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     from ..strategy.bokeh_plot import plot as bokeh_plot
                     from bokeh.resources import INLINE
                     from bokeh.embed import file_html
-                    tabs = bokeh_plot([sbr], True, False, False, None, '', '', False)
+                    tabs = bokeh_plot([sbr], True, False,
+                                      False, None, '', '', False)
                     html_path = "pair_backtest_plot.html"
                     html = file_html(tabs, INLINE, "Pair Backtest")
                     with open(html_path, 'w', encoding='utf-8') as f:
@@ -2822,12 +3108,14 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
         # ==================================================================
         if optimize:
             if isinstance(optimize, OptimizeConfig):
-                _opt_params = optimize.params if optimize.params else kwargs.pop('optimize_params', {})
+                _opt_params = optimize.params if optimize.params else kwargs.pop(
+                    'optimize_params', {})
                 _opt_target = optimize.target
                 _opt_method = optimize.method
                 _opt_weights_data = optimize.weights
                 _opt_config = optimize.config
-                _opt_n_jobs = optimize.n_jobs if optimize.n_jobs != 1 else kwargs.pop('n_jobs', 1)
+                _opt_n_jobs = optimize.n_jobs if optimize.n_jobs != 1 else kwargs.pop(
+                    'n_jobs', 1)
                 _opt_output = optimize.output_dir
                 _opt_weights = _opt_weights_data if _opt_weights_data is not None else optimize_weights
             else:
@@ -2844,10 +3132,12 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             # ---- 指标类信息 ----
             ind_cls = getattr(self, '_bt_indicator_cls', None)
             if ind_cls is None:
-                raise ValueError("pair_backtest 需要指标由 BtIndicator 创建（需设置 _bt_indicator_cls）。")
+                raise ValueError(
+                    "pair_backtest 需要指标由 BtIndicator 创建（需设置 _bt_indicator_cls）。")
             _has_next = (hasattr(ind_cls, '_is_method_overridden')
                          and ind_cls._is_method_overridden('next'))
-            _orig_cls_params = getattr(ind_cls, 'params', Addict()).copy() if _has_next else None
+            _orig_cls_params = getattr(
+                ind_cls, 'params', Addict()).copy() if _has_next else None
             import threading
             _param_lock = threading.Lock()
 
@@ -2867,7 +3157,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
                 if _has_next and ind_cls is not BtIndicator:
                     with _param_lock:
-                        ind_cls.params = Addict({**(_orig_cls_params or {}), **p})
+                        ind_cls.params = Addict(
+                            {**(_orig_cls_params or {}), **p})
                         new_ind = ind_cls(_pair_data)
                     ls = getattr(new_ind, 'long_signal', None)
                     ss = getattr(new_ind, 'short_signal', None)
@@ -2919,24 +3210,27 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     if len(returns.dropna()) > 1:
                         m['sharpe'] = float(qs_stats.sharpe(returns) or 0.)
                         m['sortino'] = float(qs_stats.sortino(returns) or 0.)
-                        m['max_drawdown'] = float(qs_stats.max_drawdown(returns) or -1.)
+                        m['max_drawdown'] = float(
+                            qs_stats.max_drawdown(returns) or -1.)
                         m['calmar'] = float(qs_stats.calmar(returns) or 0.)
                         m['win_rate'] = float(qs_stats.win_rate(returns) or 0.)
-                        m['profit_factor'] = float(qs_stats.profit_factor(returns) or 0.)
+                        m['profit_factor'] = float(
+                            qs_stats.profit_factor(returns) or 0.)
                         m['cagr'] = float(qs_stats.cagr(returns) or 0.)
                     else:
-                        for k in ('sharpe','sortino','calmar','win_rate','profit_factor','cagr'):
+                        for k in ('sharpe', 'sortino', 'calmar', 'win_rate', 'profit_factor', 'cagr'):
                             m[k] = 0.
                         m['max_drawdown'] = -1.
                 except Exception:
-                    for k in ('sharpe','sortino','calmar','win_rate','profit_factor','cagr'):
+                    for k in ('sharpe', 'sortino', 'calmar', 'win_rate', 'profit_factor', 'cagr'):
                         m[k] = 0.
                     m['max_drawdown'] = -1.
 
                 m['params'] = p
                 m['trial'] = trial_id
                 m['final_equity'] = float(eq[-1]) if eq is not None else 0.
-                m['total_return_pct'] = (m['final_equity'] / init_cash - 1.) * 100.
+                m['total_return_pct'] = (
+                    m['final_equity'] / init_cash - 1.) * 100.
                 m['total_fee'] = float(fee) if fee is not None else 0.
                 m['equity'] = eq
                 m['returns'] = returns
@@ -2952,7 +3246,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 eq = result_dict.get('equity')
                 sbr = SignalBacktestResult(
                     result_df=pd.DataFrame(result_dict),
-                    profits=pd.Series(eq, index=_datetime_idx[:len(eq)] if _datetime_idx is not None else None) if eq is not None else pd.Series(),
+                    profits=pd.Series(eq, index=_datetime_idx[:len(
+                        eq)] if _datetime_idx is not None else None) if eq is not None else pd.Series(),
                     init_cash=init_cash,
                     total_fee=result_dict.get('total_fee', 0.),
                     total_profit=result_dict.get('final_equity', init_cash),
@@ -2982,7 +3277,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                             param_defs[k] = {'type': 'int', 'low': int(low), 'high': int(high),
                                              'step': int(step) if step is not None else 1}
                         else:
-                            param_defs[k] = {'type': 'float', 'low': low, 'high': high, 'step': step}
+                            param_defs[k] = {
+                                'type': 'float', 'low': low, 'high': high, 'step': step}
                 else:
                     raise ValueError(f"optimize_params['{k}'] 格式错误")
 
@@ -3004,9 +3300,11 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
             elif isinstance(_opt_weights, (list, tuple)):
                 _opt_weights = tuple(float(w) for w in _opt_weights)
             if len(_opt_weights) != len(targets):
-                raise ValueError(f"optimize_weights 数量 ({len(_opt_weights)}) 与 targets ({len(targets)}) 不一致")
+                raise ValueError(
+                    f"optimize_weights 数量 ({len(_opt_weights)}) 与 targets ({len(targets)}) 不一致")
 
-            directions = ["maximize" if w >= 0.0 else "minimize" for w in _opt_weights]
+            directions = ["maximize" if w >=
+                          0.0 else "minimize" for w in _opt_weights]
 
             def _weighted_score(r):
                 s = 0.0
@@ -3028,7 +3326,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     if d['type'] == 'cat':
                         param_grid[k] = d['choices']
                     elif d['type'] == 'int':
-                        param_grid[k] = list(range(d['low'], d['high'] + 1, d.get('step', 1)))
+                        param_grid[k] = list(
+                            range(d['low'], d['high'] + 1, d.get('step', 1)))
                     else:
                         if d.get('step'):
                             vals = [d['low']]
@@ -3039,12 +3338,14 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                             param_grid[k] = [d['low'], d['high']]
 
                 keys = list(param_grid.keys())
-                combos = [dict(zip(keys, v)) for v in itertools.product(*param_grid.values())]
+                combos = [dict(zip(keys, v))
+                          for v in itertools.product(*param_grid.values())]
                 total_combos = len(combos)
 
                 all_results = []
                 with ThreadPoolExecutor(max_workers=n_jobs if n_jobs > 0 else 1) as ex:
-                    futures = {ex.submit(_single_pair_trial, c, idx): c for idx, c in enumerate(combos)}
+                    futures = {
+                        ex.submit(_single_pair_trial, c, idx): c for idx, c in enumerate(combos)}
                     for fut in as_completed(futures):
                         all_results.append(fut.result())
 
@@ -3053,7 +3354,8 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                 best_params = best_metrics.get('params', {})
                 best_ind = None
                 if _has_next and ind_cls is not BtIndicator:
-                    ind_cls.params = Addict({**(_orig_cls_params or {}), **best_params})
+                    ind_cls.params = Addict(
+                        {**(_orig_cls_params or {}), **best_params})
                     best_ind = ind_cls(_pair_data)
                 else:
                     best_ind = self
@@ -3077,17 +3379,21 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
                 if _has_valid_signals_idx(post_e):
                     t = _build_pair_strategy_result(
-                        IndSeries(post_e, index=self.index) if isinstance(entries, IndSeries) else post_e,
-                        IndSeries(post_x, index=self.index) if isinstance(entries, IndSeries) else post_x,
+                        IndSeries(post_e, index=self.index) if isinstance(
+                            entries, IndSeries) else post_e,
+                        IndSeries(post_x, index=self.index) if isinstance(
+                            entries, IndSeries) else post_x,
                         best_ind)
                 else:
                     print(f"[警告] 最优参数未产生有效交易信号，跳过绘图。最优参数={best_params}")
                     t = None
 
                 return OptimizationResult(best_params=best_params,
-                                          best_score=_weighted_score(best_metrics),
+                                          best_score=_weighted_score(
+                                              best_metrics),
                                           best_metrics=best_metrics,
-                                          study={'results': all_results, 'total': total_combos},
+                                          study={'results': all_results,
+                                                 'total': total_combos},
                                           method='grid',
                                           target=targets, weights=_opt_weights, result=t)
 
@@ -3114,9 +3420,11 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                         pass
 
                 if pruner:
-                    study = optuna.create_study(directions=directions, sampler=sampler, pruner=pruner)
+                    study = optuna.create_study(
+                        directions=directions, sampler=sampler, pruner=pruner)
                 else:
-                    study = optuna.create_study(directions=directions, sampler=sampler)
+                    study = optuna.create_study(
+                        directions=directions, sampler=sampler)
 
                 def _optuna_objective(trial):
                     p = {}
@@ -3124,9 +3432,11 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                         if d['type'] == 'cat':
                             p[k] = trial.suggest_categorical(k, d['choices'])
                         elif d['type'] == 'int':
-                            p[k] = trial.suggest_int(k, d['low'], d['high'], step=d.get('step', 1))
+                            p[k] = trial.suggest_int(
+                                k, d['low'], d['high'], step=d.get('step', 1))
                         else:
-                            p[k] = trial.suggest_float(k, d['low'], d['high'], step=d.get('step'))
+                            p[k] = trial.suggest_float(
+                                k, d['low'], d['high'], step=d.get('step'))
                     r = _single_pair_trial(p, trial.number)
                     if 'error' in r:
                         r.update({t: 0.0 for t in targets})
@@ -3134,22 +3444,27 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
                     trial.set_user_attr('_result', r)
                     return [r.get(t, 0.0) for t in targets]
 
-                study.optimize(_optuna_objective, n_trials=n_trials, n_jobs=n_jobs if n_jobs > 0 else 1)
+                study.optimize(_optuna_objective, n_trials=n_trials,
+                               n_jobs=n_jobs if n_jobs > 0 else 1,
+                               callbacks=_cfg.get('callbacks'))
 
                 # 多目标优化时 study.best_params / study.best_trial 不可用，需从 Pareto 前沿中选取
                 if len(targets) == 1:
                     best_trial = study.best_trial
                 else:
-                    trials_sorted = sorted(study.best_trials, key=lambda t: t.values, reverse=True)
+                    trials_sorted = sorted(
+                        study.best_trials, key=lambda t: t.values, reverse=True)
                     best_trial = trials_sorted[-1] if trials_sorted else None
                 if best_trial is None:
                     raise RuntimeError("Optuna 未找到有效试验")
                 best_params = best_trial.params
                 best_trial_attrs = best_trial.user_attrs
-                best_metrics = best_trial_attrs.get('_result', {}) if '_result' in best_trial_attrs else {}
+                best_metrics = best_trial_attrs.get(
+                    '_result', {}) if '_result' in best_trial_attrs else {}
 
                 if _has_next and ind_cls is not BtIndicator:
-                    ind_cls.params = Addict({**(_orig_cls_params or {}), **best_params})
+                    ind_cls.params = Addict(
+                        {**(_orig_cls_params or {}), **best_params})
                     best_ind = ind_cls(_pair_data)
                 else:
                     best_ind = self
@@ -3173,25 +3488,219 @@ class IndFrame(IndicatorsBase, PandasDataFrame, PandasTa, TaLib):
 
                 if _has_valid_signals_idx(post_e):
                     t = _build_pair_strategy_result(
-                        IndSeries(post_e, index=self.index) if isinstance(entries, IndSeries) else post_e,
-                        IndSeries(post_x, index=self.index) if isinstance(entries, IndSeries) else post_x,
+                        IndSeries(post_e, index=self.index) if isinstance(
+                            entries, IndSeries) else post_e,
+                        IndSeries(post_x, index=self.index) if isinstance(
+                            entries, IndSeries) else post_x,
                         best_ind)
                 else:
                     print(f"[警告] 最优参数未产生有效交易信号，跳过绘图。最优参数={best_params}")
                     t = None
 
                 return OptimizationResult(best_params=best_params,
-                                          best_score=_weighted_score(best_metrics),
+                                          best_score=_weighted_score(
+                                              best_metrics),
                                           best_metrics=best_metrics,
                                           study=study, method='optuna',
                                           target=targets, weights=_opt_weights, result=t)
 
             else:
-                raise ValueError(f"不支持的优化方法: {_opt_method}，可选 'grid' 或 'optuna'")
+                raise ValueError(
+                    f"不支持的优化方法: {_opt_method}，可选 'grid' 或 'optuna'")
 
         else:
             # 策略构建模式
             return _build_pair_strategy_result(entries, exits)
+
+    def signal_profit(self,
+                      bar: int | list[int] = 5,
+                      price: np.ndarray | None = None,
+                      isplot: bool = True) -> dict:
+        """
+        ## 基于交易信号计算持仓收益曲线
+
+        使用IndFrame内置的交易信号（``long_signal``/``short_signal``），
+        通过Cython加速的引擎计算每根持仓K线的收益表现。
+
+        ### 收益计算逻辑:
+        - 初始 profit = 1.0
+        - 多头: profit = pre_profit * (1 + (current_price - open_price) / open_price)
+        - 空头: profit = pre_profit * (1 + (open_price - current_price) / open_price)
+        - open_price 为信号出现时的价格 (固定)
+
+        ### Args:
+        | 参数 | 类型 | 默认值 | 说明 |
+        |---|---|---|---|
+        | `bar` | `int | list[int]` | `5` | 持仓K线根数，可传单个或多个值 (如 `[3, 5, 10]`) |
+        | `price` | `np.ndarray` | `None` | 参考价格数组，默认使用K线收盘价 close |
+        | `isplot` | `bool` | `True` | 是否绘制收益图表 |
+
+        ### Returns:
+        `dict`: 包含以下键的收益数据字典
+        - `long_profits`: 多头收益数组 (每信号×每bar档)
+        - `short_profits`: 空头收益数组 (每信号×每bar档)
+        - `signal_indices`: 信号出现位置
+        - `signal_directions`: 信号方向 (1=多头, -1=空头)
+        - `cum_long`: 多头累计收益曲线列表 (每bar档一条)
+        - `cum_short`: 空头累计收益曲线列表 (每bar档一条)
+        - `bars`: 使用的持仓根数列表
+
+        ### Example:
+        ```python
+        # 单档持仓
+        result = ind.signal_profit(bar=5)
+
+        # 多档持仓对比
+        result = ind.signal_profit(bar=[3, 5, 10])
+
+        # 自定义价格
+        result = ind.signal_profit(bar=5, price=my_custom_price_array)
+        ```
+        """
+        from ..cython_functions.signal_profit import calc_signal_profit
+
+        # 获取信号数据
+        long_sig = self.long_signal
+        short_sig = self.short_signal
+
+        if long_sig is None and short_sig is None:
+            raise ValueError(
+                "请先设置 long_signal 和/或 short_signal 信号。\n"
+                "示例: ind.long_signal = ind.ma5.cross_up(ind.ma10)"
+            )
+
+        # 获取价格数据
+        if price is None:
+            kline = None
+            for sig_name in ('_long_signal', '_short_signal'):
+                sig = getattr(self, sig_name, None)
+                if sig is not None and sig.kline is not None:
+                    kline = sig.kline
+                    break
+            if kline is None:
+                raise ValueError(
+                    "无法自动找到关联的KLine对象。请通过 price 参数显式指定价格数组：\n"
+                    "  result = ind.signal_profit(bar=5, price=close_array)"
+                )
+            price_arr = kline.close.values if hasattr(
+                kline.close, 'values') else np.asarray(kline.close)
+        else:
+            price_arr = np.asarray(price, dtype=np.float64)
+        price_arr = np.array(price_arr, dtype=np.float64, copy=True)
+
+        # 构建信号数组
+        # 只有long_signal → 正值为多头
+        # 只有short_signal → 负值为空头
+        # 两个都有 → 大于0为多头，小于0为空头
+        n = len(price_arr)
+        signal_arr = np.zeros(n, dtype=np.float64)
+
+        if long_sig is not None:
+            long_vals = long_sig.values if hasattr(
+                long_sig, 'values') else np.asarray(long_sig)
+            signal_arr += np.array(long_vals, dtype=np.float64, copy=True)
+
+        if short_sig is not None:
+            short_vals = short_sig.values if hasattr(
+                short_sig, 'values') else np.asarray(short_sig)
+            signal_arr -= np.array(short_vals, dtype=np.float64, copy=True)
+
+        # 处理 bar 参数
+        if isinstance(bar, (int, float)):
+            bars = [int(bar)]
+        else:
+            bars = [int(b) for b in bar]
+
+        # 调用 cython 引擎前确保类型正确
+        signal_arr = np.array(signal_arr, dtype=np.float64, copy=True)
+        price_arr = np.array(price_arr, dtype=np.float64, copy=True)
+        result = calc_signal_profit(signal_arr, price_arr, bars)
+        # 删除大数组，避免Jupyter输出过长
+        result.pop('long_profits', None)
+        result.pop('short_profits', None)
+
+        if isplot:
+            from ..btplot import signal_profit_plot
+            signal_profit_plot(result, self)
+            return None
+
+        return result
+
+    def backtest(self, **kwargs) -> Bt:
+        """## 用指标自带的 ``step`` 交易逻辑快速回测
+
+        - 适用于通过 ``BtIndicator`` 构造、并在类中重写了 ``step`` 的指标
+          (即指标内部已包含完整的买卖/持仓逻辑), 此时相当于直接对该指标做一次
+          完整的策略回测, 无需再编写 ``Strategy``。
+        - 内部自动创建策略: 以该指标关联的 KLine 为数据源, 每根 K 线调用
+          ``indicator.step()``; 下单/反手/止损等细节完全由指标自身的
+          ``step`` 决定(即指标就是策略)。
+
+        ### 📘 用法(参考 ``KLine.run``):
+        >>> ema = LocalDatas.test.kline.tradingview.SingleEMACross()
+        >>> bt  = ema.backtest()                    # 回测并绘图
+        >>> bt  = ema.backtest(isplot=False)        # 只回测, 不绘图
+        >>> bt  = ema.backtest(config=Config(...), name="EMACross")
+
+        ### Args:
+        - **kwargs: 透传给 ``Bt.run`` (如 ``isplot`` / ``isreport`` /
+          ``black_style`` / ``plot_name`` 等); 另额外识列:
+            - config (Config): 回测配置, 默认 ``Config(islog=False, profit_plot=True)``
+            - name (str): 自动生成的策略名, 默认 ``"<指标类名>Backtest"``
+
+        ### Returns:
+        >>> Bt: 执行完毕的回测控制器实例
+
+        ### Raises:
+        - ValueError: 指标未关联 KLine, 或该指标未实现 ``step`` 交易逻辑
+        """
+        from ..bt import Bt
+        from ..utils import Config as btconfig
+        from ..strategy.strategy import Strategy
+
+        indicator = self
+        kline = self.kline
+        if kline is None:
+            raise ValueError(
+                "该指标未关联K线数据(KLine), 无法回测; "
+                "请通过 kline.tradingview.Xxx() 在KLine上创建指标。")
+
+        # 仅当指标重写了 step (即自带交易逻辑) 才可回测
+        ind_cls = getattr(self, "_bt_indicator_cls", None)
+        has_step = "step" in self.__dict__ or (
+            ind_cls is not None
+            and hasattr(ind_cls, "_is_method_overridden")
+            and ind_cls._is_method_overridden("step"))
+        if not has_step:
+            _name = ind_cls.__name__ if ind_cls else type(self).__name__
+            raise ValueError(
+                f"指标 {_name} 未实现 step 交易逻辑, "
+                "无法用 backtest() 回测; 请改用 signal_backtest()。")
+
+        config = kwargs.pop("config", None)
+        if not isinstance(config, btconfig):
+            config = btconfig(islog=False, profit_plot=True)
+
+        class IndicatorBacktestStrategy(Strategy):
+            """由 ``IndFrame.backtest()`` 自动生成的策略:
+            以关联 KLine 为数据源, 每根 K 线调用指标自带的 ``step()``。"""
+
+            def __init__(self):
+                self.data = kline
+                self.indicator = indicator
+
+            def next(self):
+                self.indicator.step()
+
+        IndicatorBacktestStrategy.config = config
+        IndicatorBacktestStrategy.__name__ = kwargs.pop(
+            "name", f"{ind_cls.__name__ if ind_cls else 'Indicator'}Backtest")
+
+        bt = Bt().addstrategy(IndicatorBacktestStrategy).run(**kwargs)
+        # 清理本次回测生成的策略实例, 避免污染指标后续使用
+        self._strategy_instances.pop(
+            f"{IndicatorBacktestStrategy.__name__}_0", None)
+        return bt
 
 
 def _has_valid_signals_idx(arr):
@@ -3256,9 +3765,9 @@ class OptimizeConfig:
         result = ind.signal_backtest(optimize=config)
     """
 
-    params: dict = field(default_factory=lambda:{})     # 待优化参数范围
-    target: str | list[str] | OPTTargetType= 'sharpe'   # 优化目标指标
-    method: Literal['grid', 'optuna']= 'optuna'         # 'grid' | 'optuna'
+    params: dict = field(default_factory=lambda: {})     # 待优化参数范围
+    target: str | list[str] | OPTTargetType = 'sharpe'   # 优化目标指标
+    method: Literal['grid', 'optuna'] = 'optuna'         # 'grid' | 'optuna'
     weights: float | tuple[float] | None = None         # 优化权重
     config: dict[str,] | None = None                    # 优化器配置
     n_jobs: int = 1                                     # 并行线程数
@@ -3267,7 +3776,7 @@ class OptimizeConfig:
 
 class OptimizationResult:
     """## 信号回测优化结果容器
-    
+
     用于存储 optimize=True 模式下的参数优化结果（网格搜索 / Optuna 贝叶斯优化）。
     通过 :meth:`IndFrame.signal_backtest` 方法在 optimize=True 时创建，无需手动实例化。
 
@@ -3307,11 +3816,11 @@ class OptimizationResult:
         target_str = self.target
         if self.weights is not None:
             if isinstance(self.target, (list, tuple)) and isinstance(self.weights, (list, tuple)):
-                w_strs = [f"{t}({'max' if w>=0 else 'min'},|w|={abs(w):.1f})" 
+                w_strs = [f"{t}({'max' if w >= 0 else 'min'},|w|={abs(w):.1f})"
                           for t, w in zip(self.target, self.weights)]
                 target_str = f"[{', '.join(w_strs)}]"
             elif isinstance(self.weights, (float, int)):
-                target_str = f"{self.target}({'max' if self.weights>=0 else 'min'},|w|={abs(self.weights):.1f})"
+                target_str = f"{self.target}({'max' if self.weights >= 0 else 'min'},|w|={abs(self.weights):.1f})"
         print(f" 优化方法: {self.method.upper()}  |  目标: {target_str}")
         print(f"{'='*60}")
         print(" 最优参数:")
@@ -3326,7 +3835,8 @@ class OptimizationResult:
                 if isinstance(mv, (int, float)):
                     display_metrics[mk] = mv
             if display_metrics:
-                metrics_list = [(k, v, "{:.4f}") for k, v in display_metrics.items()]
+                metrics_list = [(k, v, "{:.4f}")
+                                for k, v in display_metrics.items()]
                 print(format_3col_report(metrics_list, "OptimizationResult"))
         elif self.best_score is not None:
             print(f" 加权最优值: {self.best_score:.4f}")
@@ -3335,9 +3845,11 @@ class OptimizationResult:
     def to_dataframe(self) -> 'pd.DataFrame':
         """返回试验结果 DataFrame"""
         if self.study is not None:
-            df = self.study.trials_dataframe(attrs=('number', 'value', 'params'))
+            df = self.study.trials_dataframe(
+                attrs=('number', 'value', 'params'))
             value_cols = [c for c in df.columns if 'value' in c]
-            df.sort_values(by=value_cols, ascending=False, inplace=True, ignore_index=True)
+            df.sort_values(by=value_cols, ascending=False,
+                           inplace=True, ignore_index=True)
             return df
         elif self.all_results:
             rows = []
@@ -3363,13 +3875,15 @@ class OptimizationResult:
             if isinstance(self.target, (list, tuple)):
                 optuna.visualization.plot_pareto_front(self.study).show()
             else:
-                optuna.visualization.plot_optimization_history(self.study).show()
+                optuna.visualization.plot_optimization_history(
+                    self.study).show()
                 optuna.visualization.plot_param_importances(self.study).show()
         except Exception as e:
             print(f"Optuna 图表绘制失败: {e}")
 
     def __repr__(self):
-        params_str = ', '.join(f'{k}={v}' for k, v in list(self.best_params.items())[:5])
+        params_str = ', '.join(f'{k}={v}' for k, v in list(
+            self.best_params.items())[:5])
         if len(self.best_params) > 5:
             params_str += '...'
         return (f"OptimizationResult(method={self.method}, target={self.target}, "
@@ -3397,14 +3911,14 @@ class SignalBacktestResult:
     - ``.report(output, show)``: 生成 QuantStats HTML 分析报告
     """
 
-    def __init__(self, 
-            result_df: pd.DataFrame, 
-            profits:pd.Series, 
-            init_cash:float, 
-            total_fee:float,
-            total_profit:float, 
-            kline:KLine, 
-            params:dict):
+    def __init__(self,
+                 result_df: pd.DataFrame,
+                 profits: pd.Series,
+                 init_cash: float,
+                 total_fee: float,
+                 total_profit: float,
+                 kline: KLine,
+                 params: dict):
         self.result_df = result_df
         self.profits = profits
         self.init_cash = init_cash
@@ -3424,8 +3938,8 @@ class SignalBacktestResult:
         if self._net_worth_cache is None:
             nw = self.profits.pct_change()
             nw.iloc[0] = 0.
-            index=pd.Index(self.kline.datetime.values)
-            nw.index=index
+            index = pd.Index(self.kline.datetime.values)
+            nw.index = index
             self._net_worth_cache = nw
         return self._net_worth_cache
 
@@ -3704,9 +4218,10 @@ class KLine(IndFrame):
         elif not set(data.columns).issuperset(FILED.Quote):
             data.add_info(**default_symbol_info(data))
         data = data[FILED.Quote]
-        data.datetime= pd.to_datetime(data.datetime)
+        data.datetime = pd.to_datetime(data.datetime)
         * _, symbol, cycle, price_tick, volume_multiple = data.loc[data.index[0]]
-        # kwargs.update(dict(isindicator=False))
+        # ⚠ ``height`` 已废弃（图表按 pane 比例布局）：不再默认注入 ✗
+        # （仍保留吞参：老代码传高度也不会报错 ✓）
         super().__init__(data[FILED.ALL], **kwargs)
         symbol_info = SymbolInfo(
             symbol, cycle, price_tick, volume_multiple)
@@ -3744,16 +4259,14 @@ class KLine(IndFrame):
         self._dataset = DataFrameSet(data[FILED.ALL], kline_object=kwargs.pop("kline_object", data), source_object=kwargs.pop(
             "source_object", self), conversion_object=kwargs.pop("conversion_object", None), custom_object=kwargs.pop("custom_object", None),
             tq_object=kwargs.pop("tq_object", None), tq_tick=kwargs.pop("tq_tick", None), copy_object=data.copy()[FILED.ALL])
-        self._plotinfo.set_default_candles(current_close[-1], self.height)
+        self._plotinfo.set_default_candles(current_close[-1])
         self._source_index = kwargs.get("source_index", None)
         self._broker = None
         self._new_datetime: datetime.datetime | None = None
         self._light_chart_candles_up_color = False
         self._light_chart_candles_down_color = False
         self._cooldown_entry_time = pd.NaT  # 冷却时间结束时间
-        self._trading_time_filter = None # 交易时间过滤器
-
-
+        self._trading_time_filter = None  # 交易时间过滤器
 
         if not self._strategy_instances:
             self._plotinfo.sname = "KLine"
@@ -3770,14 +4283,14 @@ class KLine(IndFrame):
         if self._broker is None:
             return
         return self._broker._pending_orders
-    
+
     @property
     def exectype(self) -> OrderType | None:
         """### 订单执行类型"""
         if self._broker is None:
             return
         return self._broker._default_exectype
-    
+
     @exectype.setter
     def exectype(self, value: OrderType):
         if self._broker is None:
@@ -3848,14 +4361,26 @@ class KLine(IndFrame):
         self.factors_df = factors_df
 
     def _inplace_values(self):
-        """### 实时更新函数"""
-        new_datas = self._dataset.tq_object.copy()[FILED.ALL]
-        new_datas.datetime = new_datas.datetime.apply(time_to_datetime)
-        # new_datas: pd.DataFrame = new_datas[new_datas["datetime"]
-        #                                     >= self.pandas_object["datetime"].iloc[-1]]
-        # new_datas.reset_index(drop=True, inplace=True)
-        # pandas_object = pd.concat(
-        #     [self._dataset.pandas_object.iloc[:-1], new_datas], axis=0, ignore_index=True)
+        """### 实时更新函数
+
+        ``_preload``：实盘开启“无限历史”时，`tq_object` 底层拉了很多根
+        （如 10000），但策略每次 tick 都要重算指标；如果拿全量算，
+        10000 根 × 多个策略每 tick 要几百 ms。所以这里只用最后 ``_preload``
+        根（图表先显示的窗口），图表的历史由图层的无限历史单独处理。
+        """
+        source = self._dataset.tq_object[FILED.ALL]
+        preload = getattr(self, '_preload', None)
+        if preload:
+            try:
+                preload = int(preload)
+            except (TypeError, ValueError):
+                preload = 0
+            # 先切尾再 copy/转时间：否则每个 tick 都要 copy 全量（如 10000）根
+            # 并对整列 datetime `.apply`（实测 ~35ms -> ~2ms）。
+            if 0 < preload < len(source):
+                source = source.iloc[-preload:]
+        new_datas = source.copy()
+        new_datas.datetime = _fast_time_to_datetime(new_datas.datetime)
         new_datas.reset_index(drop=True, inplace=True)
         self._update_replace(new_datas)
 
@@ -4037,11 +4562,10 @@ class KLine(IndFrame):
             return
         if not self._broker.commission:
             return
-        key=list(self._broker.commission.keys())[0]
-        
+        key = list(self._broker.commission.keys())[0]
+
         from ..other import CommissionType
-        return getattr(CommissionType,key.capitalize(),None)
-        
+        return getattr(CommissionType, key.capitalize(), None)
 
     @property
     def slip_point(self) -> float | None:
@@ -4075,15 +4599,16 @@ class KLine(IndFrame):
         if stop and (issubclass(stop.func, Stop) if isinstance(stop, partial) else issubclass(stop, Stop)):
             self._klinesetting.isstop = True
             self._klinesetting.set_default_stop_lines(self.id)
-            
+
             # 确保 KLine 对象正确关联到策略实例
             kline_for_stop = self
             if self.strategy_instance is not None and hasattr(self.strategy_instance, '_btklinedataset'):
                 # 获取策略实例中正确关联的 KLine 对象
-                _kline = self.strategy_instance._btklinedataset.get(self.id.data_id)
+                _kline = self.strategy_instance._btklinedataset.get(
+                    self.id.data_id)
                 if _kline is not None:
                     kline_for_stop = _kline
-            
+
             self._klinesetting.stop = stop(kline_for_stop, **kwargs)
             if self.strategy_instance is not None:
                 self.strategy_instance._isstop = True
@@ -4096,8 +4621,68 @@ class KLine(IndFrame):
 
     @property
     def stop_lines(self) -> IndFrame | None:
-        """## 停止线"""
+        """## 停止线
+
+        首次访问时自动创建默认的止损/止盈线, 因此在绑定停止器之前
+        (调用 ``buy/sell(stop=...)`` 前) 就可以预设绘图样式, 例如::
+
+            self.data.stop_lines.line_style.stop_price = LineStyle(...)
+            self.data.stop_lines.line_style.target_price = LineStyle(...)
+
+        或使用 :meth:`set_stop_lines_style` / :meth:`stop_lines.set_stop_lines_style`。
+
+        后续 ``_set_stop`` 会复用同一个 ``stop_lines``, 样式不会被覆盖。
+        """
+        if self._klinesetting.stop_lines is None:
+            self._klinesetting.set_default_stop_lines(self.id)
         return self._klinesetting.stop_lines
+
+    def set_stop_lines_style(self, stop: LineStyle = None,
+                             target: LineStyle = None, **styles) -> "KLine":
+        """## 设置止损/止盈线型(转发到 ``self.stop_lines``)
+
+        便捷写法, 等价于在 ``self.stop_lines`` 上调用同名方法, 允许多种方式设置:
+
+        ```python
+        self.data.set_stop_lines_style(
+            stop=LineStyle(line_color='#2962FF', line_width=1.2, line_dash=LineDash.dashed),
+            target=LineStyle(line_color='#00E676', line_width=1.5, line_dash=LineDash.dashed))
+        ```
+
+        可在绑定停止器之前调用。
+        """
+        self.stop_lines.set_stop_lines_style(
+            stop=stop, target=target, **styles)
+        return self
+
+    def reset_stop_lines(self) -> "KLine":
+        """## 重置止损/止盈线（清掉上一次回测留下的「停止类」）
+
+        止损线存在 ``self._klinesetting.stop_lines``，而同一个 K 线对象
+        （如 ``LocalDatas.test.kline``）在一个进程 / Notebook 里是**共享**的：
+        上一个带 ``step`` 的指标跑完回测后，``stop_price`` / ``target_price``
+        会留下来；下一次用同一个 K 线看别的指标时，可能被当成这次的止损线
+        画出来 ✗。在出图 / 换指标前手动调一次即可清空::
+
+            kline.reset_stop_lines()
+            kline.tradingview.SomeIndicator().btplot()
+
+        清理 ``stop_lines`` / ``stop`` / ``isstop`` 三项，并同步把策略
+        ``_btindicatordataset`` 里登记的 ``'stop_lines'`` 去掉；之后再
+        ``buy/sell(stop=...)`` 会重新生成 ✓。返回 ``self`` 便于链式调用。
+        """
+        setting = self._klinesetting
+        setting.stop_lines = None
+        setting.stop = None
+        setting.isstop = False
+        dataset = getattr(getattr(self, 'strategy_instance', None),
+                          '_btindicatordataset', None)
+        if dataset is not None:
+            try:
+                dataset.pop('stop_lines', None)
+            except Exception:                                    # noqa: BLE001
+                pass
+        return self
 
     @property
     def stop_price(self) -> IndSeries | None:
@@ -4123,7 +4708,9 @@ class KLine(IndFrame):
             exectype: OrderType = OrderType.Close,
             price: float = None,
             valid: datetime | timedelta | int | None = None,
-            stop=None) -> Order | float:
+            stop=None,
+            reverse: bool = False,
+            reverse_size: int = 0) -> Order | float:
         """
         ## 通过KLine对象执行买入操作
 
@@ -4136,6 +4723,10 @@ class KLine(IndFrame):
             price (float): 委托价格（限价单/止损单需要）
             valid (datetime.datetime | datetime.timedelta | float): 订单有效期
             stop (BtStop): 停止器设置
+            reverse (bool): 是否反手做多。仅在持有空单（离场场景）时生效，
+                自动将 size 加上当前空单手数以触发反手开多；
+            reverse_size (int): 反手仓位手数。仅在 reverse 为 True 时生效，
+                用于计算反手仓位的大小。
             **kwargs: 其他参数
                 - bar (int): 1
 
@@ -4149,6 +4740,9 @@ class KLine(IndFrame):
 
         # Example: 买入2手并设置止损
         kline.buy(size=2, stop=BtStop.SegmentationTracking)
+
+        # Example: 持有空单时反手做多1手
+        kline.buy(size=1, reverse=True)
         ```
         ### Note:
         - 实际执行逻辑由关联的strategy_instance.buy方法处理
@@ -4159,15 +4753,17 @@ class KLine(IndFrame):
             return
         data: KLine = self.source_object if self.isresample or self.isreplay else self
         if data.isresample or data.isreplay:
-            return data.buy(size, exectype, price, valid, stop)
-        return self.strategy_instance.buy(data, size, exectype, price, valid, stop)
+            return data.buy(size, exectype, price, valid, stop, reverse=reverse, reverse_size=reverse_size)
+        return self.strategy_instance.buy(data, size, exectype, price, valid, stop, reverse=reverse, reverse_size=reverse_size)
 
     def sell(self,
              size: int = 1,
              exectype: OrderType = OrderType.Close,
              price: float = None,
              valid: datetime | timedelta | int | None = None,
-             stop=None) -> Order | float:
+             stop=None,
+             reverse: bool = False,
+             reverse_size: int = 0) -> Order | float:
         """
         ## 通过KLine对象执行卖出操作
 
@@ -4175,11 +4771,15 @@ class KLine(IndFrame):
 
         Args:
             data (KLine, optional): 目标合约数据
-            size: (int) 买入手数
+            size: (int) 卖出手数
             exectype (OrderType): 订单类型（Market, Limit, Stop等）
             price (float): 委托价格（限价单/止损单需要）
             valid (datetime.datetime | datetime.timedelta | float): 订单有效期
             stop (BtStop): 停止器设置
+            reverse (bool): 是否反手做空。仅在持有多单（离场场景）时生效，
+                自动将 size 加上当前多单手数以触发反手开空；
+            reverse_size (int): 反手仓位手数。仅在 reverse 为 True 时生效，
+                用于计算反手仓位的大小。
             **kwargs: 其他参数
                 - bar (int): 1
 
@@ -4193,6 +4793,9 @@ class KLine(IndFrame):
 
         # Example: 卖出2手并设置止损
         kline.sell(size=2, stop=BtStop.SegmentationTracking)
+
+        # Example: 持有多单时反手做空1手
+        kline.sell(size=1, reverse=True)
         ```
         ### Note:
         - 实际执行逻辑由关联的strategy_instance.sell方法处理
@@ -4203,10 +4806,10 @@ class KLine(IndFrame):
             return
         data = self.source_object if self.isresample or self.isreplay else self
         if data.isresample or data.isreplay:
-            return data.buy(size, exectype, price, valid, stop)
-        return self.strategy_instance.sell(data, size, exectype, price, valid, stop)
+            return data.sell(size, exectype, price, valid, stop, reverse=reverse, reverse_size=reverse_size)
+        return self.strategy_instance.sell(data, size, exectype, price, valid, stop, reverse=reverse, reverse_size=reverse_size)
 
-    def set_target_size(self, size: int = 0) -> None:
+    def set_target_size(self, size: int = 0, reverse: bool = False, reverse_size: int = 0) -> None:
         """
         ## 通过KLine对象设置目标仓位
 
@@ -4217,6 +4820,10 @@ class KLine(IndFrame):
                 - 正数: 多头仓位
                 - 负数: 空头仓位
                 - 0: 平仓
+            reverse (bool): 是否反手到反向仓位。仅在当前持有仓位（离场场景）时生效，
+                将目标仓位自动设为反向 size 手（持多→空单 size 手，持空→多单 size 手）；
+            reverse_size (int): 反手仓位手数。仅在 reverse 为 True 时生效，
+                用于计算反手仓位的大小。
 
         Returns:
             None
@@ -4230,6 +4837,9 @@ class KLine(IndFrame):
 
         # Example: 平仓
         kline.set_target_size(size=0)
+
+        # Example: 持有多单时反手到1手空单
+        kline.set_target_size(size=1, reverse=True)
         ```
         ### Note:
         - 实际执行逻辑由关联的strategy_instance.set_target_size方法处理
@@ -4238,10 +4848,12 @@ class KLine(IndFrame):
         """
         if not self._strategy_instances:
             return
+        if not self._strategy_instances:
+            return
         data = self.source_object if self.isresample or self.isreplay else self
-        return self.strategy_instance.set_target_size(data=data, size=size)
+        return self.strategy_instance.set_target_size(data=data, size=size, reverse=reverse, reverse_size=reverse_size)
 
-    def insert_order(self, direction: OrderSide | int=OrderSide.Buy, offset: str = "", volume: int = 0,
+    def insert_order(self, direction: OrderSide | int = OrderSide.Buy, offset: str = "", volume: int = 0,
                      limit_price: Union[str, float, None] = None, advanced: Optional[str] = None,
                      order_id: Optional[str] = None, account: Optional[UnionTradeable] = None) -> TqOrder | None:
         """
@@ -4317,17 +4929,17 @@ class KLine(IndFrame):
             单状态: ALIVE, 已成交: 0 手
             单状态: FINISHED, 已成交: 3 手
             ...
-            
+
         Example4::
 
             order = self.insert_order(symbol="SHFE.rb2610", direction="BUY", offset="OPEN", limit_price=4310,volume=2)
             while order.status != "FINISHED":
                 self.api.wait_update()
                 print("委托单状态: %s, 未成交手数: %d 手" % (order.status, order.volume_left))
-            
+
             # 要撤销一个委托单, 使用 cancel_order() 函数:
             self.api.cancel_order(order)
-        
+
         ### 委托单状态信息
         >>> {
             "order_id": "",  # "123" (委托单ID, 对于一个用户的所有委托单，这个ID都是不重复的)
@@ -4351,7 +4963,7 @@ class KLine(IndFrame):
             return
         return self.strategy_instance.insert_order(self, direction, offset, volume, limit_price, advanced, order_id, account)
 
-    def in_cooldown(self, cooldown_seconds: float | int = 0.0,cooldown_bars: int | None = None) -> bool | None:
+    def in_cooldown(self, cooldown_seconds: float | int = 0.0, cooldown_bars: int | None = None) -> bool | None:
         """
         ## 检查是否在冷却中（开仓后 N 秒内禁止任何交易操作（包括平仓））
         Args:
@@ -4359,14 +4971,14 @@ class KLine(IndFrame):
             cooldown_bars: 冷却K线数
         Returns:
             bool: 是否在冷却中
-            
+
         Note:
             如果 cooldown_seconds 和 cooldown_bars 都为 None，则默认 cooldown_bars 优先级高。
         """
         if not self._strategy_instances:
             return
-        return self.strategy_instance.in_cooldown(self,cooldown_seconds,cooldown_bars)
-    
+        return self.strategy_instance.in_cooldown(self, cooldown_seconds, cooldown_bars)
+
     def exclude_time(self, start: str, end: str) -> TradeTimeFilter:
         """
         ## 排除指定时间范围内的交易时间
@@ -4377,10 +4989,11 @@ class KLine(IndFrame):
             TradeTimeFilter: 交易时间过滤器对象
         """
         if self._trading_time_filter is None:
-            self._trading_time_filter = TradeTimeFilter(self._tqobjs[self.symbol])
+            self._trading_time_filter = TradeTimeFilter(
+                self._tqobjs[self.symbol])
         self._trading_time_filter.exclude_time(start, end)
         return self._trading_time_filter
-    
+
     def exclude_open_minutes(self, minutes: int) -> TradeTimeFilter:
         """
         ## 排除开仓后 N 分钟内的交易时间
@@ -4390,10 +5003,11 @@ class KLine(IndFrame):
             TradeTimeFilter: 交易时间过滤器对象
         """
         if self._trading_time_filter is None:
-            self._trading_time_filter = TradeTimeFilter(self._tqobjs[self.symbol])
+            self._trading_time_filter = TradeTimeFilter(
+                self._tqobjs[self.symbol])
         self._trading_time_filter.exclude_open_minutes(minutes)
         return self._trading_time_filter
-    
+
     def exclude_close_minutes(self, minutes: int) -> TradeTimeFilter:
         """
         ## 排除平仓后 N 分钟内的交易时间
@@ -4403,10 +5017,11 @@ class KLine(IndFrame):
             TradeTimeFilter: 交易时间过滤器对象
         """
         if self._trading_time_filter is None:
-            self._trading_time_filter = TradeTimeFilter(self._tqobjs[self.symbol])
+            self._trading_time_filter = TradeTimeFilter(
+                self._tqobjs[self.symbol])
         self._trading_time_filter.exclude_close_minutes(minutes)
         return self._trading_time_filter
-    
+
     def get_tradable_segments(self) -> list[tuple[int, int]]:
         """
         ## 获取可交易时间段
@@ -4414,9 +5029,10 @@ class KLine(IndFrame):
             list[tuple[int, int]]: 可交易时间段列表，每个元素为 (开始时间索引, 结束时间索引)
         """
         if self._trading_time_filter is None:
-            self._trading_time_filter = TradeTimeFilter(self._tqobjs[self.symbol])
+            self._trading_time_filter = TradeTimeFilter(
+                self._tqobjs[self.symbol])
         return self._trading_time_filter.get_tradable_segments()
-    
+
     def get_sessions_info(self) -> list[dict]:
         """
         ## 获取所有会话信息
@@ -4424,9 +5040,10 @@ class KLine(IndFrame):
             list[dict]: 所有会话信息列表，每个元素为一个字典，包含会话信息
         """
         if self._trading_time_filter is None:
-            self._trading_time_filter = TradeTimeFilter(self._tqobjs[self.symbol])
+            self._trading_time_filter = TradeTimeFilter(
+                self._tqobjs[self.symbol])
         return self._trading_time_filter.get_sessions_info()
-    
+
     def can_trade(self, current_time=None) -> bool:
         """
         ## 检查当前时间是否可交易
@@ -4436,9 +5053,10 @@ class KLine(IndFrame):
             bool: 是否可交易
         """
         if self._trading_time_filter is None:
-            self._trading_time_filter = TradeTimeFilter(self._tqobjs[self.symbol])
+            self._trading_time_filter = TradeTimeFilter(
+                self._tqobjs[self.symbol])
         return self._trading_time_filter.can_trade(current_time)
-    
+
     @property
     def margin(self) -> float | None:
         """## 保证金"""
@@ -4698,6 +5316,7 @@ class KLine(IndFrame):
             _id = self.id.data_id
             source: corefunc = self.pandas_object.copy()
             kline_object = self.pandas_object.copy()
+            ensure_core_loaded()
             if isinstance(value, int) and value > 0:
                 df = source.ta.Heikin_Ashi_Candles(value)
             else:
@@ -4946,7 +5565,7 @@ class KLine(IndFrame):
             config (Config)
 
         Examples:
-        >>> bt= LocalDatas.v2601_300.kline.run(
+        >>> bt= LocalDatas.test.kline.run(
                 ["ma1", Multiply(PandasTa.sma, dict(length=20))],
                 ["ma2", Multiply(PandasTa.sma, dict(length=30))],
                 ["ma3", Multiply(PandasTa.sma, dict(length=60))],
@@ -4961,7 +5580,7 @@ class KLine(IndFrame):
                     if self.ma1.prev > self.ma4.prev and self.ma1.new < self.ma4.new:
                         self.kline.sell()
             config = Config(islog=False, profit_plot=True)
-            bt= KLine(LocalDatas.get_IndFrame(LocalDatas.v2601_300)).run(
+            bt= KLine(LocalDatas.get_IndFrame(LocalDatas.test)).run(
                 ["ma1", Multiply(PandasTa.sma, dict(length=20))],
                 ["ma2", Multiply(PandasTa.sma, dict(length=30))],
                 ["ma3", Multiply(PandasTa.sma, dict(length=60))],
@@ -4993,12 +5612,12 @@ class KLine(IndFrame):
             islog=False, profit_plot=iscallnext)
 
         class default_strategy(Strategy):
-            def __init__(self) -> None:
-                self.data = df  # self.get_kline(df)
+            def __init__(self_) -> None:
+                self_.data = df  # self.get_kline(df)
                 if args:
-                    data = self.data.multi_apply(*multiply)
-                    for name, ind in zip(names, data):
-                        setattr(self, name, ind)
+                    datas = self_.data.multi_apply(*multiply)
+                    for name, ind in zip(names, datas):
+                        setattr(self_, name, ind)
         if iscallnext:
             default_strategy.next = next
         default_strategy.config = config
@@ -5086,7 +5705,8 @@ class IndSeries(IndicatorsBase, PandasSeries, PandasTa, TaLib):
 
     def __init__(self, data: pd.Series | np.ndarray | int | None = None, **kwargs: IndSetting | dict) -> None:
         if data is None:
-            data = np.full(0, np.nan)
+            data = pd.Series(dtype=np.float64)  # np.full(0, np.nan)
+            kwargs.setdefault('lines', [])
             kwargs.update(dict(iscustom=True))
         if isinstance(data, int):
             assert data > 0, "整数类必须大于0"
@@ -5122,8 +5742,10 @@ class IndSeries(IndicatorsBase, PandasSeries, PandasTa, TaLib):
         dim_match = kwargs.pop("dim_match", True)
         height = kwargs.pop("height", 150)
         linestyle = kwargs.pop("linestyle", {})
+        tablestyle = kwargs.pop("tablestyle", None)
         signalstyle = kwargs.pop("signalstyle", Addict())  # AutoNameDict())
         span = kwargs.pop("spanstyle", np.nan)
+        legend = kwargs.pop("legend", True)
         self._indsetting = IndSetting(
             btid,
             is_mir,
@@ -5140,17 +5762,20 @@ class IndSeries(IndicatorsBase, PandasSeries, PandasTa, TaLib):
         plotinfo = kwargs.pop('plotinfo', None)
         if not isinstance(plotinfo, PlotInfo):
             plotinfo = PlotInfo(
-                height=height,
+                # height 已废弃：不再写入 ✓
+                length=self.length,
                 sname=sname,
                 ind_name=ind_name,
                 lines=lines,
                 line_filed=[],
                 category=category,
+                legend=legend,
                 isplot=isplot,
                 overlap=overlap,
                 linestyle=linestyle,
                 signalstyle=signalstyle,
                 spanstyle=span,
+                tablestyle=tablestyle,
             )
         self._plotinfo = plotinfo
         kline = kwargs.pop("kline", None)
@@ -5407,6 +6032,107 @@ class IndSeries(IndicatorsBase, PandasSeries, PandasTa, TaLib):
         ## 设置指标线的颜色
         """
         self._plotinfo.linestyle[self.lines[0]].price_label = bool(value)
+
+    def idx(self, positive: bool = True) -> np.ndarray:
+        """## 获取信号点索引
+        只对信号线有意义
+        positive=True → 返回 values>0 的信号点索引;
+        positive=False → 返回 values<0 的信号点索引"""
+        return np.flatnonzero(self.values > 0 if positive else self.values < 0)
+
+    def signal_profit(self,
+                      bar: int = 5,
+                      price: np.ndarray | None = None,
+                      isplot: bool = True) -> dict:
+        """
+        ## 基于单个信号计算持仓收益曲线
+
+        通过当前IndSeries作为交易信号，计算持仓N根K线后的收益表现。
+        适用于直接对 `long_signal` 或 `short_signal` 调用。
+
+        ### 收益计算逻辑:
+        - 初始 profit = 1.0
+        - 多头: profit = pre_profit * (1 + (current_price - open_price) / open_price)
+        - 空头: profit = pre_profit * (1 + (open_price - current_price) / open_price)
+
+        ### Args:
+        | 参数 | 类型 | 默认值 | 说明 |
+        |---|---|---|---|
+        | `bar` | `int` | `5` | 持仓K线根数 |
+        | `price` | `np.ndarray` | `None` | 参考价格数组，默认使用关联K线收盘价 |
+        | `isplot` | `bool` | `True` | 是否绘制收益图表 |
+
+        ### Returns:
+        `dict`: 收益数据字典
+
+        ### Example:
+        ```python
+        # 对long_signal单独计算收益
+        result = ind.long_signal.signal_profit(bar=5)
+
+        # 对short_signal单独计算收益
+        result = ind.short_signal.signal_profit(bar=10)
+        ```
+        """
+        from ..cython_functions.signal_profit import calc_single_signal_profit
+
+        # 获取当前信号数据
+        signal_arr = self.values if hasattr(
+            self, 'values') else np.asarray(self)
+        signal_arr = np.array(signal_arr, dtype=np.float64, copy=True)
+        n = len(signal_arr)
+
+        # 获取价格数据
+        if price is None:
+            kline = None
+            try:
+                kline = self.kline
+            except Exception:
+                pass
+            if kline is None:
+                # 尝试从 dataset 获取
+                try:
+                    src = self._dataset.source_object
+                    if src is not None and hasattr(src, 'close'):
+                        kline = src
+                except Exception:
+                    pass
+            if kline is None:
+                raise ValueError(
+                    "无法自动找到关联的KLine对象。请通过 price 参数显式指定价格数组：\n"
+                    "  result = signal_series.signal_profit(bar=5, price=close_array)"
+                )
+            price_arr = kline.close.values if hasattr(
+                kline.close, 'values') else np.asarray(kline.close)
+        else:
+            price_arr = np.asarray(price, dtype=np.float64)
+        price_arr = np.array(price_arr, dtype=np.float64, copy=True)
+
+        # 确定信号方向（正值为多头，负值为空头）
+        # 只有正值 → 全多头；只有负值 → 全空头；混合 → 按值的正负分别处理
+        has_long = np.any(signal_arr > 0)
+        has_short = np.any(signal_arr < 0)
+
+        if not has_long and not has_short:
+            raise ValueError("当前信号序列全为零，无有效交易信号")
+
+        # 保持信号原始符号，cython引擎会根据正负判断方向
+        # 正值 → 多头，负值 → 空头
+
+        # 调用 cython 引擎前确保类型正确
+        signal_arr = np.array(signal_arr, dtype=np.float64, copy=True)
+        price_arr = np.array(price_arr, dtype=np.float64, copy=True)
+        result = calc_single_signal_profit(signal_arr, price_arr, int(bar))
+        # 删除大数组，避免Jupyter输出过长
+        result.pop('long_profits', None)
+        result.pop('short_profits', None)
+
+        if isplot:
+            from ..btplot import signal_profit_plot
+            signal_profit_plot(result, self)
+            return None
+
+        return result
 
 
 class Line(IndSeries):
@@ -6437,7 +7163,7 @@ class CustomBase:
     """
     data: KLine | IndFrame | Line | IndSeries
     height: int = 150
-    lines: list[str] | Lines[str] = Lines()
+    lines: list[str] | tuple[str] | Lines[str] = Lines()
     overlap: bool = False
     isplot: bool = True
     ismain: bool = False
@@ -6450,7 +7176,15 @@ class CustomBase:
     signalstyle: Addict[str, SignalStyle] | dict[str,
                                                  SignalStyle] = Addict()
     spanstyle: SpanList[SpanStyle] | list[SpanStyle] = SpanList()
-    _bt_indicator_cls: dict[str,type[BtIndicator]] = {}
+    bandstyle: BandList[BandStyle] = []
+    _bt_indicator_cls: dict[str, type[BtIndicator]] = {}
+    #: 逐点信号文本钩子：`def signal_text(self) -> {线名: 文本数组} | None`
+    signal_text: Callable | None = None
+    #: 统计表格行钩子：`def table_rows(self, index=None, values=None) -> [(标签, 值), ...]`
+    #: （配合类上的 `tablestyle = TableStyle(...)`；默认 None = 没有表格行）
+    table_rows: Callable | None = None
+    tablestyle: TableStyle | None = None
+    legend: bool = True
 
     @classmethod
     def _is_method_overridden(cls, method_name):
@@ -6659,27 +7393,40 @@ class BtIndicator(CustomBase, KLine):
     def __new__(cls, data: KLine | IndFrame | pd.DataFrame, **kwargs: IndSetting | dict) -> IndFrame | IndSeries:
         # 检查用户是否重写了 __init__ 方法
         has_init = cls._is_method_overridden("__init__")
-        
+
+        # [修改] 原代码直接写类属性:
+        #     if "lines" in kwargs:            cls.lines = Lines(*kwargs["lines"])
+        #     elif cls.lines:                  pass
+        #     elif has_init:                   cls.lines = Lines()
+        #     else:                            cls.lines = cls._parse_return_variables()
+        #   末尾再用 cls.lines 去装饰 _next。
+        #   问题: 会把**类默认值永久改掉** —— 例如 RollingVolumeProfile 的列数由
+        #   参数 bins 决定, 门面按 bins 传一次 lines 后, 类属性就被改成那个数量;
+        #   之后直接 RollingVolumeProfile(kline) 构造(不传 lines) 就会拿到
+        #   上一次的脏值 -> "lines 数量不匹配" 报错。
+        #   改为全程用局部变量 _cls_lines, 不写回 cls.lines。(与 cls.params 同一类问题)
         if "lines" in kwargs:
             # 用户通过 kwargs 显式设置了 lines
-            cls.lines = Lines(*kwargs["lines"])
+            _cls_lines = Lines(*kwargs["lines"])
+        elif cls.lines:
+            # 用户在类中已经定义了 lines 属性
+            _cls_lines = cls.lines
+        elif has_init:
+            # 用户重写了 __init__，但没有设置 lines
+            # 保持 lines 为空，让用户在 __init__ 中通过 self.lines.xxx = ... 来设置
+            _cls_lines = Lines()
         else:
-            if cls.lines:
-                # 用户在类中已经定义了 lines 属性
-                pass
-            elif has_init:
-                # 用户重写了 __init__，但没有设置 lines
-                # 保持 lines 为空，让用户在 __init__ 中通过 self.lines.xxx = ... 来设置
-                cls.lines = Lines()
-            else:
-                # 用户没有重写 __init__，尝试从 next 方法解析返回变量
-                cls.lines = cls._parse_return_variables()
+            # 用户没有重写 __init__，尝试从 next 方法解析返回变量
+            _cls_lines = cls._parse_return_variables()
+        if not cls.lines:
+            # 只在类里本来就没有 lines 时才回写(不覆盖用户/调用方传入的), 避免污染类默认值
+            cls.lines = _cls_lines
 
         # 确保lines中不包含注释
-        if cls.lines:
+        if _cls_lines:
             # 过滤掉空字符串和只包含注释的项
             clean_lines = []
-            for line in cls.lines:
+            for line in _cls_lines:
                 # 去除注释
                 if '#' in line:
                     line = line.split('#')[0].strip()
@@ -6687,15 +7434,15 @@ class BtIndicator(CustomBase, KLine):
                 if line:
                     clean_lines.append(line)
 
-            cls.lines = Lines(*clean_lines)
+            _cls_lines = Lines(*clean_lines)
 
-        if cls.lines:
-            if isinstance(cls.lines, (list, tuple)):
-                cls.lines = Lines(*cls.lines)
-            assert cls.lines and isinstance(cls.lines, Lines) and all(
-                [isinstance(l, str) for l in cls.lines]), "lines类型为tuple or list,元素为字符串"
+        if _cls_lines:
+            if isinstance(_cls_lines, (list, tuple)):
+                _cls_lines = Lines(*_cls_lines)
+            assert _cls_lines and isinstance(_cls_lines, Lines) and all(
+                [isinstance(l, str) for l in _cls_lines]), "lines类型为tuple or list,元素为字符串"
         # print(data.lines._ind_obj,data.lines.l_close)
-        #cls.lines(data)
+        # cls.lines(data)
         # line = data.line
         # if line:
         #     for name,line in zip(data.lines,data.line):
@@ -6710,14 +7457,49 @@ class BtIndicator(CustomBase, KLine):
         multi_index = kwargs.pop("_multi_index", None)
         candlestyle = kwargs.pop("candlestyle", cls.candlestyle)
         linestyle = kwargs.pop("linestyle", cls.linestyle)
+        tablestyle = kwargs.pop("tablestyle", getattr(cls, 'tablestyle', None))
         signalstyle = Addict(kwargs.pop("signalstyle", cls.signalstyle))
         spanstyle = kwargs.pop("spanstyle", cls.spanstyle)
         isindicator = kwargs.pop("isindicator", cls.isindicator)
+        bandstyle = kwargs.pop("bandstyle", cls.bandstyle)
+        # 成交量分布图风格（`category='vp'` 专用；类属性/构造参数均可）
+        # 成交量分布图风格（`category='vp'` 专用；类属性/构造参数均可）
+        vpstyle = kwargs.pop("vpstyle", getattr(cls, 'vpstyle', None))
+        # 显式传 None（装饰器路径会把"没传"写成 None）时也要回退到类上的
+        # signal_text() 钩子，否则 `self.data.tradingview.Xxx()` 这类调用
+        # 会让钩子静默失效（逐点文本一个都出不来）。
+        signal_text = (kwargs.pop("signal_text", None)
+                       or getattr(cls, "signal_text", None))
+        legend = kwargs.pop("legend", cls.legend)
+
         params = kwargs.pop("params", {})
-        for k,v in kwargs.items():
+        for k, v in kwargs.items():
             if k in cls.params:
-                params[k]=v
-        cls.params = Addict({**cls.params, **params})
+                params[k] = v
+        # ==============================================================
+        # 【修改说明 · 2026】下面这行原代码会**就地改写类属性** cls.params，
+        #   导致“类级默认参数”被永久污染（每次实例化都会把传入的 kwargs
+        #   合并并写回 cls.params），从而产生以下问题：
+        #     1) 直接构造且只传部分参数时会“继承”上一次的陈旧值，例如
+        #        Xxx(kl, rsi_length=14) 之后再 Xxx(kl) 会拿到 rsi_length=14；
+        #     2) 同一个 KLine 上先后创建不同指标时也会互相干扰；
+        #     3) signal_backtest 的参数优化分支读取 getattr(cls,'params')
+        #        会读到脏值（见本文件 2133 / 2957 行附近）；
+        #     4) 并行实例化时对 cls.params 的写入相互竞争
+        #        （下方 2134 行“BtIndicator.__new__ 会修改 cls.params”的
+        #         线程锁注释正是为此而加）。
+        #    注：走门面方法 kl.tradingview.Xxx(...) 时每次都会全量传参，
+        #        因此该问题平时被掩盖，仅在“部分传参/直接构造”时暴露。
+        #
+        #   修改方式：合并结果只存到**本次实例的局部变量** merged_params，
+        #     不再写回 cls.params（保留 cls._params 以兼容，全库无读取处）；
+        #     下面注入 data / self 的两处一并改用 merged_params。
+        #
+        #   原始代码（保留备查）：
+        # cls.params = cls._params = Addict({**cls.params, **params})
+        # ==============================================================
+        merged_params = Addict({**cls.params, **params})
+        cls._params = merged_params
         kline_dict = data.__dict__
         # 只注入用户在子类中自定义的属性和方法，排除 CustomBase 已有属性
         # 排除 __init__ 等魔术方法（会覆盖 IndFrame 的构造器），
@@ -6731,26 +7513,62 @@ class BtIndicator(CustomBase, KLine):
         # 如果用户重写了 __init__，需要先将输入数据的列绑定到 lines 上
         has_init = cls._is_method_overridden("__init__")
         if has_init:
-            data.__dict__['params'] = cls.params
+            # 原代码: data.__dict__['params'] = cls.params  ← cls.params 可能被污染
+            data.__dict__['params'] = merged_params
             cls.__init__(data)
 
-        @tobtind(lines=cls.lines, overlap=overlap, isplot=isplot, ismain=ismain,
-                 category=category, myself=cls.__name__, _multi_index=multi_index,
-                 linestyle=linestyle, signalstyle=signalstyle, spanstyle=spanstyle, isindicator=isindicator)
-        def _next(self):
-            self.__dict__['params'] = cls.params
+        @tobtind(lines=_cls_lines, overlap=overlap, isplot=isplot, ismain=ismain,
+                 category=category, myself=cls.__name__, _multi_index=multi_index, candlestyle=candlestyle,
+                 linestyle=linestyle, signalstyle=signalstyle, spanstyle=spanstyle, isindicator=isindicator, bandstyle=bandstyle,
+                 vpstyle=vpstyle,
+                 tablestyle=tablestyle,
+                 signal_text=signal_text,
+                 legend=legend)
+        def _next(self, **kwargs):
+            # tobtind 装饰器会向 kwargs 追加 _source_for_ind 等透传参数;
+            # BtIndicator 的 next 直接以 self(源数据) 取数, 此处忽略多余 kwargs。
+            # 原代码: self.__dict__['params'] = cls.params  ← cls.params 可能被污染
+            self.__dict__['params'] = merged_params
             if has_init:
                 return None
             return cls.next(self)
         indicator = _next(data)
+        if indicator is not None:
+            # 类级 ``color_rules``（如 MultiKernelRegression 的主图逐点配色）：
+            # ``next()`` 里的 ``self`` 是 **KLine**（见 `_next` 的 `cls.next(self)`），
+            # 拿不到指标自己的 ``PlotInfo``，所以在这里补一次。
+            _cls_rules = getattr(cls, 'color_rules', None)
+            if _cls_rules:
+                try:
+                    indicator._plotinfo.color_rules.extend(_cls_rules)
+                except Exception as _e:
+                    print('[minibt] 应用类级 color_rules 失败:', _e)
+            # 让 IndFrame/IndSeries 也带上本次实例的参数：signal_text / 表格
+            # rows 这类 hooks 里可以直接 self.params，不用再绕
+            # `indicator._bt_indicator_cls._params`。
+            try:
+                indicator.params = merged_params
+            except Exception:
+                pass
+            # 类上覆写的 table_rows()（CustomBase 默认 None）绑到 IndFrame，
+            # 供图表侧生成表格行（self = IndFrame，可直接读
+            # params / btindex / 各线值）。没覆写就保持 None（等于没设）。
+            hook = getattr(cls, 'table_rows', None)
+            if callable(hook):
+                import types as _types
+                try:
+                    indicator._plotinfo.table_rows = _types.MethodType(
+                        hook, indicator)
+                except Exception:
+                    pass
         if cls._is_method_overridden("step"):
             setattr(indicator, "step", lambda: cls.step(indicator))
         # 保存原始指标类，供 signal_backtest 优化时重新创建不同参数的指标实例
         indicator._bt_indicator_cls = cls
-        cls._bt_indicator_cls[cls.__name__]=cls
+        cls._bt_indicator_cls[cls.__name__] = cls
         return indicator
-    
-    
+
+
 class StopMeta(type):
     """
     Stop类的元类（核心逻辑：__init__(kline,**kwargs) → 绑定kline → 调用user_init）
@@ -7043,16 +7861,53 @@ class BtIndType(metaclass=Meta):
 class KLineType(metaclass=Meta):
     """## KLine类型"""
     KLine = KLine
-    
-def _call_(self:pd.DataFrame | pd.Series, *args, **kwargs)->KLine | IndFrame | IndSeries:
+
+
+def _call_(self: pd.DataFrame | pd.Series, *args, **kwargs) -> KLine | IndFrame | IndSeries:
+    """## `df(...)` 语法糖：把 DataFrame/Series 转成 KLine/IndFrame/IndSeries
+
+    ⚠️ 注意 `args` 分支：pandas 的 `NDFrame.where` / `.mask` / `.clip` 会把它们的
+    布尔条件送进 `pandas.core.common.apply_if_callable`，该函数**只要对象可调用就会
+    调用它**（`cond(self)`）。而下面两行赋值让**每一个** Series/DataFrame 都可调用，
+    于是掩码会被替换成本函数的返回值，`where`/`clip` 静默算出错误数值：
+
+        (s.diff().iloc[1:]).clip(lower=0).min()   # 期望 0，实际 -1.65
+
+    无异常、无警告。实测受影响的不止 pandas 内部：任何在同进程内使用
+    `.where` / `.clip` / `.mask` 的代码都会被污染。
+
+    真正的 `df(...)` 调用**只传关键字参数**（与本库 `IndicatorsBase.__call__` 的约定
+    一致，它也定义为 ``def __call__(self, **kwargs)``），所以一旦收到位置参数就说明
+    不是用户调用，原样返回即可。
+    """
+    if args:
+        return self
     if self.ndim == 1:
-        return IndSeries(self,**kwargs)
+        return IndSeries(self, **kwargs)
     else:
-        lines=list(self.columns)
+        lines = list(self.columns)
         if set(lines).issuperset(FILED.ALL):
-            return KLine(self[FILED.ALL],**kwargs)
+            return KLine(self[FILED.ALL], **kwargs)
         else:
-            return IndFrame(self,lines=lines,**kwargs)
+            return IndFrame(self, lines=lines, **kwargs)
+
 
 pd.DataFrame.__call__ = _call_
 pd.Series.__call__ = _call_
+
+# 双保险：恢复 pandas 本来的语义 —— 在原生 pandas 里 Series/DataFrame 都不是可调用
+# 对象，因此“把某个 Series 当作回调”永远不是有效用法。直接把 pandas 对象从
+# apply_if_callable 里排除，等价于上游行为，且不依赖 _call_ 内部怎么实现。
+try:
+    from pandas.core import common as _pd_common
+
+    _pd_apply_if_callable = _pd_common.apply_if_callable
+
+    def _pd_guarded_apply_if_callable(maybe_callable, obj, **kwargs):
+        if isinstance(maybe_callable, (pd.Series, pd.DataFrame)):
+            return maybe_callable
+        return _pd_apply_if_callable(maybe_callable, obj, **kwargs)
+
+    _pd_common.apply_if_callable = _pd_guarded_apply_if_callable
+except Exception:                     # pragma: no cover - pandas 内部结构变动
+    pass

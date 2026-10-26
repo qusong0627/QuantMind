@@ -3,22 +3,34 @@ import re
 from ast import arg
 from typing import TYPE_CHECKING
 from .ta import *
+from .ta import _rolling_mad
+# `ta.py` 现在延迟导入 pandas_ta（加快 `import minibt`）；
+# 这里在 core 加载时再取（core 本身是惰性加载的）。
+from pandas_ta.core import AnalysisIndicators
 from pandas.api.types import is_datetime64_any_dtype
 from .ta_ import PairTrading, Factors
 if TYPE_CHECKING:
     import tulipy
     import talib as Talib
-    
+
     from finta import TA as FinTa
+
     class BtObject(object):
-        _df: pd.DataFrame | pd.Series | None  # pyright: ignore[reportUninitializedInstanceVariable]
-        pandas_object: pd.DataFrame | pd.Series | None  # pyright: ignore[reportUninitializedInstanceVariable]
-        
+        # pyright: ignore[reportUninitializedInstanceVariable]
+        _df: pd.DataFrame | pd.Series | None
+        # pyright: ignore[reportUninitializedInstanceVariable]
+        pandas_object: pd.DataFrame | pd.Series | None
+
 
 def is_bt_ind_type(obj):
     """判断对象是否为BtIndType包含的类型"""
     type_name = type(obj).__name__
     return type_name in ['Line', 'IndFrame', 'IndSeries']
+
+
+def isminibtobject(obj):
+    type_name = type(obj).__name__
+    return type_name in ["KLine", 'IndFrame', 'IndSeries', 'Line']
 
 
 def get_factors_df(*factors):
@@ -33,15 +45,18 @@ def get_factors_df(*factors):
     return factors_df
 
 
-def get_data(obj:BtObject | None =None) -> pd.Series | pd.DataFrame:
+def get_data(obj: BtObject | None = None) -> pd.Series | pd.DataFrame:
     # IndicatorClass->IndSeries,IndFrame
     if hasattr(obj, '_df'):
-        obj = obj._df  # pyright: ignore[reportAssignmentType, reportOptionalMemberAccess]
+        # pyright: ignore[reportAssignmentType, reportOptionalMemberAccess]
+        obj = obj._df
     # BtIndType,KLineType->pd.Series,pd.DataFrame
     if hasattr(obj, '_df'):
-        return obj._df  # pyright: ignore[reportReturnType, reportOptionalMemberAccess]
+        # pyright: ignore[reportReturnType, reportOptionalMemberAccess]
+        return obj._df
     elif hasattr(obj, 'pandas_object'):
-        return obj.pandas_object  # pyright: ignore[reportReturnType, reportOptionalMemberAccess]
+        # pyright: ignore[reportReturnType, reportOptionalMemberAccess]
+        return obj.pandas_object
     else:
         return obj  # pyright: ignore[reportReturnType]
 
@@ -63,14 +78,29 @@ def get_tqta_dataframe(obj: pd.Series | pd.DataFrame, columns: list[Any], **kwar
         return pd.DataFrame(list(kwargs.pop(columns[0], data)), columns=columns)
 
 
-def _get_column_(self, *args) -> tuple[list[pd.Series], dict] | dict:  # pyright: ignore[reportMissingTypeArgument]
-    """应用于pandas_ta"""
+# pyright: ignore[reportMissingTypeArgument]
+def _get_column_(self, *args, source: bool = False) -> tuple[list[pd.Series], dict] | dict:
+    """应用于pandas_ta
+
+    参数:
+        *args: (locals(), *默认字段) 或 (locals(),)
+        source: 默认为 False; 为 True 时在返回的 kwarg 中附带原内置指标对象
+                ``_source_for_ind``（框架对象 IndSeries/IndFrame/Line/KLine,
+                不经 get_data() 解包）。这样调用方就能根据参数决定是否需要
+                从生成该指标的框架对象上取数据。
+    """
     local, *default_filed = args
-    kwargs: dict = local.pop('kwargs', {})  # pyright: ignore[reportMissingTypeArgument]
+    # pyright: ignore[reportMissingTypeArgument]
+    kwargs: dict = local.pop('kwargs', {})
+    # source=True: 先把原内置指标取出, 避免被 get_data() 解包成 pandas
+    _source_for_ind = kwargs.pop('_source_for_ind', None) if source else None
     if 'open' in local:  # pandas_ta所有open参数都用open_
         local['open_'] = local.pop('open')
     if not default_filed:  # 没指定默认字段则返回
-        return {**local, **kwargs}
+        out = {**local, **kwargs}
+        if source:
+            out['_source_for_ind'] = _source_for_ind
+        return out
     data = kwargs.get('data', get_data(self))
     isdataframe = len(data.shape) > 1
     if not isdataframe and 'filed' not in kwargs:
@@ -91,7 +121,7 @@ def _get_column_(self, *args) -> tuple[list[pd.Series], dict] | dict:  # pyright
     args = {}
     for f in filed:
         args[f] = kwargs.pop(f, data[f] if isdataframe else data)
-    
+
     # 优化：直接构建返回列表，避免使用列表推导式
     result = []
     for k, v in args.items():
@@ -99,10 +129,14 @@ def _get_column_(self, *args) -> tuple[list[pd.Series], dict] | dict:  # pyright
             result.append(v)
         else:
             result.append(v.astype(np.float64))
-    return result, {**local, **kwargs}
+    out = {**local, **kwargs}
+    if source:
+        out['_source_for_ind'] = _source_for_ind
+    return result, out
 
 
-def _ti_get_data(*args) -> tuple[list, dict]:  # pyright: ignore[reportMissingTypeArgument]
+# pyright: ignore[reportMissingTypeArgument]
+def _ti_get_data(*args) -> tuple[list, dict]:
     values, kwargs = _get_column_(*args)
     values = [value.values.astype(np.float64) for value in values]
     return values, kwargs
@@ -136,7 +170,7 @@ def _finta_get_data(self, **kwargs):
 class SeriesIndicators(LazyImport):
     _indicator_cache = {}
     _df = pd.Series()
-    
+
     def __init__(self, pandas_obj):
         self._validate(pandas_obj)
         self._df = pandas_obj
@@ -146,21 +180,22 @@ class SeriesIndicators(LazyImport):
         if not isinstance(obj, pd.Series):
             raise AttributeError(
                 "[X] Must be either a Pandas Series.")
-    
+
     def __getattr__(self, name):
         """优化：拦截指标方法调用，添加缓存机制"""
         if name in self._indicator_cache:
             return self._indicator_cache[name]
-        else:# 检查CoreFunc是否有该方法
+        else:  # 检查CoreFunc是否有该方法
             if hasattr(CoreFunc, name):
                 method = getattr(CoreFunc, name)
                 # 缓存方法
                 self._indicator_cache[name] = method
                 # 返回缓存的方法
                 return self._indicator_cache[name]
-        
+
         # 其他属性和方法正常处理
-        return super().__getattr__(name)  # pyright: ignore[reportUnknownMemberType]
+        # pyright: ignore[reportUnknownMemberType]
+        return super().__getattr__(name)
 
 
 def length(self) -> int:
@@ -168,11 +203,13 @@ def length(self) -> int:
 
 
 # 设置AnalysisIndicators类的__getattr__方法
-setattr(AnalysisIndicators, "_indicator_cache",{})
+setattr(AnalysisIndicators, "_indicator_cache", {})
 setattr(AnalysisIndicators, '__getattr__', SeriesIndicators.__getattr__)
 
-AnalysisIndicators.length = property(length)  # pyright: ignore[reportAttributeAccessIssue]
-SeriesIndicators.length = property(length)  # pyright: ignore[reportAttributeAccessIssue]
+# pyright: ignore[reportAttributeAccessIssue]
+AnalysisIndicators.length = property(length)
+# pyright: ignore[reportAttributeAccessIssue]
+SeriesIndicators.length = property(length)
 setattr(AnalysisIndicators, '_get_column_', _get_column_)
 setattr(SeriesIndicators, '_get_column_', _get_column_)
 setattr(AnalysisIndicators, '_get_data_', _get_data_)
@@ -225,26 +262,55 @@ class CoreFunc:
     def _finta_get_data(self, **kwargs):
         ...
 
-    def _get_column_(self, *args) -> tuple[list[pd.Series] | dict] | dict:
+    def _get_column_(self, *args, source: bool = False) -> tuple[list[pd.Series] | dict] | dict:
         ...
 
     def _get_data_(self, a) -> pd.Series:
         ...
 
-    def _ti_get_data(self) -> tuple[list, dict]:  # pyright: ignore[reportMissingTypeArgument]
+    # pyright: ignore[reportMissingTypeArgument]
+    def _ti_get_data(self) -> tuple[list, dict]:
         ...
 
     # 无标签指标
     def pta_cum(self, length=10, **kwargs):
         arg, kwarg = self._get_column_(locals(), *FILED.C)
-        return cum(*arg, **kwargs)  # pyright: ignore[reportUnknownArgumentType]
+        # pyright: ignore[reportUnknownArgumentType]
+        return cum(*arg, **kwargs)
 
-    def pta_ZeroDivision(self, b=1., dtype=np.float64, fill_value=0.0, handle_inf=True, **kwargs) -> ndarray:  # pyright: ignore[reportMissingTypeArgument]
+    # pyright: ignore[reportMissingTypeArgument]
+    def pta_ZeroDivision(self, b=1., dtype=np.float64, fill_value=0.0, handle_inf=True, **kwargs) -> ndarray:
         arg, kwarg = self._get_column_(locals(), *FILED.C)
-        return ZeroDivision(*arg, **kwarg)  # pyright: ignore[reportUnknownVariableType]
+        # pyright: ignore[reportUnknownVariableType]
+        return ZeroDivision(*arg, **kwarg)
 
-    def pta_rolling_apply(self, func: Callable, window: int, prepend_nans: bool = True, n_jobs: int = 1, **kwargs) -> np.ndarray:  # pyright: ignore[reportMissingTypeArgument]
-        return rolling_apply(self, func, window, prepend_nans, n_jobs, **kwargs)  # pyright: ignore[reportUnknownVariableType]
+    # pyright: ignore[reportMissingTypeArgument]
+    def pta_rolling_apply(self, func: Callable, window: int, prepend_nans: bool = True, n_jobs: int = 1, **kwargs) -> np.ndarray:
+        # [修改] 原代码:
+        #     return rolling_apply(self, func, window, prepend_nans, n_jobs, **kwargs)
+        #
+        # 问题: tobtind 包装层(base.py)会向 kwargs **注入/保留**一批框架内部参数 ——
+        #   注入: `_source_for_ind`(base.py `kwargs.update(dict(_source_for_ind=...))`);
+        #   保留: 仅用 `kwargs.get(...)` 读取、不会 pop 掉的配置项
+        #         (isindicator / iscustom / linestyle / signalstyle / bandstyle /
+        #          id / isresample / isreplay / light_chart 等)。
+        #   而 ta.rolling_apply 会把**全部** kwargs 用 `partial(func, **kwargs)`
+        #   绑进**用户回调** -> 用户回调(LOWESS 的 func、The_Price_Radio 的 test)
+        #   不接受这些参数, 直接:
+        #     TypeError: ... got an unexpected keyword argument '_source_for_ind'
+        #   (库内 LOWESS / The_Price_Radio 因此一调用就报错。)
+        #
+        # 修法: 在进入 rolling_apply 之前剔除**框架内部参数** —— 与 core.py 中
+        #   `btind_divergence` 的 `kwargs.pop("_source_for_ind", None)` 做法一致;
+        #   下划线开头的透传参数统一按内部参数处理。
+        #   **用户自己传入的普通 kwargs 仍原样向后传递给回调**, 行为不变。
+        kwargs = {_k: _v for _k, _v in kwargs.items()
+                  if not _k.startswith('_')
+                  and _k not in ('isindicator', 'iscustom', 'linestyle',
+                                 'signalstyle', 'bandstyle', 'spanstyle',
+                                 'id', 'isresample', 'isreplay',
+                                 'light_chart')}
+        return rolling_apply(self, func, window, prepend_nans, n_jobs, **kwargs)
 
     def Linear_Regression_Candles(self, length=11, **kwargs):
         """# Linear_Regression_Candles
@@ -269,7 +335,8 @@ class CoreFunc:
             # Returns:
                 >>> pd.DataFrame"""
         kwargs.update(dict(length=length))
-        return Candles.Linear_Regression_Candles(get_data(self), **kwargs)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        return Candles.Linear_Regression_Candles(get_data(self), **kwargs)
 
     def Heikin_Ashi_Candles(self, length=0, **kwargs):
         """# Heikin_Ashi_Candles
@@ -290,7 +357,8 @@ class CoreFunc:
                 >>> pd.DataFrame
             """
         kwargs.update(dict(length=length))
-        return Candles.Heikin_Ashi_Candles(get_data(self), **kwargs)  # pyright: ignore[reportUnknownMemberType]
+        # pyright: ignore[reportUnknownMemberType]
+        return Candles.Heikin_Ashi_Candles(get_data(self), **kwargs)
 
     def pta_line_trhend(self, length=1, **kwargs):
         return line_trhend(self._df, length, **kwargs)
@@ -327,7 +395,8 @@ class CoreFunc:
         result = pta.cdl_pattern(*arg, name=name, scalar=scalar, offset=offset)
         # 处理列名：去掉末尾参数数字后缀并转为小写，保留形态名称中的数字
         if isinstance(result, pd.DataFrame):
-            result.columns = [re.sub(r'(?:_\d+(?:[._]\d+)*)+$', '', col).lower() for col in result.columns]
+            result.columns = [
+                re.sub(r'(?:_\d+(?:[._]\d+)*)+$', '', col).lower() for col in result.columns]
         return result
 
     def pta_cdl_z(self, length=30, full=False, ddof=1, offset=None, **kwargs):
@@ -367,9 +436,9 @@ class CoreFunc:
         return dframe
 
     def pta_cdl_doji(self,
-        length: int = 10, factor: int | float = 10,
-        scalar: int | float = 100, asint: bool = True,
-        offset: int = 0, **kwargs):
+                     length: int = 10, factor: int | float = 10,
+                     scalar: int | float = 100, asint: bool = True,
+                     offset: int = 0, **kwargs):
         """args : close"""
         arg, kwarg = self._get_column_(locals(), *FILED.OHLC)
         return pta.cdl_doji(*arg, **kwarg)
@@ -382,14 +451,15 @@ class CoreFunc:
         """args : open, high, low, close"""
         arg, kwarg = self._get_column_(locals(), *FILED.OHLC)
         return pta.cdl_inside(*arg, **kwarg)
-    
+
     def pta_cdl(self, name="all", scalar=None, offset=None, **kwargs) -> pd.DataFrame:
         """args : open, high, low, close"""
         arg, _ = self._get_column_(locals(), *FILED.OHLC)
         result = pta.cdl(*arg, name=name, scalar=scalar, offset=offset)
         # 处理列名：去掉末尾参数数字后缀并转为小写，保留形态名称中的数字
         if isinstance(result, pd.DataFrame):
-            result.columns = [re.sub(r'(?:_\d+(?:[._]\d+)*)+$', '', col).lower() for col in result.columns]
+            result.columns = [
+                re.sub(r'(?:_\d+(?:[._]\d+)*)+$', '', col).lower() for col in result.columns]
         return result
 
     # Cycles
@@ -403,7 +473,7 @@ class CoreFunc:
         smooth: int = 20, alpha: int | float = 0.04,
         pi: int | float = 3.14159, sqrt2: int | float = 1.414,
         offset: int = 0, **kwargs
-    ) ->pd.Series:
+    ) -> pd.Series:
         """args : close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pta.reflex(*arg, **kwarg)
@@ -636,7 +706,7 @@ class CoreFunc:
     def pta_smc(
         self,
         abr_length: int = 14, close_length: int = 50, vol_length: int = 20,
-        percent: int = 5, vol_ratio: int | float = 1.5, asint: bool =True,
+        percent: int = 5, vol_ratio: int | float = 1.5, asint: bool = True,
         mamode: str = "sma", talib: bool = True,
         offset: int = 0, **kwargs
     ) -> pd.DataFrame:
@@ -653,10 +723,11 @@ class CoreFunc:
         """args : high,low,close"""
         arg, kwarg = self._get_column_(locals(), *FILED.HLC)
         return pta.stochf(*arg, **kwarg)
+
     def pta_tmo(
         self, tmo_length: int = 14,
-        calc_length: int =5, smooth_length: int = 3,
-        momentum: bool = False, normalize: bool =False, exclusive: bool = False,
+        calc_length: int = 5, smooth_length: int = 3,
+        momentum: bool = False, normalize: bool = False, exclusive: bool = False,
         mamode: str = "ema", offset: int = 0, **kwargs,
     ) -> pd.DataFrame:
         """args : open,close"""
@@ -674,7 +745,7 @@ class CoreFunc:
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pta.dema(*arg, **kwarg)
 
-    def pta_ema(self, length=None, talib=None, offset=None, **kwargs):
+    def pta_ema(self, length=None, talib=None, presma: bool = None, offset=None, **kwargs):
         """args : close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pta.ema(*arg, **kwarg)
@@ -840,7 +911,7 @@ class CoreFunc:
         """args : close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pta.alligator(*arg, **kwarg)
-    
+
     def pta_mama(
         self, fastlimit: int | float = 0.5, slowlimit: int | float = 0.05,
         prenan: int = 3, talib: bool = True,
@@ -849,7 +920,7 @@ class CoreFunc:
         """args : close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pta.mama(*arg, **kwarg)
-    
+
     def pta_pivots(
         self,
         method: str = 'traditional', anchor: str = 'D',
@@ -883,7 +954,7 @@ class CoreFunc:
         """args : close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pta.ssf3(*arg, **kwarg)
-    
+
     # Performance
     def pta_log_return(self, length=None, cumulative=False, offset=None, **kwargs):
         """args : close"""
@@ -1038,7 +1109,7 @@ class CoreFunc:
     def pta_ttm_trend(self, length=None, offset=None, **kwargs):
         """args : high, low, close"""
         arg, kwarg = self._get_column_(locals(), *FILED.HLC)
-        return pd.Series(pta.ttm_trend(*arg, **kwarg).values,name="ttm_trend")
+        return pd.Series(pta.ttm_trend(*arg, **kwarg).values, name="ttm_trend")
 
     def pta_vhf(self, length=None, drift=None, offset=None, **kwargs):
         """args : close"""
@@ -1057,18 +1128,18 @@ class CoreFunc:
         # else:
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pta.xsignals(*arg, **kwarg)
-    
+
     def pta_alphatrend(
-        self,
-        src: str = "close",
-        length: int = 14, multiplier: int | float = 1,
-        threshold: int | float = 50, lag: int = 2,
-        mamode: str = "sma", talib: bool = True,
-        offset: int = 0, **kwargs)  -> pd.DataFrame:
+            self,
+            src: str = "close",
+            length: int = 14, multiplier: int | float = 1,
+            threshold: int | float = 50, lag: int = 2,
+            mamode: str = "sma", talib: bool = True,
+            offset: int = 0, **kwargs) -> pd.DataFrame:
         """args :open, high, low, close, volume"""
         arg, kwarg = self._get_column_(locals(), *FILED.OHLCV)
         return pta.alphatrend(*arg, **kwarg)
-    
+
     def pta_ht_trendline(
         self, talib: bool = True,
         prenan: int = 63, offset: int = 0,
@@ -1101,13 +1172,13 @@ class CoreFunc:
         self,
         legs: int = 10, deviation: int | float = 5, backtest: bool = False,
         offset: int = 0, **kwargs
-    )-> pd.DataFrame:
+    ) -> pd.DataFrame:
         """args :high, low, close"""
         arg, kwarg = self._get_column_(locals(), *FILED.HLC)
         return pta.zigzag(*arg, **kwarg)
 
-
     # Utility
+
     def pta_above(self, b=None, asint=True, offset=None, **kwargs):
         """args : a(self),b"""
         # arg, kwarg = self._get_column_(locals(), *FILED.C)
@@ -1207,8 +1278,8 @@ class CoreFunc:
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pta.signals(*arg, **kwarg)
 
-
     # Volatility
+
     def pta_aberration(self, length=None, atr_length=None, offset=None, **kwargs):
         """args : high, low, close"""
         arg, kwarg = self._get_column_(locals(), *FILED.HLC)
@@ -1288,14 +1359,14 @@ class CoreFunc:
         """args : high, low, close"""
         arg, kwarg = self._get_column_(locals(), *FILED.HLC)
         return pta.atrts(*arg, **kwarg)
-    
+
     def pta_chandelier_exit(
         self,
         high_length: int = 22, low_length: int = 22,
         atr_length: int = 14, multiplier: int | float = 2.,
         mamode: str = "rma", talib: bool = True, use_close: bool = False,
         drift: int = 1, offset: int = 0, **kwargs
-    )-> pd.DataFrame:
+    ) -> pd.DataFrame:
         """args : high, low, close"""
         arg, kwarg = self._get_column_(locals(), *FILED.HLC)
         return pta.chandelier_exit(*arg, **kwarg)
@@ -1390,7 +1461,7 @@ class CoreFunc:
         return pta.tsv(*arg, **kwarg)
 
     def pta_vhm(
-        self, length: int = 610, std_length = 610,
+        self, length: int = 610, std_length=610,
         mamode: str = "sma", offset: int = 0, **kwargs
     ) -> pd.Series:
         """args : volume"""
@@ -1448,15 +1519,15 @@ class CoreFunc:
 
     # TALIB
     # Math Operator Functions
-    def talib_ADD(self,b=None, **kwargs):
+    def talib_ADD(self, b=None, **kwargs):
         """args:high,low"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
-        return self.talib().ADD(*arg,b)
+        return self.talib().ADD(*arg, b)
 
-    def talib_DIV(self,b=None, **kwargs):
+    def talib_DIV(self, b=None, **kwargs):
         """args:high,low"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
-        return self.talib().DIV(*arg,b) 
+        return self.talib().DIV(*arg, b)
 
     def talib_MAX(self, timeperiod=30, **kwargs):
         """args:close"""
@@ -1490,15 +1561,15 @@ class CoreFunc:
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return pd.concat(self.talib().MINMAXINDEX(*arg, timeperiod=timeperiod), axis=1)
 
-    def talib_MULT(self,b=None, **kwargs):
+    def talib_MULT(self, b=None, **kwargs):
         """args:high,low"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
-        return self.talib().MULT(*arg,b)
+        return self.talib().MULT(*arg, b)
 
-    def talib_SUB(self,b=None, **kwargs):
+    def talib_SUB(self, b=None, **kwargs):
         """args:high,low"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
-        return self.talib().SUB(*arg,b)
+        return self.talib().SUB(*arg, b)
 
     def talib_SUM(self, timeperiod=30, **kwargs):
         """args:close"""
@@ -1828,7 +1899,7 @@ class CoreFunc:
         """args:high, low,"""
         arg, kwarg = self._get_column_(locals(), *FILED.HL)
         return self.talib().SAREXT(*arg, startvalue=startvalue, offsetonreverse=offsetonreverse, accelerationinitlong=accelerationinitlong, accelerationlong=accelerationlong, accelerationmaxlong=accelerationmaxlong,
-                                 accelerationinitshort=accelerationinitshort, accelerationshort=accelerationshort, accelerationmaxshort=accelerationmaxshort)
+                                   accelerationinitshort=accelerationinitshort, accelerationshort=accelerationshort, accelerationmaxshort=accelerationmaxshort)
 
     def talib_SMA(self, timeperiod=30, **kwargs):
         """args:close"""
@@ -3206,8 +3277,20 @@ class CoreFunc:
         return self.FinTa().EMV(data, period)
 
     def finta_CCI(self, period: int = 20, constant: float = 0.015, **kwargs):
+        # finta 的 CCI 用 `rolling.apply(mad)` 逐窗口 Python 回调（10000 根 ~100ms）；
+        # 这里等价向量化（min_periods=0 口径），实测 ~2ms。
         data = self._finta_get_data(**kwargs)
-        return self.FinTa().CCI(data, period, constant)
+        if not isinstance(data, pd.DataFrame):
+            return self.FinTa().CCI(data, period, constant)
+        tp = (data['high'] + data['low'] + data['close']) / 3
+        values = np.asarray(tp, dtype=float)
+        mad = _rolling_mad(values, period, min_periods=0)
+        ma = pd.Series(values, index=tp.index).rolling(
+            period, min_periods=0).mean().to_numpy()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            result = (values - ma) / (constant * mad)
+        return pd.Series(result, index=tp.index,
+                         name=f'{period} period CCI')
 
     def finta_COPP(self, adjust: bool = True, **kwargs):
         data = self._finta_get_data(**kwargs)
@@ -3737,35 +3820,35 @@ class CoreFunc:
     #     return PairTrading()
 
     def pair_bollinger_bands(self, window=60, num_std=2., **kwargs) -> pd.DataFrame:
-        data=get_data(self)
+        data = get_data(self)
         return PairTrading.bollinger_bands_strategy(data.astype(np.float64), window, num_std)
 
     def pair_percentage_deviation(self, window=60, threshold=0.1, **kwargs) -> pd.Series | pd.DataFrame:
-        data=get_data(self)
+        data = get_data(self)
         return PairTrading.percentage_deviation_strategy(data.astype(np.float64), window, threshold)
 
     def pair_rolling_quantile(self, window=60, upper_quantile=0.95, lower_quantile=0.05, **kwargs) -> pd.DataFrame:
-        data=get_data(self)
+        data = get_data(self)
         return PairTrading.rolling_quantile_strategy(data.astype(np.float64), window, upper_quantile, lower_quantile)
 
-    def pair_z_score(self, window=60, z_threshold=2.0, **kwargs)-> pd.DataFrame | pd.Series:
-        data=get_data(self)
+    def pair_z_score(self, window=60, z_threshold=2.0, **kwargs) -> pd.DataFrame | pd.Series:
+        data = get_data(self)
         return PairTrading.z_score_strategy(data.astype(np.float64), window, z_threshold)
 
-    def pair_hurst_filter(self,window=20, hurst_threshold=0.5, z_threshold=2.0, **kwargs) -> pd.DataFrame:
-        data=get_data(self)
+    def pair_hurst_filter(self, window=20, hurst_threshold=0.5, z_threshold=2.0, **kwargs) -> pd.DataFrame:
+        data = get_data(self)
         return PairTrading.hurst_filter_strategy(data.astype(np.float64), window, hurst_threshold, z_threshold)
 
     def pair_kalman_filter(self, window=60, state_var_init=1e-4, obs_var=1e-2, **kwargs) -> pd.DataFrame:
-        data=get_data(self)
+        data = get_data(self)
         return PairTrading.kalman_filter(data.astype(np.float64), window, state_var_init, obs_var)
 
     def pair_garch_volatility_adjusted(self, z_threshold=2.0, **kwargs) -> pd.DataFrame:
-        data=get_data(self)
+        data = get_data(self)
         return PairTrading.garch_volatility_adjusted_signals(data.astype(np.float64), z_threshold)
 
     def pair_vecm_based(self, y_series=None, window=60, lag=2, **kwargs) -> pd.DataFrame | pd.Series:
-        data=get_data(self)
+        data = get_data(self)
         return PairTrading.vecm_based_signals(data.astype(np.float64), y_series, window, lag)
 
     def factor_single_asset_multi_factor_strategy(self, *factors: pd.DataFrame, window=10, top_pct=0.2, bottom_pct=0.2, isstand=True, **kwargs):
@@ -3799,12 +3882,12 @@ class CoreFunc:
         price = arg[0]
         factors_df = get_factors_df(*factors)
         return Factors.FactorOptimizer(price,
-                                            factors_df,
-                                            max_weight=max_weight,
-                                            l2_reg=l2_reg,
-                                            min_ic_abs=min_ic_abs,
-                                            n_init_points=n_init_points,
-                                            optimization_model=optimization_model)
+                                       factors_df,
+                                       max_weight=max_weight,
+                                       l2_reg=l2_reg,
+                                       min_ic_abs=min_ic_abs,
+                                       n_init_points=n_init_points,
+                                       optimization_model=optimization_model)
     # 自定义指标
     # btind
 
@@ -3946,46 +4029,394 @@ class CoreFunc:
         arg, kwarg = self._get_column_(locals(), *FILED.HLCV)
         return BtFunc.vwap_volume_based(*arg, **kwarg)
 
-    def btind_gaussian_smoothed(self, window:int=11,**kwargs):
+    def btind_gaussian_smoothed(self, window: int = 11, **kwargs):
         """args:close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return BtFunc.gaussian_smoothed(*arg, **kwarg)
-    
+
     def btind_varma(self, length: int = 10, var_length: int = 10, **kwargs):
         """args :close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return BtFunc.varma(*arg, **kwarg)
-    
+
     def btind_rsswma(self, length: int = 10, **kwargs):
         """args :close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
         return BtFunc.rsswma(*arg, **kwarg)
-    
-    def btind_pivot_high(self, left: int=5, right: int=5,**kwargs) :
+
+    def btind_pivot_high(self, left: int = 5, right: int = 5, **kwargs):
         """args :high"""
         arg, kwarg = self._get_column_(locals(), *FILED.H)
         return BtFunc.pivot_high(*arg, **kwarg)
-    
-    def btind_pivot_low(self, left: int=5, right: int=5,**kwargs) :
+
+    def btind_pivot_low(self, left: int = 5, right: int = 5, **kwargs):
         """args :low"""
         arg, kwarg = self._get_column_(locals(), *FILED.L)
         return BtFunc.pivot_low(*arg, **kwarg)
-    
-    def btind_linreg_slope(self, length: int=10, **kwargs) :
+
+    def btind_linreg_slope(self, length: int = 10, **kwargs):
         """args :close"""
         arg, kwarg = self._get_column_(locals(), *FILED.C)
-        return BtFunc.linreg_slope(*arg,**kwarg)
-    
-    def btind_vwap_high(self,length:int=10,**kwargs) :
+        return BtFunc.linreg_slope(*arg, **kwarg)
+
+    def btind_vwap_high(self, length: int = 10, **kwargs):
         """args :high, close, volume"""
         arg, kwarg = self._get_column_(locals(), *FILED.HCV)
         return BtFunc.vwap_high(*arg, **kwarg)
-    
-    def btind_vwap_low(self,length:int=10,**kwargs) :
+
+    def btind_vwap_low(self, length: int = 10, **kwargs):
         """args :low, close, volume"""
         arg, kwarg = self._get_column_(locals(), *FILED.LCV)
         return BtFunc.vwap_low(*arg, **kwarg)
 
+    def btind_divergence(self, kline: pd.DataFrame = None,
+                         pivot_period: int = 5, div_type: str = 'Regular',
+                         max_bars: int = 100, **kwargs):
+        # 必须在 _get_column_ 之前取出: 否则 _source_for_ind 会被 get_data() 解包成 pandas
+        source = kwargs.pop("_source_for_ind", None)
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+
+        name = ""
+        if isminibtobject(source):
+            # source 即内置指标对象(IndSeries/IndFrame/Line/KLine)
+            if hasattr(source, "lines") and source.lines:
+                name = getattr(source, "ind_name", "") or getattr(
+                    source, "sname", "")
+            elif getattr(self, "name", ""):
+                name = getattr(source, "name", "") or ""
+            # 取原始内置 K 线框架对象(用于 pivot 的 high/low)
+            kobj = getattr(source, "kline", None)
+            if kobj is None:
+                kobj = getattr(source, "source_object", None)
+            if kobj is not None:
+                kline = kobj
+
+        # _get_column_ 已把 kline 转成 pandas, 这里补回框架 KLine 对象
+        kwarg["kline"] = kline
+        data = BtFunc.divergence(*arg, **kwarg)
+
+        if name:
+            if "_" in name:
+                name = "_".join(name.split("_")[1:])
+            data = data.rename(columns={
+                "ind_divergenc": f"{name}_divergenc",
+                "ind_div": f"{name}_div",
+            })
+        return data
+
+    # Pine指标
+    def pine_normalize(self, lo=0.0, hi=1.0, **kwargs):
+        """MLExtensions normalize: 扩展窗口历史 min/max 归一化
+        所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.normalize(*arg,  **kwarg)
+
+    def pine_cci(self, n: int = 10, **kwargs):
+        """Pine ta.cci: (src - sma) / (0.015 * mean|src - sma|)
+        所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.cci(*arg, **kwarg)
+
+    def pine_wavetrend(self, n1=10, n2=11, talib: bool | None = None, **kwargs):
+        """Pine ta.wavetrend: 波形趋势
+        所需字段：high,low,close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLC)
+        return PineFunc.wavetrend(*arg, **kwarg)
+
+    def pine_rma(self, n=20, **kwargs):
+        """Pine ta.rma: alpha=1/n, 以最初 n 个非NaN值的 SMA 播种, 之后递归
+        所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.rma(*arg, **kwarg)
+
+    def pine_ema(self, n=20, **kwargs):
+        """Pine ta.ema: 首值播种 EMA（alpha=2/(n+1)）
+        所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.ema(*arg, **kwarg)
+
+    def pine_adx_wilder(self, n=20, **kwargs):
+        """MLExtensions 风格的 Wilder ADX (累加器平滑 + rma)
+        所需字段：high,low,close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLC)
+        return PineFunc.adx_wilder(*arg, **kwarg)
+
+    def pine_barssince(self, **kwargs):
+        """Pine ta.barssince: 距上次 cond 为 True 的 bar 数, 从未发生为 NaN
+        所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.barssince(*arg, **kwarg)
+
+    def pine_rsi(self, n=20, **kwargs):
+        """Pine ta.rsi: Wilder 平滑 RSI
+        所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.rsi(*arg, **kwarg)
+
+    # ==================== Pine ta.* 全量补全 ====================
+    # 约定：本段每个 pine_xxx 的参数名与 PineFunc.xxx 完全一致，
+    # 这样 _get_column_(locals(), ...) 收集到的同名局部变量会作为关键字
+    # 直接透传给 PineFunc，无需逐个映射。
+
+    # ---- 均线 / 平滑 ----
+    def pine_sma(self, length=10, **kwargs):
+        """Pine ta.sma: 简单移动平均。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.sma(*arg, **kwarg)
+
+    def pine_wma(self, length=10, **kwargs):
+        """Pine ta.wma: 线性加权移动平均。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.wma(*arg, **kwarg)
+
+    def pine_hma(self, length=10, **kwargs):
+        """Pine ta.hma: Hull 移动平均。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.hma(*arg, **kwarg)
+
+    def pine_vwma(self, length=20, **kwargs):
+        """Pine ta.vwma: 成交量加权移动平均。所需字段：close, volume"""
+        arg, kwarg = self._get_column_(locals(), *FILED.CV)
+        return PineFunc.vwma(*arg, **kwarg)
+
+    def pine_swma(self, **kwargs):
+        """Pine ta.swma: 对称加权均线。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.swma(*arg, **kwarg)
+
+    def pine_alma(self, length=9, offset=0.85, sigma=6.0, **kwargs):
+        """Pine ta.alma: Arnaud Legoux 均线。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.alma(*arg, **kwarg)
+
+    def pine_linreg(self, length=14, offset=0, **kwargs):
+        """Pine ta.linreg: 线性回归末端值。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.linreg(*arg, **kwarg)
+
+    def pine_median(self, length=10, **kwargs):
+        """Pine ta.median: 滚动中位数。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.median(*arg, **kwarg)
+
+    # ---- 变换 / 差分 ----
+    def pine_cum(self, **kwargs):
+        """Pine ta.cum: 累计和。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.cum(*arg, **kwarg)
+
+    def pine_change(self, length=1, **kwargs):
+        """Pine ta.change: source - source[length]。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.change(*arg, **kwarg)
+
+    def pine_roc(self, length=1, **kwargs):
+        """Pine ta.roc: 变动率（%）。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.roc(*arg, **kwarg)
+
+    def pine_mom(self, length=1, **kwargs):
+        """Pine ta.mom: 动量。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.mom(*arg, **kwarg)
+
+    def pine_cog(self, length=10, **kwargs):
+        """Pine ta.cog: 重心振荡器。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.cog(*arg, **kwarg)
+
+    def pine_range(self, length=10, **kwargs):
+        """Pine ta.range: highest - lowest。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.range(*arg, **kwarg)
+
+    # ---- 波动率 / 统计 ----
+    def pine_tr(self, handle_na=False, **kwargs):
+        """Pine ta.tr: 真实波幅。所需字段：high, low, close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLC)
+        return PineFunc.tr(*arg, **kwarg)
+
+    def pine_atr(self, length=14, handle_na=True, **kwargs):
+        """Pine ta.atr: rma(tr(true), length)。所需字段：high, low, close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLC)
+        return PineFunc.atr(*arg, **kwarg)
+
+    def pine_stdev(self, length=10, biased=True, **kwargs):
+        """Pine ta.stdev: 标准差。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.stdev(*arg, **kwarg)
+
+    def pine_variance(self, length=10, biased=True, **kwargs):
+        """Pine ta.variance: 方差。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.variance(*arg, **kwarg)
+
+    def pine_dev(self, length=10, **kwargs):
+        """Pine ta.dev: 平均绝对偏差。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.dev(*arg, **kwarg)
+
+    def pine_correlation(self, b=None, length=10, **kwargs):
+        """Pine ta.correlation: 滚动皮尔逊相关。所需字段：close（b 为第二序列）"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        b = kwarg.pop('b', b)
+        length = kwarg.pop('length', length)
+        return PineFunc.correlation(arg[0], b, length, **kwarg)
+
+    def pine_percentrank(self, length=10, **kwargs):
+        """Pine ta.percentrank: 百分位排名。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.percentrank(*arg, **kwarg)
+
+    def pine_percentile_nearest_rank(self, length=10, percentage=50.0, **kwargs):
+        """Pine ta.percentile_nearest_rank: 最近秩百分位值。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.percentile_nearest_rank(*arg, **kwarg)
+
+    # ---- 极值 ----
+    def pine_highest(self, length=10, **kwargs):
+        """Pine ta.highest: 窗口最高值。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.highest(*arg, **kwarg)
+
+    def pine_lowest(self, length=10, **kwargs):
+        """Pine ta.lowest: 窗口最低值。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.lowest(*arg, **kwarg)
+
+    def pine_highestbars(self, length=10, **kwargs):
+        """Pine ta.highestbars: 距最高值的 bar 数。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.highestbars(*arg, **kwarg)
+
+    def pine_lowestbars(self, length=10, **kwargs):
+        """Pine ta.lowestbars: 距最低值的 bar 数。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.lowestbars(*arg, **kwarg)
+
+    def pine_max(self, b=None, **kwargs):
+        """Pine ta.max: 逐点较大值。所需字段：close（b 为第二序列/标量）"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        b = kwarg.pop('b', b)
+        return PineFunc.max(arg[0], b, **kwarg)
+
+    def pine_min(self, b=None, **kwargs):
+        """Pine ta.min: 逐点较小值。所需字段：close（b 为第二序列/标量）"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        b = kwarg.pop('b', b)
+        return PineFunc.min(arg[0], b, **kwarg)
+
+    # ---- 交叉 / 逻辑 ----
+    def pine_cross(self, b=None, **kwargs):
+        """Pine ta.cross: 双向穿越。所需字段：close（b 为第二序列）"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        b = kwarg.pop('b', b)
+        return PineFunc.cross(arg[0], b, **kwarg)
+
+    def pine_crossover(self, b=None, **kwargs):
+        """Pine ta.crossover: 上穿。所需字段：close（b 为第二序列）"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        b = kwarg.pop('b', b)
+        return PineFunc.crossover(arg[0], b, **kwarg)
+
+    def pine_crossunder(self, b=None, **kwargs):
+        """Pine ta.crossunder: 下穿。所需字段：close（b 为第二序列）"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        b = kwarg.pop('b', b)
+        return PineFunc.crossunder(arg[0], b, **kwarg)
+
+    def pine_rising(self, length=1, **kwargs):
+        """Pine ta.rising: 连续上涨。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.rising(*arg, **kwarg)
+
+    def pine_falling(self, length=1, **kwargs):
+        """Pine ta.falling: 连续下跌。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.falling(*arg, **kwarg)
+
+    def pine_valuewhen(self, cond=None, occurrence=0, **kwargs):
+        """Pine ta.valuewhen: 条件成立时的 source（默认 close）。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        cond = kwarg.pop('cond', cond)
+        return PineFunc.valuewhen(cond, arg[0], occurrence)
+
+    def pine_pivothigh(self, leftbars=5, rightbars=5, **kwargs):
+        """Pine ta.pivothigh: 摆动高点。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.pivothigh(*arg, **kwarg)
+
+    def pine_pivotlow(self, leftbars=5, rightbars=5, **kwargs):
+        """Pine ta.pivotlow: 摆动低点。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.pivotlow(*arg, **kwarg)
+
+    # ---- 振荡器 ----
+    def pine_cmo(self, length=14, **kwargs):
+        """Pine ta.cmo: Chande 动量振荡器。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.cmo(*arg, **kwarg)
+
+    def pine_wpr(self, length=14, **kwargs):
+        """Pine ta.wpr: Williams %R。所需字段：high, low, close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLC)
+        return PineFunc.wpr(*arg, **kwarg)
+
+    def pine_mfi(self, length=14, **kwargs):
+        """Pine ta.mfi: 资金流量指标。所需字段：high, low, close, volume"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLCV)
+        return PineFunc.mfi(*arg, **kwarg)
+
+    def pine_rci(self, length=14, **kwargs):
+        """Pine ta.rci: 秩相关指数。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.rci(*arg, **kwarg)
+
+    def pine_tsi(self, short_length=13, long_length=25, **kwargs):
+        """Pine ta.tsi: 真实强度指数。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.tsi(*arg, **kwarg)
+
+    def pine_accdist(self, **kwargs):
+        """Pine ta.accdist: 累积/派发线。所需字段：high, low, close, volume"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLCV)
+        return PineFunc.accdist(*arg, **kwarg)
+
+    def pine_vwap(self, **kwargs):
+        """Pine ta.vwap: 成交量加权均价。所需字段：high, low, close, volume"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLCV)
+        return PineFunc.vwap(*arg, **kwarg)
+
+    def pine_stoch(self, length=14, **kwargs):
+        """Pine ta.stoch: 随机指标 %K。所需字段：high, low, close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLC)
+        return PineFunc.stoch(*arg, **kwarg)
+
+    def pine_bbw(self, length=20, mult=2.0, **kwargs):
+        """Pine ta.bbw: 布林带宽度。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.bbw(*arg, **kwarg)
+
+    # ---- 多输出 ----
+    def pine_bb(self, length=20, mult=2.0, **kwargs):
+        """Pine ta.bb: 布林带（mid/upper/lower）。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.bb(*arg, **kwarg)
+
+    def pine_macd(self, fast=12, slow=26, signal=9, **kwargs):
+        """Pine ta.macd: MACD（macd/signal/hist）。所需字段：close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.C)
+        return PineFunc.macd(*arg, **kwarg)
+
+    def pine_sar(self, start=0.02, inc=0.02, maximum=0.2, **kwargs):
+        """Pine ta.sar: 抛物线 SAR。所需字段：high, low"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HL)
+        return PineFunc.sar(*arg, **kwarg)
+
+    def pine_dmi(self, di_length=14, adx_length=14, **kwargs):
+        """Pine ta.dmi: 动向指标（+DI/-DI/ADX）。所需字段：high, low, close"""
+        arg, kwarg = self._get_column_(locals(), *FILED.HLC)
+        return PineFunc.dmi(*arg, **kwarg)
 
 
 # setattr(AnalysisIndicators, 'btta', property(lambda self: self._df.ta))
@@ -3996,7 +4427,7 @@ for atrk, atrv in CoreFunc.__dict__.items():
         setattr(SeriesIndicators, atrk, atrv)
 
 AnalysisIndicators.__name__ = 'DataFrameIndicators'
-#AnalysisIndicators.__bases__ = (LazyImport,) + AnalysisIndicators.__bases__
+# AnalysisIndicators.__bases__ = (LazyImport,) + AnalysisIndicators.__bases__
 for name, attr in LazyImport.__dict__.items():
     if isinstance(attr, classmethod):
         setattr(AnalysisIndicators, name, attr)

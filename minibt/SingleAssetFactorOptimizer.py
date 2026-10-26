@@ -1,6 +1,11 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except ImportError as e:
+    raise ImportError(
+        '单资产因子优化需要依赖 matplotlib，请安装：pip install matplotlib'
+    ) from e
 from scipy.stats import spearmanr
 from scipy.optimize import minimize
 

@@ -5,7 +5,7 @@ from ..utils import (reduce, Addict, storeData,
                      FILED, time_to_datetime,
                      BtAccount, np, BASE_DIR,
                      ffillnan, Base, Literal,
-                     abc, KLinesSet, # execute_once,
+                     abc, KLinesSet,  # execute_once,
                      partial, IndSetting,
                      timedelta, Iterable, loadData,
                      BtIndicatorDataSet, pd,
@@ -69,7 +69,7 @@ class StrategyMeta(type):
                 is_indirect_subclass = True
 
         # -------------------------- 按子类类型执行不同逻辑 --------------------------
-        # 情况1：是直接子类（如owen继承Strategy）→ 执行完整改造
+        # 情况1：是直接子类（如Strategy1继承Strategy）→ 执行完整改造
         if is_direct_subclass:
             # print(f"[元类处理] {name}（Strategy直接子类）→ 执行__init__改造")
 
@@ -82,11 +82,12 @@ class StrategyMeta(type):
 
             # 保存原__init__为_strategy_init，替换新__init__，添加已处理标记
             if original_init:
-                attrs["_strategy_init"] = original_init  # execute_once(original_init)
+                # execute_once(original_init)
+                attrs["_strategy_init"] = original_init
             attrs["__init__"] = new_init
             attrs["_is_strategy_processed"] = True  # 标记为已处理
 
-        # 情况2：是间接子类（如owen1继承owen）→ 完全跳过改造，直接继承父类
+        # 情况2：是间接子类（如Strategy2继承Strategy1）→ 完全跳过改造，直接继承父类
         elif is_indirect_subclass:
             # 关键：不修改__init__和_strategy_init，直接继承父类的方法
             # 同时添加已处理标记，避免后续误触发
@@ -149,6 +150,23 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
             bt.run()  # 启动策略
     """
 
+    @property
+    def theme(self) -> str:
+        """## 图表主题：``'dark'``（默认）/ ``'light'``
+
+        回测（bokeh）、回放、实时初始化图表时统一使用。
+        优先取策略里 ``self.theme = 'light'`` 设置的值，否则回退到
+        ``self.config.theme``（默认 ``'dark'``）。
+        """
+        override = self.__dict__.get('_chart_theme')
+        if isinstance(override, str) and override.strip():
+            return override.strip().lower()
+        return getattr(getattr(self, 'config', None), 'theme', 'dark')
+
+    @theme.setter
+    def theme(self, value) -> None:
+        self.__dict__['_chart_theme'] = value
+
     def __init__(self: Strategy, *args, **kwargs):
         """
         ## 策略实例初始化（入口方法）
@@ -168,9 +186,10 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         """
         strategy_class_name = self.__class__.__name__
         global_strategy_instances = self.__class__._strategy_instances  # 全局策略实例管理集合
-        # 使用「类名 + _sid」作为唯一键，避免多策略同名类覆盖（如多个owen策略）
+        # 使用「类名 + _sid」作为唯一键，避免多策略同名类覆盖（如多个策略）
         sid = kwargs.get('_sid', 0) if isinstance(kwargs, dict) else 0
-        global_strategy_instances.add_data(f"{strategy_class_name}_{sid}", self)  # 注册当前实例
+        global_strategy_instances.add_data(
+            f"{strategy_class_name}_{sid}", self)  # 注册当前实例
 
         # 初始化策略配置（确保类型为btconfig）
         self.config = self.config if isinstance(
@@ -185,7 +204,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         kwargs.update(dict(_data_patching=options._data_patching))
         for attr_name, attr_value in kwargs.items():
             setattr(self, attr_name, attr_value)
-            
+
         if self._isoptimize:
             self._call_func = self._optimize_single_param_set       # 1. 参数优化模式
         elif self._is_live_trading:
@@ -213,7 +232,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         self.start()                                # 4. 启动钩子（用户可重写）
         return self
 
-    def _start_strategy_run(self: Strategy,*args, **kwargs) -> Strategy:
+    def _start_strategy_run(self: Strategy, *args, **kwargs) -> Strategy:
         """
         ## 策略运行主流程（回测/实盘统一入口）
         ### 核心作用：
@@ -250,7 +269,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         self._get_plot_datas()
 
         return self
-    
+
     def __call__(self: Strategy, *args, **kwds) -> Strategy:
         """
         ## 策略实例调用入口（模式分发器）
@@ -269,7 +288,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         """
         return self._call_func(*args, **kwds)
 
-    def _optimize_single_param_set(self: Strategy, params: dict, is_maximize: bool, target_metrics: Iterable,**kwargs):
+    def _optimize_single_param_set(self: Strategy, params: dict, is_maximize: bool, target_metrics: Iterable, **kwargs):
         """
         ## 单组参数优化逻辑（参数优化的核心单元）
         ### 核心作用：
@@ -375,7 +394,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
             '请先通过adddata()方法添加K线数据,或在策略初始化时使用self.get_kline(LocalDatas.test)'
 
         # 3. 账户历史记录初始化（回测模式下，若设置最小启动长度）
-        self.min_start_length = max(0,self.min_start_length)
+        self.min_start_length = max(0, self.min_start_length)
         if self.min_start_length > 0 and not self._is_live_trading:
             self._account._init_history(self.min_start_length)
 
@@ -397,9 +416,6 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
                 initial_position_records.append(
                     [position_direction, open_price])
             self._init_trades = [self.sid, initial_position_records]
-
-            # 6.1 策略id标记存放地址，用于实时图表更新
-            self._id_dir = f"{BASE_DIR}/liveplot/id" if self._is_live_trading else f"{BASE_DIR}/liveplot/replay/id"
 
         # 7. 检查是否绑定止损止盈器（_isstop：True=有止损止盈，False=无）
         has_stop_loss_take_profit = [
@@ -695,7 +711,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         else:
             pass  # i=0时，无前置数据，直接处理后续完整分组
 
-        #fr = True  # 是否从第一根K线开始重采样（修正后仅作为标记，避免重复添加）
+        # fr = True  # 是否从第一根K线开始重采样（修正后仅作为标记，避免重复添加）
         index = 0  # 当前分组起始索引
         array_len = len(array)  # 剩余数据长度
 
@@ -722,7 +738,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
                 plot_index.append(index + i)
                 # 更新索引
                 index = j
-                #fr = False  # 首次分组后，标记为非起始状态
+                # fr = False  # 首次分组后，标记为非起始状态
 
         # 处理最后一组不足倍数的K线（修正：索引判断更严谨）
         if index < array_len:
@@ -1299,193 +1315,6 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
 
         return [sid, source], [sid, _btind_span], self._account.account_info[index]
 
-    def _update_live_datas(self, isswitch: bool = False) -> tuple:
-        """
-        ## 弃用
-        ## 实盘模式下更新图表数据的方法
-        ### 核心作用：
-        - 从TQApi获取最新K线与指标数据，处理HA/K线转换，整理为绘图所需格式
-
-        Args:
-            length (int, optional): 图表显示的数据长度（默认显示最近10根K线）. Defaults to 10.
-
-        Returns:
-            tuple:
-                - 第一个元素：绘图数据源列表（每个元素对应一个K线数据的绘图配置）
-                - 第二个元素：持仓状态列表（每个元素含持仓方向与开仓价）
-        """
-        length = 100
-        sid = self.sid
-        _sid, _cid = loadData(self._id_dir)
-        if sid != _sid:
-            return [sid, [{} for _ in range(self._btklinedataset.num)]], [sid, [[0., 0.] for _ in range(self._btklinedataset.num)]], self._get_account_info()
-        source = []  # 绘图数据源列表
-        _btind_span = []  # 持仓状态列表（用于显示持仓线）
-        # 遍历所有K线数据，生成绘图数据
-        for i, kline in enumerate(self._btklinedataset.values()):
-            if _cid != i:
-                # 当前策略非当前K线跳过
-                source.append({})
-                _btind_span.append([0., 0.])
-                continue
-            # 获取TQ实盘数据
-            # kline._dataset.pandas_object
-            tq_data = kline.pandas_object.iloc[-length:]
-            volume = tq_data.volume.iloc[-length:]
-            volume5 = volume.rolling(5).mean().values
-            volume10 = volume.rolling(10).mean().values
-            _datetime = tq_data.datetime.values
-            # 获取当前持仓状态
-            position = kline.position
-            pos = position.pos
-            # 记录持仓方向与开仓价（多头取open_price_long，空头取open_price_short）
-            price = (position.open_cost_long if pos >
-                     0 else position.open_cost_short) if pos else 0.
-            _btind_span.append([pos, price])
-            # 处理时间与成交量数据（取最近length根）
-            volume = tq_data.volume.values
-            # 处理HA布林带K线转换（若启用）
-            tq_data = self._to_ha(tq_data, self._btklinedataset.isha[i])
-            # 处理线性回归K线转换（若启用）
-            tq_data = self._to_lr(tq_data, self._btklinedataset.islr[i])
-            # 提取OHLC数据（取最近length根）
-            open = tq_data.open.values
-            high = tq_data.high.values
-            low = tq_data.low.values
-            close = tq_data.close.values
-            # 整理K线基础绘图数据（含涨跌标记inc）
-            lh = tq_data[['low', 'high']]
-            Low = lh.min(1).values
-            High = lh.max(1).values
-            data = dict(
-                index=tq_data.index.values,
-                datetime=_datetime,
-                open=open,
-                high=high,
-                low=low,
-                close=close,
-                volume=volume,
-                volume5=volume5,
-                volume10=volume10,
-                inc=(tq_data.close >= tq_data.open).values.astype(
-                    np.uint8).astype(str),
-                Low=Low,  # 预留字段（用于指标显示）
-                High=High,  # 预留字段（用于指标显示）
-            )
-            # 处理指标绘图数据
-            ind_record = self._indicator_record[i]  # 指标记录（含显示配置）
-            for isplot, ind_name, lines, rlines, doubles, plotinfo in ind_record:
-                lineinfo = plotinfo.get('linestyle', {})  # 线型配置
-                overlap = plotinfo.get("overlap")
-                signal_info: dict = plotinfo.get('signalstyle', {})
-                # 获取指标数据
-                ind_key = doubles and ind_name[0] or ind_name
-                ind = self._btindicatordataset[ind_key].pandas_object
-                # ========== 核心修复1：重置指标索引为相对索引（0~length-1） ==========
-                if signal_info:
-                    for k, v in signal_info.items():
-                        signalkey, signalcolor, signalmarker, signaloverlap, signalshow, signalsize, signallabel = list(
-                            v.values())
-
-                        if signalshow:
-                            # ma0_long_signal(标识)
-                            key = f"{ind_key}{sid}_{k}"
-                            if signaloverlap:
-                                price = kline.pandas_object[signalkey].values
-                            else:
-                                try:
-                                    # 用重置索引的指标
-                                    price = ind[signalkey].values
-                                except:
-                                    price = ind[k].values
-
-                            # ========== 核心修复2：基于相对索引筛选信号 ==========
-                            # 信号值（重置索引后）
-                            svalues = ind[k].values
-                            # issignal = svalues[-1] > 0  # 当前值有交易信号
-                            signal_mask = svalues > 0  # 信号触发的掩码
-                            sprice = price[signal_mask]  # 信号价格
-                            sindex = kline.pandas_object.index.values[signal_mask]
-                            # 信号时间（与K线严格对齐）
-                            sdatetime = kline.pandas_object['datetime'].values[signal_mask]
-                            slen = len(sprice)
-
-                            # ========== 核心修复3：信号index改为相对索引 ==========
-                            signal_data = dict(
-                                index=sindex,
-                                datetime=sdatetime,
-                                price=sprice,
-                                size=[signalsize,]*slen,
-                            )
-                            if signallabel:
-                                signal_data.update(dict(text=[signallabel and signallabel["text"]
-                                                              or "text",]*slen,))
-                            data.update({key: signal_data})
-
-                # ========== 核心修复4：后续指标处理改用重置索引后的数据 ==========
-                ind = ind.iloc[-length:].values
-
-                # 处理多指标合并场景（doubles标记）
-                if doubles:
-                    ind_name = ind_name[0]
-                    ind = ind[:, doubles]  # 重新排序
-                    # 整理显示配置与指标列名
-                    len_ind = len(lines[1])
-                    _isplot = list(
-                        reduce(lambda x, y: x + y, isplot))  # 合并显示开关
-                    _lines = list(reduce(lambda x, y: x + y, lines))    # 合并列名
-                    lencol = len(lines[0])
-                    # 按显示开关添加指标数据
-                    for ix in range(len(doubles)):
-                        if _isplot[ix]:
-                            data.update(
-                                {_lines[ix]: ind[:, ix].tolist()[-length:]})
-                    data.update(self.__get_ind_HL(
-                        ind_name, ind[:, lencol:], length))
-                    # 前向填充NaN（确保数据完整性）
-                    ind = ffillnan(ind[:, -len_ind:])
-                else:
-                    # 处理单指标场景
-                    if any(isplot):
-                        if len(isplot) == 1:
-                            # 单列指标：直接添加数据
-                            value = ind.tolist()[-length:]
-                            data.update({lines[0]: value})
-                            # 处理柱状图指标（line_dash='vbar'）
-                            if lineinfo and rlines[0] in lineinfo and lineinfo[rlines[0]].get('line_dash', None) == 'vbar':
-                                # 添加涨跌标记（用于柱状图颜色区分）
-                                data.update({f"{rlines[0]}_inc": list(
-                                    map(lambda x: "1" if x > 0. else "0", value))})
-                                # 添加零线（用于柱状图基准）
-                                data.update({'zeros': [0.,] * length})
-                            if not overlap:
-                                data.update(self.__get_ind_HL(
-                                    ind_name, ind, length))
-                        else:
-                            ils = []
-                            # 多列指标：按列添加数据
-                            for ix, (_name, ov) in enumerate(zip(lines, overlap.values())):
-                                if isplot[ix]:
-                                    value = ind[:, ix].tolist()[-length:]
-                                    data.update({_name: value})
-                                    # 处理柱状图指标
-                                    if lineinfo and rlines[ix] in lineinfo and lineinfo[rlines[ix]].get('line_dash', None) == 'vbar':
-                                        data.update({f"{rlines[ix]}_inc": list(
-                                            map(lambda x: "1" if x > 0. else "0", value))})
-                                        if 'zeros' not in data:
-                                            data.update(
-                                                {'zeros': [0.,] * length})
-                                    if not ov:
-                                        ils.append(ix)
-                            if ils:
-                                data.update(self.__get_ind_HL(
-                                    ind_name, ind[:, ils], length))
-                    ind = ffillnan(ind)
-
-            # 添加当前K线的绘图数据到列表
-            source.append(data)
-        return [sid, source], [sid, _btind_span], self._get_account_info()
-
     def wait_update(self, deadline=60) -> bool:
         return self.api.wait_update(deadline=deadline)
 
@@ -1606,17 +1435,30 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
 
             value_type = type(value)
             # 收录内置指标：若值为指标类型且长度匹配，则添加到指标数据集
-            if value_type in BtIndType and len(value) in self._btklinedataset.lengths:
+            # ★ 实盘：K 线是**原地长起来**的，指标重建时长度可能刚好与 K 线
+            #   差一根（重算时机 / 预热窗口）→ 不能因此拒收 ✗，否则新指标
+            #   永远登记不进去 → 图上指标值停在初始化那一刻（用户反馈 ✗）
+            _len_ok = False
+            if value_type in BtIndType:
+                try:
+                    _klens = self._btklinedataset.lengths
+                except AttributeError:            # 还没建 K 线数据集 ✓
+                    _klens = []
+                _len_ok = (len(value) in _klens
+                           or any(abs(len(value) - n) <= 1 for n in _klens))
+            if value_type in BtIndType and _len_ok:
                 value.sname = name  # 设置指标名称
                 # 修复：确保指标对象的 strategy_id 与当前策略一致
                 # 否则指标对象的 strategy_instance 会错误地指向其他策略实例
                 if value.id.strategy_id != self._sid:
-                    value._indsetting.id = value._indsetting.id.copy(strategy_id=self._sid)
+                    value._indsetting.id = value._indsetting.id.copy(
+                        strategy_id=self._sid)
                     # 同步更新所有子行(Line)的 strategy_id
                     for line_name in value.lines:
                         line = getattr(value, line_name, None)
                         if line is not None and hasattr(line, '_indsetting'):
-                            line._indsetting.id = line._indsetting.id.copy(strategy_id=self._sid)
+                            line._indsetting.id = line._indsetting.id.copy(
+                                strategy_id=self._sid)
                 # 处理上采样关联
                 if value._upsample_name:
                     for k, v in self._btindicatordataset.items():
@@ -1627,27 +1469,33 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
                 self._btindicatordataset.add_data(name, value)
             # 收录K线数据：若值为K线数据类型，则添加到K线数据集
             elif value_type in KLineType:
+                # 确保 _btklinedataset 存在（管理所有 KLine 实例的容器），
+                # 部分场景下策略类可能未预先初始化，此处做防御性检查
+                if not hasattr(self, '_btklinedataset'):
+                    from minibt.strategy.strategy import KLinesSet
+                    self._btklinedataset = KLinesSet()
                 value.sname = name  # 设置K线数据名称
                 # 检查KLine的id是否正确：当strategy_id不匹配或plot_id/data_id为默认值0时，重新分配ID
                 # 修复：原条件 value.id.plot_id!=len(self._btklinedataset) 在 len=0 时
                 # 与 plot_id=0 相等导致第一个KLine永远不被更新，改为直接检查 strategy_id
-                need_update_id = value.id.strategy_id != self._sid or (value.id.plot_id==0 and value.id.data_id==0)
+                need_update_id = value.id.strategy_id != self._sid or (
+                    value.id.plot_id == 0 and value.id.data_id == 0)
                 if need_update_id:
                     from ..utils import BtID
                     id = len(self._btklinedataset)
                     btid = BtID(self._sid, id, id)
                     value._indsetting.id = btid
-                    value.name=name
+                    value.name = name
                     # 问题的核心就是 ： KLine 对象本身的 id 被正确更新了，但它内部的 Line 对象（如 close 、 low 、 high 、 open 、 volume 等）的 id 没有同步更新。
                     # 让我用更直观的方式解释一下：
-                    ### 问题场景
+                    # 问题场景
                     # 当策略2（CMOStrategy）初始化时：
 
-                    # 1. self.data = LocalDatas.pp2601_60.kline 创建了一个 KLine 对象，其 id.strategy_id = 0 （默认值）
+                    # 1. self.data = LocalDatas.pp2609_60.kline 创建了一个 KLine 对象，其 id.strategy_id = 0 （默认值）
                     # 2. 这个 KLine 对象内部会为每一列（open、high、low、close、volume）创建对应的 Line 对象，这些 Line 对象的 id.strategy_id 也是默认值 0
                     # 3. Strategy.__setattr__ 检测到 KLine 的 id.strategy_id 不正确，将其更新为 1
                     # 4. 但是！ Line 对象的 id 没有同步更新，仍然是 0
-                    ### 影响
+                    # 影响
                     # 当 Stop 实例访问 self.kline.close[-1] 时：
 
                     # - self.kline 返回的 KLine 对象的 id.strategy_id = 1 ✅
@@ -1655,7 +1503,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
                     # - Line.strategy_instance 使用 id.strategy_id = 0 查找策略实例，返回策略1而不是策略2
                     # - btindex 返回策略1的回测索引，而不是策略2的
                     # - 结果： close[-1] 返回策略1的数据，而不是策略2的数据
-                    ### 修复方案
+                    # 修复方案
                     # 同步更新所有子行(Line)的ID，确保索引访问时能正确关联到策略实例
                     for line_name in value.lines:
                         line = getattr(value, line_name, None)
@@ -1664,8 +1512,12 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
                 # 处理多次赋值的情况，保持指标ID一致性
                 if name in self._btklinedataset:  # 多次赋值，即替换为最新数据
                     if hasattr(self._account, "brokers"):
-                        self._account.brokers.pop(
-                            list(self._btklinedataset.keys()).index(name))
+                        _idx = list(self._btklinedataset.keys()).index(name)
+                        # 账户可能刚重建（`brokers` 为空）或重放里会二次
+                        # `_prepare_before_strategy_start`；越界就跳过，
+                        # 避免 `pop from empty list` 把整个回测/回放打断。
+                        if 0 <= _idx < len(self._account.brokers):
+                            self._account.brokers.pop(_idx)
                     btid = self._btklinedataset[name]._indsetting.id.copy()
                     for v in [*value.line, value]:
                         v._indsetting.id = value._indsetting.id.copy(
@@ -1751,7 +1603,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         use_log_transform: bool = True,    # 是否对非负特征做对数变换
         handle_outliers: str = "clip",     # 异常值处理：'clip'（截断）/'mark'（标记）
         pca_n_components: float = 1.0,     # PCA降维（1.0表示保留全部特征）
-        target_returns: np.ndarray | None= None  # 目标收益率（用于特征选择）
+        target_returns: np.ndarray | None = None  # 目标收益率（用于特征选择）
     ) -> np.ndarray:
         """
         ## 量化特征处理的实际执行方法
@@ -1871,6 +1723,8 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
             actor_name: str = "",
             file_extension: str = ".pth",
             auto_process_features: bool = True,
+            min_start_mode: Literal["fixed",
+                                    "random", "incremental"] = "fixed",
             **params):
         """## 配置强化学习模型参数并初始化训练环境
         - 本方法用于设置强化学习算法的各项参数，包括环境配置、网络结构、训练超参数、
@@ -1940,6 +1794,8 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
             actor_path (str, optional): 预训练Actor模型路径。默认为空字符串
             actor_name (str, optional): Actor模型名称。默认为空字符串
             file_extension (str, optional): 模型文件扩展名。默认为 ".pth"
+            auto_process_features (bool, optional): 是否自动处理特征（归一化、异常值、PCA等）。默认为 True
+            min_start_mode (str, optional): 最小回测长度模式。默认为 "fixed"
             **params: 其他关键字参数
 
         Returns:
@@ -1965,7 +1821,8 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         self.train = train
         self.window_size = kwargs.pop("window_size", 10)
         kwargs = {**kwargs, **params}
-        self.__auto_process_features = kwargs.pop("auto_process_features", True)
+        self.__auto_process_features = kwargs.pop(
+            "auto_process_features", True)
         if self.__auto_process_features:
             self.get_signal_features()  # 自动处理特征（归一化、异常值、PCA等）
         else:
@@ -2026,8 +1883,8 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         if self._rl_config.Activation is None:
             self._rl_config.Activation = Activation.Tanh10()
         return self._rl_config
-    
-    def step_result(self, reward: float,terminated: bool=False)-> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+
+    def step_result(self, reward: float, terminated: bool = False) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         """构造 gymnasium 风格的 step 返回值
         Returns:
             observation: 下一个状态
@@ -2088,7 +1945,7 @@ class Strategy(Base, StrategyBase, metaclass=StrategyMeta):
         print(
             f"Random Policy Test: Action Distribution :{pd.Series(actions).value_counts()}")
 
-    def train_agent(self,*args, **kwargs):
+    def train_agent(self, *args, **kwargs):
         """## 启动强化学习智能体训练，调用底层训练函数"""
         from minibt.elegantrl.train.run import train_agent
         train_agent(self._rl_config, True)
@@ -2220,5 +2077,4 @@ class default_strategy(Strategy):
     config = btconfig(islog=False, profit_plot=False)
 
     def __init__(self) -> None:
-        self.kline = self.get_kline(LocalDatas.test,height=400)
-
+        self.kline = self.get_kline(LocalDatas.test, height=400)

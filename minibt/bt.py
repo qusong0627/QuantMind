@@ -1,5 +1,6 @@
 from __future__ import annotations
 from .strategy.strategy import Strategy
+from .other import missing_extra
 from .utils import (
     MAX_WORKERS, Literal, Base, pd,
     Iterable, flatten, FILED,
@@ -15,9 +16,48 @@ if TYPE_CHECKING:
     from bokeh.models import Tabs
 
 
+def _use_jupyter_inline(gui: str) -> bool:
+    """pylightcharts 图在 Jupyter 里是否改用**内联网页版**。
+
+    Jupyter kernel 里已经跑着一个事件循环，原生窗口的 ``chart.show(block=True)``
+    会 ``asyncio.run()`` 嵌套报 ``RuntimeError: cannot be called from a running
+    event loop``；网页版则可以直接用 iframe 内嵌。所以：
+
+    * 显式 ``gui='jupyter'`` —— 一律内联；
+    * 在**真正的 notebook**（``ZMQInteractiveShell``）里，``pylightcharts`` /
+      ``pylightcharts_web`` 也自动内联（与 ``btplot`` 的 ``display='auto'`` 一致）；
+    * 普通脚本里不变（仍按 ``gui`` 开原生窗口 / 浏览器）。
+    """
+    if gui == 'jupyter':
+        return True
+    try:
+        from .strategy.strategy_window import _in_notebook
+        return _in_notebook()
+    except Exception:
+        return False
+
+
+def _force_browser_without_guard(gui: str) -> str:
+    """入口脚本没有 ``if __name__ == '__main__':`` 保护时，把原生窗口换成网页版。
+
+    Windows / macOS 用 spawn 启动图表子进程，会**重新执行入口脚本**；没有这层保护
+    时 pylightcharts 的原生窗口起不来（旧版本会一直卡住，新版本抛
+    ``WindowStartError``）。这里检测到就自动改用网页版（浏览器），
+    只打印一行说明，不打断用户。
+    """
+    if gui in ('pylightcharts', 'light_chart'):
+        from .utils import main_guard_missing
+        if main_guard_missing():
+            print('[minibt] 入口脚本缺少 if __name__ == "__main__": 保护 —— '
+                  'Windows/macOS 启动原生窗口时子进程会重跑整个脚本，窗口起不来；'
+                  '已自动改用浏览器版（gui="pylightcharts_web"）。')
+            return 'pylightcharts_web'
+    return gui
+
+
 def _run_single_strategy_process(strategy_class, strategy_id: int, period_ms: int,
-                                  auth_values: dict, account_values: dict | None,
-                                  base_datetime: float | None = None, datakey: str | None = None):
+                                 auth_values: dict, account_values: dict | None,
+                                 base_datetime: float | None = None, datakey: str | None = None):
     """子进程入口：独立运行单个策略（每个进程独占一个 TqApi 连接）
 
     Args:
@@ -43,6 +83,18 @@ def _run_single_strategy_process(strategy_class, strategy_id: int, period_ms: in
         bt.addTqapi(tq_auth=tq_auth(**auth_values))
 
     bt.run(isplot=False, period_milliseconds=period_ms)
+
+
+def _resolve_y_margin(bt, override=None):
+    """把 ``run(y_margin=…)`` / 策略 / ``Config.y_margin`` 解析成 ``(top, bottom)`` ✓。
+
+    优先级：显式 ``override``（``run(y_margin=…)``，临时覆盖 ✓）> 策略里
+    ``self.y_margin`` > ``Config.y_margin`` > 默认 ``DEFAULT_Y_MARGIN``（0.1）✓。
+    多策略时以**第一个策略**的 ``Config`` 为准（与 theme / grid / toolbox 同口径 ✓）。
+    """
+    from .utils import resolve_y_margin
+    strategies = getattr(bt, 'strategies', None) or []
+    return resolve_y_margin(strategies[0] if strategies else None, override)
 
 
 class Bt:
@@ -153,15 +205,21 @@ class Bt:
                             obj.name = name
                     self.__datas = data_list  # 保存自动加载的数据
 
-            # 2. 自动加载TqApi实例（实盘模式）
-            if (not self.__quick_live) or (self.__quick_live and self.__quick_live.get('live')):
-                with FilteredOutputRedirector():
-                    from tqsdk import TqApi  # 导入天勤API
-                # 从全局对象中查找已初始化的TqApi实例
-                api = [k for k in gc.get_referrers(
-                    TqApi) if k.__class__ == TqApi]
-                if api:
-                    self._api = api[0]  # 保存TqApi实例
+            # 2. 自动加载TqApi实例（仅当用户已创建过 TqApi、即 tqsdk 已被导入时）
+            #    这样纯回测不会为了探测而白白加载整个 tqsdk。
+            if ((not self.__quick_live) or (self.__quick_live and self.__quick_live.get('live'))) \
+                    and "tqsdk" in sys.modules:
+                try:
+                    with FilteredOutputRedirector():
+                        from tqsdk import TqApi  # 导入天勤API
+                except ImportError:
+                    TqApi = None
+                if TqApi is not None:
+                    # 从全局对象中查找已初始化的TqApi实例
+                    api = [k for k in gc.get_referrers(
+                        TqApi) if k.__class__ == TqApi]
+                    if api:
+                        self._api = api[0]  # 保存TqApi实例
 
     def addTqapi(self, tq_auth: tq_auth = None, tq_account: tq_account | None = None, api=None) -> Bt:
         """## 添加天勤实盘/模拟盘API连接（手动初始化TqApi）
@@ -177,7 +235,10 @@ class Bt:
         """
         with FilteredOutputRedirector():
             # 导入天勤API相关类（实盘账户、模拟盘、认证）
-            from tqsdk import TqApi, TqAuth, TqKq, TqAccount
+            try:
+                from tqsdk import TqApi, TqAuth, TqKq, TqAccount
+            except ImportError as e:
+                raise missing_extra("tqsdk", "live", "实盘交易功能") from e
             if isinstance(api, TqApi):
                 self._api = api
                 return self
@@ -199,8 +260,8 @@ class Bt:
                     auth=TqAuth(**tq_auth.values)  # 解包认证参数
                 )
         return self
-    
-    def download(self, symbol: str | list[str],duration_seconds: int, data_length: int = 10000, adj_type: str | None = None,path:str="./datas", **kwargs: Any) -> list[pd.DataFrame]:
+
+    def download(self, symbol: str | list[str], duration_seconds: int, data_length: int = 10000, adj_type: str | None = None, path: str = "./datas", **kwargs: Any) -> list[pd.DataFrame]:
         """
         ## 从天勤API下载合约数据
         ---
@@ -210,7 +271,7 @@ class Bt:
             duration_seconds (int): 数据时间范围（秒）
             data_length (int, optional): 数据长度（默认1000）
             adj_type (str, optional): 数据调整类型（默认None）
-            path (str, optional): 数据保存路径（默认"./datas"）
+            path (str, optional): 数据保存路径（默认"./datas",同目录下"./"）
             **kwargs: 其他天勤API参数
         Returns:
             list[pd.DataFrame]: DataFrame数据列表
@@ -220,25 +281,25 @@ class Bt:
             return []
         if isinstance(symbol, str):
             symbol = [symbol,]
-        assert all(isinstance(s,str) for s in symbol), "symbol 必须是字符串或字符串列表"
-        assert isinstance(duration_seconds,int), "duration_seconds 必须是整数"
+        assert all(isinstance(s, str) for s in symbol), "symbol 必须是字符串或字符串列表"
+        assert isinstance(duration_seconds, int), "duration_seconds 必须是整数"
         # 如果path路径不存在，则创建文件夹
         os.makedirs(path, exist_ok=True)
-        dfs:list[pd.DataFrame]=[]
+        dfs: list[pd.DataFrame] = []
         try:
             for s in symbol:
-                dfs.append(self._api.get_kline_serial(s, duration_seconds, data_length, adj_type, **kwargs))
-            for i,df in enumerate(dfs):
-                name = symbol[i].replace(".","_")
-                df.to_csv(os.path.join(path,f"{name}_{duration_seconds}.csv"),index=False)
+                dfs.append(self._api.get_kline_serial(
+                    s, duration_seconds, data_length, adj_type, **kwargs))
+            for i, df in enumerate(dfs):
+                name = symbol[i].replace(".", "_")
+                df.to_csv(os.path.join(
+                    path, f"{name}_{duration_seconds}.csv"), index=False)
         except Exception as e:
             print(f"下载数据失败：{e}")
             import traceback
             traceback.print_exc()
         self._api.close()
         return dfs
-
-
 
     def adddata(self, *args, **kwargs: dict[str, pd.DataFrame]) -> Bt:
         """
@@ -410,17 +471,6 @@ class Bt:
                 self.strategies.append(arg)
         return self
 
-    def __run_cmd(self, cmd_str: str) -> None:
-        """
-        私有方法：执行系统命令（用于启动实盘画图子进程）
-        特性：不显示命令执行时弹出的黑框，命令输出会打印到Python控制台
-
-        param cmd_str: 待执行的系统命令字符串（如"python live_plot.py"）
-        """
-        from subprocess import Popen  # 用于执行外部命令
-        # # shell=False：禁用shell解析，避免安全风险（如命令注入）
-        Popen(cmd_str, shell=False)
-
     def __tq_real(self, isplot: bool, **kwargs) -> None:
         """实时交易入口：图表模式 / 后台串行 / 多进程并行"""
         assert self._api, '请先添加天勤API'
@@ -432,11 +482,25 @@ class Bt:
 
         # 若策略包含强化学习（RL），禁用梯度计算（避免显存占用）
         if any([s.rl for s in self.strategies]):
-            from torch import no_grad
+            try:
+                from torch import no_grad
+            except ImportError as e:
+                raise missing_extra("torch", "rl", "强化学习功能") from e
             no_grad()  # 上下文管理器：禁用PyTorch梯度计算
-        
+
+        # 留白：`run(y_margin=…)` 覆盖 > 策略 / `Config.y_margin` > 默认 0.1 ✓
+        y_margin = _resolve_y_margin(None, kwargs.pop('y_margin', None))
         if isplot:
-            # 图表模式：实例化策略并启动 Qt GUI
+            # 图表模式：实例化策略并启动图形
+            # 默认引擎：pylightcharts 原生窗口（回测 / 回放 / 实时统一）；
+            # gui=Gui.Bokeh 用 bokeh，Gui.PylightchartsWeb 用网页版
+            gui = _force_browser_without_guard(
+                kwargs.pop('gui', None) or 'pylightcharts')
+            jupyter = gui == 'jupyter'
+            # Jupyter 实时用网页版（本地 SSE + iframe）承载
+            browser = gui in ('pylightcharts_web', 'browser') or jupyter
+            port = int(kwargs.pop('port', 0))
+            theme = kwargs.pop('theme', None)
             for i, s in enumerate(self.strategies):
                 self.strategies[i] = s(_sid=i, _isplot=isplot)
                 self.strategies[i]._prepare_before_strategy_start()
@@ -444,8 +508,52 @@ class Bt:
                 self.strategies[i]._first_start = True
                 if s.rl:
                     self.strategies[i].load_agent()
-            from .strategy.light_chart import main
-            main(self.strategies, period_milliseconds)
+            # 纯 bokeh server 实时（gui=Gui.Bokeh）：与 bokeh 回放同一套构建器，
+            # 但不建权益曲线；天勤数据只在内存里推，不落盘/不起子进程。
+            if gui == 'bokeh':
+                from .strategy import bokeh_realtime
+                s0 = self.strategies[0]
+                _pw = kwargs.pop('plot_width', None)
+                if not (isinstance(_pw, int) and 800 <= _pw <= 2400):
+                    _pw = None
+                _vm = kwargs.pop(
+                    'volume_mode',
+                    getattr(getattr(s0, 'config', None), 'volume_mode',
+                            'overlay'))
+                # Bokeh 实时与 pylightcharts 用同一套更新逻辑：
+                #   * 图表刷新由 `wait_update` 驱动（数据一到就推）；
+                #   * 行情没变（只是账户/委托变动）不重建整张图，
+                #     但仍会跑 step() 做风控/下单；
+                #   * 行情变了才重建+同步（K 线/指标/信号一起），
+                #     所以指标不会白算。
+                # `period_ms` 只是 periodic callback 的节拍：默认 1000ms 时
+                # 数据到了还要干等到下一拍才刷（图“慢半拍”）。这里给更快的
+                # 节拍，并让 `wait_update` 的超时与之相当（没行情时只是空转
+                # 10 次/秒，很便宜；行情来了则立刻返回）。
+                _live_ms = max(20, min(int(period_milliseconds), 100))
+                bokeh_realtime.run_live(
+                    self.strategies, port=(port or None),
+                    period_ms=_live_ms, stall_seconds=_live_ms / 1000.0,
+                    plot_kwargs=dict(plot_width=_pw, volume_mode=_vm,
+                                     theme=theme), **kwargs)
+                return
+            try:
+                import os
+                if os.environ.get('MINIBT_LIGHT_CHART'):
+                    from .strategy.light_chart import main
+                    main(self.strategies, period_milliseconds)
+                else:
+                    # 纯 pylightcharts；gui=pylightcharts_web 时用网页版
+                    from .strategy.realtime import RealtimeChart
+                    if not browser:
+                        from pylightcharts.qt import prepare_qt
+                        prepare_qt('PyQt6')
+                    RealtimeChart(self.strategies, browser=browser,
+                                  port=port, jupyter=jupyter,
+                                  realtime=True, theme=theme,
+                                  y_margin=y_margin).run()
+            except ImportError as e:
+                raise missing_extra("PyQt6", "gui", "实时图表") from e
 
         elif run_parallel and len(self.strategies) > 1:
             # 并行模式：每个策略一个独立进程（不需要父进程实例化策略）
@@ -567,539 +675,151 @@ class Bt:
 
         print("[并行模式] 所有子进程已退出")
 
-    def _strategy_replay(self, **kwargs):
-        # with open(r'd:\newminibt\debug_init_datas.txt', 'a', encoding='utf-8') as _f:
-        #     _f.write("\n=== _strategy_replay 被调用 ===\n")
-        from .utils import storeData, BASE_DIR
-        from queue import Queue, LifoQueue
-        import asyncio
-        import traceback
-        import time
-        import subprocess
-        import sys
-        # 确保目录存在
-        os.makedirs(f"{BASE_DIR}/liveplot", exist_ok=True)
-        replay_base_dir = f"{BASE_DIR}/liveplot/replay"
-        os.makedirs(replay_base_dir, exist_ok=True)
-        init_datas_dir = f"{replay_base_dir}/init_datas"
-        update_datas_dir = f"{replay_base_dir}/update_datas"
-        update_trade_dir = f"{replay_base_dir}/trade_datas"
-        account_info_dir = f"{replay_base_dir}/account_info"
-        pause_status_dir = f"{replay_base_dir}/pause_status"
-        id_dir = f"{BASE_DIR}/id"  # 实时账户信息路径
+    def _strategy_replay_bokeh(self, **kwargs):
+        """bokeh 回放：纯 bokeh server、内存更新（``strategy/bokeh_replay.py``）。
 
-        snum = len(self.strategies)
-        black_style = kwargs.pop('black_style', False)
-        plot_width = kwargs.pop('plot_width', None)
-        # 多于1秒间隔有BUG，固定为1秒更新
-        # period_milliseconds = kwargs.pop("period_milliseconds", 1000)
-        period_milliseconds = 1000
-        cycle_interval = kwargs.pop('cycle_interval', 1)
-        # ========== 多策略队列（暂存原始格式数据） ==========
-        # 存储source: [sid, source_list]
-        datas_queues = [LifoQueue(maxsize=1) for _ in range(snum)]
-        # 存储trade: [sid, trade_list]
-        trade_queues = [LifoQueue(maxsize=1) for _ in range(snum)]
-        account_queues = [Queue(maxsize=1)
-                          for _ in range(snum)]    # 存储info: 账户字符串
-        init_datas = []
-        strategy_names = []
-        strategy_sids = []  # 存储每个策略的sid
+        图表用 ``bokeh_plot.py`` 的同一套构建器（多策略 / 一策略多合约 / 主合约权益
+        曲线），回放只是按各数据源的 ``index`` 列逐 bar “揭开”，不落盘、不起子进程。
+        入口：``Bt(replay=True).run(gui=Gui.Bokeh)``。
+        """
+        from .strategy import bokeh_replay
 
-        # 画图参数解析
-        click_policy = kwargs.pop(
-            'click_policy', self.strategies[0].config.click_policy) if self.strategies else 'hide'
-
-        # 实例化策略并记录sid
-        for i, s in enumerate(self.strategies):
+        strategies = self.strategies
+        if not strategies:
+            return self
+        # 图表用「全量数据」构建（不做 replay 截断），回放负责逐 bar 揭开。
+        # 旧回放遗留的 _btindex=max 之类不会影响这里的图表与数据。
+        for s in strategies:
+            s._strategy_replay = False
             s.config.isplot = True
-            s.min_start_length = max(s.min_start_length, 300)
-            # _btindex 已由 min_start_length setter 正确设置为 min_start_length - 1
-            # 先设置 replay 标记，再调用 _get_plot_datas，确保 K线数据和指标数据都被
-            # 截断为 min_start_length，保持长度一致（指标通过 strategy_instance._strategy_replay 同步）
-            s._strategy_replay = True
-            s._get_plot_datas()
-            s._first_start = True
-            init_datas.append(s._plot_datas)
-            strategy_names.append(s.__class__.__name__)
-            strategy_sids.append(s.sid)  # 记录策略sid
-            if s.rl:
-                ...
 
-        # 初始化数据（保持原有格式）
-        storeData(init_datas, init_datas_dir)
-        storeData([], update_datas_dir)  # 初始化为空列表
-        storeData([], update_trade_dir)  # 初始化为空列表
-        storeData([s._get_account_info()
-                  for s in self.strategies], account_info_dir)
-        storeData((0, 0), id_dir)  # 初始化为空列表
-
-        # 初始化暂停状态
-        try:
-            with open(pause_status_dir, 'w') as f:
-                f.write('0')
-                f.flush()
-                os.fsync(f.fileno())
-        except Exception as e:
-            print(f"初始化暂停状态失败: {e}")
-
-        plot_width = plot_width if isinstance(
-            plot_width, int) and 800 <= plot_width <= 2400 else 1600
-
-        # ---------------------- 暂停控制器 ----------------------
-        class FilePauseController:
-            def __init__(self, status_path: str, check_interval=0.5):
-                self.status_path = status_path
-                self.check_interval = check_interval
-                self._last_successful_read = False
-
-            def get_pause_status(self) -> bool:
-                max_retries = 3
-                retry_delay = 0.01
-
-                for attempt in range(max_retries):
-                    try:
-                        with open(self.status_path, 'r', encoding='utf-8') as f:
-                            status = f.read().strip()
-                            self._last_successful_read = status == '1'
-                            if attempt > 0:
-                                print(
-                                    f"【暂停控制器】第 {attempt + 1} 次尝试读取成功，状态={status}")
-                            return self._last_successful_read
-                    except (IOError, PermissionError) as e:
-                        if attempt < max_retries - 1:
-                            time.sleep(retry_delay)
-                            continue
-                        else:
-                            print(
-                                f"【暂停控制器】读取失败: {e}，使用上次值: {self._last_successful_read}")
-                            return self._last_successful_read
-                    except Exception as e:
-                        print(f"【暂停控制器】读取失败: {e}，默认运行")
-                        return False
-                return False
-
-            async def wait_if_paused(self):
-                if not self.get_pause_status():
-                    return
-
-                print("【暂停控制器】检测到暂停状态，等待恢复...")
-                start_time = asyncio.get_event_loop().time()
-                timeout = 300
-                check_count = 0
-
-                while True:
-                    if not self.get_pause_status():
-                        print("【暂停控制器】状态已恢复为运行")
-                        break
-
-                    if asyncio.get_event_loop().time() - start_time > timeout:
-                        try:
-                            with open(self.status_path, 'w') as f:
-                                f.write('0')
-                        except Exception as e:
-                            print(f"【暂停控制器】强制写入失败: {e}")
-                        break
-
-                    if check_count % 30 == 0:
-                        elapsed = int(
-                            asyncio.get_event_loop().time() - start_time)
-                        print(f"【暂停控制器】已等待 {elapsed} 秒...")
-
-                    await asyncio.sleep(self.check_interval)
-                    check_count += 1
-
-        # ---------------------- 策略运行器 ----------------------
-        class StrategyRunner:
-            def __init__(self, cycle_interval: float = 1.0, max_cycles: int = -1, snames: list = None, sids: list = None):
-                self.cycle_interval = cycle_interval
-                self.max_cycles = max_cycles
-                self.snames = snames
-                self.sids = sids  # 策略sid列表
-                self.current_cycle = 0
-                self.is_running = True
-                self.num_strategies = 0
-                self.strategy_queues = []
-                self.ready_flags = []
-                self.data_ready_flags = []  # 数据入队标志
-                self.error_occurred = False
-                self.pause_controller = FilePauseController(pause_status_dir)
-
-            # ========== 关键2：仅入队，保持原始数据格式 ==========
-            def _push_strategy_data(self, strategy_id: int, source, trade, info):
-                """仅将单个策略数据入队（保持_update_datas返回的原始格式）"""
-                # 行情数据入队（格式：[sid, source_list]）
-                if source and not datas_queues[strategy_id].full():
-                    datas_queues[strategy_id].put(source)
-                # 交易数据入队（格式：[sid, trade_list]）
-                if trade and not trade_queues[strategy_id].full():
-                    trade_queues[strategy_id].put(trade)
-                # 账户数据入队（格式：list[str]）
-                if info and not account_queues[strategy_id].full():
-                    account_queues[strategy_id].put(info)
-
-                # 标记该策略当前周期数据已入队
-                self.data_ready_flags[strategy_id] = True
-
-            def _aggregate_and_write_all_data(self):
-                """所有策略数据入队后，按live_plot要求的格式聚合写入（列表格式）"""
-
-                # 校验所有策略数据是否都已入队
-                if not all(self.data_ready_flags):
-                    return
-
-                # 1. 聚合行情数据：列表格式 [[sid0, source0], [sid1, source1], str]
-                all_update_datas = []
-                for i in range(self.num_strategies):
-                    sid_i = self.sids[i]
-                    if datas_queues[i].qsize() > 0:
-                        source_data = datas_queues[i].get()
-                        if isinstance(source_data, list) and len(source_data) == 2 and source_data[0] == sid_i:
-                            all_update_datas.append(source_data)
-
-                # 2. 聚合交易数据：列表格式 [[sid0, trade0], [sid1, trade1], str]
-                all_update_trades = []
-                for i in range(self.num_strategies):
-                    sid_i = self.sids[i]
-                    if trade_queues[i].qsize() > 0:
-                        trade_data = trade_queues[i].get()
-                        # 校验格式：必须是 [sid, trade_list]
-                        if isinstance(trade_data, list) and len(trade_data) == 2 and trade_data[0] == sid_i:
-                            all_update_trades.append(trade_data)
-
-                # 3. 聚合账户数据：所有策略的账户信息（list[str]）
-                all_account_info = []
-                for i in range(self.num_strategies):
-                    sname_i = self.snames[i]
-                    if account_queues[i].qsize() > 0:
-                        account_data = account_queues[i].get()
-                        if isinstance(account_data, str):
-                            all_account_info.append(
-                                f"【策略 {sname_i}】{account_data}")
-
-                # 4. 按live_plot要求的格式写入文件
-                storeData(all_update_datas and all_update_datas or [],
-                          update_datas_dir)
-                storeData(
-                    all_update_trades and all_update_trades or [], update_trade_dir)
-                storeData(all_account_info and all_account_info or [],
-                          account_info_dir)
-
-                # 5. 重置数据就绪标志（为下一个周期准备）
-                self.data_ready_flags = [False] * self.num_strategies
-
-            async def wait_strategy_ready(self, strategy_id: int):
-                if self.error_occurred or not self.is_running:
-                    return
-
-                self.ready_flags[strategy_id] = True
-
-                # 所有策略执行完成后，先聚合写入数据，再推进下周期
-                if all(self.ready_flags):
-                    # 核心：按live_plot格式聚合写入
-                    self._aggregate_and_write_all_data()
-
-                    # 检查最大周期
-                    if self.max_cycles != -1 and self.current_cycle >= self.max_cycles - 1:
-                        print(
-                            f"【{self.snames[strategy_id]}】已完成所有 {self.max_cycles} 个周期，准备退出")
-                        self.is_running = False
-                        for i in range(self.num_strategies):
-                            await self.strategy_queues[i].put({"type": "exit"})
-                        return
-
-                    # 重置执行就绪标志
-                    self.ready_flags = [False] * self.num_strategies
-                    self.current_cycle += 1
-
-                    # 发送下周期消息
-                    for i in range(self.num_strategies):
-                        try:
-                            await asyncio.wait_for(
-                                self.strategy_queues[i].put(
-                                    {"type": "next_cycle"}),
-                                timeout=5.0
-                            )
-                        except asyncio.TimeoutError:
-                            self.error_occurred = True
-                        except Exception as e:
-                            self.error_occurred = True
-
-                    # 周期间隔sleep
-                    await asyncio.sleep(self.cycle_interval)
-
-            def register_strategy(self, strategy_id: int):
-                return self.StrategyNotifier(self, strategy_id, self.snames[strategy_id])
-
-            class StrategyNotifier:
-                def __init__(self, runner, strategy_id: int, sname: str):
-                    self.runner = runner
-                    self.strategy_id = strategy_id
-                    self.sname = sname
-
-                async def __aenter__(self):
-                    return self
-
-                async def __aexit__(self, *args):
-                    pass
-
-                def __aiter__(self):
-                    return self
-
-                async def __anext__(self):
-                    try:
-                        item = await asyncio.wait_for(
-                            self.runner.strategy_queues[self.strategy_id].get(
-                            ),
-                            timeout=10.0
-                        )
-                        if item["type"] == "exit":
-                            raise StopAsyncIteration
-                        return item
-                    except asyncio.TimeoutError:
-                        # print(f"【Notifier】策略 {self.sname} 等待消息超时（10秒）")
-                        if not self.runner.is_running or self.runner.error_occurred:
-                            raise StopAsyncIteration
-                        else:
-                            # print(f"【Notifier】策略 {self.sname} 重试获取消息")
-                            return await self.__anext__()
-                    except Exception as e:
-                        print(f"【Notifier】策略 {self.sname} 获取消息失败: {e}")
-                        raise StopAsyncIteration
-
-            async def run(self, strategies: list[Strategy]):
-                self.num_strategies = len(strategies)
-                self.strategy_queues = [asyncio.Queue()
-                                        for _ in range(self.num_strategies)]
-                self.ready_flags = [False] * self.num_strategies
-                self.data_ready_flags = [False] * \
-                    self.num_strategies  # 初始化数据就绪标志
-                print(
-                    f"【运行器】初始化完成 - 策略数={self.num_strategies}，队列数={len(self.strategy_queues)}")
-
-                try:
-                    # 创建策略任务
-                    tasks = []
-                    for idx, strategy in enumerate(strategies):
-                        task = asyncio.create_task(
-                            self._run_strategy(idx, strategy))
-                        tasks.append(task)
-                        print(f"【运行器】创建策略 {self.snames[idx]}")  # 任务: {task}")
-
-                    # 启动第一个周期
-                    print("\n===== 开始执行策略 =====")
-                    for i in range(self.num_strategies):
-                        try:
-                            await self.strategy_queues[i].put({"type": "next_cycle"})
-                            # print(f"【运行器】向策略 {i}（{self.snames[i]}）发送初始周期消息")
-                        except Exception as e:
-                            print(
-                                f"【运行器】向策略 {i}（{self.snames[i]}）发送初始消息失败: {e}")
-
-                    await asyncio.gather(*tasks)
-
-                except Exception as e:
-                    print(f"【运行器】执行出错: {str(e)}")
-                    traceback.print_exc()
-                finally:
-                    print("\n===== 所有策略已退出，程序结束 =====")
-
-            async def _run_strategy(self, strategy_id: int, strategy: Strategy):
-                sname = self.snames[strategy_id]
-
-                try:
-                    async with self.register_strategy(strategy_id) as notifier:
-                        cycle_count = 0
-                        async for msg in notifier:
-
-                            if not self.is_running or self.error_occurred:
-                                print(f"【策略进程】策略 {sname} 退出条件满足，退出循环")
-                                break
-
-                            try:
-                                # 检查暂停状态
-                                await self.pause_controller.wait_if_paused()
-
-                                # 检查索引是否超出范围
-                                if strategy._btindex >= strategy._btklinedataset.max_length:
-                                    print(
-                                        f"【策略进程】策略 {sname} 索引已耗尽（{strategy._btindex}/{strategy._btklinedataset.max_length}），停止推进")
-                                    self.is_running = False
-                                    await self.strategy_queues[strategy_id].put({"type": "exit"})
-                                    break
-
-                                # 执行策略
-                                strategy()  # __call__自动递增btindex
-
-                                # 更新数据（保留原始格式：(source, trade, info)）
-                                source, trade, info = strategy._update_replay_datas()
-                                # 仅入队，不立即写入（保持原始格式）
-                                self._push_strategy_data(
-                                    strategy_id, source, trade, info)
-
-                                # 通知运行器执行完成
-                                await self.wait_strategy_ready(strategy_id)
-                                cycle_count += 1
-
-                            except Exception as e:
-                                print(
-                                    f"【策略进程】策略 {sname} 周期 {cycle_count} 执行出错: {str(e)}")
-                                traceback.print_exc()
-                                self.error_occurred = True
-                                for i in range(self.num_strategies):
-                                    await self.strategy_queues[i].put({"type": "exit"})
-                                break
-
-                except Exception as e:
-                    print(f"【策略进程】策略 {sname} 框架出错: {str(e)}")
-                    traceback.print_exc()
-                    self.error_occurred = True
-                finally:
-                    print(f"【策略进程】策略 {sname} 已退出")
-
-        # ---------------------- 主函数 ----------------------
-        async def main(strategies: list[Strategy]):
-            max_cycles = -1
-            if strategies and hasattr(strategies[0], '_btklinedataset'):
-                max_cycles_list = [
-                    s._btklinedataset.max_length - s.min_start_length for s in strategies]
-                max_cycles = max(max_cycles_list) if max_cycles_list else -1
-
-            print(
-                f"\n【主函数】初始化运行器 - 周期间隔: {cycle_interval}s, 最大周期: {max_cycles}")
-
-            # 创建运行器（传入策略名称和sid）
-            strategy_runner = StrategyRunner(
-                cycle_interval=cycle_interval, max_cycles=max_cycles,
-                snames=strategy_names, sids=strategy_sids)
-            if hasattr(self, 'runner'):
-                self.runner = strategy_runner
-
-            # 后台启动画图进程（核心：去掉CREATE_NEW_CONSOLE，避免弹窗）
-            try:
-                cmd_list = [
-                    'python', f"{BASE_DIR}/liveplot/live_plot.py",
-                    '-bs', str(black_style),
-                    '-pw', str(plot_width),
-                    '-pm', str(period_milliseconds),
-                    '-cp', click_policy
-                    # 移除-multi参数，恢复原始格式兼容
-                ]
-                # Windows下用creationflags=0（无弹窗），Linux/Mac默认后台
-                if os.name == 'nt':
-                    # Windows后台运行+显示输出
-                    proc = subprocess.Popen(
-                        cmd_list,
-                        # 移除stdout/stderr PIPE，恢复控制台输出
-                        # stdout=subprocess.PIPE,
-                        # stderr=subprocess.PIPE,
-                        shell=False,
-                        stdin=subprocess.DEVNULL,
-                        creationflags=0  # 无新控制台窗口
-                    )
-                else:
-                    # Linux/Mac后台运行+显示输出
-                    proc = subprocess.Popen(
-                        cmd_list,
-                        shell=False,
-                        stdin=subprocess.DEVNULL,
-                        # 保留stderr输出到主控制台
-                        stderr=sys.stderr,
-                        stdout=sys.stdout
-                    )
-                await asyncio.sleep(2)
-            except Exception as e:
-                print(f"【主函数】启动画图进程失败: {e}")
-                traceback.print_exc()
-
-            # 运行策略
-            try:
-                # 设置【主函数】开始运行策略超时时间: 1800秒"
-                await asyncio.wait_for(strategy_runner.run(strategies), timeout=1800)
-            except asyncio.TimeoutError:
-                print("【主函数】策略运行超时（30分钟），强制退出")
-                strategy_runner.is_running = False
-                for i in range(strategy_runner.num_strategies):
-                    await strategy_runner.strategy_queues[i].put({"type": "exit"})
-
-        # 顶层执行
-        try:
-            asyncio.run(main(self.strategies))
-        except Exception as e:
-            print(f"【顶层】主程序出错: {str(e)}")
-            traceback.print_exc()
-        finally:
-            # 重置暂停状态
-            try:
-                with open(pause_status_dir, 'w') as f:
-                    f.write('0')
-                    f.flush()
-                    os.fsync(f.fileno())
-            except Exception as e:
-                print(f"重置暂停状态失败: {e}")
+        s0 = strategies[0]
+        plot_width = kwargs.pop('plot_width', None)
+        if not (isinstance(plot_width, int) and 800 <= plot_width <= 2400):
+            plot_width = None
+        volume_mode = kwargs.pop(
+            'volume_mode', getattr(getattr(s0, 'config', None),
+                                   'volume_mode', 'overlay'))
+        plot_kwargs = dict(
+            trade_signal=bool(kwargs.pop('trade_signal', True)),
+            plot_width=plot_width,
+            volume_mode=volume_mode,
+            theme=kwargs.pop('theme', None),
+        )
+        bokeh_replay.run_replay(
+            strategies,
+            port=kwargs.pop('port', None),
+            period_ms=int(kwargs.pop('period_milliseconds',
+                                     kwargs.pop('period_ms', 1000))),
+            speed=int(kwargs.pop('speed', 1)),
+            start_bars=kwargs.pop('start_bars', None),
+            window=int(kwargs.pop('window', 300)),
+            plot_kwargs=plot_kwargs,
+            show=bool(kwargs.pop('show', True)),
+        )
+        return self
 
     def _strategy_replay_light_chart(self, **kwargs):
-        """回放模式 - light_chart分支：使用Qt内嵌图表界面进行策略回放
+        """回放模式：用纯 pylightcharts 的 ReplayWindow 回放。
 
-        与_strategy_replay的区别：
-        - 不使用子进程 + 文件IPC通信
-        - 直接在同一个Qt进程中内嵌图表
-        - 使用SegmentedWidget进行多层导航
-        - 带暂停/继续和速度控制
+        ``browser=True`` 时用网页版（``PylightchartsWeb``）。
         """
-        # 使用策略的 min_start_length（预热K线数），最小100
-        default_candles = max(getattr(self.strategies[0], 'min_start_length', 300), 100)
-        initial_candles = kwargs.pop('initial_candles', default_candles)
-        replay_speed_ms = kwargs.pop('replay_speed_ms', 500)
+        browser = bool(kwargs.pop('browser', False))
+        jupyter = bool(kwargs.pop('jupyter', False))
+        port = int(kwargs.pop('port', 0))
+        from .utils import resolve_theme, resolve_toolbox, resolve_grid
+        theme = resolve_theme(kwargs.pop('theme', None),
+                              strategy=self.strategies[0]
+                              if self.strategies else None)
+        toolbox = resolve_toolbox(self.strategies[0]
+                                  if self.strategies else None)
+        grid = resolve_grid(self.strategies[0]
+                            if self.strategies else None)
+        # 价格轴上下余量：**显式传**才生效（不传 = 保持 lightweight-charts 默认）
+        y_margin = kwargs.pop('y_margin', None)
+        default_candles = max(
+            getattr(self.strategies[0], 'min_start_length', 300), 100)
+        initial_candles = int(kwargs.pop('initial_candles', default_candles))
+        kwargs.pop('replay_speed_ms', None)
 
-        # 设置回放模式状态（回测已在run()中完成）
-        for s in self.strategies:
-            s._strategy_replay = True
-            # 确保_btindex从初始位置开始
-            if not hasattr(s, '_btindex') or s._btindex is None:
-                s._btindex = initial_candles - 1
-            else:
-                s._btindex = max(s._btindex, initial_candles - 1)
+        from .strategy.replay_window import ReplayWindow
+        from .strategy.realtime import (extract_minibt_indicators,
+                                        strategy_backtest_dict,
+                                        strategy_contracts,
+                                        strategy_kline_frame)
+        names, by_name = [], {}
+        for index, strategy in enumerate(self.strategies):
+            name = getattr(strategy, 'sname', None) or type(strategy).__name__
+            if name in by_name:
+                name = f'{name}#{index}'
+            names.append(name)
+            by_name[name] = strategy
+        first = self.strategies[0] if self.strategies else None
 
-        # 启动light_chart回放GUI
-        from .strategy.light_chart_replay import main as replay_main
-        replay_main(
-            self.strategies,
-            initial_candles=initial_candles,
-            replay_speed_ms=replay_speed_ms,
-            backtest_completed=True,  # 回测已完成，跳过重复回测
-        )
+        def indicators_of(name, contract):
+            """回放时重建该策略+合约的指标（同 RealtimeChart）。"""
+            strategy = by_name.get(name)
+            if strategy is None:
+                return []
+            contracts = strategy_contracts(strategy)
+            plot_id = contracts.index(contract) if contract in contracts else 0
+            return extract_minibt_indicators(strategy, plot_id)
+
+        def backtest(released):
+            """同 example_replay_window：曲线按“已放出根数”截断，随回放更新。"""
+            if first is None:
+                return {}
+            return strategy_backtest_dict(first, limit=len(released))
+
+        window = ReplayWindow(
+            names,
+            lambda name: strategy_contracts(by_name[name]),
+            lambda name, contract: strategy_kline_frame(
+                by_name[name], contract),
+            start_bars=initial_candles,
+            indicators_of=indicators_of,
+            backtest=backtest,
+            # 回放时曲线跟着 K 线长度更新；每根都重算 strategy_backtest_dict
+            # 是 O(n) 的 Python 计算，会明显拖慢播放 —— 每 5 根刷一次肉眼几乎
+            # 看不出差别，但快得多（想更平滑可以调小）
+            refresh_every=int(kwargs.pop('refresh_every', 5)),
+            browser=browser, port=port, jupyter=jupyter, theme=theme,
+            toolbox=toolbox, grid=grid, y_margin=y_margin)
+        window._strategy_lookup = lambda name: by_name.get(name)
+        window.run()
 
     def _strategy_light_chart_display(self, **kwargs):
-        """图表展示模式 - 回测完成后用Qt light_chart展示图表（不进行逐K线回放）
+        """图表展示模式：回测完成后用**纯 pylightcharts** 窗口展示。
 
-        与_strategy_replay_light_chart的区别：
-        - 不显示ReplayInfoWindow（暂停/继续/速度控件）
-        - 一次性加载全部K线数据和指标，不进行逐K线更新
-        - 仅用于回测后的图表浏览和查看
+        * 不逐 K 线回放，一次性加载全部数据和指标；
+        * ``browser=True`` 时用网页版（``PylightchartsWeb``）。
         """
-        # 使用策略的 min_start_length（预热K线数），最小100
-        default_candles = max(getattr(self.strategies[0], 'min_start_length', 300), 100)
-        initial_candles = kwargs.pop('initial_candles', default_candles)
-        replay_speed_ms = kwargs.pop('replay_speed_ms', 500)
+        browser = bool(kwargs.pop('browser', False))
+        jupyter = bool(kwargs.pop('jupyter', False))
+        port = int(kwargs.pop('port', 0))
+        width = int(kwargs.pop('width', 1280))
+        height = int(kwargs.pop('height', 880))
+        theme = kwargs.pop('theme', None)
+        y_margin = _resolve_y_margin(self, kwargs.pop('y_margin', None))
+        # 是否画真实成交的入场/离场连线（与 bokeh 的 trade_signal 同义，默认开 ✓）
+        trade_signal = bool(kwargs.pop('trade_signal', True))
+        kwargs.pop('initial_candles', None)
+        kwargs.pop('replay_speed_ms', None)
 
-        # 设置策略状态
-        for s in self.strategies:
-            #s._strategy_replay = True
-            if not hasattr(s, '_btindex') or s._btindex is None:
-                s._btindex = initial_candles - 1
-            else:
-                s._btindex = max(s._btindex, initial_candles - 1)
-
-        # 启动light_chart显示GUI（display_only模式）
-        from .strategy.light_chart_replay import main as replay_main
-        replay_main(
-            self.strategies,
-            initial_candles=initial_candles,
-            replay_speed_ms=replay_speed_ms,
-            backtest_completed=True,  # 回测已完成
-            display_only=True,  # 纯图表展示模式（不逐K线回放）
-        )
+        from .strategy.realtime import RealtimeChart
+        chart = RealtimeChart(self.strategies, browser=browser, port=port,
+                              title='pylightcharts - 回测图表',
+                              info_pages=True, jupyter=jupyter,
+                              width=width, height=height, theme=theme,
+                              y_margin=y_margin, trade_signal=trade_signal)
+        # 登记回测结果（有权益曲线才会出现“回测结果 / 指标记录”两页）
+        for strategy in self.strategies:
+            try:
+                chart.set_backtest_from_strategy(strategy)
+            except Exception as error:
+                print('[minibt] 登记回测结果失败:', error)
+        # Jupyter 静态图：show() 内部用 JupyterChart.load() 内联，不阻塞
+        chart.show(block=not jupyter)
 
     def optstrategy(self, target: OPTTargetType = 'profit_ratio',
                     weights: float | tuple[float] = 1., opconfig: GAOpConfig | OptunaConfig | dict | list[dict] = {}, op_method: OPTMethodType = 'optuna', show_bar=True, skip=False, **kwargs):
@@ -1130,7 +850,7 @@ class Bt:
             show_bar (bool, optional): 是否显示优化进度条（默认True）
             skip: (bool): True/False（是否跳过优化，默认False）
             kwargs: 待优化参数（格式见Note）
-                path (str): 参数保存路径. 默认'./minibt/op_params/'
+                path (str): 参数保存路径. 默认 ``~/.minibt/op_params/``
         """
         # 跳过优化（通过skip参数控制，用于条件执行）
         if skip:
@@ -1144,10 +864,10 @@ class Bt:
         self.__op_show_bar = show_bar    # 进度条开关
         self.__isoptimize = True        # 标记开启优化模式
 
-        # 配置优化结果保存路径（默认./minibt/op_params/）
-        from .utils import BASE_DIR
+        # 配置优化结果保存路径（默认 ~/.minibt/op_params/）
+        from .utils import user_dir
         self.__op_path = kwargs.pop(
-            'path', os.path.join(BASE_DIR, "op_params"))
+            'path', os.path.join(user_dir(), "op_params"))
         self.__op_kwargs = kwargs        # 待优化参数列表
 
         return self
@@ -1433,6 +1153,12 @@ class Bt:
         # 10. 启动Optuna优化
         study.optimize(objective, **optimize_kwargs)
 
+        # 10.1 把完整 study / 目标 / 帕累托前沿挂到 Bt 实例上
+        #      —— 供上层（MiniQT 参数优化界面）画图 / 列出多目标最优解 ✓
+        self.op_study = study                 # optuna.Study
+        self.op_targets = list(target)        # 优化目标名（多目标时 >1）
+        self.op_best_trials = list(study.best_trials)   # 帕累托前沿（FrozenTrial）
+
         # 11. 处理优化结果
         trials = sorted(study.best_trials, key=lambda t: t.values)
         assert trials, "无优化结果（未生成有效试验）"
@@ -1506,7 +1232,13 @@ class Bt:
         from .utils import StrategyInstances
         Base._strategy_instances = StrategyInstances()
         # 更新最优策略的参数（供后续回测使用）
-        self.strategies[-1].params = Addict(best_trial.params)
+        # ★ 只覆盖**参与优化**的参数：best_trial.params 只含 Optuna 采样出来的
+        #   参数，不含未列入优化范围的**固定参数**；直接整体替换会让固定参数
+        #   丢失 → 最优参数回测时 __init__ 取不到固定参数而失败 ✗。
+        #   以原参数为底再合并最佳试验值 ✓
+        _best_params = dict(getattr(self.strategies[-1], 'params', {}) or {})
+        _best_params.update(best_trial.params)
+        self.strategies[-1].params = Addict(_best_params)
         self.strategies[-1]._profit_plot = True
 
         return best_trial.params  # 返回最优参数
@@ -1523,18 +1255,67 @@ class Bt:
         支持多策略并行回测及参数优化，完成后可生成可视化图表和分析报告。
 
         Args:
-            isplot (bool, optional): 是否生成可视化图表（Bokeh）。默认为 True
+            isplot (bool, optional): 是否生成可视化图表。默认为 True
+                （默认引擎是 pylightcharts 原生窗口，可用 ``gui`` 换成 bokeh / 网页版）
             isreport (bool, optional): 是否生成QuantStats量化分析报告。默认为 False
 
         Kwargs:
             #### 回放模式参数
             - replay (bool): 是否启用策略回放模式。默认为 False（也可在Bt(replay=True)中设置）
-            - gui (str): 回放GUI类型，可选['live_plot', 'light_chart']。默认为 'live_plot'
-                - 'live_plot': 文件IPC模式，启动独立画图进程
-                - 'light_chart': Qt内嵌图表模式，使用SegmentedWidget导航（light_chart_replay）
-            - initial_candles (int): light_chart模式初始加载K线数。默认300
-            - replay_speed_ms (int): light_chart模式回放速度(ms/根K线)。默认500
-            - update_length (int): live_plot模式更新数据长度。默认10
+            - gui (str): 回放GUI类型，可选 ['pylightcharts'（默认）, 'bokeh', 'pylightcharts_web']
+                - 'pylightcharts': 纯 pylightcharts 原生窗口（默认，与回测/实时一致）
+                - 'pylightcharts_web': 网页版（浏览器）；'bokeh': 纯 bokeh server 回放
+            - initial_candles (int): pylightcharts 回放初始加载K线数。默认300
+            - replay_speed_ms (int): pylightcharts 回放速度(ms/根K线)。默认500
+
+        Kwargs:
+            #### 通用图表参数（pylightcharts 原生窗口 / 网页版）
+            - gui (str): 图表引擎，可选 ['pylightcharts'（**默认**，原生窗口）、
+                'pylightcharts_web'（网页版）、'bokeh'、'jupyter'（Notebook 内联）]。
+                回测 / 回放 / 实时默认都走 pylightcharts，三个入口图形完全一致 ✓
+            - browser (bool): 用**浏览器（网页版）**而不是原生窗口。默认 False
+                （等价 ``gui='pylightcharts_web'``）
+            - theme (str): 图表主题，``'light'``（默认）/ ``'dark'``
+                （也可写在 ``Config.theme`` / 策略里设 ``self.theme``）
+            - **y_margin** (float | tuple): **价格轴上下留白**（K 线图顶部/底部的空白），
+                对应 lightweight-charts 价格轴的 ``scaleMargins`` ——
+                **取值是“面板高度的比例”**（0~1），不是像素 ✗：
+
+                > 这是**图表**设置，推荐写在策略里（``Config(y_margin=…)`` /
+                > ``self.y_margin = …``）→ 该策略的**所有合约**（含回测结果页里的
+                > 各个副图 pane）统一生效 ✓；这里的 ``run(y_margin=…)`` 是**临时**覆盖 ✓。
+
+                - **不传 / None** → 用 ``Config.y_margin``，都没有则 **0.1**
+                  （上下各留 **10%**）
+                - **单个数字** → 上下**同值**，如 ``y_margin=0.1``
+                - **``(top, bottom)`` 元组/列表** → 上下分别设置，如 ``y_margin=(0.1, 0.02)``
+                - ``y_margin=0.0`` → **铺满**（不留白）
+                - ``y_margin=(0.2, 0.1)`` → **回到 lightweight-charts 原样**（它的默认值）
+                - 上限 0.9（两边都拉满就没有绘图区了）；非法值回退到默认值 ✓
+                - **主图、所有指标副图、回测结果页的合约副图都会套上** ✓
+                  （切周期 / 切合约 / 重建后依然生效）
+                - ⚠ 只作用于 **pylightcharts** 引擎；**bokeh 忽略它** ✗
+                  （bokeh 有自己的留白逻辑）
+
+                示例::
+
+                    class MyStrategy(Strategy):
+                        config = Config(y_margin=0.1)    # 推荐：写进配置 ✓
+
+                    Bt().run()                      # 默认 0.1（上下各 10%）
+                    Bt().run(y_margin=0.05)         # 临时改成上下各 5%
+                    Bt().run(y_margin=(0.1, 0.02))  # 上 10%、下 2%
+                    Bt().run(y_margin=(0.2, 0.1))   # LWC 原样
+                    Bt().run(y_margin=0.0)          # 铺满
+                    Bt(replay=True).run(y_margin=0.1)    # 回放同样生效 ✓
+            - trade_signal (bool): 是否画真实成交的**入场/离场连线**（与 bokeh 的
+                ``trade_signal`` 同义）。默认 True
+            - jupyter (bool): 强制在 Notebook 里内联显示。默认自动判断
+
+            #### 其它图表设置（写在策略里，不在 run 参数）
+            - ``Config(grid=True)`` / ``self.grid``: 是否画网格
+            - ``Config(toolbox=True)`` / ``self.toolbox = True``: 初始是否显示画线工具
+              （默认 False，即初始不显示 ✓）
 
         Kwargs:
             #### 多策略并行参数
@@ -1632,7 +1413,7 @@ class Bt:
                     )
                     # 只取第一个有 op_config 的策略
                     # 参数优化只支持单策略
-                    break  
+                    break
 
         # 6. 分支1：实盘模式（__live=True时）
         if self.__live:
@@ -1681,22 +1462,45 @@ class Bt:
         # 9.1 打印账户信息（若配置开启）
         print_account = kwargs.pop('print_account', False)
         # 遍历所有策略，满足条件则打印账户和策略信息
-        [t.pprint if t.config.pprint else (t._print_account, t.richprint)  for t in self.strategies
+        [t.pprint if t.config.pprint else (t._print_account, t.richprint) for t in self.strategies
             if t.config.print_account or print_account]
+        #: pylightcharts 起图入口的 gui 名（含 Jupyter）
+        _pl_gui = ('pylightcharts', 'light_chart', 'pylightcharts_web',
+                   'browser', 'jupyter')
+        # 价格轴上下余量：只有 pylightcharts 用（bokeh 忽略），这里统一弹出，
+        # 避免它漏到 bokeh 的绘图函数里（那边没这个参数会报 TypeError）
+        y_margin = _resolve_y_margin(self, kwargs.pop('y_margin', None))
         if replay:  # 策略回放
-            gui = kwargs.pop('gui', 'live_plot')
-            if gui == 'light_chart':
-                self._strategy_replay_light_chart(**kwargs)
+            # 默认走 pylightcharts 原生窗口（与回测 / 实时默认一致）；
+            # 传 gui=Gui.Bokeh 才是纯 bokeh server 回放。
+            gui = _force_browser_without_guard(
+                kwargs.pop('gui', None) or 'pylightcharts')
+            if gui in _pl_gui:
+                self._strategy_replay_light_chart(
+                    browser=gui in ('pylightcharts_web', 'browser'),
+                    jupyter=_use_jupyter_inline(gui),
+                    y_margin=y_margin, **kwargs)
+            elif gui == 'bokeh':
+                # 纯 bokeh server 回放（Gui.Bokeh == 'bokeh'）
+                self._strategy_replay_bokeh(**kwargs)
             else:
-                self._strategy_replay(**kwargs)
+                raise ValueError(
+                    f"未知的回放 gui={gui!r}；可选 'pylightcharts'（默认）/ "
+                    "'bokeh' / 'pylightcharts_web' / 'jupyter'")
             return self
         else:
             # 9.2 生成图表（若isplot=True）
             if isplot:
-                gui = kwargs.pop('gui', 'bokeh')
-                if gui == 'light_chart':
-                    # 使用light_chart Qt图表展示模式（display_only，不逐K线回放）
-                    self._strategy_light_chart_display(**kwargs)
+                # 默认引擎：pylightcharts 原生窗口（GUI.Bokeh 用 bokeh）
+                gui = _force_browser_without_guard(
+                kwargs.pop('gui', None) or 'pylightcharts')
+                if gui in _pl_gui:
+                    # 纯 pylightcharts 图表（网页版用 pylightcharts_web）；
+                    # Jupyter 里自动换成内联网页版（见 _use_jupyter_inline）
+                    self._strategy_light_chart_display(
+                        browser=gui in ('pylightcharts_web', 'browser'),
+                        jupyter=_use_jupyter_inline(gui),
+                        y_margin=y_margin, **kwargs)
                 else:
                     self.bokeh_plot(**kwargs)
 
@@ -1784,12 +1588,13 @@ class Bt:
     def bokeh_plot(
             self,
             trade_signal: bool = True,
-            black_style: bool = False,
+            black_style: bool | None = None,
             open_browser: bool = False,
             plot_width: int = None,
             plot_cwd="",
             plot_name: str = "",
             save_plot: bool = False,
+            theme: str | None = None,
             **kwargs) -> Tabs:
         """## 生成Bokeh交互式可视化图表（展示回测结果分析）
 
@@ -1801,7 +1606,10 @@ class Bt:
 
         Args:
             trade_signal (bool, optional): 是否显示交易信号标记（开仓/平仓点）。默认为 True
-            black_style (bool, optional): 是否使用黑色主题风格（默认为白色主题）。默认为 False
+            black_style (bool, optional): 旧版主题开关（True=深色）。默认 None，
+                此时由 ``theme`` / 策略主题决定；给了它以它为准。
+            theme (str, optional): 图表主题 ``'dark'``（默认）/ ``'light'``，
+                作用于 bokeh 与 pylightcharts（与策略 ``config.theme`` 同义）
             open_browser (bool, optional): 是否在浏览器中自动打开图表（Jupyter中建议关闭）。默认为 False
             plot_width (int, optional): 图表显示宽度（像素值，默认全屏自适应）
             plot_cwd (str, optional): 图表文件存储目录路径。默认为当前工作目录
@@ -1825,8 +1633,13 @@ class Bt:
             return self.strategies[0].logger.warning('策略尚未回测（请先调用run()执行回测）')
 
         # 调用绘图函数生成图表
+        # ★ 成交量显示方式由策略 Config 控制: Config.volume_mode
+        #   ('sub' 副图 / 'overlay' 主图叠加 / 'both' 都显示 / 'none' 不显示)
+        _vol_mode = getattr(getattr(self.strategies[0], 'config', None),
+                            'volume_mode', 'sub')
         tabs = plot(self.strategies, trade_signal, black_style,
-                    open_browser, plot_width, plot_cwd, plot_name, save_plot)
+                    open_browser, plot_width, plot_cwd, plot_name, save_plot,
+                    volume_mode=_vol_mode, theme=theme)
 
         return tabs
 
@@ -1871,8 +1684,8 @@ class Bt:
             - 报告默认保存为HTML格式，可在浏览器中交互查看
             - Jupyter环境中会自动嵌入显示报告，非Jupyter环境会打开浏览器
         """
-        if not hasattr(self,"strategies"):
-            self.strategies = kwargs.pop("strategies",[])
+        if not hasattr(self, "strategies"):
+            self.strategies = kwargs.pop("strategies", [])
         try:
             from IPython import get_ipython
             _shell = get_ipython()
@@ -1904,9 +1717,8 @@ class Bt:
 
         # -------------------------- 2. 路径初始化 --------------------------
         if not report_cwd or not isinstance(report_cwd, str):
-            current_script_dir = os.path.dirname(os.path.abspath(__file__))
-            report_cwd = os.path.join(
-                current_script_dir, "strategy", "analysis_reports")
+            from .utils import user_dir
+            report_cwd = os.path.join(user_dir(), "analysis_reports")
 
         final_report_dir = os.path.normpath(report_cwd)
         try:
@@ -2250,7 +2062,7 @@ class Bt:
             with open(merged_output, 'w', encoding='utf-8') as f:
                 f.write(final_html)
             print(
-                f"| 合并报告已成功保存：{os.path.normpath(os.path.join(final_report_dir,merged_filename))}")
+                f"| 合并报告已成功保存：{os.path.normpath(os.path.join(final_report_dir, merged_filename))}")
 
             # 将合并报告移动到最终目录
             shutil.copy2(merged_output, final_merged_output)

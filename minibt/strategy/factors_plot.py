@@ -2,14 +2,29 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 # from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression
-from tqdm import tqdm
+try:
+    from sklearn.linear_model import LinearRegression
+except ImportError as e:
+    raise ImportError(
+        '因子分析可视化需要依赖 scikit-learn，请安装：pip install scikit-learn'
+    ) from e
+try:
+    from tqdm import tqdm
+except ImportError as e:
+    raise ImportError(
+        '因子分析可视化需要依赖 tqdm，请安装：pip install tqdm'
+    ) from e
 from bokeh.plotting import figure  # , show, output_file
 from bokeh.layouts import gridplot, row, column, layout
 from bokeh.models import ColumnDataSource, HoverTool, ColorBar, LinearColorMapper, Range1d, Div, Tabs, LabelSet, PrintfTickFormatter, Paragraph
 from bokeh.palettes import Spectral6, Viridis256, Category10, Plasma256
 from bokeh.transform import linear_cmap
-import holoviews as hv
+try:
+    import holoviews as hv
+except ImportError as e:
+    raise ImportError(
+        '因子分析可视化需要依赖 holoviews，请安装：pip install holoviews'
+    ) from e
 # from holoviews import opts
 # import pandas_ta as pta
 # 处理Bokeh版本差异

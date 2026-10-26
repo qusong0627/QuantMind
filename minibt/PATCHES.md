@@ -1,33 +1,73 @@
-# minibt vendor 说明(v1.2.7 裁剪版)
+# minibt vendor 说明（v1.3.3 裁剪版）
 
-来源:https://github.com/MiniBtMaster/minibt (MIT)。本目录是**裁剪后 vendor**,上游单 commit 仓库无 pyproject/无法直接 pip 安装,故随镜像构建期编译。
+来源：https://github.com/MiniBtMaster/minibt
+固定 commit：`0ea790e2c3c79bd3393444cc381908dfc6648243`（2026-10-16，`__version__ = 1.3.3`，MIT）
+上游仓库无 tag；2026-10-16 之后无新提交（截至 2026-10-26 核对）。
 
-## 裁剪补丁(升级时需重打,均带 `pilot-prune` 标记)
+## 为什么用 GitHub 源码而不是 PyPI
 
-1. `__init__.py`:`from .elegantrl.agents import Agents, BestAgents` 改注释——elegantRL 是 vendored torch fork,回测场景不需要 torch(elegantrl/ 目录已删除)。
-2. `utils.py`(~L40):tqsdk 模块级导入包 try/except(仅实盘天勤链路使用)。
+PyPI 上 1.3.2（最新）**只发布了 Windows wheel，没有 sdist**，Linux 无法从 PyPI
+构建；GitHub 源码包含 1.3.2 的全部修复，且多一个 1.3.3 的小修复（纯指标策略
+不再多出空结果页）。因此固定 commit 比固定 PyPI 版本更可复现。
 
-其余依赖(ta-lib/tulipy/bokeh/PyQt)在上游就是惰性导入,缺失只在使用时报错,无需改源码。
+## 裁剪内容（升级时需重置）
 
-## 已删除内容
+删除：`elegantrl/`（torch 强化学习 fork）、`tradingstrategy/`（示例策略）、
+`liveplot/`（上游已移除的旧实时绘图）、`build/`、`logs/`、`__pycache__`、
+`*.pyd`。`.c` 与 `.pyx` 保留（镜像构建期现场编译）。
 
-`build/`、`logs/`、`elegantrl/`、所有 `*.pyd`(Windows 编译产物)、`*copy 2*`、`__pycache__`。`.c` 与 `.pyx` 保留(镜像构建期用 Cython 编译 4 个扩展:`zigzag/core` + `cython_functions/{backtest_engine,backtrader_from_signals,backtrader_pair_from_signals}`,构建脚本 `_build_exts.py`)。
+## 补丁：**本次升级后不再需要任何源码补丁**
 
-注:`data/test/*.csv` 内置样本数据因仓库全局 `*.csv` 忽略规则不入 git;已实测 `LocalDatas` 在缺该目录时 import 与回测均正常,镜像重建不受影响。
+1.2.7 时代的两个裁剪补丁已作废——上游已把重依赖改为惰性导入：
 
-## 依赖锁定(试点 venv 实测组合)
+- `elegantrl`：PEP 562 `__getattr__` 按需加载；目录裁掉后 `import minibt`
+  正常，只有访问 `minibt.Agents` 才会报「请安装 torch」。
+- `tqsdk`：`utils.py` 内改为函数级导入；不装 tqsdk 只影响实盘天勤链路。
 
-numpy==2.2.6 / pandas==2.3.3 / pandas-ta==0.4.71b0 / numba==0.61.2 / duckdb / networkx==3.6.1 / numpy-ext==0.9.9(**必须 --no-deps 安装**,否则会把 numpy 拖到 1.x)/ TA-Lib==0.7.1(官方 wheel 自带 C)/ finta==1.3 / quantstats==0.0.81 / statsmodels / scipy / joblib / cython>=3。可选保险:arch、pykalman(惰性使用)。**不装**:tqsdk(TqTa/TqFunc 指标库随之不可用)、tulipy(gcc15 编译失败,功能被 TA-Lib 覆盖)。
+## 构建（`docker/Dockerfile.minibt-runner`）
 
-## 回测口径差异(写策略前必读)
+- 基础镜像 `python:3.12-slim-bookworm`（minibt 1.3.x 要求 Python ≥ 3.12）。
+- 编译 **5 个** Cython 扩展（`minibt/_build_exts.py`）：
+  `zigzag/core`、`cython_functions/{backtest_engine, backtrader_from_signals,
+  backtrader_pair_from_signals, signal_profit}`。1.3.2 的 `from_signals`
+  逐笔统计修复依赖新增的 `signal_profit`。
+- 预建 `/root/.minibt/logs` 与 `/root/.minibt/datas`：1.3.x 的 `Logger` 首次
+  取 logger 时 `mkdir(exist_ok=True)`（**不带 parents**），目录缺失会直接抛
+  `FileNotFoundError`。
+- 额外装 `redis>=5,<9`：仅供 `backend/shared/minibt_sim_agent.py`（模拟盘
+  侧车）读写请求/目标键，不影响回测。
 
-- **信号当根 K 线收盘价成交**(默认 `OrderType.Close`);`OrderType.Market` 才是下根开盘
-- 信号 `.new` 单次消费:持多时 `sell()` 只平不开空,反手需显式两步
-- **无 A 股规则**:T+1、涨跌停、整手、ST 均不建模;结果与实盘存在系统性口径差
-- **默认手续费=0**,需显式配 `self.percent_commission` 等(StrategyBase setter)
-- minibt 自带报告的"最终收益"**不含未平仓浮盈**(保证金式记账);结构化统计用 `backend/shared/minibt_result.py::run_and_report`
-- 桌面功能(PyQt 实时图表/light_chart 回放/bokeh)在服务端一律禁用:`Bt().run(isplot=False, isreport=False)`
+## 依赖锁定（沿用 1.2.7 试点实测组合）
 
-## 引擎行为基准(试点验证 2026-09-08)
+numpy==2.2.6 / pandas==2.3.3 / pandas-ta==0.4.71b0 / numba==0.61.2 / duckdb /
+networkx==3.6.1 / numpy-ext==0.9.9（**必须 --no-deps**）/ TA-Lib==0.7.1 /
+finta / quantstats / statsmodels / scipy / arch / pykalman / rich / colorlog。
+**不装**：tqsdk（天勤实盘链路）、tulipy（gcc15 编译失败，功能被 TA-Lib 覆盖）、
+PyQt6/pylightcharts/plotly（服务端一律 `isplot=False`，均为惰性导入）。
 
-双均线策略(600036.SH 全量 2595 根日线)与独立 pandas 复现逐笔 67/67 一致、持仓序列零偏差;近 4 年窗口 27/27 一致。复现脚本在 `/tmp/minibt-pilot/replica.py`(会话级,不随仓库)。
+## 升级验收（2026-10-26，1.2.7 → 1.3.3 A/B）
+
+同一批 11 个 A 股模板、同一份 QuantDB 数据、同一份 `minibt_result` 提取器：
+
+- `result.json` 的 **metrics / 逐笔成交 / 权益曲线完全一致**（11/11）；
+- `[RESULT]` 标量指标逐项一致（含 `cum_return / sharpe / max_drawdown /
+  win_rate / n_trades / profit_factor / final_equity`）；
+- 唯一差异是 `backtest_elapsed_sec`：约 0.3s → 2.1s（2595 根日线），
+  对「每日一次决策」的模拟盘侧车无影响；回测中心会感知为约 6 倍耗时。
+
+## 回测口径差异（写策略前必读，与 1.2.7 相同）
+
+- **信号当根 K 线收盘价成交**（默认 `OrderType.Close`）；`OrderType.Market` 才是下根开盘。
+- 信号 `.new` 单次消费：持多时 `sell()` 只平不开空，反手需显式两步。
+- **无 A 股规则**：T+1、涨跌停、整手、ST 均不建模；结果与实盘存在系统性口径差。
+- **默认手续费=0**，需显式配 `self.percent_commission`。
+- minibt 自带报告的「最终收益」**不含未平仓浮盈**（保证金式记账）；结构化统计用
+  `backend/shared/minibt_result.py::run_and_report`。
+- 桌面功能（PyQt 实时图表 / light_chart 回放 / bokeh）在服务端一律禁用：
+  `Bt().run(isplot=False, isreport=False)`。
+
+## 模拟盘侧车（本 vendor 新增用途）
+
+`backend/shared/minibt_sim_agent.py` 在 runner 镜像内运行，按调度器请求跑一次
+策略并回写目标持仓股数；数据补今日 K 线的口径见
+`backend/shared/minibt_sim_data.py`（volume 手→股、amount 万元与 QuantDB 同尺）。

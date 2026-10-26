@@ -1,7 +1,68 @@
 
 from .other import Meta
 
-__all__ = ["MaType", "Model", "LineDash", "Markers", "Colors"]
+__all__ = ["MaType", "Model", "LineDash", "Markers", "Colors",
+           "to_bokeh_marker"]
+
+# ---------------------------------------------------------------------------
+# 【新增】marker 名称兼容: 框架 Markers -> bokeh 可渲染名称
+# ---------------------------------------------------------------------------
+# 背景:
+#   ``Markers`` 枚举里同时容纳了 bokeh 与 lightweight_charts 两套标记名称
+#   (见其文档里的 "lightweight_charts" 段), 其中 ``arrow_up`` / ``arrow_down``
+#   只对 lightweight_charts 有效; 直接传给 bokeh 会触发
+#       ERROR:bokeh.core.validation.check:E-1001 (BAD_COLUMN_NAME):
+#           Glyph refers to nonexistent column name ... : marker='arrow_up'
+#   该报错不会中断绘图, 但会使信号标记被静默丢弃。
+#   另外 TradingView 的 label.style_label_up / label.style_label_down 常被写成
+#   ``label_up`` / ``label_down``, 也一并容错。
+# ---------------------------------------------------------------------------
+
+# bokeh 3.x 实际支持的 scatter 标记名(取自 bokeh.core.enums.MarkerType)
+_BOKEH_MARKERS = frozenset({
+    "asterisk", "circle", "circle_cross", "circle_dot", "circle_x",
+    "circle_y", "cross", "dash", "diamond", "diamond_cross", "diamond_dot",
+    "dot", "hex", "hex_dot", "inverted_triangle", "plus", "square",
+    "square_cross", "square_dot", "square_pin", "square_x", "star",
+    "star_dot", "triangle", "triangle_dot", "triangle_pin", "x", "y",
+})
+
+# 非 bokeh 名称 -> bokeh 等价名称(语义一致)
+_MARKER_BOKEH_ALIAS = {
+    "arrow_up": "triangle",            # lightweight_charts 向上箭头
+    "arrow_down": "inverted_triangle",  # lightweight_charts 向下箭头
+    "label_up": "triangle",            # TradingView label.style_label_up
+    "label_down": "inverted_triangle",  # TradingView label.style_label_down
+}
+
+_marker_warned = set()
+
+
+def to_bokeh_marker(name, default: str = "circle") -> str:
+    """把框架 ``Markers`` / TradingView 风格的标记名收敛为 bokeh 可渲染名称。
+
+    - bokeh 原生支持的名字原样返回;
+    - ``arrow_up`` / ``arrow_down`` / ``label_up`` / ``label_down`` 映射为语义
+      等价的 ``triangle`` / ``inverted_triangle``;
+    - 其它未知名字回退为 ``default``(默认 ``circle``) 并只提示一次 warning。
+    """
+    if name is None:
+        return default
+    key = str(name)
+    if key in _BOKEH_MARKERS:
+        return key
+    if key in _MARKER_BOKEH_ALIAS:
+        return _MARKER_BOKEH_ALIAS[key]
+    if key not in _marker_warned:
+        _marker_warned.add(key)
+        import warnings as _warnings
+        _warnings.warn(
+            "SignalStyle.marker=%r 不是 bokeh 支持的标记名, 已回退为 %r; "
+            "可选值: %s" % (key, default, sorted(_BOKEH_MARKERS)),
+            stacklevel=2)
+    return default
+
+
 
 
 class MaType(int, metaclass=Meta):

@@ -1,8 +1,99 @@
 from __future__ import annotations
-from ..utils import np, pd, partial, reduce, get_lennan, LineStyle, LineDash
-from .core import BtIndicator, IndSeries, IndFrame, KLine,Line
+
+import dataclasses
+
+from ..utils import (np, pd, partial, reduce, get_lennan, LineStyle, LineDash,
+                     BandStyle, SignalStyle, CandleStyle, TableStyle, Colors,
+                     VPStyle, Markers)
+from .core import BtIndicator, IndSeries, IndFrame, KLine, Line
+from ..ta import PineFunc, _jit_call
 from ..stop import BtStop
 import math
+
+
+def _alphatrend_kernel(upT, downT, condition, n):
+    """AlphaTrend 的逐 bar 递归（numba 可编译，逐位一致）。"""
+    at = np.full(n, np.nan)
+    for i in range(n):
+        if np.isnan(upT[i]) or np.isnan(downT[i]):
+            continue
+        prev = at[i - 1] if i > 0 else np.nan
+        if condition[i]:
+            at[i] = upT[i] if (np.isnan(prev) or upT[i] >= prev) else prev
+        else:
+            at[i] = downT[i] if (np.isnan(prev) or downT[i] <= prev) else prev
+    return at
+
+
+def _vwap_channel_kernel(hst, lst, h_change, l_change, new_high, new_low, n):
+    """VWAPPriceChannel 的逐 bar 通道推进循环（numba 可编译，逐位一致）。"""
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(n):
+        # 上轨
+        if new_high[i]:
+            upper[i] = hst[i]
+        elif i == 0:
+            upper[i] = np.nan
+        else:
+            hst_same = (hst[i] == hst[i - 1]) or (
+                np.isnan(hst[i]) and np.isnan(hst[i - 1]))
+            trend = (upper[i - 1] + h_change[i]
+                     if not np.isnan(upper[i - 1]) else np.nan)
+            if hst_same:
+                upper[i] = trend
+            else:
+                upper[i] = (np.fmin(hst[i], trend)
+                            if not np.isnan(trend) else hst[i])
+        # 下轨
+        if new_low[i]:
+            lower[i] = lst[i]
+        elif i == 0:
+            lower[i] = np.nan
+        else:
+            lst_same = (lst[i] == lst[i - 1]) or (
+                np.isnan(lst[i]) and np.isnan(lst[i - 1]))
+            trend = (lower[i - 1] + l_change[i]
+                     if not np.isnan(lower[i - 1]) else np.nan)
+            if lst_same:
+                lower[i] = trend
+            else:
+                lower[i] = (np.fmax(lst[i], trend)
+                            if not np.isnan(trend) else lst[i])
+    return upper, lower
+
+
+def _vp_profile_kernel(low, high, src, vol, n, n_bins, length, rk,
+                       lo_all, hi_all):
+    """RollingVolumeProfile 的逐 bar 直方图循环（numba 可编译）。
+
+    与原纯 Python 循环运算顺序一致，结果逐位相同；10000 根从 ~0.5s 降到几 ms。
+    返回 ``(prof, lo, hi)``，其中 lo/hi 是最后一根使用的档位区间。
+    """
+    prof = np.zeros((n, n_bins), dtype=np.float64)
+    lo = np.nan
+    hi = np.nan
+    for i in range(n):
+        if rk <= 0:
+            lo_i, hi_i = lo_all, hi_all
+        else:
+            a = i - rk + 1
+            if a < 0:
+                a = 0
+            lo_i = np.nanmin(low[a:i + 1])
+            hi_i = np.nanmax(high[a:i + 1])
+        lo, hi = lo_i, hi_i
+        if (not np.isfinite(lo_i)) or (not np.isfinite(hi_i)) or hi_i <= lo_i:
+            continue
+        w0 = i - length + 1
+        if w0 < 0:
+            w0 = 0
+        edges = np.linspace(lo_i, hi_i, n_bins + 1)
+        b_idx = np.clip(np.digitize(src[w0:i + 1], edges) - 1,
+                        0, n_bins - 1)
+        prof[i] = np.bincount(b_idx, weights=vol[w0:i + 1],
+                              minlength=n_bins)[:n_bins]
+    return prof, lo, hi
 
 
 class Powertrend_Volume_Range_Filter_Strategy(BtIndicator):
@@ -127,8 +218,20 @@ class Powertrend_Volume_Range_Filter_Strategy(BtIndicator):
 
         lowband_trendfollow = lowband.tqfunc.llv(self.params.lengthhl)
         highband_trendfollow = hband.tqfunc.hhv(self.params.lengthhl)
-        igu_filter_positive = self.close.cross_up(highband_trendfollow.shift()).tqfunc.barlast(
-        ) < self.close.cross_down(lowband_trendfollow.shift()).tqfunc.barlast()
+        # [修改] 原代码:
+        #     igu_filter_positive = self.close.cross_up(highband_trendfollow.shift()).tqfunc.barlast(
+        #     ) < self.close.cross_down(lowband_trendfollow.shift()).tqfunc.barlast()
+        #   tulip 的 barlast 用 **-1** 表示"从未触发", 而 Pine 的 ta.barssince 用 **na**。
+        #   于是"两个方向都还没出现过穿越"时, `<` 会拿 -1 去比较而**恒为真**
+        #   (-1 < 0..n), 使 igu_filter_positive 一开始就为 True; 而 Pine 里 na 参与
+        #   任何比较一律为 false。仅需把 -1 哨兵换成 na(-1 不可能是合法结果:
+        #   barlast 的取值范围是 >= 0), 序列类型与后续运算均不变。
+        _igu_up = self.close.cross_up(
+            highband_trendfollow.shift()).tqfunc.barlast()
+        _igu_dn = self.close.cross_down(
+            lowband_trendfollow.shift()).tqfunc.barlast()
+        igu_filter_positive = _igu_up.replace(-1,
+                                              np.nan) < _igu_dn.replace(-1, np.nan)
         igu_filter_negative = ~igu_filter_positive
 
         vwma = volrng.vwma(length=self.params.length)
@@ -1069,7 +1172,7 @@ class The_Flash_Strategy(BtIndicator):
         # 计算超级趋势
         supertrend, direction, * \
             _ = self.supertrend(self.params.atrPeriod,
-                                    self.params.factor).to_lines()
+                                self.params.factor).to_lines()
         # 计算跟踪止损线
         src = self.close
         Trail1 = src.ema(self.params.AP2).values  # Ema func
@@ -1213,7 +1316,7 @@ class Quantum_Edge_Pro_Adaptive_AI(BtIndicator):
             hist_macd > 0.)  # MACD看涨信号
         macd_bear = (hist_macd < hist_macd.shift()) & (
             hist_macd < 0.)  # MACD看跌信号
-        adx,_, diplus, diminus = self.adx(14, 14).to_lines()  # ADX指标
+        adx, _, diplus, diminus = self.adx(14, 14).to_lines()  # ADX指标
         strong_trend = adx > 25.  # 强趋势
         uptrend = (diplus > diminus) & strong_trend  # 上升趋势
         downtrend = (diminus > diplus) & strong_trend  # 下降趋势
@@ -1921,8 +2024,8 @@ class RJ_Trend_Engine(BtIndicator):
         psar = self.SAR(self.params.psarStart, self.params.psarMax)
         trend, st_direction, * \
             _ = self.supertrend(self.params.stAtrPeriod,
-                                    self.params.stFactor).to_lines()
-        adx,adxr, diplus, diminus = self.adx(
+                                self.params.stFactor).to_lines()
+        adx, adxr, diplus, diminus = self.adx(
             self.params.adxLen, self.params.adxLen).to_lines()
         # bbLower, bbMiddle, bbUpper, * \
         #     _ = self.close.bbands(self.params.bbLength,
@@ -2147,6 +2250,14 @@ class UT_Bot_Alerts(BtIndicator):
     """
     params = dict(a=1., c=10, h=False)
     overlap = dict(alerts=True, long_signal=False, short_signal=False)
+    isplot = dict(alerts=True, long_signal=False, short_signal=False)
+    # signalstyle = dict(
+    #     long_signal=SignalStyle('low', Colors.bull_color, Markers.triangle).set_text_style(
+    #         font_size=14, text_color='#ffd400', line_height=1.4,
+    #         background_fill_color='#222222', background_fill_alpha=0.3),
+    #     short_signal=SignalStyle('high', Colors.bear_color, Markers.inverted_triangle).set_text_style(
+    #         font_size=14, text_color='#ffd400', line_height=1.4,
+    #         background_fill_color='#222222', background_fill_alpha=0.3))
 
     def next(self):
         """计算ATR跟踪止损策略信号
@@ -2652,38 +2763,83 @@ class Pivot_Point_Supertrend(BtIndicator):
 
 
 class Volume_Flow_Indicator(BtIndicator):
-    """https://cn.tradingview.com/script/MhlDpfdS-Volume-Flow-Indicator-LazyBear/"""
+    """https://cn.tradingview.com/script/MhlDpfdS-Volume-Flow-Indicator-LazyBear/
+
+    Volume Flow Indicator [LazyBear] (@author LazyBear, 保留作者署名)
+    Pine v4 逻辑逐行还原:
+
+        typical = hlc3
+        inter   = log(typical) - log(typical[1])
+        vinter  = stdev(inter, 30)                    # 样本标准差 ddof=1
+        cutoff  = coef * vinter * close
+        vave    = sma(volume, length)[1]              # 前一根 bar 的成交量窗口均值
+        vmax    = vave * vcoef                        # 最大量截断
+        vc      = min(volume, vmax)
+        mf      = typical - typical[1]
+        vcp     = mf > cutoff ? vc : (mf < -cutoff ? -vc : 0)
+        vfi     = smoothVFI ? sma(sum(vcp, length)/vave, 3)
+                            : sum(vcp, length)/vave
+        vfima   = ema(vfi, signalLength)
+        d       = vfi - vfima                         # 上/下柱状(showHisto=True 时输出)
+
+    注意: 窗口含 na 时按 Pine 语义直接传播 na(等价 rolling 满窗才输出);
+    sum(vcp, length)/vave 的 vave 为"前一根"窗口均值, 与当日 vcp 同 bar 相除。
+    """
     params = dict(length=130, coef=0.2, vcoef=2.5,
-                  signalLength=5, smoothVFI=False)
+                  signalLength=5, smoothVFI=True, showHisto=True)
     overlap = False
+    lines = ('vfi', 'vfima', 'signal')
+    linestyle = dict(signal=LineStyle(line_dash=LineDash.vbar))
 
     def next(self):
-        length = self.params.length
-        coef = self.params.coef
-        vcoef = self.params.vcoef
-        signalLength = self.params.signalLength
-        smoothVFI = self.params.smoothVFI
-        volume = self.volume
-        def ma(x: IndSeries, y): return x.sma(y) if smoothVFI else x
+        p = self.params
+        length = int(p.length)
+        coef = p.coef
+        vcoef = p.vcoef
+        signal_length = int(p.signalLength)
+        smooth_vfi = bool(p.smoothVFI)
 
-        typical = self.hlc3()
-        inter = typical.apply(np.log).diff()
-        vinter = inter.stdev(30)
-        cutoff = coef * vinter * self.close
-        vave = volume.sma(length).shift()
+        close = np.asarray(self.close.values, dtype=np.float64)
+        high = np.asarray(self.high.values, dtype=np.float64)
+        low = np.asarray(self.low.values, dtype=np.float64)
+        volume = np.asarray(self.volume.values, dtype=np.float64)
+        n = close.size
+
+        typical = (high + low + close) / 3.0          # hlc3
+        # inter = log(typical) - log(typical[1])
+        inter = np.full(n, np.nan)
+        if n > 1:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                inter[1:] = np.log(typical[1:]) - np.log(typical[:-1])
+        # vinter = stdev(inter, 30)  → cutoff = coef*vinter*close
+        vinter = pd.Series(inter).rolling(30).std().to_numpy()
+        cutoff = coef * vinter * close
+
+        # vave = sma(volume, length)[1]  → vmax = vave*vcoef
+        vave = pd.Series(volume).rolling(length).mean().shift(1).to_numpy()
         vmax = vave * vcoef
-        # vc = self.ifs(volume < vmax, volume,
-        #               other=vmax) // volume.tqfunc.min(vmax)
-        vc = volume.where(volume < vmax, vmax) // volume.tqfunc.min(vmax)
-        mf = typical.shift()
-        # vcp = self.ifs(mf > cutoff, vc,  other=self.ifs(
-        #     mf < -cutoff, -vc, other=0.))
-        vcp = vc.where(mf > cutoff, (-vc).where(mf < -cutoff, 0.))
+        # vc = volume < vmax ? volume : vmax (Pine iff: 条件含 na 走 else → vmax)
+        vc = np.where(volume < vmax, volume, vmax)
 
-        vfi = ma(vcp.rolling(length).sum()/vave, 3)
-        vfima = vfi.ema(signalLength)
+        # mf = typical - typical[1]
+        mf = np.full(n, np.nan)
+        if n > 1:
+            mf[1:] = typical[1:] - typical[:-1]
+        # vcp = mf > cutoff ? vc : (mf < -cutoff ? -vc : 0)
+        vcp = np.where(mf > cutoff, vc, np.where(mf < -cutoff, -vc, 0.0))
 
-        return vfima, vfi
+        # vfi = sum(vcp, length)/vave, 可选再平滑 sma(3)
+        ratio = pd.Series(vcp).rolling(length).sum().to_numpy() / vave
+        vfi = pd.Series(ratio).rolling(
+            3).mean().to_numpy() if smooth_vfi else ratio
+
+        # vfima = ema(vfi, signalLength): 首个有效值播种后递推(Pine ta.ema 语义)
+        vfima = pd.Series(vfi).ewm(
+            span=signal_length, adjust=False, ignore_na=True).mean().to_numpy()
+
+        # d = vfi - vfima (原码直方图; showHisto=False 时整列 nan 不显示)
+        signal = vfi - vfima if bool(p.showHisto) else np.full(n, np.nan)
+        return vfi, vfima, signal
 
 
 class Chandelier_Exit(BtIndicator):
@@ -2702,22 +2858,24 @@ class Chandelier_Exit(BtIndicator):
             shortStop = self.close.tqfunc.llv(length)+atr
         else:
             longStop = self.high.tqfunc.hhv(length)-atr
-            shortStop = self.high.tqfunc.llv(length)+atr
-        dir = self.ones
+            shortStop = self.low.tqfunc.llv(length)+atr
         size = self.V
+        dir = np.ones(size)
         close = self.close.values.copy()
         longStopPrev = longStop.shift().bfill().values.copy()
         longStop = longStop.bfill().values.copy()
         shortStopPrev = shortStop.shift().bfill().values.copy()
         shortStop = shortStop.bfill().values.copy()
-        up = self.full()
-        dn = self.full()
+        # ★ 同上：用 ndarray 跑循环，别每次写 IndSeries（pandas __setitem__ 很慢 ✗）
+        up = np.full(size, np.nan)
+        dn = np.full(size, np.nan)
         for i in range(1, size):
+            # Pine 语义: 棘轮判断用前一根收盘 close[1], dir 判断用当前收盘 close
             longStopPrev = longStop[i-1]
-            longStop[i] = close[i] > longStopPrev and max(
+            longStop[i] = close[i-1] > longStopPrev and max(
                 longStop[i], longStopPrev) or longStop[i]
             shortStopPrev = shortStop[i-1]
-            shortStop[i] = close[i] < shortStopPrev and min(
+            shortStop[i] = close[i-1] < shortStopPrev and min(
                 shortStop[i], shortStopPrev) or shortStop[i]
             dir[i] = close[i] > shortStopPrev and 1 or (
                 close[i] < longStopPrev and -1 or dir[i-1])
@@ -2726,7 +2884,7 @@ class Chandelier_Exit(BtIndicator):
             else:
                 dn[i] = shortStop[i]
 
-        # dir = IndSeries(dir)
+        up, dn, dir = pd.Series(up), pd.Series(dn), pd.Series(dir)
         long_signal = dir == 1
         long_signal &= dir.shift() == -1
         short_signal = dir == -1
@@ -2737,7 +2895,9 @@ class Chandelier_Exit(BtIndicator):
 class SuperTrend_STRATEGY(BtIndicator):
     """https://cn.tradingview.com/script/P5Gu6F8k/"""
     params = dict(Periods=22, Multiplier=3., changeATR=True,)
+    lines = ("up", "dn", "long_signal", "short_signal")
     overlap = True
+    isplot = dict(long_signal=False, short_signal=False)
 
     def next(self):
         Periods = self.params.Periods
@@ -2750,13 +2910,17 @@ class SuperTrend_STRATEGY(BtIndicator):
             atr = self.true_range().sma(Periods)
         longStop = src-(Multiplier*atr)
         shortStop = src+(Multiplier*atr)
-        dir = self.ones
+        # ★ 用 numpy 数组跑循环：原来 `dir = self.ones` / `up = self.full()` 是
+        #   IndSeries，`dir[i] = …` / `up[i] = …` 每次都要走 pandas 的
+        #   `__setitem__`（~0.1ms/次，4 次/根）→ 8964 根要 ~3s，主线程加载时
+        #   直接卡死 ✗。换成 ndarray 后 ~0.02s（与兄弟指标 `SuperTrend` 一致 ✓）。
         size = self.V
         close = self.close.values
         longStop = longStop.bfill().values.copy()
         shortStop = shortStop.bfill().values.copy()
-        up = self.full()
-        dn = self.full()
+        dir = np.ones(size)
+        up = np.full(size, np.nan)
+        dn = np.full(size, np.nan)
         for i in range(1, size):
             longStopPrev = longStop[i-1]
             longStop[i] = close[i] > longStopPrev and max(
@@ -2770,7 +2934,7 @@ class SuperTrend_STRATEGY(BtIndicator):
                 up[i] = longStop[i]
             else:
                 dn[i] = shortStop[i]
-        # dir = IndSeries(dir)
+        up, dn, dir = pd.Series(up), pd.Series(dn), pd.Series(dir)
         long_signal = dir == 1
         long_signal &= dir.shift() == -1
         short_signal = dir == -1
@@ -2839,20 +3003,47 @@ class Optimized_Trend_Tracker(BtIndicator):
 
 
 class TonyUX_EMA_Scalper(BtIndicator):
-    """https://cn.tradingview.com/script/egfSfN1y-TonyUX-EMA-Scalper-Buy-Sell/"""
+    """https://cn.tradingview.com/script/egfSfN1y-TonyUX-EMA-Scalper-Buy-Sell/
+
+    Tony's EMA Scalper - Buy / Sell (TonyUX EMA Scalper, overlay) —— EMA 均线 + 近期高低点剥头皮
+
+    原码为 Pine v4 绘图型 study(主图叠加): 一条 EMA + 近 8 根高低点横线，
+    价格上穿/下穿 EMA 时依据动能方向输出 Buy/Sell 箭头。转换对照:
+        - len       → length(默认 20); src 默认 close(本实现固定取收盘价)
+        - out       = ema(close, length)      原图蓝色 EMA，仅用于信号判定、不输出
+        - last8h    = highest(close, period) → lasth  近期最高价横线(原图红色, 线宽 2)
+        - lastl8    = lowest(close, period)  → lastl  近期最低价横线(原图绿色, 线宽 2)
+        - bullish   = 价格上穿 EMA 且前收 < 现收(上涨动能延续) → long_signal(买入, 画在 bar 下方)
+        - bearish   = 价格下穿 EMA 且前收 > 现收(下跌动能延续) → short_signal(卖出, 画在 bar 上方)
+
+    参数:
+        length: EMA 周期，默认 20
+        period: 近期最高/最低价统计周期，默认 8
+
+    输出 lines(全部主图叠加):
+        - lasth:  近 period 根收盘的最高价(相当于把 red last8h 横线拉成折线)
+        - lastl:  近 period 根收盘的最低价(相当于把 green lastl8 横线拉成折线)
+        - long_signal:  多头(买入)信号，0/1
+        - short_signal: 空头(卖出)信号，0/1
+
+    注: 原码的 Buy/Sell 为 plotshape 箭头 + 文字；本类输出 0/1 信号列，
+    由框架以信号点/箭头形式绘制，也可直接用于策略回测。
+    """
     params = dict(length=20, period=8)
     overlap = True
 
     def next(self):
         length = self.params.length
         period = self.params.period
-        src = self.close
-        out = src.ema(length)
+        # 原码 src=close, out = ema(close, length)
+        out = self.close.ema(length)
+        # 近 period 根收盘最高/最低价(原 last8h/lastl8)
         lasth = self.close.tqfunc.hhv(period)
         lastl = self.close.tqfunc.llv(period)
-
+        # bullish: 上穿 EMA 且动能向上(close 高于前收) → 买
         long_signal = self.close.cross_up(out) & (
             self.close.shift() < self.close)
+        # bearish: 下穿 EMA 且动能向下(close 低于前收) → 卖
         short_signal = self.close.cross_down(out) & (
             self.close.shift() > self.close)
         return lasth, lastl, long_signal, short_signal
@@ -2874,8 +3065,18 @@ class Turtle_Trade_Channels_Indicator_TUTCI(BtIndicator):
         down = self.low.tqfunc.llv(length)
         sup = self.high.tqfunc.hhv(len2)
         sdown = self.low.tqfunc.llv(len2)
-        cond = (self.high >= up.shift()).tqfunc.barlast() <= (self.low <= down.shift(
-        )).tqfunc.barlast()
+        # [修改] 原代码:
+        #     cond = (self.high >= up.shift()).tqfunc.barlast() <= (self.low <= down.shift(
+        #     )).tqfunc.barlast()
+        #   同 Powertrend_Volume_Range_Filter_Strategy 的问题: tulip 的 barlast 用
+        #   **-1** 表示"从未触发", Pine 的 ta.barssince 用 **na**。两侧都未触发时
+        #   `-1 <= -1` 为真(而 Pine 的 `na <= na` 为假), 单侧未触发时 `-1 <= n`
+        #   也恒为真 —— 使 K 在开始阶段取到 kmin 而非 kmax。
+        #   仅需把 -1 哨兵换成 na(barlast >= 0, -1 只可能是哨兵);
+        #   na 参与 `<=` 为 false, 与 Pine 一致。
+        _tut_hi = (self.high >= up.shift()).tqfunc.barlast()
+        _tut_lo = (self.low <= down.shift()).tqfunc.barlast()
+        cond = _tut_hi.replace(-1, np.nan) <= _tut_lo.replace(-1, np.nan)
         # cond = (self.close > up.shift()).tqfunc.barlast() <= (self.close < down.shift(
         # )).tqfunc.barlast()
         K1 = down.where(cond, up)
@@ -2892,7 +3093,7 @@ class Turtle_Trade_Channels_Indicator_TUTCI(BtIndicator):
         exitshort_signal |= self.high.cross_up(sup.shift())
 
         return sup, sdown, K, long_signal, short_signal
-    
+
 
 class AlphaTrend(BtIndicator):
     """
@@ -2921,7 +3122,27 @@ class AlphaTrend(BtIndicator):
         # ================================================================
         # 1. ATR = SMA(True Range, AP)
         # ================================================================
-        tr = self.atr(AP)
+        # [修改] 原代码:
+        #     tr = self.atr(AP)
+        #   但 self.atr 经 MRO 解析到 PandasTa.atr(默认 mamode='rma'), 实际算的是
+        #   **Wilder 的 ta.atr** —— 与本行上方注释及原码要求的
+        #   `ATR = ta.sma(ta.tr, AP)`(TR 的**简单**均值) 口径不符。
+        #   实测: self.atr(14)[14:19] = 3.2857, 3.5510, 3.7259, 3.6027, 3.7025
+        #         ta.rma(ta.tr,14)[14:19] = 3.2857, 3.5510, 3.7259, 3.6027, 3.7025
+        #         ta.sma(ta.tr,14)[14:19] = 3.2857, 3.0000, 3.0000, 2.8571, 3.0000
+        #   即 self.atr(AP) == ta.rma(tr,AP) != 原码要的 sma(tr,AP), 故改为按原码
+        #   实现。注意 ta.tr 不带参数等价于 ta.tr(false): **首根 TR 为 na**,
+        #   因此 ATR 自第 AP 根(0-based)起才有效。
+        # 向量化：TR 逐根；tr = TR 的滚动 SMA（min_periods=AP，窗口含 NaN 则为 NaN）
+        _pc = np.empty(n, dtype=np.float64)
+        _pc[0] = np.nan
+        if n > 1:
+            _pc[1:] = close[:-1]
+        _tr = np.maximum(
+            high - low,
+            np.maximum(np.abs(high - _pc), np.abs(low - _pc)))
+        _tr[0] = np.nan
+        tr = pd.Series(_tr).rolling(AP, min_periods=AP).mean().to_numpy()
 
         # ================================================================
         # 2. upT / downT
@@ -2934,11 +3155,11 @@ class AlphaTrend(BtIndicator):
         # ================================================================
         if self.params.novolumedata:
             # RSI (Wilder's RMA smoothing, 同 TradingView ta.rsi)
-            rsi_val=self.close.rsi(AP)
+            rsi_val = self.close.rsi(AP)
             condition = rsi_val >= 50.
         else:
             # MFI = Money Flow Index
-            mfi_val=self.mfi(AP)
+            mfi_val = self.mfi(AP)
             condition = mfi_val >= 50.
 
         # ================================================================
@@ -2946,22 +3167,11 @@ class AlphaTrend(BtIndicator):
         #    - 条件满足时: upT < prev ? prev : upT
         #    - 条件不满足时: downT > prev ? prev : downT
         # ================================================================
-        alpha_trend = np.full(n, np.nan)
-        for i in range(n):
-            if np.isnan(upT[i]) or np.isnan(downT[i]):
-                continue
-            prev = alpha_trend[i - 1] if i > 0 else np.nan
-
-            if condition[i]:
-                if np.isnan(prev) or upT[i] >= prev:
-                    alpha_trend[i] = upT[i]
-                else:
-                    alpha_trend[i] = prev
-            else:
-                if np.isnan(prev) or downT[i] <= prev:
-                    alpha_trend[i] = downT[i]
-                else:
-                    alpha_trend[i] = prev
+        alpha_trend = _jit_call(
+            'alphatrend', _alphatrend_kernel,
+            np.asarray(upT, dtype=np.float64),
+            np.asarray(downT, dtype=np.float64),
+            np.asarray(condition, dtype=np.bool_), n)
 
         self.lines.alpha_trend = alpha_trend
         alpha_trend = IndSeries(alpha_trend)
@@ -2982,14 +3192,35 @@ class AlphaTrend(BtIndicator):
         sell_raw = (alpha_trend < at_shift2) & (prev_at >= prev_at_shift2)
 
         # barssince 计算
-        K1 = IndSeries(buy_raw).tqfunc.barlast()
-        K2 = IndSeries(sell_raw).tqfunc.barlast()
+        # [修改] 原代码:
+        #     K1 = IndSeries(buy_raw).tqfunc.barlast()
+        #     K2 = IndSeries(sell_raw).tqfunc.barlast()
+        #     buy_shift1 = buy_raw.shift(1)
+        #     sell_shift1 = sell_raw.shift(1)
+        #     O1 = IndSeries(buy_shift1).tqfunc.barlast()
+        #     O2 = IndSeries(sell_shift1).tqfunc.barlast()
+        #   两个问题(均与 Pine 的 ta.barssince 语义不符):
+        #   ① tulip 的 barlast 在"从未触发"时返回 **-1**, 而 ta.barssince 返回 **na**。
+        #      于是还没出现过反向信号时 `O1 > K2` 变成了 `O1 > -1`, 但为真 —— 在
+        #      "每方向第一次出现信号"的 bar 上多出 **假信号**
+        #      (实测: 17/23/36 三根多头 + 46 一根空头)。
+        #   ② buy_raw.shift(1) 在首根填 **na**, 而 barlast 判定"上一次非零"时
+        #      C 里 `NaN != 0` 为真, 于是 O1 被误认为"首根就触发过"(输出 0,1,2,...);
+        #      Pine 的 ta.barssince 对 na 条件视作 false。
+        #   下面改为显式实现 ta.barssince: 距上一次为真的 bar 数(当根为 0),
+        #   从未为真则 na; 右移一位用"补 False"而不是补 na。
+        def _barlast(cond) -> np.ndarray:
+            return np.asarray(PineFunc.barssince(cond), dtype=np.float64)
+        K1 = _barlast(buy_raw)
+        K2 = _barlast(sell_raw)
 
-        buy_shift1 = buy_raw.shift(1)
-        sell_shift1 = sell_raw.shift(1)
+        buy_shift1 = np.zeros(len(buy_raw), dtype=bool)
+        sell_shift1 = np.zeros(len(sell_raw), dtype=bool)
+        buy_shift1[1:] = np.asarray(buy_raw, dtype=bool)[:-1]
+        sell_shift1[1:] = np.asarray(sell_raw, dtype=bool)[:-1]
 
-        O1 = IndSeries(buy_shift1).tqfunc.barlast()
-        O2 = IndSeries(sell_shift1).tqfunc.barlast()
+        O1 = _barlast(buy_shift1)
+        O2 = _barlast(sell_shift1)
 
         long_signal = buy_raw & (O1 > K2)
         short_signal = sell_raw & (O2 > K1)
@@ -2997,7 +3228,8 @@ class AlphaTrend(BtIndicator):
         self.lines.alpha_shift = at_shift2
         self.lines.long_signal = long_signal
         self.lines.short_signal = short_signal
-        
+
+
 class ATRRope(BtIndicator):
     """
     ATR Rope — 基于 ATR 的自适应绳索通道
@@ -3044,7 +3276,7 @@ class ATRRope(BtIndicator):
         upper = np.full(n, np.nan)
         lower = np.full(n, np.nan)
         dir_ = np.zeros(n, dtype=int)
-        for i in range(length,n):
+        for i in range(length, n):
             if i == length:
                 rope[i] = src[i]
                 upper[i] = rope[i] + atr[i]
@@ -3054,7 +3286,8 @@ class ATRRope(BtIndicator):
             _move = src[i] - rope[i - 1]
             threshold = atr[i]
             # 仅当偏离超过阈值时移动
-            rope[i] = rope[i - 1] + max(abs(_move) - threshold, 0.0) * np.sign(_move)
+            rope[i] = rope[i - 1] + \
+                max(abs(_move) - threshold, 0.0) * np.sign(_move)
             upper[i] = rope[i] + threshold
             lower[i] = rope[i] - threshold
 
@@ -3062,7 +3295,7 @@ class ATRRope(BtIndicator):
         # 3. 方向检测
         # ================================================================
         dir_val = 0
-        for i in range(length,n):
+        for i in range(length, n):
             if i == length:
                 dir_[i] = 0
                 continue
@@ -3110,13 +3343,17 @@ class ATRRope(BtIndicator):
         self.lines.lower = lower
         self.lines.range_hi = range_hi
         self.lines.range_lo = range_lo
-        
+
+
 class DeltaRSISignals(BtIndicator):
     """
     Delta-RSI Oscillator Strategy [tbiktag]
     基于 Pine Script "Delta-RSI Oscillator Strategy" (tbiktag) 转换
-    参考 TradingView: https://cn.tradingview.com/script/OXQVFTQD-Delta-RSI-Oscillator/
+    参考 TradingView:
+      - 策略版: https://cn.tradingview.com/script/oIHW2xG2-Delta-RSI-Oscillator-Strategy/
+      - 指标版: https://cn.tradingview.com/script/OXQVFTQD-Delta-RSI-Oscillator/
 
+    D-RSI 是 RSI 的**平滑时间导数**(多项式局部回归), 作为动量指标。
     三种可选交易信号条件：
       - Zero-Crossing:        D-RSI 上穿/下穿 0 线
       - Signal Line Crossing: D-RSI 上穿/下穿信号线
@@ -3126,12 +3363,12 @@ class DeltaRSISignals(BtIndicator):
 
     输出线：
       drsi          — Delta-RSI 值
-      signal        — Signal 线
-      nrmse          — NRMSE 值
-      long_signal  — 做多信号（1=有信号，0=无）
+      signal        — Signal 线(D-RSI 的 EMA)
+      nrmse         — NRMSE 值
+      long_signal   — 做多信号（1=有信号，0=无）
       short_signal  — 做空信号（1=有信号，0=无）
-      endlong_signal  — 多头离场信号
-      endshort_signal — 空头离场信号
+      exitlong_signal  — 多头离场信号
+      exitshort_signal — 空头离场信号
 
     参数：
       rsi_length    — RSI 计算周期，默认 21
@@ -3143,8 +3380,14 @@ class DeltaRSISignals(BtIndicator):
       endcond       — 离场条件，默认 'Zero-Crossing'
       use_nrmse     — 是否启用 NRMSE 过滤，默认 False
       nrmse_thrs    — NRMSE 阈值（%），默认 10
+      show_buy / show_sell / show_exit — 对应原码 ``islong`` / ``isshort`` /
+          ``showendlabels`` 的plotshape 显示开关(默认 True)；minibt 中通过
+          **将对应信号列置零**实现(原码仅隐藏标记、alert 仍会触发)。
+
+    验证：与字面直译参考（QR 伪逆逐行版）逐列对拍，7 列 × 10 组参数均 0 mismatch。
     """
-    lines = ('drsi', 'signal', 'nrmse', 'long_signal', 'short_signal', 'exitlong_signal', 'exitshort_signal')
+    lines = ('drsi', 'signal', 'nrmse', 'long_signal',
+             'short_signal', 'exitlong_signal', 'exitshort_signal')
     params = dict(
         rsi_length=21,
         window=21,
@@ -3155,9 +3398,15 @@ class DeltaRSISignals(BtIndicator):
         endcond='Zero-Crossing',
         use_nrmse=False,
         nrmse_thrs=10.0,
+        show_buy=True,
+        show_sell=True,
+        show_exit=True,
     )
-    isplot = dict(nrmse=False, long_signal=False, short_signal=False, exitlong_signal=False, exitshort_signal=False)
-    
+    isplot = dict(nrmse=False, long_signal=False, short_signal=False,
+                  exitlong_signal=False, exitshort_signal=False)
+    linestyle = dict(signal=LineStyle(
+        line_dash=LineDash.vbar))
+
     @staticmethod
     def _poly_diff(src: np.ndarray, window: int, degree: int):
         """
@@ -3192,7 +3441,7 @@ class DeltaRSISignals(BtIndicator):
         V = np.vander(x, N=degree + 1, increasing=True)  # (window, degree+1)
 
         for i in range(window - 1, n):
-            y = np.asarray(src[i - window + 1 : i + 1], dtype=np.float64)
+            y = np.asarray(src[i - window + 1: i + 1], dtype=np.float64)
 
             # 最小二乘拟合: y = V @ coeffs
             coeffs, _, _, _ = np.linalg.lstsq(V, y, rcond=None)
@@ -3217,7 +3466,8 @@ class DeltaRSISignals(BtIndicator):
         n = len(close)
 
         rsi = self.close.rsi(length=self.params.rsi_length)
-        drsi, nrmse = self._poly_diff(rsi, self.params.window, self.params.degree)
+        drsi, nrmse = self._poly_diff(
+            rsi, self.params.window, self.params.degree)
         drsi = IndSeries(drsi)
         signal = drsi.ema(self.params.signal_length)
         self.lines.drsi = drsi
@@ -3235,8 +3485,10 @@ class DeltaRSISignals(BtIndicator):
         dir_up = np.zeros(n, dtype=bool)
         dir_dn = np.zeros(n, dtype=bool)
         for i in range(2, n):
-            dir_up[i] = (drsi[i] > drsi[i-1]) and (drsi[i-1] < drsi[i-2]) and drsi[i-1] < 0.0
-            dir_dn[i] = (drsi[i] < drsi[i-1]) and (drsi[i-1] > drsi[i-2]) and drsi[i-1] > 0.0
+            dir_up[i] = (drsi[i] > drsi[i-1]) and (drsi[i-1]
+                                                   < drsi[i-2]) and drsi[i-1] < 0.0
+            dir_dn[i] = (drsi[i] < drsi[i-1]) and (drsi[i-1]
+                                                   > drsi[i-2]) and drsi[i-1] > 0.0
 
         # 0 线交叉
         cross_up = np.zeros(n, dtype=bool)
@@ -3276,25 +3528,35 @@ class DeltaRSISignals(BtIndicator):
         self.lines.exitlong_signal = (_dn_end & rmse_ok).astype(np.int32)
         self.lines.exitshort_signal = (_up_end & rmse_ok).astype(np.int32)
 
+        # 原码 islong / isshort / showendlabels: plotshape 显示开关
+        # (minibt 中以置零信号列实现)
+        if not bool(self.params.show_buy):
+            self.lines.long_signal = np.zeros(n, dtype=np.int32)
+        if not bool(self.params.show_sell):
+            self.lines.short_signal = np.zeros(n, dtype=np.int32)
+        if not bool(self.params.show_exit):
+            self.lines.exitlong_signal = np.zeros(n, dtype=np.int32)
+            self.lines.exitshort_signal = np.zeros(n, dtype=np.int32)
+
 
 class DynamicSwingAnchoredVWAP(BtIndicator):
     """
     动态 Swing 锚定 VWAP
     基于 Pine Script "Dynamic Swing Anchored VWAP (Zeiierman)" 转换
     https://cn.tradingview.com/script/SxgyrEde-Dynamic-Swing-Anchored-VWAP-Zeiierman/
-    
+
     核心逻辑：
     1. Swing 高点/低点检测（prd 周期 highestbars/lowestbars == 0）
     2. ATR 波动率自适应调节 APT（Adaptive Price Tracking）周期
     3. 方向变化时（新高/新低），VWAP 从 swing 点重新锚定
     4. EWMA 型 VWAP = EMA(hlc3*vol) / EMA(vol)，alpha = 1 - e^(-ln2/apt)
-    
+
     参数:
     - prd:         Swing 检测周期，默认 50
     - base_apt:    基础自适应价格跟踪周期，默认 20
     - use_adapt:   是否启用 ATR 波动率自适应 APT，默认 False
     - vol_bias:    波动率偏差乘数，默认 10.0
-    
+
     输出:
     - dsav: 动态 Swing 锚定 VWAP 值，与 kline 时间对齐
     """
@@ -3302,26 +3564,14 @@ class DynamicSwingAnchoredVWAP(BtIndicator):
     lines = ('dsav',)
     params = dict(prd=50, base_apt=20, use_adapt=False, vol_bias=10.0)
     overlap = True
-    
+
     @staticmethod
     def _highestbars(src: np.ndarray, length: int) -> np.ndarray:
-        """Pine Script ta.highestbars：返回距最高价的 bar 数（0=当前最高）"""
-        n = len(src)
-        out = np.full(n, np.nan)
-        for i in range(length - 1, n):
-            window = src[i - length + 1 : i + 1]
-            out[i] = float(length - 1 - np.argmax(window))
-        return out
+        return np.asarray(PineFunc.highestbars(pd.Series(np.asarray(src, dtype=np.float64)), int(length)), dtype=np.float64)
 
     @staticmethod
     def _lowestbars(src: np.ndarray, length: int) -> np.ndarray:
-        """Pine Script ta.lowestbars"""
-        n = len(src)
-        out = np.full(n, np.nan)
-        for i in range(length - 1, n):
-            window = src[i - length + 1 : i + 1]
-            out[i] = float(length - 1 - np.argmin(window))
-        return out
+        return np.asarray(PineFunc.lowestbars(pd.Series(np.asarray(src, dtype=np.float64)), int(length)), dtype=np.float64)
 
     def __init__(self):
         high = self.kline.high.values
@@ -3492,7 +3742,7 @@ class DynamicLinearRegressionChannels(BtIndicator):
         break_mult=2.0,
     )
     overlap = True
-    
+
     @staticmethod
     def _linear_regression(x: np.ndarray) -> tuple:
         """
@@ -3573,7 +3823,8 @@ class DynamicLinearRegressionChannels(BtIndicator):
         dsxx = float(np.sum(dxt * dxt))
         dsyy = float(np.sum(dyt * dyt))
         dsxy = float(np.sum(dxt * dyt))
-        pearson_r = 0.0 if dsxx == 0 or dsyy == 0 else float(dsxy / np.sqrt(dsxx * dsyy))
+        pearson_r = 0.0 if dsxx == 0 or dsyy == 0 else float(
+            dsxy / np.sqrt(dsxx * dsyy))
 
         return std_dev, pearson_r, up_dev, dn_dev
 
@@ -3598,9 +3849,9 @@ class DynamicLinearRegressionChannels(BtIndicator):
             if seg_len <= 1:
                 continue
 
-            c_seg = close[start_index : i + 1]
-            h_seg = high[start_index : i + 1]
-            l_seg = low[start_index : i + 1]
+            c_seg = close[start_index: i + 1]
+            h_seg = high[start_index: i + 1]
+            l_seg = low[start_index: i + 1]
 
             slope, average, intercept = self._linear_regression(c_seg)
             std_dev, pearson_r, up_dev, dn_dev = self._calc_deviation(
@@ -3649,7 +3900,8 @@ class DynamicLinearRegressionChannels(BtIndicator):
         self.lines.base_line = base_line
         self.lines.upper = upper
         self.lines.lower = lower
-        
+
+
 class IGHSupertrend(BtIndicator):
     """
     Innovation-Gated Hull Supertrend — 创新门控 Hull 超级趋势
@@ -3669,7 +3921,7 @@ class IGHSupertrend(BtIndicator):
     - factor:                Supertrend 因子，默认 1.70
     - adapt_bands:           是否用创新度自适应带，默认 True
     - quiet_band_expansion:  平静期带宽扩展，默认 0.35
-    
+
     Returns:
     - super_trend: 超级趋势值
     - direction: 趋势方向，1 表示上趋势，-1 表示下趋势，0 表示无趋势
@@ -3712,15 +3964,15 @@ class IGHSupertrend(BtIndicator):
         # ================================================================
         half_len = max(round(hull_len * 0.5), 1)
         root_len = max(round(np.sqrt(hull_len)), 1)
-        fast_wma = self.close.wma(half_len)#_wma(close, half_len)
+        fast_wma = self.close.wma(half_len)  # _wma(close, half_len)
         slow_wma = self.close.wma(hull_len)
         raw_hull = 2.0 * fast_wma - slow_wma
-        hull = raw_hull.wma(root_len)#_wma(raw_hull, root_len)
+        hull = raw_hull.wma(root_len)  # _wma(raw_hull, root_len)
 
         # ================================================================
         # 2. Volatility Base
         # ================================================================
-        atr_val = self.atr(vol_len)#_atr(high, low, close, vol_len)
+        atr_val = self.atr(vol_len)  # _atr(high, low, close, vol_len)
         stdev_val = hull.stdev(vol_len)
         atr_val = np.nan_to_num(atr_val, nan=0.0)
         stdev_val = np.nan_to_num(stdev_val, nan=0.0)
@@ -3752,11 +4004,14 @@ class IGHSupertrend(BtIndicator):
 
         for i in range(n):
             # 预测
-            pred = estimate[i - 1] if i > 0 and not np.isnan(estimate[i - 1]) else hull[i]
-            prior_cov = covariance_arr[i - 1] if i > 0 and not np.isnan(covariance_arr[i - 1]) else 1.0
+            pred = estimate[i -
+                            1] if i > 0 and not np.isnan(estimate[i - 1]) else hull[i]
+            prior_cov = covariance_arr[i - 1] if i > 0 and not np.isnan(
+                covariance_arr[i - 1]) else 1.0
 
             # 创新
-            innov = hull[i] - pred if not np.isnan(hull[i]) and not np.isnan(pred) else 0.0
+            innov = hull[i] - \
+                pred if not np.isnan(hull[i]) and not np.isnan(pred) else 0.0
             score = abs(innov) / max(volatility[i], mintick)
 
             # Sigmoid 门控
@@ -3802,7 +4057,7 @@ class IGHSupertrend(BtIndicator):
         #    注意：Pine Script 中 upper_band/lower_band 是可变 series，
         #    upper_band[1] 取的是前 bar 修正后的值，而非原始值
         # ================================================================
-        st_atr = self.atr(atr_period)#_atr(high, low, close, atr_period)
+        st_atr = self.atr(atr_period)  # _atr(high, low, close, atr_period)
         upper_band_raw = filtered_hull + st_factor * st_atr
         lower_band_raw = filtered_hull - st_factor * st_atr
 
@@ -3869,7 +4124,8 @@ class IGHSupertrend(BtIndicator):
         self.lines.direction = direction.astype(float)
         self.lines.long_signal = np.where(long_raw, 1.0, np.nan)
         self.lines.short_signal = np.where(short_raw, 1.0, np.nan)
-        
+
+
 class LPTT(BtIndicator):
     """
     LPTT — 低阶多项式拟合趋势交易指标
@@ -3891,7 +4147,7 @@ class LPTT(BtIndicator):
         2. 取最近 length 根收盘价，二阶 polyfit → g'' = 2a₂（趋势加速度）
         3. f' × g'' > 0 → 顺势信号（加速趋势）
         4. f' 或 g'' 变号 → 离场信号
-    
+
     参数：
       length — 多项式拟合窗口长度，默认 20
 
@@ -3908,88 +4164,89 @@ class LPTT(BtIndicator):
              'long_signal', 'short_signal', 'exitlong_signal', 'exitshort_signal')
     params = dict(length=20)
     overlap = False
-    isplot = dict(long_signal=False, short_signal=False, exitlong_signal=False, exitshort_signal=False)
-    
+    isplot = dict(long_signal=False, short_signal=False,
+                  exitlong_signal=False, exitshort_signal=False)
+
     @staticmethod
     def _compute_lptt(close: np.ndarray, length: int):
-      """
-      计算 LPTT 指标。
+        """
+        计算 LPTT 指标。
 
-      对每根 bar，取其前 length 根收盘价做多项式拟合：
-        - 一阶（线性）拟合 → f' = 斜率 a₁
-        - 二阶（二次）拟合 → g'' = 2 × 二次项系数 a₂
-        
-      参数：
-        close  — 收盘价时间序列
-        length — 多项式拟合窗口长度
+        对每根 bar，取其前 length 根收盘价做多项式拟合：
+          - 一阶（线性）拟合 → f' = 斜率 a₁
+          - 二阶（二次）拟合 → g'' = 2 × 二次项系数 a₂
 
-      Returns:
-          f_prime          — 一阶导数（趋势斜率）
-          g_double_prime   — 二阶导数（趋势加速度）
-          long_signal      — 加速上涨信号
-          short_signal     — 加速下跌信号
-          exit_long        — 多头离场信号（f' 或 g'' 变号）
-          exit_short       — 空头离场信号
-      """
-      n = len(close)
-      f_prime = np.full(n, np.nan, dtype=np.float64)
-      g_double_prime = np.full(n, np.nan, dtype=np.float64)
-      long_signal = np.zeros(n, dtype=np.int32)
-      short_signal = np.zeros(n, dtype=np.int32)
-      exit_long = np.zeros(n, dtype=np.int32)
-      exit_short = np.zeros(n, dtype=np.int32)
+        参数：
+          close  — 收盘价时间序列
+          length — 多项式拟合窗口长度
 
-      if n < length:
-          return f_prime, g_double_prime, long_signal, short_signal, exit_long, exit_short
+        Returns:
+            f_prime          — 一阶导数（趋势斜率）
+            g_double_prime   — 二阶导数（趋势加速度）
+            long_signal      — 加速上涨信号
+            short_signal     — 加速下跌信号
+            exit_long        — 多头离场信号（f' 或 g'' 变号）
+            exit_short       — 空头离场信号
+        """
+        n = len(close)
+        f_prime = np.full(n, np.nan, dtype=np.float64)
+        g_double_prime = np.full(n, np.nan, dtype=np.float64)
+        long_signal = np.zeros(n, dtype=np.int32)
+        short_signal = np.zeros(n, dtype=np.int32)
+        exit_long = np.zeros(n, dtype=np.int32)
+        exit_short = np.zeros(n, dtype=np.int32)
 
-      x_linear = np.arange(length, dtype=np.float64)
-      x_quad = np.arange(length, dtype=np.float64)
+        if n < length:
+            return f_prime, g_double_prime, long_signal, short_signal, exit_long, exit_short
 
-      for i in range(length - 1, n):
-          y = close[i - length + 1 : i + 1]
+        x_linear = np.arange(length, dtype=np.float64)
+        x_quad = np.arange(length, dtype=np.float64)
 
-          # 一阶（线性）拟合：y = a₁·x + b₁
-          a1, _ = np.polyfit(x_linear, y, 1)
-          f_prime[i] = a1
+        for i in range(length - 1, n):
+            y = close[i - length + 1: i + 1]
 
-          # 二阶（二次）拟合：y = a₂·x² + b₂·x + c₂
-          a2, _, _ = np.polyfit(x_quad, y, 2)
-          g_double_prime[i] = 2.0 * a2
+            # 一阶（线性）拟合：y = a₁·x + b₁
+            a1, _ = np.polyfit(x_linear, y, 1)
+            f_prime[i] = a1
 
-          # 信号
-          fp = f_prime[i]
-          gpp = g_double_prime[i]
-          if not np.isfinite(fp) or not np.isfinite(gpp):
-              continue
+            # 二阶（二次）拟合：y = a₂·x² + b₂·x + c₂
+            a2, _, _ = np.polyfit(x_quad, y, 2)
+            g_double_prime[i] = 2.0 * a2
 
-          # 入场：f' × g'' > 0
-          if fp > 0 and gpp > 0:
-              long_signal[i] = 1
-          elif fp < 0 and gpp < 0:
-              short_signal[i] = 1
+            # 信号
+            fp = f_prime[i]
+            gpp = g_double_prime[i]
+            if not np.isfinite(fp) or not np.isfinite(gpp):
+                continue
 
-      # 离场信号：f' 或 g'' 变号
-      for i in range(length, n):
-          if not np.isfinite(f_prime[i]) or not np.isfinite(g_double_prime[i]):
-              continue
-          if not np.isfinite(f_prime[i - 1]) or not np.isfinite(g_double_prime[i - 1]):
-              continue
+            # 入场：f' × g'' > 0
+            if fp > 0 and gpp > 0:
+                long_signal[i] = 1
+            elif fp < 0 and gpp < 0:
+                short_signal[i] = 1
 
-          # f' 变号
-          fp_sign = np.sign(f_prime[i])
-          fp_prev_sign = np.sign(f_prime[i - 1])
-          if fp_sign != fp_prev_sign and fp_prev_sign != 0:
-              exit_long[i] = 1
-              exit_short[i] = 1
+        # 离场信号：f' 或 g'' 变号
+        for i in range(length, n):
+            if not np.isfinite(f_prime[i]) or not np.isfinite(g_double_prime[i]):
+                continue
+            if not np.isfinite(f_prime[i - 1]) or not np.isfinite(g_double_prime[i - 1]):
+                continue
 
-          # g'' 变号
-          gpp_sign = np.sign(g_double_prime[i])
-          gpp_prev_sign = np.sign(g_double_prime[i - 1])
-          if gpp_sign != gpp_prev_sign and gpp_prev_sign != 0:
-              exit_long[i] = 1
-              exit_short[i] = 1
+            # f' 变号
+            fp_sign = np.sign(f_prime[i])
+            fp_prev_sign = np.sign(f_prime[i - 1])
+            if fp_sign != fp_prev_sign and fp_prev_sign != 0:
+                exit_long[i] = 1
+                exit_short[i] = 1
 
-      return f_prime, g_double_prime, long_signal, short_signal, exit_long, exit_short
+            # g'' 变号
+            gpp_sign = np.sign(g_double_prime[i])
+            gpp_prev_sign = np.sign(g_double_prime[i - 1])
+            if gpp_sign != gpp_prev_sign and gpp_prev_sign != 0:
+                exit_long[i] = 1
+                exit_short[i] = 1
+
+        return f_prime, g_double_prime, long_signal, short_signal, exit_long, exit_short
 
     def __init__(self):
         close = np.asarray(self.close.values, dtype=np.float64)
@@ -4003,8 +4260,8 @@ class LPTT(BtIndicator):
         self.lines.short_signal = short_signal
         self.lines.exitlong_signal = exit_long
         self.lines.exitshort_signal = exit_short
-        
-        
+
+
 class MLAdaptiveSuperTrend(BtIndicator):
     """
     机器学习自适应 SuperTrend — 基于 K-Means 聚类动态调整 ATR
@@ -4044,8 +4301,7 @@ class MLAdaptiveSuperTrend(BtIndicator):
         midvol=0.50,
         lowvol=0.25,
     )
-    overlap = dict(ST=True,dir=False,cluster=False)
-    
+    overlap = dict(ST=True, dir=False, cluster=False)
 
     def __init__(self):
         close = np.asarray(self.close, dtype=np.float64)
@@ -4061,7 +4317,8 @@ class MLAdaptiveSuperTrend(BtIndicator):
 
         # 3. 计算自适应 SuperTrend
         hl2 = (high + low) / 2.0
-        st, direction = self._pine_supertrend(hl2, close, adaptive_atr, self.params.fact)
+        st, direction = self._pine_supertrend(
+            hl2, close, adaptive_atr, self.params.fact)
 
         self.lines.ST = st
         self.lines.dir = direction
@@ -4086,7 +4343,7 @@ class MLAdaptiveSuperTrend(BtIndicator):
         cluster = np.full(n, -1, dtype=np.float64)
 
         for i in range(tp - 1, n):
-            window = atr[i - tp + 1 : i + 1]
+            window = atr[i - tp + 1: i + 1]
             lo = np.min(window)
             hi = np.max(window)
             rng = hi - lo
@@ -4106,9 +4363,12 @@ class MLAdaptiveSuperTrend(BtIndicator):
                 mask_mid = (d_mid < d_high) & (d_mid <= d_low)
                 mask_low = (d_low < d_high) & (d_low < d_mid)
 
-                nc_high = float(np.mean(window[mask_high])) if mask_high.any() else c_high
-                nc_mid = float(np.mean(window[mask_mid])) if mask_mid.any() else c_mid
-                nc_low = float(np.mean(window[mask_low])) if mask_low.any() else c_low
+                nc_high = float(
+                    np.mean(window[mask_high])) if mask_high.any() else c_high
+                nc_mid = float(
+                    np.mean(window[mask_mid])) if mask_mid.any() else c_mid
+                nc_low = float(
+                    np.mean(window[mask_low])) if mask_low.any() else c_low
 
                 if nc_high == c_high and nc_mid == c_mid and nc_low == c_low:
                     c_high, c_mid, c_low = nc_high, nc_mid, nc_low
@@ -4153,8 +4413,10 @@ class MLAdaptiveSuperTrend(BtIndicator):
         for i in range(n):
             # 调整通道防止穿越（同标准 SuperTrend）
             if i > 0:
-                prev_lb = lower_band[i - 1] if np.isfinite(lower_band[i - 1]) else 0.0
-                prev_ub = upper_band[i - 1] if np.isfinite(upper_band[i - 1]) else 0.0
+                prev_lb = lower_band[i -
+                                     1] if np.isfinite(lower_band[i - 1]) else 0.0
+                prev_ub = upper_band[i -
+                                     1] if np.isfinite(upper_band[i - 1]) else 0.0
                 if not (lower_band[i] > prev_lb or close[i - 1] < prev_lb):
                     lower_band[i] = prev_lb
                 if not (upper_band[i] < prev_ub or close[i - 1] > prev_ub):
@@ -4172,8 +4434,8 @@ class MLAdaptiveSuperTrend(BtIndicator):
             st[i] = lower_band[i] if direction[i] == -1.0 else upper_band[i]
 
         return st, direction
-    
-    
+
+
 class NRTR(BtIndicator):
     """
     Nick Rypock 动态反转止损线 (NRTR)
@@ -4211,7 +4473,7 @@ class NRTR(BtIndicator):
       length — 计算窗口，默认 20（20日移动平均）
     NOTE:
       - 当 mult 为非零正数时，止损线会根据移动平均线进行修正。
-        
+
     """
     lines = ('long_stop', 'short_stop', 'buy_signal', 'sell_signal')
     params = dict(
@@ -4220,15 +4482,16 @@ class NRTR(BtIndicator):
         length=20,
     )
     overlap = True
-    isplot = dict( buy_signal=False, sell_signal=False)
+    isplot = dict(buy_signal=False, sell_signal=False)
 
     def __init__(self):
         close = self.close.values
         n = len(close)
         k = np.full(n, self.params.percentage / 100.0)
         mult = self.params.mult
-        if isinstance(mult, (int, float)) and mult>0.:
-            k = self.close.stdev(self.params.length) * mult/self.close.sma(self.params.length)
+        if isinstance(mult, (int, float)) and mult > 0.:
+            k = self.close.stdev(self.params.length) * \
+                mult/self.close.sma(self.params.length)
 
         long_stop = np.full(n, np.nan, dtype=np.float64)
         short_stop = np.full(n, np.nan, dtype=np.float64)
@@ -4268,15 +4531,15 @@ class NRTR(BtIndicator):
 
             # 按趋势分别填充止损线
             if trend == 1:
-              if long_stop[i-1] > 0:
-                long_stop[i] = max(nrtr,long_stop[i-1])
-              else:
-                long_stop[i] = nrtr
+                if long_stop[i-1] > 0:
+                    long_stop[i] = max(nrtr, long_stop[i-1])
+                else:
+                    long_stop[i] = nrtr
             else:
-              if short_stop[i-1] > 0:
-                short_stop[i] = min(nrtr,short_stop[i-1])
-              else:
-                short_stop[i] = nrtr
+                if short_stop[i-1] > 0:
+                    short_stop[i] = min(nrtr, short_stop[i-1])
+                else:
+                    short_stop[i] = nrtr
 
         self.lines.long_stop = long_stop
         self.lines.short_stop = short_stop
@@ -4294,7 +4557,7 @@ class NWEEnvelope(BtIndicator):
     - mult:       包络带乘数，默认 3.0
     - lookback:   回看窗口，默认 500
     - src_type:   价格源，可选 close/hl2/hlc3/ohlc4，默认 close
-    
+
     输出线：
       nw_line    — 高斯核回归包络线
       upper      — 上轨
@@ -4306,7 +4569,7 @@ class NWEEnvelope(BtIndicator):
     isplot = dict(long_signal=False, short_signal=False)
     params = dict(h=8.0, mult=3.0, lookback=500, src_type='close')
     overlap = True
-    
+
     @staticmethod
     def _gauss(x: float, h: float) -> float:
         """高斯核函数: exp(-x² / (2 * h²))"""
@@ -4334,7 +4597,7 @@ class NWEEnvelope(BtIndicator):
         nw_line = np.full(n, np.nan)
         for i in range(n):
             win = min(lookback, i + 1)
-            seg = src[i - win + 1 : i + 1][::-1]  # 反转匹配 coefs 顺序
+            seg = src[i - win + 1: i + 1][::-1]  # 反转匹配 coefs 顺序
             w = coefs[:win]
             nw_line[i] = np.dot(seg, w) / np.sum(w)
 
@@ -4344,7 +4607,7 @@ class NWEEnvelope(BtIndicator):
         mae = np.full(n, np.nan)
         abs_dev = np.abs(src - nw_line)
         for i in range(lookback - 1, n):
-            mae[i] = np.mean(abs_dev[i - lookback + 1 : i + 1]) * mult
+            mae[i] = np.mean(abs_dev[i - lookback + 1: i + 1]) * mult
 
         # ================================================================
         # 4. 上下轨
@@ -4379,11 +4642,13 @@ class NWEEnvelope(BtIndicator):
             return self.ohlc4().values
         else:
             return self.close.values
-        
-        
+
+
 class OptimizedTrendTracker(BtIndicator):
     """
     ## OTT — 优化趋势跟踪器
+    基于 Pine Script "Optimized Trend Tracker" (KivancOzbilgic / Anil Ozeksi) 转换
+    参考 TradingView: https://cn.tradingview.com/script/zVhoDQME/
 
     原理：
       OTT 在所选均线上下偏移 percent% 构建动态停损带，利用自适应逻辑使
@@ -4446,7 +4711,7 @@ class OptimizedTrendTracker(BtIndicator):
         self.lines.ma_avg = ma_avg
         self.lines.long_signal = buy_signal_k
         self.lines.short_signal = sell_signal_k
-                 
+
     def _compute_ott(self):
         """
         计算 OTT。
@@ -4523,18 +4788,19 @@ class OptimizedTrendTracker(BtIndicator):
 
         # 3. 偏移 [2]（Pine OTT[2]）
         ott_raw = IndSeries(ott_raw)
-        ott_s2=ott_raw.shift(2)
+        ott_s2 = ott_raw.shift(2)
 
         # 4. 支撑线穿越信号（crossover/c vs OTT[ vs OTT[2]）
-        # 非原码 
-        buy_signal_k = (ott_raw.shift(1)<=ott_s2.shift(1)) & (ott_raw>ott_s2)
-        sell_signal_k = (ott_raw.shift(1)>=ott_s2.shift(1)) & (ott_raw<ott_s2)
-        
+        # 非原码
+        buy_signal_k = (ott_raw.shift(1) <= ott_s2.shift(1)
+                        ) & (ott_raw > ott_s2)
+        sell_signal_k = (ott_raw.shift(1) >= ott_s2.shift(1)
+                         ) & (ott_raw < ott_s2)
 
         return ma_avg, ott_raw, ott_s2, buy_signal_k, sell_signal_k
-            
+
     def _compute_ma(self, length: int, var_length: int,
-                ma_type: str) -> np.ndarray:
+                    ma_type: str) -> np.ndarray:
         # 所有指标使用内置指标计算
         if ma_type == 'SMA':
             return self.close.sma(length).values
@@ -4554,8 +4820,8 @@ class OptimizedTrendTracker(BtIndicator):
             return self.close.TSF(length).values
         else:
             return self.close.sma(length).values
-        
-        
+
+
 class RangeFilter(BtIndicator):
     """
     ## 范围过滤器 [DW] — 波动率自适应价格过滤器
@@ -4656,7 +4922,7 @@ class RangeFilter(BtIndicator):
         self.lines.h_band = h_band
         self.lines.l_band = l_band
         self.lines.fdir = fdir
-    
+
     @staticmethod
     def _cond_ema(x: np.ndarray, cond: np.ndarray, period: int) -> np.ndarray:
         """条件 EMA：仅 cond=True 时更新 EMA，否则保持不变"""
@@ -4672,18 +4938,10 @@ class RangeFilter(BtIndicator):
                     ema = (x[i] - ema) * alpha + ema
             result[i] = ema
         return result
-    
+
     @staticmethod
     def _stdev(x: np.ndarray, period: int) -> np.ndarray:
-        """滚动标准差（总体标准差 ddof=0，与 Pine stdev 一致）"""
-        n = len(x)
-        out = np.full(n, np.nan, dtype=np.float64)
-        if n < period:
-            return out
-        for i in range(period - 1, n):
-            window = x[i - period + 1 : i + 1]
-            out[i] = float(np.std(window, ddof=0))
-        return out
+        return np.asarray(PineFunc.stdev(pd.Series(np.asarray(x, dtype=np.float64)), int(period)), dtype=np.float64)
 
     def _calc_range_size(self, mid, high, low, close, n):
         """计算价格波动范围，支持多种尺度"""
@@ -4767,6 +5025,7 @@ class RangeFilter(BtIndicator):
         l_band = filt - r
         return filt, h_band, l_band
 
+
 class RedKMomentumBars(BtIndicator):
     """
     ## RedK 动量 K 线 — 基于双均线动量的蜡烛图指标
@@ -4836,8 +5095,8 @@ class RedKMomentumBars(BtIndicator):
         self.lines.high = h
         self.lines.low = l
         self.lines.close = c
-    
-    def _get_ma(self,length: int, ma_type: str) ->IndSeries:
+
+    def _get_ma(self, length: int, ma_type: str) -> IndSeries:
         """MA 类型分发器"""
         if ma_type == 'SMA':
             return self.close.sma(length)
@@ -4858,7 +5117,7 @@ class RedKMomentumBars(BtIndicator):
 class _CondFilterState:
     """封装所有条件滤波器的内部状态"""
 
-    def __init__(self,ind: ResamplingFilterPack):
+    def __init__(self, ind: ResamplingFilterPack):
         self.ind = ind
         self.samples = []          # 采样值缓冲
         self.vol_buffer = []       # 成交量累积缓冲
@@ -4930,14 +5189,17 @@ class _CondFilterState:
             # 手动做 EWHMA 逻辑
             alpha_half = 2.0 / (half_n + 1)
             alpha_full = 2.0 / (n + 1)
-            self.ewhma_ema1 = (s[-1] - self.ewhma_ema1) * alpha_half + self.ewhma_ema1
-            self.ewhma_ema2 = (s[-1] - self.ewhma_ema2) * alpha_full + self.ewhma_ema2
+            self.ewhma_ema1 = (s[-1] - self.ewhma_ema1) * \
+                alpha_half + self.ewhma_ema1
+            self.ewhma_ema2 = (s[-1] - self.ewhma_ema2) * \
+                alpha_full + self.ewhma_ema2
             raw = 2.0 * self.ewhma_ema1 - self.ewhma_ema2
             # 对 raw 做 EMA(sqrt_n)
             if not hasattr(self, 'ewhma_final'):
                 self.ewhma_final = raw
             alpha_sqrt = 2.0 / (sqrt_n + 1)
-            self.ewhma_final = (raw - self.ewhma_final) * alpha_sqrt + self.ewhma_final
+            self.ewhma_final = (raw - self.ewhma_final) * \
+                alpha_sqrt + self.ewhma_final
             return self.ewhma_final
         elif ma_type == 'BLP':
             if not self.blp_init:
@@ -5030,7 +5292,7 @@ class ResamplingFilterPack(BtIndicator):
         self.lines.ds_src = ds_src
         self.lines.filter = filter_out
         self.lines.filter_dir = filter_dir
-    
+
     @staticmethod
     def _ema_raw(x: np.ndarray, length: int) -> np.ndarray:
         """EMA, alpha = 2/(length+1)"""
@@ -5069,22 +5331,21 @@ class ResamplingFilterPack(BtIndicator):
         if n < period:
             return out
         for i in range(period - 1, n):
-            window = x[i - period + 1 : i + 1]
+            window = x[i - period + 1: i + 1]
             out[i] = float(np.std(window, ddof=1))
         return out
-
 
     # ====================================================================
     # 条件滤波器核心实现
     # ====================================================================
-    
-    @staticmethod   
+
+    @staticmethod
     def _cond_sma(samples, n):
         """条件 SMA：取最近 n 个采样值的均值"""
         buf = samples[-n:] if len(samples) >= n else samples
         return float(np.mean(buf))
 
-    @staticmethod   
+    @staticmethod
     def _cond_ema(new_val, prev_ema, n, initialized):
         """条件 EMA：alpha = 2/(n+1)，仅在采样时更新"""
         if not initialized:
@@ -5092,14 +5353,14 @@ class ResamplingFilterPack(BtIndicator):
         alpha = 2.0 / (n + 1)
         return (new_val - prev_ema) * alpha + prev_ema, True
 
-    @staticmethod   
+    @staticmethod
     def _cond_rma(new_val, prev_rma, n, initialized):
         """条件 RMA (Wilder)：alpha = 1/n"""
         if not initialized:
             return new_val, True
         return (prev_rma * (n - 1) + new_val) / n, True
 
-    @staticmethod   
+    @staticmethod
     def _cond_wma(samples, n):
         """条件 WMA：线性加权，权重 = [1, 2, ..., k]"""
         buf = samples[-n:] if len(samples) >= n else samples
@@ -5107,23 +5368,24 @@ class ResamplingFilterPack(BtIndicator):
         weights = np.arange(1, k + 1, dtype=np.float64)
         return float(np.sum(np.array(buf) * weights) / np.sum(weights))
 
-    def _cond_zlema(self,samples, prev_state, n):
+    def _cond_zlema(self, samples, prev_state, n):
         """条件 ZLEMA：data = 2*latest - oldest, 然后对 data 做 EMA"""
         lag = int(np.round((n - 1) / 2)) + 1
         buf = samples[-lag:] if len(samples) >= lag else samples
         data = 2.0 * buf[-1] - buf[0]
-        new_ema, _ = self._cond_ema(data, prev_state, n, prev_state is not None)
+        new_ema, _ = self._cond_ema(
+            data, prev_state, n, prev_state is not None)
         return new_ema
 
-    def _cond_dema(self,samples, prev_ema1, prev_ema2, n):
+    def _cond_dema(self, samples, prev_ema1, prev_ema2, n):
         """条件 DEMA：2*EMA - EMA(EMA)"""
         latest = samples[-1]
         ema1, _ = self._cond_ema(latest, prev_ema1, n, prev_ema1 is not None)
         ema2, _ = self._cond_ema(ema1 if prev_ema1 is not None else latest,
-                            prev_ema2, n, prev_ema2 is not None)
+                                 prev_ema2, n, prev_ema2 is not None)
         return 2.0 * ema1 - ema2, ema1, ema2
 
-    @staticmethod   
+    @staticmethod
     def _cond_alma(samples, n):
         """条件 ALMA：Arnaud Legoux 移动平均"""
         buf = samples[-n:] if len(samples) >= n else samples
@@ -5131,10 +5393,10 @@ class ResamplingFilterPack(BtIndicator):
         m = 0.85 * (k - 1)
         s_val = k / 6.0
         weights = np.exp(-((np.arange(1, k + 1, dtype=np.float64) - 1 - m) ** 2) /
-                        (2.0 * s_val ** 2))
+                         (2.0 * s_val ** 2))
         return float(np.sum(np.array(buf) * weights) / np.sum(weights))
 
-    def _cond_hma(self,samples, n):
+    def _cond_hma(self, samples, n):
         """条件 HMA：WMA(2*WMA(n/2) - WMA(n), sqrt(n))"""
         half_n = int(np.round(n / 2))
         sqrt_n = int(np.round(np.sqrt(n)))
@@ -5147,20 +5409,20 @@ class ResamplingFilterPack(BtIndicator):
         raw_val = 2.0 * wma_half - wma_full
         return self._cond_wma(list(samples) + [raw_val], sqrt_n)
 
-    def _cond_ewhma(self,samples, prev_ema1, prev_ema2, n):
+    def _cond_ewhma(self, samples, prev_ema1, prev_ema2, n):
         """条件 EWHMA：EMA(2*EMA(n/2) - EMA(n), sqrt(n))"""
         half_n = int(np.round(n / 2))
         sqrt_n = int(np.round(np.sqrt(n)))
         latest = samples[-1]
 
         ema_half, _ = self._cond_ema(latest, prev_ema1, half_n,
-                                prev_ema1 is not None)
+                                     prev_ema1 is not None)
         ema_full, _ = self._cond_ema(latest, prev_ema2, n,
-                                prev_ema2 is not None)
+                                     prev_ema2 is not None)
 
         return ema_half, ema_full
 
-    @staticmethod   
+    @staticmethod
     def _cond_blp(sample_buffer, prev_state, n):
         """条件 2-Pole Butterworth 低通滤波"""
         a = np.exp(-np.sqrt(2) * np.pi / n)
@@ -5178,7 +5440,7 @@ class ResamplingFilterPack(BtIndicator):
         new_state = (new_s0, s0, s1)
         return new_s0, new_state
 
-    @staticmethod   
+    @staticmethod
     def _cond_glp(sample_buffer, prev_state, n):
         """条件 2-Pole Gaussian 低通滤波"""
         beta_val = (1.0 - np.cos(2.0 * np.pi / n)) / (np.sqrt(2.0) - 1.0)
@@ -5190,11 +5452,12 @@ class ResamplingFilterPack(BtIndicator):
         x0 = sample_buffer[-1]
         s0, s1, s2 = prev_state  # [current, prev1, prev2]
 
-        new_s0 = alpha ** 2 * x0 + 2.0 * (1.0 - alpha) * s1 - (1.0 - alpha) ** 2 * s2
+        new_s0 = alpha ** 2 * x0 + 2.0 * \
+            (1.0 - alpha) * s1 - (1.0 - alpha) ** 2 * s2
         new_state = (new_s0, s0, s1)
         return new_s0, new_state
 
-    @staticmethod   
+    @staticmethod
     def _cond_ssf(sample_buffer, prev_state, n):
         """条件 Super Smoother 滤波"""
         omega = 2.0 * np.pi / n
@@ -5225,12 +5488,11 @@ class ResamplingFilterPack(BtIndicator):
         den = np.sum(vbuf[-k:])
         return float(num / den) if den > 1e-12 else float(np.mean(buf[-k:]))
 
-
     # ====================================================================
     # PA 方法：价格行为采样触发
     # ====================================================================
-    def _compute_pa_thresholds(self,close, high, low, rng_scale, rng_qty, rng_per,
-                            smooth_range, smooth_per):
+    def _compute_pa_thresholds(self, close, high, low, rng_scale, rng_qty, rng_per,
+                               smooth_range, smooth_per):
         """计算 PA 方法的动态阈值（每条 bar 一个阈值）"""
         n = len(close)
         if rng_qty <= 0:
@@ -5243,7 +5505,8 @@ class ResamplingFilterPack(BtIndicator):
             tr[i] = max(high[i] - low[i],
                         abs(high[i] - close[i - 1]),
                         abs(low[i] - close[i - 1]))
-        atr_raw = self._ema_raw(tr, rng_per)  # Cond_EMA on new bar triggers → 简化为 EMA
+        # Cond_EMA on new bar triggers → 简化为 EMA
+        atr_raw = self._ema_raw(tr, rng_per)
 
         # 平均变动
         abs_chg = np.zeros(n, dtype=np.float64)
@@ -5257,7 +5520,8 @@ class ResamplingFilterPack(BtIndicator):
         elif rng_scale == 'Pips':
             r = np.full(n, rng_qty * 0.0001, dtype=np.float64)
         elif rng_scale == 'Ticks':
-            r = np.full(n, rng_qty * 1.0, dtype=np.float64)  # syminfo.mintick ~= 1
+            # syminfo.mintick ~= 1
+            r = np.full(n, rng_qty * 1.0, dtype=np.float64)
         elif rng_scale == '% of Price':
             r = close * rng_qty / 100.0
         elif rng_scale == 'ATR':
@@ -5276,15 +5540,14 @@ class ResamplingFilterPack(BtIndicator):
         r[r <= 1e-10] = 1e-10
         return r
 
-
     # ====================================================================
     # 主计算函数
     # ====================================================================
-    def _compute_resampling_filter(self,close, high, low, volume,
-                                s_method, s_size, s_off,
-                                rng_qty, rng_scale, rng_per,
-                                smooth_range, smooth_per,
-                                ma_type, ma_per):
+    def _compute_resampling_filter(self, close, high, low, volume,
+                                   s_method, s_size, s_off,
+                                   rng_qty, rng_scale, rng_per,
+                                   smooth_range, smooth_per,
+                                   ma_type, ma_per):
         """
         计算重采样滤波器。
 
@@ -5531,7 +5794,8 @@ class SRChannels(BtIndicator):
             h, l = supres[x][1], supres[x][2]
             touches = int(np.sum(
                 ((low[start:bar_idx + 1] >= l) & (low[start:bar_idx + 1] <= h)) |
-                ((high[start:bar_idx + 1] >= l) & (high[start:bar_idx + 1] <= h))
+                ((high[start:bar_idx + 1] >= l) &
+                 (high[start:bar_idx + 1] <= h))
             ))
             supres[x][0] += touches
 
@@ -5565,8 +5829,8 @@ class SRChannels(BtIndicator):
         # 按上轨降序排列
         selected.sort(key=lambda x: x[0], reverse=True)
         return selected
-    
-    
+
+
 class STDNpoleGaussianFilter(BtIndicator):
     """
     ## STD 过滤的 N-Pole 高斯滤波器 — 高阶平滑趋势线
@@ -5611,9 +5875,9 @@ class STDNpoleGaussianFilter(BtIndicator):
     )
     overlap = dict(out=True, dir=False)
     isplot = dict(long_signal=False, short_signal=False)
-    
-    def get_src(self)->IndSeries:
-        src=self.params.src
+
+    def get_src(self) -> IndSeries:
+        src = self.params.src
         if src == 'Close':
             return self.close
         elif src == 'Open':
@@ -5638,14 +5902,16 @@ class STDNpoleGaussianFilter(BtIndicator):
         # 2. 可选：源端 STD 过滤
         fo = self.params.filter_option
         if self.params.filter_mult > 0 and fo in ('Price', 'Both'):
-            src = self._std_filter(src, self.params.filter_period, self.params.filter_mult)
+            src = self._std_filter(
+                src, self.params.filter_period, self.params.filter_mult)
 
         # 3. N-Pole Gaussian Filter
         out = self._npolegf(src, self.params.period, self.params.order)
 
         # 4. 可选：输出端 STD 过滤
         if self.params.filter_mult > 0 and fo in ('Gaussian Filter', 'Both'):
-            out = self._std_filter(out, self.params.filter_period, self.params.filter_mult)
+            out = self._std_filter(
+                out, self.params.filter_period, self.params.filter_mult)
 
         # 5. 方向判定
         dir_ = np.zeros(n, dtype=np.float64)
@@ -5673,9 +5939,11 @@ class STDNpoleGaussianFilter(BtIndicator):
             out_i, out_i1, out_i2 = out[i], out[i - 1], out[i - 2]
 
             # pregoLong: out 上升 且 前一 bar 非上升（下降或持平）
-            prego_long = out_i > out_i1 and (out_i1 < out_i2 or out_i1 == out_i2)
+            prego_long = out_i > out_i1 and (
+                out_i1 < out_i2 or out_i1 == out_i2)
             # pregoShort: out 下降 且 前一 bar 非下降（上升或持平）
-            prego_short = out_i < out_i1 and (out_i1 > out_i2 or out_i1 == out_i2)
+            prego_short = out_i < out_i1 and (
+                out_i1 > out_i2 or out_i1 == out_i2)
 
             if prego_long:
                 contsw = 1
@@ -5693,7 +5961,7 @@ class STDNpoleGaussianFilter(BtIndicator):
         self.lines.dir = dir_
         self.lines.long_signal = long_signal
         self.lines.short_signal = short_signal
-    
+
     @staticmethod
     def _factorial(n: int) -> float:
         """阶乘"""
@@ -5710,10 +5978,9 @@ class STDNpoleGaussianFilter(BtIndicator):
         if n < period:
             return out
         for i in range(period - 1, n):
-            window = x[i - period + 1 : i + 1]
+            window = x[i - period + 1: i + 1]
             out[i] = float(np.std(window, ddof=1))
         return out
-
 
     @staticmethod
     def _alpha(period: int, poles: int) -> float:
@@ -5722,7 +5989,6 @@ class STDNpoleGaussianFilter(BtIndicator):
         b = (1.0 - np.cos(w)) / (pow(1.414, 2.0 / poles) - 1.0)
         a = -b + np.sqrt(b * b + 2.0 * b)
         return a
-
 
     def _make_coeffs(self, period: int, order: int):
         """
@@ -5736,11 +6002,11 @@ class STDNpoleGaussianFilter(BtIndicator):
         a = self._alpha(period, order)
         coeffs = np.zeros((order + 1, 3), dtype=np.float64)
         for r in range(order + 1):
-            coeffs[r, 0] = self._factorial(order) / (self._factorial(order - r) * self._factorial(r))
+            coeffs[r, 0] = self._factorial(
+                order) / (self._factorial(order - r) * self._factorial(r))
             coeffs[r, 1] = pow(a, r)
             coeffs[r, 2] = pow(1.0 - a, r)
         return coeffs, a
-
 
     def _npolegf(self, src: np.ndarray, period: int, order: int) -> np.ndarray:
         """
@@ -5768,7 +6034,6 @@ class STDNpoleGaussianFilter(BtIndicator):
 
         return filt
 
-
     def _std_filter(self, src: np.ndarray, length: int, filter_mult: float) -> np.ndarray:
         """
         STD 过滤器：小幅波动保持前值不变，实现去噪。
@@ -5790,11 +6055,11 @@ class SyntheticOscillator(BtIndicator):
     TASC Synthetic Oscillator Strategy
     基于 Pine Script "TASC 2026.04 A Synthetic Oscillator [John F. Ehlers]" 转换
     https://cn.tradingview.com/script/we9AMcvE-TASC-2026-04-A-Synthetic-Oscillator/
-    
+
     参数：
     LB   主周期下界，默认 15
     UB   主周期上界，默认 25
-    
+
     核心逻辑：
     1. Hann 滤波器（12 周期）初始平滑价格
     2. 高通 + SuperSmoother 构成带通滤波 → 实部分量 re
@@ -5808,12 +6073,12 @@ class SyntheticOscillator(BtIndicator):
         LB=15,
         UB=25,
     )
-    
+
     def __init__(self):
         close = self.close.values
         so = self.synthetic_oscillator(close, self.params.LB, self.params.UB)
         self.lines.so = so
-    
+
     # ====================================================================
     # Ehlers 滤波器实现
     # ====================================================================
@@ -5830,7 +6095,8 @@ class SyntheticOscillator(BtIndicator):
             if i < 4:
                 ss[i] = src[i]
             else:
-                ss[i] = a0 * (src[i] + src[i - 1]) + c1 * ss[i - 1] - c2 * ss[i - 2]
+                ss[i] = a0 * (src[i] + src[i - 1]) + c1 * \
+                    ss[i - 1] - c2 * ss[i - 2]
         return ss
 
     @staticmethod
@@ -5847,9 +6113,9 @@ class SyntheticOscillator(BtIndicator):
                 us[i] = src[i]
             else:
                 us[i] = ((1.0 - a0) * src[i]
-                        + (2.0 * a0 - c1) * src[i - 1]
-                        + (c2 - a0) * src[i - 2]
-                        + c1 * us[i - 1] - c2 * us[i - 2])
+                         + (2.0 * a0 - c1) * src[i - 1]
+                         + (c2 - a0) * src[i - 2]
+                         + c1 * us[i - 1] - c2 * us[i - 2])
         return us
 
     @staticmethod
@@ -5866,7 +6132,7 @@ class SyntheticOscillator(BtIndicator):
                 hp[i] = 0.0
             else:
                 hp[i] = (a0 * (src[i] - 2.0 * src[i - 1] + src[i - 2])
-                        + c1 * hp[i - 1] - c2 * hp[i - 2])
+                         + c1 * hp[i - 1] - c2 * hp[i - 2])
         return hp
 
     @staticmethod
@@ -5900,10 +6166,10 @@ class SyntheticOscillator(BtIndicator):
                 out[i] = np.sqrt(s2 / length)
         return out
 
-
     # ====================================================================
     # Synthetic Oscillator 核心
     # ====================================================================
+
     def synthetic_oscillator(self, src: np.ndarray, LB: int, UB: int) -> np.ndarray:
         """
         Ehlers Synthetic Oscillator（完全复刻 Pine Script 逻辑）
@@ -5983,7 +6249,7 @@ class TradingActivityIndex(BtIndicator):
     参数:
     - len_form:  价格成交量均线窗口，默认 20
     - len_hist:  滚动百分位历史窗口，默认 252（年化）
-    
+
     核心逻辑：
     1. 价格成交量 = close × volume
     2. SMA(价格成交量, len_form) → log → VOLSCALE 代理值
@@ -6010,10 +6276,10 @@ class TradingActivityIndex(BtIndicator):
         self.lines.p60 = self._rolling_percentile(vscale, len_hist, 60)
         self.lines.p80 = self._rolling_percentile(vscale, len_hist, 80)
         self.lines.p100 = self._rolling_percentile(vscale, len_hist, 100)
-    
+
     @staticmethod
     def _rolling_percentile(src: np.ndarray, length: int,
-                        percentile: float) -> np.ndarray:
+                            percentile: float) -> np.ndarray:
         """滚动百分位（线性插值）"""
         n = len(src)
         out = np.full(n, np.nan)
@@ -6035,7 +6301,7 @@ class TrendStateSignals(BtIndicator):
     - length:           灵敏度周期，默认 20
     - multiplier:       范围乘数（越大信号越少），默认 3.5
     - src_type:         价格源，可选 close/hl2/hlc3/ohlc4，默认 close
-    
+
     核心逻辑：
     1. 计算自适应范围：priceMovement = |change(source)|, smoothed = RMA(priceMovement, length)
     adaptiveRange = smoothed * multiplier
@@ -6083,12 +6349,12 @@ class TrendStateSignals(BtIndicator):
         # ================================================================
         range_filter = np.full(n, np.nan)
         trend = pd.Series(np.zeros(n, dtype=int))
-        for i in range(length,n):
+        for i in range(length, n):
             # 2. Step Filter 递归计算
             prev = range_filter[i - 1] if i > 0 else src[i]
             if np.isnan(prev):
                 prev = src[i]
-            
+
             upper_trigger = prev + adaptive_range[i]
             lower_trigger = prev - adaptive_range[i]
 
@@ -6115,7 +6381,7 @@ class TrendStateSignals(BtIndicator):
         self.lines.long_signal = long_raw
         self.lines.short_signal = short_raw
 
-    def _get_source(self)->IndSeries:
+    def _get_source(self) -> IndSeries:
         """根据 src_type 参数获取价格序列"""
         st = self.params.src_type
         if st == 'close':
@@ -6178,7 +6444,7 @@ class TrendlinesWithBreaks(BtIndicator):
         self.lines.lower = lower
         self.lines.long_signal = long_signal
         self.lines.short_signal = short_signal
-    
+
     def _compute_trendlines(self):
         """
         构建基于 pivot 的趋势线与突破信号。
@@ -6203,15 +6469,17 @@ class TrendlinesWithBreaks(BtIndicator):
             long_signal  — 向上突破信号（价格上穿 upper）
             short_signal — 向下突破信号（价格下穿 lower）
         """
-        length=self.params.length
-        mult=self.params.mult
-        calc_method=self.params.calc_method
-        unique_signal=self.params.unique_signal
+        length = self.params.length
+        mult = self.params.mult
+        calc_method = self.params.calc_method
+        unique_signal = self.params.unique_signal
         n = self.close.size
 
         # 1. Pivot 检测
-        ph = self.high.btind.pivot_high(length,length)#_pivot_high(high, length, length)
-        pl = self.low.btind.pivot_low(length,length)#_pivot_low(low, length, length)
+        # _pivot_high(high, length, length)
+        ph = self.high.btind.pivot_high(length, length)
+        # _pivot_low(low, length, length)
+        pl = self.low.btind.pivot_low(length, length)
 
         # 2. 斜率计算
         if calc_method == 'Atr':
@@ -6284,13 +6552,13 @@ class TrendlinesWithBreaks(BtIndicator):
                     cur_dnos = 1
                 else:
                     cur_dnos = prev_dnos if unique_signal else 0
-                if cur_upos > prev_upos :
+                if cur_upos > prev_upos:
                     long_signal[i] = 1
-                if cur_dnos > prev_dnos :
+                if cur_dnos > prev_dnos:
                     short_signal[i] = 1
             else:
-                cur_upos = 0#prev_upos
-                cur_dnos = 0#prev_dnos
+                cur_upos = 0  # prev_upos
+                cur_dnos = 0  # prev_dnos
 
             prev_upos = cur_upos
             prev_dnos = cur_dnos
@@ -6306,19 +6574,18 @@ class TrendlinesWithBreaks(BtIndicator):
         long_signal = long_signal[length:]
         short_signal = short_signal[length:]
 
-
         return upper, lower, long_signal, short_signal
-    
-    
+
+
 class VWAPPriceChannel(BtIndicator):
     """
     VWAP 价格通道 (VWAP Price Channel)
     基于 Pine Script "VWAP Price Channel [SamRecio]" 转换
     https://cn.tradingview.com/script/Psnjpa2Y-VWAP-Price-Channel/
-    
+
     参数:
     - len:  最高/最低检测窗口，默认 20
-    
+
     核心逻辑：
     1. 检测 _len 周期内的最高价/最低价是否刷新
     2. 在最高/最低刷新处锚定 VWAP(high) / VWAP(low)
@@ -6353,40 +6620,15 @@ class VWAPPriceChannel(BtIndicator):
         h_change = h_vwap.diff()
         l_change = l_vwap.diff()
 
-        # 5. 通道上/下轨（逐 bar 推进，完全复刻 Pine 三元嵌套逻辑）
-        upper = np.full(n, np.nan)
-        lower = np.full(n, np.nan)
-
-        for i in range(n):
-            # --- 上轨 ---
-            if new_high[i]:
-                upper[i] = hst[i]
-            elif i == 0:
-                upper[i] = np.nan
-            else:
-                hst_same = self._pine_eq(hst[i], hst[i - 1])
-                trend = (upper[i - 1] + h_change[i]
-                        if not np.isnan(upper[i - 1]) else np.nan)
-                if hst_same:
-                    upper[i] = trend
-                else:
-                    upper[i] = (np.fmin(hst[i], trend)
-                                if not np.isnan(trend) else hst[i])
-
-            # --- 下轨 ---
-            if new_low[i]:
-                lower[i] = lst[i]
-            elif i == 0:
-                lower[i] = np.nan
-            else:
-                lst_same = self._pine_eq(lst[i], lst[i - 1])
-                trend = (lower[i - 1] + l_change[i]
-                        if not np.isnan(lower[i - 1]) else np.nan)
-                if lst_same:
-                    lower[i] = trend
-                else:
-                    lower[i] = (np.fmax(lst[i], trend)
-                                if not np.isnan(trend) else lst[i])
+        # 5. 通道上/下轨（逐 bar 推进，完全复刻 Pine 三元嵌套逻辑；numba 加速）
+        upper, lower = _jit_call(
+            'vwap_channel', _vwap_channel_kernel,
+            np.asarray(hst, dtype=np.float64), np.asarray(
+                lst, dtype=np.float64),
+            np.asarray(h_change, dtype=np.float64),
+            np.asarray(l_change, dtype=np.float64),
+            np.asarray(new_high, dtype=np.bool_),
+            np.asarray(new_low, dtype=np.bool_), n)
 
         # 6. 中轴
         mid = (upper + lower) / 2.0
@@ -6394,9 +6636,9 @@ class VWAPPriceChannel(BtIndicator):
         self.lines.upper = upper
         self.lines.lower = lower
         self.lines.mid = mid
-        self.lines.hst=hst
-        self.lines.lst=lst
-    
+        self.lines.hst = hst
+        self.lines.lst = lst
+
     @staticmethod
     def _pine_eq(a: float, b: float) -> bool:
         """Pine Script 等值判断：na == na → True"""
@@ -6404,6 +6646,17895 @@ class VWAPPriceChannel(BtIndicator):
             return True
         return a == b
 
+
+class GaussianFilterTrend(BtIndicator):
+    """Gaussian Filter Trend [QuantAlgo]
+
+    https://cn.tradingview.com/script/AqRNdhlR-Gaussian-Filter-Trend-QuantAlgo/
+
+    将 TradingView Pine Script v6 指标转换为 MiniBT BtIndicator。
+
+    核心组件：
+        1. 高斯滤波器: 多级级联一阶极点滤波器，对价格进行平滑处理
+        2. 效率比: 净位移/路径长度，衡量趋势与震荡状态
+        3. 自适应宽度: 根据效率比动态调整 ATR 死区宽度
+        4. 趋势线: 死区机制，仅在价格穿越波动率包络时才移动
+        5. 星轨: 趋势线周围的装饰性轨道点
+
+    输出 lines:
+        - trend_line:      高斯趋势线 (主图叠加)
+        - upper_band:      上轨 (主图叠加)
+        - lower_band:      下轨 (主图叠加)
+        - inner_star_a:   内轨星 A (主图叠加)
+        - inner_star_b:   内轨星 B (主图叠加)
+        - outer_star_a:   外轨星 A (主图叠加)
+        - outer_star_b:   外轨星 B (主图叠加)
+        - trend_dir:       趋势方向 (1=多, -1=空, 0=中性)
+        - long_signal:     多头信号 (趋势翻多)
+        - short_signal:    空头信号 (趋势翻空)
+    """
+    lines = (
+        'trend_line', 'upper_band', 'lower_band',
+        'inner_star_a', 'inner_star_b',
+        'outer_star_a', 'outer_star_b',
+        'trend_dir', 'long_signal', 'short_signal',
+    )
+    linestyle = dict(trend_line=LineStyle(line_width=3))
+    overlap = dict(
+        trend_line=True, upper_band=True, lower_band=True,
+        inner_star_a=True, inner_star_b=True,
+        outer_star_a=True, outer_star_b=True,
+        trend_dir=False,
+    )
+    isplot = dict(
+        upper_band=True, lower_band=True,
+        inner_star_a=False, inner_star_b=False,
+        outer_star_a=False, outer_star_b=False,
+        trend_dir=False,
+    )
+    bandstyle = BandStyle("lower_band", "upper_band")
+    params = dict(
+        # 高斯滤波器
+        source='close',         # 价格源: 'close' / 'hl2' / 'hlc3'
+        length=14,              # 滤波器长度
+        poles=4,                # 极点数 1~4
+        # 趋势宽度
+        atr_length=14,          # ATR 长度
+        fixed_multiplier=1.5,    # 固定宽度倍数 (非自适应模式)
+        adaptive_width=True,    # 自适应宽度
+        efficiency_length=10,   # 效率比长度
+        trend_multiplier=0.8,   # 自适应趋势倍数
+        chop_multiplier=2.5,     # 自适应震荡倍数
+        efficiency_smooth=5,    # 效率比平滑
+        # 预设
+        preset='Default',       # 'Default' / 'Fast Response' / 'Smooth Trend'
+        # 可视化
+        show_stars=True,         # 显示星轨
+    )
+
+    def get_src(self):
+        source = self.p.source
+        if source == 'close':
+            return self.close.values
+        elif source == 'hl2':
+            return self.hl2().values
+        elif source == 'hlc3':
+            return self.hlc3().values
+        else:
+            return self.close.values
+
+    def next(self):
+        # ── 预设覆盖 ──
+        if self.p.preset == 'Fast Response':
+            _len, _poles = 8, 2
+            _atr_len, _fixed = 10, 1.2
+            _eff_len, _trend_m, _chop_m, _eff_s = 7, 0.6, 1.8, 3
+        elif self.p.preset == 'Smooth Trend':
+            _len, _poles = 21, 4
+            _atr_len, _fixed = 21, 2.0
+            _eff_len, _trend_m, _chop_m, _eff_s = 18, 1.0, 3.2, 8
+        else:
+            _len = self.p.length
+            _poles = self.p.poles
+            _atr_len = self.p.atr_length
+            _fixed = self.p.fixed_multiplier
+            _eff_len = self.p.efficiency_length
+            _trend_m = self.p.trend_multiplier
+            _chop_m = self.p.chop_multiplier
+            _eff_s = self.p.efficiency_smooth
+
+        # ── 价格源 ──
+        src = self.get_src()
+        size = len(src)
+
+        # ── 1. 高斯滤波器 ──
+        beta = (1.0 - np.cos(2.0 * np.pi / _len)) / \
+            (np.power(np.sqrt(2.0), 2.0 / _poles) - 1.0)
+        alpha = -beta + np.sqrt(beta * beta + 2.0 * beta)
+
+        stage1 = np.empty(size, dtype=np.float64)
+        stage2 = np.empty(size, dtype=np.float64)
+        stage3 = np.empty(size, dtype=np.float64)
+        stage4 = np.empty(size, dtype=np.float64)
+        s1 = s2 = s3 = s4 = src[0]
+        for i in range(size):
+            s1 = alpha * src[i] + (1.0 - alpha) * s1
+            s2 = alpha * s1 + (1.0 - alpha) * s2
+            s3 = alpha * s2 + (1.0 - alpha) * s3
+            s4 = alpha * s3 + (1.0 - alpha) * s4
+            stage1[i] = s1
+            stage2[i] = s2
+            stage3[i] = s3
+            stage4[i] = s4
+
+        poles = int(_poles)
+        if poles <= 1:
+            filtered = stage1
+        elif poles == 2:
+            filtered = stage2
+        elif poles == 3:
+            filtered = stage3
+        else:
+            filtered = stage4
+
+        # ── 2. 效率比 ──
+        eff_len = int(_eff_len)
+        net_move = np.zeros(size, dtype=np.float64)
+        path_length = np.zeros(size, dtype=np.float64)
+        abs_change = np.abs(np.diff(src, prepend=src[0]))
+        for i in range(size):
+            start = max(0, i - eff_len)
+            net_move[i] = abs(src[i] - src[start])
+            path_length[i] = np.sum(abs_change[start:i + 1])
+
+        eff_ratio = np.where(path_length == 0, 0.0, net_move /
+                             np.where(path_length == 0, 1.0, path_length))
+        # EMA 平滑
+        eff_smooth = int(_eff_s)
+        smoothed_eff = np.empty(size, dtype=np.float64)
+        ema_prev = eff_ratio[0]
+        ema_alpha = 2.0 / (eff_smooth + 1.0)
+        for i in range(size):
+            ema_prev = ema_alpha * eff_ratio[i] + (1.0 - ema_alpha) * ema_prev
+            smoothed_eff[i] = ema_prev
+
+        # ── 3. ATR & 趋势宽度 ──
+        atr = np.asarray(self.atr(_atr_len).values, dtype=np.float64)
+        if self.p.adaptive_width:
+            width_mult = _chop_m + (_trend_m - _chop_m) * smoothed_eff
+        else:
+            width_mult = np.full(size, _fixed, dtype=np.float64)
+        trend_width = atr * width_mult
+        upper_band = filtered + trend_width
+        lower_band = filtered - trend_width
+
+        # ── 4. 趋势线 (死区机制) ──
+        trend_line = np.empty(size, dtype=np.float64)
+        tl = filtered[0]
+        for i in range(size):
+            if upper_band[i] < tl:
+                tl = upper_band[i]
+            if lower_band[i] > tl:
+                tl = lower_band[i]
+            trend_line[i] = tl
+
+        # ── 5. 趋势方向 (状态机) ──
+        trend_dir = np.zeros(size, dtype=np.float64)
+        long_signal = np.zeros(size, dtype=np.float64)
+        short_signal = np.zeros(size, dtype=np.float64)
+        prev_dir = 0.0
+        for i in range(size):
+            if trend_line[i] > trend_line[i - 1] if i > 0 else False:
+                curr_dir = 1.0
+            elif trend_line[i] < trend_line[i - 1] if i > 0 else False:
+                curr_dir = -1.0
+            else:
+                curr_dir = prev_dir
+
+            turned_bull = curr_dir == 1.0 and prev_dir != 1.0
+            turned_bear = curr_dir == -1.0 and prev_dir != -1.0
+            long_signal[i] = 1.0 if turned_bull else 0.0
+            short_signal[i] = 1.0 if turned_bear else 0.0
+            trend_dir[i] = curr_dir
+            prev_dir = curr_dir
+
+        # ── 6. 星轨 ──
+        if self.p.show_stars:
+            hl = np.asarray(self.high - self.low, dtype=np.float64)
+            # SMA(high-low, 14)
+            visual_span = np.convolve(hl, np.ones(14) / 14, mode='same')
+            visual_span[:14] = np.mean(hl[:14]) if size >= 14 else np.mean(hl)
+            bar_index = np.arange(size, dtype=np.float64)
+            theta = bar_index * 0.52
+            inner_orbit = visual_span * 0.85
+            outer_orbit = visual_span * 1.75
+            inner_star_a = trend_line + np.sin(theta) * inner_orbit
+            inner_star_b = trend_line + np.sin(theta + np.pi) * inner_orbit
+            outer_star_a = trend_line + \
+                np.cos(theta * 0.71 + 1.1) * outer_orbit
+            outer_star_b = trend_line + \
+                np.cos(theta * 0.71 + 1.1 + np.pi) * outer_orbit
+        else:
+            inner_star_a = np.full(size, np.nan)
+            inner_star_b = np.full(size, np.nan)
+            outer_star_a = np.full(size, np.nan)
+            outer_star_b = np.full(size, np.nan)
+
+        return (
+            trend_line,
+            upper_band,
+            lower_band,
+            inner_star_a,
+            inner_star_b,
+            outer_star_a,
+            outer_star_b,
+            trend_dir,
+            long_signal,
+            short_signal,
+        )
+
+
+class AdaptiveTrendTrail(BtIndicator):
+    """Adaptive Trend Trail (Uptrick)
+
+    https://cn.tradingview.com/script/f4N0F439-Uptrick-Adaptive-Trend-Trail/
+
+    将 TradingView Pine Script v6 指标转换为 MiniBT BtIndicator。
+
+    核心组件：
+        1. 趋势引擎: EMA 基线 + 动量 + 方向效率 + 波动率状态
+        2. 自适应 Supertrend 矩阵: 快/中/慢三档，根据 chop/vol 动态调整因子
+        3. 综合状态场: 距离/动量/斜率/RSI/效率/压力/结构/ST 加权融合
+        4. 信号生成: 动态阈值 + 持续性确认 + 冷却期 + 强势突破快速通道
+        5. 叠加层: Trail(轨迹带) / Bands(波动带)
+
+    输出 lines:
+        - trend:           趋势方向 (1=多头, -1=空头, 0=中性)
+        - basis:           EMA 趋势基线
+        - inner_trail:     内轨迹
+        - outer_trail:     外轨迹 (亦作为止损参考)
+        - depth_trail:     深度轨迹
+        - regime:          综合状态场 [-1, 1]
+        - long_signal:     多头信号 (趋势翻多)
+        - short_signal:    空头信号 (趋势翻空)
+    """
+    overlap = dict(
+        trend=False,
+        basis=True,
+        inner_trail=True,
+        outer_trail=True,
+        depth_trail=True,
+        regime=False,
+    )
+    isplot = dict(
+        long_signal=False,
+        short_signal=False,
+    )
+    bandstyle = BandStyle("basis", "depth_trail")
+    params = dict(
+        # 01. Trend Engine
+        trend_length=34,
+        momentum_length=12,
+        sensitivity=0.35,
+        # 02. Supertrend Confirmation
+        st_fast_length=9,
+        st_fast_factor=1.45,
+        st_mid_length=14,
+        st_mid_factor=1.95,
+        st_slow_length=21,
+        st_slow_factor=2.55,
+        # 03. Overlay
+        overlay_mode="Trail",   # "Trail" / "Bands" / "None"
+        trail_size=1.00,
+        smoothness=5,
+    )
+
+    # ------------------------------------------------------------------
+    # 工具函数
+    # ------------------------------------------------------------------
+    def _clamp(self, arr, lo, hi):
+        """将数组限制在 [lo, hi] 区间 (等价 Pine f_clamp)"""
+        arr = np.asarray(arr, dtype=np.float64)
+        return np.clip(arr, lo, hi)
+
+    def _supertrend(self, src_arr, factor_arr, atr_period):
+        """计算 Supertrend 及方向 — 严格对照 Pine ta.supertrend()
+
+        Pine v6 ta.supertrend(factor, atrPeriod) 默认使用 hl2 作为源。
+        返回值 direction: -1 表示多头（价格在上轨上方），1 表示空头（价格在下轨下方）。
+
+        Args:
+            src_arr: 价格数组 (hl2)
+            factor_arr: ATR 乘数数组 (自适应)
+            atr_period: ATR 周期
+
+        Returns:
+            (supertrend, direction): direction=-1 多头, direction=1 空头 (与 Pine 一致)
+        """
+        atr_arr = self.atr(atr_period).values
+        size = len(src_arr)
+
+        # 初始 bands
+        upper_band = src_arr + factor_arr * atr_arr
+        lower_band = src_arr - factor_arr * atr_arr
+        upper_band = upper_band.copy()
+        lower_band = lower_band.copy()
+
+        # Pine ta.supertrend 返回 direction: -1=多头(价格在上轨上方), 1=空头(价格在下轨下方)
+        direction = np.ones(size, dtype=np.float64)  # 默认空头
+        supertrend = np.zeros(size, dtype=np.float64)
+
+        # 前 atr_period+1 根没有有效 ATR
+        start = atr_period + 1
+        if start >= size:
+            return supertrend, direction
+
+        # 初始化第一个有效值
+        supertrend[start] = upper_band[start]
+        direction[start] = 1.0
+
+        for i in range(start + 1, size):
+            prev_lower = lower_band[i - 1]
+            prev_upper = upper_band[i - 1]
+            prev_src = src_arr[i - 1]
+
+            # Pine 逻辑:
+            # lowerBand := close[1] > prevLowerBand ? math.max(lowerBand, prevLowerBand) : lowerBand
+            if prev_src > prev_lower:
+                lower_band[i] = max(lower_band[i], prev_lower)
+            # upperBand := close[1] < prevUpperBand ? math.min(upperBand, prevUpperBand) : upperBand
+            if prev_src < prev_upper:
+                upper_band[i] = min(upper_band[i], prev_upper)
+
+            prev_st = supertrend[i - 1]
+            prev_dir = direction[i - 1]
+
+            # Pine 逻辑:
+            # if prevSuperTrend == prevUpperBand
+            #     direction := close > upperBand ? -1 : 1
+            # else
+            #     direction := close < lowerBand ? 1 : -1
+            if prev_dir == 1.0:  # 之前是空头(在下轨下方)
+                direction[i] = -1.0 if src_arr[i] > upper_band[i] else 1.0
+            else:  # 之前是多头(在上轨上方)
+                direction[i] = 1.0 if src_arr[i] < lower_band[i] else -1.0
+
+            supertrend[i] = lower_band[i] if direction[i] == - \
+                1.0 else upper_band[i]
+
+        return supertrend, direction
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        close = self.close
+        high = self.high
+        low = self.low
+        open_ = self.open
+        size = close.size
+        close_v = close.values
+        high_v = high.values
+        low_v = low.values
+        open_v = open_.values
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # BASE MARKET STATE
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        basis = self.ema(p.trend_length).values
+
+        atr14 = self.atr(14).values
+        safe_atr = np.maximum(atr14, 1e-9)
+
+        # momentum = ta.ema(close - close[momentumLength], 5) / safeATR
+        # 注意: Pine 的 close[momentumLength] 是 shift(momentumLength)
+        ml = p.momentum_length
+        mom_raw = np.full(size, np.nan, dtype=np.float64)
+        if size > ml:
+            mom_raw[ml:] = close_v[ml:] - close_v[:-ml]
+        # Pine ta.ema 处理 NaN 的方式: 从第一个非 NaN 开始计算
+        # pandas ewm 默认忽略 NaN, 但我们用 fillna(0) 会导致前值偏差
+        # 正确做法: 用 ewm(span=5, adjust=False, ignore_na=True)
+        mom_series = pd.Series(mom_raw)
+        mom_ema = mom_series.ewm(span=5, adjust=False,
+                                 ignore_na=True).mean().values
+        # 前 ml 个仍为 NaN, 用 0 填充以便后续计算
+        mom_ema = np.nan_to_num(mom_ema, nan=0.0)
+        momentum = mom_ema / safe_atr
+
+        distance = (close_v - basis) / safe_atr
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # DIRECTIONAL EFFICIENCY
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        eff_length = 10
+        net_movement = np.zeros(size, dtype=np.float64)
+        travel_path = np.zeros(size, dtype=np.float64)
+        if size > eff_length:
+            net_movement[eff_length:] = np.abs(
+                close_v[eff_length:] - close_v[:-eff_length])
+            # travelPath = math.sum(math.abs(close - close[1]), effLength)
+            # 即 effLength 个连续 |close[i] - close[i-1]| 之和
+            # abs_ret[j] = |close[j+1] - close[j]|, j=0..size-2
+            abs_ret = np.abs(np.diff(close_v))
+            # travel_path[i] = sum(abs_ret[i-eff_length : i]), i>=eff_length
+            # 即 |close[i-eff_length+1]-close[i-eff_length]| + ... + |close[i]-close[i-1]|
+            for i in range(eff_length, size):
+                travel_path[i] = np.sum(abs_ret[i - eff_length: i])
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            efficiency = np.where(travel_path > 0.0,
+                                  self._clamp(net_movement / travel_path, 0.0, 1.0), 0.0)
+        chop = 1.0 - efficiency
+
+        # effDirection = close > close[effLength] ? 1.0 : close < close[effLength] ? -1.0 : 0.0
+        close_shift = np.full(size, np.nan, dtype=np.float64)
+        if size > eff_length:
+            close_shift[eff_length:] = close_v[:-eff_length]
+        eff_direction = np.where(close_v > close_shift, 1.0,
+                                 np.where(close_v < close_shift, -1.0, 0.0))
+        eff_direction[:eff_length] = 0.0
+        efficiency_field = efficiency * eff_direction
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # VOLATILITY REGIME
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        normal_atr = pd.Series(safe_atr).ewm(
+            span=50, adjust=False, ignore_na=True).mean().values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            vol_ratio = np.where(normal_atr > 0.0, safe_atr / normal_atr, 1.0)
+        vol_expansion = self._clamp(vol_ratio - 1.0, 0.0, 1.25)
+        vol_deviation = self._clamp(np.abs(vol_ratio - 1.0), 0.0, 1.50)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # ADAPTIVE SUPERTREND MATRIX
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        fast_factor = p.st_fast_factor + chop * 0.25 + vol_expansion * 0.10
+        mid_factor = p.st_mid_factor + chop * 0.35 + vol_expansion * 0.15
+        slow_factor = p.st_slow_factor + chop * 0.45 + vol_expansion * 0.20
+
+        # Pine ta.supertrend 默认使用 hl2
+        hl2 = (high_v + low_v) / 2.0
+        _, st_fast_dir = self._supertrend(hl2, fast_factor, p.st_fast_length)
+        _, st_mid_dir = self._supertrend(hl2, mid_factor, p.st_mid_length)
+        _, st_slow_dir = self._supertrend(hl2, slow_factor, p.st_slow_length)
+
+        # Pine: direction < 0 = 多头, direction > 0 = 空头
+        st_fast_bull = st_fast_dir < 0
+        st_fast_bear = st_fast_dir > 0
+        st_mid_bull = st_mid_dir < 0
+        st_mid_bear = st_mid_dir > 0
+        st_slow_bull = st_slow_dir < 0
+        st_slow_bear = st_slow_dir > 0
+
+        bull_st_votes = st_fast_bull.astype(
+            int) + st_mid_bull.astype(int) + st_slow_bull.astype(int)
+        bear_st_votes = st_fast_bear.astype(
+            int) + st_mid_bear.astype(int) + st_slow_bear.astype(int)
+
+        required_st_votes = np.where(chop > 0.70, 3, 2)
+        bull_st_confirmed = bull_st_votes >= required_st_votes
+        bear_st_confirmed = bear_st_votes >= required_st_votes
+
+        full_bull_st = bull_st_votes == 3
+        full_bear_st = bear_st_votes == 3
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # SUPERTREND PERSISTENCE
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        bull_st_bars = np.zeros(size, dtype=int)
+        bear_st_bars = np.zeros(size, dtype=int)
+        for i in range(1, size):
+            bull_st_bars[i] = min(bull_st_bars[i - 1] + 1,
+                                  5) if bull_st_confirmed[i] else 0
+            bear_st_bars[i] = min(bear_st_bars[i - 1] + 1,
+                                  5) if bear_st_confirmed[i] else 0
+
+        st_persistence_required = np.where(chop > 0.72, 2, 1)
+        bull_st_persistent = bull_st_bars >= st_persistence_required
+        bear_st_persistent = bear_st_bars >= st_persistence_required
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # CORE REGIME COMPONENTS
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        distance_field = self._clamp(distance / 1.20, -1.0, 1.0)
+        momentum_field = self._clamp(momentum / 0.35, -1.0, 1.0)
+
+        # basisSlope = (basis - basis[3]) / safeATR
+        basis_shift3 = np.full(size, np.nan, dtype=np.float64)
+        if size > 3:
+            basis_shift3[3:] = basis[:-3]
+        basis_slope = (basis - basis_shift3) / safe_atr
+        basis_slope = np.nan_to_num(basis_slope, nan=0.0)
+        slope_field = self._clamp(basis_slope / 0.25, -1.0, 1.0)
+
+        rsi_arr = self.rsi(14).values
+        rsi_field = self._clamp((rsi_arr - 50.0) / 20.0, -1.0, 1.0)
+
+        # SUPERTREND CONSENSUS FIELD
+        st_field = (bull_st_votes - bear_st_votes) / 3.0
+
+        slow_center_len = max(10, int(round(p.trend_length * 0.70)))
+        slow_center = pd.Series(hl2).ewm(
+            span=slow_center_len, adjust=False, ignore_na=True).mean().values
+        # slowSlope = (slowCenter - slowCenter[3]) / safeATR
+        slow_center_shift3 = np.full(size, np.nan, dtype=np.float64)
+        if size > 3:
+            slow_center_shift3[3:] = slow_center[:-3]
+        slow_slope = (slow_center - slow_center_shift3) / safe_atr
+        slow_slope = np.nan_to_num(slow_slope, nan=0.0)
+        slow_slope_field = self._clamp(slow_slope / 0.25, -1.0, 1.0)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # STRUCTURE BONUS
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        struct_len = max(3, int(round(p.trend_length * 0.12)))
+        recent_high = self.high.shift(1).rolling(struct_len).max().values
+        recent_low = self.low.shift(1).rolling(struct_len).min().values
+
+        bull_structure = close_v > recent_high
+        bear_structure = close_v < recent_low
+        structure_field = np.where(bull_structure, 1.0,
+                                   np.where(bear_structure, -1.0, 0.0))
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # CANDLE PRESSURE
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        bar_range = np.maximum(high_v - low_v, 1e-9)
+        body_pressure = (close_v - open_v) / bar_range
+        close_location = ((close_v - low_v) / bar_range - 0.50) * 2.0
+        pressure_field = self._clamp(
+            body_pressure * 0.60 + close_location * 0.40, -1.0, 1.0)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # COMPOSITE REGIME
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        raw_regime = (
+            distance_field * 0.22 +
+            momentum_field * 0.19 +
+            slope_field * 0.14 +
+            slow_slope_field * 0.10 +
+            rsi_field * 0.08 +
+            efficiency_field * 0.09 +
+            pressure_field * 0.05 +
+            structure_field * 0.05 +
+            st_field * 0.20
+        )
+        regime = pd.Series(raw_regime).ewm(
+            span=3, adjust=False, ignore_na=True).mean().values
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # DYNAMIC HYSTERESIS
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        chop_penalty = chop * 0.085
+        vol_penalty = self._clamp(vol_deviation * 0.04, 0.0, 0.06)
+        dynamic_gate = 0.22 + p.sensitivity * 0.12 + chop_penalty + vol_penalty
+
+        bull_zone = regime > dynamic_gate
+        bear_zone = regime < -dynamic_gate
+
+        bull_price_ok = close_v > basis + safe_atr * p.sensitivity * 0.30
+        bear_price_ok = close_v < basis - safe_atr * p.sensitivity * 0.30
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # SIGNAL CANDIDATES
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        bull_candidate = (bull_zone & bull_price_ok &
+                          (momentum > 0.025) & bull_st_persistent)
+        bear_candidate = (bear_zone & bear_price_ok &
+                          (momentum < -0.025) & bear_st_persistent)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # DYNAMIC CONFIRMATION (persistence)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        required_bars = np.where(chop > 0.72, 3, np.where(chop > 0.40, 2, 1))
+        bull_confirm = np.zeros(size, dtype=int)
+        bear_confirm = np.zeros(size, dtype=int)
+        for i in range(1, size):
+            bull_confirm[i] = min(bull_confirm[i - 1] + 1,
+                                  4) if bull_candidate[i] else 0
+            bear_confirm[i] = min(bear_confirm[i - 1] + 1,
+                                  4) if bear_candidate[i] else 0
+
+        bull_persistent = bull_confirm >= required_bars
+        bear_persistent = bear_confirm >= required_bars
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # STRONG MOVE FAST PASS
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        strong_bull = (bull_candidate & full_bull_st &
+                       (regime > dynamic_gate + 0.26) &
+                       (momentum > 0.16) & (efficiency > 0.42))
+        strong_bear = (bear_candidate & full_bear_st &
+                       (regime < -(dynamic_gate + 0.26)) &
+                       (momentum < -0.16) & (efficiency > 0.42))
+
+        bull_ready = bull_persistent | strong_bull
+        bear_ready = bear_persistent | strong_bear
+
+        # SUPERTREND TAKEOVER
+        bull_takeover = st_fast_bull & (st_mid_bull | st_slow_bull)
+        bear_takeover = st_fast_bear & (st_mid_bear | st_slow_bear)
+        bull_ready = bull_ready & bull_takeover
+        bear_ready = bear_ready & bear_takeover
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # ADAPTIVE COOLDOWN + TREND STATE MACHINE
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        cooldown_bars = 6 + np.round(chop * 4.0).astype(int)
+        trend = np.zeros(size, dtype=int)
+        last_flip_bar = np.full(size, -1, dtype=int)
+
+        for i in range(1, size):
+            trend[i] = trend[i - 1]
+            last_flip_bar[i] = last_flip_bar[i - 1]
+            bars_since_flip = (
+                i - last_flip_bar[i]) if last_flip_bar[i] >= 0 else 100000
+            cooldown_done = bars_since_flip >= cooldown_bars[i]
+
+            if trend[i] != 1 and bull_ready[i] and (cooldown_done or strong_bull[i]):
+                trend[i] = 1
+                last_flip_bar[i] = i
+            elif trend[i] != -1 and bear_ready[i] and (cooldown_done or strong_bear[i]):
+                trend[i] = -1
+                last_flip_bar[i] = i
+
+        bullish = trend == 1
+        bearish = trend == -1
+
+        # 信号 = 趋势翻转当根 bar
+        prev_trend = np.concatenate([[0], trend[:-1]])
+        long_signal = (trend == 1) & (prev_trend != 1)
+        short_signal = (trend == -1) & (prev_trend != -1)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # SMOOTH OVERLAY (Trail / Bands)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if p.smoothness > 1:
+            smooth_basis = pd.Series(basis).ewm(
+                span=p.smoothness, adjust=False, ignore_na=True).mean().values
+            smooth_atr = pd.Series(safe_atr).ewm(
+                span=p.smoothness, adjust=False, ignore_na=True).mean().values
+        else:
+            smooth_basis = basis
+            smooth_atr = safe_atr
+
+        inner_distance = 0.55 * p.trail_size
+        outer_distance = 1.15 * p.trail_size
+        depth_distance = 1.60 * p.trail_size
+
+        # 多头轨迹在下方, 空头在上方
+        inner_trail = np.where(bullish, smooth_basis - smooth_atr * inner_distance,
+                               np.where(bearish, smooth_basis + smooth_atr * inner_distance, smooth_basis))
+        outer_trail = np.where(bullish, smooth_basis - smooth_atr * outer_distance,
+                               np.where(bearish, smooth_basis + smooth_atr * outer_distance, smooth_basis))
+        depth_trail = np.where(bullish, smooth_basis - smooth_atr * depth_distance,
+                               np.where(bearish, smooth_basis + smooth_atr * depth_distance, smooth_basis))
+
+        return (
+            trend,           # 趋势方向 1/-1/0
+            basis,           # EMA 基线
+            inner_trail,     # 内轨迹
+            outer_trail,     # 外轨迹
+            depth_trail,     # 深度轨迹
+            regime,          # 综合状态场
+            long_signal,     # 多头信号
+            short_signal,    # 空头信号
+        )
+
+
+class SPMATrendNAL(BtIndicator):
+    """SPMA Trend | NAL (NordicAlphaLab)
+
+    https://cn.tradingview.com/script/Q8RDxj5I-SPMA-Trend-NAL/
+
+    将 TradingView Pine Script v6 指标转换为 MiniBT BtIndicator。
+
+    核心组件：
+        1. SPMA (Shock Percentile Moving Average): 仅当价格变化的百分位排名
+           超过 % Gate 时才向 EMA 更新，否则保持前值的阶梯均线
+        2. 波动率带: 支持 SD / ATR / MeanAD / MedianAD / Quantile 五种波动度量，
+           再经 EMA 平滑后乘以 Volatility Multiple 形成上下轨
+        3. 非对称波动带 (可选): 根据多/空冲击平方的 EMA 占比调节上下轨乘数
+        4. Quantile 带: 直接用 SPMA 残差 (close - SPMA) 的正/负经验分位数
+        5. 斜率门控: SPMA 在 Slope Lookback 内的百分比斜率超过阈值才允许翻多
+        6. NAL 状态机: 价格突破上轨且 SPMA 上行(+斜率门控) → 多头;
+           价格跌破下轨 → 空头; 其余情况保持原状态
+
+    输出 lines:
+        - spma:          Shock Percentile Moving Average (主图叠加)
+        - upper_band:    上轨 (主图叠加)
+        - lower_band:    下轨 (主图叠加)
+        - nal_state:     NAL 状态 (1=多, -1=空, 0=中性, 不绘制)
+        - long_signal:   多头信号 (NAL 翻多)
+        - short_signal:  空头信号 (NAL 翻空)
+    """
+    lines = (
+        'spma', 'upper_band', 'lower_band',
+        'nal_state', 'long_signal', 'short_signal',
+    )
+    linestyle = dict(spma=LineStyle(line_width=2))
+    overlap = dict(
+        spma=True, upper_band=True, lower_band=True,
+        nal_state=False,
+    )
+    isplot = dict(
+        long_signal=False,
+        short_signal=False,
+        nal_state=False,
+    )
+    bandstyle = BandStyle("lower_band", "upper_band")
+    params = dict(
+        # ── SPMA 设置 ──
+        source='close',              # 价格源: 'close' / 'hl2' / 'hlc3' / 'ohlc4'
+        baseline_length=30,          # Baseline Length (EMA 长度)
+        percentrank_lookback=30,     # Percentrank Lookback (历史排名样本数)
+        percentile_gate=50,          # % Gate (百分位门控, 0~99)
+        # ── 波动率 ──
+        use_asym_bands=False,        # 使用非对称波动带 (Quantile 模式下忽略)
+        vol_method='MeanAD',         # 'SD' / 'ATR' / 'MeanAD' / 'MedianAD' / 'Quantile'
+        vol_length=14,               # Volatility Length
+        # Volatility Multiple (原码 0.75, 收窄以增加信号密度)
+        vol_multiple=0.75,
+        # Quantile Percentile (50~99, 仅 Quantile 模式)
+        quantile_pct=90.0,
+        # ── 斜率门控 ──
+        use_slope_gate=False,        # 使用斜率门控 (仅限制多头激活; 原码 true, 关闭以增加信号)
+        slope_length=10,             # Slope Lookback (K线根数)
+        slope_gate=0.5,              # % Slope Gate
+    )
+
+    # ------------------------------------------------------------------
+    # 基础工具 (与 Pine ta.* 对齐)
+    # ------------------------------------------------------------------
+    def _ema(self, arr, n):
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(arr, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    def _rma(self, arr, n):
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(arr, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    def _percentrank(self, arr, length):
+        """Pine ta.percentrank: 当前值在过去 length 根 (不含当前根) 中,
+        历史值严格小于当前值的比例 ×100。历史不足 length 根时按实际有效
+        样本计数, 分母仍为 length (与 Pine 固定循环 1..length 一致)。"""
+        arr = np.asarray(arr, dtype=np.float64)
+        size = len(arr)
+        out = np.full(size, np.nan)
+        for t in range(size):
+            cur = arr[t]
+            if np.isnan(cur):
+                continue
+            lo = max(0, t - length)
+            window = arr[lo:t]
+            valid = window[~np.isnan(window)]
+            out[t] = 100.0 * \
+                np.count_nonzero(valid < cur) / length if valid.size else 0.0
+        return out
+
+    @staticmethod
+    def _median_ad(window):
+        """f_median_ad: 窗口内 |x - median(x)| 的中位数"""
+        med = np.median(window)
+        return np.median(np.abs(window - med))
+
+    def get_src(self):
+        source = self.params.source
+        if source == 'close':
+            return self.close
+        elif source == 'hl2':
+            return self.hl2()
+        elif source == 'hlc3':
+            return self.hlc3()
+        elif source == 'ohlc4':
+            return self.ohlc4()
+        else:
+            return self.close
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+
+        # ── 价格源 ──
+        close = self.get_src().values.astype(np.float64)
+        size = len(close)
+        try:
+            tick = float(self.price_tick) or 1.0
+        except Exception:
+            tick = 1.0
+
+        length = int(p.baseline_length)
+        lookback = int(p.percentrank_lookback)
+        vlen = int(p.vol_length)
+        vol_mul = float(p.vol_multiple)
+
+        # ── 1. SPMA (Shock Percentile Moving Average) ──
+        ret = np.full(size, np.nan, dtype=np.float64)
+        ret[1:] = np.diff(close)
+        per_rank = self._percentrank(ret, lookback)
+        gate = per_rank > float(p.percentile_gate)
+        ema_value = self.close.ema(length).values
+
+        spma = np.empty(size, dtype=np.float64)
+        spma[0] = ema_value[0]
+        prev_ma = ema_value[0]
+        for i in range(1, size):
+            ma = ema_value[i] if gate[i] else prev_ma
+            spma[i] = ma
+            prev_ma = ma
+
+        # ── 2. 波动率原始值 ──
+        method = p.vol_method
+        if method == 'SD':
+            # Pine ta.stdev: 总体标准差 (除以 n)
+            vol_raw = self.close.stdev(vlen, ddof=0).values
+        elif method == 'ATR':
+            # Pine ta.atr: RMA(Wilder) 平滑真实波幅
+            # prev_close = np.concatenate(([close[0]], close[:-1]))
+            # tr = np.maximum.reduce([
+            #     high - low,
+            #     np.abs(high - prev_close),
+            #     np.abs(low - prev_close),
+            # ])
+            # vol_raw = self._rma(tr, vlen)
+            # vol_raw = pd.Series(close).rolling(vlen).mean().values
+            vol_raw = self.close.atr(vlen).values
+        elif method == 'MedianAD':
+            vol_raw = pd.Series(close).rolling(vlen).apply(
+                self._median_ad, raw=True).values
+        elif method == 'Quantile':
+            vol_raw = np.full(size, np.nan, dtype=np.float64)
+        else:  # 'MeanAD' (Pine ta.dev: 相对 SMA 的平均绝对偏差)
+            # sma = pd.Series(close).rolling(vlen).mean().values
+            # vol_raw = pd.Series(np.abs(close - sma)).rolling(vlen).mean().values
+            vol_raw = (self.close-self.close.sma(vlen)).abs().sma(vlen).values
+
+        # 波动率 EMA 平滑 (Pine: ta.ema(VolatilityRaw, VolLen))
+        volatility = self._ema(vol_raw, vlen)
+
+        # ── 3. SPMA 残差经验分位数带 (Quantile 模式) ──
+        residual = close - spma
+        # pct = float(p.quantile_pct) / 100.0
+        pct = self.close.std() / self.close.mean()
+
+        def _quantile_upper(win):
+            pos = win[win > 0.0]
+            base = np.abs(win)
+            q = np.quantile(pos, pct) if pos.size else np.quantile(base, pct)
+            return max(float(q), tick)
+
+        def _quantile_lower(win):
+            neg = -win[win < 0.0]
+            base = np.abs(win)
+            q = np.quantile(neg, pct) if neg.size else np.quantile(base, pct)
+            return max(float(q), tick)
+
+        res_s = pd.Series(residual)
+        quantile_upper = res_s.rolling(vlen).apply(
+            _quantile_upper, raw=True).values
+        quantile_lower = res_s.rolling(vlen).apply(
+            _quantile_lower, raw=True).values
+
+        # ── 4. 冲击非对称波动率 (可选) ──
+        log_ret = np.zeros(size, dtype=np.float64)
+        for i in range(1, size):
+            if close[i] > 0.0 and close[i - 1] > 0.0:
+                log_ret[i] = np.log(close[i] / close[i - 1])
+        bull_shock = np.power(np.maximum(log_ret, 0.0), 2.0)
+        bear_shock = np.power(np.maximum(-log_ret, 0.0), 2.0)
+        total_shock = bull_shock + bear_shock
+
+        bull_var = self._ema(bull_shock, vlen)
+        bear_var = self._ema(bear_shock, vlen)
+        total_var = self._ema(total_shock, vlen)
+
+        safe_total = np.where(total_var > 0.0, total_var, 1.0)
+        bull_ratio = np.where(total_var > 0.0,
+                              np.sqrt(np.maximum(2.0 * bull_var / safe_total, 0.0)), 1.0)
+        bear_ratio = np.where(total_var > 0.0,
+                              np.sqrt(np.maximum(2.0 * bear_var / safe_total, 0.0)), 1.0)
+
+        upper_mult = 1.0 + 3.0 * (bull_ratio - 1.0)
+        lower_mult = 1.0 + 3.0 * (bear_ratio - 1.0)
+        # nz(sma(...,180), sma(...,min(max(bar_index,1),180))) 等价于
+        # 窗口 180、最小 1 个样本的滚动均值
+        avg_mult = pd.Series((upper_mult + lower_mult) / 2.0).rolling(
+            180, min_periods=1).mean().values
+
+        spread = 1.0
+        upper_mult_adj = np.clip(
+            upper_mult, avg_mult - spread, avg_mult + spread)
+        lower_mult_adj = np.clip(
+            lower_mult, avg_mult - spread, avg_mult + spread)
+
+        sym_vol = np.where(np.isnan(volatility), tick, volatility)
+        asym_upper = np.maximum(sym_vol * upper_mult_adj, tick)
+        asym_lower = np.maximum(sym_vol * lower_mult_adj, tick)
+
+        # ── 5. 最终轨道 ──
+        if method == 'Quantile':
+            final_upper, final_lower = quantile_upper, quantile_lower
+        elif p.use_asym_bands:
+            final_upper, final_lower = asym_upper, asym_lower
+        else:
+            final_upper = final_lower = volatility
+
+        upper_band = spma + final_upper * vol_mul
+        lower_band = spma - final_lower * vol_mul
+
+        # ── 6. 斜率门控 (仅作用于多头激活) ──
+        slope_len = int(p.slope_length)
+        slope_per = np.zeros(size, dtype=np.float64)
+        for i in range(slope_len, size):
+            ref = spma[i - slope_len]
+            if not np.isnan(ref) and ref != 0.0:
+                slope_per[i] = (spma[i] - ref) / ref * 100.0
+        slope_gate = slope_per > float(p.slope_gate)
+
+        # ── 7. NAL 状态机 ──
+        nal_state = np.zeros(size, dtype=np.float64)
+        long_signal = np.zeros(size, dtype=np.float64)
+        short_signal = np.zeros(size, dtype=np.float64)
+        state = 0.0
+        for i in range(size):
+            rising = i > 0 and not np.isnan(
+                spma[i - 1]) and spma[i] > spma[i - 1]
+            # 与 NaN 轨道比较结果为 False, 与 Pine na 比较语义一致
+            if rising and close[i] > upper_band[i] and \
+                    (not p.use_slope_gate or slope_gate[i]):
+                state = 1.0
+            if close[i] < lower_band[i]:
+                state = -1.0
+            nal_state[i] = state
+            if state == 1.0 and (i == 0 or nal_state[i - 1] != 1.0):
+                long_signal[i] = 1.0
+            if state == -1.0 and (i == 0 or nal_state[i - 1] != -1.0):
+                short_signal[i] = 1.0
+
+        return (
+            spma,
+            upper_band,
+            lower_band,
+            nal_state,
+            long_signal,
+            short_signal,
+        )
+
+
+class LorentzianClassification(BtIndicator):
+    """Machine Learning: Lorentzian Classification (jdehorty)
+
+    https://cn.tradingview.com/script/WhBzgfDu-Machine-Learning-Lorentzian-Classification/
+
+    将 TradingView Pine Script 指标（含 MLExtensions / KernelFunctions 两个依赖库）
+    转换为 MiniBT BtIndicator。
+
+    核心组件：
+        1. 特征工程: 5 个归一化特征 (RSI / WaveTrend / CCI / ADX 任选)
+        2. 洛伦兹距离 KNN: log(1+|Δf|) 距离 + 时间均匀分布的近似最近邻搜索 (ANN)
+        3. 预测过滤器: 波动率 / Regime(Kaufman自适应均线斜率) / ADX / EMA / SMA
+        4. 核回归过滤: Rational Quadratic Kernel (yhat1) 与 Gaussian Kernel (yhat2)
+        5. 出入场信号: start_long / start_short / end_long / end_short
+
+    输出 lines（minibt 图表不支持文字标签，原指标图表上的 prediction
+    数字标签改用 prediction 指标线显示）：
+        - kernel_estimate:   核回归估计 yhat1 (主图叠加)
+        - kernel_estimate2:  高斯核估计 yhat2 (主图叠加, 默认不绘制)
+        - prediction:        KNN 预测值 (整数, 替代原指标的数字标签)
+        - signal:            过滤后信号 (1=多, -1=空, 0=中性)
+        - long_signal:        开多信号
+        - short_signal:       开空信号
+        - exitlong_signal:          平多信号
+        - exitshort_signal:         平空信号
+    """
+    lines = (
+        'kernel_estimate', 'kernel_estimate2',
+        'prediction', 'signal',
+        'long_signal', 'short_signal', 'exitlong_signal', 'exitshort_signal',
+    )
+    linestyle = dict(kernel_estimate=LineStyle(line_width=2))
+    overlap = dict(
+        kernel_estimate=True, kernel_estimate2=True,
+        prediction=False, signal=False,
+        long_signal=False, short_signal=False,
+        exitlong_signal=False, exitshort_signal=False,
+    )
+    isplot = dict(
+        kernel_estimate2=False,
+        long_signal=False, short_signal=False,
+        exitlong_signal=False, exitshort_signal=False,
+    )
+    params = dict(
+        # ── 通用设置 ──
+        source='close',          # 价格源: 'close' / 'hl2' / 'hlc3' / 'ohlc4'
+        neighbors_count=8,       # KNN 邻居数
+        max_bars_back=2000,      # 最大回看 K 线数
+        feature_count=5,         # 参与距离计算的特征数 (2~5)
+        include_full_history=False,  # 是否使用全部历史做近邻搜索
+        # ── 特征工程 ──
+        f1_string='RSI', f1_paramA=14, f1_paramB=1,
+        f2_string='WT',  f2_paramA=10, f2_paramB=11,
+        f3_string='CCI', f3_paramA=20, f3_paramB=1,
+        f4_string='ADX', f4_paramA=20, f4_paramB=2,
+        f5_string='RSI', f5_paramA=9,  f5_paramB=1,
+        # ── 过滤器 ──
+        use_volatility_filter=True,
+        use_regime_filter=True, regime_threshold=-0.1,
+        use_adx_filter=False, adx_threshold=20,
+        use_ema_filter=False, ema_period=200,
+        use_sma_filter=False, sma_period=200,
+        # ── 核回归设置 ──
+        use_kernel_filter=True,
+        use_kernel_smoothing=False,
+        kernel_h=8,              # Lookback Window (权重形状)
+        kernel_r=8.0,            # Relative Weighting
+        kernel_x=25,             # Regression Level (窗口 = x+2 根K线)
+        kernel_lag=2,            # 高斯核滞后
+        # ── 出场 ──
+        use_dynamic_exits=False,
+    )
+
+    # ------------------------------------------------------------------
+    # 特征函数 (对应 MLExtensions 库),所有pine指标内置在ta.py中
+    # ------------------------------------------------------------------
+    def _series_from(self, name, pa, pb):
+        """对应 Pine series_from()"""
+        # .ema() 需 presma=False + talib=False: pta.ema 默认 SMA 播种(TA-Lib语义),
+        # Pine ta.ema 是首值播种, 两者头部不一致会导致特征偏移
+        if name == 'RSI':
+            return self.close.pine.rsi(pa).ema(pb, presma=False, talib=False) / 100.
+        if name == 'WT':
+            return self.pine.wavetrend(pa, pb).pine.normalize()
+        if name == 'CCI':
+            return self.close.pine.cci(pa).ema(pb, presma=False, talib=False).pine.normalize()
+        if name == 'ADX':
+            return self.pine.adx_wilder(pa) / 100.0
+        raise ValueError(f"未知特征类型: {name}")
+
+    # ------------------------------------------------------------------
+    # 过滤器 (对应 MLExtensions 库)
+    # ------------------------------------------------------------------
+    def _filter_volatility(self, use):
+        """filter_volatility(1,10): atr(1) > atr(10)"""
+        if not use:
+            return None
+        return self.atr(1) > self.atr(10)
+
+    def _regime_filter(self, ohlc4: pd.Series, high: np.ndarray, low: np.ndarray, threshold, use):
+        """regime_filter: Kaufman 自适应均线(KLMF)斜率衰减 >= threshold"""
+        if not use:
+            return None
+        src = ohlc4.values
+        size = len(src)
+        value1 = np.zeros(size, dtype=np.float64)
+        value2 = np.zeros(size, dtype=np.float64)
+        for i in range(1, size):
+            value1[i] = 0.2 * (src[i] - src[i - 1]) + 0.8 * value1[i - 1]
+            value2[i] = 0.1 * (high[i] - low[i]) + 0.8 * value2[i - 1]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            omega = np.where(value2 != 0.0, np.abs(value1 / value2), 0.0)
+        alpha = (-omega ** 2 + np.sqrt(omega ** 4 + 16.0 * omega ** 2)) / 8.0
+        klmf = np.zeros(size, dtype=np.float64)
+        klmf[0] = alpha[0] * src[0]
+        for i in range(1, size):
+            klmf[i] = alpha[i] * src[i] + (1.0 - alpha[i]) * klmf[i - 1]
+        abs_slope = np.abs(np.diff(klmf, prepend=0.0))
+        avg_slope = IndSeries(abs_slope).ema(200, talib=False, presma=False)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            nsd = np.where(avg_slope > 0.0, (abs_slope -
+                           avg_slope) / avg_slope, 0.0)
+        return nsd >= threshold
+
+    def _filter_adx(self, length, threshold, use):
+        """filter_adx: Wilder ADX > threshold"""
+        if not use:
+            return None
+        return self.pine.adx_wilder(length) > threshold
+
+    # ------------------------------------------------------------------
+    # 核回归 (对应 KernelFunctions 库)
+    # ------------------------------------------------------------------
+    def _kernel_weights(self, kind, lookback, rel_weight, start_at_bar):
+        """计算核权重数组 (窗口 = startAtBar+2 个点)
+
+        注意: KernelFunctions 库中 _size = array.size(array.from(_src)) = 1,
+        循环 i = 0 to 1+startAtBar, 因此窗口为 startAtBar+2 个点,
+        lookback 只影响权重形状, 不影响窗口长度。
+        """
+        i = np.arange(start_at_bar + 2, dtype=np.float64)
+        if kind == 'rational_quadratic':
+            w = np.power(
+                1.0 + (i ** 2 / (lookback ** 2 * 2.0 * rel_weight)), -rel_weight)
+        elif kind == 'gaussian':
+            w = np.exp(-(i ** 2) / (2.0 * lookback ** 2))
+        else:
+            raise ValueError(f"未知核类型: {kind}")
+        return w
+
+    def _kernel_estimate(self, src, weights):
+        """Nadaraya-Watson 核估计 (非重绘, 卷积实现)
+
+        yhat[t] = Σ src[t-i] * w[i] / Σw,  t >= len(w)-1, 否则 NaN
+        """
+        src = np.asarray(src, dtype=np.float64)
+        L = len(weights)
+        conv = np.convolve(src, weights, mode='full')[:len(src)]
+        out = np.full(len(src), np.nan)
+        out[L - 1:] = conv[L - 1:] / np.sum(weights)
+        return out
+
+    # ------------------------------------------------------------------
+    # Lorentzian KNN (ANN 近似最近邻)
+    # ------------------------------------------------------------------
+    def _lorentzian_prediction(self, features, y_train):
+        """洛伦兹距离 KNN 预测 (逐 bar 顺序模拟, 状态跨 bar 保持)
+
+        距离: d(t,i) = Σ_f log(1 + |f[t] - f[i]|)
+        近邻: i % 4 != 0 保证时间间隔; d >= lastDistance 递增接收;
+              超过 neighborsCount 时移除最旧邻居并重设 lastDistance 为 3/4 分位
+
+        搜索范围: include_full_history=False 时仅搜索最近 max_bars_back 根
+        历史 bar (滑动窗口 [max(0, t-mbb+1), t])。原 Pine 用固定的
+        last_bar_index - maxBarsBack 作为起点, 当数据长度 > 2*maxBarsBack
+        时会退化为空区间导致 prediction 恒为 0, 这里按注释意图修正为滑动窗口。
+        """
+        p = self.params
+        n = len(y_train)
+        k = int(p.neighbors_count)
+        mbb = int(p.max_bars_back)
+        fc = int(p.feature_count)
+        k34 = int(np.floor(k * 3.0 / 4.0 + 0.5))  # Pine math.round
+
+        prediction = np.zeros(n, dtype=np.float64)
+        distances = []   # var: 跨 bar 持久
+        predictions = []  # var: 跨 bar 持久
+        pred_state = 0.0
+        F = features[:, :fc]
+        include_full_history = p.include_full_history
+        for t in range(n):
+            # 搜索范围: 最近 mbb 根历史 bar (含当前 bar t, 与 Pine 一致)
+            start = 0 if include_full_history else max(0, t - mbb + 1)
+            cand = np.arange(start, t + 1)
+            cand = cand[cand % 4 != 0]  # i % 4 != 0: 最小时间间隔 4 根
+            if cand.size:
+                diff = np.abs(F[t] - F[cand])
+                d_arr = np.log1p(diff).sum(axis=1)
+                last_distance = -1.0
+                for j in range(cand.size):
+                    d = d_arr[j]
+                    if d >= last_distance:
+                        last_distance = d
+                        distances.append(d)
+                        predictions.append(int(y_train[cand[j]]))
+                        if len(predictions) > k:
+                            last_distance = distances[k34]
+                            distances.pop(0)
+                            predictions.pop(0)
+                pred_state = float(sum(predictions))
+            prediction[t] = pred_state
+        return prediction
+
+    def _barssince(self, cond):
+        """Pine ta.barssince: 距上次 cond 为 True 的 bar 数, 从未发生为 NaN"""
+        n = len(cond)
+        out = np.full(n, np.nan)
+        last = -1
+        for i in range(n):
+            if cond[i]:
+                last = i
+            if last >= 0:
+                out[i] = i - last
+        return out
+
+    @staticmethod
+    def _shift(arr, n, fill=False):
+        """Pine arr[n]: 向前回看 n 根 (返回 arr[t-n])"""
+        out = np.empty_like(arr)
+        if isinstance(arr, np.ndarray) and arr.dtype == bool:
+            out[:n] = fill
+            out[n:] = arr[:-n]
+        else:
+            out[:n] = np.nan
+            out[n:] = arr[:-n]
+        return out
+
+    def get_src(self):
+        source = self.params.source
+        if source == 'close':
+            return self.close
+        elif source == 'hl2':
+            return self.hl2()
+        elif source == 'hlc3':
+            return self.hlc3()
+        elif source == 'ohlc4':
+            return self.ohlc4()
+        else:
+            return self.close
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        close_v = self.close.values.astype(np.float64)
+        high_v = self.high.values.astype(np.float64)
+        low_v = self.low.values.astype(np.float64)
+        size = len(close_v)
+
+        src = self.get_src()  # .values
+        # hlc3 = self.hlc3()
+        ohlc4 = self.ohlc4()
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 1. 特征工程
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        features = np.column_stack([
+            self._series_from(p.f1_string, p.f1_paramA, p.f1_paramB),
+            self._series_from(p.f2_string, p.f2_paramA, p.f2_paramB),
+            self._series_from(p.f3_string, p.f3_paramA, p.f3_paramB),
+            self._series_from(p.f4_string, p.f4_paramA, p.f4_paramB),
+            self._series_from(p.f5_string, p.f5_paramA, p.f5_paramB),
+        ])
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 2. 训练标签: src[4] < src ? short : src[4] > src ? long : neutral
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        y_train = np.zeros(size, dtype=np.int64)
+        src_4 = src.shift(4)
+        with np.errstate(invalid='ignore'):
+            y_train = np.where(
+                src_4 < src, -1, np.where(src_4 > src, 1, 0)).astype(np.int64)
+        y_train[:4] = 0  # 前 4 根无 src[4], Pine 中比较为 na → neutral
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 3. Lorentzian KNN 预测
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        prediction = self._lorentzian_prediction(features, y_train)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 4. 预测过滤器
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        vol_pass = self._filter_volatility(p.use_volatility_filter)
+        regime_pass = self._regime_filter(
+            ohlc4, high_v, low_v, p.regime_threshold, p.use_regime_filter)
+        adx_pass = self._filter_adx(14, p.adx_threshold, p.use_adx_filter)
+        filter_all = np.ones(size, dtype=bool)
+        for f in (vol_pass, regime_pass, adx_pass):
+            if f is not None:
+                filter_all &= f
+
+        # EMA / SMA 趋势过滤 (默认关闭 → 恒为 True)
+        if p.use_ema_filter:
+            ema_arr = self._ema(close_v, int(p.ema_period))
+            is_ema_uptrend = close_v > ema_arr
+            is_ema_downtrend = close_v < ema_arr
+        else:
+            is_ema_uptrend = np.ones(size, dtype=bool)
+            is_ema_downtrend = np.ones(size, dtype=bool)
+        if p.use_sma_filter:
+            sma_arr = self._sma(close_v, int(p.sma_period))
+            is_sma_uptrend = close_v > sma_arr
+            is_sma_downtrend = close_v < sma_arr
+        else:
+            is_sma_uptrend = np.ones(size, dtype=bool)
+            is_sma_downtrend = np.ones(size, dtype=bool)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 5. 过滤信号 (信号保持: 无新信号时延续上一信号)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        signal = np.zeros(size, dtype=np.float64)
+        for t in range(size):
+            if prediction[t] > 0 and filter_all[t]:
+                signal[t] = 1.0
+            elif prediction[t] < 0 and filter_all[t]:
+                signal[t] = -1.0
+            else:
+                signal[t] = signal[t - 1] if t > 0 else 0.0
+
+        # Bar-Count 过滤器 (持仓 4 根)
+        bars_held = np.zeros(size, dtype=np.int64)
+        signal_prev = self._shift(signal, 1)
+        signal_change = signal - np.nan_to_num(signal_prev, nan=0.0)
+        for t in range(size):
+            changed = (t > 0) and (signal[t] != signal[t - 1])
+            bars_held[t] = 0 if changed else (
+                bars_held[t - 1] + 1 if t > 0 else 1)
+        is_held_four = bars_held == 4
+        is_held_less_four = (bars_held > 0) & (bars_held < 4)
+
+        is_buy_signal = (signal == 1) & is_ema_uptrend & is_sma_uptrend
+        is_sell_signal = (signal == -1) & is_ema_downtrend & is_sma_downtrend
+        is_different_signal = signal_change != 0
+        is_new_buy = is_buy_signal & is_different_signal
+        is_new_sell = is_sell_signal & is_different_signal
+
+        # 4 根前的信号状态 (isLastSignalBuy/Sell)
+        signal_4 = np.nan_to_num(self._shift(signal, 4), nan=0.0)
+        is_last_buy = (signal_4 == 1) & self._shift(
+            is_ema_uptrend, 4) & self._shift(is_sma_uptrend, 4)
+        is_last_sell = (signal_4 == -1) & self._shift(is_ema_downtrend,
+                                                      4) & self._shift(is_sma_downtrend, 4)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 6. 核回归 (KernelFunctions 库)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        h, r, x, lag = p.kernel_h, p.kernel_r, int(
+            p.kernel_x), int(p.kernel_lag)
+        w_rq = self._kernel_weights('rational_quadratic', h, r, x)
+        w_gauss = self._kernel_weights('gaussian', h - lag, r, x)
+        yhat1 = self._kernel_estimate(src, w_rq)
+        yhat2 = self._kernel_estimate(src, w_gauss)
+
+        yhat1_1 = self._shift(yhat1, 1)  # yhat1[1]
+        yhat1_2 = self._shift(yhat1, 2)  # yhat1[2]
+        with np.errstate(invalid='ignore'):
+            was_bearish_rate = yhat1_2 > yhat1_1
+            was_bullish_rate = yhat1_2 < yhat1_1
+            is_bearish_rate = yhat1_1 > yhat1
+            is_bullish_rate = yhat1_1 < yhat1
+        is_bearish_change = is_bearish_rate & was_bullish_rate
+        is_bullish_change = is_bullish_rate & was_bearish_rate
+        is_bullish_smooth = yhat2 >= yhat1
+        is_bearish_smooth = yhat2 <= yhat1
+        yhat2_1 = self._shift(yhat2, 1)
+        is_bullish_cross = is_bullish_smooth & (yhat2_1 <= yhat1_1)
+        is_bearish_cross = is_bearish_smooth & (yhat2_1 >= yhat1_1)
+
+        # alertBullish/Bearish 只取决于 useKernelSmoothing, 与 useKernelFilter 无关
+        # (动态出场的有效性校验依赖 alert 信号, 即使关闭核过滤也要计算)
+        if p.use_kernel_smoothing:
+            alert_bullish = is_bullish_cross
+            alert_bearish = is_bearish_cross
+        else:
+            alert_bullish = is_bullish_change
+            alert_bearish = is_bearish_change
+
+        if p.use_kernel_filter:
+            is_bullish = is_bullish_smooth if p.use_kernel_smoothing else is_bullish_rate
+            is_bearish = is_bearish_smooth if p.use_kernel_smoothing else is_bearish_rate
+        else:
+            is_bullish = np.ones(size, dtype=bool)
+            is_bearish = np.ones(size, dtype=bool)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 7. 入场条件
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        start_long = is_new_buy & is_bullish & is_ema_uptrend & is_sma_uptrend
+        start_short = is_new_sell & is_bearish & is_ema_downtrend & is_sma_downtrend
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 8. 出场条件
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        start_long_4 = self._shift(start_long, 4)
+        start_short_4 = self._shift(start_short, 4)
+        end_long_strict = ((is_held_four & is_last_buy) |
+                           (is_held_less_four & is_new_sell & is_last_buy)) & start_long_4
+        end_short_strict = ((is_held_four & is_last_sell) |
+                            (is_held_less_four & is_new_buy & is_last_sell)) & start_short_4
+
+        # 动态出场 (基于核回归方向变化 + 有效性校验)
+        bars_since_short_entry = self._barssince(start_short)
+        bars_since_bull_alert = self._barssince(alert_bullish)
+        bars_since_long_entry = self._barssince(start_long)
+        bars_since_bear_alert = self._barssince(alert_bearish)
+        with np.errstate(invalid='ignore'):
+            is_valid_short_exit = bars_since_bull_alert > bars_since_short_entry
+            is_valid_long_exit = bars_since_bear_alert > bars_since_long_entry
+        end_long_dynamic = is_bearish_change & self._shift(
+            is_valid_long_exit, 1)
+        end_short_dynamic = is_bullish_change & self._shift(
+            is_valid_short_exit, 1)
+
+        is_dynamic_exit_valid = (not p.use_ema_filter) and (
+            not p.use_sma_filter) and (not p.use_kernel_smoothing)
+        if p.use_dynamic_exits and is_dynamic_exit_valid:
+            end_long = end_long_dynamic
+            end_short = end_short_dynamic
+        else:
+            end_long = end_long_strict
+            end_short = end_short_strict
+        long_signal = start_long.astype(np.float64)   # start_long
+        short_signal = start_short.astype(np.float64)  # start_short
+        exitlong_signal = end_long.astype(np.float64)     # end_long
+        exitshort_signal = end_short.astype(np.float64)    # end_short
+
+        return (
+            yhat1,                    # kernel_estimate
+            yhat2,                    # kernel_estimate2
+            prediction,               # prediction (替代数字标签)
+            signal,                   # signal
+            long_signal,   # start_long
+            short_signal,  # start_short
+            exitlong_signal,     # end_long
+            exitshort_signal,    # end_short
+        )
+
+
+class KNNLorentzianMachineLearning(BtIndicator):
+    """kNN Lorentzian Machine Learning (Pine v6 library 移植)
+
+    https://cn.tradingview.com/script/pVSBWUxj-kNNLorentzianMachineLearning/
+
+    原码为 TradingView 库文件 kNNLorentzianMachineLearning (pVSBWUxj),
+    仅导出 3 个通用函数 (f_minmax / f_update_history_matrix /
+    f_calc_knn_matrix), 需宿主指标定义特征向量与目标标签。
+    本类实现一个完整的宿主集成:
+
+    ARCHITECTURE: QUANT-GRADE kNN MATRIX MACHINE LEARNING ENGINE
+    Optimized for Pine Script v6 runtime performance, zero data leakage,
+    and efficient memory handling via pre-allocated matrix operations.
+
+    核心组件 (与原库逐一对应):
+        1. f_minmax:      滚动窗口 min/max 归一化到 [0,100]
+                          (na 或 range<=1e-5 → 中点 50)
+        2. 特征工程:      5 路可配特征 (RSI/WT/CCI/ADX/Mom)
+                          → 可选 EMA 平滑 → f_minmax → [0,100]
+        3. target 标签:   即时方向 src[t] >= src[t-target_len] → 1, 否则 0
+                          (收盘即可确定, 供后续 bar 使用 → 零泄露)
+        4. 洛伦兹距离:    d = Σ log(1 + |Δf|) (对离群值对数阻尼)
+        5. kNN 扫描:      step_size 采样 + 距离升序取 k 邻居
+        6. 置信度投票:    confidence = up/k; >= threshold → +1,
+                          <= 1-threshold → -1, 否则 0 (raw_signal)
+
+    零泄露说明: 每根 bar 预测只使用 <= t-2 的历史行, 即排除"最新已收盘
+    bar" (原码注释: Start at i = 1 to guarantee ZERO DATA LEAKAGE),
+    当前活跃 bar 从不参与自身预测。
+
+    输出 lines:
+        - signal:            raw_signal (1/0/-1, 即时预测方向)
+        - confidence:        置信度 up/k (默认 0.5, 冷启动期)
+        - long_signal:       非 1 → 1 翻转点 (开多)
+        - short_signal:      非 -1 → -1 翻转点 (开空)
+        - exitlong_signal:   1 → 0 平多点 (反向翻空由 short_signal 表达)
+        - exitshort_signal:  -1 → 0 平空点
+    """
+    lines = (
+        'signal', 'confidence',
+        'long_signal', 'short_signal', 'exitlong_signal', 'exitshort_signal',
+    )
+    overlap = dict(
+        signal=False, confidence=False,
+        long_signal=False, short_signal=False,
+        exitlong_signal=False, exitshort_signal=False,
+    )
+    isplot = dict(
+        long_signal=False, short_signal=False,
+        exitlong_signal=False, exitshort_signal=False,
+    )
+    params = dict(
+        source='close',            # 价格源 (计算指标与目标标签)
+        # ── kNN 核心 ──
+        #   默认值已按"期货品种、减少信号频度"调保守。若信号仍偏多:
+        #   confidence_threshold → 0.75~0.8 (更苛刻)
+        #   k_neighbors         → 8~12 (投票更平滑, 置信度向 0.5 收敛)
+        #   target_len          → 5~10 (标签抗短周期噪声, 方向段更长)
+        #   norm_len            → 200~300 (归一化窗口更稳)
+        k_neighbors=8,             # 最近邻居数 k (大 → 信号更少更平滑)
+        confidence_threshold=0.7,  # 置信度边界 threshold (高 → 信号更少)
+        max_lookback=2000,         # 历史行容量 max_lookback
+        step_size=1,               # 历史扫描采样步长 (>1 提速)
+        target_len=3,              # 目标方向对比根数 (大 → 标签更抗噪)
+        # ── 特征归一化 ──
+        norm_len=150,              # f_minmax 滚动归一化窗口 (大 → 特征更稳)
+        feature_count=5,           # 参与距离的特征数 (1~5)
+        # ── 特征配置 (类型: RSI/WT/CCI/ADX/Mom; A=周期, B=平滑, >1 才平滑) ──
+        f1_string='RSI', f1_paramA=14, f1_paramB=1,
+        f2_string='WT',  f2_paramA=10, f2_paramB=11,
+        f3_string='CCI', f3_paramA=20, f3_paramB=1,
+        f4_string='ADX', f4_paramA=20, f4_paramB=1,
+        f5_string='Mom', f5_paramA=10, f5_paramB=1,
+    )
+
+    # ------------------------------------------------------------------
+    # f_minmax: 滚动窗口 min/max 归一化 (Pine f_minmax)
+    # ------------------------------------------------------------------
+    def _f_minmax(self, src, length):
+        """normalizes src to [0,100]; na 或 range<=1e-5 → 50"""
+        v = np.asarray(src, dtype=np.float64)
+        s = pd.Series(v)
+        # Pine ta.lowest/highest: 窗口不满 → na
+        min_val = s.rolling(length, min_periods=length).min()
+        max_val = s.rolling(length, min_periods=length).max()
+        rng = max_val - min_val
+        out = np.where(
+            np.isnan(v), 50.0,                      # src 为 na
+            np.where(np.isnan(rng.values), 50.0,    # 窗口数据不足
+                     np.where(rng.values <= 1e-5, 50.0,      # 零波动保护
+                     (v - min_val.values) / rng.values * 100.0)))
+        return out
+
+    # ------------------------------------------------------------------
+    # 特征原始值计算 (RSI/WT/CCI/ADX 复用 ta.py 内置 pine 系列)
+    # ------------------------------------------------------------------
+    def _raw_indicator(self, name, pa, pb):
+        """返回某路特征的原始指标序列 (IndSeries, 未归一化)"""
+        if name == 'RSI':
+            return self.close.pine.rsi(int(pa))
+        if name == 'WT':
+            # ta.py wavetrend: (wt1 - sma(wt1,4)), 源为 hlc3
+            return self.pine.wavetrend(int(pa), int(pb))
+        if name == 'CCI':
+            return self.close.pine.cci(int(pa))
+        if name == 'ADX':
+            return self.pine.adx_wilder(int(pa))
+        if name == 'Mom':
+            c = self.close.values.astype(np.float64)
+            pa = int(pa)
+            out = np.full(len(c), np.nan)
+            out[pa:] = c[pa:] - c[:-pa]      # momentum = src - src[pa]
+            return IndSeries(out)
+        raise ValueError(f"未知特征类型: {name}")
+
+    def _smooth(self, v, pb):
+        """Pine ta.ema 语义 (首值播种, 无 SMA 预热), pb<=1 不平滑"""
+        pb = int(pb)
+        if pb <= 1:
+            return v
+        return pd.Series(np.asarray(v, dtype=np.float64)).ewm(
+            span=pb, adjust=False, ignore_na=True).mean().values
+
+    # ------------------------------------------------------------------
+    # 特征向量矩阵构建: 每路 = 指标 → EMA 平滑 → f_minmax → [0,100]
+    # ------------------------------------------------------------------
+    def _build_features(self, fc):
+        p = self.params
+        cols = []
+        for i in range(1, fc + 1):
+            name = p[f'f{i}_string']
+            pa = p[f'f{i}_paramA']
+            pb = p[f'f{i}_paramB']
+            raw = np.asarray(self._raw_indicator(
+                name, pa, pb), dtype=np.float64)
+            if name == 'WT':
+                v = raw                       # WT 的 pb 已是构成参数
+            else:
+                v = self._smooth(raw, pb)     # 其余特征用 pb 做 EMA 平滑
+            cols.append(self._f_minmax(v, int(p.norm_len)))
+        return np.column_stack(cols)
+
+    # ------------------------------------------------------------------
+    # kNN 主循环 (零泄露 + 洛伦兹距离 + step 采样 + 置信度投票)
+    # ------------------------------------------------------------------
+    def _knn_loop(self, features, target, size):
+        p = self.params
+        k = int(p.k_neighbors)
+        thr = float(p.confidence_threshold)
+        mbb = int(p.max_lookback)
+        step = max(1, int(p.step_size))
+        fc = features.shape[1]
+
+        signal = np.zeros(size, dtype=np.float64)
+        confidence = np.full(size, 0.5, dtype=np.float64)
+        # 当前活跃 bar 的最短观测行数要求 (total_rows > k + 5)
+        min_rows = k + 6
+
+        for t in range(size):
+            # 候选历史: 窗口 [max(0, t-mbb), t-1), 排除 t-1 (原码 i=1 起),
+            # 从次新 bar (t-2) 向过去按 step 取样, 与原码 for i=1 by step 一致
+            start_c = max(0, t - mbb)
+            cand = np.arange(t - 2, start_c - 1, -step)
+            if cand.size <= min_rows:
+                continue
+            diff = np.abs(features[t, :fc] - features[cand, :fc])
+            # 洛伦兹距离: 对数阻尼离群值
+            d = np.log1p(diff).sum(axis=1)
+            k_idx = np.argpartition(d, k - 1)[:k]   # k 个最小距离
+            up = int(np.sum(target[cand[k_idx]]))
+            conf = up / float(k)
+            confidence[t] = conf
+            if conf >= thr:
+                signal[t] = 1.0
+            elif conf <= (1.0 - thr):
+                signal[t] = -1.0
+            else:
+                signal[t] = 0.0
+        return signal, confidence
+
+    def get_src(self):
+        source = self.params.source
+        if source == 'close':
+            return self.close
+        elif source == 'hl2':
+            return self.hl2()
+        elif source == 'hlc3':
+            return self.hlc3()
+        elif source == 'ohlc4':
+            return self.ohlc4()
+        return self.close
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        fc = int(p.feature_count)
+        if not 1 <= fc <= 5:
+            raise ValueError(f"feature_count 需在 1~5, 当前 {fc}")
+
+        # 价格源
+        src = self.get_src().values.astype(np.float64)
+        size = len(src)
+
+        # 1. 特征矩阵 (全部 5 路计算, 距离只用前 feature_count 路)
+        features = self._build_features(5)
+
+        # 2. 目标标签: src[t] >= src[t-target_len] → 1, 否则 0 (即时确定)
+        tl = max(1, int(p.target_len))
+        target = np.zeros(size, dtype=np.int64)
+        if tl < size:
+            target[tl:] = (src[tl:] >= src[:-tl]).astype(np.int64)
+
+        # 3. kNN 扫描
+        signal, confidence = self._knn_loop(features, target, size)
+
+        # 4. 翻转 / 平仓点
+        prev = np.roll(signal, 1)
+        prev[0] = 0.0
+        long_signal = ((signal == 1.0) & (prev != 1.0)).astype(np.float64)
+        short_signal = ((signal == -1.0) & (prev != -1.0)).astype(np.float64)
+        exitlong_signal = ((prev == 1.0) & (signal == 0.0)).astype(np.float64)
+        exitshort_signal = (
+            (prev == -1.0) & (signal == 0.0)).astype(np.float64)
+
+        return (signal, confidence, long_signal, short_signal,
+                exitlong_signal, exitshort_signal)
+
+
+def _param(params, key, default=None):
+    """读指标参数：``params`` 可能是**普通 dict**（类级默认），也可能是
+    Addict / 对象（实例参数）。属性访问对 dict 会直接 AttributeError，
+    而 ``signal_text()`` 钩子里读参数正是栽在这上面（文本静默消失）。"""
+    if hasattr(params, 'get'):
+        return params.get(key, default)
+    return getattr(params, key, default)
+
+
+def _params_of(indicator, cls):
+    """取"当前生效"的参数：优先指标实例自己的 ``params``（可能带调用方覆盖），
+    它为空时退回类级默认（``cls.params``）。"""
+    own = getattr(indicator, 'params', None)
+    return own if own else cls.params
+
+
+class DivergenceMany(BtIndicator):
+    """多指标背离检测 (Divergence for Many Indicators v4 静态简化版)
+
+    原码(TradingView Pine v4): Divergence for Many Indicators v.txt (© LonesomeTheBlue, MPL 2.0)
+    网址: https://cn.tradingview.com/script/n8AGnIZd-Divergence-for-Many-Indicators-v4/
+
+    转换说明
+    --------
+    原码同时检测 11 个指标(MACD/Hist/RSI/Stoch/CCI/MOM/OBV/VWMACD/CMF/MFI/Extrn)\n
+    与价格在 pivot high/low 上的 4 类背离(常规/隐藏 × 看涨/看跌), 确认后在当根 bar\n
+    顶部(负向/看跌) 或底部(正向/看涨) 绘制文字标签(指标名汇总 + 背离数量):
+
+        - 底部标签(正向 = 看涨) → long_signal,  对应 常规看涨 + 隐藏看涨
+        - 顶部标签(负向 = 看跌) → short_signal, 对应 常规看跌 + 隐藏看跌
+
+    原码依赖动态连线(line.new)与动态去重/删除管理, minibt 不支持动态折线;\n
+    且原码的 pivot 探测是"逐 bar 滚动检测 + 虚拟线斜率确认", 本实现采用\n
+    "相邻价格 pivot 对"的静态比较(同一 pivot 源, 无前视):
+        在价格形成新的 pivot low/high 并满足右窗(prd)确认后, 与该 pivot 的上一个
+        同向 pivot 比较价格与指标的高低关系:
+            常规看涨: 更低低点 + 指标更高低点   (价格创新低, 指标不创新低)
+            隐藏看涨: 更高低点 + 指标更低低点
+            常规看跌: 更高高点 + 指标更低高点
+            隐藏看跌: 更低高点 + 指标更高高点
+        信号/文本落在该 pivot 的"确认 bar"(pivot bar + prd), 保证只用已发生数据。
+
+    lines:
+        - long_signal:  正向(看涨)背离: 常规 + 隐藏, 确认 bar 置 1 (底部标签)
+        - short_signal: 负向(看跌)背离: 常规 + 隐藏, 确认 bar 置 1 (顶部标签)
+
+    文本显示
+    --------
+    每个信号点绘制一组多行文本(每行一个指标名), 文本末尾附背离数量(可关闭);\n
+    指示指标名按原码 options: 'Full' 完整名 / 'Short' 首字母 / 'None' 只显示数量。
+
+    两条信号线不画曲线(isplot=False), 位于各自副图窗格; 每个信号点的多行文本\n
+    由 signal_text() 提供(指标名逐行 + 末尾数量)。docstring/参数详见类属性与\n
+    signal_text() 注释; 原码网址见模块 docstring。
+    """
+    lines = (
+        'long_signal', 'short_signal',
+        'long_code', 'short_code',
+    )
+    # 信号线(0/1)与编码线(bitmask)都不画曲线; 信号点由框架按信号名渲染
+    isplot = dict(long_signal=False, short_signal=False,
+                  long_code=False, short_code=False)
+    overlap = dict(long_signal=False, short_signal=False,
+                   long_code=False, short_code=False)
+    params = dict(
+        # ── 背离检测 ──
+        pivot_period=5,          # pivot 左/右窗
+        source='Close',          # pivot 源: 'Close' 收盘 / 'HighLow' 高/低
+        div_type='Regular',      # 背离类型: 'Regular' / 'Hidden' / 'Both'
+        max_bars=100,            # 仅比较相距不超过 max_bars 的相邻 pivot 对
+        # ── 文本显示 ──
+        show_names='Full',       # 指标名: 'Full' 完整 / 'Short' 首字母 / 'None'
+        show_number=True,        # 文本末尾附加该方向背离指标数量
+        # ── 各指标开关(原码默认全开) ──
+        calc_macd=True,
+        calc_hist=True,
+        calc_rsi=True,
+        calc_stoch=True,
+        calc_cci=True,
+        calc_mom=True,
+        calc_obv=True,
+        calc_vwmacd=True,
+        calc_cmf=True,
+        calc_mfi=True,
+        calc_ext=False,          # 外部指标(近似用 close 作为替代, 原码默认 off)
+        div_table=(
+            ('calc_macd', '_calc_macd', 'MACD', 'M'),
+            ('calc_hist', '_calc_hist', 'Hist', 'H'),
+            ('calc_rsi', '_calc_rsi', 'RSI', 'E'),
+            ('calc_stoch', '_calc_stoch', 'Stoch', 'S'),
+            ('calc_cci', '_calc_cci', 'CCI', 'C'),
+            ('calc_mom', '_calc_mom', 'MOM', 'M'),
+            ('calc_obv', '_calc_obv', 'OBV', 'O'),
+            ('calc_vwmacd', '_calc_vwmacd', 'VWMACD', 'V'),
+            ('calc_cmf', '_calc_cmf', 'CMF', 'C'),
+            ('calc_mfi', '_calc_mfi', 'MFI', 'M'),
+            ('calc_ext', '_calc_ext', 'Extrn', 'X'),
+        )
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', Colors.bull_color, Markers.triangle).set_text_style(
+            font_size=14, text_color='#ffd400', line_height=1.4,
+            background_fill_color='#222222', background_fill_alpha=0.3),
+        short_signal=SignalStyle('high', Colors.bear_color, Markers.inverted_triangle).set_text_style(
+            font_size=14, text_color='#ffd400', line_height=1.4,
+            background_fill_color='#222222', background_fill_alpha=0.3))
+
+    # ------------------------------------------------------------------
+    # 基础平滑 (Pine 语义)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sma(a, n):
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _ema(a, n):
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _sum(a, n):
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(
+            int(n)).sum().values
+
+    @staticmethod
+    def _calc_ext(close, high, low, vol):
+        """外部指标近似: 直接用 close (原码默认 externalindi=close)"""
+        return np.asarray(close, dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    # 各指标计算函数 (返回全长度数组; 参数顺序统一 close, high, low, vol)
+    # ------------------------------------------------------------------
+    def _calc_macd(self, close, high, low, vol):
+        # 原码 macd 主线: EMA(close,12) - EMA(close,26)
+        return self._ema(close, 12) - self._ema(close, 26)
+
+    def _calc_hist(self, close, high, low, vol):
+        # 原码 deltamacd: macd 主线 - signal 线 (MACD Histogram)
+        macd = self._ema(close, 12) - self._ema(close, 26)
+        signal = self._ema(macd, 9)
+        return macd - signal
+
+    def _wilder(self, a, n):
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    def _calc_rsi(self, close, high, low, vol):
+        c = np.asarray(close, dtype=np.float64)
+        diff = np.diff(c, prepend=np.nan)
+        up = np.where(diff > 0, diff, 0.0)
+        dn = np.where(diff < 0, -diff, 0.0)
+        ru = self._wilder(up, 14)
+        rd = self._wilder(dn, 14)
+        rsi = 100.0 - 100.0 / (1.0 + ru / np.maximum(rd, 1e-12))
+        return np.where(rd == 0.0, 100.0, rsi)
+
+    @staticmethod
+    def _calc_stoch(close, high, low, vol):
+        s = pd.Series(np.asarray(low, dtype=np.float64)
+                      ).rolling(14).min().values
+        h = pd.Series(np.asarray(high, dtype=np.float64)
+                      ).rolling(14).max().values
+        rng = h - s
+        with np.errstate(divide='ignore', invalid='ignore'):
+            raw = np.where(rng > 0.0, (np.asarray(
+                close, dtype=np.float64) - s) / rng * 100.0, 0.0)
+        return pd.Series(raw).rolling(3).mean().values
+
+    @staticmethod
+    def _calc_cci(close, high, low, vol):
+        s = pd.Series(np.asarray(close, dtype=np.float64))
+        ma = s.rolling(10).mean()
+        dev = (s - ma).abs().rolling(10).mean()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            cci = (s - ma) / (0.015 * dev)
+        return np.where(dev > 0.0, cci, np.nan)
+
+    @staticmethod
+    def _calc_mom(close, high, low, vol):
+        c = np.asarray(close, dtype=np.float64)
+        out = np.full(len(c), np.nan, dtype=np.float64)
+        out[10:] = c[10:] - c[:-10]
+        return out
+
+    @staticmethod
+    def _calc_obv(close, high, low, vol):
+        c = np.asarray(close, dtype=np.float64)
+        v = np.asarray(vol, dtype=np.float64)
+        diff = np.diff(c, prepend=np.nan)
+        sign = np.where(diff > 0, 1.0, np.where(diff < 0, -1.0, 0.0))
+        sign[0] = 0.0
+        return np.cumsum(sign * v)
+
+    def _calc_vwmacd(self, close, high, low, vol):
+        def _vwma(a, n):
+            cv = pd.Series(np.asarray(a, dtype=np.float64) *
+                           np.asarray(vol, dtype=np.float64)).rolling(int(n)).sum()
+            vv = pd.Series(np.asarray(vol, dtype=np.float64)
+                           ).rolling(int(n)).sum()
+            with np.errstate(divide='ignore', invalid='ignore'):
+                return (cv / vv).values
+        return _vwma(close, 12) - _vwma(close, 26)
+
+    @staticmethod
+    def _calc_cmf(close, high, low, vol):
+        c = np.asarray(close, dtype=np.float64)
+        h = np.asarray(high, dtype=np.float64)
+        l = np.asarray(low, dtype=np.float64)
+        v = np.asarray(vol, dtype=np.float64)
+        rng = h - l
+        with np.errstate(divide='ignore', invalid='ignore'):
+            raw = np.where(rng > 0.0, ((c - l) - (h - c)) / rng, 0.0)
+        cv = pd.Series(raw * v).rolling(21).sum().values
+        vv = pd.Series(v).rolling(21).sum().values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.where(vv > 0.0, cv / vv, 0.0)
+
+    def _calc_mfi(self, close, high, low, vol):
+        """Pine mfi(close,14): 基于 src 变化分正负, 滚动求和, 而非 rma"""
+        c = np.asarray(close, dtype=np.float64)
+        v = np.asarray(vol, dtype=np.float64)
+        chg = np.diff(c, prepend=np.nan)
+        pos = np.where(chg > 0, v * c, 0.0)
+        neg = np.where(chg < 0, v * c, 0.0)
+        upper = self._sum(pos, 14)
+        lower = self._sum(neg, 14)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = upper / np.maximum(lower, 1e-12)
+            mfi = 100.0 - 100.0 / (1.0 + ratio)
+        return np.where(lower > 0.0, mfi, np.where(upper > 0.0, 100.0, 50.0))
+
+    # ------------------------------------------------------------------
+    # pivot 与背离扫描
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pivots(src, prd, want_high):
+        """pivot high/low bar 索引与值 (右窗严格更大, 平台等值只取后一个)"""
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        idx, vals = [], []
+        for i in range(prd, n - prd):
+            v = src[i]
+            if np.isnan(v):
+                continue
+            left = src[i - prd:i]
+            right = src[i + 1:i + prd + 1]
+            if right.size == 0:
+                continue
+            if want_high:
+                if v >= left.max() and v > right.max():
+                    idx.append(i)
+                    vals.append(v)
+            else:
+                if v <= left.min() and v < right.min():
+                    idx.append(i)
+                    vals.append(v)
+        return idx, vals
+
+    def next(self):
+        p = self.params
+        prd = int(p.pivot_period)
+        if prd < 1:
+            prd = 1
+        max_bars = int(getattr(p, 'max_bars', 100))
+
+        close = np.asarray(self.close, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        vol = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+        if n < 2 * prd + 2:
+            return np.zeros(n), np.zeros(n)
+
+        # pivot 价格源与比较价格源
+        if str(p.source) == 'HighLow':
+            lo_src = low
+            hi_src = high
+        else:  # 'Close'
+            lo_src = close
+            hi_src = close
+        lo_idx, lo_vals = self._pivots(lo_src, prd, want_high=False)
+        hi_idx, hi_vals = self._pivots(hi_src, prd, want_high=True)
+
+        div_long = np.zeros(n, dtype=np.float64)
+        div_short = np.zeros(n, dtype=np.float64)
+        code_long = np.zeros(n, dtype=np.float64)
+        code_short = np.zeros(n, dtype=np.float64)
+
+        # 背离检测类型
+        div_t = str(p.div_type)
+        check_reg = div_t != 'Hidden'      # Regular / Both
+        check_hid = div_t != 'Regular'     # Hidden / Both
+
+        for bit, (field, func_name, full, short) in enumerate(p.div_table):
+            if not bool(getattr(p, field)):
+                continue
+            ind = np.asarray(getattr(self, func_name)(close, high, low, vol),
+                             dtype=np.float64)
+            if len(ind) != n:
+                continue
+            mask = 1 << bit
+
+            # ── 看涨背离: pivot low 对 (价格 越低/越高低点 ↔ 指标 越高/越低低点) ──
+            for k in range(1, len(lo_idx)):
+                a, b = lo_idx[k - 1], lo_idx[k]
+                if b - a > max_bars:
+                    continue
+                t = b + prd                      # 确认 bar (无前视)
+                if t >= n:
+                    continue
+                pa, pb = lo_vals[k - 1], lo_vals[k]
+                ia, ib = ind[a], ind[b]
+                if np.isnan(pa) or np.isnan(pb) or np.isnan(ia) or np.isnan(ib):
+                    continue
+                # 常规看涨: 价格更低低点, 指标更高低点
+                if check_reg and pb < pa and ib > ia:
+                    div_long[t] = 1.0
+                    code_long[t] += mask
+                # 隐藏看涨: 价格更高低点, 指标更低低点
+                elif check_hid and pb > pa and ib < ia:
+                    div_long[t] = 1.0
+                    code_long[t] += mask
+
+            # ── 看跌背离: pivot high 对 ──
+            for k in range(1, len(hi_idx)):
+                a, b = hi_idx[k - 1], hi_idx[k]
+                if b - a > max_bars:
+                    continue
+                t = b + prd
+                if t >= n:
+                    continue
+                pa, pb = hi_vals[k - 1], hi_vals[k]
+                ia, ib = ind[a], ind[b]
+                if np.isnan(pa) or np.isnan(pb) or np.isnan(ia) or np.isnan(ib):
+                    continue
+                # 常规看跌: 价格更高高点, 指标更低高点
+                if check_reg and pb > pa and ib < ia:
+                    div_short[t] = 1.0
+                    code_short[t] += mask
+                # 隐藏看跌: 价格更低高点, 指标更高高点
+                elif check_hid and pb < pa and ib > ia:
+                    div_short[t] = 1.0
+                    code_short[t] += mask
+
+        return div_long, div_short, code_long, code_short
+
+    # ------------------------------------------------------------------
+    # 逐点信号标签文本: 返回 {信号key: 全长度文本数组}, 由框架统一写入。
+    # 该钩子在 IndFrame.__init__ 内调用(此时 self 是新建的 IndFrame, 只能
+    # 访问指标自身 lines, 无法访问源 OHLCV), 故由 long_code/short_code 两列
+    # bitmask 解码出指标名。无文本处 np.nan → 该信号点只画散点标记。
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _decode(codes, p):
+        """把 bitmask 编码线解码成每 bar 的多行文本(np.nan 表示无文本)"""
+        codes = np.asarray(codes, dtype=np.float64)
+        n = len(codes)
+        arr = np.full(n, np.nan, dtype=object)
+        mode = str(_param(p, 'show_names', 'Full'))
+        show_num = bool(_param(p, 'show_number', True))
+        for i in range(n):
+            c = int(codes[i])
+            if c == 0:
+                continue
+            lines = []
+            for bit, (_, _, full, short) in enumerate(
+                    _param(p, 'div_table', ()) or ()):
+                if c & (1 << bit):
+                    lines.append(full if mode == 'Full' else (
+                        short if mode == 'Short' else ''))
+            if show_num:
+                lines.append(str(bin(c).count('1')))
+            lines = [x for x in lines if x]
+            if lines:
+                arr[i] = "\n".join(lines)
+        return arr
+
+    def signal_text(self) -> dict | None:
+        p = _params_of(self, DivergenceMany)
+        return {
+            'long_signal': DivergenceMany._decode(self.long_code.values, p),
+            'short_signal': DivergenceMany._decode(self.short_code.values, p),
+        }
+
+
+class AutoChartPatterns(BtIndicator):
+    """Auto Chart Patterns [Trendoscope®] —— 通道/楔形/三角 13 类形态自动识别（简化版）
+
+    https://cn.tradingview.com/script/WZ8B1FIW-Auto-Chart-Patterns-Trendoscope/
+
+    原码(Auto Chart Patterns.txt)的前端绘制/扫描核心存放在 Trendoscope 私有附加组件
+    (ZigzagLite/4、AbstractChartPatterns/10、basechartpatterns) 中，无法 1:1 还原。
+    本实现采用自研简化扫描引擎(minibt/indicators/_acp.py)，逻辑如下：
+
+        1. 枢轴: 对 source(默认 close) 运行相对阈值 zigzag(minibt/zigzag),
+                得到峰(+1)/谷(-1)转折点序列
+        2. 枚举相邻枢轴窗口(窗口枢轴数 min_pivots..max_pivots):
+           - 上边界线 = 窗口内首尾两个高点的连线
+           - 下边界线 = 窗口内首尾两个低点的连线
+           - 校验中间同类枢轴贴合各自边界线 + 全部枢轴落在两线夹成通道内(容差 error_ratio)
+        3. 分类: 按两线斜率方向(升/降/平) + 带距变化(收/扩/平行) → 13 类之一
+        4. 保留最近、互不重叠的最多 max_patterns 个形态，各渲染三条线:
+           - top    高点线(上边界线)，形态窗口[start..end]内有值，其余 np.nan
+           - bottom 低点线(下边界线)，同上
+           - mid    中间折线(窗口枢轴按时间依次相连)，同上
+
+    参数:
+        source         zigzag 计算源: 'close'/'hl2'，默认 'close'
+        length/depth   枢轴窗口(默认 8 / 55，与原码 ZigzagLite 一致)：
+                       length=局部极值确认窗口(前后各 length 根)，
+                       depth =同类型枢轴之间的最小 bar 间隔；
+                       length<=0 时改用下面的 threshold(百分比阈值)
+        threshold      zigzag 相对翻转阈值(0~1，越小枢轴越多)，默认 0.01
+        min_pivots     参与识别的窗口最少枢轴数(默认 4，需 ≥ 2高+2低)
+        max_pivots     窗口最多枢轴数(默认 6，对应原 numberOfPivots=5/6)
+        error_ratio    中间同类枢轴贴合边界线 / 通道夹持的相对容差(默认 0.2，与原码 errorThresold=20 一致)
+        flat_ratio     边界线判"平/倾斜"的带距相对阈值(默认 0.2，原 flatThreshold=20)
+        conv_eps       两线收/扩/平行判定阈值(默认 0.05)
+        allow_channels/allow_wedges/allow_triangles  形态组开关(默认全 True)
+        max_patterns   最多保留的最近形态数(默认 20，与原码 maxPatterns 一致)
+        avoid_overlap  形态时间窗不与已接受形态重叠(默认 True)
+
+    想要更多形态？（实测：10000 根 `pp2609_60`，默认参数只出 6 个）
+
+        max_patterns    默认 6 是**硬上限** —— 先把它放开（如 30~100），
+                        否则无论怎么调别的参数都只会有 6 个。
+        threshold       形态数量的**主要开关**（枢轴密度）：
+                        0.01 → 7 个、0.005 → 22 个、0.003 → 46 个、
+                        0.002 → 81 个、0.001 → 上百（越小枢轴越密，噪声也越多）。
+        max_pivots      调**小**反而更多（窗口更短更容易成立）：threshold=0.005 时
+                        6 → 22 个、5 → 26 个、10 → 13 个；
+                        min_pivots=4 是下限（2 个高点 + 2 个低点）。
+        avoid_overlap   False 允许形态时间窗重叠 → 数量最多（可到上百），
+                        但相邻形态的线会互相压叠，看着乱。
+        error_ratio     实测几乎不影响数量（"贴合边界线"不是瓶颈），
+                        只在形态明显"歪"、该收的没收时才微调。
+
+    与原码 (Trendoscope ACP) 的关系:
+        - **参数已对齐**：枢轴窗口 numberOfPivots ∈ {5,6}、errorThresold=20%、
+          flatThreshold=20%、maxPatterns=20、avoidOverlap=true（默认值都一样）；
+        - **枢轴算法是近似**：原码用 ZigzagLite 的 (length=8, depth=55)，这里
+          按同样的语义自己实现(`_acp.length_depth_pivots`)，读数可能略有差异；
+        - **画法不同（重要）**：原码给**每个形态各画一组线**（max_lines_count=500），
+          而本实现只有 top / bottom / mid **三根固定列** —— 所以形态一旦在时间上
+          重叠，就会互相覆盖（看起来像"连成一条大通道"）。默认 avoid_overlap=True
+          正是为此；想更接近原码请调小 depth/length（形态更短、互相重叠更少）。
+
+    例（更密但仍可读）：threshold=0.003, max_patterns=50
+    例（尽可能多）    ：threshold=0.002, max_patterns=100, avoid_overlap=False
+    代价：识别本身很便宜（10000 根上 1~14ms），主要是图上线条变多。
+
+    注意:
+        - 形态只绘制到"最后一个枢轴所在 bar"(形态确认点)，不向未来延伸，无未来函数；
+        - 形态随新枢轴确认而更新/消失，属于历史标注型可视化，需结合其它信号使用；
+        - 高频交易需求下可调小 threshold(如 0.003~0.005) 获得更多形态；
+        - 突破点会打一个小圆点并显示**形态名称**文本（原码的 Pattern Label，
+          见 showPatternLabel）：向上突破用 long_signal、向下用 short_signal；
+        - `mid`（形态各顶点依时间相连的折线）用**虚线**，便于与上下边界区分；
+        - 产物除 top/bottom/mid 三条线外，还多了 long_signal / short_signal 两条
+          信号线（只承载突破点标记与文本，默认不上图）。
+    """
+    # 默认值对齐原码 Trendoscope ACP：
+    #   numberOfPivots ∈ {5, 6}          -> min_pivots/max_pivots
+    #   errorThresold = 20.0 (/100 = 0.2) -> error_ratio
+    #   flatThreshold = 20.0 (/100 = 0.2) -> flat_ratio
+    #   maxPatterns   = 20                -> max_patterns
+    #   avoidOverlap  = true              -> avoid_overlap
+    # 唯一不同：枢轴算法。原码用 ZigzagLite 的 (length=8, depth=55) 按 bar 窗口找枢轴，
+    # 这里用百分比阈值(threshold)；想要原码那种"枢轴更密、形态更紧凑"的效果就调小
+    # threshold(0.005/0.003)。
+    params = dict(source='close',
+                  # 枢轴：length/depth = 原码 ZigzagLite 的 (8, 55)（按 bar 窗口）
+                  # length<=0 时退回 threshold（百分比阈值）模式
+                  length=8, depth=55, threshold=0.01,
+                  min_pivots=5, max_pivots=6,
+                  error_ratio=0.2, flat_ratio=0.2, conv_eps=0.05,
+                  allow_channels=True, allow_wedges=True, allow_triangles=True,
+                  max_patterns=20, avoid_overlap=True)
+    # 突破点用信号线承载（只画标记 + 文本，不画曲线 -> isplot=False）
+    overlap = dict(top=True, bottom=True, mid=True,
+                   long_signal=False, short_signal=False,
+                   long_code=False, short_code=False)
+    lines = ('top', 'bottom', 'mid', 'long_signal', 'short_signal',
+             'long_code', 'short_code')
+    isplot = dict(top=True, bottom=True, mid=True, long_signal=False,
+                  short_signal=False, long_code=False, short_code=False)
+    linestyle = dict(
+        top=LineStyle(line_width=3, line_color=Colors.blue),
+        bottom=LineStyle(line_width=3, line_color=Colors.blue),
+        # 中间的折线（形态各顶点依时间相连）用**虚线**，与上下边界线区分
+        mid=LineStyle(line_width=2, line_color=Colors.blue,
+                      line_dash=LineDash.dashed),
+    )
+    # 突破点：小圆点 + 形态名称文本（原码的 Pattern Label / showPatternLabel）
+    signalstyle = dict(
+        long_signal=SignalStyle('high', Colors.red, Markers.circle,
+                                show=True, size=8),
+        short_signal=SignalStyle('low', Colors.green, Markers.circle,
+                                 show=True, size=8),
+    )
+
+    def next(self):
+        p = self.params
+        close = np.asarray(self.close.values, dtype=np.float64)
+        if str(p.source).lower() == 'hl2':
+            high = np.asarray(self.high.values, dtype=np.float64)
+            low = np.asarray(self.low.values, dtype=np.float64)
+            src = (high + low) / 2.0
+        else:
+            src = close
+
+        from ._acp import (EngineParams as _EngineParams, scan as _scan,
+                           render as _render, length_depth_pivots as _ldp)
+        length = int(p.length)
+        if length > 0:
+            # 原码 ZigzagLite 风格：局部极值窗口 + 同类型枢轴最小间隔。
+            # 枢轴价格取该枢轴所在的 high/low（形态顶点贴住真实高低点）
+            high = np.asarray(self.high.values, dtype=np.float64)
+            low = np.asarray(self.low.values, dtype=np.float64)
+            piv = _ldp(high, low, length, int(p.depth))
+            src = np.where(piv == 1, high, np.where(piv == -1, low, src))
+        else:
+            from ..zigzag import PeakValleyPivots  # 百分比阈值模式（编译核心）
+            th = float(p.threshold)
+            piv = PeakValleyPivots(src, th, -th)
+        ep = _EngineParams(
+            min_pivots=int(p.min_pivots),
+            max_pivots=int(p.max_pivots),
+            error_ratio=float(p.error_ratio),
+            flat_ratio=float(p.flat_ratio),
+            conv_eps=float(p.conv_eps),
+            allow_channels=bool(p.allow_channels),
+            allow_wedges=bool(p.allow_wedges),
+            allow_triangles=bool(p.allow_triangles),
+            max_patterns=int(p.max_patterns),
+            avoid_overlap=bool(p.avoid_overlap),
+        )
+        pats = _scan(src, piv, ep)
+        top, bottom, mid = _render(len(src), pats)
+
+        # 突破点标签（原码 Pattern Label）：文字就是形态名称，挂到逐点文本上，
+        # bokeh 与 pylightcharts 两个引擎都会显示。
+        from ._acp import breakout_labels as _breakouts
+        # 突破点：标记信号 + 形态名编号（文本由 signal_text() 钩子按编号解码 ——
+        # 钩子里是新建的 IndFrame，拿不到 OHLCV，这也是 DivergenceMany 的做法）
+        from ._acp import breakout_labels as _breakouts, kind_code as _code
+        close = np.asarray(self.close.values, dtype=np.float64)
+        up = np.zeros(len(src), dtype=np.float64)
+        down = np.zeros(len(src), dtype=np.float64)
+        up_code = np.zeros(len(src), dtype=np.float64)
+        down_code = np.zeros(len(src), dtype=np.float64)
+        for bar, direction, kind in _breakouts(close, pats):
+            code = float(_code(kind))
+            if direction < 0:
+                down[bar], down_code[bar] = 1.0, code
+            else:
+                up[bar], up_code[bar] = 1.0, code
+        return top, bottom, mid, up, down, up_code, down_code
+
+    def signal_text(self) -> dict | None:
+        """突破点显示**形态名称**（原码的 Pattern Label / showPatternLabel）。"""
+        from ._acp import KIND_NAMES as _NAMES
+
+        def _decode(codes) -> np.ndarray:
+            codes = np.asarray(codes, dtype=np.float64)
+            out = np.full(codes.shape[0], np.nan, dtype=object)
+            for i, code in enumerate(codes):
+                if code > 0 and int(code) <= len(_NAMES):
+                    out[i] = _NAMES[int(code) - 1]
+            return out
+
+        return {'long_signal': _decode(self.long_code.values),
+                'short_signal': _decode(self.short_code.values)}
+
+
+# ---------------------------------------------------------------------------
+# Scalping PullBack Tool 内部工具: Pine 风格 EMA 播种 + Heikin-Ashi 变换
+# ---------------------------------------------------------------------------
+def _spbt_ema_pine(s: np.ndarray, length: int) -> np.ndarray:
+    """TradingView ta.ema 语义: 前 length-1 根为 nan, 第 length-1 根以 SMA 播种后递归
+
+    用 ewm(adjust=False)(以首值为种子的无限脉冲衰减) + 首项修正实现，等效于
+    Pine 的 sma 播种递归，避免逐 bar Python 递归损耗。
+    """
+    n = s.shape[0]
+    s = np.asarray(s, dtype=np.float64)
+    if n < 1 or length < 1:
+        return np.full(n, np.nan)
+    if length == 1:
+        return s.copy()
+    if length >= n:
+        return np.full(n, np.nan)
+    alpha = 2.0 / (length + 1.0)
+    z = pd.Series(s).ewm(alpha=alpha, adjust=False).mean().to_numpy()
+    delta = float(np.mean(s[:length])) - z[length - 1]
+    y = z + delta * np.power(
+        1.0 - alpha, np.maximum(np.arange(n) - (length - 1), 0))
+    y = y.copy()
+    y[:length - 1] = np.nan
+    return y
+
+
+def _spbt_heikin_ashi(o, h, l, c):
+    """重建 Heikin-Ashi 开/高/低/收序列 (ho[0] 以 (o+c)/2 播种)"""
+    n = o.shape[0]
+    hc = (o + h + l + c) / 4.0
+    if n < 1:
+        return o, h, l, c
+    ho = np.empty(n)
+    ho[0] = (o[0] + c[0]) / 2.0
+    for i in range(1, n):
+        ho[i] = (ho[i - 1] + hc[i - 1]) / 2.0
+    hh = np.maximum(np.maximum(h, ho), hc)
+    hl = np.minimum(np.minimum(l, ho), hc)
+    return ho, hh, hl, hc
+
+
+class ScalpingPullBackTool(BtIndicator):
+    """https://cn.tradingview.com/script/n1co3drh-Scalping-PullBack-Tool-R1-by-JustUncleL/
+
+    Scalping PullBack Tool R1.1 (JustUncleL) —— PAC 通道回踩剥头皮工具
+
+    原码为 TradingView Pine v4 overlay 绘图型 study。按需求精简为纯指标：
+        - PAC 通道: pacU(上轨)/pacL(下轨) = EMA(High/Low, hilolen)，通道中线
+          pacC = EMA(Close, hilolen) 仅内部用于回踩状态判断，不输出；
+        - 均线: 只保留一条 mediumEMA(默认 200，蓝色) 作为趋势基准(原 3 线 EMA
+          ribbon 简化为一条)；
+        - 买卖信号点(箭头): 原码 pullback-recovery 箭头 → long_signal/short_signal，
+          在状态从 0 翻转入场的 bar 置 1(画在 bar 低点/高点)；
+        - 去除: 分形三角点(过于频繁)、HH/HL/LH/LL 文本标记、bar 颜色、背景
+          颜色、EMA ribbon 三线等纯绘图元素(指标侧不支持给 K 线/背景上色)。
+
+    与原码(UseHAcandles=true)一致的算法骨架:
+        1. 可选先对 OHLC 做 Heikin-Ashi 变换(use_ha=True)，后续全部用 HA 序列;
+        2. fast/medium = ema(haClose, fastlen/mediumlen)，slow(600) 原码算法并不
+           使用，仅保留参数以对齐输入项;
+        3. TrendDirection = (fast>medium & pacL>medium)→1 ;
+           (fast<medium & pacU<medium)→-1 ; 其余 0
+        4. pacExitU = haOpen<pacU and haClose>pacU and barssince(haClose<pacC)<=lookback
+           pacExitL = haOpen>pacL and haClose<pacL and barssince(haClose>pacC)<=lookback
+        5. Buy/Sell = TrendDirection==±1 and pacExit*(恢复箭头)；
+           状态机: 1→(haClose<pacC)→0 ; -1→(haClose>pacC)→0 ; 0+Buy→1 ;
+           0+Sell→-1 ; 否则保持原状态
+        6. long_signal/short_signal: 状态从 0 翻转为 ±1 的入场 bar(与原码箭头落在
+           翻转 bar 一致; delay_arrow 只延迟 1 根 bar 的实时确认，最终标记位置不变)
+
+    参数:
+        hilolen=34    PAC High/Low+Close 通道 EMA 长度
+        fastlen=89    快线 EMA 长度(趋势判断用, 不输出)
+        mediumlen=200 中线 EMA 长度(唯一输出的均线)
+        slowlen=600   慢线 EMA 长度(保留参数, 原码算法不使用)
+        lookback=3    回踩 PAC 中线回溯 bar 数
+        delay_arrow=False  是否延迟 1 根 bar 显示箭头(静态标记位置不变)
+        use_ha=True   是否用 Heikin-Ashi 蜡烛参与计算
+
+    lines(全部主图叠加):
+        - pacU / pacL   : PAC 通道上/下轨
+        - mediumEMA     : 单条趋势基准均线
+        - long_signal / short_signal : 回踩恢复 买入/卖出 信号点(0/1, 只画点)
+    """
+    params = dict(hilolen=34, fastlen=89, mediumlen=200, slowlen=600,
+                  lookback=3, delay_arrow=False, use_ha=True)
+    lines = ('pacU', 'pacL', 'mediumEMA', 'long_signal', 'short_signal')
+    isplot = dict(long_signal=False, short_signal=False)
+    overlap = True
+    linestyle = dict(pacU=LineStyle(line_color='#8c8c8c', line_width=1.),
+                     pacL=LineStyle(line_color='#8c8c8c', line_width=1.),
+                     mediumEMA=LineStyle(line_color='blue', line_width=2.2))
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', 'green', 'triangle', show=True, size=13),
+        short_signal=SignalStyle(
+            'high', 'maroon', 'inverted_triangle', show=True, size=13))
+    bandstyle = BandStyle(
+        lower='pacU', upper='pacL', fill_color='gray', fill_alpha=0.2)
+
+    def next(self):
+        p = self.params
+        n = len(self.close.values)
+        if n < 1:
+            return (np.full(0, np.nan),) * 3 + (np.zeros(0),) * 2
+        o = np.asarray(self.open.values, dtype=np.float64)
+        h = np.asarray(self.high.values, dtype=np.float64)
+        l = np.asarray(self.low.values, dtype=np.float64)
+        c = np.asarray(self.close.values, dtype=np.float64)
+        if bool(p.use_ha):
+            ho, hh, hl, hc = _spbt_heikin_ashi(o, h, l, c)
+        else:
+            ho, hh, hl, hc = o, h, l, c
+
+        hilolen = max(1, int(p.hilolen))
+        fastlen = max(1, int(p.fastlen))
+        mediumlen = max(1, int(p.mediumlen))
+        lookback = max(1, int(p.lookback))
+
+        pacU = _spbt_ema_pine(hh, hilolen)
+        pacL = _spbt_ema_pine(hl, hilolen)
+        pacC = _spbt_ema_pine(hc, hilolen)
+        fastEMA = _spbt_ema_pine(hc, fastlen)
+        mediumEMA = _spbt_ema_pine(hc, mediumlen)
+
+        # TrendDirection: (fast>medium and pacL>medium)->1; (fast<medium and pacU<medium)->-1; 其余 0
+        trend = np.zeros(n)
+        trend[(fastEMA > mediumEMA) & (pacL > mediumEMA)] = 1.0
+        trend[(fastEMA < mediumEMA) & (pacU < mediumEMA)] = -1.0
+
+        def _bars_since(cond):
+            """barssince(cond): 距最近一次 cond 为 True 的 bar 数; 从未出现则为 nan"""
+            last = -1
+            out = np.full(n, np.nan)
+            for i in range(n):
+                if cond[i]:
+                    last = i
+                if last >= 0:
+                    out[i] = float(i - last)
+            return out
+
+        # 最近 lookback 根内曾跌破/升破 PAC 中线
+        belowC = _bars_since(hc < pacC) <= lookback   # nan 参与比较为 False
+        aboveC = _bars_since(hc > pacC) <= lookback
+        pacExitU = (ho < pacU) & (hc > pacU) & belowC
+        pacExitL = (ho > pacL) & (hc < pacL) & aboveC
+        buy = (trend == 1.0) & pacExitU
+        sell = (trend == -1.0) & pacExitL
+
+        # TradeDirection 状态机 + 入场箭头信号
+        long_signal = np.zeros(n)
+        short_signal = np.zeros(n)
+        state = 0.0
+        for i in range(n):
+            if state == 1.0:
+                if hc[i] < pacC[i]:          # 多头回踩跌破中线 → 复位
+                    state = 0.0
+            elif state == -1.0:
+                if hc[i] > pacC[i]:          # 空头回踩升破中线 → 复位
+                    state = 0.0
+            elif buy[i]:
+                state = 1.0
+                long_signal[i] = 1.0
+            elif sell[i]:
+                state = -1.0
+                short_signal[i] = 1.0
+        return pacU, pacL, mediumEMA, long_signal, short_signal
+
+
+# ---------------------------------------------------------------------------
+# Swing Highs/Lows & Candle Patterns [LuxAlgo] 的形态名称表
+# ---------------------------------------------------------------------------
+_SWING_PATTERN_TITLES = {
+    1: "Hammer",
+    2: "Inverted Hammer",
+    3: "Bullish Engulfing",
+    4: "Hanging Man",
+    5: "Shooting Star",
+    6: "Bearish Engulfing",
+}
+
+
+class SwingHighsLows(BtIndicator):
+    """https://cn.tradingview.com/script/yxEJ4Dxw-Swing-Highs-Lows-Candle-Patterns-LuxAlgo/
+
+    Swing Highs/Lows & Candle Patterns [LuxAlgo] —— 摆动高/低点 + 6 种蜡烛形态标签
+    (Pine v5, overlay)
+
+    原码按 “整体右移 length 根 + pivot 右侧确认” 的方式把标签画在历史 pivot bar 上，
+    无未来函数（当前 bar i 只用 <= i 的数据），但标签需在 pivot bar 之后 length 根
+    才被确认。本转换保持该语义，事件均落在 pivot bar 上。
+
+    Pattern 转换对照(以修正后的条件实现):
+        - Swing High(高点, 原码 swinghCss=红) → long_signal: 在 ph 确认的 bar 置 1,
+          文本为 HH/LH(相对前一高点) + 形态名(无形态时 None)
+        - Swing Low (低点, 原码 swinglCss=teal) → short_signal: 在 pl 确认的 bar 置 1,
+          文本为 LL/HL(相对前一低点) + 形态名
+        - Hammer / Inverted Hammer / Hanging Man / Shooting Star: 长下影/长上影条件
+          结合 pivot 方向(与原码一致)
+        - Bullish Engulfing: c>o 且 c[1]<o[1] 且 c>o[1] 且 o<c[1]
+        - Bearish Engulfing: 原贴源码与 Bullish Engulfing 条件重复(疑似笔误),
+          按标准空头吞噬修正: c<o 且 c[1]>o[1] 且 c<o[1] 且 o>c[1]
+        形态优先级与原码链式一致: Hammer > Inverted Hammer > Bullish Engulfing >
+        Hanging Man > Shooting Star > Bearish Engulfing
+
+    参数:
+        length: pivot 左/右侧确认 bar 数(原码 length=21)
+
+    lines(swing_type / pattern_code 只作数据输出, 不绘图):
+        - long_signal : Swing High(高点)信号 0/1, 以红色倒三角画在 bar 高点
+        - short_signal: Swing Low (低点)信号 0/1, 以青色正三角画在 bar 低点
+        - swing_type  : 1=HH, 2=LH, 3=LL, 4=HL (其余 bar 为 0)
+        - pattern_code: 1~6 对应 6 种形态, 0=无形态 (仅 pivot bar 有效)
+    """
+    params = dict(length=21)
+    lines = ('long_signal', 'short_signal', 'swing_type', 'pattern_code')
+    isplot = dict(long_signal=False, short_signal=False,
+                  swing_type=False, pattern_code=False)
+    overlap = True
+    linestyle = {}
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'high', 'red', 'inverted_triangle', show=True, size=12),
+        short_signal=SignalStyle(
+            'low', 'teal', 'triangle', show=True, size=12))
+
+    def next(self):
+        L = int(self.params.length)
+        n = len(self.close.values)
+        if n < 2 * L + 1:
+            return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+        o = np.asarray(self.open.values, dtype=np.float64)
+        h = np.asarray(self.high.values, dtype=np.float64)
+        l = np.asarray(self.low.values, dtype=np.float64)
+        c = np.asarray(self.close.values, dtype=np.float64)
+
+        # ---- pivot high / low: 左右各 L 根须严格更高/更低, 事件锚定在 pivot bar ----
+        left_h = pd.Series(h).rolling(
+            L, min_periods=L).max().shift(1).to_numpy()
+        left_l = pd.Series(l).rolling(
+            L, min_periods=L).min().shift(1).to_numpy()
+        rmax_q = pd.Series(h[::-1]).rolling(
+            L, min_periods=L).max().to_numpy()
+        rmin_q = pd.Series(l[::-1]).rolling(
+            L, min_periods=L).min().to_numpy()
+        idx = np.arange(L, n - L)          # 可能成为 pivot 的 bar 区间
+        q = n - 2 - idx                    # 反转序列中的对应下标
+        right_h = np.full(n, np.nan)
+        right_l = np.full(n, np.nan)
+        right_h[idx] = rmax_q[q]
+        right_l[idx] = rmin_q[q]
+
+        ph = np.zeros(n)
+        pl = np.zeros(n)
+        m_hi = (h[idx] > left_h[idx]) & (h[idx] > right_h[idx])
+        m_lo = (l[idx] < left_l[idx]) & (l[idx] < right_l[idx])
+        ph[idx[m_hi]] = 1.0
+        pl[idx[m_lo]] = 1.0
+
+        # ---- 蜡烛形态条件(与原码一致的实体/影线对比) ----
+        d = np.abs(c - o)
+        o1 = np.concatenate(([np.nan], o[:-1]))
+        c1 = np.concatenate(([np.nan], c[:-1]))
+        body_min = np.minimum(o, c)
+        body_max = np.maximum(o, c)
+        long_lw = (body_min - l) > d       # 下影长于实体
+        long_uw = (h - body_max) > d       # 上影长于实体
+        short_lw = (body_min - l) < d      # 下影短于实体(严格 <, 对齐原码)
+        short_uw = (h - body_max) < d      # 上影短于实体(严格 <, 对齐原码)
+        cond_hammer = (pl == 1.0) & long_lw & short_uw
+        cond_ihammer = (pl == 1.0) & long_uw & short_lw
+        cond_hang = (ph == 1.0) & long_lw & short_uw
+        cond_shoot = (ph == 1.0) & long_uw & short_lw
+        cond_bull = (c > o) & (c1 < o1) & (c > o1) & (o < c1)
+        cond_bear = (c < o) & (c1 > o1) & (c < o1) & (o > c1)
+        pats = (cond_hammer, cond_ihammer, cond_bull,
+                cond_hang, cond_shoot, cond_bear)
+
+        # ---- HH/LH 与 LL/HL 分类(相对上一同向 pivot 的价, 原码 phy/ply 递推) ----
+        swing_type = np.zeros(n)
+        pattern_code = np.zeros(n)
+        prev = None
+        for p in idx[m_hi]:
+            # 首个高点无参照时原码输出 LH(na 比较为 false)
+            swing_type[p] = 2.0 if (prev is None or not h[p] > prev) else 1.0
+            prev = h[p]
+        prev = None
+        for p in idx[m_lo]:
+            # 首个低点无参照时原码输出 HL(na 比较为 false)
+            swing_type[p] = 4.0 if (prev is None or not l[p] < prev) else 3.0
+            prev = l[p]
+
+        # 形态标签只在 pivot bar 上(原码 label 仅在 ph/pl 分支内输出)
+        for p in np.concatenate((idx[m_hi], idx[m_lo])):
+            for j, cond in enumerate(pats):
+                if cond[p]:
+                    pattern_code[p] = float(j + 1)
+                    break
+        return ph, pl, swing_type, pattern_code
+
+
+class SupportResistanceSignalsMTF(BtIndicator):
+    """https://cn.tradingview.com/script/iOrhpIqc-Support-and-Resistance-Signals-MTF-LuxAlgo/
+
+    Support and Resistance Signals MTF [LuxAlgo] —— 多周期支撑/阻力区与信号(主图叠加)
+
+    原码(Pine v5, © LuxAlgo, CC BY-NC-SA 4.0)用 pivot high/low 动态构建支撑/阻力区
+    (box + line), 并在价格突破、测试、回测、拒绝时打上文字标签。minibt 以「按 bar 的
+    数值数组」渲染而非 Pine 的动态对象, 因此本实现做如下等价/近似处理:
+
+        1. 支撑/阻力区: 维护最近 2 个有效区间, 输出区间上/下沿的阶梯线
+           (res_high/res_low/sup_high/sup_low), 并用 BandStyle 填充为"区间"。
+        2. 信号: 原码在确认 bar(i-1) 回溯打标签, 本实现改在确认 bar(i) 打点(无前视),
+           并把原码 8 类事件映射到标准信号线 + 逐点文本:
+               - long_signal      多头突破(B) / 回测(R) / 拒绝  (低点, 绿色三角)
+               - exitshort_signal 支撑测试(T)                  (低点, 蓝色圆)
+               - short_signal     空头突破(B) / 回测(R) / 拒绝  (高点, 红色倒三角)
+               - exitlong_signal  阻力测试(T)                  (高点, 橙色圆)
+           信号数值编码事件类型: long/short 的 1=突破B、2=回测R、3=拒绝(仅打点无文本);
+           exitlong/exitshort 的 1=测试T。`signal_text()` 据此生成 B/R/T 文本。
+        3. 检测周期(MTF): 原码并未真正重采样, 而是把 pivot 长度按
+           `srLN = length * tf_m / ch_m` 缩放后在图表周期上检测, 本实现完全一致
+           (ch_m 由图表的 bar 间隔中位数推断)。
+        4. 省略部分纯装饰/低频功能: Swing Levels 的 ◈ 标签(原码默认关闭)、
+           Manipulation Zones 的扫单色块(原码默认开启但仅视觉提示, 不影响信号),
+           以及图表上 label 的多行 tooltip 明细(改由信号文本标注事件类型)。
+
+    参数:
+        detection_tf         检测周期: 'Chart'/'15 Minutes'/'1 Hour'/'4 Hours'/'1 Day'/'1 Week'
+        length               检测长度(pivot 左右窗), 默认 15
+        margin               支撑阻力边缘系数 srMR(0.1~10), 默认 2.0
+        check_historical     是否检查更早一个区间 srHST, 默认 True
+        avoid_false_breakouts 是否过滤假突破 srFBO, 默认 True
+        show_rejections      是否显示高低价拒绝信号, 默认 True
+
+    lines(全部主图叠加):
+        - res_high / res_low : 最新阻力区上/下沿(阶梯线 + 红色区间填充)
+        - sup_high / sup_low : 最新支撑区上/下沿(阶梯线 + 绿色区间填充)
+        - long_signal / exitshort_signal / short_signal / exitlong_signal : 见上
+    """
+    lines = (
+        "res_high", "res_low", "sup_high", "sup_low",
+        "long_signal", "short_signal", "exitlong_signal", "exitshort_signal",
+    )
+    params = dict(
+        detection_tf="Chart",
+        length=15,
+        margin=2.0,
+        check_historical=True,
+        avoid_false_breakouts=True,
+        show_rejections=True,
+    )
+    # 检测周期 → 分钟
+    _TF_MINUTES = {
+        "15 Minutes": 15,
+        "1 Hour": 60,
+        "4 Hours": 240,
+        "1 Day": 1440,
+        "1 Week": 10080,
+    }
+    overlap = dict(
+        res_high=True, res_low=True, sup_high=True, sup_low=True,
+        long_signal=True, short_signal=True,
+        exitlong_signal=True, exitshort_signal=True,
+    )
+    isplot = dict(
+        res_high=True, res_low=True, sup_high=True, sup_low=True,
+        long_signal=False, short_signal=False,
+        exitlong_signal=False, exitshort_signal=False,
+    )
+    linestyle = dict(
+        res_high=LineStyle(line_color="#f23645", line_width=2),
+        res_low=LineStyle(line_color="#f23645", line_width=1,
+                          line_dash=LineDash.dashed),
+        sup_high=LineStyle(line_color="#089981", line_width=1,
+                           line_dash=LineDash.dashed),
+        sup_low=LineStyle(line_color="#089981", line_width=2),
+    )
+    bandstyle = [
+        BandStyle(lower="res_low", upper="res_high",
+                  fill_color="#f23645", fill_alpha=0.15),
+        BandStyle(lower="sup_low", upper="sup_high",
+                  fill_color="#089981", fill_alpha=0.15),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle("low", "lime", "triangle", True, True, 13),
+        exitshort_signal=SignalStyle(
+            "low", "#908EEB", "circle_x", True, True, 13),
+        short_signal=SignalStyle(
+            "high", "tomato", "inverted_triangle", True, True, 13),
+        exitlong_signal=SignalStyle(
+            "high", "orange", "circle_x", True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # 工具函数(原码 Pine 语义, 均只依赖入参, 不读写内部状态)
+    # ------------------------------------------------------------------
+    def _srs_rma(self, src, length: int) -> np.ndarray:
+        """Pine `ta.rma` (Wilder 平滑): alpha = 1/length。
+
+        对齐 Pine 语义: 从第一个有效值开始递归, 遇到 NaN 沿用上一个有效输出
+        (不产生长期 NaN 段), 供 `_srs_atr` 计算真实波幅。
+        """
+        src = np.asarray(src, dtype=np.float64)
+        out = np.full(src.shape[0], np.nan, dtype=np.float64)
+        alpha = 1.0 / float(length)
+        prev = np.nan
+        for i in range(src.shape[0]):
+            v = src[i]
+            if not np.isfinite(v):
+                out[i] = prev
+                continue
+            prev = v if not np.isfinite(
+                prev) else alpha * v + (1.0 - alpha) * prev
+            out[i] = prev
+        return out
+
+    def _srs_atr(self, high, low, close, length: int = 17) -> np.ndarray:
+        """Pine `ta.atr(length)` = `ta.rma(true_range, length)`。"""
+        high = np.asarray(high, dtype=np.float64)
+        low = np.asarray(low, dtype=np.float64)
+        close = np.asarray(close, dtype=np.float64)
+        n = high.shape[0]
+        tr = np.full(n, np.nan, dtype=np.float64)
+        if n:
+            tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i],
+                        abs(high[i] - close[i - 1]),
+                        abs(low[i] - close[i - 1]))
+        return self._srs_rma(tr, length)
+
+    def _srs_sma(self, src, length: int) -> np.ndarray:
+        """滚动简单均值(Pine `ta.sma`), 前 length-1 根为 NaN。"""
+        return pd.Series(np.asarray(src, dtype=np.float64)).rolling(
+            int(length)).mean().values
+
+    def _srs_pivot_high(self, high, left: int, right: int):
+        """Pine `ta.pivothigh(left, right)`。
+
+        Returns:
+            (val, bar): 均为长度 n 的数组; 在"确认 bar" = pivot_bar + right 处分别填入
+            pivot 值与 pivot bar 索引, 其余位置为 (NaN, -1)。左右窗均要求严格更高。
+        """
+        n = len(high)
+        val = np.full(n, np.nan, dtype=np.float64)
+        bar = np.full(n, -1, dtype=np.int64)
+        if left <= 0 or right <= 0 or n <= left + right:
+            return val, bar
+        for i in range(left, n - right):
+            v = high[i]
+            if np.all(high[i - left:i] < v) and np.all(high[i + 1:i + right + 1] < v):
+                val[i + right] = v
+                bar[i + right] = i
+        return val, bar
+
+    def _srs_pivot_low(self, low, left: int, right: int):
+        """Pine `ta.pivotlow(left, right)`, 返回格式同 `_srs_pivot_high`。"""
+        n = len(low)
+        val = np.full(n, np.nan, dtype=np.float64)
+        bar = np.full(n, -1, dtype=np.int64)
+        if left <= 0 or right <= 0 or n <= left + right:
+            return val, bar
+        for i in range(left, n - right):
+            v = low[i]
+            if np.all(low[i - left:i] > v) and np.all(low[i + 1:i + right + 1] > v):
+                val[i + right] = v
+                bar[i + right] = i
+        return val, bar
+
+    def _srs_chart_minutes(self, dt) -> float:
+        """由图表的 datetime 推断每根 bar 的分钟数(相邻间隔中位数, 至少 1)。"""
+        dt = np.asarray(dt)
+        if dt.size < 2:
+            return 1.0
+        mins = dt.astype("datetime64[m]").astype(np.int64)
+        diff = np.diff(mins)
+        diff = diff[diff > 0]
+        if diff.size == 0:
+            return 1.0
+        return float(np.median(diff))
+
+    # ------------------------------------------------------------------
+    # 信号文本：数值编码 → 事件字母
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        """逐点信号文本: 由信号数值编码反推事件字母。
+
+        事件编码: long/short: 1=突破B、2=回测R、3=拒绝(仅打点无文本);
+        exitlong/exitshort: 1=测试T。无事件处为 np.nan(只画散点)。
+        """
+        def _map(line, mapping):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i, v in enumerate(vals):
+                if v > 0:
+                    txt = mapping.get(int(round(v)))
+                    if txt:
+                        arr[i] = txt
+            return arr
+
+        return {
+            "long_signal": _map(self.long_signal, {1: "▲\nB", 2: "R"}),
+            "exitshort_signal": _map(self.exitshort_signal, {1: "T"}),
+            "short_signal": _map(self.short_signal, {1: "B\n▼", 2: "R"}),
+            "exitlong_signal": _map(self.exitlong_signal, {1: "T"}),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        open_ = np.asarray(self.open, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        volume = np.nan_to_num(np.asarray(self.volume, dtype=np.float64))
+        dt = np.asarray(self.datetime)
+        n = len(close)
+
+        srMR = float(p.margin)
+        srFBO = bool(p.avoid_false_breakouts)
+        srHST = bool(p.check_historical)
+        show_rej = bool(p.show_rejections)
+
+        # ---- 检测周期换算（原码 srLN := length * tf_m / ch_m） ----
+        ch_m = self._srs_chart_minutes(dt)
+        tf_m = ch_m if str(p.detection_tf) == "Chart" else self._TF_MINUTES.get(
+            str(p.detection_tf), ch_m)
+        srLN = max(1, int(round(float(p.length) * tf_m / ch_m)))
+
+        # ---- 基础指标 ----
+        pHST = pd.Series(high).rolling(srLN).max().values
+        pLST = pd.Series(low).rolling(srLN).min().values
+        atr = self._srs_atr(high, low, close, 17)
+        isLLS = np.abs(low - np.minimum(open_, close)) >= 1.618 * atr
+        isLUS = np.abs(high - np.maximum(open_, close)) >= 1.618 * atr
+        vSMA = self._srs_sma(volume, 17)
+        isHV = volume >= 1.618 * np.where(np.isfinite(vSMA), vSMA, np.inf)
+
+        ph_val, ph_bar = self._srs_pivot_high(high, srLN, srLN)
+        pl_val, pl_bar = self._srs_pivot_low(low, srLN, srLN)
+
+        # ---- 输出 ----
+        res_high = np.full(n, np.nan, dtype=np.float64)
+        res_low = np.full(n, np.nan, dtype=np.float64)
+        sup_high = np.full(n, np.nan, dtype=np.float64)
+        sup_low = np.full(n, np.nan, dtype=np.float64)
+        long_signal = np.zeros(n, dtype=np.float64)
+        short_signal = np.zeros(n, dtype=np.float64)
+        exitlong_signal = np.zeros(n, dtype=np.float64)
+        exitshort_signal = np.zeros(n, dtype=np.float64)
+
+        # ---- 状态 ----
+        R = []          # 阻力区列表，[0] 为最近
+        S = []          # 支撑区列表，[0] 为最近
+        pp_h = pp_h1 = np.nan
+        pp_l = pp_l1 = np.nan
+        pp_x = pp_x1 = -1
+        pp_hx = pp_lx = False
+
+        # ---- 内部工具 ----
+        def make_res(level, left, right, m):
+            return dict(level=float(level), top=float(level),
+                        bottom=float(level) * (1.0 - m * 0.17 * srMR),
+                        left=int(left), right=int(right), m=float(m),
+                        b=False, t=False, r=False, l=False)
+
+        def make_sup(level, left, right, m):
+            return dict(level=float(level), bottom=float(level),
+                        top=float(level) * (1.0 + m * 0.17 * srMR),
+                        left=int(left), right=int(right), m=float(m),
+                        b=False, t=False, r=False, l=False)
+
+        def mark(arr, i, kind):
+            """打点(同一 bar 已有事件则不覆盖)。"""
+            if 0 <= i < n and arr[i] == 0:
+                arr[i] = float(kind)
+
+        def update_resistance(ph, px, i):
+            """新 pivot high 确认：按原码规则合并/新增阻力区。"""
+            m = ((pHST[i] - pLST[i]) / pHST[i]
+                 if np.isfinite(pHST[i]) and pHST[i] != 0 else 0.0)
+            if len(R) > 1:
+                lR, lRt = R[0], R[1]
+                if (ph < lR["bottom"] * (1 - lR["m"] * 0.17 * srMR)
+                        or ph > lR["top"] * (1 + lR["m"] * 0.17 * srMR)):
+                    # 若新区间与当前阻力区左端重叠且价格已在其下方，则忽略
+                    if px < lR["left"] and px + srLN > lR["left"] and close[i] < lR["bottom"]:
+                        return
+                    if (ph < lRt["bottom"] * (1 - lRt["m"] * 0.17 * srMR)
+                            or ph > lRt["top"] * (1 + lRt["m"] * 0.17 * srMR)):
+                        R.insert(0, make_res(ph, px, i, m))
+                        if S:
+                            S[0]["t"] = False
+                    else:
+                        lRt["right"] = i
+                elif (S[0]["top"] if S else np.nan) != lR["top"]:
+                    lR["right"] = i
+            else:
+                R.insert(0, make_res(ph, px, i, m))
+                if S:
+                    S[0]["t"] = False
+
+        def update_support(pl, px, i):
+            """新 pivot low 确认：按原码规则合并/新增支撑区。"""
+            m = ((pHST[i] - pLST[i]) / pHST[i]
+                 if np.isfinite(pHST[i]) and pHST[i] != 0 else 0.0)
+            if len(S) > 1:
+                lS, lSt = S[0], S[1]
+                if (pl < lS["bottom"] * (1 - lS["m"] * 0.17 * srMR)
+                        or pl > lS["top"] * (1 + lS["m"] * 0.17 * srMR)):
+                    if px < lS["left"] and px + srLN > lS["left"] and close[i] > lS["top"]:
+                        return
+                    if (pl < lSt["bottom"] * (1 - lSt["m"] * 0.17 * srMR)
+                            or pl > lSt["top"] * (1 + lSt["m"] * 0.17 * srMR)):
+                        S.insert(0, make_sup(pl, px, i, m))
+                        if R:
+                            R[0]["t"] = False
+                    else:
+                        lSt["right"] = i
+                elif (R[0]["bottom"] if R else np.nan) != lS["bottom"]:
+                    lS["right"] = i
+            else:
+                S.insert(0, make_sup(pl, px, i, m))
+                if R:
+                    R[0]["t"] = False
+
+        def process_resistance(lR):
+            """阻力区信号：向上突破 → long(1); 回测 → short(2); 测试 → exitlong(1);
+            高低价拒绝 → short(3)。"""
+            lS = S[0] if S else None
+            # 1) 向上突破阻力 → 多头突破信号，并把破位处转为新支撑区
+            if srFBO and i >= 1 and close[i - 1] > lR["top"] * (1 + lR["m"] * 0.17) and not lR["b"]:
+                lR["right"] = i - 1
+                lR["b"], lR["r"] = True, False
+                mark(long_signal, i, 1)
+                S.insert(0, make_sup(lR["bottom"], i - 1, i + 1, lR["m"]))
+            elif (not srFBO) and i >= 1 and close[i - 1] > lR["top"] and not lR["b"]:
+                lR["right"] = i - 1
+                lR["b"], lR["r"] = True, False
+                mark(long_signal, i, 1)
+                S.insert(0, make_sup(lR["bottom"], i - 1, i + 1, lR["m"]))
+            # 2) 回测阻力（空头）
+            elif (lS is not None and lS is not lR and lS["b"] and i >= 1
+                    and open_[i - 1] < lR["top"] and high[i - 1] > lR["bottom"]
+                    and close[i - 1] < lR["bottom"] and not lR["r"]
+                    and (i - 1) != lR["left"]):
+                mark(short_signal, i, 2)
+                lR["r"] = True
+                lR["right"] = i
+            # 3) 测试阻力（空头）
+            elif (i >= 1 and high[i - 1] > lR["bottom"] and close[i - 1] < lR["top"]
+                    and close[i] < lR["top"] and not lR["t"] and not lR["r"]
+                    and not lR["b"] and not (lS is not None and lS["b"])
+                    and (i - 1) != lR["left"]):
+                mark(exitlong_signal, i, 1)
+                lR["t"] = True
+                lR["right"] = i
+            # 4) 价格进入区间 → 向右延伸
+            elif high[i] > lR["bottom"] * (1 - lR["m"] * 0.17) and not lR["b"]:
+                if high[i] > lR["bottom"]:
+                    lR["right"] = i
+            # 拒绝更高价（看跌拒绝）：长上影且放量（独立于上方信号链）
+            if show_rej and i >= 1 and isLUS[i - 1] and isHV[i - 1]:
+                mark(short_signal, i, 3)
+
+        def process_support(lS):
+            """支撑区信号：向下跌破 → short(1); 回测 → long(2); 测试 → exitshort(1);
+            高低价拒绝 → long(3)。"""
+            lR = R[0] if R else None
+            # 1) 向下跌破支撑 → 空头突破信号，并把破位处转为新阻力区
+            if srFBO and i >= 1 and close[i - 1] < lS["bottom"] * (1 - lS["m"] * 0.17) and not lS["b"]:
+                lS["right"] = i - 1
+                lS["b"], lS["r"] = True, False
+                mark(short_signal, i, 1)
+                R.insert(0, make_res(lS["top"], i - 1, i + 1, lS["m"]))
+            elif (not srFBO) and i >= 1 and close[i - 1] < lS["bottom"] and not lS["b"]:
+                lS["right"] = i - 1
+                lS["b"], lS["r"] = True, False
+                mark(short_signal, i, 1)
+                R.insert(0, make_res(lS["top"], i - 1, i + 1, lS["m"]))
+            # 2) 回测支撑（多头）
+            elif (lR is not None and lR is not lS and lR["b"] and i >= 1
+                    and open_[i - 1] > lS["bottom"] and low[i - 1] < lS["top"]
+                    and close[i - 1] > lS["top"] and not lS["r"]
+                    and (i - 1) != lS["left"]):
+                mark(long_signal, i, 2)
+                lS["r"] = True
+                lS["right"] = i
+            # 3) 测试支撑（多头）
+            elif (i >= 1 and low[i - 1] < lS["top"] and close[i - 1] > lS["bottom"]
+                    and close[i] > lS["bottom"] and not lS["t"] and not lS["b"]
+                    and not lS["r"] and not (lR is not None and lR["b"])
+                    and (i - 1) != lS["left"]):
+                mark(exitshort_signal, i, 1)
+                lS["t"] = True
+                lS["right"] = i
+            # 4) 价格进入区间 → 向右延伸
+            elif low[i] < lS["top"] * (1 + lS["m"] * 0.17) and not lS["b"]:
+                if low[i] < lS["top"]:
+                    lS["right"] = i
+            # 拒绝更低价（看涨拒绝）：长下影且放量（独立于上方信号链）
+            if show_rej and i >= 1 and isLLS[i - 1] and isHV[i - 1]:
+                mark(long_signal, i, 3)
+
+        # ---- 逐 bar 模拟 ----
+        for i in range(n):
+            # pivot high 确认
+            if not np.isnan(ph_val[i]):
+                pp_h1, pp_h = pp_h, ph_val[i]
+                pp_x1, pp_x = pp_x, int(ph_bar[i])
+                pp_hx = False
+                update_resistance(pp_h, pp_x, i)
+
+            # 连续两根收盘站上最近 pivot high → 多头结构
+            if (i >= 1 and np.isfinite(pp_h)
+                    and close[i - 1] > pp_h and close[i] > pp_h and not pp_hx):
+                pp_hx = True
+
+            # pivot low 确认
+            if not np.isnan(pl_val[i]):
+                pp_l1, pp_l = pp_l, pl_val[i]
+                pp_x1, pp_x = pp_x, int(pl_bar[i])
+                pp_lx = False
+                update_support(pp_l, pp_x, i)
+
+            # 连续两根收盘跌破最近 pivot low → 空头结构
+            if (i >= 1 and np.isfinite(pp_l)
+                    and close[i - 1] < pp_l and close[i] < pp_l and not pp_lx):
+                pp_lx = True
+
+            # 阻力区信号（最近 + 历史）
+            if R:
+                process_resistance(R[0])
+            if srHST and len(R) > 1:
+                process_resistance(R[1])
+
+            # 支撑区信号（最近 + 历史）
+            if S:
+                process_support(S[0])
+            if srHST and len(S) > 1:
+                process_support(S[1])
+
+            # 记录当前区间（阶梯线），仅在区间自身生命周期内输出
+            if R and R[0]["left"] <= i <= R[0]["right"] + 1:
+                res_high[i] = R[0]["top"]
+                res_low[i] = R[0]["bottom"]
+            if S and S[0]["left"] <= i <= S[0]["right"] + 1:
+                sup_high[i] = S[0]["top"]
+                sup_low[i] = S[0]["bottom"]
+
+        # 区间线前向填充到最新 bar：被突破/替换后仍显示最后有效位置
+        def _ffill(arr):
+            return pd.Series(arr).ffill().values
+
+        res_high, res_low = _ffill(res_high), _ffill(res_low)
+        sup_high, sup_low = _ffill(sup_high), _ffill(sup_low)
+
+        return (res_high, res_low, sup_high, sup_low,
+                long_signal, short_signal, exitlong_signal, exitshort_signal)
+
+
+class TrendlineBreakoutsWithTargets(BtIndicator):
+    """Trendline Breakouts With Targets [ChartPrime]
+
+    原码(TradingView Pine v5):
+    https://cn.tradingview.com/script/hb6J9iHI-Trendline-Breakouts-With-Targets-ChartPrime/
+    © ChartPrime, MPL 2.0
+
+    基于 pivot 的上下趋势线(每向 2 条独立直线段) + 突破信号 + 目标位 TP 离场文本。
+    详见模块 docstring。
+    转换说明
+    --------
+    原码从 pivot high / pivot low 出发，用「相邻两个同向 pivot」连线得到趋势线：
+
+        - 上趋势线(阻力线): 由 pivot high 连线，仅斜率为负(向下)时有效；
+        - 下趋势线(支撑线): 由 pivot low  连线，仅斜率为正(向上)时有效；
+        - 每条趋势线是一段独立直线段 [start_bar, end_bar]，end_bar = 第二 pivot + extend；
+        - pivot 不复用: 一条线段用过 (p1, p2)，下一条同向线段用 (p3, p4)，两段不共点；
+        - 每向输出 2 条指标线，按奇偶交替承载各段，段与段各自独立、互不拼接
+        (同一数组内相邻两段相隔两个 pivot，区间不重叠，因此每条都是单一斜率的直线段)；
+        - 突破: 价格上穿 上趋势线 → 多头; 下穿 下趋势线 → 空头；
+        - 开仓后以 Zband 倍数给出目标位 TP / 止损位 SL，并输出 target 指标线；
+        - 触及 TP / SL 离场时标记离场信号并显示文本 "TP" / "SL"。
+
+    信号命名严格使用 minibt 标准名(系统只识别这四个):
+        long_signal / exitlong_signal / short_signal / exitshort_signal
+
+    输出 lines
+    ----------
+        upper_trend  / upper_trend2 : 上趋势线(阻力)线段(奇/偶交替承载)
+        lower_trend  / lower_trend2 : 下趋势线(支撑)线段(奇/偶交替承载)
+        target                      : 持仓期间目标位 TP 水平线(其余为 NaN)
+        long_signal                 : 多头突破(上穿阻力线), 值 1
+        short_signal                : 空头突破(下穿支撑线), 值 1
+        exitlong_signal             : 多头离场, 1=达到目标TP / 2=触及止损SL
+        exitshort_signal            : 空头离场, 1=达到目标TP / 2=触及止损SL
+
+    参数
+    ----
+        period       pivot 左窗(右窗 = period//2)，默认 10
+        trend_type   pivot 价格源: 'Wicks'(高低点, 默认) / 'Body'(实体)
+        extend       趋势线向前延伸的 bar 数, 默认 25 (原码 25/50/75)
+        show_targets 是否绘制 target 目标线, 默认 True
+        target_mult  目标/止损 = Zband * target_mult, 默认 20
+    """
+    lines = (
+        'upper_trend', 'upper_trend2', 'lower_trend', 'lower_trend2', 'target',
+        'long_signal', 'short_signal', 'exitlong_signal', 'exitshort_signal',
+    )
+    params = dict(
+        period=10,
+        trend_type='Wicks',
+        extend=25,
+        show_targets=True,
+        target_mult=20.0,
+    )
+    isplot = dict(
+        upper_trend=True, upper_trend2=True, lower_trend=True, lower_trend2=True,
+        target=True,
+        long_signal=False, short_signal=False,
+        exitlong_signal=False, exitshort_signal=False,
+    )
+    overlap = dict(
+        upper_trend=True, upper_trend2=True, lower_trend=True, lower_trend2=True,
+        target=True,
+        long_signal=True, short_signal=True,
+        exitlong_signal=True, exitshort_signal=True,
+    )
+    linestyle = dict(
+        upper_trend=LineStyle(line_color='#d42e00', line_width=1.6),
+        upper_trend2=LineStyle(line_color='#d42e00', line_width=1.6),
+        lower_trend=LineStyle(line_color='#0b8b07', line_width=1.6),
+        lower_trend2=LineStyle(line_color='#0b8b07', line_width=1.6),
+        target=LineStyle(line_color='#9a6714', line_width=1.6,
+                         line_dash=LineDash.dashed),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#2ec006', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#f10202', 'inverted_triangle', True, True, 13),
+        exitlong_signal=SignalStyle(
+            'high', '#9a6714', 'circle', True, True, 11),
+        exitshort_signal=SignalStyle(
+            'low', '#9a6714', 'circle', True, True, 11),
+    )
+
+    # ---------------------------------------------------------------------------
+    # 工具函数
+    # ---------------------------------------------------------------------------
+    def _rma(self, src, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(src, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    def _atr(self, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    def _pivots(self, src, left: int, right: int, want_high: bool):
+        """Pine ta.pivothigh/pivotlow: 返回 (val, bar)，均落在确认 bar = pivot + right。"""
+        n = len(src)
+        val = np.full(n, np.nan, dtype=np.float64)
+        bar = np.full(n, -1, dtype=np.int64)
+        if left <= 0 or right <= 0 or n <= left + right:
+            return val, bar
+        for i in range(left, n - right):
+            v = src[i]
+            if np.isnan(v):
+                continue
+            left_ok = (np.all(src[i - left:i] < v) if want_high
+                       else np.all(src[i - left:i] > v))
+            right_ok = (np.all(src[i + 1:i + right + 1] < v) if want_high
+                        else np.all(src[i + 1:i + right + 1] > v))
+            if left_ok and right_ok:
+                val[i + right] = v
+                bar[i + right] = i
+        return val, bar
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 离场信号 → TP / SL
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, mapping):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i, v in enumerate(vals):
+                if v > 0:
+                    txt = mapping.get(int(round(v)))
+                    if txt:
+                        arr[i] = txt
+            return arr
+
+        return {
+            # 1=达到目标 TP, 2=触及止损 SL
+            'exitlong_signal': _map(self.exitlong_signal, {1: 'TP', 2: 'SL'}),
+            'exitshort_signal': _map(self.exitshort_signal, {1: 'TP', 2: 'SL'}),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        period = max(1, int(p.period))
+        right = max(1, period // 2)
+        extend = max(1, int(p.extend))
+        tgt_mult = float(p.target_mult)
+        show_targets = bool(p.show_targets)
+
+        open_ = np.asarray(self.open, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- Zband = min(ATR(30)*0.3, close*0.3%)[20] / 2 ----
+        atr30 = self._atr(high, low, close, 30)
+        z_raw = np.minimum(atr30 * 0.3, close * 0.003)
+        zband = np.full(n, np.nan, dtype=np.float64)
+        if n > 20:
+            zband[20:] = z_raw[:-20] / 2.0
+
+        # ---- pivot 价格源 ----
+        if str(p.trend_type) == 'Body':
+            ph_src = np.where(close > open_, close, open_)
+            pl_src = np.where(close > open_, open_, close)
+        else:  # 'Wicks'
+            ph_src, pl_src = high, low
+
+        ph_val, ph_bar = self._pivots(ph_src, period, right, want_high=True)
+        pl_val, pl_bar = self._pivots(pl_src, period, right, want_high=False)
+
+        # ---- 输出 ----
+        upper_trend = np.full(n, np.nan, dtype=np.float64)
+        upper_trend2 = np.full(n, np.nan, dtype=np.float64)
+        lower_trend = np.full(n, np.nan, dtype=np.float64)
+        lower_trend2 = np.full(n, np.nan, dtype=np.float64)
+        target = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        exitlong_sig = np.zeros(n, dtype=np.float64)
+        exitshort_sig = np.zeros(n, dtype=np.float64)
+
+        # ---- 状态 ----
+        ph_prev = None      # 上趋势线: 尚未配对的下一个 pivot
+        pl_prev = None
+        up_segs = []        # 全部有效上趋势线段(含交替槽位 arr)
+        lo_segs = []
+        up_n = lo_n = 0
+        trade_on = False
+        is_long = False
+        tp = sl = np.nan
+
+        def _val(seg, j):
+            return seg['start_price'] + (j - seg['start_bar']) * seg['slope']
+
+        def _slot(seg, arr1, arr2):
+            return arr1 if seg['arr'] == 0 else arr2
+
+        for i in range(n):
+            # ---- 新 pivot high / low → 两两配对; 用过的 pivot 不复用 ----
+            if not np.isnan(ph_val[i]):
+                cur = (int(ph_bar[i]), float(ph_val[i]))
+                if ph_prev is None:
+                    ph_prev = cur
+                elif cur[0] > ph_prev[0]:
+                    slp = (cur[1] - ph_prev[1]) / (cur[0] - ph_prev[0])
+                    if slp < 0:                     # 仅下倾的阻力线有效
+                        seg = dict(start_bar=ph_prev[0], start_price=ph_prev[1],
+                                   slope=slp, created_at=i,
+                                   end_bar=int(cur[0]) + extend, arr=up_n % 2)
+                        up_n += 1
+                        up_segs.append(seg)
+                        # 回填 [start, i] 到该槽位, 形成一段独立直线
+                        arr = _slot(seg, upper_trend, upper_trend2)
+                        j0 = max(seg['start_bar'], 0)
+                        js = np.arange(j0, i + 1, dtype=np.float64)
+                        arr[j0:i + 1] = seg['start_price'] + \
+                            (js - seg['start_bar']) * seg['slope']
+                    ph_prev = None                  # 两个 pivot 已被本条线使用
+            if not np.isnan(pl_val[i]):
+                cur = (int(pl_bar[i]), float(pl_val[i]))
+                if pl_prev is None:
+                    pl_prev = cur
+                elif cur[0] > pl_prev[0]:
+                    slp = (cur[1] - pl_prev[1]) / (cur[0] - pl_prev[0])
+                    if slp >= 0:                    # 仅上倾的支撑线有效
+                        seg = dict(start_bar=pl_prev[0], start_price=pl_prev[1],
+                                   slope=slp, created_at=i,
+                                   end_bar=int(cur[0]) + extend, arr=lo_n % 2)
+                        lo_n += 1
+                        lo_segs.append(seg)
+                        arr = _slot(seg, lower_trend, lower_trend2)
+                        j0 = max(seg['start_bar'], 0)
+                        js = np.arange(j0, i + 1, dtype=np.float64)
+                        arr[j0:i + 1] = seg['start_price'] + \
+                            (js - seg['start_bar']) * seg['slope']
+                    pl_prev = None
+
+            # ---- 顺延: 每段只画到自己的 end_bar, 段外保持 NaN ----
+            for seg in up_segs:
+                if seg['created_at'] < i <= seg['end_bar']:
+                    _slot(seg, upper_trend, upper_trend2)[i] = _val(seg, i)
+            for seg in lo_segs:
+                if seg['created_at'] < i <= seg['end_bar']:
+                    _slot(seg, lower_trend, lower_trend2)[i] = _val(seg, i)
+
+            zb = zband[i] if np.isfinite(zband[i]) else 0.0
+
+            # ---- 突破信号: 用最新(有效)趋势线, 覆盖其 [created_at, end_bar] ----
+            if i >= 1:
+                if up_segs:
+                    seg = up_segs[-1]
+                    if seg['created_at'] <= i <= seg['end_bar']:
+                        if close[i - 1] < _val(seg, i - 1) and close[i] > _val(seg, i):
+                            long_sig[i] = 1.0                    # 上穿阻力线
+                            if not trade_on:
+                                trade_on, is_long = True, True
+                                tp = high[i] + zb * tgt_mult
+                                sl = low[i] - zb * tgt_mult
+                if lo_segs:
+                    seg = lo_segs[-1]
+                    if seg['created_at'] <= i <= seg['end_bar']:
+                        if (close[i - 1] > _val(seg, i - 1) - zb * 0.1
+                                and close[i] < _val(seg, i) - zb * 0.1):
+                            short_sig[i] = 1.0                   # 下穿支撑线
+                            if not trade_on:
+                                trade_on, is_long = True, False
+                                tp = low[i] - zb * tgt_mult
+                                sl = high[i] + zb * tgt_mult
+
+            # ---- 持仓: 输出目标线并判定离场 ----
+            if trade_on:
+                target[i] = tp if show_targets else np.nan
+                if is_long:
+                    if high[i] >= tp:
+                        exitlong_sig[i] = 1.0     # 达到目标 TP
+                        trade_on = False
+                    elif close[i] <= sl:
+                        exitlong_sig[i] = 2.0     # 触及止损 SL
+                        trade_on = False
+                else:
+                    if low[i] <= tp:
+                        exitshort_sig[i] = 1.0
+                        trade_on = False
+                    elif close[i] >= sl:
+                        exitshort_sig[i] = 2.0
+                        trade_on = False
+
+        return (upper_trend, upper_trend2, lower_trend, lower_trend2, target,
+                long_sig, short_sig, exitlong_sig, exitshort_sig)
+
+
+# (参数开关, 计算函数, Full 名, Short 首字母) —— 顺序对齐原码文本
+_DIV_TABLE_V3 = (
+    ('calcrsi', '_calc_rsi', 'RSI', 'E'),
+    ('calcmacd', '_calc_macd', 'MACD', 'M'),
+    ('calcmacda', '_calc_hist', 'MACD Hist', 'H'),
+    ('calcmom', '_calc_mom', 'Momentum', 'M'),
+    ('calccci', '_calc_cci', 'CCI', 'C'),
+    ('calcobv', '_calc_obv', 'OBV', 'O'),
+    ('calcstoc', '_calc_stoch', 'Stoch', 'S'),
+    ('calcdi', '_calc_di', 'Diosc', 'D'),
+    ('calcvwmacd', '_calc_vwmacd', 'VWMacd', 'V'),
+    ('calccmf', '_calc_cmf', 'CMF', 'C'),
+    ('calcmfi', '_calc_mfi', 'MFI', 'M'),
+)
+
+
+# ===========================================================================
+# 指标
+# ===========================================================================
+class DivergenceManyV3(BtIndicator):
+    """多指标背离检测 (Divergence for many indicator v3) → MiniBT BtIndicator
+
+    原码(TradingView Pine v4): Divergence for many indicator v3.txt (© LonesomeTheBlue, MPL 2.0)
+    网址: https://cn.tradingview.com/script/iN9FTv45-Divergence-for-many-indicator-v3/
+
+    转换说明
+    --------
+    原码同时检测 11 个指标(MACD / MACD Hist / RSI / Stoch / CCI / Momentum / OBV /
+    Diosc / VWMacd / CMF / MFI)，与价格在 pivot high/low 上的 4 类背离
+    (常规/隐藏 × 看涨/看跌)，命中后在当根 bar 顶部(看跌) 或底部(看涨) 画线并打标签
+    (指标名 + 背离数量)。
+
+    minibt 不支持原码的 line.new / line.delete 动态画线，本实现与同类文件
+    `divergence_many_indicators.py` 保持一致，采用「相邻同向 pivot 对」的静态比较：
+
+        常规看涨: 价格更低低点 + 指标更高低点
+        隐藏看涨: 价格更高低点 + 指标更低低点
+        常规看跌: 价格更高高点 + 指标更低高点
+        隐藏看跌: 价格更低高点 + 指标更高高点
+
+    并保留原码 v3 的两个过滤器：
+        - `emptyh/emptyl`  : 两个 pivot 之间收盘价不得穿出两者连线(原码始终检查)；
+        - `chcut`          : 指标本身在两个 pivot 之间也不得穿出两者连线(Check Cut-Through)。
+
+    信号/文本落在第二个 pivot 的「确认 bar」(pivot bar + rb)，保证只用已发生数据。
+
+    参数（对齐原码 input）
+    ----------------------
+        lb / rb         Left Bars / Right Bars，默认 5 / 5
+        showhidden      显示隐藏背离(否则显示常规背离)，默认 False
+        chcut           Check Cut-Through in indicators，默认 True
+        shownum         文本末尾显示背离数量，默认 True
+        showindis       文本显示指标名(哪些指标出现背离)，默认 True
+        showlimit       最少背离指标数量(1~11)，默认 1
+        calcmacd/calcmacda/calcrsi/calcstoc/calccci/calcmom/calcobv/calcdi/
+        calcvwmacd/calccmf/calcmfi   各指标开关(默认全开)
+
+    输出 lines
+    ----------
+        long_signal  : 看涨背离(常规或隐藏), 确认 bar 置 1
+        short_signal : 看跌背离(常规或隐藏), 确认 bar 置 1
+        long_code / short_code : 命中的指标 bitmask(供 signal_text 解码)
+    """
+    lines = ('long_signal', 'short_signal', 'long_code', 'short_code')
+    isplot = dict(long_signal=False, short_signal=False,
+                  long_code=False, short_code=False)
+    overlap = dict(long_signal=False, short_signal=False,
+                   long_code=False, short_code=False)
+    params = dict(
+        # ── 原码 input ──
+        lb=5,                    # Left Bars
+        rb=5,                    # Right Bars
+        showhidden=False,        # 显示隐藏背离
+        chcut=True,              # Check Cut-Through in indicators
+        shownum=True,            # 显示背离数量
+        showindis=True,          # 文本显示指标名(默认开启, 便于看清哪些指标出现背离)
+        showpivot=False,         # 显示 pivot 点(本实现不单独绘制, 保留参数)
+        chwidth=True,            # 按背离数量改变线宽(本实现不画线, 保留参数)
+        showlimit=1,             # 最少背离数量
+        # ── 各指标开关(原码默认全开) ──
+        calcmacd=True,
+        calcmacda=True,
+        calcrsi=True,
+        calcstoc=True,
+        calccci=True,
+        calcmom=True,
+        calcobv=True,
+        calcdi=True,
+        calcvwmacd=True,
+        calccmf=True,
+        calcmfi=True,
+        div_table=_DIV_TABLE_V3,
+    )
+
+    # ---------------------------------------------------------------------------
+    # 工具函数
+    # ---------------------------------------------------------------------------
+    def _wilder(self, a, n):
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    def _fixnan(self, a):
+        """Pine fixnan: 用最近一个非 NaN 值前向填充。"""
+        a = np.asarray(a, dtype=np.float64)
+        out = a.copy()
+        last = np.nan
+        for i in range(len(out)):
+            if np.isnan(out[i]):
+                out[i] = last
+            else:
+                last = out[i]
+        return out
+
+    def _no_cut(self, arr, a, b, above):
+        """检查 arr 在 (a, b) 之间不穿出两端点连线。
+
+        above=True : 不允许 arr[x] 高于连线(用于高点/看跌侧);
+        above=False: 不允许 arr[x] 低于连线(用于低点/看涨侧)。
+        """
+        if b <= a + 1:
+            return True
+        va, vb = arr[a], arr[b]
+        if np.isnan(va) or np.isnan(vb):
+            return False
+        diff = (vb - va) / (b - a)
+        for x in range(a + 1, b):
+            ln = va + (x - a) * diff
+            v = arr[x]
+            if np.isnan(v):
+                v = 0.0
+            if above:
+                if v > ln:
+                    return False
+            else:
+                if v < ln:
+                    return False
+        return True
+
+    def _pivots(self, src, left, right, want_high):
+        """Pine ta.pivothigh/pivotlow: 返回 (bar索引, 值)，落在确认 bar = pivot + right。"""
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        idx, vals = [], []
+        for i in range(left, n - right):
+            v = src[i]
+            if np.isnan(v):
+                continue
+            lft = src[i - left:i]
+            rgt = src[i + 1:i + right + 1]
+            if want_high:
+                if v >= lft.max() and v > rgt.max():
+                    idx.append(i)
+                    vals.append(v)
+            else:
+                if v <= lft.min() and v < rgt.min():
+                    idx.append(i)
+                    vals.append(v)
+        return idx, vals
+
+    # ------------------------------------------------------------------
+    # 基础平滑 / 各指标 (参数顺序统一 close, high, low, vol)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sma(a, n):
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _ema(a, n):
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _sum(a, n):
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(int(n)).sum().values
+
+    def _calc_macd(self, close, high, low, vol):
+        """MACD 主线 = EMA(close,12) - EMA(close,26)"""
+        return self._ema(close, 12) - self._ema(close, 26)
+
+    def _calc_hist(self, close, high, low, vol):
+        """deltamacd = MACD 主线 - 信号线 EMA(macd,9)"""
+        macd = self._ema(close, 12) - self._ema(close, 26)
+        return macd - self._ema(macd, 9)
+
+    def _calc_rsi(self, close, high, low, vol):
+        """RSI(close,14)"""
+        c = np.asarray(close, dtype=np.float64)
+        diff = np.diff(c, prepend=np.nan)
+        up = np.maximum(diff, 0.0)
+        dn = np.maximum(-diff, 0.0)
+        ru = self._wilder(up, 14)
+        rd = self._wilder(dn, 14)
+        rsi = 100.0 - 100.0 / (1.0 + ru / np.maximum(rd, 1e-12))
+        return np.where(rd == 0.0, 100.0, np.where(ru == 0.0, 0.0, rsi))
+
+    @staticmethod
+    def _calc_stoch(close, high, low, vol):
+        """sma(stoch(close,high,low,14), 3)"""
+        s = pd.Series(np.asarray(low, dtype=np.float64)
+                      ).rolling(14).min().values
+        h = pd.Series(np.asarray(high, dtype=np.float64)
+                      ).rolling(14).max().values
+        rng = h - s
+        with np.errstate(divide='ignore', invalid='ignore'):
+            raw = np.where(rng > 0.0, (np.asarray(
+                close, dtype=np.float64) - s) / rng * 100.0, 0.0)
+        return pd.Series(raw).rolling(3).mean().values
+
+    @staticmethod
+    def _calc_cci(close, high, low, vol):
+        """cci(close,10)"""
+        s = pd.Series(np.asarray(close, dtype=np.float64))
+        ma = s.rolling(10).mean()
+        dev = (s - ma).abs().rolling(10).mean()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            cci = (s - ma) / (0.015 * dev)
+        return np.where(dev > 0.0, cci, np.nan)
+
+    @staticmethod
+    def _calc_mom(close, high, low, vol):
+        """mom(close,10)"""
+        c = np.asarray(close, dtype=np.float64)
+        out = np.full(len(c), np.nan, dtype=np.float64)
+        out[10:] = c[10:] - c[:-10]
+        return out
+
+    @staticmethod
+    def _calc_obv(close, high, low, vol):
+        """obv: 按收盘涨跌累加 ±volume"""
+        c = np.asarray(close, dtype=np.float64)
+        v = np.asarray(vol, dtype=np.float64)
+        diff = np.diff(c, prepend=np.nan)
+        sign = np.where(diff > 0, 1.0, np.where(diff < 0, -1.0, 0.0))
+        sign[0] = 0.0
+        return np.cumsum(sign * v)
+
+    def _calc_di(self, close, high, low, vol):
+        """diosc = fixnan(100 * rma(change(high)+change(low), 14) / rma(tr, 14))"""
+        h = np.asarray(high, dtype=np.float64)
+        l = np.asarray(low, dtype=np.float64)
+        c = np.asarray(close, dtype=np.float64)
+        DI = np.diff(h, prepend=np.nan) + np.diff(l, prepend=np.nan)
+        tr = np.full(len(c), np.nan, dtype=np.float64)
+        if len(c):
+            tr[0] = h[0] - l[0]
+        for i in range(1, len(c)):
+            tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]),
+                        abs(l[i] - c[i - 1]))
+        trur = self._wilder(tr, 14)
+        di = self._wilder(DI, 14)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            diosc = 100.0 * di / np.maximum(trur, 1e-12)
+        return self._fixnan(diosc)
+
+    def _calc_vwmacd(self, close, high, low, vol):
+        """vwma(close,12) - vwma(close,26)"""
+        c = np.asarray(close, dtype=np.float64)
+        v = np.asarray(vol, dtype=np.float64)
+
+        def _vwma(a, n):
+            cv = pd.Series(a * v).rolling(int(n)).sum()
+            vv = pd.Series(v).rolling(int(n)).sum()
+            with np.errstate(divide='ignore', invalid='ignore'):
+                return (cv / vv).values
+        return _vwma(c, 12) - _vwma(c, 26)
+
+    @staticmethod
+    def _calc_cmf(close, high, low, vol):
+        """sma(((close-low)-(high-close))/(high-low)*volume, 21) / sma(volume,21)"""
+        c = np.asarray(close, dtype=np.float64)
+        h = np.asarray(high, dtype=np.float64)
+        l = np.asarray(low, dtype=np.float64)
+        v = np.asarray(vol, dtype=np.float64)
+        rng = h - l
+        with np.errstate(divide='ignore', invalid='ignore'):
+            raw = np.where(rng > 0.0, ((c - l) - (h - c)) / rng, 0.0)
+        cv = pd.Series(raw * v).rolling(21).sum().values
+        vv = pd.Series(v).rolling(21).sum().values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.where(vv > 0.0, cv / vv, 0.0)
+
+    def _calc_mfi(self, close, high, low, vol):
+        """mfi(close,14): 按收盘价变化分正负, money flow = close * volume"""
+        c = np.asarray(close, dtype=np.float64)
+        v = np.asarray(vol, dtype=np.float64)
+        chg = np.diff(c, prepend=np.nan)
+        pos = np.where(chg > 0, c * v, 0.0)
+        neg = np.where(chg < 0, c * v, 0.0)
+        upper = self._sum(pos, 14)
+        lower = self._sum(neg, 14)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = upper / np.maximum(lower, 1e-12)
+            mfi = 100.0 - 100.0 / (1.0 + ratio)
+        return np.where(lower > 0.0, mfi, np.where(upper > 0.0, 100.0, 50.0))
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        lb = max(1, int(p.lb))
+        rb = max(1, int(p.rb))
+        chcut = bool(p.chcut)
+        showhidden = bool(p.showhidden)
+        showlimit = max(1, int(p.showlimit))
+
+        close = np.asarray(self.close, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        vol = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+
+        div_long = np.zeros(n, dtype=np.float64)
+        div_short = np.zeros(n, dtype=np.float64)
+        code_long = np.zeros(n, dtype=np.float64)
+        code_short = np.zeros(n, dtype=np.float64)
+        if n < lb + rb + 2:
+            return div_long, div_short, code_long, code_short
+
+        # 预计算各指标
+        inds = []
+        for field, func_name, full, short in p.div_table:
+            if not bool(getattr(p, field)):
+                inds.append(None)
+                continue
+            arr = np.asarray(getattr(self, func_name)(close, high, low, vol),
+                             dtype=np.float64)
+            inds.append(arr if len(arr) == n else None)
+
+        hi_idx, hi_vals = self._pivots(high, lb, rb, want_high=True)
+        lo_idx, lo_vals = self._pivots(low, lb, rb, want_high=False)
+
+        # ── 看跌(负向)背离: pivot high 对 ──
+        for k in range(1, len(hi_idx)):
+            a, b = hi_idx[k - 1], hi_idx[k]
+            pa, pb = hi_vals[k - 1], hi_vals[k]
+            t = b + rb                      # 确认 bar
+            if t >= n:
+                continue
+            # 价格条件: 常规=更高高点; 隐藏=更低高点
+            if (pb < pa) if showhidden else (pb > pa):
+                continue
+            # 两 pivot 之间收盘价不得穿出两者连线
+            if not self._no_cut(close, a, b, above=True):
+                continue
+            code = 0
+            cnt = 0
+            for bit, (field, func_name, full, short) in enumerate(p.div_table):
+                ind = inds[bit]
+                if ind is None:
+                    continue
+                ia, ib = ind[a], ind[b]
+                if np.isnan(ia) or np.isnan(ib):
+                    continue
+                # 指标条件: 常规=更低高点; 隐藏=更高高点
+                if (ib > ia) if showhidden else (ib < ia):
+                    continue
+                if chcut and not self._no_cut(ind, a, b, above=True):
+                    continue
+                code |= (1 << bit)
+                cnt += 1
+            if cnt >= showlimit:
+                div_short[t] = 1.0
+                code_short[t] = float(code)
+
+        # ── 看涨(正向)背离: pivot low 对 ──
+        for k in range(1, len(lo_idx)):
+            a, b = lo_idx[k - 1], lo_idx[k]
+            pa, pb = lo_vals[k - 1], lo_vals[k]
+            t = b + rb
+            if t >= n:
+                continue
+            # 价格条件: 常规=更低低点; 隐藏=更高低点
+            if (pb > pa) if showhidden else (pb < pa):
+                continue
+            if not self._no_cut(close, a, b, above=False):
+                continue
+            code = 0
+            cnt = 0
+            for bit, (field, func_name, full, short) in enumerate(p.div_table):
+                ind = inds[bit]
+                if ind is None:
+                    continue
+                ia, ib = ind[a], ind[b]
+                if np.isnan(ia) or np.isnan(ib):
+                    continue
+                # 指标条件: 常规=更高低点; 隐藏=更低低点
+                if (ib < ia) if showhidden else (ib > ia):
+                    continue
+                if chcut and not self._no_cut(ind, a, b, above=False):
+                    continue
+                code |= (1 << bit)
+                cnt += 1
+            if cnt >= showlimit:
+                div_long[t] = 1.0
+                code_long[t] = float(code)
+
+        return div_long, div_short, code_long, code_short
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 由 long_code/short_code 的 bitmask 解码指标名 + 数量
+    # (该钩子的 self 是新建 IndFrame, 只能用模块级 div_table)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _decode(codes, showindis, shownum):
+        codes = np.asarray(codes, dtype=np.float64)
+        n = len(codes)
+        arr = np.full(n, np.nan, dtype=object)
+        for i in range(n):
+            c = int(codes[i])
+            if c == 0:
+                continue
+            lines = []
+            if showindis:
+                for bit, (_, _, full, short) in enumerate(_DIV_TABLE_V3):
+                    if c & (1 << bit):
+                        lines.append(full)
+            if shownum:
+                lines.append(str(bin(c).count('1')))
+            lines = [x for x in lines if x]
+            if lines:
+                arr[i] = "\n".join(lines)
+        return arr
+
+    def signal_text(self) -> dict | None:
+        p = _params_of(self, DivergenceManyV3)
+        showindis = bool(_param(p, 'showindis', True))
+        shownum = bool(_param(p, 'shownum', True))
+        return {
+            'long_signal': DivergenceManyV3._decode(self.long_code.values, showindis, shownum),
+            'short_signal': DivergenceManyV3._decode(self.short_code.values, showindis, shownum),
+        }
+
+
+# ---- 固定常量 ----
+TQI_MULT_FLOOR = 0.6      # 完美质量时的带宽系数
+TQI_MULT_RANGE = 0.8      # 最差质量时额外增加的带宽
+ASYM_TIGHTEN_MAX = 0.3    # 顺势侧最大收紧
+ASYM_WIDEN_MAX = 0.4      # 逆势侧最大放宽
+MULT_SMOOTH_ALPHA = 0.15  # 乘数 EMA 平滑
+CHAR_FLIP_MIN_AGE = 5     # 字符翻转: 最小趋势年龄 / TQI 窗口
+
+# TQI 四因子权重与窗口(固定)
+TQI_W_ER, TQI_W_VOL, TQI_W_STRUCT, TQI_W_MOM = 0.35, 0.20, 0.25, 0.20
+TQI_STRUCT_LEN, TQI_MOM_LEN, VOL_LEN = 20, 10, 20
+
+
+# ===========================================================================
+# 指标
+# ===========================================================================
+class AdaptiveSupertrend(BtIndicator):
+    """Adaptive SuperTrend (asymmetric-aware)
+
+    TQI(趋势质量) + ER 自适应调节带宽, 顺势侧收紧 / 逆势侧放宽的 SuperTrend。
+
+    原码: 1.txt 第 6.3 节 "ADAPTIVE SUPERTREND (asymmetric-aware)"
+        (来自 Self-Aware Trend System [WillyAlgoTrader] v1.12.0)
+        https://cn.tradingview.com/script/sXFWVpmg-Self-Aware-Trend-System-WillyAlgoTrader/
+
+    只取原码 6.3 这一部分(以及其依赖的 6.1 TQI / 6.2 自适应乘数)，其它模块(Dashboard、
+    TP/SL、自学习、Preset 中的 RSI 等)忽略。
+
+    核心逻辑
+    --------
+        1. rawATR   = ta.atr(effectiveAtrLen)
+        volRatio = rawATR / sma(rawATR, baselineLen)
+        ER       = |src - src[erLen]| / sum(|src - src[1]|, erLen)
+        atrValue = useEffAtr ? rawATR*(0.5 + 0.5*ER) : rawATR
+        2. TQI (Trend Quality Index, 0..1) 由 4 因子加权:
+        ER / 成交量或波动率 / 结构位置 / 动量持续性
+        3. 自适应乘数:
+        legacyAdapt = useAdaptive ? 1 + adaptStrength*(0.5 - ER) : 1
+        qualityDev  = (1 - TQI)^qualityCurve
+        tqiMult     = 1 - q + q*(0.6 + 0.8*qualityDev)
+        symMult     = baseMult * legacyAdapt * tqiMult
+        asymmetric : active = sym*tighten, passive = sym*widen  (active=顺势侧)
+        再对 active/passive 做 EMA 平滑(MULT_SMOOTH_ALPHA = 0.15)
+        4. SuperTrend 带(带棘轮):
+        lowerRaw = src - lowerMult*atrValue,  upperRaw = src + upperMult*atrValue
+        lower    = close[1] > lower[1] ? max(lowerRaw, lower[1]) : lowerRaw
+        upper    = close[1] < upper[1] ? min(upperRaw, upper[1]) : upperRaw
+        5. 翻转:
+        价格翻转: 原趋势 -1 且 close > upper[1] → 翻多; 原趋势 1 且 close < lower[1] → 翻空
+        字符翻转(Character-Flip): TQI 在窗口内曾 > high 且当前 < low, 且价格已逆向
+                                    (close < close[window] / close > close[window])
+        stTrend = 翻多 ? 1 : (翻空 ? -1 : 原趋势)
+        stLine  = stTrend == 1 ? lower : upper
+
+    输出 lines(主图叠加)
+    --------------------
+        st_bull / st_bear : SuperTrend 线(按趋势着色: 多头绿 / 空头红)
+        upper_band / lower_band : 翻转前的上下轨
+        long_signal  : 买入(翻多): 1=价格翻转 / 2=字符翻转
+        short_signal : 卖出(翻空): 1=价格翻转 / 2=字符翻转
+    """
+    lines = ('st_bull', 'st_bear', 'upper_band', 'lower_band',
+             'long_signal', 'short_signal')
+    params = dict(
+        atr_len=13,            # ATR 长度
+        base_mult=2.0,         # 基础带宽(xATR)
+        er_len=20,             # 效率窗口
+        atr_baseline_len=100,  # ATR 基线长度
+        adapt_strength=0.5,    # 旧版 ER 自适应强度
+        quality_strength=0.4,  # TQI 影响力
+        quality_curve=1.5,     # TQI 非线性幂
+        asym_strength=0.5,     # 非对称带宽强度
+        char_flip_high=0.55,   # 字符翻转: 高 TQI
+        char_flip_low=0.25,    # 字符翻转: 低 TQI
+    )
+    isplot = dict(st_bull=True, st_bear=True, upper_band=False, lower_band=False,
+                  long_signal=False, short_signal=False)
+    overlap = True
+    linestyle = dict(
+        st_bull=LineStyle(line_color='#00E676', line_width=2),
+        st_bear=LineStyle(line_color='#FF5252', line_width=2),
+        upper_band=LineStyle(line_color='#FF5252', line_width=1,
+                             line_dash=LineDash.dashed),
+        lower_band=LineStyle(line_color='#00E676', line_width=1,
+                             line_dash=LineDash.dashed),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#00E676', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#FF5252', 'inverted_triangle', True, True, 13),
+    )
+
+    def _wilder(self, a, n):
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    def _atr(self, high, low, close, n):
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    def _sma(self, a, n):
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    def _stdev(self, a, n):
+        return np.asarray(PineFunc.stdev(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    def _sum(self, a, n):
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(int(n)).sum().values
+
+    def _safe_div(self, num, den, fallback=0.0):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            out = np.asarray(num, dtype=np.float64) / \
+                np.asarray(den, dtype=np.float64)
+        return np.where(np.isfinite(out), out, float(fallback))
+
+    def _clamp(self, v, lo, hi):
+        return np.maximum(lo, np.minimum(hi, v))
+
+    def _map_clamp(self, v, in_lo, in_hi, out_lo, out_hi):
+        t = self._clamp(self._safe_div(np.asarray(v, float) -
+                        in_lo, in_hi - in_lo, 0.0), 0.0, 1.0)
+        return out_lo + t * (out_hi - out_lo)
+
+    def next(self):
+        p = self.params
+        atr_len = max(1, int(p.atr_len))
+        base_mult = float(p.base_mult)
+        er_len = max(2, int(p.er_len))
+        baseline_len = max(1, int(p.atr_baseline_len))
+        adapt_strength = float(p.adapt_strength)
+        q_strength = float(p.quality_strength)
+        q_curve = float(p.quality_curve)
+        asym_strength = float(p.asym_strength)
+        cf_high = float(p.char_flip_high)
+        cf_low = float(p.char_flip_low)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        vol = np.asarray(self.volume, dtype=np.float64)
+        src = close
+        n = len(close)
+
+        st_bull = np.full(n, np.nan, dtype=np.float64)
+        st_bear = np.full(n, np.nan, dtype=np.float64)
+        upper_band = np.full(n, np.nan, dtype=np.float64)
+        lower_band = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        if n < 2:
+            return st_bull, st_bear, upper_band, lower_band, long_sig, short_sig
+
+        # ---- ATR / ER / 效率加权 ATR ----
+        raw_atr = np.nan_to_num(self._atr(high, low, close, atr_len), nan=0.0)
+        atr_baseline = self._sma(raw_atr, baseline_len)
+        atr_baseline = np.where(np.isfinite(
+            atr_baseline), atr_baseline, raw_atr)
+        s = pd.Series(src)
+        er = self._safe_div((s - s.shift(er_len)).abs().values,
+                            s.diff().abs().rolling(er_len).sum().values, 0.0)
+        atr_value = raw_atr * (0.5 + 0.5 * er)
+
+        # ---- TQI (4 因子加权, 0..1) ----
+        tqi_er = self._clamp(er, 0.0, 1.0)
+        has_volume = bool(np.any(np.nan_to_num(vol) > 0))
+        vol_z = self._safe_div(vol - self._sma(vol, VOL_LEN),
+                               self._stdev(vol, VOL_LEN), 0.0)
+        if has_volume:
+            tqi_vol = self._map_clamp(
+                np.nan_to_num(vol_z), -1.0, 2.0, 0.0, 1.0)
+        else:
+            tqi_vol = self._map_clamp(self._safe_div(
+                raw_atr, atr_baseline, 1.0), 0.6, 1.8, 0.0, 1.0)
+        struct_hi = pd.Series(high).rolling(TQI_STRUCT_LEN).max().values
+        struct_lo = pd.Series(low).rolling(TQI_STRUCT_LEN).min().values
+        price_pos = self._safe_div(
+            close - struct_lo, struct_hi - struct_lo, 0.5)
+        tqi_struct = self._clamp(np.abs(price_pos - 0.5) * 2.0, 0.0, 1.0)
+        prev_close = np.concatenate([[np.nan], close[:-1]])
+        window_change = close - \
+            np.concatenate(
+                [np.full(TQI_MOM_LEN, np.nan), close[:-TQI_MOM_LEN]])
+        up_moves = np.nan_to_num(
+            self._sum((close > prev_close).astype(float), TQI_MOM_LEN))
+        down_moves = np.nan_to_num(
+            self._sum((close < prev_close).astype(float), TQI_MOM_LEN))
+        tqi_mom = np.where(window_change > 0, up_moves / TQI_MOM_LEN,
+                           np.where(window_change < 0, down_moves / TQI_MOM_LEN, 0.0))
+        tqi = self._clamp((tqi_er * TQI_W_ER + tqi_vol * TQI_W_VOL
+                           + tqi_struct * TQI_W_STRUCT + tqi_mom * TQI_W_MOM), 0.0, 1.0)
+
+        # ---- 自适应乘数 ----
+        legacy_adapt = 1.0 + adapt_strength * (0.5 - er)
+        quality_dev = np.power(np.clip(1.0 - tqi, 0.0, 1.0), q_curve)
+        tqi_mult = 1.0 - q_strength + q_strength * \
+            (TQI_MULT_FLOOR + TQI_MULT_RANGE * quality_dev)
+        sym_mult = base_mult * legacy_adapt * tqi_mult
+        active_raw = sym_mult * (1.0 - asym_strength * tqi * ASYM_TIGHTEN_MAX)
+        passive_raw = sym_mult * (1.0 + asym_strength * tqi * ASYM_WIDEN_MAX)
+
+        # 字符翻转窗口: TQI 在窗口内的高点
+        tqi_win_high = pd.Series(tqi).rolling(CHAR_FLIP_MIN_AGE).max().values
+
+        # ---- 逐 bar: 平滑乘数 + 棘轮 + 翻转 ----
+        active_sm = np.nan
+        passive_sm = np.nan
+        lb = np.nan
+        ub = np.nan
+        trend = 1
+        trend_start = 0
+
+        for i in range(n):
+            if np.isnan(active_sm):
+                active_sm = active_raw[i]
+                passive_sm = passive_raw[i]
+            else:
+                active_sm = active_sm * \
+                    (1.0 - MULT_SMOOTH_ALPHA) + \
+                    active_raw[i] * MULT_SMOOTH_ALPHA
+                passive_sm = passive_sm * \
+                    (1.0 - MULT_SMOOTH_ALPHA) + \
+                    passive_raw[i] * MULT_SMOOTH_ALPHA
+
+            prev_trend = trend
+            lower_mult = active_sm if prev_trend == 1 else passive_sm
+            upper_mult = passive_sm if prev_trend == 1 else active_sm
+
+            lb_prev, ub_prev = lb, ub
+            lb_raw = src[i] - lower_mult * atr_value[i]
+            ub_raw = src[i] + upper_mult * atr_value[i]
+            lb = lb_raw if np.isnan(lb_prev) else (
+                max(lb_raw, lb_prev) if close[i - 1] > lb_prev else lb_raw)
+            ub = ub_raw if np.isnan(ub_prev) else (
+                min(ub_raw, ub_prev) if close[i - 1] < ub_prev else ub_raw)
+
+            # 价格翻转
+            price_flip_up = (prev_trend == -1) and (close[i] > ub_prev)
+            price_flip_down = (prev_trend == 1) and (close[i] < lb_prev)
+
+            # 字符翻转: TQI 在窗口内曾 > high 且当前 < low, 价格已逆向
+            char_flip_up = char_flip_down = False
+            if (i - trend_start) >= CHAR_FLIP_MIN_AGE and i >= CHAR_FLIP_MIN_AGE:
+                tqi_wh = tqi_win_high[i]
+                if np.isfinite(tqi_wh) and tqi_wh > cf_high and tqi[i] < cf_low:
+                    if prev_trend == 1 and close[i] < close[i - CHAR_FLIP_MIN_AGE]:
+                        char_flip_down = True
+                    elif prev_trend == -1 and close[i] > close[i - CHAR_FLIP_MIN_AGE]:
+                        char_flip_up = True
+
+            final_up = price_flip_up or char_flip_up
+            final_down = price_flip_down or char_flip_down
+            trend = 1 if final_up else (-1 if final_down else prev_trend)
+            if trend != prev_trend:
+                trend_start = i
+
+            upper_band[i] = ub
+            lower_band[i] = lb
+            if trend == 1:
+                st_bull[i] = lb
+            else:
+                st_bear[i] = ub
+
+            # 信号: 1=价格翻转, 2=字符翻转
+            if trend == 1 and prev_trend == -1:
+                long_sig[i] = 2.0 if (
+                    char_flip_up and not price_flip_up) else 1.0
+            elif trend == -1 and prev_trend == 1:
+                short_sig[i] = 2.0 if (
+                    char_flip_down and not price_flip_down) else 1.0
+
+        return st_bull, st_bear, upper_band, lower_band, long_sig, short_sig
+
+
+class QQESignals(BtIndicator):
+    """QQE signals → MiniBT BtIndicator
+    ----
+
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/7R6ZxyZu-QQE-signals/
+        © colinmck, MPL 2.0
+
+    转换说明
+    --------
+    原码 ``overlay=true``, 只画了 Long / Short 两个信号标签, 没有把 QQE 指标本身
+    (平滑 RSI 线与 QQE 追踪线)画出来。本实现按原码逐 bar 递归计算, 除了输出
+    ``long_signal`` / ``short_signal``(主图信号), 还额外把 QQE 指标本体放到副图:
+
+    - ``qqe_rsi``  : 平滑 RSI (原码 ``RSIndex = ema(rsi(close, RSI_Period), SF)``)
+    - ``qqe_fast`` : QQE 追踪线 (原码 ``FastAtrRsiTL``, 在 longband / shortband 间切换)
+    - ``long_signal``  : ``QQExlong == 1`` 的 bar (主图 Long 标签)
+    - ``short_signal`` : ``QQExshort == 1`` 的 bar (主图 Short 标签)
+
+    原码递归逻辑(逐字对齐):
+    ----
+    - Wilders_Period = RSI_Period * 2 - 1
+    - Rsi        = rsi(close, RSI_Period)              # PINe ta.rsi = Wilder 平滑
+    - RsiMa      = ema(Rsi, SF)
+    - AtrRsi     = abs(RsiMa[1] - RsiMa)
+    - MaAtrRsi   = ema(AtrRsi, Wilders_Period)
+    - dar        = ema(MaAtrRsi, Wilders_Period) * QQE
+    - newlongband  = RsiMa - dar
+    - newshortband = RsiMa + dar
+    - longband  := (RsiMa[1] > longband[1] and RsiMa > longband[1])
+                ? max(longband[1], newlongband) : newlongband
+    - shortband := (RsiMa[1] < shortband[1] and RsiMa < shortband[1])
+                ? min(shortband[1], newshortband) : newshortband
+    - cross_1   = cross(longband[1], RsiMa)
+    - trend     := cross(RsiMa, shortband[1]) ? 1 : cross_1 ? -1 : nz(trend[1], 1)
+    - FastAtrRsiTL = trend == 1 ? longband : shortband
+    - QQExlong  := FastAtrRsiTL < RsiMa  ? QQExlong + 1 : 0
+    - QQExshort := FastAtrRsiTL > RsiMa  ? QQExshort + 1 : 0
+    - qqeLong   = QQExlong == 1 ? FastAtrRsiTL[1] - 50 : na
+    - qqeShort  = QQExshort == 1 ? FastAtrRsiTL[1] - 50 : na
+
+    说明:
+    -----
+
+    - Pine 的 ``cross(a, b)`` 这里按 **上穿(crossover)** 语义实现
+        (``a[1] < b[1] and a > b``); 原码把参数互换
+        (``cross(longband[1], RSIndex)``) 正是为了检测向下的穿越。
+    - Pine 的 ``ema`` 以第一个有效值播种后按 ``2/(n+1)`` 递归; ``rma`` 以
+        前 n 个值的 SMA 播种后按 ``1/n`` 递归, 与 minibt 内其它移植文件一致。
+    - 原码的 ``ThreshHold`` 输入在脚本中并未被使用, 这里保留为参数以对齐原码。
+
+    输出 lines
+    ----------
+    - 副图: qqe_rsi, qqe_fast
+    - 主图: long_signal, short_signal (标注 "Long" / "Short")
+    """
+    lines = ('qqe_rsi', 'qqe_fast', 'long_signal', 'short_signal')
+    params = dict(
+        rsi_period=14,       # RSI Length
+        sf=5,                # RSI Smoothing
+        qqe_factor=4.238,    # Fast QQE Factor
+        threshold=10,        # Thresh-hold (原码未使用, 保留)
+    )
+    # 副图显示 QQE 指标本体; 信号列不画线, 由 signalstyle 画在主图
+    overlap = dict(qqe_rsi=False, qqe_fast=False,
+                   long_signal=True, short_signal=True)
+    isplot = dict(qqe_rsi=True, qqe_fast=True,
+                  long_signal=False, short_signal=False)
+    category = 'momentum'
+    linestyle = dict(
+        qqe_rsi=LineStyle(line_color='#7E57C2', line_width=1.2),
+        qqe_fast=LineStyle(line_color='#FFB300', line_width=2.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#00E676', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#FF5252', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具函数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _rma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _rsi(cls, close, n: int) -> np.ndarray:
+        """Pine ``ta.rsi``: Wilder 平滑涨跌幅, 对齐 TaLib / TradingView。"""
+        c = np.asarray(close, dtype=np.float64)
+        diff = np.diff(c, prepend=np.nan)
+        up = np.maximum(diff, 0.0)
+        dn = np.maximum(-diff, 0.0)
+        ru = cls._rma(up, n)
+        rd = cls._rma(dn, n)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rsi = 100.0 - 100.0 / (1.0 + ru / np.maximum(rd, 1e-12))
+        return np.where(rd == 0.0, 100.0, np.where(ru == 0.0, 0.0, rsi))
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        rsi_period = max(2, int(p.rsi_period))
+        sf = max(1, int(p.sf))
+        factor = float(p.qqe_factor)
+        wilders = rsi_period * 2 - 1
+
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- 原码 pre-compute ----
+        rsi = self._rsi(close, rsi_period)              # Rsi
+        rsi_ma = self._ema(rsi, sf)                     # RsiMa / RSIndex
+        rsi_ma_prev = np.concatenate([[np.nan], rsi_ma[:-1]])
+        atr_rsi = np.abs(rsi_ma_prev - rsi_ma)          # AtrRsi
+        ma_atr_rsi = self._ema(atr_rsi, wilders)        # MaAtrRsi
+        dar = self._ema(ma_atr_rsi, wilders) * factor   # DeltaFastAtrRsi
+
+        new_longband = rsi_ma - dar
+        new_shortband = rsi_ma + dar
+
+        qqe_rsi = rsi_ma.copy()
+        qqe_fast = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        # ---- 原码递归: longband / shortband / trend / FastAtrRsiTL / QQE 计数 ----
+        longband = np.nan
+        shortband = np.nan
+        trend = 1                      # nz(trend[1], 1) 的初始值
+        qxlong = 0.0                   # QQExlong
+        qxshort = 0.0                  # QQExshort
+
+        prev_rsi = np.nan
+        prev_longband = np.nan
+        prev2_longband = np.nan
+        prev_shortband = np.nan
+        prev2_shortband = np.nan
+
+        for i in range(n):
+            cur_rsi = rsi_ma[i]
+
+            # longband := RsiMa[1] > longband[1] and RsiMa > longband[1]
+            #             ? max(longband[1], newlongband) : newlongband
+            if (not np.isnan(prev_rsi) and not np.isnan(prev_longband)
+                    and not np.isnan(cur_rsi)
+                    and prev_rsi > prev_longband and cur_rsi > prev_longband):
+                longband = max(prev_longband, new_longband[i])
+            else:
+                longband = new_longband[i]
+
+            # shortband := RsiMa[1] < shortband[1] and RsiMa < shortband[1]
+            #              ? min(shortband[1], newshortband) : newshortband
+            if (not np.isnan(prev_rsi) and not np.isnan(prev_shortband)
+                    and not np.isnan(cur_rsi)
+                    and prev_rsi < prev_shortband and cur_rsi < prev_shortband):
+                shortband = min(prev_shortband, new_shortband[i])
+            else:
+                shortband = new_shortband[i]
+
+            # cross(RsiMa, shortband[1]): RsiMa 上穿前一根 shortband
+            cross_up_short = (not np.isnan(prev_rsi) and not np.isnan(prev2_shortband)
+                              and not np.isnan(cur_rsi) and not np.isnan(prev_shortband)
+                              and prev_rsi < prev2_shortband
+                              and cur_rsi > prev_shortband)
+            # cross_1 = cross(longband[1], RsiMa): longband 上穿 RsiMa
+            # (等价于 RsiMa 下穿 longband)
+            cross_1 = (not np.isnan(prev2_longband) and not np.isnan(prev_rsi)
+                       and not np.isnan(prev_longband) and not np.isnan(cur_rsi)
+                       and prev2_longband < prev_rsi
+                       and prev_longband > cur_rsi)
+
+            # trend := cross(RsiMa, shortband[1]) ? 1 : cross_1 ? -1 : nz(trend[1], 1)
+            if cross_up_short:
+                trend = 1
+            elif cross_1:
+                trend = -1
+
+            fast = longband if trend == 1 else shortband   # FastAtrRsiTL
+            qqe_fast[i] = fast
+
+            # QQExlong / QQExshort 计数
+            if not np.isnan(fast) and not np.isnan(cur_rsi) and fast < cur_rsi:
+                qxlong += 1.0
+            else:
+                qxlong = 0.0
+            if not np.isnan(fast) and not np.isnan(cur_rsi) and fast > cur_rsi:
+                qxshort += 1.0
+            else:
+                qxshort = 0.0
+
+            # qqeLong / qqeShort: 计数器首次为 1 的 bar 触发
+            if qxlong == 1.0:
+                long_sig[i] = 1.0
+            if qxshort == 1.0:
+                short_sig[i] = 1.0
+
+            # 滚动历史
+            prev2_longband = prev_longband
+            prev_longband = longband
+            prev2_shortband = prev_shortband
+            prev_shortband = shortband
+            prev_rsi = cur_rsi
+
+        return qqe_rsi, qqe_fast, long_sig, short_sig
+
+    # ------------------------------------------------------------------
+    # 逐点信号标签文本 (渲染层自动调用): 对齐原码 plotshape 的 "Long"/"Short"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'Long'),
+            'short_signal': _map(self.short_signal, 'Short'),
+        }
+
+
+class ZeroLagTrendSignals(BtIndicator):
+    """Zero Lag Trend Signals (MTF) [AlgoAlpha] → MiniBT BtIndicator
+    --------
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/tHK4O1Fi-Zero-Lag-Trend-Signals-MTF-AlgoAlpha/
+        © AlgoAlpha, MPL 2.0
+
+    转换说明
+    --------
+    按需求 **只保留主图指标与信号**, 原码中的多周期 ``request.security`` 与
+    右上角 Time Frame / Signal 表格 (t1~t5, barstate.islast 的 data_table) 全部忽略。
+
+    主图核心逻辑(逐字对齐原码):
+    ----
+    - lag        = floor((length - 1) / 2)
+    - zlema      = ta.ema(src + (src - src[lag]), length)
+    - volatility = ta.highest(ta.atr(length), length * 3) * mult
+    - trend      = 0
+    - if ta.crossover(close, zlema + volatility):   trend := 1
+    - if ta.crossunder(close, zlema - volatility):  trend := -1
+
+    主图绘制(原码):
+    ----
+    - Zero Lag Basis : zlema, 多头绿 / 空头红;
+    - Upper Deviation Band : trend == -1 时显示 zlema + volatility(红);
+    - Lower Deviation Band : trend == 1  时显示 zlema - volatility(绿);
+    - zlema 与上/下轨之间分别填充红色 / 绿色。
+
+    信号(原码):
+    ----
+    - Bullish Trend  : ta.crossover(trend, 0)   (▲, 主图大三角)
+    - Bearish Trend  : ta.crossunder(trend, 0)  (▼, 主图大倒三角)
+    - Bullish Entry  : ta.crossover(close, zlema) and trend == 1 and trend[1] == 1
+    - Bearish Entry  : ta.crossunder(close, zlema) and trend == -1 and trend[1] == -1
+
+    ⚠ minibt 只识别 4 个固定信号列 (long_signal / short_signal / exitlong_signal /
+    exitshort_signal), 无法使用任意自定义信号名。因此 4 个原码信号按语义映射:
+
+    - long_signal      ← Bullish Entry  (顺势回踩做多, 主图低点 小▲)
+    - short_signal     ← Bearish Entry  (顺势反弹做空, 主图高点 小▼)
+    - exitlong_signal  ← Bearish Trend  (趋势转空 → 平多, 高点 大▼)
+    - exitshort_signal ← Bullish Trend  (趋势转多 → 平空, 低点 大▲)
+
+    这样 ``entries = long_signal - short_signal`` / ``exits`` 的语义与原码一致:
+    顺势入场 + 趋势翻转离场。
+
+    输出 lines(全部主图叠加)
+    ------------------------
+    - zlema_bull / zlema_bear : Zero Lag 基线(按趋势着色: 多绿 / 空红)
+    - upper_band / lower_band : 仅在对应趋势下显示的上/下偏离轨
+    - long_signal / short_signal : 顺势入场(Entry)
+    - exitlong_signal / exitshort_signal : 趋势翻转(Trend)
+    """
+    lines = ('zlema_bull', 'zlema_bear', 'upper_band', 'lower_band',
+             'long_signal', 'short_signal',
+             'exitlong_signal', 'exitshort_signal')
+    params = dict(
+        length=70,      # Length: ZLEMA 回看窗口
+        mult=1.2,       # Band Multiplier: 波动轨厚度
+    )
+    category = 'overlap'
+    overlap = dict(
+        zlema_bull=True, zlema_bear=True,
+        upper_band=True, lower_band=True,
+        long_signal=True, short_signal=True,
+        exitlong_signal=True, exitshort_signal=True,
+    )
+    isplot = dict(
+        zlema_bull=True, zlema_bear=True,
+        upper_band=True, lower_band=True,
+        long_signal=False, short_signal=False,
+        exitlong_signal=False, exitshort_signal=False,
+    )
+    linestyle = dict(
+        # 原码 green=#00ffbb / red=#ff1100
+        zlema_bull=LineStyle(line_color='#00ffbb', line_width=2.0),
+        zlema_bear=LineStyle(line_color='#ff1100', line_width=2.0),
+        upper_band=LineStyle(line_color='#ff1100', line_width=1.0),
+        lower_band=LineStyle(line_color='#00ffbb', line_width=1.0),
+    )
+    # 多空偏离轨填充 (原码 fill): value=0.08 略微降低透明度便于区分
+    bandstyle = [
+        BandStyle(lower='lower_band', upper='zlema_bull',
+                  fill_color='#00ffbb', fill_alpha=0.08),
+        BandStyle(lower='zlema_bear', upper='upper_band',
+                  fill_color='#ff1100', fill_alpha=0.08),
+    ]
+    signalstyle = dict(
+        # 入场信号: 小箭头
+        long_signal=SignalStyle('low', '#00ffbb', 'triangle', True, True, 9),
+        short_signal=SignalStyle(
+            'high', '#ff1100', 'inverted_triangle', True, True, 9),
+        # 趋势翻转: 大箭头
+        exitshort_signal=SignalStyle(
+            'low', '#00ffbb', 'triangle', True, True, 15),
+        exitlong_signal=SignalStyle(
+            'high', '#ff1100', 'inverted_triangle', True, True, 15),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具函数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _cross_over(a, b) -> np.ndarray:
+        """Pine ``ta.crossover(a, b)``: ``a[1] < b[1] and a > b``。"""
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        out = np.zeros(len(a), dtype=bool)
+        if len(a) > 1:                      # 向量化（与原逐点循环逐位一致）
+            finite = (~np.isnan(a[:-1]) & ~np.isnan(b[:-1])
+                      & ~np.isnan(a[1:]) & ~np.isnan(b[1:]))
+            out[1:] = finite & (a[:-1] < b[:-1]) & (a[1:] > b[1:])
+        return out
+
+    @staticmethod
+    def _cross_under(a, b) -> np.ndarray:
+        """Pine ``ta.crossunder(a, b)``: ``a[1] > b[1] and a < b``。"""
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        out = np.zeros(len(a), dtype=bool)
+        if len(a) > 1:                      # 向量化（与原逐点循环逐位一致）
+            finite = (~np.isnan(a[:-1]) & ~np.isnan(b[:-1])
+                      & ~np.isnan(a[1:]) & ~np.isnan(b[1:]))
+            out[1:] = finite & (a[:-1] > b[:-1]) & (a[1:] < b[1:])
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        length = max(2, int(p.length))
+        mult = float(p.mult)
+        lag = int(np.floor((length - 1) / 2))
+
+        src = np.asarray(self.close, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        n = len(src)
+
+        # ---- Zero Lag EMA: ema(src + (src - src[lag]), length) ----
+        if lag > 0:
+            src_lag = np.concatenate([np.full(lag, np.nan), src[:-lag]])
+        else:
+            src_lag = src.copy()
+        zlema = self._ema(src + (src - src_lag), length)
+
+        # ---- volatility = highest(atr(length), length*3) * mult ----
+        atr_ = self._atr(high, low, src, length)
+        highest_atr = pd.Series(atr_).rolling(length * 3).max().values
+        volatility = highest_atr * mult
+
+        upper = zlema + volatility
+        lower = zlema - volatility
+
+        # ---- 趋势状态机 (原码两条独立 if) ----
+        cross_up_upper = self._cross_over(src, upper)
+        cross_dn_lower = self._cross_under(src, lower)
+        cross_up_zlema = self._cross_over(src, zlema)
+        cross_dn_zlema = self._cross_under(src, zlema)
+
+        trend = np.zeros(n, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)     # Bullish Entry
+        short_sig = np.zeros(n, dtype=np.float64)    # Bearish Entry
+        exitlong = np.zeros(n, dtype=np.float64)     # Bearish Trend
+        exitshort = np.zeros(n, dtype=np.float64)    # Bullish Trend
+
+        cur_trend = 0
+        for i in range(n):
+            prev_trend = cur_trend
+            if cross_up_upper[i]:
+                cur_trend = 1
+            if cross_dn_lower[i]:
+                cur_trend = -1
+            trend[i] = cur_trend
+
+            # Bullish/Bearish Trend: crossover(trend, 0) / crossunder(trend, 0)
+            if i >= 1:
+                if trend[i - 1] < 0 < trend[i]:
+                    exitshort[i] = 1.0      # 趋势转多 → 平空
+                elif trend[i - 1] > 0 > trend[i]:
+                    exitlong[i] = 1.0       # 趋势转空 → 平多
+
+            # Bullish/Bearish Entry: close 穿过 zlema 且趋势已确立
+            if cross_up_zlema[i] and cur_trend == 1 and prev_trend == 1:
+                long_sig[i] = 1.0
+            elif cross_dn_zlema[i] and cur_trend == -1 and prev_trend == -1:
+                short_sig[i] = 1.0
+
+        # ---- 绘制线: 基线按趋势着色; 偏离轨仅在对应趋势下显示 ----
+        zlema_bull = np.where(trend == 1, zlema, np.nan)
+        zlema_bear = np.where(trend != 1, zlema, np.nan)
+        # 趋势翻转处把 zlema 同时写入两条线, 保证线段连续不断开
+        for i in range(1, n):
+            if trend[i] != trend[i - 1]:
+                zlema_bull[i] = zlema[i]
+                zlema_bear[i] = zlema[i]
+
+        upper_band = np.where(trend == -1, upper, np.nan)
+        lower_band = np.where(trend == 1, lower, np.nan)
+
+        return (zlema_bull, zlema_bear, upper_band, lower_band,
+                long_sig, short_sig, exitlong, exitshort)
+
+    # ------------------------------------------------------------------
+    # 逐点信号标签文本 (渲染层自动调用)
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'Long'),
+            'short_signal': _map(self.short_signal, 'Short'),
+            'exitshort_signal': _map(self.exitshort_signal, 'Bull'),
+            'exitlong_signal': _map(self.exitlong_signal, 'Bear'),
+        }
+
+
+class RangeFilterSignals(BtIndicator):
+    """Range Filter - B&S Signals (VuManChu Swing Free) → MiniBT BtIndicator
+    --------
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/q23anHmP-VuManChu-Swing-Free/
+        原始脚本: Range Filter DonovanWall
+        https://www.tradingview.com/script/lut7sBgG-Range-Filter-DW/
+
+    说明
+    ----
+    这是 Range Filter 的"旧版 / 少设置"版本, 只有 Swing Source / Swing Period /
+    Swing Multiplier 三个输入, 主图输出:
+
+    - Filter           : 过滤后的趋势价, 按方向着色(多绿 / 空红 / 中性灰);
+    - High / Low Band  : filt ± rng, 原码中本身完全透明, 仅作为填充边界;
+    - Band Fills       : 上带与 filt 之间(绿), 下带与 filt 之间(品红);
+    - BUY / SELL       : 多空条件首次翻转时的标签。
+
+    核心逻辑(逐字对齐原码):
+    --------
+    ```
+        // Range Size
+        wper   = n * 2 - 1
+        avrng  = ema(abs(x - x[1]), n)
+        AC     = ema(avrng, wper) * qty
+
+        // Range Filter
+        r = AC
+        var rfilt = [x, x]
+        rfilt[1] = rfilt[0]
+        if x - r > rfilt[1]: rfilt[0] = x - r
+        if x + r < rfilt[1]: rfilt[0] = x + r
+        filt = rfilt[0]
+        h_band = filt + r
+        l_band = filt - r
+
+        // Direction
+        fdir := filt > filt[1] ? 1 : filt < filt[1] ? -1 : fdir
+        upward   = fdir == 1
+        downward = fdir == -1
+
+        // Signals
+        longCond  = x > filt and upward   and (x > x[1] or x < x[1])
+        shortCond = x < filt and downward and (x < x[1] or x > x[1])
+        CondIni   := longCond ? 1 : shortCond ? -1 : CondIni[1]
+        longCondition  = longCond  and CondIni[1] == -1
+        shortCondition = shortCond and CondIni[1] ==  1
+    ```
+    输出 lines(全部主图叠加)
+    ------------------------
+    - filt           : 连续 Filter 线(中性灰, 亦作为填充边界)
+    - filt_bull / filt_bear : Filter 线按方向着色的两段(多绿 / 空红, 翻转处桥接)
+    - h_band / l_band: 上下偏离带
+    - long_signal    : BUY  信号
+    - short_signal   : SELL 信号
+
+    原码的 ``use_barcolor``(K线着色, 默认关闭)属于 barcolor 逐点染色,
+    minibt 的 K 线颜色不支持按 bar 逐点变化, 故未复现。
+    """
+    lines = ('filt', 'filt_bull', 'filt_bear', 'h_band', 'l_band',
+             'long_signal', 'short_signal')
+    params = dict(
+        rng_per=20,     # Swing Period
+        rng_qty=3.5,    # Swing Multiplier
+    )
+    category = 'overlap'
+    overlap = dict(
+        filt=True, filt_bull=True, filt_bear=True,
+        h_band=True, l_band=True,
+        long_signal=True, short_signal=True,
+    )
+    isplot = dict(
+        filt=True, filt_bull=True, filt_bear=True,
+        h_band=True, l_band=True,
+        long_signal=False, short_signal=False,
+    )
+    linestyle = dict(
+        # 连续基线(中性灰), 被下方粗线覆盖, 只在 fdir==0 时露出
+        filt=LineStyle(line_color='#cccccc', line_width=1.0),
+        # 原码: filt_color = upward ? #05ff9b : downward ? #ff0583 : #cccccc
+        filt_bull=LineStyle(line_color='#05ff9b', line_width=3.0),
+        filt_bear=LineStyle(line_color='#ff0583', line_width=3.0),
+        h_band=LineStyle(line_color='#00b36b', line_width=0.6),
+        l_band=LineStyle(line_color='#b8005d', line_width=0.6),
+    )
+    # 原码 Band Fills: 上带↔filt 用 #00b36b, 下带↔filt 用 #b8005d
+    bandstyle = [
+        BandStyle(lower='l_band', upper='filt',
+                  fill_color='#b8005d', fill_alpha=0.08),
+        BandStyle(lower='filt', upper='h_band',
+                  fill_color='#00b36b', fill_alpha=0.08),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#00ff00', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#ff0000', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具函数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        per = max(1, int(p.rng_per))
+        qty = float(p.rng_qty)
+
+        src = np.asarray(self.close, dtype=np.float64)
+        n = len(src)
+
+        # ---- Range Size: rng = ema(ema(abs(x - x[1]), per), per*2-1) * qty ----
+        src_prev = np.concatenate([[np.nan], src[:-1]])
+        diff_abs = np.abs(src - src_prev)
+        avrng = self._ema(diff_abs, per)
+        rng = self._ema(avrng, per * 2 - 1) * qty
+
+        # ---- Range Filter: 价格穿出通道时 filt 跳至通道边界, 否则保持 ----
+        filt = np.full(n, np.nan, dtype=np.float64)
+        if n:
+            rf0 = src[0]                       # var rfilt = [x, x]
+            filt[0] = rf0
+            for i in range(1, n):
+                prev = rf0                     # rfilt[1] = rfilt[0]
+                r = rng[i]
+                if not np.isnan(r):
+                    if src[i] - r > prev:
+                        rf0 = src[i] - r
+                    if src[i] + r < prev:
+                        rf0 = src[i] + r
+                filt[i] = rf0
+        h_band = filt + rng
+        l_band = filt - rng
+
+        # ---- 方向: filt 上升→1, 下降→-1, 不变→维持 ----
+        fdir = np.zeros(n, dtype=np.float64)
+        for i in range(1, n):
+            if filt[i] > filt[i - 1]:
+                fdir[i] = 1.0
+            elif filt[i] < filt[i - 1]:
+                fdir[i] = -1.0
+            else:
+                fdir[i] = fdir[i - 1]
+        upward = fdir == 1
+        downward = fdir == -1
+
+        # ---- 交易条件 ----
+        # 原码 and 优先于 or: 两个分支都以 (x > filt and upward) 为前提
+        long_cond = ((src > filt) & (src > src_prev) & upward) | \
+                    ((src > filt) & (src < src_prev) & upward)
+        short_cond = ((src < filt) & (src < src_prev) & downward) | \
+                     ((src < filt) & (src > src_prev) & downward)
+
+        # CondIni: 长条件→1, 短条件→-1, 否则维持
+        cond_ini = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            if long_cond[i]:
+                cond_ini[i] = 1.0
+            elif short_cond[i]:
+                cond_ini[i] = -1.0
+            elif i > 0:
+                cond_ini[i] = cond_ini[i - 1]
+
+        cond_ini_prev = np.concatenate([[0.0], cond_ini[:-1]])
+        long_sig = long_cond & (cond_ini_prev == -1)
+        short_sig = short_cond & (cond_ini_prev == 1)
+
+        # ---- 绘制: Filter 按方向拆线着色, 翻转处桥接以保证连续 ----
+        filt_bull = np.where(upward, filt, np.nan)
+        filt_bear = np.where(downward, filt, np.nan)
+        for i in range(1, n):
+            if fdir[i] != fdir[i - 1]:
+                filt_bull[i] = filt[i]
+                filt_bear[i] = filt[i]
+
+        return (filt, filt_bull, filt_bear, h_band, l_band,
+                long_sig.astype(np.float64), short_sig.astype(np.float64))
+
+    # ------------------------------------------------------------------
+    # 逐点信号标签文本 (渲染层自动调用): 对齐原码 plotshape 的 "BUY"/"SELL"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'BUY'),
+            'short_signal': _map(self.short_signal, 'SELL'),
+        }
+
+
+class CMEnhancedIchimokuCloud(BtIndicator):
+    """CM_Enhanced_Ichimoku Cloud-V5 → MiniBT BtIndicator
+    --------
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/5IIzyO9L-CM-Enhanced-Ichimoku-Cloud-V5/
+        © ChrisMoody
+
+    说明
+    ----
+    按需求: 一目均衡表(Ichimoku)本体直接调用框架内置的 **``self.ichimoku``**
+    (源自 pandas_ta), 本转换的重点是 **补上交易信号**。
+
+    原码输入(默认值):
+    ----
+    - Tenkan-Sen          = 9
+    - Kinjun-Sen          = 26
+    - Senkou Span B       = 52
+    - displacement        = 26   (-ChinkouSpan / +SenkouSpanA)
+    - Show Tenkan/Kinjun/Chinkou/Cloud = true
+    - Show Crosses (cr1)  = false   ← 原码默认关闭, 本实现默认开启
+
+    一目均衡表组件(原码):
+    ----
+    - turning      = donchian(9)                      → Tenkan-Sen (转换线)
+    - standard     = donchian(26)                     → Kinjun-Sen (基准线)
+    - leadingSpan1 = (turning + standard) / 2         → Senkou Span A (先行带A)
+    - leadingSpan2 = donchian(52)                     → Senkou Span B (先行带B)
+    - chinkou      = close                            → Chinkou Span (迟行线)
+
+    其中先行带 A/B 向前位移 ``displacement`` 根, 迟行线向后位移 ``displacement`` 根。
+    ``pandas_ta`` 的 ichimoku 位移是 ``kijun-1``, 本实现按 ``displacement`` 再做校正。
+
+    云层着色: leadingSpan1 >= leadingSpan2 → 绿(lime, 看涨云); 否则 → 红(red, 看跌云)。
+
+    交易信号(原码的交叉箭头, 由 cr1 控制; 本实现默认开启):
+        crossUp : turning[1] < standard[1] and turning > standard  → 做多
+        crossDn : turning[1] > standard[1] and turning < standard  → 做空
+
+    输出 lines(全部主图叠加)
+    ------------------------
+    - tenkan_sen : 转换线 (lime)
+    - kijun_sen  : 基准线 (fuchsia)
+    - chikou_span: 迟行线 (aqua, 向后位移 displacement)
+    - span1_up / span2_up : 看涨云的两条边界 (绿)
+    - span1_dn / span2_dn : 看跌云的两条边界 (红)
+    - long_signal / short_signal : Tenkan/Kijun 金叉做多 / 死叉做空
+
+    云层填充通过 BandStyle 实现: (span2_up, span1_up) 绿, (span1_dn, span2_dn) 红。
+    """
+    lines = ('tenkan_sen', 'kijun_sen', 'chikou_span',
+             'span1_up', 'span2_up', 'span1_dn', 'span2_dn',
+             'long_signal', 'short_signal')
+    params = dict(
+        tenkan=9,             # Tenkan-Sen
+        kijun=26,             # Kinjun-Sen
+        senkou=52,            # Senkou Span B
+        displacement=26,      # -ChinkouSpan / +SenkouSpanA
+        show_tenkan=True,     # sts
+        show_kijun=True,      # sks
+        show_chikou=True,     # sll
+        show_cloud=True,      # sc
+        show_crosses=True,    # cr1 (原码默认 false, 本实现默认 true, 用于输出交易信号)
+    )
+    category = 'overlap'
+    overlap = True
+    isplot = dict(long_signal=False, short_signal=False)
+    linestyle = dict(
+        tenkan_sen=LineStyle(line_color='#00ff00', line_width=2.0),   # lime
+        kijun_sen=LineStyle(line_color='#ff00ff', line_width=2.0),    # fuchsia
+        chikou_span=LineStyle(line_color='#00ffff', line_width=1.5),  # aqua
+        span1_up=LineStyle(line_color='#00ff00', line_width=1.5),
+        span2_up=LineStyle(line_color='#00ff00', line_width=1.5),
+        span1_dn=LineStyle(line_color='#ff0000', line_width=1.5),
+        span2_dn=LineStyle(line_color='#ff0000', line_width=1.5),
+    )
+    # 云层填充: 看涨云绿, 看跌云红 (原码 transp=70)
+    bandstyle = [
+        BandStyle(lower='span2_up', upper='span1_up',
+                  fill_color='#00ff00', fill_alpha=0.15),
+        BandStyle(lower='span1_dn', upper='span2_dn',
+                  fill_color='#ff0000', fill_alpha=0.15),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#ffeb3b', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#ffeb3b', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # 工具函数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        """等价 ``pd.Series.shift(k)``: k>0 向后(下)移, k<0 向前(上)移, NaN 填充。"""
+        a = np.asarray(a, dtype=np.float64)
+        n = len(a)
+        if k == 0:
+            return a.copy()
+        out = np.full(n, np.nan, dtype=np.float64)
+        if k > 0:
+            if k < n:
+                out[k:] = a[:n - k]
+        else:
+            k = -k
+            if k < n:
+                out[:n - k] = a[k:]
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        tenkan = max(1, int(p.tenkan))
+        kijun = max(1, int(p.kijun))
+        senkou = max(1, int(p.senkou))
+        disp = int(p.displacement)
+
+        # ---- 一目均衡表本体: 直接调用框架内置 self.ichimoku (pandas_ta) ----
+        ichi = self.ichimoku(tenkan=tenkan, kijun=kijun, senkou=senkou)
+        ts = np.asarray(ichi.tenkan_sen, dtype=np.float64)   # 转换线
+        ks = np.asarray(ichi.kijun_sen, dtype=np.float64)    # 基准线
+        span_a = np.asarray(ichi.spana, dtype=np.float64)    # 先行带 A
+        span_b = np.asarray(ichi.spanb, dtype=np.float64)    # 先行带 B
+        chikou = np.asarray(ichi.chikou_span, dtype=np.float64)  # 迟行线
+
+        # pandas_ta 的先行带/迟行线位移为 kijun-1, 校正到原码 displacement
+        d = disp - (kijun - 1)
+        if d != 0:
+            span_a = self._shift(span_a, d)
+            span_b = self._shift(span_b, d)
+            chikou = self._shift(chikou, -d)
+
+        # ---- 交易信号: Tenkan / Kijun 交叉 (原码 crossUp/DnTenkanKinjun) ----
+        ts_prev = self._shift(ts, 1)
+        ks_prev = self._shift(ks, 1)
+        valid = (~np.isnan(ts) & ~np.isnan(ks)
+                 & ~np.isnan(ts_prev) & ~np.isnan(ks_prev))
+        if p.show_crosses:
+            long_sig = (valid & (ts_prev < ks_prev) &
+                        (ts > ks)).astype(np.float64)
+            short_sig = (valid & (ts_prev > ks_prev) &
+                         (ts < ks)).astype(np.float64)
+        else:
+            long_sig = np.zeros_like(ts)
+            short_sig = np.zeros_like(ts)
+
+        # ---- 显示开关 (原码 sts/sks/sll/sc) ----
+        ts_plot = ts if p.show_tenkan else np.full_like(ts, np.nan)
+        ks_plot = ks if p.show_kijun else np.full_like(ks, np.nan)
+        chikou_plot = chikou if p.show_chikou else np.full_like(chikou, np.nan)
+
+        if p.show_cloud:
+            # 云层按趋势拆成绿/红两组边界, 等值时两组都有效以保证填充连续
+            cloud_valid = ~np.isnan(span_a) & ~np.isnan(span_b)
+            up = cloud_valid & (span_a >= span_b)   # 看涨云 (lime)
+            dn = cloud_valid & (span_a <= span_b)   # 看跌云 (red)
+            # span_b 尚未形成(52 周期)但 span_a 已可用时, 原码 col 落到 red 分支
+            early = ~np.isnan(span_a) & np.isnan(span_b)
+            span1_up = np.where(up, span_a, np.nan)
+            span2_up = np.where(up, span_b, np.nan)
+            span1_dn = np.where(dn | early, span_a, np.nan)
+            span2_dn = np.where(dn, span_b, np.nan)
+        else:
+            nan = np.full_like(span_a, np.nan)
+            span1_up = span2_up = span1_dn = span2_dn = nan
+
+        return (ts_plot, ks_plot, chikou_plot,
+                span1_up, span2_up, span1_dn, span2_dn,
+                long_sig, short_sig)
+
+
+class TrendTargets(BtIndicator):
+    """Trend Targets [AlgoAlpha] → MiniBT BtIndicator (仅主图 tL 与信号)
+    --------
+    原码(TradingView Pine v6):
+        https://cn.tradingview.com/script/OXsSm5NV-Trend-Targets-AlgoAlpha/
+        © AlgoAlpha
+
+    范围
+    ----
+    按需求 **只复刻主图均线 ``tL`` 及其信号**, 其余全部忽略:
+        - 忽略: 止盈/止损线(entry/SL/TP1~TP3)、各类 label、linefill、
+                barcolor、Rejection(拒绝)信号、rejcount、所有 alertcondition。
+
+    核心逻辑(逐字对齐原码):
+    ----
+    ```
+        hl2 = (high + low) / 2
+        atr = ta.atr(st_atr_period)
+
+        // 改进版 SuperTrend 上下轨(带棘轮)
+        upperBand = hl2 + st_factor * atr
+        lowerBand = hl2 - st_factor * atr
+        prevLowerBand = nz(lowerBand[1])
+        prevUpperBand = nz(upperBand[1])
+        lowerBand := lowerBand > prevLowerBand or close[1] < prevLowerBand ? lowerBand : prevLowerBand
+        upperBand := upperBand < prevUpperBand or close[1] > prevUpperBand ? upperBand : prevUpperBand
+
+        // 基线 tL: 上下轨均值的 WMA 再 EMA
+        tL = ta.ema(ta.wma(math.avg(lowerBand, upperBand), wma_length), ema_length)
+
+        // 趋势状态
+        trend = 0
+        if ta.crossover(tL, tL[1]):  trend := 1
+        if ta.crossunder(tL, tL[1]): trend := -1
+    ```
+    tL 按趋势着色: trend == 1 → 绿(#00ffbb), 否则 → 红(#ff1100)。
+
+    信号(原码的 "Bullish/Bearish Trend Change"):
+    - long_signal  = ta.crossover(tL, tL[1])    (tL 由跌转升)
+    - short_signal = ta.crossunder(tL, tL[1])   (tL 由升转跌)
+
+    输出 lines(全部主图叠加)
+    ------------------------
+    - tL_bull / tL_bear : 基线 tL 按趋势拆成的绿/红两段(翻转处桥接)
+    - long_signal / short_signal : 趋势变化信号
+    """
+    lines = ('tL_bull', 'tL_bear', 'long_signal', 'short_signal')
+    params = dict(
+        st_factor=12.0,      # Supertrend Factor
+        st_atr_period=90,    # Supertrend ATR Period
+        wma_length=40,       # WMA Length
+        ema_length=14,       # EMA Length
+        green='#00ffbb',     # Bullish Color
+        red='#ff1100',       # Bearish Color
+    )
+    category = 'overlap'
+    overlap = True
+    isplot = dict(long_signal=False, short_signal=False)
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#00ffbb', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#ff1100', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具函数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    @staticmethod
+    def _wma(a, n: int) -> np.ndarray:
+        """Pine ``ta.wma``: 线性加权移动平均(最新值权重最大), 不足 n 根为 NaN。"""
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        w = np.arange(1, n + 1, dtype=np.float64)
+        wsum = w.sum()
+        for i in range(n - 1, len(a)):
+            window = a[i - n + 1:i + 1]
+            if np.isnan(window).any():
+                continue
+            out[i] = float(np.dot(window, w)) / wsum
+        return out
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        factor = float(p.st_factor)
+        atr_period = max(1, int(p.st_atr_period))
+        wma_len = max(1, int(p.wma_length))
+        ema_len = max(1, int(p.ema_length))
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        hl2 = (high + low) / 2.0
+        atr = self._atr(high, low, close, atr_period)
+
+        # ---- 改进版 SuperTrend 上下轨(带棘轮) ----
+        lwr = np.full(n, np.nan, dtype=np.float64)
+        upr = np.full(n, np.nan, dtype=np.float64)
+        prev_lb = 0.0            # nz(lowerBand[1])
+        prev_ub = 0.0            # nz(upperBand[1])
+        for i in range(n):
+            a = atr[i]
+            if np.isnan(a):
+                # ATR 未就绪时上下轨不可用; 使用 nz 语义把前值视作 0
+                prev_lb = 0.0
+                prev_ub = 0.0
+                continue
+            lb_raw = hl2[i] - factor * a
+            ub_raw = hl2[i] + factor * a
+            c_prev = close[i - 1] if i >= 1 else np.nan
+            # lowerBand := lowerBand > prevLowerBand or close[1] < prevLowerBand ? lowerBand : prevLowerBand
+            if lb_raw > prev_lb or (not np.isnan(c_prev) and c_prev < prev_lb):
+                lb = lb_raw
+            else:
+                lb = prev_lb
+            # upperBand := upperBand < prevUpperBand or close[1] > prevUpperBand ? upperBand : prevUpperBand
+            if ub_raw < prev_ub or (not np.isnan(c_prev) and c_prev > prev_ub):
+                ub = ub_raw
+            else:
+                ub = prev_ub
+            lwr[i] = lb
+            upr[i] = ub
+            prev_lb = lb
+            prev_ub = ub
+
+        # ---- tL = ema(wma(avg(lwr, upr), wma_len), ema_len) ----
+        mid = (lwr + upr) / 2.0          # math.avg
+        wma_mid = self._wma(mid, wma_len)
+        tl = self._ema(wma_mid, ema_len)
+
+        # ---- 趋势状态: crossover(tL, tL[1]) / crossunder(tL, tL[1]) ----
+        tl_prev = np.concatenate([[np.nan], tl[:-1]])       # tL[1]
+        tl_prev2 = np.concatenate([[np.nan], tl_prev[:-1]])  # tL[2]
+        valid = ~np.isnan(tl) & ~np.isnan(tl_prev) & ~np.isnan(tl_prev2)
+        cross_up = valid & (tl_prev < tl_prev2) & (tl > tl_prev)
+        cross_dn = valid & (tl_prev > tl_prev2) & (tl < tl_prev)
+        long_sig = cross_up.astype(np.float64)
+        short_sig = cross_dn.astype(np.float64)
+
+        trend = np.zeros(n, dtype=np.float64)
+        cur = 0
+        for i in range(n):
+            if cross_up[i]:
+                cur = 1
+            elif cross_dn[i]:
+                cur = -1
+            trend[i] = cur
+
+        # ---- 基线 tL 按趋势拆线着色 (trend==1 绿, 否则红), 翻转处桥接 ----
+        tL_bull = np.where(trend == 1, tl, np.nan)
+        tL_bear = np.where(trend != 1, tl, np.nan)
+        for i in range(1, n):
+            if trend[i] != trend[i - 1]:
+                tL_bull[i] = tl[i]
+                tL_bear[i] = tl[i]
+
+        return tL_bull, tL_bear, long_sig, short_sig
+
+
+class ThreeCommasBot(BtIndicator):
+    """3Commas Bot → MiniBT BtIndicator + Strategy
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/MvlwAzSg-3Commas-Bot/
+        © Bjorgum
+
+    说明
+    ----
+    把原 ``strategy`` 拆成 MiniBT 的「指标 + 策略」两层:
+
+    指标 ``ThreeCommasBot`` 输出
+    - 主图: MA1 / MA2 (可选 9 种均线类型);
+    - 风控线(初始均为 ``np.nan``, 仅在持仓期间有值):
+        ``stop_line``    — 止损线 (trailStop 开启时为 ATR 追踪止损, 否则为固定止损)
+        ``trigger_line`` — 移动止损触发线 (tradeExitTriggerPrice)
+        ``limit_line``   — 止盈线 (tradeTargetPrice)
+    - 信号:
+        ``long_signal`` / ``short_signal``         — 入场
+        ``exitlong_signal`` / ``exitshort_signal`` — 离场
+
+    指标内部逐 bar 模拟了一遍完整持仓生命周期(入场 → 止损/止盈/追踪止损 → 离场),
+    从而得到上述三条风控线与离场信号; 策略 ``ThreeCommasBotStrategy`` 直接按这些
+    信号下单, 两者状态保持一致。
+
+    核心逻辑(逐字对齐原码):
+    ----
+    ```
+        ma1 = getMA(maType1, maLength1)
+        ma2 = getMA(maType2, maLength2)
+        atr = ta.atr(atrLen)
+        lowestLow   = ta.lowest(low,  swinglookback)
+        highestHigh = ta.highest(high, swinglookback)
+
+        validLongEntry  = ta.crossover (ma1, ma2) and not na(atr)
+        validShortEntry = ta.crossunder(ma1, ma2) and not na(atr)
+
+        longStop    = lowestLow   - atr*RiskM
+        shortStop   = highestHigh + atr*RiskM
+        longRisk    = close - longStop
+        shortRisk   = shortStop - close
+        longlimit   = close + RnR*longRisk
+        shortlimit  = close - RnR*shortRisk
+        longLimitDist  = close - longlimit
+        shortLimitDist = shortlimit - close
+    ```
+    入场时保存 stop / limit / trigger:
+    - tradeStopPrice        = longStop / shortStop
+    - tradeTargetPrice      = useLimit ? longlimit / shortlimit : na
+    - tradeExitTriggerPrice = close - longLimitDist*rrExit  (多)
+                            close + shortLimitDist*rrExit (空)
+    - trailingStop          = tradeStopPrice
+
+    止损线行为:
+    - trailStop = true (本实现默认): ``stop_line`` = ATR 追踪止损, 多单持仓时
+        ``max(lowestLow - atr*trailStopSize)`` 逐步上移, 空单持仓时
+        ``min(highestHigh + atr*trailStopSize)`` 逐步下移, 即跟踪止盈;
+    - trailStop = false: ``stop_line`` = 入场时固定的 ``tradeStopPrice``。
+
+    离场: 价格触及 stop 或 limit 时平仓。
+
+    未复刻: 3Commas 的 JSON 告警文本、时间/日期过滤器(默认关闭)、背景着色。
+    """
+    lines = ('ma1', 'ma2', 'stop_line', 'trigger_line', 'limit_line',
+             'long_signal', 'short_signal',
+             'exitlong_signal', 'exitshort_signal')
+    params = dict(
+        # Trade variables
+        long_trades=True,
+        short_trades=True,
+        use_limit=True,
+        # 原码 input 默认 false; 但原码发布图表开启的是 ATR 追踪止损,
+        # 止损线会随价格逐步上移(多)/下移(空), 故这里默认 True 以对齐图表表现。
+        # 设为 False 则退化为固定止损(入场后不再移动)。
+        trail_stop=True,
+        flip=False,
+        # Risk Management
+        rnr=1.0,              # Reward to Risk Ratio
+        risk_m=1.0,           # Risk Adjustment (ATR 倍数)
+        swing_lookback=5,
+        atr_len=14,
+        # Trailing Stop
+        trail_stop_size=1.0,
+        trail_source='High/Low',   # High/Low / Close / Open
+        rr_exit=0.0,               # R:R To Trigger Exit
+        # MA
+        ma_type1='EMA',
+        ma_type2='EMA',
+        ma_length1=21,
+        ma_length2=50,
+    )
+    category = 'overlap'
+    overlap = True
+    isplot = dict(long_signal=False, short_signal=False,
+                  exitlong_signal=False, exitshort_signal=False)
+    linestyle = dict(
+        ma1=LineStyle(line_color='#64b5f6', line_width=1.6),
+        ma2=LineStyle(line_color='#ef5350', line_width=1.6),
+        stop_line=LineStyle(line_color='#ff1100', line_width=3,
+                            line_dash=LineDash.dashed),
+        trigger_line=LineStyle(line_color='#2962FF', line_width=2,
+                               line_dash=LineDash.dashed),
+        limit_line=LineStyle(line_color='#00E676', line_width=3,
+                             line_dash=LineDash.dashed),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#00E676', 'triangle', True, True, 12).set_label('long'),
+        short_signal=SignalStyle(
+            'high', '#ff1100', 'inverted_triangle', True, True, 12).set_label('short'),
+        exitlong_signal=SignalStyle(
+            'high', '#FF9800', 'circle_x', True, True, 10).set_label('exitlong'),
+        exitshort_signal=SignalStyle(
+            'low', '#AB47BC', 'circle_x', True, True, 10).set_label('exitshort'),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具函数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _wma(cls, a, n: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        w = np.arange(1, int(n) + 1, dtype=np.float64)
+        wsum = w.sum()
+        for i in range(int(n) - 1, len(a)):
+            win = a[i - int(n) + 1:i + 1]
+            if np.isnan(win).any():
+                continue
+            out[i] = float(np.dot(win, w)) / wsum
+        return out
+
+    @classmethod
+    def _hma(cls, a, n: int) -> np.ndarray:
+        half = max(1, int(n) // 2)
+        root = max(1, int(np.floor(np.sqrt(n))))
+        raw = 2.0 * cls._wma(a, half) - cls._wma(a, n)
+        return cls._wma(raw, root)
+
+    @classmethod
+    def _dema(cls, a, n: int) -> np.ndarray:
+        e1 = cls._ema(a, n)
+        e2 = cls._ema(e1, n)
+        return 2.0 * e1 - e2
+
+    @classmethod
+    def _t3(cls, a, n: int) -> np.ndarray:
+        e1 = cls._ema(a, n)
+        e2 = cls._ema(e1, n)
+        e3 = cls._ema(e2, n)
+        e4 = cls._ema(e3, n)
+        e5 = cls._ema(e4, n)
+        e6 = cls._ema(e5, n)
+        ab = 0.7
+        ac1 = -ab * ab * ab
+        ac2 = 3 * ab * ab + 3 * ab * ab * ab
+        ac3 = -6 * ab * ab - 3 * ab - 3 * ab * ab * ab
+        ac4 = 1 + 3 * ab + ab * ab * ab + 3 * ab * ab
+        return ac1 * e6 + ac2 * e5 + ac3 * e4 + ac4 * e3
+
+    @staticmethod
+    def _vwma(close, volume, n: int) -> np.ndarray:
+        c = np.asarray(close, dtype=np.float64)
+        v = np.asarray(volume, dtype=np.float64)
+        num = pd.Series(c * v).rolling(int(n)).sum().values
+        den = pd.Series(v).rolling(int(n)).sum().values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            out = num / den
+        return np.where(np.isfinite(out), out, np.nan)
+
+    @staticmethod
+    def _vwap(close, volume) -> np.ndarray:
+        c = np.asarray(close, dtype=np.float64)
+        v = np.asarray(volume, dtype=np.float64)
+        num = np.cumsum(np.nan_to_num(c * v))
+        den = np.cumsum(np.nan_to_num(v))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            out = num / den
+        return np.where(den > 0, out, np.nan)
+
+    @staticmethod
+    def _ha_open(open_, high, low, close) -> np.ndarray:
+        """原码 ``_haOpen``: 首根 = (open+close)/2, 之后 = (前haOpen+前haClose)/2。"""
+        o = np.asarray(open_, dtype=np.float64)
+        h = np.asarray(high, dtype=np.float64)
+        l = np.asarray(low, dtype=np.float64)
+        c = np.asarray(close, dtype=np.float64)
+        ha_close = (o + h + l + c) / 4.0
+        n = len(c)
+        out = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            if i == 0:
+                out[i] = (o[i] + c[i]) / 2.0
+            else:
+                out[i] = (out[i - 1] + ha_close[i - 1]) / 2.0
+        return out
+
+    def _get_ma(self, typ, length, open_, high, low, close, volume, ha_open):
+        t = str(typ).upper()
+        if t == 'SMA':
+            return self._sma(close, length)
+        if t == 'WMA':
+            return self._wma(close, length)
+        if t == 'HMA':
+            return self._hma(close, length)
+        if t == 'DEMA':
+            return self._dema(close, length)
+        if t == 'T3':
+            return self._t3(close, length)
+        if t == 'HEMA':
+            return self._ema(ha_open, length)
+        if t == 'VWMA':
+            return self._vwma(close, volume, length)
+        if t == 'VWAP':
+            return self._vwap(close, volume)
+        return self._ema(close, length)   # EMA (默认)
+
+    @staticmethod
+    def _cross_over(a, b) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        out = np.zeros(len(a), dtype=bool)
+        if len(a) > 1:                      # 向量化（与原逐点循环逐位一致）
+            finite = (~np.isnan(a[:-1]) & ~np.isnan(b[:-1])
+                      & ~np.isnan(a[1:]) & ~np.isnan(b[1:]))
+            out[1:] = finite & (a[:-1] < b[:-1]) & (a[1:] > b[1:])
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        open_ = np.asarray(self.open, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        volume = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+
+        # ---- MA ----
+        ha_open = self._ha_open(open_, high, low, close)
+        ma1 = self._get_ma(p.ma_type1, max(1, int(p.ma_length1)),
+                           open_, high, low, close, volume, ha_open)
+        ma2 = self._get_ma(p.ma_type2, max(1, int(p.ma_length2)),
+                           open_, high, low, close, volume, ha_open)
+
+        # ---- ATR / swing ----
+        atr = self._atr(high, low, close, max(1, int(p.atr_len)))
+        sl = max(1, int(p.swing_lookback))
+        lowest_low = pd.Series(low).rolling(sl).min().values
+        highest_high = pd.Series(high).rolling(sl).max().values
+
+        # ---- 入场条件 ----
+        ma1_up2 = self._cross_over(ma1, ma2)
+        ma1_dn2 = self._cross_over(ma2, ma1)     # crossunder(ma1, ma2)
+        atr_ok = ~np.isnan(atr)
+        valid_long = ma1_up2 & atr_ok
+        valid_short = ma1_dn2 & atr_ok
+
+        # ---- 每 bar 的止损/止盈位 ----
+        risk_m = float(p.risk_m)
+        rnr = float(p.rnr)
+        long_stop = lowest_low - atr * risk_m
+        short_stop = highest_high + atr * risk_m
+        long_risk = close - long_stop
+        short_risk = short_stop - close
+        long_limit = close + rnr * long_risk
+        short_limit = close - rnr * short_risk
+        long_limit_dist = close - long_limit
+        short_limit_dist = short_limit - close
+
+        # ---- 逐 bar 模拟持仓生命周期 ----
+        stop_line = np.full(n, np.nan, dtype=np.float64)     # 初始 nan
+        trigger_line = np.full(n, np.nan, dtype=np.float64)  # 初始 nan
+        limit_line = np.full(n, np.nan, dtype=np.float64)    # 初始 nan
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        exitlong = np.zeros(n, dtype=np.float64)
+        exitshort = np.zeros(n, dtype=np.float64)
+
+        pos = 0                     # 0 空仓 / 1 多 / -1 空
+        stop = np.nan
+        target = np.nan
+        trigger = np.nan
+        look_for_exit = False
+        trail_src_mode = str(p.trail_source)
+
+        for i in range(n):
+            pos_at_start = pos          # 入场资格按 Pine 语义: 用本 bar 开始时的持仓
+            if pos == 0:
+                stop = target = trigger = np.nan
+
+            exited = False
+            # --- 离场: 价格触及止损 / 止盈 ---
+            if pos == 1:
+                hit_stop = (not np.isnan(stop)) and low[i] <= stop
+                hit_tp = (bool(p.use_limit) and not np.isnan(target)
+                          and high[i] >= target)
+                if hit_stop or hit_tp:
+                    exitlong[i] = 1.0
+                    pos = 0
+                    exited = True
+            elif pos == -1:
+                hit_stop = (not np.isnan(stop)) and high[i] >= stop
+                hit_tp = (bool(p.use_limit) and not np.isnan(target)
+                          and low[i] <= target)
+                if hit_stop or hit_tp:
+                    exitshort[i] = 1.0
+                    pos = 0
+                    exited = True
+
+            # --- ATR 追踪止损更新 (仅 trailStop 开启且已触发) ---
+            if bool(p.trail_stop) and look_for_exit and pos != 0:
+                c_prev = close[i - 1] if i >= 1 else np.nan
+                o_prev = open_[i - 1] if i >= 1 else np.nan
+                if trail_src_mode == 'Close':
+                    src_ = c_prev
+                elif trail_src_mode == 'Open':
+                    src_ = o_prev
+                else:                       # High/Low
+                    src_ = lowest_low[i] if pos == 1 else highest_high[i]
+                if not np.isnan(src_) and not np.isnan(atr[i]):
+                    if pos == 1:
+                        tr = src_ - atr[i] * float(p.trail_stop_size)
+                        if not np.isnan(stop) and tr > stop:
+                            stop = tr
+                    else:
+                        tr = src_ + atr[i] * float(p.trail_stop_size)
+                        if not np.isnan(stop) and tr < stop:
+                            stop = tr
+
+            # --- 入场 (flat, 或 FLIP 允许反手); 资格用 pos_at_start ---
+            entered = False
+            can_long = bool(p.long_trades) and (
+                pos_at_start == 0 or (pos_at_start == -1 and bool(p.flip)))
+            can_short = bool(p.short_trades) and (
+                pos_at_start == 0 or (pos_at_start == 1 and bool(p.flip)))
+            if valid_short[i] and can_short:
+                if pos == 1:            # FLIP: 多头反手做空
+                    exitlong[i] = 1.0
+                pos = -1
+                stop = short_stop[i]
+                target = short_limit[i] if bool(p.use_limit) else np.nan
+                trigger = close[i] + short_limit_dist[i] * float(p.rr_exit)
+                look_for_exit = False
+                short_sig[i] = 1.0
+                entered = True
+            elif valid_long[i] and can_long:
+                if pos == -1:           # FLIP: 空头反手做多
+                    exitshort[i] = 1.0
+                pos = 1
+                stop = long_stop[i]
+                target = long_limit[i] if bool(p.use_limit) else np.nan
+                trigger = close[i] - long_limit_dist[i] * float(p.rr_exit)
+                look_for_exit = False
+                long_sig[i] = 1.0
+                entered = True
+
+            # --- rrExit 触发追踪止损 ---
+            if bool(p.trail_stop) and pos != 0:
+                if float(p.rr_exit) == 0.0:
+                    look_for_exit = True
+                elif pos == 1 and (not np.isnan(trigger)) and high[i] >= trigger:
+                    look_for_exit = True
+                elif pos == -1 and (not np.isnan(trigger)) and low[i] <= trigger:
+                    look_for_exit = True
+
+            # --- 记录风控线 (持仓期间, 含离场当根) ---
+            if pos != 0 or entered or exited:
+                stop_line[i] = stop
+                trigger_line[i] = trigger
+                limit_line[i] = target
+
+        return (ma1, ma2, stop_line, trigger_line, limit_line,
+                long_sig, short_sig, exitlong, exitshort)
+
+
+class Volumatic_Variable_Index_Dynamic_Average(BtIndicator):
+    """Volumatic Variable Index Dynamic Average [BigBeluga] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v6):
+        https://cn.tradingview.com/script/llhVjhA5-Volumatic-Variable-Index-Dynamic-Average-BigBeluga/
+        © BigBeluga (CC BY-NC-SA 4.0)
+
+    概述
+    ----
+    用 VIDYA(Variable Index Dynamic Average, 可变指数动态均线)作为趋势基线,
+    再叠加 ATR 通道判定多空: 价格上穿上轨转多(基线取 *下轨*), 下穿下轨转空
+    (基线取 *上轨*), 基线按趋势着色; 并对 pivot 高低点形成的"流动性位"做模拟,
+    价格回扫到这些位时在主图打圆点 + 标注成交量。
+
+    与原码的差异(受 minibt / bokeh 绘图能力限制)
+    ----
+    1. **不再绘制流动性水平线**: 原码用 Pine 的 ``line.new`` 从 pivot 点向右侧
+       延伸一条水平线并在被扫掉时截断。bokeh 对"动态增删线段"支持很差, 故本实现
+       **只保留圆点标记 + 成交量文本**, 不画任何水平线(按需求)。
+    2. 主图 ``smoothed_value`` 线用 ``vidya_up`` / ``vidya_down`` 两条列按趋势着色
+       (翻转处留 1 根缺口, 等价 Pine 的 ``plot.style_linebr``)。
+    3. 缺口阴影 ``fill`` 用 ``BandStyle`` 近似: 分别在上/下趋势段与 ``hl2`` 之间
+       填充半透明色。``hl2`` 仅为填充基准, 用全透明线绘制。
+    4. 逐点圆点/文本受框架限制只能挂在 4 个标准信号列上, 因此把
+       "阻力被扫"→``exitlong_signal``、"支撑被扫"→``exitshort_signal``、
+       "趋势转多/转空箭头"→``long_signal``/``short_signal``。
+       信号列的**数值即圆点/箭头所处价格**(= 对应 bar 的 ``smoothed_value``),
+       信号线本身用全透明绘制, 只显示 marker + 文本。
+    5. 省略最后一根 bar 的统计面板(Buy/Sell/Delta Volume)与 ``✪`` 星标
+       (需要额外标签层, 原码属装饰性信息)。
+
+    参数
+    ----
+    - vidya_length     : VIDYA 平滑长度(默认 10)
+    - vidya_momentum   : VIDYA 动量窗口(默认 20)
+    - band_distance    : 上下轨 ATR 距离系数(默认 2.0)
+    - pivot_bars       : pivot 左右确认根数(默认 3)
+    - source           : VIDYA 源, 'close'/'open'/'high'/'low'/'hl2'(默认 'close')
+
+    输出 lines(全部主图叠加)
+    ----
+    - vidya_up / vidya_down : VIDYA 趋势基线(多=#17dfad, 空=#dd326b)
+    - hl2                   : (high+low)/2, 仅作阴影填充基准(透明)
+    - vol_res / vol_sup     : 圆点处的成交量(供 ``signal_text`` 生成文本, 不绘图)
+    - long_signal / short_signal         : 趋势转多 ▲ / 转空 ▼(锚定在基线)
+    - exitlong_signal / exitshort_signal : 阻力被扫 / 支撑被扫 圆点(锚定在基线)
+    """
+    lines = ('vidya_up', 'vidya_down', 'hl2', 'vol_res', 'vol_sup',
+             'long_signal', 'short_signal',
+             'exitlong_signal', 'exitshort_signal')
+    params = dict(
+        vidya_length=10,      # VIDYA Length
+        vidya_momentum=20,    # VIDYA Momentum
+        band_distance=2.0,    # Distance factor for upper/lower bands
+        pivot_bars=3,         # pivot left/right bars
+        source='close',       # Source
+    )
+    category = 'overlap'
+    overlap = dict(
+        vidya_up=True, vidya_down=True, hl2=True,
+        vol_res=False, vol_sup=False,
+        long_signal=True, short_signal=True,
+        exitlong_signal=True, exitshort_signal=True,
+    )
+    isplot = dict(
+        vidya_up=True, vidya_down=True, hl2=True,
+        vol_res=False, vol_sup=False,
+        # 信号列"绘制"以保留 overlap=False(锚定自身价格), 但线用全透明
+        long_signal=True, short_signal=True,
+        exitlong_signal=True, exitshort_signal=True,
+    )
+    _TRANS = '#00000000'
+    linestyle = dict(
+        vidya_up=LineStyle(line_color='#17dfad', line_width=2.0),
+        vidya_down=LineStyle(line_color='#dd326b', line_width=2.0),
+        hl2=LineStyle(line_color=_TRANS, line_width=0.0),
+        long_signal=LineStyle(line_color=_TRANS, line_width=0.0),
+        short_signal=LineStyle(line_color=_TRANS, line_width=0.0),
+        exitlong_signal=LineStyle(line_color=_TRANS, line_width=0.0),
+        exitshort_signal=LineStyle(line_color=_TRANS, line_width=0.0),
+    )
+    bandstyle = [
+        BandStyle(lower='vidya_up', upper='hl2',
+                  fill_color='#17dfad', fill_alpha=0.08),
+        BandStyle(lower='vidya_down', upper='hl2',
+                  fill_color='#dd326b', fill_alpha=0.08),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'vidya_up', '#17dfad', 'triangle', True, True, 12).set_label('B'),
+        short_signal=SignalStyle(
+            'vidya_down', '#dd326b', 'inverted_triangle', True, True, 12).set_label('S'),
+        exitlong_signal=SignalStyle(
+            'exitlong_signal', '#dd326b', 'circle', True, True, 11),
+        exitshort_signal=SignalStyle(
+            'exitshort_signal', '#17dfad', 'circle', True, True, 11),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _rma(src, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(src, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    @staticmethod
+    def _cross_over(a, b) -> np.ndarray:
+        """Pine ``ta.crossover(a, b)``: ``a[1] < b[1] and a > b``。"""
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        out = np.zeros(len(a), dtype=bool)
+        if len(a) > 1:                      # 向量化（与原逐点循环逐位一致）
+            finite = (~np.isnan(a[:-1]) & ~np.isnan(b[:-1])
+                      & ~np.isnan(a[1:]) & ~np.isnan(b[1:]))
+            out[1:] = finite & (a[:-1] < b[:-1]) & (a[1:] > b[1:])
+        return out
+
+    @staticmethod
+    def _cross_under(a, b) -> np.ndarray:
+        """Pine ``ta.crossunder(a, b)``: ``a[1] > b[1] and a < b``。"""
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        out = np.zeros(len(a), dtype=bool)
+        if len(a) > 1:                      # 向量化（与原逐点循环逐位一致）
+            finite = (~np.isnan(a[:-1]) & ~np.isnan(b[:-1])
+                      & ~np.isnan(a[1:]) & ~np.isnan(b[1:]))
+            out[1:] = finite & (a[:-1] > b[:-1]) & (a[1:] < b[1:])
+        return out
+
+    @staticmethod
+    def _pivots(src, left: int, right: int, want_high: bool) -> np.ndarray:
+        """Pine ``ta.pivothigh/pivotlow``: 返回确认 bar(= pivot+right) 处的 bool。"""
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        out = np.zeros(n, dtype=bool)
+        if left <= 0 or right <= 0 or n <= left + right:
+            return out
+        for p in range(left, n - right):
+            v = src[p]
+            if np.isnan(v):
+                continue
+            if want_high:
+                if np.all(src[p - left:p] < v) and np.all(src[p + 1:p + right + 1] < v):
+                    out[p + right] = True
+            else:
+                if np.all(src[p - left:p] > v) and np.all(src[p + 1:p + right + 1] > v):
+                    out[p + right] = True
+        return out
+
+    @staticmethod
+    def _fmt_volume(v: float) -> str | float:
+        """Pine ``str.tostring(x, format.volume)`` 的近似实现(K/M/B)。"""
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return np.nan
+        v = float(v)
+        sign = '-' if v < 0 else ''
+        a = abs(v)
+        if a >= 1e9:
+            return f"{sign}{a / 1e9:.2f}B"
+        if a >= 1e6:
+            return f"{sign}{a / 1e6:.2f}M"
+        if a >= 1e3:
+            return f"{sign}{a / 1e3:.2f}K"
+        return f"{sign}{a:.0f}"
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 圆点处标注成交量
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        fmt = Volumatic_Variable_Index_Dynamic_Average._fmt_volume
+
+        def _map(col) -> np.ndarray:
+            vals = np.asarray(col.values, dtype=np.float64)
+            arr = np.full(len(vals), np.nan, dtype=object)
+            for i in range(len(vals)):
+                if not np.isnan(vals[i]):
+                    arr[i] = fmt(vals[i])
+            return arr
+        return {
+            'exitlong_signal': _map(self.vol_res),
+            'exitshort_signal': _map(self.vol_sup),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        vlen = max(1, int(p.vidya_length))
+        vmom = max(1, int(p.vidya_momentum))
+        dist = float(p.band_distance)
+        r = max(1, int(p.pivot_bars))
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        volume = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+
+        src_name = str(p.source)
+        if src_name == 'hl2':
+            src = (high + low) / 2.0
+        elif src_name == 'hlc3':
+            src = (high + low + close) / 3.0
+        elif src_name == 'ohlc4':
+            src = (np.asarray(self.open, dtype=np.float64) +
+                   high + low + close) / 4.0
+        else:
+            src = np.asarray(getattr(self, src_name), dtype=np.float64)
+
+        # ---- VIDYA = sma(递归自适应均线, 15) ----
+        change = np.full(n, np.nan, dtype=np.float64)
+        if n > 1:
+            change[1:] = src[1:] - src[:-1]
+        # momentum >= 0 ? momentum : 0.0   (na → 0.0)
+        pos = np.where(np.isnan(change) | (change < 0), 0.0, change)
+        # momentum >= 0 ? 0.0 : -momentum  (na → na)
+        neg = np.where(np.isnan(change), np.nan,
+                       np.where(change >= 0, 0.0, -change))
+        sum_pos = pd.Series(pos).rolling(vmom, min_periods=vmom).sum().values
+        sum_neg = pd.Series(neg).rolling(vmom, min_periods=vmom).sum().values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            abs_cmo = np.abs(100.0 * (sum_pos - sum_neg) / (sum_pos + sum_neg))
+        alpha = 2.0 / (vlen + 1.0)
+        vid = np.full(n, np.nan, dtype=np.float64)
+        prev = 0.0                       # ``var float vidya_value = 0.0``
+        for i in range(n):
+            ac = abs_cmo[i]
+            k = np.nan if np.isnan(ac) else alpha * ac / 100.0
+            pv = 0.0 if np.isnan(prev) else prev   # ``nz(vidya_value[1])``
+            v = np.nan if np.isnan(k) else k * src[i] + (1.0 - k) * pv
+            vid[i] = v
+            prev = v
+        vidya = pd.Series(vid).rolling(15, min_periods=15).mean().values
+
+        atr = self._atr(high, low, close, 200)
+        upper = vidya + atr * dist
+        lower = vidya - atr * dist
+
+        # ---- 趋势判定 + smoothed_value(翻转 bar 置 na → 折线断开) ----
+        cross_up = self._cross_over(src, upper)
+        cross_dn = self._cross_under(src, lower)
+        is_up = np.zeros(n, dtype=bool)
+        smoothed = np.full(n, np.nan, dtype=np.float64)
+        cur = False
+        for i in range(n):
+            if cross_up[i]:
+                cur = True
+            if cross_dn[i]:
+                cur = False
+            is_up[i] = cur
+            smoothed[i] = lower[i] if cur else upper[i]
+        for i in range(1, n):
+            if is_up[i] != is_up[i - 1]:
+                smoothed[i] = np.nan       # ``if ta.change(is_trend_up) → na``
+
+        # ---- pivot 确认 + 流动性位回扫模拟(只记录圆点/成交量, 不画线) ----
+        ph = self._pivots(high, r, r, True)
+        pl = self._pivots(close, r, r, False)
+        shifted = np.concatenate(
+            [[np.nan], smoothed[:-1]])   # smoothed_value[1]
+
+        dot_res = np.full(n, np.nan, dtype=np.float64)   # 阻力被扫 (down 色)
+        dot_sup = np.full(n, np.nan, dtype=np.float64)   # 支撑被扫 (up 色)
+        vol_res = np.full(n, np.nan, dtype=np.float64)
+        vol_sup = np.full(n, np.nan, dtype=np.float64)
+
+        lines_high: list[tuple[int, float]] = []
+        lines_low: list[tuple[int, float]] = []
+        volume_value = np.nan
+        for i in range(n):
+            pbar = i - r
+            if pl[i] and pbar >= 0 and not np.isnan(smoothed[i]) \
+                    and low[pbar] > smoothed[i]:
+                lines_low.append((pbar, low[pbar]))
+                w = volume[max(0, i - (2 * r - 1)):i + 1]
+                volume_value = float(np.sum(w)) / (2.0 * r)
+            if ph[i] and pbar >= 0 and not np.isnan(smoothed[i]) \
+                    and high[pbar] < smoothed[i]:
+                lines_high.append((pbar, high[pbar]))
+                w = volume[max(0, i - (2 * r - 1)):i + 1]
+                volume_value = float(np.sum(-w)) / (2.0 * r)
+            # 阻力位被扫(价格下穿) → 圆点在 bar i-1 的 smoothed_value 处
+            keep_high = []
+            for (x1, lvl) in lines_high:
+                if (smoothed[i] < lvl) and (shifted[i] >= lvl) and (i - x1) < 50:
+                    if i >= 1 and not np.isnan(shifted[i]):
+                        dot_res[i - 1] = shifted[i]
+                        vol_res[i - 1] = volume_value
+                else:
+                    keep_high.append((x1, lvl))
+            lines_high = keep_high
+            # 支撑位被扫(价格上穿)
+            keep_low = []
+            for (x1, lvl) in lines_low:
+                if (smoothed[i] > lvl) and (shifted[i] <= lvl) and (i - x1) < 50:
+                    if i >= 1 and not np.isnan(shifted[i]):
+                        dot_sup[i - 1] = shifted[i]
+                        vol_sup[i - 1] = volume_value
+                else:
+                    keep_low.append((x1, lvl))
+            lines_low = keep_low
+
+        # ---- 趋势翻转箭头: 原码 ``trend_cross_up[1] ? smoothed_value : na`` ----
+        tcu = np.zeros(n, dtype=bool)
+        tcd = np.zeros(n, dtype=bool)
+        for i in range(1, n):
+            if (not is_up[i - 1]) and is_up[i]:
+                tcu[i] = True
+            if is_up[i - 1] and (not is_up[i]):
+                tcd[i] = True
+        arrow_up = np.full(n, np.nan, dtype=np.float64)
+        arrow_dn = np.full(n, np.nan, dtype=np.float64)
+        for i in range(1, n):
+            if np.isnan(smoothed[i]):
+                continue
+            if tcu[i - 1]:
+                arrow_up[i] = smoothed[i]
+            if tcd[i - 1]:
+                arrow_dn[i] = smoothed[i]
+
+        # ---- 按趋势着色的基线(翻转处保持 na → 断线) ----
+        vidya_up = np.where(is_up, smoothed, np.nan)
+        vidya_down = np.where(is_up, np.nan, smoothed)
+        hl2 = (high + low) / 2.0
+
+        return (vidya_up, vidya_down, hl2, vol_res, vol_sup,
+                arrow_up, arrow_dn, dot_res, dot_sup)
+
+
+class RangeFilterBuySell(BtIndicator):
+    """Range Filter Buy and Sell 5min (guikroth 版) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/J8GzFGfD-Range-Filter-Buy-and-Sell-5min-guikroth-version/
+        原始脚本: Range Filter DonovanWall
+        改编: @guikroth / 重发: @tvenn
+
+    概述
+    ----
+    和 ``RangeFilterSignals``(VuManChu 版) 同源的 Range Filter, 但参数/配色/方向
+    计数方式按本脚本原码:
+      1. 平滑范围: ``wper = per*2-1; avrng = ema(abs(x-x[1]), per);
+         smrng = ema(avrng, wper) * mult``
+      2. Range Filter: 价格穿出通道时 filt 跳至通道边界, 否则保持
+      3. 方向用 **计数器** ``upward`` / ``downward``(上升则 upward+1 且 downward=0,
+         下降反之, 持平则维持), 仅用 ``>0`` 判定, 等价于三态的 fdir
+      4. 目标带 ``hband = filt + smrng`` / ``lband = filt - smrng``
+      5. 突破信号经 CondIni 状态机过滤, 只在方向翻转后的首次突破给出 Buy/Sell
+
+    原码颜色
+    ----
+    - upColor = white(#ffffff), downColor = blue(#0000ff), midColor = #90bff9
+    - filt 线按方向着色(多=白 / 空=蓝 / 中性=#90bff9)
+    - 目标带填充: hband↔filt 白, lband↔filt 蓝
+    - Buy/Sell 标签: 灰 / 蓝
+
+    ⚠ 注意: 原码的白色是多用于**深色主题**的; 在浅色主题下白色 filt 线/填充
+    几乎不可见, 可通过 ``linestyle=dict(filt_up=LineStyle(line_color='...'))`` 覆盖。
+
+    未复现
+    ----
+    - ``barcolor(barcolor)`` K 线逐点染色: minibt 的 K 线颜色不支持按 bar 变化,
+      与 ``RangeFilterSignals`` 处理一致, 已省略。
+    - ``alertcondition`` 告警。
+
+    参数
+    ----
+    per    : Sampling Period(默认 100)
+    mult   : Range Multiplier(默认 3.0)
+    source : 源价格, 'close'/'open'/'high'/'low'/'hl2' 等(默认 'close')
+
+    输出 lines(全部主图叠加)
+    ----
+    - filt            : Range Filter 主线(连续, 中性色, 兼作填充边界)
+    - filt_up/down    : filt 按方向着色的白/蓝两段(翻转处桥接)
+    - hband / lband   : 上下目标带
+    - long_signal / short_signal : Buy / Sell 信号(低点▲灰 / 高点▼蓝)
+    """
+    lines = ('filt', 'filt_up', 'filt_down', 'hband', 'lband',
+             'long_signal', 'short_signal')
+    params = dict(
+        per=100,        # Sampling Period
+        mult=3.0,       # Range Multiplier
+        source='close',  # Source
+    )
+    category = 'overlap'
+    overlap = dict(
+        filt=True, filt_up=True, filt_down=True,
+        hband=True, lband=True,
+        long_signal=True, short_signal=True,
+    )
+    isplot = dict(
+        filt=True, filt_up=True, filt_down=True,
+        hband=True, lband=True,
+        long_signal=False, short_signal=False,
+    )
+    linestyle = dict(
+        # 原码: upColor=white / downColor=blue / midColor=#90bff9
+        filt=LineStyle(line_color='#90bff9', line_width=2.0),
+        filt_up=LineStyle(line_color="#cf1e1e", line_width=2.0),
+        filt_down=LineStyle(line_color='#0000ff', line_width=2.0),
+        # 目标带原码为 color.new(x, 70) → 30% 不透明, 用 8 位 hex 近似
+        hband=LineStyle(line_color="#762ab44d", line_width=1.0),
+        lband=LineStyle(line_color='#0000ff4d', line_width=1.0),
+    )
+    # 原码 fill(hband, filt) 用 white@90, fill(lband, filt) 用 blue@90
+    bandstyle = [
+        BandStyle(lower='filt', upper='hband',
+                  fill_color="#4ddf48", fill_alpha=0.20),
+        BandStyle(lower='lband', upper='filt',
+                  fill_color='#0000ff', fill_alpha=0.10),
+    ]
+    signalstyle = dict(
+        # 原码 Buy: labelup 于 bar 下方, 灰; Sell: labeldown 于 bar 上方, 蓝
+        long_signal=SignalStyle('low', '#aaaaaa', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#0000ff', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 plotshape 的 "Buy"/"Sell"
+    # ------------------------------------------------------------------
+
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'Buy'),
+            'short_signal': _map(self.short_signal, 'Sell'),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        per = max(1, int(p.per))
+        mult = float(p.mult)
+
+        src_name = str(p.source)
+        if src_name == 'hl2':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64)) / 2.0
+        elif src_name == 'hlc3':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64)
+                   + np.asarray(self.close, dtype=np.float64)) / 3.0
+        else:
+            src = np.asarray(getattr(self, src_name), dtype=np.float64)
+        n = len(src)
+
+        # ---- 平滑平均范围: smrng = ema(ema(abs(x-x[1]), per), per*2-1) * mult ----
+        src_prev = np.concatenate([[np.nan], src[:-1]])
+        avrng = self._ema(np.abs(src - src_prev), per)
+        smrng = self._ema(avrng, per * 2 - 1) * mult
+
+        # ---- Range Filter: 穿出通道时跳至边界, 否则保持(nz(prev) 语义) ----
+        filt = np.full(n, np.nan, dtype=np.float64)
+        prev = 0.0                         # ``nz(rngfilt[1])`` 初始为 0
+        for i in range(n):
+            x = src[i]
+            r = smrng[i]
+            base = 0.0 if np.isnan(prev) else prev
+            if x > base:
+                val = base if (x - r) < base else (x - r)
+            else:
+                val = base if (x + r) > base else (x + r)
+            filt[i] = val
+            prev = val
+
+        # ---- 方向计数器(上升→up+1 且 dn=0, 下降反之, 持平维持) ----
+        upward = np.zeros(n, dtype=np.float64)
+        downward = np.zeros(n, dtype=np.float64)
+        up = 0.0
+        dn = 0.0
+        for i in range(n):
+            cur = filt[i]
+            prv = filt[i - 1] if i > 0 else np.nan
+            if (not np.isnan(cur)) and (not np.isnan(prv)):
+                if cur > prv:
+                    up += 1.0
+                    dn = 0.0
+                elif cur < prv:
+                    dn += 1.0
+                    up = 0.0
+            upward[i] = up
+            downward[i] = dn
+
+        # ---- 目标带 ----
+        hband = filt + smrng
+        lband = filt - smrng
+
+        # ---- 突破条件(原码 and 优先于 or) ----
+        long_cond = (src > filt) & (upward > 0) & \
+            ((src > src_prev) | (src < src_prev))
+        short_cond = (src < filt) & (downward > 0) & \
+            ((src < src_prev) | (src > src_prev))
+
+        # ---- CondIni 状态机: 多→1, 空→-1, 否则维持 ----
+        cond_ini = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            if long_cond[i]:
+                cond_ini[i] = 1.0
+            elif short_cond[i]:
+                cond_ini[i] = -1.0
+            elif i > 0:
+                cond_ini[i] = cond_ini[i - 1]
+        cond_ini_prev = np.concatenate([[np.nan], cond_ini[:-1]])  # CondIni[1]
+        long_sig = long_cond & (cond_ini_prev == -1.0)
+        short_sig = short_cond & (cond_ini_prev == 1.0)
+
+        # ---- filt 按方向拆线着色: 多=白, 空=蓝; 翻转处桥接保证连续 ----
+        state = np.zeros(n, dtype=np.int8)
+        state[upward > 0] = 1
+        state[downward > 0] = -1
+        filt_up = np.where(state == 1, filt, np.nan)
+        filt_down = np.where(state == -1, filt, np.nan)
+        for i in range(1, n):
+            if state[i] != state[i - 1] and not np.isnan(filt[i]):
+                filt_up[i] = filt[i]
+                filt_down[i] = filt[i]
+
+        return (filt, filt_up, filt_down, hband, lband,
+                long_sig.astype(np.float64), short_sig.astype(np.float64))
+
+
+class QQEMod(BtIndicator):
+    """QQE MOD → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v6):
+        https://cn.tradingview.com/script/TpUW4muw-QQE-MOD/
+
+    ⚠ 与 ``QQESignals`` 的一致性检查结论: **不一致**(因此本类未复用其 QQE 核心)
+    ----
+    两者 RSI / 平滑 RSI 步骤相同, 但 **ATR-RSI 的平滑次数不同**:
+
+    - ``QQESignals``(colinmck 经典版, Double EMA):
+      ``MaAtrRsi = ema(AtrRsi, Wilders)`` 后再 ``dar = ema(MaAtrRsi, Wilders)*QQE``;
+    - ``QQE MOD``(本脚本, Single EMA):
+      ``smoothedAtrRsi = ema(atrRsi, wildersLength)``,
+      ``dynamicAtrRsi = smoothedAtrRsi * qqeFactor``。
+
+    另外初始趋势方向也不同: 经典版 ``nz(trend[1], 1) = 1``(初始用 longBand),
+    QQE MOD ``trendDirection = 0``(初始用 shortBand)。
+    故本类按本脚本逐 bar 重算; 仅通用工具 ``_rsi`` / ``_ema`` 复用
+    ``QQESignals._rsi`` / ``QQESignals._ema``。
+
+    概述
+    ----
+    同一个副图里同时计算 **Primary**(主) 与 **Secondary**(次) 两组 QQE:
+
+    - 副图趋势线 = ``secondaryQQETrendLine - 50``(原码白色)
+    - 柱状 = ``secondaryRSI - 50``: |值| > threshold 时显示灰色柱,
+      并叠加两类信号柱:
+        * QQE Up   Signal: ``secRSI-50 > thr`` 且 ``priRSI-50 > bollUpper`` → #00c3ff
+        * QQE Down Signal: ``secRSI-50 < -thr`` 且 ``priRSI-50 < bollLower`` → #ff0062
+    - 0 轴虚线(zero, 原码 hline(0) —— 框架对 BtIndicator 不回传类级 spanstyle,
+      故用一条恒 0 的线实现)
+
+    参数
+    ----
+    primary/secondary 各一组: rsi_length / rsi_smoothing / qqe_factor / threshold / source
+    布林带: bollinger_length=50, bollinger_multiplier=0.35,
+            作用对象为 ``primaryQQETrendLine - 50``(原码仅作颜色/信号判定, 不绘图)
+
+    输出 lines(副图)
+    ----
+    - sec_qqe          : 次级 QQE 趋势线 - 50(白线)
+    - rsi_thr          : |secRSI-50|>threshold 的灰色柱
+    - rsi_up / rsi_down: QQE Up(#00c3ff) / Down(#ff0062) 信号柱
+    - pri_rsi / sec_rsi: 主子 QQE 的平滑 RSI(仅数据, 不绘图)
+    - zero            : 0 轴虚线
+
+    ⚠ 原码白线/白 0 轴线偏深色主题; minibt 默认浅色主题下白色不可见,
+    可用 ``linestyle=dict(sec_qqe=LineStyle(line_color='#333333'))`` 覆盖。
+
+    未复现
+    ----
+    - ``alertcondition`` 告警(原码仅有 alert, 无 plotshape 买卖标签)。
+    """
+    lines = ('sec_qqe', 'rsi_thr', 'rsi_up', 'rsi_down',
+             'pri_rsi', 'sec_rsi', 'zero')
+    params = dict(
+        # Primary QQE Settings
+        rsi_length_primary=6,
+        rsi_smoothing_primary=5,
+        qqe_factor_primary=3.0,
+        threshold_primary=3.0,
+        source_primary='close',
+        # Secondary QQE Settings
+        rsi_length_secondary=6,
+        rsi_smoothing_secondary=5,
+        qqe_factor_secondary=1.61,
+        threshold_secondary=3.0,
+        source_secondary='close',
+        # Bollinger Bands Settings
+        bollinger_length=50,
+        bollinger_multiplier=0.35,
+    )
+    category = 'momentum'
+    overlap = False
+    isplot = dict(sec_qqe=True, rsi_thr=True, rsi_up=True, rsi_down=True,
+                  pri_rsi=False, sec_rsi=False, zero=True)
+    linestyle = dict(
+        # 原码: Secondary QQE Trend Line = color.white
+        sec_qqe=LineStyle(line_color="#df1919", line_width=2.0),
+        # 柱状(原码次级 RSI 颜色: #707070@20 / #00c3ff / #ff0062)
+        rsi_thr=LineStyle(line_color='#707070cc', line_dash=LineDash.vbar),
+        rsi_up=LineStyle(line_color='#00c3ff', line_dash=LineDash.vbar),
+        rsi_down=LineStyle(line_color='#ff0062', line_dash=LineDash.vbar),
+        # 原码 hline(0, color=color.white, style=dotted)
+        zero=LineStyle(line_color="#326bd3",
+                       line_dash=LineDash.dotted, line_width=1.0),
+    )
+
+    # ------------------------------------------------------------------
+    # 工具: 源价格 / 滚动标准差
+    # ------------------------------------------------------------------
+    def _source(self, name) -> np.ndarray:
+        name = str(name)
+        if name == 'hl2':
+            return (np.asarray(self.high, dtype=np.float64)
+                    + np.asarray(self.low, dtype=np.float64)) / 2.0
+        if name == 'hlc3':
+            return (np.asarray(self.high, dtype=np.float64)
+                    + np.asarray(self.low, dtype=np.float64)
+                    + np.asarray(self.close, dtype=np.float64)) / 3.0
+        if name == 'ohlc4':
+            return (np.asarray(self.open, dtype=np.float64)
+                    + np.asarray(self.high, dtype=np.float64)
+                    + np.asarray(self.low, dtype=np.float64)
+                    + np.asarray(self.close, dtype=np.float64)) / 4.0
+        return np.asarray(getattr(self, name), dtype=np.float64)
+
+    @staticmethod
+    def _stdev(x, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.stdev(pd.Series(np.asarray(x, dtype=np.float64)), int(n)), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # QQE MOD 核心(原码 calculateQQE 逐行对齐)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _qqe(cls, src, rsi_length: int, sf: int, qqe_factor: float):
+        wilders = int(rsi_length) * 2 - 1
+        rsi = QQESignals._rsi(src, int(rsi_length))          # ta.rsi
+        rsi_ma = QQESignals._ema(rsi, int(sf))               # smoothedRsi
+        rsi_ma_prev = np.concatenate([[np.nan], rsi_ma[:-1]])
+        atr_rsi = np.abs(rsi_ma_prev - rsi_ma)               # atrRsi
+        # QQE MOD 只做一次 EMA(经典 QQE 是两次), 这是与 QQESignals 的关键差异
+        smoothed_atr = QQESignals._ema(atr_rsi, wilders)     # smoothedAtrRsi
+        dar = smoothed_atr * float(qqe_factor)               # dynamicAtrRsi
+
+        new_long = rsi_ma - dar
+        new_short = rsi_ma + dar
+
+        n = len(src)
+        long_band = np.full(n, np.nan, dtype=np.float64)
+        short_band = np.full(n, np.nan, dtype=np.float64)
+        # trendDirection 初始 0
+        trend = np.zeros(n, dtype=np.int64)
+
+        prev_rsi = np.nan
+        prev_long = np.nan
+        prev2_long = np.nan
+        prev_short = np.nan
+        prev2_short = np.nan
+        cur = 0
+        for i in range(n):
+            r = rsi_ma[i]
+            # longBand := smoothedRsi[1] > longBand[1] and smoothedRsi > longBand[1]
+            #             ? max(longBand[1], newLongBand) : newLongBand
+            if (not np.isnan(prev_rsi) and not np.isnan(prev_long)
+                    and not np.isnan(r) and prev_rsi > prev_long and r > prev_long
+                    and not np.isnan(new_long[i])):
+                lb = max(prev_long, new_long[i])
+            else:
+                lb = new_long[i]
+            # shortBand := smoothedRsi[1] < shortBand[1] and smoothedRsi < shortBand[1]
+            #              ? min(shortBand[1], newShortBand) : newShortBand
+            if (not np.isnan(prev_rsi) and not np.isnan(prev_short)
+                    and not np.isnan(r) and prev_rsi < prev_short and r < prev_short
+                    and not np.isnan(new_short[i])):
+                sb = min(prev_short, new_short[i])
+            else:
+                sb = new_short[i]
+            # longBandCross = ta.cross(longBand[1], smoothedRsi)
+            long_band_cross = (not np.isnan(prev2_long) and not np.isnan(prev_rsi)
+                               and not np.isnan(prev_long) and not np.isnan(r)
+                               and prev2_long < prev_rsi and prev_long > r)
+            # ta.cross(smoothedRsi, shortBand[1])
+            cross_up_short = (not np.isnan(prev_rsi) and not np.isnan(prev2_short)
+                              and not np.isnan(r) and not np.isnan(prev_short)
+                              and prev_rsi < prev2_short and r > prev_short)
+            if cross_up_short:
+                cur = 1
+            elif long_band_cross:
+                cur = -1
+            # else: trendDirection := trendDirection[1]
+            trend[i] = cur
+            long_band[i] = lb
+            short_band[i] = sb
+            prev2_long = prev_long
+            prev_long = lb
+            prev2_short = prev_short
+            prev_short = sb
+            prev_rsi = r
+
+        qqe_line = np.where(trend == 1, long_band, short_band)
+        return qqe_line, rsi_ma
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        src_p = self._source(p.source_primary)
+        src_s = self._source(p.source_secondary)
+
+        pri_line, pri_rsi = self._qqe(
+            src_p, int(p.rsi_length_primary),
+            int(p.rsi_smoothing_primary), float(p.qqe_factor_primary))
+        sec_line, sec_rsi = self._qqe(
+            src_s, int(p.rsi_length_secondary),
+            int(p.rsi_smoothing_secondary), float(p.qqe_factor_secondary))
+
+        pri_diff = pri_rsi - 50.0
+        sec_diff = sec_rsi - 50.0
+
+        # ---- 对 (primaryQQETrendLine - 50) 求布林带 ----
+        basis_x = pri_line - 50.0
+        bl = max(1, int(p.bollinger_length))
+        basis = pd.Series(basis_x).rolling(
+            bl, min_periods=bl).mean().values
+        dev = float(p.bollinger_multiplier) * self._stdev(basis_x, bl)
+        boll_upper = basis + dev
+        boll_lower = basis - dev
+
+        thr_s = float(p.threshold_secondary)
+        # ---- QQE Up / Down 信号柱条件 ----
+        up_sig = (sec_diff > thr_s) & (pri_diff > boll_upper)
+        down_sig = (sec_diff < -thr_s) & (pri_diff < boll_lower)
+        # ---- 其余超阈值的灰色柱(原码 rsiColorSecondary) ----
+        thr_col = (np.abs(sec_diff) > thr_s) & (~up_sig) & (~down_sig)
+
+        sec_qqe = sec_line - 50.0
+        rsi_up = np.where(up_sig, sec_diff, np.nan)
+        rsi_down = np.where(down_sig, sec_diff, np.nan)
+        rsi_thr = np.where(thr_col, sec_diff, np.nan)
+        zero = np.zeros(len(sec_qqe), dtype=np.float64)
+
+        return (sec_qqe, rsi_thr, rsi_up, rsi_down, pri_rsi, sec_rsi, zero)
+
+
+class HalfTrend(BtIndicator):
+    """HalfTrend(Alex Orekhov / everget)→ MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v6):
+        https://cn.tradingview.com/script/U1SJ8ubc-HalfTrend/
+        © Alex Orekhov (everget)
+
+    概述
+    ----
+    HalfTrend 用一条"半趋势"阶梯线跟踪价格, 并以 ATR 通道 + 通道填充带
+    表现趋势强弱, 在趋势翻转的那根 bar 给出 Buy/Sell 信号。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``atr2 = ta.atr(100) / 2``, ``dev = channelDeviation * atr2``
+    2. ``highPrice = high[|ta.highestbars(amplitude)|]``,
+       ``lowPrice = low[|ta.lowestbars(amplitude)|]``
+       (取最近 amplitude 根内最高/最低价所在 bar 的价格)
+    3. ``highma = ta.sma(high, amplitude)``, ``lowma = ta.sma(low, amplitude)``
+    4. 状态机(``var`` 持久):
+       - ``nextTrend == 1``: ``maxLowPrice = max(lowPrice, maxLowPrice)``;
+         若 ``highma < maxLowPrice and close < nz(low[1], low)`` →
+         ``trend = 1, nextTrend = 0, minHighPrice = highPrice``
+       - 否则: ``minHighPrice = min(highPrice, minHighPrice)``;
+         若 ``lowma > minHighPrice and close > nz(high[1], high)`` →
+         ``trend = 0, nextTrend = 1, maxLowPrice = lowPrice``
+    5. 阶梯线:
+       - ``trend == 0``: 刚由空转多时 ``up = down[1]``, 否则
+         ``up = max(maxLowPrice, up[1])``; ``atrHigh = up + dev``, ``atrLow = up - dev``
+       - ``trend == 1``: 刚由多转空时 ``down = up[1]``, 否则
+         ``down = min(minHighPrice, down[1])``; ``atrHigh = down + dev``, ``atrLow = down - dev``
+    6. ``ht = trend == 0 ? up : down``
+    7. 信号: 翻多 bar ``buySignal``(arrowUp = up - atr2), 翻空 bar
+       ``sellSignal``(arrowDown = down + atr2)
+
+    参数
+    ----
+    amplitude         : 幅度(高低点回看周期, 默认 2)
+    channel_deviation : 通道偏移倍数(channelDeviation, 默认 2)
+    show_arrows       : 是否显示买卖箭头(默认 True)
+    show_channels     : 是否显示 ATR 通道(默认 True)
+    show_labels       : 是否显示 Buy/Sell 文字(默认 True)
+
+    输出 lines(全部主图叠加)
+    ----
+    - ht          : 半趋势阶梯线(连续, 兼作通道填充边界)
+    - ht_up       : ``trend == 0`` 段落(蓝, 原码 buyColor = blue)
+    - ht_down     : ``trend == 1`` 段落(红, 原码 sellColor = red)
+    - atr_high    : 通道上沿(红, 原码 circles 以点线近似)
+    - atr_low     : 通道下沿(蓝, 原码 circles 以点线近似)
+    - long_signal / short_signal : Buy / Sell 信号
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``plot.style_circles`` 在本框架以 ``LineDash.dotted`` 线近似。
+    - 原码信号箭头锚定在 ``atrLow`` / ``atrHigh``; 框架信号锚点固定取 K 线
+      low / high(受 ``_set_signal_overlap`` 限制), 故箭头略靠内 —— 仅
+      位置近似, **触发 bar 与原码一致**。
+    - ``showArrows`` 与 ``showLabels`` 共用同一信号列, 若仅关闭箭头仍会显示
+      文字锚点标记(框架限制)。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('ht', 'ht_up', 'ht_down', 'atr_high', 'atr_low',
+             'long_signal', 'short_signal')
+    params = dict(
+        amplitude=2,          # Amplitude
+        channel_deviation=2,  # Channel Deviation
+        show_arrows=True,     # Show Arrows
+        show_channels=True,   # Show Channels
+        show_labels=True,     # Show Buy/Sell Labels
+    )
+    category = 'overlap'
+    isplot = dict(ht=True, ht_up=True, ht_down=True,
+                  atr_high=True, atr_low=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 中性底色, 被 ht_up / ht_down 覆盖, 同时作为通道填充边界
+        ht=LineStyle(line_color='#808080cc', line_width=2.0),
+        # 原码 htColor = trend == 0 ? buyColor(blue) : sellColor(red)
+        ht_up=LineStyle(line_color='#0000ff', line_width=2.0),
+        ht_down=LineStyle(line_color='#ff0000', line_width=2.0),
+        # 原码 ATR High/Low 为 plot.style_circles, 此处用点线近似
+        atr_high=LineStyle(line_color='#ff0000', line_width=1.0,
+                           line_dash=LineDash.dotted),
+        atr_low=LineStyle(line_color='#0000ff', line_width=1.0,
+                          line_dash=LineDash.dotted),
+    )
+    # 原码 fill(ht, atrHigh) sellFillColor=red@85透明, fill(ht, atrLow) buyFillColor=blue@85透明
+    bandstyle = [
+        BandStyle(lower='ht', upper='atr_high',
+                  fill_color='#ff0000', fill_alpha=0.15),
+        BandStyle(lower='atr_low', upper='ht',
+                  fill_color='#0000ff', fill_alpha=0.15),
+    ]
+    signalstyle = dict(
+        # 原码: buyColor=blue triangleup / sellColor=red triangledown
+        long_signal=SignalStyle('low', '#0000ff', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#ff0000', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    @staticmethod
+    def _bars_back(src, length: int, mode: str) -> np.ndarray:
+        """Pine ``ta.highestbars`` / ``ta.lowestbars``: 返回距极值的 bar 数
+        (0 = 当前 bar), 存在等值时取**最近一次**(与 Pine 一致)。
+        窗口内出现 NaN 时该 bar 返回 NaN。"""
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        length = max(1, int(length))
+        out = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            window = src[max(0, i - length + 1):i + 1]
+            if window.size == 0 or np.isnan(window).any():
+                continue
+            rev = window[::-1]  # 最近的在最前 → 等值取最近
+            out[i] = float(np.argmax(rev) if mode == 'max'
+                           else np.argmin(rev))
+        return out
+
+    @staticmethod
+    def _nmax(a, b):
+        """Pine ``math.max``: 任一为 NaN 则返回 NaN。"""
+        if np.isnan(a) or np.isnan(b):
+            return np.nan
+        return a if a > b else b
+
+    @staticmethod
+    def _nmin(a, b):
+        """Pine ``math.min``: 任一为 NaN 则返回 NaN。"""
+        if np.isnan(a) or np.isnan(b):
+            return np.nan
+        return a if a < b else b
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 plotshape 的 "Buy"/"Sell"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        # signal_text 在 IndFrame 构造期调用, 用类级 params(已合并用户参数)
+        if not bool(HalfTrend.params.get('show_labels', True)):
+            return None
+
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'Buy'),
+            'short_signal': _map(self.short_signal, 'Sell'),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        amplitude = max(1, int(p.amplitude))
+        channel_deviation = float(p.channel_deviation)
+        show_arrows = bool(p.show_arrows)
+        show_channels = bool(p.show_channels)
+        show_labels = bool(p.show_labels)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- atr2 / dev ----
+        atr2 = self._atr(high, low, close, 100) / 2.0
+        dev = channel_deviation * atr2
+
+        # ---- 高低点价格 / 均线 ----
+        hb = self._bars_back(high, amplitude, 'max')
+        lb = self._bars_back(low, amplitude, 'min')
+        high_price = np.full(n, np.nan, dtype=np.float64)
+        low_price = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            if not np.isnan(hb[i]):
+                high_price[i] = high[i - int(hb[i])]
+            if not np.isnan(lb[i]):
+                low_price[i] = low[i - int(lb[i])]
+        highma = self._sma(high, amplitude)
+        lowma = self._sma(low, amplitude)
+
+        # ---- 状态(var) ----
+        trend = 0                                  # var int trend = 0
+        next_trend = 0                             # var int nextTrend = 0
+        max_low_price = low[0] if n else np.nan    # nz(low[1], low)
+        min_high_price = high[0] if n else np.nan  # nz(high[1], high)
+        up = 0.0                                   # var float up = 0.0
+        down = 0.0                                 # var float down = 0.0
+
+        up_arr = np.full(n, np.nan, dtype=np.float64)
+        down_arr = np.full(n, np.nan, dtype=np.float64)
+        ht_arr = np.full(n, np.nan, dtype=np.float64)
+        atr_high_arr = np.full(n, np.nan, dtype=np.float64)
+        atr_low_arr = np.full(n, np.nan, dtype=np.float64)
+        trend_arr = np.zeros(n, dtype=np.int8)
+        long_arr = np.zeros(n, dtype=np.float64)
+        short_arr = np.zeros(n, dtype=np.float64)
+
+        for i in range(n):
+            prev_trend = trend_arr[i - 1] if i > 0 else np.nan
+            low1 = low[i - 1] if i > 0 else np.nan
+            high1 = high[i - 1] if i > 0 else np.nan
+
+            # ---- 趋势状态机 ----
+            if next_trend == 1:
+                max_low_price = self._nmax(low_price[i], max_low_price)
+                if (not np.isnan(highma[i]) and not np.isnan(max_low_price)
+                        and highma[i] < max_low_price
+                        and close[i] < (low1 if not np.isnan(low1) else low[i])):
+                    trend = 1
+                    next_trend = 0
+                    min_high_price = high_price[i]
+            else:
+                min_high_price = self._nmin(high_price[i], min_high_price)
+                if (not np.isnan(lowma[i]) and not np.isnan(min_high_price)
+                        and lowma[i] > min_high_price
+                        and close[i] > (high1 if not np.isnan(high1) else high[i])):
+                    trend = 0
+                    next_trend = 1
+                    max_low_price = low_price[i]
+            trend_arr[i] = trend
+
+            # ---- 阶梯线 / ATR 通道 ----
+            up_prev = up_arr[i - 1] if i > 0 else np.nan
+            down_prev = down_arr[i - 1] if i > 0 else np.nan
+            arrow_up = np.nan    # 非 var: 每根 bar 重置
+            arrow_down = np.nan
+            if trend == 0:
+                if (not np.isnan(prev_trend)) and prev_trend != 0:
+                    # 刚由空翻多: up = nz(down[1], down)
+                    up = down if np.isnan(down_prev) else down_prev
+                    arrow_up = up - atr2[i]
+                else:
+                    up = (max_low_price if np.isnan(up_prev)
+                          else self._nmax(max_low_price, up_prev))
+                atr_high_arr[i] = up + dev[i]
+                atr_low_arr[i] = up - dev[i]
+            else:
+                if (not np.isnan(prev_trend)) and prev_trend != 1:
+                    # 刚由多翻空: down = nz(up[1], up)
+                    down = up if np.isnan(up_prev) else up_prev
+                    arrow_down = down + atr2[i]
+                else:
+                    down = (min_high_price if np.isnan(down_prev)
+                            else self._nmin(min_high_price, down_prev))
+                atr_high_arr[i] = down + dev[i]
+                atr_low_arr[i] = down - dev[i]
+
+            up_arr[i] = up
+            down_arr[i] = down
+            ht_arr[i] = up if trend == 0 else down
+
+            # ---- 翻转信号 ----
+            if (not np.isnan(arrow_up)) and trend == 0 and prev_trend == 1:
+                long_arr[i] = 1.0
+            if (not np.isnan(arrow_down)) and trend == 1 and prev_trend == 0:
+                short_arr[i] = 1.0
+
+        # ---- 按趋势拆线着色(翻转处桥接, 避免断线) ----
+        ht_up = np.where(trend_arr == 0, ht_arr, np.nan)
+        ht_down = np.where(trend_arr == 1, ht_arr, np.nan)
+        for i in range(1, n):
+            if trend_arr[i] != trend_arr[i - 1]:
+                ht_up[i] = ht_arr[i]
+                ht_down[i] = ht_arr[i]
+
+        # ---- 视觉开关 ----
+        if not show_channels:
+            atr_high_arr[:] = np.nan
+            atr_low_arr[:] = np.nan
+        if (not show_arrows) and (not show_labels):
+            long_arr[:] = 0.0
+            short_arr[:] = 0.0
+
+        return (ht_arr, ht_up, ht_down, atr_high_arr, atr_low_arr,
+                long_arr, short_arr)
+
+
+class FVGInstantaneousMitigationSignals(BtIndicator):
+    """FVG Instantaneous Mitigation Signals [LuxAlgo] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/xYpl5UdE-FVG-Instantaneous-Mitigation-Signals-LuxAlgo/
+        © LuxAlgo
+
+    概述
+    ----
+    检测 **FVG(公允价值缺口 / 三根K线失衡)**:
+
+    - 看涨 FVG: ``low[3] > high[1] and close[2] < low[3] and close > low[3]``
+      (第 3 根前的低点高于前一根的高点, 中间一根收回缺口内, 当根收复)
+    - 看跌 FVG: ``low[1] > high[3] and close[2] > high[3] and close < high[3]``
+
+    信号当根在缺口上下沿画失衡箱体, 并画一条 **缺口均价水平线**
+    ``avg = (low[3] + high[1]) / 2``(看涨) / ``(low[1] + high[3]) / 2``(看跌);
+    该线向右延伸, 直到价格 **瞬时回补**(看涨: ``close < avg``; 看跌: ``close > avg``),
+    即 "Instantaneous Mitigation" —— 一旦收盘穿越均价即视为已回补, 停止延伸。
+
+    同时附带:
+      * ``tpsl`` TP/SL 区域状态机(可开关), 输出区域是否被触发;
+      * ``trailing_stop`` ATR 跟踪止损(按 os 方向), 反向信号或每次信号重置。
+
+    参数
+    ----
+    - filter_width : FVG 宽度过滤器(原码 filterWidth, 默认 0.0);
+                   要求缺口宽度 ``a - b > atr * filter_width``
+    - show_tp      : 是否绘制 TP 区域(默认 False)
+    - tp_mult      : TP 区域 ATR 倍数(默认 4.0)
+    - show_sl      : 是否绘制 SL 区域(默认 False)
+    - sl_mult      : SL 区域 ATR 倍数(默认 2.0)
+    - ts_reset     : 跟踪止损重置方式: 'Every Signals' / 'Inverse Signals'
+    - ts_mult      : 跟踪止损 ATR 倍数(默认 3.0)
+    - show_bull    : 是否启用看涨 FVG(默认 True)
+    - show_bear    : 是否启用看跌 FVG(默认 True)
+    - show_bull_avg: 是否绘制看涨 FVG 均价线(默认 True)
+    - show_bear_avg: 是否绘制看跌 FVG 均价线(默认 True)
+
+    输出 lines(全部主图叠加)
+    ----
+    - bull_fvg     : 看涨 FVG 均价线(teal 虚线, 回补前持续延伸)
+    - bear_fvg     : 看跌 FVG 均价线(#f23645 虚线)
+    - ts_bull/ts_bear : 跟踪止损线按 os 方向拆分的两段(os=1 多 / os=0 空)
+    - long_signal / short_signal : 看涨/看跌 FVG 信号(▲/▼)
+    - os           : 方向状态(1=最近为看涨 FVG, 0=最近为看跌 FVG)
+    - bull_reached / bear_reached : TP/SL 区域已达(或反向信号触发)
+    - ts_reached   : 跟踪止损已触发
+
+    ⚠ 近似 / 未复现
+    ----
+    - 失衡箱体(box.new)与 TP/SL 区域矩形: 本框架不支持 box 绘制, 仅保留
+      **均价线** 与 **区域触发状态**; 可用 ``bandstyle`` 自行在均价线附近补填充。
+    - ``barcolor`` K 线逐点染色不支持, 已省略。
+    - 跟踪止损原码按 bar 变色(na 隐藏), 此处拆为 ``ts_bull``/``ts_bear`` 两段
+      并在信号/触发 bar 置 NaN, 等价于原码隐藏效果。
+    - 信号文字颜色随主题(框架限制), 方向由标记颜色区分。
+    """
+    lines = ('bull_fvg', 'bear_fvg', 'ts_bull', 'ts_bear',
+             'long_signal', 'short_signal',
+             'os', 'bull_reached', 'bear_reached', 'ts_reached')
+    params = dict(
+        filter_width=0.0,        # FVG Width Filter
+        show_tp=False,           # TP Area
+        tp_mult=4.0,             # TP Multiplier
+        show_sl=False,           # SL Area
+        sl_mult=2.0,             # SL Multiplier
+        ts_reset='Every Signals',  # Reset Trailing Stop
+        ts_mult=3.0,             # Trailing Stop Multiplier
+        show_bull=True,          # Bullish IMFVG
+        show_bear=True,          # Bearish IMFVG
+        show_bull_avg=True,      # Bullish Average
+        show_bear_avg=True,      # Bearish Average
+    )
+    category = 'overlap'
+    overlap = True
+    isplot = dict(
+        bull_fvg=True, bear_fvg=True, ts_bull=True, ts_bear=True,
+        long_signal=False, short_signal=False,
+        os=False, bull_reached=False, bear_reached=False, ts_reached=False,
+    )
+    linestyle = dict(
+        # 原码 bullCss = teal, bearCss = #f23645, style = dashed
+        bull_fvg=LineStyle(line_color='#008080', line_width=1.5,
+                           line_dash=LineDash.dashed),
+        bear_fvg=LineStyle(line_color='#f23645', line_width=1.5,
+                           line_dash=LineDash.dashed),
+        # 原码 plot(ts, ..., os ? bullCss : bearCss), 此处按方向拆线
+        ts_bull=LineStyle(line_color='#008080', line_width=2.0),
+        ts_bear=LineStyle(line_color='#f23645', line_width=2.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#008080', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#f23645', 'inverted_triangle', True, True, 12),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        """等价 ``a[k]``(Pine 历史引用): 正 k 向后取 k 根前的值, NaN 填充。"""
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        k = int(k)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        elif -len(a) < k < 0:
+            out[:k] = a[-k:]
+        elif k == 0:
+            out[:] = a
+        return out
+
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    @staticmethod
+    def _tpsl_step(state, condition, opposite, level, islong,
+                   show_tp, tp_mult, show_sl, sl_mult, atr, high, low):
+        """Pine ``tpsl()`` 单步: TP/SL 区域状态机。
+
+        ``state = (tp_on, tp_top, tp_bot, sl_on, sl_top, sl_bot, reached)``,
+        返回 ``(new_state, reached)``。
+        """
+        tp_on, tp_top, tp_bot, sl_on, sl_top, sl_bot, reached = state
+        if condition:
+            if islong:
+                if show_tp:
+                    tp_on, tp_top, tp_bot = True, level + atr * tp_mult, level
+                if show_sl:
+                    sl_on, sl_top, sl_bot = True, level, level - atr * sl_mult
+            else:
+                if show_tp:
+                    tp_on, tp_top, tp_bot = True, level, level - atr * tp_mult
+                if show_sl:
+                    sl_on, sl_top, sl_bot = True, level + atr * sl_mult, level
+            reached = False
+        elif opposite:
+            reached = True
+
+        if not reached:
+            if islong:
+                if (tp_on and high > tp_top) or (sl_on and low < sl_bot):
+                    reached = True
+            else:
+                if (tp_on and low < tp_bot) or (sl_on and high > sl_top):
+                    reached = True
+        new_state = (tp_on, tp_top, tp_bot, sl_on, sl_top, sl_bot, reached)
+        return new_state, reached
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 label.new 的 "▲"/"▼"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, '\u25b2'),
+            'short_signal': _map(self.short_signal, '\u25bc'),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        filter_width = float(p.filter_width)
+        show_tp = bool(p.show_tp)
+        tp_mult = float(p.tp_mult)
+        show_sl = bool(p.show_sl)
+        sl_mult = float(p.sl_mult)
+        ts_reset_mode = str(p.ts_reset)
+        ts_mult = float(p.ts_mult)
+        show_bull = bool(p.show_bull)
+        show_bear = bool(p.show_bear)
+        show_bull_avg = bool(p.show_bull_avg)
+        show_bear_avg = bool(p.show_bear_avg)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- atr = nz(ta.atr(200)) ----
+        atr = np.nan_to_num(self._atr(high, low, close, 200), nan=0.0)
+
+        low3 = self._shift(low, 3)
+        low1 = self._shift(low, 1)
+        high1 = self._shift(high, 1)
+        high3 = self._shift(high, 3)
+        close2 = self._shift(close, 2)
+
+        # ---- FVG 信号 ----
+        bull = ((low3 > high1) & (close2 < low3) & (close > low3)
+                & ((low3 - high1) > atr * filter_width) & show_bull)
+        bear = ((low1 > high3) & (close2 > high3) & (close < high3)
+                & ((low1 - high3) > atr * filter_width) & show_bear)
+
+        # 缺口均价水平位(仅在信号当根使用)
+        avg_bull_lvl = (low3 + high1) / 2.0
+        avg_bear_lvl = (low1 + high3) / 2.0
+
+        bull_fvg = np.full(n, np.nan, dtype=np.float64)
+        bear_fvg = np.full(n, np.nan, dtype=np.float64)
+        os_arr = np.zeros(n, dtype=np.float64)
+        bull_reached_arr = np.zeros(n, dtype=np.float64)
+        bear_reached_arr = np.zeros(n, dtype=np.float64)
+
+        bull_avg = np.nan
+        bear_avg = np.nan
+        bull_active = False   # 看涨均价线是否仍在延伸(未回补)
+        bear_active = False
+        os = 0.0
+
+        # tpsl 两个独立实例(long / short)
+        l_state = (False, np.nan, np.nan, False, np.nan, np.nan, False)
+        r_state = (False, np.nan, np.nan, False, np.nan, np.nan, False)
+
+        for i in range(n):
+            # ---- 看涨 FVG ----
+            if bull[i]:
+                bull_avg = avg_bull_lvl[i]
+                bull_active = True
+                bull_fvg[i] = bull_avg
+                os = 1.0
+            elif bull_active:
+                bull_fvg[i] = bull_avg   # 继续延伸
+
+            # ---- 看跌 FVG ----
+            if bear[i]:
+                bear_avg = avg_bear_lvl[i]
+                bear_active = True
+                bear_fvg[i] = bear_avg
+                os = 0.0
+            elif bear_active:
+                bear_fvg[i] = bear_avg
+
+            os_arr[i] = os
+
+            # ---- 均价线回补判定(先延伸当根, 再判定, 与原码顺序一致) ----
+            if bull_active and close[i] < bull_avg:
+                bull_active = False
+            if bear_active and close[i] > bear_avg:
+                bear_active = False
+
+            # ---- TP/SL 区域状态机 ----
+            l_state, l_reached = self._tpsl_step(
+                l_state, bool(bull[i]), bool(bear[i]), avg_bull_lvl[i], True,
+                show_tp, tp_mult, show_sl, sl_mult, atr[i], high[i], low[i])
+            r_state, r_reached = self._tpsl_step(
+                r_state, bool(bear[i]), bool(bull[i]), avg_bear_lvl[i], False,
+                show_tp, tp_mult, show_sl, sl_mult, atr[i], high[i], low[i])
+            bull_reached_arr[i] = 1.0 if l_reached else 0.0
+            bear_reached_arr[i] = 1.0 if r_reached else 0.0
+
+        # ---- 跟踪止损 ----
+        if ts_reset_mode == 'Inverse Signals':
+            os_prev = np.concatenate([[np.nan], os_arr[:-1]])
+            valid = ~np.isnan(os_prev)
+            trigger = np.zeros(n, dtype=bool)
+            trigger[valid] = os_arr[valid] != os_prev[valid]
+        else:  # 'Every Signals'
+            trigger = bull | bear
+
+        ts_arr = np.full(n, np.nan, dtype=np.float64)
+        ts_reached = np.zeros(n, dtype=np.float64)
+        ts = np.nan
+        reached = False
+        for i in range(n):
+            if trigger[i]:
+                ts = (close[i] - atr[i] * ts_mult if os_arr[i] == 1
+                      else close[i] + atr[i] * ts_mult)
+                reached = False
+            else:
+                if os_arr[i] == 1:
+                    if close[i] - ts > atr[i] * ts_mult:
+                        ts = close[i] - atr[i] * ts_mult
+                else:
+                    if ts - close[i] > atr[i] * ts_mult:
+                        ts = close[i] + atr[i] * ts_mult
+                if close[i] < ts and os_arr[i] == 1:
+                    reached = True
+                elif close[i] > ts and os_arr[i] == 0:
+                    reached = True
+            ts_arr[i] = ts
+            ts_reached[i] = 1.0 if reached else 0.0
+
+        # 原码: 信号 bar / 已触发 bar 不绘制跟踪止损
+        hidden = (ts_reached > 0) | bull | bear
+        ts_bull = np.where((os_arr == 1) & (~hidden), ts_arr, np.nan)
+        ts_bear = np.where((os_arr == 0) & (~hidden), ts_arr, np.nan)
+
+        # ---- 显示开关 ----
+        if not show_bull_avg:
+            bull_fvg[:] = np.nan
+        if not show_bear_avg:
+            bear_fvg[:] = np.nan
+
+        return (bull_fvg, bear_fvg, ts_bull, ts_bear,
+                bull.astype(np.float64), bear.astype(np.float64),
+                os_arr, bull_reached_arr, bear_reached_arr, ts_reached)
+
+
+class QuantitativeQualitativeEstimation(BtIndicator):
+    """Quantitative Qualitative Estimation (KivancOzbilgic) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/0vn4HZ7O-Quantitative-Qualitative-Estimation-QQE/
+        © KivancOzbilgic, MPL 2.0
+
+    与 ``QQESignals`` / ``QQEMod`` 的一致性结论: **均不一致**(独立收录)
+    ----
+    三者同属 QQE 家族, fast 线(平滑 RSI)完全相同, 但慢线与平滑方式不同:
+
+    ============  ==================================  =============================
+    项目           本脚本(KivancOzbilgic)              QQESignals(colinmck)
+    ============  ==================================  =============================
+    平滑 RSI      ema(rsi(src,length),SSF)            ema(rsi(close,length),SF)(相同)
+    ATR-RSI 平滑   双重 Wilder(alpha=1/length),       双重 EMA(period=2L-1, alpha 同为
+                  以 **0** 播种                       1/L), 以**首个有效值**播种
+    慢线           QUP/QDN 追踪止损线                  longband/shortband + trend 翻转
+    信号           crossover/crossunder(QQEF,QQES)     QQExlong/QQExshort 计数器
+    因子           4.236(写死)                         4.238
+    ============  ==================================  =============================
+
+    实测: ``QQEF`` 与 ``QQESignals.qqe_rsi`` 完全相等; 但慢线 ``QQES`` 与
+    ``QQESignals.qqe_fast`` 稳态均值差 0.006, **最大差 6.10**(趋势翻转处),
+    且 299 个买点中 2 个不同; 本脚本 ``QQES`` 预热期从 0 起步。
+    故按原码独立实现, 不复用 ``QQESignals`` 的慢线。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``RSII = ema(rsi(src, length), SSF)``; ``QQEF`` 同上(原码重复计算一次)
+    - ``TR      = abs(QQEF - QQEF[1])``
+    - ``alpha   = 1 / length``
+    - ``WWMA    := alpha*TR + (1-alpha)*nz(WWMA[1])``
+    - ``ATRRSI  := alpha*WWMA + (1-alpha)*nz(ATRRSI[1])``
+    - ``QUP = QQEF + ATRRSI*4.236``, ``QDN = QQEF - ATRRSI*4.236``
+    - ``QQES`` 为 QUP/QDN 间的追踪止损(原码三目链):
+      ``QUP < QQES[1] ? QUP : QQEF > QQES[1] and QQEF[1] < QQES[1] ? QDN
+      : QDN > QQES[1] ? QDN : QQEF < QQES[1] and QQEF[1] > QQES[1] ? QUP
+      : QQES[1]``
+    - 信号: ``buy = crossover(QQEF, QQES)``, ``sell = crossunder(QQEF, QQES)``
+
+    参数
+    ----
+    - source       : 源价格(默认 'close')
+    - rsi_length   : RSI 周期(原码 length, 默认 14)
+    - sf           : RSI 平滑因子(原码 SSF, 默认 5)
+    - qqe_factor   : ATR-RSI 倍数(原码写死 4.236, 默认 4.236)
+    - show_signals : 是否显示 Buy/Sell 信号(默认 True)
+    - highlight    : 是否开启上下趋势高亮填充(默认 True)
+
+    输出 lines
+    ----
+    - 副图: qqe_fast(maroon, 2px) / qqe_slow(blue, 1px) / fifty(灰 50 轴)
+    - 副图填充边界(供 BandStyle 使用, 被主线覆盖):
+      fill_up_low / fill_up_high(QQEF>QQES 绿) 与 fill_dn_low / fill_dn_high(红)
+    - 主图: long_signal / short_signal(Buy / Sell)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码为独立副图(study 未 overlay), 信号标签锚定在 ``QQES*0.995`` /
+      ``QQES*1.005``; 框架将信号固定锚定到主图 K 线 low/high, 故信号画在主图;
+      触发 bar 与原码一致。
+    - ``plot(50, style=6)``(circles)以灰色点线近似。
+    - 高亮填充用拆分的填充边界线实现(主线颜色与粗细保持原码)。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('fill_up_low', 'fill_up_high', 'fill_dn_low', 'fill_dn_high',
+             'qqe_fast', 'qqe_slow', 'fifty',
+             'long_signal', 'short_signal')
+    params = dict(
+        source='close',        # src
+        rsi_length=14,         # RSI Length
+        sf=5,                  # SF RSI Smoothing Factor
+        qqe_factor=4.236,      # 原码写死 4.236
+        show_signals=True,     # Show Crossing Signals?
+        highlight=True,        # Highlighter On/Off ?
+    )
+    category = 'momentum'
+    overlap = dict(
+        fill_up_low=False, fill_up_high=False,
+        fill_dn_low=False, fill_dn_high=False,
+        qqe_fast=False, qqe_slow=False, fifty=False,
+        long_signal=True, short_signal=True,
+    )
+    isplot = dict(
+        fill_up_low=True, fill_up_high=True,
+        fill_dn_low=True, fill_dn_high=True,
+        qqe_fast=True, qqe_slow=True, fifty=True,
+        long_signal=False, short_signal=False,
+    )
+    linestyle = dict(
+        # 原码 QQF = maroon linewidth 2, QQS = blue linewidth 1
+        qqe_fast=LineStyle(line_color='#800000', line_width=2.0),
+        qqe_slow=LineStyle(line_color='#0000ff', line_width=1.0),
+        # 原码 plot(50, color.gray, style=6) -> 点线近似
+        fifty=LineStyle(line_color='#808080', line_width=1.0,
+                        line_dash=LineDash.dotted),
+        # 填充边界: 先画并被 qqe_fast/qqe_slow 覆盖, 仅用于 BandStyle 与图例
+        fill_up_low=LineStyle(line_color='#00a000', line_width=0.1),
+        fill_up_high=LineStyle(line_color='#00a000', line_width=0.1),
+        fill_dn_low=LineStyle(line_color='#e00000', line_width=0.1),
+        fill_dn_high=LineStyle(line_color='#e00000', line_width=0.1),
+    )
+    # 原码 fill(QQF, QQS, color=longFillColor/shortFillColor), 绿=多 红=空
+    bandstyle = [
+        BandStyle(lower='fill_up_low', upper='fill_up_high',
+                  fill_color='#00ff00', fill_alpha=0.15),
+        BandStyle(lower='fill_dn_low', upper='fill_dn_high',
+                  fill_color='#ff0000', fill_alpha=0.15),
+    ]
+    signalstyle = dict(
+        # 原码 Buy: labelup 绿; Sell: labeldown 红
+        long_signal=SignalStyle('qqe_slow', '#00c853',
+                                'triangle', False, True, 13),
+        short_signal=SignalStyle(
+            'qqe_slow', '#ff1744', 'inverted_triangle', False, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 plotshape 的 "Buy"/"Sell"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'Buy'),
+            'short_signal': _map(self.short_signal, 'Sell'),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        length = max(2, int(p.rsi_length))
+        sf = max(1, int(p.sf))
+        factor = float(p.qqe_factor)
+        show_signals = bool(p.show_signals)
+        highlight = bool(p.highlight)
+
+        # ---- 源价格 ----
+        src_name = str(p.source)
+        if src_name == 'hl2':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64)) / 2.0
+        elif src_name == 'hlc3':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64)
+                   + np.asarray(self.close, dtype=np.float64)) / 3.0
+        elif src_name == 'ohlc4':
+            src = (np.asarray(self.open, dtype=np.float64)
+                   + np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64)
+                   + np.asarray(self.close, dtype=np.float64)) / 4.0
+        else:
+            src = np.asarray(getattr(self, src_name), dtype=np.float64)
+        n = len(src)
+
+        # ---- RSII = ema(rsi(src,length),SSF); QQEF 同式 ----
+        rsi = QQESignals._rsi(src, length)
+        qqef = QQESignals._ema(rsi, sf)
+
+        # ---- WWMA / ATRRSI: alpha=1/length 双重 Wilder, nz 以 0 播种 ----
+        qqef_prev = np.concatenate([[np.nan], qqef[:-1]])
+        tr = np.abs(qqef - qqef_prev)
+        alpha = 1.0 / float(length)
+        wwma = np.full(n, np.nan, dtype=np.float64)
+        atrrsi = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            pw = wwma[i - 1] if i > 0 else np.nan
+            pw = 0.0 if np.isnan(pw) else pw
+            wwma[i] = (np.nan if np.isnan(tr[i])
+                       else alpha * tr[i] + (1.0 - alpha) * pw)
+            pa = atrrsi[i - 1] if i > 0 else np.nan
+            pa = 0.0 if np.isnan(pa) else pa
+            wwma_i = wwma[i]
+            atrrsi[i] = (np.nan if np.isnan(wwma_i)
+                         else alpha * wwma_i + (1.0 - alpha) * pa)
+
+        qup = qqef + atrrsi * factor
+        qdn = qqef - atrrsi * factor
+
+        # ---- QQES 追踪止损(原码三目链) ----
+        qqes = np.full(n, np.nan, dtype=np.float64)
+        q = np.nan
+        for i in range(n):
+            prev = 0.0 if np.isnan(q) else q
+            cur = qqef[i]
+            cur_prev = qqef[i - 1] if i > 0 else np.nan
+            if (not np.isnan(qup[i])) and qup[i] < prev:
+                q = qup[i]
+            elif (not np.isnan(cur) and not np.isnan(cur_prev)
+                  and cur > prev and cur_prev < prev):
+                q = qdn[i]
+            elif (not np.isnan(qdn[i])) and qdn[i] > prev:
+                q = qdn[i]
+            elif (not np.isnan(cur) and not np.isnan(cur_prev)
+                  and cur < prev and cur_prev > prev):
+                q = qup[i]
+            else:
+                q = prev
+            qqes[i] = q
+
+        # ---- 信号: crossover / crossunder(QQEF, QQES) ----
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        if show_signals:
+            for i in range(1, n):
+                a0, b0 = qqef[i - 1], qqes[i - 1]
+                a1, b1 = qqef[i], qqes[i]
+                if (np.isnan(a0) or np.isnan(b0)
+                        or np.isnan(a1) or np.isnan(b1)):
+                    continue
+                if a0 < b0 and a1 > b1:
+                    long_sig[i] = 1.0
+                elif a0 > b0 and a1 < b1:
+                    short_sig[i] = 1.0
+
+        # ---- 高亮填充边界(绿: QQEF>QQES, 红: QQEF<QQES) ----
+        valid = (~np.isnan(qqef)) & (~np.isnan(qqes))
+        up = valid & (qqef > qqes)
+        dn = valid & (qqef < qqes)
+        fill_up_high = np.where(up, qqef, np.nan)
+        fill_up_low = np.where(up, qqes, np.nan)
+        fill_dn_low = np.where(dn, qqef, np.nan)
+        fill_dn_high = np.where(dn, qqes, np.nan)
+        if not highlight:
+            fill_up_high[:] = np.nan
+            fill_up_low[:] = np.nan
+            fill_dn_low[:] = np.nan
+            fill_dn_high[:] = np.nan
+
+        fifty = np.full(n, 50.0, dtype=np.float64)
+
+        return (fill_up_low, fill_up_high, fill_dn_low, fill_dn_high,
+                qqef, qqes, fifty, long_sig, short_sig)
+
+
+class StochasticOptimizedTrendTracker(BtIndicator):
+    """Stochastic Optimized Trend Tracker (SOTT) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/BK45kYNB-Stochastic-OTT/
+        © KivancOzbilgic(created by @Anil_Ozeksi)
+
+    概述
+    ----
+    把 OTT(Optimized Trend Tracker)套用到 **随机指标 %K** 上:
+
+    1. ``stoch = ta.stoch(close, high, low, periodK)``
+       `` = 100*(close - lowest(low,periodK)) / (highest(high,periodK) - lowest(low,periodK))``
+    2. ``k = Var_Func(stoch, smoothK)``  —— 用 VAR(基于 CMO 的自适应均线)平滑 %K
+    3. ``src = k + 1000``  (原码为避开 0 轴而整体 +1000)
+    4. ``MAvg = Var_Func(src, length)`` —— 支撑线(自适应均线)
+    5. ``fark = MAvg*percent*0.01``; 自适应 ``longStop`` / ``shortStop``;
+       翻转状态 ``dir``; ``MT = dir==1 ? longStop : shortStop``;
+       ``OTT = MAvg>MT ? MT*(200+percent)/200 : MT*(200-percent)/200``
+    6. 信号: ``buy = crossover(src, OTT[2])``, ``sell = crossunder(src, OTT[2])``
+
+    ``Var_Func(src, length)``(Pine 原码逐行对齐):
+    ----
+    - ``valpha = 2/(length+1)``
+    - ``vud1 = src>src[1] ? src-src[1] : 0``, ``vdd1 = src<src[1] ? src[1]-src : 0``
+    - ``vUD = sum(vud1, 9)``, ``vDD = sum(vdd1, 9)``
+    - ``vCMO = nz((vUD-vDD)/(vUD+vDD))``
+    - ``VAR := nz(valpha*abs(vCMO)*src) + (1-valpha*abs(vCMO))*nz(VAR[1])``
+      (Pine 以 0 播种, 故预热期输出 0)
+
+    ⚠ 原码中的 ``src1``(close) 仅传给一个**未使用**的 ``Var_Func1`` 结果, 对指标
+    无影响; 平仓/开仓都基于 ``stoch(close,high,low,periodK)``, 故本实现不暴露 source。
+
+    参数
+    ----
+    periodK      : %K Length(默认 500)
+    smoothK      : %K Smoothing(默认 200)
+    length       : OTT Period(默认 2)
+    percent      : OTT Percent(默认 0.5)
+    var_length   : CMO 回看周期(原码固定 9, 默认 9)
+    show_support : 是否绘制支撑线 MAvg(默认 False, 原码 defval=false 的装饰项)
+    show_signals : 是否显示 Buy/Sell 信号(默认 **True**)
+        ⚠ 原码是 ``defval=false``（要勾 “Show Stochastic/OTT Crossing
+        Signals?”）。minibt 把它默认打开：“出图就能看到信号”，需要安静
+        的图就传 ``show_signals=False``。
+
+    输出 lines(副图, 数值含 +1000 偏移以对齐原码)
+    ----
+    - k          : VAR 平滑后的 %K + 1000(蓝)
+    - ma_avg     : 支撑线 MAvg(show_support 关闭时置 NaN)
+    - ott        : OTT 原始值(仅数据)
+    - ott_s2     : nz(OTT[2]) —— 原码主绘图线(紫, 线宽 2)
+    - upper_band / lower_band : 固定参考水平线 1080 / 1020, 并填充紫色背景
+    - long_signal / short_signal : Buy / Sell 信号(两个都锚在 ``ott_s2``、画在副图;
+      样式按原码 ``plotshape``: 绿三角 + 绿底白字 "Buy"、红倒三角 + 红底白字 "Sell")
+
+    ⚠ 近似 / 未复现
+    ----
+    - **``ma_avg`` 改用首值播种**: Pine 的 ``Var_Func`` 用 ``nz(VAR[1])``(即 0)
+      播种。对 ``MAvg = Var_Func(k+1000, length)`` 而言, 源值从首根起就在 ~1000,
+      若用 0 播种会先在预热期输出一串 0、再缓慢爬升到 ~1000, 图上呈现明显落差。
+      本实现对 ``MAvg`` 改用 **源序列首个有效值** 播种, 使其从首根起就在 ~1000
+      平滑跟随; ``k`` 的 ``Var_Func`` 仍按原码 0 播种(其输出 ``k+1000`` 预热为
+      1000, 本就与参考线一致)。信号触发 bar 不受影响。
+    - 原码为独立副图(study 未 overlay), 信号标签锚定在 ``OTT*0.995`` /
+      ``OTT*1.005``。本实现用 ``SignalStyle('ott_s2', ..., overlap=False)``：
+      信号画在**同一个副图**、锚在 OTT 线上, 用像素偏移代替原码的 0.5% 价格
+      偏移（``shape.labelup`` / ``labeldown`` 用 绿/红三角 + 同色文字底色 +
+      白色文字近似）。触发 bar 与原码一致。
+    - ``fill(h0,h1)`` 以两条常量参考线 + BandStyle 实现。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('k', 'ma_avg', 'ott', 'ott_s2',
+             'long_signal', 'short_signal')
+    params = dict(
+        periodK=500,        # %K Length
+        smoothK=200,        # %K Smoothing
+        length=2,           # OTT Period
+        percent=0.5,        # OTT Percent
+        var_length=9,       # CMO 回看(原码固定 9)
+        show_support=False,   # Show Support Line?
+        show_signals=True,    # Show Stochastic/OTT Crossing Signals?(默认开)
+    )
+    category = 'momentum'
+    overlap = dict(
+        k=False, ma_avg=False, ott=False, ott_s2=False,
+        long_signal=False, short_signal=False,
+    )
+    isplot = dict(
+        k=True, ma_avg=True, ott=False, ott_s2=True,
+        long_signal=False, short_signal=False,
+    )
+    linestyle = dict(
+        # 原码 plot(k+1000, color=#0094FF)
+        k=LineStyle(line_color='#0094FF', line_width=1.3),
+        # 原码 plot(showsupport ? MAvg : na, color=#0585E1, linewidth=2)
+        ma_avg=LineStyle(line_color='#0585E1', line_width=2.0),
+        # 原码 plot(nz(OTT[2]), color=#B800D9, linewidth=2)
+        ott_s2=LineStyle(line_color='#B800D9', line_width=2.0),
+        ott=LineStyle(line_color='#B800D9', line_width=1.0),
+    )
+    signalstyle = dict(
+        # 原码 plotshape(buySignalc ? OTT*0.995 : na, title="Buy", text="Buy",
+        #   location=location.absolute, style=shape.labelup, size=size.tiny,
+        #   color=color.green, textcolor=color.white, transp=0)
+        # → 绿底白字 "Buy"，贴在 OTT 线**下方**（用像素偏移代替原码的 0.5%
+        #   价格偏移）；overlap=False = 画在**指标自己那个副图**里（原码 study
+        #   未 overlay），锚点是 OTT 复制线 `ott_s2`。
+        long_signal=SignalStyle(
+            'ott_s2', Colors.green, Markers.triangle, False, True, 12
+        ).set_label('Buy').set_text_style(
+            text_color='white', font_size=10, offset_y=7,
+            background_fill_color=Colors.green, background_fill_alpha=1.0,
+            border_line_color=Colors.green, border_line_width=1.0),
+        # 原码 plotshape(sellSignallc ? OTT*1.005 : na, text="Sell",
+        #   style=shape.labeldown, color=color.red, textcolor=color.white)
+        # → 红底白字 "Sell"，贴在 OTT 线**上方**
+        short_signal=SignalStyle(
+            'ott_s2', Colors.red, Markers.inverted_triangle, False, True, 12
+        ).set_label('Sell').set_text_style(
+            text_color='white', font_size=10, offset_y=-7,
+            background_fill_color=Colors.red, background_fill_alpha=1.0,
+            border_line_color=Colors.red, border_line_width=1.0),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 plotshape 的 "Buy"/"Sell"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'Buy'),
+            'short_signal': _map(self.short_signal, 'Sell'),
+        }
+
+    # ------------------------------------------------------------------
+    # Var_Func: 基于 CMO 的自适应均线
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _var_func(src, length: int, var_length: int = 9,
+                  seed_first: bool = False) -> np.ndarray:
+        """Pine ``Var_Func(src, length)`` 逐行对齐。
+
+        Pine 用 ``nz(VAR[1])`` 即 **以 0 播种**; ``seed_first=True`` 时改用源
+        序列的首个有效值播种。SOTT 的 ``MAvg = Var_Func(k+1000, length)`` 源值
+        从第一根起就在 ~1000, 若沿用 0 播种会先输出一串 0 再缓慢爬升到 ~1000,
+        图上表现为明显落差, 故对 ``MAvg`` 采用首值播种。
+        """
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        valpha = 2.0 / (float(length) + 1.0)
+        diff = src - np.concatenate([[np.nan], src[:-1]])
+        vud1 = np.where(diff > 0, diff, 0.0)
+        vdd1 = np.where(diff < 0, -diff, 0.0)
+        vUD = pd.Series(vud1).rolling(int(var_length)).sum().values
+        vDD = pd.Series(vdd1).rolling(int(var_length)).sum().values
+        denom = vUD + vDD
+        with np.errstate(divide='ignore', invalid='ignore'):
+            vCMO = np.where(denom == 0, np.nan, (vUD - vDD) / denom)
+        # nz(): na -> 0
+        vCMO = np.where(np.isnan(vCMO), 0.0, vCMO)
+
+        out = np.zeros(n, dtype=np.float64)
+        prev = 0.0                       # nz(VAR[1]) 初始为 0
+        if seed_first:
+            valid = np.flatnonzero(~np.isnan(src))
+            if valid.size:
+                prev = float(src[valid[0]])
+        for i in range(n):
+            a = valpha * abs(vCMO[i])
+            x = src[i]
+            term1 = 0.0 if np.isnan(x) else a * x   # nz(valpha*|CMO|*src)
+            prev = term1 + (1.0 - a) * prev
+            out[i] = prev
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        periodK = max(1, int(p.periodK))
+        smoothK = max(1, int(p.smoothK))
+        length = max(1, int(p.length))
+        percent = float(p.percent)
+        var_length = max(1, int(p.var_length))
+        show_support = bool(p.show_support)
+        show_signals = bool(p.show_signals)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- stoch(close, high, low, periodK) ----
+        lo = pd.Series(low).rolling(periodK).min().values
+        hi = pd.Series(high).rolling(periodK).max().values
+        denom = hi - lo
+        with np.errstate(divide='ignore', invalid='ignore'):
+            stoch = np.where(denom == 0, np.nan,
+                             100.0 * (close - lo) / denom)
+
+        # ---- k = Var_Func(stoch, smoothK); src = k + 1000 ----
+        k = self._var_func(stoch, smoothK, var_length)
+        src = k + 1000.0
+
+        # ---- MAvg = Var_Func(src, length) ----
+        # 源值(≈1000)从首根就有意义, 用首值播种以避免从 0 爬升的落差
+        ma_avg = self._var_func(src, length, var_length, seed_first=True)
+
+        # ---- OTT 迭代(原码逐行) ----
+        fark = ma_avg * percent * 0.01
+        cand_long = ma_avg - fark
+        cand_short = ma_avg + fark
+        ott = np.full(n, np.nan, dtype=np.float64)
+        d = 1                       # dir := nz(dir[1], 1)
+        adj_long = np.nan           # longStop[1]
+        adj_short = np.nan          # shortStop[1]
+        base_up = (200.0 + percent) / 200.0
+        base_dn = (200.0 - percent) / 200.0
+        for i in range(n):
+            ma = ma_avg[i]
+            if np.isnan(ma):
+                continue
+            # longStopPrev = nz(longStop[1], longStop)
+            pl = cand_long[i] if np.isnan(adj_long) else adj_long
+            a_long = max(cand_long[i], pl) if ma > pl else cand_long[i]
+            ps = cand_short[i] if np.isnan(adj_short) else adj_short
+            a_short = (min(cand_short[i], ps) if ma < ps
+                       else cand_short[i])
+            # dir
+            if d == -1 and ma > ps:
+                d = 1
+            elif d == 1 and ma < pl:
+                d = -1
+            mt = a_long if d == 1 else a_short
+            ott[i] = mt * base_up if ma > mt else mt * base_dn
+            adj_long = a_long
+            adj_short = a_short
+
+        # ---- OTT[2] (原码 pALL = plot(nz(OTT[2]))) ----
+        ott_s2 = np.full(n, np.nan, dtype=np.float64)
+        if n > 2:
+            ott_s2[2:] = ott[:-2]
+
+        # ---- 信号: crossover / crossunder(src, OTT[2]) ----
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        if show_signals:
+            for i in range(1, n):
+                a0, b0 = src[i - 1], ott_s2[i - 1]
+                a1, b1 = src[i], ott_s2[i]
+                if (np.isnan(a0) or np.isnan(b0)
+                        or np.isnan(a1) or np.isnan(b1)):
+                    continue
+                if a0 < b0 and a1 > b1:
+                    long_sig[i] = 1.0
+                elif a0 > b0 and a1 < b1:
+                    short_sig[i] = 1.0
+
+        k_out = k + 1000.0
+        ma_out = (ma_avg if show_support
+                  else np.full(n, np.nan, dtype=np.float64))
+
+        return (k_out, ma_out, ott, ott_s2,
+                long_sig, short_sig)
+
+
+class TransientZones(BtIndicator):
+    """Transient Zones v1.1 (Jurij / SPYderCrusher) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/NBcEvyej-Transient-Zones-v1-1/
+        By Jurij w/ TZ percent occurrence by SPYderCrusher
+
+    概述
+    ----
+    “Transient Zone(TZ)” = 一个由左 ``h_left`` + 中心 bar + 右 ``h_right`` 组成的
+    窗口, 当 **中心 bar 的高低点为整个窗口的极值** 时, 认为该处形成了一个瞬时极值区。
+
+    与原码的差异(按需求调整)
+    ----
+    - 原码的 **PTZ 三角信号**(``newlow`` / ``newhigh`` 的 ``plotshape``)出现过于频繁,
+      **不输出**; 但内部仍计算, 用于 TZ 概率统计。
+    - 仅保留 **TZ 箭头信号**(``central_bar_is_highest`` / ``central_bar_is_lowest``
+      的 ``plotarrow``)。
+    - 保留 **通道线** 并在两线之间加 **色带**(原码只有两条银线, 无填充)。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``h_left_low  = lowest(low,  h_left)``, ``h_left_high = highest(high, h_left)``
+      → 通道上下沿(原码变量名相反: channel_high 画的是 h_left_low)
+    - ``newlow  = low  <= h_left_low``, ``newhigh = high >= h_left_high``  (PTZ)
+    - ``central_bar_low  = low [h_right+1]``, ``central_bar_high = high[h_right+1]``
+    - ``full_zone_low  = lowest(low,  h_left+h_right+1)``
+      ``full_zone_high = highest(high, h_left+h_right+1)``
+    - ``central_bar_is_highest = central_bar_high >= full_zone_high``  → 下箭头(红)
+      ``central_bar_is_lowest  = central_bar_low  <= full_zone_low``   → 上箭头(绿)
+    - 概率: ``percent_total_tz = (cum(is_highest)+cum(is_lowest))/sample_period*100``,
+      ``percent_total_ptz`` 同理, ``percent_ptz_resolved = (1-total_tz/total_ptz)*100``
+
+    参数
+    ----
+    h_left        : 中心 bar 左侧窗口(默认 10)
+    h_right       : 中心 bar 右侧窗口(默认 10)
+    sample_period : 概率统计样本(默认 5000)
+    show_channel  : 是否显示通道线(默认 True)
+    show_arrows   : 是否显示 TZ 箭头信号(默认 True)
+
+    输出 lines
+    ----
+    - channel_high : 通道上沿 ``highest(high, h_left)``(银)
+    - channel_low  : 通道下沿 ``lowest(low, h_left)``(银), 两线之间填充色带
+    - long_signal  : 中心 bar 为窗口最低点的上箭头(绿, 0/1)
+    - short_signal : 中心 bar 为窗口最高点的下箭头(红, 0/1)
+    - pct_tz / pct_ptz / pct_resolved : TZ 概率(仅数据, 不绘图)
+
+    ⚠ 说明
+    ----
+    - **信号锚定在中心 bar**: 原码 ``plotarrow(..., offset=-h_right-1)`` 把箭头画在
+      历史中心 bar 上; 本实现同样把 0/1 写在中心 bar 下标(与 ``SwingHighsLows``
+      一致)。注意该极值需在 **h_right+1 根之后** 才被确认, 回测使用时需考虑此滞后。
+    - 框架无 arrow 标记, 用 ``triangle`` / ``inverted_triangle`` 代替。
+    - 原码 ``transp=100`` 的概率线本就不可见, 此处作为数据列输出。
+    """
+    lines = ('channel_high', 'channel_low',
+             'long_signal', 'short_signal',
+             'pct_tz', 'pct_ptz', 'pct_resolved')
+    params = dict(
+        h_left=10,          # H left
+        h_right=10,         # H right
+        sample_period=5000,  # Sample bars for % TZ
+        show_channel=True,  # Show channel
+        show_arrows=True,   # 保留 TZ 箭头信号
+    )
+    category = 'overlap'
+    overlap = True
+    isplot = dict(
+        channel_high=True, channel_low=True,
+        long_signal=False, short_signal=False,
+        pct_tz=False, pct_ptz=False, pct_resolved=False,
+    )
+    linestyle = dict(
+        # 原码 plot(..., color=silver)
+        channel_high=LineStyle(line_color='#C0C0C0', line_width=1.0),
+        channel_low=LineStyle(line_color='#C0C0C0', line_width=1.0),
+    )
+    # 原码无填充; 按需求在通道两线之间加色带
+    bandstyle = [
+        BandStyle(lower='channel_low', upper='channel_high',
+                  fill_color='#9E9E9E', fill_alpha=0.18),
+    ]
+    signalstyle = dict(
+        # 原码 plotarrow: 上箭头绿(colorup), 下箭头红(colordown)
+        long_signal=SignalStyle('low', '#00c853', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#ff1744', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # 工具: 历史引用(正 k = 向过去取 k 根)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        n = len(a)
+        k = int(k)
+        out = np.full(n, np.nan, dtype=np.float64)
+        if k == 0:
+            out[:] = a
+        elif 0 < k < n:
+            out[k:] = a[:n - k]
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        h_left = max(1, int(p.h_left))
+        h_right = max(0, int(p.h_right))
+        sample_period = max(1, int(p.sample_period))
+        show_channel = bool(p.show_channel)
+        show_arrows = bool(p.show_arrows)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        n = len(high)
+
+        # ---- 通道线: lowest(low, h_left) / highest(high, h_left) ----
+        ch_low = pd.Series(low).rolling(
+            h_left, min_periods=h_left).min().values
+        ch_high = pd.Series(high).rolling(
+            h_left, min_periods=h_left).max().values
+
+        # ---- PTZ(原三角形信号): 仅用于概率统计, 不输出 ----
+        new_low = low <= ch_low
+        new_high = high >= ch_high
+
+        # ---- TZ: 中心 bar 是否为整个窗口的极值 ----
+        w = h_left + h_right + 1
+        zone_high = pd.Series(high).rolling(
+            w, min_periods=w).max().values
+        zone_low = pd.Series(low).rolling(
+            w, min_periods=w).min().values
+        central_high = self._shift(high, h_right + 1)
+        central_low = self._shift(low, h_right + 1)
+        # NaN 参与比较结果为 False, 无需额外处理
+        is_highest = central_high >= zone_high
+        is_lowest = central_low <= zone_low
+
+        # ---- 箭头信号: 写回中心 bar 下标(原码 offset=-h_right-1) ----
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        if show_arrows:
+            for t in range(n):
+                c = t - h_right - 1
+                if c < 0:
+                    continue
+                if is_highest[t]:
+                    short_sig[c] = 1.0   # 中心 bar 为高点 → 下箭头(红)
+                if is_lowest[t]:
+                    long_sig[c] = 1.0    # 中心 bar 为低点 → 上箭头(绿)
+
+        # ---- 概率统计(cum) ----
+        tz_hi_cnt = np.cumsum(np.where(is_highest, 1.0, 0.0))
+        tz_lo_cnt = np.cumsum(np.where(is_lowest, 1.0, 0.0))
+        total_tz = tz_hi_cnt + tz_lo_cnt
+        ptz_hi_cnt = np.cumsum(np.where(new_high, 1.0, 0.0))
+        ptz_lo_cnt = np.cumsum(np.where(new_low, 1.0, 0.0))
+        total_ptz = ptz_hi_cnt + ptz_lo_cnt
+        pct_tz = total_tz / float(sample_period) * 100.0
+        pct_ptz = total_ptz / float(sample_period) * 100.0
+        with np.errstate(divide='ignore', invalid='ignore'):
+            pct_resolved = (1.0 - total_tz / np.where(
+                total_ptz == 0, np.nan, total_ptz)) * 100.0
+
+        # ---- 显示开关 ----
+        if not show_channel:
+            ch_high = np.full(n, np.nan, dtype=np.float64)
+            ch_low = np.full(n, np.nan, dtype=np.float64)
+
+        return (ch_high, ch_low, long_sig, short_sig,
+                pct_tz, pct_ptz, pct_resolved)
+
+
+class SingleEMACross(BtIndicator):
+    """Backtest single EMA cross (Pine v4 strategy) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        strategy("Backtest single EMA cross", overlay=true)
+
+    概述
+    ----
+    双 EMA 交叉: 快线(EMA1)上穿慢线(EMA2)做多, 下穿做空。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``expo = ema(close, ema1)``, ``ma = ema(close, ema2)``
+    - ``avg_1 = avg(expo, ma)``, ``s2 = cross(expo,ma) ? avg_1 : na``
+      (原码该线被注释掉, 未绘制, 本实现忽略)
+    - 信号: ``longCondition  = crossover(expo, ma)``,
+            ``shortCondition = crossunder(expo, ma)``
+
+    交易逻辑(见 ``step``)
+    ----
+    对应原码::
+
+        if testPeriod()
+            strategy.entry("Long",  strategy.long,  when=longCondition)
+            strategy.entry("Short", strategy.short, when=shortCondition)
+
+    ``step`` 中: 金叉 → ``set_target_size(+qty)``(做多/反手),
+    死叉 → ``set_target_size(-qty)``(做空/反手), 并用
+    ``test_start_* / test_stop_*`` 限定回测时段。
+    用法(参考 ``tutorials/indicator_step.py``)::
+
+        class MyStrategy(Strategy):
+            def __init__(self):
+                self.kline = self.get_kline(LocalDatas.test, height=400)
+                self.ema_cross = self.kline.tradingview.SingleEMACross()
+            def next(self):
+                self.ema_cross.step()
+
+    参数
+    ----
+    ema1 / ema2   : 快/慢 EMA 周期(默认 10 / 20)
+    qty           : 下单手数(原码 Buy quantity=100000, minibt 以手为单位, 默认 1)
+    use_test_period : 是否启用回测时段过滤(默认 True)
+    test_start_year/month/day/hour/min : 回测起始时间(默认 2019-01-01 00:00)
+    test_stop_year/month/day           : 回测结束时间(默认 2099-01-30)
+
+    输出 lines(主图叠加)
+    ----
+    - ema_fast    : 快线 EMA1(青 #00FFFF, 线宽 2)
+    - ema_slow    : 慢线 EMA2(橙, 线宽 2), 两线之间填充背景色
+    - long_signal : 金叉 BUY(低点向上)
+    - short_signal: 死叉 SELL(高点向下)
+
+    ⚠ 未复现
+    ----
+    - ``testPeriodBackground`` 背景色染色(bgcolor)不支持。
+    - ``plotshape`` 的文字标签以信号标记 + "BUY"/"SELL" 文本近似。
+    - ``fill(p1,p2,color=white,transp=80)`` 在浅色主题下不可见, 改用淡灰色色带。
+    - EMA 采用 Pine 口径(首值播种), 与框架内置 ``.ema()`` 的预热不同。
+    """
+    lines = ('ema_fast', 'ema_slow', 'long_signal', 'short_signal')
+    params = dict(
+        ema1=10,              # Select EMA 1
+        ema2=20,              # Select EMA 2
+        qty=1,                # Buy quantity(原码 100000)
+        use_test_period=True,  # 是否启用 testPeriod() 时段过滤
+        test_start_year=2019,
+        test_start_month=1,
+        test_start_day=1,
+        test_start_hour=0,
+        test_start_min=0,
+        test_stop_year=2099,
+        test_stop_month=1,
+        test_stop_day=30,
+    )
+    category = 'overlap'
+    overlap = True
+    isplot = dict(ema_fast=True, ema_slow=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 plot(expo, color=#00FFFF, linewidth=2) / plot(ma, color=orange, linewidth=2)
+        ema_fast=LineStyle(line_color='#00FFFF', line_width=2.0),
+        ema_slow=LineStyle(line_color='#FFA500', line_width=2.0),
+    )
+    # 原码 fill(p1, p2, color=white, transp=80)
+    bandstyle = [
+        BandStyle(lower='ema_fast', upper='ema_slow',
+                  fill_color='#9E9E9E', fill_alpha=0.15),
+    ]
+    signalstyle = dict(
+        # 原码 BUY: labelup #1B8112 / SELL: labeldown #FF5733
+        long_signal=SignalStyle(
+            'low', '#1B8112', 'triangle', True, True, 13).set_label('BUY'),
+        short_signal=SignalStyle(
+            'high', '#FF5733', 'inverted_triangle', True, True, 13).set_label('SELL'),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 plotshape 的 "BUY"/"SELL"
+    # ------------------------------------------------------------------
+    # def signal_text(self) -> dict:
+    #     def _map(line, txt):
+    #         vals = np.asarray(line.values, dtype=np.float64)
+    #         arr = np.full(vals.shape[0], np.nan, dtype=object)
+    #         arr[vals > 0] = txt
+    #         return arr
+    #     return {
+    #         'long_signal': _map(self.long_signal, 'BUY'),
+    #         'short_signal': _map(self.short_signal, 'SELL'),
+    #     }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        n1 = max(1, int(p.ema1))
+        n2 = max(1, int(p.ema2))
+        close = np.asarray(self.close, dtype=np.float64)
+
+        # Pine ema: 首值播种
+        ema_fast = QQESignals._ema(close, n1)
+        ema_slow = QQESignals._ema(close, n2)
+
+        # crossover / crossunder
+        f_prev = np.concatenate([[np.nan], ema_fast[:-1]])
+        s_prev = np.concatenate([[np.nan], ema_slow[:-1]])
+        long_sig = ((f_prev < s_prev) & (ema_fast > ema_slow)
+                    ).astype(np.float64)
+        short_sig = ((f_prev > s_prev) & (ema_fast < ema_slow)
+                     ).astype(np.float64)
+
+        return ema_fast, ema_slow, long_sig, short_sig
+
+    # ------------------------------------------------------------------
+    # 回测时段过滤(对应原码 testPeriod())
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _in_test_period(kline) -> bool:
+        p = kline.params
+        try:
+            t = pd.Timestamp(kline.datetime.new)
+        except Exception:
+            return True
+        try:
+            start = pd.Timestamp(
+                year=int(p.get('test_start_year', 2019)),
+                month=int(p.get('test_start_month', 1)),
+                day=int(p.get('test_start_day', 1)),
+                hour=int(p.get('test_start_hour', 0)),
+                minute=int(p.get('test_start_min', 0)))
+        except Exception:
+            start = pd.Timestamp.min
+        try:
+            stop = pd.Timestamp(
+                year=int(p.get('test_stop_year', 2099)),
+                month=int(p.get('test_stop_month', 1)),
+                day=int(p.get('test_stop_day', 30)))
+        except Exception:
+            stop = pd.Timestamp.max
+        return bool(start <= t <= stop)
+
+    # ------------------------------------------------------------------
+    # 交易逻辑: 金叉做多 / 死叉做空(反手)
+    # ------------------------------------------------------------------
+    def step(self):
+        """对应原码 ``if testPeriod(): strategy.entry(...)``。
+
+        金叉 → ``set_target_size(+qty)``; 死叉 → ``set_target_size(-qty)``。
+        用法见 ``tutorials/indicator_step.py``: 在 Strategy.next 中调用
+        ``self.ema_cross.step()``。
+
+        注意：必须是**公开的** ``step``（不能写成 ``__step`` —— 名字会被 mangle
+        成 ``_SingleEMACross__step``，导致 ``btplot`` 的 ``'step' in __dict__``
+        判定不到交易逻辑）。
+        """
+        kline = self.kline
+        if kline is None:
+            return
+        p = kline.params
+        if bool(p.get('use_test_period', True)) and not SingleEMACross._in_test_period(kline):
+            return
+        size = max(1, int(p.get('qty', 1)))
+        if self.long_signal.new:
+            kline.set_target_size(size)      # 做多 / 空翻多
+        elif self.short_signal.new:
+            kline.set_target_size(-size)     # 做空 / 多翻空
+
+
+class CumulativeDeltaVolume(BtIndicator):
+    """Cumulative Delta Volume (CDV) → MiniBT BtIndicator
+    ----
+    https://cn.tradingview.com/script/vB1T3EMp-Cumulative-Delta-Volume/
+    ----
+    原码(TradingView Pine v4):
+        study("Cumulative Delta Volume", "CDV")
+        © LonesomeTheBlue, MPL 2.0
+
+    概述
+    ----
+    用「上下影线 + 实体」的占比估计每根 K 线的买/卖成交量比率, 累加得到
+    **累计成交量差 (Cumulative Delta Volume)**, 并以 **副图蜡烛** + 可选均线展示。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``tw = high - max(open, close)``(上影), ``bw = min(open, close) - low``
+       (下影), ``body = abs(close - open)``(实体)
+    2. ``_rate(cond) = 0.5*(tw + bw + (cond ? 2*body : 0)) / (tw + bw + body)``;
+       结果 ``nz(ret)==0 ? 0.5 : ret``(即 0/0 或 0 时取 0.5)
+    3. ``deltaup = volume * _rate(open<=close)``,
+       ``deltadown = volume * _rate(open>close)``,
+       ``delta = close>=open ? deltaup : -deltadown``
+    4. ``cumdelta = cum(delta)``
+    5. 蜡烛模式(``style='Candle'``): ``o=cumdelta[1]``、``c=cumdelta``、
+       ``h=max(cumdelta, cumdelta[1])``、``l=min(cumdelta, cumdelta[1])``;
+       线模式(``style='Line'``): ``ctl=cumdelta``(不画蜡烛)
+    6. Heikin Ashi(``hacandle=True``):
+       ``haclose=(o+h+l+c)/4``,
+       ``haopen=na(haopen[1]) ? (o+c)/2 : (haopen[1]+haclose[1])/2``,
+       ``hahigh=max(h,max(haopen,haclose))``, ``halow=min(l,min(haopen,haclose))``
+    7. 均线(仅蜡烛模式): SMA1/SMA2/EMA1/EMA2 作用于蜡烛收盘价 ``c_``
+
+    参数
+    ----
+    - style    : ``'Candle'``(副图蜡烛, 默认) / ``'Line'``(只画 CDV 线 ``ctl``)
+    - hacandle : 蜡烛是否使用 Heikin Ashi(默认 True, 同原码)
+    - showma1 / ma1len : SMA1 开关 / 周期(默认 True / 50)
+    - showma2 / ma2len : SMA2 开关 / 周期(默认 True / 200)
+    - showema1 / ema1len: EMA1 开关 / 周期(默认 True / 50)
+    - showema2 / ema2len: EMA2 开关 / 周期(默认 True / 200)
+
+    输出 lines(副图)
+    ----
+    - open / high / low / close : CDV 蜡烛(``category='candles'`` 自动渲染为蜡烛图)
+    - ctl   : CDV 线(线模式绘制, 蜡烛模式为 NaN)
+    - sma1 / sma2 / ema1 / ema2 : 可选均线(作用于蜡烛收盘价)
+
+    ⚠ 说明
+    ----
+    - 原码蜡烛边框/影线分涨跌两色; 本框架副图蜡烛统一用黑色影线 + 按自身涨跌
+      着色的实体(已修正为按 **指标自身** 开/收方向着色)。
+    - 均线颜色参数(ma1col 等)未暴露, 可用 ``linestyle=dict(sma1=LineStyle(...))`` 覆盖。
+    - ``style`` 对应原码 ``linestyle`` 输入(避免与框架 ``linestyle`` 属性重名)。
+    """
+    lines = ('open', 'high', 'low', 'close', 'ctl',
+             'sma1', 'sma2', 'ema1', 'ema2')
+    category = 'candles'
+    overlap = False
+    isplot = dict(open=True, high=True, low=True, close=True, ctl=False,
+                  sma1=True, sma2=True, ema1=True, ema2=True)
+    params = dict(
+        style='Candle',      # 原码 linestyle: 'Candle' / 'Line'
+        hacandle=True,       # Heikin Ashi Candles?
+        # 均线开关默认**打开**（原码 defval=false，但“出图即可见”更直观；
+        # 不想要传 showma1=False …）
+        showma1=True, ma1len=50,
+        showma2=True, ma2len=200,
+        showema1=True, ema1len=50,
+        showema2=True, ema2len=200,
+    )
+    linestyle = dict(
+        # 原码 plot(ctl, color=color.blue, linewidth=2)
+        # ctl=LineStyle(line_color='#0000ff', line_width=2.0),
+        sma1=LineStyle(line_color='#00ff00'),
+        sma2=LineStyle(line_color='#ff0000'),
+        ema1=LineStyle(line_color='#00ff00'),
+        ema2=LineStyle(line_color='#ff0000'),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pmax(a, b):
+        """Pine ``max``: 任一为 na 则返回 na。"""
+        if np.isnan(a) or np.isnan(b):
+            return np.nan
+        return a if a > b else b
+
+    @staticmethod
+    def _pmin(a, b):
+        """Pine ``min``: 任一为 na 则返回 na。"""
+        if np.isnan(a) or np.isnan(b):
+            return np.nan
+        return a if a < b else b
+
+    @staticmethod
+    def _sma(a, length: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(length)), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        style = str(p.style)
+        hacandle = bool(p.hacandle)
+        o = np.asarray(self.open, dtype=np.float64)
+        h = np.asarray(self.high, dtype=np.float64)
+        l = np.asarray(self.low, dtype=np.float64)
+        c = np.asarray(self.close, dtype=np.float64)
+        v = np.asarray(self.volume, dtype=np.float64)
+        n = len(c)
+
+        # ---- _rate(cond) ----
+        tw = h - np.maximum(o, c)
+        bw = np.minimum(o, c) - l
+        body = np.abs(c - o)
+        den = tw + bw + body
+        cond_up = o <= c
+        with np.errstate(divide='ignore', invalid='ignore'):
+            # cond 为真时加 2*body; _rate(open<=close) 与 _rate(open>close)
+            # 各自在自己的分支上取 "加 body" 的那一档
+            rate_full = 0.5 * (tw + bw + 2.0 * body) / den
+            rate_half = 0.5 * (tw + bw) / den
+        # nz(ret) == 0 ? 0.5 : ret
+        rate_full = np.where(np.isnan(rate_full) | (rate_full == 0),
+                             0.5, rate_full)
+        rate_half = np.where(np.isnan(rate_half) | (rate_half == 0),
+                             0.5, rate_half)
+        # _rate(open<=close)
+        rate_up = np.where(cond_up, rate_full, rate_half)
+        rate_dn = np.where(cond_up, rate_half, rate_full)   # _rate(open>close)
+
+        # ---- delta / cumdelta ----
+        deltaup = v * rate_up
+        deltadown = v * rate_dn
+        delta = np.where(c >= o, deltaup, -deltadown)
+        cumdelta = np.cumsum(delta)
+
+        # ---- 蜡烛 / 线模式 ----
+        if style == 'Candle':
+            co = np.concatenate([[np.nan], cumdelta[:-1]])   # cumdelta[1]
+            ch = np.maximum(cumdelta, co)
+            cl = np.minimum(cumdelta, co)
+            cc = cumdelta
+            ctl = np.full(n, np.nan, dtype=np.float64)
+        else:
+            co = ch = cl = cc = np.full(n, np.nan, dtype=np.float64)
+            ctl = cumdelta
+
+        # ---- Heikin Ashi ----
+        haclose = (co + ch + cl + cc) / 4.0
+        haopen = np.full(n, np.nan, dtype=np.float64)
+        hahigh = np.full(n, np.nan, dtype=np.float64)
+        halow = np.full(n, np.nan, dtype=np.float64)
+        prev_ho = np.nan
+        prev_hc = np.nan
+        for i in range(n):
+            hc = haclose[i]
+            ho = ((co[i] + cc[i]) / 2.0 if np.isnan(prev_ho)
+                  else (prev_ho + prev_hc) / 2.0)
+            haopen[i] = ho
+            hahigh[i] = CumulativeDeltaVolume._pmax(
+                ch[i], CumulativeDeltaVolume._pmax(ho, hc))
+            halow[i] = CumulativeDeltaVolume._pmin(
+                cl[i], CumulativeDeltaVolume._pmin(ho, hc))
+            prev_ho = ho
+            prev_hc = hc
+
+        o_ = np.where(hacandle, haopen, co)
+        h_ = np.where(hacandle, hahigh, ch)
+        l_ = np.where(hacandle, halow, cl)
+        c_ = np.where(hacandle, haclose, cc)
+
+        # ---- 均线(仅蜡烛模式) ----
+        is_candle = (style == 'Candle')
+        nan = np.full(n, np.nan, dtype=np.float64)
+        sma1 = (self._sma(c_, int(p.ma1len))
+                if (bool(p.showma1) and is_candle) else nan)
+        sma2 = (self._sma(c_, int(p.ma2len))
+                if (bool(p.showma2) and is_candle) else nan)
+        ema1 = (QQESignals._ema(c_, int(p.ema1len))
+                if (bool(p.showema1) and is_candle) else nan)
+        ema2 = (QQESignals._ema(c_, int(p.ema2len))
+                if (bool(p.showema2) and is_candle) else nan)
+
+        return o_, h_, l_, c_, ctl, sma1, sma2, ema1, ema2
+
+
+class TwinRangeFilter(BtIndicator):
+    """Twin Range Filter (colinmck) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/r2aZvj57-Twin-Range-Filter/
+        © colinmck, MPL 2.0
+
+    ⚠ 与框架已有的 ``Twin_Range_Filter`` **不是同一个脚本**
+    ----
+    已有类来源为 ``57i9oK2t-Twin-Range-Filter-Buy-Sell-Signals``; 本类为
+    colinmck 原版 ``r2aZvj57``, 两者差异:
+
+    - 默认周期不同: 本类 ``per1=27 / per2=55``, 已有类 ``127 / 155``;
+    - 入场条件不同: 本类额外要求 ``source != source[1]``(非平盘 bar);
+    - ``rngfilt`` 播种不同: Pine ``nz(rngfilt[1])`` 以 0 播种, 已有类用首个有效值。
+    实测同一周期下两者信号数量不同, 故独立收录。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``smrng(x,t,m)``: ``wper=t*2-1``, ``avrng=ema(abs(x-x[1]),t)``,
+       ``smrng=ema(avrng,wper)*m``
+    2. ``smrng = (smrng1 + smrng2)/2``
+    3. ``rngfilt(x,r) := x > nz(filter[1]) ? (x-r < nz(filter[1]) ? nz(filter[1]) : x-r)
+                                  : (x+r > nz(filter[1]) ? nz(filter[1]) : x+r)``
+    4. ``upward``/``downward`` 方向计数器
+    5. ``hband = filt + smrng``, ``lband = filt - smrng``(原码未绘图)
+    6. 入场: ``longCond  = source>filt and upward>0  and source != source[1]``
+            ``shortCond = source<filt and downward>0 and source != source[1]``
+    7. ``CondIni`` 状态机(多→1 / 空→-1 / 否则维持);
+       ``long = longCond and CondIni[1]==-1``, ``short = shortCond and CondIni[1]==1``
+
+    参数
+    ----
+    source : 源价格(默认 'close')
+    per1 / mult1 : 快滤波器周期 / 范围乘数(默认 27 / 1.6)
+    per2 / mult2 : 慢滤波器周期 / 范围乘数(默认 55 / 2.0)
+
+    输出 lines(主图叠加)
+    ----
+    - filt : 双范围过滤器主线(原码未绘制, 本实现额外绘出便于观察)
+    - long_signal  : ``long``(低点向上, 绿 "Long" 标签)
+    - short_signal : ``short``(高点向下, 红 "Short" 标签)
+
+    ⚠ 未复现
+    ----
+    - 原码仅 ``plotshape`` 画标签, 无 ``plot(filt)``; ``hband``/``lband`` 也未绘制。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('filt', 'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        source='close',   # Source
+        per1=27,          # Fast period
+        mult1=1.6,        # Fast range
+        per2=55,          # Slow period
+        mult2=2.0,        # Slow range
+    )
+    isplot = dict(filt=True, long_signal=False, short_signal=False)
+    linestyle = dict(
+        filt=LineStyle(line_color='#2962FF', line_width=1.5),
+    )
+    signalstyle = dict(
+        # 原码 Long: labelup lime; Short: labeldown red
+        long_signal=SignalStyle('low', '#00ff00', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#ff0000', 'inverted_triangle', True, True, 12),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _smoothrng(x, t: int, m: float) -> np.ndarray:
+        """Pine ``smoothrng``: 双重 ema(首个有效值播种) * m。"""
+        x = np.asarray(x, dtype=np.float64)
+        wper = int(t) * 2 - 1
+        x_prev = np.concatenate([[np.nan], x[:-1]])
+        avrng = QQESignals._ema(np.abs(x - x_prev), int(t))
+        return QQESignals._ema(avrng, wper) * float(m)
+
+    @staticmethod
+    def _rngfilt(x, r) -> np.ndarray:
+        """Pine ``rngfilt``: 价格穿出通道时跳至边界, 否则保持(nz 以 0 播种)。"""
+        x = np.asarray(x, dtype=np.float64)
+        r = np.asarray(r, dtype=np.float64)
+        n = len(x)
+        out = np.full(n, np.nan, dtype=np.float64)
+        prev = np.nan
+        for i in range(n):
+            xi, ri = x[i], r[i]
+            p = 0.0 if np.isnan(prev) else prev   # nz(rngfilt[1])
+            if np.isnan(xi) or np.isnan(ri):
+                val = np.nan
+            elif xi > p:
+                val = p if (xi - ri) < p else (xi - ri)
+            else:
+                val = p if (xi + ri) > p else (xi + ri)
+            out[i] = val
+            prev = val
+        return out
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 plotshape 的 "Long"/"Short"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'Long'),
+            'short_signal': _map(self.short_signal, 'Short'),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        src_name = str(p.source)
+        if src_name == 'hl2':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64)) / 2.0
+        elif src_name == 'hlc3':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64)
+                   + np.asarray(self.close, dtype=np.float64)) / 3.0
+        elif src_name == 'ohlc4':
+            src = (np.asarray(self.open, dtype=np.float64)
+                   + np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64)
+                   + np.asarray(self.close, dtype=np.float64)) / 4.0
+        else:
+            src = np.asarray(getattr(self, src_name), dtype=np.float64)
+        n = len(src)
+
+        # ---- 平滑平均范围 ----
+        smrng1 = self._smoothrng(src, int(p.per1), float(p.mult1))
+        smrng2 = self._smoothrng(src, int(p.per2), float(p.mult2))
+        smrng = (smrng1 + smrng2) / 2.0
+
+        # ---- Range Filter ----
+        filt = self._rngfilt(src, smrng)
+
+        # ---- 方向计数器 ----
+        upward = np.zeros(n, dtype=np.float64)
+        downward = np.zeros(n, dtype=np.float64)
+        for i in range(1, n):
+            f, fp = filt[i], filt[i - 1]
+            if not np.isnan(f) and not np.isnan(fp):
+                if f > fp:
+                    upward[i] = upward[i - 1] + 1.0
+                    downward[i] = 0.0
+                elif f < fp:
+                    upward[i] = 0.0
+                    downward[i] = downward[i - 1] + 1.0
+                else:
+                    upward[i] = upward[i - 1]
+                    downward[i] = downward[i - 1]
+            else:
+                upward[i] = upward[i - 1]
+                downward[i] = downward[i - 1]
+
+        # ---- 入场条件(Pine and 优先于 or) ----
+        src_prev = np.concatenate([[np.nan], src[:-1]])
+        nonzero = (src > src_prev) | (src < src_prev)   # NaN 比较为 False
+        long_cond = (src > filt) & (upward > 0) & nonzero
+        short_cond = (src < filt) & (downward > 0) & nonzero
+
+        # ---- CondIni 状态机 ----
+        cond_ini = np.zeros(n, dtype=np.float64)
+        for i in range(1, n):
+            if long_cond[i]:
+                cond_ini[i] = 1.0
+            elif short_cond[i]:
+                cond_ini[i] = -1.0
+            else:
+                cond_ini[i] = cond_ini[i - 1]
+        cond_ini_prev = np.concatenate([[np.nan], cond_ini[:-1]])
+        long_sig = (long_cond & (cond_ini_prev == -1.0)).astype(np.float64)
+        short_sig = (short_cond & (cond_ini_prev == 1.0)).astype(np.float64)
+
+        return filt, long_sig, short_sig
+
+
+class SuperTrendRelativeVolume(BtIndicator):
+    """SuperTrend + Relative Volume (Kernel Optimized) | Flux Charts → MiniBT
+    ----
+    原码(TradingView Pine v6):
+        https://cn.tradingview.com/script/31up9Ozt-SuperTrend-Relative-Volume-Kernel-Optimized/
+        © fluxchart, MPL 2.0
+
+    概述
+    ----
+    用 **KDE(核密度估计)** 统计历史上 SuperTrend 翻转时的「相对买卖量」分布,
+    再用当前相对量在该分布中的 **累计概率** 作为信号过滤 / 渐变填充透明度;
+    未开启阈值过滤时, 等价于 SuperTrend 翻转信号 + 相对量标签。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``[st, dir] = ta.supertrend(atrMultiplier, atrLength)``
+       (``dir = -1`` 上涨 / ``1`` 下跌)
+    2. ``bullishBreak = ta.crossover(close, st)``,
+       ``bearishBreak = ta.crossunder(close, st)``
+    3. 买卖量: ``buyVT = volume*(close-low)/(high-low)``,
+       ``sellVT = volume*(high-close)/(high-low)``;
+       ``buyVolume = ema(buyVT,10) / ema(buyVT,barLength)``,
+       ``sellVolume = ema(sellVT,10) / ema(sellVT,barLength)``
+    4. 在每次翻转 bar 上把 ``buyVolume``/``sellVolume`` 押入滚动数组
+       (上限 ``KDEStep`` 个), 对数组标准化后计算 KDE:
+       ``x = linspace(-3, 3, KDEStep)``,
+       ``y[i] = Σ_j exp(-0.5*((x[i]-a[j])/bandwidth)^2)``, 归一化;
+       ``YSum = cumsum(y)``, ``mid = x[argmax(y)]``
+    5. 当前相对量标准化后在 ``x`` 上二分找最近点, ``volumeProb = YSum[最近点]``
+       (即累计概率), 作为 ``var`` 在非翻转 bar 上保持
+    6. 信号: ``bull_condition = bullishBreak and (not enabled or prob>=threshold)``,
+       ``bear_condition`` 同理; ``direction`` 状态机保持
+
+    参数
+    ----
+    - atr_length / atr_multiplier : SuperTrend 的 ATR 周期 / 倍数(默认 10 / 3)
+    - bandwidth : KDE 带宽(默认 0.10)
+    - kde_steps : KDE 分箱数(同时也是滚动数组上限, 默认 100)
+    - bar_length: 相对量长均线周期(默认 25; 短均线固定为 10)
+    - activation_threshold : KDE 阈值 %(默认 70)
+    - activation_enabled   : 是否启用阈值过滤(默认 False)
+    - max_opacity / min_opacity : 渐变填充透明度上下限(默认 99 / 53, 仅供参数对齐)
+    - show_supertrend / show_fill / kde_labels : 显示开关
+
+    输出 lines(主图叠加)
+    ----
+    - supertrend : SuperTrend 连续值(仅数据)
+    - st_up / st_down : 按趋势方向拆分的 SuperTrend 两段(青 / 红)
+    - body_middle: ``(open+close)/2``(渐变填充下边界, 透明色)
+    - long_signal / short_signal : 翻转箭头(即 bull_condition / bear_condition)
+    - volume_prob : KDE 累计概率(0~1, 仅数据)
+    - direction   : 方向状态(True=多, 仅数据)
+
+    ⚠ 近似 / 未复现
+    ----
+    - ``supertrend_color`` 原码为多/空/灰动态色, 本框架线色静态, 故按方向拆为
+      ``st_up``(绿) / ``st_down``(红)。
+    - 渐变填充透明度随 ``volumeProb`` 动态变化, BandStyle 为静态, 已用固定透明度近似。
+    - ``barcolor`` / 表格告警 / ``barstate.isconfirmed``(历史 bar 恒为 true) 未复现。
+    - 信号箭头原码锥定在 ``st*0.999/1.001``; 框架固定锥定到 K 线 low/high
+      (触发 bar 一致)。
+    """
+    lines = ('supertrend', 'st_up', 'st_down', 'body_middle',
+             'long_signal', 'short_signal', 'volume_prob', 'direction')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        atr_length=10,
+        atr_multiplier=3.0,
+        bandwidth=0.10,
+        kde_steps=100,
+        bar_length=25,
+        activation_threshold=70.0,
+        activation_enabled=False,
+        max_opacity=99,
+        min_opacity=53,
+        show_supertrend=True,
+        show_fill=True,
+        kde_labels=True,
+    )
+    isplot = dict(supertrend=False, st_up=True, st_down=True,
+                  body_middle=True, long_signal=False, short_signal=False,
+                  volume_prob=False, direction=False)
+    linestyle = dict(
+        # 原码 bullishColor = #09D142, bearishColor = #f23646
+        st_up=LineStyle(line_color='#09D142', line_width=2.0),
+        st_down=LineStyle(line_color='#f23646', line_width=2.0),
+        # 原码 bodyMiddle display=none, 仅供填充边界
+        body_middle=LineStyle(line_color='#00000000', line_width=1.0),
+    )
+    # 原码 fill(bodyMiddle, upTrend/downTrend, 透明度随 volumeProb 渐变)
+    bandstyle = [
+        BandStyle(lower='body_middle', upper='st_up',
+                  fill_color='#09D142', fill_alpha=0.15),
+        BandStyle(lower='st_down', upper='body_middle',
+                  fill_color='#f23646', fill_alpha=0.15),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#09D142', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#f23646', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    @classmethod
+    def _supertrend(cls, high, low, close, factor: float, atrPeriod: int):
+        """Pine ``ta.supertrend``: 返回 ``(supertrend, direction)``,
+        ``direction = -1`` 上涨 / ``1`` 下跌。"""
+        h = np.asarray(high, dtype=np.float64)
+        l = np.asarray(low, dtype=np.float64)
+        c = np.asarray(close, dtype=np.float64)
+        n = len(c)
+        src = (h + l) / 2.0
+        atr = cls._atr(h, l, c, atrPeriod)
+        upper = src + factor * atr
+        lower = src - factor * atr
+        st = np.full(n, np.nan, dtype=np.float64)
+        direction = np.ones(n, dtype=np.int64)
+        prev_st = np.nan
+        for i in range(n):
+            c_prev = c[i - 1] if i > 0 else np.nan
+            prev_lower = 0.0 if (i == 0 or np.isnan(
+                lower[i - 1])) else lower[i - 1]
+            prev_upper = 0.0 if (i == 0 or np.isnan(
+                upper[i - 1])) else upper[i - 1]
+            if not np.isnan(lower[i]):
+                lower[i] = (lower[i] if (lower[i] > prev_lower
+                                         or (not np.isnan(c_prev) and c_prev < prev_lower))
+                            else prev_lower)
+            if not np.isnan(upper[i]):
+                upper[i] = (upper[i] if (upper[i] < prev_upper
+                                         or (not np.isnan(c_prev) and c_prev > prev_upper))
+                            else prev_upper)
+            if i == 0 or np.isnan(atr[i - 1]):
+                direction[i] = 1
+            elif (not np.isnan(prev_st) and not np.isnan(prev_upper)
+                  and prev_st == prev_upper):
+                direction[i] = -1 if c[i] > upper[i] else 1
+            else:
+                direction[i] = 1 if c[i] < lower[i] else -1
+            st[i] = lower[i] if direction[i] == -1 else upper[i]
+            prev_st = st[i]
+        return st, direction
+
+    @staticmethod
+    def _kde(arr, bandwidth: float, steps: int):
+        """Pine ``kde``: 在 ``[-3, 3]`` 上取 steps 个点做高斯核密度估计并归一化。"""
+        steps = max(1, int(steps))
+        x = -3.0 + np.arange(steps) * (6.0 / float(steps))
+        a = np.asarray(arr, dtype=np.float64)
+        a = a[~np.isnan(a)]
+        if a.size == 0:
+            return x, np.zeros(steps, dtype=np.float64)
+        d = (x[:, None] - a[None, :]) / float(bandwidth)
+        y = np.exp(-0.5 * d * d).sum(axis=1)
+        total = y.sum()
+        if total != 0:
+            y = y / total
+        return x, y
+
+    @staticmethod
+    def _std_array(a) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        std = a.std(ddof=0)
+        return (a - a.mean()) / std if std != 0 else np.zeros_like(a)
+
+    @staticmethod
+    def _std_value(val, a) -> float:
+        a = np.asarray(a, dtype=np.float64)
+        if a.size == 0 or np.isnan(val):
+            return np.nan
+        std = a.std(ddof=0)
+        if std == 0:
+            return np.nan
+        return float((val - a.mean()) / std)
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 KDE 标签 "Vol: X%"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        if not bool(SuperTrendRelativeVolume.params.get('kde_labels', True)):
+            return None
+        prob = np.asarray(self.volume_prob.values, dtype=np.float64)
+        long_v = np.asarray(self.long_signal.values, dtype=np.float64)
+        short_v = np.asarray(self.short_signal.values, dtype=np.float64)
+
+        def _fmt(mask):
+            arr = np.full(mask.shape[0], np.nan, dtype=object)
+            idx = np.where(mask > 0)[0]
+            for i in idx:
+                p = prob[i]
+                arr[i] = f"Vol: {p * 100:.1f}%" if not np.isnan(
+                    p) else "Vol: 0%"
+            return arr
+        return {'long_signal': _fmt(long_v), 'short_signal': _fmt(short_v)}
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        atr_length = max(1, int(p.atr_length))
+        atr_mult = float(p.atr_multiplier)
+        bandwidth = max(1e-6, float(p.bandwidth))
+        steps = max(1, int(p.kde_steps))
+        bar_length = max(1, int(p.bar_length))
+        threshold = float(p.activation_threshold) / 100.0
+        enabled = bool(p.activation_enabled)
+        show_st = bool(p.show_supertrend)
+        show_fill = bool(p.show_fill)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        open_ = np.asarray(self.open, dtype=np.float64)
+        volume = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+
+        # ---- SuperTrend ----
+        st, pine_dir = self._supertrend(
+            high, low, close, atr_mult, atr_length)
+        bull_dir = pine_dir < 0
+        bear_dir = pine_dir > 0
+
+        # ---- 趋势翻转 ----
+        st_prev = np.concatenate([[np.nan], st[:-1]])
+        c_prev = np.concatenate([[np.nan], close[:-1]])
+        bullish_break = (c_prev < st_prev) & (close > st)
+        bearish_break = (c_prev > st_prev) & (close < st)
+
+        # ---- 买卖量(相对量) ----
+        hl = high - low
+        with np.errstate(divide='ignore', invalid='ignore'):
+            buy_vt = volume * (close - low) / hl
+            sell_vt = volume * (high - close) / hl
+        buy_avg = QQESignals._ema(buy_vt, bar_length)
+        buy_avg_s = QQESignals._ema(buy_vt, 10)
+        sell_avg = QQESignals._ema(sell_vt, bar_length)
+        sell_avg_s = QQESignals._ema(sell_vt, 10)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            buy_volume = buy_avg_s / buy_avg
+            sell_volume = sell_avg_s / sell_avg
+
+        # ---- KDE 状态 + 概率(逐 bar 递推) ----
+        bull_vols: list = []
+        bear_vols: list = []
+        bull_kde = (None, None, None)
+        bear_kde = (None, None, None)
+        volume_prob = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        direction = np.zeros(n, dtype=np.float64)
+        cur_prob = np.nan
+        cur_dir = False
+
+        for i in range(n):
+            has_vol = not np.isnan(volume[i])
+            if has_vol and bullish_break[i] and not np.isnan(buy_volume[i]):
+                if len(bull_vols) >= steps:
+                    bull_vols.pop(0)
+                bull_vols.append(float(buy_volume[i]))
+                x, y = self._kde(self._std_array(bull_vols),
+                                 bandwidth, steps)
+                bull_kde = (x, y, np.cumsum(y))
+            if has_vol and bearish_break[i] and not np.isnan(sell_volume[i]):
+                if len(bear_vols) >= steps:
+                    bear_vols.pop(0)
+                bear_vols.append(float(sell_volume[i]))
+                x, y = self._kde(self._std_array(bear_vols),
+                                 bandwidth, steps)
+                bear_kde = (x, y, np.cumsum(y))
+
+            bull = bool(bull_dir[i]) and has_vol
+            bear = bool(bear_dir[i]) and has_vol
+            if bull and len(bull_vols) > 0 and bull_kde[0] is not None:
+                x, _y, ysum = bull_kde
+                vol = self._std_value(buy_volume[i], bull_vols)
+                if not np.isnan(vol):
+                    left = int(np.searchsorted(x, vol, side='left'))
+                    right = int(min(np.searchsorted(x, vol, side='right'),
+                                    x.size - 1))
+                    left = min(max(left, 0), x.size - 1)
+                    nearest = (left if abs(vol - x[left]) < abs(vol - x[right])
+                               else right)
+                    cur_prob = float(ysum[nearest])
+            if bear and len(bear_vols) > 0 and bear_kde[0] is not None:
+                x, _y, ysum = bear_kde
+                vol = self._std_value(sell_volume[i], bear_vols)
+                if not np.isnan(vol):
+                    left = int(np.searchsorted(x, vol, side='left'))
+                    right = int(min(np.searchsorted(x, vol, side='right'),
+                                    x.size - 1))
+                    left = min(max(left, 0), x.size - 1)
+                    nearest = (left if abs(vol - x[left]) < abs(vol - x[right])
+                               else right)
+                    cur_prob = float(ysum[nearest])
+            volume_prob[i] = cur_prob
+
+            thr_ok = (not enabled) or (not np.isnan(cur_prob)
+                                       and cur_prob >= threshold)
+            bull_cond = bool(bullish_break[i]) and thr_ok
+            bear_cond = bool(bearish_break[i]) and thr_ok
+            long_sig[i] = 1.0 if bull_cond else 0.0
+            short_sig[i] = 1.0 if bear_cond else 0.0
+            if bull_cond:
+                cur_dir = True
+            elif bear_cond:
+                cur_dir = False
+            direction[i] = 1.0 if cur_dir else 0.0
+
+        # ---- 输出 ----
+        has_vol_arr = ~np.isnan(volume)
+        bull = bull_dir & has_vol_arr
+        bear = bear_dir & has_vol_arr
+        st_up = np.where(bull, st, np.nan)
+        st_down = np.where(bear, st, np.nan)
+        if not show_st:
+            st_up[:] = np.nan
+            st_down[:] = np.nan
+        body_middle = (open_ + close) / 2.0
+        if not show_fill:
+            body_middle = np.full(n, np.nan, dtype=np.float64)
+
+        return (st, st_up, st_down, body_middle,
+                long_sig, short_sig, volume_prob, direction)
+
+
+class SmartMoneyBreakouts(BtIndicator):
+    """Smart Money Breakouts [ChartPrime] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/aM3PRWEM-Smart-Money-Breakouts-ChartPrime/
+        © ChartPrime, MPL 2.0
+
+    概述
+    ----
+    以 **Swing 高低点(pivot)** 为“流动性区域”, 当价格突破最新活跃 pivot 时,
+    给出 **BOS / CHoCH** 突破信号; 同时根据 pivot 到突破之间的绿/红成交量占比
+    给出 🟢/🔴/🟡 强度标记, 并用 ATR 构造 RR 止盈止损。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``PH = ta.pivothigh(high, period, period)``,
+       ``PL = ta.pivotlow(low, period, period)``; 新 pivot 出现
+       (``ta.change(fixnan(PH)) != 0``)时更新 ``UpdatedHigh/UpdatedLow`` 与
+       ``HighIndex/LowIndex``, 并置 ``phActive/plActive = true``
+       (注: 首个 pivot 因 ``change`` 为 na 而按原码被忽略)
+    2. ``ScrHigh = (type=='Wicks') ? high : close``, ``ScrLow`` 同理
+    3. 突破: ``ScrHigh > UpdatedHigh and phActive`` → ``BUY``;
+       ``ScrLow < UpdatedLow and plActive`` → ``SELL``
+    4. ``VolCal``: 统计 pivot → 当前区间内 ``close[i] > open[i]`` 的绿量与
+       ``close[i] < open[i]`` 的红量占比, ``>55%`` 分别返回 🟢/🔴 否则 🟡
+    5. 入场: ``Long = BUY and not TradeisON``, ``Short`` 同理
+    6. 止损幅度: ``rma(tr(true),14)*1.5``; ``x2 = low - d``, ``xz = high + d``,
+       ``longDiffSL = |close-x2|``, ``longDiffSL2 = |close-xz|``;
+       多单 ``TP = close + RR1*longDiffSL``, ``SL = close - longDiffSL``;
+       空单 ``TP = close - RR1*longDiffSL2``, ``SL = close + longDiffSL2``
+    7. 持仓管理: 多单 ``high>=TP`` 止盈 / ``(SLType?close:low)<=SL`` 止损;
+       空单反向; 记录胜/负计数
+
+    参数
+    ----
+    length        : Swing pivot 左右长度(默认 20)
+    candle_type   : 计算源 ``'Wicks'``(high/low) / ``'Body'``(close)(默认 'Wicks')
+    rr_ratio      : 盈亏比 RR(默认 1.1)
+    sl_type       : 止损触发 ``'Close'`` / ``'High/Low'``(默认 'Close')
+    show_sl       : 是否输出 SL 线(默认 False, 同原码)
+    line_style    : 线型 ``'Solid'``/``'Dashed'``/``'Dotted'``(默认 'Dashed')
+
+    输出 lines(主图叠加)
+    ----
+    - pivot_high / pivot_low : 最新 pivot 高低位(前向保持)
+    - tp / sl   : 当前持仓的止盈 / 止损位(未持仓为 NaN)
+    - long_signal / short_signal : BOS/CHoCH 入场信号(逐点文本 ``BOS/CHoCH\n🟢🔴🟡``)
+    - break_type / vol_sign : 信号辅助编码(CHoCH=1/BOS=2; 🟢=1/🔴=2/🟡=3, 仅数据)
+    - winning / losing : 胜 / 负累计计数(仅数据)
+    - trade_on : 持仓状态(仅数据)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``plotcandle``/``barcolor``/``bgcolor`` 对**价格 K 线**的重新染色不支持。
+    - ``line.new`` 的 pivot 水平线 / TP/SL 线段 / Target 标签以折线 + 数据列近似。
+    - 右上角胜/负统计表以 ``winning``/``losing`` 数据列输出。
+    - 信号箭头锥定在 K 线 low/high(框架限制)。
+    """
+    lines = ('pivot_high', 'pivot_low', 'tp', 'sl',
+             'long_signal', 'short_signal',
+             'break_type', 'vol_sign', 'winning', 'losing', 'trade_on')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        length=20,
+        candle_type='Wicks',
+        rr_ratio=1.1,
+        sl_type='Close',
+        show_sl=False,
+        line_style='Dashed',
+    )
+    isplot = dict(pivot_high=False, pivot_low=False, tp=True, sl=True,
+                  long_signal=False, short_signal=False,
+                  break_type=False, vol_sign=False,
+                  winning=False, losing=False, trade_on=False)
+    linestyle = dict(
+        # 原码 Bull=#028545, Bear=#f60707, TAIL=#148d9a
+        pivot_high=LineStyle(line_color='#028545', line_width=1.5,
+                             line_dash=LineDash.dashed),
+        pivot_low=LineStyle(line_color='#f60707', line_width=1.5,
+                            line_dash=LineDash.dashed),
+        tp=LineStyle(line_color='#148d9a', line_width=3,
+                     line_dash=LineDash.dashed),
+        sl=LineStyle(line_color='#f60707', line_width=3,
+                     line_dash=LineDash.dashed),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#028545', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#f60707', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _true_range(high, low, close) -> np.ndarray:
+        h = np.asarray(high, dtype=np.float64)
+        l = np.asarray(low, dtype=np.float64)
+        c = np.asarray(close, dtype=np.float64)
+        m = len(c)
+        tr = np.full(m, np.nan, dtype=np.float64)
+        if m:
+            tr[0] = h[0] - l[0]
+        for i in range(1, m):
+            tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]),
+                        abs(l[i] - c[i - 1]))
+        return tr
+
+    @staticmethod
+    def _pivot(src, period: int, mode: str) -> np.ndarray:
+        """Pine ``ta.pivothigh/pivotlow``: 在确认 bar (pivot+period) 上返回极值。"""
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        s = pd.Series(src)
+        if mode == 'high':
+            left = s.rolling(period).max().shift(1).to_numpy()
+            right = s.rolling(period).max().shift(-period).to_numpy()
+            mask = (src > left) & (src > right)
+        else:
+            left = s.rolling(period).min().shift(1).to_numpy()
+            right = s.rolling(period).min().shift(-period).to_numpy()
+            mask = (src < left) & (src < right)
+        out = np.full(n, np.nan, dtype=np.float64)
+        for b in np.where(mask)[0]:
+            if b + period < n:
+                out[b + period] = src[b]
+        return out
+
+    @staticmethod
+    def _volcal(open_, close, volume, index: int, sync: int) -> str:
+        """Pine ``VolCal``: pivot→当前区间绿/红量占比 → 🟢/🔴/🟡。"""
+        bars = abs(int(index) - int(sync))
+        if bars <= 0:
+            return '\U0001f7e1'
+        start = max(0, sync - bars + 1)
+        o = open_[start:sync + 1]
+        c = close[start:sync + 1]
+        v = volume[start:sync + 1]
+        total = v.sum()
+        if total == 0:
+            return '\U0001f7e1'
+        green = v[c > o].sum()
+        red = v[c < o].sum()
+        green_ratio = round(green / total * 100, 2)
+        red_ratio = round(red / total * 100, 2)
+        if green_ratio > 55:
+            return '\U0001f7e2'      # 🟢
+        if red_ratio > 55:
+            return '\U0001f534'      # 🔴
+        return '\U0001f7e1'          # 🟡
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: BOS/CHoCH + 成交量强度
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        bt = np.asarray(self.break_type.values, dtype=np.float64)
+        vs = np.asarray(self.vol_sign.values, dtype=np.float64)
+        long_v = np.asarray(self.long_signal.values, dtype=np.float64)
+        short_v = np.asarray(self.short_signal.values, dtype=np.float64)
+        emoji = {1.0: '\U0001f7e2', 2.0: '\U0001f534', 3.0: '\U0001f7e1'}
+
+        def _fmt(sig):
+            arr = np.full(sig.shape[0], np.nan, dtype=object)
+            for i in np.where(sig > 0)[0]:
+                kind = 'CHoCH' if bt[i] == 1.0 else 'BOS'
+                arr[i] = f"{kind}\n{emoji.get(vs[i], '')}"
+            return arr
+        return {'long_signal': _fmt(long_v), 'short_signal': _fmt(short_v)}
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        period = max(1, int(p.length))
+        is_wicks = str(p.candle_type) == 'Wicks'
+        rr = float(p.rr_ratio)
+        sl_close = str(p.sl_type) == 'Close'
+        show_sl = bool(p.show_sl)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        open_ = np.asarray(self.open, dtype=np.float64)
+        volume = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+
+        # ---- 止损幅度(ATR) ----
+        rma14 = self._wilder(self._true_range(high, low, close), 14)
+        x2 = low - rma14 * 1.5
+        xz = rma14 * 1.5 + high
+        longDiffSL = np.abs(close - x2)
+        longDiffSL2 = np.abs(close - xz)
+
+        # ---- pivot + 新 pivot 检测(change(fixnan(...))) ----
+        PH = self._pivot(high, period, 'high')
+        PL = self._pivot(low, period, 'low')
+        ph_fixed = pd.Series(PH).ffill().to_numpy()
+        pl_fixed = pd.Series(PL).ffill().to_numpy()
+        chg_ph = ph_fixed - np.concatenate([[np.nan], ph_fixed[:-1]])
+        chg_pl = pl_fixed - np.concatenate([[np.nan], pl_fixed[:-1]])
+        new_ph = (~np.isnan(chg_ph)) & (chg_ph != 0)
+        new_pl = (~np.isnan(chg_pl)) & (chg_pl != 0)
+
+        # ---- 状态 ----
+        updated_high = np.nan
+        updated_low = np.nan
+        high_index = -1
+        low_index = -1
+        ph_active = False
+        pl_active = False
+        h_break = False
+        trade_on = False
+        long_trade = False
+        short_trade = False
+        tp = np.nan
+        sl = np.nan
+        score = [0, 0]
+
+        pivot_high_arr = np.full(n, np.nan, dtype=np.float64)
+        pivot_low_arr = np.full(n, np.nan, dtype=np.float64)
+        tp_arr = np.full(n, np.nan, dtype=np.float64)
+        sl_arr = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        break_type = np.zeros(n, dtype=np.float64)
+        vol_sign = np.zeros(n, dtype=np.float64)
+        winning = np.zeros(n, dtype=np.float64)
+        losing = np.zeros(n, dtype=np.float64)
+        trade_on_arr = np.zeros(n, dtype=np.float64)
+
+        for i in range(n):
+            buy = False
+            sell = False
+            if new_ph[i]:
+                updated_high = PH[i]
+                high_index = i - period
+                ph_active = True
+            if new_pl[i]:
+                updated_low = PL[i]
+                low_index = i - period
+                pl_active = True
+
+            scr_high = high[i] if is_wicks else close[i]
+            scr_low = low[i] if is_wicks else close[i]
+            if (not np.isnan(updated_high)) and scr_high > updated_high \
+                    and ph_active:
+                buy = True
+                ph_active = False
+            if (not np.isnan(updated_low)) and scr_low < updated_low \
+                    and pl_active:
+                sell = True
+                pl_active = False
+
+            long = buy and not trade_on
+            short = sell and not trade_on
+
+            if long:
+                sign = self._volcal(open_, close, volume, high_index, i)
+                long_trade = True
+                short_trade = False
+                break_type[i] = 1.0 if not h_break else 2.0
+                vol_sign[i] = (1.0 if sign == '\U0001f7e2'
+                               else 2.0 if sign == '\U0001f534' else 3.0)
+                long_sig[i] = 1.0
+                h_break = True
+            if short:
+                sign = self._volcal(open_, close, volume, low_index, i)
+                long_trade = False
+                short_trade = True
+                break_type[i] = 1.0 if h_break else 2.0
+                vol_sign[i] = (1.0 if sign == '\U0001f7e2'
+                               else 2.0 if sign == '\U0001f534' else 3.0)
+                short_sig[i] = 1.0
+                h_break = False
+
+            # ---- TP/SL ----
+            trade_fire = long or short
+            closed_now = False
+            if trade_fire and not trade_on:
+                if long:
+                    tp = close[i] + rr * longDiffSL[i]
+                    sl = close[i] - longDiffSL[i]
+                else:
+                    tp = close[i] - rr * longDiffSL2[i]
+                    sl = close[i] + longDiffSL2[i]
+                trade_on = True
+            was_on = trade_on
+            if trade_on:
+                if long_trade:
+                    if high[i] >= tp:
+                        score[0] += 1
+                        trade_on = False
+                    if (close[i] if sl_close else low[i]) <= sl:
+                        score[1] += 1
+                        trade_on = False
+                elif short_trade:
+                    if low[i] <= tp:
+                        score[0] += 1
+                        trade_on = False
+                    if (close[i] if sl_close else high[i]) >= sl:
+                        score[1] += 1
+                        trade_on = False
+                closed_now = was_on and not trade_on
+
+            pivot_high_arr[i] = updated_high
+            pivot_low_arr[i] = updated_low
+            if was_on or closed_now:
+                tp_arr[i] = tp
+                if show_sl:
+                    sl_arr[i] = sl
+            winning[i] = float(score[0])
+            losing[i] = float(score[1])
+            trade_on_arr[i] = 1.0 if trade_on else 0.0
+
+        return (pivot_high_arr, pivot_low_arr, tp_arr, sl_arr,
+                long_sig, short_sig, break_type, vol_sign,
+                winning, losing, trade_on_arr)
+
+
+class MACDBollingerBands(BtIndicator):
+    """AK MACD BB v1.00 (Algokid) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v3/v4):
+        https://cn.tradingview.com/script/lWRJKlbP-AK-MACD-BB-INDICATOR-V-1-00/
+        created by Algokid
+
+    概述
+    ----
+    在 **MACD** 之上叠加 **布林带**: MACD 突破上轨时以 lime 显示,
+    否则 red; 上下轨之间蓝色填充; 并以颜色标记 ``macd>Upper``(黄) /
+    ``macd<Lower``(青) 的 K 线。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``fastMA = ema(close, fastLength)``, ``slowMA = ema(close, slowLength)``
+    - ``macd = fastMA - slowMA``
+    - ``Std = stdev(macd, length)``
+    - ``Upper = Std*dev + sma(macd, length)``
+    - ``Lower = sma(macd, length) - Std*dev``
+    - ``mc = macd >= Upper ? lime : red``(MACD 圆点颜色)
+    - ``barcolor(macd > Upper ? yellow : na)`` / ``barcolor(macd < Lower ? aqua : na)``
+
+    参数
+    ----
+    bb_length     : 布林带周期(原码 length, 默认 10)
+    deviations    : 标准差倍数(原码 dev, 默认 1.0)
+    fast_length   : 快速 EMA 周期(默认 12)
+    slow_length   : 慢速 EMA 周期(默认 26)
+    signal_length : 信号线周期(原码未使用, 保留以对齐输入, 默认 9)
+
+    输出 lines(副图)
+    ----
+    - macd        : MACD 值(仅数据)
+    - macd_up     : ``macd >= Upper`` 的段(lime, 点线近似 circles)
+    - macd_dn     : 其余段(red)
+    - upper / lower : 布林带上下轨(灰色, 中间蓝色填充)
+    - zero        : 0 轴(橙色)
+    - over_upper / under_lower : ``macd>Upper`` / ``macd<Lower`` 标记(仅数据)
+
+    ⚠ 未复现
+    ----
+    - 原码用 ``barcolor`` 对**价格 K 线**染色(黄/青), 框架不支持; 已作为
+      ``over_upper`` / ``under_lower`` 数据列输出。
+    - 原码 ``style=circles`` 为逐 bar 圆点, 本实现以粗点线近似。
+    - ``stdev`` 取总体标准差(ddof=0, 对齐框架内 ``ta.stdev`` 口径)。
+    """
+    lines = ('macd', 'macd_up', 'macd_dn', 'upper', 'lower', 'zero',
+             'over_upper', 'under_lower')
+    category = 'momentum'
+    overlap = False
+    params = dict(
+        bb_length=10,
+        deviations=1.0,
+        fast_length=12,
+        slow_length=26,
+        signal_length=9,   # 原码未使用, 保留以对齐输入
+    )
+    isplot = dict(macd=False, macd_up=True, macd_dn=True,
+                  upper=True, lower=True, zero=True,
+                  over_upper=False, under_lower=False)
+    linestyle = dict(
+        # 原码 mc = macd >= Upper ? lime : red, style=circles
+        macd_up=LineStyle(line_color='#00ff00', line_width=3.0,
+                          line_dash=LineDash.dotted),
+        macd_dn=LineStyle(line_color='#ff0000', line_width=3.0,
+                          line_dash=LineDash.dotted),
+        # 原码 Band1/Band2 color=gray, linewidth=2
+        upper=LineStyle(line_color='#808080', line_width=2.0),
+        lower=LineStyle(line_color='#808080', line_width=2.0),
+        # 原码 zeroline color=orange, linewidth=2
+        zero=LineStyle(line_color='#ffa500', line_width=2.0),
+    )
+    # 原码 fill(Band1, Band2, color=blue, transp=75)
+    bandstyle = [
+        BandStyle(lower='lower', upper='upper',
+                  fill_color='#0000ff', fill_alpha=0.25),
+    ]
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        bb_length = max(1, int(p.bb_length))
+        dev = float(p.deviations)
+        fast_length = max(1, int(p.fast_length))
+        slow_length = max(1, int(p.slow_length))
+
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- MACD ----
+        fast_ma = QQESignals._ema(close, fast_length)
+        slow_ma = QQESignals._ema(close, slow_length)
+        macd = fast_ma - slow_ma
+
+        # ---- Bollinger Bands ----
+        basis = pd.Series(macd).rolling(
+            bb_length, min_periods=bb_length).mean().to_numpy()
+        std = pd.Series(macd).rolling(
+            bb_length, min_periods=bb_length).std(ddof=0).to_numpy()
+        upper = std * dev + basis
+        lower = basis - std * dev
+
+        # ---- 按 macd >= Upper 拆线着色 ----
+        up = macd >= upper
+        macd_up = np.where(up, macd, np.nan)
+        macd_dn = np.where(up, np.nan, macd)
+        for i in range(1, n):
+            if up[i] != up[i - 1] and not np.isnan(macd[i]):
+                macd_up[i] = macd[i]
+                macd_dn[i] = macd[i]
+
+        zero = np.zeros(n, dtype=np.float64)
+        over_upper = (macd > upper).astype(np.float64)
+        under_lower = (macd < lower).astype(np.float64)
+
+        return (macd, macd_up, macd_dn, upper, lower, zero,
+                over_upper, under_lower)
+
+
+class FollowLineIndicator(BtIndicator):
+    """Follow Line Indicator (Dreadblitz) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/29iYBNku-Follow-Line-Indicator/
+        © Dreadblitz
+
+    概述
+    ----
+    布林带突破 + ATR 跟踪止损的“跟随线”: 价格上破上轨时把跟随线抬到
+    ``low - atr``(只升不降), 下破下轨时压到 ``high + atr``(只降不升),
+    带内保持不变; 跟随线的拐头方向即为趋势方向。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``BBUpper = sma(close,BBperiod) + stdev(close,BBperiod)*BBdeviations``
+       ``BBLower = sma(close,BBperiod) - stdev(close,BBperiod)*BBdeviations``
+    2. ``BBSignal = close>BBUpper ? 1 : close<BBLower ? -1 : 0``
+    3. ``TrendLine``(var):
+       - ``BBSignal==1``: ``TrendLine := max(low - atr(ATRperiod), TrendLine[1])``
+         (``UseATRfilter=false`` 时去掉 atr, 即 ``max(low, TrendLine[1])``)
+       - ``BBSignal==-1``: ``TrendLine := min(high + atr(ATRperiod), TrendLine[1])``
+       - ``BBSignal==0``: 保持
+    4. ``iTrend``(var): 先继承 ``iTrend[1]``, 跟随线上行→1、下行→-1
+    5. ``buy  = iTrend[1]==-1 and iTrend==1``;
+       ``sell = iTrend[1]==1 and iTrend==-1``
+    6. 主图线颜色: ``iTrend>0 ? blue : red``
+
+    参数
+    ----
+    bb_period / bb_deviations : 布林带周期 / 倍数(默认 21 / 1.0)
+    use_atr_filter            : 是否使用 ATR 过滤(默认 True)
+    atr_period                : ATR 周期(默认 5; 标签偏移用 atr(8))
+    hide_labels               : 是否隐藏买卖标签(默认 False)
+
+    输出 lines(主图叠加)
+    ----
+    - trend_line : 跟随线连续值(仅数据)
+    - tl_up / tl_dn : ``iTrend>0``(蓝) / 否则(红) 的两段
+    - long_signal / short_signal : 趋势翻转买/卖信号(💣 / 🔨)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码买卖标签锚定在 ``TrendLine ∓ atr(8)``; 框架固定锚定到 K 线 low/high
+      (触发 bar 一致)。
+    - ``stdev`` 取总体标准差(ddof=0, 对齐框架内 ``stdev`` 口径)。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('trend_line', 'tl_up', 'tl_dn', 'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        bb_period=21,
+        bb_deviations=1.0,
+        use_atr_filter=True,
+        atr_period=5,
+        hide_labels=False,
+    )
+    isplot = dict(trend_line=False, tl_up=True, tl_dn=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 plot(TrendLine, color=iTrend>0?blue:red, linewidth=2)
+        tl_up=LineStyle(line_color='#0000ff', line_width=2.0),
+        tl_dn=LineStyle(line_color='#ff0000', line_width=2.0),
+    )
+    signalstyle = dict(
+        # 原码 buy: labelup blue text 💣 / sell: labeldown red text 🔨
+        long_signal=SignalStyle('low', '#0000ff', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#ff0000', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 plotshape 的 "💣"/"🔨"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, '\U0001f4a3'),   # 💣
+            'short_signal': _map(self.short_signal, '\U0001f528'),  # 🔨
+        }
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        bb_period = max(1, int(p.bb_period))
+        bb_dev = float(p.bb_deviations)
+        use_atr = bool(p.use_atr_filter)
+        atr_period = max(1, int(p.atr_period))
+        hide_labels = bool(p.hide_labels)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- 布林带 ----
+        basis = pd.Series(close).rolling(
+            bb_period, min_periods=bb_period).mean().to_numpy()
+        std = pd.Series(close).rolling(
+            bb_period, min_periods=bb_period).std(ddof=0).to_numpy()
+        bb_upper = basis + std * bb_dev
+        bb_lower = basis - std * bb_dev
+        bb_signal = np.where(close > bb_upper, 1,
+                             np.where(close < bb_lower, -1, 0))
+
+        # ---- 跟随线 ----
+        atr = self._atr(high, low, close, atr_period)
+        trend_line = np.full(n, np.nan, dtype=np.float64)
+        itrend = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        tl_prev = np.nan
+        it_prev = np.nan
+        for i in range(n):
+            bs = bb_signal[i]
+            if bs == 1:
+                cand = (low[i] - atr[i]) if use_atr else low[i]
+                tl = tl_prev if (not np.isnan(tl_prev)
+                                 and cand < tl_prev) else cand
+            elif bs == -1:
+                cand = (high[i] + atr[i]) if use_atr else high[i]
+                tl = tl_prev if (not np.isnan(tl_prev)
+                                 and cand > tl_prev) else cand
+            else:
+                tl = tl_prev
+            it = it_prev
+            if not np.isnan(tl) and not np.isnan(tl_prev):
+                if tl > tl_prev:
+                    it = 1.0
+                elif tl < tl_prev:
+                    it = -1.0
+            if (not hide_labels) and it_prev == -1.0 and it == 1.0:
+                long_sig[i] = 1.0
+            if (not hide_labels) and it_prev == 1.0 and it == -1.0:
+                short_sig[i] = 1.0
+            trend_line[i] = tl
+            itrend[i] = it
+            tl_prev = tl
+            it_prev = it
+
+        # ---- 按 iTrend>0 拆线着色(翻转处桥接) ----
+        up = itrend > 0
+        tl_up = np.where(up, trend_line, np.nan)
+        tl_dn = np.where(up, np.nan, trend_line)
+        for i in range(1, n):
+            if up[i] != up[i - 1] and not np.isnan(trend_line[i]):
+                tl_up[i] = trend_line[i]
+                tl_dn[i] = trend_line[i]
+
+        return trend_line, tl_up, tl_dn, long_sig, short_sig
+
+
+class FlawlessVictoryStrategy(BtIndicator):
+    """Flawless Victory Strategy (Bunghole) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4 strategy):
+        https://cn.tradingview.com/script/i3Uc79fF-Flawless-Victory-Strategy-15min-BTC-Machine-Learning-Strategy/
+        © Bunghole, MPL 2.0
+
+    概述
+    ----
+    布林带“下轨买入 / 上轨卖出”的**只做多**均值回归策略, 用 RSI / MFI
+    作为买入/卖出过滤, 共 3 个版本(参数与是否带 SL/TP 不同)。
+
+    三个版本(Pine 逐行对齐)
+    ----
+    ============  ============================  ===========================
+    版本            买入条件                      卖出条件
+    ============  ============================  ===========================
+    v1 (无SL/TP)   close<BB(20,1)下轨 and RSI>42   close>BB(20,1)上轨 and RSI>70
+    v2 (有SL/TP)   close<BB(17,1)下轨 and RSI>42   close>BB(17,1)上轨 and RSI>76
+    v3 (有SL/TP)   close<BB(20,1)下轨 and MFI<60   close>上轨 and RSI>65 and MFI>64
+    ============  ============================  ===========================
+
+    - SL/TP: v2 为 6.604% / 2.328%, v3 为 8.882% / 2.317%(基于持仓均价)
+    - 指标: RSI = Wilder RSI(14); MFI = 14 周期资金流指数(hlc3)
+
+    交易逻辑(见 ``step``)
+    ----
+    对应原码 ``strategy.entry("Long")`` / ``strategy.close("Long")`` /
+    ``strategy.exit(stop=..., limit=...)``; ``step`` 中:
+    - 空仓且买入信号 → ``buy(qty)``
+    - 持仓且卖出信号 → ``set_target_size(0)``
+    - v2/v3 持仓时, 以开仓价为基准检查 ``low<=SL`` / ``high>=TP`` 并平仓
+
+    参数
+    ----
+    version : ``'v1'`` / ``'v2'`` / ``'v3'``(默认 'v1')
+    qty     : 下单手数(默认 1)
+    各版本阈值: ``v1_rsi_lower/upper``、``v2_rsi_lower/upper``、
+    ``v2_stoploss/takeprofit``、``v3_mfi_lower/rsi_upper/mfi_upper``、
+    ``v3_stoploss/takeprofit``
+
+    输出 lines(主图叠加)
+    ----
+    - basis / upper / lower : 当前版本的布林带
+    - long_signal / exitlong_signal : 买入 / 卖出半仓信号
+    - rsi / mfi : RSI(14) / MFI(14)(仅数据)
+    - stoploss / takeprofit : 基于信号入场价的 SL/TP 位(v1 为 NaN)
+
+    ⚠ 说明
+    ----
+    - 原码为 ``strategy``, 无 plotshape; 信号列供图表标记与 ``step`` 使用。
+    - ``step`` 以开仓价 ``kline.open_price`` 为基准; 等同根 bar 同时触发 SL/TP
+      时按原码保守处理优先止损。
+    - ``stdev`` 取总体标准差(ddof=0)。
+    """
+    lines = ('basis', 'upper', 'lower', 'long_signal', 'exitlong_signal',
+             'rsi', 'mfi', 'stoploss', 'takeprofit')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        version='v1',
+        qty=1,
+        v1_rsi_lower=42.0, v1_rsi_upper=70.0,
+        v2_rsi_lower=42.0, v2_rsi_upper=76.0,
+        v2_stoploss=6.604, v2_takeprofit=2.328,
+        v3_mfi_lower=60.0, v3_rsi_upper=65.0, v3_mfi_upper=64.0,
+        v3_stoploss=8.882, v3_takeprofit=2.317,
+    )
+    isplot = dict(basis=True, upper=True, lower=True,
+                  long_signal=False, exitlong_signal=False,
+                  rsi=False, mfi=False, stoploss=True, takeprofit=True)
+    linestyle = dict(
+        basis=LineStyle(line_color='#808080', line_width=1.0),
+        upper=LineStyle(line_color='#2962FF', line_width=1.0),
+        lower=LineStyle(line_color='#2962FF', line_width=1.0),
+        # 原码 v2/v3 Stoploss=red / Profit=green (style_linebr)
+        stoploss=LineStyle(line_color='#ff0000', line_width=2.0,
+                           line_dash=LineDash.dashed),
+        takeprofit=LineStyle(line_color='#00ff00', line_width=2.0,
+                             line_dash=LineDash.dashed),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#00c853', 'triangle', True, True, 13),
+        exitlong_signal=SignalStyle(
+            'high', '#ff5252', 'circle_x', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        version = str(p.version).lower()
+        if version not in ('v1', 'v2', 'v3'):
+            version = 'v1'
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        volume = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+
+        # ---- RSI(14) ----
+        rsi = QQESignals._rsi(close, 14)
+
+        # ---- MFI(14) ----
+        hlc3 = (high + low + close) / 3.0
+        chg = hlc3 - np.concatenate([[np.nan], hlc3[:-1]])
+        pos_mf = volume * np.where(chg > 0, hlc3, 0.0)
+        neg_mf = volume * np.where(chg < 0, hlc3, 0.0)
+        mfi_up = pd.Series(pos_mf).rolling(
+            14, min_periods=14).sum().to_numpy()
+        mfi_dn = pd.Series(neg_mf).rolling(
+            14, min_periods=14).sum().to_numpy()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mfi = 100.0 - 100.0 / (1.0 + mfi_up / mfi_dn)
+        mfi = np.where(mfi_dn == 0, 100.0,
+                       np.where(mfi_up == 0, 0.0, mfi))
+
+        # ---- 当前版本布林带 ----
+        bb_len = 17 if version == 'v2' else 20
+        basis = pd.Series(close).rolling(
+            bb_len, min_periods=bb_len).mean().to_numpy()
+        std = pd.Series(close).rolling(
+            bb_len, min_periods=bb_len).std(ddof=0).to_numpy()
+        upper = basis + std
+        lower = basis - std
+
+        # ---- 信号 ----
+        sl_pct = tp_pct = None
+        if version == 'v2':
+            buy = (close < lower) & (rsi > float(p.v2_rsi_lower))
+            sell = (close > upper) & (rsi > float(p.v2_rsi_upper))
+            sl_pct = float(p.v2_stoploss) / 100.0
+            tp_pct = float(p.v2_takeprofit) / 100.0
+        elif version == 'v3':
+            buy = (close < lower) & (mfi < float(p.v3_mfi_lower))
+            sell = ((close > upper) & (rsi > float(p.v3_rsi_upper))
+                    & (mfi > float(p.v3_mfi_upper)))
+            sl_pct = float(p.v3_stoploss) / 100.0
+            tp_pct = float(p.v3_takeprofit) / 100.0
+        else:
+            buy = (close < lower) & (rsi > float(p.v1_rsi_lower))
+            sell = (close > upper) & (rsi > float(p.v1_rsi_upper))
+
+        long_sig = buy.astype(np.float64)
+        exit_sig = sell.astype(np.float64)
+
+        # ---- SL/TP 展示位(基于信号入场价) ----
+        sl_arr = np.full(n, np.nan, dtype=np.float64)
+        tp_arr = np.full(n, np.nan, dtype=np.float64)
+        if sl_pct is not None:
+            entry = np.nan
+            on = False
+            for i in range(n):
+                if long_sig[i]:
+                    entry = close[i]
+                    on = True
+                elif exit_sig[i]:
+                    on = False
+                if on and not np.isnan(entry):
+                    sl_arr[i] = entry * (1.0 - sl_pct)
+                    tp_arr[i] = entry * (1.0 + tp_pct)
+
+        return (basis, upper, lower, long_sig, exit_sig,
+                rsi, mfi, sl_arr, tp_arr)
+
+    # ------------------------------------------------------------------
+    # 交易逻辑: 只做多 + 可选 SL/TP
+    # ------------------------------------------------------------------
+    def step(self):
+        """对应原码 ``strategy.entry/close/exit``。
+
+        用法: 在 ``Strategy.next`` 中调用 ``self.flawless.step()``。
+        """
+        kline = self.kline
+        if kline is None:
+            return
+        p = kline.params
+        version = str(p.get('version', 'v1')).lower()
+        qty = max(1, int(p.get('qty', 1)))
+        pos = kline.position
+        in_pos = pos is not None and getattr(pos, 'pos', 0) > 0
+
+        if (not in_pos) and self.long_signal.new:
+            kline.buy(size=qty)
+            return
+        if not in_pos:
+            return
+        if self.exitlong_signal.new:
+            kline.set_target_size(0)
+            return
+        if version in ('v2', 'v3'):
+            entry = kline.open_price
+            if not entry:
+                return
+            if version == 'v2':
+                sl = float(p.get('v2_stoploss', 6.604)) / 100.0
+                tp = float(p.get('v2_takeprofit', 2.328)) / 100.0
+            else:
+                sl = float(p.get('v3_stoploss', 8.882)) / 100.0
+                tp = float(p.get('v3_takeprofit', 2.317)) / 100.0
+            if kline.low.new <= entry * (1.0 - sl):
+                kline.set_target_size(0)
+            elif kline.high.new >= entry * (1.0 + tp):
+                kline.set_target_size(0)
+
+
+class SuperBollingerTrend(BtIndicator):
+    """SuperBollingerTrend (Expo) (Zeiierman) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/AjWfiZpw-SuperBollingerTrend-Expo/
+        © Zeiierman, CC BY-NC-SA 4.0
+
+    概述
+    ----
+    用 **高低价的布林带** 构造一条类似 SuperTrend 的跟踪线:
+    价格在线上时以 **下轨(bbdn)** 作为棘轮上移的支撑, 在线下时以
+    **上轨(bbup)** 作为棘轮下移的压力; 价格 **上穿/下穿** 该线时翻转,
+    并在翻转点绘制 ZigZag 连线与标签, 可显示平均/中位波动距离。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``bbup = sma(high,prd) + stdev(high,prd)*mult``,
+       ``bbdn = sma(low,prd) - stdev(low,prd)*mult``
+    2. ``sbt.s := na(bbdn) or na(bbup) ? 0 : close>sbt.s ? max(sbt.s,bbdn)
+                                  : close<sbt.s ? min(sbt.s,bbup) : 0``
+    3. 依次调用两次 ``SBT``(原码顺序, 第二次的穿越判定用第一次更新后的 ``s``):
+       - ``cond = ta.crossover(close, sbt.s)`` → ``s := bbdn``(lime), ZigZag(low)
+       - ``cond = ta.crossunder(close, sbt.s)`` → ``s := bbup``(red), ZigZag(high)
+    4. ZigZag: ``y2 = dev=='ZigZag' ? sbt.s : dev=='High/Low' ? 极值 : close``;
+       记录与前一个 ZigZag 点的距离 ``|y2-y1|``
+    5. TP 线: ``dist = Tp=='Median' ? zz.diff.median() : zz.diff.avg()``;
+       ``y = pos ? zz.y1[0]+dist : zz.y1[0]-dist``(``pos = close>sbt.s``)
+
+    参数
+    ----
+    - prd / mult   : 布林带周期 / 倍数(默认 12 / 2.0)
+    - show_zigzag  : 是否绘制 ZigZag(默认 True)
+    - signal       : ``'Signal'``(三角标签) / ``'Peak Distance'``(显示距离文字)
+    - dev          : ZigZag 取值 ``'ZigZag'`` / ``'High/Low'`` / ``'Close'``
+    - show_tp / tp_type : 是否显示 TP 线 / ``'Median'`` / ``'Average'``
+    - show_table   : 是否输出平均/中位距离(作为数据列)
+
+    输出 lines(主图叠加)
+    ----
+    - sbt          : 跟踪线连续值(仅数据)
+    - sbt_up / sbt_dn : 按最新信号色(lime / red)拆分的两段
+    - zigzag       : ZigZag 连线(相邻信号点间线性插值, 灰色虚线)
+    - zigzag_diff  : 相邻 ZigZag 点的绝对距离(仅数据)
+    - zigzag_delta : 带符号距离(仅数据, 供标签文字)
+    - tp           : TP 位(仅数据/绘图: show_tp 打开时)
+    - long_signal / short_signal : 上穿 / 下穿信号
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码用 ``line.new`` 逐段画 ZigZag 与 TP 线, 本实现以折线/数据列近似。
+    - 右上角统计表以 ``zigzag_diff`` 数据列代替。
+    - ``str.tostring(..., format.mintick)`` 的 tick 精度以 2 位小数近似。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('sbt', 'sbt_up', 'sbt_dn', 'zigzag', 'zigzag_diff',
+             'zigzag_delta', 'tp', 'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        prd=12,
+        mult=2.0,
+        show_zigzag=True,
+        signal='Signal',
+        dev='ZigZag',
+        show_tp=False,
+        tp_type='Median',
+        show_table=False,
+    )
+    isplot = dict(sbt=False, sbt_up=True, sbt_dn=True, zigzag=True,
+                  zigzag_diff=False, zigzag_delta=False, tp=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 s.c = lime / red
+        sbt_up=LineStyle(line_color='#00ff00', line_width=2.0),
+        sbt_dn=LineStyle(line_color='#ff0000', line_width=2.0),
+        # 原码 ZigZag 连线 color.new(gray,0) + dashed
+        zigzag=LineStyle(line_color='#808080', line_width=1.0,
+                         line_dash=LineDash.dashed),
+        tp=LineStyle(line_color='#00ff00', line_width=1.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#00ff00', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#ff0000', 'inverted_triangle', True, True, 12),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: ``signal=='Peak Distance'`` 时显示距离
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        if str(SuperBollingerTrend.params.get('signal', 'Signal')) != 'Peak Distance':
+            return None
+        delta = np.asarray(self.zigzag_delta.values, dtype=np.float64)
+        long_v = np.asarray(self.long_signal.values, dtype=np.float64)
+        short_v = np.asarray(self.short_signal.values, dtype=np.float64)
+
+        def _fmt(sig):
+            arr = np.full(sig.shape[0], np.nan, dtype=object)
+            for i in np.where(sig > 0)[0]:
+                if not np.isnan(delta[i]):
+                    arr[i] = f"{delta[i]:.2f}p"
+            return arr
+        return {'long_signal': _fmt(long_v), 'short_signal': _fmt(short_v)}
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        prd = max(1, int(p.prd))
+        mult = float(p.mult)
+        show_zigzag = bool(p.show_zigzag)
+        dev = str(p.dev)
+        show_tp = bool(p.show_tp)
+        tp_type = str(p.tp_type)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- 高低价布林带 ----
+        up_ma = pd.Series(high).rolling(
+            prd, min_periods=prd).mean().to_numpy()
+        up_sd = pd.Series(high).rolling(
+            prd, min_periods=prd).std(ddof=0).to_numpy()
+        dn_ma = pd.Series(low).rolling(
+            prd, min_periods=prd).mean().to_numpy()
+        dn_sd = pd.Series(low).rolling(
+            prd, min_periods=prd).std(ddof=0).to_numpy()
+        bbup = up_ma + up_sd * mult
+        bbdn = dn_ma - dn_sd * mult
+
+        sbt = np.full(n, np.nan, dtype=np.float64)
+        color = np.zeros(n, dtype=np.int64)   # 0=na, 1=lime, -1=red
+        zigzag = np.full(n, np.nan, dtype=np.float64)
+        zigzag_diff = np.full(n, np.nan, dtype=np.float64)
+        zigzag_delta = np.full(n, np.nan, dtype=np.float64)
+        tp_arr = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        zz_x: list = []      # 最近的 ZigZag bar 在前
+        zz_y: list = []      # 最近的 ZigZag y 在前
+        zz_diff: list = []   # 最近的距离在前
+        s_prev = np.nan
+        cur_color = 0
+
+        def _zigzag(b, y2):
+            """Pine ``zz.zigzag``: 记录距离、画连线(前一个点 -> 当前点)、标签。"""
+            if len(zz_x) > 0:
+                d = abs(y2 - zz_y[0])
+                zz_diff.insert(0, d)
+                zigzag_diff[b] = d
+                zigzag_delta[b] = y2 - zz_y[0]
+                a, ya = zz_x[0], zz_y[0]
+                if b > a:
+                    step = (y2 - ya) / float(b - a)
+                    for k in range(a, b + 1):
+                        zigzag[k] = ya + step * (k - a)
+                else:
+                    zigzag[b] = y2
+            zz_x.insert(0, b)
+            zz_y.insert(0, y2)
+
+        for i in range(n):
+            c = close[i]
+            c_prev = close[i - 1] if i > 0 else np.nan
+            # ---- 第一次 SBT (crossover) ----
+            cond1 = (not np.isnan(c_prev)) and (not np.isnan(s_prev)) \
+                and c_prev < s_prev and c > s_prev
+            if np.isnan(bbup[i]) or np.isnan(bbdn[i]):
+                s1 = 0.0
+            elif c > s_prev:
+                s1 = max(s_prev, bbdn[i])
+            elif c < s_prev:
+                s1 = min(s_prev, bbup[i])
+            else:
+                s1 = 0.0
+            if cond1:
+                s1 = bbdn[i]
+                cur_color = 1
+                if show_zigzag:
+                    y2 = (s1 if dev == 'ZigZag'
+                          else low[i] if dev == 'High/Low' else c)
+                    _zigzag(i, y2)
+                long_sig[i] = 1.0
+
+            # ---- 第二次 SBT (crossunder, 用更新后的 s1) ----
+            cond2 = (not np.isnan(c_prev)) and (not np.isnan(s_prev)) \
+                and c_prev > s_prev and c < s1
+            if np.isnan(bbup[i]) or np.isnan(bbdn[i]):
+                s2 = 0.0
+            elif c > s1:
+                s2 = max(s1, bbdn[i])
+            elif c < s1:
+                s2 = min(s1, bbup[i])
+            else:
+                s2 = 0.0
+            if cond2:
+                s2 = bbup[i]
+                cur_color = -1
+                if show_zigzag:
+                    y2 = (s2 if dev == 'ZigZag'
+                          else high[i] if dev == 'High/Low' else c)
+                    _zigzag(i, y2)
+                short_sig[i] = 1.0
+
+            sbt[i] = s2
+            color[i] = cur_color
+            s_prev = s2
+
+            # ---- TP 线 ----
+            if show_tp and len(zz_y) > 0 and zz_diff:
+                dist = (float(np.median(zz_diff)) if tp_type == 'Median'
+                        else float(np.mean(zz_diff)))
+                pos = c > s2
+                tp_arr[i] = zz_y[0] + dist if pos else zz_y[0] - dist
+
+        # 相邻 ZigZag 点处的距离已在 _zigzag 内记录
+
+        # ---- 按颜色拆线(翻转处桥接) ----
+        up_mask = color == 1
+        sbt_up = np.where(up_mask, sbt, np.nan)
+        sbt_dn = np.where(color == -1, sbt, np.nan)
+        for i in range(1, n):
+            if color[i] != color[i - 1] and not np.isnan(sbt[i]):
+                sbt_up[i] = sbt[i]
+                sbt_dn[i] = sbt[i]
+        sbt_up[color == 0] = np.nan
+        sbt_dn[color == 0] = np.nan
+
+        return (sbt, sbt_up, sbt_dn, zigzag, zigzag_diff,
+                zigzag_delta, tp_arr, long_sig, short_sig)
+
+
+class TradingABC(BtIndicator):
+    """Trading ABC (LonesomeTheBlue) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/0SBnTaqJ-Trading-ABC/
+        © LonesomeTheBlue, MPL 2.0
+
+    概述
+    ----
+    由三部分组成:
+    1. **趋势云(Trend Cloud)**: 6 条均线(4 SMA + 2 EMA)相对当前 K 线实体
+       的位置计数; 当全部均线都在实体上方/下方连续两根时, 趋势翻转为
+       ``-1``/``1``。云带为均线的最大/最小包络。
+    2. **ZigZag**: 用 ``highestbars/lowestbars == 0`` 检测 Swing 高低点,
+       维护最近 5 个拐点(方向变化时新增, 同向延伸时更新)。
+    3. **ABC 形态**: 当 ZigZag 最新点变化且满足回撤比例
+       ``rate=(a-b)/(c-b)`` 落在 ``[fibodn*(1-error), fiboup*(1+error)]`` 时,
+       确认一个 ABC 回撤形态; 配合均线“弹跳”与趋势给出买卖信号。
+
+    计算(Pine 逐行对齐)
+    ----
+    - 均线组 ``[sma(src,50/100/150/200), ema(src,20/40)]``
+    - ``upper/lower``: 均线 >= ``max(open,close)`` / <= ``min(open,close)`` 的计数
+    - ``trend``: ``lower>0 and upper==0``连续两根 → 1;
+      ``lower==0 and upper>0``连续两根 → -1; 否则保持
+    - ZigZag: ``ph = highestbars(high,prd)==0 ? high : na``, ``pl`` 同理;
+      ``dir = ph? 1 : pl? -1 : dir``
+    - ABC: ``a/b/c`` 取自 ZigZag 最近三点; 满足回撤比例则标记 ABC
+    - 弹跳: 任均线满足 ``min(low,low[1])<=ma and close>ma and close>open``(做多)
+      / ``max(high,high[1])>=ma and close<ma and close<open``(做空)
+    - 信号: ``long = trend==1 and abc_bar_count<=6 and lbounced and lll_>=last_zz_point``
+      , ``short`` 对称
+
+    参数
+    ----
+    prd : ZigZag 周期(默认 8)
+    fiboup / fibodn / errorrate : 斐波那契上下限与容错(默认 0.618 / 0.382 / 5.0)
+    src_ma : 均线源(默认 'close')
+    malen1..4 / malen5..6 : 4 条 SMA / 2 条 EMA 周期
+    showabc / keepabc / showcloud / showzigzag : 显示开关
+
+    输出 lines(主图叠加)
+    ----
+    - zigzag      : ZigZag 连线(相邻拐点间线性插值)
+    - abc_line    : ABC 形态连线(c->b->a 三段直线插值)
+    - trend       : 趋势状态(1/-1/0, 仅数据, 内部判定信号用)
+    - abc         : ABC 形态命中标记(仅数据)
+    - exitshort_signal : A / B / C 文字标签(自定义复用标准信号列, 不画线)
+    - long_signal / short_signal : ABC 买卖信号
+
+    ⚠ 近似 / 未复现
+    ----
+    - 按需求**已移除趋势云(色带与边界线)**, 仅保留 ZigZag / ABC / 信号;
+      趋势云的计算仍在内部用于 ``trend`` 判定。
+    - ABC 连线原码为 ``line.new``, 本实现以折线插值近似; A/B/C 文字标签
+      通过标准信号列 ``exitshort_signal`` + 逐点文本输出(锤定到 K 线高/低点,
+      非原码的 ZigZag 价位)。
+    - 未使用的 ``stoch`` 信号不影响结果, 忽略。
+    """
+    lines = ('zigzag', 'abc_line', 'trend', 'abc', 'exitshort_signal',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        prd=8,
+        fiboup=0.618,
+        fibodn=0.382,
+        errorrate=5.0,
+        src_ma='close',
+        malen1=50, malen2=100, malen3=150, malen4=200,
+        malen5=20, malen6=40,
+        showabc=True,
+        keepabc=True,
+        showcloud=True,
+        showzigzag=True,
+    )
+    isplot = dict(zigzag=True, abc_line=True, trend=False, abc=False,
+                  exitshort_signal=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 ZigZag 为虚线
+        zigzag=LineStyle(line_color='#2962FF', line_width=2.0,
+                         line_dash=LineDash.dashed),
+        # ABC 连线
+        abc_line=LineStyle(line_color='#FF9800', line_width=2.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#00ff00', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#ff0000', 'inverted_triangle', True, True, 12),
+        # ABC 的 A / B / C 文字标签(自定义信号列)
+        exitshort_signal=SignalStyle(
+            'high', '#2962FF', 'circle', True, True, 6),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: A / B / C
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        sig = np.asarray(self.exitshort_signal.values, dtype=np.float64)
+        if not np.any(sig > 0):
+            return None
+        txt = np.full(sig.shape[0], np.nan, dtype=object)
+        for i in np.where(sig > 0)[0]:
+            code = int(round(sig[i]))
+            txt[i] = {1: 'A', 2: 'B', 3: 'C'}.get(code, '')
+        return {'exitshort_signal': txt}
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _draw_seg(arr, x1, y1, x2, y2):
+        if x2 > x1:
+            step = (y2 - y1) / float(x2 - x1)
+            for k in range(x1, x2 + 1):
+                arr[k] = y1 + step * (k - x1)
+        elif x2 == x1:
+            arr[x2] = y2
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        prd = max(2, int(p.prd))
+        fiboup = float(p.fiboup)
+        fibodn = float(p.fibodn)
+        error = float(p.errorrate) / 100.0
+        src_name = str(p.src_ma)
+        show_cloud = bool(p.showcloud)
+        show_zigzag = bool(p.showzigzag)
+        show_abc = bool(p.showabc)
+        keep_abc = bool(p.keepabc)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        open_ = np.asarray(self.open, dtype=np.float64)
+        n = len(close)
+
+        if src_name == 'hl2':
+            src = (high + low) / 2.0
+        elif src_name == 'hlc3':
+            src = (high + low + close) / 3.0
+        elif src_name == 'ohlc4':
+            src = (high + low + close + open_) / 4.0
+        else:
+            src = np.asarray(getattr(self, src_name), dtype=np.float64)
+
+        # ---- 均线组 ----
+        mas = [
+            self._sma(src, int(p.malen1)), self._sma(src, int(p.malen2)),
+            self._sma(src, int(p.malen3)), self._sma(src, int(p.malen4)),
+            QQESignals._ema(src, int(p.malen5)),
+            QQESignals._ema(src, int(p.malen6)),
+        ]
+
+        umax = np.full(n, np.nan, dtype=np.float64)
+        umin = np.full(n, np.nan, dtype=np.float64)
+        lmax = np.full(n, np.nan, dtype=np.float64)
+        lmin = np.full(n, np.nan, dtype=np.float64)
+        trend = np.zeros(n, dtype=np.int64)
+        up_cnt = np.zeros(n, dtype=np.int64)
+        lo_cnt = np.zeros(n, dtype=np.int64)
+        for i in range(n):
+            body_hi = max(open_[i], close[i])
+            body_lo = min(open_[i], close[i])
+            u_pool = []
+            l_pool = []
+            for ma in mas:
+                v = ma[i]
+                if np.isnan(v):
+                    continue
+                if v >= body_hi:
+                    u_pool.append(v)
+                elif v <= body_lo:
+                    l_pool.append(v)
+            if u_pool:
+                umax[i] = max(u_pool)
+                umin[i] = min(u_pool)
+                up_cnt[i] = len(u_pool)
+            if l_pool:
+                lmax[i] = max(l_pool)
+                lmin[i] = min(l_pool)
+                lo_cnt[i] = len(l_pool)
+
+        cur = 0
+        for i in range(n):
+            if i > 0 and lo_cnt[i] > 0 and up_cnt[i] == 0 \
+                    and lo_cnt[i - 1] > 0 and up_cnt[i - 1] == 0:
+                cur = 1
+            elif i > 0 and lo_cnt[i] == 0 and up_cnt[i] > 0 \
+                    and lo_cnt[i - 1] == 0 and up_cnt[i - 1] > 0:
+                cur = -1
+            trend[i] = cur
+
+        # ---- ZigZag: ph/pl 与方向 ----
+        ph = np.full(n, np.nan, dtype=np.float64)
+        pl = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            lo_i = max(0, i - prd + 1)
+            if i > lo_i:
+                if high[i] > high[lo_i:i].max():
+                    ph[i] = high[i]
+                if low[i] < low[lo_i:i].min():
+                    pl[i] = low[i]
+            else:
+                ph[i] = high[i]
+                pl[i] = low[i]
+        dir_arr = np.zeros(n, dtype=np.int64)
+        d = 0
+        for i in range(n):
+            if not np.isnan(ph[i]) and np.isnan(pl[i]):
+                d = 1
+            elif not np.isnan(pl[i]) and np.isnan(ph[i]):
+                d = -1
+            dir_arr[i] = d
+
+        zigzag = np.full(n, np.nan, dtype=np.float64)
+        abc_arr = np.zeros(n, dtype=np.float64)
+        abc_line = np.full(n, np.nan, dtype=np.float64)
+        exitshort_signal = np.zeros(n, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        zz_pts: list = []            # [[bar, value], ...] 最新在前, 上限 5
+        zchange_prev = np.nan
+        last_zz_point = 0.0
+        abc_bar_count = 0
+
+        for i in range(n):
+            if not np.isnan(ph[i]) or not np.isnan(pl[i]):
+                val = ph[i] if dir_arr[i] == 1 else pl[i]
+                dir_changed = (i == 0) or (dir_arr[i] != dir_arr[i - 1])
+                if dir_changed or len(zz_pts) == 0:
+                    zz_pts.insert(0, [i, val])
+                    if len(zz_pts) > 5:
+                        zz_pts.pop()
+                    if len(zz_pts) >= 2:
+                        self._draw_seg(zigzag, zz_pts[1][0], zz_pts[1][1],
+                                       zz_pts[0][0], zz_pts[0][1])
+                else:
+                    if ((dir_arr[i] == 1 and val > zz_pts[0][1])
+                            or (dir_arr[i] == -1 and val < zz_pts[0][1])):
+                        zz_pts[0] = [i, val]
+                        if len(zz_pts) >= 2:
+                            self._draw_seg(
+                                zigzag, zz_pts[1][0], zz_pts[1][1],
+                                zz_pts[0][0], zz_pts[0][1])
+
+            # ---- ABC 形态 ----
+            zchange = zz_pts[0][1] if zz_pts else 0.0
+            zchg_changed = (not np.isnan(zchange_prev)
+                            ) and zchange != zchange_prev
+            abc_this = False
+            if zchg_changed and len(zz_pts) >= 3:
+                ma_all = np.array([m[i] for m in mas if not np.isnan(m[i])])
+                cond_a = ((not np.isnan(pl[i])) and trend[i] == 1
+                          and dir_arr[i] == -1 and ma_all.size > 0
+                          and low[i] < ma_all.max())
+                cond_b = ((not np.isnan(ph[i])) and trend[i] == -1
+                          and dir_arr[i] == 1 and ma_all.size > 0
+                          and high[i] > ma_all.min())
+                if cond_a or cond_b:
+                    a = zz_pts[0][1]
+                    b = zz_pts[1][1]
+                    c = zz_pts[2][1]
+                    den = c - b
+                    if den != 0:
+                        rate = (a - b) / den
+                        if (rate >= fibodn - fibodn * error
+                                and rate <= fiboup + fiboup * error):
+                            abc_this = True
+            if abc_this:
+                abc_arr[i] = 1.0
+                if show_abc and len(zz_pts) >= 3:
+                    if not keep_abc:
+                        abc_line[:] = np.nan
+                        exitshort_signal[:] = 0.0
+                    a = zz_pts[0][1]
+                    b, b_loc = zz_pts[1][1], zz_pts[1][0]
+                    c, c_loc = zz_pts[2][1], zz_pts[2][0]
+                    # 连线 c -> b -> a
+                    self._draw_seg(abc_line, c_loc, c, b_loc, b)
+                    self._draw_seg(abc_line, b_loc, b, i, a)
+                    # 标签 A@c / B@b / C@a (1=A, 2=B, 3=C)
+                    exitshort_signal[c_loc] = 1.0
+                    exitshort_signal[b_loc] = 2.0
+                    exitshort_signal[i] = 3.0
+            there_is_abc = abc_this
+            if len(zz_pts) >= 2 and there_is_abc:
+                last_zz_point = zz_pts[0][1]
+            abc_bar_count = 0 if there_is_abc else abc_bar_count + 1
+
+            win = abc_bar_count + 1
+            lo_i = max(0, i - win + 1)
+            hhh = high[lo_i:i + 1].max()
+            lll = low[lo_i:i + 1].min()
+
+            # ---- 弹跳 ----
+            lbounced = False
+            sbounced = False
+            low_prev = low[i - 1] if i > 0 else low[i]
+            high_prev = high[i - 1] if i > 0 else high[i]
+            for ma in mas:
+                v = ma[i]
+                if np.isnan(v):
+                    continue
+                if min(low[i], low_prev) <= v and close[i] > v \
+                        and close[i] > open_[i]:
+                    lbounced = True
+                if max(high[i], high_prev) >= v and close[i] < v \
+                        and close[i] < open_[i]:
+                    sbounced = True
+
+            if trend[i] == 1 and abc_bar_count <= 6 and lbounced \
+                    and lll >= last_zz_point:
+                long_sig[i] = 1.0
+            if trend[i] == -1 and abc_bar_count <= 6 and sbounced \
+                    and hhh <= last_zz_point:
+                short_sig[i] = 1.0
+
+            zchange_prev = zchange
+
+        # ---- 趋势云仅内部用于 trend 判定, 不再输出 ----
+        if not show_zigzag:
+            zigzag = np.full(n, np.nan)
+
+        return (zigzag, abc_line,
+                trend.astype(np.float64), abc_arr, exitshort_signal,
+                long_sig, short_sig)
+
+
+class RMITrendSniper(BtIndicator):
+    """RMI Trend Sniper (TZack88) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/rtD9lc5D-RMI-Trend-Sniper/
+        © TZack88, MPL 2.0
+
+    概述
+    ----
+    用 **RSI 与 MFI 的平均值(RMI)** 结合短周期 EMA 方向判定趋势:
+    RMI 上穿 66 且 EMA5 上行 → 多头, RMI 下穿 30 且 EMA5 下行 → 空头;
+    趋势线上叠加 **以振幅加权的移动平均(RWMA)** 与自适应带宽构成的通道。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``up = rma(max(change(close),0), Length)``,
+       ``down = rma(-min(change(close),0), Length)``;
+       ``rsi = down==0 ? 100 : up==0 ? 0 : 100-100/(1+up/down)``
+    2. ``mf = ta.mfi(hlc3, Length)``; ``rsi_mfi = avg(rsi, mf)``
+    3. ``p_mom = rsi_mfi[1]<pmom and rsi_mfi>pmom and rsi_mfi>nmom and change(ema(close,5))>0``
+       ``n_mom = rsi_mfi<nmom and change(ema(close,5))<0``
+       → 维护 ``positive``/``negative`` 状态
+    4. ``Band = min(atr(30)*0.3, close*0.003)[20] / 2 * 8``
+    5. ``rwma = rangeMA(high-low, 20)``:
+       ``weight = Range/sum(Range,20)``;
+       ``rwma = sum(close*weight,20) / sum(weight,20)``
+    6. 趋势线 ``RWMA = positive ? rwma-Band : negative ? rwma+Band : na``;
+       通道 ``max = RWMA+Band``, ``min = RWMA-Band``
+    7. 信号: ``positive and not positive[1]`` / ``negative and not negative[1]``
+
+    参数
+    ----
+    length : RSI / MFI 周期(默认 14)
+    pmom / nmom : RMI 上/下阈值(默认 66 / 30)
+    filleshow   : 是否显示趋势线与通道(默认 True)
+
+    输出 lines(主图叠加)
+    ----
+    - rwma        : 趋势线连续值(仅数据)
+    - rwma_up / rwma_dn : 多头(青 #00bcd4) / 空头(红 #ff5252) 两段
+    - bmax_up / bmin_up : 多头通道上下沿(透明, 仅作填充边界)
+    - bmax_dn / bmin_dn : 空头通道上下沿(透明)
+    - rsi_mfi     : RMI 值(仅数据)
+    - trend       : 1 多头 / -1 空头 / 0 未定(仅数据)
+    - long_signal / short_signal : 趋势翻转信号
+
+    ⚠ 未复现
+    ----
+    - 原码 ``plotcandle``/``barcolor`` 对**价格 K 线**的重染色不支持。
+    - 原码多层透明“光晕”叠加 plot 以单线近似; 渐变填充以固定透明度色带近似。
+    - ``display.pane`` 的 ``plot(close)`` 未复现。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('rwma', 'rwma_up', 'rwma_dn',
+             'bmax_up', 'bmin_up', 'bmax_dn', 'bmin_dn',
+             'rsi_mfi', 'trend', 'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        length=14,
+        pmom=66,
+        nmom=30,
+        filleshow=True,
+    )
+    isplot = dict(rwma=False, rwma_up=True, rwma_dn=True,
+                  bmax_up=False, bmin_up=False, bmax_dn=False, bmin_dn=False,
+                  rsi_mfi=False, trend=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 colour = positive ? bull(#00bcd4) : bear(#ff5252)
+        rwma_up=LineStyle(line_color='#00bcd4', line_width=2.0),
+        rwma_dn=LineStyle(line_color='#ff5252', line_width=2.0),
+        # 通道边界透明, 仅作填充边界
+        bmax_up=LineStyle(line_color='#00000000', line_width=1.0),
+        bmin_up=LineStyle(line_color='#00000000', line_width=1.0),
+        bmax_dn=LineStyle(line_color='#00000000', line_width=1.0),
+        bmin_dn=LineStyle(line_color='#00000000', line_width=1.0),
+    )
+    # 原码 fill(top,center,...) / fill(center,bottom,...), 颜色 colour@75
+    bandstyle = [
+        BandStyle(lower='bmin_up', upper='rwma_up',
+                  fill_color='#00bcd4', fill_alpha=0.25),
+        BandStyle(lower='rwma_up', upper='bmax_up',
+                  fill_color='#00bcd4', fill_alpha=0.25),
+        BandStyle(lower='bmin_dn', upper='rwma_dn',
+                  fill_color='#ff5252', fill_alpha=0.25),
+        BandStyle(lower='rwma_dn', upper='bmax_dn',
+                  fill_color='#ff5252', fill_alpha=0.25),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle('rwma_up', '#00bcd4',
+                                'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'rwma_dn', '#ff5252', 'inverted_triangle', True, True, 12),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+
+    @staticmethod
+    def _mfi(src, volume, n: int) -> np.ndarray:
+        """Pine ``ta.mfi(source, length)``。"""
+        src = np.asarray(src, dtype=np.float64)
+        volume = np.asarray(volume, dtype=np.float64)
+        chg = src - np.concatenate([[np.nan], src[:-1]])
+        pos = volume * np.where(chg > 0, src, 0.0)
+        neg = volume * np.where(chg < 0, src, 0.0)
+        pu = pd.Series(pos).rolling(
+            int(n), min_periods=int(n)).sum().to_numpy()
+        nd = pd.Series(neg).rolling(
+            int(n), min_periods=int(n)).sum().to_numpy()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mfi = 100.0 - 100.0 / (1.0 + pu / nd)
+        return np.where(nd == 0, 100.0, np.where(pu == 0, 0.0, mfi))
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        length = max(1, int(p.length))
+        pmom = float(p.pmom)
+        nmom = float(p.nmom)
+        filleshow = bool(p.filleshow)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        volume = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+
+        # ---- RMI = avg(rsi, mfi) ----
+        rsi = QQESignals._rsi(close, length)
+        hlc3 = (high + low + close) / 3.0
+        mf = self._mfi(hlc3, volume, length)
+        rsi_mfi = (rsi + mf) / 2.0
+
+        # ---- EMA5 变化方向 ----
+        ema5 = QQESignals._ema(close, 5)
+        d_ema5 = ema5 - np.concatenate([[np.nan], ema5[:-1]])
+
+        rmi_prev = np.concatenate([[np.nan], rsi_mfi[:-1]])
+        p_mom = ((rmi_prev < pmom) & (rsi_mfi > pmom) & (rsi_mfi > nmom)
+                 & (d_ema5 > 0))
+        n_mom = (rsi_mfi < nmom) & (d_ema5 < 0)
+
+        # ---- 自适应带宽 ----
+        atr30 = self._atr(high, low, close, 30)
+        raw_band = np.minimum(atr30 * 0.3, close * (0.3 / 100.0))
+        band = np.full(n, np.nan, dtype=np.float64)
+        if n > 20:
+            band[20:] = raw_band[:-20]   # [20] 历史引用
+        band = band / 2.0 * 8.0
+
+        # ---- RWMA(振幅加权均线) ----
+        rng = high - low
+        roll = pd.Series(rng).rolling(20, min_periods=20).sum().to_numpy()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            weight = rng / roll
+        num = pd.Series(close * weight).rolling(
+            20, min_periods=20).sum().to_numpy()
+        den = pd.Series(weight).rolling(
+            20, min_periods=20).sum().to_numpy()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rwma = num / den
+
+        # ---- 趋势线与通道 ----
+        rwma_line = np.full(n, np.nan, dtype=np.float64)
+        trend = np.zeros(n, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        positive = False
+        negative = False
+        for i in range(n):
+            prev_pos, prev_neg = positive, negative
+            if p_mom[i]:
+                positive, negative = True, False
+            if n_mom[i]:
+                positive, negative = False, True
+            if positive and not np.isnan(rwma[i]) and not np.isnan(band[i]):
+                rwma_line[i] = rwma[i] - band[i]
+            elif negative and not np.isnan(rwma[i]) and not np.isnan(band[i]):
+                rwma_line[i] = rwma[i] + band[i]
+            trend[i] = 1.0 if positive else (-1.0 if negative else 0.0)
+            if positive and not prev_pos:
+                long_sig[i] = 1.0
+            if negative and not prev_neg:
+                short_sig[i] = 1.0
+
+        band_max = rwma_line + band
+        band_min = rwma_line - band
+
+        # ---- 按状态拆分(翻转处桥接) ----
+        pos_mask = trend > 0
+        neg_mask = trend < 0
+        rwma_up = np.where(pos_mask, rwma_line, np.nan)
+        rwma_dn = np.where(neg_mask, rwma_line, np.nan)
+        bmax_up = np.where(pos_mask, band_max, np.nan)
+        bmin_up = np.where(pos_mask, band_min, np.nan)
+        bmax_dn = np.where(neg_mask, band_max, np.nan)
+        bmin_dn = np.where(neg_mask, band_min, np.nan)
+        for i in range(1, n):
+            if trend[i] != trend[i - 1] and not np.isnan(rwma_line[i]):
+                rwma_up[i] = rwma_line[i]
+                rwma_dn[i] = rwma_line[i]
+                bmax_up[i] = bmax_dn[i] = band_max[i]
+                bmin_up[i] = bmin_dn[i] = band_min[i]
+
+        if not filleshow:
+            for arr in (rwma_up, rwma_dn, bmax_up, bmin_up,
+                        bmax_dn, bmin_dn):
+                arr[:] = np.nan
+
+        return (rwma_line, rwma_up, rwma_dn,
+                bmax_up, bmin_up, bmax_dn, bmin_dn,
+                rsi_mfi, trend, long_sig, short_sig)
+
+
+class ExhaustionLevels(BtIndicator):
+    """Exhaustion levels (InSilico) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/jB2a9GAV-Leledc-levels-IS/
+        © InSilico(改自 Lele "Leledc Exhaustion Bar")
+
+    概述
+    ----
+    基于 Lele Exhaustion Bar 的“耗竭”判定, 并在耗竭点记录 **阻力/支撑水平线**:
+
+    计算(Pine 逐行对齐)
+    ----
+    1. 计数(``var`` 持久, 不要求连续):
+       - ``bindex := close>close[4] ? bindex+1 : bindex``
+       - ``sindex := close<close[4] ? sindex+1 : sindex``
+    2. 耗竭顶部(``return = -1``):
+       ``bindex > bars and close<open and high >= highest(high, length)``
+       → 重置 ``bindex = 0``
+    3. 耗竭底部(``return = 1``):
+       ``sindex > bars and close>open and low <= lowest(low, length)``
+       → 重置 ``sindex = 0``
+    4. 水平线(``var`` 持久):
+       ``resistance := close<open and Lelex ? high : resistance[1]``
+       ``support    := close>open and Lelex ? low  : support[1]``
+       (即阻力取最近耗竭顶部的高点, 支撑取最近耗竭底部的低点)
+    5. 信号: ``lowlel = Lelex==1 ? low : na``(做多箭头),
+       ``highlel = Lelex==-1 ? high : na``(做空箭头)
+
+    参数
+    ----
+    exhaustion_switch : 是否显示耗竭箭头(默认 True)
+    level_switch      : 是否显示耗竭水平线(默认 True)
+    length            : Exhaustions swing length(默认 40)
+    bars              : Exhaustion bar count(默认 10)
+    thickness         : 水平线线宽(默认 2)
+
+    输出 lines(主图叠加)
+    ----
+    - resistance : 耗竭阻力位(红, 虚线)
+    - support    : 耗竭支撑位(青, 虚线)
+    - exhaustion : Lelex 取值(1 底部 / -1 顶部 / 0 无, 仅数据)
+    - long_signal / short_signal : 耗竭底部 / 顶部信号
+
+    说明
+    ----
+    - 水平线是**一段一段**的台阶线。若段与段在换位处直接相连, 图上会出现一条
+      斜线把前后两个价位接起来; 这里把**上一段的最后一个点**置为 NaN, 让引擎
+      在缺口处断开(见 pylightcharts 的 NaN 断点)。
+
+    ⚠ 近似 / 未复现
+    ----
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('resistance', 'support', 'exhaustion',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        exhaustion_switch=True,
+        level_switch=True,
+        length=40,
+        bars=10,
+        thickness=2,
+    )
+    isplot = dict(resistance=True, support=True, exhaustion=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 rescol=#ff0000 / supcol=#138484; 支撑/阻力用虚线更清楚
+        resistance=LineStyle(line_color='#ff0000', line_width=2.0,
+                             line_dash=LineDash.dashdot),
+        support=LineStyle(line_color='#138484', line_width=2.0,
+                          line_dash=LineDash.dashdot),
+    )
+    signalstyle = dict(
+        # 原码 Up 绿色 triangleup(下方) / Down 红色 triangledown(上方)
+        long_signal=SignalStyle('low', '#00ff00', 'triangle', True, True, 13),
+        short_signal=SignalStyle(
+            'high', '#ff0000', 'inverted_triangle', True, True, 13),
+    )
+
+    # ------------------------------------------------------------------
+    # Lele 耗竭判定
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _lelec(high, low, close, open_, bars: int, length: int) -> np.ndarray:
+        n = len(close)
+        out = np.zeros(n, dtype=np.float64)
+        bindex = 0
+        sindex = 0
+        for i in range(n):
+            if i >= 4:
+                if close[i] > close[i - 4]:
+                    bindex += 1
+                if close[i] < close[i - 4]:
+                    sindex += 1
+            lo = max(0, i - length + 1)
+            if (bindex > bars and close[i] < open_[i]
+                    and high[i] >= high[lo:i + 1].max()):
+                bindex = 0
+                out[i] = -1.0
+            elif (sindex > bars and close[i] > open_[i]
+                  and low[i] <= low[lo:i + 1].min()):
+                sindex = 0
+                out[i] = 1.0
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        show_exh = bool(p.exhaustion_switch)
+        show_lvl = bool(p.level_switch)
+        length = max(1, int(p.length))
+        bars = max(0, int(p.bars))
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        open_ = np.asarray(self.open, dtype=np.float64)
+        n = len(close)
+
+        lelex = self._lelec(high, low, close, open_, bars, length)
+
+        # ---- 阻力 / 支撑水平(持久台阶) ----
+        resistance = np.full(n, np.nan, dtype=np.float64)
+        support = np.full(n, np.nan, dtype=np.float64)
+        r = np.nan
+        s = np.nan
+        for i in range(n):
+            if close[i] < open_[i] and lelex[i] != 0.0:
+                r = high[i]
+            if close[i] > open_[i] and lelex[i] != 0.0:
+                s = low[i]
+            resistance[i] = r
+            support[i] = s
+
+        # 段与段之间断开：水平线换位时当前 bar 已是新值，把**上一段的最后一个
+        # 点**设为 NaN，引擎就会在缺口处断线，不会画出一条斜的连接线。
+        for i in range(1, n):
+            if resistance[i] != resistance[i - 1]:
+                resistance[i - 1] = np.nan
+            if support[i] != support[i - 1]:
+                support[i - 1] = np.nan
+
+        long_sig = np.where(lelex == 1.0, 1.0, 0.0)
+        short_sig = np.where(lelex == -1.0, 1.0, 0.0)
+        if not show_exh:
+            long_sig = np.zeros(n, dtype=np.float64)
+            short_sig = np.zeros(n, dtype=np.float64)
+        if not show_lvl:
+            resistance = np.full(n, np.nan, dtype=np.float64)
+            support = np.full(n, np.nan, dtype=np.float64)
+
+        return resistance, support, lelex, long_sig, short_sig
+
+
+class SMTDivergences(BtIndicator):
+    """SMT Divergences [LuxAlgo] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/ecEI56ff-SMT-Divergences-LuxAlgo/
+        © LuxAlgo, CC BY-NC-SA 4.0
+
+    概述
+    ----
+    **SMT(Smart Money Technique)背离**: 将本合约的 Swing 高/低点与
+    其他对比合约的 Swing 高/低点对齐, 若两者向 **相反方向** 走出新高/新低,
+    则标记为 SMT 背离(暗含机构诱导/分歧)。
+
+    ⚠ 与 `request.security` 的差异
+    ----
+    minibt 无 `request.security`, 故对比合约通过参数传入 **KLine 对象**:
+    ``kline.tradingview.SMTDivergences(sym1=other_kline, sym2=other_kline2)``;
+    未传则跳过该对比(只做 Swing 检测)。两侧数据按 **时间轴对齐**（找不到同一根
+    时间戳置 NaN）; 两边时间轴取不到时才退回**尾部对齐**。策略里一样能传:
+    ``self.xx = self.kline.tradingview.SMTDivergences(sym1=self.other)`` ✓
+
+    计算(Pine 逐行对齐)
+    ----
+    1. ``ph = fixnan(ta.pivothigh(length,length))``, ``pl`` 同理
+    2. ``get_divergence(ph, y2, sym_y2, css)``(状态机):
+       - 当本合约与对比合约 **同时出现新 pivot**
+         (``y2 != y2[1] and sym_y2 != sym_y2[1]``)时:
+         若 ``(y2-y1)*(sym_y2-sym_y1) < 0`` → SMT 背离,
+         连线 ``(n[length], y2) <- (x1, y1)`` 并计数 ``smt += 1``;
+         随后更新 ``y1/sym_y1/x1``
+       - 否则若本合约为新高/新低
+         (``(ph and y2>y2[1]) or (not ph and y2<y2[1])``)→ 重置 ``sym_y1=na``
+    3. 背离标签: 新高/新低 bar 上, 若某对比合约的 smt 计数递增,
+       则显示该合约 ticker(多个用 ``" | "`` 拼接)
+
+    参数
+    ----
+    length     : Pivot Lookback(默认 3)
+    use_sym1 / sym1 : 是否启用对比合约 1 / 对比合约 KLine(默认 None)
+    use_sym2 / sym2 : 对比合约 2
+    bull_color / bear_color : Swing High / Low 颜色(默认 #ff1100 / #2157f3)
+    show_dash  : 是否输出统计(保留参数, 以数据列代替表格)
+
+    输出 lines(主图叠加)
+    ----
+    - pivot_high / pivot_low : fixnan 后的 Swing 高/低位。**不传对比合约时**
+      会画出(红/蓝色虚线 step 线); 传了对比合约则仅作数据列。
+    - div_high / div_low  : SMT 背离连线(前一 pivot -> 当前 pivot)
+    - smt_high / smt_low  : 背离累计计数(仅数据)
+    - div_high_tag / div_low_tag : 背离来源标记(1=sym1,2=sym2,3=both, 仅数据)
+    - long_signal / short_signal : Swing Low / High 背离信号(逐点 ticker 文本)
+
+    ⚠ 未复现
+    ----
+    - 右上角统计表(``table``)未复现, 以 ``smt_high``/``smt_low`` 数据列代替。
+    - 原码背离为 ``line.new`` 斜线, 本实现以折线插值近似。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('pivot_high', 'pivot_low', 'div_high', 'div_low',
+             'smt_high', 'smt_low', 'div_high_tag', 'div_low_tag',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        length=3,
+        use_sym1=True,
+        sym1=None,
+        use_sym2=True,
+        sym2=None,
+        bull_color='#ff1100',
+        bear_color='#2157f3',
+        show_dash=False,
+    )
+    isplot = dict(pivot_high=True, pivot_low=True,
+                  div_high=True, div_low=True,
+                  smt_high=False, smt_low=False,
+                  div_high_tag=False, div_low_tag=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 bullDivCss=#ff1100(高) / bearDivCss=#2157f3(低)
+        div_high=LineStyle(line_color='#ff1100', line_width=1.5),
+        div_low=LineStyle(line_color='#2157f3', line_width=1.5),
+        # 没有对比合约时至少画出本合约的 Swing 高低点(step 线, 细虚线)
+        pivot_high=LineStyle(line_color='#ff1100', line_width=1.0,
+                             line_dash=LineDash.dashed),
+        pivot_low=LineStyle(line_color='#2157f3', line_width=1.0,
+                            line_dash=LineDash.dashed),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#2157f3', 'triangle', True, True, 11),
+        short_signal=SignalStyle(
+            'high', '#ff1100', 'inverted_triangle', True, True, 11),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pivot(src, length: int, mode: str) -> np.ndarray:
+        """Pine ``ta.pivothigh/pivotlow``: 在确认 bar (pivot+length) 上返回极值。"""
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        s = pd.Series(src)
+        if mode == 'high':
+            left = s.rolling(length).max().shift(1).to_numpy()
+            right = s.rolling(length).max().shift(-length).to_numpy()
+            mask = (src > left) & (src > right)
+        else:
+            left = s.rolling(length).min().shift(1).to_numpy()
+            right = s.rolling(length).min().shift(-length).to_numpy()
+            mask = (src < left) & (src < right)
+        out = np.full(n, np.nan, dtype=np.float64)
+        for b in np.where(mask)[0]:
+            if b + length < n:
+                out[b + length] = src[b]
+        return out
+
+    @staticmethod
+    def _ffill(a) -> np.ndarray:
+        return pd.Series(np.asarray(a, dtype=np.float64)).ffill().to_numpy()
+
+    @staticmethod
+    def _changed(cur, prev) -> bool:
+        return (not np.isnan(cur)) and (not np.isnan(prev)) and (cur != prev)
+
+    @staticmethod
+    def _draw_seg(arr, x1, y1, x2, y2):
+        if x1 is None or np.isnan(x1) or np.isnan(y1):
+            return
+        x1, x2 = int(x1), int(x2)
+        if x2 > x1:
+            step = (y2 - y1) / float(x2 - x1)
+            for k in range(x1, x2 + 1):
+                arr[k] = y1 + step * (k - x1)
+        elif x2 == x1:
+            arr[x2] = y2
+
+    @classmethod
+    def _divergence(cls, state, ph_bool, y2, y2_prev, sym_y2, sym_y2_prev,
+                    bar, length):
+        """Pine ``get_divergence``: 返回 (new_state, 计数增量, 连线或 None)。"""
+        y1, sym_y1, x1 = state
+        inc, seg = 0, None
+        if cls._changed(y2, y2_prev) and cls._changed(sym_y2, sym_y2_prev):
+            if (not np.isnan(y1)) and (not np.isnan(sym_y1)) \
+                    and (y2 - y1) * (sym_y2 - sym_y1) < 0:
+                inc = 1
+                seg = (x1, y1, bar - length, y2)
+            sym_y1 = sym_y2
+            y1 = y2
+            x1 = bar - length
+        elif ((ph_bool and cls._changed(y2, y2_prev) and y2 > y2_prev)
+              or ((not ph_bool) and cls._changed(y2, y2_prev)
+                  and y2 < y2_prev)):
+            sym_y1 = np.nan
+            y1 = y2
+            x1 = bar - length
+        return [y1, sym_y1, x1], inc, seg
+
+    @staticmethod
+    def _sym_index(sym):
+        """对比合约的 ``datetime`` 索引（缓存在对象上，避免每次重算都重建 ✓）。"""
+        cached = getattr(sym, '_smt_div_index', None)
+        if cached is not None:
+            return cached
+        try:
+            frame = sym.pandas_object
+            index = pd.DatetimeIndex(pd.to_datetime(frame['datetime']))
+        except Exception:                                        # noqa: BLE001
+            index = None
+        try:
+            sym._smt_div_index = index
+        except Exception:                                        # noqa: BLE001
+            pass
+        return index
+
+    @classmethod
+    def _sym_hl(cls, sym, n: int, times=None):
+        """对比合约的 high/low，**优先按时间轴对齐**（对不上再尾部对齐兜底 ✓）。
+
+        ⚠ 以前只按**位置**取尾部 ``h[-n:]``：两侧根数不一致（``data_length``
+        不同 / 停牌 / 起始日不同）时会整体错位 —— 背离判定建立在这种错位上就
+        完全不可信了 ✗。两边时间轴相同时与老行为**完全相同** ✓。
+        """
+        if sym is None:
+            return None
+        try:
+            h = np.asarray(sym.high, dtype=np.float64)
+            l = np.asarray(sym.low, dtype=np.float64)
+        except Exception:                                        # noqa: BLE001
+            return None
+        m = len(h)
+        if m == 0:
+            return None
+        # ① 按**时间**对齐（首选 ✓）：根数不同也不会错位
+        if times is not None:
+            try:
+                want = pd.DatetimeIndex(pd.to_datetime(times))
+                sym_index = cls._sym_index(sym)
+                if sym_index is not None and len(sym_index) == m:
+                    pos = sym_index.get_indexer(want)
+                    found = pos >= 0
+                    hh = np.where(found, h[pos.clip(min=0)], np.nan)
+                    ll = np.where(found, l[pos.clip(min=0)], np.nan)
+                    if len(hh) == len(want):
+                        return hh, ll
+            except Exception:                                    # noqa: BLE001
+                pass
+        # ② 兜底：尾部对齐（老行为 ✓）
+        if m >= n:
+            return h[-n:], l[-n:]
+        hh = np.full(n, np.nan, dtype=np.float64)
+        ll = np.full(n, np.nan, dtype=np.float64)
+        hh[n - m:] = h
+        ll[n - m:] = l
+        return hh, ll
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: SMT 背离来源合约 ticker
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        p = _params_of(self, SMTDivergences)
+
+        def _name(sym, default):
+            s = getattr(sym, 'symbol', None)
+            return str(s) if s else default
+        t1 = _name(p.get('sym1'), 'Sym1')
+        t2 = _name(p.get('sym2'), 'Sym2')
+        tag_h = np.asarray(self.div_high_tag.values, dtype=np.float64)
+        tag_l = np.asarray(self.div_low_tag.values, dtype=np.float64)
+        if not (np.any(tag_h > 0) or np.any(tag_l > 0)):
+            return None
+
+        def _fmt(tag):
+            arr = np.full(tag.shape[0], np.nan, dtype=object)
+            for i in np.where(tag > 0)[0]:
+                v = int(round(tag[i]))
+                names = []
+                if v in (1, 3):
+                    names.append(t1)
+                if v in (2, 3):
+                    names.append(t2)
+                arr[i] = ' | '.join(names)
+            return arr
+        return {'long_signal': _fmt(tag_l), 'short_signal': _fmt(tag_h)}
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        length = max(2, int(p.length))
+        use1 = bool(p.use_sym1)
+        use2 = bool(p.use_sym2)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        n = len(high)
+
+        ph = self._ffill(self._pivot(high, length, 'high'))
+        pl = self._ffill(self._pivot(low, length, 'low'))
+
+        # ---- 主图时间轴（把对比合约按**时间**对齐用 ✓）----
+        times = None
+        try:
+            _source = getattr(getattr(self, '_dataset', None),
+                              'source_object', None)
+            if _source is not None:
+                _t = pd.to_datetime(_source.pandas_object['datetime'])
+                if len(_t) >= n:
+                    times = _t.to_numpy()[-n:]
+        except Exception:                                        # noqa: BLE001
+            times = None
+
+        # ---- 对比合约高点/低点 pivot ----
+        sym_data = []
+        if use1:
+            hl = self._sym_hl(p.sym1, n, times)
+            if hl is not None:
+                sym_data.append((
+                    1, self._ffill(self._pivot(hl[0], length, 'high')),
+                    self._ffill(self._pivot(hl[1], length, 'low'))))
+        if use2:
+            hl = self._sym_hl(p.sym2, n, times)
+            if hl is not None:
+                sym_data.append((
+                    2, self._ffill(self._pivot(hl[0], length, 'high')),
+                    self._ffill(self._pivot(hl[1], length, 'low'))))
+
+        div_high = np.full(n, np.nan, dtype=np.float64)
+        div_low = np.full(n, np.nan, dtype=np.float64)
+        tag_high = np.zeros(n, dtype=np.float64)
+        tag_low = np.zeros(n, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        smt_h = {k: np.zeros(n, dtype=np.float64) for k, *_ in sym_data}
+        smt_l = {k: np.zeros(n, dtype=np.float64) for k, *_ in sym_data}
+        st_ph = {k: [np.nan, np.nan, np.nan] for k, *_ in sym_data}
+        st_pl = {k: [np.nan, np.nan, np.nan] for k, *_ in sym_data}
+        cnt_h = {k: 0 for k, *_ in sym_data}
+        cnt_l = {k: 0 for k, *_ in sym_data}
+
+        for i in range(n):
+            ph_prev = ph[i - 1] if i > 0 else np.nan
+            pl_prev = pl[i - 1] if i > 0 else np.nan
+            for k, sph, spl in sym_data:
+                sph_prev = sph[i - 1] if i > 0 else np.nan
+                spl_prev = spl[i - 1] if i > 0 else np.nan
+                st_ph[k], inc, seg = self._divergence(
+                    st_ph[k], True, ph[i], ph_prev, sph[i], sph_prev, i, length)
+                cnt_h[k] += inc
+                smt_h[k][i] = cnt_h[k]
+                if seg is not None:
+                    self._draw_seg(div_high, seg[0], seg[1], seg[2], seg[3])
+                st_pl[k], inc2, seg2 = self._divergence(
+                    st_pl[k], False, pl[i], pl_prev, spl[i], spl_prev, i, length)
+                cnt_l[k] += inc2
+                smt_l[k][i] = cnt_l[k]
+                if seg2 is not None:
+                    self._draw_seg(div_low, seg2[0], seg2[1], seg2[2], seg2[3])
+
+            # ---- 背离标签(新高 / 新低 bar) ----
+            if self._changed(ph[i], ph_prev):
+                tag = 0
+                for k, sph, spl in sym_data:
+                    if i > 0 and smt_h[k][i] > smt_h[k][i - 1]:
+                        tag |= k
+                if tag:
+                    tag_high[i] = float(tag)
+                    short_sig[i] = 1.0
+            elif self._changed(pl[i], pl_prev):
+                tag = 0
+                for k, sph, spl in sym_data:
+                    if i > 0 and smt_l[k][i] > smt_l[k][i - 1]:
+                        tag |= k
+                if tag:
+                    tag_low[i] = float(tag)
+                    long_sig[i] = 1.0
+
+        total_h = np.zeros(n, dtype=np.float64)
+        total_l = np.zeros(n, dtype=np.float64)
+        for k, *_ in sym_data:
+            total_h += smt_h[k]
+            total_l += smt_l[k]
+
+        return (ph, pl, div_high, div_low, total_h, total_l,
+                tag_high, tag_low, long_sig, short_sig)
+
+
+class PMaxOnRsiT3(BtIndicator):
+    """PMax on Rsi w T3 (KivancOzbilgic) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4):
+        https://cn.tradingview.com/script/lCJEeEkj/
+        © KivancOzbilgic, MPL 2.0
+
+    概述
+    ----
+    在 **自定义 RSI** 上叠一层 **Tillson T3** 平滑得到支撑线, 再用 ATR 构造
+    **PMax 跟踪止损线**, 两者交叉即买卖信号; RSI 与 PMax 之间按多/空填充高亮。
+
+    计算(Pine 逐行对齐)
+    ----
+    1. 涨跌量 ``i = close>=close[1] ? close-close[1] : 0``,
+       ``i2 = close<close[1] ? close[1]-close : 0``
+    2. ``Wwma_Func(src,n)``: ``alpha=1/n``,
+       ``WWMA := alpha*src + (1-alpha)*nz(WWMA[1])``(以 0 播种)
+       ``AvUp/AvDown = Wwma_Func(i/i2, rsilength)``
+    3. ``AvgUp/AvgDown = sma(i/i2, rsilength)``;
+       ``k1..k4`` 为 high/low 相对 ``close[1]`` 的正负差;
+       ``AvgUpH/AvgDownH/AvgUpL/AvgDownL = (Avg*(n-1)+k)/n``
+    4. ``rsi = 100-100/(1+AvUp/AvDown)``; ``rsih``/``rsil`` 同理用 H/L 版
+    5. ``TR = max(rsih-rsil, |rsih-rsi[1]|, |rsil-rsi[1]|)``;
+       ``atr = sma(TR, Periods)``
+    6. ``T3``: 对 ``rsi`` 连做 6 次 ``ema(length)``得到 e1..e6,
+       ``T3 = c1*e6 + c2*e5 + c3*e4 + c4*e3``
+       (``c1=-a^3``, ``c2=3a^2+3a^3``, ``c3=-6a^2-3a-3a^3``,
+        ``c4=1+3a+a^3+3a^2``) → ``MAvg``
+    7. ``PMax``: ``longStop = MAvg - mult*atr`` / ``shortStop = MAvg + mult*atr``
+       的跟踪止损(单向棘轮 + ``dir`` 翻转)
+    8. 信号: ``crossover(MAvg, PMax)`` 买入 / ``crossunder`` 卖出
+
+    参数
+    ----
+    - source : 源价格(默认 'hl2')
+    - multiplier / atr_length : PMax 的 ATR 倍数 / 周期(默认 3 / 10)
+    - t3_length / t3_factor   : Tillson T3 长度 / 体积因子(默认 8 / 0.7)
+    - rsi_length : RSI 周期(默认 14)
+    - show_rsi / show_support / show_signals / highlighting : 显示开关
+
+    输出 lines(副图)
+    ----
+    - rsi         : 自定义 RSI(#8E1599)
+    - t3          : T3 支撑线(黑, 线宽 2)
+    - pmax        : PMax 跟踪止损线(红, 线宽 2)
+    - upper / lower : 70 / 30 参考水平线(灰色, 中间紫色填充)
+    - rsi_up/pmax_up, rsi_dn/pmax_dn : 高亮填充边界(透明, 绿/红)
+    - long_signal / short_signal : MAvg 上穿/下穿 PMax 信号(Buy / Sell)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 T3 系数为手工展开多项式, 此处直接按原码公式计算。
+    - 高亮填充颜色随多/空动态变化, 以两组静态色带近似。
+    - 信号标签: 绿底白字 "Buy" / 红底白字 "Sell", 画在指标自己的副图
+      （``overlap=False``）, 锚在 ``PMax`` 线上、用像素偏移（``offset_y=±7``）
+      近似原码的 ``PMax*0.995 / PMax*1.005``。
+    - ``alertcondition`` 告警未复现。
+    """
+    lines = ('rsi', 't3', 'pmax', 'upper', 'lower',
+             'rsi_up', 'pmax_up', 'rsi_dn', 'pmax_dn',
+             'long_signal', 'short_signal')
+    category = 'momentum'
+    overlap = False
+    params = dict(
+        source='hl2',
+        multiplier=1.0,
+        t3_length=8,
+        t3_factor=0.7,
+        atr_length=10,
+        rsi_length=14,
+        show_rsi=True,
+        show_support=True,
+        show_signals=True,
+        highlighting=True,
+    )
+    isplot = dict(rsi=True, t3=True, pmax=True, upper=True, lower=True,
+                  rsi_up=True, pmax_up=True, rsi_dn=True, pmax_dn=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 plot(rsi, color=#8E1599) / T3 黑线宽 2 / PMax 红线宽 2
+        rsi=LineStyle(line_color='#8E1599', line_width=1.3),
+        t3=LineStyle(line_color='#000000', line_width=2.0),
+        pmax=LineStyle(line_color='#ff0000', line_width=2.0),
+        # 原码 hline(70)/hline(30) color=#C0C0C0
+        upper=LineStyle(line_color='#C0C0C0', line_width=1.0),
+        lower=LineStyle(line_color='#C0C0C0', line_width=1.0),
+        # 高亮填充边界透明
+        rsi_up=LineStyle(line_color='#00000000', line_width=1.0),
+        pmax_up=LineStyle(line_color='#00000000', line_width=1.0),
+        rsi_dn=LineStyle(line_color='#00000000', line_width=1.0),
+        pmax_dn=LineStyle(line_color='#00000000', line_width=1.0),
+    )
+    # 原码 fill(band1,band0,color=#9915FF,transp=90) +
+    # fill(mPlot,pALL, 多绿 / 空红)
+    bandstyle = [
+        BandStyle(lower='lower', upper='upper',
+                  fill_color='#9915FF', fill_alpha=0.10),
+        BandStyle(lower='rsi_up', upper='pmax_up',
+                  fill_color='#00ff00', fill_alpha=0.20),
+        BandStyle(lower='rsi_dn', upper='pmax_dn',
+                  fill_color='#ff0000', fill_alpha=0.20),
+        BandStyle(lower='t3', upper='pmax',
+                  fill_color="#6dbfd8", fill_alpha=0.20),
+    ]
+    # 原码两个 plotshape 都是 labelup/labeldown 标签框：绿底白字 "Buy" /
+    # 红底白字 "Sell"，锚在 PMax 下方/上方（PMax*0.995 / PMax*1.005）。
+    # 三个要点缺一个就会“跑错地方/没样式”:
+    #   * 锚点用 PMax 线本身（不是 K 线 low/high）—— 副图是 0~100 的 RSI 轴,
+    #     拿 K 线价（几千）锚会跑到图外;
+    #   * `overlap=False` 把信号画在**指标自己的副图**（原码 study overlay=false）;
+    #   * `set_label + set_text_style` 才是绿/红底白字的标签框, 且两个图表引擎
+    #     共用这一套样式（不写 text_style 就只剩个灰色默认框）。
+    # 原码的 0.5% 价格偏移用像素偏移（offset_y=±7）近似。
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'pmax', Colors.green, Markers.triangle, False, True, 13
+        ).set_label('Buy').set_text_style(
+            text_color='white', font_size=10, offset_y=7,
+            background_fill_color=Colors.green, background_fill_alpha=1.0,
+            border_line_color=Colors.green, border_line_width=1.0),
+        short_signal=SignalStyle(
+            'pmax', Colors.red, Markers.inverted_triangle, False, True, 13
+        ).set_label('Sell').set_text_style(
+            text_color='white', font_size=10, offset_y=-7,
+            background_fill_color=Colors.red, background_fill_alpha=1.0,
+            border_line_color=Colors.red, border_line_width=1.0),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wwma(src, n: int) -> np.ndarray:
+        """Pine ``Wwma_Func``: alpha=1/n, 以 0 播种。"""
+        src = np.asarray(src, dtype=np.float64)
+        out = np.full(len(src), np.nan, dtype=np.float64)
+        alpha = 1.0 / float(n)
+        prev = 0.0
+        for i in range(len(src)):
+            x = src[i]
+            if np.isnan(x):
+                out[i] = prev
+                continue
+            prev = alpha * x + (1.0 - alpha) * prev
+            out[i] = prev
+        return out
+
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 对齐原码 plotshape 的 "Buy"/"Sell"
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _map(line, txt):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            arr[vals > 0] = txt
+            return arr
+        return {
+            'long_signal': _map(self.long_signal, 'Buy'),
+            'short_signal': _map(self.short_signal, 'Sell'),
+        }
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        mult = float(p.multiplier)
+        t3_len = max(1, int(p.t3_length))
+        a1 = float(p.t3_factor)
+        atr_len = max(1, int(p.atr_length))
+        rsi_len = max(1, int(p.rsi_length))
+        show_rsi = bool(p.show_rsi)
+        show_support = bool(p.show_support)
+        show_signals = bool(p.show_signals)
+        highlighting = bool(p.highlighting)
+
+        src_name = str(p.source)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        if src_name == 'hl2':
+            src = (high + low) / 2.0
+        elif src_name == 'hlc3':
+            src = (high + low + close) / 3.0
+        elif src_name == 'close':
+            src = close
+        elif src_name == 'open':
+            src = np.asarray(self.open, dtype=np.float64)
+        elif src_name == 'high':
+            src = high
+        elif src_name == 'low':
+            src = low
+        else:
+            src = np.asarray(getattr(self, src_name), dtype=np.float64)
+        n = len(src)
+
+        # ---- 自定义 RSI ----
+        c_prev = self._shift(close, 1)
+        i_up = np.where(close >= c_prev, close - c_prev, 0.0)
+        i_dn = np.where(close < c_prev, c_prev - close, 0.0)
+        av_up = self._wwma(i_up, rsi_len)
+        av_dn = self._wwma(i_dn, rsi_len)
+        avg_up = self._sma(i_up, rsi_len)
+        avg_dn = self._sma(i_dn, rsi_len)
+        k1 = np.where(high > c_prev, high - c_prev, 0.0)
+        k2 = np.where(high < c_prev, c_prev - high, 0.0)
+        k3 = np.where(low > c_prev, low - c_prev, 0.0)
+        k4 = np.where(low < c_prev, c_prev - low, 0.0)
+        avg_uph = (avg_up * (rsi_len - 1) + k1) / rsi_len
+        avg_dnh = (avg_dn * (rsi_len - 1) + k2) / rsi_len
+        avg_upl = (avg_up * (rsi_len - 1) + k3) / rsi_len
+        avg_dnl = (avg_dn * (rsi_len - 1) + k4) / rsi_len
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rs = av_up / av_dn
+            rsi = np.where(rs == -1.0, 0.0, 100.0 - 100.0 / (1.0 + rs))
+            rsh = avg_uph / avg_dnh
+            rsih = np.where(rsh == -1.0, 0.0, 100.0 - 100.0 / (1.0 + rsh))
+            rsl = avg_upl / avg_dnl
+            rsil = np.where(rsl == -1.0, 0.0, 100.0 - 100.0 / (1.0 + rsl))
+
+        rsi_prev = self._shift(rsi, 1)
+        tr = np.maximum(
+            np.maximum(rsih - rsil, np.abs(rsih - rsi_prev)),
+            np.abs(rsil - rsi_prev))
+        atr = self._sma(tr, atr_len)
+
+        # ---- Tillson T3 ----
+        e1 = QQESignals._ema(rsi, t3_len)
+        e2 = QQESignals._ema(e1, t3_len)
+        e3 = QQESignals._ema(e2, t3_len)
+        e4 = QQESignals._ema(e3, t3_len)
+        e5 = QQESignals._ema(e4, t3_len)
+        e6 = QQESignals._ema(e5, t3_len)
+        c1 = -a1 * a1 * a1
+        c2 = 3.0 * a1 * a1 + 3.0 * a1 * a1 * a1
+        c3 = -6.0 * a1 * a1 - 3.0 * a1 - 3.0 * a1 * a1 * a1
+        c4 = 1.0 + 3.0 * a1 + a1 * a1 * a1 + 3.0 * a1 * a1
+        mavg = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
+
+        # ---- PMax 跟踪止损 ----
+        long_stop = mavg - mult * atr
+        short_stop = mavg + mult * atr
+        pmax = np.full(n, np.nan, dtype=np.float64)
+        d = 1
+        prev_l = np.nan
+        prev_s = np.nan
+        for i in range(n):
+            ma = mavg[i]
+            if np.isnan(ma):
+                continue
+            pl = long_stop[i] if np.isnan(prev_l) else prev_l
+            ls = max(long_stop[i], pl) if ma > pl else long_stop[i]
+            ps = short_stop[i] if np.isnan(prev_s) else prev_s
+            ss = min(short_stop[i], ps) if ma < ps else short_stop[i]
+            if d == -1 and ma > ps:
+                d = 1
+            elif d == 1 and ma < pl:
+                d = -1
+            pmax[i] = ls if d == 1 else ss
+            prev_l = ls
+            prev_s = ss
+
+        # ---- 信号 ----
+        mavg_prev = self._shift(mavg, 1)
+        pmax_prev = self._shift(pmax, 1)
+        long_sig = ((mavg_prev < pmax_prev) & (mavg > pmax)).astype(np.float64)
+        short_sig = ((mavg_prev > pmax_prev) & (
+            mavg < pmax)).astype(np.float64)
+        if not show_signals:
+            long_sig = np.zeros(n, dtype=np.float64)
+            short_sig = np.zeros(n, dtype=np.float64)
+
+        # ---- 高亮填充边界(多绿 / 空红) ----
+        up = mavg > pmax
+        rsi_up = np.where(up, rsi, np.nan)
+        pmax_up = np.where(up, pmax, np.nan)
+        rsi_dn = np.where(~up, rsi, np.nan)
+        pmax_dn = np.where(~up, pmax, np.nan)
+        for i in range(1, n):
+            if up[i] != up[i - 1]:
+                rsi_up[i] = rsi_dn[i] = rsi[i]
+                pmax_up[i] = pmax_dn[i] = pmax[i]
+        if not highlighting:
+            for arr in (rsi_up, pmax_up, rsi_dn, pmax_dn):
+                arr[:] = np.nan
+
+        if not show_rsi:
+            rsi = np.full(n, np.nan, dtype=np.float64)
+        if not show_support:
+            mavg = np.full(n, np.nan, dtype=np.float64)
+        upper = np.full(n, 70.0, dtype=np.float64)
+        lower = np.full(n, 30.0, dtype=np.float64)
+
+        return (rsi, mavg, pmax, upper, lower,
+                rsi_up, pmax_up, rsi_dn, pmax_dn,
+                long_sig, short_sig)
+
+
+class RSIDivergenceStrategy(BtIndicator):
+    """RSI Divergence Indicator (strategy) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4 strategy):
+        https://cn.tradingview.com/script/qSLcZSyw-RSI-Divergence-Indicator-strategy/
+        (经典的 RSI 背离策略: 常规/隐藏 看涨看跌 四类背离)
+
+    概述
+    ----
+    在 **RSI** 上用 pivot(左 lbL / 右 lbR) 检测 Swing, 比较相邻两个 Swing 的
+    RSI 与价格位置, 给出四类背离:
+
+    - 常规看涨（Regular Bullish）: 价格更低低点 + RSI 更高低点
+    - 隐藏看涨（Hidden Bullish）: 价格更高低点 + RSI 更低低点
+    - 常规看跌（Regular Bearish）: 价格更高高点 + RSI 更低高点
+    - 隐藏看跌（Hidden Bearish）: 价格更低高点 + RSI 更高高点
+
+    两个 pivot 之间的距离必须落在 ``[rangeLower, rangeUpper]``（原码 ``_inRange``
+    基于 ``barssince(plFound[1])``）。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``osc = rsi(src, len)``; ``plFound = not na(pivotlow(osc,lbL,lbR))``,
+      ``phFound`` 同理
+    - ``valuewhen(plFound, osc[lbR], 1)`` = 上一个 pivot 低点的 RSI
+    - 看涨判定: ``oscHL/oscLL`` + ``priceLL/priceHL`` + ``plFound``;
+      看跌判定同理用 ``phFound``
+    - 策略: ``longCondition = bullCond or hiddenBullCond``;
+      止盈: ``crossover(osc, takeProfitRSILevel) or bearCond``;
+      跟踪止损: ``sl_val = ATR ? stopLoss*atr(atrLength) : PERC ? close*stopLoss/100 : 0``,
+      ``trailing_sl = max(low - sl_val, nz(trailing_sl[1]))`` (仅在持仓时)
+
+    交易逻辑(见 ``step``)
+    ----
+    在多头侧(原码 ``strategy.entry/close``)基础上**对称增加空头侧**, 且**不加仓**,
+    每次固定 ``qty`` 手(默认 1):
+
+    - 多头: 空仓 + 看涨背离 → ``buy(size=qty)``;
+      持仓且(``sl_type=='NONE'`` 时 RSI 上穿 ``take_profit_rsi`` 或 看跌背离 |
+      否则 ``close`` 下穿多头跟踪止损) → 平多
+    - 空头: 空仓 + 看跌背离 → ``sell(size=qty)``;
+      持仓且(``sl_type=='NONE'`` 时 RSI 下穿 ``take_profit_rsi_short`` 或 看涨背离 |
+      否则 ``close`` 上穿空头跟踪止损) → 平空
+    - 平仓当根若反向入场信号同时成立则直接反手(多→空 / 空→多)
+
+    参数
+    ----
+    len / src : RSI 周期 / 源(默认 9 / 'close')
+    lbL / lbR : pivot 左/右回看(默认 1 / 3)
+    take_profit_rsi : 止盈 RSI 水平(默认 80)
+    take_profit_rsi_short : 空头止盈 RSI 水平(默认 20)
+    range_lower / range_upper : 两个 pivot 的最小/最大距离(默认 5 / 60)
+    plot_bull / plot_hidden_bull / plot_bear / plot_hidden_bear : 背离显示开关
+    sl_type : 'NONE' / 'PERC' / 'ATR'(默认 'NONE')
+    stop_loss / atr_length / atr_multiplier : 止损参数
+    qty : 每笔手数(默认 1, 不加仓)
+
+    输出 lines(副图)
+    ----
+    - osc / upper / lower / middle : RSI / 70 / 30 / 50(70↔30 紫色填充)
+    - bull_div / hidden_bull_div / bear_div / hidden_bear_div : 背离连线
+    - trailing_sl / trailing_sl_short : 多头/空头跟踪止损位(价格量纲, 仅数据)
+    - long_signal / short_signal : 看涨 / 看跌背离(1=Regular, 2=Hidden)
+    - exitlong_signal / exitshort_signal : 平多 / 平空信号
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``offset=-lbR`` 将背离标记画在 pivot bar; 本实现将信号放在确认 bar
+      (策略触发 bar 与原码一致), 并额外用 ``*_div`` 连线呈现背离区间。
+    - 价格 K 线量与跟踪止损在同一副图, 跟踪止损未绘图(仅数据)。
+    - 空头侧为在原码多头逻辑上的**对称扩展**(原码只做多)。
+    - 手续费等未复现。
+    """
+    lines = ('osc', 'upper', 'lower', 'middle',
+             'bull_div', 'hidden_bull_div', 'bear_div', 'hidden_bear_div',
+             'trailing_sl', 'trailing_sl_short',
+             'long_signal', 'short_signal',
+             'exitlong_signal', 'exitshort_signal')
+    category = 'momentum'
+    overlap = False
+    params = dict(
+        len=9,
+        src='close',
+        lbL=1,
+        lbR=3,
+        take_profit_rsi=80,
+        take_profit_rsi_short=20,
+        range_lower=5,
+        range_upper=60,
+        plot_bull=True,
+        plot_hidden_bull=True,
+        plot_bear=True,
+        plot_hidden_bear=False,
+        sl_type='NONE',
+        stop_loss=5,
+        atr_length=14,
+        atr_multiplier=3.5,
+        qty=1,
+    )
+    isplot = dict(osc=True, upper=True, lower=True, middle=True,
+                  bull_div=True, hidden_bull_div=True,
+                  bear_div=True, hidden_bear_div=True,
+                  trailing_sl=False, trailing_sl_short=False,
+                  long_signal=False, short_signal=False,
+                  exitlong_signal=False, exitshort_signal=False)
+    linestyle = dict(
+        osc=LineStyle(line_color='#8D1699', line_width=2.0),
+        upper=LineStyle(line_color='#C0C0C0', line_width=1.0,
+                        line_dash=LineDash.dotted),
+        lower=LineStyle(line_color='#C0C0C0', line_width=1.0,
+                        line_dash=LineDash.dotted),
+        middle=LineStyle(line_color='#C0C0C0', line_width=1.0,
+                         line_dash=LineDash.dotted),
+        # bullColor=green / hiddenBullColor=green@80 / bearColor=purple /
+        # hiddenBearColor=red@80
+        bull_div=LineStyle(line_color='#008000', line_width=2.0),
+        hidden_bull_div=LineStyle(line_color='#00800033', line_width=2.0),
+        bear_div=LineStyle(line_color='#800080', line_width=2.0),
+        hidden_bear_div=LineStyle(line_color='#ff000033', line_width=2.0),
+    )
+    # 原码 fill(obLevel, osLevel, color=#9915FF, transp=90)
+    bandstyle = [
+        BandStyle(lower='lower', upper='upper',
+                  fill_color='#9915FF', fill_alpha=0.10),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#008000', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#800080', 'inverted_triangle', True, True, 12),
+        exitlong_signal=SignalStyle(
+            'high', '#9E9E9E', 'circle_x', True, True, 10),
+        exitshort_signal=SignalStyle(
+            'low', '#9E9E9E', 'circle_x', True, True, 10),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: Bull / H Bull / Bear / H Bear
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict:
+        def _fmt(line, m):
+            vals = np.asarray(line.values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = m.get(int(round(vals[i])), '')
+            return arr
+        return {
+            'long_signal': _fmt(self.long_signal, {1: 'Bull', 2: 'H Bull'}),
+            'short_signal': _fmt(self.short_signal,
+                                 {1: 'Bear', 2: 'H Bear'}),
+            'exitlong_signal': _fmt(self.exitlong_signal, {1: 'Exit'}),
+            'exitshort_signal': _fmt(self.exitshort_signal, {1: 'Exit'}),
+        }
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+    @staticmethod
+    def _pivot(src, lbL: int, lbR: int, mode: str) -> np.ndarray:
+        """Pine ``pivotlow/pivothigh``: 在确认 bar 返回 pivot 值, 否则 NaN。"""
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        s = pd.Series(src)
+        if mode == 'high':
+            left = s.rolling(lbL).max().shift(1).to_numpy()
+            right = s.rolling(lbR).max().shift(-lbR).to_numpy()
+            mask = (src > left) & (src > right)
+        else:
+            left = s.rolling(lbL).min().shift(1).to_numpy()
+            right = s.rolling(lbR).min().shift(-lbR).to_numpy()
+            mask = (src < left) & (src < right)
+        out = np.full(n, np.nan, dtype=np.float64)
+        for b in np.where(mask)[0]:
+            if b + lbR < n:
+                out[b + lbR] = src[b]
+        return out
+
+    @staticmethod
+    def _valuewhen(cond, source, occ: int) -> np.ndarray:
+        """Pine ``valuewhen``: cond 为真的 bar 上的 source, 取 occ 次前(0=最新)。"""
+        cond = np.asarray(cond)
+        source = np.asarray(source, dtype=np.float64)
+        out = np.full(len(cond), np.nan, dtype=np.float64)
+        vals: list = []
+        for i in range(len(cond)):
+            if cond[i]:
+                vals.append(source[i])
+            idx = len(vals) - 1 - int(occ)
+            if idx >= 0:
+                out[i] = vals[idx]
+        return out
+
+    @staticmethod
+    def _barssince(cond) -> np.ndarray:
+        """Pine ``barssince``: 距上次 cond 为真的 bar 数, 从未发生为 NaN。"""
+        n = len(cond)
+        out = np.full(n, np.nan, dtype=np.float64)
+        last = -1
+        for i in range(n):
+            if cond[i]:
+                last = i
+            if last >= 0:
+                out[i] = i - last
+        return out
+
+    @staticmethod
+    def _draw_seg(arr, x1, y1, x2, y2):
+        x1, x2 = int(x1), int(x2)
+        if x2 > x1:
+            step = (y2 - y1) / float(x2 - x1)
+            for k in range(x1, x2 + 1):
+                arr[k] = y1 + step * (k - x1)
+        elif x2 == x1:
+            arr[x2] = y2
+
+    @staticmethod
+    def _wilder(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.rma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        length = max(2, int(p.len))
+        lbL = max(1, int(p.lbL))
+        lbR = max(1, int(p.lbR))
+        tp_lvl = float(p.take_profit_rsi)
+        r_low = float(p.range_lower)
+        r_up = float(p.range_upper)
+        sl_type = str(p.sl_type).upper()
+
+        src_name = str(p.src)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        if src_name == 'close':
+            src = close
+        elif src_name == 'hl2':
+            src = (high + low) / 2.0
+        elif src_name == 'hlc3':
+            src = (high + low + close) / 3.0
+        else:
+            src = np.asarray(getattr(self, src_name), dtype=np.float64)
+        n = len(close)
+
+        osc = QQESignals._rsi(src, length)
+
+        # ---- pivot ----
+        pl_piv = self._pivot(osc, lbL, lbR, 'low')
+        ph_piv = self._pivot(osc, lbL, lbR, 'high')
+        pl_found = ~np.isnan(pl_piv)
+        ph_found = ~np.isnan(ph_piv)
+
+        def _inrange(found):
+            b = self._barssince(self._shift(found.astype(np.float64),
+                                            1) > 0.5)
+            return (b >= r_low) & (b <= r_up)
+
+        osc_lbR = self._shift(osc, lbR)
+        low_lbR = self._shift(low, lbR)
+        high_lbR = self._shift(high, lbR)
+        pl_osc_prev = self._valuewhen(pl_found, osc_lbR, 1)
+        pl_low_prev = self._valuewhen(pl_found, low_lbR, 1)
+        ph_osc_prev = self._valuewhen(ph_found, osc_lbR, 1)
+        ph_high_prev = self._valuewhen(ph_found, high_lbR, 1)
+        inr_pl = _inrange(pl_found)
+        inr_ph = _inrange(ph_found)
+
+        osc_hl = (osc_lbR > pl_osc_prev) & inr_pl
+        price_ll = low_lbR < pl_low_prev
+        osc_ll = (osc_lbR < pl_osc_prev) & inr_pl
+        price_hl = low_lbR > pl_low_prev
+        osc_lh = (osc_lbR < ph_osc_prev) & inr_ph
+        price_hh = high_lbR > ph_high_prev
+        osc_hh = (osc_lbR > ph_osc_prev) & inr_ph
+        price_lh = high_lbR < ph_high_prev
+
+        bull_cond = (bool(p.plot_bull) & price_ll & osc_hl & pl_found)
+        hidden_bull = (bool(p.plot_hidden_bull) & price_hl & osc_ll
+                       & pl_found)
+        bear_cond = (bool(p.plot_bear) & price_hh & osc_lh & ph_found)
+        hidden_bear = (bool(p.plot_hidden_bear) & price_lh & osc_hh
+                       & ph_found)
+
+        # ---- 背离连线(相邻 pivot 之间) ----
+        bull_div = np.full(n, np.nan, dtype=np.float64)
+        hidden_bull_div = np.full(n, np.nan, dtype=np.float64)
+        bear_div = np.full(n, np.nan, dtype=np.float64)
+        hidden_bear_div = np.full(n, np.nan, dtype=np.float64)
+        lows: list = []
+        highs: list = []
+        for i in range(n):
+            if pl_found[i]:
+                pb = i - lbR
+                if lows:
+                    p0 = lows[-1]
+                    if bull_cond[i]:
+                        self._draw_seg(bull_div, p0, osc[p0], pb, osc[pb])
+                    elif hidden_bull[i]:
+                        self._draw_seg(hidden_bull_div, p0, osc[p0],
+                                       pb, osc[pb])
+                lows.append(pb)
+            if ph_found[i]:
+                pb = i - lbR
+                if highs:
+                    p0 = highs[-1]
+                    if bear_cond[i]:
+                        self._draw_seg(bear_div, p0, osc[p0], pb, osc[pb])
+                    elif hidden_bear[i]:
+                        self._draw_seg(hidden_bear_div, p0, osc[p0],
+                                       pb, osc[pb])
+                highs.append(pb)
+
+        # ---- 信号 ----
+        long_sig = np.zeros(n, dtype=np.float64)
+        long_sig[bull_cond] = 1.0
+        long_sig[hidden_bull] = 2.0
+        short_sig = np.zeros(n, dtype=np.float64)
+        short_sig[bear_cond] = 1.0
+        short_sig[hidden_bear] = 2.0
+        long_cond = bull_cond | hidden_bull
+        osc_prev = self._shift(osc, 1)
+        long_close = (((osc_prev <= tp_lvl) & (osc > tp_lvl)) | bear_cond)
+
+        # ---- 跟踪止损(价格量纲, 仅数据) ----
+        atr = self._atr(high, low, close, int(p.atr_length))
+        stop_loss = float(p.stop_loss)
+        if sl_type == 'ATR':
+            sl_val = stop_loss * atr
+        elif sl_type == 'PERC':
+            sl_val = close * stop_loss / 100.0
+        else:
+            sl_val = np.zeros(n, dtype=np.float64)
+        trailing = np.full(n, np.nan, dtype=np.float64)
+        tsl_exit = np.zeros(n, dtype=np.float64)
+        in_pos = False
+        ts = np.nan
+        for i in range(n):
+            if long_cond[i] and not in_pos:
+                in_pos = True
+                ts = np.nan
+            if in_pos:
+                prev = 0.0 if np.isnan(ts) else ts
+                ts = max(low[i] - sl_val[i], prev)
+                trailing[i] = ts
+                cp = close[i - 1] if i > 0 else np.nan
+                tp = trailing[i - 1] if i > 0 else np.nan
+                if ((not np.isnan(cp)) and (not np.isnan(tp))
+                        and cp > tp and close[i] < ts):
+                    tsl_exit[i] = 1.0
+                    in_pos = False
+            else:
+                trailing[i] = np.nan
+
+        exit_sig = (long_close.astype(np.float64) if sl_type == 'NONE'
+                    else tsl_exit)
+
+        # ---- 空头(对称扩展): 跟踪止损在价格上方, 逐级下移 ----
+        tp_lvl_s = float(p.take_profit_rsi_short)
+        short_cond = bear_cond | hidden_bear
+        short_close = (((osc_prev >= tp_lvl_s) & (osc < tp_lvl_s))
+                       | bull_cond)
+        trailing_s = np.full(n, np.nan, dtype=np.float64)
+        tsl_s_exit = np.zeros(n, dtype=np.float64)
+        in_short = False
+        ts_s = np.nan
+        for i in range(n):
+            if short_cond[i] and not in_short:
+                in_short = True
+                ts_s = np.nan
+            if in_short:
+                cand = high[i] + sl_val[i]
+                ts_s = cand if np.isnan(ts_s) else min(cand, ts_s)
+                trailing_s[i] = ts_s
+                cp = close[i - 1] if i > 0 else np.nan
+                tp = trailing_s[i - 1] if i > 0 else np.nan
+                if ((not np.isnan(cp)) and (not np.isnan(tp))
+                        and cp < tp and close[i] > ts_s):
+                    tsl_s_exit[i] = 1.0
+                    in_short = False
+            else:
+                trailing_s[i] = np.nan
+        exit_s_sig = (short_close.astype(np.float64) if sl_type == 'NONE'
+                      else tsl_s_exit)
+
+        upper = np.full(n, 70.0, dtype=np.float64)
+        lower = np.full(n, 30.0, dtype=np.float64)
+        middle = np.full(n, 50.0, dtype=np.float64)
+
+        return (osc, upper, lower, middle,
+                bull_div, hidden_bull_div, bear_div, hidden_bear_div,
+                trailing, trailing_s, long_sig, short_sig,
+                exit_sig, exit_s_sig)
+
+    # ------------------------------------------------------------------
+    # 交易逻辑: 看涨背离做多 + (止盈/看跌背离 或 跟踪止损) 平仓
+    # ------------------------------------------------------------------
+    def step(self):
+        """RSI 背离策略交易逻辑(多头对齐原码, 空头为其对称扩展, 不加仓):
+
+        多头(原码 ``strategy.entry/close``):
+        - 空仓 + ``long_signal`` → ``buy(size=qty)``
+        - 持仓 + ``exitlong_signal``(``NONE``: RSI 上穿止盈 或 看跌背离;
+          否则 ``close`` 下穿 ``trailing_sl``) → 平多
+
+        空头(对称扩展):
+        - 空仓 + ``short_signal`` → ``sell(size=qty)``
+        - 持仓 + ``exitshort_signal``(``NONE``: RSI 下穿止盈 或 看涨背离;
+          否则 ``close`` 上穿 ``trailing_sl_short``) → 平空
+
+        每次固定 ``qty`` 手(默认 1), 不做加仓; 平仓当根若反向入场信号同时
+        成立则直接反手。
+
+        用法: 在 ``Strategy.next`` 中调用 ``self.rsi_div.step()``。
+        """
+        kline = self.kline
+        if kline is None:
+            return
+        p = kline.params
+        qty = max(1, int(p.get('qty', 1)))
+        pos = kline.position
+        size = float(getattr(pos, 'pos', 0) or 0.0) if pos is not None else 0.0
+
+        long_in = bool(self.long_signal.new)
+        short_in = bool(self.short_signal.new)
+        long_out = bool(self.exitlong_signal.new)
+        short_out = bool(self.exitshort_signal.new)
+
+        # ---- 1) 平仓, 反向入场信号同根成立则直接反手 ----
+        if size > 0 and long_out:
+            kline.set_target_size(-qty if short_in else 0)
+            return
+        if size < 0 and short_out:
+            kline.set_target_size(qty if long_in else 0)
+            return
+
+        # ---- 2) 空仓开仓(每次 qty 手, 不加仓) ----
+        if size == 0:
+            if long_in:
+                kline.buy(size=qty, stop=BtStop.TimeSegmentationTracking)
+            elif short_in:
+                kline.sell(size=qty, stop=BtStop.TimeSegmentationTracking)
+
+
+class GhostTangentCrossings(BtIndicator):
+    """Ghost Tangent Crossings [ChartPrime] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/F2vJnCdI-Ghost-Tangent-Crossings-ChartPrime/
+        © ChartPrime, MPL 2.0
+
+    概述
+    ----
+    在 Wick(高/低) 或 Body(开/收) 上用 Pivot 找 Swing, 每确认一段 Swing 便:
+
+    1. 以两端点生成一条 **四分之一椭圆**(``generate_ellipse``): 用
+       ``(a·cosθ, b·sinθ)``(θ=0..90°) 采样, 得到连接两个 Swing 的光滑弧线;
+    2. 在椭圆上定位"切线点"(``ellipse_slope``): 取相邻采样点价格差的
+       左右累加和之差最小者为椭圆中点, 再按椭圆切线公式 ``-(b²x)/(a²y)`` 求斜率;
+    3. 由此画 **Equipoint** 虚线(Directional 用切线, Horizontal 用水平线, 可延伸);
+    4. 自切线点向后逐根检查价格是否穿越该切线(``check_b``), 命中处标注 **B**。
+
+    当下一段 Swing 尚未确认时, 用区间内极值生成 **幽灵(Ghost)** 椭圆, 预测走势。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``high_source/low_source = pivot_type=='Wick' ? (high,low) : (max(o,c), min(o,c))``
+    - ``ph = ta.pivothigh(high_source, ph_back, pivot_forward)`` (``pl`` 对称);
+      确认 bar 上 ``ph.current = high_source[bar_index-forward]``,
+      ``ph.current_idx = bar_index-forward``
+    - ``polarity_up = ph.current_idx > pl.current_idx`` (``polarity_down`` 对称)
+    - 上摆: ``new_ph and polarity_up and (last_up_start < pl.current_idx or na)
+      and up_wait`` 时; ``connect = pl.current_idx == last_down_end``;
+      ``start_x = connect ? pl.current_idx : last_down_end``; ``end_x = ph.current_idx``;
+      ``start_y = ph.current``; ``end_y = connect ? pl.current : last_low``
+    - 下摆对称(``start_y = pl.current``, ``end_y = ph.current``)
+    - 幽灵段: ``ghost_up_start_y = 区间内 high_source 最大值``,
+      ``ghost_up_end_x = 该最大值所在 bar``, ``end_y = pl.current/last_low``
+    - ``ph_back / pl_back`` 每根末尾按“距上次拐点的距离”自适应更新(限制 0..500)
+
+    参数
+    ----
+    pivot_type : 'Wick' / 'Body'(默认 'Wick')
+    pivot_forward : Pivot 右侧回看(默认 25)
+    show_elliptical_zig / show_ghosts / show_break : 显示开关
+    max_zig : 同时保留的最大弧段数。**默认 0 = 保留全部历史弧**(原码默认 10,
+        在长图上只会看到最近 10 段、早期一段弧都没有; 想要原码行为传 ``max_zig=10``)
+    equipoint_style : 'Directional' / 'Horizontal' / 'None'
+    extend_line : Equipoint 是否向两端延伸
+    up_color / down_color / ghost_up_color / ghost_down_color / text_color : 配色
+
+    输出 lines(主图叠加, 每段弧按上/下**分两色**)
+    ----
+    - zigzag_up / zigzag_down : 已确认 Swing 之间的椭圆弧弧线
+      (``polarity=true`` 即上摆 = ``up_color`` 绿, 下摆 = ``down_color`` 红;
+      与原码 ``bullish_color = polarity ? up_color : down_color`` 一致)
+    - ghost_zigzag_up / ghost_zigzag_down : 幽灵椭圆弧(未确认 Swing, 每根刷新)
+    - equipoint_up / equipoint_down : 最新一段确认 Swing 的切线/水平线(虚线, 同弧形颜色)
+    - ghost_equipoint_up / ghost_equipoint_down : 幽灵段的切线/水平线(淡色虚线)
+    - tangent_price / tangent_slope / polarity : 切线点价格 / 斜率 / 极性(仅数据)
+    - long_signal / short_signal : 切线突破点(看涨/看跌), 逐点文本 'B'
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码用 ``polyline``/``line``/``label`` 绘制; 本实现以**折线插值**落到主图线列。
+      原码 ``max_zig`` 会 ``shift().delete()`` 淘汰旧弧(默认只留 10 段), 长图上
+      早期一片空白; minibt 默认 ``max_zig=0`` **不淘汰、保留全部历史弧**
+      (默认只画一条曲线所需的代价很小), 想恢复原码上限传 ``max_zig=10``。
+      Equipoint 仍只保留最新一段(幽灵段至多一段, 与 ``dump_ghost`` 行为一致)。
+    - 'B' 标签原码定位于精确价格; 本实现经标准信号列描点(锚定 K 线高/低)。
+    - 回测中 ``barstate.isconfirmed`` 恒为真。
+    - 原码 ``var bool polarity = na`` 时 ``up_wait = not polarity`` 视为真(否则首段永不触发)。
+    """
+    lines = ('zigzag_up', 'zigzag_down',
+             'ghost_zigzag_up', 'ghost_zigzag_down',
+             'equipoint_up', 'equipoint_down',
+             'ghost_equipoint_up', 'ghost_equipoint_down',
+             'tangent_price', 'tangent_slope', 'polarity',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        pivot_type='Wick',
+        pivot_forward=25,
+        show_elliptical_zig=True,
+        show_ghosts=True,
+        show_break=True,
+        max_zig=0,
+        equipoint_style='Directional',
+        extend_line=False,
+        up_color='#1bcf66',
+        down_color='#ee2d2d',
+        ghost_up_color='#1bcf663a',
+        ghost_down_color='#ee2d2d3a',
+        text_color='#EEEEEE',
+    )
+    isplot = dict(
+        zigzag_up=True, zigzag_down=True,
+        ghost_zigzag_up=True, ghost_zigzag_down=True,
+        equipoint_up=True, equipoint_down=True,
+        ghost_equipoint_up=True, ghost_equipoint_down=True,
+        tangent_price=False, tangent_slope=False, polarity=False,
+        long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码：`bullish_color = polarity ? up_color : down_color`，
+        # 上摆绿 / 下摆红；幽灵弧与 Equipoint 跟着同色（幽灵用半透明）。
+        zigzag_up=LineStyle(line_color='#1bcf66', line_width=2.0),
+        zigzag_down=LineStyle(line_color='#ee2d2d', line_width=2.0),
+        ghost_zigzag_up=LineStyle(line_color='#1bcf663a', line_width=2.0,
+                                  line_dash=LineDash.dashed),
+        ghost_zigzag_down=LineStyle(line_color='#ee2d2d3a', line_width=2.0,
+                                    line_dash=LineDash.dashed),
+        equipoint_up=LineStyle(line_color='#1bcf66', line_width=1.0,
+                               line_dash=LineDash.dashed),
+        equipoint_down=LineStyle(line_color='#ee2d2d', line_width=1.0,
+                                 line_dash=LineDash.dashed),
+        ghost_equipoint_up=LineStyle(line_color='#1bcf663a', line_width=1.0,
+                                     line_dash=LineDash.dashed),
+        ghost_equipoint_down=LineStyle(line_color='#ee2d2d3a', line_width=1.0,
+                                       line_dash=LineDash.dashed),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#1bcf66', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#ee2d2d', 'inverted_triangle', True, True, 12),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 切线突破 'B'
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        long_v = np.asarray(self.long_signal.values, dtype=np.float64)
+        short_v = np.asarray(self.short_signal.values, dtype=np.float64)
+        if not (np.any(long_v > 0) or np.any(short_v > 0)):
+            return None
+        out = {}
+        for name, vals in (('long_signal', long_v), ('short_signal', short_v)):
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = 'B'
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pivot_flag(src, b, back, fwd, mode) -> bool:
+        """Pine ``ta.pivothigh/pivotlow``: 绝对索引 ``b`` 处是否为 pivot。
+
+        在 bar ``t = b + fwd`` 上确认, 要求左侧 ``back`` 根与右侧 ``fwd`` 根
+        都被严格超越(高) / 严格跌破(低)。
+        """
+        n = len(src)
+        if b < 0 or b + fwd >= n:
+            return False
+        v = src[b]
+        if np.isnan(v):
+            return False
+        if back > 0:
+            if b - back < 0:
+                return False
+            win = src[b - back:b]
+            if np.isnan(win).any():
+                return False
+            if mode == 'high':
+                if not (v > win.max()):
+                    return False
+            elif not (v < win.min()):
+                return False
+        rwin = src[b + 1:b + fwd + 1]
+        if len(rwin) == 0:
+            return False
+        if mode == 'high':
+            return bool(v > rwin.max())
+        return bool(v < rwin.min())
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        pivot_type = str(p.pivot_type)
+        fwd = max(1, int(p.pivot_forward))
+        show_zig = bool(p.show_elliptical_zig)
+        show_ghosts = bool(p.show_ghosts)
+        show_break = bool(p.show_break)
+        equip_style = str(p.equipoint_style)
+        extend_line = bool(p.extend_line)
+        max_zig = int(p.max_zig)
+
+        o = np.asarray(self.open, dtype=np.float64)
+        h = np.asarray(self.high, dtype=np.float64)
+        low_ = np.asarray(self.low, dtype=np.float64)
+        c = np.asarray(self.close, dtype=np.float64)
+        n = len(c)
+        if max_zig <= 0:
+            # 0 / 负数 = 不限制：保留全部历史弧（原码默认 10 会淘汰旧弧）
+            max_zig = n + 1
+        if pivot_type == 'Body':
+            hs = np.maximum(o, c)
+            ls = np.minimum(o, c)
+        else:
+            hs = h.copy()
+            ls = low_.copy()
+
+        # 上摆 / 下摆分开放：引擎一条线只能一个颜色，原码每段弧按
+        # `polarity ? up_color : down_color` 上色，所以这里拆成两列。
+        zig_up = np.full(n, np.nan, dtype=np.float64)
+        zig_dn = np.full(n, np.nan, dtype=np.float64)
+        gzz_up = np.full(n, np.nan, dtype=np.float64)
+        gzz_dn = np.full(n, np.nan, dtype=np.float64)
+        eq_up = np.full(n, np.nan, dtype=np.float64)
+        eq_dn = np.full(n, np.nan, dtype=np.float64)
+        geq_up = np.full(n, np.nan, dtype=np.float64)
+        geq_dn = np.full(n, np.nan, dtype=np.float64)
+        tan_price = np.full(n, np.nan, dtype=np.float64)
+        tan_slope = np.full(n, np.nan, dtype=np.float64)
+        pol_out = np.zeros(n, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        equip_range = None
+        gequip_range = None
+        ghost_range = None
+        zz_legs = []            # 已确认弧段的 (目标数组, x0, x1), 受 max_zig 限制
+
+        # ------------------------------------------------------------
+        # 内部工具
+        # ------------------------------------------------------------
+        def clear(arr, x0, x1):
+            if x0 is None or x1 is None:
+                return
+            a0 = max(int(min(x0, x1)), 0)
+            b0 = min(int(max(x0, x1)), n - 1)
+            if b0 >= a0:
+                arr[a0:b0 + 1] = np.nan
+
+        def draw_pts(arr, pts):
+            """把 Pine ``polyline`` 的点集落成折线(逐 bar 线性插值)。"""
+            pts = sorted(pts, key=lambda z: z[0])
+            for x, y in pts:
+                if 0 <= x < n:
+                    arr[x] = y
+            for k in range(len(pts) - 1):
+                x0, y0 = pts[k]
+                x1, y1 = pts[k + 1]
+                if x1 > x0:
+                    st = (y1 - y0) / float(x1 - x0)
+                    for x in range(max(x0 + 1, 0), min(x1, n)):
+                        arr[x] = y0 + st * (x - x0)
+
+        def ellipse_points(sx, ex, sy, ey):
+            """Pine ``generate_ellipse``: 1/4 椭圆采样点(索引从大到小)。"""
+            a = ex - sx
+            b = ey - sy
+            pts = []
+            if a > 1:
+                x = None
+                for i in range(0, 91):
+                    new_x = int(a * np.cos(np.radians(i)))
+                    y = b * np.sin(np.radians(i))
+                    if x is not None and x != new_x:
+                        pts.append((sx + x, sy + y))
+                    x = new_x
+                pts.append((sx, ey))
+            else:
+                pts.append((ex, sy))
+                pts.append((sx, ey))
+            return pts
+
+        def ellipse_slope(sx, ex, sy, ey, pts):
+            """Pine ``ellipse_slope``: 椭圆中点切点与切线斜率。"""
+            if len(pts) > 2:
+                dy = [abs(pts[i + 1][1] - pts[i][1])
+                      for i in range(len(pts) - 1)]
+                centers = []
+                idx = []
+                for i in range(1, len(dy)):
+                    idx.append(i)
+                    left = sum(dy[0:i + 1])
+                    right = sum(dy[i - 1:])
+                    centers.append(abs(left - right))
+                mid = idx[centers.index(min(centers))]
+                tan = pts[mid]
+                a = ex - sx
+                b = ey - sy
+                xv = tan[0] - sx
+                yv = tan[1] - sy
+                if a == 0 or yv == 0:
+                    slope = np.nan
+                else:
+                    slope = -(b * b * xv) / (a * a * yv)
+                return tan, slope
+            return pts[0], -(pts[-1][1] - pts[0][1])
+
+        def check_b(t, sx, sy, flen, slope, pol):
+            """Pine ``check_b``: 自切线点向前找价格穿越切线的 bar。"""
+            i = flen - 1
+            found = False
+            start_idx = t - int(sx)
+            cur_idx = start_idx
+            end_price = np.nan
+            while (not found) and cur_idx >= 0:
+                i += 1
+                check_price = sy + slope * i
+                cur_idx = start_idx - i
+                if cur_idx < 0:
+                    break
+                ai = t - cur_idx
+                if pol:
+                    end_price = h[ai]
+                    if end_price < check_price:
+                        found = True
+                else:
+                    end_price = low_[ai]
+                    if end_price > check_price:
+                        found = True
+            if found:
+                return True, end_price, t - cur_idx
+            return False, np.nan, None
+
+        def dump_ghost():
+            """Pine ``dump_ghost``: 清空上一根幽灵弧与其 Equipoint。"""
+            nonlocal ghost_range, gequip_range
+            if ghost_range is not None:
+                clear(gzz_up, *ghost_range)
+                clear(gzz_dn, *ghost_range)
+                ghost_range = None
+            if gequip_range is not None:
+                clear(geq_up, *gequip_range)
+                clear(geq_dn, *gequip_range)
+                gequip_range = None
+
+        def gen_zig(t, sx, ex, sy, ey, pol, ghost=False):
+            """Pine ``generate_zig_zag``: 画椭圆弧 + Equipoint + 突破 'B'。"""
+            nonlocal equip_range, gequip_range
+            if sx is None or ex is None:
+                return None
+            if np.isnan(sy) or np.isnan(ey):
+                return None
+            sx = int(sx)
+            ex = int(ex)
+            pts = ellipse_points(sx, ex, sy, ey)
+            tan, slope = ellipse_slope(sx, ex, sy, ey, pts)
+            tx = int(tan[0])
+            ty = float(tan[1])
+            length = ex - sx
+            back_len = tx - sx
+            fwd_len = length - back_len
+            rng = (min(sx, ex), max(sx, ex))
+            # 原码 `bullish_color = polarity ? up_color : down_color`：
+            # 上摆(pol=True)落 *_up 列，下摆落 *_down 列。
+            zarr = (gzz_up if ghost else zig_up) if pol else (
+                gzz_dn if ghost else zig_dn)
+
+            # ---- 椭圆弧(polyline) ----
+            if show_zig:
+                draw_pts(zarr, pts)
+
+            # ---- Equipoint(line): 确认/幽灵分别落在不同线列 ----
+            if equip_style != 'None':
+                earr = (geq_up if ghost else eq_up) if pol else (
+                    geq_dn if ghost else eq_dn)
+                # 上一段 Equipoint 可能是另一个颜色，两个数组都要清
+                if ghost:
+                    if gequip_range is not None:
+                        clear(geq_up, *gequip_range)
+                        clear(geq_dn, *gequip_range)
+                elif equip_range is not None:
+                    clear(eq_up, *equip_range)
+                    clear(eq_dn, *equip_range)
+                if equip_style == 'Directional':
+                    if extend_line:
+                        x0, x1 = 0, n - 1
+                    else:
+                        x0, x1 = tx - back_len, tx + back_len
+                    for x in range(max(x0, 0), min(x1, n - 1) + 1):
+                        earr[x] = (ty if np.isnan(slope)
+                                   else ty + slope * (x - tx))
+                else:  # Horizontal
+                    if extend_line:
+                        x0, x1 = tx, n - 1
+                    else:
+                        x0, x1 = tx, tx + length * 2
+                    for x in range(max(x0, 0), min(x1, n - 1) + 1):
+                        earr[x] = ty
+                if ghost:
+                    gequip_range = (x0, x1)
+                else:
+                    equip_range = (x0, x1)
+
+            # 切线点/斜率仅统计已确认段(幽灵段不写入数据列)
+            if (not ghost) and 0 <= tx < n:
+                tan_price[tx] = ty
+                tan_slope[tx] = slope
+
+            # ---- 突破标注(check_b) ----
+            if show_break and (not ghost):
+                found, _fp, fidx = check_b(t, tx, ty, fwd_len, slope, pol)
+                if found and fidx is not None and 0 <= fidx < n:
+                    if pol:
+                        short_sig[fidx] = 1.0
+                    else:
+                        long_sig[fidx] = 1.0
+            return zarr, rng
+
+        # ------------------------------------------------------------
+        # 状态(Pine var)
+        # ------------------------------------------------------------
+        ph_cur_idx = None
+        ph_cur = np.nan
+        pl_cur_idx = None
+        pl_cur = np.nan
+        ph_back = fwd
+        pl_back = fwd
+        last_up_start = None
+        last_up_end = None
+        last_down_start = None
+        last_down_end = None
+        last_high = np.nan
+        last_low = np.nan
+        polarity = None
+        since_pl = None
+        since_ph = None
+
+        # ------------------------------------------------------------
+        # 逐根 bar
+        # ------------------------------------------------------------
+        for t in range(n):
+            # ---- Pivot(使用进入本 bar 时的 ph_back/pl_back) ----
+            b = t - fwd
+            new_ph = False
+            new_pl = False
+            if b >= 0:
+                if self._pivot_flag(hs, b, ph_back, fwd, 'high'):
+                    new_ph = True
+                    ph_cur = hs[b]
+                    ph_cur_idx = b
+                if self._pivot_flag(ls, b, pl_back, fwd, 'low'):
+                    new_pl = True
+                    pl_cur = ls[b]
+                    pl_cur_idx = b
+
+            # ---- ta.barssince ----
+            if new_pl:
+                since_pl = 0
+            elif since_pl is not None:
+                since_pl += 1
+            if new_ph:
+                since_ph = 0
+            elif since_ph is not None:
+                since_ph += 1
+
+            # ---- polarity / wait ----
+            if ph_cur_idx is not None and pl_cur_idx is not None:
+                polarity_up = ph_cur_idx > pl_cur_idx
+                polarity_down = ph_cur_idx < pl_cur_idx
+            else:
+                polarity_up = False
+                polarity_down = False
+            up_wait = not polarity          # na -> True
+            down_wait = bool(polarity)
+
+            # ---- 确认上摆 ----
+            if (new_ph and polarity_up
+                    and (last_up_start is None
+                         or last_up_start < pl_cur_idx)
+                    and up_wait):
+                dump_ghost()
+                connect = (pl_cur_idx == last_down_end
+                           if last_down_end is not None else True)
+                sx = pl_cur_idx if connect else last_down_end
+                ex = ph_cur_idx
+                sy = ph_cur
+                ey = pl_cur if connect else last_low
+                last_up_start = sx
+                last_up_end = ex
+                last_high = sy
+                polarity = True
+                _r = gen_zig(t, sx, ex, sy, ey, True, False)
+                if _r is not None:
+                    zz_legs.append(_r)
+                    while len(zz_legs) > max_zig:
+                        _arr, _rng = zz_legs.pop(0)
+                        clear(_arr, *_rng)
+
+            # ---- 确认下摆 ----
+            if (new_pl and polarity_down
+                    and (last_down_start is None
+                         or last_down_start < ph_cur_idx)
+                    and down_wait):
+                dump_ghost()
+                connect = (ph_cur_idx == last_up_end
+                           if last_up_end is not None else True)
+                sx = ph_cur_idx if connect else last_up_end
+                ex = pl_cur_idx
+                sy = pl_cur
+                ey = ph_cur if connect else last_high
+                last_down_start = sx
+                last_down_end = ex
+                last_low = sy
+                polarity = False
+                _r = gen_zig(t, sx, ex, sy, ey, False, False)
+                if _r is not None:
+                    zz_legs.append(_r)
+                    while len(zz_legs) > max_zig:
+                        _arr, _rng = zz_legs.pop(0)
+                        clear(_arr, *_rng)
+
+            # ---- 幽灵上摆 ----
+            gu_conn = (pl_cur_idx == last_down_end
+                       if last_down_end is not None else True)
+            gu_sx = pl_cur_idx if gu_conn else last_down_end
+            gu_rng = (t - gu_sx) if gu_sx is not None else None
+            gmax = []
+            if (gu_rng is not None and gu_rng >= 0
+                    and since_pl is not None):
+                hi = gu_rng - since_pl
+                if hi >= 0:
+                    gmax = [hs[t - i] for i in range(0, hi + 1)]
+            gu_sy = max(gmax) if gmax else np.nan
+            gu_ey = pl_cur if gu_conn else last_low
+            gu_since = gmax.index(gu_sy) if gmax else 0
+            gu_ex = t - gu_since
+            if up_wait and (not new_ph) and show_ghosts:
+                dump_ghost()
+                _r = gen_zig(t, gu_sx, gu_ex, gu_sy, gu_ey, True, True)
+                ghost_range = None if _r is None else _r[1]
+
+            # ---- 幽灵下摆 ----
+            gd_conn = (ph_cur_idx == last_up_end
+                       if last_up_end is not None else True)
+            gd_sx = ph_cur_idx if gd_conn else last_up_end
+            gd_rng = (t - gd_sx) if gd_sx is not None else None
+            gmin = []
+            if (gd_rng is not None and gd_rng >= 0
+                    and since_ph is not None):
+                hi = gd_rng - since_ph
+                if hi >= 0:
+                    gmin = [ls[t - i] for i in range(0, hi + 1)]
+            gd_sy = min(gmin) if gmin else np.nan
+            gd_ey = ph_cur if gd_conn else last_high
+            gd_since = gmin.index(gd_sy) if gmin else 0
+            gd_ex = t - gd_since
+            if down_wait and (not new_pl) and show_ghosts:
+                dump_ghost()
+                _r = gen_zig(t, gd_sx, gd_ex, gd_sy, gd_ey, False, True)
+                ghost_range = None if _r is None else _r[1]
+
+            # ---- 输出极性 ----
+            pol_out[t] = 1.0 if polarity is True else (
+                -1.0 if polarity is False else 0.0)
+
+            # ---- ph_back / pl_back 自适应 ----
+            v1 = (t - last_down_end - pl_back + 1
+                  if last_down_end is not None else 5)
+            ph_back = int(max(0, min(v1, 500)))
+            v2 = (t - last_up_end - ph_back + 1
+                  if last_up_end is not None else 5)
+            pl_back = int(max(0, min(v2, 500)))
+
+        return (zig_up, zig_dn, gzz_up, gzz_dn, eq_up, eq_dn, geq_up, geq_dn,
+                tan_price, tan_slope, pol_out,
+                long_sig, short_sig)
+
+
+class TwoBReversalPattern(BtIndicator):
+    """2B Reversal Pattern (Expo) [Zeiierman] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/dHb3Hn12-2B-Reversal-Pattern-Expo/
+        © Zeiierman, CC BY-NC-SA 4.0
+
+    概述
+    ----
+    经典 **2B 反转形态**:
+
+    1. 用 ``ta.pivothigh(high, prd, prd)`` / ``ta.pivotlow(low, prd, prd)``
+       记录最近的 Swing 高/低点 ``(ph, phL)`` / ``(pl, plL)``;
+    2. 收盘价 **上穿** ``ph`` 时, 记下待确认突破位 ``bo = low``、
+       ``boL = bar_index``(并画一条 ``ph`` 水平虚线); **下穿** ``pl`` 时对称
+       ``bo = high`` 并画 ``pl`` 水平虚线;
+    3. 若在 ``[min, max]`` 根 bar 内收盘价 **再次反向穿越** ``bo``, 则确认
+       2B 反转: 上穿 → **做多**(绿色三角, K 线下方), 下穿 → **做空**
+       (红色三角, K 线上方);
+    4. 若 ``bo`` 被穿越但**超出** bar 数窗口, 或超过 ``max`` 根仍未反向穿越,
+       则形态作废(相关画线删除)。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``pvtHi = ta.pivothigh(high, prd, prd)``; 命中时 ``ph = high[prd]``,
+      ``phL = bar_index[prd]``(``pvtLo`` 对称)
+    - ``ta.crossover(close, ph)`` → ``bo = low``, ``boL = bar_index``, ``ph = na``
+    - ``ta.crossunder(close, pl)`` → ``bo = high``, ``boL = bar_index``, ``pl = na``
+    - ``ta.crossunder(close, bo)`` 且 ``min <= b-boL <= max`` → ``breakoutdn``
+    - ``ta.crossover(close, bo)`` 且 ``min <= b-boL <= max`` → ``breakoutup``
+    - ``ta.cross(close, bo)`` → 形态作废(删除最近一条画线)
+    - 每根 ``not na(bo)`` 时以 ``bo`` 水平线连接 ``boL`` 与当前 bar;
+      ``b - boL > max`` → 形态作废
+
+    参数
+    ----
+    prd : Pivot 周期(默认 20, 越小信号越多)
+    max_break / min_break : 反向突破的最大/最小 bar 数(默认 10 / 3;
+        ``max_break=0`` 表示**不限窗口**)
+    signal_mode : 'Custom'(默认) / 'Original' / 'Relaxed' / 'Aggressive'
+    setup_src / confirm_src : 'close'(原版) 或 'wick'(改用 high/low, 更敏感)
+    cancel_on_invalid_cross : 窗口外穿越是否直接作废(默认 True)
+    allow_multiple : 是否允许多个待确认位并存(默认 False)
+    bUp / bDn : 向上/向下突破线颜色(默认 '#6ce5a0' / '#f23645')
+    pCol : ph/pl 虚线与待确认线颜色(默认 '#00FFFF')
+
+    放宽条件 / 更多信号
+    ----
+    原码 ``prd=20`` 时新 Pivot 至少要 20 根后才出现, 而窗口只有 ``[3,10]`` 根,
+    因此绝大多数待确认位 **等不到反向穿越就超时作废**, 信号非常稀疏。
+    可按下列旋钮放大信号量(8964 根样本实测):
+
+    - **调窗口**: ``min_break=1``、``max_break=30``(或 ``0`` = 不限)
+    - **调 Pivot**: 减小 ``prd``(如 10 / 5)
+    - **换判定源**: ``setup_src='wick'`` / ``confirm_src='wick'`` 用影线穿越
+    - **少作废**: ``cancel_on_invalid_cross=False``
+    - **多位并存**: ``allow_multiple=True``(须配合 ``max_break=0`` 才有效)
+
+    | 设置 | long | short | 合计 |
+    | --- | --- | --- | --- |
+    | 原版 prd20/max10/min3 | 12 | 13 | 25 |
+    | ``signal_mode='Relaxed'`` | 24 | 32 | 56 |
+    | ``signal_mode='Aggressive'`` | 52 | 56 | 108 |
+    | Aggressive + ``prd=10`` | 111 | 99 | 210 |
+    | Aggressive + ``prd=5`` | 185 | 172 | 357 |
+
+    一键预设 ``signal_mode`` 会**覆盖** ``min_break/max_break/setup_src/``
+    ``confirm_src/cancel_on_invalid_cross/allow_multiple``; 需精细控制时用
+    ``'Custom'`` 并直接设上述参数。
+
+    输出 lines(主图叠加)
+    ----
+    - ph_level / pl_level : 被突破的 Swing 高/低点水平虚线
+    - bo_pending : 当前待确认突破位 ``bo`` 的水平线(随 bar 延伸;
+      ``allow_multiple=True`` 时同时展示所有待确认位)
+    - bo_break_up / bo_break_dn : 已完成的 2B 突破线(绿/红)
+    - long_signal / short_signal : 2B 反转信号(三角)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码用 ``line`` 对象绘制且可同时存在多条; 本实现落成主图线列,
+      默认(单待确认位)下 ``bo`` 待确认线只保留当前一条,
+      与原码 ``active`` 的逐根重画/删除一致。
+    - 原码 ``lines.pop()`` 的装饰线删除按栈语义模拟(超时/失效时删除对应线段)。
+    - ``alertcondition`` 未复现; 本指标为纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('ph_level', 'pl_level', 'bo_pending',
+             'bo_break_up', 'bo_break_dn',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        prd=20,
+        max_break=10,
+        min_break=3,
+        setup_src='close',             # 'close' | 'wick'
+        confirm_src='close',           # 'close' | 'wick'
+        cancel_on_invalid_cross=True,  # 窗口外穿越是否直接作废
+        allow_multiple=False,          # 是否允许多个待确认位并存
+        signal_mode='Custom',          # Custom|Original|Relaxed|Aggressive
+        bUp='#6ce5a0',
+        bDn='#f23645',
+        pCol='#00FFFF',
+    )
+    isplot = dict(ph_level=True, pl_level=True, bo_pending=True,
+                  bo_break_up=True, bo_break_dn=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # ph / pl 水平虚线(aqua)
+        ph_level=LineStyle(line_color='#00FFFF', line_width=1.0,
+                           line_dash=LineDash.dashed),
+        pl_level=LineStyle(line_color='#00FFFF', line_width=1.0,
+                           line_dash=LineDash.dashed),
+        # 待确认突破位(原码 active: 实线, width=2)
+        bo_pending=LineStyle(line_color='#00FFFF', line_width=2.0),
+        # 已完成的 2B 突破线
+        bo_break_up=LineStyle(line_color='#6ce5a0', line_width=2.0),
+        bo_break_dn=LineStyle(line_color='#f23645', line_width=2.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#6ce5a0', 'triangle', True, True, 10),
+        short_signal=SignalStyle(
+            'high', '#f23645', 'inverted_triangle', True, True, 10),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pivot_flag(src, b, back, fwd, mode) -> bool:
+        """Pine ``ta.pivothigh/ta.pivotlow``: 绝对索引 ``b`` 处是否为 pivot。"""
+        n = len(src)
+        if b < 0 or b + fwd >= n or b - back < 0:
+            return False
+        v = src[b]
+        if np.isnan(v):
+            return False
+        win = src[b - back:b]
+        if len(win) and np.isnan(win).any():
+            return False
+        rwin = src[b + 1:b + fwd + 1]
+        if len(rwin) == 0:
+            return False
+        if mode == 'high':
+            if len(win) and not (v > win.max()):
+                return False
+            return bool(v > rwin.max())
+        if len(win) and not (v < win.min()):
+            return False
+        return bool(v < rwin.min())
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        prd = max(1, int(p.prd))
+
+        # ---- 放宽预设: 命中预设时覆盖下方细化参数 ----
+        presets = {
+            'original': dict(min_break=3, max_break=10, setup_src='close',
+                             confirm_src='close',
+                             cancel_on_invalid_cross=True,
+                             allow_multiple=False),
+            'relaxed': dict(min_break=1, max_break=30, setup_src='close',
+                            confirm_src='close',
+                            cancel_on_invalid_cross=True,
+                            allow_multiple=False),
+            'aggressive': dict(min_break=1, max_break=0, setup_src='wick',
+                               confirm_src='wick',
+                               cancel_on_invalid_cross=False,
+                               allow_multiple=True),
+        }
+        pre = presets.get(str(p.signal_mode).lower())
+        if pre is None:                      # 'Custom': 使用下方细化参数
+            min_len = max(1, int(p.min_break))
+            max_len = int(p.max_break)
+            setup_src = str(p.setup_src)
+            confirm_src = str(p.confirm_src)
+            cancel_invalid = bool(p.cancel_on_invalid_cross)
+            multiple = bool(p.allow_multiple)
+        else:
+            min_len = max(1, int(pre['min_break']))
+            max_len = int(pre['max_break'])
+            setup_src = pre['setup_src']
+            confirm_src = pre['confirm_src']
+            cancel_invalid = bool(pre['cancel_on_invalid_cross'])
+            multiple = bool(pre['allow_multiple'])
+        unlimited = max_len <= 0             # max_break=0 -> 不限窗口
+        max_len = max(1, max_len)
+
+        h = np.asarray(self.high, dtype=np.float64)
+        l = np.asarray(self.low, dtype=np.float64)
+        c = np.asarray(self.close, dtype=np.float64)
+        n = len(c)
+        # 原码统一用 close; 'wick' 时改用 high/low, 更敏感
+        UP = h if str(setup_src).lower() == 'wick' else c
+        DN = l if str(setup_src).lower() == 'wick' else c
+        CUP = h if str(confirm_src).lower() == 'wick' else c
+        CDN = l if str(confirm_src).lower() == 'wick' else c
+
+        ph_line = np.full(n, np.nan, dtype=np.float64)
+        pl_line = np.full(n, np.nan, dtype=np.float64)
+        bo_pend = np.full(n, np.nan, dtype=np.float64)
+        bo_up = np.full(n, np.nan, dtype=np.float64)
+        bo_dn = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        arr_of = {'ph': ph_line, 'pl': pl_line,
+                  'bo_up': bo_up, 'bo_dn': bo_dn}
+
+        def hline(arr, x0, x1, v):
+            if x0 is None or x1 is None:
+                return
+            a0 = max(int(x0), 0)
+            b0 = min(int(x1), n - 1)
+            if b0 >= a0:
+                arr[a0:b0 + 1] = v
+
+        def clear(arr, x0, x1):
+            if x0 is None or x1 is None:
+                return
+            a0 = max(int(x0), 0)
+            b0 = min(int(x1), n - 1)
+            if b0 >= a0:
+                arr[a0:b0 + 1] = np.nan
+
+        def cross_up(prev, cur, lvl_prev, lvl_cur):
+            return (not np.isnan(prev) and not np.isnan(lvl_prev)
+                    and not np.isnan(lvl_cur) and prev < lvl_prev
+                    and cur > lvl_cur)
+
+        def cross_dn(prev, cur, lvl_prev, lvl_cur):
+            return (not np.isnan(prev) and not np.isnan(lvl_prev)
+                    and not np.isnan(lvl_cur) and prev > lvl_prev
+                    and cur < lvl_cur)
+
+        # ---- 状态(Pine var) ----
+        ph = np.nan
+        ph_prev = np.nan
+        phL = None
+        pl = np.nan
+        pl_prev = np.nan
+        plL = None
+        setups = []         # 待确认位(原码只有 1 个 = 最新)
+        stack = []          # 已 push 的装饰线: (key, x0, x1)
+        pend_rng = None     # 原码 active 线范围(单待确认位模式)
+        bo_prev = np.nan    # 上一根 bar 结束时的 bo(原码 bo[1])
+
+        for t in range(n):
+            # ---- Pivots ----
+            b = t - prd
+            if b >= 0:
+                if self._pivot_flag(h, b, prd, prd, 'high'):
+                    ph = h[b]
+                    phL = b
+                if self._pivot_flag(l, b, prd, prd, 'low'):
+                    pl = l[b]
+                    plL = b
+
+            u_cur, d_cur = UP[t], DN[t]
+            cu_cur, cd_cur = CUP[t], CDN[t]
+            u_prev = UP[t - 1] if t > 0 else np.nan
+            d_prev = DN[t - 1] if t > 0 else np.nan
+            cu_prev = CUP[t - 1] if t > 0 else np.nan
+            cd_prev = CDN[t - 1] if t > 0 else np.nan
+            prev_bo = bo_prev         # 新位建立前的 bo[1]
+
+            # ---- ta.crossover(src, ph): 建立待确认位 ----
+            if cross_up(u_prev, u_cur, ph_prev, ph):
+                hline(ph_line, phL, t, ph)
+                stack.append(('ph', phL, t))
+                ph = np.nan
+                new = dict(bo=l[t], boL=t, pend=None)
+                setups = (setups + [new]) if multiple else [new]
+
+            # ---- ta.crossunder(src, pl): 建立待确认位 ----
+            if cross_dn(d_prev, d_cur, pl_prev, pl):
+                hline(pl_line, plL, t, pl)
+                stack.append(('pl', plL, t))
+                pl = np.nan
+                new = dict(bo=h[t], boL=t, pend=None)
+                setups = (setups + [new]) if multiple else [new]
+
+            bo_prev = setups[-1]['bo'] if setups else np.nan
+
+            # ---- 逐位确认 ----
+            for s in list(setups):
+                bo = s['bo']
+                boL = s['boL']
+                bp = bo if t > boL else prev_bo          # 原码 bo[1]
+                age = t - boL
+                inwin = (age >= min_len) and (unlimited or age <= max_len)
+                c_dn = cross_dn(cd_prev, cd_cur, bp, bo)
+                c_up = cross_up(cu_prev, cu_cur, bp, bo)
+
+                # 向下突破 -> 做空
+                if inwin and c_dn:
+                    if multiple and s['pend'] is not None:
+                        clear(bo_pend, *s['pend'])
+                        s['pend'] = None
+                    elif pend_rng is not None:
+                        clear(bo_pend, *pend_rng)
+                        pend_rng = None
+                    hline(bo_dn, boL, t, bo)
+                    stack.append(('bo_dn', boL, t))
+                    short_sig[t] = 1.0
+                    setups.remove(s)
+                    continue
+
+                # 向上突破 -> 做多
+                if inwin and c_up:
+                    if multiple and s['pend'] is not None:
+                        clear(bo_pend, *s['pend'])
+                        s['pend'] = None
+                    elif pend_rng is not None:
+                        clear(bo_pend, *pend_rng)
+                        pend_rng = None
+                    hline(bo_up, boL, t, bo)
+                    stack.append(('bo_up', boL, t))
+                    long_sig[t] = 1.0
+                    setups.remove(s)
+                    continue
+
+                # 窗口外穿越 -> 作废(可关闭)
+                if cancel_invalid and (c_up or c_dn):
+                    if multiple and s['pend'] is not None:
+                        clear(bo_pend, *s['pend'])
+                        s['pend'] = None
+                    if stack:
+                        key, x0, x1 = stack.pop()
+                        clear(arr_of[key], x0, x1)
+                    setups.remove(s)
+                    continue
+
+                # 超时 -> 作废
+                if (not unlimited) and age > max_len:
+                    if multiple and s['pend'] is not None:
+                        clear(bo_pend, *s['pend'])
+                        s['pend'] = None
+                    elif pend_rng is not None:
+                        clear(bo_pend, *pend_rng)
+                        pend_rng = None
+                    if stack:
+                        key, x0, x1 = stack.pop()
+                        clear(arr_of[key], x0, x1)
+                    setups.remove(s)
+                    continue
+
+                # 待确认线: 每根自 boL 重画到当前 bar
+                if multiple:
+                    if s['pend'] is not None:
+                        clear(bo_pend, *s['pend'])
+                    hline(bo_pend, boL, t, bo)
+                    s['pend'] = (boL, t)
+                else:
+                    if pend_rng is not None:
+                        clear(bo_pend, *pend_rng)
+                    hline(bo_pend, boL, t, bo)
+                    pend_rng = (boL, t)
+
+            # ---- 序列历史推进 ----
+            ph_prev = ph
+            pl_prev = pl
+            bo_prev = setups[-1]['bo'] if setups else np.nan
+
+        return (ph_line, pl_line, bo_pend, bo_up, bo_dn,
+                long_sig, short_sig)
+
+
+class MACDLeader(BtIndicator):
+    """MACD Leader [LazyBear] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v2/v3):
+        https://cn.tradingview.com/script/y9HCZoQi-MACD-Leader-LazyBear/
+        © LazyBear
+
+    概述
+    ----
+    "MACD Leader" 是 MACD 的**先行(去滞后)版本**:
+
+    1. 先算两条常规 EMA: ``sema = ema(src, short)``、``lema = ema(src, long)``;
+    2. 再对各自的**残差**做一次同周期 EMA:
+       ``i1 = sema + ema(src - sema, short)``、
+       ``i2 = lema + ema(src - lema, long)``
+       (相当于对每条 EMA 再做一次"误差修正", 让曲线更快贴合价格);
+    3. ``macdl = i1 - i2`` 即 **MACD Leader**(原码主输出, 栗色, 线宽 2);
+    4. ``macd = sema - lema`` 与 ``signal = sma(macd, sigLen)`` 为常规 MACD,
+       默认不显示(原码 ``showMACD`` / ``showMACDSignal`` 默认 false)。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``ma(s,l) => ema(s,l)``: Pine 内置 ``ema``, ``alpha = 2/(l+1)``,
+      首个有效窗口以 ``sma`` 播种后逐根递归(故前 ``l-1`` 根为 na)
+    - ``sema = ma(src, shortLength)``; ``lema = ma(src, longLength)``
+    - ``i1 = sema + ma(src - sema, shortLength)``
+    - ``i2 = lema + ma(src - lema, longLength)``
+    - ``macdl = i1 - i2``; ``macd = sema - lema``;
+      ``signal = sma(macd, sigLength)``
+    - ``plot(showMACD ? macd : na)`` / ``plot(showMACDSignal ? sma(macd,sigLength) : na)``
+
+    参数
+    ----
+    short_length / long_length / sig_length : 快/慢/信号周期(默认 12 / 26 / 9)
+    show_macd / show_macdsignal : 是否输出常规 MACD / 信号线(默认 False / False)
+    src : 源序列(默认 'close')
+    ema_seed : 'sma'(默认, Pine 内置 ``ema`` 的 sma 播种语义) 或
+        'first'(首值播种, 曲线从第一根即有值)
+
+    输出 lines(副图)
+    ----
+    - macdl : MACD Leader(主输出, 栗色 width=2)
+    - macd : 常规 MACD(= sema - lema, 默认关闭 → 全 na)
+    - signal : 常规 MACD 信号线(= sma(macd, sigLen), 默认关闭 → 全 na)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``hline(0)`` 的零轴未单独绘制成线列。
+    - ``ema_seed='sma'`` 时曲线自 ``long_length`` 的两倍左右才开始有值
+      (``sema``/``lema`` 各预热一次, 与 Pine 内置 ``ema`` 一致);
+      若希望从第一根就有值, 设 ``ema_seed='first'``。
+    """
+    lines = ('macdl', 'macd', 'signal')
+    category = 'momentum'
+    overlap = False
+    params = dict(
+        short_length=12,
+        long_length=26,
+        sig_length=9,
+        show_macd=True,
+        show_macdsignal=True,
+        src='close',
+        ema_seed='sma',
+    )
+    isplot = dict(macdl=True, macd=True, signal=True)
+    linestyle = dict(
+        # maroon / green / red (原码配色)
+        macdl=LineStyle(line_dash=LineDash.vbar,
+                        line_color='#800000', line_width=2.0,
+                        vbar_base=0., vbar_up_color=Colors.bull_color,
+                        vbar_down_color=Colors.bear_color),
+        macd=LineStyle(line_color='#008000', line_width=1.0),
+        signal=LineStyle(line_color='#FF0000', line_width=1.0),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _ema(a, n: int, seed: str = 'sma') -> np.ndarray:
+        """Pine 内置 ``ema``: ``alpha=2/(n+1)`` 递归。
+
+        - ``seed='sma'``(默认): ``sum := na(sum[1]) ? sma(x,n)
+          : alpha*x + (1-alpha)*nz(sum[1])``, 即首个有效窗口的 SMA 播种,
+          因此前 ``n-1`` 根为 na;
+        - ``seed='first'``: 以首个有效值播种(``ta.ema`` 常见实现)。
+        """
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        if size == 0 or n < 1:
+            return out
+        if n == 1:
+            return a.copy()
+        alpha = 2.0 / (float(n) + 1.0)
+        sma_ = None
+        if str(seed).lower() == 'sma':
+            sma_ = pd.Series(a).rolling(
+                int(n), min_periods=int(n)).mean().to_numpy()
+        prev = np.nan
+        for i in range(size):
+            x = a[i]
+            if np.isnan(prev):
+                if sma_ is None:
+                    if np.isnan(x):
+                        out[i] = np.nan
+                        continue
+                    prev = x
+                else:
+                    prev = sma_[i]
+                    if np.isnan(prev):
+                        out[i] = np.nan
+                        continue
+            elif np.isnan(x):
+                prev = np.nan
+                out[i] = np.nan
+                continue
+            else:
+                prev = alpha * x + (1.0 - alpha) * prev
+            out[i] = prev
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        short = max(1, int(p.short_length))
+        long_ = max(1, int(p.long_length))
+        sig = max(1, int(p.sig_length))
+        seed = str(p.ema_seed)
+
+        src_name = str(p.src)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+        if src_name == 'hl2':
+            src = (np.asarray(self.high, dtype=np.float64) + np.asarray(
+                self.low, dtype=np.float64)) / 2.0
+        elif src_name == 'hlc3':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 3.0
+        elif src_name == 'ohlc4':
+            src = (np.asarray(self.open, dtype=np.float64)
+                   + np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 4.0
+        else:
+            src = np.asarray(getattr(self, src_name), dtype=np.float64)
+
+        # ---- 原码逐行 ----
+        sema = self._ema(src, short, seed)
+        lema = self._ema(src, long_, seed)
+        i1 = sema + self._ema(src - sema, short, seed)
+        i2 = lema + self._ema(src - lema, long_, seed)
+        macdl = i1 - i2
+        macd = sema - lema
+        signal = self._sma(macd, sig)
+
+        nan_arr = np.full(n, np.nan, dtype=np.float64)
+        macd_out = macd if bool(p.show_macd) else nan_arr
+        sig_out = signal if bool(p.show_macdsignal) else nan_arr
+        return (macdl, macd_out, sig_out)
+
+
+#: Machine Learning RSI 的配色方案 -> (bull, bear) 的 RGB。
+#: ``Classic`` 有 neon / 普通两套（原码 ``neonEffect ? ... : ...``）。
+_MLRSI_SCHEMES = {
+    'Classic': ((0, 255, 187), (255, 17, 0), (0, 183, 18), (195, 0, 16)),
+    'Deuteranopia': ((0, 170, 255), (255, 204, 0)),
+    'Protanopia': ((0, 170, 230), (230, 175, 0)),
+    'Tritanopia': ((255, 112, 0), (0, 33, 171)),
+    'Monochrome': ((222, 226, 230), (73, 80, 87)),
+}
+
+
+def _mlrsi_rgb(rgb) -> str:
+    return '#%02X%02X%02X' % tuple(int(x) for x in rgb)
+
+
+def _mlrsi_colors(scheme, neon: bool):
+    """原码 ``switch colorScheme`` -> ``(bullColor, bearColor)`` 十六进制。"""
+    spec = _MLRSI_SCHEMES.get(str(scheme), _MLRSI_SCHEMES['Classic'])
+    if len(spec) == 4:
+        bull, bear = (spec[0], spec[1]) if neon else (spec[2], spec[3])
+    else:
+        bull, bear = spec[0], spec[1]
+    return _mlrsi_rgb(bull), _mlrsi_rgb(bear)
+
+
+class MachineLearningRSI(BtIndicator):
+    """Machine Learning RSI ║ BullVision → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/sHevuJyQ-Machine-Learning-RSI-BullVision/
+        © BullVisionCapital, MPL 2.0
+
+    概述
+    ----
+    用 **K-近邻(KNN)** 增强传统 RSI:
+
+    1. ``baseRsi = ta.rsi(close, rsiLength)``; 可选一次均线平滑(``maType``,
+       默认 ALMA) 得到 ``standardRsi``;
+    2. 抽取特征(默认 3 个, 可到 5 个)并做 min-max 归一化:
+       ``RSI 本身 / 动量(3) / 波动率(10) / 斜率(linreg 5) / 价格动量(5)``;
+    3. 在最近 ``knnLookback`` 根中找与当前点**欧氏距离最近**的 ``knnNeighbors``
+       个历史点, 以 ``1/dist`` 加权平均其 ``standardRsi[idx-1]`` 得到 ``knnRsi``,
+       再按 ``knnWeight`` 与 ``standardRsi`` 混合并裁剪到 ``[0,100]``;
+    4. 可选一层滤波(``filterMethod``: None / Kalman / DoubleEMA / ALMA)
+       得到 ``finalRsi`` —— 即原码 ``rsiLine``。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``getMomentum(s,l) => s - s[l]``; ``getVolatility(s,l) => ta.stdev(s,l)``;
+      ``getSlope(s,l) => ta.linreg(s,l,0) - ta.linreg(s,l,1)``
+    - ``normalize(s,l)``: ``range = highest(s,l) - lowest(s,l)``;
+      ``range != 0 ? (s - lowest) / range : 0.5``
+    - KNN: ``for i = 1 to knnLookback`` 且 ``i < bar_index``; 距离
+      ``sqrt(sum((cur - hist)^2))``; 冒泡排序(稳定); ``effectiveK = min(K, size)``;
+      ``weight = dist < 0.0001 ? 1 : 1/dist``; ``knnRsi = Σ rsi*w / Σ w``;
+      ``enhanced = clamp((1-w)*standard + w*knnRsi, 0, 100)``
+      (仅在 ``Σw > 0`` 时生效)
+    - 特征归一化窗口都**以历史点自身结尾**(``normalize(standardRsi[i], L)``),
+      等价于整条归一化序列按 ``i`` 平移, 故本实现预计算后直接取偏移
+    - 滤波: Kalman ``kf := na(kf) ? ml : kf + fs*(ml-kf)``;
+      DoubleEMA ``ema(ema(ml, round(fs*10)), round(fs*5))``;
+      ALMA ``ta.alma(ml, round(fs*20), 0, 6)``
+
+    参数
+    ----
+    rsi_length : RSI 周期(默认 14)
+    use_smoothing / smoothing_length / ma_type / alma_sigma : RSI 平滑(默认
+        True / 3 / 'ALMA' / 4)
+    use_knn / knn_neighbors / knn_lookback / knn_weight / feature_count :
+        KNN 参数(默认 True / 5 / 100 / 0.4 / 3)
+    use_filter / filter_method / filter_strength : 滤波(默认 True / 'Kalman' / 0.3)
+    src : 源序列(默认 'close')
+    overbought / oversold : 超买 / 超卖阈值(默认 70 / 30)
+    color_scheme : 配色方案(Classic / Deuteranopia / Protanopia /
+        Tritanopia / Monochrome, 默认 Classic)
+    neon_effect : 是否用霓虹配色(仅 Classic, 默认 True)
+    color_mode : 上色模式(None / Trend Following / Impulse, 默认 Trend Following)
+    show_table / table_position : 是否画统计表格 / 位置(默认 True / 'top-left')
+
+    输出 lines(副图)
+    ----
+    - rsi        : 原码 ``rsiLine``(KNN 增强后的 RSI, 0..100; 数据列, 默认不绘)
+    - rsi_bull / rsi_bear : 按 ``colorMode`` 条件上色的 RSI 线
+    - rsi_neutral / rsi_gray : ``Impulse`` 模式下的白 / 灰段
+    - midline    : 50 中轴线(白 70% 透明, 虚线)
+    - upper / lower : 超买 / 超卖水平线(默认 70 / 30)
+    - long_signal / short_signal : RSI 上穿 / 下穿 50(仅数据)
+
+    主图样式
+    ----
+    - 原码 ``barcolor(finalRsi > 50 ? bull : bear)``: 通过 K 线 ``color_by`` 给**主图
+      蜡烛**条件上色(bull/bear 依 ``color_scheme`` / ``neon_effect``)。
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码的 ``fill`` 渐变 / OB-OS 色带填充未复现(只画 50 中轴与 70/30 水平线)。
+    - 一条线在引擎里只能一个颜色: 条件色按 ``colorMode`` 拆成最多 4 段
+      (``rsi_bull`` / ``rsi_bear`` / ``rsi_neutral`` / ``rsi_gray``),
+      颜色切换处会有 1 根 bar 的间隙。
+    - ``color_mode='None'`` 时原码 ``indicatorColor=na``, RSI 线不画。
+    - 无对比合约/无表格项时表格自动隐藏。
+    - 原码 ``math.round`` 为“四舍五入远离零”, 此处用 ``floor(x+0.5)`` 对齐。
+    - Pine 的 ``ta.ema`` 播种语义在本库存在两种实现, 此处采用
+      **首值播种**(与本文件其它移植一致)。
+    - 若 ``use_knn=True``, 特征需 ``knnLookback`` 根历史才就绪, 在此之前
+      ``enhanced`` 退化为 ``standardRsi``(与原码 ``weightSum>0`` 分支一致)。
+    """
+    lines = ('rsi', 'rsi_bull', 'rsi_bear', 'rsi_neutral', 'rsi_gray',
+             'midline', 'upper', 'lower',
+             'long_signal', 'short_signal')
+    category = 'momentum'
+    overlap = False
+    params = dict(
+        rsi_length=14,
+        use_smoothing=True,
+        smoothing_length=3,
+        ma_type='ALMA',
+        alma_sigma=4,
+        use_knn=True,
+        knn_neighbors=5,
+        knn_lookback=100,
+        knn_weight=0.4,
+        feature_count=3,
+        use_filter=True,
+        filter_method='Kalman',
+        filter_strength=0.3,
+        src='close',
+        overbought=70,
+        oversold=30,
+        color_scheme='Classic',
+        neon_effect=True,
+        color_mode='Trend Following',
+        show_table=True,
+        table_position=None,          # None = 用类上 tablestyle.position
+    )
+    isplot = dict(
+        rsi=False,
+        rsi_bull=True, rsi_bear=True, rsi_neutral=True, rsi_gray=True,
+        midline=True, upper=True, lower=True,
+        long_signal=False, short_signal=False)
+    linestyle = dict(
+        rsi_bull=LineStyle(line_color='#00FFBB', line_width=3.0),
+        rsi_bear=LineStyle(line_color='#FF1100', line_width=3.0),
+        rsi_neutral=LineStyle(line_color='#FFFFFF', line_width=3.0),
+        rsi_gray=LineStyle(line_color='#808080', line_width=3.0),
+        midline=LineStyle(line_color='#FFFFFF4D', line_width=1.0,
+                          line_dash=LineDash.dashed),
+        upper=LineStyle(line_color='#FF1100', line_width=1.0),
+        lower=LineStyle(line_color='#00FFBB', line_width=1.0),
+    )
+    # ------------------------------------------------------------------
+    # 统计表格：像 signal_text 一样写成指标方法
+    # ------------------------------------------------------------------
+
+    def table_rows(self, index=None, values=None):
+        """`TableStyle` 的行生成钩子（`self` 就是算完的 `IndFrame`）。
+
+        * ``self.params`` / ``self.btindex`` 可直接用（框架会把本次实例参数
+          挂到 IndFrame 上；``btindex`` 在回测/回放里就是当前那根）；
+        * ``index`` 是十字光标所在 bar；``None`` = 没有光标/移出 K 线；
+        * ``values`` 是桥接层现取的 ``{线名: 最新整条值}``（含 ``isplot=False``
+          的 ``rsi``）—— 实盘每次重算指标对象，优先用它更稳。
+        """
+        params = dict(self.params or {})
+        if not bool(params.get('show_table', True)):
+            return []
+        mode = str(params.get('color_mode', 'Trend Following'))
+        overbought = float(params.get('overbought', 70) or 70)
+        oversold = float(params.get('oversold', 30) or 30)
+        use_knn = bool(params.get('use_knn', True))
+        try:
+            live = (values or {}).get('rsi')
+            if live is not None:
+                rsi_values = np.asarray(live, dtype=float).ravel()
+            else:
+                rsi_values = np.asarray(self.pandas_object['rsi'],
+                                        dtype=float)
+            if index is None:
+                # 没有光标：用指标的 btindex（回测/回放 = 当前那根；
+                # 静态图/实时 = 最后一根），越界再退回最后一根。
+                try:
+                    i = int(self.btindex)
+                except Exception:
+                    i = -1
+                if i < 0 or i >= len(rsi_values):
+                    i = len(rsi_values) - 1
+            else:
+                i = max(0, min(int(index), len(rsi_values) - 1))
+            rsi = float(rsi_values[i])
+        except Exception:
+            rsi = float('nan')
+        if mode == 'Trend Following':
+            context = 'Bullish Trend' if rsi > 50 else 'Bearish Trend'
+        elif mode == 'Impulse':
+            context = ('Bullish Impulse' if rsi > overbought
+                       else 'Bearish Impulse' if rsi < oversold else 'None')
+        else:
+            context = 'None'
+        return [
+            ('RSI', 'n/a' if rsi != rsi else f'{rsi:.2f}'),
+            ('Mode', mode),
+            ('Detected', context),
+            ('Machine Learning', 'YES' if use_knn else 'NO'),
+            ('OB/OS Thresholds', f'{overbought:g} / {oversold:g}'),
+        ]
+
+    # 统计表格：`tablestyle` 管样式/位置，行内容由类上的 `table_rows()` 提供
+    # （框架会自动用它，不必在 TableStyle 里再写 rows=...）
+    tablestyle = TableStyle(
+        position='top-right',
+        headings=('1', '2'),
+        width=0.20,
+        height=0.16,
+        draggable=True,
+        margin_x=70,
+        margin_y=70,
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _sma_any(a, n: int) -> np.ndarray:
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(
+            int(n), min_periods=1).mean().to_numpy()
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _rma(a, n: int) -> np.ndarray:
+        """Pine ``ta.rma``(SMMA): 前 n 根 SMA 播种后按 ``1/n`` 递归。"""
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        if size < n:
+            return out
+        alpha = 1.0 / float(n)
+        prev = np.nan
+        for i in range(size):
+            if np.isnan(prev):
+                win = a[i - n + 1:i + 1]
+                if i >= n - 1 and len(win) == n and not np.isnan(win).any():
+                    prev = float(win.mean())
+                else:
+                    continue
+            elif not np.isnan(a[i]):
+                prev = prev + alpha * (a[i] - prev)
+            out[i] = prev
+        return out
+
+    @staticmethod
+    def _wma(a, n: int) -> np.ndarray:
+        """Pine ``ta.wma``: 权重 ``n, n-1, ..., 1``(最新权重最大)。"""
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        n = int(n)
+        norm = float(n * (n + 1)) / 2.0
+        for i in range(n - 1, size):
+            win = a[i - n + 1:i + 1][::-1]      # 最新在前(Pine src[0])
+            if np.isnan(win).any():
+                continue
+            acc = 0.0
+            for k in range(n):
+                acc += win[k] * float(n - k)
+            out[i] = acc / norm
+        return out
+
+    @classmethod
+    def _hma(cls, a, n: int) -> np.ndarray:
+        """Pine ``ta.hma``: ``wma(2*wma(a,n/2) - wma(a,n), round(sqrt(n)))``。"""
+        a = np.asarray(a, dtype=np.float64)
+        half = max(1, int(n) // 2)
+        inner = 2.0 * cls._wma(a, half) - cls._wma(a, n)
+        return cls._wma(inner, max(1, int(np.floor(np.sqrt(n) + 0.5))))
+
+    @staticmethod
+    def _vwma(a, v, n: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64)
+        num = pd.Series(a * v).rolling(int(n), min_periods=int(n)).sum()
+        den = pd.Series(v).rolling(int(n), min_periods=int(n)).sum()
+        return (num / den).to_numpy()
+
+    @staticmethod
+    def _linreg(a, n: int, offset: float = 0.0) -> np.ndarray:
+        """Pine ``ta.linreg``: 以最新点为 ``per=1`` 的 1..n 线性回归。
+
+        ``intercept = sumY/n - slope*sumX/n + slope*offset``
+        """
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        n = int(n)
+        if n < 1 or size < n:
+            return out
+        per = np.arange(1, n + 1, dtype=np.float64)
+        sumX = per.sum()
+        sumXSqr = float((per * per).sum())
+        den = n * sumXSqr - sumX * sumX
+        if den == 0:
+            return out
+        for i in range(n - 1, size):
+            win = a[i - n + 1:i + 1][::-1]        # Pine 顺序: 最新在前
+            if np.isnan(win).any():
+                continue
+            sumY = float(win.sum())
+            sumXY = float((win * per).sum())
+            slope = (n * sumXY - sumX * sumY) / den
+            out[i] = sumY / n - slope * sumX / n + slope * offset
+        return out
+
+    @staticmethod
+    def _alma(a, n: int, offset: float, sigma: float) -> np.ndarray:
+        """Pine ``ta.alma``: 高斯权重 ``exp(-((i-m)^2)/(2*s^2))``。"""
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        n = int(n)
+        if n < 1 or size < n:
+            return out
+        m = float(offset) * (n - 1)
+        s = float(n) / float(sigma)
+        if s == 0:
+            return out
+        i_idx = np.arange(n, dtype=np.float64)
+        w = np.exp(-((i_idx - m) ** 2) / (2.0 * s * s))
+        norm = w.sum()
+        for i in range(n - 1, size):
+            win = a[i - n + 1:i + 1][::-1]        # Pine 顺序: 最新在前
+            if np.isnan(win).any():
+                continue
+            out[i] = float((win * w).sum() / norm)
+        return out
+
+    @staticmethod
+    def _stdev(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.stdev(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _rhh(a, n: int) -> np.ndarray:
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(
+            int(n), min_periods=int(n)).max().to_numpy()
+
+    @staticmethod
+    def _rll(a, n: int) -> np.ndarray:
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(
+            int(n), min_periods=int(n)).min().to_numpy()
+
+    @classmethod
+    def _normalize(cls, a, n: int) -> np.ndarray:
+        """Pine ``normalize``: min-max 归一化, 区间为 0 时取 0.5。"""
+        a = np.asarray(a, dtype=np.float64)
+        hi = cls._rhh(a, n)
+        lo = cls._rll(a, n)
+        rng = hi - lo
+        with np.errstate(divide='ignore', invalid='ignore'):
+            out = np.where(rng != 0.0, (a - lo) / rng, 0.5)
+        return out
+
+    @classmethod
+    def _moving_average(cls, ma_type, src, n, sigma, vol) -> np.ndarray:
+        t = str(ma_type).upper()
+        if t == 'SMA':
+            return cls._sma(src, n)
+        if t == 'EMA':
+            return cls._ema(src, n)
+        if t == 'DEMA':
+            e1 = cls._ema(src, n)
+            return 2.0 * e1 - cls._ema(e1, n)
+        if t == 'TEMA':
+            e1 = cls._ema(src, n)
+            e2 = cls._ema(e1, n)
+            e3 = cls._ema(e2, n)
+            return 3.0 * (e1 - e2) + e3
+        if t == 'WMA':
+            return cls._wma(src, n)
+        if t == 'VWMA':
+            return cls._vwma(src, vol, n)
+        if t == 'SMMA':
+            return cls._rma(src, n)
+        if t == 'HMA':
+            return cls._hma(src, n)
+        if t == 'LSMA':
+            return cls._linreg(src, n, 0.0)
+        if t == 'ALMA':
+            return cls._alma(src, n, 0.85, sigma)
+        return cls._sma(src, n)
+
+    @staticmethod
+    def _pine_round(x) -> int:
+        return int(np.floor(float(x) + 0.5))
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        rlen = max(1, int(p.rsi_length))
+        overbought = float(p.overbought)
+        oversold = float(p.oversold)
+        color_mode = str(p.color_mode)
+        color_scheme = str(p.color_scheme)
+        neon = bool(p.neon_effect)
+        show_table = bool(p.show_table)
+        vol = np.asarray(self.volume, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        src_name = str(p.src)
+        if src_name == 'hl2':
+            src = (np.asarray(self.high, dtype=np.float64) + np.asarray(
+                self.low, dtype=np.float64)) / 2.0
+        elif src_name == 'hlc3':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 3.0
+        else:
+            src = close
+
+        # ---- baseRsi / 平滑 ----
+        base = np.asarray(self.close.rsi(rlen), dtype=np.float64)
+        smoothed = self._moving_average(
+            p.ma_type, base, max(1, int(p.smoothing_length)),
+            float(p.alma_sigma), vol)
+        standard = smoothed if bool(p.use_smoothing) else base
+
+        # ---- 特征(precompute; 历史归一化窗口以自身结尾 => 取偏移) ----
+        lookback = max(1, int(p.knn_lookback))
+        mom_rsi3 = standard - self._shift(standard, 3)
+        vol_rsi10 = self._stdev(standard, 10)
+        slope5 = (self._linreg(standard, 5, 0.0)
+                  - self._linreg(standard, 5, 1.0))
+        mom_close5 = close - self._shift(close, 5)
+        feats = [
+            self._normalize(standard, lookback),
+            self._normalize(mom_rsi3, lookback),
+            self._normalize(vol_rsi10, lookback),
+            self._normalize(slope5, lookback),
+            self._normalize(mom_close5, lookback),
+        ]
+
+        # ---- KNN ----
+        enhanced = standard.copy()
+        if bool(p.use_knn):
+            fc = max(1, min(5, int(p.feature_count)))
+            k_nb = max(1, int(p.knn_neighbors))
+            w_ml = float(p.knn_weight)
+            F = np.column_stack(feats[:fc])
+            idx_all = np.arange(1, lookback + 1, dtype=np.int64)
+            for t in range(2, n):
+                m = min(lookback, t - 1)
+                if m < 2:                          # 原码要求 size(distances) > 1
+                    continue
+                hist = F[t - 1:t - m - 1:-1]       # F[t-1], ..., F[t-m]
+                d = np.sqrt(((hist - F[t]) ** 2).sum(axis=1))
+                # Pine 冒泡排序: NaN 不参与交换 => 只在尾部; 其余等价稳定排序
+                nvalid = int(np.count_nonzero(~np.isnan(d)))
+                if nvalid == m:
+                    order = np.argsort(d, kind='stable')
+                else:
+                    order = np.concatenate([
+                        np.argsort(d[:nvalid], kind='stable'),
+                        np.arange(nvalid, m)])
+                ds = d[order]
+                ii = idx_all[order]
+                ek = min(k_nb, m)
+                wsum = 0.0
+                wtot = 0.0
+                for j in range(ek):
+                    idx = int(ii[j])
+                    dist = ds[j]
+                    if np.isnan(dist):
+                        w = np.nan
+                    elif dist < 0.0001:
+                        w = 1.0
+                    else:
+                        w = 1.0 / dist
+                    k = t - idx + 1                 # 原码 standardRsi[idx-1]
+                    nb = standard[k] if 0 <= k < n else np.nan
+                    if not np.isnan(nb):
+                        wsum += nb * w
+                        wtot += w
+                if wtot > 0.0:
+                    knn_rsi = wsum / wtot
+                    e = (1.0 - w_ml) * standard[t] + w_ml * knn_rsi
+                    if np.isnan(e):
+                        enhanced[t] = np.nan
+                    else:
+                        enhanced[t] = max(0.0, min(100.0, e))
+        ml = enhanced if bool(p.use_knn) else standard
+
+        # ---- 滤波 ----
+        if bool(p.use_filter):
+            fm = str(p.filter_method)
+            fs_ = float(p.filter_strength)
+            if fm == 'Kalman':
+                out = np.full(n, np.nan, dtype=np.float64)
+                prev = np.nan
+                for i in range(n):
+                    if np.isnan(prev):
+                        prev = ml[i]
+                    else:
+                        prev = prev + fs_ * (ml[i] - prev)
+                    out[i] = prev
+                final = out
+            elif fm == 'DoubleEMA':
+                e1 = self._ema(ml, max(1, self._pine_round(fs_ * 10)))
+                final = self._ema(e1, max(1, self._pine_round(fs_ * 5)))
+            elif fm == 'ALMA':
+                final = self._alma(ml, max(1, self._pine_round(fs_ * 20)),
+                                   0.0, 6.0)
+            else:
+                final = ml
+        else:
+            final = ml
+
+        bull_c, bear_c = _mlrsi_colors(color_scheme, neon)
+
+        # ---- 条件颜色: 一条线只能一个颜色, 按 colorMode 拆成最多 4 段 ----
+        # 原码 `indicatorColor`:
+        #   None           -> na(不画)
+        #   Trend Following-> rsi > 50 ? bull : bear
+        #   Impulse        -> >OB bull / <OS bear / 45~55 white / 其它 gray
+        rsi_bull = np.full(n, np.nan, dtype=np.float64)
+        rsi_bear = np.full(n, np.nan, dtype=np.float64)
+        rsi_neutral = np.full(n, np.nan, dtype=np.float64)
+        rsi_gray = np.full(n, np.nan, dtype=np.float64)
+        if color_mode == 'Trend Following':
+            m_bull = final > 50.0
+            m_bear = ~m_bull
+            rsi_bull[m_bull] = final[m_bull]
+            rsi_bear[m_bear] = final[m_bear]
+        elif color_mode == 'Impulse':
+            m_bull = final > overbought
+            m_bear = final < oversold
+            m_neutral = (~m_bull) & (~m_bear) & (final < 55.0) & (final > 45.0)
+            m_gray = ~(m_bull | m_bear | m_neutral)
+            rsi_bull[m_bull] = final[m_bull]
+            rsi_bear[m_bear] = final[m_bear]
+            rsi_neutral[m_neutral] = final[m_neutral]
+            rsi_gray[m_gray] = final[m_gray]
+        # color_mode == 'None' -> 全 nan, 不画 RSI 线(原码 indicatorColor=na)
+
+        # ---- 主图样式: 原码 barcolor(finalRsi>50 ? bull : bear) ----
+        # self 是 KLine, 这里把逐根配色规则挂上去,
+        # 图表侧 minibt.strategy.realtime.apply_color_rules 会落地。
+        try:
+            self.color_by(final > 50.0, bull_c, else_color=bear_c)
+        except Exception as error:
+            print('[minibt] MachineLearningRSI barcolor 失败:', error)
+
+        # ---- 50 中轴 / 70-30 水平线 ----
+        midline = np.full(n, 50.0, dtype=np.float64)
+        upper = np.full(n, overbought, dtype=np.float64)
+        lower = np.full(n, oversold, dtype=np.float64)
+
+        # ---- 信号(原码无, 保留为数据列: RSI 上/下穿 50) ----
+        prev = self._shift(final, 1)
+        long_signal = ((prev <= 50.0) & (final > 50.0)).astype(np.float64)
+        short_signal = ((prev >= 50.0) & (final < 50.0)).astype(np.float64)
+
+        # 表格内容由类上的 `table_rows()` 钩子按算完的数据生成（见 table_rows）
+        return (final, rsi_bull, rsi_bear, rsi_neutral, rsi_gray,
+                midline, upper, lower, long_signal, short_signal)
+
+
+class VolumeSuperTrendAI(BtIndicator):
+    """Volume SuperTrend AI (Zeiierman) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v6):
+        https://cn.tradingview.com/script/eTgP2ymK-Volume-SuperTrend-AI-Expo/
+        © Zeiierman, CC BY-NC-SA 4.0
+
+    概述
+    ----
+    1. **成交量加权 SuperTrend**: 基准线 ``vwma`` 按 ``maSrc`` 选择
+       ``SMA/EMA/WMA/RMA/VWMA`` 的**成交量加权**形式
+       (``ma(close*volume, len) / ma(volume, len)``), 上下轨为
+       ``vwma ± factor*atr(len)``; 轨线单边棘轮(只收紧不放松)后按
+       ``direction`` 取上/下轨得到 ``superTrend``。
+    2. **KNN 标签**: 取最近 ``n`` 根的 ``superTrend`` 作为样本 ``data``,
+       标签 ``label_i = wma(close, KNN_PriceLen)[i] > wma(superTrend, KNN_STLen)[i]``;
+       对当前 ``superTrend`` 按距离 ``|x - data[i]|`` 排序, 取前 ``k`` 个用
+       ``1/(dist+1e-6)`` 加权平均标签, 得 ``label_ ∈ [0,1]``。
+    3. **AI 状态**: ``col = label_==1 ? upCol : label_==0 ? dnCol : neCol``
+       (前三者着色主图线; 只有当最近 ``k`` 个标签全为 1/0 时才分别取多/空色,
+       否则取中性色 —— 因为 ``label_`` 是加权平均, 非整数即中性)。
+    4. **云带**: ``cloudLine = sma(superTrend, cloudLineSmooth)``、
+       ``cloudRef = ema((open+close)/2, cloudRefLen)``, 在两者之间取
+       0.25/0.50/0.75 三个锚点, 逐层填充形成渐变云。
+    5. **信号**: ``Start_TrendUp/Dn``(AI 状态翻转)与
+       ``TrendUp/Dn``(方向翻转且 ``label_`` 同向)。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``atr = ta.atr(len)``; ``upperBand = vwma + factor*atr``
+    - ``lowerBand := lowerBand > nz(lowerBand[1]) or close[1] < nz(lowerBand[1])
+      ? lowerBand : nz(lowerBand[1])``(上轨对称)
+    - ``direction``: ``na(atr[1])`` → 1; 否则 ``superTrend[1]==upperBand[1]``
+      时 ``close > upperBand ? -1 : 1``, 否则 ``close < lowerBand ? 1 : -1``
+    - ``superTrend := direction == -1 ? lowerBand : upperBand``
+    - KNN 冒泡排序(稳定) + ``weight_i = 1/(dist_i + 1e-6)``
+    - ``cloudA/B/C = cloudLine + (cloudRef-cloudLine) * 0.25/0.50/0.75``
+
+    参数
+    ----
+    k / n_data : KNN 邻居数 / 样本数(默认 3 / 10; 实际 ``n = max(k, n_data)``)
+    knn_price_len / knn_st_len : 价格 / SuperTrend 的 WMA 周期(默认 20 / 100)
+    ai_signals : 是否输出 AI 信号(默认 True)
+    bullish_col / bearish_col : 信号点配色(默认 lime / red)
+    length / factor / ma_src : SuperTrend 周期 / 倍数 / 基准均线类型(10 / 3.0 / 'WMA')
+    up_col / dn_col / ne_col : 多 / 空 / 中性 线色(默认 lime / red / blue)
+    show_cloud / cloud_bull / cloud_bear / cloud_transp / cloud_ref_len /
+        cloud_line_smooth / cloud_layers : 云带参数
+        (默认 True / lime / red / 78 / 10 / 2 / 3)
+
+    输出 lines(主图叠加)
+    ----
+    - super_trend : AI Volume SuperTrend 完整序列(仅数据)
+    - st_bull / st_bear / st_neutral : 按 ``col`` 三色分段的 SuperTrend 线
+    - cloud_line / cloud_a / cloud_b / cloud_c / cloud_ref : 云带锚点(仅数据,
+      与原码 ``display.none`` 一致, 视觉由 ``bandstyle`` 逐层填充给出)
+    - ai_label : KNN 加权标签 ``label_``(仅数据, 0..1)
+    - long_signal / short_signal : AI Trend Up / Down(三角)
+    - exitshort_signal / exitlong_signal : AI Trend **Start** Up / Down(圆点)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码云带的填充色随 AI 状态在 bull/bear/neutral 间切换; 本实现 ``bandstyle``
+      为静态配色(默认云用 ``cloud_bull``), 线色分层透明度按 ``cloud_transp`` 复刻。
+    - 原码 ``col`` 为颜色序列, 本实现按状态拆成 3 条线以模拟逐 bar 变色。
+    - ``alertcondition`` 未复现; 未内置 ``step()``。
+    """
+    lines = ('super_trend', 'st_bull', 'st_bear', 'st_neutral',
+             'cloud_line', 'cloud_a', 'cloud_b', 'cloud_c', 'cloud_ref',
+             'ai_label',
+             'long_signal', 'short_signal',
+             'exitlong_signal', 'exitshort_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        k=3,
+        n_data=10,
+        knn_price_len=20,
+        knn_st_len=100,
+        ai_signals=True,
+        bullish_col='#00FF00',
+        bearish_col='#FF0000',
+        length=10,
+        factor=3.0,
+        ma_src='WMA',
+        up_col='#00FF00',
+        dn_col='#FF0000',
+        ne_col='#0000FF',
+        show_cloud=True,
+        cloud_bull='#00FF00',
+        cloud_bear='#FF0000',
+        cloud_transp=78,
+        cloud_ref_len=10,
+        cloud_line_smooth=2,
+        cloud_layers=3,
+    )
+    isplot = dict(super_trend=False,
+                  st_bull=True, st_bear=True, st_neutral=True,
+                  cloud_line=False, cloud_a=False, cloud_b=False,
+                  cloud_c=False, cloud_ref=False,
+                  ai_label=False,
+                  long_signal=False, short_signal=False,
+                  exitlong_signal=False, exitshort_signal=False)
+    linestyle = dict(
+        st_bull=LineStyle(line_color='#00FF00', line_width=2.0),
+        st_bear=LineStyle(line_color='#FF0000', line_width=2.0),
+        st_neutral=LineStyle(line_color='#0000FF', line_width=2.0),
+    )
+    # cloud_transp=78 时的逐层透明度(1 - transp/100)
+    bandstyle = [
+        BandStyle(lower='cloud_line', upper='cloud_a',
+                  fill_color='#00FF00', fill_alpha=0.40, line_color=None),
+        BandStyle(lower='cloud_a', upper='cloud_b',
+                  fill_color='#00FF00', fill_alpha=0.28, line_color=None),
+        BandStyle(lower='cloud_b', upper='cloud_c',
+                  fill_color='#00FF00', fill_alpha=0.16, line_color=None),
+        BandStyle(lower='cloud_c', upper='cloud_ref',
+                  fill_color='#00FF00', fill_alpha=0.05, line_color=None),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#00FF00', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#FF0000', 'inverted_triangle', True, True, 12),
+        exitshort_signal=SignalStyle(
+            'low', '#00FF00', 'circle', True, True, 7),
+        exitlong_signal=SignalStyle(
+            'high', '#FF0000', 'circle', True, True, 7),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _rma(a, n: int) -> np.ndarray:
+        """Pine ``ta.rma``: 前 n 根 SMA 播种后按 ``1/n`` 递归。"""
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        if size < n:
+            return out
+        alpha = 1.0 / float(n)
+        prev = np.nan
+        for i in range(size):
+            if np.isnan(prev):
+                win = a[i - n + 1:i + 1]
+                if i >= n - 1 and len(win) == n and not np.isnan(win).any():
+                    prev = float(win.mean())
+                else:
+                    continue
+            elif not np.isnan(a[i]):
+                prev = prev + alpha * (a[i] - prev)
+            out[i] = prev
+        return out
+
+    @staticmethod
+    def _wma(a, n: int) -> np.ndarray:
+        """Pine ``ta.wma``: 最新权重最大(n..1)。"""
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        n = int(n)
+        norm = float(n * (n + 1)) / 2.0
+        for i in range(n - 1, size):
+            win = a[i - n + 1:i + 1][::-1]      # 最新在前(Pine src[0])
+            if np.isnan(win).any():
+                continue
+            acc = 0.0
+            for k in range(n):
+                acc += win[k] * float(n - k)
+            out[i] = acc / norm
+        return out
+
+    @classmethod
+    def _vwma(cls, x, v, n: int) -> np.ndarray:
+        """Pine ``ta.vwma``: ``sma(x*v, n) / sma(v, n)``。"""
+        x = np.asarray(x, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return cls._sma(x * v, n) / cls._sma(v, n)
+
+    @classmethod
+    def _ma(cls, kind, a, v, n: int) -> np.ndarray:
+        t = str(kind).upper()
+        if t == 'SMA':
+            return cls._sma(a, n)
+        if t == 'EMA':
+            return cls._ema(a, n)
+        if t == 'WMA':
+            return cls._wma(a, n)
+        if t == 'RMA':
+            return cls._rma(a, n)
+        return cls._sma(a, n)
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        k = max(1, int(p.k))
+        n_size = max(k, max(1, int(p.n_data)))
+        price_len = max(2, int(p.knn_price_len))
+        st_len = max(2, int(p.knn_st_len))
+        length = max(1, int(p.length))
+        factor = float(p.factor)
+        ma_src = str(p.ma_src)
+        ai_signals = bool(p.ai_signals)
+        cloud_smooth = max(1, int(p.cloud_line_smooth))
+        cloud_ref_len = max(1, int(p.cloud_ref_len))
+
+        o = np.asarray(self.open, dtype=np.float64)
+        h = np.asarray(self.high, dtype=np.float64)
+        l = np.asarray(self.low, dtype=np.float64)
+        c = np.asarray(self.close, dtype=np.float64)
+        v = np.asarray(self.volume, dtype=np.float64)
+        n = len(c)
+
+        # ---- 成交量加权基准线 ----
+        if ma_src == 'VWMA':
+            num = self._vwma(c * v, v, length)
+            den = self._vwma(v, v, length)
+        else:
+            num = self._ma(ma_src, c * v, v, length)
+            den = self._ma(ma_src, v, v, length)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            base = num / den
+
+        atr = self._atr(h, l, c, length)
+        ub_raw = base + factor * atr
+        lb_raw = base - factor * atr
+
+        # ---- 轨线棘轮 + direction + superTrend ----
+        lower = np.full(n, np.nan, dtype=np.float64)
+        upper = np.full(n, np.nan, dtype=np.float64)
+        direction = np.full(n, np.nan, dtype=np.float64)
+        super_trend = np.full(n, np.nan, dtype=np.float64)
+        for t in range(n):
+            c_prev = c[t - 1] if t > 0 else np.nan
+            plb = lower[t - 1] if t > 0 else np.nan
+            pub = upper[t - 1] if t > 0 else np.nan
+            plb = 0.0 if np.isnan(plb) else plb            # nz()
+            pub = 0.0 if np.isnan(pub) else pub
+            lb = lb_raw[t]
+            ub = ub_raw[t]
+            keep_lb = (not np.isnan(lb) and lb > plb) or (
+                not np.isnan(c_prev) and c_prev < plb)
+            keep_ub = (not np.isnan(ub) and ub < pub) or (
+                not np.isnan(c_prev) and c_prev > pub)
+            lower[t] = lb if keep_lb else plb
+            upper[t] = ub if keep_ub else pub
+
+            if t == 0 or np.isnan(atr[t - 1]):
+                d = 1.0
+            elif super_trend[t - 1] == upper[t - 1]:
+                d = -1.0 if c[t] > upper[t] else 1.0
+            else:
+                d = 1.0 if c[t] < lower[t] else -1.0
+            direction[t] = d
+            super_trend[t] = lower[t] if d == -1.0 else upper[t]
+
+        # ---- KNN ----
+        price = self._wma(c, price_len)
+        s_t = self._wma(super_trend, st_len)
+        ai_label = np.full(n, np.nan, dtype=np.float64)
+        col_state = np.full(n, -1.0, dtype=np.float64)      # 1 多 / 0 空 / -1 中性
+        idx_all = np.arange(n_size, dtype=np.int64)
+        for t in range(n):
+            x = super_trend[t]
+            data = np.full(n_size, np.nan, dtype=np.float64)
+            labs = np.full(n_size, np.nan, dtype=np.float64)
+            for i in range(n_size):
+                j = t - i
+                if j < 0:
+                    continue
+                data[i] = super_trend[j]
+                pv, sv = price[j], s_t[j]
+                if not np.isnan(pv) and not np.isnan(sv):
+                    labs[i] = 1.0 if pv > sv else 0.0
+            with np.errstate(invalid='ignore'):
+                dists = np.abs(x - data) if not np.isnan(x) else np.full(
+                    n_size, np.nan)
+            # Pine 冒泡排序: NaN 不参与交换 => 只在尾部; 其余等价稳定排序
+            nvalid = int(np.count_nonzero(~np.isnan(dists)))
+            if nvalid == n_size:
+                order = np.argsort(dists, kind='stable')
+            else:
+                order = np.concatenate([
+                    np.argsort(dists[:nvalid], kind='stable'),
+                    np.arange(nvalid, n_size)])
+            ds = dists[order]
+            ii = idx_all[order]
+            wsum = 0.0
+            wtot = 0.0
+            for i in range(k):
+                lab = labs[ii[i]]
+                w = 1.0 / (ds[i] + 1e-6)
+                wsum = wsum + w * lab
+                wtot = wtot + w
+            with np.errstate(divide='ignore', invalid='ignore'):
+                label_ = wsum / wtot
+            ai_label[t] = label_
+            if label_ == 1.0:
+                col_state[t] = 1.0
+            elif label_ == 0.0:
+                col_state[t] = 0.0
+            else:
+                col_state[t] = -1.0
+
+        # ---- 三色分段 ----
+        st_bull = np.where(col_state == 1.0, super_trend, np.nan)
+        st_bear = np.where(col_state == 0.0, super_trend, np.nan)
+        st_neutral = np.where(col_state == -1.0, super_trend, np.nan)
+
+        # ---- 云带 ----
+        cloud_line = self._sma(super_trend, cloud_smooth)
+        cloud_ref = self._ema((o + c) / 2.0, cloud_ref_len)
+        diff = cloud_ref - cloud_line
+        ok = ~np.isnan(cloud_line) & ~np.isnan(cloud_ref)
+        cloud_a = np.where(ok, cloud_line + diff * 0.25, np.nan)
+        cloud_b = np.where(ok, cloud_line + diff * 0.50, np.nan)
+        cloud_c = np.where(ok, cloud_line + diff * 0.75, np.nan)
+
+        # ---- 信号 ----
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        el_sig = np.zeros(n, dtype=np.float64)     # Start_TrendDn
+        es_sig = np.zeros(n, dtype=np.float64)     # Start_TrendUp
+        if ai_signals:
+            for t in range(n):
+                cs = col_state[t]
+                prev = col_state[t - 1] if t > 0 else None
+                if cs == 1.0 and prev is not None and (
+                        prev != 1.0 or prev == -1.0):
+                    es_sig[t] = 1.0
+                if cs == 0.0 and prev is not None and (
+                        prev != 0.0 or prev == -1.0):
+                    el_sig[t] = 1.0
+                d = direction[t]
+                d_prev = direction[t - 1] if t > 0 else np.nan
+                if (d == -1.0 and d_prev == 1.0 and ai_label[t] == 1.0):
+                    long_sig[t] = 1.0
+                if (d == 1.0 and d_prev == -1.0 and ai_label[t] == 0.0):
+                    short_sig[t] = 1.0
+
+        return (super_trend, st_bull, st_bear, st_neutral,
+                cloud_line, cloud_a, cloud_b, cloud_c, cloud_ref,
+                ai_label, long_sig, short_sig, el_sig, es_sig)
+
+
+class FalseBreakout(BtIndicator):
+    """False Breakout (Expo) [Zeiierman] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/vz0bVIJo-False-Breakout-Expo/
+        © Zeiierman, CC BY-NC-SA 4.0
+
+    概述
+    ----
+    经典的**假突破(False Breakout / Fakeout)**检测:
+
+    1. 取 ``prd`` 根内的最高价/最低价, 可选平滑(WMA / HMA):
+       ``hi = smoothing(highest(high, prd), length)``、``lo`` 对称;
+    2. ``condHi = hi > hi[1] and hi[1] <= hi[2]``(创出新高且上一根未创新高)
+       时把 ``count`` 递减并把 ``val := low``;``condLo`` 对称
+       (``count`` 递增, ``val := high``)。``count`` 连续为负/正即代表
+       连续创新高/新低;
+    3. ``index``(长度 2)记录最近两次突破的 bar 索引:
+       ``indx0`` = 最近一次, ``indx1`` = 上一次;
+       ``minbars = indx1 + minperiod < indx0``(两次突破至少间隔 minperiod);
+       ``maxvalid = bar_index - maxperiod <= indx0``(距最近突破不超过 maxperiod);
+    4. **假突破上**: ``count < -1``(连续两次以上新高)且 ``close`` 下穿 ``val``,
+       且窗口条件满足 → 红色三角标注 + 一条 ``val`` 水平线;
+       **假突破下**: ``count > 1`` 且 ``close`` 上穿 ``val`` → 绿色三角。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``smoothing(src,len)`` = ``maType=='WMA' ? ta.wma : maType=='HMA' ? ta.hma : src``
+    - ``hi = smoothing(ta.highest(a?l:h, prd), length)``(``lo`` 对称, ``a``=aggressive)
+    - ``condHi`` → ``count := (count>0 ? 0 : count) - 1``, ``val := l``,
+      ``array.unshift(index, n); array.pop(index)``
+    - ``breakdown = ta.crossunder(close, val)``; ``breakup = ta.crossover(close, val)``
+    - ``falsebreakoutup = count < -1 and breakdown and maxvalid and minbars``
+      (``falsebreakoutdown`` 对称: ``count > 1 and breakup and ...``)
+    - 命中后 ``count := 0`` 并 ``line.new(indx0, val, n, val)``
+
+    参数
+    ----
+    - prd : 新高/新低周期(默认 20)
+    - minperiod : 两次突破的最小间隔 bar 数(默认 5)
+    - maxperiod : 信号有效期 bar 数(默认 5)
+    - ma_type : 平滑方式 'None'(原码 '💎', 不平滑) / 'WMA' / 'HMA'(默认 'None')
+    - length : 平滑周期(默认 10)
+    - aggressive : 激进模式, 用 low 求最高 / high 求最低(默认 False)
+
+    输出 lines(主图叠加)
+    ----
+    - hi / lo : 平滑后的最高/最低通道(仅数据)
+    - val : 触发假突破的价位(``low`` / ``high``, 仅数据)
+    - count : 连续创新高/新低的计数(负=新高, 正=新低, 仅数据)
+    - false_break_up / false_break_down : 假突破水平线(红 / 绿)
+    - long_signal : 假突破**下**(下破后收回, 绿色三角)
+    - short_signal : 假突破**上**(上破后跌回, 红色三角)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``line.new`` 为画线对象, 本实现落成主图线列(线段区间 ``[indx0, n]``)。
+    - 原码 ``maType`` 的“不平滑”选项值为 emoji ``'💎'``, 本实现以 ``'None'``
+      表示(同时兼容传入 ``'💎'``), 避免 emoji 在 GBK 终端下的编码问题。
+    - ``alertcondition`` 未复现; 本指标为纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('hi', 'lo', 'val', 'count',
+             'false_break_up', 'false_break_down',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        prd=20,
+        minperiod=5,
+        maxperiod=5,
+        ma_type='None',
+        length=10,
+        aggressive=False,
+    )
+    isplot = dict(hi=False, lo=False, val=False, count=False,
+                  false_break_up=True, false_break_down=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        false_break_up=LineStyle(line_color='#f23645', line_width=2.0),
+        false_break_down=LineStyle(line_color='#6ce5a0', line_width=2.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle('low', '#6ce5a0', 'triangle', True, True, 10),
+        short_signal=SignalStyle(
+            'high', '#f23645', 'inverted_triangle', True, True, 10),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _highest(a, n: int) -> np.ndarray:
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(
+            int(n), min_periods=int(n)).max().to_numpy()
+
+    @staticmethod
+    def _lowest(a, n: int) -> np.ndarray:
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(
+            int(n), min_periods=int(n)).min().to_numpy()
+
+    @staticmethod
+    def _wma(a, n: int) -> np.ndarray:
+        """Pine ``ta.wma``: 最新权重最大(n..1)。
+
+        按 Pine 的**顺序累加**（最新项先加），避免 numpy 成对求和与 Pine
+        相差 1 ULP 而令 ``hi > hi[1]`` 这类严格比较翻转。
+        """
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        n = int(n)
+        norm = float(n * (n + 1)) / 2.0
+        for i in range(n - 1, size):
+            win = a[i - n + 1:i + 1][::-1]      # 最新在前(Pine src[0])
+            if np.isnan(win).any():
+                continue
+            s = 0.0
+            for k in range(n):
+                s += win[k] * float(n - k)
+            out[i] = s / norm
+        return out
+
+    @classmethod
+    def _hma(cls, a, n: int) -> np.ndarray:
+        """Pine ``ta.hma``: ``wma(2*wma(a,n/2) - wma(a,n), round(sqrt(n)))``。"""
+        a = np.asarray(a, dtype=np.float64)
+        n = int(n)
+        half = max(1, n // 2)
+        inner = 2.0 * cls._wma(a, half) - cls._wma(a, n)
+        return cls._wma(inner, max(1, int(np.floor(np.sqrt(n) + 0.5))))
+
+    @classmethod
+    def _smoothing(cls, src, ma_type, length: int) -> np.ndarray:
+        t = str(ma_type).upper()
+        if t == 'WMA':
+            return cls._wma(src, length)
+        if t == 'HMA':
+            return cls._hma(src, length)
+        return np.asarray(src, dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        prd = max(2, int(p.prd))
+        minperiod = max(0, int(p.minperiod))
+        maxperiod = max(1, int(p.maxperiod))
+        length = max(1, int(p.length))
+        ma_type = str(p.ma_type)
+        aggressive = bool(p.aggressive)
+
+        h = np.asarray(self.high, dtype=np.float64)
+        l = np.asarray(self.low, dtype=np.float64)
+        c = np.asarray(self.close, dtype=np.float64)
+        n = len(c)
+
+        # ---- 新高/新低 + 可选平滑 ----
+        src_hi = l if aggressive else h
+        src_lo = h if aggressive else l
+        hi = self._smoothing(self._highest(src_hi, prd), ma_type, length)
+        lo = self._smoothing(self._lowest(src_lo, prd), ma_type, length)
+
+        fb_up = np.full(n, np.nan, dtype=np.float64)
+        fb_dn = np.full(n, np.nan, dtype=np.float64)
+        out_val = np.full(n, np.nan, dtype=np.float64)
+        out_count = np.zeros(n, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        # ---- var 状态 ----
+        val = np.nan
+        count = 0
+        index = [0, 0]              # index[0] = 最近突破, index[1] = 上一次
+        c_prev = np.nan
+        val_prev = np.nan
+
+        def cross_up(a_prev, a_cur, b_prev, b_cur):
+            return (not np.isnan(a_prev) and not np.isnan(b_prev)
+                    and not np.isnan(b_cur) and a_prev < b_prev
+                    and a_cur > b_cur)
+
+        def cross_dn(a_prev, a_cur, b_prev, b_cur):
+            return (not np.isnan(a_prev) and not np.isnan(b_prev)
+                    and not np.isnan(b_cur) and a_prev > b_prev
+                    and a_cur < b_cur)
+
+        for t in range(n):
+            hi_t = hi[t]
+            lo_t = lo[t]
+            hi1 = hi[t - 1] if t >= 1 else np.nan
+            hi2 = hi[t - 2] if t >= 2 else np.nan
+            lo1 = lo[t - 1] if t >= 1 else np.nan
+            lo2 = lo[t - 2] if t >= 2 else np.nan
+            cond_hi = (not np.isnan(hi_t) and not np.isnan(hi1)
+                       and not np.isnan(hi2) and hi_t > hi1 and hi1 <= hi2)
+            cond_lo = (not np.isnan(lo_t) and not np.isnan(lo1)
+                       and not np.isnan(lo2) and lo_t < lo1 and lo1 >= lo2)
+
+            if cond_hi:
+                if count > 0:
+                    count = 0
+                count = count - 1
+                val = l[t]
+                index.insert(0, t)
+                index.pop()
+            if cond_lo:
+                if count < 0:
+                    count = 0
+                count = count + 1
+                val = h[t]
+                index.insert(0, t)
+                index.pop()
+
+            indx0 = index[0]
+            indx1 = index[1]
+            minbars = (indx1 + minperiod) < indx0
+            maxvalid = (t - maxperiod) <= indx0
+            breakdown = cross_dn(c_prev, c[t], val_prev, val)
+            breakup = cross_up(c_prev, c[t], val_prev, val)
+            fbup = bool(count < -1 and breakdown and maxvalid and minbars)
+            fbdown = bool(count > 1 and breakup and maxvalid and minbars)
+
+            if fbup:
+                count = 0
+                a0 = max(int(indx0), 0)
+                b0 = min(int(t), n - 1)
+                if b0 >= a0:
+                    fb_up[a0:b0 + 1] = val
+                    short_sig[t] = 1.0
+            if fbdown:
+                count = 0
+                a0 = max(int(indx0), 0)
+                b0 = min(int(t), n - 1)
+                if b0 >= a0:
+                    fb_dn[a0:b0 + 1] = val
+                    long_sig[t] = 1.0
+
+            out_val[t] = val
+            out_count[t] = float(count)
+            c_prev = c[t]
+            val_prev = val
+
+        return (hi, lo, out_val, out_count, fb_up, fb_dn,
+                long_sig, short_sig)
+
+
+def _mkr_rising(frame):
+    """MultiKernelRegression 的逐点配色条件：该线在涨（``line - line[1] > 0``）。
+
+    对应原码 ``nrp_color := direction ? bullish_color : bearish_color``
+    （``direction = nrp_sum - nrp_sum[1] > 0``）。主图 ``nrp`` 与偏差带共用同一规则。
+    """
+    try:
+        col = 'nrp' if 'nrp' in frame.columns else frame.columns[-1]
+        return frame[col].diff().fillna(0.0) > 0
+    except Exception:
+        return None
+
+
+class MultiKernelRegression(BtIndicator):
+    """Multi Kernel Regression [ChartPrime] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/o4YRa7e8-Multi-Kernel-Regression-ChartPrime/
+        © ChartPrime, MPL 2.0
+
+    概述
+    ----
+    用**核回归(Kernel Regression / Nadaraya–Watson 平滑)**对价格做加权平均,
+    内置 17 种核:
+
+    Triangular / Gaussian / Epanechnikov / Logistic / Log Logistic /
+    Cosine / Sinc / Laplace / Quartic / Parabolic / Exponential /
+    Silverman / Cauchy / Tent / Wave / Power / Morters
+
+    原码有两条分支(由 ``repaint`` 开关选择):
+
+    1. **Non-Repaint MA**(``repaint=false``): 用 ``precalculate_nrp`` 生成的权重
+       (第 ``i`` 个权重 = ``kernel(i²/bandwidth², 1)``)对最近 ``bandwidth`` 根价格
+       做加权平均得到 ``nrp``; 偏差带
+       ``nrp ± deviations·sqrt(Σ(source[i]-nrp[i])²/(bandwidth-1))``;
+       信号为 ``nrp`` 上/下穿自身前值(``Up`` / ``Down`` 标签)。
+    2. **重绘回归曲线**(``repaint=true``, 原码默认): 用 ``precalculate`` 预生成的
+       500×500 核权重矩阵, 在最后一根 bar 上对每个滞后 ``i`` 计算
+       ``Σ_j source[j]·kernel(i-j, bandwidth) / Σ_j kernel(i-j, bandwidth)``,
+       画出整条回归曲线与 Up/Down 标签。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``kernel(source, bandwidth, style)``: 17 个核函数逐条对齐
+    - ``precalculate(bandwidth, kernel)``:
+      ``c[i].weights[j] = kernel(i-j, bandwidth)``、
+      ``c[i].sumw = Σ_{j=0..499} kernel(i-j, bandwidth)``(原码仅首根 bar 构建一次)
+    - ``precalculate_nrp(bandwidth, kernel)``: 第 ``i`` 个权重
+      ``kernel(i²/bandwidth², 1)``, ``sumw = Σ``
+    - ``nrp = Σ_{i=0..bandwidth-1} nz(source[i])·weights[i] / sumw``
+    - ``nrp_stdev = sqrt(Σ_{i=0..bandwidth-1}(source[i]-nrp[i])²/(bandwidth-1))·deviations``
+    - 线色: ``direction = nrp - nrp[1] > 0`` → bullish / bearish
+
+    参数
+    ----
+    repaint : 原码模式开关(默认 True; 见下方「近似」说明)
+    kernel : 核类型(默认 'Laplace')
+    bandwidth : 带宽 / 回看长度(默认 14)
+    source : 源序列(默认 'close')
+    deviations : 偏差带倍数(默认 2.0)
+    enable : 是否显示偏差带(默认 False)
+    bullish_color / bearish_color : 涨 / 跌线色(默认 '#54C294' / '#EB3939')
+    confirm_bars : **方向确认根数**(默认 **10**)。原码信号
+        ``crossover(nrp, nrp[1])`` 本质是“MA 斜率变号”, 每个小极值都翻转一次 ——
+        实测默认下平均仅 8.4 根 bar 就换一次方向(8964 根共 1062 个信号), 趋势极不稳定。
+        本参数要求新方向**连续成立 confirm_bars 根**才确认翻转(同时用于信号与线色),
+        平均趋势段变为: 1→8.4 根 / 5→23.7 / **10→38.6** / 15→71 / 20→130。
+        ``confirm_bars=1`` 时与原码信号**完全等价**。
+
+    输出 lines(主图叠加)
+    ----
+    - nrp : Non-Repaint MA(核加权均价, 完整序列, 仅数据)
+    - nrp_up / nrp_dn : 按 ``nrp`` 斜率着色的 MA 线段(绿 / 红)
+    - nrp_std : 偏差(仅数据)
+    - upper / lower : ``nrp ± deviations·nrp_std``(``enable=False`` 时全 na)
+    - est : 重绘分支的核回归估计(取 500 权重矩阵的**第 0 行**, 仅数据)
+    - long_signal / short_signal : 方向翻转确认后的多 / 空信号
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码在 ``repaint=true``(默认)时**不计算也不绘制** ``nrp``/偏差带(返回 na),
+      只用 ``line``/``label`` 对象画整条重绘曲线; 本实现**始终**计算 ``nrp``
+      供取值/回测, 并保留重绘分支的估计 ``est``。
+    - ``est`` 取权重矩阵的**第 0 行**(即「用截止当前 bar 的数据对当前点做核回归」),
+      是**因果化**版本; 原码绘制的曲线在第 ``b`` 根 bar 上用的是第 ``bar_index-b`` 行,
+      属于**非因果**(整条曲线随最新 bar 重算), 无法表示为逐 bar 序列。
+    - ``est`` 的归一化分母沿用原码: ``sumw`` 是整行 500 个权重之和(含尚不存在的 bar),
+      故与「仅对可用样本归一」的常规核回归略有差异 —— 这是原码的固有行为。
+    - 原码 ``repaint=true`` 时的 Up/Down 标签同样非因果(在最后一根 bar 上回填整段历史),
+      故本实现统一使用**非重绘分支**的 ``nrp`` 穿越作为 long/short 信号(因果、可回测),
+      并新增 ``confirm_bars`` 方向确认以抑制高频翻转(``confirm_bars=1`` 等同原码)。
+    - 原码 ``line_style`` / ``label_size`` / ``labels`` / ``text_color`` 等纯展示参数
+      未复现。
+    - 主图与 Pine 一致：**一条** ``nrp`` 线，颜色按每根 bar 的斜率
+      （``direction = nrp - nrp[1] > 0``，涨为 ``bullish_color``、跌为
+      ``bearish_color``）用 ``color_by`` 逐点上色（不再拆成 ``nrp_up`` /
+      ``nrp_dn`` 两条线）。
+    - ``alertcondition`` 未复现; 未内置 ``step()``。
+    """
+    lines = ('nrp', 'nrp_up', 'nrp_dn', 'nrp_std', 'upper', 'lower', 'est',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        repaint=True,
+        kernel='Laplace',
+        bandwidth=14,
+        source='close',
+        deviations=2.0,
+        enable=False,
+        bullish_color='#54C294',
+        bearish_color='#EB3939',
+        confirm_bars=10,
+    )
+    #: 主图与 Pine 一致：**一条** ``nrp`` 线（原码 `plot(nrp_sum, "Non Repaint MA",
+    #: nrp_color)`），颜色按每根 bar 的斜率（涨=bullish / 跌=bearish）逐点上色。
+    #: ``next()`` 里的 ``self`` 是 KLine，够不到指标自己的 ``PlotInfo``，故用类级
+    #: ``color_rules`` 声明，由 ``core.py`` 建完 IndFrame 后落地。
+    color_rules = [
+        dict(color='#54C294', else_color='#EB3939', condition=_mkr_rising),
+    ]
+    # 只画**一条** ``nrp``（原码 `plot(nrp_sum, ...)`）；`nrp_up` / `nrp_dn` 只作
+    # 兼容数据列保留，不再上图。
+    isplot = dict(nrp=True, nrp_up=False, nrp_dn=False, nrp_std=False,
+                  upper=True, lower=True, est=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        nrp=LineStyle(line_color='#54C294', line_width=3.0),
+        nrp_up=LineStyle(line_color='#54C294', line_width=3.0),
+        nrp_dn=LineStyle(line_color='#EB3939', line_width=3.0),
+        upper=LineStyle(line_color='#787B86', line_width=1.0,
+                        line_dash=LineDash.dashed),
+        lower=LineStyle(line_color='#787B86', line_width=1.0,
+                        line_dash=LineDash.dashed),
+    )
+    signalstyle = dict(
+        # [修改] 原代码用的是 'label_up' / 'label_down'（TradingView label.style_label_up/down
+        #   的写法），但这两个名字既不在框架 ``Markers`` 枚举里、也不是 bokeh 支持的
+        #   marker，会触发 E-1001 BAD_COLUMN_NAME 且信号标记被静默丢弃。
+        #   改成语义等价的 bokeh 原生标记：
+        #       label_up   -> triangle
+        #       label_down -> inverted_triangle
+        long_signal=SignalStyle(
+            'low', '#54C294', 'triangle', True, True, 10),
+        short_signal=SignalStyle(
+            'high', '#EB3939', 'inverted_triangle', True, True, 10),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具: 17 种核函数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sq(x):
+        return np.power(x, 2)
+
+    @classmethod
+    def _kernel(cls, s, b, kind):
+        """Pine ``kernel(source, bandwidth, style)``。
+
+        ``s`` 可为标量或数组; ``b`` 为带宽(标量)。
+        """
+        s = np.asarray(s, dtype=np.float64)
+        b = float(b)
+        with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+            r = s / b
+            ar = np.abs(r)
+            if kind == 'Triangular':
+                out = np.where(ar <= 1.0, 1.0 - ar, 0.0)
+            elif kind == 'Gaussian':
+                out = np.exp(-cls._sq(r) / 2.0) / np.sqrt(2.0 * np.pi)
+            elif kind == 'Epanechnikov':
+                out = np.where(ar <= 1.0, (3.0 / 4.0) * (1.0 - cls._sq(r)),
+                               0.0)
+            elif kind == 'Logistic':
+                out = 1.0 / (np.exp(r) + 2.0 + np.exp(-r))
+            elif kind == 'Log Logistic':
+                out = 1.0 / np.power(1.0 + ar, 2)
+            elif kind == 'Cosine':
+                out = np.where(ar <= 1.0,
+                               (np.pi / 4.0) * np.cos((np.pi / 2.0) * r),
+                               0.0)
+            elif kind == 'Sinc':
+                # 原码: source == 0 ? 1 : sin(pi*source/bw)/(pi*source/bw)
+                out = np.where(s == 0.0, 1.0,
+                               np.sin(np.pi * s / b) / (np.pi * s / b))
+            elif kind == 'Laplace':
+                out = (1.0 / (2.0 * b)) * np.exp(-ar)
+            elif kind == 'Quartic':
+                out = np.where(
+                    ar <= 1.0,
+                    (15.0 / 16.0) * np.power(1.0 - cls._sq(r), 2), 0.0)
+            elif kind == 'Parabolic':
+                out = np.where(ar <= 1.0, 1.0 - np.power(r, 2), 0.0)
+            elif kind == 'Exponential':
+                out = (1.0 / b) * np.exp(-ar)
+            elif kind == 'Silverman':
+                out = np.where(
+                    ar <= 0.5,
+                    0.5 * np.exp(-r / 2.0) * np.sin(r / 2.0 + np.pi / 4.0),
+                    0.0)
+            elif kind == 'Cauchy':
+                out = 1.0 / (np.pi * b * (1.0 + cls._sq(r)))
+            elif kind == 'Tent':
+                out = np.where(ar <= 1.0, 1.0 - ar, 0.0)
+            elif kind == 'Wave':
+                out = np.where(ar <= 1.0, (1.0 - ar) * np.cos(np.pi * s / b),
+                               0.0)
+            elif kind == 'Power':
+                out = np.where(ar <= 1.0,
+                               np.power(1.0 - np.power(ar, 3), 3), 0.0)
+            elif kind == 'Morters':
+                out = np.where(ar <= np.pi,
+                               (1.0 + np.cos(r)) / (2.0 * np.pi * b), 0.0)
+            else:
+                out = np.where(ar <= 1.0, 1.0 - ar, 0.0)
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        bw = max(1, int(p.bandwidth))
+        kernel = str(p.kernel)
+        dev = float(p.deviations)
+        enable = bool(p.enable)
+
+        src_name = str(p.source)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+        if src_name == 'hl2':
+            src = (np.asarray(self.high, dtype=np.float64) + np.asarray(
+                self.low, dtype=np.float64)) / 2.0
+        elif src_name == 'hlc3':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 3.0
+        elif src_name == 'ohlc4':
+            src = (np.asarray(self.open, dtype=np.float64)
+                   + np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 4.0
+        else:
+            src = close
+
+        # ---- precalculate_nrp: 第 i 个权重 = kernel(i²/bw², 1) ----
+        i_idx = np.arange(bw, dtype=np.float64)
+        arg = (i_idx ** 2) / (float(bw) ** 2)
+        w_nrp = self._kernel(arg, 1.0, kernel)
+        sumw_nrp = float(w_nrp.sum())
+
+        # ---- Non-Repaint MA ----
+        # 按 Pine 的“顺序累加”(i=0 即最新项先加)求和，避免 numpy 成对求和相差 1 ULP
+        # 而使 nrp 的严格比较(信号穿越判定)翻转。
+        nrp = np.full(n, np.nan, dtype=np.float64)
+        if sumw_nrp != 0.0:
+            for t in range(bw - 1, n):
+                acc = 0.0
+                for i in range(bw):
+                    v = src[t - i]
+                    if np.isnan(v):
+                        v = 0.0                      # nz()
+                    acc += v * w_nrp[i]
+                nrp[t] = acc / sumw_nrp
+
+        # ---- 偏差 (原码在非重绘分支无条件计算) ----
+        nrp_std = np.full(n, np.nan, dtype=np.float64)
+        if bw >= 2:
+            for t in range(bw - 1, n):
+                sumsq = 0.0
+                for i in range(bw):
+                    sumsq += (src[t - i] - nrp[t - i]) ** 2
+                nrp_std[t] = np.sqrt(sumsq / (bw - 1)) * dev
+
+        # ---- 方向确认 (confirm_bars) ----
+        # 原码信号为 crossover(nrp, nrp[1]) / crossunder(nrp, nrp[1]), 即“MA 斜率变号”,
+        # 每个局部极值都会翻转一次(实测平均 8.4 根 bar 换一次方向, 趋势极不稳定)。
+        # 这里要求新方向连续 confirm_bars 根成立才翻转, 同时驱动信号与线色。
+        # confirm_bars=1 时与原码完全等价。
+        confirm = max(1, int(p.confirm_bars))
+        dir_state = np.zeros(n, dtype=np.int64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        state = 0
+        run = 0
+        prev_raw = 0
+        for t in range(1, n):
+            a0, a1 = nrp[t], nrp[t - 1]
+            if np.isnan(a0) or np.isnan(a1):
+                dir_state[t] = state
+                continue
+            raw = 1 if a0 > a1 else (-1 if a0 < a1 else 0)
+            if raw == 0 or raw == state:
+                run = 0
+            elif state == 0:                     # 首个方向: 直接确立, 不发信号
+                state = raw
+                run = 0
+            else:
+                run = run + 1 if raw == prev_raw else 1
+                if run >= confirm:
+                    state = raw
+                    run = 0
+                    if state > 0:
+                        long_sig[t] = 1.0
+                    else:
+                        short_sig[t] = 1.0
+            prev_raw = raw
+            dir_state[t] = state
+
+        nrp_up = np.where(dir_state > 0, nrp, np.nan)
+        nrp_dn = np.where(dir_state <= 0, nrp, np.nan)
+
+        upper = np.where(enable, nrp + nrp_std, np.nan)
+        lower = np.where(enable, nrp - nrp_std, np.nan)
+
+        # ---- precalculate: c[i].weights[j] = kernel(i-j, bw)
+        #      本实现取第 0 行(kernel(-j, bw)), 即"对当前点的核回归" ----
+        j_idx = np.arange(500, dtype=np.float64)
+        w0 = self._kernel(-j_idx, float(bw), kernel)
+        sumw0 = float(w0.sum())
+        est = np.full(n, np.nan, dtype=np.float64)
+        if sumw0 != 0.0:
+            for t in range(n):
+                J = min(t, 499)
+                seg = src[t - J:t + 1][::-1]        # source[0..J]
+                est[t] = float((seg * w0[:J + 1]).sum() / sumw0)
+
+        # ---- 信号: 见上方的“方向确认” ----
+
+        return (nrp, nrp_up, nrp_dn, nrp_std, upper, lower, est,
+                long_sig, short_sig)
+
+
+class TwinOptimizedTrendTracker(BtIndicator):
+    """Twin Optimized Trend Tracker (TOTT) → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5 ``strategy``):
+        https://cn.tradingview.com/script/eENf7NpJ/
+        created by @Anil_Ozeksi / developer ANIL ÖZEKŞİ / author @kivancozbilgic
+
+    概述
+    ----
+    OTT(Optimized Trend Tracker) 的 **Twin(双线)** 变体:
+
+    1. 先按 ``mav`` 选一种均线算 ``MAvg``(SMA / EMA / WMA / TMA / VAR / WWMA /
+       ZLEMA / TSF);
+    2. 以 ``MAvg ± MAvg*percent%`` 得 ``longStop`` / ``shortStop``, 并做**单边棘轮**
+       (longStop 只升不降、shortStop 只降不升), 得到趋势状态 ``dir``;
+    3. ``MT = dir==1 ? longStop : shortStop``;
+       ``OTT = MAvg > MT ? MT*(200+percent)/200 : MT*(200-percent)/200``;
+    4. **Twin 双线**: ``OTTup = OTT*(1+coeff)``、``OTTdn = OTT*(1-coeff)``,
+       主图绘制 ``OTTup[2]`` / ``OTTdn[2]``(滞后 2 根), 两线之间是 "Flat Zone"
+       蓝色填充;
+    5. 信号: ``buy = crossover(MAvg, OTTup[2])``、``sell = crossunder(MAvg, OTTdn[2])``;
+       原码画面上还要求 ``O1 > K2`` / ``O2 > K1``(最近买/卖信号的新旧关系)才显示
+       Buy / Sell 文本标签, 但 ``strategy.entry`` 用的是**未过滤**的原始信号。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``Var_Func``: ``vCMO = nz((vUD-vDD)/(vUD+vDD))``(vUD/vDD 为 ``var_length``
+      周期变动求和), ``VAR := nz(valpha*|vCMO|*src) + (1-valpha*|vCMO|)*nz(VAR[1])``
+      (0 播种)
+    - ``Wwma_Func``: ``wwalpha = 1/length``, 同样 0 播种
+    - ``Zlema_Func``: ``zxLag = length/2``(偶数时) / ``(length-1)/2``,
+      ``zxEMAData = src+src-src[zxLag]``, 再 ``ta.ema(zxEMAData, length)``
+    - ``Tsf_Func``: ``lrs = linreg(src,length,0) - linreg(src,length,1)``,
+      ``TSF = linreg(src,length,0) + lrs``
+    - ``TMA = sma(sma(src, ceil(length/2)), floor(length/2)+1)``
+    - ``fark = MAvg*percent*0.01``; ``longStop := MAvg > longStopPrev ?
+      max(longStop, longStopPrev) : longStop``(shortStop 对称)
+    - ``dir := dir==-1 and MAvg>shortStopPrev ? 1 : dir==1 and
+      MAvg<longStopPrev ? -1 : dir``
+
+    参数
+    ----
+    length : OTT 周期(默认 40)
+    percent : 优化常数(默认 1.0)
+    coeff : Twin OTT 系数(默认 0.001)
+    ma_type : 'SMA' / 'EMA' / 'WMA' / 'TMA' / 'VAR' / 'WWMA' / 'ZLEMA' / 'TSF'
+        (默认 'VAR')
+    var_length : VAR 的 CMO 回看周期(原码固定 9, 默认 9)
+    source : 源序列(默认 'close')
+    ma_seed : VAR / WWMA 的递归初值。``'first'``(默认) = 用源序列首值播种，
+        ``'zero'`` = 完全复现原码(``nz(VAR[1])`` 即 0 播种)。
+        原码 0 播种时，``ma_type='VAR'`` 下 ``MAvg`` 会从 0 缓慢爬升，
+        前 ~300 根远低于价格、把主图 Y 轴拉到底（平滑周期越长越明显）；
+        本库默认改用首值播种（与 ``StochasticOptimizedTrendTracker`` 同类处理）。
+    show_support : 是否绘制支撑线 ``MAvg``(默认 True)
+    show_signals : 是否显示 Buy / Sell 标记(默认 True)
+    qty : ``step()`` 每次下单手数(默认 1)
+
+    输出 lines(主图叠加)
+    ----
+    - ma_avg : 支撑线 MAvg(蓝, 线宽 2; ``show_support=False`` 时置 NaN)
+    - ott : OTT 原始值(仅数据)
+    - ott_up / ott_dn : ``OTTup[2]`` / ``OTTdn[2]``(绿 / 红, 线宽 2)
+    - buy_label / sell_label : 原码画面上带 ``O1>K2`` / ``O2>K1`` 过滤的
+      Buy / Sell 标记(0/1, 仅数据)
+    - long_signal / short_signal : **原始** ``crossover`` / ``crossunder`` 信号
+      (与原码 ``strategy.entry`` 一致, 供 ``step()`` 使用), 逐点文本 'Buy'/'Sell'
+
+    交易逻辑(见 ``step``)
+    ----
+    对应原码 ``strategy.entry('Long'/'Short')``: 买信号 → 目标仓位 ``+qty``;
+    卖信号 → 目标仓位 ``-qty``(``strategy.entry`` 反手时自动平掉旧仓)。
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``plot(nz(OTTup[2]))`` / ``plot(nz(OTTdn[2]))`` 在前 2 根 bar 会被 ``nz``
+      变成 0(把主图 Y 轴拉到底), 本实现保留 NaN; 其余 bar 完全一致。
+    - 原码 ``fill(mPlot, PPLOT, ...)`` 的 Up/DownTrend Highlighter(价格与支撑线之间
+      的涨跌底色)未复现; Flat Zone(``OTTup``↔``OTTdn`` 蓝底)已用 ``bandstyle`` 复刻。
+    - 原码 ``Timerange()`` 起止日期过滤(默认 2005~9999, 实际不过滤)未复现。
+    - ``showsignalsk`` 只影响**画标记**、不影响 ``strategy.entry``, 故本实现
+      ``long_signal``/``short_signal`` 用未过滤信号驱动 ``step()``, 过滤后的标记
+      另存 ``buy_label``/``sell_label``; 逐点文本 'Buy'/'Sell' 落在信号列上
+      (比原码画面略多, 原码只在过滤后位置显示文本)。
+    - ``ma_type='WWMA'`` 时原码从 0 播种, 预热期 ``MAvg`` 会明显低于价格, 本实现
+      按原码保留该行为。
+    - ``ma_seed='zero'`` 时完全复现原码的 0 播种；默认 ``'first'`` 是为避免
+      原码在 VAR/WWMA 下预热期的巨大落差（数值与信号仅预热段不同）。
+    - Pine ``ta.ema`` 播种语义本库有两种实现, 此处采用**首值播种**。
+    - ``alertcondition`` 未复现。
+    """
+    lines = ('ma_avg', 'ott', 'ott_up', 'ott_dn',
+             'buy_label', 'sell_label',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        length=40,
+        percent=1.0,
+        coeff=0.001,
+        ma_type='VAR',
+        var_length=9,
+        source='close',
+        ma_seed='first',
+        show_support=True,
+        show_signals=True,
+        qty=1,
+    )
+    isplot = dict(ma_avg=True, ott=False, ott_up=True, ott_dn=True,
+                  buy_label=False, sell_label=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        ma_avg=LineStyle(line_color='#0585E1', line_width=2.0),
+        ott_up=LineStyle(line_color='#008000', line_width=2.0),
+        ott_dn=LineStyle(line_color='#FF0000', line_width=2.0),
+    )
+    bandstyle = [
+        # fill(pALLup, pALLdn, color=color.new(color.blue, 90)) —— Flat Zone
+        BandStyle(lower='ott_dn', upper='ott_up',
+                  fill_color='#0000FF', fill_alpha=0.10, line_color=None),
+    ]
+    # 原码用 shape.labelup / labeldown(文字 Buy / Sell); bokeh 用三角 + 逐点文本
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#008000', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#FF0000', 'inverted_triangle', True, True, 12),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: Buy / Sell
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        out = {}
+        for name, txt in (('long_signal', 'Buy'), ('short_signal', 'Sell')):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = txt
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.sma(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _sum(a, n: int) -> np.ndarray:
+        return pd.Series(np.asarray(a, dtype=np.float64)).rolling(
+            int(n), min_periods=int(n)).sum().to_numpy()
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.ema(pd.Series(np.asarray(a, dtype=np.float64)), int(n)), dtype=np.float64)
+
+    @staticmethod
+    def _wma(a, n: int) -> np.ndarray:
+        """Pine ``ta.wma``: 最新权重最大(n..1), 按 Pine 顺序累加。"""
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        n = int(n)
+        norm = float(n * (n + 1)) / 2.0
+        for i in range(n - 1, size):
+            win = a[i - n + 1:i + 1][::-1]          # 最新在前
+            if np.isnan(win).any():
+                continue
+            acc = 0.0
+            for k in range(n):
+                acc += win[k] * float(n - k)
+            out[i] = acc / norm
+        return out
+
+    @staticmethod
+    def _linreg(a, n: int, offset: float = 0.0) -> np.ndarray:
+        """Pine ``ta.linreg``: ``src[0]``(最新)对应 ``per=1``。"""
+        a = np.asarray(a, dtype=np.float64)
+        size = len(a)
+        out = np.full(size, np.nan, dtype=np.float64)
+        n = int(n)
+        if n < 1 or size < n:
+            return out
+        per = np.arange(1, n + 1, dtype=np.float64)
+        sumX = float(per.sum())
+        sumXSqr = float((per * per).sum())
+        den = n * sumXSqr - sumX * sumX
+        if den == 0:
+            return out
+        for i in range(n - 1, size):
+            win = a[i - n + 1:i + 1][::-1]
+            if np.isnan(win).any():
+                continue
+            sumY = float(win.sum())
+            sumXY = float((win * per).sum())
+            slope = (n * sumXY - sumX * sumY) / den
+            out[i] = sumY / n - slope * sumX / n + slope * offset
+        return out
+
+    @classmethod
+    def _var_func(cls, src, length: int, var_length: int,
+                  seed: float = 0.0) -> np.ndarray:
+        """Pine ``Var_Func``: 基于 CMO 的自适应均线。
+
+        ``seed`` 为递归初值 ``nz(VAR[1])``: 原码为 0(``seed=0.0``),
+        本库默认改用源序列首值(见类文档「近似」说明)。
+        """
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        diff = np.full(n, np.nan, dtype=np.float64)
+        if n > 1:
+            diff[1:] = src[1:] - src[:-1]
+        vud1 = np.where(np.isnan(diff), np.nan, np.where(diff > 0, diff, 0.0))
+        vdd1 = np.where(np.isnan(diff), np.nan, np.where(diff < 0, -diff, 0.0))
+        vUD = cls._sum(vud1, var_length)
+        vDD = cls._sum(vdd1, var_length)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            vCMO = (vUD - vDD) / (vUD + vDD)
+        vCMO = np.nan_to_num(vCMO, nan=0.0)          # nz()
+        valpha = 2.0 / (float(length) + 1.0)
+        out = np.zeros(n, dtype=np.float64)
+        prev = float(seed)
+        for i in range(n):
+            w = valpha * abs(float(vCMO[i]))
+            out[i] = w * src[i] + (1.0 - w) * prev
+            prev = out[i]
+        return out
+
+    @classmethod
+    def _wwma_func(cls, src, length: int,
+                   seed: float = 0.0) -> np.ndarray:
+        """Pine ``Wwma_Func``: ``alpha = 1/length``。
+
+        ``seed`` 语义同 :meth:`_var_func`(原码 0 播种)。
+        """
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        alpha = 1.0 / float(length)
+        out = np.zeros(n, dtype=np.float64)
+        prev = float(seed)
+        for i in range(n):
+            out[i] = alpha * src[i] + (1.0 - alpha) * prev
+            prev = out[i]
+        return out
+
+    @classmethod
+    def _zlema_func(cls, src, length: int) -> np.ndarray:
+        """Pine ``Zlema_Func``。"""
+        src = np.asarray(src, dtype=np.float64)
+        half = float(length) / 2.0
+        lag = int(half) if half == round(half) else int((length - 1) / 2)
+        zx = src + src - cls._shift(src, lag)
+        return cls._ema(zx, length)
+
+    @classmethod
+    def _tsf_func(cls, src, length: int) -> np.ndarray:
+        """Pine ``Tsf_Func``: 时间序列预测。"""
+        lrc = cls._linreg(src, length, 0.0)
+        lrc1 = cls._linreg(src, length, 1.0)
+        return cls._linreg(src, length, 0.0) + (lrc - lrc1)
+
+    @classmethod
+    def _get_ma(cls, src, length: int, var_length: int, ma_type: str,
+                seed: float = 0.0) -> np.ndarray:
+        t = str(ma_type).upper()
+        if t == 'SMA':
+            return cls._sma(src, length)
+        if t == 'EMA':
+            return cls._ema(src, length)
+        if t == 'WMA':
+            return cls._wma(src, length)
+        if t == 'TMA':
+            inner = cls._sma(src, int(np.ceil(length / 2.0)))
+            return cls._sma(inner, int(np.floor(length / 2.0)) + 1)
+        if t == 'VAR':
+            return cls._var_func(src, length, var_length, seed)
+        if t == 'WWMA':
+            return cls._wwma_func(src, length, seed)
+        if t == 'ZLEMA':
+            return cls._zlema_func(src, length)
+        if t == 'TSF':
+            return cls._tsf_func(src, length)
+        return cls._var_func(src, length, var_length, seed)
+
+    @staticmethod
+    def _barssince(cond) -> np.ndarray:
+        """Pine ``ta.barssince``: 距上次 cond 为真的 bar 数, 从未发生为 NaN。"""
+        cond = np.asarray(cond, dtype=bool)
+        n = len(cond)
+        out = np.full(n, np.nan, dtype=np.float64)
+        last = -1
+        for i in range(n):
+            if cond[i]:
+                last = i
+            if last >= 0:
+                out[i] = float(i - last)
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        length = max(1, int(p.length))
+        percent = float(p.percent)
+        coeff = float(p.coeff)
+        var_length = max(1, int(p.var_length))
+        ma_type = str(p.ma_type)
+        show_support = bool(p.show_support)
+        show_signals = bool(p.show_signals)
+
+        src_name = str(p.source)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+        if src_name == 'hl2':
+            src = (np.asarray(self.high, dtype=np.float64) + np.asarray(
+                self.low, dtype=np.float64)) / 2.0
+        elif src_name == 'hlc3':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 3.0
+        elif src_name == 'ohlc4':
+            src = (np.asarray(self.open, dtype=np.float64)
+                   + np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 4.0
+        else:
+            src = close
+
+        # ---- MAvg ----
+        # ma_seed='first'(默认) 用源序列首值播种 VAR/WWMA, 避免原码 0 播种导致
+        # 前 ~300 根 MAvg 严重低于价格、把主图 Y 轴拉到底;
+        # ma_seed='zero' 则完全复现原码(0 播种)。
+        seed = 0.0
+        if str(p.ma_seed).lower() != 'zero':
+            seed = float(src[0]) if n else 0.0
+        ma = self._get_ma(src, length, var_length, ma_type, seed)
+
+        # ---- 棘轮 + dir + OTT ----
+        fark = ma * percent * 0.01
+        long_stop = ma - fark
+        short_stop = ma + fark
+        ott = np.full(n, np.nan, dtype=np.float64)
+        first = int(np.argmax(~np.isnan(ma))) if np.any(~np.isnan(ma)) else n
+        if first < n:
+            prev_ls = long_stop[first]      # nz(longStop[1], longStop)
+            prev_ss = short_stop[first]
+            prev_dir = 1.0                  # dir := nz(dir[1], dir), 初值 1
+            for i in range(first, n):
+                m = ma[i]
+                ls_prev, ss_prev = prev_ls, prev_ss      # longStopPrev / shortStopPrev
+                ls = long_stop[i]
+                ls_new = max(ls, ls_prev) if m > ls_prev else ls
+                ss = short_stop[i]
+                ss_new = min(ss, ss_prev) if m < ss_prev else ss
+
+                if prev_dir == -1.0 and m > ss_prev:
+                    cur_dir = 1.0
+                elif prev_dir == 1.0 and m < ls_prev:
+                    cur_dir = -1.0
+                else:
+                    cur_dir = prev_dir
+
+                mt = ls_new if cur_dir == 1.0 else ss_new
+                if m > mt:
+                    ott[i] = mt * (200.0 + percent) / 200.0
+                else:
+                    ott[i] = mt * (200.0 - percent) / 200.0
+                prev_ls, prev_ss, prev_dir = ls_new, ss_new, cur_dir
+
+        ott_up = ott * (1.0 + coeff)
+        ott_dn = ott * (1.0 - coeff)
+        # plot(nz(OTTup[2])) / plot(nz(OTTdn[2])) —— 前 2 根保留 NaN(见文档)
+        ott_up_s2 = self._shift(ott_up, 2)
+        ott_dn_s2 = self._shift(ott_dn, 2)
+        ma_avg = ma if show_support else np.full(n, np.nan)
+
+        # ---- 信号: crossover(MAvg, OTTup[2]) / crossunder(MAvg, OTTdn[2]) ----
+        ma_prev = self._shift(ma, 1)
+        up_prev = self._shift(ott_up_s2, 1)
+        dn_prev = self._shift(ott_dn_s2, 1)
+        ok_buy = (~np.isnan(ma) & ~np.isnan(ma_prev) & ~np.isnan(ott_up_s2)
+                  & ~np.isnan(up_prev))
+        ok_sell = (~np.isnan(ma) & ~np.isnan(ma_prev) & ~np.isnan(ott_dn_s2)
+                   & ~np.isnan(dn_prev))
+        with np.errstate(invalid='ignore'):
+            buy = np.asarray(ok_buy & (ma_prev <= up_prev)
+                             & (ma > ott_up_s2), dtype=bool)
+            sell = np.asarray(ok_sell & (ma_prev >= dn_prev)
+                              & (ma < ott_dn_s2), dtype=bool)
+
+        # 原码画面额外要求 O1 > K2 / O2 > K1
+        k1 = self._barssince(buy)
+        k2 = self._barssince(sell)
+        o1 = self._barssince(self._shift(buy.astype(np.float64), 1) > 0.5)
+        o2 = self._barssince(self._shift(sell.astype(np.float64), 1) > 0.5)
+        with np.errstate(invalid='ignore'):
+            buy_lab = np.asarray(buy & (o1 > k2), dtype=bool) & show_signals
+            sell_lab = np.asarray(sell & (o2 > k1), dtype=bool) & show_signals
+
+        return (ma_avg, ott, ott_up_s2, ott_dn_s2,
+                buy_lab.astype(np.float64), sell_lab.astype(np.float64),
+                buy.astype(np.float64), sell.astype(np.float64))
+
+    # ------------------------------------------------------------------
+    # 交易逻辑: 对应原码 strategy.entry('Long'/'Short')(反向自动反手)
+    # ------------------------------------------------------------------
+    def step(self):
+        """Twin OTT 交易逻辑, 对应原码::
+
+            if buySignalk
+                strategy.entry('Long', strategy.long, when=Timerange())
+            if sellSignalk
+                strategy.entry('Short', strategy.short, when=Timerange())
+
+        即买信号 → 目标仓位 ``+qty``; 卖信号 → 目标仓位 ``-qty``
+        (``strategy.entry`` 反手时自动平掉旧仓)。
+
+        用法: 在 ``Strategy.next`` 中调用 ``self.tott.step()``。
+        """
+        kline = self.kline
+        if kline is None:
+            return
+        p = kline.params
+        qty = max(1, int(p.get('qty', 1)))
+        if self.long_signal.new:
+            kline.set_target_size(qty)
+        elif self.short_signal.new:
+            kline.set_target_size(-qty)
+
+
+class ScalpPro(BtIndicator):
+    """Scalp Pro [Velly] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v2 ``study``):
+        https://cn.tradingview.com/script/YuWaSZ1Z/
+        © Velly / orhanveli（"Scalp Pro" 剥头皮指标）
+
+    概述
+    ----
+    由 **Ehlers 2 极点谐振滤波器(2-pole SuperSmoother)** 组合成的 MACD 型振荡器:
+
+    1. ``ssmooth``  : 对 ``close`` 做 2 极点滤波(Fast Line, 默认 8);
+    2. ``ssmooth2`` : 对 ``close`` 做 2 极点滤波(Slow Line, 默认 10);
+    3. ``macd = (ssmooth - ssmooth2) * scale``
+       (原码 ``*10000000``, 纯粹为了把振幅放大到与价格同量级便于观察);
+    4. ``ssmooth3`` : 对 ``macd`` 再做一次 2 极点滤波(Smoothness, 默认 8)
+       —— 即信号线;
+    5. 信号: ``buy = crossover(macd, ssmooth3)``、
+       ``sell = crossunder(macd, ssmooth3)``。
+
+    滤波器(原码逐行对齐)
+    ----
+    - ``f = 1.414*pi/length``; ``a = exp(-f)``; ``c2 = 2a*cos(f)``;
+      ``c3 = -a*a``; ``c1 = 1-c2-c3``
+    - ``y := c1*(p + p[1])/2 + c2*nz(y[1]) + c3*nz(y[2])``
+      (``nz`` 把前值 na 当 0; 而 ``p[1]`` 在首根为 na 会使整个表达式为 na,
+      故 ``y`` 首根为 na、从第 2 根起以 0 初值递归)
+
+    参数
+    ----
+    - fast_length : Fast Line 周期(默认 8)
+    - slow_length : Slow Line 周期(默认 10)
+    - smooth_length : Smoothness(信号线周期, 默认 8)
+    - scale : ``macd`` 的放大倍数(原码 10000000; 设 1.0 可看真实差值)
+    - qty : ``step()`` 每次下单手数(默认 1)
+
+    > 填充样式由**类级** ``bandstyle`` 控制，直接改类里的 ``BandStyle``
+    > （``fill_color`` / ``fill_alpha``）即可；门面方法的 ``fill_alpha`` 只用于
+    > 可选地覆写透明度。
+
+    输出 lines(副图)
+    ----
+    - macd : ``(ssmooth - ssmooth2)*scale``(浅绿, 线宽 2)
+    - signal : ``ssmooth3`` —— 信号线(黄, 线宽 1)
+    - long_signal : ``crossover(macd, signal)``(逐点文本 'Buy')
+    - short_signal : ``crossunder(macd, signal)``(逐点文本 'Sell')
+
+    > 交易信号 / 文本也画在**副图**（``SignalStyle(..., overlap=False)``），并锚到
+    > 指标自己的线（``macd`` / ``signal``）。
+    >
+    > ⚠ ``macd``/``signal`` 的数值是**价格差 × scale``（默认 1e7）**，所以副图右侧的
+    > 刻度会是 8~10 位数（如 ``5,394,526,410``）。这是原码的写法：2 极点谐振滤波器
+    > 的启动瞬态在 ``c1`` 上差异很大（``ssmooth[1]`` 与 ``ssmooth2[1]`` 差的
+    > ``(c1_8-c1_10)·close`` ≈ 0.10×4688 ≈ 470，再 ×1e7 就是 ~5e9），几根 bar 后
+    > 差值才回到“正常 MACD”水平。想看可读的刻度就把 ``scale`` 调小（如 ``scale=1``
+    > 看真实差值，或 ``scale=1000``）。
+
+    交易逻辑(见 ``step``)
+    ----
+    原码是 ``study``(指标)，但脚本内注释掉了一行 ``strategy("Scalp Pro")``；
+    按买/卖信号反手: ``buy`` → 目标仓位 ``+qty``, ``sell`` → ``-qty``。
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``fill(p1, p2, color=black)`` 为不透明黑底；本实现用类级 ``bandstyle``
+      的半透明填充（默认浅绿 ``#B2E6B9`` @ 0.05，避免遮挡曲线）。
+      改颜色/透明度请直接改类里的 ``bandstyle``；门面 ``fill_alpha=<0~1>``
+      只覆写透明度（``0`` = 关闭填充），颜色仍取自类里的 ``bandstyle``。
+    - 原码 ``plotshape(..., style=shape.labelup/labeldown, text='Buy'/'Sell')``
+      用带文字的标签；本实现用 bokeh 三角标记 + 逐点信号文本复刻。
+    - ``scale`` 只影响振幅, 不改变信号; 因此 k 线量纲下的 ``macd`` 数值含义
+      与价格无关(原码即如此)。
+    - ``alertcondition`` 未复现。
+    """
+    lines = ('macd', 'signal', 'long_signal', 'short_signal')
+    category = 'momentum'
+    overlap = False
+    params = dict(
+        fast_length=8,
+        slow_length=10,
+        smooth_length=8,
+        scale=1.,
+        qty=1,
+    )
+    isplot = dict(macd=True, signal=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        macd=LineStyle(line_color="#217A21", line_width=2.0),
+        signal=LineStyle(line_color='#FFFF00', line_width=1.0),
+    )
+    bandstyle = [
+        # 原码 fill(p1, p2, color=black)
+        BandStyle(lower='macd', upper='signal',
+                  fill_color="#262F27", fill_alpha=0.2),
+    ]
+    # 原码 style=shape.labelup / labeldown —— bokeh 用三角 + 逐点文本。
+    # 第 4 个参数是 ``overlap``：原码画在**副图**（与 macd/signal 同一个 pane），
+    # 所以必须 ``overlap=False``；锚点不能再用 K 线的 ``low``/``high``（那是价格
+    # 量纲，放到 macd（~1e7）的副图里会跑到极下方），改用**指标自身的线**。
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'macd', '#008000', 'triangle', False, True, 12),
+        short_signal=SignalStyle(
+            'signal', '#FF0000', 'inverted_triangle', False, True, 12),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: Buy / Sell
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        out = {}
+        for name, txt in (('long_signal', 'Buy'), ('short_signal', 'Sell')):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = txt
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+    @staticmethod
+    def _ss_filter(src, length: int) -> np.ndarray:
+        """Pine 原码的 2 极点谐振滤波器(2-pole SuperSmoother)。
+
+        ``y := c1*(p+p[1])/2 + c2*nz(y[1]) + c3*nz(y[2])``
+        """
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        f = (1.414 * np.pi) / float(length)
+        a = np.exp(-f)
+        c2 = 2.0 * a * np.cos(f)
+        c3 = -a * a
+        c1 = 1.0 - c2 - c3
+        out = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            p = src[i]
+            p1 = src[i - 1] if i > 0 else np.nan
+            if np.isnan(p) or np.isnan(p1):
+                out[i] = np.nan                  # c1*na + 0 + 0 = na
+                continue
+            y1 = out[i - 1] if i > 0 else np.nan
+            y2 = out[i - 2] if i > 1 else np.nan
+            y1 = 0.0 if np.isnan(y1) else y1     # nz(y[1])
+            y2 = 0.0 if np.isnan(y2) else y2     # nz(y[2])
+            out[i] = c1 * (p + p1) * 0.5 + c2 * y1 + c3 * y2
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        fast = max(1, int(p.fast_length))
+        slow = max(1, int(p.slow_length))
+        smooth = max(1, int(p.smooth_length))
+        scale = float(p.scale)
+
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        ssmooth = self._ss_filter(close, fast)
+        ssmooth2 = self._ss_filter(close, slow)
+        macd = (ssmooth - ssmooth2) * scale
+        ssmooth3 = self._ss_filter(macd, smooth)
+
+        macd_prev = self._shift(macd, 1)
+        sig_prev = self._shift(ssmooth3, 1)
+        ok = (~np.isnan(macd) & ~np.isnan(sig_prev) & ~np.isnan(macd_prev)
+              & ~np.isnan(ssmooth3))
+        with np.errstate(invalid='ignore'):
+            buy = np.asarray(ok & (macd_prev <= sig_prev)
+                             & (macd > ssmooth3), dtype=bool)
+            sell = np.asarray(ok & (macd_prev >= sig_prev)
+                              & (macd < ssmooth3), dtype=bool)
+
+        return (macd, ssmooth3,
+                buy.astype(np.float64), sell.astype(np.float64))
+
+    # ------------------------------------------------------------------
+    # 交易逻辑: 按买 / 卖信号反手(对应原码注释掉的 strategy 版写法)
+    # ------------------------------------------------------------------
+    def step(self):
+        """Scalp Pro 交易逻辑: ``buy`` → 目标仓位 ``+qty``; ``sell`` → ``-qty``。
+
+        用法: 在 ``Strategy.next`` 中调用 ``self.scalp.step()``。
+        """
+        kline = self.kline
+        if kline is None:
+            return
+        p = kline.params
+        qty = max(1, int(p.get('qty', 1)))
+        if self.long_signal.new:
+            kline.set_target_size(qty)
+        elif self.short_signal.new:
+            kline.set_target_size(-qty)
+
+
+class BreaksAndRetests(BtIndicator):
+    """Breaks and Retests [HG] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/Xeeko6TV-Support-Resistance-with-Breaks-and-Retests/
+        © HoanGhetti
+
+    概述
+    ----
+    用 pivot 构造 **支撑 / 阻力箱体**, 并跟踪 **突破(Breakout)** 与
+    **回测/回踩(Retest)** 事件:
+
+    1. ``pl = fixnan(ta.pivotlow(low, bb, bb))``、``ph = fixnan(ta.pivothigh(high, bb, bb))``
+       —— 把 pivot 值锁存成阶梯序列(最近一次确认的支撑/阻力价);
+    2. 每次 ``ta.change(pl)`` 建一个支撑箱 ``[bar_index-bb, bar_index]``,
+       上边界取 ``s_yLoc``(pivot 两侧低点的较小者)、下边界为 ``pl``; 阻力箱对称;
+       箱体每根 confirmed bar 把右边界推到 ``bar_index+5``;
+    3. **突破**: ``cu = crossunder(close, sBot)``、``co = crossover(close, rTop)``,
+       且仅在 ``sBreak``/``rBreak`` 为 na 时触发一次;
+    4. **回测**: ``s1..s4`` / ``r1..r4`` 四类"价格回到箱体附近"的条件, 经
+       ``retestEvent`` 提炼出 **潜在回测**(``retEvent``) 与 **确认回测**(``retValid``);
+    5. 新 pivot 到来时: 若期间没有突破则删除旧箱体, 并把 ``sBreak``/``rBreak`` 复位。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``retestCondition(breakout, cond)`` =
+      ``ta.barssince(na(breakout)) > ret_since and cond``
+    - ``repaint(c1, c2, c3)`` =
+      ``repaint=='On' ? c1 : repaint=='High & Low' ? c2 : c3``
+      (``rThv`` 用 ``low``/``high``; ``rTcc`` 额外要求 ``barstate.isconfirmed``)
+    - ``retestEvent``: ``retActive = c1 or c2 or c3 or c4``;
+      ``retEvent = retActive and not retActive[1]``;
+      若 ``pType=='ph' ? y2 < valuewhen(retEvent, y2, 0) : y2 > valuewhen(retEvent, y2, 0)``
+      则 ``retEvent := retActive``; ``retValue = valuewhen(retEvent, y1, 0)``;
+      ``retConditions = repaint(close >= retValue, high >= retValue,
+      close >= retValue and isconfirmed)``(``pl`` 侧用 ``<=`` 与 ``low``);
+      ``retValid = 0 < barssince(retEvent) <= ret_valid and retConditions
+      and not retOccurred``; 命中后 ``retOccurred := true``
+
+    参数
+    ----
+    lookback : pivot 回看(默认 20, 原码 ``bb``)
+    ret_since : 突破后至少多少根 bar 才检测回测(默认 2)
+    ret_valid : 回测检测的有效 bar 上限(默认 2)
+    breakouts / retests : 是否输出突破 / 回测标签(默认 True / True)
+    repaint : 'On'(默认) / 'Off: Candle Confirmation' / 'Off: High & Low'
+    label_type : 'Full'('Break'/'Retest'/'P. Retest') /
+        'Simple'('Br'/'Re'/'P. Re') —— 仅影响逐点文本
+    support_color / resistance_color : 支撑 / 阻力配色(默认 '#FF0000' / '#089981')
+
+    输出 lines(主图叠加)
+    ----
+    - support : 支撑箱底(``pl``)阶梯线
+    - resistance : 阻力箱顶(``ph``)阶梯线
+    - s_top : 支撑箱顶(``s_yLoc``)阶梯线
+    - r_bot : 阻力箱底(``r_yLoc``)阶梯线
+    - long_signal : 阻力方向事件 —— **1 = 突破, 2 = 确认回测, 3 = 潜在回测**
+    - short_signal : 支撑方向事件 —— 同上(1/2/3)
+      (逐点显示见下方「信号文本与文本图标」)
+
+    信号文本与文本图标
+    ----
+    每个信号点用**两行**文本显示: **第 1 行 = 文本图标, 第 2 行 = 事件文本**,
+    覆盖 6 种状态(2 方向 × 3 事件):
+
+    | 方向 / 事件 | 突破 | 确认回测 | 潜在回测 |
+    | --- | --- | --- | --- |
+    | 看涨(阻力方向) | ``⬆`` | ``✔`` | ``↗`` |
+    | 看跌(支撑方向) | ``⬇`` | ``✖`` | ``↘`` |
+
+    实际标签形如 ``"⬆\nBreak"`` / ``"✔\nRetest"`` / ``"↗\nP. Retest"``
+    (第 1 行 = 文本图标, 第 2 行 = 事件文本)。
+    ⚠ ``label_type`` 仅为对应原码输入而保留, **不改变图形** —— 信号文本钩子
+    在 ``IndFrame`` 构造阶段被调用, 当时读不到指标参数(详见源码注释)。
+    框架会按锚点列自动决定展开方向(多头信号向下、空头向上)并逐行错开行距。
+
+    图标含义:
+    - **直箭头** ``⬆`` / ``⬇`` —— **突破**(水平被向上/向下穿越);
+    - **勾 / 叉** ``✔`` / ``✖`` —— **回测已确认**(看涨 / 看跌);
+    - **斜箭头** ``↗`` / ``↘`` —— **仅潜在回测**(方向强度较弱、尚未确认)。
+
+    > 信号标记本身已置 ``size=0``(不可见), 图形完全由上述文本给出;
+    > 如需恢复三角形标记, 把 ``signalstyle`` 里的两个 ``size`` 改回非 0 即可
+    > (此时文本会**同时保留**, 两者不互斥)。
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码**没有任何 ``plot``**, 全部用 ``box`` / ``label`` 对象呈现; 本实现把箱体
+      转成阶梯线列 + ``bandstyle`` 填充(原码箱体填充 = ``color.new(color, 90)``),
+      标签转成标准信号列 + 逐点文本。
+    - 原码箱体右边界每根 confirmed bar 推到 ``bar_index + 5``(向未来 5 根);
+      线列无法画到未来, 本实现只画到当前 bar。
+    - 原码"回测命中后 ``box.set_right(box[1], bar_index - retSince)`` 裁剪右边界"
+      只影响当根, **下一根 ``updateBox`` 又会把右边界推回** ``bar_index + 5``,
+      属瞬态效果, 本实现不复现。
+    - ``fixnan`` 首次有值时 ``ta.change(pl)`` 因 ``pl[1]`` 为 na 而**不触发**
+      (原码即如此 —— 第一个箱体被跳过), 本实现保持一致。
+    - 原码 ``outline`` / ``extend`` / ``label_size`` / ``override_text_color`` 等
+      纯样式参数未复现; ``alertcondition`` / ``alert()`` 未复现。
+    """
+    lines = ('support', 'resistance', 's_top', 'r_bot',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        lookback=20,
+        ret_since=2,
+        ret_valid=2,
+        breakouts=True,
+        retests=True,
+        repaint='On',
+        label_type='Full',
+        support_color='#FF0000',
+        resistance_color='#089981',
+    )
+    isplot = dict(support=False, resistance=False, s_top=True, r_bot=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        support=LineStyle(line_color='#FF0000', line_width=1.0),
+        resistance=LineStyle(line_color='#089981', line_width=1.0),
+        s_top=LineStyle(line_color='#FF0000', line_width=1.0),
+        r_bot=LineStyle(line_color='#089981', line_width=1.0),
+    )
+    # bandstyle = [
+    #     # 支撑箱: color.new(plColor, 90)（10% 不透明度）
+    #     BandStyle(lower='support', upper='s_top',
+    #               fill_color='#FF0000', fill_alpha=0.10, line_color=None),
+    #     # 阻力箱: color.new(phColor, 90)
+    #     BandStyle(lower='r_bot', upper='resistance',
+    #               fill_color='#089981', fill_alpha=0.10, line_color=None),
+    # ]
+    signalstyle = dict(
+        # [修改] 按要求改为**信号文本显示**: size=0 使三角形标记不可见,
+        # 仅保留逐点文本(Break / Retest / P. Retest)。
+        # 如需同时显示三角形, 把两个 size 改回 14 即可。
+        # 注: 不能用 SignalStyle(show=False) —— btplot.py 的 if signalshow: 会连
+        #     文本标签一起隐藏。
+        long_signal=SignalStyle(
+            'low', '#089981', 'triangle', True, True, 0),
+        short_signal=SignalStyle(
+            'high', '#FF0000', 'inverted_triangle', True, True, 0),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: 【文本图标】+ 事件文本, **分两行**显示(共 6 种状态)
+    # ------------------------------------------------------------------
+    #   方向 / 事件      突破    确认回测   潜在回测
+    #   看涨(阻力方向)     ⬆        ✔         ↗
+    #   看跌(支撑方向)     ⬇        ✔         ↘
+    #
+    # 图标含义:
+    #   突破     = 直箭头(⬆/⬇)   —— 水平被向上 / 向下穿越
+    #   确认回测 = 勾 / 勾(✔/✔) —— 回测已验证(看涨 / 看跌)，上涨回踩图标在上方，下跌回踩图标在下方
+    #   潜在回测 = 斜箭头(↗/↘) —— 仅初步预警, 方向强度较弱
+    # 标签形如 "⬆\nBreak"(第 1 行 = 图标, 第 2 行 = 事件文本)。
+    # 框架会按锚点列自动决定展开方向(多头向下、空头向上)并逐行错开行距。
+    #
+    # 为何不用 label_type 区分长短文案:
+    #   本钩子在 ``IndFrame.__init__`` 阶段就被调用(core.py 的 `_sig_text()`),
+    #   那时 ``self.params`` 为空、``self.kline`` 未挂载、``_indsetting``
+    #   也不含指标参数 —— **读不到 label_type**; 因此信号文本固定使用
+    #   Full 形式('Break'/'Retest'/'P. Retest')。``label_type`` 仅为
+    #   对应原码输入而保留, 不改变图形。
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        # 事件文本固定 Full 形式(原因见上方注释)
+        ev = {1: 'Break', 2: 'Retest', 3: 'P. Retest'}
+        # 文本图标: 6 种状态 = 2 方向 × 3 事件
+        icons = {'long_signal': {1: '⬆', 2: '✔', 3: '↗'},
+                 'short_signal': {1: '⬇', 2: '✔', 3: '↘'}}
+        out = {}
+        for name in ('long_signal', 'short_signal'):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                k = int(round(vals[i]))
+                # 第 1 行 = 文本图标, 第 2 行 = 事件文本
+                arr[i] = icons[name].get(k, '') + "\n" + ev.get(k, '')
+            out[name] = arr
+        return out
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pivot_flag(src, b, back, fwd, mode) -> bool:
+        """Pine ``ta.pivothigh/ta.pivotlow``: 绝对索引 ``b`` 处是否为 pivot。"""
+        n = len(src)
+        if b - back < 0 or b + fwd >= n:
+            return False
+        v = src[b]
+        if np.isnan(v):
+            return False
+        win = src[b - back:b]
+        if len(win) and np.isnan(win).any():
+            return False
+        rwin = src[b + 1:b + fwd + 1]
+        if len(rwin) == 0:
+            return False
+        if mode == 'high':
+            if len(win) and not (v > win.max()):
+                return False
+            return bool(v > rwin.max())
+        if len(win) and not (v < win.min()):
+            return False
+        return bool(v < rwin.min())
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        bb = max(1, int(p.lookback))
+        ret_since = max(1, int(p.ret_since))
+        ret_valid = max(1, int(p.ret_valid))
+        do_break = bool(p.breakouts)
+        do_retest = bool(p.retests)
+        mode = str(p.repaint)
+        r_cc = mode.startswith('Off: Candle')
+        r_hv = mode.startswith('Off: High')
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        support = np.full(n, np.nan, dtype=np.float64)      # pl
+        resist = np.full(n, np.nan, dtype=np.float64)       # ph
+        s_top = np.full(n, np.nan, dtype=np.float64)
+        s_bot = np.full(n, np.nan, dtype=np.float64)
+        r_top = np.full(n, np.nan, dtype=np.float64)
+        r_bot = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        def repaint(c1, c2, c3):
+            if r_cc:
+                return bool(c3)
+            if r_hv:
+                return bool(c2)
+            return bool(c1)
+
+        def cross_dn(prev, cur, lvl):
+            return (not np.isnan(prev) and not np.isnan(lvl)
+                    and prev > lvl and cur < lvl)
+
+        def cross_up(prev, cur, lvl):
+            return (not np.isnan(prev) and not np.isnan(lvl)
+                    and prev < lvl and cur > lvl)
+
+        def clear(arr, x0, x1):
+            if x0 is None or x1 is None:
+                return
+            a0 = max(int(min(x0, x1)), 0)
+            b0 = min(int(max(x0, x1)), n - 1)
+            if b0 >= a0:
+                arr[a0:b0 + 1] = np.nan
+
+        # ---- 状态(Pine var) ----
+        pl_v = np.nan
+        ph_v = np.nan
+        pl_prev = np.nan
+        ph_prev = np.nan
+        s_box = None                # dict(top, bot, left, right)
+        r_box = None
+        s_break = None              # var bool sBreak = na
+        r_break = None
+        since_na_s = 0              # ta.barssince(na(sBreak))
+        since_na_r = 0
+        # retestEvent 的内部 var(每个调用点一份)
+        st = {'r': dict(occurred=None, active_prev=False,
+                        last_y1=np.nan, last_y2=np.nan, since=None),
+              's': dict(occurred=None, active_prev=False,
+                        last_y1=np.nan, last_y2=np.nan, since=None)}
+
+        def retest_event(key, c1, c2, c3, c4, y1, y2, ptype, t):
+            """Pine ``retestEvent(...)`` → (retValid, retEvent)。"""
+            if not do_retest:
+                return False, False
+            stt = st[key]
+            ret_active = bool(c1 or c2 or c3 or c4)
+            ret_event = ret_active and (not stt['active_prev'])
+            y2_cur = y2[t]
+            vw_y2 = stt['last_y2']
+            if not np.isnan(vw_y2) and not np.isnan(y2_cur):
+                hit = (y2_cur < vw_y2) if ptype == 'ph' else (y2_cur > vw_y2)
+                if hit:
+                    ret_event = ret_active
+            if ret_event:
+                stt['last_y2'] = y2_cur
+                stt['last_y1'] = y1[t]
+            ret_value = stt['last_y1']
+            if ret_event:
+                stt['since'] = 0
+            elif stt['since'] is not None:
+                stt['since'] += 1
+            if ret_event:
+                stt['occurred'] = None
+            if ptype == 'ph':
+                rc = repaint(
+                    (not np.isnan(ret_value)) and close[t] >= ret_value,
+                    (not np.isnan(ret_value)) and high[t] >= ret_value,
+                    (not np.isnan(ret_value)) and close[t] >= ret_value)
+            else:
+                rc = repaint(
+                    (not np.isnan(ret_value)) and close[t] <= ret_value,
+                    (not np.isnan(ret_value)) and low[t] <= ret_value,
+                    (not np.isnan(ret_value)) and close[t] <= ret_value)
+            s_val = stt['since']
+            valid = bool(s_val is not None and 0 < s_val <= ret_valid and rc
+                         and stt['occurred'] is None)
+            if valid:
+                stt['occurred'] = True
+            stt['active_prev'] = ret_active
+            return valid, bool(ret_event)
+
+        for t in range(n):
+            b = t - bb
+            # ---- pivots + fixnan ----
+            if b >= 0:
+                if self._pivot_flag(high, b, bb, bb, 'high'):
+                    ph_v = high[b]
+                if self._pivot_flag(low, b, bb, bb, 'low'):
+                    pl_v = low[b]
+            support[t] = pl_v
+            resist[t] = ph_v
+            pl_prev = support[t - 1] if t > 0 else np.nan
+            ph_prev = resist[t - 1] if t > 0 else np.nan
+            # ta.change(pl) = pl - pl[1]（任一侧 na → na → 条件为假）
+            new_pl = (not np.isnan(pl_v) and not np.isnan(pl_prev)
+                      and pl_v != pl_prev)
+            new_ph = (not np.isnan(ph_v) and not np.isnan(ph_prev)
+                      and ph_v != ph_prev)
+
+            # ---- s_yLoc / r_yLoc ----
+            s_y = np.nan
+            r_y = np.nan
+            if b - 1 >= 0 and b + 1 < n:
+                s_y = low[b + 1] if low[b - 1] > low[b + 1] else low[b - 1]
+                r_y = high[b + 1] if high[b + 1] > high[b - 1] else high[b - 1]
+
+            # ---- drawBox ----
+            old_s = s_box
+            old_r = r_box
+            if new_pl:
+                if old_s is not None:
+                    # box.set_right(旧, bar_index-bb)
+                    old_s['right'] = b
+                s_box = dict(top=s_y, bot=pl_v, left=b, right=t)
+            if new_ph:
+                if old_r is not None:
+                    old_r['right'] = b
+                r_box = dict(top=ph_v, bot=r_y, left=b, right=t)
+
+            # ---- sTop/sBot/rTop/rBot ----
+            s_top_v = s_box['top'] if s_box else np.nan
+            s_bot_v = s_box['bot'] if s_box else np.nan
+            r_top_v = r_box['top'] if r_box else np.nan
+            r_bot_v = r_box['bot'] if r_box else np.nan
+
+            # ---- 突破 ----
+            c_prev = close[t - 1] if t > 0 else np.nan
+            l_prev = low[t - 1] if t > 0 else np.nan
+            h_prev = high[t - 1] if t > 0 else np.nan
+            cu = repaint(cross_dn(c_prev, close[t], s_bot_v),
+                         cross_dn(l_prev, low[t], s_bot_v),
+                         cross_dn(c_prev, close[t], s_bot_v))
+            co = repaint(cross_up(c_prev, close[t], r_top_v),
+                         cross_up(h_prev, high[t], r_top_v),
+                         cross_up(c_prev, close[t], r_top_v))
+            s_breakout = bool(cu and s_break is None)
+            if s_breakout:
+                s_break = True
+            r_breakout = bool(co and r_break is None)
+            if r_breakout:
+                r_break = True
+
+            # ---- 新 pivot: 无突破则删除旧箱体; 并复位 Break ----
+            if new_pl:
+                if s_break is None and old_s is not None:
+                    clear(s_bot, old_s['left'], old_s['right'])
+                    clear(s_top, old_s['left'], old_s['right'])
+                s_break = None
+            if new_ph:
+                if r_break is None and old_r is not None:
+                    clear(r_bot, old_r['left'], old_r['right'])
+                    clear(r_top, old_r['left'], old_r['right'])
+                r_break = None
+
+            # ---- 阶梯线: 箱体存续期间沿用上下边界 ----
+            # 注：原码每个 pivot 是一个 **独立 box**（旧 box 右端 = 新 box 左端 =
+            # ``bar_index-bb``），两段水平线**互不相连**；用阶梯线近似时必须在换箱处
+            # 把那一根置 NaN 断开，否则图上会出现一条从旧价位斜到新价位的连接线。
+            if s_box is not None:
+                if new_pl:
+                    a0 = max(s_box['left'], 0)
+                    s_bot[a0:t + 1] = s_box['bot']
+                    s_top[a0:t + 1] = s_box['top']
+                    if a0 > 0:                    # 与上一段断开
+                        s_bot[a0 - 1] = np.nan
+                        s_top[a0 - 1] = np.nan
+                elif t > 0 and not np.isnan(s_bot[t - 1]):
+                    s_bot[t] = s_bot[t - 1]
+                    s_top[t] = s_top[t - 1]
+            if r_box is not None:
+                if new_ph:
+                    a0 = max(r_box['left'], 0)
+                    r_bot[a0:t + 1] = r_box['bot']
+                    r_top[a0:t + 1] = r_box['top']
+                    if a0 > 0:                    # 与上一段断开
+                        r_bot[a0 - 1] = np.nan
+                        r_top[a0 - 1] = np.nan
+                elif t > 0 and not np.isnan(r_bot[t - 1]):
+                    r_bot[t] = r_bot[t - 1]
+                    r_top[t] = r_top[t - 1]
+
+            # ---- ta.barssince(na(sBreak)) ----
+            since_na_s = 0 if s_break is None else (since_na_s + 1)
+            since_na_r = 0 if r_break is None else (since_na_r + 1)
+
+            # ---- 回测条件 ----
+            s1 = since_na_s > ret_since and high[t] >= s_top_v \
+                and close[t] <= s_bot_v
+            s2 = since_na_s > ret_since and high[t] >= s_top_v \
+                and close[t] >= s_bot_v and close[t] <= s_top_v
+            s3 = since_na_s > ret_since and high[t] >= s_bot_v \
+                and high[t] <= s_top_v
+            s4 = since_na_s > ret_since and high[t] >= s_bot_v \
+                and high[t] <= s_top_v and close[t] < s_bot_v
+            r1 = since_na_r > ret_since and low[t] <= r_bot_v \
+                and close[t] >= r_top_v
+            r2 = since_na_r > ret_since and low[t] <= r_bot_v \
+                and close[t] <= r_top_v and close[t] >= r_bot_v
+            r3 = since_na_r > ret_since and low[t] <= r_top_v \
+                and low[t] >= r_bot_v
+            r4 = since_na_r > ret_since and low[t] <= r_top_v \
+                and low[t] >= r_bot_v and close[t] > r_top_v
+
+            r_valid, r_event = retest_event('r', r1, r2, r3, r4,
+                                            high, low, 'ph', t)
+            s_valid, s_event = retest_event('s', s1, s2, s3, s4,
+                                            low, high, 'pl', t)
+
+            # ---- 输出 ----
+            if s_breakout and do_break:
+                short_sig[t] = 1.0
+            if r_breakout and do_break:
+                long_sig[t] = 1.0
+            if s_valid:
+                short_sig[t] = 2.0
+            if r_valid:
+                long_sig[t] = 2.0
+            if s_event:
+                short_sig[t] = 3.0
+            if r_event:
+                long_sig[t] = 3.0
+
+        return (support, resist, s_top, r_bot, long_sig, short_sig)
+
+
+class SwingFailurePattern(BtIndicator):
+    """Swing Failure Pattern [LuxAlgo] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/YmWELClV-Swing-Failure-Pattern-SFP-LuxAlgo/
+        © LuxAlgo
+
+    概述
+    ----
+    **Swing Failure Pattern (SFP / 假突破摆动)**:
+
+    - **Bearish SFP**: 最高价**刺破**最近摆动高点 ``sw``, 但开盘与收盘仍在 ``sw``
+      之下 → 上影线失败; 随后收盘跌破"对侧低点"(``opposL``)即**确认**;
+    - **Bullish SFP**: 最低价刺破最近摆动低点, 但开/收盘仍在其上方 → 下影线失败;
+      收盘升破对侧高点即确认。
+
+    两个方向各自独立维护一套状态(``piv`` 对象):
+
+    1. ``ph = ta.pivothigh(len, 1)`` / ``pl = ta.pivotlow(len, 1)``,
+       把最近摆动价与 bar 索引锁存到 ``swingH`` / ``swingL``;
+    2. 命中 ``high > sw and open < sw and close < sw``(多头为 ``low < sw and
+       open > sw and close > sw``)且通过(可选)成交量校验后建立 ``piv``:
+       回扫 ``[bx+1, n-1]`` 找对侧极值 ``opposL`` / ``opposB``; 画
+       摆动线(实线)、对侧线(点线)、SFP 影线(竖线), 并打 ``'SFP'`` 标签;
+    3. 激活期间每根 bar 把两条水平线右端推到当前 bar;
+       收盘跌破 ``opposL``(多头为升破 ``opposH``) → ``confirmed := true``, 打
+       ``'▼'`` / ``'▲'``;
+    4. 失效: ``n - swing_bix > 500`` 或 收盘反向越过 ``sw`` → ``active := false``,
+       若未确认则删除全部画线与标签。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``method n(float piv) => not na(piv)``
+    - 命中后 ``opposL/opposB``: ``for i = 1 to n-bx-1`` 扫描 ``low[i]`` 取最小
+    - ``if not pivH.confirmed`` 时先删除旧画线, 再 ``pivH := piv.new(sw, bx,
+      opposL, opposB, true, false)``
+    - 确认: ``if pivH.active and not pivH.confirmed`` → 延伸画线,
+      ``close < pivH.oppos_prc`` → ``confirmed := true``
+    - 失效: ``n - pivH.swing_bix > 500 or close > pivH.swing_prc``
+
+    参数
+    ----
+    - length : 摆动回看(默认 5, 原码 ``len``; ``rightbars`` 固定为 1)
+    - bullish / bearish : 是否启用多头 / 空头形态(默认 True / True)
+    - swing_lines / confirm_lines : 是否显示摆动线 / 对侧确认线(默认 True / True)
+    - sfp_labels : 是否显示 'SFP' / '▼' / '▲' 标记(默认 True)
+    - bull_color / bear_color : 线色(默认 '#089981' / '#f23645')
+    - validation : 成交量校验模式(默认 'None' = 关闭, 与原码默认一致)
+    - percent : 成交量阈值 %(默认 25)
+
+    输出 lines(主图叠加)
+    ----
+    - swing_high : 空头形态的摆动高点水平线(激活且未确认期间随 bar 延伸)
+    - oppos_low : 空头形态的对侧低点(确认线)
+    - swing_low / oppos_high : 多头形态对称的两条线
+    - short_signal : 空头 SFP —— **1 = 形态出现, 2 = 已确认**(文本 'SFP' / '▼')
+    - long_signal : 多头 SFP —— 1 / 2(文本 'SFP' / '▲')
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码用 ``line`` / ``label`` / ``table`` 绘制; 本实现把三条水平线转成线列,
+      标签转成标准信号列 + 逐点文本。``dSFP_Line`` 的**竖直 SFP 影线**
+      (``line.new(n, high, n, sw)``, 起止 x 相同)无法表示为线列, 未复现
+      (其位置由 'SFP' 标记指示)。
+    - **成交量校验未实现**: 原码依赖 ``request.security_lower_tf`` 取低周期
+      close/volume 数据, minibt 无此能力。原码默认 ``iVal='None'`` 即**不校验**,
+      本实现与该默认行为一致; 显式传入 ``validation != 'None'`` 时仅记录参数、
+      不改变结果(会在文档中说明)。
+    - 原码 ``Dashboard`` 表格(仅最后一根 bar 展示)未复现。
+    - Pine ``ta.pivothigh(len, 1)`` 默认 source = ``high``(``pivotlow`` 用 ``low``)。
+    - ``alertcondition`` 未复现; 本指标为纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('swing_high', 'oppos_low', 'swing_low', 'oppos_high',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        length=5,
+        bullish=True,
+        bearish=True,
+        swing_lines=True,
+        confirm_lines=True,
+        sfp_labels=True,
+        bull_color='#089981',
+        bear_color='#f23645',
+        validation='None',
+        percent=25.0,
+    )
+    isplot = dict(swing_high=True, oppos_low=True, swing_low=True,
+                  oppos_high=True, long_signal=False, short_signal=False)
+    linestyle = dict(
+        swing_high=LineStyle(line_color='#f23645', line_width=1.0),
+        oppos_low=LineStyle(line_color='#f23645', line_width=1.0,
+                            line_dash=LineDash.dotted),
+        swing_low=LineStyle(line_color='#089981', line_width=1.0),
+        oppos_high=LineStyle(line_color='#089981', line_width=1.0,
+                             line_dash=LineDash.dotted),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#089981', 'triangle', True, True, 12),
+        short_signal=SignalStyle(
+            'high', '#f23645', 'inverted_triangle', True, True, 12),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: SFP（形态出现） / ▼▲（确认）
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        out = {}
+        for name, conf in (('long_signal', '▲'), ('short_signal', '▼')):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = 'SFP' if int(round(vals[i])) == 1 else conf
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pivot_flag(src, b, back, fwd, mode) -> bool:
+        """Pine ``ta.pivothigh/pivotlow``: 绝对索引 ``b`` 处是否为 pivot。"""
+        n = len(src)
+        if b - back < 0 or b + fwd >= n:
+            return False
+        v = src[b]
+        if np.isnan(v):
+            return False
+        win = src[b - back:b]
+        if len(win) and np.isnan(win).any():
+            return False
+        rwin = src[b + 1:b + fwd + 1]
+        if len(rwin) == 0:
+            return False
+        if mode == 'high':
+            if len(win) and not (v > win.max()):
+                return False
+            return bool(v > rwin.max())
+        if len(win) and not (v < win.min()):
+            return False
+        return bool(v < rwin.min())
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        ln = max(1, int(p.length))
+        do_bull = bool(p.bullish)
+        do_bear = bool(p.bearish)
+        d_swing = bool(p.swing_lines)
+        d_conf = bool(p.confirm_lines)
+        d_lab = bool(p.sfp_labels)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        open_ = np.asarray(self.open, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        swing_high = np.full(n, np.nan, dtype=np.float64)
+        swing_low = np.full(n, np.nan, dtype=np.float64)
+        oppos_low = np.full(n, np.nan, dtype=np.float64)
+        oppos_high = np.full(n, np.nan, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        def clear(arr, x0, x1):
+            if x0 is None or x1 is None:
+                return
+            a0 = max(int(min(x0, x1)), 0)
+            b0 = min(int(max(x0, x1)), n - 1)
+            if b0 >= a0:
+                arr[a0:b0 + 1] = np.nan
+
+        def fill(arr, x0, x1, v):
+            a0 = max(int(x0), 0)
+            b0 = min(int(x1), n - 1)
+            if b0 >= a0:
+                arr[a0:b0 + 1] = v
+
+        # ---- var swing swingH/swingL + var piv pivH/pivL ----
+        sH = dict(bix=None, prc=np.nan)      # 最近摆动高点
+        sL = dict(bix=None, prc=np.nan)
+        # piv 对象: sw/bx/oppos/opposB/active/confirmed + 画线范围
+        pH = dict(active=False, confirmed=False, sw=np.nan, bx=None,
+                  oppos=np.nan, opposB=None, srng=None, orng=None)
+        pL = dict(active=False, confirmed=False, sw=np.nan, bx=None,
+                  oppos=np.nan, opposB=None, srng=None, orng=None)
+
+        for t in range(n):
+            # ---- ph = ta.pivothigh(len, 1) / pl = ta.pivotlow(len, 1) ----
+            pb = t - 1
+            ph_ok = pb >= 0 and self._pivot_flag(high, pb, ln, 1, 'high')
+            pl_ok = pb >= 0 and self._pivot_flag(low, pb, ln, 1, 'low')
+
+            # ================= Bearish SFP =================
+            if do_bear:
+                if ph_ok:
+                    sH['bix'] = t - 1
+                    sH['prc'] = high[t - 1]
+                sw = sH['prc']
+                bx = sH['bix']
+                if (not np.isnan(sw) and high[t] > sw and open_[t] < sw
+                        and close[t] < sw):
+                    valid = True   # 成交量校验未实现; 默认 'None' = 不校验
+                    if valid:
+                        oppos = sw
+                        opposB = t
+                        if bx is not None:
+                            for i in range(1, t - bx):
+                                if low[t - i] < oppos:
+                                    oppos = low[t - i]
+                                    opposB = t - i
+                        # 旧 pattern 未确认 → 先删除旧画线
+                        if not pH['confirmed']:
+                            clear(swing_high, *(pH['srng'] or (None, None)))
+                            clear(oppos_low, *(pH['orng'] or (None, None)))
+                        pH['sw'], pH['bx'] = sw, bx
+                        pH['oppos'], pH['opposB'] = oppos, opposB
+                        pH['active'], pH['confirmed'] = True, False
+                        pH['srng'] = (bx, t) if d_swing else None
+                        pH['orng'] = (opposB, t) if d_conf else None
+                        if pH['srng'] is not None:
+                            fill(swing_high, bx, t, sw)
+                        if pH['orng'] is not None:
+                            fill(oppos_low, opposB, t, oppos)
+                        if d_lab:
+                            short_sig[t] = 1.0
+                # active and not confirmed → 延伸画线 + 确认
+                if pH['active'] and not pH['confirmed']:
+                    if pH['srng'] is not None:
+                        swing_high[t] = pH['sw']
+                    if pH['orng'] is not None:
+                        oppos_low[t] = pH['oppos']
+                    if close[t] < pH['oppos']:
+                        pH['confirmed'] = True
+                        if d_lab:
+                            short_sig[t] = 2.0
+                # 失效
+                if ((pH['bx'] is not None and t - pH['bx'] > 500)
+                        or (not np.isnan(pH['sw']) and close[t] > pH['sw'])):
+                    pH['active'] = False
+                    if not pH['confirmed']:
+                        clear(swing_high, *(pH['srng'] or (None, None)))
+                        clear(oppos_low, *(pH['orng'] or (None, None)))
+                        pH['srng'] = pH['orng'] = None
+
+            # ================= Bullish SFP =================
+            if do_bull:
+                if pl_ok:
+                    sL['bix'] = t - 1
+                    sL['prc'] = low[t - 1]
+                sw = sL['prc']
+                bx = sL['bix']
+                if (not np.isnan(sw) and low[t] < sw and open_[t] > sw
+                        and close[t] > sw):
+                    valid = True
+                    if valid:
+                        oppos = sw
+                        opposB = t
+                        if bx is not None:
+                            for i in range(1, t - bx):
+                                if high[t - i] > oppos:
+                                    oppos = high[t - i]
+                                    opposB = t - i
+                        if not pL['confirmed']:
+                            clear(swing_low, *(pL['srng'] or (None, None)))
+                            clear(oppos_high, *(pL['orng'] or (None, None)))
+                        pL['sw'], pL['bx'] = sw, bx
+                        pL['oppos'], pL['opposB'] = oppos, opposB
+                        pL['active'], pL['confirmed'] = True, False
+                        pL['srng'] = (bx, t) if d_swing else None
+                        pL['orng'] = (opposB, t) if d_conf else None
+                        if pL['srng'] is not None:
+                            fill(swing_low, bx, t, sw)
+                        if pL['orng'] is not None:
+                            fill(oppos_high, opposB, t, oppos)
+                        if d_lab:
+                            long_sig[t] = 1.0
+                if pL['active'] and not pL['confirmed']:
+                    if pL['srng'] is not None:
+                        swing_low[t] = pL['sw']
+                    if pL['orng'] is not None:
+                        oppos_high[t] = pL['oppos']
+                    if close[t] > pL['oppos']:
+                        pL['confirmed'] = True
+                        if d_lab:
+                            long_sig[t] = 2.0
+                if ((pL['bx'] is not None and t - pL['bx'] > 500)
+                        or (not np.isnan(pL['sw']) and close[t] < pL['sw'])):
+                    pL['active'] = False
+                    if not pL['confirmed']:
+                        clear(swing_low, *(pL['srng'] or (None, None)))
+                        clear(oppos_high, *(pL['orng'] or (None, None)))
+                        pL['srng'] = pL['orng'] = None
+
+        return (swing_high, oppos_low, swing_low, oppos_high,
+                long_sig, short_sig)
+
+
+class RenkoCandlesOverlay(BtIndicator):
+    """Renko Candles Overlay [LonesomeTheBlue] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/rZs7YdMI-Renko-Candles-Overlay/
+        © LonesomeTheBlue
+
+    概述
+    ----
+    在主图上**叠加 Renko 砖块蜡烛**:
+
+    1. 砖块大小 ``boxsize`` 由 ``mode`` 决定:
+       ``Traditional``(用 ``brick_size``) / ``ATR`` / ``ATR/2`` / ``ATR/4``
+       (基于 ``ta.atr(atr_period)``, 再经 ``get_b_size`` 按最小变动价位取整)
+       / ``Percentage``(``percentage % * close / 100``);
+    2. 维护砖块收盘价数组 ``rclose``(索引 0 = 最新砖):
+       价格相对 ``rclose[0]`` 移动 ``numcell = floor(|rclose[0]-close|/boxs)`` 个砖块时,
+       按 ``trend`` 方向 unshift 追加; 反向不足 2 格则忽略, 反向 ≥2 格则**转向**并
+       少追加 1 格(``numcell - 1``, 起点偏移 ``lastclose + trend*boxs``);
+    3. 记录 ``trend``(1 上 / -1 下 / 0 未定)并在翻转时触发信号;
+    4. **铺砖**有两种模式(``align``), 默认与**原码一致**:
+
+       - ``'Repaint'``(**默认**, 原码行为): 在最后一根 bar 把 ``rclose``
+         从最新往旧**逐格铺开**成 ``bwidth`` 根宽的砖块
+         (``box.new(left=bar_index-colnum, right=bar_index-colnum-bwidth, ...)``),
+         覆盖范围为最近 ``period`` 块 / ``max_bars`` 个 ``colnum``
+         (默认 140 / 285, 即只覆盖最近 ~285 根 —— 与原码相同);
+       - ``'History'``: 按每块砖的**真实形成 bar** 铺开 —— 第 k 块占据
+         ``[rbix[k], rbix[k-1]-1]``、最新一块到当前 bar, 因此可**覆盖全历史**;
+         配合 ``period=0, max_bars=0`` 即可铺满整张图。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``get_b_size``: 按 ``mintick`` 位数取整(``ret<1`` 时 ``round(ret*num)/num``,
+      否则按 ``10^max(len(整数部分)-2,1)`` 取整), 最后 ``max(ret, mintick)``
+    - ``addbricks(rclose, numbrick, start, bsize)``:
+      ``for x = 1 to numbrick`` 逐个 ``unshift(start + x*bsize)``
+    - ``var boxs = boxsize``; ``var trend = 0``;
+      ``var rclose = [floor(open/boxs)*boxs]``
+    - 转向判定: ``lastclose*trend < currentprice*trend`` 继续,
+      ``numcell >= 2`` 则 ``trend *= -1`` 并 ``addbricks(numcell-1, lastclose+trend*boxs, ...)``
+    - ``while array.size(rclose) > period + 3: array.pop()``
+    - 砖块绘制: ``start`` 取最近一段同向连续砖的起点,
+      ``topbottom = oldtrnd == trnd ? rclose[x+1] : lasttb``
+
+    参数
+    ----
+    mode : 'Traditional' / 'ATR' / 'ATR/2'(默认) / 'ATR/4' / 'Percentage'
+    atr_period : ``ATR`` 周期(默认 14)
+    brick_size : ``Traditional`` 模式的砖块大小(默认 10.0)
+    percentage : ``Percentage`` 模式的百分比(默认 0.1)
+    period : 保留的最大砖块数(默认 140, 原码值; **0 = 不限制**)
+    brick_width : 每块砖占多少根 bar(默认 2, 原码 ``bwidth``)
+    max_bars : 绘制范围上限(默认 285, 原码硬编码值; **0 = 不限制**)
+    align : 砖块铺开方式 —— 'Repaint'(默认, 原码行为) / 'History'
+    mintick : 最小变动价位; ``None``(默认) 取 ``self.price_tick``
+    show_labels / line_style : 对应原码 ``putlabels`` / ``linestyle``
+        (本实现**未复现**其上下水平线与价格标签, 仅保留参数)
+    up_color / down_color / unconfirmed_color : 砖块配色
+        (默认 '#5b9cf6' / '#0c3299' / '#808080')
+    border_up / border_down / border_width : 砖块边框(未复现, 仅保留参数)
+    change_bar_color : 是否按 Renko 趋势给主 K 线上色(未复现, 仅保留参数)
+
+    输出 lines(主图叠加, 蜡烛型)
+    ----
+    - open / high / low / close : 逐 bar 的砖块 OHLC
+      (每根 bar 填充其所属砖块的上下沿; 多头砖 ``open<close``、空头砖 ``open>close``,
+      框架据此自动着色)
+    - trend : Renko 趋势方向(1 / -1 / 0, 仅数据)
+    - long_signal / short_signal : ``trend`` 由 -1→1 / 1→-1 的翻转
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码用 ``box`` 对象按 ``bar_index - colnum`` **逐格铺开**、每块实宽 ``bwidth``
+      根 bar; 框架的蜡烛列是"每根 bar 一个蜡烛", 因此本实现把**每根 bar 填成其所属
+      砖块**, 得到连续的砖块带(柱宽由框架的 ``BAR_WIDTH`` 决定, 而不是 ``bwidth``)。
+    - **覆盖范围**: 默认与**原码一致** —— ``align='Repaint'``、``period=140``、
+      ``max_bars=285``, 即砖块只出现在最近 ~285 根(与原码 ``colnum < 285`` 相同)。
+      若希望砖块**铺满整张图**, 传 ``align='History', period=0, max_bars=0``。
+    - 原码在每根 bar 都重画整段砖块(``barstate.islast``), 即**重绘**; 本实现同样
+      只在最后一根 bar 的状态上生成整段砖块(与之一致)。
+    - ``barstate.ishistory`` 为真时 ``unconfirmed`` 恒为 -1, 故回测中不存在灰色
+      "未确认砖块"; 本实现与之一致(``unconfirmed_color`` 仅保留参数)。
+    - ``putlabels`` 的上下水平线与价格标签、``border_*`` 砖块边框、
+      ``changebrol`` 主 K 线上色均未复现。
+    - ``alertcondition`` 未复现; 本指标为纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('open', 'high', 'low', 'close', 'trend',
+             'long_signal', 'short_signal')
+    category = 'candles'
+    overlap = True
+    params = dict(
+        mode='ATR/2',
+        atr_period=14,
+        brick_size=10.0,
+        percentage=0.1,
+        period=140,
+        brick_width=2,
+        max_bars=285,
+        align='Repaint',
+        mintick=None,
+        show_labels=True,
+        line_style='Dashed',
+        up_color='#5b9cf6',
+        down_color='#0c3299',
+        unconfirmed_color='#808080',
+        border_up='#00FF00',
+        border_down='#FF0000',
+        border_width=1,
+        change_bar_color=False,
+    )
+    isplot = dict(open=True, high=True, low=True, close=True, trend=False,
+                  long_signal=False, short_signal=False)
+    # 蜡烛涨/跌配色(类级默认; 可用构造参数 candlestyle=... 覆盖,
+    # 门面 RenkoCandlesOverlay 会把 up_color/down_color 传进来)
+    candlestyle = CandleStyle(bear='#0c3299', bull='#5b9cf6')
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pine_round(x: float) -> float:
+        """Pine ``math.round``: 四舍五入远离零(此处只处理非负数)。"""
+        return float(np.floor(float(x) + 0.5))
+
+    @classmethod
+    def _get_b_size(cls, value, mintick: float, tr_value=None) -> float:
+        """Pine ``get_b_size(value)``: 按最小变动价位取整。
+
+        原码在 ``na(value)`` 时回退到 ``ta.tr(true)``(当根真实波幅):
+        ``if na(ret) ... ret := ta.tr(true)``。
+        """
+        if value is None or not np.isfinite(value):
+            if tr_value is not None and np.isfinite(tr_value):
+                value = tr_value
+            else:
+                return float(mintick)
+        ret = float(value)
+        num = 10.0 ** (len(str(mintick)) - 2)
+        if ret < 1.0:
+            ret = cls._pine_round(ret * num) / num
+        else:
+            pw = (10.0 ** max(len(str(ret).split('.')[0]) - 2, 1)
+                  if ret >= 10.0 else 1.0)
+            ret = cls._pine_round(ret / pw) * pw
+        return max(ret, float(mintick))
+
+    @staticmethod
+    def _tr(high, low, close) -> np.ndarray:
+        """Pine ``ta.tr(true)``: ``max(high-low, |high-prevclose|, |low-prevclose|)``。"""
+        h = np.asarray(high, dtype=np.float64)
+        l = np.asarray(low, dtype=np.float64)
+        c = np.asarray(close, dtype=np.float64)
+        m = len(c)
+        tr = np.full(m, np.nan, dtype=np.float64)
+        if m:
+            tr[0] = h[0] - l[0]
+        for i in range(1, m):
+            pc = c[i - 1]
+            tr[i] = max(h[i] - l[i], abs(h[i] - pc), abs(l[i] - pc))
+        return tr
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        mode = str(p.mode)
+        atr_period = max(1, int(p.atr_period))
+        brick_size = float(p.brick_size)
+        pct = float(p.percentage)
+        period = max(0, int(p.period))          # 0 = 不限制保留砖块数
+        bwidth = max(1, int(p.brick_width))
+        max_bars = max(0, int(p.max_bars))      # 0 = 不限制绘制范围(原码 285)
+        align = str(p.align)                    # 'History' / 'Repaint'
+
+        mintick = p.mintick
+        if mintick is None:
+            mintick = getattr(self, 'price_tick', None)
+        try:
+            mintick = float(mintick)
+        except (TypeError, ValueError):
+            mintick = 0.01
+        if not np.isfinite(mintick) or mintick <= 0:
+            mintick = 0.01
+
+        o = np.asarray(self.open, dtype=np.float64)
+        h = np.asarray(self.high, dtype=np.float64)
+        l = np.asarray(self.low, dtype=np.float64)
+        c = np.asarray(self.close, dtype=np.float64)
+        n = len(c)
+
+        # ---- 逐 bar 的砖块大小 boxsize ----
+        tr = self._tr(h, l, c)
+        atr = self._atr(h, l, c, atr_period)
+        boxsize = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            if mode == 'ATR':
+                v = self._get_b_size(atr[i], mintick, tr[i])
+            elif mode == 'ATR/2':
+                v = max(self._get_b_size(atr[i], mintick, tr[i]) / 2.0,
+                        mintick)
+            elif mode == 'ATR/4':
+                v = max(self._get_b_size(atr[i], mintick, tr[i]) / 4.0,
+                        mintick)
+            elif mode == 'Percentage':
+                v = self._get_b_size(pct * c[i] / 100.0, mintick, tr[i])
+            else:                                   # Traditional
+                v = brick_size
+            boxsize[i] = v
+
+        # ---- 砖块状态机 ----
+        zero_arr = np.zeros(n, dtype=np.float64)
+        trend_arr = np.zeros(n, dtype=np.float64)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        boxs = float(boxsize[0])
+        trend = 0
+        rclose = [float(np.floor(o[0] / boxs) * boxs)]
+        rbix = [0]                              # 与 rclose 对齐: 每块砖的形成 bar
+
+        def add_bricks(numbrick: int, start: float, bsize: float, t: int):
+            for x in range(1, int(numbrick) + 1):
+                rclose.insert(0, start + x * bsize)
+                rbix.insert(0, t)
+
+        for t in range(n):
+            current = c[t]
+            last = rclose[0]
+            numcell = int(np.floor(abs(last - current) / boxs))
+            if numcell > 0:
+                if trend == 0:
+                    if numcell >= 2:
+                        trend = 1 if last < current else -1
+                        add_bricks(numcell, last, trend * boxs, t)
+                else:
+                    if last * trend < current * trend:
+                        add_bricks(numcell, last, trend * boxs, t)
+                    elif numcell >= 2:
+                        trend = -trend
+                        add_bricks(numcell - 1, last + trend * boxs,
+                                   trend * boxs, t)
+                if last != rclose[0]:
+                    boxs = float(boxsize[t])
+            if period > 0:
+                while len(rclose) > period + 3:
+                    rclose.pop()
+                    rbix.pop()
+            trend_arr[t] = float(trend)
+            if t > 0:
+                if trend_arr[t - 1] == -1 and trend == 1:
+                    long_sig[t] = 1.0
+                if trend_arr[t - 1] == 1 and trend == -1:
+                    short_sig[t] = 1.0
+
+        # ---- 最后一根 bar: 把砖块铺成逐 bar OHLC ----
+        o_arr = np.full(n, np.nan, dtype=np.float64)
+        h_arr = np.full(n, np.nan, dtype=np.float64)
+        l_arr = np.full(n, np.nan, dtype=np.float64)
+        c_arr = np.full(n, np.nan, dtype=np.float64)
+        T = n - 1
+        if align.lower().startswith('hist') and len(rclose) >= 3:
+            # ============ [新增] 按砖块**真实形成时间**铺开(覆盖全历史) ============
+            # 原码 barstate.islast 时把砖块从最后一根往左逐格铺开(重绘);
+            # 本模式改为: 第 k 块砖占据 [rbix[k], rbix[k-1]-1], 最新一块到当前 bar,
+            # 于是整段历史都被砖块覆盖(不再受 colnum<285 / period 限制)。
+            size = len(rclose)
+            start = size - 2
+            trnd = 1 if rclose[start] > rclose[start + 1] else -1
+            lasttb = rclose[start]
+            for x in range(start, -1, -1):
+                oldtrnd = trnd
+                trnd = 1 if rclose[x] > rclose[x + 1] else -1
+                topbottom = rclose[x + 1] if oldtrnd == trnd else lasttb
+                a0 = max(int(rbix[x]), 0)
+                b0 = min((int(rbix[x - 1]) - 1) if x > 0 else T, T)
+                if b0 >= a0:
+                    hi = max(rclose[x], topbottom)
+                    lo = min(rclose[x], topbottom)
+                    o_arr[a0:b0 + 1] = lo if trnd == 1 else hi
+                    c_arr[a0:b0 + 1] = hi if trnd == 1 else lo
+                    h_arr[a0:b0 + 1] = hi
+                    l_arr[a0:b0 + 1] = lo
+                lasttb = topbottom
+        elif len(rclose) >= 3:
+            # ============ 原码模式: 从最后一根 bar 往左逐格铺开(重绘) ============
+            size = len(rclose)
+            start = size - 3
+            for x in range(size - 3, -1, -1):
+                if ((rclose[x] > rclose[x + 1] > rclose[x + 2])
+                        or (rclose[x] < rclose[x + 1] < rclose[x + 2])):
+                    start = x
+                    break
+            colnum = (start + 1) * bwidth
+            trnd = 1 if rclose[start] > rclose[start + 1] else -1
+            lasttb = rclose[start]
+            for x in range(start + 1, -1, -1):
+                oldtrnd = trnd
+                trnd = 1 if rclose[x] > rclose[x + 1] else -1
+                top = rclose[x]
+                bottom = rclose[x + 1] if oldtrnd == trnd else lasttb
+                if T - colnum - bwidth > 1 and (
+                        max_bars <= 0 or colnum < max_bars):
+                    left = T - colnum
+                    right = T - colnum - bwidth
+                    a0 = max(min(left, right), 0)
+                    b0 = min(max(left, right), T)
+                    if b0 >= a0:
+                        # 多头砖: open=下沿 close=上沿; 空头砖反之(框架据此着色)
+                        lo = min(top, bottom)
+                        hi = max(top, bottom)
+                        o_arr[a0:b0 + 1] = lo if trnd == 1 else hi
+                        c_arr[a0:b0 + 1] = hi if trnd == 1 else lo
+                        h_arr[a0:b0 + 1] = hi
+                        l_arr[a0:b0 + 1] = lo
+                colnum -= bwidth
+                lasttb = bottom
+
+        return (o_arr, h_arr, l_arr, c_arr, trend_arr,
+                long_sig, short_sig)
+
+
+class VariableMovingAverage(BtIndicator):
+    """Variable Moving Average [LazyBear] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v2/v3 ``study``):
+        https://cn.tradingview.com/script/6Ix0E5Yr-Variable-Moving-Average-LazyBear/
+        © LazyBear, shorttitle ``VMA_LB``
+
+    概述
+    ----
+    经典 **VMA(可变移动平均, 亦称 VIDYA)**: 用「波动率指数」动态调节平滑系数 ——
+    趋势单边时权重接近 1(跟得紧), 震荡时权重变小(更平滑)。
+
+    1. 分别累计上涨/下跌动量 ``pdm/mdm``, 各自做一次 ``k = 1/l`` 的 EMA:
+       ``pdmS = (1-k)*nz(pdmS[1]) + k*pdm``(``mdmS`` 对称);
+    2. ``pdi = pdmS/(pdmS+mdmS)``、``mdi`` 对称, 再各做一次 ``k`` 平滑得 ``pdiS/mdiS``;
+    3. ``iS = (1-k)*nz(iS[1]) + k*|pdiS-mdiS|/(pdiS+mdiS)`` —— 即"波动率指数";
+    4. ``vI = (iS - lowest(iS,l)) / (highest(iS,l) - lowest(iS,l))`` 归一化到 0..1;
+    5. ``vma = (1 - k*vI)*nz(vma[1]) + k*vI*src`` —— 以 ``k*vI`` 为自适应权重。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``pdm = max(src - src[1], 0)``、``mdm = max(src[1] - src, 0)``
+      (首根 ``src[1]`` 为 na → 结果 na)
+    - 所有递归都用 ``nz(...[1])`` 播种 → **首根为 na, 次根起 0 播种递归**
+    - ``vmaC = vma>vma[1] ? green : vma<vma[1] ? red : vma==vma[1] ? blue : black``
+
+    参数
+    ----
+    length : VMA 周期(默认 6, 原码 ``l``; 同时用作 ``highest/lowest`` 窗口)
+    src : 源序列(默认 'close')
+    show_trend : 原码 ``std`` —— 是否按趋势给线上色(默认 False = 原码默认, 恒定黑线)
+    color_bars : 原码 ``bc`` —— 是否按趋势给主 K 线上色(**未复现**, 仅保留参数)
+
+    输出 lines(主图叠加)
+    ----
+    - vma : VMA 主线(黑色, 线宽 3; ``show_trend=True`` 时置 NaN, 改由下面三条着色)
+    - vma_up / vma_dn / vma_flat : 趋势向上(绿) / 向下(红) / 持平(蓝)的分段
+      (``show_trend=False`` 时全为 NaN)
+    - trend : 趋势方向 1 / -1 / 0(仅数据; 与 ``vmaC`` 一一对应)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``d1 = highest-lowest`` 为 0 时 ``vI = x/0`` → Pine 得到 **na**,
+      本实现同样输出 na(``vma`` 随之 na); 注意同族的 ``VMA_Win`` 在那里取 0, 二者不同。
+    - 原码 ``src`` 固定为 ``close``; 本实现开放 ``src`` 参数。
+    - ``barcolor(bc ? vmaC : na)``(按趋势给主 K 线上色)未复现(``color_bars`` 仅保留参数)。
+    - 同族指标 ``VMA_Win``(来自 ``09F2GICn`` 脚本)公式一致但实现细节不同, 二者并存。
+    - ``alertcondition`` 未复现; 本指标为纯指标, 未内置 ``step()``。
+    """
+    lines = ('vma', 'vma_up', 'vma_dn', 'vma_flat', 'trend')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        length=6,
+        src='close',
+        show_trend=False,
+        color_bars=False,
+    )
+    isplot = dict(vma=True, vma_up=True, vma_dn=True, vma_flat=True,
+                  trend=False)
+    linestyle = dict(
+        vma=LineStyle(line_color='#000000', line_width=3.0),
+        vma_up=LineStyle(line_color='#008000', line_width=3.0),
+        vma_dn=LineStyle(line_color='#FF0000', line_width=3.0),
+        vma_flat=LineStyle(line_color='#0000FF', line_width=3.0),
+    )
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        length = max(1, int(p.length))
+        show_trend = bool(p.show_trend)
+
+        src_name = str(p.src)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+        if src_name == 'hl2':
+            src = (np.asarray(self.high, dtype=np.float64) + np.asarray(
+                self.low, dtype=np.float64)) / 2.0
+        elif src_name == 'hlc3':
+            src = (np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 3.0
+        elif src_name == 'ohlc4':
+            src = (np.asarray(self.open, dtype=np.float64)
+                   + np.asarray(self.high, dtype=np.float64)
+                   + np.asarray(self.low, dtype=np.float64) + close) / 4.0
+        else:
+            src = close
+
+        k = 1.0 / float(length)
+
+        def nz(x):
+            """Pine ``nz(x)``: na → 0。"""
+            if x is None:
+                return 0.0
+            x = float(x)
+            return 0.0 if np.isnan(x) else x
+
+        pdmS = np.full(n, np.nan, dtype=np.float64)
+        mdmS = np.full(n, np.nan, dtype=np.float64)
+        pdiS = np.full(n, np.nan, dtype=np.float64)
+        mdiS = np.full(n, np.nan, dtype=np.float64)
+        iS = np.full(n, np.nan, dtype=np.float64)
+
+        for i in range(n):
+            prev = src[i - 1] if i > 0 else np.nan
+            if np.isnan(prev):
+                pdm = np.nan
+                mdm = np.nan
+            else:
+                pdm = max(src[i] - prev, 0.0)
+                mdm = max(prev - src[i], 0.0)
+            pdmS[i] = (1.0 - k) * nz(pdmS[i - 1]
+                                     if i > 0 else np.nan) + k * pdm
+            mdmS[i] = (1.0 - k) * nz(mdmS[i - 1]
+                                     if i > 0 else np.nan) + k * mdm
+            s = pdmS[i] + mdmS[i]
+            if np.isnan(s) or s == 0.0:
+                pdi = np.nan
+                mdi = np.nan
+            else:
+                pdi = pdmS[i] / s
+                mdi = mdmS[i] / s
+            pdiS[i] = (1.0 - k) * nz(pdiS[i - 1]
+                                     if i > 0 else np.nan) + k * pdi
+            mdiS[i] = (1.0 - k) * nz(mdiS[i - 1]
+                                     if i > 0 else np.nan) + k * mdi
+            if np.isnan(pdiS[i]) or np.isnan(mdiS[i]):
+                d = np.nan
+            else:
+                d = abs(pdiS[i] - mdiS[i])
+            s1 = pdiS[i] + mdiS[i]
+            if np.isnan(s1) or s1 == 0.0:
+                iS[i] = np.nan            # k*na → na
+            else:
+                iS[i] = (1.0 - k) * nz(
+                    iS[i - 1] if i > 0 else np.nan) + k * d / s1
+
+        # ---- highest/lowest + 波动率指数 ----
+        ser = pd.Series(iS)
+        hhv = ser.rolling(length, min_periods=length).max().to_numpy()
+        llv = ser.rolling(length, min_periods=length).min().to_numpy()
+        d1 = hhv - llv
+        with np.errstate(divide='ignore', invalid='ignore'):
+            vI = (iS - llv) / d1         # d1==0 → 0/0 = na(与 Pine 一致)
+
+        # ---- VMA ----
+        vma = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            if np.isnan(vI[i]):
+                continue
+            vma[i] = ((1.0 - k * vI[i]) * nz(vma[i - 1] if i > 0 else np.nan)
+                      + k * vI[i] * src[i])
+
+        # ---- 趋势方向 / 着色分段 ----
+        trend = np.full(n, np.nan, dtype=np.float64)
+        for i in range(1, n):
+            a0, a1 = vma[i], vma[i - 1]
+            if np.isnan(a0) or np.isnan(a1):
+                continue                 # na → 原码落 black
+            trend[i] = 1.0 if a0 > a1 else (-1.0 if a0 < a1 else 0.0)
+
+        up = np.where(trend == 1.0, vma, np.nan)
+        dn = np.where(trend == -1.0, vma, np.nan)
+        flat = np.where(trend == 0.0, vma, np.nan)
+        # 色不在这里分线：`plot(vma, color = std ? vmaC : black)` 是**一条线**，
+        # 逐点颜色由类级 `color_rules`（`_vma_trend_colors`）落到图表侧；
+        # `vma_up/dn/flat` 仅作兼容数据列保留（`isplot=False`）。
+        vma_line = vma
+
+        return (vma_line, up, dn, flat, trend)
+
+
+class HemaTrendLevels(BtIndicator):
+    """HEMA Trend Levels [AlgoAlpha] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v6):
+        https://cn.tradingview.com/script/WClHCU5Q-HEMA-Trend-Levels-AlgoAlpha/
+        © AlgoAlpha
+
+    概述
+    ----
+    1. **双 HEMA**: ``f_hema(src, len)`` = ``ta.ema(2*ema(src,len/2) - ema(src,len),
+       round(sqrt(len)))`` —— HMA 的 EMA 版本(Hull EMA);
+       ``hema1 = f_hema(close, 20)``(快)、``hema2 = f_hema(close, 40)``(慢);
+    2. **趋势填充**: 在 ``max(hema1,hema2)`` 与 ``min(hema1,hema2)`` 之间填充,
+       颜色随 ``hema1 > hema2`` 在多头/空头色间切换(原码为纵向渐变, 本实现用纯色近似);
+    3. **ATR 测试箱**: ``vola = ta.atr(14)/2``; 每当 ``crossover(hema1,hema2)``
+       在 ``(bar_index, low+vola) ~ (bar_index+5, low)`` 建一个多头箱(空头对称用
+       ``high-vola ~ high``), 此后每根把右边界推到当前 bar;
+    4. **测试事件**: 当 ``low < 箱顶 and high > 箱顶 and open > 箱顶 and close > 箱顶``
+       时记为一次"回测支撑", ``low_test = 箱底``(空头对称: ``high_test = 箱底``);
+    5. **信号**: 金叉/死叉 → ``▲`` / ``▼`` 标签; 测试命中 → 对应小三角。
+
+    计算(Pine 逐行对齐)
+    ----
+    - ``f_hema``: ``halfLength = max(1,round(len/2))``、
+      ``sqrtLength = max(1,round(sqrt(len)))``、
+      ``ta.ema(ta.ema(src,len/2)*2 - ta.ema(src,len), sqrtLength)``
+    - ``bullishCondition = close > hema1 and hema1 > hema2``(空头对称)
+    - 箱子用 ``box.new`` 建立并 ``unshift`` 入数组; 每根取 ``first()`` 判定测试
+    - ``plotchar(low_test != 0 ? low_test - vola : na)`` 等四个形状
+
+    参数
+    ----
+    hema_length1 / hema_length2 : 快/慢 HEMA 周期(默认 20 / 40)
+    atr_length : 测试箱半幅所用的 ATR 周期(默认 14, 原码硬编码)
+    src : 源序列(默认 'close')
+    bull_color / bear_color : 多头 / 空头配色(默认 '#00ffbb' / '#ff1100')
+
+    输出 lines(主图叠加)
+    ----
+    - hema1 / hema2 : 快 / 慢 HEMA(黑线; 原码线色随趋势, 见「近似」)
+    - bull_top / bull_bottom : ``hema1>hema2`` 时的填充上下沿(仅数据, 供 bandstyle)
+    - bear_top / bear_bottom : ``hema1<hema2`` 时的填充上下沿(仅数据)
+    - bull_box_top / bull_box_bottom : 多头测试箱上下沿(仅数据, 供 bandstyle)
+    - bear_box_top / bear_box_bottom : 空头测试箱上下沿(仅数据)
+    - low_test / high_test : 测试命中的价位(``low_test``/``high_test``, 仅数据)
+    - long_signal : **1 = 金叉(Bullish Trend), 2 = 回测多头箱支撑**
+    - short_signal : **1 = 死叉(Bearish Trend), 2 = 回测空头箱阻力**
+      (逐点文本 '▲' / '▼', 与原码一致)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``fill(...)`` 是**纵向渐变**(上沿 ``chart.bg_color@100`` → 下沿
+      ``fillColor@70``); 本实现用 ``bandstyle`` 纯色近似(多头/空头各一条带)。
+    - 原码 ``plot(hema1/2, color=color.new(fillColor, 70))`` 线色随趋势逐 bar 变化;
+      本实现给 ``hema1``/``hema2`` 单色(可用 ``line_style`` 自行改), 趋势色由填充与
+      信号体现。
+    - 原码 ``barcolor(...)``(按 ``bullish/bearish/gray`` 给主 K 线上色)未复现。
+    - 测试箱原码为 ``box`` 对象(每根把右边界推到当前 bar), 本实现落成逐 bar 阶梯线
+      (所有箱子都延伸到最后一根, 与之一致); 箱子的右边界 ``bar_index+5`` 的初始外伸
+      无法表现在线列上。
+    - 信号锚点: 原码 ``plotshape`` 的 y 为 ``low - vola*3`` / ``high + vola*3``,
+      ``plotchar`` 为 ``low_test - vola`` / ``high_test + vola``; 框架的信号点
+      锚定 K 线 low/high, 故 y 略有差异(触发 bar 一致)。
+    - Pine ``ta.ema`` 采用 **SMA 播种**语义(库内 ``close.ema()`` 亦是), 本实现一致。
+    - ``alertcondition`` 未复现; 本指标为纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('hema1', 'hema2',
+             'bull_top', 'bull_bottom', 'bear_top', 'bear_bottom',
+             'bull_box_top', 'bull_box_bottom',
+             'bear_box_top', 'bear_box_bottom',
+             'low_test', 'high_test',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        hema_length1=20,
+        hema_length2=40,
+        atr_length=14,
+        src='close',
+        bull_color='#00ffbb',
+        bear_color='#ff1100',
+    )
+    isplot = dict(hema1=True, hema2=True,
+                  bull_top=False, bull_bottom=False,
+                  bear_top=False, bear_bottom=False,
+                  bull_box_top=False, bull_box_bottom=False,
+                  bear_box_top=False, bear_box_bottom=False,
+                  low_test=False, high_test=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        hema1=LineStyle(line_color='#00ffbb', line_width=1.6),
+        hema2=LineStyle(line_color='#ff1100', line_width=1.6),
+    )
+    bandstyle = [
+        # fill(hemaTop, hemaBottom, ..., color.new(fillColor, 70)) —— 纯色近似
+        BandStyle(lower='bull_bottom', upper='bull_top',
+                  fill_color='#00ffbb', fill_alpha=0.30, line_color=None),
+        BandStyle(lower='bear_bottom', upper='bear_top',
+                  fill_color='#ff1100', fill_alpha=0.30, line_color=None),
+        # 测试箱: color.new(bullColor/bearColor, 70)
+        BandStyle(lower='bull_box_bottom', upper='bull_box_top',
+                  fill_color='#00ffbb', fill_alpha=0.30, line_color=None),
+        BandStyle(lower='bear_box_bottom', upper='bear_box_top',
+                  fill_color='#ff1100', fill_alpha=0.30, line_color=None),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#00ffbb', 'triangle', True, True, 11),
+        short_signal=SignalStyle(
+            'high', '#ff1100', 'inverted_triangle', True, True, 11),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: ▲ / ▼
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        """逐点信号文本: **只有 HMA 交叉(值 1) 带文本**, 箱子回测(值 2) 不带。
+
+        两类信号的 marker 都会绘制(框架已把文本与 marker 的数据源拆成
+        ``signal_source_`` / ``label_source_``), 于是图上:
+          * 带文字的 ``▲`` / ``▼`` = HMA 金叉 / 死叉;
+          * 纯三角标记(无文字) = 测试箱回测。
+        """
+        out = {}
+        for name, ch in (('long_signal', '▲'), ('short_signal', '▼')):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            # [修改] 原为 vals > 0 (值 1 与 2 都带文本),
+            #   现只给 HMA 交叉(==1) 加文本, 箱子信号(==2) 仅留 marker。
+            for i in np.where(vals == 1.0)[0]:
+                arr[i] = ch
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        """Pine ``ta.ema``, 严格按官方伪码:
+
+            sum := na(sum[1]) ? ta.sma(src, length)
+                              : alpha * src + (1 - alpha) * nz(sum[1])
+
+        要点: 只要上一根为 na(首根 / 上一根源值为 na), 本根就**重新用 SMA 播种**
+        (窗口内仍有 na 则继续为 na); 源值为 na 的那根本身为 na, 其下一根同样重播种。
+        """
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        alpha = 2.0 / (float(n) + 1.0)
+        for i in range(m):
+            if i == 0 or np.isnan(out[i - 1]):
+                win = a[i - n + 1:i + 1]
+                if i >= n - 1 and len(win) == n and not np.isnan(win).any():
+                    out[i] = float(win.mean())
+                continue
+            if not np.isnan(a[i]):
+                out[i] = alpha * a[i] + (1.0 - alpha) * out[i - 1]
+        return out
+
+    @classmethod
+    def _hema(cls, src, length: int) -> np.ndarray:
+        """Pine ``f_hema``: ``ema(2*ema(src,len/2) - ema(src,len), round(sqrt(len)))``。"""
+        length = max(1, int(length))
+        half = max(1, int(cls._pine_round(length / 2.0)))
+        sq = max(1, int(cls._pine_round(np.sqrt(length))))
+        e_half = cls._ema(src, half)
+        e_full = cls._ema(src, length)
+        return cls._ema(2.0 * e_half - e_full, sq)
+
+    @staticmethod
+    def _pine_round(x) -> float:
+        """Pine ``math.round``: 四舍五入远离零。"""
+        x = float(x)
+        return float(np.floor(x + 0.5)) if x >= 0 else -float(
+            np.floor(-x + 0.5))
+
+    @classmethod
+    def _atr(cls, high, low, close, n: int) -> np.ndarray:
+        return np.asarray(PineFunc.atr(high, low, close, int(n), handle_na=True), dtype=np.float64)
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+
+    def next(self):
+        p = self.params
+        len1 = max(1, int(p.hema_length1))
+        len2 = max(1, int(p.hema_length2))
+        atr_len = max(1, int(p.atr_length))
+
+        src_name = str(p.src)
+        close = np.asarray(self.close, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        open_ = np.asarray(self.open, dtype=np.float64)
+        n = len(close)
+        if src_name == 'hl2':
+            src = (high + low) / 2.0
+        elif src_name == 'hlc3':
+            src = (high + low + close) / 3.0
+        elif src_name == 'ohlc4':
+            src = (high + low + close + open_) / 4.0
+        else:
+            src = close
+
+        hema1 = self._hema(src, len1)
+        hema2 = self._hema(src, len2)
+
+        # ---- 趋势填充的上下沿(按趋势分别落线) ----
+        bull_top = np.full(n, np.nan, dtype=np.float64)
+        bull_bottom = np.full(n, np.nan, dtype=np.float64)
+        bear_top = np.full(n, np.nan, dtype=np.float64)
+        bear_bottom = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            a, b = hema1[i], hema2[i]
+            if np.isnan(a) or np.isnan(b):
+                continue
+            top, bottom = (a, b) if a > b else (b, a)
+            if a > b:
+                bull_top[i] = top
+                bull_bottom[i] = bottom
+            else:
+                bear_top[i] = top
+                bear_bottom[i] = bottom
+
+        # ---- 测试箱 ----
+        vola = self._atr(high, low, close, atr_len) / 2.0
+        bull_boxes = []          # (left, top, bottom) 按创建顺序
+        bear_boxes = []
+        h_prev = self._shift(hema1, 1)
+        s_prev = self._shift(hema2, 1)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        low_test = np.zeros(n, dtype=np.float64)
+        high_test = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            a0, a1 = hema1[i], h_prev[i]
+            b0, b1 = hema2[i], s_prev[i]
+            xo_up = (not np.isnan(a0)) and (not np.isnan(a1)) \
+                and (not np.isnan(b0)) and (not np.isnan(b1)) \
+                and a1 <= b1 and a0 > b0
+            xo_dn = (not np.isnan(a0)) and (not np.isnan(a1)) \
+                and (not np.isnan(b0)) and (not np.isnan(b1)) \
+                and a1 >= b1 and a0 < b0
+            if xo_up and not np.isnan(vola[i]):
+                bull_boxes.append((i, low[i] + vola[i], low[i]))
+                long_sig[i] = 1.0
+            elif xo_dn and not np.isnan(vola[i]):
+                bear_boxes.append((i, high[i] - vola[i], high[i]))
+                short_sig[i] = 1.0
+            # 测试判定(只看最新的箱子)
+            if bull_boxes:
+                _, btop, bbot = bull_boxes[-1]
+                if low[i] < btop and high[i] > btop \
+                        and open_[i] > btop and close[i] > btop:
+                    low_test[i] = bbot
+                    short_sig[i] = 0.0 if short_sig[i] == 1.0 else short_sig[i]
+                    long_sig[i] = 2.0
+            if bear_boxes:
+                _, stop_, sbot = bear_boxes[-1]
+                if high[i] > stop_ and low[i] < stop_ \
+                        and open_[i] < stop_ and close[i] < stop_:
+                    high_test[i] = sbot
+                    if long_sig[i] == 1.0:
+                        long_sig[i] = 0.0
+                    short_sig[i] = 2.0
+
+        # ---- 箱子阶梯线: 每个 box 一段（原码每个 box 是**独立**矩形）----
+        #   * 最新的 box：``Q.set_right(bar_index)`` -> 一直延伸到最后一根；
+        #   * 旧的 box：停在下一同类型 box 的前一拍（``box.new(..., bar_index+5, ...)``
+        #     给出的最小宽度 -> 至少 ``left+5``）。
+        #   两段之间必须用 NaN 断开，否则两条水平带会在换箱处连成一条。
+        bull_box_top = np.full(n, np.nan, dtype=np.float64)
+        bull_box_bottom = np.full(n, np.nan, dtype=np.float64)
+        bear_box_top = np.full(n, np.nan, dtype=np.float64)
+        bear_box_bottom = np.full(n, np.nan, dtype=np.float64)
+
+        def _paint(top_arr, bot_arr, boxes):
+            for j, (left, top, bottom) in enumerate(boxes):
+                nxt = boxes[j + 1][0] if j + 1 < len(boxes) else n - 1
+                a0 = max(int(left), 0)
+                a1 = min(n - 1, max(int(left) + 5, int(nxt) - 1))
+                if a1 < a0:
+                    continue
+                top_arr[a0:a1 + 1] = top
+                bot_arr[a0:a1 + 1] = bottom
+                if a0 > 0:                # 与上一段断开(原码是两个独立 box)
+                    top_arr[a0 - 1] = np.nan
+                    bot_arr[a0 - 1] = np.nan
+
+        _paint(bull_box_top, bull_box_bottom, bull_boxes)
+        _paint(bear_box_top, bear_box_bottom, bear_boxes)
+
+        return (hema1, hema2,
+                bull_top, bull_bottom, bear_top, bear_bottom,
+                bull_box_top, bull_box_bottom,
+                bear_box_top, bear_box_bottom,
+                low_test, high_test,
+                long_sig, short_sig)
+
+    # ------------------------------------------------------------------
+    # Pine 兼容: shift
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+
+class SmartMoneyBreakoutSignals(BtIndicator):
+    """Smart Money Breakout Signals [AlgoAlpha] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v6):
+        https://cn.tradingview.com/script/IV6eZF3w-Smart-Money-Breakout-Signals-AlgoAlpha/
+        © AlgoAlpha, shorttitle ``AlgoAlpha - Smart Money Breakout``
+
+    概述
+    ----
+    用 swing pivot 维护"市场结构", 当价格**突破上一个摆动高点/低点**时给出
+    BOS(结构突破) / CHoCH(性质转变) 信号, 并把被突破的摆动价位画成一条
+    **实体水平线**(压力线 / 支撑线)。
+
+    1. ``pivHi = ta.pivothigh(high, swingSize, swingSize)``、
+       ``pivLo = ta.pivotlow(low, swingSize, swingSize)``(确认 bar = pivot + swingSize);
+    2. 每次确认新摆动高点: ``prevHigh := pivHi``、``highActive := true``、
+       ``prevHighIndex := bar_index - swingSize``(摆动低点对称);
+    3. ``highSrc = (bosConfType=='Candle Close' ? close : high)``,
+       ``if highSrc > prevHigh and highActive`` → ``highBroken = true``
+       并置 ``highActive := false``(低点对称用 ``lowSrc``);
+    4. 突破发生时画 ``line.new(prevHighIndex, prevHigh, bar_index, prevHigh, BULL)``
+       —— 从摆动点水平拉到突破点的**实线**;
+    5. 标签文本: 若上次突破方向相反(``prevBreakoutDir == -1``)且开了 ``choch``
+       → ``CHoCH``, 否则 ``BOS``; 随后 ``prevBreakoutDir := 1``。
+
+    本实现范围
+    ----
+    **只保留**「突破信号」+「突破时产生信号的那条实体支撑/压力线」。
+    原码中 TP/TP1/TP2 三条 ``style_dashed`` 虚线、``SL``、``linefill`` 渐变填充、
+    以及右上角统计表 ``table.new`` 全部**不实现**(用户要求)。
+    因此 ``length`` / ``x`` / ``v`` / ``dist`` / ``RR`` / ``active*`` / ``TP*`` /
+    ``SL`` / ``total`` / ``tp1s``/``tp2s``/``tp3s`` 这一整套派生状态一并省略。
+
+    计算(Pine 逐行对齐)
+    ----
+    - 同一根 bar 上「先更新摆动点、再做突破判定」—— 确认 bar 上 ``prevHigh`` 先被
+      覆盖, 再拿 ``highSrc > prevHigh`` 比较。
+    - ``highBroken`` 与 ``lowBroken`` 是**两个独立 ``if``**, 同一根可同时成立;
+      低点分支在后, 会把 ``prevBreakoutDir`` 覆写成 ``-1``。
+    - 标签文本里的 ``prevBreakoutDir`` 取**更新前**的值。
+
+    参数
+    ----
+    swing_size : 市场结构回看周期(默认 25, 原码 ``MS`` 的 ``left=right``)
+    bos_conf_type : ``'Candle Close'``(默认, 用收盘价判定) / ``'Wicks'``(用最高/最低价)
+    choch : 是否显示 ``CHoCH`` 标签(默认 True; 关闭后全部显示 ``BOS``)
+    bull_color / bear_color : 多头 / 空头配色(默认 '#00ffbb' / '#ff1100')
+
+    **以下两项为 MiniBT 扩展**(原码没有), 默认值为**关闭**, 不传时与原码逐 bar 完全一致
+    ----
+    break_tolerance_pct : 突破容差百分比(默认 **0.0** = 原码的严格突破)
+        - 判定式从 ``highSrc > prevHigh`` 变为 ``highSrc >= prevHigh*(1-tol)``
+          (低点: ``lowSrc <= prevLow*(1+tol)``, ``tol = break_tolerance_pct/100``);
+          即价位**不必真的被越过**, "差一点点"也算突破。
+        - 建议范围 0.0 ~ 0.5(即 0% ~ 0.5%); 调大 → 信号变多、假突破也变多。
+    min_bars : 同向信号最小间隔根数(默认 **0** = 不去抖)
+        - 同一方向与上一次已发出的信号相隔不足 ``min_bars`` 根的突破会被**抑制**
+          (不画信号点、也不画那一段水平线)。
+        - 只过滤**输出**, 不改变原码的状态机(``highActive`` / ``prevHigh`` /
+          ``prevBreakoutDir`` 仍按原逻辑推进), 因此不会在同一个价位反复报信号。
+
+    ### 🎛 如何调整参数使突破信号更频繁?
+    ----
+    实测数据: ``LocalDatas.test.kline`` 共 8964 根。
+
+    **① 主要旋钮 —— `swing_size` 调小**(它决定摆动点确认的回看半径, 调小则摆动点
+    更多更密, 可供突破的价位也更多):
+
+    | swing_size | 信号数 | 每 N 根一个 |
+    |---:|---:|---:|
+    | 1 | 981 | 9 |
+    | 3 | 486 | 18 |
+    | 5 | 339 | 26 |
+    | 10 | 199 | 45 |
+    | 15 | 144 | 62 |
+    | 20 | 106 | 85 |
+    | **25(默认)** | **80** | 112 |
+    | 50 | 44 | 204 |
+    | 100 | 18 | 498 |
+
+    **② 次要旋钮 —— `bos_conf_type='Wicks'`**(改用最高/最低价判定, 影线碰到就算,
+    比 ``'Candle Close'`` 多约 20%~50%): 例 ``swing_size=25`` 时 80 → 85,
+    ``swing_size=10`` 时 199 → 240。
+
+    **③ 微调旋钮 —— `break_tolerance_pct` 调大**(容差让"差一点没破"也算, 建议 0.1~0.3)。
+
+    **④ 反向旋钮 —— `min_bars` 调大**(会**减少**信号, 用于去抖; 想增加信号就保持 0)。
+
+    常用组合::
+
+        # 温和加密(约为默认的 2.4 倍)
+        kline.tradingview.SmartMoneyBreakoutSignals(swing_size=15)
+        # 明显加密(约 3 倍, 结构仍算清晰 —— 推荐)
+        kline.tradingview.SmartMoneyBreakoutSignals(swing_size=10, bos_conf_type='Wicks')
+        # 高频(约 5.4 倍)
+        kline.tradingview.SmartMoneyBreakoutSignals(swing_size=5, bos_conf_type='Wicks')
+        # 保持默认结构、只放宽"差一点没破"的情况
+        kline.tradingview.SmartMoneyBreakoutSignals(break_tolerance_pct=0.2)
+        # 结构加密 + 去抖
+        kline.tradingview.SmartMoneyBreakoutSignals(swing_size=10, min_bars=20)
+
+    ⚠ ``swing_size`` 调到很小(≤3)时, 摆动结构本身变得不稳定, 突破的"结构含义"会
+    明显变弱(大量被小波动扫掉的假突破); 同时 ``resistance``/``support`` 的水平段
+    会变得又短又密、可读性下降。原码作者也提示 *"Larger values smooth out market
+    structure changes but may delay signals"*。
+
+    ⚠ ``choch`` **不影响信号数量** —— 它只决定标签显示 ``BOS`` 还是 ``CHoCH``。
+
+    输出 lines(主图叠加)
+    ----
+    - resistance : 多头突破时画的水平压力线(从摆动高点到突破点)
+    - support : 空头突破时画的水平支撑线(从摆动低点到突破点)
+    - long_signal : **1 = BOS, 2 = CHoCH**(多头突破, 锚 K 线 low)
+    - short_signal : **1 = BOS, 2 = CHoCH**(空头突破, 锚 K 线 high)
+      (逐点文本 'BOS' / 'CHoCH')
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码的 ``label.new`` 位于该水平线的**中点**(``floor(bar_index - (bar_index -
+      prevHighIndex)/2)``, y = 被突破价位); 框架信号点锚定触发 K 线的 low/high,
+      故位置不同、触发 bar 一致。
+    - 水平线只画在 ``[prevHighIndex, bar_index]`` 区间内(与原码 ``line.new`` 端点
+      一致); 多段重叠时按绘制先后覆盖, 与原码一致。
+    - ``barcolor(...)``(按 ``active`` 给主 K 线着灰/多/空色)未复现。
+    - 原码 ``MS()`` 还返回 ``hh/ll/lh/hl`` 与内部 ``prevSwing``, 但脚本里**从未使用**,
+      故本实现不计算。
+    - 统计表 ``table.new``(Total Signals / TP1~TP3 Win Rate)未复现。
+    - ``alert()`` / ``alertcondition()`` 未复现; 纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('resistance', 'support', 'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        swing_size=25,
+        bos_conf_type='Candle Close',
+        choch=True,
+        bull_color='#00ffbb',
+        bear_color='#ff1100',
+        # ---- MiniBT 扩展(默认关闭 -> 与原码逐 bar 一致) ----
+        break_tolerance_pct=0.0,
+        min_bars=0,
+    )
+    isplot = dict(resistance=True, support=True,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        resistance=LineStyle(line_color='#00ffbb', line_width=1.0),
+        support=LineStyle(line_color='#ff1100', line_width=1.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#00ffbb', 'triangle', True, True, 11),
+        short_signal=SignalStyle(
+            'high', '#ff1100', 'inverted_triangle', True, True, 11),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: BOS / CHoCH
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        """逐点信号文本: 1 → 'BOS', 2 → 'CHoCH'(与原码 ``label.new`` 一致)。"""
+        out = {}
+        for name in ('long_signal', 'short_signal'):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = 'CHoCH' if vals[i] == 2.0 else 'BOS'
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pivot(src, lbL: int, lbR: int, mode: str) -> np.ndarray:
+        """Pine ``ta.pivothigh(src, lbL, lbR)`` / ``ta.pivotlow``:
+        在确认 bar(``pivot + lbR``)返回 pivot 值, 否则 NaN。
+
+        两侧均为**严格**比较(与原码 ``ta.pivothigh`` 的 "higher than" 一致);
+        窗口内出现 na 时该候选不成立。
+        """
+        src = np.asarray(src, dtype=np.float64)
+        n = len(src)
+        out = np.full(n, np.nan, dtype=np.float64)
+        lbL = max(1, int(lbL))
+        lbR = max(1, int(lbR))
+        if n <= lbL + lbR:
+            return out
+        for p in range(lbL, n - lbR):
+            v = src[p]
+            if np.isnan(v):
+                continue
+            left = src[p - lbL:p]
+            right = src[p + 1:p + lbR + 1]
+            if mode == 'high':
+                if np.all(left < v) and np.all(right < v):
+                    out[p + lbR] = v
+            else:
+                if np.all(left > v) and np.all(right > v):
+                    out[p + lbR] = v
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        swing = max(1, int(p.swing_size))
+        conf = str(p.bos_conf_type)
+        show_choch = bool(p.choch)
+        # ---- MiniBT 扩展参数 ----
+        tol = max(0.0, float(
+            getattr(p, 'break_tolerance_pct', 0.0) or 0.0)) / 100.0
+        min_bars = max(0, int(getattr(p, 'min_bars', 0) or 0))
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        piv_hi = self._pivot(high, swing, swing, 'high')
+        piv_lo = self._pivot(low, swing, swing, 'low')
+
+        high_broken = np.zeros(n, dtype=bool)      # 原码 state machine 的原始突破
+        low_broken = np.zeros(n, dtype=bool)
+        keep_up = np.zeros(n, dtype=bool)          # 通过 min_bars 去抖、真正输出的信号
+        keep_dn = np.zeros(n, dtype=bool)
+        choch_up = np.zeros(n, dtype=bool)
+        choch_dn = np.zeros(n, dtype=bool)
+        segs_hi: list = []          # (left, right, value) 按绘制先后
+        segs_lo: list = []
+
+        prev_high = np.nan
+        prev_low = np.nan
+        prev_high_index = 0
+        prev_low_index = 0
+        high_active = False
+        low_active = False
+        prev_breakout_dir = 0
+        last_long = -(10 ** 9)      # 上一次已输出多头信号的 bar
+        last_short = -(10 ** 9)
+
+        for i in range(n):
+            # ---- 1) 先更新摆动结构(与原码同序) ----
+            if not np.isnan(piv_hi[i]):
+                prev_high = piv_hi[i]
+                high_active = True
+                prev_high_index = i - swing
+            if not np.isnan(piv_lo[i]):
+                prev_low = piv_lo[i]
+                low_active = True
+                prev_low_index = i - swing
+
+            # ---- 2) 再做突破判定 ----
+            high_src = close[i] if conf == 'Candle Close' else high[i]
+            low_src = close[i] if conf == 'Candle Close' else low[i]
+
+            # 突破判定: tol == 0 时保持原码的**严格**比较(不能写 >=, 否则等价价位
+            # 会多出信号、破坏与原码的逐 bar 一致性); tol > 0 时才启用容差。
+            if tol > 0.0:
+                up_hit = high_src >= prev_high * (1.0 - tol)
+                dn_hit = low_src <= prev_low * (1.0 + tol)
+            else:
+                up_hit = high_src > prev_high
+                dn_hit = low_src < prev_low
+
+            if high_active and (not np.isnan(prev_high)) and up_hit:
+                high_broken[i] = True
+                high_active = False
+                # 标签文本用"更新前"的方向
+                choch_up[i] = bool(prev_breakout_dir == -1 and show_choch)
+                # min_bars 去抖: 只过滤输出(信号点 + 该段水平线), 不动状态机
+                if min_bars <= 0 or (i - last_long) >= min_bars:
+                    keep_up[i] = True
+                    segs_hi.append((prev_high_index, i, prev_high))
+                    last_long = i
+                prev_breakout_dir = 1
+
+            if low_active and (not np.isnan(prev_low)) and dn_hit:
+                low_broken[i] = True
+                low_active = False
+                choch_dn[i] = bool(prev_breakout_dir == 1 and show_choch)
+                if min_bars <= 0 or (i - last_short) >= min_bars:
+                    keep_dn[i] = True
+                    segs_lo.append((prev_low_index, i, prev_low))
+                    last_short = i
+                prev_breakout_dir = -1
+
+        # ---- 3) 实体压力/支撑线: 每段 [left, right] 铺平, 后画者覆盖 ----
+        resistance = np.full(n, np.nan, dtype=np.float64)
+        support = np.full(n, np.nan, dtype=np.float64)
+        for left, right, val in segs_hi:
+            a0 = max(int(left), 0)
+            resistance[a0:int(right) + 1] = val
+        for left, right, val in segs_lo:
+            a0 = max(int(left), 0)
+            support[a0:int(right) + 1] = val
+
+        # ---- 4) 信号: 1=BOS, 2=CHoCH (只取通过 min_bars 的 keep_*) ----
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        long_sig[keep_up] = np.where(choch_up[keep_up], 2.0, 1.0)
+        short_sig[keep_dn] = np.where(choch_dn[keep_dn], 2.0, 1.0)
+
+        return (resistance, support, long_sig, short_sig)
+
+
+class AlphaTrendScreener(BtIndicator):
+    """AlphaTrend - Screener [KivancOzbilgic] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/kv8N05R7-AlphaTrend-Screener/
+        作者: Kivanc Ozbilgic (@KivancOzbilgic), Screener Panel: @dg_factor
+
+    概述
+    ----
+    本指标 = **经典的 AlphaTrend 自适应趋势线**(k1 / k2) + 由它派生的 **BUY/SELL 信号**。
+
+    1. ``ATR = ta.sma(ta.tr, AP)`` —— 注意是 **TR 的简单均值**, 不是 ``ta.atr``(Wilder);
+    2. ``upT = low - ATR*coeff``、``downT = high + ATR*coeff``;
+    3. ``AlphaTrend`` 以 ``nz(AlphaTrend[1])`` 播种做棘轮式递归(只进不退):
+       ``AlphaTrend := (novolumedata ? rsi(src,AP)>=50 : mfi(hlc3,AP)>=50)
+                       ? (upT < nz(AlphaTrend[1]) ? nz(AlphaTrend[1]) : upT)
+                       : (downT > nz(AlphaTrend[1]) ? nz(AlphaTrend[1]) : downT)``
+       —— 多头条件成立时取 ``max(prev, upT)``(支撑只上移), 否则取 ``min(prev, downT)``;
+    4. ``k1 = AlphaTrend``(原码蓝线 ``#0022fc``, 宽 3),
+       ``k2 = AlphaTrend[2]``(原码红线 ``#fc0400``, 宽 3, 即 "Trigger");
+    5. ``buySignalk = ta.crossover(AlphaTrend, AlphaTrend[2])``、
+       ``sellSignalk = ta.crossunder(...)``;
+       ``K1 = ta.barssince(buySignalk)``、``K2 = ta.barssince(sellSignalk)``、
+       ``O1 = ta.barssince(buySignalk[1])``、``O2 = ta.barssince(sellSignalk[1])``;
+    6. 真正的信号 = **加了一层"避免重复"过滤**:
+       ``BUY = buySignalk and O1 > K2``(上一次买入早于最近一次卖出 —— 即确实换过方向),
+       ``SELL = sellSignalk and O2 > K1``。
+
+    本实现范围
+    ----
+    **只实现 k1 / k2 / BUY / SELL**。原码其余部分(20 个 ``request.security`` 的多品种
+    "筛选面板"、``input.symbol``/``input.timeframe`` 表、``f_label`` 右侧标签堆叠、
+    ``direction`` 状态与 ``f_screener``)全部**不实现**, 因为它们是跨品种/跨周期的
+    面板逻辑, 与当前 K 线无关。``fill(k1, k2, color1)`` 的红绿填充也未复现。
+
+    参数
+    ----
+    length : 周期(默认 14, 原码 ``AP``), 同时用于 ATR/RSI/MFI
+    multiplier : 乘数(默认 1.0, 原码 ``coeff``)
+    no_volume_data : 原码 ``novolumedata``(默认 False) —— False 用 MFI, True 改用 RSI
+    src : ``ta.rsi`` 的源序列(默认 'close'; 仅 ``no_volume_data=True`` 时生效)
+    show_signals : 原码 ``showsignalsk``(默认 True) —— 是否显示 BUY/SELL 标记
+
+    输出 lines(主图叠加)
+    ----
+    - k1 : ``AlphaTrend``(蓝线, 宽 3)
+    - k2 : ``AlphaTrend[2]``(红线, 宽 3, 即原码的 Trigger)
+    - long_signal : **1 = BUY**(锚 K 线 low, 逐点文本 'BUY')
+    - short_signal : **1 = SELL**(锚 K 线 high, 逐点文本 'SELL')
+
+    ⚠ 近似 / 未复现
+    ----
+    - ``fill(k1, k2, color1)``(两根线之间的红/绿填充带, 颜色由
+      ``AlphaTrend`` 与其 ``[2]``/``[1]``/``[3]`` 的大小关系决定)未复现 —— 按需求只保留
+      两条线与信号。
+    - 原码 ``plotshape`` 用 ``location.absolute`` 把标签放在
+      ``AlphaTrend[2]*0.9999``(BUY) / ``*1.0001``(SELL) 处, 即**贴着 k2 线**;
+      框架信号点锚定触发 K 线的 low/high, 故纵向位置不同、触发 bar 一致。
+    - ``direction``(1/-1/0 状态机)只被筛选面板使用, 与 BUY/SELL 信号无关, 故未计算。
+    - ``ta.tr`` 按不带参数调用处理(等价 ``ta.tr(false)``): **首根 TR 为 na**,
+      因此 ``ATR`` 自第 ``AP`` 根起有效。若 TradingView 的默认是 ``ta.tr(true)``
+      (首根取 ``high-low``), 差异仅在 ``ATR`` 的首个有效 bar 上。
+    - 同类兄弟指标 ``AlphaTrend``(来自 ``o50NYLAZ-AlphaTrend``)在本库中已存在; 但注意
+      它用的 ``self.atr(AP)`` 是 pandas_ta 的 **Wilder RMA**, 与本原码的
+      ``ta.sma(ta.tr, AP)``(SMA) **口径不同**, 两者数值不会完全相同。
+    - ``alert`` / 无 ``plot`` 之外的绘图未复现; 纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('k1', 'k2', 'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        length=14,
+        multiplier=1.0,
+        no_volume_data=False,
+        src='close',
+        show_signals=True,
+    )
+    isplot = dict(k1=True, k2=True, long_signal=False, short_signal=False)
+    linestyle = dict(
+        k1=LineStyle(line_color='#0022fc', line_width=3.0),
+        k2=LineStyle(line_color='#fc0400', line_width=3.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#0022FC', 'triangle', True, True, 11),
+        short_signal=SignalStyle(
+            'high', '#800000', 'inverted_triangle', True, True, 11),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: BUY / SELL
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        """逐点信号文本: 与原码 ``plotshape`` 的 ``text='BUY'/'SELL'`` 一致。"""
+        out = {}
+        for name, txt in (('long_signal', 'BUY'), ('short_signal', 'SELL')):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = txt
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        """Pine ``x[k]``: 右移 k 位, 前 k 根为 na(布尔序列为 False)。"""
+        a = np.asarray(a)
+        out = np.zeros(len(a), dtype=a.dtype) if a.dtype == bool \
+            else np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+    @staticmethod
+    def _tr(high, low, close) -> np.ndarray:
+        """Pine ``ta.tr``(不带参数, 等价 ``ta.tr(false)``): 首根为 na。"""
+        high = np.asarray(high, dtype=np.float64)
+        low = np.asarray(low, dtype=np.float64)
+        close = np.asarray(close, dtype=np.float64)
+        n = len(close)
+        tr = np.full(n, np.nan, dtype=np.float64)
+        for i in range(1, n):
+            pc = close[i - 1]
+            tr[i] = max(high[i] - low[i], abs(high[i] - pc), abs(low[i] - pc))
+        return tr
+
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        """Pine ``ta.sma``: 窗口内出现 na 则为 na(严格完整窗口)。"""
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        for i in range(n - 1, m):
+            win = a[i - n + 1:i + 1]
+            if not np.isnan(win).any():
+                out[i] = float(win.mean())
+        return out
+
+    @staticmethod
+    def _sum(a, n: int) -> np.ndarray:
+        """Pine ``math.sum``: 窗口内出现 na 则为 na。"""
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        for i in range(n - 1, m):
+            win = a[i - n + 1:i + 1]
+            if not np.isnan(win).any():
+                out[i] = float(win.sum())
+        return out
+
+    @classmethod
+    def _mfi(cls, src, volume, n: int) -> np.ndarray:
+        """Pine ``ta.mfi(src, length)`` 的官方参考实现:
+
+            upper = math.sum(volume * (ta.change(src) <= 0 ? 0 : src), length)
+            lower = math.sum(volume * (ta.change(src) >= 0 ? 0 : src), length)
+            mfi   = 100 - 100 / (1 + upper / lower)
+
+        注意 na 的三元判断在 Pine 里取 false 分支: 首根 ``ta.change`` 为 na 时
+        ``<= 0`` 与 ``>= 0`` 都是 false, 于是 upper 记 ``volume*src``、lower 记 0。
+        """
+        src = np.asarray(src, dtype=np.float64)
+        volume = np.asarray(volume, dtype=np.float64)
+        n = max(1, int(n))
+        m = len(src)
+        chg = np.full(m, np.nan, dtype=np.float64)
+        if m > 1:
+            chg[1:] = src[1:] - src[:-1]
+        up_v = np.where(chg <= 0.0, 0.0, src) * \
+            volume     # na<=0 -> False -> 取 src
+        dn_v = np.where(chg >= 0.0, 0.0, src) * volume
+        upper = cls._sum(up_v, n)
+        lower = cls._sum(dn_v, n)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mfi = 100.0 - 100.0 / (1.0 + upper / lower)
+        return mfi
+
+    @staticmethod
+    def _barssince(cond) -> np.ndarray:
+        """Pine ``ta.barssince``: 距上一次条件为真的 bar 数(当根为 0), 从未为真则 na。"""
+        cond = np.asarray(cond)
+        m = len(cond)
+        out = np.full(m, np.nan, dtype=np.float64)
+        last = -1
+        for i in range(m):
+            if cond[i]:
+                last = i
+            if last >= 0:
+                out[i] = float(i - last)
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        AP = max(1, int(p.length))
+        coeff = float(p.multiplier)
+        novol = bool(p.no_volume_data)
+        show_sig = bool(p.show_signals)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        volume = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+        hlc3 = (high + low + close) / 3.0
+
+        src_name = str(p.src)
+        if src_name == 'hl2':
+            src = (high + low) / 2.0
+        elif src_name == 'hlc3':
+            src = hlc3
+        elif src_name == 'ohlc4':
+            src = (high + low + close + np.asarray(
+                self.open, dtype=np.float64)) / 4.0
+        else:
+            src = close
+
+        # ---- 1) ATR = ta.sma(ta.tr, AP)  (不是 Wilder 的 ta.atr!) ----
+        atr = self._sma(self._tr(high, low, close), AP)
+        up_t = low - atr * coeff
+        down_t = high + atr * coeff
+
+        # ---- 2) 方向条件: MFI(hlc3) 或 RSI(src) >= 50 ----
+        if novol:
+            cond = QQESignals._rsi(src, AP) >= 50.0
+        else:
+            cond = self._mfi(hlc3, volume, AP) >= 50.0
+
+        # ---- 3) AlphaTrend 棘轮递归(nz 播种) ----
+        at = np.full(n, np.nan, dtype=np.float64)
+        for i in range(n):
+            prev = at[i - 1] if i > 0 else np.nan
+            if np.isnan(prev):
+                prev = 0.0                     # nz(AlphaTrend[1])
+            if cond[i]:
+                at[i] = prev if up_t[i] < prev else up_t[i]
+            else:
+                at[i] = prev if down_t[i] > prev else down_t[i]
+
+        # ---- 4) k2 = AlphaTrend[2]; 交叉 ----
+        at2 = self._shift(at, 2)
+        at_1 = self._shift(at, 1)
+        at2_1 = self._shift(at2, 1)
+        buy = (at > at2) & (at_1 <= at2_1)
+        sell = (at < at2) & (at_1 >= at2_1)
+
+        # ---- 5) barssince 过滤(避免同向重复) ----
+        K1 = self._barssince(buy)
+        K2 = self._barssince(sell)
+        O1 = self._barssince(self._shift(buy, 1).astype(bool))
+        O2 = self._barssince(self._shift(sell, 1).astype(bool))
+
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        if show_sig:
+            long_sig[buy & (O1 > K2)] = 1.0
+            short_sig[sell & (O2 > K1)] = 1.0
+
+        return (at, at2, long_sig, short_sig)
+
+
+class EnvelopeRSISignals(BtIndicator):
+    """ENVELOPE - RSI - Buy Sell Signals [Saleh_Toodarvari] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/nVvltKvo-ENVELOPE-RSI-Buy-Sell-Signals/
+        © Saleh_Toodarvari, shorttitle ``ENVELOPE - RSI``
+
+    概述
+    ----
+    **价格包络线 + RSI 超买超卖** 的双重过滤买入/卖出信号。
+
+    1. **包络线**: ``basis = exponential ? ta.ema(src,len) : ta.sma(src,len)``
+       (默认 SMA), ``upper = basis*(1+k)``、``lower = basis*(1-k)``,
+       ``k = percent/100``; 上下轨之间填充淡蓝色背景;
+    2. **穿越**: ``cross_buy = ta.crossover(close, lower)``、
+       ``cross_sell = ta.crossunder(close, upper)``;
+    3. **RSI**(Wilder): ``up = ta.rma(max(ta.change(src),0), len)``、
+       ``down = ta.rma(-min(ta.change(src),0), len)``,
+       ``rsi = down==0 ? 100 : up==0 ? 0 : 100 - 100/(1 + up/down)``;
+    4. **双重条件**:
+       - ``condition_buy  = rsi <  oversold   and (ta.cross(low,lower)  or ta.cross(close,lower)  or ta.cross(high,lower)  or ta.cross(open,lower))``
+       - ``condition_sell = rsi >  overbought and (ta.cross(low,upper)  or ta.cross(close,upper)  or ta.cross(high,upper)  or ta.cross(open,upper))``
+       (``ta.cross`` 是**双向**穿越, 与单向的 ``crossover/crossunder`` 不同);
+    5. **信号标签**: ``Buy  = cross_buy  and condition_buy``、
+       ``Sell = cross_sell and condition_sell``;
+    6. **TP/SL**(仅在条件成立的那根 bar 上有值):
+       ``tp = condition_sell ? ohlc4*(1-TP%) : condition_buy ? ohlc4*(1+TP%) : na``,
+       ``sl = condition_sell ? ohlc4*(1+SL%) : condition_buy ? ohlc4*(1-SL%) : na``。
+
+    参数
+    ----
+    envelope_length : 包络均线周期(默认 8)
+    envelope_percent : 包络百分比(默认 0.22)
+    envelope_src : 包络源序列(默认 'hl2')
+    exponential : True 用 EMA, False(默认)用 SMA
+    rsi_length : RSI 周期(默认 8)
+    rsi_src : RSI 源序列(默认 'hl2')
+    overbought : RSI 超买阈值(默认 80, 原码 ``input.price`` 建议 70~85)
+    oversold : RSI 超卖阈值(默认 25, 原码 ``input.price`` 建议 20~30)
+    tp_percent : 止盈百分比(默认 0.15, 原码只用于被填充的 tp 线)
+    sl_percent : 止损百分比(默认 0.15, 原码只用于被填充的 sl 线)
+
+    输出 lines(主图叠加)
+    ----
+    - basis / upper / lower : 包络中轨(橙 ``#ED7300``) / 上轨(红 ``#FF2424``) / 下轨(绿 ``#24FF24``)
+      (upper 与 lower 之间为淡蓝填充 ``rgb(33,150,243)`` @95% 透明)
+    - rsi : Wilder RSI(仅数据; 原码没画它, 只用于条件判断)
+    - tp / sl : 止盈 / 止损价位(仅数据; 原码用 100% 透明画出)
+    - long_signal : **1 = Buy**(锚 K 线 low, 逐点文本 'Buy')
+    - short_signal : **1 = Sell**(锚 K 线 high, 逐点文本 'Sell')
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码的 4 条 ``fill(sell_sig/buy_sig, tp_sig/sl_sig, tpColor/slColor)`` **未复现**:
+      它们的两端分别是"只在信号 bar 上有值"的标记锚点(``cross_buy ? ohlc4 : na`` /
+      ``cross_sell ? high : na``)与 tp/sl, 而 TradingView 的 ``fill`` 需要**连续**
+      两个点才成形 —— 原码本身也画不出任何可见内容, 故一并省略(``tp``/``sl`` 仍作为
+      数据线保留)。
+    - 上述 fill 的 ``tpColor``/``slColor`` 是逐 bar 变化的(仅在
+      ``cross_sell[1] or cross_sell[2] or cross_buy[1] or cross_buy[2]`` 时为
+      绿/红, 否则全透明), 因对应的 fill 未复现, 这两个颜色量也未计算。
+    - 原码 ``lower_plot = plot(lower, 透明)`` 是把 ``lower`` 重复画了一遍且从未被
+      ``fill`` 引用(死代码), 未复现。
+    - ``buy_sig`` / ``sell_sig`` 两条 100% 透明的 plot 同样未复现(不可见且只服务于
+      上面那些 fill)。
+    - ``ta.cross(x, y)`` 按双向穿越实现 ``(x[1] <= y[1] and x > y) or (x[1] >= y[1] and x < y)``,
+      与库内 ``ti_crossany`` 口径一致(Pine 文档写的是 ``x[1] < y[1] and x > y`` 或
+      ``x[1] > y[1] and x < y``, 差异只在两端**恰好相等**时出现)。
+    - ``ta.ema``(exponential=True 时)按 Pine 语义 **SMA 播种**实现(库内 ``close.ema()`` 亦然)。
+    - ``alertcondition`` 未复现; 纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('basis', 'upper', 'lower', 'rsi', 'tp', 'sl',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        envelope_length=8,
+        envelope_percent=0.22,
+        envelope_src='hl2',
+        exponential=False,
+        rsi_length=8,
+        rsi_src='hl2',
+        overbought=80,
+        oversold=25,
+        tp_percent=0.15,
+        sl_percent=0.15,
+    )
+    isplot = dict(basis=True, upper=True, lower=True,
+                  rsi=False, tp=False, sl=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        basis=LineStyle(line_color='#ED7300'),
+        upper=LineStyle(line_color='#FF2424'),
+        lower=LineStyle(line_color='#24FF24'),
+    )
+    bandstyle = [
+        # fill(u, l, color=color.rgb(33, 150, 243, 95))  —— 95% 透明 => 5% 不透明
+        BandStyle(lower='lower', upper='upper',
+                  fill_color='#2196F3', fill_alpha=0.05, line_color=None),
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#008000', 'triangle', True, True, 11),
+        short_signal=SignalStyle(
+            'high', '#FF0000', 'inverted_triangle', True, True, 11),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: Buy / Sell
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        """逐点信号文本: 与原码 ``plotshape(text='Buy'/'Sell')`` 一致。"""
+        out = {}
+        for name, txt in (('long_signal', 'Buy'), ('short_signal', 'Sell')):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = txt
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _series(name: str, high, low, close, open_) -> np.ndarray:
+        """Pine ``input.source`` 支持的序列。"""
+        name = str(name).lower()
+        if name == 'open':
+            return open_
+        if name == 'high':
+            return high
+        if name == 'low':
+            return low
+        if name == 'hl2':
+            return (high + low) / 2.0
+        if name == 'hlc3':
+            return (high + low + close) / 3.0
+        if name == 'ohlc4':
+            return (high + low + close + open_) / 4.0
+        return close
+
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        """Pine ``ta.sma``: 窗口内出现 na 则为 na。"""
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        for i in range(n - 1, m):
+            win = a[i - n + 1:i + 1]
+            if not np.isnan(win).any():
+                out[i] = float(win.mean())
+        return out
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        """Pine ``ta.ema``(官方伪码):
+
+            sum := na(sum[1]) ? ta.sma(src, length)
+                              : alpha * src + (1 - alpha) * nz(sum[1])
+
+        即上一根为 na(首根 / 上一根源值为 na)时用 SMA **重新播种**。
+        """
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        alpha = 2.0 / (float(n) + 1.0)
+        for i in range(m):
+            if i == 0 or np.isnan(out[i - 1]):
+                win = a[i - n + 1:i + 1]
+                if i >= n - 1 and len(win) == n and not np.isnan(win).any():
+                    out[i] = float(win.mean())
+                continue
+            if not np.isnan(a[i]):
+                out[i] = alpha * a[i] + (1.0 - alpha) * out[i - 1]
+        return out
+
+    @staticmethod
+    def _cross(a, b) -> np.ndarray:
+        """Pine ``ta.cross(x, y)``: **双向**穿越(与 ``ti_crossany`` 同口径)。"""
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        m = len(a)
+        out = np.zeros(m, dtype=bool)
+        for i in range(1, m):
+            a1, b1, a0, b0 = a[i - 1], b[i - 1], a[i], b[i]
+            if np.isnan(a1) or np.isnan(b1) or np.isnan(a0) or np.isnan(b0):
+                continue
+            out[i] = (a1 <= b1 and a0 > b0) or (a1 >= b1 and a0 < b0)
+        return out
+
+    @staticmethod
+    def _cross_up(a, b) -> np.ndarray:
+        """Pine ``ta.crossover``: ``a[1] <= b[1] and a > b``。"""
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        m = len(a)
+        out = np.zeros(m, dtype=bool)
+        for i in range(1, m):
+            a1, b1, a0, b0 = a[i - 1], b[i - 1], a[i], b[i]
+            if np.isnan(a1) or np.isnan(b1) or np.isnan(a0) or np.isnan(b0):
+                continue
+            out[i] = a1 <= b1 and a0 > b0
+        return out
+
+    @staticmethod
+    def _cross_dn(a, b) -> np.ndarray:
+        """Pine ``ta.crossunder``: ``a[1] >= b[1] and a < b``。"""
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        m = len(a)
+        out = np.zeros(m, dtype=bool)
+        for i in range(1, m):
+            a1, b1, a0, b0 = a[i - 1], b[i - 1], a[i], b[i]
+            if np.isnan(a1) or np.isnan(b1) or np.isnan(a0) or np.isnan(b0):
+                continue
+            out[i] = a1 >= b1 and a0 < b0
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        elen = max(1, int(p.envelope_length))
+        epct = float(p.envelope_percent)
+        expo = bool(p.exponential)
+        rlen = max(1, int(p.rsi_length))
+        ob = float(p.overbought)
+        os_ = float(p.oversold)
+        tpp = float(p.tp_percent)
+        slp = float(p.sl_percent)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        open_ = np.asarray(self.open, dtype=np.float64)
+        n = len(close)
+        ohlc4 = (high + low + close + open_) / 4.0
+
+        esrc = self._series(p.envelope_src, high, low, close, open_)
+        rsrc = self._series(p.rsi_src, high, low, close, open_)
+
+        # ---- 1) 包络线 ----
+        basis = self._ema(esrc, elen) if expo else self._sma(esrc, elen)
+        k = epct / 100.0
+        upper = basis * (1.0 + k)
+        lower = basis * (1.0 - k)
+
+        # ---- 2) Wilder RSI(与 Pine ta.rsi 同式, 复用 QQESignals 实现) ----
+        rsi = QQESignals._rsi(rsrc, rlen)
+
+        # ---- 3) 穿越 ----
+        cross_buy = self._cross_up(close, lower)
+        cross_sell = self._cross_dn(close, upper)
+
+        # ---- 4) 双重条件(4 个双向穿越任一即可) ----
+        cond_buy = (rsi < os_) & (
+            self._cross(low, lower) | self._cross(close, lower)
+            | self._cross(high, lower) | self._cross(open_, lower))
+        cond_sell = (rsi > ob) & (
+            self._cross(low, upper) | self._cross(close, upper)
+            | self._cross(high, upper) | self._cross(open_, upper))
+
+        # ---- 5) TP / SL(仅条件成立的那根 bar 上有值) ----
+        tp = np.where(cond_sell, ohlc4 - ohlc4 * (tpp / 100.0),
+                      np.where(cond_buy, ohlc4 + ohlc4 * (tpp / 100.0), np.nan))
+        sl = np.where(cond_sell, ohlc4 + ohlc4 * (slp / 100.0),
+                      np.where(cond_buy, ohlc4 - ohlc4 * (slp / 100.0), np.nan))
+
+        # ---- 6) 信号 ----
+        long_sig = np.where(cross_buy & cond_buy, 1.0, 0.0)
+        short_sig = np.where(cross_sell & cond_sell, 1.0, 0.0)
+
+        return (basis, upper, lower, rsi, tp, sl, long_sig, short_sig)
+
+
+class MarketStructureOscillator(BtIndicator):
+    """Market Structure Oscillator [LuxAlgo] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v5):
+        https://cn.tradingview.com/script/K47z5Kmf-Market-Structure-Oscillator-LuxAlgo/
+        © LuxAlgo, shorttitle ``LuxAlgo - Market Structure Oscillator``
+
+    概述
+    ----
+    一个**副图振荡器**: 用三个层级(短期/中期/长期)的"市场结构突破"事件打分, 归一化后
+    加权平均成 0~100 的振荡器; 同时把三层结构的**支撑/阻力线**画在主图上。
+
+    **三层结构(层层嵌套)**
+    - **短期(K1)**: 直接对价格取 3 bar 分形 —— ``queryPatterns(high, high[1], high[2], true)``
+      即 ``high[2] < high[1] and high[1] >= high[0]``, 命中就把 ``high[1]`` 记入短期摆动序列;
+      当 ``close`` 上穿该摆动高点且未被穿越过 → 记一次**多头突破**;
+    - **中期(K2)**: 对**短期**摆动序列再取一次同样的分形
+      (``stHigh.queryPatterns(true)``, 即三个短期摆动中的中间那个最高), 命中就把
+      ``stHigh.midPrice`` 记入中期摆动序列; 突破逻辑相同;
+    - **长期(K3)**: 同理对**中期**摆动序列取分形。
+
+    **归一化 ``normalize(buy, sell, smooth)``** (每个层级各持一份 ``var`` 状态):
+    - ``os := buy ? 1 : sell ? -1 : os``;
+    - ``max := os > os[1] ? close : os < os[1] ? max : math.max(close, max)``
+      (``min`` 对称) —— 即"在多头状态里不断抬高上限、空头状态里不断压低下限";
+    - ``ta.sma((close - min)/(max - min), smooth) * 100``。
+
+    **合成**: ``msOSC = Σ wᵢ·nz(vᵢ,0) / Σ wᵢ·(na(vᵢ)?0:1)``
+    —— 对**已有值**的层级做加权平均(缺失的层级不参与), 默认权重 短:中:长 = 1:3:2。
+
+    **周期振荡器**: ``cycleFast = msOSC - ta.ema(msOSC, cyc_Smooth) + 50``,
+    原码用 ``plotcandle(50,50,50,cycleFast)`` 画成以 50 为基准的柱状图。
+
+    **⚠ 原码求值顺序(已严格复现)**
+    - "画结构线"的代码块位于 ``collectData()`` **之前**, 因此它读到的 ``lastPrice`` /
+      ``isCrossed`` 还是**上一根 bar 结束时的状态**; ``collectData()`` 才在本根更新摆动序列。
+      本实现按同一顺序执行(先画线/出信号, 再跑 collectData)。
+
+    参数
+    ----
+    show_osc : 是否显示振荡器主线(默认 True, 原码 ``msOsc_Show``)
+    weight_k1 / weight_k2 / weight_k3 : 三层权重(默认 1 / 3 / 2)
+    smooth : 归一化后的 SMA 平滑(默认 4, 原码 ``norm_Smooth``)
+    show_cycle : 是否显示周期柱状图(默认 True, 原码 ``cycleOpt``)
+    cycle_smooth : 周期振荡器的 EMA 长度(默认 7, 原码 ``cyc_Smooth``)
+    show_k1_lines / show_k2_lines / show_k3_lines : 三层结构线开关
+        (默认 **False / True / True** —— 原码三层都是 False, 这里按需求默认打开虚线(K2)与实线(K3))
+    style_k1 / style_k2 / style_k3 : 三层线型(默认 'dotted' / 'dashed' / 'solid')
+    bull_color / bear_color : 结构线的多头/空头配色(默认 '#089981' / '#f23645')
+    show_signals : 是否输出**突破实线(K3/长期)结构线**的信号(默认 True) —— **原码没有, 本框架新增**
+
+    输出 lines
+    ----
+    副图(``overlap=False``):
+      - ms_osc : 市场结构振荡器(0~100)
+      - osc_mid / osc_top / osc_upper / osc_lower / osc_btm : 50 / 100 / 85 / 15 / 0
+        (只有 ``osc_mid`` 画出, 其余仅作填充带的上下沿 —— 与原码 ``display.none`` 一致)
+      - osc_k1 / osc_k2 / osc_k3 : 短/中/长期分量(仅数据, 原码默认不画)
+      - cycle : 周期振荡器快线 —— 用 ``LineDash.vbar`` 画成**柱体**(围绕 50 轴)
+        ; hist_bull / hist_bear : 柱状图分色上下沿(仅数据)
+    主图(``overlap=True``):
+      - res_k1 / sup_k1 : 短期(点线)阻力 / 支撑
+      - res_k2 / sup_k2 : 中期(虚线)阻力 / 支撑
+      - res_k3 / sup_k3 : 长期(实线)阻力 / 支撑
+    信号(主图):
+      - long_signal : **1 = BoS, 2 = CHoCH**(向上突破**长期实线**阻力)
+      - short_signal : **1 = BoS, 2 = CHoCH**(向下突破**长期实线**支撑)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``plotcandle(50,50,50,cycleFast)`` 用的是蜡烛图; 本实现改用框架的
+      **柱体线**(``LineStyle(line_dash=LineDash.vbar, vbar_base=50)``)把 ``cycle``
+      画成围绕 50 轴的柱体 —— 几何与原码一致(柱体跨 [50, cycleFast]), 仅缺少蜡烛描边。
+      为此框架新增了 ``LineStyle.vbar_base``(逐线柱底基线, 默认 0.0 与旧行为一致)。
+      柱体上/下行颜色取框架默认双色(``COLORS`` 的 tomato/lime, 下行红/上行绿),
+      与原码的淡蓝 ``#90bff9`` / 淡橙 ``#ffcc80`` 不同(如需原色可改 ``linestyle``)。
+    - 原码两根渐变填充 ``fill(msPlot, midLine, 100, 60/40, ...)`` (振荡器线在 60 以上 /
+      40 以下时向 50 轴渐隐) 未复现(纯装饰); 两条 85~100 / 0~15 的超买超卖带**已复现**
+      (原码本身也是同位置渐变, 这里取渐变中值）。
+    - 原码 ``msPlot`` 的颜色是 ``color.from_gradient(msOSC, 0, 100, bear, bull)`` 的逐
+      bar 渐变; 本框架线型只有单一颜色, 故取多头色 ``#3179f5`` 单色(渐变信息由超买/超卖带
+      与柱状图体现)。
+    - 原码 ``k1/k2/k3`` 的 ``isCrossed`` 只在对应 ``msOnChartN`` 打开时才会被画线块的
+      ``setType()`` 更新; 本实现把 **BoS/CHoCH 类型状态机无条件推进**, 以便信号文本
+      始终有意义(画线开关只影响线本身)。
+    - 原码的 ``oscSig``(振荡器与 50 的交叉, 默认关)与 ``cycleSig``(周期振荡器交叉,
+      默认关)未复现 —— 信号列只用于需求中的"突破实线"信号。
+    - 信号锚点: 原码突破后画的是**结构线**(位于被突破价位), 本框架的信号点锚定触发
+      K 线的 low/high, 故纵向位置不同、触发 bar 一致。
+    - ``alertcondition`` 未复现; 纯指标, 未内置 ``step()``。
+    """
+    lines = (
+        # ---- 副图 ----
+        'ms_osc', 'osc_mid', 'osc_top', 'osc_upper', 'osc_lower', 'osc_btm',
+        'osc_k1', 'osc_k2', 'osc_k3',
+        'cycle', 'hist_bull', 'hist_bear',
+        # ---- 主图(逐线 overlap=True) ----
+        'res_k1', 'sup_k1', 'res_k2', 'sup_k2', 'res_k3', 'sup_k3',
+        # ---- 信号 ----
+        'long_signal', 'short_signal',
+    )
+    category = 'oscillator'
+    # 逐线 overlap: 结构与信号走主图, 其余走副图
+    # (框架 _get_plot_datas 会按此拆成"主图组 + 副图组"两个绘图分组)
+    overlap = dict(
+        ms_osc=False, osc_mid=False, osc_top=False, osc_upper=False,
+        osc_lower=False, osc_btm=False, osc_k1=False, osc_k2=False,
+        osc_k3=False, cycle=False, hist_bull=False, hist_bear=False,
+        res_k1=True, sup_k1=True, res_k2=True, sup_k2=True,
+        res_k3=True, sup_k3=True, long_signal=True, short_signal=True,
+    )
+    params = dict(
+        show_osc=True,
+        weight_k1=1.0, weight_k2=3.0, weight_k3=2.0,
+        smooth=4,
+        show_cycle=True,
+        cycle_smooth=7,
+        show_k1_lines=False,
+        show_k2_lines=True,
+        show_k3_lines=True,
+        style_k1='dotted', style_k2='dashed', style_k3='solid',
+        bull_color='#089981',
+        bear_color='#f23645',
+        show_signals=True,
+    )
+    isplot = dict(
+        ms_osc=True, osc_mid=True,
+        osc_top=False, osc_upper=False, osc_lower=False, osc_btm=False,
+        osc_k1=False, osc_k2=False, osc_k3=False,
+        # [修改] cycle 由仅数据改为画出 —— 用 LineDash.vbar 画成**柱体线**
+        #   (原来的"两条边线 + 以 50 为基准的填充带"近似已移除)
+        cycle=True, hist_bull=False, hist_bear=False,
+        res_k1=True, sup_k1=True, res_k2=True, sup_k2=True,
+        res_k3=True, sup_k3=True,
+        long_signal=False, short_signal=False,
+    )
+    linestyle = dict(
+        ms_osc=LineStyle(line_color='#3179f5', line_width=1.0),
+        osc_mid=LineStyle(line_color='#787b86', line_width=1.0),
+        # 周期柱状图: 原码 plotcandle(50,50,50,cycleFast) -> 从 50 轴到 cycleFast 的柱体。
+        #   line_dash='vbar' 让框架用柱体绘制; line_color=None 则取框架默认的上下行双色
+        #   (COLORS = tomato/lime, 即下行红/上行绿);
+        #   vbar_base=50.0 把柱底抬到 50 轴(默认 0.0 会画成 0 起的柱子)。
+        cycle=LineStyle(line_dash='vbar', line_width=1.0,
+                        line_color=None, vbar_base=50.0),
+        res_k1=LineStyle(line_color='#089981', line_dash='dotted'),
+        sup_k1=LineStyle(line_color='#f23645', line_dash='dotted'),
+        res_k2=LineStyle(line_color='#089981', line_dash='dashed'),
+        sup_k2=LineStyle(line_color='#f23645', line_dash='dashed'),
+        res_k3=LineStyle(line_color='#089981', line_dash='solid'),
+        sup_k3=LineStyle(line_color='#f23645', line_dash='solid'),
+    )
+    bandstyle = [
+        # fill(oscTop, upperBand, ...) 超买带 85~100 (原码为纵向渐变, 这里取中值 0.14)
+        BandStyle(lower='osc_upper', upper='osc_top',
+                  fill_color='#ffa726', fill_alpha=0.14, line_color=None),
+        # fill(lowerBand, oscBtm, ...) 超卖带 0~15
+        BandStyle(lower='osc_btm', upper='osc_lower',
+                  fill_color='#3179f5', fill_alpha=0.14, line_color=None),
+        # [修改] 原为两条围绕 osc_mid(50) 的柱状图填充带; 现 cycle 已用
+        #   LineDash.vbar 画成真正的柱体, 故移除这两条带(hist_bull/hist_bear
+        #   保留为仅数据线, 供单独提取)。
+    ]
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#089981', 'triangle', True, True, 11),
+        short_signal=SignalStyle(
+            'high', '#f23645', 'inverted_triangle', True, True, 11),
+    )
+
+    # ------------------------------------------------------------------
+    # 逐点信号文本: BoS / CHoCH
+    # ------------------------------------------------------------------
+    def signal_text(self) -> dict | None:
+        """逐点信号文本: 1 → 'BoS', 2 → 'CHoCH'(与原码结构线标签同一套用词)。"""
+        out = {}
+        for name in ('long_signal', 'short_signal'):
+            vals = np.asarray(getattr(self, name).values, dtype=np.float64)
+            arr = np.full(vals.shape[0], np.nan, dtype=object)
+            for i in np.where(vals > 0)[0]:
+                arr[i] = 'CHoCH' if vals[i] == 2.0 else 'BoS'
+            out[name] = arr
+        return out
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        """Pine ``x[k]``: 右移 k 位, 前 k 根为 na。"""
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+    @staticmethod
+    def _pmax(a, b) -> float:
+        """Pine ``math.max``: 任一侧为 na 则结果 na。"""
+        if np.isnan(a) or np.isnan(b):
+            return np.nan
+        return a if a > b else b
+
+    @staticmethod
+    def _pmin(a, b) -> float:
+        """Pine ``math.min``: 任一侧为 na 则结果 na。"""
+        if np.isnan(a) or np.isnan(b):
+            return np.nan
+        return a if a < b else b
+
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        """Pine ``ta.sma``: 窗口内出现 na 则为 na。"""
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        for i in range(n - 1, m):
+            win = a[i - n + 1:i + 1]
+            if not np.isnan(win).any():
+                out[i] = float(win.mean())
+        return out
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        """Pine ``ta.ema``: na(sum[1]) ? ta.sma(src,n) : alpha*src + (1-alpha)*nz(sum[1])。"""
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        alpha = 2.0 / (float(n) + 1.0)
+        for i in range(m):
+            if i == 0 or np.isnan(out[i - 1]):
+                win = a[i - n + 1:i + 1]
+                if i >= n - 1 and len(win) == n and not np.isnan(win).any():
+                    out[i] = float(win.mean())
+                continue
+            if not np.isnan(a[i]):
+                out[i] = alpha * a[i] + (1.0 - alpha) * out[i - 1]
+        return out
+
+    @staticmethod
+    def _query(last, mid, prev, is_high) -> bool:
+        """``queryPatterns``: 3 点分形(含 na 时为 False)。"""
+        if is_high:
+            return bool(prev < mid and mid >= last)
+        return bool(prev > mid and mid <= last)
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        w1 = float(p.weight_k1)
+        w2 = float(p.weight_k2)
+        w3 = float(p.weight_k3)
+        smooth = max(1, int(p.smooth))
+        show_osc = bool(p.show_osc)
+        show_cycle = bool(p.show_cycle)
+        cyc_smooth = max(1, int(p.cycle_smooth))
+        show_k1 = bool(p.show_k1_lines)
+        show_k2 = bool(p.show_k2_lines)
+        show_k3 = bool(p.show_k3_lines)
+        show_sig = bool(p.show_signals)
+
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        h1, h2 = self._shift(high, 1), self._shift(high, 2)
+        l1, l2 = self._shift(low, 1), self._shift(low, 2)
+
+        # ---- 摆动序列状态(Pine 的 SWINGS / MS 对象) ----
+        def new_swing():
+            return dict(lastPrice=np.nan, midPrice=np.nan, prevPrice=np.nan,
+                        lastIndex=np.nan, midIndex=np.nan, prevIndex=np.nan,
+                        isCrossed=False)
+
+        def update_pattern(sw, price, index):
+            sw['isCrossed'] = False
+            sw['prevPrice'] = sw['midPrice']
+            sw['midPrice'] = sw['lastPrice']
+            sw['lastPrice'] = price
+            sw['prevIndex'] = sw['midIndex']
+            sw['midIndex'] = sw['lastIndex']
+            sw['lastIndex'] = index
+
+        def q_swing(sw, is_high) -> bool:
+            return self._query(sw['lastPrice'], sw['midPrice'],
+                               sw['prevPrice'], is_high)
+
+        st_high, st_low = new_swing(), new_swing()
+        it_high, it_low = new_swing(), new_swing()
+        lt_high, lt_low = new_swing(), new_swing()
+        ms_type = [0, 0, 0]          # stMS / itMS / ltMS 的 type
+
+        # normalize() 的 var 状态: 每次调用点各一份 → 3 份
+        o_cur = [0, 0, 0]
+        o_prev = [np.nan, np.nan, np.nan]
+        mx = [np.nan, np.nan, np.nan]
+        mn = [np.nan, np.nan, np.nan]
+        raw = [np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)]
+
+        def normalize(buy, sell, i, k) -> float:
+            op = o_prev[k]
+            o = 1 if buy else (-1 if sell else o_cur[k])
+            o_cur[k] = o
+            if o > op:
+                mx[k] = close[i]
+            elif o < op:
+                pass
+            else:
+                mx[k] = self._pmax(close[i], mx[k])
+            if o < op:
+                mn[k] = close[i]
+            elif o > op:
+                pass
+            else:
+                mn[k] = self._pmin(close[i], mn[k])
+            den = mx[k] - mn[k]
+            if np.isnan(den) or den == 0.0:
+                raw[k][i] = np.nan         # x/0 -> na
+            else:
+                raw[k][i] = (close[i] - mn[k]) / den
+
+        # ---- 结构线段收集 (start, end, price), 后画者覆盖 ----
+        segs = {1: ([], []), 2: ([], []), 3: ([], [])}   # level -> (res, sup)
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+
+        # 画线块的判定函数(用"上一根结束时"的状态, 与原码同序)
+        def draw_block(highs, lows, lvl, i):
+            if (not np.isnan(highs['lastPrice'])) and close[i] > highs['lastPrice'] \
+                    and not highs['isCrossed']:
+                if (show_k1, show_k2, show_k3)[lvl - 1]:
+                    segs[lvl][0].append(
+                        (highs['lastIndex'], i, highs['lastPrice']))
+                ch = ms_type[lvl - 1] < 0
+                ms_type[lvl - 1] = 1
+                if lvl == 3 and show_sig:
+                    long_sig[i] = 2.0 if ch else 1.0
+            if (not np.isnan(lows['lastPrice'])) and close[i] < lows['lastPrice'] \
+                    and not lows['isCrossed']:
+                if (show_k1, show_k2, show_k3)[lvl - 1]:
+                    segs[lvl][1].append(
+                        (lows['lastIndex'], i, lows['lastPrice']))
+                ch = ms_type[lvl - 1] > 0
+                ms_type[lvl - 1] = -1
+                if lvl == 3 and show_sig:
+                    short_sig[i] = 2.0 if ch else 1.0
+
+        # cSwingHigh[1] / cSwingLow[1] —— Pine 里它们是 marketStructure()
+        # 的**局部变量**, 每个调用点各有一份历史, 故中期/长期各自独立
+        # (共 4 份), 不能共用。索引: 0=中期高 1=中期低 2=长期高 3=长期低
+        prev_c = [False, False, False, False]
+
+        for i in range(n):
+            # ================= (A) 画线 / 信号块(先于 collectData) =========
+            draw_block(st_high, st_low, 1, i)
+            draw_block(it_high, it_low, 2, i)
+            draw_block(lt_high, lt_low, 3, i)
+
+            # ================= (B) collectData() =============================
+            # --- 1) shortMarketStructure() ---
+            b1 = s1 = False
+            if self._query(high[i], h1[i], h2[i], True):
+                update_pattern(st_high, h1[i], i - 1)
+                st_high['isCrossed'] = False
+            if (not np.isnan(st_high['lastPrice'])) and close[i] > st_high['lastPrice'] \
+                    and not st_high['isCrossed']:
+                st_high['isCrossed'] = True
+                b1 = True
+            if self._query(low[i], l1[i], l2[i], False):
+                st_low['isCrossed'] = False
+                update_pattern(st_low, l1[i], i - 1)
+            if (not np.isnan(st_low['lastPrice'])) and close[i] < st_low['lastPrice'] \
+                    and not st_low['isCrossed']:
+                st_low['isCrossed'] = True
+                s1 = True
+            normalize(b1, s1, i, 0)
+
+            # --- 2) marketStructure(it*, it*, st*) ---
+            b2 = s2 = False
+            c = q_swing(st_high, True)
+            if c and not prev_c[0]:
+                update_pattern(
+                    it_high, st_high['midPrice'], st_high['midIndex'])
+                it_high['isCrossed'] = False
+            prev_c[0] = c
+            if (not np.isnan(it_high['lastPrice'])) and close[i] > it_high['lastPrice'] \
+                    and not it_high['isCrossed']:
+                it_high['isCrossed'] = True
+                b2 = True
+            c = q_swing(st_low, False)
+            if c and not prev_c[1]:
+                update_pattern(it_low, st_low['midPrice'], st_low['midIndex'])
+                it_low['isCrossed'] = False
+            prev_c[1] = c
+            if (not np.isnan(it_low['lastPrice'])) and close[i] < it_low['lastPrice'] \
+                    and not it_low['isCrossed']:
+                it_low['isCrossed'] = True
+                s2 = True
+            normalize(b2, s2, i, 1)
+
+            # --- 3) marketStructure(lt*, it*, it*) ---
+            b3 = s3 = False
+            c = q_swing(it_high, True)
+            if c and not prev_c[2]:
+                update_pattern(
+                    lt_high, it_high['midPrice'], it_high['midIndex'])
+                lt_high['isCrossed'] = False
+            prev_c[2] = c
+            if (not np.isnan(lt_high['lastPrice'])) and close[i] > lt_high['lastPrice'] \
+                    and not lt_high['isCrossed']:
+                lt_high['isCrossed'] = True
+                b3 = True
+            c = q_swing(it_low, False)
+            if c and not prev_c[3]:
+                update_pattern(lt_low, it_low['midPrice'], it_low['midIndex'])
+                lt_low['isCrossed'] = False
+            prev_c[3] = c
+            if (not np.isnan(lt_low['lastPrice'])) and close[i] < lt_low['lastPrice'] \
+                    and not lt_low['isCrossed']:
+                lt_low['isCrossed'] = True
+                s3 = True
+            normalize(b3, s3, i, 2)
+
+            # 每根结束时把 os 推进一位
+            for k in range(3):
+                o_prev[k] = o_cur[k]
+
+        v1 = self._sma(raw[0], smooth) * 100.0
+        v2 = self._sma(raw[1], smooth) * 100.0
+        v3 = self._sma(raw[2], smooth) * 100.0
+
+        # ---- 加权合成(缺失层级不参与) ----
+        num = np.zeros(n, dtype=np.float64)
+        den = np.zeros(n, dtype=np.float64)
+        for w, v in ((w1, v1), (w2, v2), (w3, v3)):
+            ok = ~np.isnan(v)
+            num += np.where(ok, w * np.nan_to_num(v, nan=0.0), 0.0)
+            den += np.where(ok, w, 0.0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ms_osc = num / den
+        ms_osc = np.where(den == 0.0, np.nan, ms_osc)
+
+        # ---- 周期振荡器 ----
+        if show_cycle:
+            cycle = ms_osc - self._ema(ms_osc, cyc_smooth) + 50.0
+        else:
+            cycle = np.full(n, 50.0, dtype=np.float64)
+
+        # ---- 结构线段 -> 逐 bar 序列(后画的覆盖先画的) ----
+        res = {1: np.full(n, np.nan), 2: np.full(
+            n, np.nan), 3: np.full(n, np.nan)}
+        sup = {1: np.full(n, np.nan), 2: np.full(
+            n, np.nan), 3: np.full(n, np.nan)}
+        for lvl in (1, 2, 3):
+            for left, right, val in segs[lvl][0]:
+                res[lvl][max(int(left), 0):int(right) + 1] = val
+            for left, right, val in segs[lvl][1]:
+                sup[lvl][max(int(left), 0):int(right) + 1] = val
+
+        # ---- 副图各线 ----
+        osc_top = np.full(n, 100.0)
+        osc_upper = np.full(n, 85.0)
+        osc_mid = np.full(n, 50.0)
+        osc_lower = np.full(n, 15.0)
+        osc_btm = np.full(n, 0.0)
+        ms_line = ms_osc if show_osc else np.full(n, np.nan)
+        k1_line = v1
+        k2_line = v2
+        k3_line = v3
+        hist_bull = np.where(cycle > 50.0, cycle, np.nan)
+        hist_bear = np.where(cycle < 50.0, cycle, np.nan)
+
+        return (ms_line, osc_mid, osc_top, osc_upper, osc_lower, osc_btm,
+                k1_line, k2_line, k3_line,
+                cycle, hist_bull, hist_bear,
+                res[1], sup[1], res[2], sup[2], res[3], sup[3],
+                long_sig, short_sig)
+
+
+class ITGScalper(BtIndicator):
+    """ITG Scalper Buy/Sell [Complector] → MiniBT BtIndicator
+    ----
+    原码(TradingView Pine v4 ``study``):
+        https://cn.tradingview.com/script/AcrZjl6Q-ITG-Scalper/
+        © Complector, shorttitle ``ITG_Scalper``
+
+    概述
+    ----
+    **TEMA(Triple EMA)方向 + MACD 噪声过滤** 的顺势进出场:
+
+    1. **TEMA 线**(原码的 ``out1``):
+       ``ema1 = ema(close,len)``、``ema2 = ema(ema1,len)``、``ema3 = ema(ema2,len)``,
+       ``out1 = 3*(ema1 - ema2) + ema3``;
+    2. **趋势**: ``ma_up = out1 >= out1[1]``、``ma_down = out1 < out1[1]``,
+       ``t_NON = (ma_up == ma_down)``(二者互补, 只在 na 预热期为真);
+    3. **噪声过滤**: ``Fmacd = ema(close,Ffast) - ema(close,Fslow)``、
+       ``Fsignal = sma(Fmacd,FsignalLength)``;
+       ``Fbuy = (Fmacd >= Fsignal) or not nfilter``、``Fsell = (Fmacd < Fsignal) or not nfilter``;
+    4. **信号**:
+       ``long  = ma_up and not last_tran and not t_NON and Fbuy``
+       ``short = ma_down and last_tran and not t_NON and Fsell``
+       —— 即**多空交替**(买后必须卖、卖后必须买, 由 ``last_tran`` 记忆), 首次只可能是 buy;
+       触发时记 ``buyprice/sellprice = close`` 并翻转 ``last_tran``;
+    5. ``PercVal`` = 自上次买/卖以来的百分比变化。
+
+    **本实现的取舍(按需求)**
+    - ``out1`` **不做绿/红分段着色**, 只画**一条单色指标线**(原码 ``col`` 是逐 bar 变化的
+      ``lime/red``(``cc=true``) 或 ``aqua``(``cc=false``); 现取单色 ``#00FFFF``, 可用
+      ``linestyle`` 自行更换);
+    - 买/卖信号**只保留标记、不带文字**(原码两种画法 —— ``uselabel`` 的 label 带成交价文本、
+      ``plotshape`` 的三角 —— 都带文本/价格信息, 这里一律不带)。
+
+    参数
+    ----
+    length : TEMA 周期(默认 14)
+    show_tema : 原码 ``shc``, 是否画出 TEMA 线(默认 True; False 时该线置 na 不画)
+    show_signals : 原码 ``showtext``, 是否输出买卖信号(默认 True)
+    noise_filter : 原码 ``nfilter``, 是否启用 MACD 过滤(默认 True; False 则不过滤)
+    filter_fast / filter_slow / filter_signal : 过滤用 MACD 的三个长度(默认 12 / 26 / 9)
+
+    输出 lines(主图叠加)
+    ----
+    - out1 : TEMA 线(``3*(ema1-ema2)+ema3``, 单色宽 2)
+    - perc : 自上次买/卖以来的百分比变化(仅数据, 原码 ``showperc`` 默认关)
+    - goodlong / goodshort : 原码的"这次是否比上次成交价更有利"(仅数据,
+      原码用它给卖点标签换色: 盈利红、否则黄; 单色标记下无法逐 bar 变色)
+    - long_signal : 1 = 买点(锚 K 线 low, 三角形**无文本**)
+    - short_signal : 1 = 卖点(锚 K 线 high, 倒三角**无文本**)
+
+    ⚠ 近似 / 未复现
+    ----
+    - 原码 ``realC = security(tickerid(...), timeframe.period, close)`` 与
+      ``out1 = security(tickerid(...), timeframe.period, out)`` 都是**本品种本周期**的
+      ``security`` 调用, 恒等于 ``close`` / ``out``, 故直接省略(原码里等价于无操作)。
+    - 原码 ``resCustom``(过滤用自定义周期)依赖 ``security(..., Fres, ...)`` 跨周期取值;
+      本实现**只支持当前周期**(等价 ``useCurrentRes = true``), 未实现跨周期重采样。
+    - 原码 ``Fsource = close``、``macd_colorChange`` 为死变量(未被使用), 未实现。
+    - 原码 ``barstate.isconfirmed`` 在已收盘 K 线上恒为 true, 本框架也只在收盘 bar 计算,
+      故省略。
+    - 原码 ``showperc`` 的百分比标签(``label.new`` 画在 bar 上方)与 ``uselabel`` 的
+      成交价标签**均未复现**(按需求信号不带文本); 百分比数值改以 ``perc`` 数据线给出。
+    - 卖点颜色原码按 ``goodshort`` 在红/黄之间逐 bar 切换, 本框架信号样式只有单色,
+      故固定单色(绿买红卖), ``goodshort`` 另以数据线保留。
+    - ``ema`` 按 Pine 官方伪码 ``na(sum[1]) ? sma(src,len) : alpha*src + (1-alpha)*nz(sum[1])``
+      实现(**SMA 播种**, 与库内 ``close.ema()`` 一致)。
+    - ``alertcondition`` 未复现; 纯信号指标, 未内置 ``step()``。
+    """
+    lines = ('out1', 'perc', 'goodlong', 'goodshort',
+             'long_signal', 'short_signal')
+    category = 'overlap'
+    overlap = True
+    params = dict(
+        length=14,
+        show_tema=True,
+        show_signals=True,
+        noise_filter=True,
+        filter_fast=12,
+        filter_slow=26,
+        filter_signal=9,
+    )
+    isplot = dict(out1=True, perc=False, goodlong=False, goodshort=False,
+                  long_signal=False, short_signal=False)
+    linestyle = dict(
+        # 原码 cc=false 时的单色为 aqua; 这里统一用单色(不做绿/红分段)
+        out1=LineStyle(line_color="#362BD9", line_width=2.0),
+    )
+    signalstyle = dict(
+        long_signal=SignalStyle(
+            'low', '#00FF00', 'triangle', True, True, 11),
+        short_signal=SignalStyle(
+            'high', '#FF0000', 'inverted_triangle', True, True, 11),
+    )
+
+    # ------------------------------------------------------------------
+    # Pine 兼容工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _shift(a, k: int) -> np.ndarray:
+        """Pine ``x[k]``: 右移 k 位, 前 k 根为 na。"""
+        a = np.asarray(a, dtype=np.float64)
+        out = np.full(len(a), np.nan, dtype=np.float64)
+        if 0 < k < len(a):
+            out[k:] = a[:len(a) - k]
+        return out
+
+    @staticmethod
+    def _ema(a, n: int) -> np.ndarray:
+        """Pine ``ema``(官方伪码):
+
+            sum := na(sum[1]) ? sma(src, length)
+                              : alpha * src + (1 - alpha) * nz(sum[1])
+        """
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        alpha = 2.0 / (float(n) + 1.0)
+        for i in range(m):
+            if i == 0 or np.isnan(out[i - 1]):
+                win = a[i - n + 1:i + 1]
+                if i >= n - 1 and len(win) == n and not np.isnan(win).any():
+                    out[i] = float(win.mean())
+                continue
+            if not np.isnan(a[i]):
+                out[i] = alpha * a[i] + (1.0 - alpha) * out[i - 1]
+        return out
+
+    @staticmethod
+    def _sma(a, n: int) -> np.ndarray:
+        """Pine ``sma``: 窗口内出现 na 则为 na。"""
+        a = np.asarray(a, dtype=np.float64)
+        m = len(a)
+        out = np.full(m, np.nan, dtype=np.float64)
+        n = max(1, int(n))
+        if m < n:
+            return out
+        for i in range(n - 1, m):
+            win = a[i - n + 1:i + 1]
+            if not np.isnan(win).any():
+                out[i] = float(win.mean())
+        return out
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        length = max(1, int(p.length))
+        show_tema = bool(p.show_tema)
+        show_sig = bool(p.show_signals)
+        nfilter = bool(p.noise_filter)
+        ff = max(1, int(p.filter_fast))
+        fs = max(1, int(p.filter_slow))
+        fg = max(1, int(p.filter_signal))
+
+        close = np.asarray(self.close, dtype=np.float64)
+        n = len(close)
+
+        # ---- 1) TEMA(out1) ----
+        ema1 = self._ema(close, length)
+        ema2 = self._ema(ema1, length)
+        ema3 = self._ema(ema2, length)
+        out1 = 3.0 * (ema1 - ema2) + ema3
+
+        # ---- 2) 趋势(na 比较 -> False, 与原码 na 条件"不成立"一致) ----
+        prev = self._shift(out1, 1)
+        ma_up = out1 >= prev
+        ma_down = out1 < prev
+        # t_NON = (ma_up == ma_down): 二者互补 -> 只在双方都 False(na 预热)时为真,
+        # 等价于 out1 或其前值缺失
+        t_non = (~ma_up) & (~ma_down)
+
+        # ---- 3) 噪声过滤 MACD ----
+        f_macd = self._ema(close, ff) - self._ema(close, fs)
+        f_signal = self._sma(f_macd, fg)
+        fb = np.zeros(n, dtype=bool)
+        fse = np.zeros(n, dtype=bool)
+        ok = (~np.isnan(f_macd)) & (~np.isnan(f_signal))
+        fb[ok] = f_macd[ok] >= f_signal[ok]
+        fse[ok] = f_macd[ok] < f_signal[ok]
+        if not nfilter:                     # Fbuy/Fsell = ... or not nfilter
+            fb = np.ones(n, dtype=bool)
+            fse = np.ones(n, dtype=bool)
+
+        # ---- 4) 进场条件(多空交替, last_tran 记忆) ----
+        long_sig = np.zeros(n, dtype=np.float64)
+        short_sig = np.zeros(n, dtype=np.float64)
+        goodlong = np.zeros(n, dtype=np.float64)
+        goodshort = np.zeros(n, dtype=np.float64)
+        perc = np.full(n, np.nan, dtype=np.float64)
+
+        buyprice = 0.0
+        sellprice = 0.0
+        last_tran = False
+        for i in range(n):
+            is_long = bool(ma_up[i] and (not last_tran)
+                           and (not t_non[i]) and fb[i])
+            is_short = bool(ma_down[i] and last_tran
+                            and (not t_non[i]) and fse[i])
+            if is_long:
+                buyprice = float(close[i])      # buyprice := realC
+                last_tran = True
+            if is_short:
+                sellprice = float(close[i])     # sellprice := realC
+                last_tran = False
+            if last_tran and buyprice != 0.0:
+                perc[i] = 100.0 * (close[i] - buyprice) / buyprice
+            elif (not last_tran) and sellprice != 0.0:
+                perc[i] = 100.0 * (close[i] - sellprice) / sellprice
+            # goodlong / goodshort(原码在 if 块之后计算)
+            if is_long and buyprice <= sellprice:
+                goodlong[i] = 1.0
+            if is_short and sellprice > buyprice:
+                goodshort[i] = 1.0
+            if show_sig:
+                if is_long:
+                    long_sig[i] = 1.0
+                if is_short:
+                    short_sig[i] = 1.0
+
+        if not show_tema:
+            out1 = np.full(n, np.nan, dtype=np.float64)
+
+        return (out1, perc, goodlong, goodshort, long_sig, short_sig)
+
+
+class RollingVolumeProfile(BtIndicator):
+    """滚动成交量分布（Volume Profile）→ MiniBT BtIndicator
+    ----
+    **框架内置的 Volume Profile 指标**（`category='vp'`），供
+    `minibt/strategy/bokeh_plot.py` 以专门的"横向成交量分布图"方式绘制。
+
+    与普通指标的区别
+    ----
+    - 普通指标的 `next()` 返回**一维**序列（每根 K 线一个值），框架画成折线/柱体；
+    - 本指标的 `next()` 返回**二维矩阵**：``shape = (K 线根数, 档数)``。
+      第 ``i`` 行 = 第 ``i`` 根 K 线时刻的**价格分档成交量分布**。
+      返回**一维**时按"只有 1 档"处理（框架同样支持，只是没什么意义）。
+
+    数据约定（绘图端按同一规则还原 Y 坐标）
+    ----
+    - **列 = 等宽的 N 个价格档**，**第 i 根 K 线有它自己的档区**：
+      ``[min(low[max(0,i-price_bars+1):i+1]), max(high[...])]``（见下面 ``price_bars``），
+      即第 ``i`` 行第 ``j`` 档的价格中心 =
+      ``lo_i + (j + 0.5) * (hi_i - lo_i) / N``；
+    - 第 ``i`` 行第 ``j`` 列 = 窗口 ``[i-length+1, i]`` 内**落在第 j 档的成交量之和**；
+    - 因此绘图端只要拿到同一段 K 线数据 + 同一 ``price_bars``，就能算出与指标
+      完全一致的档位价格（绘图端每根 K 线也按同一滚动规则取档区）。
+
+    算法
+    ----
+    1. 每根 K 线的成交量**整笔归入它 ``src``（默认 close）所在的价格档** → 得到
+       0/1 归属矩阵 ``contrib[i, b]``；
+    2. 对 ``contrib`` 沿时间做**前缀和** ``csum``（首行补 0），则
+       ``prof[i] = csum[i+1] - csum[max(0, i-length+1)]``
+       —— 一次算完所有时刻，不用逐根循环；
+    3. 前 ``length-1`` 根凑不满窗口，按"可得数据"统计（与原型的处理一致）。
+
+    参数
+    ----
+    length : 滚动统计窗口（默认 100，即"每根 K 线统计它自己 + 前 99 根"）
+    bins : 价格分档数（默认 40）
+    src : 分档所用的价格（默认 'close'；也可给 'hl2'/'hlc3'/'ohlc4'）
+
+    返回值
+    ----
+    ``np.ndarray``，形状 ``(K 线根数, bins)``（``bins`` 可为 1，此时等价于一维）
+
+    ### 使用示例::
+
+        kline = LocalDatas.test.kline
+        ind = kline.tradingview.RollingVolumeProfile(length=100, bins=40)
+        ind.btplot()                     # category='vp' -> 横向成交量分布图
+    """
+    category = 'vp'            # ★ 关键：框架据此走"Volume Profile"专门绘制分支
+    overlap = True             # 画在价格主图上
+    # 列数由参数 bins 决定(默认 40)。这里给出**默认 bins 对应的线名**,
+    #   使 `RollingVolumeProfile(kline)` 直接构造也能用;
+    #   门面方法会再按实际 bins 用 `lines=` 覆盖一次（BtIndicator.__new__ 里
+    #   `kwargs["lines"]` 优先级最高），所以任意 bins 都成立。
+    # ⚠ 不能留空：空 lines 会让框架去**解析 next() 源码猜行名**
+    #   （BtIndicator._parse_return_variables），返回矩阵时必然猜错。
+    lines = tuple(f"vp{j}" for j in range(40))
+    # ★ 关键: VP 的每一列都是"分布数据", **不能**当普通指标线画。
+    #   否则框架的通用绘图分支(以及策略图上半段 `for j in range(len(isplot)):
+    #   if isplot[j]:` 那一段)会把 40 列逐列画成折线 —— 每根 K 线在档位之间跳变,
+    #   主图上就出现大量"垂直线"。这里全部标记为**不绘制**, 只交给
+    #   `category='vp'` 的专门分支画成横向成交量分布图。
+    #   (门面方法会按实际 bins 再覆盖一次)
+    #   ⚠ 必须是 **dict{列名: bool}** 或 bool —— 框架 core.py:486-488 对非
+    #     bool/dict 的值会"静默丢弃"(退回 True), 传 list/tuple 无效。
+    isplot = False  # {f"vp{j}": False for j in range(40)}
+    # ★ 成交量分布图的**样式**（只有 `category='vp'` 会读它；pylightcharts 与
+    #   bokeh 两侧同步生效）。字段说明见 `minibt/utils.py::VPStyle`：
+    #     bar_color / poc_color / highlight_poc / fill_alpha /
+    #     line_color / line_width / profile_frac（满量程柱长 = 可视跨度 × 它）
+    #     / bin_ratio（柱体粗细）/ price_bars（档区窗口，None = 跟 params）
+    #     / show_axis（bokeh 右侧成交量刻度）。
+    #   构造时也可覆盖：`RollingVolumeProfile(vpstyle=VPStyle(fill_alpha=0.5))`，
+    #   或运行时改 `ind.plotinfo.vpstyle.fill_alpha = 0.5`。
+    #   这里的默认值与 bokeh 侧**改动前完全一致**（0.6 透明 + 白色 0.4 描边），
+    #   所以两个绘图端外观不变，改样式只需要改这一个地方。
+    vpstyle = VPStyle(
+        bar_color='#3498db',      # 横条颜色
+        poc_color='#f39c12',      # 量最大那一档（POC）的颜色
+        highlight_poc=True,       # 高亮 POC 档
+        fill_alpha=0.6,           # 横条透明度（bokeh 旧值）
+        line_color='white',       # 横条描边色（bokeh 旧值）
+        line_width=0.4,           # 描边宽度（bokeh 旧值）
+        profile_frac=0.30,        # 满量程柱长 = 可视跨度 * 0.30
+        bin_ratio=0.88,           # 柱体高度占档距的 88%
+        price_bars=None,          # None -> 跟 params.price_bars(500)
+        show_axis=False,          # bokeh 顶部“成交量刻度”轴（默认关闭，只留柱体）
+    )
+    params = dict(
+        length=100,
+        bins=40,
+        src='close',
+        # ★ 定档位所用的“价格区间”取自**每根 K 线自己**最近多少根（默认 500，
+        #   **滚动**，不是整段数据的最后 500 根）。
+        #   档位数 bins 是固定的，若区间覆盖整段数据（可能上千点），40 档里
+        #   只有极少数落在滚动窗口内 -> 图上只看得到 2~3 根柱子；
+        #   而若只取“整段数据的最后 500 根”当**固定**区间，早期 K 线的价格
+        #   根本不在区间内 -> 全被 clamp 到第 0 档 -> 只剩 POC 一根柱子。
+        #   设 None / <=0 表示用全段数据的 [min(low), max(high)]（旧行为）。
+        #   ⚠ 建议 price_bars >= length。
+        price_bars=500,
+    )
+
+    # ------------------------------------------------------------------
+    # 主计算
+    # ------------------------------------------------------------------
+    def next(self):
+        p = self.params
+        length = max(1, int(p.length))
+        n_bins = max(1, int(p.bins))
+
+        close = np.asarray(self.close, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        low = np.asarray(self.low, dtype=np.float64)
+        volume = np.asarray(self.volume, dtype=np.float64)
+        n = len(close)
+
+        src_name = str(p.src)
+        if src_name == 'hl2':
+            src = (high + low) / 2.0
+        elif src_name == 'hlc3':
+            src = (high + low + close) / 3.0
+        elif src_name == 'ohlc4':
+            src = (high + low + close + np.asarray(
+                self.open, dtype=np.float64)) / 4.0
+        else:
+            src = close
+
+        # ---- 价格档（默认只用**最后 price_bars 根**的 [min(low), max(high)]）----
+        # ★ 为什么要限制：bins 是**固定档位**，若覆盖整段数据（几千根 / 上千点），
+        #   40 档里往往只有 2~3 档落在滚动窗口的价格范围内 -> VP 看上去只有
+        #   两三根柱子。test8.py 之所以“饱满”，就是因为它只加载 LOOKBACK+LENGTH 根。
+        #   price_bars=None / <=0 -> 退回旧行为（用全段数据）。
+        _pb = p.price_bars if hasattr(p, 'price_bars') else 500
+        try:
+            _pb = None if _pb is None else int(_pb)
+        except Exception:
+            _pb = 500
+        # ==================================================================
+        # ★ BUG 修复: 档区必须**逐根滚动**, 不能只用"整段数据最后 price_bars 根"。
+        #   [原逻辑 — 保留备查]
+        #   if _pb is not None and 0 < _pb < n:
+        #       _k = _pb
+        #       lo = float(np.nanmin(low[-_k:]))      # ← 整段数据最后 500 根的区间
+        #       hi = float(np.nanmax(high[-_k:]))     #   对**所有** K 线都用这一个固定区间
+        #   else:
+        #       lo, hi = float(np.nanmin(low)), float(np.nanmax(high))
+        #   edges = np.linspace(lo, hi, n_bins + 1)
+        #   b_idx = np.clip(np.digitize(src, edges) - 1, 0, n_bins - 1)
+        #
+        #   为什么错: 固定区间只覆盖"最后 500 根"的价格。i 很小时(比如 8964 根里的
+        #   前 8464 根), 该时刻的价格**根本不在这个区间里** -> np.digitize 把它们
+        #   全部 clamp 到第 0 档(或最后一档) -> 那些时刻的分布只剩 1 根柱子,
+        #   而唯一非零的那根恰好是最大值 -> 被画成 POC 的黄色 -> 用户看到
+        #   "8459 之前只有黄色柱体, 没有别的柱子"。
+        #
+        #   正确口径: 第 i 根用**它自己**最近 price_bars 根的价格区间
+        #       [min(low[max(0,i-pb+1):i+1]), max(high[max(0,i-pb+1):i+1])]
+        #   这样早期 K 线必然覆盖自身价格, 分布始终饱满; 且 i=n-1 时该区间
+        #   恰好等于"最后 price_bars 根", 与绘图端的初始绘制完全一致。
+        #   ⚠ 约定: price_bars 应 >= length, 否则滚动窗口里的成交量超出档区
+        #     (会被 clamp 进首/末档) —— 默认 500 >= 100, 满足。
+        # ==================================================================
+        _rk = _pb if (_pb is not None and 0 < _pb < n) else None
+        _lo_all = float(np.nanmin(low))
+        _hi_all = float(np.nanmax(high))
+        _vol = np.nan_to_num(volume, nan=0.0)
+        prof, lo, hi = _jit_call(
+            'vp_profile', _vp_profile_kernel, low, high, src, _vol, n,
+            n_bins, length, 0 if _rk is None else int(_rk),
+            _lo_all, _hi_all)
+        # 保存**最后一根**实际使用的档位区间, 供绘图端读取（两边档位完全一致）
+        try:
+            self._vp_bin_range = (lo, hi)
+        except Exception:
+            ...
+
+        # ---- [原实现 — 保留备查] 固定档区 + 前缀和 --------------------
+        #   contrib = np.zeros((n, n_bins), dtype=np.float64)
+        #   contrib[np.arange(n), b_idx] = np.nan_to_num(volume, nan=0.0)
+        #   csum = np.vstack([np.zeros((1, n_bins)), np.cumsum(contrib, axis=0)])
+        #   win_lo = np.maximum(0, np.arange(n) - length + 1)
+        #   prof = csum[np.arange(n) + 1] - csum[win_lo]      # (n, n_bins)
+        #   (前缀和只对"全局固定档区"成立; 档区逐根变化后每根的 edges 都不同,
+        #    无法再用一次 cumsum 表达, 因此改为逐根 digitize + bincount。)
+        # ----------------------------------------------------------------
+
+        # bins == 1 时返回一维（框架与"一维=1档"的约定一致）
+        if n_bins == 1:
+            return prof[:, 0]
+        return prof
+
+
+class VolumeProfileMA(RollingVolumeProfile):
+    """滚动成交量分布 + 一条均线指标线 → MiniBT BtIndicator
+    ----
+    **演示 `category='vp'` 的"指标线 + Volume Profile"用法**（形态 B/C）：
+    ``next()`` 返回 ``(n, 1+bins)`` 矩阵 —— 第 0 列是均线指标线，后 ``bins`` 列是分布；
+    ``lines`` 用 ``('ma', 'vp0'..'vp{bins-1}')`` 命名，绘图端按 **``vp`` 前缀**切分：
+    前缀之前的列按普通折线画，之后的数据块交给 Volume Profile 绘制。
+
+    - ``overlap=True``（默认）：均线 + 分布都画在**价格主图**（y = 价格档）
+    - ``overlap=False``：另开**副图**（y = 档位序号，分层直方图）
+
+    参数（继承 RollingVolumeProfile，另加）
+    ----
+    ma_len : 均线周期（默认 20）
+
+    ### 使用示例::
+
+        kline = LocalDatas.test.kline
+        kline.tradingview.VolumeProfileMA(length=100, ma_len=20)          # 主图
+        kline.tradingview.VolumeProfileMA(length=100, overlap=False)      # 副图
+    """
+    lines = ('ma',) + tuple(f'vp{j}' for j in range(40))
+    # ★ 同 `RollingVolumeProfile`: 只有 `ma` 是要画的折线, `vp*` 列是分布数据,
+    #   交给 `category='vp'` 专门分支绘制, 不能再走通用折线分支。
+    isplot = dict({"ma": True}, **{f"vp{j}": False for j in range(40)})
+    params = dict(RollingVolumeProfile.params, ma_len=20)
+    linestyle = dict(
+        ma=LineStyle(line_color='#e91e63', line_width=1.6),
+        vp0=LineStyle(line_color='#3498db'),        # VP 柱体颜色(绘图端读这里)
+    )
+    overlap = True
+
+    def next(self):
+        prof = RollingVolumeProfile.next(self)          # (n, bins)
+        close = np.asarray(self.close, dtype=np.float64)
+        n_ma = max(1, int(self.params.ma_len))
+        ma = pd.Series(close).rolling(n_ma).mean().to_numpy()
+        return np.c_[ma, prof]                          # (n, 1+bins)
 
 
 class TradingView:
@@ -6426,28 +24557,29 @@ class TradingView:
 
     #### **1. 趋势跟踪策略（Trend Following）**
        - 功能：识别和跟踪市场趋势方向，在趋势启动时入场，趋势结束时出场
-       - 包含策略：Powertrend_Volume_Range_Filter_Strategy、Nadaraya_Watson_Envelope_Strategy、Adaptive_Trend_Filter、
-       - Multi_Step_Vegas_SuperTrend_strategy、RJ_Trend_Engine、AlphaTrend、SuperTrend、SuperTrend_STRATEGY、Optimized_Trend_Tracker
+       - 包含策略：Powertrend_Volume_Range_Filter_Strategy、Nadaraya_Watson_Envelope_Strategy、Adaptive_Trend_Filter、SingleEMACross、SmartMoneyBreakouts、TradingABC
+       - Multi_Step_Vegas_SuperTrend_strategy、RJ_Trend_Engine、AlphaTrend、AlphaTrendScreener、SuperTrend、SuperTrend_STRATEGY、Optimized_Trend_Tracker、HalfTrend、FollowLineIndicator、SuperBollingerTrend、GhostTangentCrossings、VolumeSuperTrendAI、MultiKernelRegression、TwinOptimizedTrendTracker
 
     #### **2. 均值回归策略（Mean Reversion）**
        - 功能：在价格偏离均值时入场，预期价格回归均值时出场
-       - 包含策略：DCA_Strategy_with_Mean_Reversion_and_Bollinger_Band、Bollinger_RSI_Double_Strategy、CM_Williams_Vix_Fix_Finds_Market_Bottoms
+       - 包含策略：DCA_Strategy_with_Mean_Reversion_and_Bollinger_Band、Bollinger_RSI_Double_Strategy、CM_Williams_Vix_Fix_Finds_Market_Bottoms、FlawlessVictoryStrategy、TwoBReversalPattern
 
     #### **3. 突破策略（Breakout）**
        - 功能：在价格突破关键支撑阻力位时入场，捕捉趋势启动机会
-       - 包含策略：Turtles_strategy、Turtle_Trade_Channels_Indicator_TUTCI、G_Channels、Twin_Range_Filter
+       - 包含策略：Turtles_strategy、Turtle_Trade_Channels_Indicator_TUTCI、G_Channels、Twin_Range_Filter、TwinRangeFilter、FVGInstantaneousMitigationSignals、TransientZones、ExhaustionLevels、SMTDivergences、FalseBreakout、BreaksAndRetests、SwingFailurePattern、RenkoCandlesOverlay、HemaTrendLevels、SmartMoneyBreakoutSignals
 
     #### **4. 动量策略（Momentum）**
        - 功能：基于价格和成交量的动量变化识别交易机会
-       - 包含策略：The_Flash_Strategy、WaveTrend_Oscillator、TonyUX_EMA_Scalper、Volume_Flow_Indicator
+       - 包含策略：The_Flash_Strategy、WaveTrend_Oscillator、TonyUX_EMA_Scalper、Volume_Flow_Indicator、QuantitativeQualitativeEstimation、StochasticOptimizedTrendTracker、CumulativeDeltaVolume、SuperTrendRelativeVolume、MACDBollingerBands、RMITrendSniper、PMaxOnRsiT3、RSIDivergenceStrategy、MACDLeader、ScalpPro、VariableMovingAverage、MarketStructureOscillator、ITGScalper、VolumeProfileMA
+       - （另见 `category='vp'` 的滚动成交量分布：RollingVolumeProfile）
 
     #### **5. 波动率策略（Volatility）**
        - 功能：基于市场波动率变化调整交易参数和风险管理
-       - 包含策略：STD_Filtered、PMax_Explorer、PMax_Explorer_STRATEGY、Chandelier_Exit、Pivot_Point_Supertrend
+       - 包含策略：STD_Filtered、PMax_Explorer、PMax_Explorer_STRATEGY、Chandelier_Exit、Pivot_Point_Supertrend、EnvelopeRSISignals
 
     #### **6. 机器学习策略（Machine Learning）**
        - 功能：基于自适应算法和AI技术优化策略参数
-       - 包含策略：Quantum_Edge_Pro_Adaptive_AI、LOWESS
+       - 包含策略：Quantum_Edge_Pro_Adaptive_AI、LOWESS、MachineLearningRSI
 
     #### **7. 信号处理策略（Signal Processing）**
        - 功能：基于信号处理理论分析价格数据
@@ -6522,7 +24654,7 @@ class TradingView:
     """
     _kline: KLine | IndFrame | IndSeries | Line
 
-    def __init__(self, kline: KLine | IndFrame | IndSeries | Line ,**kwargs):
+    def __init__(self, kline: KLine | IndFrame | IndSeries | Line, **kwargs):
         # if kwargs.pop("ischeck", True):
         #     assert isinstance(kline, (KLine, IndFrame)), (
         #         f"❌：tradingview指标初始化数据类型需为KLine或包含OHLCV列的IndFrame，传入的数据格式为{type(kline)}")
@@ -7257,18 +25389,29 @@ class TradingView:
 
     def TonyUX_EMA_Scalper(self, length=20, period=8, **kwargs) -> IndFrame:
         """
-        ## TonyUX EMA 剥头皮策略
+        ## TonyUX EMA Scalper —— Tony's EMA Scalper Buy/Sell
+
+        EMA(默认 20) 与近 8 根(period)收盘高低点相结合的剥头皮工具:
+        - 上穿 EMA 且动能向上(现收高于前收) → `long_signal`(买入);
+        - 下穿 EMA 且动能向下(现收低于前收) → `short_signal`(卖出)。
 
         ### 📘 **文档参考**:
         ✈ https://cn.tradingview.com/script/egfSfN1y-TonyUX-EMA-Scalper-Buy-Sell/
 
+        原码中蓝色 EMA(out)只参与信号判定不输出；红色 last8h / 绿色 lastl8
+        横线对应 `lasth` / `lastl` 两条折线。
+
         Args:
-            length: EMA 计算周期，默认 `20`
-            period: 价格高低点统计周期，默认 `8`
+            length: EMA 周期，默认 `20`
+            period: 近期收盘最高/最低价统计周期，默认 `8`
             **kwargs: 其他扩展参数
 
         Returns:
-            包含 `lasth`（近期高点）、`lastl`（近期低点）、`long_signal`（多头信号）、`short_signal`（空头信号）的策略数据
+            主图叠加 IndFrame，包含:
+            - `lasth`: 近 period 根收盘最高价(原码红色横线 last8h)
+            - `lastl`: 近 period 根收盘最低价(原码绿色横线 lastl8)
+            - `long_signal`: 买入信号(0/1，画在 bar 下方)
+            - `short_signal`: 卖出信号(0/1，画在 bar 上方)
         """
         return TonyUX_EMA_Scalper(self._kline, length=length, period=period, **kwargs)
 
@@ -7309,7 +25452,6 @@ class TradingView:
         """
         return AlphaTrend(self._kline, coeff=coeff, AP=AP, novolumedata=novolumedata, **kwargs)
 
-
     def ATRRope(self, length=14, multi=1.5, src='close', **kwargs) -> IndFrame:
         """
         ## ATR Rope — 基于 ATR 的自适应绳索通道
@@ -7325,17 +25467,21 @@ class TradingView:
         """
         return ATRRope(self._kline, length=length, multi=multi, src=src, **kwargs)
 
-
-    def DeltaRSISignals(self, 
+    def DeltaRSISignals(self,
                         rsi_length=21, window=21, degree=2,
+                        signal_length=9,
                         buycond='Zero-Crossing',
                         sellcond='Zero-Crossing',
                         endcond='Zero-Crossing',
-                        use_nrmse=False, nrmse_thrs=10.0, **kwargs) -> IndFrame:
+                        use_nrmse=False, nrmse_thrs=10.0,
+                        show_buy=True, show_sell=True, show_exit=True,
+                        **kwargs) -> IndFrame:
         """
         ## Delta-RSI Oscillator Strategy [tbiktag]
         基于 Pine Script "Delta-RSI Oscillator Strategy" (tbiktag) 转换
-        参考 TradingView: https://cn.tradingview.com/script/OXQVFTQD-Delta-RSI-Oscillator/
+        参考 TradingView:
+        - 策略版: https://cn.tradingview.com/script/oIHW2xG2-Delta-RSI-Oscillator-Strategy/
+        - 指标版: https://cn.tradingview.com/script/OXQVFTQD-Delta-RSI-Oscillator/
 
         三种可选交易信号条件：
         - Zero-Crossing:        D-RSI 上穿/下穿 0 线
@@ -7363,11 +25509,17 @@ class TradingView:
         endcond       — 离场条件，默认 'Zero-Crossing'
         use_nrmse     — 是否启用 NRMSE 过滤，默认 False
         nrmse_thrs    — NRMSE 阈值（%），默认 10
+        show_buy / show_sell / show_exit — 对应原码 islong / isshort /
+            showendlabels 的显示开关（默认 True；置零对应信号列）
         """
-        return DeltaRSISignals(self._kline, rsi_length=rsi_length, window=window, degree=degree,
-                                buycond=buycond, sellcond=sellcond, endcond=endcond,
-                                use_nrmse=use_nrmse, nrmse_thrs=nrmse_thrs, **kwargs)
-        
+        return DeltaRSISignals(self._kline, rsi_length=rsi_length, window=window,
+                               degree=degree, signal_length=signal_length,
+                               buycond=buycond, sellcond=sellcond,
+                               endcond=endcond, use_nrmse=use_nrmse,
+                               nrmse_thrs=nrmse_thrs, show_buy=show_buy,
+                               show_sell=show_sell, show_exit=show_exit,
+                               **kwargs)
+
     def DynamicSwingAnchoredVWAP(self, prd=50, base_apt=20, use_adapt=False, vol_bias=10.0, **kwargs) -> IndFrame:
         """
         ## Dynamic Swing Anchored VWAP (DSAV) Indicator
@@ -7384,7 +25536,7 @@ class TradingView:
             包含 `dsav`（Dynamic Swing Anchored VWAP 值）的指标数据
         """
         return DynamicSwingAnchoredVWAP(self._kline, prd=prd, base_apt=base_apt, use_adapt=use_adapt, vol_bias=vol_bias, **kwargs)
- 
+
     def DynamicLinearRegressionChannels(self, upper_mult=1.0, lower_mult=1.0, break_mult=2.0, **kwargs) -> IndFrame:
         """
         动态线性回归通道 — 自适应分段回归趋势通道
@@ -7430,21 +25582,21 @@ class TradingView:
         """
         return DynamicLinearRegressionChannels(self._kline, upper_mult=upper_mult, lower_mult=lower_mult, break_mult=break_mult, **kwargs)
 
-    def IGHSupertrend(self, 
-                        hull_length=55,
-                        volatility_length=21,
-                        volatility_mode='Blend',
-                        measurement_noise=4.0,
-                        process_noise=0.03,
-                        innovation_threshold=0.80,
-                        gate_sharpness=4.0,
-                        admission_floor=0.12,
-                        process_boost=4.0,
-                        atr_period=12,
-                        factor=1.70,
-                        adapt_bands=True,
-                        quiet_band_expansion=0.35, 
-                        **kwargs) -> IndFrame:
+    def IGHSupertrend(self,
+                      hull_length=55,
+                      volatility_length=21,
+                      volatility_mode='Blend',
+                      measurement_noise=4.0,
+                      process_noise=0.03,
+                      innovation_threshold=0.80,
+                      gate_sharpness=4.0,
+                      admission_floor=0.12,
+                      process_boost=4.0,
+                      atr_period=12,
+                      factor=1.70,
+                      adapt_bands=True,
+                      quiet_band_expansion=0.35,
+                      **kwargs) -> IndFrame:
         """
         Innovation-Gated Hull Supertrend — 创新门控 Hull 超级趋势
         https://cn.tradingview.com/script/tq9f0qwr-Innovation-Gated-Hull-Supertrend-BackQuant/
@@ -7463,29 +25615,29 @@ class TradingView:
             - factor:                Supertrend 因子，默认 1.70
             - adapt_bands:           是否用创新度自适应带，默认 True
             - quiet_band_expansion:  平静期带宽扩展，默认 0.35
-        
+
         Returns:
             - super_trend: 超级趋势值
             - direction: 趋势方向，1 表示上趋势，-1 表示下趋势，0 表示无趋势
             - long_signal: 长信号，1 表示长趋势，0 表示无长趋势
             - short_signal: 短信号，1 表示短趋势，0 表示无短趋势
         """
-        return IGHSupertrend(self._kline, 
-                              hull_length=hull_length,
-                              volatility_length=volatility_length,
-                              volatility_mode=volatility_mode,
-                              measurement_noise=measurement_noise,
-                              process_noise=process_noise,
-                              innovation_threshold=innovation_threshold,
-                              gate_sharpness=gate_sharpness,
-                              admission_floor=admission_floor,
-                              process_boost=process_boost,
-                              atr_period=atr_period,
-                              factor=factor,
-                              adapt_bands=adapt_bands,
-                              quiet_band_expansion=quiet_band_expansion,
-                              **kwargs)
-    
+        return IGHSupertrend(self._kline,
+                             hull_length=hull_length,
+                             volatility_length=volatility_length,
+                             volatility_mode=volatility_mode,
+                             measurement_noise=measurement_noise,
+                             process_noise=process_noise,
+                             innovation_threshold=innovation_threshold,
+                             gate_sharpness=gate_sharpness,
+                             admission_floor=admission_floor,
+                             process_boost=process_boost,
+                             atr_period=atr_period,
+                             factor=factor,
+                             adapt_bands=adapt_bands,
+                             quiet_band_expansion=quiet_band_expansion,
+                             **kwargs)
+
     def LPTT(self, length=20, **kwargs) -> IndFrame:
         """
         ## LPTT — 低阶多项式拟合趋势交易指标
@@ -7507,7 +25659,7 @@ class TradingView:
             2. 取最近 length 根收盘价，二阶 polyfit → g'' = 2a₂（趋势加速度）
             3. f' × g'' > 0 → 顺势信号（加速趋势）
             4. f' 或 g'' 变号 → 离场信号
-        
+
         参数：
         length — 多项式拟合窗口长度，默认 20
 
@@ -7521,15 +25673,15 @@ class TradingView:
         length  — 多项式拟合窗口长度，默认 20
         """
         return LPTT(self._kline, length=length, **kwargs)
-    
+
     def MLAdaptiveSuperTrend(self,
-                            atr_len=10,
-                            fact=3.0,
-                            training_data_period=100,
-                            highvol=0.75,
-                            midvol=0.50,
-                            lowvol=0.25,
-                            **kwargs) -> IndFrame:
+                             atr_len=10,
+                             fact=3.0,
+                             training_data_period=100,
+                             highvol=0.75,
+                             midvol=0.50,
+                             lowvol=0.25,
+                             **kwargs) -> IndFrame:
         """
         机器学习自适应 SuperTrend — 基于 K-Means 聚类动态调整 ATR
         https://cn.tradingview.com/script/CLk71Qgy-Machine-Learning-Adaptive-SuperTrend-AlgoAlpha/
@@ -7560,8 +25712,7 @@ class TradingView:
         lowvol               — 低波动初始质心百分位，默认 0.25
         """
         return MLAdaptiveSuperTrend(self._kline, atr_len=atr_len, fact=fact, training_data_period=training_data_period, highvol=highvol, midvol=midvol, lowvol=lowvol, **kwargs)
-    
-    
+
     def NRTR(self, percentage=1.0, mult=0., length=20, **kwargs) -> IndFrame:
         """
         ## Nick Rypock 动态反转止损线 (NRTR)
@@ -7601,8 +25752,7 @@ class TradingView:
         - 当 mult 为非零正数时，止损线会根据移动平均线进行修正。
         """
         return NRTR(self._kline, percentage=percentage, mult=mult, length=length, **kwargs)
-    
-    
+
     def NWEEnvelope(self, h=8.0, mult=3.0, lookback=500, src_type='close', **kwargs) -> IndFrame:
         """
         ## Nadaraya-Watson Envelope — 高斯核回归包络带
@@ -7613,7 +25763,7 @@ class TradingView:
         - mult:       包络带乘数，默认 3.0
         - lookback:   回看窗口，默认 500
         - src_type:   价格源，可选 close/hl2/hlc3/ohlc4，默认 close
-        
+
         输出线：
         nw_line    — 高斯核回归包络线
         upper      — 上轨
@@ -7622,14 +25772,14 @@ class TradingView:
         short_signal — 空头信号（趋势从 1 翻转到 -1，值为 -1）
         """
         return NWEEnvelope(self._kline, h=h, mult=mult, lookback=lookback, src_type=src_type, **kwargs)
-    
-    def OptimizedTrendTracker(self, 
-            length=9,
-            var_length=9,
-            percent=0.14,
-            mult=0.,
-            ma_type='VAR', 
-            **kwargs) -> IndFrame:
+
+    def OptimizedTrendTracker(self,
+                              length=9,
+                              var_length=9,
+                              percent=0.14,
+                              mult=0.,
+                              ma_type='VAR',
+                              **kwargs) -> IndFrame:
         """
         ## OTT — 优化趋势跟踪器
 
@@ -7676,19 +25826,18 @@ class TradingView:
             2. mult 不为 0 时，percent 为 mult * 价格的标准差倍数 / 均值
         """
         return OptimizedTrendTracker(self._kline, length=length, var_length=var_length, percent=percent, mult=mult, ma_type=ma_type, **kwargs)
-    
-    
-    def RangeFilter(self, 
-            filter_type='Type1',
-            mov_src='Wicks',
-            rng_qty=2.618,
-            rng_scale='Average Change',
-            rng_per=14,
-            smooth_range=True,
-            smooth_per=27,
-            av_vals=False,
-            av_samples=2, 
-            **kwargs) -> IndFrame:
+
+    def RangeFilter(self,
+                    filter_type='Type1',
+                    mov_src='Wicks',
+                    rng_qty=2.618,
+                    rng_scale='Average Change',
+                    rng_per=14,
+                    smooth_range=True,
+                    smooth_per=27,
+                    av_vals=False,
+                    av_samples=2,
+                    **kwargs) -> IndFrame:
         """
         ## 范围过滤器 [DW] — 波动率自适应价格过滤器
 
@@ -7722,17 +25871,16 @@ class TradingView:
         av_samples  — filter 变化平均的采样数
         """
         return RangeFilter(self._kline, filter_type=filter_type, mov_src=mov_src, rng_qty=rng_qty, rng_scale=rng_scale, rng_per=rng_per, smooth_range=smooth_range, smooth_per=smooth_per, av_vals=av_vals, av_samples=av_samples, **kwargs)
-    
-    
-    def RedKMomentumBars(self, 
-            fast_len=10,
-            fast_type='SMA',
-            slow_len=20,
-            slow_type='SMA',
-            slow_delay=3,
-            fil_len=50,
-            fil_type='SMA',
-            **kwargs) -> IndFrame:
+
+    def RedKMomentumBars(self,
+                         fast_len=10,
+                         fast_type='SMA',
+                         slow_len=20,
+                         slow_type='SMA',
+                         slow_delay=3,
+                         fil_len=50,
+                         fil_type='SMA',
+                         **kwargs) -> IndFrame:
         """
         ## RedK 动量 K 线 — 基于双均线动量的蜡烛图指标
         https://cn.tradingview.com/script/O52gURXf-RedK-Momentum-Bars-RedK-Mo-Bars/
@@ -7767,19 +25915,19 @@ class TradingView:
         fil_type   — Filter 类型，默认 'SMA'
         """
         return RedKMomentumBars(self._kline, fast_len=fast_len, fast_type=fast_type, slow_len=slow_len, slow_type=slow_type, slow_delay=slow_delay, fil_len=fil_len, fil_type=fil_type, **kwargs)
-    
-    def ResamplingFilterPack(self, 
-                            s_method='BPS',
-                            s_size=9,
-                            s_off=0,
-                            rng_qty=0.0,
-                            rng_scale='Average Change',
-                            rng_per=14,
-                            smooth_range=True,
-                            smooth_per=27,
-                            ma_type='EMA',
-                            ma_per=9,
-                            **kwargs) -> IndFrame:
+
+    def ResamplingFilterPack(self,
+                             s_method='BPS',
+                             s_size=9,
+                             s_off=0,
+                             rng_qty=0.0,
+                             rng_scale='Average Change',
+                             rng_per=14,
+                             smooth_range=True,
+                             smooth_per=27,
+                             ma_type='EMA',
+                             ma_per=9,
+                             **kwargs) -> IndFrame:
         """
         ## 重采样滤波器包 — 自定义采样率下的条件平滑滤波
         https://cn.tradingview.com/script/hIXxuhEV-Resampling-Filter-Pack-DW/
@@ -7813,15 +25961,15 @@ class TradingView:
         ma_per      — 滤波器周期，默认 9
         """
         return ResamplingFilterPack(self._kline, s_method=s_method, s_size=s_size, s_off=s_off, rng_qty=rng_qty, rng_scale=rng_scale, rng_per=rng_per, smooth_range=smooth_range, smooth_per=smooth_per, ma_type=ma_type, ma_per=ma_per, **kwargs)
-    
-    def SRChannels(self, 
-                    prd=10,
-                    ppsrc='High/Low',
-                    channel_w=5,
-                    min_strength=1,
-                    max_numsr=6,
-                    loopback=290,
-                    **kwargs) -> IndFrame:
+
+    def SRChannels(self,
+                   prd=10,
+                   ppsrc='High/Low',
+                   channel_w=5,
+                   min_strength=1,
+                   max_numsr=6,
+                   loopback=290,
+                   **kwargs) -> IndFrame:
         """
         ## SR Channels — 支撑阻力通道 [LonesomeTheBlue]
 
@@ -7858,16 +26006,16 @@ class TradingView:
             loopback      — 枢轴回看周期，默认 290
         """
         return SRChannels(self._kline, prd=prd, ppsrc=ppsrc, channel_w=channel_w, min_strength=min_strength, max_numsr=max_numsr, loopback=loopback, **kwargs)
-    
+
     def STDNpoleGaussianFilter(self,
-                                period=25,
-                                order=5,
-                                src='Close',
-                                filter_option='Both',
-                                filter_mult=1.6185,
-                                filter_period=10,
-                                **kwargs
-                            ) -> IndFrame:
+                               period=25,
+                               order=5,
+                               src='Close',
+                               filter_option='Both',
+                               filter_mult=1.6185,
+                               filter_period=10,
+                               **kwargs
+                               ) -> IndFrame:
         """
         ## STD 过滤的 N-Pole 高斯滤波器 — 高阶平滑趋势线
         https://cn.tradingview.com/script/i4xZNAoy-STD-Filtered-N-Pole-Gaussian-Filter-Loxx/
@@ -7901,21 +26049,21 @@ class TradingView:
         filter_period — STD 过滤计算周期，默认 10
         """
         return STDNpoleGaussianFilter(self._kline, period=period, order=order, src=src, filter_option=filter_option, filter_mult=filter_mult, filter_period=filter_period, **kwargs)
-    
+
     def SyntheticOscillator(self,
-                                LB=15,
-                                UB=25,
-                                **kwargs
+                            LB=15,
+                            UB=25,
+                            **kwargs
                             ) -> IndFrame:
         """
         TASC Synthetic Oscillator Strategy
         基于 Pine Script "TASC 2026.04 A Synthetic Oscillator [John F. Ehlers]" 转换
         https://cn.tradingview.com/script/we9AMcvE-TASC-2026-04-A-Synthetic-Oscillator/
-        
+
         参数：
         LB   主周期下界，默认 15
         UB   主周期上界，默认 25
-        
+
         核心逻辑：
         1. Hann 滤波器（12 周期）初始平滑价格
         2. 高通 + SuperSmoother 构成带通滤波 → 实部分量 re
@@ -7926,45 +26074,45 @@ class TradingView:
         7. so 上穿零线 → 做多；下穿零线 → 做空
         """
         return SyntheticOscillator(self._kline, LB=LB, UB=UB, **kwargs)
-    
+
     def TradingActivityIndex(self,
-                                len_form=20,
-                                len_hist=252,
-                                **kwargs
-                            ) -> IndFrame:
+                             len_form=20,
+                             len_hist=252,
+                             **kwargs
+                             ) -> IndFrame:
         """
         交易活跃度指数 (Trading Activity Index)
         Trading Activity Index (TAI) Indicator
         基于 Pine Script "Trading Activity Index (Zeiierman)" 转换
         https://cn.tradingview.com/script/rtOfqf13-Trading-Activity-Index-Zeiierman/
-        
+
         参数:
         - len_form:  价格成交量均线窗口，默认 20
         - len_hist:  滚动百分位历史窗口，默认 252（年化）
-        
+
         核心逻辑：
         1. 价格成交量 = close × volume
         2. SMA(价格成交量, len_form) → log → VOLSCALE 代理值
         3. VOLSCALE 滚动百分位 (P0/P20/P40/P60/P80/P100, 默认 252 根K线)
         """
         return TradingActivityIndex(self._kline, len_form=len_form, len_hist=len_hist, **kwargs)
-    
+
     def TrendStateSignals(self,
-                        length=20,
-                        multiplier=1.6185,
-                        src_type='close',
-                        **kwargs
-                            ) -> IndFrame:
+                          length=20,
+                          multiplier=1.6185,
+                          src_type='close',
+                          **kwargs
+                          ) -> IndFrame:
         """
         Trend State Signals — 自适应步进趋势过滤器
         基于 Pine Script "Trend State Signals [Market Structure Lab]" 转换
         参考 TradingView: https://cn.tradingview.com/script/I19TTam0-Trend-State-Signals/
-        
+
         参数:
         - length:           灵敏度周期，默认 20
         - multiplier:       范围乘数（越大信号越少），默认 3.5
         - src_type:         价格源，可选 close/hl2/hlc3/ohlc4，默认 close
-        
+
         核心逻辑：
         1. 计算自适应范围：priceMovement = |change(source)|, smoothed = RMA(priceMovement, length)
         adaptiveRange = smoothed * multiplier
@@ -7976,14 +26124,14 @@ class TradingView:
         4. 信号：趋势方向刚发生变化时触发
         """
         return TrendStateSignals(self._kline, length=length, multiplier=multiplier, src_type=src_type, **kwargs)
-    
+
     def TrendlinesWithBreaks(self,
-                            length=14,
-                            mult=1.0,
-                            calc_method='Atr',
-                            unique_signal=False,
-                            **kwargs
-                            ) -> IndFrame:
+                             length=14,
+                             mult=1.0,
+                             calc_method='Atr',
+                             unique_signal=False,
+                             **kwargs
+                             ) -> IndFrame:
         """
         动态趋势线 — 基于 Swing Pivot 的自适应支撑阻力趋势线
         基于 Pine Script "Trendlines with Breaks [LuxAlgo]" 转换
@@ -8017,19 +26165,19 @@ class TradingView:
                         False 时所有突破 bar 都生成信号，默认 False
         """
         return TrendlinesWithBreaks(self._kline, length=length, mult=mult, calc_method=calc_method, unique_signal=unique_signal, **kwargs)
-    
+
     def VWAPPriceChannel(self,
-                            len=20,
-                            **kwargs
-                            ) -> IndFrame:
+                         len=20,
+                         **kwargs
+                         ) -> IndFrame:
         """
         VWAP 价格通道 (VWAP Price Channel)
         基于 Pine Script "VWAP Price Channel [SamRecio]" 转换
         https://cn.tradingview.com/script/Psnjpa2Y-VWAP-Price-Channel/
-        
+
         参数:
         - len:  最高/最低检测窗口，默认 20
-        
+
         核心逻辑：
         1. 检测 _len 周期内的最高价/最低价是否刷新
         2. 在最高/最低刷新处锚定 VWAP(high) / VWAP(low)
@@ -8038,5 +26186,3613 @@ class TradingView:
         5. 中轴 = (upper + lower) / 2
         """
         return VWAPPriceChannel(self._kline, len=len, **kwargs)
-    
-    
+
+    def GaussianFilterTrend(self,
+                            source='close',         # 价格源: 'close' / 'hl2' / 'hlc3'
+                            length=14,              # 滤波器长度
+                            poles=4,                # 极点数 1~4
+                            # 趋势宽度
+                            atr_length=14,          # ATR 长度
+                            fixed_multiplier=1.5,    # 固定宽度倍数 (非自适应模式)
+                            adaptive_width=True,    # 自适应宽度
+                            efficiency_length=10,   # 效率比长度
+                            trend_multiplier=0.8,   # 自适应趋势倍数
+                            chop_multiplier=2.5,     # 自适应震荡倍数
+                            efficiency_smooth=5,    # 效率比平滑
+                            # 预设
+                            preset='Default',       # 'Default' / 'Fast Response' / 'Smooth Trend'
+                            # 可视化
+                            show_stars=True,         # 显示星轨
+                            **kwargs
+                            ) -> IndFrame:
+        """### 高斯趋势线Gaussian Filter Trend [QuantAlgo]
+
+        https://cn.tradingview.com/script/AqRNdhlR-Gaussian-Filter-Trend-QuantAlgo/
+
+        将 TradingView Pine Script v6 指标转换为 MiniBT BtIndicator。
+
+        参数：
+        - source: 价格源，默认 'close'
+        - length: 滤波器长度，默认 14
+        - poles: 极点数 1~4，默认 4
+        - atr_length: ATR 长度，默认 14
+        - fixed_multiplier: 固定宽度倍数 (非自适应模式)，默认 1.5
+        - adaptive_width: 是否自适应宽度，默认 True
+        - efficiency_length: 效率比长度，默认 10
+        - trend_multiplier: 自适应趋势倍数，默认 0.8
+        - chop_multiplier: 自适应震荡倍数，默认 2.5
+        - efficiency_smooth: 效率比平滑，默认 5
+        - preset: 预设，默认 'Default'
+        - show_stars: 是否显示星轨，默认 True
+
+        核心组件：
+        - 1. 高斯滤波器: 多级级联一阶极点滤波器，对价格进行平滑处理
+        - 2. 效率比: 净位移/路径长度，衡量趋势与震荡状态
+        - 3. 自适应宽度: 根据效率比动态调整 ATR 死区宽度
+        - 4. 趋势线: 死区机制，仅在价格穿越波动率包络时才移动
+        - 5. 星轨: 趋势线周围的装饰性轨道点
+
+        输出 lines:
+        - trend_line:      高斯趋势线 (主图叠加)
+        - upper_band:      上轨 (主图叠加)
+        - lower_band:      下轨 (主图叠加)
+        - inner_star_a:   内轨星 A (主图叠加)
+        - inner_star_b:   内轨星 B (主图叠加)
+        - outer_star_a:   外轨星 A (主图叠加)
+        - outer_star_b:   外轨星 B (主图叠加)
+        - trend_dir:       趋势方向 (1=多, -1=空, 0=中性)
+        - long_signal:     多头信号 (趋势翻多)
+        - short_signal:    空头信号 (趋势翻空)
+        """
+        return GaussianFilterTrend(self._kline, source=source, length=length, poles=poles, atr_length=atr_length, fixed_multiplier=fixed_multiplier, adaptive_width=adaptive_width, efficiency_length=efficiency_length, trend_multiplier=trend_multiplier, chop_multiplier=chop_multiplier, efficiency_smooth=efficiency_smooth, preset=preset, show_stars=show_stars, **kwargs)
+
+    def AdaptiveTrendTrail(self,
+                           trend_length=34,
+                           momentum_length=12,
+                           sensitivity=0.35,
+                           # 02. Supertrend Confirmation
+                           st_fast_length=9,
+                           st_fast_factor=1.45,
+                           st_mid_length=14,
+                           st_mid_factor=1.95,
+                           st_slow_length=21,
+                           st_slow_factor=2.55,
+                           # 03. Overlay
+                           overlay_mode="Trail",   # "Trail" / "Bands" / "None"
+                           trail_size=1.00,
+                           smoothness=5,
+                           **kwargs) -> IndFrame:
+        """Adaptive Trend Trail (Uptrick)
+
+        https://cn.tradingview.com/script/f4N0F439-Uptrick-Adaptive-Trend-Trail/
+
+        将 TradingView Pine Script v6 指标转换为 MiniBT BtIndicator。
+
+        参数：
+        - trend_length: 趋势长度，默认 34
+        - momentum_length: 动量长度，默认 12
+        - sensitivity: 敏感度，默认 0.35
+        - st_fast_length: 快速线长度，默认 9
+        - st_fast_factor: 快速线因子，默认 1.45
+        - st_mid_length: 中速线长度，默认 14
+        - st_mid_factor: 中速线因子，默认 1.95
+        - st_slow_length: 慢速线长度，默认 21
+        - st_slow_factor: 慢速线因子，默认 2.55
+        - overlay_mode: 趆势模式，默认 "Trail"
+        - trail_size: 趆势大小，默认 1.00
+        - smoothness: 平滑度，默认 5
+
+        核心组件：
+        - 1. 趋势引擎: EMA 基线 + 动量 + 方向效率 + 波动率状态
+        - 2. 自适应 Supertrend 矩阵: 快/中/慢三档，根据 chop/vol 动态调整因子
+        - 3. 综合状态场: 距离/动量/斜率/RSI/效率/压力/结构/ST 加权融合
+        - 4. 信号生成: 动态阈值 + 持续性确认 + 冷却期 + 强势突破快速通道
+        - 5. 叠加层: Trail(轨迹带) / Bands(波动带)
+
+        输出 lines:
+        - trend:           趋势方向 (1=多头, -1=空头, 0=中性)
+        - basis:           EMA 趋势基线
+        - inner_trail:     内轨迹
+        - outer_trail:     外轨迹 (亦作为止损参考)
+        - depth_trail:     深度轨迹
+        - regime:          综合状态场 [-1, 1]
+        - long_signal:     多头信号 (趋势翻多)
+        - short_signal:    空头信号 (趋势翻空)
+        """
+        return AdaptiveTrendTrail(self._kline, trend_length=trend_length, momentum_length=momentum_length, sensitivity=sensitivity, st_fast_length=st_fast_length, st_fast_factor=st_fast_factor, st_mid_length=st_mid_length, st_mid_factor=st_mid_factor, st_slow_length=st_slow_length, st_slow_factor=st_slow_factor, overlay_mode=overlay_mode, trail_size=trail_size, smoothness=smoothness, **kwargs)
+
+    def SPMATrendNAL(self,
+                     source='close',         # 价格源: 'close' / 'hl2' / 'hlc3'
+                     length=14,              # 滤波器长度
+                     poles=4,                # 极点数 1~4
+                     # 趋势宽度
+                            atr_length=14,          # ATR 长度
+                            fixed_multiplier=1.5,    # 固定宽度倍数 (非自适应模式)
+                            adaptive_width=True,    # 自适应宽度
+                            efficiency_length=10,   # 效率比长度
+                            trend_multiplier=0.8,   # 自适应趋势倍数
+                            chop_multiplier=2.5,     # 自适应震荡倍数
+                            efficiency_smooth=5,    # 效率比平滑
+                            # 预设
+                            preset='Default',       # 'Default' / 'Fast Response' / 'Smooth Trend'
+                            # 可视化
+                            show_stars=True,         # 显示星轨
+                            **kwargs) -> IndFrame:
+        """### SPMA Trend | NAL (NordicAlphaLab)
+
+        https://cn.tradingview.com/script/Q8RDxj5I-SPMA-Trend-NAL/
+
+        将 TradingView Pine Script v6 指标转换为 MiniBT BtIndicator。
+
+        参数：
+        - source: 价格源，默认 'close'
+        - length: 滤波器长度，默认 14
+        - poles: 极点数 1~4，默认 4
+        - atr_length: ATR 长度，默认 14
+        - fixed_multiplier: 固定宽度倍数 (非自适应模式)，默认 1.5
+        - adaptive_width: 是否自适应宽度，默认 True
+        - efficiency_length: 效率比长度，默认 10
+        - trend_multiplier: 自适应趋势倍数，默认 0.8
+        - chop_multiplier: 自适应震荡倍数，默认 2.5
+        - efficiency_smooth: 效率比平滑，默认 5
+        - preset: 预设，默认 'Default'
+        - show_stars: 是否显示星轨，默认 True
+
+        核心组件：
+        - 1. SPMA (Shock Percentile Moving Average): 仅当价格变化的百分位排名
+            超过 % Gate 时才向 EMA 更新，否则保持前值的阶梯均线
+        - 2. 波动率带: 支持 SD / ATR / MeanAD / MedianAD / Quantile 五种波动度量，
+            再经 EMA 平滑后乘以 Volatility Multiple 形成上下轨
+        - 3. 非对称波动带 (可选): 根据多/空冲击平方的 EMA 占比调节上下轨乘数
+        - 4. Quantile 带: 直接用 SPMA 残差 (close - SPMA) 的正/负经验分位数
+        - 5. 斜率门控: SPMA 在 Slope Lookback 内的百分比斜率超过阈值才允许翻多
+        - 6. NAL 状态机: 价格突破上轨且 SPMA 上行(+斜率门控) → 多头;
+            价格跌破下轨 → 空头; 其余情况保持原状态
+
+        输出 lines:
+        - spma:          Shock Percentile Moving Average (主图叠加)
+        - upper_band:    上轨 (主图叠加)
+        - lower_band:    下轨 (主图叠加)
+        - nal_state:     NAL 状态 (1=多, -1=空, 0=中性, 不绘制)
+        - long_signal:   多头信号 (NAL 翻多)
+        - short_signal:  空头信号 (NAL 翻空)
+        """
+        return SPMATrendNAL(self._kline, source=source, length=length, poles=poles, atr_length=atr_length, fixed_multiplier=fixed_multiplier, adaptive_width=adaptive_width, efficiency_length=efficiency_length, trend_multiplier=trend_multiplier, chop_multiplier=chop_multiplier, efficiency_smooth=efficiency_smooth, preset=preset, show_stars=show_stars, **kwargs)
+
+    def LorentzianClassification(self,
+                                 # ── 通用设置 ──
+                                 source='close',          # 价格源: 'close' / 'hl2' / 'hlc3' / 'ohlc4'
+                                 neighbors_count=8,       # KNN 邻居数
+                                 max_bars_back=2000,      # 最大回看 K 线数
+                                 feature_count=5,         # 参与距离计算的特征数 (2~5)
+                                 include_full_history=False,  # 是否使用全部历史做近邻搜索
+                                 # ── 特征工程 ──
+                                 f1_string='RSI', f1_paramA=14, f1_paramB=1,
+                                 f2_string='WT',  f2_paramA=10, f2_paramB=11,
+                                 f3_string='CCI', f3_paramA=20, f3_paramB=1,
+                                 f4_string='ADX', f4_paramA=20, f4_paramB=2,
+                                 f5_string='RSI', f5_paramA=9,  f5_paramB=1,
+                                 # ── 过滤器 ──
+                                 use_volatility_filter=True,
+                                 use_regime_filter=True, regime_threshold=-0.1,
+                                 use_adx_filter=False, adx_threshold=20,
+                                 use_ema_filter=False, ema_period=200,
+                                 use_sma_filter=False, sma_period=200,
+                                 # ── 核回归设置 ──
+                                 use_kernel_filter=True,
+                                 use_kernel_smoothing=False,
+                                 # Lookback Window (权重形状)
+                                 kernel_h=8,
+                                 kernel_r=8.0,            # Relative Weighting
+                                 # Regression Level (窗口 = x+2 根K线)
+                                 kernel_x=25,
+                                 kernel_lag=2,            # 高斯核滞后
+                                 # ── 出场 ──
+                                 use_dynamic_exits=False,
+                                 **kwargs) -> IndFrame:
+        """Machine Learning: Lorentzian Classification (jdehorty)
+
+        https://cn.tradingview.com/script/WhBzgfDu-Machine-Learning-Lorentzian-Classification/
+
+        将 TradingView Pine Script 指标（含 MLExtensions / KernelFunctions 两个依赖库）
+        转换为 MiniBT BtIndicator。
+
+        参数：
+        - source: 价格源，默认 'close'
+        - neighbors_count: KNN 邻居数，默认 8
+        - max_bars_back: 最大回看 K 线数，默认 2000
+        - feature_count: 参与距离计算的特征数，默认 5
+        - include_full_history: 是否使用全部历史做近邻搜索，默认 False
+        - f1_string: 第一个特征字符串，默认 'RSI'
+        - f1_paramA: 第一个特征参数 A，默认 14
+        - f1_paramB: 第一个特征参数 B，默认 1
+        - f2_string: 第二个特征字符串，默认 'WT'
+        - f2_paramA: 第二个特征参数 A，默认 10
+        - f2_paramB: 第二个特征参数 B，默认 11
+        - f3_string: 第三个特征字符串，默认 'CCI'
+        - f3_paramA: 第三个特征参数 A，默认 20
+        - f3_paramB: 第三个特征参数 B，默认 1
+        - f4_string: 第四个特征字符串，默认 'ADX'
+        - f4_paramA: 第四个特征参数 A，默认 14
+        - f4_paramB: 第四个特征参数 B，默认 1
+        - f4_paramA: 第四个特征参数 A，默认 14
+        - f4_paramB: 第四个特征参数 B，默认 1
+        - f5_string: 第五个特征字符串，默认 'RSI'
+        - f5_paramA: 第五个特征参数 A，默认 9
+        - f5_paramB: 第五个特征参数 B，默认 1
+        - use_volatility_filter: 是否使用波动率滤波，默认 True
+        - use_regime_filter: 是否使用 regime 过滤，默认 True
+        - regime_threshold: regime 过滤阈值，默认 -0.1
+        - use_adx_filter: 是否使用 ADX 过滤，默认 False
+        - adx_threshold: ADX 过滤阈值，默认 20
+        - use_ema_filter: 是否使用 EMA 过滤，默认 False
+        - ema_period: EMA 周期，默认 200
+        - use_sma_filter: 是否使用 SMA 过滤，默认 False
+        - sma_period: SMA 周期，默认 200
+        - use_kernel_filter: 是否使用核回归滤波，默认 True
+        - use_kernel_smoothing: 是否使用核平滑，默认 False
+        - kernel_h=8,              # Lookback Window (权重形状)
+        - kernel_r=8.0,            # Relative Weighting
+        - kernel_x=25,             # Regression Level (窗口 = x+2 根K线)
+        - kernel_lag=2,            # 高斯核滞后，默认 2
+        - use_dynamic_exits: 是否使用动态退出，默认 False
+
+        核心组件：
+        - 1. 特征工程: 5 个归一化特征 (RSI / WaveTrend / CCI / ADX 任选)
+        - 2. 洛伦兹距离 KNN: log(1+|Δf|) 距离 + 时间均匀分布的近似最近邻搜索 (ANN)
+        - 3. 预测过滤器: 波动率 / Regime(Kaufman自适应均线斜率) / ADX / EMA / SMA
+        - 4. 核回归过滤: Rational Quadratic Kernel (yhat1) 与 Gaussian Kernel (yhat2)
+        - 5. 出入场信号: start_long / start_short / end_long / end_short
+
+        输出 lines（minibt 图表不支持文字标签，原指标图表上的 prediction
+        数字标签改用 prediction 指标线显示）：
+            - kernel_estimate:   核回归估计 yhat1 (主图叠加)
+            - kernel_estimate2:  高斯核估计 yhat2 (主图叠加, 默认不绘制)
+            - prediction:        KNN 预测值 (整数, 替代原指标的数字标签)
+            - signal:            过滤后信号 (1=多, -1=空, 0=中性)
+            - long_signal:        开多信号
+            - short_signal:       开空信号
+            - exitlong_signal:          平多信号
+            - exitshort_signal:         平空信号
+        """
+        return LorentzianClassification(self._kline,
+                                        source=source,
+                                        neighbors_count=neighbors_count,
+                                        max_bars_back=max_bars_back,
+                                        feature_count=feature_count,
+                                        include_full_history=include_full_history,
+                                        f1_string=f1_string,
+                                        f1_paramA=f1_paramA,
+                                        f1_paramB=f1_paramB,
+                                        f2_string=f2_string,
+                                        f2_paramA=f2_paramA,
+                                        f2_paramB=f2_paramB,
+                                        f3_string=f3_string,
+                                        f3_paramA=f3_paramA,
+                                        f3_paramB=f3_paramB,
+                                        f4_string=f4_string,
+                                        f4_paramA=f4_paramA,
+                                        f4_paramB=f4_paramB,
+                                        f5_string=f5_string,
+                                        f5_paramA=f5_paramA,
+                                        f5_paramB=f5_paramB,
+                                        use_volatility_filter=use_volatility_filter,
+                                        use_regime_filter=use_regime_filter,
+                                        regime_threshold=regime_threshold,
+                                        use_adx_filter=use_adx_filter,
+                                        adx_threshold=adx_threshold,
+                                        use_ema_filter=use_ema_filter,
+                                        ema_period=ema_period,
+                                        use_sma_filter=use_sma_filter,
+                                        sma_period=sma_period,
+                                        use_kernel_filter=use_kernel_filter,
+                                        use_kernel_smoothing=use_kernel_smoothing,
+                                        kernel_h=kernel_h,
+                                        kernel_r=kernel_r,
+                                        kernel_x=kernel_x,
+                                        kernel_lag=kernel_lag,
+                                        use_dynamic_exits=use_dynamic_exits,
+                                        **kwargs)
+
+    def KNNLorentzianMachineLearning(self,
+                                     # 价格源 (计算指标与目标标签)
+                                     source='close',
+                                     # ── kNN 核心 ──
+                                     #   默认值已按"期货品种、减少信号频度"调保守。若信号仍偏多:
+                                     #   confidence_threshold → 0.75~0.8 (更苛刻)
+                                     #   k_neighbors         → 8~12 (投票更平滑, 置信度向 0.5 收敛)
+                                     #   target_len          → 5~10 (标签抗短周期噪声, 方向段更长)
+                                     #   norm_len            → 200~300 (归一化窗口更稳)
+                                     # 最近邻居数 k (大 → 信号更少更平滑)
+                                     k_neighbors=8,
+                                     # 置信度边界 threshold (高 → 信号更少)
+                                     confidence_threshold=0.7,
+                                     max_lookback=2000,         # 历史行容量 max_lookback
+                                     # 历史扫描采样步长 (>1 提速)
+                                     step_size=1,
+                                     # 目标方向对比根数 (大 → 标签更抗噪)
+                                     target_len=3,
+                                     # ── 特征归一化 ──
+                                     # f_minmax 滚动归一化窗口 (大 → 特征更稳)
+                                     norm_len=150,
+                                     # 参与距离的特征数 (1~5)
+                                     feature_count=5,
+                                     # ── 特征配置 (类型: RSI/WT/CCI/ADX/Mom; A=周期, B=平滑, >1 才平滑) ──
+                                     f1_string='RSI', f1_paramA=14, f1_paramB=1,
+                                     f2_string='WT',  f2_paramA=10, f2_paramB=11,
+                                     f3_string='CCI', f3_paramA=20, f3_paramB=1,
+                                     f4_string='ADX', f4_paramA=20, f4_paramB=1,
+                                     f5_string='Mom', f5_paramA=10, f5_paramB=1, **kwargs) -> IndFrame:
+        """kNN Lorentzian Machine Learning (Pine v6 library 移植)
+
+        https://cn.tradingview.com/script/pVSBWUxj-kNNLorentzianMachineLearning/
+
+        原码为 TradingView 库文件 kNNLorentzianMachineLearning (pVSBWUxj),
+        仅导出 3 个通用函数 (f_minmax / f_update_history_matrix /
+        f_calc_knn_matrix), 需宿主指标定义特征向量与目标标签。
+        本类实现一个完整的宿主集成:
+
+        ARCHITECTURE: QUANT-GRADE kNN MATRIX MACHINE LEARNING ENGINE
+        Optimized for Pine Script v6 runtime performance, zero data leakage,
+        and efficient memory handling via pre-allocated matrix operations.
+
+
+        参数：
+            source='close',            # 价格源 (计算指标与目标标签)
+            k_neighbors=8,             # 最近邻居数 k (大 → 信号更少更平滑)
+            confidence_threshold=0.7,  # 置信度边界 threshold (高 → 信号更少)
+            max_lookback=2000,         # 历史行容量 max_lookback
+            step_size=1,               # 历史扫描采样步长 (>1 提速)
+            target_len=3,              # 目标方向对比根数 (大 → 标签更抗噪)
+            # 特征归一化
+            norm_len=150,              # f_minmax 滚动归一化窗口 (大 → 特征更稳)
+            feature_count=5,           # 参与距离的特征数 (1~5)
+            # 特征配置 (类型: RSI/WT/CCI/ADX/Mom; A=周期, B=平滑, >1 才平滑)
+            f1_string='RSI', f1_paramA=14, f1_paramB=1,
+            f2_string='WT',  f2_paramA=10, f2_paramB=11,
+            f3_string='CCI', f3_paramA=20, f3_paramB=1,
+            f4_string='ADX', f4_paramA=20, f4_paramB=1,
+            f5_string='Mom', f5_paramA=10, f5_paramB=1,
+
+        核心组件 (与原库逐一对应):
+            1. f_minmax:      滚动窗口 min/max 归一化到 [0,100]
+                            (na 或 range<=1e-5 → 中点 50)
+            2. 特征工程:      5 路可配特征 (RSI/WT/CCI/ADX/Mom)
+                            → 可选 EMA 平滑 → f_minmax → [0,100]
+            3. target 标签:   即时方向 src[t] >= src[t-target_len] → 1, 否则 0
+                            (收盘即可确定, 供后续 bar 使用 → 零泄露)
+            4. 洛伦兹距离:    d = Σ log(1 + |Δf|) (对离群值对数阻尼)
+            5. kNN 扫描:      step_size 采样 + 距离升序取 k 邻居
+            6. 置信度投票:    confidence = up/k; >= threshold → +1,
+                            <= 1-threshold → -1, 否则 0 (raw_signal)
+
+        零泄露说明: 每根 bar 预测只使用 <= t-2 的历史行, 即排除"最新已收盘
+        bar" (原码注释: Start at i = 1 to guarantee ZERO DATA LEAKAGE),
+        当前活跃 bar 从不参与自身预测。
+
+        输出 lines:
+            - signal:            raw_signal (1/0/-1, 即时预测方向)
+            - confidence:        置信度 up/k (默认 0.5, 冷启动期)
+            - long_signal:       非 1 → 1 翻转点 (开多)
+            - short_signal:      非 -1 → -1 翻转点 (开空)
+            - exitlong_signal:   1 → 0 平多点 (反向翻空由 short_signal 表达)
+            - exitshort_signal:  -1 → 0 平空点
+        """
+        return KNNLorentzianMachineLearning(self._kline,
+                                            source=source,
+                                            k_neighbors=k_neighbors,
+                                            confidence_threshold=confidence_threshold,
+                                            max_lookback=max_lookback,
+                                            step_size=step_size,
+                                            target_len=target_len,
+                                            norm_len=norm_len,
+                                            feature_count=feature_count,
+                                            f1_string=f1_string,
+                                            f1_paramA=f1_paramA,
+                                            f1_paramB=f1_paramB,
+                                            f2_string=f2_string,
+                                            f2_paramA=f2_paramA,
+                                            f2_paramB=f2_paramB,
+                                            f3_string=f3_string,
+                                            f3_paramA=f3_paramA,
+                                            f3_paramB=f3_paramB,
+                                            f4_string=f4_string,
+                                            f4_paramA=f4_paramA,
+                                            f4_paramB=f4_paramB,
+                                            f5_string=f5_string,
+                                            f5_paramA=f5_paramA,
+                                            f5_paramB=f5_paramB, **kwargs)
+
+    def DivergenceMany(self,
+                       pivot_period=5,          # pivot 左/右窗
+                       source='Close',          # pivot 源: 'Close' 收盘 / 'HighLow' 高/低
+                       div_type='Regular',      # 背离类型: 'Regular' / 'Hidden' / 'Both'
+                       max_bars=100,            # 仅比较相距不超过 max_bars 的相邻 pivot 对
+                       # ── 文本显示 ──
+                       show_names='Full',       # 指标名: 'Full' 完整 / 'Short' 首字母 / 'None'
+                       show_number=True,        # 文本末尾附加该方向背离指标数量
+                       # ── 各指标开关(原码默认全开) ──
+                       calc_macd=True,
+                       calc_hist=True,
+                       calc_rsi=True,
+                       calc_stoch=True,
+                       calc_cci=True,
+                       calc_mom=True,
+                       calc_obv=True,
+                       calc_vwmacd=True,
+                       calc_cmf=True,
+                       calc_mfi=True,
+                       # 外部指标(近似用 close 作为替代, 原码默认 off))
+                       calc_ext=False,
+                       **kwargs) -> IndFrame:
+        """多指标背离检测 (Divergence for Many Indicators v4 静态简化版)
+
+        原码(TradingView Pine v4): Divergence for Many Indicators v.txt (© LonesomeTheBlue, MPL 2.0)
+        网址: https://cn.tradingview.com/script/n8AGnIZd-Divergence-for-Many-Indicators-v4/
+
+        转换说明
+        --------
+        原码同时检测 11 个指标(MACD/Hist/RSI/Stoch/CCI/MOM/OBV/VWMACD/CMF/MFI/Extrn)\n
+        与价格在 pivot high/low 上的 4 类背离(常规/隐藏 × 看涨/看跌), 确认后在当根 bar\n
+        顶部(负向/看跌) 或底部(正向/看涨) 绘制文字标签(指标名汇总 + 背离数量):
+
+            - 底部标签(正向 = 看涨) → long_signal,  对应 常规看涨 + 隐藏看涨
+            - 顶部标签(负向 = 看跌) → short_signal, 对应 常规看跌 + 隐藏看跌
+
+        原码依赖动态连线(line.new)与动态去重/删除管理, minibt 不支持动态折线;\n
+        且原码的 pivot 探测是"逐 bar 滚动检测 + 虚拟线斜率确认", 本实现采用\n
+        "相邻价格 pivot 对"的静态比较(同一 pivot 源, 无前视):
+            在价格形成新的 pivot low/high 并满足右窗(prd)确认后, 与该 pivot 的上一个
+            同向 pivot 比较价格与指标的高低关系:
+                常规看涨: 更低低点 + 指标更高低点   (价格创新低, 指标不创新低)
+                隐藏看涨: 更高低点 + 指标更低低点
+                常规看跌: 更高高点 + 指标更低高点
+                隐藏看跌: 更低高点 + 指标更高高点
+            信号/文本落在该 pivot 的"确认 bar"(pivot bar + prd), 保证只用已发生数据。
+
+        参数：
+            pivot_period=5,          # pivot 左/右窗
+            source='Close',          # pivot 源: 'Close' 收盘 / 'HighLow' 高/低
+            div_type='Regular',      # 背离类型: 'Regular' / 'Hidden' / 'Both'
+            max_bars=100,            # 仅比较相距不超过 max_bars 的相邻 pivot 对
+            # 文本显示
+            show_names='Full',       # 指标名: 'Full' 完整 / 'Short' 首字母 / 'None'
+            show_number=True,        # 文本末尾附加该方向背离指标数量
+            # 各指标开关(原码默认全开) 
+            calc_macd=True,
+            calc_hist=True,
+            calc_rsi=True,
+            calc_stoch=True,
+            calc_cci=True,
+            calc_mom=True,
+            calc_obv=True,
+            calc_vwmacd=True,
+            calc_cmf=True,
+            calc_mfi=True,
+            calc_ext=False,          # 外部指标(近似用 close 作为替代, 原码默认 off)
+
+        lines:
+            - long_signal:  正向(看涨)背离: 常规 + 隐藏, 确认 bar 置 1 (底部标签)
+            - short_signal: 负向(看跌)背离: 常规 + 隐藏, 确认 bar 置 1 (顶部标签)
+
+        文本显示：
+        每个信号点绘制一组多行文本(每行一个指标名), 文本末尾附背离数量(可关闭);\n
+        指示指标名按原码 options: 'Full' 完整名 / 'Short' 首字母 / 'None' 只显示数量。
+
+        两条信号线不画曲线(isplot=False), 位于各自副图窗格; 每个信号点的多行文本\n
+        由 signal_text() 提供(指标名逐行 + 末尾数量)。docstring/参数详见类属性与\n
+        signal_text() 注释; 原码网址见模块 docstring。
+        """
+        return DivergenceMany(
+            self._kline,
+            pivot_period=pivot_period,
+            source=source,
+            div_type=div_type,
+            max_bars=max_bars,
+            show_names=show_names,
+            show_number=show_number,
+            calc_macd=calc_macd,
+            calc_hist=calc_hist,
+            calc_rsi=calc_rsi,
+            calc_stoch=calc_stoch,
+            calc_cci=calc_cci,
+            calc_mom=calc_mom,
+            calc_obv=calc_obv,
+            calc_vwmacd=calc_vwmacd,
+            calc_cmf=calc_cmf,
+            calc_mfi=calc_mfi,
+            calc_ext=calc_ext,
+            **kwargs)
+
+    def AutoChartPatterns(self,
+                          source='close',        # zigzag 计算源: 'close'/'hl2'
+                          length=8,              # 原 ZigzagLite length(bar 窗口)
+                          depth=55,              # 原 ZigzagLite depth(同向最小间隔)
+                          threshold=0.01,        # length<=0 时改用百分比阈值
+                          min_pivots=5,          # 原 numberOfPivots ∈ {5, 6}
+                          max_pivots=6,
+                          error_ratio=0.2,       # 原 errorThresold=20 (/100)
+                          flat_ratio=0.2,        # 原 flatThreshold=20 (/100)
+                          conv_eps=0.05,
+                          allow_channels=True,
+                          allow_wedges=True,
+                          allow_triangles=True,
+                          max_patterns=20,       # 原 maxPatterns
+                          avoid_overlap=True,
+                          **kwargs) -> IndFrame:
+        """自动形态识别: 通道/楔形/三角 13 类 (Auto Chart Patterns [Trendoscope] 简化版)
+
+        原码(TradingView Pine v6): Auto Chart Patterns.txt (© Trendoscope Pty Ltd, CC BY-NC-SA 4.0)
+        网址: https://cn.tradingview.com/script/WZ8B1FIW-Auto-Chart-Patterns-Trendoscope/
+
+        转换说明
+        --------
+        原码的形态绘制/扫描核心存放在 Trendoscope 私有附加组件(ZigzagLite/4、
+        AbstractChartPatterns/10、basechartpatterns)中, 本地仅有入口脚本无法 1:1 还原;
+        本实现采用自研简化引擎(minibt/indicators/_acp.py):
+
+            - 枢轴: 对 source(默认 close) 运行相对阈值 zigzag(minibt/zigzag), 得到峰/谷转折
+            - 枚举相邻枢轴窗口(min_pivots..max_pivots), 上边界线 = 窗口首尾高点连线,
+              下边界线 = 首尾低点连线; 校验中间同类枢轴贴合 + 全部枢轴夹在通道内(容差)
+            - 按两线斜率方向 + 带距收/扩/平行 分类出 13 类(通道/楔形/三角×升/降/平/扩张/收缩)
+            - 保留最近、互不重叠的 max_patterns 个形态, 各渲染三条线:
+                top:     高点线(上边界线), 形态窗口内有值, 其余为 nan
+                bottom:  低点线(下边界线), 同上
+                mid:     中间折线(窗口枢轴依次相连), 同上
+
+        参数(默认值与原码 Trendoscope ACP 一致, 也与 `AutoChartPatterns` 指标类相同):
+            source: zigzag 计算源, 'close' 或 'hl2', 默认 'close'
+            length/depth: 枢轴窗口, 默认 8 / 55 (原 ZigzagLite 的 length/depth);
+                length<=0 时退回 threshold(百分比阈值)模式
+            threshold: 百分比阈值模式下的相对翻转阈值(0~1), 越小枢轴越密, 默认 0.01
+            min_pivots/max_pivots: 形态窗口枢轴数范围(默认 5..6, 即原 numberOfPivots)
+            error_ratio: 中间同类枢轴贴合边界线 / 通道夹持的相对容差, 默认 0.2
+            flat_ratio: 边界线判"平/倾斜"阈值(相对带距), 默认 0.2
+            conv_eps: 两线收/扩/平行判定阈值
+            allow_channels/allow_wedges/allow_triangles: 形态组开关
+            max_patterns: 最多保留的最近形态数, 默认 20
+            avoid_overlap: 形态时间窗互不重叠
+
+        lines:
+            - top:    高点线(上边界线)
+            - bottom: 低点线(下边界线)
+            - mid:    中间折线(虚线)
+            - long_signal / short_signal: 突破点(标记 + 形态名文本; isplot=False)
+            - long_code / short_code:    突破点的形态编号(内部用, 不上图)
+
+        Examples:
+        >>> from minibt import *
+            if __name__ == "__main__":
+                kline = LocalDatas.test.kline
+                # kline.tradingview.AutoChartPatterns(
+                #     length=5, depth=20, max_patterns=100).btplot()
+                kline.tradingview.AutoChartPatterns(
+                    length=0, threshold=0.001, max_patterns=100).btplot()
+        """
+        return AutoChartPatterns(
+            self._kline,
+            source=source,
+            length=length,
+            depth=depth,
+            threshold=threshold,
+            min_pivots=min_pivots,
+            max_pivots=max_pivots,
+            error_ratio=error_ratio,
+            flat_ratio=flat_ratio,
+            conv_eps=conv_eps,
+            allow_channels=allow_channels,
+            allow_wedges=allow_wedges,
+            allow_triangles=allow_triangles,
+            max_patterns=max_patterns,
+            avoid_overlap=avoid_overlap,
+            **kwargs)
+
+    def ScalpingPullBackTool(self,
+                             hilolen: int = 34,
+                             fastlen: int = 89,
+                             mediumlen: int = 200,
+                             slowlen: int = 600,
+                             lookback: int = 3,
+                             delay_arrow: bool = False,
+                             use_ha: bool = True,
+                             **kwargs) -> IndFrame:
+        """Scalping PullBack Tool R1.1 (JustUncleL) —— PAC 通道回踩剥头皮工具
+
+        原码: https://cn.tradingview.com/script/n1co3drh-Scalping-PullBack-Tool-R1-by-JustUncleL/
+        (Pine v4, overlay)
+
+        转换说明(按需求精简为纯叠加指标):
+            - 只输出一条均线 mediumEMA(默认 200，趋势基准)，EMAs ribbon 三线不再全画;
+            - PAC 通道 pacU/pacL = EMA(High/Low, hilolen) 保留，通道中线 pacC 仅内部参与回踩判断;
+            - 买卖信号点(箭头部分) → long_signal/short_signal: 状态从 0 翻转入场的 bar 置 1，
+              画在 bar 低点(买)/高点(卖);
+            - 去除: 分形三角点(过于频繁)、HH/HL/LH/LL 文本、bar 颜色/背景颜色等纯绘图元素;
+            - 可选 Heikin-Ashi 蜡烛参与计算(use_ha=True，与原码 UseHAcandles 一致)。
+
+        参数:
+            hilolen: PAC High/Low+Close 通道 EMA 长度，默认 34
+            fastlen: 快线 EMA 长度(趋势判断用，不输出)，默认 89
+            mediumlen: 中线 EMA 长度(唯一输出的均线)，默认 200
+            slowlen: 慢线 EMA 长度(原码算法不使用，仅保留参数)，默认 600
+            lookback: 回踩 PAC 中线回溯 bar 数，默认 3
+            delay_arrow: 是否延迟 1 根 bar 显示箭头(静态标记位置不变)，默认 False
+            use_ha: 是否用 Heikin-Ashi 蜡烛参与计算，默认 True
+
+        lines:
+            - pacU / pacL   : PAC 通道上/下轨
+            - mediumEMA     : 单条趋势基准均线
+            - long_signal / short_signal : 回踩恢复 买入/卖出 信号点(0/1, 只画点)
+        """
+        return ScalpingPullBackTool(
+            self._kline,
+            hilolen=hilolen,
+            fastlen=fastlen,
+            mediumlen=mediumlen,
+            slowlen=slowlen,
+            lookback=lookback,
+            delay_arrow=delay_arrow,
+            use_ha=use_ha,
+            **kwargs)
+
+    def SwingHighsLows(self,
+                       length: int = 21,
+                       **kwargs) -> IndFrame:
+        """
+        ## Swing Highs/Lows & Candle Patterns [LuxAlgo]
+
+        摆动高/低点标签 + 6 种蜡烛形态(主图叠加)。原码把标签画在 history pivot bar
+        上并通过 length 根右侧 bar 确认(无未来函数, 但事件只在确认后才出现)。
+
+        ### 📘 **文档参考**:
+        ✈ https://cn.tradingview.com/script/yxEJ4Dxw-Swing-Highs-Lows-Candle-Patterns-LuxAlgo/
+
+        表现:
+        - Swing High(高点, 红色) → `long_signal`: 倒三角画在 bar 高点, 文本 `HH/LH` + 形态名;
+        - Swing Low (低点, 青色) → `short_signal`: 正三角画在 bar 低点, 文本 `LL/HL` + 形态名;
+        - 形态: Hammer / Inverted Hammer / Bullish Engulfing / Hanging Man / Shooting
+          Star / Bearish Engulfing(按标准条件修正空头吞噬), 无形态时文本为 None。
+
+        Args:
+            length: pivot 左/右侧确认 bar 数，默认 `21`
+            **kwargs: 其他扩展参数
+
+        Returns:
+            主图叠加 IndFrame，包含:
+            - `long_signal`: Swing High 信号(0/1)
+            - `short_signal`: Swing Low 信号(0/1)
+            - `swing_type`: 1=HH, 2=LH, 3=LL, 4=HL
+            - `pattern_code`: 1~6 对应 6 种形态, 0=无形态
+        """
+        ind = SwingHighsLows(self._kline, length=length, **kwargs)
+        codes = np.asarray(ind.swing_type.values, dtype=np.float64)
+        pats = np.asarray(ind.pattern_code.values, dtype=np.float64)
+        n = codes.shape[0]
+        hi_txt = np.full(n, np.nan, dtype=object)   # 高点标签: HH/LH + 形态
+        lo_txt = np.full(n, np.nan, dtype=object)   # 低点标签: LL/HL + 形态
+        for p in np.flatnonzero(codes):
+            pc = int(round(pats[p]))
+            title = _SWING_PATTERN_TITLES.get(pc, "None")
+            if codes[p] in (1.0, 2.0):
+                hi_txt[p] = ("HH" if codes[p] == 1.0 else "LH") + "\n" + title
+            else:
+                lo_txt[p] = ("LL" if codes[p] == 3.0 else "HL") + "\n" + title
+        plotinfo = getattr(ind, "_plotinfo", None) or getattr(
+            ind, "plotinfo", None)
+        if plotinfo is not None:
+            # 逐点信号文本(与数值信号列按行对齐, 无文本处为 nan)
+            plotinfo["signal_texts"] = dict(
+                long_signal=hi_txt, short_signal=lo_txt)
+        return ind
+
+    def SupportResistanceSignalsMTF(self,
+                                    detection_tf: str = "Chart",
+                                    length: int = 15,
+                                    margin: float = 2.0,
+                                    check_historical: bool = True,
+                                    avoid_false_breakouts: bool = True,
+                                    show_rejections: bool = True,
+                                    **kwargs) -> IndFrame:
+        """
+        ## Support and Resistance Signals MTF [LuxAlgo]
+
+        多周期支撑/阻力区与信号(主图叠加)。用 pivot high/low 动态构建支撑/阻力区,
+        并输出突破 / 测试 / 回测 / 拒绝信号。
+
+        ### 📘 **文档参考**:
+        ✈ https://cn.tradingview.com/script/iOrhpIqc-Support-and-Resistance-Signals-MTF-LuxAlgo/
+
+        ### 表现:
+        - `res_high` / `res_low`: 最新阻力区上/下沿(阶梯线, 红色, 区间填充);
+        - `sup_high` / `sup_low`: 最新支撑区上/下沿(阶梯线, 绿色, 区间填充);
+        - `long_signal`: 多头突破(B) / 回测(R) / 拒绝 —— 低点绿色三角;
+        - `exitshort_signal`: 支撑测试(T) —— 低点蓝色圆;
+        - `short_signal`: 空头突破(B) / 回测(R) / 拒绝 —— 高点红色倒三角;
+        - `exitlong_signal`: 阻力测试(T) —— 高点橙色圆。
+
+        ### 算法:
+        - pivot 长度按检测周期缩放 `srLN = length * tf_m / ch_m` (Pine 原码口径);
+        - 维护最近 2 个有效区间, 按原码 margin 合并/新增;
+        - 突破/测试/回测/拒绝条件与原码一致, 事件落在确认 bar(i) 上(无前视)。
+
+        Args:
+            detection_tf: 检测周期, 可选 `'Chart'`/`'15 Minutes'`/`'1 Hour'`/
+                `'4 Hours'`/`'1 Day'`/`'1 Week'`, 默认 `'Chart'`
+            length: 检测长度(pivot 左右窗), 默认 `15`
+            margin: 支撑阻力边缘系数 srMR(0.1~10), 默认 `2.0`
+            check_historical: 是否检查更早一个区间(srHST), 默认 `True`
+            avoid_false_breakouts: 是否过滤假突破(srFBO), 默认 `True`
+            show_rejections: 是否显示高低价拒绝信号, 默认 `True`
+            **kwargs: 其他扩展参数(透传给 BtIndicator, 可覆盖线型等绘图参数)
+
+        Returns:
+            主图叠加 IndFrame, 包含上述 8 列。
+        """
+        return SupportResistanceSignalsMTF(
+            self._kline,
+            detection_tf=detection_tf,
+            length=length,
+            margin=margin,
+            check_historical=check_historical,
+            avoid_false_breakouts=avoid_false_breakouts,
+            show_rejections=show_rejections,
+            **kwargs)
+
+    def TrendlineBreakoutsWithTargets(self,
+                                      period=10,
+                                      trend_type='Wicks',
+                                      extend=25,
+                                      show_targets=True,
+                                      target_mult=20.0,
+                                      **kwargs) -> IndFrame:
+        """Trendline Breakouts With Targets [ChartPrime]
+
+            原码(TradingView Pine v5):
+            https://cn.tradingview.com/script/hb6J9iHI-Trendline-Breakouts-With-Targets-ChartPrime/
+            © ChartPrime, MPL 2.0
+
+            基于 pivot 的上下趋势线(每向 2 条独立直线段) + 突破信号 + 目标位 TP 离场文本。
+            详见模块 docstring。
+
+            转换说明
+            --------
+            原码从 pivot high / pivot low 出发，用「相邻两个同向 pivot」连线得到趋势线：
+
+            - 上趋势线(阻力线): 由 pivot high 连线，仅斜率为负(向下)时有效；
+            - 下趋势线(支撑线): 由 pivot low  连线，仅斜率为正(向上)时有效；
+            - 每条趋势线是一段独立直线段 [start_bar, end_bar]，end_bar = 第二 pivot + extend；
+            - pivot 不复用: 一条线段用过 (p1, p2)，下一条同向线段用 (p3, p4)，两段不共点；
+            - 每向输出 2 条指标线，按奇偶交替承载各段，段与段各自独立、互不拼接
+            (同一数组内相邻两段相隔两个 pivot，区间不重叠，因此每条都是单一斜率的直线段)；
+            - 突破: 价格上穿 上趋势线 → 多头; 下穿 下趋势线 → 空头；
+            - 开仓后以 Zband 倍数给出目标位 TP / 止损位 SL，并输出 target 指标线；
+            - 触及 TP / SL 离场时标记离场信号并显示文本 "TP" / "SL"。
+
+            信号命名严格使用 minibt 标准名(系统只识别这四个):
+                long_signal / exitlong_signal / short_signal / exitshort_signal
+
+            输出 lines
+            ----------
+            - upper_trend  / upper_trend2 : 上趋势线(阻力)线段(奇/偶交替承载)
+            - lower_trend  / lower_trend2 : 下趋势线(支撑)线段(奇/偶交替承载)
+            - target                      : 持仓期间目标位 TP 水平线(其余为 NaN)
+            - long_signal                 : 多头突破(上穿阻力线), 值 1
+            - short_signal                : 空头突破(下穿支撑线), 值 1
+            - exitlong_signal             : 多头离场, 1=达到目标TP / 2=触及止损SL
+            - exitshort_signal            : 空头离场, 1=达到目标TP / 2=触及止损SL
+
+            参数
+            ----
+            - period       pivot 左窗(右窗 = period//2)，默认 10
+            - trend_type   pivot 价格源: 'Wicks'(高低点, 默认) / 'Body'(实体)
+            - extend       趋势线向前延伸的 bar 数, 默认 25 (原码 25/50/75)
+            - show_targets 是否绘制 target 目标线, 默认 True
+            - target_mult  目标/止损 = Zband * target_mult, 默认 20
+            """
+        return TrendlineBreakoutsWithTargets(self._kline,
+                                             trend_type=trend_type,
+                                             extend=extend,
+                                             show_targets=show_targets,
+                                             target_mult=target_mult,
+                                             **kwargs)
+
+    def DivergenceManyV3(self,
+                         # ── 原码 input ──
+                         lb=5,                    # Left Bars
+                         rb=5,                    # Right Bars
+                         showhidden=False,        # 显示隐藏背离
+                         chcut=True,              # Check Cut-Through in indicators
+                         shownum=True,            # 显示背离数量
+                         showindis=True,          # 文本显示指标名(默认开启, 便于看清哪些指标出现背离)
+                         showpivot=False,         # 显示 pivot 点(本实现不单独绘制, 保留参数)
+                         chwidth=True,            # 按背离数量改变线宽(本实现不画线, 保留参数)
+                         showlimit=1,             # 最少背离数量
+                         # ── 各指标开关(原码默认全开) ──
+                         calcmacd=True,
+                         calcmacda=True,
+                         calcrsi=True,
+                         calcstoc=True,
+                         calccci=True,
+                         calcmom=True,
+                         calcobv=True,
+                         calcdi=True,
+                         calcvwmacd=True,
+                         calccmf=True,
+                         calcmfi=True,
+                         **kwargs) -> IndFrame:
+        """多指标背离检测 (Divergence for many indicator v3) → MiniBT BtIndicator
+
+            原码(TradingView Pine v4): Divergence for many indicator v3.txt (© LonesomeTheBlue, MPL 2.0)
+            网址: https://cn.tradingview.com/script/iN9FTv45-Divergence-for-many-indicator-v3/
+
+            转换说明
+            --------
+            原码同时检测 11 个指标(MACD / MACD Hist / RSI / Stoch / CCI / Momentum / OBV /
+            Diosc / VWMacd / CMF / MFI)，与价格在 pivot high/low 上的 4 类背离
+            (常规/隐藏 × 看涨/看跌)，命中后在当根 bar 顶部(看跌) 或底部(看涨) 画线并打标签
+            (指标名 + 背离数量)。
+
+            minibt 不支持原码的 line.new / line.delete 动态画线，本实现与同类文件
+            `divergence_many_indicators.py` 保持一致，采用「相邻同向 pivot 对」的静态比较：
+
+                常规看涨: 价格更低低点 + 指标更高低点
+                隐藏看涨: 价格更高低点 + 指标更低低点
+                常规看跌: 价格更高高点 + 指标更低高点
+                隐藏看跌: 价格更低高点 + 指标更高高点
+
+            并保留原码 v3 的两个过滤器：
+                - `emptyh/emptyl`  : 两个 pivot 之间收盘价不得穿出两者连线(原码始终检查)；
+                - `chcut`          : 指标本身在两个 pivot 之间也不得穿出两者连线(Check Cut-Through)。
+
+            信号/文本落在第二个 pivot 的「确认 bar」(pivot bar + rb)，保证只用已发生数据。
+
+            参数（对齐原码 input）
+            ----------------------
+            - lb / rb         Left Bars / Right Bars，默认 5 / 5
+            - showhidden      显示隐藏背离(否则显示常规背离)，默认 False
+            - chcut           Check Cut-Through in indicators，默认 True
+            - shownum         文本末尾显示背离数量，默认 True
+            - showindis       文本显示指标名(哪些指标出现背离)，默认 True
+            - showlimit       最少背离指标数量(1~11)，默认 1
+            - calcmacd/calcmacda/calcrsi/calcstoc/calccci/calcmom/calcobv/calcdi/
+            - calcvwmacd/calccmf/calcmfi   各指标开关(默认全开)
+
+            输出 lines
+            ----------
+            - long_signal  : 看涨背离(常规或隐藏), 确认 bar 置 1
+            - short_signal : 看跌背离(常规或隐藏), 确认 bar 置 1
+            - long_code / short_code : 命中的指标 bitmask(供 signal_text 解码)
+            """
+        return DivergenceManyV3(self._kline,
+                                lb=lb,
+                                rb=rb,
+                                showhidden=showhidden,
+                                chcut=chcut,
+                                shownum=shownum,
+                                showindis=showindis,
+                                showpivot=showpivot,
+                                chwidth=chwidth,
+                                showlimit=showlimit,
+                                calcmacd=calcmacd,
+                                calcmacda=calcmacd,
+                                calcrsi=calcrsi,
+                                calcstoc=calcstoc,
+                                calccci=calccci,
+                                calcmom=calcmom,
+                                calcobv=calcobv,
+                                calcdi=calcdi,
+                                calcvwmacd=calcvwmacd,
+                                calccmf=calccmf,
+                                calcmfi=calcmfi,
+                                **kwargs)
+
+    def AdaptiveSupertrend(self,
+                           atr_len=13,            # ATR 长度
+                           base_mult=2.0,         # 基础带宽(xATR)
+                           er_len=20,             # 效率窗口
+                           atr_baseline_len=100,  # ATR 基线长度
+                           adapt_strength=0.5,    # 旧版 ER 自适应强度
+                           quality_strength=0.4,  # TQI 影响力
+                           quality_curve=1.5,     # TQI 非线性幂
+                           asym_strength=0.5,     # 非对称带宽强度
+                           char_flip_high=0.55,   # 字符翻转: 高 TQI
+                           char_flip_low=0.25,    # 字符翻转: 低 TQI)
+                           **kwargs) -> IndFrame:
+        """Adaptive SuperTrend (asymmetric-aware)
+        -----
+
+            TQI(趋势质量) + ER 自适应调节带宽, 顺势侧收紧 / 逆势侧放宽的 SuperTrend。
+
+            原码: 1.txt 第 6.3 节 "ADAPTIVE SUPERTREND (asymmetric-aware)"
+                (来自 Self-Aware Trend System [WillyAlgoTrader] v1.12.0)
+                https://cn.tradingview.com/script/sXFWVpmg-Self-Aware-Trend-System-WillyAlgoTrader/
+
+            只取原码 6.3 这一部分(以及其依赖的 6.1 TQI / 6.2 自适应乘数)，其它模块(Dashboard、
+            TP/SL、自学习、Preset 中的 RSI 等)忽略。
+
+            核心逻辑
+            --------
+            - 1. rawATR   = ta.atr(effectiveAtrLen)
+                volRatio = rawATR / sma(rawATR, baselineLen)
+                ER       = |src - src[erLen]| / sum(|src - src[1]|, erLen)
+                atrValue = useEffAtr ? rawATR*(0.5 + 0.5*ER) : rawATR
+            - 2. TQI (Trend Quality Index, 0..1) 由 4 因子加权:
+                ER / 成交量或波动率 / 结构位置 / 动量持续性
+            - 3. 自适应乘数:
+                legacyAdapt = useAdaptive ? 1 + adaptStrength*(0.5 - ER) : 1
+                qualityDev  = (1 - TQI)^qualityCurve
+                tqiMult     = 1 - q + q*(0.6 + 0.8*qualityDev)
+                symMult     = baseMult * legacyAdapt * tqiMult
+                asymmetric : active = sym*tighten, passive = sym*widen  (active=顺势侧)
+                再对 active/passive 做 EMA 平滑(MULT_SMOOTH_ALPHA = 0.15)
+            - 4. SuperTrend 带(带棘轮):
+                lowerRaw = src - lowerMult*atrValue,  upperRaw = src + upperMult*atrValue
+                lower    = close[1] > lower[1] ? max(lowerRaw, lower[1]) : lowerRaw
+                upper    = close[1] < upper[1] ? min(upperRaw, upper[1]) : upperRaw
+            - 5. 翻转:
+                价格翻转: 原趋势 -1 且 close > upper[1] → 翻多; 原趋势 1 且 close < lower[1] → 翻空
+                字符翻转(Character-Flip): TQI 在窗口内曾 > high 且当前 < low, 且价格已逆向
+                                            (close < close[window] / close > close[window])
+                stTrend = 翻多 ? 1 : (翻空 ? -1 : 原趋势)
+                stLine  = stTrend == 1 ? lower : upper
+
+            输出 lines(主图叠加)
+            --------------------
+            - st_bull / st_bear : SuperTrend 线(按趋势着色: 多头绿 / 空头红)
+            - upper_band / lower_band : 翻转前的上下轨
+            - long_signal  : 买入(翻多): 1=价格翻转 / 2=字符翻转
+            - short_signal : 卖出(翻空): 1=价格翻转 / 2=字符翻转
+            """
+        return AdaptiveSupertrend(self._kline,
+                                  atr_len=atr_len,
+                                  base_mult=base_mult,
+                                  er_len=er_len,
+                                  atr_baseline_len=atr_baseline_len,
+                                  adapt_strength=adapt_strength,
+                                  quality_strength=quality_strength,
+                                  quality_curve=quality_curve,
+                                  asym_strength=asym_strength,
+                                  char_flip_high=char_flip_high,
+                                  char_flip_low=char_flip_low,
+                                  **kwargs)
+
+    def QQESignals(self,
+                   rsi_period=14,       # RSI Length
+                   sf=5,                # RSI Smoothing
+                   qqe_factor=4.238,    # Fast QQE Factor
+                   threshold=10,        # Thresh-hold (原码未使用, 保留))
+                   **kwargs) -> IndFrame:
+        """QQE signals → MiniBT BtIndicator
+            ----
+
+            原码(TradingView Pine v4):
+                https://cn.tradingview.com/script/7R6ZxyZu-QQE-signals/
+                © colinmck, MPL 2.0
+
+            转换说明
+            --------
+            原码 ``overlay=true``, 只画了 Long / Short 两个信号标签, 没有把 QQE 指标本身
+            (平滑 RSI 线与 QQE 追踪线)画出来。本实现按原码逐 bar 递归计算, 除了输出
+            ``long_signal`` / ``short_signal``(主图信号), 还额外把 QQE 指标本体放到副图:
+
+            - ``qqe_rsi``  : 平滑 RSI (原码 ``RSIndex = ema(rsi(close, RSI_Period), SF)``)
+            - ``qqe_fast`` : QQE 追踪线 (原码 ``FastAtrRsiTL``, 在 longband / shortband 间切换)
+            - ``long_signal``  : ``QQExlong == 1`` 的 bar (主图 Long 标签)
+            - ``short_signal`` : ``QQExshort == 1`` 的 bar (主图 Short 标签)
+
+            原码递归逻辑(逐字对齐):
+            ----
+            - Wilders_Period = RSI_Period * 2 - 1
+            - Rsi        = rsi(close, RSI_Period)              # PINe ta.rsi = Wilder 平滑
+            - RsiMa      = ema(Rsi, SF)
+            - AtrRsi     = abs(RsiMa[1] - RsiMa)
+            - MaAtrRsi   = ema(AtrRsi, Wilders_Period)
+            - dar        = ema(MaAtrRsi, Wilders_Period) * QQE
+            - newlongband  = RsiMa - dar
+            - newshortband = RsiMa + dar
+            - longband  := (RsiMa[1] > longband[1] and RsiMa > longband[1])
+                        ? max(longband[1], newlongband) : newlongband
+            - shortband := (RsiMa[1] < shortband[1] and RsiMa < shortband[1])
+                        ? min(shortband[1], newshortband) : newshortband
+            - cross_1   = cross(longband[1], RsiMa)
+            - trend     := cross(RsiMa, shortband[1]) ? 1 : cross_1 ? -1 : nz(trend[1], 1)
+            - FastAtrRsiTL = trend == 1 ? longband : shortband
+            - QQExlong  := FastAtrRsiTL < RsiMa  ? QQExlong + 1 : 0
+            - QQExshort := FastAtrRsiTL > RsiMa  ? QQExshort + 1 : 0
+            - qqeLong   = QQExlong == 1 ? FastAtrRsiTL[1] - 50 : na
+            - qqeShort  = QQExshort == 1 ? FastAtrRsiTL[1] - 50 : na
+
+            说明:
+            -----
+
+            - Pine 的 ``cross(a, b)`` 这里按 **上穿(crossover)** 语义实现
+                (``a[1] < b[1] and a > b``); 原码把参数互换
+                (``cross(longband[1], RSIndex)``) 正是为了检测向下的穿越。
+            - Pine 的 ``ema`` 以第一个有效值播种后按 ``2/(n+1)`` 递归; ``rma`` 以
+                前 n 个值的 SMA 播种后按 ``1/n`` 递归, 与 minibt 内其它移植文件一致。
+            - 原码的 ``ThreshHold`` 输入在脚本中并未被使用, 这里保留为参数以对齐原码。
+
+            输出 lines
+            ----------
+            - 副图: qqe_rsi, qqe_fast
+            - 主图: long_signal, short_signal (标注 "Long" / "Short")
+            """
+        return QQESignals(self._kline,
+                          rsi_period=rsi_period,
+                          sf=sf,
+                          qqe_factor=qqe_factor,
+                          threshold=threshold,
+                          **kwargs)
+
+    def ZeroLagTrendSignals(self,
+                            length=70,      # Length: ZLEMA 回看窗口
+                            mult=1.2,       # Band Multiplier: 波动轨厚度)
+                            **kwargs) -> IndFrame:
+        """Zero Lag Trend Signals (MTF) [AlgoAlpha] → MiniBT BtIndicator
+            --------
+            原码(TradingView Pine v5):
+                https://cn.tradingview.com/script/tHK4O1Fi-Zero-Lag-Trend-Signals-MTF-AlgoAlpha/
+                © AlgoAlpha, MPL 2.0
+
+            转换说明
+            --------
+            按需求 **只保留主图指标与信号**, 原码中的多周期 ``request.security`` 与
+            右上角 Time Frame / Signal 表格 (t1~t5, barstate.islast 的 data_table) 全部忽略。
+
+            主图核心逻辑(逐字对齐原码):
+            ----
+            - lag        = floor((length - 1) / 2)
+            - zlema      = ta.ema(src + (src - src[lag]), length)
+            - volatility = ta.highest(ta.atr(length), length * 3) * mult
+            - trend      = 0
+            - if ta.crossover(close, zlema + volatility):   trend := 1
+            - if ta.crossunder(close, zlema - volatility):  trend := -1
+
+            主图绘制(原码):
+            ----
+            - Zero Lag Basis : zlema, 多头绿 / 空头红;
+            - Upper Deviation Band : trend == -1 时显示 zlema + volatility(红);
+            - Lower Deviation Band : trend == 1  时显示 zlema - volatility(绿);
+            - zlema 与上/下轨之间分别填充红色 / 绿色。
+
+            信号(原码):
+            ----
+            - Bullish Trend  : ta.crossover(trend, 0)   (▲, 主图大三角)
+            - Bearish Trend  : ta.crossunder(trend, 0)  (▼, 主图大倒三角)
+            - Bullish Entry  : ta.crossover(close, zlema) and trend == 1 and trend[1] == 1
+            - Bearish Entry  : ta.crossunder(close, zlema) and trend == -1 and trend[1] == -1
+
+            ⚠ minibt 只识别 4 个固定信号列 (long_signal / short_signal / exitlong_signal /
+            exitshort_signal), 无法使用任意自定义信号名。因此 4 个原码信号按语义映射:
+
+            - long_signal      ← Bullish Entry  (顺势回踩做多, 主图低点 小▲)
+            - short_signal     ← Bearish Entry  (顺势反弹做空, 主图高点 小▼)
+            - exitlong_signal  ← Bearish Trend  (趋势转空 → 平多, 高点 大▼)
+            - exitshort_signal ← Bullish Trend  (趋势转多 → 平空, 低点 大▲)
+
+            这样 ``entries = long_signal - short_signal`` / ``exits`` 的语义与原码一致:
+            顺势入场 + 趋势翻转离场。
+
+            输出 lines(全部主图叠加)
+            ------------------------
+            - zlema_bull / zlema_bear : Zero Lag 基线(按趋势着色: 多绿 / 空红)
+            - upper_band / lower_band : 仅在对应趋势下显示的上/下偏离轨
+            - long_signal / short_signal : 顺势入场(Entry)
+            - exitlong_signal / exitshort_signal : 趋势翻转(Trend)
+            """
+        return ZeroLagTrendSignals(self._kline,
+                                   length=length,
+                                   mult=mult,
+                                   **kwargs)
+
+    def RangeFilterSignals(self,
+                           rng_per=20,     # Swing Period
+                           rng_qty=3.5,    # Swing Multiplier
+                           **kwargs) -> IndFrame:
+        """Range Filter - B&S Signals (VuManChu Swing Free) → MiniBT BtIndicator
+            --------
+            原码(TradingView Pine v4):
+                https://cn.tradingview.com/script/q23anHmP-VuManChu-Swing-Free/
+                原始脚本: Range Filter DonovanWall
+                https://www.tradingview.com/script/lut7sBgG-Range-Filter-DW/
+
+            说明
+            ----
+            这是 Range Filter 的"旧版 / 少设置"版本, 只有 Swing Source / Swing Period /
+            Swing Multiplier 三个输入, 主图输出:
+
+            - Filter           : 过滤后的趋势价, 按方向着色(多绿 / 空红 / 中性灰);
+            - High / Low Band  : filt ± rng, 原码中本身完全透明, 仅作为填充边界;
+            - Band Fills       : 上带与 filt 之间(绿), 下带与 filt 之间(品红);
+            - BUY / SELL       : 多空条件首次翻转时的标签。
+
+            核心逻辑(逐字对齐原码):
+            --------
+            ```
+                // Range Size
+                wper   = n * 2 - 1
+                avrng  = ema(abs(x - x[1]), n)
+                AC     = ema(avrng, wper) * qty
+
+                // Range Filter
+                r = AC
+                var rfilt = [x, x]
+                rfilt[1] = rfilt[0]
+                if x - r > rfilt[1]: rfilt[0] = x - r
+                if x + r < rfilt[1]: rfilt[0] = x + r
+                filt = rfilt[0]
+                h_band = filt + r
+                l_band = filt - r
+
+                // Direction
+                fdir := filt > filt[1] ? 1 : filt < filt[1] ? -1 : fdir
+                upward   = fdir == 1
+                downward = fdir == -1
+
+                // Signals
+                longCond  = x > filt and upward   and (x > x[1] or x < x[1])
+                shortCond = x < filt and downward and (x < x[1] or x > x[1])
+                CondIni   := longCond ? 1 : shortCond ? -1 : CondIni[1]
+                longCondition  = longCond  and CondIni[1] == -1
+                shortCondition = shortCond and CondIni[1] ==  1
+            ```
+            输出 lines(全部主图叠加)
+            ------------------------
+            - filt           : 连续 Filter 线(中性灰, 亦作为填充边界)
+            - filt_bull / filt_bear : Filter 线按方向着色的两段(多绿 / 空红, 翻转处桥接)
+            - h_band / l_band: 上下偏离带
+            - long_signal    : BUY  信号
+            - short_signal   : SELL 信号
+            """
+        return RangeFilterSignals(self._kline,
+                                  rng_per=rng_per,
+                                  rng_qty=rng_qty,
+                                  **kwargs)
+
+    def CMEnhancedIchimokuCloud(self,
+                                tenkan=9,             # Tenkan-Sen
+                                kijun=26,             # Kinjun-Sen
+                                senkou=52,            # Senkou Span B
+                                displacement=26,      # -ChinkouSpan / +SenkouSpanA
+                                show_tenkan=True,     # sts
+                                show_kijun=True,      # sks
+                                show_chikou=True,     # sll
+                                show_cloud=True,      # sc
+                                # cr1 (原码默认 false, 本实现默认 true, 用于输出交易信号)
+                                show_crosses=True,
+                                **kwargs) -> IndFrame:
+        """CM_Enhanced_Ichimoku Cloud-V5 → MiniBT BtIndicator
+            --------
+            原码(TradingView Pine v4):
+                https://cn.tradingview.com/script/5IIzyO9L-CM-Enhanced-Ichimoku-Cloud-V5/
+                © ChrisMoody
+
+            说明
+            ----
+            按需求: 一目均衡表(Ichimoku)本体直接调用框架内置的 **``self.ichimoku``**
+            (源自 pandas_ta), 本转换的重点是 **补上交易信号**。
+
+            原码输入(默认值):
+            ----
+            - Tenkan-Sen          = 9
+            - Kinjun-Sen          = 26
+            - Senkou Span B       = 52
+            - displacement        = 26   (-ChinkouSpan / +SenkouSpanA)
+            - Show Tenkan/Kinjun/Chinkou/Cloud = true
+            - Show Crosses (cr1)  = false   ← 原码默认关闭, 本实现默认开启
+
+            一目均衡表组件(原码):
+            ----
+            - turning      = donchian(9)                      → Tenkan-Sen (转换线)
+            - standard     = donchian(26)                     → Kinjun-Sen (基准线)
+            - leadingSpan1 = (turning + standard) / 2         → Senkou Span A (先行带A)
+            - leadingSpan2 = donchian(52)                     → Senkou Span B (先行带B)
+            - chinkou      = close                            → Chinkou Span (迟行线)
+
+            其中先行带 A/B 向前位移 ``displacement`` 根, 迟行线向后位移 ``displacement`` 根。
+            ``pandas_ta`` 的 ichimoku 位移是 ``kijun-1``, 本实现按 ``displacement`` 再做校正。
+
+            云层着色: leadingSpan1 >= leadingSpan2 → 绿(lime, 看涨云); 否则 → 红(red, 看跌云)。
+
+            交易信号(原码的交叉箭头, 由 cr1 控制; 本实现默认开启):
+                crossUp : turning[1] < standard[1] and turning > standard  → 做多
+                crossDn : turning[1] > standard[1] and turning < standard  → 做空
+
+            输出 lines(全部主图叠加)
+            ------------------------
+            - tenkan_sen : 转换线 (lime)
+            - kijun_sen  : 基准线 (fuchsia)
+            - chikou_span: 迟行线 (aqua, 向后位移 displacement)
+            - span1_up / span2_up : 看涨云的两条边界 (绿)
+            - span1_dn / span2_dn : 看跌云的两条边界 (红)
+            - long_signal / short_signal : Tenkan/Kijun 金叉做多 / 死叉做空
+
+            云层填充通过 BandStyle 实现: (span2_up, span1_up) 绿, (span1_dn, span2_dn) 红。
+            """
+        return CMEnhancedIchimokuCloud(self._kline,
+                                       tenkan=tenkan,
+                                       kijun=kijun,
+                                       senkou=senkou,
+                                       displacement=displacement,
+                                       show_tenkan=show_tenkan,
+                                       show_kijun=show_kijun,
+                                       show_chikou=show_chikou,
+                                       show_cloud=show_cloud,
+                                       show_crosses=show_crosses,
+                                       **kwargs)
+
+    def TrendTargets(self,
+                     st_factor=12.0,      # Supertrend Factor
+                     st_atr_period=90,    # Supertrend ATR Period
+                     wma_length=40,       # WMA Length
+                     ema_length=14,       # EMA Length
+                     green='#00ffbb',     # Bullish Color
+                     red='#ff1100',       # Bearish Color)
+                     **kwargs) -> IndFrame:
+        """Trend Targets [AlgoAlpha] → MiniBT BtIndicator (仅主图 tL 与信号)
+            --------
+            原码(TradingView Pine v6):
+                https://cn.tradingview.com/script/OXsSm5NV-Trend-Targets-AlgoAlpha/
+                © AlgoAlpha
+
+            范围
+            ----
+            按需求 **只复刻主图均线 ``tL`` 及其信号**, 其余全部忽略:
+                - 忽略: 止盈/止损线(entry/SL/TP1~TP3)、各类 label、linefill、
+                        barcolor、Rejection(拒绝)信号、rejcount、所有 alertcondition。
+
+            核心逻辑(逐字对齐原码):
+            ----
+            ```
+                hl2 = (high + low) / 2
+                atr = ta.atr(st_atr_period)
+
+                // 改进版 SuperTrend 上下轨(带棘轮)
+                upperBand = hl2 + st_factor * atr
+                lowerBand = hl2 - st_factor * atr
+                prevLowerBand = nz(lowerBand[1])
+                prevUpperBand = nz(upperBand[1])
+                lowerBand := lowerBand > prevLowerBand or close[1] < prevLowerBand ? lowerBand : prevLowerBand
+                upperBand := upperBand < prevUpperBand or close[1] > prevUpperBand ? upperBand : prevUpperBand
+
+                // 基线 tL: 上下轨均值的 WMA 再 EMA
+                tL = ta.ema(ta.wma(math.avg(lowerBand, upperBand), wma_length), ema_length)
+
+                // 趋势状态
+                trend = 0
+                if ta.crossover(tL, tL[1]):  trend := 1
+                if ta.crossunder(tL, tL[1]): trend := -1
+            ```
+            tL 按趋势着色: trend == 1 → 绿(#00ffbb), 否则 → 红(#ff1100)。
+
+            信号(原码的 "Bullish/Bearish Trend Change"):
+            - long_signal  = ta.crossover(tL, tL[1])    (tL 由跌转升)
+            - short_signal = ta.crossunder(tL, tL[1])   (tL 由升转跌)
+
+            输出 lines(全部主图叠加)
+            ------------------------
+            - tL_bull / tL_bear : 基线 tL 按趋势拆成的绿/红两段(翻转处桥接)
+            - long_signal / short_signal : 趋势变化信号
+            """
+        return TrendTargets(self._kline,
+                            st_factor=st_factor,      # Supertrend Factor
+                            st_atr_period=st_atr_period,    # Supertrend ATR Period
+                            wma_length=wma_length,       # WMA Length
+                            ema_length=ema_length,       # EMA Length
+                            green=green,     # Bullish Color
+                            red=red,       # Bearish Color)
+                            **kwargs)
+
+    def ThreeCommasBot(self,
+                       # Trade variables
+                       long_trades=True,
+                       short_trades=True,
+                       use_limit=True,
+                       # 原码 input 默认 false; 但原码发布图表开启的是 ATR 追踪止损,
+                       # 止损线会随价格逐步上移(多)/下移(空), 故这里默认 True 以对齐图表表现。
+                       # 设为 False 则退化为固定止损(入场后不再移动)。
+                       trail_stop=True,
+                       flip=False,
+                       # Risk Management
+                       rnr=1.0,              # Reward to Risk Ratio
+                       risk_m=1.0,           # Risk Adjustment (ATR 倍数)
+                       swing_lookback=5,
+                       atr_len=14,
+                       # Trailing Stop
+                       trail_stop_size=1.0,
+                       trail_source='High/Low',   # High/Low / Close / Open
+                       rr_exit=0.0,               # R:R To Trigger Exit
+                       # MA
+                       ma_type1='EMA',
+                       ma_type2='EMA',
+                       ma_length1=21,
+                       ma_length2=50,
+                       **kwargs) -> IndFrame:
+        """3Commas Bot → MiniBT BtIndicator + Strategy
+            ----
+            原码(TradingView Pine v5):
+                https://cn.tradingview.com/script/MvlwAzSg-3Commas-Bot/
+                © Bjorgum
+
+            说明
+            ----
+            把原 ``strategy`` 拆成 MiniBT 的「指标 + 策略」两层:
+
+            指标 ``ThreeCommasBot`` 输出
+            - 主图: MA1 / MA2 (可选 9 种均线类型);
+            - 风控线(初始均为 ``np.nan``, 仅在持仓期间有值):
+                ``stop_line``    — 止损线 (trailStop 开启时为 ATR 追踪止损, 否则为固定止损)
+                ``trigger_line`` — 移动止损触发线 (tradeExitTriggerPrice)
+                ``limit_line``   — 止盈线 (tradeTargetPrice)
+            - 信号:
+                ``long_signal`` / ``short_signal``         — 入场
+                ``exitlong_signal`` / ``exitshort_signal`` — 离场
+
+            指标内部逐 bar 模拟了一遍完整持仓生命周期(入场 → 止损/止盈/追踪止损 → 离场),
+            从而得到上述三条风控线与离场信号; 策略 ``ThreeCommasBotStrategy`` 直接按这些
+            信号下单, 两者状态保持一致。
+
+            核心逻辑(逐字对齐原码):
+            ----
+            ```
+                ma1 = getMA(maType1, maLength1)
+                ma2 = getMA(maType2, maLength2)
+                atr = ta.atr(atrLen)
+                lowestLow   = ta.lowest(low,  swinglookback)
+                highestHigh = ta.highest(high, swinglookback)
+
+                validLongEntry  = ta.crossover (ma1, ma2) and not na(atr)
+                validShortEntry = ta.crossunder(ma1, ma2) and not na(atr)
+
+                longStop    = lowestLow   - atr*RiskM
+                shortStop   = highestHigh + atr*RiskM
+                longRisk    = close - longStop
+                shortRisk   = shortStop - close
+                longlimit   = close + RnR*longRisk
+                shortlimit  = close - RnR*shortRisk
+                longLimitDist  = close - longlimit
+                shortLimitDist = shortlimit - close
+            ```
+            入场时保存 stop / limit / trigger:
+            - tradeStopPrice        = longStop / shortStop
+            - tradeTargetPrice      = useLimit ? longlimit / shortlimit : na
+            - tradeExitTriggerPrice = close - longLimitDist*rrExit  (多)
+                                    close + shortLimitDist*rrExit (空)
+            - trailingStop          = tradeStopPrice
+
+            止损线行为:
+            - trailStop = true (本实现默认): ``stop_line`` = ATR 追踪止损, 多单持仓时
+                ``max(lowestLow - atr*trailStopSize)`` 逐步上移, 空单持仓时
+                ``min(highestHigh + atr*trailStopSize)`` 逐步下移, 即跟踪止盈;
+            - trailStop = false: ``stop_line`` = 入场时固定的 ``tradeStopPrice``。
+
+            离场: 价格触及 stop 或 limit 时平仓。
+
+            未复刻: 3Commas 的 JSON 告警文本、时间/日期过滤器(默认关闭)、背景着色。
+            """
+        return ThreeCommasBot(self._kline,
+                              long_trades=long_trades,
+                              short_trades=short_trades,
+                              use_limit=use_limit,
+                              trail_stop=trail_stop,
+                              flip=flip,
+                              rnr=rnr,
+                              risk_m=risk_m,
+                              swing_lookback=swing_lookback,
+                              atr_len=atr_len,
+                              trail_stop_size=trail_stop_size,
+                              trail_source=trail_source,
+                              rr_exit=rr_exit,
+                              ma_type1=ma_type1,
+                              ma_type2=ma_type2,
+                              ma_length1=ma_length1,
+                              ma_length2=ma_length2,
+                              **kwargs)
+
+    def Volumatic_Variable_Index_Dynamic_Average(
+            self, vidya_length=10, vidya_momentum=20, band_distance=2.,
+            pivot_bars=3, source='close', **kwargs) -> IndFrame:
+        """
+        ## Volumatic VIDYA [BigBeluga] —— 成交量加权的可变指数动态均线
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/llhVjhA5-Volumatic-Variable-Index-Dynamic-Average-BigBeluga/
+
+        Args:
+            vidya_length: VIDYA 平滑长度
+            vidya_momentum: VIDYA 动量窗口
+            band_distance: 上下轨 ATR 距离系数
+            pivot_bars: pivot 左右确认根数
+            source: VIDYA 源, 'close'/'open'/'high'/'low'/'hl2'/'hlc3'/'ohlc4'
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 含 vidya_up / vidya_down(趋势基线, 多绿空红)、
+                hl2(阴影基准, 透明)、long_signal / short_signal(趋势翻转箭头)、
+                exitlong_signal / exitshort_signal(流动性位被扫圆点 + 成交量文本)。
+
+        ### 说明:
+        - 原码的流动性水平线(line.new)不做绘制, 只保留圆点标记与文本。
+        - 圆点/箭头锚定在趋势基线价格上(信号列数值即对应价格)。
+        """
+        return Volumatic_Variable_Index_Dynamic_Average(
+            self._kline,
+            vidya_length=vidya_length,
+            vidya_momentum=vidya_momentum,
+            band_distance=band_distance,
+            pivot_bars=pivot_bars,
+            source=source,
+            **kwargs)
+
+    def RangeFilterBuySell(self, per=100, mult=3.0, source='close',
+                           **kwargs) -> IndFrame:
+        """
+        ## Range Filter Buy and Sell 5min (guikroth 版)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/J8GzFGfD-Range-Filter-Buy-and-Sell-5min-guikroth-version/
+
+        Args:
+            per: Sampling Period(采样周期, 默认 100)
+            mult: Range Multiplier(范围乘数, 默认 3.0)
+            source: 源价格, 'close'/'open'/'high'/'low'/'hl2'/'hlc3'(默认 'close')
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 含 filt / filt_up / filt_down(Range Filter 主线及按方向着色的
+                白/蓝两段)、hband / lband(上下目标带)、
+                long_signal(Buy) / short_signal(Sell)。
+
+        ### 说明:
+        - 原码的 barcolor(K 线逐点染色) 与 alertcondition 未复现。
+        - 原码默认白色适配深色主题, 浅色主题下可用
+          ``linestyle=dict(filt_up=LineStyle(line_color='...'))`` 覆盖。
+        """
+        return RangeFilterBuySell(
+            self._kline,
+            per=per,
+            mult=mult,
+            source=source,
+            **kwargs)
+
+    def QQEMod(self, rsi_length_primary=6, rsi_smoothing_primary=5,
+               qqe_factor_primary=3.0, threshold_primary=3.0,
+               source_primary='close', rsi_length_secondary=6,
+               rsi_smoothing_secondary=5, qqe_factor_secondary=1.61,
+               threshold_secondary=3.0, source_secondary='close',
+               bollinger_length=50, bollinger_multiplier=0.35,
+               **kwargs) -> IndFrame:
+        """
+        ## QQE MOD —— 主子双 QQE + 布林带过滤的柱状信号
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/TpUW4muw-QQE-MOD/
+
+        Args:
+            rsi_length_primary / rsi_smoothing_primary / qqe_factor_primary /
+                threshold_primary / source_primary: 主 QQE 参数
+            rsi_length_secondary / rsi_smoothing_secondary / qqe_factor_secondary /
+                threshold_secondary / source_secondary: 次 QQE 参数
+            bollinger_length: 布林带长度(作用于 primaryQQETrendLine-50)
+            bollinger_multiplier: 布林带倍数
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图, 含 sec_qqe(次级 QQE 趋势线-50)、rsi_thr(灰柱)、
+                rsi_up(#00c3ff 上信号柱)、rsi_down(#ff0062 下信号柱),
+                以及 pri_rsi / sec_rsi(平滑 RSI, 仅数据)。
+
+        ### 说明:
+        - 与 ``QQESignals`` 的 QQE 核心 **不一致**(单次 EMA vs 双重 EMA), 详见类文档。
+        - 原码白色线偏深色主题, 浅色主题可用 ``linestyle=...`` 覆盖。
+        - ``alertcondition`` 未复现。
+        """
+        return QQEMod(
+            self._kline,
+            rsi_length_primary=rsi_length_primary,
+            rsi_smoothing_primary=rsi_smoothing_primary,
+            qqe_factor_primary=qqe_factor_primary,
+            threshold_primary=threshold_primary,
+            source_primary=source_primary,
+            rsi_length_secondary=rsi_length_secondary,
+            rsi_smoothing_secondary=rsi_smoothing_secondary,
+            qqe_factor_secondary=qqe_factor_secondary,
+            threshold_secondary=threshold_secondary,
+            source_secondary=source_secondary,
+            bollinger_length=bollinger_length,
+            bollinger_multiplier=bollinger_multiplier,
+            **kwargs)
+
+    def HalfTrend(self, amplitude=2, channel_deviation=2,
+                  show_arrows=True, show_channels=True,
+                  show_labels=True, **kwargs) -> IndFrame:
+        """
+        ## HalfTrend —— ATR 通道 + 半趋势阶梯线
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/U1SJ8ubc-HalfTrend/
+
+        Args:
+            amplitude: 幅度(高低点回看周期, 默认 2)
+            channel_deviation: 通道偏移倍数(Channel Deviation, 默认 2)
+            show_arrows: 是否显示买卖箭头(默认 True)
+            show_channels: 是否显示 ATR 通道(默认 True)
+            show_labels: 是否显示 Buy/Sell 文字(默认 True)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 ht(连续阶梯线)、ht_up / ht_down(按趋势
+                着色的蓝/红两段)、atr_high / atr_low(ATR 通道)、
+                long_signal(Buy) / short_signal(Sell)。
+
+        ### 说明:
+        - 原码 ATR 通道为圆圈样式, 本框架以点线近似。
+        - 信号箭头锚点取 K 线 low/high(框架限制), 触发 bar 与原码一致。
+        - ``alertcondition`` 未复现。
+        """
+        return HalfTrend(
+            self._kline,
+            amplitude=amplitude,
+            channel_deviation=channel_deviation,
+            show_arrows=show_arrows,
+            show_channels=show_channels,
+            show_labels=show_labels,
+            **kwargs)
+
+    def FVGInstantaneousMitigationSignals(
+            self, filter_width=0.0, show_tp=False, tp_mult=4.0,
+            show_sl=False, sl_mult=2.0, ts_reset='Every Signals',
+            ts_mult=3.0, show_bull=True, show_bear=True,
+            show_bull_avg=True, show_bear_avg=True, **kwargs) -> IndFrame:
+        """
+        ## FVG Instantaneous Mitigation Signals [LuxAlgo]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/xYpl5UdE-FVG-Instantaneous-Mitigation-Signals-LuxAlgo/
+
+        Args:
+            filter_width: FVG 宽度过滤器(缺口宽度 > atr * filter_width, 默认 0.0)
+            show_tp: 是否绘制 TP 区域(默认 False)
+            tp_mult: TP 区域 ATR 倍数(默认 4.0)
+            show_sl: 是否绘制 SL 区域(默认 False)
+            sl_mult: SL 区域 ATR 倍数(默认 2.0)
+            ts_reset: 跟踪止损重置方式 'Every Signals' / 'Inverse Signals'
+            ts_mult: 跟踪止损 ATR 倍数(默认 3.0)
+            show_bull / show_bear: 是否启用看涨/看跌 FVG(默认 True)
+            show_bull_avg / show_bear_avg: 是否绘制看涨/看跌均价线(默认 True)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 bull_fvg / bear_fvg(缺口均价线)、
+                ts_bull / ts_bear(按方向拆分的跟踪止损)、
+                long_signal / short_signal(▲/▼ FVG 信号), 以及仅供策略
+                使用的 os / bull_reached / bear_reached / ts_reached。
+
+        ### 说明:
+        - 框架不支持 box 绘制, 失衡箱体/TP-SL 区域仅保留均价线与触发状态;
+          ``barcolor`` 未复现。
+        - 跟踪止损原码按 bar 变色并隐藏, 此处拆为 ts_bull / ts_bear 两段。
+        """
+        return FVGInstantaneousMitigationSignals(
+            self._kline,
+            filter_width=filter_width,
+            show_tp=show_tp,
+            tp_mult=tp_mult,
+            show_sl=show_sl,
+            sl_mult=sl_mult,
+            ts_reset=ts_reset,
+            ts_mult=ts_mult,
+            show_bull=show_bull,
+            show_bear=show_bear,
+            show_bull_avg=show_bull_avg,
+            show_bear_avg=show_bear_avg,
+            **kwargs)
+
+    def QuantitativeQualitativeEstimation(
+            self, source='close', rsi_length=14, sf=5, qqe_factor=4.236,
+            show_signals=True, highlight=True, **kwargs) -> IndFrame:
+        """
+        ## Quantitative Qualitative Estimation (QQE, KivancOzbilgic)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/0vn4HZ7O-Quantitative-Qualitative-Estimation-QQE/
+
+        Args:
+            source: 源价格(默认 'close')
+            rsi_length: RSI 周期(原码 length, 默认 14)
+            sf: RSI 平滑因子(原码 SSF, 默认 5)
+            qqe_factor: ATR-RSI 倍数(原码写死 4.236, 默认 4.236)
+            show_signals: 是否显示 Buy/Sell 信号(默认 True)
+            highlight: 是否开启上下趋势高亮填充(默认 True)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图, 含 qqe_fast(maroon) / qqe_slow(blue) / fifty(50 轴),
+                填充边界 fill_up_low/high、fill_dn_low/high,
+                以及主图 long_signal / short_signal(Buy/Sell)。
+
+        ### 说明:
+        - 与 ``QQESignals`` / ``QQEMod`` 的 QQE 慢线算法 **不一致**
+          (追踪止损 vs longband/shortband), 详见类文档。
+        - 框架将信号固定锚定到主图 K 线 low/high; 触发 bar 与原码一致。
+        - ``alertcondition`` 未复现。
+        """
+        return QuantitativeQualitativeEstimation(
+            self._kline,
+            source=source,
+            rsi_length=rsi_length,
+            sf=sf,
+            qqe_factor=qqe_factor,
+            show_signals=show_signals,
+            highlight=highlight,
+            **kwargs)
+
+    def StochasticOptimizedTrendTracker(
+            self, periodK=500, smoothK=200, length=2, percent=0.5,
+            var_length=9, show_support=False, show_signals=True,
+            **kwargs) -> IndFrame:
+        """
+        ## Stochastic Optimized Trend Tracker (SOTT)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/BK45kYNB-Stochastic-OTT/
+
+        Args:
+            periodK: %K Length(默认 500)
+            smoothK: %K Smoothing(默认 200)
+            length: OTT Period(默认 2)
+            percent: OTT Percent(默认 0.5)
+            var_length: CMO 回看周期(原码固定 9, 默认 9)
+            show_support: 是否绘制支撑线 MAvg(默认 False)
+            show_signals: 是否显示 Buy/Sell 信号(默认 **True**;原码 defval=false)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图, 含 k(VAR 平滑 %K + 1000)、ma_avg(支撑线)、
+                ott / ott_s2(OTT 及 OTT[2])、upper_band / lower_band(1080/1020),
+                以及主图 long_signal / short_signal(Buy/Sell)。
+
+        ### 说明:
+        - 数值含 +1000 偏移(与原码一致, 用于对齐 1020/1080 参考带)。
+        - ``ma_avg`` 改用源序列首值播种(而非 Pine 的 0 播种), 消除预热期
+          从 0 爬升到 ~1000 的落差; 信号不受影响。
+        - 原码 ``fill(h0,h1)`` 用常量参考线 + BandStyle 实现。
+        - 框架将信号固定锚定到主图 K 线 low/high; 触发 bar 与原码一致。
+        - ``alertcondition`` 未复现。
+        """
+        return StochasticOptimizedTrendTracker(
+            self._kline,
+            periodK=periodK,
+            smoothK=smoothK,
+            length=length,
+            percent=percent,
+            var_length=var_length,
+            show_support=show_support,
+            show_signals=show_signals,
+            **kwargs)
+
+    def TransientZones(self, h_left=10, h_right=10, sample_period=5000,
+                       show_channel=True, show_arrows=True,
+                       **kwargs) -> IndFrame:
+        """
+        ## Transient Zones v1.1 (TZ)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/NBcEvyej-Transient-Zones-v1-1/
+
+        Args:
+            h_left: 中心 bar 左侧窗口(默认 10)
+            h_right: 中心 bar 右侧窗口(默认 10)
+            sample_period: TZ 概率统计样本(默认 5000)
+            show_channel: 是否显示通道线(默认 True)
+            show_arrows: 是否显示 TZ 箭头信号(默认 True)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 channel_high / channel_low(通道线, 中间
+                填充色带)、long_signal(上箭头绿) / short_signal(下箭头红),
+                以及仅数据的 pct_tz / pct_ptz / pct_resolved。
+
+        ### 说明:
+        - 按需求**去掉了原码出现频繁的 PTZ 三角信号**(newlow/newhigh), 仅保留
+          TZ 箭头信号; PTZ 仍内部计算用于概率统计。
+        - 通道线按需求新增了色带填充。
+        - 箭头锚定在中心 bar(原码 offset=-h_right-1), 需 h_right+1 根后才确认。
+        """
+        return TransientZones(
+            self._kline,
+            h_left=h_left,
+            h_right=h_right,
+            sample_period=sample_period,
+            show_channel=show_channel,
+            show_arrows=show_arrows,
+            **kwargs)
+
+    def SingleEMACross(self, ema1=10, ema2=20, qty=1,
+                       use_test_period=True,
+                       test_start_year=2019, test_start_month=1,
+                       test_start_day=1, test_start_hour=0,
+                       test_start_min=0, test_stop_year=2099,
+                       test_stop_month=1, test_stop_day=30,
+                       **kwargs) -> IndFrame:
+        """
+        ## Backtest single EMA cross —— 双 EMA 交叉策略
+
+        Args:
+            ema1 / ema2: 快/慢 EMA 周期(默认 10 / 20)
+            qty: 下单手数(原码 100000, minibt 以手为单位, 默认 1)
+            use_test_period: 是否启用回测时段过滤(默认 True)
+            test_start_*: 回测起止时间(默认 2019-01-01 → 2099-01-30)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 ema_fast(青) / ema_slow(橙, 中间填充色带)、
+                long_signal(金叉 BUY) / short_signal(死叉 SELL)。
+
+        ### 交易逻辑:
+        - 指标内置 ``step()``: 金叉 ``set_target_size(+qty)`` / 死叉
+          ``set_target_size(-qty)``, 并用 test_period 限定回测时段。
+        - 用法(参考 ``tutorials/indicator_step.py``)::
+
+            class MyStrategy(Strategy):
+                def __init__(self):
+                    self.kline = self.get_kline(LocalDatas.test, height=400)
+                    self.ema = self.kline.tradingview.SingleEMACross()
+                def next(self):
+                    self.ema.step()
+
+        ### 说明:
+        - ``testPeriodBackground`` 背景染色与字体标签未复现。
+        - EMA 采用 Pine 口径(首值播种)。
+        """
+        return SingleEMACross(
+            self._kline,
+            ema1=ema1,
+            ema2=ema2,
+            qty=qty,
+            use_test_period=use_test_period,
+            test_start_year=test_start_year,
+            test_start_month=test_start_month,
+            test_start_day=test_start_day,
+            test_start_hour=test_start_hour,
+            test_start_min=test_start_min,
+            test_stop_year=test_stop_year,
+            test_stop_month=test_stop_month,
+            test_stop_day=test_stop_day,
+            **kwargs)
+
+    def CumulativeDeltaVolume(
+            self, style='Candle', hacandle=True,
+            showma1=True, ma1len=50, showma2=True, ma2len=200,
+            showema1=True, ema1len=50, showema2=True, ema2len=200,
+            **kwargs) -> IndFrame:
+        """
+        ## Cumulative Delta Volume (CDV) —— 副图蜡烛指标
+
+        ### 📘 **说明**:
+        - 原码: ``study("Cumulative Delta Volume", "CDV")`` © LonesomeTheBlue
+
+        Args:
+            style: ``'Candle'``(副图蜡烛, 默认) / ``'Line'``(只画 CDV 线)
+            hacandle: 蜡烛是否使用 Heikin Ashi(默认 True)
+            showma1 / ma1len: SMA1 开关 / 周期(默认 True / 50)
+            showma2 / ma2len: SMA2 开关 / 周期(默认 True / 200)
+            showema1 / ema1len: EMA1 开关 / 周期(默认 True / 50)
+            showema2 / ema2len: EMA2 开关 / 周期(默认 True / 200)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图蜡烛指标, 含 open / high / low / close(CDV 蜡烛)、
+                ctl(CDV 线, 线模式)、sma1 / sma2 / ema1 / ema2(可选均线)。
+
+        ### 示例:
+        >>> cdv = kline.tradingview.CumulativeDeltaVolume()
+        >>> cdv = kline.tradingview.CumulativeDeltaVolume(
+        ...     hacandle=False, showma1=True, ma1len=50)
+        >>> cdv = kline.tradingview.CumulativeDeltaVolume(style='Line')
+        """
+        return CumulativeDeltaVolume(
+            self._kline,
+            style=style,
+            hacandle=hacandle,
+            showma1=showma1,
+            ma1len=ma1len,
+            showma2=showma2,
+            ma2len=ma2len,
+            showema1=showema1,
+            ema1len=ema1len,
+            showema2=showema2,
+            ema2len=ema2len,
+            **kwargs)
+
+    def TwinRangeFilter(self, source='close', per1=27, mult1=1.6,
+                        per2=55, mult2=2.0, **kwargs) -> IndFrame:
+        """
+        ## Twin Range Filter (colinmck 原版)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/r2aZvj57-Twin-Range-Filter/
+
+        Args:
+            source: 源价格(默认 'close')
+            per1 / mult1: 快滤波器周期 / 范围乘数(默认 27 / 1.6)
+            per2 / mult2: 慢滤波器周期 / 范围乘数(默认 55 / 2.0)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 filt(双范围过滤器主线)、
+                long_signal(绿 "Long") / short_signal(红 "Short")。
+
+        ### 说明:
+        - 与框架已有的 ``Twin_Range_Filter``(脚本 57i9oK2t) **不是同一脚本**:
+          本类为 colinmck 原版 r2aZvj57, 默认周期 27/55, 且入场额外要求
+          ``source != source[1]``。
+        - 原码仅画 Long/Short 标签, 无 ``plot(filt)``; 本实现额外绘出 ``filt``。
+        """
+        return TwinRangeFilter(
+            self._kline,
+            source=source,
+            per1=per1,
+            mult1=mult1,
+            per2=per2,
+            mult2=mult2,
+            **kwargs)
+
+    def SuperTrendRelativeVolume(
+            self, atr_length=10, atr_multiplier=3.0, bandwidth=0.10,
+            kde_steps=100, bar_length=25, activation_threshold=70.0,
+            activation_enabled=False, max_opacity=99, min_opacity=53,
+            show_supertrend=True, show_fill=True, kde_labels=True,
+            **kwargs) -> IndFrame:
+        """
+        ## SuperTrend + Relative Volume (Kernel Optimized) | Flux Charts
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/31up9Ozt-SuperTrend-Relative-Volume-Kernel-Optimized/
+
+        Args:
+            atr_length / atr_multiplier: SuperTrend 的 ATR 周期 / 倍数(默认 10 / 3)
+            bandwidth: KDE 带宽(默认 0.10)
+            kde_steps: KDE 分箱数 / 滚动数组上限(默认 100)
+            bar_length: 相对量长均线周期(默认 25; 短均线固定 10)
+            activation_threshold: KDE 阈值 %(默认 70)
+            activation_enabled: 是否启用阈值过滤(默认 False)
+            max_opacity / min_opacity: 渐变填充透明度上下限(仅参数对齐)
+            show_supertrend / show_fill / kde_labels: 显示开关
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 supertrend、st_up / st_down(按方向着色,
+                中间渐变填充)、long_signal / short_signal(翻转箭头)、
+                volume_prob(KDE 累计概率) / direction(方向状态)。
+
+        ### 说明:
+        - 原码动态线色/渐变透明度/barcolor 以静态样式近似。
+        - 信号箭头锥定在 K 线 low/high(触发 bar 与原码一致)。
+        - KDE 用缩放后的滚动相对量数组估计。
+        """
+        return SuperTrendRelativeVolume(
+            self._kline,
+            atr_length=atr_length,
+            atr_multiplier=atr_multiplier,
+            bandwidth=bandwidth,
+            kde_steps=kde_steps,
+            bar_length=bar_length,
+            activation_threshold=activation_threshold,
+            activation_enabled=activation_enabled,
+            max_opacity=max_opacity,
+            min_opacity=min_opacity,
+            show_supertrend=show_supertrend,
+            show_fill=show_fill,
+            kde_labels=kde_labels,
+            **kwargs)
+
+    def SmartMoneyBreakouts(
+            self, length=20, candle_type='Wicks', rr_ratio=1.1,
+            sl_type='Close', show_sl=False, line_style='Dashed',
+            **kwargs) -> IndFrame:
+        """
+        ## Smart Money Breakouts [ChartPrime]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/aM3PRWEM-Smart-Money-Breakouts-ChartPrime/
+
+        Args:
+            length: Swing pivot 左右长度(默认 20)
+            candle_type: 计算源 'Wicks'(high/low) / 'Body'(close)(默认 'Wicks')
+            rr_ratio: 盈亏比 RR(默认 1.1)
+            sl_type: 止损触发 'Close' / 'High/Low'(默认 'Close')
+            show_sl: 是否输出 SL 线(默认 False)
+            line_style: 线型 'Solid'/'Dashed'/'Dotted'(默认 'Dashed')
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 pivot_high / pivot_low(pivot 水平位)、
+                tp / sl(持仓止盈止损)、long_signal / short_signal(BOS/CHoCH),
+                以及仅数据的 break_type / vol_sign / winning / losing / trade_on。
+
+        ### 说明:
+        - 原码对价格 K 线的重新染色(plotcandle/barcolor/bgcolor)不支持。
+        - 信号箭头锥定在 K 线 low/high; BOS/CHoCH 与 🟢🔴🟡 以逐点文本输出。
+        """
+        return SmartMoneyBreakouts(
+            self._kline,
+            length=length,
+            candle_type=candle_type,
+            rr_ratio=rr_ratio,
+            sl_type=sl_type,
+            show_sl=show_sl,
+            line_style=line_style,
+            **kwargs)
+
+    def MACDBollingerBands(
+            self, bb_length=10, deviations=1.0, fast_length=12,
+            slow_length=26, signal_length=9, **kwargs) -> IndFrame:
+        """
+        ## AK MACD BB v1.00 —— MACD + 布林带
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/lWRJKlbP-AK-MACD-BB-INDICATOR-V-1-00/
+
+        Args:
+            bb_length: 布林带周期(默认 10)
+            deviations: 标准差倍数(默认 1.0)
+            fast_length: 快速 EMA 周期(默认 12)
+            slow_length: 慢速 EMA 周期(默认 26)
+            signal_length: 信号线周期(原码未使用, 保留对齐输入)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图, 含 MACD(按是否突破上轨的红/绿两段)、
+                upper / lower(布林带, 中间蓝色填充)、zero(0 轴),
+                以及仅数据的 over_upper / under_lower。
+
+        ### 说明:
+        - 原码 ``barcolor`` 对价格 K 线的黄/青染色不支持, 已作为数据列输出。
+        - ``style=circles`` 以粗点线近似。
+        """
+        return MACDBollingerBands(
+            self._kline,
+            bb_length=bb_length,
+            deviations=deviations,
+            fast_length=fast_length,
+            slow_length=slow_length,
+            signal_length=signal_length,
+            **kwargs)
+
+    def FollowLineIndicator(
+            self, bb_period=21, bb_deviations=1.0, use_atr_filter=True,
+            atr_period=5, hide_labels=False, **kwargs) -> IndFrame:
+        """
+        ## Follow Line Indicator (Dreadblitz)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/29iYBNku-Follow-Line-Indicator/
+
+        Args:
+            bb_period: 布林带周期(默认 21)
+            bb_deviations: 布林带倍数(默认 1.0)
+            use_atr_filter: 是否使用 ATR 过滤(默认 True)
+            atr_period: ATR 周期(默认 5; 标签偏移用 atr(8))
+            hide_labels: 是否隐藏买卖标签(默认 False)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 trend_line(跟随线)、tl_up / tl_dn(按趋势
+                蓝/红两段)、long_signal / short_signal(💣 / 🔨)。
+
+        ### 说明:
+        - 跟随线为布林带突破后的 ATR 跟踪止损线(单向棘轮)。
+        - 信号箭头锚定 K 线 low/high(触发 bar 与原码一致)。
+        """
+        return FollowLineIndicator(
+            self._kline,
+            bb_period=bb_period,
+            bb_deviations=bb_deviations,
+            use_atr_filter=use_atr_filter,
+            atr_period=atr_period,
+            hide_labels=hide_labels,
+            **kwargs)
+
+    def FlawlessVictoryStrategy(
+            self, version='v1', qty=1,
+            v1_rsi_lower=42.0, v1_rsi_upper=70.0,
+            v2_rsi_lower=42.0, v2_rsi_upper=76.0,
+            v2_stoploss=6.604, v2_takeprofit=2.328,
+            v3_mfi_lower=60.0, v3_rsi_upper=65.0, v3_mfi_upper=64.0,
+            v3_stoploss=8.882, v3_takeprofit=2.317,
+            **kwargs) -> IndFrame:
+        """
+        ## Flawless Victory Strategy (Bunghole)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/i3Uc79fF-Flawless-Victory-Strategy-15min-BTC-Machine-Learning-Strategy/
+
+        Args:
+            version: 'v1'(无SL/TP) / 'v2' / 'v3'(默认 'v1')
+            qty: 下单手数(默认 1)
+            各版本阈值与 stoploss/takeprofit(%): 见类文档
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 basis / upper / lower(布林带)、
+                long_signal / exitlong_signal、rsi / mfi(仅数据)、
+                stoploss / takeprofit(信号入场价基准)。
+
+        ### 交易逻辑(内置 step):
+        - 空仓 + 买入信号 → ``buy(qty)``; 持仓 + 卖出信号 → ``set_target_size(0)``;
+          v2/v3 以开仓价为基准检查 ``low<=SL`` / ``high>=TP`` 平仓。
+        - 用法(参考 ``tutorials/indicator_step.py``)::
+
+            class MyStrategy(Strategy):
+                def __init__(self):
+                    self.kline = self.get_kline(LocalDatas.test, height=400)
+                    self.flawless = self.kline.tradingview.FlawlessVictoryStrategy(
+                        version='v2')
+                def next(self):
+                    self.flawless.step()
+        """
+        return FlawlessVictoryStrategy(
+            self._kline,
+            version=version,
+            qty=qty,
+            v1_rsi_lower=v1_rsi_lower,
+            v1_rsi_upper=v1_rsi_upper,
+            v2_rsi_lower=v2_rsi_lower,
+            v2_rsi_upper=v2_rsi_upper,
+            v2_stoploss=v2_stoploss,
+            v2_takeprofit=v2_takeprofit,
+            v3_mfi_lower=v3_mfi_lower,
+            v3_rsi_upper=v3_rsi_upper,
+            v3_mfi_upper=v3_mfi_upper,
+            v3_stoploss=v3_stoploss,
+            v3_takeprofit=v3_takeprofit,
+            **kwargs)
+
+    def SuperBollingerTrend(
+            self, prd=12, mult=2.0, show_zigzag=True, signal='Signal',
+            dev='ZigZag', show_tp=False, tp_type='Median',
+            show_table=False, **kwargs) -> IndFrame:
+        """
+        ## SuperBollingerTrend (Expo) (Zeiierman)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/AjWfiZpw-SuperBollingerTrend-Expo/
+
+        Args:
+            prd / mult: 布林带周期 / 倍数(默认 12 / 2.0)
+            show_zigzag: 是否绘制 ZigZag(默认 True)
+            signal: 'Signal'(三角标签) / 'Peak Distance'(距离文字)
+            dev: ZigZag 取值 'ZigZag' / 'High/Low' / 'Close'
+            show_tp / tp_type: 是否输出 TP 线 / 'Median' / 'Average'
+            show_table: 是否输出平均/中位距离(数据列)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 sbt(跟踪线)、sbt_up / sbt_dn(按信号色拆段)、
+                zigzag(ZigZag 连线)、zigzag_diff / zigzag_delta(距离)、tp,
+                long_signal / short_signal(上穿/下穿)。
+
+        ### 说明:
+        - 跟踪线用高低价布林带作单向棘轮(类 SuperTrend)。
+        - 原码的 ZigZag/TP 线段以折线近似; 统计表以数据列代替。
+        """
+        return SuperBollingerTrend(
+            self._kline,
+            prd=prd,
+            mult=mult,
+            show_zigzag=show_zigzag,
+            signal=signal,
+            dev=dev,
+            show_tp=show_tp,
+            tp_type=tp_type,
+            show_table=show_table,
+            **kwargs)
+
+    def TradingABC(
+            self, prd=8, fiboup=0.618, fibodn=0.382, errorrate=5.0,
+            src_ma='close', malen1=50, malen2=100, malen3=150,
+            malen4=200, malen5=20, malen6=40,
+            showabc=True, keepabc=True, showcloud=True,
+            showzigzag=True, **kwargs) -> IndFrame:
+        """
+        ## Trading ABC (LonesomeTheBlue)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/0SBnTaqJ-Trading-ABC/
+
+        Args:
+            prd: ZigZag 周期(默认 8)
+            fiboup / fibodn / errorrate: 回撤上下限与容错%(默认 0.618 / 0.382 / 5.0)
+            src_ma: 均线源(默认 'close')
+            malen1..4 / malen5..6: 4 条 SMA / 2 条 EMA 周期
+            showabc / keepabc / showcloud / showzigzag: 显示开关
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 仅包含 zigzag(ZigZag 连线)、abc_line(ABC 连线)、
+                exitshort_signal(A/B/C 文字标签)、long_signal / short_signal(信号);
+                另有 trend / abc 两个仅数据列。
+
+        ### 说明:
+        - 按需求**已移除趋势云(色带与边界线)**, 趋势云仅内部用于 trend 判定。
+        - ABC 的 A/B/C 文字通过标准信号列 ``exitshort_signal`` 输出(该指标
+          本身不使用此信号), 逐点文本 = A / B / C; 连线由 ``abc_line`` 给出。
+        """
+        return TradingABC(
+            self._kline,
+            prd=prd,
+            fiboup=fiboup,
+            fibodn=fibodn,
+            errorrate=errorrate,
+            src_ma=src_ma,
+            malen1=malen1,
+            malen2=malen2,
+            malen3=malen3,
+            malen4=malen4,
+            malen5=malen5,
+            malen6=malen6,
+            showabc=showabc,
+            keepabc=keepabc,
+            showcloud=showcloud,
+            showzigzag=showzigzag,
+            **kwargs)
+
+    def RMITrendSniper(self, length=14, pmom=66, nmom=30, filleshow=True,
+                       **kwargs) -> IndFrame:
+        """
+        ## RMI Trend Sniper (TZack88)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/rtD9lc5D-RMI-Trend-Sniper/
+
+        Args:
+            length: RSI / MFI 周期(默认 14)
+            pmom / nmom: RMI 上/下阈值(默认 66 / 30)
+            filleshow: 是否显示趋势线与通道(默认 True)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 rwma(趋势线)、rwma_up / rwma_dn(多/空两段)、
+                bmax_up / bmin_up / bmax_dn / bmin_dn(通道边界, 用于色带填充)、
+                rsi_mfi / trend(仅数据)、
+                long_signal / short_signal(趋势翻转)。
+
+        ### 说明:
+        - RMI = avg(RSI, MFI)；趋势线上叠加振幅加权均线 RWMA 与自适应带宽通道。
+        - 原码对价格 K 线的重染色与多层光晕未复现。
+        """
+        return RMITrendSniper(
+            self._kline,
+            length=length,
+            pmom=pmom,
+            nmom=nmom,
+            filleshow=filleshow,
+            **kwargs)
+
+    def ExhaustionLevels(self, exhaustion_switch=True, level_switch=True,
+                         length=40, bars=10, thickness=2,
+                         **kwargs) -> IndFrame:
+        """
+        ## Exhaustion levels (InSilico)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/jB2a9GAV-Leledc-levels-IS/
+
+        Args:
+            exhaustion_switch: 是否显示耗竭箭头(默认 True)
+            level_switch: 是否显示耗竭水平线(默认 True)
+            length: Exhaustions swing length(默认 40)
+            bars: Exhaustion bar count(默认 10)
+            thickness: 水平线线宽(默认 2)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 resistance(阻力)、support(支撑)、
+                exhaustion(Lelex 值, 仅数据)、
+                long_signal / short_signal(耗竭底/顶)。
+
+        ### 说明:
+        - Lele Exhaustion Bar 的计数为**累计式**(不要求连续), 遇信号重置。
+        - 阻力/支撑为持久台阶线; 原码在更新 bar 处的断线以连续线近似。
+        """
+        ls = dict(
+            resistance=LineStyle(line_color='#ff0000',
+                                 line_width=float(thickness)),
+            support=LineStyle(line_color='#138484',
+                              line_width=float(thickness)),
+        )
+        ls.update(kwargs.pop('linestyle', {}) or {})
+        return ExhaustionLevels(
+            self._kline,
+            exhaustion_switch=exhaustion_switch,
+            level_switch=level_switch,
+            length=length,
+            bars=bars,
+            thickness=thickness,
+            linestyle=ls,
+            **kwargs)
+
+    def SMTDivergences(self, length=3, use_sym1=True, sym1=None,
+                       use_sym2=True, sym2=None,
+                       bull_color='#ff1100', bear_color='#2157f3',
+                       show_dash=False, **kwargs) -> IndFrame:
+        """
+        ## SMT Divergences [LuxAlgo]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/ecEI56ff-SMT-Divergences-LuxAlgo/
+
+        Args:
+            length: Pivot Lookback(默认 3)
+            use_sym1 / sym1: 是否启用对比合约 1 / 对比合约 KLine(默认 None)
+            use_sym2 / sym2: 对比合约 2
+            bull_color / bear_color: Swing High / Low 颜色
+            show_dash: 是否输出统计(保留参数)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 pivot_high / pivot_low、div_high / div_low
+                (SMT 背离连线)、smt_high / smt_low(计数, 仅数据)、
+                div_high_tag / div_low_tag(来源标记, 仅数据)、
+                long_signal / short_signal(逐点 ticker 文本)。
+
+        ### 用法(需显式传入对比合约):
+        >>> sym = LocalDatas.pp2609_60.kline
+        >>> kline.tradingview.SMTDivergences(sym1=sym, use_sym2=False)
+
+        ### 说明:
+        - minibt 无 ``request.security``, 对比合约通过 KLine 参数传入。
+        - 右上角统计表未复现, 以 ``smt_high``/``smt_low`` 数据列代替。
+        """
+        # 没传对比合约就没有背离可画：把本合约的 Swing 高/低点打开绘图，
+        # 否则图上一条线都没有（原码默认有对比合约，能看到背离线）。
+        has_sym = ((bool(use_sym1) and sym1 is not None)
+                   or (bool(use_sym2) and sym2 is not None))
+        kwargs.setdefault('isplot', dict(
+            pivot_high=not has_sym, pivot_low=not has_sym,
+            div_high=True, div_low=True,
+            smt_high=False, smt_low=False,
+            div_high_tag=False, div_low_tag=False,
+            long_signal=False, short_signal=False))
+        return SMTDivergences(
+            self._kline,
+            length=length,
+            use_sym1=use_sym1,
+            sym1=sym1,
+            use_sym2=use_sym2,
+            sym2=sym2,
+            bull_color=bull_color,
+            bear_color=bear_color,
+            show_dash=show_dash,
+            **kwargs)
+
+    def PMaxOnRsiT3(self, source='hl2', multiplier=1.0, t3_length=8,
+                    t3_factor=0.7, atr_length=10, rsi_length=14,
+                    show_rsi=True, show_support=True, show_signals=True,
+                    highlighting=True, **kwargs) -> IndFrame:
+        """
+        ## PMax on Rsi w T3 (KivancOzbilgic)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/lCJEeEkj/
+
+        Args:
+            source: 源价格(默认 'hl2')
+            multiplier / atr_length: PMax 的 ATR 倍数 / 周期(默认 3 / 10)
+            t3_length / t3_factor: Tillson T3 长度 / 体积因子(默认 8 / 0.7)
+            rsi_length: RSI 周期(默认 14)
+            show_rsi / show_support / show_signals / highlighting: 显示开关
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图, 含 rsi(自定义 RSI)、t3(T3 支撑线)、pmax(PMax)、
+                upper / lower(70/30)、高亮填充边界、
+                long_signal / short_signal(Buy / Sell)。
+
+        ### 说明:
+        - RSI 采用原码的特殊 WWMA + high/low 修正口径。
+        - PMax 为 ATR 跟踪止损线。
+        """
+        return PMaxOnRsiT3(
+            self._kline,
+            source=source,
+            multiplier=multiplier,
+            t3_length=t3_length,
+            t3_factor=t3_factor,
+            atr_length=atr_length,
+            rsi_length=rsi_length,
+            show_rsi=show_rsi,
+            show_support=show_support,
+            show_signals=show_signals,
+            highlighting=highlighting,
+            **kwargs)
+
+    def RSIDivergenceStrategy(
+            self, len=9, src='close', lbL=1, lbR=3, take_profit_rsi=80,
+            take_profit_rsi_short=20, range_lower=5, range_upper=60,
+            plot_bull=True, plot_hidden_bull=True, plot_bear=True,
+            plot_hidden_bear=False, sl_type='NONE', stop_loss=5,
+            atr_length=14, atr_multiplier=3.5, qty=1, **kwargs) -> IndFrame:
+        """
+        ## RSI Divergence Indicator (strategy)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/qSLcZSyw-RSI-Divergence-Indicator-strategy/
+
+        Args:
+            len / src: RSI 周期 / 源(默认 9 / 'close')
+            lbL / lbR: pivot 左/右回看(默认 1 / 3)
+            take_profit_rsi: 多头止盈 RSI 水平(默认 80)
+            take_profit_rsi_short: 空头止盈 RSI 水平(默认 20)
+            range_lower / range_upper: 两个 pivot 的最小/最大距离(默认 5 / 60)
+            plot_bull / plot_hidden_bull / plot_bear / plot_hidden_bear: 显示开关
+            sl_type: 'NONE' / 'PERC' / 'ATR'(默认 'NONE')
+            stop_loss / atr_length / atr_multiplier: 止损参数
+            qty: 每笔下单手数(默认 1, 不加仓)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图, 含 osc(RSI)、upper/lower/middle(70/30/50)、
+                四类背离连线、trailing_sl/trailing_sl_short(仅数据)、
+                long_signal / short_signal(1=Regular,2=Hidden)、
+                exitlong_signal / exitshort_signal。
+
+        ### 交易逻辑(内置 step):
+        - 多头: 空仓 + 看涨背离 → ``buy(qty)``; 持仓且(止盈/看跌背离 或 跟踪止损) → 平多。
+        - 空头: 空仓 + 看跌背离 → ``sell(qty)``; 持仓且(止盈/看涨背离 或 跟踪止损) → 平空。
+        - 每次固定 ``qty`` 手且不加仓; 平仓当根若反向信号成立则直接反手。
+        - 用法(参考 ``tutorials/indicator_step.py``)::
+
+            class MyStrategy(Strategy):
+                def __init__(self):
+                    self.kline = self.get_kline(LocalDatas.test, height=400)
+                    self.rsi_div = self.kline.tradingview.RSIDivergenceStrategy()
+                def next(self):
+                    self.rsi_div.step()
+        """
+        return RSIDivergenceStrategy(
+            self._kline,
+            len=len,
+            src=src,
+            lbL=lbL,
+            lbR=lbR,
+            take_profit_rsi=take_profit_rsi,
+            take_profit_rsi_short=take_profit_rsi_short,
+            range_lower=range_lower,
+            range_upper=range_upper,
+            plot_bull=plot_bull,
+            plot_hidden_bull=plot_hidden_bull,
+            plot_bear=plot_bear,
+            plot_hidden_bear=plot_hidden_bear,
+            sl_type=sl_type,
+            stop_loss=stop_loss,
+            atr_length=atr_length,
+            atr_multiplier=atr_multiplier,
+            qty=qty,
+            **kwargs)
+
+    def GhostTangentCrossings(
+            self, pivot_type='Wick', pivot_forward=25,
+            show_elliptical_zig=True, show_ghosts=True, show_break=True,
+            max_zig=0, equipoint_style='Directional', extend_line=False,
+            up_color='#1bcf66', down_color='#ee2d2d',
+            ghost_up_color='#1bcf663a', ghost_down_color='#ee2d2d3a',
+            text_color='#EEEEEE', **kwargs) -> IndFrame:
+        """
+        ## Ghost Tangent Crossings [ChartPrime]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/F2vJnCdI-Ghost-Tangent-Crossings-ChartPrime/
+
+        Args:
+            pivot_type: 'Wick' / 'Body'(默认 'Wick')
+            pivot_forward: Pivot 右侧回看根数(默认 25)
+            show_elliptical_zig / show_ghosts / show_break: 显示开关
+            max_zig: 保留的最大弧段数(默认 0 = 保留全部历史弧; 传 10 恢复原码行为)
+            equipoint_style: 'Directional' / 'Horizontal' / 'None'
+            extend_line: Equipoint 是否向两端延伸(默认 False)
+            up_color / down_color / ghost_up_color / ghost_down_color /
+                text_color: 配色
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 zigzag(椭圆弧)、ghost_zigzag(幽灵弧)、
+                equipoint(切线/水平线虚线)、tangent_price/tangent_slope/polarity
+                (仅数据)、long_signal / short_signal(切线突破, 文本 'B')。
+
+        ### 说明:
+        - 纯绘图型指标(无交易信号); 切线突破点经标准信号列描点并标注 'B'。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.GhostTangentCrossings(pivot_forward=25)
+        """
+        return GhostTangentCrossings(
+            self._kline,
+            pivot_type=pivot_type,
+            pivot_forward=pivot_forward,
+            show_elliptical_zig=show_elliptical_zig,
+            show_ghosts=show_ghosts,
+            show_break=show_break,
+            max_zig=max_zig,
+            equipoint_style=equipoint_style,
+            extend_line=extend_line,
+            up_color=up_color,
+            down_color=down_color,
+            ghost_up_color=ghost_up_color,
+            ghost_down_color=ghost_down_color,
+            text_color=text_color,
+            **kwargs)
+
+    def TwoBReversalPattern(
+            self, prd=20, max_break=10, min_break=3,
+            setup_src='close', confirm_src='close',
+            cancel_on_invalid_cross=True, allow_multiple=False,
+            signal_mode='Custom',
+            bUp='#6ce5a0', bDn='#f23645', pCol='#00FFFF',
+            **kwargs) -> IndFrame:
+        """
+        ## 2B Reversal Pattern (Expo)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/dHb3Hn12-2B-Reversal-Pattern-Expo/
+
+        Args:
+            prd: Pivot 周期(默认 20, 越小信号越多)
+            max_break: 反向突破最大 bar 数(默认 10; **0 = 不限制**)
+            min_break: 反向突破最小 bar 数(默认 3, 可降到 1)
+            signal_mode: 'Custom'(默认) / 'Original' / 'Relaxed' / 'Aggressive'
+                (预设会覆盖下面四个细化参数)
+            setup_src / confirm_src: 'close'(原版) 或 'wick'(用 high/low, 更敏感)
+            cancel_on_invalid_cross: 窗口外穿越是否直接作废(默认 True)
+            allow_multiple: 是否允许多个待确认位并存(默认 False,
+                需配合 max_break=0 才有效)
+            bUp / bDn: 向上/向下突破线颜色
+            pCol: ph/pl 虚线与待确认线颜色
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 ph_level / pl_level(虚线)、bo_pending(待确认位)、
+                bo_break_up / bo_break_dn(已完成的 2B 突破线)、
+                long_signal / short_signal(2B 反转信号三角)。
+
+        ### 放宽条件 / 更多信号:
+        实测(8964 根)原版仅 25 个信号; 因为 ``prd=20`` 时新 Pivot 至少 20 根后
+        才出现, 而窗口只有 ``[3,10]`` 根 → 多数待确认位**超时作废**。
+
+        ```python
+        # 1) 一键放宽
+        kline.tradingview.TwoBReversalPattern(signal_mode='Relaxed')     # 25 -> 56
+        kline.tradingview.TwoBReversalPattern(signal_mode='Aggressive')  # 25 -> 108
+
+        # 2) 精细控制(等价写法, 推荐)
+        kline.tradingview.TwoBReversalPattern(
+            min_break=1,        # 允许更早的反转
+            max_break=0,        # 0 = 不限制窗口(最大杠杆)
+            setup_src='wick',   # 影线突破 Swing 即算
+            confirm_src='wick',  # 影线反向穿越 bo 即算
+            cancel_on_invalid_cross=False,  # 窗口外穿越不作废
+            allow_multiple=True,            # 多个待确认位并存
+        )
+
+        # 3) 再减小 prd 可更多(如 prd=10 -> 210, prd=5 -> 357)
+        ```
+
+        ### 说明:
+        - 纯信号指标(原码为 ``indicator()``, 未内置 step); 若需回测可自行写
+          ``Strategy.next`` 读 ``long_signal.new`` / ``short_signal.new``。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.TwoBReversalPattern(prd=20, max_break=10, min_break=3)
+        """
+        return TwoBReversalPattern(
+            self._kline,
+            prd=prd,
+            max_break=max_break,
+            min_break=min_break,
+            setup_src=setup_src,
+            confirm_src=confirm_src,
+            cancel_on_invalid_cross=cancel_on_invalid_cross,
+            allow_multiple=allow_multiple,
+            signal_mode=signal_mode,
+            bUp=bUp,
+            bDn=bDn,
+            pCol=pCol,
+            **kwargs)
+
+    def MACDLeader(
+            self, short_length=12, long_length=26, sig_length=9,
+            show_macd=True, show_macdsignal=True,
+            src='close', ema_seed='sma', **kwargs) -> IndFrame:
+        """
+        ## MACD Leader [LazyBear]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/y9HCZoQi-MACD-Leader-LazyBear/
+
+        Args:
+            short_length / long_length / sig_length: 快/慢/信号周期(12 / 26 / 9)
+            show_macd / show_macdsignal: 是否输出常规 MACD / 信号线(默认 False)
+            src: 源序列(默认 'close')
+            ema_seed: 'sma'(默认, Pine 内置 ``ema`` 语义) 或 'first'(首值播种)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图, 含 macdl(MACD Leader, 主输出)、macd(常规 MACD,
+                默认全 na)、signal(常规 MACD 信号线, 默认全 na)。
+
+        ### 说明:
+        - 纯指标(原码为 ``study()``, 无交易信号与 step)。
+        - ``ema_seed='sma'`` 时曲线自 ``long_length`` 的两倍左右才有值(两次预热)。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.MACDLeader()                        # 只显示 Leader
+            kline.tradingview.MACDLeader(show_macd=True,
+                                         show_macdsignal=True)     # 连常规 MACD
+        """
+        return MACDLeader(
+            self._kline,
+            short_length=short_length,
+            long_length=long_length,
+            sig_length=sig_length,
+            show_macd=show_macd,
+            show_macdsignal=show_macdsignal,
+            src=src,
+            ema_seed=ema_seed,
+            **kwargs)
+
+    def MachineLearningRSI(
+            self, rsi_length=14, use_smoothing=True, smoothing_length=3,
+            ma_type='ALMA', alma_sigma=4, use_knn=True, knn_neighbors=5,
+            knn_lookback=100, knn_weight=0.4, feature_count=3,
+            use_filter=True, filter_method='Kalman', filter_strength=0.3,
+            src='close', overbought=70, oversold=30,
+            color_scheme='Classic', neon_effect=True,
+            color_mode='Trend Following', show_table=True,
+            table_position=None, **kwargs) -> IndFrame:
+        """
+        ## Machine Learning RSI ║ BullVision
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/sHevuJyQ-Machine-Learning-RSI-BullVision/
+
+        Args:
+            rsi_length: RSI 周期(默认 14)
+            use_smoothing / smoothing_length / ma_type / alma_sigma:
+                RSI 平滑(默认 True / 3 / 'ALMA' / 4)
+            use_knn / knn_neighbors / knn_lookback / knn_weight / feature_count:
+                KNN 参数(默认 True / 5 / 100 / 0.4 / 3)
+            use_filter / filter_method / filter_strength:
+                滤波(默认 True / 'Kalman' / 0.3)
+            src: 源序列(默认 'close')
+            overbought / oversold: 超买 / 超卖阈值(默认 70 / 30)
+            color_scheme: 配色方案(Classic / Deuteranopia / Protanopia /
+                Tritanopia / Monochrome, 默认 Classic)
+            neon_effect: 是否用霓虹色(仅 Classic, 默认 True)
+            color_mode: 上色模式(None / Trend Following / Impulse)
+            show_table: 是否画统计表格(默认 True)
+            table_position: 覆盖类上 `tablestyle.position`(默认 None = 用类上的)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: **副图** RSI, 含 ``rsi``(原码 rsiLine, 0..100)、
+                按 ``color_mode`` 条件上色的 ``rsi_bull / rsi_bear /
+                rsi_neutral / rsi_gray``、``midline``(50)、``upper/lower``
+                (超买/超卖)。主图蜡烛另由 ``barcolor`` 条件上色。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            ind = kline.tradingview.MachineLearningRSI()
+            print(ind.rsi.new)              # 0..100 的 RSI
+        """
+        bull, bear = _mlrsi_colors(color_scheme, neon_effect)
+        kwargs.setdefault('linestyle', dict(
+            rsi_bull=LineStyle(line_color=bull, line_width=3.0),
+            rsi_bear=LineStyle(line_color=bear, line_width=3.0),
+            rsi_neutral=LineStyle(line_color='#FFFFFF', line_width=3.0),
+            rsi_gray=LineStyle(line_color='#808080', line_width=3.0),
+            midline=LineStyle(line_color='#FFFFFF4D', line_width=1.0,
+                              line_dash=LineDash.dashed),
+            upper=LineStyle(line_color=bear, line_width=1.0),
+            lower=LineStyle(line_color=bull, line_width=1.0),
+        ))
+        # 只覆写 position（而且只有显式传入时才覆写）；headings / rows /
+        # 尺寸 / 间距等以类上的 `MachineLearningRSI.tablestyle` 为准。
+        if table_position is not None:
+            kwargs.setdefault(
+                'tablestyle',
+                dataclasses.replace(MachineLearningRSI.tablestyle,
+                                    position=str(table_position)))
+        return MachineLearningRSI(
+            self._kline,
+            rsi_length=rsi_length,
+            use_smoothing=use_smoothing,
+            smoothing_length=smoothing_length,
+            ma_type=ma_type,
+            alma_sigma=alma_sigma,
+            use_knn=use_knn,
+            knn_neighbors=knn_neighbors,
+            knn_lookback=knn_lookback,
+            knn_weight=knn_weight,
+            feature_count=feature_count,
+            use_filter=use_filter,
+            filter_method=filter_method,
+            filter_strength=filter_strength,
+            src=src,
+            overbought=overbought,
+            oversold=oversold,
+            color_scheme=color_scheme,
+            neon_effect=neon_effect,
+            color_mode=color_mode,
+            show_table=show_table,
+            table_position=table_position,
+            **kwargs)
+
+    def VolumeSuperTrendAI(
+            self, k=3, n_data=10, knn_price_len=20, knn_st_len=100,
+            ai_signals=True, bullish_col='#00FF00', bearish_col='#FF0000',
+            length=10, factor=3.0, ma_src='WMA',
+            up_col='#00FF00', dn_col='#FF0000', ne_col='#0000FF',
+            show_cloud=True, cloud_bull=None, cloud_bear=None,
+            cloud_transp=None, cloud_ref_len=10, cloud_line_smooth=2,
+            cloud_layers=None, **kwargs) -> IndFrame:
+        """
+        ## Volume SuperTrend AI (Zeiierman)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/eTgP2ymK-Volume-SuperTrend-AI-Expo/
+
+        Args:
+            k / n_data: KNN 邻居数 / 样本数(实际 n = max(k, n_data))
+            knn_price_len / knn_st_len: 价格 / SuperTrend 的 WMA 周期
+            ai_signals / bullish_col / bearish_col: AI 信号开关与配色
+            length / factor / ma_src: SuperTrend 周期 / 倍数 / 均线类型
+            up_col / dn_col / ne_col: 多 / 空 / 中性 线色
+            show_cloud / cloud_bull / cloud_bear / cloud_transp /
+                cloud_ref_len / cloud_line_smooth / cloud_layers: 云带参数。
+                其中 cloud_bull / cloud_bear / cloud_transp / cloud_layers
+                默认 None = **保持类级 bandstyle 原样**（推荐直接改类里的
+                ``bandstyle`` 调云带颜色/透明度）；显式传值时才覆写。
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 super_trend、st_bull/st_bear/st_neutral(三色分段)、
+                cloud_line/cloud_a/cloud_b/cloud_c/cloud_ref(仅数据, 由 bandstyle
+                逐层填充)、ai_label(仅数据)、
+                long_signal/short_signal(AI Trend 三角)、
+                exitshort_signal/exitlong_signal(AI Trend Start 圆点)。
+
+        ### 说明:
+        - 云带透明度按原码逐层复刻: ``1 - transp/100``,
+          四层分别为 ``transp∓18``、``transp∓6``(限制在 0..95)。
+        - 原码云色随 AI 状态切换, 本实现为静态配色(默认云用 ``cloud_bull``)。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            ind = kline.tradingview.VolumeSuperTrendAI()
+            ind = kline.tradingview.VolumeSuperTrendAI(
+                k=5, n_data=20, length=10, factor=3.0, ma_src='EMA')
+        """
+        ind = VolumeSuperTrendAI(
+            self._kline,
+            k=k, n_data=n_data,
+            knn_price_len=knn_price_len, knn_st_len=knn_st_len,
+            ai_signals=ai_signals,
+            bullish_col=bullish_col, bearish_col=bearish_col,
+            length=length, factor=factor, ma_src=ma_src,
+            up_col=up_col, dn_col=dn_col, ne_col=ne_col,
+            show_cloud=show_cloud,
+            cloud_bull='#00FF00' if cloud_bull is None else cloud_bull,
+            cloud_bear='#FF0000' if cloud_bear is None else cloud_bear,
+            cloud_transp=78 if cloud_transp is None else cloud_transp,
+            cloud_ref_len=cloud_ref_len,
+            cloud_line_smooth=cloud_line_smooth,
+            cloud_layers=3 if cloud_layers is None else cloud_layers,
+            **kwargs)
+        # 【修改】云带样式以**类级 bandstyle** 为准(方便直接在类里改颜色/透明度)。
+        # 旧代码在这里无条件重建 bandstyle 并把颜色写死为 cloud_bull 的默认值,
+        # 导致类里改的 bandstyle 完全失效 —— 与 ScalpPro 同一问题, 已一并修正。
+        # 现在: 四个云参数都是 None 哨兵(默认) -> 完全不碰类里的定义;
+        #       显式传任一云参数时才重建, 未显式给的颜色回退到类里的 bandstyle。
+        _cls_bands = VolumeSuperTrendAI.bandstyle
+        if not show_cloud:
+            # 原码 showCloud=False 时所有 fill 均为 na
+            ind.plotinfo.bandstyle = []
+        elif any(v is not None for v in
+                 (cloud_bull, cloud_bear, cloud_transp, cloud_layers)):
+            if cloud_bull is None and _cls_bands:
+                cloud_bull = _cls_bands[0].fill_color
+            tr = 78.0 if cloud_transp is None else float(cloud_transp)
+            a1 = (100.0 - max(0.0, tr - 18.0)) / 100.0
+            a2 = (100.0 - max(0.0, tr - 6.0)) / 100.0
+            a3 = (100.0 - min(95.0, tr + 6.0)) / 100.0
+            a4 = (100.0 - min(95.0, tr + 18.0)) / 100.0
+            layers = max(1, min(3, int(cloud_layers or 3)))
+            if layers >= 3:
+                bands = [('cloud_line', 'cloud_a', a1),
+                         ('cloud_a', 'cloud_b', a2),
+                         ('cloud_b', 'cloud_c', a3),
+                         ('cloud_c', 'cloud_ref', a4)]
+            elif layers == 2:
+                bands = [('cloud_line', 'cloud_a', a1),
+                         ('cloud_a', 'cloud_b', a2),
+                         ('cloud_b', 'cloud_ref', a3)]
+            else:
+                bands = [('cloud_line', 'cloud_a', a1),
+                         ('cloud_a', 'cloud_ref', a2)]
+            ind.plotinfo.bandstyle = [
+                BandStyle(lower=lo, upper=hi, fill_color=cloud_bull,
+                          fill_alpha=al, line_color=None)
+                for lo, hi, al in bands]
+        return ind
+
+    def FalseBreakout(
+            self, prd=20, minperiod=5, maxperiod=5,
+            ma_type='None', length=10, aggressive=False,
+            **kwargs) -> IndFrame:
+        """
+        ## False Breakout (Expo) [Zeiierman]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/vz0bVIJo-False-Breakout-Expo/
+
+        Args:
+            prd: 新高/新低周期(默认 20)
+            minperiod: 两次突破的最小间隔 bar 数(默认 5)
+            maxperiod: 信号有效期 bar 数(默认 5)
+            ma_type: 平滑方式 'None'(原码 '💎', 不平滑) / 'WMA' / 'HMA'
+            length: 平滑周期(默认 10)
+            aggressive: 激进模式(用 low 求最高 / high 求最低, 默认 False)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 hi/lo(平滑通道, 仅数据)、val(触发价位, 仅数据)、
+                count(连续新高/新低计数, 仅数据)、
+                false_break_up/false_break_down(假突破水平线, 红/绿)、
+                long_signal(假突破下)、short_signal(假突破上)。
+
+        ### 说明:
+        - 纯信号指标(原码为 ``indicator()``, 未内置 step); 若需回测可自行写
+          ``Strategy.next`` 读 ``long_signal.new`` / ``short_signal.new``。
+        - 使用平滑(如 ``ma_type='WMA', length=10``)时建议把 ``maxperiod``
+          调到 10~50(原码 tooltip 的建议)。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.FalseBreakout()                 # 默认(不平滑)
+            kline.tradingview.FalseBreakout(ma_type='WMA', length=10,
+                                            maxperiod=20)
+        """
+        return FalseBreakout(
+            self._kline,
+            prd=prd,
+            minperiod=minperiod,
+            maxperiod=maxperiod,
+            ma_type=ma_type,
+            length=length,
+            aggressive=aggressive,
+            **kwargs)
+
+    def MultiKernelRegression(
+            self, repaint=True, kernel='Laplace', bandwidth=14,
+            source='close', deviations=2.0, enable=False,
+            bullish_color='#54C294', bearish_color='#EB3939',
+            confirm_bars=10,
+            **kwargs) -> IndFrame:
+        """
+        ## Multi Kernel Regression [ChartPrime]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/o4YRa7e8-Multi-Kernel-Regression-ChartPrime/
+
+        Args:
+            repaint: 原码模式开关(默认 True)
+            kernel: 核类型, 共 17 种: 'Triangular' / 'Gaussian' /
+                'Epanechnikov' / 'Logistic' / 'Log Logistic' / 'Cosine' /
+                'Sinc' / 'Laplace' / 'Quartic' / 'Parabolic' /
+                'Exponential' / 'Silverman' / 'Cauchy' / 'Tent' /
+                'Wave' / 'Power' / 'Morters'(默认 'Laplace')
+            bandwidth: 带宽 / 回看长度(默认 14)
+            source: 源序列(默认 'close')
+            deviations: 偏差带倍数(默认 2.0)
+            enable: 是否显示偏差带(默认 False)
+            bullish_color / bearish_color: 涨/跌线色
+            confirm_bars: **方向确认根数(默认 10)**。原码信号本质是“MA 斜率变号”,
+                每个小极值都会翻转(实测平均仅 8.4 根 bar 换一次方向, 趋势极不稳定)。
+                本参数要求新方向连续 ``confirm_bars`` 根成立才确认翻转(同时作用于
+                信号与线色), 平均趋势段长度: 1→8.4 / 5→23.7 / **10→38.6** /
+                15→71 / 20→130 根。``confirm_bars=1`` 时与原码完全等价。
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 nrp(Non-Repaint MA)、nrp_up/nrp_dn(按斜率
+                着色)、nrp_std、upper/lower(±deviations·std, enable=False 时为
+                na)、est(重绘分支的核回归估计)、long_signal/short_signal。
+
+        ### 说明:
+        - 原码默认 ``repaint=True`` 时**不计算** ``nrp``(返回 na), 只用 line/label
+          画整条非因果回归曲线; 本实现始终计算 ``nrp`` 供取值/回测。
+        - 信号统一用**因果**的 ``nrp`` 上/下穿自身前值(即原码非重绘分支的 Up/Down)。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            ind = kline.tradingview.MultiKernelRegression()
+            ind = kline.tradingview.MultiKernelRegression(
+                kernel='Gaussian', bandwidth=20, enable=True, deviations=2.0)
+            # 想更稳定: confirm_bars 调到 15~20
+            ind = kline.tradingview.MultiKernelRegression(confirm_bars=20)
+            # 想回到原码行为: confirm_bars=1
+        """
+        return MultiKernelRegression(
+            self._kline,
+            repaint=repaint,
+            kernel=kernel,
+            bandwidth=bandwidth,
+            source=source,
+            deviations=deviations,
+            enable=enable,
+            bullish_color=bullish_color,
+            bearish_color=bearish_color,
+            confirm_bars=confirm_bars,
+            **kwargs)
+
+    def TwinOptimizedTrendTracker(
+            self, length=40, percent=1.0, coeff=0.001, ma_type='VAR',
+            var_length=9, source='close', ma_seed='first',
+            show_support=True, show_signals=True, qty=1, **kwargs) -> IndFrame:
+        """
+        ## Twin Optimized Trend Tracker (TOTT)
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/eENf7NpJ/
+
+        Args:
+            length: OTT 周期(默认 40)
+            percent: 优化常数(默认 1.0)
+            coeff: Twin OTT 系数(默认 0.001)
+            ma_type: 'SMA' / 'EMA' / 'WMA' / 'TMA' / 'VAR' / 'WWMA' /
+                'ZLEMA' / 'TSF'(默认 'VAR')
+            var_length: VAR 的 CMO 回看周期(原码固定 9, 默认 9)
+            source: 源序列(默认 'close')
+            ma_seed: VAR/WWMA 递归初值 'first'(默认, 源序列首值) / 'zero'(原码 0 播种)
+            show_support: 是否绘制支撑线 MAvg(默认 True)
+            show_signals: 是否显示 Buy / Sell 标记(默认 True)
+            qty: step() 每次下单手数(默认 1)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 ma_avg(支撑线)、ott(仅数据)、
+                ott_up/ott_dn(Twin 双线, 绿/红)、
+                buy_label/sell_label(原码画面过滤后的标记, 仅数据)、
+                long_signal/short_signal(原始信号, 供 step 使用, 逐点文本 'Buy'/'Sell')。
+
+        ### 交易逻辑(内置 step):
+        - 对应原码 ``strategy.entry('Long'/'Short')``: 买信号 → 目标仓位 ``+qty``;
+          卖信号 → 目标仓位 ``-qty``(反向自动反手)。
+
+        ### 使用示例::
+
+            class MyStrategy(Strategy):
+                def __init__(self):
+                    self.kline = self.get_kline(LocalDatas.test, height=400)
+                    self.tott = self.kline.tradingview.TwinOptimizedTrendTracker()
+                def next(self):
+                    self.tott.step()
+
+            一行回测: kline.tradingview.TwinOptimizedTrendTracker().backtest()
+        """
+        return TwinOptimizedTrendTracker(
+            self._kline,
+            length=length,
+            percent=percent,
+            coeff=coeff,
+            ma_type=ma_type,
+            var_length=var_length,
+            source=source,
+            ma_seed=ma_seed,
+            show_support=show_support,
+            show_signals=show_signals,
+            qty=qty,
+            **kwargs)
+
+    def ScalpPro(
+            self, fast_length=8, slow_length=10, smooth_length=8,
+            scale=100.0, fill_alpha=None, qty=1,
+            **kwargs) -> IndFrame:
+        """
+        ## Scalp Pro [Velly]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/YuWaSZ1Z/
+
+        Args:
+            fast_length: Fast Line 周期(默认 8)
+            slow_length: Slow Line 周期(默认 10)
+            smooth_length: Smoothness / 信号线周期(默认 8)
+            scale: macd 放大倍数(原码 10000000; 设 1.0 看真实差值)
+            fill_alpha: 填充**透明度覆写**。``None``(默认) = 保持类级
+                ``bandstyle`` 原样（推荐：直接改类里的 ``bandstyle`` 调颜色/透明度）；
+                传 0~1 时**只覆写透明度**、颜色仍取自类里的 ``bandstyle``；
+                ``0`` = 关闭填充。
+            qty: step() 每次下单手数(默认 1)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 副图, 含 macd((ssmooth-ssmooth2)*scale)、signal(ssmooth3)、
+                long_signal(Buy) / short_signal(Sell)。
+
+        ### 说明:
+        - 三段都是同一个 **Ehlers 2 极点谐振滤波器**
+          ``y := c1*(x+x[1])/2 + c2*nz(y[1]) + c3*nz(y[2])``。
+        - 原码为 ``study``(指标)，但脚本内注释掉了 ``strategy("Scalp Pro")``；
+          本类额外内置了对应的 ``step()``（买/卖反手），可直接 ``backtest()``。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.ScalpPro()
+            kline.tradingview.ScalpPro(fast_length=8, slow_length=21,
+                                       smooth_length=5, scale=1.0)
+        """
+        ind = ScalpPro(
+            self._kline,
+            fast_length=fast_length,
+            slow_length=slow_length,
+            smooth_length=smooth_length,
+            scale=scale,
+            qty=qty,
+            **kwargs)
+        # 【修改】填充样式以**类级 bandstyle** 为准(方便直接在类里改颜色/透明度)。
+        # 旧代码在这里无条件重建 bandstyle, 并把 fill_color 写死成 '#000000'、
+        # fill_alpha 写死成参数默认值 0.5, 导致类里改的 bandstyle 完全失效 —— 已修正。
+        # 现在: fill_alpha=None(默认) 完全不碰类里的定义;
+        #       显式传数值时才**只覆写透明度**, 颜色仍取自类里的 bandstyle。
+        if fill_alpha is not None:
+            fa = float(fill_alpha)
+            if fa > 0:
+                ind.plotinfo.bandstyle = [
+                    BandStyle(lower=b.lower, upper=b.upper,
+                              fill_color=b.fill_color, fill_alpha=fa,
+                              line_color=b.line_color)
+                    for b in ScalpPro.bandstyle]
+            else:
+                ind.plotinfo.bandstyle = []
+        return ind
+
+    def BreaksAndRetests(
+            self, lookback=20, ret_since=2, ret_valid=2,
+            breakouts=True, retests=True, repaint='On',
+            label_type='Full', support_color='#FF0000',
+            resistance_color='#089981', **kwargs) -> IndFrame:
+        """
+        ## Breaks and Retests [HG]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/Xeeko6TV-Support-Resistance-with-Breaks-and-Retests/
+
+        Args:
+            lookback: pivot 回看 / 箱体宽度(默认 20, 原码 bb)
+            ret_since: 突破后至少多少根 bar 才检测回测(默认 2)
+            ret_valid: 回测检测的有效 bar 上限(默认 2)
+            breakouts / retests: 是否输出突破 / 回测标签(默认 True / True)
+            repaint: 'On'(默认) / 'Off: Candle Confirmation' / 'Off: High & Low'
+            label_type: 'Full' / 'Simple' —— 仅为对应原码输入而保留。
+                ⚠ 在 minibt 中**不改变图形**: 信号文本钩子在 ``IndFrame`` 构造阶段
+                被调用、当时读不到指标参数, 故逐点文本固定使用 Full 形式
+                (Break / Retest / P. Retest)。
+            support_color / resistance_color: 支撑 / 阻力配色
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 support/resistance(箱体下/上边界)、
+                s_top/r_bot(支撑箱顶 / 阻力箱底)、
+                long_signal/short_signal(1=突破, 2=确认回测, 3=潜在回测,
+                逐点文本 Break / Retest / P. Retest)。
+
+        ### 说明:
+        - 原码无任何 ``plot``(只用 box/label), 本实现把箱体转成阶梯线列 +
+          ``bandstyle`` 半透明填充, 标签转成标准信号列 + 逐点文本。
+        - 按原码语义: 支撑方向事件(跌破/回测)记在 ``short_signal``,
+          阻力方向事件记在 ``long_signal``。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.BreaksAndRetests()
+            kline.tradingview.BreaksAndRetests(lookback=15, ret_valid=5,
+                                               label_type='Simple')
+        """
+        ind = BreaksAndRetests(
+            self._kline,
+            lookback=lookback,
+            ret_since=ret_since,
+            ret_valid=ret_valid,
+            breakouts=breakouts,
+            retests=retests,
+            repaint=repaint,
+            label_type=label_type,
+            support_color=support_color,
+            resistance_color=resistance_color,
+            **kwargs)
+        # 箱体填充颜色跟随 support_color / resistance_color（类级 bandstyle 为默认值）
+        if support_color != '#FF0000' or resistance_color != '#089981':
+            ind.plotinfo.bandstyle = [
+                BandStyle(lower='support', upper='s_top',
+                          fill_color=support_color, fill_alpha=0.10,
+                          line_color=None),
+                BandStyle(lower='r_bot', upper='resistance',
+                          fill_color=resistance_color, fill_alpha=0.10,
+                          line_color=None)]
+        return ind
+
+    def SwingFailurePattern(
+            self, length=5, bullish=True, bearish=True,
+            swing_lines=True, confirm_lines=True, sfp_labels=True,
+            bull_color='#089981', bear_color='#f23645',
+            validation='None', percent=25.0, **kwargs) -> IndFrame:
+        """
+        ## Swing Failure Pattern [LuxAlgo]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/YmWELClV-Swing-Failure-Pattern-SFP-LuxAlgo/
+
+        Args:
+            length: 摆动回看(默认 5; ``rightbars`` 固定 1)
+            bullish / bearish: 是否启用多头 / 空头形态(默认 True / True)
+            swing_lines / confirm_lines: 是否显示摆动线 / 对侧确认线
+            sfp_labels: 是否显示 'SFP' / '▼' / '▲' 标记(默认 True)
+            bull_color / bear_color: 线色
+            validation: 成交量校验模式(默认 'None' = 关闭，与原码默认一致;
+                **本实现未实现 LTF 成交量校验**, 传非 'None' 时仅记录参数)
+            percent: 成交量阈值 %(默认 25)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 swing_high/oppos_low(空头形态摆动线 / 对侧确认线)、
+                swing_low/oppos_high(多头形态对称的两条线)、
+                short_signal(空头 SFP: 1 出现 / 2 确认, 文本 'SFP'/'▼')、
+                long_signal(多头 SFP: 1 / 2, 文本 'SFP'/'▲')。
+
+        ### 说明:
+        - 原码用 line/label/table 绘制; 本实现把水平线转成线列、标签转成标准
+          信号列 + 逐点文本。~~dSFP_Line~~ 的**竖直影线**无法表示为线列, 未复现。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.SwingFailurePattern()
+            kline.tradingview.SwingFailurePattern(length=8, bearish=False)
+        """
+        return SwingFailurePattern(
+            self._kline,
+            length=length,
+            bullish=bullish,
+            bearish=bearish,
+            swing_lines=swing_lines,
+            confirm_lines=confirm_lines,
+            sfp_labels=sfp_labels,
+            bull_color=bull_color,
+            bear_color=bear_color,
+            validation=validation,
+            percent=percent,
+            **kwargs)
+
+    def RenkoCandlesOverlay(
+            self, mode='ATR/2', atr_period=14, brick_size=10.0,
+            percentage=0.1, period=140, brick_width=2, max_bars=285,
+            align='Repaint', mintick=None,
+            show_labels=True, line_style='Dashed',
+            up_color='#5b9cf6', down_color='#0c3299',
+            unconfirmed_color='#808080', border_up='#00FF00',
+            border_down='#FF0000', border_width=1,
+            change_bar_color=False, **kwargs) -> IndFrame:
+        """
+        ## Renko Candles Overlay [LonesomeTheBlue]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/rZs7YdMI-Renko-Candles-Overlay/
+
+        Args:
+            mode: 'Traditional' / 'ATR' / 'ATR/2'(默认) / 'ATR/4' / 'Percentage'
+            atr_period: ATR 周期(默认 14)
+            brick_size: Traditional 模式砖块大小(默认 10.0)
+            percentage: Percentage 模式百分比(默认 0.1)
+            period: 保留的最大砖块数(默认 140, 原码值; 0=不限制)
+            brick_width: 每块砖占多少根 bar(默认 2)
+            max_bars: 绘制范围上限(默认 285, 原码值; 0=不限制)
+            align: 'Repaint'(默认, 原码行为: 从最后一根往左逐格铺开) /
+                'History'(按砖块真实形成时间铺开, 可覆盖全历史)
+            mintick: 最小变动价位; None(默认)取 self.price_tick
+            show_labels / line_style: 对应原码 putlabels / linestyle(未复现图形)
+            up_color / down_color / unconfirmed_color: 砖块配色
+            border_up / border_down / border_width: 砖块边框(未复现)
+            change_bar_color: 按 Renko 趋势给主 K 线上色(未复现)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加蜡烛型指标(open/high/low/close + trend
+                + long_signal/short_signal), 与主 K 线形成**双蜡烛**叠加显示。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.RenkoCandlesOverlay()                 # ATR/2 砖块
+            kline.tradingview.RenkoCandlesOverlay(mode='Traditional',
+                                                  brick_size=20)
+        """
+        # [修改] 经构造参数传 candlestyle —— 框架现已支持蜡烛型指标自带 candlestyle,
+        #   并会随 get_indicator_kwargs() 进入绘图链路(btind_info/plotinfo)。
+        return RenkoCandlesOverlay(
+            self._kline,
+            mode=mode,
+            atr_period=atr_period,
+            brick_size=brick_size,
+            percentage=percentage,
+            period=period,
+            brick_width=brick_width,
+            max_bars=max_bars,
+            align=align,
+            mintick=mintick,
+            show_labels=show_labels,
+            line_style=line_style,
+            up_color=up_color,
+            down_color=down_color,
+            unconfirmed_color=unconfirmed_color,
+            border_up=border_up,
+            border_down=border_down,
+            border_width=border_width,
+            change_bar_color=change_bar_color,
+            candlestyle=CandleStyle(bull=up_color, bear=down_color),
+            **kwargs)
+
+    def VariableMovingAverage(
+            self, length=6, src='close', show_trend=False,
+            color_bars=False, **kwargs) -> IndFrame:
+        """
+        ## Variable Moving Average [LazyBear]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/6Ix0E5Yr-Variable-Moving-Average-LazyBear/
+
+        Args:
+            length: VMA 周期 / 波动率窗口(默认 6)
+            src: 源序列(默认 'close')
+            show_trend: 是否按趋势给线上色(原码 std, 默认 False = 恒定黑线)
+            color_bars: 是否按趋势给主 K 线上色(原码 bc, **未复现**)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 vma(黑线, width=3)、
+                vma_up/vma_dn/vma_flat(趋势分段, show_trend=True 时才有值)、
+                trend(1/-1/0, 仅数据)。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.VariableMovingAverage()
+            kline.tradingview.VariableMovingAverage(length=10, show_trend=True)
+        """
+        return VariableMovingAverage(
+            self._kline,
+            length=length,
+            src=src,
+            show_trend=show_trend,
+            color_bars=color_bars,
+            **kwargs)
+
+    def HemaTrendLevels(
+            self, hema_length1=20, hema_length2=40, atr_length=14,
+            src='close', bull_color='#00ffbb', bear_color='#ff1100',
+            **kwargs) -> IndFrame:
+        """
+        ## HEMA Trend Levels [AlgoAlpha]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/WClHCU5Q-HEMA-Trend-Levels-AlgoAlpha/
+
+        Args:
+            hema_length1: 快 HEMA 周期(默认 20)
+            hema_length2: 慢 HEMA 周期(默认 40)
+            atr_length: 测试箱半幅的 ATR 周期(默认 14)
+            src: 源序列(默认 'close')
+            bull_color: 多头色(默认 '#00ffbb')
+            bear_color: 空头色(默认 '#ff1100')
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 hema1/hema2(双 HEMA)、
+                bull_*/bear_*(趋势填充, bandstyle)、
+                bull_box_*/bear_box_*(ATR 测试箱阶梯线, bandstyle)、
+                low_test/high_test(测试价位, 仅数据)、
+                long_signal/short_signal(**1=金叉/死叉, 2=回测测试**)。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.HemaTrendLevels()
+            kline.tradingview.HemaTrendLevels(hema_length1=10, hema_length2=30)
+        """
+        return HemaTrendLevels(
+            self._kline,
+            hema_length1=hema_length1,
+            hema_length2=hema_length2,
+            atr_length=atr_length,
+            src=src,
+            bull_color=bull_color,
+            bear_color=bear_color,
+            **kwargs)
+
+    def SmartMoneyBreakoutSignals(
+            self, swing_size=25, bos_conf_type='Candle Close', choch=True,
+            bull_color='#00ffbb', bear_color='#ff1100',
+            break_tolerance_pct=0.0, min_bars=0, **kwargs) -> IndFrame:
+        """
+        ## Smart Money Breakout Signals [AlgoAlpha]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/IV6eZF3w-Smart-Money-Breakout-Signals-AlgoAlpha/
+
+        Args:
+            swing_size: 市场结构回看周期(默认 25)
+            bos_conf_type: 'Candle Close'(默认) / 'Wicks'
+            choch: 是否显示 CHoCH 标签(默认 True; False 则全部显示 BOS)
+            bull_color: 多头色(默认 '#00ffbb')
+            bear_color: 空头色(默认 '#ff1100')
+            break_tolerance_pct: 突破容差百分比(默认 0.0 = 原码严格突破)。
+                **调大 → 突破信号更频繁**(价位差一点点没越过也算, 建议 0.1~0.3)
+            min_bars: 同向信号最小间隔根数(默认 0 = 不去抖)。调大 → 信号**更少**
+            **kwargs: 其他参数
+
+        ### 🎛 调参增加突破信号(按效果强弱排序):
+            1. ``swing_size`` 调小 —— 主要旋钮 (25→80个, 15→144, 10→199, 5→339)
+            2. ``bos_conf_type='Wicks'`` —— 用影线判定, 多约 20%~50%
+            3. ``break_tolerance_pct`` 调大 —— 容差让"差一点没破"也算
+            4. ``min_bars`` 保持 0 —— 它是**去抖**(反方向)
+
+        Returns:
+            IndFrame: 主图叠加, 含 resistance/support(**突破产生的实体压力/支撑线**)、
+                long_signal/short_signal(**1 = BOS, 2 = CHoCH**, 逐点文本 'BOS'/'CHoCH')。
+                原码的 TP/TP1/TP2 虚线、SL、linefill、统计表均未实现。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.SmartMoneyBreakoutSignals()
+            kline.tradingview.SmartMoneyBreakoutSignals(
+                swing_size=10, bos_conf_type='Wicks', choch=False)
+            kline.tradingview.SmartMoneyBreakoutSignals(break_tolerance_pct=0.2)
+        """
+        return SmartMoneyBreakoutSignals(
+            self._kline,
+            swing_size=swing_size,
+            bos_conf_type=bos_conf_type,
+            choch=choch,
+            bull_color=bull_color,
+            bear_color=bear_color,
+            break_tolerance_pct=break_tolerance_pct,
+            min_bars=min_bars,
+            **kwargs)
+
+    def AlphaTrendScreener(
+            self, length=14, multiplier=1.0, no_volume_data=False,
+            src='close', show_signals=True, **kwargs) -> IndFrame:
+        """
+        ## AlphaTrend - Screener [KivancOzbilgic]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/kv8N05R7-AlphaTrend-Screener/
+
+        只实现核心的 **k1 / k2 两条线 + BUY/SELL 信号**;
+        原码的 20 品种 ``request.security`` 筛选面板、右侧标签堆叠、``direction``
+        状态机与 k1/k2 之间的红绿填充均未实现。
+
+        Args:
+            length: 周期(默认 14, 原码 AP), ATR/RSI/MFI 共用
+            multiplier: 乘数(默认 1.0, 原码 coeff)
+            no_volume_data: False(默认)用 MFI(hlc3), True 改用 RSI(src, 无成交量)
+            src: ta.rsi 的源序列(默认 'close'; 仅 no_volume_data=True 时生效)
+            show_signals: 原码 showsignalsk(默认 True), 是否显示 BUY/SELL
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 k1(AlphaTrend 蓝线宽3)、
+                k2(AlphaTrend[2] 红线宽3, 即 Trigger)、
+                long_signal/short_signal(**1 = BUY / SELL**, 逐点文本 'BUY'/'SELL')。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.AlphaTrendScreener()
+            kline.tradingview.AlphaTrendScreener(length=20, multiplier=1.5)
+            kline.tradingview.AlphaTrendScreener(no_volume_data=True)
+        """
+        return AlphaTrendScreener(
+            self._kline,
+            length=length,
+            multiplier=multiplier,
+            no_volume_data=no_volume_data,
+            src=src,
+            show_signals=show_signals,
+            **kwargs)
+
+    def EnvelopeRSISignals(
+            self, envelope_length=8, envelope_percent=0.22,
+            envelope_src='hl2', exponential=False, rsi_length=8,
+            rsi_src='hl2', overbought=80, oversold=25,
+            tp_percent=0.15, sl_percent=0.15, **kwargs) -> IndFrame:
+        """
+        ## ENVELOPE - RSI - Buy Sell Signals [Saleh_Toodarvari]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/nVvltKvo-ENVELOPE-RSI-Buy-Sell-Signals/
+
+        包络线(价格通道) + Wilder RSI 超买超卖 的双重过滤买卖信号。
+        Buy = ``crossover(close, lower)`` 且 ``rsi < oversold`` 且
+        (low/close/high/open 中有任一**双向**穿越 lower);
+        Sell 对称(``crossunder(close, upper)`` / ``rsi > overbought`` / upper)。
+
+        Args:
+            envelope_length: 包络均线周期(默认 8)
+            envelope_percent: 包络百分比(默认 0.22)
+            envelope_src: 包络源序列(默认 'hl2')
+            exponential: True 用 EMA, False(默认)用 SMA
+            rsi_length: RSI 周期(默认 8)
+            rsi_src: RSI 源序列(默认 'hl2')
+            overbought: RSI 超买阈值(默认 80)
+            oversold: RSI 超卖阈值(默认 25)
+            tp_percent: 止盈百分比(默认 0.15)
+            sl_percent: 止损百分比(默认 0.15)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 basis/upper/lower(包络三线, 上下轨之间有淡蓝填充)、
+                rsi(仅数据)、tp/sl(仅数据)、
+                long_signal/short_signal(**1 = Buy / Sell**, 逐点文本 'Buy'/'Sell')。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.EnvelopeRSISignals()
+            kline.tradingview.EnvelopeRSISignals(envelope_percent=0.5, oversold=30)
+            kline.tradingview.EnvelopeRSISignals(exponential=True)
+        """
+        return EnvelopeRSISignals(
+            self._kline,
+            envelope_length=envelope_length,
+            envelope_percent=envelope_percent,
+            envelope_src=envelope_src,
+            exponential=exponential,
+            rsi_length=rsi_length,
+            rsi_src=rsi_src,
+            overbought=overbought,
+            oversold=oversold,
+            tp_percent=tp_percent,
+            sl_percent=sl_percent,
+            **kwargs)
+
+    def MarketStructureOscillator(
+            self, show_osc=True, weight_k1=1.0, weight_k2=3.0, weight_k3=2.0,
+            smooth=4, show_cycle=True, cycle_smooth=7,
+            show_k1_lines=False, show_k2_lines=True, show_k3_lines=True,
+            style_k1='dotted', style_k2='dashed', style_k3='solid',
+            bull_color='#089981', bear_color='#f23645',
+            show_signals=True, **kwargs) -> IndFrame:
+        """
+        ## Market Structure Oscillator [LuxAlgo]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/K47z5Kmf-Market-Structure-Oscillator-LuxAlgo/
+
+        **副图振荡器**(三层市场结构突破归一化后加权平均) + **主图三层结构线**
+        (短期点线 / 中期虚线 / 长期实线)。突破**长期实线**结构线时输出突破信号
+        (1 = BoS, 2 = CHoCH) —— **该信号为 MiniBT 新增, 原码没有**。
+
+        Args:
+            show_osc: 显示振荡器主线(默认 True)
+            weight_k1 / weight_k2 / weight_k3: 短/中/长期权重(默认 1 / 3 / 2)
+            smooth: 归一化后的 SMA 平滑(默认 4)
+            show_cycle: 显示周期柱状图(默认 True)
+            cycle_smooth: 周期振荡器 EMA 长度(默认 7)
+            show_k1_lines / show_k2_lines / show_k3_lines: 三层结构线开关
+                (默认 False / True / True —— 原码全为 False, 这里按需求默认开虚线+实线)
+            style_k1 / style_k2 / style_k3: 三层线型(默认 'dotted'/'dashed'/'solid')
+            bull_color / bear_color: 结构线配色(默认 '#089981' / '#f23645')
+            show_signals: 是否输出突破长期实线的信号(默认 True)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 逐线 overlap —— 副图含 ms_osc / osc_mid(50) / osc_top(100) /
+                osc_upper(85) / osc_lower(15) / osc_btm(0) / osc_k1~k3(分量, 仅数据) /
+                cycle / hist_bull / hist_bear; 主图含 res_k1/sup_k1(点线)、
+                res_k2/sup_k2(虚线)、res_k3/sup_k3(实线) 与 long_signal/short_signal。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.MarketStructureOscillator()
+            # 只保留实线(长期)结构线
+            kline.tradingview.MarketStructureOscillator(
+                show_k2_lines=False, show_k1_lines=False)
+        """
+        # 结构线颜色/线型来自参数 -> 在**类默认 linestyle 基础上**覆盖
+        # [修改] 原写法 ls = dict(kwargs.pop('linestyle', {}) or {}): 从空字典起步,
+        #   会把类里其它线的 LineStyle(例如 cycle 的 line_dash='vbar' /
+        #   vbar_base=50) 整体覆盖掉, 导致柱体退化成默认实线。
+        ls = {k: v for k, v in MarketStructureOscillator.linestyle.items()}
+        ls.update(dict(kwargs.pop('linestyle', {}) or {}))
+        ls.update(dict(
+            res_k1=LineStyle(line_color=bull_color, line_dash=style_k1),
+            sup_k1=LineStyle(line_color=bear_color, line_dash=style_k1),
+            res_k2=LineStyle(line_color=bull_color, line_dash=style_k2),
+            sup_k2=LineStyle(line_color=bear_color, line_dash=style_k2),
+            res_k3=LineStyle(line_color=bull_color, line_dash=style_k3),
+            sup_k3=LineStyle(line_color=bear_color, line_dash=style_k3),
+        ))
+        return MarketStructureOscillator(
+            self._kline,
+            show_osc=show_osc,
+            weight_k1=weight_k1,
+            weight_k2=weight_k2,
+            weight_k3=weight_k3,
+            smooth=smooth,
+            show_cycle=show_cycle,
+            cycle_smooth=cycle_smooth,
+            show_k1_lines=show_k1_lines,
+            show_k2_lines=show_k2_lines,
+            show_k3_lines=show_k3_lines,
+            style_k1=style_k1,
+            style_k2=style_k2,
+            style_k3=style_k3,
+            bull_color=bull_color,
+            bear_color=bear_color,
+            show_signals=show_signals,
+            linestyle=ls,
+            **kwargs)
+
+    def RollingVolumeProfile(
+            self, length=100, bins=40, src='close', price_bars=500,
+            vp_color=None, vp_poc_color=None, **kwargs) -> IndFrame:
+        """
+        ## 滚动成交量分布 Volume Profile（框架内置，category='vp'）
+
+        返回 ``(K 线根数, bins)`` 的二维矩阵：第 i 行 = 第 i 根 K 线时刻、
+        窗口 ``[i-length+1, i]`` 内的**价格分档成交量分布**。
+        ``category='vp'``，框架会以"横向成交量分布图"（右端=0刻度、向左生长、
+        贴在价格图右缘）的方式绘制。
+
+        Args:
+            length: 滚动统计窗口（默认 100）
+            bins: 价格分档数（默认 40）
+            src: 分档所用价格（默认 'close'，可选 'hl2'/'hlc3'/'ohlc4'）
+            price_bars: 定档位所用的价格区间取自**最后多少根** K 线（默认 500）。
+                档位数固定，若区间覆盖整段数据（可能上千点），40 档里只有极少数
+                落在滚动窗口内 -> 图上只看得到 2~3 根柱子。设 None/<=0 用全段。
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: shape = (K线根数, bins)；数据约定见类文档
+                （列 = 等宽价格档，区间为整段数据的 [min(low), max(high)]）。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            ind = kline.tradingview.RollingVolumeProfile(length=100, bins=40)
+            ind.btplot()
+        """
+        # 显式把 lines 传进去（数量 = bins）：覆盖类里的默认 40 个名字，
+        #   这样 bins 取任意值都能用，也避免框架去解析 next() 源码猜行名。
+        _nb = max(1, int(bins))
+        # ★ 分布数据不参与通用折线绘制(否则 40 列会被逐列画成线 -> 主图出现垂直线)
+        kwargs.setdefault('isplot', {f"vp{j}": False for j in range(_nb)})
+        # vp_color / vp_poc_color: 柱体与 POC 的配色(多周期叠加时用来区分;
+        #   绘图端从 linestyle['vp0'] / linestyle['vp_poc'] 读取)
+        _ls = dict(kwargs.pop('linestyle', {}) or {})
+        if vp_color:
+            _ls['vp0'] = LineStyle(line_color=vp_color)
+        if vp_poc_color:
+            _ls['vp_poc'] = LineStyle(line_color=vp_poc_color)
+        # ★ 把 price_bars 一并传给绘图端(绘图端据此用**同一条规则**算档位区间,
+        #   否则横条位置会与指标算出的分布对不上)。
+        _ls['vp_price_bars'] = price_bars
+        kwargs['linestyle'] = _ls
+        kwargs.setdefault('price_bars', price_bars)
+        return RollingVolumeProfile(
+            self._kline, length=length, bins=bins, src=src,
+            lines=[f"vp{j}" for j in range(_nb)], **kwargs)
+
+    def VolumeProfileMA(
+            self, length=100, bins=40, src='close', ma_len=20,
+            price_bars=500, vp_color='#3498db', vp_poc_color='#f39c12',
+            **kwargs) -> IndFrame:
+        """
+        ## 滚动成交量分布 + 均线（category='vp' 的"指标线 + VP"示例）
+
+        返回 ``(n, 1+bins)``：第 0 列均线，后 bins 列分布；``lines=('ma','vp0'..)``。
+        ``overlap=True``(默认) 画主图；``overlap=False`` 画副图（档位序号分层直方图）。
+
+        Args:
+            length: 滚动统计窗口(默认 100)
+            bins: 价格分档数(默认 40)
+            src: 分档所用价格(默认 'close')
+            ma_len: 均线周期(默认 20)
+            price_bars: 定档位所用的价格区间取自最后多少根 K 线(默认 500)
+            vp_color / vp_poc_color: VP 柱体 / POC 配色
+            **kwargs: 其他参数(如 overlap=False 走副图)
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.VolumeProfileMA(length=100)          # 主图
+            kline.tradingview.VolumeProfileMA(length=100, overlap=False)
+        """
+        _nb = max(1, int(bins))
+        # ★ 第 0 列(ma)要画, 后面 bins 列是分布数据 -> 不参与通用折线绘制
+        kwargs.setdefault('isplot', dict(
+            {"ma": True}, **{f"vp{j}": False for j in range(_nb)}))
+        _ls = dict(kwargs.pop('linestyle', {}) or {})
+        if vp_color:
+            _ls['vp0'] = LineStyle(line_color=vp_color)
+        if vp_poc_color:
+            _ls['vp_poc'] = LineStyle(line_color=vp_poc_color)
+        _ls['vp_price_bars'] = price_bars          # 绘图端据此算同一条档位区间
+        kwargs.setdefault('price_bars', price_bars)
+        return VolumeProfileMA(
+            self._kline, length=length, bins=bins, src=src, ma_len=ma_len,
+            lines=['ma'] + [f'vp{j}' for j in range(_nb)],
+            linestyle=_ls, **kwargs)
+
+    def ITGScalper(
+            self, length=14, show_tema=True, show_signals=True,
+            noise_filter=True, filter_fast=12, filter_slow=26,
+            filter_signal=9, **kwargs) -> IndFrame:
+        """
+        ## ITG Scalper Buy/Sell [Complector]
+
+        ### 📘 **文档参考**:
+        - ✈ https://cn.tradingview.com/script/AcrZjl6Q-ITG-Scalper/
+
+        TEMA(三重 EMA)方向 + MACD 噪声过滤 的顺势多空交替进出场。
+        ``out1 = 3*(ema1-ema2)+ema3``; ``long`` 需 ``out1`` 上行且上一次是卖出;
+        ``short`` 需 ``out1`` 下行且上一次是买入(由 ``last_tran`` 记忆)。
+
+        **按需求**: ``out1`` 只画**一条单色线**(不做绿/红分段); 买卖信号
+        **只保留三角标记、不带文字**。
+
+        Args:
+            length: TEMA 周期(默认 14)
+            show_tema: 是否画出 TEMA 线(默认 True; False 时该线置 na 不画)
+            show_signals: 是否输出买卖信号(默认 True)
+            noise_filter: 是否启用 MACD 过滤(默认 True; False 则不过滤)
+            filter_fast/filter_slow/filter_signal: 过滤 MACD 三长度(默认 12/26/9)
+            **kwargs: 其他参数
+
+        Returns:
+            IndFrame: 主图叠加, 含 out1(TEMA 线, 单色宽 2)、perc(自上次买卖的
+                百分比变化, 仅数据)、goodlong/goodshort(仅数据)、
+                long_signal/short_signal(1 = 买/卖点, **无文本**)。
+
+        ### 使用示例::
+
+            kline = LocalDatas.test.kline
+            kline.tradingview.ITGScalper()
+            kline.tradingview.ITGScalper(length=20, noise_filter=False)
+        """
+        return ITGScalper(
+            self._kline,
+            length=length,
+            show_tema=show_tema,
+            show_signals=show_signals,
+            noise_filter=noise_filter,
+            filter_fast=filter_fast,
+            filter_slow=filter_slow,
+            filter_signal=filter_signal,
+            **kwargs)

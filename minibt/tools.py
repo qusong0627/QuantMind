@@ -995,18 +995,18 @@ class PairAnalyzer:
         pa = PairAnalyzer(datas=LocalDatas, output_dir="my_analysis")
 
         # 单个配对分析
-        r = pa.coint("pp2601_60", "l2601_60")
+        r = pa.coint("pp2609_60", "l2609_60")
         print(r['is_suitable'])
 
         # 批量筛选
-        pairs = pa.find(["pp2601_60", "l2601_60", "v2601_60"], method='coint')
+        pairs = pa.find(["pp2609_60", "l2609_60"], method='coint')
 
         # 多方法综合对比
-        df = pa.summary("pp2601_60", "l2601_60")
+        df = pa.summary("pp2609_60", "l2609_60")
         print(df)
 
         # 全方法批量筛选
-        df_all = pa.find_all(["pp2601_60", "l2601_60", "v2601_60"])
+        df_all = pa.find_all(["pp2609_60", "l2609_60"])
 
     可用方法一览:
 
@@ -1171,7 +1171,7 @@ class PairAnalyzer:
 
         示例::
 
-            pa.summary("pp2601_60", "l2601_60", methods=['coint', 'distance', 'halflife'])
+            pa.summary("pp2609_60", "l2609_60", methods=['coint', 'distance', 'halflife'])
         """
         if methods is None:
             methods = ['coint', 'distance', 'halflife', 'hurst', 'rolling_coint', 'johansen']

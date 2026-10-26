@@ -1,18 +1,34 @@
 from __future__ import annotations
+import os
 import re
+
+#: 是否在指标对象上挂 ``_bt_recompute``（参数页 / 重算用）。
+#: 默认 **开启**：库函数指标（如 ``data.sma``）没有 ``params``，参数只能从
+#: 这里记录的原始调用得到；不开就没法给它们显示参数页 ✗。
+#: 想完全零开销：环境变量 ``MINIBT_INDICATOR_RECOMPUTE=0``。
+#:
+#: （「参数页」是否显示由 ``config.indicator_recompute`` 控制 —— 开启时**所有**
+#:  指标都有参数，关闭时全都没有 ✓。）
+RECOMPUTE_META = os.environ.get('MINIBT_INDICATOR_RECOMPUTE', '1') != '0'
+
+
+def enable_recompute_meta(enabled: bool = True) -> None:
+    """开启/关闭 ``_bt_recompute`` 元信息（见 :data:`RECOMPUTE_META`）。"""
+    global RECOMPUTE_META
+    RECOMPUTE_META = bool(enabled)
 from ..utils import \
     (TYPE_CHECKING, PlotInfo, np, pd, wraps, Callable, BtID, retry_with_different_params,
-     partial, Iterable, Lines, Base, check_type, LineStyle, IndSetting, SymbolInfo, 
+     partial, Iterable, Lines, Base, check_type, LineStyle, IndSetting, SymbolInfo,
      DataFrameSet, Addict, Any, cachedmethod, attrgetter, LineDash, Colors,
      Multiply, get_lennan, BlockPlacement, ispandasojb, rolling_method,
-     Category, SIGNAL_Str, set_property, FILED,
-     default_symbol_info,  warnings,ExpandingGroupby,ExponentialMovingWindowGroupby,RollingGroupby,
+     Category, SIGNAL_Str, set_property, FILED, SignalText,
+     default_symbol_info,  warnings, ExpandingGroupby, ExponentialMovingWindowGroupby, RollingGroupby,
      StrategyInstances, TPE, TqObjs, default_signal_style,
-     DataSetBase, PandasObject, Rolling, CandleStyle, 
-     pandas_method, dataclass, DefaultIndicatorConfig,  CategoryString, SpanList, 
-     signature,  ExponentialMovingWindow, 
+     DataSetBase, PandasObject, Rolling, CandleStyle,
+     pandas_method, dataclass, DefaultIndicatorConfig,  CategoryString, SpanList,
+     signature,  ExponentialMovingWindow,
      ewm_method, Expanding, expanding_method, options, SPECIAL_FUNC,)
-from ..other import get_func_args_dict, timedelta
+from ..other import get_func_args_dict, timedelta, ensure_core_loaded
 from pandas.core.indexing import _iLocIndexer, _LocIndexer
 
 # Pandas 2.0+ Copy-on-Write 兼容性处理
@@ -38,7 +54,8 @@ if TYPE_CHECKING:
     from .tqfunc import TqFunc
     from .tqta import TqTa
     from .pair import Pair
-    from .factors import Factors
+    # from .factors import Factors
+    from .pine import Pine
     from ..tradingsymtem.tradingsystem import TradingSystem
 
 
@@ -230,7 +247,7 @@ class MinibtLocIndexer(MinibtIndexerBase, _LocIndexer):
 
 def _sanitize_column_name(name: str) -> str:
     """清理列名，确保合法性：转小写、替换非法字符、处理纯数字开头"""
-    #name = str(name).lower()           # 转小写
+    # name = str(name).lower()           # 转小写
     name = re.sub(r'\.+', '_', name)    # "." 替换为 "_"
     name = re.sub(r'[^a-z0-9_]', '', name)  # 移除非字母数字下划线字符
     name = re.sub(r'^(\d)', r'_\1', name)    # 数字开头的列名加前缀 "_"
@@ -321,12 +338,21 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
     _lines = lines                      # 指标线配置
     _overlap = overlap                  # 主图叠加配置
     _category = category                # 指标类别
-    _lib = kwargs_.pop('lib', "pta")                   # 指标库名称，默认 "pta"（PandasTa）
+    _candlestyle = kwargs_.pop('candlestyle', None)
+    # 指标库名称，默认 "pta"（PandasTa）
+    _lib = kwargs_.pop('lib', "pta")
     _isindicator = kwargs_.pop('isindicator', False)   # 是否为指标函数标志
     _index = kwargs_.pop('_multi_index', None)         # 多周期指标索引
     _linestyle = kwargs_.pop('linestyle', {})          # 线型样式 {线名: 样式码}
     _sname = kwargs_.pop("sname", "")                  # 策略中使用的简写名
     _signalstyle = kwargs_.pop('signalstyle', {})      # 信号图层样式配置
+    _bandstyle = kwargs_.pop('bandstyle', [])          # 带图层的样式配置元组
+    _spanstyle = kwargs_.pop('spanstyle', None)        # 水平线样式配置
+    # 成交量分布图风格（**只有 category='vp' 的指标会读**）
+    _vpstyle = kwargs_.pop('vpstyle', None)
+    _tablestyle = kwargs_.pop('tablestyle', None)      # 指标统计表格风格
+    _signal_text = kwargs_.pop("signal_text", None)
+    _legend = kwargs_.pop("legend", True)
 
     def decorator(func):
         """
@@ -358,13 +384,16 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
             # 1. 记录原始函数名，提取数据源（args[0] 约定为源数据）
             func_name = func.__name__
             _source: KLine | IndFrame | IndSeries | Line = args[0]
+            # 记录原始调用（在 kwargs 被框架改写前），供「指标参数」/重算用 ✓
+            _bt_call = ((tuple(args), dict(kwargs))
+                        if RECOMPUTE_META else None)
 
             # 1a. 解包包装类（BtInd/Talib/FinTa/TuLip/PandasTa/TqFunc/TqTa 等）
             # 这些类持有 _df 但自身无 _dataset，直接作为 source 会导致 btplot 追溯 KLine 失败
             _source_for_ind = _source
             while hasattr(_source_for_ind, '_df') and not hasattr(_source_for_ind, '_dataset'):
                 _source_for_ind = _source_for_ind._df
-
+            kwargs.update(dict(_source_for_ind=_source_for_ind))
             # 2. 从数据源继承指标属性（_indsetting），如已有 ID、绘图开关等
             source_indsetting = _source.get_indicator_kwargs(isindicator=True) if hasattr(
                 _source, "_indsetting") else {}
@@ -375,7 +404,8 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                 # 3a. 自定义指标分支：强制使用被装饰函数 func
                 func_name = myself                  # 允许用自定义名覆盖内置函数名
                 ind_func = func                     # 实际执行的函数 = 被装饰函数
-                _use_source_arg = True              # func(source, *params) 需要显式传入 source
+                # func(source, *params) 需要显式传入 source
+                _use_source_arg = True
                 source = _source                    # 数据源保持原样
             else:
                 # 3b. 内置 / 库指标分支：先提取纯数据 DataFrame，再从 ta 扩展中查找函数
@@ -396,6 +426,7 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                 # 决议计算函数：优先 ta.{lib}_{func_name} → ta.{func_name} → func
                 if _lib:
                     prefixed_name = f"{_lib}_{func_name}"
+                    ensure_core_loaded()             # 惰性注册 pandas 的 .ta 访问器
                     ta = getattr(source, "ta")      # 获取 PandasTa 入口对象
                     if hasattr(ta, prefixed_name):
                         # 带库名前缀的函数（如 pta_ema）已将 source 绑定为 self，无需再传
@@ -428,10 +459,19 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
             overlap = kwargs.pop("overlap", _overlap)             # 主图叠加
             light_chart = kwargs.pop("light_chart", False)        # 轻量图表模式
             index = kwargs.get("_multi_index", _index)            # 多周期索引
-            isindicator = kwargs.get("isindicator", _isindicator) # 是否指标链
+            isindicator = kwargs.get("isindicator", _isindicator)  # 是否指标链
             iscustom = kwargs.get("iscustom", False)              # 自定义标志
             linestyle = kwargs.get("linestyle", _linestyle)       # 线型样式
-            signalstyle = kwargs.get("signalstyle", _signalstyle) # 信号样式
+            signalstyle = kwargs.get("signalstyle", _signalstyle)  # 信号样式
+            bandstyle = kwargs.get("bandstyle", _bandstyle)     # 带图层的样式配置元组
+            spanstyle = kwargs.get("spanstyle", _spanstyle)     # 水平线样式配置
+            # 成交量分布图风格（category='vp' 专用；None = 用 VPStyle 默认值）
+            vpstyle = kwargs.get("vpstyle", _vpstyle)
+            tablestyle = kwargs.get("tablestyle", _tablestyle)  # 统计表格风格
+            # 只有**显式**传入 signal_text 才覆盖类上的钩子；没传时交给
+            # core.py 用 cls.signal_text 兜底（否则类上的钩子永远不执行）
+            signal_text = _signal_text if callable(_signal_text) else None
+            legend = kwargs.get("legend", _legend)
 
             # 4. 指标实例 ID —— 优先使用调用方传入的，其次继承数据源的，最后自动生成
             id = kwargs.get("id", source_indsetting.get("id", BtID()))
@@ -455,7 +495,8 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                 # 重放模式将历史 K 线按分段长度逐步喂给指标函数，仅返回当期结果。
 
                 num_cols = len(_lines) if _lines else 1               # 预期列数
-                nan_data = [np.nan] * num_cols if _lines else np.nan  # 不足时用 NaN 填充
+                nan_data = [np.nan] * \
+                    num_cols if _lines else np.nan  # 不足时用 NaN 填充
                 replay_length = 100                                   # 默认窗口长度
 
                 # 6a. 从 kwargs 和 ind_params 中提取最大整数参数作为窗口长度
@@ -484,6 +525,7 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                         _args.extend(ind_params)
                         return index, func(*_args, **kwargs).values[-1]
                     else:
+                        ensure_core_loaded()
                         return index, getattr(getattr(data_, "ta"), func_name)(
                             *ind_params, **kwargs).values[-1]
 
@@ -549,16 +591,19 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                 else:
                     # —— 库函数指标分支（如 PandasTa）——
                     if _use_source_arg:
-                        ind_data = ind_func(source, *ind_params, **kwargs)   # 未绑定方法，需传 source
+                        # 未绑定方法，需传 source
+                        ind_data = ind_func(source, *ind_params, **kwargs)
                     else:
-                        ind_data = ind_func(*ind_params, **kwargs)           # 已绑定方法
+                        ind_data = ind_func(
+                            *ind_params, **kwargs)           # 已绑定方法
 
                     # DataFrame 结果：若未显式提供 lines 或数量不匹配，从列名自动推导
                     if isinstance(ind_data, pd.DataFrame):
                         _actual_cols = ind_data.shape[1]
                         if lines is None or (isinstance(lines, Iterable) and len(lines) != _actual_cols):
                             _orig_lines = lines
-                            lines = [_sanitize_column_name(col) for col in ind_data.columns]
+                            lines = [_sanitize_column_name(
+                                col) for col in ind_data.columns]
                             if _orig_lines is not None:
                                 warnings.warn(
                                     f"【{func_name}】传入的 lines({_orig_lines}, {len(_orig_lines)}列) "
@@ -573,13 +618,22 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                 f"指标返回非合法数据类型: {type(ind_data)}，" \
                 f"必须为 pd.DataFrame / pd.Series / np.ndarray"
 
-            # 规范化 overlap 类型
-            if not isinstance(overlap, (bool, dict)):
-                overlap = False
-
             # dict 格式的 lines 展平为 list
             if lines and isinstance(lines, dict):
                 lines = [lines.get(l, l) for l in lines]
+
+            # 规范化 overlap 类型
+            if isinstance(overlap, (list, tuple)) and all([isinstance(overl, bool) for overl in overlap]):
+                # 校验overlap长度:不足则补False，超出则截断到与lines等长
+                lines = list(lines)
+                overlap = list(overlap)
+                if len(overlap) < len(lines):
+                    overlap += [False] * (len(lines) - len(overlap))
+                elif len(overlap) > len(lines):
+                    overlap = overlap[:len(lines)]
+                overlap = dict(zip(lines, overlap))
+            elif not isinstance(overlap, (bool, dict)):
+                overlap = False
 
             # 将 list/tuple 返回值合并为统一 numpy 数组
             if isinstance(ind_data, (list, tuple)):
@@ -589,11 +643,13 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                     data = np.c_[tuple([data if isinstance(data, np.ndarray)
                                         else data.values for data in ind_data])]
             else:
-                data = ind_data if isinstance(ind_data, np.ndarray) else ind_data.values
+                data = ind_data if isinstance(
+                    ind_data, np.ndarray) else ind_data.values
 
             # 单列矩阵降维为向量（形状 (N,1) → (N,)）
             if len(data.shape) > 1 and data.shape[1] == 1:
                 data = data[:, 0]
+                bandstyle = []
 
             # ==================================================================
             # 阶段五：封装为 minibt 指标类型
@@ -605,12 +661,23 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
 
                 if not lines:
                     lines = [f"line{i}" for i in range(data.shape[1])]
+                if len(lines) < data.shape[1]:
+                    lines += [f"line{i}" for i in range(
+                        data.shape[1]-len(lines))]
 
+                # [修改] 把装饰器捕获的 candlestyle 传给 IndFrame,
+                #   使蜡烛型指标可通过类属性/构造参数自定义涨跌配色
+                #   (原代码未传, 导致 IndFrame 内部总是用默认 CandleStyle()).
                 data = IndFrame(data, id=id, sname=sname, ind_name=ind_name, lines=Lines(*lines),
                                 category=category, isplot=isplot, ismain=ismain,
                                 isreplay=isreplay, isresample=isresample,
-                                overlap=overlap, isindicator=isindicator, iscustom=iscustom,
-                                linestyle=linestyle, signalstyle=signalstyle, source=_source_for_ind)
+                                overlap=overlap, isindicator=isindicator,
+                                iscustom=iscustom, linestyle=linestyle,
+                                signalstyle=signalstyle, source=_source_for_ind,
+                                bandstyle=bandstyle, signal_text=signal_text,
+                                spanstyle=spanstyle, tablestyle=tablestyle,
+                                vpstyle=vpstyle, legend=legend,
+                                candlestyle=_candlestyle)
             else:
                 # —— IndSeries（单线指标）——
                 from .core import IndSeries
@@ -619,7 +686,8 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                                  category=category, isplot=isplot, ismain=ismain,
                                  isreplay=isreplay, isresample=isresample,
                                  overlap=overlap, isindicator=isindicator, iscustom=iscustom,
-                                 linestyle=linestyle, source=_source_for_ind)
+                                 linestyle=linestyle, source=_source_for_ind,
+                                 tablestyle=tablestyle, legend=legend)
 
             # 轻量图表模式：拼接时间列
             if light_chart:
@@ -627,6 +695,19 @@ def tobtind(lines: list[str] | dict[str, bool] | None = None, overlap: dict | bo
                 data.rename(columns=dict(datetime="time"), inplace=True)
                 data.category = category
                 data.overlap = overlap
+
+            # 附带“重算元信息”（config.indicator_recompute 用）：记下原始调用 +
+            # wrapper 自身，参数菜单确认后用它按新参数重算 ✓。
+            # 只挂到 IndFrame/IndSeries（light_chart 模式下 data 已是 DataFrame，
+            # 给它挂属性会触发 pandas 的 UserWarning ✗）；失败也不影响主流程。
+            try:
+                if (RECOMPUTE_META and _bt_call is not None
+                        and hasattr(data, 'pandas_object')):
+                    data._bt_recompute = {'wrapper': wrapper,
+                                          'call': _bt_call,
+                                          'source': _source_for_ind}
+            except Exception:
+                pass
 
             # 多周期场景：返回 (index, data) 元组供调用方配对
             if index is not None:
@@ -966,7 +1047,7 @@ class BtRolling(BtBaseWindows):
         """
         ...
 
-    def agg(self, func, engine:Literal["cython", "numba"] | None=None, engine_kwargs:dict[str, bool] | None=None, **kwargs) -> IndFrame | IndSeries:
+    def agg(self, func, engine: Literal["cython", "numba"] | None = None, engine_kwargs: dict[str, bool] | None = None, **kwargs) -> IndFrame | IndSeries:
         """
         ## 滚动窗口内的聚合计算（支持自定义函数）
         Args:
@@ -1014,7 +1095,7 @@ class BtRolling(BtBaseWindows):
         """
         ...
 
-    def aggregate(self, func, engine:Literal["cython", "numba"] | None=None, engine_kwargs:dict[str, bool] | None=None, **kwargs) -> IndFrame | IndSeries:
+    def aggregate(self, func, engine: Literal["cython", "numba"] | None = None, engine_kwargs: dict[str, bool] | None = None, **kwargs) -> IndFrame | IndSeries:
         """
         ## 同 agg 方法，滚动窗口内的聚合计算（支持自定义函数）
         Args:
@@ -1077,7 +1158,7 @@ class BtRolling(BtBaseWindows):
         """
         ...
 
-    def apply(self, func, raw=False, engine:Literal["cython", "numba"] | None=None, engine_kwargs:dict[str, bool] | None=None, args=None, **kwargs) -> IndFrame | IndSeries:
+    def apply(self, func, raw=False, engine: Literal["cython", "numba"] | None = None, engine_kwargs: dict[str, bool] | None = None, args=None, **kwargs) -> IndFrame | IndSeries:
         """
         ## 对滚动窗口内的数据应用自定义函数（灵活扩展计算逻辑）
         Args:
@@ -1356,7 +1437,7 @@ class BtOnlineExponentialMovingWindow(BtBaseWindows):
         min_periods: int | None = 0,
         adjust: bool = True,
         ignore_na: bool = False,
-        times: np.ndarray |  pd.Series | pd.DataFrame  | None = None,
+        times: np.ndarray | pd.Series | pd.DataFrame | None = None,
         engine: Literal["cython", "numba"] | None = "numba",
         engine_kwargs: dict[str, bool] | None = None,
         *,
@@ -1372,11 +1453,13 @@ class BtOnlineExponentialMovingWindow(BtBaseWindows):
         - ``_base_object`` 为 Pandas ``OnlineExponentialMovingWindow`` 实例
         """
         # 在线 EWM 支持的方法集合（与 Pandas OnlineExponentialMovingWindow 对齐）
-        online_ewm_method = {'reset', 'aggregate', 'std', 'corr', 'cov', 'var', 'mean'}
+        online_ewm_method = {'reset', 'aggregate',
+                             'std', 'corr', 'cov', 'var', 'mean'}
         super().__init__(obj, online_ewm_method)
 
         # ---- 参数互斥性检查（与 BtExponentialMovingWindow 保持一致） ----
-        non_none_params = [p for p in [com, span, halflife, alpha] if p is not None]
+        non_none_params = [p for p in [
+            com, span, halflife, alpha] if p is not None]
         if len(non_none_params) > 1:
             raise ValueError("com、span、halflife 和 alpha 参数是互斥的，只能指定其中一个")
 
@@ -1398,7 +1481,8 @@ class BtOnlineExponentialMovingWindow(BtBaseWindows):
         )
         # 先创建普通 EWM 对象，再调用 .online() 转为在线增量计算模式
         ewm = ExponentialMovingWindow(self._obj.pandas_object, **ewm_kwargs)
-        self._base_object = ewm.online(engine=engine, engine_kwargs=engine_kwargs or {})
+        self._base_object = ewm.online(
+            engine=engine, engine_kwargs=engine_kwargs or {})
 
     def reset(self) -> None:
         """
@@ -1418,10 +1502,10 @@ class BtOnlineExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def aggregate(self, 
-            func=None, 
-            *args, 
-            **kwargs) -> IndFrame | IndSeries:
+    def aggregate(self,
+                  func=None,
+                  *args,
+                  **kwargs) -> IndFrame | IndSeries:
         """
         ## 在线 EWM 自定义聚合 —— 对在线指数加权窗口应用任意聚合函数
 
@@ -1438,9 +1522,9 @@ class BtOnlineExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def std(self, 
-            bias: bool = False, 
-            *args, 
+    def std(self,
+            bias: bool = False,
+            *args,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 在线 EWM 标准差 —— 增量计算指数加权移动标准差
@@ -1497,8 +1581,8 @@ class BtOnlineExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def var(self, 
-            bias: bool = False, 
+    def var(self,
+            bias: bool = False,
             numeric_only: bool = False,
             **kwargs) -> IndFrame | IndSeries:
         """
@@ -1513,11 +1597,11 @@ class BtOnlineExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def mean(self, 
-            *args, 
-            update=None, 
-            update_times=None, 
-            **kwargs) -> IndFrame | IndSeries:
+    def mean(self,
+             *args,
+             update=None,
+             update_times=None,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 在线 EWM 均值 —— 增量计算指数加权移动均值
 
@@ -1655,11 +1739,10 @@ class BtExponentialMovingWindow(BtBaseWindows):
             **ewm_kwargs
         )
 
-
-    def online(self, 
-            engine: Literal["cython", "numba"] | None= "numba", 
-            engine_kwargs:dict[str, bool] | None=None
-    ) -> BtOnlineExponentialMovingWindow:
+    def online(self,
+               engine: Literal["cython", "numba"] | None = "numba",
+               engine_kwargs: dict[str, bool] | None = None
+               ) -> BtOnlineExponentialMovingWindow:
         """
         ## 获取在线指数加权移动窗口 —— 返回 ``BtOnlineExponentialMovingWindow`` 实例
 
@@ -1699,10 +1782,10 @@ class BtExponentialMovingWindow(BtBaseWindows):
             selection=self._selection,
         )
 
-    def aggregate(self, 
-            func=None, 
-            *args, 
-            **kwargs)-> IndFrame | IndSeries:
+    def aggregate(self,
+                  func=None,
+                  *args,
+                  **kwargs) -> IndFrame | IndSeries:
         """
         ## 指数加权移动窗口自定义聚合 —— 对 EWM 窗口应用任意聚合函数
 
@@ -1734,11 +1817,11 @@ class BtExponentialMovingWindow(BtBaseWindows):
 
     agg = aggregate
 
-    def mean(self, 
-        numeric_only: bool = False, 
-        engine:Literal["cython", "numba"] | None=None, 
-        engine_kwargs:dict[str, bool] | None=None, 
-        **kwargs) -> IndFrame | IndSeries:
+    def mean(self,
+             numeric_only: bool = False,
+             engine: Literal["cython", "numba"] | None = None,
+             engine_kwargs: dict[str, bool] | None = None,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算指数加权移动平均（Exponentially Weighted Moving Average）
         Args:
@@ -1751,10 +1834,10 @@ class BtExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def sum(self, 
-            numeric_only: bool = False, 
-            engine:Literal["cython", "numba"] | None=None, 
-            engine_kwargs:dict[str, bool] | None=None, 
+    def sum(self,
+            numeric_only: bool = False,
+            engine: Literal["cython", "numba"] | None = None,
+            engine_kwargs: dict[str, bool] | None = None,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算指数加权移动求和（Exponentially Weighted Moving Sum）
@@ -1768,9 +1851,9 @@ class BtExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def std(self, 
-            bias: bool = False, 
-            numeric_only: bool = False, 
+    def std(self,
+            bias: bool = False,
+            numeric_only: bool = False,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算指数加权移动标准差（Exponentially Weighted Moving Standard Deviation）
@@ -1783,9 +1866,9 @@ class BtExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def var(self, 
-            bias: bool = False, 
-            numeric_only: bool = False, 
+    def var(self,
+            bias: bool = False,
+            numeric_only: bool = False,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算指数加权移动方差（Exponentially Weighted Moving Variance）
@@ -1798,11 +1881,11 @@ class BtExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def cov(self, 
-            other: pd.DataFrame | pd.Series | None = None, 
+    def cov(self,
+            other: pd.DataFrame | pd.Series | None = None,
             pairwise: bool | None = None,
-            bias: bool = False, 
-            numeric_only: bool = False, 
+            bias: bool = False,
+            numeric_only: bool = False,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算指数加权移动协方差（Exponentially Weighted Moving Covariance）
@@ -1817,11 +1900,11 @@ class BtExponentialMovingWindow(BtBaseWindows):
         """
         ...
 
-    def corr(self, 
-            other: pd.DataFrame | pd.Series | None = None, 
-            pairwise: bool | None = None,
-            numeric_only: bool = False, 
-            **kwargs) -> IndFrame | IndSeries:
+    def corr(self,
+             other: pd.DataFrame | pd.Series | None = None,
+             pairwise: bool | None = None,
+             numeric_only: bool = False,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算指数加权移动相关系数（Exponentially Weighted Moving Correlation）
         Args:
@@ -2067,10 +2150,10 @@ class BtExpanding(BtBaseWindows):
             **expanding_kwargs
         )
 
-    def aggregate(self, 
-            func=None, 
-            *args, 
-            **kwargs)-> IndFrame | IndSeries:
+    def aggregate(self,
+                  func=None,
+                  *args,
+                  **kwargs) -> IndFrame | IndSeries:
         """
         ## 扩展窗口自定义聚合 —— 对累积窗口应用任意聚合函数
 
@@ -2111,13 +2194,13 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def apply(self, 
-            func: Callable[..., Any], 
-            raw: bool = False,
-            engine: Literal["cython", "numba"] | None = None,
-            engine_kwargs: dict[str, bool] | None = None,
-            args: tuple[Any, ...] | None = None, 
-            **kwargs: dict[str, Any]) -> IndFrame | IndSeries:
+    def apply(self,
+              func: Callable[..., Any],
+              raw: bool = False,
+              engine: Literal["cython", "numba"] | None = None,
+              engine_kwargs: dict[str, bool] | None = None,
+              args: tuple[Any, ...] | None = None,
+              **kwargs: dict[str, Any]) -> IndFrame | IndSeries:
         """
         ## 对扩展窗口内的数据应用自定义函数（支持累积计算逻辑）
         Args:
@@ -2177,10 +2260,10 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def sum(self, 
+    def sum(self,
             numeric_only: bool = False,
             engine: Literal["cython", "numba"] | None = None,
-            engine_kwargs: dict[str, bool] | None = None, 
+            engine_kwargs: dict[str, bool] | None = None,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积和（从起始点到当前点的累加值）
@@ -2194,10 +2277,10 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def max(self, 
+    def max(self,
             numeric_only: bool = False,
             engine: Literal["cython", "numba"] | None = None,
-            engine_kwargs: dict[str, bool] | None = None, 
+            engine_kwargs: dict[str, bool] | None = None,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积最大值（从起始点到当前点的历史最大值）
@@ -2211,10 +2294,10 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def min(self, 
+    def min(self,
             numeric_only: bool = False,
             engine: Literal["cython", "numba"] | None = None,
-            engine_kwargs: dict[str, bool] | None = None, 
+            engine_kwargs: dict[str, bool] | None = None,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积最小值（从起始点到当前点的历史最小值）
@@ -2228,11 +2311,11 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def mean(self, 
-            numeric_only: bool = False,
-            engine: Literal["cython", "numba"] | None = None,
-            engine_kwargs: dict[str, bool] | None = None, 
-            **kwargs) -> IndFrame | IndSeries:
+    def mean(self,
+             numeric_only: bool = False,
+             engine: Literal["cython", "numba"] | None = None,
+             engine_kwargs: dict[str, bool] | None = None,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积均值（从起始点到当前点的移动平均值）
         Args:
@@ -2245,11 +2328,11 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def median(self, 
-            numeric_only: bool = False,
-            engine: Literal["cython", "numba"] | None = None,
-            engine_kwargs: dict[str, bool] | None = None, 
-            **kwargs) -> IndFrame | IndSeries:
+    def median(self,
+               numeric_only: bool = False,
+               engine: Literal["cython", "numba"] | None = None,
+               engine_kwargs: dict[str, bool] | None = None,
+               **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积中位数（从起始点到当前点的移动中位数）
         Args:
@@ -2262,11 +2345,11 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def std(self, 
-            ddof: int = 1, 
+    def std(self,
+            ddof: int = 1,
             numeric_only: bool = False,
             engine: Literal["cython", "numba"] | None = None,
-            engine_kwargs: dict[str, bool] | None = None, 
+            engine_kwargs: dict[str, bool] | None = None,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积标准差（从起始点到当前点的移动标准差）
@@ -2281,11 +2364,11 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def var(self, 
-            ddof: int = 1, 
+    def var(self,
+            ddof: int = 1,
             numeric_only: bool = False,
             engine: Literal["cython", "numba"] | None = None,
-            engine_kwargs: dict[str, bool] | None = None, 
+            engine_kwargs: dict[str, bool] | None = None,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积方差（从起始点到当前点的移动方差）
@@ -2300,9 +2383,9 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def sem(self, 
-            ddof: int = 1, 
-            numeric_only: bool = False, 
+    def sem(self,
+            ddof: int = 1,
+            numeric_only: bool = False,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积标准误（均值的标准偏差，反映均值的抽样误差）
@@ -2315,9 +2398,9 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def skew(self, 
-            numeric_only: bool = False, 
-            **kwargs) -> IndFrame | IndSeries:
+    def skew(self,
+             numeric_only: bool = False,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积偏度（衡量数据分布不对称性的变化）
         Args:
@@ -2328,9 +2411,9 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def kurt(self, 
-            numeric_only: bool = False, 
-            **kwargs) -> IndFrame | IndSeries:
+    def kurt(self,
+             numeric_only: bool = False,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积峰度（衡量数据分布陡峭程度的变化）
         Args:
@@ -2341,9 +2424,9 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def first(self, 
-            numeric_only: bool = False,
-            **kwargs)-> IndFrame | IndSeries:
+    def first(self,
+              numeric_only: bool = False,
+              **kwargs) -> IndFrame | IndSeries:
         """
         ## 扩展窗口首元素 —— 返回每个扩展窗口中最左侧（最早）的元素
 
@@ -2369,9 +2452,9 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def last(self, 
-            numeric_only: bool = False,
-            **kwargs)-> IndFrame | IndSeries:
+    def last(self,
+             numeric_only: bool = False,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 扩展窗口末元素 —— 返回每个扩展窗口中最右侧（最新）的元素
 
@@ -2397,9 +2480,10 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def quantile(self, q: float, 
-                interpolation: Literal["linear", "lower", "higher", "midpoint", "nearest"] = "linear",
-                numeric_only: bool = False, **kwargs) -> IndFrame | IndSeries:
+    def quantile(self, q: float,
+                 interpolation: Literal["linear", "lower",
+                                        "higher", "midpoint", "nearest"] = "linear",
+                 numeric_only: bool = False, **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积分位数（从起始点到当前点的移动分位数）
         Args:
@@ -2412,12 +2496,12 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def rank(self, 
-            method: Literal["average", "min", "max"] = "average",
-            ascending: bool = True, 
-            pct: bool = False, 
-            numeric_only: bool = False, 
-            **kwargs) -> IndFrame | IndSeries:
+    def rank(self,
+             method: Literal["average", "min", "max"] = "average",
+             ascending: bool = True,
+             pct: bool = False,
+             numeric_only: bool = False,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积排名（对从起始点到当前点的数据进行排序分配名次）
         Args:
@@ -2430,12 +2514,12 @@ class BtExpanding(BtBaseWindows):
             框架自定义的IndFrame/IndSeries类型结果，存储累积排名
         """
         ...
-    
+
     def nunique(
         self,
         numeric_only: bool = False,
         **kwargs
-    )-> IndFrame | IndSeries:
+    ) -> IndFrame | IndSeries:
         """
         ## 扩展窗口唯一值计数 —— 累积统计窗口中不同值的个数
 
@@ -2462,10 +2546,10 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def cov(self, other: pd.DataFrame | pd.Series | None = None, 
+    def cov(self, other: pd.DataFrame | pd.Series | None = None,
             pairwise: bool | None = None,
-            ddof: int = 1, 
-            numeric_only: bool = False, 
+            ddof: int = 1,
+            numeric_only: bool = False,
             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积协方差（从起始点到当前点的移动协方差）
@@ -2480,12 +2564,12 @@ class BtExpanding(BtBaseWindows):
         """
         ...
 
-    def corr(self, 
-            other: pd.DataFrame | pd.Series | None = None, 
-            pairwise: bool | None = None,
-            ddof: int = 1, 
-            numeric_only: bool = False, 
-            **kwargs) -> IndFrame | IndSeries:
+    def corr(self,
+             other: pd.DataFrame | pd.Series | None = None,
+             pairwise: bool | None = None,
+             ddof: int = 1,
+             numeric_only: bool = False,
+             **kwargs) -> IndFrame | IndSeries:
         """
         ## 计算扩展窗口内的累积相关系数（从起始点到当前点的移动相关系数）
         Args:
@@ -2636,6 +2720,7 @@ class BtExpandingGroupby(BtExpanding):
             **expanding_kwargs
         )
 
+
 @dataclass
 class KLineSetting(DataSetBase):
     """
@@ -2733,6 +2818,9 @@ class KLineSetting(DataSetBase):
         - 创建的stop_lines会在图表上显示为两条水平线/区间
         """
         from .core import IndFrame  # 延迟导入避免循环依赖
+        # 若已存在(例如用户提前访问 stop_lines 并预设了线型), 则复用而不覆盖
+        if self.stop_lines is not None:
+            return
         # 创建止损止盈线指标框架
         self.stop_lines = IndFrame(
             (len(self.current_close), 2),  # 数据形状：长度与收盘价相同，2列
@@ -2767,6 +2855,45 @@ class IndicatorsBase(Base):
     """
     # 内置指标数据类型
     __minibt_object__ = True
+
+    def color_by(self, condition, color, else_color=None, **options):
+        """## 逐点/逐根配色（交给 pylightcharts 图表渲染）。
+
+        与 pylightcharts 的同名方法语义一致：给数据点加 `color` 列（蜡烛还会
+        加 `wickColor`/`borderColor`）。这里只**记录规则**到
+        ``PlotInfo.color_rules``，真正上色在图表侧完成
+        （``minibt.strategy.realtime.apply_color_rules``），因此：
+
+        * 回测 / 回放 / 实时三种模式都生效；
+        * 指标重算、切换合约后依然生效（不会像旧 Qt 版每次刷新就掉色）。
+
+        典型用法::
+
+            self.data.color_by(self.data.close > self.data.open, Colors.red)
+            self.ma.color_by(self.ma > self.ma.shift(1), 'green')
+
+        :param condition: 布尔 Series/数组（按 `time` 对齐），或 ``callable(frame)``
+        :param color: 条件为真时的颜色
+        :param else_color: 条件为假时的颜色（``None`` = 保持原色）
+        :param options: 透传给 pylightcharts ``color_by`` 的其它参数
+            （如蜡烛的 ``wick_color`` / ``border_color``）
+        """
+        rule = {
+            'condition': condition,
+            'color': color,
+            'else_color': else_color,
+            'options': dict(options),
+        }
+        rules = self.__dict__.get('_color_rules')
+        if rules is None:
+            rules = []
+            object.__setattr__(self, '_color_rules', rules)
+        rules.append(rule)
+        try:
+            self._plotinfo.color_rules.append(rule)
+        except Exception:
+            pass
+        return self
     # ------------------------------
     # 核心属性（控制数据类型与行为）
     # ------------------------------
@@ -2816,79 +2943,87 @@ class IndicatorsBase(Base):
     _tqobj: TqObjs
     price_line: bool
     price_label: bool
-    _indframe:IndFrame | None=None
-    _indseries:IndSeries | None=None
-    _line:Line | None=None
-    _kline:KLine | None=None
-    _btindtype:BtIndType | None=None
-    _klnetype:KLineType | None=None
-    _indicatorclass:IndicatorClass | None=None
-    __pandas_ta :PandasTa | None=None
-    __talib:TaLib | None=None
-    __tulip:TuLip | None=None
-    __btind:BtInd | None=None
-    __finta:FinTa | None=None
-    __tqfunc:TqFunc | None=None
-    __tqta:TqTa | None=None
-    __pairtrading:Pair | None=None
-    __factors:Factors | None=None
-    __tradingsystem:TradingSystem | None=None
+    _indframe: IndFrame | None = None
+    _indseries: IndSeries | None = None
+    _line: Line | None = None
+    _kline: KLine | None = None
+    _btindtype: BtIndType | None = None
+    _klnetype: KLineType | None = None
+    _indicatorclass: IndicatorClass | None = None
+    __pandas_ta: PandasTa | None = None
+    __talib: TaLib | None = None
+    __tulip: TuLip | None = None
+    __btind: BtInd | None = None
+    __finta: FinTa | None = None
+    __tqfunc: TqFunc | None = None
+    __tqta: TqTa | None = None
+    __pairtrading: Pair | None = None
+    # __factors: Factors | None = None
+    __pine: Pine | None = None
+    __tradingsystem: TradingSystem | None = None
+    _params: Params
 
-    def _pandas_ta(self)->PandasTa:
+    def _pandas_ta(self) -> PandasTa:
         if self.__pandas_ta is None:
             from .core import PandasTa
             self.__pandas_ta = PandasTa
         return self.__pandas_ta
 
-    def _talib(self)->TaLib:
+    def _talib(self) -> TaLib:
         if self.__talib is None:
             from .talib import TaLib
             self.__talib = TaLib
         return self.__talib
 
-    def _tulip(self)->TuLip:
+    def _tulip(self) -> TuLip:
         if self.__tulip is None:
             from .tulip import TuLip
             self.__tulip = TuLip
         return self.__tulip
-    
-    def _finta(self)->FinTa:
+
+    def _finta(self) -> FinTa:
         if self.__finta is None:
             from .finta import FinTa
             self.__finta = FinTa
         return self.__finta
 
-    def _tqfunc(self)->TqFunc:
+    def _tqfunc(self) -> TqFunc:
         if self.__tqfunc is None:
             from .tqfunc import TqFunc
             self.__tqfunc = TqFunc
         return self.__tqfunc
-    
-    def _tqta(self)->TqTa:
+
+    def _tqta(self) -> TqTa:
         if self.__tqta is None:
             from .tqta import TqTa
             self.__tqta = TqTa
         return self.__tqta
 
-    def _btind(self)->BtInd:
+    def _btind(self) -> BtInd:
         if self.__btind is None:
             from .btind import BtInd
             self.__btind = BtInd
         return self.__btind
 
-    def _pairtrading(self)->Pair:
+    def _pairtrading(self) -> Pair:
         if self.__pairtrading is None:
             from .pair import Pair
             self.__pairtrading = Pair
         return self.__pairtrading
-    
-    def _factors(self)->Factors:
-        if self.__factors is None:
-            from .factors import Factors
-            self.__factors = Factors
-        return self.__factors
-    
-    def _tradingsystem(self)->TradingSystem:
+
+    # def _factors(self) -> Factors:
+    #     if self.__factors is None:
+    #         from .factors import Factors
+    #         self.__factors = Factors
+    #     return self.__factors
+
+    def _pine(self) -> Pine:
+        if self.__pine is None:
+            from .pine import Pine
+            self.__pine = Pine
+        return self.__pine
+
+    def _tradingsystem(self) -> TradingSystem:
         if self.__tradingsystem is None:
             from ..tradingsymtem.tradingsystem import TradingSystem
             self.__tradingsystem = TradingSystem
@@ -2909,7 +3044,7 @@ class IndicatorsBase(Base):
         return self._indframe
 
     def _get_line(self):
-        if self._line is None:  
+        if self._line is None:
             from .core import Line
             self._line = Line
         return self._line
@@ -2955,7 +3090,7 @@ class IndicatorsBase(Base):
         if not self.isindicator:
             return self
         return self._get_kline(self.data_id)
-    
+
     @kline.setter
     def kline(self, value: KLine | None):
         if not self.isindicator:
@@ -2990,10 +3125,11 @@ class IndicatorsBase(Base):
                 if not hasattr(node, '_dataset'):
                     break
                 node = node._dataset.source_object
-            self._dataset.kline_object = node if node is not None and type(node) == _KLine else None
+            self._dataset.kline_object = node if node is not None and type(
+                node) == _KLine else None
             return self._dataset.kline_object
         return self.strategy_instance._btklinedataset[data_id]
-    
+
     # ------------------------------
     # 交易逻辑与配置接口
     # ------------------------------
@@ -3222,6 +3358,17 @@ class IndicatorsBase(Base):
         """## 画图ID"""
         return self._indsetting.id.plot_id
 
+    @plot_id.setter
+    def plot_id(self, value) -> None:
+        """## 设置绘图ID（属性设置器）
+        仅接受整数类型，用于自定义指标在绘图中的分组
+
+        Args:
+            value (int): 新的绘图分组ID
+        """
+        if isinstance(value, (int, float)) and 0 <= value <= len(self._strategy_instances)-1:
+            self._indsetting.id.plot_id = int(value)
+
     @property
     def data_id(self) -> int:
         """## 获取数据ID（属性接口，BtID分解）
@@ -3254,6 +3401,52 @@ class IndicatorsBase(Base):
         """
         """## 播放ID"""
         return self._indsetting.id.replay_id
+
+    @property
+    def params(self) -> Params:
+        """## 获取指标参数（属性接口）
+        用于访问指标配置参数，如窗口大小、参数值等
+
+        Returns:
+            Params: 指标参数对象
+        """
+        """## 指标参数"""
+        if not hasattr(self, '_params'):
+            return Addict()
+        return self._params
+
+    @params.setter
+    def params(self, value: Params) -> None:
+        """## 设置指标参数（属性设置器）
+        用于更新指标配置参数，如窗口大小、参数值等
+
+        Args:
+            value (Params): 新的指标参数对象
+        """
+        self._params = Addict(value)
+
+    @property
+    def p(self) -> Params:
+        """## 获取指标参数（属性接口）
+        用于访问指标配置参数，如窗口大小、参数值等
+
+        Returns:
+            Params: 指标参数对象
+        """
+        """## 指标参数"""
+        if not hasattr(self, '_params'):
+            return Addict()
+        return self._params
+
+    @p.setter
+    def p(self, value: Params) -> None:
+        """## 设置指标参数（属性设置器）
+        用于更新指标配置参数，如窗口大小、参数值等
+
+        Args:
+            value (Params): 新的指标参数对象
+        """
+        self._params = Addict(value)
 
     # ------------------------------
     # 指标线配置接口（绘图与显示）
@@ -3337,7 +3530,7 @@ class IndicatorsBase(Base):
             self._plotinfo.rename_related_keys_using_mapping(new_key_mapping)
 
     @property
-    def line(self) -> list[Line] | IndSeries:
+    def line(self) -> list[Line | IndSeries] | IndSeries:
         """## 获取多维指标的Line对象列表（属性接口）
         仅对多维数据（isMDim=True）有效，返回所有列对应的Line实例
 
@@ -3425,23 +3618,20 @@ class IndicatorsBase(Base):
 
     @property
     def height(self) -> int:
-        """## 获取指标绘图高度（属性接口）
-        控制指标在图表中的显示高度（像素），默认最小值20
+        """## 获取指标绘图高度（**已废弃** ✗）
 
-        Returns:
-            int: 绘图高度（像素）
+        ⚠ 图表不再按固定像素高度布局：pylightcharts 按 **pane 比例**
+        （主图:副图 = 3:1 ✓）、bokeh 也直接置 ``None`` ✓。这个属性只为兼容
+        老脚本保留，**读写都不再影响图表** ✓（见 ``待办计划.md``）。
         """
-        """## 画图高度"""
         return self._plotinfo.height
 
     @height.setter
     def height(self, value: int) -> None:
-        """## 设置指标绘图高度（属性接口）
-        仅接受大于19的整数，确保绘图区域可见
-
-        Args:
-            value (int | float): 新的绘图高度（自动转换为整数）
-        """
+        """## 设置指标绘图高度（**已废弃、不生效** ✗，详见 getter 说明 ✓）"""
+        import warnings
+        warnings.warn('indicator.height 已废弃：图表按 pane 比例布局，设置不再生效',
+                      DeprecationWarning, stacklevel=2)
         if isinstance(value, (int, float)) and value > 19:
             self._plotinfo.height = int(value)
 
@@ -3527,6 +3717,54 @@ class IndicatorsBase(Base):
         if not self.isindicator and isinstance(value, CandleStyle):
             self._plotinfo.candlestyle = value
             self._plotinfo.category = Category.Candles
+
+    @property
+    def legend(self) -> bool:
+        """## 是否在图表左上角显示这个指标的**图例（标签）行**（读写属性）
+
+        代理 `_plotinfo.legend`，默认 `True`。
+
+        设为 `False` 时**只画线、不显示标签**，两套图引擎都生效：
+
+        - **pylightcharts**：`_get_plot_datas()` 把它放进 `_ind_plotinfo['legend']` ✓，
+          `light_chart.py` 建序列时透传 `create_line(..., legend=False)` ✓，
+          底层建完序列后 `SeriesCommon.remove_legend_row()` 摘掉那一行 ✓
+          （名字照常传下去，数据列映射不受影响 ✓）；
+        - **bokeh**：`btplot.py` 读到同一个 `plotinfo['legend']` ✓，
+          传 `legend_label=None` → bokeh 不生成图例项 ✓。
+
+        用法（实例属性 / 类属性都行 ✓）：
+        ```python
+        ind = kline.macd()
+        ind.legend = False        # 实例
+        kline.macd().btplot()     # 图上只有线，没有 macd 标签
+
+        class PositionLine(BtIndicator):
+            legend = False        # 类属性（载体线常用 ✓）
+        ```
+
+        Returns:
+            bool: `True` = 显示图例标签（默认）；`False` = 不显示。
+        """
+        return self._plotinfo.legend
+
+    @legend.setter
+    def legend(self, value: bool):
+        """## 设置是否显示图例标签（`False` = 只画线不显示标签）
+
+        Args:
+            value (bool | dict | list): ``bool`` 统一开关；``dict`` 按**线名**
+                （如 ``{'zero': False}`` 只隐藏 zero 那一行）/ ``list`` 按线序；
+                其它值按 `bool(value)` 归一化 ✓。
+
+        Note:
+            子类里写 **类属性** `legend = False` 时只会覆盖基类这个 property ✓，
+            不会写进 `_plotinfo` ✗ —— `_get_plot_datas()` 会额外读一次类属性并
+            透传（只认真正的 `bool` ✓），所以类和实例两种写法都能生效 ✓。
+        """
+        self._plotinfo.legend = (value
+                                 if isinstance(value, (dict, list, tuple))
+                                 else bool(value))
 
     # ------------------------------
     # 多周期与数据类型接口
@@ -3648,7 +3886,7 @@ class IndicatorsBase(Base):
         Returns:
             list[float]: 水平线位置列表
         """
-        return self._plotinfo.span_location
+        return [s.location for s in self._plotinfo.spanstyle]
 
     @span_location.setter
     def span_location(self, value):
@@ -3668,7 +3906,7 @@ class IndicatorsBase(Base):
         Returns:
             list[str | Colors]: 水平线颜色列表
         """
-        return self._plotinfo.span_color
+        return [s.line_color for s in self._plotinfo.spanstyle]
 
     @span_color.setter
     def span_color(self, value):
@@ -3678,7 +3916,13 @@ class IndicatorsBase(Base):
         Args:
             value (str | Colors | list[str | Colors]): 颜色配置（单个或列表）
         """
-        self._plotinfo.span_color = value
+        _spans = list(self._plotinfo.spanstyle)
+        if isinstance(value, (list, tuple)):
+            for _span, _value in zip(_spans, value):
+                _span.line_color = _value
+        else:
+            for _span in _spans:
+                _span.line_color = value
 
     @property
     def span_dash(self) -> list[str, LineDash]:
@@ -3688,7 +3932,7 @@ class IndicatorsBase(Base):
         Returns:
             list[str | LineDash]: 水平线线型列表
         """
-        return self._plotinfo.span_dash
+        return [s.line_dash for s in self._plotinfo.spanstyle]
 
     @span_dash.setter
     def span_dash(self, value):
@@ -3698,7 +3942,13 @@ class IndicatorsBase(Base):
         Args:
             value (str | LineDash | list[str | LineDash]): 线型配置（单个或列表）
         """
-        self._plotinfo.span_dash = value
+        _spans = list(self._plotinfo.spanstyle)
+        if isinstance(value, (list, tuple)):
+            for _span, _value in zip(_spans, value):
+                _span.line_dash = _value
+        else:
+            for _span in _spans:
+                _span.line_dash = value
 
     @property
     def span_width(self) -> list[float]:
@@ -3708,7 +3958,7 @@ class IndicatorsBase(Base):
         Returns:
             list[float]: 水平线宽度列表
         """
-        return self._plotinfo.span_width
+        return [s.line_width for s in self._plotinfo.spanstyle]
 
     @span_width.setter
     def span_width(self, value):
@@ -3718,7 +3968,13 @@ class IndicatorsBase(Base):
         Args:
             value (float | list[float]): 宽度配置（单个或列表）
         """
-        self._plotinfo.span_width = value
+        _spans = list(self._plotinfo.spanstyle)
+        if isinstance(value, (list, tuple)):
+            for _span, _value in zip(_spans, value):
+                _span.line_width = _value
+        else:
+            for _span in _spans:
+                _span.line_width = value
 
     # ------------------------------
     # 数据类型标识接口
@@ -4208,16 +4464,16 @@ class IndicatorsBase(Base):
         """
         return self._pairtrading()(self)
 
-    @property
-    def factors(self) -> Factors:
-        """## 获取因子分析接口（属性接口）
-        - 生成与管理因子数据（如动量因子、价值因子），用于多因子策略
+    # @property
+    # def factors(self) -> Factors:
+    #     """## 获取因子分析接口（属性接口）
+    #     - 生成与管理因子数据（如动量因子、价值因子），用于多因子策略
 
-        Returns:
-            Factors: 因子分析包装对象
-        """
-        return self._factors()(self)
-    
+    #     Returns:
+    #         Factors: 因子分析包装对象
+    #     """
+    #     return self._factors()(self)
+
     @property
     def tradingsystem(self) -> TradingSystem:
         """## 获取交易系统接口（属性接口）
@@ -4363,7 +4619,94 @@ class IndicatorsBase(Base):
         #         raise ValueError(
         #             f"❌：tradingview 指标需要包含 {FILED.OHLCV.tolist()} 列的 IndFrame 或 KLine 数据，"
         #             f"当前数据列: {self.pandas_object.columns.tolist()}")
-        return self.__tradingview(self,ischeck=False)
+        return self.__tradingview(self, ischeck=False)
+
+    @property
+    def pine(self) -> Pine:
+        """## 获取 Pine Script 指标库接口（属性接口）
+        - TradingView Pine Script ``ta.*`` 语义的指标指引
+        - 逐 bar 对齐 Pine 的播种 / na 传播 / 边界比较口径，专用于 TradingView 指标转换
+
+        ### 📘 **API文档参考**:
+        - https://www.tradingview.com/pine-script-reference/v5/#fun_ta
+
+        Returns:
+            Pine: Pine 指标包装对象
+
+        ### 核心功能：
+        - 以「与 Pine 逐 bar 等价」的方式实现 TradingView 的 ``ta.*`` 函数，
+          避开 pandas_ta / tulip / talib 在 EMA/RMA 播种、na 处理、边界比较上的口径差异
+        - 通过 ``@tobtind(lib="pine")`` 装饰器自动处理参数校验、计算与返回值转换，
+          统一返回框架内置的 ``IndSeries`` / ``IndFrame``
+        - 可在任意 KLine / IndFrame / IndSeries 上调用并链式组合，
+          如 ``self.close.pine.rsi(14).pine.ema(9)``
+
+        ### 指标分类与包含列表：
+        该类支持的 Pine ``ta.*`` 函数按功能划分为以下 9 大类，具体包含指标如下：
+
+        **1. 均线 / 平滑（Overlap）**
+        - 功能：对价格或任意序列做平滑、加权、回归拟合
+        - 包含函数：sma、wma、hma、vwma、swma、alma、linreg、median、ema、rma
+
+        **2. 变换 / 差分**
+        - 功能：累计、差分、变动率、重心等基础变换
+        - 包含函数：cum、change、roc、mom、cog、range
+
+        **3. 波动率 / 统计**
+        - 功能：真实波幅、方差/标准差、相关性、分位数等统计量
+        - 包含函数：tr、atr、stdev、variance、dev、correlation、percentrank、percentile_nearest_rank
+
+        **4. 极值**
+        - 功能：窗口内最高/最低值及其位置
+        - 包含函数：highest、lowest、highestbars、lowestbars、max、min
+
+        **5. 交叉 / 逻辑**
+        - 功能：穿越、连续涨跌、条件取值、bar 计数、摆动点
+        - 包含函数：cross、crossover、crossunder、rising、falling、valuewhen、barssince、pivothigh、pivotlow
+
+        **6. 振荡器**
+        - 功能：动量 / 超买超卖 / 趋势强度等振荡指标
+        - 包含函数：rsi、cci、cmo、wpr、mfi、rci、tsi、wavetrend、stoch、bbw、adx_wilder
+
+        **7. 成交量 / 累积**
+        - 功能：累计/派发、成交量加权均价
+        - 包含函数：accdist、vwap
+
+        **8. 多输出（IndFrame）**
+        - 功能：一次性返回多条线（布林带 / MACD / DMI）
+        - 包含函数：bb（bb_middle/bb_upper/bb_lower）、macd（macd/signal/hist）、dmi（plus_di/minus_di/adx）
+
+        **9. 其他**
+        - 功能：MLExtensions 归一化与抛物线 SAR
+        - 包含函数：normalize、sar
+
+        ### 使用说明：
+        1. 单序列指标（需要 OHLC 的请在 KLine 上调用）：
+        >>> rsi14 = self.close.pine.rsi(14)              # IndSeries
+        >>> atr14 = self.data.pine.atr(14)               # IndSeries（需 high/low/close）
+        >>> bb = self.close.pine.bb(20, 2.0)             # IndFrame: bb_middle/bb_upper/bb_lower
+        >>> macd = self.close.pine.macd(12, 26, 9)       # IndFrame: macd/signal/hist
+
+        2. 双序列 / 条件类（主序列为调用者，另一序列作参数）：
+        >>> cross = self.close.pine.crossover(self.close.pine.sma(20))
+        >>> since = (self.close > self.close.pine.sma(20)).pine.barssince()
+        >>> vw = self.close.pine.valuewhen(self.close > self.close.pine.sma(20))
+
+        3. 返回值特性：
+        - 单输出返回 ``IndSeries``，多输出返回 ``IndFrame``，可直接用于后续策略逻辑
+
+        ### 注意事项：
+        - **口径约定**：`ema` 首值播种；`rma` 为 SMA 播种的 Wilder 平滑（`na` 会使结果变 na
+          并在下一满窗口重播种）；`tr` 默认 `handle_na=False`（首根 na）、`atr` 默认 `handle_na=True`；
+          `stdev`/`variance` 默认总体口径（`biased=True`，除 N）；`highestbars`/`lowestbars` 返回
+          **非负**偏移（0 = 当前 bar）；`vwap` 自序列起点累计、不做日切重置；
+          `pivothigh`/`pivotlow` 两侧严格比较（右侧确认后落值）。
+        - 需要 OHLC(V) 的函数（`tr`/`atr`/`wpr`/`mfi`/`stoch`/`dmi`/`sar`/`accdist`/`vwap`）
+          请在 KLine 或包含对应列的 IndFrame 上调用。
+        - 与 `pta` 的差异：`pine` 以 TradingView 语义为准，不提供 pandas_ta / talib 的
+          `presma`/`talib`/`offset` 等参数。
+        """
+        return self._pine()(self)
 
     # ------------------------------
     # 策略与回测状态接口
@@ -4516,6 +4859,17 @@ class IndicatorsBase(Base):
             self.ma5.history(2, 2)   # 10-20周期前的MA5值（不含最新）
             self.ma5.iloc[-4:-2])
         """
+        # 快路径：`.new` / `.prev`（size=1、维度匹配）在策略里每根 bar 都调，
+        # 直接读底层 numpy，绕过 cachedmethod 的字典查找与缓存堆积
+        # （btindex 每根都变，缓存永远 miss 且涨到上万条）。
+        if size == 1:
+            setting = self._indsetting
+            if setting.dim_match:
+                index = self.btindex - lookback
+                try:
+                    return self.values[index]
+                except Exception:
+                    pass
         return self.__history(lookback, size, self.btindex)
 
     @cachedmethod(attrgetter('cache'))
@@ -4620,7 +4974,7 @@ class IndicatorsBase(Base):
                 )
             )
             # 生成上采样数据对象（多维→IndFrame，一维→IndSeries）
-            #from ._core import IndSeries, IndFrame  # 延迟导入避免循环依赖
+            # from ._core import IndSeries, IndFrame  # 延迟导入避免循环依赖
             if data.shape[1] != 1:
                 data = self._get_indframe()(data, ** kwargs)
             else:
@@ -4784,9 +5138,19 @@ class IndicatorsBase(Base):
         >>> Strategy: 关联的策略实例
         """
         """## 策略实例"""
-        if not self._strategy_instances:
+        instances = self._strategy_instances
+        if not instances:
             return
-        return self._strategy_instances[self.id.strategy_id]
+        # 回测里 `.new`/`btindex` 每根 bar 都会走这里（几万次）。按
+        # `_strategy_instances` 对象缓存一次，全局重置（换回测）时自动失效。
+        cache = object.__getattribute__(self, '__dict__').get(
+            '_strategy_instance_cache')
+        if cache is not None and cache[0] is instances:
+            return cache[1]
+        instance = instances[self.id.strategy_id]
+        object.__getattribute__(self, '__dict__')[
+            '_strategy_instance_cache'] = (instances, instance)
+        return instance
 
     # ------------------------------
     # 底层数据操作接口
@@ -5249,6 +5613,11 @@ class IndicatorsBase(Base):
             - 若为Pandas方法：返回装饰后的方法（返回指标对象）
             - 若为普通属性/方法：返回原始结果（如sname、btindex）
         """
+        # 快速通道：dunder（__x__）不可能是 pandas 方法，直接返回，
+        # 省掉一次集合成员判断（回测里 __getattribute__ 调用非常多）
+        if len(item) > 4 and item[0] == '_' and item[1] == '_' \
+                and item[-1] == '_' and item[-2] == '_':
+            return super().__getattribute__(item)
         # 拦截Pandas方法：自动装饰并返回
         if item in pandas_method:
             return self._wrap_pandas_method_to_indicator(super().__getattribute__(item))
@@ -5790,7 +6159,7 @@ class IndicatorsBase(Base):
     # 绘图数据组装（供前端渲染）
     # ------------------------------
 
-    def _get_plot_datas(self, key: str="") -> tuple:
+    def _get_plot_datas(self, key: str = "") -> tuple:
         """## 指标画图数据
         - 组装绘图所需的完整数据（内部方法，供策略绘图模块调用）
         - 整合指标的配置信息（ID、线条、颜色）与数值数据，生成前端可直接渲染的结构化数据，
@@ -5814,6 +6183,7 @@ class IndicatorsBase(Base):
                 11. _ind_plotinfo (dict): 指标绘图配置（颜色、线型、水平线等）
                 12. span (dict): 水平线样式配置（如RSI的20/80分界线）
                 13. _signal (dict): 交易信号样式配置（如开多信号的颜色、标记）
+                14. band (tuple): 带样式配置（如RSI的20/80分界线）
 
         ### 核心逻辑：
         - 1. 基础信息提取：获取plot_id、数据维度、数值数组等基础信息
@@ -5911,6 +6281,12 @@ class IndicatorsBase(Base):
         # 基础绘图配置：优先取plotinfo的vars，无则取plotinfo自身
         v_plotinfo = self._plotinfo.vars if hasattr(
             self.plotinfo, "vars") else self._plotinfo
+        # ★ 指标**类属性** ``legend``：``class Xxx(BtIndicator): legend = False``
+        # 只覆盖了基类上的 ``legend`` property，并不会写进 ``_plotinfo`` ✗，
+        # 所以这里显式透传一次（bool 才算，property/其它类型跳过 ✓）
+        _cls_legend = getattr(type(self), "legend", None)
+        if isinstance(_cls_legend, bool):
+            v_plotinfo["legend"] = _cls_legend
         # 蜡烛图特殊处理：添加数据源标识（key）
         if kwargs.category == 'candles':
             v_plotinfo.update(dict(source=key))
@@ -5921,11 +6297,12 @@ class IndicatorsBase(Base):
         # 信号样式配置：有交易信号时从plotinfo获取signalstyle
         _signal = v_plotinfo.get("signalstyle", {})
         _signal = _signal.vars if hasattr(_signal, "vars") else _signal
-
+        # 带样式配置：从plotinfo获取bandstyle
+        bandstyle = v_plotinfo.get("bandstyle", [])
         # 返回结构化绘图数据
         return (
             plot_id, isplot, name, lines, _lines, ind_names, overlaps,
-            categorys, indicators, doubles, _ind_plotinfo, span, _signal
+            categorys, indicators, doubles, _ind_plotinfo, span, _signal, bandstyle
         )
 
     # ------------------------------
@@ -5968,8 +6345,16 @@ class IndicatorsBase(Base):
             # 适配框架内部btindex，处理偏移逻辑
             if key < 0:
                 key += self.btindex + 1
+            # 快速通道：IndSeries + RangeIndex 时位置==标签，直接读底层 numpy，
+            # 省掉 pandas `.iloc` 的开销（指标循环里 high[i]/close[i] 极常见）
+            if (not self.isMDim and isinstance(self.index, pd.RangeIndex)
+                    and 0 <= key < len(self)):
+                return self.values[key]
             # 整数作为行索引，调用iloc取值
             data = self.iloc[key]
+            # 快速通道：标量直接返回，不走 pandas 对象转换检查
+            if not isinstance(data, (pd.Series, pd.DataFrame)):
+                return data
 
         # 2. 处理元组索引（多维索引，如 [行切片, 列名]）
         elif isinstance(key, tuple):
@@ -6034,6 +6419,25 @@ class IndicatorsBase(Base):
             key: 索引键
             value: 待赋值的数据
         """
+        # 快速通道：`series[i] = 标量`（逐点写）在指标循环里极常见（如
+        # G_Channels / VWAPPriceChannel 每个 bar 写一次）。原实现每次都走
+        # pandas 索引 + 类型转换 + 上采样/线同步，10000 次就上秒。
+        # 只在“RangeIndex + 无上采样”时走快路径，语义与 `.loc` 完全一致。
+        if (isinstance(key, (int, np.integer))
+                and not hasattr(value, '__iter__')
+                and isinstance(self.index, pd.RangeIndex)
+                and getattr(getattr(self, '_dataset', None),
+                            'upsample_object', None) is None):
+            try:
+                self.values[key] = value
+                po = self._dataset.pandas_object
+                try:
+                    po.values[key] = value
+                except Exception:
+                    pass
+                return
+            except Exception:
+                pass
         ischange = key not in self.lines
         # 安全获取 value 的 kline（避免 value.kline 内部遍历 source_object 链时崩溃）
         try:
@@ -6051,7 +6455,8 @@ class IndicatorsBase(Base):
             if isinstance(key, slice) and key == slice(None):
                 vlen = len(value) if hasattr(value, '__len__') else 1
                 if vlen != len(self):
-                    new_series = pd.Series(value, dtype=self.dtype, name=self.name)
+                    new_series = pd.Series(
+                        value, dtype=self.dtype, name=self.name)
                     pd.Series.__init__(self, new_series)
                     self._dataset.pandas_object = pd.Series(
                         self.values, index=self.index, dtype=self.dtype, name=self.name
@@ -6094,11 +6499,11 @@ class IndicatorsBase(Base):
             isplot = True
             overlap = False
             if isinstance(self._plotinfo.isplot, bool):
-                isplot=self._plotinfo.isplot
+                isplot = self._plotinfo.isplot
                 self._plotinfo.isplot = Addict()
-                
+
             if isinstance(self._plotinfo.overlap, bool):
-                overlap=self._plotinfo.overlap
+                overlap = self._plotinfo.overlap
                 self._plotinfo.overlap = Addict()
             self._plotinfo.isplot[key] = isplot
             self._plotinfo.overlap[key] = overlap
@@ -6198,16 +6603,25 @@ class IndicatorsBase(Base):
     def btplot(
             self,
             include: Literal["all", "last"] = "all",
-            black_style: bool = False,
+            black_style: bool | None = None,
             open_browser: bool = False,
             plot_cwd: str = "",
             plot_name: str = "",
             save_plot: bool = False,
+            theme: Literal['dark', 'light'] | None = None,
+            toolbox: bool | None = None,
+            grid: bool | None = None,
+            gui: Literal['bokeh', 'pylightcharts',
+                         'pylightcharts_web'] | None = None,
+            display: Literal['auto', 'inline', 'external'] | None = None,
+            volume_mode: str = 'overlay',
             **kwargs) -> None:
         """
-        ##  Bokeh生成的交互式金融行情技术分析图表
-        - 此函数自动检测数据格式（OHLCV、时间序列或指标）并使用内置技术分析工具
-        - 和专业样式创建相应的交互式可视化图表。
+        ##  交互式金融行情技术分析图表（bokeh / pylightcharts 两套引擎）
+        - 自动检测数据格式（OHLCV、时间序列或指标），用内置技术分析工具与专业样式
+          生成交互式可视化图表。
+        - 默认引擎是 **pylightcharts**（与 ``Bt.run()`` 一致；复用 minibt 的策略窗口：
+          顶栏 / 页面 / 主题 / 网格等）；只有显式 ``gui='bokeh'`` 才用 bokeh 交互图。
 
         ### 📘 **文档参考**:
         - https://www.minibt.cn/minibt_basic/1.19minibt_interactive_financial_charting_with_btplot/
@@ -6217,8 +6631,25 @@ class IndicatorsBase(Base):
         - **include**: 多指标显示模式
           - `"all"`: 显示计算链中的所有相关指标
           - `"last"`: 仅显示最终的指标结果
-        - **black_style**: 启用暗黑主题，在低光环境下提供更好的视觉舒适度
-        - **open_browser**: 强制在网页浏览器中打开（默认自动检测Jupyter环境）
+        - **black_style**: 旧版主题开关（True=深色）。默认 None，由 ``theme`` 决定
+        - **theme**: 图表主题 ``'light'``（默认）/ ``'dark'``（与 pylightcharts 同名同义）；传 ``None`` 则跟随指标所属策略的 ``self.theme`` / ``config.theme``
+        - **open_browser**: 旧版显示开关（兼容）。``True`` = ``display='external'``，
+          ``False`` = ``display='auto'``
+        - **display**: 显示位置（推荐，优先于 ``open_browser``）
+          - ``'auto'``（默认）：Jupyter 里**内联**显示，脚本里**外部**打开
+          - ``'inline'``：强制内联（Jupyter）
+          - ``'external'``：强制外部打开（``bokeh``/``pylightcharts_web`` → 浏览器；
+            ``pylightcharts`` → 原生窗口）
+        - **gui**: 看图引擎（**默认 ``None`` = pylightcharts 原生窗口**）
+          - ``'pylightcharts'``（= ``'light_chart'``）：pylightcharts 原生窗口（默认）
+          - ``'pylightcharts_web'``（= ``'browser'``）：pylightcharts 网页版
+          - ``'jupyter'``：Notebook 内联；``'bokeh'``：bokeh 交互图（需显式指定）
+        - **grid**: 是否显示网格线（默认 ``False``）；``None`` 时回退到指标所属策略的
+          ``config.grid``。bokeh 与 pylightcharts 共用
+        - **toolbox**: 是否显示工具栏/工具（bokeh 右侧工具栏 / pylightcharts 画线工具，
+          默认 ``False``）；``None`` 时回退到 ``config.toolbox``
+        - **volume_mode**: 成交量显示方式（默认 ``'overlay'`` = 叠加在主图底部）
+          - ``'overlay'`` 主图叠加 / ``'sub'`` 独立副图 / ``'both'`` 两者 / ``'none'`` 不显示
         - **plot_cwd**: 保存图表文件的自定义目录路径（默认使用strategy/plots）
         - **plot_name**: 保存图表的自定义文件名（默认：'btplot.html'）
         - **save_plot**: 自动将图表保存为HTML文件，便于分享或文档记录
@@ -6255,14 +6686,16 @@ class IndicatorsBase(Base):
           重新构造实例应用属性，对指标对象会调用`upsample`进行上采样过滤。
 
         ### 功能特性:
-        - 智能OHLCV检测，提供K线图和成交量柱状图
+        - 智能OHLCV检测，提供K线图和成交量柱状图（成交量默认叠加在主图底部）
         - 交互式缩放、平移和悬停提示，显示精确数据值
         - 自动指标叠加，采用专业配色方案
-        - 十字准星工具，用于精确坐标跟踪
+        - 十字准星工具 + 跨图联动，在底部 X 轴 / 右侧 Y 轴显示跟踪标签
+        - 左上角带数值的指标标签（点行可隐藏/显示对应指标线）
         - 图例控制，可显示/隐藏单个指标
-        - 响应式设计，适应容器尺寸
-        - 支持暗黑/明亮主题，满足不同视觉偏好
-        - 多环境支持（Jupyter和独立浏览器）
+        - 响应式设计，适应容器尺寸；`bokeh_fullscreen=None` 时 Jupyter 不铺满、
+          浏览器铺满且不出现滚动条
+        - 网格 / 工具栏 / 主题统一（``grid`` / ``toolbox`` / ``theme``）
+        - 多环境支持（Jupyter 内联、独立浏览器、pylightcharts 原生窗口）
         - 自动处理缺失值和数据缺口
 
         ### 返回:
@@ -6281,8 +6714,22 @@ class IndicatorsBase(Base):
 
         >>> # 仅显示最终指标结果
         >>> bd.close.sma().ema().btplot("last")
+
+        >>> # 在浏览器里用 pylightcharts 打开（开启网格与画线工具）
+        >>> bd.close.sma(20).btplot(gui='pylightcharts_web',
+        ...                         display='external', grid=True, toolbox=True)
+
+        >>> # Jupyter 里内联显示（默认行为，无需额外参数）
+        >>> bd.close.sma(20).btplot()
         """
-        self.BtPlot()(self, include, black_style, open_browser, plot_cwd, plot_name, save_plot,**kwargs)
+        # 全部用关键字转发：`minibt/btplot.py::btplot` 的参数比较多，
+        # 位置透传容易在以后加参数时错位。
+        self.BtPlot()(
+            self, include=include, black_style=black_style,
+            open_browser=open_browser, plot_cwd=plot_cwd,
+            plot_name=plot_name, save_plot=save_plot, theme=theme,
+            toolbox=toolbox, grid=grid, gui=gui, display=display,
+            volume_mode=volume_mode, **kwargs)
 
     def concat(
         self,
@@ -6403,5 +6850,3 @@ class IndicatorsBase(Base):
         else:
             # 一维数据 -> 创建IndSeries
             return self._get_indseries()(data.values, **indicator_kwargs)
-
-

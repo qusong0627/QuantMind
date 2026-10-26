@@ -1,6 +1,6 @@
 # 导入所需的技术指标和工具函数
 # from pandas_ta.core import atr, stdev, true_range, npNaN  # 导入ATR、标准差、真实波动范围等指标
-from ..core import smoothrng, np  # 导入平滑随机数函数和部分应用函数
+import numpy as np  # 数值计算
 from ..indicators import Stop, Literal  # 导入基础止损类
 
 
@@ -440,3 +440,170 @@ class FTStop(Stop):
                 self.target_distance * self.price_tick
         else:
             self.target_price.new = per_target_price
+
+
+class ThreeCommasStop(Stop):
+    """## 3Commas Bot 止损止盈（摆动点 + ATR 跟踪止损 + 盈亏比止盈）
+
+    复刻 TradingView 脚本 *3Commas Bot* (Bjorgum) 的风控部分:
+    https://cn.tradingview.com/script/MvlwAzSg-3Commas-Bot/
+
+    本停止类只负责**开仓之后**的 ``stop_price`` / ``target_price`` 计算,
+    不包含原脚本的均线交叉入场信号(入场信号请在自己的策略里生成)。
+
+    ### 计算规则(与原脚本一致)
+    开仓首根 bar(用 ``self.kline.open_price`` 作为入场价):
+
+        # 多单
+        stop   = lowestLow(swing_lookback)   - ATR(atr_len) * risk_m
+        risk   = entry - stop
+        target = entry + rnr * risk              # use_limit=False 时不设止盈
+        trigger = entry + rnr * risk * rr_exit
+
+        # 空单(方向相反)
+        stop   = highestHigh(swing_lookback) + ATR(atr_len) * risk_m
+        risk   = stop - entry
+        target = entry - rnr * risk
+        trigger = entry - rnr * risk * rr_exit
+
+    持仓期间:
+
+        - ``trail_stop=True`` 时按 ATR 跟踪止损: 多单只上移、空单只下移,
+          即"跟踪止盈/锁住利润", 止损线不是水平线;
+        - ``trail_source`` 决定跟踪基准:
+          ``"High/Low"``=摆动高/低点(默认), ``"Close"``/``"Open"``=前一根收盘/开盘;
+        - ``rr_exit>0`` 时价格须先触及 ``trigger`` 才开始跟踪; ``rr_exit=0`` 则开仓即跟踪;
+        - ``target`` 开仓后固定不变(水平线)。
+
+    ## Args:
+        swing_lookback (int): 摆动高低点回看长度. Defaults to 5.
+        atr_len (int): ATR 周期. Defaults to 14.
+        risk_m (float): 初始止损的 ATR 乘数(Risk Adjustment). Defaults to 1.0.
+        rnr (float): 盈亏比 Reward:Risk. Defaults to 1.0.
+        use_limit (bool): 是否设置止盈目标. Defaults to True.
+        trail_stop (bool): 是否启用 ATR 跟踪止损. Defaults to True.
+        trail_stop_size (float): 跟踪止损的 ATR 乘数. Defaults to 1.0.
+        trail_source (str): 跟踪基准, 可选 ["High/Low", "Close", "Open"]. Defaults to "High/Low".
+        rr_exit (float): 触发跟踪所需的盈利比例(0~1, 相对目标距离). Defaults to 0.0.
+
+    ### Examples
+    ```python
+    self.data.buy(stop=BtStop.ThreeCommasStop)
+    self.data.sell(stop=BtStop.ThreeCommasStop(
+        swing_lookback=10, atr_len=14, risk_m=1.5,
+        rnr=2.0, trail_stop_size=1.5, rr_exit=0.5))
+    ```
+    """
+
+    def __init__(self, swing_lookback: int = 5, atr_len: int = 14,
+                 risk_m: float = 1., rnr: float = 1., use_limit: bool = True,
+                 trail_stop: bool = True, trail_stop_size: float = 1.,
+                 trail_source: Literal["High/Low", "Close", "Open"] = "High/Low",
+                 rr_exit: float = 0.) -> None:
+        self.swing_lookback = max(1, int(swing_lookback))  # 摆动点回看长度
+        self.atr_len = max(1, int(atr_len))  # ATR 周期
+        self.risk_m = float(risk_m)  # 初始止损 ATR 乘数
+        self.rnr = float(rnr)  # 盈亏比
+        self.use_limit = bool(use_limit)  # 是否设止盈
+        self.trail_stop = bool(trail_stop)  # 是否启用跟踪止损
+        self.trail_stop_size = float(trail_stop_size)  # 跟踪止损 ATR 乘数
+        self.trail_source = trail_source  # 跟踪基准
+        self.rr_exit = float(rr_exit)  # 触发跟踪的盈利比例
+        # 与持仓无关的指标, 可全量预计算(框架会随数据滚动更新)
+        self._atr = self.kline.atr(self.atr_len)
+        self._lowest_low = self.low.rolling(self.swing_lookback).min()
+        self._highest_high = self.high.rolling(self.swing_lookback).max()
+        # 持仓状态(每次开仓首根 bar 重置)
+        self._look_for_exit = False  # 是否已启动跟踪
+        self._trigger = np.nan  # 跟踪触发线
+
+    def _reset(self) -> None:
+        """开仓首根 bar 重置持仓状态"""
+        self._look_for_exit = self.rr_exit == 0.
+        self._trigger = np.nan
+
+    def long(self) -> None:
+        """多单止损/止盈计算"""
+        atr = self._atr[-1]
+        lowest_low = self._lowest_low[-1]
+        if np.isnan(self.stop_price[-2]):  # 开仓首根 bar
+            self._reset()
+            if np.isnan(atr) or np.isnan(lowest_low):
+                self.stop_price.new = np.nan
+                self.target_price.new = np.nan
+                return
+            stop = lowest_low - atr * self.risk_m
+            entry = self.kline.open_price
+            risk = entry - stop
+            if self.use_limit:
+                target = entry + self.rnr * risk
+                self._trigger = entry + self.rnr * risk * self.rr_exit
+            else:
+                target = np.nan
+        else:
+            stop = self.stop_price[-2]
+            target = self.target_price[-2]
+
+        # rr_exit: 价格走到目标的 rr_exit 比例后才启动跟踪
+        if self.trail_stop and not self._look_for_exit and not np.isnan(self._trigger):
+            if self.high[-1] >= self._trigger:
+                self._look_for_exit = True
+
+        # ATR 跟踪止损(只上移, 锁定利润)
+        if self.trail_stop and self._look_for_exit and not np.isnan(atr):
+            if self.trail_source == "Close":
+                src = self.close[-2]
+            elif self.trail_source == "Open":
+                src = self.open[-2]
+            else:  # "High/Low": 摆动低点
+                src = lowest_low
+            if not np.isnan(src):
+                trail = src - atr * self.trail_stop_size
+                if np.isnan(stop) or trail > stop:
+                    stop = trail
+
+        self.stop_price.new = stop
+        self.target_price.new = target
+
+    def short(self) -> None:
+        """空单止损/止盈计算"""
+        atr = self._atr[-1]
+        highest_high = self._highest_high[-1]
+        if np.isnan(self.stop_price[-2]):  # 开仓首根 bar
+            self._reset()
+            if np.isnan(atr) or np.isnan(highest_high):
+                self.stop_price.new = np.nan
+                self.target_price.new = np.nan
+                return
+            stop = highest_high + atr * self.risk_m
+            entry = self.kline.open_price
+            risk = stop - entry
+            if self.use_limit:
+                target = entry - self.rnr * risk
+                self._trigger = entry - self.rnr * risk * self.rr_exit
+            else:
+                target = np.nan
+        else:
+            stop = self.stop_price[-2]
+            target = self.target_price[-2]
+
+        # rr_exit: 价格走到目标的 rr_exit 比例后才启动跟踪
+        if self.trail_stop and not self._look_for_exit and not np.isnan(self._trigger):
+            if self.low[-1] <= self._trigger:
+                self._look_for_exit = True
+
+        # ATR 跟踪止损(只下移, 锁定利润)
+        if self.trail_stop and self._look_for_exit and not np.isnan(atr):
+            if self.trail_source == "Close":
+                src = self.close[-2]
+            elif self.trail_source == "Open":
+                src = self.open[-2]
+            else:  # "High/Low": 摆动高点
+                src = highest_high
+            if not np.isnan(src):
+                trail = src + atr * self.trail_stop_size
+                if np.isnan(stop) or trail < stop:
+                    stop = trail
+
+        self.stop_price.new = stop
+        self.target_price.new = target

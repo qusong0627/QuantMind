@@ -11,10 +11,47 @@ from inspect import signature
 import glob
 import sys
 import io
+import threading
 from contextlib import AbstractContextManager, contextmanager
 from enum import Enum
 
 
+#: `ensure_core_loaded()` 的“已导入”标记 + 双重检查锁（线程安全，见函数说明）
+_core_loaded = False
+_core_loaded_lock = threading.Lock()
+
+
+def ensure_core_loaded():
+    """惰性导入 :mod:`minibt.core`。
+
+    ``minibt.core`` 会连带导入 pandas_ta、注册 pandas 的 ``.ta`` 访问器，
+    并对 pandas_ta 应用 minibt 的补丁。为加快 ``import minibt``，
+    ``core`` 不再随顶层包急切导入；所有访问 ``.ta`` 的地方都应先调用本函数。
+
+    ★ **线程安全**：``TPE.multi_run`` 会在多个线程里并发调用
+    ``multi_apply``（如 ``KLine.run(["ma1", Multiply(PandasTa.sma, ...)])``），
+    每个线程都会走到这里。以前只做一次
+    ``"minibt.core" not in sys.modules`` 判断 —— 但 Python 在**执行模块体之前**
+    就已把模块放进 ``sys.modules``，所以第一个线程刚开始导入（``.ta`` 访问器
+    还没注册）时，其它线程看到“已在 sys.modules 里”就跳过，紧接着
+    ``getattr(df, "ta")`` 抛 ``AttributeError: 'DataFrame' object has no
+    attribute 'ta'`` ✗。现在用双重检查锁：只有一个线程执行导入，其它线程
+    等它完成后直接返回 ✓。
+    """
+    global _core_loaded
+    if _core_loaded:
+        return
+    with _core_loaded_lock:
+        if _core_loaded:
+            return
+        from . import core  # noqa: F401
+        _core_loaded = True
+
+
+def missing_extra(package: str, extra: str = "", feature: str = "") -> ImportError:
+    """构造“缺少依赖”时的友好 ImportError（extra 参数保留仅为兼容旧调用）。"""
+    prefix = f"{feature} " if feature else ""
+    return ImportError(f"{prefix}缺少依赖 {package}，请安装：pip install {package}")
 
 
 # 枚举类定义
@@ -276,31 +313,28 @@ class FILED:
 
 
 def save_and_generate_utils(data: pd.DataFrame, base_dir: str, save: str | None, name: str | None):
+    """把数据保存到**用户数据目录** ``~/.minibt/datas``，并刷新 ``LocalDatas`` 索引。
+
+    保留旧签名（``base_dir`` 已不再使用）以兼容调用方；保存完成后会调用
+    ``minibt/data/tools.py::rewrite_datas()`` 重新生成 ``minibt/data/utils.py``，
+    把新名字写成 ``LocalDatas`` 的类属性（包内 ``minibt/data/test`` 是基础数据，
+    这里不往安装目录写文件）。
+    """
+    from .data.tools import user_datas_dir, rewrite_datas
     # 处理文件名（默认用symbol，支持自定义）
     file_name = save if isinstance(save, str) else name
-    if "." in file_name:
+    if file_name and "." in file_name:
         file_name = file_name.split(".")[1]
     file_name = f"{file_name}.csv"
-    # 保存路径（BASE_DIR/data/test/）
-    path = os.path.join(base_dir, "data", "test", file_name)
+    out_dir = user_datas_dir()
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, file_name)
     data.to_csv(path, index=False)
-    # 自动更新本地数据工具类（生成utils.py，包含所有CSV数据的引用）
-    csv_files = glob.glob(os.path.join(
-        base_dir, "data", "test", "*.csv"))
-    py_file_path = os.path.join(base_dir, "data", "utils.py")
-    # 生成工具类内容
-    class_content = [
-        'from .tools import *', "", "",
-        'class LocalDatas(base):', '    """本地CSV数据"""']
-    for file in csv_files:
-        file_name = os.path.splitext(os.path.basename(file))[0]
-        class_content.append(
-            f'    {file_name} = DataString("{file_name}")')
-    class_content.extend(["", ""])
-    class_content.append('LocalDatas=LocalDatas()')
-    # 写入文件
-    with open(py_file_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(class_content))
+    try:
+        rewrite_datas()                    # 让 LocalDatas 里出现这个新名字
+    except Exception as error:             # 只读安装等：不影响保存结果
+        print(f'[minibt] 刷新 LocalDatas 索引失败：{error}')
+    return path
 
 
 def find_pth_files(cwd=None, file_extension=".pth"):

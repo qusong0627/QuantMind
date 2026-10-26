@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from .core import *
 
 
-
 class BtInd:
     """## 自定义指标指引
     - 自定义指标类，用于封装项目中自定义的基础指标计算逻辑，提供框架兼容的指标访问接口
@@ -1004,7 +1003,8 @@ class BtInd:
         """
         ...
 
-    @tobtind(lines=['thrend', 'dir', 'long', 'short'], overlap=dict(thrend=False, dir=False, long=True, short=True), lib='btind')
+    @tobtind(lines=['thrend', 'dir', 'long', 'short'], overlap=dict(thrend=True, dir=False, long=True, short=True),
+             isplot=dict(thrend=False, dir=False, long=True, short=True), lib='btind')
     def supertrend(self, length=14, multiplier=2., weights=2., **Kwargs) -> IndFrame:
         """
         超级趋势指标 (SuperTrend)
@@ -1341,7 +1341,7 @@ class BtInd:
         """
         ...
 
-    @tobtind(lines=["up", "dn", "bull", "bear", "signal"], overlap=dict(up=True,dn=True,bull=False,bear=False,signal=False), lib="btind")
+    @tobtind(lines=["up", "dn", "bull", "bear", "signal"], overlap=dict(up=True, dn=True, bull=False, bear=False, signal=False), lib="btind")
     def AndeanOsc(self, length: int = 14, signal_length: int = 9, **kwargs) -> IndFrame:
         """
         安第斯振荡器指标 (Andean Oscillator)
@@ -1414,7 +1414,7 @@ class BtInd:
         """
         ...
 
-    @tobtind(overlap=True,lib="btind")
+    @tobtind(overlap=True, lib="btind")
     def Coral_Trend_Candles(self, smooth: int = 9., mult: float = .4, **kwargs) -> IndSeries:
         """
         珊瑚趋势蜡烛指标 (Coral Trend Candles)
@@ -1885,7 +1885,7 @@ class BtInd:
         ...
 
     @tobtind(lines=["gaussian"], overlap=dict(gaussian=True), lib="btind")
-    def gaussian_smoothed(self, window:int=11,**kwargs)->IndSeries:
+    def gaussian_smoothed(self, window: int = 11, **kwargs) -> IndSeries:
         """
         高斯核卷积平滑 (Gaussian Smoothed)
         ---------
@@ -1941,41 +1941,123 @@ class BtInd:
         >>> gauss_fast.cross_down(gauss_slow)
         """
         ...
-    
+
     @tobtind(overlap=True, lib="btind")
-    def varma(self, length: int=10, var_length: int=10,**kwargs) -> IndSeries:
+    def varma(self, length: int = 10, var_length: int = 10, **kwargs) -> IndSeries:
         """VAR (Variable Moving Average) — 基于 CMO 的自适应 EMA"""
         ...
-    
+
     @tobtind(overlap=True, lib="btind")
-    def rsswma(self, length: int=10,**kwargs) -> IndSeries:
+    def rsswma(self, length: int = 10, **kwargs) -> IndSeries:
         """RSS_WMA (Lazy Line) — 三重级联 WMA 平滑器"""
         ...
-        
+
     @tobtind(overlap=True, lib="btind")
-    def pivot_high(self, left: int=5, right: int=5,**kwargs) -> IndSeries:
+    def pivot_high(self, left: int = 5, right: int = 5, **kwargs) -> IndSeries:
         """Pivot High"""
         ...
-    
+
     @tobtind(overlap=True, lib="btind")
-    def pivot_low(self, left: int=5, right: int=5,**kwargs) -> IndSeries:
+    def pivot_low(self, left: int = 5, right: int = 5, **kwargs) -> IndSeries:
         """Pivot Low"""
         ...
-        
+
     @tobtind(overlap=False, lib="btind")
-    def linreg_slope(self, length: int=10,**kwargs) -> IndSeries:
+    def linreg_slope(self, length: int = 10, **kwargs) -> IndSeries:
         """Linreg Slope"""
         ...
-        
+
     @tobtind(overlap=False, lib="btind")
-    def vwap_high(self, length: int=10,**kwargs) -> IndSeries:
+    def vwap_high(self, length: int = 10, **kwargs) -> IndSeries:
         """VWAP High"""
         ...
-        
+
     @tobtind(overlap=False, lib="btind")
-    def vwap_low(self, length: int=10,**kwargs) -> IndSeries:
+    def vwap_low(self, length: int = 10, **kwargs) -> IndSeries:
         """VWAP Low"""
         ...
-    
-    
-    NON_KLINE_INDICATORS = ["signal_returns_stats","rngfilt"]
+
+    @tobtind(overlap=[False, False, True], lib="btind")
+    def divergence(self, kline: pd.DataFrame = None,
+                   pivot_period: int = 5, div_type: str = 'Regular',
+                   max_bars: int = 100, **kwargs) -> IndFrame:
+        """
+        指标背离检测 (Indicator Divergence)
+        ---------
+        - 通用型背离检测器: 不绑定具体指标。先算出任意一个「单列指标」序列,
+          再对它调用 `.btind.divergence()` 即可检测背离并画出连线。
+          如 RSI / CCI / MOM / OBV / MFI 等振荡类单列指标均适用。
+        - 原理: 在价格 pivot 高/低点上, 比较相邻两个同向 pivot 的价格与
+          该「源指标」的高低关系, 命中背离后把两个 pivot 连成一条斜线。
+        - 输出三条线: 源指标本体、以指标为纵轴的背离连线、以价格为纵轴的背离连线;
+          列名会自动带上前缀「源指标名」。
+
+        调用方式 (关键):
+        ---------
+        >>> # 先算出源指标, 再对其调用 .btind.divergence()
+        >>> div = self.data.rsi(14).btind.divergence()             # RSI 背离
+        >>> div = self.data.cci(20).btind.divergence()             # CCI 背离
+        >>> div = self.data.mom(10).btind.divergence()             # MOM 背离
+        >>> # 源指标数据由框架自动捕获(无需手传);
+        >>> # 当源指标由 KLine 数据生成时, 无需设置 kline, 系统会自动获取其 KLine
+        >>> # (内部经 source.kline / source.source_object 取回) 用于价格 pivot;
+        >>> # 仅当源指标不携带 KLine(如手工构造的纯序列)时才需显式传入 kline。
+
+        计算方法:
+        ---------
+        >>> 1) 源指标 = 调用本方法前算出的单列指标序列(作为背离线的纵轴)
+        >>> 2) 用左右各 pivot_period 根 bar 确认价格 pivot high / pivot low
+        >>> 3) 比较相邻同向 pivot 的价格与源指标:
+            常规看涨: 价格更低低点 + 指标更高低点
+            隐藏看涨: 价格更高低点 + 指标更低低点
+            常规看跌: 价格更高高点 + 指标更低高点
+            隐藏看跌: 价格更低高点 + 指标更高高点
+        >>> 4) 命中后把 [前一pivot, 当前pivot] 区间在两线上各补成一条直线段
+
+        参数:
+        ---------
+        >>> kline (pd.DataFrame | KLine): 价格来源(取 high/low 做 pivot). 可选参数:
+                当源指标由 KLine 数据生成时无需传入, 系统会自动取其 KLine;
+                仅当源指标不携带 KLine 时才需显式指定. 默认: None
+            pivot_period (int): pivot 左/右确认 bar 数. 默认: 5
+            div_type (str): 背离类型, 'Regular'(默认) / 'Hidden' / 'Both'
+            max_bars (int): 仅比较相距不超过该 bar 数的相邻 pivot 对. 默认: 100
+
+        可选参数:
+        ---------
+        >>> **kwargs: 传递给@tobtind装饰器的其他参数
+
+        返回:
+        ---------
+        >>> IndFrame: 包含三列(列名中的 <指标名> 取自源指标, 如 rsi / cci)
+            - <指标名>_divergenc : 源指标本体(副图)
+            - <指标名>_div       : 背离区间在源指标上的连线(副图, 无背离处为 NaN)
+            - price_div          : 背离区间在主图价格上的连线(主图叠加, 无背离处为 NaN)
+
+        所需数据:
+        ---------
+        >>> 源指标序列(单列: IndSeries / Line) + kline 的 high, low
+
+        使用案例:
+        ---------
+        >>> # 1) RSI 背离 (源指标来自 KLine, kline 可省略)
+        >>> div = self.data.rsi(14).btind.divergence()
+        >>> div.get_indicator_kwargs()['lines']   # ['rsi_divergenc', 'rsi_div', 'price_div']
+        >>>
+        >>> # 2) CCI 背离, 同时看常规 + 隐藏 (同样可省略 kline)
+        >>> div = self.data.cci(20).btind.divergence(
+        ...     pivot_period=5, div_type='Both', max_bars=120)
+        >>>
+        >>> # 3) 取背离连线(无背离处为 NaN)用于进一步判断
+        >>> ind_seg   = div[div.get_indicator_kwargs()['lines'][1]].values  # <指标名>_div
+        >>> price_seg = div['price_div'].values
+        >>>
+        >>> # 4) 当使用IndSeries独立生成的指标时，需要设置kline参数
+        >>> rsi = ...
+        >>> div = IndSeries(rsi).btind.divergence(self.data)
+        >>>
+        >>> # 注意: 源指标需为单列指标; 多列指标(如 MACD / Stoch)请先取其中一条线再调用
+        """
+        ...
+
+    NON_KLINE_INDICATORS = ["signal_returns_stats", "rngfilt"]

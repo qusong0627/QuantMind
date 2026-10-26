@@ -5,7 +5,7 @@ from ..indicators import (KLine, pd, KLineType,
 from ..utils import (cache, np, Callable, _time,
                      BASE_DIR, pd, BtIndicatorDataSet,
                      Any, time_to_datetime, timedelta,
-                     KLinesSet, time, datetime,sys,
+                     KLinesSet, time, datetime, sys,
                      os,  partial, Literal, FilteredOutputRedirector,
                      Config, get_cycle, read_unknown_file,
                      format_3col_report, qs_stats, FILED, loadData,
@@ -14,8 +14,8 @@ from .stats import Stats
 from .qs_plots import QSPlots
 import inspect
 import ast
-from ..order import OrderType,OrderSide
-from ..other import SizeType, CommissionType, time_to_ns_timestamp,time_to_s_timestamp
+from ..order import OrderType, OrderSide, resolve_order_side
+from ..other import SizeType, CommissionType, time_to_ns_timestamp, time_to_s_timestamp, ensure_core_loaded
 
 if TYPE_CHECKING:
     from ..indicators import IndSeries, IndFrame, TqAccount, Line
@@ -72,7 +72,8 @@ class StrategyBase:
     # K线数据集合（管理所有KLine实例，支持dict或KLinesSet类型）
     _btklinedataset: KLinesSet[str, KLine] | dict[str, KLine]
     # 指标数据集合（管理所有Line/IndSeries/IndFrame实例）
-    _btindicatordataset: BtIndicatorDataSet[str, KLine] | dict[str, Line | IndSeries | IndFrame]
+    _btindicatordataset: BtIndicatorDataSet[str,
+                                            KLine] | dict[str, Line | IndSeries | IndFrame]
     _tqobjs: dict[str, TqObjs]
     # 账户对象（回测用BtAccount，实盘用TqAccount）
     _account: BtAccount | TqAccount
@@ -109,7 +110,6 @@ class StrategyBase:
     _plot_name: str = 'plot'  # 图表保存名称
     # 回测报告保存名称（默认"qs_reports"）
     _qs_reports_name: str = "qs_reports"  # 回测报告名称
-    _id_dir: str = ""
     # 原始数据列表（内部使用）
     _datas: list[pd.DataFrame]
     # 绘图数据结构（供前端/绘图工具使用，包含K线、指标、配置等）
@@ -161,7 +161,7 @@ class StrategyBase:
     _default_order_type: OrderType = OrderType.Close
     _call_func: Callable
     __auto_process_features: bool = False
-    
+
     @classmethod
     def copy(cls, **kwargs) -> Strategy:
         """
@@ -499,7 +499,8 @@ class StrategyBase:
                     )
                 else:  # 期货
                     if period in ["1", "5", "15", "30", "60"]:
-                        data = self._akshare.futures_zh_minute_sina(symbol, period)
+                        data = self._akshare.futures_zh_minute_sina(
+                            symbol, period)
                         isreset = False
                     else:
                         start_date = kwargs.pop("start_date", "19900101")
@@ -558,7 +559,7 @@ class StrategyBase:
         - 自动生成KLine唯一标识ID，关联策略与数据索引，确保多策略/多数据源场景下数据不混淆
 
         ### 数据源优先级（回测模式）：
-        1. 本地CSV文件（BASE_DIR/data/test/{symbol}.csv）
+        1. 本地CSV文件（用户目录 ``~/.minibt/datas`` 优先，包内 ``minibt/data/test`` 兜底）
         2. symbol路径直接引用的文件（如绝对路径）
         3. TQSDK在线获取期货数据（需user_name+password，支持自动初始化_api）
         4. 外部传入的pd.DataFrame（需包含OHLCV字段，缺失字段自动补充）
@@ -597,6 +598,12 @@ class StrategyBase:
                     - password (str)：天勤密码
                     - chart_id (int)：天勤K线图表ID（传入_get_kline_serial，默认为None）
                     - adj_type (str)：复权类型（None=不复权）
+                    - history_length (int)：实盘"无限历史"的底层取数长度。设了且
+                      ``history_length > data_length`` 时，底层一次取这么多根，
+                      图表开局只显示 ``data_length`` 根，向左滚动再逐步放出；
+                      不设置时行为不变（只取 ``data_length``，一次全显示）。
+                      例：``get_kline('SHFE.ni2610', data_length=200,
+                      history_length=10000)``
 
                 **股票数据源相关**：
                     - data_source (str)：股票数据源类型，支持 ``'akshare'``(默认)、``'pytdx'``、
@@ -634,7 +641,7 @@ class StrategyBase:
                 - c. symbol为纯数字字符串 → 股票数据源（akshare/pytdx/baostock）
                 - d. _api已初始化 → 直接通过TQSDK获取（复用已有连接）
                 - e. _datas中有已加载数据 → 按名称匹配后复制
-        6. 若指定 ``save`` 参数：将数据保存为CSV至本地（``BASE_DIR/data/test/``），
+        6. 若指定 ``save`` 参数：将数据保存为CSV至用户数据目录（``~/.minibt/datas/``），
            并自动更新 ``data/utils.py``（生成 ``LocalDatas`` 引用工具类）
         7. 数据截取：取最新 ``data_length`` 根K线（确保不小于最小要求）
         8. 数据校验三重断言：
@@ -654,7 +661,7 @@ class StrategyBase:
 
         Examples:
             >>> # [回测] 从本地数据文件获取K线
-            >>> self.data = self.get_kline(LocalDatas.v2601_300, height=500)
+            >>> self.data = self.get_kline(LocalDatas.test, height=500)
 
             >>> # [回测] 从股票代码获取（自动通过akshare下载）
             >>> self.data = self.get_kline('600000', duration_seconds=86400, data_length=500)
@@ -686,6 +693,10 @@ class StrategyBase:
         # -------------------------- 2. 参数预处理 --------------------------
         # 提前弹出 save 参数，避免污染后续传递给 KLine 和子获取函数的 kwargs
         save = kwargs.pop("save", None)
+        # `history_length`：实盘底层多取多少根 K 线给"无限历史"向左滚动加载。
+        #   设置了这个值（且 > data_length）才会启用无限历史；不设置时行为不变
+        #   （只取 data_length 那一段，图表一次性全部显示）。
+        history_length = kwargs.pop("history_length", None)
 
         # -------------------------- 3. 数据集容器初始化 --------------------------
         # 确保 _btklinedataset 存在（管理所有 KLine 实例的容器），
@@ -697,6 +708,8 @@ class StrategyBase:
         # 防御性初始化：确保 data 变量在所有路径下都有定义
         # （正常情况下 data 必定在实盘/回测分支中被赋值，此处仅为代码分析器友好）
         data: pd.DataFrame | None = None
+        # 实盘图表开局先放出多少根（其余历史留给无限历史向左滚动加载）
+        preload: int | None = None
 
         # -------------------------- 4. 生成KLine唯一标识ID --------------------------
         # btid 用于关联策略ID（_sid）、数据索引（num）、图表索引，确保多策略/多数据源不混淆
@@ -708,13 +721,26 @@ class StrategyBase:
         # -------------------------- 5. 模式分支：实盘 vs 回测 --------------------------
         if self._is_live_trading:
             # ========== 4a. 实盘模式：从TQSDK实时获取K线 ==========
-            # 实盘对数据长度要求低（只需满足指标计算窗口），默认300根保证足够长度
-            # 若用户传入有效值（>=10），则尊重用户指定的数据量
-            data_length = data_length if (data_length is not None and data_length >= 10) else 300
+            # data_length 是“图表开局先放出多少根”（preload）。
+            # 若传了 history_length 且比 data_length 大，则底层多取一些给
+            # 无限历史（向左滚动时再放出来）；否则行为不变，一次取完。
+            data_length = data_length if (
+                data_length is not None and data_length >= 10) else 300
+            try:
+                history_length = int(history_length) if history_length else 0
+            except (TypeError, ValueError):
+                history_length = 0
+            if history_length > data_length:
+                preload = int(data_length)
+                fetch_length = history_length
+            else:
+                # 未启用无限历史：preload = 全部，`_setup_history` 会自动跳过
+                history_length = 0
+                preload = fetch_length = int(data_length)
 
             # 获取K线序列（TQSDK内部维护订阅，后续可通过tq_object更新）
             kline = self._api.get_kline_serial(
-                symbol, duration_seconds, data_length)
+                symbol, duration_seconds, fetch_length)
             # 同步获取最新tick报价
             tick = self._api.get_tick_serial(symbol)
             data = kline.copy()
@@ -727,14 +753,15 @@ class StrategyBase:
             # ========== 4b. 回测/优化模式：多数据源自动适配 ==========
             # 回测需要较大数据量支撑各类指标计算和策略预热（min_start_length），
             # 默认10000根，用户可传入更大或更小的值（最小值300）
-            data_length = data_length if (data_length is not None and data_length >= 300) else 10000
+            data_length = data_length if (
+                data_length is not None and data_length >= 300) else 10000
 
             # ---- 4b.1 处理symbol为字符串的情况（期货/股票代码或文件路径） ----
             if isinstance(symbol, str) and symbol:
                 name = symbol  # 记录原始symbol字符串，用于后续命名
-                # 策略一：优先加载本地CSV文件（最快，不需要网络）
-                symbol_path = os.path.join(
-                    BASE_DIR, "data", "test", f"{symbol}.csv")
+                # 策略一：优先加载本地CSV文件（用户目录 ~/.minibt/datas 优先，包内兜底）
+                from ..data.tools import get_csv_path
+                symbol_path = get_csv_path(symbol)
                 if os.path.exists(symbol_path):
                     symbol = pd.read_csv(symbol_path)
                 # 策略二：symbol本身是一个已存在的文件路径（如绝对路径）
@@ -771,7 +798,9 @@ class StrategyBase:
                 data = self.__check_and_add_fileds(symbol)
 
             # ---- 4b.3 股票数据（纯数字字符串代码，如'600000'） ----
-            elif isinstance(symbol, str) and symbol[0].isdigit():
+            # ⚠ 必须判空：``get_kline("")``（miniqt 单合约策略「用当前图表那格」
+            #   的写法）传到这里时 ``""[0]`` 会 IndexError，报错完全看不懂 ✗。
+            elif isinstance(symbol, str) and symbol and symbol[0].isdigit():
                 data_source = kwargs.pop('data_source', 'akshare').lower()
                 valid_sources = ['pytdx', 'baostock', 'akshare']
                 assert data_source in valid_sources, (
@@ -804,10 +833,21 @@ class StrategyBase:
             # ---- 4b.5 兜底：从已加载的原始数据（_datas列表）中按名称匹配 ----
             elif len(self._datas) > 0:
                 # 在 _datas 列表中查找 name 属性匹配的 DataFrame
-                data = list(filter(lambda x: x.name == symbol, self._datas))[
-                    0].copy()
+                # ⚠ 不能直接 ``filter(...)[0]``：没匹配到时是 IndexError（看不懂）；
+                #   而且空 symbol 与任何 name 都不该匹配 → 给明确提示 ✓。
+                matched = [item for item in self._datas
+                           if symbol and getattr(item, 'name', None) == symbol]
+                if not matched:
+                    available = [getattr(item, 'name', '')
+                                 for item in self._datas]
+                    raise ValueError(
+                        f"无法获取数据：symbol={symbol!r} 在 _datas 中没有匹配项。"
+                        f"可用名称：{available}。"
+                        f"（空 symbol 只在 miniqt 图表上有效；独立回测请写合约或用"
+                        f"get_kline(数据) 传本地数据。）"
+                    )
                 # 对匹配到的原始数据同样执行字段补充
-                data = self.__check_and_add_fileds(data)
+                data = self.__check_and_add_fileds(matched[0].copy())
 
             # ---- 4b.6 所有途径均失败 ----
             else:
@@ -826,9 +866,11 @@ class StrategyBase:
             data = self.__process_data(data)
 
         # -------------------------- 7. 数据截取 --------------------------
-        # 回测模式下取最新 data_length 根K线（实盘模式已在TQSDK调用中指定长度，无需二次截取）
-        # 仅在 data_length >= 300 时才执行截取，避免对极小数据集误截断
-        if isinstance(data_length, int) and data_length >= 300 and len(data) > data_length:
+        # 回测模式下取最新 data_length 根K线
+        # 实盘模式不再截断：底层 10000 根要留给图表的无限历史，
+        # 指标也在这全量数据上计算（图表只先显示 preload 根）。
+        if (not self._is_live_trading) and isinstance(data_length, int) \
+                and data_length >= 300 and len(data) > data_length:
             data = data[-data_length:]
 
         # -------------------------- 8. 数据校验（三重断言防线） --------------------------
@@ -848,7 +890,14 @@ class StrategyBase:
         # -------------------------- 9. 封装为KLine对象 --------------------------
         # 生成KLine的名称：有原始symbol则用 {symbol}_{周期} 格式，否则用 datas{plot_id} 格式
         name = f"{name}_{duration_seconds}" if name else f"datas{btid.plot_id}"
-        return KLine(data, id=btid, sname=name, ind_name=name, **kwargs)
+        kline_obj = KLine(data, id=btid, sname=name, ind_name=name, **kwargs)
+        # 记住图表开局要放出多少根 / 底层取了多少根（RealtimeChart 的无限历史用）
+        try:
+            kline_obj._preload = preload
+            kline_obj._history_length = history_length
+        except Exception:
+            pass
+        return kline_obj
 
     def __check_and_add_fileds(self, data: pd.DataFrame, price_tick=1e-2, volume_multiple=1.) -> pd.DataFrame:
         """
@@ -869,15 +918,16 @@ class StrategyBase:
         # 检查是否已经是datetime类型
         if not pd.api.types.is_datetime64_any_dtype(datetime_col):
             # 优化：尝试多种时间格式批量转换，提高性能
-            formats = ['%Y-%m-%d %H:%M:%S', '%Y/%m/%d %H:%M:%S', '%Y-%m-%d', '%Y%m%d%H%M%S']
+            formats = ['%Y-%m-%d %H:%M:%S',
+                       '%Y/%m/%d %H:%M:%S', '%Y-%m-%d', '%Y%m%d%H%M%S']
             converted = False
-            
+
             for fmt in formats:
                 try:
                     # 方法1：尝试使用pandas的to_datetime进行批量转换（性能最佳）
                     data['datetime'] = pd.to_datetime(
                         datetime_col, errors='coerce', utc=True, format=fmt)
-                    
+
                     # 检查转换后是否有无效的NaT值
                     nat_count = data['datetime'].isna().sum()
                     if nat_count == 0:
@@ -885,10 +935,11 @@ class StrategyBase:
                         break
                 except (ValueError, TypeError):
                     continue
-            
+
             # 如果所有格式都失败，使用逐元素转换
             if not converted:
-                data['datetime'] = datetime_col.apply(self._safe_time_conversion)
+                data['datetime'] = datetime_col.apply(
+                    self._safe_time_conversion)
 
         # 验证时间字段是否单调递增（数据质量检查）
         if not data['datetime'].is_monotonic_increasing:
@@ -911,7 +962,7 @@ class StrategyBase:
             new_columns['price_tick'] = price_tick  # 默认最小变动单位0.01
         if 'volume_multiple' not in col:
             new_columns['volume_multiple'] = volume_multiple  # 默认合约乘数1
-        
+
         # 批量添加缺失字段
         if new_columns:
             data = data.assign(**new_columns)
@@ -1001,10 +1052,11 @@ class StrategyBase:
                     if hasattr(kline_df, 'reset_index'):
                         kline_df = kline_df.reset_index(drop=True)
                     kline_datas.append(kline_df)
-                
+
                 # 修复：在 replay 模式下，交易结果数据也需要截断并重置索引
                 if self._results:
-                    self._results = [df.iloc[:self.min_start_length].reset_index(drop=True) for df in self._results]
+                    self._results = [df.iloc[:self.min_start_length].reset_index(
+                        drop=True) for df in self._results]
             else:
                 kline_datas = [
                     data.kline_object for data in self._btklinedataset.values()]
@@ -1082,7 +1134,8 @@ class StrategyBase:
         # 遍历每个合约的数据，构建以合约索引为key的字典
         contract_keys = []  # 保持顺序的合约key列表
         for i, kline_data in enumerate(kline_datas):
-            symbol = str(kline_data.symbol) if hasattr(kline_data, 'symbol') else f"contract_{i}"
+            symbol = str(kline_data.symbol) if hasattr(
+                kline_data, 'symbol') else f"contract_{i}"
             contract_key = symbol  # 使用symbol作为key，保证唯一性
 
             contract_info = {
@@ -1102,8 +1155,8 @@ class StrategyBase:
 
             # 转换 datetime 列为时间戳（纳秒级，与 _init_chart_data 实时模式一致）
             if 'datetime' in df.columns:
-                df["time"] = df['datetime'].apply(time_to_ns_timestamp) + 8 * 3.6e12  # +8小时北京时间偏移
-
+                df["time"] = df['datetime'].apply(
+                    time_to_ns_timestamp) + 8 * 3.6e12  # +8小时北京时间偏移
 
             # 只保留需要的列
             cols = [c for c in FILED.TALL if c in df.columns]
@@ -1112,7 +1165,7 @@ class StrategyBase:
             plot_datas["contracts"][contract_key] = contract_info
             contract_keys.append(contract_key)
 
-        #_log(f"📊 plot_datas 结构: strategy={plot_datas['strategy_name']}, contracts={list(plot_datas['contracts'].keys())}")
+        # _log(f"📊 plot_datas 结构: strategy={plot_datas['strategy_name']}, contracts={list(plot_datas['contracts'].keys())}")
 
         # 添加账户统计信息
         if hasattr(self, '_account') and self._account:
@@ -1132,9 +1185,11 @@ class StrategyBase:
                         times = profits_series.index.astype(str).tolist()
                     else:
                         times = [str(t) for t in profits_series.index]
-                    values = profits_series.values.tolist() if hasattr(profits_series, 'values') else list(profits_series)
+                    values = profits_series.values.tolist() if hasattr(
+                        profits_series, 'values') else list(profits_series)
                     cummax = __import__('pandas').Series(values).cummax()
-                    drawdowns = ((__import__('pandas').Series(values) - cummax) / cummax.replace(0, 1) * 100).tolist()
+                    drawdowns = ((__import__('pandas').Series(
+                        values) - cummax) / cummax.replace(0, 1) * 100).tolist()
                     plot_datas["equity"] = {
                         "times": times,
                         "values": values,
@@ -1143,15 +1198,14 @@ class StrategyBase:
             except Exception:
                 pass
 
-
-
         # 按合约分组存储指标数据（plot_id 即合约索引）
         init_inds_datas = [[] for _ in range(self._btklinedataset.num)]
 
         for k, v in self._btindicatordataset.items():
             # 获取指标的绘图数据，plot_id 表示该指标属于哪个合约
             plot_id, isplot, name, lines, _lines, ind_names, overlaps, \
-                categorys, indicators, doubles, _ind_plotinfo, span, _signal = v._get_plot_datas(k)
+                categorys, indicators, doubles, _ind_plotinfo, span, _signal, bandstyle = v._get_plot_datas(
+                    k)
 
             ind_plotinfo = dict(_ind_plotinfo) if _ind_plotinfo else {}
 
@@ -1177,17 +1231,18 @@ class StrategyBase:
             if plot_id < len(contract_keys):
                 contract_key = contract_keys[plot_id]
                 plot_datas["contracts"][contract_key]["indicators"] = inds
-                #_log(f"📎 合约 [{contract_key}] 指标数: {len(inds)}")
+                # _log(f"📎 合约 [{contract_key}] 指标数: {len(inds)}")
                 # 打印每个指标的原始数据结构
                 for idx, ind in enumerate(inds):
                     ind_indicators = ind.get("indicators")
                     ind_type = type(ind_indicators).__name__
-                    ind_shape = getattr(ind_indicators, 'shape', len(ind_indicators) if hasattr(ind_indicators, '__len__') else 'N/A')
-                    #_log(f"   [{idx}] name={ind.get('name')}, _lines={ind.get('_lines')}, doubles={ind.get('doubles')}")
-                    #_log(f"       indicators type={ind_type}, shape={ind_shape}")
+                    ind_shape = getattr(ind_indicators, 'shape', len(
+                        ind_indicators) if hasattr(ind_indicators, '__len__') else 'N/A')
+                    # _log(f"   [{idx}] name={ind.get('name')}, _lines={ind.get('_lines')}, doubles={ind.get('doubles')}")
+                    # _log(f"       indicators type={ind_type}, shape={ind_shape}")
 
-        #_log(f"📦 准备保存回测数据到: {pickle_path}")
-        #_log(f"📈 合约数量: {len(plot_datas['contracts'])}")
+        # _log(f"📦 准备保存回测数据到: {pickle_path}")
+        # _log(f"📈 合约数量: {len(plot_datas['contracts'])}")
 
         # 将数据递归转换为 JSON 可序列化格式（根治 StringDtype 等 pickle 兼容性问题）
         # import numpy as np
@@ -1236,11 +1291,11 @@ class StrategyBase:
         try:
             with open(pickle_path, 'w', encoding='utf-8') as f:
                 json.dump(json_data, f, ensure_ascii=False, indent=2)
-            #_log(f"✅ 回测数据已成功保存到: {pickle_path}")
+            # _log(f"✅ 回测数据已成功保存到: {pickle_path}")
         except Exception as e:
             import traceback
             traceback.print_exc()
-            #_log(f"❌ 保存回测数据失败: {e}")
+            # _log(f"❌ 保存回测数据失败: {e}")
 
     # def __process_backtest_iteration(self, x: Any = 0):
     #     """
@@ -1255,7 +1310,7 @@ class StrategyBase:
     #     btindicatordataset = self._btindicatordataset
     #     account = self._account
     #     data_patching = self._data_patching
-        
+
     #     self._btindex += 1
     #     if data_patching:
     #         btklinedataset.update_values()
@@ -1268,12 +1323,66 @@ class StrategyBase:
     #             if data._klinesetting.isstop:
     #                 data.stop.update()
     #     account.update_history()
-        
-    def _strategy_replay_iteration(self,*args,**kwds) -> Strategy:
+
+    def _strategy_replay_iteration(self, *args, **kwds) -> Strategy:
         self._btindex += 1
         return self
 
-    def _execute_live_trading(self,*args,**kwds) -> Strategy:
+    # ------------------------------------------------------------------ #
+    # 实时止损：让 Stop 类在**实盘**也能用 ✓
+    # ------------------------------------------------------------------ #
+    def _register_live_stop(self, data, stop) -> None:
+        """实时开仓时登记止损器（``stop`` 可为 ``BtStop.X`` 类 / 实例 / 参数包 ✓）。
+
+        复用回测那套 ``KLine._set_stop()`` ✓ —— 它会建 ``stop_lines``（图上那两条
+        止损/止盈线 ✓）、实例化 Stop（绑定 kline ✓）并置 ``_isstop`` ✓。
+        """
+        if not stop or data is None:
+            return
+        try:
+            if not getattr(data._klinesetting, 'isstop', False):
+                data._set_stop(stop)
+                print(f'[live] 已登记实时止损：{getattr(stop, "__name__", stop)}')
+        except Exception as error:                               # noqa: BLE001
+            print('[live] 登记实时止损失败:', error)
+
+    def _advance_live_stops(self) -> None:
+        """**每根新 K 线**推进一次止损（与回测同一套 ``Stop.update()`` ✓）。
+
+        ``Stop.update()`` 内部就是：算 ``long()/short()`` → 更新 ``stop_lines``
+        → 若价格触及止损/止盈则 ``kline.set_target_size()`` ✓，而它在实盘会路由到
+        ``_set_target_size_live_trading`` → ``TargetPosTask`` ✓ —— 所以**不需要**
+        再写一套下单逻辑 ✓，关键差别只是“回测每根 bar 都会调它，而实盘以前不调”✗。
+
+        与回测的细微差异（有意为之 ✓）：实盘在新 K 线**刚出现**时就用**最新价**
+        判断（回测用的是上一根的收盘价 ✓）→ 实盘止损宁可早触发 ✓。
+        """
+        if not getattr(self, '_isstop', False):
+            return
+        for kline in (getattr(self, '_btklinedataset', {}) or {}).values():
+            if not getattr(kline._klinesetting, 'isstop', False):
+                continue
+            stop = getattr(kline._klinesetting, 'stop', None)
+            if stop is None:
+                continue
+            try:
+                # ``KLine.datetime`` 是 ``Line``（``[-1]`` 按位置 ✓）；
+                # 但如果是 pandas Series，``[-1]`` 会去查**标签**而报错 ✗
+                # → 那样 bar 会变成 None，幂等标记就失效了 ✗。两种都试 ✓
+                series = kline.datetime
+                bar = series.iloc[-1] if hasattr(series, 'iloc') else series[-1]
+            except Exception:                                    # noqa: BLE001
+                bar = None
+            if bar is not None and getattr(kline, '_live_stop_bar', None) == bar:
+                continue                      # 同一根只推进一次 ✓（避免重复 append ✗）
+            kline._live_stop_bar = bar
+            try:
+                stop.update()
+            except Exception as error:                           # noqa: BLE001
+                print('[live] 止损更新失败:', error)
+
+    def _execute_live_trading(self, *args, step_only: bool = False,
+                              **kwds) -> Strategy:
         """
         ## 实盘交易的主方法（实时行情驱动）
         - 初始化实盘数据、处理RL动作（若启用）、调用策略核心逻辑（step），适配TQSDK实时推送
@@ -1282,25 +1391,37 @@ class StrategyBase:
         - 数据实时更新（从TQSDK推送获取）
         - 交易通过TargetPosTask实现（确保仓位准确）
         - 无回测索引迭代，依赖行情变化触发
+
+        :param step_only: ``True`` 时**跳过**“同步 K 线 + 重算指标”，只跑
+            `step()`。用于图表端的变更检测：`wait_update` 只是账户/委托变了、
+            行情没变时，指标不用重算，但风控/下单逻辑（step）仍要跑。
         """
         self._in_next_context = False
-        # 3. 实时更新K线数据（从TQSDK同步最新数据）
-        [kline._inplace_values()
-            for kline in self._btklinedataset.values()]
-        # 4. 策略初始化（重新计算指标，适应实时数据）
-        self._strategy_init()
+        if not step_only:
+            # 3. 实时更新K线数据（从TQSDK同步最新数据）
+            [kline._inplace_values()
+                for kline in self._btklinedataset.values()]
+            # 4. 策略初始化（重新计算指标，适应实时数据）
+            self._strategy_init()
         # 5. 标记初始化完成
         self._in_next_context = True
         # 6. RL模式：获取智能体动作（无梯度计算，避免性能消耗）
         if self.rl:
             with self.th.no_grad():
                 rl_action = self.actor(
-                    self.th.as_tensor(self.next_state, dtype=self.th.float32).unsqueeze(0)
+                    self.th.as_tensor(
+                        self.next_state, dtype=self.th.float32).unsqueeze(0)
                 ).cpu().numpy()[0]
                 self.step(rl_action)
         else:
-        # 7. 非RL模式：调用策略核心逻辑
+            # 7. 非RL模式：调用策略核心逻辑
             self.step()
+        # 8. ★ 实时止损：与回测**同一时机**（step() 之后 ✓）推进一次
+        #    —— ``Stop.update()`` 会算 long()/short()、刷 ``stop_lines``，
+        #    触及则 ``set_target_size()``（实盘自动走 TargetPosTask ✓）。
+        #    以前实盘**从不调它** ✗，所以 Stop 只在回测生效 ✗。
+        if not step_only:
+            self._advance_live_stops()
         return self
 
     def __process_rl_backtest_iteration(self, x):
@@ -1332,7 +1453,7 @@ class StrategyBase:
         self._indicators_names = list(self._btindicatordataset.keys())
         # 1. 标记回测初始化完成
         self._in_next_context = True
-        
+
         # 优化：预计算max_length，减少属性访问开销
         max_length = self._btklinedataset.max_length
         start_index = self._btindex
@@ -1377,16 +1498,16 @@ class StrategyBase:
         self._qs_init()       # 初始化QuantStats分析（计算指标、绘图）
         # 5. 标记回测结束，重置初始化状态
         self._in_next_context = False
-        
+
     def bt_from_signals(self,
-                        entries:IndSeries | list[IndSeries],
-                        exits:IndSeries | list[IndSeries],
+                        entries: IndSeries | list[IndSeries],
+                        exits: IndSeries | list[IndSeries],
                         size=1.0,
                         size_type=SizeType.Amount,
                         commission=1.0,
                         com_type=CommissionType.Fixed,
                         slip_point=0.0,
-                        prices:IndSeries| list[IndSeries] | None=None,
+                        prices: IndSeries | list[IndSeries] | None = None,
                         sl_stop=0.0,
                         tp_stop=0.0,
                         stop_mode=0,
@@ -1395,18 +1516,20 @@ class StrategyBase:
                         tp_callback=None,
                         sl_callback_args=(),
                         tp_callback_args=(),
-                        max_hold_bars=0,)->partial:
+                        max_hold_bars=0,) -> partial:
         from ..indicators import IndSeries
-        
+
         if isinstance(entries, IndSeries):
             entries = [entries,]
         if isinstance(exits, IndSeries):
             exits = [exits,]
         assert len(entries) == len(exits), "entries和exits必须具有相同的长度"
-        assert all(isinstance(k, IndSeries) for k in entries), "entries必须是IndSeries或IndSeries列表"
-        assert all(isinstance(k, IndSeries) for k in exits), "exits必须是IndSeries或IndSeries列表"
+        assert all(isinstance(k, IndSeries)
+                   for k in entries), "entries必须是IndSeries或IndSeries列表"
+        assert all(isinstance(k, IndSeries)
+                   for k in exits), "exits必须是IndSeries或IndSeries列表"
         kline = [signal.kline for signal in entries]
-        
+
         # 转换为正确的numpy二维数组格式
         close = np.column_stack([k.close.values for k in kline])
         margin_rate = [float(k.margin_rate) for k in kline]
@@ -1416,15 +1539,16 @@ class StrategyBase:
         init_cash = float(self.account.cash)
         exits = np.column_stack([k.values for k in exits])
         min_start_length = self.min_start_length
-        
+
         # 处理prices参数
         if prices is not None:
             if isinstance(prices, IndSeries):
                 prices = [prices,]
             assert len(prices) == len(entries), "prices和entries必须具有相同的长度"
-            assert all(isinstance(k, IndSeries) for k in prices), "prices必须是IndSeries或IndSeries列表"
+            assert all(isinstance(k, IndSeries)
+                       for k in prices), "prices必须是IndSeries或IndSeries列表"
             prices = np.column_stack([k.values for k in prices])
-        
+
         # 确保数据是二维数组
         if close.ndim == 1:
             close = close.reshape(-1, 1)
@@ -1434,10 +1558,10 @@ class StrategyBase:
             exits = exits.reshape(-1, 1)
         if prices is not None:
             prices = prices.reshape(-1, 1)
-            
+
         from ..cython_functions.backtrader_from_signals import from_signals
         self._isbacktrader_form_signals = True
-        
+
         # 提取 numba @cfunc 回调函数的 C 地址，并保持引用防止 GC
         sl_cb_addr = 0
         tp_cb_addr = 0
@@ -1447,33 +1571,33 @@ class StrategyBase:
         if tp_callback is not None:
             self._tp_callback_obj = tp_callback
             tp_cb_addr = tp_callback.address
-        
+
         self._bt_from_signals_func = partial(from_signals,
-                                            close=close,
-                                            entries=entries,
-                                            exits=exits,
-                                            size=size,
-                                            size_type=size_type,
-                                            margin_rate=margin_rate,
-                                            price_tick=price_tick,
-                                            volume_multiple=volume_multiple,
-                                            prices=prices,
-                                            min_start_length=min_start_length,
-                                            init_cash=init_cash,
-                                            commission=commission,
-                                            com_type=com_type,
-                                            slip_point=slip_point,
-                                            sl_stop=sl_stop,
-                                            tp_stop=tp_stop,
-                                            stop_mode=stop_mode,
-                                            sl_trail=sl_trail,
-                                            sl_callback_addr=sl_cb_addr,
-                                            tp_callback_addr=tp_cb_addr,
-                                            sl_callback_args=sl_callback_args,
-                                            tp_callback_args=tp_callback_args,
-                                            max_hold_bars=max_hold_bars)
+                                             close=close,
+                                             entries=entries,
+                                             exits=exits,
+                                             size=size,
+                                             size_type=size_type,
+                                             margin_rate=margin_rate,
+                                             price_tick=price_tick,
+                                             volume_multiple=volume_multiple,
+                                             prices=prices,
+                                             min_start_length=min_start_length,
+                                             init_cash=init_cash,
+                                             commission=commission,
+                                             com_type=com_type,
+                                             slip_point=slip_point,
+                                             sl_stop=sl_stop,
+                                             tp_stop=tp_stop,
+                                             stop_mode=stop_mode,
+                                             sl_trail=sl_trail,
+                                             sl_callback_addr=sl_cb_addr,
+                                             tp_callback_addr=tp_cb_addr,
+                                             sl_callback_args=sl_callback_args,
+                                             tp_callback_args=tp_callback_args,
+                                             max_hold_bars=max_hold_bars)
         return self._bt_from_signals_func
-        
+
     @staticmethod
     def _to_ha(data: pd.DataFrame, isha: bool):
         """
@@ -1492,6 +1616,7 @@ class StrategyBase:
             pd.DataFrame: 转换后的K线数据（HA或原始）
         """
         if isha:
+            ensure_core_loaded()
             df = data.ta.ha()
             # 替换原始OHLC字段为HA K线
             data.loc[:, FILED.OHLC] = df.values
@@ -1512,6 +1637,7 @@ class StrategyBase:
         """
         if isinstance(islr, int) and islr > 1:
             # 调用ta库计算线性回归K线
+            ensure_core_loaded()
             df = data.ta.Linear_Regression_Candles(length=islr)
             # 替换原始OHLC字段为线性回归K线
             data.loc[:, FILED.OHLC] = df.values
@@ -1527,8 +1653,9 @@ class StrategyBase:
         """
         if self._isbacktrader_form_signals:
             cols = ["total_profit", "positions",
-                "sizes", "float_profits", "cum_profits","total_fee"]
-            self._results = [pd.DataFrame(result, columns=cols) for result in self.__signal_results]
+                    "sizes", "float_profits", "cum_profits", "total_fee"]
+            self._results = [pd.DataFrame(result, columns=cols)
+                             for result in self.__signal_results]
         elif self._isoptimize or (not self._results):
             # 从账户获取历史记录（每个Broker对应一个DataFrame）
             self._results = self._account._get_history_results()
@@ -1551,7 +1678,7 @@ class StrategyBase:
             value (bool): 绘图开关（True=显示指标，False=隐藏指标）
         """
         self._btindicatordataset.isplot = bool(value)
-        
+
     @property
     def btklinedataset(self) -> KLinesSet[str, KLine] | dict[str, KLine] | None:
         """
@@ -1560,7 +1687,7 @@ class StrategyBase:
         """
         if hasattr(self, "_btklinedataset"):
             return self._btklinedataset
-    
+
     @property
     def btindicatordataset(self) -> BtIndicatorDataSet[str, KLine] | dict[str, Line | IndSeries | IndFrame] | None:
         """
@@ -1570,13 +1697,25 @@ class StrategyBase:
         if hasattr(self, "_btindicatordataset"):
             return self._btindicatordataset
 
+    @property
+    def kline(self)->KLine:
+        """### 默认的第一个K线数据"""
+        if self._btklinedataset:
+            return list(self._btklinedataset.values())[0]
+
+    @kline.setter
+    def kline(self,value):
+        ...
+
     def buy(self,
             data: KLine | None = None,
             size: int = 1,
             exectype: OrderType | None = None,
-            price: float | None= None,
+            price: float | None = None,
             valid: datetime | timedelta | int | None = None,
             stop: BtStop | None = None,
+            reverse: bool = False,
+            reverse_size: int = 0,
             ) -> Order | float:
         """
         ### 买入开仓/加仓接口（统一封装回测与实盘逻辑）
@@ -1596,22 +1735,28 @@ class StrategyBase:
             price (float): 委托价格（限价单/止损单需要）
             valid (Union[datetime.datetime, datetime.timedelta, float]): 订单有效期
             stop (BtStop): 停止器设置
+            reverse (bool): 是否反手做多。仅在持有空单（离场场景）时生效，
+                自动将 size 加上当前空单手数以触发反手开多；
+            reverse_size (int): 反手做多时，目标仓位的多单手数。Defaults to 0.
+            若 reverse_size 为0，则默认使用原空单持仓手数。否则，根据 reverse_size 计算目标仓位。
 
         Returns:
             Order | float: 创建的订单对象（回测模式）或浮动盈亏（实盘模式）
         """
         # 区分实盘与回测，调用对应逻辑
         if self._is_live_trading:
-            return self._buy_live_trading(data=data, size=size, stop=stop)
+            return self._buy_live_trading(data=data, size=size, stop=stop, reverse=reverse, reverse_size=reverse_size)
         if exectype is None:
             exectype = self._default_order_type
-        return self._buy_back_trading(data, size, exectype, price, valid, stop)
+        return self._buy_back_trading(data, size, exectype, price, valid, stop, reverse=reverse, reverse_size=reverse_size)
 
     def _buy_back_trading(self, data: KLine | None = None, size: int = 1,
                           exectype: OrderType = OrderType.Close,
-                          price: float | None= None,
-                          valid: datetime | timedelta |  int | None = None,
-                          stop:BtStop | None =None) -> Order:
+                          price: float | None = None,
+                          valid: datetime | timedelta | int | None = None,
+                          stop: BtStop | None = None,
+                          reverse: bool = False,
+                          reverse_size: int = 0) -> Order:
         """
         ## 回测模式的买入逻辑（内部方法，供buy调用）
         - 校验手数、设置止损（若指定）、调用Broker更新仓位，返回交易盈亏
@@ -1623,6 +1768,10 @@ class StrategyBase:
             price (float): 委托价格（限价单/止损单需要）
             valid (Union[datetime.datetime, datetime.timedelta, float]): 订单有效期
             stop (BtStop): 停止器设置
+            reverse (bool): 是否反手做多。仅在持有空单时生效，
+                自动将 size 扩充为 size + |当前空单手数| 以触发底层反手开多。
+            reverse_size (int): 反手做多时，目标仓位的多单手数。Defaults to 0.
+            若 reverse_size 为0，则默认使用原空单持仓手数。否则，根据 reverse_size 计算目标仓位。
 
         Kwargs:
         ---
@@ -1642,9 +1791,16 @@ class StrategyBase:
         # 默认使用主合约数据
         if data is None:
             data = self._btklinedataset.default_kline
-
-        # 创建买入订单
-        order = data._broker.buy(
+        current_pos = data.position.pos
+        # 反手逻辑：仅在持有空单（离场场景）时支持，否则静默退化为普通买入
+        if reverse and current_pos < 0:
+            # 反手手数：reverse_size 优先，缺省使用原空单手数
+            reverse_target = reverse_size if reverse_size > 0 else abs(
+                current_pos)
+            # 将平仓 + 反手合并到 size 中：|current_pos| 平空 + reverse_target 开多
+            # 底层 Broker.update 会先平空再自动开多（单次成交、同一价格）
+            size = abs(current_pos) + reverse_target
+        return data._broker.buy(
             size,
             exectype=exectype,
             price=price,
@@ -1652,9 +1808,9 @@ class StrategyBase:
             stop=stop,
         )
 
-        return order
-
-    def _buy_live_trading(self, data: KLine | None= None, size: int = 1, stop: BtStop | None =None) -> float:
+    def _buy_live_trading(self, data: KLine | None = None, size: int = 1,
+                          stop: BtStop | None = None,
+                          reverse: bool = False, reverse_size: int = 0) -> float:
         """
         ## 实盘模式的买入逻辑（内部方法，供buy调用）
         - 通过TQSDK的TargetPosTask设置目标仓位，实现买入开仓/加仓，返回当前浮动盈亏
@@ -1662,8 +1818,12 @@ class StrategyBase:
         Args:
             data (KLine, optional): 目标合约数据. Defaults to None.
             size (int): 买入手数（相对于当前仓位的增量）. Defaults to 1.
-            stop (Any, optional): 止损参数（预留，实盘止损需单独处理）. Defaults to None.
-            **kwargs: 额外参数（预留）.
+            stop (Any, optional): 止损参数（**实盘已支持** ✓ 传 ``BtStop.X`` 或
+                ``BtStop.X(...)``；开仓后每根新 K 线推进一次，触及即自动平仓 ✓）。
+                Defaults to None.
+            reverse (bool): 是否反手做多。仅在持有空单时生效，目标仓位设为 size 手多单。
+            reverse_size (int): 反手做多时，目标仓位的空单手数。 Defaults to 0.
+            若 reverse_size 为0，则默认使用原空单持仓手数。否则，根据 reverse_size 计算目标仓位。
 
         Returns:
             float: 当前合约的浮动盈亏
@@ -1675,19 +1835,27 @@ class StrategyBase:
         assert size > 0, '手数为不少于0的正整数'
         if data is None:
             data = self._btklinedataset.default_kline
+        # ★ 实盘也能用 Stop（以前这里只收下 ``stop`` 就丢掉了 ✗）：
+        #   登记到 KLine（建 stop_lines + 实例化）→ 每根新 K 线推进、触及即平仓 ✓
+        self._register_live_stop(data, stop)
         tqobj = self._tqobjs[data.symbol]
         # 获取当前仓位对象
         position = tqobj.Position
         pos = position.pos
-        # 计算目标仓位（当前仓位 + 买入手数）
-        size += pos
+        # 计算目标仓位（默认：当前仓位 + 买入手数）
+        target = size + pos
+        # 反手逻辑：仅在持有空单（离场场景）时支持，否则静默退化为普通买入
+        if reverse and pos < 0:
+            # 空单离场反手做多：目标仓位 = target 手多单
+            target = reverse_size if reverse_size > 0 else abs(pos)
+
         # 获取当前浮动盈亏
         profit = position.float_profit
         # 通过TargetPosTask设置目标仓位（实盘核心逻辑）
-        tqobj.TargetPosTask.set_target_volume(size)
+        tqobj.TargetPosTask.set_target_volume(target)
         # 等待仓位更新（最多10秒）
         deadline = _time.time() + 10
-        while position.pos != size or _time.time() > deadline:
+        while position.pos != target or _time.time() > deadline:
             self.api.wait_update(1)
             profit = position.float_profit
         if not pos and position.pos:
@@ -1699,7 +1867,9 @@ class StrategyBase:
              exectype: OrderType | None = None,
              price: float | None = None,
              valid: datetime | timedelta | float | None = None,
-             stop:BtStop | None =None,
+             stop: BtStop | None = None,
+             reverse: bool = False,
+             reverse_size: int = 0,
              ) -> Order | float:
         """
         ### 卖出平仓/开空接口（统一封装回测与实盘逻辑）
@@ -1719,22 +1889,29 @@ class StrategyBase:
             price (float): 委托价格（限价单/止损单需要）
             valid (Union[datetime.datetime, datetime.timedelta, float]): 订单有效期
             stop (BtStop): 停止器设置
+            reverse (bool): 是否反手做空。仅在持有多单（离场场景）时生效，
+                自动将 size 加上当前多单手数以触发反手开空；
+                若当前无多单（无仓位或已持空单）则静默退化为普通卖出。
+            reverse_size (int): 反手做空时，目标仓位的空单手数。Defaults to 0.
+            若 reverse_size 为0，则默认使用原多单持仓手数。否则，根据 reverse_size 计算目标仓位。
 
         Returns:
             Order | float: 创建的订单对象（回测模式）或浮动盈亏（实盘模式）
         """
         # 区分实盘与回测，调用对应逻辑
         if self._is_live_trading:
-            return self._sell_live_trading(data=data, size=size, stop=stop)
+            return self._sell_live_trading(data=data, size=size, stop=stop, reverse=reverse, reverse_size=reverse_size)
         if exectype is None:
             exectype = self._default_order_type
-        return self._sell_back_trading(data, size, exectype, price, valid, stop)
+        return self._sell_back_trading(data, size, exectype, price, valid, stop, reverse=reverse, reverse_size=reverse_size)
 
     def _sell_back_trading(self, data: KLine | None = None, size: int = 1,
                            exectype: OrderType = OrderType.Close,
                            price: float | None = None,
                            valid: datetime | timedelta | int | None = None,
-                           stop: BtStop | None = None) -> Order:
+                           stop: BtStop | None = None,
+                           reverse: bool = False,
+                           reverse_size: int = 0) -> Order:
         """
         ## 回测模式的卖出逻辑（内部方法，供sell调用）
         - 校验手数、设置止损（若指定）、调用Broker更新仓位，返回交易盈亏
@@ -1746,6 +1923,10 @@ class StrategyBase:
             price (float): 委托价格（限价单/止损单需要）
             valid (Union[datetime.datetime, datetime.timedelta, float]): 订单有效期
             stop (BtStop): 停止器设置
+            reverse (bool): 是否反手做空。仅在持有多单时生效，
+                自动将 size 扩充为 size + 当前多单手数 以触发底层反手开空。
+            reverse_size (int): 反手做空时，目标仓位的空单手数。Defaults to 0.
+            若 reverse_size 为0，则默认使用原多单持仓手数。否则，根据 reverse_size 计算目标仓位。
 
         Returns:
             Order: 创建的订单对象
@@ -1757,8 +1938,16 @@ class StrategyBase:
         # 默认使用主合约数据
         if data is None:
             data = self._btklinedataset.default_kline
-        # 创建买入订单
-        order = data._broker.sell(
+        current_pos = data.position.pos
+        # 反手逻辑：仅在持有多单（离场场景）时支持，否则静默退化为普通卖出
+        if reverse and current_pos > 0:
+            # 反手手数：reverse_size 优先，缺省使用原多单手数
+            reverse_target = reverse_size if reverse_size > 0 else current_pos
+            # 将平仓 + 反手合并到 size 中：current_pos 平多 + reverse_target 开空
+            # 底层 Broker.update 会先平多再自动开空（单次成交、同一价格）
+            size = current_pos + reverse_target
+        # 创建卖出订单
+        return data._broker.sell(
             size,
             exectype=exectype,
             price=price,
@@ -1766,18 +1955,21 @@ class StrategyBase:
             stop=stop
         )
 
-        return order
-
-    def _sell_live_trading(self, data: KLine | None = None, size: int = 1, stop: BtStop | None =None, **kwargs):
+    def _sell_live_trading(self, data: KLine | None = None, size: int = 1,
+                           stop: BtStop | None = None,
+                           reverse: bool = False, reverse_size: int = 0) -> float:
         """
         ## 实盘模式的卖出逻辑（内部方法，供sell调用）
+        - 通过TQSDK的TargetPosTask设置目标仓位，实现卖出模式的卖出逻辑（内部方法，供sell调用）
         - 通过TQSDK的TargetPosTask设置目标仓位，实现卖出平仓/开空，返回当前浮动盈亏
 
         Args:
             data (KLine, optional): 目标合约数据. Defaults to None.
             size (int): 卖出手数（相对于当前仓位的减量）. Defaults to 1.
             stop (Any, optional): 止损参数（预留）. Defaults to None.
-            **kwargs: 额外参数（预留）.
+            reverse (bool): 是否反手做空。仅在持有多单时生效，目标仓位设为 size 手空单。Defaults to False.
+            reverse_size (int): 反手做空时，目标仓位的空单手数。Defaults to 0.
+            若 reverse_size 为0，则默认使用原多单持仓手数。否则，根据 reverse_size 计算目标仓位。
 
         Returns:
             float: 当前合约的浮动盈亏
@@ -1789,19 +1981,27 @@ class StrategyBase:
         assert size > 0, '手数为不少于0的正整数'
         if data is None:
             data = self._btklinedataset.default_kline
+        # ★ 实盘也能用 Stop（同 _buy_live_trading ✓）
+        self._register_live_stop(data, stop)
         tqobj = self._tqobjs[data.symbol]
         # 获取当前仓位对象
         position = tqobj.Position
         pos = position.pos
-        # 计算目标仓位（当前仓位 - 卖出手数，负数表示空头）
-        size -= pos
+        # 计算目标仓位（默认：当前仓位 - 卖出手数，负数表示空头）
+        target = -(size - pos)
+        # 反手逻辑：仅在持有多单（离场场景）时支持，否则静默退化为普通卖出
+        if reverse and pos > 0:
+            # 多头离场反手做空：目标仓位 = -target（负数表示空头）
+            target = reverse_size if reverse_size > 0 else abs(pos)
+            target = -target
+
         # 获取当前浮动盈亏
         profit = position.float_profit
         # 通过TargetPosTask设置目标仓位（负仓位表示空头）
-        tqobj.TargetPosTask.set_target_volume(-size)
+        tqobj.TargetPosTask.set_target_volume(target)
         # 等待仓位更新（最多10秒）
         deadline = _time.time() + 10
-        while position.pos != -size or _time.time() > deadline:
+        while position.pos != target or _time.time() > deadline:
             self.api.wait_update(1)
             profit = position.float_profit
         if not pos and position.pos:
@@ -1809,7 +2009,8 @@ class StrategyBase:
         # 返回浮动盈亏
         return profit
 
-    def set_target_size(self, data: KLine | None = None, size: int = 0) -> None:
+    def set_target_size(self, data: KLine | None = None, size: int = 0,
+                        reverse: bool = False, reverse_size: int = 0) -> None:
         """
         ## 设置目标仓位接口（统一封装回测与实盘逻辑）
         - 直接指定最终仓位手数，自动计算仓位差并执行交易（开仓/平仓/加仓/减仓）
@@ -1817,20 +2018,31 @@ class StrategyBase:
         Args:
             data (KLine, optional): 目标合约数据（默认使用默认合约）. Defaults to None.
             size (int): 目标仓位手数（正数=多头，负数=空头，0=平仓）. Defaults to 0.
+            reverse (bool): 是否反手到反向仓位。仅在当前持有仓位（离场场景）时生效，
+                将目标仓位自动设为反向 size 手（持多→空单 size 手，持空→多单 size 手）；
+                若当前无仓位则静默退化为普通设置目标仓位。
+            reverse_size (int): 反手到反向仓位时，目标仓位的空单手数。Defaults to 0.
+            若 reverse_size 为0，则默认使用原多单持仓手数。否则，根据 reverse_size 计算目标仓位。
         """
         # 区分实盘与回测，调用对应逻辑
         if self._is_live_trading:
-            return self._set_target_size_live_trading(data, size)
-        return self._set_target_size_back_trading(data, size)
+            return self._set_target_size_live_trading(data, size, reverse=reverse, reverse_size=reverse_size)
+        return self._set_target_size_back_trading(data, size, reverse=reverse, reverse_size=reverse_size)
 
-    def _set_target_size_back_trading(self, data: KLine | None = None, size: int = 0):
+    def _set_target_size_back_trading(self, data: KLine | None = None, size: int = 0,
+                                      reverse: bool = False, reverse_size: int = 0):
         """
         ## 回测模式的目标仓位逻辑（内部方法，供set_target_size调用）
         - 计算当前仓位与目标仓位的差值，调用Broker执行对应的交易
+        - 反手到反向仓位时，根据 reverse_size 计算目标仓位
 
         Args:
             data (KLine, optional): 目标合约数据. Defaults to None.
             size (int): 目标仓位手数. Defaults to 0.
+            reverse (bool): 是否反手到反向仓位。仅在当前持有仓位时生效，
+                目标仓位自动设为反向 size 手。
+            reverse_size (int): 反手到反向仓位时，目标仓位的空单手数。Defaults to 0.
+            若 reverse_size 为0，则默认使用原多单持仓手数。否则，根据 reverse_size 计算目标仓位。
         """
         # 默认使用主合约数据
         if data is None:
@@ -1839,14 +2051,30 @@ class StrategyBase:
         size = int(size)
         # 获取当前仓位
         pre_pos = data.position.pos
+
+        # 反手逻辑：仅在当前持有仓位（离场场景）时支持，否则静默退化为普通设置目标仓位
+        if reverse and pre_pos != 0:
+            # 反手目标手数：reverse_size 优先，缺省使用原持仓手数
+            reverse_target = reverse_size if reverse_size > 0 else abs(pre_pos)
+            if pre_pos > 0:
+                # 持多 → 反手做空：单次 update 卖出 (pre_pos + reverse_target)，底层先平多再开空
+                data._broker.update(pre_pos + reverse_target, False)
+            else:
+                # 持空 → 反手做多：单次 update 买入 (|pre_pos| + reverse_target)，底层先平空再开多
+                data._broker.update(abs(pre_pos) + reverse_target, True)
+            return
+
+        # 普通目标仓位逻辑
+        target = size
         # 计算仓位差（目标仓位 - 当前仓位）
-        diff_pos = size - pre_pos
+        diff_pos = target - pre_pos
         # 仓位差非零时执行交易
         if diff_pos:
             # 调用Broker执行交易（diff_pos>0=买入，<0=卖出）
             data._broker.update(abs(diff_pos), diff_pos > 0)
 
-    def _set_target_size_live_trading(self, data: KLine | None = None, size: int = 0):
+    def _set_target_size_live_trading(self, data: KLine | None = None, size: int = 0,
+                                      reverse: bool = False, reverse_size: int = 0):
         """
         ## 实盘模式的目标仓位逻辑（内部方法，供set_target_size调用）
         - 通过TQSDK的TargetPosTask直接设置目标仓位，自动处理交易细节
@@ -1854,6 +2082,10 @@ class StrategyBase:
         Args:
             data (KLine, optional): 目标合约数据. Defaults to None.
             size (int): 目标仓位手数. Defaults to 0.
+            reverse (bool): 是否反手到反向仓位。仅在当前持有仓位时生效，
+                目标仓位自动设为反向 size 手。
+            reverse_size (int): 反手到反向仓位时，目标仓位的空单手数。Defaults to 0.
+            若 reverse_size 为0，则默认使用原多单持仓手数。否则，根据 reverse_size 计算目标仓位。
         """
         # 默认使用主合约数据
         if data is None:
@@ -1861,16 +2093,24 @@ class StrategyBase:
         tqobj = self._tqobjs[data.symbol]
         # 转换为整数手数
         size = int(size)
+        pos = tqobj.Position.pos
+        target = size
+        # 反手逻辑：仅在当前持有仓位（离场场景）时支持，否则静默退化为普通设置目标仓位
+        if reverse and pos != 0:
+            # 反手到反向仓位：持多→空单 size 手，持空→多单 size 手
+            target = reverse_size if reverse_size > 0 else abs(pos)
+            target = -target if pos > 0 else target
+
         # 目标仓位与当前仓位不同时执行
-        if size != tqobj.Position.pos:
+        if target != pos:
             # 通过TargetPosTask设置目标仓位
-            tqobj.TargetPosTask.set_target_volume(size)
+            tqobj.TargetPosTask.set_target_volume(target)
             # 等待仓位更新（最多10秒）
             deadline = _time.time() + 10
-            while tqobj.Position.pos != size or _time.time() > deadline:
+            while tqobj.Position.pos != target or _time.time() > deadline:
                 self.api.wait_update(1)
 
-    def insert_order(self, kline: KLine | None = None, direction: OrderSide | int=OrderSide.Buy, offset: str = "", volume: int = 0,
+    def insert_order(self, kline: KLine | None = None, direction: OrderSide | int = OrderSide.Buy, offset: str = "", volume: int = 0,
                      limit_price: Union[str, float, None] = None, advanced: Optional[str] = None,
                      order_id: Optional[str] = None, account: Optional[UnionTradeable] = None) -> TqOrder | None:
         """
@@ -1946,17 +2186,17 @@ class StrategyBase:
             单状态: ALIVE, 已成交: 0 手
             单状态: FINISHED, 已成交: 3 手
             ...
-            
+
         Example4::
 
             order = self.insert_order(symbol="SHFE.rb2610", direction="BUY", offset="OPEN", limit_price=4310,volume=2)
             while order.status != "FINISHED":
                 self.api.wait_update()
                 print("委托单状态: %s, 未成交手数: %d 手" % (order.status, order.volume_left))
-            
+
             # 要撤销一个委托单, 使用 cancel_order() 函数:
             self.api.cancel_order(order)
-        
+
         ### 委托单状态信息
         >>> {
             "order_id": "",  # "123" (委托单ID, 对于一个用户的所有委托单，这个ID都是不重复的)
@@ -1977,19 +2217,19 @@ class StrategyBase:
         }
         """
         if not self._is_live_trading:
-            return None
+            return
         if account is None:
             account = self._account
         if kline is None:
             kline = self._btklinedataset.default_kline
-        symbol=kline.symbol
-        if direction==OrderSide.Sell:
-            direction="SELL"
-        else:
-            direction="BUY"
+        symbol = kline.symbol
+        # ★ 方向归一化：``OrderSide`` / ``int`` / ``"BUY"`` / ``"SELL"`` 都认 ✓
+        #   以前只写 ``if direction == OrderSide.Sell`` —— OrderSide 是 IntEnum，
+        #   字符串 "SELL" 永远不相等 → 一律变 "BUY" → 「开空」实际挂**开多**单 ✗
+        direction = resolve_order_side(direction)
         return self.api.insert_order(symbol, direction, offset, volume, limit_price, advanced, order_id, account)
-    
-    def in_cooldown(self, data: KLine | None = None, cooldown_seconds: float | int = 0.0,cooldown_bars: int | None = None) -> bool | None:
+
+    def in_cooldown(self, data: KLine | None = None, cooldown_seconds: float | int = 0.0, cooldown_bars: int | None = None) -> bool | None:
         """
         检查是否在冷却中（开仓后 N 秒内禁止任何交易操作（包括平仓））
         Args:
@@ -1998,7 +2238,7 @@ class StrategyBase:
             cooldown_bars: 冷却K线数
         Returns:
             bool: 是否在冷却中
-            
+
         Note:
             如果 cooldown_seconds 和 cooldown_bars 都为 None，则默认 cooldown_bars 优先级高。
         """
@@ -2006,11 +2246,11 @@ class StrategyBase:
             return False
         if pd.isna(data._cooldown_entry_time):
             return False
-        if not cooldown_seconds and not cooldown_bars :
+        if not cooldown_seconds and not cooldown_bars:
             return False
-        if not isinstance(cooldown_seconds,(float,int)):
+        if not isinstance(cooldown_seconds, (float, int)):
             cooldown_seconds = 0.0
-        if isinstance(cooldown_bars,int):
+        if isinstance(cooldown_bars, int):
             cooldown_seconds = cooldown_bars * data.cycle
         now = data.datetime[-1]
         elapsed = (now - data._cooldown_entry_time).total_seconds()
@@ -2039,11 +2279,11 @@ class StrategyBase:
         if self._isbacktrader_form_signals:
             result = self._results[0]
             self.profits = result["total_profit"]
-            self._account._balance=self.profits.iloc[-1]
-            self._account._total_commission=result["total_fee"].iloc[-1]
-            self._account._total_profit=result["total_profit"].iloc[-1]
+            self._account._balance = self.profits.iloc[-1]
+            self._account._total_commission = result["total_fee"].iloc[-1]
+            self._account._total_profit = result["total_profit"].iloc[-1]
             # 2. 判断收益是否有效（排除所有收益相同的情况）
-            #state = len(self.profits.unique()) != 1.
+            # state = len(self.profits.unique()) != 1.
         else:
             # 1. 获取回测收益序列（从账户历史提取）
             self.profits = self._account.get_profits()
@@ -2054,7 +2294,6 @@ class StrategyBase:
             self.config.print_account = state  # 收益无效时不打印账户信息
         if self.config.profit_plot:
             self.config.profit_plot = state  # 收益无效时不绘制收益曲线
-        
 
         # 4. 处理净值序列（计算收益率，用于后续分析）
         # index = self._btklinedataset.date_index  # 获取K线时间索引
@@ -2064,7 +2303,7 @@ class StrategyBase:
         # 4. 处理净值序列（计算收益率，用于后续分析）
         index = self._btklinedataset.date_index  # 获取K线时间索引
         # print(f"时间索引长度: {len(index)}, 收益序列长度: {len(self.profits)}")
-        
+
         # **关键修复：处理min_start_length**
         start_idx = getattr(self.config, 'min_start_length', 0)
 
@@ -2096,7 +2335,7 @@ class StrategyBase:
 
         # 对齐时间索引
         self.profits.index = index
-        
+
         self._net_worth = self.profits.pct_change()[1:]  # 计算日度收益率（跳过首行NaN）
         # 5. 初始化QSPlots（绘图对象，非优化模式）
         if not self._isoptimize:
@@ -2151,6 +2390,7 @@ class StrategyBase:
 
             prev_pos = 0
             entry_cum_profit = 0.0
+            prev_cum_profit = 0.0
 
             for record in history:
                 if len(record) < 6:
@@ -2159,8 +2399,8 @@ class StrategyBase:
                 cum_profit = float(record[4])
 
                 if prev_pos == 0 and pos != 0:
-                    # 开仓
-                    entry_cum_profit = cum_profit
+                    # 开仓：基准取**开仓前**一根的累计盈亏（不含开仓手续费 ✓）
+                    entry_cum_profit = prev_cum_profit
                 elif prev_pos != 0 and pos == 0:
                     # 平仓
                     trade_pnl = cum_profit - entry_cum_profit
@@ -2175,14 +2415,55 @@ class StrategyBase:
                         wins += 1
                     else:
                         losses += 1
-                    # 开新仓
-                    entry_cum_profit = cum_profit
+                    # 开新仓：同样取反手前的累计盈亏（不含新手仓手续费 ✓）
+                    entry_cum_profit = prev_cum_profit
 
                 prev_pos = pos
+                prev_cum_profit = cum_profit
 
         trade_count = wins + losses
         win_rate = wins / trade_count if trade_count > 0 else 0.0
         return wins, losses, win_rate, trade_count
+
+    def _get_result_trade_pnls(self) -> list:
+        """## 从回测结果（positions + cum_profits）还原**逐笔**盈亏
+
+        `signal_backtest` / `bt_from_signals` 走 Cython `from_signals` 引擎，**不经过
+        Broker**，所以 `_get_broker_trade_stats()`（读 Broker 的 history_queue）恒为
+        0 —— 报告就会显示“0 笔交易”。这里按仓位状态机还原每笔往返：
+
+        * ``0 → ±1`` 开仓，记下**开仓前一根**的累计盈亏（不含开仓手续费）；
+        * ``±1 → 0`` 平仓，``cum_profits[平仓] - cum_profits[开仓前一根]`` 就是这一笔
+          （含开/平两次手续费 + 价差盈亏）；
+        * ``±1 → ∓1`` 反手：先平旧仓再以同样口径开新仓。
+
+        ### Returns:
+            list[float]: 每一笔（开→平）的盈亏；没有可还原的结果时返回 ``[]``
+        """
+        pnls: list = []
+        for result in (getattr(self, '_results', None) or []):
+            try:
+                positions = np.asarray(result['positions'], dtype=float)
+                cum = np.asarray(result['cum_profits'], dtype=float)
+            except Exception:                                    # noqa: BLE001
+                continue
+            n = min(len(positions), len(cum))
+            prev_pos = 0.0
+            entry_cum = 0.0          # 开仓**前一根**的累计盈亏
+            prev_cum = 0.0
+            for i in range(n):
+                pos = positions[i]
+                cum_i = cum[i]
+                if prev_pos == 0.0 and pos != 0.0:
+                    entry_cum = prev_cum                     # 不含开仓手续费
+                elif prev_pos != 0.0 and pos == 0.0:
+                    pnls.append(float(cum_i - entry_cum))
+                elif prev_pos != 0.0 and pos != 0.0 and prev_pos != pos:
+                    pnls.append(float(cum_i - entry_cum))    # 反手：先平旧仓
+                    entry_cum = prev_cum                     # 再开新仓
+                prev_pos = pos
+                prev_cum = cum_i
+        return pnls
 
     def _compute_backtest_metrics(self) -> dict | None:
         """## 统一计算回测核心统计指标，结果缓存到 self._backtest_metrics
@@ -2245,14 +2526,30 @@ class StrategyBase:
         profit_factor = qs_stats.profit_factor(returns)
         profit_ratio = qs_stats.profit_ratio(returns)
 
-        # 4. 交易频率指标（从 Broker 历史记录提取真实交易，非日收益差分）
+        # 4. 交易频率指标：优先 Broker 历史；`from_signals`（Cython）回测不经过
+        #    Broker（history_queue 为空 → 恒为 0），此时用回测结果里的
+        #    positions / cum_profits 还原逐笔交易（否则报表会显示“0 笔交易” ✗）。
         broker_wins, broker_losses, broker_win_rate, broker_trade_count = \
             self._get_broker_trade_stats()
-
-        # 5. 收益幅度指标
-        avg_return = qs_stats.avg_return(profits)
-        avg_win = qs_stats.avg_win(profits)
-        avg_loss = qs_stats.avg_loss(profits)
+        if broker_trade_count > 0:
+            wins_, losses_ = broker_wins, broker_losses
+            win_rate_, trade_count_ = broker_win_rate, broker_trade_count
+            # 5. 收益幅度指标（Broker 模式保持原口径：逐 bar 收益差分）
+            avg_return = qs_stats.avg_return(profits)
+            avg_win = qs_stats.avg_win(profits)
+            avg_loss = qs_stats.avg_loss(profits)
+        else:
+            # from_signals 模式：一律用**逐笔**盈亏（与上面的交易次数同源 ✓）
+            trade_pnls = np.asarray(self._get_result_trade_pnls(), dtype=float)
+            wins_ = int((trade_pnls > 0).sum())
+            losses_ = int((trade_pnls <= 0).sum())
+            trade_count_ = wins_ + losses_
+            win_rate_ = (wins_ / trade_count_) if trade_count_ else 0.0
+            avg_return = float(trade_pnls.mean()) if trade_pnls.size else 0.0
+            _wins_arr = trade_pnls[trade_pnls > 0]
+            _loss_arr = trade_pnls[trade_pnls <= 0]
+            avg_win = float(_wins_arr.mean()) if _wins_arr.size else 0.0
+            avg_loss = float(_loss_arr.mean()) if _loss_arr.size else 0.0
 
         # 缓存到策略实例
         self._backtest_metrics = {
@@ -2265,13 +2562,13 @@ class StrategyBase:
             'risk_return_ratio': risk_return_ratio,
             'profit_factor': profit_factor,
             'profit_ratio': profit_ratio,
-            'win_rate': broker_win_rate,
-            'wins': broker_wins,
-            'losses': broker_losses,
+            'win_rate': win_rate_,
+            'wins': wins_,
+            'losses': losses_,
             'avg_return': avg_return,
             'avg_win': avg_win,
             'avg_loss': avg_loss,
-            'trade_count': broker_trade_count,
+            'trade_count': trade_count_,
             'formatted': [
                 ("final return", final_return, "{:.2f}"),
                 ("commission", comm, "{:.2f}"),
@@ -2282,9 +2579,9 @@ class StrategyBase:
                 ("max_drawdown", abs(max_dd), "{:.4%}"),
                 ("profit_factor", profit_factor, "{:.4f}"),
                 ("profit_ratio", profit_ratio, "{:.4f}"),
-                ("win_rate", broker_win_rate, "{:.4%}"),
-                ("wins", broker_wins, "{:d}"),
-                ("losses", broker_losses, "{:d}"),
+                ("win_rate", win_rate_, "{:.4%}"),
+                ("wins", wins_, "{:d}"),
+                ("losses", losses_, "{:d}"),
                 ("avg_return", avg_return, "{:.6f}"),
                 ("avg_win", avg_win, "{:.6f}"),
                 ("avg_loss", avg_loss, "{:.6f}"),
@@ -2295,17 +2592,19 @@ class StrategyBase:
     @property
     def richprint(self):
         self.logger.print_strategy(self)
-        
+
     @property
     def _print_account(self):
-        self.logger.print_account(self._account,self._isbacktrader_form_signals)
+        self.logger.print_account(
+            self._account, self._isbacktrader_form_signals)
 
     @property
     def pprint(self):
         """## 格式化打印回测核心统计指标（使用统一缓存的 _backtest_metrics）"""
         metrics = self._compute_backtest_metrics()
         if metrics is not None and 'formatted' in metrics:
-            print(format_3col_report(metrics['formatted'], self.__class__.__name__))
+            print(format_3col_report(
+                metrics['formatted'], self.__class__.__name__))
 
     def _qs_reports(self, report_cwd="", report_name="", show=False, **kwargs):
         """
@@ -2315,8 +2614,8 @@ class StrategyBase:
         import quantstats as qs
         # 1. 构建报告保存路径
         if not report_cwd or not isinstance(report_cwd, str):
-            report_cwd = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "analysis_reports")
+            from ..utils import user_dir
+            report_cwd = os.path.join(user_dir(), "analysis_reports")
 
         # 确保目录存在
         os.makedirs(report_cwd, exist_ok=True)
@@ -2704,6 +3003,18 @@ class StrategyBase:
         - _strategy_init：可多次调用，用于动态更新状态（如实盘每根K线前）
         """
         ...
+
+    @property
+    def p(self) -> Params:
+        """
+        ## 获取策略参数（属性接口）
+        - 用于访问策略配置参数，如手续费、滑点、止损条件等
+
+        Returns:
+            Params: 策略参数对象
+        """
+        """策略参数"""
+        return self.params
 
     @property
     def api(self) -> TqApi | None:
@@ -3116,6 +3427,10 @@ class StrategyBase:
         return self.Logger()
 
     @property
+    def is_live_trading(self) -> bool:
+        return self._is_live_trading
+
+    @property
     def stats(self) -> Stats:
         """
         ## 获取回测统计分析对象（属性接口）
@@ -3349,7 +3664,7 @@ class StrategyBase:
         """
         """是否使用当前交易信号的收盘价作成交价,否为使用下一根K线的开盘价作成交价"""
         return self.config.on_close
-    
+
     @on_close.setter
     def on_close(self, value: bool):
         """
@@ -3716,9 +4031,9 @@ class StrategyBase:
                 self.get_signal_features()  # 自动处理特征（归一化、异常值、PCA等）
             else:
                 self.get_raw_indicator_features()  # 仅做基础缺失值处理
-        
+
         return self._signal_features
-    
+
     @property
     def state(self) -> np.ndarray:
         """
@@ -3731,9 +4046,9 @@ class StrategyBase:
         """获取当前状态"""
         if self._is_live_trading:
             # 实盘交易模式下，返回最后 window_size 个时间步的信号特征
-            return self.signal_features[self._btklinedataset._max_length - self.window_size: ].flatten()
+            return self.signal_features[self._btklinedataset._max_length - self.window_size:].flatten()
         return self.signal_features[self.btindex - self.window_size+1: self.btindex+1].flatten()
-    
+
     @property
     def next_state(self) -> np.ndarray:
         """
@@ -3746,7 +4061,7 @@ class StrategyBase:
         """获取下一个状态"""
         if self._is_live_trading:
             # 实盘交易模式下，返回的是最后一个时间步的信号特征
-            return self.signal_features[self._btklinedataset._max_length - self.window_size: ].flatten()
+            return self.signal_features[self._btklinedataset._max_length - self.window_size:].flatten()
         return self.signal_features[self.btindex - self.window_size+2: self.btindex+2].flatten()
 
     @property
@@ -3777,7 +4092,7 @@ class StrategyBase:
         """设置是否训练中"""
         if self._rl_config is not None:
             self._rl_config.train = bool(value)
-            
+
     @property
     def done(self) -> bool:
         """

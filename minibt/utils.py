@@ -1,7 +1,30 @@
 from __future__ import annotations
+from enum import Enum
+from io import StringIO
+import itertools
+import re
+import sys
+import pandas as pd
+import time as _time
+from math import isfinite
+from collections import OrderedDict
+import warnings
+from operator import neg, pos
+from dataclasses import dataclass, field, fields
+from .order import *
+from .constant import *
+from .other import *
+from pandas._libs import lib
+from pandas.io.formats import format as fmt
+from pandas.core.window import Rolling, ExponentialMovingWindow, Expanding, ExpandingGroupby, ExponentialMovingWindowGroupby, RollingGroupby
+from inspect import signature, getsourcelines  # , stack, getsource
+from queue import Queue, LifoQueue
+from iteration_utilities import flatten
+from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED, ALL_COMPLETED
 import joblib
 from typing import Any, Callable, TYPE_CHECKING
-from collections.abc import Iterable,Sequence, Mapping, Generator,Iterator
+from collections.abc import Iterable, Sequence, Mapping, Generator, Iterator
 from functools import wraps, cache, reduce, partial
 from collections import Counter
 from cachetools import cachedmethod, Cache
@@ -14,39 +37,94 @@ from retrying import retry
 from addict import Addict, Dict
 from pandas._libs.internals import BlockPlacement
 from pandas.core import common
-import quantstats.stats as qs_stats
-import quantstats.plots as qs_plot
 from typing_extensions import Literal
-from enum import Enum
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED, ALL_COMPLETED
-from copy import deepcopy
-from iteration_utilities import flatten
-from queue import Queue, LifoQueue
-from inspect import signature, getsourcelines  # , stack, getsource
-from pandas.core.window import Rolling, ExponentialMovingWindow, Expanding,ExpandingGroupby,ExponentialMovingWindowGroupby,RollingGroupby
-from pandas.io.formats import format as fmt
-from pandas._libs import lib
-from .other import *
-from .constant import *
-from .order import *
-from dataclasses import dataclass, field, fields
-from operator import neg, pos
-import warnings
-from collections import OrderedDict
-from math import isfinite
-import time as _time
-import pandas as pd
-import itertools
-from io import StringIO
 
-try:
-    with FilteredOutputRedirector():
-        from tqsdk.objs import Position, Quote
-        from tqsdk.objs import Account as TqAccount
-        from tqsdk import TqApi, TargetPosTask
-except ImportError:  # [pilot-prune] tqsdk 可选:仅实盘天勤链路使用
-    Position = Quote = TqAccount = TqApi = TargetPosTask = None
+# ---------------------------------------------------------------------------
+# quantstats 惰性加载
+# ---------------------------------------------------------------------------
+# quantstats 会连带 seaborn / matplotlib / scipy.stats / plotly / statsmodels
+# 等一大批库，导入代价约 2~3 秒，而只有统计/绘图功能需要它。
+# 这里改为惰性加载：首次访问 qs_stats / qs_plot 时才真正 import，
+# 并在首次加载 quantstats.stats 时应用 minibt 的修正补丁。
+_qs_stats_module = None
+_qs_plots_module = None
 
+
+def _get_qs_stats():
+    """首次使用时加载 quantstats.stats，并应用 minibt 的修正补丁。"""
+    global _qs_stats_module
+    if _qs_stats_module is None:
+        try:
+            import quantstats.stats as _m
+        except ImportError as e:
+            raise ImportError(
+                "统计指标/tearsheet 功能需要依赖 quantstats，请安装： pip install quantstats"
+            ) from e
+        # 原函数有BUG，用 minibt 修正版覆盖
+        _m.cagr = _cagr
+        _m.omega = _omega
+        _m.sharpe = globals()["__sharpe"]
+        _qs_stats_module = _m
+    return _qs_stats_module
+
+
+def _get_qs_plots():
+    """首次使用时加载 quantstats.plots。"""
+    global _qs_plots_module
+    if _qs_plots_module is None:
+        try:
+            import quantstats.plots as _m
+        except ImportError as e:
+            raise ImportError(
+                "统计图表功能需要依赖 quantstats，请安装： pip install quantstats"
+            ) from e
+        _qs_plots_module = _m
+    return _qs_plots_module
+
+
+class _LazyModule:
+    """惰性模块代理：首次属性访问时才加载目标模块。"""
+
+    def __init__(self, loader):
+        self.__dict__["_loader"] = loader
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__["_loader"](), name)
+
+
+qs_stats = _LazyModule(_get_qs_stats)
+qs_plot = _LazyModule(_get_qs_plots)
+
+# tqsdk 相关类型：保留 `from minibt.utils import Quote` 的兼容性，
+# 但改为按需导入，避免模块导入时就拉起整个 tqsdk（连带 aiohttp 等）。
+_LAZY_TQSDK_NAMES = ("Position", "Quote", "TqAccount",
+                     "TqApi", "TargetPosTask")
+
+
+def __getattr__(name):
+    if name in _LAZY_TQSDK_NAMES:
+        try:
+            from tqsdk.objs import Position, Quote
+            from tqsdk.objs import Account as TqAccount
+            from tqsdk import TqApi, TargetPosTask
+        except ImportError as e:
+            raise ImportError(
+                "实盘交易功能需要依赖 tqsdk，请安装： pip install tqsdk"
+            ) from e
+        value = {
+            "Position": Position,
+            "Quote": Quote,
+            "TqAccount": TqAccount,
+            "TqApi": TqApi,
+            "TargetPosTask": TargetPosTask,
+        }[name]
+        globals()[name] = value  # 缓存，后续访问不再走 __getattr__
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# tqsdk 及其依赖（aiohttp 等）体积较大，且只有实盘交易才需要，
+# 因此不再在模块导入时急切加载；TargetPosTask 在 tq_objs.__post_init__ 中按需导入。
 pd.options.mode.chained_assignment = None
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -75,9 +153,90 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SPECIAL_FUNC = {"assign", }
 
 
-class Gui(str,Enum):
-    Bokeh="bokeh"
-    LightChart="light_chart"
+def user_dir() -> str:
+    """## 用户数据目录（与 ``setting.json`` 同目录）
+
+    日志 / 优化参数 / 回测报告 / 回测图表 / 设置 等**运行时可写**的数据都放这里，
+    不随包升级被覆盖。默认 ``~/.minibt``（Windows 即 ``C:\\Users\\<你>\\.minibt``）；
+    可用环境变量 ``MINIBT_SETTINGS`` 覆盖：指向**目录**时直接用它，指向**文件**
+    （如 ``.../x/setting.json``）时取其父目录。
+    """
+    env = os.environ.get('MINIBT_SETTINGS')
+    if env:
+        path = os.path.expanduser(env)
+        if path and not os.path.splitext(path)[1]:
+            return path
+        return os.path.dirname(os.path.abspath(path))
+    return os.path.join(os.path.expanduser('~'), '.minibt')
+
+
+def main_guard_missing(module=None) -> bool:
+    """## 入口脚本是否缺少 ``if __name__ == '__main__':`` 保护
+
+    Windows / macOS 用 **spawn** 启动子进程，它会**把入口脚本重新执行一遍**；
+    没有这层保护时，pylightcharts 的原生窗口（子进程渲染）永远起不来 ——
+    旧版本会一直卡住，新版本会抛 ``WindowStartError``。
+
+    检测到这种情况时，minibt 会自动改用浏览器版（``gui='pylightcharts_web'``），
+    所以快速脚本 / Notebook 里不用特意加保护也能看到图。
+
+    :param module: 默认检查 ``sys.modules['__main__']``（可注入假模块做单测）。
+    :return: True = 缺少保护（且能确认是脚本文件）；无法判断时返回 False，
+        交给上层按原引擎处理。
+    """
+    if sys.platform not in ('win32', 'darwin'):
+        return False                       # Linux 用 fork，不受影响
+    main = module if module is not None else sys.modules.get('__main__')
+    path = getattr(main, '__file__', None)
+    if not path or not str(path).endswith('.py') or not os.path.isfile(path):
+        return False                       # IPython / 交互式 / 冻结程序
+    try:
+        with open(path, encoding='utf-8', errors='ignore') as handle:
+            source = handle.read()
+    except OSError:
+        return False
+    names = ("'__main__'", '"__main__"')
+    pattern = (r'^[ 	]*if[ 	]+__name__[ 	]*==[ 	]*('
+               + '|'.join(re.escape(name) for name in names)
+               + r')[ 	]*:')
+    return re.search(pattern, source, re.M) is None
+
+
+def ensure_user_dir(*parts) -> str:
+    """返回 ``user_dir()/parts...`` 并确保目录存在（不存在则创建）。
+
+    例子：``ensure_user_dir('logs')`` → ``~/.minibt/logs``。
+    """
+    path = os.path.join(user_dir(), *parts)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+class Gui(str, Enum):
+    """图表引擎。
+
+    * ``Bokeh``：Bokeh 交互图（回测报告，本身也是网页）；
+    * ``Pylightcharts``：原生 pylightcharts 窗口（回测/回放/实时）；
+    * ``PylightchartsWeb``：pylightcharts 网页版（浏览器标签，实时用 SSE）；
+    * ``Jupyter``：Jupyter 单元格内联（回测=``JupyterChart`` 静态快照；
+      回放/实时=本地 SSE 服务 + ``IFrame`` 内嵌，持续刷新）。
+    """
+    Bokeh = "bokeh"
+    Pylightcharts = "pylightcharts"
+    PylightchartsWeb = "pylightcharts_web"
+    #: Jupyter 内联图（回测=静态快照；回放/实时=本地 SSE 服务 + iframe）
+    Jupyter = "jupyter"
+    # 兼容旧名
+    LightChart = "pylightcharts"
+    Browser = "pylightcharts_web"
+
+    def __str__(self) -> str:
+        """``str(Gui.Bokeh)`` / ``f'{Gui.Bokeh}'`` → ``'bokeh'``。
+
+        Python 3.11 起 ``str`` 枚举的默认 ``__str__`` 返回 ``'Gui.Bokeh'``，
+        会让"把枚举直接当字符串用"的代码（比较、拼接、写进配置）莫名其妙地失效。
+        """
+        return self.value
 
 
 class MinibtOptions:
@@ -291,8 +450,7 @@ def _cagr(returns, rf=0.0, compounded=True, periods=252):
         raise ValueError(f"计算CAGR时出错: {str(e)}") from e
 
 
-# 原函数有BUG
-qs_stats.cagr = _cagr
+# 原函数有BUG（补丁已移到 _get_qs_stats()，首次加载 quantstats 时应用）
 
 
 def _omega(returns, rf=0.0, required_return=0.0, periods=252):
@@ -337,8 +495,7 @@ def _omega(returns, rf=0.0, required_return=0.0, periods=252):
         return np.nan
 
 
-# 原函数有BUG
-qs_stats.omega = _omega
+# 原函数有BUG（补丁已移到 _get_qs_stats()，首次加载 quantstats 时应用）
 
 
 def _add_symbol_info(self: pd.DataFrame, **kwargs):
@@ -397,8 +554,7 @@ def __sharpe(returns, rf=0.0, periods=252, annualize=True, smart=False):
     return res
 
 
-# 原函数有BUG
-qs_stats.sharpe = __sharpe
+# 原函数有BUG（补丁已移到 _get_qs_stats()，首次加载 quantstats 时应用）
 
 # 开盘时间
 # OPEN_TIME: list[time] = [time(9, 0), time(13, 0), time(21, 0)]
@@ -607,7 +763,16 @@ class Config:
         profit_plot: bool = True
         click_policy: Literal["hide", "mute"] = "hide"
         take_time: bool = True
-        on_close: bool = True"""
+        on_close: bool = True
+        equity_overlay: bool = False  # 回放：K 线主图叠加权益曲线
+        capital_line: bool | dict = False   # 初始资金水平虚线（+色带）
+        toolbox: bool = False               # 初始显示画图工具
+        theme: str = 'light'                # 图表主题：'light'（默认）/ 'dark'
+        # bokeh 全屏铺满：None=自动（Jupyter→False，浏览器→True）/ True / False
+        bokeh_fullscreen: bool | None = None
+        grid: bool = True                   # 是否显示图表网格线（bokeh 与 pylightcharts 共用）
+        watermark: bool = True              # 是否给每个合约画水印（默认用合约名）
+        tradestyle: TradeStyle | None = None  # 入场/离场连线样式（bokeh 与 pylightcharts 共用）"""
     value: float = 1000_000.
     margin_rate: float = 0.05
     tick_commission: float = 0.
@@ -625,15 +790,69 @@ class Config:
     key: str = 'datetime'
     start_time = None
     end_time = None
-    time_segments: time | None= None
+    time_segments: time | None = None
     profit_plot: bool = True
     click_policy: Literal["hide", "mute"] = "hide"
     take_time: bool = False
     on_close: bool = True
     replay: bool = False
     performance: bool = False  # 是否显示性能评估面板
+    # 成交量显示方式（策略绘图用）:
+    #   'sub'     独立成交量副图（默认，与旧版行为一致）
+    #   'overlay' 成交量叠加在**主图底部**（贴视口下沿，不影响价格 Y 轴范围）
+    #   'both'    独立副图 + 主图叠加，两者都显示
+    #   'none'    都不显示
+    volume_mode: Literal['sub', 'overlay', 'both', 'none'] = 'overlay'
     log_to_file: bool = True  # 是否保存日志
     auto_clean_days: int = 15  # 清理日志的天数
+    # 回放时在 K 线主图上叠加权益曲线（左刻度，右刻度仍是价格）
+    equity_overlay: bool = False
+    # 初始资金水平虚线：True 用默认样式；dict 可给色带的颜色/透明度
+    # （`{'color': .., 'opacity': ..}`，或 fill_color/fill_alpha 写法）
+    capital_line: bool | dict = False
+    # 图表初始是否显示画图工具（等价于策略里 `self.toolbox = True`）
+    toolbox: bool = False
+    # 图表主题：'light'（浅色，默认）/ 'dark'（深色）。
+    # 同时作用于 pylightcharts（``win.theme(...)``）与 bokeh 回测图（``black_style``）。
+    # 也可在策略里写 ``self.theme = 'light'`` 覆盖（见 ``Strategy.theme``）。
+    theme: str = 'light'
+    # bokeh 回测图是否**全屏铺满**（默认 None = 自动）：
+    #   None  → Jupyter 里 False（内联不方便铺满），浏览器打开 True；
+    #   True  → 主图 : 副图 = 3 : 1，整页铺满视口，不出现纵向滚动条；
+    #   False → 按各图固定高度排列，副图多时页面可纵向滚动。
+    bokeh_fullscreen: bool | None = None
+    # 是否显示图表网格线（默认 True，显示）；bokeh 与 pylightcharts 共用。
+    grid: bool = True
+    #: **价格轴上下留白**（K 线图顶部/底部的空白），只作用于 pylightcharts 引擎
+    #: （bokeh 忽略它 ✗）。对应 lightweight-charts 的 ``scaleMargins``，
+    #: 取值是**面板高度的比例**（0~1），不是像素 ✗：
+    #:
+    #: * ``None``（默认）→ 用 ``DEFAULT_Y_MARGIN``（**0.1**，上下各留 10%）✓
+    #: * 单个数字（如 ``0.1``）→ 上下**同值**
+    #: * ``(top, bottom)``（如 ``(0.1, 0.02)``）→ 上下**分别**设置
+    #: * ``0.0`` → 铺满；``(0.2, 0.1)`` → 回到 lightweight-charts 原样
+    #:
+    #: 设了它 → 该策略的**所有合约**（含回测结果页里的各个副图 pane）统一生效 ✓；
+    #: 也可在策略里写 ``self.y_margin = 0.08`` 覆盖 ✓；
+    #: 上一次性的临时覆盖用 ``Bt().run(y_margin=…)`` ✓。
+    y_margin: float | tuple | None = None
+    # 是否给图表画水印（K 线背景的大字）。
+    #   True （默认）→ **每个合约用自身的名称**（等价于在策略里写
+    #                  ``self.data.watermark = f"{self.data.symbol}"``）；
+    #                  策略里显式设过 ``self.data.watermark = '文本'`` 时用它的文本。
+    #   False        → 所有合约都不画水印。
+    # 策略里可写 ``self.config.watermark = False`` 覆盖（见 ``resolve_watermark``）。
+    watermark: bool = True
+    # 入场/离场连线（**真实成交**）的样式：四个方向的标记 + 连线线型。
+    # None = 用内置默认（见 ``TradeStyle`` / ``resolve_tradestyle``）；bokeh 与
+    # pylightcharts 两个引擎读的是同一份 `TradeStyle` ✓。
+    tradestyle: TradeStyle | None = None
+    # 指标参数重算（pylightcharts 图例齿轮菜单的「参数」页）
+    #   True  → 齿轮菜单显示「参数」页，确认后按新参数**重算该指标并重画**
+    #           （靠 `tobtind` 记录的原始调用元信息，见
+    #           `minibt/strategy/indicator_menu.py`）；
+    #   False（默认）→ 不显示「参数」页，避免误改。（视觉设置不受影响）
+    indicator_recompute: bool = True
 
     def _get_commission(self):
         comm = dict()
@@ -655,6 +874,244 @@ class Config:
     @property
     def logger_params(self) -> tuple:
         return self.log_to_file, self.auto_clean_days
+
+
+def resolve_theme(theme=None, black_style=None, strategy=None,
+                  default: str = 'light') -> str:
+    """## 统一解析图表主题
+
+    优先级：显式 ``black_style``（旧参数，兼容）> 显式 ``theme`` >
+    ``strategy.theme``（策略里 ``self.theme`` / ``config.theme``）> ``default``。
+
+    返回 ``'dark'`` 或 ``'light'``。
+    """
+    if black_style is not None:
+        return 'dark' if black_style else 'light'
+    if isinstance(theme, str) and theme.strip():
+        return theme.strip().lower()
+    if strategy is not None:
+        value = getattr(strategy, 'theme', None)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+        value = getattr(getattr(strategy, 'config', None), 'theme', None)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return default
+
+
+def theme_is_dark(theme=None, black_style=None, strategy=None,
+                 default: str = 'light') -> bool:
+    """主题是否为深色（内部按 ``resolve_theme(...) == 'dark'`` 判断）。"""
+    return resolve_theme(theme, black_style, strategy, default) == 'dark'
+
+
+def resolve_fullscreen(strategy=None, jupyter: bool = False, default=None):
+    """## 解析 bokeh 全屏开关
+
+    ``config.bokeh_fullscreen`` 为 ``None``（未设置）时：Jupyter → False，浏览器 → True。
+    """
+    val = None
+    if strategy is not None:
+        val = getattr(getattr(strategy, 'config', None), 'bokeh_fullscreen', None)
+    if val is None:
+        val = default
+    return (not jupyter) if val is None else bool(val)
+
+
+def resolve_grid(strategy=None, default: bool = False) -> bool:
+    """## 是否显示图表网格线（bokeh 与 pylightcharts 共用 ``config.grid``）。"""
+    if strategy is not None:
+        val = getattr(getattr(strategy, 'config', None), 'grid', None)
+        if val is not None:
+            return bool(val)
+    return bool(default)
+
+
+def resolve_indicator_recompute(strategy=None, default: bool = False) -> bool:
+    """## 指标参数是否可重算（``config.indicator_recompute``，默认 **False**）
+
+    False（默认）：pylightcharts 图例齿轮菜单**不显示**「参数」页，避免误改；
+    True：显示「参数」页，确认后按新参数重算该指标并重画。
+
+    把它做成开关是为了把“新功能”与现有行为分开：不开就是原来的图表，开了才有
+    重算（重算依赖 ``tobtind`` 记录的原始调用，见 ``indicator_menu``）。
+    """
+    if strategy is not None:
+        val = getattr(getattr(strategy, 'config', None), 'indicator_recompute',
+                      None)
+        if val is not None:
+            return bool(val)
+    return bool(default)
+
+
+def resolve_watermark(strategy=None, default: bool = True) -> bool:
+    """## 是否给图表画水印（``config.watermark``，默认 **True**）
+
+    取策略的 ``config.watermark``（策略里可写 ``self.config.watermark = False``
+    覆盖），没配置时用 ``default``（True）。
+
+    * ``True``：**每个合约用水印 = 自身名称**（等价于在策略里写
+      ``self.data.watermark = f"{self.data.symbol}"``）；若策略里给某个 K 线
+      显式设过 ``.watermark = '文本'``（或 ``WaterMark(...)``），那个合约用
+      它的文本。
+    * ``False``：全部合约都不画水印。
+    """
+    if strategy is not None:
+        cfg = getattr(getattr(strategy, 'config', None), 'watermark', None)
+        if cfg is not None:
+            return bool(cfg)
+    return bool(default)
+
+
+def _trade_marker_style(value, default: TradeMarkerStyle) -> TradeMarkerStyle:
+    """把 `TradeMarkerStyle` / dict / ``(color, marker, size)`` / None
+    归一成 `TradeMarkerStyle`（缺的字段用 `default` 补）。"""
+    if value is None:
+        return default
+    if isinstance(value, TradeMarkerStyle):
+        return TradeMarkerStyle(
+            color=value.color if value.color is not None else default.color,
+            marker=(value.marker if value.marker is not None
+                    else default.marker),
+            size=value.size if value.size is not None else default.size)
+    if isinstance(value, dict):
+        return TradeMarkerStyle(
+            color=value.get('color', default.color),
+            marker=value.get('marker', default.marker),
+            size=value.get('size', default.size))
+    if isinstance(value, (tuple, list)):
+        parts = list(value) + [None, None, None]
+        return TradeMarkerStyle(
+            color=parts[0] if parts[0] is not None else default.color,
+            marker=parts[1] if parts[1] is not None else default.marker,
+            size=parts[2] if parts[2] is not None else default.size)
+    return default
+
+
+def normalise_tradestyle(value=None, default=None) -> TradeStyle:
+    """把用户给的 `TradeStyle` / dict / None 补全成完整的 `TradeStyle`。"""
+    base = default if isinstance(default, TradeStyle) else TradeStyle()
+    if value is None:
+        return base
+    if isinstance(value, TradeStyle):
+        source = value
+    elif isinstance(value, dict):
+        source = TradeStyle(
+            long_entry=value.get('long_entry'),
+            short_entry=value.get('short_entry'),
+            long_exit=value.get('long_exit'),
+            short_exit=value.get('short_exit'),
+            line_color=value.get('line_color', base.line_color),
+            line_width=value.get('line_width', base.line_width),
+            line_dash=value.get('line_dash', base.line_dash),
+            show=value.get('show', base.show))
+    else:
+        return base
+    return TradeStyle(
+        long_entry=_trade_marker_style(source.long_entry, base.long_entry),
+        short_entry=_trade_marker_style(source.short_entry, base.short_entry),
+        long_exit=_trade_marker_style(source.long_exit, base.long_exit),
+        short_exit=_trade_marker_style(source.short_exit, base.short_exit),
+        line_color=(source.line_color if source.line_color is not None
+                    else base.line_color),
+        line_width=(source.line_width if source.line_width is not None
+                    else base.line_width),
+        line_dash=(source.line_dash if source.line_dash is not None
+                   else base.line_dash),
+        show=bool(source.show))
+
+
+def resolve_tradestyle(strategy=None, default=None) -> TradeStyle:
+    """## 统一解析入场/离场连线样式（bokeh 与 pylightcharts 共用）。
+
+    优先级：``strategy.config.tradestyle`` > 策略属性 ``self.tradestyle`` >
+    ``default`` > 内置默认 :class:`TradeStyle`。返回的一定是**补全过的**
+    :class:`TradeStyle`（四个标记 + 连线字段都不为 None ✓）。
+    """
+    for source in (getattr(strategy, 'config', None), strategy):
+        if source is None:
+            continue
+        value = getattr(source, 'tradestyle', None)
+        if value is not None:
+            return normalise_tradestyle(value)
+    return normalise_tradestyle(default)
+
+
+#: 价格轴上下余量默认值（LWC `scaleMargins`，面板高度的比例）。
+#: LWC 自带的是 ``top 0.2 / bottom 0.1`` —— 价格只占面板 70%，上下看着很空、
+#: 图表被压；这里改成上下各 3%（价格占 94%）。
+#: 想回到 LWC 原样传 ``y_margin=(0.2, 0.1)``；想铺满传 ``y_margin=0.0``。
+DEFAULT_Y_MARGIN = 0.1
+
+
+def resolve_y_margin(strategy=None, override=None, default=DEFAULT_Y_MARGIN):
+    """## 价格轴上下留白（K 线图顶部/底部的空白）统一解析 ✓
+
+    优先级：显式 ``override``（``run(y_margin=…)``，**临时**覆盖 ✓）>
+    策略里 ``self.y_margin`` > ``Config.y_margin`` > ``default``（0.1）✓。
+
+    返回值已归一成 ``(top, bottom)`` 比例（0~1）；全都不设就用默认值 ✓。
+    对所有策略/合约（含回测结果页的各个 pane）统一生效 ✓。
+    """
+    if override is not None:
+        return normalise_y_margin(override, default=default)
+    if strategy is not None:
+        # 策略里 `self.y_margin = ...` 会把值存进 __dict__ ✓
+        explicit = getattr(strategy, '__dict__', {}).get('y_margin')
+        if explicit is not None:
+            return normalise_y_margin(explicit, default=default)
+        cfg = getattr(getattr(strategy, 'config', None), 'y_margin', None)
+        if cfg is not None:
+            return normalise_y_margin(cfg, default=default)
+    return normalise_y_margin(None, default=default)
+
+
+def normalise_y_margin(value, default=DEFAULT_Y_MARGIN):
+    """把价格轴上下余量归一成 ``(top, bottom)``（0..1）。
+
+    接受单个数字（两边同值）或 ``(top, bottom)``，对应 lightweight-charts
+    价格轴的 ``scaleMargins``（**面板高度**的比例）；上限 0.9（两边都拉满
+    就没绘图区了）。
+
+    ``None``（或不传）→ 用 ``default``（默认 :data:`DEFAULT_Y_MARGIN` = 0.03）；
+    非法值也回退到 ``default``。
+    """
+    if value is None:
+        value = default
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        items = list(value) or [None]
+        top = items[0]
+        bottom = items[1] if len(items) > 1 else items[0]
+    else:
+        top = bottom = value
+    try:
+        # 0.9 上限：两边都拉到 0.9 就没有绘图区了
+        return (max(0.0, min(0.9, float(top))),
+                max(0.0, min(0.9, float(bottom))))
+    except (TypeError, ValueError):
+        # 非法值：退回 default（通常就是 0.03），而不是不动
+        if default is None or default == value:
+            return None
+        return normalise_y_margin(None, default=default)
+
+
+def resolve_toolbox(strategy=None, default: bool = False) -> bool:
+    """## 统一解析“初始化时是否显示工具/工具栏”
+
+    优先级：策略里显式设过的 ``self.toolbox`` > ``config.toolbox`` > ``default``。
+    bokeh（右侧工具栏）与 pylightcharts（画线工具）共用这一个开关。
+    """
+    if strategy is not None:
+        # 策略里 `self.toolbox = True` 会把值存在 __dict__['_toolbox']
+        explicit = strategy.__dict__.get('_toolbox')
+        if explicit is not None:
+            return bool(explicit)
+        cfg = getattr(getattr(strategy, 'config', None), 'toolbox', None)
+        if cfg is not None:
+            return bool(cfg)
+    return bool(default)
 
 
 def _addict__setattr__(self, name, value):
@@ -733,6 +1190,14 @@ class Lines(list):
     def __getattribute__(self, name) -> IndSeries | Line | Any:
         # 避免无限递归：使用 object.__getattribute__ 直接访问 _ind_obj
         try:
+            _lines = object.__getattribute__(self, '_lines')
+            if _lines is not None:
+                result = _lines.get(name)
+                if result is not None:
+                    return result
+        except:
+            ...
+        try:
             _ind_source = object.__getattribute__(self, '_ind_source')
             lines = _ind_source.lines
         except AttributeError:
@@ -740,10 +1205,12 @@ class Lines(list):
             lines = []
         if _ind_source is None:
             return super().__getattribute__(name)
+
         if name in lines:
             if _ind_source.ndim == 1:
                 return _ind_source
             return object.__getattribute__(_ind_source, name)
+
         return super().__getattribute__(name)
 
     @property
@@ -766,7 +1233,14 @@ class OrderedAddict(Addict):
 
     def _converted_key(self, key: str | int) -> str:
         if isinstance(key, int):
-            key = list(self.keys())[key]
+            # int 索引 -> 位置取键。回测里 `strategy_instance[ sid ]` 每根 bar
+            # 都调，原来每次 `list(self.keys())` 重建一遍；这里缓存键列表，
+            # 在增删时失效（实测回测里的 strategy_instance 查找快 ~10x）。
+            keys = self.__dict__.get('_converted_key_cache')
+            if keys is None or len(keys) != len(self):
+                keys = list(self.keys())
+                self.__dict__['_converted_key_cache'] = keys
+            key = keys[key]
         return key
 
     def __getitem__(self, key: str | int) -> Line | IndSeries | IndFrame | KLine | Strategy:
@@ -774,6 +1248,7 @@ class OrderedAddict(Addict):
 
     def __setitem__(self, name: str | int, value: Line | IndSeries | IndFrame | KLine | Strategy):
         name = self._converted_key(name)
+        self.__dict__.pop('_converted_key_cache', None)
         isFrozen = (hasattr(self, '__frozen') and
                     object.__getattribute__(self, '__frozen'))
         if isFrozen and name not in super(Dict, self).keys():
@@ -904,19 +1379,21 @@ class KLinesSet(OrderedDict, OrderedAddict):
 
     @property
     def max_length(self) -> int:
-        """## KLine数据最大长度"""
-        # 优化：使用缓存，避免重复计算
-        if self._max_length_cache is None:
-            self._max_length_cache = max(self.lengths)
-        return self._max_length_cache
+        """## KLine数据最大长度
+
+        ⚠ **不能缓存**：实盘里 K 线是 ``_inplace_values()`` **原地长起来**的
+        （不经过 ``add_data`` / ``update_values`` → 不会清缓存 ✗），缓存住就
+        永远返回**初始化时**的长度。而 ``Strategy.__setattr__`` 正是用
+        ``len(ind) in self._btklinedataset.lengths`` 判断“这个指标该不该登记”：
+        长度对不上 → **新指标永远登记不进去** → 图上指标值就停在初始化那一刻
+        （“初始化时的最后一根到最新一根前全部是固定值”✗）。
+        """
+        return max((len(value) for value in self.values()), default=0)
 
     @property
     def lengths(self) -> list[int]:
-        """## 各个数据长度"""
-        # 优化：使用缓存，避免重复计算
-        if self._lengths_cache is None:
-            self._lengths_cache = [len(value) for _, value in self.items()]
-        return self._lengths_cache
+        """## 各个数据长度（**实时计算**，理由见 :attr:`max_length` ✓）。"""
+        return [len(value) for value in self.values()]
 
     @property
     def cycles(self) -> list[int]:
@@ -1124,6 +1601,12 @@ class DataSetBase:
             if isinstance(value, SignalLabel):
                 result[key] = value.vars
                 continue
+            # 1b. SignalText(dict子类)保留实例: 其携带 style 等实例属性,
+            #     若落入下方 dict 分支会被重建为普通 dict 而丢失 style,
+            #     前端(signal_texts)需经 .style 读取文本样式。
+            if isinstance(value, SignalText):
+                result[key] = value
+                continue
             # ------------- 核心修改结束 -------------
 
             # 2. 递归处理嵌套的DataSetBase对象（保留原有逻辑）
@@ -1215,6 +1698,137 @@ class LineStyle(DataSetBase):
     line_color: str | Colors | None = None
     price_line: bool = False
     price_label: bool = False
+    # [新增] 柱体线(``line_dash=LineDash.vbar``)的**柱底基线**, 默认 None(=0.0)。
+    #   柱体跳度为 [vbar_base, 该线数值]; 上下行配色也按"数值 vs 基线"判定。
+    #   默认 0.0 与旧行为完全一致(旧代码把柱底硬编码为 0、配色用 ind>0)。
+    #   用途: 像 LuxAlgo 市场结构振荡器的周期柱那样**围绕中轴(50)振荡**的柱状指标,
+    #   需要把柱底抬到 50 才能画对位置。
+    vbar_base: float | None = None
+    # [新增] 柱体线(``line_dash=LineDash.vbar``)的**上下行配色**:
+    #   > ``vbar_base`` 的柱用 ``vbar_up_color``，否则用 ``vbar_down_color``。
+    #   不设(None) 就跟主图 K 线的上涨/下跌色一致（``candlestyle`` /
+    #   ``color_by``；都没设时用 pylightcharts 默认的 #26a69a / #ef5350）。
+    #   只在 ``line_dash=LineDash.vbar`` 时生效，其它线型忽略。
+    #   例: ``LineStyle(line_dash=LineDash.vbar, vbar_up_color='red',
+    #                   vbar_down_color='green', vbar_base=0)``
+    #   优先级: vbar_up_color/vbar_down_color > line_color(单色) > K 线色 > 默认色
+    vbar_up_color: str | Colors | None = None
+    vbar_down_color: str | Colors | None = None
+    # [新增] 柱体上下行配色的**分界位置**（默认 None = 跟随 ``vbar_base``，
+    #   再默认 0）。用于“柱子从 0 画起、但按 50 分色”这类指标。
+    vbar_color_base: float | None = None
+
+
+@dataclass
+class TradeMarkerStyle(DataSetBase):
+    """## 单个交易标记（入场 / 离场）的样式：颜色 / 形状 / 大小。
+
+    用于 :class:`TradeStyle` 的四个方向。`size` 的口径与 bokeh 的
+    ``scatter(size=...)`` 一致（pylightcharts 侧会换算成自己的标记半径 ✓）。
+    """
+    color: str | Colors = Colors.tomato
+    marker: str | Markers = Markers.triangle
+    size: int | float = 12.
+
+
+@dataclass
+class TradeStyle(DataSetBase):
+    """## 入场 / 离场连线样式（**真实成交**；bokeh 与 pylightcharts 共用）。
+
+    写到策略的 ``config`` 里即可两个引擎一起生效::
+
+        from minibt import (Colors, Markers, LineDash,
+                            TradeStyle, TradeMarkerStyle)
+
+        class MyStrategy(Strategy):
+            def __init__(self):
+                self.config.tradestyle = TradeStyle(
+                    long_entry=TradeMarkerStyle(Colors.red, Markers.triangle, 12),
+                    short_entry=TradeMarkerStyle(Colors.lime,
+                                                 Markers.inverted_triangle, 12),
+                    long_exit=TradeMarkerStyle(Colors.red, Markers.circle, 9),
+                    short_exit=TradeMarkerStyle(Colors.lime, Markers.circle, 9),
+                    line_color=Colors.blue, line_width=3,
+                    line_dash=LineDash.dashed)
+
+    只设其中一两个字段也可以（其余保持默认）::
+
+        self.config.tradestyle = TradeStyle(line_color='orange')
+
+    * ``long_entry`` / ``short_entry`` / ``long_exit`` / ``short_exit``：
+      四个方向的 :class:`TradeMarkerStyle`
+      （默认：多头入场红上三角、空头入场绿下三角、离场红/绿圆点）；
+    * ``line_color``：入场→离场连线颜色；``None``（默认）= **跟随主题**
+      （深色主题黄 / 浅色主题蓝，与 bokeh 一致）；
+    * ``line_width`` / ``line_dash``：连线线宽 / 线型；
+    * ``show=False``：关掉这组连线（等价于 ``Bt.run(trade_signal=False)``）。
+
+    注意：标记 ``size`` 以 bokeh 口径为准；pylightcharts 用
+    ``round(size * 0.8)`` 换算成自己的标记半径（默认 12 -> 10、9 -> 7，
+    比指标信号大，容易分辨 ✓）。
+    """
+    long_entry: TradeMarkerStyle = field(
+        default_factory=lambda: TradeMarkerStyle(
+            '#e53935', Markers.triangle, 12.))
+    short_entry: TradeMarkerStyle = field(
+        default_factory=lambda: TradeMarkerStyle(
+            '#26a69a', Markers.inverted_triangle, 12.))
+    long_exit: TradeMarkerStyle = field(
+        default_factory=lambda: TradeMarkerStyle('#e53935', Markers.circle, 9.))
+    short_exit: TradeMarkerStyle = field(
+        default_factory=lambda: TradeMarkerStyle('#26a69a', Markers.circle, 9.))
+    line_color: str | Colors | None = None
+    line_width: int | float = 3.
+    line_dash: str | LineDash = LineDash.dashed
+    show: bool = True
+
+
+@dataclass
+class TableStyle(DataSetBase):
+    """## 指标统计表格风格（pylightcharts 浮动表格）。
+
+    像 :class:`LineStyle` 一样写在指标类的类体里即可，框架会把它存进
+    ``PlotInfo.tablestyle``，图表侧（``minibt.strategy.realtime.apply_indicator_tables``）
+    用 ``chart.create_table`` 画出来：
+
+    .. code-block:: python
+
+        class MyIndicator(BtIndicator):
+            tablestyle = TableStyle(
+                position='top-left', draggable=True,
+                headings=('Metric', 'Value'),
+                rows=[('RSI', '70 / 30')])
+
+    ``rows`` 既可以是静态的 ``[(标签, 值), ...]``，也可以是
+    ``callable(indicator[, index]) -> [(标签, 值), ...]``（拿得到算完的
+    ``IndFrame``，用于“当前值”“Detected”这类动态单元格）。
+
+    * ``live=True``（默认）时表格**跟随十字光标**：鼠标在哪根 bar 就把 ``index``
+      传成那根（不传时是最后一根），移出 K 线回到最后一根；
+    * ``margin_x`` / ``margin_y``：离“该角最近的水平/垂直边”的像素间距；
+    * ``header`` / ``footer``：表格标题 / 脚注（对应 ``table.header(1)`` +
+      ``table.header[0] = ...``）。
+    """
+    position: str = 'top-right'
+    headings: tuple = ()
+    rows: list | Callable = field(default_factory=list)
+    width: float = 0.24
+    height: float = 0.24
+    draggable: bool = True
+    #: 水平间距 px：从“该角最近的左/右边”到表格的距离
+    margin_x: float = 0.0
+    #: 垂直间距 px：从“该角最近的上/下边”到表格的距离
+    margin_y: float = 0.0
+    #: 表格标题（header 区），None = 不显示
+    header: str | None = None
+    #: 表格脚注（footer 区），None = 不显示
+    footer: str | None = None
+    #: 跟随光标 / 实时刷新：显示鼠标所在时间的值（移出 K 线回最后一根）；
+    #: 实时图表行情推进时也会用最新值重填
+    live: bool = True
+    background_color: str | None = None
+    border_color: str | None = None
+    show: bool = True
 
 
 class LineStyleType:
@@ -1234,9 +1848,12 @@ class LineStyleType:
 
     def __setattr__(self, name, value):
         # 代理属性设置到 dataframe 的 linstyle 字典
-        if name in object.__getattribute__(self, '_dataframe')._plotinfo.linestyle:
-            setattr(object.__getattribute__(
-                self, '_dataframe')._plotinfo.linestyle, name, value)
+        # 注意: 用字典赋值而非 setattr, 因为框架对 Addict.__setattr__ 做了
+        # 行追踪补丁, 直接 setattr 会写到实例属性而不会更新字典键。
+        _linestyle = object.__getattribute__(
+            self, '_dataframe')._plotinfo.linestyle
+        if name in _linestyle:
+            _linestyle[name] = value
 
 
 class LineAttrType:
@@ -1301,10 +1918,11 @@ class SignalStyleType:
         return getattr(object.__getattribute__(self, '_dataframe')._plotinfo.signalstyle, name)
 
     def __setattr__(self, name, value):
-        # 代理属性设置到 dataframe 的 signalstyle 字典
-        if name in object.__getattribute__(self, '_dataframe')._plotinfo.signalstyle:
-            setattr(object.__getattribute__(
-                self, '_dataframe')._plotinfo.signalstyle, name, value)
+        # 代理属性设置到 dataframe 的 signalstyle 字典(用字典赋值, 原因同 LineStyleType)
+        _signalstyle = object.__getattribute__(
+            self, '_dataframe')._plotinfo.signalstyle
+        if name in _signalstyle:
+            _signalstyle[name] = value
 
 
 class SignalAttrType:
@@ -1383,25 +2001,93 @@ class SignalStyle(DataSetBase):
             text, size, style, color).set_position(self.name, self.key)
         return self
 
+    def set_text_style(self, **kwargs):
+        """## 逐点文本样式（只作用于这条信号线，两个引擎共用一套键）
+
+        例：``SignalStyle('low', 'red', Markers.triangle).set_label('B')
+        .set_text_style(font_size=14, text_color='#ffd400')``
+        """
+        if not isinstance(self.label, SignalLabel):
+            # 在**类体**里直接调用时还没有 name（只有 set_label /
+            # set_default_label 才会设它），用空名 + key 兜底；
+            # 同时把自动排布偏移算出来（SignalLabel.vars 需要 x/y_offset）
+            self.label = SignalLabel()
+            self.label.set_position(getattr(self, 'name', '') or '', self.key)
+        self.label.set_text_style(**kwargs)
+        return self
+
 
 @dataclass
 class SignalLabel(DataSetBase):
-    """## 信号标签"""
+    """## 信号标签
+
+    除了文本/字号/粗细/颜色，还承载**逐点文本的完整样式**（两个图表引擎共用同一套
+    键名，见 :data:`SIGNAL_TEXT_STYLE_KEYS`）。新增字段全部默认 ``None`` =
+    跟随主题预设，用 :meth:`set_text_style` 设置。
+    """
     text: str = ""
     size: int = 10
     style: Literal["normal", "bold"] = "bold"
     color: str = "red"
+    # ↓ 逐点文本样式（None = 继承主题预设 / 指标级 style）
+    line_height: float | None = None
+    text_align: str | None = None
+    baseline: str | None = None
+    offset_x: float | None = None
+    offset_y: float | None = None
+    font_family: str | None = None
+    background_fill_color: str | None = None
+    background_fill_alpha: float | None = None
+    border_line_color: str | None = None
+    border_line_alpha: float | None = None
+    border_line_width: float | None = None
+    padding: float | None = None
+
+    def set_text_style(self, **kwargs) -> "SignalLabel":
+        """## 设置逐点文本样式（两个引擎同时生效）
+
+        可用键：``font_size`` / ``line_height`` / ``text_color`` / ``text_align``
+        / ``baseline`` / ``offset_x`` / ``offset_y`` / ``font_family`` /
+        ``font_weight`` / ``font_style`` / ``background_fill_color`` /
+        ``background_fill_alpha`` / ``border_line_color`` / ``border_line_alpha``
+        / ``border_line_width`` / ``padding``（别名见
+        :data:`SIGNAL_TEXT_STYLE_ALIASES`，``None`` = 保持继承）。
+        """
+        style = normalise_signal_text_style(kwargs)
+        if 'font_size' in style:
+            self.size = int(style.pop('font_size'))
+        if 'text_color' in style:
+            self.color = style.pop('text_color')
+        if 'font_weight' in style:
+            self.style = style.pop('font_weight')
+        for key, value in style.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+        return self
 
     def set_position(self, signal_name: str = "", signal_key: str = ""):
-        """设置标签生成的位置与偏移量"""
-        is_buy_signal = any([name in signal_name for name in [
-            "long", "exitshort"]]) or "low" in signal_key.lower()
-        self.set_default_offset(is_buy_signal)
+        """设置标签生成的位置与偏移量
+
+        以价格锚点列(高/低)决定文字落在信号点的哪一侧:
+        锚点在低点 → 文字在下方, 锚点在高点 → 文字在上方;
+        锚点列无法判断时回退信号名(long/exitshort=下方, short/exitlong=上方)。
+        """
+        self.set_default_offset(signal_text_below(signal_key, signal_name))
         return self
 
     @property
     def vars(self) -> dict:
-        return dict(text=self.text, x_offset=self.x_offset, y_offset=self.y_offset, text_font_size=f"{self.size}pt", text_font_style=self.style, text_color=self.color)
+        vars = dict(text=self.text, x_offset=self.x_offset, y_offset=self.y_offset,
+                    text_font_size=f"{self.size}pt", text_font_style=self.style,
+                    text_color=self.color)
+        # 其它逐点文本样式：None 不写进去（渲染端靠"缺键"判断"跟随主题"）
+        for key in SIGNAL_TEXT_STYLE_KEYS:
+            if key in ('font_size', 'text_color', 'font_weight'):
+                continue                       # 上面已经按老键名给了
+            value = getattr(self, key, None)
+            if value is not None:
+                vars[key] = value
+        return vars
 
     def copy(self) -> SignalLabel:
         return SignalLabel(**self.to_dict())
@@ -1420,22 +2106,8 @@ class SignalLabel(DataSetBase):
         - (x_offset, y_offset): 水平和垂直偏移量
         """
 
-        total_width = 0
+        total_width = text_width_pt(self.text, self.size, islong)
         font_size = self.size
-        label = self.text
-        char_width_ratio_en = 0.78 if islong else 0.57
-        char_width_ratio_cn = 1.32 if islong else 1.32
-
-        # 遍历每个字符计算总宽度
-        for char in label:
-            if self.is_chinese_char(char):
-                # 中文字符使用中文宽度比例
-                char_width = font_size * char_width_ratio_cn
-            else:
-                # 非中文字符使用英文宽度比例
-                char_width = font_size * char_width_ratio_en
-
-            total_width += char_width
 
         # 计算偏移量（居中显示）
         x_offset = -total_width / 2  # 水平居中
@@ -1473,6 +2145,62 @@ default_signal_label = {
     "exitlong_signal": SignalLabel("Exit Long", **short_label),  # 多头离场标签
     "exitshort_signal": SignalLabel("Exit Short", **long_label)  # 空头离场标签
 }
+
+
+def text_width_pt(text: str, font_size: float, islong: bool = True) -> float:
+    """## 估算单个标签文字的总宽度 (像素, pt)
+
+    ### 参数:
+    - text: 要显示的文本
+    - font_size: 字体大小 (pt)
+    - islong: 是否为多头方向 (决定英文字符宽度比例)
+
+    ### 返回:
+    - float: 文本总宽度, 供逐点信号标签自适应水平居中偏移使用
+
+    与 SignalLabel.set_default_offset 的字符宽度口径保持一致:
+    中文字符宽度比例固定 1.32, 英文字符为 0.78(多头) / 0.57(空头)。
+    多行文本(以 "\n" 分隔)按最长一行的宽度返回,
+    避免整体换行文本按各行宽度累加导致水平居中偏移过大。
+    """
+    en_ratio = 0.78 if islong else 0.57
+    lines = str(text).split("\n")
+    widths = []
+    for line in lines:
+        width = 0.0
+        for char in line:
+            if re.search(r'[\u4e00-\u9fff]', char):
+                width += font_size * 1.32
+            else:
+                width += font_size * en_ratio
+        widths.append(width)
+    return max(widths, default=0.0)
+
+
+def signal_text_below(signal_key: str = "", signal_name: str = "") -> bool:
+    """## 判断信号文字是否应放在信号点下方(远离 K 线的一侧)
+
+    以价格锚点列(高/低)为准: 锚点在低点 → 文字放下方(多头文字在下方),
+    锚点在高点 → 文字放上方(空头文字在上方);
+    锚点列无法判断时回退信号名: long/exitshort 视为低点锚点,
+    short/exitlong 视为高点锚点。
+
+    ### 返回:
+    - True: 文字放在信号点下方; False: 文字放在信号点上方
+    """
+    key = str(signal_key).lower()
+    if "low" in key:
+        return True
+    if "high" in key:
+        return False
+    name = str(signal_name).lower()
+    if "exitshort" in name:
+        return True
+    if "exitlong" in name or "short" in name:
+        return False
+    if "long" in name:
+        return True
+    return False
 
 
 def default_signal_style(name: str, overlap: bool = True, show: bool = True, size=12.) -> SignalStyle:
@@ -1567,6 +2295,95 @@ def exit_short_signal_style(overlap: bool = True, show: bool = True, size=12.) -
 
 
 @dataclass
+class VPStyle(DataSetBase):
+    """## 成交量分布图（Volume Profile）风格 —— **`category='vp'` 专用**
+
+    只有 `category='vp'` 的指标（`RollingVolumeProfile` / `VolumeProfileMA`）
+    会读它，pylightcharts 与 bokeh 两侧**同步生效**；其它指标设了也没用。
+
+    像其它样式一样直接写在指标类的类体里（构造时也可用 `vpstyle=` 覆盖），
+    或运行时改 ``ind.plotinfo.vpstyle``::
+
+        class MyVP(BtIndicator):
+            category = 'vp'
+            lines = tuple(f'vp{j}' for j in range(40))
+            vpstyle = VPStyle(bar_color='#26a69a', fill_alpha=0.55,
+                              profile_frac=0.24, bin_ratio=0.8,
+                              highlight_poc=False)
+
+    ### 字段说明
+
+    | 字段 | 类型 | 默认值 | 说明 |
+    | --- | --- | --- | --- |
+    | bar_color | str or Colors | '#3498db' | 横条颜色 |
+    | poc_color | str or Colors | '#f39c12' | 量最大那一档（POC）的颜色 |
+    | highlight_poc | bool | True | 是否用 `poc_color` 高亮 POC 档；False = 全部用 `bar_color` |
+    | fill_alpha | float | 0.6 | 横条透明度（0~1） |
+    | line_color | str or Colors or None | 'white' | 横条描边颜色；None = 不描边 |
+    | line_width | float | 0.4 | 描边宽度（0 = 不描边） |
+    | profile_frac | float | 0.30 | **满量程柱长** = 当前可视跨度 × 它（“柱体大小”） |
+    | bin_ratio | float | 0.88 | 单根横条的**高度占档距的比例**（柱体粗细） |
+    | price_bars | int or None | None | 档区窗口（该根往前多少根的 `[min(low), max(high)]`）；None = 跟指标 `params.price_bars` |
+    | show_axis | bool | False | bokeh 顶部“成交量刻度”轴（默认关闭，只留分布柱体；pylightcharts 无此项） |
+
+    ### 几何约定（两侧一致）
+
+    - 位置**固定在可视范围最右端**（成交量 0 刻度），向左生长；
+    - 鼠标在图上时画**鼠标那根**的分布（仅在 pylightcharts 下有鼠标跟随，
+      bokeh 走它自己的十字线交互），鼠标移出则用最右那根。
+    """
+    bar_color: str | Colors = '#3498db'
+    poc_color: str | Colors = '#f39c12'
+    highlight_poc: bool = True
+    fill_alpha: float = 0.6
+    line_color: str | Colors | None = 'white'
+    line_width: float = 0.4
+    profile_frac: float = 0.30
+    bin_ratio: float = 0.88
+    price_bars: int | None = None
+    show_axis: bool = False
+
+
+#: `VPStyle` 的默认值（`vp_style_values` 用）
+VP_STYLE_DEFAULTS = {
+    'bar_color': '#3498db',
+    'poc_color': '#f39c12',
+    'highlight_poc': True,
+    'fill_alpha': 0.6,
+    'line_color': 'white',
+    'line_width': 0.4,
+    'profile_frac': 0.30,
+    'bin_ratio': 0.88,
+    'price_bars': None,
+    'show_axis': False,
+}
+
+
+def vp_style_values(style) -> dict:
+    """`VPStyle`（或 dict / None）-> 完整的样式字典。
+
+    **只有 `category='vp'` 的指标会读它**；pylightcharts
+    （``minibt/strategy/realtime.py``）与 bokeh
+    （``minibt/strategy/bokeh_plot.py`` / ``minibt/btplot.py``）两侧都用这个
+    函数取值，保证同一个 ``vpstyle`` 两边一致。
+    """
+    values = dict(VP_STYLE_DEFAULTS)
+    if style is None:
+        return values
+    if hasattr(style, 'get'):
+        def _get(key, default=None):
+            return style.get(key, default)
+    else:
+        def _get(key, default=None):
+            return getattr(style, key, default)
+    for key in values:
+        value = _get(key, None)
+        if value is not None:
+            values[key] = bool(value) if key == 'highlight_poc' else value
+    return values
+
+
+@dataclass
 class SpanStyle(DataSetBase):
     """## 水平线风格"""
     location: float = np.nan
@@ -1582,6 +2399,12 @@ def span_add(self: SpanList, other):
     if isinstance(other, SpanStyle):
         if other.location not in self.locations:
             self.append(other)
+    elif isinstance(other, Iterable) and not isinstance(
+            other, (str, bytes, dict, DataSetBase)):
+        # 支持 `spanstyle += [SpanStyle(0), SpanStyle(-100)]`；
+        # 样式对象（SpanStyle/BandStyle 等 DataSetBase）不是可迭代容器
+        for item in other:
+            span_add(self, item)
     return self
 
 
@@ -1616,9 +2439,482 @@ class WaterMark(DataSetBase):
 
 
 @dataclass
+class BandStyle(DataSetBase):
+    """## 带风格（两条指标线之间填充背景色）
+
+    用于在 btplot 图表中将指定的两条指标线（lower/upper）之间区域填充为半透明背景色，
+    直观展示通道、区间、趋势带等视觉效果。底层基于 Bokeh 的 `Band` 注解实现。
+
+    ### 📘 **文档参考**:
+    - 使用教程：docs/minibt_basic/1.25minibt_band_background_fill.md
+
+    ### 使用示例:
+    ```python
+    class DualBand(BtIndicator):
+        lines = ('ma_fast', 'ma_slow', 'upper', 'lower')
+
+        def __init__(self):
+            ...
+            # 链式添加填充带（相同 lower+upper 自动去重）
+            self.plotinfo.bandstyle += BandStyle(
+                lower='lower', upper='upper',
+                fill_color='green', fill_alpha=0.1,
+            )
+            self.plotinfo.bandstyle += BandStyle(
+                lower='ma_fast', upper='ma_slow',
+                fill_color='orange', fill_alpha=0.15,
+            )
+    ```
+
+    ### 字段说明:
+
+    | 字段 | 类型 | 默认值 | 说明 |
+    | --- | --- | --- | --- |
+    | lower | str | （必填） | 下限线列名，必须是指标 lines 中已存在的线条 |
+    | upper | str | （必填） | 上限线列名，必须是指标 lines 中已存在的线条 |
+    | level | Literal | "underlay" | 渲染层级（见下方层级说明表） |
+    | fill_alpha | float | 0.03 | 填充透明度，取值 0~1 |
+    | fill_color | str \\| Colors | Colors.steelblue | 填充颜色 |
+    | line_color | str \\| Colors \\| None | None | 边线颜色，None 表示不绘制边线 |
+
+    ### level 渲染层级说明（从下到上渲染顺序）:
+
+    | 值 | 说明 |
+    | --- | --- |
+    | 'image' | 最底层（图片层） |
+    | 'underlay' | 背景层，画在数据下方（推荐，不遮挡指标线） |
+    | 'glyph' | 数据层，与数据同层 |
+    | 'guide' | 参考线层 |
+    | 'annotation' | 注解层（Bokeh Band 默认值） |
+    | 'overlay' | 最顶层 |
+
+    ### 注意事项:
+    - lower/upper 必须是指标 lines 中已存在且 isplot=True 的线条名称，
+      否则该填充带不会渲染
+    - 当指标分主图/副图（overlap）时，填充带会根据 lower/upper 所属的
+      图表面板自动绘制到对应面板中
+    - 同一 (lower, upper) 组合重复添加时自动跳过（去重）
+    """
+    lower: str                                                                                  # 下限
+    # 上限
+    upper: str
+    level: Literal["image", "underlay", "glyph", "guide",
+                   "annotation", "overlay"] = "underlay"     # 画在数据下方(背景)
+    # 透明度
+    fill_alpha: float = 0.03
+    # 填充色
+    fill_color: str | Colors = Colors.steelblue
+    # 不画边线
+    line_color: str | Colors | None = None
+
+
+def band_add(self, other):
+    if isinstance(other, BandStyle):
+        if not any(b.lower == other.lower and b.upper == other.upper for b in self):
+            self.append(other)
+    elif isinstance(other, Iterable):
+        for item in other:
+            if isinstance(item, BandStyle):
+                if not any(b.lower == item.lower and b.upper == item.upper for b in self):
+                    self.append(item)
+    return self
+
+
+def band_sub(self, other):
+    if isinstance(other, BandStyle):
+        for i, b in enumerate(self):
+            if b.lower == other.lower and b.upper == other.upper:
+                self.pop(i)
+                break
+    elif isinstance(other, Iterable):
+        for item in other:
+            if isinstance(item, BandStyle):
+                for i, b in enumerate(self):
+                    if b.lower == item.lower and b.upper == item.upper:
+                        self.pop(i)
+                        break
+    return self
+
+
+class BandList(list):
+    """## 带风格列表(两条线之间填充背景色)
+
+    继承自 list，支持 += 和 -= 运算符
+    用法:
+        bandstyle = BandList()
+        bandstyle += BandStyle(lower='ma5', upper='ma20', fill_color='green')
+        bandstyle += [BandStyle(...), BandStyle(...)]
+        bandstyle -= BandStyle(lower='ma5', upper='ma20')
+
+    methods:
+        append: 添加 BandStyle
+        pop: 移除并返回指定位置的 BandStyle
+        find: 查找指定 lower/upper 的 BandStyle
+        remove: 移除指定 lower/upper 的 BandStyle
+    """
+
+    __add__ = band_add
+    __sub__ = band_sub
+    __radd__ = band_add
+    __rsub__ = band_sub
+    __iadd__ = band_add
+    __isub__ = band_sub
+
+    def __init__(self, iterable=()):
+        super().__init__()
+        try:
+            if isinstance(iterable, BandStyle):
+                iterable = [iterable,]
+            for item in iterable:
+                if isinstance(item, BandStyle):
+                    self.append(item)
+                elif hasattr(item, 'vars') and isinstance(item.vars, dict):
+                    item_vars = item.vars
+                    if "lower" in item_vars and "upper" in item_vars:
+                        self.append(BandStyle(**item_vars))
+                elif isinstance(item, dict) and 'lower' in item and 'upper' in item:
+                    self.append(BandStyle(**item))
+        except TypeError:
+            raise TypeError(
+                f"只支持 BandStyle 、DataSetBase、dict类型数据, 收到 {type(item).__name__}")
+
+    def __repr__(self):
+        if not self:
+            return f"{self.__class__.__name__}()"
+        items = ", ".join(repr(b) for b in self)
+        return f"{self.__class__.__name__}([{items}])"
+
+    def append(self, item: BandStyle):
+        """## 添加 BandStyle，已存在(相同 lower+upper)则跳过"""
+        if not isinstance(item, BandStyle):
+            raise TypeError(f"只支持 BandStyle 类型, 收到 {type(item).__name__}")
+        if any(b.lower == item.lower and b.upper == item.upper for b in self):
+            return
+        super().append(item)
+
+    def pop(self, index: int = -1) -> BandStyle:
+        """## 移除并返回指定位置的 BandStyle"""
+        if not self:
+            raise IndexError("pop from empty BandList")
+        return super().pop(index)
+
+    def find(self, lower: str, upper: str) -> BandStyle | None:
+        """## 查找指定 lower/upper 的 BandStyle"""
+        for b in self:
+            if b.lower == lower and b.upper == upper:
+                return b
+        return None
+
+    def remove_by(self, lower: str, upper: str) -> bool:
+        """## 按 lower/upper 移除 BandStyle"""
+        for i, b in enumerate(self):
+            if b.lower == lower and b.upper == upper:
+                super().pop(i)
+                return True
+        return False
+
+
+class SignalText(dict):
+    """## 信号文本字典"""
+    black: dict = dict(
+        text_color="white",
+        background_fill_color="#333333",
+        background_fill_alpha=0.7,
+        border_line_color="#888888",
+        border_line_alpha=0.8)
+    white: dict = dict(
+        text_color="black",
+        background_fill_color="#EAEAEA",
+        background_fill_alpha=0.8,
+        border_line_color="#999999",
+        border_line_alpha=0.8)
+
+    size: int
+
+    def __init__(self, size: int, **kwargs):
+        super().__init__()
+        self.size = size
+        for k, v in kwargs.items():
+            if k in SIGNAL_Str and isinstance(v, Iterable) and len(v) == size:
+                self[k] = np.asarray(v, dtype=object)
+        for k in SIGNAL_Str:
+            if k not in self:
+                self[k] = np.full(size, np.nan, dtype=object)
+        self.style = self.black
+
+    def set_text_style(self, text_color=None, background_fill_color=None,
+                       background_fill_alpha=None, border_line_color=None,
+                       border_line_alpha=None, **kwargs):
+        """## 设置**指标级**逐点文本样式（bokeh 与 pylightcharts 同时生效）
+
+        只覆盖**显式传入**的键，``None`` = 保持继承（主题预设 / 之前设过的值）：
+
+        * 字号 / 行距 / 对齐：``font_size`` / ``line_height`` / ``text_align``；
+        * 颜色 / 字体：``text_color`` / ``font_family`` / ``font_weight`` /
+          ``font_style``（别名 ``text_font`` / ``text_font_style``）；
+        * 位置：``offset_x`` / ``offset_y``（**像素**）、``baseline``；
+        * 底色 / 边框：``background_fill_color`` / ``background_fill_alpha`` /
+          ``border_line_color`` / ``border_line_alpha`` / ``border_line_width``
+          / ``padding``（``padding`` 目前只有 pylightcharts 支持）。
+
+        完整键名见 :data:`SIGNAL_TEXT_STYLE_KEYS`；想整体固定成深/浅色预设请用
+        :meth:`set_default_style`。旧的 5 个位置参数顺序保持不变。
+        """
+        style = dict(self.style or {})
+        style.update(normalise_signal_text_style({
+            'text_color': text_color,
+            'background_fill_color': background_fill_color,
+            'background_fill_alpha': background_fill_alpha,
+            'border_line_color': border_line_color,
+            'border_line_alpha': border_line_alpha,
+            **kwargs}))
+        self.style = style
+        return self
+
+    def set_default_style(self, style: str = 'black'):
+        """## 设置默认信号文本样式"""
+        if style in ['black', 'white']:
+            self.style = self.black if style == 'black' else self.white
+        else:
+            raise ValueError(f"信号文本样式 {style} 不存在")
+
+    def set_signal(self, signal: str, value: np.ndarray | Iterable | None = None):
+        """## 设置信号文本"""
+        if signal in SIGNAL_Str:
+            if value is not None:
+                if isinstance(value, Iterable) and len(value) == self.size:
+                    value = np.asarray(value, dtype=object)
+                    self[signal] = value
+                else:
+                    raise ValueError(f"{signal} 必须是 {self.size} 个元素的 Iterable")
+            else:
+                self[signal] = np.full(self.size, np.nan)
+        else:
+            raise ValueError(f"信号文本 {signal} 不存在")
+
+    @property
+    def long_signal(self) -> np.ndarray:
+        return self["long_signal"]
+
+    @long_signal.setter
+    def long_signal(self, value: np.ndarray | Iterable):
+        if isinstance(value, Iterable) and len(value) == self.size:
+            value = np.asarray(value, dtype=object)
+            self["long_signal"] = value
+        else:
+            raise ValueError(f"long_signal 必须是 {self.size} 个元素的 Iterable")
+
+    @property
+    def short_signal(self) -> np.ndarray:
+        return self["short_signal"]
+
+    @short_signal.setter
+    def short_signal(self, value: np.ndarray | Iterable):
+        if isinstance(value, Iterable) and len(value) == self.size:
+            value = np.asarray(value, dtype=object)
+            self["short_signal"] = value
+        else:
+            raise ValueError(f"short_signal 必须是 {self.size} 个元素的 Iterable")
+
+    @property
+    def exitlong_signal(self) -> np.ndarray:
+        return self["exitlong_signal"]
+
+    @exitlong_signal.setter
+    def exitlong_signal(self, value: np.ndarray | Iterable):
+        if isinstance(value, Iterable) and len(value) == self.size:
+
+            value = np.asarray(value, dtype=object)
+            self["exitlong_signal"] = value
+        else:
+            raise ValueError(f"exitlong_signal 必须是 {self.size} 个元素的 Iterable")
+
+    @property
+    def exitshort_signal(self) -> np.ndarray:
+        return self["exitshort_signal"]
+
+    @exitshort_signal.setter
+    def exitshort_signal(self, value: np.ndarray | Iterable):
+        if isinstance(value, Iterable) and len(value) == self.size:
+            value = np.asarray(value, dtype=object)
+            self["exitshort_signal"] = value
+        else:
+            raise ValueError(f"exitshort_signal 必须是 {self.size} 个元素的 Iterable")
+
+    @property
+    def text(self) -> dict:
+        """## 有效信号文本
+
+        仅返回"有数据"的信号(数组不全为 NaN)构成的 {signal: np.ndarray};
+        其它全为 NaN 的信号(无数据)自动排除。不修改自身。
+        """
+        return {k: v for k, v in self.items()
+                if not bool(pd.isna(np.asarray(v, dtype=object)).all())}
+
+
+#: 逐点文本样式：**规范键 → 兼容别名**（老的 bokeh 风格键名继续可用）
+SIGNAL_TEXT_STYLE_ALIASES: dict = {
+    'text_font_size': 'font_size',
+    'size': 'font_size',
+    'font_color': 'text_color',
+    'text_font': 'font_family',
+}
+
+#: 逐点文本样式的规范键（bokeh / pylightcharts 两个引擎共用同一套键名）
+#: ``padding`` 目前只有 pylightcharts 支持（bokeh 的 LabelSet 没有内边距概念）
+SIGNAL_TEXT_STYLE_KEYS: tuple = (
+    'font_size', 'line_height', 'text_color', 'text_align', 'baseline',
+    'offset_x', 'offset_y', 'font_family', 'font_weight', 'font_style',
+    'background_fill_color', 'background_fill_alpha',
+    'border_line_color', 'border_line_alpha', 'border_line_width', 'padding',
+)
+
+
+def normalise_signal_text_style(style=None) -> dict:
+    """## 把逐点文本样式归一成规范键
+
+    * 别名转换（``text_font_size`` → ``font_size``，``text_font_style`` →
+      ``font_weight`` / ``font_style`` …）；
+    * 字号允许 ``12`` / ``'12pt'`` / ``'12px'``；
+    * 丢掉 ``None`` 与未知键（``None`` 语义 = **跟随主题**，不进入结果）。
+    """
+    if not style:
+        return {}
+    out: dict = {}
+    for raw_key, value in dict(style).items():
+        key = str(raw_key)
+        if value is None:
+            continue
+        if key == 'text_font_style':               # bokeh: 'bold' / 'italic' / 'bold italic'
+            for word in str(value).split():
+                if word in ('bold', 'normal'):
+                    out['font_weight'] = word
+                elif word in ('italic', 'normal'):
+                    out['font_style'] = word
+            continue
+        key = SIGNAL_TEXT_STYLE_ALIASES.get(key, key)
+        if key not in SIGNAL_TEXT_STYLE_KEYS:
+            continue
+        if key == 'font_size' and isinstance(value, str):
+            try:
+                value = float(value.lower().replace('pt', '').replace('px', '').strip())
+            except ValueError:
+                continue
+        out[key] = value
+    return out
+
+
+def normalise_text_item(value) -> tuple:
+    """## 逐点文本元素 → ``(text, style)``
+
+    * ``str`` / 数字 → ``(str, {})``（老写法：只有文本）；
+    * 映射（如 ``{'text': 'BUY' + nl + 'CCI', 'font_size': 14}``）→ 文本 + 逐点样式；
+    * ``None`` / ``NaN`` → ``(None, {})``（该信号点不写字）。
+    """
+    if value is None or (isinstance(value, float) and value != value):
+        return None, {}
+    try:
+        if pd.isna(value):
+            return None, {}
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, Mapping):
+        data = dict(value)
+        text = data.pop('text', data.pop('label', None))
+        return (None if text is None else str(text),
+                normalise_signal_text_style(data))
+    text = str(value)
+    return (text or None), {}
+
+
+def _label_text_style(label) -> dict:
+    """``SignalLabel`` / 它的 ``vars`` dict → 规范样式。
+
+    ``x_offset`` / ``y_offset`` 是 ``SignalLabel`` 按文本宽度**自动**算出来的
+    排布值，不算"用户样式"，这里丢掉（否则 pylightcharts 的居中和 bokeh 会
+    叠加成双倍偏移）。用户要控制偏移请用 ``set_text_style(offset_x=...)``。
+    """
+    if not label or isinstance(label, str):
+        return {}
+    if hasattr(label, 'vars'):                 # SignalLabel
+        data = dict(label.vars)
+    elif isinstance(label, Mapping):           # 已经物化的 dict
+        data = dict(label)
+    else:                                      # 鸭子类型的对象（测试/自定义）
+        data = {'font_size': getattr(label, 'size', None),
+                'text_color': getattr(label, 'color', None),
+                'font_weight': getattr(label, 'style', None)}
+        for key in SIGNAL_TEXT_STYLE_KEYS:
+            if key not in data:
+                value = getattr(label, key, None)
+                if value is not None:
+                    data[key] = value
+    data = {k: v for k, v in data.items() if k not in ('x_offset', 'y_offset')}
+    return normalise_signal_text_style(data)
+
+
+def resolve_signal_text_style(signal_texts_map: SignalText | None = None,
+                              black_style: bool = False, *,
+                              label=None, point=None, **overrides) -> dict:
+    """## 解析逐点文本最终样式（两个图表引擎共用）
+
+    优先级（后者覆盖前者）：
+
+    1. 主题预设（``SignalText.black`` / ``white``，跟随深浅色）；
+    2. 指标级 ``self.signaltext.style``（``set_text_style(...)``）；
+    3. 逐线 ``SignalStyle.label``（``set_label(size=, color=)`` /
+       ``set_text_style(...)``）；
+    4. 逐点（文本数组元素写成 dict，如 ``{'text': ..., 'font_size': 14}``）；
+    5. 调用方 ``overrides``（渲染端兜底用）。
+
+    返回**规范键**的 dict（见 :data:`SIGNAL_TEXT_STYLE_KEYS`）；没显式设置过的键
+    仍然带着主题预设值，所以"不设置"就等于跟随主题。
+    """
+    style = normalise_signal_text_style(
+        SignalText.black if black_style else SignalText.white)
+    custom = getattr(signal_texts_map, 'style', None)
+    if custom and custom not in (SignalText.black, SignalText.white):
+        style.update(normalise_signal_text_style(custom))
+    if label is not None:
+        style.update(_label_text_style(label))
+    if point is not None:
+        style.update(normalise_signal_text_style(point))
+    if overrides:
+        style.update(normalise_signal_text_style(overrides))
+    return style
+
+
+def _resolve_signal_text_style_legacy(signal_texts_map: SignalText | None = None,
+                              black_style: bool = False) -> dict:
+    """## 解析信号文本实际生效样式
+
+    SignalText 默认以 black 预设(self.style = self.black)初始化;
+    渲染层按图表明暗主题自适应预设:
+        - 深色主题(black_style=True)  → black 预设: 白字 + #333333 深底
+        - 浅色主题(black_style=False) → white 预设: 黑字 + #EAEAEA 浅底
+    用户通过 set_text_style() 显式自定义整套样式(值不同于任一内置预设)时,
+    以自定义 signal_style 为准, 优先使用。
+    """
+    style = getattr(signal_texts_map, "style", None)
+    if not style:
+        return SignalText.black if black_style else SignalText.white
+    # 内置预设(默认 black / set_default_style 切换的 black|white) → 跟随图表主题
+    if style == SignalText.black or style == SignalText.white:
+        return SignalText.black if black_style else SignalText.white
+    # 显式自定义样式 → 优先使用
+    return style
+
+
+@dataclass
 class PlotInfo(DataSetBase, metaclass=KeyMeta):
     """## 画图信息"""
+    #: ⚠ **已废弃**（2026-10-16）：以前用来固定指标 pane 的像素高度。
+    #: 现在两个引擎都不再读它 —— pylightcharts 按 **pane 比例**布局（主图:副图
+    #: = 3:1，见 ``_apply_pane_stretch`` ✓），bokeh 那边也直接置 ``None`` ✓。
+    #: 仅为兼容老脚本保留字段与 ``height=`` 形参，**传了不生效** ✓；
+    #: 下一版连字段一起移除（见 ``待办计划.md`` ✓）。
     height: int = 150
+    length: int = 0
     sname: str = "name"
     ind_name: str = "ind_name"
     lines: Lines[str] = field(
@@ -1627,25 +2923,57 @@ class PlotInfo(DataSetBase, metaclass=KeyMeta):
     signallines: list[str] = field(default_factory=list)
     category: CategoryString | str = Category.Any
     isplot: bool | dict[str, bool] = True
+    #: 是否在图表左上角显示这个指标的**图例（标签）行**；
+    #: ``False`` = 只画线不显示标签（`legend` 是 backtrader plotinfo 的标准键名 ✓）。
+    #: pylightcharts 侧对应 ``create_line(legend=False)`` —— 序列以空名字创建，
+    #: 不生成图例行，但**数据仍按原名字映射**（不会踩「空名字导致卡死」的坑 ✓）。
+    #: 也支持 ``dict``（按**线名**，如 ``{'zero': False}`` 只隐藏零轴那一行）/
+    #: ``list``（按**线序**，与 ``isplot`` 一致）✓。
+    legend: bool | dict | list = True
     overlap: bool | dict[str, bool] = False
     candlestyle: CandleStyle | None = None
     linestyle: Addict[str, LineStyle] | dict[str,
                                              LineStyle] = field(default_factory=Addict)
     signalstyle: Addict[str, SignalStyle] | dict[str,
                                                  SignalStyle] = field(default_factory=Addict)
-    spanstyle: Spanlist[SpanStyle] | list[SpanStyle] = field(
+    spanstyle: SpanList[SpanStyle] | list[SpanStyle] = field(
         default_factory=SpanList)
     watermark: WaterMark | None = None
     source: str = ""
+    bandstyle: BandList[BandStyle] | list[BandStyle] | tuple[BandStyle] = field(
+        default_factory=BandList)
+    #: 成交量分布图风格 —— **只有 `category='vp'` 的指标会读**
+    #: （`minibt/utils.py::VPStyle`；pylightcharts 与 bokeh 两侧同步生效）
+    vpstyle: 'VPStyle | None' = None
+    signal_texts: SignalText = field(default_factory=dict)
+    # 逐点/逐根配色规则（由 KLine/IndSeries/Line.color_by 追加，
+    # 图表侧 minibt.strategy.realtime.apply_color_rules 落地上色）
+    color_rules: list = field(default_factory=list)
+    # 指标自带的统计表格（`TableStyle`，图表侧 apply_indicator_tables 落地）
+    tablestyle: 'TableStyle | None' = None
+    # 表格行生成钩子（类上覆写的 `table_rows(self, index, values)`，
+    # 已绑定到 IndFrame；`TableStyle.rows` 为空时图表侧用它）
+    table_rows: 'Callable | None' = None
 
     def __post_init__(self):
         assert isinstance(self.lines, Iterable), "lines为可迭代字符串类型"
+        # 传入 dict 时统一转成 Addict，保证 line_style.xxx / signal_style.xxx 代理可用
+        if not isinstance(self.linestyle, Addict):
+            self.linestyle = Addict(self.linestyle)
+        if not isinstance(self.signalstyle, Addict):
+            self.signalstyle = Addict(self.signalstyle)
         self.set_lines_plot()
         self.set_lines_overlap()
         self.set_default_linestyle()
         self.set_spanstyle()
+        self.set_bandstyle()
         self.set_default_signalstyle()
+        self.set_default_signaltext()
         self.category = CategoryString(self.category)
+
+    def set_default_signaltext(self):
+        """## 设置默认信号文本"""
+        self.signal_texts = SignalText(self.length, **self.signalstyle)
 
     def split_by_lines(self, selected_lines: list[str], split: bool = False) -> tuple[PlotInfo, PlotInfo] | PlotInfo:
         """## 根据指定的lines元素分割PlotInfo对象
@@ -1749,6 +3077,14 @@ class PlotInfo(DataSetBase, metaclass=KeyMeta):
         else:
             new_kwargs['signalstyle'] = deepcopy(self.signalstyle)
 
+        # 处理signal_texts：逐点信号标签文本, 仅保留被选中的行 (deepcopy 防共享引用)
+        if isinstance(self.signal_texts, Mapping) and self.signal_texts:
+            new_kwargs['signal_texts'] = {
+                k: deepcopy(v) for k, v in self.signal_texts.items()
+                if k in selected_lines}
+        else:
+            new_kwargs['signal_texts'] = deepcopy(self.signal_texts)
+
         # 处理spanstyle
         new_kwargs['spanstyle'] = deepcopy(self.spanstyle)
 
@@ -1776,19 +3112,29 @@ class PlotInfo(DataSetBase, metaclass=KeyMeta):
         self._set_signal_overlap()
 
     def _set_signal_overlap(self):
-        """## 当指标图没有画线时，禁止副图上显示，否则会有冲突"""
+        """## 当指标图**完全没有画线**时，禁止副图上显示，否则会有冲突
+
+        注意判据是"整个指标有没有画线"，不是"这条信号线有没有画线"：
+        信号线本身 ``isplot=False``（只画标记、不画线）是常态，按单条判断会把
+        用户显式写的 ``SignalStyle(..., overlap=False)`` **无条件覆盖成主图** ——
+        于是像 QQE 这种"QQE 线在副图、信号也想跟着去副图"的写法永远不生效。
+        """
         if not self.signallines or not isinstance(self.isplot, dict):
             return
+        if any(bool(self.isplot.get(line)) for line in self.isplot):
+            return          # 指标自己有画线 → 尊重用户的 overlap 设置
 
-        # 仅遍历合法的信号线（与signallines对应）
+        # 纯标记型指标（一条线都不画）：副图会是个空面板，强制回主图
         for sig_line in self.signallines:
-            if sig_line in self.isplot and sig_line in self.signalstyle:
-                if not self.isplot[sig_line]:
-                    self.signalstyle[sig_line].overlap = True
+            if sig_line in self.signalstyle:
+                self.signalstyle[sig_line].overlap = True
 
-    def set_default_candles(self, value, height=300, category=Category.Candles, candlestyle=CandleStyle()) -> PlotInfo:
-        """## 设置默认K线图样式"""
-        self.height = height
+    def set_default_candles(self, value, height=None, category=Category.Candles, candlestyle=CandleStyle()) -> PlotInfo:
+        """## 设置默认K线图样式
+
+        ⚠ ``height`` 已废弃 ✗：图表按 **pane 比例**布局，这个参数只为兼容
+        老代码保留，**传了也不生效** ✓（以前会写进 ``self.height`` ✗）。
+        """
         self.category = category
         self.candlestyle = candlestyle
         self.spanstyle = SpanList([SpanStyle(value)])
@@ -1814,6 +3160,21 @@ class PlotInfo(DataSetBase, metaclass=KeyMeta):
         else:
             span = SpanList([SpanStyle(np.nan),])
         self.spanstyle = span
+
+    def set_bandstyle(self):
+        """## 设置填充带样式"""
+        band = self.bandstyle
+        if isinstance(band, BandList):
+            return
+        if isinstance(band, BandStyle):
+            self.bandstyle = BandList([band])
+        elif isinstance(band, (list, tuple)):
+            if band and all(isinstance(b, BandStyle) for b in band):
+                self.bandstyle = BandList(band)
+            else:
+                self.bandstyle = BandList()
+        else:
+            self.bandstyle = BandList()
 
     def set_default_linestyle(self):
         """## 设置默认指标线风格"""
@@ -1843,11 +3204,19 @@ class PlotInfo(DataSetBase, metaclass=KeyMeta):
             self.isplot = bool(isplot)
 
     def set_lines_overlap(self, overlap=None):
-        """## 设置指标线是否为主图叠加"""
+        """## 设置指标线是否为主图叠加
+
+        规则:
+        - ``category == "overlap"`` 时, 未显式指定的线默认主图叠加;
+        - ``overlap`` 为 dict 时按线取值, 缺失的线回退到默认值;
+        - ``overlap`` 为 list/tuple 时按位置取值, 不足的线回退到默认值;
+        - ``overlap`` 为标量时所有线统一取默认值。
+        """
         if overlap is None:
             overlap = self.overlap
+        # category == "overlap" 隐含主图叠加; 标量 overlap=False 也要走该默认
+        default_overlap = self.category == "overlap" or overlap
         if len(self.lines) > 1:
-            default_overlap = self.category == "overlap" or overlap
             if isinstance(overlap, dict):
                 overlap = [bool(overlap.get(
                     line, default_overlap)) for line in self.lines]
@@ -1859,10 +3228,14 @@ class PlotInfo(DataSetBase, metaclass=KeyMeta):
                      ) or overlap[:len(self.lines)]
                 overlap = [bool(value) for value in overlap]
             else:
-                overlap = [bool(overlap),]*len(self.lines)
+                overlap = [bool(default_overlap),]*len(self.lines)
             self.overlap = Addict(zip(self.lines, overlap))
         else:
-            self.overlap = bool(overlap)
+            if isinstance(overlap, dict) and self.lines:
+                self.overlap = bool(
+                    overlap.get(self.lines[0], default_overlap))
+            else:
+                self.overlap = bool(default_overlap)
 
     def rename_related_keys_using_mapping(self, values: dict):
         """## 使用传入的映射关系，对多个相关字典中的键进行重命名操作"""
@@ -2707,7 +4080,7 @@ class Base:
     _trading_view: TradingView | None = None
     _logger: Logger | None = None
     _btplot: Callable | None = None
-    _light_chart:bool = False
+    _light_chart: bool = False
 
     @classmethod
     def Logger(cls) -> Logger:
@@ -2894,8 +4267,8 @@ class Broker(Base):
         >>> print(broker._margin)  # 输出总保证金（平仓后为0）"""
     poscreator = PositionCreator()
     cols = ["total_profit", "positions",
-            "sizes", "float_profits", "cum_profits","total_fee"]
-    #cols["total_equity","positions","sizes","pnl","cum_profits"]
+            "sizes", "float_profits", "cum_profits", "total_fee"]
+    # cols["total_equity","positions","sizes","pnl","cum_profits"]
     commission_keys: list[str] = ["tick_commission",
                                   "fixed_commission", "percent_commission"]
     commission_value: float
@@ -3037,7 +4410,7 @@ class Broker(Base):
 
     @property
     def _cost_price(self) -> float:
-        return 0. if self.mpsc.empty() else sum(list(map(lambda x: x[1]*x[2]+(x[3] if self.position.pos>0 else -x[3]), self.mpsc.queue)))/sum(list(map(lambda x: x[2], self.mpsc.queue)))
+        return 0. if self.mpsc.empty() else sum(list(map(lambda x: x[1]*x[2]+(x[3] if self.position.pos > 0 else -x[3]), self.mpsc.queue)))/sum(list(map(lambda x: x[2], self.mpsc.queue)))
 
     @property
     def _float_profit(self) -> float:
@@ -3226,9 +4599,9 @@ class Broker(Base):
                     self.Logger().operation_msg('加多' if long else '加空', None, *args)
             if self.profit:
                 self.cum_profits += self.profit
-                
+
     # 处理滑点后的执行价格
-    def _handle_slip_point(self, exec_price: float,long:bool) -> float:
+    def _handle_slip_point(self, exec_price: float, long: bool) -> float:
         """## 处理滑点后的执行价格"""
         if self.slip_point > 0:
             if long:
@@ -3313,7 +4686,7 @@ class Broker(Base):
 
         # 存储订单
         self._orders[ref] = order
-        
+
         # 如果是OCO订单，处理关联关系
         if oco:
             if 'oco_linked' not in oco.info:
@@ -3323,7 +4696,7 @@ class Broker(Base):
             if 'oco_linked' not in order.info:
                 order.info['oco_linked'] = []
             order.info['oco_linked'].append(oco.ref)
-            
+
         if self.islogorder:
             self.log_order_created(order)
 
@@ -4053,6 +5426,10 @@ class BtAccount(Base):
     def _cleanup_expired_orders(self):
         """## 清理过期订单"""
         for broker in self.brokers:
+            # 快速跳过：没有活跃/挂单时不可能有过期订单，
+            # 省掉每根 K 线都 get_orders() 的开销
+            if not broker._pending_orders and not broker._active_orders:
+                continue
             # 获取过期订单
             expired_orders = [
                 order for order in broker.get_orders()
@@ -4071,7 +5448,7 @@ class BtAccount(Base):
                 # 记录日志
                 if broker.islog:
                     self.Logger().log("INFO",
-                        f"订单过期: {OrderSide.get_name(order.side)} {order.size}手")
+                                      f"订单过期: {OrderSide.get_name(order.side)} {order.size}手")
 
     def _init_history(self, length: int):
         """## 策略索引从非0开始时初始化历史信息"""
@@ -4181,12 +5558,12 @@ class DataFrameSet(DataSetBase):
     tq_object: pd.DataFrame | pd.Series | corefunc | None = None
     tq_tick: pd.DataFrame | pd.Series | corefunc | None = None
     upsample_object: Line | IndSeries | IndFrame | None = None
-    copy_object: pd.DataFrame | pd.Series | corefunc | None  = None
+    copy_object: pd.DataFrame | pd.Series | corefunc | None = None
 
     def set_copy_obj(self, obj: pd.DataFrame | pd.Series | corefunc):
-        if self.copy_object is None or (isinstance(self.copy_object, (pd.DataFrame,pd.Series)) and self.copy_object.empty):
+        if self.copy_object is None or (isinstance(self.copy_object, (pd.DataFrame, pd.Series)) and self.copy_object.empty):
             self.copy_object = obj.copy()
-        if self.pandas_object is None or (isinstance(self.pandas_object, (pd.DataFrame,pd.Series)) and self.copy_object.empty):
+        if self.pandas_object is None or (isinstance(self.pandas_object, (pd.DataFrame, pd.Series)) and self.copy_object.empty):
             self.pandas_object = obj.copy()
         return self
 
@@ -4194,6 +5571,7 @@ class DataFrameSet(DataSetBase):
         if self.source_object is None:
             self.source_object = obj
         return self
+
 
 def default_symbol_info(data: pd.DataFrame) -> dict:
     try:
@@ -4216,6 +5594,7 @@ def set_property(cls, attr: str):
             # 则跳过创建 property，防止污染/覆盖原有方法调用能力。
             if callable(existing) and not isinstance(existing, property):
                 return
+
     def _getter(self): return getattr(self, f'_{attr}')
     def _setter(self, value): self[attr] = value
     setattr(cls, f"{attr}", property(_getter, _setter))
@@ -4284,12 +5663,18 @@ class TqObjs(Base):
     TargetPosTask: TargetPosTask | Callable | None = None
 
     def __post_init__(self):
+        try:
+            from tqsdk import TargetPosTask  # 实盘才需要，惰性导入
+        except ImportError as e:
+            raise ImportError(
+                "实盘交易功能需要依赖 tqsdk，请安装： pip install tqsdk"
+            ) from e
         assert self._api
         assert not self._api._loop.is_closed(), "请连接天勤API"
         self.Quote = self._api.get_quote(self.symbol)
         self.Position = self._api.get_position(self.symbol)
         self.TargetPosTask = TargetPosTask(self._api, self.symbol)
-    
+
     @property
     def tradingtime(self) -> TradingTime:
         """ TradingTime 是一个交易时间对象
@@ -4335,7 +5720,8 @@ class TradeTimeFilter:
     - 午盘 (13:30-15:00)
     - 夜盘 (21:00-xxx)：根据合约不同，收盘时间各异
     """
-    def __init__(self, tq_obj: TqObjs | None = None,day_segments=None,night_segments=None):
+
+    def __init__(self, tq_obj: TqObjs | None = None, day_segments=None, night_segments=None):
         if tq_obj is None:
             self._day_segments = day_segments or []
             self._night_segments = night_segments or []
@@ -4343,7 +5729,8 @@ class TradeTimeFilter:
             trading_time = tq_obj.tradingtime
             # 解析日盘和夜盘时段（秒为单位，夜盘保留 25:00 等跨日格式）
             self._day_segments = self._parse_segments(trading_time.day or [])
-            self._night_segments = self._parse_segments(trading_time.night or [])
+            self._night_segments = self._parse_segments(
+                trading_time.night or [])
         self._all_segments: list[tuple[int, int]] = sorted(
             self._night_segments + self._day_segments, key=lambda s: s[0])
         # 排除的时段
@@ -4514,7 +5901,8 @@ class TradeTimeFilter:
                 open=self._seconds_to_str(s[0][0]),
                 close=self._seconds_to_str(s[-1][1]),
                 segments=[
-                    (self._seconds_to_str(seg[0]), self._seconds_to_str(seg[1]))
+                    (self._seconds_to_str(seg[0]),
+                     self._seconds_to_str(seg[1]))
                     for seg in s
                 ],
             )
@@ -4543,7 +5931,8 @@ class TradeTimeFilter:
         from datetime import datetime as _datetime
         seconds = self._to_seconds_from_time(current_time)
         if isinstance(current_time, _datetime):
-            seconds = current_time.hour * 3600 + current_time.minute * 60 + current_time.second
+            seconds = current_time.hour * 3600 + \
+                current_time.minute * 60 + current_time.second
 
         segments = self.get_tradable_segments()
         for seg_start, seg_end in segments:
@@ -4573,6 +5962,7 @@ class PandasObject(metaclass=Meta):
     """## pandas对象"""
     DataFrame = pd.DataFrame
     Series = pd.Series
+
 
 def np_random(seed: int | None = None) -> tuple[np.random.Generator]:
     """## 根据种子生成随机数生成器并返回生成器和种子
@@ -4663,9 +6053,9 @@ class OptunaConfig:
 
 class OpConfig:
     def __new__(cls,
-                target: OPTTargetType | list[OPTTargetType]= 'profit_ratio',
-                weights: float | tuple[float] = 1., 
-                opconfig: GAOpConfig | OptunaConfig | dict | list[dict] = {}, 
+                target: OPTTargetType | list[OPTTargetType] = 'profit_ratio',
+                weights: float | tuple[float] = 1.,
+                opconfig: GAOpConfig | OptunaConfig | dict | list[dict] = {},
                 op_method: OPTMethodType = 'optuna',
                 params: dict = {}) -> dict:
         return dict(
@@ -8437,4 +9827,3 @@ pandas_method = get_pandas_explicit_methods(PandasSeries) | get_pandas_explicit_
 rolling_method = get_pandas_explicit_methods(Rolling)
 ewm_method = get_pandas_explicit_methods(ExponentialMovingWindow)
 expanding_method = get_pandas_explicit_methods(Expanding)
-

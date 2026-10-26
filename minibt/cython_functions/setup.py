@@ -7,6 +7,7 @@ setup(
         "backtrader_from_signals.pyx",
         "backtrader_pair_from_signals.pyx",
         "backtest_engine.pyx",
+        "signal_profit.pyx",
     ]),
     include_dirs=[np.get_include()]
 )
