@@ -722,6 +722,7 @@ AI-IDE 适合调试代码，不是策略库格式。支持三种入口：
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 想让 AI 写策略 | 策略编辑只做参数/回测/图表 | 点右栏「AI 写策略」跳 QuantBot；AI-IDE 独立页仍有内置助手 |
+| 点「4 关卡检测/转模板」报 AST 检查未通过 | 这两个是 Strategy Lab 专用动作，只支持 `setup/on_bar` 脚本；minibt/qlib 结果不应使用 | 策略编辑右栏已隐藏这些动作；minibt 用回测体检/回测历史 |
 | `该策略基于 minibt 脚本框架，qlib 回测引擎不支持` | 把 minibt 代码提交到 Qlib 回测 | 到 AI-IDE 跑，或改用 STRATEGY_CONFIG |
 | 回测一直“无信号” | `signal="<PRED>"` 但没传 `model_id`，或模型没有该区间 pred | 传 `model_id`；检查预测覆盖到回测区间 |
 | `permission denied for table qlib_backtest_runs` | runner 用了只读 DB 角色 | 升级到 2026-10-26 之后版本（已加模块回测写角色） |
