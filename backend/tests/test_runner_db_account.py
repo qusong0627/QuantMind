@@ -56,6 +56,31 @@ def test_runner_password_derivation(monkeypatch):
 
 
 @pytest.mark.unit
+def test_backtest_role_password_and_name(monkeypatch):
+    from backend.shared.runner_db_account import (
+        backtest_db_password,
+        backtest_db_role_name,
+        runner_db_password,
+    )
+
+    monkeypatch.setenv("DB_PASSWORD", "master-secret")
+    monkeypatch.delenv("BACKTEST_DB_PASSWORD", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    pw1 = backtest_db_password()
+    assert pw1 == backtest_db_password()
+    assert len(pw1) == 24 and pw1 != "master-secret"
+    assert pw1 != runner_db_password()  # 与只读角色不同 seed
+
+    monkeypatch.setenv("BACKTEST_DB_PASSWORD", "explicit-bt-pw")
+    assert backtest_db_password() == "explicit-bt-pw"
+
+    monkeypatch.setenv("BACKTEST_DB_USER", "Bad-Name; DROP")
+    assert backtest_db_role_name() == "qm_backtest_rw"
+    monkeypatch.setenv("BACKTEST_DB_USER", "custom_bw")
+    assert backtest_db_role_name() == "custom_bw"
+
+
+@pytest.mark.unit
 def test_rewrite_database_url_for_runner():
     from backend.shared.runner_db_account import rewrite_database_url_for_runner
 
@@ -202,6 +227,30 @@ async def test_executor_env_uses_read_only_credentials(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_executor_env_uses_backtest_write_role(monkeypatch):
+    import backend.shared.runner_db_account as rdb
+    from backend.services.engine.routers.ai_ide import executor
+
+    monkeypatch.setenv("DB_USER", "quantmind")
+    monkeypatch.setenv("DB_PASSWORD", "masterpw")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://quantmind:masterpw@db:5432/quantmind"
+    )
+
+    async def _fake_overrides():
+        return {"DB_USER": "qm_backtest_rw", "DB_PASSWORD": "bt-pw"}
+
+    monkeypatch.setattr(rdb, "get_backtest_db_env_overrides_async", _fake_overrides)
+    env = await executor._runner_environment_with_least_privilege(
+        "1", {}, backtest_write=True
+    )
+    assert env["DB_USER"] == "qm_backtest_rw"
+    assert env["DB_PASSWORD"] == "bt-pw"
+    assert "qm_backtest_rw:bt-pw@" in env["DATABASE_URL"]
+    assert "masterpw" not in env["DATABASE_URL"]
+
+
+@pytest.mark.asyncio
 async def test_executor_env_falls_back_with_loud_warning(monkeypatch):
     import backend.shared.runner_db_account as rdb
     from backend.services.engine.routers.ai_ide import executor
@@ -252,3 +301,92 @@ def test_c11_classification_matrix():
     assert classify_runner_db_privileges(True, False, False)[0] == "warn"  # 读不了
     level, detail = classify_runner_db_privileges(True, True, False)
     assert level == "ok" and "SELECT-only" in detail
+
+
+@pytest.mark.asyncio
+async def test_backtest_rw_role_e2e_real_db(monkeypatch):
+    """真库 E2E：模块回测写角色可 INSERT/UPDATE/DELETE 回测表 + upsert 体检表。"""
+    await _ensure_db_pool()
+    import os
+    import uuid
+    from datetime import datetime
+
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from backend.shared.database_manager_v2 import get_session
+    from backend.shared.runner_db_account import (
+        backtest_db_role_name,
+        ensure_backtest_db_role_async,
+        get_backtest_db_env_overrides_async,
+        rewrite_database_url_for_runner,
+    )
+
+    async with get_session(read_only=True) as session:
+        exists = (
+            await session.execute(
+                sa_text(
+                    "SELECT to_regclass('public.qlib_backtest_runs') IS NOT NULL "
+                    "AND to_regclass('public.eval_scores') IS NOT NULL"
+                )
+            )
+        ).scalar()
+    if not exists:
+        pytest.skip("qlib_backtest_runs/eval_scores 不存在")
+
+    assert await ensure_backtest_db_role_async() is True
+    assert await ensure_backtest_db_role_async() is True  # 幂等
+    overrides = await get_backtest_db_env_overrides_async()
+    assert overrides is not None
+    assert overrides["DB_USER"] == backtest_db_role_name()
+    url = rewrite_database_url_for_runner(
+        os.environ["DATABASE_URL"], overrides["DB_USER"], overrides["DB_PASSWORD"]
+    )
+    assert url
+
+    engine = create_async_engine(url)
+    backtest_id = f"__perm_{uuid.uuid4().hex[:12]}"
+    try:
+        async with engine.connect() as conn:
+            trans = await conn.begin()
+            insert_run = sa_text(
+                """
+                INSERT INTO qlib_backtest_runs
+                  (backtest_id,user_id,tenant_id,status,created_at,config_json,result_backup_status)
+                VALUES (:b,:u,:t,'running',:c,CAST('{}' AS jsonb),'none')
+                ON CONFLICT(backtest_id) DO UPDATE SET status=EXCLUDED.status
+                """
+            )
+            params = {
+                "b": backtest_id,
+                "u": "0",
+                "t": "default",
+                "c": datetime.now(),
+            }
+            await conn.execute(insert_run, params)
+            await conn.execute(
+                sa_text(
+                    "UPDATE qlib_backtest_runs SET status='completed' WHERE backtest_id=:b"
+                ),
+                {"b": backtest_id},
+            )
+            insert_eval = sa_text(
+                """
+                INSERT INTO eval_scores
+                  (object_type,object_id,snapshot_date,tenant_id,user_id,score,grade,
+                   low_confidence,red_line_failed,dimensions,inputs_version)
+                VALUES ('__perm_test__',:o,CURRENT_DATE,'default','0',1.0,'A',false,
+                        CAST('[]' AS jsonb),CAST('{}' AS jsonb),CAST('{}' AS jsonb))
+                ON CONFLICT(object_type,object_id,snapshot_date,tenant_id,user_id)
+                DO UPDATE SET score=EXCLUDED.score
+                """
+            )
+            await conn.execute(insert_eval, {"o": backtest_id})
+            await conn.execute(insert_eval, {"o": backtest_id})  # 冲突 → UPDATE
+            await conn.execute(
+                sa_text("DELETE FROM qlib_backtest_runs WHERE backtest_id=:b"),
+                {"b": backtest_id},
+            )
+            await trans.rollback()
+    finally:
+        await engine.dispose()

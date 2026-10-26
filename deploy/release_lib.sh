@@ -149,3 +149,46 @@ qm_release_verify_runtime() {
     fi
     return 0
 }
+
+# 构建 minibt 运行时镜像（AI-IDE / 回测中心模块型策略用；compose 不管它）。
+# 用法: qm_build_minibt_runner_if_needed <project_dir>
+#   - 镜像缺失，或 minibt/ + Dockerfile/构建脚本指纹变化 → 构建；
+#   - 失败只警告不阻断（离线机无需 minibt 时仍可完成整机部署）；
+#   - 成功写 data/.minibt_runner.sha 指纹，纯代码更新不重复构建。
+qm_build_minibt_runner_if_needed() {
+    local project_dir="${1:-${PROJECT_DIR:-}}"
+    [[ -n "$project_dir" ]] || { printf '[qm-release] 警告: 缺 project_dir，跳过 minibt runner 构建\n' >&2; return 1; }
+    _qm_minibt_log() {
+        if declare -F log >/dev/null 2>&1; then log "$@"; else printf '[qm-release] %s\n' "$@"; fi
+    }
+    if [[ "${SKIP_MINIBT_RUNNER_BUILD:-false}" == true ]]; then
+        _qm_minibt_log "跳过 minibt runner 镜像构建（SKIP_MINIBT_RUNNER_BUILD=true）"
+        return 0
+    fi
+    local image_tag="${MINIBT_RUNNER_TAG:-quantmind-minibt-runner:latest}"
+    local marker_dir="$project_dir/data"
+    local marker="$marker_dir/.minibt_runner.sha"
+    local fp have_fp='' has_image=false
+    fp="$(cd "$project_dir" && find minibt docker/Dockerfile.minibt-runner docker/build_minibt_runner.sh \
+        -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0 2>/dev/null \
+        | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | awk '{print $1}')"
+    [[ -f "$marker" ]] && have_fp="$(cat "$marker" 2>/dev/null || true)"
+    if docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -qx "$image_tag"; then
+        has_image=true
+    fi
+    if [[ "$has_image" == true && -n "$fp" && "$have_fp" == "$fp" ]]; then
+        _qm_minibt_log "minibt runner 镜像已是最新（$image_tag），跳过"
+        return 0
+    fi
+    local reason='镜像不存在'
+    [[ "$has_image" == true ]] && reason='minibt 源码/构建脚本指纹变化'
+    _qm_minibt_log "构建 minibt runner 镜像（$reason）: $image_tag（需 PyPI 访问）"
+    if ( cd "$project_dir" && MINIBT_RUNNER_TAG="$image_tag" bash docker/build_minibt_runner.sh ); then
+        mkdir -p "$marker_dir"
+        printf '%s\n' "$fp" > "$marker"
+        _qm_minibt_log "minibt runner 镜像就绪：$image_tag"
+        return 0
+    fi
+    _qm_minibt_log "警告：minibt runner 镜像构建失败——minibt 策略/AI-IDE 回测暂不可用；可手动 bash docker/build_minibt_runner.sh 重试"
+    return 1
+}

@@ -28,9 +28,20 @@ import re
 logger = logging.getLogger(__name__)
 
 DEFAULT_RUNNER_DB_USER = "qm_runner_ro"
+# 模块型回测 runner 专用写角色：只允许写回测历史/体检两张表，
+# 普通 AI-IDE 用户代码仍用 qm_runner_ro（SELECT-only）。
+DEFAULT_BACKTEST_DB_USER = "qm_backtest_rw"
 _ROLE_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 _ensured = False
+_backtest_ensured = False
+
+
+def _master_db_password() -> str:
+    master = str(os.getenv("DB_PASSWORD", "")).strip()
+    if not master:
+        master = _password_from_database_url() or ""
+    return master
 
 
 def runner_db_role_name() -> str:
@@ -46,11 +57,27 @@ def runner_db_password() -> str:
     explicit = str(os.getenv("RUNNER_DB_PASSWORD", "")).strip()
     if explicit:
         return explicit
-    master = str(os.getenv("DB_PASSWORD", "")).strip()
-    if not master:
-        # 无主口令（外部托管库仅配 DATABASE_URL）：用 URL 的口令段兜底
-        master = _password_from_database_url() or ""
-    seed = f"{master}:qm-runner-ro:v1"
+    seed = f"{_master_db_password()}:qm-runner-ro:v1"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+
+def backtest_db_role_name() -> str:
+    name = (
+        str(os.getenv("BACKTEST_DB_USER", "")).strip().lower()
+        or DEFAULT_BACKTEST_DB_USER
+    )
+    if not _ROLE_RE.match(name):
+        logger.warning("[RunnerDB] BACKTEST_DB_USER 非法（回退默认）: %r", name)
+        return DEFAULT_BACKTEST_DB_USER
+    return name
+
+
+def backtest_db_password() -> str:
+    """派生/覆盖模块回测写角色口令（确定性：主口令不换则不变）。"""
+    explicit = str(os.getenv("BACKTEST_DB_PASSWORD", "")).strip()
+    if explicit:
+        return explicit
+    seed = f"{_master_db_password()}:qm-backtest-rw:v1"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
 
 
@@ -127,6 +154,81 @@ async def get_runner_db_env_overrides_async() -> dict[str, str] | None:
     return {
         "DB_USER": runner_db_role_name(),
         "DB_PASSWORD": runner_db_password(),
+    }
+
+
+async def ensure_backtest_db_role_async() -> bool:
+    """幂等供给**模块回测专用写角色**（只写 qlib_backtest_runs / eval_scores）。
+
+    背景（2026-10-26 实测）：Qlib 模块型策略在 runner 容器内走
+    ``QlibBacktestService.run_backtest``，会 INSERT/UPDATE/DELETE
+    ``qlib_backtest_runs``（并在体检时 upsert ``eval_scores``）；而 runner
+    统一使用 SELECT-only 的 ``qm_runner_ro`` → ``permission denied``、回测直接
+    退出（ExitCode=2）。本角色只给这两张表的写权限，普通 AI-IDE 用户代码仍走
+    只读角色，不扩大其 DB 面。
+    """
+    global _backtest_ensured
+    if _backtest_ensured:
+        return True
+    from sqlalchemy import text as sa_text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    role = backtest_db_role_name()
+    if not _ROLE_RE.match(role):
+        return False
+    pw_literal = _sql_literal(backtest_db_password())
+    role_literal = _sql_literal(role)
+    ddl = f"""
+DO $$
+DECLARE
+  r text := {role_literal};
+  pw text := {pw_literal};
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('ALTER ROLE %I WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD %L', r, pw);
+  ELSE
+    EXECUTE format('CREATE ROLE %I WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD %L', r, pw);
+  END IF;
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), r);
+  EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', r);
+  EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA public TO %I', r);
+  EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', r);
+  EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO %I', r);
+  IF to_regclass('public.qlib_backtest_runs') IS NOT NULL THEN
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON TABLE public.qlib_backtest_runs TO %I', r);
+  END IF;
+  IF to_regclass('public.eval_scores') IS NOT NULL THEN
+    EXECUTE format('GRANT INSERT, UPDATE ON TABLE public.eval_scores TO %I', r);
+  END IF;
+  IF to_regclass('public.eval_scores_id_seq') IS NOT NULL THEN
+    EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE public.eval_scores_id_seq TO %I', r);
+  END IF;
+END $$;
+"""
+    try:
+        async with get_session(read_only=False) as session:
+            await session.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+            await session.execute(sa_text(ddl))
+            await session.commit()
+        _backtest_ensured = True
+        logger.info(
+            "[RunnerDB] 模块回测写角色就绪：%s（仅 qlib_backtest_runs/eval_scores 写）",
+            role,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - 供给失败由调用方显式告警
+        logger.warning("[RunnerDB] 模块回测写角色供给失败: %s", exc)
+        return False
+
+
+async def get_backtest_db_env_overrides_async() -> dict[str, str] | None:
+    """模块回测 runner 的 DB 覆盖；角色不可用返回 None（调用方显式告警）。"""
+    if not await ensure_backtest_db_role_async():
+        return None
+    return {
+        "DB_USER": backtest_db_role_name(),
+        "DB_PASSWORD": backtest_db_password(),
     }
 
 

@@ -210,20 +210,40 @@ def _build_runner_environment(
 
 
 async def _runner_environment_with_least_privilege(
-    user_id: str, request_meta: dict[str, Any] | None = None
+    user_id: str,
+    request_meta: dict[str, Any] | None = None,
+    *,
+    backtest_write: bool = False,
 ) -> dict[str, str]:
-    """runner 环境统一入口（T-P0-03 遗留）：DB 凭据替换为只读角色，失败**显式告警**后退回主凭据。"""
-    overrides: dict[str, str] | None = None
-    try:
-        from backend.shared.runner_db_account import get_runner_db_env_overrides_async
+    """runner 环境统一入口：DB 凭据按运行类型选择最小权限角色。
 
-        overrides = await get_runner_db_env_overrides_async()
+    - 普通 AI-IDE 用户代码 → ``qm_runner_ro``（SELECT-only）；
+    - 模块型策略回测（``runner.py`` 内 ``QlibBacktestService`` 要写回测历史/
+      体检）→ ``qm_backtest_rw``（只写 ``qlib_backtest_runs`` / ``eval_scores``）。
+    角色供给失败时显式告警并退回主凭据（与原有行为一致，体检 C11 可观测）。
+    """
+    overrides: dict[str, str] | None = None
+    role_desc = "模块回测写角色" if backtest_write else "只读角色"
+    try:
+        if backtest_write:
+            from backend.shared.runner_db_account import (
+                get_backtest_db_env_overrides_async,
+            )
+
+            overrides = await get_backtest_db_env_overrides_async()
+        else:
+            from backend.shared.runner_db_account import (
+                get_runner_db_env_overrides_async,
+            )
+
+            overrides = await get_runner_db_env_overrides_async()
     except Exception as exc:  # noqa: BLE001 - 供给异常不阻断启动
-        logger.warning("runner 只读 DB 凭据供给异常（退回主凭据）: %s", exc)
+        logger.warning("runner %s DB 凭据供给异常（退回主凭据）: %s", role_desc, exc)
     if overrides is None:
         logger.error(
-            "🚨 runner 只读 DB 角色不可用——本次回落为**主库凭据**"
-            "（最小权限失效；体检 C11 可见，检查 DB 供给权限/RUNNER_DB_* 配置）"
+            "🚨 runner %s 不可用——本次回落为**主库凭据**"
+            "（最小权限失效；体检 C11 可见，检查 DB 供给权限/RUNNER_DB_* 配置）",
+            role_desc,
         )
     return _build_runner_environment(user_id, request_meta, db_overrides=overrides)
 
@@ -1009,6 +1029,17 @@ async def start_execution(request: Request, item: StartRequest):
                 status_code=422, detail=_build_runnable_error(entrypoint_info)
             )
 
+        # 模块型策略回测：runner.py 会走 QlibBacktestService.run_backtest，
+        # 需要写回测历史/体检；只有 provider_uri + 模块型入口才升级 DB 角色。
+        is_module_backtest = bool(
+            item.qlib_provider_uri
+            and (
+                entrypoint_info.get("has_strategy_config")
+                or entrypoint_info.get("has_get_strategy_config")
+                or entrypoint_info.get("has_get_strategy_instance")
+            )
+        )
+
         # 2. 准备临时运行环境
         tmp_root = TMP_ROOT
         user_tmp_dir = os.path.join(tmp_root, user_id)
@@ -1038,6 +1069,7 @@ async def start_execution(request: Request, item: StartRequest):
             "file": file_path,
             "runner": runner_path,
             "image": runner_image,
+            "module_backtest": is_module_backtest,
             "request_meta": {
                 "strategy_id": item.strategy_id,
                 "model_id": item.model_id,
@@ -1314,8 +1346,19 @@ async def run_process(job_id: str, file_path: str):
         if not os.path.isfile(runner_path):
             raise RuntimeError(f"Runner 文件不存在: {runner_path}")
 
-        # 启动前解析 runner 环境（含只读 DB 凭据供给；失败显式告警后退回主凭据）
-        runner_env = await _runner_environment_with_least_privilege(user_id, request_meta)
+        # 启动前解析 runner 环境（DB 角色按运行类型选择；失败显式告警后退回主凭据）
+        # 模块型策略回测：runner.py 会走 QlibBacktestService.run_backtest，
+        # 需要写 qlib_backtest_runs（以及体检 eval_scores）。普通 AI-IDE 代码
+        # 仍用 SELECT-only 角色；只有「声明了 provider_uri + 模块型入口」才升级。
+        module_backtest = bool(job_info.get("module_backtest"))
+        if module_backtest:
+            logger.info(
+                "[AI-IDE] 模块型策略回测：runner DB 角色切换为模块回测写角色"
+                "（只写 qlib_backtest_runs/eval_scores）"
+            )
+        runner_env = await _runner_environment_with_least_privilege(
+            user_id, request_meta, backtest_write=module_backtest
+        )
         container = await asyncio.to_thread(
             client.containers.run,
             image_ref,

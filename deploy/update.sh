@@ -474,6 +474,12 @@ main() {
     sync_code
     load_release_lib
     build_core
+    # minibt runner 镜像独立于 quantmind-oss；按源码指纹构建（--no-build 时跳过）
+    if $BUILD; then
+        qm_build_minibt_runner_if_needed "$PROJECT_DIR" || true
+    else
+        warn "跳过 minibt runner 镜像构建（--no-build）；镜像缺失时 minibt 策略不可用"
+    fi
     # 重启前记住当前镜像 ID——发布断言失败时按它回滚（首次部署/容器不存在时为空）
     local prev_image=''
     prev_image="$(docker inspect --format '{{.Image}}' quantmind 2>/dev/null || true)"

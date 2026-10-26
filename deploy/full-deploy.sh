@@ -589,6 +589,9 @@ build_and_start() {
                 || die "构建产物身份断言失败：镜像=${built_sha:-无} 检出=${head_sha:0:12}"
         fi
     fi
+    # minibt 策略/AI-IDE 回测依赖独立 runner 镜像；compose 不管它。
+    # 按「镜像存在 + minibt 源码/构建脚本指纹」决定是否重建；失败只警告。
+    qm_build_minibt_runner_if_needed "$PROJECT_DIR" || true
     "${QM_COMPOSE[@]}" up -d --pull never
     configure_qwenpaw_runtime
 
