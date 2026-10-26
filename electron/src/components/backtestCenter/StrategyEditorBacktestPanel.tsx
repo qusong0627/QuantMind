@@ -23,7 +23,7 @@ import type { StrategyLabRunResult } from '../../features/strategy-lab/types';
 import { StrategyLabResultPanel } from '../../features/strategy-lab/components/StrategyLabResultPanel';
 import type { BacktestResult } from '../../services/backtestService';
 import type { QlibBacktestResult } from '../../types/backtest/qlib';
-import { QlibResultDisplay } from '../backtest/QlibResultComponents';
+import { qlibResultToStrategyLabResult } from '../../utils/qlibToStrategyLab';
 import type { SavedBacktestRun } from '../../utils/strategyEditorSavedRuns';
 import type { StrategyEditorBacktestParams } from '../../utils/strategyEditorParams';
 
@@ -91,6 +91,11 @@ const StrategyEditorBacktestPanel: React.FC<Props> = ({
     () => /^\s*(?:import|from)\s+minibt\b/m.test(code || ''),
     [code],
   );
+  // 右栏只保留一套结果视图：qlib 结果映射成 StrategyLabRunResult 后同框展示
+  const unifiedResult = useMemo(
+    () => minibtResult ?? (qlibResult ? qlibResultToStrategyLabResult(qlibResult) : null),
+    [minibtResult, qlibResult],
+  );
 
   return (
     <div className="h-full flex flex-col bg-white rounded-[24px] border border-gray-200 shadow-sm overflow-hidden">
@@ -106,10 +111,10 @@ const StrategyEditorBacktestPanel: React.FC<Props> = ({
           <Tooltip title="AI 写策略请到 QuantBot（策略编辑只做回测）">
             <Button
               size="small"
-              type="primary"
+              type="default"
               icon={<Bot className="h-3.5 w-3.5" />}
               onClick={onOpenQuantBot}
-              className="!bg-emerald-500 !border-emerald-500 hover:!bg-emerald-400"
+              className="!bg-white/10 !border-white/25 !text-white hover:!bg-white/20"
             >
               AI 写策略
             </Button>
@@ -120,7 +125,7 @@ const StrategyEditorBacktestPanel: React.FC<Props> = ({
       <div className="flex-1 overflow-y-auto custom-scrollbar">
         <section className="p-3 border-b border-gray-100">
           <SectionTitle
-            icon={<SlidersHorizontal className="h-3.5 w-3.5 text-blue-600" />}
+            icon={<SlidersHorizontal className="h-3.5 w-3.5 text-slate-500" />}
             extra={
               <button
                 type="button"
@@ -288,7 +293,7 @@ const StrategyEditorBacktestPanel: React.FC<Props> = ({
 
         <section className="p-3 border-b border-gray-100">
           <SectionTitle
-            icon={<Activity className="h-3.5 w-3.5 text-emerald-600" />}
+            icon={<Activity className="h-3.5 w-3.5 text-slate-500" />}
             extra={
               <Button
                 size="small"
@@ -303,18 +308,16 @@ const StrategyEditorBacktestPanel: React.FC<Props> = ({
             本次结果
           </SectionTitle>
           <div className="mt-2">
-            {minibtResult ? (
-              <div className="rounded-xl border border-blue-100 overflow-hidden">
+            {unifiedResult ? (
+              <div className="rounded-xl border border-slate-200 overflow-hidden bg-white">
                 <StrategyLabResultPanel
-                  result={minibtResult}
+                  result={unifiedResult}
                   loading={running}
                   code={code}
                   strategyName={strategyName || undefined}
+                  compact
+                  showLabActions={false}
                 />
-              </div>
-            ) : qlibResult ? (
-              <div className="rounded-xl border border-blue-100 overflow-hidden p-2">
-                <QlibResultDisplay result={qlibResult} />
               </div>
             ) : (
               <Empty
@@ -331,7 +334,7 @@ const StrategyEditorBacktestPanel: React.FC<Props> = ({
 
         <section className="p-3">
           <SectionTitle
-            icon={<History className="h-3.5 w-3.5 text-purple-600" />}
+            icon={<History className="h-3.5 w-3.5 text-slate-500" />}
             extra={<Tag className="!text-[10px]">{savedRuns.length}</Tag>}
           >
             已保存回测

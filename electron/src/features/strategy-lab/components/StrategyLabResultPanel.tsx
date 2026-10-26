@@ -28,6 +28,10 @@ interface Props {
   /** Day 17: hand-drawn lines synced with the parent page so they survive re-runs. */
   drawnLines?: Record<string, number>;
   onDrawnLinesChange?: (next: Record<string, number>) => void;
+  /** 内嵌右栏：去掉外层卡片阴影/边框，隐藏 Strategy Lab 专属动作。 */
+  compact?: boolean;
+  /** 是否显示 4 关卡/转模板/加入扫描（minibt/qlib 结果应 false）。 */
+  showLabActions?: boolean;
 }
 
 const fmtPct = (v: number | null | undefined, digits = 2) => {
@@ -40,7 +44,7 @@ const fmt = (v: number | null | undefined, digits = 2) => {
   return v.toFixed(digits);
 };
 
-export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code, strategyId, strategyName, prevResult, onClearPrev, drawnLines, onDrawnLinesChange }) => {
+export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code, strategyId, strategyName, prevResult, onClearPrev, drawnLines, onDrawnLinesChange, compact = false, showLabActions = true }) => {
   const [explainTrade, setExplainTrade] = useState<StrategyLabTradeRecord | null>(null);
   const [overfitReport, setOverfitReport] = useState<any>(null);
   const [overfitLoading, setOverfitLoading] = useState(false);
@@ -210,6 +214,7 @@ export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code,
   return (
     <Card
       title={
+        compact ? undefined : (
         <span>
           回测结果
           <Tag color="green" style={{ marginLeft: 8 }}>{result.status}</Tag>
@@ -221,8 +226,10 @@ export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code,
             run_id: {result.run_id.slice(0, 8)}…
           </Text>
         </span>
+        )
       }
       extra={
+        !compact && showLabActions ? (
         <Space size="small">
           <Button
             size="small"
@@ -250,8 +257,19 @@ export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code,
             转模板
           </Button>
         </Space>
+        ) : undefined
       }
-      bodyStyle={{ paddingTop: 12 }}
+      style={
+        compact
+          ? { boxShadow: 'none', border: 'none', background: 'transparent' }
+          : undefined
+      }
+      bodyStyle={{
+        paddingTop: compact ? 4 : 12,
+        paddingLeft: compact ? 0 : undefined,
+        paddingRight: compact ? 0 : undefined,
+        paddingBottom: compact ? 0 : undefined,
+      }}
     >
       <ScoreCard result={result} overfit={overfitReport} />
       <KpiCards
@@ -263,8 +281,9 @@ export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code,
       />
 
       <Tabs
+        size={compact ? 'small' : 'middle'}
         defaultActiveKey="equity"
-        style={{ marginTop: 12 }}
+        style={{ marginTop: compact ? 4 : 12 }}
         items={[
           {
             key: 'equity',
