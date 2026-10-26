@@ -367,7 +367,23 @@ def _build_run_result(
     }
 
     trades: list[dict[str, Any]] = []
-    warnings = list(_CALIBRATION_WARNINGS)
+    # 第一项（无 T+1/涨跌停/整手 + 当根收盘成交）是 minibt 引擎的固有限制，始终披露；
+    # 手续费提示改为按实际 total_fee 判断，避免用户已显式配置佣金时仍收到“默认 0”的误导。
+    warnings = [_CALIBRATION_WARNINGS[0]]
+    try:
+        total_fee_value = (
+            _safe_float(res["total_fee"].astype(float).iloc[-1])
+            if "total_fee" in res.columns and len(res)
+            else None
+        )
+    except Exception:  # noqa: BLE001 - 费用列异常不影响结果
+        total_fee_value = None
+    if total_fee_value is not None and total_fee_value > 0:
+        warnings.append(
+            f"已计入手续费合计 {total_fee_value:,.2f} 元（percent_commission 显式配置）"
+        )
+    else:
+        warnings.append(_CALIBRATION_WARNINGS[1])
     if mtm_equity is not None:
         warnings.append(_MTM_WARNING)
     else:
