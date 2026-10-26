@@ -99,13 +99,13 @@ const StrategyEditorBacktestPanel: React.FC<Props> = ({
 
   return (
     <div className="h-full flex flex-col bg-white rounded-[24px] border border-gray-200 shadow-sm overflow-hidden">
-      <header className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-slate-900 to-slate-800 text-white shrink-0">
+      <header className="px-4 py-3 border-b border-gray-100 bg-white shrink-0">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-emerald-300" />
+            <Activity className="h-4 w-4 text-blue-600" />
             <div className="leading-tight">
-              <div className="text-sm font-bold tracking-tight">回测工作台</div>
-              <div className="text-[10px] text-slate-300">参数 · 图表 · 存档</div>
+              <div className="text-sm font-bold tracking-tight text-slate-800">回测工作台</div>
+              <div className="text-[10px] text-slate-400">参数 · 图表 · 存档</div>
             </div>
           </div>
           <Tooltip title="AI 写策略请到 QuantBot（策略编辑只做回测）">
@@ -114,7 +114,7 @@ const StrategyEditorBacktestPanel: React.FC<Props> = ({
               type="default"
               icon={<Bot className="h-3.5 w-3.5" />}
               onClick={onOpenQuantBot}
-              className="!bg-white/10 !border-white/25 !text-white hover:!bg-white/20"
+              className="!border-blue-200 !text-blue-600 hover:!bg-blue-50"
             >
               AI 写策略
             </Button>
