@@ -32,6 +32,24 @@ class LiveBarUnavailable(RuntimeError):
     """实时快照不足以合成当日 K 线；``args[0]`` 是机器可读原因。"""
 
 
+class TargetExtractError(RuntimeError):
+    """回测结果里取不到目标持仓股数；``args[0]`` 是机器可读原因。"""
+
+
+def extract_last_size(frame: Any) -> float:
+    """回测结果 DataFrame → 最后一根的**带符号持仓股数**。
+
+    ⚠️ 必须用 ``sizes`` 列，不能用 ``positions``：后者是方向（-1/0/1），
+    2026-10-26 实测买 100 股的 ``positions`` 是 1.0、``sizes`` 才是 100；
+    拿 ``positions`` 当股数会把 100 股下成 1 股。
+    """
+    if frame is None or len(frame) == 0:
+        raise TargetExtractError("backtest_no_result")
+    if "sizes" not in getattr(frame, "columns", []):
+        raise TargetExtractError("result_missing_sizes")
+    return float(frame["sizes"].astype(float).iloc[-1])
+
+
 def snapshot_keys(symbol: str) -> list[str]:
     """标的 → 行情快照候选键（四形并存，写侧口径见 decision_context_source）。
 

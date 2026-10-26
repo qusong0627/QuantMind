@@ -501,6 +501,18 @@ async def start_trading(
         elif strategy_file:
             strategy_name = strategy_file.filename or strategy_name
 
+        # minibt 需要绕过「默认模型/信号就绪」准备度门禁（信号由策略自供），
+        # 因此必须在 preflight 之前拿到代码。上传流只能读一次，先读进内存。
+        uploaded_code: str | None = None
+        if strategy_file is not None:
+            uploaded_code = (await strategy_file.read()).decode("utf-8", errors="ignore")
+        _code_preview = uploaded_code or ""
+        if not _code_preview and "detail" in locals() and isinstance(detail, dict):
+            _code_preview = str(detail.get("code") or "")
+        from backend.shared.minibt_detect import detect_minibt as _detect_minibt
+
+        _is_minibt_strategy = _detect_minibt(_code_preview)
+
         exec_config = _normalize_execution_config({}, exec_config)
         ExecutionConfigSchema.model_validate(exec_config)
         live_config = _normalize_live_trade_config(
@@ -561,6 +573,34 @@ async def start_trading(
             tenant_id=resolved_tenant_id,
             market=deployment_market,
         )
+        if _is_minibt_strategy:
+            # minibt 自供信号：默认模型/信号就绪/沙箱进程池都不是它的依赖
+            # （侧车用 runner 容器，启动时会单独校验 docker 与镜像）。
+            _minibt_skip = {
+                "default_model_configured",
+                "signal_readiness",
+                "simulation_sandbox_pool",
+            }
+            _items = [
+                item
+                for item in readiness.get("items", [])
+                if str(item.get("key") or "") not in _minibt_skip
+            ]
+            readiness = {
+                **readiness,
+                "items": _items,
+                "passed": all(bool(item.get("passed")) for item in _items),
+                "trading_permission": "trade_enabled",
+                "signal_readiness": {
+                    "available": True,
+                    "status": "minibt_strategy",
+                    "message": "minibt 策略自供信号（不依赖默认模型）",
+                    "mode": mode,
+                    "blocking": False,
+                    "trading_permission": "trade_enabled",
+                    "model_source": "minibt",
+                },
+            }
         signal_readiness = readiness.get("signal_readiness") or {}
         trading_permission = str(
             readiness.get("trading_permission")
@@ -599,7 +639,7 @@ async def start_trading(
                     "trading_permission": trading_permission,
                 },
             )
-        if trading_permission == "observe_only":
+        if trading_permission == "observe_only" and not _is_minibt_strategy:
             exec_config = {
                 **exec_config,
                 "trading_permission": "observe_only",
@@ -618,10 +658,10 @@ async def start_trading(
         file_path = os.path.join(strategy_dir, f"{run_id}.py")
         code_str = ""  # 初始化，避免未定义
         if strategy_file:
-            content = await strategy_file.read()
+            content = (uploaded_code or "").encode("utf-8")
             with open(file_path, "wb") as f:
                 f.write(content)
-            code_str = content.decode("utf-8")
+            code_str = uploaded_code or ""
         else:
             # 从存储加载的策略代码也持久化一份快照，供重启恢复直接使用
             try:

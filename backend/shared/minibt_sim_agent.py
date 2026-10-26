@@ -162,7 +162,11 @@ def _trade_redis() -> redis.Redis:
 # 子进程：执行策略并提取最后一根 K 线的持仓
 # ---------------------------------------------------------------------------
 def _extract_last_position(bt: Any) -> tuple[float, int]:
-    """bt → (最后持仓股数, 结果行数)。未跑完返回 (nan, 0)。"""
+    """bt → (最后一根的带符号持仓股数, 结果行数)。未跑完返回 (nan, 0)。
+
+    ⚠️ 用 ``sizes`` 列（股数），不是 ``positions``（方向 -1/0/1）——
+    2026-10-26 实测买 100 股时 positions=1.0、sizes=100。
+    """
     results = None
     try:
         results = bt.get_results()
@@ -171,10 +175,11 @@ def _extract_last_position(bt: Any) -> tuple[float, int]:
     if not results:
         return float("nan"), 0
     frame = results[0][0] if results and results[0] else None
-    if frame is None or len(frame) == 0 or "positions" not in frame.columns:
+    if frame is None or len(frame) == 0:
         return float("nan"), 0
-    positions = frame["positions"].astype(float)
-    return float(positions.iloc[-1]), int(len(frame))
+    from backend.shared.minibt_sim_data import extract_last_size
+
+    return extract_last_size(frame), int(len(frame))
 
 
 def _find_strategy_class(namespace: dict[str, Any]) -> Any:

@@ -12,8 +12,10 @@ import pytest
 from backend.shared.minibt_sim_data import (
     LOTS_TO_SHARES,
     LiveBarUnavailable,
+    TargetExtractError,
     append_live_bar,
     build_live_bar,
+    extract_last_size,
     snapshot_age_seconds,
 )
 
@@ -131,3 +133,16 @@ def test_历史已含今日则不追加() -> None:
 def test_缺快照时拒绝合成() -> None:
     with pytest.raises(LiveBarUnavailable, match="snapshot_missing"):
         append_live_bar(_history(2), snapshot=None, symbol="600036", trade_date=TODAY)
+
+
+def test_取目标股数用sizes列而不是positions方向列() -> None:
+    frame = pd.DataFrame({"positions": [1, 1], "sizes": [100.0, 100.0]})
+    assert extract_last_size(frame) == 100.0
+    flat = pd.DataFrame({"positions": [1, 0], "sizes": [100.0, 0.0]})
+    assert extract_last_size(flat) == 0.0
+    short = pd.DataFrame({"positions": [-1], "sizes": [-1000.0]})
+    assert extract_last_size(short) == -1000.0
+    with pytest.raises(TargetExtractError, match="result_missing_sizes"):
+        extract_last_size(pd.DataFrame({"positions": [1]}))
+    with pytest.raises(TargetExtractError, match="backtest_no_result"):
+        extract_last_size(pd.DataFrame(columns=["positions", "sizes"]))
