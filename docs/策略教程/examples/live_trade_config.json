@@ -1,0 +1,15 @@
+{
+  "rebalance_days": 3,
+  "schedule_type": "interval",
+  "trade_weekdays": [],
+  "enabled_sessions": ["PM"],
+  "sell_time": "14:45",
+  "buy_time": "14:50",
+  "sell_first": true,
+  "order_type": "MARKET",
+  "max_price_deviation": 0.02,
+  "max_orders_per_cycle": 20,
+  "trigger_window_seconds": 90,
+  "pool_id": null,
+  "market": "CN"
+}
