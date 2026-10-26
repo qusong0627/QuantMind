@@ -138,6 +138,7 @@ class RebalanceCalculator:
         account: SimulationAccount,
         day_index: int = 0,
         inflight: dict[str, dict[str, int]] | None = None,
+        target_quantities: dict[str, int] | None = None,
     ) -> list[Order]:
         """
         计算调仓指令。
@@ -151,11 +152,14 @@ class RebalanceCalculator:
             inflight: 已挂出未成交的量（``aggregate_inflight`` 产物）。
                 **只有实时执行路径需要传**：回测/预演里委托当期即成交，
                 没有"挂着"的状态，传 None 保持既有行为。
+            target_quantities: 显式目标股数（minibt 模拟盘桥）。非 None 时
+                跳过涨跌停/停牌过滤与 TopK/权重计算，直接按股数调仓；不可交易
+                的标的仍生成委托，由撮合层拒绝并留痕（与 force_exit 同口径）。
 
         Returns:
             交易指令列表（先卖后买）
         """
-        if not signals:
+        if not signals and not target_quantities:
             logger.info("RebalanceCalculator: 无信号，跳过调仓")
             return []
 
@@ -167,6 +171,42 @@ class RebalanceCalculator:
                 day_index, strategy.rebalance_days,
             )
             return []
+
+        # 0.5 minibt 显式股数：SIZE 语义原样保留，不走涨跌停过滤/权重/TopK。
+        # **作用域限制**：只管理 target_quantities 里出现的标的——账户里其它
+        # 策略/历史持仓一律不碰。否则单标的 minibt 策略会把整个账户清仓
+        # （2026-10-26 实测：目标 0 时对 78 只无关持仓全部生成了卖单）。
+        if target_quantities is not None:
+            from backend.shared.stock_utils import StockCodeUtil
+
+            normalized: dict[str, int] = {}
+            for symbol, quantity in target_quantities.items():
+                text = str(symbol or "").strip()
+                suffix = StockCodeUtil.to_suffix(text) or text
+                if suffix:
+                    normalized[suffix] = int(quantity)
+            managed = set(normalized)
+            scoped_positions: dict[str, dict] = {}
+            for symbol, position in account.positions.items():
+                norm = StockCodeUtil.to_suffix(str(symbol)) or str(symbol)
+                if norm in managed:
+                    scoped_positions[norm] = position
+            target_positions = {
+                symbol: quantity for symbol, quantity in normalized.items() if quantity > 0
+            }
+            orders = self._generate_orders(
+                scoped_positions,
+                target_positions,
+                quotes,
+                score_order=list(normalized) or None,
+                force_exit_on_limit_down=True,
+                inflight=inflight,
+            )
+            logger.info(
+                "RebalanceCalculator[minibt]: 目标股数 %s（作用域 %d 只）→ 生成 %d 条指令",
+                target_positions, len(scoped_positions), len(orders),
+            )
+            return orders
 
         # 0. min_score 过滤（opt-in，见 StrategyConfig.enable_min_score）
         if strategy.enable_min_score:

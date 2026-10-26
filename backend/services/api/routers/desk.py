@@ -963,6 +963,17 @@ async def _collect_plan(
             "reason": "活跃策略未记录 strategy_id",
             "source": source,
         }
+    if str(payload.get("runtime") or "sandbox").strip().lower() == "minibt":
+        # minibt 的目标由侧车在买入窗口按策略自己算；这里跑 run_cycle 只会拿
+        # 模型信号充数（与策略无关），必须显式不可用而不是给一份假计划。
+        return {
+            "available": False,
+            "market": scope_market,
+            "strategy_id": strategy_id,
+            "runtime": "minibt",
+            "reason": "minibt 策略按自身信号在买入窗口评估，计划预演暂不支持",
+            "source": source,
+        }
     live_cfg = payload.get("live_trade_config")
     if not isinstance(live_cfg, dict):
         live_cfg = {}
@@ -1056,6 +1067,11 @@ async def execute_plan(
         raise HTTPException(
             status_code=409,
             detail=f"当前活跃策略为 {mode} 模式——交易台一键执行仅限模拟盘（实盘请走实盘确认链）",
+        )
+    if str(active.get("runtime") or "sandbox").strip().lower() == "minibt":
+        raise HTTPException(
+            status_code=409,
+            detail="minibt 策略由买入窗口自动执行，不支持交易台一键执行",
         )
 
     # 市场闸门（仅当调用方**显式声明**市场）：页面在港股而活跃策略是 A 股时，

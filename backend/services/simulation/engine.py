@@ -289,6 +289,8 @@ class SimulationEngine:
         signal_run_id: str | None = None,
         log_source: str | None = None,
         max_orders: int | None = None,
+        signals_override: list[SignalScore] | None = None,
+        target_quantities: dict[str, int] | None = None,
     ) -> ExecutionReport:
         """
         执行一次模拟盘调仓周期。
@@ -315,6 +317,12 @@ class SimulationEngine:
             max_orders: 单轮委托上限（``live_trade_config.max_orders_per_cycle``）。
                 只截调仓腿、不截退出规则单；``None`` = 不设上限。**预演必须传同一个值**，
                 否则预演条数与实际执行对不上（假预告）。见 ``apply_order_cap``。
+            signals_override: 信号覆盖（minibt 模拟盘桥用）。非 None 时**不读**
+                ``engine_signal_scores``，直接用调用方给的信号；模型信号路径传
+                None 时行为逐字节不变。
+            target_quantities: 目标持仓股数覆盖（minibt 策略输出）。非 None 时
+                直接按股数调仓，跳过涨跌停/停牌过滤与 TopK/权重计算——minibt
+                的 ``SIZE`` 语义必须原样保留；不可交易的拒单由撮合层留痕。
 
         Returns:
             执行报告（dry_run 时 executed_at 仅为计算时刻）
@@ -338,13 +346,18 @@ class SimulationEngine:
             # 统一走共享 get_session（master 会话 + 出口提交语义）。
             async with get_session() as db:
                 # 1. 加载信号（market 提示时按市场过滤；signal_run_id 指定批次，None 取最新截面）
-                signals = await self.signal_loader.load_latest_signals(
-                    db=db,
-                    tenant_id=tenant,
-                    user_id=uid,
-                    run_id=signal_run_id,
-                    market=market,
-                )
+                # minibt 模拟盘桥走 signals_override：信号由侧车按策略算出，
+                # 不读模型信号表（否则同一账户会被模型信号与策略信号双重驱动）。
+                if signals_override is not None:
+                    signals = list(signals_override)
+                else:
+                    signals = await self.signal_loader.load_latest_signals(
+                        db=db,
+                        tenant_id=tenant,
+                        user_id=uid,
+                        run_id=signal_run_id,
+                        market=market,
+                    )
                 report.signal_count = len(signals)
 
                 if not signals:
@@ -534,6 +547,7 @@ class SimulationEngine:
                     quotes=quotes,
                     account=account,
                     inflight=inflight,
+                    target_quantities=target_quantities,
                 )
                 orders = self._apply_risk_buy_locks(
                     orders, tenant=tenant, user_id=uid, trade_date=datetime.now().date()

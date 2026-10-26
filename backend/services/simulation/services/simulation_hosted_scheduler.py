@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -130,6 +131,11 @@ SKIP_REASON_TEXT: dict[str, str] = {
     "sell_only_window": "处于卖出时段：引擎买卖原子执行，仅在买入窗口跑整轮",
     "lock_held": "该执行窗口已触发过（幂等锁占用）",
     "lock_error": "分布式执行锁获取失败",
+    # minibt 模拟盘桥：目标由侧车按策略计算，未就绪时**显式跳过**，绝不回落到模型信号。
+    "minibt_target_pending": "minibt 目标计算中（侧车尚未返回）",
+    "minibt_target_stale": "minibt 目标已过期（超过新鲜度上限）",
+    "minibt_target_error": "minibt 目标计算失败",
+    "minibt_target_unavailable": "minibt 目标不可用（侧车无响应或重试耗尽）",
 }
 
 
@@ -228,14 +234,43 @@ async def run_simulation_cycle_for_active(
     exclude_symbols: set[str] | None = None,
     quantity_overrides: dict[tuple[str, str], int] | None = None,
     log_source: str | None = "hosted_sim",
+    minibt_target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """托管模拟盘唯一执行入口：RebalanceCalculator + ashare_matcher。"""
+    """托管模拟盘唯一执行入口：RebalanceCalculator + ashare_matcher。
+
+    ``minibt_target`` 非空时走 minibt 桥：信号与目标股数都由侧车给出，
+    **不读模型信号表**；撮合/台账/风控仍走同一条引擎链路。
+    """
     from backend.services.simulation.engine import simulation_engine
 
     cfg = _normalize_live_trade_config(live_trade_config)
     params_override: dict[str, Any] = {}
     if cfg.get("pool_id"):
         params_override["pool_id"] = cfg["pool_id"]
+    signals_override = None
+    target_quantities = None
+    if minibt_target:
+        from datetime import date as _date
+
+        from backend.services.simulation.services.signal_loader import SignalScore
+
+        symbol = str(minibt_target.get("symbol") or "").strip()
+        shares = max(0, int(float(minibt_target.get("target_shares") or 0)))
+        target_date = str(minibt_target.get("trade_date") or "")[:10]
+        if not symbol or not target_date:
+            raise RuntimeError("minibt target 缺少 symbol/trade_date")
+        signals_override = [
+            SignalScore(
+                symbol=symbol,
+                score=1.0 if shares > 0 else 0.0,
+                trade_date=_date.fromisoformat(target_date),
+                run_id=str(minibt_target.get("request_id") or run_id or "minibt"),
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+        ]
+        target_quantities = {symbol: shares}
+        params_override["topk"] = 1
     report = await simulation_engine.run_cycle(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -247,6 +282,8 @@ async def run_simulation_cycle_for_active(
         quantity_overrides=quantity_overrides,
         log_source=log_source,
         max_orders=cfg.get("max_orders_per_cycle"),
+        signals_override=signals_override,
+        target_quantities=target_quantities,
     )
     result = report_to_hosted_result(report)
     # T-FE-05 v2：人工改量裁定随报告透传（前端如实展示 applied/ignored）
@@ -462,6 +499,28 @@ def _resolve_phase(local_now: datetime, live_trade_config: dict[str, Any]) -> st
     return "IDLE"
 
 
+def _minibt_precompute_due(now: datetime, live_trade_config: dict[str, Any]) -> bool:
+    """是否处于「买入窗口前的预计算窗」。
+
+    调度器 30s 一拍：若 14:50:00 才发请求、14:50:30 才执行，实际下单比配置
+    晚 30s。提前 ``QM_MINIBT_SIM_PRECOMPUTE_LEAD``（默认 90s）让侧车先把目标
+    算好，14:50 第一拍直接执行；目标用 14:49 左右的现价当收盘价，成交价仍是
+    执行时的实时价。
+    """
+    tz = market_timezone(live_trade_config.get("market"))
+    local_now = now.astimezone(tz)
+    buy_time = str(live_trade_config.get("buy_time") or "14:50")
+    try:
+        hour = int(buy_time[:2])
+        minute = int(buy_time[3:5])
+    except (TypeError, ValueError):
+        return False
+    target = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    delta = (target - local_now).total_seconds()
+    lead = max(30, _to_int(os.getenv("QM_MINIBT_SIM_PRECOMPUTE_LEAD", "90"), 90))
+    return 0 < delta <= lead
+
+
 def _should_trigger(
     *,
     now: datetime,
@@ -502,7 +561,9 @@ def _should_trigger(
     return SimulationScheduleDecision(True, phase, trade_date, "matched")
 
 
-def _is_time_in_enabled_session(target_hhmm: str, live_trade_config: dict[str, Any]) -> bool:
+def _is_time_in_enabled_session(
+    target_hhmm: str, live_trade_config: dict[str, Any]
+) -> bool:
     return _is_enabled_session(str(target_hhmm or "").strip(), live_trade_config)
 
 
@@ -665,7 +726,9 @@ class SimulationHostedScheduler:
             # 心跳反而"新鲜"，正是要检出的停摆形态。redis_client 不传——heartbeat
             # 默认走 db0，与体检 C07 读取口径一致（传 trade 客户端会写到 db2 读不到）。
             try:
-                from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+                from backend.shared.scheduler_registry import (
+                    heartbeat as _sched_heartbeat,
+                )
 
                 _sched_heartbeat("sim_hosted")
             except Exception as exc:  # noqa: BLE001 - 心跳失败不得影响调度
@@ -711,6 +774,108 @@ class SimulationHostedScheduler:
                 )
         return triggered
 
+    def _resolve_minibt_target(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        strategy_id: str,
+        run_id: str,
+        trade_date: str,
+        phase: str,
+        now: datetime,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """读 minibt 目标；不可用时向侧车发一次计算请求并给出显式跳过原因。
+
+        「请求 → 侧车计算 → 下一 tick 取目标」两拍完成：调度器 30s 一轮、
+        触发窗口 90s，正常路径下一拍即可执行；超时/失败按原因码跳过，
+        **绝不回落到模型信号**（同一账户被两套信号驱动是最坏的失败方式）。
+        """
+        from backend.shared.minibt_sim_keys import (
+            attempts_key,
+            build_request_payload,
+            request_key,
+            target_key,
+            target_state,
+        )
+
+        client = self.redis.client
+        max_age = _to_int(os.getenv("QM_MINIBT_SIM_TARGET_MAX_AGE", "180"), 180)
+        raw = None
+        try:
+            raw = client.get(target_key(tenant_id, user_id, strategy_id))
+        except Exception as exc:  # noqa: BLE001 - 读失败按不可用处理
+            logger.warning("minibt target read failed: %s", exc)
+        payload = None
+        if raw:
+            try:
+                payload = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                payload = None
+        state, reason = target_state(
+            payload,
+            trade_date=trade_date,
+            now_ts=now.timestamp(),
+            max_age_seconds=float(max_age),
+        )
+        if state == "ok":
+            return payload, "ok"
+
+        logger.info(
+            "minibt target state=%s reason=%s tenant=%s user=%s strategy=%s",
+            state,
+            reason,
+            tenant_id,
+            user_id,
+            strategy_id,
+        )
+        if state == "error" and isinstance(payload, dict):
+            try:
+                hosted_sim_log(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    strategy_id=strategy_id,
+                    line=f"minibt 目标计算失败：{payload.get('error') or 'unknown'}",
+                    level="warning",
+                    stage="minibt_target",
+                    status="failed",
+                    run_id=str(payload.get("request_id") or ""),
+                    phase=phase,
+                )
+            except Exception:  # noqa: BLE001 - 日志失败不得影响调度
+                pass
+        attempts_key_value = attempts_key(tenant_id, user_id, strategy_id, trade_date)
+        try:
+            attempts = int(client.incr(attempts_key_value))
+            client.expire(attempts_key_value, 24 * 3600)
+        except Exception:  # noqa: BLE001 - Redis 异常=不可用，不假装已请求
+            return None, "minibt_target_unavailable"
+        if attempts > 3:
+            return None, "minibt_target_unavailable"
+        request = build_request_payload(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            strategy_id=strategy_id,
+            run_id=run_id,
+            trade_date=trade_date,
+            phase=phase,
+            request_id=str(uuid.uuid4()),
+        )
+        try:
+            client.set(
+                request_key(tenant_id, user_id, strategy_id),
+                json.dumps(request, ensure_ascii=False),
+                ex=120,
+                nx=True,
+            )
+        except Exception:  # noqa: BLE001
+            return None, "minibt_target_unavailable"
+        if state == "error":
+            return None, "minibt_target_error"
+        if state == "stale":
+            return None, "minibt_target_stale"
+        return None, "minibt_target_pending"
+
     async def _process_key(self, key: str, *, now: datetime) -> bool:
         raw = self.redis.client.get(key)
         if not raw:
@@ -732,13 +897,31 @@ class SimulationHostedScheduler:
         tenant_id, user_id = resolve_active_identity(
             tenant_suffix=parts[-2], user_suffix=parts[-1], payload=active_data
         )
-        strategy_id = str(active_data.get("strategy_id") or "").strip()
+        strategy_id = str(
+            active_data.get("runtime_strategy_id")
+            or active_data.get("strategy_id")
+            or ""
+        ).strip()
         if not user_id or not strategy_id:
             return False
 
         live_trade_config = _normalize_live_trade_config(
             active_data.get("live_trade_config")
         )
+        runtime = str(active_data.get("runtime") or "sandbox").strip().lower()
+        if runtime == "minibt":
+            # minibt 的信号由策略在每根 K 线上给出，按日评估；rebalance_days
+            # 是模型组合的调仓节奏，套到信号策略上会把信号最多推迟 N-1 天。
+            if int(live_trade_config.get("rebalance_days") or 1) != 1:
+                logger.info(
+                    "simulation hosted: minibt runtime evaluates daily, "
+                    "rebalance_days=%s ignored tenant=%s user=%s strategy=%s",
+                    live_trade_config.get("rebalance_days"),
+                    tenant_id,
+                    user_id,
+                    strategy_id,
+                )
+            live_trade_config = {**live_trade_config, "rebalance_days": 1}
         started_day = _parse_started_at(
             active_data.get("started_at"), market=live_trade_config.get("market")
         )
@@ -748,6 +931,22 @@ class SimulationHostedScheduler:
             started_day=started_day,
         )
         if not decision.should_trigger:
+            if (
+                runtime == "minibt"
+                and decision.reason == "before_window"
+                and _minibt_precompute_due(now, live_trade_config)
+            ):
+                # 预计算：只写请求，不执行；14:50 第一拍拿到目标直接下单。
+                self._resolve_minibt_target(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    strategy_id=strategy_id,
+                    run_id=str(active_data.get("run_id") or ""),
+                    trade_date=decision.trade_date,
+                    phase="BUY",
+                    now=now,
+                )
+                return False
             hosted_sim_skip_once(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -770,7 +969,49 @@ class SimulationHostedScheduler:
                 strategy_id=strategy_id,
             )
             return False
-        # 真的进入触发态：复位跳过标记，下一段静默期（如收盘后）能重新记录原因
+        minibt_target: dict[str, Any] | None = None
+        if runtime == "minibt":
+            minibt_target, target_reason = self._resolve_minibt_target(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                strategy_id=strategy_id,
+                run_id=str(active_data.get("run_id") or ""),
+                trade_date=decision.trade_date,
+                phase=decision.phase,
+                now=now,
+            )
+            if minibt_target is None:
+                hosted_sim_skip_once(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    reason=target_reason,
+                    strategy_id=strategy_id,
+                )
+                return False
+            hosted_sim_log(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                strategy_id=strategy_id,
+                line=(
+                    f"minibt 目标 {minibt_target.get('symbol')} "
+                    f"{minibt_target.get('target_shares')} 股"
+                    f"（bar={minibt_target.get('bar_date')} "
+                    f"{minibt_target.get('bar_source')}）"
+                ),
+                level="info",
+                stage="minibt_target",
+                status="ready",
+                run_id=str(minibt_target.get("request_id") or ""),
+                phase=decision.phase,
+                summary={
+                    "symbol": minibt_target.get("symbol"),
+                    "target_shares": minibt_target.get("target_shares"),
+                    "bar_source": minibt_target.get("bar_source"),
+                    "compute_seconds": minibt_target.get("compute_seconds"),
+                },
+            )
+
+        # 真的进入执行态：复位跳过标记，下一段静默期（如收盘后）能重新记录原因
         hosted_sim_clear_skip_marker(tenant_id=tenant_id, user_id=user_id)
 
         lock_key = _lock_key(
@@ -849,6 +1090,7 @@ class SimulationHostedScheduler:
                 strategy_id=strategy_id,
                 live_trade_config=live_trade_config,
                 run_id=task_id,
+                minibt_target=minibt_target,
             )
             if result.get("status") == "failed" and result.get("error"):
                 err = str(result["error"])

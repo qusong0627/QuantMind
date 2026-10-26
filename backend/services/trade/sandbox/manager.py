@@ -132,6 +132,16 @@ class SandboxPlatformManager:
 
         validate_strategy_code(code_str)
 
+        # minibt 策略只定义 Strategy 子类与 __main__ 块，沙箱只找 on_tick——
+        # 放进来会「启动成功、零信号」静默空转。边界必须显式：直接拒。
+        from backend.shared.minibt_detect import detect_minibt
+
+        if detect_minibt(code_str):
+            raise ValueError(
+                "minibt 策略不支持沙箱 on_tick 运行时（启动会静默零信号）；"
+                "请通过 minibt 模拟盘运行时启动"
+            )
+
         self._ensure_pool_capacity()
         if not self._workers:
             raise RuntimeError("Sandbox Worker Pool is empty.")

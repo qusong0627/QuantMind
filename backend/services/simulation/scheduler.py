@@ -288,9 +288,45 @@ class SimulationScheduler:
             )
             return None
 
+    def _active_runtime(self, account: ActiveSimulationAccount) -> str:
+        """激活策略的运行时装填（``minibt`` / ``sandbox``）；读不到按 sandbox。"""
+        try:
+            if not self.redis.client:
+                return "sandbox"
+            from backend.shared.simulation_account_keys import active_strategy_key
+
+            raw = self.redis.client.get(
+                active_strategy_key(account.tenant_id, account.user_id)
+            )
+            if not raw:
+                return "sandbox"
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return "sandbox"
+            active_id = str(
+                data.get("runtime_strategy_id") or data.get("strategy_id") or ""
+            ).strip()
+            if active_id != str(account.strategy_id):
+                return "sandbox"
+            return str(data.get("runtime") or "sandbox").strip().lower()
+        except Exception as exc:  # noqa: BLE001 - 状态读失败不得阻断调度，按旧行为
+            logger.debug("SimulationScheduler: 读取运行时类型失败: %s", exc)
+            return "sandbox"
+
     async def _run_single_account(self, account: ActiveSimulationAccount) -> bool:
         """执行单个账户的调仓"""
         try:
+            # minibt 策略由自身信号驱动，托管调度在买入窗口触发；
+            # 09:35 的模型信号周期必须显式跳过，避免同一账户被两套信号双重驱动。
+            if self._active_runtime(account) == "minibt":
+                logger.info(
+                    "SimulationScheduler: 跳过 minibt 账户（由托管调度在买入窗口触发）"
+                    " tenant=%s user=%s strategy=%s",
+                    account.tenant_id,
+                    account.user_id,
+                    account.strategy_id,
+                )
+                return False
             # 市场提示取自激活策略配置（parameters.market；港股信号为裸数字需显式指明）
             market_hint: str | None = None
             try:

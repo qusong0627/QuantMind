@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+import asyncio
 import json
 import logging
 import os
@@ -668,27 +669,89 @@ async def start_trading(
                 exc,
             )
 
-        # 3. 沙箱模拟盘执行
+        # 3. 执行：minibt → 专用侧车（runner 镜像）；其余 → 沙箱 on_tick。
+        # minibt 脚本没有 on_tick，放进沙箱只会「启动成功、零信号」；这里按代码形态
+        # 显式分流，并在 sandbox_manager 侧再设一道拒入闸。
         result = {"status": "success", "mode": "SIMULATION"}
-        from backend.services.trade.sandbox.manager import sandbox_manager
+        runtime_kind = "sandbox"
+        minibt_runtime: dict = {}
+        from backend.shared.minibt_detect import detect_minibt
 
-        try:
-            sandbox_run_id = sandbox_manager.submit_strategy(
-                tenant_id=resolved_tenant_id,
-                user_id=resolved_user_id,
-                strategy_id=strategy_id or strategy_name,
-                code_str=code_str,
-                exec_config=exec_config,
-                live_trade_config=live_config,
+        if detect_minibt(code_str):
+            runtime_kind = "minibt"
+            if mode != "SIMULATION":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "minibt 策略目前仅支持模拟盘（SIMULATION）；"
+                        "实盘请改用 STRATEGY_CONFIG / on_tick 策略"
+                    ),
+                )
+            from backend.services.trade.services.minibt_sim_launcher import (
+                MinibtSimUnavailable,
+                minibt_sim_launcher,
             )
+
+            try:
+                if not await asyncio.to_thread(minibt_sim_launcher.available):
+                    raise MinibtSimUnavailable("docker_unavailable")
+                launch = await asyncio.to_thread(
+                    minibt_sim_launcher.start,
+                    tenant_id=resolved_tenant_id,
+                    user_id=resolved_user_id,
+                    strategy_id=strategy_id or strategy_name,
+                    run_id=run_id,
+                    code=code_str,
+                )
+            except MinibtSimUnavailable as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"minibt 模拟盘运行时不可用: {exc}",
+                ) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"minibt 侧车启动失败: {exc}"
+                ) from exc
+            result = {
+                "status": "success",
+                "mode": "SIMULATION",
+                "runtime": "minibt",
+                "note": "minibt 策略将在下一个买入窗口评估并建仓",
+                **launch,
+            }
+            minibt_runtime = {
+                "container_id": launch.get("container_id"),
+                "container_name": launch.get("container_name"),
+                "code_file": launch.get("code_file"),
+            }
             logger.info(
-                f"[Sim] 用户 {resolved_user_id} 启动了沙箱模拟盘 {strategy_name} -> PID Task"
+                "[Sim] 用户 %s 启动了 minibt 模拟盘 %s -> %s",
+                resolved_user_id,
+                strategy_name,
+                launch.get("container_name"),
             )
-        except ValueError as e:
-            # T-P0-02：策略代码未过安全闸门（AST 校验）属调用方错误 → 400 带明细
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"沙箱启动失败: {str(e)}")
+        else:
+            from backend.services.trade.sandbox.manager import sandbox_manager
+
+            try:
+                sandbox_run_id = sandbox_manager.submit_strategy(
+                    tenant_id=resolved_tenant_id,
+                    user_id=resolved_user_id,
+                    strategy_id=strategy_id or strategy_name,
+                    code_str=code_str,
+                    exec_config=exec_config,
+                    live_trade_config=live_config,
+                )
+                logger.info(
+                    f"[Sim] 用户 {resolved_user_id} 启动了沙箱模拟盘 {strategy_name} -> PID Task"
+                )
+            except ValueError as e:
+                # T-P0-02：策略代码未过安全闸门（AST 校验）属调用方错误 → 400 带明细
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"沙箱启动失败: {str(e)}")
 
         # 4. 状态持久化（started_at 锚定调仓节奏，code_str 保障重启可恢复）
         import hashlib as _hashlib
@@ -699,13 +762,79 @@ async def start_trading(
         # 港股/美股策略在快照里看不出市场）。仅在配置未显式声明时补写。
         if isinstance(live_config, dict) and not str(live_config.get("market") or "").strip():
             live_config = {**live_config, "market": deployment_market}
+
+        # 切换策略时先停掉上一份 minibt 侧车：active 键会被覆盖，孤儿容器
+        # 会继续跑策略/占内存，但调度器再也读不到它的目标。
+        try:
+            previous_raw = _read_active_strategy_raw(
+                redis, resolved_tenant_id, resolved_user_id
+            )
+            previous = json.loads(previous_raw) if previous_raw else None
+            previous_id = (
+                str(previous.get("strategy_id") or "").strip()
+                if isinstance(previous, dict)
+                else ""
+            )
+            if (
+                isinstance(previous, dict)
+                and str(previous.get("runtime") or "sandbox").strip().lower()
+                == "minibt"
+                and previous_id
+                and previous_id != str(strategy_id or strategy_name)
+            ):
+                from backend.services.trade.services.minibt_sim_launcher import (
+                    minibt_sim_launcher,
+                )
+
+                await asyncio.to_thread(
+                    minibt_sim_launcher.stop,
+                    tenant_id=resolved_tenant_id,
+                    user_id=resolved_user_id,
+                    strategy_id=previous_id,
+                )
+                await asyncio.to_thread(
+                    minibt_sim_launcher.remove_code,
+                    tenant_id=resolved_tenant_id,
+                    user_id=resolved_user_id,
+                    strategy_id=previous_id,
+                )
+                from backend.shared.minibt_sim_keys import (
+                    heartbeat_key,
+                    request_key,
+                    target_key,
+                )
+
+                try:
+                    redis.client.delete(
+                        target_key(
+                            resolved_tenant_id, resolved_user_id, previous_id
+                        ),
+                        request_key(
+                            resolved_tenant_id, resolved_user_id, previous_id
+                        ),
+                        heartbeat_key(
+                            resolved_tenant_id, resolved_user_id, previous_id
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.info(
+                    "[Sim] 切换策略前已停止上一份 minibt 侧车 strategy=%s",
+                    previous_id,
+                )
+        except Exception as exc:  # noqa: BLE001 - 清理失败不阻断新策略启动
+            logger.warning("[Sim] 停止上一份 minibt 侧车失败: %s", exc)
+
         redis.client.set(
             _active_strategy_key(resolved_tenant_id, resolved_user_id),
             json.dumps(
                 {
-                    "strategy_id": strategy_id,
+                    "strategy_id": strategy_id or strategy_name,
+                    "runtime_strategy_id": str(strategy_id or strategy_name),
                     "run_id": run_id,
                     "mode": mode,
+                    "runtime": runtime_kind,
+                    "minibt": minibt_runtime or None,
                     "strategy_name": strategy_name,
                     "execution_config": exec_config,
                     "live_trade_config": live_config,
@@ -760,7 +889,18 @@ async def start_trading(
         # 无可用推理时跳过（不阻断启动），等下一轮推理就绪后由托管调度器自然补跑。
         bootstrap_result = None
         bootstrap_skipped_reason = None
-        if mode == "SIMULATION" and trading_permission != "blocked":
+        if runtime_kind == "minibt":
+            # minibt 没有「最新推理信号」可 bootstrap；启动即建仓会绕过策略的
+            # 决策时点（也可能落在非交易时段）。首次评估统一等下一个买入窗口。
+            bootstrap_skipped_reason = "minibt_waits_for_decision_window"
+            logger.info(
+                "[SimBootstrap] minibt 跳过首次 bootstrap（等待买入窗口） "
+                "tenant=%s user=%s strategy=%s",
+                resolved_tenant_id,
+                resolved_user_id,
+                strategy_id or strategy_name,
+            )
+        elif mode == "SIMULATION" and trading_permission != "blocked":
             if os.getenv("SIM_BOOTSTRAP_FIRST_RUN_ENABLED", "true").strip().lower() == "true":
                 try:
                     bootstrap_lock_key = (
@@ -913,16 +1053,66 @@ async def stop_trading(
 
         if active_strat_raw:
             data = json.loads(active_strat_raw)
-            strat_id = data.get("strategy_id", "unknown")
+            strat_id = str(
+                data.get("runtime_strategy_id")
+                or data.get("strategy_id")
+                or "unknown"
+            )
             stopped_strategy_id = strat_id
-            from backend.services.trade.sandbox.manager import sandbox_manager
+            runtime = str(data.get("runtime") or "sandbox").strip().lower()
+            if runtime == "minibt":
+                from backend.services.trade.services.minibt_sim_launcher import (
+                    minibt_sim_launcher,
+                )
 
-            sandbox_manager.stop_strategy(
-                resolved_tenant_id, resolved_user_id, strat_id
-            )
-            logger.info(
-                "[Sim] 用户 %s 停止了沙箱模拟盘（原因=%s）", resolved_user_id, stop_reason
-            )
+                try:
+                    await asyncio.to_thread(
+                        minibt_sim_launcher.stop,
+                        tenant_id=resolved_tenant_id,
+                        user_id=resolved_user_id,
+                        strategy_id=strat_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 停容器失败不得阻断状态清理
+                    logger.warning("[Sim] 停止 minibt 侧车失败: %s", exc)
+                try:
+                    from backend.shared.minibt_sim_keys import (
+                        heartbeat_key,
+                        request_key,
+                        target_key,
+                    )
+
+                    redis.client.delete(
+                        target_key(resolved_tenant_id, resolved_user_id, strat_id),
+                        request_key(resolved_tenant_id, resolved_user_id, strat_id),
+                        heartbeat_key(resolved_tenant_id, resolved_user_id, strat_id),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[Sim] 清理 minibt Redis 键失败: %s", exc)
+                try:
+                    await asyncio.to_thread(
+                        minibt_sim_launcher.remove_code,
+                        tenant_id=resolved_tenant_id,
+                        user_id=resolved_user_id,
+                        strategy_id=strat_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.info(
+                    "[Sim] 用户 %s 停止了 minibt 模拟盘（原因=%s）",
+                    resolved_user_id,
+                    stop_reason,
+                )
+            else:
+                from backend.services.trade.sandbox.manager import sandbox_manager
+
+                sandbox_manager.stop_strategy(
+                    resolved_tenant_id, resolved_user_id, strat_id
+                )
+                logger.info(
+                    "[Sim] 用户 %s 停止了沙箱模拟盘（原因=%s）",
+                    resolved_user_id,
+                    stop_reason,
+                )
 
         # 停止原因写入运行日志流：用户在界面上看到的「为什么停了」与审计同源
         try:
@@ -1192,18 +1382,57 @@ async def get_status(
     )
 
     if current_mode == "SIMULATION" and strategy_info:
-        strategy_id_for_runtime = str(active_strat_id or "").strip()
+        strategy_id_for_runtime = str(
+            active_data.get("runtime_strategy_id") or active_strat_id or ""
+        ).strip()
+        runtime = str(active_data.get("runtime") or "sandbox").strip().lower()
         simulation_runtime_alive = False
         simulation_runtime_msg = None
         if strategy_id_for_runtime:
             try:
-                from backend.services.trade.sandbox.manager import sandbox_manager
+                if runtime == "minibt":
+                    # 心跳优先（侧车每 30s 续期；容器 inspect 在无 docker 的节点不可用）
+                    heartbeat_ok = False
+                    try:
+                        from backend.shared.minibt_sim_keys import (
+                            heartbeat_is_fresh,
+                            heartbeat_key,
+                        )
 
-                simulation_runtime_alive = sandbox_manager.is_strategy_running(
-                    resolved_tenant_id,
-                    resolved_user_id,
-                    strategy_id_for_runtime,
-                )
+                        heartbeat_ok = heartbeat_is_fresh(
+                            redis.client.get(
+                                heartbeat_key(
+                                    resolved_tenant_id,
+                                    resolved_user_id,
+                                    strategy_id_for_runtime,
+                                )
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("minibt heartbeat read failed: %s", exc)
+                    container_ok = False
+                    try:
+                        from backend.services.trade.services.minibt_sim_launcher import (
+                            minibt_sim_launcher,
+                        )
+
+                        container_ok = await asyncio.to_thread(
+                            minibt_sim_launcher.is_alive,
+                            tenant_id=resolved_tenant_id,
+                            user_id=resolved_user_id,
+                            strategy_id=strategy_id_for_runtime,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("minibt container inspect failed: %s", exc)
+                    simulation_runtime_alive = bool(heartbeat_ok or container_ok)
+                else:
+                    from backend.services.trade.sandbox.manager import sandbox_manager
+
+                    simulation_runtime_alive = sandbox_manager.is_strategy_running(
+                        resolved_tenant_id,
+                        resolved_user_id,
+                        strategy_id_for_runtime,
+                    )
             except Exception as exc:
                 logger.warning(
                     "Simulation runtime health check failed: tenant=%s user=%s strategy=%s error=%s",
@@ -1218,9 +1447,10 @@ async def get_status(
             return {
                 "status": "not_running",
                 "message": simulation_runtime_msg
-                or "检测到模拟策略标记，但沙箱运行进程未存活，请重新启动模拟盘",
+                or "检测到模拟策略标记，但运行进程未存活，请重新启动模拟盘",
                 "user_id": resolved_user_id,
                 "mode": "SIMULATION",
+                "runtime": runtime,
                 "strategy": strategy_info,
                 "execution_config": active_exec_config,
                 "live_trade_config": active_live_trade_config,
@@ -1237,6 +1467,7 @@ async def get_status(
             "status": "running",
             "user_id": resolved_user_id,
             "mode": "SIMULATION",
+            "runtime": runtime,
             "strategy": strategy_info,
             "execution_config": active_exec_config,
             "live_trade_config": active_live_trade_config,

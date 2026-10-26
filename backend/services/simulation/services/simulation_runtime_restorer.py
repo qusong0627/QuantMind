@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from typing import Any
 
 from backend.services.trade_shared.redis_client import RedisClient
@@ -84,9 +85,21 @@ class SimulationRuntimeRestorer:
         user_id: str,
         active_data: dict[str, Any],
     ) -> bool:
-        strategy_id = str(active_data.get("strategy_id") or "").strip()
+        strategy_id = str(
+            active_data.get("runtime_strategy_id")
+            or active_data.get("strategy_id")
+            or ""
+        ).strip()
         if not strategy_id:
             return False
+
+        if str(active_data.get("runtime") or "sandbox").strip().lower() == "minibt":
+            return await self._restore_minibt(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                strategy_id=strategy_id,
+                active_data=active_data,
+            )
 
         from backend.services.trade.sandbox.manager import sandbox_manager
 
@@ -144,6 +157,90 @@ class SimulationRuntimeRestorer:
             user_id,
             strategy_id,
             sandbox_run_id,
+        )
+        return True
+
+    async def _restore_minibt(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        strategy_id: str,
+        active_data: dict[str, Any],
+    ) -> bool:
+        """重启后恢复 minibt 侧车：读落盘代码快照，重新起容器。
+
+        不用 ``active_data["code_str"]``：启动时它按 8000 字符截断，截断后的
+        策略可能语法不完整——拿半份代码起容器比不恢复更坏。
+        """
+        from backend.services.trade.services.minibt_sim_launcher import (
+            MinibtSimUnavailable,
+            minibt_sim_launcher,
+        )
+
+        code = minibt_sim_launcher.read_code(
+            tenant_id=tenant_id, user_id=user_id, strategy_id=strategy_id
+        )
+        if not code:
+            logger.warning(
+                "minibt restore skipped missing code snapshot: tenant=%s user=%s strategy=%s"
+                "（保留 active 键，状态接口会显式报 not_running）",
+                tenant_id,
+                user_id,
+                strategy_id,
+            )
+            return False
+        run_id = str(active_data.get("run_id") or f"minibt_restore_{int(time.time())}")
+        active_data["run_id"] = run_id
+        try:
+            launch = await asyncio.to_thread(
+                minibt_sim_launcher.start,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                strategy_id=strategy_id,
+                run_id=run_id,
+                code=code,
+            )
+        except MinibtSimUnavailable as exc:
+            logger.warning(
+                "minibt restore unavailable: tenant=%s user=%s strategy=%s error=%s",
+                tenant_id,
+                user_id,
+                strategy_id,
+                exc,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001 - 恢复失败保留 active 键，显式暴露
+            logger.warning(
+                "minibt restore failed: tenant=%s user=%s strategy=%s error=%s",
+                tenant_id,
+                user_id,
+                strategy_id,
+                exc,
+                exc_info=True,
+            )
+            return False
+        active_data["runtime"] = "minibt"
+        active_data["minibt"] = {
+            "container_id": launch.get("container_id"),
+            "container_name": launch.get("container_name"),
+            "code_file": launch.get("code_file"),
+        }
+        try:
+            from backend.shared.simulation_account_keys import active_strategy_key
+
+            self.redis.client.set(
+                active_strategy_key(tenant_id, user_id),
+                json.dumps(active_data, ensure_ascii=False),
+            )
+        except Exception:
+            pass
+        logger.info(
+            "minibt runtime restored: tenant=%s user=%s strategy=%s container=%s",
+            tenant_id,
+            user_id,
+            strategy_id,
+            launch.get("container_name"),
         )
         return True
 
