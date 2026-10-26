@@ -19,7 +19,7 @@ export const StrategyEditorModule: React.FC = () => (
         </div>
       }
     >
-      <AIIDEPage />
+      <AIIDEPage strategyEditorMode />
     </Suspense>
   </div>
 );

@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -40,7 +40,21 @@ import { authService } from '../features/auth/services/authService';
 import { strategyManagementService } from '../services/strategyManagementService';
 import { modelTrainingService } from '../services/modelTrainingService';
 import HelpCenterLink from '../components/common/HelpCenterLink';
-import StrategyBacktestPanel from './components/StrategyBacktestPanel';
+import StrategyEditorBacktestPanel from '../components/backtestCenter/StrategyEditorBacktestPanel';
+import {
+    DEFAULT_STRATEGY_EDITOR_PARAMS,
+    applyBacktestParamsToCode,
+    type StrategyEditorBacktestParams,
+} from '../utils/strategyEditorParams';
+import {
+    deleteSavedRun,
+    loadSavedRuns,
+    saveBacktestRun,
+    type SavedBacktestRun,
+} from '../utils/strategyEditorSavedRuns';
+import { backtestService } from '../services/backtestService';
+import type { BacktestResult } from '../services/backtestService';
+import type { QlibBacktestResult } from '../types/backtest/qlib';
 import type { StrategyLabRunResult } from '../features/strategy-lab/types';
 import { SERVICE_ENDPOINTS } from '../config/services';
 import { PAGE_LAYOUT } from '../config/pageLayout';
@@ -140,7 +154,13 @@ type SetRootOptions = {
     source?: 'startup' | 'manual';
 };
 
-const AIIDEPage: React.FC = () => {
+interface AIIDEPageProps {
+    /** 回测中心「策略编辑」内嵌模式：右栏改为回测工作台，AI 写策略跳 QuantBot。 */
+    strategyEditorMode?: boolean;
+}
+
+const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => {
+    const navigate = useNavigate();
     const currentMarket = useAppSelector(selectCurrentMarket);
     const marketConfig = getMarketConfig(currentMarket);
     const [searchParams] = useSearchParams();
@@ -170,6 +190,15 @@ const AIIDEPage: React.FC = () => {
     const [jobId, setJobId] = React.useState<string | null>(null);
     // minibt 运行时回测结果(权益曲线/交易表),由 /execute/result/{job_id} 拉取
     const [minibtResult, setMinibtResult] = React.useState<StrategyLabRunResult | null>(null);
+    // 模块型 qlib 回测结果：runner 打印 [RESULT] backtest_id 后按 id 拉完整结果
+    const [qlibResult, setQlibResult] = React.useState<BacktestResult | QlibBacktestResult | null>(null);
+    // 策略编辑右栏的参数面板（回测区间/资金/股票池/策略参数）
+    const [strategyEditorParams, setStrategyEditorParams] = React.useState<StrategyEditorBacktestParams>({
+        ...DEFAULT_STRATEGY_EDITOR_PARAMS,
+    });
+    const [savedBacktestRuns, setSavedBacktestRuns] = React.useState<SavedBacktestRun[]>(() =>
+        loadSavedRuns(),
+    );
     const [isSaving, setIsSaving] = React.useState(false);
     const [isAITyping, setIsAITyping] = React.useState(false);
     const [assistantRole, setAssistantRole] = React.useState<'quant_analyst' | 'bug_fixer' | 'code_reviewer'>('quant_analyst');
@@ -199,6 +228,7 @@ const AIIDEPage: React.FC = () => {
         execution_time?: number;
         status?: 'completed' | 'failed';
     } | null>(null);
+    const qlibBacktestIdRef = React.useRef<string | null>(null);
     const lastSetRootFailureRef = React.useRef<'invalid_path' | 'unavailable' | 'other' | null>(null);
     const editorRef = React.useRef<any>(null);
     const monacoRef = React.useRef<any>(null);
@@ -608,7 +638,8 @@ const AIIDEPage: React.FC = () => {
         }
     };
 
-    const handleSave = async () => {
+    const handleSave = async (codeOverride?: string) => {
+        const codeToSave = codeOverride ?? editorContent;
         if (activeTab === 'local') {
             if (!selectedFile) return;
             setIsSaving(true);
@@ -616,7 +647,7 @@ const AIIDEPage: React.FC = () => {
                 await apiFetch(`/files/${encodeURI(selectedFile.path)}`, {
                     method: 'POST',
                     body: JSON.stringify({
-                        content: editorContent,
+                        content: codeToSave,
                         parameters: { market: currentMarket === 'CN' ? 'A' : currentMarket },
                     })
                 }, true);
@@ -633,7 +664,7 @@ const AIIDEPage: React.FC = () => {
             setIsSaving(true);
             try {
                 await strategyManagementService.updateStrategy(selectedRemote.id, {
-                    code: editorContent
+                    code: codeToSave
                 });
                 message.success('云端策略已更新');
                 setTimeout(() => setIsSaving(false), 500);
@@ -917,6 +948,12 @@ const AIIDEPage: React.FC = () => {
             qlib_provider_uri: marketConfig.qlibProviderUri,
             qlib_region: marketConfig.qlibRegion,
             benchmark: marketConfig.benchmark,
+            // 回测工作台参数：runner 读取 AI_IDE_BACKTEST_* 环境变量
+            start_date: strategyEditorParams.startDate || undefined,
+            end_date: strategyEditorParams.endDate || undefined,
+            initial_capital: strategyEditorParams.initialCapital,
+            universe: strategyEditorParams.universe || undefined,
+            commission: strategyEditorParams.commission,
         };
     };
 
@@ -976,6 +1013,13 @@ const AIIDEPage: React.FC = () => {
     const ingestExecuteResultLine = (line: string) => {
         const trimmed = String(line || '').trim();
         if (!trimmed) return;
+
+        // 模块型 qlib 回测：runner 输出 [RESULT] backtest_id: <id>，用于拉完整结果
+        const backtestIdMatch = trimmed.match(/^\[RESULT\]\s+backtest_id:\s+([A-Za-z0-9_-]+)$/i);
+        if (backtestIdMatch) {
+            qlibBacktestIdRef.current = backtestIdMatch[1];
+            return;
+        }
 
         const metricMatch = trimmed.match(/^\[RESULT\]\s+([a-z_]+):\s+(-?\d+(?:\.\d+)?)$/i);
         if (metricMatch) {
@@ -1141,19 +1185,92 @@ const AIIDEPage: React.FC = () => {
         setLogTab('error');
     };
 
-    const handleRun = async () => {
+    const currentStrategyName =
+        activeTab === 'remote' ? selectedRemote?.name : selectedFile?.name;
+
+    const handleStrategyEditorParamsChange = (
+        patch: Partial<StrategyEditorBacktestParams>,
+    ) => {
+        setStrategyEditorParams((prev) => ({ ...prev, ...patch }));
+    };
+
+    const handleApplyStrategyParams = () => {
+        const next = applyBacktestParamsToCode(editorContent, strategyEditorParams);
+        setEditorContent(next);
+        editorRef.current?.setValue(next);
+        message.success('参数已应用到代码');
+    };
+
+    const handleApplyAndRun = async () => {
+        const next = applyBacktestParamsToCode(editorContent, strategyEditorParams);
+        setEditorContent(next);
+        editorRef.current?.setValue(next);
+        await handleRun(next);
+    };
+
+    const handleSaveBacktestResult = () => {
+        const result = minibtResult || qlibResult;
+        if (!result) {
+            message.warning('暂无回测结果可保存');
+            return;
+        }
+        const kind = minibtResult ? 'minibt' : 'qlib';
+        const name = `${currentStrategyName || '策略'} · ${new Date().toLocaleString('zh-CN')}`;
+        setSavedBacktestRuns(
+            saveBacktestRun({
+                name,
+                kind,
+                result,
+                code: editorContent,
+                params: strategyEditorParams,
+            }),
+        );
+        message.success('已保存本次回测');
+    };
+
+    const handleLoadSavedBacktest = (run: SavedBacktestRun) => {
+        if (run.kind === 'minibt') {
+            setMinibtResult(run.result as StrategyLabRunResult);
+            setQlibResult(null);
+        } else {
+            setQlibResult(run.result as BacktestResult);
+            setMinibtResult(null);
+        }
+        if (run.code) {
+            setEditorContent(run.code);
+            editorRef.current?.setValue(run.code);
+        }
+        if (run.params) {
+            setStrategyEditorParams(run.params);
+        }
+        message.success(`已加载回测：${run.name}`);
+    };
+
+    const handleDeleteSavedBacktest = (id: string) => {
+        setSavedBacktestRuns(deleteSavedRun(id));
+    };
+
+    const handleOpenQuantBot = () => {
+        navigate('/quantbot');
+    };
+
+    const handleRun = async (codeOverride?: string) => {
         if (isRunning) return;
         if (activeTab === 'local' && !selectedFile) return;
         if (activeTab === 'remote' && !selectedRemote) return;
 
+        const codeToRun = codeOverride ?? editorContent;
+
         // Save first if local
         if (activeTab === 'local') {
-            await handleSave();
+            await handleSave(codeToRun);
         }
 
         setLogs([]);
         setErrors([]);
         setMinibtResult(null);
+        setQlibResult(null);
+        qlibBacktestIdRef.current = null;
         setProgress(null);
         setFinalResultSummary(null);
         resetExecuteResultSummary();
@@ -1183,7 +1300,7 @@ const AIIDEPage: React.FC = () => {
                     method: 'POST',
                     body: JSON.stringify({ 
                         filename: executeFilename,
-                        content: editorContent,
+                        content: codeToRun,
                         ...executionContext,
                     })
                 }, true);
@@ -1192,7 +1309,7 @@ const AIIDEPage: React.FC = () => {
                 res = await apiFetch('/execute/run-tmp', {
                     method: 'POST',
                     body: JSON.stringify({
-                        content: editorContent,
+                        content: codeToRun,
                         filename: activeTab === 'remote' ? selectedRemote?.name : 'unsaved_local.py',
                         ...executionContext,
                     })
@@ -1243,6 +1360,16 @@ const AIIDEPage: React.FC = () => {
                             if (d && d.found) setMinibtResult(d.result as StrategyLabRunResult);
                         })
                         .catch(() => {});
+                    // 模块型 qlib 回测：按 runner 输出的 backtest_id 拉完整结果
+                    const backtestId = qlibBacktestIdRef.current;
+                    if (backtestId) {
+                        backtestService
+                            .getResult(backtestId, false)
+                            .then((result) => setQlibResult(result))
+                            .catch((err) =>
+                                console.warn('[AI-IDE] 拉取 qlib 回测结果失败', err),
+                            );
+                    }
                     return;
                 }
 
@@ -2178,7 +2305,7 @@ const AIIDEPage: React.FC = () => {
                                 </button>
                             ) : (
                                 <button
-                                    onClick={handleRun}
+                                    onClick={() => handleRun()}
                                     disabled={syntaxError !== null || (activeTab === 'local' && !selectedFile)}
                                     className={clsx(
                                         "flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-full transition-all hover:scale-[1.02] active:scale-95 whitespace-nowrap border shadow-2xs",
@@ -2194,7 +2321,7 @@ const AIIDEPage: React.FC = () => {
                             )}
                             {/* Save Button */}
                             <button
-                                onClick={handleSave}
+                                onClick={() => handleSave()}
                                 disabled={isSaving || (activeTab === 'local' && !selectedFile)}
                                 className={clsx(
                                     "flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-full transition-all hover:scale-[1.02] active:scale-95 whitespace-nowrap border shadow-2xs",
@@ -2272,7 +2399,7 @@ const AIIDEPage: React.FC = () => {
                                 错误信息
                                 {errors.length > 0 && <span className="w-4 h-4 rounded-full bg-red-100 text-[10px] flex items-center justify-center font-bold">{errors.length}</span>}
                             </button>
-                            {errors.length > 0 && (
+                            {errors.length > 0 && !strategyEditorMode && (
                                 <button
                                     onClick={() => {
                                         if (!isRunning) setIsAITyping(false); // Make sure we can send
@@ -2320,11 +2447,6 @@ const AIIDEPage: React.FC = () => {
                         {logTab === 'result' ? (
                             <div className="space-y-1">
                                 {renderResultSummaryCard()}
-                                {minibtResult && (
-                                    <div className="mt-2 rounded-xl border border-blue-100 overflow-hidden text-left">
-                                        <StrategyBacktestPanel result={minibtResult} loading={false} />
-                                    </div>
-                                )}
                                 {logs.length === 0 && !isRunning && <p className="text-gray-400 italic">暂无运行数据</p>}
                                 {logs.map((log, i) => (
                                     <div key={i} className="flex gap-3 px-2 py-0.5 hover:bg-gray-100/50 rounded transition-colors group">
@@ -2357,7 +2479,28 @@ const AIIDEPage: React.FC = () => {
 
             </main>
 
-            {/* 4. LLM Chat Panel */}
+            {/* 4. 右栏：策略编辑模式 = 回测工作台；AI-IDE 模式 = LLM Chat */}
+            {strategyEditorMode ? (
+                <aside className="w-[500px] 2xl:w-[560px] flex-shrink-0 min-h-0">
+                    <StrategyEditorBacktestPanel
+                        params={strategyEditorParams}
+                        onParamsChange={handleStrategyEditorParamsChange}
+                        onApplyParams={handleApplyStrategyParams}
+                        onRun={() => handleRun()}
+                        onApplyAndRun={handleApplyAndRun}
+                        running={isRunning}
+                        minibtResult={minibtResult}
+                        qlibResult={qlibResult}
+                        code={editorContent}
+                        strategyName={currentStrategyName}
+                        savedRuns={savedBacktestRuns}
+                        onSaveResult={handleSaveBacktestResult}
+                        onLoadSaved={handleLoadSavedBacktest}
+                        onDeleteSaved={handleDeleteSavedBacktest}
+                        onOpenQuantBot={handleOpenQuantBot}
+                    />
+                </aside>
+            ) : (
             <aside className="w-[440px] flex-shrink-0 bg-white border border-gray-200 flex flex-col rounded-[32px] shadow-sm transition-all duration-500 overflow-hidden">
                 <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                     <div className="flex flex-col gap-1">
@@ -2481,6 +2624,7 @@ const AIIDEPage: React.FC = () => {
                     </div>
                 </div>
             </aside>
+            )}
         </div>
     );
 };
