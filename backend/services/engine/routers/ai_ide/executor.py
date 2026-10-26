@@ -146,11 +146,26 @@ def _build_runner_environment(
         "qlib_region": "AI_IDE_BACKTEST_REGION",
         "benchmark": "AI_IDE_BACKTEST_BENCHMARK",
         "market": "AI_IDE_BACKTEST_MARKET",
+        "start_date": "AI_IDE_BACKTEST_START_DATE",
+        "end_date": "AI_IDE_BACKTEST_END_DATE",
+        "initial_capital": "AI_IDE_BACKTEST_INITIAL_CAPITAL",
+        "universe": "AI_IDE_BACKTEST_UNIVERSE",
+        "commission": "AI_IDE_BACKTEST_COMMISSION",
     }
     for meta_key, env_key in meta_env_map.items():
-        value = str(request_meta.get(meta_key) or "").strip()
+        raw_value = request_meta.get(meta_key)
+        if raw_value is None:
+            continue
+        value = str(raw_value).strip()
         if value:
             env[env_key] = value
+    # minibt 结果提取器读 QM_MINIBT_INITIAL_CAPITAL；与模块回测共用同一入参
+    initial_capital = request_meta.get("initial_capital")
+    try:
+        if initial_capital is not None and float(initial_capital) > 0:
+            env["QM_MINIBT_INITIAL_CAPITAL"] = str(initial_capital)
+    except (TypeError, ValueError):
+        pass
     # runner 脚本优先读 AI_IDE_BACKTEST_PROVIDER_URI，这里必须用归一后的值，
     # 否则子容器里的用户代码又会去读那份没人同步的旧缓存
     if env.get("AI_IDE_BACKTEST_PROVIDER_URI"):
@@ -262,6 +277,12 @@ class StartRequest(BaseModel):
     qlib_region: str | None = None
     benchmark: str | None = None
     market: str | None = None  # CN/HK/US/CRYPTO/FUTURES（回测费率/规则市场默认用）
+    # 策略编辑右栏的回测参数（runner 读取 AI_IDE_BACKTEST_*）
+    start_date: str | None = None
+    end_date: str | None = None
+    initial_capital: float | None = None
+    universe: str | None = None
+    commission: float | None = None
 
 
 class SmokeImageRequest(BaseModel):
@@ -896,6 +917,7 @@ def _run_module_backtest(module):
     print(f"\n{'='*60}")
     print(f"[RESULT] 回测完成 (耗时: {float(getattr(result, 'execution_time', 0.0) or 0.0):.2f}s)")
     print(f"{'='*60}")
+    print(f"[RESULT] backtest_id: {getattr(result, 'backtest_id', '')}")
     print(f"[RESULT] annual_return: {float(getattr(result, 'annual_return', 0.0) or 0.0):.4f}")
     print(f"[RESULT] sharpe_ratio: {float(getattr(result, 'sharpe_ratio', 0.0) or 0.0):.4f}")
     print(f"[RESULT] max_drawdown: {float(getattr(result, 'max_drawdown', 0.0) or 0.0):.4f}")
@@ -1077,6 +1099,12 @@ async def start_execution(request: Request, item: StartRequest):
                 "qlib_provider_uri": item.qlib_provider_uri,
                 "qlib_region": item.qlib_region,
                 "benchmark": item.benchmark,
+                "market": item.market,
+                "start_date": item.start_date,
+                "end_date": item.end_date,
+                "initial_capital": item.initial_capital,
+                "universe": item.universe,
+                "commission": item.commission,
             },
         }
 
