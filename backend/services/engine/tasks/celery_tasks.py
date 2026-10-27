@@ -1468,6 +1468,42 @@ def run_market_snapshot() -> dict[str, Any]:
         # 流式刷新只写 latest.json + latest.db 的 sector_mv/meta。因此即使 latest.json
         # 已是最新交易日，只要对应日期库缺失，就必须补跑一次全量，否则「标签双向查询」断档。
         iso_part = f"{max_part[:4]}-{max_part[4:6]}-{max_part[6:8]}"
+
+        # 大盘情绪快照：与市场快照同源（同一份后复权日线）、同频（T 日盘后一次）。
+        # 独立 try/except —— 情绪快照失败只告警，绝不影响市场分析主链路。
+        # 新鲜度自门控：已是最新交易日则不重跑，避免 04:00–05:50 每 10 分钟白算。
+        try:
+            import json as _json
+
+            sentiment_path = (
+                _Path(data_dir) / "5_technical_derived" / "market_breadth" / "sentiment.json"
+            )
+            need_sentiment = True
+            if sentiment_path.is_file():
+                try:
+                    old = _json.loads(sentiment_path.read_text(encoding="utf-8"))
+                    need_sentiment = old.get("trade_date") != iso_part
+                except Exception:
+                    need_sentiment = True
+            if need_sentiment:
+                s_proc = subprocess.run(
+                    [sys.executable, "-m", "backend.scripts.market_sentiment_snapshot"],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                if s_proc.returncode != 0:
+                    logger.warning(
+                        "[MarketSnapshot][Sentiment] 生成失败 code=%d stderr=%s",
+                        s_proc.returncode,
+                        s_proc.stderr[-1500:],
+                    )
+                else:
+                    logger.info("[MarketSnapshot][Sentiment] 已更新至 %s", iso_part)
+        except Exception as sexc:  # noqa: BLE001
+            logger.warning("[MarketSnapshot][Sentiment] 异常（不影响主链路）: %s", sexc)
+
         dated_db = _Path(out_dir) / f"{iso_part}.db"
         if latest_td is not None and max_part <= latest_td:
             if dated_db.is_file():

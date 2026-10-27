@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Activity, Network, TrendingUp, Clock, RefreshCw, Zap, Radar } from 'lucide-react';
+import { Sparkles, Activity, Network, TrendingUp, Clock, RefreshCw, Zap, Radar, Gauge } from 'lucide-react';
 import { DatePicker, message } from 'antd';
 import dayjs from 'dayjs';
 import { BroadMarketHeader, IndexItem } from '../components/BroadMarketHeader';
 import { HeatmapDrillCard } from '../components/HeatmapDrillCard';
 import { StockMoneyFlowTable, StockMoneyFlowItem } from '../components/StockMoneyFlowTable';
 import { MarketBreadthCard } from '../components/MarketBreadthCard';
+import { MarketSentimentPanel } from '../components/MarketSentimentPanel';
 import { StockTerminalSearchBox } from '../../market-analysis-shared/components/StockTerminalSearchBox';
 import { StockTerminalWindow } from '../../market-analysis-shared/components/StockTerminalWindow';
 import { FactorBoardPanel } from '../components/FactorBoardPanel';
@@ -240,6 +241,7 @@ export const MarketAnalysisPage: React.FC = () => {
 
   const navTabs = [
     { id: 'panorama', label: '大盘全景看板', icon: Activity },
+    { id: 'sentiment', label: '大盘情绪', icon: Gauge },
     { id: 'flow-panorama', label: '资金流全景', icon: Network },
     { id: 'factor-board', label: '因子概率板', icon: Sparkles },
     { id: 'smart-money', label: '聪明钱', icon: Radar },
@@ -407,6 +409,8 @@ export const MarketAnalysisPage: React.FC = () => {
               </div>
             </div>
           )}
+
+          {activeTab === 'sentiment' && <MarketSentimentPanel />}
 
           {activeTab === 'flow-panorama' && (
             <FlowPanoramaPanel

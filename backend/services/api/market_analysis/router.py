@@ -25,6 +25,7 @@ from backend.shared.factor_board import config as _fb_config
 logger = logging.getLogger(__name__)
 
 from . import flow_panorama, quantdb_feed, quantdb_snapshot as _snap
+from . import sentiment as _sentiment
 from . import smart_money as _sm
 from .domain import SectorConflictError, SectorNotFoundError
 from .repository import MarketAnalysisRepository
@@ -235,6 +236,25 @@ async def get_market_breadth(
             "limit_up_broken_ratio": 0.0,
         }
     return MarketBreadthResponse(**data)
+
+
+@router.get("/sentiment")
+async def get_market_sentiment(
+    date: str | None = Query(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="回看日期 YYYY-MM-DD（只用该日及以前的数据重算信号）",
+    ),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """大盘情绪：广度压力分 + 各指标分位 + 各指数的历史同状态扇形分布。
+
+    最新一期只读预计算快照（``backend/scripts/market_sentiment_snapshot.py`` 产出）；
+    指定 ``date`` 时走历史回看，服务端按最近交易日吸附、进程内缓存特征帧，
+    且信号只用该日及以前的数据（``indices[*].actual`` 是之后真实走势，仅供对照）。
+    """
+    _ = current_user
+    return _sentiment.load_sentiment(date)
 
 
 @router.get("/heatmap")

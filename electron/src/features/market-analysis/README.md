@@ -7,6 +7,11 @@
 - `pages/MarketAnalysisPage.tsx`: 市场分析主页面组件，包含顶部 Banner 顶栏、核心指数快照、功能 Tab 导航以及资金流向下钻面板。
 - `components/ShenwanHeatmapChart.tsx`: 申万一级分类矩形树图 (Treemap) 热力图组件。
 - `components/MarketBreadthCard.tsx`: 市场情绪温度计与赚钱效应卡片。
+- `components/MarketSentimentPanel.tsx`: 大盘情绪页签 —— 广度压力分（0–100）+ 各指数「未来 20 个交易日历史同状态路径分布」扇形图 + 8 个广度分项分位。
+- `components/SentimentFanChart.tsx`: 扇形图（SVG）。左段真实收盘，右段 p10–p90 / p25–p75 两条带 + 中位虚线；中位以上红、以下绿，上下宽度一眼可见。回看模式叠加黑色实线＝之后实际走势。
+- `components/BreadthFactorBars.tsx`: 广度分项冷热分位图。各指标方向先统一成「越靠右＝越冷」，再画 0–100 点位；名称与提示用大白话（不出现 TRIN/McClellan 术语）。含左栏浓缩版（`compact`）。
+- `components/ForecastMatrix.tsx`: 多周期模型预测矩阵（三指数 × T+5/T+10/T+20，预测值 + 上涨概率），点行切换指数。
+- `components/FactorHeatmap.tsx`: 底部分项冷热热力图（8 指标 × 近 60 交易日，颜色=冷度）。
 - `components/StockMoneyFlowTable.tsx`: 个股资金流向排行榜表格。
 - `components/FlowPanoramaPanel.tsx`: 资金流全景面板（细案 v2 状态中枢）：工具栏 + 证据 meta 披露 + 标签融合条 + 桑基 v2 + 板块⇄个股双向工作台 + 延续证据台。
 - `components/FlowSankeyV2.tsx`: 四层桑基（主体 → 单型 → 板块 → 个股），点节点联动下方工作台。
@@ -20,9 +25,13 @@
 ## 数据服务与词汇表
 - `services/moneyFlowService.ts`: 资金流全景/板块/个股/标签/证据台 API 客户端与类型（`FlowPanoramaResponse`、`FlowStockFactor` 等契约字段）。
 - `services/factorBoardService.ts`: 因子概率板 API 客户端（`REQUIRED_TOP_KEYS` 与后端金样共读）。
+- `services/sentimentService.ts`: 大盘情绪 API 客户端（`/market-analysis/sentiment`，只读预计算快照；缺失一律 null，绝不回落成 0）。
 - `factorBoardVocabulary.ts`: 判定词/衰减/制度注记/个股象限（`quadChipCls` / `quadrantMeta`）唯一展示映射，禁用买卖指令词。
 
 ## 最近优化
+- 大盘情绪 v3（2026-10-27）：①扇形图加**日期轴**（回看用真实交易日、最新一期按工作日估算标「约」），并叠加另外两个指数的典型路径做对比；②新增**多周期模型预测矩阵**（量能+广度，T+5/10/20 的预测与上涨概率）；③底部新增**分项冷热热力图**（8×60）；④新增大白话**阶段徽章**（如「下跌后段 / 超卖区」）与个股**分化度**。
+- 大盘情绪 v2（2026-10-27）：①分项区从「数字小卡」改成冷热分位图（方向统一 + 大白话标签 + 0–100 刻度），术语全部口语化；②新增**回看日期**：选历史某天后，压力分/分位/扇形只用该日及以前的数据重算（无前视，单测以「as_of 必须等于截断重算」钉死），并把**之后真实走势**画成黑线叠加，底部给出「✓ 区间与方向都对 / △ 区间对、方向反了 / ✗ 跑出区间」的判定；③回看日期写进 URL（`#/market-analysis?asof=YYYY-MM-DD`），可分享可收藏。
+- 大盘情绪（2026-10-27）：新增「大盘情绪」页签。数据链 = `backend/scripts/market_sentiment_snapshot.py`（广度面板 → `sentiment.json`）→ `GET /api/v1/market-analysis/sentiment` 只读转发 → 前端页签。展示纪律：扇形是「当前压力分所在区间的历史同等状态路径分位」，不是点预测；同时给出独立触发簇数、胜率、跌超 10% 概率与基准对照，并固定披露「广度对方向只有弱预测力」。压力分 ≥80 = 极端压力（绿）、≤20 = 过热（红），与 A 股红涨绿跌一致。
 - 规范展示文案，将“申万一级 31 个行业”统一简化命名为“申万一级分类”。
 - 采用容器原生 CSS `mask-image` 线性渐隐方案，滚动时在顶底边缘产生自然平滑渐隐，保持精致视觉过渡与流畅交互。
 - 资金流全景 v2（2026-10-11）：四层桑基 + 板块⇄个股双向工作台 + 个股卡归因回跳；「标签双向查询」并入统一搜索条（TagBrowserStrip）；个股卡新增「因子板共振态」（合成分 × 模型分位象限，陈旧显形不冒充当日）。个股层不设资金流预测徽章——实测否决（IC≤0.01），页内披露口径。
