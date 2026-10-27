@@ -285,6 +285,24 @@ def _default_datasets(market: str) -> tuple[DatasetSpec, ...]:
                 "partition",
                 "SHFE/CZCE 主力合约席位排名（多空成交；依赖当日 spot_basis 主力合约）",
             ),
+            DatasetSpec(
+                "options_risk",
+                "期权风险指标",
+                "2",
+                "base_sector",
+                "2_base_sector/options_risk",
+                "partition",
+                "上交所 ETF 期权逐合约 Greeks/隐含波动率（2016 起）",
+            ),
+            DatasetSpec(
+                "options_stats",
+                "期权每日统计",
+                "2",
+                "base_sector",
+                "2_base_sector/options_stats",
+                "partition",
+                "沪深 ETF 期权按标的成交量/PCR/持仓（SSE 2016 起，SZSE 2019-12 起）",
+            ),
         )
     base = [
         # 1 K线行情

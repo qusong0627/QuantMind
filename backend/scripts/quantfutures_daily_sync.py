@@ -9,6 +9,8 @@
   contracts_daily   分合约日K       → akshare_futures_extra.task_contracts_daily
   cftc              CFTC持仓        → akshare_futures_extra.task_cftc
   fx_daily          汇率(中行牌价)  → akshare_futures_extra.task_fx
+  options_risk      期权逐合约风险  → akshare_futures_options.task_options_risk
+  options_stats     期权每日统计    → akshare_futures_options.task_options_stats
   （国内扩展二批 → akshare_futures_cn_ext，见 EXTRA_DATASET_TASKS）
   spot_basis/settle_params/trade_rule/contract_meta/exchange_daily/inventory_em/
   ccidx_index/fees_info/hog_chain/member_rank_sina
@@ -39,6 +41,8 @@ EXTRA_DATASET_TASKS: dict[str, tuple[str, str]] = {
     "contracts_daily": ("extra", "contracts_daily"),
     "cftc": ("extra", "cftc"),
     "fx_daily": ("extra", "fx"),
+    "options_risk": ("options", "options_risk"),
+    "options_stats": ("options", "options_stats"),
     "spot_basis": ("cn_ext", "spot_basis"),
     "settle_params": ("cn_ext", "settle_params"),
     "trade_rule": ("cn_ext", "trade_rule"),
@@ -54,6 +58,7 @@ EXTRA_DATASET_TASKS: dict[str, tuple[str, str]] = {
 _EXTRA_MODULES: dict[str, str] = {
     "extra": "backend.scripts.akshare_futures_extra",
     "cn_ext": "backend.scripts.akshare_futures_cn_ext",
+    "options": "backend.scripts.akshare_futures_options",
 }
 
 # 非 field/task 直映的特殊数据集（L1 因子直读数据集为派生产物）
@@ -68,6 +73,8 @@ DEFAULT_EXTRA_DATASETS: tuple[str, ...] = (
     "member_positions",
     "cftc",
     "fx_daily",
+    "options_risk",
+    "options_stats",
     "spot_basis",
     "settle_params",
     "trade_rule",

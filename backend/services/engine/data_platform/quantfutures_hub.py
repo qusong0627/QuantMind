@@ -9,6 +9,8 @@
 数据段:
   1_kline_data/daily_forward         — 期货/贵金属日K（国际 CL.FUT / 国内 RB0.CN / 上金所 Au99.99）
   2_base_sector/futures_realtime     — 实时行情快照（国际/国内期货）
+  2_base_sector/options_risk         — 上交所 ETF 期权逐合约 Greeks/IV（日分区）
+  2_base_sector/options_stats        — 沪深 ETF 期权按标的成交量/PCR/持仓（日分区）
 """
 
 from __future__ import annotations
