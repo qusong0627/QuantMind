@@ -11,6 +11,7 @@ from backend.scripts.hstech_speed_gap import (
     _zscore,
     build_triple_aligned,
 )
+from backend.scripts.hstech_speed_gap_evidence import wilson
 
 
 def _frames(a_dates: list[str], hk_dates: list[str], us_dates: list[str]):
@@ -119,3 +120,13 @@ def test_zscore_clips_extremes_for_volatility_estimate():
     raw_sd = x.iloc[:-1].std()
     assert z.iloc[-1] == pytest.approx(0.01 / expected_sd)
     assert expected_sd < raw_sd
+
+
+def test_wilson_interval_contains_point_estimate():
+    # Arrange: 50 次里 41 次命中 = 82%
+    lo, hi = wilson(41, 50)
+
+    # Assert: 区间包含 82%，且明显宽于 0（n=50 的抽样误差）
+    assert lo < 0.82 < hi
+    assert 0.65 < lo < 0.75
+    assert hi < 0.95
