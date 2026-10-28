@@ -111,7 +111,11 @@ export const SentimentKlineChart: React.FC<SentimentKlineChartProps> = ({
     const chart = createChart(el, {
       width: el.clientWidth,
       height,
-      layout: { background: { color: '#ffffff' }, textColor: '#64748b' },
+      layout: {
+        background: { color: '#ffffff' },
+        textColor: '#64748b',
+        attributionLogo: false,
+      },
       grid: { vertLines: { color: GRID }, horzLines: { color: GRID } },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: '#e2e8f0' },
