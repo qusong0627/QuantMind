@@ -19,14 +19,110 @@ from ..security.trade_limits import TradeRateGuard
 from ..tdx.client import TdxClient, TdxError, TdxTimeoutError
 from ..ths.client import ThsClient
 from ..market.quote_hub import PREFERENCE, QuoteHub
-from ..market.schema import FIELD_DEFS, SOURCE_DEFS, normalize_tdx, normalize_ths
+from ..market.schema import (FIELD_DEFS, SOURCE_DEFS, normalize_qmt,
+                             normalize_tdx, normalize_ths)
 from ..tdx import parser
 from ..tdx.account_codes import fetch_account_codes
 from ..tdx.aidata import AidataUnavailable
 from ..utils.auth import verify_token
 from ..utils.system_metrics import SystemMetrics
+from .qmt_source import (QMT_READONLY_METHODS, normalize_asset as qmt_asset,
+                         normalize_orders as qmt_orders,
+                         normalize_positions as qmt_positions,
+                         normalize_trades as qmt_trades)
 
 log = logging.getLogger(__name__)
+
+# QMT 渠道：同机伴生桥（命名管道 → QMT 策略，只读）暴露的 HTTP 面。
+# `/api/v1/tdx/call` 带 {"source":"qmt"} 时转发到它，默认仍走通达信。
+QMT_SOURCE_URL_DEFAULT = "http://127.0.0.1:17720"
+QMT_TIMEOUT_READ_S = 8.0
+QMT_TIMEOUT_RPC_S = 15.0
+QMT_HEALTH_CACHE_S = 5.0
+
+
+def _qmt_source_url() -> str:
+    """每次调用时读 env：部署换端口/单测指向假伴生桥都不用重启解释器。"""
+    return (os.environ.get("QMT_SOURCE_URL") or QMT_SOURCE_URL_DEFAULT).rstrip("/")
+
+
+async def _qmt_call(method: str, params: dict | None = None,
+                    timeout: float = QMT_TIMEOUT_READ_S) -> tuple:
+    """调伴生桥只读接口，返回 ``(result, None)`` 或 ``(None, (status, code, msg))``。
+
+    失败必须显式上报：伴生桥没起来时返回空账户会被下游当成「0 资产」。
+    """
+    import aiohttp
+    url = _qmt_source_url() + "/api/v1/qmt/call"
+    try:
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(url, json={"method": method,
+                                               "params": params or {}}) as resp:
+                payload = await resp.json(content_type=None)
+    except Exception as exc:  # noqa: BLE001
+        return None, (502, "QMT_SOURCE_UNAVAILABLE", f"{type(exc).__name__}: {exc}")
+    if not isinstance(payload, dict) or not payload.get("success"):
+        detail = payload.get("error") if isinstance(payload, dict) else payload
+        return None, (400, "QMT_SOURCE_ERROR", str(detail or "unknown"))
+    return payload.get("result"), None
+
+
+async def _qmt_health(force: bool = False) -> dict:
+    """伴生桥健康（带 5s 缓存：8550 的 /health 被页面高频轮询）。"""
+    now = time.monotonic()
+    cached = _qmt_health_cache.get("payload")
+    if not force and cached is not None and now - _qmt_health_cache["ts"] < QMT_HEALTH_CACHE_S:
+        return cached
+    import aiohttp
+    url = _qmt_source_url() + "/health"
+    payload: dict
+    try:
+        client_timeout = aiohttp.ClientTimeout(total=2.0)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.get(url) as resp:
+                body = await resp.json(content_type=None)
+        if isinstance(body, dict) and body.get("success"):
+            # /api/v1/health 是匿名可读的：不要在这里泄露 QMT 资金账号。
+            # 需要账号请走带 token 的 /api/v1/account/query。
+            metrics = {k: v for k, v in (body.get("metrics") or {}).items()
+                       if k != "account_id"}
+            pos_age = metrics.get("pos_age_s")
+            # 心跳只能证明伴生桥进程活着；持仓快照滞后说明 QMT 侧
+            # （主线程 adjust 停摆/管道超时）已经不供数了，页面要显示降级。
+            degraded = isinstance(pos_age, (int, float)) and pos_age > 60
+            payload = {"online": True, "source": "qmt", "url": url,
+                       "degraded": degraded, "metrics": metrics,
+                       "queue_len": metrics.get("queue_len"),
+                       "pos_age_s": pos_age,
+                       "last_error": metrics.get("last_error") or "",
+                       "checked_at": datetime.now().isoformat(timespec="seconds")}
+        else:
+            payload = {"online": False, "source": "qmt", "url": url,
+                       "error": "伴生桥返回异常", "checked_at": datetime.now().isoformat(timespec="seconds")}
+    except Exception as exc:  # noqa: BLE001
+        payload = {"online": False, "source": "qmt", "url": url,
+                   "error": f"{type(exc).__name__}: {exc}",
+                   "checked_at": datetime.now().isoformat(timespec="seconds")}
+    _qmt_health_cache["ts"] = now
+    _qmt_health_cache["payload"] = payload
+    return payload
+
+
+_qmt_health_cache: dict = {"ts": 0.0, "payload": None}
+
+
+async def _forward_qmt_source(method, params):
+    """qmt 渠道的通用透传：桥侧先卡只读白名单，再交给伴生桥。"""
+    canon = str(method or "").strip()
+    if canon not in QMT_READONLY_METHODS:
+        return json_error(403, "METHOD_NOT_ALLOWED",
+                          f"qmt 渠道只读，方法不允许: {canon}")
+    result, err = await _qmt_call(canon, params, timeout=QMT_TIMEOUT_RPC_S)
+    if err:
+        return json_error(*err)
+    return web.json_response({"success": True, "method": canon,
+                              "result": result, "channel_used": "qmt"})
 
 # 专用线程池：绝不让 TQ 长调用/孤儿线程占满默认池，把 /health/账户/撤单拖死。
 # TQ 4 个 worker 与 order=2 + trade=1 + data=1 的并发上限对齐；health/cache 各自独立。
@@ -818,6 +914,8 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
         return web.json_response({
             "status": "ok",
             "tdx_connected": tdx_connected,
+            # QMT 渠道（同机伴生桥）——页面据此显示「在线/离线」，5s 缓存
+            "qmt": await _qmt_health(),
             "server_time": datetime.now().isoformat(timespec="seconds"),
             # 交易/数据分槽的占用与等待：采集器/看门狗可用它判断是否该让路
             "semaphores": semaphores_stats(),
@@ -858,8 +956,46 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
         except TdxError as e:
             return json_error(502, "TDX_UNAVAILABLE", str(e))
 
+    async def _qmt_account():
+        """QMT 账户/持仓：优先读伴生桥的 3s 快照（零 RPC 开销）。
+
+        快照未落（伴生桥刚启动/持仓线程被关）才回落到实时 RPC；
+        两者都失败就按错误原样上报——空账户绝不冒充「0 资产」。
+        """
+        snap, err = await _qmt_call("account_snapshot", {}, timeout=6.0)
+        if err:
+            # 伴生桥不可达：直接上报，别再等两轮 RPC 超时
+            if err[0] == 502:
+                return json_error(*err)
+            # 快照未生成（伴生桥刚起/午休窗口）：并行回落实时 RPC
+            (asset, e1), (positions, e2) = await asyncio.gather(
+                _qmt_call("get_asset", {}, timeout=8.0),
+                _qmt_call("get_positions", {}, timeout=10.0),
+            )
+            if e1 or e2:
+                return json_error(*err)
+            snap = {"account_id": (asset or {}).get("account_id", ""),
+                    "asset": asset or {}, "positions": positions or {},
+                    "updated_at": "", "age_s": None}
+        snap = snap or {}
+        positions = qmt_positions(snap.get("positions") or {})
+        return web.json_response({
+            "account_id": str(snap.get("account_id") or ""),
+            "asset": qmt_asset(snap.get("asset") or {}),
+            "positions": positions,
+            "channel_used": "qmt",
+            "account_source": "qmt",
+            "snapshot_at": snap.get("updated_at") or "",
+            "age_sec": snap.get("age_s"),
+            # 休市回落的历史快照：数字是最后一次可用的，页面必须标出来
+            "stale": bool(snap.get("stale")),
+            "snapshot_source": snap.get("snapshot_source") or "snapshot",
+        })
+
     async def query_account(request: web.Request):
         data = await request.json()
+        if str(data.get("source") or "").lower() == "qmt":
+            return await _qmt_account()
         account_id = await _call_tdx(executor.resolve_account_id,
                                      data.get("account", ""), data.get("account_type", "stock"), kind="trade")
         try:
@@ -876,6 +1012,22 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
 
     async def query_orders(request: web.Request):
         data = await request.json()
+        if str(data.get("source") or "").lower() == "qmt":
+            kind = str(data.get("kind") or "orders").lower()
+            if kind in ("trade", "trades"):
+                result, err = await _qmt_call("query_trades", {},
+                                              timeout=QMT_TIMEOUT_RPC_S)
+                if err:
+                    return json_error(*err)
+                return web.json_response({"trades": qmt_trades(result),
+                                          "channel_used": "qmt", "source": "qmt"})
+            params = {"cancelable_only": bool(data.get("cancelable_only"))}
+            result, err = await _qmt_call("query_orders", params,
+                                          timeout=QMT_TIMEOUT_RPC_S)
+            if err:
+                return json_error(*err)
+            return web.json_response({"orders": qmt_orders(result),
+                                      "channel_used": "qmt", "source": "qmt"})
         account_id = await _call_tdx(executor.resolve_account_id,
                                      data.get("account", ""), data.get("account_type", "stock"), kind="trade")
         try:
@@ -1022,7 +1174,60 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
         except TdxError as e:
             return json_error(502, "TDX_UNAVAILABLE", str(e))
 
+    async def qmt_health(request: web.Request):
+        """QMT 渠道健康（伴生桥 /health，5s 缓存）。"""
+        return web.json_response(await _qmt_health(force=request.query.get("force") == "1"))
+
+    async def qmt_reconcile(request: web.Request):
+        """QMT 资产口径对账（按需，只读）。
+
+        QMT 的 ``m_dBalance``（总资产）不是 ``现金 + 实时市值``：
+        实测 ``m_dBalance = m_dAvailable + m_dCurrMargin``，而
+        ``m_dInstrumentValue``（实时市值）与 ``m_dCurrMargin`` 有差额。
+        这里把两套口径并列返回，**不改 QMT 原值**。
+        """
+        result, err = await _qmt_call("query_account_infos", {},
+                                      timeout=QMT_TIMEOUT_RPC_S)
+        if err:
+            return json_error(*err)
+        rows = result if isinstance(result, list) else []
+        row = rows[0] if rows and isinstance(rows[0], dict) else {}
+        if not row:
+            return json_error(400, "QMT_EMPTY_ACCOUNT_ROW",
+                              "query_account_infos 返回空")
+
+        def _num(key):
+            try:
+                return float(row.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        cash = _num("m_dAvailable")
+        market_value = _num("m_dInstrumentValue")
+        occupied = _num("m_dCurrMargin")
+        return web.json_response({
+            "success": True,
+            "account_id": str(row.get("m_strAccountID") or ""),
+            "trading_date": str(row.get("m_strTradingDate") or ""),
+            # 两套口径并列，不做反算覆盖
+            "qmt_total_asset": _num("m_dBalance"),
+            "cash": cash,
+            "market_value": market_value,
+            "occupied_margin": occupied,
+            "live_total_asset": round(cash + market_value, 2),
+            "market_value_minus_occupied": round(market_value - occupied, 2),
+            "position_profit": _num("m_dPositionProfit"),
+            "stock_value": _num("m_dStockValue"),
+            "fund_value": _num("m_dFundValue"),
+            "frozen_cash": _num("m_dFrozenCash"),
+            "pre_balance": _num("m_dPreBalance"),
+            "identity": ("qmt_total_asset = cash + occupied_margin；"
+                         "live_total_asset = cash + market_value"),
+        })
+
     app.router.add_get("/api/v1/health", health)
+    app.router.add_get("/api/v1/qmt/health", qmt_health)
+    app.router.add_get("/api/v1/qmt/reconcile", qmt_reconcile)
     app.router.add_post("/api/v1/plans/execute", execute_plan)
     app.router.add_post("/api/v1/account/query", query_account)
     app.router.add_post("/api/v1/orders/query", query_orders)
@@ -1048,6 +1253,9 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
         params = data.get("params", {}) or {}
         if not method:
             return json_error(400, "MISSING_METHOD", "缺少 method 字段")
+        source = str(data.get("source") or "tdx").lower()
+        if source == "qmt":
+            return await _forward_qmt_source(method, params)
         if method in FORBIDDEN_CALL_METHODS:
             return json_error(
                 403, "METHOD_FORBIDDEN",
@@ -1621,9 +1829,21 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
             raise RuntimeError("ths 无数据（未登录 / 非 L2 / 代码格式）")
         return normalize_ths(item, depth if isinstance(depth, dict) else {}, item)
 
+    async def _qmt_quote_fetch(code: str) -> dict:
+        """QMT 取数：伴生桥 get_full_tick → 统一字段（5 档盘口，无内外盘）。"""
+        result, err = await _qmt_call("get_full_tick", {"codes": [code]},
+                                      timeout=10.0)
+        if err:
+            raise RuntimeError(err[2])
+        tick = (result or {}).get(code) if isinstance(result, dict) else None
+        if not isinstance(tick, dict) or not tick:
+            raise RuntimeError(f"qmt 无 {code} 行情（未订阅/停牌/代码格式）")
+        return normalize_qmt(tick)
+
     quote_hub = QuoteHub({"tdx": _tdx_quote_fetch,
                           "aidata": _aidata_quote_fetch,
-                          "ths": _ths_quote_fetch})
+                          "ths": _ths_quote_fetch,
+                          "qmt": _qmt_quote_fetch})
 
     async def market_quote(request: web.Request):
         code = _canon_code(request.query.get("code") or "")
@@ -1637,6 +1857,12 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
             base = list(prefer or PREFERENCE)
             if "aidata" not in base:
                 base.append("aidata")
+            prefer = base
+        # qmt=1：QMT 只补缺（与 aidata 同语义），不改变默认主源
+        if request.query.get("qmt") == "1":
+            base = list(prefer or PREFERENCE)
+            if "qmt" not in base:
+                base.append("qmt")
             prefer = base
         try:
             data = await quote_hub.quote(code, prefer)
@@ -1656,6 +1882,17 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
             out["tdx"] = await _call_tdx(tdx.get_market_snapshot, code, kind="data")
         except Exception as exc:  # noqa: BLE001
             errors["tdx"] = f"{type(exc).__name__}: {exc}"
+        # QMT 原始 tick（测试台「原始数据」里与 TDX/THS 并排看；?qmt=1 才取）
+        if request.query.get("qmt") == "1":
+            try:
+                result, err = await _qmt_call("get_full_tick", {"codes": [code]},
+                                              timeout=10.0)
+                if err:
+                    errors["qmt"] = err[2]
+                else:
+                    out["qmt"] = (result or {}).get(code)
+            except Exception as exc:  # noqa: BLE001
+                errors["qmt"] = f"{type(exc).__name__}: {exc}"
         if request.query.get("aidata") == "1" and aidata is not None:
             try:
                 out["aidata"] = await _run_aidata(

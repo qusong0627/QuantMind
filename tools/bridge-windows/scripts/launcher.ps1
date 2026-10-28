@@ -18,7 +18,8 @@ param(
     [switch]$NoWatchdog,
     [switch]$NoThs,
     [string]$HotSet = "",
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$NoUi
 )
 
 $ErrorActionPreference = "Continue"
@@ -29,7 +30,39 @@ $venv = Join-Path $root ".venv\Scripts\python.exe"
 $py = if (Test-Path $venv) { $venv } elseif (Test-Path "C:\Program Files\Python312\python.exe") { "C:\Program Files\Python312\python.exe" } else { (Get-Command python).Source }
 if (-not $py -or $py -like "*WindowsApps*") {
     Write-Host "[launcher] 找不到可用的 Python（拒绝 WindowsApps 别名）" -ForegroundColor Red
-    if (-not $NoPause) { Read-Host "按回车关闭" | Out-Null }
+
+# ---------- 交易台 UI（带 token 打开） ----------
+# token 放在 URL fragment（#token=...）：fragment 不会发给服务器、不进访问日志，
+# 页面加载后立即存入 localStorage 并从地址栏抹掉。启动器日志不打印 token。
+function Get-BridgeToken {
+    if ($env:BRIDGE_AUTH_TOKEN) { return $env:BRIDGE_AUTH_TOKEN.Trim() }
+    $cfgPath = Join-Path $root "config.yaml"
+    if (Test-Path $cfgPath) {
+        $cfgText = Get-Content $cfgPath -Raw -ErrorAction SilentlyContinue
+        if ($cfgText -match '(?m)^\s*token:\s*["'']?([0-9a-fA-F]{64})') {
+            return $Matches[1]
+        }
+    }
+    return ""
+}
+
+if (-not $NoUi) {
+    $uiToken = Get-BridgeToken
+    $uiUrl = if ($uiToken) {
+        "http://127.0.0.1:8550/ui#token=" + $uiToken
+    } else {
+        "http://127.0.0.1:8550/ui"
+    }
+    try {
+        Start-Process $uiUrl
+        if ($uiToken) { Write-Host "  交易台已打开（token 已注入，无需手填）" -ForegroundColor Green }
+        else { Write-Host "  交易台已打开（未找到 token，需在页面右上角填写）" -ForegroundColor Yellow }
+    } catch {
+        Write-Host ("  交易台打开失败: " + $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
+if (-not $NoPause) { Read-Host "按回车关闭" | Out-Null }
     exit 1
 }
 

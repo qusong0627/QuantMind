@@ -149,6 +149,8 @@
   tr:hover td{background:rgba(56,189,248,.04)}
   .mono{font-family:var(--mono)}
   .muted{color:var(--muted)}
+  /* A 股口径：红涨绿跌（浮盈用色与 KPI 状态色无关） */
+  .up{color:var(--red)} .down{color:var(--green)}
   .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;font:600 10.5px var(--mono);border:1px solid var(--line2);color:#a9bdd6;background:#122033}
   .badge.green{color:#b7f7d3;border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08)}
   .badge.red{color:#ffd0d0;border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.08)}
@@ -217,6 +219,7 @@
     </div>
     <div class="status-strip">
       <span class="pill" id="pillTdx"><i></i><span>TDX 探测中</span></span>
+      <span class="pill" id="pillQmt"><i></i><span>QMT 探测中</span></span>
       <span class="pill" id="pillCollector"><i></i><span>采集器探测中</span></span>
       <span class="pill" id="pillLimits"><i></i><span>硬上限 --</span></span>
       <span class="pill" id="pillWriter"><i></i><span>日志线程 --</span></span>
@@ -356,6 +359,35 @@
           <div class="m"><span>封禁 IP</span><strong id="secBanned">--</strong></div>
         </div>
       </div>
+    </section>
+
+    <section class="panel" id="qmtPanel">
+      <div class="panel-head">
+        <h2>QMT · 迅投账户</h2>
+        <span class="hint" id="qmtHint">同机管道桥 · 只读</span>
+        <button class="btn ghost" onclick="loadQmt(true)">刷新</button>
+        <button class="btn ghost" onclick="qmtReconcile()">口径对账</button>
+      </div>
+      <div class="account-grid">
+        <div class="a"><span>总资产</span><strong id="qmtAsset">--</strong></div>
+        <div class="a"><span>现金</span><strong id="qmtCash">--</strong></div>
+        <div class="a"><span>市值</span><strong id="qmtMv">--</strong></div>
+        <div class="a"><span>持仓数</span><strong id="qmtPos">--</strong></div>
+      </div>
+      <div class="hint mono" id="qmtMeta" style="margin:8px 0">--</div>
+      <div class="result-box" id="qmtRecon" style="display:none"></div>
+      <div class="row" style="gap:8px;margin:10px 0;align-items:center">
+        <select id="qmtView" onchange="renderQmtTable()" style="flex:0 0 130px">
+          <option value="positions">持仓</option>
+          <option value="orders">当日委托</option>
+          <option value="trades">当日成交</option>
+        </select>
+        <span class="hint" id="qmtTableHint">--</span>
+      </div>
+      <table id="qmtTable">
+        <thead id="qmtHead"><tr><th>--</th></tr></thead>
+        <tbody><tr><td class="empty">输入 token 后自动读取</td></tr></tbody>
+      </table>
     </section>
 
     <section class="panel">
@@ -511,6 +543,9 @@
         <input id="mktCode" placeholder="股票代码，如 600519.SH" style="flex:0 0 200px">
         <label class="hint" style="display:flex;align-items:center;gap:6px;flex:0 0 auto">
           <input type="checkbox" id="mktAidata" style="width:auto"> aidata 补缺
+        </label>
+        <label class="hint" style="display:flex;align-items:center;gap:6px;flex:0 0 auto">
+          <input type="checkbox" id="mktQmt" style="width:auto"> qmt 补缺
         </label>
         <button class="btn primary" onclick="mktQuote()">统一行情</button>
         <button class="btn ghost" onclick="mktRaw()">原始数据</button>
@@ -710,6 +745,11 @@ function renderLive(d, health){
 
   const tdxOk = !!health?.tdx_connected;
   setPill('#pillTdx', tdxOk ? 'ok' : 'bad', tdxOk ? 'TDX 已连接' : 'TDX 未连接');
+  const qmtHealth = health?.qmt || {};
+  const qmtOk = !!qmtHealth.online;
+  const qmtDeg = !!qmtHealth.degraded;
+  setPill('#pillQmt', qmtOk ? (qmtDeg ? 'warn' : 'ok') : 'bad',
+    qmtOk ? (qmtDeg ? 'QMT 在线·账户滞后' : 'QMT 在线') : 'QMT 离线');
   const colOk = col.status === 'ok';
   setPill('#pillCollector', colOk ? 'ok' : (col.status === 'degraded' ? 'warn' : 'bad'),
     colOk ? '采集器在线' : (col.status === 'degraded' ? '采集器降级' : '采集器离线'));
@@ -840,14 +880,229 @@ async function loadStats(){
   }
 }
 
+const QMT = { account: null, orders: [], trades: [], ordersOk: false, tradesOk: false,
+              online: null, ts: 0, loading: false };
+
+const QMT_STATUS_TEXT = {
+  pending: '未报', submitted: '已报', partially_filled: '部成',
+  filled: '已成', cancelled: '已撤', partial_cancelled: '部撤', rejected: '废单'
+};
+
+function qmtMoney(v){ return (v === null || v === undefined) ? '--' : '¥ ' + fmtNum(v); }
+function qmtSide(s){ return s === 'buy' ? '买入' : (s === 'sell' ? '卖出' : '--'); }
+function qmtPnl(v){
+  if (v === null || v === undefined) return '<span class="muted">--</span>';
+  const cls = v > 0 ? 'up' : (v < 0 ? 'down' : 'muted');
+  return '<span class="' + cls + '">' + (v > 0 ? '+' : '') + fmtNum(v) + '</span>';
+}
+
+function renderQmtTable(){
+  const view = $('#qmtView').value;
+  const head = $('#qmtHead');
+  const body = $('#qmtTable tbody');
+  if (!QMT.online) {
+    head.innerHTML = '<tr><th>--</th></tr>';
+    body.innerHTML = '<tr><td class="empty">QMT 渠道离线</td></tr>';
+    $('#qmtTableHint').textContent = '--';
+    return;
+  }
+  if (view === 'positions') {
+    if (!QMT.account) {
+      head.innerHTML = '<tr><th>--</th></tr>';
+      body.innerHTML = '<tr><td class="empty">账户未读到（不等同 0 持仓）</td></tr>';
+      $('#qmtTableHint').textContent = '账户读取失败';
+      return;
+    }
+    const rows = (QMT.account && QMT.account.positions) || [];
+    head.innerHTML = '<tr><th>代码</th><th>名称</th><th>持仓</th><th>可用</th>'
+      + '<th>成本</th><th>现价</th><th>市值</th><th>浮盈</th></tr>';
+    body.innerHTML = rows.map(p => '<tr><td class="mono">' + escapeHtml(p.stock_code) + '</td>'
+      + '<td>' + escapeHtml(p.stock_name || '--') + '</td>'
+      + '<td>' + fmtInt(p.total_volume) + '</td>'
+      + '<td>' + fmtInt(p.available_volume) + '</td>'
+      + '<td>' + fmtNum(p.cost_price, 3) + '</td>'
+      + '<td>' + fmtNum(p.last_price, 3) + '</td>'
+      + '<td>' + qmtMoney(p.market_value) + '</td>'
+      + '<td>' + qmtPnl(p.pnl) + '</td></tr>').join('')
+      || '<tr><td colspan="8" class="empty">无持仓</td></tr>';
+    $('#qmtTableHint').textContent = rows.length + ' 只持仓';
+  } else if (view === 'orders') {
+    if (!QMT.ordersOk) {
+      head.innerHTML = '<tr><th>--</th></tr>';
+      body.innerHTML = '<tr><td class="empty">委托未读到（不等同 0 笔）</td></tr>';
+      $('#qmtTableHint').textContent = '委托读取失败';
+      return;
+    }
+    const rows = QMT.orders || [];
+    head.innerHTML = '<tr><th>时间</th><th>代码</th><th>名称</th><th>方向</th>'
+      + '<th>委托价</th><th>委托量</th><th>已成</th><th>状态</th></tr>';
+    body.innerHTML = rows.map(o => '<tr><td class="mono">' + escapeHtml(o.time || '--') + '</td>'
+      + '<td class="mono">' + escapeHtml(o.stock_code) + '</td>'
+      + '<td>' + escapeHtml(o.stock_name || '--') + '</td>'
+      + '<td>' + qmtSide(o.side) + '</td>'
+      + '<td>' + fmtNum(o.order_price, 3) + '</td>'
+      + '<td>' + fmtInt(o.total_volume) + '</td>'
+      + '<td>' + fmtInt(o.filled_volume) + '</td>'
+      + '<td>' + (QMT_STATUS_TEXT[o.status] || o.status || '--') + '</td></tr>').join('')
+      || '<tr><td colspan="8" class="empty">无委托</td></tr>';
+    $('#qmtTableHint').textContent = rows.length + ' 笔委托';
+  } else {
+    if (!QMT.tradesOk) {
+      head.innerHTML = '<tr><th>--</th></tr>';
+      body.innerHTML = '<tr><td class="empty">成交未读到（不等同 0 笔）</td></tr>';
+      $('#qmtTableHint').textContent = '成交读取失败';
+      return;
+    }
+    const rows = QMT.trades || [];
+    head.innerHTML = '<tr><th>时间</th><th>代码</th><th>名称</th><th>方向</th>'
+      + '<th>成交价</th><th>数量</th><th>金额</th><th>委托号</th></tr>';
+    body.innerHTML = rows.map(t => '<tr><td class="mono">' + escapeHtml(t.traded_at || '--') + '</td>'
+      + '<td class="mono">' + escapeHtml(t.stock_code) + '</td>'
+      + '<td>' + escapeHtml(t.stock_name || '--') + '</td>'
+      + '<td>' + qmtSide(t.side) + '</td>'
+      + '<td>' + fmtNum(t.traded_price, 3) + '</td>'
+      + '<td>' + fmtInt(t.traded_volume) + '</td>'
+      + '<td>' + qmtMoney(t.traded_amount) + '</td>'
+      + '<td class="mono">' + escapeHtml(t.order_id || '--') + '</td></tr>').join('')
+      || '<tr><td colspan="8" class="empty">无成交</td></tr>';
+    $('#qmtTableHint').textContent = rows.length + ' 笔成交';
+  }
+}
+
+async function loadQmt(force){
+  if (!getToken()) {
+    setPill('#pillQmt', '', 'QMT 待鉴权');
+    return;
+  }
+  if (QMT.loading) return;  // 慢 RPC 时不要把 30s 轮询叠成并发
+  QMT.loading = true;
+  try {
+    const h = await fetchJSON('/api/v1/qmt/health', { headers: authHeader() }, 6000);
+    const health = h.body || {};
+    QMT.online = !!health.online;
+    setPill('#pillQmt', health.online ? (health.degraded ? 'warn' : 'ok') : 'bad',
+      health.online ? (health.degraded ? 'QMT 在线·账户滞后' : 'QMT 在线') : 'QMT 离线');
+    if (!health.online) {
+      QMT.account = null; QMT.orders = []; QMT.trades = [];
+      QMT.ordersOk = false; QMT.tradesOk = false;
+      $('#qmtHint').textContent = '伴生桥离线';
+      $('#qmtMeta').textContent = 'QMT 渠道不可用：' + (health.error || '不可达')
+        + '（不用 0 冒充资产）';
+      ['#qmtAsset', '#qmtCash', '#qmtMv', '#qmtPos'].forEach(id => { $(id).textContent = '--'; });
+      renderQmtTable();
+      return;
+    }
+    const headers = { 'Content-Type': 'application/json', ...authHeader() };
+    const postJSON = (path, payload, timeout) =>
+      fetchJSON(path, { method: 'POST', headers, body: JSON.stringify(payload) }, timeout);
+    let acct = { status: 0, body: null, error: null };
+    try {
+      const r = await postJSON('/api/v1/account/query', { source: 'qmt' }, 15000);
+      acct = { status: r.status, body: r.body, error: null };
+    } catch (e) {
+      acct.error = e;
+    }
+    const acctBody = acct.body;
+    const acctOk = acct.status === 200 && acctBody
+      && (acctBody.account_source === 'qmt' || acctBody.channel_used === 'qmt');
+    if (acctOk) {
+      QMT.account = acctBody;
+    } else if (acct.status === 200 && acctBody) {
+      // 旧版桥（未加载 source=qmt 路由）会把通达信账户当成功返回；
+      // 宁可显示「渠道未生效」，也不能把 TDX 数字贴到 QMT 面板上。
+      QMT.account = null;
+      $('#qmtHint').textContent = 'QMT 渠道未生效（桥需重启加载新路由）';
+    } else {
+      QMT.account = null;
+      const errMsg = acct.error
+        ? (acct.error.message || String(acct.error))
+        : ((acctBody && acctBody.error && acctBody.error.message)
+           || ('HTTP ' + acct.status));
+      $('#qmtHint').textContent = '账户读取失败：' + (errMsg || '未知错误');
+    }
+    const isQmt = (r) => r.status === 'fulfilled' && r.value.status === 200
+      && r.value.body
+      && (r.value.body.channel_used === 'qmt' || r.value.body.source === 'qmt');
+    if (QMT.account && QMT.account.stale) {
+      // 休市快照：委托/成交走同一条停摆的管道，别让页面白等 15s×2
+      QMT.ordersOk = false; QMT.tradesOk = false;
+      QMT.orders = []; QMT.trades = [];
+    } else if (QMT.account) {
+      const [ords, trades] = await Promise.allSettled([
+        postJSON('/api/v1/orders/query', { source: 'qmt' }, 25000),
+        postJSON('/api/v1/orders/query', { source: 'qmt', kind: 'trades' }, 25000),
+      ]);
+      QMT.ordersOk = isQmt(ords);
+      QMT.tradesOk = isQmt(trades);
+      QMT.orders = QMT.ordersOk ? (ords.value.body.orders || []) : [];
+      QMT.trades = QMT.tradesOk ? (trades.value.body.trades || []) : [];
+    } else {
+      QMT.ordersOk = false; QMT.tradesOk = false;
+      QMT.orders = []; QMT.trades = [];
+    }
+    QMT.ts = Date.now();
+
+    const a = (QMT.account && QMT.account.asset) || {};
+    const posCount = (QMT.account && QMT.account.positions || []).length;
+    $('#qmtAsset').textContent = qmtMoney(a.asset);
+    $('#qmtCash').textContent = qmtMoney(a.cash);
+    $('#qmtMv').textContent = qmtMoney(a.market_value);
+    $('#qmtPos').textContent = fmtInt(posCount);
+    const age = QMT.account ? QMT.account.age_sec : null;
+    const ageText = (age === null || age === undefined) ? '快照时间未知' : ('快照 ' + age + 's 前');
+    const stale = !!(QMT.account && QMT.account.stale);
+    const staleText = stale ? '（休市快照，非实时）' : '';
+    $('#qmtMeta').textContent = '账户 ' + ((QMT.account && QMT.account.account_id) || '--')
+      + ' · ' + ageText + staleText
+      + ' · 管道 RPC ' + fmtMs((health.metrics || {}).last_rpc_ms)
+      + ' · 队列 ' + fmtInt((health.metrics || {}).queue_len);
+    if (QMT.account) {
+      $('#qmtHint').textContent = stale
+        ? ('休市快照 · ' + (QMT.account.snapshot_at || '--') + ' · QMT 不供实时')
+        : '同机管道桥 · 只读';
+    }
+    renderQmtTable();
+  } catch (e) {
+    setPill('#pillQmt', 'bad', 'QMT 探测失败');
+    $('#qmtMeta').textContent = 'QMT 渠道不可达：' + e.message;
+  } finally {
+    QMT.loading = false;
+  }
+}
+
+async function qmtReconcile(){
+  const box = $('#qmtRecon');
+  box.style.display = 'block';
+  if (!getToken()) { box.textContent = '请先输入访问 token'; return; }
+  box.textContent = '查询中…';
+  try {
+    const { body } = await fetchJSON('/api/v1/qmt/reconcile',
+      { headers: authHeader() }, 25000);
+    if (!body.success) { box.textContent = errText(body); return; }
+    box.textContent = [
+      '账户 ' + (body.account_id || '--') + ' · 交易日 ' + (body.trading_date || '--'),
+      'QMT 总资产（券商口径）   ¥ ' + fmtNum(body.qmt_total_asset),
+      '现金                     ¥ ' + fmtNum(body.cash),
+      '持仓市值（实时）         ¥ ' + fmtNum(body.market_value),
+      '占用保证金/券商占用      ¥ ' + fmtNum(body.occupied_margin),
+      '实时总资产（现金+市值）  ¥ ' + fmtNum(body.live_total_asset),
+      '市值 − 占用              ¥ ' + fmtNum(body.market_value_minus_occupied),
+      '持仓浮盈（对成本）       ¥ ' + fmtNum(body.position_profit),
+      '',
+      body.identity || ''
+    ].join('\n');
+  } catch (e) {
+    box.textContent = '对账失败：' + e.message;
+  }
+}
+
 async function loadLogs(){
   const token = getToken();
   const tbody = $('#logTable tbody');
   if (!token) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty">输入 token 后点击刷新查看调用日志</td></tr>';
     return;
-  }
-  try {
+  }  try {
     const { body, status } = await fetchJSON('/api/v1/cache/logs?limit=30', {
       headers: { 'Authorization': 'Bearer ' + token }
     });
@@ -1225,10 +1480,11 @@ function buildSlots(){
 function startPolling(){
   stopPolling();
   S.timers = [setInterval(loadLive, 5000), setInterval(loadStats, 15000),
+              setInterval(loadQmt, 30000),
               setInterval(() => { loadAidata(); loadSubscription(); loadThs(); }, 15000)];
 }
 function stopPolling(){ S.timers.forEach(clearInterval); S.timers = []; }
-function refreshAll(){ loadLive(); loadStats(); loadLogs(); loadAidata(); loadSubscription(); loadThs(); }
+function refreshAll(){ loadLive(); loadStats(); loadLogs(); loadAidata(); loadSubscription(); loadThs(); loadQmt(); }
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { stopPolling(); }
@@ -1276,15 +1532,28 @@ function updateAuthBanner(){
     saveToken(el.value.trim());
     updateAuthBanner();
     clearTimeout(window.__tokenTimer);
-    window.__tokenTimer = setTimeout(() => { loadAidata(); loadSubscription(); }, 400);
+    window.__tokenTimer = setTimeout(() => { loadAidata(); loadSubscription(); loadQmt(); }, 400);
   });
 });
+// 书签式 token：#token=... 只在浏览器本地解析（fragment 不会发给服务器/不进访问日志），
+// 解析后立即存 localStorage 并从地址栏抹掉。用于「换地址/清缓存后不想再手填」的场景。
+try {
+  const m = (location.hash || '').match(/(?:^#|&)token=([^&]+)/);
+  if (m) {
+    const hashToken = decodeURIComponent(m[1]).trim();
+    if (hashToken) {
+      saveToken(hashToken);
+      setTokenEverywhere(hashToken);
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  }
+} catch (e) {}
 try {
   const savedToken = localStorage.getItem('tdx-token');
   if (savedToken) setTokenEverywhere(savedToken);
 } catch (e) {}
 updateAuthBanner();
-if (getToken()) { loadAidata(); loadSubscription(); }
+if (getToken()) { loadAidata(); loadSubscription(); loadQmt(); }
 if ($('#subSearch')) {
   $('#subSearch').addEventListener('input', () => {
     clearTimeout(subSearchTimer);
@@ -1449,11 +1718,12 @@ async function mktQuote(){
   if (!code) { $('#mktMsg').textContent = '先填代码'; return; }
   if (!authHeader()['Authorization']) { $('#mktMsg').textContent = '请先输入访问 token'; return; }
   const useAidata = $('#mktAidata').checked;
+  const useQmt = $('#mktQmt').checked;
   $('#mktMsg').textContent = '合并中…';
   try {
     await mktLoadFields();
     const url = '/api/v1/market/quote?code=' + encodeURIComponent(code)
-      + (useAidata ? '&aidata=1' : '');
+      + (useAidata ? '&aidata=1' : '') + (useQmt ? '&qmt=1' : '');
     const { body } = await fetchJSON(url, { headers: authHeader() }, 30000);
     if (!body.success) { $('#mktMsg').textContent = errText(body); return; }
     const d = body.data;
@@ -1482,10 +1752,11 @@ async function mktRaw(){
   if (!code) { $('#mktMsg').textContent = '先填代码'; return; }
   if (!authHeader()['Authorization']) { $('#mktMsg').textContent = '请先输入访问 token'; return; }
   const useAidata = $('#mktAidata').checked;
+  const useQmt = $('#mktQmt').checked;
   $('#mktMsg').textContent = '拉取原始数据…';
   try {
     const url = '/api/v1/market/raw?code=' + encodeURIComponent(code)
-      + (useAidata ? '&aidata=1' : '');
+      + (useAidata ? '&aidata=1' : '') + (useQmt ? '&qmt=1' : '');
     const { body } = await fetchJSON(url, { headers: authHeader() }, 30000);
     if (!body.success) { $('#mktMsg').textContent = errText(body); return; }
     $('#mktResult').style.display = 'block';

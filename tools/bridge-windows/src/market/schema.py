@@ -19,21 +19,21 @@ from typing import Any
 
 #: (字段, 中文, 单位, 说明, 可提供的源按优先级)
 FIELD_DEFS: list[tuple[str, str, str, str, tuple[str, ...]]] = [
-    ("last", "最新价", "元", "最后一笔成交价", ("ths", "aidata", "tdx")),
-    ("prev_close", "昨收", "元", "前一交易日收盘价", ("ths", "aidata", "tdx")),
-    ("open", "今开", "元", "当日第一笔成交价", ("ths", "aidata", "tdx")),
-    ("high", "最高", "元", "当日最高价", ("ths", "aidata", "tdx")),
-    ("low", "最低", "元", "当日最低价", ("ths", "aidata", "tdx")),
+    ("last", "最新价", "元", "最后一笔成交价", ("ths", "aidata", "tdx", "qmt")),
+    ("prev_close", "昨收", "元", "前一交易日收盘价", ("ths", "aidata", "tdx", "qmt")),
+    ("open", "今开", "元", "当日第一笔成交价", ("ths", "aidata", "tdx", "qmt")),
+    ("high", "最高", "元", "当日最高价", ("ths", "aidata", "tdx", "qmt")),
+    ("low", "最低", "元", "当日最低价", ("ths", "aidata", "tdx", "qmt")),
     ("volume", "成交量", "手（源而异）", "当日累计成交量；三源单位可能不同，跨源比较前先对齐",
-     ("ths", "aidata", "tdx")),
+     ("ths", "aidata", "tdx", "qmt")),
     ("amount", "成交额", "元", "当日累计成交金额；TDX 原始为万元，聚合层已 ×10000 归一为元",
-     ("ths", "aidata", "tdx")),
+     ("ths", "aidata", "tdx", "qmt")),
     ("change_pct", "涨跌幅", "%", "相对昨收；源内直取或本地计算",
-     ("ths", "aidata", "tdx")),
-    ("bids", "买盘", "档位数组（volume=手）", "[{level,price,volume}]；TDX 5 档，THS 可 10 档",
-     ("ths", "aidata", "tdx")),
-    ("asks", "卖盘", "档位数组（volume=手）", "[{level,price,volume}]；TDX 5 档，THS 可 10 档",
-     ("ths", "aidata", "tdx")),
+     ("ths", "aidata", "tdx", "qmt")),
+    ("bids", "买盘", "档位数组（volume=手）", "[{level,price,volume}]；TDX/QMT 5 档，THS 可 10 档",
+     ("ths", "aidata", "tdx", "qmt")),
+    ("asks", "卖盘", "档位数组（volume=手）", "[{level,price,volume}]；TDX/QMT 5 档，THS 可 10 档",
+     ("ths", "aidata", "tdx", "qmt")),
     ("inside", "内盘", "手", "主动卖成交量（TDX 快照 Inside）", ("aidata", "tdx")),
     ("outside", "外盘", "手", "主动买成交量（TDX 快照 Outside）", ("aidata", "tdx")),
     ("main_inflow", "主力净流入", "元", "THS 0xc4 金额表 dt250", ("ths",)),
@@ -73,6 +73,14 @@ SOURCE_DEFS: dict[str, dict] = {
                    "auction_amount", "speed_4m"],
         "cost": "0（需同花顺账号）",
         "notes": "10 档；资金面唯一来源；需扫码/账号登录",
+    },
+    "qmt": {
+        "label": "迅投 QMT（同机管道桥）",
+        "endpoint": "伴生桥 127.0.0.1:17720 get_full_tick（桥 /api/v1/tdx/call source=qmt）",
+        "fields": ["last", "prev_close", "open", "high", "low", "volume",
+                   "amount", "change_pct", "bids", "asks"],
+        "cost": "0（需 QMT 登录）",
+        "notes": "模拟/实盘终端自带行情；5 档；无内外盘字段；仅本机可用",
     },
 }
 
@@ -178,4 +186,44 @@ def normalize_ths(quote: dict | None, depth: dict | None,
         "auction_chg_pct": _f(e.get("auction_chg_pct")),
         "auction_amount": _f(e.get("auction_amount")),
         "speed_4m": _f(e.get("speed_4m")),
+    }
+
+
+def normalize_qmt(tick: dict) -> dict:
+    """QMT ``get_full_tick`` 单只 tick → 统一字段。
+
+    QMT 字段名与 TDX 完全不同（lastPrice/lastClose/...），且**没有**内外盘；
+    缺失一律 None，不填 0——0 会被下游当成真实价格/成交量。
+    """
+    tick = tick or {}
+
+    def levels(prices, volumes):
+        out = []
+        for i, (price, volume) in enumerate(
+                zip(prices or [], volumes or [], strict=False), 1):
+            p, v = _f(price), _f(volume)
+            if p is None:
+                continue
+            out.append({"level": i, "price": p, "volume": v})
+        return out or None
+
+    last = _f(tick.get("lastPrice"))
+    prev = _f(tick.get("lastClose"))
+    change_pct = None
+    if last is not None and prev:
+        change_pct = round((last - prev) / prev * 100, 4)
+    return {
+        "last": last,
+        "prev_close": prev,
+        "open": _f(tick.get("open")),
+        "high": _f(tick.get("high")),
+        "low": _f(tick.get("low")),
+        "volume": _f(tick.get("volume")),
+        "amount": _f(tick.get("amount")),
+        "change_pct": change_pct,
+        "bids": levels(tick.get("bidPrice"), tick.get("bidVol")),
+        "asks": levels(tick.get("askPrice"), tick.get("askVol")),
+        # QMT tick 不提供内外盘；保持 None 让优先序回落到 TDX/THS
+        "inside": None,
+        "outside": None,
     }
