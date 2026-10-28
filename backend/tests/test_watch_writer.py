@@ -290,6 +290,34 @@ def test_another_agents_rule_holds_the_slot() -> None:
     assert [r["owner"] for r in table(redis)] == ["llm:lgbm"]
 
 
+def test_an_auto_rule_is_replaced_by_an_llm_rule() -> None:
+    """auto 是兜底，不是归属：决策层的明确规则覆盖它（并摘掉 auto 规则）。
+
+    2026-10-28 实盘实证：``auto_arm`` 先给新仓补了 8% 兜底，决策层的
+    watch（更紧的止损/止盈）随后被判成「别家先到先得」→ ``watch_armed=0``，
+    模型写的止损根本没生效。auto 不是 agent，不能占归属位。
+    """
+    redis = FakeRedis(cfg(rule(SYM, owner="auto", stop=8.0)))
+    res = ww.write_watch_plan(redis, plan(watch(SYM, stop=9.5)), agent="tft")
+    assert res.armed == (SYM,)
+    assert res.conflicts == ()
+    assert res.ok
+    rows = table(redis)
+    assert [(r["symbol"], r["owner"]) for r in rows] == [(SYM, "llm:tft")]
+    assert rows[0]["stop_loss_price"] == 9.5
+    assert any("auto" in n for n in res.notes)
+
+
+def test_auto_rule_for_another_symbol_is_preserved() -> None:
+    redis = FakeRedis(cfg(rule(OTHER, owner="auto")))
+    res = ww.write_watch_plan(redis, plan(watch(SYM, stop=9.5)), agent="tft")
+    assert res.armed == (SYM,)
+    assert {r["symbol"]: r["owner"] for r in table(redis)} == {
+        SYM: "llm:tft",
+        OTHER: "auto",
+    }
+
+
 def test_two_watches_on_one_symbol_arm_only_the_first() -> None:
     """同标的两条共用同一个状态位、第二条永不触发——故明确拒绝第二条（先到先得）。"""
     redis = FakeRedis(cfg())

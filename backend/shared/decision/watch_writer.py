@@ -214,17 +214,21 @@ def resolve_plan(
         holder = others_by_symbol.get(symbol)
         if holder is not None:
             holder_owner = str(holder.get("owner") or "")
-            conflicts.append(
-                Conflict(
-                    index=w.index,
-                    symbol=symbol,
-                    holder=holder_owner,
-                    reason=REJECT_MANUAL_HOLD
-                    if not holder_owner
-                    else REJECT_OTHER_AGENT.format(holder=holder_owner),
+            # auto 是**兜底**（auto_arm 给「无规则持仓」补的保护），不是归属：
+            # 决策层的明确规则优先，写侧会把该 auto 规则摘掉（见 write_watch_plan）。
+            # 人工（owner=""）与其他 LLM 仍然先到先得。
+            if not (holder_owner == "auto" and owner.startswith("llm:")):
+                conflicts.append(
+                    Conflict(
+                        index=w.index,
+                        symbol=symbol,
+                        holder=holder_owner,
+                        reason=REJECT_MANUAL_HOLD
+                        if not holder_owner
+                        else REJECT_OTHER_AGENT.format(holder=holder_owner),
+                    )
                 )
-            )
-            continue
+                continue
         if symbol in seen:
             conflicts.append(
                 Conflict(
@@ -334,6 +338,21 @@ def write_watch_plan(
     others_by_symbol = {str(r.get("symbol") or ""): r for r in others}
 
     armed, conflicts = resolve_plan(plan, others_by_symbol, owner)
+    auto_replaced = {
+        str(w.symbol)
+        for w, _ in armed
+        if str((others_by_symbol.get(str(w.symbol)) or {}).get("owner") or "") == "auto"
+    }
+    if auto_replaced:
+        # auto 规则让位给决策层规则：同一个标的不留两条（执行器一个标的一个状态位）。
+        others = [
+            r
+            for r in others
+            if not (
+                str(r.get("owner") or "") == "auto"
+                and str(r.get("symbol") or "") in auto_replaced
+            )
+        ]
     total = len(others) + len(armed)
     if total > max_rules:
         return WatchWriteResult(
@@ -377,6 +396,8 @@ def write_watch_plan(
     )
 
     notes: list[str] = list(plan.notes)
+    if auto_replaced:
+        notes.append(f"以决策层规则替换 auto 兜底：{sorted(auto_replaced)}")
     if not cfg.get("enabled"):
         notes.append(
             "止盈止损执行器总开关未开：规则已落库但不会触发（qmt_sltp_ctl.py --enable）"
