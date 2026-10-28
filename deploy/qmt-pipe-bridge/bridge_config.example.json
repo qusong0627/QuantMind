@@ -1,0 +1,80 @@
+{
+  "redis": {
+    "host": "127.0.0.1",
+    "port": 6379,
+    "db": 5
+  },
+  "account_id": "<QMT_ACCOUNT>",
+  "pipe": {
+    "name": "bigqmt_rpc",
+    "connect_timeout_s": 3.0
+  },
+  "rpc": {
+    "timeout_s": 15,
+    "queue_blpop_s": 0.5
+  },
+  "positions": {
+    "enabled": true,
+    "interval_s": 3,
+    "ttl_s": 120
+  },
+  "quotes": {
+    "enabled": true,
+    "tier_a_interval_s": 2,
+    "tier_b_interval_s": 10,
+    "chunk": 20,
+    "max_symbols": 250,
+    "stale_after_s": 10,
+    "indices": [
+      "000001.SH",
+      "399001.SZ",
+      "000300.SH"
+    ],
+    "watchlist": []
+  },
+  "orders": {
+    "enabled": true,
+    "interval_s": 2,
+    "maxlen": 2000
+  },
+  "trades": {
+    "enabled": true,
+    "interval_s": 5,
+    "maxlen": 2000
+  },
+  "budget": {
+    "window_s": 10,
+    "market_ms": 3000,
+    "rpc_preempt_queue": 1
+  },
+  "risk": {
+    "enabled": true,
+    "max_order_amount": 200000,
+    "max_orders_per_min": 30,
+    "max_deviation_pct": 5.0,
+    "blacklist_codes": [],
+    "blacklist_name_keywords": [
+      "ST",
+      "退"
+    ]
+  },
+  "health": {
+    "heartbeat_key": "qm:qmt:pipe:heartbeat",
+    "metrics_key": "qm:qmt:pipe:metrics",
+    "interval_s": 5,
+    "ttl_s": 30
+  },
+  "tap": {
+    "enabled": false,
+    "interval_s": 0.5,
+    "subscribe_refresh_s": 60,
+    "max_symbols": 250,
+    "respect_budget": false
+  },
+  "source_http": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 17720,
+    "stale_after_s": 30
+  }
+}
