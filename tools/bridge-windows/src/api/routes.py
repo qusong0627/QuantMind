@@ -6,6 +6,7 @@ import queue
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -30,6 +31,8 @@ from .qmt_source import (QMT_READONLY_METHODS, normalize_asset as qmt_asset,
                          normalize_orders as qmt_orders,
                          normalize_positions as qmt_positions,
                          normalize_trades as qmt_trades)
+from .order_routing import (normalize_order, qmt_cancel_params,
+                            qmt_order_params, split_orders, tdx_plan_dict)
 
 log = logging.getLogger(__name__)
 
@@ -812,7 +815,8 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
               tracker: OrderTracker, sltp, cache_db=None, port: int = 8550,
               extra_tokens: list = None, rate_limiter=None,
               memory_cache=None, trade_limits_dir: str = "",
-              aidata=None, subscription=None, ths=None) -> web.Application:
+              aidata=None, subscription=None, ths=None,
+              qmt_orders_enabled: bool = False) -> web.Application:
     app = web.Application()
     if trade_limits_dir:
         # 撤单日计数独立持久化；桥重启不清零
@@ -1010,26 +1014,27 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
         except TdxError as e:
             return json_error(502, "TDX_UNAVAILABLE", str(e))
 
-    async def query_orders(request: web.Request):
-        data = await request.json()
-        if str(data.get("source") or "").lower() == "qmt":
-            kind = str(data.get("kind") or "orders").lower()
-            if kind in ("trade", "trades"):
-                result, err = await _qmt_call("query_trades", {},
-                                              timeout=QMT_TIMEOUT_RPC_S)
-                if err:
-                    return json_error(*err)
-                return web.json_response({"trades": qmt_trades(result),
-                                          "channel_used": "qmt", "source": "qmt"})
-            params = {"cancelable_only": bool(data.get("cancelable_only"))}
-            result, err = await _qmt_call("query_orders", params,
+    async def _qmt_orders_query(data: dict):
+        kind = str(data.get("kind") or "orders").lower()
+        if kind in ("trade", "trades"):
+            result, err = await _qmt_call("query_trades", {},
                                           timeout=QMT_TIMEOUT_RPC_S)
             if err:
                 return json_error(*err)
-            return web.json_response({"orders": qmt_orders(result),
+            return web.json_response({"trades": qmt_trades(result),
                                       "channel_used": "qmt", "source": "qmt"})
-        account_id = await _call_tdx(executor.resolve_account_id,
-                                     data.get("account", ""), data.get("account_type", "stock"), kind="trade")
+        params = {"cancelable_only": bool(data.get("cancelable_only"))}
+        result, err = await _qmt_call("query_orders", params,
+                                      timeout=QMT_TIMEOUT_RPC_S)
+        if err:
+            return json_error(*err)
+        return web.json_response({"orders": qmt_orders(result),
+                                  "channel_used": "qmt", "source": "qmt"})
+
+    async def _tdx_orders_query(data: dict):
+        account_id = await _call_tdx(
+            executor.resolve_account_id, data.get("account", ""),
+            data.get("account_type", "stock"), kind="trade")
         try:
             def _do():
                 return [parser.parse_order(o)
@@ -1037,9 +1042,22 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
                             account_id, data.get("stock_code", ""),
                             data.get("cancelable_only", False))]
             orders = await _call_tdx(_do, kind="trade")
-            return web.json_response({"orders": orders, "channel_used": "http"})
+            return web.json_response({"orders": orders, "channel_used": "tdx",
+                                      "interface": "tdx_tq"})
         except TdxError as e:
             return json_error(502, "TDX_UNAVAILABLE", str(e))
+
+    async def query_orders(request: web.Request):
+        data = await request.json()
+        if str(data.get("source") or "").lower() == "qmt":
+            return await _qmt_orders_query(data)
+        return await _tdx_orders_query(data)
+
+    async def tdx_orders_query(request: web.Request):
+        return await _tdx_orders_query(await request.json())
+
+    async def qmt_orders_query(request: web.Request):
+        return await _qmt_orders_query(await request.json())
 
     async def _verify_cancel_effective(account_id, stock_code: str, order_id: str,
                                        attempts: int = 3, delay: float = 0.6) -> bool:
@@ -1064,8 +1082,7 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
                     "cancelled", "partial_cancelled")
         return False
 
-    async def cancel_order(request: web.Request):
-        data = await request.json()
+    async def _tdx_cancel(data: dict):
         stock_code = data.get("stock_code", "")
         order_id = data.get("order_id", "")
         allowed, reason = _cancel_guard.allow()
@@ -1094,6 +1111,7 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
                 "order_id": order_id, "ok": ok, "verified": verified,
                 "msg": res.get("Msg", "")}))
             resp = {"success": ok, "message": res.get("Msg", ""),
+                    "channel": "tdx", "interface": "tdx_tq",
                     "channel_used": "http"}
             if verified:
                 resp["verified"] = True
@@ -1116,6 +1134,210 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
                 "channel_used": "http"})
         except TdxError as e:
             return json_error(502, "TDX_UNAVAILABLE", str(e))
+
+    async def cancel_order(request: web.Request):
+        """兼容旧入口：TDX 撤单（渠道专用入口见 /api/v1/tdx/orders/cancel）。"""
+        return await _tdx_cancel(await request.json())
+
+    # ---- 渠道专用下单/撤单/路由 ----
+    #
+    # 通达信与 QMT 的字段口径不同，接口也分开；/api/v1/orders/route 按每笔
+    # 的 channel 分流。QMT 写闸默认关（qmt_orders.enabled=false），且伴生桥
+    # 侧还有 source_http.allow_orders + 策略 ALLOW_ORDER_METHODS 两道闸。
+
+    def _channel_error(channel: str, status: int, code: str, message: str):
+        return web.json_response(
+            {"success": False, "channel": channel,
+             "error": {"code": code, "message": message}}, status=status)
+
+    def _qmt_order_view(result, params: dict) -> dict:
+        data = result if isinstance(result, dict) else {"result": result}
+        return {
+            "order_id": (data.get("order_sys_id") or data.get("user_order_id")
+                         or params.get("remark") or ""),
+            "order_sys_id": str(data.get("order_sys_id") or ""),
+            "client_order_id": str(params.get("remark") or ""),
+            "status": str(data.get("status") or "submitted"),
+            "message": str(data.get("message") or ""),
+        }
+
+    async def _qmt_place(side: str, data: dict):
+        if not qmt_orders_enabled:
+            return _channel_error(
+                "qmt", 403, "QMT_ORDERS_DISABLED",
+                "QMT 下单未启用（config qmt_orders.enabled=false）")
+        try:
+            order = normalize_order(dict(data, channel="qmt", side=side))
+        except ValueError as exc:
+            return _channel_error("qmt", 400, "QMT_ORDER_INVALID", str(exc))
+        params = qmt_order_params(order)
+        result, err = await _qmt_call("order_stock", params,
+                                      timeout=QMT_TIMEOUT_RPC_S + 10)
+        if err:
+            return _channel_error("qmt", err[0], err[1], err[2])
+        return web.json_response({
+            "success": True, "channel": "qmt", "interface": "qmt_pipe",
+            "order": _qmt_order_view(result, params),
+        })
+
+    async def _tdx_place(side: str, data: dict):
+        try:
+            order = normalize_order(dict(data, channel="tdx", side=side))
+        except ValueError as exc:
+            return _channel_error("tdx", 400, "TDX_ORDER_INVALID", str(exc))
+        plan_id = str(data.get("plan_id") or ("bridge-tdx-" + uuid.uuid4().hex))
+        plan = TradePlan.from_dict(tdx_plan_dict(
+            plan_id, [order], data.get("account") or data.get("account_id") or "",
+            data.get("account_type") or "stock"))
+        try:
+            report = await _call_tdx(executor.execute_plan, plan, kind="order")
+        except TdxError as exc:
+            return _channel_error("tdx", 502, "TDX_UNAVAILABLE", str(exc))
+        if report.get("status") == "duplicate":
+            return _channel_error("tdx", 409, "DUPLICATE_PLAN",
+                                  report.get("message", "重复计划"))
+        for o in report.get("orders") or []:
+            _record_trade(cache_db, plan_id, "order_route",
+                          o.get("stock_code", ""), o.get("side", ""),
+                          o.get("volume"), None, o.get("order_id", ""),
+                          o.get("status", ""), o.get("message", ""), detail=o)
+        first = (report.get("orders") or [{}])[0]
+        return web.json_response({
+            "success": report.get("status") != "rejected",
+            "channel": "tdx", "interface": "tdx_tq",
+            "plan_id": plan_id, "status": report.get("status"),
+            "order": first,
+        })
+
+    async def _qmt_cancel(data: dict):
+        if not qmt_orders_enabled:
+            return _channel_error(
+                "qmt", 403, "QMT_ORDERS_DISABLED",
+                "QMT 撤单未启用（config qmt_orders.enabled=false）")
+        try:
+            params = qmt_cancel_params(data)
+        except ValueError as exc:
+            return _channel_error("qmt", 400, "QMT_CANCEL_INVALID", str(exc))
+        result, err = await _qmt_call("cancel_order_stock", params,
+                                      timeout=QMT_TIMEOUT_RPC_S + 10)
+        if err:
+            return _channel_error("qmt", err[0], err[1], err[2])
+        return web.json_response({
+            "success": True, "channel": "qmt", "interface": "qmt_pipe",
+            "cancel": result if isinstance(result, dict) else {"result": result},
+        })
+
+    async def tdx_buy(request: web.Request):
+        return await _tdx_place("buy", await request.json())
+
+    async def tdx_sell(request: web.Request):
+        return await _tdx_place("sell", await request.json())
+
+    async def tdx_cancel(request: web.Request):
+        return await _tdx_cancel(await request.json())
+
+    async def qmt_buy(request: web.Request):
+        return await _qmt_place("buy", await request.json())
+
+    async def qmt_sell(request: web.Request):
+        return await _qmt_place("sell", await request.json())
+
+    async def qmt_cancel(request: web.Request):
+        return await _qmt_cancel(await request.json())
+
+    async def route_orders(request: web.Request):
+        """混合渠道下单：每笔带 channel，TDX 组走 TradePlan，QMT 逐笔走伴生桥。"""
+        try:
+            data = await request.json()
+        except Exception:
+            return json_error(400, "INVALID_JSON", "请求体必须是合法 JSON")
+        default_channel = str(data.get("default_channel") or "tdx").lower()
+        raw_orders = data.get("orders")
+        if raw_orders is None and data.get("order"):
+            raw_orders = [data["order"]]
+        if not isinstance(raw_orders, list) or not raw_orders:
+            return json_error(400, "INVALID_ORDERS", "orders 必须是非空数组")
+        try:
+            normalized = [normalize_order(o, default_channel) for o in raw_orders]
+        except ValueError as exc:
+            return json_error(400, "INVALID_ORDERS", str(exc))
+
+        results: list = [None] * len(normalized)
+        plan_id = str(data.get("plan_id") or ("bridge-route-" + uuid.uuid4().hex))
+        tdx_orders = [o for o in normalized if o["channel"] == "tdx"]
+
+        if tdx_orders:
+            plan = TradePlan.from_dict(tdx_plan_dict(
+                plan_id, tdx_orders, data.get("account") or "",
+                data.get("account_type") or "stock"))
+            try:
+                report = await _call_tdx(executor.execute_plan, plan, kind="order")
+                outs = list(report.get("orders") or [])
+                duplicate = report.get("status") == "duplicate"
+                for idx, order in enumerate(normalized):
+                    if order["channel"] != "tdx":
+                        continue
+                    match = None
+                    for candidate in outs:
+                        if (candidate.get("stock_code") == order["symbol"]
+                                and candidate.get("side") == order["side"]):
+                            match = candidate
+                            outs.remove(candidate)
+                            break
+                    if match is None:
+                        results[idx] = {
+                            "channel": "tdx", "interface": "tdx_tq",
+                            "success": False,
+                            "error": {
+                                "code": "DUPLICATE_PLAN" if duplicate else "TDX_NO_RESULT",
+                                "message": (report.get("message") if duplicate
+                                            else "计划未返回该笔结果"),
+                            }}
+                    else:
+                        ok = match.get("status") not in ("rejected", "error")
+                        results[idx] = {"channel": "tdx", "interface": "tdx_tq",
+                                        "success": ok, "order": match}
+                        _record_trade(cache_db, plan_id, "order_route",
+                                      match.get("stock_code", ""),
+                                      match.get("side", ""), match.get("volume"),
+                                      None, match.get("order_id", ""),
+                                      match.get("status", ""),
+                                      match.get("message", ""), detail=match)
+            except TdxError as exc:
+                for idx, order in enumerate(normalized):
+                    if order["channel"] == "tdx":
+                        results[idx] = {
+                            "channel": "tdx", "interface": "tdx_tq",
+                            "success": False,
+                            "error": {"code": "TDX_UNAVAILABLE", "message": str(exc)}}
+
+        for idx, order in enumerate(normalized):
+            if order["channel"] != "qmt":
+                continue
+            if not qmt_orders_enabled:
+                results[idx] = {
+                    "channel": "qmt", "interface": "qmt_pipe", "success": False,
+                    "error": {"code": "QMT_ORDERS_DISABLED",
+                              "message": "config qmt_orders.enabled=false"}}
+                continue
+            params = qmt_order_params(order)
+            result, err = await _qmt_call("order_stock", params,
+                                          timeout=QMT_TIMEOUT_RPC_S + 10)
+            if err:
+                results[idx] = {
+                    "channel": "qmt", "interface": "qmt_pipe", "success": False,
+                    "error": {"code": err[1], "message": err[2]}}
+            else:
+                results[idx] = {
+                    "channel": "qmt", "interface": "qmt_pipe", "success": True,
+                    "order": _qmt_order_view(result, params)}
+
+        return web.json_response({
+            "success": all(bool(r and r.get("success")) for r in results),
+            "plan_id": plan_id,
+            "channels": sorted({o["channel"] for o in normalized}),
+            "results": results,
+        })
 
     async def configure_sltp(request: web.Request):
         data = await request.json()
@@ -1232,6 +1454,17 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
     app.router.add_post("/api/v1/account/query", query_account)
     app.router.add_post("/api/v1/orders/query", query_orders)
     app.router.add_post("/api/v1/orders/cancel", cancel_order)
+    # 渠道专用交易面（字段口径各自独立）
+    app.router.add_post("/api/v1/tdx/orders/buy", tdx_buy)
+    app.router.add_post("/api/v1/tdx/orders/sell", tdx_sell)
+    app.router.add_post("/api/v1/tdx/orders/cancel", tdx_cancel)
+    app.router.add_post("/api/v1/tdx/orders/query", tdx_orders_query)
+    app.router.add_post("/api/v1/qmt/orders/buy", qmt_buy)
+    app.router.add_post("/api/v1/qmt/orders/sell", qmt_sell)
+    app.router.add_post("/api/v1/qmt/orders/cancel", qmt_cancel)
+    app.router.add_post("/api/v1/qmt/orders/query", qmt_orders_query)
+    # 混合渠道路由（每笔带 channel）
+    app.router.add_post("/api/v1/orders/route", route_orders)
     app.router.add_post("/api/v1/sltp/configure", configure_sltp)
     app.router.add_get("/api/v1/sltp/state", sltp_state)
     app.router.add_post("/api/v1/push/block", push_block)
@@ -1851,6 +2084,10 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
             return json_error(400, "BAD_REQUEST", "缺少 code")
         prefer_raw = (request.query.get("prefer") or "").strip()
         prefer = [x.strip() for x in prefer_raw.split(",") if x.strip()] or None
+        # source=qmt / source=tdx：渠道专用行情的简写（与 prefer 等价）
+        source_q = (request.query.get("source") or "").strip().lower()
+        if source_q and not prefer:
+            prefer = [source_q]
         # aidata=1：付费通道**只补缺**——追加到优先序末尾，前面源有值的字段
         # 不会被覆盖（按次计费，默认关闭；测试台可显式打开）。
         if request.query.get("aidata") == "1":

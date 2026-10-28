@@ -390,6 +390,37 @@
       </table>
     </section>
 
+    <section class="panel" id="routePanel">
+      <div class="panel-head">
+        <h2>渠道交易 · 下单 / 撤单</h2>
+        <span class="hint" id="rtHint">TDX / QMT 接口分开；QMT 写闸默认关</span>
+      </div>
+      <div class="row" style="gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+        <select id="rtChannel" style="flex:0 0 90px">
+          <option value="tdx">TDX</option>
+          <option value="qmt">QMT</option>
+        </select>
+        <input id="rtSymbol" placeholder="代码 600519.SH" style="flex:0 0 150px">
+        <select id="rtSide" style="flex:0 0 80px">
+          <option value="buy">买入</option>
+          <option value="sell">卖出</option>
+        </select>
+        <input id="rtVolume" type="number" placeholder="数量(股)" style="flex:0 0 110px">
+        <select id="rtType" style="flex:0 0 90px">
+          <option value="limit">限价</option>
+          <option value="market">市价</option>
+        </select>
+        <input id="rtPrice" type="number" step="0.001" placeholder="价格" style="flex:0 0 100px">
+        <input id="rtCid" placeholder="client_order_id（QMT 必填）" style="flex:1 1 200px">
+      </div>
+      <div class="row" style="gap:8px;margin-bottom:8px;align-items:center">
+        <button class="btn primary" onclick="routePlace()">下单</button>
+        <input id="rtOrderId" placeholder="撤单：order_id / order_sys_id" style="flex:1 1 260px">
+        <button class="btn ghost" onclick="routeCancel()">撤单</button>
+      </div>
+      <div class="result-box" id="rtResult" style="display:none"></div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <h2>最近调用</h2>
@@ -1093,6 +1124,61 @@ async function qmtReconcile(){
     ].join('\n');
   } catch (e) {
     box.textContent = '对账失败：' + e.message;
+  }
+}
+
+async function routePlace(){
+  const box = $('#rtResult');
+  box.style.display = 'block';
+  if (!getToken()) { box.textContent = '请先输入访问 token'; return; }
+  const channel = $('#rtChannel').value;
+  const symbol = ($('#rtSymbol').value || '').trim();
+  const side = $('#rtSide').value;
+  const volume = parseInt($('#rtVolume').value, 10);
+  const orderType = $('#rtType').value;
+  const priceText = ($('#rtPrice').value || '').trim();
+  const cid = ($('#rtCid').value || '').trim();
+  if (!symbol || !volume) { box.textContent = '代码和数量必填'; return; }
+  if (orderType === 'limit' && !priceText) { box.textContent = '限价单必须填价格'; return; }
+  const payload = { symbol: symbol, side: side, volume: volume,
+                    order_type: orderType };
+  if (channel === 'tdx') payload.stock_code = symbol;
+  if (orderType === 'limit') payload.price = Number(priceText);
+  if (cid) payload.client_order_id = cid;
+  box.textContent = '提交中…';
+  try {
+    const { status, body } = await fetchJSON(
+      '/api/v1/' + channel + '/orders/' + side,
+      { method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
+        body: JSON.stringify(payload) }, 35000);
+    box.textContent = 'HTTP ' + status + '\n' + JSON.stringify(body, null, 2);
+  } catch (e) {
+    box.textContent = '失败：' + e.message;
+  }
+}
+
+async function routeCancel(){
+  const box = $('#rtResult');
+  box.style.display = 'block';
+  if (!getToken()) { box.textContent = '请先输入访问 token'; return; }
+  const channel = $('#rtChannel').value;
+  const symbol = ($('#rtSymbol').value || '').trim();
+  const orderId = ($('#rtOrderId').value || '').trim();
+  if (!orderId) { box.textContent = '撤单必须填 order_id'; return; }
+  const payload = { order_id: orderId };
+  if (symbol) payload.symbol = symbol;
+  if (channel === 'tdx' && symbol) payload.stock_code = symbol;
+  box.textContent = '提交中…';
+  try {
+    const { status, body } = await fetchJSON(
+      '/api/v1/' + channel + '/orders/cancel',
+      { method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
+        body: JSON.stringify(payload) }, 35000);
+    box.textContent = 'HTTP ' + status + '\n' + JSON.stringify(body, null, 2);
+  } catch (e) {
+    box.textContent = '失败：' + e.message;
   }
 }
 

@@ -23,6 +23,14 @@ QMT 的**只读数据面**：QMT 策略 ↔ 命名管道 ↔ 伴生桥 ↔ Redis
 3. QMT 策略编辑器加载 `QMT_BRIDGE_V2.py`；把其中 `ACCOUNT_ID = ''` 填成同一账号。
    策略使用 `transport=pipe`、`redis_enabled=False`，不发起任何网络连接。
 
+## 交易写入（默认关）
+
+`bridge_config.json` 的 `source_http.allow_orders` 默认 `false`。即使打开，
+桥侧 `qmt_orders.enabled` 与 QMT 策略 `ALLOW_ORDER_METHODS=True` 也必须同时打开
+（三道闸），QMT 才能收到下单/撤单。写入面仍经过 `risk_gate`：ST/退名称黑名单、
+单笔金额上限（默认 20 万）、价格偏离（默认 5%）、每分钟笔数（默认 30）；
+`client_order_id` 作为 24h 幂等键，重复提交返回首次结果。
+
 ## 启动与看护
 
 ```powershell

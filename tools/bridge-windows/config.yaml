@@ -58,6 +58,11 @@ trade:
   # 官方文档：实盘账户默认弹确认；免确认需券商开通「支持TQ的版本」。
   notify: 0
 
+# QMT 写入闸（默认关）。即使打开，伴生桥 source_http.allow_orders 与
+# QMT 策略 ALLOW_ORDER_METHODS 也必须同时打开，三道闸缺一不可。
+qmt_orders:
+  enabled: false
+
 order_tracking:
   state_file: "./data/active_orders.json"
   sync_interval_seconds: 15

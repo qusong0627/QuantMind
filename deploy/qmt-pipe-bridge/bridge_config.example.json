@@ -75,6 +75,7 @@
     "enabled": true,
     "host": "127.0.0.1",
     "port": 17720,
-    "stale_after_s": 30
+    "stale_after_s": 30,
+    "allow_orders": false
   }
 }

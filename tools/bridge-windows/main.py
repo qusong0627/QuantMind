@@ -252,7 +252,9 @@ async def main():
                                              memory_cache=memory_cache,
                                              trade_limits_dir=data_dir,
                                              aidata=aidata, subscription=subscription,
-                                             ths=ths)
+                                             ths=ths,
+                                             qmt_orders_enabled=bool(
+                                                 cfg.get("qmt_orders.enabled", False)))
             tasks.append(asyncio.create_task(_wait_forever(runner)))
             log.info(f"通达信桥控制台: http://127.0.0.1:{port}/ui")
             # 自动打开网页控制台 (延迟确保服务已监听)

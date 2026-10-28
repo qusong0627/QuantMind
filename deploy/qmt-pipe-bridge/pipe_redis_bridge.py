@@ -64,7 +64,7 @@ DEFAULT_CONFIG = {
     'tap': {'enabled': True, 'interval_s': 0.5, 'subscribe_refresh_s': 60,
             'max_symbols': 250, 'respect_budget': False},
     'source_http': {'enabled': True, 'host': '127.0.0.1', 'port': 17720,
-                    'stale_after_s': 30},
+                    'stale_after_s': 30, 'allow_orders': False},
 }
 
 # ---------------------------------------------------------------- 日志
@@ -725,7 +725,11 @@ _SOURCE_METHODS = {'get_market_snapshot', 'snapshot', 'get_full_tick', 'get_mark
                    'ping', 'get_asset', 'get_positions', 'account_snapshot',
                    'query_orders', 'query_trades', 'get_instrument_detail',
                    # 只读诊断：资产行全字段 / ORDER/DEAL 字段名（不返回订单值）
-                   'query_account_infos', 'describe_trade_detail_fields'}
+                   'query_account_infos', 'describe_trade_detail_fields',
+                   # 写入面：默认关（source_http.allow_orders=false），且策略
+                   # ALLOW_ORDER_METHODS 必须同时打开；风控/幂等在本层执行
+                   'order_stock', 'submit_order',
+                   'cancel_order_stock', 'cancel_order'}
 
 
 def _redis_hash(code_key):
@@ -887,6 +891,31 @@ def _source_call(method, params):
         if params.get('strategy_name') is not None:
             req['strategy_name'] = str(params.get('strategy_name'))
         return rpc('query_trades', req, timeout=25)
+    if method in ('order_stock', 'submit_order'):
+        if not bool(CFG.get('source_http.allow_orders')):
+            raise ValueError('orders disabled on qmt source')
+        gate = risk_gate(method, params)
+        if gate:
+            raise ValueError(gate)
+        request = {'method': method, 'params': params}
+        hit = idempotent_lookup(request)
+        if hit is not None:
+            return hit
+        result = rpc('order_stock', params, timeout=30)
+        key = _idem_key(request)
+        status = (str((result or {}).get('status') or '').upper()
+                  if isinstance(result, dict) else '')
+        if key and status not in ('REJECTED', 'ERROR'):
+            try:
+                R.set(key, json.dumps(result, ensure_ascii=False, default=str),
+                      ex=86400)
+            except Exception:
+                pass
+        return result
+    if method in ('cancel_order_stock', 'cancel_order'):
+        if not bool(CFG.get('source_http.allow_orders')):
+            raise ValueError('orders disabled on qmt source')
+        return rpc('cancel_order_stock', params, timeout=30)
     if method == 'get_instrument_detail':
         code = params.get('code') or params.get('stock_code')
         if not code:
