@@ -52,10 +52,22 @@ const SeriesChart: React.FC<{ detail: FlowStockDetailResponse; height?: number }
     const dates = detail.series.map((p) => p.date.slice(5));
     const main = detail.series.map((p) => p.main ?? null);
     const close = detail.series.map((p) => p.close ?? null);
+    const fwd5 = detail.series.map((p) => p.fwd_5d ?? null);
     const hasClose = close.some((c) => c !== null);
+    const hasFwd = fwd5.some((v) => v !== null);
     chart.setOption(
       {
-        grid: { left: 46, right: hasClose ? 46 : 12, top: 18, bottom: 20 },
+        grid: { left: 46, right: hasFwd ? 84 : hasClose ? 46 : 12, top: hasFwd ? 28 : 18, bottom: 20 },
+        legend: hasFwd
+          ? {
+              top: 0,
+              right: 58,
+              itemWidth: 10,
+              itemHeight: 6,
+              textStyle: { fontSize: 9, color: '#64748b' },
+              data: ['主力净额', '收盘价', '之后5日'],
+            }
+          : undefined,
         tooltip: {
           trigger: 'axis',
           formatter: (ps: any[]) => {
@@ -67,7 +79,8 @@ const SeriesChart: React.FC<{ detail: FlowStockDetailResponse; height?: number }
               `主力净额：<b style="color:${(p.main ?? 0) >= 0 ? INFLOW_COLOR : OUTFLOW_COLOR}">${fmtSeriesYi(p.main)}</b><br/>` +
               `超大 ${fmtSeriesYi(p.super)} · 大 ${fmtSeriesYi(p.large)}<br/>` +
               `中 ${fmtSeriesYi(p.medium)} · 小 ${fmtSeriesYi(p.small)}<br/>` +
-              `净额比：${fmtRatio(p.net_ratio)} · 收盘 ${p.close ?? '—'}（${fmtPct(p.pct_change)}）</div>`
+              `净额比：${fmtRatio(p.net_ratio)} · 收盘 ${p.close ?? '—'}（${fmtPct(p.pct_change)}）<br/>` +
+              `<span style="color:#7c3aed">之后：5日 ${fmtPct(p.fwd_5d)} · 10日 ${fmtPct(p.fwd_10d)} · 20日 ${fmtPct(p.fwd_20d)}</span></div>`
             );
           },
         },
@@ -91,7 +104,21 @@ const SeriesChart: React.FC<{ detail: FlowStockDetailResponse; height?: number }
                 {
                   type: 'value',
                   scale: true,
+                  position: 'right',
                   axisLabel: { fontSize: 9, color: '#94a3b8' },
+                  splitLine: { show: false },
+                },
+              ]
+            : []),
+          ...(hasFwd
+            ? [
+                {
+                  type: 'value',
+                  name: '%',
+                  nameTextStyle: { fontSize: 9, color: '#a855f7' },
+                  position: 'right',
+                  offset: 42,
+                  axisLabel: { fontSize: 9, color: '#a855f7', formatter: (v: number) => `${v.toFixed(0)}%` },
                   splitLine: { show: false },
                 },
               ]
@@ -118,6 +145,20 @@ const SeriesChart: React.FC<{ detail: FlowStockDetailResponse; height?: number }
                   connectNulls: true,
                   lineStyle: { color: '#6366f1', width: 1.5 },
                   itemStyle: { color: '#6366f1' },
+                },
+              ]
+            : []),
+          ...(hasFwd
+            ? [
+                {
+                  name: '之后5日',
+                  type: 'line',
+                  yAxisIndex: 2,
+                  data: fwd5,
+                  symbolSize: 3,
+                  connectNulls: false,
+                  lineStyle: { color: '#a855f7', width: 1.2, type: 'dashed' },
+                  itemStyle: { color: '#a855f7' },
                 },
               ]
             : []),
@@ -312,6 +353,11 @@ export const StockFlowDetailCard: React.FC<StockFlowDetailCardProps> = ({
             <span className="text-[10px] font-mono text-slate-400">{detail.trade_date} · 单位：亿元</span>
           </div>
           <SeriesChart detail={detail} />
+          {detail.series.some((p) => p.fwd_5d !== null && p.fwd_5d !== undefined) && (
+            <p className="text-[9px] text-slate-400 -mt-1">
+              紫色虚线＝之后 5 日涨跌（close(t)→close(t+5)，仅历史回看；最新几天没有未来数据）
+            </p>
+          )}
 
           <div className="flex items-stretch gap-2">
             <WindowCard label="当日" w={detail.windows['1d']} />

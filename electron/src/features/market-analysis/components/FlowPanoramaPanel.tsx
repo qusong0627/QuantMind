@@ -28,6 +28,7 @@ import { SectorBoardList, SectorDetailPanel } from './SectorFlowWorkbench';
 import { EvidenceHitList } from './EvidenceHitList';
 import { StockFlowDetailCard } from './StockFlowDetailCard';
 import { FlowEvidencePanel } from './FlowEvidencePanel';
+import { FlowPredictiveCard } from './FlowPredictiveCard';
 import { TagBrowserStrip } from './TagBrowserStrip';
 import { normalizeStockCode } from '../../../utils/portfolioUtils';
 import {
@@ -447,6 +448,9 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
           />
         </div>
       )}
+
+      {/* ── 资金流预测力（研究证据）：净流入金额对照 / 质量分分位 / 5×5 热力图 / 形态 ── */}
+      <FlowPredictiveCard date={date} onSelectStock={handleSelectStock} />
 
       {/* ── 工作台 v5：左列一窗两签（延续命中榜 ⇄ 板块榜）+ 右列板块明细（选中个股再加挂个股卡）。
           任一行点击联动桑基高亮与右侧明细；两签常挂载（hidden 切换，避免切签重取证据）。 ── */}

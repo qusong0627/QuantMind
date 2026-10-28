@@ -24,7 +24,7 @@ from backend.shared.factor_board import config as _fb_config
 
 logger = logging.getLogger(__name__)
 
-from . import flow_panorama, quantdb_feed, quantdb_snapshot as _snap
+from . import flow_panorama, flow_predictive, quantdb_feed, quantdb_snapshot as _snap
 from . import sentiment as _sentiment
 from . import smart_money as _sm
 from .domain import SectorConflictError, SectorNotFoundError
@@ -563,6 +563,16 @@ async def get_stock_money_flow_full(
         # 显式历史日期无快照 → 返回空，不回落实时，避免日期错配
         return []
     return await asyncio.to_thread(quantdb_feed.get_stock_money_flow_full)
+
+
+@router.get("/money-flow/predictive")
+async def get_flow_predictive(
+    date: str | None = Query(default=None, description="快照日期 YYYY-MM-DD，默认最新"),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """资金流预测力：离线研究产物 + 当日质量分/形态匹配（口径见 flow_quality.py）。"""
+    _ = current_user
+    return await asyncio.to_thread(flow_predictive.get_predictive, date)
 
 
 @router.get("/money-flow/panorama")

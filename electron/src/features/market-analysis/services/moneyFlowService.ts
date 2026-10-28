@@ -189,6 +189,10 @@ export interface FlowStockSeriesPoint {
   net_ratio: number | null;
   close: number | null;
   pct_change: number | null;
+  /** 事后 5/10/20 日涨跌（%，close(t)→close(t+h)）；仅历史回看，最新几天为 null */
+  fwd_5d?: number | null;
+  fwd_10d?: number | null;
+  fwd_20d?: number | null;
 }
 
 export interface FlowStockAttribution {
@@ -570,4 +574,92 @@ export function panoramaEmptyHint(reason: string | undefined): string {
     default:
       return '资金流全景数据不可用';
   }
+}
+
+/* ── 资金流预测力（/money-flow/predictive）──────────────────────────────
+ * 研究产物（离线）+ 当日质量分/形态匹配；缺失一律显式 available=false，
+ * 前端隐藏统计区，不拿 0 或旧数据冒充。 */
+export interface FlowPredictiveStatRow {
+  q: number;
+  n: number;
+  mean: number | null;
+  stock_win: number | null;
+  date_win: number | null;
+  date_mean: number | null;
+}
+
+export interface FlowPredictivePattern {
+  pattern: string;
+  h: number;
+  n: number;
+  date_win: number | null;
+  date_mean: number | null;
+  stock_win: number | null;
+  yearly?: Record<string, number | null>;
+}
+
+export interface FlowPredictiveHeatmap {
+  mean: (number | null)[][];
+  win: (number | null)[][];
+  n: number[][];
+}
+
+export interface FlowPredictiveArtifact {
+  schema?: string;
+  built_at?: string;
+  trade_date?: string;
+  window?: [string, string];
+  tables?: Record<string, FlowPredictiveStatRow[]>;
+  patterns?: Record<string, FlowPredictivePattern>;
+  [key: `heatmap_exec_h${number}`]: FlowPredictiveHeatmap | undefined;
+  conventions?: Record<string, string>;
+  disclosure?: string;
+}
+
+export interface FlowScoreRow {
+  symbol: string;
+  name: string;
+  industry: string | null;
+  score: number;
+  components?: Record<string, number | null>;
+  net_ratio?: number | null;
+  z20?: number | null;
+  r5?: number | null;
+  close?: number | null;
+  pct_change?: number | null;
+}
+
+export interface FlowSectorScore {
+  name: string;
+  score: number | null;
+  n: number;
+}
+
+export interface FlowPredictiveCurrent {
+  available: boolean;
+  trade_date?: string;
+  reason?: string;
+  coverage?: { scored: number };
+  top?: FlowScoreRow[];
+  bottom?: FlowScoreRow[];
+  patterns?: Record<string, { count: number; items: FlowScoreRow[] }>;
+  sectors_top?: FlowSectorScore[];
+  sectors_bottom?: FlowSectorScore[];
+}
+
+export interface FlowPredictiveResponse {
+  available: boolean;
+  artifact: FlowPredictiveArtifact | null;
+  current: FlowPredictiveCurrent;
+  meta: {
+    score_definition: string;
+    components: { key: string; sign: number; label: string; note: string }[];
+    universe: string;
+    disclosure: string;
+  };
+}
+
+export async function getFlowPredictive(date?: string): Promise<FlowPredictiveResponse> {
+  const qs = date ? `?date=${encodeURIComponent(date)}` : '';
+  return flowGet<FlowPredictiveResponse>(`/money-flow/predictive${qs}`);
 }

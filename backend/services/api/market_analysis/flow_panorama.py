@@ -22,6 +22,7 @@ from datetime import date as _date
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from backend.shared import flow_evidence
@@ -36,6 +37,7 @@ from .quantdb_feed import (
     _load_l2_flow,
     _load_prices,
     _normalize_prefix,
+    _read_partitioned,
     _sector_members,
     placeholder_symbols_by_dt,
 )
@@ -933,6 +935,41 @@ def _stock_detail_impl(
             )
     names = _instrument_names()
 
+    # 事后 h 日涨跌：close(t)→close(t+h)，仅历史回看的展示字段，不参与信号。
+    # 最新几天自然没有未来价 → null；不向前填充、不回落成 0。
+    fwd_map: dict[str, dict[str, float | None]] = {}
+    series_dates = sorted(days_list[:days])
+    if series_dates:
+        fwd_dates_desc = [
+            d
+            for d in _get_partition_dates("1_kline_data/daily_forward")
+            if d >= series_dates[0]
+        ][: len(series_dates) + 25]
+        if fwd_dates_desc:
+            fw = _read_partitioned(
+                "1_kline_data/daily_forward", fwd_dates_desc, "symbol, close"
+            )
+            if not fw.empty and "symbol" in fw.columns:
+                fw = fw[fw["symbol"] == suffix].copy()
+                fw["dt"] = fw["dt"].astype(str)
+                asc = sorted(fwd_dates_desc)
+                close_seq = fw.set_index("dt")["close"].reindex(asc)
+                vals = close_seq.to_numpy(dtype=float)
+                pos = {d: i for i, d in enumerate(asc)}
+                for d in series_dates:
+                    i = pos.get(d)
+                    if i is None or not np.isfinite(vals[i]) or vals[i] <= 0:
+                        continue
+                    item: dict[str, float | None] = {}
+                    for h in (5, 10, 20):
+                        j = i + h
+                        item[f"fwd_{h}d"] = (
+                            round(float(vals[j] / vals[i] - 1.0) * 100, 2)
+                            if j < len(vals) and np.isfinite(vals[j])
+                            else None
+                        )
+                    fwd_map[d] = item
+
     # 序列（升序，亿元；缺失日落 null 不落 0）
     flow_by_dt = sym_flow.set_index("dt")
     series: list[dict[str, Any]] = []
@@ -952,6 +989,7 @@ def _stock_detail_impl(
                     "net_ratio": _ratio(float(r["main"]), float(r["amount_y"])),
                     "close": close,
                     "pct_change": pct,
+                    **fwd_map.get(d, {}),
                 }
             )
         elif close is not None:
@@ -967,6 +1005,7 @@ def _stock_detail_impl(
                     "net_ratio": None,
                     "close": close,
                     "pct_change": pct,
+                    **fwd_map.get(d, {}),
                 }
             )
 
@@ -1021,6 +1060,7 @@ def _stock_detail_impl(
             "series_unit": "yi",
             "window_days": [days_list[min(days, len(days_list)) - 1], days_list[0]],
             "disclosure": STOCK_DISCLOSURE,
+            "forward_note": "fwd_5d/10d/20d = close(t)→close(t+h)，仅事后回看展示，不参与信号",
         },
     }
 

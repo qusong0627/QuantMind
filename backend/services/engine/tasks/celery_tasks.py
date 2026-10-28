@@ -1811,6 +1811,43 @@ def run_flow_evidence_build() -> dict[str, Any]:
         data_dir = os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb")
         out_dir = _Path(flow_evidence.resolve_evidence_dir())
 
+        # 资金流预测力研究产物（周更）：分钟级统计很稳，不必每天重算；
+        # 当日质量分/形态匹配由 API 实时算，不依赖这份产物。失败只告警，不影响证据链。
+        pred_dir = _Path(data_dir).parent / "market-analysis" / "flow_predictive"
+        pred_path = pred_dir / "flow_predictive.json"
+        try:
+            fresh = (
+                pred_path.is_file()
+                and (datetime.now().timestamp() - pred_path.stat().st_mtime) < 7 * 86400
+            )
+        except OSError:
+            fresh = False
+        if not fresh:
+            pred_cmd = [
+                sys.executable,
+                "-m",
+                "backend.scripts.market_analysis.build_flow_predictive",
+                "--data-dir",
+                data_dir,
+                "--out-dir",
+                str(pred_dir),
+            ]
+            logger.info("[FlowPredictive] 开始: %s", " ".join(str(c) for c in pred_cmd))
+            try:
+                pred = subprocess.run(
+                    pred_cmd, cwd=str(root), capture_output=True, text=True, timeout=1800
+                )
+                if pred.returncode != 0:
+                    logger.warning(
+                        "[FlowPredictive] 失败 code=%d stderr=%s",
+                        pred.returncode,
+                        pred.stderr[-1500:],
+                    )
+                else:
+                    logger.info("[FlowPredictive] 完成\n%s", pred.stdout[-1200:])
+            except Exception as pexc:  # noqa: BLE001
+                logger.warning("[FlowPredictive] 异常（不影响证据链）: %s", pexc)
+
         # 新鲜度门控：库内最新 L2 分区未超前产物交易日 → 无事可做
         l2_dir = _Path(data_dir) / "6_ml_datasets" / "l2_factors"
         partitions = sorted(p.name[3:] for p in l2_dir.glob("dt=*") if p.is_dir())
