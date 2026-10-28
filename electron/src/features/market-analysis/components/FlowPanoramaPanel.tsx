@@ -20,7 +20,7 @@
  * - 左列签（boardTab）null=按证据产物自动（有连N证据默认命中榜），用户点选后固定。
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Spin } from 'antd';
 import { Clock, Info, AlertCircle, Network, RefreshCw, Waves } from 'lucide-react';
 import { FlowSankeyV2 } from './FlowSankeyV2';
@@ -29,10 +29,12 @@ import { EvidenceHitList } from './EvidenceHitList';
 import { StockFlowDetailCard } from './StockFlowDetailCard';
 import { FlowEvidencePanel } from './FlowEvidencePanel';
 import { FlowPredictiveCard } from './FlowPredictiveCard';
+import { FlowProbabilityCard } from './FlowProbabilityCard';
 import { TagBrowserStrip } from './TagBrowserStrip';
 import { normalizeStockCode } from '../../../utils/portfolioUtils';
 import {
   getFlowPanorama,
+  getFlowProbability,
   getFlowSector,
   MoneyFlowError,
   panoramaEmptyHint,
@@ -41,6 +43,7 @@ import {
   type FlowPanoramaNode,
   type FlowPanoramaResponse,
   type FlowPeriod,
+  type FlowProbabilityResponse,
   type FlowSectorDetailResponse,
   type FlowSectorSet,
   type FlowStockDetailResponse,
@@ -169,9 +172,26 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
   const [hitLevel, setHitLevel] = useState<number | null>(null);
   /** 左列签（v5）：null=按证据产物自动（有连N证据默认命中榜，否则板块榜），用户点选后固定。 */
   const [boardTab, setBoardTab] = useState<'streak' | 'board' | null>(null);
+  const [colorMode, setColorMode] = useState<'flow' | 'prob'>('flow');
+  const [probData, setProbData] = useState<FlowProbabilityResponse | null>(null);
 
   const panoSeq = useRef(0);
   const detailSeq = useRef(0);
+
+  // 概率模型产物（着色/列表用；与全景独立取数，失败不影响主图）
+  useEffect(() => {
+    let cancelled = false;
+    getFlowProbability(date)
+      .then((d) => {
+        if (!cancelled) setProbData(d);
+      })
+      .catch(() => {
+        if (!cancelled) setProbData(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [date]);
 
   // ── 全景取数（周期/体系/方向/TopK/快照日期/手动刷新 全量重取） ──
   useEffect(() => {
@@ -308,6 +328,29 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
   const evidenceOk = data?.meta.evidence?.available === true;
   const flowTab: 'streak' | 'board' = boardTab ?? (evidenceOk ? 'streak' : 'board');
 
+  const probReady = Boolean(probData?.available && probData.as_of_latest && probData.artifact);
+  const probByKey = useMemo(() => {
+    if (!probReady) return undefined;
+    const map: Record<string, number | null> = {};
+    const stocks = probData?.artifact?.latest?.stocks?.prob_map ?? {};
+    for (const [sym, vals] of Object.entries(stocks)) map[sym] = vals['5'] ?? null;
+    for (const sec of probData?.artifact?.latest?.sectors ?? []) {
+      map[sec.name] = (sec.p5 as number | null | undefined) ?? null;
+    }
+    return map;
+  }, [probReady, probData]);
+  const probHi = probData?.artifact?.thresholds?.['5']?.hi ?? 0.55;
+  const probLo = probData?.artifact?.thresholds?.['5']?.lo ?? 0.45;
+  const sectorThresholds = useMemo(() => {
+    const vals = (probData?.artifact?.latest?.sectors ?? [])
+      .map((s) => (s.p5 as number | null | undefined))
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    if (vals.length < 10) return { hi: 0.5, lo: 0.42 };
+    vals.sort((a, b) => a - b);
+    const q = (p: number) => vals[Math.min(vals.length - 1, Math.floor(p * vals.length))];
+    return { hi: q(0.8), lo: q(0.2) };
+  }, [probData]);
+
   const strip = evidenceStrip(data?.meta.evidence);
   const stripClass =
     strip?.tone === 'warn'
@@ -347,6 +390,17 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
                   Top {k}
                 </Chip>
               ))}
+            </Group>
+            <Group label="着色">
+              <Chip active={colorMode === 'flow'} onClick={() => setColorMode('flow')}>
+                净额
+              </Chip>
+              <Chip
+                active={colorMode === 'prob'}
+                onClick={() => probReady && setColorMode('prob')}
+              >
+                概率{probReady ? '' : '（未就绪）'}
+              </Chip>
             </Group>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -434,7 +488,9 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
               <span>主力与散户资金流全景 · 四层桑基（主体 → 单型 → 板块 → 个股）</span>
             </h3>
             <span className="text-[10px] text-slate-400 font-mono">
-              红=净流入 · 绿=净流出 · 边宽=|净额| · 个股层=每板块流入/流出双侧 · 点节点联动左列榜单与右侧明细
+              {colorMode === 'prob'
+                ? '节点红=模型分高（未来强）/绿=低 · 边宽=|当前净额| · 个股层=每板块流入/流出双侧'
+                : '红=净流入 · 绿=净流出 · 边宽=|净额| · 个股层=每板块流入/流出双侧 · 点节点联动左列榜单与右侧明细'}
             </span>
           </div>
           <FlowSankeyV2
@@ -445,9 +501,18 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
             selectedSector={selectedSector}
             onSelectSector={selectSector}
             onSelectStock={(n: FlowPanoramaNode) => handleSelectStock(n.key, n.name)}
+            colorMode={colorMode}
+            probByKey={probByKey}
+            probHi={probHi}
+            probLo={probLo}
+            sectorProbHi={sectorThresholds.hi}
+            sectorProbLo={sectorThresholds.lo}
           />
         </div>
       )}
+
+      {/* ── 未来强度概率（模型）：排序分 / 逆流候选 / 板块成分聚合 ── */}
+      <FlowProbabilityCard date={date} onSelectStock={handleSelectStock} />
 
       {/* ── 资金流预测力（研究证据）：净流入金额对照 / 质量分分位 / 5×5 热力图 / 形态 ── */}
       <FlowPredictiveCard date={date} onSelectStock={handleSelectStock} />

@@ -30,20 +30,49 @@ export interface FlowSankeyV2Props {
   selectedSector?: string | null;
   onSelectSector: (name: string) => void;
   onSelectStock: (node: FlowPanoramaNode) => void;
+  /** flow=按当前净额着色；prob=按模型分着色（节点，边仍按净额） */
+  colorMode?: 'flow' | 'prob';
+  /** 模型分（0~1）：板块名 / 个股前缀码 → 分数 */
+  probByKey?: Record<string, number | null>;
+  probHi?: number;
+  probLo?: number;
+  /** 板块聚合概率的独立阈值（板块分布比个股窄） */
+  sectorProbHi?: number;
+  sectorProbLo?: number;
 }
 
-function nodeColor(n: FlowPanoramaNode): string {
+function nodeColor(
+  n: FlowPanoramaNode,
+  colorMode: 'flow' | 'prob',
+  probByKey: Record<string, number | null> | undefined,
+  probHi: number,
+  probLo: number,
+  sectorProbHi: number,
+  sectorProbLo: number,
+): string {
   if (n.kind === 'entity') return ENTITY_COLORS[n.key] || '#64748b';
   if (n.kind === 'size') {
     const pair = SIZE_COLORS[n.key];
     if (pair) return n.sign >= 0 ? pair[0] : pair[1];
   }
+  if (colorMode === 'prob' && (n.kind === 'sector' || n.kind === 'stock')) {
+    const p = probByKey?.[n.key];
+    if (p === null || p === undefined) return '#cbd5e1';
+    const hi = n.kind === 'sector' ? sectorProbHi : probHi;
+    const lo = n.kind === 'sector' ? sectorProbLo : probLo;
+    if (p >= hi) return INFLOW_COLOR;
+    if (p <= lo) return OUTFLOW_COLOR;
+    return '#94a3b8';
+  }
   return n.sign >= 0 ? INFLOW_COLOR : OUTFLOW_COLOR;
 }
 
-function nodeTooltipHtml(n: FlowPanoramaNode): string {
+function nodeTooltipHtml(n: FlowPanoramaNode, prob?: number | null): string {
   const rows: string[] = [];
   rows.push(`<div style="font-weight:800;font-size:12px;margin-bottom:4px">${n.name}</div>`);
+  if (prob !== undefined && prob !== null) {
+    rows.push(`模型分：<b>${(prob * 100).toFixed(1)}</b>（未来强度排序，非真实胜率）`);
+  }
   if (n.kind === 'sector') {
     rows.push(`主力净额：<b style="color:${n.sign >= 0 ? INFLOW_COLOR : OUTFLOW_COLOR}">${fmtYi(n.net)}</b>`);
     rows.push(`合计净额（含散户）：${fmtYi(n.net_total ?? null)}`);
@@ -80,6 +109,12 @@ export const FlowSankeyV2: React.FC<FlowSankeyV2Props> = ({
   selectedSector,
   onSelectSector,
   onSelectStock,
+  colorMode = 'flow',
+  probByKey,
+  probHi = 0.55,
+  probLo = 0.45,
+  sectorProbHi = 0.5,
+  sectorProbLo = 0.42,
 }) => {
   const chartRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<echarts.ECharts | null>(null);
@@ -96,7 +131,15 @@ export const FlowSankeyV2: React.FC<FlowSankeyV2Props> = ({
           depth: n.layer - 1,
           _node: n,
           itemStyle: {
-            color: nodeColor(n),
+            color: nodeColor(
+              n,
+              colorMode,
+              probByKey,
+              probHi,
+              probLo,
+              sectorProbHi,
+              sectorProbLo,
+            ),
             borderColor: highlighted ? '#f59e0b' : '#ffffff',
             borderWidth: highlighted ? 3 : 1,
             borderRadius: 3,
@@ -111,7 +154,7 @@ export const FlowSankeyV2: React.FC<FlowSankeyV2Props> = ({
           },
         };
       }),
-    [nodes, selectedSector],
+    [nodes, selectedSector, colorMode, probByKey, probHi, probLo, sectorProbHi, sectorProbLo],
   );
 
   const graphLinks = useMemo(
@@ -153,7 +196,10 @@ export const FlowSankeyV2: React.FC<FlowSankeyV2Props> = ({
         formatter: (params: any) => {
           const node: FlowPanoramaNode | undefined = params?.data?._node;
           const link: FlowPanoramaLink | undefined = params?.data?._link;
-          if (node) return nodeTooltipHtml(node);
+          if (node) {
+            const key = (node as { _node?: FlowPanoramaNode })._node?.key;
+            return nodeTooltipHtml(node, key ? probByKey?.[key] : undefined);
+          }
           if (link) {
             return (
               `<div style="font-size:11px;line-height:1.6">${link.source} → ${link.target}<br/>` +

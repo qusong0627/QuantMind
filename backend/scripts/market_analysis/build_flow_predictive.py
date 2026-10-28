@@ -213,6 +213,55 @@ def _deciles(
     return rows
 
 
+def _state_table(
+    score: pd.DataFrame,
+    net: pd.DataFrame,
+    r5: pd.DataFrame,
+    rel: pd.DataFrame,
+    mask: pd.DataFrame,
+    h: int,
+) -> list[dict]:
+    """资金流状态 → 之后 h 日胜率：净流入方向 × 质量分位 × 过去 5 日涨跌档。
+
+    透明概率表：每格只给历史日期级篮子的胜率与均值，不做点预测；样本不足不输出。
+    """
+    e = rel.where(mask).to_numpy()
+    s = score.where(mask).to_numpy()
+    f = net.where(mask).to_numpy()
+    rr = r5.where(mask).to_numpy()
+    q = np.floor(pd.DataFrame(s).rank(axis=1, pct=True).to_numpy() * 5).clip(0, 4)
+    buckets = ((-np.inf, -3.0), (-3.0, 0.0), (0.0, 3.0), (3.0, np.inf))
+    labels = ("跌>3%", "跌0~3%", "涨0~3%", "涨>3%")
+    rows: list[dict] = []
+    base = np.isfinite(e) & np.isfinite(s) & np.isfinite(f) & np.isfinite(rr)
+    for sign in (0, 1):
+        flow_mask = base & ((f > 0) == bool(sign))
+        for qi in range(5):
+            for bi, (lo, hi) in enumerate(buckets):
+                m = flow_mask & (q == qi) & (rr > lo) & (rr <= hi)
+                n = int(m.sum())
+                if n < 500:
+                    continue
+                daily = np.nanmean(np.where(m, e, np.nan), axis=1)
+                daily = daily[np.isfinite(daily)]
+                if len(daily) < 20:
+                    continue
+                idx = np.arange(0, len(daily), h)
+                vals = e[m]
+                rows.append(
+                    {
+                        "flow": "inflow" if sign else "outflow",
+                        "quality_q": qi + 1,
+                        "r5_bucket": labels[bi],
+                        "n": n,
+                        "date_win": round(float((daily[idx] > 0).mean()), 3),
+                        "date_mean": round(float(daily[idx].mean()), 3),
+                        "stock_win": round(float((vals > 0).mean()), 3),
+                    }
+                )
+    return rows
+
+
 def _pattern(
     sig: pd.DataFrame, rel: pd.DataFrame, mask: pd.DataFrame, h: int, label: str
 ) -> dict | None:
@@ -324,6 +373,7 @@ def build(
     for h in HORIZONS:
         tables[f"composite_exec_h{h}"] = _deciles(score, rel[h], mask, h)
         tables[f"net_exec_h{h}"] = _deciles(net, rel[h], mask, h)
+        tables[f"state_exec_h{h}"] = _state_table(score, net, r5, rel[h], mask, h)
     for nm, frame in (
         ("consistency", features["flow_consistency"]),
         ("sell_pressure", features["micro_trade_sell_pressure"]),

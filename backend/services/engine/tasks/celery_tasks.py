@@ -1848,6 +1848,43 @@ def run_flow_evidence_build() -> dict[str, Any]:
             except Exception as pexc:  # noqa: BLE001
                 logger.warning("[FlowPredictive] 异常（不影响证据链）: %s", pexc)
 
+        # 资金流概率模型（周更）：LightGBM 训练较重，且概率排序变化慢；
+        # 当日概率由产物直接读取，不依赖在线推理。失败只告警，不影响证据链。
+        prob_dir = _Path(data_dir).parent / "market-analysis" / "flow_probability"
+        prob_path = prob_dir / "flow_probability.json"
+        try:
+            prob_fresh = (
+                prob_path.is_file()
+                and (datetime.now().timestamp() - prob_path.stat().st_mtime) < 7 * 86400
+            )
+        except OSError:
+            prob_fresh = False
+        if not prob_fresh:
+            prob_cmd = [
+                sys.executable,
+                "-m",
+                "backend.scripts.market_analysis.build_flow_probability",
+                "--data-dir",
+                data_dir,
+                "--out-dir",
+                str(prob_dir),
+            ]
+            logger.info("[FlowProbability] 开始: %s", " ".join(str(c) for c in prob_cmd))
+            try:
+                prob = subprocess.run(
+                    prob_cmd, cwd=str(root), capture_output=True, text=True, timeout=2400
+                )
+                if prob.returncode != 0:
+                    logger.warning(
+                        "[FlowProbability] 失败 code=%d stderr=%s",
+                        prob.returncode,
+                        prob.stderr[-1500:],
+                    )
+                else:
+                    logger.info("[FlowProbability] 完成\n%s", prob.stdout[-1200:])
+            except Exception as pexc:  # noqa: BLE001
+                logger.warning("[FlowProbability] 异常（不影响证据链）: %s", pexc)
+
         # 新鲜度门控：库内最新 L2 分区未超前产物交易日 → 无事可做
         l2_dir = _Path(data_dir) / "6_ml_datasets" / "l2_factors"
         partitions = sorted(p.name[3:] for p in l2_dir.glob("dt=*") if p.is_dir())

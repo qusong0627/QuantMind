@@ -663,3 +663,117 @@ export async function getFlowPredictive(date?: string): Promise<FlowPredictiveRe
   const qs = date ? `?date=${encodeURIComponent(date)}` : '';
   return flowGet<FlowPredictiveResponse>(`/money-flow/predictive${qs}`);
 }
+
+/* ── 资金流概率模型（/money-flow/probability）──────────────────────────── */
+export interface FlowProbabilityStock {
+  symbol: string;
+  name: string;
+  industry: string | null;
+  net_ratio: number | null;
+  z20: number | null;
+  r5: number | null;
+  amount: number | null;
+  p3?: number | null;
+  p5?: number | null;
+  p10?: number | null;
+  p20?: number | null;
+  /** 未校准排序分（用于展示/着色；p 为 isotonic 校准后的概率） */
+  raw3?: number | null;
+  raw5?: number | null;
+  raw10?: number | null;
+  raw20?: number | null;
+}
+
+export interface FlowProbabilitySector {
+  name: string;
+  n: number;
+  net_ratio: number | null;
+  p3?: number | null;
+  p5?: number | null;
+  p10?: number | null;
+  p20?: number | null;
+  /** 未校准排序分（用于展示/着色；p 为 isotonic 校准后的概率） */
+  raw3?: number | null;
+  raw5?: number | null;
+  raw10?: number | null;
+  raw20?: number | null;
+}
+
+export interface FlowProbabilityStocks {
+  prob_map: Record<string, Record<string, number | null>>;
+  top_3?: FlowProbabilityStock[];
+  top_5?: FlowProbabilityStock[];
+  top_10?: FlowProbabilityStock[];
+  top_20?: FlowProbabilityStock[];
+  bottom_3?: FlowProbabilityStock[];
+  bottom_5?: FlowProbabilityStock[];
+  bottom_10?: FlowProbabilityStock[];
+  bottom_20?: FlowProbabilityStock[];
+  outflow_strong_3?: FlowProbabilityStock[];
+  outflow_strong_5?: FlowProbabilityStock[];
+  outflow_strong_10?: FlowProbabilityStock[];
+  outflow_strong_20?: FlowProbabilityStock[];
+  inflow_weak_3?: FlowProbabilityStock[];
+  inflow_weak_5?: FlowProbabilityStock[];
+  inflow_weak_10?: FlowProbabilityStock[];
+  inflow_weak_20?: FlowProbabilityStock[];
+}
+
+export interface FlowProbabilityMetrics {
+  auc?: number;
+  top_mean?: number;
+  bot_mean?: number;
+  top_hit?: number;
+  base_hit?: number;
+  n_days?: number;
+}
+
+export interface FlowProbabilityArtifact {
+  schema?: string;
+  built_at?: string;
+  trade_date: string;
+  window?: [string, string];
+  features?: string[];
+  conventions?: Record<string, string>;
+  metrics?: Record<string, FlowProbabilityMetrics>;
+  thresholds?: Record<string, { hi: number | null; lo: number | null }>;
+  latest: {
+    stocks: FlowProbabilityStocks;
+    prob_map?: Record<string, Record<string, number | null>>;
+    sectors: FlowProbabilitySector[];
+  };
+}
+
+export interface FlowProbabilityIntentStock {
+  news_score?: number | null;
+  news_n?: number;
+  news_pos?: number;
+  news_neg?: number;
+  lhb_net?: number;
+  lhb_inst_net?: number;
+  block_amount?: number;
+  block_premium?: number | null;
+}
+
+export interface FlowProbabilityIntent {
+  trade_date: string;
+  stocks: Record<string, FlowProbabilityIntentStock>;
+  news_coverage?: string;
+  smart_coverage?: string;
+}
+
+export interface FlowProbabilityResponse {
+  available: boolean;
+  reason?: string;
+  hint?: string;
+  trade_date?: string;
+  requested_date?: string | null;
+  as_of_latest?: boolean;
+  artifact?: FlowProbabilityArtifact;
+  intent?: FlowProbabilityIntent;
+}
+
+export async function getFlowProbability(date?: string): Promise<FlowProbabilityResponse> {
+  const qs = date ? `?date=${encodeURIComponent(date)}` : '';
+  return flowGet<FlowProbabilityResponse>(`/money-flow/probability${qs}`);
+}

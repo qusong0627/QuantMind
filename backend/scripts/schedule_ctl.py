@@ -760,6 +760,25 @@ def _run_flow_evidence(date_str: str | None, force: bool) -> int:
     return 1
 
 
+def _run_flow_probability(date_str: str | None, force: bool) -> int:
+    """资金流概率模型：立刻全量重训并预测最新日（周更即可）。"""
+    script = os.path.join(
+        PROJECT_ROOT,
+        "backend",
+        "scripts",
+        "market_analysis",
+        "build_flow_probability.py",
+    )
+    data_dir = os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb")
+    out_dir = os.path.join(
+        os.path.dirname(data_dir.rstrip("/")), "market-analysis", "flow_probability"
+    )
+    cmd = [sys.executable, script, "--data-dir", data_dir, "--out-dir", out_dir]
+    print(f"执行 {' '.join(cmd)}（输出直通）...")
+    completed = subprocess.run(cmd, check=False)
+    return 0 if completed.returncode == 0 else 1
+
+
 def _run_flow_predictive(date_str: str | None, force: bool) -> int:
     """资金流预测力研究产物：立刻全量重建（统计产物，周更即可）。"""
     script = os.path.join(
@@ -852,6 +871,7 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     # 资金流延续证据（重跑 = 立刻按日更形态全史再构建一份；同日覆盖，原子写）
     "flow_evidence": _run_flow_evidence,
     "flow_predictive": _run_flow_predictive,
+    "flow_probability": _run_flow_probability,
     "smart_money": _run_smart_money,
     # 港股聪明钱产物（重跑 = 立刻按全量重算一份；--date 不适用）
     "hk_smart_money": _run_hk_smart_money,
