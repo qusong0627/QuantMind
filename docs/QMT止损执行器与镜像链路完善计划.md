@@ -1,6 +1,6 @@
 # QMT 真单链路完善计划（实盘压测问题闭环）
 
-> 背景：2026-09-10 ~ 09-11 对 40327478 真账户做了买卖压测（含止盈止损、未成交、涨跌停、
+> 背景：2026-09-10 ~ 09-11 对真账户做了买卖压测（含止盈止损、未成交、涨跌停、
 > 部分成交场景）。本文是发现问题的闭环计划，所有结论都有实测或代码证据。
 > 相关模块：`backend/services/live_trading/services/`（qmt_exec_*、real_mirror_service、
 > internal_strategy_dispatcher、trading_engine）、`backend/services/trade/services/order_timeout_scanner.py`。

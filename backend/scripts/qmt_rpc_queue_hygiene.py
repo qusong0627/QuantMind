@@ -15,8 +15,8 @@
 
 用法（容器内）::
 
-    python scripts/qmt_rpc_queue_hygiene.py --account 40327478            # 体检
-    python scripts/qmt_rpc_queue_hygiene.py --account 40327478 \
+    python scripts/qmt_rpc_queue_hygiene.py --account <QMT_ACCOUNT>            # 体检
+    python scripts/qmt_rpc_queue_hygiene.py --account <QMT_ACCOUNT> \
         --trim --drop-methods query_stock_orders,query_stock_asset,subscribe_whole_quote
 """
 

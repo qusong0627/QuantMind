@@ -2,7 +2,7 @@
 # 大 QMT 桥 + 备源席一体体检（宿主执行；内部用 docker exec）
 # 用法: bash qmt_bridge_status.sh [资金账号] [容器名]
 set -uo pipefail
-ACCT="${1:-40327478}"
+ACCT="${1:-${QMT_EXEC_ACCOUNT_ID:?请设置 QMT_EXEC_ACCOUNT_ID 或传第一个参数}}"
 C="${2:-quantmind}"
 
 echo "== 大 QMT 桥体检 $(date '+%F %T %Z')（账号 $ACCT）=="
