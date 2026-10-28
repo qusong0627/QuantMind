@@ -1,10 +1,13 @@
-"""QMT 执行端账户快照同步。
+"""QMT 账户快照同步。
 
 定期把大 QMT 的资金/持仓落库到 ``real_account_snapshots``（与 TDX 桥同表同口径），
 供前端 REAL 模式 ``/account`` 与对账视图读取。
 
-与 TDX 版本的差异：
-  * 数据源是 ``qmt_exec_client``（big-convert RPC），不是 HTTP 桥；
+数据源（2026-10-28 起）：
+  * 默认 ``QMT_ACCOUNT_SOURCE=bridge`` → ``QmtBridgeClient``，即
+    ``POST {TDX_BRIDGE_URL}/api/v1/account/query {"source":"qmt"}``；
+    **所有外部取数都经通达信桥 8550**（伴生桥 17720 只在本机）。
+  * 显式设 ``QMT_ACCOUNT_SOURCE=qmt_exec`` 才回退旧的 Redis RPC 直连。
   * 持仓缺现价时用 QuantDB 最近收盘价补全（与模拟撮合同源）；
   * 零资产守卫：桥未就绪/非交易时段返回空账户时不落库，避免 0 资产快照
     污染日终账本与收益计算。
@@ -20,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.shared.simulation_account_keys import resolve_db_account_user
+from backend.services.live_trading.services.qmt_bridge_client import QmtBridgeClient
 from backend.services.live_trading.services.qmt_exec_client import (
     QmtExecClient,
     QmtExecError,
@@ -31,6 +35,32 @@ from backend.services.live_trading.services.trading_session import is_trading_ti
 logger = logging.getLogger(__name__)
 
 SOURCE = "qmt_exec"
+#: 账户取数默认走桥；设为 qmt_exec 才回退旧 Redis RPC 直连
+QMT_ACCOUNT_SOURCE_DEFAULT = "bridge"
+
+
+#: 桥客户端单例：避免每次取数新建 httpx 连接池
+_bridge_client: QmtBridgeClient | None = None
+
+
+def get_qmt_account_client() -> QmtExecClient | QmtBridgeClient:
+    """账户同步取数客户端：桥优先（架构：外部取数一律经 8550）。"""
+    global _bridge_client
+    source = (
+        str(os.getenv("QMT_ACCOUNT_SOURCE", QMT_ACCOUNT_SOURCE_DEFAULT) or "")
+        .strip()
+        .lower()
+    )
+    if source in ("bridge", "qmt_bridge", "http", ""):
+        if _bridge_client is None:
+            _bridge_client = QmtBridgeClient()
+        if _bridge_client.configured:
+            return _bridge_client
+        logger.warning(
+            "[QmtSync] QMT_ACCOUNT_SOURCE=bridge 但 TDX_BRIDGE_URL/TOKEN 未配置，回退 qmt_exec"
+        )
+    return get_qmt_exec_client()
+
 
 # 快照新鲜度告警：交易时段内超过阈值未成功落库则通知，冷却期内只报一次
 STALE_ALERT_SECONDS_DEFAULT = 300
@@ -102,14 +132,14 @@ class _SyncHealth:
 
 
 class QmtAccountSyncService:
-    """大 QMT 账户 → ``real_account_snapshots``。"""
+    """大 QMT 账户 → ``real_account_snapshots``（默认经桥取数）。"""
 
-    def __init__(self, client: QmtExecClient | None = None):
+    def __init__(self, client: QmtExecClient | QmtBridgeClient | None = None):
         self._client = client
 
     @property
-    def client(self) -> QmtExecClient:
-        return self._client or get_qmt_exec_client()
+    def client(self) -> QmtExecClient | QmtBridgeClient:
+        return self._client or get_qmt_account_client()
 
     async def fetch_account(self) -> dict[str, Any]:
         """拉取并归一化账户全景（资金 + 持仓）。"""
@@ -158,6 +188,9 @@ class QmtAccountSyncService:
             "frozen_cash": float(asset.get("frozen_cash") or 0),
             "market_value": market_value,
             "positions": positions,
+            # 桥回落的历史快照：数字是最后一次可用的，但不能当新快照落库
+            "stale": bool(getattr(client, "last_stale", False)),
+            "snapshot_at": str(getattr(client, "last_snapshot_at", "") or ""),
         }
 
     async def sync_account_to_pg(
@@ -175,6 +208,20 @@ class QmtAccountSyncService:
         except QmtExecError as exc:
             logger.warning("[QmtSync] 拉取账户失败 code=%s: %s", exc.code, exc)
             return {"success": False, "error": str(exc), "code": exc.code}
+
+        # 休市快照（桥回落的历史数据）：跳过落库，避免把旧值写成新快照。
+        # 最后一条真实快照留在库里，前端继续显示它自己的时间。
+        if snapshot.get("stale"):
+            logger.info(
+                "[QmtSync] 休市快照（%s），跳过落库：不把旧数据写成新快照",
+                snapshot.get("snapshot_at") or "时间未知",
+            )
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "stale_snapshot",
+                "position_count": len(snapshot.get("positions") or []),
+            }
 
         total_asset = float(snapshot.get("total_asset") or 0)
         cash = float(snapshot.get("cash") or 0)
@@ -304,7 +351,7 @@ async def run_qmt_account_sync_task(interval_seconds: int = 30) -> None:
     配置即可接管（直接 return 的话就再也没机会醒来，页面开了也永远没有快照）。
     未启用/未配置时低频空转，不给桥与数据库添压力。
     """
-    client = get_qmt_exec_client()
+    client = get_qmt_account_client()
     interval = max(10, int(interval_seconds))
     stale_threshold = _env_seconds(
         "QMT_SYNC_STALE_ALERT_SECONDS", STALE_ALERT_SECONDS_DEFAULT
@@ -314,9 +361,10 @@ async def run_qmt_account_sync_task(interval_seconds: int = 30) -> None:
     )
     health = _SyncHealth()
     logger.info(
-        "[QmtSync] 大 QMT 账户同步任务启动, interval=%ss, account=%s, enabled=%s, "
-        "stale_alert=%ss, cooldown=%ss",
+        "[QmtSync] 大 QMT 账户同步任务启动, interval=%ss, source=%s, account=%s, "
+        "enabled=%s, stale_alert=%ss, cooldown=%ss",
         interval,
+        type(client).__name__,
         mask_account_id(client.account_id) or "(未配置)",
         client.configured,
         stale_threshold,
