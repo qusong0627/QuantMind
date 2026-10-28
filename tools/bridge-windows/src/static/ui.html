@@ -1024,7 +1024,7 @@ async function loadQmt(force){
       && r.value.body
       && (r.value.body.channel_used === 'qmt' || r.value.body.source === 'qmt');
     if (QMT.account && QMT.account.stale) {
-      // 休市快照：委托/成交走同一条停摆的管道，别让页面白等 15s×2
+      // 陈旧快照：委托/成交走同一条停摆的管道，别让页面白等 15s×2
       QMT.ordersOk = false; QMT.tradesOk = false;
       QMT.orders = []; QMT.trades = [];
     } else if (QMT.account) {
@@ -1051,14 +1051,14 @@ async function loadQmt(force){
     const age = QMT.account ? QMT.account.age_sec : null;
     const ageText = (age === null || age === undefined) ? '快照时间未知' : ('快照 ' + age + 's 前');
     const stale = !!(QMT.account && QMT.account.stale);
-    const staleText = stale ? '（休市快照，非实时）' : '';
+    const staleText = stale ? '（陈旧快照，非实时）' : '';
     $('#qmtMeta').textContent = '账户 ' + ((QMT.account && QMT.account.account_id) || '--')
       + ' · ' + ageText + staleText
       + ' · 管道 RPC ' + fmtMs((health.metrics || {}).last_rpc_ms)
       + ' · 队列 ' + fmtInt((health.metrics || {}).queue_len);
     if (QMT.account) {
       $('#qmtHint').textContent = stale
-        ? ('休市快照 · ' + (QMT.account.snapshot_at || '--') + ' · QMT 不供实时')
+        ? ('快照陈旧 · ' + (QMT.account.snapshot_at || '--') + ' · QMT 未更新')
         : '同机管道桥 · 只读';
     }
     renderQmtTable();

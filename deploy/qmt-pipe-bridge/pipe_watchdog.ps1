@@ -21,8 +21,8 @@ foreach ($c in $procs) { if ($c -and $c -match 'pipe_redis_bridge') { $running =
 
 $health = & $py (Join-Path $base 'qmt-external-bridge\bridge_health.py') 2>&1
 $healthCode = $LASTEXITCODE
-# 3 = 心跳正常但账户快照停摆（QMT 主线程不 tick / 管道卡死）：
-# 只告警不重启——交易时段重启伴生桥会打断在途 RPC（含下单回报）。
+# 3 = heartbeat fresh but account snapshot stalled (QMT main thread not ticking / pipe stuck):
+# alert only, do NOT restart - restarting during trading cuts in-flight RPC (incl. order reports).
 if ($healthCode -eq 3) {
     Write-Log "DATA_STALE $health (no restart)"
     exit 0

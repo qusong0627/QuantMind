@@ -209,11 +209,11 @@ class QmtAccountSyncService:
             logger.warning("[QmtSync] 拉取账户失败 code=%s: %s", exc.code, exc)
             return {"success": False, "error": str(exc), "code": exc.code}
 
-        # 休市快照（桥回落的历史数据）：跳过落库，避免把旧值写成新快照。
+        # 陈旧快照（休市或 RPC 停摆，桥回落的历史数据）：跳过落库，避免把旧值写成新快照。
         # 最后一条真实快照留在库里，前端继续显示它自己的时间。
         if snapshot.get("stale"):
             logger.info(
-                "[QmtSync] 休市快照（%s），跳过落库：不把旧数据写成新快照",
+                "[QmtSync] 陈旧快照（%s），跳过落库：不把旧数据写成新快照",
                 snapshot.get("snapshot_at") or "时间未知",
             )
             return {
