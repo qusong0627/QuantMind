@@ -242,8 +242,24 @@ def _read_config_overrides(redis: Any) -> dict[str, Any]:
         return {}
 
 
+def _policy_mirror_limits() -> Any:
+    """策略文件里的镜像五项；无策略文件 → ``None``（回退 env 基线）。
+
+    文件存在但坏 → ``TradingPolicyError`` 上抛：真钱路径 fail-closed，绝不用
+    「上一份/默认」限额继续下单（阶段 1 kill criteria）。
+    """
+    from backend.shared.trading_policy import load_trading_policy
+
+    policy = load_trading_policy()
+    return None if policy.source == "builtin" else policy.mirror
+
+
 def load_config(redis: Any = None) -> MirrorConfig:
-    """加载生效配置：env 基线 → Redis ``mirror:config`` JSON 覆盖。"""
+    """加载生效配置：env 基线 → 策略文件五项 → Redis ``mirror:config`` 运维覆盖。
+
+    ``TradingPolicy`` 是**默认出处**；``mirror:config`` 保留为显式运维覆盖（页面
+    的限额编辑仍可热改），但不再有第二份默认值。
+    """
     cfg = MirrorConfig(
         enabled=_env_bool("SIMULATION_MIRROR_TO_REAL", False)
         or _env_bool("MIRROR_ENABLED", False),
@@ -255,6 +271,16 @@ def load_config(redis: Any = None) -> MirrorConfig:
         max_consecutive_rejects=_env_int("MIRROR_MAX_CONSECUTIVE_REJECTS", 3),
         queue_outside_hours=_env_bool("MIRROR_QUEUE_OUTSIDE_HOURS", True),
     )
+    limits = _policy_mirror_limits()
+    if limits is not None:
+        cfg = replace(
+            cfg,
+            max_order_value=limits.max_order_value,
+            max_daily_value=limits.max_daily_value,
+            max_daily_symbols=limits.max_daily_symbols,
+            max_daily_orders=limits.max_daily_orders,
+            max_slippage_pct=limits.max_slippage_pct,
+        )
     over = _read_config_overrides(redis)
     if not over:
         return cfg

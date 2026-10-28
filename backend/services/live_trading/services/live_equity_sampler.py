@@ -113,25 +113,25 @@ async def _load_pg_agents() -> dict[str, Any]:
     return agents if isinstance(agents, dict) else {}
 
 
-def _agent_virtual_cash(rec: dict[str, Any]) -> float:
+def _agent_virtual_cash(rec: dict[str, Any], agent: str) -> float:
     """该 agent 虚拟现金：键缺失回退额度，0.0 原样（与 account_protocol._cash 同口径）。
 
-    额度回退走 ``agent_quota()``（``QM_AGENT_QUOTA`` 可覆盖，2026-10-28 起
-    每 agent ¥20 万），与决策轮提示词/闸门同一出处——两处回退值分叉会让
-    净值曲线的起点与模型看到的额度不是同一个数。
+    额度回退走 ``TradingPolicy.for_agent(agent).quota``（阶段 1 单一出处，
+    本机每 agent ¥20 万）——两处回退值分叉会让净值曲线的起点与模型看到的额度
+    不是同一个数。
     """
     if "virtual_cash" not in rec:
-        return _quota_default()
+        return _quota_default(agent)
     value = rec.get("virtual_cash")
     if value is None:
-        return _quota_default()
+        return _quota_default(agent)
     return _f(value)
 
 
-def _quota_default() -> float:
-    from backend.shared.decision.agent_ledger import agent_quota
+def _quota_default(agent: str) -> float:
+    from backend.shared.trading_policy import load_trading_policy
 
-    return agent_quota()
+    return load_trading_policy().for_agent(agent).quota
 
 
 async def _bridge_asset() -> tuple[float, float, bool]:
@@ -334,7 +334,7 @@ async def sample_once(
                     "agent": agent,
                     "date": date_str,
                     "ts": ts,
-                    "value": round(_agent_virtual_cash(rec) + mkt, 2),
+                    "value": round(_agent_virtual_cash(rec, agent) + mkt, 2),
                     # 读侧靠它区分「修复后的 PG 实盘点」与退役文件算出的旧点
                     "source": ledger_source,
                 }

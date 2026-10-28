@@ -221,10 +221,10 @@ class RebalanceContext:
     per_stock_pct: float = DEFAULT_PER_STOCK_PCT
     max_new_buys: int = DEFAULT_MAX_NEW_BUYS
     #: 允许买入候选池之外的标的（2026-10-28 用户口径「股票不限」）。默认 False
-    #: = 历史提示词逐字节不变；实盘轮由 ``QM_DECISION_ALLOW_OUT_OF_POOL`` 打开。
+    #: = 历史提示词逐字节不变；实盘轮由 ``TradingPolicy.for_agent(agent)`` 填充。
     allow_out_of_pool: bool = False
     #: 盈利优先的提示词段落（2026-10-28 用户口径）。默认 False = 金样不变；
-    #: 实盘轮由 ``QM_DECISION_PROFIT_FIRST`` 打开。
+    #: 实盘轮由 ``TradingPolicy.for_agent(agent)`` 填充。
     profit_first: bool = False
 
     @property

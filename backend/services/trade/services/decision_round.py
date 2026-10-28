@@ -122,6 +122,7 @@ from typing import Any
 
 from backend.shared.decision.gates import BuyGate
 from backend.shared.order_contract import normalize_agent
+from backend.shared.trading_policy import TradingPolicy, TradingPolicyError
 from backend.services.trade.services.decision_round_core import (
     ACCOUNT_AGE_WARN_MIN,
     STATUS_ABORTED,
@@ -161,7 +162,6 @@ from backend.services.trade.services.decision_round_notes import (
     round_highlights,
 )
 from backend.services.trade.services.decision_round_policy import (
-    capital_policy,
     filter_affordable_pool,
     tier_with_policy,
 )
@@ -302,6 +302,11 @@ async def _run_once_inner(
     # agent 名先归一（去空白 + 按列宽截断）：它是幂等键段/账本段/两张订单表的**同一个
     # 键**（口径见 normalize_agent）。归一只做在身份上，API 调用仍用 binding.model 原名。
     agent = normalize_agent(binding.model)
+    # 阶段 1：资金参数只认 TradingPolicy（文件坏/字段非法 → 本轮不下单）。
+    try:
+        agent_policy = (deps.load_trading_policy or TradingPolicy)().for_agent(agent)
+    except TradingPolicyError as exc:
+        return abort_result(day, slot, f"交易策略不可用：{exc}（本轮不下单）")
 
     # ②b 分账账本（P2.7）：本 agent 名下的持仓 + 子账户虚拟现金。**在 ② 之后**是因为
     # 账本按 agent 切段，而 agent 名来自 LLM 绑定（纯 env 解析，不花钱不触网）。
@@ -384,16 +389,10 @@ async def _run_once_inner(
                 len(all_rows),
             )
 
-    # ⑤ 档位（读失败由 tiers 自己回退收紧，不抛）；显式资金策略覆盖档位
-    #    （2026-10-28 用户口径：3×¥20 万、单笔上限 ¥20 万 → 单票比例 100%）。
-    from backend.shared.decision_llm_client import effective_env
-
+    # ⑤ 档位：资金旋钮来自 TradingPolicy（阶段 1 单一出处），写回档位块同值。
     tier = deps.load_tier()
-    policy = capital_policy(tier, env=effective_env())
-    per_stock_pct, max_new_buys = policy.per_stock_pct, policy.max_new_buys
-    notes.extend(policy.notes)
-    # 提示词里的档位块与闸门同值：覆盖后的两个旋钮写回生效档位（source 留痕）。
-    effective_tier = tier_with_policy(tier, policy)
+    per_stock_pct, max_new_buys = agent_policy.per_stock_pct, agent_policy.max_new_buys
+    effective_tier = tier_with_policy(tier, agent_policy)
 
     # ⑥ 排除名单（缺失 ≠ 空名单）
     excluded = deps.load_excluded()
@@ -405,7 +404,7 @@ async def _run_once_inner(
     # 不把真实账户的 cash/市值/总资产喂给模型——账户里有多少钱是账户主人的隐私，
     # 模型只需要知道「这条线还能动用多少」。真实账户三数仍进内部风控（执行段的
     # `l1.available_cash`、桥可卖量）与审计 `context_meta.account`，但不进提示词。
-    quota_total = ledger.quota_total
+    quota_total = agent_policy.quota
     quota_used = ledger.quota_used
     # 单票预算取**两个口径中更紧的那个**（与隔壁 `min(remaining*PER_STOCK_PCT,
     # agent_virtual_cash)` 同形）：授予额度口径决定「这条线还能动用多少」，分账虚拟
@@ -421,7 +420,7 @@ async def _run_once_inner(
             risky_symbols=risky_symbols(str(r.code) for r in pool_rows),
             per_stock_pct=per_stock_pct,
             allow_st=False,
-            allow_out_of_pool=policy.allow_out_of_pool,
+            allow_out_of_pool=agent_policy.allow_out_of_pool,
             max_new_buys_round=max_new_buys,
             # 子账户虚拟现金（本 agent 的名义额度余额）：买入腿的硬上限，
             # 与真实账户现金**各自独立**成立（隔壁 `o["cost"] > vcash` 那条闸）。
@@ -485,7 +484,7 @@ async def _run_once_inner(
     # 不渲染、取数失败如实降级并留痕（口径收在 io 助手，渲染在 decision_blocks）。
     quotes, blocks = await enrich_quotes_with_blocks(
         deps, round_id, agent, user, regime, snapped, quotes, holding_rows, now, notes,
-        tier=effective_tier, include_score_leaders=policy.allow_out_of_pool,
+        tier=effective_tier, score_leaders_limit=agent_policy.score_leaders_limit,
     )
 
     context = build_round_context(
@@ -504,8 +503,8 @@ async def _run_once_inner(
         quota_used=quota_used,
         per_stock_pct=per_stock_pct,
         max_new_buys=max_new_buys,
-        allow_out_of_pool=policy.allow_out_of_pool,
-        profit_first=policy.profit_first,
+        allow_out_of_pool=agent_policy.allow_out_of_pool,
+        profit_first=agent_policy.profit_first,
         market_state_block=blocks.market_state_block,
         signal_meta_block=blocks.signal_meta_block,
     )
@@ -547,7 +546,7 @@ async def _run_once_inner(
 
     # ⑧c 池外买入（2026-10-28「股票不限」）：名称由系统锚定 + 点名代码现刷行情。
     decision_buy_symbols: list[str] = []
-    if policy.allow_out_of_pool:
+    if agent_policy.allow_out_of_pool:
         decision_buy_symbols, snapped, gate, more_notes = await enrich_decision_quotes(
             deps=deps, quote_client=quote_client, round_id=round_id,
             decisions=decisions, snapped=snapped, gate=gate,

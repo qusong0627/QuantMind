@@ -42,3 +42,21 @@ def _stub_available_memory(monkeypatch):
 def _sandbox_arena_data_root(tmp_path, monkeypatch):
     """把 arena 数据根钉到本用例的临时目录（理由见模块 docstring）。"""
     monkeypatch.setenv("QM_ARENA_DATA_ROOT", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_trading_policy(tmp_path, monkeypatch):
+    """交易策略文件指到临时空路径（阶段 1，2026-10-28）。
+
+    生产机 ``config/trading_policy.json`` 是**按机器/账户**的实盘策略（本机 3×¥20 万）；
+    单测若读到它，会随部署环境漂移（同一份代码两个答案）。要测策略文件的用例在本用例
+    内 ``monkeypatch.setenv('QM_TRADING_POLICY_FILE', ...)`` 覆盖（夹具先跑）。
+    """
+    from backend.shared.trading_policy import clear_cache
+
+    monkeypatch.setenv(
+        "QM_TRADING_POLICY_FILE", str(tmp_path / "no-trading-policy.json")
+    )
+    clear_cache()
+    yield
+    clear_cache()

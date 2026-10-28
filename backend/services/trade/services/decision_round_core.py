@@ -410,7 +410,7 @@ class RoundDeps:
     #: () → 镜像上下文（闸门约束+当日跳过；``real_mirror_service.prompt_mirror_context``）。None = 未接线。
     read_mirror_ctx: Callable[[], Mapping[str, Any]] | None = None
     load_research_brief: Callable[[str], str] | None = None  # 研究总控 brief
-
+    load_trading_policy: Callable[[], Any] | None = None  # 阶段1 单一策略源；None=默认
 
 @dataclass(frozen=True, slots=True)
 class RoundResult:

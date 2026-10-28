@@ -39,6 +39,7 @@ from backend.shared.decision.llm_call import decide_with_retry
 from backend.shared.decision.watch_writer import WatchWriteResult
 from backend.shared.decision_blocks import INDEX_CODES, SeriesSummary
 from backend.shared.decision_context_source import PoolDoc
+from backend.shared.trading_policy import AgentPolicy, TradingPolicy
 from backend.services.trade.services import decision_round as R
 from backend.services.trade.services import decision_round_alerts as A
 from backend.services.trade.services import decision_round_feeds as F
@@ -109,21 +110,12 @@ SLOT_1005 = next(s for s in SLOTS if s.hhmm == "1005")
 
 
 @pytest.fixture(autouse=True)
-def _isolate_capital_policy_env(monkeypatch):
-    """资金策略 env 属于**部署**，测试里一律清空并指向不存在的 runtime.env。
+def _isolate_runtime_env(monkeypatch):
+    """``runtime.env`` 属于**部署**：测试里指向不存在的文件（名册/密钥不读真机）。
 
-    2026-10-28 起 ``config/runtime.env`` 会带 ``QM_AGENT_QUOTA=200000`` 等五项；
-    不清空的话「默认 10 万 / 20% / 3 只」的用例会在真实部署环境里红——同一份
-    代码两个答案。单项用例要验覆盖时，在自己体内 monkeypatch 即可（夹具先跑）。
+    资金策略已由 ``backend/tests/conftest.py`` 的 ``QM_TRADING_POLICY_FILE``
+    夹具隔离；本夹具只负责把 LLM 名册等运行时配置挡在测试之外。
     """
-    for key in (
-        "QM_AGENT_QUOTA",
-        "QM_DECISION_PER_STOCK_PCT",
-        "QM_DECISION_MAX_NEW_BUYS",
-        "QM_DECISION_ALLOW_OUT_OF_POOL",
-        "QM_DECISION_PROFIT_FIRST",
-    ):
-        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("QM_RUNTIME_ENV_FILE", "/tmp/qm-decision-test-no-runtime.env")
 
 
@@ -506,6 +498,13 @@ def make_harness(**over) -> Harness:
         read_wake_ctx=over.pop("read_wake_ctx", None),
         # 镜像闸门/回注（P0 审计修）：默认 None = 未接线（两块整段不渲染）。
         read_mirror_ctx=over.pop("read_mirror_ctx", None),
+        # 阶段 1：默认策略与默认档位同值（0.15/2），历史用例的闸门/提示词字节不变。
+        load_trading_policy=over.pop(
+            "load_trading_policy",
+            lambda: TradingPolicy(
+                default=AgentPolicy(per_stock_pct=0.15, max_new_buys=2)
+            ),
+        ),
     )
     assert not over, f"未消费的替身参数：{sorted(over)}"
     return Harness(deps=deps, log=log)
@@ -1114,16 +1113,12 @@ def test_tier_numbers_reads_only_real_numbers():
 
 
 def test_agent_ledger_quota_is_grant_minus_position_cost():
-    """授予额度口径：总量取 ``agent_quota()``（可被 QM_AGENT_QUOTA 覆盖），
+    """授予额度口径：总量取 ``TradingPolicy`` 注入的 ``quota``，
     已用 = 名下持仓成本（卖出即释放）。
 
     ``virtual_cash`` 不参与「已用」——它是账上现钱（含已实现盈亏），
     与「买了多少货」是两个数（见 ``agent_ledger.agent_used`` 的 docstring）。
-    **不写死 10 万**：2026-10-28 起额度可由 runtime.env 覆盖，写死会让测试在
-    真实部署环境里红（同一份代码两个答案）。
     """
-    from backend.shared.decision.agent_ledger import agent_quota
-
     ledger = AgentLedgerRead(
         ok=True,
         known=True,
@@ -1132,11 +1127,17 @@ def test_agent_ledger_quota_is_grant_minus_position_cost():
             "000001.SZ": {"volume": 4000, "cost_price": 10.05},
         },
         virtual_cash=1.0,
+        quota=200_000.0,
     )
-    total = agent_quota()
-    assert ledger.quota_total == total
+    assert ledger.quota_total == 200_000.0
     assert ledger.quota_used == 78_200.0  # 38000 + 40200
-    assert ledger.quota_remaining == total - 78_200.0
+    assert ledger.quota_remaining == 121_800.0
+
+
+def test_agent_ledger_quota_falls_back_to_default_for_legacy_callers():
+    from backend.shared.decision.agent_ledger import DEFAULT_AGENT_QUOTA
+
+    assert AgentLedgerRead().quota_total == DEFAULT_AGENT_QUOTA
 
 
 def test_agent_ledger_quota_skips_dirty_rows_instead_of_turning_nan():
@@ -1272,13 +1273,11 @@ async def test_run_once_aborts_when_account_numbers_untrusted():
 
 @pytest.mark.asyncio
 async def test_run_once_aborts_on_illegal_gate_pct_before_asking_llm():
-    """档位写成 15（而非 0.15）：夹取会变成空操作，一笔打满额——不许继续。"""
+    """策略写成 15（而非 0.15）：夹取会变成空操作，一笔打满额——不许继续。"""
     h = make_harness(
-        tier=type(
-            "T",
-            (),
-            {"level": "normal", "source": "doc", "budget": {"per_stock_pct": 15}},
-        )()
+        load_trading_policy=lambda: TradingPolicy(
+            default=AgentPolicy(per_stock_pct=15)
+        )
     )
     result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
     assert result.status == R.STATUS_ABORTED and "闸门参数非法" in result.note
@@ -1418,6 +1417,40 @@ async def test_run_once_prompt_carries_the_granted_quota_not_the_account_total()
     assert "170,000" not in prompt
     assert "120,000" not in prompt
     assert "50,000" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_run_once_uses_the_injected_trading_policy_for_every_layer():
+    """阶段 1 G1/G3：额度/单票/新开仓/池外/盈利优先全部来自同一份策略。
+
+    提示词首行、``BuyGate``、执行段 quota 三处必须是同一组数——任一处分叉都是
+    2026-10-28 之前「五层各一份配置」的旧病。
+    """
+    h = make_harness(
+        ledger=AgentLedgerRead(
+            ok=True, known=False, virtual_cash=200_000.0, quota=200_000.0
+        ),
+        load_trading_policy=lambda: TradingPolicy(
+            default=AgentPolicy(
+                quota=200_000.0,
+                per_stock_pct=1.0,
+                max_new_buys=9,
+                allow_out_of_pool=True,
+                profit_first=True,
+                score_leaders_limit=20,
+            )
+        ),
+    )
+    await run_once(SLOT_0935, deps=h.deps, now=NOW)
+
+    prompt = h.log["llm"][0]["prompt"]
+    assert "200,000" in prompt and "≤100%" in prompt and "≤9 只" in prompt
+    assert "池外 A 股也可买" in prompt and "【盈利优先】" in prompt
+    sent = h.log["exec"][0]
+    assert sent["quota"] == 200_000.0
+    assert sent["gate"].per_stock_pct == 1.0
+    assert sent["gate"].max_new_buys_round == 9
+    assert sent["gate"].allow_out_of_pool is True
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,43 @@
+{
+  "default": {
+    "quota": 100000,
+    "per_stock_pct": 0.2,
+    "max_new_buys": 3,
+    "allow_out_of_pool": false,
+    "profit_first": false,
+    "score_leaders_limit": 0
+  },
+  "agents": {
+    "deepseek-v4-flash": {
+      "quota": 200000,
+      "per_stock_pct": 1.0,
+      "max_new_buys": 9,
+      "allow_out_of_pool": true,
+      "profit_first": true,
+      "score_leaders_limit": 20
+    },
+    "deepseek-v4-pro": {
+      "quota": 200000,
+      "per_stock_pct": 1.0,
+      "max_new_buys": 9,
+      "allow_out_of_pool": true,
+      "profit_first": true,
+      "score_leaders_limit": 20
+    },
+    "glm-5.3-flash": {
+      "quota": 200000,
+      "per_stock_pct": 1.0,
+      "max_new_buys": 9,
+      "allow_out_of_pool": true,
+      "profit_first": true,
+      "score_leaders_limit": 20
+    }
+  },
+  "mirror": {
+    "max_order_value": 200000,
+    "max_daily_value": 1200000,
+    "max_daily_symbols": 40,
+    "max_daily_orders": 80,
+    "max_slippage_pct": 0.02
+  }
+}

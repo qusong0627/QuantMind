@@ -42,7 +42,7 @@ from backend.services.trade.services.decision_round_core import (
     RoundSlot,
     as_float,
 )
-from backend.shared.decision.agent_ledger import agent_quota
+from backend.shared.trading_policy import load_trading_policy
 from backend.shared.decision.contract import SCHEMA_INTRADAY
 
 # arena 文件面写侧是**本机独有**的包（与「实盘交易」栏同纪律，见 .gitignore）：
@@ -65,9 +65,8 @@ async def load_account_numbers(tenant_id: str, user_id: str) -> AccountRead:
     一行」等于在两座账户间掷硬币。券商类型**没映射到任何源**时同样不做无源取数：
     那是「不知道该读哪座账」，按 ``ok=False`` 报错让编排层中止本轮（不是猜一行继续）。
 
-    **券商选择读不到时不回退**（``strict=True``）：回退 ``REAL_BROKER_TYPE`` 的语义是
-    「没人显式选过」，而读失败是「不知道有没有人选过」——本轮的额度可能因此来自另一座
-    账户（规模差 ~25 倍），故按 ``ok=False`` 中止（同「不知道是谁的账」那条纪律）。
+    **券商选择读不到时不回退**（``strict=True``）：回退是「没人显式选过」，读失败是
+    「不知道有没有人选过」；额度可能来自另一座账户（差 ~25 倍），故按 ``ok=False`` 中止。
 
     ``cash`` 或 ``market_value`` 取不到 = **账不可信**（``ok=False``）：拿一个编出来的
     数字当可用资金，比不跑这一轮危险得多（模型会据此报出买不起的单）。``total_asset``
@@ -185,6 +184,7 @@ async def load_agent_ledger(
     name = str(agent or "").strip()
     if not name:
         return AgentLedgerRead(errors=("agent 名为空：无法定位分账账本段",))
+    agent_policy = load_trading_policy().for_agent(name)
     try:
         async with get_session(read_only=True) as session:
             doc = await _load_ledger(
@@ -196,7 +196,7 @@ async def load_agent_ledger(
         )
     rec = (doc.get("agents") or {}).get(name)
     if not isinstance(rec, Mapping):
-        return AgentLedgerRead(ok=True, known=False)
+        return AgentLedgerRead(ok=True, known=False, quota=agent_policy.quota)
     cash = as_float(rec.get("virtual_cash"))
     positions = rec.get("positions")
     return AgentLedgerRead(
@@ -205,7 +205,8 @@ async def load_agent_ledger(
         positions=dict(positions) if isinstance(positions, Mapping) else {},
         # 现金为负**原样带回**（不夹到 0）：透支是真实状态，夹掉只会让「为什么一直
         # 不买」变成一个查不出的问题。负值在下游自然是「什么都买不起」。
-        virtual_cash=agent_quota() if cash is None else float(cash),
+        virtual_cash=agent_policy.quota if cash is None else float(cash),
+        quota=agent_policy.quota,
     )
 
 
@@ -467,7 +468,7 @@ def default_round_deps() -> RoundDeps:
         real_enabled=is_real_trading_enabled,
         mirror_ready=_mirror_ready,
         now=now_cn,
-        # Stage 2 第一批：模型分数 + 市场状态入提示词（读失败均降级不拦轮）
+        load_trading_policy=load_trading_policy,
         load_regime=load_intraday_regime,
         load_scores=load_signal_scores,
         # Stage 2 第二批：丁1–丁9 取数面 + 丙1 唤醒上下文（口径与降级见 feeds 模块）
@@ -486,8 +487,7 @@ def default_round_deps() -> RoundDeps:
 def _read_wake_ctx(round_id: str) -> str:
     """唤醒上下文读口：现造现关的原生客户端（**交易库 db2，与写侧同库**）。
 
-    与写侧 ``wake_tick`` 同库是契约——不同库 = 卡片永远读不到且全链无报错
-    （memory: qq-push-3slot-briefing 的 db0/db2 陷阱）。连接失败按非唤醒轮降级。
+    与写侧 ``wake_tick`` 同库是契约（不同库=卡片读不到且全链无报错）；连不上降级。
     """
     client = None
     try:

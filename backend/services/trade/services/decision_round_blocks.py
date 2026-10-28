@@ -340,7 +340,7 @@ async def enrich_quotes_with_blocks(
     now: datetime,
     notes: list[str],
     tier: Any | None = None,
-    include_score_leaders: bool = False,
+    score_leaders_limit: int = 0,
 ) -> tuple[tuple[PoolQuote, ...], RoundBlocks]:
     """⑦b+⑦c 行情行填「信号分」+ 全部提示词补块（两批合并收口）。
 
@@ -392,8 +392,8 @@ async def enrich_quotes_with_blocks(
         else ""
     )
     # 2026-10-28「股票不限」：候选池只有 20 只，池外高分票需要榜面才看得见。
-    if include_score_leaders and score_map:
-        leaders = build_score_leaders_block(score_map)
+    if score_leaders_limit > 0 and score_map:
+        leaders = build_score_leaders_block(score_map, limit=score_leaders_limit)
         if leaders:
             signal_meta_block = (
                 f"{signal_meta_block}\n\n{leaders}" if signal_meta_block else leaders

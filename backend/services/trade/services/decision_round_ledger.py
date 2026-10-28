@@ -20,7 +20,6 @@ from typing import Any
 
 from backend.shared.decision.agent_ledger import (
     DEFAULT_AGENT_QUOTA,
-    agent_quota,
     holding_age_days as holding_age_days,  # noqa: PLC0414 —— 对外契约再导出
     positions_cost,
 )
@@ -80,6 +79,10 @@ class AgentLedgerRead:
     positions: Mapping[str, Any] = field(default_factory=dict)
     #: 子账户虚拟现金（元）。账本无此行 = 满额 :data:`DEFAULT_AGENT_QUOTA`。
     virtual_cash: float = DEFAULT_AGENT_QUOTA
+    #: 本轮授予额度（元）——由编排层从 ``TradingPolicy.for_agent(agent).quota``
+    #: 注入；``None`` = 旧调用点/单测，回退 :data:`DEFAULT_AGENT_QUOTA`。
+    #: 额度**不写在账本里**：它是配置，不是账；存进来就有了第二个事实源。
+    quota: float | None = None
     errors: tuple[str, ...] = ()
 
     def mine(self) -> frozenset[str]:
@@ -90,10 +93,10 @@ class AgentLedgerRead:
     def quota_total(self) -> float:
         """用户授予的额度（名义值）。真实账户总额仅供内部风控，**禁止入提示词**。
 
-        2026-10-28 起可经 ``QM_AGENT_QUOTA`` 覆盖（每轮从 runtime.env 读，改额度
-        不必重启）；缺省仍是 ¥10 万。见 ``agent_ledger.agent_quota``。
+        2026-10-28 阶段 1 起由 ``TradingPolicy`` 单一出处提供（编排层注入
+        :attr:`quota`）；``None`` 只存在于旧调用点/单测。
         """
-        return agent_quota()
+        return DEFAULT_AGENT_QUOTA if self.quota is None else self.quota
 
     @property
     def quota_used(self) -> float:

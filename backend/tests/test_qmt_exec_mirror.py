@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+import pytest
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -280,6 +282,51 @@ class TestConfig:
     def test_broken_json_falls_back_to_env(self) -> None:
         redis = _redis(strings={"mirror:config": "{not json"})
         assert m.load_config(redis).max_order_value == 10000.0
+
+    def _policy_file(self, tmp_path, monkeypatch, doc) -> None:
+        from backend.shared.trading_policy import clear_cache
+
+        path = tmp_path / "trading_policy.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        monkeypatch.setenv("QM_TRADING_POLICY_FILE", str(path))
+        clear_cache()
+
+    def test_policy_file_sets_the_five_limits(self, tmp_path, monkeypatch) -> None:
+        self._policy_file(
+            tmp_path,
+            monkeypatch,
+            {
+                "mirror": {
+                    "max_order_value": 200000,
+                    "max_daily_value": 1200000,
+                    "max_daily_symbols": 40,
+                    "max_daily_orders": 80,
+                }
+            },
+        )
+        cfg = m.load_config(None)
+        assert cfg.max_order_value == 200_000.0
+        assert cfg.max_daily_value == 1_200_000.0
+        assert cfg.max_daily_symbols == 40
+        assert cfg.max_daily_orders == 80
+
+    def test_redis_override_wins_over_policy(self, tmp_path, monkeypatch) -> None:
+        self._policy_file(
+            tmp_path, monkeypatch, {"mirror": {"max_order_value": 200_000}}
+        )
+        redis = _redis(strings={"mirror:config": '{"max_order_value": 3000}'})
+        assert m.load_config(redis).max_order_value == 3000.0
+
+    def test_broken_policy_file_fails_closed(self, tmp_path, monkeypatch) -> None:
+        from backend.shared.trading_policy import TradingPolicyError, clear_cache
+
+        path = tmp_path / "trading_policy.json"
+        path.write_text("{not json", encoding="utf-8")
+        monkeypatch.setenv("QM_TRADING_POLICY_FILE", str(path))
+        clear_cache()
+        with pytest.raises(TradingPolicyError):
+            m.load_config(None)
+        clear_cache()
 
 
 # --------------------------------------------------------------------------
