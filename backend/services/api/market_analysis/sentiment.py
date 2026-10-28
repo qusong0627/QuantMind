@@ -47,6 +47,18 @@ def _read_snapshot() -> dict:
                 "hint": "运行 python -m backend.scripts.market_sentiment_snapshot",
             },
         )
+    # 按 (mtime, size) 缓存：顶栏指数卡片也会读这份快照，别让 900KB JSON
+    # 在每次 overview 轮询里重复解析。快照是原子替换，mtime 变化即失效。
+    try:
+        st = path.stat()
+        cache_key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        with _LOCK:
+            cached = _CACHE.get("snapshot")
+        if isinstance(cached, tuple) and cached[0] == cache_key:
+            return cached[1]  # type: ignore[return-value]
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 —— 任何解析失败都要显式暴露
@@ -66,6 +78,9 @@ def _read_snapshot() -> dict:
         from backend.scripts.market_sentiment_snapshot import build_payload
 
         return build_payload(df, feats, uni=uni, ohlc=ohlc)
+    if cache_key is not None:
+        with _LOCK:
+            _CACHE["snapshot"] = (cache_key, payload)
     return payload
 
 

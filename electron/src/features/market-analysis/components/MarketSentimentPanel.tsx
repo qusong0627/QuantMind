@@ -8,9 +8,9 @@ import {
   type MarketSentiment,
 } from '../services/sentimentService';
 import { SentimentFanChart } from './SentimentFanChart';
-import { SentimentKlineChart } from './SentimentKlineChart';
 import { BreadthFactorBars } from './BreadthFactorBars';
-import { ForecastMatrix } from './ForecastMatrix';
+import { BreadthDistributionBar } from './BreadthDistributionBar';
+import { PredictionReview } from './PredictionReview';
 import { FactorHeatmap } from './FactorHeatmap';
 import { BreadthGlossaryModal } from './BreadthGlossaryModal';
 
@@ -167,11 +167,15 @@ export const MarketSentimentPanel: React.FC = () => {
   const hasStats = typeof stats?.win === 'number';
 
   const actualPts = selected.actual ?? [];
+  const actualK = actualPts.length ? actualPts[actualPts.length - 1].k : 0;
   const actualPct = actualPts.length ? actualPts[actualPts.length - 1].pct : null;
+  // 不足 20 天时用「已走到的那一天」的扇形区间对照，别拿 T+20 的区间判 T+9 的结果
+  const bandPoint =
+    actualK > 0 ? selected.fan[Math.min(actualK, selected.fan.length - 1)] : null;
   const verdict = (() => {
-    if (actualPct === null || !hasStats) return null;
-    const inBand = actualPct >= stats.p10 && actualPct <= stats.p90;
-    const sameDir = (actualPct >= 0) === (stats.median >= 0);
+    if (actualPct === null || !hasStats || !bandPoint) return null;
+    const inBand = actualPct >= bandPoint.p10 && actualPct <= bandPoint.p90;
+    const sameDir = (actualPct >= 0) === (bandPoint.p50 >= 0);
     const tone =
       inBand && sameDir
         ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
@@ -180,10 +184,10 @@ export const MarketSentimentPanel: React.FC = () => {
           : 'border-red-200 bg-red-50 text-red-800';
     const text =
       inBand && sameDir
-        ? `落在当时的八成区间内，方向也一致（当时典型 ${pctText(stats.median)}）`
+        ? `落在当时的八成区间内，方向也一致（当时典型 ${pctText(bandPoint.p50)}）`
         : inBand
-          ? `落在当时的八成区间内，但方向与当时典型相反（当时典型 ${pctText(stats.median)}）`
-          : `跑出当时的八成区间 ${pctText(stats.p10)} ~ ${pctText(stats.p90)}`;
+          ? `落在当时的八成区间内，但方向与当时典型相反（当时典型 ${pctText(bandPoint.p50)}）`
+          : `跑出当时的八成区间 ${pctText(bandPoint.p10)} ~ ${pctText(bandPoint.p90)}`;
     return { tone, text, inBand, sameDir };
   })();
 
@@ -266,6 +270,36 @@ export const MarketSentimentPanel: React.FC = () => {
                   {typeof st.percentile === 'number' ? `P${Math.round(st.percentile * 100)}` : '—'}
                 </span>
               </div>
+              {it.forecast && (
+                <div
+                  className="grid grid-cols-3 gap-0.5 mt-1 pt-1 border-t border-slate-100"
+                  title="多周期模型预测（广度 + 量能）；概率≈50% ＝ 没有方向优势"
+                >
+                  {[5, 10, 20].map((h) => {
+                    const f = it.forecast?.[String(h)];
+                    const p = f?.pred ?? null;
+                    return (
+                      <div key={h} className="text-center leading-tight">
+                        <div className="text-[8px] text-slate-400 font-mono">T+{h}</div>
+                        <div
+                          className={`text-[9px] font-mono font-extrabold ${
+                            p === null
+                              ? 'text-slate-300'
+                              : p >= 0
+                                ? 'text-red-600'
+                                : 'text-emerald-600'
+                          }`}
+                        >
+                          {p === null ? '—' : `${p > 0 ? '+' : ''}${p.toFixed(2)}%`}
+                        </div>
+                        <div className="text-[8px] text-slate-400">
+                          涨{f?.prob_up == null ? '—' : Math.round(f.prob_up * 100)}%
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </button>
           );
         })}
@@ -343,6 +377,16 @@ export const MarketSentimentPanel: React.FC = () => {
             </p>
           )}
 
+          {(selected.distribution ?? data.distribution) && (
+            <div className="border-t border-slate-100 pt-2">
+              <BreadthDistributionBar
+                dist={selected.distribution ?? data.distribution}
+                total={universe?.n_last}
+                date={data.trade_date}
+              />
+            </div>
+          )}
+
           <div className="border-t border-slate-100 pt-2">
             <div className="flex items-center justify-between mb-1">
               <span className="text-[10px] font-extrabold text-slate-600">广度分项 · 冷热</span>
@@ -410,6 +454,14 @@ export const MarketSentimentPanel: React.FC = () => {
               color: INDEX_COLORS[k] ?? '#94a3b8',
               p50: data.indices[k].fan.map((p) => p.p50),
             }))}
+            onPickDate={(d) => {
+              // 单击历史某天 = 回看当天：扇形、模型预测、实际走势全部重锚到那一天
+              if (!data.as_of && d === data.trade_date) {
+                setAsOf(undefined);
+                return;
+              }
+              setAsOf(d);
+            }}
           />
 
           {data.as_of && verdict && (
@@ -419,7 +471,12 @@ export const MarketSentimentPanel: React.FC = () => {
                 {actualPct!.toFixed(2)}%
               </div>
               <div className="min-w-0">
-                <div className="text-[11px] font-extrabold">之后 {data.horizon} 天实际走势</div>
+                <div className="text-[11px] font-extrabold">
+                  之后 {actualK} 天实际走势
+                  {actualK < data.horizon && (
+                    <span className="font-normal text-slate-500"> · 已走 {actualK}/{data.horizon} 天</span>
+                  )}
+                </div>
                 <div className="text-[10px] leading-snug">{verdict.text}</div>
               </div>
               <div className="ml-auto text-[10px] font-bold shrink-0">
@@ -428,12 +485,7 @@ export const MarketSentimentPanel: React.FC = () => {
             </div>
           )}
 
-          <ForecastMatrix
-            indices={data.indices}
-            order={INDEX_ORDER}
-            selected={indexKey}
-            onSelect={setIndexKey}
-          />
+          <PredictionReview block={selected} asOf={data.as_of} horizon={data.horizon} />
 
           {!hasStats && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
@@ -479,17 +531,6 @@ export const MarketSentimentPanel: React.FC = () => {
           </div>
         </section>
       </div>
-
-      {/* 指数 K 线：官方指数蜡烛，全A 等权合成折线（口径在组件内披露） */}
-      {selected.kline && (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3">
-          <SentimentKlineChart
-            name={selected.name}
-            kline={selected.kline}
-            universe={selected.universe}
-          />
-        </div>
-      )}
 
       {/* 底部：分项冷热热力图 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3">

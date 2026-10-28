@@ -69,7 +69,6 @@ TARGETS: dict[str, tuple[str, str, str]] = {
 HORIZON = 20
 HISTORY_DAYS = 250  # 供前端拖动回看；默认视窗仍是最近 60 日 + 20 日前瞻
 STRESS_HISTORY_DAYS = 250
-KLINE_DAYS = 250
 
 #: 展示用：指标单位与缩放（值本身在面板里是小数或原始量）
 DISPLAY = {
@@ -249,20 +248,27 @@ def actual_path(
 
     只用于「回看模式」把历史结果叠加到扇形上做对照；最新一期没有未来数据，
     返回空列表 —— 绝不把未来数据混进当时的信号。
+
+    回看日期离今天不足 ``horizon`` 个交易日时返回**已走出的部分**（而不是空），
+    调用方用 ``len(actual)-1 / horizon`` 标注「已走 N 天」；把不足 20 天说成
+    「没有实际走势」会让人误以为回看坏了。
     """
     if as_of not in close.index:
         return []
     pos = close.index.get_loc(as_of)
     future = close.iloc[pos + 1 : pos + 1 + horizon]
-    if len(future) < horizon:
+    if len(future) == 0:
         return []
     base = float(close.iloc[pos])
     if not np.isfinite(base) or base <= 0:
         return []
-    return [{"k": 0, "pct": 0.0}] + [
-        {"k": i + 1, "pct": round((float(v) / base - 1.0) * 100, 2)}
-        for i, v in enumerate(future)
-    ]
+    out: list[dict] = [{"k": 0, "pct": 0.0}]
+    for i, v in enumerate(future):
+        val = float(v)
+        if not np.isfinite(val):
+            break
+        out.append({"k": i + 1, "pct": round((val / base - 1.0) * 100, 2)})
+    return out
 
 
 def factor_history(feats: pd.DataFrame, days: int = 60) -> dict:
@@ -389,82 +395,33 @@ def price_series(
     return sub["close"].astype(float).reindex(frame.index)
 
 
-def kline_block(
-    symbol: str, kind: str, frame: pd.DataFrame, ohlc: pd.DataFrame | None
-) -> dict:
-    """K 线数据。官方指数给真 OHLC；全A 给合成聚合 OHLC（高/低=成分股加权，
-    不是指数日内极值，前端对合成口径不画蜡烛）。成交额统一换算成亿元。"""
-    if kind == "official":
-        if ohlc is None or ohlc.empty:
-            return {}
-        sub = (
-            ohlc[ohlc["symbol"] == symbol]
-            .set_index("date")
-            .sort_index()
-            .reindex(frame.index)
-        )
-        src = {
-            "open": sub["open"],
-            "high": sub["high"],
-            "low": sub["low"],
-            "close": sub["close"],
-            "amount": sub["amount"] / 1e4,
-        }
-    else:
-        src = {
-            "open": frame["ew_open"],
-            "high": frame["ew_high"],
-            "low": frame["ew_low"],
-            "close": frame["ew_close"],
-            "amount": frame["ew_amount"] / 1e4,
-        }
-    amount = src["amount"]
-    vol_z = (amount - amount.rolling(20).mean()) / amount.rolling(20).std()
-    # 旧路径（无分市场面板）没有 ew_turnover：换手率缺失就如实给 null，不回落成 0。
-    turnover = (
-        frame["ew_turnover"] * 100.0
-        if "ew_turnover" in frame
-        else pd.Series(np.nan, index=frame.index)
-    )
-    dates = [d.strftime("%Y-%m-%d") for d in frame.index[-KLINE_DAYS:]]
-    dist_keys = (
-        "dist_limit_up",
-        "dist_up_big",
-        "dist_up_small",
-        "dist_flat",
-        "dist_down_small",
-        "dist_down_big",
-        "dist_limit_down",
-    )
+#: 七档涨跌分布（互斥），与 ``breadth_universe.distribution_counts`` 的键一致
+DIST_KEYS = (
+    "dist_limit_up",
+    "dist_up_big",
+    "dist_up_small",
+    "dist_flat",
+    "dist_down_small",
+    "dist_down_big",
+    "dist_limit_down",
+)
 
-    def _tail(series: pd.Series, digits: int = 2) -> list[float | None]:
-        return [
-            None if not np.isfinite(v) else round(float(v), digits)
-            for v in series.iloc[-KLINE_DAYS:]
-        ]
 
-    return {
-        "kind": kind,
-        "dates": dates,
-        "open": _tail(src["open"]),
-        "high": _tail(src["high"]),
-        "low": _tail(src["low"]),
-        "close": _tail(src["close"]),
-        "amount": _tail(amount),
-        "turnover": _tail(turnover, 3),
-        "vol_z": _tail(vol_z),
-        "dist": {
-            k: [int(v) for v in frame[k].fillna(0).to_numpy()[-KLINE_DAYS:]]
-            for k in dist_keys
-            if k in frame
-        },
-    }
+def distribution_block(frame: pd.DataFrame) -> dict:
+    """最新交易日的七档涨跌分布（只给当天计数，不搬 250 天序列）。
+
+    每个指数用它自己宇宙的成分股；旧路径（无分市场面板）没有这些列，返回
+    空 dict —— 前端按缺失隐藏，不回落成 0。
+    """
+    if not all(k in frame for k in DIST_KEYS):
+        return {}
+    row = frame.iloc[-1]
+    return {k: int(row[k]) if np.isfinite(row[k]) else 0 for k in DIST_KEYS}
 
 
 def _index_block(
     symbol: str,
     name: str,
-    kind: str,
     frame: pd.DataFrame,
     feats: pd.DataFrame,
     scores: pd.Series,
@@ -474,7 +431,6 @@ def _index_block(
     df: pd.DataFrame,
     feats_global: pd.DataFrame,
     as_of: pd.Timestamp | None,
-    ohlc: pd.DataFrame | None,
 ) -> dict:
     if len(close) == 0 or not np.isfinite(close.iloc[-1]):
         return {}
@@ -496,6 +452,7 @@ def _index_block(
     dfx = df.assign(**{f"close_{symbol}": full_close.reindex(df.index)})
     fc = forecast_index(dfx, feats_global, symbol, last_date)
     disp_pct = float(frame["disp_pct"].iloc[-1]) if "disp_pct" in frame else np.nan
+    actual = actual_path(full_close, last_date) if as_of is not None else []
     return {
         "name": name,
         "last": round(last, 2),
@@ -507,7 +464,9 @@ def _index_block(
         "fan": fan_bands(close, mask),
         "stats": index_stats(close, mask),
         "baseline": baseline_stats(close),
-        "actual": actual_path(full_close, last_date) if as_of is not None else [],
+        "actual": actual,
+        "actual_days": max(len(actual) - 1, 0),
+        "actual_horizon": HORIZON,
         "forecast": fc,
         "future_dates": future_dates,
         "stress": stress_block(scores, pct),
@@ -526,7 +485,7 @@ def _index_block(
             "pct": round(disp_pct, 3) if np.isfinite(disp_pct) else None,
         },
         "universe": _universe_meta(symbol, frame),
-        "kline": kline_block(symbol, kind, frame, ohlc),
+        "distribution": distribution_block(frame),
     }
 
 
@@ -585,7 +544,6 @@ def build_payload(
             block = _index_block(
                 symbol,
                 name,
-                kind,
                 sliced,
                 feats_u,
                 scores_u,
@@ -595,7 +553,6 @@ def build_payload(
                 df,
                 feats,
                 as_of,
-                ohlc,
             )
         else:
             # 旧路径（无分市场面板）：全市场分数 + 官方指数价格
@@ -609,7 +566,6 @@ def build_payload(
             block = _index_block(
                 symbol,
                 name,
-                "official",
                 signal_df,
                 signal_feats,
                 scores["stress"].rename("stress"),
@@ -619,7 +575,6 @@ def build_payload(
                 df,
                 feats,
                 as_of,
-                ohlc,
             )
             block["stress"] = stress_block(
                 scores["stress"], pd.Series(1.0, index=scores.index)
@@ -672,7 +627,7 @@ def build_payload(
                 else None
             ),
         }
-        kline_all = kline_block("ALL.A", "synthetic", all_sliced, ohlc)
+        distribution_all = distribution_block(all_sliced)
     else:
         all_feats, all_scores, all_pct = (
             signal_feats,
@@ -687,7 +642,7 @@ def build_payload(
                 else None
             ),
         }
-        kline_all = {}
+        distribution_all = {}
 
     return {
         "trade_date": (
@@ -721,7 +676,7 @@ def build_payload(
             else history
         ),
         "factor_history": factor_history(all_feats),
-        "kline": kline_all,
+        "distribution": distribution_all,
         "indices": indices,
     }
 

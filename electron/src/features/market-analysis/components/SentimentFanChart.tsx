@@ -21,6 +21,8 @@ interface SentimentFanChartProps {
   compare?: ComparePath[];
   /** 与历史段同源的广度压力分（0~100），叠加在价格图上、用右轴 0–100 */
   stress?: { date: string; stress: number }[];
+  /** 单击历史某天：回看那一天的预测（拖动仍为平移，双击复位） */
+  onPickDate?: (date: string) => void;
 }
 
 const W = 780;
@@ -69,6 +71,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   forwardDates = [],
   compare = [],
   stress = [],
+  onPickDate,
 }) => {
   const H = history.length;
   const F = fan.length;
@@ -81,7 +84,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   const viewStart = Math.max(0, viewEndClamped - windowSize);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const dragRef = useRef<{ x: number; end: number; span: number } | null>(null);
+  const dragRef = useRef<{ x: number; y: number; end: number; span: number; moved: boolean } | null>(null);
 
   const plotW = W - PAD.left - PAD.right;
   const plotH = height - PAD.top - PAD.bottom;
@@ -184,21 +187,47 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   }, [history, fan, last, height, actual, compare, stress, viewStart, viewEndClamped, H, F, total, plotH, plotW]);
 
   // 拖动平移：像拖时间轴一样，向右拖＝回看更早
+  // 单击（位移 < 3px）＝选中那一天，回看当天的模型预测与实际走势
   const onPointerDown = (e: React.PointerEvent<SVGSVGElement>): void => {
-    dragRef.current = { x: e.clientX, end: viewEndClamped, span: viewEndClamped - viewStart };
-    e.currentTarget.setPointerCapture?.(e.pointerId);
+    dragRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      end: viewEndClamped,
+      span: viewEndClamped - viewStart,
+      moved: false,
+    };
+    try {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    } catch {
+      // jsdom / 老浏览器没有 pointer capture：拖动仍可用，只是移出 SVG 会中断
+    }
   };
   const onPointerMove = (e: React.PointerEvent<SVGSVGElement>): void => {
     const d = dragRef.current;
     const svg = svgRef.current;
     if (!d || !svg) return;
+    if (Math.abs(e.clientX - d.x) > 3 || Math.abs(e.clientY - d.y) > 3) d.moved = true;
     const rect = svg.getBoundingClientRect();
     if (!rect.width) return;
     const dxVb = ((e.clientX - d.x) * W) / rect.width;
     const dIdx = (-dxVb / plotW) * d.span;
     setViewEnd(Math.min(Math.max(d.end + dIdx, windowSize), total - 1));
   };
-  const onPointerUp = (): void => {
+  const onPointerUp = (e: React.PointerEvent<SVGSVGElement>): void => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (!d || d.moved || !onPickDate) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width) return;
+    const vx = ((e.clientX - rect.left) * W) / rect.width;
+    if (vx < PAD.left || vx > W - PAD.right) return;
+    const idx = viewStart + ((vx - PAD.left) / plotW) * (viewEndClamped - viewStart);
+    const i = Math.round(idx);
+    if (i >= 0 && i < H) onPickDate(history[i].date);
+  };
+  const cancelDrag = (): void => {
     dragRef.current = null;
   };
 
@@ -238,7 +267,8 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
+        onPointerLeave={cancelDrag}
+        onPointerCancel={cancelDrag}
         onDoubleClick={() => setViewEnd(total - 1)}
         role="img"
         data-view-start={viewStart.toFixed(1)}
@@ -378,7 +408,11 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
       </svg>
 
       <div className="flex items-center gap-4 px-1 -mt-1 text-[10px] text-slate-500 flex-wrap">
-        <span className="text-slate-400">按住图表左右拖动＝回看更早（双击复位）</span>
+        <span className="text-slate-400">
+          {onPickDate
+            ? '按住拖动＝平移；单击历史某天＝回看当天预测（双击复位）'
+            : '按住图表左右拖动＝回看更早（双击复位）'}
+        </span>
         <span className="flex items-center gap-1.5">
           <span className="inline-block w-3 h-2 rounded-sm" style={{ background: `${UP}29` }} />
           红色区域 ＝ 上涨空间

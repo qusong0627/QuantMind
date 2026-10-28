@@ -7,48 +7,22 @@
  * 3. 快照缺失（503）时给可照做的空态，而不是白屏或假数据。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import React from 'react';
 
 import { MarketSentimentPanel } from '../components/MarketSentimentPanel';
 import { coldPercentile } from '../components/BreadthFactorBars';
 
-// jsdom 没有 canvas：按 v5 API 交桩，断言「面板能接线」而不是渲染像素。
-const addSeries = vi.fn(() => ({ setData: vi.fn() }));
-vi.mock('lightweight-charts', () => ({
-  createChart: vi.fn(() => ({
-    addSeries,
-    priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
-    timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
-    applyOptions: vi.fn(),
-    remove: vi.fn(),
-  })),
-  CandlestickSeries: 'CandlestickSeries',
-  AreaSeries: 'AreaSeries',
-  HistogramSeries: 'HistogramSeries',
-  CrosshairMode: { Normal: 0 },
-}));
-
-const kline = {
-  kind: 'official' as const,
-  dates: ['2026-10-23', '2026-10-26'],
-  open: [4000, 4040],
-  high: [4060, 4100],
-  low: [3990, 4020],
-  close: [4040, 4103.54],
-  amount: [9000, 9800],
-  turnover: [1.2, 1.34],
-  vol_z: [0.1, 0.4],
-  dist: {
-    dist_limit_up: [10, 12],
-    dist_up_big: [20, 22],
-    dist_up_small: [200, 210],
-    dist_flat: [30, 28],
-    dist_down_small: [2100, 2050],
-    dist_down_big: [300, 320],
-    dist_limit_down: [8, 9],
-  },
+// 七档涨跌分布（当日计数）
+const distribution = {
+  dist_limit_up: 12,
+  dist_up_big: 22,
+  dist_up_small: 210,
+  dist_flat: 28,
+  dist_down_small: 2050,
+  dist_down_big: 320,
+  dist_limit_down: 9,
 };
 
 const fan = (p10: number, p50: number, p90: number) =>
@@ -108,7 +82,7 @@ const payload = {
       actual: [],
       future_dates: [],
       universe: { key: 'hs300', label: '沪深300', mode: 'rank', note: '全A流通市值前 300（逐日排名代理）', n_last: 300 },
-      kline,
+      distribution,
       forecast: {
         '5': { pred: 0.17, prob_up: 0.5, base_prob: 0.48, p10: -3.1, p50: 0.1, p90: 2.8 },
         '10': { pred: 0.31, prob_up: 0.47, base_prob: 0.49, p10: -3.7, p50: 0.5, p90: 5.1 },
@@ -147,7 +121,21 @@ const payload = {
         percentile: 0.991,
       },
       universe: { key: 'zz1000', label: '中证1000', mode: 'rank', note: '全A流通市值 801–1800 名（逐日排名代理）', n_last: 1000 },
-      forecast: { '5': { pred: 0.09, prob_up: 0.51, base_prob: 0.51, p10: -4.7, p50: 0.0, p90: 3.6 } },
+      forecast: {
+        '5': {
+          pred: 0.09,
+          prob_up: 0.51,
+          base_prob: 0.51,
+          p10: -4.7,
+          p50: 0.0,
+          p90: 3.6,
+          accuracy: { n_oos: 300, n_eff: 60, hit: 0.55, mae: 2.1, ic: 0.08 },
+          review: [
+            { date: '2026-09-01', pred: 0.5, actual: 0.4, hit: true },
+            { date: '2026-09-08', pred: -0.2, actual: 0.3, hit: false },
+          ],
+        },
+      },
     },
   },
 };
@@ -162,7 +150,6 @@ const jsonResponse = (body: unknown, status = 200) =>
 describe('MarketSentimentPanel', () => {
   beforeEach(() => {
     localStorage.setItem('access_token', 't');
-    addSeries.mockClear();
   });
 
   afterEach(() => {
@@ -177,6 +164,9 @@ describe('MarketSentimentPanel', () => {
     expect(screen.getAllByText('极端压力').length).toBeGreaterThan(0);
     expect(screen.getByText('比历史 94% 的交易日更冷')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /上证指数/ }).length).toBeGreaterThan(0);
+    // 模型预测写进分指数卡片（T+5/10/20）
+    expect(screen.getAllByText('+0.17%').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('涨50%').length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: /中证1000/ }).length).toBeGreaterThan(0);
   });
 
@@ -204,15 +194,72 @@ describe('MarketSentimentPanel', () => {
     expect(screen.getByText('比历史 99% 的交易日更冷')).toBeInTheDocument();
   });
 
-  it('K 线接线：官方指数蜡烛 + 成交额 + 七档涨跌分布', async () => {
+  it('涨跌分布条：七档计数与合计', async () => {
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse(payload)));
     render(<MarketSentimentPanel />);
-    await waitFor(() => expect(screen.getByText('官方指数 · 蜡烛')).toBeInTheDocument());
-    expect(screen.getByText(/成交额/)).toBeInTheDocument();
-    expect(screen.getByText(/广度口径：沪深300/)).toBeInTheDocument();
-    expect(screen.getByText(/合计 \d+ 只/)).toBeInTheDocument();
-    // v5 API：蜡烛 + 成交额柱各一条
-    expect(addSeries).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.getByText('涨跌分布')).toBeInTheDocument());
+    expect(screen.getByText(/合计 300 只/)).toBeInTheDocument();
+    expect(screen.getByText('涨停')).toBeInTheDocument();
+    expect(screen.getByText('跌停')).toBeInTheDocument();
+  });
+
+  it('预测复盘：命中率与历史命中点可见', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => jsonResponse(payload)));
+    render(<MarketSentimentPanel />);
+    await waitFor(() => expect(screen.getAllByText('80.2').length).toBeGreaterThan(0));
+    await userEvent.click(screen.getAllByRole('button', { name: /中证1000/ })[0]);
+    await waitFor(() => expect(screen.getByText(/历史命中 55%/)).toBeInTheDocument());
+    expect(screen.getByText(/预测复盘/)).toBeInTheDocument();
+  });
+
+  it('单击扇形图历史某天＝回看当天（请求带 date）', async () => {
+    const fetchMock = vi.fn(() => jsonResponse(payload));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<MarketSentimentPanel />);
+    await waitFor(() => expect(screen.getAllByText('80.2').length).toBeGreaterThan(0));
+    class PointerEventPolyfill extends MouseEvent {
+      pointerId: number;
+      constructor(type: string, params: Record<string, unknown> = {}) {
+        super(type, params);
+        this.pointerId = Number(params.pointerId ?? 1);
+      }
+    }
+    (window as unknown as { PointerEvent: typeof PointerEventPolyfill }).PointerEvent =
+      PointerEventPolyfill;
+    const svg = screen.getByRole('img', { name: /历史同状态路径分位/ });
+    Object.defineProperty(svg, 'getBoundingClientRect', {
+      value: () => ({
+        left: 0, top: 0, width: 780, height: 250,
+        right: 780, bottom: 250, x: 0, y: 0, toJSON: () => ({}),
+      }),
+    });
+    fireEvent.pointerDown(svg, { clientX: 400, clientY: 120, pointerId: 1 });
+    fireEvent.pointerUp(svg, { clientX: 400, clientY: 120, pointerId: 1 });
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url).includes('date=2026-07-15')),
+      ).toBe(true),
+    );
+  });
+
+  it('回看不足 20 天：显示已走出的部分与天数', async () => {
+    const asof = {
+      ...payload,
+      as_of: true,
+      trade_date: '2026-10-10',
+      indices: {
+        ...payload.indices,
+        '000300.SH': {
+          ...payload.indices['000300.SH'],
+          actual: Array.from({ length: 10 }, (_, k) => ({ k, pct: -0.4 * k })),
+          actual_days: 9,
+          actual_horizon: 20,
+        },
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn(() => jsonResponse(asof)));
+    render(<MarketSentimentPanel />);
+    await waitFor(() => expect(screen.getAllByText(/已走 9\/20 天/).length).toBeGreaterThan(0));
   });
 
   it('快照缺失时显示可照做的空态', async () => {
@@ -271,7 +318,7 @@ describe('回看模式', () => {
     render(<MarketSentimentPanel />);
 
     await waitFor(() => expect(screen.getByText('之后 20 天实际走势')).toBeInTheDocument());
-    expect(screen.getByText('-3.34%')).toBeInTheDocument();
+    expect(screen.getAllByText('-3.34%').length).toBeGreaterThan(0);
     // 实际 -3.34% 落在区间内，但当时典型为 +0.63% → 方向相反
     expect(screen.getByText('△ 区间对、方向反了')).toBeInTheDocument();
     expect(screen.getByText('回到最新')).toBeInTheDocument();

@@ -334,9 +334,8 @@ export const MarketAnalysisPage: React.FC = () => {
           </div>
         </header>
 
-        {/* 📊 二级控制条：五大核心指数快照 + 功能 Tabs 导航 */}
-        <div className="flex-shrink-0 bg-slate-50/70 border-b border-gray-100 px-6 py-2.5 flex flex-col gap-2.5">
-          <BroadMarketHeader indices={indices} loading={loading} />
+        {/* 📊 二级控制条：功能 Tabs 导航（指数快照卡已移入「大盘全景看板」页签） */}
+        <div className="flex-shrink-0 bg-slate-50/70 border-b border-gray-100 px-6 py-2 flex flex-col gap-1.5">
           <div className="flex items-center justify-between pt-0.5">
             <div className="flex items-center gap-1.5 overflow-x-auto">
               {navTabs.map((tab) => {
@@ -367,8 +366,13 @@ export const MarketAnalysisPage: React.FC = () => {
         {/* 📈 主内容区：全景看板禁用外部滚动条，保证 100% 紧凑铺满 */}
         <div className={`flex-1 min-h-0 ${activeTab === 'panorama' ? 'overflow-hidden p-4' : 'overflow-y-auto p-6 pb-20'} flex flex-col gap-3.5 bg-[#f8fafc] custom-scrollbar`}>
           {activeTab === 'panorama' && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-stretch flex-1 min-h-0 overflow-hidden">
-              <div className="lg:col-span-5 flex flex-col justify-between gap-3 min-h-0">
+            <div className="flex flex-col gap-3 flex-1 min-h-0 overflow-hidden">
+              {/* 核心指数快照（含多周期模型预测）：只在全景看板页签内，不占其它页签空间 */}
+              <div className="shrink-0">
+                <BroadMarketHeader indices={indices} loading={loading} compact />
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-stretch flex-1 min-h-0 overflow-hidden">
+                <div className="lg:col-span-5 flex flex-col justify-between gap-3 min-h-0">
                 <MarketBreadthCard
                   advanceCount={breadth?.advance_count}
                   declineCount={breadth?.decline_count}
@@ -406,6 +410,7 @@ export const MarketAnalysisPage: React.FC = () => {
                   date={snapDate}
                   onStockClick={(symbol, name) => openStockDetail({ symbol, name } as StockMoneyFlowItem)}
                 />
+              </div>
               </div>
             </div>
           )}

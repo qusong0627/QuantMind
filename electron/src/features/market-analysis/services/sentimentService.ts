@@ -44,6 +44,25 @@ export interface HorizonForecast {
   p90: number | null;
   n_train?: number;
   n_oos?: number;
+  /** 样本外复盘（只用 as_of 及以前的数据；命中按非重叠样本算） */
+  accuracy?: ForecastAccuracy | null;
+  /** 最近若干次非重叠预测 vs 实际 */
+  review?: ForecastReviewPoint[];
+}
+
+export interface ForecastAccuracy {
+  n_oos: number;
+  n_eff: number;
+  hit: number | null;
+  mae: number;
+  ic: number | null;
+}
+
+export interface ForecastReviewPoint {
+  date: string;
+  pred: number;
+  actual: number;
+  hit: boolean;
 }
 
 export interface FactorHistoryItem {
@@ -96,22 +115,8 @@ export interface UniverseMeta {
   n_last: number | null;
 }
 
-/** 指数 K 线：官方指数给真 OHLC；全A 是等权合成（高/低为成分股加权，非日内极值）。 */
-export interface IndexKline {
-  kind: 'official' | 'synthetic';
-  dates: string[];
-  open: (number | null)[];
-  high: (number | null)[];
-  low: (number | null)[];
-  close: (number | null)[];
-  /** 成交额（亿元） */
-  amount: (number | null)[];
-  /** 换手率（%，Σ成交额 / Σ昨流通市值） */
-  turnover: (number | null)[];
-  vol_z: (number | null)[];
-  /** 七档涨跌分布（互斥），键与后端 DIST_KEYS 一致 */
-  dist?: Record<string, number[]>;
-}
+/** 七档涨跌分布（当日计数，互斥）：涨停/涨>5%/涨0~5%/平/跌0~5%/跌>5%/跌停 */
+export type BreadthDistribution = Record<string, number>;
 
 export interface IndexSentiment {
   name: string;
@@ -122,6 +127,9 @@ export interface IndexSentiment {
   stats: IndexStats;
   baseline: IndexBaseline;
   actual: ActualPoint[];
+  /** 回看模式下已走出的天数（不足 20 天时 actual 是部分路径） */
+  actual_days?: number;
+  actual_horizon?: number;
   forecast: Record<string, HorizonForecast>;
   /** as-of 时给出真实未来交易日；最新一期为空（前端按工作日估算） */
   future_dates: string[];
@@ -132,7 +140,7 @@ export interface IndexSentiment {
   factor_history?: { dates: string[]; items: FactorHistoryItem[] };
   dispersion?: { value: number | null; pct: number | null };
   universe?: UniverseMeta;
-  kline?: IndexKline;
+  distribution?: BreadthDistribution;
 }
 
 export interface StressHistoryPoint {
@@ -152,8 +160,8 @@ export interface MarketSentiment {
   indicators: SentimentIndicator[];
   stress_history: StressHistoryPoint[];
   factor_history: { dates: string[]; items: FactorHistoryItem[] };
-  /** 全A 合成 K 线（顶栏口径）；旧快照没有此字段 */
-  kline?: IndexKline;
+  /** 全A 口径的七档涨跌分布；旧快照没有此字段 */
+  distribution?: BreadthDistribution;
   indices: Record<string, IndexSentiment>;
   /** true = 历史回看；false = 最新一期 */
   as_of: boolean;
