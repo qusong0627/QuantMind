@@ -398,6 +398,18 @@ def load_index_ohlc(symbols: tuple[str, ...] = INDEX_OHLC_SYMBOLS) -> pd.DataFra
     return out.sort_values(["symbol", "date"]).reset_index(drop=True)
 
 
+def _write_parquet_atomic(df: pd.DataFrame, path: Path) -> None:
+    """临时文件 + ``os.replace``：容器（root）与宿主机（zbox）交替跑也能覆盖。
+
+    直接 ``df.to_parquet(path)`` 会原地截断：先写的一方把属主改成自己，另一方
+    从此写不进去；进程中途死掉还会留下半截 parquet 让 API 读到坏文件。
+    原子写只需要目录写权限，两边都能替换。
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    df.to_parquet(tmp, index=False)
+    os.replace(tmp, path)
+
+
 def run(
     start: str | None = None, end: str | None = None, out_dir: Path = OUT_DIR
 ) -> dict:
@@ -407,10 +419,10 @@ def run(
     panel = build_universe_panel(px, st, fmv)
     out_dir.mkdir(parents=True, exist_ok=True)
     panel_path = out_dir / "by_universe.parquet"
-    panel.to_parquet(panel_path, index=False)
+    _write_parquet_atomic(panel, panel_path)
     ohlc = load_index_ohlc()
     ohlc_path = out_dir / "index_ohlc.parquet"
-    ohlc.to_parquet(ohlc_path, index=False)
+    _write_parquet_atomic(ohlc, ohlc_path)
     log.info(
         "写出 %s（%d 行 × %d 列，%d 个宇宙）与 %s（%d 行）",
         panel_path,
