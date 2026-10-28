@@ -587,3 +587,58 @@ def test_decide_time_matches_registry_schedule():
     hhmm = f"{P.DECIDE_HHMM[0]:02d}:{P.DECIDE_HHMM[1]:02d}"
     assert hhmm in spec.schedule
     assert spec.owner == "trade" and spec.kind == "worker"
+
+
+# ── 2b. 坏快照剔除（2026-10-22 假回撤 99.99%）─────────────────────────
+
+
+def test_drop_bad_equity_ticks_removes_a_recovering_cliff():
+    """2026-10-22 实录：桥读失败把总资产写成 ¥101.15，次日恢复正常。
+
+    不剔除 → 档位连续多日 ``defensive``（单票 10% / 每日 1 只新开仓）；
+    剔除后回撤回到正常的万分位。
+    """
+    series = [
+        (date(2026, 10, 16), 918_498.49),
+        (date(2026, 10, 17), 918_630.29),
+        (date(2026, 10, 19), 919_160.75),
+        (date(2026, 10, 20), 918_788.17),
+        (date(2026, 10, 21), 918_770.71),
+        (date(2026, 10, 22), 101.15),
+        (date(2026, 10, 23), 919_003.71),
+    ]
+    clean, dropped = P.drop_bad_equity_ticks(series)
+    assert [v for _, v in clean] == [
+        918_498.49,
+        918_630.29,
+        919_160.75,
+        918_788.17,
+        918_770.71,
+        919_003.71,
+    ]
+    assert dropped and dropped[0]["reason"] == "down_spike"
+    dd = P.max_drawdown_pct([v for _, v in clean])
+    assert dd is not None and dd < 1.0
+
+
+def test_drop_bad_equity_ticks_removes_a_reverting_spike_up():
+    series = [
+        (date(2026, 10, 20), 900_000.0),
+        (date(2026, 10, 21), 2_700_000.0),
+        (date(2026, 10, 22), 910_000.0),
+    ]
+    clean, dropped = P.drop_bad_equity_ticks(series)
+    assert [v for _, v in clean] == [900_000.0, 910_000.0]
+    assert dropped and dropped[0]["reason"] == "up_spike"
+
+
+def test_drop_bad_equity_ticks_keeps_a_real_crash():
+    """真实连续下跌**不**剔除：判据要求「次日恢复 2 倍以上」。"""
+    series = [
+        (date(2026, 10, 20), 100_000.0),
+        (date(2026, 10, 21), 90_000.0),
+        (date(2026, 10, 22), 80_000.0),
+        (date(2026, 10, 23), 70_000.0),
+    ]
+    clean, dropped = P.drop_bad_equity_ticks(series)
+    assert clean == series and dropped == []

@@ -14,10 +14,12 @@ from datetime import datetime, timezone
 import pytest
 
 from backend.shared.decision.agent_ledger import (
+    AGENT_QUOTA_ENV,
     DEFAULT_AGENT_QUOTA,
     LedgerChange,
     agent_cash,
     agent_positions,
+    agent_quota,
     agent_remaining,
     agent_used,
     ensure_agent,
@@ -348,6 +350,22 @@ def test_holding_days_parses_z_suffix_on_py310():
 def test_default_quota_matches_neighbor():
     """¥10 万/agent 是隔壁 `AGENT_QUOTA` 的取值（`scripts/live_ledger.py:33`）。"""
     assert DEFAULT_AGENT_QUOTA == 100_000.0
+
+
+class TestAgentQuotaOverride:
+    """2026-10-28 用户口径：3 个智能体 × ¥20 万（``QM_AGENT_QUOTA`` 覆盖）。"""
+
+    def test_override_takes_precedence(self):
+        assert agent_quota({AGENT_QUOTA_ENV: "200000"}) == 200_000.0
+
+    def test_absent_falls_back_to_default(self):
+        assert agent_quota({}) == DEFAULT_AGENT_QUOTA
+        assert agent_quota({AGENT_QUOTA_ENV: "  "}) == DEFAULT_AGENT_QUOTA
+
+    @pytest.mark.parametrize("raw", ["abc", "0", "-1", "nan", "inf"])
+    def test_invalid_values_fall_back_instead_of_poisoning_the_gate(self, raw):
+        """额度是买入硬上限：0/负数/非数绝不能静默采用。"""
+        assert agent_quota({AGENT_QUOTA_ENV: raw}) == DEFAULT_AGENT_QUOTA
 
 
 def test_ledger_change_is_frozen():

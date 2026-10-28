@@ -1220,7 +1220,9 @@ async def test_execute_batch_funds_real_buy_legs_before_submitting(monkeypatch) 
     assert log == ["fund", "submit"]
     market, floor, round_id, agent = funder.calls[0]
     assert (market, round_id, agent) == ("CN", "rnd-1", "deepseek-v4-pro")
-    assert floor == pytest.approx(500.0 * 10.0 * 1.10)
+    # 买入按限价（10 × 1.01）算股数：5000/10.1 = 495 → 整手 400；
+    # 注资地板按本轮快照价 10.0 × 400 × 1.10 缓冲。
+    assert floor == pytest.approx(400.0 * 10.0 * 1.10)
     assert outcome.summary()["submitted"] == 1
 
 

@@ -117,16 +117,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import Counter
 from datetime import date, datetime
 from typing import Any
 
-from backend.shared.decision.gates import (
-    RULE_POOL_ROW_INVALID,
-    RULE_UNAFFORDABLE,
-    BuyGate,
-    filter_pool,
-)
+from backend.shared.decision.gates import BuyGate
 from backend.shared.order_contract import normalize_agent
 from backend.services.trade.services.decision_round_core import (
     ACCOUNT_AGE_WARN_MIN,
@@ -143,20 +137,19 @@ from backend.services.trade.services.decision_round_core import (
     build_pool_stamps,
     clip_holdings_to_ledger,
     context_meta,
-    gate_row_to_pool_row,
     merge_outcomes,
-    pool_row_to_gate_row,
     position_source_meta,
     positions_consistency_issue,
     refusing_submitter,
     round_id_for,
     snap_price,
-    tier_numbers,
 )
 from backend.services.trade.services.decision_round_blocks import (
     build_round_context,
+    enrich_decision_quotes,
     enrich_quotes_with_blocks,
     load_round_snapshots,
+    risky_symbols,
 )
 from backend.services.trade.services.decision_round_io import (
     maybe_write_watch,
@@ -166,6 +159,11 @@ from backend.services.trade.services.decision_round_io import (
 from backend.services.trade.services.decision_round_notes import (
     exec_summary,
     round_highlights,
+)
+from backend.services.trade.services.decision_round_policy import (
+    capital_policy,
+    filter_affordable_pool,
+    tier_with_policy,
 )
 
 logger = logging.getLogger(__name__)
@@ -224,8 +222,6 @@ async def _run_once_inner(
     started: datetime,
 ) -> RoundResult:
     from backend.shared.decision.context import (
-        DEFAULT_MAX_NEW_BUYS,
-        DEFAULT_PER_STOCK_PCT,
         DirectionBlock,
         render_prompt_for,
     )
@@ -239,7 +235,6 @@ async def _run_once_inner(
         holdings_from_rows,
         quotes_for,
     )
-    from backend.shared.stock_utils import StockCodeUtil
 
     # ① 账户身份 → 持仓 → 资金面（三者任一不可得 = 本轮不做，见模块 docstring）
     user = str(deps.account_user() or "").strip()
@@ -389,11 +384,16 @@ async def _run_once_inner(
                 len(all_rows),
             )
 
-    # ⑤ 档位（读失败由 tiers 自己回退收紧，不抛）
+    # ⑤ 档位（读失败由 tiers 自己回退收紧，不抛）；显式资金策略覆盖档位
+    #    （2026-10-28 用户口径：3×¥20 万、单笔上限 ¥20 万 → 单票比例 100%）。
+    from backend.shared.decision_llm_client import effective_env
+
     tier = deps.load_tier()
-    tier_pct, tier_buys = tier_numbers(tier)
-    per_stock_pct = tier_pct if tier_pct is not None else DEFAULT_PER_STOCK_PCT
-    max_new_buys = tier_buys if tier_buys is not None else DEFAULT_MAX_NEW_BUYS
+    policy = capital_policy(tier, env=effective_env())
+    per_stock_pct, max_new_buys = policy.per_stock_pct, policy.max_new_buys
+    notes.extend(policy.notes)
+    # 提示词里的档位块与闸门同值：覆盖后的两个旋钮写回生效档位（source 留痕）。
+    effective_tier = tier_with_policy(tier, policy)
 
     # ⑥ 排除名单（缺失 ≠ 空名单）
     excluded = deps.load_excluded()
@@ -418,10 +418,12 @@ async def _run_once_inner(
         gate = BuyGate(
             pool_codes=frozenset(str(r.code) for r in pool_rows),
             blocked_symbols=excluded.symbols,
+            risky_symbols=risky_symbols(str(r.code) for r in pool_rows),
             per_stock_pct=per_stock_pct,
             allow_st=False,
+            allow_out_of_pool=policy.allow_out_of_pool,
             max_new_buys_round=max_new_buys,
-            # 子账户虚拟现金（本 agent 的 ¥10 万名义额度的余额）：买入腿的硬上限，
+            # 子账户虚拟现金（本 agent 的名义额度余额）：买入腿的硬上限，
             # 与真实账户现金**各自独立**成立（隔壁 `o["cost"] > vcash` 那条闸）。
             virtual_cash=virtual_cash,
         )
@@ -470,35 +472,20 @@ async def _run_once_inner(
         notes.append(
             f"候选池 {n_no_price}/{len(pool_rows)} 只无可用现价（不进模型视野）"
         )
-    gate_rows = [
-        pool_row_to_gate_row(r, pool_prices.get(str(r.code))) for r in pool_rows
-    ]
-    kept_rows, dropped_rows = filter_pool(gate_rows, gate, budget=per_stock_budget)
-    kept = [gate_row_to_pool_row(row) for row in kept_rows]
-    if pool_rows and not kept:
-        # 整个池子被剔光：不是错，但一定要看得见（否则表现为「模型这轮一只都没点」，
-        # 归因会指向模型）。计数**按闸门规则分流**：缺现价与买不起一手是两件完全不同
-        # 的事（前者是行情链路、后者是预算/档位），一句「全部未过闸」会把排障引向错处。
-        by_rule = Counter(
-            str(getattr(verdict, "rule", "") or "") for _, verdict in dropped_rows
-        )
-        logger.warning(
-            "[DecisionRound] %s 候选池 %d 只全部未过闸：缺可用现价 %d 只（%s）、"
-            "买不起一手 %d 只（%s）（单票预算 ¥%.2f）",
-            round_id,
-            len(pool_rows),
-            by_rule.get(RULE_POOL_ROW_INVALID, 0),
-            RULE_POOL_ROW_INVALID,
-            by_rule.get(RULE_UNAFFORDABLE, 0),
-            RULE_UNAFFORDABLE,
-            per_stock_budget,
-        )
+    kept, kept_rows, dropped_rows = filter_affordable_pool(
+        pool_rows=pool_rows,
+        pool_prices=pool_prices,
+        gate=gate,
+        budget=per_stock_budget,
+        round_id=round_id,
+    )
 
     quotes, stale = quotes_from_snapshots(snapped, kept, now)
     # ⑦b/⑦c 分数填进行情行（「信号分」后缀）+ 两个补块：数据门控——未接线整段
     # 不渲染、取数失败如实降级并留痕（口径收在 io 助手，渲染在 decision_blocks）。
     quotes, blocks = await enrich_quotes_with_blocks(
-        deps, round_id, agent, user, regime, snapped, quotes, holding_rows, now, notes
+        deps, round_id, agent, user, regime, snapped, quotes, holding_rows, now, notes,
+        tier=effective_tier, include_score_leaders=policy.allow_out_of_pool,
     )
 
     context = build_round_context(
@@ -517,6 +504,8 @@ async def _run_once_inner(
         quota_used=quota_used,
         per_stock_pct=per_stock_pct,
         max_new_buys=max_new_buys,
+        allow_out_of_pool=policy.allow_out_of_pool,
+        profit_first=policy.profit_first,
         market_state_block=blocks.market_state_block,
         signal_meta_block=blocks.signal_meta_block,
     )
@@ -556,10 +545,21 @@ async def _run_once_inner(
         wanted=[str(getattr(d, "code", "") or "") for d in decisions],
     )
 
+    # ⑧c 池外买入（2026-10-28「股票不限」）：名称由系统锚定 + 点名代码现刷行情。
+    decision_buy_symbols: list[str] = []
+    if policy.allow_out_of_pool:
+        decision_buy_symbols, snapped, gate, more_notes = await enrich_decision_quotes(
+            deps=deps, quote_client=quote_client, round_id=round_id,
+            decisions=decisions, snapped=snapped, gate=gate,
+        )
+        notes.extend(more_notes)
+
     # ⑨ 执行段与守护段（同一份快照、同一把闸门、同一个 round_id）。``in_session``
     # 已在 ⑦ 的行情闸门处取（那处也要用；一轮内不变）。
     exec_holdings = holdings_from_rows(holding_rows)
-    exec_symbols = sorted(set(exec_holdings) | {str(r.code) for r in kept})
+    exec_symbols = sorted(
+        set(exec_holdings) | {str(r.code) for r in kept} | set(decision_buy_symbols)
+    )
     exec_quotes = quotes_for(exec_symbols, snapped, trade_date=day)
 
     inflight: frozenset[tuple[str, str]] | None = None

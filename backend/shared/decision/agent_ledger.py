@@ -64,7 +64,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -74,6 +76,7 @@ from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.utc_datetime import as_utc, to_utc_iso
 
 __all__ = [
+    "AGENT_QUOTA_ENV",
     "BRIDGE_ANCHORED",
     "BRIDGE_DRIFT",
     "BRIDGE_MATCH",
@@ -91,6 +94,7 @@ __all__ = [
     "SeedReconciliation",
     "agent_cash",
     "agent_positions",
+    "agent_quota",
     "agent_remaining",
     "agent_used",
     "bridge_positions",
@@ -109,11 +113,66 @@ __all__ = [
     "seed_fill_key",
 ]
 
+logger = logging.getLogger(__name__)
+
 #: 每个 agent 的初始虚拟额度（元）。¥10 万是隔壁 ``scripts/live_ledger.py:33`` 的
 #: ``AGENT_QUOTA``——**名义额度，与真实账户资金解耦**（隔壁账户里另有约 ¥92 万
 #: 2026-08-31 之前的既存仓，明确不入分账）。真实资金闸在**执行段**，本值只决定
 #: 「这家模型这条线还能买多少」，不决定「账户还有多少钱」。
 DEFAULT_AGENT_QUOTA = 100_000.0
+
+#: 授予额度的覆盖变量（runtime.env 优先，与决策 LLM 配置同一读法）。
+#: 2026-10-28 用户口径：3 个智能体 × ¥20 万 = ¥60 万；改这个值不需要重启
+#: （每轮读一次 ``runtime.env``）。
+AGENT_QUOTA_ENV = "QM_AGENT_QUOTA"
+
+#: 非法额度值只告警一次（同一脏值每轮都刷日志会把真正的告警淹掉）。
+_quota_warned: set[str] = set()
+
+
+def _env_source() -> Mapping[str, str]:
+    """额度配置来源：``runtime.env`` 覆盖进程环境（与 ``effective_env`` 同取向）。
+
+    管理台/运维改 ``config/runtime.env`` 后，下一轮决策就能读到，不必重建容器。
+    读失败只回退进程环境——运维面抖动不该让买入额度消失。
+    """
+    src: dict[str, str] = dict(os.environ)
+    try:
+        from backend.shared.runtime_secrets import read_runtime_env
+
+        src.update({k: v for k, v in read_runtime_env().items() if v.strip()})
+    except Exception:  # noqa: BLE001 - 读不到运维文件就按进程环境跑
+        pass
+    return src
+
+
+def agent_quota(env: Mapping[str, str] | None = None) -> float:
+    """本 agent 的授予额度（元）：``QM_AGENT_QUOTA`` 覆盖，缺省回退 10 万。
+
+    非法值（非数/非正/非有限）**不采用**：额度是买入侧的硬上限，一个手滑的 0
+    会让所有买单消失，一个负号会让闸门恒拒；两者都比回退缺省更危险。非法值
+    告警一次（同一脏值不重复刷日志）。
+    """
+    src = _env_source() if env is None else env
+    raw = str(src.get(AGENT_QUOTA_ENV, "") or "").strip()
+    if not raw:
+        return DEFAULT_AGENT_QUOTA
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0:
+        if raw not in _quota_warned:
+            _quota_warned.add(raw)
+            logger.warning(
+                "[agent_ledger] %s=%r 不是正数：回退缺省额度 ¥%.0f（买入硬上限，"
+                "非法值不会静默采用）",
+                AGENT_QUOTA_ENV,
+                raw,
+                DEFAULT_AGENT_QUOTA,
+            )
+        return DEFAULT_AGENT_QUOTA
+    return value
 
 #: 坏 tick 的相对带宽：|成交价/参考价 − 1| 超过它就按参考价记并标 approx。
 #: 取值理由见模块 docstring（全市场最大涨跌停 ±30%，留 10 个百分点余量）。

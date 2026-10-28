@@ -108,6 +108,25 @@ SLOT_1000 = next(s for s in SLOTS if s.hhmm == "1000")
 SLOT_1005 = next(s for s in SLOTS if s.hhmm == "1005")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_capital_policy_env(monkeypatch):
+    """资金策略 env 属于**部署**，测试里一律清空并指向不存在的 runtime.env。
+
+    2026-10-28 起 ``config/runtime.env`` 会带 ``QM_AGENT_QUOTA=200000`` 等五项；
+    不清空的话「默认 10 万 / 20% / 3 只」的用例会在真实部署环境里红——同一份
+    代码两个答案。单项用例要验覆盖时，在自己体内 monkeypatch 即可（夹具先跑）。
+    """
+    for key in (
+        "QM_AGENT_QUOTA",
+        "QM_DECISION_PER_STOCK_PCT",
+        "QM_DECISION_MAX_NEW_BUYS",
+        "QM_DECISION_ALLOW_OUT_OF_POOL",
+        "QM_DECISION_PROFIT_FIRST",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("QM_RUNTIME_ENV_FILE", "/tmp/qm-decision-test-no-runtime.env")
+
+
 # ══ 替身 ═════════════════════════════════════════════════════════════
 @dataclass
 class Verdict:
@@ -1095,11 +1114,16 @@ def test_tier_numbers_reads_only_real_numbers():
 
 
 def test_agent_ledger_quota_is_grant_minus_position_cost():
-    """授予额度口径：总量恒为 ¥10 万，已用 = 名下持仓成本（卖出即释放）。
+    """授予额度口径：总量取 ``agent_quota()``（可被 QM_AGENT_QUOTA 覆盖），
+    已用 = 名下持仓成本（卖出即释放）。
 
     ``virtual_cash`` 不参与「已用」——它是账上现钱（含已实现盈亏），
     与「买了多少货」是两个数（见 ``agent_ledger.agent_used`` 的 docstring）。
+    **不写死 10 万**：2026-10-28 起额度可由 runtime.env 覆盖，写死会让测试在
+    真实部署环境里红（同一份代码两个答案）。
     """
+    from backend.shared.decision.agent_ledger import agent_quota
+
     ledger = AgentLedgerRead(
         ok=True,
         known=True,
@@ -1109,9 +1133,10 @@ def test_agent_ledger_quota_is_grant_minus_position_cost():
         },
         virtual_cash=1.0,
     )
-    assert ledger.quota_total == 100_000.0
+    total = agent_quota()
+    assert ledger.quota_total == total
     assert ledger.quota_used == 78_200.0  # 38000 + 40200
-    assert ledger.quota_remaining == 21_800.0
+    assert ledger.quota_remaining == total - 78_200.0
 
 
 def test_agent_ledger_quota_skips_dirty_rows_instead_of_turning_nan():

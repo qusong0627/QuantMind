@@ -186,6 +186,41 @@ class TestPoolMembership:
         assert _check(_buy("600036.SH"), gate).allowed
 
 
+class TestOutOfPoolBuys:
+    """2026-10-28「股票不限」：放开的是「从哪选」，不是「能不能买」。"""
+
+    def test_out_of_pool_allowed_when_enabled(self) -> None:
+        gate = _gate(allow_out_of_pool=True)
+        assert _check(_buy("300750.SZ"), gate).allowed
+
+    def test_empty_pool_is_not_a_blank_check_when_disabled(self) -> None:
+        """默认关时，空池仍必须拒——否则「池子构建失败」变成「全市场随便买」。"""
+        gate = _gate(pool_codes=frozenset())
+        v = _check(_buy(), gate)
+        assert not v.allowed and v.rule == RULE_POOL_NOT_MEMBER
+
+    def test_other_buy_constraints_still_apply(self) -> None:
+        gate = _gate(allow_out_of_pool=True, max_new_buys_round=1)
+        v = _check(_buy("300750.SZ"), gate, new_buys_round=1)
+        assert not v.allowed and v.rule == RULE_ROUND_NEW_BUYS
+
+    def test_authoritative_risky_symbol_blocks_empty_model_name(self) -> None:
+        """池外买入时模型自报 name 可能是空串；ST 判定必须由系统名称表兜底。"""
+        gate = _gate(
+            allow_out_of_pool=True,
+            risky_symbols=frozenset({"300750.SZ"}),
+        )
+        v = _check(_buy("300750.SZ", name=""), gate)
+        assert not v.allowed and v.rule == RULE_SYMBOL_BOUNDARY
+
+    def test_risky_symbols_are_form_insensitive(self) -> None:
+        gate = _gate(
+            allow_out_of_pool=True,
+            risky_symbols=frozenset({"SZ300750"}),
+        )
+        assert not _check(_buy("300750.SZ"), gate).allowed
+
+
 # --------------------------------------------------------------------------
 # 3. 执行比例可执行性（l2.pct_invalid / l2.pct_zero）
 # --------------------------------------------------------------------------

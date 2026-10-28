@@ -37,9 +37,6 @@ _CN_TZ = ZoneInfo("Asia/Shanghai")
 #: 采样时段（北京分钟数）：9:25-11:30 / 13:00-15:10。
 _SAMPLE_WINDOWS = ((9 * 60 + 25, 11 * 60 + 30), (13 * 60, 15 * 60 + 10))
 
-#: 分账初始额度（与 scripts/live_ledger.AGENT_QUOTA 同值；键缺失时的回退）。
-_DEFAULT_AGENT_QUOTA = 100_000.0
-
 #: 每分钟采样一轮；时段外空转（检查是纯本地的，代价可忽略）。
 _DEFAULT_INTERVAL_S = 60.0
 
@@ -117,13 +114,24 @@ async def _load_pg_agents() -> dict[str, Any]:
 
 
 def _agent_virtual_cash(rec: dict[str, Any]) -> float:
-    """该 agent 虚拟现金：键缺失回退额度，0.0 原样（与 account_protocol._cash 同口径）。"""
+    """该 agent 虚拟现金：键缺失回退额度，0.0 原样（与 account_protocol._cash 同口径）。
+
+    额度回退走 ``agent_quota()``（``QM_AGENT_QUOTA`` 可覆盖，2026-10-28 起
+    每 agent ¥20 万），与决策轮提示词/闸门同一出处——两处回退值分叉会让
+    净值曲线的起点与模型看到的额度不是同一个数。
+    """
     if "virtual_cash" not in rec:
-        return _DEFAULT_AGENT_QUOTA
+        return _quota_default()
     value = rec.get("virtual_cash")
     if value is None:
-        return _DEFAULT_AGENT_QUOTA
+        return _quota_default()
     return _f(value)
+
+
+def _quota_default() -> float:
+    from backend.shared.decision.agent_ledger import agent_quota
+
+    return agent_quota()
 
 
 async def _bridge_asset() -> tuple[float, float, bool]:

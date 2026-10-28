@@ -220,6 +220,12 @@ class RebalanceContext:
     quota_used: float = 0.0
     per_stock_pct: float = DEFAULT_PER_STOCK_PCT
     max_new_buys: int = DEFAULT_MAX_NEW_BUYS
+    #: 允许买入候选池之外的标的（2026-10-28 用户口径「股票不限」）。默认 False
+    #: = 历史提示词逐字节不变；实盘轮由 ``QM_DECISION_ALLOW_OUT_OF_POOL`` 打开。
+    allow_out_of_pool: bool = False
+    #: 盈利优先的提示词段落（2026-10-28 用户口径）。默认 False = 金样不变；
+    #: 实盘轮由 ``QM_DECISION_PROFIT_FIRST`` 打开。
+    profit_first: bool = False
 
     @property
     def quota_remaining(self) -> float:
@@ -251,10 +257,23 @@ PRICE_SRC_NOTE = (
 )
 
 
-def budget_filter_note(pct: float) -> str:
-    """候选池已按资金量裁剪的说明（09:35 主入口与整点轮共用同一句，防口径漂移）。"""
+def budget_filter_note(pct: float, *, allow_out_of_pool: bool = False) -> str:
+    """候选池已按资金量裁剪的说明（09:35 主入口与整点轮共用同一句，防口径漂移）。
+
+    ``allow_out_of_pool=True``（2026-10-28「股票不限」）时**不再**说「表里没有的
+    代码不要报买入」：池外标的允许买，但由系统按实时行情/名称索引校验后执行。
+    """
+    size = "单票上限 = 剩余额度" if pct >= 1.0 else f"单票预算 = 剩余额度×{pct:.0%}"
+    if allow_out_of_pool:
+        return (
+            f"候选池已按你的资金量剔除买不起的标的（{size}；"
+            "最小一手 100 股、科创板 200 股都超预算的票不会出现在表里）。"
+            "候选池是**重点参考**，不是唯一范围：你也可以买入池外 A 股——"
+            "必须给出准确代码、名称与买入依据；系统会按实时行情、名称索引、"
+            "黑名单/ST/停牌逐条校验后执行，校验不过的单不会成交。"
+        )
     return (
-        f"候选池已按你的资金量剔除买不起的标的（单票预算 = 剩余额度×{pct:.0%}；"
+        f"候选池已按你的资金量剔除买不起的标的（{size}；"
         "最小一手 100 股、科创板 200 股都超预算的票不会出现在表里），"
         "表里没有的代码不要报买入。"
     )
@@ -510,18 +529,39 @@ def _pool_lines(ctx: RebalanceContext) -> list[str]:
 
 
 def _decision_rule_lines(ctx: RebalanceContext) -> list[str]:
+    buy_scope = (
+        "2. 需要买入时优先从候选池选（分数高、行业顺大盘方向的优先）；"
+        "**池外 A 股也可买**——必须给出准确代码、名称与买入依据，系统会按实时行情、"
+        "名称索引、黑名单/ST/停牌逐条校验后执行。"
+        if ctx.allow_out_of_pool
+        else "2. 需要买入时从候选池选：优先分数高、行业顺大盘方向的；"
+    )
     rules = [
         "",
         "【决策规则】",
         "1. 逐只现有持仓判断：hold（继续持有）/ sell（减仓或清仓换股）。"
         "如果现有持股趋势/基本面仍优于候选池，可以全部 hold 不换股。",
-        "2. 需要买入时从候选池选：优先分数高、行业顺大盘方向的；"
-        "允许换仓（同轮先 sell 再 buy），以信号分数+板块主线+新闻分子综合权衡，不必拘泥原有持仓。",
+        buy_scope + "允许换仓（同轮先 sell 再 buy），以信号分数+板块主线+新闻分子"
+        "综合权衡，不必拘泥原有持仓。",
         f"3. sell 的 pct = 卖出可卖量的比例（0~1）；buy 的 pct = 使用剩余额度的比例"
         f"（每票 ≤{ctx.per_stock_pct:.0%}，当日新开仓 ≤{ctx.max_new_buys} 只；"
-        f"超出的会被闸门裁掉）。" + budget_filter_note(ctx.per_stock_pct),
+        f"超出的会被闸门裁掉）。"
+        + budget_filter_note(
+            ctx.per_stock_pct, allow_out_of_pool=ctx.allow_out_of_pool
+        ),
         "4. T+1：可卖量 0 的持仓不能卖。ST/*ST/退市整理股与黑名单标的**不可买入**（闸门硬拦）。",
     ]
+    if ctx.profit_first:
+        rules += [
+            "",
+            "【盈利优先】（2026-10-28 用户口径）：目标是在可控回撤下最大化净值增长。"
+            "在额度与风控允许范围内，把资金投向信号最强、催化最明确的标的；"
+            "没有优势信号时持有现金、不为凑交易而交易。允许集中持仓，"
+            "但每一笔买入都要在 reason 里写明止损/退出条件（盘中轮会落成 watch 条件位），"
+            "把单票风险限制在可承受范围内。研究总控的「禁新开仓」等方向判断是"
+            "**参考**：个股信号/新闻催化足够强且风险预算允许时仍可建仓，"
+            "在 reason 里写明与大盘方向的权衡。",
+        ]
     if any(h.held_days is not None for h in _display_holdings(ctx)):
         rules.append(
             "5. 持有天数 = 自首次建仓起的自然日（见持仓表）。信号模型的持有周期常见为 "
@@ -558,10 +598,19 @@ def _intraday_rule_lines(ctx: RebalanceContext) -> list[str]:
         "【决策规则】",
         f"1. sell 的 pct = 卖出可卖量的比例（0~1，清仓=1.0）；buy 的 pct = 使用剩余额度的"
         f"比例（每票 ≤{ctx.per_stock_pct:.0%}，当日新开仓 ≤{ctx.max_new_buys} 只；"
-        f"超出的会被闸门裁掉）。" + budget_filter_note(ctx.per_stock_pct),
+        f"超出的会被闸门裁掉）。"
+        + budget_filter_note(
+            ctx.per_stock_pct, allow_out_of_pool=ctx.allow_out_of_pool
+        ),
         "2. T+1：可卖量 0 的持仓不能卖。ST/*ST/退市整理股与黑名单标的**不可买入**"
         "（闸门硬拦）。买卖/换仓依据 = 信号分数 + 大盘盘面 + 板块主线 + 新闻分子"
-        "综合判断，HOLD/BUY 侧标签一律不作为依据。",
+        "综合判断，HOLD/BUY 侧标签一律不作为依据。"
+        + (
+            "候选池是重点参考；池外 A 股也可买（准确代码/名称/买入依据，"
+            "系统按实时行情与名称索引校验后执行）。"
+            if ctx.allow_out_of_pool
+            else ""
+        ),
         "3. watch = 给**现有持仓**挂**条件位**：stop_loss=跌破此价自动减仓 pct 比例、"
         "take_profit=涨到此价自动止盈 pct（至少给一个，由分钟级价格哨兵盯，不用等"
         "下一个整点）。move_stop 可选：价格**上触**该价后把 stop_loss 上移到该价"
@@ -571,6 +620,16 @@ def _intraday_rule_lines(ctx: RebalanceContext) -> list[str]:
         "4. 「③推理论证」里写了具体价位的**持仓**，**必须**同步落成 watch 决策"
         "（带 code 与 reason 写明触发价与动作）——只写在文字里等于没设防。",
     ]
+    if ctx.profit_first:
+        rules += [
+            "",
+            "【盈利优先】（2026-10-28 用户口径）：目标是在可控回撤下最大化净值增长。"
+            "在额度与风控允许范围内，把资金投向信号最强、催化最明确的标的；"
+            "没有优势信号时持有现金、不为凑交易而交易。允许集中持仓，"
+            "但每一笔买入都要给出止损/退出条件，把单票风险限制在可承受范围内。"
+            "研究总控的「禁新开仓」等方向判断是**参考**：个股信号/新闻催化足够强且"
+            "风险预算允许时仍可建仓，在 reason 里写明与大盘方向的权衡。",
+        ]
     if any(h.held_days is not None for h in _display_holdings(ctx)):
         rules.append(
             "5. 持有天数 = 自首次建仓起的自然日（见持仓表）。信号模型周期常见为 T+5/T+10："
@@ -612,6 +671,12 @@ def _context_body(ctx: RebalanceContext) -> list[str]:
         f"剩余 ¥{ctx.quota_remaining:,.0f}）。",
         "",
     ]
+    if ctx.profit_first:
+        lines += [
+            "目标：在可控回撤下**最大化净值增长**（盈利优先，其次才是交易频率）；"
+            "没有优势信号时允许持有现金。",
+            "",
+        ]
     # 丁8 新鲜度/降级警告：置顶（开场白之后、持仓表之前）——模型先知道哪些
     # 数据是降级的，再读事实。空串 = 无降级，不出现。
     if ctx.alert_block:

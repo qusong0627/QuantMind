@@ -221,8 +221,16 @@ class BuyGate:
 
     pool_codes: frozenset[str] = frozenset()
     blocked_symbols: frozenset[str] = frozenset()
+    #: 权威名称表判定的 ST/退市标的（后缀式，调用点从名称索引查好传入）。
+    #: **与模型自报的 ``decision.name`` 独立**：池外标的一旦由模型自报名称，
+    #: 空名/错名会 fail-open 放进一只 ST 股——这张表补的就是这个口子。
+    risky_symbols: frozenset[str] = frozenset()
     per_stock_pct: float = 0.0
     allow_st: bool = False
+    #: 允许买入候选池之外的标的（2026-10-28 用户口径「股票不限」）。开启后
+    #: ``pool_codes`` 不再作为新开仓的白名单；代码/名称/黑名单/停牌/涨跌停/
+    #: 额度/一手门槛**照旧逐条判**——放开的是「从哪选」，不是「能不能买」。
+    allow_out_of_pool: bool = False
     #: 本轮允许**新开仓**的标的数上限；0 = 未配置（不判 + 留 note）。
     #: 当日累计额度归既有的 ``l1.new_buys_per_day``，本层不复制。
     max_new_buys_round: int = 0
@@ -237,6 +245,11 @@ class BuyGate:
             self,
             "blocked_symbols",
             frozenset(c for c in map(_norm, self.blocked_symbols) if c),
+        )
+        object.__setattr__(
+            self,
+            "risky_symbols",
+            frozenset(c for c in map(_norm, self.risky_symbols) if c),
         )
         if self.per_stock_pct < 0 or self.per_stock_pct > 1:
             raise ValueError(
@@ -263,6 +276,13 @@ def check_symbol_boundary(code: str, name: str, gate: BuyGate) -> GateVerdict:
         return _block(RULE_SYMBOL_BOUNDARY, f"{symbol} 在买入黑名单中", symbol=symbol)
     if gate.allow_st:
         return _ok()
+    if symbol in gate.risky_symbols:
+        # 权威名称表命中（调用点用本地名称索引查好）：**不依赖模型自报的 name**。
+        return _block(
+            RULE_SYMBOL_BOUNDARY,
+            f"{symbol} 名称命中 ST/退市（权威名称表，禁买）",
+            symbol=symbol,
+        )
     if is_risky_name(name):
         return _block(
             RULE_SYMBOL_BOUNDARY,
@@ -400,7 +420,9 @@ def check_buy(
         notes.append("单票额度未配置：不夹取")
 
     if not held:
-        if not gate.pool_codes or symbol not in gate.pool_codes:
+        if not gate.allow_out_of_pool and (
+            not gate.pool_codes or symbol not in gate.pool_codes
+        ):
             return _block(
                 RULE_POOL_NOT_MEMBER,
                 f"{symbol} 不在本轮候选池内（新开仓只能在池内选）",

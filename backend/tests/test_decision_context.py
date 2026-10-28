@@ -626,3 +626,40 @@ def test_legacy_rows_keep_the_prompt_free_of_markers_and_notes() -> None:
     assert "‡" not in out
     assert ctxmod.PRICE_SRC_NOTE not in out
     assert "注：**现价" not in out
+
+
+# ---------------------------------------------------------------------------
+# 8. 2026-10-28 实盘资金策略：「股票不限」+ 盈利优先
+# ---------------------------------------------------------------------------
+
+
+def test_out_of_pool_scope_is_rendered_in_both_slots() -> None:
+    """池外可买时两个槽位都改口径：不再说「表里没有的代码不要报买入」。"""
+    ctx = replace(
+        _intraday_ctx(),
+        allow_out_of_pool=True,
+        per_stock_pct=1.0,
+        max_new_buys=9,
+    )
+    for out in (render_prompt(ctx), render_intraday_prompt(ctx)):
+        assert "池外 A 股也可买" in out
+        assert "表里没有的代码不要报买入" not in out
+        assert "≤100%" in out
+
+
+def test_default_prompt_keeps_pool_only_language() -> None:
+    """默认关（历史/金样路径）：池外口径一个字都不出现。"""
+    out = render_prompt(_intraday_ctx())
+    assert "表里没有的代码不要报买入" in out
+    assert "池外 A 股也可买" not in out
+
+
+def test_profit_first_block_reaches_both_slots() -> None:
+    ctx = replace(_intraday_ctx(), profit_first=True)
+    for out in (render_prompt(ctx), render_intraday_prompt(ctx)):
+        assert "【盈利优先】" in out
+        assert "最大化净值增长" in out
+
+
+def test_profit_first_is_off_by_default() -> None:
+    assert "【盈利优先】" not in render_prompt(_intraday_ctx())

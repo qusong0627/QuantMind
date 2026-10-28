@@ -363,6 +363,10 @@ class _Plan:
         self.quotes = {_norm(k): v for k, v in (quotes or {}).items() if _norm(k)}
         self.gate = gate
         self.quota = _finite(quota)
+        #: 本轮买入腿**已占用的额度**（数量 × 现价）。2026-10-28 修：单票比例
+        #: 放到 100% 后，同一批两条 buy 各按「剩余额度×100%」算会各出 ¥20 万腿，
+        #: 合计穿透单 agent 的授予额度——额度必须是**跨腿累计**的。
+        self.buy_spent = 0.0
         #: 已有未确认委托的 ``(code, side)``（跨轮；调用点从在途账查）
         self.inflight = {(_norm(s), str(sd).strip().lower()) for s, sd in inflight}
         self.new_buys = int(new_buys_round or 0)
@@ -558,6 +562,10 @@ class _Plan:
         q = self.quote(symbol)
         price = _finite(q.price)
         pct_hint = _finite(d.pct.value) if d.pct.is_given else None
+        # 跨腿累计：前一条腿已占用的额度必须从本条腿的可用额度里扣除。
+        available = (
+            None if self.quota is None else max(0.0, self.quota - self.buy_spent)
+        )
         verdict = check_buy(
             d,
             gate=self.gate,
@@ -568,10 +576,10 @@ class _Plan:
             limit_threshold_ratio=q.limit_threshold_ratio,
             need_amount=(
                 None
-                if self.quota is None or pct_hint is None
-                else self.quota * pct_hint
+                if available is None or pct_hint is None
+                else available * pct_hint
             ),
-            budget=self.quota,
+            budget=available,
             price=price,
         )
         if not verdict.allowed:
@@ -604,7 +612,14 @@ class _Plan:
         # 「买不起一手」已在上面按 ``l3.below_min_lot`` 拦下（那里能算出差多少钱，
         # 归因更准）。本层再加一条同义否决 = 一条永远不触发的规则 id
         # （影子代价账按 id 分组，永不触发的条目会烂在报告里）。
-        raw = self.quota * verdict.pct / price
+        limit, problem = _limit(side, price)
+        if problem:
+            self.note(f"{symbol} 买入：{problem}（不带限价）")
+        # 买入按**限价**算股数：mirror 的单笔上限按 ``limit_price × qty`` 计，
+        # 用参考价算会让满额单因 1% 限价上浮穿透上限而被跳过（2026-10-28 实测：
+        # 20 万满额单 limit 口径 20.2 万 > 20 万上限 → 整笔跳过）。
+        size_price = price * (1.0 + LIMIT_SLIP) if side == BUY else price
+        raw = available * verdict.pct / size_price
         qty, note = align_buy_quantity(symbol, raw)
         if qty <= 0:
             self.vetoes.append(
@@ -613,16 +628,13 @@ class _Plan:
                     symbol,
                     side,
                     "l3.below_min_lot",
-                    note or f"额度 {self.quota:g} 买不起一手",
-                    quota=self.quota,
+                    note or f"可用额度 {available:g} 买不起一手",
+                    quota=available,
                     price=price,
                     want=raw,
                 )
             )
             return
-        limit, problem = _limit(side, price)
-        if problem:
-            self.note(f"{symbol} 买入：{problem}（不带限价）")
         self.buy_legs.append(
             Leg(
                 index=index,
@@ -634,6 +646,8 @@ class _Plan:
                 note=note,
             )
         )
+        # 跨腿累计：按**限价**口径占用额度（与 mirror 的 order_value 同式）。
+        self.buy_spent += qty * (limit if limit is not None else price)
         self.placed.add((symbol, side))
 
 

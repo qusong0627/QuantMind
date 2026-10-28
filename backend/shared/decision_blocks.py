@@ -137,6 +137,56 @@ def build_signal_meta_block(
     )
 
 
+def build_score_leaders_block(
+    scores: Mapping[str, Mapping[str, Any]], *, limit: int = 20
+) -> str:
+    """【模型分数榜】当日默认模型截面最高分的 N 只（**不限候选池**）。
+
+    2026-10-28 用户口径「股票不限 + 按默认模型分数交易」的落点：候选池只有 20 只，
+    而当日模型最高分的票常不在池里（实测 10-28 池内全是银行、榜内是 300475/601208
+    等）。只给池内分数，模型就没有池外选股的依据。
+
+    纪律：
+    * 只列**有中文名**的 A 股（``stocks_index`` 未收录的指数/新股不列）；
+    * ST/退市名**不进榜**（执行闸门仍独立拦一次）；
+    * 只报位置（分数/分位），不给买卖结论；缺失分位渲染 ``—``，不编 0。
+    """
+    from backend.shared.stock_name_mapper import get_stock_name, normalize_symbol
+    from backend.shared.symbol_policy import is_risky_name
+
+    rows: list[tuple[float | None, float, str, str]] = []
+    for raw, rec in (scores or {}).items():
+        value = _f((rec or {}).get("value"))
+        if value is None:
+            continue
+        suffix = StockCodeUtil.to_suffix(str(raw or ""))
+        if not suffix:
+            continue
+        name = get_stock_name(normalize_symbol(suffix) or suffix)
+        if not name or name == suffix or is_risky_name(name):
+            continue
+        rows.append((_f((rec or {}).get("rank_pct")), value, suffix, name))
+    if not rows:
+        return ""
+    # 按**批内分位**排，不按 raw fusion：快照可能混多个推理批次，raw 分不可跨批比。
+    rows.sort(
+        key=lambda item: (
+            -(item[0] if item[0] is not None else -1.0),
+            -item[1],
+            item[2],
+        )
+    )
+    lines = ["【模型分数榜】（默认模型当日截面分位 · 池外选股参考，非买卖建议）"]
+    for rank, value, suffix, name in rows[: max(1, int(limit))]:
+        score = f"{rank * 100:.1f}" if rank is not None else "—"
+        lines.append(f"- {suffix} {name}：信号分 {score}（fusion {value:+.4f}）")
+    lines.append("- 分位是各批内部的截面位置（快照可能混合批次），跨批不可直接比较。")
+    lines.append(
+        "- 这些标的未在候选池也可买；系统按实时行情/名称索引/黑名单/ST 校验后执行。"
+    )
+    return "\n".join(lines)
+
+
 def _json_obj(raw: object) -> Mapping[str, Any] | None:
     """Hash 里的 JSON 字段 → dict（写侧 ``json.dumps`` 过；替身直接给 dict 也认）。"""
     if isinstance(raw, Mapping):

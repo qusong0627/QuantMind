@@ -30,6 +30,7 @@ from backend.shared.decision_blocks import (
     build_news_block,
     build_orderbook_block,
     build_prev_round_block,
+    build_score_leaders_block,
     build_signal_meta_block,
     build_tier_block,
     parse_brief_ts,
@@ -1067,3 +1068,32 @@ class TestBuildMirrorFeedbackBlock:
         assert "被闸门跳过 12 次" in text
         assert "另有 2 条" in text
         assert text.count("\n- ") == 11  # 10 行明细 + 1 行尾注
+
+
+class TestScoreLeadersBlock:
+    """2026-10-28「股票不限」：池外高分票要有榜面才看得见。"""
+
+    SCORES = {
+        "SH600036": {"value": 0.31, "rank_pct": 0.90},
+        "SZ000001": {"value": 0.50, "rank_pct": 0.99},
+        "SH000001": {"value": 0.90, "rank_pct": 1.0},  # 指数：名称索引无收录 → 不列
+        "SZ300750": {"value": 0.20, "rank_pct": None},
+        "SH600000": {"value": 0.10, "rank_pct": 0.50},
+    }
+
+    def test_ranks_by_score_and_skips_unresolvable_names(self):
+        out = build_score_leaders_block(self.SCORES)
+        assert "模型分数榜" in out
+        # 指数 0.90 被名称索引过滤，榜首是 000001.SZ 0.50
+        assert out.index("000001.SZ") < out.index("600036.SH")
+        assert out.index("600036.SH") < out.index("300750.SZ")
+        assert "SH000001" not in out
+
+    def test_limit_and_missing_rank_renders_dash(self):
+        out = build_score_leaders_block(self.SCORES, limit=2)
+        assert "000001.SZ" in out and "600036.SH" in out
+        assert "300750.SZ" not in out
+
+    def test_empty_scores_render_nothing(self):
+        assert build_score_leaders_block({}) == ""
+        assert build_score_leaders_block(None) == ""

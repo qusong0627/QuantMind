@@ -456,6 +456,8 @@ def build_context(
     extra_context: str = "",
     market_state_block: str = "",
     signal_meta_block: str = "",
+    allow_out_of_pool: bool = False,
+    profit_first: bool = False,
 ) -> RebalanceContext:
     """把读到的四块拼成一轮上下文。
 
@@ -490,6 +492,8 @@ def build_context(
         industry_caution_block=industry_caution_block,
         market_state_block=market_state_block,
         signal_meta_block=signal_meta_block,
+        allow_out_of_pool=allow_out_of_pool,
+        profit_first=profit_first,
         quota_used=quota_used,
         **kwargs,
     )

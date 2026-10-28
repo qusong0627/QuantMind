@@ -199,6 +199,8 @@ def test_merge_replaces_stale_file_points_after_cutover():
 
 # ── 分账视图补充现价/权益 ─────────────────────────────────────────
 def test_ledger_view_enriches_cash_market_value_and_equity():
+    from backend.shared.decision.agent_ledger import agent_quota
+
     ledger = {
         "agents": {
             "flash": {
@@ -218,7 +220,7 @@ def test_ledger_view_enriches_cash_market_value_and_equity():
 
     assert rec["cash"] == 9000.0
     assert rec["used"] == 2000.0
-    assert rec["remaining"] == 98000.0
+    assert rec["remaining"] == agent_quota() - 2000.0
     assert rec["market_value"] == 1200.0
     # 缺价持仓不许被悄悄丢掉：equity 为 None（UI 显示 —），不是 cash+部分市值
     assert rec["equity"] is None

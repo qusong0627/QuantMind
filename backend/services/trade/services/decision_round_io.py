@@ -42,7 +42,7 @@ from backend.services.trade.services.decision_round_core import (
     RoundSlot,
     as_float,
 )
-from backend.shared.decision.agent_ledger import DEFAULT_AGENT_QUOTA
+from backend.shared.decision.agent_ledger import agent_quota
 from backend.shared.decision.contract import SCHEMA_INTRADAY
 
 # arena 文件面写侧是**本机独有**的包（与「实盘交易」栏同纪律，见 .gitignore）：
@@ -205,7 +205,7 @@ async def load_agent_ledger(
         positions=dict(positions) if isinstance(positions, Mapping) else {},
         # 现金为负**原样带回**（不夹到 0）：透支是真实状态，夹掉只会让「为什么一直
         # 不买」变成一个查不出的问题。负值在下游自然是「什么都买不起」。
-        virtual_cash=DEFAULT_AGENT_QUOTA if cash is None else float(cash),
+        virtual_cash=agent_quota() if cash is None else float(cash),
     )
 
 

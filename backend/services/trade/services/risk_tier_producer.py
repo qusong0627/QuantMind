@@ -143,6 +143,47 @@ def merge_ledger_rows(
     return fam, series
 
 
+def drop_bad_equity_ticks(
+    series: Sequence[tuple[date, float]],
+) -> tuple[list[tuple[date, float]], list[dict[str, Any]]]:
+    """剔除「单日腰斩、次日完全恢复」的坏快照（纯函数，按日升序入参）。
+
+    2026-10-22 实测：桥账户读取异常把 ``total_asset`` 写成 ¥101.15（前一日
+    918,770.71、次日 919,003.71），``max_drawdown_pct`` 据此算出 **99.99% 回撤**，
+    档位连续多日停在 ``defensive``（单票 10% / 每日只许 1 只新开仓）。这不是行情
+    回撤，是**数据故障**；风控输入被一次脏读钉死，比数据缺失更隐蔽。
+
+    判据（两条，只处理「孤立坏点 + 次日恢复」；真实连续下跌**不**剔除）：
+    - 向下尖峰：``v[i] < 0.5·v[i-1]`` 且 ``v[i+1] > 2·v[i]``；
+    - 向上尖峰：``v[i] > 2·v[i-1]`` 且 ``v[i+1] < 0.5·v[i]``（虚高峰会把回撤放大）。
+
+    返回 ``(干净序列, 被剔除点[])``；剔除点进证据，档位文档里可追溯。
+    """
+    pts = [(d, float(v)) for d, v in series if v is not None and float(v) > 0]
+    if len(pts) < 3:
+        return pts, []
+    kept: list[tuple[date, float]] = [pts[0]]
+    dropped: list[dict[str, Any]] = []
+    for i in range(1, len(pts) - 1):
+        prev_v = kept[-1][1]
+        cur_d, cur_v = pts[i]
+        next_v = pts[i + 1][1]
+        down_spike = cur_v < 0.5 * prev_v and next_v > 2.0 * cur_v
+        up_spike = cur_v > 2.0 * prev_v and next_v < 0.5 * cur_v
+        if down_spike or up_spike:
+            dropped.append(
+                {
+                    "date": cur_d.isoformat(),
+                    "value": round(cur_v, 2),
+                    "reason": "down_spike" if down_spike else "up_spike",
+                }
+            )
+            continue
+        kept.append(pts[i])
+    kept.append(pts[-1])
+    return kept, dropped
+
+
 # ── 取数（三项）────────────────────────────────────────────────────────
 
 
@@ -218,13 +259,16 @@ async def account_drawdown20(
         return None, evidence
 
     fam, series = merge_ledger_rows([(r[0], r[1], r[2]) for r in rows])
-    dd = max_drawdown_pct([v for _, v in series])
+    clean, dropped = drop_bad_equity_ticks(series)
+    dd = max_drawdown_pct([v for _, v in clean])
     evidence.update(
         {
             "account_family": fam,
-            "points": len(series),
-            "first": series[0][0].isoformat() if series else "",
-            "last": series[-1][0].isoformat() if series else "",
+            "points": len(clean),
+            "first": clean[0][0].isoformat() if clean else "",
+            "last": clean[-1][0].isoformat() if clean else "",
+            # 坏快照剔除留痕：档位文档里能回答「99.99% 回撤去哪了」。
+            "dropped_bad_ticks": dropped,
         }
     )
     return dd, evidence

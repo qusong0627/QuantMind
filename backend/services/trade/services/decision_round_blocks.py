@@ -46,6 +46,7 @@ from backend.shared.decision_blocks import (
     build_news_block,
     build_orderbook_block,
     build_prev_round_block,
+    build_score_leaders_block,
     build_signal_meta_block,
     build_tier_block,
 )
@@ -109,6 +110,84 @@ async def _refresh_quotes_before_prompt(codes: Sequence[str], round_id: str) -> 
             ok,
             len(result),
         )
+
+
+def risky_symbols(codes: Sequence[str]) -> frozenset[str]:
+    """代码 → 权威名称表判定为 ST/退市的集合（后缀式）。
+
+    用本地名称索引（``stocks_index.json``）而不是模型自报的 ``name``：池外买入
+    时模型可能给空名或错名，名称判据必须由系统一侧锚定。索引缺失 / 名称查不到
+    → 空集（``symbol_policy`` 的 fail-open 口径：宁可漏拦一只，也不能因为名称表
+    拉不到把当天所有买入停掉；代码黑名单不依赖名称）。
+    """
+    from backend.shared.stock_name_mapper import get_stock_name, normalize_symbol
+    from backend.shared.symbol_policy import is_risky_name
+
+    out: set[str] = set()
+    for raw in codes or ():
+        code = str(raw or "").strip()
+        if not code:
+            continue
+        name = get_stock_name(normalize_symbol(code) or code)
+        if is_risky_name(name):
+            out.add(StockCodeUtil.to_suffix(code))
+    return frozenset(out)
+
+
+async def enrich_decision_quotes(
+    *,
+    deps: RoundDeps,
+    quote_client: Any,
+    round_id: str,
+    decisions: Sequence[Any],
+    snapped: Mapping[str, Mapping[str, Any]],
+    gate: Any,
+) -> tuple[
+    list[str], Mapping[str, Mapping[str, Any]], Any, list[str]
+]:
+    """池外买入（2026-10-28「股票不限」）：权威名称判定 + 行情现刷。
+
+    返回 ``(点名的买入代码, 合并后的快照, 更新后的闸门, 留痕)``。三条纪律：
+
+    * 名称判据由**系统**锚定（模型自报 ``name`` 可能为空/写错，ST 判定不能信它）；
+    * 行情按点名代码**现刷一次**再执行——否则 ``plan_orders`` 按「无价」否决，
+      「放开了池」会变成「池外一只都买不进」；
+    * 补取失败**不拦轮**：腿到执行段按无价否决并留痕（与行情面其余降级同向）。
+    """
+    buy_symbols = sorted(
+        {
+            StockCodeUtil.to_suffix(str(getattr(d, "code", "") or "").strip())
+            for d in decisions
+            if str(getattr(d, "action", "") or "").strip().lower() == "buy"
+            and str(getattr(d, "code", "") or "").strip()
+        }
+    )
+    notes: list[str] = []
+    if not buy_symbols:
+        return buy_symbols, snapped, gate, notes
+    gate = replace(
+        gate, risky_symbols=gate.risky_symbols | risky_symbols(buy_symbols)
+    )
+    missing = [s for s in buy_symbols if s not in snapped]
+    if not missing:
+        return buy_symbols, snapped, gate, notes
+    extra: Mapping[str, Mapping[str, Any]] = {}
+    if quote_client is not None:
+        await _refresh_quotes_before_prompt(missing, round_id)
+        try:
+            extra = deps.read_snaps(quote_client, missing) or {}
+        except Exception as exc:  # noqa: BLE001 刷不到按无价否决，腿不提交
+            logger.warning(
+                "[DecisionRound] %s 池外标的行情补取失败 %s: %s",
+                round_id,
+                missing,
+                exc,
+            )
+    if extra:
+        notes.append(f"池外买入 {len(missing)} 只：已现刷行情 {len(extra)} 只")
+        return buy_symbols, {**snapped, **extra}, gate, notes
+    notes.append(f"池外买入 {len(missing)} 只：行情补取为空（执行段将按无价否决）")
+    return buy_symbols, snapped, gate, notes
 
 
 async def load_round_snapshots(
@@ -260,6 +339,8 @@ async def enrich_quotes_with_blocks(
     holdings: Sequence[Any],
     now: datetime,
     notes: list[str],
+    tier: Any | None = None,
+    include_score_leaders: bool = False,
 ) -> tuple[tuple[PoolQuote, ...], RoundBlocks]:
     """⑦b+⑦c 行情行填「信号分」+ 全部提示词补块（两批合并收口）。
 
@@ -310,6 +391,13 @@ async def enrich_quotes_with_blocks(
         if scores_wired
         else ""
     )
+    # 2026-10-28「股票不限」：候选池只有 20 只，池外高分票需要榜面才看得见。
+    if include_score_leaders and score_map:
+        leaders = build_score_leaders_block(score_map)
+        if leaders:
+            signal_meta_block = (
+                f"{signal_meta_block}\n\n{leaders}" if signal_meta_block else leaders
+            )
 
     # ── Stage 2 第二批：先收集降级留痕（丁8 置顶汇总）───────────────
     alerts: list[str] = []
@@ -475,11 +563,14 @@ async def enrich_quotes_with_blocks(
         if industry_doc is None:
             alerts.append("行业风险清单未产出：行业提示段缺位")
 
-    # 丁7 档位（总接线标记门控；读失败按未接线降级）
+    # 丁7 档位（总接线标记门控；读失败按未接线降级）。``tier`` 由编排层传入
+    # **生效档位**（资金策略覆盖后的两个旋钮），保证提示词里的上限与闸门同值。
     tier_block = ""
     if enabled:
         try:
-            tier_block = build_tier_block(deps.load_tier())
+            tier_block = build_tier_block(
+                tier if tier is not None else deps.load_tier()
+            )
         except Exception as exc:  # noqa: BLE001 档位读不到按未接线降级
             logger.warning("[DecisionRound] %s 档位读取异常: %s", round_id, exc)
 

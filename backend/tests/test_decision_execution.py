@@ -399,7 +399,8 @@ def test_buy_limit_price_sits_one_percent_above_the_reference() -> None:
     )
     (leg,) = plan.buys
     assert leg.limit_price == pytest.approx(10.0 * (1 + LIMIT_SLIP))
-    assert leg.quantity == 4000  # 200000×0.2 / 10 = 4000，整手原样
+    # 买入按限价（10 × 1.01）算股数：40000/10.1 = 3960.4 → 整手 3900
+    assert leg.quantity == 3900
 
 
 def test_the_slip_band_is_one_percent_not_the_two_percent_default() -> None:
@@ -831,3 +832,35 @@ def test_every_rule_id_this_layer_can_emit_is_declared_somewhere() -> None:
     assert not missing, (
         f"本族的这些 id 在任何场景里都没被产出（用例退化了？）：{missing}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-28：单票比例 100% 时，额度必须**跨腿累计**
+# ---------------------------------------------------------------------------
+
+
+def test_two_full_size_buys_cannot_exceed_the_agent_quota() -> None:
+    """两条 buy 各写 ``pct=1.0`` 时，合计只能是 ¥20 万，不是每条各 ¥20 万。
+
+    单票比例放到 100%（用户口径：单笔上限 = 单个 agent 的 ¥20 万）后，
+    ``self.quota * pct`` 逐腿各算一次会让第二条腿凭空多出一份额度——
+    这是「额度累积」在本层的唯一职责。
+    """
+    plan = plan_orders(
+        _batch(_buy("600519.SH", 1.0), _buy("600036.SH", 1.0)),
+        gate=_gate(
+            "600519.SH",
+            "600036.SH",
+            per_stock_pct=1.0,
+            virtual_cash=200_000.0,
+        ),
+        quota=200_000.0,
+        quotes=dict(
+            [_quote("600519.SH", price=10.0), _quote("600036.SH", price=10.0)]
+        ),
+    )
+    assert len(plan.buys) == 1
+    # 20 万 / 10.1（限价）= 19801.98 → 整手 19800，限价口径 199,980 ≤ 20 万
+    assert plan.buys[0].quantity == 19_800
+    assert sum(leg.quantity * leg.limit_price for leg in plan.buys) <= 200_000.0
+    assert "l3.below_min_lot" in _rule_ids(plan)

@@ -20,6 +20,7 @@ from typing import Any
 
 from backend.shared.decision.agent_ledger import (
     DEFAULT_AGENT_QUOTA,
+    agent_quota,
     holding_age_days as holding_age_days,  # noqa: PLC0414 —— 对外契约再导出
     positions_cost,
 )
@@ -87,8 +88,12 @@ class AgentLedgerRead:
 
     @property
     def quota_total(self) -> float:
-        """用户授予的额度（名义值）。真实账户总额仅供内部风控，**禁止入提示词**。"""
-        return DEFAULT_AGENT_QUOTA
+        """用户授予的额度（名义值）。真实账户总额仅供内部风控，**禁止入提示词**。
+
+        2026-10-28 起可经 ``QM_AGENT_QUOTA`` 覆盖（每轮从 runtime.env 读，改额度
+        不必重启）；缺省仍是 ¥10 万。见 ``agent_ledger.agent_quota``。
+        """
+        return agent_quota()
 
     @property
     def quota_used(self) -> float:
