@@ -104,13 +104,19 @@ class TdxClient:
 
     def order_stock(self, account_id: int, stock_code: str, side: Side,
                     volume: int, price_type: PriceType = PriceType.MANUAL,
-                    price: float = 0.0) -> dict:
+                    price: float = 0.0, notify: int = 0) -> dict:
+        """下单。notify=是否手动确认（0=需客户端确认，1=请求免确认）。
+
+        官方文档：实盘账户默认「提示下单让用户确认」；免确认需券商开通
+        「支持TQ的版本」，且 notify 参数要显式传入。
+        """
         order_type = STOCK_BUY if side == Side.BUY else STOCK_SELL
         # 下单绝不重试：超时后订单可能已在柜台，重试=重复下单。
         return self._call("order_stock", {
             "account_id": account_id, "stock_code": stock_code,
             "order_type": order_type, "order_volume": int(volume),
-            "price_type": int(price_type.value), "price": float(price or 0)},
+            "price_type": int(price_type.value), "price": float(price or 0),
+            "notify": int(notify)},
             max_retries=0)
 
     def cancel_order_stock(self, account_id: int, stock_code: str, order_id: str) -> dict:

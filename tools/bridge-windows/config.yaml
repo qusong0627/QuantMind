@@ -53,6 +53,11 @@ sltp_daemon:
   poll_interval_seconds: 5
   state_file: "./data/stop_loss_state.json"
 
+trade:
+  # 下单确认：0=需在通达信客户端手动确认（默认，安全）；1=请求免确认。
+  # 官方文档：实盘账户默认弹确认；免确认需券商开通「支持TQ的版本」。
+  notify: 0
+
 order_tracking:
   state_file: "./data/active_orders.json"
   sync_interval_seconds: 15

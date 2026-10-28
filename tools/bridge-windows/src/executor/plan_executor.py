@@ -19,8 +19,12 @@ class PlanExecutor:
     """执行 TradePlan: 卖先买后, 资金/持仓校验, 幂等去重, 交易记录同步到共享目录."""
 
     def __init__(self, tdx: TdxClient, shared_report_dir: str,
-                 trade_log_file: str = "trade_log.jsonl", state_dir: str = ""):
+                 trade_log_file: str = "trade_log.jsonl", state_dir: str = "",
+                 default_notify: int = 0):
         self.tdx = tdx
+        # 下单确认：0=客户端手动确认（默认，安全）；1=请求免确认。
+        # 实盘免确认需券商开通「支持TQ的版本」，否则仍会返回 Value=1。
+        self.default_notify = 1 if int(default_notify or 0) else 0
         self.shared_report_dir = shared_report_dir
         self.trade_log_file = os.path.join(shared_report_dir, trade_log_file)
         self.state_dir = state_dir
@@ -156,8 +160,10 @@ class PlanExecutor:
             self._send_trade_warning(warning)
 
         try:
+            notify = (order.notify if order.notify is not None
+                      else self.default_notify)
             res = self.tdx.order_stock(account_id, stock, side, order.volume,
-                                       price_type, price)
+                                       price_type, price, notify=notify)
             value = str(res.get("Value", "0"))
             wtbh = str(res.get("Wtbh", "") or "")
             msg = res.get("Msg", "")

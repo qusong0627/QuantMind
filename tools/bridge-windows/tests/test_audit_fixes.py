@@ -166,6 +166,29 @@ def _test_timeout_circuit():
     print("  ✅ 熔断分权：传输错误 5 次 / 超时 10 次")
 
 
+def _test_order_notify():
+    from src.core.types import PriceType, Side
+    from src.tdx.client import TdxClient
+    from src.core.trade_plan import TradePlan
+
+    class _Rec(TdxClient):
+        def __init__(self):
+            super().__init__()
+            self.last = None
+
+        def _call(self, method, params, **kw):
+            self.last = (method, params)
+            return {"Value": "1", "Msg": "待确认"}
+
+    c = _Rec()
+    c.order_stock(0, "600519.SH", Side.BUY, 100, PriceType.MANUAL, 1200.0, notify=1)
+    assert c.last[0] == "order_stock" and c.last[1]["notify"] == 1, c.last
+    plan = TradePlan.from_dict({"plan_id": "t", "orders": [
+        {"stock_code": "600519.SH", "side": "buy", "volume": 100, "notify": 1}]})
+    assert plan.orders[0].notify == 1
+    print("  ✅ 下单确认参数：notify 透传到 TQ，计划可按单覆盖")
+
+
 async def _run():
     await _test_singleflight_cancel()
     await _test_bare_code_ambiguity()
@@ -174,6 +197,7 @@ async def _run():
     await _test_outbound_gate()
     _test_canon_code()
     _test_timeout_circuit()
+    _test_order_notify()
     print("✅ 审计修复回归：HIGH-1/2/3 / CRLF / 闸门 / 代码归一 / 熔断分权 全部通过")
 
 

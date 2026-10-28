@@ -16,6 +16,7 @@ class Order:
     price_type: int = 0          # 0=限价 1=市价 2=涨停 3=跌停
     price: Optional[float] = None
     order_type: str = "limit"    # "limit" | "market"
+    notify: Optional[int] = None  # 0=需客户端确认 1=请求免确认（None=用桥默认）
     stop_loss_pct: Optional[float] = None
     take_profit_pct: Optional[float] = None
     trailing_stop_pct: Optional[float] = None

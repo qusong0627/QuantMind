@@ -127,7 +127,8 @@ async def main():
     report_dir = os.path.join(shared_dir, "execution_reports")
     os.makedirs(report_dir, exist_ok=True)
 
-    executor = PlanExecutor(tdx, report_dir, state_dir=data_dir)
+    executor = PlanExecutor(tdx, report_dir, state_dir=data_dir,
+                            default_notify=int(cfg.get("trade.notify", 0) or 0))
     tracker = OrderTracker(tdx, os.path.join(data_dir, "active_orders.json"))
     sltp = StopLossDaemon(tdx, os.path.join(data_dir, "stop_loss_state.json"),
                           poll_interval=cfg.get("sltp_daemon.poll_interval_seconds", 5.0),
