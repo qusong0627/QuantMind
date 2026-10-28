@@ -26,7 +26,7 @@ def _frame(n: int = 700) -> pd.DataFrame:
     ):
         df[f"close_{sym}"] = 100 * np.cumprod(1 + rng.normal(0, 0.01 + k * 0.002, n))
     # 指标列：单调噪声即可，只要数值有分布
-    for i, ind in enumerate(INDICATORS):
+    for ind in INDICATORS:
         if ind.column in df:
             continue
         df[ind.column] = rng.normal(0.5, 0.15, n).cumsum() / np.sqrt(np.arange(1, n + 1))
@@ -93,6 +93,33 @@ def test_asof_does_not_use_future_values():
     asof = build_payload(df, feats, as_of=cut)
     breadth = next(i for i in asof["indicators"] if i["key"] == "breadth20")
     assert breadth["value"] == pytest.approx(round(float(df.loc[cut, "pct_above_ma20"]) * 100, 1))
+
+
+def test_fallback_path_with_ohlc_never_crashes():
+    """分市场面板缺失、指数日线存在：旧路径要能出 K 线，换手率缺失给 null 而非 0。"""
+    from backend.scripts.breadth_regime import build_features
+
+    df = _frame()
+    feats = build_features(df)
+    sym = "000300.SH"
+    dates = df.index[-250:]
+    close = df.loc[dates, f"close_{sym}"].to_numpy()
+    ohlc = pd.DataFrame(
+        {
+            "date": dates,
+            "symbol": sym,
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "amount": 1e6,
+        }
+    )
+    payload = build_payload(df, feats, uni=None, ohlc=ohlc)
+    kline = payload["indices"][sym]["kline"]
+    assert kline["kind"] == "official"
+    assert kline["close"][-1] == pytest.approx(round(float(close[-1]), 2))
+    assert all(v is None for v in kline["turnover"])
 
 
 def test_asof_actual_path_present_and_latest_mode_empty():

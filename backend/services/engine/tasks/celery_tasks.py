@@ -1469,6 +1469,49 @@ def run_market_snapshot() -> dict[str, Any]:
         # 已是最新交易日，只要对应日期库缺失，就必须补跑一次全量，否则「标签双向查询」断档。
         iso_part = f"{max_part[:4]}-{max_part[4:6]}-{max_part[6:8]}"
 
+        # 分市场广度面板：情绪快照的分指数压力分、合成全A K 线全部来自
+        # by_universe.parquet（breadth_universe.py）。不先重算它，情绪快照会永远
+        # 卡在旧交易日（trade_date 取自该面板），而且不报错 —— 必须同频刷新。
+        # 全量重建约 60~120s；新鲜度门控与情绪快照同款。
+        try:
+            import pyarrow.compute as _pc
+            import pyarrow.parquet as _pq
+
+            uni_path = (
+                _Path(data_dir)
+                / "5_technical_derived"
+                / "market_breadth"
+                / "by_universe.parquet"
+            )
+            need_uni = True
+            if uni_path.is_file():
+                try:
+                    col = _pq.read_table(uni_path, columns=["date"]).column("date")
+                    last_uni = str(_pc.max(col).as_py())[:10].replace("-", "")
+                    need_uni = last_uni != iso_part
+                except Exception:
+                    need_uni = True
+            if need_uni:
+                u_proc = subprocess.run(
+                    [sys.executable, "-m", "backend.scripts.breadth_universe"],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=1800,
+                )
+                if u_proc.returncode != 0:
+                    logger.warning(
+                        "[MarketSnapshot][Breadth] 分市场面板生成失败 code=%d stderr=%s",
+                        u_proc.returncode,
+                        u_proc.stderr[-1500:],
+                    )
+                else:
+                    logger.info("[MarketSnapshot][Breadth] 分市场面板已更新至 %s", iso_part)
+        except Exception as bexc:  # noqa: BLE001
+            logger.warning(
+                "[MarketSnapshot][Breadth] 异常（情绪快照将退回旧面板/全市场口径）: %s", bexc
+            )
+
         # 大盘情绪快照：与市场快照同源（同一份后复权日线）、同频（T 日盘后一次）。
         # 独立 try/except —— 情绪快照失败只告警，绝不影响市场分析主链路。
         # 新鲜度自门控：已是最新交易日则不重跑，避免 04:00–05:50 每 10 分钟白算。

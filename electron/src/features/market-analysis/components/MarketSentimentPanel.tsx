@@ -8,16 +8,21 @@ import {
   type MarketSentiment,
 } from '../services/sentimentService';
 import { SentimentFanChart } from './SentimentFanChart';
+import { SentimentKlineChart } from './SentimentKlineChart';
 import { BreadthFactorBars } from './BreadthFactorBars';
 import { ForecastMatrix } from './ForecastMatrix';
 import { FactorHeatmap } from './FactorHeatmap';
 import { BreadthGlossaryModal } from './BreadthGlossaryModal';
 
-const INDEX_ORDER = ['000001.SH', '000300.SH', '000852.SH'] as const;
+/** 展示顺序与后端 `TARGETS` 一致：三个老指数 + 深证成指 + 创业板指 + 全A合成。 */
+const INDEX_ORDER = ['000001.SH', '399001.SZ', '399006.SZ', '000300.SH', '000852.SH', 'ALL.A'] as const;
 const INDEX_COLORS: Record<string, string> = {
   '000001.SH': '#6366f1',
+  '399001.SZ': '#8b5cf6',
+  '399006.SZ': '#ec4899',
   '000300.SH': '#0ea5e9',
   '000852.SH': '#f59e0b',
+  'ALL.A': '#14b8a6',
 };
 
 const ZONE_STYLE: Record<
@@ -146,10 +151,18 @@ export const MarketSentimentPanel: React.FC = () => {
 
   if (!data || !selected) return null;
 
-  const zone = zoneStyle(data.stress.zone);
-  const score = data.stress.score;
+  /* 分市场（2026-10-28）：每个指数用自己的广度宇宙算压力分；旧快照没有
+     per-index 字段时回落到全A口径，保证面板不因数据版本白屏。 */
+  const stress = selected.stress ?? data.stress;
+  const indicators = selected.indicators ?? data.indicators;
+  const stressHistory = selected.stress_history ?? data.stress_history;
+  const factorHistory = selected.factor_history ?? data.factor_history;
+  const dispersion = selected.dispersion ?? data.dispersion;
+  const universe = selected.universe;
+  const zone = zoneStyle(stress.zone);
+  const score = stress.score;
   const percentile =
-    typeof data.stress.percentile === 'number' ? Math.round(data.stress.percentile * 100) : null;
+    typeof stress.percentile === 'number' ? Math.round(stress.percentile * 100) : null;
   const stats = selected.stats;
   const hasStats = typeof stats?.win === 'number';
 
@@ -194,9 +207,9 @@ export const MarketSentimentPanel: React.FC = () => {
               return d.isAfter(dayjs(data.available_to)) || d.isBefore(dayjs(data.available_from));
             }}
           />
-          {data.stress.phase && (
+          {stress.phase && (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-violet-50 border border-violet-200 text-[11px] font-extrabold text-violet-700">
-              现在处于：{data.stress.phase}
+              {selected.name}：{stress.phase}
             </span>
           )}
           {(asOf || data.as_of) && (
@@ -220,6 +233,44 @@ export const MarketSentimentPanel: React.FC = () => {
         </span>
       </div>
 
+      {/* 分指数压力：同一算法、各自宇宙 —— 一眼看出「指数涨、多数票跌」这类分歧 */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2">
+        {INDEX_ORDER.filter((k) => data.indices[k]).map((k) => {
+          const it = data.indices[k];
+          const st = it.stress ?? data.stress;
+          const z = zoneStyle(st.zone);
+          const active = k === indexKey;
+          const up = (it.change_pct ?? 0) >= 0;
+          return (
+            <button
+              key={k}
+              onClick={() => setIndexKey(k)}
+              className={`text-left rounded-xl border px-2.5 py-2 transition-all ${
+                active
+                  ? 'bg-white border-violet-300 shadow-sm ring-1 ring-violet-100'
+                  : 'bg-white/70 border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-[11px] font-bold text-slate-700 truncate">{it.name}</span>
+                <span className={`text-[10px] font-mono shrink-0 ${up ? 'text-red-500' : 'text-emerald-600'}`}>
+                  {it.change_pct === null ? '—' : `${up ? '+' : ''}${it.change_pct.toFixed(2)}%`}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-1 mt-0.5">
+                <span className="text-xl font-black font-mono leading-none text-slate-900 tabular-nums">
+                  {st.score.toFixed(1)}
+                </span>
+                <span className={`text-[10px] font-bold ${z.text}`}>{z.label}</span>
+                <span className="ml-auto text-[9px] font-mono text-slate-400" title="这种压力在过去历史中的分位">
+                  {typeof st.percentile === 'number' ? `P${Math.round(st.percentile * 100)}` : '—'}
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
       {/* 顶部：分数 + 扇形 */}
       <div className="grid grid-cols-1 xl:grid-cols-[300px_1fr] gap-3 items-stretch">
         {/* 左栏：压力分 */}
@@ -227,7 +278,7 @@ export const MarketSentimentPanel: React.FC = () => {
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
               <Gauge className="w-3.5 h-3.5 text-violet-600" />
-              广度压力分
+              广度压力分 · {universe?.label ?? selected.name}
             </h3>
             <button
               onClick={() => void load(asOf)}
@@ -280,14 +331,14 @@ export const MarketSentimentPanel: React.FC = () => {
 
           <div className="text-[11px] leading-relaxed text-slate-500 border-t border-slate-100 pt-2 space-y-1">
             <p>分数越高 ＝ 越多股票在跌、市场越冷；<span className="font-bold text-slate-700">80 以上属于极端超卖区</span>。</p>
-            <p className="text-slate-400">{data.stress.phase_detail ?? data.stress.zone_note}</p>
+            <p className="text-slate-400">{stress.phase_detail ?? stress.zone_note}</p>
           </div>
 
-          {typeof data.dispersion?.value === 'number' && (
+          {typeof dispersion?.value === 'number' && (
             <p className="text-[10px] text-slate-500 border-t border-slate-100 pt-2">
-              个股分化度 <span className="font-mono font-bold text-slate-700">{data.dispersion.value.toFixed(2)}%</span>
-              {typeof data.dispersion.pct === 'number' && (
-                <span className="text-slate-400"> · 高于历史 {Math.round(data.dispersion.pct * 100)}% 的时间（越高＝个股走势越分化）</span>
+              个股分化度 <span className="font-mono font-bold text-slate-700">{dispersion.value.toFixed(2)}%</span>
+              {typeof dispersion.pct === 'number' && (
+                <span className="text-slate-400"> · 高于历史 {Math.round(dispersion.pct * 100)}% 的时间（越高＝个股走势越分化）</span>
               )}
             </p>
           )}
@@ -302,8 +353,15 @@ export const MarketSentimentPanel: React.FC = () => {
                 指标说明 ?
               </button>
             </div>
-            <BreadthFactorBars items={data.indicators} compact />
+            <BreadthFactorBars items={indicators} compact />
           </div>
+
+          {universe && (
+            <p className="text-[10px] text-slate-400 border-t border-slate-100 pt-2 leading-relaxed">
+              广度口径：{universe.note}
+              {universe.mode === 'rank' && ' · 用前一交易日流通市值排名，无前视'}
+            </p>
+          )}
         </aside>
 
         {/* 右栏：扇形预测 */}
@@ -321,26 +379,16 @@ export const MarketSentimentPanel: React.FC = () => {
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-1 bg-slate-50 rounded-full p-0.5 border border-slate-200">
-              {INDEX_ORDER.filter((k) => data.indices[k]).map((k) => {
-                const it = data.indices[k];
-                const active = k === indexKey;
-                const up = (it.change_pct ?? 0) >= 0;
-                return (
-                  <button
-                    key={k}
-                    onClick={() => setIndexKey(k)}
-                    className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
-                      active ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    {it.name}
-                    <span className={`ml-1 font-mono ${up ? 'text-red-500' : 'text-emerald-600'}`}>
-                      {it.change_pct === null ? '—' : `${up ? '+' : ''}${it.change_pct.toFixed(2)}%`}
-                    </span>
-                  </button>
-                );
-              })}
+            <div className="flex items-center gap-1.5">
+              {universe && (
+                <span
+                  className="px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-[10px] font-bold text-slate-500"
+                  title={universe.note}
+                >
+                  广度口径：{universe.label}
+                  {universe.n_last ? ` · ${universe.n_last} 只` : ''}
+                </span>
+              )}
             </div>
           </div>
 
@@ -353,7 +401,7 @@ export const MarketSentimentPanel: React.FC = () => {
             forwardDates={selected.future_dates ?? []}
             stress={selected.history
               .map((h) => {
-                const hit = data.stress_history.find((p) => p.date === h.date);
+                const hit = stressHistory.find((p) => p.date === h.date);
                 return hit ? { date: h.date, stress: hit.stress } : null;
               })
               .filter((v): v is { date: string; stress: number } => v !== null)}
@@ -432,15 +480,26 @@ export const MarketSentimentPanel: React.FC = () => {
         </section>
       </div>
 
+      {/* 指数 K 线：官方指数蜡烛，全A 等权合成折线（口径在组件内披露） */}
+      {selected.kline && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3">
+          <SentimentKlineChart
+            name={selected.name}
+            kline={selected.kline}
+            universe={selected.universe}
+          />
+        </div>
+      )}
+
       {/* 底部：分项冷热热力图 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3">
-        <FactorHeatmap dates={data.factor_history?.dates ?? []} items={data.factor_history?.items ?? []} />
+        <FactorHeatmap dates={factorHistory?.dates ?? []} items={factorHistory?.items ?? []} />
       </div>
 
       <BreadthGlossaryModal
         open={glossaryOpen}
         onClose={() => setGlossaryOpen(false)}
-        items={data.indicators}
+        items={indicators}
       />
 
       {/* 免责 */}

@@ -4,11 +4,16 @@
 
 1. **最新一期**：读 ``market_sentiment_snapshot.py`` 产出的 JSON，API 进程零计算。
 2. **历史回看（?date=YYYY-MM-DD）**：从广度面板现算。首次调用加载面板并算一遍
-   扩张分位（约数秒），结果与全量特征帧在进程内缓存，之后按日切片是毫秒级。
+   扩张分位（bisect 实现，约 1 秒），结果与全量特征帧在进程内缓存，之后按日切片
+   是毫秒级。
+
+分市场（2026-10-28）：``by_universe.parquet`` 里每个宇宙的分位与压力分是**建面板
+时预计算**的（扩张窗口，因果），请求路径只切片，不重算。
 
 无前视纪律：回看时所有信号只用该日及以前的数据（``build_payload(as_of=...)``）。
 「之后真实走势」由 ``actual`` 字段单独给出，只用于对照，不参与信号计算。
 """
+
 from __future__ import annotations
 
 import json
@@ -57,34 +62,48 @@ def _read_snapshot() -> dict:
     # 旧格式快照（缺少回看所需字段）会让前端日期选择器把所有日期判成不可选，
     # 这里直接按最新交易日现算一份返回 —— 宁可慢一次，也不能给出去不了回看的产物。
     if not {"available_from", "available_to", "as_of"}.issubset(payload):
-        df, feats = _frames()
+        df, feats, uni, ohlc = _frames()
         from backend.scripts.market_sentiment_snapshot import build_payload
 
-        return build_payload(df, feats)
+        return build_payload(df, feats, uni=uni, ohlc=ohlc)
     return payload
 
 
-def _frames() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """加载面板与扩张分位（进程内缓存，只算一次）。"""
+def _frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
+    """加载面板、扩张分位与分市场面板（进程内缓存，只算一次）。"""
     with _LOCK:
         if "df" not in _CACHE:
             from backend.scripts.breadth_regime import build_features, load_panel
-            from backend.scripts.market_sentiment_snapshot import PANEL_PATH
+            from backend.scripts.market_sentiment_snapshot import (
+                PANEL_PATH,
+                load_index_ohlc,
+                load_universe_panel,
+            )
 
             df = load_panel(PANEL_PATH)
             _CACHE["df"] = df
             _CACHE["feats"] = build_features(df)
-        return _CACHE["df"], _CACHE["feats"]  # type: ignore[return-value]
+            uni = load_universe_panel()
+            _CACHE["uni"] = None if uni.empty else uni
+            _CACHE["ohlc"] = load_index_ohlc()
+        return (
+            _CACHE["df"],  # type: ignore[return-value]
+            _CACHE["feats"],  # type: ignore[return-value]
+            _CACHE.get("uni"),  # type: ignore[return-value]
+            _CACHE.get("ohlc", pd.DataFrame()),  # type: ignore[return-value]
+        )
 
 
 def _compute_asof(date: str) -> dict:
     from backend.scripts.market_sentiment_snapshot import build_payload
 
-    df, feats = _frames()
+    df, feats, uni, ohlc = _frames()
     try:
         ts = pd.Timestamp(date)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=422, detail={"message": f"日期不合法: {date}"}) from exc
+        raise HTTPException(
+            status_code=422, detail={"message": f"日期不合法: {date}"}
+        ) from exc
 
     pos = int(df.index.searchsorted(ts, side="right")) - 1
     if pos < MIN_HISTORY_DAYS:
@@ -104,7 +123,7 @@ def _compute_asof(date: str) -> dict:
     if cached is not None:
         return cached  # type: ignore[return-value]
 
-    payload = build_payload(df, feats, as_of=trade_day)
+    payload = build_payload(df, feats, as_of=trade_day, uni=uni, ohlc=ohlc)
     with _LOCK:
         payloads = _CACHE.setdefault("payloads", {})
         if isinstance(payloads, dict):

@@ -2,7 +2,7 @@
  * 大盘情绪面板接线用例。
  *
  * 钉住三件事：
- * 1. 快照能正常渲染分数、区间与三个指数切换；
+ * 1. 快照能正常渲染分数、区间与六个指数切换；
  * 2. 切换指数后扇形与统计随之更新（不是永远显示第一个）；
  * 3. 快照缺失（503）时给可照做的空态，而不是白屏或假数据。
  */
@@ -13,6 +13,43 @@ import React from 'react';
 
 import { MarketSentimentPanel } from '../components/MarketSentimentPanel';
 import { coldPercentile } from '../components/BreadthFactorBars';
+
+// jsdom 没有 canvas：按 v5 API 交桩，断言「面板能接线」而不是渲染像素。
+const addSeries = vi.fn(() => ({ setData: vi.fn() }));
+vi.mock('lightweight-charts', () => ({
+  createChart: vi.fn(() => ({
+    addSeries,
+    priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
+    timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
+    applyOptions: vi.fn(),
+    remove: vi.fn(),
+  })),
+  CandlestickSeries: 'CandlestickSeries',
+  AreaSeries: 'AreaSeries',
+  HistogramSeries: 'HistogramSeries',
+  CrosshairMode: { Normal: 0 },
+}));
+
+const kline = {
+  kind: 'official' as const,
+  dates: ['2026-10-23', '2026-10-26'],
+  open: [4000, 4040],
+  high: [4060, 4100],
+  low: [3990, 4020],
+  close: [4040, 4103.54],
+  amount: [9000, 9800],
+  turnover: [1.2, 1.34],
+  vol_z: [0.1, 0.4],
+  dist: {
+    dist_limit_up: [10, 12],
+    dist_up_big: [20, 22],
+    dist_up_small: [200, 210],
+    dist_flat: [30, 28],
+    dist_down_small: [2100, 2050],
+    dist_down_big: [300, 320],
+    dist_limit_down: [8, 9],
+  },
+};
 
 const fan = (p10: number, p50: number, p90: number) =>
   Array.from({ length: 21 }, (_, k) => ({
@@ -70,6 +107,8 @@ const payload = {
       baseline: { mean: 0.35, win: 0.508, p_drop10: 0.043 },
       actual: [],
       future_dates: [],
+      universe: { key: 'hs300', label: '沪深300', mode: 'rank', note: '全A流通市值前 300（逐日排名代理）', n_last: 300 },
+      kline,
       forecast: {
         '5': { pred: 0.17, prob_up: 0.5, base_prob: 0.48, p10: -3.1, p50: 0.1, p90: 2.8 },
         '10': { pred: 0.31, prob_up: 0.47, base_prob: 0.49, p10: -3.7, p50: 0.5, p90: 5.1 },
@@ -98,6 +137,16 @@ const payload = {
       baseline: { mean: 0.13, win: 0.48, p_drop10: 0.12 },
       actual: [],
       future_dates: [],
+      // 分市场：该指数自己的宇宙压力分（与全A 80.2 不同）
+      stress: {
+        score: 85.9,
+        zone: 'extreme_pressure',
+        zone_label: '极端压力',
+        zone_note: '历史同状态偏多，但波动最大',
+        phase: '下跌后段 / 超卖区',
+        percentile: 0.991,
+      },
+      universe: { key: 'zz1000', label: '中证1000', mode: 'rank', note: '全A流通市值 801–1800 名（逐日排名代理）', n_last: 1000 },
       forecast: { '5': { pred: 0.09, prob_up: 0.51, base_prob: 0.51, p10: -4.7, p50: 0.0, p90: 3.6 } },
     },
   },
@@ -113,18 +162,19 @@ const jsonResponse = (body: unknown, status = 200) =>
 describe('MarketSentimentPanel', () => {
   beforeEach(() => {
     localStorage.setItem('access_token', 't');
+    addSeries.mockClear();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('渲染压力分、区间标签与三个指数', async () => {
+  it('渲染压力分、区间标签与六个指数', async () => {
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse(payload)));
     render(<MarketSentimentPanel />);
 
-    await waitFor(() => expect(screen.getByText('80.2')).toBeInTheDocument());
-    expect(screen.getByText('极端压力')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText('80.2').length).toBeGreaterThan(0));
+    expect(screen.getAllByText('极端压力').length).toBeGreaterThan(0);
     expect(screen.getByText('比历史 94% 的交易日更冷')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /上证指数/ }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: /中证1000/ }).length).toBeGreaterThan(0);
@@ -133,12 +183,36 @@ describe('MarketSentimentPanel', () => {
   it('切换指数后统计随之更新', async () => {
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse(payload)));
     render(<MarketSentimentPanel />);
-    await waitFor(() => expect(screen.getByText('80.2')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('80.2').length).toBeGreaterThan(0));
 
     // 中位在扇形右标签与统计块各出现一次
     expect(screen.getAllByText('+0.6%').length).toBeGreaterThan(0);
     await userEvent.click(screen.getAllByRole('button', { name: /中证1000/ })[0]);
     await waitFor(() => expect(screen.getAllByText('+1.7%').length).toBeGreaterThan(0));
+  });
+
+  it('分市场：压力分用所选指数自己的宇宙口径', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => jsonResponse(payload)));
+    render(<MarketSentimentPanel />);
+    await waitFor(() => expect(screen.getAllByText('80.2').length).toBeGreaterThan(0));
+    expect(screen.getByText('广度压力分 · 沪深300')).toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByRole('button', { name: /中证1000/ })[0]);
+    await waitFor(() => expect(screen.getByText('广度压力分 · 中证1000')).toBeInTheDocument());
+    // 85.9 在指数卡片与压力分大数字两处出现
+    expect(screen.getAllByText('85.9').length).toBeGreaterThan(0);
+    expect(screen.getByText('比历史 99% 的交易日更冷')).toBeInTheDocument();
+  });
+
+  it('K 线接线：官方指数蜡烛 + 成交额 + 七档涨跌分布', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => jsonResponse(payload)));
+    render(<MarketSentimentPanel />);
+    await waitFor(() => expect(screen.getByText('官方指数 · 蜡烛')).toBeInTheDocument());
+    expect(screen.getByText(/成交额/)).toBeInTheDocument();
+    expect(screen.getByText(/广度口径：沪深300/)).toBeInTheDocument();
+    expect(screen.getByText(/合计 \d+ 只/)).toBeInTheDocument();
+    // v5 API：蜡烛 + 成交额柱各一条
+    expect(addSeries).toHaveBeenCalledTimes(2);
   });
 
   it('快照缺失时显示可照做的空态', async () => {

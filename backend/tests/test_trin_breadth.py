@@ -5,6 +5,7 @@
 2. 板别阈值与 ``local_market_data.limit_pct`` 一致（20%/30%/ST 5% 都要对）
 3. 小样本端到端：手算 3 只票 3 天，核对家数、成交额与 TRIN
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -32,22 +33,30 @@ from backend.scripts.trin_breadth import (
 class TestTrinMath:
     def test_classic_ratio(self):
         # (10/5) / (300/100) = 2/3
-        v = trin(pd.Series([10.0]), pd.Series([5.0]), pd.Series([300.0]), pd.Series([100.0]))
+        v = trin(
+            pd.Series([10.0]), pd.Series([5.0]), pd.Series([300.0]), pd.Series([100.0])
+        )
         assert v.iloc[0] == pytest.approx(2 / 3)
 
     def test_equivalent_expanded_form(self):
         # 用户写的 (上涨家数 × 下跌成交额)/(下跌家数 × 上涨成交额) 必须等价
         up_c, dn_c, up_s, dn_s = 30.0, 12.0, 8_000.0, 5_000.0
         direct = (up_c * dn_s) / (dn_c * up_s)
-        v = trin(pd.Series([up_c]), pd.Series([dn_c]), pd.Series([up_s]), pd.Series([dn_s]))
+        v = trin(
+            pd.Series([up_c]), pd.Series([dn_c]), pd.Series([up_s]), pd.Series([dn_s])
+        )
         assert v.iloc[0] == pytest.approx(direct)
 
     def test_zero_down_count_is_nan_not_inf(self):
-        v = trin(pd.Series([10.0]), pd.Series([0.0]), pd.Series([100.0]), pd.Series([50.0]))
+        v = trin(
+            pd.Series([10.0]), pd.Series([0.0]), pd.Series([100.0]), pd.Series([50.0])
+        )
         assert np.isnan(v.iloc[0])
 
     def test_zero_down_size_is_nan(self):
-        v = trin(pd.Series([10.0]), pd.Series([5.0]), pd.Series([100.0]), pd.Series([0.0]))
+        v = trin(
+            pd.Series([10.0]), pd.Series([5.0]), pd.Series([100.0]), pd.Series([0.0])
+        )
         assert np.isnan(v.iloc[0])
 
     def test_series_alignment_preserved(self):
@@ -110,10 +119,30 @@ class TestExpandingPctRank:
         r = expanding_pct_rank(s, min_periods=250).dropna()
         assert r.min() >= 0.0 and r.max() < 1.0
 
+    def test_matches_reference_implementation_with_nans(self):
+        """bisect 实现必须与逐行参考实现逐位一致（含热身期 NaN）。"""
+        rng = np.random.default_rng(20261028)
+        vals = rng.normal(size=400)
+        vals[::17] = np.nan
+        s = pd.Series(vals)
+        got = expanding_pct_rank(s, min_periods=50)
+        ref = []
+        for i in range(len(s)):
+            w = s.iloc[: i + 1].to_numpy()
+            cur = w[-1]
+            if not np.isfinite(cur) or np.isfinite(w).sum() < 50:
+                ref.append(np.nan)
+            else:
+                v = w[np.isfinite(w)]
+                ref.append(float((v < cur).mean()))
+        np.testing.assert_allclose(got.to_numpy(), np.array(ref), equal_nan=True)
+
 
 class TestSymbolCategory:
     def test_boards(self):
-        syms = np.array(["600000.SH", "000001.SZ", "300001.SZ", "688001.SH", "920001.BJ"])
+        syms = np.array(
+            ["600000.SH", "000001.SZ", "300001.SZ", "688001.SH", "920001.BJ"]
+        )
         cats = symbol_category(syms)
         assert list(cats) == [CAT_MAIN, CAT_MAIN, CAT_GROWTH, CAT_STAR, CAT_BSE]
 
@@ -186,7 +215,9 @@ def _synthetic_prices() -> PriceMatrices:
         ]
     )
     volume = amount.copy()
-    return PriceMatrices(dates=dates, symbols=symbols, close=close, volume=volume, amount=amount)
+    return PriceMatrices(
+        dates=dates, symbols=symbols, close=close, volume=volume, amount=amount
+    )
 
 
 class TestBuildBreadthPanel:
@@ -229,7 +260,9 @@ class TestBuildBreadthPanel:
             px, np.zeros((4, 3), dtype=bool), config=BreadthConfig(new_listing_days=2)
         )
         # 第 3 天（iloc[2]）三只票 age 都 >= 2，干净口径与主口径同宇宙
-        assert panel.iloc[2]["trin_amt_shsz"] == pytest.approx(panel.iloc[2]["trin_amt"])
+        assert panel.iloc[2]["trin_amt_shsz"] == pytest.approx(
+            panel.iloc[2]["trin_amt"]
+        )
 
         # 把门槛抬到 3 天：第 3 天三只票全是次新 → 干净口径无样本
         strict = build_breadth_panel(

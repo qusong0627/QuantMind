@@ -20,6 +20,7 @@
 
 输出：``data/quantdb/5_technical_derived/market_breadth/trin_daily.parquet``
 """
+
 from __future__ import annotations
 
 import argparse
@@ -120,9 +121,6 @@ def mcclellan_net(net: pd.Series, fast: int = 19, slow: int = 39) -> pd.Series:
     return ema(net, fast) - ema(net, slow)
 
 
-
-
-
 def rolling_sums(values: pd.Series, window: int) -> pd.Series:
     """滚动求和，窗口内任一值缺失则结果为缺失（不做前向填充）。"""
     return values.rolling(window, min_periods=window).sum()
@@ -133,13 +131,20 @@ def rolling_sums(values: pd.Series, window: int) -> pd.Series:
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class PriceMatrices:
-    """日线宽表：行=交易日，列=标的。"""
+    """日线宽表：行=交易日，列=标的。
+
+    ``open/high/low`` 可选：只有合成 K 线需要；``load_price_matrices`` 不装载
+    （广度指标用不到，省 2/5 内存与 IO），由 ``breadth_universe.load_full_matrices`` 提供。
+    """
 
     dates: pd.DatetimeIndex
     symbols: np.ndarray
     close: np.ndarray
     volume: np.ndarray
     amount: np.ndarray
+    open: np.ndarray | None = None
+    high: np.ndarray | None = None
+    low: np.ndarray | None = None
 
 
 def _day_dirs(base: Path, start: str | None, end: str | None) -> list[str]:
@@ -193,9 +198,7 @@ def load_price_matrices(
     )
 
 
-def load_st_matrix(
-    dates: pd.DatetimeIndex, symbols: np.ndarray
-) -> np.ndarray:
+def load_st_matrix(dates: pd.DatetimeIndex, symbols: np.ndarray) -> np.ndarray:
     """ST 状态 (D, S) bool。st_pit 只存 True 行，缺失即非 ST。"""
     if not ST_PIT_PATH.exists():
         log.warning("缺少 %s，ST 剔除口径退化为「不剔除」", ST_PIT_PATH)
@@ -292,28 +295,34 @@ def build_breadth_panel(
     px: PriceMatrices,
     st: np.ndarray,
     config: BreadthConfig = DEFAULT_CONFIG,
+    univ: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """构建日频广度面板。所有指标只用当日及更早数据。"""
+    """构建日频广度面板。所有指标只用当日及更早数据。
+
+    ``univ``（可选）：宇宙掩码，形状 ``(D, S)`` 或可广播的 ``(S,)``。
+    ``None`` = 全部标的（旧行为，逐位不变）。分市场只换宇宙、不换公式 ——
+    同一个函数出所有市场的面板，防止两套口径漂移。
+    """
     ret = np.full_like(px.close, np.nan)
     ret[1:] = px.close[1:] / px.close[:-1] - 1.0
 
     valid = np.isfinite(ret) & np.isfinite(px.amount) & (px.amount > 0)
-    up = valid & (ret > 0)
-    down = valid & (ret < 0)
-    flat = valid & (ret == 0)
+    base = valid if univ is None else (valid & univ)
+    up = base & (ret > 0)
+    down = base & (ret < 0)
+    flat = base & (ret == 0)
 
     cats = symbol_category(px.symbols)
     is_bse = cats == CAT_BSE
     threshold = limit_threshold_matrix(px.dates, cats, st)
-    limit_up = valid & (ret >= threshold)
-    limit_down = valid & (ret <= -threshold)
+    limit_up = base & (ret >= threshold)
+    limit_down = base & (ret <= -threshold)
 
     # 上市天数（按「有收盘价的天数」计，停牌不计age，避免停牌半年后仍算次新）
     age = np.cumsum(np.isfinite(px.close), axis=0) - 1
     seasoned = age >= config.new_listing_days
 
     out = pd.DataFrame({"date": px.dates})
-    base = valid
     up_c = up.sum(axis=1)
     down_c = down.sum(axis=1)
     out["n_total"] = base.sum(axis=1)
@@ -335,11 +344,13 @@ def build_breadth_panel(
     out["ret_equal_weight"] = _ew * 100.0
     # 横截面扩散度（个股收益标准差，%）：市场是"齐涨齐跌"还是"分化"，
     # 是 A 股最有信息量的状态变量之一；只用当日有效标的，停牌不参与。
-    _var = np.where(base, (ret - np.nan_to_num(_ew)[:, None]) ** 2, 0.0).sum(axis=1) / np.maximum(_cnt, 1)
+    _var = np.where(base, (ret - np.nan_to_num(_ew)[:, None]) ** 2, 0.0).sum(
+        axis=1
+    ) / np.maximum(_cnt, 1)
     out["ret_disp"] = np.sqrt(_var) * 100.0
 
     for v in VARIANTS:
-        mask = valid.copy()
+        mask = base.copy()
         if v.shsz_only:
             mask &= ~is_bse
         if v.drop_st:
@@ -357,7 +368,7 @@ def build_breadth_panel(
 
     # 平滑版主口径（trin_amt）
     out["trin_ema10"] = ema(out["trin_amt"], 10)
-    mask_amt = valid.copy()
+    mask_amt = base.copy()
     u, d = mask_amt & (ret > 0), mask_amt & (ret < 0)
     up10 = rolling_sums(pd.Series(u.sum(axis=1), index=out.index), 10)
     dn10 = rolling_sums(pd.Series(d.sum(axis=1), index=out.index), 10)
@@ -378,8 +389,8 @@ def build_breadth_panel(
     close_df = pd.DataFrame(px.close)
     for w in config.ma_windows:
         ma = close_df.rolling(w, min_periods=w).mean().to_numpy()
-        above = np.isfinite(ma) & (px.close > ma) & valid
-        denom = np.isfinite(ma) & valid
+        above = np.isfinite(ma) & (px.close > ma) & base
+        denom = np.isfinite(ma) & base
         out[f"pct_above_ma{w}"] = np.where(
             denom.sum(axis=1) > 0,
             above.sum(axis=1) / np.maximum(denom.sum(axis=1), 1),
@@ -389,7 +400,7 @@ def build_breadth_panel(
     # 52 周新高/新低：分母同样只用当日可比的标的
     hi = close_df.rolling(252, min_periods=252).max().to_numpy()
     lo = close_df.rolling(252, min_periods=252).min().to_numpy()
-    has52 = np.isfinite(hi) & np.isfinite(lo) & valid
+    has52 = np.isfinite(hi) & np.isfinite(lo) & base
     out["n_high_52w"] = (has52 & (px.close >= hi - 1e-9)).sum(axis=1)
     out["n_low_52w"] = (has52 & (px.close <= lo + 1e-9)).sum(axis=1)
     out["n_52w_base"] = has52.sum(axis=1)
@@ -430,7 +441,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     args = _parse_args(argv)
 
     px = load_price_matrices(args.start, args.end)
@@ -449,9 +462,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.tail:
         cols = [
-            "date", "n_up", "n_down", "n_limit_up", "n_limit_down",
-            "amt_total", "trin_amt", "trin_amt_shsz", "trin_ema10",
-            "adr", "udr_amt", "pct_above_ma20",
+            "date",
+            "n_up",
+            "n_down",
+            "n_limit_up",
+            "n_limit_down",
+            "amt_total",
+            "trin_amt",
+            "trin_amt_shsz",
+            "trin_ema10",
+            "adr",
+            "udr_amt",
+            "pct_above_ma20",
         ]
         with pd.option_context("display.width", 200, "display.max_columns", 30):
             print(panel[cols].tail(args.tail).to_string(index=False))

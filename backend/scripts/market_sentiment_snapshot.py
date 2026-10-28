@@ -8,12 +8,18 @@
 
 设计取舍：
 - 与市场分析模块既有模式一致：**预计算快照 + 只读 API**，API 进程零计算。
-  广度分位是 O(n²) 的扩张窗口，放进请求路径会拖慢每一次刷新。
+  广度分位是扩张窗口，放进请求路径会拖慢每一次刷新；分市场后 8 个宇宙
+  × 13 个指标更不可能现算 —— 分位在 ``breadth_universe.py`` 建面板时一次算完，
+  本模块只切片。
 - 预测部分只给「历史同状态的条件分布」，不给点预测。广度对方向几乎没有
   稳定预测力（见 ``breadth_regime.md``），把它画成一条确定的预测线是骗人。
 - 扇形图用的是**当前状态所在区间**的历史路径分位，而不是全样本 —— 换状态
   换形态，这一点必须在图上可见。
+- **每个指数用自己宇宙的压力分**（2026-10-28）：全 A 分数掩盖了「指数涨、
+  多数票跌」这类结构分歧（2024-02-07 创业板 82.7 vs 沪深300 29.8）。
+  宇宙口径见 ``breadth_universe.UNIVERSES``，全部 PIT。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,26 +32,44 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from backend.scripts.research_stats import expanding_pct_rank
-from backend.scripts.index_forecast import forecast_index
 from backend.scripts.breadth_regime import (
     INDICATORS,
+    MIN_PERIODS,
     build_features,
     cluster_count,
     composite_scores,
     load_panel,
+    stress_from_raw,
 )
+from backend.scripts.index_forecast import forecast_index
+from backend.scripts.breadth_universe import UNIVERSE_BY_KEY
+from backend.scripts.research_stats import expanding_pct_rank
 
 log = logging.getLogger("sentiment_snapshot")
 
 #: QuantDB 根目录：容器内是 /data/quantdb，宿主机默认 data/quantdb。
 #: 必须由 env 决定 —— 容器 cwd 是 /app，写死相对路径会找不到面板。
 QUANTDB_DIR = Path(os.getenv("QM_QUANTDB_DATA_DIR", "data/quantdb"))
-PANEL_PATH = QUANTDB_DIR / "5_technical_derived" / "market_breadth" / "trin_daily.parquet"
-TARGETS = {"000300.SH": "沪深300", "000001.SH": "上证指数", "000852.SH": "中证1000"}
+BREADTH_DIR = QUANTDB_DIR / "5_technical_derived" / "market_breadth"
+PANEL_PATH = BREADTH_DIR / "trin_daily.parquet"
+UNIVERSE_PANEL_PATH = BREADTH_DIR / "by_universe.parquet"
+INDEX_OHLC_PATH = BREADTH_DIR / "index_ohlc.parquet"
+
+#: 展示指数 → (名称, 广度宇宙, 价格来源)。顺序即前端 tab 顺序。
+#: 价格一律用官方指数；只有全 A 没有官方口径（本地没有中证全指/万得全A），
+#: 用 ``breadth_universe`` 的月频再平衡等权合成（见该模块口径说明）。
+TARGETS: dict[str, tuple[str, str, str]] = {
+    "000001.SH": ("上证指数", "sh", "official"),
+    "399001.SZ": ("深证成指", "sz500", "official"),
+    "399006.SZ": ("创业板指", "cyb100", "official"),
+    "000300.SH": ("沪深300", "hs300", "official"),
+    "000852.SH": ("中证1000", "zz1000", "official"),
+    "ALL.A": ("A股指数（全A等权）", "all", "synthetic"),
+}
 HORIZON = 20
-HISTORY_DAYS = 250   # 供前端拖动回看；默认视窗仍是最近 60 日 + 20 日前瞻
+HISTORY_DAYS = 250  # 供前端拖动回看；默认视窗仍是最近 60 日 + 20 日前瞻
 STRESS_HISTORY_DAYS = 250
+KLINE_DAYS = 250
 
 #: 展示用：指标单位与缩放（值本身在面板里是小数或原始量）
 DISPLAY = {
@@ -66,21 +90,57 @@ DISPLAY = {
 
 #: 前端默认展示的 8 个核心指标（顺序即展示顺序）
 CORE_KEYS = (
-    "breadth20", "breadth60", "trin_ema10", "adr",
-    "udr", "mcclellan", "limit_net", "nh_nl",
+    "breadth20",
+    "breadth60",
+    "trin_ema10",
+    "adr",
+    "udr",
+    "mcclellan",
+    "limit_net",
+    "nh_nl",
 )
 
 ZONES = (
-    (80.0, "extreme_pressure", "极端压力", "历史同状态偏多，但波动最大",
-     "下跌后段 / 超卖区", "多数股票已经跌到低位，历史上其后 20 天上涨居多，但波动也最大"),
-    (60.0, "pressure", "承压", "历史同状态无稳定方向",
-     "弱势整理", "市场偏弱但没有极值信号，方向要等趋势确认"),
-    (40.0, "neutral", "中性", "历史同状态接近基准",
-     "震荡中段", "冷热都在中间，历史同状态没有稳定方向"),
-    (20.0, "strong", "偏强", "历史同状态偏震荡",
-     "上涨中段 / 偏强", "多数股票在上涨，但越往过热走，回撤概率越高"),
-    (-1.0, "overheat", "过热", "大盘回撤概率高于基准",
-     "上涨后段 / 过热", "普涨且成交放大，历史上其后大盘回撤概率高于平时"),
+    (
+        80.0,
+        "extreme_pressure",
+        "极端压力",
+        "历史同状态偏多，但波动最大",
+        "下跌后段 / 超卖区",
+        "多数股票已经跌到低位，历史上其后 20 天上涨居多，但波动也最大",
+    ),
+    (
+        60.0,
+        "pressure",
+        "承压",
+        "历史同状态无稳定方向",
+        "弱势整理",
+        "市场偏弱但没有极值信号，方向要等趋势确认",
+    ),
+    (
+        40.0,
+        "neutral",
+        "中性",
+        "历史同状态接近基准",
+        "震荡中段",
+        "冷热都在中间，历史同状态没有稳定方向",
+    ),
+    (
+        20.0,
+        "strong",
+        "偏强",
+        "历史同状态偏震荡",
+        "上涨中段 / 偏强",
+        "多数股票在上涨，但越往过热走，回撤概率越高",
+    ),
+    (
+        -1.0,
+        "overheat",
+        "过热",
+        "大盘回撤概率高于基准",
+        "上涨后段 / 过热",
+        "普涨且成交放大，历史上其后大盘回撤概率高于平时",
+    ),
 )
 
 
@@ -227,14 +287,277 @@ def factor_history(feats: pd.DataFrame, days: int = 60) -> dict:
     return {"dates": [d.strftime("%Y-%m-%d") for d in tail.index], "items": items}
 
 
+# --------------------------------------------------------------------------
+# 分市场：面板装载与视图
+# --------------------------------------------------------------------------
+def load_universe_panel(path: Path | None = None) -> pd.DataFrame:
+    p = path or UNIVERSE_PANEL_PATH
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p)
+
+
+def load_index_ohlc(path: Path | None = None) -> pd.DataFrame:
+    p = path or INDEX_OHLC_PATH
+    if not p.exists():
+        return pd.DataFrame(
+            columns=["date", "symbol", "open", "high", "low", "close", "amount"]
+        )
+    return pd.read_parquet(p)
+
+
+def frame_by_universe(uni: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """长表 → {宇宙: 按日索引的帧}。分位/压力分由面板预计算，这里不重算。"""
+    out: dict[str, pd.DataFrame] = {}
+    for key, sub in uni.groupby("universe", sort=False):
+        frame = sub.drop(columns=["universe"]).set_index("date").sort_index()
+        out[str(key)] = frame
+    return out
+
+
+def feature_view(frame: pd.DataFrame) -> pd.DataFrame:
+    """分项分位视图：优先读面板预计算的 ``pct_*``；旧面板/测试帧现算兜底。"""
+    cols = {}
+    for ind in INDICATORS:
+        col = f"pct_{ind.name}"
+        cols[ind.name] = (
+            frame[col]
+            if col in frame
+            else expanding_pct_rank(frame[ind.column], MIN_PERIODS)
+        )
+    return pd.DataFrame(cols, index=frame.index)
+
+
+def stress_series(frame: pd.DataFrame) -> pd.Series:
+    if "stress" in frame:
+        return frame["stress"].astype(float)
+    return stress_from_raw(frame)
+
+
+def stress_percentile(frame: pd.DataFrame, scores: pd.Series) -> pd.Series:
+    if "stress_pct" in frame:
+        return frame["stress_pct"]
+    return expanding_pct_rank(scores, 500)
+
+
+def indicator_list(frame: pd.DataFrame, feats: pd.DataFrame) -> list[dict]:
+    out = []
+    for ind in INDICATORS:
+        if ind.name not in CORE_KEYS:
+            continue
+        unit, scale, digits = DISPLAY.get(ind.name, ("", 1.0, 3))
+        raw = frame[ind.column].iloc[-1]
+        pct = float(feats[ind.name].iloc[-1])
+        out.append(
+            {
+                "key": ind.name,
+                "label": ind.note,
+                "value": round(float(raw) * scale, digits)
+                if np.isfinite(raw)
+                else None,
+                "unit": unit,
+                "pct": round(pct, 3) if np.isfinite(pct) else None,
+                "zone": "low" if pct <= 0.1 else ("high" if pct >= 0.9 else "normal"),
+            }
+        )
+    return out
+
+
+def stress_block(scores: pd.Series, pct: pd.Series) -> dict:
+    score = float(scores.iloc[-1])
+    score_pct = float(pct.iloc[-1])
+    zone_key, zone_label, zone_note, phase, phase_detail = stress_zone(score)
+    return {
+        "score": round(score, 1),
+        "zone": zone_key,
+        "zone_label": zone_label,
+        "zone_note": zone_note,
+        "phase": phase,
+        "phase_detail": phase_detail,
+        "percentile": round(score_pct, 3) if np.isfinite(score_pct) else None,
+    }
+
+
+def price_series(
+    symbol: str, kind: str, frame: pd.DataFrame, ohlc: pd.DataFrame | None
+) -> pd.Series:
+    if kind == "synthetic":
+        return frame["ew_close"].astype(float)
+    if ohlc is None or ohlc.empty:
+        return pd.Series(dtype=float)
+    sub = ohlc[ohlc["symbol"] == symbol].set_index("date").sort_index()
+    return sub["close"].astype(float).reindex(frame.index)
+
+
+def kline_block(
+    symbol: str, kind: str, frame: pd.DataFrame, ohlc: pd.DataFrame | None
+) -> dict:
+    """K 线数据。官方指数给真 OHLC；全A 给合成聚合 OHLC（高/低=成分股加权，
+    不是指数日内极值，前端对合成口径不画蜡烛）。成交额统一换算成亿元。"""
+    if kind == "official":
+        if ohlc is None or ohlc.empty:
+            return {}
+        sub = (
+            ohlc[ohlc["symbol"] == symbol]
+            .set_index("date")
+            .sort_index()
+            .reindex(frame.index)
+        )
+        src = {
+            "open": sub["open"],
+            "high": sub["high"],
+            "low": sub["low"],
+            "close": sub["close"],
+            "amount": sub["amount"] / 1e4,
+        }
+    else:
+        src = {
+            "open": frame["ew_open"],
+            "high": frame["ew_high"],
+            "low": frame["ew_low"],
+            "close": frame["ew_close"],
+            "amount": frame["ew_amount"] / 1e4,
+        }
+    amount = src["amount"]
+    vol_z = (amount - amount.rolling(20).mean()) / amount.rolling(20).std()
+    # 旧路径（无分市场面板）没有 ew_turnover：换手率缺失就如实给 null，不回落成 0。
+    turnover = (
+        frame["ew_turnover"] * 100.0
+        if "ew_turnover" in frame
+        else pd.Series(np.nan, index=frame.index)
+    )
+    dates = [d.strftime("%Y-%m-%d") for d in frame.index[-KLINE_DAYS:]]
+    dist_keys = (
+        "dist_limit_up",
+        "dist_up_big",
+        "dist_up_small",
+        "dist_flat",
+        "dist_down_small",
+        "dist_down_big",
+        "dist_limit_down",
+    )
+
+    def _tail(series: pd.Series, digits: int = 2) -> list[float | None]:
+        return [
+            None if not np.isfinite(v) else round(float(v), digits)
+            for v in series.iloc[-KLINE_DAYS:]
+        ]
+
+    return {
+        "kind": kind,
+        "dates": dates,
+        "open": _tail(src["open"]),
+        "high": _tail(src["high"]),
+        "low": _tail(src["low"]),
+        "close": _tail(src["close"]),
+        "amount": _tail(amount),
+        "turnover": _tail(turnover, 3),
+        "vol_z": _tail(vol_z),
+        "dist": {
+            k: [int(v) for v in frame[k].fillna(0).to_numpy()[-KLINE_DAYS:]]
+            for k in dist_keys
+            if k in frame
+        },
+    }
+
+
+def _index_block(
+    symbol: str,
+    name: str,
+    kind: str,
+    frame: pd.DataFrame,
+    feats: pd.DataFrame,
+    scores: pd.Series,
+    pct: pd.Series,
+    close: pd.Series,
+    full_close: pd.Series,
+    df: pd.DataFrame,
+    feats_global: pd.DataFrame,
+    as_of: pd.Timestamp | None,
+    ohlc: pd.DataFrame | None,
+) -> dict:
+    if len(close) == 0 or not np.isfinite(close.iloc[-1]):
+        return {}
+    score = float(scores.iloc[-1])
+    mask = mask_from_zone(scores, score)
+    last_date = close.index[-1]
+    last = float(close.iloc[-1])
+    prev = float(close.iloc[-2]) if len(close) > 1 else np.nan
+    pos = (
+        full_close.index.get_loc(last_date)
+        if last_date in full_close.index
+        else len(full_close) - 1
+    )
+    future_dates = [
+        d.strftime("%Y-%m-%d") for d in full_close.index[pos + 1 : pos + 1 + HORIZON]
+    ]
+    # 预测模型沿用全市场广度特征（其 IC 是按这个口径验证的）；只有被解释变量
+    # 换成该指数自己的价格序列。旧面板只带 4 个 close_*，统一用 full_close 覆盖。
+    dfx = df.assign(**{f"close_{symbol}": full_close.reindex(df.index)})
+    fc = forecast_index(dfx, feats_global, symbol, last_date)
+    disp_pct = float(frame["disp_pct"].iloc[-1]) if "disp_pct" in frame else np.nan
+    return {
+        "name": name,
+        "last": round(last, 2),
+        "change_pct": round((last / prev - 1.0) * 100, 2) if prev else None,
+        "history": [
+            {"date": d.strftime("%Y-%m-%d"), "close": round(float(c), 2)}
+            for d, c in close.tail(HISTORY_DAYS).items()
+        ],
+        "fan": fan_bands(close, mask),
+        "stats": index_stats(close, mask),
+        "baseline": baseline_stats(close),
+        "actual": actual_path(full_close, last_date) if as_of is not None else [],
+        "forecast": fc,
+        "future_dates": future_dates,
+        "stress": stress_block(scores, pct),
+        "indicators": indicator_list(frame, feats),
+        "stress_history": [
+            {
+                "date": d.strftime("%Y-%m-%d"),
+                "stress": round(float(s), 1),
+                "breadth20": round(float(frame.loc[d, "pct_above_ma20"]) * 100, 1),
+            }
+            for d, s in scores.tail(STRESS_HISTORY_DAYS).items()
+        ],
+        "factor_history": factor_history(feats),
+        "dispersion": {
+            "value": round(float(frame["ret_disp"].iloc[-1]), 2),
+            "pct": round(disp_pct, 3) if np.isfinite(disp_pct) else None,
+        },
+        "universe": _universe_meta(symbol, frame),
+        "kline": kline_block(symbol, kind, frame, ohlc),
+    }
+
+
+def _universe_meta(symbol: str, frame: pd.DataFrame) -> dict:
+    """这个指数用的是哪个广度宇宙（前端要如实标注「近似宇宙」）。"""
+    _, ukey, _ = TARGETS[symbol]
+    u = UNIVERSE_BY_KEY.get(ukey)
+    return {
+        "key": ukey,
+        "label": u.label if u else ukey,
+        "mode": u.mode if u else "unknown",
+        "note": u.note if u else "",
+        "n_last": int(frame["n_total"].iloc[-1]) if "n_total" in frame else None,
+    }
+
+
 def build_payload(
-    df: pd.DataFrame, feats: pd.DataFrame, as_of: pd.Timestamp | None = None
+    df: pd.DataFrame,
+    feats: pd.DataFrame,
+    as_of: pd.Timestamp | None = None,
+    uni: pd.DataFrame | None = None,
+    ohlc: pd.DataFrame | None = None,
 ) -> dict:
     """构建情绪面板数据。``as_of`` 给定时，全部信号只用该日及以前的数据。
 
     无前视保证：切片后 stress / 分位 / 扇形 / 基准全部只在切片内计算；扇形的
     未来路径在切片内不足 20 天者自然被丢弃。真实走势另走 :func:`actual_path`
     从全量数据取，且只用于回看对照。
+
+    ``uni`` 给定时，每个指数用**自己宇宙**的压力分与分项（分市场）；不给则
+    退回旧的「全市场分数 + 官方指数价格」路径（向后兼容）。
     """
     signal_df = df.loc[:as_of] if as_of is not None else df
     signal_feats = feats.loc[:as_of] if as_of is not None else feats
@@ -242,28 +565,82 @@ def build_payload(
         raise ValueError("as_of 太早：可用历史不足 600 个交易日，无法计算分位")
 
     scores = composite_scores(signal_feats)
-    score = float(scores["stress"].iloc[-1])
     score_pct = float(expanding_pct_rank(scores["stress"], min_periods=500).iloc[-1])
-    zone_key, zone_label, zone_note, phase, phase_detail = stress_zone(score)
-    mask = mask_from_zone(scores["stress"], score)
 
-    indicators = []
-    for ind in INDICATORS:
-        if ind.name not in CORE_KEYS:
-            continue
-        unit, scale, digits = DISPLAY.get(ind.name, ("", 1.0, 3))
-        raw = signal_df[ind.column].iloc[-1]
-        pct = float(signal_feats[ind.name].iloc[-1])
-        indicators.append(
-            {
-                "key": ind.name,
-                "label": ind.note,
-                "value": round(float(raw) * scale, digits) if np.isfinite(raw) else None,
-                "unit": unit,
-                "pct": round(pct, 3) if np.isfinite(pct) else None,
-                "zone": "low" if pct <= 0.1 else ("high" if pct >= 0.9 else "normal"),
-            }
-        )
+    last_date = signal_df.index[-1]
+    frames = frame_by_universe(uni) if uni is not None and not uni.empty else {}
+
+    indices: dict[str, dict] = {}
+    for symbol, (name, ukey, kind) in TARGETS.items():
+        frame = frames.get(ukey)
+        if frame is not None:
+            sliced = frame.loc[:as_of] if as_of is not None else frame
+            if len(sliced) < 600:
+                continue
+            feats_u = feature_view(sliced)
+            scores_u = stress_series(sliced)
+            pct_u = stress_percentile(sliced, scores_u)
+            close = price_series(symbol, kind, sliced, ohlc).dropna()
+            full_close = price_series(symbol, kind, frame, ohlc).dropna()
+            block = _index_block(
+                symbol,
+                name,
+                kind,
+                sliced,
+                feats_u,
+                scores_u,
+                pct_u,
+                close,
+                full_close,
+                df,
+                feats,
+                as_of,
+                ohlc,
+            )
+        else:
+            # 旧路径（无分市场面板）：全市场分数 + 官方指数价格
+            close = (
+                signal_df[f"close_{symbol}"].dropna()
+                if f"close_{symbol}" in signal_df
+                else pd.Series(dtype=float)
+            )
+            if close.empty:
+                continue
+            block = _index_block(
+                symbol,
+                name,
+                "official",
+                signal_df,
+                signal_feats,
+                scores["stress"].rename("stress"),
+                pd.Series(1.0, index=scores.index),
+                close,
+                df[f"close_{symbol}"].dropna(),
+                df,
+                feats,
+                as_of,
+                ohlc,
+            )
+            block["stress"] = stress_block(
+                scores["stress"], pd.Series(1.0, index=scores.index)
+            )
+            block["stress"]["percentile"] = (
+                round(score_pct, 3) if np.isfinite(score_pct) else None
+            )
+            block["indicators"] = indicator_list(signal_df, signal_feats)
+            block["stress_history"] = [
+                {
+                    "date": d.strftime("%Y-%m-%d"),
+                    "stress": round(float(s), 1),
+                    "breadth20": round(
+                        float(signal_df.loc[d, "pct_above_ma20"]) * 100, 1
+                    ),
+                }
+                for d, s in scores["stress"].tail(STRESS_HISTORY_DAYS).items()
+            ]
+            block["factor_history"] = factor_history(signal_feats)
+        if block:
+            indices[symbol] = block
 
     history = []
     for d, s_val in scores["stress"].tail(STRESS_HISTORY_DAYS).items():
@@ -275,61 +652,76 @@ def build_payload(
             }
         )
 
-    last_date = signal_df.index[-1]
-    indices = {}
-    for symbol, name in TARGETS.items():
-        close = signal_df[f"close_{symbol}"]
-        last = float(close.iloc[-1])
-        prev = float(close.iloc[-2])
-        hist = [
-            {"date": d.strftime("%Y-%m-%d"), "close": round(float(c), 2)}
-            for d, c in close.tail(HISTORY_DAYS).items()
-        ]
-        indices[symbol] = {
-            "name": name,
-            "last": round(last, 2),
-            "change_pct": round((last / prev - 1.0) * 100, 2) if prev else None,
-            "history": hist,
-            "fan": fan_bands(close, mask),
-            "stats": index_stats(close, mask),
-            "baseline": baseline_stats(close),
-            "actual": (
-                actual_path(df[f"close_{symbol}"], last_date) if as_of is not None else []
+    # 全 A 口径的宇宙块（顶栏卡片与旧字段共用）
+    all_frame = frames.get("all")
+    all_view = (
+        all_frame.loc[:as_of]
+        if (all_frame is not None and as_of is not None)
+        else all_frame
+    )
+    if all_view is not None:
+        all_sliced = all_view
+        all_feats = feature_view(all_sliced)
+        all_scores = stress_series(all_sliced)
+        all_pct = stress_percentile(all_sliced, all_scores)
+        dispersion = {
+            "value": round(float(all_sliced["ret_disp"].iloc[-1]), 2),
+            "pct": (
+                round(float(all_sliced["disp_pct"].iloc[-1]), 3)
+                if "disp_pct" in all_sliced
+                else None
             ),
-            "forecast": forecast_index(df, feats, symbol, last_date),
-            "future_dates": [
-                d.strftime("%Y-%m-%d")
-                for d in df.index[df.index.get_loc(last_date) + 1 : df.index.get_loc(last_date) + 1 + HORIZON]
-            ],
         }
+        kline_all = kline_block("ALL.A", "synthetic", all_sliced, ohlc)
+    else:
+        all_feats, all_scores, all_pct = (
+            signal_feats,
+            scores["stress"],
+            pd.Series(1.0, index=scores.index),
+        )
+        dispersion = {
+            "value": round(float(signal_df["ret_disp"].iloc[-1]), 2),
+            "pct": (
+                round(float(expanding_pct_rank(signal_df["ret_disp"], 500).iloc[-1]), 3)
+                if np.isfinite(signal_df["ret_disp"].iloc[-1])
+                else None
+            ),
+        }
+        kline_all = {}
 
     return {
-        "trade_date": last_date.strftime("%Y-%m-%d"),
+        "trade_date": (
+            all_view.index[-1] if all_view is not None else last_date
+        ).strftime("%Y-%m-%d"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "QuantDB daily_backward · market_breadth",
         "horizon": HORIZON,
         "as_of": as_of is not None,
         "available_from": df.index[0].strftime("%Y-%m-%d"),
-        "available_to": df.index[-1].strftime("%Y-%m-%d"),
-        "dispersion": {
-            "value": round(float(signal_df["ret_disp"].iloc[-1]), 2),
-            "pct": (
-                round(float(expanding_pct_rank(signal_df["ret_disp"], 500).iloc[-1]), 3)
-                if np.isfinite(signal_df["ret_disp"].iloc[-1]) else None
-            ),
-        },
-        "stress": {
-            "score": round(score, 1),
-            "zone": zone_key,
-            "zone_label": zone_label,
-            "zone_note": zone_note,
-            "phase": phase,
-            "phase_detail": phase_detail,
-            "percentile": round(score_pct, 3) if np.isfinite(score_pct) else None,
-        },
-        "indicators": indicators,
-        "stress_history": history,
-        "factor_history": factor_history(signal_feats),
+        "available_to": (
+            all_view.index[-1] if all_view is not None else df.index[-1]
+        ).strftime("%Y-%m-%d"),
+        "dispersion": dispersion,
+        "stress": stress_block(all_scores, all_pct),
+        "indicators": indicator_list(
+            all_view if all_view is not None else signal_df, all_feats
+        ),
+        "stress_history": (
+            [
+                {
+                    "date": d.strftime("%Y-%m-%d"),
+                    "stress": round(float(s), 1),
+                    "breadth20": round(
+                        float(all_sliced.loc[d, "pct_above_ma20"]) * 100, 1
+                    ),
+                }
+                for d, s in all_scores.tail(STRESS_HISTORY_DAYS).items()
+            ]
+            if all_view is not None
+            else history
+        ),
+        "factor_history": factor_history(all_feats),
+        "kline": kline_all,
         "indices": indices,
     }
 
@@ -337,16 +729,27 @@ def build_payload(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="生成大盘情绪快照 JSON")
     p.add_argument("--panel", default=str(PANEL_PATH))
+    p.add_argument("--universe-panel", default=str(UNIVERSE_PANEL_PATH))
+    p.add_argument("--index-ohlc", default=str(INDEX_OHLC_PATH))
     p.add_argument("--out", default=None, help="输出路径（默认快照根/sentiment.json）")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     args = _parse_args(argv)
     df = load_panel(Path(args.panel))
     feats = build_features(df)
-    payload = build_payload(df, feats)
+    uni = load_universe_panel(Path(args.universe_panel))
+    ohlc = load_index_ohlc(Path(args.index_ohlc))
+    if uni.empty:
+        log.warning(
+            "缺少分市场面板 %s —— 退回全市场口径（分市场 tab 不可用）",
+            args.universe_panel,
+        )
+    payload = build_payload(df, feats, uni=uni if not uni.empty else None, ohlc=ohlc)
 
     root = QUANTDB_DIR / "5_technical_derived" / "market_breadth"
     out = Path(args.out) if args.out else root / "sentiment.json"
@@ -358,9 +761,13 @@ def main(argv: list[str] | None = None) -> int:
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, out)
     log.info(
-        "写出 %s（%s，压力分 %.1f %s，%d 个指标）",
-        out, payload["trade_date"], payload["stress"]["score"],
-        payload["stress"]["zone_label"], len(payload["indicators"]),
+        "写出 %s（%s，全A压力 %.1f %s，%d 个指数，%d 个指标）",
+        out,
+        payload["trade_date"],
+        payload["stress"]["score"],
+        payload["stress"]["zone_label"],
+        len(payload["indices"]),
+        len(payload["indicators"]),
     )
     return 0
 

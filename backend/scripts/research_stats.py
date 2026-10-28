@@ -4,7 +4,10 @@
 预测窗口互相重叠（1 个 20 日窗口 = 20 个日样本），朴素 t 值会被高估约
 ``sqrt(N)`` 倍。所有「信号有效」的结论必须在这里过一道，否则就是自欺。
 """
+
 from __future__ import annotations
+
+import bisect
 
 import numpy as np
 import pandas as pd
@@ -135,13 +138,19 @@ def expanding_pct_rank(values: pd.Series, min_periods: int = 250) -> pd.Series:
     ⚠️ 窗口里带着指标热身期的 NaN（52 周新高新低要 252 天、McClellan 要 39 天）。
     必须先把 NaN 剔掉再求分位：``(x < x[-1]).mean()`` 会把 NaN 当成 False 计入
     分母，热身期分位被严重稀释 —— 实测把 80.3 分的位置从 95% 报成 74%。
+
+    实现：维护一个有序列表 + ``bisect_left``（严格小于的个数），结果与
+    ``expanding(...).apply`` 的逐行参考实现逐位一致，复杂度从 O(n²·numpy 调用)
+    降到 O(n² C 层搬移)。分市场 8 个宇宙 × 11 个指标原来要跑 5 分钟，现在秒级。
     """
-
-    def _rank(x: np.ndarray) -> float:
-        cur = x[-1]
-        if not np.isfinite(cur):
-            return np.nan
-        valid = x[np.isfinite(x)]
-        return float((valid < cur).mean())
-
-    return values.expanding(min_periods=min_periods).apply(_rank, raw=True)
+    arr = np.asarray(values, dtype=float)
+    out = np.full(arr.shape, np.nan)
+    seen: list[float] = []
+    for i, x in enumerate(arr):
+        if not np.isfinite(x):
+            continue
+        # 窗口含当日；当日不可能小于自己，所以分母是「已见 + 1」
+        if len(seen) + 1 >= min_periods:
+            out[i] = bisect.bisect_left(seen, x) / (len(seen) + 1)
+        bisect.insort(seen, x)
+    return pd.Series(out, index=values.index)

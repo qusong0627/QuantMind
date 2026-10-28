@@ -20,6 +20,7 @@
     python -m backend.scripts.breadth_regime            # 全量报告
     python -m backend.scripts.breadth_regime --status   # 只看当前触发了什么
 """
+
 from __future__ import annotations
 
 import argparse
@@ -70,15 +71,26 @@ INDICATORS: tuple[Indicator, ...] = (
 )
 
 
+def prepare_panel(df: pd.DataFrame) -> pd.DataFrame:
+    """广度面板 → 带派生指标的帧（唯一实现，全A与分市场共用）。
+
+    输入只要求：``n_total / n_limit_up / n_limit_down / amt_total /
+    n_high_52w / n_low_52w / net_advances``（或已有 ``adl``），索引为交易日。
+    """
+    out = df.copy()
+    n = out["n_total"].replace(0, np.nan)
+    out["limit_net"] = (out["n_limit_up"] - out["n_limit_down"]) / n
+    amt = out["amt_total"]
+    out["amt_shock"] = (amt - amt.rolling(20).mean()) / amt.rolling(20).std()
+    out["nh_nl_pct"] = (out["n_high_52w"] - out["n_low_52w"]) / n
+    if "adl" not in out:
+        out["adl"] = out["net_advances"].fillna(0.0).cumsum()
+    out["adl_slope"] = out["adl"].diff(20) / n.rolling(20).mean()
+    return out
+
+
 def load_panel(path: Path = PANEL_PATH) -> pd.DataFrame:
-    df = pd.read_parquet(path).set_index("date").sort_index()
-    n = df["n_total"].replace(0, np.nan)
-    df["limit_net"] = (df["n_limit_up"] - df["n_limit_down"]) / n
-    amt = df["amt_total"]
-    df["amt_shock"] = (amt - amt.rolling(20).mean()) / amt.rolling(20).std()
-    df["nh_nl_pct"] = (df["n_high_52w"] - df["n_low_52w"]) / n
-    df["adl_slope"] = df["adl"].diff(20) / n.rolling(20).mean()
-    return df
+    return prepare_panel(pd.read_parquet(path).set_index("date").sort_index())
 
 
 def build_features(df: pd.DataFrame, min_periods: int = MIN_PERIODS) -> pd.DataFrame:
@@ -88,7 +100,9 @@ def build_features(df: pd.DataFrame, min_periods: int = MIN_PERIODS) -> pd.DataF
     return out
 
 
-def forward_path(close: pd.Series, horizon: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def forward_path(
+    close: pd.Series, horizon: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """t 收盘 → t+N 收盘：最终收益、窗口内最低点、窗口内最高点（均为相对 t 的比例）。"""
     vals = close.to_numpy(dtype=float)
     n = len(vals)
@@ -225,8 +239,11 @@ def trigger_table(
                         "base_p_drop10": base_risk[n]["p_drop10"],
                         "base_mfe_%": base_risk[n]["mfe_%"],
                         "lift_drop5": round(
-                            float((lo_v <= -0.05).mean()) / base_risk[n]["p_drop5"] - 1, 2
-                        ) if base_risk[n]["p_drop5"] > 0 else np.nan,
+                            float((lo_v <= -0.05).mean()) / base_risk[n]["p_drop5"] - 1,
+                            2,
+                        )
+                        if base_risk[n]["p_drop5"] > 0
+                        else np.nan,
                     }
                 )
     tdf = pd.DataFrame(rows)
@@ -253,11 +270,13 @@ def threshold_sensitivity(
         for tail in (0.05, 0.10, 0.20, 0.30):
             low_m = pv <= tail
             high_m = pv >= 1 - tail
-            row[f"low{int(tail*100)}_%"] = (
+            row[f"low{int(tail * 100)}_%"] = (
                 round(float(yv[low_m].mean()) * 100, 2) if low_m.sum() >= 15 else np.nan
             )
-            row[f"high{int(tail*100)}_%"] = (
-                round(float(yv[high_m].mean()) * 100, 2) if high_m.sum() >= 15 else np.nan
+            row[f"high{int(tail * 100)}_%"] = (
+                round(float(yv[high_m].mean()) * 100, 2)
+                if high_m.sum() >= 15
+                else np.nan
             )
         rows.append(row)
     return pd.DataFrame(rows)
@@ -288,6 +307,24 @@ def composite_scores(feats: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({"stress": stress}, index=feats.index)
 
 
+def stress_from_raw(df: pd.DataFrame, min_periods: int = MIN_PERIODS) -> pd.Series:
+    """原始分量列 → 0~100 压力分（分市场用；公式与 :func:`composite_scores` 同源）。
+
+    与 ``build_features`` + ``composite_scores`` 的区别只是输入：这里直接吃
+    原始指标列、内部做扩张分位，省掉为 13 个指标都建特征帧的开销。
+
+    ⚠️ ``STRESS_COMPONENTS`` 里的名字是**特征名**（``breadth20``），原始面板里
+    对应的列是 ``pct_above_ma20`` —— 必须过 ``INDICATORS`` 的 name→column 映射，
+    直接 ``df[name]`` 会 KeyError。
+    """
+    col_of = {f.name: f.column for f in INDICATORS}
+    parts = []
+    for name, sign in STRESS_COMPONENTS:
+        p = expanding_pct_rank(df[col_of[name]], min_periods=min_periods)
+        parts.append(p if sign > 0 else 1 - p)
+    return sum(parts) / len(parts) * 100.0
+
+
 def score_threshold_table(
     df: pd.DataFrame, scores: pd.DataFrame, target: str
 ) -> pd.DataFrame:
@@ -301,13 +338,17 @@ def score_threshold_table(
         m = (scores["stress"] >= thr).to_numpy() & np.isfinite(y20)
         if m.sum() >= 20:
             rows.append(
-                _score_row(m, y20, low20, high20, f"压力>={thr}", base, base_p5, base_p10)
+                _score_row(
+                    m, y20, low20, high20, f"压力>={thr}", base, base_p5, base_p10
+                )
             )
     for thr in (40, 30, 20, 10):
         m = (scores["stress"] <= thr).to_numpy() & np.isfinite(y20)
         if m.sum() >= 20:
             rows.append(
-                _score_row(m, y20, low20, high20, f"压力<={thr}", base, base_p5, base_p10)
+                _score_row(
+                    m, y20, low20, high20, f"压力<={thr}", base, base_p5, base_p10
+                )
             )
     return pd.DataFrame(rows)
 
@@ -337,7 +378,9 @@ TREND_RULES = (
 )
 
 
-def trend_interaction_table(df: pd.DataFrame, feats: pd.DataFrame, target: str) -> pd.DataFrame:
+def trend_interaction_table(
+    df: pd.DataFrame, feats: pd.DataFrame, target: str
+) -> pd.DataFrame:
     """同样的广度极端，在均线上方还是下方，后续是否不同。"""
     c = df[f"close_{target}"]
     ma20 = c.rolling(20).mean()
@@ -392,9 +435,9 @@ def current_status(df: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
                 "value": round(float(df[f.column].iloc[latest]), 4),
                 "pct": round(float(p), 3),
                 "zone": (
-                    f"低 {int(TAIL*100)}%"
+                    f"低 {int(TAIL * 100)}%"
                     if p <= TAIL
-                    else (f"高 {int(TAIL*100)}%" if p >= 1 - TAIL else "正常")
+                    else (f"高 {int(TAIL * 100)}%" if p >= 1 - TAIL else "正常")
                 ),
                 "note": f.note,
             }
@@ -405,8 +448,7 @@ def current_status(df: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
 def _md(df: pd.DataFrame) -> str:
     d = df.reset_index(drop=True)
     cols = [str(c) for c in d.columns]
-    lines = ["| " + " | ".join(cols) + " |",
-             "|" + "|".join(["---"] * len(cols)) + "|"]
+    lines = ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
     for _, row in d.iterrows():
         cells = []
         for v in row:
@@ -425,8 +467,10 @@ def build_report(df: pd.DataFrame, feats: pd.DataFrame) -> str:
     a = L.append
     a("# 广度指标风险预警阈值研究")
     a("")
-    a(f"数据区间 {df.index[0]:%Y-%m-%d} ~ {df.index[-1]:%Y-%m-%d}，{len(df)} 个交易日。"
-      f"极端判定 = 扩张窗口（起点 {MIN_PERIODS} 天）分位，尾部门槛 {int(TAIL*100)}%。")
+    a(
+        f"数据区间 {df.index[0]:%Y-%m-%d} ~ {df.index[-1]:%Y-%m-%d}，{len(df)} 个交易日。"
+        f"极端判定 = 扩张窗口（起点 {MIN_PERIODS} 天）分位，尾部门槛 {int(TAIL * 100)}%。"
+    )
     a("")
     a("`n_days` 是重叠的日样本；`n_episodes` 是连续触发段数，**后者才是独立样本量**。")
     a("")
@@ -434,8 +478,10 @@ def build_report(df: pd.DataFrame, feats: pd.DataFrame) -> str:
     scores = composite_scores(feats)
     a("## 一、当前触发了什么")
     a("")
-    a(f"**综合广度压力分 = {scores['stress'].iloc[-1]:.1f} / 100**"
-      f"（越高越紧张；60 以上为偏高压、80 以上为极端压力）。")
+    a(
+        f"**综合广度压力分 = {scores['stress'].iloc[-1]:.1f} / 100**"
+        f"（越高越紧张；60 以上为偏高压、80 以上为极端压力）。"
+    )
     a("")
     a(_md(current_status(df, feats)))
     a("")
@@ -453,17 +499,40 @@ def build_report(df: pd.DataFrame, feats: pd.DataFrame) -> str:
         a(f"## 二、{tname}：极端触发后的条件收益")
         a("")
         show = tdf[tdf.h == 20][
-            ["indicator", "side", "n_days", "n_episodes", "n_clusters", "mean_%",
-             "median_%", "win", "base_%", "delta_%", "t_nw", "q_fdr"]
+            [
+                "indicator",
+                "side",
+                "n_days",
+                "n_episodes",
+                "n_clusters",
+                "mean_%",
+                "median_%",
+                "win",
+                "base_%",
+                "delta_%",
+                "t_nw",
+                "q_fdr",
+            ]
         ].sort_values("q_fdr")
         a(_md(show))
         a("")
         a(f"### {tname}：同条件下的风险面（未来 20 日内）")
         a("")
         rshow = rdf[rdf.h == 20][
-            ["indicator", "side", "n_clusters", "avg_mae_%", "base_mae_%",
-             "p_drop5", "base_p_drop5", "lift_drop5", "p_drop10",
-             "base_p_drop10", "avg_mfe_%", "base_mfe_%"]
+            [
+                "indicator",
+                "side",
+                "n_clusters",
+                "avg_mae_%",
+                "base_mae_%",
+                "p_drop5",
+                "base_p_drop5",
+                "lift_drop5",
+                "p_drop10",
+                "base_p_drop10",
+                "avg_mfe_%",
+                "base_mfe_%",
+            ]
         ].sort_values(["lift_drop5"], ascending=False)
         a(_md(rshow))
         a("")
@@ -502,8 +571,10 @@ def build_report(df: pd.DataFrame, feats: pd.DataFrame) -> str:
 
     a("## 五、广度 × 趋势：同样超卖，趋势里还是趋势外")
     a("")
-    a("低广度只是「跌得多」；指数还在 MA20 上方时是上升趋势中的回踩，"
-      "跌到 MA60 下方则是趋势走坏。两者后续完全不同。")
+    a(
+        "低广度只是「跌得多」；指数还在 MA20 上方时是上升趋势中的回踩，"
+        "跌到 MA60 下方则是趋势走坏。两者后续完全不同。"
+    )
     a("")
     for target, tname in TARGETS.items():
         a(f"**{tname} · 未来 20 日**")
@@ -514,10 +585,26 @@ def build_report(df: pd.DataFrame, feats: pd.DataFrame) -> str:
     a("## 六、全部窗口扫描（按 FDR q 排序，取前 60 行）")
     a("")
     if not merged.empty:
-        full = merged[
-            ["target", "indicator", "side", "h", "n_days", "n_episodes",
-             "n_clusters", "mean_%", "win", "delta_%", "t_nw", "q_fdr"]
-        ].sort_values(["q_fdr", "target", "indicator", "h"]).head(60)
+        full = (
+            merged[
+                [
+                    "target",
+                    "indicator",
+                    "side",
+                    "h",
+                    "n_days",
+                    "n_episodes",
+                    "n_clusters",
+                    "mean_%",
+                    "win",
+                    "delta_%",
+                    "t_nw",
+                    "q_fdr",
+                ]
+            ]
+            .sort_values(["q_fdr", "target", "indicator", "h"])
+            .head(60)
+        )
         a(_md(full))
     a("")
     if not merged_risk.empty:
@@ -537,7 +624,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     args = _parse_args(argv)
     df = load_panel(Path(args.panel))
     feats = build_features(df)

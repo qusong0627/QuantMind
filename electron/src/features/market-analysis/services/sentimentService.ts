@@ -86,6 +86,33 @@ export interface ActualPoint {
   pct: number;
 }
 
+/** 单指数使用的广度宇宙（PIT 口径，前端如实标注「近似」）。 */
+export interface UniverseMeta {
+  key: string;
+  label: string;
+  /** board=按板别全样本；rank=逐日流通市值排名代理 */
+  mode: string;
+  note: string;
+  n_last: number | null;
+}
+
+/** 指数 K 线：官方指数给真 OHLC；全A 是等权合成（高/低为成分股加权，非日内极值）。 */
+export interface IndexKline {
+  kind: 'official' | 'synthetic';
+  dates: string[];
+  open: (number | null)[];
+  high: (number | null)[];
+  low: (number | null)[];
+  close: (number | null)[];
+  /** 成交额（亿元） */
+  amount: (number | null)[];
+  /** 换手率（%，Σ成交额 / Σ昨流通市值） */
+  turnover: (number | null)[];
+  vol_z: (number | null)[];
+  /** 七档涨跌分布（互斥），键与后端 DIST_KEYS 一致 */
+  dist?: Record<string, number[]>;
+}
+
 export interface IndexSentiment {
   name: string;
   last: number;
@@ -98,6 +125,14 @@ export interface IndexSentiment {
   forecast: Record<string, HorizonForecast>;
   /** as-of 时给出真实未来交易日；最新一期为空（前端按工作日估算） */
   future_dates: string[];
+  /** 该指数**自己宇宙**的广度压力分（分市场口径）；旧快照没有此字段 */
+  stress?: StressInfo;
+  indicators?: SentimentIndicator[];
+  stress_history?: StressHistoryPoint[];
+  factor_history?: { dates: string[]; items: FactorHistoryItem[] };
+  dispersion?: { value: number | null; pct: number | null };
+  universe?: UniverseMeta;
+  kline?: IndexKline;
 }
 
 export interface StressHistoryPoint {
@@ -117,6 +152,8 @@ export interface MarketSentiment {
   indicators: SentimentIndicator[];
   stress_history: StressHistoryPoint[];
   factor_history: { dates: string[]; items: FactorHistoryItem[] };
+  /** 全A 合成 K 线（顶栏口径）；旧快照没有此字段 */
+  kline?: IndexKline;
   indices: Record<string, IndexSentiment>;
   /** true = 历史回看；false = 最新一期 */
   as_of: boolean;
