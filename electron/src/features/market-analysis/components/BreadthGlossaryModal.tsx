@@ -16,10 +16,24 @@ interface Props {
   open: boolean;
   onClose: () => void;
   items: SentimentIndicator[];
+  /** 要展示的指标键；默认 8 个广度分项 */
+  keys?: readonly string[];
+  title?: string;
+  intro?: string;
+  footer?: string;
 }
 
-export const BreadthGlossaryModal: React.FC<Props> = ({ open, onClose, items }) => {
+export const BreadthGlossaryModal: React.FC<Props> = ({
+  open,
+  onClose,
+  items,
+  keys,
+  title,
+  intro,
+  footer,
+}) => {
   const byKey = new Map(items.map((i) => [i.key, i]));
+  const order = keys ?? BREADTH_ORDER;
   return (
     <Modal
       open={open}
@@ -28,10 +42,12 @@ export const BreadthGlossaryModal: React.FC<Props> = ({ open, onClose, items }) 
       width={860}
       title={
         <div>
-          <div className="text-sm font-extrabold text-slate-800">广度分项 · 这些数字是什么意思</div>
+          <div className="text-sm font-extrabold text-slate-800">
+            {title ?? '广度分项 · 这些数字是什么意思'}
+          </div>
           <div className="text-[11px] font-normal text-slate-500 mt-1">
-            它们都在回答同一个问题：今天是多数股票在涨还是多数在跌、钱往哪边跑、跌得有多狠。
-            点越靠右＝市场越冷；红色＝过热（追高风险），绿色＝超卖（反弹概率高）。
+            {intro ??
+              '它们都在回答同一个问题：今天是多数股票在涨还是多数在跌、钱往哪边跑、跌得有多狠。点越靠右＝市场越冷；红色＝过热（追高风险），绿色＝超卖（反弹概率高）。'}
           </div>
         </div>
       }
@@ -47,7 +63,7 @@ export const BreadthGlossaryModal: React.FC<Props> = ({ open, onClose, items }) 
             </tr>
           </thead>
           <tbody>
-            {BREADTH_ORDER.map((key) => {
+            {order.map((key) => {
               const e = BREADTH_META[key];
               const it = byKey.get(key);
               const value = typeof it?.value === 'number' ? it.value : null;
@@ -72,8 +88,8 @@ export const BreadthGlossaryModal: React.FC<Props> = ({ open, onClose, items }) 
         </table>
       </div>
       <p className="mt-3 text-[11px] text-slate-400 leading-relaxed">
-        补充：这些分项最终会被加权成一个 0–100 的「广度压力分」。分数越高说明越多股票在跌、市场越冷；
-        80 以上是极端超卖区，20 以下是过热区。单个指标只说明一个侧面，不要单独用。
+        {footer ??
+          '补充：这些分项最终会被加权成一个 0–100 的「广度压力分」。分数越高说明越多股票在跌、市场越冷；80 以上是极端超卖区，20 以下是过热区。单个指标只说明一个侧面，不要单独用。'}
       </p>
     </Modal>
   );

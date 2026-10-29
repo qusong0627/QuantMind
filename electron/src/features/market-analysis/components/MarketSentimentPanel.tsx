@@ -9,7 +9,6 @@ import {
 } from '../services/sentimentService';
 import { SentimentFanChart } from './SentimentFanChart';
 import { BreadthFactorBars } from './BreadthFactorBars';
-import { VolumeForceChart } from './VolumeForceChart';
 import { BreadthDistributionBar } from './BreadthDistributionBar';
 import { PredictionReview } from './PredictionReview';
 import { FactorHeatmap } from './FactorHeatmap';
@@ -101,6 +100,7 @@ export const MarketSentimentPanel: React.FC = () => {
   const [indexKey, setIndexKey] = useState<string>('000300.SH');
   const [asOf, setAsOfState] = useState<string | undefined>(() => readAsOfFromUrl());
   const [glossaryOpen, setGlossaryOpen] = useState(false);
+  const [mainForceGlossaryOpen, setMainForceGlossaryOpen] = useState(false);
   const [fanSolo, setFanSolo] = useState(false);
   const [fanCompare, setFanCompare] = useState(false);
   const setAsOf = useCallback((value?: string) => {
@@ -308,9 +308,6 @@ export const MarketSentimentPanel: React.FC = () => {
         })}
       </div>
 
-      {/* 成交量 × 主力加权系数曲线（放在顶部，避免用户在长面板里找不到） */}
-      {data.volume && <VolumeForceChart volume={data.volume} />}
-
       {/* 顶部：分数 + 扇形 */}
       <div className="grid grid-cols-1 xl:grid-cols-[300px_1fr] gap-3 items-stretch">
         {/* 左栏：压力分 */}
@@ -318,7 +315,7 @@ export const MarketSentimentPanel: React.FC = () => {
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
               <Gauge className="w-3.5 h-3.5 text-violet-600" />
-              广度压力分 · {universe?.label ?? selected.name}
+              广度压力分 · {selected.name}
             </h3>
             <button
               onClick={() => void load(asOf)}
@@ -410,8 +407,16 @@ export const MarketSentimentPanel: React.FC = () => {
             <div className="border-t border-slate-100 pt-2">
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[10px] font-extrabold text-slate-600">主力视角 · 冷热</span>
-                <span className="text-[9px] text-slate-400">超大单+大单</span>
+                <button
+                  onClick={() => setMainForceGlossaryOpen(true)}
+                  className="text-[9px] font-bold text-violet-600 hover:underline"
+                >
+                  指标说明 ?
+                </button>
               </div>
+              <p className="text-[9px] text-slate-400 leading-snug mb-0.5">
+                主力=超大单+大单（不是散户）。强度=主力净额/成交额；广度=主力净买入的股票占比；额广度=按成交额加权，更接近主力视角。
+              </p>
               <BreadthFactorBars items={data.main_force.indicators} compact />
               <p className="text-[9px] text-slate-400 mt-1">{data.main_force.disclosure}</p>
             </div>
@@ -488,7 +493,7 @@ export const MarketSentimentPanel: React.FC = () => {
                 return hit ? { date: h.date, stress: hit.stress } : null;
               })
               .filter((v): v is { date: string; stress: number } => v !== null)}
-            volume={fanSolo ? undefined : data.volume}
+            volume={fanSolo ? undefined : selected.volume ?? data.volume}
             compare={fanSolo || !fanCompare ? [] : INDEX_ORDER.filter((k) => k !== indexKey && data.indices[k]).map((k) => ({
               name: data.indices[k].name,
               color: INDEX_COLORS[k] ?? '#94a3b8',
@@ -581,6 +586,16 @@ export const MarketSentimentPanel: React.FC = () => {
         open={glossaryOpen}
         onClose={() => setGlossaryOpen(false)}
         items={indicators}
+      />
+
+      <BreadthGlossaryModal
+        open={mainForceGlossaryOpen}
+        onClose={() => setMainForceGlossaryOpen(false)}
+        items={data.main_force?.indicators ?? []}
+        keys={['main_net_ratio', 'main_breadth', 'main_breadth_amt', 'vw_breadth']}
+        title="主力视角 · 这些数字是什么意思"
+        intro="主力=超大单+大单（不是中单/小单的散户资金）。这里看的是主力净额强度、主力覆盖广度，以及按成交额加权的资金方向。"
+        footer="主力视角只描述当前资金结构，不构成方向预测；冷热条方向已统一，越靠右越冷。L2 资金流自 2022 年起可用。"
       />
 
       {/* 免责 */}

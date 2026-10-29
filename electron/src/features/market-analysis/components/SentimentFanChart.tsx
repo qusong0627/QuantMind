@@ -10,6 +10,8 @@ export interface ComparePath {
 
 /** 与主图日期完全对齐的成交量序列（按交易日匹配，不做重采样）。 */
 export interface FanVolumeSeries {
+  /** 该成交额对应的指数/宇宙，如「沪市」「沪深300」 */
+  scope?: string;
   dates: string[];
   turnover_yi: (number | null)[];
   vw_breadth: (number | null)[];
@@ -75,7 +77,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   fan,
   last,
   horizon,
-  height = 340,
+  height = 430,
   actual = [],
   forwardDates = [],
   compare = [],
@@ -100,8 +102,8 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   const plotW = W - PAD.left - PAD.right;
   const hasVolume = !!volume && volume.dates.length > 0;
   const hasStress = stress.length > 0;
-  const volumeH = hasVolume ? 44 : 0;
-  const stressH = hasStress ? 20 : 0;
+  const volumeH = hasVolume ? 54 : 0;
+  const stressH = hasStress ? 24 : 0;
   const gap = 8;
   const priceH =
     height - PAD.top - PAD.bottom - volumeH - stressH - (hasVolume ? gap : 0) - (hasStress ? gap : 0);
@@ -158,7 +160,8 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
     const finite = candidates.filter((v) => Number.isFinite(v));
     const rawMin = finite.length ? Math.min(...finite) : last * 0.97;
     const rawMax = finite.length ? Math.max(...finite) : last * 1.03;
-    const pad = (rawMax - rawMin) * 0.1 || rawMax * 0.02 || 1;
+    // 纵向 padding 收窄，放大主图波动幅度；p10/p90 仍在视窗内
+    const pad = (rawMax - rawMin) * 0.05 || rawMax * 0.015 || 1;
     const min = rawMin - pad;
     const max = rawMax + pad;
     const y = (price: number): number =>
@@ -219,10 +222,18 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
         title: `${history[v.i].date} · 成交额 ${v.turnover == null ? '—' : fmtTurnover(v.turnover)} · 成交额加权系数 ${v.vw == null ? '—' : (v.vw > 0 ? '+' : '') + v.vw.toFixed(3)}`,
       };
     });
+    const vwPath = visibleVol
+      .filter((v) => v.vw != null && Number.isFinite(v.vw))
+      .map((v, idx) => {
+        const val = Math.max(-1, Math.min(1, v.vw as number));
+        const yy = volumeTop + 2 + ((1 - val) / 2) * Math.max(1, volumeH - 4);
+        return `${idx === 0 ? 'M' : 'L'}${x(v.i).toFixed(2)},${yy.toFixed(2)}`;
+      })
+      .join(' ');
 
     return {
       x, y, stressY, histPath, medianPath, gridVals, actualPath, actualEnd, comparePaths,
-      stressPath, fanPrices, volBars, maxTurn,
+      stressPath, fanPrices, volBars, maxTurn, vwPath,
       upperOuter: band((i) => fanPrices[i].p50, (i) => fanPrices[i].p90),
       lowerOuter: band((i) => fanPrices[i].p10, (i) => fanPrices[i].p50),
       upperInner: band((i) => fanPrices[i].p50, (i) => fanPrices[i].p75),
@@ -367,7 +378,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
 
         <g clipPath="url(#sentiment-plot-clip)">
           <path d={`${geom.histPath} L${geom.anchorX.toFixed(2)},${PAD.top + priceH} L${PAD.left},${PAD.top + priceH} Z`} fill="url(#sentiment-hist-fill)" stroke="none" />
-          <path d={geom.histPath} fill="none" stroke={HISTORY} strokeWidth={1.7} strokeLinejoin="round" />
+          <path d={geom.histPath} fill="none" stroke={HISTORY} strokeWidth={1.9} strokeLinejoin="round" />
           <path d={geom.upperOuter} fill={UP} fillOpacity={0.07} />
           <path d={geom.lowerOuter} fill={DOWN} fillOpacity={0.07} />
           <path d={geom.upperInner} fill={UP} fillOpacity={0.16} />
@@ -425,8 +436,12 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
                 <title>{b.title}</title>
               </rect>
             ))}
-            <text x={PAD.left - 6} y={volumeTop + 10} textAnchor="end" fontSize={8} fill="#94a3b8" fontWeight={700}>成交额</text>
-            <text x={PAD.left - 6} y={volumeTop + 20} textAnchor="end" fontSize={7} fill="#cbd5e1">{fmtTurnover(geom.maxTurn)}</text>
+            <path d={geom.vwPath} fill="none" stroke="#f59e0b" strokeWidth={1.4} strokeLinejoin="round" opacity={0.95} />
+            <text x={PAD.left + 3} y={volumeTop + 10} textAnchor="start" fontSize={8} fill="#64748b" fontWeight={700}
+                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>{volume.scope ? `成交额·${volume.scope}` : '成交额'}</text>
+            <text x={PAD.left + 3} y={volumeTop + 21} textAnchor="start" fontSize={7} fill="#94a3b8"
+                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>峰值 {fmtTurnover(geom.maxTurn)}</text>
+            <text x={W - PAD.right + 4} y={volumeTop + 10} fontSize={7} fill="#f59e0b" fontWeight={700}>系数</text>
           </g>
         )}
 
@@ -481,7 +496,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
         <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-2 rounded-sm" style={{ background: `${UP}29` }} />上涨空间</span>
         <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-2 rounded-sm" style={{ background: `${DOWN}29` }} />下跌空间</span>
         {hasStress && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5" style={{ background: 'linear-gradient(90deg,#ef4444,#94a3b8,#10b981)' }} />压力分（下条）</span>}
-        {hasVolume && <span className="flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-sm bg-red-500/70" />成交额（偏涨）<span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 ml-1" />偏跌</span>}
+        {hasVolume && <span className="flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-sm bg-red-500/70" />成交额（偏涨）<span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 ml-1" />偏跌<span className="inline-block w-3 h-0.5 bg-amber-500 ml-1" />加权系数</span>}
         {actual.length > 0 && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5 bg-slate-900" />之后实际</span>}
         {compare.map((c) => <span key={c.name} className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5" style={{ background: c.color }} />{c.name}</span>)}
         <span className="ml-auto">{upWider ? '向上空间更宽' : '向下空间更宽'}</span>

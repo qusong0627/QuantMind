@@ -156,6 +156,16 @@ export interface MainForceBlock {
   disclosure?: string;
 }
 
+
+/** 单指数/宇宙成交额序列（与扇形历史日期逐日对齐）。 */
+export interface IndexVolume {
+  scope?: string;
+  dates: string[];
+  turnover_yi: (number | null)[];
+  vw_breadth: (number | null)[];
+  vw_breadth_pct: (number | null)[];
+}
+
 export interface IndexSentiment {
   name: string;
   last: number;
@@ -179,6 +189,8 @@ export interface IndexSentiment {
   dispersion?: { value: number | null; pct: number | null };
   universe?: UniverseMeta;
   distribution?: BreadthDistribution;
+  /** 该指数自己宇宙的成交额/加权系数（旧快照没有此字段） */
+  volume?: IndexVolume;
 }
 
 export interface StressHistoryPoint {

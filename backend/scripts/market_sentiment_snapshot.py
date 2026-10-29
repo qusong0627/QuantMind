@@ -420,6 +420,29 @@ def distribution_block(frame: pd.DataFrame) -> dict:
     return {k: int(row[k]) if np.isfinite(row[k]) else 0 for k in DIST_KEYS}
 
 
+def index_volume_block(frame: pd.DataFrame, scope: str, days: int = 120) -> dict:
+    """单指数/宇宙的成交额序列：与扇形主图日期逐日对齐。"""
+    tail = frame.tail(days)
+    amt = tail["amt_total"].astype(float)
+    up = tail["amt_up"].astype(float)
+    down = tail["amt_down"].astype(float)
+    vw = (up - down) / amt.where(amt > 0)
+    vw_pct = up / amt.where(amt > 0)
+    return {
+        "scope": scope,
+        "dates": [d.strftime("%Y-%m-%d") for d in tail.index],
+        "turnover_yi": [
+            round(float(v) / 1e4, 1) if np.isfinite(float(v)) else None for v in amt
+        ],
+        "vw_breadth": [
+            round(float(v), 4) if np.isfinite(float(v)) else None for v in vw
+        ],
+        "vw_breadth_pct": [
+            round(float(v), 4) if np.isfinite(float(v)) else None for v in vw_pct
+        ],
+    }
+
+
 def _index_block(
     symbol: str,
     name: str,
@@ -487,6 +510,7 @@ def _index_block(
         },
         "universe": _universe_meta(symbol, frame),
         "distribution": distribution_block(frame),
+        "volume": index_volume_block(frame, name),
     }
 
 
