@@ -72,6 +72,9 @@ class QmtExecPoller:
         # 去重缓存：委托键 → (状态, 累计成交量)；成交 id 集合
         self._seen_orders: dict[str, tuple[str, float]] = {}
         self._seen_trades: set[str] = set()
+        # 无本地订单的委托/成交（探针单、手工单）每轮都匹配失败；
+        # 同一 key 每天只告警一次，日切清空（委托号每日重置）。
+        self._warned_unmatched: set[str] = set()
         self._day = ""
         self._settings_at = 0.0
         self.stats: dict[str, int] = {
@@ -196,6 +199,7 @@ class QmtExecPoller:
             self._day = today
             self._seen_orders.clear()
             self._seen_trades.clear()
+            self._warned_unmatched.clear()
 
     # -- 委托 -----------------------------------------------------------
     async def _sync_orders(
@@ -214,12 +218,15 @@ class QmtExecPoller:
             order = await self._resolve(db, item)
             if order is None:
                 self.stats["unmatched"] += 1
-                logger.warning(
-                    "[QmtExecPoller] 委托无法匹配订单 key=%s symbol=%s remark=%s",
-                    key,
-                    item.get("symbol"),
-                    item.get("order_remark"),
-                )
+                warn_key = f"o:{key}"
+                if warn_key not in self._warned_unmatched:
+                    self._warned_unmatched.add(warn_key)
+                    logger.warning(
+                        "[QmtExecPoller] 委托无法匹配订单 key=%s symbol=%s remark=%s",
+                        key,
+                        item.get("symbol"),
+                        item.get("order_remark"),
+                    )
                 continue
 
             prev_status = order.status
@@ -320,12 +327,15 @@ class QmtExecPoller:
             order = await self._resolve(db, item)
             if order is None:
                 self.stats["unmatched"] += 1
-                logger.warning(
-                    "[QmtExecPoller] 成交无法匹配订单 trade_id=%s symbol=%s remark=%s",
-                    trade_id,
-                    item.get("symbol"),
-                    item.get("order_remark"),
-                )
+                warn_key = f"t:{trade_id}"
+                if warn_key not in self._warned_unmatched:
+                    self._warned_unmatched.add(warn_key)
+                    logger.warning(
+                        "[QmtExecPoller] 成交无法匹配订单 trade_id=%s symbol=%s remark=%s",
+                        trade_id,
+                        item.get("symbol"),
+                        item.get("order_remark"),
+                    )
                 continue
             prev_status = order.status
             price = float(item.get("traded_price") or 0)
@@ -435,7 +445,9 @@ class QmtExecPoller:
 
         new_value = float(volume) * price if price else old_value
         order.filled_quantity = (
-            float(getattr(order, "filled_quantity", 0.0) or 0.0) + float(volume) - old_qty
+            float(getattr(order, "filled_quantity", 0.0) or 0.0)
+            + float(volume)
+            - old_qty
         )
         order.filled_value = (
             float(getattr(order, "filled_value", 0.0) or 0.0) + new_value - old_value

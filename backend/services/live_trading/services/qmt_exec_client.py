@@ -74,12 +74,22 @@ QMT_STATUS_MAP: dict[int, str] = {
 _ERROR_CODE_HINTS: tuple[tuple[str, str], ...] = (
     ("order_disabled", "ORDER_DISABLED"),
     ("rpc_allow_order_methods", "ORDER_DISABLED"),
+    # 桥侧价格偏离风控（相对昨收 ±5%）：2026-10-29 实测
+    # ``risk: price deviation 5.13% > 5.00%``，单列错误码便于调用方识别
+    ("price deviation", "PRICE_DEVIATION"),
+    ("pipe_busy", "BRIDGE_BUSY"),
+    ("pipe busy", "BRIDGE_BUSY"),
     ("timeout", "TIMEOUT"),
     ("超时", "TIMEOUT"),
     ("not connected", "NOT_CONNECTED"),
     ("未连接", "NOT_CONNECTED"),
     ("connection", "NOT_CONNECTED"),
 )
+
+#: 只读 RPC 遇这些错误码重试一次；**下单/撤单永不重试**
+#: （2026-10-29 实测：pipe 桥单线程，poller + QmtSync 并发时只读查询偶发 TransportTimeout）
+_READ_RETRY_CODES = frozenset({"TIMEOUT", "NOT_CONNECTED", "BRIDGE_BUSY"})
+_READ_RETRY_DELAY_SECONDS = 0.2
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -805,28 +815,48 @@ class QmtExecClient:
         func: Callable[..., Any],
         *args: Any,
         timeout: float | None = None,
+        retryable: bool = False,
         **kwargs: Any,
     ) -> Any:
-        """同步 RPC → 线程 + 超时。超时**不可重试**（线程仍在跑）。"""
+        """同步 RPC → 线程 + 超时。
+
+        超时对**下单/撤单绝不重试**（线程仍在跑，委托可能已进柜台，重试=重复下单）；
+        只读查询（``retryable=True``）允许重试一次——2026-10-29 实测 pipe 桥在
+        poller + QmtSync 并发下会偶发 ``TransportTimeout``，重放只读查询是安全的。
+        """
         limit = float(timeout or self._effective()["timeout"])
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(func, *args, **kwargs),
-                timeout=limit,
-            )
-        except asyncio.TimeoutError as exc:
-            raise QmtExecError(
-                f"QMT RPC 超时（{limit}s）——委托可能已提交，"
-                "必须先用 query_orders 确认，禁止盲目重试",
-                code="TIMEOUT",
-            ) from exc
-        except QmtExecError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise QmtExecError(
-                redact_secrets(str(exc), self._secret_hint()),
-                code=_classify_error(exc),
-            ) from exc
+        attempts = 2 if retryable else 1
+        for attempt in range(attempts):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(func, *args, **kwargs),
+                    timeout=limit,
+                )
+            except asyncio.TimeoutError as exc:
+                if retryable and attempt + 1 < attempts:
+                    await asyncio.sleep(_READ_RETRY_DELAY_SECONDS)
+                    continue
+                detail = (
+                    "只读查询超时（已重试一次）"
+                    if retryable
+                    else "委托可能已提交，必须先用 query_orders 确认，禁止盲目重试"
+                )
+                raise QmtExecError(
+                    f"QMT RPC 超时（{limit}s）——{detail}",
+                    code="TIMEOUT",
+                ) from exc
+            except QmtExecError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                code = _classify_error(exc)
+                if retryable and code in _READ_RETRY_CODES and attempt + 1 < attempts:
+                    await asyncio.sleep(_READ_RETRY_DELAY_SECONDS)
+                    continue
+                raise QmtExecError(
+                    redact_secrets(str(exc), self._secret_hint()),
+                    code=code,
+                ) from exc
+        raise QmtExecError("QMT RPC 未执行", code="RPC_ERROR")  # pragma: no cover
 
     def _secret_hint(self) -> str:
         """当前配置里的 redis 密码（脱敏用；读取失败返回空串，绝不反过来抛错）。"""
@@ -888,7 +918,9 @@ class QmtExecClient:
     async def ping(self) -> dict[str, Any]:
         cfg = self._require_enabled()
         return await self._call(
-            self._get_backend(cfg).ping, timeout=min(float(cfg["timeout"]), 5.0)
+            self._get_backend(cfg).ping,
+            timeout=min(float(cfg["timeout"]), 5.0),
+            retryable=True,
         )
 
     async def bridge_status(self) -> dict[str, Any]:
@@ -904,26 +936,30 @@ class QmtExecClient:
         if not cfg["account_id"]:
             raise QmtExecError("QMT_EXEC_ACCOUNT_ID 未配置", code="NOT_CONFIGURED")
         return await self._call(
-            self._get_backend(cfg).ping, timeout=min(float(cfg["timeout"]), 5.0)
+            self._get_backend(cfg).ping,
+            timeout=min(float(cfg["timeout"]), 5.0),
+            retryable=True,
         )
 
     async def get_asset(self) -> dict[str, Any]:
         cfg = self._require_enabled()
-        return await self._call(self._get_backend(cfg).get_asset)
+        return await self._call(self._get_backend(cfg).get_asset, retryable=True)
 
     async def get_positions(self) -> list[dict[str, Any]]:
         cfg = self._require_enabled()
-        return await self._call(self._get_backend(cfg).get_positions)
+        return await self._call(self._get_backend(cfg).get_positions, retryable=True)
 
     async def query_orders(self, cancelable_only: bool = False) -> list[dict[str, Any]]:
         cfg = self._require_enabled()
         return await self._call(
-            self._get_backend(cfg).query_orders, cancelable_only=cancelable_only
+            self._get_backend(cfg).query_orders,
+            cancelable_only=cancelable_only,
+            retryable=True,
         )
 
     async def query_trades(self) -> list[dict[str, Any]]:
         cfg = self._require_enabled()
-        return await self._call(self._get_backend(cfg).query_trades)
+        return await self._call(self._get_backend(cfg).query_trades, retryable=True)
 
     async def get_full_tick(self, codes: list[str]) -> dict[str, Any]:
         """批量实时盘口（止损执行器/守护轮询用）。空列表直接返回 ``{}`` 不打桥。"""
@@ -932,7 +968,9 @@ class QmtExecClient:
         if not qmt_codes:
             return {}
         cfg = self._require_enabled()
-        return await self._call(self._get_backend(cfg).get_full_tick, codes=qmt_codes)
+        return await self._call(
+            self._get_backend(cfg).get_full_tick, codes=qmt_codes, retryable=True
+        )
 
     async def get_instrument_detail(self, code: str) -> dict[str, Any]:
         """合约详情（涨跌停价保护位来源；参数名为 ``code``，用 ``stock_code`` 桥会报错）。"""
@@ -941,7 +979,7 @@ class QmtExecClient:
             raise QmtExecError(f"非法代码：{code}", code="INVALID_SYMBOL")
         cfg = self._require_enabled()
         return await self._call(
-            self._get_backend(cfg).get_instrument_detail, code=qmt_code
+            self._get_backend(cfg).get_instrument_detail, code=qmt_code, retryable=True
         )
 
     # -- 交易接口 -------------------------------------------------------

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -81,7 +82,9 @@ class FakeSession:
     ) -> None:
         self.commits = 0
         self.rows = list(rows or [])  # 合成成交行（LIKE 查询）
-        self.real_rows = list(real_rows or [])  # 真实成交行（(租户, 用户, 成交号) 探测）
+        self.real_rows = list(
+            real_rows or []
+        )  # 真实成交行（(租户, 用户, 成交号) 探测）
         self.deleted: list[Any] = []
         self.executed = 0
 
@@ -91,7 +94,9 @@ class FakeSession:
     async def __aexit__(self, *exc: Any) -> bool:
         return False
 
-    async def execute(self, statement: Any = None, *_args: Any, **_kwargs: Any) -> FakeResult:
+    async def execute(
+        self, statement: Any = None, *_args: Any, **_kwargs: Any
+    ) -> FakeResult:
         self.executed += 1
         sql = str(statement) if statement is not None else ""
         if "LIKE" in sql:
@@ -315,7 +320,9 @@ class TestPollOnce:
         poller = _make_poller(FakeClient(orders=[order_item], trades=[trade_item]))
         with (
             patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=order)),
-            patch.object(mod, "apply_execution_report", AsyncMock(side_effect=fake_apply)),
+            patch.object(
+                mod, "apply_execution_report", AsyncMock(side_effect=fake_apply)
+            ),
             # 库内暂无成交行 → 旧实现会在委托阶段补一条合成成交，造成双计
             patch.object(QmtExecPoller, "_has_trade", AsyncMock(return_value=False)),
         ):
@@ -342,7 +349,9 @@ class TestPollOnce:
             patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=order)),
             patch.object(mod, "apply_execution_report", apply),
         ):
-            asyncio.run(poller._sync_trades(session, [trade_item], strategy_name="quantmind"))
+            asyncio.run(
+                poller._sync_trades(session, [trade_item], strategy_name="quantmind")
+            )
         assert row.exchange_trade_id == "T1"  # 升级为真实成交号
         assert row.quantity == 100
         assert row.price == 10.5
@@ -368,10 +377,14 @@ class TestPollOnce:
         with (
             patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=order)),
             patch.object(
-                mod, "apply_execution_report", AsyncMock(return_value=OrderStatus.PARTIALLY_FILLED)
+                mod,
+                "apply_execution_report",
+                AsyncMock(return_value=OrderStatus.PARTIALLY_FILLED),
             ),
         ):
-            asyncio.run(poller._sync_trades(session, [trade_item], strategy_name="quantmind"))
+            asyncio.run(
+                poller._sync_trades(session, [trade_item], strategy_name="quantmind")
+            )
         assert order.filled_quantity == 40.0
 
     def test_coexisting_real_row_deletes_synth_row_and_reverts_totals(self) -> None:
@@ -382,7 +395,9 @@ class TestPollOnce:
         累计里合成行的份额减掉：它是同一笔成交的替身，真身已在。
         """
         row = _fake_trade_row(qty=100.0, price=10.0)
-        session = FakeSession(rows=[row], real_rows=[SimpleNamespace(exchange_trade_id="T1")])
+        session = FakeSession(
+            rows=[row], real_rows=[SimpleNamespace(exchange_trade_id="T1")]
+        )
         order = _fake_order("FILLED", 200.0)  # 合成 100 + 真实 100 都记在订单上
         order.filled_value = 2000.0
         order.average_price = 10.0
@@ -410,7 +425,9 @@ class TestPollOnce:
         这里把它打成桩，断言它**仍然被调用**（调用方不因删了合成行而短路）。
         """
         row = _fake_trade_row(qty=100.0, price=10.0)
-        session = FakeSession(rows=[row], real_rows=[SimpleNamespace(exchange_trade_id="T1")])
+        session = FakeSession(
+            rows=[row], real_rows=[SimpleNamespace(exchange_trade_id="T1")]
+        )
         order = _fake_order("FILLED", 200.0)
         order.filled_value = 2000.0
         trade_item = {
@@ -426,7 +443,9 @@ class TestPollOnce:
             patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=order)),
             patch.object(mod, "apply_execution_report", apply),
         ):
-            asyncio.run(poller._sync_trades(session, [trade_item], strategy_name="quantmind"))
+            asyncio.run(
+                poller._sync_trades(session, [trade_item], strategy_name="quantmind")
+            )
         assert session.deleted == [row]
         assert order.filled_quantity == 100.0
         assert apply.await_args.kwargs["exchange_trade_id"] == "T1"
@@ -460,3 +479,70 @@ class TestPollOnce:
                 raise QmtExecError("桥未连接", code="NOT_CONNECTED")
 
         assert _run_poll(_make_poller(Broken())) == {"error": 1}
+
+
+def _poll_on(poller: QmtExecPoller, day: str) -> dict[str, int]:
+    session = FakeSession()
+    with (
+        patch.object(QmtExecPoller, "_session", staticmethod(lambda: session)),
+        patch.object(mod, "trade_date_str", return_value=day),
+        patch.object(mod, "publish_order_event"),
+    ):
+        return asyncio.run(poller.poll_once())
+
+
+class TestUnmatchedWarningDedup:
+    """探针单/手工单没有本地 orders 行 → 每轮都匹配失败。
+
+    原实现每 2s 刷一条 WARN（2026-10-12 实测会刷到日切），纯噪声。改为
+    「同一 key 每天只报一次」，日切重置（QMT 委托号每日重置，跨日必须重新可见）。
+    """
+
+    ORDER = {
+        "order_sysid": "777",
+        "order_remark": "qmdeadbeef",
+        "status": "SUBMITTED",
+        "traded_volume": 0,
+    }
+    TRADE = {
+        "trade_id": "T9",
+        "order_sysid": "777",
+        "order_remark": "qmdeadbeef",
+        "status": "FILLED",
+        "traded_volume": 100,
+        "traded_price": 10.0,
+    }
+
+    def _messages(self, caplog: Any) -> list[str]:
+        return [r.message for r in caplog.records if "无法匹配订单" in r.message]
+
+    def test_each_key_warns_once_per_day(self, caplog: Any) -> None:
+        poller = _make_poller(FakeClient(orders=[self.ORDER], trades=[self.TRADE]))
+        with patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=None)):
+            with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+                _poll_on(poller, DAY)
+                _poll_on(poller, DAY)
+                _poll_on(poller, DAY)
+        messages = self._messages(caplog)
+        assert any("委托无法匹配订单 key=777" in m for m in messages)
+        assert any("成交无法匹配订单 trade_id=T9" in m for m in messages)
+        assert len(messages) == 2  # 两个 key 各一条，三轮轮询不再重复
+
+    def test_day_rollover_allows_warning_again(self, caplog: Any) -> None:
+        poller = _make_poller(FakeClient(orders=[self.ORDER], trades=[self.TRADE]))
+        with patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=None)):
+            with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+                _poll_on(poller, DAY)
+                first = len(self._messages(caplog))
+                _poll_on(poller, "20260910")
+                second = len(self._messages(caplog))
+        assert first == 2
+        assert second == 4  # 新交易日重新可见
+
+    def test_rollover_clears_warned_keys(self) -> None:
+        poller = _make_poller(FakeClient())
+        poller._warned_unmatched.update({"o:777", "t:T9"})
+        poller._day = DAY
+        with patch.object(mod, "trade_date_str", return_value="20260910"):
+            poller._rollover_if_new_day()
+        assert poller._warned_unmatched == set()
