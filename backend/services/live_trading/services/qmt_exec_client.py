@@ -8,8 +8,10 @@ Python 里常驻 `xtquant-big-convert` 的 RPC 服务端（入口 ``BIGQMT_REDIS
 --------
 * RPC 调用是**同步阻塞**的（redis brpop 等响应），对外只暴露 async 方法，
   内部一律 :func:`asyncio.to_thread` 包装，避免阻塞事件循环。
-  注意：``wait_for`` 超时只会放弃等待，线程仍会跑完 —— 因此超时**绝不重试**，
-  必须先用 ``query_orders`` 确认委托是否已进系统。
+  注意：``wait_for`` 超时只会放弃等待，线程仍会跑完 —— 因此**外层超时绝不重试**
+  （重试会在管道上再排一个请求，且孤儿线程的迟到回包可能被误认），
+  必须先用 ``query_orders`` 确认委托是否已进系统。桥**主动抛回**的传输超时/管道忙
+  （RPC 已带错误返回、线程已结束）对**只读查询**允许重试一次；下单/撤单任何超时都不重试。
 * 下单/撤单受服务端 ``rpc_allow_order_methods`` 开关保护，未开启时抛
   :class:`QmtExecError` (``code="ORDER_DISABLED"``)。
 * 委托备注（``order_remark``）承载 client_order_id 的反查键。QMT 备注长度有限，
@@ -820,9 +822,11 @@ class QmtExecClient:
     ) -> Any:
         """同步 RPC → 线程 + 超时。
 
-        超时对**下单/撤单绝不重试**（线程仍在跑，委托可能已进柜台，重试=重复下单）；
-        只读查询（``retryable=True``）允许重试一次——2026-10-29 实测 pipe 桥在
-        poller + QmtSync 并发下会偶发 ``TransportTimeout``，重放只读查询是安全的。
+        ``asyncio.wait_for`` 超时会放弃等待但**线程仍在跑**，任何调用都不重试
+        （重试会在管道上再排一个请求，孤儿线程的迟到回包还可能被误认）。
+        桥主动抛回的传输超时/管道忙（线程已结束）对**只读查询**
+        （``retryable=True``）允许重试一次——2026-10-29 实测 pipe 桥在
+        poller + QmtSync 并发下会偶发 ``TransportTimeout``；下单/撤单永不重试。
         """
         limit = float(timeout or self._effective()["timeout"])
         attempts = 2 if retryable else 1
@@ -833,11 +837,8 @@ class QmtExecClient:
                     timeout=limit,
                 )
             except asyncio.TimeoutError as exc:
-                if retryable and attempt + 1 < attempts:
-                    await asyncio.sleep(_READ_RETRY_DELAY_SECONDS)
-                    continue
                 detail = (
-                    "只读查询超时（已重试一次）"
+                    "只读查询超时（不重试：线程仍在跑）"
                     if retryable
                     else "委托可能已提交，必须先用 query_orders 确认，禁止盲目重试"
                 )

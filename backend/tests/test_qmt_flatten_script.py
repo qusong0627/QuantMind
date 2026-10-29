@@ -85,6 +85,26 @@ class TestDispatcherBrokerGuard:
         assert code == 1
         submit.assert_not_awaited()
 
+    def test_dispatcher_live_refuses_when_broker_read_fails(self, capsys: Any) -> None:
+        """读不到选定券商时 live 必须 fail-closed（未知 ≠ 放行）。"""
+        submit = AsyncMock()
+        p = _patches(FakeClient(), submit)
+        with (
+            p[0],
+            p[1],
+            p[2],
+            p[3],
+            p[4],
+            patch(
+                "backend.shared.real_positions.active_broker_type",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            code = _run(_args("--symbols", "000002.SZ", "--live"))
+        assert code == 1
+        submit.assert_not_awaited()
+        assert "读取当前实盘券商失败" in capsys.readouterr().out
+
     def test_dispatcher_live_proceeds_when_selected_broker_is_qmt_exec(self) -> None:
         submit = AsyncMock(return_value={"status": "SUBMITTED"})
         client = FakeClient()
@@ -198,3 +218,87 @@ class TestDirectVerify:
         assert "5048" in out
         assert "委托已受理，勿重复提交" in out
         assert "异常" not in out.split("5048", 1)[1]
+
+    def test_non_terminal_status_is_not_labelled_final(self, capsys: Any) -> None:
+        """核对窗口到期仍是 SUBMITTED 时，不能说成「终态」。"""
+        client = FakeClient(
+            orders=[{"order_id": "5048", "status": "SUBMITTED", "traded_volume": 0.0}]
+        )
+        p = _patches(client, AsyncMock())
+        with p[0], p[1], p[2], p[3], p[4]:
+            code = _run(
+                _args(
+                    "--symbols",
+                    "000002.SZ",
+                    "--live",
+                    "--via",
+                    "direct",
+                    "--verify-sec",
+                    "0.1",
+                    "--sleep",
+                    "0",
+                )
+            )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "核对超时（未到终态） SUBMITTED" in out
+        assert "终态 SUBMITTED" not in out
+
+    def test_not_found_prints_unknown(self, capsys: Any) -> None:
+        client = FakeClient()
+        p = _patches(client, AsyncMock())
+        with p[0], p[1], p[2], p[3], p[4]:
+            code = _run(
+                _args(
+                    "--symbols",
+                    "000002.SZ",
+                    "--live",
+                    "--via",
+                    "direct",
+                    "--verify-sec",
+                    "0.1",
+                    "--sleep",
+                    "0",
+                )
+            )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "终态未知：核对窗口内未查到该委托" in out
+
+
+class TestVerifyOrder:
+    def test_matches_by_remark_when_order_id_missing(self) -> None:
+        client = FakeClient(
+            orders=[
+                {
+                    "order_id": "9999",
+                    "order_remark": "qmknown",
+                    "status": "FILLED",
+                    "traded_volume": 100.0,
+                    "traded_price": 3.24,
+                }
+            ]
+        )
+        with patch(
+            "backend.services.live_trading.services.qmt_exec_client.build_remark",
+            return_value="qmknown",
+        ):
+            out = asyncio.run(
+                flat._verify_order(client, order_id="", cid="any", seconds=0.2)
+            )
+        assert out is not None and out["order_id"] == "9999"
+
+    def test_returns_none_when_nothing_matches(self) -> None:
+        out = asyncio.run(
+            flat._verify_order(FakeClient(), order_id="5048", cid="any", seconds=0.2)
+        )
+        assert out is None
+
+    def test_non_terminal_returns_last_state(self) -> None:
+        client = FakeClient(
+            orders=[{"order_id": "5048", "status": "SUBMITTED", "traded_volume": 0.0}]
+        )
+        out = asyncio.run(
+            flat._verify_order(client, order_id="5048", cid="any", seconds=0.2)
+        )
+        assert out is not None and out["status"] == "SUBMITTED"

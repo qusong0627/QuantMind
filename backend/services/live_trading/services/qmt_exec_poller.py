@@ -218,7 +218,9 @@ class QmtExecPoller:
             order = await self._resolve(db, item)
             if order is None:
                 self.stats["unmatched"] += 1
-                warn_key = f"o:{key}"
+                # 备注一并入键：无 sysid/order_id 时 _order_key 会退化成
+                # symbol:side:volume，两笔同形委托不该共用一条告警额度。
+                warn_key = f"o:{key}|{item.get('order_remark') or ''}"
                 if warn_key not in self._warned_unmatched:
                     self._warned_unmatched.add(warn_key)
                     logger.warning(

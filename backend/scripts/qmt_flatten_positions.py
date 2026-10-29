@@ -222,10 +222,10 @@ async def _verify_order(
     last: dict | None = None
     while True:
         for item in await client.query_orders():
-            if (
-                str(item.get("order_id")) == order_id
-                or str(item.get("order_remark")) == remark
-            ):
+            matched = (bool(order_id) and str(item.get("order_id")) == order_id) or (
+                bool(remark) and str(item.get("order_remark")) == remark
+            )
+            if matched:
                 last = item
                 if str(item.get("status")) in {
                     "FILLED",
@@ -369,7 +369,7 @@ async def _run(args: argparse.Namespace) -> int:
                 )
                 # direct 模式不经本地 orders 表、没有 poller 回收：
                 # 「受理」不等于「成交」，必须把终态如实打出来。
-                if order_id and args.verify_sec > 0:
+                if args.verify_sec > 0:
                     try:
                         final = await _verify_order(
                             client, order_id=order_id, cid=cid, seconds=args.verify_sec
@@ -381,8 +381,15 @@ async def _run(args: argparse.Namespace) -> int:
                             print("        终态未知：核对窗口内未查到该委托")
                         else:
                             filled = float(final.get("traded_volume") or 0)
+                            status = str(final.get("status") or "未知")
+                            head = (
+                                "终态"
+                                if status
+                                in {"FILLED", "CANCELLED", "REJECTED", "EXPIRED"}
+                                else "核对超时（未到终态）"
+                            )
                             print(
-                                f"        终态 {final.get('status')} 成交 {filled:.0f}"
+                                f"        {head} {status} 成交 {filled:.0f}"
                                 f"/{row['quantity']:.0f} 股 @ {final.get('traded_price') or '-'}"
                             )
         except Exception as exc:  # noqa: BLE001

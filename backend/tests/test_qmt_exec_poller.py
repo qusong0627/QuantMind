@@ -546,3 +546,25 @@ class TestUnmatchedWarningDedup:
         with patch.object(mod, "trade_date_str", return_value="20260910"):
             poller._rollover_if_new_day()
         assert poller._warned_unmatched == set()
+
+    def test_same_shape_orders_with_different_remarks_warn_separately(
+        self, caplog: Any
+    ) -> None:
+        """无 sysid/order_id 时键会退化成 symbol:side:volume；备注须能区分两笔单。"""
+        base = {
+            "symbol": "SZ000001",
+            "side": "BUY",
+            "order_volume": 100,
+            "status": "SUBMITTED",
+            "traded_volume": 0,
+        }
+        orders = [
+            dict(base, order_remark="qmaaa"),
+            dict(base, order_remark="qmbbb"),
+        ]
+        poller = _make_poller(FakeClient(orders=orders))
+        with patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=None)):
+            with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+                _poll_on(poller, DAY)
+        messages = [m for m in self._messages(caplog) if "委托无法匹配订单" in m]
+        assert len(messages) == 2

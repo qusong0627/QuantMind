@@ -1,8 +1,9 @@
 """``QmtExecClient`` 只读 RPC 重试与桥侧错误码分类单测（fake 后端，无真机）。
 
 背景（2026-10-29 实测）：pipe 桥单线程，``QmtExecPoller``（2s）+ ``QmtSync``（30s）
-并发时只读查询会偶发 ``TransportTimeout: named pipe rpc timeout``。只读查询重试是
-安全的；**下单/撤单绝不重试**（超时后委托可能已在柜台，重试会重复下单）。
+并发时只读查询会偶发 ``TransportTimeout: named pipe rpc timeout``（桥**主动抛回**，
+线程已结束）——只读查询可重试一次；**外层 wait_for 超时（线程仍卡着）不重试**；
+下单/撤单任何超时都不重试（委托可能已在柜台，重试会重复下单）。
 """
 
 from __future__ import annotations
@@ -169,4 +170,30 @@ def test_pipe_busy_does_not_retry_submit() -> None:
             client.submit_order(symbol="600519.SH", side="BUY", quantity=100, price=1.0)
         )
     assert exc.value.code == "BRIDGE_BUSY"
+    assert fake.calls == 1
+
+
+class _SlowBackend(_FlakyBackend):
+    """调用阻塞超过外层超时：模拟线程仍卡在单线程管道上。"""
+
+    def __init__(self, delay: float) -> None:
+        super().__init__(fail_times=0)
+        self.delay = delay
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        import time
+
+        self.calls += 1
+        time.sleep(self.delay)
+        return []
+
+
+def test_outer_wait_for_timeout_is_not_retried() -> None:
+    """线程仍卡在桥上时，外层 wait_for 超时不得重试（会在管道上再排一个请求）。"""
+    fake = _SlowBackend(delay=0.5)
+    client = _client(fake)
+    client.timeout = 0.1
+    with pytest.raises(QmtExecError) as exc:
+        asyncio.run(client.get_positions())
+    assert exc.value.code == "TIMEOUT"
     assert fake.calls == 1
