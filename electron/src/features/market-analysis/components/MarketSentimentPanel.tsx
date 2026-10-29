@@ -511,6 +511,30 @@ export const MarketSentimentPanel: React.FC = () => {
                   {bias.label}
                 </span>
               )}
+              {(() => {
+                const hs = ['5', '10', '20'] as const;
+                const items = hs
+                  .map((h) => ({ h, f: selected.forecast?.[h] }))
+                  .filter((x) => x.f?.prob_up != null);
+                if (!items.length) return null;
+                const f20 = selected.forecast?.['20'];
+                const acc = f20?.accuracy;
+                return (
+                  <span
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-600"
+                    title={acc ? `T+20 模型 OOS：命中 ${(acc.hit! * 100).toFixed(0)}%（n_eff=${acc.n_eff}）· MAE ${acc.mae.toFixed(2)}% · IC ${acc.ic == null ? '—' : acc.ic.toFixed(2)}` : '模型上涨概率（OOS 命中见指数卡片）'}
+                  >
+                    <span className="text-slate-400">模型上涨概率</span>
+                    {items.map((x) => (
+                      <span key={x.h} className="font-mono">
+                        T+{x.h} <b className={x.f!.prob_up! >= 0.55 ? 'text-red-600' : x.f!.prob_up! <= 0.45 ? 'text-emerald-600' : 'text-slate-700'}>
+                          {(x.f!.prob_up! * 100).toFixed(0)}%
+                        </b>
+                      </span>
+                    ))}
+                  </span>
+                );
+              })()}
             </div>
             <div className="flex items-center gap-1.5">
               <div className="flex rounded-full bg-slate-100 p-0.5">

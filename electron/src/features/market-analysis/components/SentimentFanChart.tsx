@@ -623,8 +623,8 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
         <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-2 rounded-sm" style={{ background: `${UP}29` }} />上涨空间</span>
         <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-2 rounded-sm" style={{ background: `${DOWN}29` }} />下跌空间</span>
         {hasStress && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5 bg-violet-600" />广度压力</span>}
-        {mainPressure.length > 0 && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5 bg-blue-600" />主力派发（100−主力买入）</span>}
-        {retailScore.length > 0 && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5 bg-amber-500" />散户追涨（反向）</span>}
+        {mainPressure.length > 0 && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5 bg-blue-600" />主力派发（描述，非概率）</span>}
+        {retailScore.length > 0 && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5 bg-amber-500" />散户追涨（10日均，反向）</span>}
         {hasVolume && <span className="flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-sm bg-red-500/70" />成交额（偏涨）<span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 ml-1" />偏跌<span className="inline-block w-3 h-0.5 bg-amber-500 ml-1" />加权系数</span>}
         {actual.length > 0 && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5 bg-slate-900" />之后实际</span>}
         {compare.map((c) => <span key={c.name} className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5" style={{ background: c.color }} />{c.name}</span>)}

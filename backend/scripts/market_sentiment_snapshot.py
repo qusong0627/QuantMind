@@ -822,9 +822,14 @@ def build_payload(
     if mf is not None and not mf.empty:
         parts = []
         for key in ("main_net_ratio", "main_breadth", "main_breadth_amt"):
-            # 5 日平滑，减少单日翻转；主力分是描述强度，不是方向预测
+            # 5 日平滑 + 滚动 250 日分位：避免扩张分位把 2025-26 的高资金流
+            # 长期钉在 95~100，分数反映“相对近一年”的主力强弱。
             ser = mf[key].astype(float).reindex(base_view.index).rolling(5, min_periods=3).mean()
-            parts.append(expanding_pct_rank(ser, min_periods=120))
+            parts.append(
+                ser.rolling(250, min_periods=120).apply(
+                    lambda v: float((v[-1] > v[:-1]).mean()), raw=True
+                )
+            )
         main_score_series = (sum(parts) / len(parts)) * 100.0
         main_pressure_series = 100.0 - main_score_series
     main_force = {
