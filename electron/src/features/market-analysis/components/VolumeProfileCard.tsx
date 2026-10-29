@@ -1,8 +1,12 @@
 /**
  * 筹码结构 / 成交价格分布（Volume Profile）。
  *
- * 回答：主力/散户成本在哪、成交最密集的价格带、14% 低分位成交价、−14% 回撤位、
- * 日内高量时段（仅当本地分钟数据跟进最新日线时才展示）。
+ * 回答：主力/散户净头寸成本在哪、成交最密集的价格带、14% 低分位成交价、
+ * −14% 回撤位、日内高量时段（仅当本地分钟数据跟进最新日线时才展示）。
+ *
+ * 成本口径：按日净额累计的「净头寸成本」（起点零仓，卖出不改变剩余成本，
+ * 翻仓按当日 VWAP 重开），不是账户真实持仓成本；另列净买日/净卖日/全活动
+ * 加权价作对照，避免只看单边而误读。
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { Layers3, Loader2 } from 'lucide-react';
@@ -17,6 +21,18 @@ const fmt = (v: number | null | undefined, digits = 2): string =>
   v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(digits);
 const pct = (v: number | null | undefined): string =>
   v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`;
+const fmtYi = (v: number | null | undefined): string => {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—';
+  const abs = Math.abs(v);
+  if (abs >= 10000) return `${v > 0 ? '+' : ''}${(v / 10000).toFixed(2)}万亿`;
+  return `${v > 0 ? '+' : ''}${v.toFixed(0)}亿`;
+};
+const netLabel = (v: number | null | undefined): string => {
+  if (v === null || v === undefined || !Number.isFinite(v) || v === 0) return '无净额';
+  return v > 0 ? '净买入' : '净卖出';
+};
+const costKindLabel = (kind: string | null | undefined): string =>
+  kind === 'short' ? '卖出均价' : kind === 'long' ? '持仓成本' : '无净头寸';
 
 export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?: string }> = ({
   symbol,
@@ -78,13 +94,21 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
   }
   if (!data) return null;
 
+  const windowVwap = data.market_vwap ?? data.vwap;
+  const vwapPremium =
+    data.last != null && windowVwap != null && windowVwap > 0
+      ? (data.last / windowVwap - 1) * 100
+      : null;
+  const mainMark = data.main_cost_kind === 'short' ? '主卖' : '主仓';
+  const retailMark = data.retail_cost_kind === 'short' ? '散卖' : '散仓';
+
   const markers = (bin: VolumeProfileBin): string[] => {
     const out: string[] = [];
     if (inRange(bin, data.poc)) out.push('POC');
     if (data.val != null && data.vah != null && bin.high > data.val && bin.low < data.vah) out.push('价值区');
     if (inRange(bin, data.last)) out.push('现');
-    if (inRange(bin, data.main_cost)) out.push('主');
-    if (inRange(bin, data.retail_cost)) out.push('散');
+    if (inRange(bin, data.main_cost)) out.push(mainMark);
+    if (inRange(bin, data.retail_cost)) out.push(retailMark);
     if (inRange(bin, data.p14_price)) out.push('14%');
     return out;
   };
@@ -95,6 +119,9 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
         <div className="flex items-center gap-2 flex-wrap">
           <Layers3 className="w-3.5 h-3.5 text-purple-600" />
           <span className="text-xs font-extrabold text-slate-800">筹码结构 · 主力/散户成本</span>
+          <span className="text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-100 rounded-full px-1.5 py-0.5">
+            净头寸口径
+          </span>
           <span className="text-[10px] text-slate-400">{name ?? data.name} · {data.trade_date} · {data.window}日</span>
         </div>
         <div className="flex rounded-full bg-slate-100 p-0.5">
@@ -114,16 +141,25 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-1.5 text-[10px]">
         <div className="rounded-lg bg-slate-50 border border-slate-100 px-2 py-1">
-          <div className="text-slate-400">现价 / 区间高</div>
-          <div className="font-mono font-extrabold text-slate-800">{fmt(data.last)} / {fmt(data.high)}</div>
+          <div className="text-slate-400">现价 / 窗口VWAP</div>
+          <div className="font-mono font-extrabold text-slate-800 truncate">{fmt(data.last)} / {fmt(windowVwap)}</div>
+          <div className="text-[9px] text-slate-500 font-mono">偏离 {pct(vwapPremium)}</div>
         </div>
         <div className="rounded-lg bg-red-50/50 border border-red-100 px-2 py-1">
-          <div className="text-slate-400">主力成本</div>
-          <div className="font-mono font-extrabold text-red-600">{fmt(data.main_cost)} <span className="text-[9px]">{pct(data.main_premium_pct)}</span></div>
+          <div className="text-slate-400">主力 · {netLabel(data.main_net_yi)}</div>
+          <div className="font-mono font-extrabold text-red-600">{fmtYi(data.main_net_yi)}</div>
+          <div className="text-[9px] text-slate-500 truncate" title={`${costKindLabel(data.main_cost_kind)} ${fmt(data.main_cost)} · 现价 ${pct(data.main_premium_pct)}`}>
+            {costKindLabel(data.main_cost_kind)} <span className="font-mono text-slate-700">{fmt(data.main_cost)}</span>
+            <span className="font-mono"> · 现价 {pct(data.main_premium_pct)}</span>
+          </div>
         </div>
         <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 px-2 py-1">
-          <div className="text-slate-400">散户成本</div>
-          <div className="font-mono font-extrabold text-emerald-700">{fmt(data.retail_cost)} <span className="text-[9px]">{pct(data.retail_premium_pct)}</span></div>
+          <div className="text-slate-400">散户 · {netLabel(data.retail_net_yi)}</div>
+          <div className="font-mono font-extrabold text-emerald-700">{fmtYi(data.retail_net_yi)}</div>
+          <div className="text-[9px] text-slate-500 truncate" title={`${costKindLabel(data.retail_cost_kind)} ${fmt(data.retail_cost)} · 现价 ${pct(data.retail_premium_pct)}`}>
+            {costKindLabel(data.retail_cost_kind)} <span className="font-mono text-slate-700">{fmt(data.retail_cost)}</span>
+            <span className="font-mono"> · 现价 {pct(data.retail_premium_pct)}</span>
+          </div>
         </div>
         <div className="rounded-lg bg-amber-50/50 border border-amber-100 px-2 py-1">
           <div className="text-slate-400">POC / 70% 价值区</div>
@@ -135,6 +171,18 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
         </div>
       </div>
 
+      <div
+        className="grid grid-cols-1 lg:grid-cols-2 gap-x-3 gap-y-0.5 text-[9px] font-mono text-slate-500"
+        title="净买日=当日净流入为正的交易日 VWAP 加权；净卖日=净流出日的 VWAP 加权；全活动=|净额| 加权。三者都不是持仓成本，只作对照。"
+      >
+        <span className="truncate">
+          <b className="text-red-600">主力双边</b> 净买日 {fmt(data.main_buy_cost)} · 净卖日 {fmt(data.main_sell_cost)} · 全活动 {fmt(data.main_activity_cost)}
+        </span>
+        <span className="truncate">
+          <b className="text-emerald-700">散户双边</b> 净买日 {fmt(data.retail_buy_cost)} · 净卖日 {fmt(data.retail_sell_cost)} · 全活动 {fmt(data.retail_activity_cost)}
+        </span>
+      </div>
+
       <div className="flex flex-col gap-0.5">
         {rows.map((bin) => {
           const markersArr = markers(bin);
@@ -143,7 +191,7 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
           return (
             <div
               key={`${bin.low}-${bin.high}`}
-              className={`grid grid-cols-[64px_1fr_38px] items-center gap-1.5 rounded px-1 ${
+              className={`grid grid-cols-[64px_1fr_80px] items-center gap-1.5 rounded px-1 ${
                 isPoc ? 'bg-red-50' : inVa ? 'bg-amber-50/60' : ''
               }`}
               title={`${bin.low}~${bin.high} · 成交额 ${bin.amount_yi} 亿 (${(bin.share * 100).toFixed(1)}%)`}
@@ -166,7 +214,7 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
       <div className="flex items-center gap-3 text-[9px] text-slate-400 flex-wrap">
         <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-red-500" />POC 最大成交价</span>
         <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-amber-400" />70% 价值区</span>
-        <span className="inline-flex items-center gap-1"><span className="font-bold text-slate-600">现/主/散/14%</span>对应价位所在箱</span>
+        <span className="inline-flex items-center gap-1"><b className="text-slate-600">主仓/散卖</b>净头寸均价所在箱（散户净卖出时标“散卖”）</span>
         <span className="ml-auto">{data.cost_scope}</span>
       </div>
 
@@ -188,7 +236,16 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
         </div>
       )}
 
-      <p className="text-[9px] text-slate-400 leading-snug">{data.method}</p>
+      <div className="text-[9px] leading-snug text-amber-800 bg-amber-50/80 border border-amber-100 rounded px-2 py-1">
+        <span className="font-extrabold">成本口径</span>{' '}
+        {data.position_note ??
+          '主力=超大+大单、散户=中+小单，两组净额不互补；净头寸成本=窗口内逐日净额累计（起点零仓，卖出不减剩余成本，翻仓按当日 VWAP 重开），不是账户真实持仓成本；同日双边买卖不可还原。'}
+      </div>
+
+      <details className="text-[9px] text-slate-400">
+        <summary className="cursor-pointer select-none font-bold text-slate-500">成交分布方法与局限</summary>
+        <p className="mt-1 leading-snug">{data.method}</p>
+      </details>
     </div>
   );
 };

@@ -171,6 +171,48 @@ def _weighted_cost(prices: pd.Series, weights: pd.Series) -> float | None:
     return float((prices * w).sum() / total)
 
 
+def _round_opt(value: float | None, digits: int = 3) -> float | None:
+    return None if value is None else round(float(value), digits)
+
+
+def _position_cost(prices: pd.Series, flows: pd.Series) -> dict[str, Any]:
+    """按日净额累计的净头寸平均成本（窗口起点按零仓）。
+
+    净额 > 0 视为买入、< 0 视为卖出；卖出只减少头寸、不改变剩余头寸成本，
+    翻仓时剩余部分按当日 VWAP 重新开仓。这比「只对净流入日加权」更接近
+    持仓成本，也更诚实：卖出日不会被丢掉。
+
+    日频净额仍无法还原同日双边买卖，所以这是**净头寸成本**，
+    不是账户真实持仓成本；窗口起点零仓也是假设。
+    """
+    w = flows.reindex(prices.index).astype(float).fillna(0.0)
+    pos = 0.0
+    avg: float | None = None
+    for price, qty in zip(prices.astype(float), w, strict=True):
+        if not math.isfinite(price) or not math.isfinite(qty) or qty == 0:
+            continue
+        old = pos
+        pos = old + qty
+        if old == 0:
+            avg = price
+        elif (old > 0) == (qty > 0):
+            # 同向加仓：按金额加权
+            avg = (float(avg) * abs(old) + price * abs(qty)) / abs(pos)
+        elif abs(qty) < abs(old):
+            # 减仓：剩余头寸成本不变
+            pass
+        elif abs(qty) == abs(old):
+            avg = None
+        else:
+            # 翻仓：剩余反向头寸按当日 VWAP 开仓
+            avg = price
+    if pos == 0 or avg is None:
+        kind = "flat"
+    else:
+        kind = "long" if pos > 0 else "short"
+    return {"net_yi": float(pos), "avg_cost": avg, "kind": kind}
+
+
 def _profile(
     frame: pd.DataFrame, bins: int = _BINS
 ) -> tuple[list[dict], float | None, float | None, float | None, float | None, list[dict]]:
@@ -337,10 +379,32 @@ def get_volume_profile(
         low = float(prices["low"].min())
         main_cost = None
         retail_cost = None
+        main_buy_cost = main_sell_cost = main_activity_cost = None
+        retail_buy_cost = retail_sell_cost = retail_activity_cost = None
+        main_pos: dict[str, Any] = {"net_yi": None, "avg_cost": None, "kind": "flat"}
+        retail_pos: dict[str, Any] = {"net_yi": None, "avg_cost": None, "kind": "flat"}
+        market_vwap = None
         if not flows.empty:
             f = flows.reindex(prices.index)
-            main_cost = _weighted_cost(prices["vwap"], f.get("main_yi", pd.Series(dtype=float)))
-            retail_cost = _weighted_cost(prices["vwap"], f.get("retail_yi", pd.Series(dtype=float)))
+            main = f.get("main_yi", pd.Series(dtype=float)).astype(float).fillna(0.0)
+            retail = f.get("retail_yi", pd.Series(dtype=float)).astype(float).fillna(0.0)
+            # 净额只能看到“买卖相抵后的净流入/流出”，无法还原同日双边成交；
+            # 因此拆成净买日成本、净卖日成本、全活动（|净额|）加权成本，
+            # 比单点“主力成本”更诚实。
+            main_buy_cost = _weighted_cost(prices["vwap"], main.clip(lower=0))
+            main_sell_cost = _weighted_cost(prices["vwap"], (-main).clip(lower=0))
+            main_activity_cost = _weighted_cost(prices["vwap"], main.abs())
+            retail_buy_cost = _weighted_cost(prices["vwap"], retail.clip(lower=0))
+            retail_sell_cost = _weighted_cost(prices["vwap"], (-retail).clip(lower=0))
+            retail_activity_cost = _weighted_cost(prices["vwap"], retail.abs())
+            main_pos = _position_cost(prices["vwap"], main)
+            retail_pos = _position_cost(prices["vwap"], retail)
+            main_cost = main_pos["avg_cost"]
+            retail_cost = retail_pos["avg_cost"]
+            market_vwap = float(
+                (prices["vwap"] * prices["amount"]).sum()
+                / max(float(prices["amount"].sum()), 1e-9)
+            )
         profile, poc, vah, val, p14, nodes = _profile(prices)
         last_date = prices.index[-1]
         return {
@@ -361,10 +425,25 @@ def get_volume_profile(
                 ),
                 3,
             ),
-            "main_cost": None if main_cost is None else round(main_cost, 3),
-            "retail_cost": None if retail_cost is None else round(retail_cost, 3),
-            "main_premium_pct": None if main_cost is None else round((last / main_cost - 1) * 100, 2),
-            "retail_premium_pct": None if retail_cost is None else round((last / retail_cost - 1) * 100, 2),
+            "main_cost": _round_opt(main_cost),
+            "retail_cost": _round_opt(retail_cost),
+            "main_buy_cost": _round_opt(main_buy_cost),
+            "main_sell_cost": _round_opt(main_sell_cost),
+            "main_activity_cost": _round_opt(main_activity_cost),
+            "retail_buy_cost": _round_opt(retail_buy_cost),
+            "retail_sell_cost": _round_opt(retail_sell_cost),
+            "retail_activity_cost": _round_opt(retail_activity_cost),
+            "market_vwap": _round_opt(market_vwap),
+            "main_net_yi": _round_opt(main_pos.get("net_yi"), 2),
+            "retail_net_yi": _round_opt(retail_pos.get("net_yi"), 2),
+            "main_cost_kind": main_pos.get("kind"),
+            "retail_cost_kind": retail_pos.get("kind"),
+            "main_premium_pct": _round_opt(
+                None if main_cost is None else (last / main_cost - 1) * 100, 2
+            ),
+            "retail_premium_pct": _round_opt(
+                None if retail_cost is None else (last / retail_cost - 1) * 100, 2
+            ),
             "poc": None if poc is None else round(poc, 3),
             "vah": None if vah is None else round(vah, 3),
             "val": None if val is None else round(val, 3),
@@ -375,7 +454,8 @@ def get_volume_profile(
             "high_nodes": nodes,
             "profile": profile,
             "time_windows": _time_windows(sym, last_date),
-            "method": "成交额在每日高低价区间均匀摊到 24 个价格箱；POC=最大成交额箱；价值区=围绕 POC 累计 70%；14%=从最低价向上累计成交额 14% 的分位价。",
+            "method": "成交额在每日高低价区间均匀摊到 24 个价格箱；POC=最大成交额箱；价值区=围绕 POC 累计 70%；14%=从最低价向上累计成交额 14% 的分位价。成本按日净额做「持仓成本」累计（起点零仓，卖出不改变剩余成本，翻仓按当日 VWAP 重开）；另给出净买日/净卖日/全活动（|净额|）加权价作对照。L2 日频只有净额，同日双边买卖不可还原，精确成本需逐笔委托/成交。",
+            "position_note": "主力=超大+大单、散户=中+小单，按主动成交金额分桶，两组净额不互补；净头寸成本=窗口内逐日净额累计（起点零仓，卖出不减剩余成本，翻仓按当日 VWAP 重开），不是账户真实持仓成本；同日双边买卖不可还原。",
         }
 
     return _cached(key, _load)

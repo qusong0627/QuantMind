@@ -956,6 +956,17 @@ export interface VolumeProfileResponse {
   vwap?: number;
   main_cost?: number | null;
   retail_cost?: number | null;
+  main_net_yi?: number | null;
+  retail_net_yi?: number | null;
+  main_cost_kind?: 'long' | 'short' | 'flat' | null;
+  retail_cost_kind?: 'long' | 'short' | 'flat' | null;
+  main_buy_cost?: number | null;
+  main_sell_cost?: number | null;
+  main_activity_cost?: number | null;
+  retail_buy_cost?: number | null;
+  retail_sell_cost?: number | null;
+  retail_activity_cost?: number | null;
+  market_vwap?: number | null;
   main_premium_pct?: number | null;
   retail_premium_pct?: number | null;
   poc?: number | null;
@@ -973,6 +984,7 @@ export interface VolumeProfileResponse {
     top?: { bucket: string; share: number; amount_yi: number }[];
   };
   method?: string;
+  position_note?: string;
 }
 
 export async function getVolumeProfile(
