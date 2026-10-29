@@ -153,3 +153,18 @@ def test_sector_heatmap_layer_exposes_flow_net():
     assert any(abs(it["flow_net"] or 0.0) > 0 for it in items), (
         "板块层主力净额整列 0，疑似 L2 单位判别退化为「已是元」"
     )
+
+
+def test_sector_heatmap_period_speed_fields():
+    """周期口径：5 日净额/日均/加速度/周期涨幅必须齐全，且加速度有非零样本。"""
+    items = quantdb_feed.get_sector_heatmap("shenwan", "5d")
+    assert items
+    for key in ("flow_net", "flow_daily", "flow_accel", "pct_period", "period_days"):
+        assert all(key in it for it in items), f"板块层缺 {key} 字段"
+    assert {it["period_days"] for it in items} == {5}
+    assert any(it["flow_accel"] not in (None, 0) for it in items)
+    assert all(
+        it["flow_daily"] is None
+        or abs(it["flow_daily"] - (it["flow_net"] or 0.0) / 5) < 0.01
+        for it in items
+    )

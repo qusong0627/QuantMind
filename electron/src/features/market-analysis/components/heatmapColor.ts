@@ -10,7 +10,7 @@
  * 不做金额换算，避免与后端口径重复换算（DRY）。
  */
 
-export type HeatmapColorMode = 'pct' | 'flow';
+export type HeatmapColorMode = 'pct' | 'flow' | 'accel';
 
 /** 涨跌幅档位色（A 股涨红跌绿；阈值与「涨/跌停=±10%」口径对齐）。 */
 export function pctToColor(pct: number | null | undefined): string {
@@ -34,13 +34,27 @@ export function flowToColor(flowYi: number | null | undefined): string {
   return '#059669'; // 净流出 <= -1 亿
 }
 
+/** 加速度档位色（单位：亿/日）：越快越深，正=加速流入，负=加速流出。 */
+export function accelToColor(accelYi: number | null | undefined): string {
+  const v = typeof accelYi === 'number' && Number.isFinite(accelYi) ? accelYi : 0;
+  if (v >= 5) return '#dc2626';
+  if (v >= 1) return '#ef4444';
+  if (v > 0) return '#f87171';
+  if (v === 0) return '#94a3b8';
+  if (v > -1) return '#34d399';
+  if (v > -5) return '#10b981';
+  return '#059669';
+}
+
 export interface HeatmapCellMetric {
   pct_change?: number | null;
   flow_net?: number | null;
+  flow_accel?: number | null;
 }
 
 /** 统一取色入口：按当前着色维度返回色值。 */
 export function heatmapCellColor(item: HeatmapCellMetric, mode: HeatmapColorMode): string {
+  if (mode === 'accel') return accelToColor(item.flow_accel);
   return mode === 'flow' ? flowToColor(item.flow_net) : pctToColor(item.pct_change);
 }
 
@@ -49,6 +63,11 @@ export function heatmapCellColor(item: HeatmapCellMetric, mode: HeatmapColorMode
  * 缺失一律显示「—」（与全站「缺失不显示成 0」口径一致）。
  */
 export function heatmapLabelValue(item: HeatmapCellMetric, mode: HeatmapColorMode): string {
+  if (mode === 'accel') {
+    const v = item.flow_accel;
+    if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+    return `${v >= 0 ? '+' : ''}${v.toFixed(2)}亿/日`;
+  }
   if (mode === 'flow') {
     const v = item.flow_net;
     if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
@@ -63,4 +82,5 @@ export function heatmapLabelValue(item: HeatmapCellMetric, mode: HeatmapColorMod
 export const HEATMAP_COLOR_LABEL: Record<HeatmapColorMode, string> = {
   pct: '涨跌幅',
   flow: '主力净额',
+  accel: '加速度',
 };

@@ -261,6 +261,7 @@ async def get_market_sentiment(
 async def get_heatmap(
     trade_date: date | None = Query(default=None, description="PPT 交易日（回退用）"),
     category: str = Query(default="shenwan", description="分类: shenwan 或 concept"),
+    period: str = Query(default="1d", description="周期: 1d/2d/3d/5d/10d/20d"),
     date: str | None = Query(default=None, description="快照日期 YYYY-MM-DD，默认最新"),
     realtime: bool = Query(
         default=False, description="true 时跳过快照，强制实时计算最新数据"
@@ -269,19 +270,32 @@ async def get_heatmap(
 ):
     """获取申万一级行业或热门概念热力矩形图（优先快照/SQLite）。"""
     _ = current_user
-    if not realtime:
+    period = str(period or "1d").lower()
+    if period not in quantdb_feed.PERIOD_DAYS:
+        period = "1d"
+    if not realtime and period == "1d":
         snap = _snap.heatmap(category=category, date=date)
         if snap and snap["items"]:
+            snap["period"] = "1d"
             return snap
+    if date and period != "1d":
+        # 周期口径/加速度需要全量 L2，历史快照不覆盖；不拿最新冒充历史
+        return {
+            "trade_date": date,
+            "category": category,
+            "period": period,
+            "items": [],
+        }
     if date:
         # 显式历史日期无快照 → 返回空，不回落实时/今日，避免日期错配
-        return {"trade_date": date, "category": category, "items": []}
+        return {"trade_date": date, "category": category, "period": period, "items": []}
 
-    real_items = quantdb_feed.get_sector_heatmap(category=category)
+    real_items = quantdb_feed.get_sector_heatmap(category=category, period=period)
     if real_items:
         return {
             "trade_date": str(trade_date or _dt.date.today()),
             "category": category,
+            "period": period,
             "items": real_items,
         }
 
@@ -293,7 +307,12 @@ async def get_heatmap(
                 trade_date=str(trade_date),
                 items=[HeatmapItem(**item) for item in items],
             )
-    return {"trade_date": str(_dt.date.today()), "category": category, "items": []}
+    return {
+        "trade_date": str(_dt.date.today()),
+        "category": category,
+        "period": period,
+        "items": [],
+    }
 
 
 @router.get("/heatmap/drill")

@@ -29,6 +29,16 @@ import {
   type HeatmapColorMode,
 } from './heatmapColor';
 
+/** 资金流/涨幅统计窗口。 */
+const PERIOD_TABS: { id: string; label: string }[] = [
+  { id: '1d', label: '1日' },
+  { id: '2d', label: '2日' },
+  { id: '3d', label: '3日' },
+  { id: '5d', label: '5日' },
+  { id: '10d', label: '10日' },
+  { id: '20d', label: '20日' },
+];
+
 /** 顶层板块分类切换项（键名与后端 /heatmap 的 category 一致）。 */
 const CATEGORY_TABS: { id: HeatmapDrillCategory; label: string }[] = [
   { id: 'shenwan', label: '二级行业' },
@@ -51,6 +61,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
   onStockClick,
 }) => {
   const [category, setCategory] = useState<HeatmapDrillCategory>('shenwan');
+  const [period, setPeriod] = useState<string>('1d');
   const [colorMode, setColorMode] = useState<HeatmapColorMode>('pct');
   const [drillName, setDrillName] = useState<string | null>(null);
   const [drill, setDrill] = useState<HeatmapDrillResponse | null>(null);
@@ -65,6 +76,17 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
     setDrill(null);
   }, [category]);
 
+  // 周期切换退出下钻层（下钻层是当日个股口径，避免与板块周期错配）
+  useEffect(() => {
+    setDrillName(null);
+    setDrill(null);
+  }, [period]);
+
+  // 历史快照不含周期/加速度（不拿最新冒充历史）：选定历史日期时回到 1 日
+  useEffect(() => {
+    if (date) setPeriod('1d');
+  }, [date]);
+
   // 顶层数据：一律走实时全量 —— 快照库（SQLite sector_mv）既不含主力净额，
   // 又只存概念板块前 50，无法支撑「主力净额」着色与概念全量；页面预取的
   // shenwan 快照仅作首屏即时铺底，实时数据到达后替换（无估值/无 L2 时不闪空态）。
@@ -72,7 +94,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
     let cancelled = false;
     setOwnTop([]);
     setTopLoading(true);
-    getHeatmapTop({ category, date, realtime: true })
+    getHeatmapTop({ category, date, realtime: true, period })
       .then((items) => {
         if (!cancelled) setOwnTop(items);
       })
@@ -85,7 +107,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [category, date]);
+  }, [category, date, period]);
 
   // 拉取下钻数据
   useEffect(() => {
@@ -109,6 +131,36 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
 
   // 实时全量优先；尚未到达时用页面预取的 shenwan 快照铺底（避免首屏空态）
   const topData = ownTop.length > 0 ? ownTop : topItems;
+
+  const periodDays = Number(period.replace('d', '')) || 1;
+  const topChartData = useMemo(
+    () =>
+      topData.map((it) => ({
+        ...it,
+        // >1 日时面积/颜色/标签都用周期涨幅；1 日两者相同
+        pct_change:
+          periodDays > 1
+            ? (it.pct_period ?? it.pct_change)
+            : it.pct_change,
+      })),
+    [topData, periodDays],
+  );
+  const speedUp = useMemo(
+    () =>
+      topData
+        .filter((it) => typeof it.flow_accel === 'number' && Number.isFinite(it.flow_accel))
+        .sort((a, b) => (b.flow_accel ?? 0) - (a.flow_accel ?? 0))
+        .slice(0, 6),
+    [topData],
+  );
+  const speedDown = useMemo(
+    () =>
+      topData
+        .filter((it) => typeof it.flow_accel === 'number' && Number.isFinite(it.flow_accel))
+        .sort((a, b) => (a.flow_accel ?? 0) - (b.flow_accel ?? 0))
+        .slice(0, 6),
+    [topData],
+  );
 
   // 个股层：名称 → symbol 映射（treemap 点击回传的是显示名）
   const symbolByName = useMemo(() => {
@@ -138,8 +190,8 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
     if (symbol && onStockClick) onStockClick(symbol, name);
   };
 
-  const renderKey = `${category}-${drillName || 'top'}-${colorMode}`;
-  const chartData = drillName ? drillChartData : topData;
+  const renderKey = `${category}-${drillName || 'top'}-${colorMode}-${period}`;
+  const chartData = drillName ? drillChartData : topChartData;
   const isEmpty = chartData.length === 0;
 
   return (
@@ -166,10 +218,25 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
             <span className="truncate">板块热力矩形图谱</span>
           )}
         </h3>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+          {/* 周期切换（1/2/3/5/10/20 日） */}
+          <div className="flex rounded-full bg-slate-100 p-0.5">
+            {PERIOD_TABS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setPeriod(p.id)}
+                className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold transition-colors ${
+                  period === p.id ? 'bg-white text-purple-700 shadow-2xs' : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
           {/* 着色维度切换（两层共用） */}
           <div className="flex rounded-full bg-slate-100 p-0.5">
-            {(['pct', 'flow'] as HeatmapColorMode[]).map((mode) => (
+            {(['pct', 'flow', 'accel'] as HeatmapColorMode[]).map((mode) => (
               <button
                 key={mode}
                 type="button"
@@ -205,8 +272,10 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
       {/* 副标题条：口径与规模如实披露 */}
       <div className="flex items-center justify-between px-0.5 pb-1 shrink-0">
         <span className="text-[10px] text-slate-400 font-mono">
-          面积=总市值 · 颜色={HEATMAP_COLOR_LABEL[colorMode]}
-          {colorMode === 'flow' && '（主力净额按单笔金额分档估算）'}
+          面积=总市值 · 周期={periodDays}日 · 颜色={HEATMAP_COLOR_LABEL[colorMode]}
+          {colorMode === 'flow' && '（周期主力净额）'}
+          {colorMode === 'accel' && '（当前日均 − 前一窗口日均）'}
+          {drillName && '（下钻层为当日个股口径）'}
         </span>
         {drillName && drill && (
           <span className="text-[10px] text-slate-400 font-mono">
@@ -216,6 +285,38 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
           </span>
         )}
       </div>
+
+      {/* 加速榜：直接回答「哪些板块在加速流入/流出、涨幅怎么样」 */}
+      {!drillName && (speedUp.length > 0 || speedDown.length > 0) && (
+        <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1 shrink-0 text-[10px]">
+          <span className="font-extrabold text-red-600 shrink-0">加速流入</span>
+          {speedUp.slice(0, 4).map((it) => (
+            <button
+              key={`up-${it.name}`}
+              onClick={() => handleTopClick(it.name)}
+              className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-red-50 border border-red-100 text-red-700 hover:bg-red-100"
+              title={`${periodDays}日净额 ${it.flow_net?.toFixed(2) ?? '—'}亿 · 日均 ${it.flow_daily?.toFixed(2) ?? '—'}亿/日 · 加速度 ${it.flow_accel?.toFixed(2) ?? '—'}亿/日`}
+            >
+              {it.name}
+              <span className="font-mono">{it.flow_accel !== null && it.flow_accel !== undefined ? `+${it.flow_accel.toFixed(2)}` : '—'}</span>
+              <span className="text-red-400 font-mono">{it.pct_period?.toFixed(1) ?? '—'}%</span>
+            </button>
+          ))}
+          <span className="font-extrabold text-emerald-600 shrink-0 ml-2">加速流出</span>
+          {speedDown.slice(0, 4).map((it) => (
+            <button
+              key={`down-${it.name}`}
+              onClick={() => handleTopClick(it.name)}
+              className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-700 hover:bg-emerald-100"
+              title={`${periodDays}日净额 ${it.flow_net?.toFixed(2) ?? '—'}亿 · 日均 ${it.flow_daily?.toFixed(2) ?? '—'}亿/日 · 加速度 ${it.flow_accel?.toFixed(2) ?? '—'}亿/日`}
+            >
+              {it.name}
+              <span className="font-mono">{it.flow_accel?.toFixed(2) ?? '—'}</span>
+              <span className="text-emerald-400 font-mono">{it.pct_period?.toFixed(1) ?? '—'}%</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* 图区 */}
       <div className="flex-1 min-h-0 relative">
@@ -238,11 +339,28 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
             colorOf={(item) => heatmapCellColor(item, colorMode)}
             labelValueOf={(item) => heatmapLabelValue(item, colorMode)}
             tooltipExtraOf={(item) => {
-              if (colorMode !== 'flow') return '';
-              const flow = (item as { flow_net?: number }).flow_net;
-              if (typeof flow !== 'number' || !Number.isFinite(flow)) return '';
-              const color = flow >= 0 ? '#f87171' : '#34d399';
-              return `<span style="color:#cbd5e1;">主力净额: <b style="color:${color};">${flow >= 0 ? '+' : ''}${flow.toFixed(2)}亿</b></span>`;
+              const it = item as {
+                pct_period?: number | null;
+                flow_net?: number | null;
+                flow_daily?: number | null;
+                flow_accel?: number | null;
+              };
+              const parts: string[] = [];
+              if (periodDays > 1 && typeof it.pct_period === 'number') {
+                parts.push(`<span style="color:#cbd5e1;">${periodDays}日涨幅: <b>${it.pct_period >= 0 ? '+' : ''}${it.pct_period.toFixed(2)}%</b></span>`);
+              }
+              if (typeof it.flow_net === 'number') {
+                const c = it.flow_net >= 0 ? '#f87171' : '#34d399';
+                parts.push(`<span style="color:#cbd5e1;">${periodDays}日净额: <b style="color:${c};">${it.flow_net >= 0 ? '+' : ''}${it.flow_net.toFixed(2)}亿</b></span>`);
+              }
+              if (typeof it.flow_daily === 'number') {
+                parts.push(`<span style="color:#cbd5e1;">日均: ${it.flow_daily.toFixed(2)}亿/日</span>`);
+              }
+              if (typeof it.flow_accel === 'number') {
+                const c = it.flow_accel >= 0 ? '#f87171' : '#34d399';
+                parts.push(`<span style="color:#cbd5e1;">加速度: <b style="color:${c};">${it.flow_accel >= 0 ? '+' : ''}${it.flow_accel.toFixed(2)}亿/日</b></span>`);
+              }
+              return parts.join('<br/>');
             }}
           />
         )}

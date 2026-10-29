@@ -740,12 +740,21 @@ def get_market_breadth() -> dict[str, Any]:
     return _cached("market_breadth", _QUERY_TTL, _load)
 
 
-def get_sector_heatmap(category: str = "shenwan") -> list[dict[str, Any]]:
-    """获取申万一级行业或热门概念热力矩形图数据（板块均值涨跌、市值/成交额权重、领涨龙头及涨跌幅）。
+def get_sector_heatmap(
+    category: str = "shenwan", period: str = "1d"
+) -> list[dict[str, Any]]:
+    """板块热力图数据（涨跌幅 + 周期主力净额/日均/加速度 + 市值权重 + 龙头）。
 
-    矩形面积权重与离线快照/官网一致：优先用总市值 total_mv（元→亿），
-    无估值数据时回退当日成交额，避免实时与快照的市值口径不一致。
+    周期口径：
+    - ``flow_net``：当前 N 日主力净额（亿）；
+    - ``flow_daily``：当前 N 日日均（亿/日）；
+    - ``prev_flow_daily``：前一 N 日日均；
+    - ``flow_accel``：当前日均 − 前一窗口日均（亿/日），正=加速流入；
+    - ``flow_ratio``：当前 N 日主力净额 / 成分成交额；
+    - ``pct_period``：板块等权 N 日涨幅（%）；``pct_change`` 保留当日均涨幅。
     """
+    n_days = PERIOD_DAYS.get(str(period or "1d").lower(), 1)
+
     def _load():
         if not _available():
             return []
@@ -762,11 +771,13 @@ def get_sector_heatmap(category: str = "shenwan") -> list[dict[str, Any]]:
         if not groups:
             return []
 
-        # 市值权重：从 valuation 读总市值，symbol 统一大写后缀与板块成员对齐
+        # 市值权重（总市值，元→亿；缺失回退成交额）
         today_s = str(today).zfill(8) if today else ""
         mv_map: dict[str, float] = {}
         if today_s:
-            vdf = _read_partitioned("5_technical_derived/valuation", [today_s], "symbol, total_mv")
+            vdf = _read_partitioned(
+                "5_technical_derived/valuation", [today_s], "symbol, total_mv"
+            )
             if not vdf.empty:
                 for r in vdf.itertuples(index=False):
                     sym = str(r.symbol).strip().upper()
@@ -775,9 +786,64 @@ def get_sector_heatmap(category: str = "shenwan") -> list[dict[str, Any]]:
                         tv = 0.0
                     mv_map[sym] = tv
 
-        # 主力净额（主力 = flow_super_net + flow_large_net）：板块层按成分求和，
-        # 与下钻层同口径；取不到时留 None，前端显示「—」而不是伪装成 0。
-        _, flow_map = _load_l2_main_flow(today_s)
+        # 周期主力净额：最近 2N 个有 L2 数据的交易日
+        flow_days = _l2_days(today_s, max(n_days * 2, n_days + 1)) if today_s else []
+        cur_days = set(flow_days[:n_days])
+        prev_days = set(flow_days[n_days : n_days * 2])
+        cur_flow = prev_flow = pd.DataFrame()
+        if flow_days:
+            flow_all = _load_l2_flow(flow_days)
+            if not flow_all.empty:
+                flow_all["dt"] = flow_all["dt"].astype(str)
+                bad = placeholder_symbols_by_dt(flow_all)
+                if bad:
+                    keep = [
+                        sym not in (bad.get(str(dt)) or set())
+                        for sym, dt in zip(
+                            flow_all["symbol"], flow_all["dt"], strict=True
+                        )
+                    ]
+                    flow_all = flow_all[keep]
+                flow_all["main"] = flow_all["flow_super_net"].fillna(
+                    0.0
+                ) + flow_all["flow_large_net"].fillna(0.0)
+                flow_all["amount_y"] = flow_all["amount"].astype(float) * 1e4
+                cur_flow = flow_all[flow_all["dt"].isin(cur_days)]
+                prev_flow = flow_all[flow_all["dt"].isin(prev_days)]
+        cur_sums = (
+            cur_flow.groupby("symbol")[["main", "amount_y"]].sum()
+            if not cur_flow.empty
+            else pd.DataFrame()
+        )
+        prev_sums = (
+            prev_flow.groupby("symbol")[["main", "amount_y"]].sum()
+            if not prev_flow.empty
+            else pd.DataFrame()
+        )
+
+        # 周期涨幅：N 日等权（收盘价，未复权；1 日用当日官方涨跌幅）
+        period_pct: dict[str, float] = {}
+        if n_days > 1:
+            ret_days = _trading_days(today_s, n_days + 1) if today_s else []
+            if len(ret_days) >= 2:
+                closes = _read_partitioned(
+                    "1_kline_data/daily_unadjusted",
+                    ret_days,
+                    "symbol, close",
+                )
+                if not closes.empty:
+                    closes["dt"] = closes["dt"].astype(str)
+                    piv = closes.pivot_table(
+                        index="symbol", columns="dt", values="close"
+                    )
+                    first, last = ret_days[-1], ret_days[0]
+                    if first in piv.columns and last in piv.columns:
+                        ret = (piv[last] / piv[first] - 1.0) * 100.0
+                        period_pct = {
+                            str(k): float(v)
+                            for k, v in ret.items()
+                            if math.isfinite(float(v))
+                        }
 
         items: list[dict[str, Any]] = []
         for sname, syms in groups.items():
@@ -785,13 +851,20 @@ def get_sector_heatmap(category: str = "shenwan") -> list[dict[str, Any]]:
             if sub.empty:
                 continue
             avg_pct = round(float(sub["pct_change"].mean() or 0.0), 2)
+            vals = [
+                period_pct[s]
+                for s in syms
+                if s in period_pct and math.isfinite(period_pct[s])
+            ]
+            pct_period = (
+                round(sum(vals) / len(vals), 2) if vals else round(avg_pct, 2)
+            )
             val_yi: float | None = None
             if mv_map:
                 tot_mv = sum(mv_map.get(s, 0.0) for s in syms)
                 if tot_mv > 0:
                     val_yi = round(tot_mv / 1e8, 1)
             if val_yi is None:
-                # 无估值时按成交额兜底（单位分档换算，避免多分支比例错乱）
                 tot_amt = float(sub["amount"].sum() or 0.0)
                 if tot_amt > 1e11:
                     val_yi = round(tot_amt / 1e8, 1)
@@ -801,23 +874,62 @@ def get_sector_heatmap(category: str = "shenwan") -> list[dict[str, Any]]:
                     val_yi = round(tot_amt, 1)
 
             leader_row = sub.sort_values("pct_change", ascending=False).iloc[0]
-            # 主力净额（亿）：全成分求和（含未在行情快照内的成分，只要 L2 有值即计入）
-            flow_yuan = sum(flow_map.get(s, 0.0) for s in syms) if flow_map else None
-            flow_yi = round(flow_yuan / 1e8, 2) if flow_yuan is not None else None
-            items.append({
-                "name": sname,
-                "value": max(val_yi, 10.0),
-                "pct_change": avg_pct,
-                "flow_net": flow_yi,
-                "leader": str(leader_row.get("name") or leader_row["symbol"]),
-                "leader_pct": round(float(leader_row["pct_change"] or 0.0), 2),
-            })
+            cur_main = (
+                float(cur_sums.loc[[s for s in syms if s in cur_sums.index], "main"].sum())
+                if not cur_sums.empty
+                else 0.0
+            )
+            cur_amount = (
+                float(
+                    cur_sums.loc[
+                        [s for s in syms if s in cur_sums.index], "amount_y"
+                    ].sum()
+                )
+                if not cur_sums.empty
+                else 0.0
+            )
+            prev_main = (
+                float(prev_sums.loc[[s for s in syms if s in prev_sums.index], "main"].sum())
+                if not prev_sums.empty
+                else 0.0
+            )
+            flow_net = round(cur_main / 1e8, 4)
+            flow_daily = round(flow_net / n_days, 4) if n_days else None
+            prev_daily = (
+                round((prev_main / 1e8) / len(prev_days), 4)
+                if prev_days and not prev_sums.empty
+                else None
+            )
+            flow_accel = (
+                round(flow_daily - prev_daily, 4)
+                if flow_daily is not None and prev_daily is not None
+                else None
+            )
+            flow_ratio = (
+                round(cur_main / cur_amount, 4) if cur_amount > 0 else None
+            )
+            items.append(
+                {
+                    "name": sname,
+                    "value": max(val_yi, 10.0),
+                    "pct_change": avg_pct,
+                    "pct_period": pct_period,
+                    "flow_net": flow_net,
+                    "flow_daily": flow_daily,
+                    "prev_flow_daily": prev_daily,
+                    "flow_accel": flow_accel,
+                    "flow_ratio": flow_ratio,
+                    "period": period,
+                    "period_days": n_days,
+                    "leader": str(leader_row.get("name") or leader_row["symbol"]),
+                    "leader_pct": round(float(leader_row["pct_change"] or 0.0), 2),
+                }
+            )
 
         items.sort(key=lambda x: x["value"], reverse=True)
         return items
 
-    return _cached(f"heatmap_{category}", _QUERY_TTL, _load)
-
+    return _cached(f"heatmap_{category}_{n_days}", _QUERY_TTL, _load)
 
 def _load_valuation_mv(days: list[str]) -> pd.DataFrame:
     """指定交易日的个股总市值（元）。days 降序，逐日回退取首个可用日。"""

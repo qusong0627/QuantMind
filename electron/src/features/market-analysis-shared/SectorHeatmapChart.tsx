@@ -18,6 +18,16 @@ export interface SectorHeatmapItem {
   leader_pct?: number;
   /** 主力净额（亿）；仅下钻/按净额着色时有值 */
   flow_net?: number;
+  /** 周期涨幅（%）：>1 日时用于着色/标签，1 日等于 pct_change */
+  pct_period?: number | null;
+  /** 周期日均主力净额（亿/日） */
+  flow_daily?: number | null;
+  /** 前一窗口日均（亿/日） */
+  prev_flow_daily?: number | null;
+  /** 加速度 = 当前日均 − 前一窗口日均（亿/日） */
+  flow_accel?: number | null;
+  /** 周期净额比 */
+  flow_ratio?: number | null;
   /** tooltip 透传附加字段（下钻层展示细分行业/量比/成交额等）；不参与布局 */
   extra?: Record<string, unknown>;
 }
