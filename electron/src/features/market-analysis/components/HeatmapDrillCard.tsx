@@ -69,6 +69,9 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
   onStockClick,
 }) => {
   const [category, setCategory] = useState<HeatmapDrillCategory>('shenwan');
+  // 概念板块 400+ 块，很多方块窄到放不下字；默认把长尾合并成「其他概念」，
+  // 保留面积排序与涨跌加权，可一键展开全部。
+  const [mergeSmallConcepts, setMergeSmallConcepts] = useState(true);
   const [period, setPeriod] = useState<string>('1d');
   const [colorMode, setColorMode] = useState<HeatmapColorMode>('pct');
   const [directionH, setDirectionH] = useState<number>(10);
@@ -208,6 +211,61 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
       };
     });
   }, [topData, periodDays, colorMode, directionH]);
+
+  /** 概念板块默认只画前 40 个市值板块 +「其他概念（N）」合并块。
+   * 400+ 小方块在 900px 宽的 treemap 里必然无字；合并后保留面积/涨跌/净额口径，
+   * 点「显示全部」可回到全量。合并块不响应下钻（没有对应板块）。 */
+  const chartTopData = useMemo(() => {
+    const MAX_CONCEPT_BLOCKS = 40;
+    if (category !== 'concept' || !mergeSmallConcepts || topChartData.length <= MAX_CONCEPT_BLOCKS + 1) {
+      return topChartData;
+    }
+    const num = (it: SectorHeatmapItem, key: string): number | null => {
+      const v = (it as unknown as Record<string, unknown>)[key];
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    };
+    const sum = (rows: SectorHeatmapItem[], key: string): number | null => {
+      const vals = rows.map((it) => num(it, key)).filter((v): v is number => v !== null);
+      return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
+    };
+    const wavg = (rows: SectorHeatmapItem[], key: string): number | null => {
+      const pairs = rows
+        .map((it) => [num(it, key), num(it, 'value')] as const)
+        .filter((p): p is readonly [number, number] => p[0] !== null && p[1] !== null && p[1] > 0);
+      const w = pairs.reduce((s, [, weight]) => s + weight, 0);
+      return w > 0 ? pairs.reduce((s, [v, weight]) => s + v * weight, 0) / w : null;
+    };
+    const sorted = [...topChartData].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+    const keep = sorted.slice(0, MAX_CONCEPT_BLOCKS);
+    const tail = sorted.slice(MAX_CONCEPT_BLOCKS);
+    if (!tail.length) return topChartData;
+    const agg: SectorHeatmapItem = {
+      name: `其他概念（${tail.length}）`,
+      value: sum(tail, 'value') ?? 0,
+      pct_change: wavg(tail, 'pct_change') ?? 0,
+      flow_net: sum(tail, 'flow_net'),
+      pct_period: wavg(tail, 'pct_period'),
+      flow_daily: sum(tail, 'flow_daily'),
+      prev_flow_daily: sum(tail, 'prev_flow_daily'),
+      flow_accel: sum(tail, 'flow_accel'),
+      flow_ratio: wavg(tail, 'flow_ratio'),
+      breadth_flow: wavg(tail, 'breadth_flow'),
+      breadth_flow_chg: wavg(tail, 'breadth_flow_chg'),
+      flow_ratio_accel: wavg(tail, 'flow_ratio_accel'),
+      pct_above_ma20: wavg(tail, 'pct_above_ma20'),
+      pct_above_ma20_chg: wavg(tail, 'pct_above_ma20_chg'),
+      price_accel: wavg(tail, 'price_accel'),
+      sentiment_score: wavg(tail, 'sentiment_score'),
+      direction: null,
+      leader: undefined,
+      extra: {
+        aggregate: true,
+        count: tail.length,
+        names: tail.slice(0, 8).map((it) => it.name),
+      },
+    };
+    return [...keep, agg];
+  }, [topChartData, category, mergeSmallConcepts]);
   const speedUp = useMemo(
     () =>
       topData
@@ -267,6 +325,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
   );
 
   const handleTopClick = (name: string) => {
+    if (name.startsWith('其他概念')) return;
     setDrillName(name);
   };
 
@@ -277,8 +336,8 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
 
   // 下钻层只支持涨跌幅/净额着色；用有效模式兜底，避免 effect 复位前闪一帧灰
   const chartColorMode = drillName ? 'pct' : colorMode;
-  const renderKey = `${category}-${drillName || 'top'}-${chartColorMode}-${period}-${directionH}`;
-  const chartData = drillName ? drillChartData : topChartData;
+  const renderKey = `${category}-${drillName || 'top'}-${chartColorMode}-${period}-${directionH}-${mergeSmallConcepts}`;
+  const chartData = drillName ? drillChartData : chartTopData;
   const isEmpty = chartData.length === 0;
 
   return (
@@ -394,6 +453,20 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
               ))}
             </div>
           )}
+          {category === 'concept' && !drillName && (
+            <button
+              type="button"
+              onClick={() => setMergeSmallConcepts((v) => !v)}
+              title={mergeSmallConcepts ? '把长尾小概念合并成「其他概念」，避免方块小到没有字；点击展开全部' : '当前显示全部概念（400+ 块，部分小方块无字）'}
+              className={`px-2 py-0.5 rounded-full text-[10px] font-bold border transition-colors ${
+                mergeSmallConcepts
+                  ? 'bg-purple-600 text-white border-purple-600'
+                  : 'bg-white text-slate-500 border-slate-200 hover:border-purple-300'
+              }`}
+            >
+              {mergeSmallConcepts ? '合并小概念' : '显示全部'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -409,6 +482,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
           {colorMode === 'sentiment' &&
             '（情绪热度=价格广度(MA20)/资金广度/两者变化/周期涨幅/资金加速的截面分位合成，0~100）'}
           {drillName && '（下钻层为当日个股口径）'}
+          {category === 'concept' && !drillName && mergeSmallConcepts && ' · 小概念已合并为「其他」'}
         </span>
         {drillName && drill && (
           <span className="text-[10px] text-slate-400 font-mono">
@@ -625,6 +699,9 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
                 direction?: Record<string, HeatmapDirectionCell> | null;
               };
               const parts: string[] = [];
+              if ((item.extra as { aggregate?: boolean } | undefined)?.aggregate) {
+                parts.push('<span style="color:#fbbf24;">小概念合并块：点击「显示全部」展开</span>');
+              }
               if (periodDays > 1 && typeof it.pct_period === 'number') {
                 parts.push(`<span style="color:#cbd5e1;">${periodDays}日涨幅: <b>${it.pct_period >= 0 ? '+' : ''}${it.pct_period.toFixed(2)}%</b></span>`);
               }

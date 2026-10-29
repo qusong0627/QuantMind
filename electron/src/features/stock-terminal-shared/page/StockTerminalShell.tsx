@@ -100,7 +100,8 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
   const [modelId, setModelId] = useState<string | undefined>(undefined);
   const [scoreModels, setScoreModels] = useState<Array<{ model_id: string; display_name?: string }>>([]);
   const [modelName, setModelName] = useState<string>('');
-  const [scoreLast, setScoreLast] = useState<{ value: number; date: string; up: boolean } | null>(null);
+  const [scoreLast, setScoreLast] = useState<{ value: number; date: string; up: boolean; side: string | null } | null>(null);
+  const [scoreLoading, setScoreLoading] = useState(false);
 
   // 拉起推理分数：喂给 K线底部分数副图 + 顶部最近分数 + 模型下拉列表。
   // 不渲染独立折线图组件，分数统一由 K线底部副图承载（与主图同 x 轴对齐）。
@@ -109,9 +110,11 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
       setScorePoints([]);
       setScoreLast(null);
       setScoreModels([]);
+      setScoreLoading(false);
       return;
     }
     let cancelled = false;
+    setScoreLoading(true);
     const code = selected.symbol.split('.')[0];
     modelTrainingService
       .getStockInferenceHistory(code, 750, modelId || undefined)
@@ -128,7 +131,7 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
         setScorePoints(pts);
         const last = pts[pts.length - 1];
         setScoreLast(last && typeof last.value === 'number'
-          ? { value: Number(last.value), date: last.date, up: Number(last.value) >= 0 }
+          ? { value: Number(last.value), date: last.date, up: Number(last.value) >= 0, side: last.side ?? null }
           : null);
         const models = resp.models ?? [];
         setScoreModels(models);
@@ -140,6 +143,9 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
           setScorePoints([]);
           setScoreLast(null);
         }
+      })
+      .finally(() => {
+        if (!cancelled) setScoreLoading(false);
       });
     return () => {
       cancelled = true;
@@ -382,7 +388,6 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
                         <span className="text-slate-400">{scoreLast.date}</span>
                       </span>
                     )}
-                    {modelName && <span className="hidden xl:inline text-[10px] font-mono text-indigo-500 truncate max-w-[120px]">· {modelName}</span>}
                     {theme.klineNote && (
                       <span className="hidden 2xl:inline text-[10px] text-slate-400 truncate max-w-[220px]">· {theme.klineNote}</span>
                     )}
@@ -409,6 +414,31 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
                     ))}
                   </div>
                 </div>
+                {(scoreLoading || scoreLast) && (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-4 py-1 border-b border-slate-100 bg-white shrink-0 text-[10px] text-slate-500">
+                    {scoreLast ? (
+                      <>
+                        <span>
+                          推理分数 <b className="font-mono text-[11px] text-slate-800">{scoreLast.value.toFixed(4)}</b>
+                        </span>
+                        {scoreLast.side && (
+                          <span>
+                            位置 <b className="text-slate-700">{signalPositionLabel(scoreLast.side)}</b>
+                          </span>
+                        )}
+                        {modelName && (
+                          <span className="min-w-0 break-all">
+                            模型 <b className="font-normal text-indigo-600">{modelName}</b>
+                          </span>
+                        )}
+                        <span className="font-mono text-slate-400">{scoreLast.date}</span>
+                        {scoreLoading && <span className="text-purple-400 animate-pulse">更新中…</span>}
+                      </>
+                    ) : (
+                      <span className="text-slate-400 animate-pulse">推理分数加载中…（750 日窗口，首次可能稍慢）</span>
+                    )}
+                  </div>
+                )}
                 <div className="flex-1 min-h-0 p-2 flex flex-col">
                   {barsLoading ? (
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">K线加载中…</div>

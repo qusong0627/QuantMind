@@ -290,6 +290,13 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
                 fontFamily: 'monospace',
                 align: 'center',
               },
+              tiny: {
+                fontSize: 7,
+                fontWeight: 'bold',
+                color: '#ffffff',
+                lineHeight: 9,
+                align: 'center',
+              },
             },
           },
           itemStyle: {
@@ -323,13 +330,23 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
         const centeredData = formattedData.map((item) => {
           const layout = layoutByName[item.name];
           if (!layout) return { ...item, label: { show: false } };
-          // 小色块不显示文字：避免下钻层 100+ 只个股时标签互相挤压；
-          // 大色块统一两行居中 + 超宽省略。
-          const show = layout.width >= 28 && layout.height >= 16;
-          const pad = Math.max(0, (layout.height - LABEL_TEXT_HEIGHT) / 2);
+          // 两行（名称+数值）需要 40×22；更小的块至少给一行名称（7px），
+          // 否则概念板块长尾全是没有字的色块。再小（<22×12）才隐藏。
+          const canTwoLine = layout.width >= 40 && layout.height >= 22;
+          const show = layout.width >= 22 && layout.height >= 12;
+          const textH = canTwoLine ? LABEL_TEXT_HEIGHT : 9;
+          const pad = Math.max(0, (layout.height - textH) / 2);
           return {
             ...item,
-            label: { show, padding: [pad, 0, pad, 0], align: 'center', overflow: 'truncate' },
+            label: {
+              show,
+              padding: [pad, 0, pad, 0],
+              align: 'center',
+              overflow: 'truncate',
+              ...(canTwoLine
+                ? {}
+                : { formatter: (params: { name?: string }) => `{tiny|${params?.name ?? ''}}` }),
+            },
           };
         });
         chart.setOption({ series: [{ id: 'sector-heatmap', data: centeredData }] });
