@@ -47,7 +47,7 @@ const TYPE_OF_SET: Record<FlowSectorSet, string> = {
 };
 /** 热门 tabs 顺序与工具栏「体系」组一致（二级默认在前）。 */
 const SET_ORDER: FlowSectorSet[] = ['industry2', 'industry1', 'concept'];
-const HOT_MAX = 18;
+const HOT_MAX = 5;
 const MATCH_MAX = 10;
 const STOCK_MAX = 6;
 const SEARCH_DEBOUNCE_MS = 200;
@@ -250,7 +250,7 @@ export const TagBrowserStrip: React.FC<TagBrowserStripProps> = ({
           )}
         </div>
 
-        {/* 热门板块：体系 tabs = 页面体系选择器（同源同步），单体系 top-18 chips */}
+        {/* 热门板块：体系 tabs = 页面体系选择器（同源同步），单体系 top-5 chips */}
         <div className="flex items-center gap-2 flex-wrap min-w-0 flex-1">
           <span className="flex items-center gap-1 text-[10px] font-extrabold text-slate-400 whitespace-nowrap">
             <Flame className="w-3 h-3 text-orange-400" />

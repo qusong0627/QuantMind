@@ -1,11 +1,13 @@
 /**
- * 资金流概率模型卡：未来 h 日跑赢排序分（订单流结构 + 量价速度 + 板块状态）。
+ * 资金流概率模型卡（v2 四象限版）：未来 h 日跑赢排序分
+ * （订单流结构 + 量价速度 + 板块状态）。
  *
  * 展示纪律：
  * - 模型分是**排序分**（isotonic 校准后仍不是真实胜率）；真正的概率看 OOS
  *   十分位胜率（top_hit vs base_hit），不用「85 分＝85%」误导；
  * - 板块没有独立模型（实测无稳定 alpha），板块分＝成分股概率成交额加权，只作构成/风险聚合；
- * - 当前流出但概率高＝「逆流候选」（吸筹），当前流入但概率低＝「流入但弱」（派发警惕）；
+ * - 四象限：横轴=当前资金（流出/流入），纵轴=模型未来强度（低/高）：
+ *   强势 Top、逆流候选（流出·高）、流入但弱（流入·低）、弱势 Top；
  * - 产物只覆盖 trade_date；历史回看不拿最新概率冒充当时。
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -14,6 +16,7 @@ import {
   getFlowProbability,
   type FlowProbabilityIntentStock,
   type FlowProbabilityResponse,
+  type FlowProbabilitySector,
   type FlowProbabilityStock,
 } from '../services/moneyFlowService';
 
@@ -30,24 +33,30 @@ const pointPct = (v: number | null | undefined, digits = 2): string =>
 const money = (v: number | null | undefined): string =>
   v === null || v === undefined ? '—' : v >= 0 ? '流入' : '流出';
 
-const StockRow: React.FC<{
+const rawOf = (row: FlowProbabilityStock, h: Horizon): number | null => {
+  const raw = row[`raw${h}` as keyof FlowProbabilityStock] as number | null | undefined;
+  const p = row[`p${h}` as keyof FlowProbabilityStock] as number | null | undefined;
+  return typeof raw === 'number' ? raw : typeof p === 'number' ? p : null;
+};
+
+/** 单行：名称 + 消息/龙虎/大宗徽章 + 净流入/出 + 模型分点（0~100 轴）。 */
+const QuadrantRow: React.FC<{
   row: FlowProbabilityStock;
   h: Horizon;
   intent?: FlowProbabilityIntentStock;
   onSelect?: (s: string, n: string) => void;
 }> = ({ row, h, intent, onSelect }) => {
-  const p =
-    (row[`raw${h}` as keyof FlowProbabilityStock] as number | null | undefined) ??
-    (row[`p${h}` as keyof FlowProbabilityStock] as number | null | undefined);
+  const p = rawOf(row, h);
   const inflow = (row.net_ratio ?? 0) >= 0;
+  const pos = p === null ? null : Math.max(0, Math.min(100, p * 100));
   return (
     <button
       onClick={() => onSelect?.(row.symbol, row.name)}
-      className="flex items-center gap-1.5 py-0.5 text-left hover:bg-slate-50 rounded px-1 -mx-1 transition-colors w-full"
+      className="flex items-center gap-1.5 py-1 text-left hover:bg-white/80 rounded px-1 -mx-1 transition-colors w-full"
       title={`${row.industry ?? '—'} · 5日 ${pointPct(row.r5)} · z20 ${row.z20 ?? '—'} · 净额比 ${pointPct((row.net_ratio ?? 0) * 100)}`}
     >
       <span className="text-[10px] font-mono text-slate-400 w-10 shrink-0">{row.symbol}</span>
-      <span className="text-[10px] font-bold text-slate-700 truncate">{row.name || '—'}</span>
+      <span className="text-[10px] font-bold text-slate-700 truncate flex-1">{row.name || '—'}</span>
       {intent?.news_score != null && Math.abs(intent.news_score) >= 0.15 && (
         <span
           className={`text-[8px] font-bold shrink-0 ${intent.news_score > 0 ? 'text-purple-600' : 'text-slate-500'}`}
@@ -72,14 +81,96 @@ const StockRow: React.FC<{
           大宗{intent.block_premium < 0 ? '折' : '溢'}
         </span>
       )}
-      <span className="flex-1" />
       <span className={`text-[9px] font-bold shrink-0 ${inflow ? 'text-red-500' : 'text-emerald-600'}`}>
         {money(row.net_ratio)}
+      </span>
+      <span className="relative h-1.5 w-12 shrink-0 rounded-full bg-slate-200/70">
+        <span className="absolute top-0 bottom-0 left-1/2 w-px bg-slate-300" />
+        {pos !== null && (
+          <span
+            className={`absolute top-1/2 -translate-y-1/2 h-2 w-2 rounded-full border border-white shadow-sm ${
+              (p ?? 0) >= 0.5 ? 'bg-red-600' : 'bg-emerald-600'
+            }`}
+            style={{ left: `calc(${pos}% - 4px)` }}
+          />
+        )}
       </span>
       <span className={`text-[10px] font-mono font-extrabold w-8 text-right ${(p ?? 0) >= 0.5 ? 'text-red-600' : 'text-emerald-600'}`}>
         {scoreText(p)}
       </span>
     </button>
+  );
+};
+
+const Quadrant: React.FC<{
+  title: string;
+  hint: string;
+  tone: 'strong' | 'reverse' | 'weak' | 'bottom';
+  rows: FlowProbabilityStock[];
+  h: Horizon;
+  intentMap: Record<string, FlowProbabilityIntentStock>;
+  onSelect?: (s: string, n: string) => void;
+}> = ({ title, hint, tone, rows, h, intentMap, onSelect }) => {
+  const cls =
+    tone === 'strong'
+      ? 'border-red-100 bg-red-50/35'
+      : tone === 'reverse'
+        ? 'border-purple-100 bg-purple-50/35'
+        : tone === 'weak'
+          ? 'border-amber-100 bg-amber-50/35'
+          : 'border-emerald-100 bg-emerald-50/35';
+  const titleCls =
+    tone === 'strong'
+      ? 'text-red-700'
+      : tone === 'reverse'
+        ? 'text-purple-700'
+        : tone === 'weak'
+          ? 'text-amber-700'
+          : 'text-emerald-700';
+  return (
+    <div className={`rounded-xl border px-2.5 py-1.5 flex flex-col min-w-0 ${cls}`}>
+      <div className="flex items-center justify-between gap-1">
+        <span className={`text-[10px] font-extrabold ${titleCls}`}>{title}</span>
+        <span className="text-[9px] text-slate-400">{hint}</span>
+      </div>
+      <div className="flex flex-col divide-y divide-white/60 mt-0.5">
+        {rows.slice(0, 5).map((r) => (
+          <QuadrantRow key={r.symbol} row={r} h={h} intent={intentMap[r.symbol]} onSelect={onSelect} />
+        ))}
+        {!rows.length && <div className="text-[10px] text-slate-300 py-1">今日无</div>}
+      </div>
+    </div>
+  );
+};
+
+const SectorBar: React.FC<{ row: FlowProbabilitySector; h: Horizon; tone: 'up' | 'down' }> = ({
+  row,
+  h,
+  tone,
+}) => {
+  const raw = row[`raw${h}` as keyof FlowProbabilitySector];
+  const p = row[`p${h}` as keyof FlowProbabilitySector];
+  const v = typeof raw === 'number' ? raw : typeof p === 'number' ? p : null;
+  const pos = v === null ? null : Math.max(0, Math.min(100, v * 100));
+  return (
+    <div
+      className="flex items-center gap-1.5 py-0.5"
+      title={`${row.n} 只 · 净额比 ${pointPct((row.net_ratio ?? 0) * 100)}`}
+    >
+      <span className="text-[9px] font-bold text-slate-600 w-24 truncate shrink-0">{row.name}</span>
+      <span className="relative h-1.5 flex-1 rounded-full bg-slate-100">
+        <span className="absolute top-0 bottom-0 left-1/2 w-px bg-slate-300" />
+        {pos !== null && (
+          <span
+            className={`absolute top-1/2 -translate-y-1/2 h-2 w-2 rounded-full ${tone === 'up' ? 'bg-red-600' : 'bg-emerald-600'}`}
+            style={{ left: `calc(${pos}% - 4px)` }}
+          />
+        )}
+      </span>
+      <span className={`text-[9px] font-mono font-extrabold w-8 text-right ${tone === 'up' ? 'text-red-600' : 'text-emerald-600'}`}>
+        {scoreText(v)}
+      </span>
+    </div>
   );
 };
 
@@ -111,7 +202,6 @@ export const FlowProbabilityCard: React.FC<{
 
   const art = data?.available ? data.artifact : undefined;
   const metrics = art?.metrics?.[String(h)];
-  const thresholds = art?.thresholds?.[String(h)];
   const stocks = art?.latest?.stocks;
   const intentMap = data?.intent?.stocks ?? {};
   const top = (stocks?.[`top_${h}` as keyof typeof stocks] as FlowProbabilityStock[] | undefined) ?? [];
@@ -122,8 +212,32 @@ export const FlowProbabilityCard: React.FC<{
     (stocks?.[`inflow_weak_${h}` as keyof typeof stocks] as FlowProbabilityStock[] | undefined) ?? [];
   const sectors = useMemo(() => {
     const list = art?.latest?.sectors ?? [];
-    return [...list].sort((a, b) => (b[`p${h}` as keyof typeof b] as number ?? 0) - (a[`p${h}` as keyof typeof a] as number ?? 0));
+    return [...list].sort(
+      (a, b) =>
+        ((b[`p${h}` as keyof typeof b] as number) ?? 0) -
+        ((a[`p${h}` as keyof typeof a] as number) ?? 0),
+    );
   }, [art, h]);
+
+  // 四象限按「当前资金方向 × 模型分」互斥拆分：同一只票不在两个象限重复出现
+  const quadrants = useMemo(() => {
+    const used = new Set<string>();
+    const take = (rows: FlowProbabilityStock[], pred: (r: FlowProbabilityStock) => boolean) =>
+      rows.filter((r) => !used.has(r.symbol) && pred(r)).slice(0, 5);
+    const strong = take(top, (r) => (r.net_ratio ?? 0) >= 0);
+    strong.forEach((r) => used.add(r.symbol));
+    const reverse = take(outflowStrong, () => true);
+    reverse.forEach((r) => used.add(r.symbol));
+    const weak = take(inflowWeak, () => true);
+    weak.forEach((r) => used.add(r.symbol));
+    const bottomRows = take(bottom, (r) => (r.net_ratio ?? 0) < 0);
+    return {
+      strong: strong.length ? strong : top.slice(0, 5),
+      reverse,
+      weak,
+      bottom: bottomRows.length ? bottomRows : bottom.slice(0, 5),
+    };
+  }, [top, bottom, outflowStrong, inflowWeak]);
 
   if (!loading && !error && data && !data.available) {
     return (
@@ -141,7 +255,7 @@ export const FlowProbabilityCard: React.FC<{
         <div className="flex items-center gap-2 flex-wrap">
           <Gauge className="w-3.5 h-3.5 text-red-500" />
           <span className="text-xs font-extrabold text-slate-800">未来强度概率（模型）</span>
-          <span className="text-[10px] text-slate-400">订单流结构 × 量价速度 × 板块状态 · 排序分</span>
+          <span className="text-[10px] text-slate-400">订单流结构 × 量价速度 × 板块状态 · 四象限</span>
           <span className="text-[10px] font-mono text-purple-700 bg-purple-50 border border-purple-200/70 rounded-full px-2 py-0.5">
             {data.trade_date}
           </span>
@@ -184,61 +298,68 @@ export const FlowProbabilityCard: React.FC<{
             </div>
           )}
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <div className="rounded-xl border border-red-100 bg-red-50/30 px-2.5 py-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-extrabold text-red-700">强势概率 Top</span>
-                <span className="text-[9px] text-slate-400">分数越高＝模型越看好</span>
-              </div>
-              {top.slice(0, 6).map((r) => <StockRow key={r.symbol} row={r} h={h} intent={intentMap[r.symbol]} onSelect={onSelectStock} />)}
-              {!top.length && <div className="text-[10px] text-slate-300">—</div>}
-            </div>
-            <div className="rounded-xl border border-emerald-100 bg-emerald-50/30 px-2.5 py-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-extrabold text-emerald-700">弱势概率 Top</span>
-                <span className="text-[9px] text-slate-400">分数越低＝模型越回避</span>
-              </div>
-              {bottom.slice(0, 6).map((r) => <StockRow key={r.symbol} row={r} h={h} intent={intentMap[r.symbol]} onSelect={onSelectStock} />)}
-              {!bottom.length && <div className="text-[10px] text-slate-300">—</div>}
-            </div>
+          <div className="flex items-center gap-2 text-[9px] text-slate-400 font-mono">
+            <span>横轴=当前资金（流出 ← 0 → 流入）</span>
+            <span>纵轴=模型未来强度（低 ← 50 → 高）</span>
+            <span className="ml-auto">点行打开个股详情</span>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <div className="rounded-xl border border-purple-100 bg-purple-50/30 px-2.5 py-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-extrabold text-purple-700">逆流候选：当前流出 · 概率高</span>
-                <span className="text-[9px] text-slate-400">吸筹/清洗迹象</span>
-              </div>
-              {outflowStrong.slice(0, 5).map((r) => <StockRow key={r.symbol} row={r} h={h} intent={intentMap[r.symbol]} onSelect={onSelectStock} />)}
-              {!outflowStrong.length && <div className="text-[10px] text-slate-300">今日无</div>}
-            </div>
-            <div className="rounded-xl border border-amber-100 bg-amber-50/30 px-2.5 py-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-extrabold text-amber-700">流入但弱：当前流入 · 概率低</span>
-                <span className="text-[9px] text-slate-400">派发/追高警惕</span>
-              </div>
-              {inflowWeak.slice(0, 5).map((r) => <StockRow key={r.symbol} row={r} h={h} intent={intentMap[r.symbol]} onSelect={onSelectStock} />)}
-              {!inflowWeak.length && <div className="text-[10px] text-slate-300">今日无</div>}
-            </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+            <Quadrant
+              title="强势概率 Top"
+              hint="当前流入 · 模型高"
+              tone="strong"
+              rows={quadrants.strong}
+              h={h}
+              intentMap={intentMap}
+              onSelect={onSelectStock}
+            />
+            <Quadrant
+              title="逆流候选：当前流出 · 概率高"
+              hint="吸筹/清洗迹象"
+              tone="reverse"
+              rows={quadrants.reverse}
+              h={h}
+              intentMap={intentMap}
+              onSelect={onSelectStock}
+            />
+            <Quadrant
+              title="流入但弱：当前流入 · 概率低"
+              hint="派发/追高警惕"
+              tone="weak"
+              rows={quadrants.weak}
+              h={h}
+              intentMap={intentMap}
+              onSelect={onSelectStock}
+            />
+            <Quadrant
+              title="弱势概率 Top"
+              hint="模型低 · 回避"
+              tone="bottom"
+              rows={quadrants.bottom}
+              h={h}
+              intentMap={intentMap}
+              onSelect={onSelectStock}
+            />
           </div>
 
           {sectors.length > 0 && (
-            <div className="flex flex-col gap-1 rounded-xl border border-slate-100 bg-slate-50/40 px-2.5 py-1.5">
+            <div className="rounded-xl border border-slate-100 bg-slate-50/40 px-3 py-2">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-extrabold text-slate-600">板块聚合（成分股概率成交额加权）</span>
                 <span className="text-[9px] text-slate-400">不是独立板块模型；仅作构成/风险聚合</span>
               </div>
-              <div className="flex flex-wrap gap-1">
-                {sectors.slice(0, 5).map((s) => (
-                  <span key={s.name} className="px-1.5 py-0.5 rounded bg-red-50 text-red-600 text-[9px] font-bold" title={`${s.n} 只 · 净额比 ${pointPct((s.net_ratio ?? 0) * 100)}`}>
-                    {s.name} {scoreText(s[`p${h}` as keyof typeof s] as number | null)}
-                  </span>
-                ))}
-                {sectors.slice(-5).reverse().map((s) => (
-                  <span key={s.name} className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 text-[9px] font-bold" title={`${s.n} 只 · 净额比 ${pointPct((s.net_ratio ?? 0) * 100)}`}>
-                    {s.name} {scoreText(s[`p${h}` as keyof typeof s] as number | null)}
-                  </span>
-                ))}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-4 mt-1">
+                <div>
+                  {sectors.slice(0, 5).map((s) => (
+                    <SectorBar key={`su-${s.name}`} row={s} h={h} tone="up" />
+                  ))}
+                </div>
+                <div>
+                  {sectors.slice(-5).reverse().map((s) => (
+                    <SectorBar key={`sd-${s.name}`} row={s} h={h} tone="down" />
+                  ))}
+                </div>
               </div>
             </div>
           )}
@@ -248,12 +369,6 @@ export const FlowProbabilityCard: React.FC<{
             当前流出但概率高＝逆流候选（可能是吸筹/清洗），当前流入但概率低＝派发警惕。
             板块层资金流实测无稳定 alpha，故板块只做成分聚合，不做独立预测。
           </p>
-          {thresholds && (
-            <p className="text-[8px] text-slate-300 font-mono">
-              着色阈值：hi={scoreText(thresholds.hi)} / lo={scoreText(thresholds.lo)}
-              {loading ? ' · 刷新中' : ''}{error ? ` · ${error}` : ''}
-            </p>
-          )}
         </div>
       )}
     </div>

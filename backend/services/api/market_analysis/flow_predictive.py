@@ -329,6 +329,32 @@ def _current(date: str | None) -> dict[str, Any]:
     sectors = [s for s in sectors if s["score"] is not None]
     sectors.sort(key=lambda x: x["score"], reverse=True)
 
+    # 分数分布 + 分项指纹：给前端画直方图/热条，算法与单票分数不变
+    scores = np.array([float(r["score"]) for r in records], dtype=float)
+    hist_counts, _ = np.histogram(scores, bins=np.arange(0, 101, 10))
+    destribution = {
+        "bins": list(range(0, 101, 10)),
+        "counts": [int(v) for v in hist_counts],
+        "p10": _round(float(np.quantile(scores, 0.10)), 1),
+        "median": _round(float(np.quantile(scores, 0.50)), 1),
+        "p90": _round(float(np.quantile(scores, 0.90)), 1),
+        "n": len(records),
+    }
+
+    def _profile(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+        out: dict[str, float | None] = {}
+        for col in COMPONENT_COLUMNS:
+            vals = [
+                float(r["components"][col])
+                for r in rows
+                if isinstance(r["components"].get(col), (int, float))
+            ]
+            out[col] = round(float(np.mean(vals)), 4) if vals else None
+        return out
+
+    top_profile = [r for r in records if r["score"] >= score_cut]
+    bottom_profile = [r for r in records if r["score"] <= score_floor]
+
     return {
         "available": True,
         "trade_date": target,
@@ -338,6 +364,11 @@ def _current(date: str | None) -> dict[str, Any]:
         "patterns": patterns,
         "sectors_top": sectors[:8],
         "sectors_bottom": list(reversed(sectors[-8:])),
+        "distribution": destribution,
+        "component_profile": {
+            "top": _profile(top_profile),
+            "bottom": _profile(bottom_profile),
+        },
     }
 
 
