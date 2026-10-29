@@ -10,6 +10,8 @@ import {
   flowToColor,
   directionToColor,
   sentimentToColor,
+  vpToColor,
+  vpLabel,
   computeSentimentScores,
   heatmapCellColor,
   heatmapDirectionLabel,
@@ -139,6 +141,22 @@ describe('computeSentimentScores', () => {
   });
 });
 
+describe('vpToColor / vpLabel', () => {
+  it('同向加速红/绿，背离琥珀，缺失灰白', () => {
+    expect(vpToColor(1, 0.2)).toBe('#dc2626');
+    expect(vpToColor(-1, -0.2)).toBe('#059669');
+    expect(vpToColor(1, -0.2)).toBe('#f59e0b');
+    expect(vpToColor(null, 0.2)).toBe('#e2e8f0');
+  });
+
+  it('标签', () => {
+    expect(vpLabel(1, 0.2)).toBe('↑共振');
+    expect(vpLabel(-1, -0.2)).toBe('↓共振');
+    expect(vpLabel(1, -0.2)).toBe('背离');
+    expect(heatmapLabelValue({ flow_accel: 1, price_accel: 0.2 }, 'vp')).toBe('↑共振');
+  });
+});
+
 describe('HEATMAP_COLOR_LABEL', () => {
   it('所有维度都有中文文案', () => {
     expect(HEATMAP_COLOR_LABEL.pct).toBe('涨跌幅');
@@ -146,5 +164,6 @@ describe('HEATMAP_COLOR_LABEL', () => {
     expect(HEATMAP_COLOR_LABEL.accel).toBe('加速度');
     expect(HEATMAP_COLOR_LABEL.direction).toBe('方向概率');
     expect(HEATMAP_COLOR_LABEL.sentiment).toBe('情绪热度');
+    expect(HEATMAP_COLOR_LABEL.vp).toBe('量价共振');
   });
 });

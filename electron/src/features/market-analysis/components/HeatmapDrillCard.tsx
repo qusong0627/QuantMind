@@ -29,6 +29,7 @@ import {
   heatmapCellColor,
   heatmapDirectionLabel,
   heatmapLabelValue,
+  vpLabel,
   HEATMAP_COLOR_LABEL,
   type HeatmapColorMode,
 } from './heatmapColor';
@@ -115,7 +116,8 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
   // shenwan 快照仅作首屏即时铺底，实时数据到达后替换（无估值/无 L2 时不闪空态）。
   useEffect(() => {
     let cancelled = false;
-    setOwnTop([]);
+    // 不清空旧数据：日期/周期切换时保留上一帧，等新数据到达后由 ECharts 补间色块，
+    // 这样能看到哪些板块颜色变了，而不是整图闪空再重画。
     setTopLoading(true);
     getHeatmapTop({ category, date, realtime: true, period })
       .then((res) => {
@@ -333,7 +335,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
           )}
           {/* 着色维度切换（两层共用）；方向概率仅行业二级最新快照 */}
           <div className="flex rounded-full bg-slate-100 p-0.5">
-            {(['pct', 'flow', 'accel', 'sentiment', 'direction'] as HeatmapColorMode[]).map((mode) => {
+            {(['pct', 'flow', 'vp', 'sentiment', 'direction'] as HeatmapColorMode[]).map((mode) => {
               const directionDisabled =
                 mode === 'direction' &&
                 (category !== 'shenwan' || !!date || (!directionReady && !topLoading));
@@ -396,6 +398,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
           面积=总市值 · 周期={periodDays}日 · 颜色={HEATMAP_COLOR_LABEL[colorMode]}
           {colorMode === 'flow' && '（周期主力净额）'}
           {colorMode === 'accel' && '（当前日均 − 前一窗口日均）'}
+          {colorMode === 'vp' && '（资金加速方向 × 价格加速方向；同向=共振，反向=背离）'}
           {colorMode === 'direction' &&
             `（T+${directionH} 历史跑赢概率；颜色/箭头=板块间排名，数字=概率，50%=无优势）`}
           {colorMode === 'sentiment' &&
@@ -408,6 +411,9 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
             {drill.summary.truncated ? '（按市值截断）' : ''} · 均涨 {drill.summary.avg_pct >= 0 ? '+' : ''}
             {drill.summary.avg_pct}%
           </span>
+        )}
+        {topLoading && !isEmpty && (
+          <span className="text-[10px] text-purple-500 font-mono animate-pulse">更新中…</span>
         )}
       </div>
 
@@ -580,7 +586,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
 
       {/* 图区 */}
       <div className="flex-1 min-h-0 relative">
-        {(drillLoading || topLoading) && (
+        {(drillLoading || topLoading) && isEmpty && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60 backdrop-blur-xs">
             <Loader2 className="w-5 h-5 text-purple-500 animate-spin" />
           </div>
@@ -605,6 +611,7 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
                 flow_daily?: number | null;
                 flow_accel?: number | null;
                 flow_ratio_accel?: number | null;
+                price_accel?: number | null;
                 breadth_flow?: number | null;
                 breadth_flow_chg?: number | null;
                 pct_above_ma20?: number | null;
@@ -626,6 +633,18 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
               if (typeof it.flow_accel === 'number') {
                 const c = it.flow_accel >= 0 ? '#f87171' : '#34d399';
                 parts.push(`<span style="color:#cbd5e1;">加速度: <b style="color:${c};">${it.flow_accel >= 0 ? '+' : ''}${it.flow_accel.toFixed(2)}亿/日</b></span>`);
+              }
+              if (colorMode === 'vp') {
+                const f = it.flow_accel;
+                const p = it.price_accel;
+                parts.push(
+                  `<span style="color:#fbbf24;">量价共振：<b>${vpLabel(f, p)}</b></span>`,
+                );
+                parts.push(
+                  `<span style="color:#94a3b8;">资金加速 ${f == null ? '—' : `${f > 0 ? '+' : ''}${f.toFixed(2)}亿/日`}` +
+                    ` · 价格加速 ${p == null ? '—' : `${p > 0 ? '+' : ''}${p.toFixed(2)}pp/日`}</span>`,
+                );
+                parts.push('<span style="color:#64748b;">描述性状态；历史统计不支持把它当方向预测</span>');
               }
               if (colorMode === 'sentiment') {
                 parts.push(

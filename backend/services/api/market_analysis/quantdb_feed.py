@@ -860,8 +860,11 @@ def get_sector_heatmap(
         # 供方向概率状态表查表）；pct_period 仍保留首尾收盘口径供展示。
         period_pct: dict[str, float] = {}
         ret_period_sum: dict[str, float] = {}
-        if n_days > 1:
-            ret_days = _trading_days(today_s, n_days + 1) if today_s else []
+        ret_period_sum_prev: dict[str, float] = {}
+        price_accel: dict[str, float] = {}
+        if n_days >= 1:
+            # 多取一倍窗口：当前 N 日 + 前 N 日，用于价格加速度
+            ret_days = _trading_days(today_s, n_days * 2 + 1) if today_s else []
             if len(ret_days) >= 2:
                 closes = _read_partitioned(
                     "1_kline_data/daily_unadjusted",
@@ -873,7 +876,7 @@ def get_sector_heatmap(
                     piv = closes.pivot_table(
                         index="symbol", columns="dt", values="close"
                     )
-                    first, last = ret_days[-1], ret_days[0]
+                    first, last = ret_days[min(n_days, len(ret_days) - 1)], ret_days[0]
                     if first in piv.columns and last in piv.columns:
                         ret = (piv[last] / piv[first] - 1.0) * 100.0
                         period_pct = {
@@ -881,21 +884,39 @@ def get_sector_heatmap(
                             for k, v in ret.items()
                             if math.isfinite(float(v))
                         }
-                    # 逐日收益（ret_days 降序）：day i / day i+1 − 1
+                    # 逐日收益（ret_days 降序）：day i / day i+1 − 1；2N 日用于价格加速度
                     daily = pd.DataFrame(index=piv.index)
-                    for i in range(min(n_days, len(ret_days) - 1)):
+                    for i in range(min(n_days * 2, len(ret_days) - 1)):
                         d0, d1 = ret_days[i], ret_days[i + 1]
                         if d0 in piv.columns and d1 in piv.columns:
                             daily[d0] = piv[d0] / piv[d1] - 1.0
                     if not daily.empty:
+                        cur_cols = list(daily.columns[:n_days])
+                        prev_cols = list(daily.columns[n_days : n_days * 2])
                         for sname, syms in groups.items():
                             sub = daily.reindex([s for s in syms if s in daily.index])
                             if sub.empty:
                                 continue
-                            per_day = sub.mean(axis=0, skipna=True)
-                            total = per_day.sum(min_count=1)
-                            if pd.notna(total):
-                                ret_period_sum[sname] = float(total) * 100.0
+                            cur = sub.reindex(columns=cur_cols).mean(axis=0, skipna=True)
+                            cur_total = cur.sum(min_count=1)
+                            if pd.notna(cur_total):
+                                ret_period_sum[sname] = float(cur_total) * 100.0
+                            if prev_cols:
+                                prev = sub.reindex(columns=prev_cols).mean(
+                                    axis=0, skipna=True
+                                )
+                                prev_total = prev.sum(min_count=1)
+                                if pd.notna(prev_total):
+                                    ret_period_sum_prev[sname] = (
+                                        float(prev_total) * 100.0
+                                    )
+                                if pd.notna(cur_total) and pd.notna(prev_total):
+                                    price_accel[sname] = round(
+                                        (float(cur_total) - float(prev_total))
+                                        / n_days
+                                        * 100.0,
+                                        4,
+                                    )
 
         # 价格广度（情绪算法的行业化）：成分收盘价在 MA20 上方的占比（当前/5日前）。
         price_breadth: dict[str, tuple[float, float | None]] = {}
@@ -1045,6 +1066,12 @@ def get_sector_heatmap(
                         if sname in ret_period_sum
                         else None
                     ),
+                    "ret_period_sum_prev": (
+                        round(ret_period_sum_prev[sname], 4)
+                        if sname in ret_period_sum_prev
+                        else None
+                    ),
+                    "price_accel": price_accel.get(sname),
                     "flow_net": flow_net,
                     "flow_daily": flow_daily,
                     "prev_flow_daily": prev_daily,

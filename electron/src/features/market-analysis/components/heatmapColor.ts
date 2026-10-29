@@ -10,7 +10,7 @@
  * 不做金额换算，避免与后端口径重复换算（DRY）。
  */
 
-export type HeatmapColorMode = 'pct' | 'flow' | 'accel' | 'direction' | 'sentiment';
+export type HeatmapColorMode = 'pct' | 'flow' | 'accel' | 'vp' | 'direction' | 'sentiment';
 
 /** 涨跌幅档位色（A 股涨红跌绿；阈值与「涨/跌停=±10%」口径对齐）。 */
 export function pctToColor(pct: number | null | undefined): string {
@@ -117,6 +117,46 @@ export function computeSentimentScores<T extends SentimentHeatItem>(
   });
 }
 
+
+/** 量价共振：资金加速方向 × 价格加速方向。
+ *  同向加速上涨=红、同向加速下跌=绿、背离=琥珀；缺失灰。
+ *  注意：历史统计不支持把它当方向预测，仅作当前状态描述。 */
+export function vpToColor(
+  flowAccel: number | null | undefined,
+  priceAccel: number | null | undefined,
+): string {
+  if (
+    typeof flowAccel !== 'number' ||
+    !Number.isFinite(flowAccel) ||
+    typeof priceAccel !== 'number' ||
+    !Number.isFinite(priceAccel)
+  ) {
+    return '#e2e8f0';
+  }
+  const f = flowAccel >= 0 ? 1 : -1;
+  const p = priceAccel >= 0 ? 1 : -1;
+  if (f !== p) return '#f59e0b';
+  return f > 0 ? '#dc2626' : '#059669';
+}
+
+export function vpLabel(
+  flowAccel: number | null | undefined,
+  priceAccel: number | null | undefined,
+): string {
+  if (
+    typeof flowAccel !== 'number' ||
+    !Number.isFinite(flowAccel) ||
+    typeof priceAccel !== 'number' ||
+    !Number.isFinite(priceAccel)
+  ) {
+    return '—';
+  }
+  const f = flowAccel >= 0 ? 1 : -1;
+  const p = priceAccel >= 0 ? 1 : -1;
+  if (f !== p) return '背离';
+  return f > 0 ? '↑共振' : '↓共振';
+}
+
 export interface HeatmapCellMetric {
   pct_change?: number | null;
   flow_net?: number | null;
@@ -124,6 +164,8 @@ export interface HeatmapCellMetric {
   direction?: Record<string, HeatmapDirectionCellLike> | null;
   /** 情绪热度（0~1，截面分位合成；不是概率） */
   sentiment_score?: number | null;
+  /** 价格加速度（百分点/日） */
+  price_accel?: number | null;
 }
 
 /** 方向概率：按全板块截面排名着色（不是绝对概率档位）。
@@ -166,6 +208,7 @@ export function heatmapCellColor(
     return directionToColor(cell?.rank);
   }
   if (mode === 'sentiment') return sentimentToColor(item.sentiment_score);
+  if (mode === 'vp') return vpToColor(item.flow_accel, item.price_accel);
   if (mode === 'accel') return accelToColor(item.flow_accel);
   return mode === 'flow' ? flowToColor(item.flow_net) : pctToColor(item.pct_change);
 }
@@ -186,6 +229,7 @@ export function heatmapLabelValue(
     const v = item.sentiment_score;
     return typeof v === 'number' && Number.isFinite(v) ? `热度${(v * 100).toFixed(0)}` : '—';
   }
+  if (mode === 'vp') return vpLabel(item.flow_accel, item.price_accel);
   if (mode === 'accel') {
     const v = item.flow_accel;
     if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
@@ -208,4 +252,5 @@ export const HEATMAP_COLOR_LABEL: Record<HeatmapColorMode, string> = {
   accel: '加速度',
   direction: '方向概率',
   sentiment: '情绪热度',
+  vp: '量价共振',
 };

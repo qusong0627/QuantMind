@@ -574,6 +574,8 @@ export interface HeatmapTopItem {
   pct_above_ma20_prev?: number | null;
   /** 价格广度变化（当前 − 5 日前） */
   pct_above_ma20_chg?: number | null;
+  /** 价格加速度：当前 N 日逐日等权收益均值 − 前 N 日均值（百分点/日） */
+  price_accel?: number | null;
   /** 情绪热度（0~1，前端按截面分位合成；不是概率） */
   sentiment_score?: number | null;
   period?: string;
@@ -783,6 +785,20 @@ export interface FlowPredictiveCurrent {
   patterns?: Record<string, { count: number; items: FlowScoreRow[] }>;
   sectors_top?: FlowSectorScore[];
   sectors_bottom?: FlowSectorScore[];
+  /** 当日质量分分布（10 分一档直方图 + 分位） */
+  distribution?: {
+    bins: number[];
+    counts: number[];
+    p10: number | null;
+    median: number | null;
+    p90: number | null;
+    n: number;
+  };
+  /** 强势组/弱势组的分项指纹（各分项当日截面分位均值） */
+  component_profile?: {
+    top: Record<string, number | null>;
+    bottom: Record<string, number | null>;
+  };
 }
 
 export interface FlowPredictiveResponse {

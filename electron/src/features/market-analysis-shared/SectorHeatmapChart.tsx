@@ -38,6 +38,8 @@ export interface SectorHeatmapItem {
   pct_above_ma20?: number | null;
   /** 价格广度变化（当前 − 5 日前） */
   pct_above_ma20_chg?: number | null;
+  /** 价格加速度：当前 N 日逐日等权收益均值 − 前 N 日均值（百分点/日） */
+  price_accel?: number | null;
   /** 情绪热度（0~1，截面分位合成；不是概率） */
   sentiment_score?: number | null;
   /** 板块方向概率（键 5/10/20）；仅行业二级最新快照有值 */
@@ -117,15 +119,39 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
   // echarts treemap 会把文本盒钉死为色块尺寸并忽略 verticalAlign，只能靠 padding 在盒内下移实现居中
   const LABEL_TEXT_HEIGHT = 31;
 
+  const redrawRef = useRef<() => void>(() => {});
+
+  // 只初始化一次：之后数据/颜色/日期变化都走 setOption 合并，动画才能看出色块变化，
+  // 而不是每次 dispose + init 导致整图闪一下。
+  useEffect(() => {
+    if (!chartRef.current) return;
+    const chart = echarts.init(chartRef.current);
+    instanceRef.current = chart;
+    const handleClick = (params: any) => {
+      if (params?.componentType !== 'series' || !params?.name) return;
+      onItemClickRef.current?.(String(params.name));
+    };
+    chart.on('click', handleClick);
+    const ro = new ResizeObserver(() => {
+      chart.resize();
+      redrawRef.current();
+    });
+    ro.observe(chartRef.current);
+    return () => {
+      ro.disconnect();
+      chart.off('click', handleClick);
+      chart.dispose();
+      instanceRef.current = null;
+    };
+  }, []);
+
   useEffect(() => {
     if (!chartRef.current || sectorItems.length === 0) return;
-
-    if (!instanceRef.current) {
-      instanceRef.current = echarts.init(chartRef.current);
-    }
-    const chart = instanceRef.current;
+    const chart = instanceRef.current ?? echarts.init(chartRef.current);
+    instanceRef.current = chart;
 
     const formattedData = sectorItems.map((item) => ({
+      id: item.name,
       name: item.name,
       // 🎯 非线性压缩(幂0.4)，避免超大板块(如半导体/银行)吞掉整张图；tooltip 用 raw_value 显示真实规模
       value: Math.pow(Math.max(item.value || 0, 1), 0.4),
@@ -138,7 +164,7 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
       // 第二行标签文本：默认涨跌幅，下钻层可覆盖为「+x.xx亿」等
       label_value:
         labelValueOfRef.current?.(item) ??
-        `${item.pct_change >= 0 ? '+' : ''}${item.pct_change}%`,
+        `${item.pct_change >= 0 ? '+' : ''}${item.pct_change.toFixed(2)}%`,
       itemStyle: {
         // 默认按涨跌幅档位着色；下钻层可传 colorOf 覆盖（按主力净额等）
         color:
@@ -152,10 +178,15 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
             : item.pct_change > -2
             ? '#34d399'
             : '#10b981'),
+        borderRadius: 2,
       },
     }));
 
     const option: echarts.EChartsOption = {
+      animationDuration: 500,
+      animationDurationUpdate: 650,
+      animationEasing: 'cubicOut',
+      animationEasingUpdate: 'cubicInOut',
       tooltip: {
         trigger: 'item',
         backgroundColor: 'rgba(15, 23, 42, 0.92)',
@@ -194,6 +225,7 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
       },
       series: [
         {
+          id: 'sector-heatmap',
           type: 'treemap',
           top: 4,
           bottom: 4,
@@ -204,6 +236,8 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
           breadcrumb: { show: false },
           label: {
             show: true,
+            overflow: 'truncate',
+            ellipsis: '…',
             formatter: (params: any) => {
               const d = params.data || {};
               // label_value 由 formattedData 预计算（默认涨跌幅；下钻层可覆盖为净额）
@@ -216,12 +250,14 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
                 fontWeight: 'bold',
                 color: '#ffffff',
                 lineHeight: 15,
+                align: 'center',
               },
               pct: {
                 fontSize: 10,
                 fontWeight: 'bold',
                 color: '#ffffff',
                 fontFamily: 'monospace',
+                align: 'center',
               },
             },
           },
@@ -235,15 +271,9 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
       ],
     };
 
-    // 第一遍渲染：确定每个色块的实际布局（treemap 布局只取决于 value，与 label padding 无关）
-    chart.setOption(option);
-
-    // 点击色块 → 下钻（treemap 的 nodeClick 会吃掉原生 click，必须用 echarts 事件）
-    const handleClick = (params: any) => {
-      if (params?.componentType !== 'series' || !params?.name) return;
-      onItemClickRef.current?.(String(params.name));
-    };
-    chart.on('click', handleClick);
+    // 合并更新（不销毁实例）：日期/颜色/周期变化时 ECharts 自己补间色块与布局，
+    // replaceMerge 只替换 series 数据，保留图表实例与动画状态。
+    chart.setOption(option, { notMerge: false, replaceMerge: ['series'] });
 
     // 第二遍渲染：按每个色块自身高度注入上下 padding，实现文字水平+垂直居中；
     // padding 在「盒高=色块高」的文本盒内生效：上下各留 (块高-文字高)/2，两行文本整体上下居中；
@@ -263,27 +293,19 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
           const layout = layoutByName[item.name];
           if (!layout) return item;
           const pad = Math.max(0, (layout.height - LABEL_TEXT_HEIGHT) / 2);
-          return { ...item, label: { padding: [pad, 0, pad, 0], align: 'center' } };
+          return { ...item, label: { padding: [pad, 0, pad, 0], align: 'center', overflow: 'truncate' } };
         });
-        chart.setOption({ series: [{ data: centeredData }] });
+        chart.setOption({ series: [{ id: 'sector-heatmap', data: centeredData }] });
       } catch {
         // 内部 API 变化时退化为默认顶部对齐，不影响图表展示
       }
     };
     applyCenteredLabels();
 
-    // resize 后色块高度变化，先恢复无 padding 布局再按新尺寸重算居中，避免旧 padding 错位（数据未变时布局不变，重算是幂等的）
-    const handleResize = () => {
+    redrawRef.current = () => {
       chart.resize();
-      chart.setOption({ series: [{ data: formattedData }] });
+      chart.setOption({ series: [{ id: 'sector-heatmap', data: formattedData }] });
       applyCenteredLabels();
-    };
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      chart.dispose();
-      instanceRef.current = null;
     };
   }, [sectorItems, valueLabel, pctLabel, renderKey]);
 
