@@ -102,6 +102,7 @@ export const MarketSentimentPanel: React.FC = () => {
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [mainForceGlossaryOpen, setMainForceGlossaryOpen] = useState(false);
   const [fanSolo, setFanSolo] = useState(false);
+  const [volumeMode, setVolumeMode] = useState<'market' | 'main'>('market');
   const [fanCompare, setFanCompare] = useState(false);
   const setAsOf = useCallback((value?: string) => {
     setAsOfState(value);
@@ -446,6 +447,26 @@ export const MarketSentimentPanel: React.FC = () => {
               )}
             </div>
             <div className="flex items-center gap-1.5">
+              <div className="flex rounded-full bg-slate-100 p-0.5">
+                <button
+                  onClick={() => setVolumeMode('market')}
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                    volumeMode === 'market' ? 'bg-white text-slate-800 shadow-2xs' : 'text-slate-500'
+                  }`}
+                  title="成交量柱=所选指数/宇宙的成交额"
+                >
+                  大盘柱
+                </button>
+                <button
+                  onClick={() => setVolumeMode('main')}
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                    volumeMode === 'main' ? 'bg-white text-slate-800 shadow-2xs' : 'text-slate-500'
+                  }`}
+                  title="成交量柱=全市场主力净额（超大单+大单）"
+                >
+                  主力柱
+                </button>
+              </div>
               <button
                 onClick={() => setFanSolo((v) => !v)}
                 className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border transition-colors ${
@@ -493,7 +514,13 @@ export const MarketSentimentPanel: React.FC = () => {
                 return hit ? { date: h.date, stress: hit.stress } : null;
               })
               .filter((v): v is { date: string; stress: number } => v !== null)}
-            volume={fanSolo ? undefined : selected.volume ?? data.volume}
+            volume={
+              fanSolo
+                ? undefined
+                : volumeMode === 'main' && data.volume
+                  ? { ...data.volume, scope: '全市场', barMode: 'main' as const }
+                  : selected.volume ?? data.volume
+            }
             compare={fanSolo || !fanCompare ? [] : INDEX_ORDER.filter((k) => k !== indexKey && data.indices[k]).map((k) => ({
               name: data.indices[k].name,
               color: INDEX_COLORS[k] ?? '#94a3b8',

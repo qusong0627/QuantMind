@@ -15,6 +15,9 @@ export interface FanVolumeSeries {
   dates: string[];
   turnover_yi: (number | null)[];
   vw_breadth: (number | null)[];
+  /** 主力净额柱（亿元）；barMode=main 时使用 */
+  main_net_yi?: (number | null)[];
+  barMode?: 'market' | 'main';
 }
 
 interface SentimentFanChartProps {
@@ -103,14 +106,14 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   const hasVolume = !!volume && volume.dates.length > 0;
   const hasStress = stress.length > 0;
   const volumeH = hasVolume ? 54 : 0;
-  const stressH = hasStress ? 24 : 0;
   const gap = 8;
-  const priceH =
-    height - PAD.top - PAD.bottom - volumeH - stressH - (hasVolume ? gap : 0) - (hasStress ? gap : 0);
+  const priceH = height - PAD.top - PAD.bottom - volumeH - (hasVolume ? gap : 0);
   const priceBottom = PAD.top + priceH;
-  const stressTop = priceBottom + (hasStress ? gap : 0);
-  const stressBottom = stressTop + stressH;
-  const volumeTop = stressBottom + (hasVolume ? gap : 0);
+  const stressTop = PAD.top;
+  const volumeTop = priceBottom + (hasVolume ? gap : 0);
+  // 压力分画在主图下 38% 带内，避免和价格线正面打架
+  const stressBandTop = PAD.top + priceH * 0.62;
+  const stressBandH = priceH * 0.38;
   const volumeBase = height - PAD.bottom;
 
   const allDates = useMemo(() => {
@@ -124,10 +127,14 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   }, [history, forwardDates, horizon, H]);
 
   const volMap = useMemo(() => {
-    const map = new Map<string, { turnover: number | null; vw: number | null }>();
+    const map = new Map<string, { turnover: number | null; vw: number | null; mainNet: number | null }>();
     if (volume) {
       volume.dates.forEach((d, i) =>
-        map.set(d, { turnover: volume.turnover_yi[i] ?? null, vw: volume.vw_breadth[i] ?? null }),
+        map.set(d, {
+          turnover: volume.turnover_yi[i] ?? null,
+          vw: volume.vw_breadth[i] ?? null,
+          mainNet: volume.main_net_yi?.[i] ?? null,
+        }),
       );
     }
     return map;
@@ -138,7 +145,8 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   const geom = useMemo(() => {
     const x = (i: number): number =>
       PAD.left + ((i - viewStart) / Math.max(viewEndClamped - viewStart, 1e-9)) * plotW;
-    const stressY = (v: number): number => stressTop + (v / 100) * stressH;
+    // 压力分叠加在主图下 38% 带：0=过热在带顶、100=超卖在带底（与价格同向）
+    const stressY = (v: number): number => stressBandTop + (v / 100) * stressBandH;
     const inView = (i: number): boolean => i >= viewStart - 0.5 && i <= viewEndClamped + 0.5;
     const priceAt = (pct: number): number => last * (1 + pct / 100);
 
@@ -201,16 +209,38 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
       : '';
 
     // 成交量柱：只画历史段，日期逐日映射到价格 x 轴（未来段留空）
-    const volByDate = new Map<string, { turnover: number | null; vw: number | null }>();
+    const volByDate = new Map<string, { turnover: number | null; vw: number | null; mainNet: number | null }>();
     if (volume) {
-      volume.dates.forEach((d, i) => volByDate.set(d, { turnover: volume.turnover_yi[i] ?? null, vw: volume.vw_breadth[i] ?? null }));
+      volume.dates.forEach((d, i) => volByDate.set(d, {
+        turnover: volume.turnover_yi[i] ?? null,
+        vw: volume.vw_breadth[i] ?? null,
+        mainNet: volume.main_net_yi?.[i] ?? null,
+      }));
     }
     const visibleVol = history
-      .map((h, i) => ({ i, ...(volByDate.get(h.date) ?? { turnover: null, vw: null }) }))
+      .map((h, i) => ({ i, ...(volByDate.get(h.date) ?? { turnover: null, vw: null, mainNet: null }) }))
       .filter((v) => v.i >= Math.max(0, Math.floor(viewStart)) && v.i <= Math.min(H - 1, Math.ceil(viewEndClamped)));
-    const maxTurn = Math.max(...visibleVol.map((v) => v.turnover ?? 0), 1);
+    const isMain = volume?.barMode === 'main';
+    const maxTurn = Math.max(
+      ...visibleVol.map((v) => (isMain ? Math.abs(v.mainNet ?? 0) : v.turnover ?? 0)),
+      1,
+    );
     const barW = Math.max(1, (plotW / Math.max(viewEndClamped - viewStart, 1)) * 0.58);
+    const volZero = volumeTop + volumeH / 2;
     const volBars = visibleVol.map((v) => {
+      if (isMain) {
+        const val = v.mainNet ?? 0;
+        const hgt = Math.max(1, (Math.abs(val) / maxTurn) * (volumeH / 2 - 2));
+        return {
+          key: history[v.i].date,
+          x: x(v.i) - barW / 2,
+          y: val >= 0 ? volZero - hgt : volZero,
+          h: hgt,
+          w: barW,
+          color: val >= 0 ? UP : DOWN,
+          title: `${history[v.i].date} · 主力净额 ${val >= 0 ? '+' : ''}${val.toFixed(2)} 亿（全市场）`,
+        };
+      }
       const hgt = v.turnover == null ? 0 : Math.max(1, (v.turnover / maxTurn) * (volumeH - 4));
       return {
         key: history[v.i].date,
@@ -233,7 +263,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
 
     return {
       x, y, stressY, histPath, medianPath, gridVals, actualPath, actualEnd, comparePaths,
-      stressPath, fanPrices, volBars, maxTurn, vwPath,
+      stressPath, fanPrices, volBars, maxTurn, vwPath, isMain, volZero,
       upperOuter: band((i) => fanPrices[i].p50, (i) => fanPrices[i].p90),
       lowerOuter: band((i) => fanPrices[i].p10, (i) => fanPrices[i].p50),
       upperInner: band((i) => fanPrices[i].p50, (i) => fanPrices[i].p75),
@@ -245,7 +275,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
       anchorVisible: inView(H - 1),
       fanEndVisible: inView(total - 1),
     };
-  }, [history, fan, last, actual, compare, stress, volume, viewStart, viewEndClamped, H, F, total, plotW, priceH, stressH, stressTop, volumeH, volumeBase]);
+  }, [history, fan, last, actual, compare, stress, volume, viewStart, viewEndClamped, H, F, total, plotW, priceH, volumeH, volumeBase, stressBandTop, stressBandH]);
 
   const onPointerDown = (e: React.PointerEvent<SVGSVGElement>): void => {
     dragRef.current = { x: e.clientX, y: e.clientY, end: viewEndClamped, span: viewEndClamped - viewStart, moved: false };
@@ -325,6 +355,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
       stress: stressV,
       turnover: vol?.turnover ?? null,
       vw: vol?.vw ?? null,
+      mainNet: vol?.mainNet ?? null,
     };
   }, [hoverIdx, allDates, total, H, F, history, fan, volMap, stressMap, viewStart, viewEndClamped, plotW]);
 
@@ -354,7 +385,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
             <stop offset="0%" stopColor={HISTORY} stopOpacity="0.10" />
             <stop offset="100%" stopColor={HISTORY} stopOpacity="0" />
           </linearGradient>
-          <linearGradient id="stress-grad" gradientUnits="userSpaceOnUse" x1="0" y1={stressTop} x2="0" y2={stressTop + stressH}>
+          <linearGradient id="stress-grad" gradientUnits="userSpaceOnUse" x1="0" y1={stressBandTop} x2="0" y2={stressBandTop + stressBandH}>
             <stop offset="0%" stopColor="#ef4444" />
             <stop offset="50%" stopColor="#94a3b8" />
             <stop offset="100%" stopColor="#10b981" />
@@ -383,6 +414,9 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
           <path d={geom.lowerOuter} fill={DOWN} fillOpacity={0.07} />
           <path d={geom.upperInner} fill={UP} fillOpacity={0.16} />
           <path d={geom.lowerInner} fill={DOWN} fillOpacity={0.16} />
+          {hasStress && (
+            <path d={geom.stressPath} fill="none" stroke="#7c3aed" strokeWidth={1.25} strokeDasharray="4 3" strokeLinejoin="round" opacity={0.72} />
+          )}
           {geom.comparePaths.map((c) => (
             <path key={c.name} d={c.d} fill="none" stroke={c.color} strokeWidth={1.2} strokeDasharray="2 3" opacity={0.8} />
           ))}
@@ -404,26 +438,28 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
         )}
         {geom.fanEndVisible && (
           <g fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
-            <text x={geom.lastX + 8} y={geom.y(geom.lastFan.p50) + 3} fontSize={11} fill={geom.lastPct.p50 >= 0 ? UP : DOWN} fontWeight={800}>典型 {fmtPct(geom.lastPct.p50)}</text>
-            <text x={geom.lastX + 8} y={geom.y(geom.lastFan.p50) + 14} fontSize={8} fill="#94a3b8">80% {fmtPct(geom.lastPct.p10)}~{fmtPct(geom.lastPct.p90)}</text>
+            {[
+              { y: geom.y(geom.lastFan.p90), pct: geom.lastPct.p90, label: '最高', color: UP, size: 9 },
+              { y: geom.y(geom.lastFan.p50), pct: geom.lastPct.p50, label: '典型', color: geom.lastPct.p50 >= 0 ? UP : DOWN, size: 11 },
+              { y: geom.y(geom.lastFan.p10), pct: geom.lastPct.p10, label: '最低', color: DOWN, size: 9 },
+            ].map((it) => (
+              <g key={it.label}>
+                <line x1={geom.lastX + 5} x2={geom.lastX + 13} y1={it.y} y2={it.y} stroke={it.color} strokeWidth={1} opacity={0.6} />
+                <text x={geom.lastX + 16} y={it.y + 3} fontSize={it.size} fill={it.color} fontWeight={800} paintOrder="stroke" stroke="#ffffff" strokeWidth={2.5}>
+                  {it.label} {fmtPct(it.pct)}
+                </text>
+              </g>
+            ))}
           </g>
         )}
-
-        {/* 压力分细条：不再叠在价格上 */}
+        {/* 压力分右轴：只标 0/50/100，避免压住价格 */}
         {hasStress && (
-          <g>
-            <rect x={PAD.left} y={stressTop} width={plotW} height={stressH} fill="#faf5ff" opacity={0.65} rx={2} />
-            {[20, 40, 60, 80].map((v) => (
-              <line key={v} x1={PAD.left} x2={W - PAD.right} y1={geom.stressY(v)} y2={geom.stressY(v)} stroke="#a78bfa" strokeWidth={0.6} strokeDasharray="2 4" opacity={0.3} />
+          <g fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
+            {[0, 50, 100].map((v) => (
+              <text key={v} x={W - PAD.right + 4} y={geom.stressY(v) + 3} fontSize={7} fill="#7c3aed" fontWeight={700} opacity={0.75}>
+                {v}
+              </text>
             ))}
-            <path d={geom.stressPath} fill="none" stroke="url(#stress-grad)" strokeWidth={1.7} strokeLinejoin="round" />
-            {latestStress != null && (
-              <circle cx={geom.x(stress.length - 1)} cy={geom.stressY(latestStress)} r={2.6} fill="#fff" stroke="#7c3aed" strokeWidth={1.8} />
-            )}
-            <text x={PAD.left - 6} y={stressTop + 11} textAnchor="end" fontSize={8} fill="#7c3aed" fontWeight={700}>压力</text>
-            {latestStress != null && (
-              <text x={W - PAD.right + 4} y={stressTop + 11} fontSize={9} fill="#7c3aed" fontWeight={800} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">{latestStress.toFixed(1)}</text>
-            )}
           </g>
         )}
 
@@ -436,12 +472,13 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
                 <title>{b.title}</title>
               </rect>
             ))}
-            <path d={geom.vwPath} fill="none" stroke="#f59e0b" strokeWidth={1.4} strokeLinejoin="round" opacity={0.95} />
+            {!geom.isMain && <path d={geom.vwPath} fill="none" stroke="#f59e0b" strokeWidth={1.4} strokeLinejoin="round" opacity={0.95} />}
+            {geom.isMain && <line x1={PAD.left} x2={W - PAD.right} y1={geom.volZero} y2={geom.volZero} stroke="#cbd5e1" strokeWidth={0.8} />}
             <text x={PAD.left + 3} y={volumeTop + 10} textAnchor="start" fontSize={8} fill="#64748b" fontWeight={700}
-                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>{volume.scope ? `成交额·${volume.scope}` : '成交额'}</text>
+                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>{geom.isMain ? '主力净额（全市场）' : volume.scope ? `成交额·${volume.scope}` : '成交额'}</text>
             <text x={PAD.left + 3} y={volumeTop + 21} textAnchor="start" fontSize={7} fill="#94a3b8"
-                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>峰值 {fmtTurnover(geom.maxTurn)}</text>
-            <text x={W - PAD.right + 4} y={volumeTop + 10} fontSize={7} fill="#f59e0b" fontWeight={700}>系数</text>
+                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>{geom.isMain ? '红=净流入 / 绿=净流出' : `峰值 ${fmtTurnover(geom.maxTurn)}`}</text>
+            <text x={W - PAD.right + 4} y={volumeTop + 10} fontSize={7} fill="#f59e0b" fontWeight={700}>{geom.isMain ? '' : '系数'}</text>
           </g>
         )}
 
@@ -471,11 +508,15 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
                   {hover.stress != null && (
                     <text x={boxX + 6} y={boxY + (hover.f ? 47 : 36)} fontSize={8} fill="#7c3aed" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">压力 {hover.stress.toFixed(1)}</text>
                   )}
-                  {hover.turnover != null && (
+                  {volume?.barMode === 'main' && hover.mainNet != null ? (
+                    <text x={boxX + 6} y={boxY + (hover.f ? 58 : 47)} fontSize={8} fill={hover.mainNet < 0 ? '#059669' : '#dc2626'} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
+                      主力净额 {hover.mainNet > 0 ? '+' : ''}{hover.mainNet.toFixed(2)} 亿
+                    </text>
+                  ) : hover.turnover != null ? (
                     <text x={boxX + 6} y={boxY + (hover.f ? 58 : 47)} fontSize={8} fill={hover.vw != null && hover.vw < 0 ? '#059669' : '#dc2626'} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
                       成交额 {fmtTurnover(hover.turnover)}{hover.vw != null ? ` · 系数 ${hover.vw > 0 ? '+' : ''}${hover.vw.toFixed(2)}` : ''}
                     </text>
-                  )}
+                  ) : null}
                 </g>
               );
             })()}
@@ -495,7 +536,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
         <span className="text-slate-400">{onPickDate ? '拖动＝平移；单击历史某天＝回看当天预测（双击复位）' : '拖动＝回看更早（双击复位）'}</span>
         <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-2 rounded-sm" style={{ background: `${UP}29` }} />上涨空间</span>
         <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-2 rounded-sm" style={{ background: `${DOWN}29` }} />下跌空间</span>
-        {hasStress && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5" style={{ background: 'linear-gradient(90deg,#ef4444,#94a3b8,#10b981)' }} />压力分（下条）</span>}
+        {hasStress && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5" style={{ background: 'linear-gradient(90deg,#ef4444,#94a3b8,#10b981)' }} />压力分（主图右轴）</span>}
         {hasVolume && <span className="flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-sm bg-red-500/70" />成交额（偏涨）<span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 ml-1" />偏跌<span className="inline-block w-3 h-0.5 bg-amber-500 ml-1" />加权系数</span>}
         {actual.length > 0 && <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5 bg-slate-900" />之后实际</span>}
         {compare.map((c) => <span key={c.name} className="flex items-center gap-1.5"><span className="inline-block w-3 h-0.5" style={{ background: c.color }} />{c.name}</span>)}

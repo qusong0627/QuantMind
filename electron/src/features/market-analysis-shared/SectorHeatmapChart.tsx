@@ -169,11 +169,18 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
       clickAttachedRef.current = true;
     }
 
+    const finiteValues = sectorItems
+      .map((it) => Number(it.value))
+      .filter((v) => Number.isFinite(v) && v > 0)
+      .sort((a, b) => a - b);
+    const medianValue = finiteValues.length ? finiteValues[Math.floor(finiteValues.length / 2)] : 1;
+    const minAreaValue = Math.max(1, medianValue * 0.2);
     const formattedData = sectorItems.map((item) => ({
       id: item.name,
       name: item.name,
-      // 🎯 非线性压缩(幂0.4)，避免超大板块(如半导体/银行)吞掉整张图；tooltip 用 raw_value 显示真实规模
-      value: Math.pow(Math.max(item.value || 0, 1), 0.4),
+      // 🎯 非线性压缩(幂0.4)，避免超大板块(如半导体/银行)吞掉整张图；
+      // 同时给极小板块一个面积下限，避免右侧出现没有宽度/没有文字的碎片块。
+      value: Math.pow(Math.max(item.value || 0, minAreaValue), 0.4),
       raw_value: item.value,
       pct_change: item.pct_change,
       leader: item.leader,
@@ -318,7 +325,7 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
           if (!layout) return { ...item, label: { show: false } };
           // 小色块不显示文字：避免下钻层 100+ 只个股时标签互相挤压；
           // 大色块统一两行居中 + 超宽省略。
-          const show = layout.width >= 44 && layout.height >= 26;
+          const show = layout.width >= 28 && layout.height >= 16;
           const pad = Math.max(0, (layout.height - LABEL_TEXT_HEIGHT) / 2);
           return {
             ...item,
