@@ -302,7 +302,7 @@ export const SectorDetailPanel: React.FC<SectorDetailPanelProps> = ({
             <EvidenceBadge streak={detail.summary.streak} badge={detail.summary.evidence} size="md" />
           </div>
 
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
             <div className="bg-slate-50/80 rounded-xl px-3 py-2 border border-slate-100">
               <div className="text-[10px] font-bold text-slate-400">窗口主力净额</div>
               <div className={`text-sm font-extrabold font-mono ${flowTextClass(detail.summary.net_main)}`}>
@@ -323,6 +323,17 @@ export const SectorDetailPanel: React.FC<SectorDetailPanelProps> = ({
               <div className="text-[10px] font-bold text-slate-400">主力广度</div>
               <div className="text-sm font-extrabold font-mono text-slate-700">
                 {detail.summary.breadth === null ? '—' : `${(detail.summary.breadth * 100).toFixed(0)}%`}
+              </div>
+            </div>
+            <div className="bg-amber-50/60 rounded-xl px-3 py-2 border border-amber-100">
+              <div className="text-[10px] font-bold text-amber-700">资金流速率（日均）</div>
+              <div className={`text-sm font-extrabold font-mono ${(detail.summary.accel ?? 0) >= 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                {detail.summary.accel === null || detail.summary.accel === undefined
+                  ? '—'
+                  : `${detail.summary.accel >= 0 ? '+' : ''}${(detail.summary.accel / 1e8).toFixed(2)} 亿/日`}
+              </div>
+              <div className="text-[9px] text-amber-700/80 font-mono">
+                当前 {fmtYi(detail.summary.net_daily)}/日 · 前 {fmtYi(detail.summary.prev_net_daily)}/日
               </div>
             </div>
           </div>

@@ -36,7 +36,7 @@ INDEX_OVERVIEW = [
 ]
 
 # 周期 -> 累计交易日数
-PERIOD_DAYS = {"1d": 1, "3d": 3, "5d": 5, "10d": 10, "20d": 20}
+PERIOD_DAYS = {"1d": 1, "2d": 2, "3d": 3, "5d": 5, "10d": 10, "20d": 20}
 
 # 板块分类 -> sector_concept 中的 SectorType
 # 注意：shenwan 必须用「行业板块(二级)」=通达信二级行业(标准 80 个)，与离线快照/官网一致；

@@ -30,6 +30,7 @@ import { StockFlowDetailCard } from './StockFlowDetailCard';
 import { FlowEvidencePanel } from './FlowEvidencePanel';
 import { FlowPredictiveCard } from './FlowPredictiveCard';
 import { FlowProbabilityCard } from './FlowProbabilityCard';
+import { FlowSpeedCard } from './FlowSpeedCard';
 import { TagBrowserStrip } from './TagBrowserStrip';
 import { normalizeStockCode } from '../../../utils/portfolioUtils';
 import {
@@ -51,6 +52,7 @@ import {
 
 const PERIODS: Array<{ id: FlowPeriod; label: string }> = [
   { id: '1d', label: '1日' },
+  { id: '2d', label: '2日' },
   { id: '3d', label: '3日' },
   { id: '5d', label: '5日' },
   { id: '10d', label: '10日' },
@@ -510,6 +512,14 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
           />
         </div>
       )}
+
+      {/* ── 资金流速率：当前窗口日均 vs 前一窗口日均（加速进/加速跑） ── */}
+      <FlowSpeedCard
+        speed={data?.speed}
+        period={period}
+        onSelectSector={selectSector}
+        onSelectStock={handleSelectStock}
+      />
 
       {/* ── 未来强度概率（模型）：排序分 / 逆流候选 / 板块成分聚合 ── */}
       <FlowProbabilityCard date={date} onSelectStock={handleSelectStock} />

@@ -15,7 +15,7 @@ import { SERVICE_ENDPOINTS } from '../../../config/services';
 
 const MA_API = `${SERVICE_ENDPOINTS.USER_SERVICE}/market-analysis`;
 
-export type FlowPeriod = '1d' | '3d' | '5d' | '10d' | '20d';
+export type FlowPeriod = '1d' | '2d' | '3d' | '5d' | '10d' | '20d';
 export type FlowSectorSet = 'industry1' | 'industry2' | 'concept';
 export type FlowDirection = 'all' | 'inflow' | 'outflow';
 
@@ -62,6 +62,12 @@ export interface FlowPanoramaNode {
   inner_rank?: number;
   inner_total?: number;
   close?: number | null;
+  // 速率（当前窗口日均 vs 前一窗口日均）
+  net_daily?: number | null;
+  prev_net_daily?: number | null;
+  accel?: number | null;
+  prev_net_ratio?: number | null;
+  accel_ratio?: number | null;
 }
 
 export interface FlowPanoramaLink {
@@ -72,9 +78,25 @@ export interface FlowPanoramaLink {
   sign: number;
 }
 
+export interface FlowSpeedRow {
+  name?: string;
+  symbol?: string;
+  sector?: string | null;
+  net_daily: number | null;
+  prev_net_daily: number | null;
+  accel: number | null;
+  net_ratio?: number | null;
+  prev_net_ratio?: number | null;
+  accel_ratio?: number | null;
+}
+
 export interface FlowSectorRow {
   name: string;
   net_main: number;
+  net_daily?: number | null;
+  prev_net_daily?: number | null;
+  accel?: number | null;
+  accel_ratio?: number | null;
   net_total: number;
   net_ratio: number | null;
   breadth: number | null;
@@ -127,6 +149,13 @@ export interface FlowPanoramaResponse {
   nodes: FlowPanoramaNode[];
   links: FlowPanoramaLink[];
   sectors: FlowSectorRow[];
+  /** 资金流速率榜：当前窗口日均 vs 前一窗口日均 */
+  speed?: {
+    sectors_up: FlowSpeedRow[];
+    sectors_down: FlowSpeedRow[];
+    stocks_up: FlowSpeedRow[];
+    stocks_down: FlowSpeedRow[];
+  };
   meta: FlowPanoramaMeta & { reason?: string };
 }
 
@@ -172,6 +201,20 @@ export interface FlowSectorDetailResponse {
     data_symbols: number;
     streak: number | null;
     evidence: FlowEvidenceBadge | null;
+    net_daily?: number | null;
+    prev_net_daily?: number | null;
+    accel?: number | null;
+    accel_ratio?: number | null;
+  };
+  speed?: {
+    window: [string, string];
+    prev_window: [string, string] | null;
+    net_daily: number | null;
+    prev_net_daily: number | null;
+    accel: number | null;
+    net_ratio?: number | null;
+    prev_net_ratio?: number | null;
+    accel_ratio?: number | null;
   };
   trend: { date: string; net_main: number; net_ratio: number | null }[];
   members: FlowSectorMember[];
@@ -238,9 +281,16 @@ export interface FlowStockDetailResponse {
   pct_change: number | null;
   series: FlowStockSeriesPoint[];
   windows: Record<
-    '1d' | '5d' | '20d',
+    '1d' | '2d' | '3d' | '5d' | '10d' | '20d',
     { net_main: number; net_total: number; net_ratio: number | null; days: number } | null
   >;
+  speed?: {
+    window: [string, string];
+    prev_window: [string, string] | null;
+    net_daily: number | null;
+    prev_net_daily: number | null;
+    accel: number | null;
+  };
   attribution: FlowStockAttribution[];
   factor: FlowStockFactor | null;
   meta: { unit: string; series_unit: string; window_days: [string, string]; disclosure: string[] };

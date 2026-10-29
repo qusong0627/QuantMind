@@ -591,6 +591,12 @@ def get_panorama(
     )
 
 
+def _speed_down(up: list[dict[str, Any]], tail: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """下行榜：尾部反转并去掉与上行榜重复的板块/个股（小样本时不重复展示）。"""
+    seen = {(r.get("name"), r.get("symbol")) for r in up}
+    return [r for r in reversed(tail) if (r.get("name"), r.get("symbol")) not in seen]
+
+
 def _panorama_impl(
     period: str,
     sector_set: str,
@@ -602,14 +608,18 @@ def _panorama_impl(
     if not _available():
         return _empty_panorama(sector_set, period, direction, "quantdb_unavailable")
     n_days = PERIOD_DAYS[period]
-    days = _l2_dates_upto(target, n_days)
+    days_all = _l2_dates_upto(target, max(n_days * 2, n_days + 1))
+    days = days_all[:n_days]
+    prev_days = days_all[n_days : n_days * 2]
     if not days or (target and days[0] != target):
         return _empty_panorama(
             sector_set, period, direction, "date_not_found" if target else "no_l2_data"
         )
-    flow = _clean_flow(_load_l2_flow(days))
-    if flow.empty:
+    flow_all = _clean_flow(_load_l2_flow(days_all))
+    if flow_all.empty:
         return _empty_panorama(sector_set, period, direction, "no_flow_data")
+    flow = flow_all[flow_all["dt"].isin(set(days))]
+    flow_prev = flow_all[flow_all["dt"].isin(set(prev_days))] if prev_days else flow_all.iloc[0:0]
 
     members = _sector_members()
     member_df = _member_frame(members, SECTOR_SET_TYPE[sector_set])
@@ -630,9 +640,67 @@ def _panorama_impl(
                 pct_map[str(r.symbol)] = round(p, 2)
 
     sym_sums = _symbol_sums(flow)
+    prev_sums = _symbol_sums(flow_prev) if not flow_prev.empty else pd.DataFrame()
     agg = _sector_agg(sym_sums, member_df)
+    prev_agg = _sector_agg(prev_sums, member_df) if not prev_sums.empty else pd.DataFrame()
     if agg.empty:
         return _empty_panorama(sector_set, period, direction, "no_flow_data")
+
+    # ── 资金流速率：当前 N 日日均净额 vs 前 N 日日均净额 ──
+    prev_n = len(prev_days) if prev_days else 0
+    stock_speed: dict[str, dict[str, Any]] = {}
+    for sym, row in sym_sums.iterrows():
+        cur_daily = float(row["main"]) / n_days if n_days else None
+        prev_daily = (
+            float(prev_sums.loc[sym, "main"]) / prev_n
+            if prev_n and sym in prev_sums.index
+            else None
+        )
+        accel = (
+            cur_daily - prev_daily
+            if cur_daily is not None and prev_daily is not None
+            else None
+        )
+        stock_speed[sym] = {
+            "net_daily": round(cur_daily, 2) if cur_daily is not None else None,
+            "prev_net_daily": round(prev_daily, 2) if prev_daily is not None else None,
+            "accel": round(accel, 2) if accel is not None else None,
+            "net_ratio": _ratio(float(row["main"]), float(row["amount_y"])),
+        }
+    sector_speed: dict[str, dict[str, Any]] = {}
+    for name, row in agg.iterrows():
+        cur_main = float(row["main"])
+        cur_daily = cur_main / n_days if n_days else None
+        prev_main = (
+            float(prev_agg.loc[name, "main"])
+            if not prev_agg.empty and name in prev_agg.index
+            else None
+        )
+        prev_daily = prev_main / prev_n if prev_main is not None and prev_n else None
+        cur_ratio = _ratio(cur_main, float(row["amount_y"]))
+        prev_ratio = (
+            _ratio(prev_main, float(prev_agg.loc[name, "amount_y"]))
+            if prev_main is not None
+            else None
+        )
+        accel = (
+            cur_daily - prev_daily
+            if cur_daily is not None and prev_daily is not None
+            else None
+        )
+        accel_ratio = (
+            cur_ratio - prev_ratio
+            if cur_ratio is not None and prev_ratio is not None
+            else None
+        )
+        sector_speed[str(name)] = {
+            "net_daily": round(cur_daily, 2) if cur_daily is not None else None,
+            "prev_net_daily": round(prev_daily, 2) if prev_daily is not None else None,
+            "accel": round(accel, 2) if accel is not None else None,
+            "net_ratio": cur_ratio,
+            "prev_net_ratio": prev_ratio,
+            "accel_ratio": round(accel_ratio, 4) if accel_ratio is not None else None,
+        }
 
     streak_rows, evidence_doc, ev_meta = _evidence_context(sector_set, days[0])
     sector_evidence_ok = ev_meta.get("available", False)
@@ -642,6 +710,8 @@ def _panorama_impl(
     sectors = _sector_master_rows(
         agg, day_stats, streak_rows, evidence_doc, sector_evidence_ok
     )
+    for row in sectors:
+        row.update(sector_speed.get(row["name"], {}))
     graph = _sankey_graph(
         agg,
         member_df,
@@ -657,6 +727,39 @@ def _panorama_impl(
         top_sectors,
         stocks_per_sector,
     )
+
+    # 节点补速率字段（板块/个股）
+    for node in graph["nodes"]:
+        if node["kind"] == "sector":
+            node.update(sector_speed.get(node["key"], {}))
+        elif node["kind"] == "stock":
+            node.update(stock_speed.get(StockCodeUtil.to_suffix(node["key"]), {}))
+
+    # 速率榜：按加速度排序（当前日均 − 前一日均），正=加速流入/负=加速流出
+    speed_sectors = [
+        {"name": n, **sector_speed[n]}
+        for n in sector_speed
+        if sector_speed[n].get("accel") is not None
+    ]
+    speed_sectors.sort(key=lambda r: r["accel"], reverse=True)
+    speed_stocks: list[dict[str, Any]] = []
+    sec_of = (
+        member_df.drop_duplicates("symbol").set_index("symbol")["sector_name"].to_dict()
+        if not member_df.empty
+        else {}
+    )
+    for sym, sp in stock_speed.items():
+        if sp.get("accel") is None:
+            continue
+        speed_stocks.append(
+            {
+                "symbol": _normalize_prefix(sym),
+                "name": names.get(sym, ""),
+                "sector": sec_of.get(sym),
+                **sp,
+            }
+        )
+    speed_stocks.sort(key=lambda r: r["accel"], reverse=True)
 
     covered = len(set(sym_sums.index) & set(member_df["symbol"]))
     total_syms = int(len(sym_sums))
@@ -675,6 +778,12 @@ def _panorama_impl(
         },
         "evidence": ev_meta,
         "disclosure": DISCLOSURE,
+        "speed": {
+            "window": [days[-1], days[0]],
+            "prev_window": [prev_days[-1], prev_days[0]] if prev_days else None,
+            "days": n_days,
+            "definition": "日均净额 = 窗口主力净额/天数；加速度 = 当前日均 − 前一窗口日均（元/日）",
+        },
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     return {
@@ -689,6 +798,12 @@ def _panorama_impl(
         "nodes": graph["nodes"],
         "links": graph["links"],
         "sectors": sectors,
+        "speed": {
+            "sectors_up": speed_sectors[:8],
+            "sectors_down": _speed_down(speed_sectors[:8], speed_sectors[-8:]),
+            "stocks_up": speed_stocks[:15],
+            "stocks_down": _speed_down(speed_stocks[:15], speed_stocks[-15:]),
+        },
         "meta": meta,
     }
 
@@ -729,7 +844,7 @@ def _sector_detail_impl(
     if not name or not _available():
         return None
     n_days = PERIOD_DAYS[period]
-    days = _l2_dates_upto(target, max(n_days, SECTOR_TREND_DAYS))
+    days = _l2_dates_upto(target, max(n_days * 2, SECTOR_TREND_DAYS))
     if not days or (target and days[0] != target):
         return None
 
@@ -745,12 +860,55 @@ def _sector_detail_impl(
         return None
     sec_set = set(sec_members)
     window = set(days[:n_days])
+    prev_window = set(days[n_days : n_days * 2])
     flow_w = flow[flow["dt"].isin(window) & flow["symbol"].isin(sec_set)]
     sym_sums = _symbol_sums(flow_w)
     if sym_sums.empty:
         return None
     totals = sym_sums.sum(numeric_only=True)
     main_total = float(totals["main"])
+    prev_sums = (
+        _symbol_sums(flow[flow["dt"].isin(prev_window) & flow["symbol"].isin(sec_set)])
+        if prev_window
+        else pd.DataFrame()
+    )
+    prev_totals = prev_sums.sum(numeric_only=True) if not prev_sums.empty else None
+    prev_n = len(prev_window)
+    cur_daily = main_total / n_days if n_days else None
+    prev_daily = (
+        float(prev_totals["main"]) / prev_n
+        if prev_totals is not None and prev_n
+        else None
+    )
+    accel = (
+        cur_daily - prev_daily
+        if cur_daily is not None and prev_daily is not None
+        else None
+    )
+    cur_ratio = _ratio(main_total, float(totals["amount_y"]))
+    prev_ratio = (
+        _ratio(float(prev_totals["main"]), float(prev_totals["amount_y"]))
+        if prev_totals is not None
+        else None
+    )
+    speed = {
+        "window": [days[n_days - 1], days[0]],
+        "prev_window": (
+            [days[min(n_days * 2 - 1, len(days) - 1)], days[min(n_days, len(days) - 1)]]
+            if prev_n
+            else None
+        ),
+        "net_daily": round(cur_daily, 2) if cur_daily is not None else None,
+        "prev_net_daily": round(prev_daily, 2) if prev_daily is not None else None,
+        "accel": round(accel, 2) if accel is not None else None,
+        "net_ratio": cur_ratio,
+        "prev_net_ratio": prev_ratio,
+        "accel_ratio": (
+            round(cur_ratio - prev_ratio, 4)
+            if cur_ratio is not None and prev_ratio is not None
+            else None
+        ),
+    }
 
     # 趋势（升序，亿元）：窗口内逐日板块主力净额与净额比
     flow_sec = flow[flow["symbol"].isin(sec_set)]
@@ -864,7 +1022,12 @@ def _sector_detail_impl(
             "data_symbols": int(len(sym_sums)),
             "streak": streak,
             "evidence": _badge(streak, evidence_doc, ev_meta.get("available", False)),
+            "net_daily": speed["net_daily"],
+            "prev_net_daily": speed["prev_net_daily"],
+            "accel": speed["accel"],
+            "accel_ratio": speed["accel_ratio"],
         },
+        "speed": speed,
         "trend": trend,
         "members": member_rows,
         "meta": {
@@ -911,7 +1074,7 @@ def _stock_detail_impl(
         return None
     if not _available():
         return None
-    load_n = max(days, SECTOR_TREND_DAYS)
+    load_n = max(days * 2, SECTOR_TREND_DAYS)
     days_list = _l2_dates_upto(target, load_n)
     if not days_list or (target and days_list[0] != target):
         return None
@@ -1012,7 +1175,14 @@ def _stock_detail_impl(
     # 窗口汇总（1/5/20 日，元）
     sym_sums_all = _symbol_sums(flow)
     windows: dict[str, Any] = {}
-    for key, k in (("1d", 1), ("5d", 5), ("20d", 20)):
+    for key, k in (
+        ("1d", 1),
+        ("2d", 2),
+        ("3d", 3),
+        ("5d", 5),
+        ("10d", 10),
+        ("20d", 20),
+    ):
         sub = sym_flow[sym_flow["dt"].isin(set(days_list[:k]))]
         if sub.empty:
             windows[key] = None
@@ -1028,6 +1198,38 @@ def _stock_detail_impl(
             "net_ratio": _ratio(float(r["main"]), float(r["amount_y"])),
             "days": int(min(k, len(days_list))),
         }
+
+    # 资金流速率：当前 days 窗口日均 vs 前一 days 窗口日均
+    cur_days = set(days_list[:days])
+    prev_days = set(days_list[days : days * 2])
+    cur_sums = _symbol_sums(sym_flow[sym_flow["dt"].isin(cur_days)])
+    prev_sums = (
+        _symbol_sums(sym_flow[sym_flow["dt"].isin(prev_days)]) if prev_days else pd.DataFrame()
+    )
+    cur_main = float(cur_sums.iloc[0]["main"]) if not cur_sums.empty else None
+    prev_main = float(prev_sums.iloc[0]["main"]) if not prev_sums.empty else None
+    cur_daily = cur_main / days if cur_main is not None and days else None
+    prev_daily = (
+        prev_main / len(prev_days)
+        if prev_main is not None and len(prev_days)
+        else None
+    )
+    accel = (
+        cur_daily - prev_daily
+        if cur_daily is not None and prev_daily is not None
+        else None
+    )
+    speed = {
+        "window": [days_list[min(days, len(days_list)) - 1], days_list[0]],
+        "prev_window": (
+            [days_list[min(days * 2, len(days_list)) - 1], days_list[min(days, len(days_list) - 1)]]
+            if prev_days
+            else None
+        ),
+        "net_daily": round(cur_daily, 2) if cur_daily is not None else None,
+        "prev_net_daily": round(prev_daily, 2) if prev_daily is not None else None,
+        "accel": round(accel, 2) if accel is not None else None,
+    }
 
     # 板块归因（「个股资金流返回板块」）：所属板块 + 板块内 rank + 贡献占比
     streak_rows, evidence_doc, ev_meta = _evidence_context(
@@ -1053,6 +1255,7 @@ def _stock_detail_impl(
         "pct_change": latest_pct,
         "series": series,
         "windows": windows,
+        "speed": speed,
         "attribution": attribution,
         "factor": _factor_board_snapshot(suffix, days_list[0]),
         "meta": {

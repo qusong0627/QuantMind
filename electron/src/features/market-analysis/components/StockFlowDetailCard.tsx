@@ -359,11 +359,24 @@ export const StockFlowDetailCard: React.FC<StockFlowDetailCardProps> = ({
             </p>
           )}
 
-          <div className="flex items-stretch gap-2">
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
             <WindowCard label="当日" w={detail.windows['1d']} />
+            <WindowCard label="2 日" w={detail.windows['2d']} />
+            <WindowCard label="3 日" w={detail.windows['3d']} />
             <WindowCard label="5 日" w={detail.windows['5d']} />
+            <WindowCard label="10 日" w={detail.windows['10d']} />
             <WindowCard label="20 日" w={detail.windows['20d']} />
           </div>
+          {detail.speed && (
+            <div className="rounded-xl bg-amber-50/60 border border-amber-100 px-2.5 py-1.5 text-[10px] text-amber-800 flex items-center gap-2 flex-wrap">
+              <span className="font-extrabold">资金流速率</span>
+              <span>当前日均 {fmtYi(detail.speed.net_daily)}/日</span>
+              <span>· 前一窗口日均 {fmtYi(detail.speed.prev_net_daily)}/日</span>
+              <span className="font-mono font-extrabold">
+                加速度 {detail.speed.accel === null ? '—' : `${detail.speed.accel >= 0 ? '+' : ''}${(detail.speed.accel / 1e8).toFixed(2)} 亿/日`}
+              </span>
+            </div>
+          )}
 
           {factor && <FactorResonanceSection factor={factor} onNavigateSector={onNavigateSector} />}
 

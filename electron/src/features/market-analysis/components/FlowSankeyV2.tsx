@@ -73,6 +73,21 @@ function nodeTooltipHtml(n: FlowPanoramaNode, prob?: number | null): string {
   if (prob !== undefined && prob !== null) {
     rows.push(`模型分：<b>${(prob * 100).toFixed(1)}</b>（未来强度排序，非真实胜率）`);
   }
+  if (n.net_daily !== undefined && n.net_daily !== null) {
+    const cur = (n.net_daily / 1e8).toFixed(2);
+    const prev =
+      n.prev_net_daily === undefined || n.prev_net_daily === null
+        ? '—'
+        : (n.prev_net_daily / 1e8).toFixed(2);
+    rows.push(`日均净额：<b>${cur} 亿/日</b>（前一窗口 ${prev} 亿/日）`);
+    if (n.accel !== undefined && n.accel !== null) {
+      const a = n.accel / 1e8;
+      rows.push(
+        `速率：<b style="color:${a >= 0 ? INFLOW_COLOR : OUTFLOW_COLOR}">${a > 0 ? '+' : ''}${a.toFixed(2)} 亿/日</b>` +
+          `（${a >= 0 ? '加速流入' : '加速流出'}）`,
+      );
+    }
+  }
   if (n.kind === 'sector') {
     rows.push(`主力净额：<b style="color:${n.sign >= 0 ? INFLOW_COLOR : OUTFLOW_COLOR}">${fmtYi(n.net)}</b>`);
     rows.push(`合计净额（含散户）：${fmtYi(n.net_total ?? null)}`);
@@ -146,8 +161,17 @@ export const FlowSankeyV2: React.FC<FlowSankeyV2Props> = ({
           },
           label: {
             show: n.kind !== 'stock',
-            formatter:
-              n.kind === 'sector' && (n.streak ?? 0) >= 2 ? `${n.name} 连${n.streak}` : n.name,
+            formatter: (() => {
+              if (n.kind !== 'sector') return n.name;
+              const streak = (n.streak ?? 0) >= 2 ? ` 连${n.streak}` : '';
+              const arrow =
+                n.accel === undefined || n.accel === null || n.accel === 0
+                  ? ''
+                  : n.accel > 0
+                    ? ' ↑'
+                    : ' ↓';
+              return `${n.name}${streak}${arrow}`;
+            })(),
             fontSize: 11,
             fontWeight: 'bold' as const,
             color: '#334155',

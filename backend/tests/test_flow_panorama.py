@@ -870,3 +870,10 @@ def test_evidence_endpoint_snapshot_backtrack_and_no_rows(tmp_path, monkeypatch)
     quantdb_feed.clear_cache()
     doc = flow_panorama.get_evidence(date="2099-09-30")
     assert doc["hits_state"] == "no_rows" and doc["hits"] == []
+
+
+def test_period_map_has_2d_and_speed_windows():
+    from backend.services.api.market_analysis.quantdb_feed import PERIOD_DAYS
+
+    assert PERIOD_DAYS["2d"] == 2
+    assert {"1d", "2d", "3d", "5d", "10d", "20d"} <= set(PERIOD_DAYS)
