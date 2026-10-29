@@ -65,6 +65,28 @@ const payload = {
       { key: 'breadth20', label: '站上 MA20', cold: [10, 20, 30, 40, 50, 60, 70, 80, 90, 95] },
     ],
   },
+  volume: {
+    dates: Array.from(
+      { length: 30 },
+      (_, i) => `2026-${String(9 + Math.floor(i / 28)).padStart(2, '0')}-${String((i % 28) + 1).padStart(2, '0')}`,
+    ),
+    turnover_yi: Array.from({ length: 30 }, () => 16000),
+    vw_breadth: Array.from({ length: 30 }, () => 0.4),
+    vw_breadth_pct: Array.from({ length: 30 }, () => 0.7),
+    main_net_ratio: Array.from({ length: 30 }, () => 0.0075),
+    main_net_yi: Array.from({ length: 30 }, () => 121.9),
+    main_breadth: Array.from({ length: 30 }, () => 0.65),
+    main_breadth_amt: Array.from({ length: 30 }, () => 0.63),
+    latest: { date: '2026-10-26', turnover_yi: 16000, vw_breadth: 0.4, main_net_ratio: 0.0075, main_net_yi: 121.9, main_breadth: 0.65, main_breadth_amt: 0.63 },
+  },
+  main_force: {
+    latest: { date: '2026-10-26', main_net_ratio: 0.0075, main_breadth: 0.65, main_breadth_amt: 0.63 },
+    indicators: [
+      { key: 'main_net_ratio', label: '主力净额/成交额', value: 0.75, unit: '%', pct: 0.8, zone: 'normal' },
+      { key: 'main_breadth', label: '主力广度（等权）', value: 65.1, unit: '%', pct: 0.9, zone: 'normal' },
+    ],
+    disclosure: '主力=超大单+大单',
+  },
   stress_history: Array.from({ length: 40 }, (_, i) => ({
     date: `2026-08-${String((i % 28) + 1).padStart(2, '0')}`,
     stress: 40 + i,

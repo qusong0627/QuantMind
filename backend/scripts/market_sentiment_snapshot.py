@@ -43,6 +43,7 @@ from backend.scripts.breadth_regime import (
 )
 from backend.scripts.index_forecast import forecast_index
 from backend.scripts.breadth_universe import UNIVERSE_BY_KEY
+from backend.scripts.market_analysis.main_force import load_main_force, latest_block
 from backend.scripts.research_stats import expanding_pct_rank
 
 log = logging.getLogger("sentiment_snapshot")
@@ -644,6 +645,135 @@ def build_payload(
         }
         distribution_all = {}
 
+    # 主力视角：L2 超大单+大单日频曲线 + 成交额加权涨跌系数（不参与评分，只做展示）
+    base_view = all_view if all_view is not None else signal_df
+    try:
+        # L2 资金流自 2022 年起可用；取全量做主力分位，曲线只画最近 120 日
+        mf = load_main_force(days=1600)
+    except Exception:  # noqa: BLE001 —— 主力数据缺失不影响情绪主链
+        mf = None
+    if mf is not None and not mf.empty:
+        mf = mf.reindex(base_view.index)
+    vw_breadth = (
+        (base_view["amt_up"] - base_view["amt_down"])
+        / base_view["amt_total"].where(base_view["amt_total"] > 0)
+    ).reindex(base_view.index)
+    vw_pct = (
+        base_view["amt_up"] / base_view["amt_total"].where(base_view["amt_total"] > 0)
+    ).reindex(base_view.index)
+    vol_tail = base_view.tail(120).index
+    volume = {
+        "dates": [d.strftime("%Y-%m-%d") for d in vol_tail],
+        "turnover_yi": [
+            round(float(base_view.loc[d, "amt_total"]) / 1e4, 1)
+            if np.isfinite(float(base_view.loc[d, "amt_total"]))
+            else None
+            for d in vol_tail
+        ],
+        "vw_breadth": [
+            None if not np.isfinite(float(vw_breadth.get(d, np.nan))) else round(float(vw_breadth.get(d)), 4)
+            for d in vol_tail
+        ],
+        "vw_breadth_pct": [
+            None if not np.isfinite(float(vw_pct.get(d, np.nan))) else round(float(vw_pct.get(d)), 4)
+            for d in vol_tail
+        ],
+        "main_net_ratio": [
+            None
+            if mf is None or d not in mf.index or not np.isfinite(float(mf.loc[d, "main_net_ratio"]))
+            else round(float(mf.loc[d, "main_net_ratio"]), 4)
+            for d in vol_tail
+        ],
+        "main_net_yi": [
+            None
+            if mf is None or d not in mf.index or not np.isfinite(float(mf.loc[d, "main_net_yi"]))
+            else round(float(mf.loc[d, "main_net_yi"]), 2)
+            for d in vol_tail
+        ],
+        "main_breadth": [
+            None
+            if mf is None or d not in mf.index or not np.isfinite(float(mf.loc[d, "main_breadth"]))
+            else round(float(mf.loc[d, "main_breadth"]), 4)
+            for d in vol_tail
+        ],
+        "main_breadth_amt": [
+            None
+            if mf is None or d not in mf.index or not np.isfinite(float(mf.loc[d, "main_breadth_amt"]))
+            else round(float(mf.loc[d, "main_breadth_amt"]), 4)
+            for d in vol_tail
+        ],
+        "latest": {
+            "date": vol_tail[-1].strftime("%Y-%m-%d") if len(vol_tail) else None,
+            "turnover_yi": (
+                round(float(base_view.loc[vol_tail[-1], "amt_total"]) / 1e4, 1)
+                if len(vol_tail)
+                else None
+            ),
+            "vw_breadth": (
+                round(float(vw_breadth.get(vol_tail[-1])), 4)
+                if len(vol_tail) and np.isfinite(float(vw_breadth.get(vol_tail[-1], np.nan)))
+                else None
+            ),
+            **(latest_block(mf) if mf is not None and not mf.empty else {}),
+        },
+        "conventions": {
+            "turnover_yi": "全市场成交额（亿元）",
+            "vw_breadth": "(上涨股成交额 − 下跌股成交额) / 全市场成交额，−1~1；>0=成交额加权偏涨",
+            "main_net_ratio": "(超大单+大单)净额 / 全市场成交额；主力视角的资金强度",
+            "main_breadth": "主力净流入为正的个股占比（等权）",
+            "main_breadth_amt": "主力净流入为正的个股成交额占比（成交额加权，更接近主力视角）",
+        },
+        "disclosure": "主力=超大单+大单；主力视角只描述当前资金结构，不构成方向预测。",
+    }
+
+    # 主力视角冷热分项（与广度分项同 UI 组件）；分位用扩张窗口，不用未来数据
+    main_force_indicators = []
+    main_force_series = {
+        "main_net_ratio": ("主力净额/成交额", "%", 100.0, 2),
+        "main_breadth": ("主力广度（等权）", "%", 100.0, 1),
+        "main_breadth_amt": ("主力广度（成交额加权）", "%", 100.0, 1),
+    }
+    for key, (label, unit, scale, digits) in main_force_series.items():
+        series = (
+            mf[key].reindex(base_view.index)
+            if mf is not None and key in mf
+            else pd.Series(np.nan, index=base_view.index)
+        )
+        raw = float(series.iloc[-1]) if len(series) else np.nan
+        pct_series = expanding_pct_rank(series, min_periods=60)
+        pct = float(pct_series.iloc[-1]) if len(pct_series) else np.nan
+        main_force_indicators.append(
+            {
+                "key": key,
+                "label": label,
+                "value": round(raw * scale, digits) if np.isfinite(raw) else None,
+                "unit": unit,
+                "pct": round(pct, 3) if np.isfinite(pct) else None,
+                "zone": "low" if pct <= 0.1 else ("high" if pct >= 0.9 else "normal")
+                if np.isfinite(pct)
+                else "normal",
+            }
+        )
+    # 成交额加权涨跌系数：−1~1，>0=成交额加权偏涨；作为“成交量加权系数”曲线
+    vw_series = vw_breadth.reindex(base_view.index)
+    raw_vw = float(vw_series.iloc[-1]) if len(vw_series) else np.nan
+    pct_vw = expanding_pct_rank(vw_series, min_periods=60)
+    main_force_indicators.append(
+        {
+            "key": "vw_breadth",
+            "label": "成交额加权涨跌系数",
+            "value": round(raw_vw, 4) if np.isfinite(raw_vw) else None,
+            "unit": "",
+            "pct": round(float(pct_vw.iloc[-1]), 3) if len(pct_vw) and np.isfinite(pct_vw.iloc[-1]) else None,
+            "zone": "normal",
+        }
+    )
+    main_force = {
+        "latest": latest_block(mf) if mf is not None and not mf.empty else {},
+        "indicators": main_force_indicators,
+        "disclosure": "主力=超大单+大单；主力视角描述当前资金结构，不构成方向预测。",
+    }
+
     return {
         "trade_date": (
             all_view.index[-1] if all_view is not None else last_date
@@ -677,6 +807,8 @@ def build_payload(
         ),
         "factor_history": factor_history(all_feats),
         "distribution": distribution_all,
+        "volume": volume,
+        "main_force": main_force,
         "indices": indices,
     }
 

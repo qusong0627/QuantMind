@@ -118,6 +118,44 @@ export interface UniverseMeta {
 /** 七档涨跌分布（当日计数，互斥）：涨停/涨>5%/涨0~5%/平/跌0~5%/跌>5%/跌停 */
 export type BreadthDistribution = Record<string, number>;
 
+
+/** 成交量 × 主力加权系数（全市场口径；120 日曲线）。 */
+export interface SentimentVolume {
+  dates: string[];
+  /** 全市场成交额（亿元） */
+  turnover_yi: (number | null)[];
+  /** (上涨股成交额 − 下跌股成交额) / 全市场成交额，−1~1 */
+  vw_breadth: (number | null)[];
+  /** 上涨股成交额 / 全市场成交额，0~1 */
+  vw_breadth_pct: (number | null)[];
+  /** (超大单+大单)净额 / 全市场成交额 */
+  main_net_ratio: (number | null)[];
+  main_net_yi: (number | null)[];
+  /** 主力净流入为正的个股占比（等权） */
+  main_breadth: (number | null)[];
+  /** 主力净流入为正的个股成交额占比（成交额加权） */
+  main_breadth_amt: (number | null)[];
+  latest: {
+    date?: string | null;
+    turnover_yi?: number | null;
+    vw_breadth?: number | null;
+    main_net_yi?: number | null;
+    main_net_ratio?: number | null;
+    main_net_z20?: number | null;
+    main_breadth?: number | null;
+    main_breadth_amt?: number | null;
+  };
+  conventions?: Record<string, string>;
+  disclosure?: string;
+}
+
+/** 主力视角冷热分项（复用广度分项 UI；分位为扩张窗口）。 */
+export interface MainForceBlock {
+  latest: SentimentVolume['latest'];
+  indicators: SentimentIndicator[];
+  disclosure?: string;
+}
+
 export interface IndexSentiment {
   name: string;
   last: number;
@@ -162,6 +200,10 @@ export interface MarketSentiment {
   factor_history: { dates: string[]; items: FactorHistoryItem[] };
   /** 全A 口径的七档涨跌分布；旧快照没有此字段 */
   distribution?: BreadthDistribution;
+  /** 成交量 × 主力加权系数曲线；旧快照没有此字段 */
+  volume?: SentimentVolume;
+  /** 主力视角冷热分项；旧快照没有此字段 */
+  main_force?: MainForceBlock;
   indices: Record<string, IndexSentiment>;
   /** true = 历史回看；false = 最新一期 */
   as_of: boolean;

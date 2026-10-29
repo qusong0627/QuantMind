@@ -9,6 +9,7 @@ import {
 } from '../services/sentimentService';
 import { SentimentFanChart } from './SentimentFanChart';
 import { BreadthFactorBars } from './BreadthFactorBars';
+import { VolumeForceChart } from './VolumeForceChart';
 import { BreadthDistributionBar } from './BreadthDistributionBar';
 import { PredictionReview } from './PredictionReview';
 import { FactorHeatmap } from './FactorHeatmap';
@@ -400,6 +401,17 @@ export const MarketSentimentPanel: React.FC = () => {
             <BreadthFactorBars items={indicators} compact />
           </div>
 
+          {data.main_force?.indicators?.length ? (
+            <div className="border-t border-slate-100 pt-2">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-extrabold text-slate-600">主力视角 · 冷热</span>
+                <span className="text-[9px] text-slate-400">超大单+大单</span>
+              </div>
+              <BreadthFactorBars items={data.main_force.indicators} compact />
+              <p className="text-[9px] text-slate-400 mt-1">{data.main_force.disclosure}</p>
+            </div>
+          ) : null}
+
           {universe && (
             <p className="text-[10px] text-slate-400 border-t border-slate-100 pt-2 leading-relaxed">
               广度口径：{universe.note}
@@ -531,6 +543,9 @@ export const MarketSentimentPanel: React.FC = () => {
           </div>
         </section>
       </div>
+
+      {/* 成交量 × 主力加权系数曲线 */}
+      {data.volume && <VolumeForceChart volume={data.volume} />}
 
       {/* 底部：分项冷热热力图 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3">
