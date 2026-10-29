@@ -12,6 +12,7 @@ import { BreadthFactorBars } from './BreadthFactorBars';
 import { BreadthDistributionBar } from './BreadthDistributionBar';
 import { PredictionReview } from './PredictionReview';
 import { FactorHeatmap } from './FactorHeatmap';
+import { VolumeProfileCard } from './VolumeProfileCard';
 import { BreadthGlossaryModal } from './BreadthGlossaryModal';
 
 /** 展示顺序与后端 `TARGETS` 一致：三个老指数 + 深证成指 + 创业板指 + 全A合成。 */
@@ -720,6 +721,9 @@ export const MarketSentimentPanel: React.FC = () => {
           </div>
         </section>
       </div>
+
+      {/* 筹码结构 / 成交价格分布 */}
+      <VolumeProfileCard symbol={indexKey} date={data.trade_date} name={selected.name} />
 
       {/* 底部：分项冷热热力图 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3">

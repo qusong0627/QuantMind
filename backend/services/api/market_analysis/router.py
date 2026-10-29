@@ -24,7 +24,7 @@ from backend.shared.factor_board import config as _fb_config
 
 logger = logging.getLogger(__name__)
 
-from . import flow_panorama, flow_predictive, flow_probability, quantdb_feed, sector_direction, quantdb_snapshot as _snap
+from . import flow_panorama, flow_predictive, flow_probability, quantdb_feed, sector_direction, volume_profile, quantdb_snapshot as _snap
 from . import sentiment as _sentiment
 from . import smart_money as _sm
 from .domain import SectorConflictError, SectorNotFoundError
@@ -1348,3 +1348,14 @@ async def trigger_market_analysis_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+@router.get("/volume-profile")
+async def get_volume_profile(
+    symbol: str = Query(..., description="指数代码或个股前缀/后缀代码"),
+    window: int = Query(60, ge=20, le=250),
+    date: str | None = Query(None, description="快照日期 YYYY-MM-DD；缺省最新"),
+    current_user: dict = Depends(get_current_user),
+):
+    """筹码/成交价格结构：主力散户成本、POC/价值区、14%低分位价、日内高量时段。"""
+    return volume_profile.get_volume_profile(symbol, window, date)
+

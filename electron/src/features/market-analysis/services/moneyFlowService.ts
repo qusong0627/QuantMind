@@ -931,3 +931,56 @@ export async function getFlowProbability(date?: string): Promise<FlowProbability
   const qs = date ? `?date=${encodeURIComponent(date)}` : '';
   return flowGet<FlowProbabilityResponse>(`/money-flow/probability${qs}`);
 }
+
+/* ── 筹码结构 / 成交价格分布（/volume-profile）────────────────────────── */
+export interface VolumeProfileBin {
+  low: number;
+  high: number;
+  mid: number;
+  amount_yi: number;
+  share: number;
+}
+
+export interface VolumeProfileResponse {
+  available: boolean;
+  reason?: string;
+  symbol?: string;
+  name?: string;
+  trade_date?: string;
+  window?: number;
+  scope?: 'index' | 'stock';
+  cost_scope?: string;
+  last?: number;
+  high?: number;
+  low?: number;
+  vwap?: number;
+  main_cost?: number | null;
+  retail_cost?: number | null;
+  main_premium_pct?: number | null;
+  retail_premium_pct?: number | null;
+  poc?: number | null;
+  vah?: number | null;
+  val?: number | null;
+  p14_price?: number | null;
+  p14_pct_from_last?: number | null;
+  drawdown14?: number | null;
+  drawdown_from_high_pct?: number | null;
+  high_nodes?: { price: number; share: number; amount_yi: number }[];
+  profile?: VolumeProfileBin[];
+  time_windows?: {
+    available: boolean;
+    note?: string;
+    top?: { bucket: string; share: number; amount_yi: number }[];
+  };
+  method?: string;
+}
+
+export async function getVolumeProfile(
+  symbol: string,
+  window = 60,
+  date?: string,
+): Promise<VolumeProfileResponse> {
+  const qs = new URLSearchParams({ symbol, window: String(window) });
+  if (date) qs.set('date', date);
+  return flowGet<VolumeProfileResponse>(`/volume-profile?${qs.toString()}`);
+}
