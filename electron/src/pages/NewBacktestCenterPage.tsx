@@ -82,6 +82,10 @@ export const NewBacktestCenterPage: React.FC = () => {
     return ['回测中心', moduleNames[activeModule]];
   };
 
+  // 策略编辑是「工作台」不是「文档」：取消 contentOuter 的 24px 内边距，
+  // 让 Monaco/参数栏/结果坞吃满 1150px 内容区（旧版卡片套卡片进一步压窄画布）。
+  const isFullBleed = activeModule === 'parameter-optimize' || activeModule === 'strategy-editor';
+
   return (
     <div className={PAGE_LAYOUT.outerClass}>
       <div className={PAGE_LAYOUT.frameClass}>
@@ -144,13 +148,13 @@ export const NewBacktestCenterPage: React.FC = () => {
 
             {/* 内容区域（可滚动） */}
               <div
-              className={`${PAGE_LAYOUT.scrollContainerClass} ${activeModule === 'parameter-optimize' ? 'overflow-hidden' : 'overflow-y-auto overflow-x-hidden'}`}
+              className={`${PAGE_LAYOUT.scrollContainerClass} ${isFullBleed ? 'overflow-hidden' : 'overflow-y-auto overflow-x-hidden'}`}
               style={{
                 scrollbarWidth: 'thin',
                 scrollbarColor: '#cbd5e1 #f1f5f9'
               }}
             >
-              <div className={`${activeModule === 'parameter-optimize' ? 'h-full' : PAGE_LAYOUT.contentOuterClass} h-full`}>
+              <div className={`${isFullBleed ? 'h-full' : PAGE_LAYOUT.contentOuterClass} h-full`}>
                 <AnimatePresence mode="wait">
                   <motion.div
                     key={activeModule}

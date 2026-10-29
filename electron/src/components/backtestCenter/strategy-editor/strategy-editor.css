@@ -1,0 +1,384 @@
+/* 回测中心「策略编辑」工作台 —— 作用域样式（.se-workspace 下生效）。
+ *
+ * 视觉方向：研究终端（research cockpit）。白卡片 + 冷灰画布 + 细线层级；
+ * 圆角收在 10–14px（不再用 24/32px 的大圆角），让高密度信息有骨架。
+ * 颜色语义：蓝=可操作，靛蓝=质量分，红涨绿跌只用于收益方向。
+ */
+
+/* 变量同时挂到弹层根节点：文件选择器由 antd Portal 挂到 body，
+ * 不在 .se-workspace 内部，否则 var(--se-*) 全是未定义。 */
+.se-workspace,
+.se-file-popover {
+  --se-ink: #0f172a;
+  --se-muted: #64748b;
+  --se-faint: #94a3b8;
+  --se-line: #e4eaf3;
+  --se-line-strong: #d5dfec;
+  --se-canvas: #f5f8fc;
+  --se-accent: #2563eb;
+  --se-accent-soft: #eff5ff;
+  --se-up: #ef4444;
+  --se-down: #10b981;
+}
+
+.se-workspace {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--se-ink);
+  background:
+    radial-gradient(1200px 400px at 100% -10%, rgba(37, 99, 235, 0.06), transparent 60%),
+    linear-gradient(180deg, #f8fafd 0%, #f1f5fa 100%);
+  font-feature-settings: 'tnum' 1;
+}
+
+.se-card {
+  background: #ffffff;
+  border: 1px solid var(--se-line);
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.se-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 -2px 0 var(--se-accent);
+  flex-shrink: 0;
+}
+
+.se-kicker {
+  font-size: 9px;
+  line-height: 1.1;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--se-faint);
+  font-weight: 700;
+}
+
+.se-section-label {
+  font-size: 9.5px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #8a99ad;
+  font-weight: 700;
+}
+
+.se-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.se-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #c8d3e2 transparent;
+}
+.se-scroll::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+.se-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+.se-scroll::-webkit-scrollbar-thumb:hover {
+  background: #aebdd2;
+}
+.se-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── 参数栏：把 antd 控件收成同一套「设置行」尺寸 ───────────────── */
+.se-params .ant-input,
+.se-params .ant-input-number,
+.se-params .ant-select-selector {
+  width: 100%;
+  min-height: 30px;
+  border-radius: 8px !important;
+  border-color: var(--se-line-strong) !important;
+  background: #fbfdff !important;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px !important;
+  color: var(--se-ink) !important;
+  box-shadow: none !important;
+}
+.se-params .ant-input-number-input {
+  height: 28px;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--se-ink);
+}
+.se-params .ant-input:focus,
+.se-params .ant-input-number-focused,
+.se-params .ant-select-focused .ant-select-selector {
+  border-color: var(--se-accent) !important;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.08) !important;
+  background: #fff !important;
+}
+.se-params .ant-select-selection-item,
+.se-params .ant-select-selection-placeholder {
+  font-size: 11.5px;
+  line-height: 28px !important;
+}
+.se-params .ant-input-number-group-addon {
+  border-radius: 0 8px 8px 0;
+  border-color: var(--se-line-strong);
+  background: #f4f7fb;
+  font-size: 10px;
+  color: var(--se-muted);
+  padding: 0 7px;
+}
+.se-params input[type='date']::-webkit-calendar-picker-indicator {
+  opacity: 0.35;
+  cursor: pointer;
+}
+.se-params input[type='date']:hover::-webkit-calendar-picker-indicator {
+  opacity: 0.7;
+}
+
+/* ── 文件选择弹层 ─────────────────────────────────────────────── */
+.se-file-popover .ant-popover-inner {
+  padding: 0;
+  border-radius: 14px;
+  border: 1px solid var(--se-line);
+  box-shadow: 0 20px 45px -20px rgba(15, 23, 42, 0.28);
+  overflow: hidden;
+}
+.se-file-popover .ant-popover-arrow {
+  display: none;
+}
+
+/* ── 底部结果坞 ───────────────────────────────────────────────── */
+.se-dock {
+  transition: box-shadow 160ms ease;
+}
+.se-dock-drag {
+  height: 6px;
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.se-dock-drag::after {
+  content: '';
+  width: 44px;
+  height: 3px;
+  border-radius: 999px;
+  background: #dbe3ee;
+  transition: background 120ms ease;
+}
+.se-dock-drag:hover::after {
+  background: #9fb3cc;
+}
+
+.se-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #66758a;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 120ms ease;
+}
+.se-tab:hover {
+  color: #1e293b;
+}
+.se-tab[data-active='true'] {
+  color: #1d4ed8;
+}
+.se-tab[data-active='true']::after {
+  content: '';
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--se-accent);
+}
+
+.se-run-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.14);
+}
+.se-run-dot[data-state='done'] {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.12);
+}
+.se-run-dot[data-state='running'] {
+  background: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+  animation: se-pulse 1.2s ease-in-out infinite;
+}
+.se-run-dot[data-state='error'] {
+  background: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12);
+}
+
+@keyframes se-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.82);
+  }
+}
+
+/* 结果 KPI 条 */
+.se-kpi-tile {
+  min-width: 0;
+  border-radius: 10px;
+  border: 1px solid #edf2f8;
+  background: linear-gradient(180deg, #fbfdff, #f7fafd);
+  padding: 6px 9px;
+}
+.se-kpi-label {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #93a1b5;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.se-kpi-value {
+  margin-top: 2px;
+  font-size: 15px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* 月度热力格 */
+.se-month-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  border-radius: 5px;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  transition: transform 100ms ease, box-shadow 100ms ease;
+  cursor: default;
+}
+.se-month-cell:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(15, 23, 42, 0.14);
+  z-index: 2;
+}
+.se-month-empty {
+  height: 26px;
+  border-radius: 5px;
+  border: 1px dashed #e8eef6;
+}
+
+/* 文件行 */
+.se-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  text-align: left;
+  transition: background 100ms ease, border-color 100ms ease;
+}
+.se-file-row:hover {
+  background: #f5f8fd;
+  border-color: #e8eef7;
+}
+.se-file-row[data-selected='true'] {
+  background: var(--se-accent-soft);
+  border-color: #cfe0fb;
+}
+
+/* 运行日志 */
+.se-log-line {
+  display: flex;
+  gap: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 18px;
+  color: #475569;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.se-log-line:hover {
+  background: #f3f7fc;
+}
+.se-log-index {
+  width: 30px;
+  flex-shrink: 0;
+  text-align: right;
+  color: #c2cede;
+  user-select: none;
+}
+.se-log-error {
+  background: #fff5f5;
+  color: #b91c1c;
+}
+
+/* 结果表（成交/持仓/年度）——统一收成 11px 的密集研究表 */
+.se-mini-table .ant-table {
+  background: transparent;
+  font-size: 11px;
+}
+.se-mini-table .ant-table-thead > tr > th {
+  background: #f8fafd !important;
+  border-bottom: 1px solid #edf2f8 !important;
+  color: #8494a8 !important;
+  font-size: 9px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em;
+  padding: 5px 8px !important;
+  white-space: nowrap;
+}
+.se-mini-table .ant-table-thead > tr > th::before {
+  display: none !important;
+}
+.se-mini-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #f1f5f9 !important;
+  color: #475569;
+  font-size: 10.5px;
+  padding: 4px 8px !important;
+}
+.se-mini-table .ant-table-tbody > tr:hover > td {
+  background: #f7faff !important;
+}
+.se-mini-table .ant-table-placeholder .ant-table-cell {
+  background: transparent !important;
+}
+.se-mini-table .ant-pagination {
+  margin: 6px 0 0 !important;
+}
+.se-mini-table .ant-pagination .ant-pagination-item,
+.se-mini-table .ant-pagination .ant-pagination-prev,
+.se-mini-table .ant-pagination .ant-pagination-next {
+  min-width: 20px;
+  height: 20px;
+  line-height: 18px;
+  font-size: 10px;
+}

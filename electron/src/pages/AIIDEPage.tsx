@@ -40,7 +40,7 @@ import { authService } from '../features/auth/services/authService';
 import { strategyManagementService } from '../services/strategyManagementService';
 import { modelTrainingService } from '../services/modelTrainingService';
 import HelpCenterLink from '../components/common/HelpCenterLink';
-import StrategyEditorBacktestPanel from '../components/backtestCenter/StrategyEditorBacktestPanel';
+import StrategyEditorWorkspace from '../components/backtestCenter/strategy-editor/StrategyEditorWorkspace';
 import {
     DEFAULT_STRATEGY_EDITOR_PARAMS,
     applyBacktestParamsToCode,
@@ -176,6 +176,8 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
     const [selectedFile, setSelectedFile] = React.useState<FileItem | null>(null);
     const [selectedRemote, setSelectedRemote] = React.useState<RemoteStrategy | null>(null);
     const [editorContent, setEditorContent] = React.useState('# 请选择一个文件开始编辑');
+    // 已落盘的代码快照：用于「有未保存修改」提示（切换文件/保存/运行后同步）。
+    const [savedContent, setSavedContent] = React.useState('# 请选择一个文件开始编辑');
     const [currentDir, setCurrentDir] = React.useState('');
     const [parentDir, setParentDir] = React.useState<string | null>(null);
     const [messages, setMessages] = React.useState<Message[]>([
@@ -434,10 +436,13 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
     React.useEffect(() => {
         if (activeTab === 'local') {
             setSelectedRemote(null);
+            setSyntaxError(null);
             fetchLocalFileList();
         } else {
             setSelectedFile(null);
             setEditorContent('# 请选择一个远程策略');
+            setSavedContent('# 请选择一个远程策略');
+            setSyntaxError(null);
             fetchRemoteStrategies();
         }
     }, [activeTab]);
@@ -568,6 +573,7 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
             const res = await apiFetch(`/files/${encodeURI(filePath)}`);
             const data = await res.json();
             setEditorContent(data.content);
+            setSavedContent(data.content);
         } catch (err) {
             console.error('Failed to load file content', err);
         }
@@ -576,7 +582,9 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
     const loadRemoteStrategy = async (strategyId: string) => {
         try {
             const strategy = await strategyManagementService.getStrategy(strategyId);
-            setEditorContent(strategy.code || '# 远程策略内容为空');
+            const content = strategy.code || '# 远程策略内容为空';
+            setEditorContent(content);
+            setSavedContent(content);
         } catch (err: any) {
             console.error('Failed to load remote strategy', err);
             message.error(`远程策略加载失败: ${err.message}`);
@@ -652,6 +660,7 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
                     })
                 }, true);
                 message.success('本地文件已保存');
+                setSavedContent(codeToSave);
                 setTimeout(() => setIsSaving(false), 500);
             } catch (err) {
                 console.error('Failed to save file', err);
@@ -667,6 +676,7 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
                     code: codeToSave
                 });
                 message.success('云端策略已更新');
+                setSavedContent(codeToSave);
                 setTimeout(() => setIsSaving(false), 500);
             } catch (err: any) {
                 console.error('Failed to update remote strategy', err);
@@ -1421,6 +1431,7 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
         setCurrentDir(path);
         setSelectedFile(null);
         setEditorContent('# 请选择一个文件开始编辑');
+        setSavedContent('# 请选择一个文件开始编辑');
         await fetchLocalFileList(path);
     };
 
@@ -1430,6 +1441,7 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
         setCurrentDir(parentDir || '');
         setSelectedFile(null);
         setEditorContent('# 请选择一个文件开始编辑');
+        setSavedContent('# 请选择一个文件开始编辑');
         await fetchLocalFileList(parentDir || '');
     };
 
@@ -1958,10 +1970,11 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
         }
     };
 
-    const handleCopyLogs = async () => {
-        const content = logTab === 'result' ? logs.join('\n') : errors.join('\n');
+    const handleCopyLogs = async (which?: 'result' | 'error') => {
+        const target = which || logTab;
+        const content = target === 'result' ? logs.join('\n') : errors.join('\n');
         if (!content.trim()) {
-            message.info(logTab === 'result' ? '暂无可复制的运行日志' : '暂无可复制的错误日志');
+            message.info(target === 'result' ? '暂无可复制的运行日志' : '暂无可复制的错误日志');
             return;
         }
         try {
@@ -1972,6 +1985,129 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
             message.error('日志复制失败');
         }
     };
+
+    if (strategyEditorMode) {
+        const hasSelection = activeTab === 'local' ? Boolean(selectedFile) : Boolean(selectedRemote);
+        return (
+            <StrategyEditorWorkspace
+                files={{
+                    tab: activeTab,
+                    localFiles: files,
+                    remoteFiles: remoteStrategies,
+                    isLoadingLocal: isLoadingFiles,
+                    isLoadingRemote,
+                    currentDir,
+                    parentDir,
+                    searchQuery,
+                    selectedFile,
+                    selectedRemote,
+                    onTabChange: setActiveTab,
+                    onSearchQueryChange: setSearchQuery,
+                    onSelectFile: (file) => setSelectedFile(file),
+                    onSelectRemote: (strategy) => {
+                        setSelectedRemote(strategy);
+                        setSelectedFile(null);
+                    },
+                    onEnterDirectory: (dir) => {
+                        void handleEnterDirectory(dir);
+                    },
+                    onGoParent: () => {
+                        void handleGoParent();
+                    },
+                    onRefresh: () => {
+                        if (activeTab === 'local') void fetchLocalFileList();
+                        else void fetchRemoteStrategies();
+                    },
+                    onCreateFile: () => {
+                        void handleCreateFile();
+                    },
+                    onCreateFolder: () => {
+                        void handleCreateFolder();
+                    },
+                    onRenameFile: (file, event) => {
+                        void handleRenameItem(file, event);
+                    },
+                    onDeleteFile: (path, event) => {
+                        void handleDeleteFile(path, event);
+                    },
+                    onUploadToCloud: () => {
+                        void handleUploadToCloud();
+                    },
+                }}
+                editor={{
+                    code: editorContent,
+                    onChange: setEditorContent,
+                    onMount: (instance, monaco) => {
+                        editorRef.current = instance as any;
+                        monacoRef.current = monaco as any;
+                    },
+                    theme: editorTheme,
+                    isSaving,
+                    isCheckingSyntax,
+                    syntaxError,
+                    isDirty: hasSelection && editorContent !== savedContent,
+                    canRun: hasSelection && !syntaxError && !isRunning,
+                    onSave: () => {
+                        void handleSave();
+                    },
+                }}
+                params={{
+                    value: strategyEditorParams,
+                    onChange: handleStrategyEditorParamsChange,
+                    onApply: handleApplyStrategyParams,
+                    onApplyAndRun: () => {
+                        void handleApplyAndRun();
+                    },
+                    market: currentMarket,
+                }}
+                run={{
+                    isRunning,
+                    progress,
+                    logs,
+                    errors,
+                    onStop: () => {
+                        void handleStop();
+                    },
+                    onRun: () => {
+                        void handleRun();
+                    },
+                    onClearLogs: () => {
+                        setLogs([]);
+                        setErrors([]);
+                        setFinalResultSummary(null);
+                        resetExecuteResultSummary();
+                    },
+                    onCopyLogs: (which) => {
+                        void handleCopyLogs(which);
+                    },
+                    finalSummary: finalResultSummary,
+                }}
+                results={{
+                    minibtResult,
+                    qlibResult,
+                    savedRuns: savedBacktestRuns,
+                    onSave: handleSaveBacktestResult,
+                    onLoadSaved: handleLoadSavedBacktest,
+                    onDeleteSaved: handleDeleteSavedBacktest,
+                }}
+                meta={{
+                    strategyName: currentStrategyName,
+                    defaultModelName,
+                    marketLabel: marketConfig.label,
+                    onOpenQuantBot: handleOpenQuantBot,
+                }}
+                createDialog={{
+                    mode: createMode,
+                    name: createName,
+                    onNameChange: setCreateName,
+                    onConfirm: () => {
+                        void handleConfirmCreate();
+                    },
+                    onCancel: handleCancelCreate,
+                }}
+            />
+        );
+    }
 
     return (
         <div className="flex h-full bg-[#f8fafc] overflow-hidden p-6 gap-6">
@@ -2435,7 +2571,7 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
                                 <Trash2 className="h-3.5 w-3.5" />
                             </button>
                             <button
-                                onClick={handleCopyLogs}
+                                onClick={() => handleCopyLogs()}
                                 className="p-1 hover:bg-gray-100 rounded text-gray-400 transition-all hover:scale-110"
                                 title="复制当前日志"
                             >
@@ -2479,28 +2615,7 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
 
             </main>
 
-            {/* 4. 右栏：策略编辑模式 = 回测工作台；AI-IDE 模式 = LLM Chat */}
-            {strategyEditorMode ? (
-                <aside className="w-[500px] 2xl:w-[560px] flex-shrink-0 min-h-0">
-                    <StrategyEditorBacktestPanel
-                        params={strategyEditorParams}
-                        onParamsChange={handleStrategyEditorParamsChange}
-                        onApplyParams={handleApplyStrategyParams}
-                        onRun={() => handleRun()}
-                        onApplyAndRun={handleApplyAndRun}
-                        running={isRunning}
-                        minibtResult={minibtResult}
-                        qlibResult={qlibResult}
-                        code={editorContent}
-                        strategyName={currentStrategyName}
-                        savedRuns={savedBacktestRuns}
-                        onSaveResult={handleSaveBacktestResult}
-                        onLoadSaved={handleLoadSavedBacktest}
-                        onDeleteSaved={handleDeleteSavedBacktest}
-                        onOpenQuantBot={handleOpenQuantBot}
-                    />
-                </aside>
-            ) : (
+            {/* 右栏：AI-IDE 模式的 LLM Chat（策略编辑模式已在函数顶部独立渲染） */}
             <aside className="w-[440px] flex-shrink-0 bg-white border border-gray-200 flex flex-col rounded-[32px] shadow-sm transition-all duration-500 overflow-hidden">
                 <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                     <div className="flex flex-col gap-1">
@@ -2624,7 +2739,6 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
                     </div>
                 </div>
             </aside>
-            )}
         </div>
     );
 };

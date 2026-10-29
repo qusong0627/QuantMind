@@ -37,7 +37,7 @@ const modules: Module[] = [
     name: '策略编辑',
     icon: SquareTerminal,
     color: 'text-emerald-400',
-    description: 'AI-IDE 策略工作台：编写 / 调试 / 一键回测'
+    description: '策略工作台：编写 / 回测 / 复盘'
   },
   {
     id: 'quick-backtest',
