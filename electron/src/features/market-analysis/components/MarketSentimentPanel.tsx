@@ -713,32 +713,23 @@ export const MarketSentimentPanel: React.FC = () => {
           </div>
           )}
 
+          {/* 筹码结构放在扇形卡内部，填满右侧原先的空白区 */}
+          <VolumeProfileCard symbol={indexKey} date={data.trade_date} name={selected.name} />
+
           {hasStats && (
-            <div className="flex-1 min-h-[108px] flex items-center justify-center pt-1">
-              <div className="w-full max-w-md rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-3 text-center">
-                <div className="flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-400">
-                  <Info className="w-3 h-3" />
-                  历史同类情形
-                  <span className="font-mono text-slate-700">{selected.stats.n_clusters} 次</span>
-                  <span className="font-normal">独立触发簇</span>
-                </div>
-                <div className="mt-1 text-[11px] text-slate-500">
-                  平均涨跌{' '}
-                  <span className={`text-lg font-extrabold font-mono ${selected.baseline.mean >= 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                    {pctText(selected.baseline.mean, 2)}
-                  </span>
-                  <span className="text-slate-400">（平时水平）</span>
-                </div>
-                {bias && <div className="mt-1 text-[10px] text-slate-400 leading-snug">{bias.hint}</div>}
-                <div className="mt-1 text-[9px] text-slate-300">同类情形按独立触发簇统计，不是重叠日样本</div>
-              </div>
+            <div className="flex items-center justify-center gap-2 flex-wrap text-[10px] text-slate-400 pt-1 border-t border-slate-100">
+              <Info className="w-3 h-3" />
+              <span>历史同类情形 <b className="font-mono text-slate-600">{selected.stats.n_clusters}</b> 次（独立触发簇）</span>
+              <span>平均涨跌{' '}
+                <b className={`font-mono ${selected.baseline.mean >= 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                  {pctText(selected.baseline.mean, 2)}
+                </b>（平时水平）
+              </span>
+              {bias && <span className="text-slate-300">{bias.hint}</span>}
             </div>
           )}
         </section>
       </div>
-
-      {/* 筹码结构 / 成交价格分布 */}
-      <VolumeProfileCard symbol={indexKey} date={data.trade_date} name={selected.name} />
 
       {/* 底部：分项冷热热力图 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3">
