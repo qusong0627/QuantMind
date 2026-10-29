@@ -44,6 +44,10 @@ from backend.scripts.breadth_regime import (
 from backend.scripts.index_forecast import forecast_index
 from backend.scripts.breadth_universe import UNIVERSE_BY_KEY
 from backend.scripts.market_analysis.main_force import load_main_force, latest_block
+from backend.scripts.market_analysis.retail_force import (
+    latest_retail_block,
+    load_retail_force,
+)
 from backend.scripts.research_stats import expanding_pct_rank
 
 log = logging.getLogger("sentiment_snapshot")
@@ -678,6 +682,12 @@ def build_payload(
         mf = None
     if mf is not None and not mf.empty:
         mf = mf.reindex(base_view.index)
+    try:
+        rf = load_retail_force(days=1600)
+    except Exception:  # noqa: BLE001
+        rf = None
+    if rf is not None and not rf.empty:
+        rf = rf.reindex(base_view.index)
     vw_breadth = (
         (base_view["amt_up"] - base_view["amt_down"])
         / base_view["amt_total"].where(base_view["amt_total"] > 0)
@@ -724,6 +734,12 @@ def build_payload(
             None
             if mf is None or d not in mf.index or not np.isfinite(float(mf.loc[d, "main_breadth_amt"]))
             else round(float(mf.loc[d, "main_breadth_amt"]), 4)
+            for d in vol_tail
+        ],
+        "retail_net_yi": [
+            None
+            if rf is None or d not in rf.index or not np.isfinite(float(rf.loc[d, "retail_net_yi"]))
+            else round(float(rf.loc[d, "retail_net_yi"]), 2)
             for d in vol_tail
         ],
         "latest": {
@@ -798,6 +814,78 @@ def build_payload(
         "disclosure": "主力=超大单+大单；主力视角描述当前资金结构，不构成方向预测。",
     }
 
+    # 散户视角：唯一经历史验证的反向指标是「散户追涨相关」
+    retail = {}
+    if rf is not None and not rf.empty:
+        rf_view = rf.reindex(base_view.index)
+        chase = rf_view["retail_chase_corr"].astype(float)
+        # 分数=原始追涨相关的线性映射（0.05→0, 0.30→100），阈值来自 2022-2026 验证：
+        # >0.25 过热（之后偏弱），<0.10 冷/不追（之后偏强）。
+        score_series = ((chase - 0.05) / 0.25 * 100.0).clip(lower=0, upper=100)
+        latest_r = latest_retail_block(rf_view)
+        raw_chase = float(chase.iloc[-1]) if len(chase) else np.nan
+        score = float(score_series.iloc[-1]) if len(score_series) else np.nan
+        if np.isfinite(score):
+            latest_r["retail_score"] = round(score, 1)
+        if np.isfinite(raw_chase) and raw_chase >= 0.25:
+            verdict = {"label": "散户追涨过热", "tone": "warn", "hint": "反向警惕：散户在追近期赢家，之后偏弱"}
+        elif np.isfinite(raw_chase) and raw_chase <= 0.10:
+            verdict = {"label": "散户不追/回避", "tone": "good", "hint": "反向关注：散户没有追涨，之后偏强"}
+        else:
+            verdict = {"label": "散户情绪中性", "tone": "neutral", "hint": "没有极端反向信号"}
+        def _pct(key: str) -> float | None:
+            ser = rf_view[key].astype(float)
+            pv = expanding_pct_rank(ser, min_periods=120)
+            v = float(pv.iloc[-1]) if len(pv) else np.nan
+            return round(v, 3) if np.isfinite(v) else None
+        retail_indicators = [
+            {
+                "key": "retail_chase_corr",
+                "label": "散户追涨相关",
+                "value": None if not np.isfinite(chase.iloc[-1]) else round(float(chase.iloc[-1]), 4),
+                "unit": "",
+                "pct": _pct("retail_chase_corr"),
+                "zone": "low" if (_pct("retail_chase_corr") or 0) <= 0.1 else ("high" if (_pct("retail_chase_corr") or 0) >= 0.9 else "normal"),
+            },
+            {
+                "key": "retail_ratio",
+                "label": "散户净额/成交额",
+                "value": round(float(rf_view["retail_ratio"].iloc[-1]) * 100, 2) if np.isfinite(rf_view["retail_ratio"].iloc[-1]) else None,
+                "unit": "%",
+                "pct": _pct("retail_ratio"),
+                "zone": "normal",
+            },
+            {
+                "key": "retail_breadth_amt",
+                "label": "散户广度（成交额加权）",
+                "value": round(float(rf_view["retail_breadth_amt"].iloc[-1]) * 100, 1) if np.isfinite(rf_view["retail_breadth_amt"].iloc[-1]) else None,
+                "unit": "%",
+                "pct": _pct("retail_breadth_amt"),
+                "zone": "normal",
+            },
+            {
+                "key": "retail_divergence",
+                "label": "主力−散户背离",
+                "value": round(float(rf_view["divergence"].iloc[-1]) * 100, 2) if np.isfinite(rf_view["divergence"].iloc[-1]) else None,
+                "unit": "%",
+                "pct": _pct("divergence"),
+                "zone": "normal",
+            },
+        ]
+        retail = {
+            "latest": latest_r,
+            "verdict": verdict,
+            "score": round(score, 1) if np.isfinite(score) else None,
+            "thresholds": {"hot": 0.25, "cold": 0.10},
+            "indicators": retail_indicators,
+            "history": {
+                "dates": [d.strftime("%Y-%m-%d") for d in base_view.tail(120).index],
+                "score": [None if not np.isfinite(float(v)) else round(float(v), 1) for v in score_series.tail(120)],
+                "chase_corr": [None if not np.isfinite(float(v)) else round(float(v), 4) for v in chase.tail(120)],
+            },
+            "disclosure": "散户=中单+小单。只有「散户追涨相关」经 2022-2026 历史验证具反向价值：高=散户追近期赢家→之后偏弱，低=散户不追→之后偏强；散户净流入/广度本身更像同步动量，不单独做反向。",
+        }
+
     return {
         "trade_date": (
             all_view.index[-1] if all_view is not None else last_date
@@ -833,6 +921,7 @@ def build_payload(
         "distribution": distribution_all,
         "volume": volume,
         "main_force": main_force,
+        "retail": retail,
         "indices": indices,
     }
 

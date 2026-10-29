@@ -87,6 +87,18 @@ const payload = {
     ],
     disclosure: '主力=超大单+大单',
   },
+  retail: {
+    latest: { date: '2026-10-26', retail_ratio: 0.0317, retail_breadth_amt: 0.68, retail_chase_corr: 0.0603, retail_score: 4.1 },
+    verdict: { label: '散户不追/回避', tone: 'good', hint: '反向关注：散户没有追涨，之后偏强' },
+    score: 4.1,
+    thresholds: { hot: 0.25, cold: 0.1 },
+    indicators: [
+      { key: 'retail_chase_corr', label: '散户追涨相关', value: 0.0603, unit: '', pct: 0.176, zone: 'normal' },
+      { key: 'retail_ratio', label: '散户净额/成交额', value: 3.17, unit: '%', pct: 0.935, zone: 'normal' },
+    ],
+    history: { dates: ['2026-10-26'], score: [4.1], chase_corr: [0.0603] },
+    disclosure: '散户=中单+小单',
+  },
   stress_history: Array.from({ length: 40 }, (_, i) => ({
     date: `2026-08-${String((i % 28) + 1).padStart(2, '0')}`,
     stress: 40 + i,

@@ -101,8 +101,9 @@ export const MarketSentimentPanel: React.FC = () => {
   const [asOf, setAsOfState] = useState<string | undefined>(() => readAsOfFromUrl());
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [mainForceGlossaryOpen, setMainForceGlossaryOpen] = useState(false);
+  const [retailGlossaryOpen, setRetailGlossaryOpen] = useState(false);
   const [fanSolo, setFanSolo] = useState(false);
-  const [volumeMode, setVolumeMode] = useState<'market' | 'main'>('market');
+  const [volumeMode, setVolumeMode] = useState<'market' | 'main' | 'retail'>('market');
   const [fanCompare, setFanCompare] = useState(false);
   const setAsOf = useCallback((value?: string) => {
     setAsOfState(value);
@@ -423,6 +424,43 @@ export const MarketSentimentPanel: React.FC = () => {
             </div>
           ) : null}
 
+          {data.retail?.indicators?.length ? (
+            <div className="border-t border-slate-100 pt-2">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-extrabold text-slate-600">散户视角 · 冷热</span>
+                <button
+                  onClick={() => setRetailGlossaryOpen(true)}
+                  className="text-[9px] font-bold text-violet-600 hover:underline"
+                >
+                  指标说明 ?
+                </button>
+              </div>
+              <div className={`rounded-lg border px-2 py-1 mb-1 ${
+                data.retail.verdict.tone === 'warn'
+                  ? 'border-amber-200 bg-amber-50 text-amber-800'
+                  : data.retail.verdict.tone === 'good'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                    : 'border-slate-200 bg-slate-50 text-slate-600'
+              }`}>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-extrabold">{data.retail.verdict.label}</span>
+                  <span className="text-[9px] font-mono opacity-70">{data.retail.score == null ? '—' : data.retail.score.toFixed(0)}/100</span>
+                </div>
+                <div className="text-[9px] leading-snug">{data.retail.verdict.hint}</div>
+                {data.retail.score != null && (
+                  <div className="relative h-1.5 mt-1 rounded-full bg-gradient-to-r from-emerald-500 via-slate-300 to-red-500">
+                    <span
+                      className="absolute top-1/2 -translate-y-1/2 h-2 w-2 rounded-full border border-white bg-slate-800 shadow"
+                      style={{ left: `calc(${Math.min(100, Math.max(0, data.retail.score))}% - 4px)` }}
+                    />
+                  </div>
+                )}
+              </div>
+              <BreadthFactorBars items={data.retail.indicators} compact />
+              <p className="text-[9px] text-slate-400 mt-1">{data.retail.disclosure}</p>
+            </div>
+          ) : null}
+
           {universe && (
             <p className="text-[10px] text-slate-400 border-t border-slate-100 pt-2 leading-relaxed">
               广度口径：{universe.note}
@@ -465,6 +503,15 @@ export const MarketSentimentPanel: React.FC = () => {
                   title="成交量柱=全市场主力净额（超大单+大单）"
                 >
                   主力柱
+                </button>
+                <button
+                  onClick={() => setVolumeMode('retail')}
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                    volumeMode === 'retail' ? 'bg-white text-slate-800 shadow-2xs' : 'text-slate-500'
+                  }`}
+                  title="成交量柱=全市场散户净额（中单+小单）"
+                >
+                  散户柱
                 </button>
               </div>
               <button
@@ -519,7 +566,9 @@ export const MarketSentimentPanel: React.FC = () => {
                 ? undefined
                 : volumeMode === 'main' && data.volume
                   ? { ...data.volume, scope: '全市场', barMode: 'main' as const }
-                  : selected.volume ?? data.volume
+                  : volumeMode === 'retail' && data.volume
+                    ? { ...data.volume, scope: '全市场', barMode: 'retail' as const }
+                    : selected.volume ?? data.volume
             }
             compare={fanSolo || !fanCompare ? [] : INDEX_ORDER.filter((k) => k !== indexKey && data.indices[k]).map((k) => ({
               name: data.indices[k].name,
@@ -623,6 +672,16 @@ export const MarketSentimentPanel: React.FC = () => {
         title="主力视角 · 这些数字是什么意思"
         intro="主力=超大单+大单（不是中单/小单的散户资金）。这里看的是主力净额强度、主力覆盖广度，以及按成交额加权的资金方向。"
         footer="主力视角只描述当前资金结构，不构成方向预测；冷热条方向已统一，越靠右越冷。L2 资金流自 2022 年起可用。"
+      />
+
+      <BreadthGlossaryModal
+        open={retailGlossaryOpen}
+        onClose={() => setRetailGlossaryOpen(false)}
+        items={data.retail?.indicators ?? []}
+        keys={['retail_chase_corr', 'retail_ratio', 'retail_breadth_amt', 'retail_divergence']}
+        title="散户视角 · 怎么识别散户情绪、怎么做反向"
+        intro="散户=中单+小单。不是所有散户指标都能反向：经 2022-2026 验证，只有「散户追涨相关」有稳定反向价值；散户净流入/广度更像同步动量。"
+        footer="散户追涨相关 >0.25：散户在追近期赢家，之后偏弱（反向警惕）；<0.10：散户不追/回避，之后偏强（反向关注）。历史统计，不是未来保证。"
       />
 
       {/* 免责 */}

@@ -17,7 +17,8 @@ export interface FanVolumeSeries {
   vw_breadth: (number | null)[];
   /** 主力净额柱（亿元）；barMode=main 时使用 */
   main_net_yi?: (number | null)[];
-  barMode?: 'market' | 'main';
+  retail_net_yi?: (number | null)[];
+  barMode?: 'market' | 'main' | 'retail';
 }
 
 interface SentimentFanChartProps {
@@ -127,13 +128,14 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   }, [history, forwardDates, horizon, H]);
 
   const volMap = useMemo(() => {
-    const map = new Map<string, { turnover: number | null; vw: number | null; mainNet: number | null }>();
+    const map = new Map<string, { turnover: number | null; vw: number | null; mainNet: number | null; retailNet: number | null }>();
     if (volume) {
       volume.dates.forEach((d, i) =>
         map.set(d, {
           turnover: volume.turnover_yi[i] ?? null,
           vw: volume.vw_breadth[i] ?? null,
           mainNet: volume.main_net_yi?.[i] ?? null,
+          retailNet: volume.retail_net_yi?.[i] ?? null,
         }),
       );
     }
@@ -209,27 +211,31 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
       : '';
 
     // 成交量柱：只画历史段，日期逐日映射到价格 x 轴（未来段留空）
-    const volByDate = new Map<string, { turnover: number | null; vw: number | null; mainNet: number | null }>();
+    const volByDate = new Map<string, { turnover: number | null; vw: number | null; mainNet: number | null; retailNet: number | null }>();
     if (volume) {
       volume.dates.forEach((d, i) => volByDate.set(d, {
         turnover: volume.turnover_yi[i] ?? null,
         vw: volume.vw_breadth[i] ?? null,
         mainNet: volume.main_net_yi?.[i] ?? null,
+        retailNet: volume.retail_net_yi?.[i] ?? null,
       }));
     }
     const visibleVol = history
-      .map((h, i) => ({ i, ...(volByDate.get(h.date) ?? { turnover: null, vw: null, mainNet: null }) }))
+      .map((h, i) => ({ i, ...(volByDate.get(h.date) ?? { turnover: null, vw: null, mainNet: null, retailNet: null }) }))
       .filter((v) => v.i >= Math.max(0, Math.floor(viewStart)) && v.i <= Math.min(H - 1, Math.ceil(viewEndClamped)));
     const isMain = volume?.barMode === 'main';
+    const isRetail = volume?.barMode === 'retail';
+    const barValue = (v: { turnover: number | null; mainNet: number | null; retailNet: number | null }) =>
+      isMain ? v.mainNet : isRetail ? v.retailNet : v.turnover;
     const maxTurn = Math.max(
-      ...visibleVol.map((v) => (isMain ? Math.abs(v.mainNet ?? 0) : v.turnover ?? 0)),
+      ...visibleVol.map((v) => (isMain || isRetail ? Math.abs(barValue(v) ?? 0) : v.turnover ?? 0)),
       1,
     );
     const barW = Math.max(1, (plotW / Math.max(viewEndClamped - viewStart, 1)) * 0.58);
     const volZero = volumeTop + volumeH / 2;
     const volBars = visibleVol.map((v) => {
-      if (isMain) {
-        const val = v.mainNet ?? 0;
+      if (isMain || isRetail) {
+        const val = barValue(v) ?? 0;
         const hgt = Math.max(1, (Math.abs(val) / maxTurn) * (volumeH / 2 - 2));
         return {
           key: history[v.i].date,
@@ -238,7 +244,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
           h: hgt,
           w: barW,
           color: val >= 0 ? UP : DOWN,
-          title: `${history[v.i].date} · 主力净额 ${val >= 0 ? '+' : ''}${val.toFixed(2)} 亿（全市场）`,
+          title: `${history[v.i].date} · ${isRetail ? '散户' : '主力'}净额 ${val >= 0 ? '+' : ''}${val.toFixed(2)} 亿（全市场）`,
         };
       }
       const hgt = v.turnover == null ? 0 : Math.max(1, (v.turnover / maxTurn) * (volumeH - 4));
@@ -263,7 +269,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
 
     return {
       x, y, stressY, histPath, medianPath, gridVals, actualPath, actualEnd, comparePaths,
-      stressPath, fanPrices, volBars, maxTurn, vwPath, isMain, volZero,
+      stressPath, fanPrices, volBars, maxTurn, vwPath, isMain, isRetail, volZero,
       upperOuter: band((i) => fanPrices[i].p50, (i) => fanPrices[i].p90),
       lowerOuter: band((i) => fanPrices[i].p10, (i) => fanPrices[i].p50),
       upperInner: band((i) => fanPrices[i].p50, (i) => fanPrices[i].p75),
@@ -356,6 +362,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
       turnover: vol?.turnover ?? null,
       vw: vol?.vw ?? null,
       mainNet: vol?.mainNet ?? null,
+      retailNet: vol?.retailNet ?? null,
     };
   }, [hoverIdx, allDates, total, H, F, history, fan, volMap, stressMap, viewStart, viewEndClamped, plotW]);
 
@@ -504,13 +511,13 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
                 <title>{b.title}</title>
               </rect>
             ))}
-            {!geom.isMain && <path d={geom.vwPath} fill="none" stroke="#f59e0b" strokeWidth={1.4} strokeLinejoin="round" opacity={0.95} />}
-            {geom.isMain && <line x1={PAD.left} x2={W - PAD.right} y1={geom.volZero} y2={geom.volZero} stroke="#cbd5e1" strokeWidth={0.8} />}
+            {!geom.isMain && !geom.isRetail && <path d={geom.vwPath} fill="none" stroke="#f59e0b" strokeWidth={1.4} strokeLinejoin="round" opacity={0.95} />}
+            {(geom.isMain || geom.isRetail) && <line x1={PAD.left} x2={W - PAD.right} y1={geom.volZero} y2={geom.volZero} stroke="#cbd5e1" strokeWidth={0.8} />}
             <text x={PAD.left + 3} y={volumeTop + 10} textAnchor="start" fontSize={8} fill="#64748b" fontWeight={700}
-                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>{geom.isMain ? '主力净额（全市场）' : volume.scope ? `成交额·${volume.scope}` : '成交额'}</text>
+                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>{geom.isMain ? '主力净额（全市场）' : geom.isRetail ? '散户净额（全市场）' : volume.scope ? `成交额·${volume.scope}` : '成交额'}</text>
             <text x={PAD.left + 3} y={volumeTop + 21} textAnchor="start" fontSize={7} fill="#94a3b8"
-                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>{geom.isMain ? '红=净流入 / 绿=净流出' : `峰值 ${fmtTurnover(geom.maxTurn)}`}</text>
-            <text x={W - PAD.right + 4} y={volumeTop + 10} fontSize={7} fill="#f59e0b" fontWeight={700}>{geom.isMain ? '' : '系数'}</text>
+                  paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>{geom.isMain || geom.isRetail ? '红=净流入 / 绿=净流出' : `峰值 ${fmtTurnover(geom.maxTurn)}`}</text>
+            <text x={W - PAD.right + 4} y={volumeTop + 10} fontSize={7} fill="#f59e0b" fontWeight={700}>{geom.isMain || geom.isRetail ? '' : '系数'}</text>
           </g>
         )}
 
@@ -540,9 +547,9 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
                   {hover.stress != null && (
                     <text x={boxX + 6} y={boxY + (hover.f ? 47 : 36)} fontSize={8} fill="#7c3aed" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">压力 {hover.stress.toFixed(1)}</text>
                   )}
-                  {volume?.barMode === 'main' && hover.mainNet != null ? (
-                    <text x={boxX + 6} y={boxY + (hover.f ? 58 : 47)} fontSize={8} fill={hover.mainNet < 0 ? '#059669' : '#dc2626'} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
-                      主力净额 {hover.mainNet > 0 ? '+' : ''}{hover.mainNet.toFixed(2)} 亿
+                  {(volume?.barMode === 'main' || volume?.barMode === 'retail') && (volume?.barMode === 'main' ? hover.mainNet : hover.retailNet) != null ? (
+                    <text x={boxX + 6} y={boxY + (hover.f ? 58 : 47)} fontSize={8} fill={((volume?.barMode === 'main' ? hover.mainNet : hover.retailNet) ?? 0) < 0 ? '#059669' : '#dc2626'} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
+                      {volume?.barMode === 'main' ? '主力净额' : '散户净额'} {((volume?.barMode === 'main' ? hover.mainNet : hover.retailNet) ?? 0) > 0 ? '+' : ''}{((volume?.barMode === 'main' ? hover.mainNet : hover.retailNet) ?? 0).toFixed(2)} 亿
                     </text>
                   ) : hover.turnover != null ? (
                     <text x={boxX + 6} y={boxY + (hover.f ? 58 : 47)} fontSize={8} fill={hover.vw != null && hover.vw < 0 ? '#059669' : '#dc2626'} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">

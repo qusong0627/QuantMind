@@ -135,6 +135,8 @@ export interface SentimentVolume {
   main_breadth: (number | null)[];
   /** 主力净流入为正的个股成交额占比（成交额加权） */
   main_breadth_amt: (number | null)[];
+  /** 散户（中单+小单）净额（亿元）；散户柱用 */
+  retail_net_yi?: (number | null)[];
   latest: {
     date?: string | null;
     turnover_yi?: number | null;
@@ -153,6 +155,17 @@ export interface SentimentVolume {
 export interface MainForceBlock {
   latest: SentimentVolume['latest'];
   indicators: SentimentIndicator[];
+  disclosure?: string;
+}
+
+/** 散户视角：唯一经历史验证的反向指标是「散户追涨相关」。 */
+export interface RetailBlock {
+  latest: SentimentVolume['latest'] & { retail_score?: number | null };
+  verdict: { label: string; tone: 'warn' | 'good' | 'neutral'; hint: string };
+  score: number | null;
+  thresholds: { hot: number; cold: number };
+  indicators: SentimentIndicator[];
+  history: { dates: string[]; score: (number | null)[]; chase_corr: (number | null)[] };
   disclosure?: string;
 }
 
@@ -216,6 +229,8 @@ export interface MarketSentiment {
   volume?: SentimentVolume;
   /** 主力视角冷热分项；旧快照没有此字段 */
   main_force?: MainForceBlock;
+  /** 散户视角冷热分项；旧快照没有此字段 */
+  retail?: RetailBlock;
   indices: Record<string, IndexSentiment>;
   /** true = 历史回看；false = 最新一期 */
   as_of: boolean;
