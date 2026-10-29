@@ -34,10 +34,19 @@ const netLabel = (v: number | null | undefined): string => {
 const costKindLabel = (kind: string | null | undefined): string =>
   kind === 'short' ? '卖出均价' : kind === 'long' ? '持仓成本' : '无净头寸';
 
-export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?: string }> = ({
+interface VolumeProfileCardProps {
+  symbol: string;
+  date?: string;
+  name?: string;
+  /** 窄容器（个股详情右栏）用两列瓦片、单列成本带，避免五列挤压 */
+  compact?: boolean;
+}
+
+export const VolumeProfileCard: React.FC<VolumeProfileCardProps> = ({
   symbol,
   date,
   name,
+  compact = false,
 }) => {
   const [windowDays, setWindowDays] = useState<number>(60);
   const [data, setData] = useState<VolumeProfileResponse | null>(null);
@@ -101,11 +110,34 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
       : null;
   const mainMark = data.main_cost_kind === 'short' ? '主卖' : '主仓';
   const retailMark = data.retail_cost_kind === 'short' ? '散卖' : '散仓';
+  const vaRows = rows.filter(
+    (bin) => data.val != null && data.vah != null && bin.high > data.val && bin.low < data.vah,
+  );
+  const vaTopMid = vaRows.length ? vaRows[0].mid : null;
+  const vaBottomMid = vaRows.length ? vaRows[vaRows.length - 1].mid : null;
+  const vaWidthPct =
+    data.val != null && data.vah != null && data.val > 0
+      ? (data.vah / data.val - 1) * 100
+      : null;
+  const vaPosition =
+    data.last == null || data.val == null || data.vah == null
+      ? null
+      : data.last < data.val
+        ? '带下方'
+        : data.last > data.vah
+          ? '带上方'
+          : '带内';
+  const vaWidthText = vaWidthPct == null ? '—' : `${vaWidthPct.toFixed(1)}%`;
 
   const markers = (bin: VolumeProfileBin): string[] => {
     const out: string[] = [];
     if (inRange(bin, data.poc)) out.push('POC');
-    if (data.val != null && data.vah != null && bin.high > data.val && bin.low < data.vah) out.push('价值区');
+    const isVa = data.val != null && data.vah != null && bin.high > data.val && bin.low < data.vah;
+    if (isVa) {
+      const isTop = vaTopMid != null && bin.mid === vaTopMid;
+      const isBottom = vaBottomMid != null && bin.mid === vaBottomMid;
+      out.push(isTop && !isBottom ? '价值区上沿' : isBottom && !isTop ? '价值区下沿' : '价值区');
+    }
     if (inRange(bin, data.last)) out.push('现');
     if (inRange(bin, data.main_cost)) out.push(mainMark);
     if (inRange(bin, data.retail_cost)) out.push(retailMark);
@@ -139,7 +171,7 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-1.5 text-[10px]">
+      <div className={`grid ${compact ? 'grid-cols-2' : 'grid-cols-2 lg:grid-cols-5'} gap-1.5 text-[10px]`}>
         <div className="rounded-lg bg-slate-50 border border-slate-100 px-2 py-1">
           <div className="text-slate-400">现价 / 窗口VWAP</div>
           <div className="font-mono font-extrabold text-slate-800 truncate">{fmt(data.last)} / {fmt(windowVwap)}</div>
@@ -148,7 +180,7 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
         <div className="rounded-lg bg-red-50/50 border border-red-100 px-2 py-1">
           <div className="text-slate-400">主力 · {netLabel(data.main_net_yi)}</div>
           <div className="font-mono font-extrabold text-red-600">{fmtYi(data.main_net_yi)}</div>
-          <div className="text-[9px] text-slate-500 truncate" title={`${costKindLabel(data.main_cost_kind)} ${fmt(data.main_cost)} · 现价 ${pct(data.main_premium_pct)}`}>
+          <div className={`text-[9px] text-slate-500 ${compact ? '' : 'truncate'}`} title={`${costKindLabel(data.main_cost_kind)} ${fmt(data.main_cost)} · 现价 ${pct(data.main_premium_pct)}`}>
             {costKindLabel(data.main_cost_kind)} <span className="font-mono text-slate-700">{fmt(data.main_cost)}</span>
             <span className="font-mono"> · 现价 {pct(data.main_premium_pct)}</span>
           </div>
@@ -156,14 +188,18 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
         <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 px-2 py-1">
           <div className="text-slate-400">散户 · {netLabel(data.retail_net_yi)}</div>
           <div className="font-mono font-extrabold text-emerald-700">{fmtYi(data.retail_net_yi)}</div>
-          <div className="text-[9px] text-slate-500 truncate" title={`${costKindLabel(data.retail_cost_kind)} ${fmt(data.retail_cost)} · 现价 ${pct(data.retail_premium_pct)}`}>
+          <div className={`text-[9px] text-slate-500 ${compact ? '' : 'truncate'}`} title={`${costKindLabel(data.retail_cost_kind)} ${fmt(data.retail_cost)} · 现价 ${pct(data.retail_premium_pct)}`}>
             {costKindLabel(data.retail_cost_kind)} <span className="font-mono text-slate-700">{fmt(data.retail_cost)}</span>
             <span className="font-mono"> · 现价 {pct(data.retail_premium_pct)}</span>
           </div>
         </div>
-        <div className="rounded-lg bg-amber-50/50 border border-amber-100 px-2 py-1">
+        <div
+          className="rounded-lg bg-amber-50/50 border border-amber-100 px-2 py-1"
+          title="70% 价值区=窗口内 70% 成交额所在的价格带。带宽越窄，筹码越集中。现价在带下方：带内筹码整体浮亏，下沿是反弹压力；在带内：多空共识区；在带上方：带内筹码获利，上沿转支撑。"
+        >
           <div className="text-slate-400">POC / 70% 价值区</div>
           <div className="font-mono font-extrabold text-amber-700">{fmt(data.poc)} <span className="text-[9px]">{fmt(data.val)}~{fmt(data.vah)}</span></div>
+          <div className="text-[9px] text-slate-500 font-mono">现价在{vaPosition ?? '—'} · 带宽 {vaWidthText}</div>
         </div>
         <div className="rounded-lg bg-purple-50/50 border border-purple-100 px-2 py-1">
           <div className="text-slate-400">14% 低分位 / −14% 回撤</div>
@@ -171,8 +207,18 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
         </div>
       </div>
 
+      <div className="flex items-start gap-1.5 text-[10px] leading-snug text-amber-900">
+        <span className="mt-1 w-2 h-2 rounded-sm bg-amber-400 shrink-0" />
+        <span>
+          <b>黄 = 70% 价值区</b>：窗口内 70% 的成交额落在{' '}
+          <span className="font-mono font-bold">{fmt(data.val)}~{fmt(data.vah)}</span>（带宽 {vaWidthText}）。
+          <br />
+          越窄=筹码越集中；现价在带下方=带内筹码整体浮亏、下沿是反弹压力；在带内=多空共识区；在带上方=带内获利、上沿转支撑。
+        </span>
+      </div>
+
       <div
-        className="grid grid-cols-1 lg:grid-cols-2 gap-x-3 gap-y-0.5 text-[9px] font-mono text-slate-500"
+        className={`grid ${compact ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-2'} gap-x-3 gap-y-0.5 text-[9px] font-mono text-slate-500`}
         title="净买日=当日净流入为正的交易日 VWAP 加权；净卖日=净流出日的 VWAP 加权；全活动=|净额| 加权。三者都不是持仓成本，只作对照。"
       >
         <span className="truncate">
@@ -187,11 +233,12 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
         {rows.map((bin) => {
           const markersArr = markers(bin);
           const isPoc = markersArr.includes('POC');
-          const inVa = markersArr.includes('价值区');
+          const inVa =
+            data.val != null && data.vah != null && bin.high > data.val && bin.low < data.vah;
           return (
             <div
               key={`${bin.low}-${bin.high}`}
-              className={`grid grid-cols-[64px_1fr_80px] items-center gap-1.5 rounded px-1 ${
+              className={`grid ${compact ? 'grid-cols-[52px_1fr_78px]' : 'grid-cols-[64px_1fr_92px]'} items-center gap-1.5 rounded px-1 ${
                 isPoc ? 'bg-red-50' : inVa ? 'bg-amber-50/60' : ''
               }`}
               title={`${bin.low}~${bin.high} · 成交额 ${bin.amount_yi} 亿 (${(bin.share * 100).toFixed(1)}%)`}
@@ -213,7 +260,8 @@ export const VolumeProfileCard: React.FC<{ symbol: string; date?: string; name?:
 
       <div className="flex items-center gap-3 text-[9px] text-slate-400 flex-wrap">
         <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-red-500" />POC 最大成交价</span>
-        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-amber-400" />70% 价值区</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-amber-400" />黄=70% 价值区（上/下沿已标注）</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-slate-300" />其余成交价</span>
         <span className="inline-flex items-center gap-1"><b className="text-slate-600">主仓/散卖</b>净头寸均价所在箱（散户净卖出时标“散卖”）</span>
         <span className="ml-auto">{data.cost_scope}</span>
       </div>

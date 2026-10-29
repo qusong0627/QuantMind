@@ -5,6 +5,7 @@ import { message } from 'antd';
 import { BarChart3, Coins, Landmark, BrainCircuit, Users2, PieChart } from 'lucide-react';
 import { stockTerminalService, FinancialsResponse, SeriesResponse, DividendItem } from '../../services/stockTerminalService';
 import { SeriesChart, buildSeries } from './SeriesChart';
+import { VolumeProfileCard } from '../../../market-analysis/components/VolumeProfileCard';
 
 export interface TabProps { symbol: string; asof?: string; }
 
@@ -200,6 +201,7 @@ export function ChipFlowTab({ symbol, asof }: TabProps) {
   return (
     <TabShell title="筹码与资金" icon={PieChart} loading={loading} autoHeight>
       <div className="flex flex-col gap-3">
+        <VolumeProfileCard symbol={symbol} date={asof} compact />
         <div className="bg-white/70 rounded-2xl border border-slate-100 p-2">
           <div className="text-[11px] font-bold text-slate-500 mb-1">筹码分布（获利盘 / 集中度）</div>
           <SeriesChart resp={chip} series={chipS} height={280} tooltipFmt={(n, v) => `${n}: ${_divFmt(v)}`} />

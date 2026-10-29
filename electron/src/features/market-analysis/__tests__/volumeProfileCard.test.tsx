@@ -53,6 +53,7 @@ vi.mock('../services/moneyFlowService', async (importOriginal) => {
 });
 
 import { VolumeProfileCard } from '../components/VolumeProfileCard';
+import { getVolumeProfile } from '../services/moneyFlowService';
 
 describe('VolumeProfileCard', () => {
   it('渲染主力/散户成本、POC/价值区与 14% 低分位', async () => {
@@ -65,8 +66,20 @@ describe('VolumeProfileCard', () => {
     expect(screen.getByText('净头寸口径')).toBeInTheDocument();
     expect(screen.getByText(/主力双边/)).toBeInTheDocument();
     expect(screen.getByText(/散户双边/)).toBeInTheDocument();
+    expect(screen.getByText(/黄 = 70% 价值区/)).toBeInTheDocument();
+    expect(screen.getAllByText(/现价在带下方/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/价值区上沿/)).toBeInTheDocument();
+    expect(screen.getByText(/价值区下沿/)).toBeInTheDocument();
     expect(screen.getAllByText(/4557.37/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/4227.09/).length).toBeGreaterThan(0);
     expect(screen.getByText(/本地分钟数据陈旧/)).toBeInTheDocument();
+  });
+
+  it('带内时显示「现价在带内」，不出现「带带内」', async () => {
+    vi.mocked(getVolumeProfile).mockResolvedValueOnce({ ...payload, last: 4500 });
+    render(<VolumeProfileCard symbol="000300.SH" compact />);
+    await waitFor(() => expect(screen.getByText('筹码结构 · 主力/散户成本')).toBeInTheDocument());
+    expect(screen.getAllByText(/现价在带内/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/带带内/)).toBeNull();
   });
 });
