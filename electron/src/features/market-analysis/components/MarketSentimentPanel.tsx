@@ -306,6 +306,9 @@ export const MarketSentimentPanel: React.FC = () => {
         })}
       </div>
 
+      {/* 成交量 × 主力加权系数曲线（放在顶部，避免用户在长面板里找不到） */}
+      {data.volume && <VolumeForceChart volume={data.volume} />}
+
       {/* 顶部：分数 + 扇形 */}
       <div className="grid grid-cols-1 xl:grid-cols-[300px_1fr] gap-3 items-stretch">
         {/* 左栏：压力分 */}
@@ -543,9 +546,6 @@ export const MarketSentimentPanel: React.FC = () => {
           </div>
         </section>
       </div>
-
-      {/* 成交量 × 主力加权系数曲线 */}
-      {data.volume && <VolumeForceChart volume={data.volume} />}
 
       {/* 底部：分项冷热热力图 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3">
