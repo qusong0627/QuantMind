@@ -111,9 +111,9 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   const priceBottom = PAD.top + priceH;
   const stressTop = PAD.top;
   const volumeTop = priceBottom + (hasVolume ? gap : 0);
-  // 压力分画在主图下 38% 带内，避免和价格线正面打架
-  const stressBandTop = PAD.top + priceH * 0.62;
-  const stressBandH = priceH * 0.38;
+  // 压力分画在主图中下部（0 上移，方便读数），带内用色块区分冷热
+  const stressBandTop = PAD.top + priceH * 0.36;
+  const stressBandH = priceH * 0.46;
   const volumeBase = height - PAD.bottom;
 
   const allDates = useMemo(() => {
@@ -415,7 +415,25 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
           <path d={geom.upperInner} fill={UP} fillOpacity={0.16} />
           <path d={geom.lowerInner} fill={DOWN} fillOpacity={0.16} />
           {hasStress && (
-            <path d={geom.stressPath} fill="none" stroke="#7c3aed" strokeWidth={1.25} strokeDasharray="4 3" strokeLinejoin="round" opacity={0.72} />
+            <>
+              {[
+                { from: 0, to: 20, color: 'rgba(220,38,38,0.07)' },
+                { from: 20, to: 40, color: 'rgba(245,158,11,0.06)' },
+                { from: 40, to: 60, color: 'rgba(148,163,184,0.05)' },
+                { from: 60, to: 80, color: 'rgba(20,184,166,0.06)' },
+                { from: 80, to: 100, color: 'rgba(16,185,129,0.07)' },
+              ].map((z) => (
+                <rect
+                  key={`zone-${z.from}`}
+                  x={PAD.left}
+                  y={geom.stressY(z.from)}
+                  width={plotW}
+                  height={Math.max(1, geom.stressY(z.to) - geom.stressY(z.from))}
+                  fill={z.color}
+                />
+              ))}
+              <path d={geom.stressPath} fill="none" stroke="#7c3aed" strokeWidth={1.25} strokeDasharray="4 3" strokeLinejoin="round" opacity={0.75} />
+            </>
           )}
           {geom.comparePaths.map((c) => (
             <path key={c.name} d={c.d} fill="none" stroke={c.color} strokeWidth={1.2} strokeDasharray="2 3" opacity={0.8} />
@@ -435,6 +453,20 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
 
         {geom.anchorVisible && (
           <text x={geom.anchorX} y={PAD.top - 4} textAnchor="middle" fontSize={9} fill="#64748b" fontWeight={700}>今日</text>
+        )}
+        {hasStress && (
+          <g fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
+            {[40, 60].map((v) => (
+              <g key={`ref-${v}`}>
+                <line x1={PAD.left} x2={W - PAD.right} y1={geom.stressY(v)} y2={geom.stressY(v)}
+                      stroke="#7c3aed" strokeWidth={0.9} strokeDasharray="4 4" opacity={0.42} />
+                <text x={W - PAD.right - 4} y={geom.stressY(v) - 2} textAnchor="end" fontSize={7} fill="#7c3aed"
+                      fontWeight={700} paintOrder="stroke" stroke="#ffffff" strokeWidth={2}>
+                  {v === 40 ? '偏热 40' : '偏冷 60'}
+                </text>
+              </g>
+            ))}
+          </g>
         )}
         {geom.fanEndVisible && (
           <g fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
