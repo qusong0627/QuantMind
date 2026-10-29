@@ -369,6 +369,7 @@ describe('聪明钱面板接线 v2.1（一框六面）', () => {
     await userEvent.click(screen.getByText('天马科技'));
 
     expect(mockStock).toHaveBeenCalledWith('SH603668');
+    expect(await screen.findByRole('dialog')).toBeInTheDocument(); // 居中弹窗，不是右侧抽屉
     await screen.findByText('事件时间线');
     expect(screen.getByText('最近龙虎榜席位构成')).toBeInTheDocument();
 

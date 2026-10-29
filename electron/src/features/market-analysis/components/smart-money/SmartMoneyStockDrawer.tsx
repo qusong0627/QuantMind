@@ -1,4 +1,6 @@
-/** 聪明钱 · 个股档案抽屉（细案 §6.1 StockDrawer：时间线 / 席位构成 / 大宗明细 / 北向序列）。
+/** 聪明钱 · 个股档案弹窗（细案 §6.1 StockDrawer：时间线 / 席位构成 / 大宗明细 / 北向序列）。
+ *
+ * 2026-10-29 用户反馈：不要右侧抽屉，改为居中 Modal 弹出；内容与取数口径不变。
  *
  * 消费 GET /smart-money/stock/{symbol}（前缀式代码）。纪律：
  * 缺失「—」不补 0；lhb 的 fwd_ret_* 是东财历史回溯口径（只展示，标注非预测）；
@@ -7,7 +9,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Building2, CalendarClock, Coins, LineChart as LineChartIcon, ShieldAlert } from 'lucide-react';
-import { Drawer, Tag, Tooltip } from 'antd';
+import { Modal, Tag, Tooltip } from 'antd';
 import {
   getSmartMoneyStock,
   type SmartDzjyRow,
@@ -233,10 +235,13 @@ export const SmartMoneyStockDrawer: React.FC<SmartMoneyStockDrawerProps> = ({
   }, [north]);
 
   return (
-    <Drawer
+    <Modal
       open={open}
-      onClose={onClose}
-      width={560}
+      onCancel={onClose}
+      footer={null}
+      width={1080}
+      centered
+      styles={{ body: { maxHeight: 'calc(100vh - 170px)', overflowY: 'auto', paddingRight: 8 } }}
       title={
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-[13px] font-extrabold text-slate-800 truncate">
@@ -453,6 +458,6 @@ export const SmartMoneyStockDrawer: React.FC<SmartMoneyStockDrawerProps> = ({
           )}
         </div>
       )}
-    </Drawer>
+    </Modal>
   );
 };
