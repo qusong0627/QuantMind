@@ -107,6 +107,15 @@ def load_candidates(quantdb_root: Path) -> tuple[pd.DataFrame, dict]:
         log.warning("rd_mined 报告缺失，跳过 rd 源: %s", rd_path)
 
     cand = pd.concat([kept, pd.DataFrame(rd_rows, columns=cols)], ignore_index=True)
+    # 同一 (lib,name) 可能在 kept 与 rd 报告里各出现一次；不去重会让
+    # compute_ic_table 的 d[name] 返回 DataFrame（重复列），
+    # v.notna() & fr.notna() 直接抛 duplicate labels。
+    if cand.duplicated(["lib", "name"]).any():
+        log.warning(
+            "候选 (lib,name) 重复 %d 行，保留首行（优先联合筛选清单）",
+            int(cand.duplicated(["lib", "name"]).sum()),
+        )
+        cand = cand.drop_duplicates(["lib", "name"], keep="first")
     cand["sublibrary"] = cand["sublibrary"].fillna("")
     cand["group"] = cand["lib"] + "/" + cand["sublibrary"].astype(str)
     fp = {
@@ -183,7 +192,7 @@ def compute_ic_table(
     )
     days_by_lib: dict[str, list[str]] = {lib: [] for lib in cand.groupby("lib").groups}
     prev_long: dict[tuple[str, str], frozenset] = {}
-    by_lib = {lib: g["name"].tolist() for lib, g in cand.groupby("lib")}
+    by_lib = {lib: sorted(set(g["name"].tolist())) for lib, g in cand.groupby("lib")}
     for dt in eval_dates:
         fr = fwd_ranks.get(dt)
         if fr is None or fr.notna().sum() < C.MIN_STOCK_SAMPLE:
@@ -194,7 +203,8 @@ def compute_ic_table(
             if not p.exists():
                 continue
             days_by_lib[lib].append(dt)
-            d = pd.read_parquet(p, columns=["symbol"] + names).set_index("symbol")
+            d = pd.read_parquet(p, columns=["symbol"] + names)
+            d = d.drop_duplicates("symbol", keep="last").set_index("symbol")
             for n in names:
                 key = (lib, n)
                 v = d[n]
@@ -281,7 +291,10 @@ def summarize_ic(
                 "ic60": ic60,
                 "win60": float((np.sign(s) == np.sign(ic60)).mean()),
                 "n_days": int(len(s)),
-                "icir60": ic60 / sd * math.sqrt(len(s)) if sd > 0 else None,
+                # ICIR = mean(IC)/std(IC)；t = ICIR×√n（显著性）。
+                # 二者不可混用：旧实现把 t 写进 icir60，前端 ICIR 列被放大 √n 倍。
+                "icir60": ic60 / sd if sd > 0 else None,
+                "t60": ic60 / sd * math.sqrt(len(s)) if sd > 0 else None,
                 **_decay_stat(s, ic60),
                 **_net_stat(net_table, (lib, n), ic60),
             }
@@ -330,7 +343,8 @@ def _net_stat(
     return {
         "net_ic60": net_ic60,
         "net_win60": float((np.sign(ns) == np.sign(net_ic60)).mean()),
-        "net_icir60": net_ic60 / nsd * math.sqrt(len(ns)) if nsd > 0 else None,
+        "net_icir60": net_ic60 / nsd if nsd > 0 else None,
+        "net_t60": net_ic60 / nsd * math.sqrt(len(ns)) if nsd > 0 else None,
         "eroded": bool(np.sign(net_ic60) != np.sign(ic60)),
     }
 
@@ -357,15 +371,18 @@ def select_factors(stats: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         log.warning(
             "过闸数不足，胜率门槛降级至 %.2f → %d 个", C.DEGRADE_WIN_RATE, len(gated)
         )
-    sel = pd.concat(
-        [
-            g.sort_values("ic60", key=lambda s: s.abs(), ascending=False).head(
-                C.RD_FAMILY_CAP if lib == "rd_mined" else C.FAMILY_CAP
-            )
-            for (lib, _grp), g in gated.groupby(["lib", "group"])
-        ]
-    ).drop_duplicates(["lib", "name"])
-    sel = sel.reset_index(drop=True)
+    parts = [
+        g.sort_values("ic60", key=lambda s: s.abs(), ascending=False).head(
+            C.RD_FAMILY_CAP if lib == "rd_mined" else C.FAMILY_CAP
+        )
+        for (lib, _grp), g in gated.groupby(["lib", "group"])
+    ]
+    if parts:
+        sel = pd.concat(parts).drop_duplicates(["lib", "name"]).reset_index(drop=True)
+    else:
+        # 极端行情下连降级胜率也无因子过闸：返回空表，由调用方按 MIN_SELECTED
+        # 硬门报 BuildError；不能对空列表 pd.concat（会抛 ValueError 掩盖真因）。
+        sel = gated.iloc[0:0].copy().reset_index(drop=True)
     sel["sgn"] = np.sign(sel["ic60"]).astype(int)
     sel["w"] = sel["ic60"].abs().clip(C.W_CLIP_LO, C.W_CLIP_HI)
     info = {

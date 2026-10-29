@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from backend.shared.factor_board import config as C
+from backend.shared.factor_board import composite as CP
 from backend.shared.factor_board import selection as SEL
 
 
@@ -351,3 +352,47 @@ def test_净IC_未给成本或未给原始收益_净轨不启用(tmp_path, monke
     assert net_a is None
     _, net_b, _ = SEL.compute_ic_table(tmp_path, cand, dates, ranks, cost_rate=0.002)
     assert net_b is None
+
+
+@pytest.mark.unit
+def test_ICIR_是均值除标准差_t_才乘根号n():
+    """ICIR 与 t 不可混用：ICIR=mean/std，t=ICIR×√n（旧实现把 t 写进 ICIR）。"""
+    cand = _cand([("a", "f", 0.05)])
+    ics = list(np.linspace(0.01, 0.11, 60))
+    stats = SEL.summarize_ic({("a", "f"): ics}, cand)
+    row = stats.iloc[0]
+    s = pd.Series(ics)
+    expected_icir = float(s.mean() / s.std())
+    assert row["icir60"] == pytest.approx(expected_icir, rel=1e-9)
+    assert row["t60"] == pytest.approx(expected_icir * np.sqrt(60), rel=1e-9)
+    assert row["t60"] != pytest.approx(row["icir60"])
+
+
+@pytest.mark.unit
+def test_全部因子不过闸时返回空表而不是抛异常():
+    stats = _stats([("a", "weak", 0.01, 0.4, 0.05)])
+    sel, info = SEL.select_factors(stats)
+    assert sel.empty
+    assert "sgn" in sel.columns and "w" in sel.columns
+    assert info["gated"] == 0
+
+
+@pytest.mark.unit
+def test_共同分区日取全库交集_不按_l1_最新日(tmp_path):
+    root = tmp_path / "quantdb"
+    for lib, dates in {
+        "l1_factors": ["20261027", "20261028"],
+        "alpha360": ["20261027"],
+        "rd_mined": ["20261024", "20261027"],
+    }.items():
+        for d in dates:
+            (root / "6_ml_datasets" / lib / f"dt={d}").mkdir(parents=True)
+    common, latest = CP.common_factor_dates(
+        root, ["l1_factors", "alpha360", "rd_mined"]
+    )
+    assert common == ["20261027"]  # 10-28 只有 l1 有，不进入共同截面
+    assert latest == {
+        "l1_factors": "20261028",
+        "alpha360": "20261027",
+        "rd_mined": "20261027",
+    }

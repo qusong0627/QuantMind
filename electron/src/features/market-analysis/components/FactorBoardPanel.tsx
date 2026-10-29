@@ -28,6 +28,7 @@ import { DateBadge, EmptyHint, NumText, PeriodChips, RankRow, SectionCard, fmtIn
 import { signalPositionLabel } from '../../shared/signalVocabulary';
 import type { VerdictMeta } from '../factorBoardVocabulary';
 import { decayMeta, quadChipCls, regimeNoteMeta, verdictMeta } from '../factorBoardVocabulary';
+import { FactorICBar, FactorICIRScatter, SectorResonanceScatter } from './FactorBoardCharts';
 import {
   FactorBoardError,
   FactorBoardMaskInfo,
@@ -147,7 +148,7 @@ function SectorRow({
           onPick(item.name);
         }
       }}
-      title={`${item.name}：点击查看成分股`}
+      title={`${item.name}：成分 ${item.n} 只 · 有评分 ${item.n_scored ?? '—'} 只；点击查看成分股`}
       className={`group flex items-center gap-2 px-1 py-1.5 border-b border-slate-50 last:border-0 cursor-pointer transition-colors ${
         active ? 'bg-purple-50/70' : 'hover:bg-slate-50/80'
       }`}
@@ -259,6 +260,8 @@ export const FactorBoardPanel: React.FC = () => {
   const [selectedDate, setSelectedDate] = useState<string | undefined>();
   const [sectorType, setSectorType] = useState<string>('industry_l2');
   const [stockList, setStockList] = useState<string>('top');
+  const [sectorView, setSectorView] = useState<'chart' | 'table'>('chart');
+  const [factorView, setFactorView] = useState<'chart' | 'table'>('chart');
   // 板块成分钻取（master-detail：点左侧板块行 → 右侧卡切成分视图）
   const [sectorPick, setSectorPick] = useState<{ type: string; name: string } | null>(null);
   const [members, setMembers] = useState<FactorBoardSectorMember[] | null>(null);
@@ -537,31 +540,56 @@ export const FactorBoardPanel: React.FC = () => {
           title={`板块共振（三层判定 · q67=${sectorGroup?.q67 ?? '—'} / q33=${sectorGroup?.q33 ?? '—'}）`}
           icon={<Layers className="w-3.5 h-3.5 text-purple-600" />}
           extra={
-            <PeriodChips
-              options={SECTOR_TYPE_OPTIONS}
-              value={sectorType}
-              onChange={(id) => {
-                setSectorType(id);
-                setSectorPick(null);
-              }}
-            />
+            <div className="flex items-center gap-1.5 flex-wrap justify-end">
+              <PeriodChips
+                options={SECTOR_TYPE_OPTIONS}
+                value={sectorType}
+                onChange={(id) => {
+                  setSectorType(id);
+                  setSectorPick(null);
+                }}
+              />
+              <div className="flex rounded-full bg-slate-100 p-0.5">
+                {(['chart', 'table'] as const).map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setSectorView(v)}
+                    aria-pressed={sectorView === v}
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold transition-colors ${
+                      sectorView === v ? 'bg-white text-purple-700 shadow-2xs' : 'text-slate-500'
+                    }`}
+                  >
+                    {v === 'chart' ? '图表' : '明细'}
+                  </button>
+                ))}
+              </div>
+            </div>
           }
         >
           {sectorGroup && sectorGroup.items.length > 0 ? (
-            <div className="max-h-[400px] overflow-y-auto custom-scrollbar -mx-1 px-1">
-              {sectorGroup.items.map((it, i) => (
-                <SectorRow
-                  key={it.name}
-                  item={it}
-                  rank={i + 1}
-                  q67={sectorGroup.q67}
-                  q33={sectorGroup.q33}
-                  scale={sectorScale}
-                  active={sectorPick?.type === sectorType && sectorPick?.name === it.name}
-                  onPick={pickSector}
-                />
-              ))}
-            </div>
+            sectorView === 'chart' ? (
+              <SectorResonanceScatter
+                group={sectorGroup}
+                activeName={sectorPick?.type === sectorType ? sectorPick.name : null}
+                onPick={pickSector}
+              />
+            ) : (
+              <div className="max-h-[400px] overflow-y-auto custom-scrollbar -mx-1 px-1">
+                {sectorGroup.items.map((it, i) => (
+                  <SectorRow
+                    key={it.name}
+                    item={it}
+                    rank={i + 1}
+                    q67={sectorGroup.q67}
+                    q33={sectorGroup.q33}
+                    scale={sectorScale}
+                    active={sectorPick?.type === sectorType && sectorPick?.name === it.name}
+                    onPick={pickSector}
+                  />
+                ))}
+              </div>
+            )
           ) : (
             <EmptyHint text="该分类无板块数据" />
           )}
@@ -608,10 +636,15 @@ export const FactorBoardPanel: React.FC = () => {
               <EmptyHint text="该板块无成分数据" />
             )
           ) : stocks.length > 0 ? (
-            <div className="max-h-[400px] overflow-y-auto custom-scrollbar">
-              {stocks.map((s, i) => (
-                <StockRow key={`${s.symbol}-${i}`} rank={i + 1} item={s} />
-              ))}
+            <div className="flex flex-col gap-1">
+              <p className="text-[10px] text-slate-400 -mt-1">
+                按合成分排序；无模型覆盖的票保留在名单中，模型/象限显示「—」（不补 0）。
+              </p>
+              <div className="max-h-[400px] overflow-y-auto custom-scrollbar">
+                {stocks.map((s, i) => (
+                  <StockRow key={`${s.symbol}-${i}`} rank={i + 1} item={s} />
+                ))}
+              </div>
             </div>
           ) : (
             <EmptyHint text="该名单为空" />
@@ -623,8 +656,44 @@ export const FactorBoardPanel: React.FC = () => {
       <SectionCard
         title={`入选因子（${board.factors.length}）`}
         icon={<Sparkles className="w-3.5 h-3.5 text-purple-600" />}
-        extra={<span className="text-[10px] text-slate-400">近 60 评估日自算 IC 过闸（|IC60|≥0.02 ∧ 同号 ∧ 胜率≥0.5）× 族封顶（每族≤3，rd≤4）</span>}
+        extra={
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <span className="text-[10px] text-slate-400">近 60 评估日自算 IC 过闸（|IC60|≥0.02 ∧ 同号 ∧ 胜率≥0.5）× 族封顶（每族≤3，rd≤4）</span>
+            <div className="flex rounded-full bg-slate-100 p-0.5">
+              {(['chart', 'table'] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setFactorView(v)}
+                  aria-pressed={factorView === v}
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold transition-colors ${
+                    factorView === v ? 'bg-white text-purple-700 shadow-2xs' : 'text-slate-500'
+                  }`}
+                >
+                  {v === 'chart' ? '图表' : '明细'}
+                </button>
+              ))}
+            </div>
+          </div>
+        }
       >
+        {factorView === 'chart' ? (
+          <div className="flex flex-col gap-3">
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 items-start">
+              <div className="rounded-xl border border-slate-100 bg-white/60 p-1.5">
+                <FactorICBar factors={board.factors} />
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-white/60 p-1.5">
+                <FactorICIRScatter factors={board.factors} />
+              </div>
+            </div>
+            <div className="text-[9px] text-slate-400 px-1">
+              图表取 |IC60| 前 18；完整 {board.factors.length} 条与逐列数字切「明细」。
+              ICIR=IC60/IC 标准差，t=ICIR×√n；净 IC 只显形、不进闸门。
+            </div>
+          </div>
+        ) : (
+          <>
         <div className="overflow-x-auto custom-scrollbar">
           {/* table-fixed + 列宽配额：数值列定宽右对齐、名称列吸收余宽——不再整行拉散 */}
           <table className="w-full table-fixed text-[11px]">
@@ -715,7 +784,12 @@ export const FactorBoardPanel: React.FC = () => {
                   <td className="py-1.5 px-1 text-right font-mono text-slate-600">
                     {f.win60 === null ? '—' : `${(f.win60 * 100).toFixed(0)}%`}
                   </td>
-                  <td className="py-1.5 px-1 text-right font-mono text-slate-600">{f.icir60 === null ? '—' : f.icir60.toFixed(2)}</td>
+                  <td
+                    className="py-1.5 px-1 text-right font-mono text-slate-600"
+                    title={`ICIR=IC60/IC标准差；t=${f.t60 === null || f.t60 === undefined ? '—' : f.t60.toFixed(1)}（t=ICIR×√n）`}
+                  >
+                    {f.icir60 === null ? '—' : f.icir60.toFixed(2)}
+                  </td>
                   <td className="py-1.5 px-1 text-right font-mono text-slate-600 whitespace-nowrap">
                     {f.weight === null ? '—' : `${(f.weight * 100).toFixed(1)}%`}
                     {f.regime_mult != null && f.regime_mult !== 1 && (
@@ -757,6 +831,8 @@ export const FactorBoardPanel: React.FC = () => {
               </>
             )}
           </button>
+        )}
+          </>
         )}
       </SectionCard>
 

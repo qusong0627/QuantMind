@@ -75,7 +75,20 @@ def run_selection(
 
     # ── 1. 候选池与数据窗 ──────────────────────────────────────────
     cand, cand_fp = SEL.load_candidates(quantdb_root)
-    dates_all = CP.list_factor_dates(quantdb_root)
+    # 全库共同分区：各库同步有先后，按 l1 最新日会整库剔除尚未更新的库。
+    dates_all, latest_by_lib = CP.common_factor_dates(
+        quantdb_root, sorted(cand["lib"].unique())
+    )
+    if not dates_all:
+        dates_all = CP.list_factor_dates(quantdb_root)
+        warnings.append("候选库无共同分区，退回 l1 分区（可能整库剔除）")
+    else:
+        l1_latest = latest_by_lib.get("l1_factors")
+        if l1_latest and l1_latest > dates_all[-1]:
+            warnings.append(
+                f"全库共同最新分区 {dates_all[-1]}；l1 已到 {l1_latest}，"
+                "等待其余库同步（不用残缺截面选因子）"
+            )
     if as_of:
         as_of_dt = str(as_of).replace("-", "")
         dates_all = [d for d in dates_all if d <= as_of_dt]
@@ -319,7 +332,7 @@ def build_board(
             "quadrants": S.quadrant_counts(q),
         },
         "sectors": sectors_payload,
-        "stocks": S.stock_lists(q),
+        "stocks": S.stock_lists(stock),
         "regime": IO.regime_payload(regime_block),
         "dedup": dedup_block,
     }

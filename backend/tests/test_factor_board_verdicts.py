@@ -265,3 +265,47 @@ def test_金样_制度注记枚举与代码字面量一致(golden):
         "insufficient",
         "unavailable",
     }
+
+
+@pytest.mark.unit
+def test_板块广度分母只算有评分成分_且评分样本不足直接剔除():
+    idx = [f"6000{i:02d}.SH" for i in range(8)]
+    base = pd.DataFrame(
+        {
+            # 8 只成分里只有 3 只有 composite；旧实现分母=8 → 广度被低估
+            "composite": [0.2, 0.1, -0.1, np.nan, np.nan, np.nan, np.nan, np.nan],
+            "mdl_rank": [0.8, 0.6, 0.4, np.nan, np.nan, np.nan, np.nan, np.nan],
+            "SectorName": ["X"] * 8,
+        },
+        index=idx,
+    )
+    g = S.sector_table(base, min_n=3)
+    assert list(g.index) == ["X"]
+    row = g.loc["X"]
+    assert row["n"] == 8 and row["n_scored"] == 3
+    assert row["fbreadth"] == pytest.approx(2 / 3)
+
+    # min_n=8：8 只成分只有 3 只有评分 → 不得产出板块判定
+    assert S.sector_table(base, min_n=8).empty
+
+
+@pytest.mark.unit
+def test_个股名单_top_包含无模型覆盖标的_象限落空():
+    idx = ["600001.SH", "600002.SH", "600003.SH"]
+    stock = pd.DataFrame(
+        {
+            "composite": [0.9, 0.8, -0.9],
+            "mdl_rank": [0.9, np.nan, 0.1],
+            "quadrant": ["HH", np.nan, "LL"],
+            "st": [False, False, False],
+            "name": ["甲", "乙", "丙"],
+            "sector_l2": [None, None, None],
+        },
+        index=idx,
+    )
+    out = S.stock_lists(stock, n=2)
+    top = out["top"]
+    assert [r["symbol"] for r in top] == [idx[0], idx[1]]
+    assert top[1]["model_rank"] is None
+    assert top[1]["quadrant"] is None
+    assert out["bottom"][0]["symbol"] == idx[2]

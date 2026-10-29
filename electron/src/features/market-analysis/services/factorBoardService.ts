@@ -30,7 +30,10 @@ export interface FactorBoardFactor {
   sign: number;
   ic60: number | null;
   win60: number | null;
+  /** ICIR=mean(IC)/std(IC)（不是 t）；1.1 产物才有 */
   icir60: number | null;
+  /** t=ICIR×√n（显著性；1.1 增量，旧产物缺失） */
+  t60?: number | null;
   kept_ic: number | null;
   weight: number | null;
   horizon: Record<string, number | null>;
@@ -39,6 +42,7 @@ export interface FactorBoardFactor {
   net_ic60?: number | null;
   net_win60?: number | null;
   net_icir60?: number | null;
+  net_t60?: number | null;
   /** 成本侵蚀：净 IC 与毛 IC 反号（净轨有效日不足时 null）。 */
   eroded?: boolean | null;
   /** 尾窗 20 个有效日的方向对齐 IC 均值（sgn×RankIC；可负）。 */
@@ -109,7 +113,10 @@ export interface FactorBoardRollingOos {
 
 export interface FactorBoardSectorItem {
   name: string;
+  /** 板块成分总数 */
   n: number;
+  /** 有合成分（参与判定）的成分数；1.1 增量 */
+  n_scored?: number | null;
   fac: number | null;
   med: number | null;
   fbreadth: number | null;
@@ -129,7 +136,8 @@ export interface FactorBoardStock {
   name: string | null;
   composite: number | null;
   model_rank: number | null;
-  quadrant: string;
+  /** 无模型覆盖时可为 null（top/bottom 不再强制模型覆盖） */
+  quadrant: string | null;
   sector_l2: string | null;
 }
 

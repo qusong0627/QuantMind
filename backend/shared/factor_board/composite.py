@@ -28,6 +28,32 @@ def list_factor_dates(quantdb_root: Path, lib: str = "l1_factors") -> list[str]:
     )
 
 
+def common_factor_dates(
+    quantdb_root: Path, libs: list[str]
+) -> tuple[list[str], dict[str, str]]:
+    """候选库的**共同**分区日期（升序）与各库最新日期。
+
+    为什么不用 l1 的日期：各库同步有先后（实测 2026-10-29 l1/l2 已到 10-28，
+    alpha360/alpha_library/jq110/tdxgs/rd_mined 仍停在 10-27）。若按 l1 最新日
+    产板，其余库会被整库剔除，入选因子数骤降（实测 6 < 硬门 10）——宁可整体
+    退到全库都有数据的 10-27，也不要用残缺横截面选因子。
+    """
+    sets: dict[str, set[str]] = {}
+    latest: dict[str, str] = {}
+    for lib in libs:
+        try:
+            ds = set(list_factor_dates(quantdb_root, lib))
+        except FileNotFoundError:
+            continue
+        if ds:
+            sets[lib] = ds
+            latest[lib] = max(ds)
+    if not sets:
+        return [], latest
+    common = set.intersection(*sets.values())
+    return sorted(common), latest
+
+
 def load_close_matrix(quantdb_root: Path, dates: list[str]) -> pd.DataFrame:
     """qfq 收盘矩阵（index=symbol 后缀式，columns=dt）。缺分区→该列 NaN 并告警。"""
     root = quantdb_root / "1_kline_data" / "daily_forward"
@@ -38,9 +64,11 @@ def load_close_matrix(quantdb_root: Path, dates: list[str]) -> pd.DataFrame:
         if not p.exists():
             missing.append(dt)
             continue
-        cols[dt] = pd.read_parquet(p, columns=["symbol", "close"]).set_index("symbol")[
-            "close"
-        ]
+        # 分区内偶见重复 symbol（追加写/多源拼接）；不先按 symbol 去重会让
+        # 后续 fwd_ret/rank 得到重复索引，v.notna() & fr.notna() 直接抛
+        # 「cannot reindex on an axis with duplicate labels」。
+        d = pd.read_parquet(p, columns=["symbol", "close"])
+        cols[dt] = d.drop_duplicates("symbol", keep="last").set_index("symbol")["close"]
     if missing:
         log.warning("daily_forward 缺 %d 个分区: %s", len(missing), missing[:5])
     return pd.DataFrame(cols)
@@ -131,7 +159,7 @@ def read_selected_frames(
         p = quantdb_root / "6_ml_datasets" / lib / f"dt={dt}" / "data.parquet"
         if not p.exists():
             continue
-        want = list(names)
+        want = sorted(set(names))
         try:
             d = pd.read_parquet(p, columns=["symbol"] + want).set_index("symbol")
         except KeyError as exc:  # 列缺失（分区 schema 漂移）→ 缺失列补 NaN
@@ -142,6 +170,7 @@ def read_selected_frames(
             for n in want:
                 if n not in d.columns:
                     d[n] = np.nan
+        d = d[~d.index.duplicated(keep="last")]
         frames[lib] = d
     return frames
 
