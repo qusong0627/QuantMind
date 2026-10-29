@@ -4,7 +4,8 @@
 每日执行一次，扫描所有的仿真/模拟账户，扣除融资和融券利息。
 - 融资利息基数：可用现金为负的部分
 - 融券利息基数：空头头寸总市值 (short_market_value)
-- 费率：年化 6%，按 365 自然日计算
+- 费率：融资/融券分别取 settings.DEFAULT_FINANCING_RATE / DEFAULT_BORROW_RATE
+  （默认年化 8%），按 365 自然日计算
 """
 
 from __future__ import annotations
@@ -69,13 +70,21 @@ async def _scan_and_settle() -> int:
 
                 cash = float(account.get("cash") or 0.0)
                 short_market_value = float(account.get("short_market_value") or 0.0)
+                financing_rate = float(
+                    getattr(settings, "DEFAULT_FINANCING_RATE", 0.08) or 0.08
+                )
+                borrow_rate = float(
+                    getattr(settings, "DEFAULT_BORROW_RATE", 0.08) or 0.08
+                )
 
                 cash_debt = max(0.0, -cash)
                 total_debt = short_market_value + cash_debt
 
                 if total_debt > 0:
-                    daily_rate = 0.06 / 365.0
-                    interest_charge = total_debt * daily_rate * days_diff
+                    interest_charge = (
+                        short_market_value * borrow_rate
+                        + cash_debt * financing_rate
+                    ) * days_diff / 365
 
                     # 扣除利息
                     new_cash = cash - interest_charge
@@ -93,6 +102,7 @@ async def _scan_and_settle() -> int:
                             equity,
                             float(account.get("short_market_value") or 0.0),
                             liabilities,
+                            new_cash,
                         )
 
                     if interest_charge > 1:

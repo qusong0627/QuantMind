@@ -385,7 +385,10 @@ class SimulationLedgerService:
         account.liabilities = float(account_snapshot.get("liabilities") or account.liabilities or 0.0)
         account.equity = float(account_snapshot.get("total_asset") or account.equity or 0.0)
         account.maintenance_margin_ratio = maintenance_margin_ratio(
-            account.equity, account.short_market_value, account.liabilities
+            account.equity,
+            account.short_market_value,
+            account.liabilities,
+            account.cash,
         )
         now = datetime.utcnow()
         account.last_trade_at = now

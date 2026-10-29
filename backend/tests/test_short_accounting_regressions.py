@@ -43,6 +43,15 @@ def test_margin_ratio_tracks_short_market_value():
     assert maintenance_margin_ratio(1200, 0, 1000) == 1.2
 
 
+def test_margin_ratio_counts_financing_debt():
+    # 融资负债（负现金）必须计入分母，否则混合账户比例虚高
+    assert maintenance_margin_ratio(1200, 2000, 1000, -500) == pytest.approx(0.48)
+    # 无融资负债时不受影响
+    assert maintenance_margin_ratio(1200, 2000, 1000, 800) == 0.6
+    # 无空头时回退本金负债，融资负债同样叠加
+    assert maintenance_margin_ratio(1200, 0, 1000, -200) == 1.0
+
+
 @pytest.mark.parametrize("exit_price,expected", [(8, 100200), (12, 99800)])
 def test_qlib_short_close_uses_entry_price_after_remark(exit_price, expected):
     pytest.importorskip("qlib")

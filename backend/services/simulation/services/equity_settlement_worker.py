@@ -181,6 +181,9 @@ account.total_asset = tonumber(account.cash or 0) + short_proceeds + long_mv - s
 account.equity = account.total_asset
 local liability = short_mv
 if liability <= 0 then liability = tonumber(account.liabilities or 0) end
+local cash_debt = tonumber(account.cash or 0)
+if cash_debt < 0 then cash_debt = -cash_debt else cash_debt = 0 end
+liability = liability + cash_debt
 account.maintenance_margin_ratio = liability > 0 and account.equity / liability or 0
 account.available_cash = tonumber(account.cash or 0)
 account.frozen_cash = 0
@@ -606,6 +609,16 @@ class SimulationEquitySettlementWorker:
                 cash = float(account.get("cash") or 0)
                 short_proceeds = float(account.get("short_proceeds") or 0.0)
                 total_asset = round(cash + short_proceeds + net_mv, 4)
+                cash_debt = max(0.0, -cash)
+                if short_mv > 0:
+                    debt = short_mv + cash_debt
+                    ratio_value = total_asset / debt if debt > 0 else 0.0
+                else:
+                    debt = SimulationAccount.liabilities + cash_debt
+                    ratio_value = sa_case(
+                        (debt > 0, total_asset / debt),
+                        else_=0.0,
+                    )
                 result = await session.execute(
                     sa_update(SimulationAccount)
                     .where(
@@ -618,17 +631,7 @@ class SimulationEquitySettlementWorker:
                         short_market_value=round(short_mv, 4),
                         total_asset=total_asset,
                         equity=total_asset,
-                        maintenance_margin_ratio=(
-                            total_asset / short_mv
-                            if short_mv > 0
-                            else sa_case(
-                                (
-                                    SimulationAccount.liabilities > 0,
-                                    total_asset / SimulationAccount.liabilities,
-                                ),
-                                else_=0.0,
-                            )
-                        ),
+                        maintenance_margin_ratio=ratio_value,
                         last_projected_at=now,
                     )
                 )

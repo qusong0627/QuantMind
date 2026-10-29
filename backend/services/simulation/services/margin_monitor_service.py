@@ -80,7 +80,7 @@ async def _scan_and_monitor() -> tuple[int, int]:
                 if liabilities <= 0:
                     continue
                 ratio = maintenance_margin_ratio(
-                    equity, account.short_market_value, liabilities
+                    equity, account.short_market_value, liabilities, account.cash
                 )
 
                 if ratio < _LIQUIDATION_RATIO:
@@ -191,7 +191,7 @@ async def _force_liquidate(
         )
         liabilities = float(account.liabilities or 0.0)
         if liabilities <= 0 or maintenance_margin_ratio(
-            equity, account.short_market_value, liabilities
+            equity, account.short_market_value, liabilities, account.cash
         ) >= target_ratio:
             break
 

@@ -246,7 +246,10 @@ async def _execute_eod(trade_date: date) -> bool:
                     projection_account.total_asset = total_asset
                     projection_account.equity = total_asset
                     projection_account.maintenance_margin_ratio = round(
-                        maintenance_margin_ratio(total_asset, short_mv, liabilities), 6
+                        maintenance_margin_ratio(
+                            total_asset, short_mv, liabilities, cash
+                        ),
+                        6,
                     )
                     projection_account.last_projected_at = datetime.utcnow()
 

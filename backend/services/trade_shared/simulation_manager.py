@@ -1205,7 +1205,7 @@ return 0
         # 维持担保比例 = 总资产 / 负债（分母优先用盯市空头市值）
         if liabilities > 0:
             maintenance_ratio = maintenance_margin_ratio(
-                equity, short_market_value, liabilities
+                equity, short_market_value, liabilities, cash
             )
             if maintenance_ratio <= float(settings.MARGIN_CLOSEOUT_RATIO):
                 warning_level = "closeout"
