@@ -24,7 +24,7 @@ from backend.shared.factor_board import config as _fb_config
 
 logger = logging.getLogger(__name__)
 
-from . import flow_panorama, flow_predictive, flow_probability, quantdb_feed, quantdb_snapshot as _snap
+from . import flow_panorama, flow_predictive, flow_probability, quantdb_feed, sector_direction, quantdb_snapshot as _snap
 from . import sentiment as _sentiment
 from . import smart_money as _sm
 from .domain import SectorConflictError, SectorNotFoundError
@@ -292,11 +292,19 @@ async def get_heatmap(
 
     real_items = quantdb_feed.get_sector_heatmap(category=category, period=period)
     if real_items:
+        # 大盘情绪基准对所有分类可用（情绪热度横幅）；板块方向状态表仅行业二级
+        market = sector_direction.market(date)
+        items = real_items
+        if category == "shenwan" and not date:
+            attached = sector_direction.attach(real_items, date)
+            items = attached["items"]
+            market = attached.get("market") or market
         return {
             "trade_date": str(trade_date or _dt.date.today()),
             "category": category,
             "period": period,
-            "items": real_items,
+            "items": items,
+            "direction": market,
         }
 
     if trade_date:

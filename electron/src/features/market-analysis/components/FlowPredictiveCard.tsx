@@ -146,7 +146,7 @@ export const FlowPredictiveCard: React.FC<{
   date?: string;
   onSelectStock?: (symbol: string, name: string) => void;
 }> = ({ date, onSelectStock }) => {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const [horizon, setHorizon] = useState<Horizon>(5);
   const [data, setData] = useState<FlowPredictiveResponse | null>(null);
   const [loading, setLoading] = useState(false);

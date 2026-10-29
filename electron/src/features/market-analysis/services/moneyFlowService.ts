@@ -502,6 +502,48 @@ export async function getHeatmapDrill(
   return flowGet<HeatmapDrillResponse>(`/heatmap/drill?${qs.toString()}`);
 }
 
+export interface HeatmapDirectionCell {
+  /** P(板块绝对上涨) = 大盘先验 + (P(板块跑赢) − 0.5)，已截断到 5%~95% */
+  prob: number;
+  label: 'up' | 'down' | 'neutral';
+  /** 大盘先验（情绪模型 T+N prob_up） */
+  market_prob: number;
+  /** 历史同状态 P(板块等权超额 > 0)，50%=无相对优势 */
+  rel_prob: number;
+  mean: number | null;
+  n: number | null;
+  date_win: number | null;
+  n_dates: number | null;
+  /** 全板块截面分位（0~1，1=相对概率最高）；前端计算，不来自后端 */
+  rank?: number | null;
+  state: { stress: string; flow: string; price: string };
+}
+
+export interface HeatmapDirectionMarket {
+  trade_date?: string | null;
+  stress_score?: number | null;
+  stress_zone?: string | null;
+  stress_label?: string | null;
+  stress_note?: string | null;
+  phase?: string | null;
+  win20?: number | null;
+  median20?: number | null;
+  p10_20?: number | null;
+  p90_20?: number | null;
+  n_days?: number | null;
+  market_prob?: Record<string, number | null>;
+  indices?: Array<{
+    key: string;
+    name: string;
+    change_pct: number | null;
+    prob_up: Record<string, number | null>;
+  }>;
+  available?: boolean;
+  neutral_band?: [number, number];
+  disclosure?: string;
+  note?: string;
+}
+
 export interface HeatmapTopItem {
   name: string;
   value: number;
@@ -518,10 +560,33 @@ export interface HeatmapTopItem {
   flow_accel?: number | null;
   /** 周期净额比（主力净额/成交额） */
   flow_ratio?: number | null;
+  /** 当前窗口「成分主力净流入为正」的日均占比（资金广度，0~1） */
+  breadth_flow?: number | null;
+  /** 前一窗口资金广度 */
+  breadth_flow_prev?: number | null;
+  /** 资金广度变化（当前 − 前一窗口，百分点/100） */
+  breadth_flow_chg?: number | null;
+  /** 板块净额比加速（当前窗口日均 − 前一窗口日均） */
+  flow_ratio_accel?: number | null;
+  /** 成分收盘价在 MA20 上方的占比（价格广度，0~1） */
+  pct_above_ma20?: number | null;
+  /** 5 个交易日前的价格广度 */
+  pct_above_ma20_prev?: number | null;
+  /** 价格广度变化（当前 − 5 日前） */
+  pct_above_ma20_chg?: number | null;
+  /** 情绪热度（0~1，前端按截面分位合成；不是概率） */
+  sentiment_score?: number | null;
   period?: string;
   period_days?: number;
   leader?: string;
   leader_pct?: number;
+  /** 板块方向概率（仅 shenwan 最新快照；键为 5/10/20） */
+  direction?: Record<string, HeatmapDirectionCell> | null;
+}
+
+export interface HeatmapTopResponse {
+  items: HeatmapTopItem[];
+  direction: HeatmapDirectionMarket | null;
 }
 
 /** 板块层热力图（顶层）。realtime=true 跳过快照、直接读 QuantDB 全量
@@ -533,13 +598,18 @@ export async function getHeatmapTop(
     realtime?: boolean;
     period?: string;
   } = {},
-): Promise<HeatmapTopItem[]> {
+): Promise<HeatmapTopResponse> {
   const qs = new URLSearchParams({ category: params.category || 'shenwan' });
   if (params.period) qs.set('period', params.period);
   if (params.date) qs.set('date', params.date);
   if (params.realtime) qs.set('realtime', '1');
-  const body = await flowGet<{ items?: HeatmapTopItem[] }>(`/heatmap?${qs.toString()}`);
-  return Array.isArray(body.items) ? body.items : [];
+  const body = await flowGet<{ items?: HeatmapTopItem[]; direction?: HeatmapDirectionMarket | null }>(
+    `/heatmap?${qs.toString()}`,
+  );
+  return {
+    items: Array.isArray(body.items) ? body.items : [],
+    direction: body.direction ?? null,
+  };
 }
 
 /** 证据台：信号档案（过闸条件统计 + 否决清单）+ 命中榜（默认最新，可回溯快照日）。 */

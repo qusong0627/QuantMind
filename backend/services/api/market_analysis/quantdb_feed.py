@@ -751,7 +751,14 @@ def get_sector_heatmap(
     - ``prev_flow_daily``：前一 N 日日均；
     - ``flow_accel``：当前日均 − 前一窗口日均（亿/日），正=加速流入；
     - ``flow_ratio``：当前 N 日主力净额 / 成分成交额；
-    - ``pct_period``：板块等权 N 日涨幅（%）；``pct_change`` 保留当日均涨幅。
+    - ``flow_ratio_accel``：当前 N 日板块净额比日均 − 前一 N 日日均（与离线
+      panel_sector.net_ratio 同口径，供方向概率状态表查表）；
+    - ``pct_period``：板块等权 N 日涨幅（%）；``pct_change`` 保留当日均涨幅；
+    - ``ret_period_sum``：板块逐日等权收益之和（与 panel_sector.ret 同口径）；
+    - ``breadth_flow``：当前 N 日「成分主力净流入为正」的日均占比（资金广度）；
+      ``breadth_flow_chg`` = 当前 − 前一窗口（情绪升温/降温）；
+    - ``pct_above_ma20``：成分收盘价在 MA20 上方的占比（价格广度，情绪算法行业化）；
+      ``pct_above_ma20_chg`` = 当前 − 5 个交易日前。
     """
     n_days = PERIOD_DAYS.get(str(period or "1d").lower(), 1)
 
@@ -810,6 +817,33 @@ def get_sector_heatmap(
                 flow_all["amount_y"] = flow_all["amount"].astype(float) * 1e4
                 cur_flow = flow_all[flow_all["dt"].isin(cur_days)]
                 prev_flow = flow_all[flow_all["dt"].isin(prev_days)]
+        # 板块逐日净额比（sum(main)/sum(amount)）→ 当前/前一窗口日均值；
+        # 与离线 panel_sector.net_ratio 同口径，供状态表方向概率使用。
+        cur_ratio = prev_ratio = pd.Series(dtype="float64")
+        cur_breadth = prev_breadth = pd.Series(dtype="float64")
+        if flow_days and not flow_all.empty:
+            sym2group = {s: name for name, syms in groups.items() for s in syms}
+            mapped = flow_all[flow_all["symbol"].isin(sym2group)].copy()
+            mapped["sector"] = mapped["symbol"].map(sym2group)
+            mapped["main_pos"] = (mapped["main"] > 0).astype(float)
+            daily = mapped.groupby(["sector", "dt"]).agg(
+                main=("main", "sum"),
+                amount_y=("amount_y", "sum"),
+                breadth=("main_pos", "mean"),
+            )
+            daily["ratio"] = daily["main"] / daily["amount_y"].where(
+                daily["amount_y"] > 0
+            )
+            idx_dt = daily.index.get_level_values("dt")
+            cur_ratio = daily[idx_dt.isin(cur_days)].groupby("sector")["ratio"].mean()
+            prev_ratio = daily[idx_dt.isin(prev_days)].groupby("sector")["ratio"].mean()
+            cur_breadth = (
+                daily[idx_dt.isin(cur_days)].groupby("sector")["breadth"].mean()
+            )
+            prev_breadth = (
+                daily[idx_dt.isin(prev_days)].groupby("sector")["breadth"].mean()
+            )
+
         cur_sums = (
             cur_flow.groupby("symbol")[["main", "amount_y"]].sum()
             if not cur_flow.empty
@@ -822,7 +856,10 @@ def get_sector_heatmap(
         )
 
         # 周期涨幅：N 日等权（收盘价，未复权；1 日用当日官方涨跌幅）
+        # ret_period_sum = 板块逐日等权收益之和（与 panel_sector.ret 滚动求和同口径，
+        # 供方向概率状态表查表）；pct_period 仍保留首尾收盘口径供展示。
         period_pct: dict[str, float] = {}
+        ret_period_sum: dict[str, float] = {}
         if n_days > 1:
             ret_days = _trading_days(today_s, n_days + 1) if today_s else []
             if len(ret_days) >= 2:
@@ -844,6 +881,55 @@ def get_sector_heatmap(
                             for k, v in ret.items()
                             if math.isfinite(float(v))
                         }
+                    # 逐日收益（ret_days 降序）：day i / day i+1 − 1
+                    daily = pd.DataFrame(index=piv.index)
+                    for i in range(min(n_days, len(ret_days) - 1)):
+                        d0, d1 = ret_days[i], ret_days[i + 1]
+                        if d0 in piv.columns and d1 in piv.columns:
+                            daily[d0] = piv[d0] / piv[d1] - 1.0
+                    if not daily.empty:
+                        for sname, syms in groups.items():
+                            sub = daily.reindex([s for s in syms if s in daily.index])
+                            if sub.empty:
+                                continue
+                            per_day = sub.mean(axis=0, skipna=True)
+                            total = per_day.sum(min_count=1)
+                            if pd.notna(total):
+                                ret_period_sum[sname] = float(total) * 100.0
+
+        # 价格广度（情绪算法的行业化）：成分收盘价在 MA20 上方的占比（当前/5日前）。
+        price_breadth: dict[str, tuple[float, float | None]] = {}
+        if today_s:
+            breadth_days = _trading_days(today_s, 26)
+            if len(breadth_days) >= 25:
+                bclose = _read_partitioned(
+                    "1_kline_data/daily_unadjusted",
+                    breadth_days,
+                    "symbol, close",
+                )
+                if not bclose.empty:
+                    bclose["dt"] = bclose["dt"].astype(str)
+                    bpiv = bclose.pivot_table(
+                        index="symbol", columns="dt", values="close"
+                    )
+                    cols = [d for d in breadth_days if d in bpiv.columns]
+                    if len(cols) >= 25:
+                        cur_above = (bpiv[cols[0]] > bpiv[cols[:20]].mean(axis=1)).astype(float)
+                        prev_above = (
+                            bpiv[cols[5]] > bpiv[cols[5:25]].mean(axis=1)
+                        ).astype(float)
+                        for sname, syms in groups.items():
+                            present = [s for s in syms if s in bpiv.index]
+                            if not present:
+                                continue
+                            cur_vals = cur_above.reindex(present).dropna()
+                            prev_vals = prev_above.reindex(present).dropna()
+                            if cur_vals.empty:
+                                continue
+                            price_breadth[sname] = (
+                                float(cur_vals.mean()),
+                                float(prev_vals.mean()) if not prev_vals.empty else None,
+                            )
 
         items: list[dict[str, Any]] = []
         for sname, syms in groups.items():
@@ -908,17 +994,89 @@ def get_sector_heatmap(
             flow_ratio = (
                 round(cur_main / cur_amount, 4) if cur_amount > 0 else None
             )
+            cur_ratio_raw = cur_ratio.get(sname) if sname in cur_ratio.index else None
+            prev_ratio_raw = prev_ratio.get(sname) if sname in prev_ratio.index else None
+            cur_ratio_v = (
+                float(cur_ratio_raw)
+                if cur_ratio_raw is not None and math.isfinite(float(cur_ratio_raw))
+                else None
+            )
+            prev_ratio_v = (
+                float(prev_ratio_raw)
+                if prev_ratio_raw is not None and math.isfinite(float(prev_ratio_raw))
+                else None
+            )
+            flow_ratio_accel = (
+                round(cur_ratio_v - prev_ratio_v, 4)
+                if cur_ratio_v is not None and prev_ratio_v is not None
+                else None
+            )
+            cur_breadth_raw = (
+                cur_breadth.get(sname) if sname in cur_breadth.index else None
+            )
+            prev_breadth_raw = (
+                prev_breadth.get(sname) if sname in prev_breadth.index else None
+            )
+            cur_breadth_v = (
+                float(cur_breadth_raw)
+                if cur_breadth_raw is not None
+                and math.isfinite(float(cur_breadth_raw))
+                else None
+            )
+            prev_breadth_v = (
+                float(prev_breadth_raw)
+                if prev_breadth_raw is not None
+                and math.isfinite(float(prev_breadth_raw))
+                else None
+            )
+            breadth_chg = (
+                round(cur_breadth_v - prev_breadth_v, 4)
+                if cur_breadth_v is not None and prev_breadth_v is not None
+                else None
+            )
             items.append(
                 {
                     "name": sname,
                     "value": max(val_yi, 10.0),
                     "pct_change": avg_pct,
                     "pct_period": pct_period,
+                    "ret_period_sum": (
+                        round(ret_period_sum[sname], 4)
+                        if sname in ret_period_sum
+                        else None
+                    ),
                     "flow_net": flow_net,
                     "flow_daily": flow_daily,
                     "prev_flow_daily": prev_daily,
                     "flow_accel": flow_accel,
                     "flow_ratio": flow_ratio,
+                    "prev_flow_ratio": None if prev_ratio_v is None else round(prev_ratio_v, 4),
+                    "flow_ratio_accel": flow_ratio_accel,
+                    "breadth_flow": None if cur_breadth_v is None else round(cur_breadth_v, 4),
+                    "breadth_flow_prev": (
+                        None if prev_breadth_v is None else round(prev_breadth_v, 4)
+                    ),
+                    "breadth_flow_chg": breadth_chg,
+                    "pct_above_ma20": (
+                        round(price_breadth[sname][0], 4)
+                        if sname in price_breadth
+                        else None
+                    ),
+                    "pct_above_ma20_prev": (
+                        None
+                        if sname not in price_breadth
+                        or price_breadth[sname][1] is None
+                        else round(price_breadth[sname][1], 4)
+                    ),
+                    "pct_above_ma20_chg": (
+                        round(
+                            price_breadth[sname][0] - price_breadth[sname][1],
+                            4,
+                        )
+                        if sname in price_breadth
+                        and price_breadth[sname][1] is not None
+                        else None
+                    ),
                     "period": period,
                     "period_days": n_days,
                     "leader": str(leader_row.get("name") or leader_row["symbol"]),

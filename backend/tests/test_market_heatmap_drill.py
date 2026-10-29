@@ -168,3 +168,15 @@ def test_sector_heatmap_period_speed_fields():
         or abs(it["flow_daily"] - (it["flow_net"] or 0.0) / 5) < 0.01
         for it in items
     )
+
+
+def test_sector_heatmap_period_fields_feed_direction_state():
+    """方向概率状态表依赖的两个同口径字段：净额比加速 + 逐日等权收益和。"""
+    quantdb_feed.clear_cache()
+    items = quantdb_feed.get_sector_heatmap("shenwan", "3d")
+    assert items, "行业二级热力图不应为空"
+    assert any(isinstance(it.get("flow_ratio_accel"), (int, float)) for it in items)
+    assert any(isinstance(it.get("prev_flow_ratio"), (int, float)) for it in items)
+    assert any(isinstance(it.get("breadth_flow"), (int, float)) for it in items)
+    items5 = quantdb_feed.get_sector_heatmap("shenwan", "5d")
+    assert any(isinstance(it.get("ret_period_sum"), (int, float)) for it in items5)

@@ -779,6 +779,25 @@ def _run_flow_probability(date_str: str | None, force: bool) -> int:
     return 0 if completed.returncode == 0 else 1
 
 
+def _run_sector_direction(date_str: str | None, force: bool) -> int:
+    """板块方向概率状态表（周更，依赖 panel_sector）。"""
+    script = os.path.join(
+        PROJECT_ROOT,
+        "backend",
+        "scripts",
+        "market_analysis",
+        "build_sector_direction.py",
+    )
+    data_dir = os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb")
+    out_dir = os.path.join(
+        os.path.dirname(data_dir.rstrip("/")), "market-analysis", "sector_direction"
+    )
+    cmd = [sys.executable, script, "--data-dir", data_dir, "--out-dir", out_dir]
+    print(f"执行 {' '.join(cmd)}（输出直通）...")
+    completed = subprocess.run(cmd, check=False)
+    return 0 if completed.returncode == 0 else 1
+
+
 def _run_flow_predictive(date_str: str | None, force: bool) -> int:
     """资金流预测力研究产物：立刻全量重建（统计产物，周更即可）。"""
     script = os.path.join(
@@ -870,6 +889,7 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "factor_board_reselect": _run_factor_board_reselect,
     # 资金流延续证据（重跑 = 立刻按日更形态全史再构建一份；同日覆盖，原子写）
     "flow_evidence": _run_flow_evidence,
+    "sector_direction": _run_sector_direction,
     "flow_predictive": _run_flow_predictive,
     "flow_probability": _run_flow_probability,
     "smart_money": _run_smart_money,

@@ -28,6 +28,34 @@ export interface SectorHeatmapItem {
   flow_accel?: number | null;
   /** 周期净额比 */
   flow_ratio?: number | null;
+  /** 当前窗口「成分主力净流入为正」的日均占比（资金广度，0~1） */
+  breadth_flow?: number | null;
+  /** 资金广度变化（当前 − 前一窗口） */
+  breadth_flow_chg?: number | null;
+  /** 板块净额比加速（当前窗口日均 − 前一窗口日均） */
+  flow_ratio_accel?: number | null;
+  /** 成分收盘价在 MA20 上方的占比（价格广度，0~1） */
+  pct_above_ma20?: number | null;
+  /** 价格广度变化（当前 − 5 日前） */
+  pct_above_ma20_chg?: number | null;
+  /** 情绪热度（0~1，截面分位合成；不是概率） */
+  sentiment_score?: number | null;
+  /** 板块方向概率（键 5/10/20）；仅行业二级最新快照有值 */
+  direction?: Record<
+    string,
+    {
+      prob: number;
+      rel_prob: number;
+      market_prob?: number;
+      label?: 'up' | 'down' | 'neutral';
+      mean?: number | null;
+      n?: number | null;
+      date_win?: number | null;
+      n_dates?: number | null;
+      rank?: number | null;
+      state?: { stress: string; flow: string; price: string };
+    }
+  > | null;
   /** tooltip 透传附加字段（下钻层展示细分行业/量比/成交额等）；不参与布局 */
   extra?: Record<string, unknown>;
 }

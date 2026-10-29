@@ -1885,6 +1885,48 @@ def run_flow_evidence_build() -> dict[str, Any]:
             except Exception as pexc:  # noqa: BLE001
                 logger.warning("[FlowProbability] 异常（不影响证据链）: %s", pexc)
 
+        # 板块方向概率状态表（周更）：依赖 panel_sector（证据产物）；压力区 × 3 日
+        # 净额比加速五分 × 5 日涨幅五分 → 历史同状态跑赢概率。失败只告警。
+        def _maybe_build_sector_direction() -> None:
+            direction_dir = (
+                _Path(data_dir).parent / "market-analysis" / "sector_direction"
+            )
+            direction_path = direction_dir / "sector_direction.json"
+            try:
+                direction_fresh = (
+                    direction_path.is_file()
+                    and (datetime.now().timestamp() - direction_path.stat().st_mtime)
+                    < 7 * 86400
+                )
+            except OSError:
+                direction_fresh = False
+            if direction_fresh:
+                return
+            direction_cmd = [
+                sys.executable,
+                "-m",
+                "backend.scripts.market_analysis.build_sector_direction",
+                "--data-dir",
+                data_dir,
+                "--out-dir",
+                str(direction_dir),
+            ]
+            logger.info("[SectorDirection] 开始: %s", " ".join(str(c) for c in direction_cmd))
+            try:
+                direction = subprocess.run(
+                    direction_cmd, cwd=str(root), capture_output=True, text=True, timeout=900
+                )
+                if direction.returncode != 0:
+                    logger.warning(
+                        "[SectorDirection] 失败 code=%d stderr=%s",
+                        direction.returncode,
+                        direction.stderr[-1500:],
+                    )
+                else:
+                    logger.info("[SectorDirection] 完成\n%s", direction.stdout[-1200:])
+            except Exception as dexc:  # noqa: BLE001
+                logger.warning("[SectorDirection] 异常（不影响证据链）: %s", dexc)
+
         # 新鲜度门控：库内最新 L2 分区未超前产物交易日 → 无事可做
         l2_dir = _Path(data_dir) / "6_ml_datasets" / "l2_factors"
         partitions = sorted(p.name[3:] for p in l2_dir.glob("dt=*") if p.is_dir())
@@ -1893,6 +1935,7 @@ def run_flow_evidence_build() -> dict[str, Any]:
         built = flow_evidence.norm_trade_date((latest or {}).get("trade_date"))
         if latest_partition and built and built >= latest_partition:
             logger.info("[FlowEvidence] 跳过：产物已跟进最新分区 %s", latest_partition)
+            _maybe_build_sector_direction()
             return {"status": "skipped", "reason": "up_to_date", "trade_date": built}
 
         cmd = [
@@ -1921,6 +1964,7 @@ def run_flow_evidence_build() -> dict[str, Any]:
 
         elapsed = (datetime.now() - started).total_seconds()
         logger.info("[FlowEvidence] 完成 用时%.0fs\n%s", elapsed, proc.stdout[-2000:])
+        _maybe_build_sector_direction()
         return {
             "status": "success",
             "elapsed_s": round(elapsed, 1),

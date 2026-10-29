@@ -1,5 +1,5 @@
 /** 资金流预测力卡：研究产物缺失/存在两条路径 + 当日匹配接线。 */
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import React from 'react';
 
@@ -68,6 +68,7 @@ describe('FlowPredictiveCard', () => {
   it('渲染金额对照、质量分、热力图、形态与当日靠前', async () => {
     render(<FlowPredictiveCard />);
     await waitFor(() => expect(screen.getByText('资金流预测力')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('资金流预测力'));
     expect(screen.getByText(/主力净流入分位/)).toBeInTheDocument();
     expect(screen.getByText(/资金流质量分分位/)).toBeInTheDocument();
     expect(screen.getByText(/资金流 × 价格位置/)).toBeInTheDocument();
@@ -83,6 +84,8 @@ describe('FlowPredictiveCard', () => {
       artifact: null,
     });
     render(<FlowPredictiveCard />);
+    await waitFor(() => expect(screen.getByText('资金流预测力')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('资金流预测力'));
     await waitFor(() => expect(screen.getByText(/研究产物尚未生成/)).toBeInTheDocument());
     expect(screen.getByText('中国医药')).toBeInTheDocument();
   });

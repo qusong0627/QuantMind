@@ -21,7 +21,6 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Spin } from 'antd';
 import { Clock, Info, AlertCircle, Network, RefreshCw, Waves } from 'lucide-react';
 import { FlowSankeyV2 } from './FlowSankeyV2';
 import { SectorBoardList, SectorDetailPanel } from './SectorFlowWorkbench';
@@ -31,6 +30,7 @@ import { FlowEvidencePanel } from './FlowEvidencePanel';
 import { FlowPredictiveCard } from './FlowPredictiveCard';
 import { FlowProbabilityCard } from './FlowProbabilityCard';
 import { FlowSpeedCard } from './FlowSpeedCard';
+import { FlowBlockBoard } from './FlowBlockBoard';
 import { TagBrowserStrip } from './TagBrowserStrip';
 import { normalizeStockCode } from '../../../utils/portfolioUtils';
 import {
@@ -511,6 +511,17 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
             sectorProbLo={sectorThresholds.lo}
           />
         </div>
+      )}
+
+      {/* ── 板块 / 个股方块图：表格的图形化替代（T+N 可选，点击下钻） ── */}
+      {!error && data?.available && (
+        <FlowBlockBoard
+          panorama={data}
+          probability={probData}
+          date={date}
+          onSelectSector={selectSector}
+          onSelectStock={handleSelectStock}
+        />
       )}
 
       {/* ── 资金流速率：当前窗口日均 vs 前一窗口日均（加速进/加速跑） ── */}
