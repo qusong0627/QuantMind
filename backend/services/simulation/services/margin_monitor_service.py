@@ -24,6 +24,7 @@ from backend.services.simulation.services.projection_service import (
 )
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.simulation_account_keys import account_key
+from backend.shared.simulation_margin_math import maintenance_margin_ratio
 from backend.shared.trade_account_cache import (
     read_json_cache,
     write_json_cache,
@@ -70,11 +71,17 @@ async def _scan_and_monitor() -> tuple[int, int]:
 
         for account in accounts:
             try:
-                equity = float(account.equity or account.total_asset or 0.0)
+                equity = float(
+                    account.equity
+                    if account.equity is not None
+                    else account.total_asset or 0.0
+                )
                 liabilities = float(account.liabilities or 0.0)
                 if liabilities <= 0:
                     continue
-                ratio = equity / liabilities
+                ratio = maintenance_margin_ratio(
+                    equity, account.short_market_value, liabilities
+                )
 
                 if ratio < _LIQUIDATION_RATIO:
                     count = await _force_liquidate(
@@ -177,9 +184,15 @@ async def _force_liquidate(
     )
 
     for lot in lots:
-        equity = float(account.equity or account.total_asset or 0.0)
+        equity = float(
+            account.equity
+            if account.equity is not None
+            else account.total_asset or 0.0
+        )
         liabilities = float(account.liabilities or 0.0)
-        if liabilities <= 0 or equity / liabilities >= target_ratio:
+        if liabilities <= 0 or maintenance_margin_ratio(
+            equity, account.short_market_value, liabilities
+        ) >= target_ratio:
             break
 
         qty = float(lot.quantity_remaining or 0.0)

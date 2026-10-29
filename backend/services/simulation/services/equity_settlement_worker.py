@@ -179,6 +179,9 @@ account.short_market_value = short_mv
 local short_proceeds = tonumber(account.short_proceeds or 0)
 account.total_asset = tonumber(account.cash or 0) + short_proceeds + long_mv - short_mv
 account.equity = account.total_asset
+local liability = short_mv
+if liability <= 0 then liability = tonumber(account.liabilities or 0) end
+account.maintenance_margin_ratio = liability > 0 and account.equity / liability or 0
 account.available_cash = tonumber(account.cash or 0)
 account.frozen_cash = 0
 
@@ -577,7 +580,7 @@ class SimulationEquitySettlementWorker:
         """刷新 simulation_accounts 台账投影字段（仅 UPDATE 已有行，不新建）。"""
         if not accounts:
             return 0
-        from sqlalchemy import update as sa_update
+        from sqlalchemy import case as sa_case, update as sa_update
 
         from backend.services.simulation.models.account import SimulationAccount
         from backend.shared.database_manager_v2 import get_session
@@ -605,12 +608,27 @@ class SimulationEquitySettlementWorker:
                 total_asset = round(cash + short_proceeds + net_mv, 4)
                 result = await session.execute(
                     sa_update(SimulationAccount)
-                    .where(SimulationAccount.account_id == account_id)
+                    .where(
+                        SimulationAccount.account_id == account_id,
+                        SimulationAccount.tenant_id == tenant_id,
+                        SimulationAccount.user_id == str(user_id),
+                    )
                     .values(
                         long_market_value=round(long_mv, 4),
                         short_market_value=round(short_mv, 4),
                         total_asset=total_asset,
                         equity=total_asset,
+                        maintenance_margin_ratio=(
+                            total_asset / short_mv
+                            if short_mv > 0
+                            else sa_case(
+                                (
+                                    SimulationAccount.liabilities > 0,
+                                    total_asset / SimulationAccount.liabilities,
+                                ),
+                                else_=0.0,
+                            )
+                        ),
                         last_projected_at=now,
                     )
                 )

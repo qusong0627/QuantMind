@@ -1132,7 +1132,10 @@ return 0
 
         # 现金/负债/冻结资金增量与台账投影（ledger_service）共用同一实现，
         # 避免 Redis 与 PG 两边口径漂移、对账反复互相覆盖。
-        from backend.shared.simulation_margin_math import margin_trade_deltas
+        from backend.shared.simulation_margin_math import (
+            maintenance_margin_ratio,
+            margin_trade_deltas,
+        )
 
         deltas = margin_trade_deltas(
             trade_action=action,
@@ -1199,9 +1202,11 @@ return 0
 
         equity = cash + short_proceeds + total_market_value
 
-        # 维持担保比例 = 总资产 / 总负债
+        # 维持担保比例 = 总资产 / 负债（分母优先用盯市空头市值）
         if liabilities > 0:
-            maintenance_ratio = equity / liabilities if liabilities else 0.0
+            maintenance_ratio = maintenance_margin_ratio(
+                equity, short_market_value, liabilities
+            )
             if maintenance_ratio <= float(settings.MARGIN_CLOSEOUT_RATIO):
                 warning_level = "closeout"
             elif maintenance_ratio <= float(settings.MARGIN_WARNING_RATIO):

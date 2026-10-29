@@ -679,7 +679,14 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             backtest_config = {
                 "start_time": request.start_date,
                 "end_time": request.end_date,
-                "account": request.initial_capital,
+                "account": (
+                    {
+                        "cash": request.initial_capital,
+                        "_qm_financing_rate": request.strategy_params.financing_rate,
+                        "_qm_borrow_rate": request.strategy_params.borrow_rate,
+                    }
+                    if enable_short_selling else request.initial_capital
+                ),
                 "benchmark": _disabled_benchmark_series(request.start_date),
                 "pos_type": pos_type,
                 "exchange_kwargs": {

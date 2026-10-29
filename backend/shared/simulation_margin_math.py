@@ -17,6 +17,16 @@ from __future__ import annotations
 BORROW_RATE_DAYS = 252.0
 
 
+def maintenance_margin_ratio(
+    equity: float, short_market_value: float, liabilities: float
+) -> float:
+    """维持担保比例：分母优先用盯市空头负债，无空头时回退旧本金口径。"""
+    debt = float(short_market_value or 0.0)
+    if debt <= 0:
+        debt = float(liabilities or 0.0)
+    return float(equity) / debt if debt > 0 else 0.0
+
+
 def default_borrow_rate() -> float:
     """年化融券费率（与撮合侧 settings.DEFAULT_BORROW_RATE 同源）。"""
     try:

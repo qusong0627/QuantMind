@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from backend.services.trade_shared.redis_client import redis_client
 from backend.services.trade_shared.trade_config import settings
+from backend.shared.simulation_margin_math import maintenance_margin_ratio
 from backend.shared.trade_account_cache import read_json_cache, write_json_cache
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,11 @@ async def _scan_and_settle() -> int:
 
                     liabilities = float(account.get("liabilities") or 0.0)
                     if liabilities > 0:
-                        account["maintenance_margin_ratio"] = equity / liabilities
+                        account["maintenance_margin_ratio"] = maintenance_margin_ratio(
+                            equity,
+                            float(account.get("short_market_value") or 0.0),
+                            liabilities,
+                        )
 
                     if interest_charge > 1:
                         logger.info(

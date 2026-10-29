@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 from collections.abc import Iterator
 
 import numpy as np
@@ -80,7 +80,9 @@ class MarginPosition(Position):
             # --- 买入平空 (Cover Short) ---
             trade_amount = trade_val / trade_price
             cover_amount = min(abs(old_amount), trade_amount)
-            entry_price = self.get_stock_price(stock_id)
+            entry_price = self.position[stock_id].get(
+                "short_entry_price", self.get_stock_price(stock_id)
+            )
 
             # 实现盈亏 = (借入卖出价 - 买入平仓价) * 数量 - 交易成本
             realized_pnl = (entry_price - trade_price) * cover_amount - cost
@@ -100,6 +102,7 @@ class MarginPosition(Position):
                 extra_val = (trade_amount - cover_amount) * trade_price
                 self.position["cash"] -= extra_val
                 self.position[stock_id]["price"] = trade_price  # 更新为多头入场价
+                self.position[stock_id].pop("short_entry_price", None)
 
             if abs(self.position[stock_id]["amount"]) <= 1e-5:
                 self._del_stock(stock_id)
@@ -123,12 +126,17 @@ class MarginPosition(Position):
 
             if old_amount == 0:
                 self._init_stock(stock_id=stock_id, amount=-trade_amount, price=trade_price)
+                self.position[stock_id]["short_entry_price"] = trade_price
             else:
-                # 更新空头持仓的平均入场价
+                # 更新空头持仓的平均入场价（用原开仓成本摊薄，不能用盯市价）
                 new_amount = old_amount - trade_amount
-                new_avg_price = (abs(old_amount) * self.get_stock_price(stock_id) + trade_val) / abs(new_amount)
+                old_entry = self.position[stock_id].get(
+                    "short_entry_price", self.get_stock_price(stock_id)
+                )
+                new_avg_price = (abs(old_amount) * old_entry + trade_val) / abs(new_amount)
                 self.position[stock_id]["amount"] = new_amount
-                self.position[stock_id]["price"] = new_avg_price
+                self.position[stock_id]["short_entry_price"] = new_avg_price
+                self.position[stock_id]["price"] = trade_price
         else:
             # --- 卖出多头 ---
             # 如果卖出额超过多头持仓，则转化为一部分平仓，一部分新开空
@@ -146,11 +154,13 @@ class MarginAccount(Account):
     """
     支持计息与真实多空结算的账户类：
     1. 每日对 融资额(负现金) 和 融券额(空头市值) 计息。
-    2. 利息年化 6%，按 365 个自然日拆分。
+    2. 按请求的融资、融券年化利率及自然日计息。
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, financing_rate=0.08, borrow_rate=0.08, **kwargs):
         super().__init__(*args, **kwargs)
+        self.financing_rate = float(financing_rate)
+        self.borrow_rate = float(borrow_rate)
         self._last_interest_date = None
         self._pre_trade_snapshot: tuple[float, float] | None = None
 
@@ -163,6 +173,10 @@ class MarginAccount(Account):
         if self.current_position.check_stock(order.stock_id):
             pre_amount = self.current_position.get_stock_amount(order.stock_id)
             pre_price = self.current_position.get_stock_price(order.stock_id)
+            if pre_amount < 0:
+                pre_price = self.current_position.position[order.stock_id].get(
+                    "short_entry_price", pre_price
+                )
 
         self._pre_trade_snapshot = (float(pre_amount), float(pre_price))
         try:
@@ -212,9 +226,10 @@ class MarginAccount(Account):
         total_debt = short_debt_value + cash_debt
 
         if total_debt > 0:
-            # 年化 6% -> 自然日利率 (365天)
-            daily_rate = 0.06 / 365
-            interest_charge = total_debt * daily_rate * days_diff
+            interest_charge = (
+                short_debt_value * self.borrow_rate
+                + cash_debt * self.financing_rate
+            ) * days_diff / 365
 
             # 直接从现金账户扣除
             self.current_position.position["cash"] -= interest_charge
@@ -292,10 +307,14 @@ def ensure_margin_backtest_support() -> str:
             raise ValueError("account must be int, float or dict")
 
         # 返回自定义的 MarginAccount
+        financing_rate = position_dict.pop("_qm_financing_rate", 0.08)
+        borrow_rate = position_dict.pop("_qm_borrow_rate", 0.08)
         return MarginAccount(
             init_cash=init_cash,
             position_dict=position_dict,
             pos_type=pos_type,
+            financing_rate=financing_rate,
+            borrow_rate=borrow_rate,
             benchmark_config=(
                 {}
                 if benchmark is None

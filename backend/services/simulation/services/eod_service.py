@@ -36,6 +36,7 @@ from backend.services.simulation.services.projection_service import (
     SimulationProjectionService,
 )
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.simulation_margin_math import maintenance_margin_ratio
 from backend.shared.trade_account_cache import (
     read_json_cache,
     write_json_cache,
@@ -244,10 +245,9 @@ async def _execute_eod(trade_date: date) -> bool:
                     projection_account.short_market_value = round(short_mv, 4)
                     projection_account.total_asset = total_asset
                     projection_account.equity = total_asset
-                    if liabilities > 0:
-                        projection_account.maintenance_margin_ratio = round(
-                            total_asset / liabilities, 6
-                        )
+                    projection_account.maintenance_margin_ratio = round(
+                        maintenance_margin_ratio(total_asset, short_mv, liabilities), 6
+                    )
                     projection_account.last_projected_at = datetime.utcnow()
 
                     account_payload = SimulationProjectionService.build_cache_payload(

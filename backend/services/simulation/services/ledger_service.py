@@ -14,7 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.services.simulation.models.account import SimulationAccount
 from backend.services.simulation.models.cash_ledger import SimulationCashLedger
 from backend.services.simulation.models.position_lot import SimulationPositionLot
-from backend.shared.simulation_margin_math import margin_trade_deltas
+from backend.shared.simulation_margin_math import (
+    maintenance_margin_ratio,
+    margin_trade_deltas,
+)
 from backend.shared.simulation_position_keys import build_position_key
 
 
@@ -381,10 +384,8 @@ class SimulationLedgerService:
         account.total_asset = float(account_snapshot.get("total_asset") or account.total_asset or 0.0)
         account.liabilities = float(account_snapshot.get("liabilities") or account.liabilities or 0.0)
         account.equity = float(account_snapshot.get("total_asset") or account.equity or 0.0)
-        account.maintenance_margin_ratio = float(
-            account_snapshot.get("maintenance_margin_ratio")
-            or account.maintenance_margin_ratio
-            or 0.0
+        account.maintenance_margin_ratio = maintenance_margin_ratio(
+            account.equity, account.short_market_value, account.liabilities
         )
         now = datetime.utcnow()
         account.last_trade_at = now

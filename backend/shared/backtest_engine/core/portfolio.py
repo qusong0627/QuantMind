@@ -3,7 +3,6 @@
 """
 
 from datetime import datetime
-from typing import Dict
 
 
 class Position:
@@ -111,6 +110,7 @@ class Portfolio:
         """
         self.initial_cash = initial_cash
         self.cash = initial_cash
+        self.short_proceeds = 0.0
         self.positions: dict[str, Position] = {}
         self.total_value = initial_cash
         self.last_total_value = initial_cash
@@ -119,6 +119,7 @@ class Portfolio:
     def reset(self) -> None:
         """重置投资组合"""
         self.cash = self.initial_cash
+        self.short_proceeds = 0.0
         self.positions.clear()
         self.total_value = self.initial_cash
         self.last_total_value = self.initial_cash
@@ -129,7 +130,10 @@ class Portfolio:
         # 只扣手续费，卖出所得不增加可用现金（A股融券规则）
         if commission > self.cash:
             raise ValueError(f"现金不足以支付融券手续费，需要 {commission}，可用 {self.cash}")
+        if symbol in self.positions and self.positions[symbol].quantity > 0:
+            raise ValueError("持仓已为多头，不可直接开空，请先平多")
         self.cash -= commission
+        self.short_proceeds += quantity * price
 
         if symbol not in self.positions:
             self.positions[symbol] = Position(symbol)
@@ -143,11 +147,12 @@ class Portfolio:
             raise ValueError(f"无空头持仓可平: {symbol}")
 
         position = self.positions[symbol]
+        entry_price = position.avg_cost
         realized_pnl = position.cover_short(quantity, price)
 
-        # 平空成本 = 买入金额 + 手续费；实现盈亏已算入 realized_pnl
-        cover_cost = quantity * price + commission
-        self.cash -= cover_cost
+        # 平空只释放开仓成本对应的冻结资金，现金只结算实现盈亏与手续费
+        self.short_proceeds = max(0.0, self.short_proceeds - quantity * entry_price)
+        self.cash += realized_pnl - commission
 
         if position.quantity == 0:
             del self.positions[symbol]
@@ -162,6 +167,8 @@ class Portfolio:
         total_cost = quantity * price + commission
         if total_cost > self.cash:
             raise ValueError(f"现金不足，需要 {total_cost}，可用 {self.cash}")
+        if symbol in self.positions and self.positions[symbol].quantity < 0:
+            raise ValueError("持仓已为空头，请先平空")
 
         # 更新现金
         self.cash -= total_cost
@@ -214,7 +221,7 @@ class Portfolio:
     def _update_total_value(self) -> None:
         """更新总价值"""
         positions_value = sum(pos.market_value for pos in self.positions.values())
-        self.total_value = self.cash + positions_value
+        self.total_value = self.cash + self.short_proceeds + positions_value
         self.updated_at = datetime.now()
 
     def get_total_value(self) -> float:
