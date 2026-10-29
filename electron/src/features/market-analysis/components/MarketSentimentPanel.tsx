@@ -101,6 +101,8 @@ export const MarketSentimentPanel: React.FC = () => {
   const [indexKey, setIndexKey] = useState<string>('000300.SH');
   const [asOf, setAsOfState] = useState<string | undefined>(() => readAsOfFromUrl());
   const [glossaryOpen, setGlossaryOpen] = useState(false);
+  const [fanSolo, setFanSolo] = useState(false);
+  const [fanCompare, setFanCompare] = useState(false);
   const setAsOf = useCallback((value?: string) => {
     setAsOfState(value);
     writeAsOfToUrl(value);
@@ -439,6 +441,28 @@ export const MarketSentimentPanel: React.FC = () => {
               )}
             </div>
             <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setFanSolo((v) => !v)}
+                className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border transition-colors ${
+                  fanSolo
+                    ? 'bg-violet-600 text-white border-violet-600'
+                    : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                }`}
+                title="隐藏成交量/压力副图，只保留扇形主图"
+              >
+                {fanSolo ? '恢复副图' : '单看走势'}
+              </button>
+              <button
+                onClick={() => setFanCompare((v) => !v)}
+                className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border transition-colors ${
+                  fanCompare
+                    ? 'bg-slate-800 text-white border-slate-800'
+                    : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                }`}
+                title="叠加其它指数的历史同状态中位路径"
+              >
+                {fanCompare ? '隐藏对比' : '对比指数'}
+              </button>
               {universe && (
                 <span
                   className="px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-[10px] font-bold text-slate-500"
@@ -458,13 +482,14 @@ export const MarketSentimentPanel: React.FC = () => {
             horizon={data.horizon}
             actual={actualPts}
             forwardDates={selected.future_dates ?? []}
-            stress={selected.history
+            stress={fanSolo ? [] : selected.history
               .map((h) => {
                 const hit = stressHistory.find((p) => p.date === h.date);
                 return hit ? { date: h.date, stress: hit.stress } : null;
               })
               .filter((v): v is { date: string; stress: number } => v !== null)}
-            compare={INDEX_ORDER.filter((k) => k !== indexKey && data.indices[k]).map((k) => ({
+            volume={fanSolo ? undefined : data.volume}
+            compare={fanSolo || !fanCompare ? [] : INDEX_ORDER.filter((k) => k !== indexKey && data.indices[k]).map((k) => ({
               name: data.indices[k].name,
               color: INDEX_COLORS[k] ?? '#94a3b8',
               p50: data.indices[k].fan.map((p) => p.p50),

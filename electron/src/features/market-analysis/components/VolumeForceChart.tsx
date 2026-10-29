@@ -25,6 +25,8 @@ const fmtPct100 = (v: number | null | undefined, digits = 1): string => {
 
 export const VolumeForceChart: React.FC<{ volume: SentimentVolume }> = ({ volume }) => {
   const [days, setDays] = useState<60 | 120>(60);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const svgRef = React.useRef<SVGSVGElement | null>(null);
   const n = volume.dates.length;
   const start = Math.max(0, n - days);
   const dates = volume.dates.slice(start);
@@ -70,6 +72,18 @@ export const VolumeForceChart: React.FC<{ volume: SentimentVolume }> = ({ volume
   const latest = volume.latest ?? {};
   const lastVw = latest.vw_breadth ?? [...vw].reverse().find((v) => typeof v === 'number') ?? null;
   const lastMain = latest.main_breadth_amt ?? [...mainAmt].reverse().find((v) => typeof v === 'number') ?? null;
+
+  const hover = useMemo(() => {
+    if (hoverIdx === null || hoverIdx < 0 || hoverIdx >= dates.length) return null;
+    return {
+      i: hoverIdx,
+      date: dates[hoverIdx],
+      turnover: turnover[hoverIdx] ?? null,
+      vw: vw[hoverIdx] ?? null,
+      mainAmt: mainAmt[hoverIdx] ?? null,
+      x: left + (hoverIdx + 0.5) * barW,
+    };
+  }, [hoverIdx, dates, turnover, vw, mainAmt, barW]);
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-4 py-3 flex flex-col gap-1.5">
@@ -122,7 +136,21 @@ export const VolumeForceChart: React.FC<{ volume: SentimentVolume }> = ({ volume
         </div>
       </div>
 
-      <svg viewBox={`0 0 ${width} 200`} className="w-full" role="img" aria-label="成交量与主力加权系数曲线">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} 200`}
+        className="w-full"
+        role="img"
+        aria-label="成交量与主力加权系数曲线"
+        onMouseMove={(e) => {
+          const rect = svgRef.current?.getBoundingClientRect();
+          if (!rect || !rect.width) return;
+          const vx = ((e.clientX - rect.left) * width) / rect.width;
+          if (vx < left || vx > width - right) { setHoverIdx(null); return; }
+          setHoverIdx(Math.max(0, Math.min(dates.length - 1, Math.floor((vx - left) / barW))));
+        }}
+        onMouseLeave={() => setHoverIdx(null)}
+      >
         {[0, 0.25, 0.5, 0.75, 1].map((f) => (
           <line key={f} x1={left} x2={width - right} y1={topBase - f * topH} y2={topBase - f * topH} stroke="#f1f5f9" strokeWidth="1" />
         ))}
@@ -170,6 +198,24 @@ export const VolumeForceChart: React.FC<{ volume: SentimentVolume }> = ({ volume
               {dates[i].slice(5)}
             </text>
           ) : null,
+        )}
+        {hover && (
+          <g pointerEvents="none">
+            <line x1={hover.x} x2={hover.x} y1={4} y2={192} stroke="#475569" strokeWidth={0.8} strokeDasharray="3 3" opacity={0.7} />
+            {(() => {
+              const boxW = 152;
+              const boxX = hover.x > width / 2 ? left + 4 : width - right - boxW - 4;
+              const boxY = 8;
+              return (
+                <g>
+                  <rect x={boxX} y={boxY} width={boxW} height={43} rx={4} fill="#ffffff" opacity={0.94} stroke="#e2e8f0" />
+                  <text x={boxX + 5} y={boxY + 12} fontSize={9} fill="#334155" fontWeight={800} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">{hover.date}</text>
+                  <text x={boxX + 5} y={boxY + 23} fontSize={8} fill="#475569" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">成交额 {fmtTurnover(hover.turnover)}</text>
+                  <text x={boxX + 5} y={boxY + 33} fontSize={8} fill={hover.vw != null && hover.vw < 0 ? '#059669' : '#dc2626'} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">系数 {fmtSigned(hover.vw)} · 主力额广 {fmtPct100(hover.mainAmt, 0)}</text>
+                </g>
+              );
+            })()}
+          </g>
         )}
       </svg>
 
