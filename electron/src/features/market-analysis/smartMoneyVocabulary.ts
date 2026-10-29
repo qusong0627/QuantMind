@@ -50,6 +50,8 @@ export const PILLAR_SHORT: Record<string, string> = {
   margin_bal_chg_20d: '两融额',
   dzjy_amount_ratio_5d: '大宗量',
   dzjy_premium_5d: '大宗价',
+  dzjy_inst_amount_ratio_5d: '机构大宗',
+  dzjy_inst_premium_5d: '大宗价',
   survey_inst_90d: '调研',
 };
 

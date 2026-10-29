@@ -389,17 +389,17 @@ export const SmartMoneyTrackRecordSection: React.FC<SmartMoneyTrackRecordSection
             </div>
           </div>
 
-          {/* 最近案例 */}
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 px-1 pb-1">
+          {/* 最近案例：默认收起，图表优先；需要逐行对账时展开 */}
+          <details className="min-w-0 rounded-xl border border-slate-100 bg-white/60 px-2 py-1.5">
+            <summary className="cursor-pointer select-none flex items-center gap-1.5 pb-1">
               <ListOrdered className="w-3 h-3 text-purple-600" />
               <span className="text-[10px] font-extrabold text-slate-600">
                 最近案例（近 10 计分日 × Top-5，含进行中）
               </span>
               <span className="text-[9px] text-slate-400">
-                T+1 收盘入场口径 · 点行打开个股档案
+                T+1 收盘入场口径 · 点行打开个股档案 · 展开看逐行
               </span>
-            </div>
+            </summary>
             {/* 限高滚动：近 10 计分日 × Top-5 全量入表会拉长整面，表头吸顶滚动阅读 */}
             <div className="max-h-[300px] overflow-y-auto custom-scrollbar rounded-lg border border-slate-100/80">
               <div className="grid grid-cols-[64px_minmax(110px,1.3fr)_48px_64px_64px_64px_56px] gap-1.5 px-1 py-1 text-[9px] font-extrabold text-slate-400 border-b border-slate-100 sticky top-0 bg-white/95 backdrop-blur z-[5]">
@@ -422,7 +422,7 @@ export const SmartMoneyTrackRecordSection: React.FC<SmartMoneyTrackRecordSection
             <div className="text-[9px] text-slate-400 px-1 mt-1">
               「至今」=T+1 收盘入场至最新收盘的浮动收益（持有中最新实况）；「h5/h10」=已实现前向收益，未到期为「—」。
             </div>
-          </div>
+          </details>
         </div>
       )}
     </FaceCard>

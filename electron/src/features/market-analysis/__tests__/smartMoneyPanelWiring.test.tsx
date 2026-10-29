@@ -402,12 +402,25 @@ describe('聪明钱面板接线 v2.1（一框六面）', () => {
     mockStocks.mockResolvedValue({ ...STOCKS_BASE, total: 120 });
     render(<SmartMoneyPanel />);
     await screen.findByText('天马科技');
+    await userEvent.click(screen.getByRole('button', { name: '明细' }));
 
     await userEvent.click(screen.getByRole('button', { name: '下一页' }));
     await waitFor(() =>
       expect(mockStocks).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 50, limit: 50 })),
     );
     await screen.findByText(/第 2\/3 页/);
+  });
+
+  it('v3：选股榜默认图表视图（综合分/六柱热力/散点），可切明细表', async () => {
+    render(<SmartMoneyPanel />);
+    await screen.findByText('天马科技');
+    expect(screen.getByText(/综合分 Top/)).toBeInTheDocument();
+    expect(screen.getByText(/六柱分位热力图/)).toBeInTheDocument();
+    expect(screen.getByText(/综合分 × 机构净买/)).toBeInTheDocument();
+    expect(screen.getAllByTestId('echarts-mock').length).toBeGreaterThanOrEqual(3);
+
+    await userEvent.click(screen.getByRole('button', { name: '明细' }));
+    expect(screen.getByRole('button', { name: '下一页' })).toBeInTheDocument();
   });
 
   it('B6：date prop 驱动取数 + 头部披露「请求日 → 实际快照」', async () => {

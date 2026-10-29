@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Crosshair, ListFilter } from 'lucide-react';
 import { Tooltip } from 'antd';
 import { EmptyHint, FaceCard } from '../../../market-analysis-shared/ui';
+import { StockPillarHeatmap, StockScoreBar, StockScoreScatter, TopStockStrip } from './SmartMoneyStockCharts';
 import {
   getSmartMoneyStocks,
   type SmartPillarMeta,
@@ -72,6 +73,7 @@ export const SmartMoneyStockBoard: React.FC<SmartMoneyStockBoardProps> = ({
   className = '',
 }) => {
   const [q, setQ] = useState<BoardQuery>({ event: null, industry: null, minScore: 0, offset: 0 });
+  const [view, setView] = useState<'chart' | 'table'>('chart');
   const [resp, setResp] = useState<SmartStocksResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -134,9 +136,26 @@ export const SmartMoneyStockBoard: React.FC<SmartMoneyStockBoardProps> = ({
         </span>
       }
       extra={
-        <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap">
-          {resp?.as_of ? `${resp.as_of} 快照 · ` : ''}共 {total} 只
-        </span>
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap">
+            {resp?.as_of ? `${resp.as_of} 快照 · ` : ''}共 {total} 只
+          </span>
+          <div className="flex rounded-full bg-slate-100 p-0.5">
+            {(['chart', 'table'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setView(v)}
+                aria-pressed={view === v}
+                className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold transition-colors ${
+                  view === v ? 'bg-white text-purple-700 shadow-2xs' : 'text-slate-500'
+                }`}
+              >
+                {v === 'chart' ? '图表' : '明细'}
+              </button>
+            ))}
+          </div>
+        </div>
       }
     >
       <div className="flex flex-col gap-2 min-w-0">
@@ -239,6 +258,24 @@ export const SmartMoneyStockBoard: React.FC<SmartMoneyStockBoardProps> = ({
           ) : (
             <EmptyHint text="当日事件池为空（无聪明钱事件触发）" />
           )
+        ) : view === 'chart' ? (
+          <div className="flex flex-col gap-3">
+            <TopStockStrip items={items} onPick={onPick} />
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 items-start">
+              <div className="rounded-xl border border-slate-100 bg-white/60 p-1.5">
+                <StockScoreBar items={items} onPick={onPick} />
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-white/60 p-1.5">
+                <StockPillarHeatmap items={items} pillars={pillars} onPick={onPick} />
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-100 bg-white/60 p-1.5">
+              <StockScoreScatter items={items} onPick={onPick} />
+            </div>
+            <div className="text-[9px] text-slate-400 px-1">
+              图表取当前页前 20；完整 50 条与逐列数字切「明细」。分位=池内截面 0–100，灰格=缺失（不为 0）。
+            </div>
+          </div>
         ) : (
           <>
             {/* 限高滚动（表头吸顶）：50 行/页全展开会占近 2 屏，框内滚动阅读 */}

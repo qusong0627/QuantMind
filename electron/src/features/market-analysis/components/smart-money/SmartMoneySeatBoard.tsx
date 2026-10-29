@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Store } from 'lucide-react';
 import { Tooltip } from 'antd';
 import { EmptyHint, FaceCard, PeriodChips } from '../../../market-analysis-shared/ui';
+import { SeatScatter, TopSeatStrip } from './SmartMoneySeatCharts';
 import {
   getSmartMoneySeats,
   type SmartSeatsResponse,
@@ -119,6 +120,7 @@ export const SmartMoneySeatBoard: React.FC<SmartMoneySeatBoardProps> = ({
   const [sort, setSort] = useState('win_rate');
   const [seatClass, setSeatClass] = useState<string | null>(null);
   const [limit, setLimit] = useState(50);
+  const [view, setView] = useState<'chart' | 'table'>('chart');
   const [data, setData] = useState<SmartSeatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -172,6 +174,21 @@ export const SmartMoneySeatBoard: React.FC<SmartMoneySeatBoardProps> = ({
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
           <PeriodChips options={WINDOW_OPTIONS} value={win} onChange={setWin} />
           <PeriodChips options={SORT_OPTIONS} value={sort} onChange={setSort} />
+          <div className="flex rounded-full bg-slate-100 p-0.5">
+            {(['chart', 'table'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setView(v)}
+                aria-pressed={view === v}
+                className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold transition-colors ${
+                  view === v ? 'bg-white text-purple-700 shadow-2xs' : 'text-slate-500'
+                }`}
+              >
+                {v === 'chart' ? '图表' : '明细'}
+              </button>
+            ))}
+          </div>
         </div>
       }
     >
@@ -235,6 +252,16 @@ export const SmartMoneySeatBoard: React.FC<SmartMoneySeatBoardProps> = ({
           <EmptyHint loading />
         ) : !items.length && !error ? (
           <EmptyHint text="该筛选条件下暂无席位记录" />
+        ) : view === 'chart' ? (
+          <div className="flex flex-col gap-3">
+            <TopSeatStrip items={items} window={data?.window ?? win} />
+            <div className="rounded-xl border border-slate-100 bg-white/60 p-1.5">
+              <SeatScatter items={items} window={data?.window ?? win} baseline={baseline} />
+            </div>
+            <div className="text-[9px] text-slate-400 px-1">
+              图表按当前窗口（{win}）展示前 50 席；样本不足 {minTrades} 的席位仍可见但统计不稳，完整逐列数字切「明细」。
+            </div>
+          </div>
         ) : (
           <>
             {/* 限高滚动（表头吸顶）：50 席/页全展开会拉长整面，框内滚动阅读 */}

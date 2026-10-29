@@ -4,12 +4,13 @@
  * 席位行为是事实统计，不含「跟随营业部」类暗示文案。
  */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { AlertCircle, Store } from 'lucide-react';
 import { Tooltip } from 'antd';
 import { EmptyHint, FaceCard, PeriodChips, RankRow } from '../../../market-analysis-shared/ui';
 import type { SmartBranchRow } from '../../services/smartMoneyService';
 import { fmtYiFromYuan, signCls } from '../../smartMoneyVocabulary';
+import { AXIS_LABEL, CHART_COLORS, SmartChart } from './charts';
 
 const WINDOW_OPTIONS = [
   { id: '5', label: '5 日' },
@@ -38,6 +39,74 @@ export const SmartMoneyBranchBoard: React.FC<SmartMoneyBranchBoardProps> = ({
   bare = false,
 }) => {
   const list = rows ?? [];
+
+  const chartOption = useMemo(() => {
+    const top = [...list]
+      .filter((r) => r.net_amount !== null && r.net_amount !== undefined)
+      .sort((a, b) => Math.abs(Number(b.net_amount)) - Math.abs(Number(a.net_amount)))
+      .slice(0, 12);
+    if (!top.length) return null;
+    const ordered = top.reverse();
+    return {
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        textStyle: { fontSize: 10 },
+        formatter: (ps: Array<{ dataIndex: number }>) => {
+          const r = ordered[ps[0]?.dataIndex ?? 0];
+          if (!r) return '';
+          return [
+            r.branch_name,
+            `净买 ${fmtYiFromYuan(r.net_amount)} 亿`,
+            `买 ${fmtYiFromYuan(r.buy_amount)} 亿 · 卖 ${fmtYiFromYuan(r.sell_amount)} 亿`,
+            `上榜 ${r.n_days} 日`,
+            r.stocks_bought ? `买入个股：${r.stocks_bought}` : '',
+          ]
+            .filter(Boolean)
+            .join('<br/>');
+        },
+      },
+      grid: { left: 110, right: 40, top: 6, bottom: 18 },
+      xAxis: {
+        type: 'value',
+        axisLabel: { ...AXIS_LABEL },
+        splitLine: { lineStyle: { color: CHART_COLORS.grid } },
+      },
+      yAxis: {
+        type: 'category',
+        data: ordered.map((r) => r.branch_name),
+        axisLabel: { fontSize: 9, color: CHART_COLORS.neutral, width: 104, overflow: 'truncate' },
+        axisTick: { show: false },
+        axisLine: { lineStyle: { color: CHART_COLORS.axis } },
+      },
+      series: [
+        {
+          type: 'bar',
+          barMaxWidth: 12,
+          data: ordered.map((r) => ({
+            value: Number(r.net_amount) / 1e8,
+            itemStyle: {
+              color:
+                Number(r.net_amount) > 0
+                  ? CHART_COLORS.pos
+                  : Number(r.net_amount) < 0
+                    ? CHART_COLORS.neg
+                    : CHART_COLORS.neutral,
+              borderRadius: [0, 3, 3, 0],
+            },
+          })),
+          label: {
+            show: true,
+            position: 'right',
+            fontSize: 9,
+            color: CHART_COLORS.neutral,
+            formatter: (p: { value: number | null }) =>
+              p.value === null ? '' : `${p.value > 0 ? '+' : ''}${p.value.toFixed(1)}`,
+          },
+        },
+      ],
+    };
+  }, [list]);
 
   return (
     <FaceCard
@@ -68,7 +137,20 @@ export const SmartMoneyBranchBoard: React.FC<SmartMoneyBranchBoardProps> = ({
       ) : loading && !list.length ? (
         <EmptyHint loading />
       ) : list.length ? (
-        <div className="flex flex-col">
+        <div className="flex flex-col gap-2">
+          {chartOption && (
+            <div className="rounded-xl border border-slate-100 bg-white/60 p-1.5">
+              <div className="text-[10px] font-bold text-slate-500 px-1 pb-1">
+                营业部净买 Top 12 <span className="font-normal text-slate-400">（亿 · 红买绿卖）</span>
+              </div>
+              <SmartChart option={chartOption} height={Math.max(180, Math.min(12, list.length) * 20 + 40)} />
+            </div>
+          )}
+          <details className="rounded-xl border border-slate-100 bg-white/60 px-2 py-1.5">
+            <summary className="cursor-pointer select-none text-[10px] font-bold text-slate-500">
+              席位明细（{list.length}）· 买入个股与买卖拆分
+            </summary>
+            <div className="mt-1 flex flex-col">
           {list.map((b, i) => (
             <RankRow
               key={b.branch_name}
@@ -94,6 +176,8 @@ export const SmartMoneyBranchBoard: React.FC<SmartMoneyBranchBoardProps> = ({
               }
             />
           ))}
+            </div>
+          </details>
         </div>
       ) : (
         <EmptyHint text={`近 ${window} 日无席位记录`} />

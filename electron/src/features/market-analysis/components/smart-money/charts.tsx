@@ -55,6 +55,8 @@ export function tipNum(
 interface SmartChartProps {
   /** ECharts option（主题经本模块常量拼装） */
   option: Record<string, unknown> | null;
+  /** ECharts 事件（如 click 打开个股抽屉） */
+  onEvents?: Record<string, (params: unknown) => void>;
   /** 图高（px）；默认 160（卡内小图） */
   height?: number;
   /** 空态文案（option 为 null 时渲染；不传则渲染空占位） */
@@ -65,6 +67,7 @@ interface SmartChartProps {
 /** 薄封装：响应式 + 不合并旧 option（切换数据源防残留）+ 空态。 */
 export const SmartChart: React.FC<SmartChartProps> = ({
   option,
+  onEvents,
   height = 160,
   emptyText,
   className,
@@ -84,6 +87,7 @@ export const SmartChart: React.FC<SmartChartProps> = ({
       option={option}
       notMerge
       lazyUpdate
+      onEvents={onEvents}
       style={{ height, width: '100%' }}
       className={className}
     />
