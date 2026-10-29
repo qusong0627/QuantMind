@@ -228,16 +228,24 @@ export const BacktestSettingsPanel: React.FC<Props> = ({
       {/* 参数体 */}
       <div className="se-scroll flex-1 space-y-4 overflow-y-auto px-3 py-3">
         <Group title="标的与区间" icon={<Landmark className="h-3 w-3" />}>
-          <Field label="标的代码" htmlFor="se-param-symbol">
-            <Input
-              id="se-param-symbol"
-              size="small"
-              value={value.symbol}
-              placeholder="600036"
-              onChange={(event) => patch({ symbol: event.target.value.trim() })}
-              status={validation.symbolMissing ? 'error' : undefined}
-            />
-          </Field>
+          {mode === 'minibt' ? (
+            <Field label="标的代码" htmlFor="se-param-symbol">
+              <Input
+                id="se-param-symbol"
+                size="small"
+                value={value.symbol}
+                placeholder="600036"
+                onChange={(event) => patch({ symbol: event.target.value.trim() })}
+                status={validation.symbolMissing ? 'error' : undefined}
+              />
+            </Field>
+          ) : (
+            <div className="rounded-lg border border-slate-100 bg-slate-50/60 px-2.5 py-2 text-[9.5px] leading-relaxed text-slate-400">
+              {mode === 'config'
+                ? '截面策略：标的由「股票池 + topk」在回测日选出，单标的代码不参与本次回测。'
+                : '当前代码未识别回测引擎：单标的代码不会写回代码，也不随请求下发。'}
+            </div>
+          )}
           <Field label="股票池" htmlFor="se-param-universe">
             <Select
               id="se-param-universe"

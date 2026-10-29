@@ -81,7 +81,7 @@ const TooltipCard: React.FC<TooltipCardProps> = ({ active, payload, label }) => 
   );
 };
 
-export const ResultEquityChart: React.FC<{ equity: StrategyLabEquityPoint[] }> = ({ equity }) => {
+export const ResultEquityChart: React.FC<{ equity: StrategyLabEquityPoint[]; logScale?: boolean }> = ({ equity, logScale = false }) => {
   const data = useMemo(() => buildData(equity), [equity]);
   if (!data.length) return null;
   const hasBenchmark = data.some((row) => row.benchmark !== null);
@@ -108,12 +108,13 @@ export const ResultEquityChart: React.FC<{ equity: StrategyLabEquityPoint[] }> =
           <YAxis
             yAxisId="equity"
             orientation="left"
+            scale={logScale ? 'log' : 'linear'}
             tick={{ fontSize: 9, fill: '#94a3b8', fontFamily: 'JetBrains Mono' }}
             tickLine={false}
             axisLine={false}
             width={40}
             domain={['auto', 'auto']}
-            tickFormatter={(value: number) => value.toFixed(2)}
+            tickFormatter={(value: number) => (value >= 10 ? value.toFixed(0) : value.toFixed(2))}
           />
           <YAxis
             yAxisId="drawdown"
@@ -150,9 +151,9 @@ export const ResultEquityChart: React.FC<{ equity: StrategyLabEquityPoint[] }> =
               yAxisId="equity"
               type="monotone"
               dataKey="benchmark"
-              stroke="#94a3b8"
-              strokeWidth={1.2}
-              strokeDasharray="4 4"
+              stroke="#64748b"
+              strokeWidth={1.3}
+              strokeDasharray="6 4"
               dot={false}
               isAnimationActive={false}
             />

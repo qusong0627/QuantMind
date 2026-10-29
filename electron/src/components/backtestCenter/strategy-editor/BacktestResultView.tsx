@@ -31,10 +31,16 @@ import {
   signedToneClass,
 } from './resultMetrics';
 import type { DockTab } from './types';
+import { alignBuyHoldBenchmark, type AlignedBuyHold } from './resultMetrics';
+import { useBuyHoldBenchmark } from './useBuyHoldBenchmark';
 
 interface Props {
   result: StrategyLabRunResult;
   tab: DockTab;
+  /** minibt 单标的策略的标的代码（用于买入持有基准）。 */
+  symbol?: string;
+  /** CN / HK / US；其他市场不取持有基准。 */
+  market?: string;
 }
 
 const KpiTile: React.FC<{
@@ -91,8 +97,8 @@ const ScoreRing: React.FC<{ result: StrategyLabRunResult }> = ({ result }) => {
   );
 };
 
-const StatLine: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
-  <div className="flex items-baseline justify-between gap-2 border-b border-dashed border-slate-100 py-1 last:border-b-0">
+const StatLine: React.FC<{ label: string; value: React.ReactNode; hint?: string }> = ({ label, value, hint }) => (
+  <div className="flex items-baseline justify-between gap-2 border-b border-dashed border-slate-100 py-1 last:border-b-0" title={hint}>
     <span className="shrink-0 text-[9.5px] text-slate-400">{label}</span>
     <span className="min-w-0 truncate text-right font-mono text-[10.5px] font-semibold text-slate-700">
       {value}
@@ -100,12 +106,50 @@ const StatLine: React.FC<{ label: string; value: React.ReactNode }> = ({ label, 
   </div>
 );
 
-const NetView: React.FC<{ result: StrategyLabRunResult }> = ({ result }) => {
-  const summary = useMemo(() => computeEquitySummary(result.equity), [result.equity]);
+interface Comparison {
+  label: '基准' | '持有';
+  benchmarkReturn: number | null;
+  alpha: number | null;
+  loading: boolean;
+  error: string | null;
+}
+
+interface NetViewProps {
+  result: StrategyLabRunResult;
+  summary: ReturnType<typeof computeEquitySummary>;
+  comparison: Comparison | null;
+  hold: AlignedBuyHold | null;
+}
+
+const NetView: React.FC<NetViewProps> = ({ result, summary, comparison, hold }) => {
+  const chartEquity = useMemo(() => {
+    if (!hold) return result.equity;
+    const byDate = new Map(hold.series.map((point) => [point.date, point.value]));
+    return result.equity.map((point) => ({
+      ...point,
+      benchmark: byDate.get(String(point.date).slice(0, 10)) ?? null,
+    }));
+  }, [result.equity, hold]);
   const hasBenchmark = useMemo(
-    () => result.equity.some((point) => point.benchmark !== null && point.benchmark !== undefined),
-    [result.equity],
+    () =>
+      Boolean(hold) ||
+      result.equity.some((point) => point.benchmark !== null && point.benchmark !== undefined),
+    [result.equity, hold],
   );
+  const useLogScale = useMemo(() => {
+    const values = chartEquity
+      .flatMap((point) => [point.value, point.benchmark])
+      .filter((value): value is number => value !== null && value !== undefined && value > 0);
+    if (values.length < 2) return false;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    return min > 0 && max / min >= 2;
+  }, [chartEquity]);
+  const benchmarkValue = (value: number | null) => {
+    if (comparison?.loading) return '读取中…';
+    if (value === null || value === undefined) return '—';
+    return formatSignedPct(value);
+  };
   return (
     <div className="flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col px-2 pb-1">
@@ -115,16 +159,17 @@ const NetView: React.FC<{ result: StrategyLabRunResult }> = ({ result }) => {
           </span>
           {hasBenchmark && (
             <span className="flex items-center gap-1">
-              <span className="h-[2px] w-4 rounded bg-[#94a3b8]" style={{ backgroundImage: 'linear-gradient(90deg,#94a3b8 55%,transparent 55%)' }} />
-              基准
+              <span className="h-[2px] w-4 rounded bg-[#64748b]" style={{ backgroundImage: 'linear-gradient(90deg,#64748b 55%,transparent 55%)' }} />
+              {comparison?.label ?? '基准'}
             </span>
           )}
           <span className="flex items-center gap-1">
             <span className="h-2 w-3 rounded-sm bg-emerald-400/40" /> 回撤
           </span>
+          {useLogScale && <span className="text-slate-300">· 对数轴</span>}
         </div>
         <div className="min-h-0 flex-1">
-          <ResultEquityChart equity={result.equity} />
+          <ResultEquityChart equity={chartEquity} logScale={useLogScale} />
         </div>
       </div>
       <aside className="se-scroll w-[218px] shrink-0 overflow-y-auto border-l border-slate-100 bg-slate-50/40 px-3 py-2">
@@ -136,10 +181,23 @@ const NetView: React.FC<{ result: StrategyLabRunResult }> = ({ result }) => {
             <StatLine label="回测区间" value={`${summary.startDate.slice(0, 10)} → ${summary.endDate.slice(0, 10)}`} />
             <StatLine label="交易日" value={`${summary.tradingDays}`} />
             <StatLine label="期末净值" value={formatNumber(summary.finalNetValue, 4)} />
-            <StatLine label="基准收益" value={formatSignedPct(summary.benchmarkReturn)} />
+            <StatLine
+              label={`${comparison?.label ?? '基准'}收益`}
+              value={
+                <span className={signedToneClass(comparison?.benchmarkReturn)}>
+                  {benchmarkValue(comparison?.benchmarkReturn ?? null)}
+                </span>
+              }
+              hint={comparison?.error || (comparison?.label === '持有' ? '同区间买入持有（前复权，不含交易费用）' : '引擎返回的基准序列')}
+            />
             <StatLine
               label="超额"
-              value={<span className={signedToneClass(summary.alpha)}>{formatSignedPct(summary.alpha)}</span>}
+              value={
+                <span className={signedToneClass(comparison?.alpha)}>
+                  {comparison?.loading ? '读取中…' : formatSignedPct(comparison?.alpha ?? null)}
+                </span>
+              }
+              hint={comparison?.error || undefined}
             />
             <StatLine label="月度胜率" value={formatPct(summary.monthlyWinRate, 1)} />
             <StatLine label="最长水下" value={`${summary.maxDrawdownDays} 个交易日`} />
@@ -318,9 +376,49 @@ const FailedView: React.FC<{ result: StrategyLabRunResult }> = ({ result }) => {
   );
 };
 
-export const BacktestResultView: React.FC<Props> = ({ result, tab }) => {
+export const BacktestResultView: React.FC<Props> = ({ result, tab, symbol, market }) => {
   const summary = useMemo(() => computeEquitySummary(result.equity), [result.equity]);
   const monthly = useMemo(() => computeMonthlyReturns(result.equity), [result.equity]);
+  const engineHasBenchmark = useMemo(
+    () => result.equity.some((point) => point.benchmark !== null && point.benchmark !== undefined),
+    [result.equity],
+  );
+  const isMinibt = useMemo(
+    () => String((result.config as Record<string, unknown> | undefined)?.engine || '').toLowerCase() === 'minibt',
+    [result.config],
+  );
+  // K 线 API 只覆盖 A/HK/US；期货/加密不拿股票持有基准。
+  const holdSupported = useMemo(
+    () => ['CN', 'HK', 'US'].includes(String(market || '').toUpperCase()),
+    [market],
+  );
+  const holdState = useBuyHoldBenchmark({
+    enabled: result.status !== 'failed' && isMinibt && holdSupported && !engineHasBenchmark,
+    symbol: symbol || '',
+    market: market || '',
+    equity: result.equity,
+  });
+  const hold = useMemo(
+    () => (holdState.data ? alignBuyHoldBenchmark(result.equity, holdState.data) : null),
+    [holdState.data, result.equity],
+  );
+  const comparison: Comparison | null = engineHasBenchmark
+    ? {
+        label: '基准',
+        benchmarkReturn: summary?.benchmarkReturn ?? null,
+        alpha: summary?.alpha ?? null,
+        loading: false,
+        error: null,
+      }
+    : isMinibt && holdSupported
+      ? {
+          label: '持有',
+          benchmarkReturn: hold?.benchmarkReturn ?? null,
+          alpha: hold?.alpha ?? null,
+          loading: holdState.loading,
+          error: holdState.error,
+        }
+      : null;
 
   if (result.status === 'failed') return <FailedView result={result} />;
   if (tab === 'logs' || tab === 'saved') return null;
@@ -335,10 +433,27 @@ export const BacktestResultView: React.FC<Props> = ({ result, tab }) => {
         <KpiTile label="累计收益" value={formatSignedPct(m.cum_return)} tone={signedToneClass(m.cum_return)} hint="期末权益 / 初始权益 - 1" />
         <KpiTile label="年化收益" value={formatSignedPct(m.annual_return)} tone={signedToneClass(m.annual_return)} hint="按 252 个交易日折算" />
         <KpiTile
-          label="超额"
-          value={summary?.alpha === null || summary?.alpha === undefined ? '—' : formatSignedPct(summary.alpha)}
-          tone={signedToneClass(summary?.alpha)}
-          hint="策略累计收益 − 基准累计收益"
+          label={comparison ? `超额·${comparison.label}` : '超额'}
+          value={
+            comparison
+              ? comparison.loading
+                ? '读取中…'
+                : comparison.alpha === null
+                  ? '—'
+                  : formatSignedPct(comparison.alpha)
+              : '—'
+          }
+          tone={signedToneClass(comparison?.alpha)}
+          hint={
+            comparison
+              ? comparison.error ||
+                `策略累计收益 − ${
+                  comparison.label === '持有'
+                    ? '同区间买入持有收益（前复权，不含交易费用）'
+                    : '基准累计收益'
+                }`
+              : '本次结果未返回基准序列'
+          }
         />
         <KpiTile label="夏普" value={formatNumber(m.sharpe, 2)} hint="日收益均值 / 标准差 × √252" />
         <KpiTile label="最大回撤" value={formatPct(normalizeDrawdown(m.max_drawdown))} tone="text-emerald-600" hint="历史峰值到谷底的最大跌幅（A 股口径：绿色为亏损）" />
@@ -347,7 +462,9 @@ export const BacktestResultView: React.FC<Props> = ({ result, tab }) => {
       </div>
 
       <div className="min-h-0 flex-1">
-        {tab === 'net' && <NetView result={result} />}
+        {tab === 'net' && (
+          <NetView result={result} summary={summary} comparison={comparison} hold={hold} />
+        )}
         {tab === 'monthly' && <MonthlyReturnGrid rows={monthly} />}
         {tab === 'kline' && (
           <div className="se-scroll h-full overflow-auto p-2">

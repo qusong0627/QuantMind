@@ -245,6 +245,64 @@ export function computeMonthlyReturns(equity: StrategyLabEquityPoint[]): Monthly
     });
 }
 
+export interface BenchmarkKlinePoint {
+  date: string;
+  close: number;
+}
+
+export interface AlignedBuyHold {
+  /** 与 equity 日期对齐的归一化持有净值（首日 = 1），只包含有基准数据的日期。 */
+  series: Array<{ date: string; value: number }>;
+  /** 对齐窗口内的策略收益（首/末有效点）。 */
+  strategyReturn: number;
+  /** 对齐窗口内的买入持有收益。 */
+  benchmarkReturn: number;
+  alpha: number;
+}
+
+/**
+ * 把「买入持有」K 线对齐到策略净值日期：
+ * - 只取基准有数据的日期（基准上市/数据起点晚于策略时，窗口自动收窄）；
+ * - 停牌/缺日按前值填充（持有者不会因为停牌卖出）；
+ * - 归一化以对齐窗口首日收盘价为 1。
+ */
+export function alignBuyHoldBenchmark(
+  equity: StrategyLabEquityPoint[],
+  kline: BenchmarkKlinePoint[],
+): AlignedBuyHold | null {
+  if (!equity?.length || !kline?.length) return null;
+  const closeByDate = new Map<string, number>();
+  for (const point of kline) {
+    const date = String(point.date || '').slice(0, 10);
+    if (date && Number.isFinite(point.close) && point.close > 0) closeByDate.set(date, point.close);
+  }
+
+  let lastClose: number | null = null;
+  const aligned: Array<{ date: string; equityValue: number; close: number }> = [];
+  for (const point of equity) {
+    const date = String(point.date || '').slice(0, 10);
+    const close = closeByDate.get(date);
+    if (close !== undefined) lastClose = close;
+    if (lastClose === null) continue;
+    if (!Number.isFinite(point.value) || point.value <= 0) continue;
+    aligned.push({ date, equityValue: point.value, close: lastClose });
+  }
+
+  if (aligned.length < 2) return null;
+  const first = aligned[0];
+  const last = aligned[aligned.length - 1];
+  if (!first.close || !first.equityValue) return null;
+
+  const strategyReturn = last.equityValue / first.equityValue - 1;
+  const benchmarkReturn = last.close / first.close - 1;
+  return {
+    series: aligned.map((row) => ({ date: row.date, value: row.close / first.close })),
+    strategyReturn,
+    benchmarkReturn,
+    alpha: strategyReturn - benchmarkReturn,
+  };
+}
+
 export interface SavedRunMetrics {
   cumReturn: number | null;
   sharpe: number | null;
@@ -290,7 +348,8 @@ export function validateBacktestParams(input: {
   isMinibt: boolean;
 }): ParamValidation {
   const messages: string[] = [];
-  const symbolMissing = !String(input.symbol || '').trim();
+  // 只有 minibt 会把 SYMBOL 写回代码；截面策略的标的由股票池 + topk 决定。
+  const symbolMissing = input.isMinibt && !String(input.symbol || '').trim();
   if (symbolMissing) messages.push('标的代码不能为空');
   const dateInvalid = !input.startDate || !input.endDate || input.startDate >= input.endDate;
   if (dateInvalid) messages.push('结束日期必须晚于开始日期');

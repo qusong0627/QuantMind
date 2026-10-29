@@ -471,6 +471,8 @@ export const StrategyEditorWorkspace: React.FC<StrategyEditorWorkspaceProps> = (
               run={run}
               results={results}
               result={unifiedResult}
+              symbol={meta.strategySymbol}
+              market={meta.market}
             />
           </div>
         </div>

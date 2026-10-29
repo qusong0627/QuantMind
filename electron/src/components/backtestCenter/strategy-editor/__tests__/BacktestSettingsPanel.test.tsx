@@ -30,6 +30,7 @@ describe('BacktestSettingsPanel', () => {
     expect(screen.getByText('均线信号')).toBeInTheDocument();
     expect(screen.queryByText('组合构建')).not.toBeInTheDocument();
     expect(screen.getByLabelText('快线 fast')).toBeInTheDocument();
+    expect(screen.getByLabelText('标的代码')).toBeInTheDocument();
   });
 
   it('STRATEGY_CONFIG 代码显示组合构建，不显示均线组', () => {
@@ -38,6 +39,9 @@ describe('BacktestSettingsPanel', () => {
     expect(screen.getByText('Qlib 配置')).toBeInTheDocument();
     expect(screen.getByText('组合构建')).toBeInTheDocument();
     expect(screen.queryByText('均线信号')).not.toBeInTheDocument();
+    // 截面策略不展示单标的代码（面板改它不会影响回测）
+    expect(screen.queryByLabelText('标的代码')).not.toBeInTheDocument();
+    expect(screen.getByText(/截面策略/)).toBeInTheDocument();
   });
 
   it('未识别引擎明确提示「应用不会改动代码」', () => {
@@ -45,6 +49,8 @@ describe('BacktestSettingsPanel', () => {
     renderPanel(params, 'print("hello")\n');
     expect(screen.getByText('未识别')).toBeInTheDocument();
     expect(screen.getByText(/不会改动代码/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('标的代码')).not.toBeInTheDocument();
+    expect(screen.getByText(/单标的代码不会写回/)).toBeInTheDocument();
   });
 
   it('修改变量时把 patch 交给上层（不直接改代码）', () => {

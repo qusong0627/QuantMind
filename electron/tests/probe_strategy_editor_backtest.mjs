@@ -121,6 +121,29 @@ try {
   const kpiValues = await p.locator('.se-kpi-value').allInnerTexts();
   ok('KPI 条渲染 7 项', kpiValues.length >= 7, `n=${kpiValues.length}`);
   ok('KPI 有非空数值', kpiValues.some((v) => v.trim() && v.trim() !== '—'), kpiValues.join(' | '));
+
+  // minibt 没有引擎基准：超额应改用「同区间买入持有」并在取数完成后给出数值。
+  const excessLabel = await p
+    .locator('.se-kpi-tile')
+    .filter({ hasText: '超额' })
+    .first()
+    .locator('.se-kpi-label')
+    .innerText();
+  ok('超额使用持有基准', excessLabel.includes('持有'), excessLabel);
+  await p.waitForFunction(
+    () => {
+      const tile = Array.from(document.querySelectorAll('.se-kpi-tile')).find((el) =>
+        (el.textContent || '').includes('超额'),
+      );
+      const value = tile?.querySelector('.se-kpi-value')?.textContent?.trim() || '';
+      return value.length > 0 && !value.includes('读取') && value !== '—';
+    },
+    { timeout: 30000 },
+  );
+  const excessValue = (
+    await p.locator('.se-kpi-tile').filter({ hasText: '超额' }).first().locator('.se-kpi-value').innerText()
+  ).trim();
+  ok('超额有百分比数值', /%$/.test(excessValue), excessValue);
   ok('净值图渲染', await waitForChartAtLeast(1), 'recharts=0');
   await p.screenshot({ path: '/tmp/se_run_1_net.png' });
 

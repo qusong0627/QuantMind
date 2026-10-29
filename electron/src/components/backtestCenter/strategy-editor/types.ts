@@ -127,6 +127,10 @@ export interface StrategyEditorWorkspaceProps {
     strategyName?: string | null;
     defaultModelName?: string;
     marketLabel: string;
+    /** 当前市场（CN/HK/US/…），用于买入持有基准取数。 */
+    market: string;
+    /** minibt 代码里的 SYMBOL；截面策略为空。 */
+    strategySymbol?: string;
     onOpenQuantBot: () => void;
   };
   createDialog: {

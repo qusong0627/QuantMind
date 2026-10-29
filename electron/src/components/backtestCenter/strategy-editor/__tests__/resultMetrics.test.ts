@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { StrategyLabRunResult } from '../../../../features/strategy-lab/types';
 import type { SavedBacktestRun } from '../../../../utils/strategyEditorSavedRuns';
 import {
+  alignBuyHoldBenchmark,
   computeEquitySummary,
   computeMonthlyReturns,
   computeStrategyScore,
@@ -165,6 +166,84 @@ describe('computeMonthlyReturns', () => {
   });
 });
 
+describe('alignBuyHoldBenchmark（minibt 买入持有基准）', () => {
+  const eq = (rows: Array<[string, number]>) =>
+    rows.map(([date, value]) => ({ date, value, benchmark: null }));
+
+  it('全额对齐：持有收益与超额按同一窗口计算', () => {
+    const result = alignBuyHoldBenchmark(
+      eq([
+        ['2024-01-02', 1],
+        ['2024-01-03', 1.1],
+        ['2024-01-04', 0.99],
+        ['2024-01-05', 1.21],
+      ]),
+      [
+        { date: '2024-01-02', close: 10 },
+        { date: '2024-01-03', close: 11 },
+        { date: '2024-01-04', close: 9 },
+        { date: '2024-01-05', close: 12 },
+      ],
+    );
+    expect(result).not.toBeNull();
+    expect(result!.strategyReturn).toBeCloseTo(0.21);
+    expect(result!.benchmarkReturn).toBeCloseTo(0.2);
+    expect(result!.alpha).toBeCloseTo(0.01);
+    expect(result!.series.map((point) => Number(point.value.toFixed(4)))).toEqual([1, 1.1, 0.9, 1.2]);
+  });
+
+  it('基准起点晚于策略：窗口自动收窄到共同日期', () => {
+    const result = alignBuyHoldBenchmark(
+      eq([
+        ['2024-01-02', 1],
+        ['2024-01-03', 1.1],
+        ['2024-01-04', 0.99],
+        ['2024-01-05', 1.21],
+      ]),
+      [
+        { date: '2024-01-03', close: 11 },
+        { date: '2024-01-04', close: 9 },
+        { date: '2024-01-05', close: 12 },
+      ],
+    );
+    expect(result).not.toBeNull();
+    expect(result!.strategyReturn).toBeCloseTo(1.21 / 1.1 - 1);
+    expect(result!.benchmarkReturn).toBeCloseTo(12 / 11 - 1);
+    expect(result!.series).toHaveLength(3);
+  });
+
+  it('停牌缺日按前值填充，而不是丢掉策略日期', () => {
+    const result = alignBuyHoldBenchmark(
+      eq([
+        ['2024-01-02', 1],
+        ['2024-01-03', 1.1],
+        ['2024-01-04', 1.2],
+      ]),
+      [
+        { date: '2024-01-02', close: 10 },
+        { date: '2024-01-04', close: 12 },
+      ],
+    );
+    expect(result).not.toBeNull();
+    expect(result!.benchmarkReturn).toBeCloseTo(0.2);
+    expect(result!.series.map((point) => Number(point.value.toFixed(4)))).toEqual([1, 1, 1.2]);
+  });
+
+  it('数据不足返回 null（空序列 / 单点 / 基准无交集）', () => {
+    expect(alignBuyHoldBenchmark([], [])).toBeNull();
+    expect(alignBuyHoldBenchmark(eq([['2024-01-02', 1]]), [{ date: '2024-01-02', close: 10 }])).toBeNull();
+    expect(
+      alignBuyHoldBenchmark(
+        eq([
+          ['2024-01-02', 1],
+          ['2024-01-03', 1.1],
+        ]),
+        [{ date: '2024-02-01', close: 10 }],
+      ),
+    ).toBeNull();
+  });
+});
+
 describe('validateBacktestParams', () => {
   const base = { symbol: '600036', startDate: '2024-01-01', endDate: '2025-01-01', fast: 10, slow: 20 };
 
@@ -182,13 +261,15 @@ describe('validateBacktestParams', () => {
     const fastSlow = validateBacktestParams({ ...base, fast: 20, slow: 20, isMinibt: true });
     expect(fastSlow.fastSlowInvalid).toBe(true);
 
-    const empty = validateBacktestParams({ ...base, symbol: '  ', isMinibt: false });
+    const empty = validateBacktestParams({ ...base, symbol: '  ', isMinibt: true });
     expect(empty.symbolMissing).toBe(true);
   });
 
-  it('非 minibt 不校验快慢线', () => {
-    const result = validateBacktestParams({ ...base, fast: 50, slow: 10, isMinibt: false });
+  it('非 minibt 不校验快慢线，也不要求单标的代码', () => {
+    const result = validateBacktestParams({ ...base, symbol: '', fast: 50, slow: 10, isMinibt: false });
     expect(result.fastSlowInvalid).toBe(false);
+    expect(result.symbolMissing).toBe(false);
+    expect(result.canApply).toBe(true);
   });
 });
 

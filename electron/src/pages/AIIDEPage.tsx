@@ -1988,6 +1988,10 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
 
     if (strategyEditorMode) {
         const hasSelection = activeTab === 'local' ? Boolean(selectedFile) : Boolean(selectedRemote);
+        // minibt 的 SYMBOL 是代码里的真实标的；参数面板可能还没应用，优先读代码。
+        const codeSymbol =
+            String(editorContent).match(/^\s*SYMBOL\s*=\s*['"]([^'"]+)['"]/m)?.[1] ||
+            strategyEditorParams.symbol;
         return (
             <StrategyEditorWorkspace
                 files={{
@@ -2094,6 +2098,8 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
                     strategyName: currentStrategyName,
                     defaultModelName,
                     marketLabel: marketConfig.label,
+                    market: currentMarket,
+                    strategySymbol: codeSymbol,
                     onOpenQuantBot: handleOpenQuantBot,
                 }}
                 createDialog={{

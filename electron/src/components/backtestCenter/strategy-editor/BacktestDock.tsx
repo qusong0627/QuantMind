@@ -42,6 +42,8 @@ interface Props {
   run: RunState;
   results: ResultsState;
   result: StrategyLabRunResult | null;
+  symbol?: string;
+  market?: string;
 }
 
 const RESULT_TABS: Array<{ key: DockTab; label: string }> = [
@@ -272,6 +274,8 @@ export const BacktestDock: React.FC<Props> = ({
   run,
   results,
   result,
+  symbol,
+  market,
 }) => {
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -480,7 +484,7 @@ export const BacktestDock: React.FC<Props> = ({
               onDeleteSaved={results.onDeleteSaved}
             />
           ) : result ? (
-            <BacktestResultView result={result} tab={activeTab} />
+            <BacktestResultView result={result} tab={activeTab} symbol={symbol} market={market} />
           ) : (
             <div className="flex h-full items-center justify-center text-[11px] text-slate-400">
               运行一次回测，净值、月度与成交会显示在这里

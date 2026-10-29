@@ -85,7 +85,13 @@ try {
   ok('文件选择器列出条目（≥1）', rowCount >= 1, `count=${rowCount}`);
   const pyRow = p.locator('.ant-popover .se-file-row button').filter({ hasText: /\.py/i }).first();
   ok('工作空间里能找到 .py 文件', (await pyRow.count()) > 0);
-  await pyRow.click();
+  // 选 minibt 策略：参数栏应出现「标的代码」（Qlib 截面策略会隐藏它）
+  const minibtRow = p
+    .locator('.ant-popover .se-file-row button')
+    .filter({ hasText: /双均线|MA5/i })
+    .first();
+  ok('工作空间里能找到 minibt 策略', (await minibtRow.count()) > 0);
+  await minibtRow.click();
   await p.waitForSelector('.monaco-editor', { timeout: 30000 });
   await p.waitForTimeout(1200);
   await p.screenshot({ path: '/tmp/se_new_2_editor.png' });
