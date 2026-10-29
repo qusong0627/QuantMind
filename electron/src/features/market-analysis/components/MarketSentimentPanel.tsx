@@ -416,10 +416,30 @@ export const MarketSentimentPanel: React.FC = () => {
                   指标说明 ?
                 </button>
               </div>
-              <p className="text-[9px] text-slate-400 leading-snug mb-0.5">
-                主力=超大单+大单（不是散户）。强度=主力净额/成交额；广度=主力净买入的股票占比；额广度=按成交额加权，更接近主力视角。
-              </p>
-              <BreadthFactorBars items={data.main_force.indicators} compact />
+              {data.main_force.available !== false && data.main_force.score != null && (
+                <div className="flex items-center gap-2 text-[9px] font-mono mb-1">
+                  <span className="text-red-600 font-extrabold">主力买入 {data.main_force.score.toFixed(0)}/100</span>
+                  <span className="text-blue-600 font-extrabold">派发分 {data.main_force.pressure == null ? '—' : data.main_force.pressure.toFixed(0)}/100</span>
+                </div>
+              )}
+              {data.main_force.available === false ? (
+                <>
+                  <p className="text-[9px] text-amber-700 bg-amber-50 border border-amber-200/70 rounded px-1.5 py-1 mb-1 leading-snug">
+                    该日期早于 L2 资金流起点（{data.main_force.available_from ?? '2022-06'}）；主力强度/广度/额广度不可用，仅显示成交额加权系数。
+                  </p>
+                  <BreadthFactorBars
+                    items={data.main_force.indicators.filter((i) => i.key === 'vw_breadth')}
+                    compact
+                  />
+                </>
+              ) : (
+                <>
+                  <p className="text-[9px] text-slate-400 leading-snug mb-0.5">
+                    主力=超大单+大单（不是散户）。强度=主力净额/成交额；广度=主力净买入的股票占比；额广度=按成交额加权，更接近主力视角。
+                  </p>
+                  <BreadthFactorBars items={data.main_force.indicators} compact />
+                </>
+              )}
               <p className="text-[9px] text-slate-400 mt-1">{data.main_force.disclosure}</p>
             </div>
           ) : null}
@@ -435,28 +455,36 @@ export const MarketSentimentPanel: React.FC = () => {
                   指标说明 ?
                 </button>
               </div>
-              <div className={`rounded-lg border px-2 py-1 mb-1 ${
-                data.retail.verdict.tone === 'warn'
-                  ? 'border-amber-200 bg-amber-50 text-amber-800'
-                  : data.retail.verdict.tone === 'good'
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                    : 'border-slate-200 bg-slate-50 text-slate-600'
-              }`}>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-extrabold">{data.retail.verdict.label}</span>
-                  <span className="text-[9px] font-mono opacity-70">{data.retail.score == null ? '—' : data.retail.score.toFixed(0)}/100</span>
-                </div>
-                <div className="text-[9px] leading-snug">{data.retail.verdict.hint}</div>
-                {data.retail.score != null && (
-                  <div className="relative h-1.5 mt-1 rounded-full bg-gradient-to-r from-emerald-500 via-slate-300 to-red-500">
-                    <span
-                      className="absolute top-1/2 -translate-y-1/2 h-2 w-2 rounded-full border border-white bg-slate-800 shadow"
-                      style={{ left: `calc(${Math.min(100, Math.max(0, data.retail.score))}% - 4px)` }}
-                    />
+              {data.retail.available === false ? (
+                <p className="text-[9px] text-amber-700 bg-amber-50 border border-amber-200/70 rounded px-1.5 py-1 mb-1 leading-snug">
+                  该日期早于 L2 资金流起点（{data.retail.available_from ?? '2022-06'}）；散户追涨/强度/广度不可用。请选 2022-06 之后的日期。
+                </p>
+              ) : (
+                <>
+                  <div className={`rounded-lg border px-2 py-1 mb-1 ${
+                    data.retail.verdict.tone === 'warn'
+                      ? 'border-amber-200 bg-amber-50 text-amber-800'
+                      : data.retail.verdict.tone === 'good'
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                        : 'border-slate-200 bg-slate-50 text-slate-600'
+                  }`}>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-extrabold">{data.retail.verdict.label}</span>
+                      <span className="text-[9px] font-mono opacity-70">{data.retail.score == null ? '—' : data.retail.score.toFixed(0)}/100</span>
+                    </div>
+                    <div className="text-[9px] leading-snug">{data.retail.verdict.hint}</div>
+                    {data.retail.score != null && (
+                      <div className="relative h-1.5 mt-1 rounded-full bg-gradient-to-r from-emerald-500 via-slate-300 to-red-500">
+                        <span
+                          className="absolute top-1/2 -translate-y-1/2 h-2 w-2 rounded-full border border-white bg-slate-800 shadow"
+                          style={{ left: `calc(${Math.min(100, Math.max(0, data.retail.score))}% - 4px)` }}
+                        />
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-              <BreadthFactorBars items={data.retail.indicators} compact />
+                  <BreadthFactorBars items={data.retail.indicators} compact />
+                </>
+              )}
               <p className="text-[9px] text-slate-400 mt-1">{data.retail.disclosure}</p>
             </div>
           ) : null}
@@ -569,6 +597,22 @@ export const MarketSentimentPanel: React.FC = () => {
                   : volumeMode === 'retail' && data.volume
                     ? { ...data.volume, scope: '全市场', barMode: 'retail' as const }
                     : selected.volume ?? data.volume
+            }
+            mainPressure={
+              fanSolo
+                ? []
+                : (data.main_force?.history?.dates ?? []).map((d, i) => ({
+                    date: d,
+                    value: data.main_force?.history?.pressure?.[i] ?? null,
+                  }))
+            }
+            retailScore={
+              fanSolo
+                ? []
+                : (data.retail?.history?.dates ?? []).map((d, i) => ({
+                    date: d,
+                    value: data.retail?.history?.score?.[i] ?? null,
+                  }))
             }
             compare={fanSolo || !fanCompare ? [] : INDEX_ORDER.filter((k) => k !== indexKey && data.indices[k]).map((k) => ({
               name: data.indices[k].name,

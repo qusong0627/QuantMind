@@ -154,6 +154,13 @@ export interface SentimentVolume {
 /** 主力视角冷热分项（复用广度分项 UI；分位为扩张窗口）。 */
 export interface MainForceBlock {
   latest: SentimentVolume['latest'];
+  available?: boolean;
+  available_from?: string | null;
+  /** 0~100，越高=主力越偏买 */
+  score?: number | null;
+  /** 100−score，越高=主力越偏派发 */
+  pressure?: number | null;
+  history?: { dates: string[]; score: (number | null)[]; pressure: (number | null)[] };
   indicators: SentimentIndicator[];
   disclosure?: string;
 }
@@ -161,6 +168,8 @@ export interface MainForceBlock {
 /** 散户视角：唯一经历史验证的反向指标是「散户追涨相关」。 */
 export interface RetailBlock {
   latest: SentimentVolume['latest'] & { retail_score?: number | null };
+  available?: boolean;
+  available_from?: string | null;
   verdict: { label: string; tone: 'warn' | 'good' | 'neutral'; hint: string };
   score: number | null;
   thresholds: { hot: number; cold: number };

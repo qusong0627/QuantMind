@@ -680,13 +680,17 @@ def build_payload(
         mf = load_main_force(days=1600)
     except Exception:  # noqa: BLE001 —— 主力数据缺失不影响情绪主链
         mf = None
+    mf_start = None
     if mf is not None and not mf.empty:
+        mf_start = mf.index[0].strftime("%Y-%m-%d")
         mf = mf.reindex(base_view.index)
     try:
         rf = load_retail_force(days=1600)
     except Exception:  # noqa: BLE001
         rf = None
+    rf_start = None
     if rf is not None and not rf.empty:
+        rf_start = rf.index[0].strftime("%Y-%m-%d")
         rf = rf.reindex(base_view.index)
     vw_breadth = (
         (base_view["amt_up"] - base_view["amt_down"])
@@ -808,10 +812,41 @@ def build_payload(
             "zone": "normal",
         }
     )
+    mf_available = bool(
+        mf is not None
+        and not mf.empty
+        and np.isfinite(float(mf["main_net_ratio"].iloc[-1]))
+    )
+    main_score_series = pd.Series(np.nan, index=base_view.index)
+    main_pressure_series = pd.Series(np.nan, index=base_view.index)
+    if mf is not None and not mf.empty:
+        parts = []
+        for key in ("main_net_ratio", "main_breadth", "main_breadth_amt"):
+            ser = mf[key].astype(float).reindex(base_view.index)
+            parts.append(expanding_pct_rank(ser, min_periods=120))
+        main_score_series = (sum(parts) / len(parts)) * 100.0
+        main_pressure_series = 100.0 - main_score_series
     main_force = {
         "latest": latest_block(mf) if mf is not None and not mf.empty else {},
+        "available": mf_available,
+        "available_from": mf_start,
+        "score": (
+            round(float(main_score_series.iloc[-1]), 1)
+            if len(main_score_series) and np.isfinite(main_score_series.iloc[-1])
+            else None
+        ),
+        "pressure": (
+            round(float(main_pressure_series.iloc[-1]), 1)
+            if len(main_pressure_series) and np.isfinite(main_pressure_series.iloc[-1])
+            else None
+        ),
+        "history": {
+            "dates": [d.strftime("%Y-%m-%d") for d in base_view.tail(120).index],
+            "score": [None if not np.isfinite(float(v)) else round(float(v), 1) for v in main_score_series.tail(120)],
+            "pressure": [None if not np.isfinite(float(v)) else round(float(v), 1) for v in main_pressure_series.tail(120)],
+        },
         "indicators": main_force_indicators,
-        "disclosure": "主力=超大单+大单；主力视角描述当前资金结构，不构成方向预测。",
+        "disclosure": "主力=超大单+大单；主力视角描述当前资金结构，不构成方向预测。主力派发分=100−主力买入强度。",
     }
 
     # 散户视角：唯一经历史验证的反向指标是「散户追涨相关」
@@ -819,6 +854,7 @@ def build_payload(
     if rf is not None and not rf.empty:
         rf_view = rf.reindex(base_view.index)
         chase = rf_view["retail_chase_corr"].astype(float)
+        retail_available = bool(len(chase) and np.isfinite(float(chase.iloc[-1])))
         # 分数=原始追涨相关的线性映射（0.05→0, 0.30→100），阈值来自 2022-2026 验证：
         # >0.25 过热（之后偏弱），<0.10 冷/不追（之后偏强）。
         score_series = ((chase - 0.05) / 0.25 * 100.0).clip(lower=0, upper=100)
@@ -827,7 +863,9 @@ def build_payload(
         score = float(score_series.iloc[-1]) if len(score_series) else np.nan
         if np.isfinite(score):
             latest_r["retail_score"] = round(score, 1)
-        if np.isfinite(raw_chase) and raw_chase >= 0.25:
+        if not retail_available:
+            verdict = {"label": "该日期无散户 L2 数据", "tone": "neutral", "hint": f"L2 资金流自 {rf_start or '2022-06'} 起可用，之前的日期只显示成交额口径"}
+        elif np.isfinite(raw_chase) and raw_chase >= 0.25:
             verdict = {"label": "散户追涨过热", "tone": "warn", "hint": "反向警惕：散户在追近期赢家，之后偏弱"}
         elif np.isfinite(raw_chase) and raw_chase <= 0.10:
             verdict = {"label": "散户不追/回避", "tone": "good", "hint": "反向关注：散户没有追涨，之后偏强"}
@@ -874,6 +912,8 @@ def build_payload(
         ]
         retail = {
             "latest": latest_r,
+            "available": retail_available,
+            "available_from": rf_start,
             "verdict": verdict,
             "score": round(score, 1) if np.isfinite(score) else None,
             "thresholds": {"hot": 0.25, "cold": 0.10},
