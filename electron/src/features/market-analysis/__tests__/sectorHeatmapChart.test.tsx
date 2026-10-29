@@ -36,6 +36,17 @@ describe('SectorHeatmapChart · 切换动画', () => {
     delete global.ResizeObserver;
   });
 
+  it('首屏空数据后到达：迟到初始化也要挂上 click 处理器', () => {
+    // @ts-expect-error test polyfill
+    global.ResizeObserver = RO;
+    const { rerender } = render(<SectorHeatmapChart data={[]} renderKey="empty" />);
+    expect(chart.on).not.toHaveBeenCalled();
+    rerender(<SectorHeatmapChart data={dataA} renderKey="loaded" />);
+    expect((echarts.init as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+    const clickCalls = chart.on.mock.calls.filter((c) => c[0] === 'click');
+    expect(clickCalls.length).toBe(1);
+  });
+
   it('数据更新复用实例，使用 notMerge:false 合并补间', () => {
     // @ts-expect-error test polyfill
     global.ResizeObserver = RO;

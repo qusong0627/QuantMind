@@ -120,6 +120,7 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
   const LABEL_TEXT_HEIGHT = 31;
 
   const redrawRef = useRef<() => void>(() => {});
+  const clickAttachedRef = useRef(false);
 
   // 只初始化一次：之后数据/颜色/日期变化都走 setOption 合并，动画才能看出色块变化，
   // 而不是每次 dispose + init 导致整图闪一下。
@@ -131,7 +132,15 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
       if (params?.componentType !== 'series' || !params?.name) return;
       onItemClickRef.current?.(String(params.name));
     };
-    chart.on('click', handleClick);
+    const attachClick = (c: echarts.ECharts) => {
+      if (clickAttachedRef.current) return;
+      c.on('click', handleClick);
+      clickAttachedRef.current = true;
+    };
+    attachClick(chart);
+    redrawRef.current = () => {
+      chart.resize();
+    };
     const ro = new ResizeObserver(() => {
       chart.resize();
       redrawRef.current();
@@ -142,6 +151,7 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
       chart.off('click', handleClick);
       chart.dispose();
       instanceRef.current = null;
+      clickAttachedRef.current = false;
     };
   }, []);
 
@@ -149,6 +159,15 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
     if (!chartRef.current || sectorItems.length === 0) return;
     const chart = instanceRef.current ?? echarts.init(chartRef.current);
     instanceRef.current = chart;
+    // 首屏数据为空时挂载 effect 拿不到 DOM（渲染的是空态占位），图表会在本 effect
+    // 里首次初始化；点击处理器必须在这里补挂，否则只能 hover、不能下钻。
+    if (!clickAttachedRef.current) {
+      chart.on('click', (params: any) => {
+        if (params?.componentType !== 'series' || !params?.name) return;
+        onItemClickRef.current?.(String(params.name));
+      });
+      clickAttachedRef.current = true;
+    }
 
     const formattedData = sectorItems.map((item) => ({
       id: item.name,
@@ -161,6 +180,9 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
       leader_pct: item.leader_pct,
       flow_net: (item as { flow_net?: number }).flow_net,
       extra: item.extra,
+      // 原始 item 透传：tooltipExtraOf 需要 flow_accel/price_accel/direction/情绪等字段，
+      // 只传手工挑选的字段会让「量价共振/方向概率」tooltip 全显示 —。
+      source: item,
       // 第二行标签文本：默认涨跌幅，下钻层可覆盖为「+x.xx亿」等
       label_value:
         labelValueOfRef.current?.(item) ??
@@ -201,15 +223,17 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
           const extra = (() => {
             const fn = tooltipExtraOfRef.current;
             if (!fn) return '';
-            const raw = fn({
-              name: info.name,
-              value: cap,
-              pct_change: pct,
-              leader: d.leader,
-              leader_pct: d.leader_pct,
-              flow_net: d.flow_net,
-              extra: d.extra,
-            } as SectorHeatmapItem);
+            const raw = fn(
+              (d.source as SectorHeatmapItem | undefined) ?? {
+                name: info.name,
+                value: cap,
+                pct_change: pct,
+                leader: d.leader,
+                leader_pct: d.leader_pct,
+                flow_net: d.flow_net,
+                extra: d.extra,
+              } as SectorHeatmapItem,
+            );
             return raw ? `<div style="margin-top: 2px;">${raw}</div>` : '';
           })();
           return `
@@ -291,9 +315,15 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
         });
         const centeredData = formattedData.map((item) => {
           const layout = layoutByName[item.name];
-          if (!layout) return item;
+          if (!layout) return { ...item, label: { show: false } };
+          // 小色块不显示文字：避免下钻层 100+ 只个股时标签互相挤压；
+          // 大色块统一两行居中 + 超宽省略。
+          const show = layout.width >= 44 && layout.height >= 26;
           const pad = Math.max(0, (layout.height - LABEL_TEXT_HEIGHT) / 2);
-          return { ...item, label: { padding: [pad, 0, pad, 0], align: 'center', overflow: 'truncate' } };
+          return {
+            ...item,
+            label: { show, padding: [pad, 0, pad, 0], align: 'center', overflow: 'truncate' },
+          };
         });
         chart.setOption({ series: [{ id: 'sector-heatmap', data: centeredData }] });
       } catch {

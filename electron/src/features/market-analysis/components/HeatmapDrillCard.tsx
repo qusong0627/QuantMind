@@ -98,9 +98,12 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
     if (date) setPeriod('1d');
   }, [date]);
 
-  // 下钻层是个股当日口径，没有板块方向/情绪热度字段——进入下钻自动回涨跌幅着色
+  // 下钻层是个股当日口径，没有板块方向/情绪热度/量价共振字段——进入下钻自动回涨跌幅着色
   useEffect(() => {
-    if (drillName && (colorMode === 'direction' || colorMode === 'sentiment')) {
+    if (
+      drillName &&
+      (colorMode === 'direction' || colorMode === 'sentiment' || colorMode === 'vp')
+    ) {
       setColorMode('pct');
     }
   }, [drillName, colorMode]);
@@ -272,7 +275,9 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
     if (symbol && onStockClick) onStockClick(symbol, name);
   };
 
-  const renderKey = `${category}-${drillName || 'top'}-${colorMode}-${period}-${directionH}`;
+  // 下钻层只支持涨跌幅/净额着色；用有效模式兜底，避免 effect 复位前闪一帧灰
+  const chartColorMode = drillName ? 'pct' : colorMode;
+  const renderKey = `${category}-${drillName || 'top'}-${chartColorMode}-${period}-${directionH}`;
   const chartData = drillName ? drillChartData : topChartData;
   const isEmpty = chartData.length === 0;
 
@@ -602,8 +607,8 @@ export const HeatmapDrillCard: React.FC<HeatmapDrillCardProps> = ({
             valueLabel={drillName ? '总市值' : '市值权重规模'}
             renderKey={renderKey}
             onItemClick={drillName ? handleDrillClick : handleTopClick}
-            colorOf={(item) => heatmapCellColor(item, colorMode, directionH)}
-            labelValueOf={(item) => heatmapLabelValue(item, colorMode, directionH)}
+            colorOf={(item) => heatmapCellColor(item, chartColorMode, directionH)}
+            labelValueOf={(item) => heatmapLabelValue(item, chartColorMode, directionH)}
             tooltipExtraOf={(item) => {
               const it = item as {
                 pct_period?: number | null;
