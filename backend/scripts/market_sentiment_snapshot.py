@@ -822,7 +822,8 @@ def build_payload(
     if mf is not None and not mf.empty:
         parts = []
         for key in ("main_net_ratio", "main_breadth", "main_breadth_amt"):
-            ser = mf[key].astype(float).reindex(base_view.index)
+            # 5 日平滑，减少单日翻转；主力分是描述强度，不是方向预测
+            ser = mf[key].astype(float).reindex(base_view.index).rolling(5, min_periods=3).mean()
             parts.append(expanding_pct_rank(ser, min_periods=120))
         main_score_series = (sum(parts) / len(parts)) * 100.0
         main_pressure_series = 100.0 - main_score_series
@@ -853,19 +854,27 @@ def build_payload(
     retail = {}
     if rf is not None and not rf.empty:
         rf_view = rf.reindex(base_view.index)
-        chase = rf_view["retail_chase_corr"].astype(float)
+        chase_raw = rf_view["retail_chase_corr"].astype(float)
+        # 10 日平滑：单日追涨相关噪声大，会一会追涨一会追跌；10 日均仍保留反向力
+        chase = chase_raw.rolling(10, min_periods=5).mean()
         retail_available = bool(len(chase) and np.isfinite(float(chase.iloc[-1])))
-        # 分数=原始追涨相关的线性映射（0.05→0, 0.30→100），阈值来自 2022-2026 验证：
-        # >0.25 过热（之后偏弱），<0.10 冷/不追（之后偏强）。
-        score_series = ((chase - 0.05) / 0.25 * 100.0).clip(lower=0, upper=100)
+        chase_pct = expanding_pct_rank(chase, min_periods=120)
+        # 10日均阈值（2022-2026 验证）：>0.20 过热、<0.10 冷/不追
+        score_series = ((chase - 0.10) / 0.10 * 60.0 + 20.0).clip(lower=0, upper=100)
         latest_r = latest_retail_block(rf_view)
+        latest_r["retail_chase_corr_raw"] = (
+            None if not len(chase_raw) or not np.isfinite(chase_raw.iloc[-1]) else round(float(chase_raw.iloc[-1]), 4)
+        )
+        latest_r["retail_chase_corr_ma10"] = (
+            None if not len(chase) or not np.isfinite(chase.iloc[-1]) else round(float(chase.iloc[-1]), 4)
+        )
         raw_chase = float(chase.iloc[-1]) if len(chase) else np.nan
         score = float(score_series.iloc[-1]) if len(score_series) else np.nan
         if np.isfinite(score):
             latest_r["retail_score"] = round(score, 1)
         if not retail_available:
             verdict = {"label": "该日期无散户 L2 数据", "tone": "neutral", "hint": f"L2 资金流自 {rf_start or '2022-06'} 起可用，之前的日期只显示成交额口径"}
-        elif np.isfinite(raw_chase) and raw_chase >= 0.25:
+        elif np.isfinite(raw_chase) and raw_chase >= 0.20:
             verdict = {"label": "散户追涨过热", "tone": "warn", "hint": "反向警惕：散户在追近期赢家，之后偏弱"}
         elif np.isfinite(raw_chase) and raw_chase <= 0.10:
             verdict = {"label": "散户不追/回避", "tone": "good", "hint": "反向关注：散户没有追涨，之后偏强"}
@@ -879,10 +888,10 @@ def build_payload(
         retail_indicators = [
             {
                 "key": "retail_chase_corr",
-                "label": "散户追涨相关",
+                "label": "散户追涨相关（10日均）",
                 "value": None if not np.isfinite(chase.iloc[-1]) else round(float(chase.iloc[-1]), 4),
                 "unit": "",
-                "pct": _pct("retail_chase_corr"),
+                "pct": round(float(chase_pct.iloc[-1]), 3) if len(chase_pct) and np.isfinite(chase_pct.iloc[-1]) else None,
                 "zone": "low" if (_pct("retail_chase_corr") or 0) <= 0.1 else ("high" if (_pct("retail_chase_corr") or 0) >= 0.9 else "normal"),
             },
             {
@@ -916,14 +925,14 @@ def build_payload(
             "available_from": rf_start,
             "verdict": verdict,
             "score": round(score, 1) if np.isfinite(score) else None,
-            "thresholds": {"hot": 0.25, "cold": 0.10},
+            "thresholds": {"hot": 0.20, "cold": 0.10},
             "indicators": retail_indicators,
             "history": {
                 "dates": [d.strftime("%Y-%m-%d") for d in base_view.tail(120).index],
                 "score": [None if not np.isfinite(float(v)) else round(float(v), 1) for v in score_series.tail(120)],
                 "chase_corr": [None if not np.isfinite(float(v)) else round(float(v), 4) for v in chase.tail(120)],
             },
-            "disclosure": "散户=中单+小单。只有「散户追涨相关」经 2022-2026 历史验证具反向价值：高=散户追近期赢家→之后偏弱，低=散户不追→之后偏强；散户净流入/广度本身更像同步动量，不单独做反向。",
+            "disclosure": "散户=中单+小单。只有「散户追涨相关（10日均）」经 2022-2026 历史验证具反向价值：>0.20=追涨过热→之后偏弱，<0.10=不追→之后偏强；散户净流入/广度本身更像同步动量，不单独做反向。10日均用于减少单日翻转。",
         }
 
     return {

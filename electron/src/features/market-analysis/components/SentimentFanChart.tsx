@@ -112,7 +112,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
   const plotW = W - PAD.left - PAD.right;
   const hasVolume = !!volume && volume.dates.length > 0;
   const hasStress = stress.length > 0;
-  const volumeH = hasVolume ? 54 : 0;
+  const volumeH = hasVolume ? 64 : 0;
   const gap = 8;
   const priceH = height - PAD.top - PAD.bottom - volumeH - (hasVolume ? gap : 0);
   const priceBottom = PAD.top + priceH;
@@ -258,7 +258,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
       ...visibleVol.map((v) => (isMain || isRetail ? Math.abs(barValue(v) ?? 0) : v.turnover ?? 0)),
       1,
     );
-    const barW = Math.max(1, (plotW / Math.max(viewEndClamped - viewStart, 1)) * 0.58);
+    const barW = Math.max(1, (plotW / Math.max(viewEndClamped - viewStart, 1)) * 0.72);
     const volZero = volumeTop + volumeH / 2;
     const volBars = visibleVol.map((v) => {
       if (isMain || isRetail) {
@@ -271,6 +271,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
           h: hgt,
           w: barW,
           color: val >= 0 ? UP : DOWN,
+          bgColor: val >= 0 ? 'rgba(220,38,38,0.10)' : 'rgba(5,150,105,0.10)',
           title: `${history[v.i].date} · ${isRetail ? '散户' : '主力'}净额 ${val >= 0 ? '+' : ''}${val.toFixed(2)} 亿（全市场）`,
         };
       }
@@ -282,6 +283,7 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
         h: hgt,
         w: barW,
         color: v.vw == null ? '#cbd5e1' : v.vw >= 0 ? UP : DOWN,
+        bgColor: v.vw == null ? 'rgba(148,163,184,0.08)' : v.vw >= 0 ? 'rgba(220,38,38,0.10)' : 'rgba(5,150,105,0.10)',
         title: `${history[v.i].date} · 成交额 ${v.turnover == null ? '—' : fmtTurnover(v.turnover)} · 成交额加权系数 ${v.vw == null ? '—' : (v.vw > 0 ? '+' : '') + v.vw.toFixed(3)}`,
       };
     });
@@ -544,7 +546,10 @@ export const SentimentFanChart: React.FC<SentimentFanChartProps> = ({
           <g>
             <line x1={PAD.left} x2={W - PAD.right} y1={volumeBase} y2={volumeBase} stroke="#e2e8f0" strokeWidth={1} />
             {geom.volBars.map((b) => (
-              <rect key={b.key} x={b.x} y={b.y} width={b.w} height={b.h} fill={b.color} opacity={0.66} rx={0.5}>
+              <rect key={`bg-${b.key}`} x={b.x} y={volumeTop} width={b.w} height={volumeH} fill={b.bgColor} />
+            ))}
+            {geom.volBars.map((b) => (
+              <rect key={b.key} x={b.x} y={b.y} width={b.w} height={b.h} fill={b.color} opacity={0.9} rx={0.5} stroke="#ffffff" strokeWidth={0.4}>
                 <title>{b.title}</title>
               </rect>
             ))}
