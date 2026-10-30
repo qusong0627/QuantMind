@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 METRICS_KEY = "qm:qmt:pipe:metrics"
+HEARTBEAT_KEY = "qm:qmt:pipe:heartbeat"
 UNVERIFIED_KEY = "qm:qmt:unverified:{account}"
 ORDER_EVENTS_KEY = "bigqmt:order_events:{account}"
 
@@ -37,6 +38,7 @@ DEFAULT_INTERVAL_S = 15.0
 DEFAULT_REPEAT_S = 1800.0
 DEFAULT_UNVERIFIED_STALE_S = 600.0
 DEFAULT_HARD_THRESHOLD = 2
+DEFAULT_HEARTBEAT_MAX_AGE_S = 45.0
 DEFAULT_UNVERIFIED_TTL_S = 7200
 
 _CN_TZ = timezone(timedelta(hours=8))
@@ -75,6 +77,33 @@ def evaluate_pipe_metrics(
     if order_age_max_s > 0 and order_age > order_age_max_s:
         issues.append(f"委托回报停滞 {order_age:.0f}s（阈值 {order_age_max_s:.0f}s）")
     return issues
+
+
+def evaluate_pipe_heartbeat(
+    heartbeat_raw: object,
+    *,
+    now: float | None = None,
+    max_age_s: float = DEFAULT_HEARTBEAT_MAX_AGE_S,
+) -> list[str]:
+    """心跳判据（纯函数）。
+
+    **为什么必须有**：``qm:qmt:pipe:metrics`` 只有 120s TTL——伴生桥进程一死，
+    指标键过期后 ``hgetall`` 返回空字典，只按指标判活会判成"健康"、零告警
+    （2026-10-30 实测盲区）。心跳键 TTL 30s、5s 一刷，缺失/陈旧才是桥死了。
+    """
+    if max_age_s <= 0:
+        return []
+    now = time.time() if now is None else float(now)
+    try:
+        ts = float(heartbeat_raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        ts = 0.0
+    if ts <= 0:
+        return ["桥心跳缺失（伴生桥可能已退出或 Redis 不可达）"]
+    age = now - ts
+    if age > max_age_s:
+        return [f"桥心跳陈旧 {age:.0f}s（阈值 {max_age_s:.0f}s）"]
+    return []
 
 
 EVENT_DOWN = "down"
@@ -307,7 +336,8 @@ async def run_qmt_pipe_guard_task(interval_seconds: float | None = None) -> None
                     await _redis_url_db5(), decode_responses=True
                 )
             metrics = await redis_client.hgetall(METRICS_KEY)
-            issues = evaluate_pipe_metrics(
+            heartbeat = await redis_client.get(HEARTBEAT_KEY)
+            issues = evaluate_pipe_heartbeat(heartbeat) + evaluate_pipe_metrics(
                 metrics or {},
                 queue_max=queue_max,
                 pos_age_max_s=pos_age_max,

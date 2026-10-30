@@ -1103,11 +1103,15 @@ class QmtExecClient:
         if volume <= 0:
             raise QmtExecError("数量必须大于 0", code="INVALID_QUANTITY")
         cid = str(client_order_id or "").strip()
-        remark = build_remark(cid) if cid else build_remark(f"qm-{qmt_symbol}-{volume}")
-        if cid:
-            # 先写映射再下单：TIMEOUT 时委托可能已提交，映射缺失会让回收端
-            # 只能靠兜底匹配（且此时还不知道 QMT 委托号）。写失败不影响下单。
-            await self._remember_remark(remark, cid)
+        if not cid:
+            # 无 cid 时必须生成唯一值：确定性备注（旧实现 ``qm-{symbol}-{volume}``）
+            # 会撞桥侧幂等键，同标的同数量的第二笔被当成重复单静默丢弃
+            # （2026-10-30 审计发现：幂等生效后这是真单丢失）。
+            cid = f"auto-{uuid.uuid4().hex[:16]}"
+        remark = build_remark(cid)
+        # 先写映射再下单：TIMEOUT / 异步受理时委托可能无号，回收端只能靠备注
+        # 反查 client_order_id。写失败不影响下单。
+        await self._remember_remark(remark, cid)
         async_mode = self._flag("async_orders", "QMT_ASYNC_ORDERS", default=True)
         backend = self._get_backend(cfg)
         call_kwargs: dict[str, Any] = {

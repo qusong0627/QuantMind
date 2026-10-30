@@ -115,3 +115,23 @@ def test_build_alert_titles():
     recovered = g.PipeEvent(g.EVENT_RECOVERED, (), 0, 42.0)
     title, _, level = g.build_alert(recovered)
     assert title == "QMT 管道已恢复" and level == "success"
+
+
+def test_heartbeat_missing_is_failure():
+    """指标键 120s 过期、心跳键 30s 过期——桥死了必须由心跳判出来。"""
+    assert g.evaluate_pipe_heartbeat(None)
+    assert g.evaluate_pipe_heartbeat("")
+    assert g.evaluate_pipe_heartbeat("not-a-number")
+
+
+def test_heartbeat_stale_is_failure():
+    issues = g.evaluate_pipe_heartbeat(str(1000), now=1060.0, max_age_s=45.0)
+    assert issues and "陈旧" in issues[0]
+
+
+def test_heartbeat_fresh_is_ok():
+    assert g.evaluate_pipe_heartbeat(str(1000), now=1020.0, max_age_s=45.0) == []
+
+
+def test_heartbeat_check_can_be_disabled():
+    assert g.evaluate_pipe_heartbeat(None, max_age_s=0) == []

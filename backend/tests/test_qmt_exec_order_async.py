@@ -290,3 +290,34 @@ async def test_cancel_timeout_is_not_retried():
         await client.cancel_order(order_id="xt1", symbol="601398.SH")
     assert excinfo.value.code == "TIMEOUT"
     assert backend.calls == ["xt1"]
+
+
+class _RemarkBackend:
+    def __init__(self) -> None:
+        self.remarks: list[str] = []
+
+    def submit_order(
+        self, *, remark: str, wait_settlement: bool = True, **kwargs
+    ) -> dict:
+        self.remarks.append(remark)
+        return {"order_id": "1", "remark": remark}
+
+
+@pytest.mark.asyncio
+async def test_submit_without_cid_generates_unique_remark():
+    """无 client_order_id 时备注必须唯一：确定性备注会撞幂等键 → 第二笔被静默丢弃。"""
+    fake_redis = _FakeRedis()
+
+    async def _redis():
+        return fake_redis
+
+    backend = _RemarkBackend()
+    client = _client(backend)
+    client._get_redis = _redis  # type: ignore[method-assign]
+    client._page_settings = {"record_orders": "false"}
+
+    await client.submit_order(symbol="600036.SH", side="BUY", quantity=100, price=40.0)
+    await client.submit_order(symbol="600036.SH", side="BUY", quantity=100, price=40.0)
+
+    assert len(backend.remarks) == 2
+    assert backend.remarks[0] != backend.remarks[1]
