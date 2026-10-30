@@ -135,3 +135,33 @@ def test_heartbeat_fresh_is_ok():
 
 def test_heartbeat_check_can_be_disabled():
     assert g.evaluate_pipe_heartbeat(None, max_age_s=0) == []
+
+
+def test_read_order_event_remarks_xrevrange_tuples():
+    """decode_responses=True 的 XREVRANGE 返回 (id, {payload}) 元组 —— 实测形态。"""
+    rows = [
+        (
+            "1793338599000-0",
+            {"payload": json.dumps({"row": {"user_order_id": "qm-t1"}})},
+        ),
+        ("1793338598000-0", {"payload": json.dumps({"row": {"remark": "qm-t2"}})}),
+    ]
+    assert g.read_order_event_remarks(rows) == {"qm-t1", "qm-t2"}
+
+
+def test_read_order_event_remarks_flat_dict():
+    rows = [{"payload": json.dumps({"row": {"order_remark": "qm-t3"}})}]
+    assert g.read_order_event_remarks(rows) == {"qm-t3"}
+
+
+def test_reconcile_unverified_with_real_stream_shape():
+    """真实流结果直接喂进 reconcile：出现即销账。"""
+    rows = [
+        ("1-0", {"payload": json.dumps({"row": {"user_order_id": "qm-ok"}})}),
+    ]
+    seen = g.read_order_event_remarks(rows)
+    unverified = {"qm-ok": {"ts": 1000.0}, "qm-missing": {"ts": 1000.0}}
+    resolved, stale = g.reconcile_unverified(
+        unverified, seen, now=1100.0, stale_after_s=600.0
+    )
+    assert resolved == ["qm-ok"] and stale == []

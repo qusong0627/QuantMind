@@ -201,18 +201,33 @@ def reconcile_unverified(
     return resolved, stale
 
 
-def read_order_event_remarks(rows: list[str | bytes], limit: int = 500) -> set[str]:
-    """从 ``bigqmt:order_events`` 的 XREVRANGE 原始行里提取 remark 集合。"""
+def read_order_event_remarks(rows: list, limit: int = 500) -> set[str]:
+    """从 ``bigqmt:order_events`` 的 XREVRANGE 结果里提取 remark 集合。
+
+    兼容三种形态（2026-10-30 实测踩坑）：
+    - ``(id, {"payload": "<json>"})``：decode_responses=True 下 XREVRANGE 的**真实返回**；
+    - ``{"payload": "<json>"}``：已摊平的字段字典；
+    - 裸 JSON 字符串/bytes：旧测试与手工拼装。
+    只认字符串会让 seen 永远为空 → 超时委托永远销不了账。
+    """
     seen: set[str] = set()
     for raw in rows[:limit]:
-        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        payload = raw
+        if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+            payload = raw[1]
+        if isinstance(payload, dict):
+            text = str(payload.get("payload") or "")
+        elif isinstance(payload, bytes):
+            text = payload.decode("utf-8", "replace")
+        else:
+            text = str(payload)
         if not text.startswith("{"):
             continue
         try:
-            payload = json.loads(text)
+            body = json.loads(text)
         except (TypeError, ValueError):
             continue
-        row = payload.get("row") or {}
+        row = body.get("row") or {}
         for key in ("user_order_id", "remark", "order_remark"):
             value = row.get(key)
             if value:
@@ -369,11 +384,7 @@ async def _reconcile_once(redis_client, account: str, stale_after: float) -> Non
     rows = await redis_client.xrevrange(
         ORDER_EVENTS_KEY.format(account=account), count=500
     )
-    flat: list[str] = []
-    for item in rows or []:
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            flat.append(item[1])
-    seen = read_order_event_remarks(flat)
+    seen = read_order_event_remarks(list(rows or []))
     resolved, stale = reconcile_unverified(entries, seen, stale_after_s=stale_after)
     if resolved:
         await redis_client.hdel(key, *resolved)
