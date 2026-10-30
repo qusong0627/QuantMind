@@ -161,3 +161,28 @@ def test_empty_symbol_still_rejected_for_both_sides(bridge):
         bridge.risk_gate("order_stock", _order("", 100, 5.0, 23))
         == "risk: empty symbol"
     )
+
+
+def test_idem_key_reads_order_remark(bridge):
+    """xtquant order_stock 的幂等键字段是 order_remark（不是 remark）。
+
+    2026-10-30 实测：只认 remark 时 order_stock 永远拿不到键，
+    Redis 里 0 条 `qm:qmt:pipe:idem:*` → client_order_id 去重实际未生效。
+    """
+    bridge.CFG._data["account_id"] = "40327478"
+    req = {
+        "method": "order_stock",
+        "params": {"stock_code": "600036.SH", "order_remark": "qm-abc"},
+    }
+    assert bridge._idem_key(req) == "qm:qmt:pipe:idem:40327478:qm-abc"
+
+
+def test_idem_key_still_reads_http_remark(bridge):
+    bridge.CFG._data["account_id"] = "40327478"
+    req = {"method": "submit_order", "params": {"remark": "qm-http"}}
+    assert bridge._idem_key(req) == "qm:qmt:pipe:idem:40327478:qm-http"
+
+
+def test_idem_key_none_without_key_field(bridge):
+    bridge.CFG._data["account_id"] = "40327478"
+    assert bridge._idem_key({"method": "order_stock", "params": {}}) is None

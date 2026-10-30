@@ -403,7 +403,10 @@ def risk_gate(method, params):
 
 def _idem_key(req):
     params = req.get('params') or {}
-    key = params.get('remark') or params.get('order_id') or params.get('user_order_id')
+    # xtquant ``order_stock`` 把幂等键放在 ``order_remark``；HTTP 路由用 ``remark``。
+    # 只认 remark/order_id 时 order_stock 永远拿不到键 → 幂等等于没开（2026-10-30 实测）。
+    key = (params.get('remark') or params.get('order_remark')
+           or params.get('order_id') or params.get('user_order_id'))
     if not key:
         return None
     return 'qm:qmt:pipe:idem:%s:%s' % (CFG.get('account_id'), key)
