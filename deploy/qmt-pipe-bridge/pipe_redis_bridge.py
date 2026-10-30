@@ -58,7 +58,10 @@ DEFAULT_CONFIG = {
     'budget': {'window_s': 10, 'market_ms': 2000, 'rpc_preempt_queue': 1},
     'risk': {'enabled': True, 'max_order_amount': 200000, 'max_orders_per_min': 30,
              'max_deviation_pct': 5.0, 'blacklist_codes': [],
-             'blacklist_name_keywords': ['ST', '退']},
+             'blacklist_name_keywords': ['ST', '退'],
+             # 卖出是减风险动作：默认不做黑名单/金额/偏离/限频拦截（只拦买入）。
+             # 2026-10-30 用户拍板：ST 黑名单把清仓也堵死，等于给卖出加风险。
+             'apply_to_sells': False},
     'health': {'heartbeat_key': 'qm:qmt:pipe:heartbeat', 'metrics_key': 'qm:qmt:pipe:metrics',
                'interval_s': 5, 'ttl_s': 30},
     'tap': {'enabled': True, 'interval_s': 0.5, 'subscribe_refresh_s': 60,
@@ -333,6 +336,25 @@ def _order_params(params):
     return str(symbol), volume, price
 
 
+_SIDE_FIELDS = ('op_type', 'optype', 'action', 'side', 'order_type', 'entrust_bs')
+_SIDE_BUY = ('23', 'BUY', 'B', '0')
+_SIDE_SELL = ('24', 'SELL', 'S', '1')
+
+
+def _order_side(params):
+    """推断买卖方向。xtquant ``order_stock``/``passorder`` 用 23=买 / 24=卖。"""
+    for key in _SIDE_FIELDS:
+        value = params.get(key)
+        if value is None:
+            continue
+        text = str(value).strip().upper()
+        if text in _SIDE_BUY:
+            return 'BUY'
+        if text in _SIDE_SELL:
+            return 'SELL'
+    return ''
+
+
 def risk_gate(method, params):
     """下单/撤单前置检查。返回 None=放行，字符串=拒绝原因。"""
     if not bool(CFG.get('risk.enabled')):
@@ -347,6 +369,9 @@ def risk_gate(method, params):
     symbol, volume, price = _order_params(params)
     if not symbol:
         return 'risk: empty symbol'
+    # 卖出是减风险动作：默认不拦（名称黑名单/金额/偏离/限频全部只对买入生效）。
+    if _order_side(params) == 'SELL' and not bool(CFG.get('risk.apply_to_sells')):
+        return None
     blacklist = [str(x).upper() for x in (CFG.get('risk.blacklist_codes') or [])]
     if symbol.upper() in blacklist:
         return 'risk: blacklisted code %s' % symbol

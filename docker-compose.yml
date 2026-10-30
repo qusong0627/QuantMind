@@ -40,7 +40,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: quantmind-redis
-    # 内存上限（2026-10-14 防假死；2026-10-15 顶格写拒绝风暴后 maxmemory 512mb→1024mb）。
+    # 内存上限（2026-10-14 防假死；2026-10-15 顶格写拒绝风暴后 maxmemory 512mb→1024mb；
+    # 2026-10-30 存量无 TTL 再触顶 → 1024mb→1536mb，运行态已 CONFIG SET 同步）。
     # 容器上限必须显著高于 --maxmemory，否则 Redis 进程未到软上限先被 OOM-kill。
     mem_limit: 2g
     memswap_limit: 2g
@@ -48,7 +49,7 @@ services:
       - "127.0.0.1:6379:6379"
     # maxmemory-policy 必须为 noeviction：本实例同时承载 Celery broker/result backend，
     # allkeys-lru 会在内存压力下静默淘汰队列消息（定时任务表现为"没跑"）。
-    command: redis-server --appendonly yes --maxmemory 1024mb --maxmemory-policy noeviction --databases 16 --bind 0.0.0.0
+    command: redis-server --appendonly yes --maxmemory 1536mb --maxmemory-policy noeviction --databases 16 --bind 0.0.0.0
     volumes:
       - redis-data:/data
     healthcheck:
