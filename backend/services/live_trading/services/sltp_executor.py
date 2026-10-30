@@ -1625,7 +1625,9 @@ async def _execute_trigger(
             )
             return
         if owner_volume <= 0:
-            st["status"] = ST_SKIPPED
+            # 保持 ARMED（不是 SKIPPED）：这个 agent 今天稍后建仓时规则要能自动
+            # 重新评估；共享账户的 no_position 终态只适用于「账户里也没有」。
+            st["status"] = ST_ARMED
             st["skip_reason"] = "owner_no_position"
             summary["no_position"] = int(summary.get("no_position", 0) or 0) + 1
             logger.info(
@@ -1635,6 +1637,8 @@ async def _execute_trigger(
                 agent_name,
             )
             return
+        if st.get("skip_reason") == "owner_no_position":
+            st.pop("skip_reason", None)
         # 只卖归属 agent 的那一段：柜台可卖量是共享账户口径，必须夹到分账持仓。
         can_use = min(can_use, owner_volume)
         held = min(held, owner_volume)
