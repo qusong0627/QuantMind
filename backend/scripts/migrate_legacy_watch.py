@@ -262,15 +262,14 @@ def _verify(args: argparse.Namespace, redis: Any) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"[复验] 读规则表失败（{CONFIG_KEY}）：{exc}", file=sys.stderr)
         return EXIT_USAGE
-    by_symbol = {str(r.get("symbol") or ""): r for r in (cfg.get("rules") or [])}
+    by_key = {executor.rule_key(r): r for r in (cfg.get("rules") or [])}
 
     expected = [r for r in (doc.get("rules") or []) if r.get("armed")]
     missing: list[dict[str, Any]] = []
     drifted: list[tuple[dict[str, Any], str]] = []
     for row in expected:
         want = row.get("expected_rule") or {}
-        symbol = str(want.get("symbol") or row.get("code") or "")
-        live = by_symbol.get(symbol)
+        live = by_key.get(executor.rule_key(want))
         if live is None:
             missing.append(row)
             continue
@@ -283,7 +282,7 @@ def _verify(args: argparse.Namespace, redis: Any) -> int:
         print(f"  ✗ {row.get('code')}（{row.get('agent')}）被改过：{why}")
     print(
         f"[复验] 存档 {len(expected)} 条已挂 → 在表 {len(expected) - len(missing)} 条 / "
-        f"缺失 {len(missing)} / 被改 {len(drifted)}；表内共 {len(by_symbol)} 条"
+        f"缺失 {len(missing)} / 被改 {len(drifted)}；表内共 {len(by_key)} 条"
     )
     return EXIT_ATTENTION if (missing or drifted) else EXIT_OK
 

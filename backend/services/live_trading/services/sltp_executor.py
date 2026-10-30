@@ -42,7 +42,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -310,6 +310,26 @@ def llm_owner(agent: str) -> str:
     """
     name = str(agent or "").strip()
     return f"{OWNER_LLM_PREFIX}{name}" if name else OWNER_MANUAL
+
+
+def rule_key(rule: Mapping[str, Any]) -> str:
+    """规则在配置/状态里的键：LLM 规则按 ``symbol|owner`` 隔离，人工/auto 仍按 symbol。
+
+    共享账户里同一个 symbol 可以被三家 agent 同时持有（2026-10-30 601825）：
+    旧键只有 symbol，pro/glm 的规则永远挂不上，且执行器一个状态位无法同时
+    跟踪多家的高水位/触发态。LLM 规则改用复合键；人工/auto 保持 symbol，
+    与既有控制面/CLI 完全兼容。
+    """
+    symbol = str(rule.get("symbol") or "")
+    owner = str(rule.get("owner") or "")
+    return f"{symbol}|{owner}" if owner.startswith(OWNER_LLM_PREFIX) else symbol
+
+
+def state_symbol(key: str, item: Mapping[str, Any] | None = None) -> str:
+    """状态键 → 展示/行情用的 symbol（复合键取 ``|`` 前段）。"""
+    if isinstance(item, Mapping) and item.get("symbol"):
+        return str(item["symbol"])
+    return str(key or "").split("|", 1)[0]
 
 
 def merge_config(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -892,11 +912,15 @@ def reset_rules(redis: Any, symbols: list[str] | None = None) -> dict[str, Any]:
     高水位同理——它属于**上一个持仓轮次**。
     """
     state = load_state(redis)
-    targets = (
-        [normalize_symbol(s) for s in symbols]
-        if symbols
-        else list(state["rules"].keys())
-    )
+    if symbols:
+        targets: list[str] = []
+        for raw in symbols:
+            sym = normalize_symbol(raw)
+            targets.extend(
+                k for k in state["rules"] if k == sym or k.startswith(f"{sym}|")
+            )
+    else:
+        targets = list(state["rules"].keys())
     for symbol in targets:
         if not symbol:
             continue
@@ -906,6 +930,7 @@ def reset_rules(redis: Any, symbols: list[str] | None = None) -> dict[str, Any]:
         keep_entry = item.get("entry_price")
         state["rules"][symbol] = {
             "status": ST_ARMED,
+            "symbol": state_symbol(symbol, item),
             "highest_price": None,
             "highest_entry": None,
             "entry_price": keep_entry,
@@ -935,6 +960,9 @@ class SltpDeps:
     #: 触发时「柜台没有这只票」的第二份证据（账户快照，见 sltp_position_evidence）。
     #: ``None`` = 未接线 → 判 ``unknown``（按异常告警，绝不静默跳过）。
     position_evidence: Callable[..., Awaitable[PositionEvidence]] | None = None
+    #: **LLM 规则归属 agent 的分账持仓**（agent, symbol, user_id, tenant_id → 股数）。
+    #: ``None`` = 旧替身/未接线：llm 规则**不下单**（fail-closed，绝不按共享账户全量卖）。
+    ledger_volume: Callable[[str, str, str, str], Awaitable[float]] | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1144,7 +1172,23 @@ async def run_sltp_cycle(
         _persist()
         return summary
 
-    armed = [r for r in rules if is_retryable(state["rules"].get(r["symbol"]))]
+    # 旧版 LLM 规则只按 symbol 存状态；升级到复合键后把孤立的 symbol 状态搬过去
+    # （同 symbol 若还有人工/auto 规则，old 仍在 keys 里，不搬——那份状态是人工规则的）。
+    keys = {rule_key(r) for r in rules}
+    for old_key in [k for k in list(state["rules"]) if "|" not in k]:
+        candidates = [k for k in keys if k.startswith(f"{old_key}|")]
+        if (
+            old_key not in keys
+            and len(candidates) == 1
+            and candidates[0] not in state["rules"]
+        ):
+            state["rules"][candidates[0]] = state["rules"].pop(old_key)
+            state["rules"][candidates[0]]["symbol"] = old_key
+            logger.info(
+                "[SltpExec] 规则状态迁移 symbol=%s → %s", old_key, candidates[0]
+            )
+
+    armed = [r for r in rules if is_retryable(state["rules"].get(rule_key(r)))]
     if not armed:
         _persist()
         return summary
@@ -1167,10 +1211,16 @@ async def run_sltp_cycle(
 
     fallback_cfg: dict[str, Any] | None = None
     positions: list[dict[str, Any]] | None = None
+    #: 本轮每个 symbol 的**剩余可卖量**：同 symbol 多家 agent 的规则在同一轮触发时，
+    #: 各自按柜台 can_use 夹取会合计超卖（T+1 时 can_use < 各家账本之和）。预算只在
+    #: 成功报单后扣减，失败/跳过不吃额度。
+    cycle_available: dict[str, float] = {}
 
     for rule in armed:
-        symbol = rule["symbol"]
-        st = state["rules"].setdefault(symbol, {"status": ST_ARMED})
+        symbol = str(rule.get("symbol") or "")
+        key = rule_key(rule)
+        st = state["rules"].setdefault(key, {"status": ST_ARMED})
+        st["symbol"] = symbol
         tick = (ticks or {}).get(symbol) or {}
         price = _to_float(tick.get("lastPrice"))
         summary["evaluated"] += 1
@@ -1313,6 +1363,7 @@ async def run_sltp_cycle(
             tenant_id,
             now,
             summary,
+            cycle_available=cycle_available,
         )
 
     _persist()
@@ -1497,6 +1548,7 @@ async def _execute_trigger(
     tenant_id: str,
     now: float,
     summary: dict[str, Any],
+    cycle_available: dict[str, float] | None = None,
 ) -> None:
     symbol = rule["symbol"]
     if position is None:
@@ -1512,6 +1564,66 @@ async def _execute_trigger(
         return
     can_use = _to_float((position or {}).get("can_use_volume")) or 0.0
     held = _to_float((position or {}).get("volume")) or 0.0
+    if cycle_available is not None:
+        budget = cycle_available.setdefault(symbol, can_use)
+        can_use = min(can_use, budget)
+    # LLM 规则归属单一 agent：只能卖该 agent 的分账持仓，且订单必须带 agent 才能
+    # 落回它的账本。共享账户里 601825 三家共持时，旧实现按 can_use 全量卖 + 订单
+    # agent 为空 → 卖完三家账本全是幻影仓（2026-10-30 审计 P0）。
+    owner = str(rule.get("owner") or "")
+    agent_name = ""
+    if owner.startswith("llm:"):
+        agent_name = owner.split(":", 1)[1].strip()
+        if not agent_name or deps.ledger_volume is None:
+            st["status"] = ST_SKIPPED
+            st["skip_reason"] = "owner_ledger_unavailable"
+            summary["failed"] += 1
+            logger.error(
+                "[SltpExec] %s llm 规则缺归属账本（%r），拒绝按共享账户全量卖出",
+                symbol,
+                owner,
+            )
+            await deps.notify(
+                user_id,
+                f"{symbol} 归属份额不可读，未卖出",
+                f"{reason}；LLM 规则归属 {owner}，但执行器未接入分账账本，"
+                "无法确认该 agent 的份额。本次不下单（不会卖共享账户里其它 agent 的仓位）。",
+                "error",
+                tenant_id=tenant_id,
+            )
+            return
+        try:
+            owner_volume = float(
+                await deps.ledger_volume(agent_name, symbol, user_id, tenant_id)
+            )
+        except Exception as exc:  # noqa: BLE001 读不到归属份额 → fail-closed
+            st["status"] = ST_SKIPPED
+            st["skip_reason"] = "owner_ledger_unavailable"
+            summary["failed"] += 1
+            logger.error("[SltpExec] %s 读归属账本失败：%s", symbol, exc)
+            await deps.notify(
+                user_id,
+                f"{symbol} 归属份额读取失败，未卖出",
+                f"{reason}；读取 {agent_name} 的分账持仓失败（{type(exc).__name__}）。"
+                "本次不下单，避免误卖共享账户里其它 agent 的仓位。",
+                "error",
+                tenant_id=tenant_id,
+            )
+            return
+        if owner_volume <= 0:
+            st["status"] = ST_SKIPPED
+            st["skip_reason"] = "owner_no_position"
+            summary["no_position"] = int(summary.get("no_position", 0) or 0) + 1
+            logger.info(
+                "[SltpExec] %s 触发（%s）但 %s 分账无持仓；不卖共享账户其它份额",
+                symbol,
+                reason,
+                agent_name,
+            )
+            return
+        # 只卖归属 agent 的那一段：柜台可卖量是共享账户口径，必须夹到分账持仓。
+        can_use = min(can_use, owner_volume)
+        held = min(held, owner_volume)
     quantity, note = plan_sell_quantity(symbol, rule, can_use)
     if quantity <= 0:
         st["status"] = ST_SKIPPED
@@ -1614,6 +1726,9 @@ async def _execute_trigger(
         # 该止损的时候止损单发不出去（委托行已落库，每轮重试都被拒）。
         "full_position_sell": is_full_position_sell("SELL", quantity, can_use),
     }
+    if agent_name:
+        # 订单归属：成交回报据此落回该 agent 的分账账本（agent_ledger_fill）。
+        order_data["agent"] = agent_name
     try:
         resp = await deps.dispatch(order_data, user_id)
     except Exception as exc:  # noqa: BLE001
@@ -1676,6 +1791,10 @@ async def _execute_trigger(
         )
         return
 
+    if cycle_available is not None:
+        cycle_available[symbol] = max(
+            0.0, float(cycle_available.get(symbol, can_use)) - float(quantity)
+        )
     st.update(
         {
             "status": ST_SUBMITTED,
@@ -1734,7 +1853,8 @@ async def _notify_stranded_triggers(
     但收盘后才发现的（例如重启后已过 15:00）当天已经没有补救机会，
     必须让人知道「触发了但没卖出去」。
     """
-    for symbol, st in state.get("rules", {}).items():
+    for key, st in state.get("rules", {}).items():
+        symbol = state_symbol(key, st)
         if str(st.get("status")) != ST_TRIGGERED or str(st.get("order_id") or ""):
             continue
         if st.get("stranded_notified"):
@@ -1776,7 +1896,7 @@ async def _monitor_pending(
         getattr(deps.client, "configured", True)
     ):
         need = [
-            sym
+            state_symbol(sym, item)
             for sym, item in (state.get("rules") or {}).items()
             if item.get("status") in _LIVE_STATES and not item.get("remainder_applied")
         ]
@@ -1793,7 +1913,8 @@ async def _monitor_pending(
                         live_prices[sym] = px
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[SltpExec] 重挂取实时行情失败: %s", exc)
-    for symbol, st in list(state.get("rules", {}).items()):
+    for key, st in list(state.get("rules", {}).items()):
+        symbol = state_symbol(key, st)
         if st.get("status") not in _LIVE_STATES:
             continue
         order_id = str(st.get("order_id") or "")
@@ -2149,6 +2270,29 @@ def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
             engine = TradingEngine(db, _get_redis())
             return bool(await engine.cancel_order_execution(row))
 
+    async def ledger_volume(
+        agent: str, symbol: str, user_id: str, tenant_id: str
+    ) -> float:
+        """LLM 规则归属 agent 的分账持仓（股）。读不到 → 抛，调用方 fail-closed。"""
+        from sqlalchemy import text
+
+        from backend.shared.order_contract import normalize_agent
+
+        async with get_session(read_only=True) as db:
+            res = await db.execute(
+                text(
+                    "SELECT volume FROM qm_agent_ledger_position "
+                    "WHERE tenant_id=:t AND user_id=:u AND agent=:a AND code=:c"
+                ),
+                {
+                    "t": str(tenant_id or "default"),
+                    "u": str(user_id),
+                    "a": normalize_agent(agent),
+                    "c": symbol,
+                },
+            )
+            return float(res.scalar() or 0.0)
+
     return SltpDeps(
         client=client,
         redis=redis,
@@ -2157,6 +2301,7 @@ def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
         order_reader=order_reader,
         cancel_order=cancel_order,
         position_evidence=position_evidence,
+        ledger_volume=ledger_volume,
         extras={"broker": broker},
     )
 

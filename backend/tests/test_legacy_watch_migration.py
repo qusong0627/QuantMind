@@ -325,19 +325,16 @@ def test_simulate_matches_a_real_sequential_apply() -> None:
     }
 
 
-def test_the_alphabetically_first_agent_holds_a_contested_symbol() -> None:
-    """先到先得且**顺序确定**（P2.4 口径，本层不另立一套仲裁）。"""
+def test_a_contested_symbol_arms_both_agents() -> None:
+    """共享账户同 symbol 多 agent：各挂各的复合键，不再先到先得挤掉后一家。"""
     watch = lw.parse_legacy_watch(neighbor_doc())
     sim = lw.simulate_apply(lw.plan_groups(watch), seed_table())
     by_agent = {a.agent: a for a in sim.agents}
 
     assert by_agent[GLM].armed == ("600036.SH",)
     assert by_agent[GLM].conflicts == ()
-    assert by_agent[TA].armed == ("002074.SZ",)
-    held = by_agent[TA].conflicts
-    assert [c.symbol for c in held] == ["600036.SH"]
-    assert held[0].holder == ex.llm_owner(GLM)
-    assert held[0].reason == ww.REJECT_OTHER_AGENT.format(holder=ex.llm_owner(GLM))
+    assert by_agent[TA].armed == ("002074.SZ", "600036.SH")
+    assert by_agent[TA].conflicts == ()
 
 
 def test_a_manual_rule_blocks_the_agent_and_survives() -> None:
@@ -452,9 +449,9 @@ def test_the_preview_summary_is_json_ready_and_carries_the_arms() -> None:
     assert glm["owner"] == ex.llm_owner(GLM)
     assert [r["symbol"] for r in glm["arms"]] == ["600036.SH"]
     assert glm["arms"][0]["owner"] == ex.llm_owner(GLM)
-    assert doc["table_after"] == 4
-    assert sim.armed_total == 2
-    assert sim.conflicts_total == 1
+    assert doc["table_after"] == 5  # 3 既存 + TA 的 600036（GLM 600036/TA 002074 是整组替换）
+    assert sim.armed_total == 3
+    assert sim.conflicts_total == 0
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +506,7 @@ def test_plan_mode_writes_nothing_and_prints_the_disabled_note(
 
     code = cli.main(["--file", str(src)])
 
-    assert code == cli.EXIT_ATTENTION  # 有冲突 ⇒ 要人看一眼
+    assert code == cli.EXIT_OK  # 同 symbol 多 agent 已不再算冲突
     assert wired.set_calls == []
     assert symbols_in(wired) == {"600000.SH", "000001.SZ", "002074.SZ"}
     out = capsys.readouterr().out
@@ -526,20 +523,21 @@ def test_apply_stamps_ownership_and_writes_a_record(
 
     code = cli.main(["--file", str(src), "--apply", "--record", str(record)])
 
-    assert code == cli.EXIT_ATTENTION  # 两家抢一个标的：不许静默通过
+    assert code == cli.EXIT_OK  # 两家各挂各的复合键（Phase 2），不再算冲突
 
-    landed = {str(r["symbol"]): r for r in table(wired)}
-    assert landed["600036.SH"]["owner"] == ex.llm_owner(GLM)
-    assert landed["600036.SH"]["stop_loss_price"] == 31.0
-    assert landed["002074.SZ"]["owner"] == ex.llm_owner(TA)
-    assert landed["002074.SZ"]["stop_loss_price"] == 44.6  # 旧价 9.0 被整组替换
-    assert landed["600000.SH"]["owner"] == ""  # 人工那条原地不动
-    assert "510300.SH" not in landed  # pct=0 不挂
+    landed = {
+        (str(r["symbol"]), str(r.get("owner") or "")): r for r in table(wired)
+    }
+    assert landed[("600036.SH", ex.llm_owner(GLM))]["stop_loss_price"] == 31.0
+    assert landed[("600036.SH", ex.llm_owner(TA))]["stop_loss_price"] > 0
+    assert landed[("002074.SZ", ex.llm_owner(TA))]["stop_loss_price"] == 44.6
+    assert landed[("600000.SH", "")]["owner"] == ""  # 人工那条原地不动
+    assert ("510300.SH", ex.llm_owner(GLM)) not in landed  # pct=0 不挂
 
     doc = json.loads(record.read_text(encoding="utf-8"))
     assert doc["kind"] == "legacy-watch-migration"
     assert doc["source"]["source_rules"] == 4
-    assert doc["verdict"]["ok"] is False
+    assert doc["verdict"]["ok"] is True
     assert len(doc["rules"]) == 4  # 逐条源规则都有归宿，一条不漏
     rows = {
         (r["agent"], r["code"]): r for r in doc["rules"]
@@ -549,8 +547,8 @@ def test_apply_stamps_ownership_and_writes_a_record(
     assert rows[(TA, "002074.SZ")]["expected_rule"]["owner"] == ex.llm_owner(TA)
     assert rows[(TA, "002074.SZ")]["reason"] == "跌破前低就走"  # 证据链留档（表里没有）
     assert rows[(GLM, "600036.SH")]["armed"] is True
-    assert rows[(TA, "600036.SH")]["armed"] is False  # 排序在后的那家拿不到槽位
-    assert rows[(TA, "600036.SH")]["expected_rule"] is None
+    assert rows[(TA, "600036.SH")]["armed"] is True  # 两家各挂各的复合键
+    assert rows[(TA, "600036.SH")]["expected_rule"]["owner"] == ex.llm_owner(TA)
     assert rows[(GLM, "510300.SH")]["armed"] is False
     assert rows[(GLM, "510300.SH")]["expected_rule"] is None
 

@@ -280,14 +280,13 @@ def test_a_manual_rule_wins_and_the_conflict_is_recorded() -> None:
     assert res.outcomes()[0]["reject_reason"] == ww.REJECT_MANUAL_HOLD
 
 
-def test_another_agents_rule_holds_the_slot() -> None:
-    """别家 agent 先挂的持有：本执行器一个标的只有一个状态位（仲裁是 P2.7 的事）。"""
+def test_another_agents_rule_coexists_on_the_same_symbol() -> None:
+    """共享账户同 symbol 多 agent：各挂各的复合键（2026-10-30 Phase 2）。"""
     redis = FakeRedis(cfg(rule(SYM, owner="llm:lgbm")))
     res = ww.write_watch_plan(redis, plan(watch(SYM)), agent="tft")
-    (conflict,) = res.conflicts
-    assert conflict.holder == "llm:lgbm"
-    assert conflict.reason == ww.REJECT_OTHER_AGENT.format(holder="llm:lgbm")
-    assert [r["owner"] for r in table(redis)] == ["llm:lgbm"]
+    assert res.conflicts == ()
+    assert res.armed == (SYM,)
+    assert sorted(r["owner"] for r in table(redis)) == ["llm:lgbm", "llm:tft"]
 
 
 def test_an_auto_rule_is_replaced_by_an_llm_rule() -> None:

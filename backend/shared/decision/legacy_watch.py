@@ -315,10 +315,11 @@ def simulate_apply(
     ``test_legacy_watch_migration.py`` 的差分用例（预演 vs 真写一遍）会立刻变红——
     这是本层唯一需要靠测试钉住的耦合。
 
-    顺序即输入顺序（迁移固定按 agent 名排序，见 ``parse_legacy_watch``）：同一个标的
-    两家都挂时**先处理的那家拿到槽位**，后来者记 ``REJECT_OTHER_AGENT``。顺序不定 =
-    每次跑出来的归属不一样，而操作员是照着预演按确认的。
+    顺序即输入顺序（迁移固定按 agent 名排序，见 ``parse_legacy_watch``）。同一个标的
+    不同 agent 的规则**各挂各的复合键**（``symbol|owner``，2026-10-30 Phase 2）：
+    共享账户里三家各持一段，不再「先到先得」把后两家挤掉；人工规则仍按 symbol 独占。
     """
+    from backend.services.live_trading.services import sltp_executor as executor
     from backend.shared.decision import watch_writer as ww
 
     current = [dict(r) for r in table]
@@ -353,7 +354,7 @@ def simulate_apply(
                 )
             continue
         others = [r for r in current if str(r.get("owner") or "") != owner]
-        others_by_symbol = {str(r.get("symbol") or ""): r for r in others}
+        others_by_symbol = {executor.rule_key(r): r for r in others}
         armed, conflicts = ww.resolve_plan(plan, others_by_symbol, owner)
         total = len(others) + len(armed)
         overflow = ""
@@ -364,7 +365,7 @@ def simulate_apply(
             armed = []
         else:
             current = others + [rule for _, rule in armed]
-        kept_symbols = {str(r.get("symbol") or "") for r in current}
+        kept_keys = {executor.rule_key(r) for r in current}
         out.append(
             PreviewAgent(
                 agent=plan.agent,
@@ -378,7 +379,7 @@ def simulate_apply(
                     tuple(
                         str(r.get("symbol") or "")
                         for r in mine_old
-                        if str(r.get("symbol") or "") not in kept_symbols
+                        if executor.rule_key(r) not in kept_keys
                     )
                     if not overflow
                     else ()

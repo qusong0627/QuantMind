@@ -90,6 +90,7 @@ class Harness:
         default_detail: dict | None = None,
         state: dict | None = None,
         evidence=None,
+        ledger_volume=None,
     ) -> None:
         self.redis = FakeRedis(cfg=ex.merge_config(cfg), state=state)
         self.evidence = evidence
@@ -102,6 +103,7 @@ class Harness:
         self.dispatch_result = dispatch_result or {"status": "success", "order_id": "OID-1"}
         self.fallback = fallback or {"stop_loss_pct": None, "take_profit_pct": None, "trailing_stop_pct": None}
         self.now = 1_000_000.0
+        self.ledger_volume = ledger_volume
         self.cancelled: list[str] = []
         self.cancel_result = True
         self.cancel_hook = None
@@ -135,6 +137,7 @@ class Harness:
             fallback_config=lambda tenant, user: self.fallback,
             cancel_order=cancel_order,
             position_evidence=self.evidence,
+            ledger_volume=self.ledger_volume,
         )
 
     def cycle(self) -> dict:
@@ -1523,3 +1526,144 @@ class TestTdxRealExecution:
         assert ticks["SZ002469"]["lastPrice"] == pytest.approx(6.78)
         assert ticks["002469.SZ"]["lastPrice"] == pytest.approx(6.78)
         assert detail["PreClose"] == pytest.approx(6.90)
+
+
+class TestLlmOwnerAttribution:
+    """LLM 规则只卖归属 agent 的份额，并把 agent 带进订单（2026-10-30 P0）。"""
+
+    @staticmethod
+    def _deps_volume(volume: float):
+        async def _volume(agent: str, symbol: str, user_id: str, tenant_id: str) -> float:
+            assert agent == "deepseek-v4-flash"
+            assert symbol == "600036.SH"
+            return volume
+
+        return _volume
+
+    def test_caps_to_owner_ledger_share_and_sets_agent(self) -> None:
+        h = Harness(
+            cfg=_cfg([_rule(owner="llm:deepseek-v4-flash")]),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=6900)],
+            ledger_volume=self._deps_volume(3000),
+        )
+
+        h.cycle()
+
+        assert len(h.dispatched) == 1
+        order = h.dispatched[0]
+        assert order["quantity"] == pytest.approx(3000.0)
+        assert order["agent"] == "deepseek-v4-flash"
+
+    def test_owner_without_ledger_position_does_not_sell_shared_account(self) -> None:
+        h = Harness(
+            cfg=_cfg([_rule(owner="llm:deepseek-v4-flash")]),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=6900)],
+            ledger_volume=self._deps_volume(0),
+        )
+
+        h.cycle()
+
+        assert h.dispatched == []
+        key = ex.rule_key(
+            {"symbol": "600036.SH", "owner": "llm:deepseek-v4-flash"}
+        )
+        assert h.state()["rules"][key]["skip_reason"] == "owner_no_position"
+
+    def test_missing_ledger_bridge_fails_closed(self) -> None:
+        h = Harness(
+            cfg=_cfg([_rule(owner="llm:deepseek-v4-flash")]),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=6900)],
+            ledger_volume=None,
+        )
+
+        h.cycle()
+
+        assert h.dispatched == []
+        key = ex.rule_key(
+            {"symbol": "600036.SH", "owner": "llm:deepseek-v4-flash"}
+        )
+        assert h.state()["rules"][key]["skip_reason"] == "owner_ledger_unavailable"
+
+
+class TestLlmMultiOwnerSameSymbol:
+    """同 symbol 两家 LLM 规则并存 + 本轮共享可卖预算（2026-10-30 Phase 2）。"""
+
+    @staticmethod
+    def _volumes() -> object:
+        async def _volume(agent: str, symbol: str, user_id: str, tenant_id: str) -> float:
+            return {"deepseek-v4-flash": 3000.0, "deepseek-v4-pro": 2800.0}[agent]
+
+        return _volume
+
+    def test_two_owners_arm_and_sell_their_own_shares(self) -> None:
+        h = Harness(
+            cfg=_cfg(
+                [
+                    _rule(owner="llm:deepseek-v4-flash"),
+                    _rule(owner="llm:deepseek-v4-pro"),
+                ]
+            ),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=6900)],
+            ledger_volume=self._volumes(),
+        )
+
+        h.cycle()
+
+        assert len(h.dispatched) == 2
+        assert [(o["agent"], o["quantity"]) for o in h.dispatched] == [
+            ("deepseek-v4-flash", 3000.0),
+            ("deepseek-v4-pro", 2800.0),
+        ]
+        state = h.state()["rules"]
+        for owner in ("deepseek-v4-flash", "deepseek-v4-pro"):
+            key = ex.rule_key({"symbol": "600036.SH", "owner": f"llm:{owner}"})
+            assert state[key]["status"] == ex.ST_SUBMITTED
+
+    def test_cycle_budget_prevents_oversell_when_t1_locks_shares(self) -> None:
+        """柜台可卖 1000 < 两家账本合计 5800：本轮合计只能卖 1000。"""
+        h = Harness(
+            cfg=_cfg(
+                [
+                    _rule(owner="llm:deepseek-v4-flash"),
+                    _rule(owner="llm:deepseek-v4-pro"),
+                ]
+            ),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=1000)],
+            ledger_volume=self._volumes(),
+        )
+
+        h.cycle()
+
+        assert len(h.dispatched) == 1
+        assert h.dispatched[0]["quantity"] == pytest.approx(1000.0)
+        assert h.dispatched[0]["agent"] == "deepseek-v4-flash"
+
+
+class TestLlmStateMigration:
+    """升级到复合状态键：旧 symbol 状态搬到 symbol|owner，不丢高水位。"""
+
+    def test_legacy_symbol_state_moves_to_composite_key(self) -> None:
+        h = Harness(
+            cfg=_cfg([_rule(owner="llm:deepseek-v4-flash", take_profit_pct=0.10, stop_loss_pct=None)]),
+            ticks={"600036.SH": {"lastPrice": 95.0}},
+            positions=[_position()],
+            state={
+                "date": DAY,
+                "rules": {
+                    "600036.SH": {"status": ex.ST_ARMED, "highest_price": 120.0}
+                },
+            },
+        )
+
+        h.cycle()
+
+        state = h.state()["rules"]
+        key = ex.rule_key({"symbol": "600036.SH", "owner": "llm:deepseek-v4-flash"})
+        assert key in state
+        assert "600036.SH" not in state
+        assert state[key]["highest_price"] == pytest.approx(120.0)

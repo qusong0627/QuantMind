@@ -211,35 +211,33 @@ def resolve_plan(
         rule = executor.normalize_rule(w.rule)
         rule["owner"] = owner
         symbol = str(rule.get("symbol") or "")
+        # 只有**人工**规则按 symbol 独占（key=symbol）。auto 是兜底、可被决策层替换；
+        # 其他 LLM owner 的规则键是 ``symbol|owner``，允许同 symbol 共存——共享账户
+        # 里三家 agent 各持一段，旧「一个标的只有一个状态位」会让后两家永远挂不上
+        # （2026-10-30 601825 实测 19/27 条否决）。
         holder = others_by_symbol.get(symbol)
-        if holder is not None:
-            holder_owner = str(holder.get("owner") or "")
-            # auto 是**兜底**（auto_arm 给「无规则持仓」补的保护），不是归属：
-            # 决策层的明确规则优先，写侧会把该 auto 规则摘掉（见 write_watch_plan）。
-            # 人工（owner=""）与其他 LLM 仍然先到先得。
-            if not (holder_owner == "auto" and owner.startswith("llm:")):
-                conflicts.append(
-                    Conflict(
-                        index=w.index,
-                        symbol=symbol,
-                        holder=holder_owner,
-                        reason=REJECT_MANUAL_HOLD
-                        if not holder_owner
-                        else REJECT_OTHER_AGENT.format(holder=holder_owner),
-                    )
+        if holder is not None and not str(holder.get("owner") or ""):
+            conflicts.append(
+                Conflict(
+                    index=w.index,
+                    symbol=symbol,
+                    holder="",
+                    reason=REJECT_MANUAL_HOLD,
                 )
-                continue
-        if symbol in seen:
+            )
+            continue
+        key = executor.rule_key(rule)
+        if key in seen:
             conflicts.append(
                 Conflict(
                     index=w.index,
                     symbol=symbol,
                     holder=owner,
-                    reason=REJECT_SAME_SYMBOL.format(first=seen[symbol]),
+                    reason=REJECT_SAME_SYMBOL.format(first=seen[key]),
                 )
             )
             continue
-        seen[symbol] = w.index
+        seen[key] = w.index
         armed.append((w, rule))
     return armed, conflicts
 
@@ -260,12 +258,23 @@ def _verify(
     unverified: list[tuple[str, str]] = []
     problems: list[str] = []
     table = {
-        str(r.get("symbol") or ""): r for r in (after.get("rules") or [])
+        executor.rule_key(r): r for r in (after.get("rules") or [])
     }  # 回读结果（read_config_strict 已过 merge_config，规则是归一形态）
-    want = {str(rule.get("symbol") or ""): rule for _, rule in armed}
+    by_symbol = {str(r.get("symbol") or ""): r for r in (after.get("rules") or [])}
+    want = {executor.rule_key(rule): rule for _, rule in armed}
 
-    for symbol, rule in want.items():
-        got = table.get(symbol)
+    for key, rule in want.items():
+        symbol = str(rule.get("symbol") or "")
+        got = table.get(key)
+        if got is None and symbol in by_symbol:
+            unverified.append(
+                (
+                    symbol,
+                    f"归属被改写成 {str(by_symbol[symbol].get('owner') or '')!r}"
+                    f"（期望 {owner!r}）",
+                )
+            )
+            continue
         if got is None:
             unverified.append((symbol, "回读的表里没有这条规则"))
         elif str(got.get("owner") or "") != owner:
@@ -276,8 +285,9 @@ def _verify(
             unverified.append((symbol, "落库内容与写入内容不一致"))
 
     for before in others:
+        key = executor.rule_key(before)
         symbol = str(before.get("symbol") or "")
-        got = table.get(symbol)
+        got = table.get(key)
         if got is None:
             problems.append(
                 f"他方规则在写入后消失：{symbol}（owner={before.get('owner')!r}）"
@@ -285,9 +295,9 @@ def _verify(
         elif executor.normalize_rule(got) != executor.normalize_rule(before):
             problems.append(f"他方规则在写入后被改写：{symbol}")
 
-    for symbol in mine_old:
-        if symbol not in want and symbol in table:
-            problems.append(f"旧规则未被整组替换掉：{symbol}")
+    for key in mine_old:
+        if key not in want and key in table:
+            problems.append(f"旧规则未被整组替换掉：{executor.state_symbol(key)}")
     return unverified, problems
 
 
@@ -297,8 +307,17 @@ def _clear_states(
     """摘掉旧规则后清理状态 → ``(已清, 因在途而保留)``。"""
     if not symbols:
         return [], []
-    live = [s for s in symbols if executor.is_live_state(state_rules.get(s))]
-    cleared = [s for s in symbols if s not in live]
+    # 兼容升级前的 symbol 状态键：LLM 规则旧状态存在 symbol 下，新键是 symbol|owner。
+    resolved: list[str] = []
+    for key in symbols:
+        if key in state_rules:
+            resolved.append(key)
+            continue
+        legacy = executor.state_symbol(key)
+        if legacy in state_rules:
+            resolved.append(legacy)
+    live = [s for s in resolved if executor.is_live_state(state_rules.get(s))]
+    cleared = [s for s in resolved if s not in live]
     if cleared:
         state = executor.load_state(redis)
         executor.save_state(redis, state, removed=set(cleared))
@@ -330,12 +349,13 @@ def write_watch_plan(
 
     existing = list(cfg.get("rules") or [])
     mine_old = [
-        str(r.get("symbol") or "")
+        executor.rule_key(r)
         for r in existing
         if str(r.get("owner") or "") == owner
     ]
     others = [r for r in existing if str(r.get("owner") or "") != owner]
-    others_by_symbol = {str(r.get("symbol") or ""): r for r in others}
+    # LLM 规则键 = symbol|owner；人工/auto 仍是 symbol（见 executor.rule_key）。
+    others_by_symbol = {executor.rule_key(r): r for r in others}
 
     armed, conflicts = resolve_plan(plan, others_by_symbol, owner)
     auto_replaced = {
@@ -409,8 +429,13 @@ def write_watch_plan(
     notes.extend(f"回读校验发现：{p}" for p in problems)
 
     # 状态：只处理「槽位已空」的标的（被别人接手的槽位不动），且在途真单不清
+    final_keys = {executor.rule_key(r) for r in wanted}
     final_symbols = {str(r.get("symbol") or "") for r in wanted}
-    to_clear = [s for s in mine_old if s and s not in final_symbols]
+    to_clear = [
+        k
+        for k in mine_old
+        if k and k not in final_keys and executor.state_symbol(k) not in final_symbols
+    ]
     cleared: list[str] = []
     # None = 没读到 → 跳过一切状态判断（清不掉旧状态只是小事，按状态不对而误清才是大事）
     state_rules: dict[str, Any] | None = None
