@@ -321,3 +321,12 @@ async def test_submit_without_cid_generates_unique_remark():
 
     assert len(backend.remarks) == 2
     assert backend.remarks[0] != backend.remarks[1]
+
+
+def test_classify_bridge_busy_code():
+    from backend.services.live_trading.services.qmt_exec_client import _classify_error
+
+    assert (
+        _classify_error(RuntimeError("BRIDGE_BUSY: order queue backlog=4 >= 3"))
+        == "BRIDGE_BUSY"
+    )

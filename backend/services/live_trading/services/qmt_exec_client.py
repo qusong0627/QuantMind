@@ -95,6 +95,8 @@ _ERROR_CODE_HINTS: tuple[tuple[str, str], ...] = (
     ("price deviation", "PRICE_DEVIATION"),
     ("pipe_busy", "BRIDGE_BUSY"),
     ("pipe busy", "BRIDGE_BUSY"),
+    # 桥侧订单队列快速失败（2026-10-30）：``BRIDGE_BUSY: order queue backlog=4 >= 3``
+    ("bridge_busy", "BRIDGE_BUSY"),
     ("timeout", "TIMEOUT"),
     ("超时", "TIMEOUT"),
     ("not connected", "NOT_CONNECTED"),
