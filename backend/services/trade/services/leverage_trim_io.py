@@ -427,7 +427,12 @@ async def read_account(deps: TrimDeps) -> AccountRead:
     ]
     codes = [c for c in codes if c]
     try:
-        ticks = await deps.client.get_full_tick(codes) if codes else {}
+        # 缓存优先（桥全市场快照），缺失/陈旧才回落管道
+        from backend.services.live_trading.services.quote_cache_reader import (
+            get_ticks,
+        )
+
+        ticks = await get_ticks(deps.client, codes) if codes else {}
     except Exception as exc:  # noqa: BLE001 无行情不下手（同隔壁 degraded = 只告警）
         return AccountRead(
             equity=equity,

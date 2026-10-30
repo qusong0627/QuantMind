@@ -30,6 +30,12 @@ _PLENTIFUL_MEMORY_GB = 512.0
 
 
 @pytest.fixture(autouse=True)
+def _disable_quote_cache(monkeypatch):
+    """单测不连真实 Redis 行情缓存（2026-10-30 P3）；用例可显式改回 on。"""
+    monkeypatch.setenv("QM_QUOTE_CACHE", "off")
+
+
+@pytest.fixture(autouse=True)
 def _stub_available_memory(monkeypatch):
     from backend.services.engine.alpha_agent import hw_lock
 

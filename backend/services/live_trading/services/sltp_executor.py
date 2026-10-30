@@ -1153,7 +1153,14 @@ async def run_sltp_cycle(
         return summary
 
     try:
-        ticks = await deps.client.get_full_tick([r["symbol"] for r in armed])
+        # 缓存优先（桥 tap/sweep 全市场快照），陈旧/缺失才回落管道；止损最忌陈旧价。
+        from backend.services.live_trading.services.quote_cache_reader import (
+            get_ticks,
+        )
+
+        ticks = await get_ticks(
+            deps.client, [r["symbol"] for r in armed], max_age_s=3.0
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SltpExec] 拉实时行情失败: %s", exc)
         return summary
@@ -1775,7 +1782,11 @@ async def _monitor_pending(
         ]
         if need:
             try:
-                ticks = await deps.client.get_full_tick(need)
+                from backend.services.live_trading.services.quote_cache_reader import (
+                    get_ticks,
+                )
+
+                ticks = await get_ticks(deps.client, need, max_age_s=3.0)
                 for sym in need:
                     px = _to_float(((ticks or {}).get(sym) or {}).get("lastPrice"))
                     if px is not None and px > 0:
