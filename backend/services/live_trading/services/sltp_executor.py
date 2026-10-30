@@ -1211,6 +1211,13 @@ async def run_sltp_cycle(
 
     fallback_cfg: dict[str, Any] | None = None
     positions: list[dict[str, Any]] | None = None
+    #: 人工规则按 symbol 独占：同一标的同时存在人工与 LLM/auto 时，人工优先执行，
+    #: 其余跳过（否则会卖出两次）。watch_writer 下一轮也会把 LLM 规则摘掉。
+    manual_symbols = {
+        str(r.get("symbol") or "")
+        for r in rules
+        if not str(r.get("owner") or "").strip()
+    }
     #: 本轮每个 symbol 的**剩余可卖量**：同 symbol 多家 agent 的规则在同一轮触发时，
     #: 各自按柜台 can_use 夹取会合计超卖（T+1 时 can_use < 各家账本之和）。预算只在
     #: 成功报单后扣减，失败/跳过不吃额度。
@@ -1218,6 +1225,13 @@ async def run_sltp_cycle(
 
     for rule in armed:
         symbol = str(rule.get("symbol") or "")
+        if symbol in manual_symbols and str(rule.get("owner") or "").strip():
+            logger.warning(
+                "[SltpExec] %s 已有人工规则，跳过 %s（人工优先）",
+                symbol,
+                rule.get("owner"),
+            )
+            continue
         key = rule_key(rule)
         st = state["rules"].setdefault(key, {"status": ST_ARMED})
         st["symbol"] = symbol

@@ -1667,3 +1667,25 @@ class TestLlmStateMigration:
         assert key in state
         assert "600036.SH" not in state
         assert state[key]["highest_price"] == pytest.approx(120.0)
+
+
+class TestManualPriority:
+    """同一标的人工规则与 LLM 规则并存：人工优先，LLM 本轮跳过（不双卖）。"""
+
+    def test_manual_rule_skips_llm_rule_on_same_symbol(self) -> None:
+        h = Harness(
+            cfg=_cfg(
+                [
+                    _rule(owner="llm:deepseek-v4-flash"),
+                    _rule(owner=""),
+                ]
+            ),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=1000)],
+        )
+
+        h.cycle()
+
+        assert len(h.dispatched) == 1
+        assert "agent" not in h.dispatched[0]
+        assert h.dispatched[0]["quantity"] == pytest.approx(1000.0)
