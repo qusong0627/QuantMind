@@ -55,13 +55,19 @@ DEFAULT_CONFIG = {
                'indices': ['000001.SH', '399001.SZ', '000300.SH'], 'watchlist': []},
     'orders': {'enabled': True, 'interval_s': 2, 'maxlen': 2000},
     'trades': {'enabled': True, 'interval_s': 5, 'maxlen': 2000},
-    'budget': {'window_s': 10, 'market_ms': 2000, 'rpc_preempt_queue': 1},
+    'budget': {'window_s': 10, 'market_ms': 2000, 'rpc_preempt_queue': 1,
+               # 订单队列积压闸：待处理订单请求 >= N 时直接 BRIDGE_BUSY 快速失败，
+               # 避免调用方在单线程管道里干等 25s（2026-10-30 实测头阻塞）。
+               'order_preempt_queue': 3},
     'risk': {'enabled': True, 'max_order_amount': 200000, 'max_orders_per_min': 30,
              'max_deviation_pct': 5.0, 'blacklist_codes': [],
              'blacklist_name_keywords': ['ST', '退'],
              # 卖出是减风险动作：默认不做黑名单/金额/偏离/限频拦截（只拦买入）。
              # 2026-10-30 用户拍板：ST 黑名单把清仓也堵死，等于给卖出加风险。
-             'apply_to_sells': False},
+             'apply_to_sells': False,
+             # 但卖出保留「错价保护」：限价相对昨收偏离超过该带宽即拒（市价单不受限）。
+             'sell_price_band_pct': 9.5},
+    'reload': {'enabled': True, 'key': 'qm:qmt:pipe:reload'},
     'health': {'heartbeat_key': 'qm:qmt:pipe:heartbeat', 'metrics_key': 'qm:qmt:pipe:metrics',
                'interval_s': 5, 'ttl_s': 30},
     'tap': {'enabled': True, 'interval_s': 0.5, 'subscribe_refresh_s': 60,
@@ -286,6 +292,17 @@ def rpc_worker():
             STATE.note_error('rpc.decode', exc)
             continue
         method = str(req.get('method') or '')
+        if is_order_method(method):
+            busy = order_backlog_gate(
+                rpc_backlog(), CFG.get('budget.order_preempt_queue') or 0)
+            if busy is not None:
+                resp = {'request_id': req.get('request_id'), 'ok': False, 'error': busy}
+                STATE.note_error('rpc.busy', busy)
+                try:
+                    write_reply(req, resp)
+                except Exception as exc:
+                    STATE.note_error('rpc.reply', exc)
+                continue
         gate = risk_gate(method, req.get('params') or {})
         if gate is not None:
             resp = {'request_id': req.get('request_id'), 'ok': False, 'error': gate}
@@ -355,6 +372,32 @@ def _order_side(params):
     return ''
 
 
+def is_order_method(method):
+    """订单写方法集合（与 risk_gate / 幂等同源）。"""
+    return str(method or '').lower() in ('order_stock', 'passorder', 'submit_order')
+
+
+def order_backlog_gate(backlog, limit):
+    """订单队列积压闸（纯函数）：待处理请求超限即快速失败，别让调用方干等 25s。"""
+    if int(limit or 0) <= 0:
+        return None
+    if int(backlog) >= int(limit):
+        return 'BRIDGE_BUSY: order queue backlog=%d >= %d' % (int(backlog), int(limit))
+    return None
+
+
+def _sell_price_band_reason(symbol, price):
+    """卖出错价保护：限价对昨收偏离超过带宽即拒；市价单（price<=0）不受限。"""
+    band = float(CFG.get('risk.sell_price_band_pct') or 0)
+    pre = STATE.quote_pre_close.get(symbol)
+    if band <= 0 or price <= 0 or not pre:
+        return None
+    dev = abs(price / pre - 1) * 100.0
+    if dev > band:
+        return 'risk: sell price band %.2f%% > %.2f%%' % (dev, band)
+    return None
+
+
 def risk_gate(method, params):
     """下单/撤单前置检查。返回 None=放行，字符串=拒绝原因。"""
     if not bool(CFG.get('risk.enabled')):
@@ -369,9 +412,9 @@ def risk_gate(method, params):
     symbol, volume, price = _order_params(params)
     if not symbol:
         return 'risk: empty symbol'
-    # 卖出是减风险动作：默认不拦（名称黑名单/金额/偏离/限频全部只对买入生效）。
+    # 卖出是减风险动作：黑名单/金额/偏离/限频只对买入生效；卖出仅保留错价保护。
     if _order_side(params) == 'SELL' and not bool(CFG.get('risk.apply_to_sells')):
-        return None
+        return _sell_price_band_reason(symbol, price)
     blacklist = [str(x).upper() for x in (CFG.get('risk.blacklist_codes') or [])]
     if symbol.upper() in blacklist:
         return 'risk: blacklisted code %s' % symbol
@@ -1049,6 +1092,16 @@ def health_worker():
 def watchdog_config_loop():
     while not STATE.stop.is_set():
         CFG.reload()
+        try:
+            if bool(CFG.get('reload.enabled')):
+                key = str(CFG.get('reload.key') or 'qm:qmt:pipe:reload')
+                if R.get(key):
+                    R.delete(key)
+                    log('reload requested via %s -> exiting for watchdog restart' % key)
+                    time.sleep(0.2)
+                    os._exit(0)
+        except Exception as exc:
+            STATE.note_error('reload.check', exc)
         time.sleep(10)
 
 

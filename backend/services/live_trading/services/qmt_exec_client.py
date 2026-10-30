@@ -38,10 +38,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
 import threading
+import time
+import uuid
 from typing import Any, Optional, Protocol
 from collections.abc import Callable
 from urllib.parse import quote
@@ -54,6 +57,12 @@ _REMARK_DIGEST_LEN = 16
 _REMARK_MAP_PREFIX = "quantmind:qmt_exec:remark:"
 _CLIENT_ID_MAP_PREFIX = "quantmind:qmt_exec:cid:"
 _REMARK_TTL_SECONDS = 7 * 24 * 3600
+
+#: 超时委托待核对清单：客户端的发单超时 ≠ 没下单（管道拥塞时委托仍会落地）。
+#: 键为 ``qm:qmt:unverified:{account}`` 的 hash，field=remark，由 ``qmt_pipe_guard``
+#: 任务从 ``bigqmt:order_events`` 流里比对销账，超过阈值仍未出现则告警。
+_UNVERIFIED_KEY = "qm:qmt:unverified:{account}"
+_UNVERIFIED_TTL_SECONDS = 2 * 3600
 
 # QMT 委托状态码 → 本系统 OrderStatus 字符串（口径见 xtconstant）
 # 51/52 是「撤单请求已发出但未确认」，委托仍可能成交，不能当终态；
@@ -219,6 +228,16 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _accepts_kwarg(func: Any, name: str) -> bool:
+    """后端实现是否接受该关键字参数（兼容旧 fake backend / 旧版兼容层）。"""
+    try:
+        import inspect
+
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _first_attr(obj: Any, *names: str, default: Any = None) -> Any:
     """按顺序取第一个非 None 属性（兼容不同版本的字段命名）。"""
     for name in names:
@@ -305,6 +324,7 @@ class QmtExecBackend(Protocol):
         price: float,
         remark: str,
         strategy_name: str,
+        wait_settlement: bool = True,
     ) -> dict[str, Any]: ...
 
     def cancel_order(self, *, order_id: str, symbol: str) -> dict[str, Any]: ...
@@ -547,6 +567,7 @@ class BigConvertBackend:
         price: float,
         remark: str,
         strategy_name: str,
+        wait_settlement: bool = True,
     ) -> dict[str, Any]:
         trader, account = self._ensure()
         constants = self._constants
@@ -560,6 +581,31 @@ class BigConvertBackend:
             price_value = float(price or 0)
             if price_value <= 0:
                 raise QmtExecError("限价单必须提供价格", code="INVALID_PRICE")
+        if not wait_settlement and hasattr(trader, "order_stock_result"):
+            # 异步受理：不等券商分配委托号就回包（管道不再被单笔占死）。
+            # 委托号由 order_events / poller 按 remark 回填；返回体不含 order_id。
+            async_result = trader.order_stock_result(
+                account,
+                symbol,
+                qmt_order_type,
+                int(quantity),
+                price_type,
+                price_value,
+                strategy_name,
+                remark,
+                wait_settlement=False,
+            )
+            data = async_result if isinstance(async_result, dict) else {}
+            return {
+                "order_id": str(data.get("order_sys_id") or ""),
+                "symbol": symbol,
+                "side": "BUY" if is_buy else "SELL",
+                "quantity": int(quantity),
+                "price": price_value,
+                "remark": remark,
+                "accepted": True,
+                "async": True,
+            }
         order_id = trader.order_stock(
             account,
             symbol,
@@ -1011,19 +1057,37 @@ class QmtExecClient:
             # 先写映射再下单：TIMEOUT 时委托可能已提交，映射缺失会让回收端
             # 只能靠兜底匹配（且此时还不知道 QMT 委托号）。写失败不影响下单。
             await self._remember_remark(remark, cid)
-        result = await self._call(
-            self._get_backend(cfg).submit_order,
-            symbol=qmt_symbol,
-            side=str(side or "").upper(),
-            quantity=volume,
-            order_type=str(order_type or "LIMIT").upper(),
-            price=float(price or 0),
-            remark=remark,
-            strategy_name=str(cfg["strategy_name"]),
-            timeout=float(cfg["timeout"]),
-        )
+        async_mode = self._flag("async_orders", "QMT_ASYNC_ORDERS", default=True)
+        backend = self._get_backend(cfg)
+        call_kwargs: dict[str, Any] = {
+            "symbol": qmt_symbol,
+            "side": str(side or "").upper(),
+            "quantity": volume,
+            "order_type": str(order_type or "LIMIT").upper(),
+            "price": float(price or 0),
+            "remark": remark,
+            "strategy_name": str(cfg["strategy_name"]),
+            "timeout": float(cfg["timeout"]),
+        }
+        if _accepts_kwarg(backend.submit_order, "wait_settlement"):
+            call_kwargs["wait_settlement"] = not async_mode
+        try:
+            result = await self._call(backend.submit_order, **call_kwargs)
+        except QmtExecError as exc:
+            # 超时 = 委托可能已提交（管道拥塞时仍会落地）。记入待核对清单，
+            # 由 qmt_pipe_guard 从 order_events 比对销账；禁止重试。
+            if exc.code == "TIMEOUT" and cid:
+                await self._remember_unverified(
+                    cid,
+                    remark=remark,
+                    symbol=qmt_symbol,
+                    side=str(side or "").upper(),
+                    quantity=volume,
+                    price=float(price or 0),
+                )
+            raise
         logger.info(
-            "[QmtExec] 下单已受理 symbol=%s side=%s qty=%s price=%s order_id=%s remark=%s cid=%s",
+            "[QmtExec] 下单已受理 symbol=%s side=%s qty=%s price=%s order_id=%s remark=%s cid=%s async=%s",
             qmt_symbol,
             side,
             volume,
@@ -1031,8 +1095,139 @@ class QmtExecClient:
             result.get("order_id"),
             remark,
             cid,
+            async_mode,
         )
+        if self._flag("record_orders", "QMT_RECORD_ORDERS", default=True):
+            await self._record_order_row(
+                symbol=qmt_symbol,
+                side=str(side or "").upper(),
+                quantity=volume,
+                price=float(price or 0),
+                order_type=str(order_type or "LIMIT").upper(),
+                client_order_id=cid,
+                exchange_order_id=str(result.get("order_id") or ""),
+                status="submitted",
+                remark=remark,
+            )
         return result
+
+    # -- 待核对清单 / 台账 -------------------------------------------------
+    def _flag(self, page_key: str, env_key: str, *, default: bool) -> bool:
+        """页面配置 > 环境变量 > 默认值。"""
+        override = (self._page_settings or {}).get(page_key)
+        raw = override if override is not None else os.getenv(env_key)
+        if raw is None or str(raw).strip() == "":
+            return default
+        return str(raw).strip().lower() in _TRUE_VALUES
+
+    async def _remember_unverified(
+        self,
+        client_order_id: str,
+        *,
+        remark: str,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float,
+    ) -> None:
+        try:
+            redis = await self._get_redis()
+            key = _UNVERIFIED_KEY.format(
+                account=str(self._effective().get("account_id") or "")
+            )
+            payload = json.dumps(
+                {
+                    "client_order_id": client_order_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                    "price": price,
+                    "ts": time.time(),
+                },
+                ensure_ascii=False,
+            )
+            await redis.hset(key, remark, payload)
+            await redis.expire(key, _UNVERIFIED_TTL_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - 记录失败不影响原始异常
+            logger.warning(
+                "[QmtExec] 超时委托待核对写入失败 remark=%s: %s",
+                remark,
+                redact_secrets(exc, self._secret_hint()),
+            )
+
+    async def _record_order_row(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float,
+        order_type: str,
+        client_order_id: str,
+        exchange_order_id: str,
+        status: str,
+        remark: str,
+    ) -> None:
+        """直连 RPC 下的真单补一条 ``orders`` 台账（source=qmt_direct）。
+
+        与引擎/派发链已落库的单按 ``client_order_id`` 唯一索引冲突跳过
+        （``ON CONFLICT DO NOTHING``），不会重复记账。台账写失败只告警，
+        绝不影响已受理的委托。
+        """
+        try:
+            from sqlalchemy import text as sql_text
+
+            from backend.shared.database_manager_v2 import get_session
+
+            user_id = str(os.getenv("QMT_DIRECT_USER_ID", "10000001") or "10000001")
+            side_value = "buy" if str(side).upper() == "BUY" else "sell"
+            type_value = "market" if str(order_type).upper() == "MARKET" else "limit"
+            async with get_session(read_only=False) as session:
+                await session.execute(
+                    sql_text(
+                        """
+                        INSERT INTO orders (
+                            order_id, tenant_id, user_id, portfolio_id, strategy_id, symbol,
+                            side, trade_action, position_side, is_margin_trade,
+                            order_type, trading_mode, status,
+                            quantity, filled_quantity, price, average_price,
+                            order_value, filled_value, commission,
+                            submitted_at, created_at, updated_at,
+                            client_order_id, exchange_order_id, remarks, source
+                        ) VALUES (
+                            :order_id, 'default', :user_id, 0, NULL, :symbol,
+                            :side, NULL, 'LONG', FALSE,
+                            :order_type, 'REAL', :status,
+                            :quantity, 0, :price, NULL,
+                            :order_value, 0, 0,
+                            NOW(), NOW(), NOW(),
+                            :client_order_id, :exchange_order_id, :remarks, 'qmt_direct'
+                        )
+                        ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    {
+                        "order_id": str(uuid.uuid4()),
+                        "user_id": user_id,
+                        "symbol": _to_prefix_symbol(symbol),
+                        "side": side_value,
+                        "order_type": type_value,
+                        "status": status,
+                        "quantity": float(quantity),
+                        "price": float(price),
+                        "order_value": float(quantity) * float(price or 0),
+                        "client_order_id": client_order_id or None,
+                        "exchange_order_id": exchange_order_id or None,
+                        "remarks": f"qmt_direct remark={remark}"[:500],
+                    },
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 - 台账失败不影响交易
+            logger.warning(
+                "[QmtExec] 直连台账写入失败 cid=%s: %s",
+                client_order_id,
+                redact_secrets(exc, self._secret_hint()),
+            )
 
     async def cancel_order(self, *, order_id: str, symbol: str = "") -> dict[str, Any]:
         cfg = self._require_enabled()

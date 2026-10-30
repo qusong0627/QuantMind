@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):
     tdx_account_sync_task = None
     qmt_account_sync_task = None
     qmt_exec_poller_task = None
+    qmt_pipe_guard_task = None
     mirror_queue_drainer_task = None
     qmt_sltp_executor_task = None
     qmt_quote_backup_task = None
@@ -278,6 +279,24 @@ async def lifespan(app: FastAPI):
             run_qmt_exec_poller_task(),
             name="qmt-exec-poller",
         )
+        # QMT 管道健康 + 超时委托核对（2026-10-30）：积压/持仓推送停滞/委托回报停滞
+        # 边沿告警；客户端超时但可能已提交的委托从 order_events 销账。只读 Redis。
+        if str(os.getenv("QM_QMT_PIPE_GUARD_ENABLED", "true")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            from backend.services.live_trading.services.qmt_pipe_guard import (
+                run_qmt_pipe_guard_task,
+            )
+
+            qmt_pipe_guard_task = asyncio.create_task(
+                run_qmt_pipe_guard_task(), name="qmt-pipe-guard"
+            )
+        else:
+            qmt_pipe_guard_task = None
+            logger.info("qmt pipe guard disabled (QM_QMT_PIPE_GUARD_ENABLED=false)")
         # 模拟盘 → 真单镜像：非交易时段入队的镜像单，开盘后由本任务补交
         from backend.services.live_trading.services.real_mirror_service import (
             run_mirror_queue_drainer,
@@ -939,6 +958,7 @@ async def lifespan(app: FastAPI):
         tdx_account_sync_task,
         qmt_account_sync_task,
         qmt_exec_poller_task,
+        qmt_pipe_guard_task,
         mirror_queue_drainer_task,
         qmt_sltp_executor_task,
         qmt_quote_backup_task,

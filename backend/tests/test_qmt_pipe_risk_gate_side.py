@@ -28,6 +28,9 @@ _MODULE_PATH = (
     / "pipe_redis_bridge.py"
 )
 
+if not _MODULE_PATH.exists():  # pragma: no cover - 容器镜像不含 deploy/
+    pytest.skip("deploy/qmt-pipe-bridge 不在当前运行环境", allow_module_level=True)
+
 
 def _load_bridge_module(monkeypatch):
     """以桩模块加载桥脚本（生产依赖 redis / bigqmt 不在测试环境里）。"""
@@ -80,6 +83,7 @@ def bridge(monkeypatch):
         "blacklist_codes": [],
         "blacklist_name_keywords": ["ST", "退"],
         "apply_to_sells": False,
+        "sell_price_band_pct": 9.5,
     }
     module.STATE.name_map = {"600289.SH": "ST信通", "600036.SH": "招商银行"}
     module.STATE.quote_pre_close = {"600289.SH": 5.0, "600036.SH": 40.0}
@@ -115,18 +119,16 @@ def test_buy_still_blocked_by_st_name_blacklist(bridge):
 
 
 def test_sell_bypasses_amount_cap(bridge):
-    # 31,200 股 × 12.49 ≈ 39 万 > 20 万：买入拒，卖出放行。
-    assert (
-        bridge.risk_gate("order_stock", _order("600036.SH", 31200, 12.49, 24)) is None
-    )
-    reason = bridge.risk_gate("order_stock", _order("600036.SH", 31200, 12.49, 23))
+    # 31,200 股 × 37.0 ≈ 115 万 > 20 万：买入拒，卖出放行（价格在卖出带宽内）。
+    assert bridge.risk_gate("order_stock", _order("600036.SH", 31200, 37.0, 24)) is None
+    reason = bridge.risk_gate("order_stock", _order("600036.SH", 31200, 37.0, 23))
     assert reason and "amount" in reason
 
 
 def test_sell_bypasses_price_deviation(bridge):
-    # 昨收 40.0，卖价 30.0（-25%）：买入拒，卖出放行。
-    assert bridge.risk_gate("order_stock", _order("600036.SH", 100, 30.0, 24)) is None
-    reason = bridge.risk_gate("order_stock", _order("600036.SH", 100, 30.0, 23))
+    # 昨收 40.0，卖价 37.0（-7.5%）：买入的 ±5% 闸会拒，卖出放行（带宽 9.5% 内）。
+    assert bridge.risk_gate("order_stock", _order("600036.SH", 100, 37.0, 24)) is None
+    reason = bridge.risk_gate("order_stock", _order("600036.SH", 100, 37.0, 23))
     assert reason and "deviation" in reason
 
 
@@ -186,3 +188,38 @@ def test_idem_key_still_reads_http_remark(bridge):
 def test_idem_key_none_without_key_field(bridge):
     bridge.CFG._data["account_id"] = "40327478"
     assert bridge._idem_key({"method": "order_stock", "params": {}}) is None
+
+
+def test_sell_price_band_rejects_far_limit(bridge):
+    """卖出保留错价保护：限价对昨收偏离 > 带宽（9.5%）即拒。"""
+    reason = bridge.risk_gate("order_stock", _order("600036.SH", 100, 30.0, 24))
+    assert reason and "sell price band" in reason
+
+
+def test_sell_price_band_allows_normal(bridge):
+    assert bridge.risk_gate("order_stock", _order("600036.SH", 100, 39.0, 24)) is None
+
+
+def test_sell_market_order_bypasses_band(bridge):
+    assert bridge.risk_gate("order_stock", _order("600036.SH", 100, 0.0, 24)) is None
+
+
+def test_sell_band_can_be_disabled(bridge):
+    bridge.CFG._data["risk"]["sell_price_band_pct"] = 0
+    assert bridge.risk_gate("order_stock", _order("600036.SH", 100, 30.0, 24)) is None
+
+
+def test_order_method_detection(bridge):
+    assert bridge.is_order_method("order_stock")
+    assert bridge.is_order_method("passorder")
+    assert bridge.is_order_method("submit_order")
+    assert not bridge.is_order_method("query_stock_orders")
+    assert not bridge.is_order_method("")
+
+
+def test_order_backlog_gate(bridge):
+    assert bridge.order_backlog_gate(2, 3) is None
+    busy = bridge.order_backlog_gate(3, 3)
+    assert busy and busy.startswith("BRIDGE_BUSY")
+    # limit=0 关闭快速失败
+    assert bridge.order_backlog_gate(99, 0) is None
