@@ -1618,6 +1618,10 @@ class TestLlmMultiOwnerSameSymbol:
             ("deepseek-v4-flash", 3000.0),
             ("deepseek-v4-pro", 2800.0),
         ]
+        cids = [o["client_order_id"] for o in h.dispatched]
+        assert len(set(cids)) == 2  # 同 symbol 同秒触发不能撞 client_order_id
+        assert "deepseek-v4-flash" in cids[0]
+        assert "deepseek-v4-pro" in cids[1]
         state = h.state()["rules"]
         for owner in ("deepseek-v4-flash", "deepseek-v4-pro"):
             key = ex.rule_key({"symbol": "600036.SH", "owner": f"llm:{owner}"})
@@ -1689,3 +1693,13 @@ class TestManualPriority:
         assert len(h.dispatched) == 1
         assert "agent" not in h.dispatched[0]
         assert h.dispatched[0]["quantity"] == pytest.approx(1000.0)
+
+
+def test_llm_owner_disambiguates_client_order_id() -> None:
+    a = ex.rule_client_order_id("600036.SH", 1_000_000.0, 1, owner="llm:deepseek-v4-flash")
+    b = ex.rule_client_order_id("600036.SH", 1_000_000.0, 1, owner="llm:deepseek-v4-pro")
+    manual = ex.rule_client_order_id("600036.SH", 1_000_000.0, 1)
+
+    assert a != b
+    assert "deepseek-v4-flash" in a and "deepseek-v4-pro" in b
+    assert manual == ex.rule_client_order_id("600036.SH", 1_000_000.0, 1, owner="")

@@ -442,18 +442,30 @@ def update_highest_price(previous: float | None, price: float) -> float:
     return max(prev, float(price or 0))
 
 
-def rule_client_order_id(symbol: str, now_ts: float, generation: int = 1) -> str:
+def rule_client_order_id(
+    symbol: str, now_ts: float, generation: int = 1, owner: str = ""
+) -> str:
     """规则当日幂等委托号。
 
-    同一个「标的 + 交易日 + 触发代数」永远得到同一个 ``client_order_id``：
-    触发后进程崩溃/状态写回失败时按同号重试，调度器的 client_order_id 去重
-    会返回已有委托而不是重复下单（下真单的链路不允许靠状态机兜底防重）。
+    同一个「标的 + 交易日 + 触发代数（+ LLM owner）」永远得到同一个
+    ``client_order_id``：触发后进程崩溃/状态写回失败时按同号重试，调度器的
+    client_order_id 去重会返回已有委托而不是重复下单（下真单的链路不允许靠
+    状态机兜底防重）。
 
     ``generation`` 是当日第几次触发；``POST /reset`` 重新武装后递增，
     保证「重新武装后再触发」仍能下出**新**单而不是被自己的旧号挡住。
+
+    ``owner`` 只对 LLM 规则生效：同 symbol 多家 agent 的规则可能同一秒触发，
+    旧号不含 owner 会撞成同一个 client_order_id，第二家被调度器当重复吞掉。
+    人工/auto 仍用旧号（owner 为空）。
     """
     day = datetime.fromtimestamp(float(now_ts), TZ).strftime("%Y%m%d")
-    return f"sltp-{normalize_symbol(symbol)}-{day}-g{max(1, int(generation))}"
+    cid = f"sltp-{normalize_symbol(symbol)}-{day}-g{max(1, int(generation))}"
+    if str(owner or "").startswith(OWNER_LLM_PREFIX):
+        name = str(owner).split(":", 1)[1]
+        safe = "".join(ch for ch in name if ch.isalnum() or ch in "_-")[:24]
+        cid += f"-{safe or 'agent'}"
+    return cid
 
 
 def is_retryable(state_item: dict[str, Any] | None) -> bool:
@@ -1235,6 +1247,7 @@ async def run_sltp_cycle(
         key = rule_key(rule)
         st = state["rules"].setdefault(key, {"status": ST_ARMED})
         st["symbol"] = symbol
+        st["owner"] = str(rule.get("owner") or "")
         tick = (ticks or {}).get(symbol) or {}
         price = _to_float(tick.get("lastPrice"))
         summary["evaluated"] += 1
@@ -1722,7 +1735,9 @@ async def _execute_trigger(
     st["generation"] = generation
     # 当日同规则固定委托号：崩溃重试复用同号，由调度器幂等去重（不会重复下单）；
     # 换代重试（每次失败 generation+1）拿到**新号**，不会被自己的旧号挡成幂等命中。
-    cid = rule_client_order_id(symbol, now, generation)
+    cid = rule_client_order_id(
+        symbol, now, generation, owner=str(rule.get("owner") or "")
+    )
     remarks = f"sltp:{reason[:40]}" if reason else "sltp:trigger"
     order_data = {
         "symbol": symbol,
@@ -2114,7 +2129,11 @@ async def _apply_remainder_policy(
 
     # requote：撤旧挂新（保护价、当日额度按新委托重新计）
     requote_count = int(st.get("requote_count") or 0) + 1
-    cid = f"{rule_client_order_id(symbol, now, int(st.get('generation') or 1))}-r{requote_count}"
+    owner = str(st.get("owner") or "")
+    cid = (
+        f"{rule_client_order_id(symbol, now, int(st.get('generation') or 1), owner=owner)}"
+        f"-r{requote_count}"
+    )
     order_data = {
         "symbol": symbol,
         "side": "SELL",
@@ -2131,6 +2150,10 @@ async def _apply_remainder_policy(
         # 不假装它是新鲜行情。
         "ref_price": ref,
     }
+    if owner.startswith(OWNER_LLM_PREFIX):
+        agent_name = owner.split(":", 1)[1].strip()
+        if agent_name:
+            order_data["agent"] = agent_name
     try:
         resp = await deps.dispatch(order_data, user_id)
     except Exception as exc:  # noqa: BLE001
