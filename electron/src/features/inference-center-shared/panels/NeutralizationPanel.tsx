@@ -304,7 +304,6 @@ export function buildNeutralizationAdvice(
   const type = String(modelType || '').toLowerCase();
   const horizon = Number(horizonDays || 0);
   const isSequence =
-    type.includes('tft') ||
     type.includes('transformer') ||
     type.includes('gru') ||
     type.includes('lstm') ||
@@ -319,14 +318,63 @@ export function buildNeutralizationAdvice(
       detail: '请先用影子模式观察至少 20 个换股期，并同时记录 Top20 / Top50 两套口径。',
     };
   }
-  if (isSequence) {
+  if (type.includes('nativetft') || type.includes('tft')) {
     return {
       tone: 'avoid',
       label: '不建议',
-      title: 'NativeTFT / 序列模型不推荐中性化',
+      title: 'NativeTFT 系列不推荐中性化',
       detail:
-        '2025–2026 测试集实测：T+5 净 +90%→+56%，T+10 +388%→+82%，T+20 +228%→+61%；' +
-        '中性化会剥掉其主要收益来源（风格暴露）。',
+        '2025–2026 测试集实测（含 T+10 另一个 TFT）：T+5 净 +90%→+56%，T+10 +388%→+82%，' +
+        'T+20 +228%→+61%；中性化会剥掉其主要收益来源（风格暴露）。',
+    };
+  }
+  if (
+    type.includes('transformer') ||
+    type.includes('alstm') ||
+    type.includes('gru')
+  ) {
+    return {
+      tone: 'avoid',
+      label: '不建议',
+      title: 'Transformer / ALSTM / GRU 实测中性化后大幅下降',
+      detail:
+        'T+10（39 期）扣费净：Transformer +76%→+17%、ALSTM +51%→+14%、GRU +46%→+18%；' +
+        'Top50 同样下降。不要照搬树模型或 T+3 的结论。',
+    };
+  }
+  if (
+    type.includes('tcn') ||
+    type.includes('tabnet') ||
+    type.includes('mlp') ||
+    type.includes('linear')
+  ) {
+    return {
+      tone: 'avoid',
+      label: '不建议',
+      title: 'TCN / TabNet / MLP / Linear 实测中性化后下降',
+      detail:
+        'T+10（39 期）扣费净：TCN +56%→+37%、TabNet +62%→+53%、MLP +58%→+33%、' +
+        'Linear +40%→+27%；Top20/Top50 两个宽度都下降。',
+    };
+  }
+  if (type.includes('lstm')) {
+    return {
+      tone: 'caution',
+      label: '小仓位观察',
+      title: 'LSTM 是唯一实测改善的序列族',
+      detail:
+        'T+10（39 期）：Top20 净 +21.1%→+74.3%，Top50 +25.1%→+36.4%；' +
+        '但最大回撤同时扩大（-20.3%→-30.0%），只建议小仓位影子。',
+    };
+  }
+  if (isSequence) {
+    return {
+      tone: 'unknown',
+      label: '待验证',
+      title: '该序列模型族暂无同口径中性化实测',
+      detail:
+        '目前只验证了 NativeTFT / Transformer / ALSTM / GRU / LSTM / TCN；' +
+        '其它序列结构请先影子观察，不要照搬已有结论。',
     };
   }
   if (horizon === 3 && type.includes('catboost')) {
