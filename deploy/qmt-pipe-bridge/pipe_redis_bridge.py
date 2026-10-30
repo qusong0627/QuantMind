@@ -1096,8 +1096,29 @@ def watchdog_config_loop():
             if bool(CFG.get('reload.enabled')):
                 key = str(CFG.get('reload.key') or 'qm:qmt:pipe:reload')
                 if R.get(key):
+                    # 自重启：Windows 上 os.execv 不引用含空格的 sys.executable
+                    # （实测 "C:\Program Files\..." 被拆成两个参数，进程直接死）。
+                    # 用 subprocess 拉起新进程，成功才退出；失败保持原进程存活——
+                    # 绝不能因一次热重载把桥弄下线（2026-10-30 实测看门狗兜不住）。
+                    spawn = None
+                    try:
+                        import subprocess
+                        spawn = subprocess.Popen(
+                            [sys.executable, '-u', os.path.abspath(__file__)],
+                            close_fds=True,
+                            creationflags=(
+                                getattr(subprocess, 'DETACHED_PROCESS', 0)
+                                | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+                            ),
+                        )
+                    except Exception as exc:
+                        log('reload spawn failed: %r (keep running)' % (exc,))
+                        R.delete(key)
+                        time.sleep(10)
+                        continue
                     R.delete(key)
-                    log('reload requested via %s -> exiting for watchdog restart' % key)
+                    log('reload requested via %s -> spawned pid=%s, exiting old' %
+                        (key, getattr(spawn, 'pid', '?')))
                     time.sleep(0.2)
                     os._exit(0)
         except Exception as exc:
