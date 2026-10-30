@@ -113,8 +113,13 @@ def compute_order(bars: list, cash: float, pct: float, code: str = "") -> dict:
         return {"ok": False, "reason": "无有效价格", "rule": gate_rules.DATA_NO_QUOTE}
     chg = (price - prev_close) / prev_close * 100
     # 涨停/跌停/停牌过滤（板块口径 ±10%/±20%/±30%；停牌=无最新 bar 或成交量为 0）
-    from ashare_rules import (MIN_LOT_SLACK, at_limit_down, at_limit_up,
-                              min_buy_cost, min_buy_qty, round_buy_qty)
+    from ashare_rules import (
+        MIN_LOT_SLACK,
+        at_limit_down,
+        at_limit_up,
+        min_buy_qty,
+        round_buy_qty,
+    )
     from live_fills import buy_limit_and_cost          # 限价口径的唯一出处
 
     if at_limit_up(code, chg):
@@ -124,12 +129,15 @@ def compute_order(bars: list, cash: float, pct: float, code: str = "") -> dict:
     if not last.get("volume"):
         return {"ok": False, "reason": "停牌或无成交", "rule": gate_rules.SYMBOL_HALTED}
     budget = cash * pct
-    raw_vol = round_buy_qty(code, int(budget / price))
-    # 资金量判据（2026-09-09）：最小可买股数（科创板 200，其余 100）× 现价 > 单票预算
-    # → 这只票该 agent 根本买不起。提示词侧 filter_affordable 已按同一口径整行剔除，
-    # 这里兜底（模型从对话历史/记忆里报出的、或预算刚被其他成交吃掉的情况）。
-    need = min_buy_cost(code, price)
-    if raw_vol <= 0 or raw_vol * price > budget * MIN_LOT_SLACK:
+    # 额度必须按**限价**卡（现价+1%）：按现价配额时成本天然超预算 1%，
+    # per_stock_pct=1.0 的 agent 几乎每只票都会被自己的限价挤掉（2026-10-30 实测）。
+    limit_price = buy_limit_and_cost(price, 0, "cn")[0]
+    raw_vol = round_buy_qty(code, int(budget / limit_price))
+    # 资金量判据（2026-09-09）：最小可买股数（科创板 200，其余 100）× 限价 >
+    # 单票预算 → 这只票该 agent 根本买不起。提示词侧 filter_affordable 已按同一
+    # 口径整行剔除，这里兜底。
+    need = min_buy_qty(code) * limit_price
+    if raw_vol <= 0 or raw_vol * limit_price > budget * MIN_LOT_SLACK:
         return {"ok": False,
                 "reason": f"资金不足：最小可买 {min_buy_qty(code)} 股需 ¥{need:,.0f}"
                           f" > 单票预算 ¥{budget:,.0f}（剩余额度×{pct:.0%}）",
