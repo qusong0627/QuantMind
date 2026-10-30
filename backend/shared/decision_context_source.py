@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -249,6 +250,45 @@ def snapshot_age_min(snap: Mapping[str, Any] | None, now: datetime) -> float | N
     return None
 
 
+_BRIDGE_CLIENT: Any = None
+_BRIDGE_LOCK = threading.Lock()
+
+
+def _bridge_fallback_enabled() -> bool:
+    """桥缓存兜底开关（``QM_SNAPSHOT_BRIDGE_FALLBACK``，默认开）。"""
+    return str(os.getenv("QM_SNAPSHOT_BRIDGE_FALLBACK", "on")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _bridge_client() -> Any:
+    """桥缓存 Redis（同实例 db5，QMT tap/sweep 写入）。懒加载，失败返回 None。"""
+    global _BRIDGE_CLIENT
+    if _BRIDGE_CLIENT is not None:
+        return _BRIDGE_CLIENT
+    with _BRIDGE_LOCK:
+        if _BRIDGE_CLIENT is not None:
+            return _BRIDGE_CLIENT
+        try:
+            import redis as _redis
+
+            _BRIDGE_CLIENT = _redis.Redis(
+                host=os.getenv("REDIS_HOST", "redis"),
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                db=int(os.getenv("QM_SNAPSHOT_BRIDGE_DB", "5")),
+                password=os.getenv("REDIS_PASSWORD") or None,
+                decode_responses=True,
+                socket_connect_timeout=0.5,
+                socket_timeout=1.0,
+            )
+        except Exception:  # noqa: BLE001 - 无兜底只降级
+            _BRIDGE_CLIENT = None
+        return _BRIDGE_CLIENT
+
+
 def read_snapshots(client: Any, codes: Iterable[str]) -> dict[str, Mapping[str, Any]]:
     """批量读快照 Hash（pipeline，逐只缺键就是缺键）。``code`` 用 suffix 形态做键。
 
@@ -286,6 +326,21 @@ def read_snapshots(client: Any, codes: Iterable[str]) -> dict[str, Mapping[str, 
         # 先到的键形赢（后缀式在前）——两套都 miss 才是真缺键
         if data and symbol not in out:
             out[symbol] = data
+    # 桥缓存兜底（2026-10-30 全市场缓存）：主行情库没有的标的，从 db5 的
+    # QMT tap/sweep 快照补。只补缺口，不覆盖主源（多源口径仍以平台行情为准）。
+    missing = sorted({suffix for _k, suffix in keys if suffix and suffix not in out})
+    if missing and _bridge_fallback_enabled():
+        try:
+            bridge = _bridge_client()
+            if bridge is not None:
+                bpipe = bridge.pipeline(transaction=False)
+                for suffix in missing:
+                    bpipe.hgetall(f"market:snapshot:{suffix}")
+                for suffix, data in zip(missing, bpipe.execute(), strict=True):
+                    if data and suffix not in out:
+                        out[suffix] = data
+        except Exception:  # noqa: BLE001 - 兜底失败只用主源
+            pass
     return out
 
 

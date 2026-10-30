@@ -33,6 +33,8 @@ _PLENTIFUL_MEMORY_GB = 512.0
 def _disable_quote_cache(monkeypatch):
     """单测不连真实 Redis 行情缓存（2026-10-30 P3）；用例可显式改回 on。"""
     monkeypatch.setenv("QM_QUOTE_CACHE", "off")
+    # 快照读取的桥缓存兜底也关：单测只喂假 Redis，不连真实 db5。
+    monkeypatch.setenv("QM_SNAPSHOT_BRIDGE_FALLBACK", "off")
 
 
 @pytest.fixture(autouse=True)

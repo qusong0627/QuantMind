@@ -711,3 +711,31 @@ def test_build_context_empty_pool_and_direction_missing_marker() -> None:
         ]
         == MISSING
     )
+
+
+def test_read_snapshots_falls_back_to_bridge_cache(monkeypatch) -> None:
+    """主行情库缺的标的从桥缓存（db5 QMT tap/sweep）补；主源永远优先。"""
+    from backend.shared import decision_context_source as dcs
+
+    primary = _FakeRedis({"market:snapshot:600036.SH": {"Now": "40.82"}})
+    bridge = _FakeRedis(
+        {"market:snapshot:000001.SZ": {"price": "11.5", "pre_close": "11.3"}}
+    )
+    monkeypatch.setattr(dcs, "_BRIDGE_CLIENT", bridge)
+    monkeypatch.setenv("QM_SNAPSHOT_BRIDGE_FALLBACK", "on")
+
+    out = dcs.read_snapshots(primary, ["600036.SH", "000001.SZ"])
+
+    assert out["600036.SH"]["Now"] == "40.82"
+    assert out["000001.SZ"]["price"] == "11.5"
+
+
+def test_read_snapshots_bridge_fallback_disabled(monkeypatch) -> None:
+    from backend.shared import decision_context_source as dcs
+
+    primary = _FakeRedis({})
+    bridge = _FakeRedis({"market:snapshot:000001.SZ": {"price": "11.5"}})
+    monkeypatch.setattr(dcs, "_BRIDGE_CLIENT", bridge)
+    monkeypatch.setenv("QM_SNAPSHOT_BRIDGE_FALLBACK", "off")
+
+    assert dcs.read_snapshots(primary, ["000001.SZ"]) == {}
