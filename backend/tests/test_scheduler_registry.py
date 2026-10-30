@@ -308,6 +308,11 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "smart_money",
         # 港股聪明钱产物（重跑 = 立刻按全量重算一份；--date 不适用）
         "hk_smart_money",
+        # 市场分析 · 资金流预测/概率/板块方向：构建器内嵌在 market analysis 的
+        # celery 任务里，分发表单独挂入口供手工重跑（2026-10-30 补登记）
+        "flow_predictive",
+        "flow_probability",
+        "sector_direction",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）
