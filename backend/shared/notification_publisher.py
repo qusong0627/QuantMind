@@ -373,7 +373,11 @@ def publish_notification_to_admins(
             )
         ).fetchall()
     sent = 0
-    for user_id, tenant_id in admins:
+    for index, (user_id, tenant_id) in enumerate(admins):
+        # QQ 通道是**单 openid**（qq_notify._send_message 读全局配置），管理员 fanout
+        # 逐人推会让同一条告警在同一个 QQ 会话里出现 N 次（2026-10-30 实测：
+        # 两个 admin → QMT 管道异常/恢复、超时委托未核对全部双推）。站内卡片照旧
+        # 逐人落库，QQ 只由第一个人发送一次。
         if publish_notification(
             user_id=str(user_id),
             tenant_id=str(tenant_id),
@@ -383,7 +387,7 @@ def publish_notification_to_admins(
             level=level,
             action_url=action_url,
             expire_days=expire_days,
-            qq_alert=qq_alert,
+            qq_alert=bool(qq_alert and index == 0),
         ):
             sent += 1
     return sent, len(admins)

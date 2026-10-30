@@ -19,14 +19,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, or_, select
 
 from backend.services.trade_shared.models.enums import OrderStatus
 from backend.services.trade_shared.models.order import Order, TradingMode
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.market_sessions import (
+    is_market_session_active,
+    session_ranges_local,
+)
 from backend.shared.notification_publisher import publish_notification_async
+from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +275,30 @@ async def _scan_bridge_ack_timeout_once() -> int:
     return flagged_count
 
 
-async def _flag_stale_broker_managed_once() -> int:
+def _in_trading_session(symbol: str, now: datetime) -> bool:
+    """标的当前是否处于其市场的任一交易时段（含盘后固定价格）。"""
+    market = StockCodeUtil.detect_market(str(symbol or "")) or "CN"
+    return any(
+        is_market_session_active(market, session, now)
+        for session in session_ranges_local(market)
+    )
+
+
+def _stale_already_notified(order_id: object) -> bool:
+    """同一条悬挂委托只推一次（7 天）——备注标记会被桥每 30s 同步覆盖，不能靠它去重。"""
+    try:
+        from backend.services.trade_shared.redis_client import get_redis
+
+        redis = get_redis()
+        if redis.client is None:
+            return False
+        key = f"qm:order:stale_notified:{order_id}"
+        return not bool(redis.client.set(key, "1", ex=7 * 86400, nx=True))
+    except Exception:  # noqa: BLE001 Redis 不可用 → 退回旧行为（可能重复，但不丢告警）
+        return False
+
+
+async def _flag_stale_broker_managed_once(now: datetime | None = None) -> int:
     """对长时间未成交的托管委托（桥/QMT 镜像单）只提醒、不改状态。
 
     这类委托的终态由桥/轮询器回写（撤单、废单、成交），本地判死会造成
@@ -278,6 +306,7 @@ async def _flag_stale_broker_managed_once() -> int:
     后续成交回报撞上终态守卫。超时后仅标记一次并推送提醒，交人工决定
     是否撤单（QMT 单可用控制面/委托页撤单；桥单由桥侧处理）。
     """
+    now = now or datetime.now(timezone.utc)
     cutoff = datetime.now() - timedelta(minutes=_TIMEOUT_MINUTES)
     flagged_count = 0
 
@@ -303,6 +332,8 @@ async def _flag_stale_broker_managed_once() -> int:
 
         for order in orders:
             try:
+                if not _in_trading_session(order.symbol, now):
+                    continue  # 收盘后不再每 5 分钟提醒；收盘核对另有一次性告警
                 order.remarks = (
                     f"{(order.remarks or '').strip()} "
                     f"{_STALE_PENDING_MARKER} [pending_over={_TIMEOUT_MINUTES}m "
@@ -318,6 +349,12 @@ async def _flag_stale_broker_managed_once() -> int:
                     order.symbol,
                     order.remarks,
                 )
+                if _stale_already_notified(order.order_id):
+                    logger.info(
+                        "stale pending order %s already notified (7d dedupe); skip push",
+                        order.order_id,
+                    )
+                    continue
                 try:
                     await publish_notification_async(
                         user_id=str(order.user_id),

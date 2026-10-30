@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -8,6 +8,9 @@ import pytest
 
 from backend.services.trade_shared.models.enums import OrderSide, OrderStatus, TradingMode
 from backend.services.trade.services import order_timeout_scanner
+
+#: 盘中时刻（北京时间 2026-10-30 10:00）——时段判断与周一无关，固定值即可。
+_IN_SESSION = datetime(2026, 10, 30, 10, 0, tzinfo=timezone(timedelta(hours=8)))
 
 
 class _ScalarResult:
@@ -84,7 +87,7 @@ async def test_bridge_ack_timeout_marks_pending_review_without_rejecting(monkeyp
 
 @pytest.mark.asyncio
 async def test_bridge_ack_timeout_skips_already_flagged_order(monkeypatch):
-    order = SimpleNamespace(
+    order = SimpleNamespace(  # noqa: F841  场景说明：该单已被标记，查询不会返回它
         order_id=uuid4(),
         tenant_id="default",
         user_id=1001,
@@ -299,8 +302,9 @@ async def test_flag_stale_broker_managed_marks_without_expiring(monkeypatch):
 
     monkeypatch.setattr(order_timeout_scanner, "publish_notification_async", _fake_notification)
     monkeypatch.setattr(order_timeout_scanner, "_TIMEOUT_MINUTES", 30)
+    monkeypatch.setattr(order_timeout_scanner, "_stale_already_notified", lambda _oid: False)
 
-    count = await order_timeout_scanner._flag_stale_broker_managed_once()
+    count = await order_timeout_scanner._flag_stale_broker_managed_once(now=_IN_SESSION)
 
     assert count == 1
     assert session.committed is True
@@ -339,4 +343,75 @@ async def test_flag_stale_broker_managed_skips_already_flagged(monkeypatch):
     count = await order_timeout_scanner._flag_stale_broker_managed_once()
 
     assert count == 0
+    assert notifications == []
+
+
+@pytest.mark.asyncio
+async def test_flag_stale_skips_outside_trading_session(monkeypatch):
+    """收盘后不再每 5 分钟提醒（2026-10-30 实测：一条悬挂单推了 40+ 次）。"""
+    order = SimpleNamespace(
+        order_id=uuid4(),
+        tenant_id="default",
+        user_id="00000001",
+        symbol="600036.SH",
+        side=OrderSide.BUY,
+        trading_mode=TradingMode.REAL,
+        status=OrderStatus.SUBMITTED,
+        submitted_at=datetime.now() - timedelta(minutes=40),
+        remarks="mirror:internal_dispatcher:SIMULATION",
+    )
+    session = _StaleFilterSession([order])
+    notifications = []
+    monkeypatch.setattr(
+        "backend.services.trade.services.order_timeout_scanner.get_session",
+        lambda: _FakeSessionContext(session),
+    )
+
+    async def _fake_notification(**kwargs):
+        notifications.append(kwargs)
+        return None
+
+    monkeypatch.setattr(order_timeout_scanner, "publish_notification_async", _fake_notification)
+    monkeypatch.setattr(order_timeout_scanner, "_TIMEOUT_MINUTES", 30)
+
+    count = await order_timeout_scanner._flag_stale_broker_managed_once(
+        now=datetime(2026, 10, 30, 16, 0, tzinfo=timezone(timedelta(hours=8)))
+    )
+
+    assert count == 0
+    assert notifications == []
+
+
+@pytest.mark.asyncio
+async def test_flag_stale_dedupes_push_per_order(monkeypatch):
+    """备注标记会被桥同步覆盖；Redis 去重保证同一条悬挂单只推一次。"""
+    order = SimpleNamespace(
+        order_id=uuid4(),
+        tenant_id="default",
+        user_id="00000001",
+        symbol="600036.SH",
+        side=OrderSide.BUY,
+        trading_mode=TradingMode.REAL,
+        status=OrderStatus.SUBMITTED,
+        submitted_at=datetime.now() - timedelta(minutes=40),
+        remarks="mirror:internal_dispatcher:SIMULATION",
+    )
+    session = _StaleFilterSession([order])
+    notifications = []
+    monkeypatch.setattr(
+        "backend.services.trade.services.order_timeout_scanner.get_session",
+        lambda: _FakeSessionContext(session),
+    )
+
+    async def _fake_notification(**kwargs):
+        notifications.append(kwargs)
+        return None
+
+    monkeypatch.setattr(order_timeout_scanner, "publish_notification_async", _fake_notification)
+    monkeypatch.setattr(order_timeout_scanner, "_TIMEOUT_MINUTES", 30)
+    monkeypatch.setattr(order_timeout_scanner, "_stale_already_notified", lambda _oid: True)
+
+    count = await order_timeout_scanner._flag_stale_broker_managed_once(now=_IN_SESSION)
+
+    assert count == 1
     assert notifications == []

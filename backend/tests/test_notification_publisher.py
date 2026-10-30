@@ -57,6 +57,8 @@ def test_fanout_reaches_every_admin(monkeypatch):
     assert {c["user_id"] for c in calls} == {"10000001", "10000002"}
     assert all(c["type"] == "health" and c["level"] == "error" for c in calls)
     assert calls[1]["tenant_id"] == "tenant-b"
+    # QQ 通道是单 openid：管理员 fanout 只让第一个人触发 QQ，避免同一会话双推
+    assert [c["qq_alert"] for c in calls] == [True, False]
 
 
 @pytest.mark.unit
