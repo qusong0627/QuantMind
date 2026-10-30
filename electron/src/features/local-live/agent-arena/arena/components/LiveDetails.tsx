@@ -75,10 +75,10 @@ const PIPELINE_SIM = (market: Market, broker: string): PipelineRow[] => [
 /** A 股实盘闸门（系统侧强制，模型不可绕过） */
 const GATES_CN: { name: string; detail: string }[] = [
   { name: 'T+1 可卖量复核', detail: '当日买入部分不计入可卖，防止超卖被券商拒单。' },
-  { name: '单票集中度', detail: '单票买入额 ≤ 该模型剩余额度 × 20%。' },
+  { name: '单票集中度', detail: '单票买入额 ≤ 该模型剩余额度 × 策略配置比例（比例随交易策略走，不写死）。' },
   { name: '杠杆上限', detail: '持仓市值 ≤ 权益 × 1.5，超线由分钟级守护自动减仓。' },
   { name: '涨跌停纪律', detail: '涨停不追、跌停不接（避免在无流动性价格上成交）。' },
-  { name: '额度不透支', detail: '分账额度（每模型 ¥10 万）用尽即拒，不产生负现金。' },
+  { name: '额度不透支', detail: '分账额度（按交易策略逐模型配置）用尽即拒，不产生负现金。' },
   { name: '拒单重放', detail: '拒单自动登记为延期单，行情恢复后重放而非静默丢弃。' },
   { name: '行情停更硬闸', detail: '行情停更期间禁止基于价格的交易决策（不看旧价下单）。' },
   { name: '退出框架必填', detail: '缺止损 / 止盈 / 移动止损 / 失效条件的买卖决策作废。' },
@@ -173,7 +173,7 @@ export default function LiveDetails({
       <h4 className="ld-h">③ 智能体阵容（{roster.length} 个）</h4>
       {roster.length === 0 && <p className="ld-empty">该市场暂无启用中的智能体。</p>}
       {roster.map((r) => {
-        // A 股 PG 分账的 total_return 以 ¥10 万额度为基，但迁移起点可能低于额度
+        // A 股 PG 分账的 total_return 以策略额度为基，但迁移起点可能低于额度
         // （期初持仓未入账），拿它当业绩会把迁移缺口记成亏损。阵容展示区间收益，
         // 与模型详情「区间收益率」同一口径。
         const ret = market === 'cn'
@@ -214,7 +214,7 @@ export default function LiveDetails({
         </li>
         {market === 'cn' ? (
           <li>
-            <b>分账口径</b>：A 股每模型独立 ¥10 万虚拟子账户，持仓与收益按模型归属，互不挪用。
+            <b>分账口径</b>：A 股每模型独立分账额度（金额按交易策略配置，持仓页「额度已用 / 总额」为实时值），持仓与收益按模型归属，互不挪用。
           </li>
         ) : (
           <li>

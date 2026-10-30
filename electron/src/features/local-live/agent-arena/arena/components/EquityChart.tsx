@@ -17,7 +17,7 @@ export interface ChartLine {
   label: string;
   color: string;
   points: { t: number; v: number }[]; // v 为绝对净值
-  /** 名义基准金额（如实盘分账 ¥10 万）→ hover 时换算金额盈亏 */
+  /** 名义基准金额（= 该 agent 的策略额度，由调用方从账本/策略口径取）→ hover 时换算金额盈亏 */
   notional?: number;
   /** 整线虚线（空仓/现金恒定的平线用，保留信息量但不抢视线） */
   dash?: boolean;
@@ -353,7 +353,7 @@ const ChartStatic = memo(function ChartStatic({
                   }
                   // 金额换算：pct 模式图内点位已归一化到 100 起点（display 里做的），
                   // 直接用会按「点」报数（实测 ¥14,026 的台阶被写成 ¥14）——沿用 hover
-                  // 的同一口径 Δ/基准 × notional（分账 ¥10 万）。dollar/abs 线本就是金额。
+                  // 的同一口径 Δ/基准 × notional（该线名义额度）。dollar/abs 线本就是金额。
                   const baseV = l.points[0]?.v || 0;
                   const stepMoney =
                     mode === 'dollar' || l.abs
@@ -470,7 +470,7 @@ function HoverTip({
   const hl = display.lines.find((l) => l.id === hover.id);
   const base = hl && hl.points.length ? hl.points[0].v : null;
   const chg = base ? ((hover.v - base) / base) * 100 : null;
-  // 金额盈亏: abs 线 = 绝对增减额；其余按收益率 × 名义基准换算（分账 ¥10 万）
+  // 金额盈亏: abs 线 = 绝对增减额；其余按收益率 × 名义额度换算
   const pnlAmt = base
     ? hl?.abs
       ? hover.v - base
@@ -547,7 +547,7 @@ function HoverTip({
       )}
       <text x={tx + 6} y={ty + 53} fill="#666" fontSize={9}
         fontFamily="'Courier New', monospace">
-        {isBench ? '基准指数' : hover.label === '总账户' ? '通达信桥实时总资产' : hover.label === '分账合计' ? '分账合计净值（3 agent）' : hover.id.startsWith('real-ledger-') ? '实盘账户日终总资产 · 涨跌自首个记录日' : '虚拟净值（¥10万起步）'}
+        {isBench ? '基准指数' : hover.label === '总账户' ? '通达信桥实时总资产' : hover.label === '分账合计' ? '分账合计净值（3 agent）' : hover.id.startsWith('real-ledger-') ? '实盘账户日终总资产 · 涨跌自首个记录日' : hl?.notional ? `虚拟净值 · 金额按额度 ${fmtMoney(hl.notional, currency, 0)} 换算` : '虚拟净值'}
       </text>
       {extraH > 0 && (
         <g>

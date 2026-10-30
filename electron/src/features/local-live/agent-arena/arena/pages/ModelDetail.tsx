@@ -153,8 +153,9 @@ export default function ModelDetail({ market = 'cn', agent = '', onBack }: Model
     if (!isLive) return line;
     return {
       ...line,
-      // 实盘分账 ¥10 万名义本金：hover 金额换算与分账额度同口径
-      notional: 100000,
+      // 名义本金 = 该 agent 的策略额度（PG summary 的 start_equity，TradingPolicy
+      // 单一出处）；不再写死 ¥10 万——额度调到 ¥20 万后金额换算会少一半。
+      notional: perf.data.summary?.start_equity ?? undefined,
       fills: liveFills.map((f) => ({ t: new Date(f.ts).getTime(), side: f.side })),
     };
   }, [perf.data, isLive, name, liveFills]);

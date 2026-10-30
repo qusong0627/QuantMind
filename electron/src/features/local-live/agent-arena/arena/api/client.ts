@@ -66,7 +66,7 @@ export interface Summary {
   median_trade_size: number | null;
   median_hold_days: number | null;
   /** ── PG 实盘口径扩展（旧文件线没有这些键；缺失显示 —） ── */
-  /** 从净值序列首点起算的区间收益（total_return 恒以 ¥10 万本金为基） */
+  /** 从净值序列首点起算的区间收益（total_return 恒以策略额度为基） */
   period_return?: number | null;
   series_start_equity?: number;
   fills_count?: number;
@@ -572,7 +572,7 @@ export const fetchFutuOrders = async (
   return data?.orders ?? [];
 };
 
-// ---------- 实盘分账（每 agent ¥10 万虚拟子账户） ----------
+// ---------- 实盘分账（每 agent 独立策略额度） ----------
 
 export interface LedgerPosition {
   code: string;
@@ -662,7 +662,7 @@ export interface LiveEquityPoint {
 export interface LiveEquity {
   /** 总账户（桥实时总资产） */
   total: LiveEquityPoint[];
-  /** 每 agent 分账虚拟净值（¥10 万起：虚拟现金 + 名下持仓 × 实时价） */
+  /** 每 agent 分账虚拟净值（策略额度起：虚拟现金 + 名下持仓 × 实时价） */
   agents: Record<string, LiveEquityPoint[]>;
 }
 

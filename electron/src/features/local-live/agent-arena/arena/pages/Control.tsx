@@ -75,7 +75,7 @@ export default function Control() {
   const metrics = usePolling(() => fetchMetrics(), [], 30000);
   const overview = usePolling(() => fetchOverview(), [], 30000);
   const exchange = usePolling(fetchExchangeStatus, [], 30000);
-  // 实盘分账(A股, 通达信桥): 总资产 + 每 agent ¥10 万虚拟子账户, 20 秒刷新
+  // 实盘分账(A股, 通达信桥): 总资产 + 每 agent 独立策略额度, 20 秒刷新
   const liveAcct = usePolling(() => fetchLiveAccount(), [], 20000);
   const liveLedger = usePolling(() => fetchLiveLedger(), [], 20000);
   const liveEquity = usePolling(() => fetchLiveEquity(), [], 20000);
@@ -215,7 +215,7 @@ export default function Control() {
         )}
       </section>
 
-      {/* A股实盘分账(通达信桥) —— 总账户持仓 + 每 agent ¥10 万虚拟子账户 */}
+      {/* A股实盘分账(通达信桥) —— 总账户持仓 + 每 agent 独立策略额度 */}
       {liveAcct.data ? (
         <section className="mk-section">
           <div className="mk-head">
@@ -241,7 +241,7 @@ export default function Control() {
                   const pts = liveEquity.data?.agents?.[name] ?? [];
                   const nav = pts.length ? pts[pts.length - 1].value : null;
                   // 区间收益：从序列首点起算（= PG 的 period_return 同口径）。
-                  // 不能用 nav / quota：迁移起点低于 ¥10 万额度，拿额度当基准会把
+                  // 不能用 nav / quota：迁移起点低于策略额度，拿额度当基准会把
                   // 期初持仓未入账的缺口记成一笔亏损（2026-10-20 审查 HIGH）。
                   const ret =
                     nav != null && pts.length >= 2 && pts[0].value > 0
@@ -390,7 +390,7 @@ export default function Control() {
                   <tbody>
                     {rows.map((r) => {
                       const s = r.summary;
-                      // A 股 PG 账本用区间收益（total_return 以 ¥10 万额度为基，
+                      // A 股 PG 账本用区间收益（total_return 以策略额度为基，
                       // 迁移起点低于额度，直接展示会把期初缺口记成亏损）
                       const ret = m === 'cn' ? s?.period_return ?? null : s?.total_return ?? null;
                       return (

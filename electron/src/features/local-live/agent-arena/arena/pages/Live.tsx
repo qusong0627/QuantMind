@@ -411,7 +411,7 @@ export default function Live() {
     const eq = liveEq;
     // 实盘采样必须用完整时间戳 ts（含时刻），date 只是 YYYY-MM-DD 会把当天所有点挤到零点
     const toEq = (v: number, ts: string) => ({ date: ts, cash: 0, market_value: 0, equity: v });
-    // A股实盘优先：每 agent 分账虚拟净值线（¥10 万起，通达信桥实时价）
+    // A股实盘优先：每 agent 分账虚拟净值线（起点=策略额度，通达信桥实时价）
     // + 总账户线（桥实时总资产）。序列 ≥2 点才画。
     if (market === 'cn' && eq) {
       // 空仓段虚线：成交事件反推 + （无事件时）净值最后变动点兜底
@@ -466,15 +466,18 @@ export default function Live() {
             const from = trailingFlatFrom(line.points.map((p) => p.v));
             groups.push([[line.points[from].t, Date.now()]]);
           }
+          const quota = liveLedger.data?.agents?.[name]?.quota;
           return {
             ...line,
-            notional: 100000, // 分账名义基准: hover 换算金额盈亏
+            // 名义本金 = 该 agent 的策略额度（/live/ledger 下发，TradingPolicy 单一出处）；
+            // 取不到就不换算（hover 只显示收益率），绝不回退成固定的 ¥10 万。
+            notional: quota && quota > 0 ? quota : undefined,
             dashSegs: tsToDashSegs(line.points, groups),
             fills: fillsOfAgent(name),
           };
         });
       // 总账户线（¥92.5 万量级）只兜底：没有任何分账线可画时才显示。
-      // 用户口径 = 分账 ¥10 万，总账户已买很多、与 10 万不具可比性。
+      // 用户口径 = 各 agent 的分账额度，总账户已买很多、与分账不具可比性。
       const totalLine =
         agentLines.length === 0 && (eq.total ?? []).length >= 2
           ? toChartLine(
@@ -675,7 +678,7 @@ export default function Live() {
     if (market === 'cn') return 0;
     return simEntries.length;
   }, [market, livePositions, livePosDated, simEntries, tdxPos]);
-  // 实盘分账账本（每 agent ¥10 万虚拟子账户，按模型显示各自持仓）
+  // 实盘分账账本（每 agent 独立策略额度，按模型显示各自持仓）
   // （hook 上移：空仓虚线判定在 lines memo 里要用）
 
   // ---------- 滚动价格条（当前市场全部 agent 持仓股票最新价） ----------
@@ -1442,7 +1445,7 @@ export default function Live() {
                   market={market}
                   agent={p.agent}
                   balance={p.summary?.end_equity ?? null}
-                  // A股 PG 账本：区间收益（迁移起点可能低于 ¥10 万额度，
+                  // A股 PG 账本：区间收益（迁移起点可能低于策略额度，
                   // total_return 会把迁移缺口算成亏损）；港美股沿用原口径
                   ret={
                     market === 'cn'

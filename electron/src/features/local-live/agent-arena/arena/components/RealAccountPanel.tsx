@@ -284,7 +284,7 @@ export default function RealAccountPanel({
       </div>
       <div className="ra-chan-note">
         {cur === 'tdx'
-          ? '通达信桥：QuantMind 实盘决策的下单与成交回报通道（各模型 ¥10 万分账）。'
+          ? '通达信桥：QuantMind 实盘决策的下单与成交回报通道（各模型独立分账，额度按交易策略配置）。'
           : '迅投 QMT：账户读取通道，与通达信桥互为独立佐证；本系统未接其下单链路，不参与决策与执行。'}
       </div>
 

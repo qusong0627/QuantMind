@@ -107,7 +107,7 @@ const AgentLedgerBody = () => {
             market={market}
             agent={p.agent}
             // 与实况页 / 模型详情同一口径：余额 = 账本重建的期末权益；
-            // A 股用区间收益率（total_return 以 ¥10 万额度为基，迁移起点低于额度，
+            // A 股用区间收益率（total_return 以策略额度为基，迁移起点低于额度，
             // 拿它展示等于把期初持仓未入账的缺口记成亏损）。
             balance={p.summary?.end_equity ?? null}
             ret={market === 'cn' ? p.summary?.period_return ?? null : p.summary?.total_return ?? null}
