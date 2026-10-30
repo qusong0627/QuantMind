@@ -162,9 +162,14 @@ class SimulationPendingOrderWorker:
                         )
                         await session.commit()
 
+                        # 余量重试口径：v1 SimOrder.filled_quantity 是成交进度唯一真相，
+                        # v2 投影 quantity 恒为委托量，不再承载余量。
+                        remaining_qty = float(getattr(runtime_order, "quantity", 0) or 0) - float(
+                            getattr(runtime_order, "filled_quantity", 0) or 0
+                        )
                         execution_result = await engine.execute_order(
                             runtime_order,
-                            requested_quantity=float(projection_order.quantity or 0.0),
+                            requested_quantity=max(0.0, remaining_qty),
                         )
                         if not execution_result.success:
                             await engine.mark_rejected(

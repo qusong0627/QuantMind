@@ -12,6 +12,46 @@ from backend.services.simulation.models.order import OrderStatus, SimOrder
 from backend.services.simulation.schemas.order import SimOrderCreate
 
 
+def build_order_projection(order, *, trigger_source: str):
+    """Build a SimulationOrderV2 row mirroring a SimOrder (caller adds+flushes).
+
+    Single source of truth for hosted/risk/manual projection inserts so every
+    execution path lands in the v2 ledger. `quantity` is ALWAYS the original
+    ordered quantity (same semantics as SimOrder.quantity) — fill progress is
+    tracked in SimOrder.filled_quantity + SimulationFill rows and must never
+    be written back into this column (see execution_engine.apply_filled).
+    """
+    from backend.services.simulation.models.order_v2 import SimulationOrderV2
+
+    status = getattr(order, "status", None)
+    status_str = getattr(status, "value", status)
+    tenant = str(getattr(order, "tenant_id", "default"))
+    user = str(getattr(order, "user_id", ""))
+    strategy_id = getattr(order, "strategy_id", None)
+    side = getattr(order, "side", "")
+    order_type = getattr(order, "order_type", "")
+    position_side = getattr(order, "position_side", "long")
+    return SimulationOrderV2(
+        order_id=getattr(order, "order_id", None),
+        tenant_id=tenant,
+        user_id=user,
+        strategy_id=str(strategy_id) if strategy_id is not None else None,
+        account_id=f"sim:{tenant}:{user}",
+        portfolio_id=int(getattr(order, "portfolio_id", 0) or 0),
+        legacy_order_id=getattr(order, "id", None),
+        symbol=str(getattr(order, "symbol", "")),
+        side=str(getattr(side, "value", side)),
+        position_side=str(getattr(position_side, "value", position_side) or "long"),
+        trade_action=getattr(order, "trade_action", None),
+        order_type=str(getattr(order_type, "value", order_type)),
+        time_in_force="DAY",
+        quantity=float(getattr(order, "quantity", 0) or 0.0),
+        price=getattr(order, "price", None),
+        trigger_source=trigger_source,
+        status=str(status_str or "pending"),
+    )
+
+
 class SimOrderService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -214,7 +254,7 @@ class SimOrderService:
                         order_id=getattr(order, "order_id", None),
                         tenant_id=str(getattr(order, "tenant_id", "default")),
                         user_id=str(getattr(order, "user_id", "")),
-                        account_id=f"{getattr(order, 'tenant_id', 'default')}:{getattr(order, 'user_id', '')}",
+                        account_id=f"sim:{getattr(order, 'tenant_id', 'default')}:{getattr(order, 'user_id', '')}",
                         symbol=str(getattr(order, "symbol", "")),
                         side=str(
                             getattr(

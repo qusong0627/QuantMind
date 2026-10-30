@@ -327,21 +327,30 @@ class RebalanceCalculator:
         }
         add_pool = [s for s in target_signals if s.symbol not in held_with_vol]
         add_list = add_pool[:fundable]
+        skipped_unfunded = [s.symbol for s in add_pool[fundable:]]
+        skipped_no_quote: list[str] = []
+        skipped_zero_qty: list[str] = []
         if add_list and freed_value > 0:
             per_value = freed_value / len(add_list)
             for s in add_list:
                 quote = quotes.get(s.symbol)
                 if not quote or quote.current_price <= 0:
+                    skipped_no_quote.append(s.symbol)
                     continue
                 lot = self._lot_for(s.symbol, strategy)
                 qty = int(per_value / quote.current_price // lot) * lot
                 if qty > 0:
                     target[s.symbol] = qty
+                else:
+                    skipped_zero_qty.append(s.symbol)
         logger.info(
-            "RebalanceCalculator: Dropout 对账 可释放标的=%d 释放资金=%.2f 新增候选=%d",
+            "RebalanceCalculator: Dropout 对账 可释放标的=%d 释放资金=%.2f 新增候选=%d unfunded=%s no_quote=%s zero_qty=%s",
             fundable,
             freed_value,
             len(add_list),
+            ",".join(skipped_unfunded[:10]),
+            ",".join(skipped_no_quote[:10]),
+            ",".join(skipped_zero_qty[:10]),
         )
         return target
 

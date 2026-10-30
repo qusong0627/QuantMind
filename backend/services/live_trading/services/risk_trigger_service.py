@@ -534,6 +534,7 @@ async def _default_execute_sim_sell(
     from backend.services.simulation.services.execution_engine import (
         SimulationExecutionEngine,
     )
+    from backend.services.simulation.services.order_service import build_order_projection
     from backend.services.trade_shared.simulation_manager import SimulationAccountManager
 
     manager = SimulationAccountManager(redis)
@@ -548,6 +549,10 @@ async def _default_execute_sim_sell(
         remarks=f"risk_rule:{message}"[:500],
     )
     db.add(sim_order)
+    await db.flush()
+    # 止损单同样写入 v2 投影，否则 simulation_orders/fills 永远缺止损记录，
+    # 且 apply_filled 找不到投影会跳过 SimulationFill 写入。
+    db.add(build_order_projection(sim_order, trigger_source="risk"))
     await db.flush()
     result = await engine.execute_order(sim_order)
     if result.success:

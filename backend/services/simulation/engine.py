@@ -1098,12 +1098,19 @@ class SimulationEngine:
             kept = filter_buy_orders(orders, locks)
             dropped = len(orders) - len(kept)
             if dropped:
+                kept_ids = {id(o) for o in kept}
+                dropped_syms = [
+                    str(getattr(o, "symbol", ""))
+                    for o in orders
+                    if id(o) not in kept_ids
+                ]
                 logger.info(
-                    "SimulationEngine: 风控禁买过滤 tenant=%s user=%s dropped=%d frozen=%s",
+                    "SimulationEngine: 风控禁买过滤 tenant=%s user=%s dropped=%d frozen=%s dropped_list=%s",
                     tenant,
                     user_id,
                     dropped,
                     locks.account_frozen,
+                    ",".join(dropped_syms[:10]),
                 )
             return kept
         except Exception as exc:
@@ -1332,36 +1339,11 @@ class SimulationEngine:
         )
         db.add(sim_order)
         await db.flush()
-        from backend.services.simulation.models.order_v2 import SimulationOrderV2
-
-        db.add(
-            SimulationOrderV2(
-                order_id=sim_order.order_id,
-                tenant_id=tenant_id,
-                user_id=str(sim_order.user_id),
-                strategy_id=strategy_id or None,
-                account_id=f"sim:{tenant_id}:{sim_order.user_id}",
-                portfolio_id=int(sim_order.portfolio_id or 0),
-                legacy_order_id=sim_order.id,
-                symbol=sim_order.symbol,
-                side=sim_order.side.value,
-                position_side=str(
-                    getattr(
-                        getattr(sim_order, "position_side", "long"),
-                        "value",
-                        getattr(sim_order, "position_side", "long"),
-                    )
-                    or "long"
-                ),
-                trade_action=getattr(sim_order, "trade_action", None),
-                order_type=sim_order.order_type.value,
-                time_in_force="DAY",
-                quantity=float(sim_order.quantity or 0.0),
-                price=sim_order.price,
-                trigger_source="hosted",
-                status=sim_order.status.value,
-            )
+        from backend.services.simulation.services.order_service import (
+            build_order_projection,
         )
+
+        db.add(build_order_projection(sim_order, trigger_source="hosted"))
         await db.flush()
 
         # 闸门风控（管理后台 risk_rules）：在撮合前拦截，落 REJECTED 可审计。

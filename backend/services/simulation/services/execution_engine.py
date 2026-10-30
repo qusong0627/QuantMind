@@ -816,16 +816,17 @@ return tostring(granted)
                 )
             ).scalar_one_or_none()
             if projection_order is not None:
+                # quantity 保持建单时的委托量（与 SimOrder.quantity 同口径），
+                # 成交进度只看 SimOrder.filled_quantity + SimulationFill，
+                # 禁止写回余量/清零，否则已成交单数量永久丢失。
                 if partial:
-                    projection_order.quantity = max(
-                        0.0, requested_quantity - result.quantity
-                    )
+                    remaining = max(0.0, requested_quantity - result.quantity)
                     projection_order.status = OrderStatus.PENDING.value
                     projection_order.rejected_reason = (
-                        "partially_filled; remainder queued for current DAY session"
+                        "partially_filled; remainder "
+                        f"{remaining:.0f} queued for current DAY session"
                     )
                 else:
-                    projection_order.quantity = 0.0
                     projection_order.status = OrderStatus.FILLED.value
                     projection_order.rejected_reason = None
                 self.db.add(
