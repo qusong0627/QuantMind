@@ -58,7 +58,11 @@ DEFAULT_CONFIG = {
     'budget': {'window_s': 10, 'market_ms': 2000, 'rpc_preempt_queue': 1,
                # 订单队列积压闸：待处理订单请求 >= N 时直接 BRIDGE_BUSY 快速失败，
                # 避免调用方在单线程管道里干等 25s（2026-10-30 实测头阻塞）。
-               'order_preempt_queue': 3},
+               'order_preempt_queue': 3,
+               # 行情类请求让路闸：队列积压 >= N 时直接 BRIDGE_BUSY，
+               # 避免一次大批 get_full_tick 把单线程管道占住、订单排后面
+               # （2026-10-30 实测：50 只 ≈200ms/次）。
+               'market_preempt_queue': 2},
     'risk': {'enabled': True, 'max_order_amount': 200000, 'max_orders_per_min': 30,
              'max_deviation_pct': 5.0, 'blacklist_codes': [],
              'blacklist_name_keywords': ['ST', '退'],
@@ -76,7 +80,10 @@ DEFAULT_CONFIG = {
     'health': {'heartbeat_key': 'qm:qmt:pipe:heartbeat', 'metrics_key': 'qm:qmt:pipe:metrics',
                'interval_s': 5, 'ttl_s': 30},
     'tap': {'enabled': True, 'interval_s': 0.5, 'subscribe_refresh_s': 60,
-            'max_symbols': 250, 'respect_budget': False},
+            'max_symbols': 250, 'respect_budget': False,
+            # 全市场推送：指向 Redis 集合（成员为后缀式代码）即把订阅扩到全市场，
+            # 置空=只订持仓+指数+watchlist 的 250 只热集。
+            'universe_key': ''},
     'source_http': {'enabled': True, 'host': '127.0.0.1', 'port': 17720,
                     'stale_after_s': 30, 'allow_orders': False},
 }
@@ -309,6 +316,18 @@ def rpc_worker():
                 except Exception as exc:
                     STATE.note_error('rpc.reply', exc)
                 continue
+        if is_market_method(method):
+            busy = order_backlog_gate(
+                rpc_backlog(), CFG.get('budget.market_preempt_queue') or 0,
+                label='market')
+            if busy is not None:
+                resp = {'request_id': req.get('request_id'), 'ok': False, 'error': busy}
+                STATE.note_error('rpc.market_busy', busy)
+                try:
+                    write_reply(req, resp)
+                except Exception as exc:
+                    STATE.note_error('rpc.reply', exc)
+                continue
         gate = risk_gate(method, req.get('params') or {})
         if gate is not None:
             resp = {'request_id': req.get('request_id'), 'ok': False, 'error': gate}
@@ -383,12 +402,20 @@ def is_order_method(method):
     return str(method or '').lower() in ('order_stock', 'passorder', 'submit_order')
 
 
-def order_backlog_gate(backlog, limit):
-    """订单队列积压闸（纯函数）：待处理请求超限即快速失败，别让调用方干等 25s。"""
+_MARKET_METHODS = ('get_full_tick', 'get_instrument_detail', 'get_stock_list')
+
+
+def is_market_method(method):
+    """行情类只读方法（大批量拉取会长时间占用单线程管道）。"""
+    return str(method or '').lower() in _MARKET_METHODS
+
+
+def order_backlog_gate(backlog, limit, label='order'):
+    """队列积压闸（纯函数）：待处理请求超限即快速失败，别让调用方干等 25s。"""
     if int(limit or 0) <= 0:
         return None
     if int(backlog) >= int(limit):
-        return 'BRIDGE_BUSY: order queue backlog=%d >= %d' % (int(backlog), int(limit))
+        return 'BRIDGE_BUSY: %s queue backlog=%d >= %d' % (label, int(backlog), int(limit))
     return None
 
 
@@ -599,11 +626,8 @@ def _chunks(items, size):
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def write_snapshot(code, tick):
-    if not isinstance(tick, dict):
-        return
-    ts = time.time()
-    key = 'market:snapshot:%s' % code
+def _snapshot_mapping(code, tick, ts):
+    """tick → snapshot hash 字段（纯函数，便于批量写与单测）。"""
     bid_p = tick.get('bidPrice') or []
     bid_v = tick.get('bidVol') or []
     ask_p = tick.get('askPrice') or []
@@ -625,14 +649,55 @@ def write_snapshot(code, tick):
         mapping['bid%d_v' % (i + 1)] = bid_v[i] if i < len(bid_v) else None
         mapping['ask%d_p' % (i + 1)] = ask_p[i] if i < len(ask_p) else None
         mapping['ask%d_v' % (i + 1)] = ask_v[i] if i < len(ask_v) else None
+    return mapping
+
+
+def write_snapshot(code, tick):
+    if not isinstance(tick, dict):
+        return
+    ts = time.time()
+    mapping = _snapshot_mapping(code, tick, ts)
     pipe = R.pipeline()
-    pipe.hset(key, mapping=mapping)
-    pipe.expire(key, int(CFG.get('quotes.stale_after_s') or 10))
+    pipe.hset('market:snapshot:%s' % code, mapping=mapping)
+    pipe.expire('market:snapshot:%s' % code, int(CFG.get('quotes.stale_after_s') or 10))
     pipe.execute()
     with STATE.lock:
         STATE.quote_ts[code] = ts
         if tick.get('lastClose'):
             STATE.quote_pre_close[code] = float(tick['lastClose'])
+
+
+def write_snapshots_bulk(ticks, chunk=500):
+    """批量写快照：**一个 pipeline 写一批**，不是每只一次往返。
+
+    全市场（~5,400 只）0.5s 一轮时，逐只 pipeline 会变成 5,400 次往返
+    （本地 ~0.2ms 也要 1s+，直接拖垮 tap 循环）。分批写把往返压到 ~11 次。
+    """
+    if not isinstance(ticks, dict) or not ticks:
+        return 0
+    ts = time.time()
+    ttl = int(CFG.get('quotes.stale_after_s') or 10)
+    written = 0
+    items = list(ticks.items())
+    for start in range(0, len(items), max(1, int(chunk))):
+        pipe = R.pipeline(transaction=False)
+        batch = items[start : start + chunk]
+        for code, tick in batch:
+            if not isinstance(tick, dict):
+                continue
+            key = 'market:snapshot:%s' % code
+            pipe.hset(key, mapping=_snapshot_mapping(code, tick, ts))
+            pipe.expire(key, ttl)
+            written += 1
+        pipe.execute()
+        with STATE.lock:
+            for code, tick in batch:
+                if not isinstance(tick, dict):
+                    continue
+                STATE.quote_ts[code] = ts
+                if tick.get('lastClose'):
+                    STATE.quote_pre_close[code] = float(tick['lastClose'])
+    return written
 
 
 def poll_quotes(symbols):
@@ -751,6 +816,15 @@ _TAP_STATE = {'state': 'init', 'subscribed': [], 'last_error': '', 'last_drain_m
 def _tap_universe():
     with STATE.lock:
         syms = list(STATE.symbols_a)
+    # 可选全市场来源：Redis 集合（如 qm:universe:cn，由数据管线每日重建）。
+    # 置空则退回「持仓+指数+watchlist」，即当前 250 只热集口径。
+    universe_key = str(CFG.get('tap.universe_key') or '')
+    if universe_key:
+        try:
+            members = R.smembers(universe_key) or set()
+            syms = list(syms) + sorted(str(x) for x in members)
+        except Exception as exc:
+            STATE.note_error('tap.universe', exc)
     watch = [str(x) for x in (CFG.get('quotes.watchlist') or []) if x]
     out, seen = [], set()
     for code in syms + watch:
@@ -789,8 +863,7 @@ def tap_worker():
             data = rpc('quote_drain', {}, timeout=10) or {}
             _TAP_STATE['last_drain_ms'] = (time.perf_counter() - t0) * 1000.0
             ticks = data.get('ticks') or {}
-            for code, tick in ticks.items():
-                write_snapshot(code, tick)
+            write_snapshots_bulk(ticks)
             with STATE.lock:
                 STATE.tap_ticks += len(ticks)
                 STATE.tap_batches = data.get('batches') or 0

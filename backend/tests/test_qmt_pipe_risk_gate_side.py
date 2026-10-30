@@ -35,12 +35,33 @@ if not _MODULE_PATH.exists():  # pragma: no cover - 容器镜像不含 deploy/
 def _load_bridge_module(monkeypatch):
     """以桩模块加载桥脚本（生产依赖 redis / bigqmt 不在测试环境里）。"""
 
+    class _FakePipeline:
+        def __init__(self, parent):
+            self.parent = parent
+            self.ops = 0
+
+        def hset(self, *args, **kwargs):
+            self.ops += 1
+
+        def expire(self, *args, **kwargs):
+            self.ops += 1
+
+        def execute(self):
+            self.parent.pipelines.append(self.ops)
+            return []
+
     class _FakeRedis:
         def __init__(self, *args, **kwargs):
-            pass
+            self.pipelines = []
 
-        def pipeline(self):
-            return self
+        def pipeline(self, transaction=True):
+            return _FakePipeline(self)
+
+        def smembers(self, key):
+            return set()
+
+        def get(self, key):
+            return None
 
     redis_mod = types.ModuleType("redis")
     redis_mod.Redis = _FakeRedis
@@ -293,3 +314,45 @@ def test_enrich_failure_keeps_fail_open(bridge, monkeypatch):
 
     monkeypatch.setattr(bridge, "rpc", _boom)
     assert bridge.risk_gate("order_stock", _order("600996.SH", 100, 10.0, 23)) is None
+
+
+def test_market_method_detection(bridge):
+    assert bridge.is_market_method("get_full_tick")
+    assert bridge.is_market_method("get_instrument_detail")
+    assert not bridge.is_market_method("order_stock")
+    assert not bridge.is_market_method("query_stock_orders")
+
+
+def test_market_backlog_gate_labels(bridge):
+    busy = bridge.order_backlog_gate(2, 2, label="market")
+    assert busy and busy.startswith("BRIDGE_BUSY: market queue backlog=2")
+    assert bridge.order_backlog_gate(1, 2, label="market") is None
+
+
+def test_snapshot_mapping_is_pure(bridge):
+    mapping = bridge._snapshot_mapping(
+        "600036.SH", {"lastPrice": 40.0, "bidPrice": [39.9], "askPrice": [40.1]}, 123.0
+    )
+    assert mapping["last"] == 40.0
+    assert mapping["bid1_p"] == 39.9
+    assert mapping["ask1_p"] == 40.1
+    assert mapping["pre_close"] is None
+
+
+def test_write_snapshots_bulk_uses_one_pipeline_per_chunk(bridge):
+    """全市场批量写：500/批 → 1200 只只开 3 个 pipeline（不是 1200 次往返）。"""
+    ticks = {
+        f"60{i:04d}.SH": {"lastPrice": 1.0, "bidPrice": [1.0], "askPrice": [1.1]}
+        for i in range(1200)
+    }
+    written = bridge.write_snapshots_bulk(ticks, chunk=500)
+    assert written == 1200
+    assert len(bridge.R.pipelines) == 3
+    assert bridge.STATE.quote_ts
+
+
+def test_write_snapshots_bulk_skips_non_dict(bridge):
+    assert (
+        bridge.write_snapshots_bulk({"600036.SH": None, "000001.SZ": {"lastPrice": 1}})
+        == 1
+    )

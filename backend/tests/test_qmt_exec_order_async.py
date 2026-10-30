@@ -330,3 +330,31 @@ def test_classify_bridge_busy_code():
         _classify_error(RuntimeError("BRIDGE_BUSY: order queue backlog=4 >= 3"))
         == "BRIDGE_BUSY"
     )
+
+
+class _TickBackend:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def get_full_tick(self, codes: list[str]) -> dict:
+        self.calls.append(list(codes))
+        return {code: {"lastPrice": 1.0} for code in codes}
+
+
+@pytest.mark.asyncio
+async def test_get_full_tick_chunks_large_batches(monkeypatch):
+    """大批量拉行情必须分批：单个请求占住单线程管道的时间要短。"""
+    monkeypatch.setenv("QMT_TICK_CHUNK", "100")
+    backend = _TickBackend()
+    client = _client(backend)
+    client._get_redis = _noop_redis  # type: ignore[method-assign]
+
+    codes = [f"60{i:04d}.SH" for i in range(250)]
+    data = await client.get_full_tick(codes)
+
+    assert [len(call) for call in backend.calls] == [100, 100, 50]
+    assert len(data) == 250
+
+
+async def _noop_redis():
+    return _FakeRedis()

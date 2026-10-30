@@ -1062,15 +1062,32 @@ class QmtExecClient:
         return await self._call(self._get_backend(cfg).query_trades, retryable=True)
 
     async def get_full_tick(self, codes: list[str]) -> dict[str, Any]:
-        """批量实时盘口（止损执行器/守护轮询用）。空列表直接返回 ``{}`` 不打桥。"""
+        """批量实时盘口（止损执行器/守护轮询用）。空列表直接返回 ``{}`` 不打桥。
+
+        **内部分批**（``QMT_TICK_CHUNK``，默认 100）：管道是单线程的，一次拉
+        上千只会把管道占住数秒、订单排在后面（2026-10-30 实测 50 只 ≈200ms）。
+        分批后单个请求变短，订单可以在批次之间插队。
+        """
         qmt_codes = [_to_qmt_symbol(code) for code in (codes or [])]
         qmt_codes = [code for code in qmt_codes if code]
         if not qmt_codes:
             return {}
         cfg = self._require_enabled()
-        return await self._call(
-            self._get_backend(cfg).get_full_tick, codes=qmt_codes, retryable=True
-        )
+        backend = self._get_backend(cfg)
+        try:
+            chunk = max(1, int(os.getenv("QMT_TICK_CHUNK", "100")))
+        except (TypeError, ValueError):
+            chunk = 100
+        merged: dict[str, Any] = {}
+        for start in range(0, len(qmt_codes), chunk):
+            data = await self._call(
+                backend.get_full_tick,
+                codes=qmt_codes[start : start + chunk],
+                retryable=True,
+            )
+            if isinstance(data, dict):
+                merged.update(data)
+        return merged
 
     async def get_instrument_detail(self, code: str) -> dict[str, Any]:
         """合约详情（涨跌停价保护位来源；参数名为 ``code``，用 ``stock_code`` 桥会报错）。"""
