@@ -390,6 +390,11 @@ CREATE TABLE IF NOT EXISTS engine_signal_scores (
 
 CREATE INDEX IF NOT EXISTS idx_ess_run_id ON engine_signal_scores (run_id);
 CREATE INDEX IF NOT EXISTS idx_ess_trade_date ON engine_signal_scores (trade_date DESC);
+-- 研究总控 dossier 的「每 (market,source) 最新批次」查询靠这条索引做 index scan 首行；
+-- 缺它时 2,200 万行走 parallel seq scan + sort，20s statement_timeout 直接 QueryCanceled
+-- （2026-10-30 实测，连续四天模型分数不可读）。查询侧已改为 VALUES × LATERAL。
+CREATE INDEX IF NOT EXISTS idx_ess_market_source_date_ts
+    ON engine_signal_scores (market, source, trade_date DESC, signal_ts DESC NULLS LAST);
 
 -- ========================
 -- 13. ENGINE_DISPATCH_BATCHES

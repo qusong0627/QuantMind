@@ -503,8 +503,8 @@ def collect_trading(d: Dossier, env: dict[str, str], conn) -> None:
             group by 1 order by 3 desc
             """,
             (
-                d.day + " 00:00:00+08",
-                (date.fromisoformat(d.day) + timedelta(days=1)).isoformat()
+                _dash(d.day) + " 00:00:00+08",
+                (date.fromisoformat(_dash(d.day)) + timedelta(days=1)).isoformat()
                 + " 00:00:00+08",
             ),
         )
@@ -680,17 +680,27 @@ def collect_models(d: Dossier, env: dict[str, str], conn) -> None:
         # 最新批次（每个 market/source 一条）。
         # 排序先 trade_date 再 signal_ts：老批次有 signal_ts 为 NULL 的（NULLS FIRST
         # 会把 6 月的批抬到最新），按 trade_date 兜住；同日多批再由 signal_ts 取最新。
+        #
+        # **不要退回 `distinct on (market, source)` 全表版**（2026-10-30 实测）：
+        # 它在 2,200 万行上走 parallel seq scan + sort，20s statement_timeout 直接
+        # QueryCanceled——连续四天「模型分数不可读」就是它。改成 VALUES × LATERAL
+        # 后每个 (market,source) 用 idx_ess_market_source_date_ts 取首行，0.9ms。
         cur.execute(
             """
-            with latest as (
-              select distinct on (market, source) market, source, run_id, trade_date, signal_ts
-              from engine_signal_scores
-              where trade_date <= %s and source in ('batch', 'realtime')
-                and market in ('CN', 'CUSTOM')
-              order by market, source, trade_date desc, signal_ts desc nulls last
+            with combos(market, source) as (
+              values ('CN', 'batch'), ('CN', 'realtime'),
+                     ('CUSTOM', 'batch'), ('CUSTOM', 'realtime')
             )
-            select l.market, l.source, l.run_id, l.trade_date, l.signal_ts
-            from latest l order by l.market, l.source
+            select c.market, c.source, x.run_id, x.trade_date, x.signal_ts
+            from combos c
+            cross join lateral (
+              select run_id, trade_date, signal_ts
+              from engine_signal_scores
+              where market = c.market and source = c.source and trade_date <= %s
+              order by trade_date desc, signal_ts desc nulls last
+              limit 1
+            ) x
+            order by c.market, c.source
             """,
             (d.day,),
         )
@@ -754,6 +764,8 @@ def collect_models(d: Dossier, env: dict[str, str], conn) -> None:
                 lines.append(f"  尾部：{bottom}")
         # 与上一交易日对比（仅 CN batch）：每天只取当天**最后一批**。
         # 直接 group by trade_date 会把一天 30 多批一起平均，把「模型变化」洗成噪声。
+        # `limit 2` 必须在 CTE 内：不加会为**全部历史交易日**做 distinct（2,200 万行
+        # 上 20s 超时，2026-10-30 实测）；加了以后只扫最近两个交易日（~90ms）。
         cur.execute(
             """
             with per_day as (
@@ -761,6 +773,7 @@ def collect_models(d: Dossier, env: dict[str, str], conn) -> None:
               from engine_signal_scores
               where market='CN' and source='batch' and trade_date <= %s
               order by trade_date desc, signal_ts desc nulls last
+              limit 2
             )
             select p.trade_date,
                    avg(s.fusion_score),
