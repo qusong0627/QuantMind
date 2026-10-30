@@ -56,6 +56,11 @@ _REMARK_PREFIX = "qm"
 _REMARK_DIGEST_LEN = 16
 _REMARK_MAP_PREFIX = "quantmind:qmt_exec:remark:"
 _CLIENT_ID_MAP_PREFIX = "quantmind:qmt_exec:cid:"
+#: 本地返回的委托号（可能是 ``xt*`` 占位号）→ remark。
+#: 柜台随后分配的 order_sys_id 与本地号不同，撤单必须先按 remark 反查真号
+#: （2026-10-30 实测：占位号直接撤单 0/5 成功，悬空单风险）。
+_ORDER_ID_MAP_PREFIX = "quantmind:qmt_exec:oid:"
+_ORDER_ID_MAP_TTL_SECONDS = 24 * 3600
 _REMARK_TTL_SECONDS = 7 * 24 * 3600
 
 #: 超时委托待核对清单：客户端的发单超时 ≠ 没下单（管道拥塞时委托仍会落地）。
@@ -943,6 +948,52 @@ class QmtExecClient:
                 redact_secrets(exc, self._secret_hint()),
             )
 
+    async def _remember_order_id(self, order_id: str, remark: str) -> None:
+        """本地委托号 → remark 映射（撤单反查柜台真号用）。"""
+        if not order_id or not remark:
+            return
+        try:
+            redis = await self._get_redis()
+            await redis.set(
+                f"{_ORDER_ID_MAP_PREFIX}{order_id}",
+                remark,
+                ex=_ORDER_ID_MAP_TTL_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - 映射只影响撤单兜底
+            logger.warning(
+                "[QmtExec] 委托号映射写入失败 %s: %s",
+                order_id,
+                redact_secrets(exc, self._secret_hint()),
+            )
+
+    async def _resolve_cancel_id(self, order_id: str) -> str:
+        """按本地委托号反查柜台 ``order_sys_id``（占位号撤单必失败）。
+
+        链路：本地号 → Redis 映射拿 remark → ``query_orders`` 找在途委托 →
+        返回柜台委托号。任何一步拿不到都返回空串（调用方保留原始错误）。
+        """
+        try:
+            redis = await self._get_redis()
+            remark = await redis.get(f"{_ORDER_ID_MAP_PREFIX}{order_id}")
+        except Exception:  # noqa: BLE001
+            return ""
+        remark = str(remark or "").strip()
+        if not remark:
+            return ""
+        try:
+            orders = await self.query_orders()
+        except QmtExecError:
+            return ""
+        for order in orders:
+            if str(order.get("order_remark")) != remark:
+                continue
+            if str(order.get("status")) not in ("SUBMITTED", "PARTIALLY_FILLED"):
+                continue
+            real = str(order.get("order_sysid") or order.get("order_id") or "")
+            if real and real != order_id:
+                return real
+        return ""
+
     async def resolve_client_order_id(self, remark: str) -> str:
         """备注 → client_order_id（映射缺失时返回空串，由调用方走兜底匹配）。"""
         key = str(remark or "").strip()
@@ -1097,6 +1148,9 @@ class QmtExecClient:
             cid,
             async_mode,
         )
+        if result.get("order_id"):
+            # 本地号可能是 xt* 占位号：记下 本地号→remark，撤单时按 remark 反查柜台真号。
+            await self._remember_order_id(str(result["order_id"]), remark)
         if self._flag("record_orders", "QMT_RECORD_ORDERS", default=True):
             await self._record_order_row(
                 symbol=qmt_symbol,
@@ -1231,11 +1285,29 @@ class QmtExecClient:
 
     async def cancel_order(self, *, order_id: str, symbol: str = "") -> dict[str, Any]:
         cfg = self._require_enabled()
-        return await self._call(
-            self._get_backend(cfg).cancel_order,
-            order_id=str(order_id),
-            symbol=_to_qmt_symbol(symbol) if symbol else "",
-        )
+        backend = self._get_backend(cfg)
+        qmt_symbol = _to_qmt_symbol(symbol) if symbol else ""
+        try:
+            return await self._call(
+                backend.cancel_order, order_id=str(order_id), symbol=qmt_symbol
+            )
+        except QmtExecError as exc:
+            # 本地占位号（xt*）撤不动：按 remark 反查柜台真号再撤一次。
+            # 撤单是减风险动作，重试只针对**明确失败**（不是超时）——超时不重试。
+            if exc.code == "TIMEOUT":
+                raise
+            real = await self._resolve_cancel_id(str(order_id))
+            if not real:
+                raise
+            logger.info(
+                "[QmtExec] 撤单改用柜台委托号 %s -> %s（原错误 %s）",
+                order_id,
+                real,
+                exc.code,
+            )
+            return await self._call(
+                backend.cancel_order, order_id=real, symbol=qmt_symbol
+            )
 
 
 _singleton: QmtExecClient | None = None

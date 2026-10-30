@@ -27,6 +27,7 @@ from backend.services.live_trading.services.qmt_exec_client import (
 class _FakeRedis:
     def __init__(self) -> None:
         self.hashes: dict[str, dict[str, str]] = {}
+        self.values: dict[str, str] = {}
         self.expires: dict[str, int] = {}
 
     async def hset(self, key: str, field: str, value: str) -> None:
@@ -36,7 +37,12 @@ class _FakeRedis:
         self.expires[key] = ttl
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.hashes.setdefault(key, {})["__value__"] = value
+        self.values[key] = value
+        if ex:
+            self.expires[key] = ex
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
 
 
 class _AsyncBackend:
@@ -199,3 +205,88 @@ async def test_ledger_failure_does_not_break_order(monkeypatch):
         symbol="600036.SH", side="BUY", quantity=100, price=40.0
     )
     assert result["order_id"] == "520"
+
+
+class _CancelBackend:
+    """占位号（xt*）撤单必败、柜台真号可撤；query_orders 返回在途委托。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.orders = [
+            {
+                "order_id": "7322",
+                "order_sysid": "7322",
+                "order_remark": "qmabc",
+                "status": "SUBMITTED",
+                "symbol": "SH601398",
+            }
+        ]
+
+    def cancel_order(self, *, order_id: str, symbol: str) -> dict:
+        self.calls.append(order_id)
+        if order_id.startswith("xt"):
+            raise QmtExecError("撤单被拒（返回 -1）", code="CANCEL_REJECTED")
+        return {"success": True, "order_id": order_id}
+
+    def query_orders(self, cancelable_only: bool = False) -> list[dict]:
+        return list(self.orders)
+
+
+@pytest.mark.asyncio
+async def test_cancel_resolves_placeholder_id_by_remark():
+    """本地占位号 xt* 撤不动 → 按 remark 反查柜台真号再撤（2026-10-30 实测）。"""
+    fake_redis = _FakeRedis()
+
+    async def _redis():
+        return fake_redis
+
+    backend = _CancelBackend()
+    client = _client(backend)
+    client._get_redis = _redis  # type: ignore[method-assign]
+    await client._remember_order_id("xt1082143155", "qmabc")
+
+    result = await client.cancel_order(order_id="xt1082143155", symbol="601398.SH")
+    assert backend.calls == ["xt1082143155", "7322"]
+    assert result["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_mapping_raises_original_error():
+    fake_redis = _FakeRedis()
+
+    async def _redis():
+        return fake_redis
+
+    backend = _CancelBackend()
+    client = _client(backend)
+    client._get_redis = _redis  # type: ignore[method-assign]
+
+    with pytest.raises(QmtExecError) as excinfo:
+        await client.cancel_order(order_id="xt999", symbol="601398.SH")
+    assert excinfo.value.code == "CANCEL_REJECTED"
+    assert backend.calls == ["xt999"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_timeout_is_not_retried():
+    """撤单超时不重试（委托可能已撤，重试只是噪音）。"""
+
+    class _TimeoutBackend(_CancelBackend):
+        def cancel_order(self, *, order_id: str, symbol: str) -> dict:
+            self.calls.append(order_id)
+            raise QmtExecError("撤单超时", code="TIMEOUT")
+
+    fake_redis = _FakeRedis()
+
+    async def _redis():
+        return fake_redis
+
+    backend = _TimeoutBackend()
+    client = _client(backend)
+    client._get_redis = _redis  # type: ignore[method-assign]
+    await client._remember_order_id("xt1", "qmabc")
+
+    with pytest.raises(QmtExecError) as excinfo:
+        await client.cancel_order(order_id="xt1", symbol="601398.SH")
+    assert excinfo.value.code == "TIMEOUT"
+    assert backend.calls == ["xt1"]
