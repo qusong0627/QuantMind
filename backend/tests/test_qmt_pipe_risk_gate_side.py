@@ -40,8 +40,9 @@ def _load_bridge_module(monkeypatch):
             self.parent = parent
             self.ops = 0
 
-        def hset(self, *args, **kwargs):
+        def hset(self, key=None, *args, **kwargs):
             self.ops += 1
+            self.parent.hset_keys.append(key)
 
         def expire(self, *args, **kwargs):
             self.ops += 1
@@ -53,6 +54,7 @@ def _load_bridge_module(monkeypatch):
     class _FakeRedis:
         def __init__(self, *args, **kwargs):
             self.pipelines = []
+            self.hset_keys = []
 
         def pipeline(self, transaction=True):
             return _FakePipeline(self)
@@ -356,3 +358,78 @@ def test_write_snapshots_bulk_skips_non_dict(bridge):
         bridge.write_snapshots_bulk({"600036.SH": None, "000001.SZ": {"lastPrice": 1}})
         == 1
     )
+
+
+def test_seconds_until_next_between_one_hour_and_one_day(bridge):
+    value = bridge._seconds_until_next("09:05")
+    assert 3600 <= value <= 86400 + 3600
+
+
+def test_write_snapshots_bulk_writes_day_snapshot(bridge):
+    """当日快照 quote:snap:{YYYYMMDD} 必须随批量写落库（隔日靠 TTL 自清）。"""
+    import time as _time
+
+    bridge.CFG._data["tap"] = {
+        "day_snapshot": True,
+        "day_snapshot_key": "quote:snap:%s",
+        "day_snapshot_expire_hhmm": "09:05",
+    }
+    bridge.write_snapshots_bulk({"600036.SH": {"lastPrice": 1.0}}, chunk=10)
+    today_key = "quote:snap:" + _time.strftime("%Y%m%d")
+    assert today_key in bridge.R.hset_keys
+
+
+def test_day_snapshot_can_be_disabled(bridge):
+    import time as _time
+
+    bridge.CFG._data["tap"] = {"day_snapshot": False}
+    bridge.write_snapshots_bulk({"600036.SH": {"lastPrice": 1.0}}, chunk=10)
+    assert ("quote:snap:" + _time.strftime("%Y%m%d")) not in bridge.R.hset_keys
+
+
+def test_session_active_windows(bridge):
+    import time as _time
+
+    def ts(y, m, d, h, mi):
+        return _time.mktime((y, m, d, h, mi, 0, 0, 0, -1))
+
+    assert bridge.session_active(ts(2026, 10, 30, 10, 0)) is True
+    assert bridge.session_active(ts(2026, 10, 30, 12, 0)) is False
+    assert bridge.session_active(ts(2026, 10, 30, 14, 30)) is True
+    assert bridge.session_active(ts(2026, 11, 1, 10, 0)) is False
+
+
+def test_sweep_universe_filters_and_caps(bridge, monkeypatch):
+    bridge.CFG._data["sweep"] = {"universe_key": "qm:universe:cn", "max_symbols": 10}
+    bridge.CFG._data["tap"] = {"universe_key": ""}
+    monkeypatch.setattr(
+        bridge.R, "smembers", lambda key: {"600036.SH", "SH", "000001.SZ"}
+    )
+    assert bridge.sweep_universe() == ["000001.SZ", "600036.SH"]
+
+
+def test_sweep_universe_falls_back_to_hot_set(bridge, monkeypatch):
+    bridge.CFG._data["sweep"] = {"universe_key": "", "max_symbols": 10}
+    bridge.CFG._data["tap"] = {"universe_key": ""}
+    bridge.STATE.symbols_a = ["600036.SH", "SH"]
+    assert bridge.sweep_universe() == ["600036.SH"]
+
+
+def test_sweep_universe_decodes_redis_bytes(bridge, monkeypatch):
+    """桥的 Redis 是 decode_responses=False，成员是 bytes —— 必须解码（实测踩坑）。"""
+    bridge.CFG._data["sweep"] = {"universe_key": "qm:universe:cn", "max_symbols": 10}
+    bridge.CFG._data["tap"] = {"universe_key": ""}
+    monkeypatch.setattr(
+        bridge.R,
+        "smembers",
+        lambda key: {b"600036.SH", b"920693.BJ", b"SH"},
+    )
+    assert bridge.sweep_universe() == ["600036.SH", "920693.BJ"]
+
+
+def test_tap_universe_decodes_redis_bytes(bridge, monkeypatch):
+    bridge.CFG._data["tap"] = {"universe_key": "qm:universe:cn", "max_symbols": 10}
+    bridge.STATE.symbols_a = []
+    monkeypatch.setattr(bridge.R, "smembers", lambda key: {b"600036.SH"})
+    assert "600036.SH" in bridge._tap_universe()
+    assert not any(x.startswith("b'") for x in bridge._tap_universe())

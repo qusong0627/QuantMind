@@ -83,13 +83,31 @@ DEFAULT_CONFIG = {
             'max_symbols': 250, 'respect_budget': False,
             # 全市场推送：指向 Redis 集合（成员为后缀式代码）即把订阅扩到全市场，
             # 置空=只订持仓+指数+watchlist 的 250 只热集。
-            'universe_key': ''},
+            'universe_key': '',
+            # 当日快照（quote:snap:{YYYYMMDD}，hash）：当天可查、次日 09:05 过期，
+            # 隔日自动清空，不需要清理任务。
+            'day_snapshot': True,
+            'day_snapshot_key': 'quote:snap:%s',
+            'day_snapshot_expire_hhmm': '09:05'},
+    # 全市场轮询兜底：QMT 全推在本机只覆盖策略宇宙（实测 5,638 只代码订阅
+    # 只有热集 61 只出 tick），全市场用分批 get_full_tick 轮询补齐。
+    # 500 只 ≈0.6s，5,577 只整轮 ≈7-9s；每批前查队列，订单优先让路。
+    'sweep': {'enabled': True, 'interval_s': 300, 'chunk': 500, 'ttl_s': 360,
+              'universe_key': '', 'max_symbols': 6000,
+              'start_hhmm': 930, 'end_hhmm': 1500},
     'source_http': {'enabled': True, 'host': '127.0.0.1', 'port': 17720,
                     'stale_after_s': 30, 'allow_orders': False},
 }
 
 # ---------------------------------------------------------------- 日志
 _log_lock = threading.Lock()
+
+
+def _as_text(value):
+    """Redis 客户端 decode_responses=False（备源行情要 msgpack）→ 统一转 str。"""
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode('utf-8', 'replace')
+    return str(value)
 
 
 def log(msg):
@@ -163,6 +181,9 @@ class State(object):
         self.symbols_b = []          # 候选池
         self.name_map = {}           # code -> name(来自持仓/按需补全)
         self.instrument = {}         # code -> {name, pre, ts}(按需补全缓存)
+        self.sweep_written = 0
+        self.sweep_last_ts = 0.0
+        self.sweep_last_ms = 0.0
         self.quote_pre_close = {}    # code -> 昨收(风控用)
         self.quote_ts = {}           # code -> 写入时间
         self.last_rpc_ms = 0.0
@@ -667,7 +688,28 @@ def write_snapshot(code, tick):
             STATE.quote_pre_close[code] = float(tick['lastClose'])
 
 
-def write_snapshots_bulk(ticks, chunk=500):
+def _seconds_until_next(hhmm):
+    """距下一个 HH:MM（本地墙钟）的秒数；跨日自动 +24h，最小 1 小时。"""
+    try:
+        hh, mm = [int(x) for x in str(hhmm or '09:05').split(':', 1)]
+    except Exception:
+        hh, mm = 9, 5
+    now = time.time()
+    lt = time.localtime(now)
+    target = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
+    if target <= now:
+        target += 86400
+    return max(3600, int(target - now))
+
+
+def _day_snapshot_key():
+    if not bool(CFG.get('tap.day_snapshot')):
+        return None
+    pattern = str(CFG.get('tap.day_snapshot_key') or 'quote:snap:%s')
+    return pattern % time.strftime('%Y%m%d')
+
+
+def write_snapshots_bulk(ticks, chunk=500, ttl_override=0):
     """批量写快照：**一个 pipeline 写一批**，不是每只一次往返。
 
     全市场（~5,400 只）0.5s 一轮时，逐只 pipeline 会变成 5,400 次往返
@@ -676,7 +718,9 @@ def write_snapshots_bulk(ticks, chunk=500):
     if not isinstance(ticks, dict) or not ticks:
         return 0
     ts = time.time()
-    ttl = int(CFG.get('quotes.stale_after_s') or 10)
+    ttl = int(ttl_override or CFG.get('quotes.stale_after_s') or 10)
+    day_key = _day_snapshot_key()
+    day_ttl = _seconds_until_next(CFG.get('tap.day_snapshot_expire_hhmm')) if day_key else 0
     written = 0
     items = list(ticks.items())
     for start in range(0, len(items), max(1, int(chunk))):
@@ -685,10 +729,16 @@ def write_snapshots_bulk(ticks, chunk=500):
         for code, tick in batch:
             if not isinstance(tick, dict):
                 continue
+            mapping = _snapshot_mapping(code, tick, ts)
             key = 'market:snapshot:%s' % code
-            pipe.hset(key, mapping=_snapshot_mapping(code, tick, ts))
+            pipe.hset(key, mapping=mapping)
             pipe.expire(key, ttl)
+            if day_key:
+                # 当日快照：整条 mapping 落 JSON，消费方按需取字段。
+                pipe.hset(day_key, code, json.dumps(mapping, ensure_ascii=False))
             written += 1
+        if day_key:
+            pipe.expire(day_key, day_ttl)
         pipe.execute()
         with STATE.lock:
             for code, tick in batch:
@@ -698,6 +748,68 @@ def write_snapshots_bulk(ticks, chunk=500):
                 if tick.get('lastClose'):
                     STATE.quote_pre_close[code] = float(tick['lastClose'])
     return written
+
+
+def session_active(now=None):
+    """是否在 A 股连续竞价时段（纯函数，便于单测）。"""
+    lt = time.localtime(now if now is not None else time.time())
+    if lt.tm_wday >= 5:
+        return False
+    hhmm = lt.tm_hour * 100 + lt.tm_min
+    return (930 <= hhmm <= 1130) or (1300 <= hhmm <= 1500)
+
+
+def sweep_universe():
+    """全市场轮询的标的域：sweep.universe_key 优先，否则用 tap 的域。"""
+    key = str(CFG.get('sweep.universe_key') or '') or str(CFG.get('tap.universe_key') or '')
+    codes = []
+    if key:
+        try:
+            codes = [
+                text
+                for text in (_as_text(c) for c in (R.smembers(key) or set()))
+                if '.' in text
+            ]
+        except Exception as exc:
+            STATE.note_error('sweep.universe', exc)
+    if not codes:
+        with STATE.lock:
+            codes = [c for c in STATE.symbols_a if '.' in str(c)]
+    limit = int(CFG.get('sweep.max_symbols') or 6000)
+    return sorted(set(codes))[:limit]
+
+
+def sweep_worker():
+    log('sweep worker start')
+    while not STATE.stop.is_set():
+        interval = float(CFG.get('sweep.interval_s') or 300)
+        if not bool(CFG.get('sweep.enabled')) or not session_active():
+            time.sleep(min(30.0, max(5.0, interval)))
+            continue
+        codes = sweep_universe()
+        chunk = max(50, int(CFG.get('sweep.chunk') or 500))
+        ttl = int(CFG.get('sweep.ttl_s') or 360)
+        written = 0
+        started = time.perf_counter()
+        for start in range(0, len(codes), chunk):
+            waited = 0.0
+            while rpc_backlog() >= 1 and waited < 5.0:
+                time.sleep(0.2)
+                waited += 0.2
+            try:
+                data = rpc('get_full_tick', {'codes': codes[start:start + chunk]},
+                           timeout=15)
+            except Exception as exc:
+                STATE.note_error('sweep', exc)
+                continue
+            if isinstance(data, dict):
+                written += write_snapshots_bulk(data, chunk=500, ttl_override=ttl)
+            time.sleep(0.05)
+        with STATE.lock:
+            STATE.sweep_written = written
+            STATE.sweep_last_ts = time.time()
+            STATE.sweep_last_ms = (time.perf_counter() - started) * 1000.0
+        time.sleep(max(30.0, interval))
 
 
 def poll_quotes(symbols):
@@ -822,7 +934,7 @@ def _tap_universe():
     if universe_key:
         try:
             members = R.smembers(universe_key) or set()
-            syms = list(syms) + sorted(str(x) for x in members)
+            syms = list(syms) + sorted(_as_text(x) for x in members)
         except Exception as exc:
             STATE.note_error('tap.universe', exc)
     watch = [str(x) for x in (CFG.get('quotes.watchlist') or []) if x]
@@ -848,6 +960,10 @@ def tap_worker():
         try:
             now = time.time()
             universe = _tap_universe()
+            if not universe:
+                # 启动瞬间/宇宙集合未就绪：别把「空列表」当成错误去订阅。
+                time.sleep(max(1.0, interval))
+                continue
             refresh = float(CFG.get('tap.subscribe_refresh_s') or 60)
             if (not _TAP_STATE['subscribed'] or set(universe) != set(_TAP_STATE['subscribed'])
                     or now - last_sub > refresh):
@@ -897,6 +1013,9 @@ def _metrics_snapshot():
             'tap_batches': STATE.tap_batches,
             'tap_age_s': round(now - STATE.tap_last_push, 1) if STATE.tap_last_push else -1,
             'tap_drain_ms': round(_TAP_STATE['last_drain_ms'], 1),
+            'sweep_written': STATE.sweep_written,
+            'sweep_last_age_s': round(now - STATE.sweep_last_ts, 1) if STATE.sweep_last_ts else -1,
+            'sweep_ms': round(STATE.sweep_last_ms, 1),
             'tap_subscribed': len(_TAP_STATE['subscribed']),
             'rpc_calls': STATE.rpc_calls,
             'errors': STATE.errors,
@@ -1253,6 +1372,7 @@ def main():
         threading.Thread(target=positions_worker, daemon=True, name='pos'),
         threading.Thread(target=quotes_worker, daemon=True, name='quotes'),
         threading.Thread(target=tap_worker, daemon=True, name='tap'),
+        threading.Thread(target=sweep_worker, daemon=True, name='sweep'),
         threading.Thread(target=source_http_worker, daemon=True, name='source_http'),
         threading.Thread(target=events_worker, args=('order',), daemon=True, name='orders'),
         threading.Thread(target=events_worker, args=('trade',), daemon=True, name='trades'),
