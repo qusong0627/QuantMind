@@ -972,9 +972,14 @@ class SltpDeps:
     #: 触发时「柜台没有这只票」的第二份证据（账户快照，见 sltp_position_evidence）。
     #: ``None`` = 未接线 → 判 ``unknown``（按异常告警，绝不静默跳过）。
     position_evidence: Callable[..., Awaitable[PositionEvidence]] | None = None
-    #: **LLM 规则归属 agent 的分账持仓**（agent, symbol, user_id, tenant_id → 股数）。
+    #: **LLM 规则归属 agent 的分账持仓**（agent, symbol, user_id, tenant_id → 总股数）。
     #: ``None`` = 旧替身/未接线：llm 规则**不下单**（fail-closed，绝不按共享账户全量卖）。
     ledger_volume: Callable[[str, str, str, str], Awaitable[float]] | None = None
+    #: 该 agent 当日买入量（T+1 不可卖）；``None`` = 旧替身：按 0 处理（存量测试口径）。
+    ledger_today_buys: Callable[[str, str, str, str], Awaitable[float]] | None = None
+    #: 该 symbol 的**分账持有人**（symbol, user_id, tenant_id → [(agent, volume)]）。
+    #: auto 规则据此判断「这是不是 agent 共享仓」——是则不再按共享账户全量代卖。
+    ledger_holders: Callable[[str, str, str], Awaitable[list[tuple[str, float]]]] | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1026,27 +1031,41 @@ def _effective_config(cfg: dict[str, Any], deps: SltpDeps) -> dict[str, Any]:
 async def auto_arm_missing_rules(
     deps: SltpDeps, cfg: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """给「有持仓、无启用规则」的标的补挂保护（``owner="auto"``，只补不删）。
+    """给「有持仓、无启用规则」的标的补挂保护（只补不删）。
 
     为什么要它：持仓并不都从规则页面建仓——决策轮、人工直下、桥端操作都会留下
     仓位；没有规则的仓位在触发器里**根本不存在**，于是「只提醒不下单」看起来像
     执行器坏了，实际是它压根没被武装。
 
-    口径：
-    * 已有任意**启用**规则（人工/LLM/auto）的标的一律跳过，不改动既有规则；
+    口径（2026-10-30 第二批，机构级）：
+    * 标的有**分账持有人**（agent 共享仓）→ 按持有人各补一条 ``owner=llm:<agent>``
+      的 per-agent 规则，触发只卖各自份额、成交落回各自账本；**不补全局 auto**；
+    * 标的无分账持有人（人工/QMT 仓）→ 补一条 ``owner=auto`` 的账户级规则；
+    * 已有同 owner 规则的跳过；人工/auto 规则按 symbol 独占（人工优先）；
     * 阈值优先级 ``auto_arm_*`` > 设置页 ``trade:sltp_config``；两者都没有 →
       不补挂（没有阈值的规则是空保护，挂着只会每轮空转）；
-    * ``auto_arm_exclude`` 里的标的不补挂（用户删掉 auto 规则后的退出阀）。
+    * ``auto_arm_exclude`` 里的标的不补挂（用户删掉 auto 规则后的退出阀）；
+    * 读分账持有人失败 → 本轮跳过（fail-closed，不补一条可能代卖 agent 份额的
+      全局 auto）。
 
     返回新增规则列表；**本函数不写配置**——调用方负责落盘并发通知。
     """
     if not cfg.get("auto_arm"):
         return []
     rules = list(cfg.get("rules") or [])
-    covered = {
-        normalize_symbol(str(rule.get("symbol") or ""))
+    existing = {
+        (
+            normalize_symbol(str(rule.get("symbol") or "")),
+            str(rule.get("owner") or ""),
+        )
         for rule in rules
         if rule.get("enabled", True)
+    }
+    covered_symbols = {symbol for symbol, _owner in existing}
+    #: 人工/auto 规则按 symbol 独占：有它们时不再补 per-agent auto（人工优先；
+    #: 旧 auto 规则由 prune_auto_rules 在下一拍摘掉后再补 per-agent）。
+    global_covered = {
+        symbol for symbol, owner in existing if owner in ("", OWNER_AUTO)
     }
     excluded = {
         normalize_symbol(str(symbol))
@@ -1081,6 +1100,8 @@ async def auto_arm_missing_rules(
         return []
 
     positions = await _fetch_positions(deps)
+    user_id = str(cfg.get("user_id") or "1")
+    tenant_id = str(cfg.get("tenant_id") or "default")
     added: list[dict[str, Any]] = []
     for position in positions or ():
         symbol = normalize_symbol(
@@ -1091,13 +1112,45 @@ async def auto_arm_missing_rules(
         volume = _to_float(position.get("volume")) or _to_float(
             position.get("can_use_volume")
         )
-        if (
-            not symbol
-            or not volume
-            or volume <= 0
-            or symbol in covered
-            or symbol in excluded
-        ):
+        if not symbol or not volume or volume <= 0 or symbol in excluded:
+            continue
+        holders: list[tuple[str, float]] = []
+        if deps.ledger_holders is not None:
+            try:
+                holders = await deps.ledger_holders(symbol, user_id, tenant_id)
+            except Exception as exc:  # noqa: BLE001 读不到归属 → 不补全局 auto
+                logger.error(
+                    "[SltpExec] 自动布防读分账持有人失败 %s（本轮跳过）: %s",
+                    symbol,
+                    exc,
+                )
+                continue
+        if holders:
+            # 共享账户的 agent 仓：按持有人各补一条 LLM auto（owner=llm:<agent>），
+            # 触发时只卖各自份额且成交落回各自账本；不再补全局 auto。
+            for agent, holder_volume in holders:
+                owner = llm_owner(str(agent or ""))
+                if not owner or holder_volume <= 0:
+                    continue
+                if (symbol, owner) in existing or symbol in global_covered:
+                    continue
+                rule = normalize_rule(
+                    {
+                        "symbol": symbol,
+                        "owner": owner,
+                        "enabled": True,
+                        "side": "SELL",
+                        "entry_price": _position_entry_price(position),
+                        "stop_loss_pct": stop_pct,
+                        "take_profit_pct": take_pct,
+                        "trailing_stop_pct": trail_pct,
+                    }
+                )
+                rules.append(rule)
+                existing.add((symbol, owner))
+                added.append(rule)
+            continue
+        if symbol in covered_symbols:
             continue
         rule = normalize_rule(
             {
@@ -1112,11 +1165,78 @@ async def auto_arm_missing_rules(
             }
         )
         rules.append(rule)
-        covered.add(symbol)
+        covered_symbols.add(symbol)
         added.append(rule)
     if added:
         cfg["rules"] = rules
     return added
+
+
+async def prune_auto_rules(deps: SltpDeps, cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """摘掉**无持仓或已转分账**的 auto 规则（只动 ``owner=auto``，不碰人工/LLM）。
+
+    两类要摘：
+    1. 标的不在柜台持仓里（清仓后残留，002074 等）——不摘会每轮 no_position；
+    2. 标的有分账持有人（agent 共享仓）——auto 是按共享账户全量卖的旧兜底，
+       由 ``auto_arm_missing_rules`` 改补 per-agent auto；旧 auto 必须先摘，
+       否则同一仓位会被全局 auto 与 per-agent 规则各卖一次。
+
+    读持仓/读持有人失败 → **保留**（fail-open：宁可留一条可能 no_position 的规则，
+    也不在账户数据不可信时把保护摘光；执行器对 auto 规则的归属判定另有 fail-closed）。
+    """
+    if not bool(getattr(deps.client, "configured", True)):
+        return []
+    try:
+        positions = await _fetch_positions(deps)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SltpExec] 清理 auto 规则读持仓失败（本轮不摘）: %s", exc)
+        return []
+    held = {
+        normalize_symbol(str(p.get("stock_code") or p.get("symbol") or ""))
+        for p in positions or ()
+        if _to_float(p.get("volume")) or _to_float(p.get("can_use_volume"))
+    }
+    user_id = str(cfg.get("user_id") or "1")
+    tenant_id = str(cfg.get("tenant_id") or "default")
+    removed: list[dict[str, Any]] = []
+    keep: list[dict[str, Any]] = []
+    for rule in cfg.get("rules") or []:
+        if str(rule.get("owner") or "") != OWNER_AUTO:
+            keep.append(rule)
+            continue
+        symbol = normalize_symbol(str(rule.get("symbol") or ""))
+        if not symbol or symbol not in held:
+            removed.append(rule)
+            continue
+        if deps.ledger_holders is not None:
+            try:
+                holders = await deps.ledger_holders(symbol, user_id, tenant_id)
+            except Exception as exc:  # noqa: BLE001 读不到 → 保留
+                logger.warning(
+                    "[SltpExec] 清理 auto 规则读持有人失败 %s（保留）: %s", symbol, exc
+                )
+                keep.append(rule)
+                continue
+            if holders:
+                removed.append(rule)
+                continue
+        keep.append(rule)
+    if not removed:
+        return []
+    cfg["rules"] = keep
+    try:
+        state = load_state(deps.redis)
+        symbols = [normalize_symbol(str(r.get("symbol") or "")) for r in removed]
+        removable = [
+            s
+            for s in symbols
+            if s and not is_live_state((state.get("rules") or {}).get(s))
+        ]
+        if removable:
+            save_state(deps.redis, state, removed=set(removable))
+    except Exception as exc:  # noqa: BLE001 状态清理失败不阻断规则摘除
+        logger.warning("[SltpExec] 清理 auto 规则状态失败: %s", exc)
+    return removed
 
 
 def _auto_rule_brief(rule: dict[str, Any]) -> str:
@@ -1598,6 +1718,45 @@ async def _execute_trigger(
     # 落回它的账本。共享账户里 601825 三家共持时，旧实现按 can_use 全量卖 + 订单
     # agent 为空 → 卖完三家账本全是幻影仓（2026-10-30 审计 P0）。
     owner = str(rule.get("owner") or "")
+    if owner == OWNER_AUTO and deps.ledger_holders is not None:
+        # 防御性兜底：auto 规则若因清理未及时/迁移窗口仍在，且标的是 agent 共享仓，
+        # 绝不按共享账户全量代卖（会造三家幻影仓）；只告警，交给 per-agent 规则。
+        try:
+            auto_holders = await deps.ledger_holders(symbol, user_id, tenant_id)
+        except Exception as exc:  # noqa: BLE001 读不到 → fail-closed
+            st["status"] = ST_SKIPPED
+            st["skip_reason"] = "auto_holders_unknown"
+            summary["failed"] += 1
+            logger.error("[SltpExec] %s auto 规则读分账持有人失败：%s", symbol, exc)
+            await deps.notify(
+                user_id,
+                f"{symbol} 自动兜底归属不可读，未卖出",
+                f"{reason}；读取该标的分账持有人失败（{type(exc).__name__}）。"
+                "本次不下单，避免按共享账户全量卖出。",
+                "error",
+                tenant_id=tenant_id,
+            )
+            return
+        if auto_holders:
+            st["status"] = ST_SKIPPED
+            st["skip_reason"] = "auto_agent_owned"
+            summary["failed"] += 1
+            names = "、".join(f"{a} {v:g}股" for a, v in auto_holders[:6])
+            logger.warning(
+                "[SltpExec] %s auto 规则命中 agent 共享仓，不代下单：%s",
+                symbol,
+                names,
+            )
+            await deps.notify(
+                user_id,
+                f"{symbol} 自动兜底未下单（agent 共享仓）",
+                f"{reason}；该标的由 {len(auto_holders)} 个 agent 分账持有（{names}）。"
+                "自动兜底不代 agent 下单，请为每个 agent 配 watch（决策轮会自动挂）；"
+                "本规则会被清理任务转为 per-agent auto。",
+                "warning",
+                tenant_id=tenant_id,
+            )
+            return
     agent_name = ""
     if owner.startswith("llm:"):
         agent_name = owner.split(":", 1)[1].strip()
@@ -1652,9 +1811,41 @@ async def _execute_trigger(
             return
         if st.get("skip_reason") == "owner_no_position":
             st.pop("skip_reason", None)
-        # 只卖归属 agent 的那一段：柜台可卖量是共享账户口径，必须夹到分账持仓。
-        can_use = min(can_use, owner_volume)
-        held = min(held, owner_volume)
+        today_buys = 0.0
+        if deps.ledger_today_buys is not None:
+            try:
+                today_buys = float(
+                    await deps.ledger_today_buys(
+                        agent_name, symbol, user_id, tenant_id
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 T+1 判不了 → fail-closed
+                st["status"] = ST_SKIPPED
+                st["skip_reason"] = "owner_t1_unknown"
+                summary["failed"] += 1
+                logger.error("[SltpExec] %s 读当日买入量失败：%s", symbol, exc)
+                await deps.notify(
+                    user_id,
+                    f"{symbol} 当日买入量读取失败，未卖出",
+                    f"{reason}；读取 {agent_name} 当日买入量失败"
+                    f"（{type(exc).__name__}）。本次不下单，避免卖出 T+1 锁定份额。",
+                    "error",
+                    tenant_id=tenant_id,
+                )
+                return
+        owner_available = max(0.0, owner_volume - today_buys)
+        # 只卖归属 agent 的那一段，且只卖 T+1 已解锁的份额；柜台可卖量是共享账户
+        # 口径，必须再夹到该 agent 的可用量。
+        can_use = min(can_use, owner_available)
+        held = owner_volume
+        if owner_available <= 0 and held > 0:
+            logger.info(
+                "[SltpExec] %s 触发（%s）但 %s 持仓 %g 股全部为当日买入（T+1 锁定）",
+                symbol,
+                reason,
+                agent_name,
+                held,
+            )
     quantity, note = plan_sell_quantity(symbol, rule, can_use)
     if quantity <= 0:
         st["status"] = ST_SKIPPED
@@ -2311,13 +2502,21 @@ def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
             engine = TradingEngine(db, _get_redis())
             return bool(await engine.cancel_order_execution(row))
 
+    def _ledger_params(agent: str, symbol: str, user_id: str, tenant_id: str) -> dict[str, Any]:
+        from backend.shared.order_contract import normalize_agent
+
+        return {
+            "t": str(tenant_id or "default"),
+            "u": str(user_id),
+            "a": normalize_agent(agent),
+            "c": symbol,
+        }
+
     async def ledger_volume(
         agent: str, symbol: str, user_id: str, tenant_id: str
     ) -> float:
-        """LLM 规则归属 agent 的分账持仓（股）。读不到 → 抛，调用方 fail-closed。"""
+        """LLM 规则归属 agent 的分账持仓（总股数）。读不到 → 抛，调用方 fail-closed。"""
         from sqlalchemy import text
-
-        from backend.shared.order_contract import normalize_agent
 
         async with get_session(read_only=True) as db:
             res = await db.execute(
@@ -2325,14 +2524,44 @@ def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
                     "SELECT volume FROM qm_agent_ledger_position "
                     "WHERE tenant_id=:t AND user_id=:u AND agent=:a AND code=:c"
                 ),
-                {
-                    "t": str(tenant_id or "default"),
-                    "u": str(user_id),
-                    "a": normalize_agent(agent),
-                    "c": symbol,
-                },
+                _ledger_params(agent, symbol, user_id, tenant_id),
             )
             return float(res.scalar() or 0.0)
+
+    async def ledger_today_buys(
+        agent: str, symbol: str, user_id: str, tenant_id: str
+    ) -> float:
+        """该 agent 当日买入量（T+1 锁定，不可卖）。读不到 → 抛，调用方 fail-closed。"""
+        from sqlalchemy import text
+
+        params = _ledger_params(agent, symbol, user_id, tenant_id)
+        params["d"] = trade_date_str()
+        async with get_session(read_only=True) as db:
+            res = await db.execute(
+                text(
+                    "SELECT COALESCE(SUM(volume), 0) FROM qm_agent_ledger_fill "
+                    "WHERE tenant_id=:t AND user_id=:u AND agent=:a AND code=:c "
+                    "AND side='buy' AND trade_date=:d"
+                ),
+                params,
+            )
+            return float(res.scalar() or 0.0)
+
+    async def ledger_holders(
+        symbol: str, user_id: str, tenant_id: str
+    ) -> list[tuple[str, float]]:
+        """该 symbol 的分账持有人（股数 >0）。读不到 → 抛，调用方 fail-closed。"""
+        from sqlalchemy import text
+
+        async with get_session(read_only=True) as db:
+            res = await db.execute(
+                text(
+                    "SELECT agent, volume FROM qm_agent_ledger_position "
+                    "WHERE tenant_id=:t AND user_id=:u AND code=:c AND volume > 0"
+                ),
+                {"t": str(tenant_id or "default"), "u": str(user_id), "c": symbol},
+            )
+            return [(str(row[0]), float(row[1] or 0)) for row in res.all()]
 
     return SltpDeps(
         client=client,
@@ -2343,6 +2572,8 @@ def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
         cancel_order=cancel_order,
         position_evidence=position_evidence,
         ledger_volume=ledger_volume,
+        ledger_today_buys=ledger_today_buys,
+        ledger_holders=ledger_holders,
         extras={"broker": broker},
     )
 
@@ -2370,38 +2601,58 @@ async def run_qmt_sltp_executor_task() -> None:
                 if arm_interval is None or arm_interval <= 0:
                     arm_interval = float(DEFAULT_CONFIG["auto_arm_interval_sec"])
                 auto_added: list[dict[str, Any]] = []
+                auto_removed: list[dict[str, Any]] = []
                 now_mono = time.monotonic()
-                if cfg.get("auto_arm") and now_mono - last_auto_arm >= arm_interval:
+                if now_mono - last_auto_arm >= arm_interval:
                     last_auto_arm = now_mono
-                    # 自动布防是增强面：它失败时本轮的真单保护必须照常评估，
-                    # 不能因为「补挂没补上」把已经武装的规则一起跳过。
+                    # 清理先于补挂：无持仓/已转分账的旧 auto 先摘，auto_arm 才能给
+                    # agent 共享仓补 per-agent 规则（否则全局 auto 会占住 symbol）。
                     try:
-                        auto_added = await auto_arm_missing_rules(deps, cfg)
+                        auto_removed = await prune_auto_rules(deps, cfg)
                     except Exception as exc:  # noqa: BLE001
-                        logger.error(
-                            "[SltpExec] 自动布防失败（本轮仍执行既有规则）: %s",
-                            exc,
-                            exc_info=True,
-                        )
-                if auto_added:
+                        logger.error("[SltpExec] 清理 auto 规则失败: %s", exc)
+                    if cfg.get("auto_arm"):
+                        # 自动布防是增强面：它失败时本轮的真单保护必须照常评估，
+                        # 不能因为「补挂没补上」把已经武装的规则一起跳过。
+                        try:
+                            auto_added = await auto_arm_missing_rules(deps, cfg)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error(
+                                "[SltpExec] 自动布防失败（本轮仍执行既有规则）: %s",
+                                exc,
+                                exc_info=True,
+                            )
+                if auto_added or auto_removed:
                     try:
                         cfg = save_config_strict(redis, cfg)
                     except Exception as exc:  # noqa: BLE001
                         # 落盘失败不阻断本轮：规则已在内存 cfg 里，本轮照常评估；
-                        # 下一轮会再次补挂并重试落盘（补挂按 symbol 幂等）。
+                        # 下一轮会再次补挂/清理并重试落盘。
                         logger.error(
                             "[SltpExec] 自动布防规则落盘失败: %s", exc, exc_info=True
                         )
-                    detail = "、".join(_auto_rule_brief(r) for r in auto_added)
-                    await deps.notify(
-                        str(cfg.get("user_id") or "1"),
-                        "已自动布防持仓止盈止损",
-                        f"为 {len(auto_added)} 只无规则持仓补挂保护：{detail}。"
-                        "阈值来自执行器 auto_arm_* 或设置页；触发即报真单卖出，"
-                        "T+1 当日买入的仓位会在下一交易日自动继续评估。",
-                        "info",
-                        tenant_id=str(cfg.get("tenant_id") or "default"),
-                    )
+                    if auto_removed:
+                        detail = "、".join(_auto_rule_brief(r) for r in auto_removed)
+                        await deps.notify(
+                            str(cfg.get("user_id") or "1"),
+                            "已清理失效的自动兜底规则",
+                            f"清理 {len(auto_removed)} 条（无持仓或已转 agent 分账）："
+                            f"{detail}。人工/LLM 规则未动。",
+                            "info",
+                            tenant_id=str(cfg.get("tenant_id") or "default"),
+                        )
+                    if auto_added:
+                        detail = "、".join(_auto_rule_brief(r) for r in auto_added)
+                        await deps.notify(
+                            str(cfg.get("user_id") or "1"),
+                            "已自动布防持仓止盈止损",
+                            f"补挂 {len(auto_added)} 条保护规则：{detail}。"
+                            "agent 共享仓按持有人各补一条（只卖各自份额）；"
+                            "阈值来自执行器 auto_arm_* 或设置页；T+1 当日买入的份额"
+                            "会在下一交易日自动继续评估。",
+                            "info",
+                            tenant_id=str(cfg.get("tenant_id") or "default"),
+                        )
                 summary = await run_sltp_cycle(deps, config=cfg)
                 last_error = ""
                 if (

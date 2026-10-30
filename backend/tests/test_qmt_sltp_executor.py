@@ -91,6 +91,8 @@ class Harness:
         state: dict | None = None,
         evidence=None,
         ledger_volume=None,
+        ledger_today_buys=None,
+        ledger_holders=None,
     ) -> None:
         self.redis = FakeRedis(cfg=ex.merge_config(cfg), state=state)
         self.evidence = evidence
@@ -104,6 +106,8 @@ class Harness:
         self.fallback = fallback or {"stop_loss_pct": None, "take_profit_pct": None, "trailing_stop_pct": None}
         self.now = 1_000_000.0
         self.ledger_volume = ledger_volume
+        self.ledger_today_buys = ledger_today_buys
+        self.ledger_holders = ledger_holders
         self.cancelled: list[str] = []
         self.cancel_result = True
         self.cancel_hook = None
@@ -138,6 +142,8 @@ class Harness:
             cancel_order=cancel_order,
             position_evidence=self.evidence,
             ledger_volume=self.ledger_volume,
+            ledger_today_buys=self.ledger_today_buys,
+            ledger_holders=self.ledger_holders,
         )
 
     def cycle(self) -> dict:
@@ -1703,3 +1709,147 @@ def test_llm_owner_disambiguates_client_order_id() -> None:
     assert a != b
     assert "deepseek-v4-flash" in a and "deepseek-v4-pro" in b
     assert manual == ex.rule_client_order_id("600036.SH", 1_000_000.0, 1, owner="")
+
+
+class TestLlmT1Availability:
+    """LLM 规则只卖归属 agent 的 T+1 解锁份额（2026-10-30 第二批）。"""
+
+    @staticmethod
+    def _vol(total: float, today: float):
+        async def _ledger_volume(agent, symbol, user_id, tenant_id):
+            return total
+
+        async def _today_buys(agent, symbol, user_id, tenant_id):
+            return today
+
+        return _ledger_volume, _today_buys
+
+    def test_sells_only_unlocked_part(self) -> None:
+        vol, today = self._vol(3000.0, 2800.0)
+        h = Harness(
+            cfg=_cfg([_rule(owner="llm:deepseek-v4-flash")]),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=6900)],
+            ledger_volume=vol,
+            ledger_today_buys=today,
+        )
+
+        h.cycle()
+
+        assert len(h.dispatched) == 1
+        assert h.dispatched[0]["quantity"] == pytest.approx(200.0)
+        assert h.dispatched[0]["agent"] == "deepseek-v4-flash"
+
+    def test_all_today_buys_is_t1_locked_not_sold(self) -> None:
+        vol, today = self._vol(3000.0, 3000.0)
+        h = Harness(
+            cfg=_cfg([_rule(owner="llm:deepseek-v4-flash")]),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=6900)],
+            ledger_volume=vol,
+            ledger_today_buys=today,
+        )
+
+        h.cycle()
+
+        assert h.dispatched == []
+        key = ex.rule_key({"symbol": "600036.SH", "owner": "llm:deepseek-v4-flash"})
+        assert h.state()["rules"][key].get("t1_locked") is True
+        assert any("T+1" in n["title"] for n in h.notices)
+
+
+class TestAutoArmPerHolder:
+    """auto 兜底按分账持有人拆成 per-agent 规则；无持仓/已转分账的旧 auto 被清理。"""
+
+    def test_positions_with_holders_get_per_agent_auto_rules(self) -> None:
+        async def holders(symbol, user_id, tenant_id):
+            return [("deepseek-v4-flash", 3000.0), ("deepseek-v4-pro", 2800.0)]
+
+        cfg = _cfg([], auto_arm=True, auto_arm_stop_loss_pct=0.05)
+        h = Harness(cfg=cfg, positions=[_position("600036.SH", can_use=6900)], ledger_holders=holders)
+
+        added = asyncio.run(ex.auto_arm_missing_rules(h.deps(), cfg))
+
+        assert [(r["symbol"], r["owner"]) for r in added] == [
+            ("600036.SH", "llm:deepseek-v4-flash"),
+            ("600036.SH", "llm:deepseek-v4-pro"),
+        ]
+        assert all(r["stop_loss_pct"] == 0.05 for r in added)
+
+    def test_position_without_holders_keeps_global_auto(self) -> None:
+        async def holders(symbol, user_id, tenant_id):
+            return []
+
+        cfg = _cfg([], auto_arm=True, auto_arm_stop_loss_pct=0.05)
+        h = Harness(cfg=cfg, positions=[_position("600036.SH")], ledger_holders=holders)
+
+        added = asyncio.run(ex.auto_arm_missing_rules(h.deps(), cfg))
+
+        assert [(r["symbol"], r["owner"]) for r in added] == [("600036.SH", "auto")]
+
+    def test_prune_removes_orphan_and_agent_owned_auto_only(self) -> None:
+        async def holders(symbol, user_id, tenant_id):
+            return [("deepseek-v4-flash", 3000.0)]
+
+        cfg = _cfg(
+            [
+                _rule("002074.SZ", owner="auto"),
+                _rule("600036.SH", owner="auto"),
+                _rule("600000.SH", owner=""),
+                _rule("600036.SH", owner="llm:deepseek-v4-flash"),
+            ]
+        )
+        h = Harness(
+            cfg=cfg,
+            positions=[_position("600036.SH")],
+            ledger_holders=holders,
+            state={
+                "date": ex.trade_date_str(),
+                "rules": {
+                    "002074.SZ": {"status": ex.ST_ARMED},
+                    "600036.SH": {"status": ex.ST_SUBMITTED, "order_id": "ord-live"},
+                },
+            },
+        )
+
+        removed = asyncio.run(ex.prune_auto_rules(h.deps(), cfg))
+
+        assert [r["symbol"] for r in removed] == ["002074.SZ", "600036.SH"]
+        assert {r["owner"] for r in cfg["rules"]} == {"", "llm:deepseek-v4-flash"}
+        state = h.redis.store[ex.STATE_KEY]["rules"]
+        assert "002074.SZ" not in state  # 非在途，清状态
+        assert "600036.SH" in state  # 在途真单，状态保留跟踪
+
+    def test_auto_rule_with_agent_holders_alerts_instead_of_selling(self) -> None:
+        async def holders(symbol, user_id, tenant_id):
+            return [("deepseek-v4-flash", 3000.0)]
+
+        h = Harness(
+            cfg=_cfg([_rule("600036.SH", owner="auto")]),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=6900)],
+            ledger_holders=holders,
+        )
+
+        h.cycle()
+
+        assert h.dispatched == []
+        assert any("自动兜底未下单" in n["title"] for n in h.notices)
+        assert h.state()["rules"]["600036.SH"]["skip_reason"] == "auto_agent_owned"
+
+    def test_auto_rule_without_holders_still_sells_account_level(self) -> None:
+        async def holders(symbol, user_id, tenant_id):
+            return []
+
+        h = Harness(
+            cfg=_cfg([_rule("600036.SH", owner="auto")]),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=1000)],
+            ledger_holders=holders,
+        )
+
+        h.cycle()
+
+        assert len(h.dispatched) == 1
+        assert "agent" not in h.dispatched[0]
+        assert h.dispatched[0]["quantity"] == pytest.approx(1000.0)
