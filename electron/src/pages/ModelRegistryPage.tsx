@@ -1028,6 +1028,13 @@ export const ModelRegistryPage: React.FC = () => {
                                 ? Number(selectedModel.metadata_json?.target_horizon_days)
                                 : undefined
                             }
+                            featureCount={
+                              Number.isFinite(
+                                Number(selectedModel.metadata_json?.feature_count),
+                              )
+                                ? Number(selectedModel.metadata_json?.feature_count)
+                                : undefined
+                            }
                           />
                         ),
                       },

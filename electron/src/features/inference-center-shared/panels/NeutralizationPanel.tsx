@@ -273,6 +273,7 @@ interface NeutralizationModelPanelProps {
   modelName?: string;
   modelType?: string | null;
   horizonDays?: number | null;
+  featureCount?: number | null;
 }
 
 /* ────────────────────────── 研究建议 ────────────────────────── */
@@ -300,9 +301,11 @@ const ADVICE_CLS: Record<NeutralizationAdviceTone, string> = {
 export function buildNeutralizationAdvice(
   modelType?: string | null,
   horizonDays?: number | null,
+  featureCount?: number | null,
 ): NeutralizationAdvice {
   const type = String(modelType || '').toLowerCase();
   const horizon = Number(horizonDays || 0);
+  const features = Number(featureCount || 0);
   const isSequence =
     type.includes('transformer') ||
     type.includes('gru') ||
@@ -378,13 +381,33 @@ export function buildNeutralizationAdvice(
     };
   }
   if (horizon === 3 && type.includes('catboost')) {
+    if (features >= 100) {
+      return {
+        tone: 'avoid',
+        label: '不建议',
+        title: 'T+3 CatBoost（全特征版）中性化后大幅下降',
+        detail:
+          '273 特征全进版本实测：Top20 扣费净 +95.6%→-1.5%，Top50 +78.3%→+34.5%，' +
+          '回撤反而扩大；全特征模型的 alpha 高度依赖风格暴露，不建议中性化。',
+      };
+    }
+    if (features > 0 && features <= 60) {
+      return {
+        tone: 'recommend',
+        label: '推荐观察',
+        title: 'T+3 CatBoost（精选特征版）是中性化最稳的候选',
+        detail:
+          '200→33 特征版本实测：Top20 扣费净 +48.8%→+121.1%，夏普 1.81→2.02；' +
+          'Top50 净 +35.4%→+56.6%，回撤 -20.1%→-16.9%。建议优先按 Top20 影子观察。',
+      };
+    }
     return {
-      tone: 'recommend',
-      label: '推荐观察',
-      title: 'T+3 CatBoost 是中性化最稳的候选',
+      tone: 'unknown',
+      label: '待验证',
+      title: 'T+3 CatBoost：该特征数没有实测结论',
       detail:
-        'Top20 扣费净 +48.8%→+121.1%，夏普 1.81→2.02；Top50 净 +35.4%→+56.6%，' +
-        '回撤 -20.1%→-16.9%。建议优先按 Top20 影子观察。',
+        '已验证两端：33 特征推荐、273 特征不建议；中间特征数（或元数据缺 feature_count）' +
+        '请先影子观察，不要直接套用两端结论。',
     };
   }
   if (horizon === 3 && (type.includes('lightgbm') || type.includes('xgboost'))) {
@@ -447,6 +470,7 @@ export function NeutralizationModelPanel({
   modelName,
   modelType,
   horizonDays,
+  featureCount,
 }: NeutralizationModelPanelProps) {
   const [settings, setSettings] = useState<NeutralizationSettings | null>(null);
   const [diagnostics, setDiagnostics] = useState<NeutralizationDiagnostic[]>([]);
@@ -520,7 +544,7 @@ export function NeutralizationModelPanel({
   const latest = diagnostics[0] ?? null;
   const trend = useMemo(() => [...diagnostics].reverse().slice(-20), [diagnostics]);
   const latestExposure = maxExposure(latest?.exposure);
-  const advice = buildNeutralizationAdvice(modelType, horizonDays);
+  const advice = buildNeutralizationAdvice(modelType, horizonDays, featureCount);
 
   const save = async () => {
     if (!controls.length) {
@@ -1377,6 +1401,7 @@ export function NeutralizationOverviewPanel({
         const advice = buildNeutralizationAdvice(
           modelMetaString(model, 'model_type'),
           modelMetaNumber(model, 'target_horizon_days'),
+          modelMetaNumber(model, 'feature_count'),
         );
         return (
           <span
@@ -1529,6 +1554,7 @@ export function NeutralizationOverviewPanel({
             modelName={selectedModel ? modelDisplayName(selectedModel) : selected}
             modelType={modelMetaString(selectedModel, 'model_type')}
             horizonDays={modelMetaNumber(selectedModel, 'target_horizon_days')}
+            featureCount={modelMetaNumber(selectedModel, 'feature_count')}
           />
         )}
       </Drawer>
