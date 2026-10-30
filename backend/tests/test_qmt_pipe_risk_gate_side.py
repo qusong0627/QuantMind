@@ -234,3 +234,62 @@ def test_sell_price_band_still_blocks_absurd_price(bridge):
     """真正离谱的价格（-30%）仍要拦。"""
     reason = bridge.risk_gate("order_stock", _order("600036.SH", 100, 28.0, 24))
     assert reason and "sell price band" in reason
+
+
+def test_enrich_unknown_fills_name_and_pre_for_buys(bridge, monkeypatch):
+    """非持仓、非热集标的：按需补全后 ST 黑名单与偏离闸必须生效。"""
+    bridge.CFG._data["risk"]["enrich_unknown"] = True
+    bridge.STATE.name_map = {}
+    bridge.STATE.quote_pre_close = {}
+    bridge.STATE.instrument = {}
+
+    def _fake_rpc(method, params=None, timeout=None):
+        assert method == "get_instrument_detail"
+        return {"InstrumentName": "ST测试", "PreClose": 10.0}
+
+    monkeypatch.setattr(bridge, "rpc", _fake_rpc)
+    reason = bridge.risk_gate("order_stock", _order("600999.SH", 100, 10.0, 23))
+    assert reason and "blacklisted name" in reason
+
+
+def test_enrich_unknown_applies_deviation_for_buys(bridge, monkeypatch):
+    bridge.CFG._data["risk"]["enrich_unknown"] = True
+    bridge.STATE.name_map = {}
+    bridge.STATE.quote_pre_close = {}
+    bridge.STATE.instrument = {}
+
+    def _fake_rpc(method, params=None, timeout=None):
+        return {"InstrumentName": "正常股", "PreClose": 10.0}
+
+    monkeypatch.setattr(bridge, "rpc", _fake_rpc)
+    reason = bridge.risk_gate("order_stock", _order("600998.SH", 100, 12.0, 23))
+    assert reason and "deviation" in reason
+
+
+def test_enrich_disabled_keeps_fail_open(bridge, monkeypatch):
+    bridge.CFG._data["risk"]["enrich_unknown"] = False
+    bridge.STATE.name_map = {}
+    bridge.STATE.quote_pre_close = {}
+    bridge.STATE.instrument = {}
+    called = {"n": 0}
+
+    def _fake_rpc(method, params=None, timeout=None):
+        called["n"] += 1
+        return {"InstrumentName": "ST测试", "PreClose": 10.0}
+
+    monkeypatch.setattr(bridge, "rpc", _fake_rpc)
+    assert bridge.risk_gate("order_stock", _order("600997.SH", 100, 10.0, 23)) is None
+    assert called["n"] == 0
+
+
+def test_enrich_failure_keeps_fail_open(bridge, monkeypatch):
+    bridge.CFG._data["risk"]["enrich_unknown"] = True
+    bridge.STATE.name_map = {}
+    bridge.STATE.quote_pre_close = {}
+    bridge.STATE.instrument = {}
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("pipe busy")
+
+    monkeypatch.setattr(bridge, "rpc", _boom)
+    assert bridge.risk_gate("order_stock", _order("600996.SH", 100, 10.0, 23)) is None

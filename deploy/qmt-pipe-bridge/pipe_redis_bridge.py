@@ -68,7 +68,10 @@ DEFAULT_CONFIG = {
              # 但卖出保留「错价保护」：限价对昨收偏离超过该带宽即拒（市价单不受限）。
              # 20% 覆盖创业板/科创板涨跌停；主板 10%/ST 5% 由交易所涨跌停兜底。
              # 2026-10-30 实测 9.5% 会把「跌 10% 的票按买一价正常卖出」误杀。
-             'sell_price_band_pct': 20.0},
+             'sell_price_band_pct': 20.0,
+             # 非持仓、非订阅热集的标的：下单前按需查一次合约详情补全名称/昨收，
+             # 否则 ST 黑名单与 ±5% 偏离闸会 fail-open（2026-10-30 审计发现）。
+             'enrich_unknown': True},
     'reload': {'enabled': True, 'key': 'qm:qmt:pipe:reload'},
     'health': {'heartbeat_key': 'qm:qmt:pipe:heartbeat', 'metrics_key': 'qm:qmt:pipe:metrics',
                'interval_s': 5, 'ttl_s': 30},
@@ -151,7 +154,8 @@ class State(object):
         self.stop = threading.Event()
         self.symbols_a = []          # 持仓 + 指数
         self.symbols_b = []          # 候选池
-        self.name_map = {}           # code -> name(来自持仓)
+        self.name_map = {}           # code -> name(来自持仓/按需补全)
+        self.instrument = {}         # code -> {name, pre, ts}(按需补全缓存)
         self.quote_pre_close = {}    # code -> 昨收(风控用)
         self.quote_ts = {}           # code -> 写入时间
         self.last_rpc_ms = 0.0
@@ -388,6 +392,43 @@ def order_backlog_gate(backlog, limit):
     return None
 
 
+_INSTRUMENT_TTL_S = 6 * 3600
+
+
+def _instrument_info(symbol):
+    """按需补全标的名称/昨收（持仓表与订阅热集都不含时）。
+
+    不补全的话：ST 名称黑名单只对**持仓**生效、±5% 偏离闸只对**热集**生效，
+    其余标的一律 fail-open —— 买入侧风控形同虚设（2026-10-30 审计）。
+    结果缓存 6 小时（昨收当日不变）；查询失败保持 fail-open 并记账。
+    """
+    now = time.time()
+    cached = STATE.instrument.get(symbol)
+    if cached and now - float(cached.get('ts') or 0) < _INSTRUMENT_TTL_S:
+        return cached
+    if not bool(CFG.get('risk.enrich_unknown')):
+        return None
+    try:
+        data = rpc('get_instrument_detail', {'code': symbol}, timeout=3.0)
+    except Exception as exc:
+        STATE.note_error('risk.enrich', exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    info = {
+        'name': str(data.get('InstrumentName') or ''),
+        'pre': float(data.get('PreClose') or 0),
+        'ts': now,
+    }
+    with STATE.lock:
+        STATE.instrument[symbol] = info
+        if info['name']:
+            STATE.name_map[symbol] = info['name']
+        if info['pre'] > 0:
+            STATE.quote_pre_close[symbol] = info['pre']
+    return info
+
+
 def _sell_price_band_reason(symbol, price):
     """卖出错价保护：限价对昨收偏离超过带宽即拒；市价单（price<=0）不受限。"""
     band = float(CFG.get('risk.sell_price_band_pct') or 0)
@@ -414,6 +455,8 @@ def risk_gate(method, params):
     symbol, volume, price = _order_params(params)
     if not symbol:
         return 'risk: empty symbol'
+    if not STATE.name_map.get(symbol) or not STATE.quote_pre_close.get(symbol):
+        _instrument_info(symbol)
     # 卖出是减风险动作：黑名单/金额/偏离/限频只对买入生效；卖出仅保留错价保护。
     if _order_side(params) == 'SELL' and not bool(CFG.get('risk.apply_to_sells')):
         return _sell_price_band_reason(symbol, price)
