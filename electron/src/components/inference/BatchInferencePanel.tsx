@@ -17,6 +17,7 @@ import {
   BatchAggregateSymbol,
   BatchAggregateDaily,
 } from '../../services/modelTrainingService';
+import { neutralizationService } from '../../services/neutralizationService';
 
 const { Text } = Typography;
 
@@ -420,6 +421,37 @@ export const BatchInferencePanel: React.FC<Props> = ({ modelId, horizonDays }) =
   const [pollTimer, setPollTimer] = useState<ReturnType<typeof setInterval> | null>(null);
   const [batches, setBatches] = useState<BatchInferenceRecord[]>([]);
   const [batchesLoading, setBatchesLoading] = useState(false);
+  const [neutralInfo, setNeutralInfo] = useState<{
+    mode: string;
+    status: string | null;
+    coverage: number | null;
+    date: string | null;
+  } | null>(null);
+
+  const loadNeutral = useCallback(async () => {
+    try {
+      const bundle = await neutralizationService.getSettings(modelId);
+      const latest = bundle.diagnostics?.[0];
+      setNeutralInfo({
+        mode: bundle.settings.mode,
+        status: latest?.status ?? null,
+        coverage: latest?.coverage ?? null,
+        date: latest?.data_trade_date ?? null,
+      });
+    } catch {
+      setNeutralInfo(null);
+    }
+  }, [modelId]);
+
+  useEffect(() => {
+    void loadNeutral();
+  }, [loadNeutral]);
+
+  useEffect(() => {
+    if (currentBatch && (currentBatch.status === 'completed' || currentBatch.status === 'partial')) {
+      void loadNeutral();
+    }
+  }, [currentBatch?.status, loadNeutral]);
 
   const loadBatches = useCallback(async () => {
     setBatchesLoading(true);
@@ -530,6 +562,26 @@ export const BatchInferencePanel: React.FC<Props> = ({ modelId, horizonDays }) =
             <Layers size={18} />
           </div>
           <Text className="text-sm font-black text-slate-800 uppercase tracking-tight leading-none">批量多日推理</Text>
+          {neutralInfo && (
+            <Tooltip title="中性化影子层：只写独立影子表，不改原始分数与下单链路">
+              <span className="ml-auto flex items-center gap-1.5">
+                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">中性化</span>
+                <Tag color={neutralInfo.mode === 'enforce' ? 'green' : neutralInfo.mode === 'shadow' ? 'blue' : 'default'} className="!m-0 text-[10px]">
+                  {neutralInfo.mode === 'enforce' ? '启用' : neutralInfo.mode === 'shadow' ? '影子' : '关闭'}
+                </Tag>
+                {neutralInfo.status && (
+                  <Tag
+                    color={neutralInfo.status === 'ok' ? 'green' : neutralInfo.status === 'degraded' ? 'orange' : 'red'}
+                    className="!m-0 text-[10px]"
+                  >
+                    {neutralInfo.status === 'ok' ? '正常' : neutralInfo.status === 'degraded' ? '降级' : '失败'}
+                    {neutralInfo.coverage != null ? ` · 覆盖 ${fmtPct(neutralInfo.coverage)}` : ''}
+                    {neutralInfo.date ? ` · ${neutralInfo.date}` : ''}
+                  </Tag>
+                )}
+              </span>
+            </Tooltip>
+          )}
         </div>
 
         <div className="grid grid-cols-12 gap-4 items-end">

@@ -53,6 +53,7 @@ from backend.services.api.routers.model_selection_stats import (
     router as model_selection_stats_router,
 )
 from backend.services.api.routers.model_training import router as model_training_router
+from backend.services.api.routers.neutralization import router as neutralization_router
 from backend.services.api.routers.model_rollouts import router as model_rollouts_router
 from backend.services.api.routers.model_rolling import router as model_rolling_router
 from backend.services.api.routers.training_per_model import build_per_model_router
@@ -525,6 +526,9 @@ app.include_router(
 app.include_router(
     model_selection_stats_router
 )  # 截面选股 TopK 历史统计（/api/v1/models/{model_id}/selection-stats）
+app.include_router(
+    neutralization_router
+)  # 推理中性化（/api/v1/models/{model_id}/neutralization*，必须先于 model_training 兜底）
 app.include_router(
     model_training_router, prefix="/api/v1/models", tags=["ModelTraining"]
 )

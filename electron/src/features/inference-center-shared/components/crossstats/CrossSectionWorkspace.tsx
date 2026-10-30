@@ -8,12 +8,14 @@
  * 顶栏选中的那个模型。
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Segmented, Tag } from 'antd';
 import type {
   InferenceRankingItem,
   InferenceRankingResult,
 } from '../../../../services/modelTrainingService';
+import { neutralizationService } from '../../../../services/neutralizationService';
+import { normalizeStockCode } from '../../../../utils/portfolioUtils';
 import { CrossSectionTable } from '../CrossSectionTable';
 import { SelectionStatsPanel } from './SelectionStatsPanel';
 
@@ -51,6 +53,42 @@ export const CrossSectionWorkspace: React.FC<CrossSectionWorkspaceProps> = ({
   marketLabel,
 }) => {
   const [view, setView] = useState<CrossSectionView>('today');
+  const [neutralMode, setNeutralMode] = useState(false);
+  const [neutralMap, setNeutralMap] = useState<Record<string, number | null>>({});
+
+  useEffect(() => {
+    if (!neutralMode || !modelId || !ranking?.inference_date) return;
+    let cancelled = false;
+    void neutralizationService
+      .getScores(modelId, ranking.inference_date, 1000, 0)
+      .then(({ rows }) => {
+        if (cancelled) return;
+        setNeutralMap(
+          Object.fromEntries(rows.map((row) => [row.symbol, row.neutral_score])),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setNeutralMap({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [neutralMode, modelId, ranking?.inference_date]);
+
+  const adjustedRanking = useMemo<InferenceRankingResult | null>(() => {
+    if (!ranking) return null;
+    if (!neutralMode) return ranking;
+    return {
+      ...ranking,
+      rankings: ranking.rankings.map((row) => ({
+        ...row,
+        neutral_score: neutralMap[normalizeStockCode(row.code)] ?? null,
+      })),
+    };
+  }, [ranking, neutralMode, neutralMap]);
+
+  const neutralAvailable =
+    neutralMode && Boolean(adjustedRanking?.rankings.some((row) => row.neutral_score != null));
 
   return (
     <div
@@ -69,6 +107,23 @@ export const CrossSectionWorkspace: React.FC<CrossSectionWorkspaceProps> = ({
           data-testid="cross-section-view"
         />
         <span className="text-[11px] text-slate-500 truncate">{VIEW_HINTS[view]}</span>
+        {view === 'today' && (
+          <Segmented<'raw' | 'neutral'>
+            size="small"
+            value={neutralMode ? 'neutral' : 'raw'}
+            onChange={(value) => setNeutralMode(value === 'neutral')}
+            options={[
+              { value: 'raw', label: '原始分' },
+              { value: 'neutral', label: '中性化' },
+            ]}
+            data-testid="cross-section-neutral-mode"
+          />
+        )}
+        {neutralMode && !neutralAvailable && (
+          <span className="text-[11px] text-amber-600">
+            该模型未开启中性化（影子）或当日无结果
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-1.5 min-w-0">
           <Tag
             color="blue"
@@ -85,11 +140,12 @@ export const CrossSectionWorkspace: React.FC<CrossSectionWorkspaceProps> = ({
       <div className="flex-1 min-h-0 min-w-0 flex flex-col">
         {view === 'today' ? (
           <CrossSectionTable
-            ranking={ranking}
+            ranking={adjustedRanking}
             loading={loading}
             fallbackFrom={fallbackFrom}
             onSelect={onSelect}
             activeCode={activeCode}
+            neutralMode={neutralMode}
           />
         ) : (
           <SelectionStatsPanel

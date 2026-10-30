@@ -122,6 +122,14 @@ if AUTO_INFERENCE_ENABLED:
             "task": "engine.tasks.auto_inference_if_needed",
             "schedule": crontab(minute="0", hour="8", day_of_week="1-5"),
         },
+        # 盘前数据迟到补跑：08:00 因「数据范围不足」失败时，09:05 再试一次。
+        # 08:00 成功时被 ALREADY_DONE / 推理锁跳过（幂等）；09:05 开跑约 6 分钟，
+        # 仍早于 09:35 决策轮。2026-10-29 全是 08:00 数据门禁失败、当天无信号，
+        # 这条兜底让上游迟到一天时仍有盘中信号。
+        "auto-inference-retry-0905": {
+            "task": "engine.tasks.auto_inference_if_needed",
+            "schedule": crontab(minute="5", hour="9", day_of_week="1-5"),
+        },
         # 推理质量回填：每日 02:30 回填已完成推理但缺 quality 记录的日期
         # （滞后 5 天等真实收益兑现，算生产 Rank IC）
         "backfill-inference-quality-daily": {

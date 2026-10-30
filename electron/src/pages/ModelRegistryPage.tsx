@@ -60,6 +60,7 @@ import { DriftTabPanel } from './DriftTabPanel';
 import { MarketRegimePanel } from './MarketRegimePanel';
 import { InferenceCoveragePanel } from './InferenceCoveragePanel';
 import { ModelRollingPanel } from './ModelRollingPanel';
+import { NeutralizationModelPanel } from '../features/inference-center-shared/panels/NeutralizationPanel';
 import {
   buildFeatureLabelMap,
   DEFAULT_FEATURE_CATEGORIES,
@@ -1003,6 +1004,20 @@ export const ModelRegistryPage: React.FC = () => {
                           </span>
                         ),
                         children: <InferenceCoveragePanel modelId={selectedModel.model_id} calendar={marketConfig.calendar} />,
+                      },
+                      {
+                        key: 'neutralization',
+                        label: (
+                          <span className="text-xs font-black uppercase tracking-widest px-1 flex items-center gap-1.5">
+                            中性化
+                          </span>
+                        ),
+                        children: (
+                          <NeutralizationModelPanel
+                            modelId={selectedModel.model_id}
+                            modelName={modelDisplayName(selectedModel)}
+                          />
+                        ),
                       },
                     ]}
                   />

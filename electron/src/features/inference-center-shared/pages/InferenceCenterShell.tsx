@@ -34,6 +34,7 @@ import { IndividualWorkbench } from '../components/IndividualWorkbench';
 import { CrossSectionWorkspace } from '../components/crossstats/CrossSectionWorkspace';
 import { MarketStatusBar } from '../components/MarketStatusBar';
 import { ModelGovernancePanel } from '../components/ModelGovernancePanel';
+import { NeutralizationOverviewPanel } from '../panels/NeutralizationPanel';
 import { RolloutGovernancePanel } from '../components/RolloutGovernancePanel';
 import { ComboWorkspace } from '../components/combo/ComboWorkspace';
 import { WorkspaceTabs, type WorkspaceKey } from '../components/WorkspaceTabs';
@@ -74,6 +75,7 @@ export const InferenceCenterShell: React.FC = () => {
 
   const isNarrow = useIsNarrow(NARROW_BREAKPOINT);
   const [workspace, setWorkspace] = useState<WorkspaceKey>('single');
+  const [governanceView, setGovernanceView] = useState<'assets' | 'neutralization'>('assets');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [poolPickerOpen, setPoolPickerOpen] = useState(false);
   /** 治理面板「组合选股」→ 组合工作区：带过去的模型选择（nonce 触发构建器预填） */
@@ -429,14 +431,44 @@ export const InferenceCenterShell: React.FC = () => {
 
       {workspace === 'governance' && (
         <div className="flex-1 min-h-0 flex flex-col">
-          <ModelGovernancePanel
-            models={cs.registeredModels}
-            loading={cs.modelsLoading}
-            marketLabel={marketLabel}
-            onInspect={handleInspectModel}
-            onOpenCombo={handleOpenCombo}
-            onBackfillFinished={cs.reloadModels}
-          />
+          <div className="flex items-center gap-1 px-4 pt-3">
+            <button
+              type="button"
+              onClick={() => setGovernanceView('assets')}
+              className={clsx(
+                'rounded-lg px-3 py-1 text-[11px] font-black tracking-wide transition-colors',
+                governanceView === 'assets'
+                  ? 'bg-slate-900 text-white'
+                  : 'bg-slate-100 text-slate-500 hover:text-slate-700',
+              )}
+            >
+              模型资产
+            </button>
+            <button
+              type="button"
+              onClick={() => setGovernanceView('neutralization')}
+              className={clsx(
+                'rounded-lg px-3 py-1 text-[11px] font-black tracking-wide transition-colors',
+                governanceView === 'neutralization'
+                  ? 'bg-slate-900 text-white'
+                  : 'bg-slate-100 text-slate-500 hover:text-slate-700',
+              )}
+            >
+              推理中性化
+            </button>
+          </div>
+          {governanceView === 'assets' ? (
+            <ModelGovernancePanel
+              models={cs.registeredModels}
+              loading={cs.modelsLoading}
+              marketLabel={marketLabel}
+              onInspect={handleInspectModel}
+              onOpenCombo={handleOpenCombo}
+              onBackfillFinished={cs.reloadModels}
+            />
+          ) : (
+            <NeutralizationOverviewPanel models={cs.registeredModels} marketLabel={marketLabel} />
+          )}
         </div>
       )}
 

@@ -274,6 +274,8 @@ export interface InferenceRankingItem {
   market_cap_yi?: number | null;
   market_cap_tier?: string;
   negative_tag?: string;
+  /** 中性化分位（影子层输出，0~1；null=该标的不可用） */
+  neutral_score?: number | null;
 }
 
 export interface NegativeCandidate {

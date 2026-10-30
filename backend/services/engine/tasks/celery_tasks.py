@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from backend.services.engine.qlib_app.celery_config import celery_app
@@ -101,6 +102,16 @@ def run_pipeline_run(self, run_id: str) -> dict[str, Any]:
     service = PipelineService()
     result = _run_async(service.execute_run(run_id))
     return result.model_dump()
+
+
+def _production_inference_available() -> bool:
+    """production 模型目录是否配置了推理脚本（全局任务的前置条件）。
+
+    2026-10-30：``/app/models/production`` 为空时，08:00 全局任务每天派发一次
+    注定失败的 run（``主模型推理脚本不存在``）。未配置不是执行故障，应跳过。
+    """
+    prod_dir = Path(os.getenv("MODELS_PRODUCTION", "/app/models/production"))
+    return (prod_dir / "inference.py").is_file()
 
 
 def _already_done_probe_sql(model_name: str | None) -> str:
@@ -416,6 +427,28 @@ def auto_inference_if_needed() -> dict[str, Any]:
                     exc,
                 )
                 resolved_model = None
+
+            # 全局任务（model_id=None）落到 production 模型目录；生产目录未配置
+            # 推理脚本时，每天 08:00 都会派发一次注定失败的 run（实测 2026-10-30
+            # `/app/models/production/inference.py` 不存在）。未配置就不派发，
+            # 记 skipped 而不是 failed——「没配生产模型」不是执行故障。
+            if sid == "global" and not mid and not (
+                resolved_model and resolved_model.get("effective_model_id")
+            ):
+                if not _production_inference_available():
+                    prod_dir = os.getenv("MODELS_PRODUCTION", "/app/models/production")
+                    _write_dispatch_log(
+                        tenant_id=tid,
+                        user_id=uid,
+                        strategy_id=sid,
+                        model_id=None,
+                        status="skipped",
+                        reason_code="NO_PRODUCTION_MODEL",
+                        reason_detail=(
+                            f"production 模型目录未配置推理脚本: {prod_dir}"
+                        ),
+                    )
+                    continue
 
             # 检查当日是否已完成 (DB 记录)，按模型维度 —— 口径见 _already_done_probe_sql
             exists_params: dict[str, Any] = {

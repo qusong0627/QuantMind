@@ -322,6 +322,21 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
                 },
             )
 
+    # 中性化影子层（热集口径）：只写独立影子表，不改 fusion_score。
+    # enforce 消费方不得使用 hot_set 结果（横截面样本偏差，设计文档 §4.3）。
+    try:
+        from starlette.concurrency import run_in_threadpool
+
+        from backend.services.engine.inference.neutralization_service import (
+            compute_for_run,
+        )
+
+        await run_in_threadpool(compute_for_run, run_id, universe_scope="hot_set")
+    except Exception as exc:  # noqa: BLE001 - 影子层失败不得影响 signal-ready
+        logger.warning(
+            "[RealtimeContract] 中性化影子计算失败（不影响 signal-ready）: %s", exc
+        )
+
     return {
         "ok": True,
         "run_id": run_id,

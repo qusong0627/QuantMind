@@ -1702,6 +1702,24 @@ class InferenceScriptRunner:
                     f"[InferenceScriptRunner] 写 Redis 完成标记失败（不影响主流程）: {exc}"
                 )
 
+        # 中性化影子层（Neutralization Layer）：只写独立影子表，不改原始分数。
+        # 失败只告警，不影响推理 run 的成功状态（设计见 docs/推理中性化处理前端_生产级设计_20261030.md）。
+        if persist and not (partial_applied or pool_scoped):
+            try:
+                from backend.services.engine.inference.neutralization_service import (
+                    compute_for_run,
+                )
+
+                compute_for_run(
+                    run_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - 影子层失败不得回滚推理
+                logger.warning(
+                    f"[InferenceScriptRunner] 中性化影子计算失败（不影响推理）: {exc}"
+                )
+
         return ExecutionResult(
             success=True,
             exit_code=0,

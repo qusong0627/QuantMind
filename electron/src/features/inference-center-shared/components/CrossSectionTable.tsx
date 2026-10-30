@@ -98,6 +98,8 @@ interface CrossSectionTableProps {
   onSelect: (item: InferenceRankingItem) => void;
   /** 当前联动中的标的（高亮行） */
   activeCode?: string;
+  /** 显示中性化分位列（影子层，0~1 分位） */
+  neutralMode?: boolean;
 }
 
 export const CrossSectionTable: React.FC<CrossSectionTableProps> = ({
@@ -106,6 +108,7 @@ export const CrossSectionTable: React.FC<CrossSectionTableProps> = ({
   fallbackFrom,
   onSelect,
   activeCode,
+  neutralMode = false,
 }) => {
   const [keyword, setKeyword] = useState('');
   const [signals, setSignals] = useState<SignalKey[]>([]);
@@ -200,6 +203,26 @@ export const CrossSectionTable: React.FC<CrossSectionTableProps> = ({
       defaultSortOrder: 'descend',
       render: (v: number) => <span className={clsx('font-mono text-xs font-black', scoreClass(v))}>{fmt(v)}</span>,
     },
+    ...(neutralMode
+      ? [{
+          title: (
+            <Tooltip title="影子层：按流通市值、60日 Beta、20日动量做截面中性化后的分位（0~1）">
+              <span>中性化</span>
+            </Tooltip>
+          ),
+          dataIndex: 'neutral_score',
+          width: 96,
+          align: 'right' as const,
+          sorter: (a: InferenceRankingItem, b: InferenceRankingItem) =>
+            (a.neutral_score ?? -1) - (b.neutral_score ?? -1),
+          render: (v: number | null) =>
+            v == null ? (
+              <span className="text-[11px] text-slate-300">—</span>
+            ) : (
+              <span className="font-mono text-xs font-bold text-indigo-700">{(v * 100).toFixed(1)}</span>
+            ),
+        }]
+      : []),
     {
       title: '位置', dataIndex: 'signal', width: 72, align: 'center',
       filters: (Object.keys(SIGNAL_META) as SignalKey[]).map((k) => ({ text: SIGNAL_META[k].label, value: k })),
@@ -253,7 +276,7 @@ export const CrossSectionTable: React.FC<CrossSectionTableProps> = ({
           <span className="text-slate-300">—</span>
         ),
     },
-  ], []);
+  ], [neutralMode]);
 
   return (
     <div className="flex-1 min-w-0 min-h-0 flex flex-col bg-white border border-slate-200 rounded-xl overflow-hidden">

@@ -111,6 +111,32 @@ newest_custom_dt() {
         | grep -oE 'dt=[0-9]{8}' | cut -d= -f2 | sort | tail -1
 }
 
+# 最近一个**已收盘**的交易日（北京时区）。不能用「本地最新分区」当基准：
+# 2026-10-29 的形态就是日K 本身停在 10-27，链把 10-27 当成了「已最新」，
+# 三档全空跑，08:00 盘前推理要 10-28 直接撞维度门禁。
+# 容器 TZ=Asia/Shanghai；取「昨天及以前」的最后一个交易日，避开当日未收盘的会话。
+expected_last_session() {
+    # 运维演练/单测注入点：显式指定期望交易日，跳过日历计算
+    if [ -n "${QM_EXPECTED_DT_OVERRIDE:-}" ]; then
+        echo "$QM_EXPECTED_DT_OVERRIDE"
+        return 0
+    fi
+    # 测试/替身环境：DOCKER_BIN 不是真 docker 时跳过（假 docker 不实现 exec）
+    if [ "${DOCKER_BIN:-docker}" != "docker" ]; then
+        return 0
+    fi
+    timeout 30 docker exec -i quantmind python - <<'PY' 2>/dev/null
+import datetime as dt
+try:
+    import exchange_calendars as xc
+    cal = xc.get_calendar("XSHG")
+    prev = dt.date.today() - dt.timedelta(days=1)
+    print(cal.date_to_session(prev, direction="previous").strftime("%Y%m%d"))
+except Exception:
+    pass
+PY
+}
+
 # 1) 防重入（三档 cron 可能撞在同一个还没跑完的窗口里）
 exec 9>"$LOCK"
 if ! flock -n 9; then
@@ -137,39 +163,84 @@ if [ -z "$KL_DT" ]; then
     exit 0
 fi
 
-# 两段各自判滞后：alpha 是最上游，custom 是推理直读源。**不许只看 alpha**——
-# 2026-10-17 的形态就是 alpha 最新、jq110 在 8G worker 被 OOM，custom 停在旧日。
+# 三段各自判滞后：alpha 是最上游，custom 是推理直读源，kline 是所有源的地基。
+# **不许只看 alpha**——2026-10-17 的形态就是 alpha 最新、jq110 在 8G worker 被 OOM，
+# custom 停在旧日；2026-10-29 的形态则是日K 本身停在 10-27，链把旧分区当「已最新」，
+# 三档全空跑，08:00 盘前推理撞维度门禁。
 AL_STALE=0
 CUSTOM_STALE=0
+KLINE_STALE=0
+EXPECTED_DT=$(expected_last_session)
+if [ -n "$EXPECTED_DT" ] && [ -n "$KL_DT" ] && [ "$KL_DT" -lt "$EXPECTED_DT" ]; then
+    KLINE_STALE=1
+fi
 if [ -z "$AL_DT" ] || [ "$AL_DT" -lt "$KL_DT" ]; then AL_STALE=1; fi
 if [ -z "$CUSTOM_DT" ] || [ "$CUSTOM_DT" -lt "$KL_DT" ]; then CUSTOM_STALE=1; fi
 
 PENDING_PICKS=0
 [ -f "$PENDING_FLAG" ] && PENDING_PICKS=1
 
-if [ "$AL_STALE" = "0" ] && [ "$CUSTOM_STALE" = "0" ] && [ "$PENDING_PICKS" = "0" ]; then
+if [ "$KLINE_STALE" = "0" ] && [ "$AL_STALE" = "0" ] && [ "$CUSTOM_STALE" = "0" ] && [ "$PENDING_PICKS" = "0" ]; then
     # 链是好的——绝大多数日子走这条。写一行日志便于确认守护在跑，但不推 QQ。
-    log_line "无事：已最新（alpha=$AL_DT custom=$CUSTOM_DT kline=$KL_DT）"
+    log_line "无事：已最新（alpha=$AL_DT custom=$CUSTOM_DT kline=$KL_DT expected=${EXPECTED_DT:-?}）"
     exit 0
 fi
 
 AVAIL_GB=$(awk '/^MemAvailable:/ {print int($2/1024/1024)}' /proc/meminfo)
 AL_DT_ORIG="$AL_DT"
 CUSTOM_DT_ORIG="$CUSTOM_DT"
-if [ "$AL_STALE" = "1" ] || [ "$CUSTOM_STALE" = "1" ]; then
+if [ "$KLINE_STALE" = "1" ]; then
+    log_line "日K 滞后（kline=${KL_DT:-无} expected=$EXPECTED_DT）→ 先补 A 股上游同步"
+elif [ "$AL_STALE" = "1" ] || [ "$CUSTOM_STALE" = "1" ]; then
     log_line "补池链滞后（alpha=${AL_DT:-无} custom=${CUSTOM_DT:-无} kline=$KL_DT，pending_picks=$PENDING_PICKS，可用内存 ${AVAIL_GB:-?}GB）→ 重试"
 else
     log_line "补池链待办：数据已最新，但上次备选池重算失败（$PENDING_FLAG）→ 只重试池"
 fi
 
 if [ "$DRY_RUN" = "1" ]; then
+    [ "$KLINE_STALE" = "1" ] && log_line "[dry-run] 将执行：容器内 A 股同步（run_market_sync('A')）"
     [ "$AL_STALE" = "1" ] && log_line "[dry-run] 将执行：bash $SCRIPT（alpha 刷新）"
     if [ "$AL_STALE" = "1" ] || [ "$CUSTOM_STALE" = "1" ]; then
         log_line "[dry-run] 将执行：容器内 CUSTOM 重建（若滞后）；成功后备选池重算（--picks-only）"
-    else
+    elif [ "$KLINE_STALE" = "0" ]; then
         log_line "[dry-run] 将执行：只重试备选池（--picks-only）"
     fi
     exit 0
+fi
+
+# 1.5) 日K 本身滞后：先跑 A 股上游同步（盘前推理要的就是这一天）
+if [ "$KLINE_STALE" = "1" ]; then
+    log_line "触发 A 股同步：kline=${KL_DT:-无} expected=$EXPECTED_DT"
+    timeout 2700 docker exec quantmind python -c "
+import logging
+logging.basicConfig(level=logging.INFO)
+from backend.services.engine.tasks.market_sync_scheduler import get_schedule, run_market_sync
+print(run_market_sync('A', get_schedule('A')))
+" >> "$LOG" 2>&1
+    SYNC_RC=$?
+    KL_NEW=$(newest_dt "$KLINE_ROOT")
+    log_line "A 股同步结束 rc=$SYNC_RC kline=${KL_NEW:-无}"
+    KL_DT="${KL_NEW:-$KL_DT}"
+    AL_DT=$(newest_dt "$ALPHA_ROOT")
+    CUSTOM_DT=$(newest_custom_dt "$CUSTOM_ROOT")
+    KLINE_STALE=0
+    AL_STALE=0
+    CUSTOM_STALE=0
+    if [ -n "$EXPECTED_DT" ] && [ -n "$KL_DT" ] && [ "$KL_DT" -lt "$EXPECTED_DT" ]; then
+        KLINE_STALE=1
+    fi
+    if [ -z "$AL_DT" ] || [ "$AL_DT" -lt "$KL_DT" ]; then AL_STALE=1; fi
+    if [ -z "$CUSTOM_DT" ] || [ "$CUSTOM_DT" -lt "$KL_DT" ]; then CUSTOM_STALE=1; fi
+    if [ "$KLINE_STALE" = "1" ]; then
+        log_line "❌ 日K 仍滞后（kline=${KL_DT:-无} expected=$EXPECTED_DT）——上游未就绪，盘前推理将失败"
+        if [ "${QM_RETRY_FINAL:-0}" = "1" ]; then
+            notify "🟠 日K 仍缺 $EXPECTED_DT" \
+"补池链已触发 A 股同步，但日K 仍停在 ${KL_DT:-无}（期望 $EXPECTED_DT）。
+
+08:00 盘前推理会因数据范围不足失败；请检查上游 QuantDB release 是否已发布。"
+        fi
+        exit 0
+    fi
 fi
 
 # 2) alpha：只有滞后才刷新（它自己会再判一次内存/可写/已最新，全部幂等）
