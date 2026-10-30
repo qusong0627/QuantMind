@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI):
     qmt_account_sync_task = None
     qmt_exec_poller_task = None
     qmt_pipe_guard_task = None
+    market_scanner_task = None
     mirror_queue_drainer_task = None
     qmt_sltp_executor_task = None
     qmt_quote_backup_task = None
@@ -297,6 +298,24 @@ async def lifespan(app: FastAPI):
         else:
             qmt_pipe_guard_task = None
             logger.info("qmt pipe guard disabled (QM_QMT_PIPE_GUARD_ENABLED=false)")
+        # 全市场扫描器（影子模式，2026-10-30）：读桥的当日快照做截面打分，
+        # 只写信号台账（qm:scanner:latest / stream），**不下任何单**。
+        if str(os.getenv("QM_MARKET_SCANNER_ENABLED", "true")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            from backend.services.live_trading.services.market_scanner import (
+                run_market_scanner_task,
+            )
+
+            market_scanner_task = asyncio.create_task(
+                run_market_scanner_task(), name="market-scanner"
+            )
+        else:
+            market_scanner_task = None
+            logger.info("market scanner disabled (QM_MARKET_SCANNER_ENABLED=false)")
         # 模拟盘 → 真单镜像：非交易时段入队的镜像单，开盘后由本任务补交
         from backend.services.live_trading.services.real_mirror_service import (
             run_mirror_queue_drainer,
@@ -959,6 +978,7 @@ async def lifespan(app: FastAPI):
         qmt_account_sync_task,
         qmt_exec_poller_task,
         qmt_pipe_guard_task,
+        market_scanner_task,
         mirror_queue_drainer_task,
         qmt_sltp_executor_task,
         qmt_quote_backup_task,
