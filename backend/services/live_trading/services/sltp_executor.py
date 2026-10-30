@@ -980,6 +980,10 @@ class SltpDeps:
     #: 该 symbol 的**分账持有人**（symbol, user_id, tenant_id → [(agent, volume)]）。
     #: auto 规则据此判断「这是不是 agent 共享仓」——是则不再按共享账户全量代卖。
     ledger_holders: Callable[[str, str, str], Awaitable[list[tuple[str, float]]]] | None = None
+    #: 该 agent 在 symbol 上的**分账成本价**（agent, symbol, user_id, tenant_id → 成本价）。
+    #: per-agent auto 规则的 entry_price：共享账户成本是成交加权均价，与单个 agent 的
+    #: 建仓成本可差几个百分点，用账户价会让 8% 止损位整体偏移。``None``/0 → 回退账户价。
+    ledger_cost: Callable[[str, str, str, str], Awaitable[float | None]] | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1134,13 +1138,29 @@ async def auto_arm_missing_rules(
                     continue
                 if (symbol, owner) in existing or symbol in global_covered:
                     continue
+                entry_price = _position_entry_price(position)
+                if deps.ledger_cost is not None:
+                    try:
+                        cost = _to_float(
+                            await deps.ledger_cost(agent, symbol, user_id, tenant_id)
+                        )
+                    except Exception as exc:  # noqa: BLE001 成本读失败 → 回退账户价
+                        logger.warning(
+                            "[SltpExec] 自动布防读分账成本失败 %s/%s（回退账户价）: %s",
+                            symbol,
+                            agent,
+                            exc,
+                        )
+                        cost = None
+                    if cost and cost > 0:
+                        entry_price = cost
                 rule = normalize_rule(
                     {
                         "symbol": symbol,
                         "owner": owner,
                         "enabled": True,
                         "side": "SELL",
-                        "entry_price": _position_entry_price(position),
+                        "entry_price": entry_price,
                         "stop_loss_pct": stop_pct,
                         "take_profit_pct": take_pct,
                         "trailing_stop_pct": trail_pct,
@@ -2589,6 +2609,23 @@ def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
             )
             return [(str(row[0]), float(row[1] or 0)) for row in res.all()]
 
+    async def ledger_cost(
+        agent: str, symbol: str, user_id: str, tenant_id: str
+    ) -> float | None:
+        """该 agent 在 symbol 上的分账成本价。无持仓行 → ``None``（回退账户价）。"""
+        from sqlalchemy import text
+
+        async with get_session(read_only=True) as db:
+            res = await db.execute(
+                text(
+                    "SELECT cost_price FROM qm_agent_ledger_position "
+                    "WHERE tenant_id=:t AND user_id=:u AND agent=:a AND code=:c"
+                ),
+                _ledger_params(agent, symbol, user_id, tenant_id),
+            )
+            value = res.scalar()
+            return float(value) if value is not None else None
+
     return SltpDeps(
         client=client,
         redis=redis,
@@ -2600,6 +2637,7 @@ def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
         ledger_volume=ledger_volume,
         ledger_today_buys=ledger_today_buys,
         ledger_holders=ledger_holders,
+        ledger_cost=ledger_cost,
         extras={"broker": broker},
     )
 

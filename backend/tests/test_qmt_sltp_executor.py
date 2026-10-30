@@ -93,6 +93,7 @@ class Harness:
         ledger_volume=None,
         ledger_today_buys=None,
         ledger_holders=None,
+        ledger_cost=None,
     ) -> None:
         self.redis = FakeRedis(cfg=ex.merge_config(cfg), state=state)
         self.evidence = evidence
@@ -108,6 +109,7 @@ class Harness:
         self.ledger_volume = ledger_volume
         self.ledger_today_buys = ledger_today_buys
         self.ledger_holders = ledger_holders
+        self.ledger_cost = ledger_cost
         self.cancelled: list[str] = []
         self.cancel_result = True
         self.cancel_hook = None
@@ -144,6 +146,7 @@ class Harness:
             ledger_volume=self.ledger_volume,
             ledger_today_buys=self.ledger_today_buys,
             ledger_holders=self.ledger_holders,
+            ledger_cost=self.ledger_cost,
         )
 
     def cycle(self) -> dict:
@@ -1775,6 +1778,110 @@ class TestAutoArmPerHolder:
             ("600036.SH", "llm:deepseek-v4-pro"),
         ]
         assert all(r["stop_loss_pct"] == 0.05 for r in added)
+
+    def test_per_agent_auto_uses_ledger_cost_as_entry(self) -> None:
+        """per-agent auto 的 entry_price 取**该 agent 的分账成本**，不是共享账户均价。
+
+        601825 实录（2026-10-30）：账户成本 8.944，flash 8.956 / pro 8.91 / glm 8.98。
+        用账户价会把各家 8% 止损位整体挪位置（最大 ~0.8%）。
+        """
+
+        async def holders(symbol, user_id, tenant_id):
+            return [("deepseek-v4-flash", 3000.0), ("deepseek-v4-pro", 2800.0)]
+
+        costs = {
+            "deepseek-v4-flash": 8.956,
+            "deepseek-v4-pro": 8.91,
+        }
+
+        async def ledger_cost(agent, symbol, user_id, tenant_id):
+            return costs.get(agent)
+
+        cfg = _cfg([], auto_arm=True, auto_arm_stop_loss_pct=0.08)
+        h = Harness(
+            cfg=cfg,
+            positions=[_position("601825.SH", can_use=5800, cost=8.944)],
+            ledger_holders=holders,
+            ledger_cost=ledger_cost,
+        )
+
+        added = asyncio.run(ex.auto_arm_missing_rules(h.deps(), cfg))
+
+        assert [(r["symbol"], r["owner"], r["entry_price"]) for r in added] == [
+            ("601825.SH", "llm:deepseek-v4-flash", 8.956),
+            ("601825.SH", "llm:deepseek-v4-pro", 8.91),
+        ]
+
+    def test_per_agent_auto_falls_back_to_position_price_without_ledger_cost(self) -> None:
+        """分账成本缺失/为 0 → 回退账户持仓成本（仍布防，不因成本缺失放弃保护）。"""
+
+        async def holders(symbol, user_id, tenant_id):
+            return [("deepseek-v4-flash", 3000.0)]
+
+        async def ledger_cost(agent, symbol, user_id, tenant_id):
+            return None
+
+        cfg = _cfg([], auto_arm=True, auto_arm_stop_loss_pct=0.08)
+        h = Harness(
+            cfg=cfg,
+            positions=[_position("601825.SH", can_use=3000, cost=8.944)],
+            ledger_holders=holders,
+            ledger_cost=ledger_cost,
+        )
+
+        added = asyncio.run(ex.auto_arm_missing_rules(h.deps(), cfg))
+
+        assert [(r["owner"], r["entry_price"]) for r in added] == [
+            ("llm:deepseek-v4-flash", 8.944)
+        ]
+
+    def test_per_agent_auto_survives_ledger_cost_error(self) -> None:
+        """读分账成本抛异常 → 回退账户价继续布防（成本读失败不得让保护缺位）。"""
+
+        async def holders(symbol, user_id, tenant_id):
+            return [("deepseek-v4-flash", 3000.0)]
+
+        async def ledger_cost(agent, symbol, user_id, tenant_id):
+            raise RuntimeError("ledger down")
+
+        cfg = _cfg([], auto_arm=True, auto_arm_stop_loss_pct=0.08)
+        h = Harness(
+            cfg=cfg,
+            positions=[_position("601825.SH", can_use=3000, cost=8.944)],
+            ledger_holders=holders,
+            ledger_cost=ledger_cost,
+        )
+
+        added = asyncio.run(ex.auto_arm_missing_rules(h.deps(), cfg))
+
+        assert [(r["owner"], r["entry_price"]) for r in added] == [
+            ("llm:deepseek-v4-flash", 8.944)
+        ]
+
+    def test_global_auto_does_not_read_ledger_cost(self) -> None:
+        """无分账持有人的手工/柜台仓走账户级 auto，不该读分账成本。"""
+
+        calls: list[tuple] = []
+
+        async def holders(symbol, user_id, tenant_id):
+            return []
+
+        async def ledger_cost(*args):
+            calls.append(args)
+            return 1.0
+
+        cfg = _cfg([], auto_arm=True, auto_arm_stop_loss_pct=0.05)
+        h = Harness(
+            cfg=cfg,
+            positions=[_position("600036.SH", cost=100.0)],
+            ledger_holders=holders,
+            ledger_cost=ledger_cost,
+        )
+
+        added = asyncio.run(ex.auto_arm_missing_rules(h.deps(), cfg))
+
+        assert [(r["owner"], r["entry_price"]) for r in added] == [("auto", 100.0)]
+        assert calls == []
 
     def test_position_without_holders_keeps_global_auto(self) -> None:
         async def holders(symbol, user_id, tenant_id):
