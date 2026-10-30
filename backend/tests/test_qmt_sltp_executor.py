@@ -1853,3 +1853,49 @@ class TestAutoArmPerHolder:
         assert len(h.dispatched) == 1
         assert "agent" not in h.dispatched[0]
         assert h.dispatched[0]["quantity"] == pytest.approx(1000.0)
+
+
+class TestLlmStateMigrationMultiOwner:
+    def test_multi_owner_legacy_state_matches_by_entry_price(self) -> None:
+        """同 symbol 已有多个 owner 时，旧 symbol 状态按 entry_price 归位。"""
+        h = Harness(
+            cfg=_cfg(
+                [
+                    _rule(
+                        owner="llm:deepseek-v4-flash",
+                        entry_price=8.956,
+                        take_profit_pct=0.10,
+                        stop_loss_pct=None,
+                    ),
+                    _rule(
+                        owner="llm:deepseek-v4-pro",
+                        entry_price=8.944,
+                        take_profit_pct=0.10,
+                        stop_loss_pct=None,
+                    ),
+                ]
+            ),
+            ticks={"600036.SH": {"lastPrice": 9.0}},
+            positions=[_position(can_use=6900, cost=8.956)],
+            state={
+                "date": DAY,
+                "rules": {
+                    "600036.SH": {
+                        "status": ex.ST_ARMED,
+                        "entry_price": 8.956,
+                        "highest_price": 9.04,
+                    }
+                },
+            },
+        )
+
+        h.cycle()
+
+        state = h.state()["rules"]
+        flash_key = ex.rule_key(
+            {"symbol": "600036.SH", "owner": "llm:deepseek-v4-flash"}
+        )
+        pro_key = ex.rule_key({"symbol": "600036.SH", "owner": "llm:deepseek-v4-pro"})
+        assert "600036.SH" not in state
+        assert state[flash_key]["highest_price"] == pytest.approx(9.04)
+        assert pro_key in state

@@ -1307,18 +1307,44 @@ async def run_sltp_cycle(
     # 旧版 LLM 规则只按 symbol 存状态；升级到复合键后把孤立的 symbol 状态搬过去
     # （同 symbol 若还有人工/auto 规则，old 仍在 keys 里，不搬——那份状态是人工规则的）。
     keys = {rule_key(r) for r in rules}
+    rules_by_key = {rule_key(r): r for r in rules}
+    ordered_keys = [rule_key(r) for r in rules]
     for old_key in [k for k in list(state["rules"]) if "|" not in k]:
-        candidates = [k for k in keys if k.startswith(f"{old_key}|")]
-        if (
-            old_key not in keys
-            and len(candidates) == 1
-            and candidates[0] not in state["rules"]
-        ):
-            state["rules"][candidates[0]] = state["rules"].pop(old_key)
-            state["rules"][candidates[0]]["symbol"] = old_key
-            logger.info(
-                "[SltpExec] 规则状态迁移 symbol=%s → %s", old_key, candidates[0]
-            )
+        if old_key in keys:  # 人工/auto 仍按 symbol，不迁移
+            continue
+        candidates = [k for k in ordered_keys if k.startswith(f"{old_key}|")]
+        target = ""
+        if len(candidates) == 1:
+            target = candidates[0]
+        elif len(candidates) > 1:
+            # 同 symbol 多 agent 后旧状态归属未知：按 entry_price 匹配（旧状态是
+            # 升级前唯一那条规则的；多家的 entry 一般不同，能唯一定位）。
+            old_entry = _to_float((state["rules"].get(old_key) or {}).get("entry_price"))
+            matches = []
+            for candidate in candidates:
+                entry = _to_float(
+                    (rules_by_key.get(candidate) or {}).get("entry_price")
+                )
+                if (
+                    old_entry is not None
+                    and entry is not None
+                    and abs(entry - old_entry) <= 1e-3
+                ):
+                    matches.append(candidate)
+            if len(matches) == 1:
+                target = matches[0]
+            else:
+                logger.warning(
+                    "[SltpExec] 旧状态 %s 有 %d 个候选且 entry 匹配到 %d 个，"
+                    "不迁移（旧高水位留在原键）",
+                    old_key,
+                    len(candidates),
+                    len(matches),
+                )
+        if target and target not in state["rules"]:
+            state["rules"][target] = state["rules"].pop(old_key)
+            state["rules"][target]["symbol"] = old_key
+            logger.info("[SltpExec] 规则状态迁移 symbol=%s → %s", old_key, target)
 
     armed = [r for r in rules if is_retryable(state["rules"].get(rule_key(r)))]
     if not armed:
