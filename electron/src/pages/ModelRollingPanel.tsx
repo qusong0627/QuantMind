@@ -9,7 +9,7 @@
  * 4. 滚动台账（qm_rolling_campaigns；市场/状态过滤 + 刷新）。
  *
  * 展示面不做执行面含糊化：这里的动作就是「派发训练」，按钮直说。
- * 视觉：样式见 ./model-rolling.css（.rp-board 作用域）；训练/验证/测试三段
+ * 视觉：Tailwind 卡片式布局（与推理中性化面板同一套设计语言）；训练/验证/测试三段
  * 窗口用色带做数据可视化——有派发计划时带真实日期区间，没有时给窗口档说明。
  */
 
@@ -37,20 +37,44 @@ import {
   type ScheduleUpdateBody,
   rollingErrorMessage,
 } from '../services/modelRollingService';
-import './model-rolling.css';
+import { clsx } from 'clsx';
 
-const STATUS_PILL: Record<string, { cls: string; label: string }> = {
-  planned: { cls: 'rp-pill--warn', label: '已计划' },
-  dispatched: { cls: 'rp-pill--info', label: '已提交' },
-  registered: { cls: 'rp-pill--ok', label: '已注册' },
-  failed: { cls: 'rp-pill--err', label: '失败' },
-  skipped: { cls: 'rp-pill--muted', label: '已跳过' },
+type Tone = 'ok' | 'warn' | 'err' | 'info' | 'muted' | 'violet';
+
+const PILL_CLS: Record<Tone, string> = {
+  ok: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  warn: 'border-amber-200 bg-amber-50 text-amber-700',
+  err: 'border-rose-200 bg-rose-50 text-rose-700',
+  info: 'border-sky-200 bg-sky-50 text-sky-700',
+  muted: 'border-slate-200 bg-slate-50 text-slate-500',
+  violet: 'border-violet-200 bg-violet-50 text-violet-700',
 };
 
-const DERIVE_PILL: Record<DeriveResult['status'], { cls: string; label: string }> = {
-  preview: { cls: 'rp-pill--muted', label: '预览（未落盘）' },
-  saved: { cls: 'rp-pill--ok', label: '已保存' },
-  unchanged: { cls: 'rp-pill--warn', label: '内容未变' },
+function Pill({ tone = 'muted', children }: { tone?: Tone; children: React.ReactNode }) {
+  return (
+    <span
+      className={clsx(
+        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-black',
+        PILL_CLS[tone],
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+const STATUS_PILL: Record<string, { tone: Tone; label: string }> = {
+  planned: { tone: 'warn', label: '已计划' },
+  dispatched: { tone: 'info', label: '已提交' },
+  registered: { tone: 'ok', label: '已注册' },
+  failed: { tone: 'err', label: '失败' },
+  skipped: { tone: 'muted', label: '已跳过' },
+};
+
+const DERIVE_PILL: Record<DeriveResult['status'], { tone: Tone; label: string }> = {
+  preview: { tone: 'muted', label: '预览（未落盘）' },
+  saved: { tone: 'ok', label: '已保存' },
+  unchanged: { tone: 'warn', label: '内容未变' },
 };
 
 const DISPATCH_STATUS_TEXT: Record<string, string> = {
@@ -60,11 +84,11 @@ const DISPATCH_STATUS_TEXT: Record<string, string> = {
   skipped: '本轮跳过',
 };
 
-function dispatchPillCls(result: DispatchResult): string {
-  if (result.status === 'dispatched') return 'rp-pill--info';
-  if (result.status === 'dry_run') return result.ready === false ? 'rp-pill--warn' : 'rp-pill--ok';
-  if (result.status === 'duplicate') return 'rp-pill--warn';
-  return 'rp-pill--muted';
+function dispatchTone(result: DispatchResult): Tone {
+  if (result.status === 'dispatched') return 'info';
+  if (result.status === 'dry_run') return result.ready === false ? 'warn' : 'ok';
+  if (result.status === 'duplicate') return 'warn';
+  return 'muted';
 }
 
 function windowPolicyText(wp?: RollingRecipeSummary['window_policy']): string {
@@ -86,56 +110,141 @@ function dispatchSummary(result: DispatchResult): string {
   return result.message ?? result.reason ?? '—';
 }
 
-const BAND_SEGMENTS = [
-  { key: 'train', label: '训练' },
-  { key: 'valid', label: '验证' },
-  { key: 'test', label: '测试' },
-] as const;
-
 /** 训练/验证/测试三段窗口色带：有派发计划时附真实日期区间 */
-const WindowBand: React.FC<{ wp?: RollingWindowPolicy; plan?: DispatchPlan | null }> = ({ wp, plan }) => {
+const WindowBand: React.FC<{ wp?: RollingWindowPolicy; plan?: DispatchPlan | null }> = ({
+  wp,
+  plan,
+}) => {
   if (!wp) return null;
-  const days: Record<'train' | 'valid' | 'test', number> = {
-    train: wp.train_days,
-    valid: wp.valid_days,
-    test: wp.test_days,
-  };
-  const ranges: Record<'train' | 'valid' | 'test', [string, string] | null> = {
-    train: plan?.train ?? null,
-    valid: plan?.valid ?? null,
-    test: plan?.test ?? null,
-  };
+  const segments = [
+    {
+      key: 'train',
+      label: '训练',
+      days: wp.train_days,
+      dot: 'bg-violet-500',
+      bar: 'from-violet-400 to-violet-500',
+      range: plan?.train ?? null,
+    },
+    {
+      key: 'valid',
+      label: '验证',
+      days: wp.valid_days,
+      dot: 'bg-emerald-500',
+      bar: 'from-emerald-400 to-emerald-500',
+      range: plan?.valid ?? null,
+    },
+    {
+      key: 'test',
+      label: '测试',
+      days: wp.test_days,
+      dot: 'bg-amber-500',
+      bar: 'from-amber-400 to-amber-500',
+      range: plan?.test ?? null,
+    },
+  ] as const;
+  const total = Math.max(1, segments.reduce((sum, s) => sum + s.days, 0));
   return (
-    <div className="rp-band">
-      <div className="rp-band__track">
-        {BAND_SEGMENTS.map(s => (
-          <span
+    <div>
+      <div className="flex h-2 w-full overflow-hidden rounded-full bg-slate-100">
+        {segments.map((s) => (
+          <div
             key={s.key}
-            className={`rp-band__seg rp-band__seg--${s.key}`}
-            style={{ flex: `${days[s.key]} 0 0` }}
+            className={clsx('h-full bg-gradient-to-r', s.bar)}
+            style={{ width: `${(s.days / total) * 100}%` }}
           />
         ))}
       </div>
-      {plan ? (
-        <div className="rp-band__caps">
-          {BAND_SEGMENTS.map(s => {
-            const r = ranges[s.key];
-            return (
-              <div key={s.key} className={`rp-band__cap rp-band__cap--${s.key}`}>
-                <b>{s.label} {days[s.key]} 天</b>
-                <span>{r ? `${r[0]} → ${r[1]}` : '—'}</span>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="rp-band__note">
-          {wp.mode === 'sliding' ? '滑动窗口' : '扩展窗口'} · purge {wp.purge_days ?? 0} 天 · 锚定日回推
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        {segments.map((s) => (
+          <div
+            key={s.key}
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1.5"
+          >
+            <div className="flex items-center gap-1.5 text-[10px] font-black text-slate-600">
+              <span className={clsx('h-1.5 w-1.5 rounded-full', s.dot)} />
+              {s.label} · {s.days} 天
+            </div>
+            <div className="truncate font-mono text-[10px] text-slate-400">
+              {s.range ? `${s.range[0]} → ${s.range[1]}` : '锚定日回推'}
+            </div>
+          </div>
+        ))}
+      </div>
+      {!plan && (
+        <div className="mt-1.5 text-[10px] text-slate-400">
+          {wp.mode === 'sliding' ? '滑动窗口' : '扩展窗口'} · purge {wp.purge_days ?? 0} 天
         </div>
       )}
     </div>
   );
 };
+
+interface StepHeaderProps {
+  no: string;
+  title: string;
+  icon: typeof Activity;
+  tone: 'violet' | 'sky' | 'emerald' | 'amber';
+  right?: React.ReactNode;
+}
+
+function StepHeader({ no, title, icon: Icon, tone, right }: StepHeaderProps) {
+  const toneMap = {
+    violet: 'bg-violet-50 text-violet-600',
+    sky: 'bg-sky-50 text-sky-600',
+    emerald: 'bg-emerald-50 text-emerald-600',
+    amber: 'bg-amber-50 text-amber-600',
+  } as const;
+  return (
+    <div className="flex items-center gap-2">
+      <span className={clsx('rounded-lg p-1.5', toneMap[tone])}>
+        <Icon size={14} />
+      </span>
+      <span className="font-mono text-[10px] font-black text-slate-300">{no}</span>
+      <span className="text-xs font-black uppercase tracking-[0.12em] text-slate-700">
+        {title}
+      </span>
+      <span className="h-px flex-1 bg-slate-100" />
+      {right}
+    </div>
+  );
+}
+
+interface StatProps {
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: 'slate' | 'violet' | 'emerald' | 'amber' | 'rose';
+}
+
+function Stat({ label, value, hint, tone = 'slate' }: StatProps) {
+  const toneMap = {
+    slate: 'text-slate-800',
+    violet: 'text-violet-700',
+    emerald: 'text-emerald-700',
+    amber: 'text-amber-700',
+    rose: 'text-rose-700',
+  } as const;
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white px-3.5 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+      <div className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">
+        {label}
+      </div>
+      <div className={clsx('mt-1.5 font-mono text-lg font-black leading-none', toneMap[tone])}>
+        {value}
+      </div>
+      {hint && <div className="mt-1 text-[10px] text-slate-400">{hint}</div>}
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[10px] font-bold text-slate-400">{label}</span>
+      {children}
+    </label>
+  );
+}
 
 export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model }) => {
   const modelMarket = (model.market || 'CN').toUpperCase();
@@ -358,14 +467,14 @@ export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model 
     label: (
       <span className="flex items-center gap-1.5">
         <span className="font-mono text-xs">{r.recipe_id}</span>
-        {r.source === 'user' && <span className="rp-pill rp-pill--violet">派生</span>}
+        {r.source === 'user' && <Pill tone="violet">派生</Pill>}
         <span className="text-slate-400 text-[11px]">{windowPolicyText(r.window_policy)}</span>
       </span>
     ),
   }));
 
   const campaignColumns: TableColumnsType<RollingCampaign> = [
-    { title: '市场', dataIndex: 'market', width: 64, render: (v: string) => <span className="rp-mk">{v}</span> },
+    { title: '市场', dataIndex: 'market', width: 64, render: (v: string) => <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-black text-slate-600">{v}</span> },
     {
       title: '配方', dataIndex: 'recipe_id', width: 200, ellipsis: true,
       render: (v: string) => <Tooltip title={v}><span className="font-mono text-xs">{v}</span></Tooltip>,
@@ -373,17 +482,17 @@ export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model 
     {
       title: '触发', dataIndex: 'trigger', width: 84,
       render: (v: string) => (
-        <span className={`rp-pill ${v === 'manual' ? 'rp-pill--violet' : 'rp-pill--muted'}`}>
+        <Pill tone={v === 'manual' ? 'violet' : 'muted'}>
           {v === 'manual' ? '手动' : '调度'}
-        </span>
+        </Pill>
       ),
     },
     { title: '锚定日', dataIndex: 'anchor_date', width: 102, render: (v: string) => <span className="font-mono text-xs">{v}</span> },
     {
       title: '状态', dataIndex: 'status', width: 92,
       render: (v: string) => {
-        const cfg = STATUS_PILL[v] ?? { cls: 'rp-pill--muted', label: v };
-        return <span className={`rp-pill ${cfg.cls}`}>{cfg.label}</span>;
+        const cfg = STATUS_PILL[v] ?? { tone: 'muted' as Tone, label: v };
+        return <Pill tone={cfg.tone}>{cfg.label}</Pill>;
       },
     },
     { title: '尝试', dataIndex: 'attempts', width: 56 },
@@ -405,253 +514,447 @@ export const ModelRollingPanel: React.FC<{ model: UserModelRecord }> = ({ model 
 
   // 派发器心跳 → 状态标记（口径 = 后端 read_heartbeats/体检 C07，前端不做二次判定）。
   // 「调度存了 enabled 但没人派发」曾经整月不可见（M5 复盘），此标记即真相出口。
-  const dispatchHealthChip = (() => {
-    if (!dispatchHealth) return { cls: 'rp-pill--muted', label: '派发器状态未知（心跳读取失败）' };
+  const dispatchHealthChip: { tone: Tone; label: string } = (() => {
+    if (!dispatchHealth) return { tone: 'muted', label: '派发器状态未知（心跳读取失败）' };
     switch (dispatchHealth.state) {
       case 'ok':
-        return { cls: 'rp-pill--ok', label: `派发器正常 · ${dispatchHealth.age ?? 0}s 前心跳` };
+        return { tone: 'ok', label: `派发器正常 · ${dispatchHealth.age ?? 0}s 前心跳` };
       case 'stale':
-        return { cls: 'rp-pill--err', label: `派发器心跳过期 ${dispatchHealth.age ?? '?'}s —— 调度不会触发，检查 celery-beat` };
+        return { tone: 'err', label: `派发器心跳过期 ${dispatchHealth.age ?? '?'}s —— 调度不会触发，检查 celery-beat` };
       case 'off':
-        return { cls: 'rp-pill--warn', label: '派发总闸未开（RETRAIN_SCHEDULER_ENABLED）——保存调度也不会自动派发' };
+        return { tone: 'warn', label: '派发总闸未开（RETRAIN_SCHEDULER_ENABLED）——保存调度也不会自动派发' };
       default:
-        return { cls: 'rp-pill--warn', label: '派发器无心跳记录 —— 尚未运行，到点不会自动派发' };
+        return { tone: 'warn', label: '派发器无心跳记录 —— 尚未运行，到点不会自动派发' };
     }
   })();
 
+  const healthValue =
+    dispatchHealth?.state === 'ok'
+      ? '正常'
+      : dispatchHealth?.state === 'stale'
+        ? '心跳过期'
+        : dispatchHealth?.state === 'off'
+          ? '总闸关闭'
+          : '未知';
+
   return (
-    <div className="rp-board">
-      {/* 头部：标题 + 实时统计 */}
-      <div className="rp-head">
-        <div>
-          <div className="rp-head__title"><Activity size={18} strokeWidth={2.5} />滚动训练</div>
-          <div className="rp-head__sub">配方驱动的月度重训 · 手动派发与调度同链路、同台账 · 窗口策略归配方所有</div>
-        </div>
-        <div className="rp-chips">
-          <div className="rp-chip"><b>{validRecipeCount}</b><span>有效配方</span></div>
-          <div className="rp-chip"><b>{derivedRecipeCount}</b><span>派生配方</span></div>
-          <div className="rp-chip">
-            <b>
-              {scheduleEnabled
-                ? <span className="rp-pill rp-pill--ok">已启用</span>
-                : <span className="rp-pill rp-pill--muted">未启用</span>}
-            </b>
-            <span>{market} 调度</span>
+    <div className="flex flex-col gap-4">
+      {/* ── 顶部身份条 ── */}
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)]">
+        <div className="h-1 w-full bg-gradient-to-r from-violet-500 via-indigo-500 to-sky-400" />
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <div className="flex items-center gap-2.5">
+            <span className="rounded-xl bg-violet-50 p-2 text-violet-600">
+              <Activity size={18} />
+            </span>
+            <div>
+              <div className="text-sm font-black text-slate-800">滚动训练</div>
+              <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">
+                配方驱动的月度重训 · 手动派发与调度同链路、同台账
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              size="small"
+              className="!w-[92px]"
+              value={market}
+              onChange={changeMarket}
+              options={marketOptions.length ? marketOptions : [{ value: modelMarket, label: modelMarket }]}
+            />
+            <Pill tone={scheduleEnabled ? 'ok' : 'muted'}>
+              {market} 调度{scheduleEnabled ? '已启用' : '未启用'}
+            </Pill>
+            <Button
+              size="small"
+              icon={<RefreshCw size={12} />}
+              className="!rounded-lg"
+              onClick={() => {
+                void (async () => {
+                  const list = await loadRecipes();
+                  const scheduleMap = await loadSchedules();
+                  syncDraft(market, scheduleMap, list);
+                  await loadCampaigns(campaignMarket);
+                })();
+              }}
+            >
+              刷新
+            </Button>
           </div>
         </div>
       </div>
 
-      {/* 坏配方必须可见（否则调度引用了它只会每天服务端告警） */}
+      {/* ── KPI ── */}
+      <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
+        <Stat
+          label="有效配方"
+          value={String(validRecipeCount)}
+          hint={`派生 ${derivedRecipeCount} 个`}
+          tone="violet"
+        />
+        <Stat
+          label="当前市场"
+          value={market}
+          hint={`${marketRecipes.length} 个可用配方`}
+        />
+        <Stat
+          label="调度状态"
+          value={scheduleEnabled ? '已启用' : '未启用'}
+          hint={`每月首个交易日 ${draft?.time ?? '—'}`}
+          tone={scheduleEnabled ? 'emerald' : 'slate'}
+        />
+        <Stat
+          label="派发器"
+          value={healthValue}
+          hint={
+            dispatchHealth?.age != null
+              ? `${dispatchHealth.age}s 前心跳`
+              : '检查 celery-beat'
+          }
+          tone={
+            dispatchHealth?.state === 'ok'
+              ? 'emerald'
+              : dispatchHealth?.state === 'stale'
+                ? 'rose'
+                : 'amber'
+          }
+        />
+      </div>
+
       {invalidRecipes.length > 0 && (
-        <div className="rp-notice">
-          <AlertTriangle size={14} />
-          <div className="rp-notice__body">
-            有 {invalidRecipes.length} 个配方文件不可用（已从下拉中隐藏）：{' '}
+        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          <div>
+            有 {invalidRecipes.length} 个配方文件不可用（已从下拉中隐藏）：
             {invalidRecipes.map(r => `${r.recipe_id}（${r.error ?? '校验不过'}）`).join('；')}
           </div>
         </div>
       )}
 
-      <div className="rp-grid">
-        {/* ① 从模型派生配方（深色主卡：云端导入模型的入口） */}
-        <section className="rp-cell rp-cell--hero">
-          <div className="rp-step">
-            <span className="rp-step__icon rp-accent--violet"><Wand2 size={14} /></span>
-            <span className="rp-step__no">01</span>
-            <span className="rp-step__title">派生滚动配方</span>
-            <span className="rp-step__rule" />
-          </div>
-          <div className="rp-hero__model">来源模型 · {model.model_id}</div>
-          <div className="rp-hero__desc">
-            读取模型目录产物（metadata.json / config.yaml）复刻其训练语义为滚动配方；
-            云端下载导入的模型同样可用。保存后进入用户配方目录，与内建配方在派发/调度上完全同权。
-          </div>
-          <div className="rp-hero__actions">
-            <Button size="small" className="rp-btn-ghost" icon={<Wand2 size={13} />} loading={deriving === 'preview'} disabled={deriving === 'save'} onClick={() => handleDerive('preview')}>预览推导结果</Button>
-            <Button size="small" className="rp-btn-violet" icon={<Save size={13} />} loading={deriving === 'save'} disabled={deriving === 'preview'} onClick={() => handleDerive('save')}>保存为配方</Button>
-          </div>
-          {deriveResult && (
-            <div className="rp-readout">
-              <div className="rp-readout__head">
-                <span className={`rp-pill ${DERIVE_PILL[deriveResult.status].cls}`}>{DERIVE_PILL[deriveResult.status].label}</span>
-                <span className="rp-readout__id">{deriveResult.recipe_id}</span>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        {/* ── 01 派生配方 ── */}
+        <section className="rounded-2xl border border-violet-200/70 bg-gradient-to-br from-violet-50/70 via-white to-sky-50/50 p-4 shadow-[0_1px_3px_rgba(15,23,42,0.05)] lg:col-span-2">
+          <StepHeader
+            no="01"
+            title="派生滚动配方"
+            icon={Wand2}
+            tone="violet"
+            right={<Pill tone="violet">云端导入模型可用</Pill>}
+          />
+          <div className="mt-3 grid gap-4 lg:grid-cols-5">
+            <div className="lg:col-span-3">
+              <div className="font-mono text-[11px] text-slate-400">
+                来源模型 · {model.model_id}
               </div>
-              <WindowBand wp={deriveResult.window_policy} />
-              <div className="rp-readout__mono">
-                市场 {deriveResult.market} · 因子面 {deriveResult.factor_market}（{deriveResult.factor_source}） · 特征 {deriveResult.feature_count} 维 · 标签 {deriveResult.target_horizon_days} 日
+              <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
+                读取模型目录产物（metadata.json / config.yaml）复刻其训练语义为滚动配方；
+                云端下载导入的模型同样可用。保存后进入用户配方目录，与内建配方在派发、调度上完全同权。
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  size="small"
+                  icon={<Wand2 size={13} />}
+                  loading={deriving === 'preview'}
+                  disabled={deriving === 'save'}
+                  onClick={() => handleDerive('preview')}
+                  className="!rounded-lg text-[11px] font-bold"
+                >
+                  预览推导结果
+                </Button>
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<Save size={13} />}
+                  loading={deriving === 'save'}
+                  disabled={deriving === 'preview'}
+                  onClick={() => handleDerive('save')}
+                  className="!rounded-lg !border-0 !bg-violet-600 text-[11px] font-bold"
+                >
+                  保存为配方
+                </Button>
               </div>
-              <div className="rp-readout__mono">来源文件 {deriveResult.source_files.join(' + ') || '—'}</div>
-              <div className="rp-readout__mono">
-                hash {deriveResult.recipe_hash}{deriveResult.path ? ` · ${deriveResult.path}` : ''}
-              </div>
-              {deriveResult.warnings.length > 0 && (
-                <div className="rp-hero__warn">⚠ {deriveResult.warnings.join('；')}</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white/90 p-3 lg:col-span-2">
+              {deriveResult ? (
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Pill tone={DERIVE_PILL[deriveResult.status].tone}>
+                      {DERIVE_PILL[deriveResult.status].label}
+                    </Pill>
+                    <span className="font-mono text-xs font-bold text-slate-700">
+                      {deriveResult.recipe_id}
+                    </span>
+                  </div>
+                  <div className="mt-2.5">
+                    <WindowBand wp={deriveResult.window_policy} />
+                  </div>
+                  <div className="mt-2.5 space-y-1 font-mono text-[10px] text-slate-400">
+                    <div>
+                      市场 {deriveResult.market} · 因子面 {deriveResult.factor_market}（{deriveResult.factor_source}）
+                    </div>
+                    <div>
+                      特征 {deriveResult.feature_count} 维 · 标签 {deriveResult.target_horizon_days} 日 · hash {deriveResult.recipe_hash}
+                    </div>
+                    <div className="truncate">
+                      来源文件 {deriveResult.source_files.join(' + ') || '—'}
+                    </div>
+                  </div>
+                  {deriveResult.warnings.length > 0 && (
+                    <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-[10px] text-amber-700">
+                      ⚠ {deriveResult.warnings.join('；')}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex h-full min-h-[130px] flex-col items-center justify-center gap-2 text-center">
+                  <span className="rounded-xl bg-violet-50 p-2 text-violet-500">
+                    <Wand2 size={18} />
+                  </span>
+                  <div className="text-[11px] font-bold text-slate-500">尚未派生</div>
+                  <div className="text-[10px] text-slate-400">
+                    先预览窗口与特征口径，确认无误再保存为配方
+                  </div>
+                </div>
               )}
             </div>
-          )}
+          </div>
         </section>
 
-        {/* ② 立即执行 */}
-        <section className="rp-cell">
-          <div className="rp-step">
-            <span className="rp-step__icon rp-accent--blue"><Rocket size={14} /></span>
-            <span className="rp-step__no">02</span>
-            <span className="rp-step__title">立即执行</span>
-            <span className="rp-step__rule" />
-          </div>
-          <div className="rp-console">
-            <div className="rp-console__row">
-              <Select
-                size="small"
-                className="!w-[92px]"
-                value={market}
-                onChange={changeMarket}
-                options={marketOptions.length ? marketOptions : [{ value: modelMarket, label: modelMarket }]}
-              />
-              <Select
-                size="small"
-                className="flex-1 !min-w-[220px]"
-                placeholder="选择配方"
-                value={dispatchRecipe || undefined}
-                onChange={setDispatchRecipe}
-                options={recipeOptions}
-                notFoundContent={<span className="text-xs">该市场暂无有效配方（可先派生）</span>}
-              />
-              <DatePicker
-                size="small"
-                className="!w-[176px]"
-                placeholder="锚定日（缺省=今天）"
-                value={anchor}
-                onChange={setAnchor}
-                allowClear
-              />
+        {/* ── 02 立即执行 ── */}
+        <section className="rounded-2xl border border-slate-200 bg-white p-4">
+          <StepHeader no="02" title="立即执行" icon={Rocket} tone="sky" />
+          <div className="mt-3 space-y-3">
+            <div className="grid grid-cols-12 gap-2">
+              <div className="col-span-3">
+                <Field label="市场">
+                  <Select
+                    size="small"
+                    value={market}
+                    onChange={changeMarket}
+                    options={marketOptions.length ? marketOptions : [{ value: modelMarket, label: modelMarket }]}
+                  />
+                </Field>
+              </div>
+              <div className="col-span-5">
+                <Field label="配方">
+                  <Select
+                    size="small"
+                    placeholder="选择配方"
+                    value={dispatchRecipe || undefined}
+                    onChange={setDispatchRecipe}
+                    options={recipeOptions}
+                    notFoundContent={<span className="text-xs">该市场暂无有效配方（可先派生）</span>}
+                  />
+                </Field>
+              </div>
+              <div className="col-span-4">
+                <Field label="锚定日">
+                  <DatePicker
+                    size="small"
+                    className="!w-full"
+                    placeholder="缺省=今天"
+                    value={anchor}
+                    onChange={setAnchor}
+                    allowClear
+                  />
+                </Field>
+              </div>
             </div>
-            <div className="rp-inset">
-              {selectedRecipe?.window_policy
-                ? <WindowBand wp={selectedRecipe.window_policy} plan={dispatchResult?.plan ?? null} />
-                : <div className="rp-band__note">选择配方后显示其滚动窗口（训练 / 验证 / 测试）</div>}
+            <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+              {selectedRecipe?.window_policy ? (
+                <WindowBand wp={selectedRecipe.window_policy} plan={dispatchResult?.plan ?? null} />
+              ) : (
+                <div className="py-3 text-center text-[11px] text-slate-400">
+                  选择配方后显示其滚动窗口（训练 / 验证 / 测试）
+                </div>
+              )}
             </div>
-            <div className="rp-console__actions">
-              <Button size="small" icon={<Play size={13} />} loading={dispatching === 'preview'} disabled={dispatching === 'run'} onClick={() => runDispatch(true)}>预览窗口计划</Button>
-              <Button size="small" className="rp-btn-dispatch" icon={<Rocket size={13} />} loading={dispatching === 'run'} disabled={dispatching === 'preview'} onClick={confirmDispatch}>执行派发</Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="small"
+                icon={<Play size={13} />}
+                loading={dispatching === 'preview'}
+                disabled={dispatching === 'run'}
+                onClick={() => runDispatch(true)}
+                className="!rounded-lg text-[11px] font-bold"
+              >
+                预览窗口计划
+              </Button>
+              <Button
+                size="small"
+                type="primary"
+                className="!rounded-lg !border-0 !bg-slate-900 text-[11px] font-bold"
+                icon={<Rocket size={13} />}
+                loading={dispatching === 'run'}
+                disabled={dispatching === 'preview'}
+                onClick={confirmDispatch}
+              >
+                执行派发
+              </Button>
             </div>
             {dispatchResult && (
-              <div className="rp-readout">
-                <div className="rp-readout__head">
-                  <span className={`rp-pill ${dispatchPillCls(dispatchResult)}`}>
+              <div className="rounded-xl border border-slate-200 bg-white p-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Pill tone={dispatchTone(dispatchResult)}>
                     {DISPATCH_STATUS_TEXT[dispatchResult.status] ?? dispatchResult.status}
-                  </span>
-                  <span>{dispatchSummary(dispatchResult)}</span>
+                  </Pill>
+                  <span className="text-[11px] text-slate-600">{dispatchSummary(dispatchResult)}</span>
                 </div>
                 {dispatchResult.plan && (
-                  <div className="rp-readout__mono">
+                  <div className="mt-1.5 font-mono text-[10px] text-slate-400">
                     锚定 {dispatchResult.plan.anchor_date} · 窗口内序号 {dispatchResult.plan.window_index} · purge {dispatchResult.plan.purge_days}
                   </div>
                 )}
                 {dispatchResult.campaign_id && (
-                  <div className="rp-readout__mono">campaign {dispatchResult.campaign_id}</div>
+                  <div className="mt-0.5 font-mono text-[10px] text-slate-400">
+                    campaign {dispatchResult.campaign_id}
+                  </div>
                 )}
                 {dispatchResult.detail && dispatchResult.status !== 'dispatched' && (
-                  <div className="rp-readout__json">{JSON.stringify(dispatchResult.detail)}</div>
+                  <div className="mt-1 max-h-24 overflow-auto rounded-lg bg-slate-50 p-2 font-mono text-[10px] text-slate-500">
+                    {JSON.stringify(dispatchResult.detail)}
+                  </div>
                 )}
               </div>
             )}
           </div>
         </section>
 
-        {/* ③ 月度调度 */}
-        <section className="rp-cell rp-cell--schedule">
-          <div className="rp-step">
-            <span className="rp-step__icon rp-accent--emerald"><CalendarClock size={14} /></span>
-            <span className="rp-step__no">03</span>
-            <span className="rp-step__title">月度重训调度</span>
-            <span className="rp-pill rp-pill--muted">{market}</span>
-            <span className="rp-step__rule" />
-          </div>
-          <div className="rp-dispatch-health">
-            <span className={`rp-pill ${dispatchHealthChip.cls}`}>{dispatchHealthChip.label}</span>
-          </div>
+        {/* ── 03 月度调度 ── */}
+        <section className="rounded-2xl border border-slate-200 bg-white p-4">
+          <StepHeader
+            no="03"
+            title="月度重训调度"
+            icon={CalendarClock}
+            tone="emerald"
+            right={<Pill tone={dispatchHealthChip.tone}>{dispatchHealthChip.label}</Pill>}
+          />
           {draft ? (
-            <div className="rp-form">
-              <div className="rp-field rp-field--power">
-                <span className="rp-field__label">启用</span>
-                <div className={`rp-power ${draft.enabled ? 'rp-power--on' : ''}`}>
-                  <b>{draft.enabled ? '已启用' : '未启用'}</b>
-                  <Switch size="small" checked={draft.enabled} onChange={v => setDraft({ ...draft, enabled: v })} />
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2">
+                <div>
+                  <div className="text-xs font-black text-slate-700">启用月度重训</div>
+                  <div className="text-[10px] text-slate-400">
+                    每月首个交易日 {draft.time} 自动派发 · 窗口策略归配方所有
+                  </div>
                 </div>
-              </div>
-              <div className="rp-field rp-field--rule">
-                <span className="rp-field__label">触发规则</span>
-                <Select
+                <Switch
                   size="small"
-                  className="!w-full"
-                  value={draft.day_rule}
-                  onChange={v => setDraft({ ...draft, day_rule: v })}
-                  options={[{ value: 'first_trading_day', label: '每月首个交易日' }]}
+                  checked={draft.enabled}
+                  onChange={v => setDraft({ ...draft, enabled: v })}
                 />
               </div>
-              <div className="rp-field rp-field--time">
-                <span className="rp-field__label">触发时间</span>
-                <Input size="small" value={draft.time} onChange={e => setDraft({ ...draft, time: e.target.value })} placeholder="15:30" />
-              </div>
-              <div className="rp-field rp-field--recipe">
-                <span className="rp-field__label">配方</span>
-                <Select
-                  size="small"
-                  className="!w-full"
-                  placeholder="选择配方"
-                  value={draft.recipe_id || undefined}
-                  onChange={v => setDraft({ ...draft, recipe_id: v })}
-                  options={recipeOptions}
-                />
-              </div>
-              <div className="rp-field rp-field--obs">
-                <span className="rp-field__label">观察天数</span>
-                <InputNumber size="small" className="!w-full" min={1} max={250} value={draft.observation_days} onChange={v => setDraft({ ...draft, observation_days: v ?? 20 })} />
-              </div>
-              <div className="rp-field rp-field--max">
-                <span className="rp-field__label">训练时限（分）</span>
-                <InputNumber size="small" className="!w-full" min={10} max={1440} value={draft.max_time_minutes} onChange={v => setDraft({ ...draft, max_time_minutes: v ?? 240 })} />
-              </div>
-              <div className="rp-field rp-field--save">
-                <Button className="rp-btn-dispatch" icon={<Save size={13} />} loading={saving} onClick={saveSchedule}>保存调度</Button>
-              </div>
-              <div className="rp-field rp-field--last">
-                <span className="rp-field__label">上次运行</span>
-                <div className="rp-lastrun">
-                  <b>{lastRun ? dayjs(lastRun).format('YYYY-MM-DD HH:mm:ss') : '—'}</b>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="触发规则">
+                  <Select
+                    size="small"
+                    value={draft.day_rule}
+                    onChange={v => setDraft({ ...draft, day_rule: v })}
+                    options={[{ value: 'first_trading_day', label: '每月首个交易日' }]}
+                  />
+                </Field>
+                <Field label="触发时间">
+                  <Input
+                    size="small"
+                    value={draft.time}
+                    onChange={e => setDraft({ ...draft, time: e.target.value })}
+                    placeholder="15:30"
+                  />
+                </Field>
+                <div className="col-span-2">
+                  <Field label="配方">
+                    <Select
+                      size="small"
+                      placeholder="选择配方"
+                      value={draft.recipe_id || undefined}
+                      onChange={v => setDraft({ ...draft, recipe_id: v })}
+                      options={recipeOptions}
+                    />
+                  </Field>
                 </div>
+                <Field label="观察天数">
+                  <InputNumber
+                    size="small"
+                    className="!w-full"
+                    min={1}
+                    max={250}
+                    value={draft.observation_days}
+                    onChange={v => setDraft({ ...draft, observation_days: v ?? 20 })}
+                  />
+                </Field>
+                <Field label="训练时限（分）">
+                  <InputNumber
+                    size="small"
+                    className="!w-full"
+                    min={10}
+                    max={1440}
+                    value={draft.max_time_minutes}
+                    onChange={v => setDraft({ ...draft, max_time_minutes: v ?? 240 })}
+                  />
+                </Field>
               </div>
-              <div className="rp-foot">
-                窗口策略（训练/验证/测试天数）归配方所有，在配方里改；此处保存即对该市场生效。是否真的到点派发，以上方派发器心跳标记为准。
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Button
+                  type="primary"
+                  size="small"
+                  className="!rounded-lg !border-0 !bg-emerald-600 text-[11px] font-bold"
+                  icon={<Save size={13} />}
+                  loading={saving}
+                  onClick={saveSchedule}
+                >
+                  保存调度
+                </Button>
+                <span className="font-mono text-[10px] text-slate-400">
+                  上次运行 {lastRun ? dayjs(lastRun).format('YYYY-MM-DD HH:mm:ss') : '—'}
+                </span>
+              </div>
+              <div className="text-[10px] leading-relaxed text-slate-400">
+                窗口策略（训练/验证/测试天数）在配方里改；此处保存即对该市场生效。
+                是否真的到点派发，以上方派发器心跳为准。
               </div>
             </div>
           ) : (
-            <Empty description="暂无调度草稿" />
+            <Empty description="暂无调度草稿" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           )}
         </section>
 
-        {/* ④ 台账 */}
-        <section className="rp-cell rp-cell--ledger">
-          <div className="rp-step">
-            <span className="rp-step__icon rp-accent--amber"><History size={14} /></span>
-            <span className="rp-step__no">04</span>
-            <span className="rp-step__title">滚动台账</span>
-            <span className="rp-step__rule" />
-            <span className="rp-pill rp-pill--muted">{campaigns.length} 条</span>
-            <Select
-              size="small"
-              allowClear
-              className="!w-[120px]"
-              placeholder="全部市场"
-              value={campaignMarket}
-              onChange={v => { setCampaignMarket(v); void loadCampaigns(v); }}
-              options={marketOptions}
+        {/* ── 04 台账 ── */}
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white lg:col-span-2">
+          <div className="border-b border-slate-100 px-4 py-3">
+            <StepHeader
+              no="04"
+              title="滚动台账"
+              icon={History}
+              tone="amber"
+              right={
+                <div className="flex items-center gap-2">
+                  <Pill>{campaigns.length} 条</Pill>
+                  <Select
+                    size="small"
+                    allowClear
+                    className="!w-[120px]"
+                    placeholder="全部市场"
+                    value={campaignMarket}
+                    onChange={v => {
+                      setCampaignMarket(v);
+                      void loadCampaigns(v);
+                    }}
+                    options={marketOptions}
+                  />
+                  <Button
+                    size="small"
+                    icon={<RefreshCw size={13} />}
+                    loading={campaignsLoading}
+                    onClick={() => loadCampaigns(campaignMarket)}
+                    className="!rounded-lg"
+                  >
+                    刷新
+                  </Button>
+                </div>
+              }
             />
-            <Button size="small" icon={<RefreshCw size={13} />} loading={campaignsLoading} onClick={() => loadCampaigns(campaignMarket)}>刷新</Button>
           </div>
           <Table
-            className="rp-table"
             size="small"
             rowKey="campaign_id"
             loading={campaignsLoading}
