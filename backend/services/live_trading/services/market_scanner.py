@@ -33,6 +33,7 @@ DAY_KEY = "quote:snap:%s"
 POSITIONS_KEY = "bigqmt:positions:%s"
 LATEST_KEY = "qm:scanner:latest"
 STREAM_KEY = "qm:scanner:signals:%s"
+SCANNER_STREAM_TTL_S = 30 * 24 * 3600  # 台账保留 30 天
 
 DEFAULT_INTERVAL_S = 60.0
 DEFAULT_TOP_N = 50
@@ -335,6 +336,8 @@ async def run_scan_once(
                     maxlen=5000,
                     approximate=True,
                 )
+            # 按天一条 stream：必须带 TTL，否则逐日累积（~1.2MB/天）。
+            await redis.expire(stream, SCANNER_STREAM_TTL_S)
         return result
     finally:
         try:
