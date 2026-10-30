@@ -32,7 +32,9 @@ from backend.shared.stock_utils import StockCodeUtil
 logger = logging.getLogger(__name__)
 
 BENCHMARK_SYMBOL = "000300.SH"
-SUPPORTED_MARKETS: frozenset[str] = frozenset({"CN"})
+# CUSTOM（/data/quantcustom）是 A 股筛选保留因子集，价格与基准同源 A 股日线，
+# 选股统计口径与 CN 完全一致；2026-10-30 起纳入支持范围（默认模型即为 CUSTOM）。
+SUPPORTED_MARKETS: frozenset[str] = frozenset({"CN", "CUSTOM"})
 DEFAULT_HOLD_DAYS = 10
 MAX_TOP_K = 50
 MIN_TOTAL_SIGNAL_DAYS = 5
@@ -118,7 +120,8 @@ class ModelSelectionStatsService:
         if market not in SUPPORTED_MARKETS:
             raise SelectionStatsError(
                 "unsupported_market",
-                f"当前仅支持 A 股模型的选股统计（模型市场: {market}）",
+                "当前仅支持 A 股（含自定义 A 股因子集）模型的选股统计"
+                f"（模型市场: {market}）",
             )
 
         default_horizon = self._metadata_int(
