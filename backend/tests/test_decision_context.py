@@ -663,3 +663,22 @@ def test_profit_first_block_reaches_both_slots() -> None:
 
 def test_profit_first_is_off_by_default() -> None:
     assert "【盈利优先】" not in render_prompt(_intraday_ctx())
+
+
+def test_session_phase_keeps_trading_hours_byte_identical() -> None:
+    """提示词时段标签：交易时段仍是「开盘后」（金样），非交易时段如实标注。"""
+    tz = ZoneInfo("Asia/Shanghai")
+
+    def at(day: int, hour: int, minute: int) -> str:
+        return ctxmod._session_phase(
+            datetime(2026, 10, day, hour, minute, tzinfo=tz)
+        )
+
+    assert at(30, 8, 30) == "盘前"
+    assert at(30, 9, 30) == "开盘后"
+    assert at(30, 11, 30) == "开盘后"
+    assert at(30, 12, 0) == "午间休市"
+    assert at(30, 13, 0) == "开盘后"
+    assert at(30, 15, 0) == "开盘后"
+    assert at(30, 15, 30) == "盘后"
+    assert at(31, 10, 0) == "周末休市"  # 2026-10-31 周六

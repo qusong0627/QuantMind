@@ -650,6 +650,24 @@ def _intraday_rule_lines(ctx: RebalanceContext) -> list[str]:
     return rules
 
 
+def _session_phase(now: datetime) -> str:
+    """北京时间 → 盘面阶段。交易时段保持「开盘后」——金样逐字节不变。
+
+    2026-10-30 审计：08:30/12:00 的提示词也写「开盘后」，模型据此把
+    「提交腿」当成可执行（实际被闸门按非交易时段拒）。只改非交易时段文案。
+    """
+    if now.weekday() >= 5:
+        return "周末休市"
+    hm = now.hour * 60 + now.minute
+    if 570 <= hm <= 690 or 780 <= hm <= 900:  # 09:30–11:30 / 13:00–15:00
+        return "开盘后"
+    if hm < 570:
+        return "盘前"
+    if 690 < hm < 780:
+        return "午间休市"
+    return "盘后"
+
+
 def _context_body(ctx: RebalanceContext) -> list[str]:
     """两套提示词**逐字节共用**的正文：持仓表 → 大盘方向 →（新鲜度/市场状态/
     指数）→（唤醒）→ 候选池 →（行情+信号块）→（盘口/分钟/L2/新闻/互看/上一轮）
@@ -666,7 +684,7 @@ def _context_body(ctx: RebalanceContext) -> list[str]:
     # 一只都没有 → 整列不出现（legacy/金样逐字节不动）。
     show_age = any(h.held_days is not None for h in display)
     lines = [
-        f"现在是北京时间 {ctx.now:%F %T}（开盘后）。你是 {ctx.agent} 的 A股实盘调仓决策模型，"
+        f"现在是北京时间 {ctx.now:%F %T}（{_session_phase(ctx.now)}）。你是 {ctx.agent} 的 A股实盘调仓决策模型，"
         f"管理 ¥{ctx.quota_total:,.0f} 虚拟额度（已用 ¥{ctx.quota_used:,.0f}，"
         f"剩余 ¥{ctx.quota_remaining:,.0f}）。",
         "",
