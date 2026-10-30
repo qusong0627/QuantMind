@@ -27,6 +27,7 @@ import {
   ArrowUpRight,
   CheckCircle2,
   Gauge,
+  Lightbulb,
   RefreshCw,
   ShieldCheck,
   SlidersHorizontal,
@@ -270,9 +271,135 @@ function CoverageBar({ value }: { value: number | null }) {
 interface NeutralizationModelPanelProps {
   modelId: string;
   modelName?: string;
+  modelType?: string | null;
+  horizonDays?: number | null;
 }
 
-export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationModelPanelProps) {
+/* ────────────────────────── 研究建议 ────────────────────────── */
+
+export type NeutralizationAdviceTone = 'recommend' | 'caution' | 'avoid' | 'unknown';
+
+export interface NeutralizationAdvice {
+  tone: NeutralizationAdviceTone;
+  label: string;
+  title: string;
+  detail: string;
+}
+
+const ADVICE_CLS: Record<NeutralizationAdviceTone, string> = {
+  recommend: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+  caution: 'border-amber-200 bg-amber-50 text-amber-800',
+  avoid: 'border-rose-200 bg-rose-50 text-rose-800',
+  unknown: 'border-slate-200 bg-slate-50 text-slate-600',
+};
+
+/**
+ * 基于 2026-10-30 的 12 模型 × Top20/Top50 测试集对比给出建议。
+ * 规则按「模型族 + 周期」收敛，不按单只模型硬编码。
+ */
+export function buildNeutralizationAdvice(
+  modelType?: string | null,
+  horizonDays?: number | null,
+): NeutralizationAdvice {
+  const type = String(modelType || '').toLowerCase();
+  const horizon = Number(horizonDays || 0);
+  const isSequence =
+    type.includes('tft') ||
+    type.includes('transformer') ||
+    type.includes('gru') ||
+    type.includes('lstm') ||
+    type.includes('alstm') ||
+    type.includes('tcn');
+
+  if (type.includes('ensemble') || type.includes('blend')) {
+    return {
+      tone: 'unknown',
+      label: '待验证',
+      title: '融合/组合模型暂无同口径结论',
+      detail: '请先用影子模式观察至少 20 个换股期，并同时记录 Top20 / Top50 两套口径。',
+    };
+  }
+  if (isSequence) {
+    return {
+      tone: 'avoid',
+      label: '不建议',
+      title: 'NativeTFT / 序列模型不推荐中性化',
+      detail:
+        '2025–2026 测试集实测：T+5 净 +90%→+56%，T+10 +388%→+82%，T+20 +228%→+61%；' +
+        '中性化会剥掉其主要收益来源（风格暴露）。',
+    };
+  }
+  if (horizon === 3 && type.includes('catboost')) {
+    return {
+      tone: 'recommend',
+      label: '推荐观察',
+      title: 'T+3 CatBoost 是中性化最稳的候选',
+      detail:
+        'Top20 扣费净 +48.8%→+121.1%，夏普 1.81→2.02；Top50 净 +35.4%→+56.6%，' +
+        '回撤 -20.1%→-16.9%。建议优先按 Top20 影子观察。',
+    };
+  }
+  if (horizon === 3 && (type.includes('lightgbm') || type.includes('xgboost'))) {
+    return {
+      tone: 'caution',
+      label: '选择性观察',
+      title: 'T+3 树模型对组合宽度敏感',
+      detail:
+        'Top20 中性化更好（LGB 净 +37%→+74%，XGB +30%→+57%），但 Top50 反而变差' +
+        '（LGB +32%→+19%，XGB +33%→+27%）。只建议按 Top20 口径做影子。',
+    };
+  }
+  if (horizon === 5) {
+    return {
+      tone: 'avoid',
+      label: '不建议',
+      title: 'T+5 中性化后收益下降',
+      detail:
+        'CatBoost T+5 扣费净 +48.4%→-2.7%，NativeTFT T+5 +90.4%→+56.4%；' +
+        'T+5 以上收益更多来自风格与趋势，剥掉风格等于剥掉收益。',
+    };
+  }
+  if (horizon === 10 && (type.includes('lightgbm') || type.includes('catboost'))) {
+    return {
+      tone: 'caution',
+      label: '小仓位观察',
+      title: 'T+10 树模型仅在 Top20 有改善',
+      detail:
+        'Top20 净：LGB -1.8%→+74.8%、CAT -8.2%→+34.7%；但只有 9 期样本' +
+        '（2026-05~09），Top50 基本打平。建议只做小仓位影子。',
+    };
+  }
+  if (horizon === 20 && type.includes('lightgbm')) {
+    return {
+      tone: 'caution',
+      label: '选择性观察',
+      title: 'T+20 LightGBM 只在 Top20 改善',
+      detail:
+        'Top20 净 +41.6%→+82.7%，Top50 +75.9%→+54.3%；只建议按 Top20 口径做影子。',
+    };
+  }
+  if (horizon === 20 && (type.includes('catboost') || type.includes('random_forest'))) {
+    return {
+      tone: 'avoid',
+      label: '不建议',
+      title: 'T+20 树模型中性化后变差',
+      detail: 'CAT 净 +89.7%→+49.4%，RF +67.1%→+58.0%；维持原始分数即可。',
+    };
+  }
+  return {
+    tone: 'unknown',
+    label: '待验证',
+    title: '该模型/周期暂无同口径实测结论',
+    detail: '建议先用影子模式观察至少 20 个换股期，并同时记录 Top20 / Top50 两套口径。',
+  };
+}
+
+export function NeutralizationModelPanel({
+  modelId,
+  modelName,
+  modelType,
+  horizonDays,
+}: NeutralizationModelPanelProps) {
   const [settings, setSettings] = useState<NeutralizationSettings | null>(null);
   const [diagnostics, setDiagnostics] = useState<NeutralizationDiagnostic[]>([]);
   const [loading, setLoading] = useState(false);
@@ -345,6 +472,7 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
   const latest = diagnostics[0] ?? null;
   const trend = useMemo(() => [...diagnostics].reverse().slice(-20), [diagnostics]);
   const latestExposure = maxExposure(latest?.exposure);
+  const advice = buildNeutralizationAdvice(modelType, horizonDays);
 
   const save = async () => {
     if (!controls.length) {
@@ -734,6 +862,37 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
         )}
       </div>
 
+      {/* ── 研究建议 ── */}
+      <div
+        className={clsx(
+          'flex items-start gap-2 rounded-xl border px-3 py-2',
+          ADVICE_CLS[advice.tone],
+        )}
+      >
+        <Lightbulb size={15} className="mt-0.5 shrink-0" />
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-black">{advice.title}</span>
+            <span className="rounded-full border border-current/20 bg-white/60 px-1.5 py-0.5 text-[9px] font-black">
+              {advice.label}
+            </span>
+          </div>
+          <div className="mt-0.5 text-[10px] leading-relaxed opacity-90">{advice.detail}</div>
+          <div className="mt-0.5 text-[9px] opacity-60">
+            依据：2025–2026 测试集 Top20 / Top50 对比（等权、单边 10bp）；仅作研究建议，不构成投资建议
+          </div>
+        </div>
+      </div>
+
+      {mode === 'enforce' && advice.tone === 'avoid' && (
+        <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          <span>
+            该模型/周期实测不建议中性化；如果仍要启用，请确认已看过完整测试集对比，并只做小仓位观察。
+          </span>
+        </div>
+      )}
+
       {mode === 'enforce' && (
         <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-medium text-amber-700">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
@@ -1043,6 +1202,22 @@ interface NeutralizationOverviewPanelProps {
   marketLabel?: string;
 }
 
+function modelMetaString(
+  model: UserModelRecord | undefined,
+  key: string,
+): string | undefined {
+  const value = model?.metadata_json?.[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function modelMetaNumber(
+  model: UserModelRecord | undefined,
+  key: string,
+): number | undefined {
+  const value = Number(model?.metadata_json?.[key]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
 export function NeutralizationOverviewPanel({
   models,
   marketLabel,
@@ -1052,6 +1227,11 @@ export function NeutralizationOverviewPanel({
   const [selected, setSelected] = useState<string>('');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [newModelId, setNewModelId] = useState<string>('');
+
+  const selectedModel = useMemo(
+    () => models.find((m) => m.model_id === selected),
+    [models, selected],
+  );
 
   const load = async () => {
     setLoading(true);
@@ -1139,6 +1319,28 @@ export function NeutralizationOverviewPanel({
       render: (value: number | null) => (
         <span className="font-mono text-xs text-slate-600">{fmtNum(value, 2)}</span>
       ),
+    },
+    {
+      title: '研究建议',
+      key: 'advice',
+      width: 104,
+      render: (_, row) => {
+        const model = models.find((m) => m.model_id === row.model_id);
+        const advice = buildNeutralizationAdvice(
+          modelMetaString(model, 'model_type'),
+          modelMetaNumber(model, 'target_horizon_days'),
+        );
+        return (
+          <span
+            className={clsx(
+              'inline-flex rounded-full border px-2 py-0.5 text-[10px] font-black',
+              ADVICE_CLS[advice.tone],
+            )}
+          >
+            {advice.label}
+          </span>
+        );
+      },
     },
     {
       title: '原因',
@@ -1276,11 +1478,9 @@ export function NeutralizationOverviewPanel({
         {selected && (
           <NeutralizationModelPanel
             modelId={selected}
-            modelName={
-              models.find((m) => m.model_id === selected)
-                ? modelDisplayName(models.find((m) => m.model_id === selected)!)
-                : selected
-            }
+            modelName={selectedModel ? modelDisplayName(selectedModel) : selected}
+            modelType={modelMetaString(selectedModel, 'model_type')}
+            horizonDays={modelMetaNumber(selectedModel, 'target_horizon_days')}
           />
         )}
       </Drawer>

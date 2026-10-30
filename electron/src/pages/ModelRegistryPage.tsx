@@ -1016,6 +1016,18 @@ export const ModelRegistryPage: React.FC = () => {
                           <NeutralizationModelPanel
                             modelId={selectedModel.model_id}
                             modelName={modelDisplayName(selectedModel)}
+                            modelType={
+                              typeof selectedModel.metadata_json?.model_type === 'string'
+                                ? selectedModel.metadata_json.model_type
+                                : undefined
+                            }
+                            horizonDays={
+                              Number.isFinite(
+                                Number(selectedModel.metadata_json?.target_horizon_days),
+                              )
+                                ? Number(selectedModel.metadata_json?.target_horizon_days)
+                                : undefined
+                            }
                           />
                         ),
                       },
