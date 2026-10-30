@@ -121,10 +121,16 @@ async def resolve_order(
         filters.append(Order.user_id == str(user_id))
 
     if cid:
+        # limit(1) + first()：client_order_id 唯一索引是 (tenant,user,cid)，
+        # 多租户/多用户下同 cid 可以有多行；scalar_one_or_none 会抛
+        # MultipleResultsFound 把整轮 poller 打断（2026-10-30 审计）。
         result = await db.execute(
-            select(Order).where(and_(Order.client_order_id == cid, *filters))
+            select(Order)
+            .where(and_(Order.client_order_id == cid, *filters))
+            .order_by(Order.created_at.desc())
+            .limit(1)
         )
-        order = result.scalar_one_or_none()
+        order = result.scalars().first()
         if order is not None:
             return order, "client_order_id"
         # 兼容：某些 Agent 会把 order_id(UUID) 填进 client_order_id 回传
@@ -134,18 +140,24 @@ async def resolve_order(
             oid = None
         if oid is not None:
             result = await db.execute(
-                select(Order).where(and_(Order.order_id == oid, *filters))
+                select(Order)
+                .where(and_(Order.order_id == oid, *filters))
+                .order_by(Order.created_at.desc())
+                .limit(1)
             )
-            order = result.scalar_one_or_none()
+            order = result.scalars().first()
             if order is not None:
                 return order, "order_id"
 
     ex_oid = valid_exchange_order_id(exchange_order_id)
     if ex_oid:
         result = await db.execute(
-            select(Order).where(and_(Order.exchange_order_id == ex_oid, *filters))
+            select(Order)
+            .where(and_(Order.exchange_order_id == ex_oid, *filters))
+            .order_by(Order.created_at.desc())
+            .limit(1)
         )
-        order = result.scalar_one_or_none()
+        order = result.scalars().first()
         if order is not None:
             return order, "exchange_order_id"
 
@@ -309,7 +321,10 @@ async def apply_execution_report(
                         # 四个费用列都要写（只写 commission=0.0 时另三列吃默认 0，
                         # get_trade_statistics 求和恒为 0 ⇒ UI「总佣金 ¥0.00」）。
                         **fee_columns(
-                            order.symbol, filled_qty, price, order.side,
+                            order.symbol,
+                            filled_qty,
+                            price,
+                            order.side,
                             market=getattr(order, "market", None),
                         ),
                         exchange_trade_id=trade_id,

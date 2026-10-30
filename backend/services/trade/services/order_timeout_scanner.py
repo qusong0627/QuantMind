@@ -60,13 +60,25 @@ _BROKER_MANAGED_REMARK_PATTERNS = tuple(
     )
 )
 _STALE_PENDING_MARKER = "[STALE_PENDING_REVIEW]"
+#: 直连 QMT 执行端的台账（``QmtExecClient`` 写入的 source='qmt_direct'）：
+#: 备注是 ``qm<hash>``、cid 由调用方随意命名，都命中不了前缀表；真实状态由
+#: ``qmt_exec_poller`` 按备注回写。不排除的话，挂超 30 分钟的直连真单（如挂在
+#: 买一价等成交的卖单）会被本地判 EXPIRED，终态守卫再吞掉后续成交回报
+#: ——「柜台还挂着、本地已判死」（2026-10-30 审计发现）。
+_BROKER_MANAGED_SOURCES = ("qmt_direct",)
 
 
-def is_broker_managed(remarks: str | None, client_order_id: str | None) -> bool:
+def is_broker_managed(
+    remarks: str | None,
+    client_order_id: str | None,
+    source: str | None = None,
+) -> bool:
     """Python 口径的托管判断（与 :func:`_broker_managed_clause` 同规则）。
 
     供测试与日志使用，避免两处规则漂移。
     """
+    if str(source or "") in _BROKER_MANAGED_SOURCES:
+        return True
     text = str(remarks or "")
     if any(text.startswith(p) for p in _BROKER_MANAGED_REMARK_PREFIXES):
         return True
@@ -79,6 +91,7 @@ def is_broker_managed(remarks: str | None, client_order_id: str | None) -> bool:
 def _broker_managed_clause():
     """SQL 条件：外部通道托管（备注特征 或 镜像 client_order_id 前缀）。"""
     return or_(
+        Order.source.in_(_BROKER_MANAGED_SOURCES),
         *[Order.remarks.like(pattern) for pattern in _BROKER_MANAGED_REMARK_PATTERNS],
         *[
             Order.client_order_id.like(f"{prefix}%")
@@ -100,7 +113,11 @@ def _not_broker_managed_clause():
             for prefix in _BROKER_MANAGED_CID_PREFIXES
         ],
     )
-    return [*remark_clean, cid_clean]
+    source_clean = or_(
+        Order.source.is_(None),
+        ~Order.source.in_(_BROKER_MANAGED_SOURCES),
+    )
+    return [*remark_clean, cid_clean, source_clean]
 
 
 async def _scan_once() -> int:
@@ -128,8 +145,9 @@ async def _scan_once() -> int:
             try:
                 order.status = OrderStatus.EXPIRED
                 order.remarks = (
-                    order.remarks or ""
-                ) + f" [EXPIRED: submitted_at={order.submitted_at}, timeout={_TIMEOUT_MINUTES}m]"
+                    (order.remarks or "")
+                    + f" [EXPIRED: submitted_at={order.submitted_at}, timeout={_TIMEOUT_MINUTES}m]"
+                )
                 expired_count += 1
                 logger.warning(
                     "order %s expired after %d min (submitted_at=%s)",
@@ -152,7 +170,11 @@ async def _scan_once() -> int:
                         action_url="/trading",
                     )
                 except Exception as notify_exc:
-                    logger.warning("notify failed for expired order %s: %s", order.order_id, notify_exc)
+                    logger.warning(
+                        "notify failed for expired order %s: %s",
+                        order.order_id,
+                        notify_exc,
+                    )
             except Exception as exc:
                 logger.error("failed to expire order %s: %s", order.order_id, exc)
 
@@ -232,9 +254,15 @@ async def _scan_bridge_ack_timeout_once() -> int:
                         action_url="/trading",
                     )
                 except Exception as notify_exc:
-                    logger.warning("notify failed for bridge timeout order %s: %s", order.order_id, notify_exc)
+                    logger.warning(
+                        "notify failed for bridge timeout order %s: %s",
+                        order.order_id,
+                        notify_exc,
+                    )
             except Exception as exc:
-                logger.error("failed to flag bridge timeout order %s: %s", order.order_id, exc)
+                logger.error(
+                    "failed to flag bridge timeout order %s: %s", order.order_id, exc
+                )
 
         if orders:
             await db.commit()
@@ -312,7 +340,9 @@ async def _flag_stale_broker_managed_once() -> int:
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.error(
-                    "failed to flag stale broker-managed order %s: %s", order.order_id, exc
+                    "failed to flag stale broker-managed order %s: %s",
+                    order.order_id,
+                    exc,
                 )
 
         if orders:
@@ -336,7 +366,10 @@ async def run_order_timeout_scanner() -> None:
         try:
             bridge_count = await _scan_bridge_ack_timeout_once()
             if bridge_count:
-                logger.info("Order timeout scanner: flagged %d bridge-timeout order(s) for review", bridge_count)
+                logger.info(
+                    "Order timeout scanner: flagged %d bridge-timeout order(s) for review",
+                    bridge_count,
+                )
 
             now = datetime.now()
             if now >= next_long_scan:

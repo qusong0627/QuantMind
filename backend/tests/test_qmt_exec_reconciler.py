@@ -252,7 +252,9 @@ class TestFeeColumns:
         from backend.services.simulation.services.market_rules import CN_RULES
 
         order = _order(status=OrderStatus.SUBMITTED, filled=0.0)
-        _, session = _apply(order, "PARTIALLY_FILLED", qty=1000, price=100.0, trade_id="T-1")
+        _, session = _apply(
+            order, "PARTIALLY_FILLED", qty=1000, price=100.0, trade_id="T-1"
+        )
         trade = session.added[0]
         commission, stamp, transfer = CN_RULES.compute_real_order_breakdown(
             1000, 100.0, OrderSide.BUY
@@ -263,13 +265,17 @@ class TestFeeColumns:
             transfer,
         ), "费用分项必须来自 market_rules（费率单实现）"
         assert trade.total_fee == round(commission + stamp + transfer, 2)
-        assert trade.total_fee == 26.0, "10 万买入 = 25（万2.5）+ 1 过户；31.0 即取了撮合口径"
+        assert trade.total_fee == 26.0, (
+            "10 万买入 = 25（万2.5）+ 1 过户；31.0 即取了撮合口径"
+        )
 
     def test_a_sell_row_pays_the_stamp_duty(self) -> None:
         """卖方印花税是逐笔金额级的差（万 5）：方向判错会静默少收。"""
         order = _order(status=OrderStatus.SUBMITTED, filled=0.0)
         order.side = OrderSide.SELL
-        _, session = _apply(order, "PARTIALLY_FILLED", qty=1000, price=100.0, trade_id="T-2")
+        _, session = _apply(
+            order, "PARTIALLY_FILLED", qty=1000, price=100.0, trade_id="T-2"
+        )
         trade = session.added[0]
         assert trade.stamp_duty == 50.0  # 100000 × 0.05%
         assert trade.total_fee == 76.0  # 佣金 25 + 印花 50 + 过户 1
@@ -282,7 +288,10 @@ class TestNormalizeStatus:
             normalize_status,
         )
 
-        assert normalize_status(OrderStatus.PARTIALLY_FILLED) is OrderStatus.PARTIALLY_FILLED
+        assert (
+            normalize_status(OrderStatus.PARTIALLY_FILLED)
+            is OrderStatus.PARTIALLY_FILLED
+        )
         assert normalize_status(OrderStatus.FILLED) is OrderStatus.FILLED
         assert normalize_status("PARTIALLY_FILLED") is OrderStatus.PARTIALLY_FILLED
         assert normalize_status("garbage") is OrderStatus.SUBMITTED
@@ -357,3 +366,52 @@ class TestAgentLedgerHook:
         assert result is OrderStatus.PARTIALLY_FILLED
         assert len(session.added) == 1
         assert order.filled_quantity == 40.0
+
+
+class _StrictResult:
+    """只允许 ``scalars().first()``：走 ``scalar_one_or_none`` 直接炸。"""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+    def scalar_one_or_none(self):
+        raise AssertionError("resolve_order 不应使用 scalar_one_or_none")
+
+
+class _StrictSession:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.sql: list[str] = []
+
+    async def execute(self, stmt, *_a, **_k):
+        self.sql.append(str(stmt))
+        return _StrictResult(self.rows)
+
+
+def test_resolve_order_multiple_rows_uses_first():
+    """同 cid 多行（多租户）时不得抛 MultipleResultsFound，取最新一行。"""
+    latest = SimpleNamespace(order_id="newest")
+    older = SimpleNamespace(order_id="older")
+    db = _StrictSession([latest, older])
+    got, matched = asyncio.run(
+        mod.resolve_order(db, client_order_id="cid-dup", symbol="SH600036", side="BUY")
+    )
+    assert got is latest
+    assert matched == "client_order_id"
+    assert "ORDER BY" in db.sql[0].upper()
+
+
+def test_resolve_order_exchange_id_multiple_rows_uses_first():
+    latest = SimpleNamespace(order_id="newest")
+    db = _StrictSession([latest, SimpleNamespace(order_id="older")])
+    got, matched = asyncio.run(
+        mod.resolve_order(db, exchange_order_id="7322", symbol="SH600036", side="BUY")
+    )
+    assert got is latest
+    assert matched == "exchange_order_id"
