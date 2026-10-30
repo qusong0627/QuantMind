@@ -13,6 +13,7 @@ import {
   Drawer,
   InputNumber,
   message,
+  Modal,
   Select,
   Table,
   Tooltip,
@@ -34,6 +35,8 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { UserModelRecord } from '../../../services/modelTrainingService';
+import { stockListService } from '../../../services/stockListService';
+import { normalizeStockCode } from '../../../utils/portfolioUtils';
 import { modelDisplayName } from '../../../pages/modelRegistryUtils';
 import {
   neutralizationService,
@@ -286,6 +289,31 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
   const [scoresOpen, setScoresOpen] = useState(false);
   const [scoresDate, setScoresDate] = useState<string>('');
   const [scoresLoading, setScoresLoading] = useState(false);
+  const [nameMap, setNameMap] = useState<Record<string, string>>({});
+
+  // 后端 list_scores 尚未重启时也能显示名称：用本地股票列表兜底
+  useEffect(() => {
+    let cancelled = false;
+    void stockListService
+      .load()
+      .then(() => {
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        for (const stock of stockListService.getAll()) {
+          map[normalizeStockCode(stock.symbol)] = stock.name ?? '';
+        }
+        setNameMap(map);
+      })
+      .catch(() => {
+        if (!cancelled) setNameMap({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const displayName = (symbol: string, name?: string | null): string =>
+    name || nameMap[normalizeStockCode(symbol)] || '—';
 
   const applySettings = (next: NeutralizationSettings) => {
     setSettings(next);
@@ -397,12 +425,23 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
       const before = rawRank.get(row.symbol) ?? 0;
       return {
         symbol: row.symbol,
+        name: row.name ?? '',
         raw_rank: before,
         neutral_rank: idx + 1,
         delta: before - (idx + 1),
         neutral_score: row.neutral_score,
       };
     });
+  }, [scores]);
+
+  const rankMaps = useMemo(() => {
+    const rawSorted = [...scores].sort((a, b) => b.raw_score - a.raw_score);
+    const rawRank = new Map(rawSorted.map((row, idx) => [row.symbol, idx + 1]));
+    const validNeutral = scores
+      .filter((row) => row.neutral_score != null)
+      .sort((a, b) => (b.neutral_score ?? 0) - (a.neutral_score ?? 0));
+    const neutralRank = new Map(validNeutral.map((row, idx) => [row.symbol, idx + 1]));
+    return { rawRank, neutralRank };
   }, [scores]);
 
   const upCount = useMemo(
@@ -497,12 +536,20 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
 
   const scoreColumns: ColumnsType<NeutralizationScoreRow> = [
     {
-      title: '排名',
-      key: 'rank',
-      width: 56,
-      render: (_, __, idx) => (
-        <span className="font-mono text-[11px] text-slate-400">{idx + 1}</span>
-      ),
+      title: '中性排名',
+      key: 'neutral_rank',
+      width: 82,
+      align: 'right',
+      render: (_, row) => {
+        const rank = rankMaps.neutralRank.get(row.symbol);
+        return rank ? (
+          <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 font-mono text-[11px] font-black text-indigo-700">
+            #{rank}
+          </span>
+        ) : (
+          <span className="text-[11px] text-slate-300">—</span>
+        );
+      },
     },
     {
       title: '标的',
@@ -513,10 +560,20 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
       ),
     },
     {
+      title: '名称',
+      dataIndex: 'name',
+      width: 108,
+      render: (v: string | null | undefined, row) => (
+        <span className="text-xs font-bold text-slate-800">
+          {displayName(row.symbol, v)}
+        </span>
+      ),
+    },
+    {
       title: '原始分',
       dataIndex: 'raw_score',
       align: 'right',
-      width: 100,
+      width: 96,
       render: (v: number) => (
         <span className="font-mono text-[11px] text-slate-500">{v.toFixed(5)}</span>
       ),
@@ -525,7 +582,7 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
       title: '中性化分位',
       dataIndex: 'neutral_score',
       align: 'right',
-      width: 120,
+      width: 126,
       render: (v: number | null) =>
         v == null ? (
           <span className="text-slate-300">—</span>
@@ -544,9 +601,52 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
         ),
     },
     {
+      title: '原始排名',
+      key: 'raw_rank',
+      width: 82,
+      align: 'right',
+      render: (_, row) => {
+        const rank = rankMaps.rawRank.get(row.symbol);
+        return rank ? (
+          <span className="font-mono text-[11px] text-slate-500">#{rank}</span>
+        ) : (
+          <span className="text-[11px] text-slate-300">—</span>
+        );
+      },
+    },
+    {
+      title: '名次变化',
+      key: 'delta',
+      width: 84,
+      align: 'right',
+      render: (_, row) => {
+        const rawRank = rankMaps.rawRank.get(row.symbol);
+        const neutralRank = rankMaps.neutralRank.get(row.symbol);
+        if (!rawRank || !neutralRank) {
+          return <span className="text-[11px] text-slate-300">—</span>;
+        }
+        const delta = rawRank - neutralRank;
+        if (delta > 0) {
+          return (
+            <span className="font-mono text-[11px] font-black text-emerald-600">
+              ↑{delta}
+            </span>
+          );
+        }
+        if (delta < 0) {
+          return (
+            <span className="font-mono text-[11px] font-bold text-slate-400">
+              ↓{Math.abs(delta)}
+            </span>
+          );
+        }
+        return <span className="text-[11px] text-slate-300">—</span>;
+      },
+    },
+    {
       title: '标记',
       dataIndex: 'flag',
-      width: 100,
+      width: 96,
       render: (v: string | null) =>
         v && v !== 'ok' ? (
           <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
@@ -857,8 +957,8 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
         />
       </div>
 
-      {/* ── 明细抽屉 ── */}
-      <Drawer
+      {/* ── 明细弹窗 ── */}
+      <Modal
         title={
           <div className="flex items-center gap-2">
             <span className="rounded-lg bg-indigo-50 p-1.5 text-indigo-600">
@@ -867,15 +967,17 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
             <div>
               <div className="text-sm font-black text-slate-800">中性化明细 · {scoresDate}</div>
               <div className="text-[10px] text-slate-400">
-                原始分 → 中性化分位（已剥离市值 / Beta / 动量）
+                原始分 → 中性化分位（已剥离所选风格因子），名次按中性化分位重排
               </div>
             </div>
           </div>
         }
         open={scoresOpen}
-        onClose={() => setScoresOpen(false)}
-        width={760}
+        onCancel={() => setScoresOpen(false)}
+        width={1120}
+        footer={null}
         destroyOnClose
+        styles={{ body: { maxHeight: '72vh', overflowY: 'auto', paddingTop: 8 } }}
       >
         <div className="mb-3 grid grid-cols-3 gap-2">
           <StatTile label="有效标的" value={String(scores.filter((r) => r.neutral_score != null).length)} hint={`共 ${scores.length} 行`} />
@@ -907,6 +1009,7 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
                 )}
               >
                 {row.symbol}
+                <span className="text-slate-500">{displayName(row.symbol, row.name)}</span>
                 <span className={row.delta > 0 ? 'text-emerald-600' : 'text-slate-400'}>
                   {row.delta > 0 ? (
                     <ArrowUpRight size={11} className="inline" />
@@ -928,7 +1031,7 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
           dataSource={scores}
           pagination={{ pageSize: 50, size: 'small' }}
         />
-      </Drawer>
+      </Modal>
     </div>
   );
 }

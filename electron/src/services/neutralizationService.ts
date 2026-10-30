@@ -56,6 +56,7 @@ export interface NeutralizationOverviewRow extends NeutralizationSettings {
 
 export interface NeutralizationScoreRow {
   symbol: string;
+  name?: string | null;
   raw_score: number;
   neutral_score: number | null;
   flag: string | null;

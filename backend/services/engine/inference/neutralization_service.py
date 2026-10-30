@@ -344,8 +344,36 @@ def compute_for_run(
             uid = uid or r_uid
             mid = mid or r_mid
             dtd = dtd or r_dtd
+        # 推理 run 的归属账号（实时链路可能是系统账号 admin）
+        run_tid, run_uid = tid, uid
 
         settings = load_settings(session, tid, uid, mid)
+        # 找不到本账号配置时回退到模型属主：实时链路的 run 归属常是系统账号，
+        # 而中性化配置挂在模型属主名下。写侧也落属主，治理面板才看得到实时影子结果。
+        if not settings["exists"]:
+            owner = (
+                session.execute(
+                    text(
+                        """
+                        SELECT tenant_id, user_id FROM qm_user_models
+                        WHERE model_id=:m
+                        ORDER BY (user_id = :u) DESC, updated_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"m": mid, "u": uid},
+                )
+                .mappings()
+                .first()
+            )
+            if owner and (owner["tenant_id"] != tid or owner["user_id"] != uid):
+                candidate = load_settings(
+                    session, owner["tenant_id"], owner["user_id"], mid
+                )
+                if candidate["exists"]:
+                    settings = candidate
+                    tid, uid = owner["tenant_id"], owner["user_id"]
+
         if not force and settings["mode"] == "off":
             return None
 
@@ -357,7 +385,32 @@ def compute_for_run(
             control_lag=int(settings["control_lag"]),
         )
 
-        scores = _load_scores(session, run_id, tid, uid)
+        # 实时热集每 15 秒发布一次；同一模型/日期/口径 60 秒内只算一次，
+        # 避免每轮都 delete+insert 并堆积诊断行（force=True 的回填/重算不受限）。
+        if universe_scope == SCOPE_HOT and not force:
+            recent = session.execute(
+                text(
+                    """
+                    SELECT 1 FROM qm_neutral_runs
+                    WHERE tenant_id=:t AND user_id=:u AND model_id=:m
+                      AND data_trade_date=:dtd AND universe_scope='hot_set'
+                      AND config_version=:cv
+                      AND created_at > NOW() - INTERVAL '60 seconds'
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "t": tid,
+                    "u": uid,
+                    "m": mid,
+                    "dtd": dtd,
+                    "cv": cfg.config_version,
+                },
+            ).first()
+            if recent:
+                return None
+
+        scores = _load_scores(session, run_id, run_tid, run_uid)
         neutral_run_id = f"nl_{dtd:%Y%m%d}_{uuid.uuid4().hex[:8]}"
         try:
             control_date = _resolve_control_date(dtd, cfg.control_lag, session)
@@ -648,7 +701,18 @@ def list_scores(
         .mappings()
         .all()
     )
-    return [dict(r) for r in rows], int(total)
+    records = [dict(r) for r in rows]
+    if records:
+        # 明细展示需要股票名称；stocks 表是后缀式，转成前缀回填
+        suffixes = [StockCodeUtil.to_suffix(r["symbol"]) for r in records]
+        name_rows = session.execute(
+            text("SELECT symbol, name FROM stocks WHERE symbol = ANY(:syms)"),
+            {"syms": suffixes},
+        ).all()
+        name_map = {StockCodeUtil.to_prefix(sym): name for sym, name in name_rows}
+        for record in records:
+            record["name"] = name_map.get(record["symbol"])
+    return records, int(total)
 
 
 def list_audit(
