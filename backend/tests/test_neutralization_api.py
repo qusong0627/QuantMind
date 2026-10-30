@@ -31,7 +31,7 @@ def _admin() -> dict:
 
 
 def _normal_user() -> dict:
-    return {"user_id": "10000001", "tenant_id": "default", "is_admin": False}
+    return {"user_id": "u2", "tenant_id": "default", "is_admin": False}
 
 
 def test_overview_returns_settings(monkeypatch):
@@ -58,12 +58,55 @@ def test_put_rejects_unknown_controls():
     assert resp.status_code == 422
 
 
-def test_put_enforce_requires_admin():
+def test_put_enforce_requires_admin_or_owner(monkeypatch):
+    monkeypatch.setattr(nl_router, "_owns_model_sync", lambda *a, **k: False)
     resp = _client(_normal_user()).put(
         "/api/v1/models/m1/neutralization",
         json={"mode": "enforce", "controls": ["log_mv"]},
     )
     assert resp.status_code == 403
+
+
+def test_put_enforce_allowed_for_canonical_admin_without_claim(monkeypatch):
+    """admin 账号的存量 token 可能没有 is_admin 声明；规范 user_id 必须放行。"""
+    monkeypatch.setattr(svc, "get_session_factory", lambda: _FakeSession)
+    monkeypatch.setattr(
+        svc,
+        "upsert_settings",
+        lambda session, **kwargs: {
+            "mode": kwargs["mode"],
+            "controls": kwargs["controls"],
+            "config_version": "test",
+            "exists": True,
+        },
+    )
+    user = {"user_id": "10000001", "tenant_id": "default", "is_admin": False}
+    resp = _client(user).put(
+        "/api/v1/models/m1/neutralization",
+        json={"mode": "enforce", "controls": ["log_mv"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["mode"] == "enforce"
+
+
+def test_put_enforce_allowed_for_model_owner(monkeypatch):
+    monkeypatch.setattr(svc, "get_session_factory", lambda: _FakeSession)
+    monkeypatch.setattr(nl_router, "_owns_model_sync", lambda *a, **k: True)
+    monkeypatch.setattr(
+        svc,
+        "upsert_settings",
+        lambda session, **kwargs: {
+            "mode": kwargs["mode"],
+            "controls": kwargs["controls"],
+            "config_version": "test",
+            "exists": True,
+        },
+    )
+    resp = _client(_normal_user()).put(
+        "/api/v1/models/m1/neutralization",
+        json={"mode": "enforce", "controls": ["log_mv"]},
+    )
+    assert resp.status_code == 200
 
 
 def test_recompute_404_when_no_run(monkeypatch):

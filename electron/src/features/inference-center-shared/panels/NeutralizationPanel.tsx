@@ -738,7 +738,7 @@ export function NeutralizationModelPanel({ modelId, modelName }: NeutralizationM
         <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-medium text-amber-700">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
           <span>
-            启用模式会让信号读取层看到中性化分位。仅管理员可保存；热集/自定义宇宙结果不允许用于启用。
+            启用模式会让信号读取层看到中性化分位。模型属主或管理员可保存；热集/自定义宇宙结果不允许用于启用。
           </span>
         </div>
       )}

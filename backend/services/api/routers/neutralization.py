@@ -19,10 +19,12 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.services.engine.inference import neutralization_service as svc
+from backend.shared.admin_identity import is_admin_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,33 @@ def _owner_scope(current_user: dict[str, Any]) -> tuple[str, str]:
     if not user_id:
         raise HTTPException(status_code=401, detail="用户身份无效")
     return tenant_id, user_id
+
+
+def _is_admin(current_user: dict[str, Any]) -> bool:
+    """管理员判定：token 标记 或 规范管理员账号。
+
+    JWT 不一定带 ``is_admin`` 声明（实测 admin 账号的存量 token 就没有），
+    只认 token 会把真正的管理员挡在门外——这正是 enforce 保存报
+    「需要管理员权限」的根因。
+    """
+    if current_user.get("is_admin"):
+        return True
+    return is_admin_user_id(current_user.get("user_id") or current_user.get("sub"))
+
+
+def _owns_model_sync(tenant_id: str, user_id: str, model_id: str) -> bool:
+    with svc.get_session_factory()() as session:
+        row = session.execute(
+            text(
+                """
+                SELECT 1 FROM qm_user_models
+                WHERE tenant_id=:t AND user_id=:u AND model_id=:m
+                LIMIT 1
+                """
+            ),
+            {"t": tenant_id, "u": user_id, "m": model_id},
+        ).first()
+    return row is not None
 
 
 class NeutralizationSettingsBody(BaseModel):
@@ -133,8 +162,12 @@ async def put_neutralization_settings(
             status_code=422,
             detail=f"controls 仅允许 {sorted(_ALLOWED_CONTROLS)} 的非空子集",
         )
-    if body.mode == "enforce" and not current_user.get("is_admin", False):
-        raise HTTPException(status_code=403, detail="enforce 模式需要管理员权限")
+    if body.mode == "enforce" and not _is_admin(current_user):
+        owns = await run_in_threadpool(_owns_model_sync, tenant_id, user_id, model_id)
+        if not owns:
+            raise HTTPException(
+                status_code=403, detail="enforce 模式需要模型属主或管理员权限"
+            )
     operator = f"{user_id}:{current_user.get('username') or ''}".rstrip(":")
 
     def _save() -> dict:
