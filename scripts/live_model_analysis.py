@@ -68,6 +68,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -221,6 +222,11 @@ def read_agent_ledgers(
 
     返回 ``{agent: {"quota", "used", "remaining", "known", "positions": [...]}}``。
     **任何失败都不回退到桥账户**——回退就是把账户总额喂给模型的那条泄漏路径。
+
+    额度按 agent 逐个取自 ``TradingPolicy``（阶段 1 单一出处）：本脚本曾是阶段 1
+    消费方改造的漏网（2026-10-30 实测 15:30 复盘轮仍对模型说「用户授予 ¥100,000」，
+    而决策轮同一时刻是 ¥200,000——模型拿着半额额度做次日计划）。策略文件坏 →
+    整轮降级为无账户模板（**不**回退常量：错额度比没额度更坏）。
     """
     wanted = [str(a).strip() for a in agents if str(a).strip()]
     out: dict[str, dict | None] = dict.fromkeys(wanted)
@@ -229,8 +235,11 @@ def read_agent_ledgers(
     tenant, user = _ledger_identity(env)
     conn = None
     try:
-        from backend.shared.decision.agent_ledger import DEFAULT_AGENT_QUOTA
-
+        quotas = _policy_quotas(wanted)
+    except Exception as exc:  # noqa: BLE001 策略不可用 → 整轮无账户上下文
+        print(f"⚠️ 交易策略不可用（本轮降级为无持仓上下文）: {exc}")
+        return out
+    try:
         conn = _pg_connect(env)
         with conn.cursor() as cur:
             cur.execute(
@@ -263,19 +272,32 @@ def read_agent_ledgers(
             except Exception:  # noqa: BLE001 关闭失败不改变本轮结论
                 pass
 
-    return _ledger_view(wanted, rows, account_rows, DEFAULT_AGENT_QUOTA)
+    return _ledger_view(wanted, rows, account_rows, quotas)
+
+
+def _policy_quotas(agents: list[str]) -> dict[str, float]:
+    """各 agent 的授予额度（元）——``TradingPolicy.for_agent`` 的逐家取值。
+
+    与决策轮/净值采样器同一出处；策略文件坏时抛 ``TradingPolicyError``，由
+    调用方降级（绝不在这里回退成某个常量）。
+    """
+    from backend.shared.trading_policy import load_trading_policy
+
+    policy = load_trading_policy()
+    return {agent: policy.for_agent(agent).quota for agent in agents}
 
 
 def _ledger_view(
     agents: list[str],
     rows: list[tuple],
     account_rows: list[tuple],
-    quota: float,
+    quota: float | Mapping[str, float],
 ) -> dict[str, dict]:
     """把账本查询行映射成提示词要的视图（纯函数，脏行逐条跳过）。
 
     ``rows`` = ``(agent, code, volume, cost_price, name)``；
-    ``account_rows`` = ``(agent,)``（账本里有账户行、但名下无货的 agent）。
+    ``account_rows`` = ``(agent,)``（账本里有账户行、但名下无货的 agent）；
+    ``quota`` = 单值（旧调用点/单测）或 ``{agent: 额度}``（生产路径，按 agent 取）。
     """
     known = {str(row[0]) for row in account_rows}
     grouped: dict[str, list[dict]] = {agent: [] for agent in agents}
@@ -301,10 +323,13 @@ def _ledger_view(
     for agent in agents:
         positions = grouped.get(agent, [])
         used = round(sum(p["volume"] * p["cost_price"] for p in positions), 2)
+        agent_quota = (
+            float(quota[agent]) if isinstance(quota, Mapping) else float(quota)
+        )
         out[agent] = {
-            "quota": quota,
+            "quota": agent_quota,
             "used": used,
-            "remaining": round(quota - used, 2),
+            "remaining": round(agent_quota - used, 2),
             "known": agent in known or bool(positions),
             "positions": positions,
         }

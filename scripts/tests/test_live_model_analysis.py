@@ -207,6 +207,56 @@ class TestLedgerRead:
         monkeypatch.setattr(lma, "_pg_connect", lambda env: pytest.fail("不该连库"))
         assert lma.read_agent_ledgers({}, []) == {}
 
+    def test_quota_comes_from_trading_policy_per_agent(self, monkeypatch):
+        """额度逐家取 ``TradingPolicy``（本脚本曾是阶段 1 改造漏网）。
+
+        2026-10-30 实测：决策轮提示词 ¥200,000，同一天 15:30 复盘轮仍写
+        「用户授予 ¥100,000」——模型拿半额额度做次日计划。
+        """
+        import backend.shared.trading_policy as tp
+        from backend.shared.trading_policy import AgentPolicy, TradingPolicy
+
+        policy = TradingPolicy(
+            default=AgentPolicy(quota=100_000.0),
+            agents={
+                "a": AgentPolicy(quota=200_000.0),
+                "b": AgentPolicy(quota=150_000.0),
+            },
+        )
+        monkeypatch.setattr(tp, "load_trading_policy", lambda: policy)
+
+        assert lma._policy_quotas(["a", "b", "c"]) == {
+            "a": 200_000.0,
+            "b": 150_000.0,
+            "c": 100_000.0,
+        }
+
+    def test_policy_failure_degrades_instead_of_using_a_constant(self, monkeypatch):
+        """策略文件坏 → 本轮无账户上下文；**不许**回退成某个固定额度。"""
+        import backend.shared.trading_policy as tp
+
+        def boom():
+            raise tp.TradingPolicyError("bad file")
+
+        monkeypatch.setattr(tp, "load_trading_policy", boom)
+        monkeypatch.setattr(
+            lma, "_pg_connect", lambda env: pytest.fail("策略坏时不该读库")
+        )
+
+        assert lma.read_agent_ledgers({}, ["a"]) == {"a": None}
+
+    def test_ledger_view_accepts_per_agent_quota_map(self):
+        view = lma._ledger_view(
+            ["a", "b"],
+            [("a", "600036.SH", 100, 10.0, "招商银行")],
+            [],
+            {"a": 200_000.0, "b": 100_000.0},
+        )
+
+        assert view["a"]["quota"] == 200_000.0
+        assert view["a"]["remaining"] == 199_000.0
+        assert view["b"]["quota"] == 100_000.0
+
 
 class TestBridgeAvailability:
     def test_extracts_only_code_and_available_volume_never_totals(self, monkeypatch):
