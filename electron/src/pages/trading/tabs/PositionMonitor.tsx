@@ -20,6 +20,9 @@ interface LiveQuote {
     stock_code: string;
     data?: {
         price?: number | null;
+        /** 昨收：与 Now 同源的 Redis 快照 PreClose/Close（老推送可能缺失） */
+        pre_close?: number | null;
+        close_price?: number | null;
         open?: number | null;
         high?: number | null;
         low?: number | null;
@@ -28,20 +31,42 @@ interface LiveQuote {
     };
 }
 
-/** 持仓明细叠加实时价：现价/市值/盈亏全部按 live price 重算 */
-const mergeLivePrices = (holdings: NormalizedHolding[], live: Record<string, number>): NormalizedHolding[] => {
+/** 持仓明细叠加实时价：现价/市值/盈亏全部按 live price 重算，当日收益按昨收重算 */
+const mergeLivePrices = (
+    holdings: NormalizedHolding[],
+    live: Record<string, number>,
+    prevCloseMap: Record<string, number> = {},
+): NormalizedHolding[] => {
     return holdings.map(h => {
+        const prev = prevCloseMap[h.code];
+        const base = prev != null && Number.isFinite(prev) && prev > 0
+            ? { ...h, prevClose: prev }
+            : h;
         const price = live[h.code];
-        if (price == null || !Number.isFinite(price) || price <= 0) return h;
-        const value = h.shares * price;
-        const profit = h.cost > 0 ? (price - h.cost) * h.shares : 0;
-        const costValue = h.shares * h.cost;
+        if (price == null || !Number.isFinite(price) || price <= 0) {
+            // 无实时价时，若刚拿到昨收也把当日收益补算一次
+            if (base !== h && base.prevClose > 0 && base.current > 0) {
+                const dp = (base.current - base.prevClose) * base.shares;
+                const dv = base.prevClose * base.shares;
+                return { ...base, dailyProfit: dp, dailyProfitPercent: dv > 0 ? (dp / dv) * 100 : 0 };
+            }
+            return base;
+        }
+        const value = base.shares * price;
+        const profit = base.cost > 0 ? (price - base.cost) * base.shares : 0;
+        const costValue = base.shares * base.cost;
+        const dailyProfit = base.prevClose > 0
+            ? (price - base.prevClose) * base.shares
+            : null;
+        const dailyBase = base.prevClose > 0 ? base.prevClose * base.shares : 0;
         return {
-            ...h,
+            ...base,
             current: price,
             value,
             profit,
             profitPercent: costValue > 0 ? (profit / costValue) * 100 : 0,
+            dailyProfit,
+            dailyProfitPercent: dailyProfit == null ? null : dailyBase > 0 ? (dailyProfit / dailyBase) * 100 : 0,
         };
     });
 };
@@ -50,7 +75,9 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [stockNames, setStockNames] = useState<Record<string, string>>({});
     const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+    const [livePrevClose, setLivePrevClose] = useState<Record<string, number>>({});
     const livePricesRef = useRef<Record<string, number>>({});
+    const livePrevCloseRef = useRef<Record<string, number>>({});
     const subscribedRef = useRef<string[]>([]);
 
     React.useEffect(() => {
@@ -94,11 +121,25 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
         const handler = (data: unknown) => {
             const msg = data as LiveQuote;
             const code = normalizeSymbol(String(msg?.stock_code || ''));
+            if (!code) return;
             const price = Number(msg?.data?.price);
-            if (!code || !Number.isFinite(price) || price <= 0) return;
-            const next = { ...livePricesRef.current, [code]: price };
-            livePricesRef.current = next;
-            setLivePrices(next);
+            const prevRaw = msg?.data?.pre_close ?? msg?.data?.close_price;
+            const prev = Number(prevRaw);
+            let priceChanged = false;
+            let prevChanged = false;
+            if (Number.isFinite(price) && price > 0) {
+                const next = { ...livePricesRef.current, [code]: price };
+                livePricesRef.current = next;
+                setLivePrices(next);
+                priceChanged = true;
+            }
+            if (Number.isFinite(prev) && prev > 0 && livePrevCloseRef.current[code] !== prev) {
+                const nextPrev = { ...livePrevCloseRef.current, [code]: prev };
+                livePrevCloseRef.current = nextPrev;
+                setLivePrevClose(nextPrev);
+                prevChanged = true;
+            }
+            if (!priceChanged && !prevChanged) return;
         };
         websocketService.addMessageHandler('quote' as MessageType, handler);
         return () => {
@@ -114,8 +155,8 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
     }, [isActive]);
 
     const holdings = React.useMemo(() => {
-        return mergeLivePrices(buildNormalizedHoldings(accountInfo, stockNames), livePrices);
-    }, [accountInfo, stockNames, livePrices]);
+        return mergeLivePrices(buildNormalizedHoldings(accountInfo, stockNames, livePrevClose), livePrices, livePrevClose);
+    }, [accountInfo, stockNames, livePrices, livePrevClose]);
 
     const summary = React.useMemo(
         () => getPositionSummary(accountInfo, holdings),

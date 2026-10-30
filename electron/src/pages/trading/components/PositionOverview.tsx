@@ -117,24 +117,30 @@ const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, 
             </div>
 
             <div className={`${compact ? COMPACT_RIGHT_RATIO : FULL_RIGHT_RATIO} bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col`}>
-                <div className="px-6 py-2 border-b border-gray-200">
+                <div className="px-6 py-2 border-b border-gray-200 flex items-center justify-between">
                     <h3 className="text-base font-bold text-gray-800">{compact ? '持仓明细' : '持仓明细（按市值排序）'}</h3>
+                    {!compact && (
+                        <span className={`text-xs font-bold ${summary.dailyProfit == null ? 'text-gray-300' : summary.dailyProfit > 0 ? 'text-red-500' : summary.dailyProfit < 0 ? 'text-emerald-500' : 'text-gray-500'}`}>
+                            当日{summary.dailyProfit == null ? '--' : `${summary.dailyProfit > 0 ? '+' : ''}${formatAmount(summary.dailyProfit)}`}
+                        </span>
+                    )}
                 </div>
 
                 <div className="flex-1 overflow-y-auto overflow-x-auto custom-scrollbar pb-2">
                     {currentHoldings.length > 0 ? (
-                        <table className={`w-full min-w-[1160px] table-fixed ${compact ? '' : '[&_td]:!py-[9.5px] [&_th]:!py-[8.5px]'}`}>
+                        <table className={`w-full min-w-[1300px] table-fixed ${compact ? '' : '[&_td]:!py-[9.5px] [&_th]:!py-[8.5px]'}`}>
                             <thead className="sticky top-0 bg-gray-100 border-b border-gray-200">
                                 <tr>
-                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[6%] whitespace-nowrap">序号</th>}
-                                    <th className={`px-3 py-1.5 text-center text-sm font-semibold text-gray-700 whitespace-nowrap ${compact ? 'w-1/4' : 'w-[11%]'}`}>股票代码</th>
-                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[12%] whitespace-nowrap">股票名称</th>}
-                                    <th className={`px-3 py-1.5 text-center text-sm font-semibold text-gray-700 whitespace-nowrap ${compact ? 'w-1/4' : 'w-[11%]'}`}>持仓数量</th>
-                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[11%] whitespace-nowrap">成本价</th>}
-                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[11%] whitespace-nowrap">现价</th>}
-                                    <th className={`px-3 py-1.5 text-center text-sm font-semibold text-gray-700 whitespace-nowrap ${compact ? 'w-1/4' : 'w-[12%]'}`}>持仓市值</th>
-                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[14%] whitespace-nowrap">盈亏金额</th>}
-                                    <th className={`px-3 py-1.5 text-center text-sm font-semibold text-gray-700 whitespace-nowrap ${compact ? 'w-1/4' : 'w-[12%]'}`}>盈亏比例</th>
+                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[5%] whitespace-nowrap">序号</th>}
+                                    <th className={`px-3 py-1.5 text-center text-sm font-semibold text-gray-700 whitespace-nowrap ${compact ? 'w-1/4' : 'w-[10%]'}`}>股票代码</th>
+                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[10%] whitespace-nowrap">股票名称</th>}
+                                    <th className={`px-3 py-1.5 text-center text-sm font-semibold text-gray-700 whitespace-nowrap ${compact ? 'w-1/4' : 'w-[9%]'}`}>持仓数量</th>
+                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[9%] whitespace-nowrap">成本价</th>}
+                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[9%] whitespace-nowrap">现价</th>}
+                                    <th className={`px-3 py-1.5 text-center text-sm font-semibold text-gray-700 whitespace-nowrap ${compact ? 'w-1/4' : 'w-[11%]'}`}>持仓市值</th>
+                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[11%] whitespace-nowrap">盈亏金额</th>}
+                                    {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[13%] whitespace-nowrap" title="当日收益=(现价-昨收)×股数，昨收与现价同源自Redis快照">当日收益</th>}
+                                    <th className={`px-3 py-1.5 text-center text-sm font-semibold text-gray-700 whitespace-nowrap ${compact ? 'w-1/4' : 'w-[13%]'}`}>盈亏比例</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -175,11 +181,32 @@ const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, 
                                             {formatAmount(holding.value)}
                                         </td>
                                         {!compact && (
-                                            <td className={`px-3 py-1.5 text-center text-sm font-bold flex items-center justify-center gap-1 ${
+                                            <td className={`px-3 py-1.5 text-center text-sm font-bold ${
                                                 holding.profit > 0 ? 'text-red-500' : holding.profit < 0 ? 'text-emerald-500' : 'text-black'
                                             }`}>
-                                                {holding.profit > 0 ? <TrendingUp size={14} /> : holding.profit < 0 ? <TrendingDown size={14} /> : <Minus size={14} />}
-                                                {holding.profit > 0 ? '+' : ''}{formatAmount(holding.profit)}
+                                                <span className="inline-flex items-center justify-center gap-1">
+                                                    {holding.profit > 0 ? <TrendingUp size={14} /> : holding.profit < 0 ? <TrendingDown size={14} /> : <Minus size={14} />}
+                                                    {holding.profit > 0 ? '+' : ''}{formatAmount(holding.profit)}
+                                                </span>
+                                            </td>
+                                        )}
+                                        {!compact && (
+                                            <td className={`px-3 py-1.5 text-center text-sm font-bold ${
+                                                holding.dailyProfit == null ? 'text-gray-300' : holding.dailyProfit > 0 ? 'text-red-500' : holding.dailyProfit < 0 ? 'text-emerald-500' : 'text-black'
+                                            }`}>
+                                                {holding.dailyProfit == null ? (
+                                                    <span title="昨收缺失（停牌/新股/快照过期）">--</span>
+                                                ) : (
+                                                    <span className="inline-flex flex-col items-center leading-tight">
+                                                        <span className="inline-flex items-center gap-1">
+                                                            {holding.dailyProfit > 0 ? <TrendingUp size={14} /> : holding.dailyProfit < 0 ? <TrendingDown size={14} /> : <Minus size={14} />}
+                                                            {holding.dailyProfit > 0 ? '+' : ''}{formatAmount(holding.dailyProfit)}
+                                                        </span>
+                                                        <span className="text-[11px] font-semibold opacity-80">
+                                                            {holding.dailyProfitPercent != null ? `${holding.dailyProfitPercent > 0 ? '+' : ''}${holding.dailyProfitPercent.toFixed(2)}%` : ''}
+                                                        </span>
+                                                    </span>
+                                                )}
                                             </td>
                                         )}
                                         <td className={`px-3 py-1.5 text-center text-sm font-semibold ${

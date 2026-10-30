@@ -18,6 +18,11 @@ export interface NormalizedHolding {
     profit: number;
     profitPercent: number;
     value: number;
+    /** 昨收（Redis快照PreClose/Close，与现价Now同源；<=0/缺失表示未知） */
+    prevClose: number;
+    /** 当日收益 = (现价-昨收)*股数，空头取反；昨收未知时为 null */
+    dailyProfit: number | null;
+    dailyProfitPercent: number | null;
 }
 
 export interface PositionSummary {
@@ -26,6 +31,8 @@ export interface PositionSummary {
     positionValue: number;
     positionRatio: number;
     cashRatio: number;
+    /** 当日总收益（各持仓当日收益之和，未知昨收的持仓不计入）；全未知时为 null */
+    dailyProfit: number | null;
 }
 
 export const extractPositionCodes = (accountInfo: AccountInfo | null): string[] => {
@@ -49,6 +56,18 @@ export const getPositionSummary = (
     const safeTotalAsset = totalAsset > 0 ? totalAsset : (cashValue + positionValue);
     const positionRatio = safeTotalAsset > 0 ? (positionValue / safeTotalAsset) * 100 : 0;
     const cashRatio = safeTotalAsset > 0 ? (cashValue / safeTotalAsset) * 100 : 0;
+    let dailyProfit: number | null = null;
+    if (holdings) {
+        let acc = 0;
+        let known = false;
+        for (const h of holdings) {
+            if (h.dailyProfit != null && Number.isFinite(h.dailyProfit)) {
+                acc += h.dailyProfit;
+                known = true;
+            }
+        }
+        dailyProfit = known ? acc : null;
+    }
 
     return {
         totalAsset: safeTotalAsset,
@@ -56,12 +75,29 @@ export const getPositionSummary = (
         positionValue,
         positionRatio,
         cashRatio,
+        dailyProfit,
     };
+};
+
+/** 当日收益 = (现价-昨收)*股数（空头取反）；昨收未知/现价无效返回 null */
+export const calcDailyProfit = (
+    current: number,
+    prevClose: number,
+    shares: number,
+    isShort: boolean,
+): { dailyProfit: number | null; dailyProfitPercent: number | null } => {
+    if (!Number.isFinite(current) || current <= 0 || !Number.isFinite(prevClose) || prevClose <= 0 || !Number.isFinite(shares) || shares <= 0) {
+        return { dailyProfit: null, dailyProfitPercent: null };
+    }
+    const p = (isShort ? prevClose - current : current - prevClose) * shares;
+    const base = prevClose * shares;
+    return { dailyProfit: p, dailyProfitPercent: base > 0 ? (p / base) * 100 : 0 };
 };
 
 export const buildNormalizedHoldings = (
     accountInfo: AccountInfo | null,
     stockNames: StockNameMap = {},
+    prevCloseMap: Record<string, number> = {},
 ): NormalizedHolding[] => {
     const rows = normalizePositions(accountInfo);
     return rows
@@ -106,6 +142,12 @@ export const buildNormalizedHoldings = (
                     : 0;
             const costValue = shares * cost;
             const profitPercent = costValue > 0 ? (profit / costValue) * 100 : 0;
+            // 昨收与现价同源：优先 WS/快照下发的 prevCloseMap，其次账户快照自带的 prev_close/close_price
+            const prevClose = toPositiveNumber(
+                prevCloseMap[code] ?? (pos as any).prev_close ?? (pos as any).pre_close ?? (pos as any).close_price,
+                0,
+            );
+            const { dailyProfit, dailyProfitPercent } = calcDailyProfit(current, prevClose, shares, isShort);
 
             return {
                 code,
@@ -116,6 +158,9 @@ export const buildNormalizedHoldings = (
                 profit,
                 profitPercent,
                 value,
+                prevClose,
+                dailyProfit,
+                dailyProfitPercent,
             };
         })
         .filter((item) => item.shares > 0 || item.value > 0)

@@ -161,10 +161,13 @@ class QuotePusher:
                     stock_code = quote["symbol"]
                     topic = f"stock.{stock_code}"
 
-                    # 转化为推送协议格式
+                    # 转化为推送协议格式（pre_close 与 Now 同源，均来自远程 Redis 快照；
+                    # remote_redis_source 返回 close_price，quantdb 兜底返回 pre_close）
+                    pre_close_val = quote.get("close_price", quote.get("pre_close"))
                     push_data = {
                         "stock_code": stock_code,
                         "price": quote["current_price"],
+                        "pre_close": pre_close_val,
                         "open": quote.get("open_price"),
                         "high": quote.get("high_price"),
                         "low": quote.get("low_price"),
@@ -302,8 +305,10 @@ class QuotePusher:
 
         old_data = self.cache[stock_code]
 
-        # 比较价格是否变化
-        return old_data.get("price") != new_data.get("price")
+        # 比较价格/昨收是否变化（昨收后到也需推送，否则当日收益一直是 --）
+        return old_data.get("price") != new_data.get("price") or old_data.get(
+            "pre_close"
+        ) != new_data.get("pre_close")
 
     async def push_kline(self, stock_code: str, period: str = "1min"):
         """
