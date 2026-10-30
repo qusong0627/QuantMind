@@ -97,7 +97,9 @@ def classify_close_state(
     local_orders = local_orders or []
 
     counter_open = [
-        item for item in counter_orders if str(item.get("status") or "").upper() not in _COUNTER_TERMINAL
+        item
+        for item in counter_orders
+        if str(item.get("status") or "").upper() not in _COUNTER_TERMINAL
     ]
     counter_by_id = {
         str(item.get("order_id") or ""): item
@@ -122,7 +124,11 @@ def classify_close_state(
             continue
         if str(counter.get("status") or "").upper() in _COUNTER_TERMINAL:
             local_stale.append(
-                {**item, "reason": "counter_terminal", "counter_status": counter.get("status")}
+                {
+                    **item,
+                    "reason": "counter_terminal",
+                    "counter_status": counter.get("status"),
+                }
             )
 
     return {
@@ -132,13 +138,88 @@ def classify_close_state(
     }
 
 
+def is_cross_session_orphan(status: str, submitted_at, day_start) -> bool:
+    """纯判定：上一交易日之前提交、仍非终态的 REAL 单（A股委托当日有效）。
+
+    柜台随收盘作废，永远不会再有回报；不收口就会一直停在 submitted，
+    污染委托列表并让扫描器每天重复告警（2026-10-30 实测 10-29 的 mir- 单）。
+    """
+    from backend.services.trade_shared.models.enums import OrderStatus
+
+    text = str(getattr(status, "value", status) or "").lower()
+    if text not in {"submitted", "partially_filled", "pending"}:
+        return False
+    if submitted_at is None or day_start is None:
+        return False
+    return submitted_at < day_start
+
+
+async def expire_cross_session_orphans(date_str: str) -> list[dict]:
+    """把上一个交易日之前仍非终态的 REAL 单标记 EXPIRED，返回处理清单。"""
+    from sqlalchemy import and_, select
+
+    from backend.services.trade_shared.models.enums import OrderStatus
+    from backend.services.trade_shared.models.order import Order, TradingMode
+    from backend.shared.database_manager_v2 import get_session
+
+    day = datetime.strptime(date_str, "%Y%m%d")
+    day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    expired: list[dict] = []
+    async with get_session(read_only=False) as db:
+        rows = (
+            (
+                await db.execute(
+                    select(Order)
+                    .where(
+                        and_(
+                            Order.trading_mode == TradingMode.REAL,
+                            Order.status.in_(
+                                [
+                                    OrderStatus.SUBMITTED,
+                                    OrderStatus.PARTIALLY_FILLED,
+                                    OrderStatus.PENDING,
+                                ]
+                            ),
+                            Order.submitted_at.is_not(None),
+                            Order.submitted_at < day_start,
+                        )
+                    )
+                    .limit(500)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for order in rows:
+            if not is_cross_session_orphan(order.status, order.submitted_at, day_start):
+                continue
+            order.status = OrderStatus.EXPIRED
+            order.remarks = (order.remarks or "") + (
+                f" [EXPIRED: cross_session submitted_at={order.submitted_at}]"
+            )
+            expired.append(
+                {
+                    "client_order_id": order.client_order_id,
+                    "symbol": order.symbol,
+                    "submitted_at": str(order.submitted_at),
+                }
+            )
+        if expired:
+            await db.commit()
+    if expired:
+        logger.warning("[CloseAudit] 跨日残留委托已置 EXPIRED: %d", len(expired))
+    return expired
+
+
 async def run_close_audit(redis, date_str: str | None = None) -> dict:
     """执行一次收盘核对，返回报表并落 Redis。
 
     QMT 执行端未配置/未启用时直接跳过：没有柜台可核对，跑下去只会每天报
     「查询柜台委托失败」的假警。
     """
-    from backend.services.live_trading.services.qmt_exec_client import get_qmt_exec_client
+    from backend.services.live_trading.services.qmt_exec_client import (
+        get_qmt_exec_client,
+    )
 
     date_str = date_str or datetime.now(TZ).strftime("%Y%m%d")
     report: dict = {
@@ -146,8 +227,16 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
         "generated_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "counter_open": [],
         "local_stale": [],
+        "expired_cross_session": [],
         "errors": [],
     }
+
+    # 跨日残留收口：本地状态卫生，与柜台是否配置无关。
+    try:
+        report["expired_cross_session"] = await expire_cross_session_orphans(date_str)
+    except Exception as exc:  # noqa: BLE001 - 清理失败不影响下面的柜台核对
+        logger.error("[CloseAudit] 跨日残留清理失败: %s", exc, exc_info=True)
+        report["errors"].append(f"cross_session_expire_failed: {exc}")
 
     client = get_qmt_exec_client()
     try:
@@ -172,7 +261,9 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
         local_orders = []
         report["errors"].append(f"local_orders_query_failed: {exc}")
 
-    classified = classify_close_state(counter_orders=counter_orders, local_orders=local_orders)
+    classified = classify_close_state(
+        counter_orders=counter_orders, local_orders=local_orders
+    )
     report["counter_orders"] = len(counter_orders)
     report["local_open_orders"] = len(local_orders)
     report["counter_open"] = [
@@ -208,7 +299,7 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
         len(report["counter_open"]),
         len(report["local_stale"]),
     )
-    if not report["ok"]:
+    if not report["ok"] or report["expired_cross_session"]:
         await _notify_report(redis, report)
     return report
 
@@ -224,8 +315,14 @@ def _qmt_channel_clause():
     from backend.services.trade_shared.models.order import Order
 
     return or_(
-        *[Order.client_order_id.like(f"{prefix}%") for prefix in _QMT_CHANNEL_CID_PREFIXES],
+        *[
+            Order.client_order_id.like(f"{prefix}%")
+            for prefix in _QMT_CHANNEL_CID_PREFIXES
+        ],
         Order.remarks.like("mirror:%"),
+        # 直连 QMT 台账（QmtExecClient 写入）：cid 由调用方随意命名，前缀表命中不了，
+        # 不按 source 兜住的话这些真单根本不进收盘核对（2026-10-30 审计）。
+        Order.source == "qmt_direct",
     )
 
 
@@ -316,7 +413,10 @@ async def _notify_report(redis, report: dict) -> None:
     if client is not None:
         try:
             if not client.set(
-                f"trade:close-audit:notified:{date_str}", "1", nx=True, ex=_REPORT_TTL_SECONDS
+                f"trade:close-audit:notified:{date_str}",
+                "1",
+                nx=True,
+                ex=_REPORT_TTL_SECONDS,
             ):
                 return
         except Exception:  # noqa: BLE001
@@ -363,7 +463,9 @@ async def run_close_audit_task() -> None:
     from backend.services.trade_shared.deps import get_redis
 
     target_h, target_m = parse_audit_time(cfg["time"])
-    logger.info("[CloseAudit] 收盘核对任务启动：每日 %02d:%02d 执行", target_h, target_m)
+    logger.info(
+        "[CloseAudit] 收盘核对任务启动：每日 %02d:%02d 执行", target_h, target_m
+    )
     last_error = ""
     while True:
         try:
@@ -386,7 +488,9 @@ async def run_close_audit_task() -> None:
                 # 因通道未配置而跳过时不落 done 标记：当天稍后启用还能补跑
                 if client is not None and not (result or {}).get("skipped"):
                     try:
-                        client.set(_DONE_KEY.format(date=date_str), "1", ex=3 * 24 * 3600)
+                        client.set(
+                            _DONE_KEY.format(date=date_str), "1", ex=3 * 24 * 3600
+                        )
                     except Exception:  # noqa: BLE001
                         pass
             last_error = ""
