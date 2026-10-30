@@ -65,8 +65,10 @@ DEFAULT_CONFIG = {
              # 卖出是减风险动作：默认不做黑名单/金额/偏离/限频拦截（只拦买入）。
              # 2026-10-30 用户拍板：ST 黑名单把清仓也堵死，等于给卖出加风险。
              'apply_to_sells': False,
-             # 但卖出保留「错价保护」：限价相对昨收偏离超过该带宽即拒（市价单不受限）。
-             'sell_price_band_pct': 9.5},
+             # 但卖出保留「错价保护」：限价对昨收偏离超过该带宽即拒（市价单不受限）。
+             # 20% 覆盖创业板/科创板涨跌停；主板 10%/ST 5% 由交易所涨跌停兜底。
+             # 2026-10-30 实测 9.5% 会把「跌 10% 的票按买一价正常卖出」误杀。
+             'sell_price_band_pct': 20.0},
     'reload': {'enabled': True, 'key': 'qm:qmt:pipe:reload'},
     'health': {'heartbeat_key': 'qm:qmt:pipe:heartbeat', 'metrics_key': 'qm:qmt:pipe:metrics',
                'interval_s': 5, 'ttl_s': 30},

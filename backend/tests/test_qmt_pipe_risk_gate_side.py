@@ -83,7 +83,7 @@ def bridge(monkeypatch):
         "blacklist_codes": [],
         "blacklist_name_keywords": ["ST", "退"],
         "apply_to_sells": False,
-        "sell_price_band_pct": 9.5,
+        "sell_price_band_pct": 20.0,
     }
     module.STATE.name_map = {"600289.SH": "ST信通", "600036.SH": "招商银行"}
     module.STATE.quote_pre_close = {"600289.SH": 5.0, "600036.SH": 40.0}
@@ -223,3 +223,14 @@ def test_order_backlog_gate(bridge):
     assert busy and busy.startswith("BRIDGE_BUSY")
     # limit=0 关闭快速失败
     assert bridge.order_backlog_gate(99, 0) is None
+
+
+def test_sell_price_band_allows_daily_limit_move(bridge):
+    """跌 10% 的票按买一价卖出必须放行（9.5% 带宽会误杀，2026-10-30 实测）。"""
+    assert bridge.risk_gate("order_stock", _order("600036.SH", 100, 36.0, 24)) is None
+
+
+def test_sell_price_band_still_blocks_absurd_price(bridge):
+    """真正离谱的价格（-30%）仍要拦。"""
+    reason = bridge.risk_gate("order_stock", _order("600036.SH", 100, 28.0, 24))
+    assert reason and "sell price band" in reason
