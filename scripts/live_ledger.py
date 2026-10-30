@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""实盘分账记账本（A股，**薄封装**）。
+"""实盘分账记账本（A股，**薄封装**）——**文件账本已于 2026-09-30 冻结**。
+
+⚠️ 生产分账账本是 PG ``qm_agent_ledger_*``（写入口 ``backend.shared.agent_ledger_store``
+/ ``agent_ledger_fill``）；本模块的文件账本 ``logs/live_ledger.json`` 最后写入
+2026-09-29（迁移夜），此后不再有真单成交进入。**新代码不要再用它做额度/持仓判断**：
+`scripts/live_trade_picks.py` 已于 2026-10-30 改为只读 PG 活账；本模块仅保留给
+尚未迁移的遗留脚本（``live_fills.record_inline_fill`` 等）避免一次性断链。
 
 算法全部收敛在 `scripts/account_protocol.py`（QIFI 式协议层）；
-本模块只做"绑定"：台账文件路径 + 额度（¥10 万）+ 本市场 IO + A 股特有的坏价闸。
+本模块只做"绑定"：台账文件路径 + 额度 + 本市场 IO + A 股特有的坏价闸。
 
 规则（2026-08-31 用户确认）：
   - 每个 agent 初始额度 AGENT_QUOTA = ¥100,000，累计买入成本不得超过该额度

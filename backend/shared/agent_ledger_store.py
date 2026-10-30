@@ -815,6 +815,19 @@ async def _write_cash(
     )
 
 
+async def write_roundtrip(
+    session: Any, *, tenant_id: str, user_id: str, agent: str, row: Mapping[str, Any]
+) -> None:
+    """写一条回合台账（历史迁移/补录用；真单卖出走 ``apply_fill`` 内部同一实现）。
+
+    公开包装只暴露「按行写入」这一件事：列名/类型收口仍在 ``_write_roundtrip``，
+    历史导入与真单记账共用同一份形状，避免迁移脚本各写一份 INSERT 后漂移。
+    """
+    await _write_roundtrip(
+        session, tenant_id=tenant_id, user_id=user_id, agent=agent, row=row
+    )
+
+
 async def _write_roundtrip(
     session: Any, *, tenant_id: str, user_id: str, agent: str, row: Mapping[str, Any]
 ) -> None:

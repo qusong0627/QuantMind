@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
-"""历史市场分析报告选股 → 通达信桥实盘买卖全流程。
+"""候选池 → 通达信桥实盘买卖（人工路径，默认 dry-run）。
 
 买入流程（--mode buy，默认）：
-  1. 选股：scripts/select_from_reports.py（最新 picks.json / --source md 市场分析报告个股）
+  1. 选股：最新 ``data/reports/stock_picks/*_picks.json``（--source picks，默认）或
+     ``*_agent_picks.json``（--source agent，与决策轮同一份池）；--picks-file 可指定
   2. 桥探活：GET /api/v1/health
   3. 账户：POST /api/v1/account/query（可用资金 / 现持仓）
-  4. 行情：TdxAiData 实时源批量日K（失败逐票回退桥）
-  5. 计算：涨跌停/停牌过滤 → 100 股整数倍量 → 单票 ≤ 20% 资金、限价=现价×1.01
+  4. 行情：桥日K（逐票；旧的 TdxAiData 模块已随 quant-Trader 退役，不再依赖）
+  5. 计算：涨跌停/停牌过滤 → 板块手数 → 单票 ≤ 策略配置比例（TradingPolicy）
   6. 下单：POST /api/v1/plans/execute
-  7. 记录：logs/live_trade_YYYYMMDD.jsonl + orders/query 委托验证
+  7. 记账：成交按累计量台阶写 **PG 分账账本**（qm_agent_ledger_*，与决策轮同一本账）
+     + logs/live_trade_YYYYMMDD.jsonl 流水 + orders/query 委托验证
 
 卖出流程（--mode sell）：
-  1. 账户查询现持仓 → 2. 逐票实时行情（限价=现价×0.99，T+1 可用量检查）
-  3. 卖出 → 4. 记录 + 委托验证
+  1. 账户查询现持仓 → 2. 桥日K（限价=现价×0.99，T+1 可用量检查）
+  3. 卖出 → 4. 成交写 PG 分账（持有归属从 PG 账本取）+ 委托验证
   标的：--sell-all 全部持仓 | --sell-codes 600519.SH,000858.SZ 指定 | --sell-pct 0.5 每只卖一半
   提示：当日买入 T+1 不可卖（available_volume=0），桥会拒绝，脚本会跳过
+
+额度与账本（2026-10-30 修）：
+  - 额度逐 agent 读 ``config/trading_policy.json``（TradingPolicy），不再有 ¥10 万常量；
+  - 文件账本 ``logs/live_ledger.json`` 自 2026-09-30 起冻结，本脚本**只读 PG 活账**；
+  - 手工成交按累计量台阶入 PG 分账；未终态/超时的余量不自动跟踪，必须人工核对。
 
 安全：
   - 默认 --dry-run：只演练（选股/资金/价格/拟下量），不下单
   - --execute 才真下
+  - 账本/策略不可读 → 直接退出，不用旧账本或默认额度兜底
 
 用法：
   python scripts/live_trade_picks.py                            # buy dry-run
-  python scripts/live_trade_picks.py --source md --top 5        # 市场分析报告个股 dry-run
-  python scripts/live_trade_picks.py --execute --source md      # 实盘买入（08-28 报告个股）
+  python scripts/live_trade_picks.py --source agent --top 5     # 决策池个股 dry-run
+  python scripts/live_trade_picks.py --execute --source picks   # 实盘买入（夜间池）
   python scripts/live_trade_picks.py --mode sell --dry-run      # 卖出演练
   python scripts/live_trade_picks.py --mode sell --execute --sell-all   # 实盘清仓
 """
@@ -40,16 +48,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_tools.brokers.tdx_bridge import TdxBridgeBroker  # noqa: E402
 import gate_rules  # noqa: E402  规则 id 词表（影子代价账的分组键）
-# 实盘分账（每 agent ¥10 万虚拟子账户）
-from live_ledger import (  # noqa: E402
-    AGENT_QUOTA,
+from live_ledger_pg import (  # noqa: E402
+    agent_quota,
     agent_remaining,
     agent_used,
-    find_holder,
+    ensure_pg_runtime,
+    holders_by_age,
+    load_env as load_pg_env,
     load_ledger,
-    record_buy,
-    record_sell,
-    save_ledger,
+    load_policy,
+    settle_fill,
 )
 
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -63,6 +71,7 @@ def enabled_agents() -> list:
         return [m["name"] for m in data.get("models", []) if m.get("enabled")]
     except Exception:  # noqa: BLE001
         return ["deepseek-v4-flash", "deepseek-v4-pro", "glm-5.3-flash"]
+
 
 # 交易时间固定用市场本地时区（本机时区可能是 JST，不能依赖）
 CN_TZ = ZoneInfo("Asia/Shanghai")
@@ -142,27 +151,13 @@ def compute_order(bars: list, cash: float, pct: float, code: str = "") -> dict:
     }
 
 
-def _pend_or_warn(order_id, agent: str, code: str, side: str,
-                  vol: int, price: float) -> None:
-    """未确认成交 → 挂 pending 交 reconcile 兜底；桥没给委托号则如实说明。
-
-    add_pending 对空委托号会落一条 untracked_order 事件（不写假在途单），CLI 输出
-    必须与之一致——原来无条件打印「已挂 pending」，操作员会以为成交已受跟踪。
-    """
-    from live_fills import add_pending
-
-    add_pending(order_id, agent, code, side, vol, price, now_cn().isoformat())
-    if order_id:
-        print(f"   ⏳ {code}: 未确认成交 → 已挂 pending，reconcile 按真实成交兜底记账")
-    else:
-        print(f"   ⚠️ {code}: 桥未返回委托号——成交无法跟踪，"
-              f"已落事件需人工核对当日委托")
-
-
 def sell_flow(broker, args, log_line) -> int:
-    """卖出流程：桥持仓 → TdxAiData 行情 → 限价卖出。
+    """卖出流程：桥持仓 → 桥日K → 限价卖出；成交写 PG 分账。
+
     标的：--sell-all（默认）全部持仓 | --sell-codes 指定；
-    每只可卖量 × --sell-pct，100 股整数倍；跌停/停牌跳过；T+1 当日买入不可卖（available=0 跳过）。"""
+    每只可卖量 × --sell-pct，板块手数取整；跌停/停牌跳过；T+1 当日买入不可卖
+    （available=0 跳过）。持有归属从 PG 活账取；多家持有时提示后按第一顺位记。
+    """
     import requests
 
     try:
@@ -179,10 +174,23 @@ def sell_flow(broker, args, log_line) -> int:
     print(f"💰 持仓 {len(positions)} 只:")
     for p in positions:
         print(f"   {p.get('stock_code')} 总量={p.get('total_volume')} 可卖={p.get('available_volume')}")
-    ledger = load_ledger()
+    try:
+        policy = load_policy()
+        ledger = load_ledger()
+    except Exception as exc:  # noqa: BLE001 账本/策略读不到就不许按猜的归属记账
+        print(f"❌ 分账账本/策略不可读：{type(exc).__name__}: {exc}")
+        print("   本工具不再回退文件账本（logs/live_ledger.json 自 2026-09-30 已冻结）")
+        return 2
+    print("📒 PG 分账（额度按 TradingPolicy）：")
+    for agent in enabled_agents():
+        print(
+            f"   {agent}: 已用 ¥{agent_used(ledger, agent):,.0f}"
+            f" / ¥{agent_quota(policy, agent):,.0f}"
+            f" 剩余 ¥{agent_remaining(ledger, agent, policy):,.0f}"
+        )
     # 在途卖单提示（不拦截，人工路径以操作员意图为准）：自动路径（哨兵/整点轮）
     # 可能刚下过同一代码的止损单，再下一单柜台会按可用量驳回或造成超卖
-    from live_fills import inflight_codes, wait_fill
+    from live_fills import inflight_codes
 
     pending_sell = inflight_codes("sell")
 
@@ -199,25 +207,18 @@ def sell_flow(broker, args, log_line) -> int:
         print("ℹ️ 无目标持仓可卖")
         return 0
 
-    # 行情：TdxAiData 批量 → 回退桥
-    from agent_tools.datasources import tdx_aidata
-
-    codes = [t.get("stock_code") for t in targets]
-    bars_map = {}
-    if tdx_aidata.available():
-        try:
-            bars_map = tdx_aidata.get_klines_batch(codes, interval="daily", count=5)
-        except Exception as e:
-            print(f"⚠️  TdxAiData 行情失败: {e} → 回退桥")
+    # 行情：桥日K（旧的 TdxAiData 数据源模块已随 quant-Trader 退役；
+    # 缺失时不再 import 失败，桥本身就是行情面）
+    bars_map: dict = {}
     for t in targets:
         c = t.get("stock_code")
-        if c not in bars_map or not bars_map[c]:
-            try:
-                bars_map[c] = broker.get_klines(c, interval="daily")[-5:]
-            except Exception:
-                bars_map[c] = []
+        try:
+            bars_map[c] = broker.get_klines(c, interval="daily")[-5:]
+        except Exception:
+            bars_map[c] = []
 
     sold = []
+    record_errors: list[str] = []
     for t in targets:
         code = t.get("stock_code")
         avail = int(t.get("available_volume") or 0)
@@ -258,7 +259,17 @@ def sell_flow(broker, args, log_line) -> int:
         if limit is None:
             print(f"⏭️  {code}: 无法计算合法报单价，跳过")
             continue
-        print(f"📉 {code}: 现价 ¥{price:.2f} ({chg:+.2f}%) 拟卖 {vol}/{avail} 股 限价 ¥{limit:.2f}")
+        allocations = holders_by_age(ledger, code)
+        if allocations:
+            plan_text = " + ".join(f"{a} {v}股" for a, v in allocations)
+            print(f"📉 {code}: 现价 ¥{price:.2f} ({chg:+.2f}%) 拟卖 {vol}/{avail} 股"
+                  f" 限价 ¥{limit:.2f} · 按 FIFO 减仓 [{plan_text}]")
+            if len(allocations) > 1:
+                print(f"   ℹ️  {code}: 共享账户 {len(allocations)} 家 agent 持有——"
+                      f"本笔按买入时间 FIFO 逐家扣减")
+        else:
+            print(f"📉 {code}: 现价 ¥{price:.2f} ({chg:+.2f}%) 拟卖 {vol}/{avail} 股"
+                  f" 限价 ¥{limit:.2f} · 无分账 agent")
         if code in pending_sell:
             print(f"   ⚠️  {code}: 已有在途卖单未确认（data/live_pending_orders.json）"
                   f"——再下同向单可能超卖，请先核对当日委托再决定")
@@ -277,29 +288,39 @@ def sell_flow(broker, args, log_line) -> int:
         sold.append(result)
         log_line({"ts": now_cn().isoformat(), "mode": "sell",
                   "code": code, "volume": vol, "price": limit, "result": result})
-        # 分账记账：下单≠成交——等成交回报按真实成交价/量扣减；未确认成交挂 pending
-        # 由 reconcile 兜底（2026-09-11 前按委托限价即刻记账：跌停封死没卖出去也照样
-        # 扣减持仓、释放额度，账本与真实持仓脱节）
-        #
-        # ⚠️ 待办（2026-09-12 审查 MEDIUM-2）：这里是**手工**下单路径，仍未接入
-        # live_fills.settle_place_fill——部分成交的余量不会挂 pending 继续跟踪，
-        # 且账本写不在 _file_lock 内（与 cron 的 record-only/reconcile 并发时可能丢
-        # 更新）。无人值守的四条路径（09:35 调仓、整点轮）已收口；手工路径迁移待办。
-        holder = find_holder(ledger, code)
+        # 分账记账（PG 活账）：下单≠成交——成交按桥回报的累计量台阶入账；
+        # 没成交/未终态如实打印，不拿委托限价预扣（2026-09-11 前的老毛病）。
         order_id = str(result.get("order_id") or "")
-        fill = wait_fill(broker, order_id)
-        fv = int((fill or {}).get("filled_volume") or 0)
-        if fv > 0:
-            fp = float(fill.get("filled_price") or limit)
-            if holder:
-                ledger = record_sell(ledger, holder, code, fv, fp, now_cn().isoformat())
-                save_ledger(ledger)
-                print(f"   📒 分账释放: {holder} -{fv}股 {code} 成交 ¥{fp:.2f}"
-                      f"（剩余 ¥{agent_remaining(ledger, holder):,.0f}）")
-        elif holder:
-            _pend_or_warn(order_id, holder, code, "sell", vol, limit)
-        else:
+        if not allocations:
             print(f"   ℹ️  {code}: 无分账 agent 持有该代码，跳过记账（仅桥账户变动）")
+        elif not order_id:
+            print(f"   ⚠️  {code}: 桥未返回委托号——成交无法跟踪，未记分账；请人工核对当日委托")
+            record_errors.append(f"{code}: 无委托号")
+        else:
+            settlement = settle_fill(
+                broker, allocations=allocations, code=code, side="sell",
+                order_id=order_id, limit_price=limit, timeout_s=args.fill_timeout,
+            )
+            if settlement["filled"] > 0:
+                parts = " / ".join(
+                    f"{agent} -{qty}股"
+                    for agent, qty in settlement["by_agent"].items()
+                )
+                print(f"   📒 分账释放: {parts} {code}"
+                      f" 均价 ¥{settlement['price']:.2f}")
+                ledger = load_ledger()
+                if not settlement["terminal"]:
+                    print(f"   ⚠️  {code}: 委托未终态（{settlement['status'] or '—'}），"
+                          f"余量未跟踪；请核对当日委托")
+                    log_line({"ts": now_cn().isoformat(), "mode": "fill_unfinished",
+                              "agent": ",".join(settlement["by_agent"]), "code": code,
+                              "side": "sell", "filled": settlement["filled"],
+                              "status": settlement["status"]})
+            else:
+                print(f"   ⏳ {code}: 尚无成交（{settlement['status'] or '无终态'}）——未记分账")
+            if settlement["error"]:
+                print(f"   ❌ {settlement['error']}")
+                record_errors.append(f"{code}: {settlement['error']}")
         time.sleep(1)  # 桥限流 60 req/min
 
     if args.execute and sold:
@@ -308,16 +329,112 @@ def sell_flow(broker, args, log_line) -> int:
             print(f"   {o.get('stock_code')} {o.get('side')} "
                   f"{o.get('total_volume')}股 status={o.get('status')} id={o.get('order_id')}")
     print(f"\n{'✅ 卖出完成' if args.execute else '🟡 卖出演练完成'}: 受理 {len(sold)} 笔")
+    if record_errors:
+        print(f"\n❌ 有 {len(record_errors)} 笔成交未完整入分账（请人工核对）：")
+        for item in record_errors:
+            print(f"   - {item}")
+        return 2
     return 0
 
 
+_PICKS_DIR = Path(__file__).resolve().parent.parent / "data" / "reports" / "stock_picks"
+_SIDE_RANK = {"BUY": 3, "ADD": 2, "HOLD": 1}
+
+
+def load_picks(source: str, top: int, min_side: str, picks_file: str = "") -> list[dict]:
+    """候选读取：默认夜间池 ``*_picks.json``；``agent`` = 决策轮同一份池。
+
+    两种 schema 归一成 ``{code(后缀式), name, side, score}``：
+    - 夜间池：``{"candidates": [{"symbol": "688687", ...}]}``
+    - 决策池：``{"picks": [{"code": "003816.SZ", ...}]}``
+
+    ``--source md`` 已无实现（``select_from_reports.py`` 随 quant-Trader 退役）。
+    """
+    if source == "md":
+        raise SystemExit(
+            "❌ --source md 依赖的 select_from_reports.py 已随 quant-Trader 退役；"
+            "请用 --source picks / --source agent，或 --picks-file 指定 JSON"
+        )
+    if picks_file:
+        path = Path(picks_file)
+        if not path.is_file():
+            raise SystemExit(f"❌ 候选文件不存在：{path}")
+    else:
+        pattern = "*_agent_picks.json" if source == "agent" else "*_picks.json"
+        if source == "agent":
+            files = sorted(
+                _PICKS_DIR.glob("*_agent_picks.json"),
+                key=lambda p: (p.stat().st_mtime, p.name),
+            )
+        else:
+            # 夜间池：排除 *_agent_picks.json（决策池的 glob 也命中 *_picks.json）
+            files = sorted(
+                (
+                    p
+                    for p in _PICKS_DIR.glob("*_picks.json")
+                    if not p.name.endswith("_agent_picks.json")
+                ),
+                key=lambda p: (p.stat().st_mtime, p.name),
+            )
+        if not files:
+            raise SystemExit(f"❌ 找不到候选文件：{_PICKS_DIR}/{pattern}")
+        path = files[-1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"❌ 候选文件不可读：{path}（{exc}）") from exc
+    raw = (
+        data.get("picks") or data.get("candidates") or []
+        if isinstance(data, dict)
+        else data
+    )
+    from backend.shared.stock_utils import StockCodeUtil
+
+    rank = _SIDE_RANK.get(str(min_side).upper(), 3)
+    rows: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or item.get("symbol") or "").strip()
+        if not code:
+            continue
+        side = str(item.get("side") or "HOLD").upper()
+        if _SIDE_RANK.get(side, 0) < rank:
+            continue
+        try:
+            score = float(item.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        rows.append(
+            {
+                "code": StockCodeUtil.to_suffix(code),
+                "name": str(item.get("name") or ""),
+                "side": side,
+                "score": score,
+            }
+        )
+    rows.sort(key=lambda row: row["score"], reverse=True)
+    print(f"📄 候选来源：{path}（{len(rows)} 只，side≥{min_side}）")
+    return rows[: max(int(top), 1)]
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="报告选股 → 通达信桥实盘下单")
+    ap = argparse.ArgumentParser(description="候选池 → 通达信桥实盘下单（默认 dry-run）")
     ap.add_argument("--execute", action="store_true", help="真下单（默认仅 dry-run 演练）")
-    ap.add_argument("--source", choices=["picks", "md"], default="picks")
+    ap.add_argument(
+        "--source",
+        choices=["picks", "agent", "md"],
+        default="picks",
+        help="picks=夜间池（默认）；agent=决策轮同一份池；md=已退役",
+    )
+    ap.add_argument("--picks-file", default="", help="显式指定 picks JSON（覆盖 --source）")
     ap.add_argument("--top", type=int, default=5, help="取前 N 只候选")
-    ap.add_argument("--per-stock-pct", type=float, default=0.2,
-                    help="单票占可用资金比例（默认 0.2）")
+    ap.add_argument(
+        "--per-stock-pct",
+        type=float,
+        default=None,
+        help="单票占剩余额度比例（缺省=该 agent 的 TradingPolicy.per_stock_pct）",
+    )
     ap.add_argument("--min-side", choices=["BUY", "ADD", "HOLD"], default="BUY",
                     help="最低 side 门槛（默认 BUY：只买推荐买入的）")
     ap.add_argument("--mode", choices=["buy", "sell"], default="buy",
@@ -327,26 +444,26 @@ def main() -> None:
     ap.add_argument("--sell-pct", type=float, default=1.0,
                     help="每只卖出比例（默认 1.0=全部可卖量；按板块手数取整，"
                          "取整后不足 1 手的标的跳过）")
+    ap.add_argument("--fill-timeout", type=int, default=60,
+                    help="成交回报轮询上限（秒）；超时未终态会如实告警（默认 60）")
     args = ap.parse_args()
+
+    # PG 分账是唯一账本：解释器/环境先就位，失败即退出（不回退文件账本）。
+    ensure_pg_runtime()
+    load_pg_env()
 
     mode = "🔴 实盘执行" if args.execute else "🟡 DRY-RUN 演练（不下单）"
     print(f"{mode}  {now_cn():%F %T}  [mode={args.mode}]")
 
     broker = TdxBridgeBroker()
     if args.mode == "sell":
-        return sell_flow(broker, args, log_line)
+        raise SystemExit(sell_flow(broker, args, log_line))
 
     # 1. 选股（仅买入模式）
-    import subprocess
-
-    sel = subprocess.run(
-        [sys.executable, "scripts/select_from_reports.py", "--source", args.source,
-         "--top", str(args.top), "--min-side", args.min_side, "--json"],
-        capture_output=True, text=True, check=True)
-    picks = json.loads(sel.stdout)
+    picks = load_picks(args.source, args.top, args.min_side, args.picks_file)
     if not picks:
-        print("❌ 无候选（side≥BUY），流程终止")
-        sys.exit(0)
+        print("❌ 无候选（side 门槛未命中），流程终止")
+        raise SystemExit(0)
     print(f"📋 候选 {len(picks)} 只:")
     for p in picks:
         print(f"   {p['code']} {p['name']} side={p['side']} score={p['score']:.3f}")
@@ -369,27 +486,10 @@ def main() -> None:
         print("❌ 无可用资金，终止")
         sys.exit(1)
 
-    # 4. 行情：优先 TdxAiData 实时源（批量一次拿全部候选，省限流配额），失败逐票回退桥
-    from agent_tools.datasources import tdx_aidata
-
+    # 4. 行情：桥日K（旧的 TdxAiData 数据源模块已随 quant-Trader 退役）
     bars_map: dict = {}
-    codes = [p["code"] for p in picks]
-    if tdx_aidata.available():
-        try:
-            bars_map = tdx_aidata.get_klines_batch(codes, interval="daily", count=5)
-            got = sum(1 for b in bars_map.values() if b)
-            print(f"📡 实时行情(TdxAiData) {got}/{len(codes)} 只")
-            if got == 0:
-                bars_map = {}  # 整体空（限流）→ 全部回退桥
-        except Exception as e:
-            print(f"⚠️  TdxAiData 批量行情失败: {e} → 回退桥行情")
-            bars_map = {}
-    else:
-        print("⚠️  TdxAiData 不可用 → 回退桥行情")
-    for p in picks:  # 空/缺失的单只回退桥
+    for p in picks:
         code = p["code"]
-        if bars_map.get(code):
-            continue
         try:
             bars_map[code] = latest_klines(broker, code)
         except Exception as e:
@@ -398,26 +498,39 @@ def main() -> None:
                       "stage": "quote", "error": str(e)})
 
     # 5. 逐票下单 —— 实盘分账：候选按 score 轮流分配给各 agent，
-    #    每 agent 用自己剩余额度（¥10 万 - 已用）买，累计不超；账户现金兜底。
+    #    每 agent 用自己剩余额度（TradingPolicy 授予额度 − 已用，且不超过账上现金）。
     agents = enabled_agents()
-    ledger = load_ledger()
-    print(f"📒 分账 agent {len(agents)} 个（每 agent ¥{AGENT_QUOTA:,.0f} 额度）:")
+    try:
+        policy = load_policy()
+        ledger = load_ledger()
+    except Exception as exc:  # noqa: BLE001 账本/策略读不到就不许按猜的额度下单
+        print(f"❌ 分账账本/策略不可读：{type(exc).__name__}: {exc}")
+        print("   本工具不再回退文件账本（logs/live_ledger.json 自 2026-09-30 已冻结）")
+        raise SystemExit(2) from exc
+    print(f"📒 分账 agent {len(agents)} 个（额度按 TradingPolicy）：")
     for a in agents:
-        print(f"   {a}: 已用 ¥{agent_used(ledger, a):,.0f} 剩余 ¥{agent_remaining(ledger, a):,.0f}")
+        print(f"   {a}: 已用 ¥{agent_used(ledger, a):,.0f}"
+              f" / ¥{agent_quota(policy, a):,.0f}"
+              f" 剩余 ¥{agent_remaining(ledger, a, policy):,.0f}")
     placed = []
     planned_cost = 0.0  # dry-run 也累计，现金兜底在演练时同样生效
-    from live_fills import wait_fill   # 记账口径：下单≠成交（见下单段）
+    record_errors: list[str] = []
 
     for i, p in enumerate(picks):
         agent = agents[i % len(agents)]
         code, name = p["code"], p["name"]
-        remaining = agent_remaining(ledger, agent)
+        remaining = agent_remaining(ledger, agent, policy)
         if remaining < 100:
             print(f"⏭️  [{agent}] {code} {name}: 额度已用完（剩余 ¥{remaining:,.0f}），跳过")
             continue
+        pct = (
+            args.per_stock_pct
+            if args.per_stock_pct is not None
+            else policy.for_agent(agent).per_stock_pct
+        )
         bars = bars_map.get(code) or []
         try:
-            o = compute_order(bars, remaining, args.per_stock_pct, code)
+            o = compute_order(bars, remaining, pct, code)
         except Exception as e:
             print(f"⚠️  [{agent}] {code} {name} 行情失败: {e}")
             log_line({"ts": now_cn().isoformat(), "code": code, "name": name,
@@ -437,7 +550,7 @@ def main() -> None:
         print(f"📈 [{agent}] {code} {name}: 现价 ¥{o['price']:.2f} ({o['chg_pct']:+.2f}%)"
               f" 拟买 {o['volume']} 股 限价 ¥{o['limit_price']:.2f}"
               f" ≈¥{o['cost']:,.0f}（额度已用 ¥{agent_used(ledger, agent):,.0f}"
-              f" → {agent_used(ledger, agent) + o['cost']:,.0f} / ¥{AGENT_QUOTA:,.0f}）")
+              f" → {agent_used(ledger, agent) + o['cost']:,.0f} / ¥{agent_quota(policy, agent):,.0f}）")
 
         if not args.execute:
             continue  # dry-run：只演练
@@ -457,19 +570,39 @@ def main() -> None:
         log_line({"ts": now_cn().isoformat(), "mode": "execute",
                   "code": code, "name": name, "volume": o["volume"],
                   "price": o["limit_price"], "result": result})
-        # 分账记账：记到该 agent 名下（券商持仓按股票合并，账本按 agent 分开）。
-        # 下单≠成交：等成交回报按真实成交价/量入账，未确认成交挂 pending 由 reconcile 兜底
-        # ⚠️ 待办（2026-09-12 审查 MEDIUM-2）：手工路径同 sell_flow——未接 settle_place_fill，
-        #    部分成交余量不跟踪、账本写不在 _file_lock 内。
+        # 分账记账（PG 活账）：记到该 agent 名下（券商持仓按股票合并，账本按 agent 分开）。
+        # 下单≠成交：只按桥回报的累计成交量台阶入账；未成交/未终态如实告警，不预扣。
         order_id = str(result.get("order_id") or "")
-        fill = wait_fill(broker, order_id)
-        fv = int((fill or {}).get("filled_volume") or 0)
-        if fv > 0:
-            fp = float(fill.get("filled_price") or o["price"])
-            ledger = record_buy(ledger, agent, code, fv, fp, now_cn().isoformat())
-            save_ledger(ledger)
+        if not order_id:
+            print(f"   ⚠️  [{agent}] {code}: 桥未返回委托号——成交无法跟踪，未记分账；"
+                  f"请人工核对当日委托")
+            record_errors.append(f"{code}: 无委托号")
         else:
-            _pend_or_warn(order_id, agent, code, "buy", o["volume"], o["limit_price"])
+            settlement = settle_fill(
+                broker,
+                allocations=[(agent, int(o["volume"]))],
+                code=code,
+                side="buy",
+                order_id=order_id,
+                limit_price=o["limit_price"],
+                timeout_s=args.fill_timeout,
+            )
+            if settlement["filled"] > 0:
+                print(f"   📒 分账入账: {agent} +{settlement['filled']}股 {code}"
+                      f" 均价 ¥{settlement['price']:.2f}")
+                ledger = load_ledger()  # 下一只票按最新账本算剩余额度
+                if not settlement["terminal"]:
+                    print(f"   ⚠️  {code}: 委托未终态（{settlement['status'] or '—'}），"
+                          f"余量未跟踪；请核对当日委托")
+                    log_line({"ts": now_cn().isoformat(), "mode": "fill_unfinished",
+                              "agent": agent, "code": code, "side": "buy",
+                              "filled": settlement["filled"],
+                              "status": settlement["status"]})
+            else:
+                print(f"   ⏳ {code}: 尚无成交（{settlement['status'] or '无终态'}）——未记分账")
+            if settlement["error"]:
+                print(f"   ❌ {settlement['error']}")
+                record_errors.append(f"{code}: {settlement['error']}")
         time.sleep(1)  # 桥限流 60 req/min
 
     # 6. 委托验证
@@ -479,15 +612,25 @@ def main() -> None:
             print(f"   {o.get('stock_code')} {o.get('side')} "
                   f"{o.get('total_volume')}股 status={o.get('status')} id={o.get('order_id')}")
 
-    print("\n📒 分账额度（当前账本）:")
+    try:
+        ledger = load_ledger()
+    except Exception as exc:  # noqa: BLE001 复读失败不覆盖本轮已打印的结果
+        print(f"\n⚠️ 账本复读失败（{type(exc).__name__}: {exc}）：以下为最后一次读到的账本")
+    print("\n📒 分账额度（PG 活账）:")
     for a in agents:
-        print(f"   {a}: 已用 ¥{agent_used(ledger, a):,.0f} / ¥{AGENT_QUOTA:,.0f}"
-              f" 剩余 ¥{agent_remaining(ledger, a):,.0f}")
+        print(f"   {a}: 已用 ¥{agent_used(ledger, a):,.0f}"
+              f" / ¥{agent_quota(policy, a):,.0f}"
+              f" 剩余 ¥{agent_remaining(ledger, a, policy):,.0f}")
 
     print(f"\n{'✅ 流程完成' if args.execute else '🟡 演练完成（--execute 真下单）'}"
           f"：共受理 {len(placed)} 笔")
     log_line({"ts": now_cn().isoformat(), "mode": "execute" if args.execute else "dry_run",
               "picks": len(picks), "placed": len(placed), "cash": cash})
+    if record_errors:
+        print(f"\n❌ 有 {len(record_errors)} 笔成交未完整入分账（请人工核对）：")
+        for item in record_errors:
+            print(f"   - {item}")
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

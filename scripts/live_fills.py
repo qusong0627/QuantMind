@@ -256,8 +256,9 @@ def record_inline_fill(agent: str, code: str, side: str, volume: int, price: flo
         增量，同一笔成交记两次。
     标记只兜住「重复记账」这一半；反方向的窗口（崩在记账与挂 pending 之间 → 余量
     无人跟踪）在 settle_place_fill 的说明里如实写明，不在这里重复承诺。
-    范围：无人值守四条路径（见 settle_place_fill）；live_trade_picks 的手工路径
-    尚未接入，别把「同锁」读成全仓库账本写者都满足。
+    范围：无人值守四条路径（见 settle_place_fill）。手工路径 ``live_trade_picks``
+    2026-10-30 起已改为直接写 PG 活账（``agent_ledger_store.apply_fill``），不再经过
+    本函数/文件账本——这里的「同锁」只覆盖仍走文件账本的遗留路径。
     返回该票记账前的成本价（卖出路径的 fill_confirm 日志要用）。
     """
     from live_ledger import load_ledger, record_buy, record_sell, save_ledger
@@ -297,10 +298,9 @@ def settle_place_fill(order_id, agent: str, code: str, side: str, volume: int,
       - 全部成交 / 尚无成交回报 → 调用方原样处理。
 
     范围（2026-09-12 审查 MEDIUM-2）：只覆盖**无人值守**的四条路径（09:35 调仓
-    卖出/买入、整点轮卖出/买入）。`live_trade_picks` 的交互式手工 sell/buy 仍是
-    旧模式（按限价即记账、不挂在途、账本写不在 _file_lock 内），迁移待办——手工
-    路径与 cron 的 record-only/reconcile 并发时仍可能丢更新，别把本函数的
-    「同锁」承诺读成全仓库成立。
+    卖出/买入、整点轮卖出/买入）。``live_trade_picks`` 的交互式手工 sell/buy 于
+    2026-10-30 改为**直接写 PG 活账**（累计量台阶 + ``apply_fill``），不再走本模块的
+    文件账本/pending 链；这里的「同锁」承诺只覆盖仍写文件账本的路径。
 
     已知窗口（2026-09-12 审查 MEDIUM-3）：`record_inline_fill` 与 `add_pending`
     是两次写盘，进程若恰好崩在中间——已成交部分已记账、幂等标记已写，但这笔单
