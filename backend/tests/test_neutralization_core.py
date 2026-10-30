@@ -146,3 +146,25 @@ def test_matches_independent_normal_equations():
 
     got = result.residual.loc[x.index].to_numpy()
     assert np.allclose(got, resid2, atol=1e-10)
+
+
+def test_extended_control_library():
+    scores, controls = _fixture()
+    rng = np.random.RandomState(7)
+    controls = controls.copy()
+    controls["vol20"] = rng.normal(0.25, 0.05, len(controls))
+    controls["turn20"] = rng.normal(3.0, 1.0, len(controls))
+    cfg = NeutralizationConfig(
+        controls=("log_mv", "beta60", "mom20", "vol20", "turn20")
+    )
+    result = neutralize_scores(scores, controls, cfg)
+    assert result.status == STATUS_OK
+    assert set(result.diagnostics["exposure"]) == {
+        "log_mv",
+        "beta60",
+        "mom20",
+        "vol20",
+        "turn20",
+    }
+    for value in result.diagnostics["exposure"].values():
+        assert value is None or abs(value) < 0.05

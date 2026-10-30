@@ -83,3 +83,23 @@ def test_recompute_404_when_no_run(monkeypatch):
 def test_scores_requires_date():
     resp = _client(_admin()).get("/api/v1/models/m1/neutralization/scores")
     assert resp.status_code == 422
+
+
+def test_put_accepts_extended_controls(monkeypatch):
+    monkeypatch.setattr(svc, "get_session_factory", lambda: _FakeSession)
+    monkeypatch.setattr(
+        svc,
+        "upsert_settings",
+        lambda session, **kwargs: {
+            "mode": kwargs["mode"],
+            "controls": kwargs["controls"],
+            "config_version": "test",
+            "exists": True,
+        },
+    )
+    resp = _client(_admin()).put(
+        "/api/v1/models/m1/neutralization",
+        json={"mode": "shadow", "controls": ["log_mv", "vol20", "turn20"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["controls"] == ["log_mv", "vol20", "turn20"]

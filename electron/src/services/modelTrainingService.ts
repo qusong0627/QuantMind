@@ -276,6 +276,10 @@ export interface InferenceRankingItem {
   negative_tag?: string;
   /** 中性化分位（影子层输出，0~1；null=该标的不可用） */
   neutral_score?: number | null;
+  /** 中性化口径下的名次（按 neutral_score 降序，仅有效标的参与） */
+  neutral_rank?: number | null;
+  /** 名次变化 = 原始 rank − 中性化 rank；正数表示中性化后上升 */
+  neutral_delta?: number | null;
 }
 
 export interface NegativeCandidate {

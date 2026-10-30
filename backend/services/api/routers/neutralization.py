@@ -28,7 +28,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/models", tags=["Neutralization"])
 
-_ALLOWED_CONTROLS = {"log_mv", "beta60", "mom20"}
+_ALLOWED_CONTROLS = {
+    "log_mv",
+    "log_total_mv",
+    "beta20",
+    "beta60",
+    "mom20",
+    "mom60",
+    "vol20",
+    "idio_vol20",
+    "turn20",
+    "pb",
+    "ep",
+}
 _VALID_MODES = {"off", "shadow", "enforce"}
 
 

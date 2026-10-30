@@ -200,28 +200,74 @@ export const CrossSectionTable: React.FC<CrossSectionTableProps> = ({
     {
       title: '分数', dataIndex: 'score', width: 104, align: 'right',
       sorter: (a, b) => a.score - b.score,
-      defaultSortOrder: 'descend',
+      defaultSortOrder: neutralMode ? undefined : 'descend',
       render: (v: number) => <span className={clsx('font-mono text-xs font-black', scoreClass(v))}>{fmt(v)}</span>,
     },
     ...(neutralMode
-      ? [{
-          title: (
-            <Tooltip title="影子层：按流通市值、60日 Beta、20日动量做截面中性化后的分位（0~1）">
-              <span>中性化</span>
-            </Tooltip>
-          ),
-          dataIndex: 'neutral_score',
-          width: 96,
-          align: 'right' as const,
-          sorter: (a: InferenceRankingItem, b: InferenceRankingItem) =>
-            (a.neutral_score ?? -1) - (b.neutral_score ?? -1),
-          render: (v: number | null) =>
-            v == null ? (
-              <span className="text-[11px] text-slate-300">—</span>
-            ) : (
-              <span className="font-mono text-xs font-bold text-indigo-700">{(v * 100).toFixed(1)}</span>
+      ? [
+          {
+            title: '中性排名',
+            dataIndex: 'neutral_rank',
+            width: 82,
+            align: 'right' as const,
+            sorter: (a: InferenceRankingItem, b: InferenceRankingItem) =>
+              (a.neutral_rank ?? 999999) - (b.neutral_rank ?? 999999),
+            render: (v: number | null) =>
+              v == null ? (
+                <span className="text-[11px] text-slate-300">—</span>
+              ) : (
+                <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 font-mono text-[11px] font-black text-indigo-700">
+                  #{v}
+                </span>
+              ),
+          },
+          {
+            title: (
+              <Tooltip title="影子层：按流通市值、60日 Beta、20日动量做截面中性化后的分位（0~1）">
+                <span>中性化分位</span>
+              </Tooltip>
             ),
-        }]
+            dataIndex: 'neutral_score',
+            width: 132,
+            align: 'right' as const,
+            sorter: (a: InferenceRankingItem, b: InferenceRankingItem) =>
+              (a.neutral_score ?? -1) - (b.neutral_score ?? -1),
+            render: (v: number | null) =>
+              v == null ? (
+                <span className="text-[11px] text-slate-300">—</span>
+              ) : (
+                <div className="flex items-center justify-end gap-1.5">
+                  <div className="h-1.5 w-14 overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600"
+                      style={{ width: `${v * 100}%` }}
+                    />
+                  </div>
+                  <span className="font-mono text-[11px] font-black text-indigo-700">
+                    {(v * 100).toFixed(1)}
+                  </span>
+                </div>
+              ),
+          },
+          {
+            title: '名次变化',
+            dataIndex: 'neutral_delta',
+            width: 82,
+            align: 'right' as const,
+            sorter: (a: InferenceRankingItem, b: InferenceRankingItem) =>
+              (a.neutral_delta ?? 0) - (b.neutral_delta ?? 0),
+            render: (v: number | null) =>
+              v == null ? (
+                <span className="text-[11px] text-slate-300">—</span>
+              ) : v > 0 ? (
+                <span className="font-mono text-[11px] font-black text-emerald-600">↑{v}</span>
+              ) : v < 0 ? (
+                <span className="font-mono text-[11px] font-bold text-slate-400">↓{Math.abs(v)}</span>
+              ) : (
+                <span className="text-[11px] text-slate-300">—</span>
+              ),
+          },
+        ]
       : []),
     {
       title: '位置', dataIndex: 'signal', width: 72, align: 'center',
@@ -279,7 +325,17 @@ export const CrossSectionTable: React.FC<CrossSectionTableProps> = ({
   ], [neutralMode]);
 
   return (
-    <div className="flex-1 min-w-0 min-h-0 flex flex-col bg-white border border-slate-200 rounded-xl overflow-hidden">
+    <div
+      className={clsx(
+        'flex-1 min-w-0 min-h-0 flex flex-col bg-white rounded-xl overflow-hidden border',
+        neutralMode
+          ? 'border-indigo-200 ring-1 ring-indigo-100 shadow-[0_0_0_3px_rgba(99,102,241,0.06)]'
+          : 'border-slate-200',
+      )}
+    >
+      {neutralMode && (
+        <div className="h-0.5 w-full shrink-0 bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-400" />
+      )}
       {/* ── 过滤条 ─────────────────────────────────────────── */}
       <div className="shrink-0 px-3 py-2 border-b border-slate-200 bg-slate-50/60 flex items-center gap-2 flex-wrap">
         <div className="flex items-center bg-white border border-slate-200 hover:border-blue-400 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100 rounded-md pl-2.5 pr-2 h-8 transition-all w-[190px] shrink-0">

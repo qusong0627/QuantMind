@@ -59,13 +59,27 @@ export const CrossSectionWorkspace: React.FC<CrossSectionWorkspaceProps> = ({
   useEffect(() => {
     if (!neutralMode || !modelId || !ranking?.inference_date) return;
     let cancelled = false;
-    void neutralizationService
-      .getScores(modelId, ranking.inference_date, 1000, 0)
-      .then(({ rows }) => {
-        if (cancelled) return;
-        setNeutralMap(
-          Object.fromEntries(rows.map((row) => [row.symbol, row.neutral_score])),
+    const loadAll = async () => {
+      const map: Record<string, number | null> = {};
+      let offset = 0;
+      let total = 1;
+      while (offset < total && offset < 10000) {
+        const page = await neutralizationService.getScores(
+          modelId,
+          ranking.inference_date,
+          1000,
+          offset,
         );
+        total = page.total;
+        for (const row of page.rows) map[row.symbol] = row.neutral_score;
+        if (!page.rows.length) break;
+        offset += page.rows.length;
+      }
+      return map;
+    };
+    void loadAll()
+      .then((map) => {
+        if (!cancelled) setNeutralMap(map);
       })
       .catch(() => {
         if (!cancelled) setNeutralMap({});
@@ -78,17 +92,45 @@ export const CrossSectionWorkspace: React.FC<CrossSectionWorkspaceProps> = ({
   const adjustedRanking = useMemo<InferenceRankingResult | null>(() => {
     if (!ranking) return null;
     if (!neutralMode) return ranking;
-    return {
-      ...ranking,
-      rankings: ranking.rankings.map((row) => ({
+    const enriched = ranking.rankings.map((row) => ({
+      ...row,
+      neutral_score: neutralMap[normalizeStockCode(row.code)] ?? null,
+    }));
+    const withScore = enriched
+      .filter((row) => row.neutral_score != null)
+      .sort((a, b) => (b.neutral_score ?? 0) - (a.neutral_score ?? 0));
+    const withoutScore = enriched.filter((row) => row.neutral_score == null);
+    let cursor = 0;
+    const ranked = [
+      ...withScore.map((row) => {
+        cursor += 1;
+        return {
+          ...row,
+          neutral_rank: cursor,
+          neutral_delta: (row.rank || cursor) - cursor,
+        };
+      }),
+      ...withoutScore.map((row) => ({
         ...row,
-        neutral_score: neutralMap[normalizeStockCode(row.code)] ?? null,
+        neutral_rank: null,
+        neutral_delta: null,
       })),
-    };
+    ];
+    return { ...ranking, rankings: ranked };
   }, [ranking, neutralMode, neutralMap]);
 
   const neutralAvailable =
     neutralMode && Boolean(adjustedRanking?.rankings.some((row) => row.neutral_score != null));
+
+  const neutralStats = useMemo(() => {
+    if (!neutralMode || !adjustedRanking) return null;
+    const valid = adjustedRanking.rankings.filter((row) => row.neutral_score != null);
+    return {
+      valid: valid.length,
+      up: valid.filter((row) => (row.neutral_delta ?? 0) > 0).length,
+      down: valid.filter((row) => (row.neutral_delta ?? 0) < 0).length,
+    };
+  }, [neutralMode, adjustedRanking]);
 
   return (
     <div
@@ -136,6 +178,24 @@ export const CrossSectionWorkspace: React.FC<CrossSectionWorkspaceProps> = ({
           <Tag className="!m-0 text-[10px]">训练周期 T+{Math.max(1, horizonDays || 1)}</Tag>
         </div>
       </div>
+
+      {view === 'today' && neutralMode && (
+        <div className="shrink-0 flex flex-wrap items-center gap-2 rounded-xl border border-indigo-200 bg-gradient-to-r from-indigo-50 via-white to-sky-50 px-3 py-1.5">
+          <span className="rounded-md bg-indigo-600 px-1.5 py-0.5 text-[9px] font-black tracking-wide text-white">
+            NL
+          </span>
+          <span className="text-[11px] font-black text-indigo-700">中性化视图</span>
+          <span className="text-[10px] text-indigo-600/80">
+            已剥离 流通市值 · 60日 Beta · 20日动量 · 覆盖 {neutralStats?.valid ?? 0} 只 · 榜单按中性化分位重排
+          </span>
+          {neutralStats && (
+            <span className="ml-auto flex items-center gap-3 text-[10px] font-bold">
+              <span className="text-emerald-600">名次上升 {neutralStats.up}</span>
+              <span className="text-slate-500">下降 {neutralStats.down}</span>
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="flex-1 min-h-0 min-w-0 flex flex-col">
         {view === 'today' ? (

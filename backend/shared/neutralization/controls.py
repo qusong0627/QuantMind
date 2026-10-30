@@ -1,16 +1,15 @@
-"""中性化控制变量快照（市值 / beta / 动量），只读 QuantDB 日分区。
+"""中性化控制变量快照（规模 / 风险 / 动量 / 流动性 / 估值），只读 QuantDB 日分区。
 
 数据源：``6_ml_datasets/l1_factors/dt=YYYYMMDD/data.parquet``
 
-- ``fun_float_mv`` → ``log_mv = log(max(v, 1))``
-- ``style_beta_60`` → ``beta60``
-- ``mom_ret_20d`` → ``mom20``
+默认三因子：``fun_float_mv`` → ``log_mv``、``style_beta_60`` → ``beta60``、
+``mom_ret_20d`` → ``mom20``；另提供 8 个可选变量（见 ``CONTROL_SPECS``）。
 
 口径约束：
 
 - 只允许读取 **<= 信号数据日** 的分区（防前视由调用方与 ``load_controls`` 双重把关）；
 - 代码统一转规范**前缀式**（``SH600036``），与 ``engine_signal_scores.symbol`` 对齐；
-- 分区缺失抛 ``ControlsUnavailableError``，由服务层记为 ``degraded``，不得静默跳过。
+- 分区缺失抛 ``ControlsUnavailableError``；单列缺失填 NaN（由服务层按覆盖率降级）。
 """
 
 from __future__ import annotations
@@ -29,17 +28,37 @@ from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_COLUMNS = ("symbol", "fun_float_mv", "style_beta_60", "mom_ret_20d")
-
 
 class ControlsUnavailableError(RuntimeError):
     """控制变量分区缺失或不可读。"""
 
 
+#: 控制变量库：逻辑名 → (物理列, 变换)
+#:
+#: 默认只用 ``log_mv / beta60 / mom20``（验证过的三因子口径）；
+#: 其余变量供按模型/按市场选择，避免同族变量同时勾选（市值×总市值、beta20×beta60
+#: 高度共线，设计矩阵条件数会越界，服务层会判 degraded）。
+CONTROL_SPECS: dict[str, tuple[str, str]] = {
+    "log_mv": ("fun_float_mv", "log"),
+    "log_total_mv": ("fun_total_mv", "log"),
+    "beta20": ("style_beta_20", "raw"),
+    "beta60": ("style_beta_60", "raw"),
+    "mom20": ("mom_ret_20d", "raw"),
+    "mom60": ("mom_ret_60d", "raw"),
+    "vol20": ("vol_std_20", "raw"),
+    "idio_vol20": ("style_idio_vol_20", "raw"),
+    "turn20": ("turn_20", "raw"),
+    "pb": ("fun_pb", "raw"),
+    "ep": ("fun_ep", "raw"),
+}
+
+_SYMBOL_COLUMN = "symbol"
+
+
 @dataclass(frozen=True)
 class ControlSnapshot:
     trade_date: date
-    frame: pd.DataFrame  # index=symbol(prefix), columns=log_mv/beta60/mom20
+    frame: pd.DataFrame  # index=symbol(prefix), columns=CONTROL_SPECS 的逻辑名
     source_path: str
 
 
@@ -54,24 +73,39 @@ def partition_path(trade_date: date) -> Path:
 _partition_path = partition_path
 
 
+def _available_columns(path: Path) -> set[str]:
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    return set(pq.read_schema(path).names)
+
+
 def _read_partition(path: Path) -> pd.DataFrame:
-    try:
-        raw = pd.read_parquet(path, columns=list(_REQUIRED_COLUMNS))
-    except (KeyError, ValueError) as exc:
-        raise ControlsUnavailableError(f"控制变量列缺失: {path} ({exc})") from exc
+    available = _available_columns(path)
+    if _SYMBOL_COLUMN not in available:
+        raise ControlsUnavailableError(f"控制变量分区缺 symbol 列: {path}")
+    physical = [col for col, _ in CONTROL_SPECS.values() if col in available]
+    if not physical:
+        raise ControlsUnavailableError(
+            f"控制变量列全部缺失: {path}（可用列 {sorted(available)[:8]}…）"
+        )
+    raw = pd.read_parquet(path, columns=[_SYMBOL_COLUMN, *physical])
     if raw.empty:
         raise ControlsUnavailableError(f"控制变量分区为空: {path}")
 
-    symbols = raw["symbol"].astype(str).map(StockCodeUtil.to_prefix)
-    frame = pd.DataFrame(
-        {
-            "log_mv": np.log(
-                pd.to_numeric(raw["fun_float_mv"], errors="coerce").clip(lower=1.0)
-            ),
-            "beta60": pd.to_numeric(raw["style_beta_60"], errors="coerce"),
-            "mom20": pd.to_numeric(raw["mom_ret_20d"], errors="coerce"),
-        }
-    )
+    symbols = raw[_SYMBOL_COLUMN].astype(str).map(StockCodeUtil.to_prefix)
+    columns: dict[str, pd.Series] = {}
+    for name, (physical_col, transform) in CONTROL_SPECS.items():
+        if physical_col not in raw.columns:
+            # 老分区/自定义数据集可能缺列：缺失变量填 NaN，由服务层按覆盖率降级，
+            # 而不是让整批计算失败（用户只勾选了已有变量时仍可正常中性化）。
+            columns[name] = pd.Series(np.nan, index=raw.index, dtype=float)
+            continue
+        values = pd.to_numeric(raw[physical_col], errors="coerce")
+        if transform == "log":
+            values = np.log(values.clip(lower=1.0))
+        columns[name] = values.astype(float)
+
+    frame = pd.DataFrame(columns)
     # 按位置对齐：symbols 是 Series（index=0..n-1），直接传 index= 会按标签对齐成 NaN
     frame.index = symbols.to_numpy()
     frame.index.name = "symbol"
