@@ -1,8 +1,11 @@
-"""Built-in semantic dictionary for QuantDB A-share training factors.
+"""QuantDB A 股训练因子语义字典。
 
-Definitions are derived from ``300_factors_lightgbm_design_v2.md``.  The
-dictionary is deliberately code-owned: QuantDB remains raw/read-only while
-the administrator can override every generated label in a catalog draft.
+库内 V5 因子字典（`quantdb_factor_v5` 快照，schema v5-571，571 列：
+中文名、公式、释义、方向、分组）优先命中；快照未覆盖的列
+（CCASS/南向/自定义市场/厂商扩展列）回退到本模块的启发式规则。
+
+QuantDB 远端保持 raw/read-only，字典随快照版本更新
+（见 backend/scripts/regen_factor_v5.py）。
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ class FactorDefinition:
     category_name: str
     sort_order: int
     confidence: str = "documented"
+    formula: str = ""
+    direction: str = ""
 
     def to_dict(self) -> dict[str, str | int]:
         return asdict(self)
@@ -216,7 +221,29 @@ def _render_name(column: str) -> str:
 
 
 def definition_for(column: str) -> dict[str, str | int]:
-    """Return a non-destructive default definition for a raw QuantDB column."""
+    """Return the display definition for a raw QuantDB column.
+
+    库内 V5 字典优先（中文名/公式/释义/方向/分组与 SDK/官网同源）；
+    未覆盖的列回退到启发式模板（兜底仍提示参考官方帮助文档）。
+    """
+    try:
+        from backend.services.engine.data_platform.quantdb_factor_v5 import (
+            V5_FIELDS,
+        )
+    except Exception:  # noqa: BLE001 - 快照缺失时整体回退启发式
+        V5_FIELDS = {}  # type: ignore[assignment]
+    hit = V5_FIELDS.get(column)
+    if hit is not None:
+        return FactorDefinition(
+            display_name=str(hit.get("display_name") or column),
+            explanation=str(hit.get("explanation") or ""),
+            category_id=str(hit.get("category_id") or "other"),
+            category_name=str(hit.get("category_name") or "其他因子"),
+            sort_order=int(hit.get("sort_order") or 0),
+            confidence="database",
+            formula=str(hit.get("formula") or ""),
+            direction=str(hit.get("direction") or ""),
+        ).to_dict()
     category_id, category_name, order = _group(column)
     if column in _EXACT:
         name, explanation = _EXACT[column]
