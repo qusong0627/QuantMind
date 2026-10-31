@@ -69,7 +69,7 @@ V2_DATASETS = [
     {"category_id": "5", "sub_category": "market_sentiment", "dir": "5_technical_derived"},
     {"category_id": "6", "sub_category": "features_daily", "dir": "6_ml_datasets"},
     {"category_id": "6", "sub_category": "l1_factors", "dir": "6_ml_datasets"},
-    {"category_id": "6", "sub_category": "l2_factors", "dir": "6_ml_datasets"},
+    {"category_id": "6", "sub_category": "factor_dictionary", "dir": "6_ml_datasets"},
     {"category_id": "6", "sub_category": "l1_l2_factors", "dir": "6_ml_datasets"},
 ]
 

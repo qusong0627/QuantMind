@@ -408,7 +408,7 @@ def show_status():
 
             reader = QuantDBFactorReader(market="CN")
             print("\n📁 QuantDB 因子源 (6_ml_datasets)")
-            for source in ("l1_factors", "l2_factors", "l1_l2_factors"):
+            for source in ("l1_factors", "l1_l2_factors", "factor_dictionary"):
                 status = reader.describe(source)
                 if status.files == 0:
                     print(f"{source:16s} N/A")

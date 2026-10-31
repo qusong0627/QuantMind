@@ -74,8 +74,8 @@ DATASETS: tuple[DatasetSpec, ...] = (
     # 6 ML数据集
     DatasetSpec("features_daily", "日频特征", "6", "ml", "6_ml_datasets/features_daily", "partition", "技术指标 + 估值合并，PG 填充主源"),
     DatasetSpec("l1_factors", "L1 因子", "6", "ml", "6_ml_datasets/l1_factors", "partition", "因子挖掘核心"),
-    DatasetSpec("l2_factors", "L2 因子", "6", "ml", "6_ml_datasets/l2_factors", "partition", "高频微观因子"),
     DatasetSpec("l1_l2_factors", "L1+L2 合并", "6", "ml", "6_ml_datasets/l1_l2_factors", "partition", "L1 与 L2 因子合并集"),
+    DatasetSpec("factor_dictionary", "动态因子库", "6", "ml", "6_ml_datasets/factor_dictionary", "partition", "L1/L2/Alpha全量因子字典宽表（571列，schema随版本演进）"),
 )
 
 _BY_NAME: dict[str, DatasetSpec] = {ds.dataset: ds for ds in DATASETS}

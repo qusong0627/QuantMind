@@ -24,13 +24,13 @@ from backend.shared.stock_utils import StockCodeUtil
 logger = logging.getLogger(__name__)
 
 FactorSource = Literal[
-    "l1_factors", "l2_factors", "l1_l2_factors", "ccass_factors", "south_factors"
+    "l1_factors", "l1_l2_factors", "factor_dictionary", "ccass_factors", "south_factors"
 ]
 
 FACTOR_SOURCE_DIRS: dict[FactorSource, str] = {
     "l1_factors": "6_ml_datasets/l1_factors",
-    "l2_factors": "6_ml_datasets/l2_factors",
     "l1_l2_factors": "6_ml_datasets/l1_l2_factors",
+    "factor_dictionary": "6_ml_datasets/factor_dictionary",
     "ccass_factors": "6_ml_datasets/ccass_factors",
     "south_factors": "6_ml_datasets/south_factors",
 }
@@ -41,7 +41,7 @@ DEFAULT_FACTOR_SOURCE: FactorSource = "l1_factors"
 # 各市场 6_ml_datasets/ 下实际存在的训练直读数据集。
 # CUSTOM 为用户自传市场：仅做因子扫描，不强制 OHLCV 完备性（见 describe）。
 MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
-    "CN": ("l1_factors", "l2_factors", "l1_l2_factors"),
+    "CN": ("l1_factors", "l1_l2_factors", "factor_dictionary"),
     "HK": ("l1_factors", "ccass_factors", "south_factors"),
     "US": ("l1_factors",),
     "CRYPTO": ("l1_factors",),

@@ -60,14 +60,14 @@ def test_reads_single_source_with_logical_field_alias(tmp_path):
 def test_rejects_source_without_common_ohlcv(tmp_path):
     _write_factor_partition(
         tmp_path,
-        "l2_factors",
+        "factor_dictionary",
         pd.DataFrame(
             {"symbol": ["600001.SH"], "date": ["2024-01-02"], "l2_alpha": [1.0]}
         ),
         "20240102",
     )
     with pytest.raises(QuantDBFactorError, match="not ready"):
-        QuantDBFactorReader(tmp_path).assert_ready("l2_factors")
+        QuantDBFactorReader(tmp_path).assert_ready("factor_dictionary")
 
 
 def test_forward_labels_use_future_close_without_snapshot(tmp_path):

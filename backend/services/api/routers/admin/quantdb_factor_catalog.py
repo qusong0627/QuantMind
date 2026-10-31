@@ -108,8 +108,8 @@ DEFAULT_SELECTED_FACTORS = frozenset({
 # 数据源元信息属于后端训练数据契约；前端不得硬编码来源或默认项。
 FACTOR_SOURCE_LABELS = {
     "l1_factors": "L1 因子",
-    "l2_factors": "L2 因子",
     "l1_l2_factors": "L1 + L2 合并宽表",
+    "factor_dictionary": "动态因子库",
     "ccass_factors": "CCASS 持仓结构",
     "south_factors": "南向资金结构",
 }
