@@ -1223,19 +1223,35 @@ async def stock_series(
     if not _SYMBOL_RE.match(sym):
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
 
-    # 股东户数: 平铺小文件, endDate 为报告期
+    # 股东户数: 平铺小文件, 日期列为报告期(endDate/declareDate/m_timetag 兼容),
+    # 数值列为股东户数(shareholder/holder_num 兼容, SDK 版本间列名漂移)
     if group == "holders":
         hn = _read_symbol_parquet("holder_num", sym)
         if hn.empty:
             return {"success": True, "data": {"dates": [], "columns": {}}}
-        hn = hn.sort_values("endDate")
+        date_col = next(
+            (c for c in ("endDate", "declareDate", "m_timetag", "m_anntime", "date", "time")
+             if c in hn.columns),
+            None,
+        )
+        val_col = next(
+            (c for c in ("shareholder", "holder_num", "holderNum", "total_holders", "holders", "shareholders")
+             if c in hn.columns),
+            None,
+        )
+        if date_col is None or val_col is None:
+            logger.warning(
+                "holders columns mismatch %s: %s", sym, list(hn.columns)
+            )
+            return {"success": True, "data": {"dates": [], "columns": {}}}
+        hn = hn.sort_values(date_col)
         if end_date:
-            hn = hn[hn["endDate"].astype(str).str[:10] <= end_date]
+            hn = hn[hn[date_col].astype(str).str[:10] <= end_date]
         return {
             "success": True,
             "data": {
-                "dates": [str(v)[:10] for v in hn["endDate"]],
-                "columns": {"holder_num": [_safe_f(v) for v in hn["shareholder"]]},
+                "dates": [str(v)[:10] for v in hn[date_col]],
+                "columns": {"holder_num": [_safe_f(v) for v in hn[val_col]]},
             },
         }
 

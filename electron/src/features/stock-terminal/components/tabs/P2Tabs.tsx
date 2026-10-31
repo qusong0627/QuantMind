@@ -299,7 +299,11 @@ export function HoldersTab({ symbol, asof }: TabProps) {
       <div className="flex flex-col gap-3">
         <div className="bg-white/70 rounded-2xl border border-slate-100 p-2">
           <div className="text-[11px] font-bold text-slate-500 mb-1">股东户数（户数降=筹码集中）</div>
-          <SeriesChart resp={hn} series={hS} height={280} tooltipFmt={(n, v) => `${n}: ${v == null ? '--' : Math.round(v).toLocaleString()}`} />
+          {!hn.dates.length || !hS.length ? (
+            <div className="text-[11px] text-slate-400 py-8 text-center">暂无股东户数数据</div>
+          ) : (
+            <SeriesChart resp={hn} series={hS} height={280} tooltipFmt={(n, v) => `${n}: ${v == null ? '--' : Math.round(v).toLocaleString()}`} />
+          )}
         </div>
         <div className="bg-white/70 rounded-2xl border border-slate-100 p-2">
           <div className="text-[11px] font-bold text-slate-500 mb-1">分红记录</div>
