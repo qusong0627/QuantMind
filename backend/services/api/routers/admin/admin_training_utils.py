@@ -17,7 +17,10 @@ from backend.services.api.routers.admin.db import TrainingJobRecord
 from backend.services.api.training_explain import normalize_explain
 from backend.services.api.user_app.middleware.auth import require_admin
 from backend.services.engine.training.orchestrator_base import get_orchestrator, REGISTRY
-from backend.services.engine.training.local_docker_orchestrator import LocalDockerOrchestrator
+from backend.services.engine.training.local_docker_orchestrator import (
+    LocalDockerOrchestrator,
+    resume_paused_containers_from_state,
+)
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
 from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
 from backend.shared.database_manager_v2 import get_session
@@ -891,9 +894,11 @@ _CANCELABLE_STATUSES = ("pending", "provisioning", "running", "waiting_callback"
 async def cancel_training_run(run_id: str, current_user: dict[str, Any]) -> dict[str, Any]:
     """取消一个进行中的训练任务（用户态/管理端共用）。
 
-    流程：校验归属与状态 → 置 redis 取消标记 → best-effort 中断编排 task →
-    立即把 DB 状态置 cancelled 并写日志。真正的资源回收（docker stop / ssh kill）
-    由编排器轮询循环读到取消标记后执行，避免容器/远端进程泄漏。
+    流程：校验归属与状态 → 置 redis 取消标记 → 中断编排 task →
+    立即把 DB 状态置 cancelled 并写日志。训练容器的资源回收
+    （docker stop / ssh kill）由编排器轮询循环在读到取消标记后执行；
+    但 REGISTRY.cancel 会直接杀掉轮询协程，被 pause 的基础设施容器将无人
+    恢复——因此中断后显式补一次 resume（幂等）。
     """
     tenant_id = str(current_user.get("tenant_id") or "default")
     user_id = str(current_user.get("user_id") or current_user.get("sub") or "unknown")
@@ -923,6 +928,26 @@ async def cancel_training_run(run_id: str, current_user: dict[str, Any]) -> dict
 
     _training_log_stream.mark_cancel_requested(run_id)
     REGISTRY.cancel(run_id)
+    # REGISTRY.cancel 会杀掉该 run 的轮询协程（含负责 resume 的 _poll_container），
+    # 被 pause_others 停止的基础设施容器将无人恢复——此处显式补一次（幂等，
+    # state 文件不存在或已有 resumed_at 时直接返回）。
+    try:
+        resumed = await asyncio.to_thread(
+            resume_paused_containers_from_state,
+            Path("/data") / "training_jobs" / run_id,
+            run_id,
+            resumed_by="cancel-reconcile",
+        )
+        if resumed:
+            _training_log_stream.append_log(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                line="[SYSTEM] 已恢复训练前暂停的容器: " + ", ".join(resumed),
+                status="cancelled",
+            )
+    except Exception as exc:
+        logger.warning("[%s] resume paused containers after cancel failed: %s", run_id, exc)
     _training_log_stream.append_log(
         run_id=run_id,
         tenant_id=tenant_id,
@@ -1247,5 +1272,17 @@ async def complete_training_run(
             logger.info("[%s] removed training container: %s", run_id, container_name)
     except Exception as exc:
         logger.warning("[%s] failed to remove container %s: %s", run_id, container_name, exc)
+
+    # 完成回调是恢复被 pause 容器的最后机会：轮询协程可能已被取消（cancel 先行）
+    # 或远端节点根本没有轮询循环，此处显式补一次（幂等）。
+    try:
+        await asyncio.to_thread(
+            resume_paused_containers_from_state,
+            Path("/data") / "training_jobs" / run_id,
+            run_id,
+            resumed_by="complete-callback",
+        )
+    except Exception as exc:
+        logger.warning("[%s] resume paused containers after complete failed: %s", run_id, exc)
 
     return {"ok": True, "runId": run_id, "status": status}

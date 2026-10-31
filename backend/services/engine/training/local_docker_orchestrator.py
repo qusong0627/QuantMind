@@ -115,7 +115,9 @@ _PAUSE_OTHERS_ENABLED = os.getenv("TRAINING_PAUSE_OTHERS", "true").strip().lower
 }
 # 受保护的容器名前缀：训练期间永远不停。可通过环境变量覆盖（逗号分隔）。
 # 默认保护 quantmind 全家桶 + 训练容器自身 + 通用基础依赖。
-_DEFAULT_PROTECTED_PREFIXES = ("quantmind", "qm-train-")
+# qwenpaw 是基础设施容器（QuantBot/技能/报告），训练腾内存时绝不能停——
+# 它被 docker stop 后，unless-stopped 语义下不会自启（2026-10-31 事故）。
+_DEFAULT_PROTECTED_PREFIXES = ("quantmind", "qm-train-", "qwenpaw")
 _PROTECTED_PREFIXES: tuple[str, ...] = tuple(
     p.strip()
     for p in (
@@ -214,6 +216,76 @@ def _validate_config_dict(run_id: str, config: dict) -> dict:
     except Exception as exc:
         logger.warning("[%s] TrainingConfig validation failed, fallback legacy dict: %s", run_id, exc)
         return config
+
+
+_PAUSED_STATE_FILENAME = ".paused_containers.json"
+
+
+def resume_paused_containers_from_state(
+    work_dir: str | Path,
+    run_id: str,
+    *,
+    resumed_by: str = "manual",
+) -> list[str]:
+    """同步：读取 {work_dir}/.paused_containers.json，启动其中未运行的容器。
+
+    供训练编排主循环之外的路径调用（取消接口 / 完成回调 / 排障脚本）：
+    这些路径下轮询协程可能已被取消或根本不存在，指望不上 _resume_others。
+    幂等：状态文件不存在或已有 resumed_at 时直接返回 []；单个容器失败只记
+    warning 不抛异常。成功恢复后打标 resumed_at + resumed_by，避免重复处理。
+    """
+    state_path = Path(work_dir) / _PAUSED_STATE_FILENAME
+    if not state_path.exists():
+        return []
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("[%s] read paused-state file failed: %s", run_id, exc)
+        return []
+    if not isinstance(data, dict) or data.get("resumed_at"):
+        return []
+    if docker is None or DockerClient is None:
+        logger.warning("[%s] docker sdk missing, cannot resume paused containers", run_id)
+        return []
+    try:
+        client = DockerClient.from_env()
+    except Exception as exc:
+        logger.warning("[%s] docker client failed, cannot resume: %s", run_id, exc)
+        return []
+    names: list[str] = list(data.get("containers") or [])
+    resumed: list[str] = []
+    for name in names:
+        try:
+            c = client.containers.get(name)
+            if c.status != "running":
+                c.start()
+            resumed.append(name)
+            logger.info("[%s] resumed container: %s (by %s)", run_id, name, resumed_by)
+        except docker.errors.NotFound:
+            logger.warning(
+                "[%s] cannot resume %s: container no longer exists", run_id, name
+            )
+        except Exception as exc:
+            logger.warning("[%s] start container %s failed: %s", run_id, name, exc)
+    # 标记为已处理：保留文件但加 resumed_at，便于事后排查
+    try:
+        data["resumed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        data["resumed"] = resumed
+        data["resumed_by"] = resumed_by
+        state_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+    if resumed:
+        logger.info(
+            "[%s] resumed %d containers (by %s): %s",
+            run_id,
+            len(resumed),
+            resumed_by,
+            resumed,
+        )
+    return resumed
 
 
 class LocalDockerOrchestrator(TrainingOrchestrator):
@@ -341,50 +413,9 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
 
     def _resume_others(self, work_dir: Path, run_id: str) -> list[str]:
         """恢复 _pause_others 停止的容器。幂等：状态文件不存在时直接返回。"""
-        state_path = Path(work_dir) / ".paused_containers.json"
-        if not state_path.exists():
-            return []
-
-        try:
-            data = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("[%s] read paused-state file failed: %s", run_id, exc)
-            return []
-
-        names: list[str] = list(data.get("containers") or [])
-        resumed: list[str] = []
-        for name in names:
-            try:
-                c = self.docker.containers.get(name)
-                if c.status != "running":
-                    c.start()
-                resumed.append(name)
-                logger.info("[%s] resumed container: %s", run_id, name)
-            except docker.errors.NotFound:
-                logger.warning(
-                    "[%s] cannot resume %s: container no longer exists", run_id, name
-                )
-            except Exception as exc:
-                logger.warning("[%s] start container %s failed: %s", run_id, name, exc)
-
-        # 标记为已处理：保留文件但加 resumed_at，便于事后排查
-        try:
-            data["resumed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            data["resumed"] = resumed
-            state_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            pass
-
-        if resumed:
-            logger.info(
-                "[%s] resumed %d containers after training: %s",
-                run_id,
-                len(resumed),
-                resumed,
-            )
-        return resumed
+        return resume_paused_containers_from_state(
+            work_dir, run_id, resumed_by="poll-loop"
+        )
 
     @staticmethod
     def _parse_docker_log_entry(raw_line: str) -> tuple[float, str]:

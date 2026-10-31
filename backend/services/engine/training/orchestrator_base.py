@@ -89,7 +89,9 @@ class TrainingTaskRegistry:
         """请求取消该 run 已注册的全部编排 task（best-effort 中断长等待）。
 
         返回是否有 task 被实际取消。真正的资源清理（docker stop / ssh kill）
-        由编排器轮询循环在读到取消标记后执行。
+        由编排器轮询循环在读到取消标记后执行——但注意：被 cancel 杀掉的
+        轮询循环无法再做收尾，调用方必须自行补齐 resume 等 reconciling
+        （见 cancel_training_run 的 cancel-reconcile）。
         """
         tasks = self._by_run_id.pop(str(run_id), None)
         cancelled = False
