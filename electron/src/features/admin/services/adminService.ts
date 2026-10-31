@@ -208,9 +208,9 @@ class AdminService {
         return resp.data;
     }
 
-    async getModelFeatureCatalog(market?: string): Promise<AdminModelFeatureCatalog> {
+    async getModelFeatureCatalog(market?: string, factorSource?: string): Promise<AdminModelFeatureCatalog> {
         const resp = await this.axiosInstance.get<AdminModelFeatureCatalog>('/admin/models/feature-catalog', {
-            params: market ? { market } : {},
+            params: { ...(market ? { market } : {}), ...(factorSource ? { factor_source: factorSource } : {}) },
         });
         return resp.data;
     }

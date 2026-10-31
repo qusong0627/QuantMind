@@ -78,6 +78,7 @@ export const AdminFeatureCatalog: React.FC = () => {
   const [dirty, setDirty] = useState(false);
   const [selectedCatId, setSelectedCatId] = useState<string | null>(null);
   const [marketFilter, setMarketFilter] = useState<string>('ALL');
+  const [sourceFilter, setSourceFilter] = useState<string>('factor_dictionary');
   const [keyword, setKeyword] = useState('');
   // 全量目录（仅用于胶囊计数；按市场过滤后 catalog 为子集，计数仍以全量为准）
   const [fullCatalog, setFullCatalog] = useState<AdminModelFeatureCatalog | null>(null);
@@ -93,16 +94,18 @@ export const AdminFeatureCatalog: React.FC = () => {
   const [featForm] = Form.useForm();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  const loadCatalog = useCallback(async (market?: string) => {
+  const loadCatalog = useCallback(async (market?: string, source?: string) => {
     setLoading(true);
     setLoadError(null);
     try {
       const activeMarket = typeof market === 'string' ? market : marketFilter;
+      const activeSource = typeof source === 'string' ? source : sourceFilter;
       const data = await adminService.getModelFeatureCatalog(
         activeMarket && activeMarket !== 'ALL' ? activeMarket : undefined,
+        activeSource || undefined,
       );
       setCatalog(data);
-      if (!activeMarket || activeMarket === 'ALL') {
+      if ((!activeMarket || activeMarket === 'ALL')) {
         setFullCatalog(data);
       }
       if (!data.categories?.length) {
@@ -116,7 +119,7 @@ export const AdminFeatureCatalog: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [marketFilter]);
+  }, [marketFilter, sourceFilter]);
 
   useEffect(() => { loadCatalog(); }, [loadCatalog]);
 
@@ -125,6 +128,18 @@ export const AdminFeatureCatalog: React.FC = () => {
     setSelectedCatId(null);
     setKeyword('');
     loadCatalog(next);
+  };
+
+  const SOURCE_OPTIONS = [
+    { value: 'factor_dictionary', label: '动态因子库' },
+    { value: 'l1_l2_factors', label: 'L1+L2 合并宽表' },
+  ];
+
+  const handleSourceChange = (next: string) => {
+    setSourceFilter(next);
+    setSelectedCatId(null);
+    setKeyword('');
+    loadCatalog(undefined, next);
   };
 
   // 首次加载后默认选中第一个分类
@@ -603,6 +618,7 @@ export const AdminFeatureCatalog: React.FC = () => {
             <Title level={4} className="!m-0">特征字典管理</Title>
             <Text type="secondary" className="text-xs">
               {catalog.categories.length} 个分类 · {totalFeatures} 个特征 · 来源: {catalog.source || 'file'}
+              {catalog.source_dataset ? ` · 数据集: ${catalog.source_dataset}` : ''}
               {marketFilter !== 'ALL' ? ` · 当前市场: ${marketFilter}（${marketCounts[marketFilter] ?? 0}）` : ''}
             </Text>
           </div>
@@ -632,6 +648,25 @@ export const AdminFeatureCatalog: React.FC = () => {
             </Button>
           </Tooltip>
         </Space>
+      </div>
+
+      {/* 数据集切换：动态因子库（V5 全量）/ L1+L2 合并宽表 —— 固定不动 */}
+      <div className="flex items-center gap-2 flex-wrap shrink-0">
+        <Text type="secondary" className="text-xs">数据集</Text>
+        {SOURCE_OPTIONS.map(m => {
+          const active = sourceFilter === m.value;
+          return (
+            <Button
+              key={m.value}
+              shape="round"
+              size="small"
+              type={active ? 'primary' : 'default'}
+              onClick={() => handleSourceChange(m.value)}
+            >
+              {m.label}
+            </Button>
+          );
+        })}
       </div>
 
       {/* 市场胶囊切换：5 个市场，点选过滤，再点取消回到全部 —— 固定不动 */}
