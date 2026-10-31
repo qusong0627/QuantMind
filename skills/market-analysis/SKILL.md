@@ -16,11 +16,11 @@ description: "市场分析报告（大盘快照版）— 复用市场分析页�
 
 | 陷阱 | 正确口径 |
 |---|---|
-| `l2_factors.flow_*` 金额是**万元**（2026-09 起；读入后归一为元再转亿元） | 报告统一换算**亿元**（脚本 `_yi()` 已处理） |
+| `l1_l2_factors.flow_*` 金额是**万元**（2026-09 起；读入后归一为元再转亿元） | 报告统一换算**亿元**（脚本 `_yi()` 已处理） |
 | `index_daily.amount` 是**万元** | 指数成交额脚本已转亿元 |
 | `technical_indicators.pct_change` = **%** | 涨跌家数/涨停/行业均涨幅全用它；涨停≈≥9.8%、跌停≈≤-9.8% |
 | `index_daily.preClose` **全 NULL** | 指数涨跌幅由 close 序列自算（后端已处理，勿另算） |
-| 资金流依赖 `l2_factors` | 最新日期可能与行情日不同步（L2 更新滞后 1 日属正常），facts 里以 trade_date 为准，滞后时在报告中声明 |
+| 资金流依赖 `l1_l2_factors` | 最新日期可能与行情日不同步（L2 更新滞后 1 日属正常），facts 里以 trade_date 为准，滞后时在报告中声明 |
 
 **写报告时所有数字必须来自 `{date}_facts.json`，不得自行推算或编造。**
 
@@ -87,8 +87,8 @@ docker exec quantmind bash -c "mkdir -p '/data/reports/stock_reports/A股市场/
 | 三、行业板块 | `sector_members` 申万一级 | 31 行业均涨幅/成交额/领涨股，Top10+Bottom10 |
 | 四、行业多日涨跌幅 | `daily_unadjusted`+`sector_members` | 行业 1/3/5 日累计涨幅对比（成分股中位数），看启动时点与主线持续性 |
 | 五、热门概念 | `sector_members` 概念板块 | 概念均涨幅 Top/Bottom |
-| 六、板块资金流 | `l2_factors.flow_*` | 1日/5日/10日 行业净流入（亿元）+主力占比 |
-| 七、个股资金流 | `l2_factors.flow_*` | 主力净流入 Top20 / 净流出 Top10 |
+| 六、板块资金流 | `l1_l2_factors.flow_*` | 1日/5日/10日 行业净流入（亿元）+主力占比 |
+| 七、个股资金流 | `l1_l2_factors.flow_*` | 主力净流入 Top20 / 净流出 Top10 |
 | 八、标签体系 | `sector_members` 聚合 | 标签总数/覆盖股票/热门标签 |
 
 **多日对比解读口径**（四、行业多日涨跌幅，中位数）：

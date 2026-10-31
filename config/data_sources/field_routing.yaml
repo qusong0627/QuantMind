@@ -97,7 +97,7 @@ markets:
       consensus: false
       cleanup: false
     ai_factors:
-      # l1_factors / l2_factors / features_daily
+      # l1_factors / l1_l2_factors / features_daily
       tier: T1
       primary: quantdb_local
       fallbacks: []

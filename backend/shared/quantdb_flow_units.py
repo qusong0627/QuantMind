@@ -1,4 +1,4 @@
-"""QuantDB l2_factors 资金流金额单位归一。
+"""QuantDB L1/L2 资金流金额单位归一。
 
 QuantDB 2026-09 起 ``flow_*`` 金额与日线 ``amount`` 同为**万元**
 （``flow_net_amount / amount ≈ flow_net_ratio``）；此前为**元**

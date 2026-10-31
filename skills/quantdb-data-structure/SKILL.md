@@ -34,7 +34,7 @@ description: "QuantDB 服务器数据结构与读取口径 — 数据目录组�
 | `3_financial_data/` | balance/income/cashflow/股本/分红因子等财务报表 | 单文件为主 |
 | `4_bond_etf/` | 债券 / ETF | 单文件 |
 | `5_technical_derived/` | valuation（估值）、technical_indicators、market_sentiment | 分区 |
-| `6_ml_datasets/` | features_daily、l1_factors、l2_factors、l1_l2_factors、alpha_library（Alpha101+GTJA191+Alpha158 三库因子） | 分区 |
+| `6_ml_datasets/` | features_daily、l1_factors、l1_l2_factors、alpha_library（Alpha101+GTJA191+Alpha158 三库因子） | 分区 |
 
 辅助文件：`releases/`（数据包版本）、`.sync_state` / `quantdb_sync.sqlite`（增量同步状态）、`.qlib_cache`、`_meta`。
 
@@ -82,7 +82,7 @@ description: "QuantDB 服务器数据结构与读取口径 — 数据目录组�
 | `qdb_market_sentiment` | 市场情绪 |
 | `qdb_features_daily` | 每日特征 |
 | `qdb_margin_trading` | 融资融券 |
-| `qdb_l2_factors` / `qdb_l1_l2_factors` | L2 / L1+L2 因子 |
+| `qdb_l1_l2_factors` | L1+L2 因子 |
 | `qdb_l1_factors` | L1 因子（仅当存在 `dt=*` 分区时挂载） |
 | `qdb_alpha_library` | 三库因子 429 列（训练直读） |
 | `qdb_hsgt_north_daily` / `qdb_hsgt_north` | 北向资金日频 / 季度 |

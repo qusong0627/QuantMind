@@ -83,8 +83,7 @@ QuantDB 按 6 大类 28 个数据集组织，本地已全部落盘（2016-01 至
 |---|---|
 | `features_daily` | 日频特征（技术指标+估值+交易属性合并，**78 列**，2026-09 起） |
 | `l1_factors` | **L1 因子（98 因子）**：动量/波动/流动性/技术/基本面/风格/行业/筹码/概念 |
-| `l2_factors` | **L2 因子（216 高频微观因子）**：VPIN/资金流/价差/深度/订单/竞价/跳跃/冲击 |
-| `l1_l2_factors` | L1+L2 合并 |
+| `l1_l2_factors` | **L1+L2 合并宽表**：L1 因子 + L2 高频微观因子（216 因子：VPIN/资金流/价差/深度/订单/竞价/跳跃/冲击，现已并入本表；独立 l2 目录已下线） |
 
 ### 查看数据集目录统计
 ```bash
@@ -141,7 +140,7 @@ curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
 # 按数据集同步（异步任务）
 curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
   "$BASE/api/v1/admin/data-platform/quantdb/sync-datasets" \
-  -d '{"datasets":["l1_factors","l2_factors"],"with_pg":true,"with_qlib":true}'
+  -d '{"datasets":["l1_factors","l1_l2_factors"],"with_pg":true,"with_qlib":true}'
 # with_pg: 同步后填充 PG stock_daily_latest
 # with_qlib: 同步后重建 Qlib 缓存
 
@@ -202,8 +201,8 @@ Qlib 二进制缓存（data/quantdb/.qlib_cache/cn_data）
 筹码(9): `chip_profit_ratio_20/60/120, chip_concentration_20, chip_peak_distance, chip_floating_ratio, chip_cost_90_width, chip_profit_delta_5`
 概念(11): `concept_hot_score, concept_momentum_top3, concept_exposure_top1, concept_rotation_score, concept_crowding_max, concept_diversity, concept_flow_rank, concept_leader_score, concept_cross_sector, concept_volume_ratio`
 
-### l2_factors（216 高频微观因子）
-VPIN/价差/深度/订单/资金流/已实现波动/竞价/跳跃/冲击等，如 `micro_vpin_8/20/50, micro_pin, micro_order_flow_toxicity, micro_realized_spread, micro_kyle_lambda, micro_amihud_illiquidity, micro_depth_imbalance_1, flow_money_flow_index, vol_realized_rv/rrv/rskew, micro_jump_count_1pct, micro_trade_buy/sell_pressure`
+### l1_l2_factors（L1+L2 合并宽表，含 216 高频微观因子）
+L1 因子 + L2 高频微观因子：VPIN/价差/深度/订单/资金流/已实现波动/竞价/跳跃/冲击等，如 `micro_vpin_8/20/50, micro_pin, micro_order_flow_toxicity, micro_realized_spread, micro_kyle_lambda, micro_amihud_illiquidity, micro_depth_imbalance_1, flow_money_flow_index, vol_realized_rv/rrv/rskew, micro_jump_count_1pct, micro_trade_buy/sell_pressure`（独立 l2 目录已下线，L2 因子现位于本合并宽表，见 l1_l2 合并宽表）
 
 ## 6.1 字段单位速查 → [[quantdb-fields]]
 
@@ -218,7 +217,7 @@ VPIN/价差/深度/订单/资金流/已实现波动/竞价/跳跃/冲击等，�
 
 - **数据落盘校验**：`catalog` + `remote-meta` 看覆盖，`preview` 看字段
 - **当日数据补全**：本地缺当日时用 `query-kline` 远程拉
-- **因子挖掘原料**：`sync-datasets` 同步 l1/l2_factors，喂给 [[rd-agent-factor-mining]]
+- **因子挖掘原料**：`sync-datasets` 同步 l1/l1_l2_factors，喂给 [[rd-agent-factor-mining]]
 - **选股字段**：valuation/l1_factors 的字段是 [[smart-strategy-stock-picking]] 的数据源
 - **训练特征**：features_daily/l1_factors 是 [[quantmind-operations]] 模型训练的特征来源
 

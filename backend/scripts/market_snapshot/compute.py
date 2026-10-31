@@ -7,7 +7,7 @@ Market analysis snapshot compute — 移植自 quantmind/website 的离线快照
 
 数据口径（与 quantmindoss/electron 的 quantdb_feed 一致）：
   - pct_change 为百分点点口径（涨停=10）；标的 ID 统一小写后缀（000001.SZ）。
-  - 真实资金流来自 l2_factors 的 flow_* 列。
+  - 真实资金流来自 l1_l2_factors 的 flow_* 列。
 
 用法：
   python backend/scripts/market_snapshot/compute.py [--data-dir D:\\quant_data] [--out data/market-analysis]
@@ -86,8 +86,8 @@ def _latest_trade_date(data_dir: Path) -> str | None:
     return dates[0]
 
 
-def _latest_l2_date(data_dir: Path) -> str | None:
-    dates = _get_partition_dates(data_dir, DATASET_DIRS["l2_factors"])
+def _latest_flow_date(data_dir: Path) -> str | None:
+    dates = _get_partition_dates(data_dir, DATASET_DIRS["l1_l2_factors"])
     if not dates:
         return None
     if _REF_OVERRIDE:
@@ -106,7 +106,7 @@ def _trading_days(data_dir: Path, end: str | None, n: int) -> list[str]:
 
 # ---------- 数据加载（基于归一视图） ----------
 
-def _load_l2_flow(con, days: list[str]) -> pd.DataFrame:
+def _load_flow(con, days: list[str]) -> pd.DataFrame:
     if not days:
         return pd.DataFrame()
     dt_in = ", ".join(f"'{d}'" for d in days)
@@ -115,7 +115,7 @@ def _load_l2_flow(con, days: list[str]) -> pd.DataFrame:
         "SELECT symbol, dt, amount, flow_net_amount, flow_buy_amount, flow_sell_amount, flow_net_ratio, "
         "flow_super_net, flow_large_net, flow_medium_net, flow_small_net, "
         "flow_large_ratio, flow_medium_ratio, flow_small_ratio, flow_money_flow_index "
-        f"FROM qdb_l2_factors WHERE dt IN ({dt_in})",
+        f"FROM qdb_l1_l2_factors WHERE dt IN ({dt_in})",
     )
     return normalize_l2_flow_money_to_yuan(df)
 
@@ -436,11 +436,11 @@ def _detect_placeholder_symbols(flow: pd.DataFrame, share_thresh: int = 25) -> s
 
 
 def get_stock_flow_full(con, data_dir: Path, limit: int = 6500) -> list[dict]:
-    ref = _latest_l2_date(data_dir)
+    ref = _latest_flow_date(data_dir)
     if not ref:
         return []
     days = _trading_days(data_dir, ref, 1)
-    flow = _load_l2_flow(con, days)
+    flow = _load_flow(con, days)
     if flow.empty:
         return []
     bad = _detect_placeholder_symbols(flow)
@@ -466,14 +466,14 @@ def get_stock_flow_full(con, data_dir: Path, limit: int = 6500) -> list[dict]:
 
 
 def get_stock_money_flow(con, data_dir: Path, limit: int = 20) -> list[dict]:
-    ref = _latest_l2_date(data_dir)
+    ref = _latest_flow_date(data_dir)
     if not ref:
         return []
     days = _trading_days(data_dir, ref, 30)
     if not days:
         return []
     today = days[0]
-    hist = _load_l2_flow(con, days)
+    hist = _load_flow(con, days)
     if hist.empty:
         return []
     hist["_dt"] = hist["dt"].astype(str)
@@ -532,11 +532,11 @@ def get_stock_money_flow(con, data_dir: Path, limit: int = 20) -> list[dict]:
 
 
 def get_money_flow_sankey(con, data_dir: Path) -> dict | None:
-    latest = _latest_l2_date(data_dir)
+    latest = _latest_flow_date(data_dir)
     if not latest:
         return None
     days = _trading_days(data_dir, latest, 1)
-    flow = _load_l2_flow(con, days)
+    flow = _load_flow(con, days)
     if flow.empty:
         return None
     groups = _sector_groups(data_dir, "shenwan")
@@ -574,14 +574,14 @@ def get_money_flow_sankey(con, data_dir: Path) -> dict | None:
 def get_money_flow_period(con, data_dir: Path, period: str = "1d", dimension: str = "sector",
                           category: str = "shenwan", limit: int = 31) -> list[dict]:
     n_days = PERIOD_DAYS.get(period.lower(), 1)
-    ref = _latest_l2_date(data_dir)
+    ref = _latest_flow_date(data_dir)
     if not ref:
         return []
     days = _trading_days(data_dir, ref, 20)
     if not days:
         return []
     window = days[:n_days]
-    flow_all = _load_l2_flow(con, days)
+    flow_all = _load_flow(con, days)
     if flow_all.empty:
         return []
     flow_all["_dt"] = flow_all["dt"].astype(str)
@@ -744,7 +744,7 @@ def main():
 
     t0 = datetime.now()
     con = get_conn(data_dir)
-    print(f"[info] data_dir={data_dir} out_dir={out_dir} latest_trade={_latest_trade_date(data_dir)} latest_l2={_latest_l2_date(data_dir)}")
+    print(f"[info] data_dir={data_dir} out_dir={out_dir} latest_trade={_latest_trade_date(data_dir)} latest_l2={_latest_flow_date(data_dir)}")
 
     indices = get_indices_overview(con, data_dir)
     print(f"[step] indices {len(indices)}")

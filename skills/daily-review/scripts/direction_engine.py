@@ -124,7 +124,7 @@ def score_breadth(market: dict, sentiment: dict | None) -> dict:
 def score_l2(factors: dict | None) -> dict:
     l2 = (factors or {}).get("l2") or {}
     if not l2:
-        return _dim("L2 微观", 0.0, 2.0, "L2 因子数据缺失（news_review 后重跑或检查 l2_factors 分区），维度中性")
+        return _dim("L2 微观", 0.0, 2.0, "L2 因子数据缺失（news_review 后重跑或检查 l1_l2_factors 分区），维度中性")
     ev: list[str] = []
     s = 0.0
     strong = _f(l2.get("strong_pct"))

@@ -1,7 +1,7 @@
 """个股终端智能标签规则引擎
 
 11 大类 + 25 个常用组合预设。基于 QuantDB 本地最新交易日快照
-（instrument_detail + technical_indicators + valuation + l1_factors + l2_factors + margin_trading），
+（instrument_detail + technical_indicators + valuation + l1_factors + l1_l2_factors + margin_trading），
 按 symbol 合并后向量化匹配。进程内缓存 5 分钟。
 
 规则 = {id, name, category, desc, cond: (metric, op, threshold), sort_key, sort_asc}

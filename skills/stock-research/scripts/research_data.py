@@ -125,7 +125,7 @@ def fetch_l2_flow(hub, symbol: str, days: int = 10) -> dict:
     end = date.today()
     start = end - timedelta(days=days * 2 + 5)
     try:
-        df = hub.fetch_l2_factors(start=start, end=end)
+        df = hub.fetch_l1_l2_factors(start=start, end=end)
     except Exception as exc:  # noqa: BLE001
         log.warning("l2 读取失败: %s", exc)
         return {}

@@ -13,7 +13,7 @@
 | `kind` | ✅ | string | 固定 `quantmind-model-training-config` |
 | `exported_at` | 建议 | ISO8601 | 仅元数据，导入不校验 |
 | `market` | ✅ | enum | `CN` / `HK` / `US` / `CRYPTO` / `FUTURES`；决定导入时是否自动切市场 |
-| `factor_source` | 可选 | string | QuantDB 直读市场用，如 `l1_factors` / `l2_factors` / `l1_l2_factors`；导入后会切换页面的因子源 |
+| `factor_source` | 可选 | string | QuantDB 直读市场用，如 `l1_factors` / `l1_l2_factors`；导入后会切换页面的因子源 |
 | `factor_catalog_version` | 可选 | string | **仅供导入时提示版本是否变化**；实际训练用页面当前已发布版本，不是回放 |
 | `factor_filter` | 可选 | object | 因子筛选节点，见下 |
 | `configuration` | ✅ | object | 主体配置，见下 |

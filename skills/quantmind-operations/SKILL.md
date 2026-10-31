@@ -202,7 +202,7 @@ curl -s -H "$AUTH" "$BASE/api/v1/admin/data-platform/sync-progress"
 ```bash
 # 同步数据集时带 with_qlib 触发 Qlib 缓存重建
 curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/admin/data-platform/quantdb/sync-datasets" \
-  -d '{"datasets":["l1_factors","l2_factors"],"with_qlib":true}'
+  -d '{"datasets":["l1_factors","l1_l2_factors"],"with_qlib":true}'
 # 查看 Qlib + 特征快照数据状态（含年度快照详情）
 curl -s -H "$AUTH" "$BASE/api/v1/admin/models/data-status"
 ```

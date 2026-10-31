@@ -874,7 +874,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "return10d": return_10d,
         "return20d": return_20d,
         "return60d": return_60d,
-        # 资金流主源为 batch-features → l2_factors（已归一为元）；此处若有值按元→百万元
+        # 资金流主源为 batch-features → l1_l2_factors（已归一为元）；此处若有值按元→百万元
         "mainFlow": round(main_flow_raw / 1000000.0, 2) if main_flow_raw is not None else None,
         "flowNetAmount": round(flow_net_raw / 1000000.0, 2) if flow_net_raw is not None else None,
         "instOwnership": round(inst_own_raw / 1000000.0, 2) if inst_own_raw is not None else None,

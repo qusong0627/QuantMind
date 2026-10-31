@@ -22,7 +22,7 @@ description: "股票市场深度数据分析与导出 — 全市场信号扫描�
 > | valuation `dividend_rate` 是**百分数**（0.148=0.148%），**20260814 起才切换** | 之前是小数口径，跨日分析必须 ×10 归一 |
 > | l1 `vol_std_*` 是**小数**（0.0406） | technical_indicators `vol_std_*` 是 **%**（4.06），差 100 倍 |
 > | symbols/features API 已换算：市值→亿元、flow*→百万元 | parquet 原值：市值=元、flow=元（差 1e8/1e6） |
-> | l2_factors 分区**停滞 20260227** | 用前先查最新日期，近期 l2 型字段大量 NaN 是正常的 |
+> | l2 独立目录已下线，读 l1_l2 合并宽表 | 用前先查 l1_l2 最新分区日期，见 l1_l2 合并宽表 |
 > | min1/min5 停更 20260724、hsgt_north 停更 202408 | 别当实时数据用 |
 > | 财务 parquet 单位=**元** | instrument_detail `J_*`=万元、`Zsz/Ltsz`=亿元 |
 > | 股息：dividend_factors `interest`=**每10股派息** | 算每股股息要 /10 |
@@ -115,11 +115,11 @@ curl -s -H "$AUTH" "$BASE/api/v1/market/index-kline?symbol=000001.SH&days=60"
 curl -s -H "$AUTH" "$BASE/api/v1/market/overview"           # 多市场指数概览
 
 # ⑥ 订单微结构截面分位（L4b，2026-08 新增；先确认最新分区）
-docker exec quantmind ls /data/quantdb/6_ml_datasets/l2_factors/ | tail -1   # → dt=YYYYMMDD
+docker exec quantmind ls /data/quantdb/6_ml_datasets/l1_l2_factors/ | tail -1   # → dt=YYYYMMDD
 docker exec quantmind python3 - <<'EOF'
 import duckdb, pandas as pd
 dt = "YYYYMMDD"   # 上一步最新分区
-mkt = duckdb.connect().execute(f"SELECT * FROM read_parquet('/data/quantdb/6_ml_datasets/l2_factors/dt={dt}/data.parquet')").df()
+mkt = duckdb.connect().execute(f"SELECT * FROM read_parquet('/data/quantdb/6_ml_datasets/l1_l2_factors/dt={dt}/data.parquet')").df()
 s = mkt[mkt.symbol == "600519.SH"].iloc[0]
 for f in ["vol_persistence","micro_vpin_vol_ratio","flow_buy_amount","flow_sell_amount",
           "micro_toxicity_persistence","flow_order_duration_p90","flow_cancel_lifetime",
@@ -209,7 +209,7 @@ EOF
 - **分单口径**（l2，API 已换算为百万元）：`flowSuperNet`（超大单）/`flowLargeNet`（大单）/`flowMediumNet`/`flowSmallNet`——三口径同向才可信；parquet 原值是元（差 1e6）
 - **全口径**：`flowNetAmount` + `flowNetRatio`（净流入占成交比）
 - **筹码**（l1）：`chipProfitRatio20/60`（获利盘%）、`chipConcentration20`、`chipPeakDistance`、`chipProfitDelta5`（5日获利盘变化——散户接盘还是主力吸筹）
-- **⚠️ l2 分区停滞 20260227**：flow/chip/micro 型字段近期大量 NaN。若 l2 全 NaN，明确标注「l2 数据缺失（厂商停更），资金结论降级为不可验证」而不是跳过或编造
+- **⚠️ l2 独立目录已下线，读 l1_l2 合并宽表**：若 l1_l2 中 flow/chip/micro 型字段全 NaN，明确标注「l1_l2 数据缺失，资金结论降级为不可验证」而不是跳过或编造
 - **融资融券**（parquet，单位：finance_*=**万元**、slo_volume=**股**）：
 
 ```bash
@@ -270,7 +270,7 @@ curl -s -H "$AUTH" "$BASE/api/v1/admin/data-platform/quantdb/preview?dataset=l1_
 | **动量挖掘** | `mom_ret_5d/20d/60d, mom_ma_gap_*, mom_rsi_*` |
 | **波动率掘金** | `vol_std_*, vol_atr_14, vol_parkinson_*, vol_gk_20` |
 | **流动性异常** | `liq_volume_ratio_5/20, liq_obv_20, liq_mfi_14` |
-| **资金流异动** | `flow_net_*, flow_large_net, flow_money_flow_index`（⚠️ l2 停更 20260227） |
+| **资金流异动** | `flow_net_*, flow_large_net, flow_money_flow_index`（见 l1_l2 合并宽表） |
 | **筹码集中** | `chip_profit_ratio_*, chip_concentration_20, chip_peak_distance` |
 | **行业强度** | `ind_strength_20/60, ind_rotation_speed_20, ind_crowding_20` |
 | **概念热度** | `concept_hot_score, concept_momentum_top3, concept_leader_score` |
@@ -504,7 +504,7 @@ data/reports/stock_reports/{市场名}/{股票名}/{股票名}{代码}_{日期}_
 | 选股 candidates 空 | 检查 `total_signals` 与 `market_state`（MA20 空仓保护），或 `ignore_ma20=true` |
 | 个股特征空 | 确认 symbol 格式（600519.SH），用 `/research/batch-features` 批量试 |
 | 财务/融资融券数据拿不到 | 这些不在 API 里，必须 docker exec 直读 parquet（见 3.2/3.5） |
-| l2 资金流字段全 NaN | l2 分区停更 20260227（厂商侧），明确标注数据缺失，勿编造 |
+| l1_l2 资金流字段全 NaN | l2 独立目录已下线，读 l1_l2 合并宽表；明确标注数据缺失，勿编造 |
 | 股息率两个值对不上 | valuation.dividend_rate 20260814 起切换百分数口径，跨日对比先 ×10 归一 |
 | risk 接口 MA 与实际价差一个量级（如 ma5=147 vs 价 26） | 复权口径陷阱：接口曾混入后复权 features_daily 的 MA。**必须先拉 `/research/kline` 用 pandas rolling 自算核对**，以 K 线为准；20260817 起接口已改为前复权重算，但历史报告/旧缓存仍可能踩坑 |
 | 市值/成交额数字离谱 | 单位错：API 市值=亿元、flow=百万元；parquet 市值=元；成交额永远是万元 |

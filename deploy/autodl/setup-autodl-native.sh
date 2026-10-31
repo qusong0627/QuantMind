@@ -11,7 +11,7 @@
 # 环境变量：
 #   AUTO_DL             yes | no | skip（默认：无数据 yes；已有数据 skip）
 #   AUTODL_RESYNC       1=已有数据时仍做增量同步（ModelScope 续传，已下载文件跳过）
-#   AUTODL_DATASETS     逗号分隔，默认 l1_factors,l2_factors,l1_l2_factors
+#   AUTODL_DATASETS     逗号分隔，默认 l1_factors,l1_l2_factors
 #   AUTODL_SINCE        YYYY-MM-DD 才裁剪下载窗口；默认空=全量历史（3-year 可解析为近三年）
 #   MODELSCOPE_DATASET_REPO    魔搭数据集，默认 qusong0627/LightGBM_Alpha300
 #   MODELSCOPE_ENDPOINT        默认 https://www.modelscope.cn
@@ -35,7 +35,7 @@ ENV_FILE="${ENV_FILE:-/etc/profile.d/quantmind_sh.sh}"
 NODE_ENV_FILE="${NODE_ENV_FILE:-$WORK_DIR/.env}"
 PIP_INDEX="${PIP_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple/}"
 PIP_HOST="${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
-DEFAULT_DATASETS="${AUTODL_DATASETS:-l1_factors,l2_factors,l1_l2_factors}"
+DEFAULT_DATASETS="${AUTODL_DATASETS:-l1_factors,l1_l2_factors}"
 # 初始训练数据来源：魔搭（ModelScope）公开数据集（即 QuantDB 本体，纯 HTTP，无需 SDK/Key）
 MODELSCOPE_ENDPOINT="${MODELSCOPE_ENDPOINT:-https://www.modelscope.cn}"
 MODELSCOPE_DATASET_REPO="${MODELSCOPE_DATASET_REPO:-qusong0627/LightGBM_Alpha300}"
@@ -560,7 +560,7 @@ echo "  nvidia-smi"
 echo "  du -sh $FACTOR_DIR 2>/dev/null || true"
 echo ""
 info "非交互示例："
-echo "  AUTO_DL=yes bash $0                     # 默认拉 l1_factors,l2_factors,l1_l2_factors 全量历史"
+echo "  AUTO_DL=yes bash $0                     # 默认拉 l1_factors,l1_l2_factors 全量历史"
 echo "  AUTODL_RESYNC=1 bash $0                 # 已有数据仍续传（已下载文件跳过）"
 echo "  AUTODL_DATASETS=l1_factors bash $0      # 只拉单个数据集"
 echo "  AUTODL_SINCE=2024-01-01 bash $0         # 只拉 2024 年以后的 dt= 分区"

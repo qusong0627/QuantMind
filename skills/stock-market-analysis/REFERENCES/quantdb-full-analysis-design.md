@@ -15,8 +15,8 @@
 | L1 估值 | `valuation`（pe_ttm/pb/ps/dividend_rate）+ 历史分位、l1 `ind_relative_pe` | 贵不贵？相对行业、相对自身历史处在什么位置？ |
 | L2 财务 | `income`/`balance`/`cashflow`/`pershare_index`/`dividend_factors`/`holder_num` | 赚钱吗？真金白银还是纸面利润？资产负债表健康吗？ |
 | L3 技术 | `technical_indicators`（37 列全量）+ `daily_forward` K 线 | 趋势、动能、支撑压力、量价是否配合？ |
-| L4 资金筹码 | `l2_factors` flow_*/chip_*（已日更）、`margin_trading` 融资融券 | 谁在买谁在卖？主力还是散户？筹码松动还是集中？ |
-| **L4b 订单微结构** | `6_ml_datasets/l2_factors`（micro_*/vol_*/flow_* 219 列，日更）按《L2 微观结构因子系统化分析报告》框架 | 盘里的钱在怎么动？订单流毒性、知情交易、资金韧性处于全市场什么分位？（T+5/T+10 持续信号） |
+| L4 资金筹码 | `l1_l2_factors` flow_*/chip_*（见 l1_l2 合并宽表）、`margin_trading` 融资融券 | 谁在买谁在卖？主力还是散户？筹码松动还是集中？ |
+| **L4b 订单微结构** | `6_ml_datasets/l1_l2_factors`（micro_*/vol_*/flow_* 列，见 l1_l2 合并宽表）按《L2 微观结构因子系统化分析报告》框架 | 盘里的钱在怎么动？订单流毒性、知情交易、资金韧性处于全市场什么分位？（T+5/T+10 持续信号） |
 | L5 行业概念 | `l1_factors` ind_*/concept_*、`sector_concept`、`index_weights` | 所处行业强不强？概念热不热？轮动到了没有？ |
 | L6 模型信号 | `/models/inference/stock/{symbol}/history`（按 model_id 分模型） | 模型怎么看？多模型是否一致？趋势是改善还是恶化？ |
 | L7 新闻舆情 | `/news/articles` + Huntly 库全文 → **七维规律三步纵深**（直接→相关→规律对照） | 消息面是催化剂还是风险？与量价/L4b/模型信号互相印证？ |
@@ -66,7 +66,7 @@
 
 ### L4b 订单微结构（L2 截面框架，2026-08 新增层）
 
-> 依据《L2 微观结构因子系统化分析报告》（875 交易日 × 5202 标的全量验证，211 因子）。**注：旧文档曾写「l2 分区停更 20260227」——已过时，2026-08 起 `6_ml_datasets/l2_factors` 恢复日更到最新分区（220 列 micro_*/vol_*/flow_* 订单微结构因子）。** 若某天读数全 NaN 才是厂商停更，要用前先 `ls data/quantdb/6_ml_datasets/l2_factors/ | tail` 确认最新日期。
+> 依据《L2 微观结构因子系统化分析报告》（875 交易日 × 5202 标的全量验证，211 因子）。**注：l2 独立目录已下线，读 l1_l2 合并宽表（见 l1_l2 合并宽表）。** 若某天读数全 NaN 才是厂商停更，要用前先 `ls data/quantdb/6_ml_datasets/l1_l2_factors/ | tail` 确认最新日期。
 
 **三条铁律（IC 方向，判读前提）**：
 1. **VPIN 族是正 IC 因子**（`micro_vpin_vol_ratio` ICIR +0.562 居首）：VPIN 上升 = 知情资金在场 = **偏多**，绝不是"毒性利空"。
@@ -77,7 +77,7 @@
 ```python
 import duckdb, pandas as pd
 dt = 'YYYYMMDD'  # 最新分区
-mkt = duckdb.connect().execute(f"SELECT * FROM read_parquet('data/quantdb/6_ml_datasets/l2_factors/dt={dt}/data.parquet')").df()
+mkt = duckdb.connect().execute(f"SELECT * FROM read_parquet('data/quantdb/6_ml_datasets/l1_l2_factors/dt={dt}/data.parquet')").df()
 stock = mkt[mkt['symbol']=='600563.SH'].iloc[0]
 for f in L2_REPORT_FACTORS:               # 报告 26 个确认因子
     pct = (mkt[f].astype(float) < float(stock[f])).mean()   # 上分位
@@ -196,10 +196,10 @@ curl -s -H "$AUTH" "$BASE/api/v1/models/default"               # 默认模型
 curl -s -H "$AUTH" "$BASE/api/v1/models/inference/stock/600519.SH/history?days=180"
 curl -s -H "$AUTH" "$BASE/api/v1/models/inference/stock/600519.SH/history?days=180&model_id=xxx"
 # L4b: 订单微结构截面分位（容器内 python + duckdb，需 pandas；先 ls 分区确认最新日期）
-#   docker exec quantmind ls /data/quantdb/6_ml_datasets/l2_factors/ | tail -1
+#   docker exec quantmind ls /data/quantdb/6_ml_datasets/l1_l2_factors/ | tail -1
 #   docker exec quantmind python3 - <<'PY'
 #   import duckdb, pandas as pd
-#   mkt = duckdb.connect().execute("SELECT * FROM read_parquet('/data/quantdb/6_ml_datasets/l2_factors/dt=最新/data.parquet')").df()
+#   mkt = duckdb.connect().execute("SELECT * FROM read_parquet('/data/quantdb/6_ml_datasets/l1_l2_factors/dt=最新/data.parquet')").df()
 #   pct = (mkt[f].astype(float) < float(mkt[mkt.symbol=='xxx.SH'].iloc[0][f])).mean()  # 逐因子算截面分位
 #   # 负IC族≥70%高位 / 正IC族≤40%低位 = 偏空；反之为偏多
 # L7: 新闻三步纵深（v3 规律对照，方法论见 news_sentiment_deep_report §13）

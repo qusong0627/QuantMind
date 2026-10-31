@@ -223,11 +223,12 @@ class QuantDBLocalAdapter(OfflineDataSourceAdapter):
     def _fetch_ai_factors(
         self, symbol: str, start: date | None, end: date | None, **kwargs: Any
     ) -> pd.DataFrame:
-        sub = kwargs.get("sub_category", "l1_factors")
+        sub = kwargs.get("sub_category", "l1_l2_factors")
         if sub == "l1_factors":
             df = self._hub.fetch_l1_factors(start=start, end=end)
-        elif sub == "l2_factors":
-            df = self._hub.fetch_l2_factors(start=start, end=end)
+        elif sub in ("l1_l2_factors", "l2_factors"):
+            # l2_factors 目录已下线并入 l1_l2 合并宽表（列超集），旧参数名兼容指向新表
+            df = self._hub.fetch_l1_l2_factors(start=start, end=end)
         elif sub == "features_daily":
             df = self._hub.fetch_features_daily(symbol=symbol, start=start, end=end)
         else:

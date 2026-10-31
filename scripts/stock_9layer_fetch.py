@@ -73,10 +73,10 @@ def main():
     out = {"code": SYM}
 
     # 最新分区
-    l2_dt = latest_partition("6_ml_datasets/l2_factors")
+    l2_dt = latest_partition("6_ml_datasets/l1_l2_factors")
     print(f"[info] QuantDB 根: {QS}")
-    print(f"[info] L2 最新分区: {l2_dt}")
-    out["l2_dt"] = l2_dt
+    print(f"[info] L1+L2 最新分区: {l2_dt}")
+    out["l1l2_dt"] = l2_dt
 
     if args.l4b:
         fetch_l4b(SYM, l2_dt)
@@ -174,7 +174,7 @@ def fetch_margin(SYM, out):
 
 def fetch_l4b(SYM, dt, out=None):
     try:
-        mkt = read_part("6_ml_datasets/l2_factors", dt)
+        mkt = read_part("6_ml_datasets/l1_l2_factors", dt)
     except Exception as e:
         print(f"[error] L4b 读 {dt} 失败: {e}")
         return

@@ -23,7 +23,6 @@ QuantDB 数据中枢 — A 股所有数据读取的单一入口。
     5_technical_derived/market_sentiment/dt=YYYYMMDD/data.parquet
     6_ml_datasets/features_daily/dt=YYYYMMDD/data.parquet
     6_ml_datasets/l1_factors/l1_factors_YYYYMMDD.parquet or dt=YYYYMMDD/
-    6_ml_datasets/l2_factors/dt=YYYYMMDD/data.parquet
     6_ml_datasets/l1_l2_factors/dt=YYYYMMDD/data.parquet
 """
 
@@ -269,7 +268,6 @@ class QuantDBDataHub:
             "qdb_market_sentiment": "5_technical_derived/market_sentiment",
             "qdb_features_daily": "6_ml_datasets/features_daily",
             "qdb_margin_trading": "2_base_sector/margin_trading",
-            "qdb_l2_factors": "6_ml_datasets/l2_factors",
             "qdb_l1_l2_factors": "6_ml_datasets/l1_l2_factors",
         }
         # l1_factors has mixed format (flat files + partitioned dirs); only read partitioned dirs
@@ -341,7 +339,6 @@ class QuantDBDataHub:
         "qdb_market_sentiment": "5_technical_derived/market_sentiment",
         "qdb_features_daily": "6_ml_datasets/features_daily",
         "qdb_margin_trading": "2_base_sector/margin_trading",
-        "qdb_l2_factors": "6_ml_datasets/l2_factors",
         "qdb_l1_l2_factors": "6_ml_datasets/l1_l2_factors",
         "qdb_l1_factors": "6_ml_datasets/l1_factors",
         "qdb_alpha_library": "6_ml_datasets/alpha_library",
@@ -1030,17 +1027,17 @@ class QuantDBDataHub:
         )
         return self._normalize_columns(df)
 
-    def fetch_l2_factors(
+    def fetch_l1_l2_factors(
         self,
         start: date | None = None,
         end: date | None = None,
     ) -> pd.DataFrame:
-        """读取 L2 高频因子。"""
-        dates = self._partition_dates("6_ml_datasets/l2_factors", start, end)
+        """读取 L1+L2 合并宽表（含全部 L2 高频因子列）。"""
+        dates = self._partition_dates("6_ml_datasets/l1_l2_factors", start, end)
         if not dates:
             return pd.DataFrame()
         df = self._read_partitioned(
-            "6_ml_datasets/l2_factors",
+            "6_ml_datasets/l1_l2_factors",
             dates,
             order_by="dt",
         )
@@ -1061,7 +1058,7 @@ class QuantDBDataHub:
         K 线按 ``symbol`` + ``trade_date`` 对齐。
 
         Args:
-            dataset: features_daily / l1_factors / l2_factors / alpha_library
+            dataset: features_daily / l1_factors / l1_l2_factors / alpha_library
             columns: 需要读取的特征列名（不含 symbol/dt/trade_date）
             symbols: 可选，限定股票（后缀格式），减少读取量（debug 场景）
         """
@@ -1409,9 +1406,9 @@ class QuantDBDataHub:
                 "categories": cat_names,
                 "category_count": len(cat_names),
             }
-        l2_dir = dd / "6_ml_datasets" / "l2_factors"
-        if l2_dir.exists():
-            datasets["l2_factors"] = {"columns": 219}
+        l1l2_dir = dd / "6_ml_datasets" / "l1_l2_factors"
+        if l1l2_dir.exists():
+            datasets["l1_l2_factors"] = {"columns": 330}
         ti_dir = dd / "5_technical_derived" / "technical_indicators"
         if ti_dir.exists():
             datasets["technical_indicators"] = {"columns": 37}

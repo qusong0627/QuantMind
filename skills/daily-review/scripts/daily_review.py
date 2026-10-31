@@ -64,7 +64,7 @@ INDEXES: list[tuple[str, str]] = [
 ]
 
 STALE_NOTES: dict[str, str] = {
-    "l2_factors": "",  # L2 已恢复日更（2026-08 复测），无滞后
+    "l1_l2_factors": "",  # L2 因子现位于 l1_l2 合并宽表，无滞后
     "min1_kline": "停更 2026-07-24",
     "min5_kline": "停更 2026-07-24",
     "hsgt_north": "北向 2024-08 起改季度披露，只有季度快照",
@@ -554,11 +554,11 @@ def load_fund_stats(db: duckdb.DuckDBPyConnection, data_dir: Path, trade_date: s
 
     rows = q1(
         db,
-        f"SELECT max(dt) FROM read_parquet('{data_dir}/6_ml_datasets/l2_factors/dt=*/data.parquet',"
+        f"SELECT max(dt) FROM read_parquet('{data_dir}/6_ml_datasets/l1_l2_factors/dt=*/data.parquet',"
         f" hive_partitioning=true)",
     )
     out["l2_latest"] = rows[0][0] if rows and rows[0] else None
-    out["l2_note"] = STALE_NOTES["l2_factors"]
+    out["l2_note"] = STALE_NOTES["l1_l2_factors"]
     return out
 
 
@@ -666,7 +666,7 @@ def load_preflight(db: duckdb.DuckDBPyConnection, data_dir: Path, trade_date: st
         ("valuation", "5_technical_derived/valuation"),
         ("margin_trading", "2_base_sector/margin_trading"),
         ("l1_factors", "6_ml_datasets/l1_factors"),
-        ("l2_factors", "6_ml_datasets/l2_factors"),
+        ("l1_l2_factors", "6_ml_datasets/l1_l2_factors"),
     ]
     out = []
     for name, rel in checks:
@@ -725,8 +725,8 @@ def load_factor_stats(
 
     # ── L2 微观结构：正向因子强度 + VPIN + 量价背离 + 超级大单 ──
     try:
-        l2f_now = f"{data_dir}/6_ml_datasets/l2_factors/dt={trade_date}/data.parquet"
-        l2f_prev = f"{data_dir}/6_ml_datasets/l2_factors/dt={prev_date}/data.parquet"
+        l2f_now = f"{data_dir}/6_ml_datasets/l1_l2_factors/dt={trade_date}/data.parquet"
+        l2f_prev = f"{data_dir}/6_ml_datasets/l1_l2_factors/dt={prev_date}/data.parquet"
         avail = [c for c in L2_POSITIVE_FACTORS if c in q(db, f"SELECT * FROM read_parquet('{l2f_now}') LIMIT 0").columns]
         sel = ", ".join(avail + ["symbol", "flow_super_net", "vol_price_divergence"])
         dn_f = q(db, f"SELECT {sel} FROM read_parquet('{l2f_now}')")
@@ -1478,12 +1478,12 @@ def load_sector_flow_multiday(
     df = q(
         db,
         f"SELECT symbol, dt, flow_net_amount FROM read_parquet("
-        f"'{data_dir}/6_ml_datasets/l2_factors/dt=*/data.parquet', hive_partitioning=true)"
+        f"'{data_dir}/6_ml_datasets/l1_l2_factors/dt=*/data.parquet', hive_partitioning=true)"
         f" WHERE dt IN ({dt_in})",
     )
     if df.empty:
         return {"latest": trade_date, "items": []}
-    df["dt"] = df["dt"].astype(str)  # l2_factors dt 为 int（20260828），统一字符串
+    df["dt"] = df["dt"].astype(str)  # l1_l2_factors dt 为 int（20260828），统一字符串
     df["ind"] = df["symbol"].map(industry_map).fillna("未知")
     df = df[df["ind"] != "未知"]
     if df.empty:

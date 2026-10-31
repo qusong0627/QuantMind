@@ -4,13 +4,13 @@ Phase 0 · QuantDB 数据口径适配层。
 当前 QuantDB 本地 parquet（D:\\quant_data）各数据源列名不完全统一：
   - daily_unadjusted / index_daily / valuation : 小写 ``symbol`` + ``time``
   - technical_indicators                        : 部分分区大写 ``Symbol``，最新分区小写 ``symbol``
-  - l2_factors                                  : 小写 ``symbol`` + ``date`` + ``flow_*`` 资金流（partition 注入 ``dt``）
+  - l1_l2_factors                               : 小写 ``symbol`` + ``date`` + ``flow_*`` 资金流（partition 注入 ``dt``）
   - sector_concept/sector_members.parquet       : ``SectorCode/ SectorName/ SectorType/ Symbol``
 
 本层把上层（snapshot 计算 / 实时 feed）需要的列统一归一：
   - 标的 ID 一律小写后缀（``000001.SZ``）
   - 交易日一律为 partition 注入的 ``dt``（``YYYYMMDD``）
-  - 提供 DuckDB 规范视图：qdb_daily_unadjusted / qdb_index_daily / qdb_l2_factors / qdb_technical_indicators
+  - 提供 DuckDB 规范视图：qdb_daily_unadjusted / qdb_index_daily / qdb_l1_l2_factors / qdb_technical_indicators
 
 这样上层 SQL 无需感知分区间的大小写差异，跨分区读也安全（用 COALESCE 合并 Symbol/symbol）。
 """
@@ -32,13 +32,13 @@ DATASET_DIRS = {
     "daily_unadjusted": "1_kline_data/daily_unadjusted",
     "index_daily": "1_kline_data/index_daily",
     "technical_indicators": "5_technical_derived/technical_indicators",
-    "l2_factors": "6_ml_datasets/l2_factors",
+    "l1_l2_factors": "6_ml_datasets/l1_l2_factors",
     "valuation": "5_technical_derived/valuation",
     "sector_members": "2_base_sector/sector_concept/sector_members.parquet",
     "instrument_list": "2_base_sector/instrument_detail/instrument_list.parquet",
 }
 
-# l2_factors 资金流必要列（供上层直接选取，缺失时降级）
+# L1+L2 资金流必要列（供上层直接选取，缺失时降级）
 FLOW_COLUMNS = [
     "symbol", "dt", "close", "amount",
     "flow_net_amount", "flow_buy_amount", "flow_sell_amount", "flow_net_ratio",
@@ -109,14 +109,14 @@ def create_views(con: duckdb.DuckDBPyConnection, data_dir: Path) -> duckdb.DuckD
             FROM read_parquet('{_partition_glob(data_dir, DATASET_DIRS["technical_indicators"])}',
                               hive_partitioning=1, union_by_name=true)
         """)
-    # L2 资金流：只投影必要列（symbol + 资金流字段）
-    if _available(data_dir, DATASET_DIRS["l2_factors"]):
-        present_cols = _l2_available_flow_cols(con, data_dir)
+    # L1+L2 资金流：只投影必要列（symbol + 资金流字段）
+    if _available(data_dir, DATASET_DIRS["l1_l2_factors"]):
+        present_cols = _l1l2_available_flow_cols(con, data_dir)
         select_cols = [c for c in FLOW_COLUMNS if c in present_cols] or ["symbol", "dt", "close"]
         con.execute(f"""
-            CREATE VIEW IF NOT EXISTS qdb_l2_factors AS
+            CREATE VIEW IF NOT EXISTS qdb_l1_l2_factors AS
             SELECT {", ".join(select_cols)}
-            FROM read_parquet('{_partition_glob(data_dir, DATASET_DIRS["l2_factors"])}',
+            FROM read_parquet('{_partition_glob(data_dir, DATASET_DIRS["l1_l2_factors"])}',
                               hive_partitioning=1, union_by_name=true)
         """)
     # 估值（板块总市值用）——按需读，供 compute 引用
@@ -130,10 +130,10 @@ def create_views(con: duckdb.DuckDBPyConnection, data_dir: Path) -> duckdb.DuckD
     return con
 
 
-def _l2_available_flow_cols(con: duckdb.DuckDBPyConnection, data_dir: Path) -> set[str]:
-    """探测最新 l2 分区实际有哪些列（避免引用不存在的 flow_* 报错）。"""
+def _l1l2_available_flow_cols(con: duckdb.DuckDBPyConnection, data_dir: Path) -> set[str]:
+    """探测最新 l1_l2 分区实际有哪些列（避免引用不存在的 flow_* 报错）。"""
     try:
-        files = sorted((data_dir / DATASET_DIRS["l2_factors"]).glob("dt=*/data.parquet"))
+        files = sorted((data_dir / DATASET_DIRS["l1_l2_factors"]).glob("dt=*/data.parquet"))
         if not files:
             return set()
         rel = str(files[-1]).replace("\\", "/")

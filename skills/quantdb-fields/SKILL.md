@@ -182,13 +182,13 @@ python backend/scripts/wind_l2_import.py --archive ... --force                  
 | 分位数/percentile 字段 | 0~1 小数 |
 | `liq_* / fun_turnover / fun_mv` | 部分日期为 None，注意补缺 |
 
-### l2_factors（二级因子，flow 金额注意）
+### l1_l2_factors（L2 因子现位于合并宽表，flow 金额注意）
 | 字段 | 单位 | 实测依据 |
 |---|---|---|
 | `flow_net_amount / flow_buy/sell / flow_super/large/medium/small_net` | **万元**（2026-09 起） | 与同表 `amount` 同量纲：`flow_net_amount/amount≈flow_net_ratio`；此前为**元**（`flow/(amount×1e4)≈ratio`） |
 | `flow_*_ratio` | 小数 | |
 | `vol_turnover_total` | **股** | 与 kline volume 完全相等 ✓ |
-| 分区 | 已恢复日更 | ⚠️ top 少数净流入可能厂商同值封顶 |
+| 分区 | l2 独立目录已下线，读 l1_l2 合并宽表 | ⚠️ top 少数净流入可能厂商同值封顶 |
 
 **读入归一**：`backend/shared/quantdb_flow_units.py` 自动把万元→元（兼容旧分区），下游再 `/1e8`→亿、`×1e-6`→百万元。
 
@@ -253,7 +253,7 @@ API 层 `_UNIT_SCALES` 把部分字段缩放后输出（L2 金额先归一为元
 ## 十二、已知数据缺口（2026-08 实测）
 
 1. **min1/min5** 分钟线停更（最新 2026-07-24）
-2. ~~l2_factors 分区停更~~ —— **已恢复**（2026-08-19 实测至 20260818）
+2. ~~l2 分区停更~~ —— l2 独立目录已下线，读 l1_l2 合并宽表
 3. **hsgt_north** 北向明细停更（2024-08，改季度披露所致）
 4. **instrument_detail** HqDate 滞后（20260720）
 5. **dt=20260729~20260802** 个股日线有同步缺口（非交易日+同步中断）

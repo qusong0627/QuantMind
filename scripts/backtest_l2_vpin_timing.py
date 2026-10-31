@@ -32,12 +32,12 @@ IMPACT_FILTER_PCT = 0.8  # 剔除当日冲击成本最高的 20% 个股
 
 
 def _l2_root() -> Path:
-    """L2 分区根目录：容器内 /data，host 上项目相对路径。"""
-    for cand in (Path("/data/quantdb/6_ml_datasets/l2_factors"),
-                 Path(__file__).resolve().parents[1] / "data" / "quantdb" / "6_ml_datasets" / "l2_factors"):
+    """L1+L2 分区根目录：容器内 /data，host 上项目相对路径。"""
+    for cand in (Path("/data/quantdb/6_ml_datasets/l1_l2_factors"),
+                 Path(__file__).resolve().parents[1] / "data" / "quantdb" / "6_ml_datasets" / "l1_l2_factors"):
         if cand.exists():
             return cand
-    return Path(__file__).resolve().parents[1] / "data" / "quantdb" / "6_ml_datasets" / "l2_factors"
+    return Path(__file__).resolve().parents[1] / "data" / "quantdb" / "6_ml_datasets" / "l1_l2_factors"
 
 
 def load_vpin_regime(start: str = "20260106", end: str = "20260819") -> dict[str, dict]:

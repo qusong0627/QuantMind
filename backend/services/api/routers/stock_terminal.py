@@ -374,14 +374,14 @@ L2_RECOMMENDED_FACTORS: list[dict[str, Any]] = [
 
 @lru_cache(maxsize=1)
 def _l2_partitions() -> tuple[str, ...]:
-    """L2 因子分区目录（dt=YYYYMMDD）升序。"""
-    d = _quantdb_dir() / "6_ml_datasets" / "l2_factors"
+    """L1+L2 合并宽表分区目录（dt=YYYYMMDD）升序。"""
+    d = _quantdb_dir() / "6_ml_datasets" / "l1_l2_factors"
     parts = sorted(p.name for p in d.glob("dt=*"))
     return tuple(parts)
 
 
 def _l2_feature_date(signal_date: str | None) -> str | None:
-    """预测日的前一个交易日（L2 分区 dt 中 < signal_date 的最近一天）。"""
+    """预测日的前一个交易日（L1+L2 分区 dt 中 < signal_date 的最近一天）。"""
     dt = (signal_date or "").replace("-", "")
     for p in reversed(_l2_partitions()):
         d = p.removeprefix("dt=")
@@ -390,14 +390,14 @@ def _l2_feature_date(signal_date: str | None) -> str | None:
     return None
 
 
-# L2 全市场因子表缓存：同一天切多只股票时避免重复读全市场 parquet（实测每次约 0.5~1s）
+# L1+L2 全市场因子表缓存：同一天切多只股票时避免重复读全市场 parquet（实测每次约 0.5~1s）
 _l2_frame_cache: dict[str, tuple[float, pd.DataFrame]] = {}
 _l2_frame_cache_lock = threading.Lock()
 _L2_FRAME_TTL = 300.0
 
 
 def _l2_frame_for(feature_date: str) -> pd.DataFrame | None:
-    """读某特征日的全市场 L2 因子表（按日期缓存）。"""
+    """读某特征日的全市场 L1+L2 因子表（按日期缓存）。"""
     now = time.time()
     with _l2_frame_cache_lock:
         hit = _l2_frame_cache.get(feature_date)
@@ -408,7 +408,7 @@ def _l2_frame_for(feature_date: str) -> pd.DataFrame | None:
                 return hit[1]
     import duckdb
 
-    d = _quantdb_dir() / "6_ml_datasets" / "l2_factors" / f"dt={feature_date}" / "data.parquet"
+    d = _quantdb_dir() / "6_ml_datasets" / "l1_l2_factors" / f"dt={feature_date}" / "data.parquet"
     if not d.exists():
         return None
     names = [f["name"] for f in L2_RECOMMENDED_FACTORS]
@@ -420,7 +420,7 @@ def _l2_frame_for(feature_date: str) -> pd.DataFrame | None:
         ).fetchdf()
         con.close()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("read l2 factors %s failed: %s", feature_date, exc)
+        logger.warning("read l1_l2 factors %s failed: %s", feature_date, exc)
         return None
     if df.empty or "symbol" not in df.columns:
         return None
@@ -527,7 +527,7 @@ _SERIES_GROUPS: dict[str, tuple[str, list[str]]] = {
         "chip_profit_ratio_20", "chip_profit_ratio_60", "chip_concentration_20",
         "chip_cost_90_width",
     ]),
-    "flow": ("qdb_l2_factors", [
+    "flow": ("qdb_l1_l2_factors", [
         "flow_net_amount", "flow_super_net", "flow_large_net", "flow_net_ratio",
         "amount",
     ]),

@@ -410,7 +410,7 @@ def prepare_data(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# L2 数据加载（直读 QuantDB l2_factors 分区）
+# L1+L2 数据加载（直读 QuantDB l1_l2_factors 分区，含全部 L2 高频因子列）
 # ═══════════════════════════════════════════════════════════════════════════
 
 L2_EXCLUDE_COLS = {
@@ -423,23 +423,23 @@ def prepare_l2_data(
     date_range: tuple = None,
 ) -> pd.DataFrame:
     """
-    直读 L2 原始分区（data/quantdb/6_ml_datasets/l2_factors/dt=*/data.parquet）。
+    直读 L1+L2 原始分区（data/quantdb/6_ml_datasets/l1_l2_factors/dt=*/data.parquet）。
 
-    L2 分区自带 OHLCV + date 列，无需 join K 线。
+    L1+L2 分区自带 OHLCV + date 列，无需 join K 线。
     为效率抽样股票（L2 信号截面性强，抽样不影响因子排序）。
     主看 T+3 fwd_ret（超短线定位），同时算 T+1/5/10/20 看衰减。
     """
     if os.path.exists("/app") and not os.environ.get("QUANTMIND_HOST_MODE"):
-        l2_root = Path("/app/data/quantdb/6_ml_datasets/l2_factors")
+        l2_root = Path("/app/data/quantdb/6_ml_datasets/l1_l2_factors")
     else:
-        l2_root = PROJECT_ROOT / "data" / "quantdb" / "6_ml_datasets" / "l2_factors"
+        l2_root = PROJECT_ROOT / "data" / "quantdb" / "6_ml_datasets" / "l1_l2_factors"
 
     if not l2_root.exists():
-        _log(f"ERROR: L2 分区目录不存在: {l2_root}")
+        _log(f"ERROR: L1+L2 分区目录不存在: {l2_root}")
         sys.exit(1)
 
     partitions = sorted(l2_root.glob("dt=*/data.parquet"))
-    _log(f"发现 {len(partitions)} 个 L2 分区: {partitions[0].parent.name} ~ {partitions[-1].parent.name}")
+    _log(f"发现 {len(partitions)} 个 L1+L2 分区: {partitions[0].parent.name} ~ {partitions[-1].parent.name}")
 
     if date_range:
         partitions = [

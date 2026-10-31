@@ -307,7 +307,7 @@ def build_report_md(d: dict) -> str:
 
 - 涨跌家数与涨跌停：以 `technical_indicators.pct_change`（%）为口径，涨停≈≥9.8%、跌停≈≤-9.8%
 - 成交额：指数 `index_daily.amount`（万元）；两市总额为全市场日线 amount 聚合，已转亿元
-- 资金流：`l2_factors.flow_*`（万元，后端归一为元后转亿元）；主力占比 = 主力净额/总成交额
+- 资金流：`l1_l2_factors.flow_*`（万元，后端归一为元后转亿元）；主力占比 = 主力净额/总成交额
 - 概念/行业归属：`sector_members`（申万一级 + 概念板块）
 - 本报告由 AI 自动生成，仅供学习研究，不构成投资建议
 """

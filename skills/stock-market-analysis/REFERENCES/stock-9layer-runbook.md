@@ -13,7 +13,7 @@ docker exec quantmind-db psql -U quantmind -d quantmind -t -c \
   "SELECT symbol,name FROM stocks WHERE name LIKE '%振华科技%';"
 
 # ② 确认最新数据分区（日更节奏：当日 L2 晚间落盘；个别标的日K可能缺最新一天）
-ls data/quantdb/6_ml_datasets/l2_factors/ | tail -1          # L2 最新
+ls data/quantdb/6_ml_datasets/l1_l2_factors/ | tail -1          # L1+L2 最新
 ls data/quantdb/1_kline_data/daily_forward/ | tail -1        # 日K 最新
 ```
 

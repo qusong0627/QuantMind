@@ -12,7 +12,7 @@
   - PG `stock_aliases`：symbol -> 股票名
   - `data/reports/daily_review/{date}_news.json`：当日新闻情绪（news_review.py 产物，
     缺失则该维度中性）
-  - QuantDB `6_ml_datasets/l2_factors`：订单微结构截面分位（正 IC 高=资金活跃，
+  - QuantDB `6_ml_datasets/l1_l2_factors`：订单微结构截面分位（正 IC 高=资金活跃，
     负 IC 反转计入；缺失则跳过）
 
 打分：L2 微观结构为主(40%)，模型融合分其次(30%)，趋势不纳入；
@@ -487,7 +487,7 @@ def load_l2(data_date: date | None, buy_date: date) -> dict[str, dict]:
     qs = _find_quantdb()
     if not qs:
         return {}
-    ds = os.path.join(qs, "6_ml_datasets", "l2_factors")
+    ds = os.path.join(qs, "6_ml_datasets", "l1_l2_factors")
     if not os.path.isdir(ds):
         return {}
     pats = sorted(os.path.join(ds, p) for p in os.listdir(ds) if p.startswith("dt="))

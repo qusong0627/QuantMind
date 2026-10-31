@@ -28,7 +28,7 @@ Qlib 二进制缓存（.qlib_cache/{cn,hk,us,bc,futures}_data）
 - **QuantDB 数据目录**：`data/quantdb/`（6 大类：`1_kline_data` / `2_base_sector` / `3_financial` / `4_bond_etf` / `5_technical_derived` / `6_ml_datasets`）
 - **字段路由**：`config/data_sources/field_routing.yaml`（quantdb_local 为主源，旧适配器兜底）
 - **A股同步 4 阶段**：`sync_parquet()`（V2 分区 `dt=YYYYMMDD/data.parquet` 增量）→ `fill_pg_from_parquet()` → `update_qlib_cache()` → 年度特征快照
-- **特征快照**：`generate_feature_snapshots.py --year YYYY` 从 QuantDB parquet 直读 `daily_backward + features_daily + l1_factors + l2_factors`，JOIN 后写按年 parquet + metadata.json（含 Alpha158/GTJA 扩充、去泄漏列）
+- **特征快照**：`generate_feature_snapshots.py --year YYYY` 从 QuantDB parquet 直读 `daily_backward + features_daily + l1_factors + l1_l2_factors`，JOIN 后写按年 parquet + metadata.json（含 Alpha158/GTJA 扩充、去泄漏列）
 - **覆盖日期**：2016-01 起；A股特征快照逐年，非A股单体文件
 
 ## 同步调度

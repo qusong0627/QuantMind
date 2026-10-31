@@ -54,7 +54,7 @@ INDEXES: list[tuple[str, str]] = [
 # 上游仍有数据、可由 QuantDB 同步补齐 —— 并非上游停更。
 _STALE_NOTE = "本地未同步，可由 QuantDB 同步补齐（非上游停更）"
 STALE_NOTES: dict[str, str] = {
-    "l2_factors": _STALE_NOTE,
+    "l1_l2_factors": _STALE_NOTE,
     "min1_kline": _STALE_NOTE,
     "min5_kline": _STALE_NOTE,
     "hsgt_north": _STALE_NOTE,
@@ -484,11 +484,11 @@ def load_fund_stats(db: duckdb.DuckDBPyConnection, data_dir: Path, trade_date: s
 
     rows = q1(
         db,
-        f"SELECT max(dt) FROM read_parquet('{data_dir}/6_ml_datasets/l2_factors/dt=*/data.parquet',"
+        f"SELECT max(dt) FROM read_parquet('{data_dir}/6_ml_datasets/l1_l2_factors/dt=*/data.parquet',"
         f" hive_partitioning=true)",
     )
-    out["l2_latest"] = rows[0][0] if rows and rows[0] else None
-    out["l2_note"] = STALE_NOTES["l2_factors"]
+    out["flow_latest"] = rows[0][0] if rows and rows[0] else None
+    out["flow_note"] = STALE_NOTES["l1_l2_factors"]
     return out
 
 
@@ -596,7 +596,7 @@ def load_preflight(db: duckdb.DuckDBPyConnection, data_dir: Path, trade_date: st
         ("valuation", "5_technical_derived/valuation"),
         ("margin_trading", "2_base_sector/margin_trading"),
         ("l1_factors", "6_ml_datasets/l1_factors"),
-        ("l2_factors", "6_ml_datasets/l2_factors"),
+        ("l1_l2_factors", "6_ml_datasets/l1_l2_factors"),
     ]
     out = []
     for name, rel in checks:
@@ -719,7 +719,7 @@ def render_facts(stats: dict) -> str:
             f"- 北向资金：{n['quarter']} 季度快照（报告期 {n['report_date']}）持仓市值 {_yi(n['total_value_yi'])}，"
             f"覆盖 {n['stocks']} 只（2024-08 起日频改季度披露）"
         )
-    L.append(f"- 主力资金（L2）：{fu.get('l2_note', '')}")
+    L.append(f"- 主力资金：{fu.get('flow_note', '')}")
     L.append("")
 
     L.append("## 六、个股榜（剔除 ST 与新股首日）\n")

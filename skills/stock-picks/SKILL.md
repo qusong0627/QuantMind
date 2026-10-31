@@ -115,7 +115,7 @@ Top5 候选（五维综合，L2 主导）：
 
 | 维度 | 权重 | 数据源 | 怎么判读 |
 |---|---|---|---|
-| L2 微观结构 | **40%** | `l2_factors` 正 IC 因子 + 负 IC 因子（负 IC 反转） | 正 IC 高=知情资金活跃；负 IC 低=毒性/波动小；健康分 = 0.5×正IC分位 + 0.5×(1−负IC分位) |
+| L2 微观结构 | **40%** | `l1_l2_factors` 正 IC 因子 + 负 IC 因子（负 IC 反转，L2 为因子家族叫法，数据源为合并宽表） | 正 IC 高=知情资金活跃；负 IC 低=毒性/波动小；健康分 = 0.5×正IC分位 + 0.5×(1−负IC分位) |
 | 模型融合分数 | 30% | `engine_signal_scores.fusion_score` 幅度归一 | 融合分越高=模型预测收益越强；用默认单模型（日推模型） |
 | 仓位信号 | 15% | `quality.position.position_score` | 0.8+ = 强行业地位 + 半凯利高仓位；<0.3 弱；数据缺失不拦 |
 | 板块强度 | 10% | `industry_top10_avg` 截面分位 + 板块超级大单净额 | 行业头部强度 + 当日板块大单净流入（跌市抄底方向反推） |
@@ -130,7 +130,7 @@ Top5 候选（五维综合，L2 主导）：
 
 > **报告日期**：2026-08-21
 > **数据截至**：2026-08-21（信号日）
-> **口径**：候选来自最近全量推理日 engine_signal_scores + l2_factors + 当日新闻情绪；五维加权（L2 40/融合 30/仓位 15/板块 10/新闻 5，趋势不纳入）
+> **口径**：候选来自最近全量推理日 engine_signal_scores + l1_l2_factors + 当日新闻情绪；五维加权（L2 40/融合 30/仓位 15/板块 10/新闻 5，趋势不纳入）
 
 ## 一、市场环境（综合复盘，从 facts.md 提炼）
 指数/广度/量能/主线/资金 2-4 句 + 次日方向（六维合成）+ 一句话「该不该进场/什么风格占优」。
@@ -159,7 +159,7 @@ Top5 候选（五维综合，L2 主导）：
 
 ## 维护
 
-- 核心脚本：`scripts/pick_candidates.py`（宿主机跑；PG `engine_signal_scores` + `stock_aliases`，QuantDB `l2_factors`，`news_review.py` 产物）
+- 核心脚本：`scripts/pick_candidates.py`（宿主机跑；PG `engine_signal_scores` + `stock_aliases`，QuantDB `l1_l2_factors`，`news_review.py` 产物）
 - 依赖技能：`[[daily-review]]`（复盘取数）、`[[stock-market-analysis]]`（深分）、`[[quantdb-fields]]`（单位口径）
 - 权重/阈值改 `pick_candidates.py` 顶部常量（`W_*`、`_POSITION_GATE`、`_MIN_SIGNAL_COVERAGE`）
 - 单测：`cd scripts && python3 -m pytest tests/ -q`（覆盖打分/过滤/趋势/单位）

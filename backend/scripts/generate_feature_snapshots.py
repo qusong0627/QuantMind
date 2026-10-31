@@ -2,7 +2,7 @@
 """从 QuantDB parquet 直接生成特征快照（按年份拆分）。
 
 替代 update_feature_parquet.py 的 PG→计算模式，
-直接读取 QuantDB 已有的 daily_forward + features_daily + l1_factors + l2_factors 数据，
+直接读取 QuantDB 已有的 daily_forward + features_daily + l1_factors + l1_l2_factors 数据，
 JOIN 后按年份写入 model_features_YYYY.parquet + metadata.json。
 
 用法:
@@ -307,9 +307,9 @@ def _build_snapshot(year: int, dry_run: bool = False) -> dict | None:
     else:
         _log("  l1_factors: 无数据或为空")
 
-    # ── Step 3: l2_factors (微观结构/高频波动率/资金流) ──
-    _log(f"读取 QuantDB l2_factors ({year})...")
-    l2_path = f"{qdb}/6_ml_datasets/l2_factors"
+    # ── Step 3: l1_l2_factors (L1 + 微观结构/高频波动率/资金流) ──
+    _log(f"读取 QuantDB l1_l2_factors ({year})...")
+    l2_path = f"{qdb}/6_ml_datasets/l1_l2_factors"
     try:
         # union_by_name: 2026-03-02 前老分区无 OHLC 行情列，之后的分区有，
         # 跨分区 glob 会因 schema 不一致报错（unified 按位置对齐会串列）。
@@ -320,7 +320,7 @@ def _build_snapshot(year: int, dry_run: bool = False) -> dict | None:
         """
         df_l2 = con.execute(query_l2).fetchdf()
     except Exception as e:
-        _log(f"  l2_factors 读取失败: {e}")
+        _log(f"  l1_l2_factors 读取失败: {e}")
         df_l2 = None
 
     if df_l2 is not None and not df_l2.empty:
@@ -338,13 +338,13 @@ def _build_snapshot(year: int, dry_run: bool = False) -> dict | None:
             df_l2 = df_l2.drop(columns=["dt"], errors="ignore")
 
         if df_l2 is not None:
-            _log(f"  l2_factors: {len(df_l2):,} rows, {len(df_l2.columns)} cols")
+            _log(f"  l1_l2_factors: {len(df_l2):,} rows, {len(df_l2.columns)} cols")
             df = df.merge(df_l2, on=["symbol", "trade_date"], how="left", suffixes=("", "_l2"))
             dup_cols = [c for c in df.columns if c.endswith("_l2")]
             if dup_cols:
                 df = df.drop(columns=dup_cols, errors="ignore")
     else:
-        _log("  l2_factors: 无数据或为空")
+        _log("  l1_l2_factors: 无数据或为空")
 
     con.close()
 
@@ -416,7 +416,7 @@ def _build_snapshot(year: int, dry_run: bool = False) -> dict | None:
         "symbol_count": sym_count,
         "implemented_feature_count": len(feature_cols),
         "feature_columns": feature_cols,
-        "source": "quantdb (daily_forward + features_daily + l1_factors + l2_factors)",
+        "source": "quantdb (daily_forward + features_daily + l1_factors + l1_l2_factors)",
         "generated_at": datetime.now().isoformat(),
     }
     meta_path = out_path.with_suffix(".metadata.json")

@@ -68,7 +68,7 @@ configuration:
 1. **收集需求**：市场？预测周期 T+N？模型类型？偏因子方向（动量/微观结构/基本面…）？
    训练/验证/测试时间范围？股票池？若用户没说，用 §3 的默认值并**在交付时说明所选默认**。
 2. **定市场与因子源**：CN/HK/US/FUTURES/CRYPTO 是 QuantDB 直读市场。
-   要 L2 微观特征就 `l1_l2_factors`；只要日频用 `l1_factors`；纯高频用 `l2_factors`。
+   要 L2 微观特征就 `l1_l2_factors`；只要日频用 `l1_factors`；纯高频从 `l1_l2_factors` 中取 micro_*/flow_* 列子集。
 3. **选因子**：按 [references/factor-families.md](references/factor-families.md) 的 recipe 挑
    40~120 个，家族均衡；优先用其中列出的 key（已在本地目录验证）。
 4. **定时间切分**：三段都要，且 `train_end < val_start`、`val_end < test_start`；
