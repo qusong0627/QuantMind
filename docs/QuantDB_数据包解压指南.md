@@ -17,7 +17,7 @@
 | `3_financial_data/` | 财务数据（资产负债表、利润表、现金流、股本、分红因子等） | ~0.85 GB |
 | `4_bond_etf/` | 债券 / ETF | 小 |
 | `5_technical_derived/` | 技术衍生（估值、技术指标、市场情绪） | ~9.3 GB |
-| `6_ml_datasets/` | 机器学习因子（features_daily、l1/l2_factors 等） | ~39 GB |
+| `6_ml_datasets/` | 机器学习因子（features_daily、l1_factors、l1_l2_factors 等） | ~39 GB |
 
 ## 2. 项目标准数据目录
 

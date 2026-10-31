@@ -1,7 +1,7 @@
 {
   "version": "v2.0",
   "version_name": "QM Feature Set v2.1 (L2/microstructure unlocked, 20260820)",
-  "description": "完整 QuantDB 特征集 (daily_forward + features_daily + l1_factors + l2_factors), 164 个可用特征",
+  "description": "完整 QuantDB 特征集 (daily_forward + features_daily + l1_factors + l1_l2_factors), 164 个可用特征",
   "feature_count": 534,
   "categories": [
     {
@@ -1253,7 +1253,7 @@
           "order_no": 7,
           "default_selected": false,
           "coverage_ratio": 0.9974,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "已实现波动率RV (高频当日值，建议使用 Ref(...,1) 以防未来函数)",
           "explanation": ""
         },
@@ -1274,7 +1274,7 @@
           "order_no": 8,
           "default_selected": false,
           "coverage_ratio": 0.9974,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "稳健已实现波动率RRV (高频当日值，建议使用 Ref(...,1) 以防未来函数)",
           "explanation": ""
         },
@@ -1295,7 +1295,7 @@
           "order_no": 9,
           "default_selected": false,
           "coverage_ratio": 0.9972,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "已实现偏度RSkew (高频当日值，建议使用 Ref(...,1) 以防未来函数)",
           "explanation": ""
         },
@@ -1384,7 +1384,7 @@
           "key": "vol_realized_5min",
           "description": "5分钟已实现波动率",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -1400,7 +1400,7 @@
           "key": "vol_realized_sjv",
           "description": "连续/跳跃波动率分解-跳跃成分",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -1416,7 +1416,7 @@
           "key": "vol_realized_jump",
           "description": "跳跃波动率",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -1432,7 +1432,7 @@
           "key": "vol_skew",
           "description": "收益率偏度",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -1448,7 +1448,7 @@
           "key": "vol_kurtosis",
           "description": "收益率峰度",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -1464,7 +1464,7 @@
           "key": "vol_persistence",
           "description": "波动率持续性",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -1480,7 +1480,7 @@
           "key": "vol_up_down_ratio",
           "description": "涨跌量比",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -2788,7 +2788,7 @@
           "order_no": 1,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "总净流入额",
           "explanation": ""
         },
@@ -3181,7 +3181,7 @@
           "key": "flow_net_ratio",
           "description": "总净流入占比",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3189,7 +3189,7 @@
           "order_no": 23,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "总净流入占比",
           "explanation": ""
         },
@@ -3198,7 +3198,7 @@
           "key": "flow_large_net",
           "description": "大单净流入",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3206,7 +3206,7 @@
           "order_no": 24,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "大单净流入",
           "explanation": ""
         },
@@ -3215,7 +3215,7 @@
           "key": "flow_medium_net",
           "description": "中单净流入",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3231,7 +3231,7 @@
           "key": "flow_small_net",
           "description": "小单净流入",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3247,7 +3247,7 @@
           "key": "flow_super_net",
           "description": "超大单净流入",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3263,7 +3263,7 @@
           "key": "flow_large_ratio",
           "description": "大单流入占比",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3279,7 +3279,7 @@
           "key": "flow_medium_ratio",
           "description": "中单流入占比",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3295,7 +3295,7 @@
           "key": "flow_small_ratio",
           "description": "小单流入占比",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3311,7 +3311,7 @@
           "key": "flow_imbalance_volume",
           "description": "委托量不平衡",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3319,7 +3319,7 @@
           "order_no": 31,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "委托量不平衡",
           "explanation": ""
         },
@@ -3328,7 +3328,7 @@
           "key": "flow_consistency",
           "description": "资金流一致性",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3344,7 +3344,7 @@
           "key": "flow_money_flow_index",
           "description": "资金流量指数",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3360,7 +3360,7 @@
           "key": "flow_big_trade_ratio",
           "description": "大单成交占比",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3376,7 +3376,7 @@
           "key": "micro_vpin_8",
           "description": "VPIN(8桶)",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3392,7 +3392,7 @@
           "key": "micro_vpin_20",
           "description": "VPIN(20桶)",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3400,7 +3400,7 @@
           "order_no": 36,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "VPIN(20桶)",
           "explanation": ""
         },
@@ -3409,7 +3409,7 @@
           "key": "micro_vpin_50",
           "description": "VPIN(50桶)",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3425,7 +3425,7 @@
           "key": "micro_vpin_ma_5",
           "description": "VPIN 5日均值",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3433,7 +3433,7 @@
           "order_no": 38,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "VPIN 5日均值",
           "explanation": ""
         },
@@ -3442,7 +3442,7 @@
           "key": "micro_vpin_ma_20",
           "description": "VPIN 20日均值",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3458,7 +3458,7 @@
           "key": "micro_vpin_delta_5",
           "description": "VPIN 5日变化",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -3474,7 +3474,7 @@
           "key": "micro_pin",
           "description": "PIN知情交易概率",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5137,7 +5137,7 @@
           "key": "micro_amihud_illiquidity",
           "description": "Amihud非流动性",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5145,7 +5145,7 @@
           "order_no": 21,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "Amihud非流动性",
           "explanation": ""
         },
@@ -5154,7 +5154,7 @@
           "key": "micro_kyle_lambda",
           "description": "Kyle Lambda价格冲击",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5170,7 +5170,7 @@
           "key": "micro_price_impact_large",
           "description": "大单价格冲击",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5186,7 +5186,7 @@
           "key": "micro_impact_cost",
           "description": "冲击成本",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5202,7 +5202,7 @@
           "key": "micro_impact_elasticity",
           "description": "冲击弹性",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5218,7 +5218,7 @@
           "key": "micro_aqsp",
           "description": "调整报价价差",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5234,7 +5234,7 @@
           "key": "micro_aesp",
           "description": "调整有效价差",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5250,7 +5250,7 @@
           "key": "micro_qsp_vol_20",
           "description": "报价价差波动20日",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5266,7 +5266,7 @@
           "key": "micro_esp_vol_20",
           "description": "有效价差波动20日",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5282,7 +5282,7 @@
           "key": "micro_spread_slope_1_5",
           "description": "价差斜率1-5档",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5298,7 +5298,7 @@
           "key": "micro_bid_ask_vol_ratio",
           "description": "买卖量比",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5314,7 +5314,7 @@
           "key": "micro_depth_imbalance_1",
           "description": "1档深度不平衡",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5330,7 +5330,7 @@
           "key": "micro_depth_imbalance_5",
           "description": "5档深度不平衡",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5338,7 +5338,7 @@
           "order_no": 33,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "coverage_note": "仅 2026 年起有数据 (l1_l2_factors)，跨年训练前请确认覆盖范围",
           "feature_name": "5档深度不平衡",
           "explanation": ""
         },
@@ -5347,7 +5347,7 @@
           "key": "micro_depth_slope",
           "description": "深度斜率",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5363,7 +5363,7 @@
           "key": "micro_order_flow_toxicity",
           "description": "订单流毒性",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5379,7 +5379,7 @@
           "key": "micro_informed_ratio",
           "description": "知情交易者比例",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5395,7 +5395,7 @@
           "key": "micro_jump_count_1pct",
           "description": "跳跃次数(1%阈值)",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5411,7 +5411,7 @@
           "key": "micro_open_gap",
           "description": "开盘缺口",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5427,7 +5427,7 @@
           "key": "micro_trade_buy_pressure",
           "description": "买方压力",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
@@ -5443,7 +5443,7 @@
           "key": "micro_trade_sell_pressure",
           "description": "卖方压力",
           "formula": "",
-          "source": "l2_factors",
+          "source": "l1_l2_factors",
           "enabled": true,
           "markets": [
             "CN"
