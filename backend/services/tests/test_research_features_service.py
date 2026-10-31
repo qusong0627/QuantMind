@@ -233,7 +233,7 @@ def test_to_camel_matches_frontend_convention():
 def test_camel_name_applies_cross_category_aliases():
     """前端把这些列归入别的分组，命名必须与 featureMapper.ts 一致。"""
     assert svc._camel_name("fun_mv_rank", "qdb_l1_factors") == "styleMvRank"  # noqa: SLF001
-    assert svc._camel_name("micro_liquidity_amihud_20", "qdb_l2_factors") == "liqAmihud20"  # noqa: SLF001
+    assert svc._camel_name("micro_liquidity_amihud_20", "qdb_l1_l2_factors") == "liqAmihud20"  # noqa: SLF001
 
 
 def test_camel_name_prefixes_sentiment_columns_only_for_sentiment_view():
@@ -304,7 +304,7 @@ def test_projected_batch_scales_flow_fields_to_millions(monkeypatch):
         monkeypatch,
         _FakeHub(
             {
-                "qdb_l2_factors": [
+                "qdb_l1_l2_factors": [
                     {"symbol": "600036.SH", "dt": 1, "flow_net_amount": 25_000_000.0}
                 ]
             }

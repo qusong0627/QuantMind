@@ -65,7 +65,7 @@ def _build_metrics() -> pd.DataFrame:
         "buy_pressure", "sell_pressure", "liquidity_score",
     ])
     margin = latest_rows("qdb_margin_trading", ["finance_balance", "finance_net"])
-    l2 = latest_rows("qdb_l2_factors", [
+    l2 = latest_rows("qdb_l1_l2_factors", [
         "flow_net_amount", "flow_net_ratio", "flow_super_net",
     ])
 

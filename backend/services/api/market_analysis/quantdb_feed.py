@@ -4,7 +4,7 @@
 聚合个股/板块资金流向、指数快照、行业/概念标签等，供市场分析 API 使用。
 
 数据口径（单位）：
-- ``l2_factors.flow_*`` 金额：QuantDB 2026-09 起为「万元」（读入后归一为「元」）；
+- ``l1_l2_factors.flow_*`` 金额：QuantDB 2026-09 起为「万元」（读入后归一为「元」）；
   ``index_daily.amount`` 为「万元」；
 - 输出统一转换为前端约定：个股资金流/板块净流入为「元」，趋势序列为「亿元」。
 """
@@ -141,12 +141,12 @@ def _latest_trade_date() -> str | None:
     return str(int(df.iloc[0]["dt"]))
 
 
-def _latest_l2_date() -> str | None:
-    """最新有 L2 资金流数据的交易日（YYYYMMDD）。"""
-    dates = _get_partition_dates("6_ml_datasets/l2_factors")
+def _latest_flow_date() -> str | None:
+    """最新有资金流数据的交易日（YYYYMMDD）。"""
+    dates = _get_partition_dates("6_ml_datasets/l1_l2_factors")
     if dates:
         return dates[0]
-    df = _q("SELECT max(dt) AS dt FROM qdb_l2_factors")
+    df = _q("SELECT max(dt) AS dt FROM qdb_l1_l2_factors")
     if df.empty or df.iloc[0]["dt"] is None:
         return None
     return str(int(df.iloc[0]["dt"]))
@@ -209,12 +209,12 @@ def _trading_days(end: str | None, n: int) -> list[str]:
     return [str(int(r)) for r in df["dt"]]
 
 
-def _load_l2_flow(days: list[str]) -> pd.DataFrame:
-    """读取指定交易日的 L2 资金流明细（金额列归一为元）。"""
+def _load_flow(days: list[str]) -> pd.DataFrame:
+    """读取指定交易日的资金流明细（金额列归一为元）。"""
     if not days:
         return pd.DataFrame()
     df = _read_partitioned(
-        "6_ml_datasets/l2_factors",
+        "6_ml_datasets/l1_l2_factors",
         days,
         "symbol, amount, "
         "flow_net_amount, flow_buy_amount, flow_sell_amount, flow_net_ratio, "
@@ -312,7 +312,7 @@ def _day_flow_series(flow: pd.DataFrame, days: list[str]) -> list[float]:
 def _detect_placeholder_symbols(flow: pd.DataFrame, share_thresh: int = 25) -> set[str]:
     """识别被整行占位（多只股票共享同一高精度常量）的异常股票，供剔除。
 
-    上游 L2 生成端在逐笔缺失时会给一批股票填相同占位常量，造成资金流假数据。
+    上游因子生成端在逐笔缺失时会给一批股票填相同占位常量，造成资金流假数据。
     判据：flow_net_amount 非零值被 >=share_thresh 只共享，即视为占位行。
     与离线快照/官网 predict 脚本一致。
     """
@@ -343,16 +343,16 @@ def get_stock_money_flow(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def _stock_money_flow_impl(limit: int) -> list[dict[str, Any]]:
-    ref = _latest_l2_date()
+    ref = _latest_flow_date()
     if not ref:
         return []
     days = _trading_days(ref, 30)
     if not days:
         return []
 
-    today = days[0]  # 降序列表，最新有 L2 数据的交易日
+    today = days[0]  # 降序列表，最新有资金流数据的交易日
     # 一次性加载 30 天明细，当日榜单与历史趋势共用（避免重复全量扫描）
-    hist = _load_l2_flow(days)
+    hist = _load_flow(days)
     if hist.empty:
         return []
     hist_dt = hist["dt"].astype(str)
@@ -360,7 +360,7 @@ def _stock_money_flow_impl(limit: int) -> list[dict[str, Any]]:
     if flow.empty:
         return []
 
-    # 剔除 L2 占位污染（多只股票共享同一常量值=假数据），与离线快照/官网一致。
+    # 剔除占位污染（多只股票共享同一常量值=假数据），与离线快照/官网一致。
     # bad_by_dt 供 30 日明细逐日剔除；当日榜单先剔除占位股，否则假股票把真实榜挤下去。
     bad_by_dt: dict[str, set[str]] = {}
     if "flow_net_amount" in hist.columns:
@@ -441,7 +441,7 @@ def _stock_money_flow_impl(limit: int) -> list[dict[str, Any]]:
 def get_stock_money_flow_full() -> list[dict[str, Any]]:
     """全市场个股资金流（单日快照缺失时的实时兜底，供前端本地搜索）。
 
-    只读最新一个交易日的 L2 明细，不构建 30 日趋势与逐日明细，控制全市场开销。
+    只读最新一个交易日的资金流明细，不构建 30 日趋势与逐日明细，控制全市场开销。
     """
     if not _available():
         return []
@@ -450,14 +450,14 @@ def get_stock_money_flow_full() -> list[dict[str, Any]]:
 
 
 def _stock_money_flow_full_impl() -> list[dict[str, Any]]:
-    ref = _latest_l2_date()
+    ref = _latest_flow_date()
     if not ref:
         return []
     days = _trading_days(ref, 1)
     if not days:
         return []
     today = days[0]
-    flow = _load_l2_flow([today])
+    flow = _load_flow([today])
     if flow.empty:
         return []
     # 剔除当日被整行占位（共享常量=假数据）的异常股票，与离线快照/官网一致
@@ -519,7 +519,7 @@ def _money_flow_period_impl(
     limit: int,
 ) -> list[dict[str, Any]]:
     n_days = PERIOD_DAYS.get(period.lower(), 1)
-    ref = _latest_l2_date()
+    ref = _latest_flow_date()
     if not ref:
         return []
     days = _trading_days(ref, 20)
@@ -527,7 +527,7 @@ def _money_flow_period_impl(
         return []
     window = days[:n_days]  # 降序列表中取前 n_days 天
 
-    flow_all = _load_l2_flow(days)
+    flow_all = _load_flow(days)
     if flow_all.empty:
         return []
     window_dt = set(window)
@@ -621,13 +621,13 @@ def get_money_flow_sankey() -> dict[str, Any] | None:
     if not _available():
         return None
 
-    latest = _latest_l2_date()
+    latest = _latest_flow_date()
     if not latest:
         return None
     days = _trading_days(latest, 1)
     if not days:
         return None
-    flow = _load_l2_flow([days[0]])
+    flow = _load_flow([days[0]])
     if flow.empty:
         return None
 
@@ -884,9 +884,9 @@ def get_stocks_by_tag(tag: str, limit: int = 30) -> list[dict[str, Any]] | None:
     if not symbols:
         return None
 
-    latest = _latest_l2_date()
+    latest = _latest_flow_date()
     days = _trading_days(latest, 1) if latest else []
-    flow = _load_l2_flow(days) if days else pd.DataFrame()
+    flow = _load_flow(days) if days else pd.DataFrame()
     prices = _load_prices(days) if days else pd.DataFrame()
     names = _instrument_names()
 

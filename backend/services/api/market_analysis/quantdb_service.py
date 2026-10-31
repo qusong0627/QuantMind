@@ -3,13 +3,13 @@
 把 Market Analysis 页面各接口从「硬编码假数据」切换到 QuantDB 本地数据：
 - 指数概览：index_daily（最新交易日 9 大指数点位/涨跌/成交额/量比/近5日 trend）
 - 市场广度：technical_indicators.pct_change（涨跌家数/涨停跌停/量能，复用 shared.market_breadth）
-- 资金流：l2_factors（行业与个股资金净流向，最新交易日）
+- 资金流：l1_l2_factors（行业与个股资金净流向，最新交易日）
 - 标签：sector_concept/sector_members + instrument_detail（真实行业/概念成分股）
 
 取数口径与 quantdb_feed 对齐：交易日走 dt=YYYYMMDD 目录枚举，查询只打开真正
 需要的分区文件（read_parquet 精确路径数组），参考表按源文件 mtime 缓存；
 不用 ``SELECT DISTINCT dt`` / ``dt=*`` 全量 glob 去枚举上千个 parquet。
-单位口径遵循 quantdb-fields 技能：个股 amount=万元、l2 flow=万元（读入归一为元）、指数 volume=手。
+单位口径遵循 quantdb-fields 技能：个股 amount=万元、l1_l2 flow=万元（读入归一为元）、指数 volume=手。
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ _duck_local = threading.local()
 _DAILY_REL = "1_kline_data/daily_unadjusted"
 _INDEX_DAILY_REL = "1_kline_data/index_daily"
 _TECH_REL = "5_technical_derived/technical_indicators"
-_L2_REL = "6_ml_datasets/l2_factors"
+_FLOW_REL = "6_ml_datasets/l1_l2_factors"
 _MEMBERS_REL = "2_base_sector/sector_concept/sector_members.parquet"
 _INSTRUMENT_DIR = "2_base_sector/instrument_detail"
 
@@ -389,20 +389,20 @@ def market_breadth_stats(trade_date: str | None = None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 资金流（l2_factors）
+# 资金流（l1_l2_factors）
 # ---------------------------------------------------------------------------
 
 _FLOW_COLS = ["flow_net_amount", "flow_super_net", "flow_large_net", "flow_medium_net", "flow_small_net"]
 
 
-def _l2_latest_dt() -> str | None:
-    """最新有 L2 资金流的交易日（目录枚举，不扫全部分区）。"""
-    dates = _partition_dates(_L2_REL)
+def _flow_latest_dt() -> str | None:
+    """最新有资金流的交易日（目录枚举，不扫全部分区）。"""
+    dates = _partition_dates(_FLOW_REL)
     if dates:
         return dates[0]
     # 兜底同样只用显式路径：本模块的连接没有挂载任何 hub 视图
     df = _read(
-        f"SELECT max(dt) AS dt FROM read_parquet('{_sql_rel(_L2_REL)}/dt=*/data.parquet',"
+        f"SELECT max(dt) AS dt FROM read_parquet('{_sql_rel(_FLOW_REL)}/dt=*/data.parquet',"
         " hive_partitioning=true)"
     )
     if df.empty or df.iloc[0]["dt"] is None:
@@ -410,26 +410,26 @@ def _l2_latest_dt() -> str | None:
     return str(int(df.iloc[0]["dt"]))
 
 
-def _load_l2_flow(dt: str | None = None) -> pd.DataFrame:
+def _load_flow(dt: str | None = None) -> pd.DataFrame:
     """读取指定（默认最新）交易日资金流（金额归一为元）。
 
-    旧实现 ``FROM read_parquet('l2_factors/dt=*/data.parquet')`` 不带 dt 条件，
-    每次请求都要读全历史（本机实测 885 个分区 / 8.2GB / 451 万行 / 22.5s），
+    旧实现不带 dt 条件，每次请求都要读全历史
+    （本机实测 885 个分区 / 8.2GB / 451 万行 / 22.5s），
     而所有调用方只取其中一天；单日精确分区实测 0.04s。
     """
-    day = dt or _l2_latest_dt()
+    day = dt or _flow_latest_dt()
     if not day:
         return pd.DataFrame(columns=["symbol", *_FLOW_COLS, "dt"])
     # amount / flow_net_ratio 用于万元↔元自动识别；缺列时退回仅金额列
     try:
         df = _read(
             f"SELECT symbol, amount, {', '.join(_FLOW_COLS)}, flow_net_ratio, dt FROM read_parquet("
-            f"'{_sql_rel(_L2_REL)}/dt={day}/*.parquet', hive_partitioning=true)"
+            f"'{_sql_rel(_FLOW_REL)}/dt={day}/*.parquet', hive_partitioning=true)"
         )
     except Exception:
         df = _read(
             f"SELECT symbol, {', '.join(_FLOW_COLS)}, dt FROM read_parquet("
-            f"'{_sql_rel(_L2_REL)}/dt={day}/*.parquet', hive_partitioning=true)"
+            f"'{_sql_rel(_FLOW_REL)}/dt={day}/*.parquet', hive_partitioning=true)"
         )
     if df.empty:
         return df
@@ -452,10 +452,10 @@ def money_flow_period(period: str = "1d", dimension: str = "sector") -> list[dic
     为准并标注截至日，绝不乘系数伪造多周期。
     个股级（stock）返回真实收盘价与涨跌幅。
     """
-    latest = _l2_latest_dt()
+    latest = _flow_latest_dt()
     if not latest:
         return []
-    day = _load_l2_flow(latest)
+    day = _load_flow(latest)
     if day.empty:
         return []
 
@@ -511,14 +511,14 @@ def money_flow_period(period: str = "1d", dimension: str = "sector") -> list[dic
 
 
 def stock_money_flow(limit: int = 20) -> list[dict[str, Any]]:
-    """个股资金流向排行榜（l2 真实资金流 + 当日真实收盘价/涨跌幅）。
+    """个股资金流向排行榜（l1_l2 真实资金流 + 当日真实收盘价/涨跌幅）。
 
     单位：flow_* 为元；close_price 为元（不复权）；pct_change 为 %。
     """
-    latest = _l2_latest_dt()
+    latest = _flow_latest_dt()
     if not latest:
         return []
-    day = _load_l2_flow(latest).sort_values("flow_net_amount", ascending=False)
+    day = _load_flow(latest).sort_values("flow_net_amount", ascending=False)
     if day.empty:
         return []
 
@@ -558,11 +558,11 @@ def stock_money_flow(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def money_flow_sankey() -> dict[str, Any]:
-    """主力/散户资金流向桑基图（l2 真实行业资金流，单位：元）。"""
-    latest = _l2_latest_dt()
+    """主力/散户资金流向桑基图（l1_l2 真实行业资金流，单位：元）。"""
+    latest = _flow_latest_dt()
     if not latest:
         return {"nodes": [], "links": [], "trade_date": ""}
-    day = _load_l2_flow(latest)
+    day = _load_flow(latest)
     if day.empty:
         return {"nodes": [], "links": [], "trade_date": ""}
     members = _sector_industry_members()

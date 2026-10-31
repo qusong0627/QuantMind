@@ -442,20 +442,20 @@ def _query_sources(
             "qdb_technical_indicators", symbols, dt
         )
 
-    # 2. 情绪面、L1 因子、L2 因子（非 dt 模式沿用全量）
+    # 2. 情绪面、L1 因子、L1+L2 因子（非 dt 模式沿用全量）
     sources["qdb_market_sentiment"] = _latest_rows("qdb_market_sentiment", symbols, dt)
     sources["qdb_l1_factors"] = _fetch_l1(symbols, dt)
-    l2 = _latest_rows("qdb_l2_factors", symbols, dt)
-    if l2:
+    l12 = _latest_rows("qdb_l1_l2_factors", symbols, dt)
+    if l12:
         import pandas as pd
 
-        l2_df = pd.DataFrame(list(l2.values()))
-        l2_df = normalize_l2_flow_money_to_yuan(l2_df)
-        sources["qdb_l2_factors"] = {
-            str(row["symbol"]): row for row in l2_df.to_dict(orient="records")
+        l12_df = pd.DataFrame(list(l12.values()))
+        l12_df = normalize_l2_flow_money_to_yuan(l12_df)
+        sources["qdb_l1_l2_factors"] = {
+            str(row["symbol"]): row for row in l12_df.to_dict(orient="records")
         }
     else:
-        sources["qdb_l2_factors"] = {}
+        sources["qdb_l1_l2_factors"] = {}
 
     if "turnoverRate" in wanted:
         # 日线视图只用于取 volume（现算换手率的原料）。其余列必须丢弃：
