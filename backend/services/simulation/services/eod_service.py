@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, func
@@ -175,6 +176,157 @@ async def _eod_position_snapshot_exists(
         return False
 
 
+async def _write_eod_fund_snapshot(
+    session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    trade_date: date,
+    cash: float,
+    long_mv: float,
+    short_mv: float,
+    total_asset: float,
+    initial_equity: float,
+) -> None:
+    """用 EOD 同一份重估写资金快照（与 replace_daily_snapshot 同一事务）。
+
+    口径与周期采集对齐：total/total_pnl/today_pnl 的计算方式一致，
+    只是估值取自 EOD 收盘重估而非 Redis 现值。market_value 取净市值
+    （long-short），与 EOD 重建后 Redis 的 projection 口径一致。
+    """
+    try:
+        initial = float(initial_equity or 0.0)
+        total = round(float(total_asset or 0.0), 4)
+        if initial <= 0:
+            initial = total
+        try:
+            baselines = await SimulationFundSnapshotService.get_baselines(
+                tenant_id, str(user_id), Decimal(str(initial)), as_of=trade_date
+            )
+            day_open = float(baselines.get("day_open_equity") or initial)
+        except Exception:
+            day_open = initial
+        await SimulationFundSnapshotService.upsert_eod_snapshot(
+            session,
+            tenant_id=tenant_id,
+            user_id=str(user_id),
+            snapshot_date=trade_date,
+            total_asset=total,
+            available_balance=round(float(cash or 0.0), 4),
+            frozen_balance=0.0,
+            market_value=round(float(long_mv or 0.0) - float(short_mv or 0.0), 4),
+            initial_capital=round(initial, 4),
+            total_pnl=round(total - initial, 4),
+            today_pnl=round(total - day_open, 4),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "EOD fund snapshot write failed tenant=%s user=%s date=%s: %s",
+            tenant_id,
+            user_id,
+            trade_date,
+            exc,
+        )
+
+
+async def _repair_eod_fund_snapshot(
+    session, *, tenant_id: str, user_id: str, trade_date: date
+) -> None:
+    """EOD 重跑修复：持仓日快照已存在说明该日已结算，禁止用当前持仓回写历史。
+
+     仅当资金快照缺失、非 EOD 来源、或与日账估值不一致时，按 account_daily
+    （含历史日终估值）把同一份估值配对补齐；一致时直接返回。
+    """
+    try:
+        from backend.services.simulation.models.account_daily import (
+            SimulationAccountDaily,
+        )
+
+        daily = (
+            (
+                await session.execute(
+                    select(SimulationAccountDaily).where(
+                        SimulationAccountDaily.tenant_id == tenant_id,
+                        SimulationAccountDaily.user_id == str(user_id),
+                        SimulationAccountDaily.snapshot_date == trade_date,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if daily is None:
+            return
+        fund = (
+            (
+                await session.execute(
+                    select(SimulationFundSnapshot).where(
+                        SimulationFundSnapshot.tenant_id == tenant_id,
+                        SimulationFundSnapshot.user_id == str(user_id),
+                        SimulationFundSnapshot.snapshot_date == trade_date,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if (
+            fund is not None
+            and str(getattr(fund, "source", "") or "")
+            == SimulationFundSnapshotService.EOD_SOURCE
+            and abs(float(fund.total_asset or 0.0) - float(daily.total_asset or 0.0))
+            < 1e-9
+        ):
+            return
+        total = round(float(daily.total_asset or 0.0), 4)
+        initial = 0.0
+        if fund is not None and float(fund.initial_capital or 0.0) > 0:
+            initial = float(fund.initial_capital)
+        else:
+            initial = round(total - float(daily.total_pnl or 0.0), 4)
+        if initial <= 0:
+            initial = total
+        try:
+            baselines = await SimulationFundSnapshotService.get_baselines(
+                tenant_id, str(user_id), Decimal(str(initial)), as_of=trade_date
+            )
+            day_open = float(baselines.get("day_open_equity") or initial)
+        except Exception:
+            day_open = initial
+        await SimulationFundSnapshotService.upsert_eod_snapshot(
+            session,
+            tenant_id=tenant_id,
+            user_id=str(user_id),
+            snapshot_date=trade_date,
+            total_asset=total,
+            available_balance=round(float(daily.available_cash or 0.0), 4),
+            frozen_balance=round(float(daily.frozen_cash or 0.0), 4),
+            market_value=round(
+                float(daily.long_market_value or 0.0)
+                - float(daily.short_market_value or 0.0),
+                4,
+            ),
+            initial_capital=round(initial, 4),
+            total_pnl=round(total - initial, 4),
+            today_pnl=round(total - day_open, 4),
+        )
+        logger.info(
+            "EOD fund snapshot repaired from account_daily tenant=%s user=%s date=%s total=%s",
+            tenant_id,
+            user_id,
+            trade_date,
+            total,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "EOD fund snapshot repair failed tenant=%s user=%s date=%s: %s",
+            tenant_id,
+            user_id,
+            trade_date,
+            exc,
+        )
+
+
 async def _execute_eod(trade_date: date) -> bool:
     """Run the full EOD pipeline. Returns True only when all accounts succeed."""
     try:
@@ -260,11 +412,13 @@ async def _execute_eod(trade_date: date) -> bool:
                         short_proceeds=short_proceeds,
                     )
 
-                    # 重启重跑昨日 trade_date 时，若该日 EOD 持仓快照已存在，
-                    # 说明日终已结算过：重跑用的是「当前持仓」，用它回写历史日期
-                    # 会把该日曲线写错（实测重启当日把 09-23 曲线写成本日持仓）。
-                    # 此时只刷新 Redis 现值，不改历史日快照。
-                    if await _eod_position_snapshot_exists(
+                    # slot 锁 + 锁后重查：EOD/EOD 重跑与周期采集共用同一把锁，
+                    # 逐账户判定完成态，不再按“该日有任意资金快照”全局跳过
+                    # （周期采集的普通快照不得被误判为 EOD 完成）。
+                    await SimulationFundSnapshotService.lock_slot(
+                        session, account.tenant_id, account.user_id, trade_date
+                    )
+                    if await SimulationFundSnapshotService.is_eod_completed(
                         session, account.tenant_id, account.user_id, trade_date
                     ):
                         logger.info(
@@ -272,6 +426,14 @@ async def _execute_eod(trade_date: date) -> bool:
                             "skipping overwrite (rerun)",
                             trade_date,
                             account.account_id,
+                        )
+                        # 重跑修复：历史日终估值保留在 account_daily；若资金快照
+                        # 缺失或仍是周期旧值，按日账把同一份估值配对补齐。
+                        await _repair_eod_fund_snapshot(
+                            session,
+                            tenant_id=account.tenant_id,
+                            user_id=account.user_id,
+                            trade_date=trade_date,
                         )
                     else:
                         await snapshot_svc.replace_daily_snapshot(
@@ -281,6 +443,22 @@ async def _execute_eod(trade_date: date) -> bool:
                             snapshot_date=trade_date,
                             account_payload=account_payload,
                             positions=positions,
+                        )
+                        # 同一事务内用同一份重估配对写资金快照：两者提交后，
+                        # is_eod_completed 才为真，EOD 完成态才算成立。
+                        await _write_eod_fund_snapshot(
+                            session,
+                            tenant_id=account.tenant_id,
+                            user_id=account.user_id,
+                            trade_date=trade_date,
+                            cash=cash,
+                            long_mv=long_mv,
+                            short_mv=short_mv,
+                            total_asset=total_asset,
+                            initial_equity=float(
+                                getattr(projection_account, "initial_equity", 0.0)
+                                or 0.0
+                            ),
                         )
 
                     await asyncio.to_thread(
@@ -310,35 +488,6 @@ async def _execute_eod(trade_date: date) -> bool:
             logger.warning(
                 "EOD: %d simulation order(s) still in pending status", pending_count
             )
-
-        # 容器重启后 EOD 可能重跑昨日的 trade_date。若 fund_snapshots 已有该日数据,
-        # 跳过 capture_all 避免公司行为 apply 后的值覆盖原始快照。
-        try:
-            async with get_session(read_only=True) as check_session:
-                existing_count = (
-                    await check_session.execute(
-                        select(func.count())
-                        .select_from(SimulationFundSnapshot)
-                        .where(SimulationFundSnapshot.snapshot_date == trade_date)
-                    )
-                ).scalar_one_or_none()
-        except Exception:
-            existing_count = 0
-
-        if existing_count and existing_count > 0:
-            logger.info(
-                "EOD fund snapshot for %s already exists (%d rows), skipping capture",
-                trade_date,
-                existing_count,
-            )
-        else:
-            try:
-                # P0-7：EOD资金快照按trade_date记，与account_daily对齐
-                await SimulationFundSnapshotService.capture_all(
-                    redis_client, snapshot_date=trade_date
-                )
-            except Exception as exc:
-                logger.warning("EOD fund snapshot capture failed: %s", exc)
 
         if failed_accounts:
             logger.error(

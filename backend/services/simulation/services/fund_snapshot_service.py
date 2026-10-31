@@ -13,7 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from backend.services.trade_shared.redis_client import RedisClient
@@ -26,6 +26,13 @@ from backend.shared.simulation_account_keys import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+#: 周期采集写入 simulation_fund_snapshots.source 的取值
+PERIODIC_FUND_SOURCE = "redis_simulation_account"
+#: EOD 日终写入的取值。周期采集永不覆盖该来源的行：
+#: 逐行跳过（持仓日快照/EOD 来源双重判据）+ upsert 的 SQL 层 WHERE 兜底。
+EOD_FUND_SOURCE = "eod_settlement"
 
 
 def _to_decimal(value: object, default: Decimal = Decimal("0")) -> Decimal:
@@ -67,6 +74,11 @@ class SnapshotUpsertResult:
 
 
 class SimulationFundSnapshotService:
+    #: 周期采集来源标记（= PERIODIC_FUND_SOURCE）
+    PERIODIC_SOURCE = PERIODIC_FUND_SOURCE
+    #: EOD 日终来源标记（= EOD_FUND_SOURCE）
+    EOD_SOURCE = EOD_FUND_SOURCE
+
     @staticmethod
     def _read_settings_initial_cash(
         redis: RedisClient, tenant_id: str, user_id: str
@@ -169,13 +181,131 @@ class SimulationFundSnapshotService:
             logger.debug("ledger initial equity lookup failed: %s", exc)
         return Decimal("0")
 
+    @staticmethod
+    async def lock_slot(session, tenant_id: str, user_id: str, snap_date) -> None:
+        """取同一 slot（账户+日期）的事务级排他锁。
+
+        周期采集与 EOD 共用同一把锁、同一顺序（单锁，无死锁），拿到锁后调用方
+        必须重新检查 EOD 完成态，避免检查与写入之间的竞争。非 PG 环境降级为
+        空操作（单测 fake session）。
+        """
+        try:
+            from sqlalchemy import text as sa_text
+
+            key = f"sim_eod_slot:{tenant_id}:{user_id}:{snap_date.isoformat()}"
+            await session.execute(
+                sa_text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": key}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("EOD slot lock unavailable, proceeding without it: %s", exc)
+
+    @staticmethod
+    async def is_eod_completed(
+        session, tenant_id: str, user_id: str, snap_date
+    ) -> bool:
+        """该账户该日的日终是否已完成。
+
+        判据（任一成立即视为完成，逐账户判定）：
+        1. 存在 EOD 写入的持仓日快照（仅 EOD 写 position_daily；零持仓账户无此行）；
+        2. 当日资金快照来源为 EOD（覆盖零持仓账户）。
+        """
+        try:
+            from backend.services.simulation.models.position_daily import (
+                SimulationPositionDaily,
+            )
+
+            count = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(SimulationPositionDaily)
+                    .where(
+                        SimulationPositionDaily.tenant_id == tenant_id,
+                        SimulationPositionDaily.user_id == str(user_id),
+                        SimulationPositionDaily.snapshot_date == snap_date,
+                    )
+                )
+            ).scalar_one_or_none()
+            if (count or 0) > 0:
+                return True
+            source = (
+                await session.execute(
+                    select(SimulationFundSnapshot.source).where(
+                        SimulationFundSnapshot.tenant_id == tenant_id,
+                        SimulationFundSnapshot.user_id == str(user_id),
+                        SimulationFundSnapshot.snapshot_date == snap_date,
+                    )
+                )
+            ).scalar_one_or_none()
+            return str(source or "") == EOD_FUND_SOURCE
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("EOD completion check failed: %s", exc)
+            return False
+
+    @staticmethod
+    async def upsert_eod_snapshot(
+        session,
+        *,
+        tenant_id: str,
+        user_id: str,
+        snapshot_date,
+        total_asset: float = 0.0,
+        available_balance: float = 0.0,
+        frozen_balance: float = 0.0,
+        market_value: float = 0.0,
+        initial_capital: float = 0.0,
+        total_pnl: float = 0.0,
+        today_pnl: float = 0.0,
+    ) -> None:
+        """写入 EOD 日终资金快照（无条件覆盖：EOD 估值永远赢）。
+
+        调用方须持有 lock_slot 且已做完成态重查；与 replace_daily_snapshot
+        在同一事务内提交，保证日账与资金快照是同一份重估。
+        """
+        row = {
+            "tenant_id": tenant_id,
+            "user_id": str(user_id),
+            "snapshot_date": snapshot_date,
+            "total_asset": total_asset,
+            "available_balance": available_balance,
+            "frozen_balance": frozen_balance,
+            "market_value": market_value,
+            "initial_capital": initial_capital,
+            "total_pnl": total_pnl,
+            "today_pnl": today_pnl,
+            "source": EOD_FUND_SOURCE,
+        }
+        stmt = (
+            pg_insert(SimulationFundSnapshot)
+            .values(**row)
+            .on_conflict_do_update(
+                index_elements=["tenant_id", "user_id", "snapshot_date"],
+                set_={
+                    "total_asset": row["total_asset"],
+                    "available_balance": row["available_balance"],
+                    "frozen_balance": row["frozen_balance"],
+                    "market_value": row["market_value"],
+                    "initial_capital": row["initial_capital"],
+                    "total_pnl": row["total_pnl"],
+                    "today_pnl": row["today_pnl"],
+                    "source": row["source"],
+                    "updated_at": datetime.utcnow(),
+                },
+            )
+        )
+        await session.execute(stmt)
+
     @classmethod
     async def capture_all(
-        cls, redis: RedisClient, snapshot_date=None
+        cls,
+        redis: RedisClient,
+        snapshot_date=None,
+        *,
+        skip_eod_completed: bool = True,
     ) -> SnapshotUpsertResult:
         if not redis.client:
             return SnapshotUpsertResult(upserted_rows=0, scanned_accounts=0)
-        # P0-7：EOD传入trade_date，其余调用方默认今日
+        # P0-7：EOD传入trade_date的场景已移至 EOD 内逐户直写；此处调用方
+        # （周期 worker / 引擎 / 手动触发）一律按“周期采集”语义处理，默认今日
         snap_date = snapshot_date or _local_today()
 
         keys = list(redis.client.scan_iter(match="simulation:account:*", count=500))
@@ -213,46 +343,47 @@ class SimulationFundSnapshotService:
                 account.get("market_value") or account.get("long_market_value")
             )
 
-        rows: list[dict[str, object]] = []
-        for (tenant_id, user_id), bucket in grouped.items():
-            row = {
-                "tenant_id": tenant_id,
-                "user_id": user_id,
-                # P0-7：EOD按trade_date记，与account_daily对齐；周期采集默认今日
-                "snapshot_date": snap_date,
-                "total_asset": bucket["total_asset"],
-                "available_balance": bucket["available_balance"],
-                "frozen_balance": bucket["frozen_balance"],
-                "market_value": bucket["market_value"],
-                "initial_capital": Decimal("0"),
-                "total_pnl": Decimal("0"),
-                "today_pnl": Decimal("0"),
-                "source": "redis_simulation_account",
-            }
-            if row["initial_capital"] == 0:
-                row["initial_capital"] = cls._read_settings_initial_cash(
-                    redis, tenant_id, user_id
-                )
-                if row["initial_capital"] == 0:
-                    row["initial_capital"] = await cls._read_ledger_initial_equity(
-                        tenant_id, user_id
-                    )
-                if row["initial_capital"] == 0:
-                    row["initial_capital"] = row["total_asset"]
-            # 总盈亏 = 总资产 - 初始资金（手续费已从现金扣减，天然计入）
-            row["total_pnl"] = row["total_asset"] - row["initial_capital"]
-            # 当日盈亏 = 总资产 - 日初权益（snap_date之前最近快照基线）
-            baselines = await cls.get_baselines(
-                tenant_id, user_id, row["initial_capital"], as_of=snap_date
-            )
-            row["today_pnl"] = row["total_asset"] - baselines["day_open_equity"]
-            rows.append(row)
-
-        if not rows:
+        if not grouped:
             return SnapshotUpsertResult(upserted_rows=0, scanned_accounts=len(keys))
 
+        upserted = 0
         async with get_session(read_only=False) as session:
-            for row in rows:
+            for (tenant_id, user_id), bucket in grouped.items():
+                # 与 EOD 共用 slot 锁并在锁后重查：已完成日终的账户跳过，
+                # 周期采集永不覆盖 EOD 日终估值。
+                await cls.lock_slot(session, tenant_id, user_id, snap_date)
+                if skip_eod_completed and await cls.is_eod_completed(
+                    session, tenant_id, user_id, snap_date
+                ):
+                    continue
+                initial_capital = cls._read_settings_initial_cash(
+                    redis, tenant_id, user_id
+                )
+                if initial_capital == 0:
+                    initial_capital = await cls._read_ledger_initial_equity(
+                        tenant_id, user_id
+                    )
+                if initial_capital == 0:
+                    initial_capital = bucket["total_asset"]
+                # 总盈亏 = 总资产 - 初始资金（手续费已从现金扣减，天然计入）
+                total_pnl = bucket["total_asset"] - initial_capital
+                # 当日盈亏 = 总资产 - 日初权益（snap_date之前最近快照基线）
+                baselines = await cls.get_baselines(
+                    tenant_id, user_id, initial_capital, as_of=snap_date
+                )
+                row = {
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                    "snapshot_date": snap_date,
+                    "total_asset": bucket["total_asset"],
+                    "available_balance": bucket["available_balance"],
+                    "frozen_balance": bucket["frozen_balance"],
+                    "market_value": bucket["market_value"],
+                    "initial_capital": initial_capital,
+                    "total_pnl": total_pnl,
+                    "today_pnl": bucket["total_asset"] - baselines["day_open_equity"],
+                    "source": PERIODIC_FUND_SOURCE,
+                }
                 stmt = (
                     pg_insert(SimulationFundSnapshot)
                     .values(**row)
@@ -270,17 +401,21 @@ class SimulationFundSnapshotService:
                             # naive 列沿用 utcnow 口径（与模型默认值一致；审计字段不展示）
                             "updated_at": datetime.utcnow(),
                         },
+                        # SQL 层兜底：锁后重查与写入之间的极小窗口里若 EOD
+                        # 已提交，该行不被覆盖（EOD 估值永远赢）。
+                        where=SimulationFundSnapshot.source != EOD_FUND_SOURCE,
                     )
                 )
                 await session.execute(stmt)
+                upserted += 1
                 # 同步轻量日台账行：EOD 未跑时智能图表/审计仍有 account_daily 可读
                 await cls._upsert_account_daily_summary(session, row)
             # 把存量 fund_snapshots 中缺失的 account_daily 补齐（只插缺的，不覆盖当日已写行以外的历史）
-            seen_users = {(str(r["tenant_id"]), str(r["user_id"])) for r in rows}
+            seen_users = {(str(t), str(u)) for (t, u) in grouped}
             for tenant_id, user_id in seen_users:
                 await cls._backfill_missing_account_daily(session, tenant_id, user_id)
 
-        return SnapshotUpsertResult(upserted_rows=len(rows), scanned_accounts=len(keys))
+        return SnapshotUpsertResult(upserted_rows=upserted, scanned_accounts=len(keys))
 
     @staticmethod
     async def _backfill_missing_account_daily(
