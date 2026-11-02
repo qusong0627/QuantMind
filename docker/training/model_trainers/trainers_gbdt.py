@@ -74,24 +74,52 @@ DEFAULT_CATBOOST_PARAMS: dict[str, Any] = {
     "verbose":          100,
 }
 
-def _lgb_rank_ic_feval(preds: np.ndarray, dataset: lgb.Dataset) -> tuple[str, float, bool]:
-    """LightGBM 自定义评估：全局 Rank IC（Spearman），作为 l2 的补充监控指标。
+# rank_ic 仅用于日志观察：全量 Spearman 在 6M 训练集上单线程约 3s/轮，
+# 每轮对 train+valid 都算会把多线程 LightGBM 拖成单核。这里降采样并每
+# N 次调用才重算一次，其余迭代返回缓存值（早停只认 l2，不受影响）。
+_RANK_IC_MAX_ROWS = 200_000
+_RANK_IC_EVERY_CALLS = 50
 
-    不参与早停决策（early stopping 仍以 l2 为准），仅输出日志供观察
-    rank_ic 是否随迭代提升，防止模型只优化 l2 而 rank_ic 停滞。
+
+def _make_lgb_rank_ic_feval(
+    max_rows: int = _RANK_IC_MAX_ROWS, every_calls: int = _RANK_IC_EVERY_CALLS
+):
+    """构造带降采样/节流的 rank_ic feval。
+
+    feval 每轮会被 train/valid 各调用一次。全量 spearmanr 的代价与样本数
+    成正比（6M 行实测 ~3.2s），会掩盖 LightGBM 的多线程训练；rank_ic 只是
+    监控指标，按 `every_calls` 次调用重算一次、每次最多 `max_rows` 行即可。
     """
-    label = dataset.get_label()
-    try:
-        from scipy.stats import spearmanr
-        valid = np.isfinite(preds) & np.isfinite(label)
-        if valid.sum() < 10:
+    cache: dict[int, list] = {}  # id(dataset) -> [调用次数, 最近一次 rho]
+
+    def feval(preds: np.ndarray, dataset: lgb.Dataset) -> tuple[str, float, bool]:
+        entry = cache.setdefault(id(dataset), [0, 0.0])
+        entry[0] += 1
+        if entry[0] % every_calls != 0:
+            return "rank_ic", float(entry[1]), True
+        label = dataset.get_label()
+        try:
+            from scipy.stats import spearmanr
+
+            # 先抽样再过滤：避免对 6M 行全量做副本/掩码。
+            n = len(preds)
+            if max_rows > 0 and n > max_rows:
+                idx = np.linspace(0, n - 1, max_rows, dtype=np.int64)
+                sample_preds, sample_label = preds[idx], label[idx]
+            else:
+                sample_preds, sample_label = preds, label
+            valid = np.isfinite(sample_preds) & np.isfinite(sample_label)
+            if int(valid.sum()) < 10:
+                return "rank_ic", 0.0, True
+            rho, _ = spearmanr(sample_preds[valid], sample_label[valid])
+            if not np.isfinite(rho):
+                rho = 0.0
+            entry[1] = float(rho)
+            return "rank_ic", float(rho), True  # higher is better
+        except Exception:
             return "rank_ic", 0.0, True
-        rho, _ = spearmanr(preds[valid], label[valid])
-        if not np.isfinite(rho):
-            rho = 0.0
-        return "rank_ic", float(rho), True  # higher is better
-    except Exception:
-        return "rank_ic", 0.0, True
+
+    return feval
 
 @register_trainer("lightgbm", framework="lightgbm")
 def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
@@ -116,20 +144,27 @@ def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
     ds_val = lgb.Dataset(X_val, label=y_val, feature_name=features, free_raw_data=True)
 
     callbacks = [
-        lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=True),
+        # 只用 l2 早停：rank_ic 是节流后的监控指标，不能参与早停判断。
+        lgb.early_stopping(
+            stopping_rounds=early_stopping_rounds,
+            verbose=True,
+            first_metric_only=True,
+        ),
         lgb.log_evaluation(100),
     ]
-    # 补充监控 rank_ic（不影响早停，仅日志），帮助判断是否只优化 l2 而 rank_ic 停滞
-    if str(model_cfg.get("monitor_rank_ic", "true")).lower() in ("1", "true", "yes", "on"):
-        # lightgbm 4.x 的 record_evaluation(eval_result) 需要 dict 而非 Dataset，
-        # 传空 dict，feval 返回的 rank_ic 会被自动写入。
-        callbacks.append(lgb.record_evaluation({}))
+    # 补充监控 rank_ic（不参与早停，仅日志），帮助判断是否只优化 l2 而 rank_ic 停滞
+    monitor_rank_ic = str(model_cfg.get("monitor_rank_ic", "true")).lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     model = lgb.train(
         params, ds_train,
         num_boost_round=num_boost_round,
         valid_sets=[ds_train, ds_val],
         valid_names=["train", "valid"],
-        feval=_lgb_rank_ic_feval,
+        feval=_make_lgb_rank_ic_feval() if monitor_rank_ic else None,
         callbacks=callbacks,
     )
     return model
