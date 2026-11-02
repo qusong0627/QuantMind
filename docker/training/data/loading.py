@@ -268,7 +268,7 @@ def load_data(
             feature_sources=factor_field_sources,
             start=range_start.date(),
             end=range_end.date(),
-            # 池下推到 DuckDB（UPPER(symbol) IN (...)）：池任务不再全市场物化，
+            # 池下推到 DuckDB（存储 symbol 归一后 IN 过滤）：池任务不再全市场物化，
             # 小内存主机上这是内存峰值的主因。读出后下方仍做 pandas 二次确认。
             pool_symbols=pool_symbols
             if (pool_symbols and market_upper == "CN")

@@ -132,15 +132,34 @@ _CN_PREFIX_RE = re.compile(r"^(SH|SZ|BJ)\d{6}$")
 _CN_BARE_RE = re.compile(r"^\d{6}$")
 # 非 CN 市场兜底：仅允许安全字符（字母数字与 ._: -），配合绑定参数杜绝注入。
 _GENERIC_SYMBOL_RE = re.compile(r"^[A-Z0-9_.:\-]{1,32}$")
-# SQL IN 列表上限：csi 全成分 + 前后缀双口径膨胀后仍有余量，超限直接拒绝而非截断。
-_MAX_POOL_SQL_VALUES = 10000
+# 单条 SQL IN 列表的分块大小。超过后拆成多个 IN 用 OR 连接，避免把
+# 「池太大」变成训练失败的硬错误（全 A 池 ~5600 只用一条即可）。
+_MAX_POOL_SQL_VALUES_PER_IN = 10000
+_CN_SYMBOL_SQL_RE = "^(SH|SZ|BJ)[0-9]{6}$"
+
+
+def _canonical_symbol_expression(alias: str) -> str:
+    """SQL 表达式：把存储 symbol 归一到正典后缀口径（600036.SH）。
+
+    QuantDB 各分区存储的 symbol 可能是后缀式（600036.SH）也可能是前缀式
+    （SH600036）。在 SQL 里统一归一后再与池白名单比对，池白名单每个股票
+    只需一个值，不再为「双口径」把 IN 列表翻倍（全 A 池因此不会撞上限）。
+    非 CN 形状（HK/US 等）只做大写归一，保持原样。
+    """
+    upper = f'UPPER({alias}."symbol")'
+    return (
+        f"CASE WHEN regexp_full_match({upper}, '{_CN_SYMBOL_SQL_RE}') "
+        f"THEN substr({upper}, 3, 6) || '.' || substr({upper}, 1, 2) "
+        f"ELSE {upper} END"
+    )
 
 
 def pool_sql_values(pool_symbols: list[str] | None) -> list[str]:
-    """池成分 → SQL `IN` 白名单（大写，前后缀双口径）。
+    """池成分 → SQL 白名单（大写、单一正典口径）。
 
-    QuantDB 各分区存储的 symbol 可能是后缀式（600036.SH）也可能是前缀式
-    （SH600036），读时统一 `UPPER(symbol)` 比对，所以两个口径都要进 IN 列表。
+    CN 代码统一为后缀式（600036.SH），读取时由 `_canonical_symbol_expression`
+    把分区里的前缀/后缀两种存储口径都归一到同一形态再比对，因此每个股票只占
+    一个 IN 值——全 A 股池（~5600 只）不会再因双口径展开翻倍而失败。
     非 CN 形状且字符安全的原样收录（HK/US 等）；其余脏输入丢弃（零命中，
     由上游 loading 的空结果报错兜底）。
     """
@@ -151,23 +170,32 @@ def pool_sql_values(pool_symbols: list[str] | None) -> list[str]:
         s = str(raw or "").strip().upper()
         if not s:
             continue
-        if _CN_SUFFIX_RE.fullmatch(s):
-            values.add(s)
-            values.add(StockCodeUtil.to_prefix(s))
-        elif _CN_PREFIX_RE.fullmatch(s):
-            values.add(s)
-            values.add(StockCodeUtil.to_suffix(s))
-        elif _CN_BARE_RE.fullmatch(s):
-            values.add(StockCodeUtil.to_suffix(s))
-            values.add(StockCodeUtil.to_prefix(s))
+        if (
+            _CN_SUFFIX_RE.fullmatch(s)
+            or _CN_PREFIX_RE.fullmatch(s)
+            or _CN_BARE_RE.fullmatch(s)
+        ):
+            normalized = StockCodeUtil.normalize(s)
+            if normalized:
+                values.add(normalized)
         elif _GENERIC_SYMBOL_RE.fullmatch(s):
             values.add(s)
-    if len(values) > _MAX_POOL_SQL_VALUES:
-        raise QuantDBFactorError(
-            f"pool_symbols 展开后 {len(values)} 个 SQL 值，超过上限 "
-            f"{_MAX_POOL_SQL_VALUES}，拒绝下推（请拆小池）"
-        )
     return sorted(values)
+
+
+def _pool_filter_sql(alias: str, pool_values: list[str], params: list[str]) -> str:
+    """生成池过滤 SQL 片段，并把绑定值追加到 `params`。
+
+    超过单条 IN 上限时按块拆分（OR 连接），不再因池规模直接拒绝下推。
+    """
+    symbol_expr = _canonical_symbol_expression(alias)
+    clauses: list[str] = []
+    for offset in range(0, len(pool_values), _MAX_POOL_SQL_VALUES_PER_IN):
+        chunk = pool_values[offset : offset + _MAX_POOL_SQL_VALUES_PER_IN]
+        placeholders = ", ".join(["?"] * len(chunk))
+        clauses.append(f"{symbol_expr} IN ({placeholders})")
+        params.extend(chunk)
+    return " AND (" + " OR ".join(clauses) + ")"
 
 
 class QuantDBFactorError(RuntimeError):
@@ -501,7 +529,7 @@ class QuantDBFactorReader:
     ) -> pd.DataFrame:
         """Project raw source columns for a date range into an in-memory DataFrame.
 
-        `pool_symbols` 非空时把过滤下推到 DuckDB（`UPPER(symbol) IN (...)`），
+        `pool_symbols` 非空时把过滤下推到 DuckDB（存储 symbol 归一后 `IN (...)`），
         避免全市场物化后再由 pandas 过滤——10 年窗口 × 40+ 列在小内存主机上
         会直接把整机拖进 swap。读出后上游仍可做 pandas 二次确认。
         """
@@ -591,10 +619,9 @@ class QuantDBFactorReader:
             )
             params: list[str] = [start_s, end_s]
             if pool_values:
-                # 存储口径可能是前缀也可能是后缀，统一 UPPER 比对双口径集合。
-                placeholders = ", ".join(["?"] * len(pool_values))
-                sql += f' AND UPPER(f."symbol") IN ({placeholders})'
-                params.extend(pool_values)
+                # 存储口径可能是前缀也可能是后缀，SQL 侧先归一到后缀再比对
+                # （每个池成分只占一个绑定值，大池按块拆分）。
+                sql += _pool_filter_sql("f", pool_values, params)
             logger.info(
                 "QuantDB DuckDB scanning %s from %s to %s%s",
                 source, start_s, end_s,

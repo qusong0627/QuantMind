@@ -272,3 +272,44 @@ def test_custom_market_scan_only_without_ohlcv(tmp_path):
     assert status.ready
     assert status.missing_required == []
     assert "my_alpha" in status.columns
+
+
+# ── 全 A 股池规模：单口径白名单 + 分块下推 ──────────────────────────────────
+
+
+def test_pool_sql_values_single_canonical_form_supports_full_a_universe():
+    """全 A 池（~5600 只）只展开一份后缀口径，不得再因双口径翻倍而失败。"""
+    from backend.services.engine.data_platform.quantdb_factor_reader import (
+        pool_sql_values,
+    )
+
+    suffixes = [f"{600000 + i:06d}.SH" for i in range(5600)]
+    prefixes = [f"SH{code[:6]}" for code in suffixes]
+    values = pool_sql_values(suffixes)
+
+    assert len(values) == 5600
+    assert all(v.endswith(".SH") for v in values)
+    # 前缀式输入与后缀式输入归一到同一份白名单
+    assert pool_sql_values(prefixes) == values
+    # 裸码同样归一为后缀
+    assert pool_sql_values(["600001"]) == ["600001.SH"]
+
+
+def test_read_range_pool_pushdown_chunks_oversized_pool(tmp_path, monkeypatch):
+    """超过单条 IN 上限的池按块拆分，不再直接拒绝下推。"""
+    from backend.services.engine.data_platform import quantdb_factor_reader as mod
+
+    _write_factor_partition(
+        tmp_path, "l1_factors", _frame("2024-01-02", 10), "20240102"
+    )
+    monkeypatch.setattr(mod, "_MAX_POOL_SQL_VALUES_PER_IN", 1)
+
+    data = QuantDBFactorReader(tmp_path).read_range(
+        "l1_factors",
+        features=["l1_alpha"],
+        start="2024-01-02",
+        end="2024-01-02",
+        pool_symbols=["600001.SH", "000001.SZ"],
+    )
+    assert set(data["symbol"]) == {"600001.SH", "000001.SZ"}
+
