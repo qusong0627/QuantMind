@@ -59,6 +59,19 @@ def _symbol_core(sym_up: str) -> str:
     return s.zfill(6) if s.isdigit() else s
 
 
+def _pool_symbol_mask(symbols: pd.Series, pool_symbols: list[str]) -> pd.Series:
+    """股票池掩码：两边都归一为 6 位裸码后比对。
+
+    QuantDB 存储/上游传入的 symbol 可能是后缀式（600036.SH）、前缀式
+    （SH600036）或裸码（600036）。只比对其中一两种口径会把另一种整池
+    误杀，因此统一走 `_symbol_core` 归一化。
+    """
+    wanted = {_symbol_core(s) for s in pool_symbols if str(s).strip()}
+    if not wanted:
+        raise RuntimeError("pool_symbols 非空但无法解析出任何代码")
+    return symbols.map(_symbol_core).isin(wanted)
+
+
 def _load_local_parquet(
     local_dir: Path,
     year: int,
@@ -284,27 +297,12 @@ def load_data(
         # 池尽早过滤（P3）：SQL 侧已按池预过滤（见 read_range pool_symbols 下推）——
         # 否则直读返回全市场（1053 万行 × 114 列 float64），在复制展开期峰值会
         # 触发容器 mem_limit（Exit 137），小内存主机直接被拖进 swap。
-        # 此处为 pandas 二次确认（双口径匹配，与函数末尾全局池过滤保持一致），
-        # 开销已忽略不计。零命中仍直接报错，避免静默错配。
+        # 此处为 pandas 二次确认（统一按 6 位裸码匹配，与函数末尾全局池过滤
+        # 保持一致），开销已忽略不计。零命中仍直接报错，避免静默错配。
         if pool_symbols and market_upper == "CN" and "symbol" in df.columns:
             _pool_clean = [s for s in pool_symbols if str(s).strip()]
-            _wanted_prefix = {_to_prefix_symbol(s) for s in _pool_clean}
-            _wanted_suffix = {_to_suffix_symbol(s) for s in _pool_clean}
-            _wanted_core = {_symbol_core(s) for s in _pool_clean}
-            if not (_wanted_prefix or _wanted_suffix or _wanted_core):
-                raise RuntimeError("pool_symbols 非空但无法解析出任何代码")
             _before_early = len(df)
-            _sym_up = df["symbol"].astype(str).str.upper()
-            _sym_core = (
-                _sym_up.str.split(".", n=1)
-                .str[0]
-                .str.replace(r"^(SH|SZ|BJ)", "", regex=True)
-            )
-            df = df[
-                _sym_up.isin(_wanted_prefix)
-                | _sym_up.isin(_wanted_suffix)
-                | _sym_core.isin(_wanted_core)
-            ].copy()
+            df = df[_pool_symbol_mask(df["symbol"], _pool_clean)].copy()
             logger.info(
                 "After early pool filter: %d rows (pool=%d symbols, before=%d)",
                 len(df),
@@ -519,27 +517,26 @@ def load_data(
     # 此前缩在 CN-parquet 分支内，直读模式（l1_factors）会静默训成全市场模型。
     # 严格语义：池非空但零命中时直接报错，避免静默错配。
     if pool_symbols and market_upper == "CN":
-        wanted = {str(s).split(".")[0].zfill(6) for s in pool_symbols if str(s).strip()}
-        if not wanted:
-            raise RuntimeError("pool_symbols 非空但无法解析出任何代码")
+        _pool_clean = [s for s in pool_symbols if str(s).strip()]
         if "symbol" not in df.columns:
             raise RuntimeError("股票池过滤需要 symbol 列，但当前数据无该列")
         before_pool = len(df)
-        # 双口径匹配：直读分支 symbol 为前缀式（SH600036），parquet 分支为
-        # 6 位数字——zfill 对 8 位前缀是空操作，单用 6 位集合会零命中误杀。
-        _sym_up = df["symbol"].astype(str).str.upper()
-        _sym6 = _sym_up.str.replace(r"^(SH|SZ|BJ)", "", regex=True)
-        _wanted_prefix = {_to_prefix_symbol(s) for s in pool_symbols if str(s).strip()}
-        df = df[_sym6.isin(wanted) | _sym_up.isin(_wanted_prefix)].copy()
+        # 统一按 6 位裸码匹配：后缀式（600036.SH）、前缀式（SH600036）、
+        # 裸码（600036）三种存储口径都命中。此前只匹配裸码+前缀，直读
+        # 因子源返回后缀式时会把整池 5580 只全部误杀成零命中。
+        _mask = _pool_symbol_mask(df["symbol"], _pool_clean)
+        df = df[_mask].copy()
         logger.info(
             "After pool filter: %d rows (pool=%d symbols, before=%d)",
             len(df),
-            len(wanted),
+            len({_symbol_core(s) for s in _pool_clean}),
             before_pool,
         )
         if df.empty:
             raise RuntimeError(
-                f"股票池过滤后无数据：池内 {len(wanted)} 只标的在训练区间/数据源内无记录"
+                f"股票池过滤后无数据：池内 "
+                f"{len({_symbol_core(s) for s in _pool_clean})} 只标的"
+                "在训练区间/数据源内无记录"
                 "（请检查池成分与训练时间窗是否匹配）"
             )
 

@@ -923,7 +923,7 @@ class TestP3TrainingBridge:
 
         norm_idx = loading.index(".str.zfill(6)")
         pool_idx = loading.index("pool_symbols:")
-        filter_idx = loading.index("isin(wanted)")
+        filter_idx = loading.index("After pool filter")
         assert norm_idx < filter_idx
         assert pool_idx < filter_idx
 
@@ -958,7 +958,26 @@ class TestP3TrainingBridge:
             / "loading.py"
         ).read_text(encoding="utf-8")
         assert "After early pool filter" in loading
-        assert "_to_prefix_symbol" in loading
+        assert "_pool_symbol_mask" in loading
+
+    def test_pool_symbol_mask_matches_all_symbol_formats(self):
+        """池过滤必须三口径兼容：直读因子源返回后缀式，早期只匹配裸码+前缀会整池误杀。"""
+        import sys
+
+        import pandas as pd
+
+        training_root = Path(__file__).resolve().parents[2] / "docker" / "training"
+        sys.path.insert(0, str(training_root))
+        try:
+            from data.loading import _pool_symbol_mask
+        finally:
+            sys.path.remove(str(training_root))
+
+        symbols = pd.Series(["600036.SH", "SH600036", "600036", "000001.SZ"])
+        mask = _pool_symbol_mask(symbols, ["600036.SH", "000001.SZ"])
+        assert mask.tolist() == [True, True, True, True]
+        # 池外标的不命中
+        assert not _pool_symbol_mask(pd.Series(["600001.SH"]), ["600036.SH"]).any()
 
     def test_bj_filter_applies_to_all_branches(self):
         """北交所过滤必须在函数层级（CN 常开），直读分支不再漏进训练集。"""
