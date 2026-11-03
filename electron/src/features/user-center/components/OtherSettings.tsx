@@ -54,6 +54,27 @@ const PROVIDERS: ProviderMeta[] = [
     defaultModel: 'qwen3.8-max',
   },
   {
+    id: 'zhipu',
+    label: '智谱（GLM）',
+    baseUrls: [
+      { id: 'open', label: 'OpenAI 兼容', url: 'https://open.bigmodel.cn/api/paas/v4' },
+    ],
+    defaultBaseUrlId: 'open',
+    models: [
+      { label: 'glm-5.3', value: 'glm-5.3' },
+      { label: 'glm-5.3-flash', value: 'glm-5.3-flash' },
+      { label: 'glm-5.2', value: 'glm-5.2' },
+      { label: 'glm-5.1', value: 'glm-5.1' },
+      { label: 'glm-5', value: 'glm-5' },
+      { label: 'glm-5-turbo', value: 'glm-5-turbo' },
+      { label: 'glm-4.7', value: 'glm-4.7' },
+      { label: 'glm-4.6', value: 'glm-4.6' },
+      { label: 'glm-4.7-flash（免费）', value: 'glm-4.7-flash' },
+      { label: 'glm-4.5-flash（免费）', value: 'glm-4.5-flash' },
+    ],
+    defaultModel: 'glm-5.3',
+  },
+  {
     id: 'custom',
     label: '自定义模型',
     baseUrls: [],
@@ -447,8 +468,8 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
 
           <div className="text-[11px] text-gray-400 space-y-0.5 pt-1 border-t border-gray-100">
             <p>• API Key 安全存储在您的个人档案中，仅用于 AI-IDE 智能助手</p>
-            <p>• 支持多供应商：DeepSeek、阿里云百炼，可自定义接口地址与模型</p>
-            <p>• 获取 Key：<a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">DeepSeek</a> | <a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">阿里云百炼</a></p>
+            <p>• 支持多供应商：DeepSeek、阿里云百炼、智谱，可自定义接口地址与模型</p>
+            <p>• 获取 Key：<a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">DeepSeek</a> | <a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">阿里云百炼</a> | <a href="https://bigmodel.cn/usercenter/proj-mgmt/apikeys" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">智谱</a></p>
           </div>
         </div>
       </div>
