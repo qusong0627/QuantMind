@@ -220,3 +220,26 @@ def test_stale_release_sha_overridden_by_manifest_size(tmp_path, monkeypatch):
         "SELECT sha256, size FROM objects WHERE key=?", (key,)
     ).fetchone()
     assert row == (hashlib.sha256(b"new!").hexdigest(), 4)
+
+
+def test_release_control_object_skipped(tmp_path, monkeypatch):
+    """kind=control 的控制对象（如 v5_factor_dictionary.json）不是分区，不能下载。
+
+    网关 /api/v1/data/download 只认 manifest 内的数据对象，控制对象会 400，
+    曾导致 factor_dictionary 每次同步都记为「1 个对象下载失败」。
+    """
+    monkeypatch.setattr(sync, "QUANTDB_DATA_DIR", tmp_path)
+    key = "6_ml_datasets/factor_dictionary/dt=20261030/data.parquet"
+    control_key = "6_ml_datasets/factor_dictionary/v5_factor_dictionary.json"
+    control_obj = {**_release_obj(control_key, b"{}"), "kind": "control"}
+    client = FakeClient(
+        objects={key: _release_obj(key, b"data"), control_key: control_obj},
+        contents={key: b"data"},
+    )
+    state = _state(tmp_path)
+
+    done, errors = sync._sync_v2_dataset(client, state, "6", "factor_dictionary")
+
+    assert (done, errors) == (1, 0)
+    assert control_key not in client.downloads
+    assert (tmp_path / key).read_bytes() == b"data"

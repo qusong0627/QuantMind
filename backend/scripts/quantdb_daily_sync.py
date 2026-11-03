@@ -193,6 +193,15 @@ def _is_patch_key(key: str) -> bool:
     return "/patches/" in key or key.startswith("releases/")
 
 
+def _is_control_object(obj: dict) -> bool:
+    """数据集控制对象（kind=control，如 factor_dictionary 的字典 JSON）。
+
+    只能走网关字段字典接口读取；/api/v1/data/download 只认 manifest 里的数据
+    对象，对控制对象回 400，混入 release 会让整个数据集同步被记为失败。
+    """
+    return str(obj.get("kind") or "").strip().lower() == "control"
+
+
 def _is_partition_file(path: Path) -> bool:
     """判断是否为 V2 分区文件 (dt=YYYYMMDD/data.parquet)。"""
     return "/dt=" in str(path) and path.name == "data.parquet"
@@ -297,11 +306,14 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
     releases = data.get("releases", [])
 
     # 同一 key 可被多份 manifest 引用，以 cursor 序列中最新一份为准。
+    # kind=control 是数据集控制对象（如 factor_dictionary 的
+    # v5_factor_dictionary.json），只能走网关字段字典接口读取；
+    # /api/v1/data/download 只认 manifest 内的数据对象，会回 400。
     latest: dict[str, dict] = {}
     for rel in releases:
         for obj in rel.get("objects", []):
             key = client._normalise_release_key(obj["key"])
-            if _is_patch_key(key):
+            if _is_patch_key(key) or _is_control_object(obj):
                 continue
             latest[key] = obj
 
@@ -314,7 +326,7 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
         if manifest:
             for obj in manifest:
                 key = obj.get("key", "")
-                if not key or _is_patch_key(key):
+                if not key or _is_patch_key(key) or _is_control_object(obj):
                     continue
                 manifest_by_key[key] = obj
                 if key not in latest:
