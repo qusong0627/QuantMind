@@ -23,6 +23,15 @@ COPY electron ./
 # Re-strip after the full electron/ copy overwrites package.json
 RUN node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));delete p.overrides;fs.writeFileSync('package.json',JSON.stringify(p,null,2));"
 
+# 实盘交易 UI（2026-11-05）：**默认不部署**。只有部署方在 .env 里显式
+# ENABLE_REAL_TRADING=true（即用户自己打开了实盘），deploy/update.sh 才会把
+# VITE_ENABLE_REAL_TRADING=true 传进来重建；否则每次更新都用默认 false，
+# 底部栏不会出现「实盘交易」入口，账户概览也不会显示真实券商账户。
+# 它与后端 ENABLE_REAL_TRADING 是同一件事的两端；前端开关是 Vite 构建期内联，
+# 镜像建好后无法靠重启/强刷补出来，必须重建（一键更新会自动重建）。
+ARG VITE_ENABLE_REAL_TRADING=false
+ENV VITE_ENABLE_REAL_TRADING=${VITE_ENABLE_REAL_TRADING}
+
 # 文档挖掘 UI（因子挖掘「上传文档」链）出厂默认开启（2026-10-24 用户拍板）：
 # Docker 服务器版**第一次安装、第一次启动**就要能打开，不允许"装完没有、再重建/重启一轮"。
 # 前端开关是 Vite **构建期内联**——镜像构建时没开，容器重启、浏览器强刷都补不出来。

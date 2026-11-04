@@ -74,6 +74,14 @@ dist/
 node_modules/
 package-lock.json
 
+# 前端本地依赖/产物/本机 env（2026-11-05）：Dockerfile.web 会在镜像内 npm install
+# 并 vite build，构建期开关只认 build-arg。放本机 node_modules 进去会用宿主二进制
+# 覆盖镜像里的安装结果；放 .env.production.local 会把开发机的实盘开关带进客户镜像。
+electron/node_modules/
+electron/dist-react/
+electron/dist-electron/
+electron/.env.production.local
+
 # Documentation（docs/ 例外：P2-6 不可变发布要求烘焙进镜像——管理后台
 # 「打开部署指南」（/app/docs）与 prod 覆盖层去挂载后都读镜像内这份）
 research/

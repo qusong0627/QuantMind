@@ -165,8 +165,9 @@ export const AdminDashboard: React.FC = () => {
             } finally {
                 busy = false;
             }
-            if (attempts >= 200) {
-                // ~10 分钟仍未终态：停止轮询，保留最后一次状态，避免无限 setInterval
+            if (attempts >= 800) {
+                // ~40 分钟仍未终态：停止轮询，保留最后一次状态，避免无限 setInterval
+                // （首次前端镜像构建要 npm install，慢机器上可能十几分钟）
                 window.clearInterval(timer);
                 if (progressTimer.current === timer) progressTimer.current = null;
             }

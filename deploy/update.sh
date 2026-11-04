@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # QuantMind 一键更新脚本
-# 核心流程（P2-6 不可变发布）：拉代码 → 构建（注戳）→ 晋级 :latest → 强制重建容器
-# → 发布断言（无代码挂载 / 运行态戳==检出，不过则自动回滚上一镜像）→ 跑
-# data/upgrade_*.sql → 健康检查。
+# 核心流程（P2-6 不可变发布）：拉代码 → 构建后端（注戳）→ 构建前端镜像
+# （实盘 UI 跟随 .env 的 ENABLE_REAL_TRADING；默认不构建）→ 重启后端 → 发布断言
+# → 跑 data/upgrade_*.sql → 健康检查 → 切换 quantmind-web 静态文件。
 # 生成容器默认走 docker-compose.prod.yml 覆盖层（去全部代码 bind mount）；
 # 本地开发不经过本脚本（直接裸用 docker-compose.yml 热更新）。
 # db/redis/qwenpaw 等基础设施容器不强制重启（仅 compose 配置漂移时按需重建）。
-# 用法：sudo bash deploy/update.sh [--ref <branch>] [--remote gitee|github|origin] [--force] [--no-build] [--mounts] [--skip-backup]
+# 用法：sudo bash deploy/update.sh [--ref <branch>] [--remote gitee|github|origin|URL] [--force] [--no-build] [--mounts] [--skip-backup]
 # 不传 --ref 时默认更新到**当前 checkout 的分支**（见 default_ref）。
 
 set -Eeuo pipefail
@@ -46,12 +46,15 @@ usage() {
 用法: sudo bash deploy/update.sh [选项]
 
   --ref <branch|tag>    更新到指定版本（默认：当前 checkout 的分支；识别不到时为 master）
-  --remote <name>       远端名（默认 origin；项目实际远端是 gitee/github）
+  --remote <name|URL>   远端名或仓库 URL（默认 origin；项目实际远端是 gitee/github）
   --force               覆盖服务器上的未提交代码改动，不删除业务数据
-  --no-build            跳过镜像构建（仅当镜像身份==检出 commit 时允许；代码变更必须重建）
+  --no-build            跳过前后端镜像构建（仅当镜像身份==检出 commit 时允许）
   --mounts              应急：退回 bind-mount 模式（默认走 docker-compose.prod.yml 不可变发布）
   --skip-backup         跳过升级前数据库备份
   -h, --help            显示帮助
+
+说明：启用了独立 quantmind-web 容器的部署，本脚本会同步重建前端并把静态文件
+切换到运行中的容器；实盘交易栏目只在 .env 的 ENABLE_REAL_TRADING=true 时构建。
 EOF
 }
 
@@ -136,7 +139,7 @@ backup_database() {
 }
 
 sync_code() {
-    log "1/4 同步代码：$REMOTE/$REF"
+    log "1/5 同步代码：$REMOTE/$REF"
     if ! git -C "$PROJECT_DIR" diff --quiet || ! git -C "$PROJECT_DIR" diff --cached --quiet; then
         $FORCE || die '检测到未提交代码改动；确认覆盖请加 --force'
         git -C "$PROJECT_DIR" reset --hard
@@ -221,7 +224,7 @@ build_core() {
             [[ "$cur_sha" == "$head_sha" ]] \
                 || die "--no-build 与不可变发布不兼容（镜像身份 ${cur_sha:-无} ≠ 检出 ${head_sha:0:12}）：去掉 --no-build 重建，或 --mounts 显式回退"
         fi
-        log '2/4 跳过镜像构建（--no-build 显式指定）'
+        log '2/5 跳过镜像构建（--no-build 显式指定）'
         return
     fi
 
@@ -240,9 +243,9 @@ build_core() {
     fi
     if ! $need_build; then
         if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
-            log "2/4 镜像已对应当前检出（${head_sha:0:12}），跳过重建"
+            log "2/5 镜像已对应当前检出（${head_sha:0:12}），跳过重建"
         else
-            log '2/4 跳过镜像构建（bind-mount 回退模式：镜像已存在）'
+            log '2/5 跳过镜像构建（bind-mount 回退模式：镜像已存在）'
         fi
         return
     fi
@@ -256,7 +259,7 @@ build_core() {
         torch_val="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" --infer-torch \
             "$PROJECT_DIR" quantmind-oss:latest 2>/dev/null || true)"
         if [[ -n "$torch_val" ]]; then
-            log "2/4 未指定 TORCH_DEVICE，已从镜像推断/回落为 $torch_val（写入 .env，避免下次再拦）"
+            log "2/5 未指定 TORCH_DEVICE，已从镜像推断/回落为 $torch_val（写入 .env，避免下次再拦）"
             export TORCH_DEVICE="$torch_val"
             if [[ -f "$PROJECT_DIR/.env" ]]; then
                 if grep -qE '^[[:space:]]*TORCH_DEVICE=' "$PROJECT_DIR/.env"; then
@@ -267,11 +270,11 @@ build_core() {
                 fi
             fi
         else
-            log '2/4 未指定 TORCH_DEVICE 且无可用镜像推断，按 skip 形态构建'
+            log '2/5 未指定 TORCH_DEVICE 且无可用镜像推断，按 skip 形态构建'
         fi
     fi
 
-    log "2/4 重建核心后端镜像（$reason）"
+    log "2/5 重建核心后端镜像（$reason）"
     # 旧依赖指纹 marker（.update/deps.sha256）已废弃：镜像身份改由 commit 决定；
     # 残留文件无害，可手动删除。
     # 把依赖指纹同步写入镜像 Label（qm.req.sha），与 full-deploy 的指纹闸门共用一套口径。
@@ -299,15 +302,122 @@ build_core() {
         built_sha="$(qm_image_git_commit quantmind-oss:latest)"
         [[ "$built_sha" == "$head_sha" ]] \
             || die "构建产物身份断言失败：镜像=${built_sha:-无} 检出=${head_sha:0:12}（检查构建侧 QM_GIT_COMMIT 注入）"
-        log "2/4 镜像已注戳：quantmind-oss:latest @ ${head_sha:0:12}"
+        log "2/5 镜像已注戳：quantmind-oss:latest @ ${head_sha:0:12}"
     fi
+}
+
+# 读 .env 里的布尔开关（同一 key 多次出现取最后一次）；缺失/非 true 一律 false。
+# 只用于「前端构建期开关」这类非敏感值，不替代 .env 的加载逻辑。
+env_flag() {
+    local key="$1" default="$2" value
+    value="$(grep -E "^[[:space:]]*${key}=" "$PROJECT_DIR/.env" 2>/dev/null \
+        | tail -1 | cut -d= -f2- | tr -d "\"'[:space:]" || true)"
+    value="$(printf '%s' "${value:-$default}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$value" == "true" ]]; then printf 'true'; else printf 'false'; fi
+}
+
+web_container_running() {
+    [[ "$(docker inspect --format '{{.State.Status}}' quantmind-web 2>/dev/null || true)" == "running" ]]
+}
+
+# 3/5 构建前端镜像（2026-11-05）：一键更新默认连前端一起更新。
+# - 构建放在「重启后端」之前：失败时现场仍是旧版本，干净 fail-fast；
+# - 实盘栏目是否进产物由**部署方自己的开关**决定：
+#     VITE_ENABLE_REAL_TRADING 显式 env > .env 的 ENABLE_REAL_TRADING > false
+#   即用户没开实盘 → 更新后 UI 不会出现实盘入口；开了才保留。
+#   这与 scripts/deploy_frontend.sh 的 --allow-local-live 闸门同源（以后端
+#   开关为准，而不是开发机随手 export 的构建变量）。
+# - 文档挖掘 UI 出厂默认 true，可用 VITE_ENABLE_DOC_MINING / .env ENABLE_DOC_MINING 关。
+build_web_image() {
+    if ! web_container_running; then
+        log '3/5 跳过前端镜像（quantmind-web 不存在/未运行：该部署不走独立 web 容器）'
+        return 0
+    fi
+    local live_flag doc_flag
+    live_flag="${VITE_ENABLE_REAL_TRADING:-$(env_flag ENABLE_REAL_TRADING false)}"
+    live_flag="$(printf '%s' "$live_flag" | tr '[:upper:]' '[:lower:]')"
+    [[ "$live_flag" == "true" ]] || live_flag="false"
+    doc_flag="${VITE_ENABLE_DOC_MINING:-$(env_flag ENABLE_DOC_MINING true)}"
+    doc_flag="$(printf '%s' "$doc_flag" | tr '[:upper:]' '[:lower:]')"
+    [[ "$doc_flag" == "true" ]] || doc_flag="false"
+
+    log "3/5 构建前端镜像（实盘 UI: $live_flag · 文档挖掘 UI: $doc_flag）"
+    docker build \
+        -f "$PROJECT_DIR/docker/Dockerfile.web" \
+        --build-arg "VITE_ENABLE_REAL_TRADING=$live_flag" \
+        --build-arg "VITE_ENABLE_DOC_MINING=$doc_flag" \
+        -t quantmind-web:latest "$PROJECT_DIR" \
+        || die '前端镜像构建失败（后端尚未重启，现场保持旧版本）'
+}
+
+restore_web_backup() {
+    local web="$1" backup_dir="$2"
+    if [[ ! -d "$backup_dir" ]] || [[ -z "$(ls -A "$backup_dir" 2>/dev/null || true)" ]]; then
+        return 0
+    fi
+    log '前端校验失败，回滚上一版静态文件' >&2
+    docker exec "$web" rm -rf /usr/share/nginx/html/assets >/dev/null 2>&1 || true
+    docker cp "$backup_dir/." "$web:/usr/share/nginx/html/" >/dev/null 2>&1 || true
+}
+
+# 把前端镜像里的 dist 切换进运行中的 quantmind-web（与 scripts/deploy_frontend.sh
+# 同一套纪律：清空 assets → 全量复制 → 校验 main/文件数/HTTP）。放在后端健康检查
+# 之后执行：新前端只在新后端就绪后可见。任何一步失败都先回滚旧静态文件再 die。
+deploy_web_dist() {
+    if ! web_container_running; then
+        log '前端部署跳过（quantmind-web 不存在/未运行）'
+        return 0
+    fi
+    local web=quantmind-web
+    local dist_dir=/tmp/quantmind-web-dist
+    local backup_dir=/tmp/quantmind-web-backup
+    local cid main_ref local_count remote_count http_code
+    rm -rf "$dist_dir" "$backup_dir"
+    mkdir -p "$dist_dir" "$backup_dir"
+
+    cid="$(docker create quantmind-web:latest)" || die '创建前端产物容器失败'
+    if ! docker cp "$cid:/usr/share/nginx/html/." "$dist_dir/"; then
+        docker rm -f "$cid" >/dev/null 2>&1 || true
+        die '从前端镜像提取产物失败'
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+
+    main_ref="$(grep -oE 'main-[A-Za-z0-9_-]+\.js' "$dist_dir/index.html" 2>/dev/null | head -1 || true)"
+    [[ -n "$main_ref" && -f "$dist_dir/assets/$main_ref" ]] \
+        || die "前端产物缺少 main 入口（index.html/main_ref=$main_ref）"
+
+    docker cp "$web:/usr/share/nginx/html/." "$backup_dir/" >/dev/null 2>&1 || true
+    log "前端部署：切换 $web 静态文件 → $main_ref"
+    docker exec "$web" rm -rf /usr/share/nginx/html/assets >/dev/null 2>&1 || true
+    docker exec "$web" mkdir -p /usr/share/nginx/html/assets \
+        || die '前端部署失败：无法创建容器 assets 目录'
+    docker cp "$dist_dir/." "$web:/usr/share/nginx/html/" \
+        || { restore_web_backup "$web" "$backup_dir"; die '前端部署失败：docker cp 中断'; }
+
+    if ! docker exec "$web" test -f "/usr/share/nginx/html/assets/$main_ref"; then
+        restore_web_backup "$web" "$backup_dir"
+        die "前端部署校验失败：$main_ref 未复制进容器"
+    fi
+    local_count="$(find "$dist_dir/assets" -type f | wc -l | tr -d ' ')"
+    remote_count="$(docker exec "$web" sh -c 'ls /usr/share/nginx/html/assets | wc -l' | tr -d ' ')"
+    if [[ "$local_count" != "$remote_count" ]]; then
+        restore_web_backup "$web" "$backup_dir"
+        die "前端部署校验失败：assets 数量 本地 $local_count vs 容器 $remote_count"
+    fi
+    http_code="$(docker exec "$web" curl -s -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1/assets/$main_ref" 2>/dev/null || echo ERR)"
+    if [[ "$http_code" != "200" ]]; then
+        restore_web_backup "$web" "$backup_dir"
+        die "前端部署校验失败：nginx GET /assets/$main_ref → $http_code"
+    fi
+    log "前端部署完成 ✓（$http_code，assets $local_count 个）"
 }
 
 # 关键步骤：强制重建 application 层容器（不可变模式下让新镜像生效；回退模式下让
 # 挂载代码随进程重启生效），其余服务（含 db/redis/dsh）不强制重启，仅在 compose
 # 配置发生漂移时按需重建。
 restart_services() {
-    log '3/4 重启后端服务（强制重建 quantmind + celery）'
+    log '4/5 重启后端服务（强制重建 quantmind + celery）'
     local services=(quantmind)
     local service
     for service in celery-worker celery-beat; do
@@ -386,7 +496,7 @@ assert_release_runtime() {
 # db 健康检查：短等待 15×2s=30s（覆盖 db 首次启动 / restart 窗口），
 # 不健康立即报错而不是傻等。
 update_database() {
-    log '4/4 执行数据库升级 SQL (data/upgrade_*.sql)'
+    log '5/5 执行数据库升级 SQL (data/upgrade_*.sql)'
     local max_attempts=15
     local attempt
     local pg_user
@@ -486,8 +596,11 @@ main() {
     # minibt runner 镜像独立于 quantmind-oss；按源码指纹构建（--no-build 时跳过）
     if $BUILD; then
         qm_build_minibt_runner_if_needed "$PROJECT_DIR" || true
+        # 前端镜像也在这里构建（还没碰运行容器；构建失败则本次更新干净中止）
+        build_web_image
     else
         warn "跳过 minibt runner 镜像构建（--no-build）；镜像缺失时 minibt 策略不可用"
+        warn "跳过前端镜像构建与部署（--no-build）：前端保持当前版本"
     fi
     # 重启前记住当前镜像 ID——发布断言失败时按它回滚（首次部署/容器不存在时为空）
     local prev_image=''
@@ -519,6 +632,10 @@ main() {
             fi
         done
         if $api_ok && $celery_ok && $beat_ok; then
+            # 后端已就绪 → 再切换前端静态文件（新前端只在新后端之后可见）
+            if $BUILD; then
+                deploy_web_dist
+            fi
             # admin 身份遗留收口（幂等分块；后台执行不阻塞升级；遗留为空时秒级完成）
             docker exec -d quantmind bash -c 'cd /app && python backend/scripts/fix_admin_identity_full.py > /tmp/admin_identity_sweep.log 2>&1' 2>/dev/null || true
             log "升级完成 ✓ (HEAD: $(git -C "$PROJECT_DIR" rev-parse --short HEAD))"
