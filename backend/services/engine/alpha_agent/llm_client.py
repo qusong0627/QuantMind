@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 
 import httpx
@@ -63,12 +64,14 @@ def env_extra_headers() -> dict[str, str]:
 
 
 def openai_chat_url(base_url: str) -> str:
-    """OpenAI 兼容 chat 端点：统一补齐 /v1 后拼 /chat/completions。
+    """OpenAI 兼容 chat 端点：路径未带版本段时补 /v1，再拼 /chat/completions。
 
+    已带版本段（/v1、/v4 等，如智谱 open.bigmodel.cn/api/paas/v4）直接使用，
+    不再强补 /v1（曾导致 /v4/v1/chat/completions 404）。
     与实际调用、测试连接共用同一套规则，避免「测试通过、实际 404」。
     """
     base = (base_url or "").strip().rstrip("/")
-    if not base.endswith("/v1"):
+    if not re.search(r"/v\d+$", base):
         base += "/v1"
     return f"{base}/chat/completions"
 
