@@ -691,10 +691,12 @@ class AdminService {
 
     /**
      * 一键更新系统：触发宿主机 deploy/update.sh（git pull + 重建 + 重启服务）。
-     * 需要后端开启 QUANTMIND_ENABLE_WEB_UPDATE 并挂载 docker socket，否则后端返回 403。
+     * ref = 更新检查算出的目标分支（后端按「显式 ref > 环境变量 > 检出分支」解析）。
      */
-    public async updateSystem(): Promise<{ started: boolean; task_id?: string }> {
-        const resp = await this.axiosInstance.post('/admin/system/update', {}, { params: { confirm: 1 } });
+    public async updateSystem(ref?: string): Promise<{ started: boolean; task_id?: string; ref?: string; remote?: string }> {
+        const params: Record<string, unknown> = { confirm: 1 };
+        if (ref) params.ref = ref;
+        const resp = await this.axiosInstance.post('/admin/system/update', {}, { params });
         return this.unwrap(resp.data);
     }
 

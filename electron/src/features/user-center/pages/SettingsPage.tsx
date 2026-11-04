@@ -9,8 +9,8 @@ import { Bell, ShieldCheck, Mail, Smartphone, Zap, Globe, MessageCircle, BarChar
 import {
   systemService,
   type ProgrammaticTradingDisclosure,
-  type SystemVersion,
 } from '../../../services/systemService';
+import { useSystemUpdateCheck } from '../../../hooks/useSystemUpdateCheck';
 import { ComplianceFooter } from '../../../components/shared/compliance/ComplianceChrome';
 
 interface SettingsPageProps {
@@ -18,19 +18,16 @@ interface SettingsPageProps {
 }
 
 const SettingsPage: React.FC<SettingsPageProps> = ({ userId }) => {
-  const [versionInfo, setVersionInfo] = useState<SystemVersion | null>(null);
+  // 与全局更新提醒/后台徽章共享同一份 query：设置页打开时自动拿最新检查结果，
+  // 10 分钟轮询，不需要本页自己再发一遍请求。
+  const {
+    version: versionInfo,
+    isFetching: checkingUpdate,
+    refresh: refreshVersion,
+  } = useSystemUpdateCheck();
   const [disclosure, setDisclosure] = useState<ProgrammaticTradingDisclosure | null>(null);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-
-  const loadVersion = (force = false) => {
-    systemService
-      .getVersion(force)
-      .then((v) => setVersionInfo(v))
-      .catch(() => setVersionInfo(null));
-  };
 
   useEffect(() => {
-    loadVersion();
     // 程序化交易报告的待填报信息：取不到就整块不渲染（宁可不显示，也不显示半截）
     systemService
       .getProgrammaticTradingDisclosure()
@@ -38,13 +35,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ userId }) => {
       .catch(() => setDisclosure(null));
   }, []);
 
-  // 主动刷新「落后上游」检查（绕过缓存实时请求上游平台）
+  // 主动刷新「落后上游」检查（force 绕过后端缓存，实时请求上游平台）
   const refreshUpdateCheck = () => {
-    setCheckingUpdate(true);
-    systemService
-      .getVersion(true)
-      .then((v) => setVersionInfo(v))
-      .finally(() => setCheckingUpdate(false));
+    void refreshVersion(true);
   };
   const { config, isLoading, error } = useUserConfig(userId);
   const {
@@ -106,6 +99,14 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ userId }) => {
           <div className="flex items-center gap-2">
             <span className="text-slate-400 font-medium">版本</span>
             <span className="font-bold text-slate-700">{versionInfo ? versionInfo.version : '—'}</span>
+            {versionInfo?.update?.current_short ? (
+              <span
+                className="font-mono text-[11px] text-slate-400"
+                title="运行处 .git 探针实测的 commit（与版本号声明分叉时以这里为准）"
+              >
+                {versionInfo.update.current_short}
+              </span>
+            ) : null}
           </div>
           <div className="flex items-center gap-2">
             <span className="text-slate-400 font-medium">版本类型</span>
@@ -113,14 +114,26 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ userId }) => {
           </div>
           {versionInfo?.update ? (
             versionInfo.update.behind > 0 ? (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1 font-medium">
+              <span
+                className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1 font-medium"
+                title={
+                  versionInfo.update.latest_subject
+                    ? `上游最新提交：${versionInfo.update.latest_subject}`
+                    : undefined
+                }
+              >
                 <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                {`落后上游 ${versionInfo.update.behind}${versionInfo.update.behind_capped ? '+' : ''} 个提交`}
+                {`落后 ${versionInfo.update.upstream_branch || 'next'} 分支 ${versionInfo.update.behind}${versionInfo.update.behind_capped ? '+' : ''} 个提交`}
+                {versionInfo.update.current_short && versionInfo.update.latest_short ? (
+                  <span className="font-mono text-[11px] text-amber-600/80">
+                    {versionInfo.update.current_short} → {versionInfo.update.latest_short}
+                  </span>
+                ) : null}
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-1 font-medium">
                 <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                已是最新
+                {`已是最新（${versionInfo.update.upstream_branch || 'next'} 分支）`}
               </span>
             )
           ) : null}

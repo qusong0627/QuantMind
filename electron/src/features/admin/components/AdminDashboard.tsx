@@ -7,9 +7,10 @@
  * - 服务集群按平面分组（核心/数据/调度/接入生态），组内异常排前，
  *   健康行只剩一个状态点 + 一行描述，异常行整行染色；
  * - 指标条换成一条面板里的等宽数字格；事件改为左对齐的严重度流。
- * 数据逻辑（鉴权错误态 / 更新确认弹窗 / 30s 性能轮询）保持不变。
+ * 数据逻辑（鉴权错误态 / 30s 性能轮询）保持不变；「更新系统」新增仓库更新
+ * 提醒条（落后 N 个提交 + 当前→最新）与更新进度轮询。
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Button, Modal, Result, Spin, message } from 'antd';
 import {
     CloudSyncOutlined,
@@ -24,6 +25,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { EChartsChart } from '../../../components/common/EChartsChart';
 import { adminService } from '../services/adminService';
+import { useSystemUpdateCheck } from '../../../hooks/useSystemUpdateCheck';
 import { useAppDispatch } from '../../../store';
 import { logout } from '../../auth/store/authSlice';
 import { DashboardMetrics, DashboardServiceInfo } from '../types';
@@ -49,6 +51,9 @@ const isServiceHealthy = (s: DashboardServiceInfo) => s.healthy && s.status === 
 const serviceTone = (s: DashboardServiceInfo): DotTone =>
     isServiceHealthy(s) ? 'ok' : s.status === 'unreachable' ? 'bad' : 'warn';
 
+/** 更新进度（后端读 data/update.log 的状态机：idle/running/done/failed）。 */
+type UpdateProgress = Awaited<ReturnType<typeof adminService.getUpdateStatus>>;
+
 export const AdminDashboard: React.FC = () => {
     const dispatch = useAppDispatch();
     const navigate = useNavigate();
@@ -61,10 +66,25 @@ export const AdminDashboard: React.FC = () => {
     const [updating, setUpdating] = useState(false);
     const [perfHistory, setPerfHistory] = useState<Array<{ ts: number; cpu: number; mem: number; disk: number }>>([]);
     const [perfLoading, setPerfLoading] = useState(true);
+    // 更新检查（与顶栏徽章/全局提醒共享同一份 query 缓存，不会重复请求上游）
+    const { version, update, isFetching: checkingUpdate, refresh: refreshUpdate } = useSystemUpdateCheck();
+    const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
+    const progressTimer = useRef<number | null>(null);
 
     useEffect(() => {
         loadMetrics();
     }, []);
+
+    // 卸载时停掉更新进度轮询（组件切换不应留下后台 setInterval）
+    useEffect(
+        () => () => {
+            if (progressTimer.current !== null) {
+                window.clearInterval(progressTimer.current);
+                progressTimer.current = null;
+            }
+        },
+        [],
+    );
 
     const loadMetrics = async () => {
         try {
@@ -108,20 +128,85 @@ export const AdminDashboard: React.FC = () => {
     };
 
     /**
+     * 轮询更新进度（后端读 data/update.log）。更新会重建 api 容器，期间请求失败
+     * 是预期内的，不能因此判定更新失败——继续等到接口回来说明状态。
+     */
+    const watchUpdateProgress = () => {
+        if (progressTimer.current !== null) {
+            window.clearInterval(progressTimer.current);
+        }
+        setUpdateProgress({ state: 'running', message: '更新任务已启动' });
+
+        let attempts = 0;
+        let busy = false;
+        const timer = window.setInterval(async () => {
+            // 更新期间 api 容器重建，请求可能挂到 15s 超时；避免轮询叠加
+            if (busy) return;
+            busy = true;
+            attempts += 1;
+            try {
+                const status = await adminService.getUpdateStatus();
+                setUpdateProgress(status);
+                if (status.state === 'done') {
+                    window.clearInterval(timer);
+                    if (progressTimer.current === timer) progressTimer.current = null;
+                    message.success('系统更新完成，页面即将刷新…');
+                    window.setTimeout(() => window.location.reload(), 3000);
+                    return;
+                }
+                if (status.state === 'failed') {
+                    window.clearInterval(timer);
+                    if (progressTimer.current === timer) progressTimer.current = null;
+                    message.error(status.message || '系统更新失败，请查看更新日志');
+                    return;
+                }
+            } catch {
+                /* api 容器重建窗口：继续等 */
+            } finally {
+                busy = false;
+            }
+            if (attempts >= 200) {
+                // ~10 分钟仍未终态：停止轮询，保留最后一次状态，避免无限 setInterval
+                window.clearInterval(timer);
+                if (progressTimer.current === timer) progressTimer.current = null;
+            }
+        }, 3000);
+        progressTimer.current = timer;
+    };
+
+    /**
      * 「更新系统」：确认弹窗 → 触发宿主机 deploy/update.sh。
      * 更新会重建并重启所有核心服务，当前会话可能短暂中断；故二次确认。
+     * 目标分支取更新检查算出的分支（当前部署的 next 分支），保证「提示算哪个
+     * 分支、更新就拉哪个分支」。
      */
     const handleUpdateSystem = () => {
+        const branch = update?.upstream_branch || version?.branch || 'next';
+        const behind = update?.behind ?? 0;
+        const current = update?.current_short || update?.current_commit?.slice(0, 8);
+        const latest = update?.latest_short || update?.latest_commit?.slice(0, 8);
+
         Modal.confirm({
             title: '确认更新系统？',
             icon: <CloudSyncOutlined className="text-blue-500" />,
             content: (
                 <div className="space-y-2 text-sm">
                     <p className="m-0">
-                        将执行宿主机 <b>deploy/update.sh</b>：拉取最新代码、重建镜像并重启服务。
+                        将从 git 拉取 <b>{branch}</b> 分支最新代码，执行宿主机{' '}
+                        <b>deploy/update.sh</b>：重建镜像并重启服务。
                     </p>
+                    {behind > 0 ? (
+                        <p className="m-0 rounded-lg bg-amber-50 px-3 py-2 text-[12px] text-amber-700">
+                            当前落后 <b>{behind}{update?.behind_capped ? '+' : ''}</b> 个提交
+                            {current ? <>（<span className="font-mono">{current}</span></> : null}
+                            {latest ? <> → <span className="font-mono">{latest}</span></> : null}
+                            {update?.latest_subject ? <>：{update.latest_subject}</> : null}
+                        </p>
+                    ) : null}
                     <p className="m-0 text-amber-600">⚠️ 重启过程中当前连接可能中断，请勿在交易时段执行，并确保已保存数据。</p>
-                    <p className="m-0 text-xs text-slate-400">更新完成后，页面会在一段时间后自动恢复。</p>
+                    <p className="m-0 text-xs text-slate-400">
+                        若服务器工作树有未提交改动，更新会被安全中止（不会覆盖现场改动），日志会给出指引。
+                    </p>
                 </div>
             ),
             okText: '开始更新',
@@ -130,12 +215,19 @@ export const AdminDashboard: React.FC = () => {
             onOk: async () => {
                 setUpdating(true);
                 try {
-                    const res = await adminService.updateSystem();
-                    message.success(res?.started ? '已提交系统更新，后台执行中…' : '更新任务已提交');
+                    const res = await adminService.updateSystem(branch);
+                    message.success(
+                        res?.started
+                            ? `已提交系统更新（${res.ref || branch} 分支），后台构建中…`
+                            : '更新任务已提交',
+                    );
+                    watchUpdateProgress();
                 } catch (err: any) {
                     const status = err?.response?.status;
                     if (status === 403) {
-                        message.warning('更新功能未开启：需在宿主机挂载 docker socket 并设置 QUANTMIND_ENABLE_WEB_UPDATE=true');
+                        message.warning('更新功能未开启：宿主 docker socket 未挂载到 quantmind 容器');
+                    } else if (status === 409) {
+                        message.warning('已有更新任务在执行中，请稍候');
                     } else {
                         message.error(err?.response?.data?.detail || '系统更新失败');
                     }
@@ -313,6 +405,87 @@ export const AdminDashboard: React.FC = () => {
                     </Button>
                 </div>
             </div>
+
+            {/* 仓库更新提醒：更新检查算出的分支就是本次更新会拉取的分支 */}
+            {update && update.behind > 0 ? (
+                <div className="rounded-xl border border-amber-200/80 bg-gradient-to-r from-amber-50 via-orange-50/70 to-white px-4 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className="relative flex h-2.5 w-2.5">
+                                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-70" />
+                                    <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-500" />
+                                </span>
+                                <span className="text-[13px] font-semibold text-amber-900">
+                                    仓库 {update.upstream_branch || 'next'} 分支有更新
+                                </span>
+                                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                                    落后 {update.behind}{update.behind_capped ? '+' : ''} 个提交
+                                </span>
+                            </div>
+                            <p className="m-0 mt-1 truncate text-[11px] text-amber-800/70">
+                                当前{' '}
+                                <span className="font-mono">
+                                    {update.current_short || update.current_commit?.slice(0, 8) || '未知'}
+                                </span>
+                                {update.latest_short || update.latest_commit ? (
+                                    <>
+                                        {' → '}最新{' '}
+                                        <span className="font-mono">
+                                            {update.latest_short || update.latest_commit?.slice(0, 8)}
+                                        </span>
+                                    </>
+                                ) : null}
+                                {update.latest_subject ? ` · ${update.latest_subject}` : ''}
+                            </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                            <Button
+                                size="small"
+                                icon={<SyncOutlined spin={checkingUpdate} />}
+                                loading={checkingUpdate}
+                                onClick={() => void refreshUpdate(true)}
+                                className="rounded-md"
+                            >
+                                重新检查
+                            </Button>
+                            <Button
+                                size="small"
+                                type="primary"
+                                danger
+                                icon={<CloudSyncOutlined />}
+                                loading={updating}
+                                onClick={handleUpdateSystem}
+                                className="rounded-md"
+                            >
+                                立即更新
+                            </Button>
+                        </div>
+                    </div>
+                    {updateProgress ? (
+                        <div className="mt-2 border-t border-amber-200/60 pt-2 text-[11px]">
+                            {updateProgress.state === 'running' ? (
+                                <span className="text-amber-700">
+                                    更新进行中…（构建/重启期间接口可能短暂不可达，完成后页面会自动刷新）
+                                </span>
+                            ) : null}
+                            {updateProgress.state === 'failed' ? (
+                                <span className="text-rose-600">更新失败：{updateProgress.message}</span>
+                            ) : null}
+                            {updateProgress.log_tail ? (
+                                <details className="mt-1">
+                                    <summary className="cursor-pointer select-none text-slate-400 hover:text-slate-600">
+                                        查看更新日志
+                                    </summary>
+                                    <pre className="mt-1 max-h-32 overflow-auto rounded-lg bg-slate-900/90 p-2 text-[10px] leading-4 text-slate-100">
+                                        {updateProgress.log_tail}
+                                    </pre>
+                                </details>
+                            ) : null}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
 
             {/* 异常横幅：只在有服务不健康时出现 */}
             {unhealthy.length > 0 && (

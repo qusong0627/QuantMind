@@ -19,9 +19,20 @@ export interface SystemUpdateInfo {
   behind: number;
   /** 上游 commits 超过单次 API 上限，behind 为下限（前端可显示 N+） */
   behind_capped: boolean;
+  /** 对比的上游分支（也是更新时应拉取/安装的分支） */
   upstream_branch: string;
+  /** 本部署当前 commit（运行处工作树优先） */
+  current_commit?: string;
+  current_short?: string;
+  /** 上游最新提交 */
+  latest_commit?: string;
+  latest_short?: string;
+  latest_subject?: string;
+  latest_committed_at?: string | null;
   checked_at: number;
   is_up_to_date: boolean;
+  /** 本部署 commit 的来源：运行处 .git 探针 / update.sh 声明 */
+  source?: 'git-runtime' | 'version-json' | 'unknown';
 }
 
 export interface SystemVersion {

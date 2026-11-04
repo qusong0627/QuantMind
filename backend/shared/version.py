@@ -18,11 +18,15 @@ fetch），故走上游平台（默认 gitee）的 compare HTTP API，比较「�
 与「上游分支」算出落后提交数。
 结果做本地磁盘缓存，避免每次请求都访问上游。
 
-**只有走过 deploy/update.sh 的部署（version.json 在场）才参与更新检查**：
-version.txt 是遗留回退，它的 commit 冻结在写入那一刻，开发机（bind mount
-恒最新）拿它对比上游会把「本地其实最新」误报成落后几百提交。宁可不提示，
-也不误报。上游对比分支默认 next（本项目开发主线；main 只读、推送走 next），
-可用 QUANTMIND_UPSTREAM_BRANCH 覆盖。
+**本部署 commit 的取值顺序（2026-11-05 修订）**：
+1. 运行处工作树（`.git` 只读探针）—— 唯一能反映「此刻实际检出/热修」的来源，
+   不依赖 update.sh 是否写过 version.json；bind mount 的开发部署也据此自动提示；
+2. version.json（update.sh 落盘的声明）—— 仅当容器内 `.git` 不可达时回退；
+3. 遗留 version.txt **故意不参与**：它的 commit 冻结在打包时刻，拿它对比上游
+   会把「本地其实最新」误报成落后几百提交（2026-10-09 事故口径：宁可不提示，
+   也不误报）。
+上游对比分支默认 next（本项目开发主线；main 只读、推送走 next），可用
+QUANTMIND_UPSTREAM_BRANCH 覆盖；实际优先跟随运行处 checkout 的分支。
 """
 
 from __future__ import annotations
@@ -53,8 +57,9 @@ _CACHE_FILE = os.getenv(
     "QUANTMIND_UPDATE_CACHE_FILE",
     os.path.join(os.getenv("STORAGE_ROOT", "/data"), "version_check.json"),
 )
-# 缓存有效期（秒）：避免每次页面加载都请求上游。
-_CACHE_TTL = int(os.getenv("QUANTMIND_UPDATE_CHECK_TTL", str(6 * 3600)))
+# 缓存有效期（秒）：自动提醒按此 TTL 复用结果，避免每次页面轮询都请求上游。
+# 15 分钟 = 用户最多晚一刻钟看到新提交；单部署每小时最多 4 次上游请求。
+_CACHE_TTL = int(os.getenv("QUANTMIND_UPDATE_CHECK_TTL", str(15 * 60)))
 _CACHE_FILE = Path(os.getenv("QUANTMIND_UPDATE_CACHE_FILE", _CACHE_FILE))
 _TIMEOUT = float(os.getenv("QUANTMIND_UPDATE_CHECK_TIMEOUT", "10"))
 
@@ -140,11 +145,17 @@ def _git(args: list[str], code_root: Path) -> str | None:
     return proc.stdout.strip()
 
 
-def get_git_identity(code_root: Path | None = None) -> dict:
+def get_git_identity(
+    code_root: Path | None = None, *, with_status: bool = True
+) -> dict:
     """运行处工作树身份：commit/branch/脏标记（T7-3）。
 
     `.git` 不可达（未挂载/非仓库/无 git）→ available=False，脏标记为 None
     （未探到 ≠ 干净，别把不可知显示成 False）。脏面限定 `_STATUS_PATHS`。
+
+    ``with_status=False`` 只跑两条 rev-parse，跳过 git status：更新检查每次
+    请求都要拿 commit/branch，在大仓库上 ``git status`` 是几百毫秒级开销，
+    而脏标记与「落后几个提交」无关。
     """
     root = Path(code_root) if code_root is not None else _CODE_ROOT
     commit = _git(["rev-parse", "HEAD"], root)
@@ -159,6 +170,16 @@ def get_git_identity(code_root: Path | None = None) -> dict:
             "dirty_sample": [],
         }
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], root) or ""
+    if not with_status:
+        return {
+            "available": True,
+            "commit": commit,
+            "short": commit[:8],
+            "branch": branch,
+            "dirty": None,
+            "dirty_count": None,
+            "dirty_sample": [],
+        }
     scope = [p for p in _STATUS_PATHS if (root / p).exists()]
     porcelain = _git(["status", "--porcelain", "--", *scope], root) if scope else ""
     lines = [ln for ln in (porcelain or "").splitlines() if ln.strip()]
@@ -174,6 +195,23 @@ def get_git_identity(code_root: Path | None = None) -> dict:
         # 对 strip 前后两种形态都给出同一路径。
         "dirty_sample": [ln[2:].lstrip() for ln in lines[:_DIRTY_SAMPLE_LIMIT]],
     }
+
+
+def get_git_remotes(code_root: Path | None = None) -> list[str]:
+    """运行处 checkout 配置的远端名（git remote）；不可达时返回空列表。
+
+    更新接口用它挑一个实际存在的远端（本仓没有 ``origin``，实际是
+    gitee/upstream/quantmind2），避免把 ``origin`` 传给 update.sh 后
+    落到那条「远端不存在」的回退路径上。
+    """
+    out = _git(["remote"], Path(code_root) if code_root is not None else _CODE_ROOT)
+    return [line.strip() for line in (out or "").splitlines() if line.strip()]
+
+
+def get_git_remote_url(name: str, code_root: Path | None = None) -> str:
+    """远端 URL（git remote get-url）；不存在/失败返回空串。"""
+    root = Path(code_root) if code_root is not None else _CODE_ROOT
+    return _git(["remote", "get-url", name], root) or ""
 
 
 def _read_image_stamp(stamp_path: Path | None = None) -> dict | None:
@@ -310,32 +348,88 @@ def _save_cache(payload: dict) -> None:
         pass  # 目录不可写时静默降级为每次实查
 
 
-async def check_updates(force: bool = False) -> dict | None:
-    """向正则资源上游查询本部署是否落后，返回落后提交数等；失败/无需检查返回 None。
+def _update_identity() -> dict:
+    """更新检查用的「本部署身份」（commit / 对比分支 / 来源）。
 
-    返回字段：behind、behind_capped、upstream_branch、checked_at、is_up_to_date。
+    优先级见模块 docstring：运行处工作树 > version.json > 不检查。
+    遗留 version.txt 不参与——它冻结在打包时刻，天然会误报。
+    """
+    runtime = get_git_identity(with_status=False)
+    if runtime["available"] and runtime["commit"]:
+        return {
+            "commit": runtime["commit"],
+            "branch": runtime["branch"] or _UPSTREAM_BRANCH,
+            "source": "git-runtime",
+        }
+    if _VERSION_JSON.is_file():
+        info = get_version_info()
+        if info.get("commit"):
+            return {
+                "commit": info["commit"],
+                "branch": info.get("branch") or _UPSTREAM_BRANCH,
+                "source": "version-json",
+            }
+    return {"commit": "", "branch": _UPSTREAM_BRANCH, "source": "unknown"}
+
+
+def _cache_matches(cache: dict | None, identity: dict) -> bool:
+    """缓存必须绑定「同一个本地 commit + 同一个对比分支」。
+
+    只按时间判新鲜是不够的：部署刚更新/热修换了 commit 后，旧缓存里的
+    behind 会继续挂着，管理页就会建议一次并不存在的更新（update.sh 会在
+    更新完成后删缓存，但热加载/手工 checkout 不走那条路径）。
+    """
+    return bool(
+        cache
+        and cache.get("current_commit") == identity["commit"]
+        and cache.get("upstream_branch") == identity["branch"]
+    )
+
+
+def _cache_is_fresh(cache: dict | None) -> bool:
+    return bool(cache) and time.time() - cache.get("checked_at", 0) < _CACHE_TTL
+
+
+def _latest_commit_info(body: dict) -> dict:
+    """从 gitee compare 响应里取「上游最新提交」摘要。
+
+    gitee 的 commits 按**新→旧**排列（实测 2026-11-05），commits[0] 即上游 HEAD；
+    落后 0 个提交时列表为空，base_commit 就是本地（也即上游）HEAD。
+    """
+    commits = body.get("commits") or []
+    latest = commits[0] if commits else (body.get("base_commit") or {})
+    sha = latest.get("sha") or ""
+    message = ((latest.get("commit") or {}).get("message") or "").strip()
+    author = (latest.get("commit") or {}).get("author") or {}
+    return {
+        "latest_commit": sha,
+        "latest_short": sha[:8],
+        "latest_subject": message.splitlines()[0] if message else "",
+        "latest_committed_at": author.get("date"),
+    }
+
+
+async def check_updates(force: bool = False) -> dict | None:
+    """向上游查询本部署是否落后，返回落后提交数等；无法判断时返回 None。
+
+    返回字段：behind、behind_capped、upstream_branch、current_commit、
+    latest_commit/latest_subject、checked_at、is_up_to_date、source。
     前端仅需 behind > 0 即提示「落后上游 N 个提交」。
     """
-    info = get_version_info()
-    commit, branch = info.get("commit"), info.get("branch")
-    # 只有走 update.sh 的部署（version.json 在场）才能对比：遗留 version.txt 的
-    # commit 冻结在打包时刻，开发机拿它对比上游 = 把恒最新的本地误报成落后。
-    if not commit or not _VERSION_JSON.is_file():
+    identity = await asyncio.to_thread(_update_identity)
+    commit, branch = identity["commit"], identity["branch"]
+    if not commit:
         return None
 
     cache = _load_cache()
-    if not force and cache and time.time() - cache.get("checked_at", 0) < _CACHE_TTL:
+    if not force and _cache_matches(cache, identity) and _cache_is_fresh(cache):
         return cache
 
     # 幂等：同一批次并发请求只打一次上游。
     async with _lock:
         # 双检：等待锁期间可能已被别的协程填充缓存。
         cache = _load_cache()
-        if (
-            not force
-            and cache
-            and time.time() - cache.get("checked_at", 0) < _CACHE_TTL
-        ):
+        if not force and _cache_matches(cache, identity) and _cache_is_fresh(cache):
             return cache
 
         url = (
@@ -348,6 +442,8 @@ async def check_updates(force: bool = False) -> dict | None:
             body = resp.json()
         except (httpx.HTTPError, ValueError):
             return None
+        if not isinstance(body, dict):
+            return None
 
         commits = body.get("commits") or []
         behind = len(commits)
@@ -355,8 +451,12 @@ async def check_updates(force: bool = False) -> dict | None:
             "behind": behind,
             "behind_capped": bool(body.get("truncated")),
             "upstream_branch": branch,
+            "current_commit": commit,
+            "current_short": commit[:8],
+            **_latest_commit_info(body),
             "checked_at": int(time.time()),
             "is_up_to_date": behind == 0,
+            "source": identity["source"],
         }
         _save_cache(result)
         return result

@@ -39,7 +39,7 @@ import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { AdminSystemLoadWidget } from './components/AdminSystemLoadWidget';
 import { StatusDot } from './components/ui/AdminPrimitives';
 import { adminService } from './services/adminService';
-import { systemService, type SystemVersion } from '../../services/systemService';
+import { useSystemUpdateCheck } from '../../hooks/useSystemUpdateCheck';
 import type { SystemLoadSummary } from './types';
 
 // ── 导航注册表（分组 + 路由键）。新增栏目只改这里 ──────────────────────
@@ -113,43 +113,32 @@ const NAV_INDEX: Record<string, { label: string; group: string }> = Object.fromE
     NAV_GROUPS.flatMap((g) => g.items.map((it) => [it.key, { label: it.label, group: g.label }])),
 );
 
-// ── 顶栏更新徽章（留在原处；版本接口无 update 字段时整体不渲染） ──────────
+// ── 顶栏更新徽章（自动轮询；接口无 update 字段时整体不渲染） ──────────────
 
 const AdminUpdateBadge: React.FC = () => {
-    const [versionInfo, setVersionInfo] = useState<SystemVersion | null>(null);
-    const [checkingUpdate, setCheckingUpdate] = useState(false);
+    const navigate = useNavigate();
+    const { update, isFetching, refresh } = useSystemUpdateCheck();
 
-    const loadVersion = (force = false) => {
-        setCheckingUpdate(true);
-        systemService
-            .getVersion(force)
-            .then((info) => setVersionInfo(info))
-            .catch(() => setVersionInfo(null))
-            .finally(() => setCheckingUpdate(false));
-    };
-
-    useEffect(() => {
-        loadVersion();
-    }, []);
-
-    const update = versionInfo?.update;
-    if (checkingUpdate && !update) {
+    if (isFetching && !update) {
         return <span className="text-[10px] text-slate-400">检查更新…</span>;
     }
     if (!update) {
         return null;
     }
     if (update.behind > 0) {
+        const branch = update.upstream_branch || 'next';
         return (
-            <Tooltip title="在服务器项目目录执行：sudo bash deploy/update.sh">
+            <Tooltip
+                title={`仓库 ${branch} 分支有 ${update.behind}${update.behind_capped ? '+' : ''} 个新提交，点击去系统概览更新`}
+            >
                 <button
                     type="button"
-                    onClick={() => loadVersion(true)}
-                    disabled={checkingUpdate}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 disabled:opacity-60"
+                    onClick={() => navigate('/admin/overview')}
+                    disabled={isFetching}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 transition-colors hover:border-amber-300 hover:bg-amber-100 disabled:opacity-60"
                 >
                     <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
-                    {`落后 ${update.behind}${update.behind_capped ? '+' : ''} 个提交`}
+                    {`落后 ${branch} ${update.behind}${update.behind_capped ? '+' : ''} 个提交`}
                 </button>
             </Tooltip>
         );
@@ -158,10 +147,11 @@ const AdminUpdateBadge: React.FC = () => {
         return (
             <button
                 type="button"
-                onClick={() => loadVersion(true)}
-                className="text-[10px] font-medium text-slate-400 hover:text-emerald-600"
+                onClick={() => void refresh(true)}
+                disabled={isFetching}
+                className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-400 transition-colors hover:text-emerald-600 disabled:opacity-60"
             >
-                已最新
+                {isFetching ? '检查中…' : '已最新'}
             </button>
         );
     }

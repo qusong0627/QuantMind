@@ -14,6 +14,7 @@ import MiningTaskMonitor from './features/alpha-research/components-v2/MiningTas
 import { loadLocalLivePage } from './features/shared/localLive';
 import { resolveSimColumnForcedMode } from './pages/trading/utils/consoleTabs';
 import { TitleBar } from './components/layout/TitleBar';
+import { SystemUpdateNotifier } from './components/common/SystemUpdateNotifier';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { useMenuExport } from './hooks/useMenuExport';
 import { WebSocketProvider } from './contexts/WebSocketContext';
@@ -596,6 +597,9 @@ export default function App() {
           <ConfigProvider locale={zhCN}>
             <div className={`app-root${shouldShowNavigation ? ' has-dock' : ''}`}>
             <TitleBar />
+            {/* 全局更新提醒：登录后自动轮询仓库更新（每 10 分钟 + 窗口聚焦），
+                落后上游时浮出「落后 N 个提交」卡片；未登录不发起请求。 */}
+            {isAuthenticated ? <SystemUpdateNotifier /> : null}
             <ErrorBoundary>
               <div className="app-main">
               <Suspense

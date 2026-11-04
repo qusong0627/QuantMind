@@ -32,12 +32,18 @@ main 容器已挂载 /var/run/docker.sock。因此这里借 **docker socket HTTP
 路径由环境变量决定：QUANTMIND_PROJECT_DIR 指定项目目录（默认 /opt/quantmind），
 QUANTMIND_REF / QUANTMIND_REMOTE 可选，透传给 deploy/update.sh；不设时 update.sh
 默认更新到**当前 checkout 的分支**。
+
+目标分支（2026-11-05 增补）：POST /update 接受 `ref` 查询参数（前端把更新检查
+算出的分支传回来），优先级 = 显式 ref > QUANTMIND_REF 环境变量 > 运行处 checkout
+分支。这样「落后 N 个提交」提示的分支与真正拉取/安装的分支永远是同一个，
+不会出现「按 next 算落后、却去更新 master」的错位。
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 from io import StringIO
 from pathlib import Path
@@ -85,6 +91,106 @@ def _verify_token(token: str | None) -> None:
     return
 
 
+# git ref 的保守白名单：分支/标签名允许字母数字、点、下划线、斜杠、连字符。
+# 这里不做「解析成合法 git ref」的完整校验（update.sh 里一律带引号使用），
+# 只拦掉会改变参数语义的形态：前导 '-'（被当成选项）、'..'（范围语法）、
+# 空白/控制字符。长度与 refs 规范对齐（<=128）。
+_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+
+
+def _resolve_ref(ref: str | None) -> str:
+    """目标分支：显式 ref > QUANTMIND_REF > 运行处 checkout 分支 > 空。
+
+    空串 = 不注入 QUANTMIND_REF，交给 deploy/update.sh 自己的 default_ref()
+    （跟随当前 checkout 的分支）。显式值必须过白名单，否则 400。
+    """
+    if ref is not None:
+        ref = ref.strip()
+        if not ref:
+            return ""
+        if not _REF_RE.match(ref) or ".." in ref or "@{" in ref:
+            raise HTTPException(
+                status_code=400,
+                detail=f"非法的分支/标签名: {ref!r}",
+            )
+        return ref
+    env_ref = os.getenv("QUANTMIND_REF", "").strip()
+    if env_ref:
+        return env_ref
+    try:
+        from backend.shared.version import get_git_identity
+
+        branch = (get_git_identity().get("branch") or "").strip()
+    except Exception:  # noqa: BLE001 - 探针失败不影响更新（update.sh 会自行判断）
+        branch = ""
+    return branch if branch and branch != "HEAD" else ""
+
+
+# 远端名比 ref 更窄：字母数字开头，允许点、下划线、连字符（不允许斜杠/空格）。
+_REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# 也允许直接传 URL（update.sh 已支持 URL 形态的远端）。
+_REMOTE_URL_RE = re.compile(r"^(?:https?://|ssh://|git@)[^\s'\"]{1,255}$")
+# git@gitee.com:owner/repo.git / ssh://git@host/owner/repo.git → https URL
+_SSH_URL_RE = re.compile(r"^(?:ssh://)?git@([^:/]+)[:/](.+?)(?:\.git)?/?$")
+
+
+def _https_url_from_ssh(url: str) -> str:
+    """把 SSH 远端转成 HTTPS URL；无法识别返回空串。
+
+    updater 容器里没有宿主 SSH 私钥（只挂项目目录 + docker socket），
+    SSH 形态的 gitee 远端在容器内必然 "Host key verification failed"。
+    本仓远端是公开仓库，HTTPS 匿名 fetch 可用，因此自动解析时优先转 HTTPS。
+    """
+    match = _SSH_URL_RE.match(url.strip())
+    if not match:
+        return ""
+    host, path = match.group(1), match.group(2).rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return f"https://{host}/{path}.git"
+
+
+def _resolve_remote(remote: str | None) -> str:
+    """目标远端：显式 remote > QUANTMIND_REMOTE > 运行处已配置的常用远端。
+
+    本仓实际远端是 gitee / upstream / quantmind2，**没有 origin**；update.sh
+    默认 origin 会落到「远端不存在」的回退路径。这里提前挑一个存在的，
+    顺序 gitee → origin → upstream → quantmind2（与推送主仓一致）。
+    自动选择时若该远端是 SSH 形态，转换成 HTTPS URL 传下去——updater 容器
+    没有宿主 SSH 私钥，SSH fetch 必失败；公开仓 HTTPS 匿名可用。
+    """
+    if remote is not None:
+        remote = remote.strip()
+        if not remote:
+            return ""
+        if not (_REMOTE_RE.match(remote) or _REMOTE_URL_RE.match(remote)):
+            raise HTTPException(status_code=400, detail=f"非法的远端名: {remote!r}")
+        return remote
+    env_remote = os.getenv("QUANTMIND_REMOTE", "").strip()
+    if env_remote:
+        return env_remote
+
+    names: list[str] = []
+    get_url = None
+    try:
+        from backend.shared.version import get_git_remote_url, get_git_remotes
+
+        names = get_git_remotes()
+        get_url = get_git_remote_url
+    except Exception:  # noqa: BLE001 - 探针失败交给 update.sh 自行回退
+        pass
+
+    for candidate in ("gitee", "origin", "upstream", "quantmind2"):
+        if candidate not in names:
+            continue
+        url = get_url(candidate) if get_url else ""
+        if url.startswith(("http://", "https://")):
+            return candidate
+        https_url = _https_url_from_ssh(url) if url else ""
+        return https_url or candidate
+    return ""
+
+
 def _detect_image(client: httpx.Client) -> str:
     """用当前 main 容器镜像作为 updater 镜像；失败时回退环境变量/默认值。"""
     override = os.getenv("QUANTMIND_UPDATE_IMAGE", "").strip()
@@ -122,7 +228,9 @@ def _remove_stale(client: httpx.Client) -> None:
         pass
 
 
-def _build_container_spec(image: str) -> dict:
+def _build_container_spec(
+    image: str, ref: str | None = None, remote: str | None = None
+) -> dict:
     # 存在性检查必须放在 **updater 容器内**做：那边按 {_PROJECT_DIR}:{_PROJECT_DIR}
     # 挂了整个项目目录，deploy/update.sh 才可见。API 容器只挂载了子目录
     # （backend/scripts/config/data/…，实测无 deploy/），在那儿检查会把正常部署
@@ -156,12 +264,16 @@ def _build_container_spec(image: str) -> dict:
         "GIT_CONFIG_KEY_0=safe.directory",
         f"GIT_CONFIG_VALUE_0={_PROJECT_DIR}",
     ]
-    # 版本/远端透传：不设时 update.sh 自行「跟随当前 checkout 的分支」。
-    # 设了才显式带过去，避免这里替运维决定分支。
-    for var in ("QUANTMIND_REF", "QUANTMIND_REMOTE"):
-        value = os.getenv(var, "").strip()
-        if value:
-            env.append(f"{var}={value}")
+    # 版本/远端透传：ref 由调用方解析（显式参数 > 环境变量 > 运行处分支）；
+    # 都没有时不注入，交给 update.sh 自行「跟随当前 checkout 的分支」。
+    target_ref = ref if ref is not None else os.getenv("QUANTMIND_REF", "").strip()
+    if target_ref:
+        env.append(f"QUANTMIND_REF={target_ref}")
+    target_remote = (
+        remote if remote is not None else os.getenv("QUANTMIND_REMOTE", "").strip()
+    )
+    if target_remote:
+        env.append(f"QUANTMIND_REMOTE={target_remote}")
     return {
         "Image": image,
         "Cmd": ["bash", "-lc", cmd],
@@ -178,22 +290,32 @@ def _build_container_spec(image: str) -> dict:
 @router.post("/update")
 async def trigger_update(
     confirm: int = Query(default=1, ge=0, le=1),
+    ref: str | None = Query(default=None, max_length=128),
+    remote: str | None = Query(default=None, max_length=64),
     x_update_token: str | None = Header(default=None, alias="X-Update-Token"),
 ):
-    """触发宿主 deploy/update.sh（分离 updater 容器，立即返回）。已移除环境变量与 confirm 强校验。"""
+    """触发宿主 deploy/update.sh（分离 updater 容器，立即返回）。
+
+    `ref` 为前端回传的目标分支（更新检查算出的分支）；不传时按
+    QUANTMIND_REF 环境变量、再退到运行处 checkout 分支。
+    `remote` 为 git 远端名；不传时按 QUANTMIND_REMOTE、再自动挑一个存在的
+    （本仓没有 origin，实际是 gitee）。
+    """
     if not _enabled():
         raise HTTPException(
             status_code=403,
             detail="docker socket 未挂载，无法触发更新",
         )
 
+    target_ref = _resolve_ref(ref)
+    target_remote = _resolve_remote(remote)
     try:
         client = _docker_client()
         if _container_running(client):
             raise HTTPException(status_code=409, detail="已有更新任务在执行中")
 
         image = _detect_image(client)
-        spec = _build_container_spec(image)
+        spec = _build_container_spec(image, target_ref, target_remote)
         _remove_stale(client)
 
         created = client.post(
@@ -216,17 +338,33 @@ async def trigger_update(
         try:
             from backend.shared.system_events import record_system_event_async
             import asyncio as _asyncio
-            _asyncio.create_task(record_system_event_async(
-                event_type="system_update",
-                level="info",
-                source="quantmind-api",
-                title="系统更新已触发（Web）",
-                message=f"updater 镜像 {image} 已启动，容器 {cid[:12]}",
-                meta={"container_id": cid, "image": image},
-            ))
+
+            _asyncio.create_task(
+                record_system_event_async(
+                    event_type="system_update",
+                    level="info",
+                    source="quantmind-api",
+                    title="系统更新已触发（Web）",
+                    message=f"updater 镜像 {image} 已启动，容器 {cid[:12]}",
+                    meta={
+                        "container_id": cid,
+                        "image": image,
+                        "ref": target_ref,
+                        "remote": target_remote,
+                    },
+                )
+            )
         except Exception:
             pass
-        return {"success": True, "data": {"started": True, "task_id": cid}}
+        return {
+            "success": True,
+            "data": {
+                "started": True,
+                "task_id": cid,
+                "ref": target_ref,
+                "remote": target_remote,
+            },
+        }
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

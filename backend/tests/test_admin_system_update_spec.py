@@ -52,7 +52,9 @@ def _restore_module_constants():
     su._PROJECT_DIR, su._SCRIPT_PATH, su._LOG_PATH = snapshot
 
 
-def _render_cmd(monkeypatch, tmp_path: Path, *, script_exists: bool) -> tuple[str, Path]:
+def _render_cmd(
+    monkeypatch, tmp_path: Path, *, script_exists: bool
+) -> tuple[str, Path]:
     """把模块常量指到临时目录后渲染出真实会被执行的那条 shell 命令。"""
     project = tmp_path / "proj"
     (project / "data").mkdir(parents=True, exist_ok=True)
@@ -187,3 +189,149 @@ def test_allowed_write_target_is_the_project_log(monkeypatch, tmp_path):
 
     assert log_path.name == "update.log"
     assert log_path.parent.name == "data"
+
+
+# ---------------------------------------------------------------------------
+# 目标分支（2026-11-05）：更新检查算哪个分支，更新就拉哪个分支
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_ref_is_passed_to_updater(monkeypatch):
+    """前端回传的分支必须原样进 updater 容器环境（否则 update.sh 会跟随检出分支）。"""
+    spec = su._build_container_spec("img", "next")
+
+    assert "QUANTMIND_REF=next" in spec["Env"]
+
+
+def test_explicit_ref_wins_over_env(monkeypatch):
+    monkeypatch.setenv("QUANTMIND_REF", "master")
+
+    spec = su._build_container_spec("img", "next")
+
+    refs = [v for v in spec["Env"] if v.startswith("QUANTMIND_REF=")]
+    assert refs == ["QUANTMIND_REF=next"]
+
+
+def test_resolve_ref_falls_back_to_live_checkout_branch(monkeypatch):
+    """既无显式 ref 也无环境变量时，跟运行处 checkout 的分支（next 部署不倒退）。"""
+    monkeypatch.delenv("QUANTMIND_REF", raising=False)
+    monkeypatch.setattr(
+        "backend.shared.version.get_git_identity",
+        lambda *a, **kw: {
+            "available": True,
+            "commit": "abc123",
+            "branch": "next",
+            "dirty": False,
+            "dirty_count": 0,
+            "dirty_sample": [],
+        },
+    )
+
+    assert su._resolve_ref(None) == "next"
+
+
+def test_resolve_ref_empty_when_branch_unknown(monkeypatch):
+    """探不到分支时返回空串 = 不注入环境变量，让 update.sh 自己决定。"""
+    monkeypatch.delenv("QUANTMIND_REF", raising=False)
+    monkeypatch.setattr(
+        "backend.shared.version.get_git_identity",
+        lambda *a, **kw: {
+            "available": False,
+            "commit": "",
+            "branch": "",
+            "dirty": None,
+            "dirty_count": None,
+            "dirty_sample": [],
+        },
+    )
+
+    assert su._resolve_ref(None) == ""
+
+
+@pytest.mark.parametrize(
+    "bad_ref",
+    [
+        "../etc/passwd",  # 路径穿越形态
+        "-rf",  # 会被 git 当成选项
+        "next --force",  # 空白拆参数
+        "a;rm -rf /",  # shell 元字符（env 不经过 shell，但仍拒绝）
+        "a..b",  # git 范围语法
+        "a@{1}",  # reflog 语法
+    ],
+)
+def test_invalid_ref_is_rejected(bad_ref):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        su._resolve_ref(bad_ref)
+
+    assert exc.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 目标远端（2026-11-05）：updater 容器没有宿主 SSH 私钥，SSH 远端必须转 HTTPS
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_remote_is_passed_to_updater():
+    spec = su._build_container_spec("img", "next", "https://gitee.com/o/r.git")
+
+    assert "QUANTMIND_REMOTE=https://gitee.com/o/r.git" in spec["Env"]
+
+
+def test_resolve_remote_converts_ssh_gitee_to_https(monkeypatch):
+    """本仓 gitee 远端是 SSH；自动解析必须转成 HTTPS URL（公开仓匿名可拉）。"""
+    monkeypatch.delenv("QUANTMIND_REMOTE", raising=False)
+    monkeypatch.setattr(
+        "backend.shared.version.get_git_remotes",
+        lambda *a, **k: ["gitee", "upstream"],
+    )
+    monkeypatch.setattr(
+        "backend.shared.version.get_git_remote_url",
+        lambda name, *a, **k: (
+            "git@gitee.com:qusong0627/QuantMind.git"
+            if name == "gitee"
+            else "https://github.com/qusong0627/QuantMind.git"
+        ),
+    )
+
+    assert su._resolve_remote(None) == "https://gitee.com/qusong0627/QuantMind.git"
+
+
+def test_resolve_remote_keeps_name_when_url_is_https(monkeypatch):
+    """HTTPS 远端直接按名字传（update.sh 走 remote get-url 分支）。"""
+    monkeypatch.delenv("QUANTMIND_REMOTE", raising=False)
+    monkeypatch.setattr(
+        "backend.shared.version.get_git_remotes", lambda *a, **k: ["origin"]
+    )
+    monkeypatch.setattr(
+        "backend.shared.version.get_git_remote_url",
+        lambda name, *a, **k: "https://example.com/o/r.git",
+    )
+
+    assert su._resolve_remote(None) == "origin"
+
+
+def test_resolve_remote_prefers_gitee_over_upstream(monkeypatch):
+    """更新检查打的是 gitee，更新也优先 gitee —— 两边不能各拉一个仓。"""
+    monkeypatch.delenv("QUANTMIND_REMOTE", raising=False)
+    monkeypatch.setattr(
+        "backend.shared.version.get_git_remotes",
+        lambda *a, **k: ["upstream", "gitee"],
+    )
+    monkeypatch.setattr(
+        "backend.shared.version.get_git_remote_url",
+        lambda name, *a, **k: f"https://example.com/{name}.git",
+    )
+
+    assert su._resolve_remote(None) == "gitee"
+
+
+@pytest.mark.parametrize("bad_remote", ["a b", "a;b", "../x", "a/b"])
+def test_invalid_remote_is_rejected(bad_remote):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        su._resolve_remote(bad_remote)
+
+    assert exc.value.status_code == 400

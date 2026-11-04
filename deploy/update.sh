@@ -148,14 +148,23 @@ sync_code() {
             -e .update -e .env.bak -e .env.bak.* -e secrets -e certs
     fi
 
-    # 拉远端：指定远端不存在时回退 fetch --all（项目实际是 gitee/github）
-    if git -C "$PROJECT_DIR" remote get-url "$REMOTE" >/dev/null 2>&1; then
+    # 拉远端：REMOTE 可以是远端名，也可以是 URL（Web 一键更新会传 HTTPS URL，
+    # 因为 updater 容器没有宿主 SSH 私钥）；两者都不成立时回退 fetch --all。
+    local fetched_ref
+    if [[ "$REMOTE" == *"://"* || "$REMOTE" == git@* ]]; then
+        log "  远端为 URL，直接 fetch: $REMOTE"
         git -C "$PROJECT_DIR" fetch "$REMOTE" "$REF" || die "git fetch $REMOTE $REF 失败"
-        local fetched_ref="FETCH_HEAD"
+        fetched_ref="FETCH_HEAD"
+    elif git -C "$PROJECT_DIR" remote get-url "$REMOTE" >/dev/null 2>&1; then
+        git -C "$PROJECT_DIR" fetch "$REMOTE" "$REF" || die "git fetch $REMOTE $REF 失败"
+        fetched_ref="FETCH_HEAD"
     else
         log "  远端 $REMOTE 不存在，回退 fetch --all"
-        git -C "$PROJECT_DIR" fetch --all "$REF" 2>/dev/null || die "git fetch 失败"
-        local fetched_ref
+        # 注意：`git fetch --all` 后面**不能**再跟 refspec —— git 会把 next 当成
+        # 仓库参数并直接报 "fetch --all 不能带一个仓库参数"（2026-11-05 实测），
+        # 之前的写法让「没有 origin 的检出」（本仓实际是 gitee/upstream/quantmind2）
+        # 每次更新都在第一步 die。整体 fetch 后按 refs/remotes/*/$REF 找。
+        git -C "$PROJECT_DIR" fetch --all 2>/dev/null || die "git fetch 失败"
         fetched_ref="$(git -C "$PROJECT_DIR" for-each-ref --format='%(refname)' \
                         "refs/remotes/*/$REF" | head -1 || true)"
         fetched_ref="${fetched_ref:-$REF}"
