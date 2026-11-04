@@ -95,6 +95,7 @@ V1_DATASETS = [
     {"category_id": "3", "sub_category": "cashflow", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "capital", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "pershare_index", "dir": "3_financial_data"},
+    {"category_id": "3", "sub_category": "per_share", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "dividend_factors", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "holder_num", "dir": "3_financial_data"},
 ]
