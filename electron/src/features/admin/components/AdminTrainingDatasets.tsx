@@ -39,6 +39,7 @@ const MARKET_SOURCE_FALLBACK: Record<string, { value: string; label: string }[]>
     { value: 'l1_factors', label: 'L1 因子（默认）' },
     { value: 'l1_l2_factors', label: 'L1 + L2 合并宽表' },
     { value: 'l2_factors', label: 'L2 因子' },
+    { value: 'factor_dictionary', label: 'V5 因子宽表' },
   ],
   HK: [
     { value: 'l1_factors', label: 'L1 因子（默认）' },

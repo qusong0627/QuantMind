@@ -89,13 +89,14 @@ RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
   && python -m pip install --root-user-action=ignore -r /tmp/requirements-ai.txt \
   && rm -rf /tmp/requirements*.txt
 
-# 安装 QuantDB SDK（付费高质量数据源：K线/Tick/财报/估值/315维AI因子）
-# 钉版 ==0.3.3 + 共享 pip 缓存（id=quantmind-pip，与上方 requirements 层同设计）。
-# 2026-10-13 解冲突：本行下方的 stash-pop 冲突标记被清掉——HEAD 侧（钉版+缓存挂载）
-# 与在跑镜像实际安装的 0.3.3 一致；stashed 侧（--no-cache-dir + >=0.3.1 范围）是被
-# 弃的旧 WIP，不迁回。留标记会让任何镜像重建以 dockerfile parse error 失败。
+# 安装 QuantDB SDK（付费高质量数据源：K线/Tick/财报/估值/L1+L2 因子 + V5 因子宽表）
+# 钉版 ==0.5.0（2026-11-05：上游新增 factor_dictionary / etf_kline，并补齐 per_share）
+# + 共享 pip 缓存（id=quantmind-pip，与上方 requirements 层同设计）。
+# 2026-10-13 解冲突：本行曾残留 stash-pop 冲突标记，会让任何镜像重建以 dockerfile
+# parse error 失败；保留「钉版 + 缓存挂载」这一侧，`--no-cache-dir + >=0.3.1`
+# 是被弃的旧 WIP，不迁回。
 RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
-    python -m pip install --root-user-action=ignore "quantdb-sdk==0.3.3"
+    python -m pip install --root-user-action=ignore "quantdb-sdk==0.5.0"
 
 # 修复 qlib 0.9.7 bug: position.py 中 price=None 导致 TypeError
 COPY docker/patch_qlib.py /tmp/patch_qlib.py

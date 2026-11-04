@@ -36,6 +36,11 @@ libraries:
     kind: microstructure
     description: l1_factors ∪ l2_factors 的冗余并集；跨库组合读取请直接走「库:列」拼接，不必依赖本表
     markets: [CN]
+  - id: factor_dictionary
+    name: V5 因子宽表
+    kind: training_features
+    description: 上游 V5 全因子宽表（571 列：2 键 + 6 列后复权 OHLCV + 563 因子），2018 起按日分区，约 32GB 按需同步
+    markets: [CN]
   - id: alpha_library
     name: Alpha 因子库
     kind: alpha_zoo

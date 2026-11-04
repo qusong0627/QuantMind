@@ -270,7 +270,7 @@ def test_payload_single_fact_failure_degrades_to_none(monkeypatch, tmp_path):
 
 
 def test_endpoint_merges_categories_and_libraries():
-    """路由把两段拼进同一 data；libraries 段来自仓库目录（15 库）。"""
+    """路由把两段拼进同一 data；libraries 段来自仓库目录（16 库）。"""
     from backend.services.engine.routers.alpha_agent import get_factor_categories
 
     resp = asyncio.run(get_factor_categories())
@@ -279,7 +279,8 @@ def test_endpoint_merges_categories_and_libraries():
     assert isinstance(data["categories"], list)
     ids = [lib["id"] for lib in data["libraries"]]
     assert "l1_factors" in ids and "features_daily" in ids
-    assert len(ids) == 15
+    assert "factor_dictionary" in ids
+    assert len(ids) == 16
     for lib in data["libraries"]:
         assert isinstance(lib["markets"], dict)
     assert data["libraries_checked_at"] == "2026-10-10"

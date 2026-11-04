@@ -465,7 +465,7 @@ curl -s -X POST -H "$AUTH" "$BASE/api/v1/news/sources/{source_id}/refresh"
 
 - **[[rd-agent-factor-mining]]** — 自动调用 RD-Agent 挖掘因子（evolve/tasks/factors/backtest/export）
 - **[[smart-strategy-stock-picking]]** — 基于 QuantDB 数据的条件选股（自然语言/条件/DSL 三种方式）
-- **[[quantdb-sdk]]** — QuantDB 数据 SDK（API Key 配置、28 数据集目录、字段查询、远程查询、同步）
+- **[[quantdb-sdk]]** — QuantDB 数据 SDK（API Key 配置、31 数据集目录、字段查询、远程查询、同步）
 - **[[stock-market-analysis]]** — 市场深度分析 + 数据导出（全市场扫描/行业轮动/个股371字段/风险评分/CSV导出）
 - **[[backtest-center]]** — 回测中心（快速回测/专家模式/策略对比/参数优化/高级分析/向量化极速回测）
 - **[[ai-ide-strategy-writing]]** — AI-IDE 写策略并执行（Docker runner 运行/回测）

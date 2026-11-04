@@ -93,6 +93,16 @@ DELISTED_DAILY_DATASETS = (
     "daily_backward",
 )
 
+# 按需同步的 V2 分区数据集：只在用户显式勾选时下载，**不进每日默认清单**。
+# - factor_dictionary：上游 0.5.0 的 V5 全因子宽表（571 列），单库约 32GB；
+# - etf_kline：ETF 日线（2006 起，单文件很小），默认不同步以保持每日任务精简。
+# 判定 V2 时与 V2_DATASETS 同权（见 _is_v2_spec），但 datasets=None 的默认
+# 全量同步只走 V2_DATASETS，避免升级 SDK 后夜间任务静默多下 32GB。
+OPTIONAL_V2_DATASETS = [
+    {"category_id": "4", "sub_category": "etf_kline", "dir": "4_bond_etf"},
+    {"category_id": "6", "sub_category": "factor_dictionary", "dir": "6_ml_datasets"},
+]
+
 # V1 非分区数据集 (全量 ETag 增量)
 V1_DATASETS = [
     {"category_id": "2", "sub_category": "sector_concept", "dir": "2_base_sector"},
@@ -104,9 +114,16 @@ V1_DATASETS = [
     {"category_id": "3", "sub_category": "cashflow", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "capital", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "pershare_index", "dir": "3_financial_data"},
+    {"category_id": "3", "sub_category": "per_share", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "dividend_factors", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "holder_num", "dir": "3_financial_data"},
 ]
+
+
+def _is_v2_spec(spec: dict) -> bool:
+    """数据集规格是否按 V2 日分区读取/下载（含按需清单）。"""
+    return spec in V2_DATASETS or spec in OPTIONAL_V2_DATASETS
+
 
 # DB config
 DB_HOST = os.getenv("DB_HOST", os.getenv("DB_MASTER_HOST", "127.0.0.1"))
@@ -228,6 +245,16 @@ def _is_patch_key(key: str) -> bool:
     return "/patches/" in key or key.startswith("releases/")
 
 
+def _is_parquet_object(key: str) -> bool:
+    """release 里混有数据集元数据（如 factor_dictionary 的 v5_factor_dictionary.json）。
+
+    这类对象**不属于** Parquet 下载面：COS 对象可以存在，但 ``/api/v1/data/download``
+    会以 400 拒绝（object_key 只允许 parquet 切片）。字段字典由
+    ``/api/v1/data/fields``（零下载流量）提供，因此同步只需跳过，不能记成下载失败。
+    """
+    return str(key).lower().endswith(".parquet")
+
+
 def _is_partition_file(path: Path) -> bool:
     """判断是否为 V2 分区文件 (dt=YYYYMMDD/data.parquet)。"""
     return "/dt=" in str(path) and path.name == "data.parquet"
@@ -300,10 +327,14 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
 
     # 同一 key 可被多份 manifest 引用，以 cursor 序列中最新一份为准。
     latest: dict[str, dict] = {}
+    skipped_meta: set[str] = set()
     for rel in releases:
         for obj in rel.get("objects", []):
             key = client._normalise_release_key(obj["key"])
             if _is_patch_key(key):
+                continue
+            if not _is_parquet_object(key):
+                skipped_meta.add(key)
                 continue
             latest[key] = obj
 
@@ -313,7 +344,7 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
         if manifest:
             for obj in manifest:
                 key = obj.get("key", "")
-                if not key or _is_patch_key(key):
+                if not key or _is_patch_key(key) or not _is_parquet_object(key):
                     continue
                 if key not in latest:
                     latest[key] = obj
@@ -324,6 +355,12 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
                          len(latest))
     except Exception as exc:
         log.warning("[V2] %s: manifest 补漏查询失败（不影响 releases 数据）: %s", dataset, str(exc)[:120])
+
+    if skipped_meta:
+        log.info(
+            "[V2] %s: 跳过 %d 个非 parquet 元数据对象（%s；字段字典走 /api/v1/data/fields）",
+            dataset, len(skipped_meta), ", ".join(sorted(skipped_meta)[:3]),
+        )
 
     if not latest:
         return 0, 0
@@ -554,7 +591,7 @@ def reseed_state(datasets: list[dict] | None = None) -> dict:
 
     for ds in datasets:
         sub, cat_id = ds["sub_category"], ds["category_id"]
-        is_v2 = ds in V2_DATASETS
+        is_v2 = _is_v2_spec(ds)
         rows = []
 
         if is_v2:
@@ -649,7 +686,7 @@ def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, p
             results["cancelled"] = True
             log.info("[quantdb] 收到取消信号，停止剩余数据集（已处理 %d/%d）", idx, len(datasets))
             break
-        is_v2 = ds in V2_DATASETS
+        is_v2 = _is_v2_spec(ds)
         if progress_cb:
             progress_cb("dataset_start", dataset=sub, index=idx, total=len(datasets))
         try:
@@ -989,7 +1026,7 @@ def show_status() -> dict:
 
     if QUANTDB_DATA_DIR.is_dir():
         # 统计各数据集文件数
-        for ds in V2_DATASETS + V1_DATASETS:
+        for ds in V2_DATASETS + OPTIONAL_V2_DATASETS + V1_DATASETS:
             sub = ds["sub_category"]
             parent = ds["dir"]
             p = QUANTDB_DATA_DIR / parent / sub
@@ -1131,7 +1168,7 @@ def run_daily_sync(
         log.info("=== Phase 1: Sync QuantDB parquet ===")
         ds_list = None
         if datasets:
-            all_ds = V2_DATASETS + V1_DATASETS
+            all_ds = V2_DATASETS + OPTIONAL_V2_DATASETS + V1_DATASETS
             covered = {ds["sub_category"] for ds in all_ds}
             # 云端增量清单没收录的数据集（min1/min5/tick/etf_pcf/convertible_bond 等）
             # 上报给调用方，不能静默当成 up_to_date——管理台会渲染成绿色「最新」，
@@ -1418,7 +1455,7 @@ def main():
     if args.reseed_state:
         ds_list = None
         if datasets:
-            all_ds = V2_DATASETS + V1_DATASETS
+            all_ds = V2_DATASETS + OPTIONAL_V2_DATASETS + V1_DATASETS
             ds_list = [d for d in all_ds if d["sub_category"] in datasets]
         summary = reseed_state(ds_list)
         print(json.dumps(summary, indent=2, ensure_ascii=False))
@@ -1427,7 +1464,7 @@ def main():
     if args.repair:
         ds_list = None
         if datasets:
-            all_ds = V2_DATASETS + V1_DATASETS
+            all_ds = V2_DATASETS + OPTIONAL_V2_DATASETS + V1_DATASETS
             ds_list = [d for d in all_ds if d["sub_category"] in datasets]
         result = repair_partitions(ds_list)
         print(json.dumps(result, indent=2, ensure_ascii=False))

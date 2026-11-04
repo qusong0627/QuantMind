@@ -493,7 +493,7 @@ db/trading_agents_results/{市场名}/{股票名}/{股票名}{代码}_{日期}_�
 ## 9. 相关技能联动
 
 - **[[quantdb-fields]]** — **必读**：全部数据集单位/口径速查（本技能计算正确性的前提）
-- **[[quantdb-sdk]]** — QuantDB 数据源（Key 配置、28 数据集、字段清单）
+- **[[quantdb-sdk]]** — QuantDB 数据源（Key 配置、31 数据集、字段清单）
 - **[[smart-strategy-stock-picking]]** — 条件选股（QuantDB 字段字典 DSL 筛选）
 - **[[news-sentiment-research]]** — 新闻七维方法论（本技能 L7 层的底座，21 条规律 + 三步纵深）
 - **[[quantmind-operations]]** — 模型训练/推理/RSS 新闻

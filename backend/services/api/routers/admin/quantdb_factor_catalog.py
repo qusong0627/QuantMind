@@ -122,6 +122,7 @@ FACTOR_SOURCE_LABELS = {
     "l1_factors": "L1 因子",
     "l2_factors": "L2 因子",
     "l1_l2_factors": "L1 + L2 合并宽表",
+    "factor_dictionary": "V5 因子宽表",
     "l1_batch1_factors": "L1 批次1 附加因子（涨跌停/两融）",
     "l1_batch2_factors": "L1 批次2 附加因子（风格漂移）",
     "ccass_factors": "CCASS 持仓结构",

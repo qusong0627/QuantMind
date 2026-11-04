@@ -3,7 +3,7 @@
 GET  /api/v1/admin/data-platform/quantdb/info            SDK 安装/连接状态、账户与流量配额
 GET  /api/v1/admin/data-platform/quantdb/config          API Key 配置状态（脱敏）
 POST /api/v1/admin/data-platform/quantdb/config          写入 API Key（落盘 config/runtime.env）
-GET  /api/v1/admin/data-platform/quantdb/catalog         数据集目录（6 大类 / 28 数据集）+ 本地落盘统计
+GET  /api/v1/admin/data-platform/quantdb/catalog         数据集目录（6 大类 / 31 数据集）+ 本地落盘统计
 GET  /api/v1/admin/data-platform/quantdb/preview         数据集预览（本地 parquet 优先，零流量）
 GET  /api/v1/admin/data-platform/quantdb/remote-meta     远端各数据集日期范围/行数
 GET  /api/v1/admin/data-platform/quantdb/diff            远端 vs 本地差异（哪些数据集有更新）

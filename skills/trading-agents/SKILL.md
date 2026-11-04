@@ -347,7 +347,7 @@ curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/trading-agents/files/delete-fo
 - **[[stock-market-analysis]]** — 量化因子深度分析（371 字段 + 风险评分 + 数据导出）
 - **[[batch-inference-analysis]]** — 模型推理信号选股
 - **[[quantmind-operations]]** — RSS 新闻、模型推理
-- **[[quantdb-sdk]]** — QuantDB 数据查询（28 数据集）
+- **[[quantdb-sdk]]** — QuantDB 数据查询（31 数据集）
 - **[[simulation-trading]]** — 分析结论落地模拟/实盘交易
 
 ## 十二、常见问题

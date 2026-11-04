@@ -65,6 +65,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
     DatasetSpec("dividend_factors", "分红因子", "3", "financial", "3_financial_data/dividend_factors", "symbol", "历次分红送转因子"),
     DatasetSpec("holder_num", "股东户数", "3", "financial", "3_financial_data/holder_num", "symbol", "股东户数变化"),
     # 4 债券/ETF
+    DatasetSpec("etf_kline", "ETF日线", "4", "bond_etf", "4_bond_etf/etf_kline", "partition", "ETF 日线 OHLCV，2006 年起"),
     DatasetSpec("etf_pcf", "ETF申赎清单", "4", "bond_etf", "4_bond_etf/etf_pcf", "symbol", "ETF 申购赎回清单"),
     DatasetSpec("convertible_bond", "可转债", "4", "bond_etf", "4_bond_etf/convertible_bond", "symbol", "可转债行情与条款"),
     # 5 技术衍生
@@ -76,6 +77,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
     DatasetSpec("l1_factors", "L1 因子", "6", "ml", "6_ml_datasets/l1_factors", "partition", "因子挖掘核心"),
     DatasetSpec("l2_factors", "L2 因子", "6", "ml", "6_ml_datasets/l2_factors", "partition", "高频微观因子"),
     DatasetSpec("l1_l2_factors", "L1+L2 合并", "6", "ml", "6_ml_datasets/l1_l2_factors", "partition", "L1 与 L2 因子合并集"),
+    DatasetSpec("factor_dictionary", "V5 因子宽表", "6", "ml", "6_ml_datasets/factor_dictionary", "partition", "571 列（2 键 + 6 OHLCV + 563 因子），2018 起，32GB 按需同步"),
 )
 
 _BY_NAME: dict[str, DatasetSpec] = {ds.dataset: ds for ds in DATASETS}

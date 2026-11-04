@@ -126,7 +126,7 @@ COMBINED="$BUILD/requirements-win-combined.txt"
 {
     cat "$REPO_ROOT/requirements.txt"
     echo "torch==2.9.1+cpu"
-    echo "quantdb-sdk==0.3.3"
+    echo "quantdb-sdk==0.5.0"
     for p in $EXTRA_WIN_PKGS; do echo "$p"; done
 } > "$COMBINED"
 

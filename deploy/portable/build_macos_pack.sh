@@ -66,7 +66,7 @@ if [ ! -f "$SITE_PKG/fastapi/__init__.py" ]; then
     {
         sed '/^futu-api/d;/^qstock/d' "$REPO_ROOT/requirements.txt"
         echo "torch==2.9.1"
-        echo "quantdb-sdk==0.3.3"
+        echo "quantdb-sdk==0.5.0"
     } > "$COMBINED"
     DL_OK=0
     for idx in "${PIP_FALLBACKS[@]}"; do

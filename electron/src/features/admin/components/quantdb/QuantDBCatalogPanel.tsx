@@ -20,14 +20,17 @@ const { Text } = Typography;
 
 const JOB_POLL_INTERVAL_MS = 3000;
 
-// 默认勾选：除 1分/5分/Tick/债券ETF/L1+L2合并 外，其余数据集默认勾选（便于开箱即用）。
+// 默认勾选：除 1分/5分/Tick/债券ETF/L1+L2合并/V5宽表 外，其余数据集默认勾选（便于开箱即用）。
+// factor_dictionary 单库约 32GB，默认不勾，避免一键同步变成大流量下载。
 const EXCLUDED_BY_DEFAULT = new Set([
     'min1_kline',
     'min5_kline',
     'tick_data',
+    'etf_kline',
     'etf_pcf',
     'convertible_bond',
     'l1_l2_factors',
+    'factor_dictionary',
 ]);
 
 const LAYOUT_LABELS: Record<QuantDBDataset['layout'], { text: string; color: string }> = {

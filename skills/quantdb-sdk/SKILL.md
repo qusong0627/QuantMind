@@ -22,7 +22,7 @@ description: "QuantDB 数据 SDK — API Key 配置、数据集目录、字段�
 
 # QuantDB 数据 SDK 技能
 
-QuantDB 是付费 CDN 数据源，通过 API Key 认证。提供 A 股完整数据：K 线、财务、估值、技术指标、L1/L2 因子（共 315 维 AI 因子）。
+QuantDB 是付费 CDN 数据源，通过 API Key 认证。提供 A 股完整数据：K 线、财务、估值、技术指标、L1/L2 因子（共 315 维 AI 因子），以及 V5 全因子宽表（571 列 / 563 因子）。
 
 ## 1. API Key 配置
 
@@ -58,7 +58,7 @@ curl -s -H "$AUTH" "$BASE/api/v1/admin/data-platform/quantdb/info"
 
 ## 2. 数据集目录（能获取哪些字段）
 
-QuantDB 按 6 大类 28 个数据集组织，本地已全部落盘（2016-01 至 2026-08）：
+QuantDB 按 6 大类 31 个数据集组织（SDK 0.5.0，2026-11-04 上游口径），主要数据集已落盘（2016-01 起）：
 
 ### 1 K线行情
 | 数据集 | 内容 | 日期范围 |
@@ -80,10 +80,10 @@ QuantDB 按 6 大类 28 个数据集组织，本地已全部落盘（2016-01 至
 | `margin_trading` | 融资融券 |
 
 ### 3 财务数据（按 symbol 文件）
-`balance`（资产负债表）/ `income`（利润表）/ `cashflow`（现金流量表）/ `capital`（股本结构）/ `pershare_index`（每股指标）/ `dividend_factors`（分红因子）/ `holder_num`（股东户数）
+`balance`（资产负债表）/ `income`（利润表）/ `cashflow`（现金流量表）/ `capital`（股本结构）/ `pershare_index`（每股指标）/ `per_share`（TTM 财务指标补充表）/ `dividend_factors`（分红因子）/ `holder_num`（股东户数）
 
 ### 4 债券/ETF
-`etf_pcf`（ETF申赎清单）/ `convertible_bond`（可转债）
+`etf_kline`（ETF 日线，2006 起按日分区）/ `etf_pcf`（ETF申赎清单）/ `convertible_bond`（可转债）
 
 ### 5 技术衍生
 | 数据集 | 内容 |
@@ -99,6 +99,7 @@ QuantDB 按 6 大类 28 个数据集组织，本地已全部落盘（2016-01 至
 | `l1_factors` | **L1 因子（98 因子）**：动量/波动/流动性/技术/基本面/风格/行业/筹码/概念 |
 | `l2_factors` | **L2 因子（216 高频微观因子）**：VPIN/资金流/价差/深度/订单/竞价/跳跃/冲击 |
 | `l1_l2_factors` | L1+L2 合并 |
+| `factor_dictionary` | **V5 全因子宽表（571 列 = 2 键 + 6 列后复权 OHLCV + 563 因子）**，2018 起按日分区，约 32GB，**按需同步**（不在每日默认清单） |
 
 ### 查看数据集目录统计
 ```bash
@@ -109,7 +110,7 @@ curl -s -H "$AUTH" "$BASE/api/v1/admin/data-platform/quantdb/catalog"
 ### 远程 meta（各数据集日期范围）
 ```bash
 curl -s -H "$AUTH" "$BASE/api/v1/admin/data-platform/quantdb/remote-meta"
-# 返回 28 行: {source, dataset, dimension, min_date, max_date, row_count, file_count, file_size}
+# 返回各数据集: {source, dataset, dimension, min_date, max_date, row_count, file_count, file_size}
 ```
 
 ## 3. 数据预览
@@ -218,6 +219,12 @@ Qlib 二进制缓存（data/quantdb/.qlib_cache/cn_data）
 
 ### l2_factors（216 高频微观因子）
 VPIN/价差/深度/订单/资金流/已实现波动/竞价/跳跃/冲击等，如 `micro_vpin_8/20/50, micro_pin, micro_order_flow_toxicity, micro_realized_spread, micro_kyle_lambda, micro_amihud_illiquidity, micro_depth_imbalance_1, flow_money_flow_index, vol_realized_rv/rrv/rskew, micro_jump_count_1pct, micro_trade_buy/sell_pressure`
+
+### factor_dictionary（V5 全因子宽表，571 列）
+键 = `symbol`（后缀式）+ `date`；6 列 OHLCV（**后复权**）；其余 563 列为因子
+（量价 144 / 技术 41 / Alpha 29 / L2 各簇 / L1 各簇 等，分组见
+`client.data.info("factor_dictionary")["field_groups"]`）。字段全字典随数据集目录
+附带 `v5_factor_dictionary.json`。覆盖 2018-01 起，约 32GB，按需同步。
 
 ## 6.1 字段单位速查 → [[quantdb-fields]]
 

@@ -117,7 +117,7 @@ if ! "$PY" -c "import fastapi" 2>/dev/null; then
         "$PY" -m pip install -r "$REPO_ROOT/requirements.txt" &&
         "$PY" -m pip install -r "$REPO_ROOT/requirements/production.txt" &&
         "$PY" -m pip install -r "$REPO_ROOT/requirements/ai.txt" &&
-        "$PY" -m pip install "quantdb-sdk==0.3.3"
+        "$PY" -m pip install "quantdb-sdk==0.5.0"
     }
     PIP_OK=0
     for _idx in "${PIP_FALLBACKS[@]}"; do
