@@ -69,6 +69,10 @@ _CALENDAR_LOOKBACK_DAYS = 5 * 366
 #: 允许重开（见模块 docstring 纪律 4）。
 PLANNED_STALE_MINUTES = 30
 
+#: C3：窗口末端最近 N 个交易日必须无因子分区缺口；更早的历史缺口只记录不阻断
+#: （l2/V5 等源的早期历史长度不同，全窗零缺口会把正常配方误杀）。
+RECENT_COVERAGE_DAYS = 20
+
 #: 内存守卫阈值（GB 宿主 MemAvailable）；env 唯一读取点。
 DEFAULT_MEM_MIN_GB = 50.0
 MEM_MIN_ENV = "RETRAIN_MEM_MIN_GB"
@@ -207,9 +211,37 @@ def compute_plan(
             factor_max_date=factor_max.isoformat(),
         )
 
+    # C3：训练窗口内的分区缺口。最近 N 个交易日必须完整；更早的缺口只记录
+    # （factor_min 已保证起点，早期缺口不影响最近锚点窗口的样本完整性）。
+    eligible = [d for d in days if window.train_start <= d <= window.anchor_date]
+    factor_set = set(factor_days)
+    missing_window = [d for d in eligible if d not in factor_set]
+    missing_recent = [
+        d for d in eligible[-RECENT_COVERAGE_DAYS:] if d not in factor_set
+    ]
+    if missing_recent:
+        return ReadinessResult(
+            False,
+            "factor_coverage_gap",
+            {
+                "missing_recent": [d.isoformat() for d in missing_recent],
+                "missing_total": len(missing_window),
+                "recent_days_checked": min(len(eligible), RECENT_COVERAGE_DAYS),
+                "anchor_date": window.anchor_date.isoformat(),
+            },
+            anchor_date=window.anchor_date,
+            factor_min_date=factor_min.isoformat(),
+            factor_max_date=factor_max.isoformat(),
+        )
+
     return ReadinessResult(
         True,
         "ok",
+        detail=(
+            {"missing_total": len(missing_window), "coverage_note": "older gaps tolerated"}
+            if missing_window
+            else {}
+        ),
         anchor_date=window.anchor_date,
         window=window,
         factor_min_date=factor_min.isoformat(),

@@ -200,6 +200,38 @@ def test_compute_plan_factor_history_shorter_than_train_start(small_days):
     assert result.detail["train_start"] == "2026-03-20"
 
 
+@pytest.mark.unit
+def test_compute_plan_missing_recent_partition_blocks(small_days):
+    """C3：窗口内最近交易日的分区缺口 → factor_coverage_gap。"""
+    dates = list(small_days)
+    removed = dates.pop(-6)  # 锚点(04-08)之前、窗口内的一天
+    result = rd.compute_plan(
+        _synthetic_recipe(),
+        calendar_days=small_days,
+        factor_dates=dates,
+        today=date(2026, 4, 13),
+    )
+    assert result.ready is False
+    assert result.reason == "factor_coverage_gap"
+    assert removed.isoformat() in result.detail["missing_recent"]
+    assert result.detail["missing_total"] >= 1
+
+
+@pytest.mark.unit
+def test_compute_plan_old_gap_outside_window_is_tolerated(small_days):
+    """窗口起点之前的历史缺口只记录，不阻断最近窗口训练。"""
+    dates = list(small_days)
+    dates.pop(0)  # 早于 train_start
+    result = rd.compute_plan(
+        _synthetic_recipe(),
+        calendar_days=small_days,
+        factor_dates=dates,
+        today=date(2026, 4, 13),
+    )
+    assert result.ready is True
+    assert result.reason == "ok"
+
+
 # ---------------------------------------------------------------------------
 # planned 陈旧裁决
 # ---------------------------------------------------------------------------
