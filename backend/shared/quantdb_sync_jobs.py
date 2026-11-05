@@ -245,14 +245,23 @@ def celery_progress_cb(job_id: str):
                 },
             }
         elif event == "dataset_done":
+            job = get_job(job_id) or {}
+            errors = kw.get("errors", 0)
+            synced = kw.get("synced", 0)
+            result = {
+                "dataset": ds,
+                "status": "failed" if errors else "synced" if synced else "up_to_date",
+                "downloaded": synced,
+            }
+            if errors:
+                result["error"] = kw.get("error") or f"{errors} 个对象下载失败"
+            results = [r for r in job.get("results", []) if r.get("dataset") != ds]
+            results.append(result)
             fields = {
-                "done": (get_job(job_id) or {}).get("done", 0) + 1,
-                "current": f"{ds} 完成 (同步 {kw.get('synced', 0)})",
-                "current_detail": {
-                    "dataset": ds,
-                    "done": kw.get("synced", 0),
-                    "phase": "dataset_done",
-                },
+                "done": job.get("done", 0) + 1,
+                "results": results,
+                "current": f"{ds} {'失败' if errors else '完成'} (同步 {synced})",
+                "current_detail": {"dataset": ds, "done": synced, "phase": "dataset_done"},
             }
         if fields:
             upsert_job(job_id, **fields)

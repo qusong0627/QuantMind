@@ -123,3 +123,13 @@ def test_progress_cb_tracks_dataset_level_total(fake_redis):
     assert stored["current_detail"]["done"] == 1400
     assert stored["current_detail"]["total"] == 2144
     assert stored["total"] == 28
+
+
+def test_progress_records_failed_dataset(fake_redis):
+    job = jobs.new_celery_job()
+    cb = jobs.celery_progress_cb(job["job_id"])
+    cb("dataset_start", dataset="holder_num", index=1, total=1)
+    cb("dataset_done", dataset="holder_num", synced=0, errors=1, error="database is locked")
+    stored = jobs.get_job(job["job_id"])
+    assert stored["done"] == 1
+    assert stored["results"] == [{"dataset": "holder_num", "status": "failed", "downloaded": 0, "error": "database is locked"}]

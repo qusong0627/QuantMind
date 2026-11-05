@@ -911,7 +911,19 @@ def daily_data_sync_task(
             finally:
                 stop_heartbeat.set()
 
-            upsert_job(job_id, status="completed", stage="done", finished_at=_now_iso())
+            parquet = result.get("parquet") or {}
+            errors = parquet.get("errors") or []
+            upsert_job(
+                job_id,
+                status="failed" if errors else "completed",
+                stage="error" if errors else "done",
+                current=f"同步结束：{len(errors)} 个数据集失败" if errors else "同步完成",
+                current_detail=None,
+                error="; ".join(errors) if errors else "",
+                pg_fill=result.get("pg_fill"),
+                qlib_cache=result.get("qlib_cache"),
+                finished_at=_now_iso(),
+            )
             logger.info(
                 "[DailySync] QuantDB 完成: parquet=%s pg_rows=%s qlib=%s",
                 (result.get("parquet") or {}).get("total_downloaded"),

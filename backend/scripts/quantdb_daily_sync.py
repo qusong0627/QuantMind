@@ -152,7 +152,8 @@ def _open_state():
     import sqlite3
 
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(_state_path()), timeout=60)
+    # 避免在网络下载和文件校验期间持有 SQLite 写事务。
+    conn = sqlite3.connect(str(_state_path()), timeout=60, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=60000")
     conn.execute(
@@ -728,7 +729,7 @@ def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, p
 
     client = _make_client()
     state = _open_state()
-    results = {"synced": 0, "up_to_date": 0, "errors": [], "total_downloaded": 0}
+    results = {"synced": 0, "up_to_date": 0, "errors": [], "total_downloaded": 0, "datasets": []}
 
     for idx, ds in enumerate(datasets):
         sub, cat_id = ds["sub_category"], ds["category_id"]
@@ -747,16 +748,21 @@ def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, p
                 done, errs = _sync_v1_dataset(client, state, cat_id, sub, progress_cb=progress_cb, should_cancel=should_cancel, since=since)
             if progress_cb:
                 progress_cb("dataset_done", dataset=sub, synced=done, errors=errs)
+            results["datasets"].append({"dataset": sub, "status": "failed" if errs else "synced" if done else "up_to_date", "downloaded": done, **({"error": f"{errs} 个对象下载失败"} if errs else {})})
             if done:
                 results["synced"] += 1
                 results["total_downloaded"] += done
-            else:
+            elif not errs:
                 results["up_to_date"] += 1
                 log.info("[OK] %s: 已最新", sub)
             if errs:
                 results["errors"].append(f"{sub}: {errs} 个对象下载失败")
         except Exception as exc:
+            state.rollback()
             results["errors"].append(f"{sub}: {exc}")
+            results["datasets"].append({"dataset": sub, "status": "failed", "downloaded": 0, "error": str(exc)})
+            if progress_cb:
+                progress_cb("dataset_done", dataset=sub, synced=0, errors=1, error=str(exc))
             log.warning("[FAIL] %s: %s", sub, exc)
             client = _make_client()
 

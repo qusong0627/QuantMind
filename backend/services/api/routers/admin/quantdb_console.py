@@ -730,6 +730,7 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
     sources_info = sync_result.get("sources") or {}
 
     results = []
+    dataset_results = {r["dataset"]: r for r in parquet_info.get("datasets", [])}
     cancelled = _cancelled()
     for name in req.datasets:
         src = sources_info.get(name)
@@ -741,6 +742,8 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
                 results.append({"dataset": name, "status": "synced", "downloaded": src.get("synced", 1)})
             else:
                 results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+        elif name in dataset_results:
+            results.append(dataset_results[name])
         elif cancelled:
             results.append({"dataset": name, "status": "skipped", "downloaded": 0,
                             "reason": "用户取消"})
@@ -756,7 +759,7 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
         if job is not None:
             job["results"] = results
             # 实际处理进度：已处理并经 sync 完成的数据集；若有 skipped（取消跳过）不计入 done。
-            job["done"] = sum(1 for r in results if r.get("status") in ("synced", "up_to_date"))
+            job["done"] = sum(1 for r in results if r.get("status") in ("synced", "up_to_date", "failed"))
 
     if cancelled:
         _job_update(job_id, status="cancelled", current=None, finished_at=_now_iso())
@@ -800,7 +803,13 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
             logger.error("quantdb sync job %s: qlib cache failed: %s", job_id, exc, exc_info=True)
             _job_update(job_id, qlib_cache={"status": "error", "reason": str(exc)})
 
-    _job_update(job_id, status="completed", stage="done", finished_at=_now_iso())
+    failed = [r for r in results if r.get("status") == "failed"]
+    _job_update(
+        job_id, status="failed" if failed else "completed",
+        stage="error" if failed else "done",
+        current=f"同步结束：{len(failed)} 个数据集失败" if failed else "同步完成",
+        current_detail=None, finished_at=_now_iso(),
+    )
 
 
 @router.post("/sync-datasets")
