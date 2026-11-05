@@ -1155,6 +1155,20 @@ def run_daily_sync(
         "uncovered_datasets": [],
     }
 
+    # B2 契约：SDK 版本 + 本地 V5 列集（只报告，不阻断同步）
+    try:
+        from backend.shared.quantdb_contract import contract_summary
+
+        result["sdk_contract"] = contract_summary(QUANTDB_DATA_DIR)
+        sdk_contract = result["sdk_contract"].get("sdk") or {}
+        if not sdk_contract.get("ok"):
+            log.warning("SDK 契约: %s", sdk_contract.get("message"))
+        fd_contract = result["sdk_contract"].get("factor_dictionary") or {}
+        if fd_contract.get("available") and fd_contract.get("ok") is False:
+            log.warning("V5 列集契约: %s", fd_contract.get("message"))
+    except Exception as exc:  # noqa: BLE001 - 契约检查失败不打断同步
+        result["sdk_contract"] = {"error": str(exc)}
+
     # Phase 1: sync parquet
     if not skip_parquet:
         log.info("=== Phase 1: Sync QuantDB parquet ===")

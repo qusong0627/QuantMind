@@ -263,6 +263,13 @@ def get_sdk_info() -> dict[str, Any]:
             info["error"] = str(exc)
     else:
         info["connected"] = False
+    # B2 契约摘要：SDK 版本 + 本地 V5 列集（不依赖 Key/连接，未同步时 available=False）
+    try:
+        from backend.shared.quantdb_contract import contract_summary
+
+        info["contract"] = contract_summary()
+    except Exception as exc:  # noqa: BLE001 - 契约检查失败不阻断状态接口
+        info["contract_error"] = str(exc)
     return info
 
 

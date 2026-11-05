@@ -41,6 +41,19 @@ interface QuantDBInfo {
         credit_gb?: number;
         subscription?: { status: string };
     };
+    /** B2 契约：SDK 版本 + 本地 V5 列集（不阻断，只提示） */
+    contract?: {
+        sdk?: { ok: boolean; installed: string; expected: string; message?: string };
+        factor_dictionary?: {
+            available: boolean;
+            ok: boolean | null;
+            message?: string;
+            added?: string[];
+            removed?: string[];
+            expected_count?: number;
+            actual_count?: number;
+        };
+    };
     error?: string;
 }
 
@@ -160,6 +173,35 @@ export const AdminQuantDBPanel: React.FC = () => {
                 }
             >
                 {info?.error && <Alert type="error" message={info.error} className="mb-4" showIcon />}
+
+                {info?.contract?.sdk && !info.contract.sdk.ok ? (
+                    <Alert
+                        type="warning"
+                        showIcon
+                        className="mb-3"
+                        message="SDK 版本契约"
+                        description={info.contract.sdk.message}
+                    />
+                ) : null}
+
+                {info?.contract?.factor_dictionary?.available
+                    && info.contract.factor_dictionary.ok === false ? (
+                    <Alert
+                        type="warning"
+                        showIcon
+                        className="mb-3"
+                        message="V5 列集契约"
+                        description={[
+                            info.contract.factor_dictionary.message,
+                            info.contract.factor_dictionary.added?.length
+                                ? `新增: ${info.contract.factor_dictionary.added.slice(0, 5).join(', ')}`
+                                : '',
+                            info.contract.factor_dictionary.removed?.length
+                                ? `缺失: ${info.contract.factor_dictionary.removed.slice(0, 5).join(', ')}`
+                                : '',
+                        ].filter(Boolean).join(' · ')}
+                    />
+                ) : null}
 
                 <Row gutter={16}>
                     <Col span={6}>
