@@ -1297,19 +1297,27 @@ def main() -> None:
 
                 if shutil.which("docker"):
                     script_src = Path(__file__).resolve().parent / "trigger_inference.py"
-                    subprocess.run(
-                        ["docker", "cp", str(script_src), "quantmind:/tmp/"],
-                        capture_output=True, timeout=60,
+                    # 唯一文件名：/tmp 里旧 cp 留下的同名文件 root 也写不动
+                    # （2026-11-05 实测 Permission denied），且不能与并发调用撞名。
+                    target = f"/tmp/qm_exec_trigger_inference_{os.getpid()}.py"
+                    inner = (
+                        f'cat > "{target}" && python3 "{target}" "$@"; '
+                        f'rc=$?; rm -f "{target}"; exit $rc'
                     )
                     prev_date_str = prev_date if prev_date else ""
                     for d in (prev_date_str, trade_date):
                         if not d:
                             continue
-                        p = subprocess.run(
-                            ["docker", "exec", "quantmind", "python3",
-                             "/tmp/trigger_inference.py", "--date", d],
-                            capture_output=True, text=True, timeout=600,
-                        )
+                        # stdin 投递，不用 docker cp：quantmind 容器 bind 的
+                        # /mnt/tdx-shared（CIFS）对端一关机，daemon 为 cp 准备容器
+                        # 挂载就失败（`mkdir ...: file exists`，2026-11-03~05 实锤），
+                        # 补推理整段静默失效。docker exec -i 不吃容器挂载。
+                        with open(script_src, "rb") as fh:
+                            p = subprocess.run(
+                                ["docker", "exec", "-i", "-w", "/app", "quantmind",
+                                 "sh", "-c", inner, "qm-exec", "--date", d],
+                                stdin=fh, capture_output=True, text=True, timeout=600,
+                            )
                         out = (p.stdout or "").strip().splitlines()[-1] if p.stdout else ""
                         inference_attempt[d] = {
                             "ok": p.returncode == 0,

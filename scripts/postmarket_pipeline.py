@@ -64,6 +64,45 @@ def run(cmd: list[str], dry_run: bool) -> None:
         sys.exit(f"步骤失败（{r.returncode}）：{' '.join(str(c) for c in cmd)}")
 
 
+def run_in_container(script: Path, argv: list[str], *, dry_run: bool = False) -> None:
+    """把宿主脚本经 stdin 送进 quantmind 容器再执行（**不用 ``docker cp``**）。
+
+    为什么换掉 ``docker cp``：容器 bind 了 ``/mnt/tdx-shared``（TDX 桥 CIFS 共享盘）。
+    对端 Windows 关机时该挂载变 ``Host is down``，docker daemon 为 cp 准备容器挂载会在
+    死挂载上失败（``mkdir /mnt/tdx-shared: file exists``），整条备选链在「补推理」这一步
+    断掉——2026-11-03~05 连续三天实锤。``docker exec -i`` 不吃容器挂载：脚本从 stdin
+    写进 /tmp 再执行（执行完删除），语义与原 ``docker cp + docker exec`` 等价。
+    """
+    target = f"/tmp/qm_exec_{script.stem}_{os.getpid()}{script.suffix}"
+    # 唯一文件名：/tmp 里可能躺着镜像/旧 cp 留下的同名文件（**root 也写不动**，2026-11-05
+    # 实测 `Permission denied`），且并发调用不能互相截断。执行完即删。
+    # $0 占位 qm-exec：sh -c 的第一个参数是 $0，之后才是 "$@"。
+    inner = (
+        f'cat > "{target}" && python3 "{target}" "$@"; '
+        f'rc=$?; rm -f "{target}"; exit $rc'
+    )
+    cmd = [
+        "docker",
+        "exec",
+        "-i",
+        "-w",
+        "/app",
+        "quantmind",
+        "sh",
+        "-c",
+        inner,
+        "qm-exec",
+        *argv,
+    ]
+    log("$ " + " ".join(str(c) for c in cmd) + f"  < {script}")
+    if dry_run:
+        return
+    with open(script, "rb") as fh:  # 文件当 stdin：不经过 daemon 的挂载准备
+        r = subprocess.run(cmd, cwd=ROOT, stdin=fh)
+    if r.returncode != 0:
+        sys.exit(f"步骤失败（{r.returncode}）：{' '.join(str(c) for c in cmd)}")
+
+
 def resolve_trade_date() -> str:
     """最新交易日 = daily_unadjusted 分区最大 dt。"""
     import duckdb  # noqa: PLC0415 宿主已装，延迟导入加速 --dry-run
@@ -199,10 +238,8 @@ def step_news(trade_date: str, args) -> None:
         return
     if not shutil.which("docker"):
         sys.exit("① news_review 宿主失败且无 docker")
-    log("宿主执行失败，回退容器 docker cp + exec")
-    run(["docker", "cp", str(NEWS_SCRIPT), "quantmind:/tmp/news_review.py"], False)
-    run(["docker", "exec", "-w", "/app", "quantmind", "python3",
-         "/tmp/news_review.py", "--date", trade_date], False)
+    log("宿主执行失败，回退容器（stdin 投递，不依赖 docker cp/挂载）")
+    run_in_container(NEWS_SCRIPT, ["--date", trade_date])
 
 
 def step_review(trade_date: str, watch: str, watch_note: str, args) -> None:
@@ -255,9 +292,7 @@ def step_picks(trade_date: str, args) -> None:
     log("③ 失败，疑似缺当日推理批次 → 容器内补跑 trigger_inference")
     if not shutil.which("docker"):
         sys.exit(f"③ pick_candidates 失败且无 docker 可补推理：{r.returncode}")
-    run(["docker", "cp", str(TRIGGER_SCRIPT), "quantmind:/tmp/trigger_inference.py"], False)
-    run(["docker", "exec", "-w", "/app", "quantmind", "python3",
-         "/tmp/trigger_inference.py", "--date", trade_date], False)
+    run_in_container(TRIGGER_SCRIPT, ["--date", trade_date])
     log("③ 重试 pick_candidates")
     run(cmd, False)
 
