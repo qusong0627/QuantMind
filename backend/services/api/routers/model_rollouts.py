@@ -75,6 +75,11 @@ class ObservingBody(BaseModel):
 
 class DecisionBody(BaseModel):
     notes: str = Field(..., min_length=1, description="审批理由（审计，必填）")
+    # B3：仅 promote 使用。schema 漂移默认阻断；显式 true 才降级为 warning，
+    # 理由仍写进 notes/evidence，供审计。
+    allow_schema_drift: bool = Field(
+        default=False, description="允许训练/推理特征 schema 漂移（需在理由中说明）"
+    )
 
 
 @router.get("")
@@ -159,7 +164,11 @@ async def promote_rollout(
     tenant_id, user_id = _owner_scope(current_user)
     try:
         return await model_rollout_service.promote(
-            rollout_id, decided_by=user_id, notes=body.notes, owner=(tenant_id, user_id)
+            rollout_id,
+            decided_by=user_id,
+            notes=body.notes,
+            owner=(tenant_id, user_id),
+            allow_schema_drift=body.allow_schema_drift,
         )
     except (RolloutNotFound, RolloutConflict, RolloutInvalid) as exc:
         raise _as_http(exc) from exc

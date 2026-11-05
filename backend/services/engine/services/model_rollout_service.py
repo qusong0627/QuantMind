@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from argparse import Namespace
 from datetime import datetime, timezone
@@ -492,6 +493,7 @@ class ModelRolloutService:
         decided_by: str,
         notes: str,
         owner: tuple[str, str] | None = None,
+        allow_schema_drift: bool = False,
     ) -> dict[str, Any]:
         if not str(notes or "").strip():
             raise RolloutInvalid("晋升必须填写理由（审计）")
@@ -502,6 +504,31 @@ class ModelRolloutService:
             )
         market = rollout["market"]
         warnings: list[str] = []
+
+        # B3：晋升前校验训练特征契约（源/特征列/schema/数据指纹）。非 QuantDB
+        # 因子模型 skipped；schema 漂移默认阻断，只有显式 allow 才降级为 warning。
+        challenger = await model_registry_service.get_model(
+            tenant_id=rollout["tenant_id"],
+            user_id=rollout["user_id"],
+            model_id=rollout["challenger_model_id"],
+        )
+        challenger_metadata = (challenger or {}).get("metadata_json") or {}
+        from backend.shared.training.contract import (
+            contract_block_message,
+            validate_model_contract,
+        )
+
+        promotion_contract = await asyncio.to_thread(
+            validate_model_contract,
+            rollout["challenger_model_id"],
+            metadata=challenger_metadata,
+            market=market,
+            allow_schema_drift=allow_schema_drift,
+        )
+        if promotion_contract.get("blocked"):
+            raise RolloutInvalid(contract_block_message(promotion_contract))
+        warnings.extend(str(w) for w in promotion_contract.get("warnings") or [])
+
         now = datetime.now(timezone.utc)
 
         async with get_session() as session:
@@ -578,6 +605,10 @@ class ModelRolloutService:
                 prior_default_model_id=prior_default,
                 decided_by=decided_by,
                 notes=notes,
+                evidence={
+                    **(rollout.get("evidence") or {}),
+                    "promotion_contract": promotion_contract,
+                },
                 decided=True,
                 session=session,
             )
@@ -588,6 +619,7 @@ class ModelRolloutService:
             "rollout": promoted,
             "prior_default_model_id": prior_default,
             "warnings": warnings,
+            "contract": promotion_contract,
         }
 
     # ── 拒绝（关 settings 行 + 审计）───────────────────────────────────

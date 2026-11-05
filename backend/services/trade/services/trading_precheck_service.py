@@ -433,6 +433,9 @@ async def run_trading_readiness_precheck(
                                     tenant_id=tenant_id,
                                     user_id=user_id,
                                     model_id=str(chosen.get("model_id")),
+                                    # 前置兜底：用户没显式选默认时补一个；
+                                    # 不套 B3 契约闸门（可用性由推理/数据检查兜底）
+                                    enforce_contract=False,
                                 )
                             )
                         except Exception:

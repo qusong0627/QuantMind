@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -776,8 +777,19 @@ class ModelRegistryService:
         return self._row_to_model(dict(row)) if row else None
 
     async def set_default_model(
-        self, *, tenant_id: str, user_id: str, model_id: str
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        model_id: str,
+        enforce_contract: bool = True,
     ) -> dict[str, Any]:
+        """切换市场默认模型。
+
+        ``enforce_contract=True``（默认）时先校验训练特征契约（B3）；交易前置
+        的「没有默认就自动补一个」属于 best-effort 兜底，传 False 保持旧行为
+        （它不改变用户显式选择，真正的服务可用性由推理/数据检查兜底）。
+        """
         tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
         mid = str(model_id).strip()
         if not mid:
@@ -838,6 +850,28 @@ class ModelRegistryService:
             if status not in _READY_STATUSES:
                 raise ValueError("model is not ready")
 
+            # B3：切默认前校验训练特征契约（源/特征列/schema/数据指纹）。
+            # 非 QuantDB 因子模型（无 factor_source）直接 skipped，不改变旧行为。
+            target_metadata = target.get("metadata_json") or {}
+            if isinstance(target_metadata, str):
+                try:
+                    target_metadata = json.loads(target_metadata)
+                except Exception:
+                    target_metadata = {}
+            elif not isinstance(target_metadata, dict):
+                target_metadata = {}
+            if enforce_contract:
+                from backend.shared.training.contract import (
+                    contract_block_message,
+                    validate_model_contract,
+                )
+
+                contract = await asyncio.to_thread(
+                    validate_model_contract, mid, metadata=target_metadata
+                )
+                if contract.get("blocked"):
+                    raise ValueError(contract_block_message(contract))
+
             await session.execute(
                 text(
                     """
@@ -850,14 +884,6 @@ class ModelRegistryService:
             )
 
             # 清除 system_default 标记，表明这是用户主动设置的默认模型
-            target_metadata = target.get("metadata_json") or {}
-            if isinstance(target_metadata, str):
-                try:
-                    target_metadata = json.loads(target_metadata)
-                except Exception:
-                    target_metadata = {}
-            elif not isinstance(target_metadata, dict):
-                target_metadata = {}
             cleaned_metadata = {
                 k: v
                 for k, v in target_metadata.items()
