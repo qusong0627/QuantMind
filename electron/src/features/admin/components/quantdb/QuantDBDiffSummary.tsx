@@ -32,6 +32,18 @@ function formatRemoteDate(date: string | null | undefined): string {
     return s;
 }
 
+function formatBytes(n: number | null | undefined): string {
+    if (!n || !Number.isFinite(n) || n <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = n;
+    let idx = 0;
+    while (value >= 1024 && idx < units.length - 1) {
+        value /= 1024;
+        idx += 1;
+    }
+    return `${value.toFixed(idx >= 2 ? 2 : 1)} ${units[idx]}`;
+}
+
 export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
     diff,
     loading,
@@ -113,6 +125,15 @@ export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
                         />
                     </Space>
 
+                    {summary!.new_bytes > 0 && (
+                        <div className="mb-2">
+                            <Text type="secondary" className="text-xs">
+                                预计下载 <Text strong>{formatBytes(summary!.new_bytes)}</Text>
+                                （manifest 声明大小，实际可能略有偏差；同步前会按账户剩余/日预算再校验）
+                            </Text>
+                        </div>
+                    )}
+
                     {syncableDatasets.length > 0 && (
                         <div className="mt-2">
                             <Text type="secondary" className="text-xs">可同步的数据集：</Text>
@@ -133,6 +154,9 @@ export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
                                                     )}
                                                     {d.new_files > 0 && (
                                                         <div>约 {d.new_files} 个新文件</div>
+                                                    )}
+                                                    {d.new_bytes > 0 && (
+                                                        <div>约 {formatBytes(d.new_bytes)}</div>
                                                     )}
                                                 </div>
                                             }

@@ -48,6 +48,24 @@ const DIFF_STATUS_TAG: Record<string, { color: string; label: string }> = {
     unknown: { color: 'default', label: '未知' },
 };
 
+/** 同步启动失败：优先展示后端的预算/校验 detail，避免 [object Object]。 */
+function describeSyncError(error: unknown): string {
+    const detail = (error as { response?: { data?: { detail?: unknown } } })
+        ?.response?.data?.detail;
+    const budget =
+        typeof detail === 'object' && detail !== null
+            ? (detail as { budget?: { reasons?: string[] } }).budget
+            : undefined;
+    if (budget) {
+        const reasons = (budget.reasons ?? []).join('；');
+        return `下载预算不足，本次未启动：${reasons || '详见账户配额'}`;
+    }
+    if (typeof detail === 'string') {
+        return `启动同步失败: ${detail}`;
+    }
+    return `启动同步失败: ${describeError(error)}`;
+}
+
 interface QuantDBCatalogPanelProps {
     connected: boolean;
     /** 是否已配置 API Key（用于区分「未配置」与「已配置但云端连不上」） */
@@ -167,7 +185,7 @@ export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPre
             setActiveJob(resp.job);
             message.success(`已启动同步任务 ${resp.job.job_id}（后台执行）`);
         } catch (error: unknown) {
-            message.error(`启动同步失败: ${describeError(error)}`);
+            message.error(describeSyncError(error));
         } finally {
             setSubmitting(false);
         }
@@ -244,7 +262,7 @@ export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPre
             setActiveJob(resp.job);
             message.success(`已启动同步任务 ${resp.job.job_id}（后台执行）`);
         } catch (error: unknown) {
-            message.error(`启动同步失败: ${describeError(error)}`);
+            message.error(describeSyncError(error));
         } finally {
             setSubmitting(false);
         }

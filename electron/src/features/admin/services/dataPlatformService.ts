@@ -349,9 +349,12 @@ export interface QuantDBDatasetDiff {
         end_date?: string | null;
         rows?: number | null;
         files?: number | null;
+        bytes?: number | null;
     } | null;
     status: 'up_to_date' | 'updates_available' | 'not_synced' | 'unknown';
     new_files: number;
+    /** 预估本次需要下载的字节（manifest size 汇总） */
+    new_bytes: number;
 }
 
 export interface QuantDBDiffResult {
@@ -362,6 +365,8 @@ export interface QuantDBDiffResult {
         updates_available: number;
         not_synced: number;
         unknown: number;
+        /** 全部待下载数据集的预估字节 */
+        new_bytes: number;
     };
     timestamp: string;
 }
@@ -801,6 +806,8 @@ class DataPlatformService {
         with_pg?: boolean;
         with_qlib?: boolean;
         pg_full?: boolean;
+        /** 预算不足时显式放行（管理台二次确认后） */
+        force_budget?: boolean;
     }): Promise<{ job: QuantDBSyncJob }> {
         const resp = await this.axiosInstance.post(
             '/admin/data-platform/quantdb/sync-datasets',

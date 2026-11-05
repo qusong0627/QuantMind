@@ -428,6 +428,9 @@ class SyncDatasetsRequest(BaseModel):
     with_pg: bool = Field(False, description="同步后从 parquet 填充 PG stock_daily_latest")
     with_qlib: bool = Field(False, description="同步后增量重建 Qlib 缓存")
     pg_full: bool = Field(False, description="PG 全量重灌（默认增量）")
+    force_budget: bool = Field(
+        False, description="预算不足时显式放行（需管理台二次确认）"
+    )
 
 
 _jobs: dict[str, dict[str, Any]] = {}
@@ -847,6 +850,52 @@ async def sync_datasets(
     for name in payload.datasets:
         _spec(name)
 
+    # C2 预算闸：manifest 预估（零下载流量）vs 账户剩余/日预算；不足则 422。
+    budget: dict[str, Any] | None = None
+    try:
+        from backend.services.engine.data_platform.quantdb_budget import evaluate_budget
+
+        diff_resp = await get_remote_diff(
+            datasets=",".join(payload.datasets), current_user=current_user
+        )
+        new_bytes = int(
+            (((diff_resp.get("data") or {}).get("summary") or {}).get("new_bytes")) or 0
+        )
+        remaining_gb: float | None = None
+        try:
+            from backend.services.engine.data_platform.adapters.quantdb_adapter import (
+                _get_client,
+            )
+
+            usage = await asyncio.to_thread(lambda: _get_client().get_usage())
+            raw_remaining = usage.get("remaining_gb")
+            remaining_gb = (
+                float(raw_remaining) if raw_remaining is not None else None
+            )
+        except Exception:  # noqa: BLE001 - 配额查询失败不阻断（只按日预算判）
+            remaining_gb = None
+        budget = evaluate_budget(
+            new_bytes=new_bytes,
+            remaining_gb=remaining_gb,
+            budget_gb=float(os.getenv("QUANTDB_DAILY_BUDGET_GB", "0") or 0),
+            force=payload.force_budget,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 预检失败不阻断同步
+        logger.warning("budget preflight failed, skip gate: %s", exc)
+        budget = {"ok": True, "error": str(exc)}
+
+    if budget and not budget.get("ok"):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "下载预算不足，本次同步未启动",
+                "budget": budget,
+                "hint": "确认要下载请带 force_budget=true，或提高 QUANTDB_DAILY_BUDGET_GB/账户配额",
+            },
+        )
+
     job_id = f"qdb-{next(_job_counter)}"
     job = {
         "job_id": job_id,
@@ -863,6 +912,7 @@ async def sync_datasets(
         "cancel_requested": False,
         "started_at": _now_iso(),
         "started_by": current_user.get("username") or current_user.get("user_id"),
+        "budget": budget,
     }
     with _jobs_lock:
         _jobs[job_id] = job
@@ -1408,7 +1458,14 @@ async def get_remote_diff(
     root = _data_dir()
 
     items: list[dict[str, Any]] = []
-    summary = {"total_datasets": len(specs), "up_to_date": 0, "updates_available": 0, "not_synced": 0, "unknown": 0}
+    summary = {
+        "total_datasets": len(specs),
+        "up_to_date": 0,
+        "updates_available": 0,
+        "not_synced": 0,
+        "unknown": 0,
+        "new_bytes": 0,  # 预估本次需要下载的字节（manifest size 汇总，不消耗流量）
+    }
 
     for spec in specs:
         local_stats = _dataset_stats(spec, root)
@@ -1431,6 +1488,7 @@ async def get_remote_diff(
             "remote": None,
             "status": "unknown",
             "new_files": 0,
+            "new_bytes": 0,
         }
 
         # 通过 manifest 比对远端 vs 本地
@@ -1443,6 +1501,8 @@ async def get_remote_diff(
             remote_end = None
             remote_files_count = len(manifest)
             etag_changed = 0
+            remote_bytes = 0
+            new_bytes = 0
 
             # 从 manifest 提取远端最新日期和 ETag 变化数
             for obj in manifest:
@@ -1454,9 +1514,12 @@ async def get_remote_diff(
                 # 比对 ETag：检查本地状态库
                 rel_path = obj.get("relative_path") or key
                 target = root / spec.rel_dir
-                target / rel_path if spec.layout == "partition" else target / rel_path
-                (obj.get("etag") or "").strip('"')
                 remote_size = obj.get("size")
+                try:
+                    remote_size_int = int(remote_size or 0)
+                except (TypeError, ValueError):
+                    remote_size_int = 0
+                remote_bytes += remote_size_int
 
                 # partition 布局：文件存在 + 大小一致才算通过（内容被污染但存在
                 # 的文件通过大小差异暴露，如 daily_backward 复权因子错误）
@@ -1465,18 +1528,23 @@ async def get_remote_diff(
                     pq = next(dt_dir.glob("*.parquet"), None) if dt_dir.exists() else None
                     if pq is None:
                         etag_changed += 1
-                    elif remote_size and abs(pq.stat().st_size - int(remote_size)) > 64:
+                        new_bytes += remote_size_int
+                    elif remote_size and abs(pq.stat().st_size - remote_size_int) > 64:
                         etag_changed += 1
+                        new_bytes += remote_size_int
                 elif spec.layout in ("single", "symbol"):
                     # 单文件/标的文件：检查本地文件是否存在且 ETag 未变
                     local_path = root / rel_path
                     if not local_path.exists():
                         etag_changed += 1
+                        new_bytes += remote_size_int
 
             item["remote"] = {
                 "end_date": remote_end,
                 "files": remote_files_count,
+                "bytes": remote_bytes,
             }
+            item["new_bytes"] = remote_bytes if not local_synced else new_bytes
 
             if not local_synced:
                 item["status"] = "not_synced"
@@ -1498,6 +1566,7 @@ async def get_remote_diff(
             item["status"] = "unknown"
             summary["unknown"] += 1
 
+        summary["new_bytes"] += int(item.get("new_bytes") or 0)
         items.append(item)
 
     return {
