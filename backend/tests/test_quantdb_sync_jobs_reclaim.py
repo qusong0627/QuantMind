@@ -24,6 +24,9 @@ class FakeRedis:
 
         return [k.encode() for k in self.store if fnmatch.fnmatch(k, pattern)]
 
+    def scan_iter(self, pattern: str):
+        return iter(self.keys(pattern))
+
     def hset(self, name: str, mapping: dict):
         bucket = self.store.setdefault(name, {})
         for k, v in mapping.items():

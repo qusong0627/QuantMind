@@ -111,7 +111,7 @@ def get_job(job_id: str) -> dict | None:
 def list_jobs() -> list[dict]:
     r = _redis()
     try:
-        keys = r.keys(KEY_PREFIX + "*")
+        keys = list(r.scan_iter(KEY_PREFIX + "*"))
     except Exception:
         return []
     jobs = []
@@ -182,7 +182,9 @@ def reclaim_stale_jobs(
     reclaimed: list[str] = []
     r = _redis()
     try:
-        keys = r.keys(KEY_PREFIX + prefix + "*")
+        # 用 scan_iter 而不是 keys()：该函数在 /sync-jobs 每次轮询都会跑，
+        # 不能让 O(整个 keyspace) 的 KEYS 阻塞 Redis。
+        keys = list(r.scan_iter(KEY_PREFIX + prefix + "*"))
     except Exception:
         return reclaimed
     now = datetime.now()
