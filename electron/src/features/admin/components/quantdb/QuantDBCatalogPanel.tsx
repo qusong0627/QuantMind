@@ -16,6 +16,7 @@ import {
 import { describeError, formatPartitionDate, formatSize } from './utils';
 import { QuantDBDiffSummary } from './QuantDBDiffSummary';
 import { QuantDBQualityCard } from './QuantDBQualityCard';
+import { QuantDBUsageCard } from './QuantDBUsageCard';
 
 const { Text } = Typography;
 
@@ -370,6 +371,9 @@ export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPre
 
             {/* 同步语义质量（分区覆盖 / 行数 / 列集） */}
             <QuantDBQualityCard refreshSignal={qualityRefresh} />
+
+            {/* 下载用量（按数据集 bytes / files / errors） */}
+            <QuantDBUsageCard refreshSignal={qualityRefresh} />
 
             <Collapse
                 defaultActiveKey={groups.length > 0 ? [groups[0].id] : []}

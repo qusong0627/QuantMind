@@ -20,6 +20,7 @@ POST /api/v1/admin/data-platform/quantdb/query-kline     远端 K 线查询（�
 GET  /api/v1/admin/data-platform/quantdb/stock-list      远端股票列表
 GET  /api/v1/admin/data-platform/quantdb/calendar        远端交易日历
 GET  /api/v1/admin/data-platform/quantdb/quality         同步语义质量报告（覆盖/行数/列集）
+GET  /api/v1/admin/data-platform/quantdb/usage-stats     按数据集下载量/失败/耗时
 """
 
 from __future__ import annotations
@@ -1621,6 +1622,29 @@ async def get_quantdb_quality(refresh: bool = Query(default=False)):
             "source": "none",
         }
     return {"success": True, "data": report, "source": "cache"}
+
+
+@router.get("/usage-stats")
+async def get_quantdb_usage_stats(
+    days: int = Query(default=7, ge=1, le=90),
+    include_account: bool = Query(default=False),
+):
+    """按数据集的下载量/失败/耗时（近 N 天），可选附账户配额快照。"""
+    from backend.shared import quantdb_paths
+    from backend.services.engine.data_platform.quantdb_usage import load_usage
+
+    root = quantdb_paths.resolve_quantdb_dir()
+    report = await asyncio.to_thread(load_usage, root, days=days)
+    if include_account:
+        try:
+            from backend.services.engine.data_platform.adapters.quantdb_adapter import (
+                get_sdk_info,
+            )
+
+            report["account"] = await asyncio.to_thread(get_sdk_info)
+        except Exception as exc:  # noqa: BLE001 - 账户信息是增强项
+            report["account_error"] = str(exc)
+    return {"success": True, "data": report}
 
 
 class QuantDBKlineRequest(BaseModel):

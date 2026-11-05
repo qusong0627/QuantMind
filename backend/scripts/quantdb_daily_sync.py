@@ -137,14 +137,11 @@ DB_PASS = os.getenv("DB_PASSWORD", "quantmind")
 # SDK client
 # ---------------------------------------------------------------------------
 def _make_client():
-    from backend.shared.runtime_secrets import get_secret
-    from quantdb_sdk import QuantDBClient
-    # 任务执行时动态读取：管理台换 key 后，下一次同步（含 Celery 定时任务）
-    # 无需重启进程即用新 key
-    api_key = get_secret("QUANTDB_API_KEY")
-    if not api_key:
-        raise RuntimeError("QUANTDB_API_KEY 未配置")
-    return QuantDBClient(api_key=api_key, timeout=(15, 300), max_retries=3)
+    from backend.shared.quantdb_client import get_client
+
+    # 任务执行时动态读取 Key：管理台换 key 后，下一次同步（含 Celery 定时任务）
+    # 无需重启进程即用新 key（工厂内部每次重新读 runtime_secrets）。
+    return get_client("sync")
 
 
 # ---------------------------------------------------------------------------
@@ -288,30 +285,51 @@ def _since_skip(key: str, since: date | None) -> bool:
 
 def _download_object(client, dataset: str, cat_id: str, key: str, target: Path, layout: str):
     """下载单个对象，返回 (sha256, md5, size)。不校验服务端声明的 size。"""
+    import time as _time
+
+    from backend.services.engine.data_platform.quantdb_usage import record_download
+
+    started = _time.monotonic()
+
+    def _record(nbytes: int, ok: bool, error: str = "") -> None:
+        record_download(
+            dataset,
+            nbytes=nbytes,
+            seconds=_time.monotonic() - started,
+            ok=ok,
+            error=error,
+            root=QUANTDB_DATA_DIR,
+        )
+
     params = {"category_id": cat_id, "sub_category": dataset, "layout": layout}
     if layout == "v2":
         params["object_key"] = key
     else:
         params["symbol"] = ""
-    resp = client._download_stream(params)
-    if resp.status_code != 200:
-        raise RuntimeError(f"HTTP {resp.status_code}")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".part")
-    h_sha, h_md5 = hashlib.sha256(), hashlib.md5()
     try:
-        with open(tmp, "wb") as fh:
-            for chunk in resp.iter_content(1 << 20):
-                if chunk:
-                    fh.write(chunk)
-                    h_sha.update(chunk)
-                    h_md5.update(chunk)
-        size = tmp.stat().st_size
-        tmp.replace(target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
+        resp = client._download_stream(params)
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".part")
+        h_sha, h_md5 = hashlib.sha256(), hashlib.md5()
+        try:
+            with open(tmp, "wb") as fh:
+                for chunk in resp.iter_content(1 << 20):
+                    if chunk:
+                        fh.write(chunk)
+                        h_sha.update(chunk)
+                        h_md5.update(chunk)
+            size = tmp.stat().st_size
+            tmp.replace(target)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    except BaseException as exc:
+        _record(0, False, str(exc))
         raise
+    _record(size, True)
     return h_sha.hexdigest(), h_md5.hexdigest(), size
 
 

@@ -403,6 +403,40 @@ export interface QuantDBQualityReport {
     datasets?: Record<string, QuantDBQualityDataset>;
 }
 
+// ---- 下载用量（B1：按数据集 bytes / files / errors / seconds） ----
+export interface QuantDBUsageDataset {
+    bytes: number;
+    files: number;
+    errors: number;
+    seconds: number;
+    last_error?: string;
+}
+
+export interface QuantDBUsageDay {
+    date: string;
+    datasets: Record<string, QuantDBUsageDataset>;
+    total_bytes: number;
+    total_files: number;
+    errors: number;
+    updated_at?: string;
+}
+
+export interface QuantDBUsageStats {
+    root?: string;
+    days_requested?: number;
+    days: QuantDBUsageDay[];
+    totals: {
+        bytes: number;
+        files: number;
+        errors: number;
+        seconds: number;
+        datasets: Record<string, QuantDBUsageDataset>;
+    };
+    generated_at?: string;
+    account?: Record<string, unknown>;
+    account_error?: string;
+}
+
 // ---- 补池链就绪（候选池为什么没有） ----
 /** 补池链五段之一。`detail` 是后端实测原话（含日期），前端不加工。 */
 export interface PoolReadinessStage {
@@ -835,6 +869,15 @@ class DataPlatformService {
             report: (body?.data ?? {}) as QuantDBQualityReport,
             source: String(body?.source ?? 'none'),
         };
+    }
+
+    /** 按数据集的下载量/失败/耗时（近 N 天）。 */
+    async getQuantDBUsageStats(days = 7, includeAccount = false): Promise<QuantDBUsageStats> {
+        const resp = await this.axiosInstance.get('/admin/data-platform/quantdb/usage-stats', {
+            params: { days, include_account: includeAccount },
+            timeout: 30000,
+        });
+        return this.unwrap(resp);
     }
 
     // ---- QuantDB 本地扫描（离线数据 → SQLite 同步状态库） ----

@@ -44,13 +44,13 @@ except ImportError:
 def _get_client() -> QuantDBClient:
     if not _QDB_AVAILABLE:
         raise DataUnavailable("quantdb-sdk 未安装，请运行 pip install quantdb-sdk")
-    from backend.shared.runtime_secrets import get_secret
+    from backend.shared.quantdb_client import get_client
 
-    api_key = get_secret("QUANTDB_API_KEY")
-    if not api_key:
-        raise DataUnavailable("QUANTDB_API_KEY 未配置")
-    client = QuantDBClient(api_key=api_key)
-    return client
+    try:
+        # 与同步客户端共用超时/重试/Key 读取；避免 adapter 用 SDK 默认 (5,60)/2
+        return get_client("adapter")
+    except RuntimeError as exc:
+        raise DataUnavailable(str(exc)) from exc
 
 
 def _to_qdb_symbol(symbol: str) -> str:
