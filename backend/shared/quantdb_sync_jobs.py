@@ -222,20 +222,37 @@ def celery_progress_cb(job_id: str):
         ds = kw.get("dataset")
         fields: dict = {}
         if event == "dataset_start":
+            # 数据集级进度：index 从 1 开始，done 取 index-1（已完成的数据集数），
+            # total 为本次同步计划的数据集总数，供前端进度条与「x/y」文案使用。
+            index = kw.get("index")
+            total = kw.get("total")
             fields = {
                 "current": f"{ds} 开始同步",
-                "current_detail": {"dataset": ds, "done": 0, "total": kw.get("total"), "phase": "dataset_start"},
+                "current_detail": {"dataset": ds, "phase": "dataset_start"},
             }
+            if isinstance(index, int):
+                fields["done"] = max(0, index - 1)
+            if isinstance(total, int):
+                fields["total"] = total
         elif event == "file":
             fields = {
                 "current": f"{ds} 下载 {kw.get('done')}/{kw.get('total')}",
-                "current_detail": {"dataset": ds, "done": kw.get("done"), "total": kw.get("total"), "phase": "downloading"},
+                "current_detail": {
+                    "dataset": ds,
+                    "done": kw.get("done"),
+                    "total": kw.get("total"),
+                    "phase": "downloading",
+                },
             }
         elif event == "dataset_done":
             fields = {
                 "done": (get_job(job_id) or {}).get("done", 0) + 1,
                 "current": f"{ds} 完成 (同步 {kw.get('synced', 0)})",
-                "current_detail": {"dataset": ds, "done": kw.get("synced", 0), "total": kw.get("total"), "phase": "dataset_done"},
+                "current_detail": {
+                    "dataset": ds,
+                    "done": kw.get("synced", 0),
+                    "phase": "dataset_done",
+                },
             }
         if fields:
             upsert_job(job_id, **fields)

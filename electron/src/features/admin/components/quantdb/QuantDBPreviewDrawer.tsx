@@ -102,7 +102,7 @@ export function QuantDBPreviewDrawer({ dataset, onClose, onSynced }: QuantDBPrev
             && ['running', 'cancelling'].includes(job.status)
             && job.datasets.includes(dataset.dataset),
     );
-    const syncingPercent = isSyncingThis && job && job.total > 0
+    const syncingPercent = isSyncingThis && job && job.total && job.total > 0
         ? Math.round((job.done / job.total) * 100)
         : 0;
 

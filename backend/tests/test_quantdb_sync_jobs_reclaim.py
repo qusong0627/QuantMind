@@ -96,3 +96,30 @@ def test_reclaim_skips_finished_job(fake_redis):
 
     assert jobs.reclaim_stale_jobs(max_idle_seconds=900) == []
     assert jobs.get_job(job["job_id"])["status"] == "completed"
+
+
+def test_progress_cb_tracks_dataset_level_total(fake_redis):
+    """dataset_start 要写入数据集级 done/total，前端才不会显示 10/null。"""
+    job = jobs.new_celery_job(celery_task_id="task-4")
+    job_id = job["job_id"]
+    cb = jobs.celery_progress_cb(job_id)
+
+    cb("dataset_start", dataset="features_daily", index=1, total=28)
+    stored = jobs.get_job(job_id)
+    assert stored["done"] == 0
+    assert stored["total"] == 28
+    assert stored["current_detail"]["phase"] == "dataset_start"
+
+    cb("dataset_done", dataset="features_daily", synced=120, errors=0)
+    stored = jobs.get_job(job_id)
+    assert stored["done"] == 1
+
+    cb("dataset_start", dataset="l1_factors", index=2, total=28)
+    assert jobs.get_job(job_id)["done"] == 1
+
+    cb("file", dataset="l1_factors", done=1400, total=2144)
+    stored = jobs.get_job(job_id)
+    assert stored["current_detail"]["phase"] == "downloading"
+    assert stored["current_detail"]["done"] == 1400
+    assert stored["current_detail"]["total"] == 2144
+    assert stored["total"] == 28

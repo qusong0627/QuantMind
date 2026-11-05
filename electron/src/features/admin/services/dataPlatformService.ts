@@ -170,9 +170,16 @@ export interface QuantDBSyncJob {
     status: 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
     stage: string;
     datasets: string[];
-    total: number;
+    /** Celery 每日同步在首个数据集开始前没有计划总数，可能为 null */
+    total: number | null;
     done: number;
     current?: string | null;
+    current_detail?: {
+        dataset?: string;
+        phase?: 'dataset_start' | 'downloading' | 'dataset_done' | string;
+        done?: number;
+        total?: number;
+    } | null;
     results: Array<{
         dataset: string;
         status: 'synced' | 'up_to_date' | 'failed';

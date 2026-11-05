@@ -118,7 +118,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0, e
                 if (job.status === 'completed') {
                     message.success(`同步完成：${job.datasets.length} 个数据集`);
                 } else if (job.status === 'cancelled') {
-                    message.warning(`同步已取消：${job.done}/${job.total} 个数据集已完成`);
+                    message.warning(`同步已取消：已完成 ${job.done} 个数据集`);
                 } else {
                     message.error(`同步失败: ${job.error ?? '详见后端日志'}`);
                 }
@@ -455,9 +455,30 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0, e
 
 function SyncJobProgress({ job }: { job: QuantDBSyncJob }) {
     const results = job.results ?? [];
-    const percent = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
+    const detail = job.current_detail;
     const failed = results.filter((r) => r.status === 'failed');
     const downloaded = results.reduce((sum, r) => sum + (r.downloaded || 0), 0);
+
+    // 两套进度口径：
+    // 1. 下载中（phase=downloading）用当前数据集的文件/分区级 done/total，能看到 1400/2144；
+    // 2. 其余阶段用数据集级 done/total；Celery 每日同步在首个数据集开始前 total 为 null，
+    //    此时只显示已处理数量，避免出现「10/null」。
+    const fileTotal = detail?.phase === 'downloading' && typeof detail.total === 'number' ? detail.total : 0;
+    const fileDone = typeof detail?.done === 'number' ? detail.done : 0;
+    const dsTotal = typeof job.total === 'number' && job.total > 0 ? job.total : 0;
+
+    let percent = 0;
+    let progressText = '';
+    if (fileTotal > 0) {
+        percent = Math.min(100, Math.round((fileDone / fileTotal) * 100));
+        progressText = `${fileDone}/${fileTotal}`;
+    } else if (dsTotal > 0) {
+        percent = Math.min(100, Math.round((job.done / dsTotal) * 100));
+        progressText = `${job.done}/${dsTotal}`;
+    } else {
+        percent = job.status === 'completed' ? 100 : 0;
+        progressText = job.done > 0 ? `已完成 ${job.done} 个数据集` : '准备中';
+    }
 
     const statusLabel = job.status === 'running'
         ? `进行中 · ${job.stage}`
@@ -488,7 +509,7 @@ function SyncJobProgress({ job }: { job: QuantDBSyncJob }) {
                 <Progress
                     percent={percent}
                     status={job.status === 'failed' ? 'exception' : (job.status === 'running' || job.status === 'cancelling') ? 'active' : 'success'}
-                    format={() => `${job.done}/${job.total}`}
+                    format={() => progressText}
                 />
                 <Space wrap size="small">
                     <Tag color="blue">下载 {downloaded} 个文件</Tag>
