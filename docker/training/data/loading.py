@@ -35,7 +35,7 @@ _SPILL_CHUNK_ROWS = 262_144
 
 
 def _spill_enabled() -> bool:
-    v = os.environ.get("QM_TRAIN_FEATURE_SPILL", "1").strip().lower()
+    v = os.environ.get("QM_TRAIN_FEATURE_SPILL", "0").strip().lower()
     return v not in ("0", "false", "no", "off")
 
 
@@ -220,6 +220,7 @@ def load_data(
     range_end = pd.Timestamp(upper_bound) + pd.Timedelta(days=max(7, horizon + 3))
 
     direct_factor_source = str(factor_source or "").strip()
+    _train_cache_key = None
     if direct_factor_source and market_upper in _MARKET_DATA_DIR_ENV:
         # Direct QuantDB mode: one factor source only, never materialise or merge snapshots.
         # 与 A 股一致：直接读该市场 6_ml_datasets 下的因子分区
@@ -237,6 +238,51 @@ def load_data(
             range_start = max(range_start, pd.Timestamp(_status.min_date))
         if _status.max_date:
             range_end = min(range_end, pd.Timestamp(_status.max_date))
+
+        # D3 训练缓存：源指纹+特征+窗口+池全等时直接复用最终窄表（含标签）。
+        # cache_dir 由 train.py 传入（本地编排取 /workspace/cache；远端为空）。
+        _train_cache_key = None
+        if cache_dir:
+            try:
+                from backend.shared.train_cache import (
+                    build_cache_key,
+                    read_cache,
+                    source_stamp,
+                )
+
+                _src_stamp = source_stamp(
+                    _status, reader.source_path(direct_factor_source)
+                )
+                _train_cache_key = build_cache_key(
+                    market=market_upper,
+                    factor_source=direct_factor_source,
+                    source_stamp_value=_src_stamp,
+                    train_start=train_start,
+                    train_end=train_end,
+                    valid_end=valid_end,
+                    test_end=test_end,
+                    horizon=horizon,
+                    target_mode=target_mode,
+                    features=features,
+                    factor_field_sources=factor_field_sources,
+                    pool_symbols=pool_symbols,
+                    industry_as_feature=industry_as_feature,
+                )
+                _cached = read_cache(cache_dir, _train_cache_key)
+                if _cached is not None:
+                    _cached_df, _cached_features = _cached
+                    logger.info(
+                        "Train cache hit: source=%s key=%s rows=%d features=%d",
+                        direct_factor_source,
+                        _train_cache_key[:12],
+                        len(_cached_df),
+                        len(_cached_features),
+                    )
+                    return _cached_df, _cached_features
+            except Exception as exc:  # noqa: BLE001 - 缓存失败不阻断训练
+                logger.warning("训练缓存检查失败（忽略）: %s", exc)
+                _train_cache_key = None
+
         logger.info(
             "Direct QuantDB read %s: requesting %s .. %s",
             direct_factor_source,
@@ -663,4 +709,25 @@ def load_data(
         f"Data ready: {len(df):,} rows, {len(features)} features, "
         f"{df['trade_date'].min().date()} ~ {df['trade_date'].max().date()}"
     )
+
+    # D3：只缓存直读因子源的最终窄表（含标签）；写失败只告警，不影响本次训练。
+    if _train_cache_key and cache_dir and len(df) > 0:
+        try:
+            from backend.shared.train_cache import write_cache
+
+            write_cache(
+                cache_dir,
+                _train_cache_key,
+                df,
+                features,
+                meta_extra={
+                    "factor_source": direct_factor_source,
+                    "market": market_upper,
+                    "train_start": str(train_start),
+                    "train_end": str(train_end),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("训练缓存写入失败（忽略）: %s", exc)
+
     return df, features
