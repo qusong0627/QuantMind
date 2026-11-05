@@ -503,7 +503,15 @@ function SyncJobProgress({ job }: { job: QuantDBSyncJob }) {
                 <Space wrap>
                     <Text strong>{job.job_id}</Text>
                     <Tag color={statusColor}>{statusLabel}</Tag>
-                    {job.current && <Text type="secondary" className="text-xs">正在同步 {job.current}</Text>}
+                    {job.current && (
+                        <Text type="secondary" className="text-xs">
+                            {job.status === 'running'
+                                ? `正在同步 ${job.current}`
+                                : job.status === 'cancelling'
+                                    ? `正在取消 ${job.current}`
+                                    : job.current}
+                        </Text>
+                    )}
                     {job.started_by && <Text type="secondary" className="text-xs">由 {job.started_by} 启动</Text>}
                 </Space>
                 <Progress
