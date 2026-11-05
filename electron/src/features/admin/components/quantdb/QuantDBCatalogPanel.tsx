@@ -15,6 +15,7 @@ import {
 } from '../../services/dataPlatformService';
 import { describeError, formatPartitionDate, formatSize } from './utils';
 import { QuantDBDiffSummary } from './QuantDBDiffSummary';
+import { QuantDBQualityCard } from './QuantDBQualityCard';
 
 const { Text } = Typography;
 
@@ -70,6 +71,8 @@ export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPre
     // Diff state
     const [diff, setDiff] = useState<QuantDBDiffResult | null>(null);
     const [diffLoading, setDiffLoading] = useState(false);
+    // 质量卡刷新信号：外部同步完成 / 目录刷新时递增
+    const [qualityRefresh, setQualityRefresh] = useState(0);
 
     const loadCatalog = useCallback(async () => {
         setLoading(true);
@@ -111,6 +114,7 @@ export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPre
     useEffect(() => {
         if (refreshSignal > 0) {
             loadCatalog();
+            setQualityRefresh((v) => v + 1);
         }
     }, [refreshSignal, loadCatalog]);
 
@@ -122,6 +126,7 @@ export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPre
             if (job && job.status !== 'running' && job.status !== 'cancelling') {
                 clearInterval(timer);
                 loadCatalog();
+                setQualityRefresh((v) => v + 1);
                 if (job.status === 'completed') {
                     message.success(`同步完成：${job.datasets.length} 个数据集`);
                 } else if (job.status === 'cancelled') {
@@ -362,6 +367,9 @@ export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPre
                     onSyncSelected={handleSyncFromDiff}
                 />
             </div>
+
+            {/* 同步语义质量（分区覆盖 / 行数 / 列集） */}
+            <QuantDBQualityCard refreshSignal={qualityRefresh} />
 
             <Collapse
                 defaultActiveKey={groups.length > 0 ? [groups[0].id] : []}

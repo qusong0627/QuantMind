@@ -19,12 +19,14 @@ POST /api/v1/admin/data-platform/quantdb/modelscope/jobs/{id}/cancel  取消初�
 POST /api/v1/admin/data-platform/quantdb/query-kline     远端 K 线查询（消耗流量）
 GET  /api/v1/admin/data-platform/quantdb/stock-list      远端股票列表
 GET  /api/v1/admin/data-platform/quantdb/calendar        远端交易日历
+GET  /api/v1/admin/data-platform/quantdb/quality         同步语义质量报告（覆盖/行数/列集）
 """
 
 from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import logging
 import os
 import re
@@ -1583,6 +1585,42 @@ async def get_quantdb_info(current_user: dict = Depends(require_admin)):
     except Exception as exc:  # noqa: BLE001
         logger.error("get_quantdb_info failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"failed: {exc}")
+
+
+@router.get("/quality")
+async def get_quantdb_quality(refresh: bool = Query(default=False)):
+    """同步语义质量报告（A1）：分区覆盖 / 行数断崖 / 列集漂移。
+
+    默认读最近一次同步落盘的 ``data/quantdb/.quality/latest.json``（零开销）；
+    ``refresh=true`` 现场跑一遍闸门（只读，不写告警）。
+    """
+    from backend.shared import quantdb_paths
+
+    root = quantdb_paths.resolve_quantdb_dir()
+    if refresh:
+        from backend.services.engine.data_platform.quantdb_quality import (
+            run_quality_gate,
+        )
+
+        report = await asyncio.to_thread(
+            run_quality_gate, None, root, mode="warn", alert_service=False
+        )
+        return {"success": True, "data": report, "source": "fresh"}
+
+    report_path = root / ".quality" / "latest.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {
+            "success": True,
+            "data": {
+                "available": False,
+                "report_path": str(report_path),
+                "hint": "尚无质量报告；执行一次 QuantDB 同步或带 refresh=true 现场检查",
+            },
+            "source": "none",
+        }
+    return {"success": True, "data": report, "source": "cache"}
 
 
 class QuantDBKlineRequest(BaseModel):

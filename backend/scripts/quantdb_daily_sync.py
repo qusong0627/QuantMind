@@ -1279,6 +1279,55 @@ def run_daily_sync(
                 log.warning("退市股日线写回失败: %s", exc)
                 result["delisted_inject"] = {"status": "error", "reason": str(exc)}
 
+        # 质量闸门（A1）：分区覆盖 / 行数断崖 / 列集漂移。
+        # 默认 warn 只告警；QM_QUANTDB_QUALITY_GATE=block 时 error 会跳过 PG/Qlib。
+        # 放在 delisted 写回之后：此时落盘面才是本轮同步的最终状态。
+        raw_gate = os.getenv("QM_QUANTDB_QUALITY_GATE", "warn").strip().lower()
+        if raw_gate in {"0", "false", "no", "off"}:
+            gate_mode = "off"
+        elif raw_gate in {"1", "true", "yes", "on"}:
+            gate_mode = "warn"
+        else:
+            gate_mode = raw_gate if raw_gate in {"warn", "block"} else "warn"
+
+        if gate_mode != "off" and not dry_run:
+            try:
+                from backend.services.engine.data_platform.quantdb_quality import (
+                    run_quality_gate,
+                )
+
+                gate_datasets = (
+                    [d["sub_category"] for d in V2_DATASETS]
+                    if datasets is None
+                    else list(datasets)
+                )
+                gate_report = run_quality_gate(
+                    gate_datasets,
+                    QUANTDB_DATA_DIR,
+                    mode=gate_mode,
+                    alert_service=None,
+                )
+                result["quality_gate"] = gate_report
+                if gate_report.get("blocked"):
+                    errors = [
+                        i
+                        for i in gate_report.get("issues", [])
+                        if i.get("severity") == "error"
+                    ]
+                    log.error(
+                        "质量闸门 block：%d 个 error，跳过 PG/Qlib 阶段"
+                        "（详情见 data/quantdb/.quality/latest.json）",
+                        len(errors),
+                    )
+                    skip_pg = True
+                    skip_qlib = True
+                    result["quality_gate_blocked_phases"] = ["pg", "qlib"]
+                elif not gate_report.get("ok", True):
+                    log.warning("质量闸门发现 error（warn 模式不阻断）")
+            except Exception as exc:  # noqa: BLE001 - 闸门失败不打断同步
+                log.warning("质量闸门执行失败（不阻断同步）: %s", exc)
+                result["quality_gate"] = {"error": str(exc)}
+
     # Phase 1.5: 额外数据源（北向/南向，按数据源勾选控制；逐数据集路径只同步请求项）
     result["sources"] = _sync_extra_sources(dry_run=dry_run, datasets=datasets)
 

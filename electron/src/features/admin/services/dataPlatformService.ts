@@ -366,6 +366,43 @@ export interface QuantDBDiffResult {
     timestamp: string;
 }
 
+// ---- 同步语义质量（A1：分区覆盖 / 行数断崖 / 列集漂移） ----
+export interface QuantDBQualityIssue {
+    dataset: string;
+    issue_type: string;
+    severity: 'warning' | 'error' | string;
+    message: string;
+    details?: Record<string, unknown>;
+}
+
+export interface QuantDBQualityDataset {
+    skipped?: boolean;
+    reason?: string;
+    partitions?: number;
+    latest?: string | null;
+    issues?: QuantDBQualityIssue[];
+}
+
+export interface QuantDBQualityReport {
+    /** 后端还没有落过报告时为 false */
+    available?: boolean;
+    report_path?: string;
+    hint?: string;
+    error?: string;
+    checked_at?: string;
+    today?: string;
+    expected_latest?: string;
+    relaxed_from_today?: string | null;
+    calendar_source?: string;
+    mode?: string;
+    lookback_days?: number;
+    ok?: boolean;
+    blocked?: boolean;
+    alerts_written?: number;
+    issues?: QuantDBQualityIssue[];
+    datasets?: Record<string, QuantDBQualityDataset>;
+}
+
 // ---- 补池链就绪（候选池为什么没有） ----
 /** 补池链五段之一。`detail` 是后端实测原话（含日期），前端不加工。 */
 export interface PoolReadinessStage {
@@ -779,6 +816,25 @@ class DataPlatformService {
             timeout: 120000,
         });
         return this.unwrap(resp);
+    }
+
+    /**
+     * 同步语义质量报告（A1）。默认读最近一次同步落盘的报告（零开销）；
+     * refresh=true 现场跑一遍（只读，不写告警）。
+     */
+    async getQuantDBQuality(refresh = false): Promise<{
+        report: QuantDBQualityReport;
+        source: 'cache' | 'fresh' | 'none' | string;
+    }> {
+        const resp = await this.axiosInstance.get('/admin/data-platform/quantdb/quality', {
+            params: { refresh },
+            timeout: refresh ? 120000 : 30000,
+        });
+        const body = resp.data;
+        return {
+            report: (body?.data ?? {}) as QuantDBQualityReport,
+            source: String(body?.source ?? 'none'),
+        };
     }
 
     // ---- QuantDB 本地扫描（离线数据 → SQLite 同步状态库） ----
