@@ -408,7 +408,9 @@ async def update_status(
     tail = log_content[-2000:]
     if running:
         state = "running"
-    elif "更新完成" in log_content:
+    elif "升级完成" in log_content or "更新完成" in log_content:
+        # update.sh 的成功终态是「升级完成 ✓」；旧版本/旧日志用过「更新完成」，
+        # 两个都认。历史 bug：只认后者 → 成功更新也被判成「更新中断」。
         state = "done"
         message = "系统更新完成"
     elif "健康检查失败" in log_content or "错误" in log_content:

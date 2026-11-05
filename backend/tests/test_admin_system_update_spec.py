@@ -349,3 +349,60 @@ def test_invalid_remote_is_rejected(bad_remote):
         su._resolve_remote(bad_remote)
 
     assert exc.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 更新状态机（2026-11-05）：update.sh 成功写「升级完成」，状态接口必须认
+# ---------------------------------------------------------------------------
+
+
+def _status_with_log(monkeypatch, tmp_path, text: str) -> dict:
+    log = tmp_path / "update.log"
+    log.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(su, "_LOG_FILE", str(log))
+    monkeypatch.setattr(su, "_container_running", lambda *a, **k: False)
+    import asyncio
+
+    return asyncio.run(su.update_status(None))["data"]
+
+
+def test_status_recognizes_update_script_success_wording(monkeypatch, tmp_path):
+    """回归：脚本成功终态是「升级完成」，只认「更新完成」会把成功判成中断。"""
+    data = _status_with_log(
+        monkeypatch, tmp_path, "[quantmind-update] 升级完成 ✓ (HEAD: abc123)\n"
+    )
+
+    assert data["state"] == "done"
+    assert data["message"] == "系统更新完成"
+
+
+def test_status_accepts_legacy_success_wording(monkeypatch, tmp_path):
+    data = _status_with_log(monkeypatch, tmp_path, "[quantmind-update] 更新完成\n")
+
+    assert data["state"] == "done"
+
+
+def test_status_reports_failure_on_error_line(monkeypatch, tmp_path):
+    data = _status_with_log(
+        monkeypatch, tmp_path, "[quantmind-update] 错误: git fetch 失败\n"
+    )
+
+    assert data["state"] == "failed"
+
+
+def test_status_is_idle_without_log(monkeypatch, tmp_path):
+    data = _status_with_log(monkeypatch, tmp_path, "")
+
+    assert data["state"] == "idle"
+
+
+def test_status_is_running_while_updater_container_alive(monkeypatch, tmp_path):
+    log = tmp_path / "update.log"
+    log.write_text("[quantmind-update] 升级完成 ✓\n", encoding="utf-8")
+    monkeypatch.setattr(su, "_LOG_FILE", str(log))
+    monkeypatch.setattr(su, "_container_running", lambda *a, **k: True)
+    import asyncio
+
+    data = asyncio.run(su.update_status(None))["data"]
+
+    assert data["state"] == "running"
