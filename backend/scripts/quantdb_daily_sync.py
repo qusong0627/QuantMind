@@ -57,21 +57,11 @@ log = logging.getLogger("quantdb_daily_sync")
 # ---------------------------------------------------------------------------
 QUANTDB_DATA_DIR = Path(os.getenv("QM_QUANTDB_DATA_DIR", str(PROJECT_ROOT / "data" / "quantdb")))
 
-# V2 分区数据集 (按交易日分区, sync_dataset 增量同步)
-V2_DATASETS = [
-    {"category_id": "1", "sub_category": "daily_unadjusted", "dir": "1_kline_data"},
-    {"category_id": "1", "sub_category": "daily_forward", "dir": "1_kline_data"},
-    {"category_id": "1", "sub_category": "daily_backward", "dir": "1_kline_data"},
-    {"category_id": "1", "sub_category": "index_daily", "dir": "1_kline_data"},
-    {"category_id": "2", "sub_category": "margin_trading", "dir": "2_base_sector"},
-    {"category_id": "5", "sub_category": "valuation", "dir": "5_technical_derived"},
-    {"category_id": "5", "sub_category": "technical_indicators", "dir": "5_technical_derived"},
-    {"category_id": "5", "sub_category": "market_sentiment", "dir": "5_technical_derived"},
-    {"category_id": "6", "sub_category": "features_daily", "dir": "6_ml_datasets"},
-    {"category_id": "6", "sub_category": "l1_factors", "dir": "6_ml_datasets"},
-    {"category_id": "6", "sub_category": "l2_factors", "dir": "6_ml_datasets"},
-    {"category_id": "6", "sub_category": "l1_l2_factors", "dir": "6_ml_datasets"},
-]
+# 同步清单从数据集目录单一来源派生（C1）：新增数据集只改 quantdb_datasets.py。
+# V2=每日增量日分区；OPTIONAL_V2=显式勾选才同步；V1=每日 ETag 增量。
+from backend.shared.quantdb_datasets import sync_specs  # noqa: E402
+
+V2_DATASETS = sync_specs("v2")
 
 # 每天全量重写的分区数据集：上游每次 release 都会整段重算（如前复权/后复权
 # K 线，除权除息后历史价格全部回溯改写）。对这些数据集，本地不能只看
@@ -98,26 +88,10 @@ DELISTED_DAILY_DATASETS = (
 # - etf_kline：ETF 日线（2006 起，单文件很小），默认不同步以保持每日任务精简。
 # 判定 V2 时与 V2_DATASETS 同权（见 _is_v2_spec），但 datasets=None 的默认
 # 全量同步只走 V2_DATASETS，避免升级 SDK 后夜间任务静默多下 32GB。
-OPTIONAL_V2_DATASETS = [
-    {"category_id": "4", "sub_category": "etf_kline", "dir": "4_bond_etf"},
-    {"category_id": "6", "sub_category": "factor_dictionary", "dir": "6_ml_datasets"},
-]
+OPTIONAL_V2_DATASETS = sync_specs("optional_v2")
 
 # V1 非分区数据集 (全量 ETag 增量)
-V1_DATASETS = [
-    {"category_id": "2", "sub_category": "sector_concept", "dir": "2_base_sector"},
-    {"category_id": "2", "sub_category": "instrument_detail", "dir": "2_base_sector"},
-    {"category_id": "2", "sub_category": "index_weights", "dir": "2_base_sector"},
-    {"category_id": "2", "sub_category": "trading_calendar", "dir": "2_base_sector"},
-    {"category_id": "3", "sub_category": "balance", "dir": "3_financial_data"},
-    {"category_id": "3", "sub_category": "income", "dir": "3_financial_data"},
-    {"category_id": "3", "sub_category": "cashflow", "dir": "3_financial_data"},
-    {"category_id": "3", "sub_category": "capital", "dir": "3_financial_data"},
-    {"category_id": "3", "sub_category": "pershare_index", "dir": "3_financial_data"},
-    {"category_id": "3", "sub_category": "per_share", "dir": "3_financial_data"},
-    {"category_id": "3", "sub_category": "dividend_factors", "dir": "3_financial_data"},
-    {"category_id": "3", "sub_category": "holder_num", "dir": "3_financial_data"},
-]
+V1_DATASETS = sync_specs("v1")
 
 
 def _is_v2_spec(spec: dict) -> bool:

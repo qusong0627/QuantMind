@@ -147,3 +147,72 @@ def test_run_daily_sync_treats_optional_dataset_as_covered(monkeypatch):
 
     assert result["uncovered_datasets"] == []
     assert seen["datasets"] == ["factor_dictionary"]
+
+
+# ---------------------------------------------------------------------------
+# C1：同步清单单一来源（从 DATASETS 派生）
+# ---------------------------------------------------------------------------
+
+GOLDEN_V2 = {
+    "daily_unadjusted",
+    "daily_forward",
+    "daily_backward",
+    "index_daily",
+    "margin_trading",
+    "valuation",
+    "technical_indicators",
+    "market_sentiment",
+    "features_daily",
+    "l1_factors",
+    "l2_factors",
+    "l1_l2_factors",
+}
+GOLDEN_V1 = {
+    "sector_concept",
+    "instrument_detail",
+    "index_weights",
+    "trading_calendar",
+    "balance",
+    "income",
+    "cashflow",
+    "capital",
+    "pershare_index",
+    "per_share",
+    "dividend_factors",
+    "holder_num",
+}
+GOLDEN_OPTIONAL = {"etf_kline", "factor_dictionary"}
+
+
+def test_sync_lists_match_golden_sets():
+    """派生清单必须与改造前的三份硬编码逐项一致（行为零差异）。"""
+    assert {d["sub_category"] for d in qds.V2_DATASETS} == GOLDEN_V2
+    assert {d["sub_category"] for d in qds.V1_DATASETS} == GOLDEN_V1
+    assert {d["sub_category"] for d in qds.OPTIONAL_V2_DATASETS} == GOLDEN_OPTIONAL
+
+
+def test_sync_specs_are_consistent_with_catalog_layout():
+    by_name = {ds.dataset: ds for ds in DATASETS}
+    for spec in qds.V2_DATASETS + qds.OPTIONAL_V2_DATASETS:
+        ds = by_name[spec["sub_category"]]
+        assert ds.layout == "partition", f"{ds.dataset} 应为 partition"
+        assert spec["dir"] == ds.rel_dir.split("/", 1)[0]
+        assert spec["category_id"] == ds.category_id
+    for spec in qds.V1_DATASETS:
+        ds = by_name[spec["sub_category"]]
+        assert ds.layout in {"single", "symbol"}, f"{ds.dataset} 应为非分区"
+        assert spec["dir"] == ds.rel_dir.split("/", 1)[0]
+        assert spec["category_id"] == ds.category_id
+
+
+def test_sync_modes_cover_every_syncable_dataset():
+    """catalog 里标了 sync 的数据集，必须出现在派生清单；反之亦然。"""
+    from backend.shared.quantdb_datasets import sync_specs
+
+    all_derived = {
+        d["sub_category"]
+        for d in qds.V2_DATASETS + qds.V1_DATASETS + qds.OPTIONAL_V2_DATASETS
+    }
+    all_catalog = {ds.dataset for ds in DATASETS if ds.sync != "none"}
+    assert all_derived == all_catalog
+    assert all_derived == {d["sub_category"] for d in sync_specs()}
