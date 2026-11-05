@@ -27,7 +27,7 @@ from backend.services.live_trading.services.qmt_exec_client import (
     QmtExecError,
 )
 
-BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://192.168.31.13:8550").rstrip("/")
+BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://192.168.31.250:8550").rstrip("/")
 BRIDGE_TOKEN = os.getenv("TDX_BRIDGE_TOKEN", "")
 TAG = "stbatch-" + time.strftime("%Y%m%d-%H%M%S")
 MAX_ORDER_VALUE = 130_000.0

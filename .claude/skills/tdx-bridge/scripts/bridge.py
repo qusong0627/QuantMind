@@ -5,7 +5,7 @@
 
 连接参数
 --------
-- 地址：环境变量 `QM_BRIDGE_URL`，默认 `http://192.168.31.13:8550`
+- 地址：环境变量 `QM_BRIDGE_URL`，默认 `http://192.168.31.250:8550`
 - Token：`QM_BRIDGE_TOKEN` > `TDX_BRIDGE_TOKEN` > 自动 `docker exec quantmind printenv TDX_BRIDGE_TOKEN`
   （自动探测仅在 Linux/容器主机可用；失败会给出明确提示）
 
@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-DEFAULT_URL = "http://192.168.31.13:8550"
+DEFAULT_URL = "http://192.168.31.250:8550"
 TIMEOUT = float(os.environ.get("QM_BRIDGE_TIMEOUT", "30"))
 
 

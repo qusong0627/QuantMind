@@ -26,10 +26,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 _MOUNTS_OK = (
     "sysfs /sys sysfs rw,nosuid 0 0\n"
-    "//192.168.31.13/PYPlugins /mnt/tdx-shared cifs rw,relatime,vers=3.0 0 0\n"
+    "//192.168.31.250/PYPlugins /mnt/tdx-shared cifs rw,relatime,vers=3.0 0 0\n"
 )
 _MOUNTS_OTHER = "sysfs /sys sysfs rw,nosuid 0 0\ntmpfs /mnt/tdx-shared tmpfs rw 0 0\n"
-_MOUNTS_PREFIX_ONLY = "//192.168.31.13/PYPlugins /mnt cifs rw 0 0\n"
+_MOUNTS_PREFIX_ONLY = "//192.168.31.250/PYPlugins /mnt cifs rw 0 0\n"
 
 
 # ── 挂载判定（纯函数）────────────────────────────────────────────────────

@@ -23,7 +23,7 @@ from backend.services.live_trading.services.qmt_exec_client import (
     QmtExecError,
 )
 
-BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://192.168.31.13:8550")
+BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://192.168.31.250:8550")
 BRIDGE_TOKEN = os.getenv("TDX_BRIDGE_TOKEN", "")
 BUY_LIST = [
     "601869.SH",

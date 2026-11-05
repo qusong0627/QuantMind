@@ -184,10 +184,10 @@ class TestFieldValidation:
         monkeypatch.delenv("TDX_BRIDGE_TOKEN", raising=False)
         redis = _redis_for("tdx")
         payload = mod.BrokerConfigUpdate(
-            values={"bridge_url": "http://192.168.31.13:8550", "account": "8888"}
+            values={"bridge_url": "http://192.168.31.250:8550", "account": "8888"}
         )
         asyncio.run(mod.update_broker_config("tdx", payload, auth=_auth(), redis=redis))
-        assert _stored("tdx", redis)["bridge_url"] == "http://192.168.31.13:8550"
+        assert _stored("tdx", redis)["bridge_url"] == "http://192.168.31.250:8550"
 
 
 class TestSecretRedaction:

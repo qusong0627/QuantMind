@@ -29,7 +29,7 @@ python3 $B aidata get_minute_data --params '{"stock_code":"002415.SZ","date":"20
 
 | 参数 | 来源 | 默认 |
 |---|---|---|
-| 地址 | `QM_BRIDGE_URL` | `http://192.168.31.13:8550` |
+| 地址 | `QM_BRIDGE_URL` | `http://192.168.31.250:8550` |
 | Token | `QM_BRIDGE_TOKEN` → `TDX_BRIDGE_TOKEN` → `docker exec quantmind printenv TDX_BRIDGE_TOKEN` | 无（缺失会报错） |
 
 ## 什么时候用哪个

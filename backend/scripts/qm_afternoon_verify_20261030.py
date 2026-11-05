@@ -21,7 +21,7 @@ from backend.services.live_trading.services.qmt_exec_client import (
     QmtExecError,
 )
 
-BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://192.168.31.13:8550").rstrip("/")
+BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://192.168.31.250:8550").rstrip("/")
 BRIDGE_TOKEN = os.getenv("TDX_BRIDGE_TOKEN", "")
 ST_SYMBOL = "002883.SZ"
 BUY_SYMBOL = "601398.SH"

@@ -39,7 +39,7 @@ declare -A LIMITS=(
 #   redis-lan-bridge   docker run -d --name quantmind-redis-lan-bridge --restart unless-stopped \
 #                        --memory 512m --memory-swap 512m --network host \
 #                        -e REDIS_LAN_BIND_IPS=192.168.31.68,192.168.31.56 \
-#                        -e REDIS_LAN_ALLOW=192.168.31.13,192.168.31.68,192.168.31.56 \
+#                        -e REDIS_LAN_ALLOW=192.168.31.250,192.168.31.68,192.168.31.56 \
 #                        -v /home/zbox/projects/quantmind/deploy/redis_lan_bridge.py:/bridge.py:ro \
 #                        python:3.10-slim-bookworm python3 /bridge.py
 

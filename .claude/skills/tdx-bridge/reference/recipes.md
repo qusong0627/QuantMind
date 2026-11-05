@@ -1,14 +1,14 @@
 # 常用配方
 
 > 所有示例用 skill 自带客户端：`python3 .claude/skills/tdx-bridge/scripts/bridge.py ...`
-> 环境变量：`QM_BRIDGE_URL`（默认 `http://192.168.31.13:8550`）、
+> 环境变量：`QM_BRIDGE_URL`（默认 `http://192.168.31.250:8550`）、
 > `QM_BRIDGE_TOKEN` 或 `TDX_BRIDGE_TOKEN`。
 
 ## 0. 连通性
 
 ```bash
 python3 scripts/bridge.py health
-curl.exe -s http://192.168.31.13:8550/api/v1/health        # Windows
+curl.exe -s http://192.168.31.250:8550/api/v1/health        # Windows
 ```
 
 ## 1. 单只行情（三源自动平衡）
@@ -26,7 +26,7 @@ python3 scripts/bridge.py quote 002415.SZ --aidata --prefer ths,aidata,tdx
 
 ```python
 import json, urllib.parse, urllib.request, os
-BASE = os.environ.get("QM_BRIDGE_URL", "http://192.168.31.13:8550")
+BASE = os.environ.get("QM_BRIDGE_URL", "http://192.168.31.250:8550")
 TOKEN = os.environ.get("QM_BRIDGE_TOKEN") or os.environ["TDX_BRIDGE_TOKEN"]
 def quote(code, prefer="ths,tdx"):
     url = f"{BASE}/api/v1/market/quote?" + urllib.parse.urlencode({"code": code, "prefer": prefer})
