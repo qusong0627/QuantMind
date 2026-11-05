@@ -1326,6 +1326,38 @@ def main(argv: list[str] | None = None) -> int:
 
     status_path = _write_status(ctx, results, started)
     LOG.info("状态文件：%s", status_path)
+
+    # D2：只对 status=ok 的库记录代次并切 active；失败/部分完成不动指针。
+    if not ctx.dry_run:
+        try:
+            from backend.shared.factor_generation import (
+                read_active,
+                record_generation,
+            )
+
+            for result in results:
+                if result.status != "ok":
+                    continue
+                lib_root = ops.library_root(ctx.quantdb, result.library)
+                partitions = ops.partition_dates(lib_root)
+                latest = partitions[-1] if partitions else ""
+                fingerprint = f"{latest}|{len(partitions)}"
+                active = read_active(lib_root)
+                if active and active.get("source_fingerprint") == fingerprint:
+                    continue
+                record_generation(
+                    lib_root,
+                    source_fingerprint=fingerprint,
+                    partitions=len(partitions),
+                )
+                LOG.info(
+                    "代次已切换：%s active=%s partitions=%d",
+                    result.library,
+                    (read_active(lib_root) or {}).get("generation_id"),
+                    len(partitions),
+                )
+        except Exception as exc:  # noqa: BLE001 - 代次记录失败不影响物化
+            LOG.warning("generation 记录失败（不影响物化）: %s", exc)
     failed = [step.library for step in results if step.status == "failed"]
     partial = [step.library for step in results if step.status == "partial"]
     if failed:

@@ -204,20 +204,16 @@ def materialize(
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     _atomic_write_json(_manifest_path(out_dir), manifest)
+    from backend.shared.factor_generation import record_generation
+
     generation_id = f"g{info['source_stamp'][:12]}-{sid}"
-    _atomic_write_json(
-        out_dir / "generation.json",
-        {
-            "generation_id": generation_id,
-            "status": "active",
-            "source_stamp": info["source_stamp"],
-            "features": features,
-            "partitions": written,
-            "rows": int(total_rows),
-            "created_at": manifest["created_at"],
-        },
+    record_generation(
+        out_dir,
+        generation_id=generation_id,
+        source_fingerprint=info["source_stamp"],
+        partitions=written,
+        extra={"features": features, "rows": int(total_rows)},
     )
-    _atomic_write_json(out_dir / "active.json", {"generation_id": generation_id})
     incomplete.unlink(missing_ok=True)
 
     info["status"] = "applied"
