@@ -291,6 +291,9 @@ python -m celery -A backend.services.engine.qlib_app.celery_config:celery_app fl
 ### 3. 任务超时约束
 
 - 全局：`task_time_limit=3600` / `task_soft_time_limit=3300`，`task_acks_late=true` + `task_reject_on_worker_lost=true`。
+- `engine.tasks.daily_data_sync` 单独放宽为 `soft 14100 / hard 14400`（`DAILY_SYNC_SOFT_TIME_LIMIT` / `DAILY_SYNC_TIME_LIMIT`）。
+  原因：QuantDB parquet 指纹全变时（如 `factor_dictionary` 2144 个分区全量重下）单次同步要 80 分钟以上，全局 3600s 硬限制会直接 `SIGKILL` worker。
+  该任务同时启动独立心跳线程（`DAILY_SYNC_HEARTBEAT_SECONDS`，默认 60s）刷新 Redis 任务 `updated_at` 与同步锁 TTL；`reclaim_stale_jobs` 据此把超过 `QUANTDB_SYNC_STALE_SECONDS`（默认 900s）没有心跳的 `running` 任务判定为僵死并标记 `failed`，避免一条死记录把前端同步按钮永久禁用。
 - `run_market_scheduled_sync` 单独收紧为 `soft 1800 / hard 2100`（`MARKET_SYNC_SOFT_TIME_LIMIT` / `MARKET_SYNC_TIME_LIMIT`）且 `acks_late=false`。
   原因：上游（如 yfinance）被限流时会把单个标的拖到分钟级，整体突破 3600s 硬限制 → 进程被 `SIGKILL`；叠加 `acks_late` 会重新入队再次超时，形成死循环。
 - 数据拉取耗时超过预算一半时，`market_sync_scheduler.run_market_sync` 会跳过 Qlib 缓存重建并在结果里标记 `skipped`。
