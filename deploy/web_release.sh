@@ -58,9 +58,35 @@ qm_web_image_commit() {
         --format '{{ index .Config.Labels "qm.git.commit" }}' 2>/dev/null || true
 }
 
-# 镜像是否由当前检出构建（label qm.git.commit == HEAD）；用于离线安装复用判断。
+# 前端源码身份：electron/ 树 + Dockerfile.web + 构建脚本 + .npmrc 的哈希。
+# 用它做镜像复用判据，后端-only 提交不会误判「前端镜像过期」。
+qm_web_src_id() {
+    local project="${1:-$PROJECT_DIR}" part hash parts=''
+    for part in electron docker/Dockerfile.web scripts/frontend .npmrc; do
+        hash="$(git -C "$project" rev-parse "HEAD:$part" 2>/dev/null || true)"
+        [[ -n "$hash" ]] && parts+="$hash"$'\n'
+    done
+    if [[ -z "$parts" ]]; then
+        git -C "$project" rev-parse HEAD 2>/dev/null || echo unknown
+        return
+    fi
+    printf '%s' "$parts" | sha256sum | cut -c1-16
+}
+
+qm_web_image_src() {
+    docker image inspect quantmind-web:latest \
+        --format '{{ index .Config.Labels "qm.web.src" }}' 2>/dev/null || true
+}
+
+# 镜像是否由当前前端源码构建；无 qm.web.src 的旧镜像退回 commit 精确匹配。
 qm_web_image_matches() {
-    local project="${1:-$PROJECT_DIR}" head current
+    local project="${1:-$PROJECT_DIR}" want have head current
+    want="$(qm_web_src_id "$project")"
+    have="$(qm_web_image_src)"
+    if [[ -n "$want" && -n "$have" && "$want" != "unknown" ]]; then
+        [[ "$want" == "$have" ]]
+        return
+    fi
     head="$(git -C "$project" rev-parse HEAD 2>/dev/null || true)"
     current="$(qm_web_image_commit)"
     [[ -n "$head" && "$current" == "$head" ]]
@@ -69,16 +95,18 @@ qm_web_image_matches() {
 # 构建前端镜像。实盘开关默认 false；不传 project_dir 时用 PROJECT_DIR。
 qm_build_web_image() {
     local project="${1:-$PROJECT_DIR}"
-    local live doc head
+    local live doc head src
     live="$(qm_web_live_flag)"
     doc="$(qm_web_doc_flag)"
     head="$(git -C "$project" rev-parse HEAD 2>/dev/null || echo unknown)"
+    src="$(qm_web_src_id "$project")"
     qm_web_log "构建前端镜像（实盘 UI: $live · 文档挖掘 UI: $doc · commit: ${head:0:8}）"
     docker build \
         -f "$project/docker/Dockerfile.web" \
         --build-arg "VITE_ENABLE_REAL_TRADING=$live" \
         --build-arg "VITE_ENABLE_DOC_MINING=$doc" \
         --label "qm.git.commit=$head" \
+        --label "qm.web.src=$src" \
         -t quantmind-web:latest "$project" \
         || {
             qm_web_warn '前端镜像构建失败'
@@ -92,12 +120,12 @@ qm_web_network() {
     if qm_web_container_exists; then
         net="$(docker inspect quantmind-web \
             --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' \
-            2>/dev/null | head -1)"
+            2>/dev/null | head -1 || true)"
     fi
     if [[ -z "$net" ]]; then
         net="$(docker inspect quantmind \
             --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' \
-            2>/dev/null | head -1)"
+            2>/dev/null | head -1 || true)"
     fi
     printf '%s' "${net:-quantmind_quantmind-net}"
 }
@@ -160,11 +188,11 @@ qm_deploy_web_dist() {
         qm_web_warn "$main_ref 未复制进容器"
         return 1
     fi
-    local_count="$(find "$dist_dir/assets" -type f | wc -l | tr -d ' ')"
-    remote_count="$(docker exec quantmind-web sh -c 'ls /usr/share/nginx/html/assets | wc -l' | tr -d ' ')"
-    if [[ "$local_count" != "$remote_count" ]]; then
+    local_count="$(find "$dist_dir/assets" -type f | wc -l | tr -d ' ' || true)"
+    remote_count="$(docker exec quantmind-web sh -c 'ls /usr/share/nginx/html/assets | wc -l' | tr -d ' ' || true)"
+    if [[ -z "$local_count" || -z "$remote_count" || "$local_count" != "$remote_count" ]]; then
         qm_web_restore_backup "$backup_dir"
-        qm_web_warn "assets 数量不一致：本地 $local_count vs 容器 $remote_count"
+        qm_web_warn "assets 数量不一致：本地 ${local_count:-?} vs 容器 ${remote_count:-?}"
         return 1
     fi
     http_code="$(docker exec quantmind-web curl -s -o /dev/null -w '%{http_code}' \
