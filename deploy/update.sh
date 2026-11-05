@@ -310,113 +310,6 @@ build_core() {
     fi
 }
 
-# 读 .env 里的布尔开关（同一 key 多次出现取最后一次）；缺失/非 true 一律 false。
-# 只用于「前端构建期开关」这类非敏感值，不替代 .env 的加载逻辑。
-env_flag() {
-    local key="$1" default="$2" value
-    value="$(grep -E "^[[:space:]]*${key}=" "$PROJECT_DIR/.env" 2>/dev/null \
-        | tail -1 | cut -d= -f2- | tr -d "\"'[:space:]" || true)"
-    value="$(printf '%s' "${value:-$default}" | tr '[:upper:]' '[:lower:]')"
-    if [[ "$value" == "true" ]]; then printf 'true'; else printf 'false'; fi
-}
-
-web_container_running() {
-    [[ "$(docker inspect --format '{{.State.Status}}' quantmind-web 2>/dev/null || true)" == "running" ]]
-}
-
-# 3/5 构建前端镜像（2026-11-05）：一键更新默认连前端一起更新。
-# - 构建放在「重启后端」之前：失败时现场仍是旧版本，干净 fail-fast；
-# - 实盘栏目是否进产物由**部署方自己的开关**决定：
-#     VITE_ENABLE_REAL_TRADING 显式 env > .env 的 ENABLE_REAL_TRADING > false
-#   即用户没开实盘 → 更新后 UI 不会出现实盘入口；开了才保留。
-#   这与 scripts/deploy_frontend.sh 的 --allow-local-live 闸门同源（以后端
-#   开关为准，而不是开发机随手 export 的构建变量）。
-# - 文档挖掘 UI 出厂默认 true，可用 VITE_ENABLE_DOC_MINING / .env ENABLE_DOC_MINING 关。
-build_web_image() {
-    if ! web_container_running; then
-        log '3/5 跳过前端镜像（quantmind-web 不存在/未运行：该部署不走独立 web 容器）'
-        return 0
-    fi
-    local live_flag doc_flag
-    live_flag="${VITE_ENABLE_REAL_TRADING:-$(env_flag ENABLE_REAL_TRADING false)}"
-    live_flag="$(printf '%s' "$live_flag" | tr '[:upper:]' '[:lower:]')"
-    [[ "$live_flag" == "true" ]] || live_flag="false"
-    doc_flag="${VITE_ENABLE_DOC_MINING:-$(env_flag ENABLE_DOC_MINING true)}"
-    doc_flag="$(printf '%s' "$doc_flag" | tr '[:upper:]' '[:lower:]')"
-    [[ "$doc_flag" == "true" ]] || doc_flag="false"
-
-    log "3/5 构建前端镜像（实盘 UI: $live_flag · 文档挖掘 UI: $doc_flag）"
-    docker build \
-        -f "$PROJECT_DIR/docker/Dockerfile.web" \
-        --build-arg "VITE_ENABLE_REAL_TRADING=$live_flag" \
-        --build-arg "VITE_ENABLE_DOC_MINING=$doc_flag" \
-        -t quantmind-web:latest "$PROJECT_DIR" \
-        || die '前端镜像构建失败（后端尚未重启，现场保持旧版本）'
-}
-
-restore_web_backup() {
-    local web="$1" backup_dir="$2"
-    if [[ ! -d "$backup_dir" ]] || [[ -z "$(ls -A "$backup_dir" 2>/dev/null || true)" ]]; then
-        return 0
-    fi
-    log '前端校验失败，回滚上一版静态文件' >&2
-    docker exec "$web" rm -rf /usr/share/nginx/html/assets >/dev/null 2>&1 || true
-    docker cp "$backup_dir/." "$web:/usr/share/nginx/html/" >/dev/null 2>&1 || true
-}
-
-# 把前端镜像里的 dist 切换进运行中的 quantmind-web（与 scripts/deploy_frontend.sh
-# 同一套纪律：清空 assets → 全量复制 → 校验 main/文件数/HTTP）。放在后端健康检查
-# 之后执行：新前端只在新后端就绪后可见。任何一步失败都先回滚旧静态文件再 die。
-deploy_web_dist() {
-    if ! web_container_running; then
-        log '前端部署跳过（quantmind-web 不存在/未运行）'
-        return 0
-    fi
-    local web=quantmind-web
-    local dist_dir=/tmp/quantmind-web-dist
-    local backup_dir=/tmp/quantmind-web-backup
-    local cid main_ref local_count remote_count http_code
-    rm -rf "$dist_dir" "$backup_dir"
-    mkdir -p "$dist_dir" "$backup_dir"
-
-    cid="$(docker create quantmind-web:latest)" || die '创建前端产物容器失败'
-    if ! docker cp "$cid:/usr/share/nginx/html/." "$dist_dir/"; then
-        docker rm -f "$cid" >/dev/null 2>&1 || true
-        die '从前端镜像提取产物失败'
-    fi
-    docker rm -f "$cid" >/dev/null 2>&1 || true
-
-    main_ref="$(grep -oE 'main-[A-Za-z0-9_-]+\.js' "$dist_dir/index.html" 2>/dev/null | head -1 || true)"
-    [[ -n "$main_ref" && -f "$dist_dir/assets/$main_ref" ]] \
-        || die "前端产物缺少 main 入口（index.html/main_ref=$main_ref）"
-
-    docker cp "$web:/usr/share/nginx/html/." "$backup_dir/" >/dev/null 2>&1 || true
-    log "前端部署：切换 $web 静态文件 → $main_ref"
-    docker exec "$web" rm -rf /usr/share/nginx/html/assets >/dev/null 2>&1 || true
-    docker exec "$web" mkdir -p /usr/share/nginx/html/assets \
-        || die '前端部署失败：无法创建容器 assets 目录'
-    docker cp "$dist_dir/." "$web:/usr/share/nginx/html/" \
-        || { restore_web_backup "$web" "$backup_dir"; die '前端部署失败：docker cp 中断'; }
-
-    if ! docker exec "$web" test -f "/usr/share/nginx/html/assets/$main_ref"; then
-        restore_web_backup "$web" "$backup_dir"
-        die "前端部署校验失败：$main_ref 未复制进容器"
-    fi
-    local_count="$(find "$dist_dir/assets" -type f | wc -l | tr -d ' ')"
-    remote_count="$(docker exec "$web" sh -c 'ls /usr/share/nginx/html/assets | wc -l' | tr -d ' ')"
-    if [[ "$local_count" != "$remote_count" ]]; then
-        restore_web_backup "$web" "$backup_dir"
-        die "前端部署校验失败：assets 数量 本地 $local_count vs 容器 $remote_count"
-    fi
-    http_code="$(docker exec "$web" curl -s -o /dev/null -w '%{http_code}' \
-        "http://127.0.0.1/assets/$main_ref" 2>/dev/null || echo ERR)"
-    if [[ "$http_code" != "200" ]]; then
-        restore_web_backup "$web" "$backup_dir"
-        die "前端部署校验失败：nginx GET /assets/$main_ref → $http_code"
-    fi
-    log "前端部署完成 ✓（$http_code，assets $local_count 个）"
-}
-
 # 关键步骤：强制重建 application 层容器（不可变模式下让新镜像生效；回退模式下让
 # 挂载代码随进程重启生效），其余服务（含 db/redis/dsh）不强制重启，仅在 compose
 # 配置发生漂移时按需重建。
@@ -463,6 +356,11 @@ load_release_lib() {
     [[ -f "$lib" ]] || die "缺少 $lib（代码未同步完整？）"
     # shellcheck source=/dev/null
     source "$lib"
+    # 前端构建/切换与安装脚本共用同一份实现（开关口径、回滚、健康检查都在里面）
+    local web_lib="$PROJECT_DIR/deploy/web_release.sh"
+    [[ -f "$web_lib" ]] || die "缺少 $web_lib（代码未同步完整？）"
+    # shellcheck source=/dev/null
+    source "$web_lib"
     qm_compose_init "$PROJECT_DIR" "$MOUNTS_MODE" \
         || die 'compose 文件组初始化失败（见上方指引：升级 docker compose 或 --mounts 临时回退）'
     if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
@@ -601,7 +499,13 @@ main() {
     if $BUILD; then
         qm_build_minibt_runner_if_needed "$PROJECT_DIR" || true
         # 前端镜像也在这里构建（还没碰运行容器；构建失败则本次更新干净中止）
-        build_web_image
+        if qm_web_container_running; then
+            log '3/5 构建前端镜像'
+            qm_build_web_image "$PROJECT_DIR" \
+                || die '前端镜像构建失败（后端尚未重启，现场保持旧版本）'
+        else
+            log '3/5 跳过前端镜像（quantmind-web 不存在/未运行：该部署不走独立 web 容器）'
+        fi
     else
         warn "跳过 minibt runner 镜像构建（--no-build）；镜像缺失时 minibt 策略不可用"
         warn "跳过前端镜像构建与部署（--no-build）：前端保持当前版本"
@@ -638,7 +542,7 @@ main() {
         if $api_ok && $celery_ok && $beat_ok; then
             # 后端已就绪 → 再切换前端静态文件（新前端只在新后端之后可见）
             if $BUILD; then
-                deploy_web_dist
+                qm_deploy_web_dist || die '前端部署失败（后端已更新，旧静态文件已尝试回滚）'
             fi
             # admin 身份遗留收口（幂等分块；后台执行不阻塞升级；遗留为空时秒级完成）
             docker exec -d quantmind bash -c 'cd /app && python backend/scripts/fix_admin_identity_full.py > /tmp/admin_identity_sweep.log 2>&1' 2>/dev/null || true

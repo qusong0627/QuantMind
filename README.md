@@ -96,7 +96,7 @@ curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.
 
 部署完成后即可访问：
 
-* **Web 控制台**: `http://<服务器 IP>:3000`
+* **Web 控制台**: `http://<服务器 IP>:3080`
 
 * **API 接口网关**: `http://<服务器 IP>:8000`
 

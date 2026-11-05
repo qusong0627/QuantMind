@@ -604,6 +604,13 @@ build_and_start() {
         fi
         log '发布断言通过：三容器零代码挂载，运行态戳==检出 HEAD'
     fi
+    # 前端：离线包若带 quantmind-web:latest 直接复用（离线机无法 npm install），
+    # 缺失才尝试构建。默认安装全部栏目；实盘 UI 只跟随 .env ENABLE_REAL_TRADING（默认关）。
+    local web_lib="$PROJECT_DIR/deploy/web_release.sh"
+    [[ -f "$web_lib" ]] || die '缺少 deploy/web_release.sh（代码未同步完整？）'
+    # shellcheck source=/dev/null
+    source "$web_lib"
+    qm_install_web "$PROJECT_DIR" offline || die '前端安装失败（quantmind-web）'
     "${QM_COMPOSE[@]}" ps
 }
 

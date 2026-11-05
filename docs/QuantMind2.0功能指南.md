@@ -153,7 +153,7 @@ curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.
 离线包内置：预构建镜像（`images.tar.zst`）、业务数据（`data-system.tar.zst`）、PostgreSQL 初始化备份（`postgres-all.sql.zst`）、QwenPaw 模型卷。
 
 **部署完成后访问**：
-- Web 控制台 `http://<IP>:3000`
+- Web 控制台 `http://<IP>:3080`
 - API 网关 `http://<IP>:8000`、Swagger `http://<IP>:8000/docs`
 - 默认管理员 `admin` / `admin123`
 

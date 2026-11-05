@@ -226,15 +226,26 @@ start_services() {
         fi
         log '发布断言通过：三容器零代码挂载，运行态戳==检出 HEAD'
     fi
+    # 前端：默认安装全部栏目；实盘 UI 只跟随 .env 的 ENABLE_REAL_TRADING（默认关）。
+    # 首次安装创建 quantmind-web 容器，重复安装则原地切换静态文件。
+    local web_lib="$PROJECT_DIR/deploy/web_release.sh"
+    [[ -f "$web_lib" ]] || die '缺少 deploy/web_release.sh（代码未同步完整？）'
+    # shellcheck source=/dev/null
+    source "$web_lib"
+    qm_install_web "$PROJECT_DIR" false || die '前端安装失败（quantmind-web）'
     verify_dsh_runtime
 }
 
 health_check() {
     log '5/5 检查核心服务'
     local attempt
+    local web_port="${QUANTMIND_WEB_PORT:-3080}"
     for attempt in {1..30}; do
         if curl --fail --silent --max-time 3 http://127.0.0.1:8000/health >/dev/null; then
+            curl --fail --silent --max-time 3 "http://127.0.0.1:${web_port}/" >/dev/null \
+                || die "前端 quantmind-web 未就绪（http://127.0.0.1:${web_port}/）"
             "${QM_COMPOSE[@]}" ps
+            docker ps --filter name=quantmind-web --format 'quantmind-web: {{.Status}}' || true
             log "部署完成：$PROJECT_DIR"
             return
         fi
@@ -249,7 +260,7 @@ show_completion_tips() {
     echo "========================================================================="
     echo " 🎉 QuantMind 服务部署完成！"
     echo " -------------------------------------------------------------------------"
-    echo " 🌐 Web 控制台  : http://<服务器 IP>:3000"
+    echo " 🌐 Web 控制台  : http://<服务器 IP>:3080"
     echo " 📖 API 文档    : http://<服务器 IP>:8000/docs"
     echo " 👤 默认账号    : admin / admin123"
     echo " 🤖 QuantBot    : http://<服务器 IP>:8088（dsh；用 IP/域名访问前需在 .env 配 DSH_TRUSTED_HOSTS）"
