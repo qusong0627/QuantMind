@@ -200,8 +200,11 @@ import_images() {
 
     local image
     local images_ready=true
+    # 前端 nginx 镜像 quantmind-web:latest 也应打进离线包；缺失时 build_and_start
+    # 会尝试本地构建（需要 node 基础镜像与 npm 网络），纯离线机请补进 images.tar.zst。
     for image in \
         quantmind-oss:latest \
+        quantmind-web:latest \
         quantmind-data-gateway:latest \
         postgres:15-alpine redis:7-alpine \
         lcomplete/huntly:latest quantmind-dsh:latest \
