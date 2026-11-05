@@ -24,6 +24,9 @@ export interface SystemUpdateInfo {
   /** 本部署当前 commit（运行处工作树优先） */
   current_commit?: string;
   current_short?: string;
+  /** 本次对比的基线（正常=当前 commit；本地有未推送提交时=远端跟踪 ref 的 commit） */
+  compared_from?: string;
+  compared_from_short?: string;
   /** 上游最新提交 */
   latest_commit?: string;
   latest_short?: string;

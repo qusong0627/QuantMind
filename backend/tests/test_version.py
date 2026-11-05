@@ -300,15 +300,72 @@ async def test_check_updates_reports_latest_commit_from_newest_first_list(
 async def test_check_updates_returns_none_when_upstream_unknown(
     tmp_path: Path, monkeypatch
 ):
-    """本地 commit 上游不认识（未推送）→ compare 404，一律 None，不许瞎报。"""
+    """本地 commit 上游不认识（未推送）且无远端跟踪 ref → 一律 None，不许瞎报。"""
     _isolate(monkeypatch, tmp_path, txt=None, js=None)
     monkeypatch.setattr(vmod, "get_git_identity", lambda *a, **kw: _runtime("deadbeef"))
+    monkeypatch.setattr(vmod, "get_git_remote_ref", lambda *a, **kw: "")
 
     import httpx
 
+    calls = []
+
     def _get(url):
+        calls.append(url)
         raise httpx.HTTPStatusError("404", request=None, response=None)
 
     monkeypatch.setattr(vmod, "_httpx", SimpleNamespace(get=_get))
 
     assert await vmod.check_updates(force=True) is None
+    assert len(calls) == 1  # 没有回退基线 → 不重复请求
+
+
+@pytest.mark.asyncio
+async def test_check_updates_falls_back_to_remote_tracking_ref(
+    tmp_path: Path, monkeypatch
+):
+    """HEAD 带未推送提交（compare 404）→ 用本地 gitee/next 基线仍算出落后数。"""
+    _isolate(monkeypatch, tmp_path, txt=None, js=None)
+    monkeypatch.setattr(
+        vmod, "get_git_identity", lambda *a, **kw: _runtime("deadbeef" * 5)
+    )
+    monkeypatch.setattr(
+        vmod,
+        "get_git_remote_ref",
+        lambda remote, branch, *a, **kw: (
+            "aaaa1111" + "0" * 32 if remote == "gitee" else ""
+        ),
+    )
+
+    import httpx
+
+    calls = []
+
+    def _get(url):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.HTTPStatusError("404", request=None, response=None)
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "commits": [
+                    {
+                        "sha": "ffff2222",
+                        "commit": {"message": "feat: 上游新提交"},
+                    }
+                ],
+                "truncated": False,
+            },
+        )
+
+    monkeypatch.setattr(vmod, "_httpx", SimpleNamespace(get=_get))
+
+    result = await vmod.check_updates(force=True)
+
+    assert result is not None
+    assert result["behind"] == 1
+    assert result["current_commit"] == "deadbeef" * 5
+    assert result["compared_from"] == "aaaa1111" + "0" * 32
+    assert result["compared_from_short"] == "aaaa1111"
+    assert result["latest_subject"] == "feat: 上游新提交"
+    assert calls[0].endswith("/compare/" + "deadbeef" * 5 + "...next")
+    assert calls[1].endswith("/compare/aaaa1111" + "0" * 32 + "...next")

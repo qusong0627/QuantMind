@@ -214,6 +214,34 @@ def get_git_remote_url(name: str, code_root: Path | None = None) -> str:
     return _git(["remote", "get-url", name], root) or ""
 
 
+def get_git_remote_ref(remote: str, branch: str, code_root: Path | None = None) -> str:
+    """远端跟踪 ref（refs/remotes/<remote>/<branch>）指向的 commit；不存在返回空串。"""
+    root = Path(code_root) if code_root is not None else _CODE_ROOT
+    return (
+        _git(
+            ["rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"],
+            root,
+        )
+        or ""
+    )
+
+
+def _known_upstream_base(branch: str) -> str:
+    """本地已知的「上游基线」commit（用于 HEAD 尚未推送时的贪心回退）。
+
+    本地 HEAD 带未推送提交时，上游 compare 会 404（"Compare not found"），
+    整个提醒就消失了。此时用最近一次 fetch 留下的远端跟踪 ref 当基线：
+    它指向的 commit 一定存在于上游，compare(base...branch) 仍能准确给出
+    「上游还有多少提交不在本地」——未推送的本地提交不影响这个数。
+    优先 gitee（更新检查的目标上游），再 origin/upstream。
+    """
+    for remote in ("gitee", "origin", "upstream", "quantmind2"):
+        sha = get_git_remote_ref(remote, branch)
+        if sha:
+            return sha
+    return ""
+
+
 def _read_image_stamp(stamp_path: Path | None = None) -> dict | None:
     """读镜像构建戳（Dockerfile.oss 写入）；缺失/损坏 → None。"""
     path = stamp_path if stamp_path is not None else _IMAGE_STAMP
@@ -409,6 +437,21 @@ def _latest_commit_info(body: dict) -> dict:
     }
 
 
+async def _fetch_compare(base: str, branch: str) -> dict | None:
+    """请求 gitee compare(base...branch)；网络/解析失败一律返回 None。"""
+    url = (
+        f"{_UPSTREAM_HOST.rstrip('/')}/api/v5/repos/"
+        f"{_UPSTREAM_OWNER}/{_UPSTREAM_REPO}/compare/{base}...{branch}"
+    )
+    try:
+        resp = await asyncio.to_thread(_httpx.get, url)
+        resp.raise_for_status()
+        body = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
 async def check_updates(force: bool = False) -> dict | None:
     """向上游查询本部署是否落后，返回落后提交数等；无法判断时返回 None。
 
@@ -432,17 +475,17 @@ async def check_updates(force: bool = False) -> dict | None:
         if not force and _cache_matches(cache, identity) and _cache_is_fresh(cache):
             return cache
 
-        url = (
-            f"{_UPSTREAM_HOST.rstrip('/')}/api/v5/repos/"
-            f"{_UPSTREAM_OWNER}/{_UPSTREAM_REPO}/compare/{commit}...{branch}"
-        )
-        try:
-            resp = await asyncio.to_thread(_httpx.get, url)
-            resp.raise_for_status()
-            body = resp.json()
-        except (httpx.HTTPError, ValueError):
-            return None
-        if not isinstance(body, dict):
+        body = await _fetch_compare(commit, branch)
+        compared_from = commit
+        if body is None:
+            # 本地 HEAD 带未推送提交时上游 compare 会 404；退回「最近一次 fetch
+            # 留下的远端跟踪 ref」做基线。该 commit 一定在上游，算出的 behind
+            # 仍是「上游还有多少提交不在本地」，不受未推送本地提交影响。
+            fallback = await asyncio.to_thread(_known_upstream_base, branch)
+            if fallback and fallback != commit:
+                body = await _fetch_compare(fallback, branch)
+                compared_from = fallback
+        if body is None:
             return None
 
         commits = body.get("commits") or []
@@ -453,6 +496,9 @@ async def check_updates(force: bool = False) -> dict | None:
             "upstream_branch": branch,
             "current_commit": commit,
             "current_short": commit[:8],
+            # 对比基线：正常等于 current_commit；回退时是本地远端跟踪 ref 的 commit
+            "compared_from": compared_from,
+            "compared_from_short": compared_from[:8],
             **_latest_commit_info(body),
             "checked_at": int(time.time()),
             "is_up_to_date": behind == 0,
