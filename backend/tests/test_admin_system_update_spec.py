@@ -182,6 +182,20 @@ def test_docker_socket_is_mounted_into_updater(monkeypatch):
     assert f"{su._SOCKET}:/var/run/docker.sock" in spec["HostConfig"]["Binds"]
 
 
+def test_data_dir_is_mounted_at_data(monkeypatch):
+    """宿主 ./data 可能是符号链接：必须单独挂到 /data。
+
+    只挂 {PROJECT_DIR}:{PROJECT_DIR} 时，容器里的 $PROJECT_DIR/data 符号链接
+    指向未挂载的宿主路径，/data/update.log 重定向与 data/backups 都会失败。
+    """
+    spec = su._build_container_spec("img")
+
+    assert f"{su._DATA_MOUNT_SOURCE}:/data:rw" in spec["HostConfig"]["Binds"]
+    assert "STORAGE_ROOT=/data" in spec["Env"]
+    # 日志读写路径必须是同一个（API 读 /data/update.log，updater 写 /data/update.log）
+    assert su._LOG_PATH == su._LOG_FILE == "/data/update.log"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="仅 POSIX")
 def test_allowed_write_target_is_the_project_log(monkeypatch, tmp_path):
     """日志写在项目 data/ 下 —— 状态接口读的 /data/update.log 是同一个文件。"""

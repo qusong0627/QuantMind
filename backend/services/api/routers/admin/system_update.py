@@ -69,7 +69,11 @@ _COMPOSE_PLUGIN_DIR = "/usr/libexec/docker/cli-plugins"
 _SCRIPT = "deploy/update.sh"
 _LOG_FILE = "/data/update.log"
 _SCRIPT_PATH = os.path.join(_PROJECT_DIR, _SCRIPT)
-_LOG_PATH = os.path.join(_PROJECT_DIR, "data", "update.log")
+# 日志/备份统一走数据卷 /data：宿主 ./data 可能是符号链接（本机 data → 数据盘），
+# updater 容器只挂项目目录时，$PROJECT_DIR/data 在容器内指向未挂载的宿主路径，
+# 重定向与 mkdir 都会失败。把 {_PROJECT_DIR}/data 也挂到 /data 后，两端看到同一目录。
+_LOG_PATH = "/data/update.log"
+_DATA_MOUNT_SOURCE = os.path.join(_PROJECT_DIR, "data")
 _CONTAINER_NAME = "quantmind-web-update"
 
 
@@ -248,6 +252,9 @@ def _build_container_spec(
     cmd = f"{{ {guard}; }} > {shlex.quote(_LOG_PATH)} 2>&1"
     binds = [
         f"{_PROJECT_DIR}:{_PROJECT_DIR}:rw",
+        # 数据卷：宿主 ./data 可能是符号链接，updater 只挂项目目录会写不进
+        # $PROJECT_DIR/data（见 _LOG_PATH 注释）。与 API 容器同一个 /data。
+        f"{_DATA_MOUNT_SOURCE}:/data:rw",
         f"{_SOCKET}:/var/run/docker.sock",
         f"{_DOCKER_CLI}:/usr/bin/docker:ro",
         f"{_COMPOSE_PLUGIN_DIR}:/usr/libexec/docker/cli-plugins:ro",
@@ -256,6 +263,7 @@ def _build_container_spec(
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         f"QUANTMIND_PROJECT_DIR={_PROJECT_DIR}",
         f"DOCKER_CLI_PLUGINS={_COMPOSE_PLUGIN_DIR}",
+        "STORAGE_ROOT=/data",
         "TZ=Asia/Shanghai",
         # 受信项目目录，避免 updater 容器内 git 因 UID 归属差异触发
         # dubious ownership 校验，导致所有 git 命令失败、被误判为"未提交改动"。

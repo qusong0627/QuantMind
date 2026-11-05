@@ -12,6 +12,10 @@
 set -Eeuo pipefail
 
 PROJECT_DIR="${QUANTMIND_PROJECT_DIR:-/opt/quantmind}"
+# 数据目录：Web 一键更新的 updater 容器把宿主 ./data 挂到 /data（宿主 data/
+# 可能是符号链接，只挂项目目录时 $PROJECT_DIR/data 在容器内指向未挂载路径）。
+# 直接跑脚本时 STORAGE_ROOT 通常为空 → 退回 $PROJECT_DIR/data，行为不变。
+DATA_ROOT="${STORAGE_ROOT:-$PROJECT_DIR/data}"
 REF="${QUANTMIND_REF:-}"               # 空 = 未指定，main 里按当前 checkout 的分支解析
 REMOTE="${QUANTMIND_REMOTE:-origin}"   # 项目实际远端是 gitee/github；默认 origin 兼容旧配置
 FORCE=false
@@ -116,7 +120,7 @@ backup_database() {
         log 'quantmind-db 未运行，跳过备份'
         return
     fi
-    local backup_dir="$PROJECT_DIR/data/backups"
+    local backup_dir="$DATA_ROOT/backups"
     mkdir -p "$backup_dir"
     local stamp backup_file pg_user pg_db pg_pass
     stamp="$(TZ=Asia/Shanghai date +%Y%m%dT%H%M%S+08:00)"
@@ -539,7 +543,7 @@ EOSQL
         psql -U "$pg_user" -tAc 'SELECT count(*) FROM schema_migrations' 2>/dev/null | tr -d ' ' || echo 0)"
     if [[ "$seed_count" == "0" ]]; then
         names=()
-        for p in "$PROJECT_DIR"/data/upgrade_*.sql; do
+        for p in "$DATA_ROOT"/upgrade_*.sql; do
             [[ -e "$p" ]] && names+=("$(basename "$p")")
         done
         if [[ ${#names[@]} -gt 0 ]]; then
@@ -579,7 +583,7 @@ EOSQL
             "INSERT INTO schema_migrations (file_name) VALUES ('$b') ON CONFLICT (file_name) DO NOTHING" >/dev/null 2>&1
         log "  ✓ $b 已应用"
         applied=$((applied + 1))
-    done < <(for p in "$PROJECT_DIR"/data/upgrade_*.sql; do printf '%s\n' "$p"; done | sort -V)
+    done < <(for p in "$DATA_ROOT"/upgrade_*.sql; do printf '%s\n' "$p"; done | sort -V)
     if (( applied == 0 )); then
         log '  无新增 upgrade_*.sql（全部已应用）'
     fi
