@@ -489,8 +489,7 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
 }
 
 function MarketSyncJobProgress({ job }: { job: QuantDBSyncJob }) {
-    const total = job.total ?? 0;
-    const percent = total > 0 ? Math.round((job.done / total) * 100) : 0;
+    const percent = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
     const statusLabel = job.status === 'running'
         ? `进行中 · ${job.stage}`
         : job.status === 'cancelling'
@@ -519,7 +518,7 @@ function MarketSyncJobProgress({ job }: { job: QuantDBSyncJob }) {
                 <Progress
                     percent={percent}
                     status={job.status === 'failed' ? 'exception' : (job.status === 'running' || job.status === 'cancelling') ? 'active' : 'success'}
-                    format={() => (total > 0 ? `${job.done}/${total}` : `${job.done} 个数据集`)}
+                    format={() => `${job.done}/${job.total}`}
                 />
                 {job.summary && typeof job.summary === 'object' && (
                     <Text type="secondary" className="text-xs">

@@ -3,11 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
-
-from celery.exceptions import SoftTimeLimitExceeded
 
 from backend.services.engine.qlib_app.celery_config import celery_app
 from backend.services.engine.services.pipeline_service import PipelineService
@@ -782,21 +779,7 @@ def news_matcher_reload_task() -> dict[str, Any]:
         return {"status": "failed", "error": str(e)}
 
 
-# 全市场 parquet 指纹变化时（例如 factor_dictionary 2144 个分区全部重下）单次同步
-# 可能超过 1 小时，全局 3600s 硬限制会把 worker 直接 SIGKILL 且不留任何收尾。
-# 这里给每日同步单独放宽上限，可用环境变量覆盖。
-DAILY_SYNC_SOFT_TIME_LIMIT = int(os.getenv("DAILY_SYNC_SOFT_TIME_LIMIT", "14100"))
-DAILY_SYNC_TIME_LIMIT = int(os.getenv("DAILY_SYNC_TIME_LIMIT", "14400"))
-DAILY_SYNC_HEARTBEAT_SECONDS = int(os.getenv("DAILY_SYNC_HEARTBEAT_SECONDS", "60"))
-
-
-@celery_app.task(
-    name="engine.tasks.daily_data_sync",
-    max_retries=0,
-    bind=True,
-    soft_time_limit=DAILY_SYNC_SOFT_TIME_LIMIT,
-    time_limit=DAILY_SYNC_TIME_LIMIT,
-)
+@celery_app.task(name="engine.tasks.daily_data_sync", max_retries=0, bind=True)
 def daily_data_sync_task(
     self,
     market: str = "A",
@@ -815,10 +798,7 @@ def daily_data_sync_task(
     import redis as _redis
 
     lock_key = "quantmind:daily_sync:lock"
-    # 锁 TTL 保持 1 小时，但由心跳线程每分钟续期，长任务不会被自己拖过期；
-    # 进程被 SIGKILL 后心跳停止，锁最多 1 小时后自动释放，不会长期挡住下一次同步。
-    lock_ttl = 3600
-    rds = None
+    lock_ttl = 3600  # 1 小时自动过期
     try:
         rds = _redis.from_url(
             os.getenv("REDIS_URL", "redis://redis:6379/0"), socket_timeout=2
@@ -848,81 +828,22 @@ def daily_data_sync_task(
                 new_celery_job,
                 celery_progress_cb,
                 upsert_job,
-                heartbeat,
                 _now_iso,
             )
 
-            job = new_celery_job(
-                with_pg=not skip_pg, celery_task_id=getattr(self.request, "id", None)
-            )
+            job = new_celery_job(with_pg=not skip_pg)
             job_id = job["job_id"]
             logger.info("[DailySync] 创建 Redis 同步任务 %s", job_id)
 
-            stop_heartbeat = threading.Event()
-
-            def _heartbeat_loop() -> None:
-                # 清单核对阶段可能十几分钟没有任何进度回调，必须独立心跳，
-                # 否则会被 reclaim_stale_jobs 误判为僵死任务。
-                while not stop_heartbeat.wait(DAILY_SYNC_HEARTBEAT_SECONDS):
-                    try:
-                        heartbeat(job_id)
-                    except Exception:
-                        pass
-                    try:
-                        if rds is not None:
-                            rds.expire(lock_key, lock_ttl)
-                    except Exception:
-                        pass
-
-            hb = threading.Thread(
-                target=_heartbeat_loop, name=f"daily-sync-hb-{job_id}", daemon=True
+            result = run_daily_sync(
+                skip_pg=skip_pg, progress_cb=celery_progress_cb(job_id)
             )
-            hb.start()
-            try:
-                result = run_daily_sync(
-                    skip_pg=skip_pg, progress_cb=celery_progress_cb(job_id)
-                )
-            except SoftTimeLimitExceeded as exc:
-                logger.error(
-                    "[DailySync] 软超时 %ss，标记任务失败: %s",
-                    DAILY_SYNC_SOFT_TIME_LIMIT,
-                    exc,
-                )
-                upsert_job(
-                    job_id,
-                    status="failed",
-                    stage="error",
-                    current="同步超时中断",
-                    error=f"SoftTimeLimitExceeded({DAILY_SYNC_SOFT_TIME_LIMIT}s)",
-                    finished_at=_now_iso(),
-                )
-                raise
-            except Exception as exc:
-                logger.exception("[DailySync] 异常中断: %s", exc)
-                upsert_job(
-                    job_id,
-                    status="failed",
-                    stage="error",
-                    current="同步失败中断",
-                    error=f"{type(exc).__name__}: {exc}",
-                    finished_at=_now_iso(),
-                )
-                raise
-            finally:
-                stop_heartbeat.set()
-
-            parquet = result.get("parquet") or {}
-            errors = parquet.get("errors") or []
-            upsert_job(
-                job_id,
-                status="failed" if errors else "completed",
-                stage="error" if errors else "done",
-                current=f"同步结束：{len(errors)} 个数据集失败" if errors else "同步完成",
-                current_detail=None,
-                error="; ".join(errors) if errors else "",
-                pg_fill=result.get("pg_fill"),
-                qlib_cache=result.get("qlib_cache"),
-                finished_at=_now_iso(),
+            upsert_job(job_id, status="completed", stage="done", finished_at=_now_iso())
+            logger.info(
+                "[DailySync] QuantDB 完成: parquet=%s pg_rows=%s qlib=%s",
+                (result.get("parquet") or {}).get("total_downloaded"),
+                (result.get("pg_fill") or {}).get("rows"),
+                (result.get("qlib_cache") or {}).get("status"),
             )
             logger.info(
                 "[DailySync] QuantDB 完成: parquet=%s pg_rows=%s qlib=%s",
@@ -955,9 +876,7 @@ def daily_data_sync_task(
         raise
     finally:
         try:
-            # 只删自己持有的锁，避免 TTL 过期后误删别的任务刚拿到的锁。
-            if rds is not None and rds.get(lock_key) == str(self.request.id).encode():
-                rds.delete(lock_key)
+            rds.delete(lock_key)
         except Exception:
             pass
 

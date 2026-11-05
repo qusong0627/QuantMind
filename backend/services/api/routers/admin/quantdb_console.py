@@ -730,7 +730,6 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
     sources_info = sync_result.get("sources") or {}
 
     results = []
-    dataset_results = {r["dataset"]: r for r in parquet_info.get("datasets", [])}
     cancelled = _cancelled()
     for name in req.datasets:
         src = sources_info.get(name)
@@ -742,8 +741,6 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
                 results.append({"dataset": name, "status": "synced", "downloaded": src.get("synced", 1)})
             else:
                 results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
-        elif name in dataset_results:
-            results.append(dataset_results[name])
         elif cancelled:
             results.append({"dataset": name, "status": "skipped", "downloaded": 0,
                             "reason": "用户取消"})
@@ -759,7 +756,7 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
         if job is not None:
             job["results"] = results
             # 实际处理进度：已处理并经 sync 完成的数据集；若有 skipped（取消跳过）不计入 done。
-            job["done"] = sum(1 for r in results if r.get("status") in ("synced", "up_to_date", "failed"))
+            job["done"] = sum(1 for r in results if r.get("status") in ("synced", "up_to_date"))
 
     if cancelled:
         _job_update(job_id, status="cancelled", current=None, finished_at=_now_iso())
@@ -803,13 +800,7 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
             logger.error("quantdb sync job %s: qlib cache failed: %s", job_id, exc, exc_info=True)
             _job_update(job_id, qlib_cache={"status": "error", "reason": str(exc)})
 
-    failed = [r for r in results if r.get("status") == "failed"]
-    _job_update(
-        job_id, status="failed" if failed else "completed",
-        stage="error" if failed else "done",
-        current=f"同步结束：{len(failed)} 个数据集失败" if failed else "同步完成",
-        current_detail=None, finished_at=_now_iso(),
-    )
+    _job_update(job_id, status="completed", stage="done", finished_at=_now_iso())
 
 
 @router.post("/sync-datasets")
@@ -855,13 +846,6 @@ async def list_sync_jobs(current_user: dict = Depends(require_admin)):
         jobs = [dict(j) for j in _jobs.values()]
     try:
         from backend.shared.quantdb_sync_jobs import list_jobs as _redis_list_jobs
-        from backend.shared.quantdb_sync_jobs import reclaim_stale_jobs
-
-        # 自愈：worker 被硬超时 SIGKILL 时任务记录不会自己收尾，列表接口顺手回收，
-        # 避免一条心跳已停的 running 记录把前端同步按钮永久禁用。
-        reclaimed = reclaim_stale_jobs()
-        if reclaimed:
-            logger.warning("[QuantDB] 回收僵死同步任务: %s", ", ".join(reclaimed))
         jobs.extend(_redis_list_jobs())
     except Exception:
         pass
@@ -887,76 +871,20 @@ async def get_sync_job(job_id: str, current_user: dict = Depends(require_admin))
 
 @router.post("/sync-jobs/{job_id}/cancel")
 async def cancel_sync_job(job_id: str, current_user: dict = Depends(require_admin)):
-    """取消正在运行的同步任务（进程内任务发协作信号，Celery 任务直接 revoke）。"""
+    """取消正在运行的同步任务（协作式，当前数据集完成后停止）。"""
     with _jobs_lock:
         job = _jobs.get(job_id)
-        if job is not None:
-            if job["status"] != "running":
-                raise HTTPException(
-                    status_code=400, detail=f"任务状态为 {job['status']}，无法取消"
-                )
-            job["cancel_requested"] = True
-            return {
-                "success": True,
-                "data": {
-                    "job_id": job_id,
-                    "status": "cancelling",
-                    "message": "取消信号已发送，当前数据集完成后将停止",
-                },
-            }
-
-    # Celery 定时同步任务只存在 Redis，进程内 _jobs 查不到；之前这里直接 404，
-    # 导致页面上的「取消同步」对定时任务完全无效。
-    from backend.shared import quantdb_sync_jobs as _sync_jobs
-
-    redis_job = _sync_jobs.get_job(job_id)
-    if redis_job is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
-    if redis_job.get("status") not in _sync_jobs.ACTIVE_STATUSES:
-        return {
-            "success": True,
-            "data": {
-                "job_id": job_id,
-                "status": redis_job.get("status"),
-                "message": "任务已结束",
-            },
-        }
-
-    task_id = redis_job.get("celery_task_id")
-    _sync_jobs.upsert_job(job_id, cancel_requested=True, current="取消请求已提交")
-    revoked = False
-    if task_id:
-        try:
-            from backend.services.engine.qlib_app.celery_config import celery_app
-
-            # control.revoke 会同步等 worker 回执，放线程里避免阻塞事件循环。
-            await asyncio.to_thread(
-                celery_app.control.revoke, str(task_id), terminate=True, signal="SIGTERM"
-            )
-            revoked = True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[QuantDB] revoke celery 任务 %s 失败: %s", task_id, exc)
-
-    if revoked:
-        # revoke(terminate=True) 是 SIGTERM 硬杀，任务自身不会再写状态，
-        # 由接口直接收尾，保证前端立刻解锁。
-        _sync_jobs.upsert_job(
-            job_id,
-            status="cancelled",
-            stage="done",
-            current="任务已取消（worker 进程已终止）",
-            finished_at=_now_iso(),
-        )
-        message = "任务已取消，worker 进程已终止"
-    else:
-        _sync_jobs.upsert_job(job_id, status="cancelling")
-        message = "取消信号已提交，等待 worker 响应"
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
+        if job["status"] != "running":
+            raise HTTPException(status_code=400, detail=f"任务状态为 {job['status']}，无法取消")
+        job["cancel_requested"] = True
     return {
         "success": True,
         "data": {
             "job_id": job_id,
-            "status": "cancelled" if revoked else "cancelling",
-            "message": message,
+            "status": "cancelling",
+            "message": "取消信号已发送，当前数据集完成后将停止",
         },
     }
 
