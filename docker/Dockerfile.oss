@@ -95,8 +95,13 @@ RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
 # 2026-10-13 解冲突：本行曾残留 stash-pop 冲突标记，会让任何镜像重建以 dockerfile
 # parse error 失败；保留「钉版 + 缓存挂载」这一侧，`--no-cache-dir + >=0.3.1`
 # 是被弃的旧 WIP，不迁回。
+# 2026-11-06：本行必须显式走官方 PyPI——默认 PIP_INDEX_URL（清华镜像）对
+# quantdb-sdk 返回 403（不在其镜像白名单），任何镜像重建都会在本层以
+# "No matching distribution found" 失败。官方源实测 200；不继承 ${PIP_INDEX_URL}。
 RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
-    python -m pip install --root-user-action=ignore "quantdb-sdk==0.5.0"
+    python -m pip install --root-user-action=ignore \
+        --index-url https://pypi.org/simple \
+        "quantdb-sdk==0.5.0"
 
 # 修复 qlib 0.9.7 bug: position.py 中 price=None 导致 TypeError
 COPY docker/patch_qlib.py /tmp/patch_qlib.py

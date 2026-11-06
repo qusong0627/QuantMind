@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -135,3 +136,24 @@ def test_missing_golden_does_not_crash(monkeypatch, tmp_path: Path):
     assert result["available"] is True
     assert result["ok"] is None
     assert "金样缺失" in result["message"]
+
+
+def test_dockerfile_installs_pinned_sdk_from_official_index():
+    """镜像构建层必须能装上钉版 SDK，且不继承默认镜像源。
+
+    2026-11-06 实测：默认 ``PIP_INDEX_URL``（清华）对 ``quantdb-sdk``
+    返回 403，构建在该层以 "No matching distribution found" 失败；
+    后果是镜像重建不可用 → 容器 recreate 后 SDK 退回镜像内旧版本
+    （运行态 0.3.3 vs 契约 0.5.0，管理页一直亮红条）。
+    """
+    dockerfile = (
+        Path(__file__).resolve().parents[2] / "docker" / "Dockerfile.oss"
+    ).read_text(encoding="utf-8")
+    pinned = re.compile(
+        r"--index-url https://pypi\.org/simple[^\n]*\n\s*"
+        rf'"quantdb-sdk=={re.escape(c.EXPECTED_SDK_VERSION)}"'
+    )
+    assert pinned.search(dockerfile), (
+        "Dockerfile.oss 的 quantdb-sdk 安装行必须钉 "
+        f"{c.EXPECTED_SDK_VERSION} 且显式 --index-url https://pypi.org/simple"
+    )
