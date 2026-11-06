@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from pick_candidates import _per_day_scores, score_candidates
+from pick_candidates import _bare_key, _missing_dims, _per_day_scores, score_candidates
 
 
 def _scores():
@@ -98,6 +98,72 @@ class TestScoreCandidates(unittest.TestCase):
                 self.assertIn(k, c)
                 self.assertGreaterEqual(c[k], 0.0)
                 self.assertLessEqual(c[k], 1.0)
+
+
+class TestSymbolKeyNormalization(unittest.TestCase):
+    """代码口径折键：scores 前缀式，各维度源后缀式/裸码。
+
+    ``engine_signal_scores.symbol`` 是前缀式（``SZ300750``），而 ``l1_factors`` /
+    ``l2_factors`` / ``instrument_detail`` / ``stock_aliases`` 的 symbol 是后缀式
+    （``300750.SZ``，脚本内折成裸码 ``300750``）。两边不折键时 ``.get()`` 全 miss，
+    L2/L1/行业/名称静默退化成常数——2026-11-02 起实际发生（池子 d_l2、d_l1 恒 0.5，
+    name/industry 全空，排名只剩融合分在起作用）。
+    """
+
+    def _prefixed_scores(self):
+        return {
+            "SZ300750": {"fusion": 0.05, "side": "BUY", "position_score": 0.9,
+                         "pct_industry": 0.98, "industry_top10_avg": 0.041,
+                         "consensus": 3},
+            "SH600519": {"fusion": 0.04, "side": "BUY", "position_score": 0.85,
+                         "pct_industry": 0.99, "industry_top10_avg": 0.038,
+                         "consensus": 2},
+        }
+
+    def test_l2_l1_industry_resolve_with_prefixed_score_keys(self):
+        l2 = {"300750": {"l2_score": 0.9, "l2_pos": 0.9, "l2_neg": 0.1},
+              "600519": {"l2_score": 0.2, "l2_pos": 0.2, "l2_neg": 0.8}}
+        l1 = {"300750": {"l1_score": 0.8}, "600519": {"l1_score": 0.3}}
+        ind = {"300750": "电池", "600519": "白酒"}
+
+        out = _per_day_scores(self._prefixed_scores(), {}, l2, l1, ind, {})
+
+        self.assertAlmostEqual(out["SZ300750"]["d_l2"], 0.9)
+        self.assertAlmostEqual(out["SZ300750"]["d_l1"], 0.8)
+        self.assertEqual(out["SZ300750"]["industry"], "电池")
+        self.assertAlmostEqual(out["SH600519"]["d_l2"], 0.2)
+        self.assertEqual(out["SH600519"]["industry"], "白酒")
+
+    def test_l2_dominates_with_prefixed_keys(self):
+        # 600519 融合更高但 L2 差；折键正确时 300750 必须排第一
+        l2 = {"300750": {"l2_score": 0.95, "l2_pos": 0.95, "l2_neg": 0.05},
+              "600519": {"l2_score": 0.05, "l2_pos": 0.05, "l2_neg": 0.95}}
+        day = _per_day_scores(self._prefixed_scores(), {}, l2, {}, {}, {})
+        cands = score_candidates([day], {"300750": "宁德时代", "600519": "贵州茅台"})
+        self.assertEqual(cands[0]["symbol"], "SZ300750")
+
+    def test_name_resolves_for_prefixed_symbol(self):
+        day = _per_day_scores(self._prefixed_scores(), {}, {}, {}, {}, {})
+        cands = score_candidates([day], {"300750": "宁德时代"})
+        by = {c["symbol"]: c for c in cands}
+        self.assertEqual(by["SZ300750"]["name"], "宁德时代")
+
+    def test_missing_dims_flags_neutral_l2_and_l1(self):
+        day = _per_day_scores(self._prefixed_scores(), {}, {}, {}, {}, {})
+        self.assertIn("L2", _missing_dims([day]))
+        self.assertIn("L1", _missing_dims([day]))
+
+    def test_missing_dims_silent_when_all_dims_live(self):
+        l2 = {"300750": {"l2_score": 0.9}, "600519": {"l2_score": 0.2}}
+        l1 = {"300750": {"l1_score": 0.8}, "600519": {"l1_score": 0.3}}
+        news = {"300750": {"news_count": 3, "net_ratio": 0.4, "score_mean": 0.6},
+                "600519": {"news_count": 1, "net_ratio": -0.2, "score_mean": -0.1}}
+        day = _per_day_scores(self._prefixed_scores(), news, l2, l1, {}, {})
+        self.assertEqual(_missing_dims([day]), "无")
+
+    def test_bare_key_handles_all_notations(self):
+        for raw in ("SZ300750", "300750.SZ", "sz300750", "300750"):
+            self.assertEqual(_bare_key(raw), "300750")
 
 
 if __name__ == "__main__":

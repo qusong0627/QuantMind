@@ -589,6 +589,23 @@ def _f(x, default: float | None = None):
         return default
 
 
+def _bare_key(sym) -> str:
+    """把任意写法的股票代码折成裸 6 位（各维度统一键）。
+
+    ``engine_signal_scores`` 用前缀式（``SZ002475``），而 ``l1_factors`` /
+    ``l2_factors`` / ``instrument_detail`` 的 symbol 是后缀式（``002475.SZ``），
+    脚本内一律折成裸码。不折键时 ``dict.get(sym)`` 全 miss，L2/L1/行业/名称
+    静默退化成常数——2026-11-02 起实际发生（d_l2/d_l1 恒 0.5、name 全空，
+    占权重 50%+15% 的两个维度不再参与排名）。
+    """
+    s = str(sym or "").strip().upper()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    if len(s) > 6 and s[:2] in ("SH", "SZ", "BJ"):
+        s = s[2:]
+    return s
+
+
 def _per_day_scores(scores: dict[str, dict], news: dict[str, dict], l2: dict[str, dict],
                     l1: dict[str, dict], industries: dict[str, str],
                     sector_flow: dict[str, float]) -> dict[str, dict]:
@@ -616,20 +633,22 @@ def _per_day_scores(scores: dict[str, dict], news: dict[str, dict], l2: dict[str
 
     out: dict[str, dict] = {}
     for sym, s in scores.items():
-        industry = industries.get(sym, "")
+        # 各维度源一律按裸码建索引；索引式若本来就是裸码则原样命中
+        key = _bare_key(sym)
+        industry = industries.get(key) or industries.get(sym, "")
         sector_net = sector_flow.get(industry)
         position_score = s["position_score"]
         d_fusion = max((s["fusion"] - _fmin) / _fspan, 0.0)
         d_position = min(max(position_score, 0.0), 1.0) if position_score is not None else 0.0
         d_sector = 0.7 * sec_pct.get(sym, 0.5) + 0.3 * _flow_score(sector_net)
-        nws = news.get(sym, {})
+        nws = news.get(sym) or news.get(key) or {}
         d_news = 0.5
         if nws:
             d_news = min(max(0.5 + nws["net_ratio"] * 2 + nws["score_mean"] * 0.5, 0.0), 1.0)
-        l2s = l2.get(sym, {})
+        l2s = l2.get(key) or l2.get(sym) or {}
         d_l2 = l2s.get("l2_score", 0.5)
         d_risk = l2s.get("l2_risk", 0.5)
-        l1s = l1.get(sym, {})
+        l1s = l1.get(key) or l1.get(sym) or {}
         d_l1 = l1s.get("l1_score", 0.5)
         # 正向维度加权 - 反向因子风险罚分（高波动持续/对倒/恐慌扣分）
         composite = (
@@ -661,6 +680,26 @@ def _per_day_scores(scores: dict[str, dict], news: dict[str, dict], l2: dict[str
     return out
 
 
+def _missing_dims(day_scores: list[dict[str, dict]]) -> str:
+    """哪些维度实际没数据（全部候选都停在中性 0.5）——只报告，不改分。
+
+    旧实现把判据写反了：L2 有数据时报「未含 L2」、真没数据时反而不报。
+    """
+    def _all_neutral(field: str, default: float = 0.5) -> bool:
+        return not any(
+            v.get(field, default) != default
+            for d in day_scores
+            for v in d.values()
+        )
+
+    dims = (
+        ("L2", _all_neutral("d_l2")),
+        ("L1", _all_neutral("d_l1")),
+        ("新闻", _all_neutral("d_news")),
+    )
+    return ", ".join(x for x, absent in dims if absent) or "无"
+
+
 def score_candidates(day_scores: list[dict[str, dict]], names: dict[str, str],
                      exclude_st: bool = True) -> list[dict]:
     """跨日聚合复合分 + 过滤 + 排名（按分数降序）。
@@ -685,7 +724,7 @@ def score_candidates(day_scores: list[dict[str, dict]], names: dict[str, str],
 
     cands: list[dict] = []
     for sym, a in agg.items():
-        name = names.get(sym, "")
+        name = names.get(sym) or names.get(_bare_key(sym), "")
         if exclude_st and "ST" in name.upper():
             continue
         latest = a["days"][-1]
@@ -867,12 +906,7 @@ def main():
     elif market_dir:
         gate_note = f"复盘判{market_dir['direction']}（{market_dir.get('total_score')}/11）"
 
-    missing = ", ".join(
-        x for x, has in (
-            ("L2", all(not s for s in [any(v.get("d_l2", 0) > 0 for v in d.values()) for d in day_scores])),
-            ("新闻", not any(d for d in day_scores if any(v.get("d_news", 0.5) != 0.5 for v in d.values()))),
-        ) if not has
-    ) or "无"
+    missing = _missing_dims(day_scores)
 
     # 落盘
     out_dir = os.getenv("QM_PICKS_DIR") or os.path.join(os.getenv("QM_REPORTS_DIR", "data/reports"), "stock_picks")
