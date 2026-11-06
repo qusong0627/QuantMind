@@ -181,23 +181,39 @@ if (-not $NoThs) {
     $thsTask = Get-ScheduledTask -TaskName "TdxThsWorker" -ErrorAction SilentlyContinue
     $thsRestart = $Restart
     $ths = if (-not $thsRestart) { Get-Json "http://127.0.0.1:8765/api/status" } else { $null }
-    if ($thsRestart -or -not $ths) {
-        if ($thsRestart -or (Test-Port 8765)) {
-            Write-Host "[5/5] 同花顺       停止旧进程..." -ForegroundColor DarkGray
+    # 任务卡 Running 但 8765 无响应 = worker 死在启动早期、Task Scheduler 仍认为它在跑。
+    # 此时 MultipleInstances=IgnoreNew 会让 Start-ScheduledTask 直接拒绝
+    # （0x800710E0），表现为「永远启动不了」（2026-11-06 实盘现场：11-05 19:29
+    # 登录任务起的 worker 只占 1 线程/2.2MB，从未绑定端口）。残尸必须先 Stop。
+    $thsStuck = [bool]($thsTask -and -not $ths -and $thsTask.State -eq "Running")
+    if ($thsRestart -or $thsStuck -or -not $ths) {
+        if ($thsRestart -or $thsStuck -or (Test-Port 8765)) {
+            if ($thsStuck) {
+                Write-Host "[5/5] 同花顺       任务卡在 Running 但 8765 无响应，终止残尸后重启..." -ForegroundColor DarkGray
+            } else {
+                Write-Host "[5/5] 同花顺       停止旧进程..." -ForegroundColor DarkGray
+            }
             if ($thsTask) { Stop-ScheduledTask -TaskName "TdxThsWorker" -ErrorAction SilentlyContinue }
             Stop-Port 8765
             Start-Sleep -Seconds 2
         }
         Write-Host "[5/5] 同花顺       启动中..." -ForegroundColor DarkGray
         if ($thsTask) {
+            if ($thsTask.State -eq "Disabled") {
+                Write-Host "[5/5] 同花顺       计划任务已禁用：管理员执行 Enable-ScheduledTask -TaskName TdxThsWorker" -ForegroundColor Yellow
+            }
             Start-ScheduledTask -TaskName "TdxThsWorker"
         } else {
             Start-Process -FilePath $py `
                 -ArgumentList "-u `"$root\scripts\ths_worker.py`" --host 127.0.0.1 --port 8765" `
                 -WorkingDirectory $root -WindowStyle Hidden | Out-Null
         }
-        Start-Sleep -Seconds 8
-        $ths = Get-Json "http://127.0.0.1:8765/api/status"
+        # 冷启动 import thspypc/uvicorn 有时 >8s：最多轮询 20s，别让健康进程被误判
+        $thsDeadline = (Get-Date).AddSeconds(20)
+        while (-not $ths -and (Get-Date) -lt $thsDeadline) {
+            Start-Sleep -Seconds 1
+            $ths = Get-Json "http://127.0.0.1:8765/api/status"
+        }
     }
     if ($ths) {
         Write-Host ("[5/5] 同花顺       OK  connected={0} credentials={1}" -f `

@@ -30,7 +30,48 @@ sys.path.insert(0, str(ROOT / "vendor" / "ths" / "src"))
 sys.path.insert(0, str(ROOT / "vendor" / "ths_deps"))
 
 
+def _tee_log() -> None:
+    """stdout/stderr 同时落 data/logs/ths_worker.log。
+
+    计划任务起的进程没有控制台、也没有重定向：启动失败或挂死时零证据
+    （2026-11-06 现场：worker 卡在 1 线程/2.2MB，日志目录里什么都没有）。
+    日志写不了就静默跳过，绝不影响 worker 本身。
+    """
+    path = ROOT / "data" / "logs" / "ths_worker.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mirror = open(path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    mirror.write(f"\n===== {stamp} start pid={os.getpid()} =====\n")
+    mirror.flush()
+
+    class _Tee:
+        def __init__(self, original, other) -> None:
+            self._original = original
+            self._other = other
+
+        def write(self, data):
+            if self._original is not None:
+                self._original.write(data)
+            self._other.write(data)
+            return len(data)
+
+        def flush(self):
+            if self._original is not None:
+                self._original.flush()
+            self._other.flush()
+
+        def isatty(self):
+            return bool(self._original is not None and self._original.isatty())
+
+    sys.stdout = _Tee(sys.stdout, mirror)
+    sys.stderr = _Tee(sys.stderr, mirror)
+
+
 def main() -> None:
+    _tee_log()
     parser = argparse.ArgumentParser(description="同花顺行情 worker（只读）")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
