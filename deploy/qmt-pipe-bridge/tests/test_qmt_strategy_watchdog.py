@@ -219,23 +219,26 @@ def test_load_config_missing_file_uses_defaults(tmp_path):
 # 桥重启判定（reload 救不回来时的最后自愈手段）
 # --------------------------------------------------------------------------
 def test_should_restart_bridge_requires_threshold():
+    cfg = {'bridge_restart_after_s': 180, 'bridge_restart_max_per_hour': 2}
     now = 1000.0
-    ok, _ = wd.should_restart_bridge({'unresponsive_since': now - 60}, now)
+    ok, _ = wd.should_restart_bridge({'unresponsive_since': now - 60}, now, cfg)
     assert ok is False
-    ok, _ = wd.should_restart_bridge({'unresponsive_since': now - 200}, now)
+    ok, _ = wd.should_restart_bridge({'unresponsive_since': now - 200}, now, cfg)
     assert ok is True
 
 
 def test_should_restart_bridge_hourly_budget():
+    cfg = {'bridge_restart_after_s': 60, 'bridge_restart_max_per_hour': 2}
     now = 10000.0
     stamps = f'{int(now - 100)},{int(now - 200)}'
     ok, reason = wd.should_restart_bridge(
-        {'unresponsive_since': now - 300, 'bridge_restart_ts': stamps}, now)
+        {'unresponsive_since': now - 300, 'bridge_restart_ts': stamps}, now, cfg)
     assert ok is False
     assert 'budget' in reason
     # 一小时以前的记录不计入
     ok, _ = wd.should_restart_bridge(
-        {'unresponsive_since': now - 300, 'bridge_restart_ts': str(int(now - 4000))}, now)
+        {'unresponsive_since': now - 300, 'bridge_restart_ts': str(int(now - 4000))},
+        now, cfg)
     assert ok is True
 
 

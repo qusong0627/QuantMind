@@ -72,8 +72,8 @@ DEFAULT_CONFIG = {
     'post_reload_wait_s': 8.0,
     # reload 也救不回来时，重启伴生桥（实测：断管道连接能解锁策略主线程，
     # 2026-11-06 两次现场 11:28:40 / 11:32:45）。
-    'bridge_restart_after_s': 180,
-    'bridge_restart_max_per_hour': 2,
+    'bridge_restart_after_s': 60,
+    'bridge_restart_max_per_hour': 6,
     'bridge_start_cmd': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\start_pipe_bridge.cmd',
     'bridge_restart_wait_s': 15.0,
 }
@@ -187,7 +187,12 @@ def evaluate(
         return Decision('observe', 'order rpc in flight; reload deferred',
                         failures, state)
     if now_ts - state['last_reload_ts'] < float(cfg['reload_cooldown_s']):
-        return Decision('observe', 'reload cooldown', failures, state)
+        # reload 冷却中也不该干等：桥重启（断管道）是更轻、更快的恢复手段。
+        allowed, why = should_restart_bridge(state, now_ts, cfg)
+        if allowed:
+            return Decision('restart_bridge', f'account hung; {why}',
+                            failures, state)
+        return Decision('observe', f'reload cooldown ({why})', failures, state)
     if reload_count >= int(cfg['reload_max_per_day']):
         return Decision('alert', 'reload budget exhausted; manual restart needed',
                         failures, state)
@@ -481,6 +486,9 @@ def main(argv: list[str] | None = None) -> int:
                 decision = _restart_or_alert(
                     decision, f'reload did not recover account queries ({after.error})')
                 print(f'{stamp} {decision.action.upper()} {decision.reason}')
+    elif decision.action == 'restart_bridge' and not args.dry_run:
+        decision = _restart_or_alert(decision, decision.reason)
+        print(f'{stamp} {decision.action.upper()} {decision.reason}')
     elif decision.action == 'alert' and float(decision.state.get('unresponsive_since') or 0):
         # reload 预算耗尽等场景：桥重启仍是可用的恢复手段。
         decision = _restart_or_alert(decision, decision.reason)
