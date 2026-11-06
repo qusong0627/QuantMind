@@ -71,6 +71,11 @@ class OrderResponse(OrderBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+    # 市价单没有委托价（库里 price 为 0 或 NULL）。基类 price 用 gt=0 管**下单**
+    # 入口是对的，但读侧必须容忍 0：否则只要当天有一笔市价单，
+    # ``GET /api/v1/orders`` 整页 500（2026-11-06：「交易记录一条都没有」的真凶）。
+    price: float | None = Field(None, ge=0)
+
     id: int
     order_id: UUID4
     tenant_id: str
