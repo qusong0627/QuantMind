@@ -1,81 +1,75 @@
-import React, { useState } from 'react';
-import {
-  AreaChart,
-  Area,
-  ResponsiveContainer,
-} from 'recharts';
+import React, { useEffect, useRef, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/Card';
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "./ui/HoverCard";
 import { RealtimeMetrics } from '../types-v2';
 import { formatNumber, formatPercent } from '../utils-v2';
-import { TrendingUp, Zap, Check, Loader2, Sparkles, FileUp, Play } from 'lucide-react';
-import { alphaAgentService } from '../services/alphaAgentService';
+import { Check, Loader2, Sparkles, FileUp, Play } from 'lucide-react';
+import { getSessionGeneration, registerSessionReset } from '../../../store/sessionBoundary';
 import { explainFactor, exportFactorToIde } from '../services-v2/api';
-import { useTaskContext } from '../context-v2/TaskContext';
 
 interface FactorListProps {
   metrics: RealtimeMetrics | null;
-  onNavigate?: (page: string) => void;
+  onBacktestFactor?: (factorId: string) => void;
 }
 
 const MARKET_LABELS: Record<string, string> = {
-  a_share: 'A股', crypto: '加密货币', hong_kong: '港股', us_stock: '美股', futures: '期货',
+  a_share: 'A股',
 };
 
-export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) => {
-  const { startBacktestTask } = useTaskContext();
-  const [promoting, setPromoting] = useState<Record<string, 'loading' | 'done' | 'error'>>({});
+export const FactorList: React.FC<FactorListProps> = ({ metrics, onBacktestFactor }) => {
   const [exporting, setExporting] = useState<Record<string, 'loading' | 'done' | 'error'>>({});
-  const [explanations, setExplanations] = useState<Record<string, { loading: boolean; text?: string; error?: string }>>({});
+  const [explanations, setExplanations] = useState<Record<string, { loading: boolean; text?: string; error?: string; revision?: number | null }>>({});
+  const explanationControllers = useRef(new Map<string, AbortController>());
+  const [expandedFactorId, setExpandedFactorId] = useState<string | null>(null);
+  const sessionGenerationRef = useRef(getSessionGeneration());
 
-  const handleExplain = async (factorId: string, factorName: string) => {
-    // Check localStorage cache first
-    const cacheKey = `alpha_explain_${factorId}`;
-    const cached = localStorage.getItem(cacheKey);
-    if (cached) {
-      setExplanations((prev => ({ ...prev, [factorId]: { loading: false, text: cached } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
-      return;
-    }
+  useEffect(() => {
+    sessionGenerationRef.current = getSessionGeneration();
+    const unregister = registerSessionReset(() => {
+      explanationControllers.current.forEach((controller) => controller.abort());
+      explanationControllers.current.clear();
+      sessionGenerationRef.current = getSessionGeneration();
+      setExporting({});
+      setExplanations({});
+      setExpandedFactorId(null);
+    });
+    return () => { unregister(); explanationControllers.current.forEach((controller) => controller.abort()); explanationControllers.current.clear(); };
+  }, []);
 
-    setExplanations((prev => ({ ...prev, [factorId]: { loading: true } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
+  const handleExplain = async (factorId: string) => {
+    const generation = sessionGenerationRef.current;
+    explanationControllers.current.get(factorId)?.abort();
+    const controller = new AbortController(); explanationControllers.current.set(factorId, controller);
+    setExplanations((prev) => ({ ...prev, [factorId]: { loading: true } }));
     try {
-      const result = await explainFactor(factorId);
+      const result = await explainFactor(factorId, controller.signal);
+      if (controller.signal.aborted || generation !== sessionGenerationRef.current) return;
       if (result.success && result.data?.explanation) {
         const text = result.data.explanation;
-        localStorage.setItem(cacheKey, text);
-        setExplanations((prev => ({ ...prev, [factorId]: { loading: false, text } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
+        setExplanations((prev) => ({ ...prev, [factorId]: { loading: false, text, revision: result.data?.source_revision_no } }));
       } else {
-        setExplanations((prev => ({ ...prev, [factorId]: { loading: false, error: '解释失败' } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
+        setExplanations((prev) => ({ ...prev, [factorId]: { loading: false, error: '解释失败' } }));
       }
-    } catch {
-      setExplanations((prev => ({ ...prev, [factorId]: { loading: false, error: '请求失败' } })) as unknown as Record<string, { loading: boolean; text?: string; error?: string }>);
+    } catch (failure) {
+      if (controller.signal.aborted || generation !== sessionGenerationRef.current) return;
+      setExplanations((prev) => ({ ...prev, [factorId]: { loading: false, error: failure instanceof Error ? failure.message : '请求失败' } }));
+    } finally {
+      if (explanationControllers.current.get(factorId) === controller) explanationControllers.current.delete(factorId);
     }
   };
 
-  const handlePromote = async (factorName: string, expression: string) => {
-    setPromoting((prev => ({ ...prev, [factorName]: 'loading' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-    try {
-      const result = await alphaAgentService.promoteByExpression([{ name: factorName, expression }]);
-      if (result.success && result.promoted.length > 0) {
-        setPromoting((prev => ({ ...prev, [factorName]: 'done' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-      } else {
-        setPromoting((prev => ({ ...prev, [factorName]: 'error' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-      }
-    } catch {
-      setPromoting((prev => ({ ...prev, [factorName]: 'error' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
-    }
-  };
-
-  const handleExport = async (factorId: string, factorName: string) => {
+  const handleExport = async (factorId: string) => {
+    const generation = sessionGenerationRef.current;
     setExporting((prev => ({ ...prev, [factorId]: 'loading' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
     try {
       const result = await exportFactorToIde(factorId);
+      if (generation !== sessionGenerationRef.current) return;
       if (result.success) {
         setExporting((prev => ({ ...prev, [factorId]: 'done' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
       } else {
         setExporting((prev => ({ ...prev, [factorId]: 'error' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
       }
     } catch {
+      if (generation !== sessionGenerationRef.current) return;
       setExporting((prev => ({ ...prev, [factorId]: 'error' })) as unknown as Record<string, 'loading' | 'done' | 'error'>);
     }
   };
@@ -86,21 +80,21 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
   };
 
   const formatMetric = (value: number | undefined | null, type: 'number' | 'percent' = 'number') => {
-    if (value === undefined || value === null || value === 0) return <span className="text-muted-foreground/50">N/A</span>;
+    if (value == null || !Number.isFinite(value)) return <span className="text-muted-foreground/50">—</span>;
     return type === 'percent' ? formatPercent(value) : formatNumber(value, 4);
   };
 
   return (
     <Card className="glass card-hover animate-fade-in-up w-full">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
+        <CardTitle className="text-sm flex items-center gap-2">
           <div className="h-2 w-2 rounded-full bg-purple-500 animate-pulse" />
           当前因子库 RankIC Top 10
         </CardTitle>
       </CardHeader>
       <CardContent>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-border/50">
                 <th className="py-3 px-4 text-center font-medium text-muted-foreground w-1/6">因子名</th>
@@ -118,10 +112,13 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
             </thead>
             <tbody>
               {metrics?.top10Factors && metrics.top10Factors.length > 0 ? (
-                metrics.top10Factors.map((factor, index) => (
-                  <HoverCard key={index} openDelay={200}>
-                    <HoverCardTrigger asChild>
-                      <tr className="group hover:bg-muted/50 transition-colors border-b border-border/50 last:border-0 cursor-help">
+                metrics.top10Factors.map((factor) => (
+                  <React.Fragment key={factor.factorId}>
+                      <tr
+                        className="group hover:bg-muted/50 transition-colors border-b border-border/50 last:border-0 cursor-pointer"
+                        onClick={() => setExpandedFactorId(expandedFactorId === factor.factorId ? null : factor.factorId)}
+                        title="点击查看因子详情"
+                      >
                         <td className="py-3 px-4 font-medium max-w-[150px] truncate text-center" title={factor.factorName}>
                           {truncate(factor.factorName, 15)}
                         </td>
@@ -146,28 +143,6 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
                         <td className="py-3 px-4 text-center font-mono">{formatMetric(factor.sharpeRatio)}</td>
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1">
-                            {promoting[factor.factorName] === 'done' ? (
-                              <span className="inline-flex items-center gap-1 text-xs text-green-500">
-                                <Check size={12} /> 已加入
-                              </span>
-                            ) : promoting[factor.factorName] === 'loading' ? (
-                              <Loader2 size={14} className="animate-spin text-muted-foreground" />
-                            ) : promoting[factor.factorName] === 'error' ? (
-                              <span className="text-xs text-red-400">失败</span>
-                            ) : (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handlePromote(factor.factorName, factor.factorExpression);
-                                }}
-                                className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md
-                                           bg-primary/10 text-primary hover:bg-primary/20
-                                           border border-primary/20 transition-colors"
-                                title="将此因子加入训练特征集"
-                              >
-                                <Zap size={12} /> 训练
-                              </button>
-                            )}
                             {exporting[factor.factorId] === 'done' ? (
                               <span className="inline-flex items-center gap-1 text-xs text-green-500">
                                 <Check size={12} /> 已导出
@@ -178,7 +153,7 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleExport(factor.factorId, factor.factorName);
+                                  handleExport(factor.factorId);
                                 }}
                                 className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md
                                            bg-blue-500/10 text-blue-400 hover:bg-blue-500/20
@@ -191,14 +166,19 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                try {
-                                  startBacktestTask({
-                                    factorId: factor.factorId,
-                                    universe: (factor as any).universe || 'csi300',
-                                  });
-                                  onNavigate?.('backtest');
-                                } catch (err) { console.error(err); }
+                                setExpandedFactorId(expandedFactorId === factor.factorId ? null : factor.factorId);
                               }}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-primary/10 text-primary hover:bg-primary/20 border border-primary/20 transition-colors"
+                              title="查看因子详情与解读"
+                            >
+                              <Sparkles size={12} /> 详情
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onBacktestFactor?.(factor.factorId);
+                              }}
+                              disabled={!onBacktestFactor}
                               className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md
                                          bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20
                                          border border-emerald-500/20 transition-colors"
@@ -209,22 +189,15 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
                           </div>
                         </td>
                       </tr>
-                    </HoverCardTrigger>
-                    <HoverCardContent 
-                      className="w-[400px] glass-strong p-4 shadow-xl border border-primary/20" 
-                      side="top" 
-                      align="center"
-                      sideOffset={10}
-                      collisionPadding={20}
-                      avoidCollisions={true}
-                      style={{ zIndex: 1000 }}
-                    >
-                      <div className="space-y-4">
+                    {expandedFactorId === factor.factorId && (
+                      <tr>
+                        <td colSpan={11} className="p-4 bg-secondary/20">
+                          <div className="space-y-4 max-w-4xl mx-auto">
                         <div>
                           <div className="flex items-center justify-between mb-2">
-                            <h4 className="font-bold text-primary text-base">{factor.factorName}</h4>
+                            <h4 className="font-bold text-primary text-sm">{factor.factorName}</h4>
                             <div className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-medium border border-primary/20">
-                               Score: {formatNumber(factor.rankIc * 100, 1)}
+                               Score: {formatNumber(factor.rankIc == null ? null : factor.rankIc * 100, 1)}
                             </div>
                           </div>
                           <div className="p-3 bg-secondary/40 rounded-lg font-mono text-xs break-all border border-border/50 text-foreground/90 shadow-inner">
@@ -235,19 +208,19 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
                         <div className="grid grid-cols-2 gap-3 p-3 bg-background/40 rounded-lg border border-border/30">
                           <div>
                             <span className="text-xs text-muted-foreground block mb-0.5">年化收益 (ARR)</span>
-                            <span className="font-bold text-success text-sm">{formatPercent(factor.annualReturn || 0)}</span>
+                            <span className="font-bold text-success text-xs">{formatPercent(factor.annualReturn)}</span>
                           </div>
                           <div>
                             <span className="text-xs text-muted-foreground block mb-0.5">夏普比率 (Sharpe)</span>
-                            <span className="font-bold text-sm">{formatNumber(factor.sharpeRatio || 0, 2)}</span>
+                            <span className="font-bold text-xs">{formatNumber(factor.sharpeRatio, 2)}</span>
                           </div>
                           <div>
                             <span className="text-xs text-muted-foreground block mb-0.5">最大回撤 (MDD)</span>
-                            <span className="font-bold text-destructive text-sm">{formatPercent(factor.maxDrawdown || 0)}</span>
+                            <span className="font-bold text-destructive text-xs">{formatPercent(factor.maxDrawdown)}</span>
                           </div>
                           <div>
                             <span className="text-xs text-muted-foreground block mb-0.5">卡玛比率 (CR)</span>
-                            <span className="font-bold text-primary text-sm">{formatNumber(factor.calmarRatio || 0, 2)}</span>
+                            <span className="font-bold text-primary text-xs">{formatNumber(factor.calmarRatio, 2)}</span>
                           </div>
                         </div>
 
@@ -257,6 +230,8 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
                             <div className="flex items-center gap-1.5 mb-2">
                               <Sparkles className="h-3.5 w-3.5 text-primary" />
                               <span className="text-xs font-medium text-primary">AI 解读</span>
+                              <span className="text-xs text-muted-foreground">{explanations[factor.factorId]?.revision ? `基于代码版本 ${explanations[factor.factorId].revision}` : '基于当时公式快照'}</span>
+                              <button type="button" className="text-xs text-primary" onClick={() => void handleExplain(factor.factorId)}>刷新解释</button>
                             </div>
                             <div className="text-xs text-foreground/80 whitespace-pre-line leading-relaxed">
                               {explanations[factor.factorId].text}
@@ -266,7 +241,7 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleExplain(factor.factorId, factor.factorName);
+                              handleExplain(factor.factorId);
                             }}
                             disabled={explanations[factor.factorId]?.loading}
                             className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg
@@ -283,13 +258,15 @@ export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) =
                           </button>
                         )}
 
-                      </div>
-                    </HoverCardContent>
-                  </HoverCard>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center text-muted-foreground">
+                  <td colSpan={11} className="py-8 text-center text-muted-foreground">
                     暂无因子数据
                   </td>
                 </tr>

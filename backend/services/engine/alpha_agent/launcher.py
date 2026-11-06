@@ -25,20 +25,92 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _normalize_seed_factors(value: Any) -> list[dict[str, str]]:
+    """Validate bounded, immutable owner-selected factor parent snapshots."""
+    from collections.abc import Mapping
+
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 3:
+        raise ValueError("Invalid parent factor snapshot")
+    output: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in value:
+        if not isinstance(row, Mapping) or set(row) - {
+            "factor_id",
+            "factor_name",
+            "factor_formulation",
+        }:
+            raise ValueError("Invalid parent factor snapshot")
+        factor_id = row.get("factor_id")
+        if not isinstance(factor_id, str) or not factor_id.strip() or len(factor_id) > 256:
+            raise ValueError("Invalid parent factor snapshot")
+        factor_id = factor_id.strip()
+        if factor_id in seen:
+            raise ValueError("Parent factor IDs must be unique")
+        seen.add(factor_id)
+        name = row.get("factor_name")
+        formulation = row.get("factor_formulation")
+        if (name is not None and not isinstance(name, str)) or (
+            formulation is not None and not isinstance(formulation, str)
+        ):
+            raise ValueError("Invalid parent factor snapshot")
+        output.append({
+            "factor_id": factor_id,
+            "factor_name": (name or "")[:128],
+            "factor_formulation": (formulation or "")[:1200],
+        })
+    return output
+
+
+def _mining_windows_from_params(value: Any) -> dict[str, str | None]:
+    """Extract and validate date fields from the immutable task snapshot."""
+    from collections.abc import Mapping
+
+    params = value
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except (TypeError, ValueError):
+            params = {}
+    if not isinstance(params, Mapping):
+        params = {}
+    windows = {}
+    for key in ("mining_start", "mining_end", "valid_start", "valid_end"):
+        value = params.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError("Persisted factor mining window is invalid")
+        windows[key] = value or None
+    from backend.services.engine.alpha_agent.mining_windows import build_mining_window_env
+
+    build_mining_window_env(**windows)
+    return windows
+
+
 class TaskStatus(str, Enum):
     PENDING = "pending"
+    QUEUED = "queued"
     RUNNING = "running"
+    STOPPING = "stopping"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
 class EvolutionTask:
     task_id: str
     user_id: str
+    tenant_id: str = "default"
     market: str = "a_share"
     data_source: str = ""
+    datasets: tuple[str, ...] = ()
+    mining_start: str | None = None
+    mining_end: str | None = None
+    valid_start: str | None = None
+    valid_end: str | None = None
     universe: str = "csi300"
+    universe_symbols: list[str] | None = None
     status: TaskStatus = TaskStatus.PENDING
     progress: str = ""
     phase: str = "pending"
@@ -50,8 +122,10 @@ class EvolutionTask:
     result: dict[str, Any] | None = None
     process: subprocess.Popen | None = None
     _cancel_requested: bool = False
+    _cancel_confirmed: bool = False
     timeline: list[dict[str, Any]] = field(default_factory=list)
     token_usage: dict[str, Any] = field(default_factory=dict)
+    mining_progress: dict[str, Any] = field(default_factory=dict)
 
 
 class AlphaAgentLauncher:
@@ -60,6 +134,94 @@ class AlphaAgentLauncher:
     _RD_AGENT_RUNNER_SCRIPT = str(
         Path(__file__).resolve().parent.parent.parent.parent.parent / "scripts" / "alpha_agent" / "run_rd_agent.py"
     )
+
+    @staticmethod
+    def _process_group_has_live_process(pgid: int) -> bool:
+        """Check /proc for non-zombie members of an isolated child process group."""
+        proc_root = Path("/proc")
+        if not proc_root.is_dir():
+            return True
+        try:
+            entries = list(proc_root.iterdir())
+        except OSError:
+            return True
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+                fields = stat[stat.rindex(")") + 2:].split()
+                if fields[0] != "Z" and int(fields[2]) == pgid:
+                    return True
+            except (OSError, ValueError, IndexError):
+                continue
+        return False
+
+    @classmethod
+    async def _terminate_process_group(cls, pgid: int) -> bool:
+        # OSS-ADAPT: Windows 无 killpg，按“无法确认”降级（本地开发调试用）。
+        if not hasattr(os, "killpg"):
+            return False
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return not cls._process_group_has_live_process(pgid)
+        deadline = time.monotonic() + 30
+        while cls._process_group_has_live_process(pgid) and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+        if cls._process_group_has_live_process(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 30
+            while cls._process_group_has_live_process(pgid) and time.monotonic() < deadline:
+                await asyncio.sleep(0.25)
+        return not cls._process_group_has_live_process(pgid)
+
+    @staticmethod
+    def _safe_name(text: str) -> str:
+        return (
+            "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(text or ""))
+            or "default"
+        )
+
+    def task_dir(
+        self, task_id: str, tenant_id: str = "default", user_id: str = ""
+    ) -> Path:
+        from backend.shared.owner_path import owner_segment, user_scoped_dir
+
+        return user_scoped_dir(self._log_dir, tenant_id, user_id) / owner_segment(
+            task_id
+        )
+
+    def _resolve_task_dir(self, task: EvolutionTask) -> Path:
+        """优先分片路径，其次兼容历史遗留布局。"""
+        from backend.shared.owner_path import user_scoped_dir, owner_segment
+
+        sharded = self.task_dir(task.task_id, task.tenant_id, task.user_id)
+        if sharded.exists():
+            return sharded
+        old_sharded = (
+            self._log_dir
+            / f"t{self._safe_name(task.tenant_id)}"
+            / f"u{self._safe_name(task.user_id)}"
+            / task.task_id
+        )
+        if old_sharded.exists():
+            return old_sharded
+        legacy = self._log_dir / task.task_id
+        # OSS-ADAPT: FACTOR_MINING_NODE_URL（远端节点历史路径）OSS 不支持，不回退。
+        return sharded if not legacy.exists() else legacy
+
+    @staticmethod
+    def _celery_enabled() -> bool:
+        return os.getenv("FACTOR_MINING_CELERY", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def __init__(self) -> None:
         self._tasks: dict[str, EvolutionTask] = {}
@@ -155,6 +317,286 @@ class AlphaAgentLauncher:
         )
         return task_id
 
+    @staticmethod
+    def _require_task_store():
+        # OSS-ADAPT: AlphaMiningTaskPersistence 已从企业版移植
+        # （见 qlib_app/services/rd_agent_persistence.py 末尾）；保留 ImportError
+        # 守卫以便缺表/缺依赖时仍报出可读错误。
+        try:
+            from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+                AlphaMiningTaskPersistence,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "OSS 缺失 AlphaMiningTaskPersistence，队列调度路径暂不可用"
+            ) from exc
+        return AlphaMiningTaskPersistence()
+
+    async def run_evolution_blocking(
+        self,
+        *,
+        task_id: str,
+        tenant_id: str,
+        user_id: str,
+        market: str,
+        universe: str,
+        loop_n: int,
+        direction: str = "",
+        data_source: str = "",
+        llm_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any] | None:
+        """worker 内阻塞执行一次挖掘（供 Celery 任务调用），状态回写 DB。"""
+        from backend.shared.owner_scope import OwnerScope
+
+        owner = OwnerScope(tenant_id, user_id)
+        tenant_id, user_id = owner.tenant_id, owner.user_id
+        if market != "a_share":
+            raise ValueError("Only A-share mining is supported")
+
+        store = self._require_task_store()
+        record = await store.get_for_dispatch(task_id)
+        if not record or record.get("tenant_id") != owner.tenant_id or record.get("user_id") != owner.user_id:
+            raise ValueError("Persisted factor mining owner does not match the worker")
+        params_snapshot = record.get("params_snapshot") or {}
+        if isinstance(params_snapshot, str):
+            params_snapshot = json.loads(params_snapshot)
+        if not isinstance(params_snapshot, dict):
+            raise ValueError("Persisted factor mining parameters are invalid")
+        seed_factors = _normalize_seed_factors(params_snapshot.get("seed_factors"))
+        from backend.services.engine.rd_agent.mining_datasets import resolve_datasets
+
+        task_datasets = resolve_datasets(
+            params_snapshot.get("datasets") or ["features_daily", "l1_factors"]
+        )
+        task_windows = _mining_windows_from_params(params_snapshot)
+        source_snapshot = record.get("data_snapshot") or {}
+        if isinstance(source_snapshot, str):
+            source_snapshot = json.loads(source_snapshot)
+        task = EvolutionTask(
+            task_id=task_id,
+            user_id=user_id,
+            tenant_id=owner.tenant_id,
+            market=market,
+            universe=universe,
+            loop_n=loop_n,
+            data_source=data_source or "",
+            datasets=task_datasets,
+            universe_symbols=source_snapshot.get("universe_symbols"),
+            **task_windows,
+            status=TaskStatus.QUEUED,
+            phase="queued",
+            progress="等待前序任务完成",
+        )
+        self._tasks[task_id] = task
+        if not llm_overrides:
+            from backend.services.engine.alpha_agent.llm_client import (
+                resolve_llm_config,
+            )
+
+            cfg = resolve_llm_config()
+            llm_overrides = cfg.llm_env_overrides() if cfg else None
+        provider_uri = await self._resolve_provider_uri(task, data_source)
+        seed_path = self._default_seed_path()
+        await self._run_evolution(
+            task,
+            loop_n=loop_n,
+            seed=seed_path,
+            provider_uri=provider_uri,
+            direction=direction or "",
+            seed_factors=seed_factors,
+            llm_overrides=llm_overrides,
+        )
+        try:
+            if task.status == TaskStatus.COMPLETED:
+                await store.update(
+                    task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    status="completed",
+                    progress="因子挖掘完成",
+                )
+            elif task.status == TaskStatus.CANCELLED:
+                await store.update(
+                    task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    expected_status=("stopping",),
+                    status="cancelled",
+                    error_message="Cancelled by user",
+                )
+            else:
+                await store.update(
+                    task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    status="failed",
+                    error_message=(task.error_message or "")[:2000],
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[factor-mining] DB回写失败 %s: %s", task_id, exc)
+        return task.result
+
+    async def _resolve_provider_uri(
+        self, task: EvolutionTask, data_source: str | None
+    ) -> str:
+        provider_uri = ""
+        try:
+            from backend.services.engine.rd_agent.market_adapters import get_adapter
+
+            adapter = get_adapter("a_share")  # 仅CN/A股
+            provider_uri = adapter.get_qlib_provider_uri()
+        except Exception:
+            provider_uri = os.getenv("QLIB_PROVIDER_URI", "/data/qlib/cn_data")
+        if data_source:
+            ds = data_source.lower().strip()
+            if ds == "parquet":
+                if os.getenv("QM_MINING_SHARED_CFS") == "1":
+                    from backend.shared.qlib_paths import is_qlib_provider_ready
+
+                    if not is_qlib_provider_ready(provider_uri):
+                        raise ValueError("共享 CFS Qlib 数据不可用，请先完成数据同步")
+                    return provider_uri
+                from backend.services.engine.rd_agent.rd_loop_wrapper import (
+                    RDLoopWrapper,
+                )
+
+                quantdb_dir = RDLoopWrapper._resolve_quantdb_dir()
+                if quantdb_dir:
+                    from backend.services.engine.qlib_data_builder import (
+                        ensure_qlib_cache,
+                    )
+
+                    preparation = asyncio.create_task(
+                        asyncio.to_thread(ensure_qlib_cache, quantdb_dir)
+                    )
+                    try:
+                        provider_uri = await asyncio.shield(preparation)
+                    except asyncio.CancelledError:
+                        # Do not release serial occupancy while cache work still runs.
+                        await preparation
+                        raise
+                else:
+                    provider_uri = "/app/db/feature_snapshots"
+            elif ds == "pg":
+                provider_uri = "postgresql://localhost:5432/quantmind"
+        return provider_uri
+
+    async def run_queued(self, record: dict[str, Any]) -> None:
+        from backend.shared.owner_scope import OwnerScope
+
+        owner = OwnerScope(record.get("tenant_id"), record.get("user_id"))
+        if any(record.get(key) != value for key, value in owner.sql_params().items()):
+            raise ValueError("Persisted task owner is not canonical")
+        if record.get("market") != "a_share":
+            raise ValueError("Only A-share mining is supported")
+        task = EvolutionTask(
+            task_id=record["task_id"],
+            tenant_id=record["tenant_id"],
+            user_id=record["user_id"],
+            market=record["market"],
+            universe=record["universe"],
+            loop_n=record["loop_n"],
+            data_source=record.get("data_source") or "",
+            **_mining_windows_from_params(record.get("params_snapshot")),
+            status=TaskStatus.QUEUED,
+            phase="queued",
+            progress="等待前序任务完成",
+        )
+        self._tasks[task.task_id] = task
+        request = (record.get("executor_json") or {}).get("request") or {}
+        params_snapshot = record.get("params_snapshot") or {}
+        if isinstance(params_snapshot, str):
+            params_snapshot = json.loads(params_snapshot)
+        if not isinstance(params_snapshot, dict):
+            raise ValueError("Persisted factor mining parameters are invalid")
+        seed_factors = _normalize_seed_factors(params_snapshot.get("seed_factors"))
+        from backend.services.engine.rd_agent.mining_datasets import resolve_datasets
+
+        task.datasets = resolve_datasets(
+            params_snapshot.get("datasets") or ["features_daily", "l1_factors"]
+        )
+        task.mining_start = params_snapshot.get("mining_start")
+        task.mining_end = params_snapshot.get("mining_end")
+        task.valid_start = params_snapshot.get("valid_start")
+        task.valid_end = params_snapshot.get("valid_end")
+        source_snapshot = record.get("data_snapshot") or {}
+        if isinstance(source_snapshot, str):
+            source_snapshot = json.loads(source_snapshot)
+        task.universe_symbols = source_snapshot.get("universe_symbols")
+        from backend.services.engine.alpha_agent.llm_client import resolve_llm_config
+
+        cfg = resolve_llm_config()
+        await self._run_evolution_with_budget(
+            task,
+            loop_n=task.loop_n,
+            seed=request.get("seed") or self._default_seed_path(),
+            provider_uri=request.get("provider_uri") or "",
+            direction=record.get("direction") or "",
+            seed_factors=seed_factors,
+            llm_overrides=cfg.llm_env_overrides() if cfg else None,
+        )
+
+    async def _run_evolution_with_budget(
+        self,
+        task: EvolutionTask,
+        *,
+        loop_n: int,
+        seed: str,
+        provider_uri: str,
+        direction: str,
+        seed_factors: list[dict[str, Any]],
+        llm_overrides: dict[str, str] | None,
+    ) -> None:
+        """Wait for a durable execution slot before any local subprocess fork."""
+        from backend.services.engine.alpha_agent.resource_budget import (
+            ExecutionCapacityFull,
+            begin_execution,
+        )
+
+        store = self._require_task_store()
+        from backend.services.engine.alpha_agent.queue import capture_controller
+
+        witness = await asyncio.to_thread(capture_controller)
+        try:
+            with begin_execution(
+                task.task_id,
+                task.tenant_id,
+                task.user_id,
+                executor_kind="engine-local",
+                witness=witness,
+            ):
+                claimed = await store.update(
+                    task.task_id,
+                    tenant_id=task.tenant_id,
+                    user_id=task.user_id,
+                    expected_status=("pending", "queued"),
+                    status="running",
+                    phase="starting",
+                    progress="正在启动因子挖掘…",
+                )
+                if not claimed:
+                    return
+                if not provider_uri:
+                    provider_uri = await self._resolve_provider_uri(task, task.data_source)
+                await self._run_evolution(
+                    task, loop_n=loop_n, seed=seed, provider_uri=provider_uri,
+                    direction=direction, seed_factors=seed_factors,
+                    llm_overrides=llm_overrides,
+                )
+                while task.status == TaskStatus.STOPPING and task.process is not None:
+                    task._cancel_confirmed = await self._terminate_process_group(task.process.pid)
+                    if task._cancel_confirmed:
+                        task.status = TaskStatus.CANCELLED
+                        task.phase = "cancelled"
+                        self._persist_task(task)
+                        await store.confirm_cancelled(task.task_id, tenant_id=task.tenant_id, user_id=task.user_id)
+                        break
+                    await asyncio.sleep(5)
+        except ExecutionCapacityFull:
+            # Another engine/Celery executor owns the single slot. The durable
+            # queue stays untouched; the dispatcher will retry its oldest entry.
+            return
+
     async def get_task_status(self, task_id: str) -> dict[str, Any] | None:
         task = self._tasks.get(task_id)
         if not task:
@@ -162,6 +604,7 @@ class AlphaAgentLauncher:
         return {
             "task_id": task.task_id,
             "user_id": task.user_id,
+            "tenant_id": task.tenant_id,
             "status": task.status.value,
             "progress": task.progress,
             "phase": task.phase,
@@ -171,6 +614,11 @@ class AlphaAgentLauncher:
             "market": task.market,
             "universe": task.universe,
             "data_source": task.data_source,
+            "datasets": list(task.datasets),
+            "mining_start": task.mining_start,
+            "mining_end": task.mining_end,
+            "valid_start": task.valid_start,
+            "valid_end": task.valid_end,
             "error_message": task.error_message,
             "result": task.result,
             "timeline": task.timeline,
@@ -181,25 +629,16 @@ class AlphaAgentLauncher:
         task = self._tasks.get(task_id)
         if not task:
             return False
-        if task.status not in (TaskStatus.RUNNING, TaskStatus.PENDING):
+        if task.status not in (TaskStatus.RUNNING, TaskStatus.PENDING, TaskStatus.QUEUED):
             return False
         task._cancel_requested = True
         if task.process and task.process.poll() is None:
-            try:
-                pgid = os.getpgid(task.process.pid)
-                os.killpg(pgid, signal.SIGTERM)
-                # Wait up to 5 seconds, then SIGKILL
-                for _ in range(10):
-                    if task.process.poll() is not None:
-                        break
-                    await asyncio.sleep(0.5)
-                if task.process.poll() is None:
-                    os.killpg(pgid, signal.SIGKILL)
-                    logger.warning("Force-killed process group %d for task %s", pgid, task_id)
-            except ProcessLookupError:
-                pass
-            except Exception as e:
-                logger.warning("Failed to kill process for task %s: %s", task_id, e)
+            # start_new_session=True 使子进程自成进程组，本地执行直接终止整个组。
+            task._cancel_confirmed = await self._terminate_process_group(task.process.pid)
+            if not task._cancel_confirmed:
+                logger.warning("Process group stop not confirmed for task %s", task_id)
+        else:
+            task._cancel_confirmed = True
         task.status = TaskStatus.FAILED
         task.error_message = "Cancelled by user"
         self._persist_task(task)
@@ -253,8 +692,14 @@ class AlphaAgentLauncher:
             data = {
                 "task_id": task.task_id,
                 "user_id": task.user_id,
+                "tenant_id": task.tenant_id,
                 "market": task.market,
                 "data_source": task.data_source,
+                "datasets": list(task.datasets),
+                "mining_start": task.mining_start,
+                "mining_end": task.mining_end,
+                "valid_start": task.valid_start,
+                "valid_end": task.valid_end,
                 "universe": task.universe,
                 "status": task.status.value,
                 "progress": task.progress,
@@ -266,6 +711,7 @@ class AlphaAgentLauncher:
                 "error_message": task.error_message,
                 "timeline": task.timeline,
                 "token_usage": task.token_usage,
+                "mining_progress": task.mining_progress,
             }
             with open(state_file, "w") as f:
                 json.dump(data, f, ensure_ascii=False, default=str)
@@ -285,8 +731,14 @@ class AlphaAgentLauncher:
                     task = EvolutionTask(
                         task_id=data["task_id"],
                         user_id=data["user_id"],
+                        tenant_id=data.get("tenant_id", "default"),
                         market=data.get("market", "a_share"),
                         data_source=data.get("data_source", ""),
+                        datasets=tuple(data.get("datasets") or ()),
+                        mining_start=data.get("mining_start"),
+                        mining_end=data.get("mining_end"),
+                        valid_start=data.get("valid_start"),
+                        valid_end=data.get("valid_end"),
                         universe=data.get("universe", "csi300"),
                         status=TaskStatus(data.get("status", "pending")),
                         progress=data.get("progress", ""),
@@ -298,6 +750,7 @@ class AlphaAgentLauncher:
                         error_message=data.get("error_message"),
                         timeline=data.get("timeline", []),
                         token_usage=data.get("token_usage", {}),
+                        mining_progress=data.get("mining_progress", {}),
                     )
                     # Running tasks at startup are likely orphaned
                     if task.status == TaskStatus.RUNNING:
@@ -415,6 +868,7 @@ class AlphaAgentLauncher:
         seed: str,
         provider_uri: str,
         direction: str = "",
+        seed_factors: list[dict[str, Any]] | None = None,
         llm_overrides: dict[str, str] | None = None,
     ) -> None:
         task.status = TaskStatus.RUNNING
@@ -432,6 +886,10 @@ class AlphaAgentLauncher:
             provider_uri=provider_uri,
             llm_overrides=llm_overrides,
         )
+        # 本地执行路径：RD-Agent 子进程回调引擎沙箱控制面用的任务身份。
+        env["QM_FACTOR_TASK_ID"] = task.task_id
+        env["QM_FACTOR_TENANT_ID"] = task.tenant_id
+        env["QM_FACTOR_USER_ID"] = task.user_id
 
         # RD-Agent runner for all markets
         runner_script = self._RD_AGENT_RUNNER_SCRIPT
@@ -471,11 +929,10 @@ class AlphaAgentLauncher:
 
             while process.poll() is None:
                 if task._cancel_requested:
-                    try:
-                        pgid = os.getpgid(process.pid)
-                        os.killpg(pgid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                    # start_new_session=True 使子进程自成进程组，本地确认整个组已退出。
+                    task._cancel_confirmed = await self._terminate_process_group(process.pid)
+                    if not task._cancel_confirmed:
+                        logger.warning("Process group stop not confirmed for task %s", task.task_id)
                     break
                 self._update_progress(task, task_log_dir)
                 await asyncio.sleep(3)
@@ -488,7 +945,20 @@ class AlphaAgentLauncher:
             except Exception:
                 pass
 
-            if process.returncode == 0:
+            if self._process_group_has_live_process(process.pid):
+                if not await self._terminate_process_group(process.pid):
+                    raise RuntimeError("RD-Agent process group exit not confirmed")
+
+            if task._cancel_requested and task._cancel_confirmed:
+                task.status = TaskStatus.CANCELLED
+                task.phase = "cancelled"
+                task.progress = "任务已取消"
+                task.error_message = "Cancelled by user"
+            elif task._cancel_requested:
+                task.status = TaskStatus.STOPPING
+                task.phase = "stopping"
+                task.error_message = "Stop requested; waiting for child process group to exit"
+            elif process.returncode == 0:
                 task.status = TaskStatus.COMPLETED
                 task.phase = "completed"
                 task.progress_pct = 100
@@ -503,8 +973,21 @@ class AlphaAgentLauncher:
             self._persist_task(task)
 
         except Exception as e:
-            task.status = TaskStatus.FAILED
-            task.error_message = str(e)
+            if task.process is not None:
+                stopped = await self._terminate_process_group(task.process.pid)
+                if not stopped:
+                    task._cancel_requested = True
+                elif task._cancel_requested:
+                    task._cancel_confirmed = True
+            if task._cancel_requested and task._cancel_confirmed:
+                task.status = TaskStatus.CANCELLED
+                task.error_message = "Cancelled by user"
+            elif task._cancel_requested:
+                task.status = TaskStatus.STOPPING
+                task.error_message = "Stop requested; process exit not confirmed"
+            else:
+                task.status = TaskStatus.FAILED
+                task.error_message = str(e)
             logger.exception("Factor mining exception for task %s", task.task_id)
             self._persist_task(task)
 

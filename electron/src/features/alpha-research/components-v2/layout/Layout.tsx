@@ -1,7 +1,7 @@
 import React from 'react';
-import { Sparkles, Database, BarChart3, Settings as SettingsIcon } from 'lucide-react';
+import { Sparkles, Database, BarChart3, Settings as SettingsIcon, ClipboardList, BookOpen } from 'lucide-react';
 
-export type PageId = 'home' | 'library' | 'backtest' | 'settings' | 'mining_dashboard';
+export type PageId = 'home' | 'library' | 'backtest' | 'settings' | 'mining_dashboard' | 'tasks' | 'papers';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -26,6 +26,8 @@ export const Layout: React.FC<LayoutProps> = ({
     { id: 'home' as const, label: '因子挖掘', icon: Sparkles },
     { id: 'library' as const, label: '因子库', icon: Database },
     { id: 'backtest' as const, label: '回测', icon: BarChart3 },
+    { id: 'tasks' as const, label: '任务中心', icon: ClipboardList },
+    { id: 'papers' as const, label: '论文库', icon: BookOpen },
     { id: 'settings' as const, label: '设置', icon: SettingsIcon },
   ];
 
@@ -42,7 +44,7 @@ export const Layout: React.FC<LayoutProps> = ({
             <Sparkles className="h-4 w-4" />
           </div>
           <div>
-            <h1 className="text-sm font-black text-slate-800 m-0 tracking-tight leading-none">QuantaAlpha</h1>
+            <h1 className="text-sm font-black text-slate-800 m-0 tracking-tight leading-none">AutoAlpha</h1>
             <p className="text-[10px] font-bold text-slate-400 m-0 leading-none mt-1">智能因子挖掘平台</p>
           </div>
         </div>

@@ -113,3 +113,38 @@ def _make_request_model(model_name: str, params_field: str) -> type[BaseModel]:
 REQUEST_MODELS: dict[str, type[BaseModel]] = {
     name: _make_request_model(name, field) for name, field in MODEL_PARAMS_FIELD.items()
 }
+
+
+# OSS-ADAPT: 由 backend/shared/training/constraints.py 需要（因子数上下限按算力分类）。
+# 与企业版 per_model.py 同口径；training_node（CVM/远端路由）OSS 不需要，未移植。
+CPU_MODEL_TYPES = frozenset(
+    {
+        "lightgbm",
+        "xgboost",
+        "catboost",
+        "linear",
+        "random_forest",
+        "mlp",
+    }
+)
+GPU_MODEL_TYPES = frozenset(
+    {
+        "gru",
+        "lstm",
+        "alstm",
+        "transformer",
+        "tabnet",
+        "tcn",
+        "nativetft",
+    }
+)
+
+
+def training_compute(model_type: str) -> str:
+    """返回 cpu 或 gpu。未知模型抛出 ValueError。"""
+    name = str(model_type or "").strip().lower()
+    if name in GPU_MODEL_TYPES:
+        return "gpu"
+    if name in CPU_MODEL_TYPES:
+        return "cpu"
+    raise ValueError(f"未知模型，无法分类算力: {model_type}")

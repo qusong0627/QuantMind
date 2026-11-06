@@ -1,5 +1,5 @@
 /**
- * QuantaAlpha frontend-v2 API bridge
+ * AutoAlpha frontend-v2 API bridge
  *
  * The original frontend-v2 expected its own dedicated FastAPI backend with
  * endpoints like /api/v1/mining/start, /api/v1/factors, WS /ws/mining/{id}.
@@ -10,6 +10,10 @@
  */
 
 import { apiClient } from '../../../services/aiStrategyClients';
+import { authService } from '../../auth/services/authService';
+import { SERVICE_ENDPOINTS } from '../../../config/services';
+import { generateId } from '../utils-v2';
+import { requestResearchResult } from './researchRequestsApi';
 import type {
   ApiResponse,
   DataSummary,
@@ -22,6 +26,7 @@ import type {
   UniverseId,
   UniverseInfo,
   WsMessage,
+  StatisticalMiningOptions,
 } from '../types-v2';
 
 // ========================== Defaults ==========================
@@ -44,13 +49,13 @@ function makeOk<T>(data: T): ApiResponse<T> {
 
 function emptyMetrics(): RealtimeMetrics {
   return {
-    ic: 0,
-    icir: 0,
-    rankIc: 0,
-    rankIcir: 0,
-    annualReturn: 0,
-    sharpeRatio: 0,
-    maxDrawdown: 0,
+    ic: null,
+    icir: null,
+    rankIc: null,
+    rankIcir: null,
+    annualReturn: null,
+    sharpeRatio: null,
+    maxDrawdown: null,
     totalFactors: 0,
     highQualityFactors: 0,
     mediumQualityFactors: 0,
@@ -60,7 +65,7 @@ function emptyMetrics(): RealtimeMetrics {
 }
 
 export function classifyQuality(ic: number | null | undefined): 'high' | 'medium' | 'low' {
-  if (ic == null) return 'low';
+  if (ic == null || !Number.isFinite(ic)) return 'low';
   const v = Math.abs(ic);
   if (v >= 0.05) return 'high';
   if (v >= 0.02) return 'medium';
@@ -72,11 +77,16 @@ function normalizeTaskStatus(raw: string | undefined): TaskStatus {
     case 'completed':
       return 'completed';
     case 'failed':
-    case 'cancelled':
       return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    case 'stopping':
+      return 'stopping';
     case 'running':
-    case 'pending':
       return 'running';
+    case 'pending':
+    case 'queued':
+      return 'queued';
     default:
       return 'idle';
   }
@@ -84,6 +94,7 @@ function normalizeTaskStatus(raw: string | undefined): TaskStatus {
 
 const PHASE_MAP: Record<string, ExecutionPhase> = {
   pending: 'parsing',
+  queued: 'parsing',
   starting: 'parsing',
   scenario: 'parsing',
   hypothesis: 'planning',
@@ -122,6 +133,7 @@ function normalizeAgentTask(raw: any, configHint?: any): Task {
 
   return {
     taskId: raw?.task_id ?? raw?.taskId ?? '',
+    queuePosition: typeof raw?.queue_position === 'number' ? raw.queue_position : undefined,
     status,
     config: configHint ?? { userInput: '' },
     progress: {
@@ -130,13 +142,14 @@ function normalizeAgentTask(raw: any, configHint?: any): Task {
       totalRounds,
       progress: progressNum,
       message:
-        typeof raw?.progress === 'string'
+        status === 'queued'
+          ? (raw?.queue_position ? `排队中，第 ${raw.queue_position} 位；可取消排队` : '排队中，等待前序任务完成，可取消排队')
+          : typeof raw?.progress === 'string'
           ? raw.progress
           : raw?.error_message || (status === 'completed' ? '完成' : '运行中'),
       timestamp: raw?.updated_at ?? new Date().toISOString(),
     },
-    // 回测任务由 getBacktestStatus 把后端 factor 详情里的指标放进 raw.metrics；
-    // 此前这里无条件用 emptyMetrics() 覆盖，导致「回测结果」面板永远显示 0.0000 / --。
+    // 回测任务由 getBacktestStatus 把持久化 factor-job 结果里的指标放进 raw.metrics；
     // 保留后端给的字段（缺失的键保持 undefined，前端据此显示 "--" 而不是伪造 0）。
     metrics: (raw?.metrics && Object.keys(raw.metrics).length > 0
       ? raw.metrics
@@ -150,8 +163,14 @@ function normalizeAgentTask(raw: any, configHint?: any): Task {
   };
 }
 
+function metricNumber(value: unknown): number | null {
+  if (value == null || (typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function normalizeAgentFactor(raw: any): Factor {
-  const ic = raw?.ic_value ?? null;
+  const ic = metricNumber(raw?.ic_value);
   const meta = raw?.metadata ?? {};
   return {
     factorId: raw?.id ?? raw?.factor_id ?? '',
@@ -161,16 +180,21 @@ function normalizeAgentFactor(raw: any): Factor {
     quality: classifyQuality(ic),
     market: meta.market ?? raw?.market ?? undefined,
     universe: raw?.universe ?? meta.universe ?? undefined,
-    ic: ic ?? 0,
-    icir: meta.icir ?? 0,
-    rankIc: raw?.rank_ic ?? meta.rank_ic ?? 0,
-    rankIcir: 0,
-    sharpeRatio: raw?.sharpe_ratio ?? 0,
-    annualReturn: raw?.annual_return ?? 0,
-    maxDrawdown: raw?.max_drawdown ?? 0,
+    ic,
+    icir: metricNumber(raw?.icir ?? meta.icir),
+    rankIc: metricNumber(raw?.rank_ic ?? meta.rank_ic),
+    rankIcir: metricNumber(raw?.rank_icir ?? meta.rank_icir),
+    sharpeRatio: metricNumber(raw?.sharpe_ratio),
+    annualReturn: metricNumber(raw?.annual_return),
+    maxDrawdown: metricNumber(raw?.max_drawdown),
     round: meta.round ?? 0,
     direction: meta.direction ?? raw?.category ?? '',
     createdAt: raw?.created_at ?? '',
+    archivedAt: raw?.archived_at ?? null,
+    hasCode: typeof raw?.factor_code === 'string' && Boolean(raw.factor_code.trim()),
+    archiveReason: raw?.archive_reason ?? null,
+    tags: raw?.tags ?? undefined,
+    lifecycle: raw?.lifecycle ?? undefined,
   };
 }
 
@@ -178,53 +202,155 @@ function normalizeAgentFactor(raw: any): Factor {
 
 export interface MiningStartParams {
   direction: string;
+  algorithm?: 'rdagent' | 'statistical';
+  statisticalConfig?: StatisticalMiningOptions;
+  autoMaterialize?: boolean;
+  miningStart?: string;
+  miningEnd?: string;
+  validStart?: string;
+  validEnd?: string;
   market?: string;
   universe?: string;
   dataSource?: string;
-  numDirections?: number;
+  datasets?: string[];
+  freq?: 'day';
   maxRounds?: number;
-  maxLoops?: number;
-  factorsPerHypothesis?: number;
-  librarySuffix?: string;
-  qualityGateEnabled?: boolean;
-  parallelEnabled?: boolean;
   /** L1 因子类别方向（多选，label） */
   directions?: string[];
-  /** 类别选择模式：selected=取第一条，random=随机一条 */
-  directionMode?: 'selected' | 'random';
+  /** 类别选择模式：selected=取第一条，random=随机一条，quota=配额加权一条 */
+  directionMode?: 'selected' | 'random' | 'quota';
+}
+
+export interface MiningPreview {
+  algorithm: { key: string; name: string; version: string; uses_llm: boolean; uses_datasets: boolean };
+  market: string;
+  freq: string;
+  universe: string;
+  data_source: string;
+  loop_n: number;
+  direction: string;
+  directions: string[];
+  direction_mode: 'selected' | 'random' | 'quota';
+  direction_weighting?: 'blankness' | null;
+  direction_quota?: {
+    available: boolean;
+    n: number;
+    quota: { explore: number; exploit: number; mutate: number };
+    slots: { explore: number; exploit: number; mutate: number };
+    saturated_threshold: number;
+    recent_success_tasks: number;
+    directions: Array<{
+      direction: string; attempts: number; n_tasks: number; n_success: number;
+      p: number; dup_hits_90d: number; sat_penalty: number; score: number; saturated: boolean;
+    }>;
+    tiers: {
+      explore: { pool: string[]; weighting: string; fallback: string | null };
+      exploit: { pool: string[]; weighting: string; fallback: string | null };
+      mutate: { pool: string[]; weighting: string; fallback: string | null };
+    } | null;
+    recent_success_dirs: string[];
+    error: string | null;
+  } | null;
+  datasets: Record<string, string>;
+  window: {
+    mode: 'custom' | 'server_default';
+    mining?: [string, string];
+    train?: [string, string];
+    valid?: [string, string];
+    test?: [string, string];
+    oos?: [string, string] | null;
+  };
+  requires_llm: boolean;
+  statistical_config?: StatisticalMiningOptions | null;
+}
+
+function miningRequestBody(params: MiningStartParams) {
+  const loopN = params.maxRounds ?? 3;
+  if (params.algorithm === 'statistical') {
+    return {
+      ...params.statisticalConfig,
+      algorithm: 'statistical',
+      market: 'a_share',
+      universe: params.universe ?? 'all_a',
+      data_source: 'qlib_bin',
+      freq: params.freq ?? 'day',
+      mining_start: params.miningStart,
+      mining_end: params.miningEnd,
+      valid_start: params.validStart,
+      valid_end: params.validEnd,
+      auto_materialize: params.autoMaterialize ?? true,
+    };
+  }
+  return {
+    algorithm: 'rdagent',
+    market: params.market ?? 'a_share',
+    universe: params.universe ?? 'all_a',
+    loop_n: loopN,
+    direction: params.direction || '',
+    directions: params.directions?.filter((value) => value.trim()) ?? [],
+    direction_mode: params.directionMode ?? 'selected',
+    data_source: params.dataSource ?? 'qlib_bin',
+    freq: params.freq ?? 'day',
+    datasets: params.datasets,
+    mining_start: params.miningStart,
+    mining_end: params.miningEnd,
+    valid_start: params.validStart,
+    valid_end: params.validEnd,
+  };
+}
+
+export async function previewMining(
+  params: MiningStartParams,
+): Promise<ApiResponse<MiningPreview>> {
+  const res = await apiClient.post('/alpha-agent/preview', miningRequestBody(params));
+  return makeOk(res.data?.data as MiningPreview);
 }
 
 export async function startMining(
   params: MiningStartParams,
+  requestKey: string,
+  signal?: AbortSignal,
 ): Promise<ApiResponse<{ taskId: string; task: Task }>> {
-  const loopN = params.maxRounds ?? params.maxLoops ?? 3;
-  const qs = new URLSearchParams({
-    loop_n: String(loopN),
-    direction: params.direction || '',
+  const res = await apiClient.post('/alpha-agent/evolve', miningRequestBody(params), {
+    headers: { 'Idempotency-Key': requestKey },
+    signal,
   });
-  if (params.market) qs.set('market', params.market);
-  if (params.universe) qs.set('universe', params.universe);
-  if (params.dataSource) qs.set('data_source', params.dataSource);
-  for (const d of params.directions ?? []) {
-    if (d && d.trim()) qs.append('directions', d.trim());
-  }
-  if (params.directionMode) qs.set('direction_mode', params.directionMode);
-  const res = await apiClient.post(`/alpha-agent/evolve?${qs.toString()}`);
-  const data = res.data?.data ?? {};
+  return miningSubmissionResponse(res.data?.data ?? {}, params);
+}
+
+function miningSubmissionResponse(data: any, params: MiningStartParams): ApiResponse<{ taskId: string; task: Task }> {
   const taskId: string = data.task_id ?? '';
+  if (!taskId) throw new Error('提交响应缺少任务编号，请重试确认原提交');
   const task = normalizeAgentTask(
-    { task_id: taskId, status: data.status ?? 'pending' },
+    { ...data, task_id: taskId, status: data.status ?? 'queued' },
     {
       userInput: params.direction,
-      numDirections: params.numDirections,
-      maxRounds: loopN,
+      algorithm: params.algorithm ?? 'rdagent',
+      statisticalConfig: params.statisticalConfig,
+      miningStart: params.miningStart,
+      miningEnd: params.miningEnd,
+      validStart: params.validStart,
+      validEnd: params.validEnd,
+      maxRounds: params.maxRounds ?? 3,
       universe: params.universe,
-      librarySuffix: params.librarySuffix,
-      qualityGateEnabled: params.qualityGateEnabled,
-      parallelExecution: params.parallelEnabled,
+      datasets: params.datasets,
+      freq: params.freq ?? 'day',
     },
   );
   return makeOk({ taskId, task });
+}
+
+export async function findMiningSubmission(
+  params: MiningStartParams, requestKey: string, signal?: AbortSignal,
+): Promise<ApiResponse<{ taskId: string; task: Task }> | null> {
+  try {
+    const res = await apiClient.get('/alpha-agent/submissions/by-request-key', { params: { request_key: requestKey }, signal });
+    return miningSubmissionResponse(res.data?.data ?? {}, params);
+  } catch (failure) {
+    const status = (failure as { response?: { status?: number } }).response?.status;
+    if (status === 404) return null;
+    throw failure;
+  }
 }
 
 export async function getMiningStatus(
@@ -234,9 +360,11 @@ export async function getMiningStatus(
   return makeOk({ task: normalizeAgentTask(res.data?.data) });
 }
 
-export async function cancelMining(taskId: string): Promise<ApiResponse> {
-  await apiClient.post(`/alpha-agent/tasks/${taskId}/cancel`);
-  return makeOk({});
+export async function cancelMining(
+  taskId: string,
+): Promise<ApiResponse<{ status: 'cancelled' | 'stopping' }>> {
+  const res = await apiClient.post(`/alpha-agent/tasks/${taskId}/cancel`);
+  return makeOk({ status: res.data?.data?.status ?? 'stopping' });
 }
 
 export async function listTasks(): Promise<ApiResponse<{ tasks: Task[] }>> {
@@ -265,6 +393,7 @@ export async function getTaskLog(
 // ========================== Factor API ==========================
 
 export interface FactorListParams {
+  archived?: boolean;
   quality?: string;
   search?: string;
   limit?: number;
@@ -281,10 +410,13 @@ export interface FactorListResponse {
   offset: number;
   metadata?: any;
   libraries?: string[];
+  counts?: { total: number; high: number; medium: number; low: number };
+  archiveSupported?: boolean;
 }
 
 export async function getFactors(
   params: FactorListParams = {},
+  signal?: AbortSignal,
 ): Promise<ApiResponse<FactorListResponse>> {
   const qs = new URLSearchParams();
   // Backend caps `limit` at 200 — clamp client-side so callers requesting more
@@ -292,15 +424,21 @@ export async function getFactors(
   const requested = params.limit ?? 200;
   const clamped = Math.min(Math.max(requested, 1), 200);
   qs.set('limit', String(clamped));
+  qs.set('offset', String(Math.max(0, params.offset ?? 0)));
   if (params.market) qs.set('market', params.market);
   if (params.universe) qs.set('universe', params.universe);
-  const res = await apiClient.get(`/alpha-agent/factors?${qs.toString()}`);
+  if (params.archived) qs.set('archived', 'true');
+  if (params.search?.trim()) qs.set('search', params.search.trim());
+  if (params.quality && params.quality !== 'all') qs.set('quality', params.quality);
+  const res = await apiClient.get(`/alpha-agent/factors?${qs.toString()}`, { signal });
+  const data = res.data?.data ?? {};
+  const serverPagination = Number.isInteger(data.limit) && Number.isInteger(data.offset);
   let factors: Factor[] = (res.data?.data?.factors ?? []).map(normalizeAgentFactor);
 
-  if (params.quality) {
+  if (!serverPagination && params.quality) {
     factors = factors.filter((f) => f.quality === params.quality);
   }
-  if (params.search) {
+  if (!serverPagination && params.search) {
     const s = params.search.toLowerCase();
     factors = factors.filter(
       (f) =>
@@ -309,23 +447,26 @@ export async function getFactors(
         f.factorDescription.toLowerCase().includes(s),
     );
   }
-  const total = factors.length;
-  const offset = params.offset ?? 0;
-  if (params.limit) factors = factors.slice(offset, offset + params.limit);
+  const total = serverPagination ? data.total : factors.length;
+  const offset = serverPagination ? data.offset : (params.offset ?? 0);
+  if (!serverPagination && params.limit) factors = factors.slice(offset, offset + params.limit);
 
   return makeOk({
     factors,
     total,
-    limit: params.limit ?? total,
+    limit: serverPagination ? data.limit : (params.limit ?? total),
     offset,
+    counts: data.counts,
+    archiveSupported: data.archive_supported === true,
     libraries: ['default'],
   });
 }
 
 export async function getFactorDetail(
   factorId: string,
+  signal?: AbortSignal,
 ): Promise<ApiResponse<{ factor: any }>> {
-  const res = await apiClient.get(`/alpha-agent/factors/${factorId}`);
+  const res = await apiClient.get(`/alpha-agent/factors/${encodeURIComponent(factorId)}`, { signal });
   const raw = res.data?.data ?? {};
   return makeOk({ factor: { ...normalizeAgentFactor(raw), raw } });
 }
@@ -335,24 +476,24 @@ export interface FactoryFactor {
   factorId: string;
   factorName: string;
   factorExpression: string;
-  ic: number;
-  icir: number;
-  coverage: number;
+  ic: number | null;
+  icir: number | null;
+  coverage: number | null;
   field: string;
 }
 
-export async function getFactoryFactors(): Promise<
+export async function getFactoryFactors(signal?: AbortSignal): Promise<
   ApiResponse<{ factors: FactoryFactor[]; generatedAt: string | null }>
 > {
-  const res = await apiClient.get(`/alpha-agent/factory-factors`);
+  const res = await apiClient.get(`/alpha-agent/factory-factors`, { signal });
   const data = res.data?.data ?? {};
   const factors: FactoryFactor[] = (data.factors ?? []).map((raw: any) => ({
     factorId: raw.factor_id ?? '',
     factorName: raw.factor_name ?? 'unnamed',
     factorExpression: raw.factor_expression ?? raw.factor_formulation ?? '',
-    ic: raw.ic_value ?? 0,
-    icir: raw.metadata?.icir ?? raw.icir ?? 0,
-    coverage: raw.metadata?.coverage ?? raw.coverage ?? 0,
+    ic: metricNumber(raw.ic_value),
+    icir: metricNumber(raw.metadata?.icir ?? raw.icir),
+    coverage: metricNumber(raw.metadata?.coverage ?? raw.coverage),
     field: raw.metadata?.field ?? '',
   }));
   return makeOk({ factors, generatedAt: data.generated_at ?? null });
@@ -360,9 +501,11 @@ export async function getFactoryFactors(): Promise<
 
 export async function explainFactor(
   factorId: string,
-): Promise<ApiResponse<{ explanation: string; cached: boolean }>> {
-  const res = await apiClient.post(`/alpha-agent/factors/${factorId}/explain`);
-  return makeOk(res.data?.data ?? { explanation: '', cached: false });
+  signal?: AbortSignal,
+): Promise<ApiResponse<{ explanation: string; cached: boolean; source_revision_no?: number | null }>> {
+  const data = await requestResearchResult<{ explanation: string; cached: boolean; source_revision_no?: number | null }>(`/alpha-agent/factors/${encodeURIComponent(factorId)}/explain`, undefined, signal);
+  if (!data || typeof data.explanation !== 'string' || !data.explanation.trim()) throw new Error('因子解释响应无效');
+  return makeOk(data);
 }
 
 export async function exportFactorToIde(
@@ -372,30 +515,16 @@ export async function exportFactorToIde(
   return makeOk(res.data?.data ?? {});
 }
 
-/** 回测可选的因子项（下拉显示 name，提交用 id） */
-export interface FactorLibraryOption {
-  id: string;
-  name: string;
-  ic: number | null;
-  status: string;
-}
-
 export async function listFactorLibraries(): Promise<
-  ApiResponse<{ libraries: FactorLibraryOption[] }>
+  ApiResponse<{ libraries: string[] }>
 > {
   try {
-    const res = await apiClient.get(`/alpha-agent/factors?limit=200`);
+    const res = await apiClient.get(`/alpha-agent/factors`);
     const rawFactors: any[] = res.data?.data?.factors ?? [];
-    // 下拉项以因子为单位：显示 factor_name，值用 factor_id。
-    // 此前只回显裸 id（如 1897d59bf8cc143d3c339b5f105d2efd），用户无法判断是哪个因子。
-    const libraries: FactorLibraryOption[] = rawFactors
-      .map((f: any) => ({
-        id: String(f.factor_id ?? f.id ?? ''),
-        name: String(f.factor_name ?? f.name ?? ''),
-        ic: typeof f.ic_value === 'number' ? f.ic_value : null,
-        status: String(f.status ?? ''),
-      }))
-      .filter((o: FactorLibraryOption) => o.id.length > 0);
+    // Extract unique factor IDs as library identifiers
+    const libraries: string[] = rawFactors
+      .map((f: any) => f.id ?? f.factor_id ?? '')
+      .filter((id: string) => id.length > 0);
     return makeOk({ libraries });
   } catch {
     return makeOk({ libraries: [] });
@@ -497,7 +626,7 @@ export interface BacktestStartParams {
   factorSource?: string;
   configPath?: string;
   universe?: string;
-  dataSource?: 'qlib_bin' | 'h5';
+  dataSource?: 'qlib_bin';
   /** 回测窗口起止（YYYY-MM-DD）；缺省后端默认近一年 */
   startDate?: string;
   endDate?: string;
@@ -513,23 +642,30 @@ export async function startBacktest(
       error: '回测需要 factorId — 请在因子库中选择一个已生成的因子。',
     } as ApiResponse<any>;
   }
-  const qs = new URLSearchParams();
-  if (params.universe) qs.set('universe', params.universe);
-  if (params.dataSource) qs.set('data_source', params.dataSource);
-  if (params.startDate) qs.set('start_date', params.startDate);
-  if (params.endDate) qs.set('end_date', params.endDate);
-  const query = qs.toString();
+  const idempotencyKey = generateId();
   const res = await apiClient.post(
-    `/alpha-agent/factors/${factorId}/backtest${query ? `?${query}` : ''}`,
+    '/alpha-agent/factor-jobs',
+    {
+      factor_id: factorId,
+      kind: 'backtest',
+      ...(params.universe ? { universe: params.universe } : {}),
+      ...(params.startDate ? { start_date: params.startDate } : {}),
+      ...(params.endDate ? { end_date: params.endDate } : {}),
+      data_source: params.dataSource ?? 'qlib_bin',
+    },
+    { headers: { 'Idempotency-Key': idempotencyKey } },
   );
   const data = res.data?.data ?? {};
-  const taskId = data.factor_id ?? factorId;
+  const taskId = data.job_id;
+  if (typeof taskId !== 'string' || !taskId) {
+    return { success: false, error: '后端没有返回有效的回测作业 ID。' } as ApiResponse<any>;
+  }
   return makeOk({
     taskId,
     task: normalizeAgentTask({
       task_id: taskId,
-      status: data.status ?? 'running',
-      progress: data.message,
+      status: data.status ?? 'queued',
+      progress: data.progress_snapshot?.message ?? '已加入回测队列',
     }),
   });
 }
@@ -538,37 +674,21 @@ export async function getBacktestStatus(
   taskId: string,
 ): Promise<ApiResponse<{ task: Task }>> {
   try {
-    const res = await apiClient.get(`/alpha-agent/factors/${taskId}`);
+    const res = await apiClient.get(`/alpha-agent/factor-jobs/${encodeURIComponent(taskId)}`);
     const raw = res.data?.data ?? {};
-    // Map backend status correctly: 'failed' should map to 'failed', not 'running'
-    const rawStatus: string = raw.status ?? '';
-    const status: string =
-      rawStatus === 'completed' ? 'completed' :
-      rawStatus === 'failed' || rawStatus === 'cancelled' ? 'failed' :
-      'running';
-    // Extract metrics from factor detail response
+    const sourceMetrics = raw.result_snapshot?.metrics ?? {};
     const metrics: Record<string, any> = {};
-    if (raw.ic_value != null) metrics.ic = raw.ic_value;
-    if (raw.sharpe_ratio != null) metrics.sharpeRatio = raw.sharpe_ratio;
-    if (raw.annual_return != null) metrics.annualReturn = raw.annual_return;
-    if (raw.max_drawdown != null) metrics.maxDrawdown = raw.max_drawdown;
-    if (raw.rank_ic != null) metrics.rankIc = raw.rank_ic;
-    // ICIR / Rank ICIR 不是表字段，落在 metadata_json（挖掘阶段写入 icir / rank_icir）
-    const meta = raw.metadata ?? {};
-    const asNum = (v: any): number | null => {
-      if (typeof v === 'number') return v;
-      if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return Number(v);
-      return null;
-    };
-    const icir = asNum(meta.icir);
-    const rankIcir = asNum(meta.rank_icir);
-    if (icir != null) metrics.icir = icir;
-    if (rankIcir != null) metrics.rankIcir = rankIcir;
+    if (sourceMetrics.ic_mean != null) metrics.ic = sourceMetrics.ic_mean;
+    if (sourceMetrics.rank_ic_median != null) metrics.rankIc = sourceMetrics.rank_ic_median;
+    if (sourceMetrics.icir != null) metrics.icir = sourceMetrics.icir;
+    if (sourceMetrics.sharpe_ratio != null) metrics.sharpeRatio = sourceMetrics.sharpe_ratio;
+    if (sourceMetrics.annual_return != null) metrics.annualReturn = sourceMetrics.annual_return;
+    if (sourceMetrics.max_drawdown != null) metrics.maxDrawdown = sourceMetrics.max_drawdown;
     return makeOk({
       task: normalizeAgentTask({
         task_id: taskId,
-        status,
-        progress: status === 'completed' ? 'Backtest done' : 'Running',
+        status: raw.status ?? 'failed',
+        progress: raw.progress_snapshot?.message ?? raw.error_message,
         metrics: Object.keys(metrics).length > 0 ? metrics : undefined,
       }),
     });
@@ -577,8 +697,11 @@ export async function getBacktestStatus(
   }
 }
 
-export async function cancelBacktest(_taskId: string): Promise<ApiResponse> {
-  return makeOk({});
+export async function cancelBacktest(taskId: string): Promise<ApiResponse> {
+  const res = await apiClient.post(
+    `/alpha-agent/factor-jobs/${encodeURIComponent(taskId)}/cancel`,
+  );
+  return makeOk(res.data?.data ?? {});
 }
 
 // ========================== LLM Config ==========================
@@ -586,8 +709,8 @@ export async function cancelBacktest(_taskId: string): Promise<ApiResponse> {
 export interface LlmConfigStatus {
   configured: boolean;
   reason?: string;
-  /** 配置来源：env=服务器环境变量，user_profile=个人中心 AI 服务配置 */
-  source?: 'env' | 'user_profile';
+  /** 配置来源：系统统一维护的服务器环境变量。 */
+  source?: 'env';
   provider?: string;
   model?: string;
   base_url?: string;
@@ -636,6 +759,8 @@ export function connectMiningWs(
     send: (_data: string) => {},
     close: () => {
       stopped = true;
+      logStream?.close();
+      logStream = null;
       fakeWs.readyState = 3;
       onClose?.();
     },
@@ -647,6 +772,7 @@ export function connectMiningWs(
   let lastPct = -1;
   let lastFactorsCount = -1;
   let logOffset = 0;
+  let logBootstrapped = false;
 
   // Regex to parse RD-Agent log lines like:
   // 2026-05-31 00:30:41,967 [INFO] LiteLLM: completion() model=...
@@ -679,11 +805,12 @@ export function connectMiningWs(
     const trimmed = line.trim();
     if (!trimmed) return null;
     // Skip ANSI escape codes
-    const clean = trimmed.replace(/\x1b\[[0-9;]*m/g, '').replace(/\[0m/g, '');
+    const escapeCode = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+    const clean = trimmed.replace(escapeCode, '').replace(/\[0m/g, '');
     // Skip very short lines (just timestamps, brackets)
     if (clean.length < 10) return null;
     // Skip repetitive prompt template lines
-    if (clean.startsWith('# daily_pv.h5')) return null;
+    if (clean.startsWith('# daily_pv.parquet')) return null;
     if (clean.startsWith('## File Type')) return null;
     if (clean.startsWith('## Content Overview')) return null;
     if (clean.startsWith('#### All Columns:')) return null;
@@ -698,6 +825,44 @@ export function connectMiningWs(
     // Keep everything else
     return clean;
   }
+
+  const emitLogLines = (lines: string[]) => {
+    for (const rawLine of lines) {
+      const filtered = filterLogLine(rawLine);
+      if (!filtered) continue;
+      onMessage({
+        type: 'log',
+        taskId,
+        data: {
+          id: `${taskId}-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: extractTimestamp(rawLine),
+          level: classifyLogLine(rawLine),
+          message: filtered,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+
+  let logStream: { close: () => void } | null = null;
+  let logStreamDenied = false;
+  try {
+    logStream = openMiningLogStream(taskId, {
+      onLines: (lines) => {
+        if (!stopped) emitLogLines(lines);
+      },
+      onDone: () => {},
+      onError: () => {
+        // 代理或网络不支持流式：退回增量轮询，保证历史不丢。
+        logStreamDenied = true;
+        logStream?.close();
+        logStream = null;
+      },
+    });
+  } catch {
+    logStream = null;
+  }
+  if (!logStream) logStreamDenied = true;
 
   const poll = async () => {
     if (stopped) return;
@@ -748,6 +913,8 @@ export function connectMiningWs(
             totalRounds,
             progress: progressPct,
             message: progressText || status,
+            status: normalizeTaskStatus(status),
+            queuePosition: data.queue_position,
             timestamp: new Date().toISOString(),
             timeline: data.timeline ?? undefined,
             tokenUsage: data.token_usage ?? undefined,
@@ -760,10 +927,12 @@ export function connectMiningWs(
           onMessage({
             type: 'result',
             taskId,
-            data: { status: status === 'completed' ? 'completed' : 'failed' },
+            data: { status },
             timestamp: new Date().toISOString(),
           });
           stopped = true;
+          logStream?.close();
+          logStream = null;
           fakeWs.readyState = 3;
           onClose?.();
           return;
@@ -771,29 +940,31 @@ export function connectMiningWs(
       }
 
       // 2. Poll detailed subprocess logs (rich output)
-      try {
-        const logRes = await apiClient.get(
-          `/alpha-agent/tasks/${taskId}/log?tail=500&offset=${logOffset}`,
-        );
-        const logData = logRes.data?.data ?? {};
-        const lines: string[] = logData.lines ?? [];
+      //    SSE 可用时完全跳过这段，避免重复拉取与读放大。
+      if (logStreamDenied) try {
+        const fetchLog = async (offset: number) => {
+          const logRes = await apiClient.get(
+            `/alpha-agent/tasks/${taskId}/log?tail=500&offset=${offset}`,
+          );
+          return logRes.data?.data ?? {};
+        };
+        let logData = await fetchLog(logOffset);
+        let lines: string[] = logData.lines ?? [];
+        if (!logBootstrapped) {
+          // 首次绑定（含刷新后恢复）直接看最新 500 行，而不是从第 0 行
+          // 以每 2 秒 500 行的速度补历史，否则日志会长时间落后于实际进度。
+          logBootstrapped = true;
+          const total = Number(logData.total ?? lines.length);
+          if (total > 500 && lines.length < total) {
+            logData = await fetchLog(total - 500);
+            lines = logData.lines ?? [];
+          }
+          // 只把本次返回的行计入下方累加，最终对齐到 total
+          logOffset = total - lines.length;
+        }
         if (lines.length > 0) {
           logOffset += lines.length;
-          for (const rawLine of lines) {
-            const filtered = filterLogLine(rawLine);
-            if (!filtered) continue;
-            onMessage({
-              type: 'log',
-              taskId,
-              data: {
-                id: `${taskId}-log-${logOffset}-${Math.random().toString(36).slice(2, 6)}`,
-                timestamp: extractTimestamp(rawLine),
-                level: classifyLogLine(rawLine),
-                message: filtered,
-              },
-              timestamp: new Date().toISOString(),
-            });
-          }
+          emitLogLines(lines);
         }
       } catch {
         /* log endpoint may not exist yet — ignore */
@@ -808,4 +979,89 @@ export function connectMiningWs(
 
   fakeWs._pollingTimeoutId = setTimeout(poll, 100);
   return fakeWs as WebSocket;
+}
+
+// ========================== SSE log stream ==========================
+
+export interface MiningLogStreamHandle {
+  close: () => void;
+}
+
+/**
+ * 订阅挖掘任务日志（SSE，服务端按字节偏移增量读取，文件仍是事实源）。
+ *
+ * 返回 null 表示当前环境不支持流式，调用方应退回增量轮询。
+ */
+export function openMiningLogStream(
+  taskId: string,
+  handlers: {
+    onLines: (lines: string[]) => void;
+    onDone: () => void;
+    onError: () => void;
+  },
+): MiningLogStreamHandle | null {
+  if (typeof fetch !== 'function' || typeof AbortController !== 'function') {
+    return null;
+  }
+  const base = String(SERVICE_ENDPOINTS.AI_STRATEGY || '').replace(/\/+$/, '');
+  const url = `${base}/alpha-agent/tasks/${encodeURIComponent(taskId)}/log/stream?tail_lines=200`;
+  const controller = new AbortController();
+  let closed = false;
+  const token = authService.getAccessToken();
+  const headers: Record<string, string> = { Accept: 'text/event-stream' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  (async () => {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      if (!response.ok || !response.body) {
+        if (!closed) handlers.onError();
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done || closed) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() ?? '';
+        for (const frame of frames) {
+          const payload = frame
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .join('');
+          if (!payload) continue;
+          try {
+            const parsed = JSON.parse(payload) as {
+              lines?: unknown;
+              done?: unknown;
+            };
+            if (Array.isArray(parsed.lines)) {
+              handlers.onLines(parsed.lines.map((line) => String(line)));
+            }
+            if (parsed.done === true) handlers.onDone();
+          } catch {
+            // 心跳或无法解析的帧直接忽略
+          }
+        }
+      }
+    } catch {
+      if (!closed) handlers.onError();
+    }
+  })();
+
+  return {
+    close: () => {
+      closed = true;
+      controller.abort();
+    },
+  };
 }

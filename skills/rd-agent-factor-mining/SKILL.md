@@ -69,7 +69,7 @@ python3 scripts/alpha_agent/factor_pipeline.py --check-env
 2. `evolve` 启动演化 → 拿 `task_id`
 3. 轮询 `tasks/{id}` 直到 `completed`（打印 phase/loop/error）
 4. 收集本次 `task_id` 的因子（`metadata.task_id` 过滤）
-5. 逐个 `factor/{id}/backtest` 触发 → 轮询全部 completed
+5. 逐个 `factor/{id}/backtest` 触发 → 轮询全部 completed（生产批量建议改用持久化 `factor-jobs kind=batch`，见下节）
 6. 按 `|IC|` 排序打印排行榜
 7. 对 `--explain-top` 因子 `explain`（LLM 解读，写入报告）
 8. `--export` 最高分因子
@@ -135,7 +135,20 @@ curl -s -X POST -H "$AUTH" "$BASE/api/v1/alpha-agent/tasks/{task_id}/cancel"
 # 状态机: pending → running → backtesting → completed | failed
 ```
 
-### 因子回测（注意是 query 参数，不是 form）
+### 因子回测（持久化作业，推荐；瞬时回测见下）
+```bash
+IDEMPOTENCY_KEY=$(python -c 'import uuid; print(uuid.uuid4().hex)')
+curl -s -X POST "$BASE/api/v1/alpha-agent/factor-jobs" \
+  -H "$AUTH" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  --data '{"factor_id":"{factor_id}","kind":"backtest","start_date":"2025-01-01","end_date":"2026-08-21","universe":"csi300","data_source":"qlib_bin"}'
+# 从 data.job_id 取得 job_id；重试同一请求时复用 IDEMPOTENCY_KEY
+curl -s -H "$AUTH" "$BASE/api/v1/alpha-agent/factor-jobs/{job_id}"
+curl -s -X POST -H "$AUTH" "$BASE/api/v1/alpha-agent/factor-jobs/{job_id}/cancel"
+```
+作业状态和结果保存在持久化任务表中；批量/组合/物化见 `kind=batch|combo|materialize`，任务中心页可视化跟进。
+
+### 因子回测（瞬时，轻量验证用，注意是 query 参数，不是 form）
 ```bash
 curl -s -X POST -H "$AUTH" "$BASE/api/v1/alpha-agent/factors/{factor_id}/backtest?start_date=2025-01-01&end_date=2026-08-21&universe=csi300&data_source=qlib_bin"
 # factors 列表里 ic_value/sharpe_ratio/rank_ic 回测完成后回填；status 变 completed

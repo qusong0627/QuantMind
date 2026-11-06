@@ -1,660 +1,811 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '../components-v2/ui/Card';
-import { Button } from '../components-v2/ui/Button';
-import { Badge } from '../components-v2/ui/Badge';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertCircle, BarChart3, CheckCircle2, Clock3, FileDown, Loader2, RefreshCw, Square, Trash2 } from 'lucide-react';
+import { useAppSelector } from '../../../store';
+import { getSessionGeneration, registerSessionReset } from '../../../store/sessionBoundary';
+import { getFactorDetail, getFactors } from '../services-v2/api';
 import {
-  Play,
-  Square,
-  Loader2,
-  FileText,
-  TrendingUp,
-  AlertCircle,
-  Info,
-  ChevronDown,
-  Clock,
-  BarChart3,
-  RefreshCw,
-  CheckCircle2,
-} from 'lucide-react';
-import {
-  getFactors,
-  listFactorLibraries,
-  getUniverses,
-} from '../services-v2/api';
-import type { FactorLibraryOption } from '../services-v2/api';
-import type { UniverseId, UniverseInfo } from '../types-v2';
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from 'recharts';
-import { formatDate, formatNumber, formatPercent } from '../utils-v2';
-
-// ... (existing MetricCard component)
-
-const CumulativeReturnChart: React.FC<{ data: { date: string; value: number }[] }> = ({ data }) => {
-  if (!data || data.length === 0) return null;
-
-  // Generate ticks for every 6 months
-  const ticks = [];
-  if (data.length > 0) {
-    const startDate = new Date(data[0].date);
-    const endDate = new Date(data[data.length - 1].date);
-    let currentDate = new Date(startDate);
-    
-    // Align to start of month
-    currentDate.setDate(1);
-    
-    while (currentDate <= endDate) {
-      ticks.push(currentDate.toISOString().split('T')[0]);
-      // Add 6 months
-      currentDate.setMonth(currentDate.getMonth() + 6);
-    }
-  }
-
-  const CustomTooltip = ({ active, payload, label }: any) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="glass-strong rounded-lg p-3 shadow-xl border border-border/50">
-          <p className="text-xs text-muted-foreground mb-1">{formatDate(label)}</p>
-          <p className="text-sm font-bold text-primary">
-            Excess Return: {formatPercent(payload[0].value)}
-          </p>
-        </div>
-      );
-    }
-    return null;
-  };
-
-  return (
-    <div className="h-[300px] w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-          <defs>
-            <linearGradient id="colorReturn" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#10B981" stopOpacity={0.3} />
-              <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.2} vertical={false} />
-          <XAxis 
-            dataKey="date" 
-            tick={{ fill: '#9CA3AF', fontSize: 11 }}
-            tickLine={false}
-            axisLine={false}
-            ticks={ticks}
-            tickFormatter={(value) => formatDate(value).split('/').slice(0, 2).join('/')} 
-          />
-          <YAxis 
-            tick={{ fill: '#9CA3AF', fontSize: 11 }}
-            tickLine={false}
-            axisLine={false}
-            tickFormatter={(value) => `${(value * 100).toFixed(0)}%`}
-          />
-          <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#374151', strokeWidth: 1, strokeDasharray: '4 4' }} />
-          <Area
-            type="monotone"
-            dataKey="value"
-            stroke="#10B981"
-            strokeWidth={2}
-            fill="url(#colorReturn)"
-            animationDuration={1000}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-};
-
+  cancelFactorJob,
+  deleteFactorJob,
+  downloadFactorJobReport,
+  listFactorJobs,
+  submitFactorBatch,
+  submitFactorJob,
+  type FactorBacktestSeries,
+  type FactorJob,
+} from '../services-v2/factorJobsApi';
+import type { Factor } from '../types-v2';
+import { formatDateTime, formatNumber, formatPercent } from '../utils-v2';
 import { useTaskContext } from '../context-v2/TaskContext';
+import { Badge } from '../components-v2/ui/Badge';
+import { Button } from '../components-v2/ui/Button';
+import { Card, CardContent, CardHeader, CardTitle } from '../components-v2/ui/Card';
 
-// ========================== Component ==========================
+const UNIVERSES = [
+  ['csi300', '沪深300'],
+  ['csi500', '中证500'],
+  ['csi1000', '中证1000'],
+  ['sse50', '上证50'],
+  ['gem', '创业板指'],
+  ['star', '科创50'],
+  ['csi800', '中证800'],
+  ['all_a', '全部A股'],
+] as const;
 
-// Helper component for metrics
-const MetricCard = ({ label, value, unit = '' }: { label: string; value?: number; unit?: string }) => (
-  <div className="bg-secondary/30 rounded-lg p-3">
-    <div className="text-xs text-muted-foreground mb-1">{label}</div>
-    <div className="text-lg font-bold font-mono">
-      {typeof value === 'number' 
-        ? `${formatNumber(value, 4)}${unit}`
-        : '--'}
-    </div>
-  </div>
-);
+const ACTIVE = new Set(['queued', 'running', 'stopping']);
+const FACTOR_PAGE_SIZE = 50;
 
-export const BacktestPage: React.FC = () => {
-  const {
-    backendAvailable,
-    backtestTask: task,
-    backtestLogs: logs,
-    startBacktestTask,
-    stopBacktestTask,
-  } = useTaskContext();
+function statusLabel(status: string): string {
+  return ({
+    queued: '排队中',
+    running: '运行中',
+    stopping: '停止中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+  } as Record<string, string>)[status] ?? status;
+}
 
-  // -- Local UI State --
-  const [libraries, setLibraries] = useState<FactorLibraryOption[]>([]);
-  // Initialize with saved library from localStorage if available
-  const [selectedLibrary, setSelectedLibrary] = useState(localStorage.getItem('quantaalpha_active_library') || '');
-  const [factorSource, setFactorSource] = useState<'custom' | 'combined'>('custom');
-  const [universe, setUniverse] = useState<UniverseId>('csi300');
-  const [dataSource, setDataSource] = useState<'qlib_bin' | 'h5'>('qlib_bin');
-  const [universes, setUniverses] = useState<UniverseInfo[]>([]);
-  const [factorCount, setFactorCount] = useState(0);
-  const [isStarting, setIsStarting] = useState(false);
-  const logsEndRef = useRef<HTMLDivElement>(null);
+function statusVariant(status: string): 'default' | 'success' | 'warning' | 'destructive' | 'outline' {
+  if (status === 'completed') return 'success';
+  if (status === 'failed') return 'destructive';
+  if (status === 'queued' || status === 'stopping') return 'warning';
+  return 'outline';
+}
 
-  // -- Load libraries (on mount + manual refresh) --
-  const [libsLoading, setLibsLoading] = useState(false);
-  const loadLibraries = useCallback(async () => {
-    setLibsLoading(true);
+function metricLabel(value: unknown, percent = false): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  return percent ? formatPercent(value) : formatNumber(value, 4);
+}
+
+/**
+ * 取第一个有效指标。RD-Agent 功能因子产出 ic_value/rank_ic，
+ * 统计派与批量任务产出 ic_mean/rank_ic_median；只认一种会让已完成的
+ * 回测在界面上显示「—」。
+ */
+function pickMetric(metrics: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    const value = metrics?.[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+export const BacktestPage: React.FC<{ initialFactorId?: string }> = ({ initialFactorId }) => {
+  const { backendAvailable } = useTaskContext();
+  const isAuthenticated = useAppSelector((state) => state.auth.isAuthenticated);
+  const isAuthenticating = useAppSelector((state) => state.auth.isLoading);
+  const [factors, setFactors] = useState<Factor[]>([]);
+  const [factorSearch, setFactorSearch] = useState('');
+  const [factorOffset, setFactorOffset] = useState(0);
+  const [factorTotal, setFactorTotal] = useState(0);
+  const [factorsLoading, setFactorsLoading] = useState(true);
+  const [factorError, setFactorError] = useState('');
+  const factorCache = useRef(new Map<string, Factor>());
+  const factorController = useRef<AbortController | null>(null);
+  const [jobs, setJobs] = useState<FactorJob[]>([]);
+  const [factorId, setFactorId] = useState(initialFactorId || '');
+  const [selectedFactor, setSelectedFactor] = useState<Factor | null>(null);
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchFactorIds, setBatchFactorIds] = useState<string[]>([]);
+  const factorIdRef = useRef(initialFactorId || '');
+  const [jobKind, setJobKind] = useState<'backtest' | 'validate'>('backtest');
+  const [universe, setUniverse] = useState('csi300');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [cancelling, setCancelling] = useState('');
+  const [deleting, setDeleting] = useState('');
+  const [pendingDelete, setPendingDelete] = useState<FactorJob | null>(null);
+  const [downloadingReport, setDownloadingReport] = useState('');
+  const [error, setError] = useState('');
+  const [sessionEpoch, setSessionEpoch] = useState(() => getSessionGeneration());
+  const requestEpoch = useRef(0);
+  const controllers = useRef(new Set<AbortController>());
+
+  useEffect(() => {
+    factorIdRef.current = factorId;
+  }, [factorId]);
+
+  useEffect(() => {
+    if (!pendingDelete) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPendingDelete(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [pendingDelete]);
+
+  useEffect(() => registerSessionReset(() => {
+    requestEpoch.current += 1;
+    controllers.current.forEach((controller) => controller.abort());
+    controllers.current.clear();
+    factorController.current?.abort();
+    factorCache.current.clear();
+    factorIdRef.current = '';
+    setFactors([]);
+    setSelectedFactor(null);
+    setFactorSearch('');
+    setFactorOffset(0);
+    setFactorTotal(0);
+    setFactorsLoading(false);
+    setFactorError('');
+    setJobs([]);
+    setFactorId('');
+    setBatchFactorIds([]);
+    setBatchMode(false);
+    setJobKind('backtest');
+    setDownloadingReport('');
+    setDeleting('');
+    setPendingDelete(null);
+    setError('');
+    setLoading(true);
+    setSessionEpoch(getSessionGeneration());
+  }), []);
+
+  const loadFactors = useCallback(async () => {
+    const generation = getSessionGeneration();
+    factorController.current?.abort();
+    const controller = new AbortController();
+    factorController.current = controller;
+    setFactorsLoading(true);
     try {
-      const resp = await listFactorLibraries();
-      if (resp.success && resp.data) {
-        const libs = resp.data.libraries || [];
-        setLibraries(libs);
-        // Auto-select first if current selection is empty or removed
-        if (libs.length > 0 && (!selectedLibrary || !libs.some(l => l.id === selectedLibrary))) {
-          setSelectedLibrary(libs[0].id);
-        }
+      const response = await getFactors({ limit: FACTOR_PAGE_SIZE, offset: factorOffset, search: factorSearch }, controller.signal);
+      if (controller.signal.aborted || generation !== getSessionGeneration()) return;
+      const rows = (response.data?.factors ?? []).filter((factor) => !factor.readOnly);
+      rows.forEach((factor) => factorCache.current.set(factor.factorId, factor));
+      setFactors(rows);
+      setFactorTotal(response.data?.total ?? 0);
+      setFactorError('');
+      if (!factorIdRef.current && rows[0]) {
+        factorIdRef.current = rows[0].factorId;
+        setFactorId(rows[0].factorId);
       }
-    } catch {
-      // ignore — backend might not be up yet
-    }
-    setLibsLoading(false);
-  }, [selectedLibrary]);
-
-  // Init on mount
-  const initDone = useRef(false);
-  useEffect(() => {
-    if (initDone.current) return;
-    initDone.current = true;
-    loadLibraries();
-    getUniverses()
-      .then((res) => setUniverses(res.data?.universes ?? []))
-      .catch(() => {});
-  }, [loadLibraries]);
-
-  // Load factor count when library changes
-  useEffect(() => {
-    if (!selectedLibrary) return;
-    (async () => {
-      try {
-        const resp = await getFactors({ limit: 500 });
-        if (resp.success && resp.data) {
-          setFactorCount(resp.data.total || 0);
-        }
-      } catch { /* ignore */ }
-    })();
-  }, [selectedLibrary]);
-
-  // Auto-scroll logs
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
-
-  // -- Start backtest --
-  const handleStart = async () => {
-    if (!selectedLibrary) return;
-    setIsStarting(true);
-    try {
-      await startBacktestTask({
-        factorId: selectedLibrary,
-        factorSource,
-        universe,
-        dataSource,
-      });
-    } catch (err: any) {
-      console.error('Failed to start backtest:', err);
+    } catch (cause) {
+      if (!controller.signal.aborted && generation === getSessionGeneration()) {
+        setFactorError(cause instanceof Error ? cause.message : '因子列表加载失败');
+      }
     } finally {
-      setIsStarting(false);
+      if (!controller.signal.aborted && generation === getSessionGeneration()) setFactorsLoading(false);
+    }
+  }, [factorSearch, factorOffset]);
+
+  useEffect(() => {
+    if (!isAuthenticated || isAuthenticating) return;
+    const timer = window.setTimeout(() => void loadFactors(), 250);
+    return () => { window.clearTimeout(timer); factorController.current?.abort(); };
+  }, [isAuthenticated, isAuthenticating, sessionEpoch, loadFactors]);
+
+  // A factor opened from another page may fall outside the current search page.
+  useEffect(() => {
+    setSelectedFactor(null);
+    if (!isAuthenticated || isAuthenticating || !factorId) return;
+    const cached = factorCache.current.get(factorId);
+    if (cached) { setSelectedFactor(cached); return; }
+    const generation = getSessionGeneration();
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    void getFactorDetail(factorId, controller.signal).then((response) => {
+      if (controller.signal.aborted || generation !== getSessionGeneration()) return;
+      const factor = response.data?.factor as Factor | undefined;
+      if (!factor || factor.readOnly || factor.archivedAt) throw new Error('所选因子当前不可用于回测');
+      factorCache.current.set(factor.factorId, factor);
+      setSelectedFactor(factor);
+    }).catch((cause) => {
+      if (!controller.signal.aborted && generation === getSessionGeneration()) setFactorError(cause instanceof Error ? cause.message : '所选因子读取失败');
+    }).finally(() => controllers.current.delete(controller));
+    return () => { controller.abort(); controllers.current.delete(controller); };
+  }, [factorId, isAuthenticated, isAuthenticating, sessionEpoch, factors]);
+
+  const loadJobs = useCallback(async (signal?: AbortSignal) => {
+    const generation = getSessionGeneration();
+    const requestId = requestEpoch.current;
+    try {
+      const rows = await listFactorJobs(signal);
+      if (generation !== getSessionGeneration() || requestId !== requestEpoch.current) return;
+      setJobs(rows.filter((job) => job.kind === 'backtest' || job.kind === 'validate'));
+      setError('');
+    } catch (cause) {
+      if (signal?.aborted) return;
+      if (generation === getSessionGeneration() && requestId === requestEpoch.current) {
+        setError(cause instanceof Error ? cause.message : '回测任务读取失败');
+      }
+    } finally {
+      if (!signal?.aborted && generation === getSessionGeneration()) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const activeControllers = controllers.current;
+    if (!isAuthenticated || isAuthenticating) {
+      setFactors([]);
+      setJobs([]);
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    void loadJobs(controller.signal);
+    const timer = window.setInterval(() => {
+      const next = new AbortController();
+      controllers.current.add(next);
+      void loadJobs(next.signal).finally(() => controllers.current.delete(next));
+    }, 5000);
+    return () => {
+      window.clearInterval(timer);
+      activeControllers.forEach((requestController) => requestController.abort());
+      activeControllers.clear();
+    };
+  }, [isAuthenticated, isAuthenticating, sessionEpoch, loadJobs]);
+  const refresh = useCallback(() => {
+    setLoading(true);
+    void loadFactors();
+    void loadJobs();
+  }, [loadFactors, loadJobs]);
+
+  const submit = async () => {
+    const selectedFactorIds = batchMode ? batchFactorIds : [factorId];
+    if (selectedFactorIds.some((id) => !id)) {
+      setError('请先选择本人因子');
+      return;
+    }
+    if (!batchMode && (!selectedFactor || selectedFactor.factorId !== factorId)) {
+      setError('请等待所选因子读取成功，或重新选择本人因子');
+      return;
+    }
+    if (batchMode && (selectedFactorIds.length < 2 || selectedFactorIds.length > 20)) {
+      setError('批量运行需要选择 2 至 20 个本人因子');
+      return;
+    }
+    if ((jobKind === 'validate' && (!startDate || !endDate)) || Boolean(startDate) !== Boolean(endDate) || (startDate && startDate > endDate)) {
+      setError(jobKind === 'validate' ? '样本外验证必须填写完整日期区间' : '请填写完整且有效的回测日期区间');
+      return;
+    }
+    setSubmitting(true);
+    setError('');
+    const generation = getSessionGeneration();
+    try {
+      const request = {
+        kind: jobKind,
+        universe,
+        ...(startDate ? { start_date: startDate, end_date: endDate } : {}),
+        data_source: 'qlib_bin',
+      } as const;
+      if (batchMode) {
+        await submitFactorBatch({ ...request, factor_ids: selectedFactorIds });
+      } else {
+        await submitFactorJob({ ...request, factor_id: factorId });
+      }
+      if (generation !== getSessionGeneration()) return;
+      await loadJobs();
+    } catch (cause) {
+      if (generation === getSessionGeneration()) {
+        setError(cause instanceof Error ? cause.message : '回测任务提交失败');
+      }
+    } finally {
+      if (generation === getSessionGeneration()) setSubmitting(false);
     }
   };
 
-  // -- Cancel backtest --
-  const handleCancel = async () => {
-    stopBacktestTask();
+  const cancel = async (job: FactorJob) => {
+    setCancelling(job.job_id);
+    const generation = getSessionGeneration();
+    try {
+      await cancelFactorJob(job.job_id);
+      if (generation !== getSessionGeneration()) return;
+      await loadJobs();
+    } catch (cause) {
+      if (generation === getSessionGeneration()) {
+        setError(cause instanceof Error ? cause.message : '取消请求失败');
+      }
+    } finally {
+      if (generation === getSessionGeneration()) setCancelling('');
+    }
   };
 
-  const isRunning = task?.status === 'running';
-  const isFinished = task?.status === 'completed' || task?.status === 'failed' || task?.status === 'cancelled';
+  const remove = async (job: FactorJob) => {
+    const generation = getSessionGeneration();
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    setDeleting(job.job_id);
+    try {
+      await deleteFactorJob(job.job_id, controller.signal);
+      if (!controller.signal.aborted && generation === getSessionGeneration()) {
+        setJobs((prev) => prev.filter((item) => item.job_id !== job.job_id));
+        setPendingDelete(null);
+      }
+    } catch (cause) {
+      if (!controller.signal.aborted && generation === getSessionGeneration()) {
+        setError(cause instanceof Error ? cause.message : '清除记录失败');
+        // 关闭弹窗，错误统一走页面顶部提示（防重复提交也依赖它）。
+        setPendingDelete(null);
+      }
+    } finally {
+      controllers.current.delete(controller);
+      if (generation === getSessionGeneration()) setDeleting('');
+    }
+  };
 
-  // -- Render metric card --
-  const MetricCard = ({ label, value, unit }: { label: string; value: any; unit?: string }) => (
-    <div className="glass rounded-xl p-4 text-center">
-      <div className="text-xs text-muted-foreground mb-1">{label}</div>
-      <div className="text-lg font-bold text-foreground">
-        {typeof value === 'number' ? value.toFixed(4) : value ?? '--'}
-        {unit && <span className="text-xs text-muted-foreground ml-1">{unit}</span>}
-      </div>
-    </div>
-  );
-
-  // Extract metrics from task（后端给的是 camelCase：ic/icir/rankIc/rankIcir/annualReturn/maxDrawdown）
-  const metrics = (task?.metrics ?? {}) as Record<string, any>;
-  const annualReturn = metrics.annualReturn ?? metrics.annualized_return;
-  const maxDrawdown = metrics.maxDrawdown ?? metrics.max_drawdown;
-  // Calmar = 年化收益 / |最大回撤|；后端未单独提供时按标准定义推导
-  const calmar =
-    metrics.calmar_ratio ?? metrics.calmarRatio ??
-    (annualReturn != null && maxDrawdown ? annualReturn / Math.abs(maxDrawdown) : undefined);
+  const downloadReport = async (job: FactorJob) => {
+    const generation = getSessionGeneration();
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    setDownloadingReport(job.job_id);
+    try {
+      const blob = await downloadFactorJobReport(job.job_id, controller.signal);
+      if (generation !== getSessionGeneration()) return;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `factor-report-${job.job_id.slice(0, 8).replace(/[^a-zA-Z0-9-]/g, '')}.pdf`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch (cause) {
+      if (!controller.signal.aborted && generation === getSessionGeneration()) {
+        setError(cause instanceof Error ? cause.message : 'PDF 报告下载失败');
+      }
+    } finally {
+      controllers.current.delete(controller);
+      if (generation === getSessionGeneration()) setDownloadingReport('');
+    }
+  };
 
   return (
-    <div className="space-y-6 animate-fade-in-up">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold flex items-center gap-3">
-          <BarChart3 className="h-8 w-8 text-primary" />
-          独立回测
+    <div className="space-y-4 animate-fade-in-up">
+      <header>
+        <h1 className="text-xl font-bold flex items-center gap-2">
+          <BarChart3 className="h-5 w-5 text-primary" />
+          回测中心
         </h1>
-        <p className="text-muted-foreground mt-1">
-          使用因子库进行全周期回测评估
-        </p>
-      </div>
+        <p className="text-xs text-muted-foreground mt-0.5">提交本人因子的 A 股日频回测或样本外验证，任务和结果只对当前账号可见。</p>
+      </header>
 
-      {/* Info Banner */}
-      <Card className="glass border-primary/30">
-        <CardContent className="p-4">
-          <div className="flex gap-3">
-            <Info className="h-5 w-5 text-primary flex-shrink-0 mt-0.5" />
-            <div className="text-sm space-y-1">
-              <p className="text-muted-foreground">
-                独立回测在<strong className="text-foreground">测试集（2022-01-01 ~ 2025-12-26）</strong>上评估因子的样本外表现。
-                使用 CSI300 市场股票池，TopK Dropout 策略，LightGBM 模型。
-              </p>
-              <p className="text-muted-foreground">
-                <strong className="text-foreground">custom</strong> 模式仅使用因子库中的自定义因子；
-                <strong className="text-foreground">combined</strong> 模式将自定义因子与基线因子组合使用。
-                回测仅使用已缓存的因子，未缓存因子将自动跳过。
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Backend Status */}
       {backendAvailable === false && (
-        <Card className="glass border-destructive/50">
-          <CardContent className="p-4 flex items-center gap-3">
-            <AlertCircle className="h-5 w-5 text-destructive" />
-            <span className="text-sm text-destructive">
-              后端服务未连接。请检查网络或登录状态，或稍后重试。
-            </span>
+        <Card className="border-destructive/50">
+          <CardContent className="p-4 flex items-center gap-3 text-destructive">
+            <AlertCircle className="h-5 w-5" />后端服务暂不可用，请稍后刷新。
+          </CardContent>
+        </Card>
+      )}
+      {(error || factorError) && (
+        <Card className="border-destructive/50">
+          <CardContent className="p-4 flex items-start gap-3 text-destructive">
+            <AlertCircle className="h-5 w-5 mt-0.5 shrink-0" />
+            <span>{error || factorError}</span>
           </CardContent>
         </Card>
       )}
 
-      {/* Configuration Panel */}
       <Card className="glass card-hover">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <FileText className="h-5 w-5" />
-            回测配置
-          </CardTitle>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">创建回测 / 验证任务</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Factor Library Selection */}
-            <div>
-              <label className="block text-sm font-medium mb-2">因子库 JSON</label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <select
-                    value={selectedLibrary}
-                    onChange={e => setSelectedLibrary(e.target.value)}
-                    disabled={isRunning}
-                    className="w-full rounded-lg border border-input bg-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary transition-all appearance-none pr-10"
-                  >
-                    {libraries.length === 0 && (
-                      <option value="">暂无因子库文件</option>
-                    )}
-                    {libraries.map(lib => (
-                      <option key={lib.id} value={lib.id}>
-                        {lib.name || lib.id}
-                        {lib.ic !== null ? `（IC ${lib.ic.toFixed(4)}）` : ''}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={loadLibraries}
-                  disabled={libsLoading}
-                  title="刷新因子库列表"
-                  className="px-2.5 self-center"
-                >
-                  <RefreshCw className={`h-4 w-4 ${libsLoading ? 'animate-spin' : ''}`} />
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                因子库共 {factorCount} 个因子
-              </p>
-            </div>
-
-            {/* Factor Source */}
-            <div>
-              <label className="block text-sm font-medium mb-2">因子源类型</label>
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setFactorSource('custom')}
-                  disabled={isRunning}
-                  className={`flex-1 px-4 py-2.5 rounded-lg border text-sm font-medium transition-all ${
-                    factorSource === 'custom'
-                      ? 'border-primary bg-primary/10 text-primary'
-                      : 'border-input bg-background text-muted-foreground hover:border-primary/50'
-                  }`}
-                >
-                  Custom
-                  <span className="block text-xs font-normal mt-0.5">仅自定义因子</span>
-                </button>
-                <button
-                  onClick={() => setFactorSource('combined')}
-                  disabled={isRunning}
-                  className={`flex-1 px-4 py-2.5 rounded-lg border text-sm font-medium transition-all ${
-                    factorSource === 'combined'
-                      ? 'border-primary bg-primary/10 text-primary'
-                      : 'border-input bg-background text-muted-foreground hover:border-primary/50'
-                  }`}
-                >
-                  Combined
-                  <span className="block text-xs font-normal mt-0.5">自定义 + 基线因子</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Stock Universe */}
-            <div>
-              <label className="block text-sm font-medium mb-2">回测股票池</label>
-              <div className="relative">
-                <select
-                  value={universe}
-                  onChange={e => setUniverse(e.target.value as UniverseId)}
-                  disabled={isRunning}
-                  className="w-full rounded-lg border border-input bg-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary transition-all appearance-none pr-10"
-                >
-                  {universes.length > 0 ? (
-                    universes.map(u => (
-                      <option key={u.id} value={u.id}>
-                        {u.name}
-                        {u.stockCount > 0 ? ` — ${u.stockCount} 只` : ''}
-                      </option>
-                    ))
-                  ) : (
-                    <option value="csi300">沪深300</option>
-                  )}
-                </select>
-                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                {universes.find(u => u.id === universe)?.indexSymbol
-                  ? `基准指数 ${universes.find(u => u.id === universe)?.indexSymbol}`
-                  : '来自 QuantDB 指数成分数据'}
-              </p>
-            </div>
-          </div>
-
-          {/* Fixed display fields */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-2 border-t border-border/50">
-            <div className="text-sm">
-              <span className="text-muted-foreground">市场：</span>
-              <span className="font-medium ml-1">CSI 300（沪深300）</span>
-            </div>
-            <div className="text-sm">
-              <span className="text-muted-foreground">回测区间：</span>
-              <span className="font-medium ml-1">2022-01-01 ~ 2025-12-26</span>
-            </div>
-            <div className="text-sm">
-              <span className="text-muted-foreground">基准：</span>
-              <span className="font-medium ml-1">000300.SH（沪深300指数）</span>
-            </div>
-            {/* 数据源切换 */}
-            <div className="text-sm">
-              <span className="text-muted-foreground mr-2">数据源：</span>
-              <div className="inline-flex items-center rounded-md border border-border/50 overflow-hidden">
-                {(['qlib_bin', 'h5'] as const).map((ds) => (
-                  <button
-                    key={ds}
-                    disabled={isRunning}
-                    onClick={() => setDataSource(ds)}
-                    className={`px-2.5 py-1 text-xs font-medium transition-colors ${
-                      dataSource === ds
-                        ? 'bg-primary/15 text-primary'
-                        : 'text-muted-foreground hover:bg-muted/50'
-                    }`}
-                  >
-                    {ds === 'qlib_bin' ? 'Qlib' : 'H5'}
-                  </button>
-                ))}
-              </div>
-              {dataSource === 'h5' && (
-                <p className="text-[10px] text-amber-400 mt-1">H5 预生成数据，可能不覆盖最新行情</p>
-              )}
-            </div>
-          </div>
-
-          {/* Start / Cancel Button */}
-          <div className="flex justify-end gap-3 pt-2">
-            {isRunning ? (
-              <Button variant="outline" onClick={handleCancel}>
-                <Square className="h-4 w-4 mr-2" />
-                停止回测
-              </Button>
-            ) : (
-              <Button
-                variant="primary"
-                onClick={handleStart}
-                disabled={backendAvailable === false || !selectedLibrary || isStarting}
+            <label className="text-xs font-medium space-y-2">
+              <span>运行类型</span>
+              <select
+                className="w-full rounded-lg border border-input bg-background px-3 py-2"
+                value={jobKind}
+                onChange={(event) => setJobKind(event.target.value as 'backtest' | 'validate')}
               >
-                {isStarting ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Play className="h-4 w-4 mr-2" />
-                )}
-                开始回测
-              </Button>
-            )}
+                <option value="backtest">回测</option>
+                <option value="validate">样本外验证</option>
+              </select>
+            </label>
+            {!batchMode && <label className="text-xs font-medium space-y-2">
+              <span>本人因子</span>
+              <select
+                className="w-full rounded-lg border border-input bg-background px-3 py-2"
+                value={factorId}
+                onChange={(event) => setFactorId(event.target.value)}
+                disabled={submitting || (!factors.length && !factorId)}
+              >
+                {!factorId && <option value="">请选择本人因子</option>}
+                {factorId && !factors.some((factor) => factor.factorId === factorId) && <option value={factorId}>{selectedFactor?.factorName || factorId}（当前页外已选）</option>}
+                {factors.map((factor) => (
+                  <option key={factor.factorId} value={factor.factorId}>
+                    {factor.factorName} · {factor.factorId}
+                  </option>
+                ))}
+              </select>
+            </label>}
+            <label className="text-xs font-medium space-y-2">
+              <span>A 股股票池</span>
+              <select
+                className="w-full rounded-lg border border-input bg-background px-3 py-2"
+                value={universe}
+                onChange={(event) => setUniverse(event.target.value)}
+              >
+                {UNIVERSES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="text-xs font-medium space-y-2">
+              <span>开始日期（{jobKind === 'validate' ? '必填' : '可留空'}）</span>
+              <input
+                className="w-full rounded-lg border border-input bg-background px-3 py-2"
+                type="date"
+                value={startDate}
+                onChange={(event) => setStartDate(event.target.value)}
+              />
+            </label>
+            <label className="text-xs font-medium space-y-2">
+              <span>结束日期（{jobKind === 'validate' ? '必填' : '可留空'}）</span>
+              <input
+                className="w-full rounded-lg border border-input bg-background px-3 py-2"
+                type="date"
+                min={startDate || undefined}
+                value={endDate}
+                onChange={(event) => setEndDate(event.target.value)}
+              />
+            </label>
+            <label className="text-xs font-medium space-y-2">
+              <span>数据适配</span>
+              <p className="text-xs text-muted-foreground py-2">自动匹配：Qlib 类因子使用 Qlib 日线，函数因子使用兼容的 Parquet 面板。</p>
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              aria-label="搜索本人因子"
+              placeholder="搜索因子名称、表达式或描述"
+              maxLength={200}
+              className="min-w-56 flex-1 rounded-lg border border-input bg-background px-3 py-2 text-xs"
+              value={factorSearch}
+              onChange={(event) => { setFactorSearch(event.target.value); setFactorOffset(0); }}
+            />
+            <span className="text-xs text-muted-foreground">共 {factorTotal} 个 · 第 {Math.floor(factorOffset / FACTOR_PAGE_SIZE) + 1} 页{factorsLoading ? ' · 加载中' : ''}</span>
+            <Button variant="outline" size="sm" disabled={factorOffset === 0 || factorsLoading} onClick={() => setFactorOffset(Math.max(0, factorOffset - FACTOR_PAGE_SIZE))}>上一页</Button>
+            <Button variant="outline" size="sm" disabled={factorOffset + FACTOR_PAGE_SIZE >= factorTotal || factorsLoading} onClick={() => setFactorOffset(factorOffset + FACTOR_PAGE_SIZE)}>下一页</Button>
+          </div>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={batchMode}
+              onChange={(event) => {
+                setBatchMode(event.target.checked);
+                if (!event.target.checked) setBatchFactorIds([]);
+                else if (factorId) setBatchFactorIds([factorId]);
+              }}
+            />
+            批量运行（顺序执行 2–20 个因子，共用一个任务槽）
+          </label>
+          {batchMode && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto rounded-lg border border-border/70 p-3">
+              {factors.map((factor) => {
+                const checked = batchFactorIds.includes(factor.factorId);
+                return (
+                  <label key={factor.factorId} className="flex items-center gap-2 text-xs min-w-0">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={!checked && batchFactorIds.length >= 20}
+                      onChange={(event) => setBatchFactorIds(event.target.checked
+                        ? [...batchFactorIds, factor.factorId]
+                        : batchFactorIds.filter((id) => id !== factor.factorId))}
+                    />
+                    <span className="truncate" title={`${factor.factorName} · ${factor.factorId}`}>
+                      {factor.factorName} · {factor.factorId}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          {batchMode && <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">已跨页选中 {batchFactorIds.length} 个。批量任务按选择顺序执行；任一因子失败会使整批失败，当前不会保存部分结果。</p>
+            <div className="flex flex-wrap gap-2">{batchFactorIds.map((id) => <button key={id} type="button" className="rounded border px-2 py-1 text-xs" title={`移除 ${id}`} onClick={() => setBatchFactorIds((ids) => ids.filter((value) => value !== id))}>{factorCache.current.get(id)?.factorName || id} ×</button>)}</div>
+          </div>}
+          {!factorsLoading && factors.length === 0 && <p className="text-xs text-muted-foreground">当前搜索没有匹配因子；已选因子保留，可修改关键词或清空搜索。</p>}
+          {selectedFactor && (
+            <p className="text-xs text-muted-foreground">
+              {selectedFactor.factorExpression ? `表达式：${selectedFactor.factorExpression.slice(0, 180)}` : '回测执行时从本人因子记录读取代码快照。'}
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              variant="primary"
+              onClick={submit}
+              disabled={!isAuthenticated || backendAvailable === false || submitting || (batchMode ? batchFactorIds.length < 2 : !selectedFactor || selectedFactor.factorId !== factorId)}
+            >
+              {submitting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              提交{batchMode ? '批量' : ''}{jobKind === 'validate' ? '样本外验证' : '回测'}
+            </Button>
+            <Button variant="outline" size="sm" className="text-xs" onClick={refresh} disabled={loading}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />刷新
+            </Button>
+            <span className="text-xs text-muted-foreground">当前执行槽已占用时，可查看状态；页面不在浏览器本地保存任务详情。</span>
           </div>
         </CardContent>
       </Card>
 
-      {/* Progress + Status */}
-      {task && (
-        <Card className={`glass card-hover ${isRunning ? 'border-primary/50' : ''}`}>
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                {isRunning ? (
-                  <div className="relative h-5 w-5">
-                    <div className="absolute inset-0 rounded-full bg-primary/30 animate-ping" />
-                    <BarChart3 className="relative h-5 w-5 text-primary" />
-                  </div>
-                ) : task.status === 'completed' ? (
-                  <CheckCircle2 className="h-5 w-5 text-green-500" />
-                ) : task.status === 'failed' ? (
-                  <AlertCircle className="h-5 w-5 text-red-500" />
-                ) : (
-                  <Clock className="h-5 w-5" />
-                )}
-                回测进度
-              </div>
-              <Badge
-                variant={
-                  task.status === 'completed' ? 'default' :
-                  task.status === 'running' ? 'default' :
-                  task.status === 'failed' ? 'destructive' : 'outline'
-                }
-              >
-                {task.status === 'running' ? '运行中' :
-                 task.status === 'completed' ? '已完成' :
-                 task.status === 'failed' ? '失败' :
-                 task.status === 'cancelled' ? '已取消' : task.status}
-              </Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {/* Running animation banner */}
-            {isRunning && (
-              <div className="mb-4 rounded-lg bg-primary/5 border border-primary/20 p-3 flex items-center gap-3">
-                <Loader2 className="h-5 w-5 text-primary animate-spin flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-primary">
-                    回测正在执行中
-                  </p>
-                  <p className="text-xs text-muted-foreground truncate">
-                    {task.progress?.message || '正在加载因子数据并训练模型...'}
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* Progress bar */}
-            <div className="mb-4">
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-muted-foreground">{task.progress?.message || '等待中...'}</span>
-                <span className="text-muted-foreground">
-                  {task.status === 'completed' ? '100%' :
-                   task.status === 'failed' ? '失败' :
-                   task.progress?.progress > 0 ? `${Math.round(task.progress.progress)}%` :
-                   isRunning ? '运行中...' : ''}
-                </span>
-              </div>
-              <div className="h-2 bg-secondary rounded-full overflow-hidden">
-                {isRunning && (!task.progress?.progress || task.progress.progress <= 0) ? (
-                  /* Indeterminate shimmer animation when no progress % */
-                  <div
-                    className="h-full w-1/3 rounded-full bg-gradient-to-r from-transparent via-primary to-transparent"
-                    style={{
-                      animation: 'shimmer 1.5s ease-in-out infinite',
-                    }}
-                  />
-                ) : (
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${
-                      task.status === 'completed' ? 'bg-green-500' :
-                      task.status === 'failed' ? 'bg-red-500' :
-                      'bg-primary'
-                    }`}
-                    style={{
-                      width: task.status === 'completed' ? '100%' :
-                             task.status === 'failed' ? '100%' :
-                             task.progress?.progress > 0 ? `${task.progress.progress}%` :
-                             '0%',
-                    }}
-                  />
-                )}
-              </div>
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm flex items-center gap-2"><Clock3 className="h-5 w-5" />我的回测与验证任务</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {loading && jobs.length === 0 ? (
+            <div className="flex items-center gap-2 py-8 text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />读取任务中</div>
+          ) : jobs.length === 0 ? (
+            <div className="py-8 text-center text-muted-foreground">还没有回测任务</div>
+          ) : (
+            <div className="space-y-3">
+              {jobs.map((job) => {
+                const metrics = job.result_snapshot?.metrics ?? {};
+                const active = ACTIVE.has(job.status);
+                const name = factors.find((item) => item.factorId === job.request.factor_id)?.factorName;
+                const batchResults = job.result_snapshot?.results ?? [];
+                const progress = job.progress_snapshot;
+                return (
+                  <article key={job.job_id} className="rounded-lg border border-border/70 p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-semibold truncate">{job.kind === 'validate' ? '样本外验证 · ' : '回测 · '}{job.request.factor_ids?.length ? `批量 ${job.request.factor_ids.length} 个因子` : name || job.request.factor_id || '本人因子'}</div>
+                        <div className="text-xs text-muted-foreground mt-1">
+                          {job.job_id} · {UNIVERSES.find(([value]) => value === job.request.universe)?.[1] ?? job.request.universe ?? 'A 股'}
+                          {' · '}{job.created_at ? formatDateTime(job.created_at) : '提交时间未知'}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={statusVariant(job.status)}>{statusLabel(job.status)}</Badge>
+                        {job.status === 'completed' && (
+                          <Button variant="outline" size="sm" onClick={() => void downloadReport(job)} disabled={downloadingReport === job.job_id}>
+                            {downloadingReport === job.job_id ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+                            导出 PDF
+                          </Button>
+                        )}
+                        {active && (
+                          <Button variant="destructive" size="sm" onClick={() => cancel(job)} disabled={cancelling === job.job_id || job.status === 'stopping'}>
+                            {cancelling === job.job_id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-3.5 w-3.5 mr-1" />}
+                            {job.status === 'stopping' ? '等待停止' : '取消'}
+                          </Button>
+                        )}
+                        {!active && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setPendingDelete(job)}
+                            disabled={deleting === job.job_id}
+                            title="从记录中清除（同时删除服务端数据）"
+                          >
+                            {deleting === job.job_id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-3.5 w-3.5 mr-1" />}
+                            清除
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    {active && (
+                      <div className="text-xs text-muted-foreground">
+                        {typeof progress?.stage === 'string' ? progress.stage : statusLabel(job.status)}
+                        {typeof progress?.progress_pct === 'number' ? ` · ${progress.progress_pct}%` : ''}
+                      </div>
+                    )}
+                    {job.status === 'completed' && (
+                      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+                        <Metric label="平均 IC" value={metricLabel(pickMetric(metrics, ['ic_mean', 'ic_value']))} />
+                        <Metric label="Rank IC 中位数" value={metricLabel(pickMetric(metrics, ['rank_ic_median', 'rank_ic']))} />
+                        <Metric label="换手后 Rank IC" value={metricLabel(metrics.net_rank_ic_mean)} />
+                        <Metric label="年化收益" value={metricLabel(metrics.annual_return, true)} />
+                        <Metric label="最大回撤" value={metricLabel(metrics.max_drawdown, true)} />
+                      </div>
+                    )}
+                    {job.status === 'completed' && job.kind === 'validate' && job.result_snapshot?.validation && (
+                      <div className="text-xs text-muted-foreground">
+                        训练区间 {job.result_snapshot.validation.training_window?.start_date} 至 {job.result_snapshot.validation.training_window?.end_date}
+                        {' · '}验证区间 {job.result_snapshot.validation.validation_window?.start_date} 至 {job.result_snapshot.validation.validation_window?.end_date}
+                        {' · '}训练与验证区间不重叠
+                      </div>
+                    )}
+                    {job.status === 'completed' && job.result_snapshot?.series && (
+                      <div className="space-y-2">
+                        <FactorSeriesCharts series={job.result_snapshot.series} />
+                        <p className="text-[11px] text-muted-foreground">
+                          等权因子前 30% 次日净收益；冻结双边成本率 {percentLabel(job.result_snapshot.series.cost_rate ?? job.request.cost_model?.round_trip_cost)}，按新进多头持仓换手扣费。此组合估算未模拟最低佣金、个股涨跌停和逐笔撮合。
+                        </p>
+                      </div>
+                    )}
+                    {job.status === 'completed' && batchResults.length > 0 && (
+                      <div className="space-y-2">
+                        {batchResults.map((item) => {
+                          const factor = factors.find((candidate) => candidate.factorId === item.factor_id);
+                          return (
+                            <div key={item.factor_id} className="space-y-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-secondary/30 px-3 py-2 text-xs">
+                                <span className="truncate">{factor?.factorName ?? item.factor_id}</span>
+                                <span className="text-xs text-muted-foreground">IC {metricLabel(pickMetric(item.metrics ?? {}, ['ic_mean', 'ic_value']))} · Rank IC {metricLabel(pickMetric(item.metrics ?? {}, ['rank_ic_median', 'rank_ic']))}</span>
+                              </div>
+                              {item.series && (
+                                <details className="rounded-md border border-border/50 px-3 py-2">
+                                  <summary className="cursor-pointer text-xs text-muted-foreground">查看收益与回撤曲线 · {factor?.factorName ?? item.factor_id}</summary>
+                                  <div className="mt-2"><FactorSeriesCharts series={item.series} /></div>
+                                  <p className="text-[11px] text-muted-foreground mt-2">
+                                    净收益口径；冻结双边成本率 {percentLabel(item.series.cost_rate ?? job.request.cost_model?.round_trip_cost)}，按新进多头持仓换手扣费，未模拟最低佣金、个股涨跌停和逐笔撮合。
+                                  </p>
+                                </details>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {job.status === 'completed' && <div className="text-xs text-emerald-500 flex items-center gap-1"><CheckCircle2 className="h-3.5 w-3.5" />结果已保存到本人任务记录</div>}
+                    {job.status === 'failed' && job.error_message && <p className="text-xs text-destructive">{job.error_message}</p>}
+                  </article>
+                );
+              })}
             </div>
-
-            {/* Task info */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-muted-foreground">
-              <div>任务 ID: <span className="font-mono text-foreground">{task.taskId}</span></div>
-              <div>开始时间: {new Date(task.createdAt).toLocaleTimeString()}</div>
-              <div>因子ID: {task.config?.factorId || selectedLibrary}</div>
-              <div>因子源: {task.config?.factorSource || factorSource}</div>
+          )}
+        </CardContent>
+      </Card>
+      {pendingDelete && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="清除回测记录"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !deleting) setPendingDelete(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-xl space-y-4">
+            <h3 className="font-semibold">清除记录</h3>
+            <p className="text-sm">
+              {pendingDelete.kind === 'validate' ? '样本外验证' : '回测'} ·{' '}
+              {factors.find((item) => item.factorId === pendingDelete.request.factor_id)?.factorName
+                || pendingDelete.request.factor_id
+                || '本人因子'}
+            </p>
+            <p className="text-xs text-muted-foreground break-all">
+              {pendingDelete.job_id} · {pendingDelete.created_at ? formatDateTime(pendingDelete.created_at) : '提交时间未知'}
+            </p>
+            <p className="text-sm text-destructive">
+              这条记录与它的回测结果会一并从服务端删除，无法恢复。
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" size="sm" disabled={Boolean(deleting)} onClick={() => setPendingDelete(null)}>
+                取消
+              </Button>
+              <Button variant="destructive" size="sm" disabled={Boolean(deleting)} onClick={() => void remove(pendingDelete)}>
+                {deleting === pendingDelete.job_id ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Trash2 className="h-3.5 w-3.5 mr-1" />}
+                确认清除
+              </Button>
             </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Results */}
-      {isFinished && task?.status === 'completed' && Object.keys(metrics).length > 0 && (
-        <Card className="glass card-hover animate-fade-in-up">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <TrendingUp className="h-5 w-5 text-green-500" />
-                回测结果
-              </div>
-              {metrics.__num_factors != null && (
-                <span className="text-xs text-muted-foreground font-normal">
-                  {metrics.__num_factors} 个因子 · 耗时 {metrics.__elapsed_seconds != null ? `${Math.round(metrics.__elapsed_seconds)}s` : '--'}
-                </span>
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <MetricCard label="IC" value={metrics.ic ?? metrics.IC} />
-              <MetricCard label="ICIR" value={metrics.icir ?? metrics.ICIR} />
-              <MetricCard label="Rank IC" value={metrics.rankIc ?? metrics.RankIC ?? metrics['Rank IC']} />
-              <MetricCard label="Rank ICIR" value={metrics.rankIcir ?? metrics.RankICIR ?? metrics['Rank ICIR']} />
-              <MetricCard
-                label="年化扣费收益"
-                value={annualReturn != null ? annualReturn * 100 : undefined}
-                unit="%"
-              />
-              <MetricCard
-                label="最大回撤"
-                value={maxDrawdown != null ? maxDrawdown * 100 : undefined}
-                unit="%"
-              />
-              <MetricCard label="夏普比率" value={metrics.sharpeRatio ?? metrics.sharpe_ratio} />
-              <MetricCard label="Calmar" value={calmar} />
-            </div>
-
-            {/* Cumulative Excess Return Chart */}
-            {metrics.cumulative_curve && (
-              <div className="pt-4 border-t border-border/50">
-                <h4 className="text-sm font-medium mb-4 flex items-center gap-2">
-                  <TrendingUp className="h-4 w-4 text-primary" />
-                  超额累计收益曲线
-                </h4>
-                <CumulativeReturnChart data={metrics.cumulative_curve} />
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Logs Panel */}
-      {(logs.length > 0 || isRunning) && (
-        <Card className="glass card-hover">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <FileText className="h-5 w-5" />
-                运行日志
-              </span>
-              <span className="text-xs text-muted-foreground font-normal">
-                {logs.length} 条日志
-              </span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="bg-black/50 rounded-lg p-4 max-h-[400px] overflow-y-auto font-mono text-xs">
-              {logs.length === 0 && isRunning && (
-                <div className="text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  等待日志输出...
-                </div>
-              )}
-              {logs.map((log) => (
-                <div key={log.id} className="py-0.5 flex gap-2">
-                  <span className="text-muted-foreground whitespace-nowrap">
-                    {new Date(log.timestamp).toLocaleTimeString()}
-                  </span>
-                  <span
-                    className={
-                      log.level === 'error' ? 'text-red-400' :
-                      log.level === 'warning' ? 'text-yellow-400' :
-                      log.level === 'success' ? 'text-green-400' :
-                      'text-gray-300'
-                    }
-                  >
-                    {log.message}
-                  </span>
-                </div>
-              ))}
-              <div ref={logsEndRef} />
-            </div>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       )}
     </div>
   );
 };
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-secondary/40 px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="font-mono font-semibold mt-1">{value}</div>
+    </div>
+  );
+}
+
+function percentLabel(value: number | undefined) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${(value * 100).toFixed(3)}%`
+    : '未知';
+}
+
+function FactorSeriesCharts({ series }: { series: FactorBacktestSeries }) {
+  const dates = series.dates ?? [];
+  if (dates.length > 0) {
+    const quantiles = Object.entries(series.q_curves ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, values], index) => ({
+        key,
+        label: `分位 ${key.slice(1)}`,
+        color: ['#94a3b8', '#60a5fa', '#a78bfa', '#f59e0b', '#34d399'][index % 5],
+        values,
+      }));
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <MultiSeriesChart label="累计净值 · 多头 / 基准" dates={dates} lines={[
+          { key: 'net', label: '多头净值（扣费）', color: '#38bdf8', values: series.nav_long },
+          { key: 'gross', label: '多头净值（毛）', color: '#a78bfa', values: series.nav_long_gross },
+          { key: 'bench', label: '等权基准', color: '#f59e0b', values: series.nav_bench },
+        ]} />
+        <MultiSeriesChart label="相对基准超额（%）" dates={dates} lines={[
+          { key: 'excess', label: '超额收益', color: '#34d399', values: series.nav_excess_pct },
+        ]} />
+        <MultiSeriesChart label="日度 IC" dates={dates} lines={[
+          { key: 'ic', label: 'IC', color: '#38bdf8', values: series.ic },
+          { key: 'rank_ic', label: 'Rank IC', color: '#f97316', values: series.rank_ic },
+        ]} />
+        <MultiSeriesChart label="分位组合净值（毛）" dates={dates} lines={quantiles} />
+        <MultiSeriesChart label="新进多头持仓比例" dates={dates} lines={[
+          { key: 'turnover', label: '新进持仓占比', color: '#f97316', values: series.turnover },
+        ]} />
+        <MultiSeriesChart label="多头净值回撤" dates={dates} lines={[
+          { key: 'drawdown', label: '回撤', color: '#f97316', values: series.drawdown },
+        ]} />
+      </div>
+    );
+  }
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <CurveChart label="累计净值（初始值 1）" values={series.equity_curve ?? []} color="#38bdf8" />
+      <CurveChart label="回撤" values={series.drawdown_curve ?? []} color="#f97316" />
+    </div>
+  );
+}
+
+interface FactorSeriesLine {
+  key: string;
+  label: string;
+  color: string;
+  values?: Array<number | null>;
+}
+
+function MultiSeriesChart({
+  label,
+  dates,
+  lines,
+}: {
+  label: string;
+  dates: string[];
+  lines: FactorSeriesLine[];
+}) {
+  const active = lines.filter((line) => line.values?.some((value) => typeof value === 'number' && Number.isFinite(value)));
+  const points = active.flatMap((line) => (line.values ?? []).filter((value): value is number => typeof value === 'number' && Number.isFinite(value)));
+  if (dates.length < 2 || points.length === 0) return null;
+  const low = Math.min(...points);
+  const high = Math.max(...points);
+  const span = high - low || 1;
+  return (
+    <div className="rounded-md border border-border/50 bg-secondary/20 p-2">
+      <div className="text-xs text-muted-foreground mb-1">{label}</div>
+      <svg viewBox="0 0 360 96" role="img" aria-label={label} className="w-full h-24">
+        {active.map((line) => {
+          const coordinates = (line.values ?? []).map((value, index) => {
+            if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+            const x = (index / Math.max(1, dates.length - 1)) * 360;
+            const y = 76 - ((value - low) / span) * 64;
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+          }).filter((coordinate): coordinate is string => coordinate !== null).join(' ');
+          return <polyline key={line.key} points={coordinates} fill="none" stroke={line.color} strokeWidth="2" vectorEffect="non-scaling-stroke" />;
+        })}
+      </svg>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+        {active.map((line) => <span key={line.key} className="inline-flex items-center gap-1"><i className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: line.color }} />{line.label}</span>)}
+      </div>
+      <div className="flex justify-between text-[10px] text-muted-foreground mt-1"><span>{dates[0]}</span><span>{dates[dates.length - 1]}</span></div>
+    </div>
+  );
+}
+
+function CurveChart({
+  label,
+  values,
+  color,
+}: {
+  label: string;
+  values: FactorBacktestSeries['equity_curve'];
+  color: string;
+}) {
+  const valid = (values ?? []).filter((point) => Number.isFinite(point.value));
+  if (valid.length < 2) return null;
+  const low = Math.min(...valid.map((point) => point.value));
+  const high = Math.max(...valid.map((point) => point.value));
+  const span = high - low || 1;
+  const points = valid.map((point, index) => {
+    const x = (index / (valid.length - 1)) * 360;
+    const y = 72 - ((point.value - low) / span) * 64;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return (
+    <div className="rounded-md border border-border/50 bg-secondary/20 p-2">
+      <div className="text-xs text-muted-foreground mb-1">{label}</div>
+      <svg viewBox="0 0 360 80" role="img" aria-label={label} className="w-full h-20">
+        <polyline points={points} fill="none" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="flex justify-between text-[10px] text-muted-foreground">
+        <span>{valid[0].date}</span><span>{valid[valid.length - 1].date}</span>
+      </div>
+    </div>
+  );
+}

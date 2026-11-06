@@ -5,6 +5,7 @@
 
 import { configureStore } from '@reduxjs/toolkit';
 import { useDispatch, useSelector, TypedUseSelectorHook } from 'react-redux';
+import { createSessionBoundaryMiddleware } from './sessionBoundary';
 
 // 导入各个切片
 import authSlice from './slices/authSlice';
@@ -53,7 +54,7 @@ const store = configureStore({
           'rehydrate',
         ],
       },
-    }),
+    }).prepend(createSessionBoundaryMiddleware()),
   devTools: process.env.NODE_ENV !== 'production',
 });
 

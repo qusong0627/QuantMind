@@ -1,15 +1,11 @@
 import React, { useRef, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/Card';
-import { Badge } from './ui/Badge';
-import { TimeSeriesData, RealtimeMetrics, LogEntry } from '../types-v2';
-import { formatNumber, formatPercent, formatDateTime } from '../utils-v2';
-import { TrendingUp, Activity, BarChart3, Target } from 'lucide-react';
+import { RealtimeMetrics, LogEntry } from '../types-v2';
+import { formatNumber, formatDateTime } from '../utils-v2';
+import { Activity } from 'lucide-react';
 
 interface LiveChartsProps {
-  equityCurve: TimeSeriesData[];
-  drawdownCurve: TimeSeriesData[];
   metrics: RealtimeMetrics | null;
-  isRunning: boolean;
   logs: LogEntry[];
 }
 
@@ -17,8 +13,8 @@ interface LiveChartsProps {
 function isCodeLine(msg: string): boolean {
   return /^\s*(import |from |def |class |if |for |while |return |try:|except |with |print\(|# )/.test(msg)
     || /^\s*(df|result|factor|close|open|high|low|volume)\s*[=.]/.test(msg)
-    || msg.includes('pd.read_hdf')
-    || msg.includes('.to_hdf(')
+    || msg.includes('pd.read_parquet')
+    || msg.includes('.to_parquet(')
     || msg.includes('>>> ');
 }
 
@@ -80,10 +76,7 @@ function renderLogMessage(msg: string, level: LogEntry['level']) {
 }
 
 export const LiveCharts: React.FC<LiveChartsProps> = ({
-  equityCurve,
-  drawdownCurve,
   metrics,
-  isRunning,
   logs,
 }) => {
   const logContainerRef = useRef<HTMLDivElement>(null);
@@ -132,52 +125,26 @@ export const LiveCharts: React.FC<LiveChartsProps> = ({
     }
   };
 
-  const StatCard = ({ icon: Icon, label, value, trend, color }: any) => (
-    <div className="glass rounded-xl p-4 card-hover h-[140px] flex flex-col items-center justify-center text-center gap-1">
-      <div className={`p-2 rounded-lg ${color} bg-opacity-20`}>
-        <Icon className={`h-5 w-5 ${color}`} />
-      </div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-2xl font-bold">{value}</div>
-      {trend !== undefined && (
-        <Badge variant={trend > 0 ? 'success' : 'destructive'} className="text-xs">
-          {trend > 0 ? '+' : ''}{formatPercent(trend, 1)}
-        </Badge>
-      )}
-    </div>
-  );
-
   return (
     <div className="space-y-4">
-      {/* Key Metrics Row */}
+      {/* 最佳因子指标：挖掘只产出 IC/RankIC/ICIR，收益类指标需等回补任务 */}
       {metrics && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 animate-fade-in-up">
-          <StatCard
-            icon={TrendingUp}
-            label={metrics.factorName ? `最佳因子年化收益 (${metrics.factorName.split('_').slice(0,2).join('_')}...)` : "最佳因子年化收益"}
-            value={formatPercent(metrics.annualReturn)}
-            trend={metrics.annualReturn}
-            color="text-success"
-          />
-          <StatCard
-            icon={Activity}
-            label="最佳因子RankIC"
-            value={formatNumber(metrics.rankIc, 4)}
-            color="text-primary"
-          />
-          <StatCard
-            icon={BarChart3}
-            label="最佳因子夏普比率"
-            value={formatNumber(metrics.sharpeRatio, 2)}
-            color="text-warning"
-          />
-          <StatCard
-            icon={Target}
-            label="最佳因子最大回撤"
-            value={formatPercent(metrics.maxDrawdown)}
-            trend={metrics.maxDrawdown}
-            color="text-destructive"
-          />
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-1 rounded-xl border border-border/60 bg-white/70 px-4 py-2 text-xs">
+          <span className="flex items-center gap-1.5 text-muted-foreground">
+            <Activity className="h-3.5 w-3.5 text-primary" />
+            最佳因子 RankIC
+          </span>
+          <span className="font-mono text-sm font-bold text-primary">
+            {formatNumber(metrics.rankIc, 4)}
+          </span>
+          {metrics.factorName && (
+            <span className="truncate max-w-[16rem] text-muted-foreground" title={metrics.factorName}>
+              {metrics.factorName}
+            </span>
+          )}
+          <span className="ml-auto text-muted-foreground">
+            因子数 <span className="font-mono font-semibold text-foreground">{metrics.totalFactors}</span>
+          </span>
         </div>
       )}
 
@@ -187,7 +154,7 @@ export const LiveCharts: React.FC<LiveChartsProps> = ({
         {/* Real-time Logs (Full Width, taller for big screens) */}
         <Card className="glass card-hover animate-fade-in-left lg:col-span-4 flex flex-col" style={{ height: 'calc(var(--app-h) - 380px)', minHeight: '400px' }}>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base flex items-center justify-between">
+            <CardTitle className="text-sm flex items-center justify-between">
               <span>实时日志</span>
               <span className="text-xs text-muted-foreground font-normal">
                 {logs.length} 条
@@ -202,7 +169,7 @@ export const LiveCharts: React.FC<LiveChartsProps> = ({
               className="h-full overflow-y-auto rounded-lg bg-slate-950 p-3 font-mono text-[11px] leading-[1.6] space-y-0.5 border border-slate-800 scroll-smooth"
             >
               {logs.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
+                <div className="flex h-full items-center justify-center text-muted-foreground text-xs">
                   等待日志输出...
                 </div>
               ) : (

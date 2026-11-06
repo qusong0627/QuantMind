@@ -5,12 +5,12 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function formatNumber(num: number, decimals: number = 2): string {
-  return num.toFixed(decimals);
+export function formatNumber(num: number | null | undefined, decimals: number = 2): string {
+  return typeof num === 'number' && Number.isFinite(num) ? num.toFixed(decimals) : '—';
 }
 
-export function formatPercent(num: number, decimals: number = 2): string {
-  return `${(num * 100).toFixed(decimals)}%`;
+export function formatPercent(num: number | null | undefined, decimals: number = 2): string {
+  return typeof num === 'number' && Number.isFinite(num) ? `${(num * 100).toFixed(decimals)}%` : '—';
 }
 
 export function formatDate(date: string | Date): string {

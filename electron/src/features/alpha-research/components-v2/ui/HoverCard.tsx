@@ -1,7 +1,7 @@
 /**
  * Minimal HoverCard fallback (no @radix-ui dependency).
  *
- * The QuantaAlpha frontend-v2 originally used @radix-ui/react-hover-card.
+ * The AutoAlpha frontend-v2 originally used @radix-ui/react-hover-card.
  * To avoid pulling in another dependency just for one hover popover, this
  * implementation gives the same three-export surface backed by a
  * CSS-only :hover (and focus-within) reveal. It loses Radix's accessibility

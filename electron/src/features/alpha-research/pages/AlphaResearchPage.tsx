@@ -1,7 +1,7 @@
 /**
- * AlphaResearchPage — mounts the ported QuantaAlpha frontend-v2 dashboard.
+ * AlphaResearchPage — mounts the ported AutoAlpha frontend-v2 dashboard.
  *
- * This is the Alpha Research entry point. It scopes the QuantaAlpha shadcn
+ * This is the Alpha Research entry point. It scopes the AutoAlpha shadcn
  * design tokens via [data-theme="alpha-research"] and renders the AppRoot
  * (HomePage / MiningDashboard / FactorLibrary / Backtest / Settings) inside
  * a TaskProvider.

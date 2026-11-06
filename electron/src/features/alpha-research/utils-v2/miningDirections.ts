@@ -2,6 +2,7 @@
  * Reference mining directions list and default direction parsing (consistent with "Mining Direction" in settings)
  * Each direction can attach up to 3 factors' "short name", "expression", "meaning", displayed on hover
  */
+import { getSessionScopedStorageKey } from '../../../store/sessionScopedStorage';
 
 export interface FactorHint {
   shortName: string;
@@ -47,7 +48,7 @@ export function getDirectionLabel(item: MiningDirectionItem): string {
 }
 
 interface StoredMiningDirectionConfig {
-  miningDirectionMode?: 'selected' | 'random';
+  miningDirectionMode?: 'selected' | 'random' | 'quota';
   /** 选中的挖掘方向（存 label，避免与动态 L1 类别列表下标错位） */
   selectedMiningDirections?: string[];
 }
@@ -55,17 +56,20 @@ interface StoredMiningDirectionConfig {
 /** 读取本地保存的挖掘方向选择（label 列表 + 模式） */
 export function getStoredDirectionConfig(): {
   labels: string[];
-  mode: 'selected' | 'random';
+  mode: 'selected' | 'random' | 'quota';
 } {
   try {
-    const raw = localStorage.getItem('quantaalpha_config');
+    const storageKey = getSessionScopedStorageKey('autoalpha_config');
+    const raw = storageKey ? localStorage.getItem(storageKey) : null;
     if (!raw) return { labels: [], mode: 'selected' };
     const config = JSON.parse(raw) as StoredMiningDirectionConfig;
     return {
       labels: Array.isArray(config?.selectedMiningDirections)
         ? config.selectedMiningDirections.filter((l) => typeof l === 'string' && l.trim())
         : [],
-      mode: config?.miningDirectionMode === 'random' ? 'random' : 'selected',
+      mode: config?.miningDirectionMode === 'random' || config?.miningDirectionMode === 'quota'
+        ? config.miningDirectionMode
+        : 'selected',
     };
   } catch {
     return { labels: [], mode: 'selected' };

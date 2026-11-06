@@ -1,7 +1,7 @@
 /*
- * Alpha-Research (QuantaAlpha frontend-v2) scoped styles.
+ * Alpha-Research (AutoAlpha frontend-v2) scoped styles.
  *
- * The original index.css from QuantaAlpha frontend-v2 was a global stylesheet
+ * The original index.css from AutoAlpha frontend-v2 was a global stylesheet
  * built on top of shadcn/ui design tokens (--background, --foreground, etc.)
  * and applied @apply border-border to every element. Pulling that in globally
  * would clobber the rest of the QuantMind dashboard, so this file:

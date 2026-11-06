@@ -245,9 +245,13 @@ export class PerformanceProfiler {
 export const globalProfiler = new PerformanceProfiler();
 
 // React命名空间修复
+// OSS-ADAPT: 纠正 setter 类型以兼容标准 React useState（支持 updater 函数）。
+// 原先收窄为仅接受值 `(value: T) => void`，导致所有 `setX((prev) => ...)` 在 tsc 下报错
+// TS2345，而企业版同名文件均使用 updater 写法。类型级声明，无运行时影响。
 declare global {
   namespace React {
-    function useState<T>(initialState: T | (() => T)): [T, (value: T) => void];
+    function useState<T>(initialState: T | (() => T)): [T, (value: T | ((prev: T) => T)) => void];
+    function useState<T = undefined>(): [T | undefined, (value: T | undefined | ((prev: T | undefined) => T | undefined)) => void];
   }
 }
 

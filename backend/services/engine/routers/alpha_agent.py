@@ -8,12 +8,15 @@ import logging
 import os
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
 from backend.services.engine.alpha_agent.launcher import get_launcher
@@ -29,6 +32,32 @@ from backend.shared.stock_pool.builtins import cn_index_symbols
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/alpha-agent", tags=["AlphaAgent"])
+
+# 因子挖掘扩展子路由（企业版下放）：任务/因子作业/因子池/文档/研究/方向批次/恢复/论文/清理/管线。
+from backend.services.engine.alpha_agent.factor_job_api import router as factor_job_router
+from backend.services.engine.alpha_agent.pool_research_api import router as pool_research_router
+from backend.services.engine.alpha_agent.direction_batch_api import router as direction_batch_router
+from backend.services.engine.alpha_agent.factor_pool_api import router as factor_pool_router
+from backend.services.engine.alpha_agent.doc_api import router as doc_router
+from backend.services.engine.alpha_agent.research_api import router as research_router
+from backend.services.engine.alpha_agent.factor_recovery_api import router as recovery_router
+from backend.services.engine.alpha_agent.paper_vault_api import router as paper_vault_router
+from backend.services.engine.alpha_agent.purge_api import router as purge_router
+from backend.services.engine.alpha_agent.research_pipeline import router as pipeline_router
+from backend.services.engine.alpha_agent.statistical.variant_api import router as variant_router
+
+router.include_router(factor_job_router)
+router.include_router(pool_research_router)
+router.include_router(direction_batch_router)
+router.include_router(factor_pool_router)
+router.include_router(doc_router)
+router.include_router(research_router)
+router.include_router(recovery_router)
+router.include_router(paper_vault_router)
+router.include_router(purge_router)
+router.include_router(variant_router)
+router.include_router(pipeline_router)
+
 persistence = RDAgentFactorPersistence()
 
 # P2：CN 可选股票池由 shared.stock_pool.builtins 派生（唯一事实源），
@@ -877,6 +906,1267 @@ async def get_llm_config(request: Request):
             "api_key_masked": masked,
         },
     }
+
+
+# ---- 企业版下放：算法/数据集/研究经验 ----
+
+
+@router.get("/algorithms")
+async def list_mining_algorithms():
+    """List validated algorithm capabilities without exposing runner paths."""
+    from backend.services.engine.alpha_agent.algorithm_registry import list_algorithms
+
+    public_fields = (
+        "key",
+        "name",
+        "version",
+        "desc",
+        "vendor",
+        "enabled",
+        "tags",
+        "markets",
+        "freqs",
+        "uses_datasets",
+        "uses_llm",
+        "requires_gpu",
+        "progress_kind",
+        "stages",
+    )
+    from backend.services.engine.alpha_agent.statistical.configuration import (
+        statistical_config_payload,
+    )
+
+    algorithms = []
+    for item in list_algorithms():
+        if item.get("valid") is True:
+            statistical_options = {}
+            if item.get("key") == "statistical" and item.get("enabled"):
+                try:
+                    statistical_options[
+                        "statistical_defaults"
+                    ] = await asyncio.to_thread(statistical_config_payload)
+                except Exception:
+                    logger.exception("Statistical mining configuration is unavailable")
+                    algorithms.append(
+                        {
+                            "key": "statistical",
+                            "valid": False,
+                            "error": "统计挖掘配置暂不可用，请联系平台维护人员",
+                        }
+                    )
+                    continue
+            algorithms.append(
+                {
+                    **{field: item[field] for field in public_fields},
+                    "valid": True,
+                    "supports_direction_batches": item.get("key") == "rdagent",
+                    "supports_sampled_direction_batches": item.get("key") == "rdagent",
+                    "supports_direction_quota": item.get("key") == "rdagent",
+                    "supports_experience_memory": True,
+                    "supports_variant_ledger": item.get("key") == "statistical",
+                    **statistical_options,
+                }
+            )
+        else:
+            algorithms.append(
+                {
+                    "key": str(item.get("key") or "")[:64],
+                    "valid": False,
+                    "error": "算法配置无效，请联系平台维护人员",
+                }
+            )
+    return {
+        "code": 200,
+        "data": {"algorithms": algorithms, "total": len(algorithms)},
+    }
+
+
+@router.get("/datasets")
+async def list_mining_datasets(request: Request = None):
+    """List the public datasets available through the sandbox's QuantDB SDK."""
+    # OSS-ADAPT：开源版无远端挖掘节点，固定走本地 mining_catalog。
+    from backend.services.engine.alpha_agent.mining_catalog import dataset_catalog
+    from backend.services.engine.rd_agent.rd_loop_wrapper import RDLoopWrapper
+
+    root_value = RDLoopWrapper._resolve_quantdb_dir()
+    return await asyncio.to_thread(
+        dataset_catalog, Path(root_value) if root_value else None,
+    )
+
+
+@router.get("/research/experience")
+async def get_research_experience(    request: Request,
+    universe: str | None = Query(default=None, min_length=1, max_length=128),
+):
+    """Read bounded, derived experience from this authenticated owner's records."""
+    user_id, tenant_id = get_authenticated_identity(request)
+    if universe is not None and not _universe_is_valid(universe):
+        raise HTTPException(status_code=404, detail="股票池不可用")
+    from backend.services.engine.alpha_agent.experience_memory import load_memory
+
+    try:
+        memory = await load_memory(
+            tenant_id=tenant_id, user_id=user_id, universe=universe
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Private research experience could not be loaded")
+        raise HTTPException(status_code=503, detail="本人研究经验暂不可用") from exc
+    return {"code": 200, "data": memory}
+
+
+@router.post("/preview")
+async def preview_mining(request: Request, payload: dict):
+    """Validate and summarize a mining request without admission or execution."""
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    from backend.services.engine.alpha_agent.algorithm_registry import (
+        AlgorithmError,
+        resolve_algorithm,
+    )
+    from backend.services.engine.alpha_agent.api_models import MiningSubmitRequest
+    from backend.services.engine.alpha_agent.mining_windows import (
+        build_mining_window_env,
+    )
+
+    try:
+        parsed = MiningSubmitRequest.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    values = parsed.model_dump(exclude_none=True)
+    algorithm_key = values.get("algorithm", "rdagent")
+    from backend.services.engine.alpha_agent.direction_sampling import clean_directions
+
+    try:
+        preview_directions = clean_directions(values.get("directions", []))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    market = values.get("market", "a_share")
+    freq = values.get("freq", "day")
+    datasets = values.get("datasets")
+    try:
+        algorithm = resolve_algorithm(
+            algorithm_key, market=market, freq=freq, datasets=datasets
+        )
+        # OSS-ADAPT：无远端挖掘节点，datasets 直接取请求值，不做远端解析。
+        canonical_datasets: tuple[str, ...] = tuple(datasets or ())
+        try:
+            from backend.services.engine.rd_agent.market_adapters import get_adapter
+
+            get_adapter(market)
+        except ValueError as exc:
+            raise ValueError(f"Unknown market: {market}") from exc
+        universe = values.get("universe", "all_a")
+        if market == "a_share" and not _universe_is_valid(universe):
+            raise ValueError("所选股票池不可用或不属于当前用户")
+        statistical_config = None
+        if algorithm.key == "statistical":
+            from backend.services.engine.alpha_agent.statistical.configuration import (
+                STATISTICAL_PARAMETER_KEYS,
+                statistical_config_payload,
+            )
+
+            if values.get("data_source") not in {None, "", "qlib_bin"}:
+                raise ValueError("统计挖掘仅支持公共 Qlib 日线数据")
+            statistical_config = await asyncio.to_thread(
+                statistical_config_payload,
+                {
+                    key: values[key]
+                    for key in STATISTICAL_PARAMETER_KEYS
+                    if key in values
+                },
+            )
+        window_env = build_mining_window_env(
+            values.get("mining_start"),
+            values.get("mining_end"),
+            values.get("valid_start"),
+            values.get("valid_end"),
+        )
+        # OSS-ADAPT：远端 admission 快照/窗口校验（mining_remote）跳过，单容器本地执行。
+    except (AlgorithmError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if algorithm.key == "statistical" and not values.get("mining_start"):
+        raise HTTPException(status_code=422, detail="统计挖掘必须提供挖掘日期范围")
+
+    datasets_by_key = {}
+    if canonical_datasets:
+        from backend.services.engine.rd_agent.mining_datasets import DATASET_LABELS
+
+        datasets_by_key = {key: DATASET_LABELS[key] for key in canonical_datasets}
+
+    if window_env:
+        window_preview = {
+            "mode": "custom",
+            "mining": [
+                window_env["QM_MINING_WINDOW_START"],
+                window_env["QM_MINING_WINDOW_END"],
+            ],
+            "train": [
+                window_env["QM_QLIB_TRAIN_START"],
+                window_env["QM_QLIB_TRAIN_END"],
+            ],
+            "valid": [
+                window_env["QM_QLIB_VALID_START"],
+                window_env["QM_QLIB_VALID_END"],
+            ],
+            "test": [
+                window_env["QM_QLIB_TEST_START"],
+                window_env["QM_QLIB_TEST_END"],
+            ],
+            "oos": (
+                [
+                    window_env["QM_VALIDATION_WINDOW_START"],
+                    window_env["QM_VALIDATION_WINDOW_END"],
+                ]
+                if "QM_VALIDATION_WINDOW_START" in window_env
+                else None
+            ),
+        }
+    else:
+        window_preview = {"mode": "server_default"}
+
+    direction_weighting = (
+        "blankness"
+        if algorithm.key == "rdagent"
+        and values.get("direction_mode") == "random"
+        and preview_directions
+        else None
+    )
+    direction_quota_preview = None
+    if (
+        algorithm.key == "rdagent"
+        and values.get("direction_mode") == "quota"
+        and preview_directions
+    ):
+        from backend.services.engine.alpha_agent import direction_quota
+        from backend.shared.owner_scope import OwnerScope
+
+        try:
+            quota_owner = OwnerScope(auth_tenant_id, auth_user_id)
+        except ValueError:
+            quota_owner = None
+        if quota_owner is not None:
+            direction_quota_preview = await direction_quota.preview(
+                owner=quota_owner,
+                market=market,
+                universe=universe,
+                directions=preview_directions,
+                n=1,
+            )
+
+    return {
+        "code": 200,
+        "data": {
+            "algorithm": {
+                "key": algorithm.key,
+                "name": algorithm.name,
+                "version": algorithm.version,
+                "uses_llm": algorithm.uses_llm,
+                "uses_datasets": algorithm.uses_datasets,
+            },
+            "market": market,
+            "freq": freq,
+            "universe": universe,
+            "data_source": values.get("data_source") or "qlib_bin",
+            "loop_n": values.get("loop_n", 3),
+            "direction": values.get("direction", ""),
+            "directions": preview_directions,
+            "direction_mode": values.get("direction_mode", "selected"),
+            "direction_weighting": direction_weighting,
+            "direction_quota": direction_quota_preview,
+            "datasets": datasets_by_key,
+            "window": window_preview,
+            "requires_llm": algorithm.uses_llm,
+            "statistical_config": statistical_config,
+        },
+    }
+
+
+# ---- 企业版下放：方向分解与批量派发 ----
+
+
+@router.post("/directions/decompose")
+async def decompose_mining_direction(payload: dict, request: Request):
+    from backend.services.engine.alpha_agent.api_models import DirectionDecomposeRequest
+    from backend.services.engine.alpha_agent.research_api import handle_decompose
+
+    try:
+        parsed = DirectionDecomposeRequest.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await handle_decompose(parsed, request)
+
+
+@router.post("/directions/dispatch")
+async def dispatch_mining_directions(payload: dict, request: Request) -> dict:
+    from backend.services.engine.alpha_agent.api_models import DirectionBatchDispatchRequest
+
+    try:
+        parsed = DirectionBatchDispatchRequest.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await _dispatch_mining_directions(parsed, request)
+
+
+async def _queue_position(task_id: str, tenant_id: str, user_id: str) -> int | None:
+    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+        AlphaMiningTaskPersistence,
+    )
+
+    return await AlphaMiningTaskPersistence().queue_position(
+        task_id, tenant_id=tenant_id, user_id=user_id
+    )
+
+
+async def _dispatch_mining_directions(payload, request: Request, *, selection_batch=None) -> dict:
+    """Enqueue reviewed hypotheses in the owner's shared durable mining queue."""
+    user_id, tenant_id = get_authenticated_identity(request)
+    if not tenant_id or not user_id:
+        raise HTTPException(status_code=401, detail="Authenticated owner is required")
+    if payload.market == "a_share" and not _universe_is_valid(payload.universe):
+        raise HTTPException(status_code=400, detail="本人股票池不存在或不可用")
+
+    from backend.services.engine.alpha_agent.algorithm_registry import (
+        AlgorithmError,
+        resolve_algorithm,
+    )
+    from backend.services.engine.rd_agent.mining_datasets import resolve_datasets
+
+    try:
+        resolve_algorithm(
+            "rdagent",
+            market=payload.market,
+            freq=payload.freq,
+            datasets=payload.datasets,
+        )
+        datasets = list(resolve_datasets(payload.datasets))
+    except (AlgorithmError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if payload.doc_id is not None:
+        from backend.services.engine.alpha_agent.doc_store import DocStore
+
+        source_doc = await DocStore().get_doc(
+            payload.doc_id, tenant_id=tenant_id, user_id=user_id
+        )
+        if (
+            source_doc is None
+            or source_doc.get("status") != "organized"
+            or source_doc.get("organize_state") != "completed"
+            or not isinstance(source_doc.get("organized_payload"), dict)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="本人文档尚无已确认的整理结果，无法批量派发挖掘",
+            )
+
+    seed_factor_ids = payload.seed_factor_ids or [None] * len(payload.directions)
+    seed_factors_by_id: dict[str, dict] = {}
+    unique_seed_ids = list(dict.fromkeys(value for value in seed_factor_ids if value))
+    if unique_seed_ids:
+        from backend.services.engine.alpha_agent.factor_pool import (
+            FactorPoolPersistence,
+        )
+
+        try:
+            seed_rows = await FactorPoolPersistence().get_seed_factors(
+                unique_seed_ids,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                market=payload.market,
+                universe=payload.universe,
+            )
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404, detail="Parent factor not found"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        seed_factors_by_id = {str(row["factor_id"]): row for row in seed_rows}
+
+    llm_config, _llm_source = await _resolve_effective_llm_config(user_id, tenant_id)
+    if llm_config is None:
+        raise HTTPException(
+            status_code=412,
+            detail="未配置 LLM API Key：可在个人中心「其他设置 → AI 服务配置」填写（与 AI-IDE 共用），"
+            "或在服务器 .env 配置 DEEPSEEK_API_KEY / AI_IDE_LLM_API_KEY / OPENAI_API_KEY。",
+        )
+    try:
+        from backend.shared.storage_quota import check_user_quota
+    except ImportError:
+        check_user_quota = None
+    if check_user_quota is not None:
+        from backend.shared.storage_quota import StorageQuotaExceeded
+
+        launcher = get_launcher()
+        try:
+            check_user_quota(
+                launcher._log_dir,
+                tenant_id,
+                user_id,
+                quota_gb=float(os.getenv("FACTOR_QUOTA_GB", "30")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, StorageQuotaExceeded):
+                raise HTTPException(
+                    status_code=507,
+                    detail={"code": "QUOTA_EXCEEDED", "retryable": False},
+                ) from exc
+            raise HTTPException(status_code=503, detail="存储配额暂时无法核验") from exc
+
+    from backend.services.engine.alpha_agent.task_spec import (
+        IdempotencyConflict,
+        MiningTaskSpec,
+    )
+
+    batch_id = str(payload.batch_id)
+    items: list[dict] = []
+    started = queued = failed = 0
+    for index, direction in enumerate(payload.directions):
+        namespace = "doc-batch" if payload.doc_id is not None else "direction-batch"
+        if selection_batch is not None:
+            namespace = "sample-batch"
+        request_key = f"{namespace}:{batch_id}:{index}"
+        seed_factor_id = seed_factor_ids[index]
+        item_seed_factors = (
+            [seed_factors_by_id[seed_factor_id]] if seed_factor_id else []
+        )
+        item_seed_ids = [seed_factor_id] if seed_factor_id else []
+        request_parameters = {
+            "algorithm": "rdagent",
+            "market": payload.market,
+            "universe": payload.universe,
+            "loop_n": payload.loop_n,
+            "direction": direction,
+            "batch_id": batch_id,
+            "batch_size": len(payload.directions),
+            "batch_index": index,
+            "seed_factor_ids": item_seed_ids,
+        }
+        if payload.doc_id is not None:
+            request_parameters["doc_id"] = payload.doc_id
+        if selection_batch is not None:
+            request_parameters["selection_batch_id"] = batch_id
+        execution_options = {
+            "data_source": payload.data_source,
+            "freq": payload.freq,
+            "datasets": datasets,
+            "mining_start": payload.mining_start,
+            "mining_end": payload.mining_end,
+            "valid_start": payload.valid_start,
+            "valid_end": payload.valid_end,
+        }
+        request_parameters.update(
+            (key, value)
+            for key, value in execution_options.items()
+            if key in payload.model_fields_set
+        )
+        # OSS-ADAPT：单容器无 mining_remote admission 快照，data_snapshot 置空；
+        # 落库后由 engine 内队列泵（factor-mining-queue）本地执行。
+        parameters = dict(request_parameters)
+        parameters["seed_factors"] = item_seed_factors
+        try:
+            from backend.services.engine.alpha_agent.resource_budget import (
+                AlphaQueueFull,
+                submit_budget,
+            )
+            from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+                AlphaMiningTaskPersistence,
+            )
+
+            specification = MiningTaskSpec.build(
+                algorithm="rdagent",
+                algorithm_version="rdagent",
+                request=request_parameters,
+                params=parameters,
+                data_snapshot={},
+                request_key=request_key,
+            )
+            task_id = uuid.uuid4().hex[:16]
+            budget = submit_budget(task_id, tenant_id, user_id)
+            store = AlphaMiningTaskPersistence()
+            try:
+                admitted_task_id = await store.create(
+                    task_id,
+                    tenant_id,
+                    user_id,
+                    specification=specification,
+                    market=payload.market,
+                    universe=payload.universe,
+                    loop_n=payload.loop_n,
+                    direction=direction,
+                    data_source=payload.data_source or "",
+                    source_doc_id=payload.doc_id,
+                    status="queued",
+                    phase="queued",
+                    progress="等待前序任务完成",
+                    executor_json="{}",
+                )
+            except Exception:
+                try:
+                    from backend.services.engine.alpha_agent.resource_budget import (
+                        POOL as alpha_pool,
+                    )
+
+                    budget.store.cancel_queued(alpha_pool, task_id, tenant_id, user_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+            task_id = admitted_task_id or task_id
+            persisted = await store.get(
+                task_id, tenant_id=tenant_id, user_id=user_id, consistent=True
+            )
+            if persisted is None:
+                raise RuntimeError("任务状态暂时无法核验")
+            status = persisted["status"]
+            is_queued = status in {"pending", "queued"}
+            item_error = None
+            if status in {"failed", "cancelled"}:
+                failed += 1
+                item_error = "此幂等任务已进入终态；请核查任务详情后用新批次重试"
+            elif is_queued:
+                queued += 1
+            else:
+                started += 1
+            items.append(
+                {
+                    "index": index,
+                    "direction": direction,
+                    "task_id": task_id,
+                    "seed_factor_ids": item_seed_ids,
+                    "status": status,
+                    "queued": is_queued,
+                    "queue_position": await _queue_position(
+                        task_id, tenant_id, user_id
+                    ),
+                    "error": item_error,
+                }
+            )
+        except IdempotencyConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 -- preserve other item receipts
+            if isinstance(exc, AlphaQueueFull):
+                message = "因子挖掘队列暂不可用"
+            elif isinstance(exc, ValueError):
+                message = str(exc)
+            else:
+                message = "本方向派发失败，可用相同批次 ID 安全重试"
+            logger.warning(
+                "[alpha-agent] direction dispatch failed owner=%s/%s batch=%s index=%d error=%s",
+                tenant_id,
+                user_id,
+                batch_id,
+                index,
+                type(exc).__name__,
+            )
+            failed += 1
+            items.append(
+                {
+                    "index": index,
+                    "direction": direction,
+                    "task_id": None,
+                    "status": "failed",
+                    "queued": False,
+                    "queue_position": None,
+                    "error": message,
+                }
+            )
+
+    return {
+        "code": 200,
+        "data": {
+            "batch_id": batch_id,
+            "items": items,
+            "started": started,
+            "queued": queued,
+            "failed": failed,
+        },
+    }
+
+
+# ---- 企业版下放：存储配额、提交回查、任务历史 ----
+
+
+@router.get("/storage")
+async def factor_mining_storage(request: Request):
+    """Return only the authenticated user's factor-mining artifact quota."""
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    try:
+        from backend.shared.storage_quota import user_usage_bytes
+
+        launcher = get_launcher()
+        quota_gb = float(os.getenv("FACTOR_QUOTA_GB", "30"))
+        used_bytes = await asyncio.to_thread(
+            user_usage_bytes, launcher._log_dir, auth_tenant_id, auth_user_id
+        )
+        quota_bytes = None if quota_gb < 0 else int(quota_gb * (1024**3))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="存储用量暂时无法核验") from exc
+    return {
+        "code": 200,
+        "data": {
+            "used_bytes": used_bytes,
+            "quota_bytes": quota_bytes,
+            "used_gb": round(used_bytes / (1024**3), 3),
+            "quota_gb": None if quota_gb < 0 else quota_gb,
+            "unlimited": quota_gb < 0,
+            "remaining_bytes": (
+                None if quota_bytes is None else max(0, quota_bytes - used_bytes)
+            ),
+        },
+    }
+
+
+@router.post("/storage/cleanup")
+async def cleanup_factor_mining_artifacts(request: Request):
+    """Preview or admit a durable cleanup; HTTP never deletes workspace files."""
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    if not auth_tenant_id or not auth_user_id:
+        raise HTTPException(status_code=401, detail="Authenticated owner is required")
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="请求体必须是 JSON") from exc
+    task_ids = payload.get("task_ids") if isinstance(payload, dict) else None
+    confirm = payload.get("confirm") if isinstance(payload, dict) else None
+    if (
+        not isinstance(task_ids, list)
+        or not task_ids
+        or len(task_ids) > 20
+        or any(not isinstance(item, str) or not item.strip() for item in task_ids)
+    ):
+        raise HTTPException(status_code=422, detail="task_ids 必须为 1–20 个任务 ID")
+    if confirm is not None and not isinstance(confirm, bool):
+        raise HTTPException(status_code=422, detail="confirm 必须是布尔值")
+    if len(set(task_ids)) != len(task_ids):
+        raise HTTPException(status_code=422, detail="task_ids 不能重复")
+    if set(payload) - {"task_ids", "confirm", "preview_token"}:
+        raise HTTPException(status_code=422, detail="清理请求包含未知字段")
+    token = payload.get("preview_token")
+    if token is not None and (
+        not isinstance(token, str)
+        or len(token) != 64
+        or any(char not in "0123456789abcdef" for char in token)
+    ):
+        raise HTTPException(status_code=422, detail="preview_token 格式无效")
+
+    from backend.shared.owner_path import owner_segment
+    from backend.shared.owner_scope import OwnerScope
+    from backend.services.engine.alpha_agent.artifact_cleanup import (
+        ArtifactCleanupConflict,
+        attach_cleanup,
+        preview,
+    )
+    from backend.services.engine.alpha_agent.factor_jobs import (
+        AlphaFactorJobPersistence,
+        FactorJobIdempotencyConflict,
+        FactorJobQueueFull,
+    )
+    from backend.services.engine.alpha_agent.factor_job_api import _public
+
+    owner = OwnerScope(auth_tenant_id, auth_user_id)
+    try:
+        for task_id in task_ids:
+            if owner_segment(task_id) != task_id:
+                raise ValueError("任务 ID 含非法字符")
+        jobs = AlphaFactorJobPersistence()
+        key = request.headers.get("Idempotency-Key", "").strip() or token or None
+
+        def receipt(job):
+            frozen = job["request_snapshot"]["request"]
+            items = [
+                {"task_id": item["task_id"], "size_bytes": item["size_bytes"]}
+                for item in frozen["items"]
+            ]
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "code": 202,
+                    "data": {
+                        "confirmed": True,
+                        "job": _public(job),
+                        "items": items,
+                        "total_bytes": sum(item["size_bytes"] for item in items),
+                        "note": "清理作业已接收，可在任务中心查看进度；文件删除不可恢复。",
+                    },
+                    "dispatch": "durable_outbox",
+                },
+            )
+
+        if confirm is True and key:
+            existing = await jobs.get_by_request_key(
+                key,
+                tenant_id=owner.tenant_id,
+                user_id=owner.user_id,
+            )
+            if existing:
+                frozen = existing["request_snapshot"]["request"]
+                if (
+                    existing["kind"] != "cleanup"
+                    or frozen.get("task_ids") != sorted(task_ids)
+                    or (token is not None and frozen.get("preview_token") != token)
+                ):
+                    raise FactorJobIdempotencyConflict("幂等键已用于其他清理请求")
+                return receipt(existing)
+        root = Path(get_launcher()._log_dir)
+        approved = await preview(root, owner, task_ids)
+        if confirm is True and token is not None and token != approved["preview_token"]:
+            raise ArtifactCleanupConflict("预览后产物已变化，请重新预览")
+        if confirm is not True:
+            return {
+                "code": 200,
+                "data": {
+                    "confirmed": False,
+                    "preview_token": approved["preview_token"],
+                    "items": [
+                        {"task_id": item["task_id"], "size_bytes": item["size_bytes"]}
+                        for item in approved["items"]
+                    ],
+                    "total_bytes": approved["total_bytes"],
+                    "note": "清理不可恢复的任务文件；保留任务、规格、结果、因子代码及训练引用。",
+                },
+            }
+
+        def attach(session, job_id):
+            attach_cleanup(session, owner=owner, job_id=job_id, items=approved["items"])
+
+        job_id = await jobs.create(
+            tenant_id=owner.tenant_id,
+            user_id=owner.user_id,
+            kind="cleanup",
+            request={
+                "task_ids": sorted(task_ids),
+                "items": approved["items"],
+                "preview_token": approved["preview_token"],
+                "root_binding": approved["root_binding"],
+            },
+            request_key=key,
+            on_created=attach,
+        )
+        job = await jobs.get(
+            job_id, tenant_id=owner.tenant_id, user_id=owner.user_id, consistent=True
+        )
+        if job is None:
+            raise RuntimeError("Cleanup receipt is missing")
+        return receipt(job)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ArtifactCleanupConflict, FactorJobIdempotencyConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FactorJobQueueFull as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="清理作业暂时无法核验或入队"
+        ) from exc
+
+
+@router.get("/submissions/by-request-key")
+async def mining_submission_by_request_key(
+    request: Request, request_key: str = Query(..., min_length=1, max_length=128)
+):
+    """Read back the caller's original submission, including terminal tasks."""
+    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+        AlphaMiningTaskPersistence,
+    )
+    from backend.services.engine.alpha_agent.public_task import public_task
+    from backend.shared.secret_redaction import redact_data
+
+    user_id, tenant_id = get_authenticated_identity(request)
+    task = await AlphaMiningTaskPersistence().get_by_request_key(
+        request_key, tenant_id=tenant_id, user_id=user_id
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="Mining submission not found")
+    return JSONResponse(
+        content=jsonable_encoder({"code": 200, "data": redact_data(public_task(task))}),
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@router.get("/tasks/history")
+async def mining_task_history(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1000000),
+    status: str | None = None,
+    include_archived: bool = False,
+):
+    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+        AlphaMiningTaskPersistence,
+    )
+    from backend.shared.secret_redaction import redact_data
+
+    user_id, tenant_id = get_authenticated_identity(request)
+    try:
+        page = await AlphaMiningTaskPersistence().history_page(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+            status=status,
+            include_archived=include_archived,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(
+        content=jsonable_encoder({"code": 200, "data": redact_data(page)}),
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@router.post("/tasks/{task_id}/archive")
+async def archive_mining_task(task_id: str, request: Request):
+    """Archive an owned terminal mining task without deleting its evidence."""
+    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+        AlphaMiningTaskPersistence,
+    )
+
+    user_id, tenant_id = get_authenticated_identity(request)
+    try:
+        archived = await AlphaMiningTaskPersistence().archive_terminal(
+            task_id, tenant_id=tenant_id, user_id=user_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not archived:
+        raise HTTPException(status_code=404, detail="Mining task not found")
+    return {"code": 200, "data": {"task_id": task_id, "archived": True}}
+
+
+@router.post("/tasks/{task_id}/restore")
+async def restore_mining_task(task_id: str, request: Request):
+    """Restore an owned archived terminal task to the visible history."""
+    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+        AlphaMiningTaskPersistence,
+    )
+
+    user_id, tenant_id = get_authenticated_identity(request)
+    try:
+        restored = await AlphaMiningTaskPersistence().restore_terminal(
+            task_id, tenant_id=tenant_id, user_id=user_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not restored:
+        raise HTTPException(status_code=404, detail="Mining task not found")
+    return {"code": 200, "data": {"task_id": task_id, "archived": False}}
+
+
+@router.get("/tasks/{task_id}/result")
+async def get_task_result(task_id: str, request: Request):
+    """Return both algorithm output and persisted factors in the verified owner scope."""
+    await _require_owned_task(task_id, request)
+    user_id, tenant_id = get_authenticated_identity(request)
+    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+        AlphaMiningTaskPersistence,
+    )
+    from backend.shared.secret_redaction import redact_data
+
+    store = AlphaMiningTaskPersistence()
+    task = await store.get_for_owner_with_spec(
+        task_id, tenant_id=tenant_id, user_id=user_id
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="Mining task not found")
+    algorithm = task.get("algorithm") or "rdagent"
+    result = await store.get_result(task_id, tenant_id=tenant_id, user_id=user_id)
+    persisted_factors = await persistence.list_factors(
+        user_id=user_id,
+        task_id=task_id,
+        limit=200,
+    )
+    factors = [
+        {
+            "factor_id": str(factor.get("factor_id") or ""),
+            "factor_name": str(factor.get("factor_name") or ""),
+            "factor_formulation": str(factor.get("factor_formulation") or "")[:2000],
+            "status": str(factor.get("status") or "unknown"),
+            "rank_ic": factor.get("rank_ic"),
+            "factor_revision_no": factor.get("factor_revision_no"),
+        }
+        for factor in persisted_factors
+    ]
+    return {
+        "code": 200,
+        "data": redact_data(
+            {
+                "task_id": task_id,
+                "algorithm": algorithm,
+                "status": task.get("status"),
+                "result": result,
+                "factors": factors,
+            }
+        ),
+    }
+
+
+@router.get("/tasks/{task_id}/log/stream")
+async def stream_task_log(
+    task_id: str,
+    request: Request,
+    tail_lines: int = Query(200, ge=0, le=2000, description="首帧回看的日志行数"),
+) -> StreamingResponse:
+    """SSE 增量推送任务子进程日志（文件为事实源，按字节偏移只读新增）。"""
+    import time as _time
+
+    from backend.shared.sse_guard import guard_sse, identity_from_request
+
+    await _require_owned_task(task_id, request)
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    from backend.services.engine.alpha_agent.log_stream import stream_log
+    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+        AlphaMiningTaskPersistence,
+    )
+
+    launcher = get_launcher()
+    log_path = launcher.task_log_path(
+        task_id, tenant_id=auth_tenant_id, user_id=auth_user_id
+    )
+    store = AlphaMiningTaskPersistence()
+    terminal = {"value": False, "checked_at": 0.0}
+
+    async def is_done() -> bool:
+        if terminal["value"]:
+            return True
+        now = _time.monotonic()
+        if now - terminal["checked_at"] < 3.0:
+            return False
+        terminal["checked_at"] = now
+        record = await store.get(
+            task_id, tenant_id=auth_tenant_id, user_id=auth_user_id
+        )
+        if str((record or {}).get("status") or "") in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
+            terminal["value"] = True
+            return True
+        return False
+
+    return StreamingResponse(
+        guard_sse(
+            identity_from_request(request),
+            stream_log(log_path, tail_lines=tail_lines, is_done=is_done),
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/tasks/{task_id}/trajectory")
+async def get_task_trajectory(task_id: str, request: Request):
+    """Read the current owner's RD-Agent loop and phase artifact summary."""
+    from backend.shared.secret_redaction import redact_data
+
+    task = await _require_owned_task(task_id, request)
+    user_id, tenant_id = get_authenticated_identity(request)
+    launcher = get_launcher()
+    from backend.services.engine.alpha_agent.trajectory_store import load_trajectory
+
+    try:
+        trajectory = await load_trajectory(
+            task=task,
+            root=launcher._log_dir,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(
+            status_code=404, detail="Task trajectory not found"
+        ) from None
+    return {"code": 200, "data": redact_data(trajectory)}
+
+
+# ---- 企业版下放：因子归档/生命周期/版本 ----
+
+
+async def _set_factor_archived(
+    factor_id: str, request: Request, *, archived: bool, reason: str
+) -> dict:
+    from backend.services.engine.alpha_agent.factor_visibility import (
+        FactorVisibilityConflict,
+        FactorVisibilityStore,
+    )
+
+    user_id, tenant_id = get_authenticated_identity(request)
+    try:
+        result = await FactorVisibilityStore().set_archived(
+            factor_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            archived=archived,
+            reason=reason,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Factor not found") from exc
+    except FactorVisibilityConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"code": 200, "data": {**result, "history_preserved": True}}
+
+
+@router.post("/factors/{factor_id}/archive")
+async def archive_factor(factor_id: str, payload: dict, request: Request) -> dict:
+    reason = payload.get("reason", "") if isinstance(payload, dict) else ""
+    return await _set_factor_archived(
+        factor_id, request, archived=True, reason=reason
+    )
+
+
+@router.post("/factors/{factor_id}/restore")
+async def restore_factor(factor_id: str, payload: dict, request: Request) -> dict:
+    reason = payload.get("reason", "") if isinstance(payload, dict) else ""
+    return await _set_factor_archived(
+        factor_id, request, archived=False, reason=reason
+    )
+
+
+@router.delete("/factors/{factor_id}")
+async def archive_factor_legacy(factor_id: str, request: Request) -> dict:
+    """Preserve frozen references when older clients request factor deletion."""
+    return await _set_factor_archived(
+        factor_id, request, archived=True, reason="兼容客户端归档"
+    )
+
+
+@router.post("/factors/{factor_id}/lifecycle/evaluate")
+async def evaluate_factor_lifecycle(
+    factor_id: str,
+    request: Request,
+    apply: bool = Query(False, description="显式保存本人因子的评估与降权状态"),
+):
+    """Evaluate one factor using only the authenticated owner's completed run."""
+    from backend.services.engine.alpha_agent.factor_jobs import (
+        AlphaFactorJobPersistence,
+    )
+    from backend.shared.factor_lifecycle import (
+        STATE_DOWNWEIGHTED,
+        STATE_OBSERVING,
+        evaluate_lifecycle,
+    )
+    from backend.shared.utc_datetime import utc_now
+
+    factor = await _require_owned_factor(factor_id, request, for_write=True)
+    user_id, tenant_id = get_authenticated_identity(request)
+    jobs = AlphaFactorJobPersistence()
+    try:
+        evidence = await jobs.latest_completed_backtest_evidence(
+            [factor_id], tenant_id=tenant_id, user_id=user_id
+        )
+        first_completed = await jobs.first_completed_backtest_at(
+            [factor_id], tenant_id=tenant_id, user_id=user_id
+        )
+    except Exception as exc:
+        logger.warning("因子生命周期证据读取失败", exc_info=True)
+        raise HTTPException(status_code=503, detail="因子评估证据暂不可用") from exc
+
+    evidence_row = evidence.get(factor_id) or {}
+    result_snapshot = evidence_row.get("result")
+    if isinstance(result_snapshot, str):
+        try:
+            import json
+
+            result_snapshot = json.loads(result_snapshot)
+        except (TypeError, ValueError):
+            result_snapshot = None
+    chart = result_snapshot.get("series") if isinstance(result_snapshot, dict) else None
+    raw_series = chart.get("lifecycle_ic_series") if isinstance(chart, dict) else None
+    series = raw_series if isinstance(raw_series, dict) else None
+    now = utc_now()
+    result = evaluate_lifecycle(
+        factor,
+        series=series,
+        first_completed_run_at=first_completed.get(factor_id),
+        now=now,
+    )
+    lifecycle = result["state_before"]
+    if apply:
+        try:
+            await persistence.record_factor_lifecycle_evaluation(
+                factor_id,
+                result,
+                evaluated_at=now,
+                factor_revision_no=(
+                    result_snapshot.get("factor_revision_no")
+                    if isinstance(result_snapshot, dict)
+                    and isinstance(result_snapshot.get("factor_revision_no"), int)
+                    else None
+                ),
+                evidence_job_id=evidence_row.get("job_id") or None,
+                user_id=user_id,
+                tenant_id=tenant_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="因子不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.warning("因子生命周期结果写入失败", exc_info=True)
+            raise HTTPException(status_code=503, detail="因子评估结果暂未保存") from exc
+
+    if lifecycle == STATE_OBSERVING:
+        return {
+            "code": 200,
+            "data": {
+                "factor_id": factor_id,
+                "state": STATE_OBSERVING,
+                "blind_until": result["blind_until"],
+                "eval_status": "blind_window",
+                "action": "none",
+                "applied": apply,
+            },
+        }
+
+    verdict = result["verdict"]
+    latest = verdict.get("latest") or {}
+    return {
+        "code": 200,
+        "data": {
+            "factor_id": factor_id,
+            "state": result["state_after"] if apply else lifecycle,
+            "blind_until": result["blind_until"],
+            "eval_status": result["eval_status"],
+            "decision": verdict.get("decision"),
+            "streak": verdict.get("streak"),
+            "latest": latest,
+            "readings": result["readings"],
+            "action": result["action"],
+            "applied": apply,
+            "downweighted": (
+                result["state_after"] == STATE_DOWNWEIGHTED
+                if apply
+                else lifecycle == STATE_DOWNWEIGHTED
+            ),
+        },
+    }
+
+
+@router.get("/factors/{factor_id}/lifecycle/history")
+async def factor_lifecycle_history(
+    factor_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=100),
+    before_event_id: int | None = Query(None, gt=0),
+):
+    """Return a bounded page of this owner's lifecycle evaluation history."""
+    from backend.services.engine.alpha_agent.factor_jobs import (
+        AlphaFactorJobPersistence,
+    )
+    from backend.shared.factor_lifecycle import blind_until_of
+    from backend.shared.utc_datetime import utc_now
+
+    factor = await _require_owned_factor(factor_id, request)
+    user_id, tenant_id = get_authenticated_identity(request)
+    jobs = AlphaFactorJobPersistence()
+    try:
+        first_completed = await jobs.first_completed_backtest_at(
+            [factor_id], tenant_id=tenant_id, user_id=user_id
+        )
+        events = await persistence.list_factor_lifecycle_events(
+            factor_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            limit=limit,
+            before_event_id=before_event_id,
+        )
+    except Exception as exc:
+        logger.warning("因子生命周期历史读取失败", exc_info=True)
+        raise HTTPException(status_code=503, detail="因子生命周期历史暂不可用") from exc
+
+    created_at = factor.get("created_at")
+    blind_until = blind_until_of(
+        created_at=created_at if isinstance(created_at, datetime) else None,
+        first_completed_run_at=first_completed.get(factor_id),
+    )
+    redact = blind_until is not None and utc_now() < blind_until
+    data = []
+    for event in events:
+        item = {
+            "event_id": int(event["event_id"]),
+            "event_type": event["event_type"],
+            "evaluated_at": event["evaluated_at"],
+        }
+        if redact:
+            item["redacted"] = True
+            item["eval_status"] = "blind_window"
+        else:
+            item.update(
+                {
+                    "factor_revision_no": event.get("factor_revision_no"),
+                    "evidence_job_id": event.get("evidence_job_id"),
+                    "event_snapshot": event.get("event_snapshot"),
+                }
+            )
+        data.append(item)
+    return {
+        "code": 200,
+        "data": {
+            "events": data,
+            "next_before_event_id": (
+                data[-1]["event_id"] if len(data) == limit else None
+            ),
+        },
+    }
+
+
+@router.post("/factors/{factor_id}/lifecycle/restore")
+async def restore_factor_lifecycle(
+    factor_id: str,
+    request: Request,
+    reason: str = Query(..., min_length=1, max_length=500),
+):
+    """Clear a downweight override with an owner-attributed restore record."""
+    await _require_owned_factor(factor_id, request, for_write=True)
+    user_id, tenant_id = get_authenticated_identity(request)
+    try:
+        lifecycle = await persistence.restore_factor_lifecycle(
+            factor_id,
+            reason,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Factor not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("因子生命周期恢复失败", exc_info=True)
+        raise HTTPException(status_code=503, detail="因子状态暂未恢复") from exc
+
+    return {
+        "code": 200,
+        "data": {
+            "factor_id": factor_id,
+            "lifecycle": lifecycle,
+        },
+    }
+
+
+@router.get("/factors/{factor_id}/revisions")
+async def list_factor_revisions(
+    factor_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=100),
+):
+    """列出本人因子不可变代码版本及其内容哈希。"""
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    await _require_owned_factor(factor_id, request)
+    revisions = await persistence.list_factor_revisions(
+        factor_id,
+        tenant_id=auth_tenant_id,
+        user_id=auth_user_id,
+        limit=limit,
+    )
+    return {"code": 200, "data": {"revisions": revisions, "total": len(revisions)}}
 
 
 _MARKET_TO_QLIB: dict[str, str] = {

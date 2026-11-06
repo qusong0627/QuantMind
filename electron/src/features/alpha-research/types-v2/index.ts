@@ -1,5 +1,5 @@
 // Task status
-export type TaskStatus = 'idle' | 'running' | 'completed' | 'failed';
+export type TaskStatus = 'queued' | 'idle' | 'running' | 'stopping' | 'completed' | 'failed' | 'cancelled';
 
 // Execution phase
 export type ExecutionPhase =
@@ -24,7 +24,7 @@ export type BuiltinUniverseId =
   | 'csi800'
   | 'all_a';
 
-export type UniverseId = BuiltinUniverseId | (string & {});
+export type UniverseId = BuiltinUniverseId | (string & Record<never, never>);
 
 // Stock universe metadata from /universes API
 export interface UniverseInfo {
@@ -60,15 +60,53 @@ export interface DataSummary {
   error?: string;
 }
 
+/** Statistical runner parameters, using the server's parameter names. */
+export interface StatisticalMiningOptions {
+  horizons?: number[];
+  top_k?: number;
+  min_names_per_day?: number;
+  min_valid_days?: number;
+  quantiles?: number;
+  fdr_q?: number;
+  require_fdr?: boolean;
+  oos_min_ratio?: number;
+  oos_min_days?: number;
+  neutralize?: 'none' | 'industry' | 'industry_size';
+  stability_folds?: number;
+  min_fold_sign_consistency?: number;
+  min_fold_days?: number;
+  require_stability?: boolean;
+  dedup_corr_reject?: number;
+  dedup_corr_warn?: number;
+  require_dedup?: boolean;
+  composite_enabled?: boolean;
+  composite_z_window?: number;
+  net_ic_cost_rate?: number | null;
+  tradability?: {
+    exclude_suspended?: boolean;
+    st_snapshot_symbols?: string[];
+    min_list_days?: number;
+    exclude_limit_locked?: boolean;
+    limit_tolerance?: number;
+    min_amount_quantile?: number;
+    min_amount_window?: number;
+  };
+}
+
 // Task configuration
 export interface TaskConfig {
   // Basic configuration
   userInput: string;
+  algorithm?: 'rdagent' | 'statistical';
+  statisticalConfig?: StatisticalMiningOptions;
+  autoMaterialize?: boolean;
+  miningStart?: string;
+  miningEnd?: string;
+  validStart?: string;
+  validEnd?: string;
   /** When true, use options in "Settings -> Mining Direction" (selected/random), ignoring input box content */
   useCustomMiningDirection?: boolean;
-  numDirections?: number;
   maxRounds?: number;
-  librarySuffix?: string;
 
   // LLM configuration
   apiKey?: string;
@@ -83,25 +121,25 @@ export interface TaskConfig {
 
   // Data source selection
   dataSource?: 'qlib_bin' | 'parquet';
+  /** Selected server-registered QuantDB datasets for RD-Agent mining. */
+  datasets?: string[];
+  /** Mining frequency. The current supported value is A-share daily. */
+  freq?: 'day';
 
   // Backtest configuration
   market?: 'csi300' | 'csi500' | 'sp500';
   startDate?: string;
   endDate?: string;
 
-  // Advanced configuration
-  parallelExecution?: boolean;
-  qualityGateEnabled?: boolean;
-  backtestTimeout?: number;
 }
 
 // Real-time metrics
 export interface RealtimeMetrics {
   // IC metrics
-  ic: number;
-  icir: number;
-  rankIc: number;
-  rankIcir: number;
+  ic: number | null;
+  icir: number | null;
+  rankIc: number | null;
+  rankIcir: number | null;
   
   // Optional factor name if available (e.g. best factor)
   factorName?: string;
@@ -111,22 +149,22 @@ export interface RealtimeMetrics {
     factorId: string;
     factorName: string;
     factorExpression: string;
-    rankIc: number;
-    rankIcir: number;
-    ic: number;
-    icir: number;
-    annualReturn?: number;
-    sharpeRatio?: number;
-    maxDrawdown?: number;
-    calmarRatio?: number;
+    rankIc: number | null;
+    rankIcir: number | null;
+    ic: number | null;
+    icir: number | null;
+    annualReturn?: number | null;
+    sharpeRatio?: number | null;
+    maxDrawdown?: number | null;
+    calmarRatio?: number | null;
     market?: string;
     cumulativeCurve?: Array<{date: string, value: number}>;
   }>;
 
   // Return metrics
-  annualReturn: number;
-  sharpeRatio: number;
-  maxDrawdown: number;
+  annualReturn: number | null;
+  sharpeRatio: number | null;
+  maxDrawdown: number | null;
 
   // Factor statistics
   totalFactors: number;
@@ -182,6 +220,22 @@ export interface LogEntry {
 }
 
 // Factor information
+export interface FactorTags {
+  data_source: string;
+  frequency: string;
+  family: string;
+  transform: string;
+  target: string;
+  maturity: string;
+}
+
+export interface FactorLifecycle {
+  state: 'experiment' | 'observing' | 'active' | 'downweighted';
+  maturity: string;
+  blind_until: string | null;
+  last_eval: Record<string, unknown> | null;
+}
+
 export interface Factor {
   factorId: string;
   factorName: string;
@@ -192,23 +246,28 @@ export interface Factor {
   universe?: string;  // csi300, csi500, csi1000, sse50, gem, star, csi800, all_a
 
   // Backtest metrics
-  ic: number;
-  icir: number;
-  rankIc: number;
-  rankIcir: number;
-  sharpeRatio: number;
-  annualReturn: number;
-  maxDrawdown: number;
+  ic: number | null;
+  icir: number | null;
+  rankIc: number | null;
+  rankIcir: number | null;
+  sharpeRatio: number | null;
+  annualReturn: number | null;
+  maxDrawdown: number | null;
 
   // Metadata
   round: number;
   direction: string;
   createdAt: string;
+  archivedAt?: string | null;
+  hasCode?: boolean;
+  archiveReason?: string | null;
 
   /** 因子工厂批量产出：只读展示，不提供回测/训练操作 */
   readOnly?: boolean;
   source?: string;
-  coverage?: number;
+  coverage?: number | null;
+  tags?: FactorTags;
+  lifecycle?: FactorLifecycle | null;
 }
 
 // Backtest result
@@ -241,6 +300,7 @@ export interface TimeSeriesData {
 // Task information
 export interface Task {
   taskId: string;
+  queuePosition?: number;
   status: TaskStatus;
   config: TaskConfig;
   progress: ExecutionProgress;
