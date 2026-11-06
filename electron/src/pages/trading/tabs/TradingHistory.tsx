@@ -3,7 +3,7 @@ import { selectCurrentMarket, setMarket, type AppMarket } from '../../../store/s
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { FileText, Search, Download, TrendingUp, TrendingDown, Clock, CheckCircle, XCircle, ChevronLeft, ChevronRight, AlertTriangle, Activity, RotateCcw, ChevronDown } from 'lucide-react';
 import { DatePicker, Dropdown, Modal, message } from 'antd';
-import type { Dayjs } from 'dayjs';
+import dayjs, { type Dayjs } from 'dayjs';
 import type { Order } from '../../../services/realTradingService';
 import { marketDataService } from '../../../services/marketDataService';
 import { csvExporter } from '../../../services/export';
@@ -192,8 +192,8 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
     const [brokerNote, setBrokerNote] = useState('');
     // 柜台视图可在 QMT / 通达信 之间显式切换（auto = 跟随「券商接入」）
     const [brokerSource, setBrokerSource] = useState<'auto' | 'qmt_exec' | 'tdx'>('auto');
-    // 柜台历史日期（留空=当日；QMT 支持历史，TDX 只有当日）
-    const [brokerDate, setBrokerDate] = useState<Dayjs | null>(null);
+    // 柜台历史区间（留空=当日；QMT 支持历史区间，TDX 只有当日）
+    const [brokerRange, setBrokerRange] = useState<[Dayjs, Dayjs] | null>(null);
     // Agent 对账单弹窗
     const [statementOpen, setStatementOpen] = useState(false);
     const [statementLoading, setStatementLoading] = useState(false);
@@ -222,7 +222,9 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                 const resp = await realTradingService.getBrokerRecords(
                     'orders',
                     brokerSource === 'auto' ? undefined : brokerSource,
-                    brokerDate ? brokerDate.format('YYYY-MM-DD') : undefined,
+                    undefined,
+                    brokerRange ? brokerRange[0].format('YYYY-MM-DD') : undefined,
+                    brokerRange ? brokerRange[1].format('YYYY-MM-DD') : undefined,
                 );
                 setBrokerLabel(BROKER_LABELS[resp.broker] || resp.broker || '券商');
                 setBrokerNote(resp.note || '');
@@ -357,20 +359,30 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
             setTrades(mapped);
         } catch (e) {
             console.error("Failed to load orders", e);
+            if (recordSource === 'broker') {
+                // 柜台查询失败（QMT 通道卡死 / TDX 桥不可达）必须落到界面上，
+                // 否则用户只看到一张空表，分不清「没单」还是「查不了」。
+                setTrades([]);
+                const detail = e instanceof Error ? e.message : String(e);
+                setBrokerNote(`柜台查询失败：${detail}`);
+            }
         } finally {
             loadingRef.current = false;
         }
-    }, [recordSource, brokerSource, brokerDate, timeRange, tradingMode, userId, currentMarket]);
+    }, [recordSource, brokerSource, brokerRange, timeRange, tradingMode, userId, currentMarket]);
 
     React.useEffect(() => {
         if (isActive && userId) {
             void loadOrders();
+            // 历史区间查询重（QMT 交易上下文 RPC），不轮询；当日柜台 30s 一次，
+            // 系统账本 5s 一次（纯 PG，不碰券商通道）。
+            if (recordSource === 'broker' && brokerRange) return;
             const interval = setInterval(() => {
                 void loadOrders();
-            }, 5000);
+            }, recordSource === 'broker' ? 30000 : 5000);
             return () => clearInterval(interval);
         }
-    }, [isActive, loadOrders, userId]);
+    }, [isActive, loadOrders, userId, recordSource, brokerRange]);
 
     React.useEffect(() => {
         setCurrentPage(1);
@@ -589,12 +601,26 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                 </div>
 
                 {recordSource === 'broker' && (
-                    <DatePicker
+                    <DatePicker.RangePicker
                         size="small"
-                        value={brokerDate}
-                        onChange={(d) => setBrokerDate(d)}
-                        placeholder="当日（可查历史）"
+                        value={brokerRange}
+                        onChange={(range) =>
+                            setBrokerRange(
+                                range && range[0] && range[1]
+                                    ? [range[0], range[1]]
+                                    : null,
+                            )
+                        }
+                        placeholder={['开始日期', '结束日期']}
                         allowClear
+                        presets={[
+                            { label: '今日', value: [dayjs(), dayjs()] },
+                            { label: '9 月 1 日起', value: [dayjs('2026-09-01'), dayjs()] },
+                            {
+                                label: '近 30 天',
+                                value: [dayjs().subtract(29, 'day'), dayjs()],
+                            },
+                        ]}
                     />
                 )}
 
@@ -742,11 +768,15 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                                         <div className="flex flex-col items-center gap-2">
                                             <FileText size={32} className="text-gray-200" />
                                             <span className="text-sm">
-                                                {recordSource === 'broker' ? '券商柜台今日无委托记录' : '暂无交易记录'}
+                                                {recordSource === 'broker'
+                                                    ? (brokerRange
+                                                        ? `${brokerRange[0].format('YYYY-MM-DD')} ~ ${brokerRange[1].format('YYYY-MM-DD')} 柜台无记录`
+                                                        : '券商柜台今日无委托记录')
+                                                    : '暂无交易记录'}
                                             </span>
                                             <span className="text-xs text-gray-300">
                                                 {recordSource === 'broker'
-                                                    ? (brokerNote || '柜台接口只返回当日数据；跨日历史请看「系统账本」')
+                                                    ? (brokerNote || '柜台当日走实时接口；历史区间仅 QMT 支持（通达信无历史接口）')
                                                     : `${timeRange === 'today' ? '今日' : timeRange === 'week' ? '本周' : timeRange === 'month' ? '本月' : ''}内无委托记录`}
                                             </span>
                                             {marketHint && (

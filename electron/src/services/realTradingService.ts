@@ -130,6 +130,9 @@ export interface BrokerRecordsResponse {
     broker: string;
     market: string;
     kind: 'orders' | 'trades';
+    /** 实际查询区间（后端回显） */
+    start?: string;
+    end?: string;
     count: number;
     /** 数据源说明（如通达信不提供成交明细） */
     note?: string;
@@ -1035,11 +1038,19 @@ export const realTradingService = {
         kind: 'orders' | 'trades',
         source?: string,
         date?: string,
+        start?: string,
+        end?: string,
     ): Promise<BrokerRecordsResponse> => {
         return await requestRealTradingWithFallback<BrokerRecordsResponse>({
             method: 'get',
             url: '/broker-records',
-            params: { kind, ...(source ? { source } : {}), ...(date ? { date } : {}) },
+            params: {
+                kind,
+                ...(source ? { source } : {}),
+                ...(date ? { date } : {}),
+                ...(start ? { start } : {}),
+                ...(end ? { end } : {}),
+            },
         });
     },
 
