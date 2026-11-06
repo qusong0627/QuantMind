@@ -3617,6 +3617,45 @@ async def get_model_inference_run_detail(
     }
 
 
+@router.get("/inference/review-runs", summary="列出复盘推理批次")
+async def list_review_runs(
+    model_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    tenant_id, user_id = _owner_scope(current_user)
+    async with get_session(read_only=True) as session:
+        rows = (await session.execute(text("""
+            SELECT run_id, model_id, data_trade_date, prediction_trade_date, created_at, updated_at
+            FROM qm_model_inference_runs
+            WHERE tenant_id = :tenant_id AND user_id = :user_id
+              AND model_id = :model_id AND status = 'completed'
+            ORDER BY data_trade_date DESC, created_at DESC
+            LIMIT :limit OFFSET :offset
+        """), {"tenant_id": tenant_id, "user_id": user_id, "model_id": model_id,
+                "limit": page_size, "offset": (page - 1) * page_size})).mappings().all()
+    return {"items": [dict(row) for row in rows], "page": page, "has_more": len(rows) == page_size}
+
+
+@router.get("/inference/review/{run_id}", summary="复盘推理组合")
+async def review_inference_run(
+    run_id: str,
+    top_k: int = Query(30),
+    exclude_st: bool = Query(True),
+    benchmark: str = Query("000300.SH"),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    if top_k not in (10, 30, 50) or benchmark not in ("000300.SH", "000905.SH", "000001.SH"):
+        raise HTTPException(status_code=422, detail="无效的组合规模或基准")
+    # 复用现有批次属主验证、信号查询与历史产物回退。
+    detail = await get_model_inference_run_detail(run_id, current_user)
+    if detail["summary"].get("status") != "completed":
+        raise HTTPException(status_code=409, detail="推理批次尚未完成")
+    from backend.services.api.services.inference_review import calculate_review
+    return await calculate_review(detail, top_k, exclude_st, benchmark)
+
+
 @router.delete("/inference/runs/{run_id}", summary="删除推理运行记录（用户态）")
 async def delete_model_inference_run(
     run_id: str,

@@ -44,6 +44,7 @@ const ModelTrainingPage = lazy(() => import('./pages/ModelTrainingPage'));
 const ModelRegistryPage = lazy(() => import('./pages/ModelRegistryPage'));
 const ModelHubPage = lazy(() => import('./pages/ModelHubPage'));
 const InferenceCenterPage = lazy(() => import('./pages/InferenceCenterPage'));
+const ReviewCenterPage = lazy(() => import('./features/review-center/ReviewCenterPage'));
 const StockTerminalPage = lazy(() => import('./features/stock-terminal/pages/StockTerminalPage'));
 const ResearchPlatformPage = lazy(() => import('./pages/ResearchPlatformPage').then(m => ({ default: m.default || m.ResearchPlatformPage })));
 const RealTradingPage = lazy(() => import('./pages/trading/RealTradingPage'));
@@ -179,6 +180,7 @@ export default function App() {
       'model-training': '/model-training',
       'model-registry': '/model-registry',
       'inference-center': '/inference-center',
+      'review-center': '/review-center',
       'stock-terminal': '/stock-terminal',
       'research': '/research',
       'trading': '/trading',
@@ -220,6 +222,8 @@ export default function App() {
       dispatch(setCurrentTab('model-registry' as DashboardTab));
     } else if (location.pathname.startsWith('/inference-center')) {
       dispatch(setCurrentTab('inference-center' as DashboardTab));
+    } else if (location.pathname.startsWith('/review-center')) {
+      dispatch(setCurrentTab('review-center' as DashboardTab));
     } else if (location.pathname.startsWith('/stock-terminal')) {
       dispatch(setCurrentTab('stock-terminal' as DashboardTab));
     } else if (location.pathname.startsWith('/research')) {
@@ -531,6 +535,14 @@ export default function App() {
                     element={
                       <ProtectedRoute>
                         <InferenceCenterPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="/review-center"
+                    element={
+                      <ProtectedRoute>
+                        <ReviewCenterPage />
                       </ProtectedRoute>
                     }
                   />

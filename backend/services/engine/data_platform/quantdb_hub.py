@@ -386,6 +386,25 @@ class QuantDBDataHub:
             return []
         return sorted(dates)
 
+    def partition_columns(self, rel_path: str, dt: str) -> set[str]:
+        """指定分区的列名集合（只读 parquet footer，不扫数据行）。
+
+        供调用方做列裁剪：duckdb 对不存在的列是 Binder Error，一个列名失效会让
+        整条 SELECT 失败、整层数据被吞成空表。先取交集再 SELECT，缺列只降级该列。
+        """
+        base = self.data_dir / rel_path / f"dt={dt}"
+        if not base.is_dir():
+            return set()
+        glob_path = str(base / "*.parquet").replace("\\", "/")
+        try:
+            df = self._exact_conn().execute(
+                f"SELECT * FROM read_parquet('{glob_path}', union_by_name=true) LIMIT 0"
+            ).fetchdf()
+            return set(df.columns)
+        except Exception as exc:
+            logger.warning("读取分区列失败 %s dt=%s: %s", rel_path, dt, exc)
+            return set()
+
     def _read_partitioned(
         self,
         rel_path: str,

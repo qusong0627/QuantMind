@@ -17,6 +17,7 @@ import {
   Brain,
   BarChart3,
   Cpu,
+  TrendingUp,
   CandlestickChart,
 } from 'lucide-react';
 import { useSelector } from 'react-redux';
@@ -53,6 +54,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'model-training', label: '模型训练', icon: Layers },
     { id: 'model-registry', label: '模型管理', icon: Boxes },
     { id: 'inference-center', label: '推理中心', icon: Cpu },
+    { id: 'review-center', label: '模型复盘', icon: TrendingUp },
     // 4. 智能投研区域
     { id: 'research', label: '投研平台', icon: Search },
     { id: 'alpha-research', label: '因子挖掘', icon: TestTube2 },
@@ -72,7 +74,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     // 2. 回测与交易区域
     navItems.filter((item) => ['stock-terminal', 'ai-ide', 'backtest', 'trading'].includes(item.id)),
     // 3. 模型区域
-    navItems.filter((item) => ['model-training', 'model-registry', 'inference-center'].includes(item.id)),
+    navItems.filter((item) => ['model-training', 'model-registry', 'inference-center', 'review-center'].includes(item.id)),
     // 4. 智能投研区域
     navItems.filter((item) => ['research', 'alpha-research', 'skills', 'agent'].includes(item.id)),
     // 5. 个人与系统组

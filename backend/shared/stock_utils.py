@@ -186,3 +186,28 @@ class StockCodeUtil:
     def normalize_list(codes: list[str]) -> list[str]:
         """批量标准化为 suffix 格式（全系统通用口径）"""
         return [StockCodeUtil.to_suffix(c) for c in codes if c]
+
+    @staticmethod
+    def exchange(code: str) -> str:
+        """返回后缀口径代码的交易所（SH/SZ/BJ），非标准返回空串。"""
+        canonical = StockCodeUtil.to_suffix(code)
+        return (
+            canonical.rsplit(".", 1)[1]
+            if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", canonical)
+            else ""
+        )
+
+    @staticmethod
+    def digits(code: str) -> str:
+        """返回后缀口径代码的 6 位裸码。"""
+        return StockCodeUtil.to_suffix(code).split(".", 1)[0]
+
+    @staticmethod
+    def series_keys(code: str) -> list[str]:
+        """行情时序 Redis 键（`market:series:<后缀>`，兼容旧前缀键只读）。"""
+        canonical = StockCodeUtil.to_suffix(code)
+        keys = [f"market:series:{canonical}"]
+        if StockCodeUtil.exchange(canonical):
+            legacy = StockCodeUtil.exchange(canonical) + StockCodeUtil.digits(canonical)
+            keys.append(f"market:series:{legacy}")
+        return keys

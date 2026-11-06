@@ -1021,8 +1021,19 @@ class ModelTrainingService {
     return resp.data;
   }
 
-  async getLatestInferenceRun(modelId?: string): Promise<LatestInferenceRunInfo | null> {
-    const resp = await this.client.get<LatestInferenceRunInfo>('/models/inference/latest', {
+  async listReviewRuns(modelId: string, page = 1): Promise<{ items: ReviewRun[]; has_more: boolean }> {
+    const resp = await this.client.get('/models/inference/review-runs', { params: { model_id: modelId, page, page_size: 50 } });
+    return resp.data;
+  }
+
+  async getInferenceReview(runId: string, topK: number, excludeST: boolean, benchmark: string): Promise<ReviewResult> {
+    const resp = await this.client.get(`/models/inference/review/${encodeURIComponent(runId)}`, {
+      params: { top_k: topK, exclude_st: excludeST, benchmark }, timeout: 90000,
+    });
+    return resp.data;
+  }
+
+  async getLatestInferenceRun(modelId?: string): Promise<LatestInferenceRunInfo | null> {    const resp = await this.client.get<LatestInferenceRunInfo>('/models/inference/latest', {
       params: modelId ? { model_id: modelId } : undefined,
     });
     const data = resp.data as any;
@@ -1170,5 +1181,10 @@ export interface DataWindowResult {
   } | null;
   coverage: DataWindowCoverage | null;
 }
+
+export interface ReviewRun { run_id: string; model_id: string; data_trade_date: string; prediction_trade_date: string; created_at: string; updated_at: string; }
+export interface ReviewStock { code: string; name: string; industry: string; score: number | null; rank: number; start: number | null; latest: number | null; cumulative: number | null; daily: number | null; source: string; }
+export interface ReviewDay { date: string; cumulative: number | null; benchmark: number | null; coverage: number; source: string; }
+export interface ReviewResult { benchmark_start: number | null; stocks: ReviewStock[]; days: ReviewDay[]; unknown_st: number; requested: number; quote_coverage: number; quote_time: string | null; message: string; }
 
 export const modelTrainingService = new ModelTrainingService();
