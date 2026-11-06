@@ -3648,6 +3648,31 @@ ALTER TABLE rd_agent_factors ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DE
 CREATE INDEX IF NOT EXISTS idx_rd_agent_factors_tenant_user
     ON rd_agent_factors (tenant_id, user_id);
 
+-- S. 推理作业持久队列（企业版 data/upgrade_v1.0.25.sql 下放）。
+-- backend/services/engine/inference/jobs.py 的作业泵读写此表；缺表会每轮报
+-- UndefinedTable 并空转。owner 双维 + 幂等键唯一，单容器下仍按用户隔离。
+CREATE TABLE IF NOT EXISTS qm_inference_jobs (
+    task_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL CHECK (tenant_id <> ''),
+    user_id TEXT NOT NULL CHECK (user_id <> ''),
+    idempotency_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued','running','cancelling','completed','failed','cancelled')),
+    token TEXT,
+    request_payload JSONB NOT NULL,
+    executor JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result_payload JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    heartbeat_at TIMESTAMPTZ,
+    UNIQUE (tenant_id,user_id,idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS qm_inference_jobs_owner_status
+    ON qm_inference_jobs (tenant_id,user_id,status,created_at);
+CREATE INDEX IF NOT EXISTS qm_inference_jobs_dispatch
+    ON qm_inference_jobs (status,created_at,task_id);
+
 -- ========================
 -- DONE - 所有缺失表已创建
 -- ========================
