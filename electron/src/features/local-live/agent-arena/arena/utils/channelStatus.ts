@@ -163,7 +163,7 @@ const qmtOrderLines = (status?: QmtStatusLite | null): ChanLine[] => [
   qmtLocalOrderLine(status),
 ];
 
-/** 迅投 QMT：账户读取通道（与桥互为独立佐证；下单已接线，本侧默认关闭） */
+/** 迅投 QMT：账户读取 + 下单通道（与桥互为独立佐证；是否可下单见下方两道闸门状态） */
 export function qmtChannel(
   summary: RealAccountSummary | undefined,
   probe: { ok: boolean; error?: string } | null,
@@ -191,7 +191,7 @@ export function qmtChannel(
   return {
     key: 'qmt',
     label: '迅投 QMT',
-    role: '账户读取 + 下单（与桥互为独立佐证；本侧下单总闸默认关闭）',
+    role: '账户读取 + 下单（与桥互为独立佐证；可下单以本侧总闸与 Windows 侧下单闸为准）',
     state,
     stateText,
     lines: [
