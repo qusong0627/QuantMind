@@ -83,6 +83,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File register_strategy_watchdog.p
 
 配套：轮询间隔已收紧（positions 10s / orders 5s / trades 15s），降低主线程压力。
 
+**交易类 RPC 全局限速（令牌桶，双桶）**：容器请求桶 `rpc.trade_min_interval_s`
+（默认 2s，容量 `trade_burst`=1）；桥内部轮询桶 `rpc.internal_trade_min_interval_s`
+（默认 2s，容量 `internal_trade_burst`=4，positions 一轮要连发 asset+positions
+两条）。两桶互不抢占——单桶会被桥自身轮询抢光令牌、把 SLTP/委托轮询饿死。
+超速的容器请求回 ``TRADE_RPC_THROTTLED`` 快速失败，桥自身轮询按 ``skipped``
+跳过；订单/撤单/行情不受限制。依据：2026-11-06 实测「桥停掉的 35 秒里账户
+通道自己恢复，恢复流量后一分钟内又挂」——``get_trade_detail_data`` 连续查询
+会长时间阻塞、空载可自愈，速率是可控变量。
+
 ## 接口
 
 伴生桥只监听 `127.0.0.1:17720`，提供 `/api/v1/qmt/call` 与 `/health`；

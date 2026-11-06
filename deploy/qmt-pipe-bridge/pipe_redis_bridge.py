@@ -53,7 +53,10 @@ DEFAULT_CONFIG = {
     'rpc': {'timeout_s': 15, 'queue_blpop_s': 0.5,
             # 交易类 RPC 最小间隔：QMT 的 get_trade_detail_data 连续查询会阻塞，
             # 空载可自愈（2026-11-06 实测），把速率压下来是唯一可控变量。
-            'trade_min_interval_s': 2.0},
+            # 双桶：容器请求与桥内部轮询各自限速，互不饿死（内部抢光令牌会让
+            # SLTP/委托轮询完全查不到柜台）。
+            'trade_min_interval_s': 2.0, 'trade_burst': 1,
+            'internal_trade_min_interval_s': 2.0, 'internal_trade_burst': 4},
     'positions': {'enabled': True, 'interval_s': 3, 'ttl_s': 120},
     'quotes': {'enabled': True, 'tier_a_interval_s': 2, 'tier_b_interval_s': 10,
                'chunk': 25, 'max_symbols': 250, 'stale_after_s': 10,
@@ -209,7 +212,13 @@ class State(object):
         self.strategy_state = bridge_gates.STATE_UNKNOWN
         self.account_fail_count = 0
         self.account_probe_ok_ts = 0.0
-        self.last_trade_rpc_ts = 0.0
+        # 令牌桶：容器请求桶容量 1（超速即失败）；桥内部轮询桶容量 4
+        # （positions 一轮要连发 get_asset + get_positions 两条，硬间隔会把
+        # 第二条永远挡在门外 → pos_age 恒 -1）。
+        self.queue_trade_tokens = 1.0
+        self.queue_trade_ts = 0.0
+        self.internal_trade_tokens = 4.0
+        self.internal_trade_ts = 0.0
 
     def note_error(self, where, exc):
         with self.lock:
@@ -313,13 +322,14 @@ def market_call(method, params=None, timeout=None, est_ms=200.0):
         raise RuntimeError('strategy unhealthy, skipped')
     if (bridge_gates.is_trade_context(method)
             and not bridge_gates.is_order_like(method)):
-        min_interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
+        interval = float(CFG.get('rpc.internal_trade_min_interval_s') or 0)
+        capacity = int(CFG.get('rpc.internal_trade_burst') or 4)
         with STATE.lock:
-            too_soon = bridge_gates.should_throttle(
-                STATE.last_trade_rpc_ts, time.time(), min_interval)
-            if not too_soon:
-                STATE.last_trade_rpc_ts = time.time()
-        if too_soon:
+            ok, STATE.internal_trade_tokens, STATE.internal_trade_ts = (
+                bridge_gates.take_token(
+                    STATE.internal_trade_tokens, STATE.internal_trade_ts,
+                    time.time(), interval, capacity))
+        if not ok:
             raise RuntimeError('trade rpc throttled, skipped')
     preempt = int(CFG.get('budget.rpc_preempt_queue') or 1)
     if rpc_backlog() >= preempt:
@@ -396,17 +406,18 @@ def rpc_worker():
                     STATE.note_error('rpc.reply', exc)
                 continue
         # 交易类请求限速：只限交易上下文方法，订单/撤单/行情一律不受影响。
-        # QMT 的 get_trade_detail_data 连续查询会长时间阻塞（空载可自愈），
-        # 把速率压到 rpc.trade_min_interval_s 一条是唯一可控变量。
+        # QMT 的 get_trade_detail_data 连续查询会长时间阻塞，令牌桶把持续速率
+        # 压到 rpc.trade_min_interval_s 一条，容器请求桶容量 1。
         if (bridge_gates.is_trade_context(method)
                 and not bridge_gates.is_order_like(method)):
-            min_interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
+            interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
+            capacity = int(CFG.get('rpc.trade_burst') or 1)
             with STATE.lock:
-                too_soon = bridge_gates.should_throttle(
-                    STATE.last_trade_rpc_ts, time.time(), min_interval)
-                if not too_soon:
-                    STATE.last_trade_rpc_ts = time.time()
-            if too_soon:
+                ok, STATE.queue_trade_tokens, STATE.queue_trade_ts = (
+                    bridge_gates.take_token(
+                        STATE.queue_trade_tokens, STATE.queue_trade_ts,
+                        time.time(), interval, capacity))
+            if not ok:
                 resp = {'request_id': req.get('request_id'), 'ok': False,
                         'error': 'TRADE_RPC_THROTTLED: 交易查询限速，稍后重试'}
                 try:

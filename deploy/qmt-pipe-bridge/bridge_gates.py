@@ -93,14 +93,25 @@ def next_state(prev: str, probe_ok: bool, consecutive_failures: int,
     return prev
 
 
-def should_throttle(last_ts: float, now_ts: float, min_interval_s: float) -> bool:
-    """交易类请求的最小间隔限速（令牌桶的退化版：单桶）。
+def refill_tokens(tokens: float, last_ts: float, now_ts: float,
+                  interval_s: float, capacity: int) -> tuple[float, float]:
+    """令牌桶补充：每 ``interval_s`` 秒回 1 个，上限 ``capacity``。
 
-    2026-11-06 观测：伴生桥停掉的 35 秒里策略账户通道自己恢复了；恢复流量后
-    一分钟内又挂。QMT 的 ``get_trade_detail_data`` 在连续查询下会长时间阻塞，
-    空载可自愈。把桥对策略的交易类调用压到 ``min_interval_s`` 一条，是唯一
-    能被我们自己控制住的变量。
+    比"最小间隔"多一个突发额度：positions 一轮要连发 get_asset + get_positions
+    两条，硬间隔会把第二条永远挡在门外（pos_age 恒 -1）。
     """
-    if float(min_interval_s or 0) <= 0:
-        return False
-    return (float(now_ts) - float(last_ts or 0.0)) < float(min_interval_s)
+    capacity = max(1, int(capacity))
+    if float(interval_s or 0) <= 0:
+        return float(capacity), float(now_ts)
+    elapsed = max(0.0, float(now_ts) - float(last_ts or 0.0))
+    tokens = min(float(capacity), float(tokens or 0.0) + elapsed / float(interval_s))
+    return tokens, float(now_ts)
+
+
+def take_token(tokens: float, last_ts: float, now_ts: float,
+               interval_s: float, capacity: int) -> tuple[bool, float, float]:
+    """尝试取一个令牌 → (是否取到, 剩余令牌, 新时间戳)。"""
+    tokens, last_ts = refill_tokens(tokens, last_ts, now_ts, interval_s, capacity)
+    if tokens >= 1.0:
+        return True, tokens - 1.0, last_ts
+    return False, tokens, last_ts

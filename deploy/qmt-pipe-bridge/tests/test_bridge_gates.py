@@ -78,12 +78,23 @@ def test_next_state_custom_threshold():
         gates.STATE_UNRESPONSIVE
 
 
-def test_should_throttle():
-    # 冷却窗内拒绝
-    assert gates.should_throttle(100.0, 101.0, 2.0) is True
-    # 超过最小间隔放行
-    assert gates.should_throttle(100.0, 102.5, 2.0) is False
-    # 首次（last=0）放行
-    assert gates.should_throttle(0.0, 100.0, 2.0) is False
-    # 关闭限速
-    assert gates.should_throttle(100.0, 100.1, 0) is False
+def test_token_bucket_burst_then_refill():
+    # 初始满桶：连续取 4 个（capacity=4）
+    tokens, ts = 4.0, 100.0
+    for _ in range(4):
+        ok, tokens, ts = gates.take_token(tokens, ts, 100.0, 2.0, 4)
+        assert ok is True
+    # 第 5 个被拒
+    ok, tokens, ts = gates.take_token(tokens, ts, 100.0, 2.0, 4)
+    assert ok is False
+    # 2 秒后回 1 个令牌
+    ok, tokens, ts = gates.take_token(tokens, ts, 102.0, 2.0, 4)
+    assert ok is True
+    # 4 秒后再回 2 个（上限 4，不会超）
+    tokens, ts = gates.refill_tokens(tokens, ts, 106.0, 2.0, 4)
+    assert tokens <= 4.0
+
+
+def test_token_bucket_zero_interval_means_unlimited():
+    ok, _, _ = gates.take_token(0.0, 0.0, 100.0, 0, 1)
+    assert ok is True
