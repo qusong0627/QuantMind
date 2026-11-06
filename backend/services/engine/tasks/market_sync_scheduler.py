@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from backend.services.engine.tasks.schedule_gate import (
@@ -31,6 +32,13 @@ _LAST_RUN_KEY = "quantmind:sync_schedule_last_run:{market}:{date}"
 #: 补跑要在「当天正常班次还没到点」时提前跑一轮，如果占用当天的 last_run 名额，
 #: 今晚到点的正常班次就会被去重逻辑挡掉，当天新数据反而永远不同步。
 _CATCHUP_KEY = "quantmind:sync_schedule_catchup:{market}:{date}"
+#: 数据没到位时的重试记账（次数 / 上次派发时间戳）。上游迟到是常态，
+#: 只跑一次计划班次会让当天永远停在旧数据上；但重试要有天花板，不能每分钟重派。
+_CATCHUP_TRIES_KEY = "quantmind:sync_schedule_catchup_tries:{market}:{date}"
+_CATCHUP_AT_KEY = "quantmind:sync_schedule_catchup_at:{market}:{date}"
+#: 每天最多派发几次（含计划班次本身），两次之间至少隔这么久。
+CATCHUP_MAX_TRIES = 3
+CATCHUP_MIN_GAP_S = 45 * 60
 
 # 派发任务名：上游同步与自定义数据集重建的超时预算不同（后者是本地磁盘作业，
 # 全量重建可达 40-60 分钟），因此 CUSTOM 走独立任务，见 celery_tasks.py。
@@ -187,21 +195,158 @@ def _mark_catchup(market: str, date_str: str) -> None:
     r.set(_CATCHUP_KEY.format(market=market, date=date_str), "1", ex=2 * 24 * 3600)
 
 
+# ---------------------------------------------------------------------------
+# 数据是否真的到位（补跑判据的唯一可信来源）
+# ---------------------------------------------------------------------------
+#: 每个市场的关键分区：**全部**覆盖到某交易日才算这个市场的数据齐了。
+#: 只看其中一个会漏掉「同步跑到一半被杀」的情况——2026-11-05 崩机时
+#: `daily_forward` 落了 11-05、`daily_unadjusted` 停在 11-04，只看前者会误判「已最新」。
+#: 值为 (环境变量, 容器内默认根目录, 关键数据集相对路径)。
+_KEY_PARTITIONS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "A": (
+        "QM_QUANTDB_DATA_DIR",
+        "/data/quantdb",
+        ("1_kline_data/daily_forward", "1_kline_data/daily_unadjusted"),
+    ),
+    "US": ("QM_QUANTUS_DATA_DIR", "/data/quantus", ("1_kline_data/daily_forward",)),
+    "HK": ("QM_QUANTHK_DATA_DIR", "/data/quanthk", ("1_kline_data/daily_forward",)),
+    "BC": ("QM_QUANTBC_DATA_DIR", "/data/quantbc", ("1_kline_data/daily_forward",)),
+    "FUTURES": (
+        "QM_QUANTFUTURES_DATA_DIR",
+        "/data/quantfutures",
+        ("1_kline_data/daily_forward",),
+    ),
+    # 自定义因子集：源是 A 股，产物在 quantcustom 的 l1_factors 分区
+    "CUSTOM": (
+        "QM_QUANTCUSTOM_DATA_DIR",
+        "/data/quantcustom",
+        ("6_ml_datasets/l1_factors",),
+    ),
+}
+
+
+def _latest_partition_date(base: Path) -> date | None:
+    """该数据集最新的 ``dt=YYYYMMDD`` 分区日；目录缺失/无分区返回 None。"""
+    try:
+        names = [p.name[3:] for p in base.iterdir() if p.name.startswith("dt=")]
+    except OSError:
+        return None
+    dates = [n for n in names if len(n) == 8 and n.isdigit()]
+    if not dates:
+        return None
+    try:
+        return datetime.strptime(max(dates), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _market_data_covers(market: str, day: date | None) -> bool | None:
+    """本地数据是否已经覆盖到 ``day``。
+
+    True  = 关键分区全部到达该日（无需补跑）
+    False = 确实没到（该补跑）
+    None  = 无探针 / 目录不可读，判据不可用（调用方退回标记逻辑）
+    """
+    if day is None:
+        return None
+    spec = _KEY_PARTITIONS.get(market)
+    if spec is None:
+        return None
+    env_key, default_root, rels = spec
+    root = Path(os.getenv(env_key) or default_root)
+    if not root.is_dir():
+        return None
+    latest: date | None = None
+    for rel in rels:
+        d = _latest_partition_date(root / rel)
+        if d is None:
+            return None  # 目录缺失/空：探针不可用，别拿它当「缺数据」
+        latest = d if latest is None else min(latest, d)
+    return latest >= day
+
+
+def _catchup_tries(market: str, date_str: str) -> int | None:
+    """今日已派发次数；Redis 读不到返回 None（调用方按「不许重试」处理）。"""
+    try:
+        raw = _redis().get(_CATCHUP_TRIES_KEY.format(market=market, date=date_str))
+    except Exception:  # noqa: BLE001 - 记账读不到时宁可不再重派
+        return None
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _catchup_last_at(market: str, date_str: str) -> float | None:
+    try:
+        raw = _redis().get(_CATCHUP_AT_KEY.format(market=market, date=date_str))
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _retry_allowed(market: str, now: datetime, date_str: str) -> bool:
+    """数据缺时是否还能再补一次：限次 + 限频，避免每分钟重派。
+
+    上游迟到是常态（用户侧实测数据 23:00 才发布），只跑一次计划班次的话，
+    当天就永远停在旧数据上——所以「数据没到」必须能重试，但要有天花板。
+    Redis 读不到时**不重试**（fail-closed）：拿不到次数就可能变成每分钟重派。
+    """
+    tries = _catchup_tries(market, date_str)
+    if tries is None or tries >= CATCHUP_MAX_TRIES:
+        return False
+    last = _catchup_last_at(market, date_str)
+    if last is None:
+        return False
+    if last and (now.timestamp() - last) < CATCHUP_MIN_GAP_S:
+        return False
+    return True
+
+
+def _note_attempt(market: str, now: datetime, date_str: str) -> None:
+    """记一次派发尝试（次数 + 时间戳），供 ``_retry_allowed`` 限频限次。"""
+    tries = _catchup_tries(market, date_str)
+    try:
+        r = _redis()
+        r.set(
+            _CATCHUP_TRIES_KEY.format(market=market, date=date_str),
+            str((tries or 0) + 1),
+            ex=2 * 24 * 3600,
+        )
+        r.set(
+            _CATCHUP_AT_KEY.format(market=market, date=date_str),
+            str(now.timestamp()),
+            ex=2 * 24 * 3600,
+        )
+    except Exception as exc:  # noqa: BLE001 - 记账失败只影响重试额度，不影响本次派发
+        logger.warning("[SyncSchedule] 重试记账失败（不影响本次派发）: %s", exc)
+
+
 def _catchup_needed(market: str, now: datetime, date_str: str) -> bool:
-    """当日班次还没到点，但**上一交易日**的派发标记缺失 ⇒ 该补跑。
+    """当日班次还没到点，但上一交易日的**数据**没到位 ⇒ 该补跑。
 
     2026-11-05 事故：宿主 21:44（北京）崩机、次日 09:03 才起，CN 排在 20:55 的班次
     整个丢掉。而派发判据只问「今天是否到点」——开机时 20:55 还没到，直接跳过，
     `daily_unadjusted` 于是停在崩机前一天，直到当晚 20:55 才可能补上；批量推理
     08:00/09:05 两班全部撞数据门禁，当天候选池空。
 
-    补跑判据用**上一交易日**而不是「今天」：正常班次在收盘后跑完才写标记，所以
-    次日上午看到「昨天没标记」就一定是漏了。写独立的 catch-up 键，不占当天名额。
+    2026-11-06 复盘：那次补跑**没触发**——判据看的是「上一交易日有没有派发标记」，
+    而标记在**派发时**就写了（21:44 崩机前 20:55 已派发），系统认为「昨天跑过了」。
+    现在改为先看**本地数据是否真的覆盖上一交易日**；探针不可用才退回标记判据。
     """
-    if _catchup_done_today(market, date_str):
-        return False
     prev = previous_trading_day(market, now.date())
     if prev is None:
+        return False
+    covered = _market_data_covers(market, prev)
+    if covered is True:
+        return False  # 数据已到位，补跑无意义
+    if covered is False:
+        return _retry_allowed(market, now, date_str)
+    # 探针不可用（目录缺失/无分区）：维持旧判据
+    if _catchup_done_today(market, date_str):
         return False
     return not _has_run(market, prev.isoformat())
 
@@ -350,11 +495,13 @@ def dispatch_due_syncs() -> dict[str, Any]:
     按该市场日历都非交易日（周日、长假内部日）时跳过并留 ``skipped`` 原因；
     周六凌晨取周五收盘的班次**不跳**（D-1 是交易日）。日历答不了 = 放行。
 
-    跨日补跑（2026-11-05 崩机事故）：当日班次还**没到点**、但上一交易日的派发
-    标记缺失时提前跑一轮（``_catchup_needed``）。没有这条，晚上才排班的市场
-    （CN 20:55）在「关机错过 → 次日早上开机」后要等到当晚才补，当天一整天都在
-    用落后的数据。补跑写独立的 catch-up 键，**不占**当天 last_run 名额，
-    今晚的正常班次照跑。
+    跨日补跑（2026-11-05 崩机事故；2026-11-06 修正判据）：当日班次还**没到点**、
+    且上一交易日的**本地数据没到位**时提前跑一轮（``_catchup_needed``）。判据改成
+    看关键分区（``_market_data_covers``），不再看派发标记——标记在派发时就写了，
+    任务中途被杀也照样「有标记」，11-06 早上正是因此没有补跑。数据缺时允许限次
+    重试（``CATCHUP_MAX_TRIES`` / ``CATCHUP_MIN_GAP_S``），覆盖「上游数据迟到，
+    计划班次跑空、之后再无同步」的老问题。补跑写独立的 catch-up 键，**不占**
+    当天 last_run 名额，今晚的正常班次照跑。
     """
     from backend.services.engine.qlib_app.celery_config import celery_app
 
@@ -370,16 +517,19 @@ def dispatch_due_syncs() -> dict[str, Any]:
         if not cfg.get("enabled"):
             continue
         due_today = not not_due_yet(now, str(cfg.get("time") or ""))
-        if not due_today and not _catchup_needed(market, now, date_str):
+        prev_day = previous_trading_day(market, now.date())
+        data_missing = _market_data_covers(market, prev_day) is False
+        if due_today:
+            if _has_run(market, date_str) and not (
+                data_missing and _retry_allowed(market, now, date_str)
+            ):
+                # 当天班次派过、数据也到齐（或还在重试额度内等下一档）
+                continue
+        elif not _catchup_needed(market, now, date_str):
             continue
         idle_reason = no_data_window(market, now)
         if idle_reason:
             skipped[market] = idle_reason
-            continue
-        if due_today:
-            if _has_run(market, date_str):
-                continue
-        elif _catchup_done_today(market, date_str):
             continue
         try:
             celery_app.send_task(
@@ -395,12 +545,14 @@ def dispatch_due_syncs() -> dict[str, Any]:
                 exc_info=True,
             )
             continue
+        _note_attempt(market, now, date_str)
         if not due_today:
             _mark_catchup(market, date_str)
             catchup.append(market)
             logger.info(
-                "[SyncSchedule] %s 上一交易日班次缺失，%s 开机补跑",
+                "[SyncSchedule] %s 上一交易日（%s）数据未到位，%s 补跑",
                 MARKETS[market],
+                prev_day,
                 now_hm,
             )
             continue

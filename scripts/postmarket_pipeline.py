@@ -103,15 +103,45 @@ def run_in_container(script: Path, argv: list[str], *, dry_run: bool = False) ->
         sys.exit(f"步骤失败（{r.returncode}）：{' '.join(str(c) for c in cmd)}")
 
 
-def resolve_trade_date() -> str:
-    """最新交易日 = daily_unadjusted 分区最大 dt。"""
+def _max_partition_dt(rel: str) -> str | None:
+    """该数据集最新 ``dt=YYYYMMDD`` 分区日（字符串，可直接比较）；读不到返回 None。"""
     import duckdb  # noqa: PLC0415 宿主已装，延迟导入加速 --dry-run
 
-    db = duckdb.connect()
-    base = QDB / "1_kline_data" / "daily_unadjusted"
-    return str(db.execute(
-        f"SELECT max(dt) FROM read_parquet('{base}/dt=*/data.parquet', hive_partitioning=true)"
-    ).fetchone()[0])
+    base = QDB / rel
+    if not base.is_dir():
+        return None
+    try:
+        row = duckdb.connect().execute(
+            "SELECT max(dt) FROM read_parquet("
+            f"'{base}/dt=*/data.parquet', hive_partitioning=true)"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - 无分区/读失败交给调用方判空
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
+def resolve_trade_date() -> str:
+    """最新交易日：daily_forward / daily_unadjusted 取较新者；不一致时告警。
+
+    只认 ``daily_unadjusted`` 会在它缺分区时**静默退回前一天**：2026-11-05 的
+    A 股同步被崩机腰斩，daily_forward 已到 11-05 而 daily_unadjusted 停在 11-04，
+    流水线于是把 ``20261105_picks.json`` 重算了一遍（文件名/日志都像成功），
+    ``20261106_picks.json`` 一整天都没出现，当天决策轮全部撞 `pool_not_member`。
+
+    两个口径不一致本身就是「同步没跑完」的信号，必须喊出来，不能悄悄降级；
+    取较新者保证不会因为一个滞后的数据集把整条链拖回前一天。
+    """
+    fwd = _max_partition_dt("1_kline_data/daily_forward")
+    unadj = _max_partition_dt("1_kline_data/daily_unadjusted")
+    if fwd and unadj and fwd != unadj:
+        log(
+            f"⚠️ 数据不齐：daily_forward={fwd} daily_unadjusted={unadj}"
+            f"（取较新者 {max(fwd, unadj)}；补跑 A 股同步可补齐）"
+        )
+    latest = max((x for x in (fwd, unadj) if x), default=None)
+    if latest is None:
+        sys.exit("QuantDB 日K分区不可读，无法确定交易日")
+    return latest
 
 
 _CST = timezone(timedelta(hours=8))  # 北京墙钟=UTC+8（无夏令时）；不走 zoneinfo 免 tzdata
