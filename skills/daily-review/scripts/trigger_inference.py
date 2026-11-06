@@ -18,6 +18,19 @@ import sys
 sys.path.insert(0, "/app")
 
 
+def _engine_redis_client():
+    """调度链同一个 Redis 客户端（就绪/完成标记的写入点，见调用处注释）。
+
+    取不到就返回 None：那是「补跑只补数据行、不补标记」的旧行为，不该让补跑本身失败。
+    """
+    try:
+        from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+
+        return get_redis_sentinel_client()
+    except Exception:  # noqa: BLE001 - 标记写不进去不影响信号落库
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="每日推理补跑")
     ap.add_argument("--date", required=True, help="特征日 YYYYMMDD 或 YYYY-MM-DD")
@@ -76,6 +89,12 @@ def main() -> int:
         tenant_id=tenant_id or "default",
         user_id=user_id or "system",
         model_id=model_id or None,
+        # 必须与 celery 自动推理传同一个客户端：脚本落库后由 runner 写
+        # `qm:signal:ready:{market}:{date}` 与完成标记，而这两处写入都在
+        # `if persist and redis_client is not None:` 里。不传 ⇒ 补跑出来的批次
+        # 在健康页 C02 上仍报「无就绪/完成标记」，下游按就绪键判「今天有没有信号」
+        # 的消费者也看不到（2026-11-06 实测）。
+        redis_client=_engine_redis_client(),
     )
     if not result.success:
         print(f"推理失败: {getattr(result, 'error', '') or result.stdout or ''}", flush=True)

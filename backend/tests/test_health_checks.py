@@ -477,9 +477,10 @@ async def test_c12_check_reports_missing_market_with_reason(monkeypatch):
 
 SYNTH = "qmt-synth-"
 SEED = "legacy-seed:"
+ABSORB = "manual-absorb:"
 
 
-def _parity(trades, ledger, *, index=True):
+def _parity(trades, ledger, *, index=True, absorb=ABSORB):
     return classify_agent_ledger_parity(
         ledger_parity(
             trades,
@@ -487,6 +488,7 @@ def _parity(trades, ledger, *, index=True):
             index_enabled=index,
             synth_prefix=SYNTH,
             seed_prefix=SEED,
+            absorb_prefix=absorb,
         )
     )
 
@@ -543,6 +545,30 @@ def test_c14_leftover_synth_row_is_double_post():
     assert r.level == "fail"
     assert r.metrics["dup_posts"] == 1
     assert r.metrics["posted"] == 1
+
+
+def test_c14_manual_absorb_rows_are_counted_not_blamed():
+    """人工卖单吸收流水既不是孤儿也不是重复记账。
+
+    源订单 ``orders.agent`` 为空，按 C14 取数口径不算 LLM 腿成交 ⇒ 它**永远**配不上对。
+    2026-11-06 实测 7 条这类行：当孤儿报（warn）会让人去查一次已验收的修账，当合成键
+    配对又会把账本行标成「重复记账」（fail）。两处都是假警报。
+    """
+    r = _parity(
+        [_t("k1")],
+        [_l("k1"), _l(f"{ABSORB}o9:alpha", order="o9")],
+    )
+    assert r.level == "ok", r.detail
+    assert r.metrics["absorbed"] == 1
+    assert r.metrics["orphans"] == 0
+    assert r.metrics["dup_posts"] == 0
+    assert "人工卖单吸收 1 条" in r.detail
+
+
+def test_c14_only_absorb_rows_is_not_participation_failure():
+    """窗口里只有吸收流水、没有 LLM 腿成交 ⇒ 按「分账未参与」如实写，不报红。"""
+    r = _parity([], [_l(f"{ABSORB}o9:alpha", order="o9")])
+    assert r.level == "ok", r.detail
 
 
 def test_c14_missing_post_is_fail():
@@ -793,11 +819,34 @@ async def test_c01_empty_market_says_so_without_realtime_noise():
 
 
 _C02_RUNS_SQL_KEY = "count(DISTINCT run_id)"
+_C02_PRESENT_SQL_KEY = "SELECT 1 AS present FROM engine_signal_scores"
 _HEALTH_PY = Path(__file__).resolve().parents[1] / "scripts" / "diagnose" / "health.py"
 
 
+def _pin_expected_batch_date(monkeypatch, trade_date: date) -> None:
+    """把 C01/C02 的基准日钉死，别让用例跟着真日历/墙钟漂。
+
+    基准日起点已改成 ``expected_batch_signal_date``（交易日 09:15 后取当天，否则取上一
+    交易日）——不钉死的话，同一个用例在周末与工作日会喂出不同的 trade_date。
+    """
+    from backend.scripts.diagnose import health as health_mod
+
+    monkeypatch.setattr(
+        health_mod, "expected_batch_signal_date", lambda ctx, now=None: trade_date
+    )
+
+
+def _pin_expected_synced_date(monkeypatch, trade_date: date) -> None:
+    """C08 的基准日（上一交易日）同理钉死。"""
+    from backend.scripts.diagnose import health as health_mod
+
+    monkeypatch.setattr(
+        health_mod, "expected_synced_date", lambda ctx: trade_date
+    )
+
+
 @pytest.mark.asyncio
-async def test_c02_batch_runs_at_threshold_is_ok_with_ready_marker():
+async def test_c02_batch_runs_at_threshold_is_ok_with_ready_marker(monkeypatch):
     """2026-09-24 实测形态：2 批量 run + 就绪标记 → ok，不得报「同日多 run」。
 
     实时行每日每模型一个 rt- run_id（与批量重跑/竞态无关），旧计数不筛
@@ -805,9 +854,10 @@ async def test_c02_batch_runs_at_threshold_is_ok_with_ready_marker():
     """
     from backend.shared.inference_lock import ready_key
 
+    _pin_expected_batch_date(monkeypatch, date(2026, 9, 24))
     ctx = FakeCtx(
         {
-            "max(trade_date)": [{"d": date(2026, 9, 24)}],
+            _C02_PRESENT_SQL_KEY: [{"present": 1}],
             _C02_RUNS_SQL_KEY: [{"n": 2, "models": 2}],
         },
         values={ready_key("CN", "2026-09-24"): '{"run_id": "run_x", "symbols": 3274}'},
@@ -821,7 +871,7 @@ async def test_c02_batch_runs_at_threshold_is_ok_with_ready_marker():
 
 
 @pytest.mark.asyncio
-async def test_c02_five_models_one_run_each_is_not_multi_run():
+async def test_c02_five_models_one_run_each_is_not_multi_run(monkeypatch):
     """2026-10-19 实测形态：5 个模型各跑一次 = 5 个 run_id，**不是**同日多 run。
 
     旧实现数全市场 distinct run_id（5 > 2）→ 天天误报「检查竞态/回填」。
@@ -829,9 +879,10 @@ async def test_c02_five_models_one_run_each_is_not_multi_run():
     """
     from backend.shared.inference_lock import ready_key
 
+    _pin_expected_batch_date(monkeypatch, date(2026, 10, 19))
     ctx = FakeCtx(
         {
-            "max(trade_date)": [{"d": date(2026, 10, 19)}],
+            _C02_PRESENT_SQL_KEY: [{"present": 1}],
             _C02_RUNS_SQL_KEY: [{"n": 1, "models": 5}],
         },
         values={
@@ -866,11 +917,12 @@ def test_c02_runs_sql_counts_per_model_not_globally():
 
 
 @pytest.mark.asyncio
-async def test_c02_completed_marker_is_fallback_when_ready_absent():
+async def test_c02_completed_marker_is_fallback_when_ready_absent(monkeypatch):
     """就绪键缺失（2026-09-24 前的历史全缺失）时，完成标记兜底 → ok。"""
+    _pin_expected_batch_date(monkeypatch, date(2026, 9, 24))
     ctx = FakeCtx(
         {
-            "max(trade_date)": [{"d": date(2026, 9, 24)}],
+            _C02_PRESENT_SQL_KEY: [{"present": 1}],
             _C02_RUNS_SQL_KEY: [{"n": 2}],
         },
         values={"qm:inference:completed:2026-09-24": "run_20260923_995286b3"},
@@ -882,10 +934,11 @@ async def test_c02_completed_marker_is_fallback_when_ready_absent():
 
 
 @pytest.mark.asyncio
-async def test_c02_no_markers_at_all_is_warn():
+async def test_c02_no_markers_at_all_is_warn(monkeypatch):
+    _pin_expected_batch_date(monkeypatch, date(2026, 9, 24))
     ctx = FakeCtx(
         {
-            "max(trade_date)": [{"d": date(2026, 9, 24)}],
+            _C02_PRESENT_SQL_KEY: [{"present": 1}],
             _C02_RUNS_SQL_KEY: [{"n": 1}],
         }
     )
@@ -896,13 +949,14 @@ async def test_c02_no_markers_at_all_is_warn():
 
 
 @pytest.mark.asyncio
-async def test_c02_three_batch_runs_is_multi_run_warn():
+async def test_c02_three_batch_runs_is_multi_run_warn(monkeypatch):
     """阈值仍要能报：同一模型 3 个批量 run 才是真异常（重跑/竞态）。"""
     from backend.shared.inference_lock import ready_key
 
+    _pin_expected_batch_date(monkeypatch, date(2026, 9, 24))
     ctx = FakeCtx(
         {
-            "max(trade_date)": [{"d": date(2026, 9, 24)}],
+            _C02_PRESENT_SQL_KEY: [{"present": 1}],
             _C02_RUNS_SQL_KEY: [{"n": 3, "models": 1}],
         },
         values={ready_key("CN", "2026-09-24"): '{"run_id": "run_x"}'},
@@ -911,6 +965,68 @@ async def test_c02_three_batch_runs_is_multi_run_warn():
 
     assert r.level == "warn"
     assert "同日多 run" in r.detail
+
+
+# --- C01/C02/C08 基准日：不能被「当天的实时行」顶到今天 ----------------------
+
+
+def _pin_calendar(monkeypatch, *, trading_today: bool, prev: date) -> None:
+    from backend.scripts.diagnose import health as health_mod
+
+    monkeypatch.setattr(health_mod, "is_trading_day", lambda d, m: trading_today)
+    monkeypatch.setattr(health_mod, "previous_trading_day", lambda d, m: prev)
+
+
+def test_expected_batch_signal_date_before_the_run_uses_previous_session(monkeypatch):
+    """09:15 前当日批量还没跑（08:00 首跑 / 09:05 补跑），基准必须是上一交易日。
+
+    2026-11-06 实测：实时推理 09:16 写入当天 realtime 行后，``max(trade_date)`` 立刻
+    变成今天，C01/C02 从那一刻起恒报「批量信号缺失 / runs=0」。
+    """
+    from backend.scripts.diagnose import health as health_mod
+
+    _pin_calendar(monkeypatch, trading_today=True, prev=date(2026, 11, 5))
+    ctx = FakeCtx({}, today=date(2026, 11, 6))
+
+    assert health_mod.expected_batch_signal_date(
+        ctx, datetime(2026, 11, 6, 7, 30)
+    ) == date(2026, 11, 5)
+
+
+def test_expected_batch_signal_date_after_the_run_uses_today(monkeypatch):
+    from backend.scripts.diagnose import health as health_mod
+
+    _pin_calendar(monkeypatch, trading_today=True, prev=date(2026, 11, 5))
+    ctx = FakeCtx({}, today=date(2026, 11, 6))
+
+    assert health_mod.expected_batch_signal_date(
+        ctx, datetime(2026, 11, 6, 10, 0)
+    ) == date(2026, 11, 6)
+
+
+def test_expected_batch_signal_date_on_non_trading_day_uses_previous_session(monkeypatch):
+    """周末/节假日不产批量，基准落回上一个交易日——否则整周末恒红。"""
+    from backend.scripts.diagnose import health as health_mod
+
+    _pin_calendar(monkeypatch, trading_today=False, prev=date(2026, 11, 6))
+    ctx = FakeCtx({}, today=date(2026, 11, 7))
+
+    assert health_mod.expected_batch_signal_date(
+        ctx, datetime(2026, 11, 7, 10, 0)
+    ) == date(2026, 11, 6)
+
+
+def test_expected_synced_date_is_previous_session(monkeypatch):
+    """同步标记记的是**派发日期**、各市场班次都在收盘后（CN 20:55）⇒ 基准取上一交易日。
+
+    拿今天当基准时，A 股每天 00:00-20:55 都查不到当天标记，健康页恒红。
+    """
+    from backend.scripts.diagnose import health as health_mod
+
+    _pin_calendar(monkeypatch, trading_today=True, prev=date(2026, 11, 5))
+    ctx = FakeCtx({}, today=date(2026, 11, 6))
+
+    assert health_mod.expected_synced_date(ctx) == date(2026, 11, 5)
 
 
 # --- C15 模型产物一致：注册表 ready 行 ↔ 磁盘目录 ----------------------------

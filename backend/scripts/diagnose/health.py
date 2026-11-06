@@ -258,6 +258,12 @@ class LedgerParity:
     #: 期初结转流水（``legacy-seed:*``，P3 迁入时就有的仓）：**不参与配对**，
     #: 单独计数——它们本来就没有对应的本仓成交，混进 orphans 会把「迁入」报成异常。
     seeds: tuple[str, ...] = ()
+    #: 人工卖单吸收流水（``manual-absorb:<order_id>:<agent>``，由
+    #: ``repair_agent_ledger_manual_sells.py`` 写）：同样**不参与配对**。它记的是
+    #: 「``orders.agent`` 为空的真单卖出被吸收进某个 agent 名下」，源订单按定义就不在
+    #: ``C14_TRADES_SQL`` 的 LLM 腿成交集合里，因此永远配不上对；混进 orphans 会把
+    #: 一次已验收的修账报成「账本有流水、成交表没有」。
+    absorbed: tuple[str, ...] = ()
 
 
 def _group_by_order(rows: Any) -> dict[tuple[str, str, str], list[dict]]:
@@ -305,6 +311,7 @@ def ledger_parity(
     index_enabled: bool,
     synth_prefix: str,
     seed_prefix: str,
+    absorb_prefix: str = "",
 ) -> LedgerParity:
     """逐单配对（纯函数）：成交行 ↔ 账本流水行，分成五类偏差。
 
@@ -316,9 +323,10 @@ def ledger_parity(
     * ``unapplied`` —— 流水落了但 ``applied_volume = 0``（方向未知/代码识别不出/卖出超
       持仓被裁剪）：账本其实没反映这笔成交，原因在 ``note`` 列。
 
-    ``synth_prefix`` / ``seed_prefix`` 由调用方给（与写入方**同一个常量**），
-    不在这里写死字面量。带 ``seed_prefix`` 的行是期初结转（P3 迁入时就有的仓），
-    归 ``seeds`` 单独计数：它们本来就没有对应的本仓成交。
+    ``synth_prefix`` / ``seed_prefix`` / ``absorb_prefix`` 由调用方给（与写入方**同一个
+    常量**），不在这里写死字面量。``seed_prefix``（期初结转，P3 迁入时就有的仓）与
+    ``absorb_prefix``（人工卖单吸收）两族**不参与配对**、各自单独计数：它们本来就没有
+    对应的 LLM 腿成交，混进 orphans 会把「迁入」和「已验收的修账」报成异常。
     """
     trades_by_order = _group_by_order(trades)
     ledger_by_order = _group_by_order(ledger_fills)
@@ -329,6 +337,7 @@ def ledger_parity(
     orphans: list[str] = []
     unapplied: list[str] = []
     seeds: list[str] = []
+    absorbed: list[str] = []
 
     for key in sorted(set(trades_by_order) | set(ledger_by_order)):
         order_id = key[2]
@@ -338,6 +347,9 @@ def ledger_parity(
             fill_key = str(row.get("fill_key") or "")
             if fill_key.startswith(seed_prefix):
                 seeds.append(f"{order_id}:{fill_key}")
+                continue
+            if absorb_prefix and fill_key.startswith(absorb_prefix):
+                absorbed.append(f"{order_id}:{fill_key}")
                 continue
             by_fill_key.setdefault(fill_key, []).append(i)
             if float(row.get("applied_volume") or 0.0) == 0.0:
@@ -363,6 +375,8 @@ def ledger_parity(
             fill_key = str(row.get("fill_key") or "")
             if fill_key.startswith(seed_prefix):
                 continue  # 上面已归 seeds（这里的 continue 只防将来改结构时漏一刀）
+            if absorb_prefix and fill_key.startswith(absorb_prefix):
+                continue  # 上面已归 absorbed
             if fill_key.startswith(synth_prefix):
                 dup_posts.append(f"{order_id}:{fill_key}")
             else:
@@ -380,6 +394,7 @@ def ledger_parity(
         unapplied=tuple(unapplied),
         index_enabled=index_enabled,
         seeds=tuple(seeds),
+        absorbed=tuple(absorbed),
     )
 
 
@@ -456,6 +471,7 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
         "orphans": len(p.orphans),
         "unapplied": len(p.unapplied),
         "seeds": len(p.seeds),
+        "absorbed": len(p.absorbed),
         "trade_unique_index": p.index_enabled,
     }
     index_note = "" if p.index_enabled else "；成交唯一键未启用（并发双写无 DB 兜底）"
@@ -464,22 +480,24 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
         "账本可能双记。正常由 trade 服务启动期自愈；建不起来多半是存量重复成交挡着"
         "（先去重），见 C14 告警里的重复组"
     )
-    # 期初结转（P3）的流水**不是**「多出来的账」：它们没有对应的本仓成交，如实报出条数。
+    # 期初结转（P3）与人工卖单吸收的流水**不是**「多出来的账」：它们没有对应的
+    # LLM 腿成交，如实报出条数。
     seed_note = f"，另含期初结转 {len(p.seeds)} 条" if p.seeds else ""
-    if p.trades == 0 and p.ledger_rows == len(p.seeds):
+    absorb_note = f"，另含人工卖单吸收 {len(p.absorbed)} 条" if p.absorbed else ""
+    if p.trades == 0 and p.ledger_rows == len(p.seeds) + len(p.absorbed):
         if p.index_enabled:
             return CheckResult(
                 "C14",
                 "分账账本一致性",
                 "ok",
-                f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}（分账未参与）",
+                f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}{absorb_note}（分账未参与）",
                 metrics=metrics,
             )
         return CheckResult(
             "C14",
             "分账账本一致性",
             "warn",
-            f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}"
+            f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}{absorb_note}"
             f"（分账未参与）{index_note}",
             index_fix,
             metrics,
@@ -507,14 +525,14 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
             "分账账本一致性",
             "ok",
             f"近 30 日 {p.trades} 笔 LLM 腿成交全部落账（账本 {p.ledger_rows} 行，"
-            f"归属一致{seed_note}）",
+            f"归属一致{seed_note}{absorb_note}）",
             metrics=metrics,
         )
     return CheckResult(
         "C14",
         "分账账本一致性",
         level,
-        f"近 30 日 {p.trades} 笔 LLM 腿成交 / 账本 {p.ledger_rows} 行{seed_note}："
+        f"近 30 日 {p.trades} 笔 LLM 腿成交 / 账本 {p.ledger_rows} 行{seed_note}{absorb_note}："
         + "；".join(parts),
         " ".join(dict.fromkeys(suggestions)),
         metrics,
@@ -527,17 +545,95 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
 
 _USER_KEY_RE = re.compile(r"^simulation:account:([^:]+):([^:]+)(?::([A-Z]+))?$")
 
+#: 批量推理当日班次：08:00 首跑、09:05 兜底补跑，单轮约 6 分钟。09:15 起当日批量
+#: 信号视为「应已存在」；在此之前拿今天当基准只会在调度时点前误报。
+BATCH_SIGNAL_READY_HHMM = "09:15"
+
+
+def _market_xcal(market: str):
+    """市场 → exchange_calendars 日历对象；无日历（FUTURES/CRYPTO）或解析失败返回 None。"""
+    try:
+        from exchange_calendars import get_calendar
+
+        from backend.shared.market_sessions import market_calendar
+
+        name = market_calendar(market)
+        return get_calendar(name) if name else None
+    except Exception:  # noqa: BLE001 - 日历探测失败不该让体检中断
+        return None
+
+
+def previous_trading_day(today: date, market: str) -> date | None:
+    """``today`` 的**前一交易日**（严格早于当日）；日历不可用/越界返回 None。"""
+    cal = _market_xcal(market)
+    if cal is None:
+        return None
+    try:
+        import pandas as pd
+
+        ts = pd.Timestamp(today) - pd.Timedelta(days=1)
+        return cal.date_to_session(ts, direction="previous").date()
+    except Exception:  # noqa: BLE001 - 越界/节假日表缺行都退回自然日
+        return None
+
+
+def is_trading_day(today: date, market: str) -> bool | None:
+    """``today`` 是否为交易日；日历不可用返回 None（调用方按「不是」处理）。"""
+    cal = _market_xcal(market)
+    if cal is None:
+        return None
+    try:
+        import pandas as pd
+
+        return bool(cal.is_session(pd.Timestamp(today)))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def expected_batch_signal_date(ctx: HealthContext, now: datetime | None = None) -> date:
+    """C01/C02 的取数基准：此刻**应已有批量信号**的交易日。
+
+    不能直接用 ``max(engine_signal_scores.trade_date)``——实时推理开盘前后就往同一张表
+    写当天的 ``realtime`` 行，max 立刻跳到「今天」，而今天的**批量**要 08:00 才跑。
+    2026-11-06 实测：09:37 时 max=2026-11-06（仅 572 行实时行），C01 报「批量信号缺失」、
+    C02 报「runs=0」；当天 08:00 那轮确实被崩机错过，但这条口径本身也让每天
+    00:00-08:00 恒红。
+
+    基准 = 今天是交易日且已过 09:15 → 今天；否则上一交易日（周末/节假日自然落到
+    上一个有批量的日子）。
+    """
+    now = now or datetime.now()
+    today = ctx.today
+    if is_trading_day(today, ctx.market) and now.strftime("%H:%M") >= BATCH_SIGNAL_READY_HHMM:
+        return today
+    return previous_trading_day(today, ctx.market) or (today - timedelta(days=1))
+
+
+def expected_synced_date(ctx: HealthContext) -> date:
+    """C08 的取数基准：此刻**应已完成行情同步**的交易日。
+
+    ``quantmind:sync_schedule_last_run:{token}:{date}`` 里的 date 是**派发日期**，而各
+    市场的同步班次都在收盘后（CN 20:55 / HK 23:50 / US 05:30 / FUTURES 03:00）。拿「今天」
+    当基准时，A 股每天 00:00-20:55 都查不到当天标记 → 恒红。基准取上一交易日：当日收盘
+    后的同步由次日的体检来验，一天检出延迟换零误报。
+    """
+    today = ctx.today
+    return previous_trading_day(today, ctx.market) or (today - timedelta(days=1))
+
 
 async def check_c01_signal_distribution(ctx: HealthContext) -> CheckResult:
     # 分布只认非实时行：realtime 行 signal_side 恒 NULL，混进来之后
     # 「批量信号缺失」会显示成「全 HOLD（N 行无 BUY/SELL）」——2026-09-24
     # 实测的假警报形态（当日批量推理 5 任务全失败，健康页却报全 HOLD）。
+    # 基准日同样不能取 max(trade_date)：实时行会把它顶到「今天」（见
+    # ``expected_batch_signal_date`` 的注释）。
+    latest = expected_batch_signal_date(ctx)
     rows = ctx.query(
         "SELECT source, signal_side, count(*) AS n FROM engine_signal_scores "
-        "WHERE COALESCE(market, 'CN') = :m "
-        "AND trade_date = (SELECT max(trade_date) FROM engine_signal_scores WHERE COALESCE(market, 'CN') = :m) "
+        "WHERE COALESCE(market, 'CN') = :m AND trade_date = :d "
         "GROUP BY source, signal_side",
         m=ctx.market,
+        d=latest,
     )
     counts: dict[str, int] = {}
     realtime_rows = 0
@@ -551,7 +647,11 @@ async def check_c01_signal_distribution(ctx: HealthContext) -> CheckResult:
             unknown_side += n
         else:
             counts[str(r["signal_side"])] = counts.get(str(r["signal_side"]), 0) + n
-    extra = {"market": ctx.market, "realtime_rows": realtime_rows}
+    extra = {
+        "market": ctx.market,
+        "trade_date": latest.isoformat(),
+        "realtime_rows": realtime_rows,
+    }
     if not counts:
         # 批量行整批缺失/字段为空的形态：推理没产出，不是闸门坍缩
         if unknown_side:
@@ -559,14 +659,14 @@ async def check_c01_signal_distribution(ctx: HealthContext) -> CheckResult:
                 "C01",
                 "信号分布",
                 "fail",
-                f"批量行 signal_side 全为空（{unknown_side} 行）",
+                f"{latest.isoformat()} 批量行 signal_side 全为空（{unknown_side} 行）",
                 "检查批量推理的落库字段",
                 {**extra, "unknown_side": unknown_side},
             )
         detail = (
-            f"批量信号缺失（{ctx.market} 最新日仅 {realtime_rows} 行实时行）"
+            f"{latest.isoformat()} 批量信号缺失（{ctx.market} 仅 {realtime_rows} 行实时行）"
             if realtime_rows
-            else f"{ctx.market} 市场无任何信号数据"
+            else f"{ctx.market} 市场 {latest.isoformat()} 无任何信号数据"
         )
         return CheckResult(
             "C01",
@@ -581,12 +681,14 @@ async def check_c01_signal_distribution(ctx: HealthContext) -> CheckResult:
 
 
 async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
-    rows = ctx.query(
-        "SELECT max(trade_date) AS d FROM engine_signal_scores WHERE COALESCE(market, 'CN') = :m",
+    # 基准日 = 「此刻应已有批量信号的交易日」，不是 max(trade_date)：实时行会把 max
+    # 顶到当天，让本检查在开盘到 08:00 之间恒报 runs=0（同 C01 的注释）。
+    latest = expected_batch_signal_date(ctx)
+    if not ctx.query(
+        "SELECT 1 AS present FROM engine_signal_scores "
+        "WHERE COALESCE(market, 'CN') = :m LIMIT 1",
         m=ctx.market,
-    )
-    latest = rows[0]["d"] if rows else None
-    if latest is None:
+    ):
         return CheckResult(
             "C02",
             "信号就绪",
@@ -595,7 +697,7 @@ async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
             "检查该市场推理任务",
             {"market": ctx.market},
         )
-    latest_str = str(latest)
+    latest_str = latest.isoformat()
     # T-P1-02：首选就绪标记（全量校验通过才置位）；完成标记为兼容回退
     from backend.shared.inference_lock import ready_key
 
@@ -876,14 +978,9 @@ async def check_c07_scheduler_heartbeat(ctx: HealthContext) -> CheckResult:
 
 
 async def check_c08_data_sync_freshness(ctx: HealthContext) -> CheckResult:
-    rows = ctx.query(
-        "SELECT max(trade_date) AS d FROM engine_signal_scores WHERE COALESCE(market, 'CN') = :m",
-        m=ctx.market,
-    )
-    latest = rows[0]["d"] if rows else None
-    if latest is None:
-        return CheckResult("C08", "数据同步", "warn", f"{ctx.market} 市场无交易日基准")
-    d = str(latest)
+    # 基准 = 上一交易日（见 ``expected_synced_date``）：同步标记记的是**派发日期**，
+    # 而各市场的同步班次都在收盘后，拿今天当基准会每天恒红。
+    d = expected_synced_date(ctx).isoformat()
     # 同步键的市场码与业务市场码**不同名**（CN→A、CRYPTO→BC），映射唯一实现在
     # market_sync_scheduler.sync_market_token；手写 "A" 会让港股/美股永远查不到。
     from backend.services.engine.tasks.market_sync_scheduler import sync_market_token
@@ -895,7 +992,7 @@ async def check_c08_data_sync_freshness(ctx: HealthContext) -> CheckResult:
             "C08",
             "数据同步",
             "warn",
-            f"{ctx.market} 市场最近交易日 {d} 无同步记录",
+            f"{ctx.market} 市场 {d} 无同步记录",
             "检查同步调度配置与执行",
             {"market": ctx.market, "trade_date": d, "sync_token": token},
         )
@@ -1221,6 +1318,9 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
     两侧各放宽 :data:`AGENT_LEDGER_WINDOW_SLACK_DAYS` 天（见该常量）。
     """
     from backend.shared.decision.agent_ledger import SEED_FILL_PREFIX
+    from backend.shared.decision.manual_sell_absorption import (
+        FILL_KEY_PREFIX as MANUAL_ABSORB_PREFIX,
+    )
     from backend.shared.trade_contract import (
         DUP_FILLS_SQL,
         SYNTH_TRADE_PREFIX,
@@ -1287,6 +1387,7 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
             ledger,
             index_enabled=indexed,
             synth_prefix=SYNTH_TRADE_PREFIX,
+            absorb_prefix=f"{MANUAL_ABSORB_PREFIX}:",
             seed_prefix=SEED_FILL_PREFIX,
         )
     )
