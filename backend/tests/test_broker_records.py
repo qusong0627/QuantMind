@@ -39,3 +39,30 @@ def test_tdx_trades_is_explicitly_unsupported():
     rows, note = asyncio.run(br._tdx_records(FakeRedis({}), 'trades'))
     assert rows == []
     assert '不提供成交明细' in note
+
+
+def test_qmt_history_rejects_bad_date():
+    from fastapi import HTTPException
+
+    try:
+        asyncio.run(br._qmt_history_records('2026/11/06', 'orders'))
+    except HTTPException as exc:
+        assert exc.status_code == 400
+    else:  # pragma: no cover - 走到这里说明没校验
+        raise AssertionError('bad date should be rejected')
+
+
+def test_parse_day_formats():
+    from backend.services.live_trading.routers import agent_statement as st
+
+    assert st._parse_day('2026-11-06').strftime('%Y-%m-%d') == '2026-11-06'
+    assert st._parse_day('2026-11-06', end_of_day=True).hour == 23
+    assert st._parse_day(None) is None
+    from fastapi import HTTPException
+
+    try:
+        st._parse_day('11/06/2026')
+    except HTTPException as exc:
+        assert exc.status_code == 400
+    else:  # pragma: no cover
+        raise AssertionError('bad date should be rejected')

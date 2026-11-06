@@ -2,7 +2,8 @@ import { useAppDispatch, useAppSelector } from '../../../store';
 import { selectCurrentMarket, setMarket, type AppMarket } from '../../../store/slices/uiSlice';
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { FileText, Search, Download, TrendingUp, TrendingDown, Clock, CheckCircle, XCircle, ChevronLeft, ChevronRight, AlertTriangle, Activity, RotateCcw, ChevronDown } from 'lucide-react';
-import { Dropdown, message } from 'antd';
+import { DatePicker, Dropdown, Modal, message } from 'antd';
+import type { Dayjs } from 'dayjs';
 import type { Order } from '../../../services/realTradingService';
 import { marketDataService } from '../../../services/marketDataService';
 import { csvExporter } from '../../../services/export';
@@ -191,6 +192,12 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
     const [brokerNote, setBrokerNote] = useState('');
     // 柜台视图可在 QMT / 通达信 之间显式切换（auto = 跟随「券商接入」）
     const [brokerSource, setBrokerSource] = useState<'auto' | 'qmt_exec' | 'tdx'>('auto');
+    // 柜台历史日期（留空=当日；QMT 支持历史，TDX 只有当日）
+    const [brokerDate, setBrokerDate] = useState<Dayjs | null>(null);
+    // Agent 对账单弹窗
+    const [statementOpen, setStatementOpen] = useState(false);
+    const [statementLoading, setStatementLoading] = useState(false);
+    const [statement, setStatement] = useState<import('../../../services/realTradingService').AgentStatementResponse | null>(null);
     // 当前市场无记录、但别的市场有：给出可一键切换的提示，避免"看起来全空"
     const [marketHint, setMarketHint] = useState<{ market: string; count: number } | null>(null);
     const [stockNames, setStockNames] = React.useState<Record<string, string>>({});
@@ -215,6 +222,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                 const resp = await realTradingService.getBrokerRecords(
                     'orders',
                     brokerSource === 'auto' ? undefined : brokerSource,
+                    brokerDate ? brokerDate.format('YYYY-MM-DD') : undefined,
                 );
                 setBrokerLabel(BROKER_LABELS[resp.broker] || resp.broker || '券商');
                 setBrokerNote(resp.note || '');
@@ -352,7 +360,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         } finally {
             loadingRef.current = false;
         }
-    }, [recordSource, brokerSource, timeRange, tradingMode, userId, currentMarket]);
+    }, [recordSource, brokerSource, brokerDate, timeRange, tradingMode, userId, currentMarket]);
 
     React.useEffect(() => {
         if (isActive && userId) {
@@ -526,6 +534,24 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         void handleExport(format, scope);
     }, [handleExport]);
 
+    const openStatement = useCallback(async () => {
+        setStatementOpen(true);
+        setStatementLoading(true);
+        try {
+            const { realTradingService } = await import('../../../services/realTradingService');
+            const range = buildDateRange(timeRange);
+            const start = range.startDate
+                ? String(range.startDate).slice(0, 10)
+                : new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+            const end = new Date().toISOString().slice(0, 10);
+            setStatement(await realTradingService.getAgentStatement(start, end));
+        } catch {
+            message.error('对账单加载失败');
+        } finally {
+            setStatementLoading(false);
+        }
+    }, [timeRange]);
+
     if (!isActive) return null;
 
     return (
@@ -537,6 +563,14 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     交易记录
                 </h3>
                 
+                <button
+                    onClick={() => void openStatement()}
+                    className="px-3 py-1.5 text-xs font-medium rounded-full border border-blue-200 text-blue-600 bg-blue-50 hover:bg-blue-100"
+                    title="按 agent 汇总实盘委托/成交（PG 真源，可对券商记录）"
+                >
+                    Agent 对账单
+                </button>
+
                 <div className="flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200">
                     <button
                         onClick={() => setRecordSource('ledger')}
@@ -553,6 +587,16 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                         {brokerLabel}柜台
                     </button>
                 </div>
+
+                {recordSource === 'broker' && (
+                    <DatePicker
+                        size="small"
+                        value={brokerDate}
+                        onChange={(d) => setBrokerDate(d)}
+                        placeholder="当日（可查历史）"
+                        allowClear
+                    />
+                )}
 
                 {recordSource === 'broker' && (
                     <div className="flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200">
@@ -935,6 +979,54 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     </div>
                 </div>
             </div>
+
+            <Modal
+                title="Agent 交易对账单"
+                open={statementOpen}
+                onCancel={() => setStatementOpen(false)}
+                footer={null}
+                width={720}
+            >
+                {statementLoading ? (
+                    <div className="py-8 text-center text-gray-400 text-sm">加载中…</div>
+                ) : statement ? (
+                    <div>
+                        <div className="text-xs text-gray-500 mb-2">
+                            {statement.start} ~ {statement.end}
+                            {' · '}委托 {statement.total.orders} 笔
+                            {' · '}成交额 {statement.total.filled_value.toFixed(2)}
+                            {' · '}手续费 {statement.total.commission.toFixed(2)}
+                        </div>
+                        <table className="w-full text-xs">
+                            <thead>
+                                <tr className="bg-gray-50 text-gray-500">
+                                    <th className="px-2 py-1.5 text-left">Agent</th>
+                                    <th className="px-2 py-1.5 text-right">委托数</th>
+                                    <th className="px-2 py-1.5 text-right">成交笔数</th>
+                                    <th className="px-2 py-1.5 text-right">成交额</th>
+                                    <th className="px-2 py-1.5 text-right">手续费</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                                {statement.items.map((item) => (
+                                    <tr key={item.agent}>
+                                        <td className="px-2 py-1.5">{item.agent}</td>
+                                        <td className="px-2 py-1.5 text-right">{item.orders}</td>
+                                        <td className="px-2 py-1.5 text-right">{item.filled_orders}</td>
+                                        <td className="px-2 py-1.5 text-right">{item.filled_value.toFixed(2)}</td>
+                                        <td className="px-2 py-1.5 text-right">{item.commission.toFixed(2)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                        {statement.note && (
+                            <div className="text-[10px] text-gray-400 mt-2">{statement.note}</div>
+                        )}
+                    </div>
+                ) : (
+                    <div className="py-8 text-center text-gray-400 text-sm">暂无数据</div>
+                )}
+            </Modal>
         </div>
     );
 };

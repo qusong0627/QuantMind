@@ -13,8 +13,10 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 import httpx
@@ -65,6 +67,30 @@ def _bridge_cfg(redis: Any) -> tuple[str, str]:
     return url, token
 
 
+async def _qmt_history_records(day: str, kind: str) -> list[dict[str, Any]]:
+    """QMT **历史**成交/委托（get_history_trade_detail_data，按单日拉取）。
+
+    柜台只保留当日；跨日历史必须走这个官方接口（或客户端导出对账单）。
+    ``day`` 接受 ``YYYY-MM-DD``，QMT 参数用 ``YYYYMMDD``。
+    """
+    from backend.services.live_trading.services.qmt_exec_client import (
+        get_qmt_exec_client,
+    )
+
+    compact = str(day or "").replace("-", "")
+    if len(compact) != 8 or not compact.isdigit():
+        raise HTTPException(status_code=400, detail=f"日期格式应为 YYYY-MM-DD：{day}")
+    client = get_qmt_exec_client()
+    await client.refresh_settings()
+    detail = "ORDER" if kind == "orders" else "DEAL"
+    return list(
+        await asyncio.wait_for(
+            client.query_history_trades(compact, compact, detail), timeout=35.0
+        )
+        or []
+    )
+
+
 async def _qmt_records(kind: str) -> list[dict[str, Any]]:
     from backend.services.live_trading.services.qmt_exec_client import (
         get_qmt_exec_client,
@@ -110,6 +136,7 @@ async def broker_records(
     kind: str = Query("orders", pattern="^(orders|trades)$"),
     market: str = "CN",
     source: str | None = None,
+    date: str | None = Query(None, description="YYYY-MM-DD；留空=当日"),
     auth: AuthContext = Depends(get_auth_context),
     redis: Any = Depends(get_redis),
 ):
@@ -127,8 +154,14 @@ async def broker_records(
 
     try:
         if src.startswith("qmt"):
-            rows = await _qmt_records(kind)
-            note = ""
+            day = str(date or "").strip()
+            today = time.strftime("%Y-%m-%d")
+            if day and day != today:
+                rows = await _qmt_history_records(day, kind)
+                note = f"QMT 历史（{day}）：来自柜台 get_history_trade_detail_data"
+            else:
+                rows = await _qmt_records(kind)
+                note = ""
         elif src.startswith("tdx"):
             rows, note = await _tdx_records(redis, kind)
         else:

@@ -108,6 +108,23 @@ export interface BrokerRecordRow {
     [key: string]: unknown;
 }
 
+export interface AgentStatementItem {
+    agent: string;
+    orders: number;
+    filled_orders: number;
+    filled_value: number;
+    commission: number;
+}
+
+export interface AgentStatementResponse {
+    success: boolean;
+    start: string;
+    end: string;
+    total: Omit<AgentStatementItem, 'agent'>;
+    items: AgentStatementItem[];
+    note?: string;
+}
+
 export interface BrokerRecordsResponse {
     success: boolean;
     broker: string;
@@ -1017,11 +1034,24 @@ export const realTradingService = {
     getBrokerRecords: async (
         kind: 'orders' | 'trades',
         source?: string,
+        date?: string,
     ): Promise<BrokerRecordsResponse> => {
         return await requestRealTradingWithFallback<BrokerRecordsResponse>({
             method: 'get',
             url: '/broker-records',
-            params: { kind, ...(source ? { source } : {}) },
+            params: { kind, ...(source ? { source } : {}), ...(date ? { date } : {}) },
+        });
+    },
+
+    // Agent 交易对账单（PG 真源：按 agent 汇总 REAL 委托/成交）
+    getAgentStatement: async (
+        start?: string,
+        end?: string,
+    ): Promise<AgentStatementResponse> => {
+        return await requestRealTradingWithFallback<AgentStatementResponse>({
+            method: 'get',
+            url: '/agent-statement',
+            params: { ...(start ? { start } : {}), ...(end ? { end } : {}) },
         });
     },
 

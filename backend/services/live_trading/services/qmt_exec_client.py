@@ -317,6 +317,9 @@ class QmtExecBackend(Protocol):
 
     def query_trades(self) -> list[dict[str, Any]]: ...
 
+    def query_history_trades(self, start_date: str, end_date: str,
+                             detail_type: str = "DEAL") -> list[dict[str, Any]]: ...
+
     def get_full_tick(self, codes: list[str]) -> dict[str, Any]: ...
 
     def get_instrument_detail(self, code: str) -> dict[str, Any]: ...
@@ -490,6 +493,22 @@ class BigConvertBackend:
         trader, account = self._ensure()
         trades = trader.query_stock_trades(account) or []
         return [self._normalize_trade(item) for item in trades]
+
+    def query_history_trades(self, start_date: str, end_date: str,
+                             detail_type: str = "DEAL") -> list[dict[str, Any]]:
+        """柜台**历史**成交/委托（按日期区间，QMT 官方
+        ``get_history_trade_detail_data(account, type, datatype, start, end)``）。
+
+        这是拉取「券商历史记录」的唯一官方入口；柜台只保留当日，
+        历史必须走这个接口或客户端导出对账单。
+        """
+        trader, _account = self._ensure()
+        result = trader.client.call("get_history_trade_detail_data", {
+            "detail_type": str(detail_type or "DEAL"),
+            "start_date": str(start_date or ""),
+            "end_date": str(end_date or ""),
+        })
+        return list(result) if isinstance(result, list) else []
 
     def get_full_tick(self, codes: list[str]) -> dict[str, Any]:
         """批量实时盘口（桥侧 ``get_full_tick``，返回 ``{code: tick}``）。
@@ -1060,6 +1079,17 @@ class QmtExecClient:
     async def query_trades(self) -> list[dict[str, Any]]:
         cfg = self._require_enabled()
         return await self._call(self._get_backend(cfg).query_trades, retryable=True)
+
+    async def query_history_trades(self, start_date: str, end_date: str,
+                                   detail_type: str = "DEAL") -> list[dict[str, Any]]:
+        cfg = self._require_enabled()
+        return await self._call(
+            self._get_backend(cfg).query_history_trades,
+            start_date=start_date,
+            end_date=end_date,
+            detail_type=detail_type,
+            retryable=True,
+        )
 
     async def get_full_tick(self, codes: list[str]) -> dict[str, Any]:
         """批量实时盘口（止损执行器/守护轮询用）。空列表直接返回 ``{}`` 不打桥。
