@@ -11,7 +11,7 @@ type BrokerKey = string;
 
 const BROKERS_BY_MARKET: Record<string, { key: BrokerKey; label: string; desc: string }[]> = {
   CN: [
-    { key: 'qmt_exec', label: '大 QMT(执行端)', desc: 'QMT 内置 Python 跑 big-convert RPC 服务端，需在 QMT 机器上常驻；下单走官方内置通道' },
+    { key: 'qmt_exec', label: '大 QMT(执行端)', desc: 'QMT 策略 + 伴生桥（命名管道）链路；策略必须在「实盘交易」板块绑定资金账号运行，经 8550 桥的 QMT 源对外提供' },
     { key: 'tdx', label: '通达信(TDX 桥)', desc: 'Windows 常驻 TDX 桥（HTTP），需 token 一致且通达信已登录' },
   ],
   HK: [
@@ -279,7 +279,7 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
           )}
           {selected === 'qmt_exec' && (
             <div className="text-[11px] leading-5 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
-              配置步骤：① 在 QMT 那台 Windows 上部署 RPC 服务端 —— <b>不要 pip 安装</b>（QMT 内置 Python 是 3.6，装不了），用 QuantMind 生成的开箱包拷到 QMT 的 <b>python 目录</b>（部署手册 §三）；② 在 QMT <b>策略编辑器</b>里加载运行 <b>BIGQMT_REDIS_DRYRUN.py</b>（用普通脚本方式跑不会生效，日志以 finished 结尾）；③ 服务端配置开启 <b>rpc_allow_order_methods</b> 才会真正下单；④ 上方填写该机器上的 <b>RPC Redis 地址/端口/密码</b>；⑤ 保存后点「测试连接」应返回真实资金与持仓。成交无推送，靠 1–3 秒轮询回收；断在哪一层可跑 <code>scripts/qmt_bridge_selftest.py</code> 逐层看。
+              配置步骤：① 在 QMT 那台 Windows 上部署 <b>伴生桥</b>（<code>qmt-tools</code>，命名管道 + 看门狗常驻）；② 在 QMT 的 <b>实盘交易</b>板块（不是策略编辑器、不是模拟交易板块）加载 <b>QMT_BRIDGE_V2.py</b> 并绑定资金账号运行——启动日志应出现 <code>[v2] quote tap installed</code>；③ 策略里 <b>rpc_allow_order_methods</b> 必须为 True 才会真正下单；④ 上方填写该机器上的 <b>RPC Redis 地址/端口/密码</b>；⑤ 保存后点「测试连接」应返回真实资金与持仓。下单链路 = Redis 队列 → 伴生桥 → 命名管道 → 策略 passorder；成交靠 1–3 秒轮询回收。若「已受理但柜台无委托」，先查策略是否跑在模拟板块/未绑定账号；断在哪一层可跑 <code>scripts/qmt_bridge_selftest.py</code> 逐层看。
             </div>
           )}
           {selected === 'tdx' && (

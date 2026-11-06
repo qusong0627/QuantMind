@@ -113,6 +113,68 @@ const buildDateRange = (timeRange: 'today' | 'week' | 'month' | 'all'): OrdersRa
 };
 
 
+const BROKER_LABELS: Record<string, string> = {
+    qmt_exec: '大 QMT',
+    tdx: '通达信',
+};
+
+/** 柜台行（QMT/TDX 两套字段）→ 表格行。柜台只回当日数据。 */
+const toBrokerTradeRow = (row: Record<string, unknown>, idx: number): TradeRow => {
+    const pick = (...keys: string[]): unknown => {
+        for (const key of keys) {
+            const value = row[key];
+            if (value !== undefined && value !== null && value !== '') return value;
+        }
+        return undefined;
+    };
+    const code = String(pick('symbol', 'stock_code') ?? '');
+    const rawSide = String(pick('side', 'direction') ?? '').toLowerCase();
+    const direction = rawSide === 'buy' || rawSide === 'sell' ? rawSide : rawSide || '—';
+    const quantity = Number(pick('order_volume', 'total_volume', 'volume') ?? 0);
+    const filledQty = Number(pick('traded_volume', 'filled_volume') ?? 0);
+    const price = Number(pick('price', 'order_price') ?? 0);
+    const avgPrice = Number(pick('traded_price', 'filled_price') ?? 0);
+    const rawTime = pick('time', 'order_time', 'traded_time', 'created_at');
+    let when = new Date();
+    let timeText = '';
+    if (typeof rawTime === 'number' || /^\d{10,13}$/.test(String(rawTime ?? ''))) {
+        const raw = Number(rawTime);
+        when = new Date(raw < 1e12 ? raw * 1000 : raw);
+        timeText = when.toLocaleTimeString('zh-CN', { hour12: false });
+    } else if (typeof rawTime === 'string' && rawTime.includes(':')) {
+        timeText = rawTime.slice(-8);
+    } else if (rawTime) {
+        const parsed = new Date(String(rawTime));
+        if (!Number.isNaN(parsed.getTime())) {
+            when = parsed;
+            timeText = parsed.toLocaleTimeString('zh-CN', { hour12: false });
+        }
+    }
+    const dateText = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, '0')}-${String(when.getDate()).padStart(2, '0')}`;
+    return {
+        id: String(pick('order_id', 'order_sysid', 'order_sys_id') ?? `${code}-${idx}`),
+        createdAt: when.toISOString(),
+        date: dateText,
+        time: timeText,
+        direction,
+        code,
+        name: String(pick('instrument_name', 'stock_name', 'name') ?? ''),
+        quantity,
+        filledQty,
+        price,
+        avgPrice,
+        amount: quantity * price,
+        filledValue: filledQty * avgPrice,
+        status: String(pick('status', 'order_status') ?? '').toLowerCase(),
+        reason: '',
+        reasonSummary: '',
+        tradeAction: direction === 'buy' ? '买入' : direction === 'sell' ? '卖出' : '',
+        exchangeOrderId: String(pick('order_sysid', 'order_id') ?? ''),
+        commission: 0,
+    };
+};
+
+
 const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradingMode }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month' | 'all'>('all');
@@ -122,6 +184,10 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
     const [currentPage, setCurrentPage] = useState(1);
     const [trades, setTrades] = useState<TradeRow[]>([]);
     const [columnFilters, setColumnFilters] = useState<ColumnFilterState>({});
+    // 数据源：系统账本（PG，含历史）/ 券商柜台（跟随「券商接入」，仅当日）
+    const [recordSource, setRecordSource] = useState<'ledger' | 'broker'>('ledger');
+    const [brokerLabel, setBrokerLabel] = useState('券商');
+    const [brokerNote, setBrokerNote] = useState('');
     const [stockNames, setStockNames] = React.useState<Record<string, string>>({});
     const [exporting, setExporting] = useState(false);
     const stockNamesRef = useRef<Record<string, string>>({});
@@ -140,6 +206,17 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
 
         try {
             const { realTradingService } = await import('../../../services/realTradingService');
+            if (recordSource === 'broker') {
+                const resp = await realTradingService.getBrokerRecords('orders');
+                setBrokerLabel(BROKER_LABELS[resp.broker] || resp.broker || '券商');
+                setBrokerNote(resp.note || '');
+                const rows = (resp.rows || [])
+                    .map((row, idx) => toBrokerTradeRow(row, idx))
+                    .filter((o) => inferMarketOfSymbol(o.code) === currentMarket.toUpperCase());
+                setTrades(rows);
+                return;
+            }
+            setBrokerNote('');
             const rangeQuery = buildDateRange(timeRange);
             const allOrders: Order[] = [];
             let offset = 0;
@@ -255,7 +332,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         } finally {
             loadingRef.current = false;
         }
-    }, [timeRange, tradingMode, userId]);
+    }, [recordSource, timeRange, tradingMode, userId, currentMarket]);
 
     React.useEffect(() => {
         if (isActive && userId) {
@@ -441,6 +518,23 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                 </h3>
                 
                 <div className="flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200">
+                    <button
+                        onClick={() => setRecordSource('ledger')}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${recordSource === 'ledger' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        title="系统账本：我们自己的委托台账（含跨日历史）"
+                    >
+                        系统账本
+                    </button>
+                    <button
+                        onClick={() => setRecordSource('broker')}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${recordSource === 'broker' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        title="券商柜台：按「设置 → 券商接入」选定的券商查询（仅当日）"
+                    >
+                        {brokerLabel}柜台
+                    </button>
+                </div>
+
+                <div className={`flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200 ${recordSource === 'broker' ? 'opacity-60' : ''}`}>
                     {(['today', 'week', 'month', 'all'] as const).map((range) => (
                         <button
                             key={range}
@@ -569,9 +663,13 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                                     <td colSpan={11} className="px-3 py-12 text-center text-gray-400">
                                         <div className="flex flex-col items-center gap-2">
                                             <FileText size={32} className="text-gray-200" />
-                                            <span className="text-sm">暂无交易记录</span>
+                                            <span className="text-sm">
+                                                {recordSource === 'broker' ? '券商柜台今日无委托记录' : '暂无交易记录'}
+                                            </span>
                                             <span className="text-xs text-gray-300">
-                                                {timeRange === 'today' ? '今日' : timeRange === 'week' ? '本周' : timeRange === 'month' ? '本月' : ''}内无委托记录
+                                                {recordSource === 'broker'
+                                                    ? (brokerNote || '柜台接口只返回当日数据；跨日历史请看「系统账本」')
+                                                    : `${timeRange === 'today' ? '今日' : timeRange === 'week' ? '本周' : timeRange === 'month' ? '本月' : ''}内无委托记录`}
                                             </span>
                                         </div>
                                     </td>

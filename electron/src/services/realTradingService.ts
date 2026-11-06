@@ -104,6 +104,21 @@ async function requestRealTradingWithFallback<T>(
     }
 }
 
+export interface BrokerRecordRow {
+    [key: string]: unknown;
+}
+
+export interface BrokerRecordsResponse {
+    success: boolean;
+    broker: string;
+    market: string;
+    kind: 'orders' | 'trades';
+    count: number;
+    /** 数据源说明（如通达信不提供成交明细） */
+    note?: string;
+    rows: BrokerRecordRow[];
+}
+
 export interface RealTradingStatus {
     status: 'running' | 'stopped' | 'not_running' | 'starting' | 'error';
     user_id: string;
@@ -996,6 +1011,18 @@ export const realTradingService = {
             timeout: 30000,
         });
         return response.data;
+    },
+
+    // 券商柜台侧的委托/成交（跟随「券商接入」选定通道；只回当日）
+    getBrokerRecords: async (
+        kind: 'orders' | 'trades',
+        source?: string,
+    ): Promise<BrokerRecordsResponse> => {
+        return await requestRealTradingWithFallback<BrokerRecordsResponse>({
+            method: 'get',
+            url: '/broker-records',
+            params: { kind, ...(source ? { source } : {}) },
+        });
     },
 
     // Get Account Info
