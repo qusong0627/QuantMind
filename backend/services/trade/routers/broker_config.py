@@ -394,20 +394,42 @@ async def test_broker_connection(
 
             client = get_qmt_exec_client()
             await client.refresh_settings()  # 表单值刚落库，立即生效
-            try:
-                await client.ping()
-                asset = await client.get_asset()
-                positions = await client.get_positions()
-            except QmtExecError as exc:
+            import asyncio as _asyncio
+
+            last_exc: QmtExecError | None = None
+            asset: dict[str, Any] = {}
+            positions: list[Any] = []
+            # 手动「测试连接」不该被后台轮询的限速误伤：撞上限速/短暂不可用时
+            # 等 2 秒重试一次（队列桶容量已给到 3，正常一次就能过）。
+            for attempt in range(2):
+                try:
+                    await client.ping()
+                    asset = await client.get_asset()
+                    positions = await client.get_positions()
+                    last_exc = None
+                    break
+                except QmtExecError as exc:
+                    last_exc = exc
+                    transient = any(k in str(exc) for k in ("THROTTLED", "UNHEALTHY"))
+                    if attempt == 0 and transient:
+                        await _asyncio.sleep(2.0)
+                        continue
+                    break
+            if last_exc is not None:
                 return {
                     "success": False,
-                    "message": f"QMT 执行端调用失败[{exc.code}]：{exc}",
-                    "code": exc.code,
+                    "message": f"QMT 执行端调用失败[{last_exc.code}]：{last_exc}",
+                    "code": last_exc.code,
                 }
+            try:
+                # refresh_settings 后账号在页面配置里；client.account_id 可能为空
+                acct = str(client._effective().get("account_id") or client.account_id)
+            except Exception:  # noqa: BLE001
+                acct = str(client.account_id or "")
             return {
                 "success": True,
                 "message": (
-                    f"QMT 执行端已连接（{mask_account_id(client.account_id)}），"
+                    f"QMT 执行端已连接（{mask_account_id(acct)}），"
                     f"总资产 {float(asset.get('total_asset') or 0):.2f}"
                     f"，可用 {float(asset.get('cash') or 0):.2f}"
                     f"，持仓 {len(positions)} 只"
