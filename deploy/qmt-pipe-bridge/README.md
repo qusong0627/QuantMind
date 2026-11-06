@@ -44,6 +44,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File register_pipe_watchdog.ps1
 `bridge_health.py` 退出码：0=正常；1=心跳缺失/过期；2=读不到心跳；
 3=心跳正常但账户快照停摆（只告警，不自动重启——交易时段重启会打断在途 RPC）。
 
+### 策略看门狗（交易查询通道卡死 → 自救/告警）
+
+`qmt_strategy_watchdog.py` 每分钟探测一次：`ping`（后台 listener 线程）与
+`get_asset`（adjust 主线程）。ping 通但 `get_asset` 连续两次超时 → 发
+`reload_deployment`（主线程还活着时这是最后的自愈机会）；reload 也超时 →
+判定主线程死锁，写 Redis `qm:qmt:strategy:watchdog` 并 CRITICAL 告警，提示人工
+在 QMT 策略编辑器里重启策略（GUI 是唯一恢复手段）。
+
+为什么需要它：trade-context RPC（`get_asset` / `get_positions` / `query_orders` …）
+必须走 adjust 主线程（`get_trade_detail_data` 在后台线程返回空），主线程一旦被
+QMT 的 C++ 调用挂住，这些查询全部超时，而 `ping` 与行情方法仍在后台线程 25ms
+正常应答——这就是「QMT 在线·账户滞后」的假活。2026-11-06 两次实测：
+09:37:46 与 10:14:23，策略日志在 `adjust cadence` 之后同时断掉。
+
+保护：队列里有订单/撤单 RPC 时不 reload；冷却 10 分钟；每日最多 3 次；
+只在交易时段自动 reload；状态全部落在 `qm:qmt:strategy:watchdog`（TTL 1 天）。
+
+部署（文件放到 `qmt-tools\` 与 `qmt-tools\qmt-external-bridge\`）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File register_strategy_watchdog.ps1
+```
+
 ## 接口
 
 伴生桥只监听 `127.0.0.1:17720`，提供 `/api/v1/qmt/call` 与 `/health`；
