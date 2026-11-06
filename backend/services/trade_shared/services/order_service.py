@@ -34,6 +34,21 @@ from backend.services.trade_shared.trade_config import settings
 logger = logging.getLogger(__name__)
 
 
+REMARKS_MAX = 500
+
+
+def _clip_remarks(text: str | None, limit: int = REMARKS_MAX) -> str:
+    """把要写进 ``orders.remarks``（varchar(500)）的文本截断。
+
+    超长不截会让 asyncpg 抛 StringDataRightTruncationError —— 该异常会把
+    整个 Session 置为 PendingRollback，后续所有订单操作一起失败。
+    """
+    value = str(text or '')
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + '…'
+
+
 class OrderService:
     """Order management service"""
 
@@ -225,7 +240,13 @@ class OrderService:
             order.expired_at = datetime.now()
 
         if remarks:
-            order.remarks = f"{order.remarks or ''} [{new_status.value.upper()}: {remarks}]"
+            # 列宽 500：上游拒因可能很长（2026-11-06：QMT 的
+            # "passorder submitted but order not found ... switch it to 实盘"
+            # 直接把 remarks 撑爆，StringDataRightTruncationError 让整个
+            # session 回滚，后续订单全部落不了库）。
+            order.remarks = _clip_remarks(
+                f"{order.remarks or ''} [{new_status.value.upper()}: {remarks}]"
+            )
 
         await self.db.commit()
         await self.db.refresh(order)

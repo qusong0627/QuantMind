@@ -1642,8 +1642,25 @@ class QmtExecBroker(BaseBroker):
         return check_price_protection_band(price=price, side=side, detail=detail)
 
     async def query_quote(self, symbol: str) -> dict[str, Any]:
-        """行情走 stream / QuantDB，不依赖 QMT 行情权限。"""
-        _ = symbol
+        """行情走 QMT 管道（``get_full_tick``）：市价单风控估值必须有价。
+
+        历史实现直接 ``return {}``（注释称行情走 stream/QuantDB），但风控闸
+        ``check_order_risk`` 对市价单要求 ``last_price`` 才能估值——空字典让
+        **所有经 qmt_exec 的市价单**都撞 ``market_price_unavailable``
+        （2026-11-06：8 笔止损补单全部被拒，止损形同虚设）。
+        管道取不到价时仍返回空，由风控 fail-closed。
+        """
+        try:
+            client = self._client
+            if not getattr(client, "configured", True):
+                await client.refresh_settings()
+            ticks = await client.get_full_tick([symbol])
+            tick = (ticks or {}).get(symbol) or {}
+            price = float(tick.get("lastPrice") or 0)
+            if price > 0:
+                return {"last_price": price, "symbol": symbol}
+        except Exception as exc:  # noqa: BLE001 - 取不到价交给风控 fail-closed
+            logger.warning("[QmtExecBroker] query_quote %s 失败: %s", symbol, exc)
         return {}
 
 

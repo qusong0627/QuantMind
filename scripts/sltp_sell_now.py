@@ -48,7 +48,8 @@ def _match_key(code: str) -> str:
     return ''.join(ch for ch in normalize(code) if ch.isdigit())
 
 
-def build_plan(positions: list[dict], ticks: dict, symbols: list[str]) -> tuple[list[dict], list[str]]:
+def build_plan(positions: list[dict], ticks: dict, symbols: list[str],
+               slip_pct: float = 0.01) -> tuple[list[dict], list[str]]:
     """柜台持仓 + 实时行情 → 卖出计划（纯函数，便于单测）。
 
     返回 (plan, skipped)：plan 元素含 symbol/qty/full_position/price；skipped 为
@@ -88,6 +89,7 @@ def build_plan(positions: list[dict], ticks: dict, symbols: list[str]) -> tuple[
             "qty": qty,
             "full_position": bool(volume and qty >= volume),
             "price": price,
+            "limit_price": round(price * (1 - slip_pct), 2),
         })
     return plan, skipped
 
@@ -134,7 +136,7 @@ async def _run(args) -> int:
         print(f"ABORT 行情不可用：{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
-    plan, skipped = build_plan(positions, ticks, symbols)
+    plan, skipped = build_plan(positions, ticks, symbols, args.slip_pct)
     for line in skipped:
         print(f"SKIP {line}")
     print("PLAN " + json.dumps(plan, ensure_ascii=False))
@@ -161,8 +163,8 @@ async def _run(args) -> int:
             "symbol": item["symbol"],
             "side": "SELL",
             "quantity": item["qty"],
-            "price": 0.0,
-            "order_type": "MARKET",
+            "price": item["limit_price"] if args.order_type == "limit" else 0.0,
+            "order_type": "LIMIT" if args.order_type == "limit" else "MARKET",
             "trading_mode": "REAL",
             "portfolio_id": 0,
             "strategy_id": None,
@@ -213,6 +215,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="止损补单（市价卖出，默认 dry-run）")
     parser.add_argument("--symbols", required=True, help="逗号分隔，后缀式代码")
     parser.add_argument("--confirm", action="store_true", help="真正下单")
+    parser.add_argument("--order-type", choices=("market", "limit"), default="market",
+                        help="默认市价；QMT 某些版本对 price=0 的市价单静默丢弃，可用限价")
+    parser.add_argument("--slip-pct", type=float, default=0.01,
+                        help="限价单相对现价的下浮比例（卖出吃买盘），默认 1%%")
     parser.add_argument("--strict", action="store_true", help="有标的被跳过则整批拒绝")
     parser.add_argument("--verify-wait", type=float, default=5.0,
                         help="派发后复核终态前等待秒数（0=不复核）")

@@ -23,7 +23,8 @@ def test_full_position_sell():
         ['600036.SH'])
     assert not skipped
     assert plan == [{'symbol': '600036.SH', 'qty': 1000.0,
-                     'full_position': True, 'price': 41.0}]
+                     'full_position': True, 'price': 41.0,
+                     'limit_price': 40.59}]
 
 
 def test_t1_partial_is_not_full_position():
