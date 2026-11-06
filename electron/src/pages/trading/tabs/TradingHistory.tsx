@@ -198,6 +198,10 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
     const [statementOpen, setStatementOpen] = useState(false);
     const [statementLoading, setStatementLoading] = useState(false);
     const [statement, setStatement] = useState<import('../../../services/realTradingService').AgentStatementResponse | null>(null);
+    // 每日日结（智能体台账口径：成交/平仓 + 执行事实 + 真实资金锚）
+    const [settlementOpen, setSettlementOpen] = useState(false);
+    const [settlementLoading, setSettlementLoading] = useState(false);
+    const [settlementRows, setSettlementRows] = useState<import('../../../services/realTradingService').DailySettlementRow[]>([]);
     // 当前市场无记录、但别的市场有：给出可一键切换的提示，避免"看起来全空"
     const [marketHint, setMarketHint] = useState<{ market: string; count: number } | null>(null);
     const [stockNames, setStockNames] = React.useState<Record<string, string>>({});
@@ -564,6 +568,26 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         }
     }, [timeRange]);
 
+    const openSettlement = useCallback(async () => {
+        setSettlementOpen(true);
+        setSettlementLoading(true);
+        try {
+            const { realTradingService } = await import('../../../services/realTradingService');
+            const range = buildDateRange(timeRange);
+            // 默认从 9 月 1 日（实盘起账日）看到今天；「今日/本周/本月」跟随筛选
+            const start = range.startDate
+                ? String(range.startDate).slice(0, 10)
+                : '2026-09-01';
+            const end = new Date().toISOString().slice(0, 10);
+            const resp = await realTradingService.getDailySettlements(start, end);
+            setSettlementRows(resp.rows || []);
+        } catch {
+            message.error('日结加载失败');
+        } finally {
+            setSettlementLoading(false);
+        }
+    }, [timeRange]);
+
     if (!isActive) return null;
 
     return (
@@ -581,6 +605,14 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     title="按 agent 汇总实盘委托/成交（PG 真源，可对券商记录）"
                 >
                     Agent 对账单
+                </button>
+
+                <button
+                    onClick={() => void openSettlement()}
+                    className="px-3 py-1.5 text-xs font-medium rounded-full border border-emerald-200 text-emerald-600 bg-emerald-50 hover:bg-emerald-100"
+                    title="每日日结：智能体台账（成交/平仓）+ 执行事实（委托/费用）+ 真实资金锚"
+                >
+                    每日日结
                 </button>
 
                 <div className="flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200">
@@ -1055,6 +1087,79 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     </div>
                 ) : (
                     <div className="py-8 text-center text-gray-400 text-sm">暂无数据</div>
+                )}
+            </Modal>
+
+            <Modal
+                title="每日日结（智能体台账）"
+                open={settlementOpen}
+                onCancel={() => setSettlementOpen(false)}
+                footer={null}
+                width={960}
+            >
+                {settlementLoading ? (
+                    <div className="py-8 text-center text-gray-400 text-sm">加载中…</div>
+                ) : settlementRows.length === 0 ? (
+                    <div className="py-8 text-center text-gray-400 text-sm">暂无日结</div>
+                ) : (
+                    <div>
+                        <div className="text-xs text-gray-500 mb-2">
+                            {settlementRows[settlementRows.length - 1]?.trade_date} ~ {settlementRows[0]?.trade_date}
+                            {' · '}共 {settlementRows.length} 个交易日
+                            {' · '}成交额合计{' '}
+                            {settlementRows.reduce((s, r) => s + (r.buy_value + r.sell_value), 0).toFixed(2)}
+                            {' · '}费用合计{' '}
+                            {settlementRows.reduce((s, r) => s + Number(r.total_fee || 0), 0).toFixed(2)}
+                            {' · '}已实现盈亏合计{' '}
+                            {settlementRows.reduce((s, r) => s + Number(r.realized_pnl || 0), 0).toFixed(2)}
+                        </div>
+                        <div className="max-h-[520px] overflow-auto">
+                            <table className="w-full text-xs">
+                                <thead className="sticky top-0 bg-gray-50 text-gray-500">
+                                    <tr>
+                                        <th className="px-2 py-1.5 text-left">日期</th>
+                                        <th className="px-2 py-1.5 text-right">委托(成交)</th>
+                                        <th className="px-2 py-1.5 text-right">买入</th>
+                                        <th className="px-2 py-1.5 text-right">卖出</th>
+                                        <th className="px-2 py-1.5 text-right">费用</th>
+                                        <th className="px-2 py-1.5 text-right">净现金流</th>
+                                        <th className="px-2 py-1.5 text-right">已实现盈亏</th>
+                                        <th className="px-2 py-1.5 text-right">总资产</th>
+                                        <th className="px-2 py-1.5 text-center">状态</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-100">
+                                    {settlementRows.map((row) => (
+                                        <tr key={row.trade_date} className="hover:bg-gray-50">
+                                            <td className="px-2 py-1.5 font-mono">{row.trade_date}</td>
+                                            <td className="px-2 py-1.5 text-right">
+                                                {row.orders_total}({row.orders_filled})
+                                            </td>
+                                            <td className="px-2 py-1.5 text-right">{Number(row.buy_value).toFixed(2)}</td>
+                                            <td className="px-2 py-1.5 text-right">{Number(row.sell_value).toFixed(2)}</td>
+                                            <td className="px-2 py-1.5 text-right">{Number(row.total_fee).toFixed(2)}</td>
+                                            <td className="px-2 py-1.5 text-right text-gray-700">
+                                                {Number(row.net_cash_flow).toFixed(2)}
+                                            </td>
+                                            <td className={`px-2 py-1.5 text-right ${Number(row.realized_pnl) < 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                {Number(row.realized_pnl).toFixed(2)}
+                                            </td>
+                                            <td className="px-2 py-1.5 text-right">
+                                                {row.total_asset == null ? '—' : Number(row.total_asset).toFixed(2)}
+                                            </td>
+                                            <td className="px-2 py-1.5 text-center text-[10px] text-gray-400">
+                                                {row.status === 'closed' ? '已结' : '无快照'}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                        <div className="text-[10px] text-gray-400 mt-2">
+                            口径：智能体台账（成交/平仓）+ 执行事实（委托/费用/执行券商）+ 真实资金锚（快照）；
+                            金额只认成交，费率为 0 表示券商回报里没有费用字段（不估算）。
+                        </div>
+                    </div>
                 )}
             </Modal>
         </div>

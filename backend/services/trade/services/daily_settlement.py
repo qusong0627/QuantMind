@@ -423,6 +423,10 @@ async def run_day(
 
     await ensure_table_async(session)
     payload = await compute_day(session, tenant_id=tenant_id, user_id=user_id, day=day)
+    # 无成交、无委托、也无资金快照的日子不落行（补跑时算 skipped）——避免台账里
+    # 铺满全零行把「没交易」和「没数据」混成一张表。
+    if not payload.get("has_activity") and payload.get("status") != "closed":
+        return payload
     params = dict(payload)
     for key in ("agents_json", "brokers_json", "positions_json", "recon_json"):
         params[key] = json.dumps(params.get(key) or {}, ensure_ascii=False, default=str)

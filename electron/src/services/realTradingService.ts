@@ -125,6 +125,49 @@ export interface AgentStatementResponse {
     note?: string;
 }
 
+/** 每日日结（智能体台账口径：成交/平仓 + 执行事实 + 真实资金锚） */
+export interface DailySettlementRow {
+    trade_date: string;
+    orders_total: number;
+    orders_filled: number;
+    orders_partial: number;
+    orders_cancelled: number;
+    orders_rejected: number;
+    orders_pending: number;
+    filled_value: number;
+    buy_value: number;
+    sell_value: number;
+    commission: number;
+    stamp_duty: number;
+    transfer_fee: number;
+    total_fee: number;
+    net_cash_flow: number;
+    realized_pnl: number;
+    cash: number | null;
+    market_value: number | null;
+    total_asset: number | null;
+    status: string;
+    agents_json: Record<string, {
+        fills: number;
+        buy_volume: number;
+        sell_volume: number;
+        buy_amount: number;
+        sell_amount: number;
+        roundtrips?: number;
+        realized_pnl?: number;
+    }>;
+    brokers_json: Record<string, { orders: number; filled_value: number }>;
+}
+
+export interface DailySettlementsResponse {
+    success: boolean;
+    start: string;
+    end: string;
+    count: number;
+    rows: DailySettlementRow[];
+    note?: string;
+}
+
 export interface BrokerRecordsResponse {
     success: boolean;
     broker: string;
@@ -1062,6 +1105,18 @@ export const realTradingService = {
         return await requestRealTradingWithFallback<AgentStatementResponse>({
             method: 'get',
             url: '/agent-statement',
+            params: { ...(start ? { start } : {}), ...(end ? { end } : {}) },
+        });
+    },
+
+    // 每日日结（智能体台账：成交/平仓 + 执行事实 + 真实资金锚）
+    getDailySettlements: async (
+        start?: string,
+        end?: string,
+    ): Promise<DailySettlementsResponse> => {
+        return await requestRealTradingWithFallback<DailySettlementsResponse>({
+            method: 'get',
+            url: '/daily-settlements',
             params: { ...(start ? { start } : {}), ...(end ? { end } : {}) },
         });
     },
