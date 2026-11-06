@@ -56,7 +56,7 @@ DEFAULT_CONFIG = {
             # 双桶：容器请求与桥内部轮询各自限速，互不饿死（内部抢光令牌会让
             # SLTP/委托轮询完全查不到柜台）。
             'trade_min_interval_s': 3.0, 'trade_burst': 1,
-            'internal_trade_min_interval_s': 5.0, 'internal_trade_burst': 4},
+            'internal_trade_min_interval_s': 2.0, 'internal_trade_burst': 6},
     # 启动错峰：2026-11-06 三次实测「桥一启动，策略 40-60s 内必挂」——五个
     # worker 零延迟同时开跑，瞬间并发打到 QMT 单线程交易 API。错峰后同一时刻
     # 只有一个 worker 热身。
@@ -317,28 +317,36 @@ def rpc_backlog():
         return 0
 
 
-def market_call(method, params=None, timeout=None, est_ms=200.0):
-    """市场类调用：预算 + 让路 + 记账。返回 data 或抛异常。"""
+def market_call(method, params=None, timeout=None, est_ms=200.0,
+                tokens=1.0, throttle=True, budget=True, backlog=True):
+    """市场类调用：预算 + 让路 + 记账。返回 data 或抛异常。
+
+    ``tokens``/``throttle`` 用于成对调用：一次预扣多个令牌，第二条调用传
+    ``throttle=False``（不再单独取令牌）。分开取会被「只够一条」卡成永远
+    只发第一条，配对永远完不成（2026-11-06 实测 pos_age 4028s）。
+    """
     with STATE.lock:
         strategy_state = STATE.strategy_state
     if bridge_gates.should_drop_request(method, strategy_state):
         # 策略账户通道判死：本桥自己的轮询也停手，别往单线程管道里加柴。
         raise RuntimeError('strategy unhealthy, skipped')
-    if (bridge_gates.is_trade_context(method)
+    if (throttle and bridge_gates.is_trade_context(method)
             and not bridge_gates.is_order_like(method)):
         interval = float(CFG.get('rpc.internal_trade_min_interval_s') or 0)
-        capacity = int(CFG.get('rpc.internal_trade_burst') or 4)
+        capacity = int(CFG.get('rpc.internal_trade_burst') or 6)
         with STATE.lock:
             ok, STATE.internal_trade_tokens, STATE.internal_trade_ts = (
                 bridge_gates.take_token(
                     STATE.internal_trade_tokens, STATE.internal_trade_ts,
-                    time.time(), interval, capacity))
+                    time.time(), interval, capacity, n=tokens))
         if not ok:
             raise RuntimeError('trade rpc throttled, skipped')
     preempt = int(CFG.get('budget.rpc_preempt_queue') or 1)
-    if rpc_backlog() >= preempt:
+    if backlog and rpc_backlog() >= preempt:
         raise RuntimeError('rpc backlog, skipped')
-    if not BUDGET.allow():
+    if budget and not BUDGET.allow():
+        # 预算闸保护的是行情大调用；持仓快照是风控刚需，必须能绕过
+        # （2026-11-06：tap 不可用时行情回退轮询吃光预算，pos_age 一路涨）。
         raise RuntimeError('market budget exhausted, skipped')
     t0 = time.perf_counter()
     try:
@@ -668,6 +676,10 @@ def idempotent_store(req, resp):
 
 # ---------------------------------------------------------------- B. 持仓
 _last_pos_material = [None]
+# asset 缓存：2026-11-06 实测「连发两条」比「单发一条」更容易触发 QMT 楔死，
+# positions 每轮单发（风控刚需），asset 降频到 positions.asset_refresh_s 一次。
+_asset_cache = [None]
+_asset_cache_ts = [0.0]
 
 
 def positions_worker():
@@ -682,9 +694,20 @@ def positions_worker():
             time.sleep(max(1.0, interval))
             continue
         try:
-            asset = market_call('get_asset', {}, est_ms=100)
-            pos = market_call('get_positions', {}, est_ms=150)
-            payload = build_position_payload(asset, pos)
+            # 单发 positions（风控刚需）：配对调用在楔死状态下永远凑不齐两条。
+            pos = market_call('get_positions', {}, est_ms=150,
+                              budget=False, backlog=False)
+            now = time.time()
+            refresh = float(CFG.get('positions.asset_refresh_s') or 60)
+            if _asset_cache[0] is None or now - _asset_cache_ts[0] >= refresh:
+                try:
+                    _asset_cache[0] = market_call(
+                        'get_asset', {}, est_ms=100, budget=False, backlog=False)
+                    _asset_cache_ts[0] = now
+                except Exception as exc:  # noqa: BLE001 - 保留旧值，不拖垮本轮
+                    if 'skipped' not in str(exc):
+                        STATE.note_error('positions.asset', exc)
+            payload = build_position_payload(_asset_cache[0] or {}, pos)
             raw = json.dumps(payload, ensure_ascii=False)
             R.set(key, raw, ex=int(CFG.get('positions.ttl_s') or 120))
             material = json.dumps({k: v for k, v in payload.items() if k != 'updated_at'},
