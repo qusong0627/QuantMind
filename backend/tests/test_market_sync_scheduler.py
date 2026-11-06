@@ -159,7 +159,18 @@ def test_task_name_for_routes_custom_to_rebuild_task():
     # Assert：CUSTOM 走数据集重建任务；上游市场走常规同步任务
     assert task_name_for("CUSTOM") == "engine.tasks.run_custom_dataset_rebuild"
     assert task_name_for("A") == "engine.tasks.run_market_scheduled_sync"
-    assert task_name_for("HK") == "engine.tasks.run_market_scheduled_sync"
+    assert task_name_for("US") == "engine.tasks.run_market_scheduled_sync"
+
+
+def test_task_name_for_routes_hk_to_its_own_budget_task():
+    """HK 链比别的市场长一倍（K线+CCASS 必做段就 89 分钟），必须走独立任务。
+
+    共用 6900s 时尾段（sdl/因子集/雅虎元数据）每晚被砍——2026-11-06 实测跑满
+    115 分钟被杀，`ccass_factors` 已停更 3 周。独立任务才拿得到 3.5h 预算。
+    """
+    from backend.services.engine.tasks.market_sync_scheduler import task_name_for
+
+    assert task_name_for("HK") == "engine.tasks.run_hk_scheduled_sync"
 
 
 def test_ashare_stays_disabled_without_config(stub_redis):

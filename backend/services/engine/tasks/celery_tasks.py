@@ -1362,21 +1362,8 @@ def duty_deadman_check_task() -> dict[str, Any]:
         return {"status": "failed", "error": str(e)}
 
 
-@celery_app.task(
-    name="engine.tasks.run_market_scheduled_sync",
-    # 上游数据源（yfinance 等）被限流时会把单个 ticker 拖到分钟级；acks_late=False
-    # + reject_on_worker_lost=False 保证超时被杀的任务不重新入队，一次调度最多
-    # 失败一次（不恢复 acks_late 就没有重复入队的死循环风险）。
-    # 预算必须装得下整条市场链：HK=K线+南向+L1+CCASS增量抓取+因子集刷新+雅虎元数据；
-    # US=指数+K线/元数据+L1+快照。1800/2100（35 分钟）实测装不下——链尾步骤
-    # 被超时截断饿停（2026-09-12~10-07 南向/CCASS 因子集与美股 L1/index 停更的根因）。
-    soft_time_limit=int(os.getenv("MARKET_SYNC_SOFT_TIME_LIMIT", "6900")),
-    time_limit=int(os.getenv("MARKET_SYNC_TIME_LIMIT", "7200")),
-    acks_late=False,
-    reject_on_worker_lost=False,
-)
-def run_market_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
-    """执行某市场的定时同步（由 dispatch_market_sync 派发）。"""
+def _run_market_sync_task(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """定时同步任务体（CN/US/FUTURES 与 HK 共用同一实现，预算各自不同）。"""
     try:
         from backend.services.engine.tasks.market_sync_scheduler import run_market_sync
 
@@ -1384,6 +1371,41 @@ def run_market_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any
     except Exception as e:
         logger.exception("[SyncSchedule] %s 定时同步失败: %s", market, e)
         return {"market": market, "status": "failed", "error": str(e)}
+
+
+@celery_app.task(
+    name="engine.tasks.run_market_scheduled_sync",
+    # 上游数据源（yfinance 等）被限流时会把单个 ticker 拖到分钟级；acks_late=False
+    # + reject_on_worker_lost=False 保证超时被杀的任务不重新入队，一次调度最多
+    # 失败一次（不恢复 acks_late 就没有重复入队的死循环风险）。
+    # 预算必须装得下整条市场链：US=指数+K线/元数据+L1+快照。1800/2100（35 分钟）
+    # 实测装不下——链尾步骤被超时截断饿停（2026-09-12~10-07 南向/CCASS 因子集与
+    # 美股 L1/index 停更的根因）。HK 链更长，走 run_hk_scheduled_sync 单独给预算。
+    soft_time_limit=int(os.getenv("MARKET_SYNC_SOFT_TIME_LIMIT", "6900")),
+    time_limit=int(os.getenv("MARKET_SYNC_TIME_LIMIT", "7200")),
+    acks_late=False,
+    reject_on_worker_lost=False,
+)
+def run_market_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """执行某市场的定时同步（由 dispatch_market_sync 派发）。"""
+    return _run_market_sync_task(market, cfg)
+
+
+@celery_app.task(
+    name="engine.tasks.run_hk_scheduled_sync",
+    # HK 单独放宽到 3.5h/4h：它的链是 K线(18–24min) + 指数 + 南向 + L1 + CCASS(71min)
+    # + sdl + 因子集 + 雅虎元数据，必做段就 89 分钟，尾巴再要 30+ 分钟——共用
+    # 6900s 时尾巴每晚被砍（2026-11-06 实测跑满 115 分钟后被 SoftTimeLimit 杀，
+    # ccass_factors 已停 3 周）。配合把调度挪到北京 20:00（L2 22:00 才开始），
+    # 空窗里跑满也不挤别人。
+    soft_time_limit=int(os.getenv("HK_SYNC_SOFT_TIME_LIMIT", "12600")),
+    time_limit=int(os.getenv("HK_SYNC_TIME_LIMIT", "13200")),
+    acks_late=False,
+    reject_on_worker_lost=False,
+)
+def run_hk_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """港股定时同步（与 CN/US 同一实现，仅预算不同）。"""
+    return _run_market_sync_task(market, cfg)
 
 
 @celery_app.task(

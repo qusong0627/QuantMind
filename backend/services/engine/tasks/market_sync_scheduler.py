@@ -36,10 +36,19 @@ _CATCHUP_KEY = "quantmind:sync_schedule_catchup:{market}:{date}"
 # 全量重建可达 40-60 分钟），因此 CUSTOM 走独立任务，见 celery_tasks.py。
 _SYNC_TASK_NAME = "engine.tasks.run_market_scheduled_sync"
 _CUSTOM_REBUILD_TASK_NAME = "engine.tasks.run_custom_dataset_rebuild"
+#: HK 单独一个任务：它的链比别的市场长得多，共用的 6900s 预算装不下。
+#: 实测（2026-11-06，按落盘时间戳反推）：K线 18–24 分钟 + CCASS 71 分钟 +
+#: 索引/南向/L1 ≈ 89 分钟必做，之后还有 sdl / 因子集 / 雅虎元数据三段尾巴——
+#: 尾巴每晚被砍，`ccass_factors` 因此停更 3 周没人发现。
+_HK_SYNC_TASK_NAME = "engine.tasks.run_hk_scheduled_sync"
 
 
 def task_name_for(market: str) -> str:
-    return _CUSTOM_REBUILD_TASK_NAME if market == "CUSTOM" else _SYNC_TASK_NAME
+    if market == "CUSTOM":
+        return _CUSTOM_REBUILD_TASK_NAME
+    if market == "HK":
+        return _HK_SYNC_TASK_NAME
+    return _SYNC_TASK_NAME
 
 
 # market -> (标签, 同步任务名)
