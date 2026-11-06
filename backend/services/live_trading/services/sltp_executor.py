@@ -75,6 +75,11 @@ from backend.shared.redis_unwrap import raw_redis_client
 logger = logging.getLogger(__name__)
 
 CONFIG_KEY = "qmt:sltp:executor:config"
+#: 规则表写入审计（200 条环形）：记下每次写入的增/删规则与来源。
+#: 2026-11-06 事故：8 条人工止损规则从配置里消失，事后无法回答「谁在什么时候删的」
+#: ——这类静默丢失必须可追溯。
+CONFIG_AUDIT_KEY = "qmt:sltp:executor:config:audit"
+CONFIG_AUDIT_MAX = 200
 STATE_KEY = "qmt:sltp:executor:state"
 
 #: 规则表容量上限（**单源**：API 契约与决策层写入端都引这里）。
@@ -727,8 +732,64 @@ def _persistable(cfg: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in cfg.items() if k != "rejected_rules"}
 
 
-def save_config(redis: Any, cfg: dict[str, Any]) -> dict[str, Any]:
+def _rule_brief(rule: dict[str, Any]) -> dict[str, str]:
+    return {
+        "symbol": str(rule.get("symbol") or ""),
+        "owner": str(rule.get("owner") or ""),
+    }
+
+
+def _audit_config_write(redis: Any, new_cfg: dict[str, Any], source: str) -> None:
+    """记录本次写入相对**当前规则表**的增/删（含来源）。
+
+    2026-11-06：8 条人工止损规则从配置里消失，事后无法回答「谁在什么时候删的」。
+    这里只做观测，任何异常吞掉，绝不影响写入本身。
+    """
+    try:
+        raw = redis.get(CONFIG_KEY)
+        old_cfg = merge_config(raw if isinstance(raw, dict) else None)
+        old_rules = {rule_key(r): r for r in (old_cfg.get("rules") or [])}
+        new_rules = {rule_key(r): r for r in (new_cfg.get("rules") or [])}
+        removed = [old_rules[k] for k in old_rules if k not in new_rules]
+        added = [new_rules[k] for k in new_rules if k not in old_rules]
+        if not removed and not added:
+            return
+        entry = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": str(source or "unknown"),
+            "added": [_rule_brief(r) for r in added],
+            "removed": [_rule_brief(r) for r in removed],
+        }
+        raw_audit = redis.get(CONFIG_AUDIT_KEY)
+        history = raw_audit.get("history") if isinstance(raw_audit, dict) else []
+        if not isinstance(history, list):
+            history = []
+        history.append(entry)
+        redis.set(CONFIG_AUDIT_KEY, {"history": history[-CONFIG_AUDIT_MAX:]})
+        manual_removed = [
+            r for r in removed if not str(r.get("owner") or "").strip()
+        ]
+        if manual_removed and str(source or "") not in {
+            "api",
+            "cli",
+            "migrate",
+            "manual",
+        }:
+            # 自动化写者删除人工规则：今天的事故形态，必须刺眼。
+            logger.warning(
+                "[SltpExec] 规则表写入(source=%s)移除了 %d 条人工规则：%s",
+                source,
+                len(manual_removed),
+                "、".join(_rule_brief(r)["symbol"] for r in manual_removed),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[SltpExec] 规则表审计写入失败: %s", exc)
+
+
+def save_config(redis: Any, cfg: dict[str, Any], *,
+                source: str = "unknown") -> dict[str, Any]:
     clean = merge_config(cfg)
+    _audit_config_write(redis, clean, source)
     redis.set(CONFIG_KEY, _persistable(clean))
     return clean
 
@@ -745,7 +806,8 @@ def _config_fingerprint(cfg: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def save_config_strict(redis: Any, cfg: dict[str, Any]) -> dict[str, Any]:
+def save_config_strict(redis: Any, cfg: dict[str, Any], *,
+                       source: str = "unknown") -> dict[str, Any]:
     """写配置并**回读确认**，写没生效就抛错（控制面 PUT / CLI 用）。
 
     ``RedisClient.set`` 会把写失败吞掉（只记一条日志），所以「写成功」不能靠返回值
@@ -753,14 +815,15 @@ def save_config_strict(redis: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     链路上最不能接受的一类静默失败。与决策层写入端（``decision/watch_writer.py``）
     的分工是粒度：那边要逐条回报「哪条没落库」，这里只要「写进去了没有」。
     """
-    clean = save_config(redis, cfg)
+    clean = save_config(redis, cfg, source=source)
     after = read_config_strict(redis)
     if _config_fingerprint(after) != _config_fingerprint(clean):
         raise RuntimeError("写入未生效：回读的规则表与写入内容不一致")
     return clean
 
 
-def set_enabled(redis: Any, enabled: bool) -> dict[str, Any]:
+def set_enabled(redis: Any, enabled: bool, *,
+                source: str = "unknown") -> dict[str, Any]:
     """只改总开关，不动规则表。
 
     与 :func:`save_config` 的区别是**读失败直接抛错**（调用方回 5xx）：把「读不到」
@@ -772,7 +835,7 @@ def set_enabled(redis: Any, enabled: bool) -> dict[str, Any]:
     """
     cfg = merge_config(read_config_strict(redis))
     cfg["enabled"] = bool(enabled)
-    return save_config_strict(redis, cfg)
+    return save_config_strict(redis, cfg, source=source)
 
 
 def diff_state(
@@ -2726,7 +2789,7 @@ async def run_qmt_sltp_executor_task() -> None:
                             )
                 if auto_added or auto_removed:
                     try:
-                        cfg = save_config_strict(redis, cfg)
+                        cfg = save_config_strict(redis, cfg, source="auto_arm")
                     except Exception as exc:  # noqa: BLE001
                         # 落盘失败不阻断本轮：规则已在内存 cfg 里，本轮照常评估；
                         # 下一轮会再次补挂/清理并重试落盘。

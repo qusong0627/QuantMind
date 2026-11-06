@@ -219,7 +219,7 @@ async def put_sltp_config(
     """
     data = payload.model_dump()
     try:
-        saved = executor.save_config_strict(redis, data)
+        saved = executor.save_config_strict(redis, data, source="api")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Redis 写入失败: {exc}") from exc
     logger.info(
@@ -245,7 +245,7 @@ async def put_sltp_enabled(
     写回去（否则 Redis 抖动时这一按会把规则表抹掉）。
     """
     try:
-        saved = executor.set_enabled(redis, payload.enabled)
+        saved = executor.set_enabled(redis, payload.enabled, source="api")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=503, detail=f"Redis 读取/写入失败: {exc}"

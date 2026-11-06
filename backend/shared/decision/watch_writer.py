@@ -391,7 +391,7 @@ def write_watch_plan(
 
     wanted = others + [rule for _, rule in armed]
     try:
-        executor.save_config(redis, {**cfg, "rules": wanted})
+        executor.save_config(redis, {**cfg, "rules": wanted}, source="watch")
     except Exception as exc:  # noqa: BLE001
         return WatchWriteResult(
             owner=owner,

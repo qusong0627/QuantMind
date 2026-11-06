@@ -61,7 +61,7 @@ def _load(redis):
 def _save(redis, cfg):
     # 写后回读确认：`RedisClient.set` 写失败是静默的，不确认就会打印「已武装」
     # 而 Redis 里一条都没有（用户以为有止损，实盘裸奔）。
-    return ex.save_config_strict(redis, cfg)
+    return ex.save_config_strict(redis, cfg, source="cli")
 
 
 def cmd_arm(redis, args) -> None:

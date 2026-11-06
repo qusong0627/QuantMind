@@ -2057,3 +2057,56 @@ class TestLlmStateMigrationMultiOwner:
         assert "600036.SH" not in state
         assert state[flash_key]["highest_price"] == pytest.approx(9.04)
         assert pro_key in state
+
+
+# --------------------------------------------------------------------------
+# 规则表写入审计（2026-11-06：8 条人工规则消失且无法追溯）
+# --------------------------------------------------------------------------
+def _manual_rule(symbol: str = "600036.SH") -> dict:
+    return {"symbol": symbol, "entry_price": 100.0, "stop_loss_pct": 0.05}
+
+
+def _llm_rule(symbol: str = "601825.SH") -> dict:
+    return {"symbol": symbol, "owner": "llm:test", "entry_price": 9.0,
+            "stop_loss_pct": 0.08}
+
+
+def test_save_config_records_removed_manual_rule_in_audit():
+    redis = FakeRedis(cfg=ex.merge_config(_cfg([_manual_rule(), _llm_rule()])))
+    ex.save_config(redis, _cfg([_llm_rule()]), source="watch")
+    audit = redis.get(ex.CONFIG_AUDIT_KEY)
+    assert isinstance(audit, dict) and audit.get("history"), audit
+    entry = audit["history"][-1]
+    assert entry["source"] == "watch"
+    assert entry["removed"] == [{"symbol": "600036.SH", "owner": ""}]
+    assert entry["added"] == []
+
+
+def test_save_config_warns_when_automation_drops_manual_rule(caplog):
+    import logging as _logging
+
+    redis = FakeRedis(cfg=ex.merge_config(_cfg([_manual_rule(), _llm_rule()])))
+    with caplog.at_level(_logging.WARNING,
+                         logger="backend.services.live_trading.services.sltp_executor"):
+        ex.save_config(redis, _cfg([_llm_rule()]), source="auto_arm")
+    assert any("人工规则" in rec.getMessage() for rec in caplog.records), \
+        [r.getMessage() for r in caplog.records]
+
+
+def test_save_config_api_source_does_not_warn(caplog):
+    import logging as _logging
+
+    redis = FakeRedis(cfg=ex.merge_config(_cfg([_manual_rule(), _llm_rule()])))
+    with caplog.at_level(_logging.WARNING,
+                         logger="backend.services.live_trading.services.sltp_executor"):
+        ex.save_config(redis, _cfg([_llm_rule()]), source="api")
+    assert not any("人工规则" in rec.getMessage() for rec in caplog.records)
+
+
+def test_audit_history_is_capped():
+    redis = FakeRedis(cfg=ex.merge_config(_cfg([_manual_rule()])))
+    for i in range(ex.CONFIG_AUDIT_MAX + 20):
+        rules = [_manual_rule()] if i % 2 else [_llm_rule()]
+        ex.save_config(redis, _cfg(rules), source="watch")
+    audit = redis.get(ex.CONFIG_AUDIT_KEY)
+    assert len(audit["history"]) == ex.CONFIG_AUDIT_MAX
