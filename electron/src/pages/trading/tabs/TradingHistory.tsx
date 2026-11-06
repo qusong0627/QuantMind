@@ -49,6 +49,8 @@ interface TradeRow {
     tradeAction: string;      // buy_to_open / sell_to_close 等
     exchangeOrderId: string;  // 交易所委托号
     commission: number;       // 手续费
+    /** 分账归属（agent 名）；空 = 人工/系统单 */
+    agent?: string;
 }
 
 type ExportFormat = 'csv' | 'xlsx';
@@ -172,6 +174,35 @@ const toBrokerTradeRow = (row: Record<string, unknown>, idx: number): TradeRow =
         tradeAction: direction === 'buy' ? '买入' : direction === 'sell' ? '卖出' : '',
         exchangeOrderId: String(pick('order_sysid', 'order_id') ?? ''),
         commission: 0,
+        agent: String(pick('agent', 'order_remark') ?? ''),
+    };
+};
+
+/** 系统账本行（Order）→ 表格行：券商柜台没有历史接口时的兜底视图。 */
+const toLedgerTradeRow = (order: Order, idx: number): TradeRow => {
+    const createdAt = order.submitted_at || order.created_at;
+    const direction = String(order.side || '').toLowerCase();
+    return {
+        id: String(order.id ?? `${order.symbol}-${idx}`),
+        createdAt,
+        date: formatBackendDate(createdAt),
+        time: formatBackendTime(createdAt, { withSeconds: true }),
+        direction,
+        code: order.symbol,
+        name: order.symbol_name || order.symbol,
+        quantity: order.quantity ?? 0,
+        filledQty: order.filled_quantity ?? 0,
+        price: order.price || 0,
+        avgPrice: order.average_price ?? 0,
+        amount: order.order_value ?? 0,
+        filledValue: order.filled_value ?? 0,
+        status: String(order.status || '').toLowerCase(),
+        reason: displayReason(order.remarks ?? ''),
+        reasonSummary: displayReasonSummary(order.remarks ?? ''),
+        tradeAction: order.trade_action || (direction === 'buy' ? '买入' : '卖出'),
+        exchangeOrderId: order.exchange_order_id || '',
+        commission: Number(order.commission ?? 0),
+        agent: order.agent || '',
     };
 };
 
@@ -223,16 +254,51 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         try {
             const { realTradingService } = await import('../../../services/realTradingService');
             if (recordSource === 'broker') {
+                const explicitSource = brokerSource === 'auto' ? undefined : brokerSource;
                 const resp = await realTradingService.getBrokerRecords(
                     'orders',
-                    brokerSource === 'auto' ? undefined : brokerSource,
+                    explicitSource,
                     undefined,
                     brokerRange ? brokerRange[0].format('YYYY-MM-DD') : undefined,
                     brokerRange ? brokerRange[1].format('YYYY-MM-DD') : undefined,
                 );
                 setBrokerLabel(BROKER_LABELS[resp.broker] || resp.broker || '券商');
-                setBrokerNote(resp.note || '');
-                const allRows = (resp.rows || []).map((row, idx) => toBrokerTradeRow(row, idx));
+                let allRows = (resp.rows || []).map((row, idx) => toBrokerTradeRow(row, idx));
+                let note = resp.note || '';
+                const resolvedSource = explicitSource || (resp.broker?.startsWith('qmt') ? 'qmt_exec' : resp.broker?.startsWith('tdx') ? 'tdx' : undefined);
+                if (allRows.length === 0 && resolvedSource) {
+                    // 柜台没有历史接口（通达信只有当日；QMT 本地也可能没有历史数据）——
+                    // 用**系统账本按执行券商过滤**兜底：经该通道下过的单在 PG 里是全的，
+                    // 这比给用户一张空表诚实，也回答了「agent 在通达信下过什么单」。
+                    const ledgerOrders: Order[] = [];
+                    let offset = 0;
+                    while (true) {
+                        const batch = await realTradingService.getOrders(
+                            userId,
+                            undefined,
+                            tradingMode,
+                            {
+                                broker: resolvedSource,
+                                ...(brokerRange
+                                    ? {
+                                        startDate: brokerRange[0].startOf('day').toISOString(),
+                                        endDate: brokerRange[1].endOf('day').toISOString(),
+                                    }
+                                    : {}),
+                                limit: PAGE_SIZE,
+                                offset,
+                            },
+                        );
+                        ledgerOrders.push(...batch);
+                        if (batch.length < PAGE_SIZE) break;
+                        offset += PAGE_SIZE;
+                    }
+                    allRows = ledgerOrders.map((order, idx) => toLedgerTradeRow(order, idx));
+                    if (allRows.length > 0) {
+                        note = `${note ? note + ' ' : ''}柜台无记录，已回退到系统账本：以下是经${BROKER_LABELS[resolvedSource] || resolvedSource}执行的 ${allRows.length} 笔（含 agent 归属）。`;
+                    }
+                }
+                setBrokerNote(note);
                 const rows = allRows.filter(
                     (o) => inferMarketOfSymbol(o.code) === currentMarket.toUpperCase(),
                 );
@@ -358,6 +424,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     tradeAction: actionMap[rawAction] || rawAction,
                     exchangeOrderId: order.exchange_order_id || '',
                     commission: Number((order as any).commission ?? (order as any).fee ?? 0),
+                    agent: (order as any).agent || '',
                 };
             });
             setTrades(mapped);
@@ -848,7 +915,12 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                                             ) : '--'}
                                         </td>
                                         <td className="px-3 py-2 text-center font-mono text-gray-900 overflow-hidden text-ellipsis whitespace-nowrap">{trade.code}</td>
-                                        <td className="px-3 py-2 text-center font-medium text-gray-900 overflow-hidden text-ellipsis whitespace-nowrap">{trade.name}</td>
+                                        <td className="px-3 py-2 text-center font-medium text-gray-900 overflow-hidden text-ellipsis whitespace-nowrap">
+                                            <div>{trade.name}</div>
+                                            {trade.agent && (
+                                                <div className="text-[10px] font-normal text-indigo-500" title="分账归属">{trade.agent}</div>
+                                            )}
+                                        </td>
                                         <td className="px-3 py-2 text-center">
                                             {isFilled ? (
                                                 <span className="font-semibold text-gray-900">{trade.filledQty.toLocaleString()}</span>

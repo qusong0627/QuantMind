@@ -481,6 +481,10 @@ export interface Order {
     filled_at?: string;
     client_order_id?: string;
     exchange_order_id?: string;
+    /** 分账归属：这条单是哪家模型下的（空 = 人工/系统） */
+    agent?: string | null;
+    /** 执行券商（qmt_exec/tdx）；历史单为 null */
+    broker?: string | null;
 }
 
 export interface OrdersQueryOptions {
@@ -488,6 +492,8 @@ export interface OrdersQueryOptions {
     symbol?: string;
     startDate?: string;
     endDate?: string;
+    /** 执行券商过滤（qmt_exec/tdx）；历史单无此字段，只在明确传值时过滤 */
+    broker?: string;
     limit?: number;
     offset?: number;
 }
@@ -1065,6 +1071,7 @@ export const realTradingService = {
                 trading_mode: normalizedTradingMode,
                 portfolio_id: options?.portfolioId,
                 symbol: options?.symbol,
+                broker: options?.broker,
                 start_date: options?.startDate,
                 end_date: options?.endDate,
                 limit: options?.limit,

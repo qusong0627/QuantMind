@@ -143,6 +143,8 @@ class OrderListQuery(BaseModel):
     status: OrderStatus | None = None
     side: OrderSide | None = None
     trading_mode: TradingMode | None = None
+    # 执行券商过滤（qmt_exec/tdx/...）；历史单 broker 为 NULL，只在明确传值时过滤。
+    broker: str | None = None
     start_date: datetime | None = None
     end_date: datetime | None = None
     limit: int = Field(50, ge=1, le=1000)

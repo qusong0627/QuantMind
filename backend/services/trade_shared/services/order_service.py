@@ -112,6 +112,7 @@ class OrderService:
             f"symbol:{query.symbol or 'all'}",
             f"status:{query.status.value if query.status else 'all'}",
             f"side:{query.side.value if query.side else 'all'}",
+            f"broker:{query.broker or 'all'}",
         ]
         if query.start_date:
             key_parts.append(f"start:{query.start_date.isoformat()}")
@@ -199,6 +200,8 @@ class OrderService:
             conditions.append(Order.side == query.side)
         if query.trading_mode:
             conditions.append(Order.trading_mode == query.trading_mode)
+        if query.broker:
+            conditions.append(Order.broker == query.broker)
         if start_date:
             conditions.append(Order.created_at >= start_date)
         if end_date:
