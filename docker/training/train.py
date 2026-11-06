@@ -1220,13 +1220,17 @@ def main() -> int:
         context_cfg = cfg.get("context", {}) or {}
         market = str(context_cfg.get("market", "CN")).upper()
 
+        _cache_dir = cfg.get("cache", {}).get("dir")
+        if str(_cache_dir or "") == "/tmp" and os.path.isdir("/workspace"):
+            _cache_dir = "/workspace/cache"
+            os.makedirs(_cache_dir, exist_ok=True)
         df, valid_features = load_data(
             cfg["data"]["train_start"],
             cfg["data"]["train_end"],
             features,
             target_horizon_days=int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
             target_mode=str((cfg.get("label", {}) or {}).get("target_mode") or "return"),
-            cache_dir=cfg.get("cache", {}).get("dir"),
+            cache_dir=_cache_dir,
             valid_end=cfg.get("split", {}).get("valid", [None, None])[1],
             test_end=cfg.get("split", {}).get("test", [None, None])[1],
             source_mode=source_mode,

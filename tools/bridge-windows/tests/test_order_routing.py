@@ -108,7 +108,7 @@ def test_qmt_params_maps_action_and_price_type():
     assert p["price"] == 8.59
     assert p["price_type"] == "LIMIT"
     assert p["remark"] == "qm-test-1"
-    assert p["wait_settlement"] is True
+    assert p["wait_settlement"] is False
 
     m = qmt_order_params(normalize_order({
         "channel": "qmt", "symbol": "510300.SH", "side": "buy",

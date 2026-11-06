@@ -119,7 +119,10 @@ def qmt_order_params(order: dict) -> dict:
         "price_type": "LATEST_PRICE" if market else "LIMIT",
         "strategy_name": order.get("strategy_name") or "bridge",
         "remark": order["client_order_id"],
-        "wait_settlement": True,
+        # QMT 2026-10-28: 按 strategy_name 做成交回填会在 C 层抛
+        # SystemError: Negative size passed to PyUnicode_New（terminal 2.1.33）。
+        # 下单只回报受理，委托号/终态由 /qmt/orders/query 轮询取。
+        "wait_settlement": False,
     }
     if order.get("account_id"):
         params["account_id"] = order["account_id"]

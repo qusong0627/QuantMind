@@ -37,6 +37,15 @@ DRIFT_MIN_COVERAGE_RATIO = 0.5
 UNIVERSE_MISSING_LIMIT = 0.05
 #: 漂移比对至少需要的共同非空值数量（少了只报信息，不设闸）
 DRIFT_MIN_COMMON = 100
+#: 阈值计数型因子的漂移豁免名单：这类列的值 = 「240 日内收益超 ±kσ 的天数」/ 窗长，
+#: 取值是 1/N 的整数倍。qfq 基准每晚整段重写，个别交易日会在阈值边界翻转，整列按
+#: 1/N 跳变，秩相关必然跌破下限——这不是算错，而是两条都合法的序列（不同复权基准）
+#: 本就不该逐值对齐。2026-10-29 实测：f13_0654 在重叠日 20261013 上秩相关 0.847、
+#: 65.3% 的值变化，而同批长窗列 f13_0645 / f13_0261 与正式库 diff=0.0。
+#: 不豁免的后果是长窗遍**每晚**判失败 → 长窗列永远合并不进去（2026-10-14 起
+#: f13_0645 / f13_0261 全空，正是 300 因子模型在用的两列）。名单里的列降级为
+#: informational，仍然可见，只是不再阻断合并。
+DRIFT_EXEMPT_COLUMNS = frozenset({"f13_0654"})
 
 
 def _read(path: Path) -> pd.DataFrame | None:
@@ -242,7 +251,11 @@ def compare_partitions(
         elif is_required and left_nonnull > 0 and coverage_ratio < min_coverage_ratio:
             issues.append({"kind": "required_coverage_drop", **entry})
         elif is_required and rank_corr is not None and rank_corr < min_rank_corr:
-            issues.append({"kind": "required_drift", **entry})
+            if column in DRIFT_EXEMPT_COLUMNS:
+                # 阈值计数型：基准漂移导致的边界翻转，不阻断合并（见常量注释）
+                informational.append({"kind": "required_drift_exempt", **entry})
+            else:
+                issues.append({"kind": "required_drift", **entry})
         elif not is_required and right_nonnull == 0 and left_nonnull > 0:
             informational.append({"kind": "column_empty", **entry})
         elif is_required and (share_rel_gt > 0 or coverage_ratio < 1.0):

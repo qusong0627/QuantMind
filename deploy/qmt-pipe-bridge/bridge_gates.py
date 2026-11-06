@@ -109,9 +109,16 @@ def refill_tokens(tokens: float, last_ts: float, now_ts: float,
 
 
 def take_token(tokens: float, last_ts: float, now_ts: float,
-               interval_s: float, capacity: int) -> tuple[bool, float, float]:
-    """尝试取一个令牌 → (是否取到, 剩余令牌, 新时间戳)。"""
+               interval_s: float, capacity: int,
+               n: float = 1.0) -> tuple[bool, float, float]:
+    """尝试取 ``n`` 个令牌 → (是否取到, 剩余令牌, 新时间戳)。
+
+    ``n>1`` 用于**成对调用**（positions 一轮必须连发 get_asset + get_positions）：
+    分开取会被"只够一条"卡成永远只发第一条，配对永远完不成（2026-11-06 实测
+    pos_age 4028s）。
+    """
+    need = max(1.0, float(n))
     tokens, last_ts = refill_tokens(tokens, last_ts, now_ts, interval_s, capacity)
-    if tokens >= 1.0:
-        return True, tokens - 1.0, last_ts
+    if tokens >= need:
+        return True, tokens - need, last_ts
     return False, tokens, last_ts

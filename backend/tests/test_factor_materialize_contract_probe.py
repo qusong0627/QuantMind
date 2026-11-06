@@ -180,6 +180,30 @@ def test_compare_partitions_flags_rank_collapse_as_required_drift(
 
 
 @pytest.mark.unit
+def test_compare_partitions_downgrades_exempt_threshold_column(
+    tmp_path: Path,
+) -> None:
+    # Arrange：阈值计数型因子（f13_0654）在 qfq 基准漂移下边界翻转，秩相关必然掉；
+    # 豁免后只报信息，不再阻断长窗遍合并（否则长窗列永远进不了正式库）
+    n = 120
+    values = [float(i) for i in range(n)]
+    frame = pd.DataFrame({"symbol": [f"S{i}" for i in range(n)], "f13_0654": values})
+    reversed_frame = pd.DataFrame(
+        {"symbol": [f"S{i}" for i in range(n)], "f13_0654": values[::-1]}
+    )
+    official = _partition(tmp_path / "official", "20261015", frame)
+    staged = _partition(tmp_path / "staged", "20261015", reversed_frame)
+
+    # Act
+    report = probe.compare_partitions(official, staged, required=["f13_0654"])
+
+    # Assert
+    assert report["ok"] is True
+    kinds = {item["kind"] for item in report["informational"]}
+    assert "required_drift_exempt" in kinds
+
+
+@pytest.mark.unit
 def test_compare_partitions_treats_uniform_scale_as_informational(
     tmp_path: Path,
 ) -> None:

@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import shutil
-import time
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +31,8 @@ from pathlib import Path
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 log = logging.getLogger("delisted_factor_inject")
 
 BACKUP_DIR = "_delisted_backup"

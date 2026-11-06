@@ -98,3 +98,12 @@ def test_token_bucket_burst_then_refill():
 def test_token_bucket_zero_interval_means_unlimited():
     ok, _, _ = gates.take_token(0.0, 0.0, 100.0, 0, 1)
     assert ok is True
+
+
+def test_take_token_pair_is_atomic():
+    # 容量 4：一次取 2 个（成对调用）成功，剩 2
+    ok, left, _ = gates.take_token(4.0, 100.0, 100.0, 2.0, 4, n=2)
+    assert ok is True and left == 2.0
+    # 只剩 1 个时取 2 必须失败（不能只发一半）
+    ok, left, _ = gates.take_token(1.0, 100.0, 100.0, 2.0, 4, n=2)
+    assert ok is False and left == 1.0
