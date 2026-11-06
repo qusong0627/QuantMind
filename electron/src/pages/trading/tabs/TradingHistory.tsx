@@ -1,5 +1,5 @@
-import { useAppSelector } from '../../../store';
-import { selectCurrentMarket } from '../../../store/slices/uiSlice';
+import { useAppDispatch, useAppSelector } from '../../../store';
+import { selectCurrentMarket, setMarket, type AppMarket } from '../../../store/slices/uiSlice';
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { FileText, Search, Download, TrendingUp, TrendingDown, Clock, CheckCircle, XCircle, ChevronLeft, ChevronRight, AlertTriangle, Activity, RotateCcw, ChevronDown } from 'lucide-react';
 import { Dropdown, message } from 'antd';
@@ -177,6 +177,7 @@ const toBrokerTradeRow = (row: Record<string, unknown>, idx: number): TradeRow =
 
 const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradingMode }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
+    const dispatch = useAppDispatch();
     const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month' | 'all'>('all');
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -188,6 +189,10 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
     const [recordSource, setRecordSource] = useState<'ledger' | 'broker'>('ledger');
     const [brokerLabel, setBrokerLabel] = useState('券商');
     const [brokerNote, setBrokerNote] = useState('');
+    // 柜台视图可在 QMT / 通达信 之间显式切换（auto = 跟随「券商接入」）
+    const [brokerSource, setBrokerSource] = useState<'auto' | 'qmt_exec' | 'tdx'>('auto');
+    // 当前市场无记录、但别的市场有：给出可一键切换的提示，避免"看起来全空"
+    const [marketHint, setMarketHint] = useState<{ market: string; count: number } | null>(null);
     const [stockNames, setStockNames] = React.useState<Record<string, string>>({});
     const [exporting, setExporting] = useState(false);
     const stockNamesRef = useRef<Record<string, string>>({});
@@ -207,16 +212,26 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         try {
             const { realTradingService } = await import('../../../services/realTradingService');
             if (recordSource === 'broker') {
-                const resp = await realTradingService.getBrokerRecords('orders');
+                const resp = await realTradingService.getBrokerRecords(
+                    'orders',
+                    brokerSource === 'auto' ? undefined : brokerSource,
+                );
                 setBrokerLabel(BROKER_LABELS[resp.broker] || resp.broker || '券商');
                 setBrokerNote(resp.note || '');
-                const rows = (resp.rows || [])
-                    .map((row, idx) => toBrokerTradeRow(row, idx))
-                    .filter((o) => inferMarketOfSymbol(o.code) === currentMarket.toUpperCase());
+                const allRows = (resp.rows || []).map((row, idx) => toBrokerTradeRow(row, idx));
+                const rows = allRows.filter(
+                    (o) => inferMarketOfSymbol(o.code) === currentMarket.toUpperCase(),
+                );
+                setMarketHint(
+                    rows.length === 0 && allRows.length > 0
+                        ? { market: inferMarketOfSymbol(allRows[0].code), count: allRows.length }
+                        : null,
+                );
                 setTrades(rows);
                 return;
             }
             setBrokerNote('');
+            setMarketHint(null);
             const rangeQuery = buildDateRange(timeRange);
             const allOrders: Order[] = [];
             let offset = 0;
@@ -238,6 +253,11 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
             // 按当前市场过滤订单（symbol 格式推断，与后端 market_rules 同口径）
             const marketFilteredOrders = allOrders.filter(
                 o => inferMarketOfSymbol(o.symbol) === currentMarket.toUpperCase()
+            );
+            setMarketHint(
+                marketFilteredOrders.length === 0 && allOrders.length > 0
+                    ? { market: inferMarketOfSymbol(allOrders[0].symbol), count: allOrders.length }
+                    : null,
             );
 
             const uniqueCodes = Array.from(new Set(
@@ -332,7 +352,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         } finally {
             loadingRef.current = false;
         }
-    }, [recordSource, timeRange, tradingMode, userId, currentMarket]);
+    }, [recordSource, brokerSource, timeRange, tradingMode, userId, currentMarket]);
 
     React.useEffect(() => {
         if (isActive && userId) {
@@ -534,6 +554,20 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     </button>
                 </div>
 
+                {recordSource === 'broker' && (
+                    <div className="flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200">
+                        {([['auto', '跟随设置'], ['qmt_exec', '大 QMT'], ['tdx', '通达信']] as const).map(([key, label]) => (
+                            <button
+                                key={key}
+                                onClick={() => setBrokerSource(key)}
+                                className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${brokerSource === key ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                )}
+
                 <div className={`flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200 ${recordSource === 'broker' ? 'opacity-60' : ''}`}>
                     {(['today', 'week', 'month', 'all'] as const).map((range) => (
                         <button
@@ -671,6 +705,14 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                                                     ? (brokerNote || '柜台接口只返回当日数据；跨日历史请看「系统账本」')
                                                     : `${timeRange === 'today' ? '今日' : timeRange === 'week' ? '本周' : timeRange === 'month' ? '本月' : ''}内无委托记录`}
                                             </span>
+                                            {marketHint && (
+                                                <button
+                                                    onClick={() => dispatch(setMarket(marketHint.market as AppMarket))}
+                                                    className="text-xs text-blue-600 hover:underline"
+                                                >
+                                                    当前市场（{currentMarket}）无记录；切到 {marketHint.market} 查看 {marketHint.count} 条
+                                                </button>
+                                            )}
                                         </div>
                                     </td>
                                 </tr>
