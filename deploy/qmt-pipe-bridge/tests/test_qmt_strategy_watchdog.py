@@ -105,10 +105,23 @@ def test_no_reload_outside_trading_hours():
 
 
 def test_ping_failure_is_unreachable_alert_not_reload():
+    now = _ts(10, 0)
     d = wd.evaluate({}, _probe(reachable=False, account_ok=False),
-                    now_ts=_ts(10, 0), queue_has_orders=False)
+                    now_ts=now, queue_has_orders=False)
     assert d.action == 'alert'
     assert 'unreachable' in d.reason
+    # 交易时段内 ping 不通也要记时间戳：main 的 alert 分支靠它触发桥重启
+    assert d.state['unresponsive_since'] == now
+    ok, why = wd.should_restart_bridge(
+        {**d.state, 'bridge_restart_ts': ''}, now + 61)
+    assert ok, why
+
+
+def test_ping_failure_outside_hours_does_not_arm_bridge_restart():
+    d = wd.evaluate({}, _probe(reachable=False, account_ok=False),
+                    now_ts=_ts(20, 0), queue_has_orders=False)
+    assert d.action == 'alert'
+    assert d.state['unresponsive_since'] == 0.0
 
 
 def test_new_day_resets_reload_budget():

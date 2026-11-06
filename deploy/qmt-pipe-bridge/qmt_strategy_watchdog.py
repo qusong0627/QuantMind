@@ -165,7 +165,14 @@ def evaluate(
 
     if not probe.reachable:
         # ping 都不通：策略进程/管道整体不在，reload 无从谈起。
+        # 但**必须记下 unresponsive_since**：管道 BUSY（err=231）时策略主线程卡死、
+        # 后台线程仍活着，重连也一样失败——只有「重启伴生桥断开管道」能解锁。
+        # 2026-11-06 现场：16:34 起 err=231，旧逻辑只报 alert、永不重启桥，
+        # 两小时无人能恢复；main 里的 alert 分支正是靠这个时间戳才动手。
+        # 交易时段外不记：QMT 关了就别拿桥当开关，免得整夜重启风暴。
         state['failures'] = 0
+        if in_trading_window(now_ts) and not state['unresponsive_since']:
+            state['unresponsive_since'] = now_ts
         return Decision('alert', 'strategy unreachable (ping timeout)', 0, state)
 
     if probe.account_ok:
