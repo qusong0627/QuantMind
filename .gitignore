@@ -316,6 +316,10 @@ backend/tests/test_factor_materialize_gap_mined.py
 # 今后新增的自有因子公式统一放此私有目录，永不入库
 backend/scripts/factor_materialize/private/
 
+# 私有因子构建引擎：因子工厂按「字段 × 算子 × 窗口」组合出候选因子再 IC 筛选，
+# 属自有因子研究资产（2026-11-06 用户指令）。产物 l1_factors 已在上面忽略。
+backend/scripts/factor_factory.py
+
 # JKP A股因子库构建脚本（403 个特征的 A 股适配式，代码即公式）：不入库。
 # 产物已物化在 quantcustom/quantdb，源码只留在研究工作区 research/jkp_ashare/
 # （research/ 整体忽略），交付备份走 NAS-NSF。
