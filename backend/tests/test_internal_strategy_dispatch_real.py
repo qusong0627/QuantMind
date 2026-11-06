@@ -206,6 +206,85 @@ def test_real_order_duplicate_client_order_id_is_skipped():
     assert "00000001" in dup_params.values()
 
 
+def test_real_order_duplicate_of_rejected_order_is_a_failure():
+    """幂等命中的是**拒单**时必须报失败，不能报 success。
+
+    2026-11-06 实盘：8 笔止损市价单在风控闸被拒（``market_price_unavailable``），
+    止损执行器每轮用同一个 ``client_order_id`` 重发，这里是 ``duplicate_skipped``
+    → success → 执行器记「已提交」，PG 终态却全是 rejected。涨停/跌停/行情断档
+    时止损单会永久假成功，这是必须堵死的口子。
+    """
+    existing = SimpleNamespace(
+        order_id="dead-order",
+        status="rejected",
+        remarks="Risk check failed: market_price_unavailable",
+    )
+    db = FakeDb(results=[None, existing])
+    redis = SimpleNamespace()
+
+    with patch.object(d, "_fetch_active_portfolio_snapshot", AsyncMock(return_value=None)), \
+            patch.object(d, "OrderService", FakeOrderService), \
+            patch.object(d, "TradingEngine", FakeEngine):
+        result = _run(
+            d.dispatch_internal_strategy_order(
+                order_data={
+                    "symbol": "600036.SH",
+                    "side": "SELL",
+                    "quantity": 100,
+                    "price": 41.0,
+                    "order_type": "MARKET",
+                    "trading_mode": "REAL",
+                    "client_order_id": "sltp-600036.SH-20261106-g1",
+                },
+                user_id="00000001",
+                tenant_id="default",
+                redis=redis,
+                db=db,
+            )
+        )
+
+    assert result["status"] == "failed"
+    assert result["execution"] == "duplicate_terminal"
+    assert result["order_status"] == "rejected"
+    assert result["order_id"] == "dead-order"
+    assert result["result"]["success"] is False
+    assert "rejected" in result["message"]
+    assert "market_price_unavailable" in result["message"]
+
+
+def test_real_order_duplicate_of_live_order_still_counts_as_submitted():
+    """在途/已成交的旧单仍是幂等重放：不能因为「有旧单」就报失败。"""
+    existing = SimpleNamespace(order_id="live-order", status="submitted", remarks="")
+    db = FakeDb(results=[None, existing])
+    redis = SimpleNamespace()
+
+    with patch.object(d, "_fetch_active_portfolio_snapshot", AsyncMock(return_value=None)), \
+            patch.object(d, "OrderService", FakeOrderService), \
+            patch.object(d, "TradingEngine", FakeEngine):
+        result = _run(
+            d.dispatch_internal_strategy_order(
+                order_data={
+                    "symbol": "600036.SH",
+                    "side": "SELL",
+                    "quantity": 100,
+                    "price": 41.0,
+                    "order_type": "LIMIT",
+                    "trading_mode": "REAL",
+                    "client_order_id": "sltp-600036.SH-20261106-g1",
+                },
+                user_id="00000001",
+                tenant_id="default",
+                redis=redis,
+                db=db,
+            )
+        )
+
+    assert result["status"] == "success"
+    assert result["execution"] == "duplicate_skipped"
+    assert result["order_status"] == "submitted"
+    assert result["result"]["success"] is True
+
+
 def test_real_order_uses_portfolio_from_order_data():
     """order_data 显式带 portfolio_id 时优先使用，不再兜底 0。"""
     db = FakeDb(results=[None])

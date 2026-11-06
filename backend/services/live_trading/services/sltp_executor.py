@@ -564,6 +564,34 @@ def _to_float(value: Any) -> float | None:
     return x if x == x and abs(x) != float("inf") else None
 
 
+#: 派发信封里「这张单已经死了」的终态集合（与派发层 duplicate 判定同源）。
+_TERMINAL_BAD_ORDER_STATUS = {"rejected", "failed", "expired", "cancelled"}
+
+
+def _demote_terminal_success(resp: dict[str, Any] | None) -> dict[str, Any]:
+    """派发层说 success、但信封指向一张已死的单 → 按失败处理。
+
+    真单成败判据是**订单终态**，不是派发层有没有抛异常、也不是它回的 status。
+    派发层若把「幂等命中一张 rejected 旧单」当成功回（2026-11-06 实盘），这里
+    再兜一道：改写成 ``duplicate_terminal`` 失败信封，走失败分支告警，绝不记已提交。
+    """
+    env = resp if isinstance(resp, dict) else {"status": "error", "message": str(resp)}
+    order_status = str(env.get("order_status") or "").strip().lower()
+    if (
+        str(env.get("status") or "") == "success"
+        and order_status in _TERMINAL_BAD_ORDER_STATUS
+    ):
+        return {
+            **env,
+            "status": "failed",
+            "execution": "duplicate_terminal",
+            "message": str(
+                env.get("message") or f"existing order is {order_status}"
+            ),
+        }
+    return env
+
+
 def dispatch_failure_text(resp: dict[str, Any] | None) -> str:
     """派发信封 → 用户告警里的失败文案。
 
@@ -597,7 +625,13 @@ def classify_dispatch_failure(resp: dict[str, Any] | None) -> str:
       这里，它在引擎侧就以成功+待核查返回）。
     """
     env = resp if isinstance(resp, dict) else {}
-    if str(env.get("execution") or "") in {"lot_blocked", "risk_blocked"}:
+    if str(env.get("execution") or "") in {
+        "lot_blocked",
+        "risk_blocked",
+        # 同号命中一张已 rejected/failed 的旧单：这个 cid 已经烧掉，原样重发只会
+        # 再撞一次幂等。属于终态，不自动重发（要重报先重新武装换代）。
+        "duplicate_terminal",
+    }:
         return FAIL_DETERMINISTIC
     text = dispatch_failure_text(env)
     if any(marker in text for marker in _PRICE_REJECT_MARKERS):
@@ -2003,6 +2037,8 @@ async def _execute_trigger(
         resp = await deps.dispatch(order_data, user_id)
     except Exception as exc:  # noqa: BLE001
         resp = {"status": "error", "message": str(exc)}
+    # 终态才是判据：派发层回 success 但指向一张已死的单，按失败处理。
+    resp = _demote_terminal_success(resp)
     if str((resp or {}).get("status")) != "success":
         st["failure"] = dispatch_failure_text(resp)
         fail_class = classify_dispatch_failure(resp)
@@ -2395,6 +2431,8 @@ async def _apply_remainder_policy(
         resp = await deps.dispatch(order_data, user_id)
     except Exception as exc:  # noqa: BLE001
         resp = {"status": "error", "message": str(exc)}
+    # 终态才是判据（同 _execute_trigger）：幂等命中死单不算重挂成功。
+    resp = _demote_terminal_success(resp)
     if str((resp or {}).get("status")) != "success":
         st["remainder_applied"] = True
         st["remainder_note"] = f"重挂失败：{(resp or {}).get('message') or resp}"

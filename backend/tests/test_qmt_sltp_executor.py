@@ -1106,6 +1106,57 @@ class TestProtectiveRetry:
             dispatch_result=dispatch_result,
         )
 
+    def test_duplicate_terminal_rejection_is_terminal_and_loud(self) -> None:
+        """幂等命中一张**已拒**旧单 → 当日终态失败 + 告警，绝不记「已提交」。
+
+        2026-11-06 实盘：派发层对同号旧单无条件回 ``duplicate_skipped`` + success，
+        执行器日志打「已提交」，PG 终态其实是 rejected —— 止损没卖出去，也没人知道。
+        """
+        h = self._harness({
+            "status": "failed",
+            "execution": "duplicate_terminal",
+            "order_id": "OID-dead",
+            "order_status": "rejected",
+            "message": "duplicate client_order_id sltp-600036.SH-20260911-g1 skipped: "
+                       "existing order rejected (Risk check failed: market_price_unavailable)",
+            "client_order_id": "sltp-600036.SH-20260911-g1",
+        })
+        s1 = h.cycle()
+        st = h.state()["rules"]["600036.SH"]
+        assert s1["submitted"] == 0
+        assert s1["failed"] == 1
+        assert s1["retry_scheduled"] == 0
+        assert st["status"] == ex.ST_FAILED
+        assert not st.get("order_id"), "死单不是我们的在途单，不得记进状态"
+        assert any("失败" in n["title"] for n in h.notices), h.notices
+        assert any(
+            "market_price_unavailable" in n["content"] for n in h.notices
+        ), h.notices
+
+    def test_classify_duplicate_terminal_is_deterministic(self) -> None:
+        """同号命中已拒旧单 = cid 已烧掉：不自动重发（重发同号只会再撞一次）。"""
+        assert ex.classify_dispatch_failure({
+            "status": "failed",
+            "execution": "duplicate_terminal",
+            "order_id": "OID-dead",
+            "order_status": "rejected",
+            "message": "existing order rejected",
+        }) == ex.FAIL_DETERMINISTIC
+
+    def test_demote_terminal_success_only_touches_dead_orders(self) -> None:
+        """兜底：派发层回 success 但旧单已 rejected → 改写成失败；在途单不动。"""
+        dead = ex._demote_terminal_success(
+            {"status": "success", "order_status": "rejected", "order_id": "X"}
+        )
+        assert dead["status"] == "failed"
+        assert dead["execution"] == "duplicate_terminal"
+
+        live = ex._demote_terminal_success(
+            {"status": "success", "order_status": "submitted", "order_id": "Y"}
+        )
+        assert live["status"] == "success"
+        assert "execution" not in live
+
     def test_transient_failure_retries_next_cycle_with_new_generation(self) -> None:
         """①暂时性失败 + 条件仍成立 → 下一轮再发，且**代次 +1**（新委托号）。
 

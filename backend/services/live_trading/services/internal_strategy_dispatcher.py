@@ -300,6 +300,50 @@ def _violations_text(violations: Any) -> str:
     return "；".join(parts)
 
 
+#: 幂等命中时「这张旧单已经死了」的状态集合——同号重发不可能再产生新委托。
+_TERMINAL_BAD_ORDER_STATUS = {"rejected", "failed", "expired", "cancelled"}
+
+
+def _order_status_text(order: Any) -> str:
+    status = getattr(order, "status", "")
+    return str(getattr(status, "value", status) or "").strip().lower()
+
+
+def _duplicate_order_envelope(order: Any, client_order_id: str) -> dict[str, Any]:
+    """幂等命中 → 派发信封：**成败由旧单终态决定**，不是由「命中」本身决定。
+
+    2026-11-06 实盘：8 笔止损市价单在风控闸被拒（``market_price_unavailable``），
+    止损执行器每轮用同一个 ``client_order_id`` 重发。旧实现对所有幂等命中一律回
+    ``success`` → 执行器记「已提交」，PG 终态却全是 rejected：止损没卖出去，日志
+    还在报成功。命中一张 rejected/failed 的单不是「又下了一单」，必须如实报失败，
+    交给调用方按失败处置（告警/人工介入），绝不能冒充成交路径。
+    """
+    status = _order_status_text(order)
+    terminal_bad = status in _TERMINAL_BAD_ORDER_STATUS
+    remarks = str(getattr(order, "remarks", "") or "").strip()
+    message = f"duplicate client_order_id {client_order_id} skipped"
+    if status:
+        message += f": existing order is {status}"
+    if remarks:
+        message += f" ({remarks})"
+    result: dict[str, Any] = {
+        "success": not terminal_bad,
+        "message": message,
+        "client_order_id": client_order_id,
+    }
+    if status:
+        result["order_status"] = status
+    return {
+        "status": "failed" if terminal_bad else "success",
+        "execution": "duplicate_terminal" if terminal_bad else "duplicate_skipped",
+        "order_id": str(getattr(order, "order_id", "") or ""),
+        "order_status": status,
+        "client_order_id": client_order_id,
+        "message": message,
+        "result": result,
+    }
+
+
 async def dispatch_internal_strategy_order(
     *,
     order_data: dict[str, Any],
@@ -598,16 +642,7 @@ async def dispatch_internal_strategy_order(
             existed_result = await db.execute(existed_stmt)
             existed_order = existed_result.scalar_one_or_none()
             if existed_order is not None:
-                return {
-                    "status": "success",
-                    "execution": "duplicate_skipped",
-                    "order_id": str(existed_order.order_id),
-                    "result": {
-                        "success": True,
-                        "message": "duplicate client_order_id skipped",
-                        "client_order_id": client_order_id,
-                    },
-                }
+                return _duplicate_order_envelope(existed_order, client_order_id)
 
         order = await order_service.create_order(
             user_id=db_uid,
@@ -661,16 +696,7 @@ async def dispatch_internal_strategy_order(
         dup_order = dup_result.scalar_one_or_none()
         if dup_order is None:
             raise
-        return {
-            "status": "success",
-            "execution": "duplicate_skipped",
-            "order_id": str(dup_order.order_id),
-            "result": {
-                "success": True,
-                "message": "duplicate client_order_id skipped",
-                "client_order_id": client_order_id,
-            },
-        }
+        return _duplicate_order_envelope(dup_order, client_order_id)
     except HTTPException:
         raise
     except Exception as exc:
