@@ -77,6 +77,8 @@ class OrderResponse(OrderBase):
     price: float | None = Field(None, ge=0)
     # 执行券商（qmt_exec/tdx/...）。记账/对账用；历史单为 None（当时只有全局选择）。
     broker: str | None = None
+    # 分账归属：这条单是哪家模型下的（空 = 人工/系统单）。对账单与「按 agent 看单」用。
+    agent: str | None = None
 
     id: int
     order_id: UUID4
