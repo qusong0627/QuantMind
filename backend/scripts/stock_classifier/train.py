@@ -42,7 +42,7 @@ EARLY_STOP_DAYS = 126
 PURGE_EXTRA = 2
 
 
-def _params(n_classes: int, seed: int = 42) -> dict[str, Any]:
+def _params(n_classes: int, seed: int = 42, max_bin: int = 127) -> dict[str, Any]:
     return {
         "objective": "multiclass",
         "num_class": n_classes,
@@ -55,7 +55,7 @@ def _params(n_classes: int, seed: int = 42) -> dict[str, Any]:
         "bagging_fraction": 0.8,
         "bagging_freq": 1,
         "lambda_l2": 20.0,
-        "max_bin": 127,
+        "max_bin": max_bin,
         "num_threads": 20,
         "verbosity": -1,
         "seed": seed,
@@ -70,12 +70,14 @@ def split_frame(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     return frame.loc[mask].reset_index(drop=True)
 
 
-def load_split(horizon: int, features: list[str], name: str) -> pd.DataFrame:
+def load_split(
+    horizon: int, features: list[str], name: str, variant: str = ""
+) -> pd.DataFrame:
     """按切分惰性加载（避免把全样本同时驻留内存）。"""
     start, end = SPLIT_BOUNDS[name]
     frames: list[pd.DataFrame] = []
     for year in range(2018, 2027):
-        path = ROOT / f"panel_h{horizon}" / f"year={year}" / "data.parquet"
+        path = ROOT / f"panel_h{horizon}{variant}" / f"year={year}" / "data.parquet"
         if not path.exists():
             continue
         frame = pq.read_table(path).to_pandas()
@@ -201,20 +203,42 @@ def classification_metrics(y: np.ndarray, proba: np.ndarray) -> dict[str, Any]:
     }
 
 
-def run(horizon: int, n_classes: int, max_rounds: int, tag: str) -> Path:
+def run(
+    horizon: int,
+    n_classes: int,
+    max_rounds: int,
+    tag: str,
+    variant: str = "",
+    sample_frac: float = 1.0,
+    max_bin: int = 127,
+    drop_prefixes: tuple[str, ...] = (),
+) -> Path:
     import lightgbm as lgb
 
     screen = json.loads(
-        (ROOT / "screening" / f"screen_h{horizon}.json").read_text("utf-8")
+        (ROOT / "screening" / f"screen_h{horizon}{variant}.json").read_text("utf-8")
     )
-    features = [item["name"] for item in screen["selected"]]
+    features = [
+        item["name"]
+        for item in screen["selected"]
+        if not any(item["name"].startswith(p) for p in drop_prefixes)
+    ]
     log.info("h%d 特征 %d 个（筛选自 %d）", horizon, len(features), screen["n_factors"])
 
     parts = {
-        name: load_split(horizon, features, name) for name in ("valid", "test", "oos")
+        name: load_split(horizon, features, name, variant)
+        for name in ("valid", "test", "oos")
     }
     # 训练集尾部剔除 h+2 天：标签窗口不伸进 valid
-    train = purge_tail(load_split(horizon, features, "train"), horizon, PURGE_EXTRA)
+    train = purge_tail(
+        load_split(horizon, features, "train", variant), horizon, PURGE_EXTRA
+    )
+    if sample_frac < 1.0:
+        train = (
+            train.sample(frac=sample_frac, random_state=7)
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
     train_dates = np.sort(train["date"].unique())
     if len(train_dates) <= EARLY_STOP_DAYS + horizon:
         raise RuntimeError("训练窗太短，无法切内层早停集")
@@ -239,7 +263,7 @@ def run(horizon: int, n_classes: int, max_rounds: int, tag: str) -> Path:
     dtrain = lgb.Dataset(Xtr, label=ytr, feature_name=features)
     dvalid = lgb.Dataset(Xva, label=yva, reference=dtrain)
     booster = lgb.train(
-        _params(n_classes),
+        _params(n_classes, max_bin=max_bin),
         dtrain,
         num_boost_round=max_rounds,
         valid_sets=[dvalid],
@@ -252,7 +276,9 @@ def run(horizon: int, n_classes: int, max_rounds: int, tag: str) -> Path:
     Xfull = train[features].to_numpy("float32")
     yfull = train["y"].to_numpy("int8")
     final = lgb.train(
-        _params(n_classes), lgb.Dataset(Xfull, label=yfull), num_boost_round=best_iter
+        _params(n_classes, max_bin=max_bin),
+        lgb.Dataset(Xfull, label=yfull),
+        num_boost_round=best_iter,
     )
     del Xtr, Xva, Xfull
     importance = dict(
@@ -310,7 +336,7 @@ def run(horizon: int, n_classes: int, max_rounds: int, tag: str) -> Path:
 
     out_dir = ROOT / "models"
     out_dir.mkdir(parents=True, exist_ok=True)
-    with (out_dir / f"lgb_h{horizon}.pkl").open("wb") as fh:
+    with (out_dir / f"lgb_h{horizon}{variant}.pkl").open("wb") as fh:
         pickle.dump(
             {
                 "booster": final,
@@ -321,11 +347,13 @@ def run(horizon: int, n_classes: int, max_rounds: int, tag: str) -> Path:
             },
             fh,
         )
-    (out_dir / f"metadata_h{horizon}.json").write_text(
+    (out_dir / f"metadata_h{horizon}{variant}.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
-    report_path = ROOT / "reports" / f"stock_multiclass_h{horizon}_{tag}_{stamp}.json"
+    report_path = (
+        ROOT / "reports" / f"stock_multiclass_h{horizon}{variant}_{tag}_{stamp}.json"
+    )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -409,8 +437,26 @@ def main() -> None:
     parser.add_argument("--classes", type=int, default=N_CLASSES_DEFAULT)
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument("--tag", default="v1")
+    parser.add_argument("--variant", default="", help="面板/模型后缀，如 _l1")
+    parser.add_argument("--sample-frac", type=float, default=1.0, help="训练行抽样比例")
+    parser.add_argument("--max-bin", type=int, default=127)
+    parser.add_argument(
+        "--drop-prefixes",
+        default="",
+        help="剔除的特征前缀，逗号分隔（如 chip_,ind_,concept_）",
+    )
     args = parser.parse_args()
-    path = run(args.horizon, args.classes, args.rounds, args.tag)
+    drop = tuple(p.strip() for p in args.drop_prefixes.split(",") if p.strip())
+    path = run(
+        args.horizon,
+        args.classes,
+        args.rounds,
+        args.tag,
+        args.variant,
+        args.sample_frac,
+        args.max_bin,
+        drop,
+    )
     print(path)
 
 

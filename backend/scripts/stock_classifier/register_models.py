@@ -40,6 +40,8 @@ def _connect():
 def _metadata(horizon: int, report: dict) -> dict:
     return {
         "model_type": "custom_multiclass_l1l2",
+        "market": "CN",
+        "context": {"market": "CN"},
         "research_only": True,
         "horizon": horizon,
         "n_classes": report.get("n_classes", 5),
@@ -72,6 +74,38 @@ def _metrics(report: dict) -> dict:
     return out
 
 
+def _register_one(
+    cur, model_id: str, model_path: Path, report: dict, extra: dict
+) -> None:
+    cur.execute(
+        """
+        INSERT INTO qm_user_models
+          (tenant_id, user_id, model_id, status, storage_path,
+           model_file, metadata_json, metrics_json, is_default)
+        VALUES (%s, %s, %s, 'candidate', %s, %s, %s, %s, FALSE)
+        ON CONFLICT (tenant_id, user_id, model_id) DO UPDATE SET
+          status = EXCLUDED.status,
+          storage_path = EXCLUDED.storage_path,
+          model_file = EXCLUDED.model_file,
+          metadata_json = EXCLUDED.metadata_json,
+          metrics_json = EXCLUDED.metrics_json,
+          updated_at = NOW()
+        """,
+        (
+            TENANT,
+            OWNER,
+            model_id,
+            str(MODEL_DIR),
+            model_path.name,
+            json.dumps(
+                _metadata(report["horizon"], report) | extra, ensure_ascii=False
+            ),
+            json.dumps(_metrics(report), ensure_ascii=False),
+        ),
+    )
+    print(f"registered {model_id}")
+
+
 def register() -> None:
     conn = _connect()
     try:
@@ -84,31 +118,26 @@ def register() -> None:
                     continue
                 report = json.loads(meta_path.read_text("utf-8"))
                 model_id = f"{MODEL_PREFIX}{horizon}"
-                cur.execute(
-                    """
-                    INSERT INTO qm_user_models
-                      (tenant_id, user_id, model_id, status, storage_path,
-                       model_file, metadata_json, metrics_json, is_default)
-                    VALUES (%s, %s, %s, 'candidate', %s, %s, %s, %s, FALSE)
-                    ON CONFLICT (tenant_id, user_id, model_id) DO UPDATE SET
-                      status = EXCLUDED.status,
-                      storage_path = EXCLUDED.storage_path,
-                      model_file = EXCLUDED.model_file,
-                      metadata_json = EXCLUDED.metadata_json,
-                      metrics_json = EXCLUDED.metrics_json,
-                      updated_at = NOW()
-                    """,
-                    (
-                        TENANT,
-                        OWNER,
-                        model_id,
-                        str(MODEL_DIR),
-                        model_path.name,
-                        json.dumps(_metadata(horizon, report), ensure_ascii=False),
-                        json.dumps(_metrics(report), ensure_ascii=False),
-                    ),
+                _register_one(cur, model_id, model_path, report, {})
+            # L1 盘中版（只用收盘前可算的 32 个特征）
+            l1_meta = MODEL_DIR / "metadata_h1_l1.json"
+            l1_model = MODEL_DIR / "lgb_h1_l1.pkl"
+            if l1_meta.exists() and l1_model.exists():
+                l1_report = json.loads(l1_meta.read_text("utf-8"))
+                l1_report["horizon"] = 1
+                _register_one(
+                    cur,
+                    "mdl_stock_multiclass_l1intraday_h1",
+                    l1_model,
+                    l1_report,
+                    {
+                        "model_type": "custom_multiclass_l1_intraday",
+                        "feature_count": len(l1_report.get("features", [])),
+                        "features": l1_report.get("features", []),
+                        "note": "仅 L1 盘中可算特征（turn/amt/mom/vol/tech/mfi/obv），"
+                        "不含 chip/ind/concept/style/fun；用于 14:50 快照推理",
+                    },
                 )
-                print(f"registered {model_id}")
         conn.commit()
     finally:
         conn.close()

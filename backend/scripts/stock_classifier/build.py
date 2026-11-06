@@ -61,9 +61,15 @@ def _part_date(part: Path) -> pd.Timestamp:
     return pd.to_datetime(part.parent.name.split("=")[1])
 
 
-def factor_columns() -> list[str]:
+def factor_columns(only_l1: bool = False) -> list[str]:
     schema = pq.read_schema(_partitions()[-1])
-    return [c for c in schema.names if c not in OHLCV_COLUMNS]
+    columns = [c for c in schema.names if c not in OHLCV_COLUMNS]
+    if only_l1:
+        from backend.scripts.l1_factors.features import STORAGE_BODY_COLUMNS
+
+        l1 = set(STORAGE_BODY_COLUMNS)
+        columns = [c for c in columns if c in l1]
+    return columns
 
 
 # ---------------------------------------------------------------------------
@@ -142,10 +148,11 @@ def build_forward_returns(wide: pd.DataFrame) -> dict[int, pd.DataFrame]:
 # ---------------------------------------------------------------------------
 
 
-def screen(horizon: int) -> dict:
+def screen(horizon: int, only_l1: bool = False) -> dict:
+    suffix = "_l1" if only_l1 else ""
     fwd = pq.read_table(OUT / f"fwd_ret_h{horizon}.parquet").to_pandas()
     fwd.index = pd.to_datetime(fwd.index)
-    cols = factor_columns()
+    cols = factor_columns(only_l1)
     parts = [
         p
         for p in _partitions()
@@ -176,12 +183,12 @@ def screen(horizon: int) -> dict:
             )
     ic_matrix = np.vstack(ic_rows)
     np.savez_compressed(
-        OUT / "screening" / f"ic_h{horizon}.npz",
+        OUT / "screening" / f"ic_h{horizon}{suffix}.npz",
         ic=ic_matrix.astype(np.float32),
         columns=np.array(cols, dtype=object),
     )
     corr = corr_sum / max(corr_days, 1)
-    np.save(OUT / "screening" / f"corr_h{horizon}.npy", corr.astype(np.float32))
+    np.save(OUT / "screening" / f"corr_h{horizon}{suffix}.npy", corr.astype(np.float32))
 
     coverage = np.isfinite(ic_matrix).mean(axis=0)
     keep = select_by_ic(
@@ -235,7 +242,7 @@ def screen(horizon: int) -> dict:
         ][:30],
     }
     (OUT / "screening").mkdir(parents=True, exist_ok=True)
-    (OUT / "screening" / f"screen_h{horizon}.json").write_text(
+    (OUT / "screening" / f"screen_h{horizon}{suffix}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     log.info(
@@ -254,10 +261,12 @@ def screen(horizon: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def build_panel(horizon: int, features: list[str], n_classes: int) -> None:
+def build_panel(
+    horizon: int, features: list[str], n_classes: int, only_l1: bool = False
+) -> None:
     fwd = pq.read_table(OUT / f"fwd_ret_h{horizon}.parquet").to_pandas()
     fwd.index = pd.to_datetime(fwd.index)
-    out_dir = OUT / f"panel_h{horizon}"
+    out_dir = OUT / f"panel_h{horizon}{'_l1' if only_l1 else ''}"
     out_dir.mkdir(parents=True, exist_ok=True)
     part_cols = ["symbol", "close", "amount", "mom_ret_1d", *features]
     part_cols = list(dict.fromkeys(part_cols))
@@ -313,6 +322,7 @@ def main() -> None:
     parser.add_argument("stage", choices=("close", "open", "screen", "panel", "all"))
     parser.add_argument("--horizons", default="1,3,5")
     parser.add_argument("--classes", type=int, default=N_CLASSES_DEFAULT)
+    parser.add_argument("--only-l1", action="store_true", help="只用 L1 因子列")
     args = parser.parse_args()
 
     horizons = [int(h) for h in args.horizons.split(",") if h.strip()]
@@ -331,15 +341,18 @@ def main() -> None:
 
     if args.stage in ("screen", "all"):
         for horizon in horizons:
-            screen(horizon)
+            screen(horizon, args.only_l1)
 
     if args.stage in ("panel", "all"):
         for horizon in horizons:
+            suffix = "_l1" if args.only_l1 else ""
             payload = json.loads(
-                (OUT / "screening" / f"screen_h{horizon}.json").read_text("utf-8")
+                (OUT / "screening" / f"screen_h{horizon}{suffix}.json").read_text(
+                    "utf-8"
+                )
             )
             features = [item["name"] for item in payload["selected"]]
-            build_panel(horizon, features, args.classes)
+            build_panel(horizon, features, args.classes, args.only_l1)
 
 
 if __name__ == "__main__":
