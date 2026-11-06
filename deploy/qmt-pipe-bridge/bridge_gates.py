@@ -91,3 +91,16 @@ def next_state(prev: str, probe_ok: bool, consecutive_failures: int,
     if int(consecutive_failures) >= max(1, int(threshold)):
         return STATE_UNRESPONSIVE
     return prev
+
+
+def should_throttle(last_ts: float, now_ts: float, min_interval_s: float) -> bool:
+    """交易类请求的最小间隔限速（令牌桶的退化版：单桶）。
+
+    2026-11-06 观测：伴生桥停掉的 35 秒里策略账户通道自己恢复了；恢复流量后
+    一分钟内又挂。QMT 的 ``get_trade_detail_data`` 在连续查询下会长时间阻塞，
+    空载可自愈。把桥对策略的交易类调用压到 ``min_interval_s`` 一条，是唯一
+    能被我们自己控制住的变量。
+    """
+    if float(min_interval_s or 0) <= 0:
+        return False
+    return (float(now_ts) - float(last_ts or 0.0)) < float(min_interval_s)

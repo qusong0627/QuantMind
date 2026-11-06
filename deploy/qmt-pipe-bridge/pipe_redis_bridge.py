@@ -50,7 +50,10 @@ DEFAULT_CONFIG = {
     'redis': {'host': '127.0.0.1', 'port': 6379, 'db': 5},
     'account_id': '',  # set in bridge_config.json
     'pipe': {'name': 'bigqmt_rpc', 'connect_timeout_s': 3.0},
-    'rpc': {'timeout_s': 15, 'queue_blpop_s': 0.5},
+    'rpc': {'timeout_s': 15, 'queue_blpop_s': 0.5,
+            # 交易类 RPC 最小间隔：QMT 的 get_trade_detail_data 连续查询会阻塞，
+            # 空载可自愈（2026-11-06 实测），把速率压下来是唯一可控变量。
+            'trade_min_interval_s': 2.0},
     'positions': {'enabled': True, 'interval_s': 3, 'ttl_s': 120},
     'quotes': {'enabled': True, 'tier_a_interval_s': 2, 'tier_b_interval_s': 10,
                'chunk': 25, 'max_symbols': 250, 'stale_after_s': 10,
@@ -206,6 +209,7 @@ class State(object):
         self.strategy_state = bridge_gates.STATE_UNKNOWN
         self.account_fail_count = 0
         self.account_probe_ok_ts = 0.0
+        self.last_trade_rpc_ts = 0.0
 
     def note_error(self, where, exc):
         with self.lock:
@@ -307,6 +311,16 @@ def market_call(method, params=None, timeout=None, est_ms=200.0):
     if bridge_gates.should_drop_request(method, strategy_state):
         # 策略账户通道判死：本桥自己的轮询也停手，别往单线程管道里加柴。
         raise RuntimeError('strategy unhealthy, skipped')
+    if (bridge_gates.is_trade_context(method)
+            and not bridge_gates.is_order_like(method)):
+        min_interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
+        with STATE.lock:
+            too_soon = bridge_gates.should_throttle(
+                STATE.last_trade_rpc_ts, time.time(), min_interval)
+            if not too_soon:
+                STATE.last_trade_rpc_ts = time.time()
+        if too_soon:
+            raise RuntimeError('trade rpc throttled, skipped')
     preempt = int(CFG.get('budget.rpc_preempt_queue') or 1)
     if rpc_backlog() >= preempt:
         raise RuntimeError('rpc backlog, skipped')
@@ -376,6 +390,25 @@ def rpc_worker():
             if busy is not None:
                 resp = {'request_id': req.get('request_id'), 'ok': False, 'error': busy}
                 STATE.note_error('rpc.market_busy', busy)
+                try:
+                    write_reply(req, resp)
+                except Exception as exc:
+                    STATE.note_error('rpc.reply', exc)
+                continue
+        # 交易类请求限速：只限交易上下文方法，订单/撤单/行情一律不受影响。
+        # QMT 的 get_trade_detail_data 连续查询会长时间阻塞（空载可自愈），
+        # 把速率压到 rpc.trade_min_interval_s 一条是唯一可控变量。
+        if (bridge_gates.is_trade_context(method)
+                and not bridge_gates.is_order_like(method)):
+            min_interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
+            with STATE.lock:
+                too_soon = bridge_gates.should_throttle(
+                    STATE.last_trade_rpc_ts, time.time(), min_interval)
+                if not too_soon:
+                    STATE.last_trade_rpc_ts = time.time()
+            if too_soon:
+                resp = {'request_id': req.get('request_id'), 'ok': False,
+                        'error': 'TRADE_RPC_THROTTLED: 交易查询限速，稍后重试'}
                 try:
                     write_reply(req, resp)
                 except Exception as exc:

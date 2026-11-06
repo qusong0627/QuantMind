@@ -76,3 +76,14 @@ def test_next_state_thresholds():
 def test_next_state_custom_threshold():
     assert gates.next_state(gates.STATE_UNKNOWN, False, 1, threshold=1) == \
         gates.STATE_UNRESPONSIVE
+
+
+def test_should_throttle():
+    # 冷却窗内拒绝
+    assert gates.should_throttle(100.0, 101.0, 2.0) is True
+    # 超过最小间隔放行
+    assert gates.should_throttle(100.0, 102.5, 2.0) is False
+    # 首次（last=0）放行
+    assert gates.should_throttle(0.0, 100.0, 2.0) is False
+    # 关闭限速
+    assert gates.should_throttle(100.0, 100.1, 0) is False
