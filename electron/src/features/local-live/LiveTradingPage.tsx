@@ -78,6 +78,7 @@ import { Bot, Send, ShieldCheck, AlertTriangle } from 'lucide-react';
 import RealTradingPage from '../../pages/trading/RealTradingPage';
 import type { RealTradingExtraTab, RealTradingTabContext } from '../../pages/trading/RealTradingPage';
 import { MarketSelector } from '../../components/layout/MarketSelector';
+import { BrokerSwitch } from './BrokerSwitch';
 import { isLiveTradingEnabled } from '../../config/tradingFlags';
 import { QuantBotSurface, useQuantBotFrame } from '../quantbot/components/QuantBotFrame';
 
@@ -474,7 +475,12 @@ const LiveTradingPage: React.FC = () => {
             // 复用全局切换器（`components/layout/MarketSelector`）＝同一份 marketFlags 过滤与
             // 同一份 redux 状态：这里切一下，宿主页的账户/持仓/交易记录/设置里的券商卡全部跟着走
             // （RealTradingPage 的取数 deps 本来就含 currentMarket），不需要另写一套。
-            topBarExtras={<MarketSelector />}
+            topBarExtras={(
+                <div className="flex items-center gap-2">
+                    <MarketSelector />
+                    <BrokerSwitch />
+                </div>
+            )}
             extraTabs={extraTabs}
             banner={(ctx) => <AccountNoticeBanner ctx={ctx} />}
             // 设置页里的两块：总控 / 数据（用户口径「总控放设置里面、数据也放设置里面」）
