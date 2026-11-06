@@ -162,12 +162,35 @@ class TradingEngine:
                 ),
             )
         self._broker_cache[cache_key] = broker
+        # 记账用：把「这一单实际走哪条通道」落在 broker 实例上，submit_order 会把它
+        # 写进 orders.broker。缓存键里已经有 broker_type，这里只是让实例自己说得出。
+        try:
+            setattr(
+                broker,
+                "broker_type",
+                broker_type if mode in ("REAL", "SHADOW") else "paper",
+            )
+        except Exception:  # noqa: BLE001 - 记账标记失败不能影响下单
+            pass
         return broker
 
     async def submit_order(self, order: Order, *, tenant_id: str = "default") -> dict:
         """Submit order for execution"""
         try:
             tenant_id = (tenant_id or "").strip() or order.tenant_id or "default"
+
+            # 记账：**送单前**把执行券商钉在订单上（此时才知道实际路由到哪条通道）。
+            # 必须赶在下面 SUBMITTED 那次 commit 之前，否则超时单（状态留在
+            # submitted）的 broker 永远落不了库。历史单为空，不回溯推断。
+            try:
+                broker = self._get_stock_broker(order.trading_mode, order.symbol)
+                broker_type = str(getattr(broker, "broker_type", "") or "").strip()
+                if broker_type and not getattr(order, "broker", None):
+                    order.broker = broker_type[:16]
+            except Exception as stamp_exc:  # noqa: BLE001 - 取券商失败交给下面统一处理
+                logger.warning(
+                    "[TradingEngine] broker 标记失败（不影响下单）: %s", stamp_exc
+                )
 
             # Use OrderService for status transition
             await self.order_service.transition_order_status(order, OrderStatus.SUBMITTED)

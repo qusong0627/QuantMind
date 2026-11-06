@@ -50,6 +50,8 @@ def test_column_lists():
         "source",
         "agent",
         "ref_price",
+        # 记账地基（2026-11-06）：执行券商，按券商对账/追溯通道
+        "broker",
     }
 
 

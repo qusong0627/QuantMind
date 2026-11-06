@@ -40,6 +40,9 @@ ORDER_COLUMNS = (
     ("price_source", "VARCHAR(64)"),
     ("source", "VARCHAR(32)"),
     ("agent", "VARCHAR(64)"),
+    # 执行券商（qmt_exec/tdx/tiger/futu/ib/paper）。记账地基：按券商对账、按通道
+    # 追溯都靠它。TradingEngine 送单前写入；历史单 NULL（当时只有全局选择，不回溯）。
+    ("broker", "VARCHAR(16)"),
     # P1.6 TCA 基准价：**决策时点我们看到的那个价**（LLM 腿 = 决策报价；镜像腿 =
     # 模拟虚拟成交价/强平盘口价）。成交侧的滑点 = 成交价相对这一列算，缺了就把该笔
     # 归入"不可定价"——**不拿成交价倒推假基准**（倒推出来的滑点恒等于我们自己设的

@@ -75,6 +75,8 @@ class OrderResponse(OrderBase):
     # 入口是对的，但读侧必须容忍 0：否则只要当天有一笔市价单，
     # ``GET /api/v1/orders`` 整页 500（2026-11-06：「交易记录一条都没有」的真凶）。
     price: float | None = Field(None, ge=0)
+    # 执行券商（qmt_exec/tdx/...）。记账/对账用；历史单为 None（当时只有全局选择）。
+    broker: str | None = None
 
     id: int
     order_id: UUID4

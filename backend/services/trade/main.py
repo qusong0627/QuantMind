@@ -80,6 +80,7 @@ async def lifespan(app: FastAPI):
     daily_pnl_report_task = None
     duty_summary_task = None
     intel_briefing_task = None
+    daily_settlement_task = None
     tdx_quote_feed_task = None
     tdx_l2_capture_task = None
     tdx_l2_realtime_task = None
@@ -611,6 +612,15 @@ async def lifespan(app: FastAPI):
             run_intel_briefing_task(),
             name="intel-briefing",
         )
+        # 每日日结（2026-11-06）：收盘后汇总智能体台账 + 执行事实 + 真实资金锚
+        from backend.services.trade.services.daily_settlement_task import (
+            run_daily_settlement_task,
+        )
+
+        daily_settlement_task = asyncio.create_task(
+            run_daily_settlement_task(),
+            name="daily-settlement",
+        )
         from backend.services.live_trading.services.tdx_quote_feed import (
             run_tdx_quote_feed_task,
         )
@@ -990,6 +1000,7 @@ async def lifespan(app: FastAPI):
         daily_pnl_report_task,
         duty_summary_task,
         intel_briefing_task,
+        daily_settlement_task,
         tdx_quote_feed_task,
         call_auction_watch_task,
         tdx_ingest_task,
