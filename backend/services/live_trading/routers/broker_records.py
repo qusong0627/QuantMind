@@ -336,6 +336,12 @@ async def broker_records(
                     f"QMT 历史（{range_start} ~ {range_end}）：来自柜台 "
                     "get_history_trade_detail_data"
                 )
+                if not rows:
+                    note += (
+                        "；返回 0 行——QMT 客户端本地没有该区间的历史成交/委托数据"
+                        "（或该终端未绑定此函数）。请先在 QMT 客户端「交易 → 历史成交/"
+                        "对账单」确认是否有记录。"
+                    )
             else:
                 rows = await _qmt_records(kind)
                 note = ""
