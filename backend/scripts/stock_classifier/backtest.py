@@ -187,6 +187,8 @@ def portfolio(
     buffer_frac: float,
     cost_rate: float,
     step: int,
+    side: str = "long",
+    borrow_rate: float = 0.0,
 ) -> dict:
     dates = sorted(groups)
     sampled = dates[:: max(step, 1)]
@@ -198,8 +200,12 @@ def portfolio(
         if len(group) < 200:
             continue
         s = group[score_col]
-        enter = set(group.loc[s >= s.quantile(1 - top_frac), "symbol"])
-        hold = set(group.loc[s >= s.quantile(1 - buffer_frac), "symbol"])
+        if side == "long":
+            enter = set(group.loc[s >= s.quantile(1 - top_frac), "symbol"])
+            hold = set(group.loc[s >= s.quantile(1 - buffer_frac), "symbol"])
+        else:
+            enter = set(group.loc[s <= s.quantile(top_frac), "symbol"])
+            hold = set(group.loc[s <= s.quantile(buffer_frac), "symbol"])
         holdings = (prev & hold) | enter
         if not holdings:
             prev = set()
@@ -210,8 +216,13 @@ def portfolio(
         if ok.sum() < 20:
             prev = holdings
             continue
-        port_ret = float(np.nanmean(ret[ok]))
-        bench_ret = float(np.nanmean(group[ret_col].to_numpy(float)))
+        raw_ret = float(np.nanmean(ret[ok]))
+        port_ret = raw_ret if side == "long" else -raw_ret
+        bench_ret = (
+            0.0
+            if side == "short"
+            else float(np.nanmean(group[ret_col].to_numpy(float)))
+        )
         one_way_turnover = (
             len(holdings.symmetric_difference(prev)) / 2.0 / max(len(holdings), 1)
             if prev
@@ -230,7 +241,9 @@ def portfolio(
     if not recs:
         return {}
     df = pd.DataFrame(recs).sort_values("date").reset_index(drop=True)
-    df["cost"] = df["turnover"] * cost_rate
+    df["cost"] = df["turnover"] * cost_rate + (
+        borrow_rate / 252.0 if side == "short" else 0.0
+    )
     df["net_ret"] = df["port_ret"] - df["cost"]
     df["excess_gross"] = df["port_ret"] - df["bench_ret"]
     df["excess_net"] = df["net_ret"] - df["bench_ret"]
@@ -262,6 +275,7 @@ def portfolio(
         "turnover_period": round(float(df["turnover"].mean()), 4),
         "cost_ann": round(float(df["cost"].mean() * periods_per_year), 4),
         "avg_holdings": round(float(df["n"].mean()), 1),
+        "side": side,
     }
 
 
@@ -270,6 +284,9 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=1)
     parser.add_argument("--splits", default="test,oos")
     parser.add_argument("--cost", type=float, default=COST_RATE)
+    parser.add_argument(
+        "--borrow", type=float, default=0.08, help="融券年化费率（默认 8%%）"
+    )
     args = parser.parse_args()
 
     with (ROOT / "models" / f"lgb_h{args.horizon}.pkl").open("rb") as fh:
@@ -327,6 +344,38 @@ def main() -> None:
             "open_slow5": portfolio(
                 groups, "exp_ret", "exec_open_ret", TOP_FRAC, 0.30, args.cost, 5
             ),
+            "short_open_gross": portfolio(
+                groups,
+                "exp_ret",
+                "exec_open_ret",
+                TOP_FRAC,
+                BUFFER_FRAC,
+                0.0,
+                step,
+                side="short",
+            ),
+            "short_open_costed": portfolio(
+                groups,
+                "exp_ret",
+                "exec_open_ret",
+                TOP_FRAC,
+                BUFFER_FRAC,
+                args.cost,
+                step,
+                side="short",
+                borrow_rate=args.borrow,
+            ),
+            "short_open_neutral": portfolio(
+                groups,
+                "neutral_score",
+                "exec_open_ret",
+                TOP_FRAC,
+                BUFFER_FRAC,
+                args.cost,
+                step,
+                side="short",
+                borrow_rate=args.borrow,
+            ),
             "cost_sensitivity": {
                 f"{round(c * 1e4)}bp": portfolio(
                     groups,
@@ -348,6 +397,9 @@ def main() -> None:
             "open_neutral",
             "close_costed",
             "open_slow5",
+            "short_open_gross",
+            "short_open_costed",
+            "short_open_neutral",
         ):
             r = results[label]
             if r:
