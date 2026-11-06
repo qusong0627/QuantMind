@@ -101,8 +101,55 @@ def aware_day_window(day: date) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
+def anchor_source_for_broker(broker: str | None) -> str | None:
+    """券商通道 → 账户快照 source（资金锚按账户取，不跨账户混算）。"""
+    value = str(broker or "").strip().lower()
+    if value.startswith("qmt"):
+        return "qmt_exec"
+    if value.startswith("tdx"):
+        return "tdx_bridge"
+    return None
+
+
+async def resolve_anchor_source(redis=None) -> str | None:
+    """当前 CN 券商 → 快照 source。
+
+    口径统一走 ``real_positions.active_broker_type()``（交易库 db2
+    ``broker:selected:CN`` → settings 回退），不自己拼读键：
+    包装器 ``RedisClient.get`` 会 JSON 解码，而该键是**裸字符串**——直接读会解析失败
+    静默返回 None，锚点永远落到默认券商（2026-11-06 实测踩中）。
+    """
+    broker = ""
+    try:
+        from backend.shared.real_positions import active_broker_type
+
+        broker = str(active_broker_type() or "")
+    except Exception:  # noqa: BLE001
+        broker = ""
+    if not broker and redis is not None:
+        try:
+            from backend.shared.redis_unwrap import raw_redis_client
+
+            raw = raw_redis_client(redis)
+            value = raw.get("broker:selected:CN") if raw is not None else None
+            if value is not None:
+                broker = (
+                    value.decode()
+                    if isinstance(value, (bytes, bytearray))
+                    else str(value)
+                )
+        except Exception:  # noqa: BLE001
+            broker = ""
+    return anchor_source_for_broker(broker)
+
+
 async def compute_day(
-    session, *, tenant_id: str, user_id: str, day: date
+    session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    day: date,
+    anchor_source: str | None = None,
 ) -> dict[str, Any]:
     """汇总一个交易日的账（纯读；调用方决定是否落库）。"""
     start, end = day_window(day)
@@ -320,24 +367,37 @@ async def compute_day(
         for r in pos_rows
     ]
 
-    # ── 4. 真实资金锚（当日最后一条快照；没有则留空，不拿旧值冒充） ──
-    snap = (
+    # ── 4. 真实资金锚（**按 source 分开**；多券商并行时绝不能拿最后一条当唯一账户）
+    #
+    # real_account_snapshots 的 source 是账号维度（qmt_exec / tdx_bridge）。两个
+    # 平台同时在报时，旧写法「当天最后一条」会把两个账户混成一个数字（2026-11-06
+    # 实测：QMT 账户 2377 万，同一天另一条 TDX 账户 92 万，谁后写谁上账）。
+    # 现在：按 source 各取最新一条 → anchor_source 指定主账户 → 其余进 recon_json。
+    snap_rows = (
         (
             await session.execute(
                 text(
                     """
-                SELECT cash, market_value, total_asset, source, snapshot_at
+                SELECT DISTINCT ON (source)
+                       source, cash, market_value, total_asset, snapshot_at
                 FROM real_account_snapshots
                 WHERE tenant_id = :t AND user_id = :u AND snapshot_date = :d
-                ORDER BY snapshot_at DESC LIMIT 1
+                ORDER BY source, snapshot_at DESC
                 """
                 ),
                 {"t": tenant_id, "u": user_id, "d": day},
             )
         )
         .mappings()
-        .first()
+        .all()
     )
+    snaps = {str(r["source"]): dict(r) for r in snap_rows}
+    snap = None
+    if anchor_source:
+        snap = snaps.get(str(anchor_source))
+    if snap is None and snaps:
+        # 没指定主账户时取「快照时间最新」的那条，并把全部分源留在 recon 里备查
+        snap = max(snaps.values(), key=lambda r: str(r["snapshot_at"]))
     if snap:
         payload.update(
             {
@@ -350,6 +410,15 @@ async def compute_day(
         payload["recon_json"] = {
             "snapshot_source": str(snap["source"]),
             "snapshot_at": str(snap["snapshot_at"]),
+            "snapshots": {
+                source: {
+                    "cash": round(float(row["cash"] or 0), 2),
+                    "market_value": round(float(row["market_value"] or 0), 2),
+                    "total_asset": round(float(row["total_asset"] or 0), 2),
+                    "snapshot_at": str(row["snapshot_at"]),
+                }
+                for source, row in snaps.items()
+            },
         }
     else:
         payload.update(
@@ -416,13 +485,24 @@ _UPSERT_SQL = text(
 
 
 async def run_day(
-    session, *, tenant_id: str, user_id: str, day: date
+    session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    day: date,
+    anchor_source: str | None = None,
 ) -> dict[str, Any]:
     """计算并落库单日日结（幂等）。"""
     import json
 
     await ensure_table_async(session)
-    payload = await compute_day(session, tenant_id=tenant_id, user_id=user_id, day=day)
+    payload = await compute_day(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        day=day,
+        anchor_source=anchor_source,
+    )
     # 无成交、无委托、也无资金快照的日子不落行（补跑时算 skipped）——避免台账里
     # 铺满全零行把「没交易」和「没数据」混成一张表。
     if not payload.get("has_activity") and payload.get("status") != "closed":

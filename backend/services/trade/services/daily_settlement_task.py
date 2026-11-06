@@ -71,6 +71,7 @@ async def run_settlement_cycle(now: datetime) -> int:
         except Exception:  # noqa: BLE001 - 读不到 done 就重算（幂等，无害）
             logger.warning("[DailySettlement] done 键读取失败，本周期重算")
 
+    anchor_source = await settlement.resolve_anchor_source(client)
     start = datetime.combine(day, time.min)
     from datetime import timedelta
 
@@ -91,7 +92,11 @@ async def run_settlement_cycle(now: datetime) -> int:
         for user_id in users:
             try:
                 await settlement.run_day(
-                    session, tenant_id="default", user_id=user_id, day=day
+                    session,
+                    tenant_id="default",
+                    user_id=user_id,
+                    day=day,
+                    anchor_source=anchor_source,
                 )
                 done += 1
             except Exception as exc:  # noqa: BLE001 - 单用户失败隔离

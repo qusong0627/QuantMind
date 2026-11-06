@@ -20,7 +20,12 @@ from backend.services.live_trading.routers.real_trading_utils import (
     normalize_db_user_id,
 )
 from backend.services.trade.services import daily_settlement as settlement
-from backend.services.trade_shared.deps import AuthContext, get_auth_context, get_db
+from backend.services.trade_shared.deps import (
+    AuthContext,
+    get_auth_context,
+    get_db,
+    get_redis,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -80,6 +85,7 @@ async def run_settlements(
     end: str | None = Query(None, description="YYYY-MM-DD（含）；留空=同 start"),
     auth: AuthContext = Depends(get_auth_context),
     db: Any = Depends(get_db),
+    redis: Any = Depends(get_redis),
 ):
     """补跑日结（幂等 upsert；非交易日自动跳过）。"""
     uid = normalize_db_user_id(str(auth.user_id))
@@ -96,6 +102,7 @@ async def run_settlements(
             detail=f"补跑区间最长 {_MAX_BACKFILL_DAYS} 天",
         )
 
+    anchor_source = await settlement.resolve_anchor_source(redis)
     days = await settlement.trading_days_between(start_day, end_day)
     done: list[str] = []
     skipped: list[str] = []
@@ -103,7 +110,11 @@ async def run_settlements(
     for day in days:
         try:
             payload = await settlement.run_day(
-                db, tenant_id=tenant, user_id=str(uid), day=day
+                db,
+                tenant_id=tenant,
+                user_id=str(uid),
+                day=day,
+                anchor_source=anchor_source,
             )
             if payload.get("has_activity") or payload.get("status") == "closed":
                 done.append(day.isoformat())

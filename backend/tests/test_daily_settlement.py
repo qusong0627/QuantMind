@@ -49,6 +49,7 @@ class FakeSession:
         roundtrips=None,
         positions=None,
         snapshot=None,
+        snapshots=None,
     ):
         self._orders = orders
         self._brokers = brokers or []
@@ -56,7 +57,9 @@ class FakeSession:
         self._fills = fills or []
         self._roundtrips = roundtrips or []
         self._positions = positions or []
-        self._snapshot = snapshot
+        self._snapshots = (
+            snapshots if snapshots is not None else ([snapshot] if snapshot else [])
+        )
         self.calls = 0
         self.committed = 0
 
@@ -75,7 +78,7 @@ class FakeSession:
         if "qm_agent_ledger_position" in sql:
             return _Result(self._positions)
         if "real_account_snapshots" in sql:
-            return _Result([self._snapshot] if self._snapshot else [])
+            return _Result(self._snapshots)
         if "FROM trades" in sql:
             return _Result([self._trades])
         if "GROUP BY 1 ORDER BY 2 DESC" in sql:
@@ -267,3 +270,75 @@ async def test_trading_days_between_falls_back_to_weekdays(monkeypatch):
     days = await ds.trading_days_between(date(2026, 11, 6), date(2026, 11, 9))
     # 11-07/11-08 是周末
     assert days == [date(2026, 11, 6), date(2026, 11, 9)]
+
+
+_ZERO_ORDERS = {
+    "total": 0,
+    "filled": 0,
+    "partial": 0,
+    "cancelled": 0,
+    "rejected": 0,
+    "pending": 0,
+    "filled_value": 0,
+}
+_ZERO_TRADES = {
+    "value": 0,
+    "buy_value": 0,
+    "sell_value": 0,
+    "commission": 0,
+    "stamp_duty": 0,
+    "transfer_fee": 0,
+}
+_TWO_ACCOUNTS = [
+    {
+        "source": "qmt_exec",
+        "cash": 22932177.87,
+        "market_value": 821632.0,
+        "total_asset": 23773059.87,
+        "snapshot_at": "2026-11-06 15:05:00",
+    },
+    {
+        "source": "tdx_bridge",
+        "cash": 900000.0,
+        "market_value": 20242.89,
+        "total_asset": 920242.89,
+        "snapshot_at": "2026-11-06 15:06:00",
+    },
+]
+
+
+@pytest.mark.asyncio
+async def test_anchor_source_keeps_accounts_separate():
+    """两个平台同期报快照时，资金锚按主账户取，另一账户只进 recon。"""
+    session = FakeSession(
+        orders=_ZERO_ORDERS, trades=_ZERO_TRADES, snapshots=_TWO_ACCOUNTS
+    )
+    out = await ds.compute_day(
+        session,
+        tenant_id="default",
+        user_id="10000001",
+        day=DAY,
+        anchor_source="qmt_exec",
+    )
+    assert out["total_asset"] == 23773059.87
+    assert out["recon_json"]["snapshot_source"] == "qmt_exec"
+    assert out["recon_json"]["snapshots"]["tdx_bridge"]["total_asset"] == 920242.89
+
+
+@pytest.mark.asyncio
+async def test_without_anchor_uses_latest_snapshot_but_keeps_all():
+    session = FakeSession(
+        orders=_ZERO_ORDERS, trades=_ZERO_TRADES, snapshots=_TWO_ACCOUNTS
+    )
+    out = await ds.compute_day(
+        session, tenant_id="default", user_id="10000001", day=DAY
+    )
+    # 没指定主账户 → 取快照时间最新的那条（tdx 15:06）
+    assert out["recon_json"]["snapshot_source"] == "tdx_bridge"
+    assert set(out["recon_json"]["snapshots"]) == {"qmt_exec", "tdx_bridge"}
+
+
+def test_anchor_source_for_broker_mapping():
+    assert ds.anchor_source_for_broker("qmt_exec") == "qmt_exec"
+    assert ds.anchor_source_for_broker("tdx") == "tdx_bridge"
+    assert ds.anchor_source_for_broker("tiger") is None
