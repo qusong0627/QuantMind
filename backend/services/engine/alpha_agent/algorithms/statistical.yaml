@@ -1,0 +1,36 @@
+# 挖掘算法 manifest（移植 P2）——字段契约见 algorithm_registry.py。
+# key 必须等于文件名；runner 为仓根相对路径且必须真实存在（装载时校验）。
+key: statistical
+name: 统计量价挖掘
+vendor: QuantMind
+desc: >-
+  不调用 LLM：28 个有文献依据的价量候选（反转/动量/彩票/波动率/流动性/量价/
+  日内结构七族）逐日做截面 IC/RankIC 检验——多周期（1/5/10/20 日）+ t 值 +
+  BH-FDR 多重检验修正 + 折间符号一致性闸（再选择率降为审计量）+ IC 半衰期
+  + 样本外一致性闸 + A 股可交易性过滤（涨跌停/停牌/次新/低流动性/ST）+
+  行业市值中性化，按选择分（|RankIC|×折间符号一致性）取 Top-K → 选择期
+  相关性去重（被拒者不占席、后续候选递补）→ IC 加权合成因子，因子带真实
+  IC/ICIR/分组单调性/逐折 IC/选择分；落库身份走任务指纹（同配置重跑
+  幂等刷新）；样本外验证通过独立耐久验证任务显式提交。
+version: "quantmind-statistical/2.0"
+enabled: true
+tags: [statistical, no-llm]
+markets: [a_share]
+freqs: [day]
+uses_datasets: false
+# 运行时能力面：统计派不喂 LLM（无提示词池注入 / 无 --loop-n --direction），
+# 且纯 CPU 跑截面检验——GPU 硬件锁不得拦它（占的是 CPU 不是显卡）。
+uses_llm: false
+requires_gpu: false
+# 进度契约：runner 追加写 $LOG_DIR/progress.jsonl（阶段 key 见下方 stages）
+progress_kind: jsonl
+# 与引擎 progress 事件一一对应（统计/engine.py 的 emit 调用的 stage 全集）
+stages:
+  - {key: data, label: 取数}
+  - {key: filter, label: 可交易性过滤}
+  - {key: evaluate, label: 截面检验}
+  - {key: select, label: 入库}
+  - {key: stability, label: 子窗稳定性}
+  - {key: dedup, label: 相关性去重}
+  - {key: composite, label: IC 加权合成}
+runner: backend/services/engine/alpha_agent/statistical/worker.py

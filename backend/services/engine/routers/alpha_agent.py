@@ -356,6 +356,37 @@ async def start_evolution(
     }
 
 
+@router.get("/tasks/history")
+async def mining_task_history(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1000000),
+    status: str | None = None,
+    include_archived: bool = False,
+):
+    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+        AlphaMiningTaskPersistence,
+    )
+    from backend.shared.secret_redaction import redact_data
+
+    user_id, tenant_id = get_authenticated_identity(request)
+    try:
+        page = await AlphaMiningTaskPersistence().history_page(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+            status=status,
+            include_archived=include_archived,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(
+        content=jsonable_encoder({"code": 200, "data": redact_data(page)}),
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 @router.get("/tasks/{task_id}")
 async def get_task_status(task_id: str, request: Request):
     """查询演化任务状态（附带该任务已落库的结构化因子，供前端实时展示）"""
@@ -1683,37 +1714,6 @@ async def mining_submission_by_request_key(
         raise HTTPException(status_code=404, detail="Mining submission not found")
     return JSONResponse(
         content=jsonable_encoder({"code": 200, "data": redact_data(public_task(task))}),
-        headers={"Cache-Control": "private, no-store"},
-    )
-
-
-@router.get("/tasks/history")
-async def mining_task_history(
-    request: Request,
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0, le=1000000),
-    status: str | None = None,
-    include_archived: bool = False,
-):
-    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
-        AlphaMiningTaskPersistence,
-    )
-    from backend.shared.secret_redaction import redact_data
-
-    user_id, tenant_id = get_authenticated_identity(request)
-    try:
-        page = await AlphaMiningTaskPersistence().history_page(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            limit=limit,
-            offset=offset,
-            status=status,
-            include_archived=include_archived,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return JSONResponse(
-        content=jsonable_encoder({"code": 200, "data": redact_data(page)}),
         headers={"Cache-Control": "private, no-store"},
     )
 

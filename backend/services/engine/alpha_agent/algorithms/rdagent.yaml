@@ -1,0 +1,25 @@
+# 挖掘算法 manifest（移植 P2）——字段契约见 algorithm_registry.py。
+# key 必须等于文件名；runner 为仓根相对路径且必须真实存在（装载时校验）。
+key: rdagent
+name: RD-Agent 因子演化
+vendor: 微软 RD-Agent（QuantMind 适配）
+desc: >-
+  LLM 多轮演化：假设 → 实验 → 编码 → 回测 → 反馈逐轮递进，产出可回测的
+  因子表达式。演化轮数（loop_n）与数据集选择只对本算法生效。
+version: "quantmind-rd/1.0"
+enabled: true
+tags: [llm, evolution]
+markets: [a_share]
+freqs: [day]
+uses_datasets: true
+uses_llm: true
+requires_gpu: false
+# 进度契约：RD-Agent 工作目录扫描（Loop_* 目录 + 阶段 pkl）
+progress_kind: workdir
+stages:
+  - {key: hypothesis, label: 假设}
+  - {key: experiment, label: 实验}
+  - {key: coder, label: 编码}
+  - {key: runner, label: 回测}
+  - {key: feedback, label: 反馈}
+runner: scripts/alpha_agent/run_rd_agent.py
