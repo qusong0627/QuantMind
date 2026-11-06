@@ -43,6 +43,17 @@ BJ = timezone(timedelta(hours=8))
 TRADING_GAP_MIN = 3      # 交易日白天阈值
 OFFHOURS_GAP_MIN = 30    # 其余时段阈值
 
+# ── 内存告急告警（2026-11-05 崩机事故后加）──────────────────────────────
+# 那天 22:07 起 OOM 连环杀（orca-client / tigervnc ×2 / orca-daemon），22:14 dockerd
+# 健康检查全部超时，22:23 硬崩、停机 11 小时；05:20–05:50 还有过一轮 l2-panel-full
+# 被反复 OOM。内核 OOM-kill 是**结果**，机器在它之前就已经吃紧了——所以这里在水位
+# 掉到阈值时就喊人，而不是等内核动手。
+# 阈值 8GB：本机 60GB 常态可用 23–26GB，L2 面板夜跑会压到 10–15GB；8GB 之下基本
+# 已经进入抖动区，再低就该动手停重活了。
+MEM_ALERT_GB = float(os.getenv("QM_MEM_ALERT_GB") or 8)
+MEM_ALERT_COOLDOWN_MIN = int(os.getenv("QM_MEM_ALERT_COOLDOWN_MIN") or 30)
+MEM_STATE = ROOT / "logs" / "host_mem_alert.json"
+
 
 def now_bj() -> datetime:
     return datetime.now(BJ)
@@ -172,6 +183,100 @@ def render(gap: float, mode: str, prev: dict, now: datetime,
     return msg
 
 
+def mem_available_gb() -> float | None:
+    """``/proc/meminfo`` 的 MemAvailable（GB）；读不到返回 None（不猜）。"""
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 1024 / 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def top_rss(limit: int = 5) -> list[str]:
+    """内存占用前 N 的进程——告警里直接给出「谁在吃」，不然收到消息还得自己查。"""
+    rows: list[tuple[int, str]] = []
+    try:
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit():
+                continue
+            try:
+                status = (proc / "status").read_text(encoding="utf-8")
+                rss_kb = next(
+                    int(line.split()[1])
+                    for line in status.splitlines()
+                    if line.startswith("VmRSS:")
+                )
+                cmd = (
+                    (proc / "cmdline")
+                    .read_bytes()
+                    .replace(b"\0", b" ")
+                    .decode("utf-8", "replace")
+                    .strip()
+                )
+            except (OSError, StopIteration, ValueError, IndexError):
+                continue
+            rows.append((rss_kb, cmd[:90]))
+    except OSError:
+        return []
+    rows.sort(reverse=True)
+    return [f"{rss / 1024 / 1024:.1f}GB {cmd}" for rss, cmd in rows[:limit]]
+
+
+def memory_pressure_alert(now: datetime, *, dry_run: bool) -> str | None:
+    """可用内存低于阈值 → 推 QQ 告警（带冷却）；否则保持安静。
+
+    冷却的意义：内存风暴会持续几分钟到几十分钟，每分钟推一条只会让人把告警静音，
+    那正是最需要它响的时候。冷却期内只写 stdout（cron 日志里仍留痕）。
+    """
+    avail = mem_available_gb()
+    if avail is None or avail >= MEM_ALERT_GB:
+        return None
+    last: datetime | None = None
+    try:
+        state = json.loads(MEM_STATE.read_text(encoding="utf-8"))
+        last = datetime.fromisoformat(str(state.get("last_alert") or ""))
+    except (OSError, json.JSONDecodeError, ValueError):
+        last = None
+    cooldown_active = False
+    if last is not None:
+        try:
+            cooldown_active = (now - last) < timedelta(minutes=MEM_ALERT_COOLDOWN_MIN)
+        except TypeError:  # 状态文件被写坏（naive 时间戳）：当作没有上次
+            cooldown_active = False
+    if cooldown_active:
+        print(
+            f"[{now:%F %T}] 🟠 内存仍低（{avail:.1f}GB < {MEM_ALERT_GB:.0f}GB），"
+            f"冷却中不重复推（上次 {last:%F %T}）"
+        )
+        return None
+    body = (
+        f"可用内存 {avail:.1f}GB，低于阈值 {MEM_ALERT_GB:.0f}GB。\n"
+        f"{MEM_ALERT_COOLDOWN_MIN} 分钟内不重复推。\n\n"
+        "2026-11-05 就是这样崩的：22:07 起 OOM 连环杀、22:14 dockerd 健康检查全超时、"
+        "22:23 硬崩，停机 11 小时（当晚 CN 同步与次日批量推理全丢）。\n\n"
+        "占用前 5：\n" + "\n".join(f"· {t}" for t in top_rss()) + "\n\n"
+        "处理：先看 l2-panel 夜跑（23:00–05:50 每 10 分钟检查）与训练/因子计算是否在跑，"
+        "必要时停一轮，别等内核 OOM。"
+    )
+    if dry_run:
+        return body
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from push_notify import notify
+
+        notify("🟠 主机内存告急", body)
+    except Exception as exc:  # noqa: BLE001 - 推不出去下分钟重试（不写状态）
+        print(f"⚠️ 内存告警推送失败（下分钟重试）: {exc}", file=sys.stderr)
+        return None
+    try:
+        MEM_STATE.write_text(json.dumps({"last_alert": now.isoformat()}), encoding="utf-8")
+    except OSError:
+        pass
+    return body
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="主机存活看门狗")
     ap.add_argument("--boot", action="store_true", help="开机模式（@reboot 调用）")
@@ -226,6 +331,10 @@ def main() -> int:
                 print(f"⚠️ 心跳写入失败（已留痕，下分钟重试）: {exc}",
                       file=sys.stderr)
                 write_fail_marker(exc, now)
+        # 内存告急放在心跳之后：内存压力不该拖累「主机还活着」这条最基础的证据
+        mem_msg = memory_pressure_alert(now, dry_run=args.dry_run)
+        if mem_msg:
+            print(f"[{now:%F %T}] 🟠 内存告急\n{mem_msg}")
     except Exception as exc:  # noqa: BLE001  看门狗绝不阻断 cron
         print(f"⚠️ host_watchdog 异常（不影响其他任务）: {exc}", file=sys.stderr)
     return 0

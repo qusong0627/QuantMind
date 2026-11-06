@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -37,7 +37,8 @@ def env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     `datetime.now()` 无需冻结也必然「到点」——比 mock 掉 datetime 少一层耦合。
     """
     marks: set[str] = set()
-    state: dict[str, Any] = {"marks": marks}
+    catchups: set[str] = set()
+    state: dict[str, Any] = {"marks": marks, "catchups": catchups}
 
     def _fake_get_schedule(_market: str) -> dict[str, Any]:
         return {
@@ -49,10 +50,17 @@ def env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         }
 
     monkeypatch.setattr(sched, "get_schedule", _fake_get_schedule)
-    monkeypatch.setattr(
-        sched, "_last_run_today", lambda market, date_str: (market, date_str) in marks
-    )
+    monkeypatch.setattr(sched, "_has_run", lambda market, date_str: (market, date_str) in marks)
     monkeypatch.setattr(sched, "_mark_run", lambda market, date_str: marks.add((market, date_str)))
+    monkeypatch.setattr(
+        sched, "_catchup_done_today", lambda market, date_str: (market, date_str) in catchups
+    )
+    monkeypatch.setattr(
+        sched, "_mark_catchup", lambda market, date_str: catchups.add((market, date_str))
+    )
+    # 日历换替身：默认「答不了」= 不补跑，既有用例与真实日历解耦。
+    # 跨日补跑用例自己覆盖这个替身。
+    monkeypatch.setattr(sched, "previous_trading_day", lambda market, today: None)
     # 交易日历门换替身：既有测试与真实日历解耦（到点/标记纪律与日历无关）
     monkeypatch.setattr(sched, "no_data_window", lambda market, now: None)
     return state
@@ -240,3 +248,103 @@ def test_calendar_skip_leaves_the_day_open_for_a_later_tick(
     assert second["dispatched"] == ["US"]
     assert second["skipped"] == {}
     assert fake.sent == ["US"]
+
+
+# ---------------------------------------------------------------------------
+# 跨日补跑（2026-11-05 崩机）：当日班次还没到点，但上一交易日没跑成
+# ---------------------------------------------------------------------------
+
+
+def _freeze_missing_previous_day(
+    monkeypatch: pytest.MonkeyPatch, cfg_time: str, at: datetime
+) -> None:
+    _freeze_uniform_schedule(monkeypatch, cfg_time, at)
+    # 上一交易日钉死：补跑判据只关心「那天有没有标记」，不关心真实日历
+    monkeypatch.setattr(
+        sched, "previous_trading_day", lambda market, today: date(2026, 11, 5)
+    )
+
+
+def test_missed_previous_day_is_caught_up_before_todays_slot(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """CN 20:55 的班次在崩机夜丢失 → 次日 09:10 开机必须立刻补跑。
+
+    事故形态：宿主 21:44 崩机、次日 09:03 才起。旧逻辑只问「今天 20:55 到点没」，
+    没到就跳过 ⇒ 落后数据挂一整天，批量推理两班全撞数据门禁。
+    """
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"A": "QuantDB A股"})
+    _freeze_missing_previous_day(monkeypatch, "20:55", datetime(2026, 11, 6, 9, 10, 0))
+
+    result = sched.dispatch_due_syncs()
+
+    assert fake.sent == ["A"]
+    assert result["catchup"] == ["A"]
+    assert result["dispatched"] == [], "补跑不是当天班次，不能混进 dispatched"
+    assert env["marks"] == set(), "补跑不得占用当天的 last_run 名额"
+    assert {m for m, _d in env["catchups"]} == {"A"}
+
+
+def test_catchup_is_idempotent_within_the_day(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"A": "QuantDB A股"})
+    _freeze_missing_previous_day(monkeypatch, "20:55", datetime(2026, 11, 6, 9, 10, 0))
+
+    sched.dispatch_due_syncs()
+    second = sched.dispatch_due_syncs()
+
+    assert second["catchup"] == []
+    assert fake.sent == ["A"], "同一天不得重复补跑"
+
+
+def test_no_catchup_when_previous_day_already_ran(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """上一交易日跑过了 → 未到点就安静等待（回归守卫：不许变成「随时都跑」）。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"A": "QuantDB A股"})
+    _freeze_missing_previous_day(monkeypatch, "20:55", datetime(2026, 11, 6, 9, 10, 0))
+    env["marks"].add(("A", "2026-11-05"))
+
+    result = sched.dispatch_due_syncs()
+
+    assert result == {"now": "09:10", "dispatched": [], "catchup": [], "skipped": {}}
+    assert fake.sent == []
+
+
+def test_catchup_does_not_consume_todays_scheduled_slot(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """补跑之后，当晚到点仍必须正常跑一次——否则当天的新数据永远不同步。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"A": "QuantDB A股"})
+    _freeze_missing_previous_day(monkeypatch, "20:55", datetime(2026, 11, 6, 9, 10, 0))
+    assert sched.dispatch_due_syncs()["catchup"] == ["A"]
+
+    _freeze_missing_previous_day(monkeypatch, "20:55", datetime(2026, 11, 6, 20, 55, 5))
+    evening = sched.dispatch_due_syncs()
+
+    assert evening["dispatched"] == ["A"]
+    assert evening["catchup"] == []
+    assert fake.sent == ["A", "A"]
+
+
+def test_calendar_unknown_does_not_trigger_catchup(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    """日历答不了时不外推：补跑的代价是一整轮同步，宁可这轮不补。"""
+    fake = _FakeCelery()
+    _install_celery(monkeypatch, fake)
+    monkeypatch.setattr(sched, "MARKETS", {"A": "QuantDB A股"})
+    _freeze_uniform_schedule(monkeypatch, "20:55", datetime(2026, 11, 6, 9, 10, 0))
+    monkeypatch.setattr(sched, "previous_trading_day", lambda market, today: None)
+
+    assert sched.dispatch_due_syncs()["catchup"] == []
+    assert fake.sent == []

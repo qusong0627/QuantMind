@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -140,4 +140,52 @@ def test_always_on_market_has_no_gate(monkeypatch) -> None:
 def test_unknown_market_fails_open(monkeypatch) -> None:
     calls = _stub_calendar(monkeypatch, {})
     assert no_data_window("XYZ", datetime(2026, 10, 11, 4, 15, 30)) is None
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# 上一交易日（跨日补跑判据）：昨天该跑没跑时，缺的到底是哪一天
+# ---------------------------------------------------------------------------
+
+
+def test_previous_trading_day_skips_the_weekend(monkeypatch) -> None:
+    """周一问「上一交易日」得到周五——不能把周末算成「该跑没跑」。"""
+    _stub_calendar(
+        monkeypatch,
+        {"2026-11-08": False, "2026-11-07": False, "2026-11-06": True},
+    )
+    assert gate.previous_trading_day("A", date(2026, 11, 9)) == date(2026, 11, 6)
+
+
+def test_previous_trading_day_excludes_today(monkeypatch) -> None:
+    """严格早于今日：今天的班次还没跑不算「漏」——否则每 tick 都会补跑。"""
+    calls = _stub_calendar(monkeypatch, {"2026-11-05": True})
+    assert gate.previous_trading_day("A", date(2026, 11, 6)) == date(2026, 11, 5)
+    assert {d for _, d in calls} == {"2026-11-05"}, "不得把今天喂进日历"
+
+
+def test_previous_trading_day_uses_the_markets_calendar(monkeypatch) -> None:
+    calls = _stub_calendar(monkeypatch, {"2026-11-05": True})
+    gate.previous_trading_day("US", date(2026, 11, 6))
+    assert {m for m, _ in calls} == {"US"}
+
+
+def test_previous_trading_day_gives_up_when_calendar_cannot_answer(monkeypatch) -> None:
+    """日历答不了就返回 None（调用方不补跑）：补跑是一整轮同步，不许靠猜触发。"""
+    _stub_calendar(monkeypatch, {"2026-11-05": None})
+    assert gate.previous_trading_day("A", date(2026, 11, 6)) is None
+
+
+def test_previous_trading_day_gives_up_after_lookback(monkeypatch) -> None:
+    """连续非交易日超过回看窗口也返回 None，不无限往回走。"""
+    table = {
+        (date(2026, 11, 6) - timedelta(days=i)).isoformat(): False for i in range(1, 25)
+    }
+    _stub_calendar(monkeypatch, table)
+    assert gate.previous_trading_day("A", date(2026, 11, 6)) is None
+
+
+def test_always_on_market_has_no_previous_trading_day(monkeypatch) -> None:
+    calls = _stub_calendar(monkeypatch, {"2026-11-05": True})
+    assert gate.previous_trading_day("BC", date(2026, 11, 6)) is None
     assert calls == []

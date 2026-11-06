@@ -224,6 +224,22 @@ if [ "$(state_of "$MAIN_CONTAINER")" = "running" ]; then
     curl -sf -m 5 -o /dev/null http://127.0.0.1:8000/health || true
 fi
 
+# ---------- 10) 开机补池链（异步，不阻塞本脚本退出） ----------
+# 2026-11-05 崩机事故：宿主 21:44（北京）硬崩、停机 11 小时，05:30/06:30/07:30 三档
+# 补池重试与 08:50 盘前检查**全部**被跳过；开机后没有任何机制把链接上，CN 数据停在
+# 崩机前一天、08:00/09:05 两班批推理全撞数据门禁（l1_factors 最新可用 2026-11-04），
+# 当天三个 agent 全部 empty_pool。
+#
+# 接在这里而不是再加一条 @reboot：本脚本已经是开机入口，且它**等容器 healthy
+# 之后**才走到这一步（补池链要靠 docker exec 进容器重建 CUSTOM）。
+# 链路自带 flock / 已最新即退出 / 内存闸，空跑只花三次 ls；自愈成功才推 🟢。
+# QM_BOOT_CHAIN=0 可临时关掉（演练/调试用）。
+if [ "${QM_BOOT_CHAIN:-1}" = "1" ] && [ "$(state_of "$MAIN_CONTAINER")" = "running" ]; then
+  info "后台启动开机补池链：scripts/alpha_refresh_retry.sh（日志 logs/keepers/alpha_refresh_retry.log）"
+  nohup bash "$PROJECT_DIR/scripts/alpha_refresh_retry.sh" \
+    >> "$PROJECT_DIR/logs/keepers/alpha_refresh_retry.log" 2>&1 &
+fi
+
 # ---------- 汇总 ----------
 if [ "$ISSUES" -eq 0 ]; then
   log "===== boot_guard 完成：全部就绪 ====="

@@ -17,12 +17,20 @@ import os
 from datetime import datetime
 from typing import Any
 
-from backend.services.engine.tasks.schedule_gate import no_data_window, not_due_yet
+from backend.services.engine.tasks.schedule_gate import (
+    no_data_window,
+    not_due_yet,
+    previous_trading_day,
+)
 
 logger = logging.getLogger(__name__)
 
 _SCHEDULE_KEY = "quantmind:sync_schedule:{market}"
 _LAST_RUN_KEY = "quantmind:sync_schedule_last_run:{market}:{date}"
+#: 跨日补跑的去重键（值 = 补跑当天的日期）。**与 last_run 分开**是刻意的：
+#: 补跑要在「当天正常班次还没到点」时提前跑一轮，如果占用当天的 last_run 名额，
+#: 今晚到点的正常班次就会被去重逻辑挡掉，当天新数据反而永远不同步。
+_CATCHUP_KEY = "quantmind:sync_schedule_catchup:{market}:{date}"
 
 # 派发任务名：上游同步与自定义数据集重建的超时预算不同（后者是本地磁盘作业，
 # 全量重建可达 40-60 分钟），因此 CUSTOM 走独立任务，见 celery_tasks.py。
@@ -150,9 +158,43 @@ def save_schedule(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _last_run_today(market: str, date_str: str) -> bool:
+def _has_run(market: str, date_str: str) -> bool:
+    """该市场在 ``date_str``（**派发日期**，不是交易日期）是否已派发过。"""
     r = _redis()
     return r.exists(_LAST_RUN_KEY.format(market=market, date=date_str)) > 0
+
+
+#: 旧名保留：语义就是「这一天是否跑过」，跨日补跑复用它查上一交易日。
+_last_run_today = _has_run
+
+
+def _catchup_done_today(market: str, date_str: str) -> bool:
+    r = _redis()
+    return r.exists(_CATCHUP_KEY.format(market=market, date=date_str)) > 0
+
+
+def _mark_catchup(market: str, date_str: str) -> None:
+    r = _redis()
+    r.set(_CATCHUP_KEY.format(market=market, date=date_str), "1", ex=2 * 24 * 3600)
+
+
+def _catchup_needed(market: str, now: datetime, date_str: str) -> bool:
+    """当日班次还没到点，但**上一交易日**的派发标记缺失 ⇒ 该补跑。
+
+    2026-11-05 事故：宿主 21:44（北京）崩机、次日 09:03 才起，CN 排在 20:55 的班次
+    整个丢掉。而派发判据只问「今天是否到点」——开机时 20:55 还没到，直接跳过，
+    `daily_unadjusted` 于是停在崩机前一天，直到当晚 20:55 才可能补上；批量推理
+    08:00/09:05 两班全部撞数据门禁，当天候选池空。
+
+    补跑判据用**上一交易日**而不是「今天」：正常班次在收盘后跑完才写标记，所以
+    次日上午看到「昨天没标记」就一定是漏了。写独立的 catch-up 键，不占当天名额。
+    """
+    if _catchup_done_today(market, date_str):
+        return False
+    prev = previous_trading_day(market, now.date())
+    if prev is None:
+        return False
+    return not _has_run(market, prev.isoformat())
 
 
 def _mark_run(market: str, date_str: str) -> None:
@@ -298,6 +340,12 @@ def dispatch_due_syncs() -> dict[str, Any]:
     交易日历门（P2-3 / M7）：``no_data_window``——{今日, 昨日} 两个自然日
     按该市场日历都非交易日（周日、长假内部日）时跳过并留 ``skipped`` 原因；
     周六凌晨取周五收盘的班次**不跳**（D-1 是交易日）。日历答不了 = 放行。
+
+    跨日补跑（2026-11-05 崩机事故）：当日班次还**没到点**、但上一交易日的派发
+    标记缺失时提前跑一轮（``_catchup_needed``）。没有这条，晚上才排班的市场
+    （CN 20:55）在「关机错过 → 次日早上开机」后要等到当晚才补，当天一整天都在
+    用落后的数据。补跑写独立的 catch-up 键，**不占**当天 last_run 名额，
+    今晚的正常班次照跑。
     """
     from backend.services.engine.qlib_app.celery_config import celery_app
 
@@ -305,19 +353,24 @@ def dispatch_due_syncs() -> dict[str, Any]:
     now_hm = now.strftime("%H:%M")
     date_str = now.strftime("%Y-%m-%d")
     dispatched: list[str] = []
+    catchup: list[str] = []
     skipped: dict[str, str] = {}
 
     for market in MARKETS:
         cfg = get_schedule(market)
         if not cfg.get("enabled"):
             continue
-        if not_due_yet(now, str(cfg.get("time") or "")):
+        due_today = not not_due_yet(now, str(cfg.get("time") or ""))
+        if not due_today and not _catchup_needed(market, now, date_str):
             continue
         idle_reason = no_data_window(market, now)
         if idle_reason:
             skipped[market] = idle_reason
             continue
-        if _last_run_today(market, date_str):
+        if due_today:
+            if _has_run(market, date_str):
+                continue
+        elif _catchup_done_today(market, date_str):
             continue
         try:
             celery_app.send_task(
@@ -333,10 +386,24 @@ def dispatch_due_syncs() -> dict[str, Any]:
                 exc_info=True,
             )
             continue
+        if not due_today:
+            _mark_catchup(market, date_str)
+            catchup.append(market)
+            logger.info(
+                "[SyncSchedule] %s 上一交易日班次缺失，%s 开机补跑",
+                MARKETS[market],
+                now_hm,
+            )
+            continue
         _mark_run(market, date_str)
         dispatched.append(market)
         logger.info(
             "[SyncSchedule] %s 到点 %s，已派发同步任务", MARKETS[market], now_hm
         )
 
-    return {"now": now_hm, "dispatched": dispatched, "skipped": skipped}
+    return {
+        "now": now_hm,
+        "dispatched": dispatched,
+        "catchup": catchup,
+        "skipped": skipped,
+    }

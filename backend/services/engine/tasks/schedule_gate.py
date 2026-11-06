@@ -96,3 +96,28 @@ def no_data_window(market: str, now: datetime) -> str | None:
             "无新数据可同步"
         )
     return None
+
+
+def previous_trading_day(
+    market: str, today: date, *, max_lookback: int = 15
+) -> date | None:
+    """``today`` **之前**（不含）的最近一个交易日；日历答不了返回 ``None``。
+
+    只服务「跨日补跑」：当日班次还没到点、但上一交易日的派发标记缺失时，要能说出
+    缺的是哪一天。不能用 ``today - 1``——周一/节后会把周末与假期算成「该跑没跑」，
+    每次开机都白补一轮。
+
+    ``_probe_trading_day`` 返回 ``None``（日历库缺失/越界）时**立即放弃**、不外推：
+    补跑代价是一整轮同步，宁可这轮不补，也不能靠猜触发。
+    """
+    calendar_market = _SYNC_MARKET_CALENDAR.get(str(market or "").upper())
+    if not calendar_market:
+        return None
+    for offset in range(1, max_lookback + 1):
+        day = today - timedelta(days=offset)
+        probe = _probe_trading_day(calendar_market, day)
+        if probe is None:
+            return None
+        if probe:
+            return day
+    return None
