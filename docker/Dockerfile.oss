@@ -4,8 +4,11 @@
 FROM python:3.10-slim-bookworm
 
 # 镜像源参数（构建时可传入）
-ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/
-ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+# 2026-11-07：默认从清华换成阿里 —— 本机出口访问 mirrors.tuna.tsinghua.edu.cn
+# （apt 与 pypi 的 http/https 全部）返回 403 Forbidden，构建在第一个 apt 层就失败。
+# 阿里云主仓/debian-security/PyPI 实测均 200；需要别的源时用 --build-arg 覆盖。
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 ARG APT_MIRROR=mirrors.aliyun.com
 
 # torch 版本选择：skip（默认，跳过 torch 安装，适合镜像已含训练组件/纯指标行情服务）、

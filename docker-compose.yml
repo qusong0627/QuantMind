@@ -76,7 +76,11 @@ services:
         QM_GIT_COMMIT: ${QM_GIT_COMMIT:-unknown}
         QM_GIT_BRANCH: ${QM_GIT_BRANCH:-unknown}
         QM_GIT_DIRTY: ${QM_GIT_DIRTY:-unknown}
-        APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
+        # APT 源（2026-11-07）：默认从 tuna 改为 aliyun —— 本机出口访问
+        # mirrors.tuna.tsinghua.edu.cn（http/https 均）返回 403 Forbidden，
+        # 镜像构建在第一个 apt 层就失败；aliyun 主仓与 debian-security 均 200。
+        # 与 docker/Dockerfile.oss 的 ARG 默认值一致，可用 APT_MIRROR 覆盖。
+        APT_MIRROR: ${APT_MIRROR:-mirrors.aliyun.com}
     platform: linux/amd64
     # GPU 直通：宿主机已安装 nvidia-container-toolkit 时可开启
     # deploy:
@@ -803,7 +807,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.data-gateway
       args:
-        APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
+        APT_MIRROR: ${APT_MIRROR:-mirrors.aliyun.com}
     container_name: quantmind-data-gateway
     # 内存上限（同上，2026-10-14 防假死）。
     mem_limit: 2g
