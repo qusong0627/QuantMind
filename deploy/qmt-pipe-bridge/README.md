@@ -67,6 +67,22 @@ QMT 的 C++ 调用挂住，这些查询全部超时，而 `ping` 与行情方法
 powershell -NoProfile -ExecutionPolicy Bypass -File register_strategy_watchdog.ps1
 ```
 
+### 账户通道熔断（积压不回灌）
+
+2026-11-06 事故链：QMT 策略主线程被交易类查询挂死后，容器轮询继续入队，伴生桥
+每 15s 才超时放掉一条，队列越积越多；**重启 QMT 后这些积压立刻被灌进新策略**
+——三次重启的存活时间 12h → 6min → 3min。现在伴生桥每 30s 用 `get_asset` 探活
+（`ping` 与行情跑在后台 listener 线程，主线程挂死时仍然正常，不能判健康）：
+
+* 连续 2 次探活超时 → `strategy_state=unresponsive`；
+* 此后**交易类只读请求本地立即失败**（方法集合见 `bridge_gates.py`，与 QMT 侧
+  `LISTENER_DEFERRED_METHODS` 同源，含 `query_stock_*` 线名），不转发、不占管道、
+  重启后不回灌；
+* **订单/撤单永远放行**；行情类（`get_full_tick` 等）不受影响；
+* 探针一成功立即回到 `ok`。状态经 `/health` 的 `strategy_state` 暴露。
+
+配套：轮询间隔已收紧（positions 10s / orders 5s / trades 15s），降低主线程压力。
+
 ## 接口
 
 伴生桥只监听 `127.0.0.1:17720`，提供 `/api/v1/qmt/call` 与 `/health`；

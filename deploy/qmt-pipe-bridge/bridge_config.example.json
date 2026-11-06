@@ -15,7 +15,7 @@
   },
   "positions": {
     "enabled": true,
-    "interval_s": 3,
+    "interval_s": 10,
     "ttl_s": 120
   },
   "quotes": {
@@ -34,12 +34,12 @@
   },
   "orders": {
     "enabled": true,
-    "interval_s": 2,
+    "interval_s": 5,
     "maxlen": 2000
   },
   "trades": {
     "enabled": true,
-    "interval_s": 5,
+    "interval_s": 15,
     "maxlen": 2000
   },
   "budget": {
@@ -62,7 +62,9 @@
     "heartbeat_key": "qm:qmt:pipe:heartbeat",
     "metrics_key": "qm:qmt:pipe:metrics",
     "interval_s": 5,
-    "ttl_s": 30
+    "ttl_s": 30,
+    "account_probe_s": 30,
+    "account_probe_timeout_s": 6
   },
   "tap": {
     "enabled": false,

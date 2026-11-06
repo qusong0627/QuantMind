@@ -36,10 +36,12 @@ except Exception:
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.environ.get('QMT_VENV_SITE_PACKAGES',
                                    r'C:\xmt\venv\Lib\site-packages'))
+sys.path.insert(0, BASE)
 
 import redis  # noqa: E402
 from bigqmt_signal_trader.transports.pipe_transport import NamedPipeTransport  # noqa: E402
 from bigqmt_signal_trader.redis_rpc import decode_rpc_request_payload  # noqa: E402
+import bridge_gates  # noqa: E402
 
 CONFIG_PATH = os.path.join(BASE, 'bridge_config.json')
 LOG_PATH = os.path.join(BASE, '..', 'logs', 'pipe_bridge.log')
@@ -78,7 +80,10 @@ DEFAULT_CONFIG = {
              'enrich_unknown': True},
     'reload': {'enabled': True, 'key': 'qm:qmt:pipe:reload'},
     'health': {'heartbeat_key': 'qm:qmt:pipe:heartbeat', 'metrics_key': 'qm:qmt:pipe:metrics',
-               'interval_s': 5, 'ttl_s': 30},
+               'interval_s': 5, 'ttl_s': 30,
+               # 交易查询通道探针（见 strategy_health_worker）：get_asset 走
+               # adjust 主线程，连续失败即判 unresponsive 并开始退避。
+               'account_probe_s': 30, 'account_probe_timeout_s': 6},
     'tap': {'enabled': True, 'interval_s': 0.5, 'subscribe_refresh_s': 60,
             'max_symbols': 250, 'respect_budget': False,
             # 全市场推送：指向 Redis 集合（成员为后缀式代码）即把订阅扩到全市场，
@@ -196,6 +201,11 @@ class State(object):
         self.tap_ticks = 0
         self.tap_batches = 0
         self.tap_last_push = 0.0
+        # 策略账户通道健康（判定见 bridge_gates）：unknown / ok / unresponsive。
+        # unresponsive 时交易类只读请求立即失败、不再转发（防止挂死后积压回灌）。
+        self.strategy_state = bridge_gates.STATE_UNKNOWN
+        self.account_fail_count = 0
+        self.account_probe_ok_ts = 0.0
 
     def note_error(self, where, exc):
         with self.lock:
@@ -292,6 +302,11 @@ def rpc_backlog():
 
 def market_call(method, params=None, timeout=None, est_ms=200.0):
     """市场类调用：预算 + 让路 + 记账。返回 data 或抛异常。"""
+    with STATE.lock:
+        strategy_state = STATE.strategy_state
+    if bridge_gates.should_drop_request(method, strategy_state):
+        # 策略账户通道判死：本桥自己的轮询也停手，别往单线程管道里加柴。
+        raise RuntimeError('strategy unhealthy, skipped')
     preempt = int(CFG.get('budget.rpc_preempt_queue') or 1)
     if rpc_backlog() >= preempt:
         raise RuntimeError('rpc backlog, skipped')
@@ -326,6 +341,23 @@ def rpc_worker():
             STATE.note_error('rpc.decode', exc)
             continue
         method = str(req.get('method') or '')
+        with STATE.lock:
+            strategy_state = STATE.strategy_state
+        if bridge_gates.should_drop_request(method, strategy_state):
+            # 策略主线程已判定卡死：交易类只读请求立即失败，不转发。继续转发
+            # 只会占住单线程管道，QMT 重启后还会把这些积压回灌给新策略
+            # （2026-11-06：三次重启存活 12h → 6min → 3min，积压一轮比一轮多）。
+            resp = {
+                'request_id': req.get('request_id'), 'ok': False,
+                'error': 'STRATEGY_UNHEALTHY: 交易查询通道卡死，请求未转发'
+                         '（防止重启后积压回灌）',
+            }
+            STATE.note_error('rpc.drop_unhealthy', method)
+            try:
+                write_reply(req, resp)
+            except Exception as exc:
+                STATE.note_error('rpc.reply', exc)
+            continue
         if is_order_method(method):
             busy = order_backlog_gate(
                 rpc_backlog(), CFG.get('budget.order_preempt_queue') or 0)
@@ -1022,6 +1054,13 @@ def _metrics_snapshot():
             'last_error': STATE.last_error or _TAP_STATE['last_error'],
             'duty_ms_10s': round(BUDGET.used_ms(), 0),
             'queue_len': rpc_backlog(),
+            # 策略账户通道健康：ok/unresponsive。unresponsive 时交易类只读请求
+            # 本地快速失败（不回灌），下单/撤单与行情不受影响。
+            'strategy_state': STATE.strategy_state,
+            'account_fail_count': STATE.account_fail_count,
+            'account_probe_ok_age_s': (
+                round(now - STATE.account_probe_ok_ts, 1)
+                if STATE.account_probe_ok_ts else -1),
             'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         }
 
@@ -1305,6 +1344,37 @@ def source_http_worker():
 
 
 # ---------------------------------------------------------------- E. 健康
+def strategy_health_worker():
+    """账户通道探针：``get_asset`` 走 adjust 主线程，是「假活」最灵敏的判据。
+
+    ping 与行情方法跑在后台 listener 线程，主线程挂死时它们仍然 20ms 正常，
+    不能拿来判健康。连续失败达阈值 → unresponsive：rpc_worker 对交易类只读
+    请求快速失败（不回灌），本桥的轮询也自动让路；探针一成功立即回到 ok。
+    """
+    log('strategy health worker start')
+    while not STATE.stop.is_set():
+        interval = float(CFG.get('health.account_probe_s') or 30)
+        timeout = float(CFG.get('health.account_probe_timeout_s') or 6)
+        ok = True
+        try:
+            rpc('get_asset', {}, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            STATE.note_error('health.account', exc)
+        with STATE.lock:
+            STATE.account_fail_count = 0 if ok else STATE.account_fail_count + 1
+            prev = STATE.strategy_state
+            STATE.strategy_state = bridge_gates.next_state(
+                prev, ok, STATE.account_fail_count)
+            if ok:
+                STATE.account_probe_ok_ts = time.time()
+            new = STATE.strategy_state
+            fails = STATE.account_fail_count
+        if new != prev:
+            log('strategy account channel %s -> %s (fails=%d)' % (prev, new, fails))
+        time.sleep(max(5.0, interval))
+
+
 def health_worker():
     hb_key = str(CFG.get('health.heartbeat_key'))
     metrics_key = str(CFG.get('health.metrics_key'))
@@ -1377,6 +1447,8 @@ def main():
         threading.Thread(target=events_worker, args=('order',), daemon=True, name='orders'),
         threading.Thread(target=events_worker, args=('trade',), daemon=True, name='trades'),
         threading.Thread(target=health_worker, daemon=True, name='health'),
+        threading.Thread(target=strategy_health_worker, daemon=True,
+                         name='strategy_health'),
     ]
     for t in threads:
         t.start()
