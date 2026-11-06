@@ -279,7 +279,7 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
           )}
           {selected === 'qmt_exec' && (
             <div className="text-[11px] leading-5 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
-              配置步骤：① 在 QMT 那台 Windows 上部署 <b>伴生桥</b>（<code>qmt-tools</code>，命名管道 + 看门狗常驻）；② 在 QMT 的 <b>实盘交易</b>板块（不是策略编辑器、不是模拟交易板块）加载 <b>QMT_BRIDGE_V2.py</b> 并绑定资金账号运行——启动日志应出现 <code>[v2] quote tap installed</code>；③ 策略里 <b>rpc_allow_order_methods</b> 必须为 True 才会真正下单；④ 上方填写该机器上的 <b>RPC Redis 地址/端口/密码</b>；⑤ 保存后点「测试连接」应返回真实资金与持仓。下单链路 = Redis 队列 → 伴生桥 → 命名管道 → 策略 passorder；成交靠 1–3 秒轮询回收。若「已受理但柜台无委托」，先查策略是否跑在模拟板块/未绑定账号；断在哪一层可跑 <code>scripts/qmt_bridge_selftest.py</code> 逐层看。
+              配置步骤：① 在 QMT 那台 Windows 上部署 <b>伴生桥</b>（<code>qmt-tools</code>，命名管道 + 看门狗常驻）；② 在 QMT 的 <b>实盘交易</b>板块加载 <b>QMT_BRIDGE_V2.py</b> 并绑定资金账号运行——启动日志应出现 <code>[v2] quote tap installed</code>；<b>运行模式必须逐模型改成「实盘」</b>（默认是「模拟」，配置存于 config\indexUserConfig.xml 的 <code>runMode</code>，0=模拟/1=实盘；不改的话 passorder 只在本地撮合、柜台永远无委托）；③ 策略里 <b>rpc_allow_order_methods</b> 必须为 True 才会真正下单；④ 上方填写该机器上的 <b>RPC Redis 地址/端口/密码</b>；⑤ 保存后点「测试连接」应返回真实资金与持仓。下单链路 = Redis 队列 → 伴生桥 → 命名管道 → 策略 passorder；成交靠 1–3 秒轮询回收。若「已受理但柜台无委托」，先查策略是否跑在模拟板块/未绑定账号；断在哪一层可跑 <code>scripts/qmt_bridge_selftest.py</code> 逐层看。
             </div>
           )}
           {selected === 'tdx' && (
