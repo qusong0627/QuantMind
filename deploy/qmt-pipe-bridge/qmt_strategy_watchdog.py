@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import os
 import sys
 import time
@@ -397,6 +398,30 @@ def _restart_bridge(cfg: dict) -> bool:
     return True
 
 
+def _with_timeout(fn, seconds: float):
+    """在守护线程里跑 fn，超时返回 (None, True)。
+
+    管道的同步 ReadFile 在句柄楔死时，transport 自带的 watchdog 定时器可能
+    取消不掉（2026-11-06 现场：看门狗进程卡在 reload 调用上 8 分钟，计划任务
+    一直是 Running，后续每分钟触发全被 IgnoreNew 吞掉——自愈彻底失效）。
+    线程超时后主流程继续走「重启桥」，卡住的线程随进程退出。
+    """
+    result: dict = {}
+
+    def _run():
+        try:
+            result["value"] = fn()
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(float(seconds))
+    if thread.is_alive():
+        return None, True
+    return result.get("value"), False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='QMT 策略交易查询看门狗')
     parser.add_argument('--config', default=CONFIG_PATH)
@@ -412,7 +437,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     transport = _build_transport(cfg)
-    probe = probe_once(transport, cfg)
+    probe, probe_hung = _with_timeout(lambda: probe_once(transport, cfg), 20.0)
+    if probe_hung or probe is None:
+        # 探测都卡住：进程多半还活着，是管道楔死——按「账户不可用」推进重启。
+        probe = Probe(reachable=True, account_ok=False,
+                      error='probe timeout (pipe wedged)')
 
     queue_has_orders = False
     redis_client = None
@@ -470,8 +499,12 @@ def main(argv: list[str] | None = None) -> int:
                         'editor', dec.failures, dec.state)
 
     if decision.action == 'reload' and not args.dry_run:
-        data, err = _call(transport, 'reload_deployment',
-                          {}, cfg['reload_timeout_s'])
+        data, err = _with_timeout(
+            lambda: _call(transport, 'reload_deployment', {},
+                          cfg['reload_timeout_s']),
+            float(cfg['reload_timeout_s']) + 10.0)
+        if data is None and err is None:
+            err = 'reload_deployment timed out (pipe wedged)'
         if data is None:
             # 主线程已经连 reload 都处理不了：先试重启桥，再降级人工。
             decision = _restart_or_alert(

@@ -257,3 +257,20 @@ def test_evaluate_tracks_unresponsive_since():
         {'failures': 3, 'unresponsive_since': now, 'day': time.strftime('%Y%m%d')},
         _probe(account_ok=True), now_ts=now + 10, queue_has_orders=False)
     assert d2.state['unresponsive_since'] == 0.0
+
+
+# --------------------------------------------------------------------------
+# 管道调用线程超时（2026-11-06：看门狗自己卡死 8 分钟，任务被 IgnoreNew 吞掉）
+# --------------------------------------------------------------------------
+def test_with_timeout_returns_value():
+    value, hung = wd._with_timeout(lambda: 42, 1.0)
+    assert value == 42 and hung is False
+
+
+def test_with_timeout_gives_up_on_hang():
+    import time as _time
+
+    start = _time.time()
+    value, hung = wd._with_timeout(lambda: _time.sleep(5), 0.2)
+    assert hung is True and value is None
+    assert _time.time() - start < 2.0
