@@ -57,6 +57,10 @@ DEFAULT_CONFIG = {
             # SLTP/委托轮询完全查不到柜台）。
             'trade_min_interval_s': 2.0, 'trade_burst': 1,
             'internal_trade_min_interval_s': 2.0, 'internal_trade_burst': 4},
+    # 启动错峰：2026-11-06 三次实测「桥一启动，策略 40-60s 内必挂」——五个
+    # worker 零延迟同时开跑，瞬间并发打到 QMT 单线程交易 API。错峰后同一时刻
+    # 只有一个 worker 热身。
+    'startup': {'grace_s': 8.0, 'step_s': 3.0},
     'positions': {'enabled': True, 'interval_s': 3, 'ttl_s': 120},
     'quotes': {'enabled': True, 'tier_a_interval_s': 2, 'tier_b_interval_s': 10,
                'chunk': 25, 'max_symbols': 250, 'stale_after_s': 10,
@@ -344,11 +348,22 @@ def market_call(method, params=None, timeout=None, est_ms=200.0):
 
 
 # ---------------------------------------------------------------- A. RPC
+
+def _startup_delay(step: int) -> None:
+    """启动错峰：第 step 个 worker 等 grace_s + step*step_s 秒再开跑。"""
+    base = float(CFG.get('startup.grace_s') or 0)
+    step_s = float(CFG.get('startup.step_s') or 0)
+    delay = base + max(0, int(step)) * step_s
+    if delay > 0:
+        time.sleep(delay)
+
+
 def rpc_worker():
     account = str(CFG.get('account_id'))
     queue = 'bigqmt:rpc:queue:%s' % account
     blpop_s = float(CFG.get('rpc.queue_blpop_s') or 0.5)
     log('rpc worker start queue=%s' % queue)
+    _startup_delay(0)
     while not STATE.stop.is_set():
         try:
             item = R.blpop(queue, timeout=blpop_s)
@@ -660,6 +675,7 @@ def positions_worker():
     key = 'bigqmt:positions:%s' % account
     stream = 'bigqmt:position_events:%s' % account
     log('positions worker start')
+    _startup_delay(1)
     while not STATE.stop.is_set():
         interval = float(CFG.get('positions.interval_s') or 3)
         if not bool(CFG.get('positions.enabled')):
@@ -857,6 +873,7 @@ def sweep_universe():
 
 def sweep_worker():
     log('sweep worker start')
+    _startup_delay(5)
     while not STATE.stop.is_set():
         interval = float(CFG.get('sweep.interval_s') or 300)
         if not bool(CFG.get('sweep.enabled')) or not session_active():
@@ -900,6 +917,7 @@ def poll_quotes(symbols):
 
 def quotes_worker():
     log('quotes worker start')
+    _startup_delay(1)
     next_a = next_b = 0.0
     ia = ib = 0
     while not STATE.stop.is_set():
@@ -966,6 +984,7 @@ def events_worker(kind):
     seen = _order_seen if kind == 'order' else _trade_seen
     fp = _order_fingerprint if kind == 'order' else _trade_fingerprint
     log('%s events worker start' % kind)
+    _startup_delay(3 if kind == 'order' else 4)
     while not STATE.stop.is_set():
         interval = float(CFG.get('%ss.interval_s' % kind) or (2 if kind == 'order' else 5))
         if not bool(CFG.get('%ss.enabled' % kind)):
@@ -1025,6 +1044,7 @@ def _tap_universe():
 def tap_worker():
     last_sub = 0.0
     log('quote tap worker start')
+    _startup_delay(0)
     while not STATE.stop.is_set():
         interval = float(CFG.get('tap.interval_s') or 0.5)
         if not bool(CFG.get('tap.enabled')):
@@ -1396,6 +1416,7 @@ def strategy_health_worker():
     请求快速失败（不回灌），本桥的轮询也自动让路；探针一成功立即回到 ok。
     """
     log('strategy health worker start')
+    _startup_delay(2)
     while not STATE.stop.is_set():
         interval = float(CFG.get('health.account_probe_s') or 30)
         timeout = float(CFG.get('health.account_probe_timeout_s') or 6)
