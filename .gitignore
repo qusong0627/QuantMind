@@ -316,6 +316,12 @@ backend/tests/test_factor_materialize_gap_mined.py
 # 今后新增的自有因子公式统一放此私有目录，永不入库
 backend/scripts/factor_materialize/private/
 
+# JKP A股因子库构建脚本（403 个特征的 A 股适配式，代码即公式）：不入库。
+# 产物已物化在 quantcustom/quantdb，源码只留在研究工作区 research/jkp_ashare/
+# （research/ 整体忽略），交付备份走 NAS-NSF。
+backend/scripts/build_jkp*.py
+backend/scripts/*_jkp*.py
+
 # 内部发布脚本（含 COS 上传与 CDN 刷新，不进开源仓库）
 scripts/cos-publish/
 REFACTOR_PLAN.md

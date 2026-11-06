@@ -44,7 +44,7 @@ FACTOR_SOURCE_DIRS: dict[FactorSource, str] = {
     "south_factors": "6_ml_datasets/south_factors",
     "alpha_library": "6_ml_datasets/alpha_library",
     # JKP 404 特征的 A 股日频投影（月频库 jkp_ashare_monthly 按月末值前向填充，
-    # 由 backend/scripts/build_jkp_daily_projection.py 生成）
+    # 构建脚本在研究侧（不入库）：research/jkp_ashare/scripts/build_daily_projection.py）
     "jkp_ashare_daily": "6_ml_datasets/jkp_ashare_daily",
     "futures_factors": "6_ml_datasets/futures_factors",
 }
