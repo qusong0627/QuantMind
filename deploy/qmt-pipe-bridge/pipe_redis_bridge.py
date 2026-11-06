@@ -55,8 +55,8 @@ DEFAULT_CONFIG = {
             # 空载可自愈（2026-11-06 实测），把速率压下来是唯一可控变量。
             # 双桶：容器请求与桥内部轮询各自限速，互不饿死（内部抢光令牌会让
             # SLTP/委托轮询完全查不到柜台）。
-            'trade_min_interval_s': 2.0, 'trade_burst': 1,
-            'internal_trade_min_interval_s': 2.0, 'internal_trade_burst': 4},
+            'trade_min_interval_s': 3.0, 'trade_burst': 1,
+            'internal_trade_min_interval_s': 5.0, 'internal_trade_burst': 4},
     # 启动错峰：2026-11-06 三次实测「桥一启动，策略 40-60s 内必挂」——五个
     # worker 零延迟同时开跑，瞬间并发打到 QMT 单线程交易 API。错峰后同一时刻
     # 只有一个 worker 热身。
