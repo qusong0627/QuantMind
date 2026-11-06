@@ -35,13 +35,15 @@ def _no_status_write(payload) -> None:
     return None
 
 
-def _make_model_dir(tmp_path: Path, n_features: int = 6) -> Path:
+def _make_model_dir(tmp_path: Path, n_features: int = 6, *, extra_feature: str | None = None) -> Path:
     """真实 sklearn 模型目录（含 metadata），供导出链与服务使用。"""
     from sklearn.linear_model import Ridge
 
     rng = np.random.default_rng(3)
     cols = [f"f{i}" for i in range(n_features)]
     cols[0] = "mom_ret_1d"  # 白名单列之一
+    if extra_feature:
+        cols[-1] = extra_feature  # 影子/覆盖测试用的第二列 TIER 特征
     x = rng.normal(0, 1, (200, n_features))
     y = x @ np.linspace(0.1, 0.6, n_features) + rng.normal(0, 0.01, 200)
     model = Ridge(alpha=1.0).fit(x, y)
@@ -705,7 +707,7 @@ async def test_tick_dispatches_status_payload_to_injected_writer():
 
     assert len(written) == 1, "每轮 tick 必须下发一次镜像载荷"
     payload = written[0]
-    assert set(payload) == {"updated_at", "counters", "config", "governor"}
+    assert set(payload) == {"updated_at", "counters", "config", "governor", "shadow"}
     assert json.loads(payload["config"])["enabled"] is True
     assert "未配置模型目录" in (json.loads(payload["counters"])["last_skip"] or "")
     # 治理器快照必须与本轮同一份（节拍取自本 cfg，而非上一轮/默认值）
@@ -766,3 +768,416 @@ def test_status_mirror_payload_governor_absent_is_explicit(tmp_path):
 
     # 两种写法都算如实：键缺失，或显式 "null"。不允许出现一个假的 level=0 快照。
     assert json.loads(payload.get("governor") or "null") is None
+
+
+# ── T-RT-02 行情前进校验（2026-11-06）────────────────────────────────────
+
+@pytest.mark.unit
+def test_quote_liveness_counters(tmp_path):
+    """同一快照第二轮 → 冻结；量价变化 → 前进；首轮没有上轮可比。"""
+    from backend.services.engine.inference.realtime_service import RealtimeInferenceService
+
+    model_dir = _make_model_dir(tmp_path)
+    hot, snaps, baseline = _fake_engine_inputs(price=12.0)
+    svc = RealtimeInferenceService(
+        config_loader=lambda: _cfg(model_dir),
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda syms: snaps,
+        baseline_loader=lambda syms, day: baseline,
+        ledger_sink=lambda _e: None,
+    )
+    svc.build_cycle()
+    assert svc.counters["quote_compared"] == 0  # 首轮只登记基准
+    assert svc.counters["never_seen"] == 0
+
+    svc.build_cycle()  # 同一份快照 → 全部冻结
+    assert svc.counters["quote_compared"] == 2
+    assert svc.counters["quote_frozen"] == 2
+    assert svc.counters["quote_advanced"] == 0
+    assert svc.counters["last_advance_ratio"] == 0.0
+
+    bumped = {
+        sym: {**snap, "Volume": str(int(float(snap["Volume"])) + 1000)}
+        for sym, snap in snaps.items()
+    }
+    svc._snapshot_fetcher = lambda syms: bumped
+    svc.build_cycle()
+    assert svc.counters["quote_advanced"] == 2
+    assert svc.counters["quote_frozen"] == 0
+    assert svc.counters["last_advance_ratio"] == 1.0
+
+
+@pytest.mark.unit
+def test_never_seen_counts_hot_symbols_without_snapshot(tmp_path):
+    """热集里没有快照键的标的单独计数——回答「从未写入 vs 写过又过期」。"""
+    from backend.services.engine.inference.realtime_service import RealtimeInferenceService
+
+    model_dir = _make_model_dir(tmp_path)
+    hot, snaps, baseline = _fake_engine_inputs(price=12.0)
+    hot = [*hot, "300750.SZ"]  # 第三只没有快照
+    svc = RealtimeInferenceService(
+        config_loader=lambda: _cfg(model_dir),
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda syms: snaps,
+        baseline_loader=lambda syms, day: baseline,
+        ledger_sink=lambda _e: None,
+    )
+    svc.build_cycle()
+    assert svc.counters["hot_symbols"] == 3
+    assert svc.counters["snapshot_symbols"] == 2
+    assert svc.counters["never_seen"] == 1
+
+
+# ── T-RT-04 影子白名单（2026-11-06）──────────────────────────────────────
+
+@pytest.mark.unit
+def test_shadow_whitelist_runs_without_touching_production(tmp_path):
+    """影子用扩展白名单重算：不改生产分、不发布，摘要 + 逐标的分返回给采样。"""
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferConfig,
+        RealtimeInferenceService,
+    )
+
+    model_dir = _make_model_dir(tmp_path, extra_feature="vol_std_10")
+    hot, snaps, baseline = _fake_engine_inputs(price=12.0)
+    reported: list[dict] = []
+
+    def cfg() -> RealtimeInferConfig:
+        return RealtimeInferConfig(
+            enabled=True,
+            model_dir=str(model_dir),
+            cadence_s=3,
+            override_whitelist=("mom_ret_1d",),
+            shadow_whitelist=("mom_ret_1d", "vol_std_10"),
+            shadow_every_n_cycles=1,
+        )
+
+    svc = RealtimeInferenceService(
+        config_loader=cfg,
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda syms: snaps,
+        baseline_loader=lambda syms, day: baseline,
+        ledger_sink=lambda _e: None,
+        shadow_sink=reported.append,
+    )
+    payload = svc.build_cycle()
+    assert payload is not None
+    shadow = payload.get("shadow")
+    assert shadow is not None
+    assert shadow["whitelist"] == ["mom_ret_1d", "vol_std_10"]
+    assert len(shadow["scores"]) == 2
+    assert shadow["rank_corr"] is not None
+    # 扩展列（vol_std_10）确实改变了输入 → 分数不再完全相同
+    assert shadow["mean_abs_diff"] > 0
+    assert svc.counters["shadow_runs"] == 1
+    assert reported and reported[0] is shadow
+    # 生产载荷本身不受影子影响（published 口径不变）
+    assert payload["quality"]["override_whitelist"] == ["mom_ret_1d"]
+
+
+@pytest.mark.unit
+def test_shadow_summary_reversed_is_minus_one():
+    from backend.services.engine.inference.realtime_service import _shadow_summary
+
+    base = [0.1, 0.2, 0.3]
+    same = _shadow_summary(base, base)
+    assert same["rank_corr"] == 1.0
+    assert same["top_overlap"] == 3
+    rev = _shadow_summary(base, list(reversed(base)), top_n=1)
+    assert rev["rank_corr"] == -1.0
+    assert rev["top_overlap"] == 0
+
+
+@pytest.mark.unit
+def test_shadow_off_by_default(tmp_path):
+    from backend.services.engine.inference.realtime_service import RealtimeInferenceService
+
+    model_dir = _make_model_dir(tmp_path)
+    hot, snaps, baseline = _fake_engine_inputs(price=12.0)
+    svc = RealtimeInferenceService(
+        config_loader=lambda: _cfg(model_dir),
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda syms: snaps,
+        baseline_loader=lambda syms, day: baseline,
+        ledger_sink=lambda _e: None,
+    )
+    payload = svc.build_cycle()
+    assert payload is not None and "shadow" not in payload
+
+
+# ── T-RT-05 采样（2026-11-06）───────────────────────────────────────────
+
+@pytest.mark.unit
+def test_build_sample_rows_rank_pct_and_variant():
+    from backend.services.engine.inference.realtime_samples import build_sample_rows
+
+    rows = build_sample_rows(
+        run_id="rt-x",
+        trade_date=date(2026, 11, 6),
+        sample_ts=datetime(2026, 11, 6, 7, 0, tzinfo=timezone.utc),
+        model_version="m1",
+        feature_version="fv1",
+        variant="production",
+        items=[
+            {"symbol": "600036.SH", "fusion_score": 0.1, "score_rank": 2},
+            {"symbol": "000001.SZ", "fusion_score": 0.3, "score_rank": 1},
+        ],
+        live_coverage=0.5,
+        degraded_level=0,
+    )
+    assert [r["symbol"] for r in rows] == ["600036.SH", "000001.SZ"]
+    assert rows[0]["rank_pct"] == 0.0 and rows[1]["rank_pct"] == 1.0
+    assert all(r["variant"] == "production" for r in rows)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_tick_once_samples_production_and_shadow(tmp_path):
+    """发布成功才采样；影子同刻另一变体；失败只计数不影响主循环。"""
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferConfig,
+        RealtimeInferenceService,
+    )
+
+    model_dir = _make_model_dir(tmp_path, extra_feature="vol_std_10")
+    hot, snaps, baseline = _fake_engine_inputs(price=12.0)
+    calls: list[dict] = []
+
+    async def writer(**kwargs):
+        calls.append(kwargs)
+        return len(kwargs["items"])
+
+    def cfg() -> RealtimeInferConfig:
+        return RealtimeInferConfig(
+            enabled=True,
+            model_dir=str(model_dir),
+            cadence_s=3,
+            override_whitelist=("mom_ret_1d",),
+            shadow_whitelist=("mom_ret_1d", "vol_std_10"),
+            shadow_every_n_cycles=1,
+            sample_interval_s=0.0,  # 0 = 关闭 → 下面显式打开
+        )
+
+    svc = RealtimeInferenceService(
+        config_loader=cfg,
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda syms: snaps,
+        baseline_loader=lambda syms, day: baseline,
+        publisher=lambda _p, _c: None,
+        ledger_sink=lambda _e: None,
+        status_writer=_no_status_write,
+        sample_writer=writer,
+    )
+    # sample_interval_s=0 → 关闭：一次都不该采
+    await svc.tick_once()
+    assert calls == []
+    assert svc.counters["sample_rows"] == 0
+
+    def cfg_on() -> RealtimeInferConfig:
+        c = cfg()
+        c.sample_interval_s = 0.001
+        return c
+
+    svc._config_loader = cfg_on
+    await svc.tick_once()
+    assert [c["variant"] for c in calls] == ["production", "shadow"]
+    assert calls[0]["sample_ts"] == calls[1]["sample_ts"]
+    assert svc.counters["sample_rows"] == 4
+    assert svc.counters["sample_errors"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_tick_sample_failure_is_counted_not_fatal(tmp_path):
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferConfig,
+        RealtimeInferenceService,
+    )
+
+    model_dir = _make_model_dir(tmp_path)
+    hot, snaps, baseline = _fake_engine_inputs(price=12.0)
+
+    async def broken(**kwargs):
+        raise RuntimeError("db down")
+
+    cfg = RealtimeInferConfig(
+        enabled=True, model_dir=str(model_dir), cadence_s=3,
+        override_whitelist=(), sample_interval_s=0.001,
+    )
+    svc = RealtimeInferenceService(
+        config_loader=lambda: cfg,
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda syms: snaps,
+        baseline_loader=lambda syms, day: baseline,
+        publisher=lambda _p, _c: None,
+        ledger_sink=lambda _e: None,
+        status_writer=_no_status_write,
+        sample_writer=broken,
+    )
+    await svc.tick_once()
+    assert svc.counters["published"] == 1  # 主链路照常发布
+    assert svc.counters["sample_errors"] == 1
+    assert "db down" in str(svc.counters["last_sample_error"])
+
+
+@pytest.mark.unit
+def test_status_mirror_payload_carries_shadow_and_config():
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferConfig,
+        status_mirror_payload,
+    )
+
+    cfg = RealtimeInferConfig(shadow_whitelist=("vol_std_10",), shadow_every_n_cycles=7)
+    payload = status_mirror_payload(
+        counters={"cycles": 1}, cfg=cfg, governor=None, shadow={"rank_corr": 0.99}
+    )
+    assert json.loads(payload["shadow"])["rank_corr"] == 0.99
+    parsed = json.loads(payload["config"])
+    assert parsed["shadow_whitelist"] == ["vol_std_10"]
+    assert parsed["shadow_every_n_cycles"] == 7
+    # 未开启影子的服务写 "null"，面板据此区分「未开」与「开了没到轮」
+    assert json.loads(status_mirror_payload(
+        counters={}, cfg=RealtimeInferConfig(), governor=None
+    )["shadow"]) is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_sample_write_end_to_end_real_db():
+    """真实写表：建表幂等 + 两变体落行 + 冲突幂等 → 删除。"""
+    from sqlalchemy import text
+
+    from backend.services.engine.inference.realtime_samples import (
+        SAMPLE_TABLE,
+        write_score_samples,
+    )
+    from backend.shared.database_manager_v2 import get_session
+
+    run_id = f"rt-sample-test-{uuid.uuid4().hex[:8]}"
+    sample_ts = datetime.now(tz=timezone.utc)
+    items = [
+        {"symbol": "600036.SH", "fusion_score": 0.1, "score_rank": 2},
+        {"symbol": "000001.SZ", "fusion_score": 0.3, "score_rank": 1},
+    ]
+    try:
+        n = await write_score_samples(
+            run_id=run_id,
+            trade_date=sample_ts.date(),
+            sample_ts=sample_ts,
+            model_version="m-test",
+            feature_version="fv-test",
+            variant="production",
+            items=items,
+            live_coverage=0.5,
+            degraded_level=0,
+        )
+        assert n == 2
+        # 重放同一批：ON CONFLICT DO NOTHING → 不新增行
+        await write_score_samples(
+            run_id=run_id,
+            trade_date=sample_ts.date(),
+            sample_ts=sample_ts,
+            model_version="m-test",
+            feature_version="fv-test",
+            variant="production",
+            items=items,
+            live_coverage=0.5,
+            degraded_level=0,
+        )
+        async with get_session(read_only=True) as db:
+            rows = (
+                await db.execute(
+                    text(
+                        f"SELECT symbol, score, rank_pct FROM {SAMPLE_TABLE} "
+                        "WHERE run_id=:r ORDER BY symbol"
+                    ),
+                    {"r": run_id},
+                )
+            ).all()
+        assert len(rows) == 2
+        assert rows[0][0] == "000001.SZ" and rows[0][2] == 1.0
+        assert rows[1][0] == "600036.SH" and rows[1][2] == 0.0
+    finally:
+        async with get_session(read_only=False) as db:
+            await db.execute(
+                text(f"DELETE FROM {SAMPLE_TABLE} WHERE run_id=:r"), {"r": run_id}
+            )
+        async with get_session(read_only=True) as db:
+            left = (
+                await db.execute(
+                    text(f"SELECT COUNT(*) FROM {SAMPLE_TABLE} WHERE run_id=:r"),
+                    {"r": run_id},
+                )
+            ).scalar()
+        assert int(left or 0) == 0
+
+
+@pytest.mark.unit
+def test_shadow_noop_when_whitelist_cannot_expand(tmp_path):
+    """影子白名单与生产白名单交集相同 → 跳过重算（结果必然 1.0，白烧算力）。
+
+    实测背景（2026-11-06）：生产模型 273 个特征是 JQ110_* 命名，与 TIER 32 列
+    只有 vol_gk_20 / vol_std_10 两个同名——当前模型根本没有"再扩两列"的空间。
+    """
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferConfig,
+        RealtimeInferenceService,
+    )
+
+    model_dir = _make_model_dir(tmp_path)
+    hot, snaps, baseline = _fake_engine_inputs(price=12.0)
+
+    def cfg() -> RealtimeInferConfig:
+        return RealtimeInferConfig(
+            enabled=True,
+            model_dir=str(model_dir),
+            cadence_s=3,
+            override_whitelist=("mom_ret_1d",),
+            shadow_whitelist=("mom_ret_1d", "not_a_tier_column"),
+            shadow_every_n_cycles=1,
+        )
+
+    svc = RealtimeInferenceService(
+        config_loader=cfg,
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda syms: snaps,
+        baseline_loader=lambda syms, day: baseline,
+        ledger_sink=lambda _e: None,
+        shadow_sink=lambda _p: None,
+    )
+    payload = svc.build_cycle()
+    assert payload is not None and "shadow" not in payload
+    assert svc.counters["shadow_noop"] == 1
+    assert svc.counters["shadow_runs"] == 0
+
+
+@pytest.mark.unit
+def test_shadow_skipped_when_governor_degraded(tmp_path):
+    """过载降载时影子必须让路：它是纯可选重算，不能和保命降载抢算力。"""
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferConfig,
+        RealtimeInferenceService,
+    )
+
+    model_dir = _make_model_dir(tmp_path, extra_feature="vol_std_10")
+    hot, snaps, baseline = _fake_engine_inputs(price=12.0)
+    cfg = RealtimeInferConfig(
+        enabled=True,
+        model_dir=str(model_dir),
+        cadence_s=3,
+        override_whitelist=("mom_ret_1d",),
+        shadow_whitelist=("mom_ret_1d", "vol_std_10"),
+        shadow_every_n_cycles=1,
+    )
+    svc = RealtimeInferenceService(
+        config_loader=lambda: cfg,
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda syms: snaps,
+        baseline_loader=lambda syms, day: baseline,
+        ledger_sink=lambda _e: None,
+        shadow_sink=lambda _p: None,
+    )
+    payload = svc.build_cycle(degrade_level=1)
+    assert payload is not None and "shadow" not in payload
+    assert svc.counters["shadow_skipped_degraded"] == 1
+    assert svc.counters["shadow_runs"] == 0

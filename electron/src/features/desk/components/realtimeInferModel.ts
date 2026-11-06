@@ -13,6 +13,9 @@ export interface InferConfigView {
   cadence_s?: string;
   override_whitelist?: string;
   min_live_coverage?: string;
+  /** T-RT-04 影子白名单（逗号分隔；空 = 未开启） */
+  shadow_whitelist?: string;
+  sample_interval_s?: string;
 }
 
 /** 引擎侧治理器快照（引擎进程内状态镜像）。字段缺失是常态，一律容错。 */
@@ -31,10 +34,23 @@ export interface InferGovernorView {
   level_since?: number | null;
 }
 
+/** 影子摘要（T-RT-04）：扩展白名单重算 vs 生产分的运行面证据。 */
+export interface InferShadowView {
+  ts?: number;
+  whitelist?: string[];
+  n?: number;
+  rank_corr?: number | null;
+  mean_abs_diff?: number | null;
+  top_overlap?: number | null;
+  top_n?: number | null;
+  overridden?: number;
+}
+
 export interface InferStatusView {
   updated_at?: string | null;
   counters?: Record<string, unknown>;
   governor?: InferGovernorView | null;
+  shadow?: InferShadowView | null;
 }
 
 export type InferHeartbeat = 'live' | 'stale' | 'skewed' | 'missing';
@@ -103,6 +119,12 @@ export interface InferViewState {
   lastRunId: string;
   /** 基线取数面（模型 metadata.data_source 决定；回放复现的口径说明） */
   baselineSource: string;
+  /** T-RT-02 行情前进校验：相比上一周期量价有变化的标的数 / 可比对总数 */
+  quoteAdvanceText: string;
+  /** 热集里服务启动/日切以来一次快照都没见过的只数（从未写入 vs 写过又过期） */
+  neverSeenText: string;
+  /** T-RT-04 影子白名单运行面文案 */
+  shadowText: string;
 }
 
 const GATE_HINT = (min: number): string =>
@@ -110,16 +132,40 @@ const GATE_HINT = (min: number): string =>
     ? '闸门关闭（接受 T-1 基线口径）'
     : `覆盖率 < ${Math.round(min * 100)}% 不发布（防伪实时）`;
 
-/** 心跳阈值：镜像超过 2×节拍未更新 = 没按节拍在跑。跟随节拍，不写死分钟数。 */
+/** 心跳阈值系数：镜像超过 N 个「节拍 + 计算」周期未更新 = 没按节拍在跑。 */
 export const HEARTBEAT_STALE_FACTOR = 2;
+/** 面板轮询间隔（毫秒）：必须明显小于判活阈值，否则数据显示滞后本身会被误判成停更。 */
+export const HEARTBEAT_POLL_INTERVAL_MS = 10000;
+const HEARTBEAT_POLL_SLACK_S = HEARTBEAT_POLL_INTERVAL_MS / 1000;
 /** 未来时间容差：几秒抖动属正常，超过即判时钟偏差（那会冤枉一个健康的服务）。 */
 const CLOCK_SKEW_TOLERANCE_S = 5;
 /** 时延预算余量：p95 超过节拍预算的 80% 即报警——留不出余量，下一轮就会串在一起。 */
 const LATENCY_BUDGET_RATIO = 0.8;
 
+/**
+ * 心跳判活阈值（秒）：`2 × (节拍 + 本周期耗时) + 轮询间隔`。
+ *
+ * 为什么不是 `2 × 节拍`：镜像每轮在 `tick_once` 末尾写，两轮间隔 = 节拍（等待）+
+ * 本周期耗时（实测 ~7s）。只按节拍判活时，正常运行时显示年龄就会周期性越过 30s；
+ * 再叠加面板 30s 的轮询滞后，面板会定期误报「心跳停更」。
+ * 本周期耗时按节拍封顶——一次异常长周期不该把停更判据永久放宽。
+ */
+export function heartbeatStaleAfterS(cadenceS: number, lastCycleS: number): number {
+  const cadence = Math.max(1, cadenceS);
+  const cycle = Math.min(Math.max(0, lastCycleS), cadence);
+  return HEARTBEAT_STALE_FACTOR * (cadence + cycle) + HEARTBEAT_POLL_SLACK_S;
+}
+
 function _num(v: unknown, d = 0): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
+}
+
+/** 缺失与 0 必须分开：面板上的「—」是「不知道」，不是「零」。 */
+function _numOrNull(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 /** 毫秒 → 人读时延：< 1s 用 ms，≥ 1s 用 s（一位小数） */
@@ -189,15 +235,25 @@ export function inferViewState(
   const degradeTone: InferDegradeTone =
     degradeLevel <= 0 ? 'ok' : degradeLevel === 1 ? 'warn' : 'bad';
 
+  // 本周期耗时先算：心跳阈值要用它（镜像两轮之间的真实间隔 = 节拍 + 计算）。
+  const lastMsRaw = counters['last_ms'];
+  const lastMsNum = Number(lastMsRaw);
+  const lastCycleS =
+    lastMsRaw === null || lastMsRaw === undefined || !Number.isFinite(lastMsNum) || lastMsNum <= 0
+      ? 0
+      : lastMsNum / 1000;
+
   // 心跳：阈值跟随**生效**节拍——降载是设计内的放慢，按原节拍判活会把好循环判死。
+  // 再叠加本周期耗时与轮询滞后：只按 2×节拍会在健康运行时周期性误报「停更」。
   const heartbeatFactorS = Math.max(1, effectiveCadenceS);
+  const staleAfterS = heartbeatStaleAfterS(effectiveCadenceS, lastCycleS);
   const ageS = updatedAt > 0 ? (nowMs - updatedAt) / 1000 : null;
   const heartbeat: InferHeartbeat =
     ageS === null
       ? 'missing'
       : ageS < -CLOCK_SKEW_TOLERANCE_S
         ? 'skewed'
-        : ageS > HEARTBEAT_STALE_FACTOR * heartbeatFactorS
+        : ageS > staleAfterS
           ? 'stale'
           : 'live';
   const heartbeatText =
@@ -206,13 +262,11 @@ export function inferViewState(
       : heartbeat === 'skewed'
         ? `镜像时间超前 ${_ageText(Math.abs(ageS ?? 0))} · 两侧时钟不同步（时效判断暂不可信）`
         : heartbeat === 'stale'
-          ? `镜像 ${_ageText(ageS ?? 0)} 未更新（节拍 ${heartbeatFactorS}s）· 循环可能已停，或两侧时钟不同步`
+          ? `镜像 ${_ageText(ageS ?? 0)} 未更新（节拍 ${heartbeatFactorS}s + 本周期 ${lastCycleS.toFixed(1)}s，阈值 ${Math.round(staleAfterS)}s）· 循环可能已停，或两侧时钟不同步`
           : `心跳 ${_ageText(ageS ?? 0)}前 · 节拍 ${heartbeatFactorS}s`;
 
   // 时延：本周期（counters.last_ms）与近窗 p95（治理器）。p95 无样本时如实说、
   // 不写 0 —— 0 与「样本不足」在运维眼里是两件完全相反的事。
-  const lastMsRaw = counters['last_ms'];
-  const lastMsNum = Number(lastMsRaw);
   const lastMsText =
     lastMsRaw === null || lastMsRaw === undefined || !Number.isFinite(lastMsNum)
       ? '—'
@@ -227,6 +281,37 @@ export function inferViewState(
   const publishedCount = _num(counters['published']);
   const ledgerEntries = _num(counters['ledger_entries']);
   const ledgerErrors = _num(counters['ledger_errors']);
+
+  // T-RT-02：量价三元组与上一轮都相同 = 冻结（覆盖率只证"喂数进程活着"，
+  // 这里补"价格有没有在动"）。只显示、不参与任何发布判断。
+  const quoteCompared = _numOrNull(counters['quote_compared']);
+  const quoteAdvanced = _numOrNull(counters['quote_advanced']);
+  const quoteFrozen = _numOrNull(counters['quote_frozen']);
+  const quoteAdvanceText =
+    quoteCompared === null || quoteCompared === 0
+      ? '—'
+      : `前进 ${quoteAdvanced ?? 0}/${quoteCompared} · 冻结 ${quoteFrozen ?? 0}`;
+  const hotSymbols = _numOrNull(counters['hot_symbols']);
+  const neverSeen = _numOrNull(counters['never_seen']);
+  // 统计窗口必须写明：服务重启/日切后集合清零，不写「自几点起」会把「刚重启」误读成
+  // 「全热集都没行情」——2026-11-06 收盘后重启即出现 597/597。
+  const neverSeenSince = String(counters['never_seen_since'] || '');
+  const neverSeenSinceText = neverSeenSince
+    ? `自 ${fmtBeijingClock(Date.parse(neverSeenSince), { withSeconds: false })} 起 `
+    : '';
+  const neverSeenText =
+    hotSymbols === null
+      ? '—'
+      : `${neverSeenSinceText}${neverSeen ?? 0}/${hotSymbols} 只从未见快照`;
+
+  // T-RT-04：影子白名单（只重算不发布）。未开启 / 已开启未到首轮 / 有摘要 三态。
+  const shadowEnabled = String(config?.shadow_whitelist || '').trim() !== '';
+  const shadow = status?.shadow ?? null;
+  const shadowText = !shadowEnabled
+    ? '未开启'
+    : !shadow
+      ? '已开启 · 等待首轮'
+      : `秩相关 ${shadow.rank_corr ?? '—'} · Top${shadow.top_n ?? 20} 重合 ${shadow.top_overlap ?? '—'} · Δ${shadow.mean_abs_diff ?? '—'}`;
 
   return {
     available: !!config,
@@ -268,6 +353,9 @@ export function inferViewState(
     ledgerText: `${ledgerEntries} 条${ledgerErrors > 0 ? ` · ${ledgerErrors} 错` : ''}`,
     lastRunId: String(counters['last_run_id'] || ''),
     baselineSource: String(baselineSource || '').trim(),
+    quoteAdvanceText,
+    neverSeenText,
+    shadowText,
   };
 }
 

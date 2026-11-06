@@ -59,6 +59,8 @@ STATUS_KEY = "qm:realtime:infer:status"  # 状态镜像（api/admin 面板读；
 LEDGER_KEY_PREFIX = "qm:realtime:infer:ledger"
 LEDGER_TTL_S = 7 * 86400
 LEDGER_MAX_ENTRIES = 4000
+SHADOW_KEY = "qm:realtime:infer:shadow:last"
+SHADOW_LEDGER_PREFIX = "qm:realtime:infer:shadow:ledger"
 SNAPSHOT_DIR = "/app/db/feature_snapshots"
 DEFAULT_SNAPSHOT_PARQUET = f"{SNAPSHOT_DIR}/model_features_{datetime.now(tz=CST).year}.parquet"
 OVERRIDE_GUARD_NOTE = (
@@ -71,11 +73,72 @@ def _now() -> datetime:
     return datetime.now(tz=CST)
 
 
+def _num_or_none(*values: Any) -> float | None:
+    """取第一个可转 float 的值（快照有标准键 ``Volume`` 与订阅键 ``volume`` 两种写法）。
+
+    NaN 视为缺失（``float('nan') != float('nan')``），继续看下一个候选。
+    """
+    for value in values:
+        if value is None:
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        if num != num:  # NaN
+            continue
+        return num
+    return None
+
+
+def _shadow_summary(
+    prod_scores: Any, shadow_scores: Any, *, top_n: int = 20
+) -> dict[str, Any]:
+    """生产分 vs 影子分一致性摘要（纯函数）：秩相关 / 平均绝对差 / TopN 重合。
+
+    秩相关按 Spearman 定义（两列各自排名后取 Pearson）；非有限值整对剔除，
+    剔除后不足 2 个或任一列方差为 0 → 相关如实返回 ``None``（不伪造 1.0）。
+    """
+    p = np.asarray(prod_scores, dtype=float).reshape(-1)
+    s = np.asarray(shadow_scores, dtype=float).reshape(-1)
+    n = int(min(p.size, s.size))
+    if n == 0:
+        return {"rank_corr": None, "mean_abs_diff": None, "top_overlap": None, "top_n": 0}
+    p, s = p[:n], s[:n]
+    finite = np.isfinite(p) & np.isfinite(s)
+    p, s = p[finite], s[finite]
+    n = int(p.size)
+    if n == 0:
+        return {"rank_corr": None, "mean_abs_diff": None, "top_overlap": None, "top_n": 0}
+    pr = np.argsort(np.argsort(p)).astype(float)
+    sr = np.argsort(np.argsort(s)).astype(float)
+    corr = None
+    if n > 1 and float(pr.std()) > 0 and float(sr.std()) > 0:
+        corr = float(np.corrcoef(pr, sr)[0, 1])
+    top = min(int(top_n), n)
+    prod_top = set(np.argsort(-p)[:top].tolist())
+    shadow_top = set(np.argsort(-s)[:top].tolist())
+    return {
+        "rank_corr": round(corr, 4) if corr is not None else None,
+        "mean_abs_diff": round(float(np.mean(np.abs(p - s))), 6),
+        "top_overlap": len(prod_top & shadow_top),
+        "top_n": top,
+    }
+
+
+async def _default_sample_writer(**kwargs: Any) -> int:
+    """默认采样写手（真实 PG 表）；测试注入替身，避免污染评估数据。"""
+    from backend.services.engine.inference.realtime_samples import write_score_samples
+
+    return await write_score_samples(**kwargs)
+
+
 def status_mirror_payload(
     *,
     counters: dict[str, Any],
     cfg: RealtimeInferConfig,
     governor: dict[str, Any] | None,
+    shadow: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """状态镜像载荷（纯函数，便于单测；`_write_status_mirror` 只组装、`_default_status_write` 只负责写）。
 
@@ -85,6 +148,9 @@ def status_mirror_payload(
     治理器只活在引擎进程内，镜像它是把这份数据送达面板的唯一通道——admin 端点
     按约定不做跨服务 HTTP。`governor=None` 时如实写 "null"：面板必须能区分
     「治理器未建立」与「治理器说一切正常」。
+
+    ``shadow``（T-RT-04）同理由引擎进程内计算，未开启时写 "null"（面板区分「未开」
+    与「开了但还没到采样轮」——后者是带字段的空摘要）。
     """
     return {
         "updated_at": _now().isoformat(),
@@ -96,16 +162,21 @@ def status_mirror_payload(
                 "cadence_s": cfg.cadence_s,
                 "override_whitelist": list(cfg.override_whitelist),
                 "min_live_coverage": cfg.min_live_coverage,
+                "shadow_whitelist": list(cfg.shadow_whitelist),
+                "shadow_every_n_cycles": cfg.shadow_every_n_cycles,
+                "sample_interval_s": cfg.sample_interval_s,
             },
             ensure_ascii=False,
         ),
         "governor": json.dumps(governor, ensure_ascii=False, default=str),
+        "shadow": json.dumps(shadow, ensure_ascii=False, default=str),
     }
 
 
 class RealtimeInferConfig:
     __slots__ = ("enabled", "model_dir", "cadence_s", "override_whitelist", "tenant_id",
-                 "user_id", "min_live_coverage")
+                 "user_id", "min_live_coverage", "shadow_whitelist",
+                 "shadow_every_n_cycles", "sample_interval_s")
 
     def __init__(
         self,
@@ -117,6 +188,9 @@ class RealtimeInferConfig:
         tenant_id: str = "default",
         user_id: str = "admin",
         min_live_coverage: float = 0.5,
+        shadow_whitelist: tuple[str, ...] = (),
+        shadow_every_n_cycles: int = 20,
+        sample_interval_s: float = 300.0,
     ) -> None:
         self.enabled = enabled
         self.model_dir = model_dir
@@ -126,6 +200,11 @@ class RealtimeInferConfig:
         self.user_id = user_id
         # 发布闸门：可用实时快照覆盖率下限（< 阈值 → 不发布"伪实时"信号，只计数）
         self.min_live_coverage = min(max(float(min_live_coverage), 0.0), 1.0)
+        # 影子白名单（T-RT-04）：非空才开；只重算不发布，用于扩展覆盖列的 A/B 证据
+        self.shadow_whitelist = tuple(shadow_whitelist)
+        self.shadow_every_n_cycles = max(1, min(int(shadow_every_n_cycles), 10000))
+        # 盘中分数采样（T-RT-05）：0 = 关闭
+        self.sample_interval_s = max(0.0, min(float(sample_interval_s), 3600.0))
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any] | None) -> RealtimeInferConfig:
@@ -133,6 +212,9 @@ class RealtimeInferConfig:
         truthy = {"1", "true", "yes", "on"}
         whitelist = tuple(
             c.strip() for c in str(raw.get("override_whitelist") or "").split(",") if c.strip()
+        )
+        shadow = tuple(
+            c.strip() for c in str(raw.get("shadow_whitelist") or "").split(",") if c.strip()
         )
         try:
             cadence = float(raw.get("cadence_s") or 15.0)
@@ -142,6 +224,14 @@ class RealtimeInferConfig:
             min_cov = float(raw.get("min_live_coverage") or 0.5)
         except (TypeError, ValueError):
             min_cov = 0.5
+        try:
+            shadow_every = int(float(raw.get("shadow_every_n_cycles") or 20))
+        except (TypeError, ValueError):
+            shadow_every = 20
+        try:
+            sample_interval = float(raw.get("sample_interval_s") or 300.0)
+        except (TypeError, ValueError):
+            sample_interval = 300.0
         return cls(
             enabled=str(raw.get("enabled") or "").strip().lower() in truthy,
             model_dir=str(raw.get("model_dir") or "").strip(),
@@ -150,6 +240,9 @@ class RealtimeInferConfig:
             tenant_id=str(raw.get("tenant_id") or "default").strip() or "default",
             user_id=str(raw.get("user_id") or "admin").strip() or "admin",
             min_live_coverage=min_cov,
+            shadow_whitelist=shadow,
+            shadow_every_n_cycles=shadow_every,
+            sample_interval_s=sample_interval,
         )
 
 
@@ -187,6 +280,8 @@ class RealtimeInferenceService:
         publisher: Callable[[dict[str, Any], RealtimeInferConfig], Any] | None = None,
         ledger_sink: Callable[[dict[str, Any]], None] | None = None,
         status_writer: Callable[[dict[str, Any]], None] | None = None,
+        shadow_sink: Callable[[dict[str, Any]], None] | None = None,
+        sample_writer: Callable[..., Any] | None = None,
     ) -> None:
         self._config_loader = config_loader or _load_config_sync
         self._hot_set_fetcher = hot_set_fetcher
@@ -198,6 +293,10 @@ class RealtimeInferenceService:
         # 注入式状态镜像落点（None → 写生产键 qm:realtime:infer:status）。tick_once
         # 每轮 finally 都会调它，测试**必须**注入空实现——证据见 _write_status_mirror。
         self._status_writer = status_writer or self._default_status_write
+        # 影子结果落点（T-RT-04；None → Redis）与采样写手（T-RT-05；None → 真实写表）。
+        # 两者都必须可注入：测试直写生产键/生产表会污染面板与评估数据。
+        self._shadow_sink = shadow_sink or self._default_shadow_write
+        self._sample_writer = sample_writer or _default_sample_writer
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._lock = threading.Lock()
@@ -208,12 +307,31 @@ class RealtimeInferenceService:
         self._baselines: dict[str, dict[str, dict[str, Any]]] = {}  # "YYYYMMDD|model" → rows
         self._baseline_day: str | None = None
         self._windows: dict[str, dict[str, Any]] = {}  # 时序窗口缓存（日级 + 覆盖集扩容）
+        # ── 观测面状态（T-RT-02/04/05）：只服务计数与影子，不参与发布决策 ──
+        self._last_quotes: dict[str, tuple[float | None, float | None, float | None]] = {}
+        self._ever_seen: set[str] = set()  # 服务启动/日切以来见过快照的热集标的
+        self._seen_day: date | None = None
+        self._seen_since: str | None = None  # 「从未见」统计起点（面板要能说明窗口）
+        self._cycle_seq = 0  # 影子轮次节拍（每 N 周期一次）
+        self._last_sample_mono = 0.0
+        self._last_shadow: dict[str, Any] | None = None
         self.counters: dict[str, Any] = {
             "cycles": 0, "published": 0, "scores": 0, "skipped": 0,
             "ledger_entries": 0, "ledger_errors": 0,
             "skipped_no_live": 0, "last_live_coverage": None, "last_skip": None,
             "last_ms": None, "last_error": None, "last_run_id": None,
             "last_cycle_at": None, "last_scores": 0,
+            # T-RT-02 行情前进校验（旁路观测；只计数不拦截）
+            "quote_compared": 0, "quote_advanced": 0, "quote_frozen": 0,
+            "last_advance_ratio": None, "hot_symbols": None,
+            "snapshot_symbols": None, "never_seen": None,
+            "never_seen_since": None,
+            # T-RT-04 扩展白名单影子
+            "shadow_runs": 0, "shadow_errors": 0, "last_shadow_error": None,
+            "last_shadow": None, "shadow_noop": 0, "shadow_skipped_degraded": 0,
+            # T-RT-05 盘中分数采样
+            "sample_rows": 0, "sample_errors": 0,
+            "last_sample_at": None, "last_sample_error": None,
         }
 
     # ── 供测注入的默认实现 ────────────────────────────────────────────
@@ -397,6 +515,60 @@ class RealtimeInferenceService:
         with self._lock:
             return getattr(self, "_model_dir", "")
 
+    # ── 观测面（T-RT-02）：行情前进校验 ─────────────────────────────
+
+    def _observe_quotes(
+        self, hot: list[str], snapshots: dict[str, dict[str, Any]]
+    ) -> None:
+        """同一标的本轮量价与上轮完全相同 → 记为 frozen（桥可能在返回旧值）。
+
+        **只计数不拦截**：覆盖率闸门量的是"喂数进程最近有没有写"（快照 timestamp 是
+        写入时刻），证明不了"价格在动"。这里补一条旁路证据：量、额、价三元组都没变
+        就是没前进。是否纳入闸门，等两周观测数据再裁。
+
+        ``never_seen`` 回答另一个问题：热集里哪些标的**服务启动/日切以来一次快照都没
+        见过**（从未写入）——与"写过又过期"分开，避免把两种故障混成一个覆盖率数字。
+        """
+        today = _now().date()
+        with self._lock:
+            if self._seen_day != today:
+                self._seen_day = today
+                self._ever_seen.clear()
+                self._last_quotes.clear()
+                self._seen_since = _now().isoformat()
+                self.counters["never_seen_since"] = self._seen_since
+        advanced = frozen = 0
+        seen_now = 0
+        with self._lock:
+            for sym in hot:
+                snap = snapshots.get(sym)
+                if not snap:
+                    continue
+                seen_now += 1
+                cur = (
+                    _num_or_none(snap.get("Volume"), snap.get("volume")),
+                    _num_or_none(snap.get("Amount"), snap.get("amount")),
+                    _num_or_none(snap.get("Now"), snap.get("price")),
+                )
+                prev = self._last_quotes.get(sym)
+                if prev is not None:
+                    if cur == prev:
+                        frozen += 1
+                    else:
+                        advanced += 1
+                self._last_quotes[sym] = cur
+                self._ever_seen.add(sym)
+            compared = advanced + frozen
+            self.counters["quote_compared"] = compared
+            self.counters["quote_advanced"] = advanced
+            self.counters["quote_frozen"] = frozen
+            self.counters["last_advance_ratio"] = (
+                round(advanced / compared, 4) if compared else None
+            )
+            self.counters["hot_symbols"] = len(hot)
+            self.counters["snapshot_symbols"] = seen_now
+            self.counters["never_seen"] = len(set(hot) - self._ever_seen)
+
     # ── 周期计算（同步；由 to_thread 调用）────────────────────────────
 
     def build_cycle(self, degrade_level: int = 0) -> dict[str, Any] | None:
@@ -421,6 +593,8 @@ class RealtimeInferenceService:
         if not hot:
             raise RuntimeError("热集为空（远端 Redis 不可读或未构建）")
         snapshots = (self._snapshot_fetcher or self._default_snapshots)(hot)
+        # 行情前进校验（T-RT-02）：走闸门之前先记——被拦下的周期同样要能看出"桥是否还在动"
+        self._observe_quotes(hot, snapshots)
         # ── 发布闸门（2026-09-17 收口）：可用实时快照覆盖率不足 → 不发布"伪实时"信号 ──
         # 背景：基线为 T-1 特征，若行情未到达仍打分发布，消费方按 source=realtime 采信会失真。
         coverage = live_coverage(hot, snapshots, now=time.time())
@@ -510,9 +684,30 @@ class RealtimeInferenceService:
             }
             for i in range(len(hot))
         ]
-        return {
+        shadow_payload = self._maybe_shadow(
+            cfg,
+            cols=cols,
+            fill=fill,
+            model_version=model_version,
+            hot=hot,
+            snapshots=snapshots,
+            baseline=baseline,
+            histories=histories,
+            window_frames=window_frames,
+            seq_len=seq_len,
+            session=session,
+            input_name=input_name,
+            prod_scores=result.scores,
+            prod_override=override,
+            cycle_ts=cycle_ts,
+            degrade_level=degrade_level,
+            feat_norm=meta.get("feat_norm") if seq_len > 1 else None,
+            preprocessing=meta.get("preprocessing") if seq_len > 1 else None,
+        )
+        payload = {
             "run_id": run_id,
             "trade_date": today,
+            "ts": cycle_ts,
             "model_id": model_id,
             "model_version": model_version,
             "feature_version": realtime_feature_version(meta),
@@ -533,6 +728,117 @@ class RealtimeInferenceService:
             },
             "scores": items,
         }
+        if shadow_payload is not None:
+            payload["shadow"] = shadow_payload
+        return payload
+
+    # ── 影子（T-RT-04）：扩展白名单重算，不发布 ─────────────────────
+
+    def _maybe_shadow(
+        self,
+        cfg: RealtimeInferConfig,
+        *,
+        cols: list[str],
+        fill: dict[str, Any],
+        model_version: str,
+        hot: list[str],
+        snapshots: dict[str, dict[str, Any]],
+        baseline: dict[str, dict[str, Any]],
+        histories: dict[str, Any],
+        window_frames: dict[str, list[dict[str, Any] | None]] | None,
+        seq_len: int,
+        session: Any,
+        input_name: str,
+        prod_scores: Any,
+        prod_override: set[str],
+        cycle_ts: float,
+        degrade_level: int,
+        feat_norm: dict[str, Any] | None,
+        preprocessing: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """每 N 个周期用扩展白名单重算一次，返回摘要（含逐标的分）；不发布。
+
+        引擎状态已由生产轮喂过（``feed_engine=False``），这里只重建矩阵与推理；
+        影子异常只计数——**绝不影响生产周期**。
+
+        ``shadow_override == prod_override`` 时直接跳过：白名单没有真正扩列
+        （例如模型特征里只有当前这两列 TIER），再算一遍只会得到相关系数 1.0
+        的重复结果，白烧算力。
+        """
+        if not cfg.shadow_whitelist:
+            return None
+        if degrade_level >= 1:
+            # 过载治理已降载（L1 跳可选计算）：影子是纯可选重算，不许和保命降载抢算力
+            with self._lock:
+                self.counters["shadow_skipped_degraded"] = (
+                    int(self.counters.get("shadow_skipped_degraded", 0)) + 1
+                )
+            return None
+        with self._lock:
+            self._cycle_seq += 1
+            seq = self._cycle_seq
+        if seq % cfg.shadow_every_n_cycles != 0:
+            return None
+        shadow_override = effective_override(cfg.shadow_whitelist, cols)
+        if not shadow_override:
+            return None
+        if shadow_override == prod_override:
+            with self._lock:
+                self.counters["shadow_noop"] = int(self.counters.get("shadow_noop", 0)) + 1
+            return None
+        try:
+            shadow = compute_cycle(
+                session=session,
+                input_name=input_name,
+                cols=cols,
+                fill=fill,
+                model_version=model_version,
+                hot=hot,
+                snapshots=snapshots,
+                baseline=baseline,
+                histories=histories,
+                override=shadow_override,
+                engine=self._engine,
+                bootstrapped=self._bootstrapped,
+                window=window_frames,
+                seq_len=seq_len,
+                feat_norm=feat_norm,
+                preprocessing=preprocessing,
+                feed_engine=False,
+            )
+            summary = _shadow_summary(prod_scores, shadow.scores)
+            payload = {
+                "ts": cycle_ts,
+                "model_version": model_version,
+                "whitelist": sorted(shadow_override),
+                "n": len(shadow.symbols),
+                "overridden": int(shadow.overridden),
+                "degraded_level": int(degrade_level),
+                **summary,
+                "scores": [
+                    {
+                        "symbol": shadow.symbols[i],
+                        "fusion_score": float(shadow.scores[i]),
+                        "score_rank": int(shadow.ranks[i]),
+                    }
+                    for i in range(len(shadow.symbols))
+                ],
+            }
+            with self._lock:
+                self.counters["shadow_runs"] += 1
+                self._last_shadow = {k: v for k, v in payload.items() if k != "scores"}
+                self.counters["last_shadow"] = self._last_shadow
+            try:
+                self._shadow_sink(payload)
+            except Exception as sink_exc:  # noqa: BLE001 - 落盘失败不影响主周期
+                logger.warning("[realtime-infer] 影子结果落盘失败: %s", sink_exc)
+            return payload
+        except Exception as exc:  # noqa: BLE001 - 影子永不影响生产
+            with self._lock:
+                self.counters["shadow_errors"] += 1
+                self.counters["last_shadow_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning("[realtime-infer] 影子计算失败（不影响生产）: %s", exc)
+            return None
 
     def _ensure_session(self, model_dir: Path, n_features: int, seq_len: int = 1) -> Any:
         key = str(model_dir)
@@ -618,6 +924,8 @@ class RealtimeInferenceService:
                         self.counters["scores"] += len(payload["scores"])
                         self.counters["last_scores"] = len(payload["scores"])
                         self.counters["last_run_id"] = payload["run_id"]
+                    # T-RT-05：发布成功才采样（被闸门拦下的周期没有分数可采）
+                    await self._maybe_sample(payload, cfg)
                 with self._lock:
                     self.counters["last_error"] = None
                     self.counters["cycles"] += 1
@@ -644,6 +952,56 @@ class RealtimeInferenceService:
             self._write_status_mirror(cfg)
         return governor
 
+    async def _maybe_sample(
+        self, payload: dict[str, Any], cfg: RealtimeInferConfig
+    ) -> None:
+        """按节拍把本轮（含影子）分数落采样表（T-RT-05）；失败只计数。
+
+        采样是观测面：任何异常都不得冒泡到 tick_once（那里会把整轮记成失败）。
+        """
+        interval = float(cfg.sample_interval_s or 0)
+        if interval <= 0:
+            return
+        now_mono = time.monotonic()
+        if now_mono - self._last_sample_mono < interval:
+            return
+        self._last_sample_mono = now_mono
+        cycle_ts = float(payload.get("ts") or time.time())
+        sample_ts = datetime.fromtimestamp(cycle_ts, tz=timezone.utc)
+        try:
+            written = await self._sample_writer(
+                run_id=payload["run_id"],
+                trade_date=payload["trade_date"],
+                sample_ts=sample_ts,
+                model_version=payload["model_version"],
+                feature_version=payload.get("feature_version") or "",
+                variant="production",
+                items=payload["scores"],
+                live_coverage=payload.get("live_coverage"),
+                degraded_level=payload.get("degraded_level"),
+            )
+            shadow = payload.get("shadow") or {}
+            if shadow.get("scores"):
+                written += await self._sample_writer(
+                    run_id=payload["run_id"],
+                    trade_date=payload["trade_date"],
+                    sample_ts=sample_ts,
+                    model_version=shadow.get("model_version") or payload["model_version"],
+                    feature_version=payload.get("feature_version") or "",
+                    variant="shadow",
+                    items=shadow["scores"],
+                    live_coverage=payload.get("live_coverage"),
+                    degraded_level=payload.get("degraded_level"),
+                )
+            with self._lock:
+                self.counters["sample_rows"] += int(written)
+                self.counters["last_sample_at"] = _now().isoformat()
+        except Exception as exc:  # noqa: BLE001 - 采样失败不影响主循环
+            with self._lock:
+                self.counters["sample_errors"] += 1
+                self.counters["last_sample_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning("[realtime-infer] 采样失败: %s", exc)
+
     def _write_status_mirror(self, cfg: RealtimeInferConfig) -> None:
         """组装状态镜像并交给落点（best-effort）：admin/前端面板唯一读面。
 
@@ -661,11 +1019,16 @@ class RealtimeInferenceService:
             # 治理器快照与 counters 同锁语义：两者都要与本次周期一致，
             # 否则面板可能看到「周期数已 +1、p95 还是上一轮」的错配。
             governor = None
+            shadow = None
             with self._lock:
                 if self._governor is not None:
                     governor = self._governor.snapshot()
+                if self._last_shadow is not None:
+                    shadow = dict(self._last_shadow)
             self._status_writer(
-                status_mirror_payload(counters=counters, cfg=cfg, governor=governor)
+                status_mirror_payload(
+                    counters=counters, cfg=cfg, governor=governor, shadow=shadow
+                )
             )
         except Exception:  # noqa: BLE001 - 镜像失败不影响推理循环
             pass
@@ -690,6 +1053,48 @@ class RealtimeInferenceService:
             finally:
                 client.close()
         except Exception:  # noqa: BLE001 - 镜像失败不影响推理循环
+            pass
+
+    def _default_shadow_write(self, payload: dict[str, Any]) -> None:
+        """默认落点：影子摘要写 Redis（``shadow:last``）+ 日账本（7 天，4000 条）。
+
+        只存摘要（不含逐标的分）——逐标的分的长期载体是采样表 ``variant='shadow'``，
+        这里保留的是"这一轮影子和生产差多少"的运行面证据。
+        """
+        try:
+            import os
+
+            import redis as redis_lib
+
+            client = redis_lib.Redis(
+                host=os.getenv("REDIS_HOST") or "redis",
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                db=int(os.getenv("REDIS_DB", "0")),
+                password=os.getenv("REDIS_PASSWORD") or None,
+                decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+            )
+            try:
+                summary = {k: v for k, v in payload.items() if k != "scores"}
+                day = datetime.fromtimestamp(
+                    float(payload.get("ts") or time.time()), tz=CST
+                ).strftime("%Y%m%d")
+                client.hset(
+                    SHADOW_KEY,
+                    mapping={
+                        k: json.dumps(v, ensure_ascii=False, default=str)
+                        if isinstance(v, (list, dict))
+                        else str(v)
+                        for k, v in summary.items()
+                    },
+                )
+                client.expire(SHADOW_KEY, 86400)
+                key = f"{SHADOW_LEDGER_PREFIX}:{day}"
+                client.rpush(key, ledger_json(summary))
+                client.ltrim(key, -LEDGER_MAX_ENTRIES, -1)
+                client.expire(key, LEDGER_TTL_S)
+            finally:
+                client.close()
+        except Exception:  # noqa: BLE001 - 影子落盘失败不影响推理循环
             pass
 
     def _governor_for(self, cfg: RealtimeInferConfig) -> LoadGovernor:
@@ -725,9 +1130,13 @@ class RealtimeInferenceService:
                 "model_dir": cfg.model_dir,
                 "cadence_s": cfg.cadence_s,
                 "override_whitelist": list(cfg.override_whitelist),
+                "shadow_whitelist": list(cfg.shadow_whitelist),
+                "shadow_every_n_cycles": cfg.shadow_every_n_cycles,
+                "sample_interval_s": cfg.sample_interval_s,
                 "loop_alive": bool(self._task and not self._task.done()),
                 "cached_models": list(self._sessions.keys()),
                 "governor": governor.snapshot() if governor else None,
+                "shadow": dict(self._last_shadow) if self._last_shadow else None,
                 "resources": _process_resources(),
                 **dict(self.counters),
             }

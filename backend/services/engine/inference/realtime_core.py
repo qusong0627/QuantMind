@@ -317,6 +317,7 @@ def compute_cycle(
     seq_len: int = 1,
     feat_norm: dict[str, Any] | None = None,
     preprocessing: dict[str, Any] | None = None,
+    feed_engine: bool = True,
 ) -> CycleResult:
     """单周期装配：引导(每标的一次) → 喂当前快照一帧 → live 覆盖 → 矩阵 → 推理 → 排名。
 
@@ -335,6 +336,9 @@ def compute_cycle(
     再统一 :func:`apply_feat_norm`（训练集 mean/std）后 NaN/Inf 归零。
     批量对整窗不足的标的是弃打分（NaN），实时不弃——热集池固定、分数行必须对齐；缺帧只
     影响该标的自身分数并记入 ``window_missing``（如实计数，不装没发生）。
+
+    ``feed_engine=False`` 供影子重算（T-RT-04）复用同一份引擎状态：跳过引导/喂帧，
+    只做矩阵装配与推理，避免同一帧被重复累计（分钟桶、缺口计数会虚高）。
     """
     seq = max(int(seq_len or 1), 1)
     n_cols = len(cols)
@@ -349,7 +353,9 @@ def compute_cycle(
         ident = identity(sym)
         symbols_norm.append(ident)
         row = dict(baseline.get(ident) or {})
-        if sym not in bootstrapped:
+        # ``feed_engine=False``：影子重算（T-RT-04）——引擎状态已由生产轮喂过，
+        # 再喂一次同一帧会重复累计（分钟桶/缺口计数），故只读不算。
+        if feed_engine and sym not in bootstrapped:
             hist = histories.get(ident)
             if hist is not None and len(hist):
                 try:
@@ -359,7 +365,7 @@ def compute_cycle(
             bootstrapped.add(sym)
         snap = snapshots.get(ident)
         cuts.append(snapshot_watermark(snap))
-        if snap:
+        if feed_engine and snap:
             engine.on_snapshot(sym, snap)
         live = None
         if override:

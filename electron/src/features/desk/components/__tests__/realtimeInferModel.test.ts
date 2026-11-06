@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gateHint, inferViewState } from '../realtimeInferModel';
+import { gateHint, heartbeatStaleAfterS, inferViewState } from '../realtimeInferModel';
 
 describe('realtimeInferModel', () => {
   it('启用态 + 模型名 + 覆盖率展示', () => {
@@ -100,6 +100,26 @@ describe('realtimeInferModel · 运行面（心跳/时延/治理/台账）', () 
     expect(v.heartbeatText).toMatch(/循环|停/);
   });
 
+  it('阈值 = 2×(节拍+本周期)+轮询：健康循环不再被 30s 固定线误判成停更', () => {
+    // 2026-11-06 实测：节拍 15s + 本周期 7s，写入周期 ≈ 22s；旧阈值 2×15=30s
+    // 叠加 30s 轮询滞后 → 面板定期误报。新阈值 = 2×(15+7)+10 = 54s。
+    expect(heartbeatStaleAfterS(15, 7)).toBe(54);
+    const v = inferViewState(cfg, { updated_at: iso(40_000), counters: { last_ms: 7000 } }, T0);
+    expect(v.heartbeat).toBe('live');
+  });
+
+  it('确实停更仍判 stale：超过 2×(节拍+本周期)+轮询 就报', () => {
+    const v = inferViewState(cfg, { updated_at: iso(60_000), counters: { last_ms: 7000 } }, T0);
+    expect(v.heartbeat).toBe('stale');
+    expect(v.heartbeatText).toContain('7.0s');
+    expect(v.heartbeatText).toContain('54s');
+  });
+
+  it('本周期耗时按节拍封顶：一次异常长周期不把停更判据永久放宽', () => {
+    expect(heartbeatStaleAfterS(15, 999)).toBe(heartbeatStaleAfterS(15, 15));
+    expect(heartbeatStaleAfterS(15, -3)).toBe(heartbeatStaleAfterS(15, 0));
+  });
+
   it('从未写过镜像 → missing（不是"正常"，也不是"陈旧"）', () => {
     const v = inferViewState(cfg, { updated_at: null, counters: {} }, T0);
     expect(v.heartbeat).toBe('missing');
@@ -195,5 +215,62 @@ describe('realtimeInferModel · 运行面（心跳/时延/治理/台账）', () 
     // 显式 UTC 输入 ⇒ 期望值不随设备时区漂（旧实现读设备本地钟，主机 JST 会多 1 小时）。
     const v = inferViewState(cfg, { updated_at: '2026-09-20T14:03:04Z', counters: {} }, T0);
     expect(v.mirrorUpdatedText).toBe('22:03:04');
+  });
+});
+
+describe('realtimeInferModel · 观测面（行情前进 / 影子）', () => {
+  const cfg = { enabled: 'true', cadence_s: '15', min_live_coverage: '0.5' };
+  const T0 = Date.parse('2026-11-06T15:30:00+08:00');
+
+  it('行情前进：显示前进/比对与冻结，缺失时是 — 不是 0', () => {
+    const v = inferViewState(
+      cfg,
+      { counters: { quote_compared: 500, quote_advanced: 320, quote_frozen: 180 } },
+      T0,
+    );
+    expect(v.quoteAdvanceText).toContain('320/500');
+    expect(v.quoteAdvanceText).toContain('冻结 180');
+
+    const empty = inferViewState(cfg, { counters: {} }, T0);
+    expect(empty.quoteAdvanceText).toBe('—');
+  });
+
+  it('从未见快照：与热集总数一起显示；无数据时 —', () => {
+    const v = inferViewState(cfg, { counters: { hot_symbols: 597, never_seen: 225 } }, T0);
+    expect(v.neverSeenText).toBe('225/597 只从未见快照');
+    expect(inferViewState(cfg, { counters: {} }, T0).neverSeenText).toBe('—');
+  });
+
+  it('从未见快照带统计起点：重启后集合清零，不写「自几点起」会被误读成全体没行情', () => {
+    const v = inferViewState(
+      cfg,
+      {
+        counters: {
+          hot_symbols: 597,
+          never_seen: 597,
+          never_seen_since: '2026-11-06T15:46:00+08:00',
+        },
+      },
+      T0,
+    );
+    expect(v.neverSeenText).toBe('自 15:46 起 597/597 只从未见快照');
+  });
+
+  it('影子三态：未开启 / 已开启等待首轮 / 有摘要', () => {
+    expect(inferViewState(cfg, { counters: {} }, T0).shadowText).toBe('未开启');
+
+    const on = { ...cfg, shadow_whitelist: 'mom_ret_1d,vol_gk_20' };
+    expect(inferViewState(on, { counters: {} }, T0).shadowText).toContain('等待首轮');
+
+    const withSummary = inferViewState(
+      on,
+      {
+        counters: {},
+        shadow: { rank_corr: 0.97, top_overlap: 19, top_n: 20, mean_abs_diff: 0.0031 },
+      },
+      T0,
+    );
+    expect(withSummary.shadowText).toContain('0.97');
+    expect(withSummary.shadowText).toContain('19');
   });
 });

@@ -13,6 +13,7 @@ import { Activity, Loader2, RefreshCw } from 'lucide-react';
 import { CARD, CardHeader, StatTile } from './cardKit';
 import {
   gateHint,
+  HEARTBEAT_POLL_INTERVAL_MS,
   inferViewState,
   type InferConfigView,
   type InferStatusView,
@@ -103,7 +104,9 @@ export const RealtimeInferenceCard: React.FC = () => {
 
   useEffect(() => {
     void load();
-    const timer = window.setInterval(() => void load(), 30000);
+    // 轮询间隔必须明显小于心跳判活阈值（模型里按 2×(节拍+本周期)+轮询 算），
+    // 否则「数据显示滞后」本身就会被误读成「循环停了」——2026-11-06 实测的周期误报。
+    const timer = window.setInterval(() => void load(), HEARTBEAT_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [load]);
 
@@ -309,6 +312,15 @@ export const RealtimeInferenceCard: React.FC = () => {
             <span className="ml-1.5 text-slate-400">
               生效节拍 <span className="font-mono">{view.effectiveCadenceS}s</span>
             </span>
+          </RunRow>
+          <RunRow label="行情" wrap>
+            <span className="font-mono">{view.quoteAdvanceText}</span>
+            <span className="ml-1.5 text-slate-400">（量价较上一周期有变化 / 冻结）</span>
+            <span className="ml-1.5 text-slate-400">· {view.neverSeenText}</span>
+          </RunRow>
+          <RunRow label="影子" wrap>
+            <span className="font-mono">{view.shadowText}</span>
+            <span className="ml-1.5 text-slate-400">（扩展白名单只重算不发布）</span>
           </RunRow>
           <RunRow label="可复现" full>
             {view.lastRunId ? (

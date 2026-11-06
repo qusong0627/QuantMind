@@ -45,6 +45,11 @@ class InferConfigRequest(BaseModel):
     cadence_s: float | None = Field(default=None, ge=3.0, le=600.0)
     override_whitelist: list[str] | None = None
     min_live_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    # T-RT-04 影子白名单：只重算不发布，列名同样必须 ⊆ 模型特征列
+    shadow_whitelist: list[str] | None = None
+    shadow_every_n_cycles: int | None = Field(default=None, ge=1, le=10000)
+    # T-RT-05 采样节拍（秒）；0 = 关闭采样
+    sample_interval_s: float | None = Field(default=None, ge=0.0, le=3600.0)
 
 
 def _redis():
@@ -184,11 +189,13 @@ def validate_feature_coverage(model_dir: str, feature_columns: list[str]) -> Non
         )
 
 
-def validate_override_whitelist(whitelist: list[str] | None, feature_columns: list[str]) -> None:
+def validate_override_whitelist(
+    whitelist: list[str] | None, feature_columns: list[str], *, label: str = "override"
+) -> None:
     """白名单必须 ⊆ 模型特征列（防写错列名造成静默错分）。"""
     unknown = [c for c in (whitelist or []) if c not in set(feature_columns)]
     if unknown:
-        raise ValueError(f"override 白名单含模型未定义列: {unknown[:6]}（防静默错分，拒绝）")
+        raise ValueError(f"{label} 白名单含模型未定义列: {unknown[:6]}（防静默错分，拒绝）")
 
 
 def _onnx_status(model_dir: str) -> dict[str, Any]:
@@ -387,6 +394,14 @@ async def get_infer_config() -> dict[str, Any]:
             governor = parsed if isinstance(parsed, dict) else None
         except (TypeError, ValueError):
             governor = None
+    # 影子摘要（T-RT-04）：未开启时引擎写 "null"；开启但还没到采样轮 → 字段缺省。
+    shadow: dict[str, Any] | None = None
+    if status.get("shadow"):
+        try:
+            parsed = json.loads(status["shadow"])
+            shadow = parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            shadow = None
     model_dir = str(config.get("model_dir") or "").strip()
     display_names = await _load_model_display_names(
         [Path(model_dir).name] if model_dir else []
@@ -402,6 +417,7 @@ async def get_infer_config() -> dict[str, Any]:
                 "updated_at": status.get("updated_at"),
                 "counters": counters,
                 "governor": governor,
+                "shadow": shadow,
                 "source": "redis:qm:realtime:infer:status（引擎侧每周期镜像）",
             },
         },
@@ -453,6 +469,29 @@ async def set_infer_config(payload: InferConfigRequest) -> dict[str, Any]:
             )
         elif payload.model_dir is not None and (current.get("override_whitelist") or "").strip():
             updates["override_whitelist"] = ""
+
+        # T-RT-04 影子白名单：与 override 同一校验（列名 ⊆ 模型特征列）；
+        # 模型目录变更时一并清空，防旧列残留到新模型上（静默错分的另一条路径）。
+        if payload.shadow_whitelist is not None:
+            if feature_columns is None:
+                raise HTTPException(
+                    status_code=400, detail="shadow_whitelist 需先配置有效 model_dir"
+                )
+            try:
+                validate_override_whitelist(
+                    payload.shadow_whitelist, feature_columns, label="shadow"
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            updates["shadow_whitelist"] = ",".join(
+                c.strip() for c in payload.shadow_whitelist if c.strip()
+            )
+        elif payload.model_dir is not None and (current.get("shadow_whitelist") or "").strip():
+            updates["shadow_whitelist"] = ""
+        if payload.shadow_every_n_cycles is not None:
+            updates["shadow_every_n_cycles"] = str(int(payload.shadow_every_n_cycles))
+        if payload.sample_interval_s is not None:
+            updates["sample_interval_s"] = str(float(payload.sample_interval_s))
 
         enabling = updates.get("enabled") == "true" or (
             "enabled" not in updates and str(current.get("enabled") or "").lower() in {"1", "true"}

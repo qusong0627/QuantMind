@@ -185,6 +185,8 @@ def test_admin_realtime_config_roundtrip_real_redis(tmp_path):
                 InferConfigRequest(
                     enabled=True, model_dir=str(d), cadence_s=10.0,
                     override_whitelist=["f1"], min_live_coverage=0.6,
+                    shadow_whitelist=["f1"], shadow_every_n_cycles=5,
+                    sample_interval_s=120.0,
                 )
             )
         )
@@ -192,8 +194,12 @@ def test_admin_realtime_config_roundtrip_real_redis(tmp_path):
         cfg = saved["data"]["config"]
         assert cfg["enabled"] == "true" and cfg["cadence_s"] == "10.0"
         assert cfg["override_whitelist"] == "f1" and cfg["min_live_coverage"] == "0.6"
+        # T-RT-04/05：影子白名单与采样节拍同一次写入（面板可回读）
+        assert cfg["shadow_whitelist"] == "f1"
+        assert cfg["shadow_every_n_cycles"] == "5"
+        assert cfg["sample_interval_s"] == "120.0"
 
-        # ④ 非法白名单 → 400（防静默错分）
+        # ④ 非法白名单 → 400（防静默错分）；shadow 同一条防线
         with pytest.raises(HTTPException) as exc1:
             asyncio.run(
                 set_infer_config(
@@ -201,12 +207,21 @@ def test_admin_realtime_config_roundtrip_real_redis(tmp_path):
                 )
             )
         assert exc1.value.status_code == 400
+        with pytest.raises(HTTPException) as exc1b:
+            asyncio.run(
+                set_infer_config(
+                    InferConfigRequest(shadow_whitelist=["nope"], model_dir=str(d))
+                )
+            )
+        assert exc1b.value.status_code == 400
+        assert "shadow" in str(exc1b.value.detail)
 
         # ⑤ 换模型目录未带白名单 → 旧白名单自动清空（防旧列残留）
         saved2 = asyncio.run(
             set_infer_config(InferConfigRequest(model_dir=str(d), enabled=True))
         )
         assert saved2["data"]["config"]["override_whitelist"] == ""
+        assert saved2["data"]["config"]["shadow_whitelist"] == ""
     finally:
         client.delete(CONFIG_KEY)
         if original:
