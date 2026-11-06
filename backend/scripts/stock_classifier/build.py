@@ -92,6 +92,40 @@ def build_close_wide() -> pd.DataFrame:
     return wide
 
 
+def build_exec_returns(
+    close: pd.DataFrame, open_: pd.DataFrame
+) -> dict[int, pd.DataFrame]:
+    """次日开盘成交口径：close[T+h] / open[T+1] - 1。"""
+    out: dict[int, pd.DataFrame] = {}
+    for horizon in HORIZONS:
+        ret = close.shift(-horizon) / open_.shift(-1) - 1.0
+        ret = ret.astype("float32")
+        ret.to_parquet(OUT / f"exec_ret_h{horizon}.parquet")
+        out[horizon] = ret
+        log.info("exec_ret_h%d %s", horizon, ret.shape)
+    return out
+
+
+def build_open_wide() -> pd.DataFrame:
+    rows: dict[pd.Timestamp, pd.Series] = {}
+    started = time.time()
+    parts = _partitions()
+    for i, part in enumerate(parts, 1):
+        frame = pq.read_table(part, columns=["symbol", "open"]).to_pandas()
+        frame = frame[np.isfinite(frame["open"].to_numpy(float))]
+        rows[_part_date(part)] = pd.Series(
+            frame["open"].to_numpy(float), index=frame["symbol"].astype(str)
+        )
+        if i % 800 == 0:
+            log.info("开盘宽表 %d/%d（%.0fs）", i, len(parts), time.time() - started)
+    wide = pd.DataFrame(rows).T.sort_index()
+    wide.index.name = "date"
+    wide = wide.astype("float32")
+    wide.to_parquet(OUT / "open_wide.parquet")
+    log.info("open_wide %s（%.0fs）", wide.shape, time.time() - started)
+    return wide
+
+
 def build_forward_returns(wide: pd.DataFrame) -> dict[int, pd.DataFrame]:
     out: dict[int, pd.DataFrame] = {}
     for horizon in HORIZONS:
@@ -276,7 +310,7 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     parser = argparse.ArgumentParser(description="构建全市场多分类面板")
-    parser.add_argument("stage", choices=("close", "screen", "panel", "all"))
+    parser.add_argument("stage", choices=("close", "open", "screen", "panel", "all"))
     parser.add_argument("--horizons", default="1,3,5")
     parser.add_argument("--classes", type=int, default=N_CLASSES_DEFAULT)
     args = parser.parse_args()
@@ -288,6 +322,12 @@ def main() -> None:
     if args.stage in ("close", "all"):
         wide = build_close_wide()
         build_forward_returns(wide)
+
+    if args.stage in ("open", "all"):
+        close_wide = pq.read_table(OUT / "close_wide.parquet").to_pandas()
+        close_wide.index = pd.to_datetime(close_wide.index)
+        open_wide = build_open_wide()
+        build_exec_returns(close_wide, open_wide)
 
     if args.stage in ("screen", "all"):
         for horizon in horizons:
