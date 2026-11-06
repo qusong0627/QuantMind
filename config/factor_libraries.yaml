@@ -19,7 +19,7 @@
 #   Alpha 集 | mined 挖掘产出 | manifest 清单库 | auxiliary 辅助数据 |
 #   labels 标签/泄露库（强制 excluded: true）
 version: 1
-checked_at: "2026-10-10"
+checked_at: "2026-11-06"
 libraries:
   - id: l1_factors
     name: L1 因子
@@ -61,6 +61,16 @@ libraries:
     kind: alpha_zoo
     description: 通达信公式指标因子集
     markets: [CN]
+  - id: jkp_ashare_daily
+    name: JKP A股因子（日频投影）
+    kind: training_features
+    description: 月频库按月末值前向填充到交易日的日频投影（403 因子 + OHLCV 锚列），供日频训练与因子研究直读；陈旧上限 45 天
+    markets: [CN]
+  - id: jkp_ashare_monthly
+    name: JKP A股因子库（月频）
+    kind: alpha_zoo
+    description: Jensen-Kelly-Pedersen (2023) 404 个股票特征的 A 股适配（403 列，月频 PIT，2016-06 起，含 is_financial/is_st 标记列）
+    markets: [CUSTOM]
   - id: rd_mined
     name: RD-Agent 挖掘因子
     kind: mined

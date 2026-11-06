@@ -231,3 +231,52 @@ describe('ScanPanel：毕业管道（2026-10-09）', () => {
     expect(screen.queryByTestId('scan-pipeline')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 大列表（2026-11-06）：JKP A股因子库首扫 404 个新增，平铺会把整页撑爆。
+// 契约：默认只平铺前 COLLAPSED_SHOW 个 + 「展开全部」；提供按名筛选。
+// ---------------------------------------------------------------------------
+const BIG_DIFF: ScanDiff = {
+  new: Array.from({ length: 404 }, (_, i) => ({
+    code: `jkp_factor_${String(i + 1).padStart(3, '0')}`,
+    library: 'jkp_ashare_daily',
+    library_label: 'JKP A股因子（日频投影）',
+  })),
+  missing: [],
+  new_by_library: { jkp_ashare_daily: 404 },
+  unchanged_count: 4011,
+  discovered_count: 4419,
+  catalog_count: 4011,
+  dataset: 'private',
+  snapshot_at: '2026-10-16T07:28:35',
+  snapshot_source: 'auto',
+};
+
+describe('大列表（单库 400+ 新增）', () => {
+  beforeEach(() => {
+    scanMock.mockReset();
+    scanMock.mockResolvedValue(BIG_DIFF);
+  });
+
+  test('默认不全量平铺，给出「展开全部」入口', async () => {
+    renderPanel();
+    const group = await screen.findByTestId('scan-new-jkp_ashare_daily');
+    expect(group.textContent).toContain('404 个新增');
+    // 第 100 个不应出现在 DOM 里（默认只铺前 24 个）
+    expect(group.textContent).not.toContain('jkp_factor_100');
+    const expand = screen.getByText(/展开全部（还有 \d+ 个）/);
+    fireEvent.click(expand);
+    expect(group.textContent).toContain('jkp_factor_100');
+  });
+
+  test('按名筛选后只留命中项', async () => {
+    renderPanel();
+    await screen.findByTestId('scan-summary');
+    const box = screen.getByTestId('scan-filter');
+    fireEvent.change(box, { target: { value: 'factor_404' } });
+    const group = screen.getByTestId('scan-new-jkp_ashare_daily');
+    expect(group.textContent).toContain('命中 1');
+    expect(group.textContent).toContain('jkp_factor_404');
+    expect(group.textContent).not.toContain('jkp_factor_001');
+  });
+});

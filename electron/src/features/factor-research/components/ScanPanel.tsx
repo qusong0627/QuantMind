@@ -11,9 +11,22 @@
  * 差异口径由后端 /factor-research/scan 与重算共用同一份扫描实现给出（见
  * backend/services/engine/factor_research/discovery.py）：两边一旦分叉，这里就会
  * 承诺一个重算根本不会发生的结果。
+ *
+ * 布局（2026-11-06）：单个库可能一次新增 400+ 个因子（JKP A股因子库首扫 404 个），
+ * 平铺会把整页撑爆。现在按库分组、组内限高滚动、超阈值折叠，并支持顶部按名筛选。
  */
-import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, GraduationCap, Loader2, RefreshCw, ScanSearch } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  GraduationCap,
+  Loader2,
+  RefreshCw,
+  ScanSearch,
+  Search,
+} from 'lucide-react';
 import { getPromoteStatus, getScanSources, postPromote } from '../services/factorResearchService';
 import type { FactorDataset, ScanDiff, ScanDiffItem } from '../services/factorResearchService';
 import type { ResearchMarket } from '../types/factorResearch';
@@ -30,9 +43,22 @@ interface Props {
   onClose: () => void;
 }
 
+/** 组内一次最多平铺多少个标签；超过则折叠，避免 400+ 标签同时进 DOM。 */
+const COLLAPSE_THRESHOLD = 40;
+/** 折叠态下先展示多少个（剩下的点「展开全部」）。 */
+const COLLAPSED_SHOW = 24;
+/** 组内列表高度上限（px）——超过就内部滚动，不撑高卡片。 */
+const GROUP_BODY_MAX_H = 168;
+
+interface LibGroup {
+  lib: string;
+  label: string;
+  items: ScanDiffItem[];
+}
+
 /** 新增项按来源库归组（保留后端给的库顺序） */
-function groupByLibrary(items: ScanDiffItem[]): Array<{ lib: string; label: string; items: ScanDiffItem[] }> {
-  const groups = new Map<string, { lib: string; label: string; items: ScanDiffItem[] }>();
+function groupByLibrary(items: ScanDiffItem[]): LibGroup[] {
+  const groups = new Map<string, LibGroup>();
   for (const it of items) {
     const g = groups.get(it.library) || { lib: it.library, label: it.library_label || it.library, items: [] };
     g.items.push(it);
@@ -48,6 +74,92 @@ const Stat: React.FC<{ label: string; value: React.ReactNode; tone?: string }> =
   </span>
 );
 
+const Chip: React.FC<{ code: string; title?: string; tone?: 'emerald' | 'amber' }> = ({ code, title, tone = 'emerald' }) => (
+  <span
+    className={`rounded border px-1.5 py-0.5 text-[10px] font-mono text-slate-600 ${
+      tone === 'emerald' ? 'border-emerald-100 bg-white' : 'border-amber-100 bg-white'
+    }`}
+    title={title || code}
+  >
+    {code}
+  </span>
+);
+
+/** 单个来源库分组：标题行可折叠，组内限高滚动，大列表默认只平铺前 N 个。 */
+const LibraryGroup: React.FC<{ group: LibGroup; keyword: string }> = ({ group, keyword }) => {
+  const [open, setOpen] = useState(true);
+  const [showAll, setShowAll] = useState(false);
+
+  const matched = useMemo(() => {
+    const q = keyword.trim().toLowerCase();
+    return q ? group.items.filter((it) => it.code.toLowerCase().includes(q)) : group.items;
+  }, [group.items, keyword]);
+
+  // 只有「用户点了展开」或「本来就少于阈值」才全量平铺；无筛选词时同样要折叠，
+  // 否则单库 400+ 仍会一次性进 DOM（首屏卡顿 + 视觉淹没）。
+  const cap = showAll || matched.length <= COLLAPSE_THRESHOLD ? matched.length : COLLAPSED_SHOW;
+  const shown = matched.slice(0, cap);
+  const hidden = matched.length - shown.length;
+
+  return (
+    <div
+      data-testid={`scan-new-${group.lib}`}
+      className="rounded-xl border border-emerald-100 bg-emerald-50/40 px-2.5 py-1.5"
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-baseline gap-2 text-left"
+        title={open ? '收起该库' : '展开该库'}
+      >
+        {open ? (
+          <ChevronDown className="w-3 h-3 shrink-0 text-emerald-500" />
+        ) : (
+          <ChevronRight className="w-3 h-3 shrink-0 text-emerald-500" />
+        )}
+        <span className="text-[11px] font-bold text-emerald-700">{group.label}</span>
+        <span className="text-[10px] font-mono text-emerald-600">{group.items.length} 个新增</span>
+        {keyword.trim() && (
+          <span className="text-[10px] font-mono text-slate-400">命中 {matched.length}</span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="mt-1 overflow-y-auto custom-scrollbar" style={{ maxHeight: GROUP_BODY_MAX_H }}>
+            <div className="flex flex-wrap gap-1 pr-1">
+              {shown.map((it) => (
+                <Chip key={it.code} code={it.code} />
+              ))}
+              {matched.length === 0 && (
+                <span className="text-[10px] text-slate-400">没有匹配的因子名</span>
+              )}
+            </div>
+          </div>
+          {hidden > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowAll(true)}
+              className="mt-1 rounded-full border border-emerald-200 bg-white px-2 py-0.5 text-[10px] font-bold text-emerald-600 hover:bg-emerald-50"
+            >
+              展开全部（还有 {hidden} 个）
+            </button>
+          )}
+          {showAll && matched.length > COLLAPSE_THRESHOLD && (
+            <button
+              type="button"
+              onClick={() => setShowAll(false)}
+              className="mt-1 ml-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-bold text-slate-500 hover:bg-slate-50"
+            >
+              收起
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
 export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose }) => {
   const [diff, setDiff] = useState<ScanDiff | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -57,6 +169,8 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
   const [promoting, setPromoting] = useState(false);
   const [promoteStep, setPromoteStep] = useState('');
   const [promoteErr, setPromoteErr] = useState<string | null>(null);
+  // 顶部筛选：库多/因子多时按名找；空串 = 不过滤
+  const [keyword, setKeyword] = useState('');
 
   const scan = useCallback(async () => {
     setScanning(true);
@@ -119,11 +233,26 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
   const groups = groupByLibrary(diff?.new ?? []);
   const pipeline = diff?.pipeline || null;
 
+  const q = keyword.trim().toLowerCase();
+  const matchedNew = useMemo(
+    () => (q ? (diff?.new ?? []).filter((it) => it.code.toLowerCase().includes(q)).length : nNew),
+    [diff, q, nNew]
+  );
+  const matchedMissing = useMemo(
+    () => (q ? (diff?.missing ?? []).filter((it) => it.code.toLowerCase().includes(q)).length : nMissing),
+    [diff, q, nMissing]
+  );
+  // 有筛选时，空的库不再占位
+  const visibleGroups = q ? groups.filter((g) => g.items.some((it) => it.code.toLowerCase().includes(q))) : groups;
+  const visibleMissing = q
+    ? (diff?.missing ?? []).filter((it) => it.code.toLowerCase().includes(q))
+    : diff?.missing ?? [];
+
   return (
-    <div className="flex-1 min-h-0 flex items-start justify-center pt-6">
+    <div className="flex-1 min-h-0 h-full flex items-start justify-center pt-4">
       <Card
         title="扫描因子来源"
-        className="w-[760px] max-h-full"
+        className="w-[760px] max-w-full h-full max-h-[calc(100vh-7.5rem)]"
         extra={
           <div className="flex items-center gap-2">
             <button
@@ -152,7 +281,7 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
           </div>
         }
       >
-        <div className="flex flex-col min-h-0">
+        <div className="flex h-full min-h-0 flex-col">
           <div
             data-testid="scan-summary"
             className="shrink-0 flex items-center gap-3 flex-wrap rounded-lg bg-slate-50 border border-slate-100 px-3 py-1.5"
@@ -160,13 +289,27 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
             <ScanSearch className="w-3.5 h-3.5 text-slate-400 shrink-0" />
             <Stat label="盘上扫到" value={diff?.discovered_count ?? '—'} />
             <Stat label="快照目录" value={diff?.catalog_count ?? '—'} />
-            <Stat label="新增" value={nNew} tone={nNew ? 'text-emerald-600' : 'text-slate-400'} />
-            <Stat label="消失" value={nMissing} tone={nMissing ? 'text-amber-600' : 'text-slate-400'} />
+            <Stat label="新增" value={q ? `${matchedNew}/${nNew}` : nNew} tone={nNew ? 'text-emerald-600' : 'text-slate-400'} />
+            <Stat label="消失" value={q ? `${matchedMissing}/${nMissing}` : nMissing} tone={nMissing ? 'text-amber-600' : 'text-slate-400'} />
             <Stat label="未变" value={diff?.unchanged_count ?? '—'} />
             {diff?.snapshot_at && (
               <span className="text-[10px] text-slate-400">快照建于 {diff.snapshot_at}</span>
             )}
           </div>
+
+          {/* 筛选框：单库 400+ 因子时按名找，比滚动快 */}
+          {nNew > 20 && (
+            <div className="shrink-0 mt-1.5 relative">
+              <Search className="w-3 h-3 text-slate-400 absolute left-2 top-1/2 -translate-y-1/2" />
+              <input
+                data-testid="scan-filter"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                placeholder={`在 ${nNew} 个新增因子里筛选（名称包含）`}
+                className="w-full rounded-lg border border-slate-200 bg-white pl-7 pr-2 py-1 text-[11px] text-slate-700 placeholder:text-slate-400 focus:border-indigo-300 focus:outline-none"
+              />
+            </div>
+          )}
 
           {/* 快照不是按默认全量扫描建的时，说清楚「新增」为什么会偏多 —— 重算按钮
               走的是 auto 全量，两边的范围本来就不是一回事，不说明会看着像 bug。 */}
@@ -254,54 +397,40 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
             </div>
           )}
 
-          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar mt-2 space-y-2">
+          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar mt-2 space-y-2 pr-1">
             {isLatest && (
               <div className="text-[11px] text-slate-500 py-3 text-center">
                 已是最新：盘上的因子与快照目录完全一致，没有需要重算的内容。
               </div>
             )}
 
-            {groups.map((g) => (
-              <div
-                key={g.lib}
-                data-testid={`scan-new-${g.lib}`}
-                className="rounded-xl border border-emerald-100 bg-emerald-50/40 px-2.5 py-1.5"
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className="text-[11px] font-bold text-emerald-700">{g.label}</span>
-                  <span className="text-[10px] font-mono text-emerald-600">{g.items.length} 个新增</span>
-                </div>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {g.items.map((it) => (
-                    <span
-                      key={it.code}
-                      className="rounded border border-emerald-100 bg-white px-1.5 py-0.5 text-[10px] font-mono text-slate-600"
-                      title={it.code}
-                    >
-                      {it.code}
-                    </span>
-                  ))}
-                </div>
-              </div>
+            {visibleGroups.map((g) => (
+              <LibraryGroup key={g.lib} group={g} keyword={keyword} />
             ))}
 
-            {nMissing > 0 && (
+            {q && visibleGroups.length === 0 && nNew > 0 && (
+              <div className="text-[11px] text-slate-500 py-3 text-center">没有匹配「{keyword}」的新增因子</div>
+            )}
+
+            {visibleMissing.length > 0 && (
               <div data-testid="scan-missing" className="rounded-xl border border-amber-100 bg-amber-50/40 px-2.5 py-1.5">
                 <div className="flex items-baseline gap-2">
                   <span className="text-[11px] font-bold text-amber-700">快照里还在、盘上已找不到</span>
-                  <span className="text-[10px] font-mono text-amber-600">{nMissing} 个</span>
+                  <span className="text-[10px] font-mono text-amber-600">{visibleMissing.length} 个</span>
                 </div>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {diff?.missing.map((it) => (
-                    <span
-                      key={it.code}
-                      className="rounded border border-amber-100 bg-white px-1.5 py-0.5 text-[10px] font-mono text-slate-600"
-                      title={it.library_label || it.library || '来源未知'}
-                    >
-                      {it.code}
-                      {it.library_label ? <span className="ml-1 text-slate-400">{it.library_label}</span> : null}
-                    </span>
-                  ))}
+                <div className="mt-1 overflow-y-auto custom-scrollbar" style={{ maxHeight: GROUP_BODY_MAX_H }}>
+                  <div className="flex flex-wrap gap-1 pr-1">
+                    {visibleMissing.map((it) => (
+                      <span
+                        key={it.code}
+                        className="rounded border border-amber-100 bg-white px-1.5 py-0.5 text-[10px] font-mono text-slate-600"
+                        title={it.library_label || it.library || '来源未知'}
+                      >
+                        {it.code}
+                        {it.library_label ? <span className="ml-1 text-slate-400">{it.library_label}</span> : null}
+                      </span>
+                    ))}
+                  </div>
                 </div>
                 <div className="mt-1 text-[10px] text-amber-600/80">
                   重算后会从目录里移除（数据没了，快照留着只会读到空值）。

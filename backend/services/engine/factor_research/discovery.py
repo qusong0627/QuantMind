@@ -56,6 +56,7 @@ LIB_LABELS = {
     "alpha360": "Alpha360 量价",
     "jq110": "聚宽 JQ110",
     "tdxgs": "通达信指标",
+    "jkp_ashare_daily": "JKP A股因子（日频投影）",
     "features_daily": "每日特征（技术+估值）",
     # 多市场库（港股专属；市场由扫描根决定，与标签表无冲突）
     "ccass_factors": "CCASS 中央结算持股因子",

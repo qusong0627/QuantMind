@@ -43,6 +43,9 @@ FACTOR_SOURCE_DIRS: dict[FactorSource, str] = {
     "ccass_factors": "6_ml_datasets/ccass_factors",
     "south_factors": "6_ml_datasets/south_factors",
     "alpha_library": "6_ml_datasets/alpha_library",
+    # JKP 404 特征的 A 股日频投影（月频库 jkp_ashare_monthly 按月末值前向填充，
+    # 由 backend/scripts/build_jkp_daily_projection.py 生成）
+    "jkp_ashare_daily": "6_ml_datasets/jkp_ashare_daily",
     "futures_factors": "6_ml_datasets/futures_factors",
 }
 DAILY_BACKWARD_DIR = "1_kline_data/daily_backward"
@@ -70,6 +73,7 @@ MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
         "l1_batch2_factors",
         "alpha_library",
         "factor_defs",
+        "jkp_ashare_daily",
     ),
     "HK": ("l1_factors", "ccass_factors", "south_factors"),
     "US": ("l1_factors",),
@@ -96,6 +100,9 @@ EXCLUDED_FROM_DISCOVERY: frozenset[str] = frozenset({
     "alpha_library",
     "factor_defs",
     "futures_factors_labels",
+    # JKP 153 因子的多空收益序列：无 symbol 维度（一行一个月，列名即因子名），
+    # 不是横截面因子值库，不得进「刷新字段」的因子源清单。
+    "jkp_ashare_factor_returns",
 })
 EXCLUDED_FROM_TRAINING: frozenset[str] = frozenset({
     "features_daily",
