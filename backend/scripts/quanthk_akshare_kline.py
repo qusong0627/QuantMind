@@ -26,6 +26,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -53,6 +54,44 @@ OUT_COLS = [
 ]
 
 DEFAULT_THREADS = 6
+
+#: 单次 HTTP 请求的默认超时（秒）。akshare 的 ``stock_hk_daily`` 走
+#: ``requests.get(url)`` → ``Session.request()``，而 akshare **不传 timeout**——
+#: 一条死连接就能让 ``as_completed`` 永远等下。2026-11-06 实测：2875 只单只 0.3s、
+#: 6 并发本该 2.4 分钟跑完，实际挂满 110 分钟、CPU 0.14%，直到任务软超时（115 分钟）
+#: 被杀；当晚本可落盘的 11-05 数据一行没写。
+DEFAULT_HTTP_TIMEOUT = float(os.getenv("QM_HK_HTTP_TIMEOUT_S") or 20)
+
+#: 整轮抓取的兜底预算（秒）。单请求超时之外再加一道：防止「每个请求都恰好不超时、
+#: 但整体慢到吃满夜窗」。到点后不再等剩余标的，已拿到的照常落盘。
+DEFAULT_FETCH_BUDGET = float(os.getenv("QM_HK_FETCH_BUDGET_S") or 1800)
+
+
+def _install_default_http_timeout(seconds: float) -> None:
+    """给 ``requests`` 打默认超时——只补**调用方没传**的情形。
+
+    补在 ``Session.request`` 上而不是 ``requests.get``：akshare 里两种写法都有，
+    而 ``requests.get`` 内部本就是 ``Session().request()``，补 Session 覆盖面最大。
+    显式传了 ``timeout`` 的调用方一律不动（别人的超时语义不该被我们改写）。
+
+    幂等：模块级函数对象上打标记，重复调用只装一次。
+    """
+    import requests
+
+    if getattr(requests.Session.request, "_qm_default_timeout", None):
+        return
+    original = requests.Session.request
+
+    def request_with_timeout(self, method, url, **kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = seconds
+        return original(self, method, url, **kwargs)
+
+    request_with_timeout._qm_default_timeout = seconds  # type: ignore[attr-defined]
+    # 留一条回退到原函数的引用：进程内被别的模块再打补丁时可还原，测试也据此
+    # 在用例之间复位（否则一次安装会污染整个 pytest 进程的 requests 语义）。
+    request_with_timeout._qm_original = original  # type: ignore[attr-defined]
+    requests.Session.request = request_with_timeout  # type: ignore[method-assign]
 
 
 def _quanthk_root() -> Path:
@@ -180,18 +219,42 @@ def sync(
     frames: list[pd.DataFrame] = []
     ok = 0
     err = 0
+    timed_out = 0
+    _install_default_http_timeout(DEFAULT_HTTP_TIMEOUT)
+    started = time.monotonic()
     with ThreadPoolExecutor(max_workers=concurrent) as pool:
         futures = {pool.submit(_fetch_stock, s, min_date): s for s in syms}
-        for future in as_completed(futures):
-            df = future.result()
-            if df is not None and not df.empty:
-                frames.append(df)
-                ok += 1
-            else:
-                err += 1
+        try:
+            # timeout 必须挂在 as_completed 上：只靠循环体里的 deadline 判断的话，
+            # 「全部标的都卡住」时一个 future 都不会完成，那个判断永远轮不到，
+            # 整轮照样挂到任务软超时（正是要修的那个形态）。
+            for done, future in enumerate(
+                as_completed(futures, timeout=DEFAULT_FETCH_BUDGET), start=1
+            ):
+                df = future.result()
+                if df is not None and not df.empty:
+                    frames.append(df)
+                    ok += 1
+                else:
+                    err += 1
+                # 进度日志：卡住时要能一眼看出「停在第几只」，否则整轮静默（2026-11-06）
+                if done % 500 == 0:
+                    log.info(
+                        "日线进度 %d/%d（ok=%d err=%d 用时 %.0fs）",
+                        done, len(syms), ok, err, time.monotonic() - started,
+                    )
+        except TimeoutError:
+            timed_out = max(len(syms) - ok - err, 0)
+            log.warning(
+                "日线抓取预算 %.0fs 用尽：已完成 %d/%d，剩余 %d 只不再等待"
+                "（已拿到的照常落盘；调 QM_HK_FETCH_BUDGET_S 可放宽）",
+                DEFAULT_FETCH_BUDGET, ok + err, len(syms), timed_out,
+            )
 
     if not frames:
-        return {"stocks": len(syms), "ok": ok, "err": err, "rows": 0}
+        return {
+            "stocks": len(syms), "ok": ok, "err": err, "rows": 0, "timed_out": timed_out
+        }
 
     all_df = pd.concat(frames, ignore_index=True)
     target_dir = _quanthk_root() / REL_DIR
@@ -216,6 +279,7 @@ def sync(
         "stocks": len(syms),
         "ok": ok,
         "err": err,
+        "timed_out": timed_out,
         "rows": int(len(all_df)),
         "partitions_written": written,
         "start_date": min(grouped),
