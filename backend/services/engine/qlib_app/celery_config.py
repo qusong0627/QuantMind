@@ -21,6 +21,12 @@ except ImportError:
 if load_dotenv:
     load_dotenv(PROJECT_ROOT / ".env")
 
+# worker/beat 不经过 main_oss 启动，core dump 限额要在这里单独关（同 main_oss）：
+# 宿主 core_pattern=core → 崩溃现场写进容器 CWD，单份 3~5GB（2026-11-06 十份 38GB）。
+from backend.shared.core_dump_guard import disable_core_dumps
+
+disable_core_dumps()
+
 # worker/beat 不经过 main_oss 启动，管理台写入的 runtime.env（如
 # QUANTDB_API_KEY）必须在此注入，否则定时同步拿不到运行时密钥。
 # 真实环境变量优先，runtime.env 只补空缺，与 main_oss 语义一致。

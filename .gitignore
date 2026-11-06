@@ -364,3 +364,8 @@ pine_lab/
 # 导出的实盘增量包（推理结果 + 策略的 CSV，属业务数据；CSV 已被 *.csv 覆盖，
 # 这里连 manifest.json/目录本身一起挡掉）
 deploy/portable/live-out/
+
+# core dump（2026-11-07）：宿主 kernel.core_pattern=core，崩溃进程把 core 写进 cwd；
+# 容器 cwd=/app/backend 是 bind mount → 直接落进仓库工作树（实测 15.9GB）。
+core.[0-9]*
+backend/core.*

@@ -709,13 +709,12 @@ def _disable_core_dumps() -> None:
     2026-10-14 审计仍有 9 个共 ≈6.5GB（单次 600MB~1.7GB × 分片数）。原生库闭源、
     core 诊断价值低（排障走 SDK 日志 + fd 级诊断 + counters），事故面远大于收益。
     需要 core 取证时手动以 ``ulimit -c unlimited`` 直跑单实例（隔离探针模式）。
-    """
-    try:
-        import resource
 
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    except Exception:  # noqa: BLE001 - 非 POSIX 或受限环境：保持默认，不阻断启动
-        pass
+    实现统一在 :mod:`backend.shared.core_dump_guard`（与 main_oss / celery 同源）。
+    """
+    from backend.shared.core_dump_guard import disable_core_dumps
+
+    disable_core_dumps()
 
 
 def main(argv: list[str] | None = None) -> int:

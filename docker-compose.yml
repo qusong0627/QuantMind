@@ -94,6 +94,14 @@ services:
     # 收敛到容器，不再拖垮宿主机。memswap=50g 留 5G 交换余量吸收瞬时尖峰。
     mem_limit: 45g
     memswap_limit: 50g
+    # 关闭 core dump（2026-11-07）：宿主 kernel.core_pattern 是裸的 `core`，内核把崩溃
+    # 进程的 core 写进它的 cwd —— 容器 /app 是**可写层**，cwd=/app/backend 则落到宿主
+    # 仓库目录。实测单份 3.4~16GB（2026-10-15 pytest SIGABRT 16GB、2026-11-06 十份
+    # multiprocessing spawn SIGSEGV 共 38GB），2026-09-21 更曾把根分区写到 0 字节。
+    # ulimits 在**容器创建时**生效：改完需 recreate 才作用于运行中的容器；
+    # 重建前由宿主机 cron 的 core 清扫兜底（见 crontab 「core dump 清扫」）。
+    ulimits:
+      core: 0
     # SYS_RESOURCE：仅供 main_oss.py 里在线服务把自身 oom_score_adj 调**低**用
     # （内核规定：调低 oom_score_adj 需 CAP_SYS_RESOURCE，调高不需要）。容器级
     # memcg OOM 时会优先牺牲因子挖掘子进程(+500)而不是交易/API(-500)。
@@ -547,6 +555,9 @@ services:
     # 同一负载在 12g 硬限下复跑通过（峰值 7820MB，114s）。
     mem_limit: 12g
     memswap_limit: 14g
+    # 关闭 core dump（同 quantmind 服务；worker 里跑训练/推理，崩一次 3~5GB）
+    ulimits:
+      core: 0
     depends_on:
       db:
         condition: service_healthy
@@ -725,6 +736,9 @@ services:
     # 内存上限（同上）。beat 只做调度，1G 足够。
     mem_limit: 1g
     memswap_limit: 1g
+    # 关闭 core dump（同上）
+    ulimits:
+      core: 0
     depends_on:
       db:
         condition: service_healthy

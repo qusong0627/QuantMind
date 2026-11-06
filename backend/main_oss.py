@@ -21,6 +21,12 @@ try:
 except RuntimeError:
     pass
 
+# 禁止 core dump：宿主 core_pattern=core 会把崩溃现场写进容器 CWD（可写层/仓库 bind
+# mount），单份 3~16GB。子进程 spawn 后继承本限额。详见 backend/shared/core_dump_guard.py
+from backend.shared.core_dump_guard import disable_core_dumps
+
+disable_core_dumps()
+
 from backend.shared.logging_config import setup_logging
 
 setup_logging(service_name="quantmind-oss")
