@@ -196,6 +196,9 @@ def simulate(
     for target in dates:
         try:
             data, replaced = _apply_bars(target, bars, adj)
+            if replaced < 500:
+                log.warning("skip %s: 14:50 bar 仅替换 %d 只，分钟数据缺日", target, replaced)
+                continue
             data = _subset_universe(data, max_symbols)
             frame = compute_core(target, data)
         except Exception as exc:
