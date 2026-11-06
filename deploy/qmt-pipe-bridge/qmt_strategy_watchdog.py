@@ -70,6 +70,12 @@ DEFAULT_CONFIG = {
     'reload_max_per_day': 3,
     'state_ttl_s': 86400,
     'post_reload_wait_s': 8.0,
+    # reload 也救不回来时，重启伴生桥（实测：断管道连接能解锁策略主线程，
+    # 2026-11-06 两次现场 11:28:40 / 11:32:45）。
+    'bridge_restart_after_s': 180,
+    'bridge_restart_max_per_hour': 2,
+    'bridge_start_cmd': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\start_pipe_bridge.cmd',
+    'bridge_restart_wait_s': 15.0,
 }
 
 
@@ -151,6 +157,9 @@ def evaluate(
         'failures': int(prev.get('failures') or 0),
         'last_reload_ts': float(prev.get('last_reload_ts') or 0.0),
         'reload_count': reload_count,
+        # 本次 unresponsive 的起始时间（桥重启判定用）：成功即刻清零。
+        'unresponsive_since': float(prev.get('unresponsive_since') or 0.0),
+        'bridge_restart_ts': str(prev.get('bridge_restart_ts') or ''),
     }
 
     if not probe.reachable:
@@ -160,10 +169,13 @@ def evaluate(
 
     if probe.account_ok:
         state['failures'] = 0
+        state['unresponsive_since'] = 0.0
         return Decision('ok', 'account query ok', 0, state)
 
     state['failures'] += 1
     failures = state['failures']
+    if failures >= int(cfg['fail_threshold']) and not state['unresponsive_since']:
+        state['unresponsive_since'] = now_ts
     if failures < int(cfg['fail_threshold']):
         return Decision('observe', f'account timeout ({failures}/'
                          f'{int(cfg["fail_threshold"])})', failures, state)
@@ -184,6 +196,31 @@ def evaluate(
     state['last_reload_ts'] = now_ts
     return Decision('reload', 'account query hung; scheduling reload_deployment',
                     failures, state)
+
+
+def should_restart_bridge(prev: dict, now_ts: float,
+                          cfg: dict | None = None) -> tuple[bool, str]:
+    """reload 救不回来时，是否该重启伴生桥（纯函数）。
+
+    实测（2026-11-06 两次现场 11:28:40 / 11:32:45）：断开管道连接能让卡在
+    QMT C++ 调用里的策略主线程立刻解锁；而空载 7 分钟不会自愈。所以「挂死后
+    重启桥」是唯一不需要人工去 QMT 点重启的恢复手段。加冷却窗与小时上限，
+    防止把桥当成重启风暴的开关。
+    """
+    cfg = {**DEFAULT_CONFIG, **(cfg or {})}
+    since = float(prev.get('unresponsive_since') or 0.0)
+    if since <= 0:
+        return False, 'not unresponsive'
+    waited = now_ts - since
+    threshold = float(cfg['bridge_restart_after_s'])
+    if waited < threshold:
+        return False, f'unresponsive {waited:.0f}s < {int(threshold)}s'
+    stamps = [float(x) for x in str(prev.get('bridge_restart_ts') or '').split(',')
+              if x]
+    recent = [s for s in stamps if now_ts - s < 3600]
+    if len(recent) >= int(cfg['bridge_restart_max_per_hour']):
+        return False, 'bridge restart hourly budget exhausted'
+    return True, f'unresponsive {waited:.0f}s'
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +339,59 @@ def _save_state(redis_client, decision: Decision, probe: Probe, cfg: dict) -> No
         pass
 
 
+def _restart_bridge(cfg: dict) -> bool:
+    """杀掉伴生桥并脱离本会话重新拉起。成功返回 True。
+
+    只动 pipe_redis_bridge 进程（按命令行匹配，绝不按进程名杀——容器里所有
+    服务都叫 python 的教训同理）。拉起用 DETACHED_PROCESS，避免随本进程退出。
+    """
+    import subprocess  # noqa: PLC0415
+
+    killed = False
+    try:
+        import psutil  # noqa: PLC0415
+
+        for proc in psutil.process_iter(['pid', 'cmdline']):
+            try:
+                cmdline = ' '.join(proc.info.get('cmdline') or [])
+            except Exception:  # noqa: BLE001
+                continue
+            if 'pipe_redis_bridge' in cmdline:
+                proc.kill()
+                killed = True
+    except Exception:  # noqa: BLE001 - 没有 psutil 就退回 wmic/taskkill
+        try:
+            out = subprocess.run(
+                ['wmic', 'process', 'where', "name='python.exe'", 'get',
+                 'ProcessId,CommandLine', '/format:csv'],
+                capture_output=True, text=True, timeout=15).stdout
+            for line in out.splitlines():
+                if 'pipe_redis_bridge' in line:
+                    pid = line.rstrip().split(',')[-1].strip()
+                    if pid.isdigit():
+                        subprocess.run(['taskkill', '/F', '/PID', pid],
+                                       capture_output=True, timeout=10)
+                        killed = True
+        except Exception:  # noqa: BLE001
+            return False
+    if not killed:
+        # 桥本来就没在跑：等价于需要拉起，继续。
+        pass
+    time.sleep(2)
+    flags = 0
+    for name in ('DETACHED_PROCESS', 'CREATE_NEW_PROCESS_GROUP'):
+        flags |= getattr(subprocess, name, 0)
+    try:
+        subprocess.Popen(
+            ['cmd.exe', '/c', str(cfg['bridge_start_cmd'])],
+            creationflags=flags, close_fds=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='QMT 策略交易查询看门狗')
     parser.add_argument('--config', default=CONFIG_PATH)
@@ -339,28 +429,62 @@ def main(argv: list[str] | None = None) -> int:
           f'reachable={probe.reachable} account_ok={probe.account_ok} '
           f'asset_ms={probe.asset_ms} err={probe.error[:120]}')
 
+    def _restart_or_alert(dec: Decision, why: str) -> Decision:
+        """先尝试重启伴生桥（断管道解锁策略），失败才降级为人工告警。"""
+        if args.dry_run:
+            return Decision('alert', f'{why}; dry-run, no action',
+                            dec.failures, dec.state)
+        if queue_has_orders:
+            return Decision('alert', f'{why}; order rpc in flight, bridge restart '
+                            'deferred - check manually', dec.failures, dec.state)
+        allowed, reason = should_restart_bridge(dec.state, time.time(), cfg)
+        if not allowed:
+            return Decision('alert', f'{why}; bridge restart skipped ({reason}) - '
+                            'restart the strategy in QMT strategy editor',
+                            dec.failures, dec.state)
+        stamps = [s for s in str(dec.state.get('bridge_restart_ts') or '').split(',')
+                  if s]
+        stamps.append(str(int(time.time())))
+        dec.state['bridge_restart_ts'] = ','.join(stamps)
+        started = _restart_bridge(cfg)
+        print(f'{stamp} BRIDGE RESTART started={started}')
+        if not started:
+            return Decision('alert', f'{why}; bridge restart failed to start',
+                            dec.failures, dec.state)
+        time.sleep(float(cfg['bridge_restart_wait_s']))
+        after = probe_once(transport, cfg)
+        print(f'{stamp} after bridge restart: account_ok={after.account_ok} '
+              f'ms={after.asset_ms} err={after.error[:120]}')
+        if after.account_ok:
+            dec.state['unresponsive_since'] = 0.0
+            dec.state['failures'] = 0
+            return Decision('ok', 'account query ok after bridge restart', 0,
+                            dec.state)
+        return Decision('alert', f'{why}; bridge restarted but account still hung '
+                        f'({after.error}) - restart the strategy in QMT strategy '
+                        'editor', dec.failures, dec.state)
+
     if decision.action == 'reload' and not args.dry_run:
         data, err = _call(transport, 'reload_deployment',
                           {}, cfg['reload_timeout_s'])
         if data is None:
-            # 主线程已经连 reload 都处理不了：判定死锁，转人工。
-            decision = Decision(
-                'alert',
-                f'reload_deployment failed ({err}); strategy main thread is '
-                'deadlocked - restart the strategy in QMT strategy editor',
-                decision.failures, decision.state)
-            print(f'{stamp} ALERT {decision.reason}')
+            # 主线程已经连 reload 都处理不了：先试重启桥，再降级人工。
+            decision = _restart_or_alert(
+                decision, f'reload_deployment failed ({err})')
+            print(f'{stamp} {decision.action.upper()} {decision.reason}')
         else:
             time.sleep(float(cfg['post_reload_wait_s']))
             after = probe_once(transport, cfg)
             print(f'{stamp} reload scheduled={data} after_ok={after.account_ok} '
                   f'after_ms={after.asset_ms}')
             if not after.account_ok:
-                decision = Decision(
-                    'alert',
-                    f'reload did not recover account queries ({after.error}); '
-                    'restart the strategy in QMT strategy editor',
-                    decision.failures, decision.state)
+                decision = _restart_or_alert(
+                    decision, f'reload did not recover account queries ({after.error})')
+                print(f'{stamp} {decision.action.upper()} {decision.reason}')
+    elif decision.action == 'alert' and float(decision.state.get('unresponsive_since') or 0):
+        # reload 预算耗尽等场景：桥重启仍是可用的恢复手段。
+        decision = _restart_or_alert(decision, decision.reason)
+        print(f'{stamp} {decision.action.upper()} {decision.reason}')
 
     if redis_client is not None:
         _save_state(redis_client, decision, probe, cfg)

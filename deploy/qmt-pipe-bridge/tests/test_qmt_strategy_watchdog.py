@@ -213,3 +213,44 @@ def test_load_config_missing_file_uses_defaults(tmp_path):
     assert cfg['fail_threshold'] == wd.DEFAULT_CONFIG['fail_threshold']
     assert cfg['enabled'] is True
 
+
+
+# --------------------------------------------------------------------------
+# 桥重启判定（reload 救不回来时的最后自愈手段）
+# --------------------------------------------------------------------------
+def test_should_restart_bridge_requires_threshold():
+    now = 1000.0
+    ok, _ = wd.should_restart_bridge({'unresponsive_since': now - 60}, now)
+    assert ok is False
+    ok, _ = wd.should_restart_bridge({'unresponsive_since': now - 200}, now)
+    assert ok is True
+
+
+def test_should_restart_bridge_hourly_budget():
+    now = 10000.0
+    stamps = f'{int(now - 100)},{int(now - 200)}'
+    ok, reason = wd.should_restart_bridge(
+        {'unresponsive_since': now - 300, 'bridge_restart_ts': stamps}, now)
+    assert ok is False
+    assert 'budget' in reason
+    # 一小时以前的记录不计入
+    ok, _ = wd.should_restart_bridge(
+        {'unresponsive_since': now - 300, 'bridge_restart_ts': str(int(now - 4000))}, now)
+    assert ok is True
+
+
+def test_should_restart_bridge_not_when_healthy():
+    ok, reason = wd.should_restart_bridge({}, 1000.0)
+    assert ok is False
+    assert 'not unresponsive' in reason
+
+
+def test_evaluate_tracks_unresponsive_since():
+    now = _ts(10, 0)
+    d = wd.evaluate({'failures': 1, 'day': time.strftime('%Y%m%d')},
+                    _probe(account_ok=False), now_ts=now, queue_has_orders=False)
+    assert d.state['unresponsive_since'] == now
+    d2 = wd.evaluate(
+        {'failures': 3, 'unresponsive_since': now, 'day': time.strftime('%Y%m%d')},
+        _probe(account_ok=True), now_ts=now + 10, queue_has_orders=False)
+    assert d2.state['unresponsive_since'] == 0.0
