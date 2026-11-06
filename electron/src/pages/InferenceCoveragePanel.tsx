@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Tag, Typography, Spin, Empty, Collapse, Progress, Modal, message } from 'antd';
 import { Database, Calendar, RefreshCw, Zap, CheckCircle2, AlertTriangle, Clock } from 'lucide-react';
 import { modelTrainingService } from '../services/modelTrainingService';
@@ -7,12 +7,50 @@ const { Text } = Typography;
 
 const STORAGE_KEY = (modelId: string) => `qm:backfill:${modelId}`;
 
+/** 日历动态展示的月份数量 */
+const CALENDAR_MONTH_SPAN = 3;
+
+/** 补全任务轮询节奏：默认 2s，超过 2 分钟后降频到 5s，避免长任务持续压接口 */
+const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_SLOW_MS = 5000;
+const POLL_SLOW_AFTER_MS = 2 * 60 * 1000;
+/** 连续查询失败上限（容忍一次容器重启的 5xx 窗口），超过则暂停自动刷新但保留任务号 */
+const POLL_MAX_CONSECUTIVE_ERRORS = 30;
+/** 无任何状态变化的上限：单日推理脚本超时上限 60 分钟，这里留 1.5 倍余量 */
+const POLL_STALE_LIMIT_MS = 90 * 60 * 1000;
+
+/**
+ * 动态生成日历展示的月份列表（YYYY-MM）：
+ * 以「当前月」为最后一列向前取满 3 个月，随月份自然滚动（如 2026-11 → 9、10、11 月，12 月 → 10、11、12 月）；
+ * 若最新交易月晚于当前月（数据超前或时钟偏差），则以最新交易月为最后一列，保证覆盖数据始终可见。
+ */
+const buildCalendarMonths = (latest: string | null): string[] => {
+  const now = new Date();
+  let anchor = new Date(now.getFullYear(), now.getMonth(), 1);
+  if (latest) {
+    const [y, m] = latest.split('-').map(Number);
+    if (y > 0 && m > 0) {
+      const latestMonth = new Date(y, m - 1, 1);
+      if (latestMonth > anchor) anchor = latestMonth;
+    }
+  }
+  return Array.from({ length: CALENDAR_MONTH_SPAN }, (_, i) => {
+    const d = new Date(anchor.getFullYear(), anchor.getMonth() - (CALENDAR_MONTH_SPAN - 1 - i), 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  });
+};
+
 export const InferenceCoveragePanel: React.FC<{ modelId: string }> = ({ modelId }) => {
   const [loading, setLoading] = useState(true);
   const [coverage, setCoverage] = useState<any>(null);
   const [backfilling, setBackfilling] = useState(false);
   const [task, setTask] = useState<any>(null);
   const [tradingMap, setTradingMap] = useState<Record<string, boolean>>({});
+
+  // 日历展示的月份窗口：随当前月动态滚动（当前月为最后一列）
+  const latestTradeDate = coverage?.latest_trade_date ? String(coverage.latest_trade_date).slice(0, 10) : null;
+  const calendarMonths = useMemo(() => buildCalendarMonths(latestTradeDate), [latestTradeDate]);
+  const calendarMonthsKey = calendarMonths.join(',');
 
   const load = useCallback(async () => {
     if (!modelId) return;
@@ -30,77 +68,141 @@ export const InferenceCoveragePanel: React.FC<{ modelId: string }> = ({ modelId 
 
   useEffect(() => { void load(); }, [load]);
 
+  // ── 补全任务轮询 ────────────────────────────────────────────────────────
+  // 后台按交易日逐日跑推理，缺口几十个时会远超 4 分钟，因此这里不设轮询次数
+  // 上限：只有任务结束、组件卸载、连续查询失败或长时间无进度才停止。
+  // 任务号常驻 localStorage，离开页面再回来会继续查询同一个后台任务。
+  const pollTokenRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      // 卸载后让在途轮询退出，避免对已卸载组件 setState
+      mountedRef.current = false;
+      pollTokenRef.current += 1;
+    };
+  }, []);
+
+  /** 停止当前轮询（下一次 startPolling 会自动抢占） */
+  const stopPolling = useCallback(() => {
+    pollTokenRef.current += 1;
+  }, []);
+
+  const startPolling = useCallback((taskId: string) => {
+    const token = (pollTokenRef.current += 1);
+    const isActive = () => mountedRef.current && pollTokenRef.current === token;
+
+    void (async () => {
+      const startedAt = Date.now();
+      let lastSignature = '';
+      let lastChangeAt = Date.now();
+      let consecutiveErrors = 0;
+
+      while (isActive()) {
+        const interval = Date.now() - startedAt > POLL_SLOW_AFTER_MS ? POLL_INTERVAL_SLOW_MS : POLL_INTERVAL_MS;
+        await new Promise((r) => setTimeout(r, interval));
+        if (!isActive()) return;
+
+        let st: any;
+        try {
+          st = await modelTrainingService.getBackfillStatus(modelId, taskId);
+          consecutiveErrors = 0;
+        } catch (e: any) {
+          if (!isActive()) return;
+          const status = e?.response?.status ?? e?.status;
+          if (status === 404) {
+            // 任务状态存在后端进程内存里，服务重启/更新后就会丢
+            localStorage.removeItem(STORAGE_KEY(modelId));
+            setBackfilling(false);
+            message.warning('补全任务状态已丢失（服务可能重启过），请点「刷新」重新检测缺口');
+            void load();
+            return;
+          }
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= POLL_MAX_CONSECUTIVE_ERRORS) {
+            setBackfilling(false);
+            message.warning('补全仍在后台执行，但状态查询连续失败，已暂停自动刷新；重新进入页面会继续查询');
+            return;
+          }
+          continue;
+        }
+        if (!isActive()) return;
+
+        setTask(st);
+        const signature = `${st?.status}|${st?.progress}|${st?.appended}|${st?.failed}|${st?.error ?? ''}|${String(st?.logs ?? '').length}`;
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          lastChangeAt = Date.now();
+        }
+
+        if (st?.status === 'completed' || st?.status === 'failed' || st?.status === 'partial') {
+          if (st?.status === 'completed') message.success(`补全完成，追加 ${st?.appended ?? 0} 日`);
+          else if (st?.status === 'partial') message.warning(st?.error || `部分成功：追加 ${st?.appended ?? 0} 日，${st?.failed ?? 0} 日失败`);
+          else message.error(st?.error || '补全失败');
+          localStorage.removeItem(STORAGE_KEY(modelId));
+          setBackfilling(false);
+          void load();
+          return;
+        }
+
+        if (Date.now() - lastChangeAt > POLL_STALE_LIMIT_MS) {
+          setBackfilling(false);
+          message.warning('补全任务长时间无进度更新，已暂停自动刷新；任务可能仍在后台执行，重新进入页面可继续查询');
+          return;
+        }
+      }
+    })();
+  }, [modelId, load]);
+
   // 切页恢复：若存在进行中的后台任务，自动恢复轮询
   useEffect(() => {
     if (!modelId) return;
-    const stored = localStorage.getItem(STORAGE_KEY(modelId));
-    if (!stored) return;
-    const taskId = stored.trim();
+    const taskId = (localStorage.getItem(STORAGE_KEY(modelId)) || '').trim();
     if (!taskId) return;
     let cancelled = false;
+
     const resume = async () => {
       try {
         const st = await modelTrainingService.getBackfillStatus(modelId, taskId);
         if (cancelled) return;
+        setTask(st);
         if (st?.status === 'running') {
-          setTask(st);
           setBackfilling(true);
-          // 继续轮询直至完成
-          for (let i = 0; i < 120; i++) {
-            await new Promise((r) => setTimeout(r, 2000));
-            if (cancelled) return;
-            try {
-              const cur = await modelTrainingService.getBackfillStatus(modelId, taskId);
-              if (cancelled) return;
-              setTask(cur);
-              if (cur?.status === 'completed' || cur?.status === 'failed' || cur?.status === 'partial') {
-                if (cur?.status === 'completed') message.success(`补全完成，追加 ${cur?.appended ?? 0} 日`);
-                else if (cur?.status === 'partial') message.warning(cur?.error || `部分成功：追加 ${cur?.appended ?? 0} 日，${cur?.failed ?? 0} 日失败`);
-                else message.error(cur?.error || '补全失败');
-                localStorage.removeItem(STORAGE_KEY(modelId));
-                setBackfilling(false);
-                void load();
-                return;
-              }
-            } catch {
-              // 忽略轮询错误
-            }
-          }
-          setBackfilling(false);
+          startPolling(taskId);
         } else {
-          // 已结束的任务清理存储，失败/完成时展示一下进度
-          if (st?.status === 'completed' || st?.status === 'failed') {
-            setTask(st);
-            // 若已完成可短期展示后清理，避免切回仍显示旧进度时误以为进行中
-            if (st?.status === 'completed') localStorage.removeItem(STORAGE_KEY(modelId));
-          } else {
-            localStorage.removeItem(STORAGE_KEY(modelId));
-          }
+          // 已结束/已丢失的任务不再续轮询，清掉任务号避免下次误判为进行中
+          localStorage.removeItem(STORAGE_KEY(modelId));
+          setBackfilling(false);
         }
       } catch {
-        localStorage.removeItem(STORAGE_KEY(modelId));
+        // 404（服务重启）或网络失败：清理任务号，不影响页面其它内容
+        if (!cancelled) {
+          localStorage.removeItem(STORAGE_KEY(modelId));
+          setBackfilling(false);
+        }
       }
     };
-    void resume();
-    return () => { cancelled = true; };
-  }, [modelId, load]);
 
-  // 量化交易日历：批量判断 3 个月所有日期是否为交易日，替代周末判断
+    void resume();
+    return () => {
+      cancelled = true;
+      stopPolling();
+    };
+  }, [modelId, startPolling, stopPolling]);
+
+  // 量化交易日历：批量判断日历窗口内所有日期是否为交易日，替代周末判断
   useEffect(() => {
-    const latest = coverage?.latest_trade_date ? String(coverage.latest_trade_date).slice(0, 10) : null;
-    const baseDate = latest ? new Date(latest) : new Date();
-    const months = [-2, -1, 0].map((off) => {
-      const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + off, 1);
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    });
+    const months = calendarMonthsKey ? calendarMonthsKey.split(',') : [];
     const allDates: string[] = [];
     for (const ym of months) {
       const [y, m] = ym.split('-').map(Number);
       const days = new Date(y, m, 0).getDate();
       for (let d = 1; d <= days; d++) allDates.push(`${ym}-${String(d).padStart(2, '0')}`);
     }
+    if (!allDates.length) return;
     void modelTrainingService.batchCheckTradingDays('SSE', allDates).then(setTradingMap).catch(() => setTradingMap({}));
-  }, [coverage?.latest_trade_date]);
+  }, [calendarMonthsKey]);
 
   const gapCount = coverage?.gap_dates?.length ?? 0;
   const isUpToDate = coverage?.is_up_to_date ?? (gapCount === 0 && coverage?.max_date);
@@ -133,30 +235,8 @@ export const InferenceCoveragePanel: React.FC<{ modelId: string }> = ({ modelId 
             return;
           }
           localStorage.setItem(STORAGE_KEY(modelId), taskId);
-          // 轮询
-          const poll = async () => {
-            for (let i = 0; i < 120; i++) {
-              await new Promise((r) => setTimeout(r, 2000));
-              try {
-                const st = await modelTrainingService.getBackfillStatus(modelId, taskId);
-                setTask(st);
-                if (st?.status === 'completed' || st?.status === 'failed' || st?.status === 'partial') {
-                  if (st?.status === 'completed') message.success(`补全完成，追加 ${st?.appended ?? gapCount} 日`);
-                  else if (st?.status === 'partial') message.warning(st?.error || `部分成功：追加 ${st?.appended ?? gapCount} 日，${st?.failed ?? 0} 日失败`);
-                  else message.error(st?.error || '补全失败');
-                  localStorage.removeItem(STORAGE_KEY(modelId));
-                  setBackfilling(false);
-                  void load();
-                  return;
-                }
-              } catch {
-                // 忽略轮询错误
-              }
-            }
-            // 超时仍保留 taskId 供下次切回继续轮询
-            setBackfilling(false);
-          };
-          void poll();
+          // 持续轮询直至任务结束（无次数上限，离开页面后重新进入会继续）
+          startPolling(taskId);
         } catch (e: any) {
           message.error(e?.message ?? '触发失败');
           setBackfilling(false);
@@ -215,6 +295,9 @@ export const InferenceCoveragePanel: React.FC<{ modelId: string }> = ({ modelId 
         <Card size="small" className="rounded-2xl">
           <div className="flex items-center gap-2 mb-2"><Clock size={12} className="text-blue-500"/><Text className="text-xs font-bold">补全进度</Text></div>
           <Progress percent={task.progress ?? 0} size="small" />
+          <div className="text-[11px] text-slate-400 mt-1">
+            任务在后台按交易日逐日执行，可以离开本页，重新进入会继续显示进度。
+          </div>
           {task.logs && <pre className="mt-2 p-2 bg-slate-900 text-slate-100 rounded-xl text-[10px] max-h-32 overflow-auto">{String(task.logs).slice(-2000)}</pre>}
         </Card>
       )}
@@ -228,12 +311,8 @@ export const InferenceCoveragePanel: React.FC<{ modelId: string }> = ({ modelId 
           const latest = coverage?.latest_trade_date ? String(coverage.latest_trade_date).slice(0, 10) : null;
           const maxDate = coverage?.max_date ? String(coverage.max_date).slice(0, 10) : null;
           const gapSet = new Set((coverage?.gap_dates || []).map((d: string) => String(d).slice(0, 10)));
-          // 动态展示最近 3 个月（含最新交易月），如 8.30 则 6-8 月
-          const baseDate = latest ? new Date(latest) : new Date();
-          const months = [-2, -1, 0].map((off) => {
-            const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + off, 1);
-            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-          });
+          // 月份窗口由 calendarMonths 统一提供（随当前月滚动，如 11 月 → 9-11 月）
+          const months = calendarMonths;
           const weekDays = ['一', '二', '三', '四', '五', '六', '日'];
           const isTradingDay = (d: string) => tradingMap[d] ?? false;
           return (
