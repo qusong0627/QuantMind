@@ -47,6 +47,7 @@ def evaluate(
     min_amount_wan: float,
     cost_rate: float,
     portfolio_size: float = 1e7,
+    include_st: bool = False,
 ) -> dict:
     feats = model["features"]
     booster, mu = model["booster"], model["mu"]
@@ -54,7 +55,9 @@ def evaluate(
     score = booster.predict(rows[feats].to_numpy("float32")) @ mu
     rows["score"] = score
 
-    rows = rows[~rows["limit_up"].astype(bool) & ~rows["is_st"].astype(bool)]
+    rows = rows[~rows["limit_up"].astype(bool)]
+    if not include_st:
+        rows = rows[~rows["is_st"].astype(bool)]
     rows = rows[rows["amount"] >= min_amount_wan]
     rows = rows[np.isfinite(rows["ret_next"]) & np.isfinite(rows["score"])]
 
@@ -143,6 +146,7 @@ def main() -> None:
     parser.add_argument("--min-amount", type=float, default=2000.0, help="成交额下限（万元）")
     parser.add_argument("--cost", type=float, default=COST_RATE)
     parser.add_argument("--portfolio-size", type=float, default=1e7, help="组合规模（元）")
+    parser.add_argument("--include-st", action="store_true", help="不剔除 ST")
     parser.add_argument("--out", default=str(OUT / "analysis_1450.json"))
     args = parser.parse_args()
 
@@ -163,7 +167,12 @@ def main() -> None:
             continue
         model = _load_model(path)
         report["models"][tag] = evaluate(
-            features, model, args.min_amount, args.cost, args.portfolio_size
+            features,
+            model,
+            args.min_amount,
+            args.cost,
+            args.portfolio_size,
+            args.include_st,
         )
 
     Path(args.out).write_text(
@@ -174,7 +183,7 @@ def main() -> None:
         "",
         f"- 交易日 {report['n_days']}，样本 {report['n_rows']} 行，"
         f"{report['date_min']} ~ {report['date_max']}",
-        f"- 过滤：剔除涨停/ST、成交额 ≥ {args.min_amount:.0f} 万元",
+        f"- 过滤：剔除涨停、ST={'剔除' if not args.include_st else '保留'}、成交额 ≥ {args.min_amount:.0f} 万元",
         f"- 成本：单边换手 {args.cost * 1e4:.0f}bp；组合规模 {args.portfolio_size / 1e4:.0f} 万元",
         "",
     ]
