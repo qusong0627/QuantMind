@@ -39,7 +39,9 @@ WITH m AS (
            count(*) FILTER (WHERE bid1 IS NULL) AS bid1_null,
            count(*) FILTER (WHERE volume < 0) AS neg_vol,
            count(*) FILTER (WHERE high < low) AS bad_hl,
-           count(*) FILTER (WHERE trade_n = 0) AS zero_trade
+           count(*) FILTER (WHERE trade_n = 0) AS zero_trade,
+           median(abs(bid1 / nullif(close, 0) - 1)) AS bid_dev_symbol,
+           median(abs(wavg_bid / nullif(close, 0) - 1)) AS wavg_dev_symbol
     FROM read_parquet('{minute_path}')
     GROUP BY symbol
 ), d AS (
@@ -62,6 +64,9 @@ SELECT
     quantile_cont(abs(amt - d_amt) / nullif(d_amt, 0), 0.95) AS amt_relerr_p95,
     median(abs(m_close - d_close) / nullif(d_close, 0)) AS px_relerr_med,
     quantile_cont(abs(m_close - d_close) / nullif(d_close, 0), 0.95) AS px_relerr_p95,
+    median(bid_dev_symbol) AS bid_dev_med,
+    quantile_cont(bid_dev_symbol, 0.99) AS bid_dev_p99,
+    median(wavg_dev_symbol) AS wavg_dev_med,
     median(n_bars) AS bars_med,
     min(n_bars) AS bars_min,
     sum(close_null) AS close_null,
@@ -107,7 +112,8 @@ def check_day(date: str) -> dict | None:
     stats["missing_by_market"] = by_market
     stats["missing_sample"] = sorted(missing)[:20]
     for key in ("vol_relerr_med", "vol_relerr_p95", "amt_relerr_med",
-                "amt_relerr_p95", "px_relerr_med", "px_relerr_p95"):
+                "amt_relerr_p95", "px_relerr_med", "px_relerr_p95",
+                "bid_dev_med", "bid_dev_p99", "wavg_dev_med"):
         stats[key] = None if stats[key] is None else round(float(stats[key]), 10)
     stats["bars_med"] = int(stats["bars_med"]) if stats["bars_med"] is not None else None
     return stats
@@ -162,6 +168,8 @@ def main() -> None:
             "days": len(good),
             "vol_relerr_p95_max": max(r["vol_relerr_p95"] or 0 for r in good),
             "px_relerr_p95_max": max(r["px_relerr_p95"] or 0 for r in good),
+            "bid_dev_med_max": max(r["bid_dev_med"] or 0 for r in good),
+            "wavg_dev_med_max": max(r["wavg_dev_med"] or 0 for r in good),
             "bars_med_min": min(r["bars_med"] or 0 for r in good),
             "missing_daily_only_med": st.median(r["missing_daily_only"] for r in good),
             "bad_hl_days": sum(1 for r in good if (r["bad_hl"] or 0) > 0),

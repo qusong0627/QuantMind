@@ -28,7 +28,7 @@ import duckdb
 from backend.scripts.minute_model.build_min1_l2 import OUT as MIN1_DIR
 
 log = logging.getLogger("minute_model.features")
-OUT = MIN1_DIR.parents[1] / "minute_model" / "daily"  # data/quantdb 同级
+OUT = MIN1_DIR.parents[2] / "minute_model" / "daily"  # data/minute_model/daily（research 产物，不进 quantdb）
 CUTOFF = "14:50:00"
 
 FEATURE_COLS = [

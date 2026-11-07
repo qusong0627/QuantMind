@@ -21,6 +21,7 @@ END="${2:-}"
 WORKERS="${MIN1_WORKERS:-2}"
 MEM="${MIN1_MEM:-5GB}"
 THREADS="${MIN1_THREADS:-6}"
+MIN_FREE_GB="${MIN1_MIN_FREE_GB:-14}"
 LOG="logs/minute_model/build_min1_${START:-all}_${END:-all}.log"
 mkdir -p "$(dirname "$LOG")"
 
@@ -71,7 +72,8 @@ for attempt in $(seq 1 30); do
 
   .venv/bin/python -m backend.scripts.minute_model.build_min1_l2 --all \
       --start "$START" --end "$END" --workers "$WORKERS" \
-      --memory-limit "$MEM" --threads "$THREADS" >> "$LOG" 2>&1
+      --memory-limit "$MEM" --threads "$THREADS" \
+      --min-free-gb "$MIN_FREE_GB" >> "$LOG" 2>&1
   rc=$?
   echo "=== $(date -Is) 退出码 $rc ===" >> "$LOG"
   sleep 30
