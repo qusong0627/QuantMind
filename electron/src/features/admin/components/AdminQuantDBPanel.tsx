@@ -160,7 +160,7 @@ export const AdminQuantDBPanel: React.FC = () => {
                         本地扫描
                     </Button>
                     <span className="text-xs text-slate-400 leading-relaxed">
-                        免流量拉取 56GB 全量（ModelScope 断点续传）或扫描已有离线包建增量
+                        免流量拉取 78GB 全量（ModelScope 断点续传）或扫描已有离线包建增量
                     </span>
                 </div>
                 <div className="text-[11px] text-slate-400 mt-2 px-1">
@@ -813,8 +813,8 @@ export const ModelScopeInitModal: React.FC<ModelScopeInitModalProps> = ({ open, 
                 <Alert
                     type="warning"
                     showIcon
-                    message="首次全量同步约需 1-3 小时，请耐心等待，您可稍后回来查看"
-                    description="数据总量约 56GB，下载在后台执行。启动后可以关闭本窗口或离开页面，稍后回来查看进度；已完整下载的文件会自动跳过，中断后重新发起可断点续传。"
+                    message="数据每周末更新，如需更新请重新点击初始化"
+                    description="数据总量约 78GB，首次全量同步约需 1-3 小时，请耐心等待，您可稍后回来查看。下载在后台执行，启动后可以关闭本窗口或离开页面；已完整下载的文件会自动跳过，中断后重新发起可断点续传。"
                 />
 
                 {preflight?.warnings.map((w, i) => (
