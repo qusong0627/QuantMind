@@ -216,7 +216,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
               <span className="font-medium text-slate-500">从一个研究方向开始</span>
               <span className="hidden sm:inline">点击填入，继续完善你的假设</span>
             </div>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
               {PRESET_PROMPTS.map((promptText, idx) => (
                 <button
                   key={promptText}
