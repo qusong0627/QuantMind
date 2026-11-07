@@ -216,20 +216,20 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
               <span className="font-medium text-slate-500">从一个研究方向开始</span>
               <span className="hidden sm:inline">点击填入，继续完善你的假设</span>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3">
               {PRESET_PROMPTS.map((promptText, idx) => (
                 <button
                   key={promptText}
                   type="button"
                   disabled={taskActive}
                   onClick={() => setActivePrompt(promptText)}
-                  className="group flex items-start gap-3 rounded-xl border border-slate-200/80 bg-white/60 px-4 py-3 text-left transition-colors hover:border-blue-200 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="group flex items-center gap-3 rounded-xl border border-slate-200/80 bg-white/60 px-4 py-3 text-left transition-colors hover:border-blue-200 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <div className="min-w-0 flex-1">
                     <span className="text-xs font-semibold text-slate-700 group-hover:text-blue-600">{PRESET_LABELS[idx]}</span>
                     <p className="mt-1 text-xs leading-5 text-slate-500">{promptText}</p>
                   </div>
-                  <ArrowRight className="mt-1 h-3.5 w-3.5 shrink-0 text-slate-300 transition-colors group-hover:text-blue-500" />
+                  <ArrowRight className="h-3.5 w-3.5 shrink-0 self-center text-slate-300 transition-colors group-hover:text-blue-500" />
                 </button>
               ))}
             </div>
