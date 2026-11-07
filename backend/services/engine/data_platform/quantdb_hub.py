@@ -1414,32 +1414,80 @@ class QuantDBDataHub:
                 summary["stock_count"] = stock_count
         summary["universes"] = universes
 
-        # 数据集信息
+        # 数据集信息：列数取最新分区实测（历史硬编码快照会与上游发布漂移，
+        # 曾出现 l1_factors 写 101 实际 119、features_daily 写 52 实际 78）
         datasets: dict = {}
+
+        def _latest_partition_columns(rel_path: str) -> int | None:
+            dates = self._partition_dates(rel_path)
+            if not dates:
+                return None
+            cols = self.partition_columns(rel_path, dates[-1])
+            # dt 是 hive 分区伪列，不计入数据维度
+            return len(cols - {"dt"}) or None
+
+        # 真实可代理挖掘的数据集：注册表全量逐个探测 parquet 可读性。
+        # 不能只统计 summary 里预置的 6 项展示集——会少报（分钟线/ETF 等
+        # 未进展示列表），且与挖掘网关 /mining-cfs/datasets 口径不一致。
+        from backend.services.engine.rd_agent.mining_datasets import (
+            DATASET_REL_PATHS,
+            SUPPORTED_DATASETS,
+        )
+
+        supported_dataset_keys: list[str] = []
+        for key in SUPPORTED_DATASETS:
+            ddir = dd / DATASET_REL_PATHS[key]
+            try:
+                if not ddir.is_dir():
+                    continue
+                names = sorted(
+                    n
+                    for n in os.listdir(ddir)
+                    if n.startswith("dt=") and len(n) == 11 and n[3:].isdigit()
+                )
+                parent = ddir / names[-1] if names else ddir
+                if next(iter(parent.glob("*.parquet")), None) is None:
+                    continue
+                supported_dataset_keys.append(key)
+            except OSError:
+                continue
+        summary["dataset_count"] = len(supported_dataset_keys)
+        summary["supported_dataset_keys"] = supported_dataset_keys
+
         l1_dir = dd / "6_ml_datasets" / "l1_factors"
         if l1_dir.exists():
             categories_info = self.fetch_l1_factor_categories()
             cat_names = [c["name"] for c in categories_info.get("categories", [])]
             datasets["l1_factors"] = {
-                "columns": 101,
+                "columns": _latest_partition_columns("6_ml_datasets/l1_factors") or 101,
                 "categories": cat_names,
                 "category_count": len(cat_names),
             }
         l1l2_dir = dd / "6_ml_datasets" / "l1_l2_factors"
         if l1l2_dir.exists():
-            datasets["l1_l2_factors"] = {"columns": 330}
+            datasets["l1_l2_factors"] = {
+                "columns": _latest_partition_columns("6_ml_datasets/l1_l2_factors") or 330
+            }
         ti_dir = dd / "5_technical_derived" / "technical_indicators"
         if ti_dir.exists():
-            datasets["technical_indicators"] = {"columns": 37}
+            datasets["technical_indicators"] = {
+                "columns": _latest_partition_columns("5_technical_derived/technical_indicators") or 37
+            }
         val_dir = dd / "5_technical_derived" / "valuation"
         if val_dir.exists():
-            datasets["valuation"] = {"columns": 18}
+            datasets["valuation"] = {
+                "columns": _latest_partition_columns("5_technical_derived/valuation") or 18
+            }
         ms_dir = dd / "5_technical_derived" / "market_sentiment"
         if ms_dir.exists():
-            datasets["market_sentiment"] = {"columns": 19}
+            datasets["market_sentiment"] = {
+                "columns": _latest_partition_columns("5_technical_derived/market_sentiment") or 19
+            }
         fd_dir = dd / "6_ml_datasets" / "features_daily"
         if fd_dir.exists():
-            datasets["features_daily"] = {"columns": 52}
+            datasets["features_daily"] = {
+                "columns": _latest_partition_columns("6_ml_datasets/features_daily") or 52
+            }
         summary["datasets"] = datasets
 
         return summary
