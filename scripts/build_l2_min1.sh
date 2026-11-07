@@ -47,8 +47,8 @@ from backend.scripts.minute_model.build_features import available_days
 print(len(available_days()))
 PY
 )"
-  echo "已落库天数：$(ls -d data/quantdb/1_kline_data/l2_min1/dt=* 2>/dev/null | wc -l)"
-  echo "占用：$(du -sh data/quantdb/1_kline_data/l2_min1 2>/dev/null | cut -f1)"
+  echo "已落库天数：$(ls data/quantdb/1_kline_data/l2_min1/dt=*/data.parquet 2>/dev/null | wc -l)"
+  echo "占用：$(du -sh --exclude=_probe data/quantdb/1_kline_data/l2_min1 2>/dev/null | cut -f1)"
   exit 0
 fi
 

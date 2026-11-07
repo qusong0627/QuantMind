@@ -118,11 +118,14 @@ def _snap_aggs() -> list[str]:
         'arg_max(cum_amount, time_ms) AS cum_amount',
     ]
     for i in range(1, 11):
+        # 盘口价同样是万分之一元，必须与成交价一样除 1e4；漏了会得到 56600 而不是 5.66
         aggs.append(
-            f'arg_max("申买价{i}", time_ms) FILTER (WHERE {_price_filter(f"申买价{i}")}) AS bid{i}'
+            f'arg_max("申买价{i}", time_ms) FILTER '
+            f'(WHERE {_price_filter(f"申买价{i}")}) / 1e4 AS bid{i}'
         )
         aggs.append(
-            f'arg_max("申卖价{i}", time_ms) FILTER (WHERE {_price_filter(f"申卖价{i}")}) AS ask{i}'
+            f'arg_max("申卖价{i}", time_ms) FILTER '
+            f'(WHERE {_price_filter(f"申卖价{i}")}) / 1e4 AS ask{i}'
         )
         aggs.append(f'arg_max("申买量{i}", time_ms) AS bidv{i}')
         aggs.append(f'arg_max("申卖量{i}", time_ms) AS askv{i}')
@@ -342,13 +345,24 @@ def build_day(
         stats = con.execute(
             f"SELECT count(*) AS rows, count(DISTINCT symbol) AS symbols, "
             f"count(DISTINCT time) AS bars, "
-            f"avg(CASE WHEN volume IS NULL THEN 0 ELSE 1 END) AS vol_cov "
+            f"avg(CASE WHEN volume IS NULL THEN 0 ELSE 1 END) AS vol_cov, "
+            f"median(abs(bid1 / nullif(close, 0) - 1)) AS bid_dev, "
+            f"median(abs(wavg_bid / nullif(close, 0) - 1)) AS wavg_dev "
             f"FROM read_parquet('{tmp_path}')"
         ).fetchone()
+        rows, symbols, bars, vol_cov, bid_dev, wavg_dev = stats
+        # 量纲自检：盘口价与成交价必须同量纲（曾因漏除 1e4 落了一版错误数据）
+        if bid_dev is not None and bid_dev > 0.2:
+            raise ValueError(
+                f"{date}: 盘口价与成交价量纲不一致（bid1 偏差中位 {bid_dev:.3f}），拒绝落库"
+            )
+        if wavg_dev is not None and wavg_dev > 0.2:
+            raise ValueError(
+                f"{date}: 加权叫买价与成交价量纲不一致（偏差中位 {wavg_dev:.3f}），拒绝落库"
+            )
     finally:
         con.close()
 
-    rows, symbols, bars, vol_cov = stats
     tmp_path.replace(out_path)
     meta = {
         "date": date,

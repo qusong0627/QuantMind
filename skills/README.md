@@ -35,6 +35,7 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 | [quantdb-sdk](quantdb-sdk/) | QuantDB 数据 SDK：API Key 配置、数据集目录、字段查询、K线/财务/因子远程查询 | quantdb、数据key、数据集、查询K线 |
 | [quantdb-fields](quantdb-fields/) | QuantDB 字段单位速查：各数据集实测单位、口径与陷阱（volume=股、amount=万元、L2 逐笔等） | 字段单位、成交量单位、数据口径、逐笔、十档盘口 |
 | [quantdb-data-structure](quantdb-data-structure/) | QuantDB 数据结构：目录组织、Hive 分区、parquet 路径、代码格式、quantdb_hub 入口、quantdb vs quantcustom | quantdb 结构、数据目录、dt 分区、parquet 路径、数据在哪里 |
+| [l2-minute-quantdb](l2-minute-quantdb/) | L2 原始 parquet → QuantDB 分钟表（l2_min1）：DuckDB 聚合落库、清洗规则、与日线对数验收、14:50 盘中特征；含 OOM 事故与单位 1e4 坑 | L2 分钟、分钟表、l2_min1、分钟落库、L2 回补、14:50 特征、盘中特征、分钟模型数据 |
 | [qwenpaw-migrate](qwenpaw-migrate/) | QwenPaw（千问）→ DSH 迁移向导：旧容器用户技能与 MCP 配置导入、核验平台技能库、停用并清理旧容器与数据卷（含整卷备份） | 迁移、QwenPaw、千问、旧数据导入、升级清理 |
 | [copilot-advice](copilot-advice/) | 副驾驶实时上下文与建议卡：工具化查询持仓/信号/告警（/api/v1/copilot/context），生成建议卡由用户一键执行（OrderRouter，source=co_pilot 留痕） | 副驾驶、实时上下文、操作建议、建议卡、持仓快照 |
 | [tdx-aidata-ops](tdx-aidata-ops/) | TdxAiData（通达信 AI 数据 SDK）通道运维：状态体检（分片/帧/热集）、订阅推送 vs 请求通道语义与配额（预算窗口，默认 30）、SDK API 方法表、故障与证据采集（盘中零数据帧、错误码 11/10/13、ini 主机表）、平台 REST 与前端入口 | TdxAiData、订阅推送、行情主源、零帧、配额、Token Insufficient、错误码11/10/13、Connection failed、tdx 自检 |
