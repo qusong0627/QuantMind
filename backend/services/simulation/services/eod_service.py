@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -48,17 +48,77 @@ from backend.shared.trading_calendar import calendar_service
 logger = logging.getLogger(__name__)
 
 _TZ = ZoneInfo("Asia/Shanghai")
-_TRIGGER_TIME = time(
-    *map(int, (os.getenv("SIM_EOD_TRIGGER_TIME", "06:05") or "06:05").split(":"))
+
+
+def _parse_hhmm(raw: str | None, default: str) -> time:
+    """解析 HH:MM 配置，非法值回退默认值，避免环境变量把 worker 打挂。"""
+    parts = (raw or default).split(":")
+    try:
+        return time(int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except (TypeError, ValueError, IndexError):
+        return time(*map(int, default.split(":")))
+
+
+_TRIGGER_TIME = _parse_hhmm(
+    os.getenv("SIM_EOD_TRIGGER_TIME", "06:05") or "06:05", "06:05"
 )
+# 收盘时刻（上海）：过了这个点，账户现值已经是“当日日终”，不能再拿去回填 T-1。
+_SESSION_CLOSE = _parse_hhmm(os.getenv("SIM_EOD_SESSION_CLOSE"), "15:00")
 _INTERVAL_SEC = 60
 
 
 def _resolve_target_trade_date(now: datetime | None = None) -> date:
+    """返回「已收盘、待结算」的目标自然日（是否交易日由 _should_run_eod 兜底）。
+
+    旧实现只判断触发时刻是否早于中午，06:05 触发时**任何时刻**都返回 T-1。
+    容器在交易日盘中/盘后重启会重跑 EOD，用「当前权益」（已包含当日成交）
+    去回填 T-1 的日账与资金快照，把当日盈亏错记到昨天（收益被打回 T-1）。
+
+    现在按收盘时刻切分：
+    - 收盘前：当日交易未结束，最近一个完整交易日是昨天 → 结算 T-1；
+    - 收盘后：当日交易已结束，账户现值即当日日终 → 结算当日，
+      绝不再用当日权益回填 T-1。
+    下午/晚上触发（trigger.hour >= 12）沿用旧语义直接结算当日。
+    """
     current = now or datetime.now(_TZ)
-    if _TRIGGER_TIME.hour < 12:
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_TZ)
+    else:
+        current = current.astimezone(_TZ)
+
+    if _TRIGGER_TIME.hour >= 12:
+        return current.date()
+    if current.time() < _SESSION_CLOSE:
         return current.date() - timedelta(days=1)
     return current.date()
+
+
+async def _accounts_with_trades_after(session, trade_date: date) -> set[tuple[str, str]] | None:
+    """查「在 trade_date（上海日历日）之后已有成交」的账户。
+
+    EOD 用「当前账户现值」写历史日快照，这个前提只有在该日之后再无成交时
+    才成立。一旦已有更晚的成交，现值已不是该日的日终状态，必须拒绝回填，
+    否则当日盈亏会被错记到历史日。返回 None 表示查询失败（调用方应跳过本轮）。
+    """
+    from backend.services.simulation.models.trade import SimTrade
+
+    next_day_utc = datetime.combine(
+        trade_date + timedelta(days=1), time.min, tzinfo=_TZ
+    ).astimezone(timezone.utc)
+    try:
+        rows = (
+            await session.execute(
+                select(SimTrade.tenant_id, SimTrade.user_id)
+                .where(SimTrade.executed_at >= next_day_utc)
+                .distinct()
+            )
+        ).all()
+        return {(str(row.tenant_id), str(row.user_id)) for row in rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "EOD trade-timeline guard failed date=%s: %s", trade_date, exc
+        )
+        return None
 
 
 async def _should_run_eod(trade_date: date) -> bool:
@@ -346,6 +406,16 @@ async def _execute_eod(trade_date: date) -> bool:
             if not accounts:
                 return True
 
+            # 硬护栏：该日之后已有成交的账户，禁止用当前权益回填历史日快照。
+            # 容器盘中/盘后重启、EOD 重跑、手工补跑都走这道校验。
+            stale_accounts = await _accounts_with_trades_after(session, trade_date)
+            if stale_accounts is None:
+                logger.warning(
+                    "Simulation EOD skipped for %s: trade timeline unavailable",
+                    trade_date,
+                )
+                return False
+
             projection_svc = SimulationProjectionService(session)
             snapshot_svc = SimulationDailySnapshotService(session)
 
@@ -357,6 +427,15 @@ async def _execute_eod(trade_date: date) -> bool:
             # P0-6：total计入Redis侧short_proceeds，与盘中equity口径对齐。
             failed_accounts = 0
             for account in accounts:
+                if (str(account.tenant_id), str(account.user_id)) in stale_accounts:
+                    logger.warning(
+                        "Simulation EOD skip %s for %s: trades after the settlement "
+                        "date exist, refusing to backfill current equity into a "
+                        "historical snapshot",
+                        account.account_id,
+                        trade_date,
+                    )
+                    continue
                 try:
                     projection = await projection_svc.load_projection(
                         tenant_id=account.tenant_id,
