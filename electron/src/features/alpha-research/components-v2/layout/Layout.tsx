@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sparkles, Database, BarChart3, Settings as SettingsIcon, ClipboardList, BookOpen } from 'lucide-react';
+import { Sparkles, Dna, Database, BarChart3, Settings as SettingsIcon, ClipboardList, BookOpen } from 'lucide-react';
 
 export type PageId = 'home' | 'library' | 'backtest' | 'settings' | 'mining_dashboard' | 'tasks' | 'papers';
 
@@ -23,7 +23,7 @@ export const Layout: React.FC<LayoutProps> = ({
   };
 
   const navItems = [
-    { id: 'home' as const, label: '因子挖掘', icon: Sparkles },
+    { id: 'home' as const, label: '因子挖掘', icon: Dna },
     { id: 'library' as const, label: '因子库', icon: Database },
     { id: 'backtest' as const, label: '回测', icon: BarChart3 },
     { id: 'tasks' as const, label: '任务中心', icon: ClipboardList },

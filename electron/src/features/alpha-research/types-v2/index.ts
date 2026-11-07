@@ -53,6 +53,8 @@ export interface DataSummary {
   };
   universes?: Record<string, { count: number; indexSymbol: string | null }>;
   stockCount?: number;
+  /** 真实可代理挖掘的数据集数量（注册表逐个探测 parquet 可读性） */
+  datasetCount?: number;
   datasets?: Record<
     string,
     { columns: number; categories?: string[]; categoryCount?: number }

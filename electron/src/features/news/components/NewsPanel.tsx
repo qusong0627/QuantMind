@@ -149,7 +149,8 @@ function saveFilters(state: FilterState) {
   } catch { /* ignore */ }
 }
 
-// 新闻大类快捷导航（对应 finance_lexicon 事件大类，点击按 event_tags 筛选）
+// 新闻大类快捷导航（对应 finance_lexicon 大类词，命中在文章 key_terms 列，筛选走 key_terms；
+// 细分事件标签才在 event_tags 列，见 seed_event_categories.py 口径）
 const QUICK_EVENT_CHIPS = [
   { label: '全部', value: '' },
   { label: '政策', value: '政策' },
@@ -733,7 +734,7 @@ export const NewsPanel: React.FC = () => {
               <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-md shrink-0">
                 <BellOutlined style={{ color: '#ffffff', fontSize: 16 }} />
               </div>
-              <Title level={5} style={{ margin: 0, fontSize: 16, fontWeight: 700, whiteSpace: 'nowrap' }}>RSS信息流</Title>
+              <Title level={5} style={{ margin: 0, fontSize: 16, fontWeight: 700, whiteSpace: 'nowrap' }}>新闻快讯</Title>
               <Tag color={health?.huntly_status === 'up' ? 'green' : 'red'} style={{ margin: 0 }}>{health?.huntly_status === 'up' ? '已连接' : '未连接'}</Tag>
               <Tooltip title={latestPublishedAt ? `最新发布于 ${new Date(latestPublishedAt).toLocaleString('zh-CN')}` : '暂无'}>
                 <Tag icon={<SyncOutlined spin={loading} />} color="processing" style={{ margin: 0 }}>最新：{formatRelative(latestPublishedAt)}</Tag>
@@ -845,24 +846,26 @@ export const NewsPanel: React.FC = () => {
           </div>
         </div>
 
-      {/* ===== 分类导航：词典大类 + 全部高频事件标签（含文章数），点击按 event_tags 筛选 ===== */}
+      {/* ===== 分类导航：词典大类（key_terms）+ 全部高频事件标签（event_tags），分别走对应筛选 ===== */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 16px', borderBottom: '1px solid rgba(226,232,240,0.8)', background: 'rgba(255,255,255,0.85)', flexWrap: 'wrap' }}>
         <Text type="secondary" style={{ fontSize: 12, marginRight: 6, whiteSpace: 'nowrap' }}>分类:</Text>
         {QUICK_EVENT_CHIPS.map((chip) => {
-          const active = chip.value === '' ? f.selectedEventTags.length === 0 : f.selectedEventTags.includes(chip.value);
-          const cnt = chip.value ? stats?.top_events.find((e) => e.name === chip.value)?.count : undefined;
+          const active = chip.value === ''
+            ? f.selectedKeyTerms.length === 0 && f.selectedEventTags.length === 0
+            : f.selectedKeyTerms.includes(chip.value);
+          const cnt = chip.value ? stats?.top_key_terms.find((e) => e.name === chip.value)?.count : undefined;
           return (
             <Tag.CheckableTag
               key={chip.value || '__all'}
               checked={active}
               onChange={(c) => {
                 if (chip.value === '') {
-                  // 全部：清空所有事件筛选
-                  updateF({ selectedEventTags: [] });
+                  // 全部：清空大类与事件筛选
+                  updateF({ selectedKeyTerms: [], selectedEventTags: [] });
                 } else if (c) {
-                  addFilter('selectedEventTags', chip.value);
+                  addFilter('selectedKeyTerms', chip.value);
                 } else {
-                  removeFilter('selectedEventTags', chip.value);
+                  removeFilter('selectedKeyTerms', chip.value);
                 }
               }}
               style={{ fontSize: 12, padding: '2px 10px', borderRadius: 12, margin: 0, fontWeight: active ? 600 : 400 }}

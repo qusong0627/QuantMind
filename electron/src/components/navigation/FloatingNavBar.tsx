@@ -11,7 +11,7 @@ import {
   Search,
   ShieldCheck,
   SquareTerminal,
-  TestTube2,
+  Dna,
   FileText,
   Sparkles,
   Brain,
@@ -45,7 +45,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     // 1. 大盘分析模块
     { id: 'dashboard', label: marketLabel, icon: LayoutDashboard },
     { id: 'market-analysis', label: '市场分析', icon: BarChart3 },
-    { id: 'rss-news', label: 'RSS信息流', icon: Rss },
+    { id: 'rss-news', label: '新闻快讯', icon: Rss },
     { id: 'stock-terminal', label: '个股终端', icon: CandlestickChart },
     { id: 'ai-ide', label: 'AI-IDE', icon: SquareTerminal },
     { id: 'backtest', label: '回测中心', icon: FlaskConical },
@@ -57,7 +57,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'review-center', label: '模型复盘', icon: TrendingUp },
     // 4. 智能投研区域
     { id: 'research', label: '投研平台', icon: Search },
-    { id: 'alpha-research', label: '因子挖掘', icon: TestTube2 },
+    { id: 'alpha-research', label: '因子挖掘', icon: Dna },
     { id: 'skills', label: '技能中心', icon: Sparkles },
     { id: 'agent', label: 'QuantBot', icon: Orbit },
     // 5. 个人中心

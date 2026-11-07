@@ -549,6 +549,8 @@ export async function getDataSummary(): Promise<ApiResponse<DataSummary>> {
         : undefined,
       universes: raw.universes ?? undefined,
       stockCount: raw.stock_count ?? undefined,
+      datasetCount:
+        typeof raw.dataset_count === 'number' ? raw.dataset_count : undefined,
       datasets: raw.datasets
         ? Object.fromEntries(
             Object.entries(raw.datasets).map(([name, info]: [string, any]) => [

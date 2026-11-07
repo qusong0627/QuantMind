@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Sparkles, Bot, Database, BarChart3, ArrowRight, Zap,
+  Sparkles, Dna, Database, BarChart3, ArrowRight, Zap,
   Layers, Shield, Activity, Cpu,
   Loader2, Square
 } from 'lucide-react';
@@ -99,8 +99,6 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
   const dateRangeText = dataSummary?.dateRange?.start && dataSummary?.dateRange?.end
     ? `${dataSummary.dateRange.start} ~ ${dataSummary.dateRange.end}`
     : '数据概况暂不可用';
-  const l1Columns = dataSummary?.datasets?.l1_factors?.columns;
-  const l1Categories = dataSummary?.datasets?.l1_factors?.categoryCount;
 
   return (
     <Layout
@@ -244,7 +242,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
             className="group relative bg-white/80 hover:bg-white backdrop-blur-xl rounded-2xl p-5 border border-white/90 shadow-xs hover:shadow-md transition-all cursor-pointer flex flex-col items-center text-center"
           >
             <div className="absolute top-4 left-4 w-10 h-10 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-100 flex items-center justify-center text-blue-600 group-hover:scale-105 transition-transform">
-              <Bot className="w-5 h-5" />
+              <Dna className="w-5 h-5" />
             </div>
             <span className="absolute top-4 right-4 text-[10px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">
               演化台
@@ -344,13 +342,13 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
             <div className="p-3 bg-slate-50/80 rounded-xl border border-slate-100 flex flex-col justify-center items-center text-center gap-2">
               <div>
                 <span className="text-[10px] font-bold text-slate-400 flex items-center justify-center gap-1 mb-1">
-                  <Database className="w-3 h-3 text-emerald-500" /> 基础特征集
+                  <Database className="w-3 h-3 text-emerald-500" /> 挖掘数据集
                 </span>
                 <span className="text-xs font-bold text-slate-800 block">
-                  QuantDB L1 ({l1Columns ?? '未知'} 维 / {l1Categories ?? '未知'} 类)
+                  {dataSummary?.datasetCount != null ? `${dataSummary.datasetCount} 个` : '数据概况暂不可用'}
                 </span>
               </div>
-              <span className="text-[10px] text-slate-500 mt-2">具体字段与分类以当前数据概况为准</span>
+              <span className="text-[10px] text-slate-500 mt-2">L1/L2 · 财务 · 技术指标等，QuantDB 云端直供</span>
             </div>
 
             {/* 数据时间范围 */}
