@@ -212,6 +212,8 @@ def run(
     sample_frac: float = 1.0,
     max_bin: int = 127,
     drop_prefixes: tuple[str, ...] = (),
+    seed: int = 42,
+    model_suffix: str = "",
 ) -> Path:
     import lightgbm as lgb
 
@@ -263,7 +265,7 @@ def run(
     dtrain = lgb.Dataset(Xtr, label=ytr, feature_name=features)
     dvalid = lgb.Dataset(Xva, label=yva, reference=dtrain)
     booster = lgb.train(
-        _params(n_classes, max_bin=max_bin),
+        _params(n_classes, seed=seed, max_bin=max_bin),
         dtrain,
         num_boost_round=max_rounds,
         valid_sets=[dvalid],
@@ -276,7 +278,7 @@ def run(
     Xfull = train[features].to_numpy("float32")
     yfull = train["y"].to_numpy("int8")
     final = lgb.train(
-        _params(n_classes, max_bin=max_bin),
+        _params(n_classes, seed=seed, max_bin=max_bin),
         lgb.Dataset(Xfull, label=yfull),
         num_boost_round=best_iter,
     )
@@ -336,7 +338,7 @@ def run(
 
     out_dir = ROOT / "models"
     out_dir.mkdir(parents=True, exist_ok=True)
-    with (out_dir / f"lgb_h{horizon}{variant}.pkl").open("wb") as fh:
+    with (out_dir / f"lgb_h{horizon}{variant}{model_suffix}.pkl").open("wb") as fh:
         pickle.dump(
             {
                 "booster": final,
@@ -347,7 +349,7 @@ def run(
             },
             fh,
         )
-    (out_dir / f"metadata_h{horizon}{variant}.json").write_text(
+    (out_dir / f"metadata_h{horizon}{variant}{model_suffix}.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -445,6 +447,8 @@ def main() -> None:
         default="",
         help="剔除的特征前缀，逗号分隔（如 chip_,ind_,concept_）",
     )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--model-suffix", default="", help="模型文件名后缀（多种子时区分）")
     args = parser.parse_args()
     drop = tuple(p.strip() for p in args.drop_prefixes.split(",") if p.strip())
     path = run(
@@ -456,6 +460,8 @@ def main() -> None:
         args.sample_frac,
         args.max_bin,
         drop,
+        args.seed,
+        args.model_suffix,
     )
     print(path)
 
