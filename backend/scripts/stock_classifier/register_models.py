@@ -24,7 +24,7 @@ MODEL_DIR = ROOT / "models"
 HORIZONS = (1, 3, 5)
 MODEL_PREFIX = "mdl_stock_multiclass_l1l2_h"
 TENANT = "default"
-OWNER = "admin"
+OWNERS = ("10000001", "admin")  # 用户端 /models 按登录用户过滤，两个都登记
 
 
 def _connect():
@@ -37,9 +37,20 @@ def _connect():
     )
 
 
+DISPLAY_NAMES = {
+    1: "全市场五分类 T+1（L1+L2·研究）",
+    3: "全市场五分类 T+3（L1+L2·研究）",
+    5: "全市场五分类 T+5（L1+L2·研究）",
+}
+INTRADAY_DISPLAY_NAME = "盘中14:50 尾部排雷 T+1（L1可算·研究）"
+
+
 def _metadata(horizon: int, report: dict) -> dict:
+    name = DISPLAY_NAMES.get(horizon, f"全市场五分类 T+{horizon}（L1+L2·研究）")
     return {
         "model_type": "custom_multiclass_l1l2",
+        "display_name": name,
+        "model_name": name,
         "market": "CN",
         "context": {"market": "CN"},
         "research_only": True,
@@ -75,7 +86,7 @@ def _metrics(report: dict) -> dict:
 
 
 def _register_one(
-    cur, model_id: str, model_path: Path, report: dict, extra: dict
+    cur, owner: str, model_id: str, model_path: Path, report: dict, extra: dict
 ) -> None:
     cur.execute(
         """
@@ -93,7 +104,7 @@ def _register_one(
         """,
         (
             TENANT,
-            OWNER,
+            owner,
             model_id,
             str(MODEL_DIR),
             model_path.name,
@@ -110,28 +121,33 @@ def register() -> None:
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            for horizon in HORIZONS:
-                meta_path = MODEL_DIR / f"metadata_h{horizon}.json"
-                model_path = MODEL_DIR / f"lgb_h{horizon}.pkl"
-                if not meta_path.exists() or not model_path.exists():
-                    print(f"skip h{horizon}: 缺 {meta_path.name} 或 {model_path.name}")
+            for owner in OWNERS:
+                for horizon in HORIZONS:
+                    meta_path = MODEL_DIR / f"metadata_h{horizon}.json"
+                    model_path = MODEL_DIR / f"lgb_h{horizon}.pkl"
+                    if not meta_path.exists() or not model_path.exists():
+                        print(f"skip h{horizon}: 缺 {meta_path.name} 或 {model_path.name}")
+                        continue
+                    report = json.loads(meta_path.read_text("utf-8"))
+                    model_id = f"{MODEL_PREFIX}{horizon}"
+                    _register_one(cur, owner, model_id, model_path, report, {})
+                # L1 盘中版（只用收盘前可算的 32 个特征）
+                l1_meta = MODEL_DIR / "metadata_h1_l1.json"
+                l1_model = MODEL_DIR / "lgb_h1_l1.pkl"
+                if not (l1_meta.exists() and l1_model.exists()):
                     continue
-                report = json.loads(meta_path.read_text("utf-8"))
-                model_id = f"{MODEL_PREFIX}{horizon}"
-                _register_one(cur, model_id, model_path, report, {})
-            # L1 盘中版（只用收盘前可算的 32 个特征）
-            l1_meta = MODEL_DIR / "metadata_h1_l1.json"
-            l1_model = MODEL_DIR / "lgb_h1_l1.pkl"
-            if l1_meta.exists() and l1_model.exists():
                 l1_report = json.loads(l1_meta.read_text("utf-8"))
                 l1_report["horizon"] = 1
                 _register_one(
                     cur,
+                    owner,
                     "mdl_stock_multiclass_l1intraday_h1",
                     l1_model,
                     l1_report,
                     {
                         "model_type": "custom_multiclass_l1_intraday",
+                        "display_name": INTRADAY_DISPLAY_NAME,
+                        "model_name": INTRADAY_DISPLAY_NAME,
                         "feature_count": len(l1_report.get("features", [])),
                         "features": l1_report.get("features", []),
                         "note": "仅 L1 盘中可算特征（turn/amt/mom/vol/tech/mfi/obv），"
