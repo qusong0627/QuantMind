@@ -22,14 +22,23 @@ WORKERS="${MIN1_WORKERS:-2}"
 MEM="${MIN1_MEM:-5GB}"
 THREADS="${MIN1_THREADS:-6}"
 MIN_FREE_GB="${MIN1_MIN_FREE_GB:-14}"
+BUILDER="${MIN1_BUILDER:-parquet}"
+
+if [ "$BUILDER" = "7z" ]; then
+  MODULE="backend.scripts.minute_model.build_min1_l2_7z"
+  DAYS_SRC="from backend.scripts.minute_model.build_min1_l2_7z import available_days"
+else
+  MODULE="backend.scripts.minute_model.build_min1_l2"
+  DAYS_SRC="from backend.scripts.minute_model.build_features import available_days"
+fi
 LOG="logs/minute_model/build_min1_${START:-all}_${END:-all}.log"
 mkdir -p "$(dirname "$LOG")"
 
 count_remaining() {
-  .venv/bin/python - "$START" "$END" <<'PY'
+  .venv/bin/python - "$START" "$END" "$DAYS_SRC" <<'PY'
 import sys
 sys.path.insert(0, '.')
-from backend.scripts.minute_model.build_features import available_days
+exec(sys.argv[3])
 from backend.scripts.minute_model.build_min1_l2 import OUT
 start, end = sys.argv[1], sys.argv[2]
 days = available_days()
@@ -41,10 +50,10 @@ PY
 }
 
 if [ "${1:-}" = "--status" ]; then
-  echo "总可用交易日：$(.venv/bin/python - <<'PY'
+  echo "总可用交易日：$(.venv/bin/python - "$DAYS_SRC" <<'PY'
 import sys
 sys.path.insert(0, '.')
-from backend.scripts.minute_model.build_features import available_days
+exec(sys.argv[1])
 print(len(available_days()))
 PY
 )"
@@ -70,7 +79,7 @@ for attempt in $(seq 1 30); do
   fi
   prev_left="$left"
 
-  .venv/bin/python -m backend.scripts.minute_model.build_min1_l2 --all \
+  .venv/bin/python -m "$MODULE" --all \
       --start "$START" --end "$END" --workers "$WORKERS" \
       --memory-limit "$MEM" --threads "$THREADS" \
       --min-free-gb "$MIN_FREE_GB" >> "$LOG" 2>&1
