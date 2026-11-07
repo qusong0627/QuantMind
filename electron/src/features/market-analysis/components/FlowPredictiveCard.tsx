@@ -288,7 +288,7 @@ const PatternDotPlot: React.FC<{
         <span className="text-slate-500">50% 基准</span>
         <span>100%</span>
       </span>
-      <span className="w-20 shrink-0 text-right">超额 / n / 今日</span>
+      <span className="w-[104px] shrink-0 text-right">胜率 / 超额 / n / 今日</span>
     </div>
     {rows.map((p) => {
       const win = p.stat?.date_win;
@@ -309,8 +309,13 @@ const PatternDotPlot: React.FC<{
               />
             )}
           </span>
-          <span className="w-20 shrink-0 text-right text-[8px] font-mono text-slate-500">
-            {fmtWin(win)} · {fmtPct(p.stat?.date_mean ?? null)} · n={p.stat?.n ?? '—'} · 今{p.today ?? 0}
+          <span className="w-[104px] shrink-0 text-right font-mono leading-tight">
+            <span className="block text-[8px] text-slate-600">
+              {fmtWin(win)} · {fmtPct(p.stat?.date_mean ?? null)}
+            </span>
+            <span className="block text-[8px] text-slate-400">
+              n={p.stat?.n ?? '—'} · 今{p.today ?? 0}
+            </span>
           </span>
         </div>
       );
@@ -539,31 +544,35 @@ export const FlowPredictiveCard: React.FC<{
             </div>
           )}
 
-          {art && (
-            <div className="rounded-xl border border-slate-100 bg-white px-3 py-2">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[10px] font-extrabold text-slate-600">资金流 × 价格位置（之后 {horizon} 日，行业中性超额）</span>
-                <span className="text-[9px] text-slate-400">格内数字＝平均超额（%）</span>
-              </div>
-              <Heatmap art={art} h={horizon} />
-            </div>
-          )}
+          {(art || cur?.available) && (
+            <div className={`grid grid-cols-1 gap-3 ${art && cur?.available ? 'lg:grid-cols-2' : ''}`}>
+              {art && (
+                <div className="rounded-xl border border-slate-100 bg-white px-3 py-2 flex flex-col gap-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[10px] font-extrabold text-slate-600">资金流 × 价格位置（之后 {horizon} 日，行业中性超额）</span>
+                    <span className="text-[9px] text-slate-400">格内数字＝平均超额（%）</span>
+                  </div>
+                  <Heatmap art={art} h={horizon} />
+                </div>
+              )}
 
-          {cur?.available && (
-            <div className="rounded-xl border border-slate-100 bg-white px-3 py-2 flex flex-col gap-1">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-extrabold text-slate-600">形态 · 历史日期胜率（T+{horizon}）</span>
-                <span className="text-[9px] text-slate-400">0~100% 轴 · 50%=无方向 · 右侧为平均超额/n/今日命中</span>
-              </div>
-              <PatternDotPlot
-                rows={patternOrder.map((p) => ({
-                  key: p.key,
-                  tone: p.tone,
-                  stat: statOf(p),
-                  today: matchCounts[p.match]?.count ?? 0,
-                }))}
-              />
-              <p className="text-[9px] text-slate-400">日期胜率＝信号日触发篮子跑赢过滤后宇宙的比例，50%＝无方向；n 为股票-日样本。</p>
+              {cur?.available && (
+                <div className="rounded-xl border border-slate-100 bg-white px-3 py-2 flex flex-col gap-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[10px] font-extrabold text-slate-600">形态 · 历史日期胜率（T+{horizon}）</span>
+                    <span className="text-[9px] text-slate-400">0~100% 轴 · 50%=无方向 · 右侧为平均超额/n/今日命中</span>
+                  </div>
+                  <PatternDotPlot
+                    rows={patternOrder.map((p) => ({
+                      key: p.key,
+                      tone: p.tone,
+                      stat: statOf(p),
+                      today: matchCounts[p.match]?.count ?? 0,
+                    }))}
+                  />
+                  <p className="text-[9px] text-slate-400">日期胜率＝信号日触发篮子跑赢过滤后宇宙的比例，50%＝无方向；n 为股票-日样本。</p>
+                </div>
+              )}
             </div>
           )}
 

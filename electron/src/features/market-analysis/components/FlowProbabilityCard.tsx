@@ -208,7 +208,20 @@ export const FlowProbabilityCard: React.FC<{
       </div>
     );
   }
-  if (!art) return null;
+  if (!art) {
+    // 取数失败不能静默消失：给出可读提示（并排布局下也避免右列整块留白）
+    if (error && !loading) {
+      return (
+        <div className="bg-white/95 rounded-2xl border border-slate-200 px-3.5 py-2.5 text-[11px] text-slate-500 flex items-center gap-2 min-w-0">
+          <AlertCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+          <span className="truncate" title={error}>
+            概率模型加载失败：{error}
+          </span>
+        </div>
+      );
+    }
+    return null;
+  }
 
   const active = QUADRANTS.find((q) => q.key === tab) ?? QUADRANTS[0];
   const activeRows = quadrants[tab];
@@ -222,7 +235,7 @@ export const FlowProbabilityCard: React.FC<{
           : 'text-emerald-600';
 
   return (
-    <div className="bg-white/95 backdrop-blur-md rounded-2xl border border-purple-100/80 shadow-xs">
+    <div className="bg-white/95 backdrop-blur-md rounded-2xl border border-purple-100/80 shadow-xs min-w-0">
       <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center justify-between gap-2 px-3.5 py-2.5 text-left">
         <div className="flex items-center gap-2 flex-wrap">
           <Gauge className="w-3.5 h-3.5 text-red-500" />

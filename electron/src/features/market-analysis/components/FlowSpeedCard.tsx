@@ -98,7 +98,7 @@ export const FlowSpeedCard: React.FC<{
   if (!speed) return null;
 
   return (
-    <div className="bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-xs px-3.5 py-2.5 flex flex-col gap-1">
+    <div className="bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-xs px-3.5 py-2.5 flex flex-col gap-1 min-w-0">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
           <Gauge className="w-3.5 h-3.5 text-amber-500" />
@@ -163,7 +163,7 @@ export const FlowSpeedCard: React.FC<{
         <span className="w-[68px] shrink-0 text-right">加速度</span>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-x-5">
+      <div className="flex flex-1 flex-col min-h-0">
         {rows.map((r, i) => (
           <SpeedBar
             key={`${r.symbol ?? r.name}-${i}`}

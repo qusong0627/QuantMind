@@ -524,16 +524,20 @@ export const FlowPanoramaPanel: React.FC<FlowPanoramaPanelProps> = ({ date, focu
         />
       )}
 
-      {/* ── 资金流速率：当前窗口日均 vs 前一窗口日均（加速进/加速跑） ── */}
-      <FlowSpeedCard
-        speed={data?.speed}
-        period={period}
-        onSelectSector={selectSector}
-        onSelectStock={handleSelectStock}
-      />
-
-      {/* ── 未来强度概率（模型）：排序分 / 逆流候选 / 板块成分聚合 ── */}
-      <FlowProbabilityCard date={date} onSelectStock={handleSelectStock} />
+      {/* ── 速率 × 未来强度概率：左右同屏。两张卡单卡信息密度都不高，半宽刚好
+              装得下（速率卡内条改为单列，12 行与概率卡 6 行列表等高）；概率卡折叠时
+              自身取自然高度（self-start），不撑出空白卡片。 ── */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 min-w-0 items-stretch">
+        <FlowSpeedCard
+          speed={data?.speed}
+          period={period}
+          onSelectSector={selectSector}
+          onSelectStock={handleSelectStock}
+        />
+        <div className="min-w-0 self-start w-full">
+          <FlowProbabilityCard date={date} onSelectStock={handleSelectStock} />
+        </div>
+      </div>
 
       {/* ── 资金流预测力（研究证据）：净流入金额对照 / 质量分分位 / 5×5 热力图 / 形态 ── */}
       <FlowPredictiveCard date={date} onSelectStock={handleSelectStock} />
