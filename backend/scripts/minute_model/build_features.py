@@ -46,6 +46,8 @@ WAREHOUSES = (
     Path("/media/zbox/sata/l2-warehouse/parquet"),
     # seagate 仓补 2023 年 3/4/8/11 月与 2026 全年（schema 与前三个完全一致）
     Path("/media/zbox/nas-seagate/l2-warehouse/parquet"),
+    # 202611 起新包落 nas-NSF2026（seagate 只剩 ~360G）；同日优先取这里
+    Path("/media/zbox/nas-NSF2026/l2-warehouse/parquet"),
 )
 OUT = (_quantdb_root().parent / "minute_model" / "daily").resolve()
 CUTOFF_MS = 145000000  # 14:50:00.000
