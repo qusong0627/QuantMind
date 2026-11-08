@@ -12,15 +12,22 @@
 
 CSV 是 **GBK** 编码，但数据行全是 ASCII——跳过头行、按位置读列即可，不需要转码。
 
-## 覆盖（2026-11-07 清点）
+## 覆盖（2026-11-07 清点，两个源合并）
 
-2017: 244 天 / 2018: 243 / 2019: 244 / 2020: 239 / 2021: 244 / 2022: 97（仅 9-12 月）
-= **1,311 天**。2023 年 7z 为空，2023 用 parquet 仓库的 169 天。
+| 年 | 天数 | 来源 |
+|---|---:|---|
+| 2017 | 244 | NSF |
+| 2018 | 243 | NSF |
+| 2019 | 244 | NSF |
+| 2020 | 239 | NSF |
+| 2021 | 244 | NSF |
+| 2022 | **242（全年）** | 1-8 月 toshiba Leve2 + 8-12 月 NSF |
+| 合计 | **1,449 天** | 2023 年 7z 为空，用 parquet 仓库的 169 天 |
 
-## 实测成本（2017-01-03）
+## 实测成本
 
-解压 6.5 秒 + 解析 981 万/2,135 万/1,599 万行约 5.5 秒 + 聚合约 20-30 秒
-→ **约 35-45 秒/天**，1,311 天约 **13-16 小时**。
+2017-01-03（7.8GB 解压、2,837 只）：解压 6.2s + 解析 5.5s + 聚合 ~12s = **24s**；
+2022-01-04（27.1GB 解压、4,986 只）预计 **60-90s**。全量约 **18-20 小时**（单进程）。
 
 用法（宿主机仓库根）：
   .venv/bin/python -m backend.scripts.minute_model.build_min1_l2_7z --probe 20170103
@@ -53,7 +60,10 @@ from backend.scripts.minute_model.build_min1_l2 import (
 
 log = logging.getLogger("minute_model.min1_7z")
 
-ARCHIVE_ROOT = Path("/media/zbox/nas-NSF/L2")
+ARCHIVE_ROOTS = (
+    Path("/media/zbox/nas-NSF/L2"),
+    Path("/media/zbox/nas-toshiba/Leve2"),
+)
 STAGE_ROOT = Path("/media/zbox/data/quantmind/tmp/l2_7z")
 
 # 时间：HHMMSSmmm -> minute(HHMM)；bar 与 parquet 版同一口径
@@ -84,22 +94,30 @@ TRADE_COLS = {f"c{i}": "VARCHAR" for i in range(13)}
 ORDER_COLS = {f"c{i}": "VARCHAR" for i in range(11)}
 
 
-def available_days(root: Path = ARCHIVE_ROOT) -> dict[str, Path]:
-    """日期 -> 7z 路径。兼容两种目录形态：{年}/{月}/{日}.7z 与 {年}/{YYYYMM}/。"""
+def available_days(roots: tuple[Path, ...] = ARCHIVE_ROOTS) -> dict[str, Path]:
+    """日期 -> 7z 路径。兼容 {年}/{月}/{日}.7z 与 {年}/{YYYYMM}/ 两种目录形态。
+
+    两个源合并（后者覆盖前者）：NSF 的 2017-2021 + 2022 年 8-12 月，
+    toshiba Leve2 的 2022 年 1-8 月——合起来 2022 全年 242 天齐全。
+    """
     days: dict[str, Path] = {}
-    if not root.is_dir():
-        return days
-    for p in root.glob("*/*/*.7z"):
-        stem = p.stem
-        if len(stem) == 8 and stem.isdigit():
-            days[stem] = p
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for p in root.glob("*/*/*.7z"):
+            stem = p.stem
+            if len(stem) == 8 and stem.isdigit():
+                days[stem] = p
     return days
 
 
 def _csv(name: str, base: Path, cols: dict[str, str], extra: str = "") -> str:
+    # auto_detect=false 必须开：停牌股会留下只有表头的空 CSV，
+    # DuckDB 嗅探空文件会直接报 "Error when sniffing"（2026-11-08 实测 350 天因此失败）。
+    # null_padding=true 必须开：部分年份的行少一个尾随逗号（委托表 10 vs 11 列）。
     return (
         f"read_csv('{base}/*/{name}.csv', header=false, skip=1, "
-        f"encoding='latin-1', columns={cols}{extra})"
+        f"auto_detect=false, null_padding=true, encoding='latin-1', columns={cols}{extra})"
     )
 
 
@@ -366,7 +384,7 @@ def main() -> None:
 
     days = available_days()
     if not days:
-        raise SystemExit(f"未找到 7z 归档：{ARCHIVE_ROOT}")
+        raise SystemExit(f"未找到 7z 归档：{ARCHIVE_ROOTS}")
     print(f"7z 可用交易日 {len(days)} 天：{min(days)} ~ {max(days)}", flush=True)
     STAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
