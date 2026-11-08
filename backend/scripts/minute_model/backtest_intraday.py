@@ -136,10 +136,13 @@ def main() -> None:
     ap.add_argument("--end", default="20261030")
     ap.add_argument("--cost", type=float, default=0.0015, help="单次进出总成本（默认 0.15%%）")
     ap.add_argument("--filter", default="trend_dd", choices=["none", "trend", "trend_dd"])
+    ap.add_argument("--model", default="lgb_4h.pkl")
+    ap.add_argument("--tag", default="")
     args = ap.parse_args()
-    OUT.mkdir(parents=True, exist_ok=True)
+    out_dir = (OUT / args.tag) if args.tag else OUT
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    buy = pickle.load(open(Path("data/minute_model/model/lgb_4h.pkl"), "rb"))
+    buy = pickle.load(open(Path("data/minute_model/model") / args.model, "rb"))
     model, feats = buy["model"], buy["features"]
     days = _days(args.start, args.end)
     log.info("回测区间 %s ~ %s，%d 天，成本 %.4f，过滤 %s",
@@ -173,7 +176,7 @@ def main() -> None:
     con.close()
     tr = pd.concat(trades, ignore_index=True)
     tr["date"] = tr["date"].astype(str)
-    tr.to_parquet(OUT / "trades.parquet", index=False)
+    tr.to_parquet(out_dir / "trades.parquet", index=False)
 
     # regime 过滤（每日一个条件）
     if args.filter == "trend":
@@ -204,7 +207,7 @@ def main() -> None:
             results[f"{name}|{exit_name}"] = metrics(dly, frame, f"{name}|{exit_name}", col)
 
     daily = pd.concat(daily_all, ignore_index=True)
-    daily.to_parquet(OUT / "daily.parquet", index=False)
+    daily.to_parquet(out_dir / "daily.parquet", index=False)
 
     bench = _benchmark(days[0], days[-1])
     if len(bench):
@@ -231,7 +234,7 @@ def main() -> None:
             }
     results["cost_sensitivity"] = sens
 
-    (OUT / "metrics.json").write_text(
+    (out_dir / "metrics.json").write_text(
         json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -239,7 +242,7 @@ def main() -> None:
     # 月度表
     main_curve = daily[daily["label"] == "filtered|next_open"]
     mt = monthly_table(main_curve)
-    mt.to_csv(OUT / "monthly.csv", encoding="utf-8-sig")
+    mt.to_csv(out_dir / "monthly.csv", encoding="utf-8-sig")
     print(mt.to_string())
 
     # Markdown 报告
@@ -262,8 +265,8 @@ def main() -> None:
         lines.append(mt.to_markdown())
     except Exception:
         lines.append("```\n" + mt.to_string() + "\n```")
-    (OUT / "report.md").write_text("\n".join(lines), encoding="utf-8")
-    print("报告:", OUT / "report.md")
+    (out_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
+    print("报告:", out_dir / "report.md")
 
 
 if __name__ == "__main__":

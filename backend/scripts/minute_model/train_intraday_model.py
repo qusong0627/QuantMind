@@ -155,6 +155,8 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--label", default="ret_4h", choices=["ret_4h", "ret_5h"])
+    ap.add_argument("--drop", default="", help="逗号分隔的丢弃特征")
+    ap.add_argument("--tag", default="", help="输出标签后缀")
     args = ap.parse_args()
 
     import lightgbm as lgb
@@ -169,6 +171,10 @@ def main() -> None:
     sample = PANEL / f"date={train_days[0]}" / "data.parquet"
     all_cols = pq.ParquetFile(sample).schema_arrow.names
     feature_cols = [c for c in all_cols if c not in EXCLUDE]
+    drop = {x.strip() for x in args.drop.split(",") if x.strip()}
+    if drop:
+        feature_cols = [c for c in feature_cols if c not in drop]
+        log.info("丢弃特征 %d 个：%s", len(drop), sorted(drop))
 
     t0 = time.time()
     train = load_frames(train_days, feature_cols, args.sample_frac, args.seed, args.label)
@@ -193,7 +199,7 @@ def main() -> None:
     )
     log.info("最优迭代 %d，验证 best=%.6f", model.best_iteration_, model.best_score_["valid_0"]["l2"])
 
-    tag = "4h" if args.label == "ret_4h" else "5h"
+    tag = args.tag or ("4h" if args.label == "ret_4h" else "5h")
     with open(OUT / f"lgb_{tag}.pkl", "wb") as fh:
         pickle.dump({"model": model, "features": feats, "cutoffs": CUTOFF_IDX}, fh)
 
@@ -216,7 +222,7 @@ def main() -> None:
     test = pd.concat(preds, ignore_index=True)
     ok_col = "label_ok" if args.label == "ret_4h" else "label_ok_5h"
     test = test[test[ok_col] & test["tradable"]]
-    tag = "4h" if args.label == "ret_4h" else "5h"
+    tag = args.tag or ("4h" if args.label == "ret_4h" else "5h")
     test.to_parquet(OUT / f"pred_{tag}_test.parquet", index=False)
     log.info("测试预测 %d 行，%.1f 分钟", len(test), (time.time() - t0) / 60)
 
