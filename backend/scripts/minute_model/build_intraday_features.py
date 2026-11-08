@@ -29,10 +29,11 @@ from backend.scripts.minute_model.build_min1_l2 import OUT as MIN1_DIR
 
 log = logging.getLogger("minute_model.features")
 OUT = MIN1_DIR.parents[2] / "minute_model" / "daily"  # data/minute_model/daily（research 产物，不进 quantdb）
+CUTOFFS = ("10:30", "11:30", "13:30", "14:30", "14:50")
 CUTOFF = "14:50:00"
 
 FEATURE_COLS = [
-    "symbol", "date", "n_bars",
+    "symbol", "date", "cutoff", "n_bars",
     "px", "day_open", "day_high", "day_low",
     "ret_open", "range_pos", "cum_volume", "cum_amount", "vwap", "vwap_gap",
     "ret_5m", "ret_15m", "ret_30m", "vol_15m", "vol_30m",
@@ -47,11 +48,15 @@ FEATURE_COLS = [
 ]
 
 
-def build_sql(date: str, minute_path: Path) -> str:
-    cutoff = f"TIMESTAMP '{date[:4]}-{date[4:6]}-{date[6:]} {CUTOFF}'"
-    t5 = f"TIMESTAMP '{date[:4]}-{date[4:6]}-{date[6:]} 14:45:00'"
-    t15 = f"TIMESTAMP '{date[:4]}-{date[4:6]}-{date[6:]} 14:35:00'"
-    t30 = f"TIMESTAMP '{date[:4]}-{date[4:6]}-{date[6:]} 14:20:00'"
+def build_sql(date: str, minute_path: Path, cutoff_hm: str = "14:50") -> str:
+    ymd = f"{date[:4]}-{date[4:6]}-{date[6:]}"
+    cutoff = f"TIMESTAMP '{ymd} {cutoff_hm}:00'"
+    hh, mm = int(cutoff_hm[:2]), int(cutoff_hm[3:5])
+    total = hh * 60 + mm
+    def _t(delta: int) -> str:
+        m = total - delta
+        return f"TIMESTAMP '{ymd} {m // 60:02d}:{m % 60:02d}:00'"
+    t5, t15, t30 = _t(5), _t(15), _t(30)
 
     bidv_sum = " + ".join(f"coalesce(bidv{i}, 0)" for i in range(1, 11))
     askv_sum = " + ".join(f"coalesce(askv{i}, 0)" for i in range(1, 11))
@@ -129,6 +134,7 @@ WITH b AS (
 SELECT
     g.symbol,
     '{date}' AS date,
+    '{cutoff_hm}' AS cutoff,
     g.n_bars,
     g.px,
     g.day_open,
@@ -138,8 +144,8 @@ SELECT
     (g.px - g.day_low) / nullif(g.day_high - g.day_low, 0) AS range_pos,
     g.cum_volume,
     g.cum_amount,
-    g.cum_amount / nullif(g.cum_volume, 0) AS vwap,
-    g.px / nullif(g.cum_amount / nullif(g.cum_volume, 0), 0) - 1.0 AS vwap_gap,
+    g.cum_amount * 1e4 / nullif(g.cum_volume, 0) AS vwap,
+    g.px / nullif(g.cum_amount * 1e4 / nullif(g.cum_volume, 0), 0) - 1.0 AS vwap_gap,
     g.px / nullif(g.c5, 0) - 1.0 AS ret_5m,
     g.px / nullif(g.c15, 0) - 1.0 AS ret_15m,
     g.px / nullif(g.c30, 0) - 1.0 AS ret_30m,
@@ -184,10 +190,10 @@ ORDER BY g.symbol
 
 def _cast_sql(inner: str) -> str:
     casts = ",\n       ".join(
-        f"CAST({c} AS DOUBLE) AS {c}" if c not in ("symbol", "date") else c
+        f"CAST({c} AS DOUBLE) AS {c}" if c not in ("symbol", "date", "cutoff") else c
         for c in FEATURE_COLS
     )
-    return f"SELECT {casts} FROM ({inner}) AS q ORDER BY symbol"
+    return f"SELECT {casts} FROM ({inner}) AS q ORDER BY symbol, cutoff"
 
 
 def build_day(date: str, minute_path: Path, out_path: Path) -> dict:
@@ -201,8 +207,11 @@ def build_day(date: str, minute_path: Path, out_path: Path) -> dict:
     con.execute("SET threads=6")
     con.execute("SET preserve_insertion_order=false")
     try:
+        union = " UNION ALL ".join(
+            f"SELECT * FROM ({build_sql(date, minute_path, c)})" for c in CUTOFFS
+        )
         con.execute(
-            f"COPY ({_cast_sql(build_sql(date, minute_path))}) TO '{tmp}' "
+            f"COPY ({_cast_sql(union)}) TO '{tmp}' "
             f"(FORMAT PARQUET, COMPRESSION ZSTD)"
         )
         rows = con.execute(f"SELECT count(*) FROM read_parquet('{tmp}')").fetchone()[0]
