@@ -112,14 +112,16 @@ WITH f AS (
         f.symbol, f.date, f.cutoff,
         {", ".join("f." + c for c in _feature_cols())},
         {ctx},
-        d.close AS prev_close,
+        dp.close AS prev_close,
         dn.close AS next_close,
         n.px AS px_next_same,
         n2.px AS px_next_5h,
         old.symbol IS NOT NULL AS has_60d_history,
-        (f.px / nullif(d.close, 0) - 1.0) AS ret_today_sofar
+        (f.px / nullif(dp.close, 0) - 1.0) AS ret_today_sofar
     FROM f
     LEFT JOIN read_parquet('{factors}') d ON d.symbol = f.symbol
+    -- 昨收必须用未复权日线：因子表的 close 是后复权价，与 px 口径不同（2026-11-08 修复）
+    LEFT JOIN read_parquet('{DAILY}/dt={prev_date}/data.parquet') dp ON dp.symbol = f.symbol
     LEFT JOIN read_parquet('{daily_next}') dn ON dn.symbol = f.symbol
     LEFT JOIN read_parquet('{feat_next}') n ON n.symbol = f.symbol AND n.cutoff = f.cutoff
     {n2_join}

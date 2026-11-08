@@ -43,6 +43,13 @@ EXCLUDE = {
 CUTOFF_IDX = {"10:30": 0, "11:30": 1, "13:30": 2, "14:30": 3, "14:50": 4}
 
 
+def _json_default(o):
+    """numpy/pandas 标量 -> Python 原生。"""
+    if hasattr(o, "item"):
+        return o.item()
+    return str(o)
+
+
 def _panel_days(start: str, end: str) -> list[str]:
     days = []
     for p in PANEL.glob("date=*"):
@@ -58,10 +65,12 @@ def load_frames(days: list[str], feature_cols: list[str], sample_frac: float, se
     con = duckdb.connect()
     con.execute("SET memory_limit='12GB'")
     con.execute("SET threads=8")
+    sample_sql = (f" USING SAMPLE {sample_frac * 100:.2f} PERCENT (bernoulli)"
+                  if sample_frac < 1.0 else "")
     q = f"""
         SELECT {", ".join(cols)}
         FROM read_parquet({files!r})
-        WHERE label_ok AND tradable AND rank_4h IS NOT NULL
+        WHERE label_ok AND tradable AND rank_4h IS NOT NULL{sample_sql}
     """
     df = con.sql(q).df()
     con.close()
@@ -71,8 +80,6 @@ def load_frames(days: list[str], feature_cols: list[str], sample_frac: float, se
     for c in df.columns:
         if c not in ("y", "cutoff_idx", "ret_4h"):
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("float32")
-    if sample_frac < 1.0:
-        df = df.sample(frac=sample_frac, random_state=seed).reset_index(drop=True)
     return df
 
 
@@ -81,8 +88,14 @@ def evaluate(pred_df: pd.DataFrame, label: str) -> dict:
     con = duckdb.connect()
     con.register("p", pred_df)
     ic = con.sql(f"""
-        SELECT date, cutoff, corr(pred, ret_4h) AS ic, count(*) AS n
-        FROM p GROUP BY 1, 2 HAVING count(*) >= 100
+        WITH r AS (
+            SELECT date, cutoff, pred, ret_4h,
+                   rank() OVER (PARTITION BY date, cutoff ORDER BY pred) AS rp,
+                   rank() OVER (PARTITION BY date, cutoff ORDER BY ret_4h) AS rr
+            FROM p
+        )
+        SELECT date, cutoff, corr(rp, rr) AS ic, count(*) AS n
+        FROM r GROUP BY 1, 2 HAVING count(*) >= 100
     """).df()
     by_cut = ic.groupby("cutoff")["ic"].agg(["mean", "std", "count"]).reset_index()
     mean_ic = ic["ic"].mean()
@@ -100,6 +113,9 @@ def evaluate(pred_df: pd.DataFrame, label: str) -> dict:
             FROM p WHERE ret_4h IS NOT NULL AND tradable
         )
         SELECT avg(ret_4h) AS gross, avg(CASE WHEN ret_4h > 0 THEN 1.0 ELSE 0.0 END) AS win,
+               median(ret_4h) AS med, quantile_cont(ret_4h, 0.1) AS p10,
+               quantile_cont(ret_4h, 0.9) AS p90,
+               avg(CASE WHEN abs(ret_4h) >= 0.095 THEN 1.0 ELSE 0.0 END) AS frac_limit,
                count(*) AS n
         FROM r WHERE rn <= 50
     """).df()
@@ -117,6 +133,10 @@ def evaluate(pred_df: pd.DataFrame, label: str) -> dict:
         "top50_gross": float(top["gross"].iloc[0]),
         "top50_net": float(top["gross"].iloc[0] - cost),
         "top50_win": float(top["win"].iloc[0]),
+        "top50_med": float(top["med"].iloc[0]),
+        "top50_p10": float(top["p10"].iloc[0]),
+        "top50_p90": float(top["p90"].iloc[0]),
+        "top50_frac_limit": float(top["frac_limit"].iloc[0]),
         "top50_n": int(top["n"].iloc[0]),
         "cost_assumed": cost,
     }
@@ -189,6 +209,7 @@ def main() -> None:
     con.close()
     test = pd.concat(preds, ignore_index=True)
     test = test[test["label_ok"] & test["tradable"]]
+    test.to_parquet(OUT / "pred_4h_test.parquet", index=False)
     log.info("测试预测 %d 行，%.1f 分钟", len(test), (time.time() - t0) / 60)
 
     report = {
@@ -203,8 +224,10 @@ def main() -> None:
             zip(feats, model.feature_importances_), key=lambda x: -x[1]
         )[:30],
     }
-    (OUT / "report_4h.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(report["test"], ensure_ascii=False, indent=2))
+    (OUT / "report_4h.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8"
+    )
+    print(json.dumps(report["test"], ensure_ascii=False, indent=2, default=_json_default))
     print("TOP30:", [(k, int(v)) for k, v in report["importance_top30"][:15]])
 
 
