@@ -186,9 +186,11 @@ export const AdminQlibDataPanel: React.FC = () => {
             <Descriptions.Item label="上游 parquet 最新">{status?.parquet_latest_date ? `${status.parquet_latest_date.slice(0,4)}-${status.parquet_latest_date.slice(4,6)}-${status.parquet_latest_date.slice(6)}` : '—'}</Descriptions.Item>
             <Descriptions.Item label="对齐情况" span={2}>
               {status?.lag_hint ? (
-                status.lag_days && status.lag_days > 0
-                  ? <Tag color="orange">{status.lag_hint}</Tag>
-                  : <Tag color="green">{status.lag_hint}</Tag>
+                status.lag_status === 'aligned'
+                  ? <Tag color="green">{status.lag_hint}</Tag>
+                  : status.lag_status === 'ahead'
+                  ? <Tag color="red">{status.lag_hint}</Tag>
+                  : <Tag color="orange">{status.lag_hint}</Tag>
               ) : <Text type="secondary">—</Text>}
             </Descriptions.Item>
           </Descriptions>

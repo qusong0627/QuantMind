@@ -143,14 +143,25 @@ async def get_qlib_status(
     parquet_latest = _latest_parquet_date()
     lag_days = None
     lag_hint = None
+    lag_status = None
     if qlib_last and parquet_latest:
         try:
             q_last = date.fromisoformat(qlib_last)
             p_last = date.fromisoformat(f"{parquet_latest[:4]}-{parquet_latest[4:6]}-{parquet_latest[6:]}")
             lag_days = max(0, (p_last - q_last).days)
             if lag_days > 0:
+                lag_status = "lagging"
                 lag_hint = f"Qlib 日历最新 {qlib_last}，上游 parquet 已到 {p_last.isoformat()}，落后约 {lag_days} 天"
+            elif q_last > p_last:
+                # 旧构建把上游预发布的未来交易日写进了日历（如全年日历写到 12-31），
+                # 日历末日期超出真实行情覆盖，提示重建以便裁剪。
+                lag_status = "ahead"
+                lag_hint = (
+                    f"Qlib 日历最新 {qlib_last} 超出上游 parquet 实际覆盖 "
+                    f"{p_last.isoformat()}（含预发布未来交易日），请重建 Qlib 以裁剪日历"
+                )
             else:
+                lag_status = "aligned"
                 lag_hint = "Qlib 已与上游 parquet 对齐"
         except Exception:
             lag_hint = None
@@ -162,6 +173,7 @@ async def get_qlib_status(
         "qlib_data": info,
         "parquet_latest_date": parquet_latest,
         "lag_days": lag_days,
+        "lag_status": lag_status,
         "lag_hint": lag_hint,
         "checked_at": _now_iso(),
     }

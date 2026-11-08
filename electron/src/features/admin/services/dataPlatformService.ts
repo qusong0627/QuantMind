@@ -380,6 +380,7 @@ export interface QlibStatus {
     };
     parquet_latest_date: string | null;
     lag_days: number | null;
+    lag_status: 'lagging' | 'ahead' | 'aligned' | null;
     lag_hint: string | null;
     checked_at: string;
 }

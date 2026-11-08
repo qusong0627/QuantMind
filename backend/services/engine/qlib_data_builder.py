@@ -230,11 +230,42 @@ class QlibDataBuilder:
             logger.warning("%s 交易日历为空", self._market)
             return 0
 
+        # 上游交易日历是交易所按全年预先发布的（如 SSE 年初即发布到 12-31），
+        # 其中晚于最新行情分区的未来交易日没有任何数据可写。若不裁剪，
+        # day.txt 末日期会超出真实覆盖（回测/推理/管理台都会误判“数据已有到该日”）。
+        cap = self._data_coverage_end()
+        if cap:
+            kept = [d for d in dates if d <= cap]
+            if kept and len(kept) != len(dates):
+                logger.info(
+                    "Qlib[%s] 日历裁剪未来交易日至行情覆盖 %s: %d -> %d",
+                    self._market, cap, len(dates), len(kept),
+                )
+                dates = kept
+
         with open(cal_file, "w") as f:
             f.write("\n".join(dates) + "\n")
 
         logger.info("Qlib[%s] calendar: %d trading days -> %s", self._market, len(dates), cal_file)
         return len(dates)
+
+    def _data_coverage_end(self) -> str | None:
+        """已有行情的最大日期（YYYY-MM-DD），取 daily_forward 最新分区目录名。
+
+        分区目录名 dt=YYYYMMDD 即上游真实同步到的交易日；目录不可用时返回
+        None（不裁剪，保持旧行为，如首次构建前行情尚未落地）。
+        """
+        fwd = self._hub.data_dir / "1_kline_data" / "daily_forward"
+        if not fwd.is_dir():
+            return None
+        parts = [p.name[len("dt="):] for p in fwd.glob("dt=*") if len(p.name) == len("dt=YYYYMMDD")]
+        if not parts:
+            return None
+        latest = max(parts)
+        try:
+            return f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+        except Exception:  # noqa: BLE001 - 目录名异常则放弃裁剪
+            return None
 
     def _extract_dates(self, df: pd.DataFrame) -> list[str] | None:
         """从 hub fetch_calendar 返回的 DataFrame 提取日期列表。"""
