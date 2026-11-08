@@ -45,6 +45,11 @@ FEATURE_COLS = [
     "buy_ratio", "net_amt", "trade_n", "avg_trade_amt",
     "large_net", "large_ratio", "xlarge_net", "dir_autocorr",
     "order_n", "big_order_n", "cancel_n", "order_trade_ratio", "cancel_rate",
+    # L2 微观结构（近端窗口）
+    "ofi_amt_5m", "ofi_amt_15m", "large_net_5m", "xlarge_net_15m",
+    "amt_ratio_5_30", "trade_ratio_5_30", "vol_5m", "range_5m",
+    "spread_chg_5m", "depth_chg_5m", "imb_chg_5m",
+    "bid_conc", "ask_conc", "order_rate_5m", "cancel_rate_5m", "big_order_ratio_5m",
 ]
 
 
@@ -130,6 +135,43 @@ WITH b AS (
         FROM b
     )
     GROUP BY symbol
+), wr AS (
+    SELECT *,
+           row_number() OVER (PARTITION BY symbol ORDER BY time DESC) AS rn,
+           close / lag(close) OVER (PARTITION BY symbol ORDER BY time) - 1.0 AS r,
+           (ask1 - bid1) / nullif((ask1 + bid1) / 2.0, 0) AS spread_bar,
+           (bidv1 - askv1) / nullif(bidv1 + askv1, 0) AS imb1_bar,
+           (total_bidv + total_askv) AS depth_bar,
+           bidv1 / nullif(bidv1 + bidv2 + bidv3 + bidv4 + bidv5
+                          + bidv6 + bidv7 + bidv8 + bidv9 + bidv10, 0) AS bid_conc_bar,
+           askv1 / nullif(askv1 + askv2 + askv3 + askv4 + askv5
+                          + askv6 + askv7 + askv8 + askv9 + askv10, 0) AS ask_conc_bar
+    FROM b
+), rec AS (
+    SELECT symbol,
+           sum(buy_amount - sell_amount) FILTER (WHERE rn <= 5) AS ofi_amt_5m,
+           sum(buy_amount - sell_amount) FILTER (WHERE rn <= 15) AS ofi_amt_15m,
+           sum(large_buy_amount - large_sell_amount) FILTER (WHERE rn <= 5) AS large_net_5m,
+           sum(xlarge_buy_amount - xlarge_sell_amount) FILTER (WHERE rn <= 15) AS xlarge_net_15m,
+           sum(amount) FILTER (WHERE rn <= 5) AS amt_5m,
+           sum(amount) FILTER (WHERE rn <= 30) AS amt_30m,
+           sum(trade_n) FILTER (WHERE rn <= 5) AS trades_5m,
+           sum(trade_n) FILTER (WHERE rn <= 30) AS trades_30m,
+           sum(order_n) FILTER (WHERE rn <= 5) AS orders_5m,
+           sum(cancel_n) FILTER (WHERE rn <= 5) AS cancels_5m,
+           sum(big_order_n) FILTER (WHERE rn <= 5) AS big_orders_5m,
+           stddev_samp(r) FILTER (WHERE rn <= 5) AS vol_5m,
+           max(high) FILTER (WHERE rn <= 5) AS hi_5m,
+           min(low) FILTER (WHERE rn <= 5) AS lo_5m,
+           max(bid_conc_bar) FILTER (WHERE rn = 1) AS bid_conc,
+           max(ask_conc_bar) FILTER (WHERE rn = 1) AS ask_conc
+    FROM wr GROUP BY symbol
+), ref5 AS (
+    SELECT symbol,
+           max(spread_bar) FILTER (WHERE rn = 6) AS spread_5,
+           max(imb1_bar) FILTER (WHERE rn = 6) AS imb_5,
+           max(depth_bar) FILTER (WHERE rn = 6) AS depth_5
+    FROM wr GROUP BY symbol
 )
 SELECT
     g.symbol,
@@ -180,10 +222,29 @@ SELECT
     g.big_order_n,
     g.cancel_n,
     g.order_n / nullif(g.trade_n, 0) AS order_trade_ratio,
-    g.cancel_n / nullif(g.order_n, 0) AS cancel_rate
+    g.cancel_n / nullif(g.order_n, 0) AS cancel_rate,
+    r.ofi_amt_5m,
+    r.ofi_amt_15m,
+    r.large_net_5m,
+    r.xlarge_net_15m,
+    r.amt_5m / nullif(r.amt_30m / 6.0, 0) AS amt_ratio_5_30,
+    r.trades_5m / nullif(r.trades_30m / 6.0, 0) AS trade_ratio_5_30,
+    r.vol_5m,
+    (r.hi_5m - r.lo_5m) / nullif(g.px, 0) AS range_5m,
+    (g.ask1 - g.bid1) / nullif((g.ask1 + g.bid1) / 2.0, 0) - f5.spread_5 AS spread_chg_5m,
+    (g.total_bidv + g.total_askv - f5.depth_5) / nullif(f5.depth_5, 0) AS depth_chg_5m,
+    (g.bid_depth_1 - g.ask_depth_1) / nullif(g.bid_depth_1 + g.ask_depth_1, 0)
+        - f5.imb_5 AS imb_chg_5m,
+    r.bid_conc,
+    r.ask_conc,
+    r.orders_5m / 5.0 AS order_rate_5m,
+    r.cancels_5m / nullif(r.orders_5m, 0) AS cancel_rate_5m,
+    r.big_orders_5m / nullif(r.orders_5m, 0) AS big_order_ratio_5m
 FROM grid AS g
 LEFT JOIN vol AS v USING (symbol)
 LEFT JOIN flow AS f USING (symbol)
+LEFT JOIN rec AS r USING (symbol)
+LEFT JOIN ref5 AS f5 USING (symbol)
 ORDER BY g.symbol
 """
 

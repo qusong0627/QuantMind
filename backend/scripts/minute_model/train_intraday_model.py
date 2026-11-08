@@ -35,7 +35,7 @@ PANEL = Path("data/minute_model/panel")
 OUT = Path("data/minute_model/model")
 EXCLUDE = {
     "symbol", "date", "cutoff",
-    "ret_4h", "ret_5h", "ret_5h_capped", "rank_4h", "label_ok", "tradable",
+    "ret_4h", "ret_5h", "ret_5h_capped", "rank_4h", "rank_5h", "label_ok", "label_ok_5h", "tradable",
     "is_limit_up", "is_suspended", "is_new", "has_60d_history",
     "prev_close", "next_close", "px_next_same", "px_next_5h",
     "ret_today_sofar",  # 作为特征单独加入
@@ -59,9 +59,12 @@ def _panel_days(start: str, end: str) -> list[str]:
     return sorted(days)
 
 
-def load_frames(days: list[str], feature_cols: list[str], sample_frac: float, seed: int) -> pd.DataFrame:
+def load_frames(days: list[str], feature_cols: list[str], sample_frac: float, seed: int,
+                label: str = "ret_4h") -> pd.DataFrame:
+    rank_col = "rank_4h" if label == "ret_4h" else "rank_5h"
+    ok_col = "label_ok" if label == "ret_4h" else "label_ok_5h"
     files = [str(PANEL / f"date={d}" / "data.parquet") for d in days]
-    cols = feature_cols + ["ret_4h", "rank_4h", "ret_today_sofar", "cutoff"]
+    cols = feature_cols + [label, rank_col, "ret_today_sofar", "cutoff"]
     con = duckdb.connect()
     con.execute("SET memory_limit='12GB'")
     con.execute("SET threads=8")
@@ -70,29 +73,30 @@ def load_frames(days: list[str], feature_cols: list[str], sample_frac: float, se
     q = f"""
         SELECT {", ".join(cols)}
         FROM read_parquet({files!r})
-        WHERE label_ok AND tradable AND rank_4h IS NOT NULL{sample_sql}
+        WHERE {ok_col} AND tradable AND {rank_col} IS NOT NULL{sample_sql}
     """
     df = con.sql(q).df()
     con.close()
     df["cutoff_idx"] = df["cutoff"].map(CUTOFF_IDX).astype("int8")
-    df["y"] = (df["rank_4h"].astype("float32") - 0.5).astype("float32")
-    df = df.drop(columns=["cutoff", "rank_4h"])
+    df["y"] = (df[rank_col].astype("float32") - 0.5).astype("float32")
+    df = df.drop(columns=["cutoff", rank_col])
     for c in df.columns:
-        if c not in ("y", "cutoff_idx", "ret_4h"):
+        if c not in ("y", "cutoff_idx", label):
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("float32")
     return df
 
 
-def evaluate(pred_df: pd.DataFrame, label: str) -> dict:
-    """pred_df: date, cutoff, pred, ret_4h, tradable。返回 IC/分层/Top50。"""
+def evaluate(pred_df: pd.DataFrame, label: str = "ret_4h") -> dict:
+    """pred_df: date, cutoff, pred, label, tradable。返回 IC/分层/Top50。"""
+    lab = label
     con = duckdb.connect()
     con.register("p", pred_df)
     ic = con.sql(f"""
         WITH r AS (
-            SELECT date, cutoff, pred, ret_4h,
+            SELECT date, cutoff, pred, {lab} AS y,
                    rank() OVER (PARTITION BY date, cutoff ORDER BY pred) AS rp,
-                   rank() OVER (PARTITION BY date, cutoff ORDER BY ret_4h) AS rr
-            FROM p
+                   rank() OVER (PARTITION BY date, cutoff ORDER BY {lab}) AS rr
+            FROM p WHERE {lab} IS NOT NULL
         )
         SELECT date, cutoff, corr(rp, rr) AS ic, count(*) AS n
         FROM r GROUP BY 1, 2 HAVING count(*) >= 100
@@ -100,27 +104,27 @@ def evaluate(pred_df: pd.DataFrame, label: str) -> dict:
     by_cut = ic.groupby("cutoff")["ic"].agg(["mean", "std", "count"]).reset_index()
     mean_ic = ic["ic"].mean()
     icir = mean_ic / ic["ic"].std() * np.sqrt(len(ic)) if len(ic) > 1 else np.nan
-    dec = con.sql("""
+    dec = con.sql(f"""
         WITH r AS (
             SELECT *, ntile(5) OVER (PARTITION BY date, cutoff ORDER BY pred) AS q
-            FROM p WHERE ret_4h IS NOT NULL
+            FROM p WHERE {lab} IS NOT NULL
         )
-        SELECT q, avg(ret_4h) AS ret, count(*) AS n FROM r GROUP BY q ORDER BY q
+        SELECT q, avg({lab}) AS ret, count(*) AS n FROM r GROUP BY q ORDER BY q
     """).df()
-    top = con.sql("""
+    top = con.sql(f"""
         WITH r AS (
             SELECT *, row_number() OVER (PARTITION BY date, cutoff ORDER BY pred DESC) AS rn
-            FROM p WHERE ret_4h IS NOT NULL AND tradable
+            FROM p WHERE {lab} IS NOT NULL AND tradable
         )
-        SELECT avg(ret_4h) AS gross, avg(CASE WHEN ret_4h > 0 THEN 1.0 ELSE 0.0 END) AS win,
-               median(ret_4h) AS med, quantile_cont(ret_4h, 0.1) AS p10,
-               quantile_cont(ret_4h, 0.9) AS p90,
-               avg(CASE WHEN abs(ret_4h) >= 0.095 THEN 1.0 ELSE 0.0 END) AS frac_limit,
+        SELECT avg({lab}) AS gross, avg(CASE WHEN {lab} > 0 THEN 1.0 ELSE 0.0 END) AS win,
+               median({lab}) AS med, quantile_cont({lab}, 0.1) AS p10,
+               quantile_cont({lab}, 0.9) AS p90,
+               avg(CASE WHEN abs({lab}) >= 0.095 THEN 1.0 ELSE 0.0 END) AS frac_limit,
                count(*) AS n
         FROM r WHERE rn <= 50
     """).df()
     con.close()
-    cost = 0.0015 + 0.001  # 双边万3 + 0.2% 滑点（保守）
+    cost = 0.0015 + 0.001
     return {
         "label": label,
         "ic_mean": float(mean_ic),
@@ -150,6 +154,7 @@ def main() -> None:
     ap.add_argument("--leaves", type=int, default=63)
     ap.add_argument("--lr", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--label", default="ret_4h", choices=["ret_4h", "ret_5h"])
     args = ap.parse_args()
 
     import lightgbm as lgb
@@ -166,10 +171,10 @@ def main() -> None:
     feature_cols = [c for c in all_cols if c not in EXCLUDE]
 
     t0 = time.time()
-    train = load_frames(train_days, feature_cols, args.sample_frac, args.seed)
+    train = load_frames(train_days, feature_cols, args.sample_frac, args.seed, args.label)
     log.info("训练样本 %d 行，%.1f 分钟", len(train), (time.time() - t0) / 60)
     t0 = time.time()
-    valid = load_frames(valid_days, feature_cols, 1.0, args.seed)
+    valid = load_frames(valid_days, feature_cols, 1.0, args.seed, args.label)
     log.info("验证样本 %d 行，%.1f 分钟", len(valid), (time.time() - t0) / 60)
 
     feats = feature_cols + ["ret_today_sofar", "cutoff_idx"]
@@ -188,7 +193,8 @@ def main() -> None:
     )
     log.info("最优迭代 %d，验证 best=%.6f", model.best_iteration_, model.best_score_["valid_0"]["l2"])
 
-    with open(OUT / "lgb_4h.pkl", "wb") as fh:
+    tag = "4h" if args.label == "ret_4h" else "5h"
+    with open(OUT / f"lgb_{tag}.pkl", "wb") as fh:
         pickle.dump({"model": model, "features": feats, "cutoffs": CUTOFF_IDX}, fh)
 
     # 样本外：逐日预测（控制内存）
@@ -203,13 +209,15 @@ def main() -> None:
             if c not in df.columns:
                 df[c] = np.nan
         df["pred"] = model.predict(df[feats].astype("float32"))
-        preds.append(df[["date", "cutoff", "pred", "ret_4h", "tradable", "label_ok", "ret_5h"]])
+        preds.append(df[["date", "cutoff", "pred", "ret_4h", "ret_5h", "tradable", "label_ok", "label_ok_5h"]])
         if i % 40 == 0:
             log.info("预测 %d/%d", i, len(test_days))
     con.close()
     test = pd.concat(preds, ignore_index=True)
-    test = test[test["label_ok"] & test["tradable"]]
-    test.to_parquet(OUT / "pred_4h_test.parquet", index=False)
+    ok_col = "label_ok" if args.label == "ret_4h" else "label_ok_5h"
+    test = test[test[ok_col] & test["tradable"]]
+    tag = "4h" if args.label == "ret_4h" else "5h"
+    test.to_parquet(OUT / f"pred_{tag}_test.parquet", index=False)
     log.info("测试预测 %d 行，%.1f 分钟", len(test), (time.time() - t0) / 60)
 
     report = {
@@ -219,12 +227,13 @@ def main() -> None:
         "sample": {"train_rows": int(len(train)), "valid_rows": int(len(valid)),
                    "test_rows": int(len(test)), "sample_frac": args.sample_frac},
         "features": len(feats),
-        "test": evaluate(test, "ret_4h"),
+        "label": args.label,
+        "test": evaluate(test, args.label),
         "importance_top30": sorted(
             zip(feats, model.feature_importances_), key=lambda x: -x[1]
         )[:30],
     }
-    (OUT / "report_4h.json").write_text(
+    (OUT / f"report_{tag}.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8"
     )
     print(json.dumps(report["test"], ensure_ascii=False, indent=2, default=_json_default))

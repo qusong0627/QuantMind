@@ -40,6 +40,9 @@ QUANTDB = FEAT_DIR.parents[1] / "quantdb"
 FACTORS = QUANTDB / "6_ml_datasets" / "l1_l2_factors"
 DAILY = QUANTDB / "1_kline_data" / "daily_unadjusted"
 OUT = FEAT_DIR.parent / "panel"
+REGIME_PATH = FEAT_DIR.parent / "regime.parquet"
+REGIME = {}
+REGIME_COLS = ["mkt_ret_5d", "mkt_ret_20d", "mkt_vol_20d", "mkt_dd_20d"]
 
 # 日频上下文（前一交易日，PIT）
 CONTEXT_COLS = [
@@ -64,6 +67,46 @@ CONTEXT_COLS = [
 FIVE_H_MAP = {"10:30": "11:30", "11:30": "13:30", "13:30": "14:30", "14:30": "close", "14:50": "close"}
 
 
+def _load_regime() -> dict[str, dict]:
+    """沪深300 regime（PIT：截至该交易日收盘，面板按 prev_date 取）。"""
+    global REGIME
+    if REGIME:
+        return REGIME
+    con = duckdb.connect()
+    con.execute("SET memory_limit='6GB'")
+    if not REGIME_PATH.exists():
+        con.execute(f"""
+            COPY (
+              WITH idx AS (
+                SELECT CAST(time AS DATE) AS d, close
+                FROM read_parquet('{QUANTDB}/1_kline_data/index_daily/dt=*/data.parquet')
+                WHERE symbol = '000300.SH'
+              ), r0 AS (
+                SELECT d, close, close / lag(close) OVER (ORDER BY d) - 1 AS ret
+                FROM idx
+              ), r AS (
+                SELECT d, close,
+                       close / lag(close, 5) OVER (ORDER BY d) - 1 AS mkt_ret_5d,
+                       close / lag(close, 20) OVER (ORDER BY d) - 1 AS mkt_ret_20d,
+                       close / max(close) OVER (ORDER BY d ROWS BETWEEN 20 PRECEDING AND CURRENT ROW) - 1
+                           AS mkt_dd_20d,
+                       stddev_samp(ret) OVER (ORDER BY d ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING)
+                           AS mkt_vol_20d
+                FROM r0
+              )
+              SELECT strftime(r.d, '%Y%m%d') AS date,
+                     r.mkt_ret_5d, r.mkt_ret_20d, r.mkt_vol_20d, r.mkt_dd_20d
+              FROM r
+            ) TO '{REGIME_PATH}' (FORMAT PARQUET)
+        """)
+    rel = con.sql(f"SELECT * FROM read_parquet('{REGIME_PATH}')")
+    cols = [d[0] for d in rel.description]
+    REGIME = {r[0]: dict(zip(cols[1:], r[1:])) for r in rel.fetchall()}
+    con.close()
+    log.info("regime 表 %d 天", len(REGIME))
+    return REGIME
+
+
 def calendar() -> list[str]:
     days = []
     for p in DAILY.glob("dt=*"):
@@ -79,6 +122,12 @@ def _next_prev(days: list[str]) -> tuple[dict[str, str], dict[str, str], dict[st
     # 60 个交易日前（用于次新过滤）
     d60 = {d: days[i - 60] for i, d in enumerate(days) if i >= 60}
     return nxt, prv, d60
+
+
+def _rg(date: str, col: str) -> str:
+    """regime 标量 -> SQL 字面量（缺省 NULL）。"""
+    v = (REGIME.get(date) or {}).get(col)
+    return "CAST(NULL AS DOUBLE)" if v is None else repr(float(v))
 
 
 def build_sql(date: str, next_date: str, prev_date: str, d60: str | None) -> str:
@@ -117,7 +166,8 @@ WITH f AS (
         n.px AS px_next_same,
         n2.px AS px_next_5h,
         old.symbol IS NOT NULL AS has_60d_history,
-        (f.px / nullif(dp.close, 0) - 1.0) AS ret_today_sofar
+        (f.px / nullif(dp.close, 0) - 1.0) AS ret_today_sofar,
+        {", ".join(f"{_rg(prev_date, c)} AS {c}" for c in REGIME_COLS)}
     FROM f
     LEFT JOIN read_parquet('{factors}') d ON d.symbol = f.symbol
     -- 昨收必须用未复权日线：因子表的 close 是后复权价，与 px 口径不同（2026-11-08 修复）
@@ -134,6 +184,7 @@ WITH f AS (
             ELSE px_next_5h / nullif(px, 0) - 1.0
         END AS ret_5h,
         (cutoff IN ('14:30', '14:50')) AS ret_5h_capped,
+        ret_5h IS NOT NULL AND ret_5h BETWEEN -0.35 AND 0.35 AS label_ok_5h,
         CASE
             WHEN px IS NULL OR prev_close IS NULL THEN FALSE
             WHEN px / prev_close - 1.0 >=
@@ -149,7 +200,8 @@ WITH f AS (
 SELECT *,
     ret_4h IS NOT NULL AND ret_4h BETWEEN -0.35 AND 0.35 AS label_ok,
     (NOT is_limit_up AND NOT is_suspended AND NOT is_new AND px IS NOT NULL) AS tradable,
-    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_4h) AS rank_4h
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_4h) AS rank_4h,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_5h) AS rank_5h
 FROM labels
 """
 
@@ -208,6 +260,7 @@ def main() -> None:
 
     days = calendar()
     nxt, prv, d60 = _next_prev(days)
+    _load_regime()
     feat_days = sorted(
         p.name.split("=", 1)[1] for p in FEAT_DIR.glob("date=*")
         if (p / "data.parquet").exists()
