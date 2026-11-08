@@ -70,4 +70,37 @@ describe('SectorHeatmapChart · 切换动画', () => {
     expect(mergeCalls.length).toBeGreaterThan(0);
     expect((mergeCalls[0][1] as { replaceMerge?: string[] }).replaceMerge).toEqual(['series']);
   });
+
+  it('标签字色随底色：浅色块切深字、深色块保持白字', () => {
+    // @ts-expect-error test polyfill
+    global.ResizeObserver = RO;
+    const data = [
+      { name: '电池', value: 100, pct_change: 0.5 },
+      { name: '电力', value: 80, pct_change: 3 },
+    ];
+    render(
+      <SectorHeatmapChart
+        data={data}
+        renderKey="contrast"
+        colorOf={(item) => (item.name === '电池' ? '#cbd5e1' : '#dc2626')}
+      />,
+    );
+
+    const dataItems = chart.setOption.mock.calls
+      .flatMap((c) => {
+        const series = (c[0] as { series?: Array<{ data?: Array<Record<string, unknown>> }> }).series;
+        return Array.isArray(series) ? series.flatMap((s) => s.data ?? []) : [];
+      })
+      .filter((d) => d.name === '电池' || d.name === '电力') as Array<{
+      name: string;
+      label: { color: string; rich: Record<string, { color: string }> };
+    }>;
+
+    const light = dataItems.find((d) => d.name === '电池')!;
+    const dark = dataItems.find((d) => d.name === '电力')!;
+    expect(light.label.color).toBe('#0f172a');
+    expect(light.label.rich.name.color).toBe('#0f172a');
+    expect(dark.label.color).toBe('#ffffff');
+    expect(dark.label.rich.pct.color).toBe('#ffffff');
+  });
 });

@@ -9,6 +9,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
+import { heatmapLabelColor } from './heatmapLabelContrast';
 
 export interface SectorHeatmapItem {
   name: string;
@@ -119,6 +120,32 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
   // echarts treemap 会把文本盒钉死为色块尺寸并忽略 verticalAlign，只能靠 padding 在盒内下移实现居中
   const LABEL_TEXT_HEIGHT = 31;
 
+  // 字色不写死白色：浅色档（#cbd5e1/#e2e8f0/#34d399 等）上白字对比度不足 2:1，
+  // 肉眼等同「方块没有文字」，这里按每块底色亮度切成深字。
+  const labelRichStyles = (color: string) => ({
+    name: {
+      fontSize: 11,
+      fontWeight: 'bold' as const,
+      color,
+      lineHeight: 15,
+      align: 'center' as const,
+    },
+    pct: {
+      fontSize: 10,
+      fontWeight: 'bold' as const,
+      color,
+      fontFamily: 'monospace',
+      align: 'center' as const,
+    },
+    tiny: {
+      fontSize: 7,
+      fontWeight: 'bold' as const,
+      color,
+      lineHeight: 9,
+      align: 'center' as const,
+    },
+  });
+
   const redrawRef = useRef<() => void>(() => {});
   const clickAttachedRef = useRef(false);
 
@@ -175,41 +202,50 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
       .sort((a, b) => a - b);
     const medianValue = finiteValues.length ? finiteValues[Math.floor(finiteValues.length / 2)] : 1;
     const minAreaValue = Math.max(1, medianValue * 0.2);
-    const formattedData = sectorItems.map((item) => ({
-      id: item.name,
-      name: item.name,
-      // 🎯 非线性压缩(幂0.4)，避免超大板块(如半导体/银行)吞掉整张图；
-      // 同时给极小板块一个面积下限，避免右侧出现没有宽度/没有文字的碎片块。
-      value: Math.pow(Math.max(item.value || 0, minAreaValue), 0.4),
-      raw_value: item.value,
-      pct_change: item.pct_change,
-      leader: item.leader,
-      leader_pct: item.leader_pct,
-      flow_net: (item as { flow_net?: number }).flow_net,
-      extra: item.extra,
-      // 原始 item 透传：tooltipExtraOf 需要 flow_accel/price_accel/direction/情绪等字段，
-      // 只传手工挑选的字段会让「量价共振/方向概率」tooltip 全显示 —。
-      source: item,
-      // 第二行标签文本：默认涨跌幅，下钻层可覆盖为「+x.xx亿」等
-      label_value:
-        labelValueOfRef.current?.(item) ??
-        `${item.pct_change >= 0 ? '+' : ''}${item.pct_change.toFixed(2)}%`,
-      itemStyle: {
-        // 默认按涨跌幅档位着色；下钻层可传 colorOf 覆盖（按主力净额等）
-        color:
-          colorOfRef.current?.(item) ??
-          (item.pct_change > 2
-            ? '#ef4444'
-            : item.pct_change > 0
-            ? '#f87171'
-            : item.pct_change === 0
-            ? '#94a3b8'
-            : item.pct_change > -2
-            ? '#34d399'
-            : '#10b981'),
-        borderRadius: 2,
-      },
-    }));
+    const formattedData = sectorItems.map((item) => {
+      const cellColor =
+        colorOfRef.current?.(item) ??
+        (item.pct_change > 2
+          ? '#ef4444'
+          : item.pct_change > 0
+          ? '#f87171'
+          : item.pct_change === 0
+          ? '#94a3b8'
+          : item.pct_change > -2
+          ? '#34d399'
+          : '#10b981');
+      const textColor = heatmapLabelColor(cellColor);
+      return {
+        id: item.name,
+        name: item.name,
+        // 🎯 非线性压缩(幂0.4)，避免超大板块(如半导体/银行)吞掉整张图；
+        // 同时给极小板块一个面积下限，避免右侧出现没有宽度/没有文字的碎片块。
+        value: Math.pow(Math.max(item.value || 0, minAreaValue), 0.4),
+        raw_value: item.value,
+        pct_change: item.pct_change,
+        leader: item.leader,
+        leader_pct: item.leader_pct,
+        flow_net: (item as { flow_net?: number }).flow_net,
+        extra: item.extra,
+        // 原始 item 透传：tooltipExtraOf 需要 flow_accel/price_accel/direction/情绪等字段，
+        // 只传手工挑选的字段会让「量价共振/方向概率」tooltip 全显示 —。
+        source: item,
+        // 第二行标签文本：默认涨跌幅，下钻层可覆盖为「+x.xx亿」等
+        label_value:
+          labelValueOfRef.current?.(item) ??
+          `${item.pct_change >= 0 ? '+' : ''}${item.pct_change.toFixed(2)}%`,
+        itemStyle: {
+          // 默认按涨跌幅档位着色；下钻层可传 colorOf 覆盖（按主力净额等）
+          color: cellColor,
+          borderRadius: 2,
+        },
+        // 字色随底色走：深底白字维持原观感，浅底（中性灰/浅绿/浅红）切深字
+        label: {
+          color: textColor,
+          rich: labelRichStyles(textColor),
+        },
+      };
+    });
 
     const option: echarts.EChartsOption = {
       animationDuration: 500,
@@ -275,29 +311,7 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
               const val = d.label_value ?? '';
               return `{name|${params.name}}\n{pct|${val}}`;
             },
-            rich: {
-              name: {
-                fontSize: 11,
-                fontWeight: 'bold',
-                color: '#ffffff',
-                lineHeight: 15,
-                align: 'center',
-              },
-              pct: {
-                fontSize: 10,
-                fontWeight: 'bold',
-                color: '#ffffff',
-                fontFamily: 'monospace',
-                align: 'center',
-              },
-              tiny: {
-                fontSize: 7,
-                fontWeight: 'bold',
-                color: '#ffffff',
-                lineHeight: 9,
-                align: 'center',
-              },
-            },
+            rich: labelRichStyles('#ffffff'),
           },
           itemStyle: {
             borderColor: '#ffffff',
@@ -329,16 +343,21 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
         });
         const centeredData = formattedData.map((item) => {
           const layout = layoutByName[item.name];
-          if (!layout) return { ...item, label: { show: false } };
+          if (!layout) return { ...item, label: { ...item.label, show: false } };
           // 两行（名称+数值）需要 40×22；更小的块至少给一行名称（7px），
           // 否则概念板块长尾全是没有字的色块。再小（<22×12）才隐藏。
           const canTwoLine = layout.width >= 40 && layout.height >= 22;
           const show = layout.width >= 22 && layout.height >= 12;
-          const textH = canTwoLine ? LABEL_TEXT_HEIGHT : 9;
+          // 单行也留 12px 盒高：tiny 的 lineHeight=9，若按 9 校准，块高为小数时
+          // 实际盒高会略小于 9（如 66 − 2×28.71 = 8.58），zrender 的
+          // lineOverflow:'truncate' 判定一行都放不下 → 标签整块不渲染（实测踩过）。
+          const textH = canTwoLine ? LABEL_TEXT_HEIGHT : 12;
           const pad = Math.max(0, (layout.height - textH) / 2);
           return {
             ...item,
+            // 保留 formattedData 里按底色算好的 color/rich，只覆盖布局相关项
             label: {
+              ...item.label,
               show,
               padding: [pad, 0, pad, 0],
               align: 'center',
