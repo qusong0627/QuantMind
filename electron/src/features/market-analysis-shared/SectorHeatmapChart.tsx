@@ -10,6 +10,7 @@
 import React, { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
 import { heatmapLabelColor } from './heatmapLabelContrast';
+import { fitBlockLabel } from './heatmapLabelFit';
 
 export interface SectorHeatmapItem {
   name: string;
@@ -116,9 +117,9 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
 
   const sectorItems = data && data.length > 0 ? data : [];
 
-  // 两行 rich 文本（名称行高15 + 数值行~12.5）加上 gapWidth 裁剪补偿的总高校准值（离屏 SVG 渲染实测，误差 ±0.25px）；
-  // echarts treemap 会把文本盒钉死为色块尺寸并忽略 verticalAlign，只能靠 padding 在盒内下移实现居中
-  const LABEL_TEXT_HEIGHT = 31;
+  // 两行 rich 文本（名称行高15 + 数值行~12.5）加上 gapWidth 裁剪补偿的总高校准值
+  // 已移入 heatmapLabelFit（LABEL_TWO_LINE_HEIGHT）：echarts treemap 会把文本盒钉死
+  // 为色块尺寸并忽略 verticalAlign，只能靠 padding 在盒内下移实现居中。
 
   // 字色不写死白色：浅色档（#cbd5e1/#e2e8f0/#34d399 等）上白字对比度不足 2:1，
   // 肉眼等同「方块没有文字」，这里按每块底色亮度切成深字。
@@ -344,27 +345,23 @@ export const SectorHeatmapChart: React.FC<SectorHeatmapChartProps> = ({
         const centeredData = formattedData.map((item) => {
           const layout = layoutByName[item.name];
           if (!layout) return { ...item, label: { ...item.label, show: false } };
-          // 两行（名称+数值）需要 40×22；更小的块至少给一行名称（7px），
-          // 否则概念板块长尾全是没有字的色块。再小（<22×12）才隐藏。
-          const canTwoLine = layout.width >= 40 && layout.height >= 22;
-          const show = layout.width >= 22 && layout.height >= 12;
-          // 单行也留 12px 盒高：tiny 的 lineHeight=9，若按 9 校准，块高为小数时
-          // 实际盒高会略小于 9（如 66 − 2×28.71 = 8.58），zrender 的
-          // lineOverflow:'truncate' 判定一行都放不下 → 标签整块不渲染（实测踩过）。
-          const textH = canTwoLine ? LABEL_TEXT_HEIGHT : 12;
-          const pad = Math.max(0, (layout.height - textH) / 2);
+          // 文本盒 = 色块内框（扣 1.5px 边框×2）；盒高必须 ≥ 行高，否则 zrender 的
+          // lineOverflow:'truncate' 判定一行都放不下，标签整块不渲染（不是截断）。
+          const boxW = Math.max(layout.width - 3, 0);
+          const boxH = Math.max(layout.height - 3, 0);
+          const fit = fitBlockLabel(item.name, boxW, boxH);
+          if (!fit.show) return { ...item, label: { ...item.label, show: false } };
+          const pad = Math.max(0, (boxH - fit.textH) / 2);
           return {
             ...item,
             // 保留 formattedData 里按底色算好的 color/rich，只覆盖布局相关项
             label: {
               ...item.label,
-              show,
+              show: true,
               padding: [pad, 0, pad, 0],
               align: 'center',
               overflow: 'truncate',
-              ...(canTwoLine
-                ? {}
-                : { formatter: (params: { name?: string }) => `{tiny|${params?.name ?? ''}}` }),
+              ...fit.style,
             },
           };
         });
