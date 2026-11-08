@@ -52,16 +52,20 @@ def _days(start: str, end: str) -> list[str]:
     return sorted(out)
 
 
-def _predict_day(con, d: str, model, feats) -> pd.DataFrame:
+def _predict_day(con, d: str, models, feats_list) -> pd.DataFrame:
     df = con.sql(f"SELECT * FROM read_parquet('{PANEL}/date={d}/data.parquet') WHERE cutoff = '{CUTOFF}'").df()
     df = df[df["label_ok"] & df["tradable"] & df["ret_4h"].notna()]
     if len(df) < 100:
         return pd.DataFrame()
     df["cutoff_idx"] = CUTOFF_IDX
-    for c in feats:
-        if c not in df.columns:
-            df[c] = np.nan
-    df["pred"] = model.predict(df[feats].astype("float32"))
+    scores = []
+    for model, feats in zip(models, feats_list):
+        for c in feats:
+            if c not in df.columns:
+                df[c] = np.nan
+        p = model.predict(df[feats].astype("float32"))
+        scores.append(pd.Series(p).rank(pct=True).to_numpy())
+    df["pred"] = np.mean(scores, axis=0)
     return df.nlargest(TOPN, "pred")
 
 
@@ -137,13 +141,17 @@ def main() -> None:
     ap.add_argument("--cost", type=float, default=0.0015, help="单次进出总成本（默认 0.15%%）")
     ap.add_argument("--filter", default="trend_dd", choices=["none", "trend", "trend_dd"])
     ap.add_argument("--model", default="lgb_4h.pkl")
+    ap.add_argument("--models", default="", help="逗号分隔：多模型 rank 平均集成")
     ap.add_argument("--tag", default="")
     args = ap.parse_args()
     out_dir = (OUT / args.tag) if args.tag else OUT
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    buy = pickle.load(open(Path("data/minute_model/model") / args.model, "rb"))
-    model, feats = buy["model"], buy["features"]
+    model_files = [x.strip() for x in (args.models or args.model).split(",") if x.strip()]
+    buys = [pickle.load(open(Path("data/minute_model/model") / f, "rb")) for f in model_files]
+    models = [b["model"] for b in buys]
+    feats_list = [b["features"] for b in buys]
+    log.info("模型 %s", model_files)
     days = _days(args.start, args.end)
     log.info("回测区间 %s ~ %s，%d 天，成本 %.4f，过滤 %s",
              days[0], days[-1], len(days), args.cost, args.filter)
@@ -154,7 +162,7 @@ def main() -> None:
     t0 = time.time()
     for i, d in enumerate(days[:-1]):
         nd = days[i + 1]
-        top = _predict_day(con, d, model, feats)
+        top = _predict_day(con, d, models, feats_list)
         if top.empty:
             continue
         opens = _next_open(con, nd, top["symbol"].tolist())
