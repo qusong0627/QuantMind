@@ -28,6 +28,8 @@ description: "L2 原始 parquet → QuantDB 分钟表（l2_min1）的落库、�
 | parquet 仓库 nas-toshiba | `/media/zbox/nas-toshiba/l2-warehouse/parquet` | 2023-01-03 ~ 2024-10-31（348 天，2023 缺 4/8 月） | snapshot 2520万 / trades 1.24亿 / orders 1.87亿行 |
 | parquet 仓库 nas-wd | `/media/zbox/nas-wd/l2-warehouse/parquet` | 2024-04-01 ~ 2025-11-28（159 天，稀疏） | 同上 |
 | parquet 仓库 sata | `/media/zbox/sata/l2-warehouse/parquet` | 2024-11-01 ~ 2025-12-31（147 天） | 同上 |
+| **parquet 仓库 seagate** | `/media/zbox/nas-seagate/l2-warehouse/parquet` | **2023-03/04/08/11（73 天）+ 2026-01~10（198 天）** | 同上（72 列 schema 一致） |
+| 7z（seagate） | `/media/zbox/nas-seagate/L2` | 2020-12-18~31（10 天） | 同 7z |
 
 
 ## 2. 命令（一分钟跑通）
