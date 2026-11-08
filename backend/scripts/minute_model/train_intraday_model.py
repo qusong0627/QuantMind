@@ -157,6 +157,8 @@ def main() -> None:
     ap.add_argument("--label", default="ret_4h", choices=["ret_4h", "ret_5h"])
     ap.add_argument("--drop", default="", help="逗号分隔的丢弃特征")
     ap.add_argument("--tag", default="", help="输出标签后缀")
+    ap.add_argument("--algo", default="lightgbm", choices=["lightgbm", "xgboost", "catboost"])
+    ap.add_argument("--threads", type=int, default=18)
     args = ap.parse_args()
 
     import lightgbm as lgb
@@ -187,21 +189,52 @@ def main() -> None:
     Xtr, ytr = train[feats], train["y"]
     Xva, yva = valid[feats], valid["y"]
 
-    model = lgb.LGBMRegressor(
-        objective="regression", n_estimators=args.rounds, learning_rate=args.lr,
-        num_leaves=args.leaves, min_child_samples=200, subsample=0.8, subsample_freq=1,
-        colsample_bytree=0.8, reg_lambda=5.0, n_jobs=18, random_state=args.seed,
-        verbose=-1,
-    )
-    model.fit(
-        Xtr, ytr, eval_set=[(Xva, yva)],
-        callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(100)],
-    )
-    log.info("最优迭代 %d，验证 best=%.6f", model.best_iteration_, model.best_score_["valid_0"]["l2"])
+    algo = args.algo
+    if algo == "lightgbm":
+        model = lgb.LGBMRegressor(
+            objective="regression", n_estimators=args.rounds, learning_rate=args.lr,
+            num_leaves=args.leaves, min_child_samples=200, subsample=0.8, subsample_freq=1,
+            colsample_bytree=0.8, reg_lambda=5.0, n_jobs=args.threads, random_state=args.seed,
+            verbose=-1,
+        )
+        model.fit(
+            Xtr, ytr, eval_set=[(Xva, yva)],
+            callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(100)],
+        )
+        best = model.best_iteration_ or args.rounds
+        imp = model.feature_importances_
+    elif algo == "xgboost":
+        from xgboost import XGBRegressor
 
-    tag = args.tag or ("4h" if args.label == "ret_4h" else "5h")
+        model = XGBRegressor(
+            n_estimators=args.rounds, learning_rate=args.lr, max_depth=6,
+            min_child_weight=20, subsample=0.8, colsample_bytree=0.8, reg_lambda=5.0,
+            tree_method="hist", n_jobs=args.threads, random_state=args.seed,
+            early_stopping_rounds=50,
+        )
+        model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=100)
+        best = model.best_iteration
+        imp = model.feature_importances_
+    elif algo == "catboost":
+        from catboost import CatBoostRegressor
+
+        model = CatBoostRegressor(
+            loss_function="RMSE", iterations=args.rounds, learning_rate=args.lr, depth=6,
+            l2_leaf_reg=5.0, random_seed=args.seed, thread_count=args.threads,
+            verbose=100, od_type="Iter", od_wait=50,
+        )
+        model.fit(Xtr, ytr, eval_set=(Xva, yva))
+        best = model.get_best_iteration()
+        imp = model.get_feature_importance()
+    else:
+        raise SystemExit(f"未知算法 {algo}")
+    log.info("最优迭代 %d", best)
+    tag = args.tag or (("4h" if args.label == "ret_4h" else "5h")
+                       + ("" if algo == "lightgbm" else "_" + algo))
+
     with open(OUT / f"lgb_{tag}.pkl", "wb") as fh:
-        pickle.dump({"model": model, "features": feats, "cutoffs": CUTOFF_IDX}, fh)
+        pickle.dump({"model": model, "features": feats, "cutoffs": CUTOFF_IDX,
+                     "algo": algo}, fh)
 
     # 样本外：逐日预测（控制内存）
     t0 = time.time()
@@ -222,7 +255,7 @@ def main() -> None:
     test = pd.concat(preds, ignore_index=True)
     ok_col = "label_ok" if args.label == "ret_4h" else "label_ok_5h"
     test = test[test[ok_col] & test["tradable"]]
-    tag = args.tag or ("4h" if args.label == "ret_4h" else "5h")
+    tag = args.tag or (("4h" if args.label == "ret_4h" else "5h") + ("" if algo == "lightgbm" else "_" + algo))
     test.to_parquet(OUT / f"pred_{tag}_test.parquet", index=False)
     log.info("测试预测 %d 行，%.1f 分钟", len(test), (time.time() - t0) / 60)
 
@@ -236,7 +269,7 @@ def main() -> None:
         "label": args.label,
         "test": evaluate(test, args.label),
         "importance_top30": sorted(
-            zip(feats, model.feature_importances_), key=lambda x: -x[1]
+            zip(feats, imp), key=lambda x: -x[1]
         )[:30],
     }
     (OUT / f"report_{tag}.json").write_text(
