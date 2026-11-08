@@ -63,6 +63,8 @@ log = logging.getLogger("minute_model.min1_7z")
 ARCHIVE_ROOTS = (
     Path("/media/zbox/nas-NSF/L2"),
     Path("/media/zbox/nas-toshiba/Leve2"),
+    # seagate 补 2020-12-18~31 的 10 天
+    Path("/media/zbox/nas-seagate/L2"),
 )
 STAGE_ROOT = Path("/media/zbox/data/quantmind/tmp/l2_7z")
 

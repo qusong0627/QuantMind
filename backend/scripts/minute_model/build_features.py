@@ -44,6 +44,8 @@ WAREHOUSES = (
     Path("/media/zbox/nas-toshiba/l2-warehouse/parquet"),
     Path("/media/zbox/nas-wd/l2-warehouse/parquet"),
     Path("/media/zbox/sata/l2-warehouse/parquet"),
+    # seagate 仓补 2023 年 3/4/8/11 月与 2026 全年（schema 与前三个完全一致）
+    Path("/media/zbox/nas-seagate/l2-warehouse/parquet"),
 )
 OUT = (_quantdb_root().parent / "minute_model" / "daily").resolve()
 CUTOFF_MS = 145000000  # 14:50:00.000
