@@ -96,7 +96,9 @@ class RemoteRedisDataSource(DataSourceAdapter):
         quotes = await self.fetch_quotes([symbol])
         return quotes[0] if quotes else None
 
-    async def fetch_quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
+    async def fetch_quotes(
+        self, symbols: list[str], *, max_age_sec: int | None = 300
+    ) -> list[dict[str, Any]]:
         """
         批量从远程 Redis 读取行情快照
         支持高性能的 Pipeline 批量查询
@@ -163,11 +165,11 @@ class RemoteRedisDataSource(DataSourceAdapter):
             age = (now_ts - ts_raw) if ts_raw > 0 else 999999
             is_stale = age > 60
 
-            if is_stale:
+            if is_stale and max_age_sec is not None:
                 logger.warning(
                     f"[RemoteRedis] 数据陈旧: {normalized} (age: {int(age)}s)"
                 )
-            if age > 300:
+            if max_age_sec is not None and age > max_age_sec:
                 logger.warning(
                     f"[RemoteRedis] 数据不可用(>300s): {normalized} (age: {int(age)}s)"
                 )

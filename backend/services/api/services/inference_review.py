@@ -2,7 +2,7 @@
 
 import asyncio
 import math
-from datetime import date, datetime, time
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from backend.shared.stock_utils import StockCodeUtil
@@ -98,7 +98,7 @@ def _previous_closes(symbols, previous_date, adjust):
 
 
 async def _series_quotes(source, symbols, now):
-    """批量取当日时序最新价；收盘后只接受当日尾盘记录。"""
+    """读取最后一笔时序行情；保留其实际时间，直到出现更新。"""
     from backend.services.simulation.services.redis_series_quote import (
         parse_series_member,
     )
@@ -106,10 +106,6 @@ async def _series_quotes(source, symbols, now):
     if not symbols:
         return {}
     try:
-        import exchange_calendars as xcals
-
-        if not xcals.get_calendar("XSHG").is_session(now.date()):
-            return {}
         client = source._get_client()
         candidates = [
             (symbol, key)
@@ -127,21 +123,15 @@ async def _series_quotes(source, symbols, now):
         if symbol in result or not rows:
             continue
         member, score = rows[0]
-        # 当日尾盘数据最多保留至当天结束；其他时段要求 300 秒内。
-        closed = now.time() >= time(15, 0)
         try:
             tick = parse_series_member(
-                member, score, now.timestamp(), 86400 if closed else 300
+                member, score, now.timestamp(), int(now.timestamp())
             )
         except (AttributeError, TypeError, ValueError):
             continue
         if not tick or not _price(tick.get("price")):
             continue
         stamp = datetime.fromtimestamp(tick["timestamp"], _TZ)
-        if stamp.date() != now.date():
-            continue
-        if closed and not time(14, 55) <= stamp.time() <= time(15, 10):
-            continue
         result[symbol] = {
             "symbol": symbol,
             "timestamp": stamp,
@@ -150,7 +140,7 @@ async def _series_quotes(source, symbols, now):
             "close_price": None,
             "is_stale": False,
             "estimated": True,
-            "kind": "尾盘估算" if closed else "盘中估算",
+            "kind": "最近行情估算",
         }
     return result
 
@@ -161,7 +151,6 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
     )
     target = str(detail["summary"]["prediction_trade_date"])[:10]
     now = datetime.now(_TZ)
-    today = now.date().isoformat()
     dates = sorted({d for series in history.values() for d in series})
     starts = {
         s["code"]: history.get(s["code"], {}).get(target, {}).get("open")
@@ -174,28 +163,33 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
     source = RemoteRedisDataSource()
     try:
         quotes = (
-            await source.fetch_quotes([s["code"] for s in stocks]) if stocks else []
+            await source.fetch_quotes([s["code"] for s in stocks], max_age_sec=None)
+            if stocks
+            else []
         )
-        snapshot_symbols = {
-            StockCodeUtil.to_suffix(q["symbol"])
-            for q in quotes
-            if not q["is_stale"]
-            and q["timestamp"].astimezone(_TZ).date().isoformat() == today
-        }
-        fallback = await _series_quotes(
-            source,
-            [s["code"] for s in stocks if s["code"] not in snapshot_symbols],
-            now,
-        )
+        fallback = await _series_quotes(source, [s["code"] for s in stocks], now)
         quotes.extend(fallback.values())
     finally:
         if source._client is not None:
             await source._client.aclose()
+    live = {}
+    for q in quotes:
+        code = StockCodeUtil.to_suffix(q["symbol"])
+        if q["timestamp"] <= now and (
+            code not in live or q["timestamp"] > live[code]["timestamp"]
+        ):
+            if q.get("is_stale"):
+                q["kind"] = "最近行情"
+            live[code] = q
+    quote_dates = [
+        q["timestamp"].astimezone(_TZ).date().isoformat() for q in live.values()
+    ]
+    latest_date = max(dates + quote_dates, default=None)
     live = {
-        StockCodeUtil.to_suffix(q["symbol"]): q
-        for q in quotes
-        if not q["is_stale"]
-        and q["timestamp"].astimezone(_TZ).date().isoformat() == today
+        code: q
+        for code, q in live.items()
+        if q["timestamp"].astimezone(_TZ).date().isoformat() == latest_date
+        and latest_date >= target
     }
     rows = []
     index_start = index.get(target, {}).get("open")
@@ -225,7 +219,9 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
         import exchange_calendars as xcals
 
         previous_date = str(
-            xcals.get_calendar("XSHG").previous_session(now.date()).date()
+            xcals.get_calendar("XSHG")
+            .previous_session(date.fromisoformat(latest_date))
+            .date()
         )
     except Exception:
         pass  # 无法确认上一交易日时，不拼接历史日线和实时行情。
@@ -264,49 +260,106 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
             else None
         )
     # 实时开盘价也须换算为前复权基准，缺少基准时不计算。
-    if target == today:
+    if target == latest_date:
         for stock in stocks:
             code = stock["code"]
             if not starts[code] and code in live:
                 starts[code] = live[code].get("adjusted_open")
-    if today >= target and (not dates or dates[-1] < today):
-        for s in stocks:
-            code = s["code"]
+    # 每只股票优先使用该行情日的 QuantDB 日线，缺失时使用 Redis。
+    # 前复权换算必须有上一交易日的原始昨收和前复权收盘价。
+    if latest_date and latest_date >= target:
+        for stock in stocks:
+            code = stock["code"]
+            if history.get(code, {}).get(latest_date, {}).get("close"):
+                continue
             q = live.get(code)
             start = starts[code]
             current = _price(q.get("adjusted_price")) if q else None
             previous = _price(q.get("adjusted_previous")) if q else None
-            last = (
-                history.get(code, {}).get(dates[-1], {}).get("close") if dates else None
-            )
-            if start and current and target == today:
+            last = history.get(code, {}).get(previous_date, {}).get("close")
+            if start and current and target == latest_date:
                 realtime_values[code] = (current / start - 1) * 100
-            elif start and current and previous and last and dates[-1] == previous_date:
+            elif start and current and previous and last:
                 realtime_values[code] = (last * current / previous / start - 1) * 100
         if realtime_values:
-            rows.append(
-                {
-                    "date": today,
-                    "cumulative": sum(realtime_values.values()) / len(stocks)
-                    if len(realtime_values) == len(stocks)
-                    else None,
-                    "benchmark": None,
-                    "coverage": len(realtime_values),
-                    "source": "尾盘估算"
-                    if any(q.get("kind") == "尾盘估算" for q in live.values())
-                    else "盘中估算"
-                    if any(q.get("estimated") for q in live.values())
-                    else "实时",
-                }
+            values = []
+            daily_count = 0
+            for stock in stocks:
+                code = stock["code"]
+                start = starts[code]
+                close = history.get(code, {}).get(latest_date, {}).get("close")
+                if start and close:
+                    values.append((close / start - 1) * 100)
+                    daily_count += 1
+                else:
+                    values.append(realtime_values.get(code))
+            has_estimate = any(live[code].get("estimated") for code in realtime_values)
+            has_old = any(live[code].get("is_stale") for code in realtime_values)
+            live_source = (
+                "最近行情估算" if has_estimate else "最近行情" if has_old else "实时"
             )
+            index_close = index.get(latest_date, {}).get("close")
+            latest_row = {
+                "date": latest_date,
+                "cumulative": sum(values) / len(values)
+                if values and all(value is not None for value in values)
+                else None,
+                "benchmark": (index_close / index_start - 1) * 100
+                if index_close and index_start
+                else None,
+                "coverage": sum(value is not None for value in values),
+                "source": f"日线+{live_source}" if daily_count else live_source,
+            }
+            if rows and rows[-1]["date"] == latest_date:
+                rows[-1] = latest_row
+            else:
+                rows.append(latest_row)
+    # 历史日线的日涨跌必须使用同一复权口径的上一交易日收盘价。
+    historical_previous = {}
+    if latest_date:
+        try:
+            import exchange_calendars as xcals
+
+            historical_previous_date = str(
+                xcals.get_calendar("XSHG")
+                .previous_session(date.fromisoformat(latest_date))
+                .date()
+            )
+        except Exception:
+            historical_previous_date = None
+        if historical_previous_date:
+            historical_previous = {
+                s["code"]: history.get(s["code"], {})
+                .get(historical_previous_date, {})
+                .get("close")
+                for s in stocks
+            }
+            missing = [
+                s["code"]
+                for s in stocks
+                if history.get(s["code"], {}).get(latest_date, {}).get("close")
+                and not _price(historical_previous.get(s["code"]))
+            ]
+            if missing:
+                historical_previous.update(
+                    await asyncio.to_thread(
+                        _previous_closes, missing, historical_previous_date, "qfq"
+                    )
+                )
     for s in stocks:
         code = s["code"]
         start = starts[code]
-        hist = history.get(code, {}).get(dates[-1], {}).get("close") if dates else None
+        hist = (
+            history.get(code, {}).get(latest_date, {}).get("close")
+            if latest_date
+            else None
+        )
         # 日涨跌只需当日行情和昨收，与能否计算组合累计收益无关。
         q = (
             live.get(code)
-            if today >= target and (not dates or dates[-1] < today)
+            if latest_date
+            and latest_date >= target
+            and not history.get(code, {}).get(latest_date, {}).get("close")
             else None
         )
         value = (
@@ -329,6 +382,8 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
                     if q
                     and _price(q.get("adjusted_price"))
                     and _price(q.get("adjusted_previous"))
+                    else (hist / historical_previous[code] - 1) * 100
+                    if not q and hist and _price(historical_previous.get(code))
                     else None
                 ),
                 "source": q.get("kind", "实时") if q else "日线" if hist else "缺失",

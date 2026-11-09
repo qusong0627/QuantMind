@@ -8,11 +8,13 @@ describe('live index benchmark', () => {
     expect(getLiveBenchmarkReturn(quote,'000905.SH','2026-11-06','2026-11-06',null,now)).toBeCloseTo(10);
     expect(getLiveBenchmarkReturn(quote,'000905.SH','2026-11-03','2026-11-06',80,now)).toBeCloseTo(37.5);
   });
-  it('rejects stale, wrong symbol, wrong day and missing base', () => {
-    expect(getLiveBenchmarkReturn({...quote,timestamp:'2026-11-06T14:40:00'},'000905.SH','2026-11-06','2026-11-06',null,now)).toBeNull();
+  it('retains the last quote across midnight but rejects wrong symbol, day and base', () => {
+    expect(getLiveBenchmarkReturn({...quote,timestamp:'2026-11-06T14:40:00'},'000905.SH','2026-11-06','2026-11-06',null,now)).toBeCloseTo(10);
     expect(getLiveBenchmarkReturn(quote,'000300.SH','2026-11-06','2026-11-06',null,now)).toBeNull();
     expect(getLiveBenchmarkReturn(quote,'000905.SH','2026-11-06','2026-11-05',null,now)).toBeNull();
     expect(getLiveBenchmarkReturn(quote,'000905.SH','2026-11-03','2026-11-06',null,now)).toBeNull();
-    expect(getLiveBenchmarkReturn(quote,'000905.SH','2026-11-06','2026-11-06',null,new Date('2026-11-07T08:00:00Z'))).toBeNull();
+    expect(getLiveBenchmarkReturn(quote,'000905.SH','2026-11-06','2026-11-06',null,new Date('2026-11-07T08:00:00Z'))).toBeCloseTo(10);
+    expect(getLiveBenchmarkReturn({...quote,timestamp:'2026-11-06T14:40:00'},'000905.SH','2026-11-06','2026-11-06',null,new Date('2026-11-07T08:00:00Z'))).toBeCloseTo(10);
+    expect(getLiveBenchmarkReturn({...quote,timestamp:'2026-11-06T15:30:00'},'000905.SH','2026-11-06','2026-11-06',null,new Date('2026-11-07T08:00:00Z'))).toBeCloseTo(10);
   });
 });

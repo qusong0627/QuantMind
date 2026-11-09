@@ -4,8 +4,9 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest';
 
 const api = vi.hoisted(() => ({ listUserModels: vi.fn(), listReviewRuns: vi.fn(), getInferenceReview: vi.fn() }));
+const market = vi.hoisted(() => ({ getTencentMarketData: vi.fn().mockResolvedValue({ success: false }) }));
 vi.mock('react-redux', () => ({ useSelector: (select: (state: unknown) => unknown) => select({ auth: { user: { id: 1, tenant_id: 't1' } } }) }));
-vi.mock('../../services/marketService', () => ({ marketService: { getTencentMarketData: vi.fn().mockResolvedValue({ success: false }) } }));
+vi.mock('../../services/marketService', () => ({ marketService: market }));
 vi.mock('echarts-for-react', () => ({ default: () => <div data-testid="chart" /> }));
 vi.mock('../../services/modelTrainingService', () => ({ modelTrainingService: api }));
 import ReviewCenterPage from './ReviewCenterPage';
@@ -34,3 +35,23 @@ it('keeps the current view while refreshing in the background', async () => {
   expect(screen.getByText('交易日期')).toBeTruthy();
 });
 
+
+
+it('uses a same-day Tencent close when the QuantDB benchmark is missing and prefers QuantDB when present', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-07T02:00:00Z'));
+  api.listUserModels.mockResolvedValue({ items: [{ model_id: 'model', metadata_json: {} }] });
+  api.listReviewRuns.mockResolvedValue({ items: [{ run_id: 'run', data_trade_date: '2026-11-05', prediction_trade_date: '2026-11-06' }], has_more: false });
+  const first = { stocks: [], days: [{ date: '2026-11-06', cumulative: 15, benchmark: null, coverage: 0, source: '日线' }], benchmark_start: null, quote_coverage: 0, unknown_st: 0, message: '' };
+  api.getInferenceReview.mockResolvedValue(first);
+  market.getTencentMarketData.mockResolvedValue({ success: true, data: { indices: [{symbol:'SH000300',name:'沪深300',price:110,open:100,change:0,changePercent:0,tradeDate:'2026-11-06',timestamp:'2026-11-06T15:00:00'}] } });
+  await act(async () => { render(<ReviewCenterPage />); });
+  await act(async () => {});
+  expect(screen.getByText('+5.00%')).toBeTruthy();
+  expect(screen.getByText(/腾讯财经行情估算/)).toBeTruthy();
+  api.getInferenceReview.mockResolvedValue({ ...first, days: [{ ...first.days[0], benchmark: 2 }] });
+  await act(async () => { vi.advanceTimersByTime(60000); });
+  await act(async () => {});
+  expect(screen.getByText('+13.00%')).toBeTruthy();
+  expect(screen.queryByText(/腾讯财经行情估算/)).toBeNull();
+});

@@ -10,7 +10,7 @@ from backend.services.stream.market_app.services import remote_redis_source
 class NoQuotes:
     _client = None
 
-    async def fetch_quotes(self, symbols):
+    async def fetch_quotes(self, symbols, **kwargs):
         return []
 
 
@@ -23,6 +23,7 @@ def test_historical_equal_weights_and_missing_quotes(monkeypatch):
     index = {'2026-01-02': {'open': 100, 'close': 102}, '2026-01-05': {'open': 102, 'close': 103}}
     monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, index, 2))
     monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
     data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-01-02'}}, 10, True, '000300.SH'))
     assert data['days'][0]['cumulative'] == pytest.approx(0)
     assert data['days'][1]['cumulative'] is None
@@ -38,7 +39,7 @@ def test_live_target_day_uses_open_and_never_renormalizes_partial(monkeypatch):
     monkeypatch.setattr(review, '_historical', lambda *args: (stocks, {}, {}, 0))
     class PartialQuotes:
         _client = None
-        async def fetch_quotes(self, symbols):
+        async def fetch_quotes(self, symbols, **kwargs):
             return [{'symbol': '600036.SH', 'timestamp': datetime.now(timezone.utc),
                      'is_stale': False, 'open_price': 10, 'current_price': 11, 'close_price': 9}]
     monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', PartialQuotes)
@@ -51,7 +52,7 @@ def test_live_target_day_uses_open_and_never_renormalizes_partial(monkeypatch):
     assert data['days'][0]['coverage'] == 1
 
 
-def test_series_quotes_accepts_tail_but_rejects_early_and_future():
+def test_series_quotes_retains_last_quote_but_rejects_future():
     import json
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -83,8 +84,8 @@ def test_series_quotes_accepts_tail_but_rejects_early_and_future():
         def _get_client(self):
             return Client()
     result = asyncio.run(review._series_quotes(Source(), ['600036.SH', '600519.SH', '300750.SZ'], now))
-    assert list(result) == ['600036.SH']
-    assert result['600036.SH']['kind'] == '尾盘估算'
+    assert set(result) == {'600036.SH', '600519.SH'}
+    assert result['600036.SH']['kind'] == '最近行情估算'
 
 
 def test_daily_change_available_without_start_price(monkeypatch):
@@ -92,7 +93,7 @@ def test_daily_change_available_without_start_price(monkeypatch):
     monkeypatch.setattr(review, '_historical', lambda *args: ([{'code': '600036.SH'}], {}, {}, 0))
     class QuoteWithoutOpen:
         _client = None
-        async def fetch_quotes(self, symbols):
+        async def fetch_quotes(self, symbols, **kwargs):
             return [{'symbol': '600036.SH', 'timestamp': datetime.now(timezone.utc),
                      'is_stale': False, 'open_price': None, 'current_price': 11, 'close_price': 10}]
     monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', QuoteWithoutOpen)
@@ -100,3 +101,144 @@ def test_daily_change_available_without_start_price(monkeypatch):
     data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': today}}, 10, True, '000300.SH'))
     assert data['stocks'][0]['daily'] == pytest.approx(10)
     assert data['stocks'][0]['cumulative'] is None
+
+
+def test_today_partial_daily_uses_redis_only_for_missing_stocks(monkeypatch):
+    from datetime import datetime, timezone
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 6, 14, 0, tzinfo=review._TZ).astimezone(tz or timezone.utc)
+    now = FixedDateTime.now(timezone.utc)
+    stocks = [{'code': '600036.SH'}, {'code': '600519.SH'}]
+    history = {
+        '600036.SH': {'2026-11-05': {'open': 10, 'close': 10}, '2026-11-06': {'open': 10, 'close': 12}},
+        '600519.SH': {'2026-11-05': {'open': 20, 'close': 20}},
+    }
+    index = {'2026-11-05': {'open': 100, 'close': 101}, '2026-11-06': {'open': 101, 'close': 102}}
+    monkeypatch.setattr(review, 'datetime', FixedDateTime)
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, index, 0))
+    class Quotes:
+        _client = None
+        async def fetch_quotes(self, symbols, **kwargs):
+            return [
+                {'symbol':'600036.SH', 'timestamp':now, 'is_stale':False, 'open_price':10, 'current_price':99, 'close_price':10},
+                {'symbol':'600519.SH', 'timestamp':now, 'is_stale':False, 'open_price':20, 'current_price':22, 'close_price':20},
+            ]
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', Quotes)
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {'600036.SH':10, '600519.SH':20})
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-05'}}, 10, True, '000300.SH'))
+    latest = data['days'][-1]
+    assert latest['date'] == '2026-11-06'
+    assert latest['cumulative'] == pytest.approx(15)
+    assert latest['coverage'] == 2
+    assert latest['benchmark'] == pytest.approx(2)
+    assert latest['source'] == '日线+实时'
+    assert data['stocks'][0]['latest'] == 12
+    assert data['stocks'][0]['source'] == '日线'
+    assert data['stocks'][1]['latest'] == 22
+    assert data['stocks'][1]['source'] == '实时'
+
+
+def test_today_partial_daily_does_not_fill_missing_with_wrong_date(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 6, 14, 0, tzinfo=review._TZ).astimezone(tz or timezone.utc)
+    now = FixedDateTime.now(timezone.utc)
+    stocks = [{'code': '600036.SH'}, {'code': '600519.SH'}]
+    history = {
+        '600036.SH': {'2026-11-05': {'open':10, 'close':10}, '2026-11-06': {'open':10, 'close':12}},
+        '600519.SH': {'2026-11-05': {'open':20, 'close':20}},
+    }
+    monkeypatch.setattr(review, 'datetime', FixedDateTime)
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    class YesterdayQuote:
+        _client = None
+        async def fetch_quotes(self, symbols, **kwargs):
+            return [{'symbol':'600519.SH','timestamp':now-timedelta(days=1),'is_stale':False,'open_price':20,'current_price':22,'close_price':20}]
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', YesterdayQuote)
+    monkeypatch.setattr(review, '_series_quotes', lambda *args: asyncio.sleep(0, result={}))
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-05'}}, 10, True, '000300.SH'))
+    assert data['days'][-1]['cumulative'] is None
+    assert data['days'][-1]['coverage'] == 1
+    assert data['stocks'][1]['source'] == '缺失'
+
+
+def test_missing_adjustment_basis_does_not_mix_raw_redis_with_qfq(monkeypatch):
+    from datetime import datetime, timezone
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 6, 14, 0, tzinfo=review._TZ).astimezone(tz or timezone.utc)
+    now = FixedDateTime.now(timezone.utc)
+    stocks = [{'code': '600036.SH'}, {'code': '600519.SH'}]
+    history = {
+        '600036.SH': {'2026-11-05': {'open':10, 'close':10}, '2026-11-06': {'open':10, 'close':12}},
+        '600519.SH': {'2026-11-05': {'open':20, 'close':20}},
+    }
+    monkeypatch.setattr(review, 'datetime', FixedDateTime)
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    class CurrentQuote:
+        _client = None
+        async def fetch_quotes(self, symbols, **kwargs):
+            return [{'symbol':'600519.SH','timestamp':now,'is_stale':False,'open_price':20,'current_price':22,'close_price':20}]
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', CurrentQuote)
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
+    monkeypatch.setattr(review, '_series_quotes', lambda *args: asyncio.sleep(0, result={}))
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-05'}}, 10, True, '000300.SH'))
+    assert data['days'][-1]['cumulative'] is None
+    assert data['days'][-1]['coverage'] == 1
+    assert data['stocks'][1]['cumulative'] is None
+
+
+def test_historical_daily_uses_previous_session_not_previous_available_quote(monkeypatch):
+    stocks = [{'code': '600036.SH'}, {'code': '600519.SH'}]
+    history = {
+        '600036.SH': {'2026-11-05': {'open': 10, 'close': 10}, '2026-11-06': {'open': 10, 'close': 12}},
+        '600519.SH': {'2026-11-04': {'open': 20, 'close': 20}, '2026-11-06': {'open': 20, 'close': 22}},
+    }
+    calls = []
+    def previous(symbols, day, adjust):
+        calls.append((symbols, day, adjust))
+        return {}
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    monkeypatch.setattr(review, '_previous_closes', previous)
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-04'}}, 10, False, '000300.SH'))
+    assert data['stocks'][0]['daily'] == pytest.approx(20)
+    assert data['stocks'][1]['daily'] is None
+    assert calls == [(['600519.SH'], '2026-11-05', 'qfq')]
+
+
+def test_first_historical_day_fetches_previous_close(monkeypatch):
+    stocks = [{'code': '600036.SH'}]
+    history = {'600036.SH': {'2026-11-06': {'open': 10, 'close': 11}}}
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    monkeypatch.setattr(review, '_previous_closes', lambda symbols, day, adjust: {'600036.SH': 10} if day == '2026-11-05' and adjust == 'qfq' else {})
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-06'}}, 10, False, '000300.SH'))
+    assert data['stocks'][0]['daily'] == pytest.approx(10)
+
+
+def test_last_quote_is_kept_across_midnight_until_a_newer_day(monkeypatch):
+    from datetime import timedelta
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 7, 0, 1, tzinfo=review._TZ).astimezone(tz or timezone.utc)
+    stamp = FixedDateTime.now(timezone.utc) - timedelta(hours=9)
+    monkeypatch.setattr(review, 'datetime', FixedDateTime)
+    monkeypatch.setattr(review, '_historical', lambda *args: ([{'code': '600036.SH'}], {}, {}, 0))
+    class OldQuote:
+        _client = None
+        async def fetch_quotes(self, symbols, **kwargs):
+            return [{'symbol':'600036.SH', 'timestamp':stamp, 'is_stale':True, 'open_price':10, 'current_price':11, 'close_price':10}]
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', OldQuote)
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {'600036.SH': 10})
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-06'}}, 10, False, '000300.SH'))
+    assert data['days'][0]['date'] == '2026-11-06'
+    assert data['stocks'][0]['daily'] == pytest.approx(10)
+    assert data['quote_time'] == stamp
+    assert data['stocks'][0]['source'] == '最近行情'
