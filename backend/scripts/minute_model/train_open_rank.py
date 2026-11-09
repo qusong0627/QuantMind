@@ -114,7 +114,8 @@ def _load(
     )
     df = con.sql(
         f"""
-        SELECT p.date, p.symbol, p.px, p.cum_amount, {cols}, p.mkt_ret_20d, p.mkt_dd_20d,
+        SELECT p.date, p.symbol, p.px, p.cum_amount, p.fun_float_mv AS mv,
+               {cols}, p.mkt_ret_20d, p.mkt_dd_20d,
                l.o_n / p.px - 1.0 AS y_open
         FROM read_parquet({files!r}) p
         JOIN lab l ON l.date = CAST(p.date AS VARCHAR) AND l.symbol = p.symbol
@@ -126,17 +127,45 @@ def _load(
     return df[df["y_open"].between(-Y_CLIP, Y_CLIP)].reset_index(drop=True)
 
 
-def _rank_label(df: pd.DataFrame) -> pd.Series:
-    return (df.groupby("date")["y_open"].rank(pct=True) - 0.5).astype("float32")
+NEUTRALIZERS = {
+    "mcap": lambda df: np.log(df["mv"].clip(lower=1.0)),
+    "px": lambda df: np.log(df["px"].clip(lower=0.01)),
+}
+
+
+def _rank_label(df: pd.DataFrame, neutralize: str = "none") -> pd.Series:
+    """同日截面分位标签；`mcap`/`mcap_px` 时对相应风格做逐日秩中性化。"""
+    y = (df.groupby("date")["y_open"].rank(pct=True) - 0.5).astype("float64")
+    if neutralize == "none":
+        return y.astype("float32")
+    names = neutralize.split("_")
+    unknown = [n for n in names if n not in NEUTRALIZERS]
+    if unknown:
+        raise SystemExit(f"未知中性化口径：{unknown}")
+    key = df["date"]
+    for n in names:
+        x = (NEUTRALIZERS[n](df).groupby(key).rank(pct=True) - 0.5).fillna(0.0)
+        # 逐日 OLS：y = beta * x + resid，斜率取秩协方差（Spearman 中性化）
+        cov = (y * x).groupby(key).transform("mean") - y.groupby(key).transform(
+            "mean"
+        ) * x.groupby(key).transform("mean")
+        var = (x * x).groupby(key).transform("mean") - x.groupby(key).transform(
+            "mean"
+        ) ** 2
+        y = y - (cov / var.replace(0.0, np.nan)).fillna(0.0) * x
+    return y.astype("float32")
 
 
 def _daily_top20(df: pd.DataFrame, pred: np.ndarray) -> pd.DataFrame:
-    """逐日取 Top20，返回 date/ret/win/regime + 组合价格/成交额画像。"""
-    d = df[["date", "y_open", "px", "cum_amount", "mkt_ret_20d", "mkt_dd_20d"]].copy()
+    """逐日取 Top20，返回 date/ret/win/regime + 组合价格/成交额/市值画像。"""
+    d = df[
+        ["date", "y_open", "px", "cum_amount", "mv", "mkt_ret_20d", "mkt_dd_20d"]
+    ].copy()
     d["pred"] = pred
     rows = []
     for dt, g in d.groupby("date", sort=True):
         top = g.nlargest(TOPN, "pred")
+        mv_pct = g["mv"].rank(pct=True).loc[top.index].mean()
         rows.append(
             (
                 dt,
@@ -146,12 +175,57 @@ def _daily_top20(df: pd.DataFrame, pred: np.ndarray) -> pd.DataFrame:
                 top["mkt_dd_20d"].iloc[0],
                 top["px"].median(),
                 top["cum_amount"].median(),
+                mv_pct,
             )
         )
     out = pd.DataFrame(
-        rows, columns=["date", "ret", "win", "r20", "dd", "px_med", "amt_med"]
+        rows,
+        columns=["date", "ret", "win", "r20", "dd", "px_med", "amt_med", "mv_pct"],
     )
     out["gate"] = (out["r20"] > 0) & (out["dd"] > -0.03)
+    return out
+
+
+def _style_stats(df: pd.DataFrame, pred: np.ndarray) -> dict:
+    """预测的规模/价格暴露：逐日截面 Spearman 相关 + Top20 市值分位。"""
+    d = df[["date", "px", "mv"]].copy()
+    d["pred"] = pred
+    d["logmv"] = np.log(d["mv"].clip(lower=1.0))
+    d["logpx"] = np.log(d["px"].clip(lower=0.01))
+    corr_mv = d.groupby("date").apply(
+        lambda g: g["pred"].corr(g["logmv"], method="spearman"), include_groups=False
+    )
+    corr_px = d.groupby("date").apply(
+        lambda g: g["pred"].corr(g["logpx"], method="spearman"), include_groups=False
+    )
+    return {
+        "pred_mv_corr": round(float(corr_mv.mean()), 3),
+        "pred_px_corr": round(float(corr_px.mean()), 3),
+    }
+
+
+def _price_floor(df: pd.DataFrame, pred: np.ndarray) -> dict:
+    """选股加价格下限后的 2026 单笔净，看 edge 是否依赖低价股。"""
+    d = df[["date", "y_open", "px"]].copy()
+    d["pred"] = pred
+    out = {}
+    for th in (0.0, 3.0, 5.0, 10.0):
+        rows = []
+        for dt, g in d[d["px"] >= th].groupby("date"):
+            rows.append((dt, g.nlargest(TOPN, "pred")["y_open"].mean()))
+        r = pd.DataFrame(rows, columns=["date", "ret"])
+        r["ym"] = r["date"].str[:6]
+        r26 = r.loc[r["ym"] >= "202601", "ret"] - COST
+        t = (
+            float(r26.mean() / (r26.std() / np.sqrt(len(r26))))
+            if len(r26) > 1 and r26.std() > 0
+            else None
+        )
+        out[f">={th:g}元"] = {
+            "net_2026_pct": round(float(r26.mean()) * 100, 3),
+            "t": round(t, 2) if t is not None else None,
+            "days": int(len(r26)),
+        }
     return out
 
 
@@ -223,6 +297,12 @@ def main() -> None:
     ap.add_argument("--sample-frac", type=float, default=1.0, help="训练/验证抽样比例")
     ap.add_argument("--seed", type=int, default=42, help="随机种子（换种子测训练噪声）")
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument(
+        "--neutralize",
+        default="none",
+        choices=["none", "mcap", "mcap_px"],
+        help="标签中性化：mcap = 逐日对 log 流通市值做秩中性化；mcap_px = 再叠加 log 股价",
+    )
     ap.add_argument("--placebo", action="store_true", help="同日打乱标签重训（对照）")
     ap.add_argument(
         "--no-artifacts",
@@ -272,8 +352,8 @@ def main() -> None:
         valid["y_open"] = valid.groupby("date")["y_open"].transform(
             lambda s: s.sample(frac=1.0, random_state=42).to_numpy()
         )
-    train["y"] = _rank_label(train)
-    valid["y"] = _rank_label(valid)
+    train["y"] = _rank_label(train, args.neutralize)
+    valid["y"] = _rank_label(valid, args.neutralize)
 
     params = dict(PARAMS, thread_count=args.threads, random_seed=args.seed)
     t0 = time.time()
@@ -292,6 +372,7 @@ def main() -> None:
     report = {
         "tag": args.tag,
         "placebo": args.placebo,
+        "neutralize": args.neutralize,
         "label": "next_open_rank_minus_0.5",
         "features": len(feats),
         "dropped_features": ["px", "cutoff_idx"],
@@ -307,12 +388,20 @@ def main() -> None:
         "curve": _curve_stats(daily),
         "monthly_net_pct": _monthly(daily),
         "cost_sensitivity_total_return_pct": _cost_sensitivity(daily),
+        "style": _style_stats(test, test["pred"].to_numpy()),
+        "price_floor_2026": _price_floor(test, test["pred"].to_numpy()),
         "top20_price_median": round(float(daily["px_med"].median()), 2),
         "top20_amt_median_wan": round(float(daily["amt_med"].median()), 0),
+        "top20_mv_pct_median": round(float(daily["mv_pct"].median()), 3),
         "universe_price_median": round(float(test["px"].median()), 2),
     }
     log.info("分段：%s", json.dumps(report["segments"], ensure_ascii=False))
     log.info("净值：%s", json.dumps(report["curve"]["all"], ensure_ascii=False))
+    log.info(
+        "风格：%s | 价格下限：%s",
+        json.dumps(report["style"], ensure_ascii=False),
+        json.dumps(report["price_floor_2026"], ensure_ascii=False),
+    )
 
     if not args.placebo and not args.no_artifacts:
         pickle.dump(
