@@ -57,6 +57,54 @@ SPLIT = {
 SEGMENTS = (("2025H2", "202507", "202512"), ("2026", "202601", "202610"))
 EMBARGO_DAYS = 4
 
+# 水平量特征：绝对价位/市值/成交量额（树模型可按档位切分，训练期有效但样本外靠「低价小盘记忆」）
+# 该留的是状态量/比率：收益率、换手、波动、失衡、相对分位
+LEVEL_FEATURES = [
+    # 绝对价格
+    "day_open",
+    "day_high",
+    "day_low",
+    "vwap",
+    "bid1",
+    "ask1",
+    "spread",
+    # 绝对成交量/额
+    "cum_volume",
+    "cum_amount",
+    "vol_5m",
+    "vol_15m",
+    "vol_30m",
+    "amt_log",
+    # 绝对挂单量
+    "bid_depth_1",
+    "bid_depth_5",
+    "ask_depth_1",
+    "ask_depth_5",
+    # 绝对资金流 / 市值
+    "flow_super_net",
+    "flow_large_net",
+    "fun_float_mv",
+]
+
+# 卫生清理：6 个价格水平量 + 6 个零/低重要性特征（2026-11-09 A/B：不掉收益）
+DROP_HYGIENE = [
+    "day_open",
+    "day_high",
+    "day_low",
+    "vwap",
+    "bid1",
+    "ask1",
+    "vol_5m",
+    "depth_chg_5m",
+    "flow_large_ratio",
+    "fun_pb",
+    "mfi_14",
+    "obv_slope_20",
+]
+
+# 市场级日常数特征：日内截面完全相同，只能学 regime 交互（A/B：删掉 2026 +3.5bp/日，t=2.28）
+DROP_MARKET = ["mkt_ret_5d", "mkt_ret_20d", "mkt_vol_20d", "mkt_dd_20d"]
+
 PARAMS = {
     "iterations": 600,
     "learning_rate": 0.05,
@@ -305,6 +353,21 @@ def main() -> None:
     )
     ap.add_argument("--placebo", action="store_true", help="同日打乱标签重训（对照）")
     ap.add_argument(
+        "--drop-levels",
+        action="store_true",
+        help="剔除水平量特征（绝对价位/市值/成交量额，见 LEVEL_FEATURES）",
+    )
+    ap.add_argument(
+        "--drop-hygiene",
+        action="store_true",
+        help="剔除卫生特征（DROP_HYGIENE：6 价格水平量 + 6 零重要性）",
+    )
+    ap.add_argument(
+        "--drop-market",
+        action="store_true",
+        help="剔除市场级日常数特征（DROP_MARKET）",
+    )
+    ap.add_argument(
         "--no-artifacts",
         action="store_true",
         help="只写 report，不落模型/预测（扫参用）",
@@ -316,6 +379,17 @@ def main() -> None:
     MODEL.mkdir(parents=True, exist_ok=True)
     base = pickle.load(open(MODEL / args.base_model, "rb"))
     feats = [c for c in base["features"] if c not in ("px", "cutoff_idx")]
+    dropped = ["px", "cutoff_idx"]
+    for flag, group in (
+        ("drop_levels", LEVEL_FEATURES),
+        ("drop_hygiene", DROP_HYGIENE),
+        ("drop_market", DROP_MARKET),
+    ):
+        if getattr(args, flag):
+            hit = [c for c in group if c in feats]
+            feats = [c for c in feats if c not in group]
+            dropped += hit
+            log.info("剔除 %s %d 个：%s", flag, len(hit), hit)
     log.info(
         "特征 %d 个（base %d，去掉 px/cutoff_idx）", len(feats), len(base["features"])
     )
@@ -375,7 +449,7 @@ def main() -> None:
         "neutralize": args.neutralize,
         "label": "next_open_rank_minus_0.5",
         "features": len(feats),
-        "dropped_features": ["px", "cutoff_idx"],
+        "dropped_features": dropped,
         "cost": COST,
         "params": params,
         "sample": {
@@ -410,7 +484,7 @@ def main() -> None:
                 "features": feats,
                 "label": "open_rank",
                 "params": params,
-                "dropped": ["px", "cutoff_idx"],
+                "dropped": dropped,
                 "split": SPLIT,
             },
             open(MODEL / f"{args.tag}.pkl", "wb"),
