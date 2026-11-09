@@ -3609,6 +3609,8 @@ CREATE INDEX IF NOT EXISTS idx_alpha_mining_tasks_owner_source_doc
 --    alpha_mining 池种子行 ready=true：AlphaMiningTaskPersistence.create /
 --    request_cancel 建池锁要求 SELECT ready ... FOR UPDATE 为真，否则抛
 --    LeaseUnavailable。ON CONFLICT 仅覆盖 ready（保留 reconciler 维护的 epoch）。
+--    backtest 池种子行（v1.0.17 随回测预算模块补齐）：回测/优化 HTTP+Celery
+--    共用独立池，不与 alpha_mining 混用名额；存量库靠 data/upgrade_v1.0.17.sql 拉齐。
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS resource_lease_pools (
     pool TEXT PRIMARY KEY,
@@ -3617,7 +3619,8 @@ CREATE TABLE IF NOT EXISTS resource_lease_pools (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO resource_lease_pools (pool, epoch, ready)
-VALUES ('alpha_mining', 'oss-bootstrap', TRUE)
+VALUES ('alpha_mining', 'oss-bootstrap', TRUE),
+       ('backtest', 'oss-bootstrap', TRUE)
 ON CONFLICT (pool) DO UPDATE SET ready = TRUE, updated_at = NOW();
 
 -- resource_task_leases：任务租约（企业版原 v1.0.17，与 pools 同段，upgrade_v1.0.16.sql 末尾 R 节同 DDL）。

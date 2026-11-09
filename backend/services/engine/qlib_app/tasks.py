@@ -12,7 +12,7 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import requests
 from celery import Task
@@ -25,7 +25,6 @@ from backend.services.engine.qlib_app import (
 )
 from backend.services.engine.qlib_app.celery_config import celery_app
 from backend.services.engine.qlib_app.schemas.backtest import (
-    QlibBacktestRequest,
     QlibGeneticOptimizationRequest,
     QlibOptimizationRequest,
 )
@@ -411,8 +410,12 @@ def _get_qlib_service_instance() -> Any:
 )
 def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
     """异步执行回测任务"""
+    from backend.services.engine.qlib_app.backtest_task_payload import (
+        deserialize_backtest_task_request,
+    )
+
     task_id = self.request.id
-    request = QlibBacktestRequest(**request_dict)
+    request = deserialize_backtest_task_request(request_dict)
     backtest_id = request_dict.get("backtest_id")
 
     tenant_id = request.tenant_id
@@ -422,6 +425,17 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
     )
 
     task_log.info("开始异步回测")
+
+    # heavy 按用户准入：同一用户运行数超限则延迟重试，避免单用户占满 heavy
+    # 池（与企业版同语义；OSS 无计费模块，跳过 billing begin/finish 钩子）。
+    from backend.services.engine.qlib_app.resource_budget import begin_execution
+
+    _heavy_guard = begin_execution(task_id, tenant_id, request.user_id)
+    if _heavy_guard is None:
+        task_log.warning(
+            f"heavy 配额已满 tenant={tenant_id} user={request.user_id}，延迟重试"
+        )
+        raise self.retry(countdown=30, max_retries=None)
 
     # 进度：0%
     self.update_state(
@@ -515,6 +529,10 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
             }
         )
         raise
+    finally:
+        # 无论成功/失败都释放运行名额；配额满走延迟重试分支时
+        # _heavy_guard 为 None 已提前 raise，此处 guard 必非空。
+        _heavy_guard.__exit__(*sys.exc_info())
 
 
 @celery_app.task(name="qlib_app.tasks.log_frontend_error")

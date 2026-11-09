@@ -1,9 +1,9 @@
 """Qlib 回测请求和响应 Schema"""
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 GRID_SEARCH_MAX_COMBINATIONS = 100
@@ -204,6 +204,12 @@ class QlibBacktestRequest(BaseModel):
         "manual",
         description="历史来源标记：manual=普通回测，optimization=参数优化子任务",
     )
+
+    # 受信任务元数据（不进 API schema，仅经 backtest_task_payload 在
+    # HTTP→Celery 边界透传；与企业版同名，见 backtest_task_payload.py）。
+    _trusted_replay_signal_data: dict[str, Any] | None = PrivateAttr(default=None)
+    _trusted_pandas_pool_snapshot: dict[str, Any] | None = PrivateAttr(default=None)
+    _resolved_execution_mode: str | None = PrivateAttr(default=None)
 
 
 class QlibPortfolioMetrics(BaseModel):

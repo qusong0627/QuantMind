@@ -152,6 +152,7 @@ async def lifespan(app: FastAPI):
     # 单容器本地执行，无远端节点。失败不阻塞启动。
     factor_queue_task: asyncio.Task | None = None
     research_pipeline_task: asyncio.Task | None = None
+    gateway_task: asyncio.Task | None = None
     try:
         from backend.services.engine.inference.jobs import start_jobs
 
@@ -175,6 +176,32 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Research pipelines pump start skipped: {e}")
 
+    # 回测资源池看护（本批次补齐）：启动时恢复一次 backtest 池投影
+    # （DB 种子行见 db_init.sql Q 节 / data/upgrade_v1.0.17.sql），
+    # 网关对账 30s 一轮（容器/进程幽灵租约 + 业务终态修复）。失败不阻塞启动，
+    # 请求路径按 queue.py 惯例（ready 缺失即 recover）自愈。
+    try:
+        from backend.services.engine.qlib_app.resource_budget import (
+            recover_budget as recover_backtest_budget,
+        )
+
+        await asyncio.to_thread(recover_backtest_budget)
+        logger.info("✅ Backtest budget pool recovered")
+    except Exception as e:
+        logger.warning(f"⚠️ Backtest budget recover skipped: {e}")
+    try:
+        from backend.services.engine.qlib_app.resource_gateway import (
+            run_gateway_reconciler,
+        )
+
+        gateway_task = asyncio.create_task(
+            run_gateway_reconciler(), name="gateway-reconciler"
+        )
+        app.state.gateway_task = gateway_task
+        logger.info("✅ Gateway reconciler started")
+    except Exception as e:
+        logger.warning(f"⚠️ Gateway reconciler start skipped: {e}")
+
     # --- 此处 Yield，之后代码在 shutdown 时运行 ---
     try:
         from backend.shared.system_events import record_system_event_async
@@ -192,6 +219,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # --- 停止逻辑 ---
+    if gateway_task and not gateway_task.done():
+        gateway_task.cancel()
     if research_pipeline_task and not research_pipeline_task.done():
         research_pipeline_task.cancel()
     if factor_queue_task and not factor_queue_task.done():

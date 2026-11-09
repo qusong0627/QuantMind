@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import shutil
 from pathlib import Path, PurePosixPath
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_USER_CODE_MAX_SOURCE_BYTES = 256 * 1024
 MAX_USER_CODE_SOURCE_BYTES = 1024 * 1024
@@ -299,6 +302,15 @@ def prepare_source_bundle(destination: Path, *, include_legacy: bool = True) -> 
         path = Path(relative)
         if path.is_absolute() or ".." in path.parts or path.suffix != ".py":
             raise ValueError("Invalid sandbox source manifest")
+        # 清单可能引用尚未下放的企业版模块（如已补齐则存在）：缺失时跳过并
+        # 告警，避免整个 bundle 构建被单个陈旧条目拖崩（checked_input 对
+        # 不存在路径严格抛错）。注意这会静默缩小沙箱源码集，新增模块时
+        # 应同步补齐 user_code_sources.json / legacy_qlib_sources.json。
+        if not (backend_root / path).exists():
+            logger.warning(
+                "Sandbox source manifest entry missing, skipped: %s", relative
+            )
+            continue
         source = checked_input(backend_root / path, backend_root)
         target = bundle / path
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -81,32 +81,49 @@ async def run_backtest(
 
             try:
                 from backend.services.engine.qlib_app.services.backtest_persistence import BacktestPersistence
+                from backend.services.engine.qlib_app.resource_budget import (
+                    publish_owned_task,
+                )
                 from backend.services.engine.qlib_app.tasks import run_backtest_async
 
-                task = run_backtest_async.apply_async(args=[request_dict])
-
                 persistence = BacktestPersistence()
-                await persistence.save_run(
-                    backtest_id=backtest_id,
-                    user_id=request.user_id,
-                    tenant_id=request.tenant_id,
-                    status="pending",
-                    created_at=datetime.now(),
-                    config=request_dict,
-                    result=None,
-                    task_id=task.id,
+
+                async def persist(task_id, status):
+                    await persistence.save_run(
+                        backtest_id=backtest_id,
+                        user_id=request.user_id,
+                        tenant_id=request.tenant_id,
+                        status=status,
+                        created_at=datetime.now(),
+                        config=request_dict,
+                        result=None,
+                        task_id=task_id,
+                    )
+
+                # 经预算提交：排队上限 429 / 名额服务不可用 503 / 重复提交 409；
+                # task_id 取 backtest_id，保证同一回测重复提交可判定去重。
+                # OSS 无计费模块，不挂 before_publish/on_publish_failure 钩子。
+                task_id = await publish_owned_task(
+                    run_backtest_async,
+                    request_dict,
+                    request.tenant_id,
+                    request.user_id,
+                    persist,
+                    task_id=str(backtest_id),
                 )
 
                 return QlibBacktestResult(
                     backtest_id=backtest_id,
                     status="pending",
                     config=request_dict,
-                    task_id=task.id,
+                    task_id=task_id,
                     annual_return=0.0,
                     sharpe_ratio=0.0,
                     max_drawdown=0.0,
                     alpha=0.0,
                 )
+            except HTTPException:
+                raise
             except Exception as celery_err:
                 task_logger.error(
                     "async_enqueue_failed",
@@ -117,11 +134,19 @@ async def run_backtest(
                 raise HTTPException(
                     status_code=503,
                     detail="异步回测服务不可用，请检查 Celery Worker",
-                )
+                ) from celery_err
 
-        return await service.run_backtest(request)
+        # 同步执行同样占用运行名额：经 HTTP 准入门控，名额满时 429。
+        from backend.services.engine.qlib_app.backtest_admission import (
+            run_http_execution,
+        )
+
+        async def compute():
+            return await service.run_backtest(request)
+
+        return await run_http_execution(request.tenant_id, request.user_id, compute)
     except HTTPException:
         raise
     except Exception as e:
         task_logger.exception("backtest_failed", "回测执行失败", error=str(e))
-        raise HTTPException(status_code=500, detail=f"回测执行失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"回测执行失败: {str(e)}") from e

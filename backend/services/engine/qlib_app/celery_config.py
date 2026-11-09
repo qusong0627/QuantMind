@@ -243,6 +243,19 @@ celery_app.conf.update(
 )
 
 # 自动发现任务
+from backend.services.engine.qlib_app.memory_feature_cache import install_worker_preload
+
+install_worker_preload()
+if os.getenv("QLIB_LEASE_MONITOR_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    from backend.services.engine.qlib_app.resource_worker import LeaseExitMonitor
+
+    celery_app.steps["worker"].add(LeaseExitMonitor)
+
 celery_app.autodiscover_tasks(
     [
         "backend.services.engine.qlib_app",
