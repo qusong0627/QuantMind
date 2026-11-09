@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,49 @@ def _price(value):
         return n if math.isfinite(n) and n > 0 else None
     except (ValueError, TypeError):
         return None
+
+
+_INDEX_TENCENT = {
+    "000300.SH": "sh000300",
+    "000905.SH": "sh000905",
+    "000001.SH": "sh000001",
+}
+_benchmark_cache = {}
+
+
+async def _fetch_benchmark_quote(symbol, now):
+    """读取公开指数最新行情，服务异常时保留本进程最后一笔有效数据。"""
+    code = _INDEX_TENCENT.get(symbol)
+    if not code:
+        return None
+    try:
+        import aiohttp
+
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=4)
+        ) as session:
+            async with session.get(f"https://qt.gtimg.cn/q={code}") as response:
+                response.raise_for_status()
+                text = (await response.read()).decode("gb18030")
+        match = re.search(r"v_" + re.escape(code) + r'="([^"]+)"', text)
+        fields = match.group(1).split("~") if match else []
+        if len(fields) > 30:
+            stamp = datetime.strptime(fields[30], "%Y%m%d%H%M%S").replace(tzinfo=_TZ)
+            price, opening = _price(fields[3]), _price(fields[5])
+            if price and opening and stamp <= now:
+                quote = {"timestamp": stamp, "price": price, "open": opening}
+                cached = _benchmark_cache.get(symbol)
+                if not cached or stamp >= cached["timestamp"]:
+                    _benchmark_cache[symbol] = quote
+    except (
+        aiohttp.ClientError,
+        asyncio.TimeoutError,
+        UnicodeError,
+        ValueError,
+        IndexError,
+    ):
+        pass
+    return _benchmark_cache.get(symbol)
 
 
 def _historical(detail, top_k, exclude_st, benchmark):
@@ -193,6 +237,21 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
     }
     rows = []
     index_start = index.get(target, {}).get("open")
+    benchmark_quote = None
+    start_from_tencent = False
+    if (
+        latest_date
+        and latest_date >= target
+        and (not index_start or not index.get(latest_date, {}).get("close"))
+    ):
+        benchmark_quote = await _fetch_benchmark_quote(benchmark, now)
+        if (
+            not index_start
+            and benchmark_quote
+            and benchmark_quote["timestamp"].date().isoformat() == target
+        ):
+            index_start = benchmark_quote["open"]
+            start_from_tencent = True
     for d in dates:
         values = []
         for s in stocks:
@@ -314,6 +373,33 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
                 rows[-1] = latest_row
             else:
                 rows.append(latest_row)
+    # 指数与组合必须属于同一个行情日，QuantDB 日线始终优先。
+    benchmark_reason = None
+    if rows:
+        latest_row = rows[-1]
+        if latest_row["benchmark"] is not None:
+            latest_row["benchmark_source"] = (
+                "QuantDB 日线，腾讯开盘价" if start_from_tencent else "QuantDB 日线"
+            )
+        else:
+            quote = benchmark_quote
+            quote_date = quote["timestamp"].date().isoformat() if quote else None
+            base = index_start or (
+                quote["open"] if quote and quote_date == target else None
+            )
+            if quote and quote_date == latest_row["date"] and base:
+                latest_row["benchmark"] = (quote["price"] / base - 1) * 100
+                latest_row["benchmark_source"] = "腾讯财经"
+                latest_row["benchmark_time"] = quote["timestamp"].isoformat()
+            elif not quote:
+                benchmark_reason = "指数行情暂不可用"
+            elif quote_date != latest_row["date"]:
+                benchmark_reason = "指数与组合行情日期不一致"
+            else:
+                benchmark_reason = "目标日指数开盘价缺失"
+    else:
+        benchmark_reason = "暂无组合行情"
+
     # 历史日线的日涨跌必须使用同一复权口径的上一交易日收盘价。
     historical_previous = {}
     if latest_date:
@@ -395,6 +481,7 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
         "unknown_st": unknown,
         "requested": top_k,
         "benchmark_start": index_start,
+        "benchmark_unavailable_reason": benchmark_reason,
         "quote_coverage": len(live),
         "quote_time": min((q["timestamp"] for q in live.values()), default=None),
         "message": "备注：固定等权组合，历史行情采用前复权；当日涨跌以昨收为基准，累计收益以目标日开盘价为基准。结果为事后观察，未计费用和成交限制。当日行情依上一交易日前复权价与昨收换算，时序数据缺少交易所昨收时使用上日原始收盘价估算，除权除息日可能失真；行情缺失时不展示组合收益。",

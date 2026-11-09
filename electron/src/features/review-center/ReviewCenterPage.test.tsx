@@ -37,21 +37,15 @@ it('keeps the current view while refreshing in the background', async () => {
 
 
 
-it('uses a same-day Tencent close when the QuantDB benchmark is missing and prefers QuantDB when present', async () => {
+it('displays the benchmark supplied by the review API', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-11-07T02:00:00Z'));
   api.listUserModels.mockResolvedValue({ items: [{ model_id: 'model', metadata_json: {} }] });
   api.listReviewRuns.mockResolvedValue({ items: [{ run_id: 'run', data_trade_date: '2026-11-05', prediction_trade_date: '2026-11-06' }], has_more: false });
-  const first = { stocks: [], days: [{ date: '2026-11-06', cumulative: 15, benchmark: null, coverage: 0, source: '日线' }], benchmark_start: null, quote_coverage: 0, unknown_st: 0, message: '' };
-  api.getInferenceReview.mockResolvedValue(first);
-  market.getTencentMarketData.mockResolvedValue({ success: true, data: { indices: [{symbol:'SH000300',name:'沪深300',price:110,open:100,change:0,changePercent:0,tradeDate:'2026-11-06',timestamp:'2026-11-06T15:00:00'}] } });
+  api.getInferenceReview.mockResolvedValue({ stocks: [], days: [{ date: '2026-11-06', cumulative: 15, benchmark: 10, benchmark_source: '腾讯财经', benchmark_time: '2026-11-06T15:00:00+08:00', coverage: 0, source: '日线' }], benchmark_start: null, quote_coverage: 0, unknown_st: 0, message: '' });
   await act(async () => { render(<ReviewCenterPage />); });
   await act(async () => {});
   expect(screen.getByText('+5.00%')).toBeTruthy();
-  expect(screen.getByText(/腾讯财经行情估算/)).toBeTruthy();
-  api.getInferenceReview.mockResolvedValue({ ...first, days: [{ ...first.days[0], benchmark: 2 }] });
-  await act(async () => { vi.advanceTimersByTime(60000); });
-  await act(async () => {});
-  expect(screen.getByText('+13.00%')).toBeTruthy();
-  expect(screen.queryByText(/腾讯财经行情估算/)).toBeNull();
+  expect(screen.getByText(/腾讯财经行情 2026-11-06/)).toBeTruthy();
+  expect(market.getTencentMarketData).not.toHaveBeenCalled();
 });

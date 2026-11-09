@@ -1184,7 +1184,7 @@ export interface DataWindowResult {
 
 export interface ReviewRun { run_id: string; model_id: string; data_trade_date: string; prediction_trade_date: string; created_at: string; updated_at: string; }
 export interface ReviewStock { code: string; name: string; industry: string; score: number | null; rank: number; start: number | null; latest: number | null; cumulative: number | null; daily: number | null; source: string; }
-export interface ReviewDay { date: string; cumulative: number | null; benchmark: number | null; coverage: number; source: string; }
-export interface ReviewResult { benchmark_start: number | null; stocks: ReviewStock[]; days: ReviewDay[]; unknown_st: number; requested: number; quote_coverage: number; quote_time: string | null; message: string; }
+export interface ReviewDay { date: string; cumulative: number | null; benchmark: number | null; benchmark_source?: string; benchmark_time?: string; coverage: number; source: string; }
+export interface ReviewResult { benchmark_unavailable_reason?: string | null; benchmark_start: number | null; stocks: ReviewStock[]; days: ReviewDay[]; unknown_st: number; requested: number; quote_coverage: number; quote_time: string | null; message: string; }
 
 export const modelTrainingService = new ModelTrainingService();

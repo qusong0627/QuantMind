@@ -6,6 +6,15 @@ import pytest
 from backend.services.api.services import inference_review as review
 from backend.services.stream.market_app.services import remote_redis_source
 
+_REAL_FETCH_BENCHMARK = review._fetch_benchmark_quote
+
+
+@pytest.fixture(autouse=True)
+def no_external_benchmark(monkeypatch):
+    async def unavailable(*args):
+        return None
+    monkeypatch.setattr(review, '_fetch_benchmark_quote', unavailable)
+
 
 class NoQuotes:
     _client = None
@@ -242,3 +251,95 @@ def test_last_quote_is_kept_across_midnight_until_a_newer_day(monkeypatch):
     assert data['stocks'][0]['daily'] == pytest.approx(10)
     assert data['quote_time'] == stamp
     assert data['stocks'][0]['source'] == '最近行情'
+
+
+def test_benchmark_falls_back_to_matching_tencent_quote(monkeypatch):
+    stocks = [{'code': '600036.SH'}]
+    history = {'600036.SH': {'2026-11-06': {'open': 10, 'close': 11}}}
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    async def quote(*args):
+        return {'timestamp': datetime(2026, 11, 6, 15, tzinfo=review._TZ), 'price': 110, 'open': 100}
+    monkeypatch.setattr(review, '_fetch_benchmark_quote', quote)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-06'}}, 10, False, '000300.SH'))
+    assert data['days'][-1]['benchmark'] == pytest.approx(10)
+    assert data['days'][-1]['benchmark_source'] == '腾讯财经'
+    assert data['days'][-1]['benchmark_time'] == '2026-11-06T15:00:00+08:00'
+
+
+def test_benchmark_does_not_use_wrong_date_or_missing_target_open(monkeypatch):
+    stocks = [{'code': '600036.SH'}]
+    history = {'600036.SH': {'2026-11-06': {'open': 10, 'close': 11}}}
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    async def wrong_date(*args):
+        return {'timestamp': datetime(2026, 11, 5, 15, tzinfo=review._TZ), 'price': 110, 'open': 100}
+    monkeypatch.setattr(review, '_fetch_benchmark_quote', wrong_date)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-05'}}, 10, False, '000300.SH'))
+    assert data['days'][-1]['benchmark'] is None
+    assert data['benchmark_unavailable_reason'] == '指数与组合行情日期不一致'
+    async def matching(*args):
+        return {'timestamp': datetime(2026, 11, 6, 15, tzinfo=review._TZ), 'price': 110, 'open': 100}
+    monkeypatch.setattr(review, '_fetch_benchmark_quote', matching)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-05'}}, 10, False, '000300.SH'))
+    assert data['days'][-1]['benchmark'] is None
+    assert data['benchmark_unavailable_reason'] == '目标日指数开盘价缺失'
+
+
+def test_benchmark_prefers_quantdb_and_skips_tencent(monkeypatch):
+    stocks = [{'code': '600036.SH'}]
+    history = {'600036.SH': {'2026-11-06': {'open': 10, 'close': 11}}}
+    index = {'2026-11-06': {'open': 100, 'close': 102}}
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, index, 0))
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    async def fail(*args):
+        raise AssertionError('QuantDB should take precedence')
+    monkeypatch.setattr(review, '_fetch_benchmark_quote', fail)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-06'}}, 10, False, '000300.SH'))
+    assert data['days'][-1]['benchmark'] == pytest.approx(2)
+    assert data['days'][-1]['benchmark_source'] == 'QuantDB 日线'
+
+
+def test_tencent_quote_fetch_keeps_last_valid_on_failure(monkeypatch):
+    import aiohttp
+    review._benchmark_cache.clear()
+    stamp = datetime(2026, 11, 9, 12, 30, tzinfo=review._TZ)
+    fields = [''] * 31
+    fields[3], fields[5], fields[30] = '110', '100', '20261109113000'
+    class Response:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def raise_for_status(self): pass
+        async def read(self): return ('v_sh000300="' + '~'.join(fields) + '";').encode('gb18030')
+    class Session:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def get(self, url): return Response()
+    monkeypatch.setattr(aiohttp, 'ClientSession', Session)
+    original = _REAL_FETCH_BENCHMARK
+    first = asyncio.run(original('000300.SH', stamp))
+    assert first['price'] == 110 and first['open'] == 100
+    class FailedSession(Session):
+        def get(self, url): raise aiohttp.ClientConnectionError()
+    monkeypatch.setattr(aiohttp, 'ClientSession', FailedSession)
+    assert asyncio.run(original('000300.SH', stamp)) == first
+    review._benchmark_cache.clear()
+
+
+def test_quantdb_close_wins_when_tencent_supplies_target_open(monkeypatch):
+    stocks = [{'code': '600036.SH'}]
+    history = {'600036.SH': {'2026-11-06': {'open': 10, 'close': 11}}}
+    index = {'2026-11-06': {'open': None, 'close': 105}}
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, index, 0))
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    async def quote(*args):
+        return {'timestamp': datetime(2026, 11, 6, 15, tzinfo=review._TZ), 'price': 110, 'open': 100}
+    monkeypatch.setattr(review, '_fetch_benchmark_quote', quote)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-06'}}, 10, False, '000300.SH'))
+    assert data['days'][-1]['benchmark'] == pytest.approx(5)
+    assert data['days'][-1]['benchmark_source'] == 'QuantDB 日线，腾讯开盘价'
