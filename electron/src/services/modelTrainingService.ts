@@ -1026,9 +1026,9 @@ class ModelTrainingService {
     return resp.data;
   }
 
-  async getInferenceReview(runId: string, topK: number, excludeST: boolean, benchmark: string): Promise<ReviewResult> {
+  async getInferenceReview(runId: string, topK: number, excludeST: boolean, benchmark: string, buyClose = false): Promise<ReviewResult> {
     const resp = await this.client.get(`/models/inference/review/${encodeURIComponent(runId)}`, {
-      params: { top_k: topK, exclude_st: excludeST, benchmark }, timeout: 90000,
+      params: { top_k: topK, exclude_st: excludeST, benchmark, buy_close: buyClose }, timeout: 90000,
     });
     return resp.data;
   }

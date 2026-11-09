@@ -3644,6 +3644,7 @@ async def review_inference_run(
     top_k: int = Query(30),
     exclude_st: bool = Query(True),
     benchmark: str = Query("000300.SH"),
+    buy_close: bool = Query(False, description="尾盘买入：以推理日收盘价为基准"),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     if top_k not in (10, 30, 50) or benchmark not in ("000300.SH", "000905.SH", "000001.SH"):
@@ -3653,7 +3654,7 @@ async def review_inference_run(
     if detail["summary"].get("status") != "completed":
         raise HTTPException(status_code=409, detail="推理批次尚未完成")
     from backend.services.api.services.inference_review import calculate_review
-    return await calculate_review(detail, top_k, exclude_st, benchmark)
+    return await calculate_review(detail, top_k, exclude_st, benchmark, buy_close)
 
 
 @router.delete("/inference/runs/{run_id}", summary="删除推理运行记录（用户态）")

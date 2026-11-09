@@ -62,7 +62,7 @@ async def _fetch_benchmark_quote(symbol, now):
     return _benchmark_cache.get(symbol)
 
 
-def _historical(detail, top_k, exclude_st, benchmark):
+def _historical(detail, top_k, exclude_st, benchmark, buy_close=False):
     from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
     hub = QuantDBDataHub.get_instance()
@@ -108,8 +108,10 @@ def _historical(detail, top_k, exclude_st, benchmark):
             break
     history, index = {}, {}
     if stocks and start <= today:
+        # 尾盘买入时基准是推理日(asof)收盘，需把取数起点前移到 asof。
+        frame_start = min(asof, start) if buy_close else start
         frame = hub.fetch_daily_kline_batch(
-            [s["code"] for s in stocks], start, today, adjust="qfq"
+            [s["code"] for s in stocks], frame_start, today, adjust="qfq"
         )
         for row in frame.to_dict("records"):
             sym = StockCodeUtil.to_suffix(str(row.get("symbol") or ""))
@@ -117,7 +119,9 @@ def _historical(detail, top_k, exclude_st, benchmark):
                 "open": _price(row.get("open")),
                 "close": _price(row.get("close")),
             }
-        for row in hub.fetch_index_kline(benchmark, start, today).to_dict("records"):
+        for row in hub.fetch_index_kline(benchmark, frame_start, today).to_dict(
+            "records"
+        ):
             index[str(row.get("trade_date"))[:10]] = {
                 "open": _price(row.get("open")),
                 "close": _price(row.get("close")),
@@ -189,17 +193,25 @@ async def _series_quotes(source, symbols, now):
     return result
 
 
-async def calculate_review(detail, top_k, exclude_st, benchmark):
+async def calculate_review(detail, top_k, exclude_st, benchmark, buy_close=False):
     stocks, history, index, unknown = await asyncio.to_thread(
-        _historical, detail, top_k, exclude_st, benchmark
+        _historical, detail, top_k, exclude_st, benchmark, buy_close
     )
     target = str(detail["summary"]["prediction_trade_date"])[:10]
+    asof_str = str(detail["summary"].get("data_trade_date") or "")[:10]
     now = datetime.now(_TZ)
     dates = sorted({d for series in history.values() for d in series})
-    starts = {
-        s["code"]: history.get(s["code"], {}).get(target, {}).get("open")
-        for s in stocks
-    }
+    if buy_close and asof_str:
+        # 尾盘买入：唯一改动——起始价从目标日开盘改为推理日收盘（含隔夜跳空）。
+        starts = {
+            s["code"]: history.get(s["code"], {}).get(asof_str, {}).get("close")
+            for s in stocks
+        }
+    else:
+        starts = {
+            s["code"]: history.get(s["code"], {}).get(target, {}).get("open")
+            for s in stocks
+        }
     from backend.services.stream.market_app.services.remote_redis_source import (
         RemoteRedisDataSource,
     )
@@ -236,7 +248,10 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
         and latest_date >= target
     }
     rows = []
-    index_start = index.get(target, {}).get("open")
+    if buy_close and asof_str:
+        index_start = index.get(asof_str, {}).get("close")
+    else:
+        index_start = index.get(target, {}).get("open")
     benchmark_quote = None
     start_from_tencent = False
     if (
@@ -247,6 +262,7 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
         benchmark_quote = await _fetch_benchmark_quote(benchmark, now)
         if (
             not index_start
+            and not buy_close
             and benchmark_quote
             and benchmark_quote["timestamp"].date().isoformat() == target
         ):
@@ -319,7 +335,8 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
             else None
         )
     # 实时开盘价也须换算为前复权基准，缺少基准时不计算。
-    if target == latest_date:
+    # 尾盘买入时起始价已是推理日收盘，不再用当日开盘回填。
+    if target == latest_date and not buy_close:
         for stock in stocks:
             code = stock["code"]
             if not starts[code] and code in live:
@@ -385,7 +402,9 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
             quote = benchmark_quote
             quote_date = quote["timestamp"].date().isoformat() if quote else None
             base = index_start or (
-                quote["open"] if quote and quote_date == target else None
+                quote["open"]
+                if quote and quote_date == target and not buy_close
+                else None
             )
             if quote and quote_date == latest_row["date"] and base:
                 latest_row["benchmark"] = (quote["price"] / base - 1) * 100
@@ -396,7 +415,9 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
             elif quote_date != latest_row["date"]:
                 benchmark_reason = "指数与组合行情日期不一致"
             else:
-                benchmark_reason = "目标日指数开盘价缺失"
+                benchmark_reason = (
+                    "推理日指数收盘价缺失" if buy_close else "目标日指数开盘价缺失"
+                )
     else:
         benchmark_reason = "暂无组合行情"
 
@@ -482,7 +503,9 @@ async def calculate_review(detail, top_k, exclude_st, benchmark):
         "requested": top_k,
         "benchmark_start": index_start,
         "benchmark_unavailable_reason": benchmark_reason,
+        "buy_close": buy_close,
+        "entry_label": "推理日收盘起算" if buy_close else "目标日开盘起算",
         "quote_coverage": len(live),
         "quote_time": min((q["timestamp"] for q in live.values()), default=None),
-        "message": "备注：固定等权组合，历史行情采用前复权；当日涨跌以昨收为基准，累计收益以目标日开盘价为基准。结果为事后观察，未计费用和成交限制。当日行情依上一交易日前复权价与昨收换算，时序数据缺少交易所昨收时使用上日原始收盘价估算，除权除息日可能失真；行情缺失时不展示组合收益。",
+        "message": "备注：固定等权组合，历史行情采用前复权；当日涨跌以昨收为基准，累计收益以目标日开盘价为基准，尾盘买入时以推理日收盘价为基准。结果为事后观察，未计费用和成交限制。当日行情依上一交易日前复权价与昨收换算，时序数据缺少交易所昨收时使用上日原始收盘价估算，除权除息日可能失真；行情缺失时不展示组合收益。",
     }
