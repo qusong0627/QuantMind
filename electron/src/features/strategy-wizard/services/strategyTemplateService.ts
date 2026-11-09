@@ -44,12 +44,26 @@ function clearCache(): void {
 }
 
 class StrategyTemplateService {
+  // 注意：构造时只存一份兜底地址；每次请求必须重新解析网关地址，
+  // 否则登录页改服务器 IP 后这里仍沿用旧地址（表现为一直 fallback 到 4 个离线模板）。
   private readonly baseURL = normalizeServiceBaseUrl(
     resolveWebSafeServiceBase(
       (import.meta as any).env?.VITE_API_GATEWAY_URL,
       SERVICE_URLS.API_GATEWAY || '/api/v1',
     )
   );
+
+  /** 运行时解析网关地址（跟随登录页/设置的服务器 IP 实时变化）。 */
+  private getRuntimeBaseURL(): string {
+    return (
+      normalizeServiceBaseUrl(
+        resolveWebSafeServiceBase(
+          (import.meta as any).env?.VITE_API_GATEWAY_URL,
+          SERVICE_URLS.API_GATEWAY || '/api/v1',
+        ),
+      ) || this.baseURL
+    );
+  }
 
   /**
    * 从后端获取所有预置策略模板（优先 sessionStorage 缓存）。
@@ -91,7 +105,7 @@ class StrategyTemplateService {
       localStorage.getItem('token');
     const tenantId = authService.getTenantId?.() || localStorage.getItem('tenant_id') || 'default';
 
-    const response = await axios.get(`${this.baseURL}/api/v1/strategies/templates`, {
+    const response = await axios.get(`${this.getRuntimeBaseURL()}/api/v1/strategies/templates`, {
       timeout: 15000,
       headers: {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
