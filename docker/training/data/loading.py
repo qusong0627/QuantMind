@@ -176,6 +176,9 @@ def load_data(
     features: list[str],
     target_horizon_days: int = 1,
     target_mode: str = "return",
+    label_transform: str = "rank",
+    label_top_pct: float = 0.2,
+    execution_price: str = "close",
     cache_dir: str | None = None,
     valid_end: str | None = None,
     test_end: str | None = None,
@@ -199,7 +202,7 @@ def load_data(
     horizon_col = f"mom_ret_{horizon}d"
     required_columns = list(
         dict.fromkeys(
-            ["trade_date", "symbol", "mom_ret_1d", horizon_col, "is_st", "volume"]
+            ["trade_date", "symbol", "mom_ret_1d", horizon_col, "is_st", "volume", "open"]
             + list(features)
         )
     )
@@ -593,7 +596,7 @@ def load_data(
     _narrow_cols = list(
         dict.fromkeys(
             c
-            for c in ("symbol", "trade_date", "volume", "close", "mom_ret_1d", _mom_col)
+            for c in ("symbol", "trade_date", "volume", "close", "open", "mom_ret_1d", _mom_col)
             if c in df.columns
         )
     )
@@ -626,12 +629,24 @@ def load_data(
     # 等价于: label = next_N_day_return = pct_change(N).shift(-N)
     # 保持原始行索引（不 reset），供后续宽表按索引一次性取行
     narrow = narrow.sort_values(["symbol", "trade_date"])
+    _exec_price = str(execution_price or "close").strip().lower()
+    if _exec_price not in ("open", "close"):
+        raise ValueError(
+            f"execution_price must be one of: open, close (got {execution_price!r})"
+        )
     if direct_factor_source:
-        # Raw factor sources carry close, so labels are always true forward returns.
+        # Raw factor sources carry open/close, so labels are true forward returns.
+        # execution_price=open：t+1 开盘买（严格实盘口径）；close：t+1 收盘买（旧口径）。
         _lag = _EXECUTION_LAG_DAYS
-        execution_close = narrow.groupby("symbol")["close"].shift(-_lag)
+        _entry_col = "open" if _exec_price == "open" else "close"
+        execution_close = narrow.groupby("symbol")[_entry_col].shift(-_lag)
         future_close = narrow.groupby("symbol")["close"].shift(-(_lag + _horizon))
         narrow["label"] = future_close / execution_close - 1.0
+    elif _exec_price == "open":
+        raise RuntimeError(
+            "execution_price=open 仅支持直读 QuantDB 因子源（需要 open 列）；"
+            "本地快照/动量回退路径不支持开盘价标签"
+        )
     elif _horizon == 1:
         # mom_ret_1d[T+2] = close[T+2] / close[T+1] - 1，匹配 T+1 执行。
         narrow["label"] = narrow.groupby("symbol")["mom_ret_1d"].shift(-(_horizon + _EXECUTION_LAG_DAYS))
@@ -646,8 +661,9 @@ def load_data(
             .shift(-(_horizon + _EXECUTION_LAG_DAYS))
         )
     logger.info(
-        "Label built with target_horizon_days=%s (%s)",
+        "Label built with target_horizon_days=%s execution_price=%s (%s)",
         _horizon,
+        _exec_price,
         "direct close" if direct_factor_source else _mom_col if _mom_col in narrow.columns else "rolling",
     )
 
@@ -701,9 +717,15 @@ def load_data(
         _n_neg = int((df["label"] == 0).sum())
         logger.info(f"Classification target: positive={_n_pos}, negative={_n_neg} (ratio={_n_pos / max(1, _n_pos + _n_neg):.3f})")
 
-    # 收益预测使用截面 rank 目标，强调同日选股排序；分类预测保持二元标签。
+    # 收益预测默认使用截面 rank 目标（强调同日选股排序）；可选 zscore / raw。
+    # 分类预测保持二元标签，不做截面变换。
     if _target_mode != "classification":
-        df["label"] = df.groupby("trade_date")["label"].rank(pct=True) - 0.5
+        from preprocessing import cross_sectional_label_transform
+
+        df["label"] = cross_sectional_label_transform(
+            df["label"], df["trade_date"], label_transform, top_pct=label_top_pct
+        ).to_numpy()
+        logger.info("Label transform: %s", label_transform)
 
     logger.info(
         f"Data ready: {len(df):,} rows, {len(features)} features, "

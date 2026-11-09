@@ -212,6 +212,110 @@ def cross_sectional_rank(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     return out
 
 
+def cross_sectional_robust_zscore(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    """按 (trade_date, feature) 截面稳健 Z-score：(x - median) / (IQR/1.349)。
+
+    IQR 对极端值免疫，不需要先缩尾；IQR=0 时回退到标准差，仍为 0 的截面
+    有效行置 0。NaN 透传。原地修改入参 features 列并返回同一对象。
+    """
+    out = df
+    if not features:
+        return out
+    for chunk in _date_chunks(out["trade_date"]):
+        m = out["trade_date"].isin(chunk)
+        sub = out.loc[m, ["trade_date", *features]]
+        g = sub.groupby("trade_date", sort=False)
+        X = sub[features].astype(np.float64)
+        med = g[features].median()
+        q25 = g[features].quantile(0.25)
+        q75 = g[features].quantile(0.75)
+        iqr = (q75 - q25) / 1.349
+        # IQR 退化（>50% 同值）时回退 std；std 也为 0 的截面有效行置 0
+        sd = g[features].std(ddof=0)
+        scale = iqr.where(iqr.gt(0) & np.isfinite(iqr), sd)
+        ok = scale.gt(0) & np.isfinite(scale)
+        med_full = _chunk_broadcast(sub["trade_date"], med)
+        scale_full = _chunk_broadcast(sub["trade_date"], scale)
+        ok_full = _chunk_broadcast(sub["trade_date"], ok)
+        Z = (X - med_full).div(scale_full)
+        valid = X.notna()
+        Z = Z.where(valid)
+        Z = Z.mask(valid & ~ok_full, 0.0)
+        out.loc[m, features] = Z.astype(np.float32)
+    return out
+
+
+def cross_sectional_label_transform(
+    labels: pd.Series,
+    dates: pd.Series,
+    mode: str = "rank",
+    top_pct: float = 0.2,
+) -> pd.Series:
+    """标签按日截面变换：rank = pct rank - 0.5；zscore = (x-mean)/std；raw 原样。
+
+    top_tail：只保留当日最强 top_pct 的排序，其余置 0（长多 top-tail 标签）。
+    NaN 透传；返回新 Series（不修改入参）。
+    """
+    mode = str(mode or "rank").strip().lower()
+    x = pd.Series(labels, copy=True).astype(np.float64)
+    d = pd.Series(dates)
+    if mode == "raw":
+        return x.astype(np.float32)
+    if mode == "rank":
+        return (x.groupby(d).rank(pct=True) - 0.5).astype(np.float32)
+    if mode == "zscore":
+        g = x.groupby(d)
+        mu = g.transform("mean")
+        sd = g.transform(lambda s: s.std(ddof=0))
+        ok = sd.gt(0) & np.isfinite(sd)
+        out = (x - mu).div(sd.where(ok))
+        out = out.mask(x.notna() & ~ok, 0.0)
+        return out.astype(np.float32)
+    if mode == "top_tail":
+        pct = min(max(float(top_pct), 0.05), 0.5)
+        thr = 1.0 - pct
+        # 分块按日计算：全帧 groupby.rank 在 1000 万行 × 147 特征训练里
+        # 会多造 r/y/top 三份整帧临时量，撞 53G 容器上限（2026-11-09 Exit 137）。
+        xa = x.to_numpy()
+        da = d.to_numpy()
+        out = np.zeros(len(xa), dtype=np.float64)
+        for chunk in _date_chunks(d):
+            m = np.isin(da, np.asarray(chunk))
+            if not m.any():
+                continue
+            sub_x = xa[m]
+            sub_d = da[m]
+            r = pd.Series(sub_x).groupby(sub_d).rank(pct=True).to_numpy()
+            top = r > thr
+            out[m] = np.where(top, 0.5 + 0.5 * (r - thr) / pct, 0.0)
+        out[~np.isfinite(xa)] = np.nan
+        return pd.Series(out, index=x.index).astype(np.float32)
+    raise ValueError(
+        f"unknown label_transform: {mode} (allowed: rank, zscore, raw, top_tail)"
+    )
+
+
+def drop_extreme_labels(
+    frame: pd.DataFrame,
+    pct: float,
+    *,
+    label_col: str = "label_return",
+    date_col: str = "trade_date",
+) -> pd.DataFrame:
+    """按日剔除 label 两端 pct 的样本（MASTER 式极端标签清洗，只用于 train 段）。
+
+    pct=0 或列缺失时原样返回；返回新帧，不修改入参。
+    """
+    if frame.empty or pct <= 0 or label_col not in frame.columns:
+        return frame
+    pct = min(max(float(pct), 0.0), 0.2)
+    g = frame.groupby(date_col)[label_col]
+    lo = g.transform(lambda s: s.quantile(pct))
+    hi = g.transform(lambda s: s.quantile(1.0 - pct))
+    return frame[(frame[label_col] >= lo) & (frame[label_col] <= hi)].copy()
+
+
+
 def cross_sectional_preprocess(
     df: pd.DataFrame,
     features: list[str],
@@ -241,6 +345,8 @@ def cross_sectional_preprocess(
     mode = str(standardize or "zscore").strip().lower()
     if mode == "rank":
         out = cross_sectional_rank(out, feats)
+    elif mode == "robust":
+        out = cross_sectional_robust_zscore(out, feats)
     else:
         out = cross_sectional_zscore(out, feats, winsor=winsor, quantiles=quantiles)
     return out

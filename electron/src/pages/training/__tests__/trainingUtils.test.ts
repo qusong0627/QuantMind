@@ -13,11 +13,13 @@ import dayjs from 'dayjs';
 import {
   buildAutoDisplayName,
   buildBackendTrainingPayload,
+  buildLabelFormula,
   buildTrainingRequest,
   DEFAULT_CONTEXT,
   DEFAULT_PARAMS,
   DEFAULT_TARGET,
   DEFAULT_TIME_PERIODS,
+  normalizeTrainingTarget,
   resolveEvalIcHeadline,
   summarizeRunRequest,
   type EvalReport,
@@ -232,5 +234,73 @@ describe('任务载荷摘要 summarizeRunRequest', () => {
     expect(multi?.modelTypes).toEqual(['lightgbm', 'xgboost']);
     expect(summarizeRunRequest(null)).toBeNull();
     expect(summarizeRunRequest(undefined)).toBeNull();
+  });
+});
+
+/**
+ * 标签与执行口径（2026-11-10）：后端训练管线新增 execution_price / label_transform /
+ * label_top_pct / label_drop_extreme_pct。前端默认严格实盘（T+1 开盘买），并且
+ * 旧草稿/旧配置缺字段时必须回落默认值，不能把 undefined 发进载荷。
+ */
+describe('标签与执行口径', () => {
+  it('默认严格实盘：标签从 T+1 开盘起算，到 T+1+N 收盘', () => {
+    expect(DEFAULT_TARGET.executionPrice).toBe('open');
+    expect(buildLabelFormula({ ...DEFAULT_TARGET, horizonDays: 5 }))
+      .toBe('label = close(T+6) / open(T+1) - 1');
+    expect(buildLabelFormula({ ...DEFAULT_TARGET, horizonDays: 5, mode: 'classification' }))
+      .toBe('label = 1[ close(T+6) / open(T+1) - 1 > 0 ]');
+  });
+
+  it('close 口径回退到 T+1 收盘买（旧行为）', () => {
+    expect(buildLabelFormula({ ...DEFAULT_TARGET, horizonDays: 10, executionPrice: 'close' }))
+      .toBe('label = close(T+11) / close(T+1) - 1');
+  });
+
+  it('提交载荷透传四个标签字段', () => {
+    const request = buildTrainingRequest(
+      ['VOLUME48'],
+      [{ id: 'momentum', name: '动量', icon: null, features: [{ key: 'VOLUME48', label: 'VOLUME48' }] }],
+      DEFAULT_TIME_PERIODS,
+      {
+        ...DEFAULT_TARGET,
+        labelTransform: 'top_tail',
+        labelTopPct: 0.3,
+        labelDropExtremePct: 0.05,
+      },
+      DEFAULT_PARAMS,
+      DEFAULT_CONTEXT,
+      '标签口径载荷',
+      'CN',
+    );
+    const payload = buildBackendTrainingPayload(request, DEFAULT_TIME_PERIODS) as Record<string, unknown>;
+
+    expect(payload.execution_price).toBe('open');
+    expect(payload.label_transform).toBe('top_tail');
+    expect(payload.label_top_pct).toBe(0.3);
+    expect(payload.label_drop_extreme_pct).toBe(0.05);
+  });
+
+  it('旧草稿/旧配置缺字段时补默认值，非法值被钳制', () => {
+    expect(normalizeTrainingTarget({ mode: 'return', horizonDays: 3 })).toMatchObject({
+      executionPrice: 'open',
+      labelTransform: 'rank',
+      labelTopPct: 0.2,
+      labelDropExtremePct: 0,
+    });
+    expect(normalizeTrainingTarget(null)).toMatchObject({ horizonDays: 5, executionPrice: 'open' });
+
+    const clamped = normalizeTrainingTarget({
+      mode: 'return',
+      horizonDays: 99,
+      executionPrice: 'bogus' as never,
+      labelTransform: 'bogus' as never,
+      labelTopPct: 0.9,
+      labelDropExtremePct: 0.5,
+    });
+    expect(clamped.horizonDays).toBe(30);
+    expect(clamped.executionPrice).toBe('open');
+    expect(clamped.labelTransform).toBe('rank');
+    expect(clamped.labelTopPct).toBe(0.5);
+    expect(clamped.labelDropExtremePct).toBe(0.2);
   });
 });

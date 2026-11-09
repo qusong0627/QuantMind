@@ -15,7 +15,7 @@ import { modelTrainingService } from '../services/modelTrainingService';
 import { useAppDispatch, useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket, setMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
-import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER, TrainingMarket, resolveTrainingMarket, resolveTrainingPoolMarket, getEnabledTrainingMarketOptions, buildCrossSourceFeaturePlan, buildExtraFactorSourceOptions, buildFeatureOwnershipMap, findCrossSourceFeatureConflicts, formatCrossSourceConflictMessage, mergeSourceFeatureCategories, sanitizeExtraFactorSources } from './training/trainingUtils';
+import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER, TrainingMarket, resolveTrainingMarket, resolveTrainingPoolMarket, getEnabledTrainingMarketOptions, buildCrossSourceFeaturePlan, buildExtraFactorSourceOptions, buildFeatureOwnershipMap, findCrossSourceFeatureConflicts, formatCrossSourceConflictMessage, mergeSourceFeatureCategories, sanitizeExtraFactorSources, normalizeTrainingTarget } from './training/trainingUtils';
 import { AdminModelFeatureDataCoverage, QuantDBTrainingSource } from '../features/admin/types';
 import { adminService } from '../features/admin/services/adminService';
 import { FeatureSelector } from './training/FeatureSelector';
@@ -148,7 +148,7 @@ function formReducer(state: FormState, action: FormAction): FormState {
           val: restoreRange(p.timePeriods?.val, DEFAULT_TIME_PERIODS.val),
           test: restoreRange(p.timePeriods?.test, DEFAULT_TIME_PERIODS.test),
         },
-        target: p.target || DEFAULT_TARGET,
+        target: normalizeTrainingTarget(p.target),
         params: restoredParams,
         context: { ...DEFAULT_CONTEXT, ...p.context },
         displayNameMode: p.displayNameMode || 'auto',

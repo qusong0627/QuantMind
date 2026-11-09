@@ -98,6 +98,14 @@ class LabelCfg(BaseModel):
 
     target_horizon_days: int = 1
     target_mode: Literal["return", "classification"] = "return"
+    # 执行价：close（旧口径，t+1 收盘买）/ open（严格实盘，t+1 开盘买）
+    execution_price: Literal["open", "close"] = "close"
+    # 截面标签变换：rank（默认，pct rank - 0.5）/ zscore / raw
+    label_transform: Literal["rank", "zscore", "raw", "top_tail"] = "rank"
+    # top_tail：只保留当日最强 top_pct 的排序，其余置 0（长多标签）
+    label_top_pct: float = 0.2
+    # MASTER 式极端标签清洗：只对 train 段按日剔除两端 pct（0~0.2）
+    label_drop_extreme_pct: float = 0.0
     label_formula: str = ""
     effective_trade_date: str = ""
     training_window: str = ""

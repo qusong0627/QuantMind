@@ -753,6 +753,10 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 label=LabelCfg(
                     target_horizon_days=payload.get("target_horizon_days", 1),
                     target_mode=payload.get("target_mode", "return"),
+                    execution_price=payload.get("execution_price", "close"),
+                    label_transform=payload.get("label_transform", "rank"),
+                    label_top_pct=payload.get("label_top_pct", 0.2),
+                    label_drop_extreme_pct=payload.get("label_drop_extreme_pct", 0.0),
                     label_formula=payload.get("label_formula", ""),
                     effective_trade_date=payload.get("effective_trade_date", ""),
                     training_window=payload.get("training_window", ""),

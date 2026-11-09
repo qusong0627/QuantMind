@@ -215,6 +215,26 @@ def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
             f"  test[{len(test_df)}] {pd.Timestamp(test_start).date()}~"
         )
 
+    # MASTER 式极端标签清洗：只对 train 段按日剔除 label 两端 pct 的样本。
+    # 默认 0（关闭）；val/test 不删，保持评估口径完整。
+    _drop_pct = float((cfg.get("label") or {}).get("label_drop_extreme_pct") or 0)
+    if _drop_pct > 0 and not train_df.empty:
+        from preprocessing import drop_extreme_labels
+
+        _before = len(train_df)
+        train_df = drop_extreme_labels(train_df, _drop_pct)
+        if str((cfg.get("label") or {}).get("label_transform") or "rank").lower() == "rank":
+            # 删样本后重算截面 rank，保持标签仍为「同日在榜样本」的分位
+            train_df["label"] = (
+                train_df.groupby("trade_date")["label"].rank(pct=True) - 0.5
+            )
+        logger.info(
+            "Label extreme drop: pct=%.3f train %d -> %d",
+            _drop_pct,
+            _before,
+            len(train_df),
+        )
+
     log_rss(
         "切分完成",
         f"train {len(train_df):,} / val {len(val_df):,} / test {len(test_df):,} 行"

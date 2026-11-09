@@ -85,15 +85,21 @@ def _dispatch_gbdt_sklearn(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
+    groups: tuple | None = None,
 ) -> Any:
     """GBDT/sklearn 组统一分派：lightgbm/xgboost/catboost/linear/random_forest/mlp。
 
     optuna 预搜索与分位分支保留在调用方原逻辑中，此处只替换裸训练函数选择。
-    B4：旧 if/elif fallback 已删除（B2 A/B 全过），未知类型直接 ValueError。
+    groups=(train_dates, val_dates)：排序损失（LambdaRank/YetiRank/rank:*）
+    必需，按日分组；树模型之外的训练器忽略该参数。
     """
     trainer = MODEL_REGISTRY.get(model_type)
     if trainer is None:
         raise ValueError(f"Unsupported model_type: {model_type}")
+    if groups is not None and model_type in ("lightgbm", "xgboost", "catboost"):
+        return trainer.train_fn(
+            cfg, features, X_train, y_train, X_val, y_val, groups=groups
+        )
     return trainer.train_fn(cfg, features, X_train, y_train, X_val, y_val)
 
 class DLAdapter:

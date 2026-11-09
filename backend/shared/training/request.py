@@ -192,6 +192,10 @@ class TrainingRequest(BaseModel):
     dl_params: dict = Field(default_factory=dict)
     target_horizon_days: int = 1
     target_mode: str = "return"
+    execution_price: str = "close"
+    label_transform: str = "rank"
+    label_top_pct: float = 0.2
+    label_drop_extreme_pct: float = 0.0
     label_formula: str = ""
     effective_trade_date: str = ""
     training_window: str = ""
@@ -342,6 +346,42 @@ class TrainingRequest(BaseModel):
                 detail="target_mode must be one of: return, classification",
             )
 
+        execution_price = str(payload.get("execution_price") or "close").strip().lower()
+        if execution_price not in ("open", "close"):
+            raise HTTPException(
+                status_code=422,
+                detail="execution_price must be one of: open, close",
+            )
+
+        label_transform = str(payload.get("label_transform") or "rank").strip().lower()
+        if label_transform not in ("rank", "zscore", "raw", "top_tail"):
+            raise HTTPException(
+                status_code=422,
+                detail="label_transform must be one of: rank, zscore, raw, top_tail",
+            )
+        try:
+            label_top_pct = float(payload.get("label_top_pct") or 0.2)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422, detail="label_top_pct must be a number"
+            ) from None
+        if not (0.05 <= label_top_pct <= 0.5):
+            raise HTTPException(
+                status_code=422,
+                detail="label_top_pct must be between 0.05 and 0.5",
+            )
+        try:
+            label_drop_extreme_pct = float(payload.get("label_drop_extreme_pct") or 0.0)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422, detail="label_drop_extreme_pct must be a number"
+            ) from None
+        if not (0.0 <= label_drop_extreme_pct <= 0.2):
+            raise HTTPException(
+                status_code=422,
+                detail="label_drop_extreme_pct must be between 0 and 0.2",
+            )
+
         label_formula = str(payload.get("label_formula") or "").strip()
         effective_trade_date = str(payload.get("effective_trade_date") or "").strip()
         if effective_trade_date:
@@ -375,6 +415,10 @@ class TrainingRequest(BaseModel):
                 dl_params=payload.get("dl_params", {}) or {},
                 target_horizon_days=target_horizon_days,
                 target_mode=target_mode,
+                execution_price=execution_price,
+                label_transform=label_transform,
+                label_top_pct=label_top_pct,
+                label_drop_extreme_pct=label_drop_extreme_pct,
                 label_formula=label_formula,
                 effective_trade_date=effective_trade_date,
                 training_window=training_window,

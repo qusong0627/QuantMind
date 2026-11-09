@@ -16,6 +16,7 @@ import {
   formatRange,
   TrainingFactorFilterConfig,
   DEFAULT_FACTOR_FILTER,
+  buildLabelTransformSummary,
 } from './trainingUtils';
 import { AdminModelFeatureDataCoverage } from '../../features/admin/types';
 
@@ -131,6 +132,85 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
                 className="w-28"
               />
               <span className="text-sm text-slate-500">交易日</span>
+            </div>
+          </div>
+
+          {/* ── 标签与执行口径（严格实盘）── */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <Tooltip title="训练标签直接决定模型学到的收益口径。open = T+1 开盘买、T+1+N 收盘卖；close = 旧口径。截面变换与 top-tail 只改标签，不改特征。">
+                <div className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-400 cursor-help">标签与执行口径</div>
+              </Tooltip>
+              <Tag className="m-0 rounded-lg border-0 bg-indigo-50 px-2 text-[10px] font-bold text-indigo-700">严格实盘</Tag>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <div className="mb-1 text-xs font-semibold text-slate-700">执行价</div>
+                <Select
+                  value={target.executionPrice}
+                  onChange={(value) => onTargetChange({ ...target, executionPrice: value as TrainingTarget['executionPrice'] })}
+                  className="w-full"
+                  options={[
+                    { label: '开盘价 · T+1 开盘买', value: 'open' },
+                    { label: '收盘价 · T+1 收盘买（旧口径）', value: 'close' },
+                  ]}
+                />
+                <div className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                  标签 = close(T+1+N) / 执行价(T+1) − 1
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold text-slate-700">标签截面变换</div>
+                <Select
+                  value={target.labelTransform}
+                  onChange={(value) => onTargetChange({ ...target, labelTransform: value as TrainingTarget['labelTransform'] })}
+                  className="w-full"
+                  options={[
+                    { label: '截面 rank（默认）', value: 'rank' },
+                    { label: '截面 zscore', value: 'zscore' },
+                    { label: '原始收益', value: 'raw' },
+                    { label: 'top-tail（只学最强尾部）', value: 'top_tail' },
+                  ]}
+                />
+                <div className="mt-1 text-[10px] leading-relaxed text-slate-500">{buildLabelTransformSummary(target)}</div>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {target.labelTransform === 'top_tail' && (
+                <div>
+                  <div className="mb-1 text-xs font-semibold text-slate-700">top-tail 尾部比例</div>
+                  <InputNumber
+                    min={5}
+                    max={50}
+                    step={5}
+                    value={Math.round(target.labelTopPct * 100)}
+                    onChange={(value) => onTargetChange({
+                      ...target,
+                      labelTopPct: clamp(Number(value ?? 20), 5, 50) / 100,
+                    })}
+                    addonAfter="%"
+                    className="w-full"
+                  />
+                </div>
+              )}
+              <div>
+                <div className="mb-1 text-xs font-semibold text-slate-700">极端标签清洗（仅训练段）</div>
+                <InputNumber
+                  min={0}
+                  max={20}
+                  step={1}
+                  value={Math.round(target.labelDropExtremePct * 100)}
+                  onChange={(value) => onTargetChange({
+                    ...target,
+                    labelDropExtremePct: clamp(Number(value ?? 0), 0, 20) / 100,
+                  })}
+                  addonAfter="%"
+                  className="w-full"
+                />
+                <div className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                  按日剔除标签两端各 N%，0 = 关闭；只作用于训练段，验证/测试段不动。
+                </div>
+              </div>
             </div>
           </div>
 

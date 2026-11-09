@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import numpy as np
 import os
+import pandas as pd
 from typing import Any
 
 import lightgbm as lgb
@@ -26,19 +27,21 @@ def _default_train_threads() -> int:
 _TRAIN_NTHREAD = _default_train_threads()
 
 DEFAULT_LGB_PARAMS: dict[str, Any] = {
+    # 机构级起点（2026-11-09）：按 A 股日频选股的稳健区间取中值；
+    # 这是起点不是调参终点，payload 的 params 可逐项覆盖。
     "objective":         "regression",
     "metric":            "l2",
     "boosting":          "gbdt",
     "num_leaves":        31,
-    "learning_rate":     0.02,
-    "feature_fraction":  0.6,
-    "bagging_fraction":  0.7,
-    "bagging_freq":      5,
-    "min_data_in_leaf":  300,
+    "learning_rate":     0.03,
+    "feature_fraction":  0.7,
+    "bagging_fraction":  0.8,
+    "bagging_freq":      1,
+    "min_data_in_leaf":  500,
     "path_smooth":       1.0,
     "lambda_l1":         0.5,
-    "lambda_l2":         1.0,
-    "max_depth":         -1,
+    "lambda_l2":         5.0,
+    "max_depth":         6,
     # LightGBM 原生 API 的线程参数名是 num_threads（n_jobs 是 sklearn 层的别名，
     # 直接传 n_jobs 给 lgb.train() 会被忽略并回退到默认线程数，导致多核不生效）
     "num_threads":       _TRAIN_NTHREAD,
@@ -46,14 +49,15 @@ DEFAULT_LGB_PARAMS: dict[str, Any] = {
 }
 
 DEFAULT_XGB_PARAMS: dict[str, Any] = {
+    # 机构级起点（2026-11-09）：hist + 0.03 lr + 深度 5 + 强正则
     "objective":        "reg:squarederror",
     "eval_metric":      "rmse",
-    "max_depth":        4,
-    "learning_rate":    0.05,
-    "subsample":        0.7,
-    "colsample_bytree": 0.65,
+    "max_depth":        5,
+    "learning_rate":    0.03,
+    "subsample":        0.8,
+    "colsample_bytree": 0.8,
     "reg_alpha":        0.5,
-    "reg_lambda":       2.0,
+    "reg_lambda":       10.0,
     "min_child_weight": 100,
     "tree_method":      "hist",
     "nthread":          -1,
@@ -61,18 +65,48 @@ DEFAULT_XGB_PARAMS: dict[str, Any] = {
 }
 
 DEFAULT_CATBOOST_PARAMS: dict[str, Any] = {
+    # 机构级起点（2026-11-09）：深度 5 + l2 10 + 2000 轮 + 早停 100
     "loss_function":    "RMSE",
-    "depth":            6,
+    "depth":            5,
     "learning_rate":    0.03,
-    "iterations":       1500,
-    "l2_leaf_reg":      3.0,
-    "random_strength":  1.5,
-    "bagging_temperature": 0.8,
+    "iterations":       2000,
+    "l2_leaf_reg":      10.0,
+    "random_strength":  2.0,
+    "bagging_temperature": 1.0,
     "od_type":          "Iter",
     "od_wait":          100,
     "thread_count":     -1,
     "verbose":          100,
 }
+
+# ── 排序损失（IC / LambdaRank 类）────────────────────────────────────────────
+# 三个 GBDT 的排序目标名不同；显式传这些 objective 时，训练端必须同时提供
+# 「按日分组」信息（group/group_id），否则 LightGBM/CatBoost/XGBoost 直接报错。
+RANK_OBJECTIVES: dict[str, set[str]] = {
+    "lightgbm": {"lambdarank", "rank_xendcg"},
+    "xgboost": {"rank:pairwise", "rank:ndcg", "rank:map"},
+    "catboost": {"yetirank", "yetirankpairwise", "queryrmse", "querysoftmax", "queryauc", "lambdamart"},
+}
+
+
+def _group_counts(dates: Any) -> np.ndarray:
+    """按日分组的连续样本数（LightGBM/XGBoost 的 group 参数）。dates 必须已按日排序。"""
+    _, counts = np.unique(np.asarray(dates), return_counts=True)
+    return counts.astype(np.int32)
+
+
+def _bin_rank_labels(y: Any, dates: Any, n_bins: int = 10) -> np.ndarray:
+    """把连续 rank 标签按日分箱成 0..n_bins-1 的 relevance（LambdaRank/NDCG 需要整数档位）。"""
+    s = pd.Series(np.asarray(y))
+    d = pd.Series(np.asarray(dates))
+    r = s.groupby(d).rank(pct=True)
+    return np.floor(r * n_bins).clip(0, n_bins - 1).astype(np.int32).to_numpy()
+
+
+def _factorize_groups(dates: Any) -> np.ndarray:
+    """CatBoost group_id：按日排序后行号即组号；返回每行的组 id。"""
+    return pd.factorize(pd.Series(np.asarray(dates)), sort=True)[0].astype(np.int32)
+
 
 def _lgb_rank_ic_feval(preds: np.ndarray, dataset: lgb.Dataset) -> tuple[str, float, bool]:
     """LightGBM 自定义评估：全局 Rank IC（Spearman），作为 l2 的补充监控指标。
@@ -95,13 +129,17 @@ def _lgb_rank_ic_feval(preds: np.ndarray, dataset: lgb.Dataset) -> tuple[str, fl
 
 @register_trainer("lightgbm", framework="lightgbm")
 def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
-               X_val: np.ndarray, y_val: np.ndarray) -> Any:
-    """LightGBM 训练。"""
+               X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None) -> Any:
+    """LightGBM 训练；objective 为 lambdarank/rank_xendcg 时按日分组。"""
     model_cfg = cfg.get("model", {})
     params = {**DEFAULT_LGB_PARAMS, **model_cfg.get("params", {})}
     if str((cfg.get("label", {}) or {}).get("target_mode") or "return").lower() == "classification":
         params["objective"] = "binary"
         params["metric"] = "binary_logloss"
+    _objective = str(params.get("objective") or "").lower()
+    _rank = _objective in RANK_OBJECTIVES["lightgbm"] and groups is not None
+    if _rank and str(params.get("metric") or "").lower() in ("l2", "rmse", "regression"):
+        params["metric"] = "ndcg"
     # 线程数：num_threads=-1 用满所有核心；多模型/OOF 训练时内存叠加易 OOM，
     # 可用 TRAIN_NTHREADS 环境变量限流
     params["num_threads"] = _TRAIN_NTHREAD
@@ -112,8 +150,27 @@ def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
     num_boost_round = int(model_cfg.get("num_boost_round", 1000))
     early_stopping_rounds = max(1, int(model_cfg.get("early_stopping_rounds", 100) or 100))
 
-    ds_train = lgb.Dataset(X_train, label=y_train, feature_name=features, free_raw_data=True)
-    ds_val = lgb.Dataset(X_val, label=y_val, feature_name=features, free_raw_data=True)
+    if _rank:
+        gtr, gva = groups
+        # lambdarank 只吃整数 relevance；rank_xendcg 支持连续标签
+        y_tr = _bin_rank_labels(y_train, gtr) if _objective == "lambdarank" else y_train
+        y_va = _bin_rank_labels(y_val, gva) if _objective == "lambdarank" else y_val
+        ds_train = lgb.Dataset(
+            X_train, label=y_tr, group=_group_counts(gtr),
+            feature_name=features, free_raw_data=True,
+        )
+        ds_val = lgb.Dataset(
+            X_val, label=y_va, group=_group_counts(gva),
+            feature_name=features, reference=ds_train, free_raw_data=True,
+        )
+        logger.info(
+            "LightGBM rank loss: objective=%s train_groups=%d val_groups=%d",
+            _objective, len(np.unique(np.asarray(gtr))), len(np.unique(np.asarray(gva))),
+        )
+    else:
+        ds_train = lgb.Dataset(X_train, label=y_train, feature_name=features, free_raw_data=True)
+        ds_val = lgb.Dataset(X_val, label=y_val, feature_name=features, free_raw_data=True)
+
 
     callbacks = [
         lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=True),
@@ -136,14 +193,18 @@ def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
 
 @register_trainer("xgboost", framework="xgboost")
 def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
-               X_val: np.ndarray, y_val: np.ndarray) -> Any:
-    """XGBoost 训练。"""
+               X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None) -> Any:
+    """XGBoost 训练；objective 为 rank:* 时按日分组。"""
     import xgboost as xgb
     model_cfg = cfg.get("model", {})
     params = {**DEFAULT_XGB_PARAMS, **model_cfg.get("xgb_params", {})}
     if str((cfg.get("label", {}) or {}).get("target_mode") or "return").lower() == "classification":
         params["objective"] = "binary:logistic"
         params["eval_metric"] = "auc"
+    _objective = str(params.get("objective") or "").lower()
+    _rank = _objective in RANK_OBJECTIVES["xgboost"] and groups is not None
+    if _rank and _objective in ("rank:ndcg", "rank:map"):
+        params.setdefault("eval_metric", "ndcg")
     # 限制线程：nthread=-1 用满所有核心，多模型/OOF 训练时内存叠加易 OOM
     params["nthread"] = _TRAIN_NTHREAD
     # 可复现性：注入全局 seed
@@ -162,10 +223,26 @@ def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
     # 在 7.4M×273 float32 上省约 7GB + 直方图构建更省）。2026-09-15 XGB 在
     # DMatrix 构造处峰值冲顶 OOM(SIGKILL 137) 后切换；valid 用 ref=dtrain
     # 复用训练分箱。分箱细节（sketch 分位）与 DMatrix 略有差异，属内部实现。
-    dtrain = xgb.QuantileDMatrix(X_train, label=y_train, feature_names=features)
-    dval = xgb.QuantileDMatrix(
-        X_val, label=y_val, feature_names=features, ref=dtrain
-    )
+    if _rank:
+        gtr, gva = groups
+        # 所有 rank:* 目标统一用整数 relevance 档位：rank:pairwise + ndcg 指标
+        # 也要求整数标签（XGBoost 实测报 label_is_integer），分 10 档损失极小。
+        y_tr = _bin_rank_labels(y_train, gtr)
+        y_va = _bin_rank_labels(y_val, gva)
+        dtrain = xgb.QuantileDMatrix(X_train, label=y_tr, feature_names=features)
+        dval = xgb.QuantileDMatrix(X_val, label=y_va, feature_names=features, ref=dtrain)
+        dtrain.set_group(_group_counts(gtr))
+        dval.set_group(_group_counts(gva))
+        logger.info(
+            "XGBoost rank loss: objective=%s train_groups=%d val_groups=%d",
+            _objective, len(np.unique(np.asarray(gtr))), len(np.unique(np.asarray(gva))),
+        )
+    else:
+        dtrain = xgb.QuantileDMatrix(X_train, label=y_train, feature_names=features)
+        dval = xgb.QuantileDMatrix(
+            X_val, label=y_val, feature_names=features, ref=dtrain
+        )
+
 
     evals_result: dict = {}
     model = xgb.train(
@@ -180,8 +257,8 @@ def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
 
 @register_trainer("catboost", framework="catboost")
 def _train_catboost(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
-                    X_val: np.ndarray, y_val: np.ndarray) -> Any:
-    """CatBoost 训练。支持 cat_features（行业编码等类别特征）。"""
+                    X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None) -> Any:
+    """CatBoost 训练。支持 cat_features；YetiRank/Query* 时按日传 group_id。"""
     from catboost import CatBoost, Pool
     model_cfg = cfg.get("model", {})
     params = {**DEFAULT_CATBOOST_PARAMS, **model_cfg.get("catboost_params", {})}
@@ -218,7 +295,21 @@ def _train_catboost(cfg: dict, features: list[str], X_train: np.ndarray, y_train
         "feature_names": features,
         "cat_features": cat_feature_indices if cat_feature_indices else None,
     }
-    if has_time:
+    _loss = str(params.get("loss_function") or "").lower()
+    _rank = _loss in RANK_OBJECTIVES["catboost"] and groups is not None
+    if _rank:
+        gtr, gva = groups
+        train_pool = Pool(
+            X_train, label=y_train, group_id=_factorize_groups(gtr), **_pool_kwargs
+        )
+        val_pool = Pool(
+            X_val, label=y_val, group_id=_factorize_groups(gva), **_pool_kwargs
+        )
+        logger.info(
+            "CatBoost rank loss: loss=%s train_groups=%d val_groups=%d",
+            _loss, len(np.unique(np.asarray(gtr))), len(np.unique(np.asarray(gva))),
+        )
+    elif has_time:
         try:
             train_pool = Pool(X_train, label=y_train, has_time=True, **_pool_kwargs)
             val_pool = Pool(X_val, label=y_val, has_time=True, **_pool_kwargs)

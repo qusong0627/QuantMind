@@ -130,6 +130,7 @@ from model_trainers.registry import (
 )
 from model_trainers.trainers_gbdt import (
     DEFAULT_LGB_PARAMS,
+    RANK_OBJECTIVES,
     _train_catboost,
     _train_lgb,
     _train_xgb,
@@ -143,6 +144,54 @@ from diagnostics.wfa import train_wfa
 from data.factor_selection import _log_factor_selection_summary, select_top_factors
 from data.fingerprint import build_data_fingerprint
 from data.loading import load_data
+
+
+def _is_rank_loss(cfg: dict, model_type: str) -> bool:
+    """检测模型参数是否指定了排序损失（LambdaRank/YetiRank/rank:*）。
+
+    排序损失必须按日分组；调用方据此在 _prepare_arrays 前按 trade_date 排序，
+    并把 (train_dates, val_dates) 传给训练器。未指定排序损失时行为完全不变。
+    """
+    model_cfg = cfg.get("model", {}) or {}
+    mt = str(model_type or "").lower()
+    if mt == "lightgbm":
+        loss = str((model_cfg.get("params") or {}).get("objective") or "").lower()
+    elif mt == "xgboost":
+        loss = str((model_cfg.get("xgb_params") or {}).get("objective") or "").lower()
+    elif mt == "catboost":
+        loss = str((model_cfg.get("catboost_params") or {}).get("loss_function") or "").lower()
+    else:
+        return False
+    return loss in RANK_OBJECTIVES.get(mt, set())
+
+
+def _apply_label_formula_overrides(cfg: dict) -> None:
+    """兼容旧 API 编排器：新标签字段也可能写在 label_formula 里。
+
+    旧版 _normalize_payload 白名单不会保留 execution_price/label_transform/
+    label_top_pct/label_drop_extreme_pct；label_formula 是白名单字段。格式：
+    'execution_price=open;label_transform=top_tail;label_top_pct=0.2'。
+    显式 config 字段优先（setdefault），只覆盖缺省。
+    """
+    label = cfg.get("label")
+    if not isinstance(label, dict):
+        return
+    raw = str(label.get("label_formula") or "")
+    if "=" not in raw:
+        return
+    allowed = {"execution_price", "label_transform", "label_top_pct", "label_drop_extreme_pct"}
+    applied = {}
+    for part in raw.split(";"):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k in allowed and v:
+            label.setdefault(k, v)
+            applied[k] = v
+    if applied:
+        logger.info("Label formula overrides: %s", applied)
+
 from data.memprobe import log_rss, peak_gb, reset_peak, rss_gb
 from data.splits import (
     _EXECUTION_LAG_DAYS,
@@ -407,6 +456,21 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     # 数据切分
     train_df, val_df, test_df = _split_data(df, cfg)
     _trim_memory("after split")
+    # 排序损失：按 trade_date 排序（保证同组连续）+ 传每行的日期给训练器分组。
+    # 非排序损失不排序、不传 groups，行为与旧版逐位一致。
+    _rank_groups = None
+    if _is_rank_loss(cfg, model_type):
+        train_df = train_df.sort_values("trade_date", kind="stable").reset_index(drop=True)
+        val_df = val_df.sort_values("trade_date", kind="stable").reset_index(drop=True)
+        _rank_groups = (
+            train_df["trade_date"].to_numpy(),
+            val_df["trade_date"].to_numpy(),
+        )
+        logger.info(
+            "Rank loss enabled: train groups=%d val groups=%d",
+            len(pd.unique(_rank_groups[0])),
+            len(pd.unique(_rank_groups[1])),
+        )
     fill_values, X_train, y_train, X_val, y_val, _fill = _prepare_arrays(
         train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {},
         extra_frames=[test_df, df], clip_value=feature_clip_for(model_type),
@@ -439,7 +503,7 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
                 _merge_cfg["model"] = _model_cfg
                 cfg = _merge_cfg
         quantile_result: dict[str, Any] | None = None
-        if model_type == "lightgbm" and _quantile_mode_enabled(cfg):
+        if model_type == "lightgbm" and _quantile_mode_enabled(cfg) and not _is_rank_loss(cfg, model_type):
             quantile_models, calibration = _train_lgb_quantiles(
                 cfg, features, X_train, y_train, X_val, y_val, val_df["trade_date"]
             )
@@ -448,9 +512,9 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
             quantile_result = {"models": quantile_models, "calibration": calibration}
         else:
             # B2：树组查表分派（optuna 预搜索与分位分支保持原逻辑）
-            model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
+            model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups)
     elif model_type in ("linear", "random_forest", "mlp"):
-        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups)
     elif model_type == "nativetft":
         del X_train, X_val
         _trim_memory("before DL dispatch")
@@ -544,6 +608,11 @@ def _tune_tree_hyperparams(
     返回最优参数 dict（合并进模型参数）；未安装 optuna 时返回 None（优雅降级）。
     搜索空间面向 A 股选股场景（截面 rank 收益标签、防过拟合优先）。
     """
+    if _is_rank_loss(cfg, model_type):
+        logger.warning(
+            "Optuna + rank loss 未支持（搜索内部不传 group），跳过超参搜索"
+        )
+        return None
     try:
         import optuna
     except ImportError:
@@ -628,6 +697,15 @@ def _train_single_model(
     t0 = time.time()
 
     _optuna_result = None
+    # 排序损失：按 trade_date 排序 + 传日期分组（与 train_model 同口径）。
+    _rank_groups = None
+    if _is_rank_loss(cfg, model_type):
+        train_df = train_df.sort_values("trade_date", kind="stable").reset_index(drop=True)
+        val_df = val_df.sort_values("trade_date", kind="stable").reset_index(drop=True)
+        _rank_groups = (
+            train_df["trade_date"].to_numpy(),
+            val_df["trade_date"].to_numpy(),
+        )
     fill_values, X_train, y_train, X_val, y_val, _fill = _prepare_arrays(
         train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {},
         extra_frames=[test_df, df], clip_value=feature_clip_for(model_type),
@@ -655,9 +733,9 @@ def _train_single_model(
                 _merge_cfg["model"] = _model_cfg
                 cfg = _merge_cfg
         # B2：树组查表分派（optuna 预搜索保持原逻辑）
-        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups)
     elif model_type in ("linear", "random_forest", "mlp"):
-        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups)
     elif model_type == "nativetft":
         del X_train, X_val
         _trim_memory("before DL dispatch (single tft)")
@@ -1167,6 +1245,7 @@ def main() -> int:
         if not cfg_path.exists():
             raise RuntimeError(f"Config file not found: {cfg_path}")
         cfg = yaml.safe_load(cfg_path.read_text())
+        _apply_label_formula_overrides(cfg)
 
         # B1 配置校验门：与 api 侧同一 TrainingConfig 双端复用，非法枚举等纯输入
         # 错误在启动秒级失败，而不是数据加载后才抛。校验只做 gate，不改写 cfg，
@@ -1230,6 +1309,9 @@ def main() -> int:
             features,
             target_horizon_days=int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
             target_mode=str((cfg.get("label", {}) or {}).get("target_mode") or "return"),
+            label_transform=str((cfg.get("label", {}) or {}).get("label_transform") or "rank"),
+            label_top_pct=float((cfg.get("label", {}) or {}).get("label_top_pct") or 0.2),
+            execution_price=str((cfg.get("label", {}) or {}).get("execution_price") or "close"),
             cache_dir=_cache_dir,
             valid_end=cfg.get("split", {}).get("valid", [None, None])[1],
             test_end=cfg.get("split", {}).get("test", [None, None])[1],
@@ -1301,6 +1383,18 @@ def main() -> int:
         drift_cfg = cfg.get("drift") or {}
         if drift_cfg.get("enabled") is False:
             psi_result = {"enabled": False, "reason": "disabled by config"}
+        elif len(valid_features) > 250:
+            # 大特征集内存保护：PSI 内部造 3~4 份整帧临时量，300 特征 × 1000 万行
+            # 会击穿训练容器 mem_limit（2026-11-09 Exit 137 实证）。PSI 只是诊断，
+            # 不能让它阻断训练；需要漂移报告时用 ≤250 特征的子集单独跑。
+            psi_result = {
+                "enabled": False,
+                "reason": f"skipped: {len(valid_features)} features > 250",
+            }
+            logger.info(
+                "PSI skipped: %d features > 250 (memory guard)",
+                len(valid_features),
+            )
         else:
             # PSI 内部要造 3~4 份**整帧级**临时量（`df[train_mask]` → `train_df[usable]`
             # → `.dropna(how="all")`）；train 窗覆盖全区间时每份 ≈ 一整个全帧。

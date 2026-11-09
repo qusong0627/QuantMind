@@ -64,10 +64,49 @@ export const MODEL_TYPE_OPTIONS: ModelTypeOption[] = [
     tooltip: 'QuantMind 自研轻量 TFT：GRU 时序编码 + MultiheadAttention + 门控残差网络(GRN)。比 pytorch_forecasting TFT 轻量 10 倍，无需额外依赖。hidden_dim 默认 64，num_heads 默认 4。适合 GRU 效果好但想尝试注意力机制的场景。' },
 ];
 
+export type ExecutionPrice = 'open' | 'close';
+export type LabelTransform = 'rank' | 'zscore' | 'raw' | 'top_tail';
+
 export interface TrainingTarget {
   mode: TargetMode;
   horizonDays: number;
+  /** 执行价：open = T+1 开盘买（严格实盘口径）；close = T+1 收盘买（旧口径） */
+  executionPrice: ExecutionPrice;
+  /** 截面标签变换：rank / zscore / raw / top_tail（只学当日最强尾部） */
+  labelTransform: LabelTransform;
+  /** top_tail 的尾部比例（0.05~0.5） */
+  labelTopPct: number;
+  /** MASTER 式极端标签清洗：只对训练段按日剔除两端比例（0 关闭，0~0.2） */
+  labelDropExtremePct: number;
 }
+
+const LABEL_TRANSFORMS: LabelTransform[] = ['rank', 'zscore', 'raw', 'top_tail'];
+const EXECUTION_PRICES: ExecutionPrice[] = ['open', 'close'];
+
+const clampNumber = (value: unknown, fallback: number, min: number, max: number): number => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+};
+
+/** 旧草稿 / 旧配置文件没有标签口径字段：统一补默认值并做范围钳制。 */
+export const normalizeTrainingTarget = (raw?: Partial<TrainingTarget> | null): TrainingTarget => {
+  const source = raw ?? {};
+  const executionPrice = EXECUTION_PRICES.includes(source.executionPrice as ExecutionPrice)
+    ? (source.executionPrice as ExecutionPrice)
+    : DEFAULT_TARGET.executionPrice;
+  const labelTransform = LABEL_TRANSFORMS.includes(source.labelTransform as LabelTransform)
+    ? (source.labelTransform as LabelTransform)
+    : DEFAULT_TARGET.labelTransform;
+  return {
+    mode: source.mode === 'classification' ? 'classification' : 'return',
+    horizonDays: clampNumber(source.horizonDays, DEFAULT_TARGET.horizonDays, 1, 30),
+    executionPrice,
+    labelTransform,
+    labelTopPct: clampNumber(source.labelTopPct, DEFAULT_TARGET.labelTopPct, 0.05, 0.5),
+    labelDropExtremePct: clampNumber(source.labelDropExtremePct, DEFAULT_TARGET.labelDropExtremePct, 0, 0.2),
+  };
+};
 
 export type EnsembleMethod = 'none' | 'stacking';
 
@@ -861,6 +900,11 @@ export const DEFAULT_CONTEXT: TrainingContext = {
 export const DEFAULT_TARGET: TrainingTarget = {
   mode: 'return',
   horizonDays: 5,
+  // 默认严格实盘口径：T+1 开盘成交；选 close 可退回旧口径
+  executionPrice: 'open',
+  labelTransform: 'rank',
+  labelTopPct: 0.2,
+  labelDropExtremePct: 0,
 };
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -1031,10 +1075,14 @@ export const parseTrainingConfig = (source: string): ImportedTrainingConfig => {
     model_type: modelType as ModelType,
     model_types: requestedModelTypes.length > 0 ? requestedModelTypes : [modelType as ModelType],
   } as TrainingParams;
-  const target: TrainingTarget = {
+  const target = normalizeTrainingTarget({
     mode: targetMode,
     horizonDays,
-  };
+    executionPrice: (config.target.executionPrice ?? config.target.execution_price) as ExecutionPrice | undefined,
+    labelTransform: (config.target.labelTransform ?? config.target.label_transform) as LabelTransform | undefined,
+    labelTopPct: (config.target.labelTopPct ?? config.target.label_top_pct) as number | undefined,
+    labelDropExtremePct: (config.target.labelDropExtremePct ?? config.target.label_drop_extreme_pct) as number | undefined,
+  });
   const context = { ...DEFAULT_CONTEXT, ...config.context } as TrainingContext;
   const displayName = typeof config.displayName === 'string' ? config.displayName : '';
   const displayNameMode = config.displayNameMode === 'manual' ? 'manual' : 'auto';
@@ -1095,10 +1143,27 @@ export const parseSuggestedTimePeriods = (
 };
 
 export const buildLabelFormula = (target: TrainingTarget) => {
+  const horizon = Math.max(1, target.horizonDays);
+  const entry = target.executionPrice === 'open' ? `open(T+1)` : `close(T+1)`;
+  const exit = `close(T+${horizon + 1})`;
   if (target.mode === 'classification') {
-    return `label = 1[ future_return(T, T+${target.horizonDays}) > 0 ]`;
+    return `label = 1[ ${exit} / ${entry} - 1 > 0 ]`;
   }
-  return `label = future_return(T, T+${target.horizonDays}) = close(T+${target.horizonDays}) / close(T) - 1`;
+  return `label = ${exit} / ${entry} - 1`;
+};
+
+/** 标签截面变换的人读摘要（标签预览区展示）。 */
+export const buildLabelTransformSummary = (target: TrainingTarget) => {
+  switch (target.labelTransform) {
+    case 'zscore':
+      return '截面 zscore（每日 (x-mean)/std）';
+    case 'raw':
+      return '原始收益（不做截面变换）';
+    case 'top_tail':
+      return `top-tail：只学当日最强 ${Math.round(target.labelTopPct * 100)}%，其余置 0`;
+    default:
+      return '截面 rank（每日 pct rank − 0.5）';
+  }
 };
 
 export const buildEffectiveTradeDate = (target: TrainingTarget, referenceDate: Dayjs) => {
@@ -1635,6 +1700,10 @@ export const buildBackendTrainingPayload = (
     feature_categories: request.featureCategories,
     target_horizon_days: request.target.horizonDays,
     target_mode: request.target.mode,
+    execution_price: request.target.executionPrice,
+    label_transform: request.target.labelTransform,
+    label_top_pct: request.target.labelTopPct,
+    label_drop_extreme_pct: request.target.labelDropExtremePct,
     prediction_mode: request.params.prediction_mode ?? 'point',
     label_formula: request.labelFormula,
     effective_trade_date: request.effectiveTradeDate,
@@ -1847,6 +1916,10 @@ export const parseTrainingResult = (
     display_name: request.displayName,
     target_horizon_days: request.target.horizonDays,
     target_mode: request.target.mode,
+    execution_price: request.target.executionPrice,
+    label_transform: request.target.labelTransform,
+    label_top_pct: request.target.labelTopPct,
+    label_drop_extreme_pct: request.target.labelDropExtremePct,
     label_formula: request.labelFormula,
     training_window: request.trainingWindow,
     feature_count: request.selectedFeatures.length,
