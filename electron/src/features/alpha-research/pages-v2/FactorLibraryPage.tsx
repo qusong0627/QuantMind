@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { isAxiosError } from 'axios';
+import { Input, Modal } from 'antd';
 import { useAppSelector } from '../../../store';
 import { getSessionGeneration, registerSessionReset } from '../../../store/sessionBoundary';
 import { Card, CardContent, CardHeader, CardTitle } from '../components-v2/ui/Card';
@@ -153,6 +154,8 @@ export const FactorLibraryPage: React.FC<{
   const [lifecycleEvaluation, setLifecycleEvaluation] = useState<FactorLifecycleEvaluation | null>(null);
   const [lifecycleEvaluationBusy, setLifecycleEvaluationBusy] = useState(false);
   const [lifecycleEvaluationError, setLifecycleEvaluationError] = useState('');
+  const [restoreTarget, setRestoreTarget] = useState<string | null>(null);
+  const [restoreReason, setRestoreReason] = useState('');
   const [lifecycleEvents, setLifecycleEvents] = useState<FactorLifecycleEvent[]>([]);
   const [lifecycleHistoryCursor, setLifecycleHistoryCursor] = useState<number | null>(null);
   const [lifecycleHistoryLoading, setLifecycleHistoryLoading] = useState(false);
@@ -224,6 +227,8 @@ export const FactorLibraryPage: React.FC<{
     setLifecycleEvaluation(null);
     setLifecycleEvaluationBusy(false);
     setLifecycleEvaluationError('');
+    setRestoreTarget(null);
+    setRestoreReason('');
     setLifecycleEvents([]);
     setLifecycleHistoryCursor(null);
     setLifecycleHistoryLoading(false);
@@ -912,11 +917,13 @@ export const FactorLibraryPage: React.FC<{
     }
   };
 
-  const restoreSelectedLifecycle = async () => {
+  const restoreSelectedLifecycle = async (reasonInput: string) => {
     const factorId = selectedFactor?.factorId || selectedFactor?.factor_id || '';
-    if (!factorId || selectedFactor?.readOnly || lifecycleEvaluationBusy) return;
-    const reason = window.prompt('填写人工恢复原因（必填，最多 500 字）')?.trim();
+    if (!factorId || factorId !== restoreTarget || selectedFactor?.readOnly || lifecycleEvaluationBusy) return;
+    const reason = reasonInput.trim();
     if (!reason) return;
+    setRestoreTarget(null);
+    setRestoreReason('');
     const generation = sessionGenerationRef.current;
     const selectionRequest = selectionRequestRef.current;
     setLifecycleEvaluationBusy(true);
@@ -1619,7 +1626,7 @@ export const FactorLibraryPage: React.FC<{
                       <Button
                         variant="outline"
                         disabled={lifecycleEvaluationBusy || Boolean(selectedFactor.archivedAt)}
-                        onClick={() => void restoreSelectedLifecycle()}
+                        onClick={() => { setRestoreReason(''); setRestoreTarget(selectedFactor.factorId || selectedFactor.factor_id || null); }}
                       >
                         人工恢复
                       </Button>
@@ -1830,6 +1837,10 @@ export const FactorLibraryPage: React.FC<{
       {recoveryFactors && <FactorRecoveryDialog factors={recoveryFactors} universe={universeFilter === 'all' ? 'csi300' : universeFilter} onClose={closeRecovery} onChanged={() => setFactorRefreshSeq((value) => value + 1)} />}
       {poolCleanupOpen && <PoolCleanupDialog universe={universeFilter === 'all' ? undefined : universeFilter} onClose={closePoolCleanup} onRemoved={onPoolCleanupRemoved} />}
       {poolResearchOpen && universeFilter !== 'all' && <PoolResearchDialog universe={universeFilter} onClose={closePoolResearch} />}
+      <Modal centered title="人工恢复因子" open={!!restoreTarget} okText="确认恢复" cancelText="取消" okButtonProps={{ disabled: !restoreReason.trim() }} onCancel={() => { setRestoreTarget(null); setRestoreReason(''); }} onOk={() => void restoreSelectedLifecycle(restoreReason)}>
+        <p>请填写人工恢复原因（必填，最多 500 字）。</p>
+        <Input.TextArea aria-label="人工恢复原因" maxLength={500} value={restoreReason} onChange={(event) => setRestoreReason(event.target.value)} />
+      </Modal>
     </div>
   );
 };

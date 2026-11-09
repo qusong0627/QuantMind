@@ -33,12 +33,21 @@ export async function uploadPersonalPaper(file: File, signal?: AbortSignal): Pro
   if (!/\.pdf$/i.test(file.name)) throw new Error('仅支持 PDF 文件');
   const form = new FormData();
   form.append('file', file, file.name);
-  const response = await apiClient.post('/alpha-agent/papers', form, { signal });
+  // Let the browser generate the multipart boundary instead of inheriting JSON.
+  const response = await apiClient.post('/alpha-agent/papers', form, {
+    signal,
+    headers: { 'Content-Type': undefined },
+  });
   return unwrap<PersonalPaperUpload>(response);
 }
 
 export async function deletePersonalPaper(paperId: string, signal?: AbortSignal): Promise<void> {
   await apiClient.delete(`/alpha-agent/papers/${encodeURIComponent(paperId)}`, { signal });
+}
+
+export async function migratePersonalPaper(paperId: string, signal?: AbortSignal): Promise<{ doc_id: string }> {
+  const response = await apiClient.post(`/alpha-agent/papers/${encodeURIComponent(paperId)}/migrate`, undefined, { signal });
+  return unwrap<{ doc_id: string }>(response);
 }
 
 export async function downloadPersonalPaper(paperId: string, signal?: AbortSignal): Promise<Blob> {

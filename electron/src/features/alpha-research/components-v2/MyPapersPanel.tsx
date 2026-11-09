@@ -1,198 +1,128 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, Loader2, Trash2, UploadCloud } from 'lucide-react';
+import { isAxiosError } from 'axios';
+import { Modal } from 'antd';
 import { getSessionGeneration, registerSessionReset } from '../../../store/sessionBoundary';
-import {
-  deletePersonalPaper,
-  downloadPersonalPaper,
-  listPersonalPapers,
-  uploadPersonalPaper,
-  type PersonalPaper,
-} from '../services-v2/papersApi';
+import { useAppSelector } from '../../../store';
+import { listPersonalPapers, migratePersonalPaper, downloadPersonalPaper, deletePersonalPaper, type PersonalPaper } from '../services-v2/papersApi';
 import { Button } from './ui/Button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/Card';
 
 const PAGE_SIZE = 50;
 
-function formatBytes(value: number): string {
-  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MiB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${value} B`;
-}
-
-function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '时间未知';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-export const MyPapersPanel: React.FC = () => {
+export const MyPapersPanel: React.FC<{ onImported?: () => void }> = ({ onImported }) => {
   const [papers, setPapers] = useState<PersonalPaper[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [sessionEpoch, setSessionEpoch] = useState(() => getSessionGeneration());
+  const isAuthenticated = useAppSelector((state) => state.auth.isAuthenticated);
+  const isAuthenticating = useAppSelector((state) => state.auth.isLoading);
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [busyId, setBusyId] = useState('');
-  const action = useRef<AbortController | null>(null);
-  const fileInput = useRef<HTMLInputElement | null>(null);
-
+  const [message, setMessage] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<PersonalPaper | null>(null);
+  const controller = useRef<AbortController | null>(null);
   const load = useCallback(() => {
-    const controller = new AbortController();
-    action.current?.abort();
-    action.current = controller;
+    controller.current?.abort();
+    if (!isAuthenticated || isAuthenticating) { setPapers([]); setLoading(false); return; }
+    const current = new AbortController();
+    controller.current = current;
     const generation = getSessionGeneration();
     setLoading(true);
-    setError('');
-    listPersonalPapers({ limit: PAGE_SIZE, offset: 0 }, controller.signal)
-      .then((rows) => {
-        if (!controller.signal.aborted && generation === getSessionGeneration()) {
-          setPapers(rows);
-        }
-      })
-      .catch((failure: unknown) => {
-        if (!controller.signal.aborted && generation === getSessionGeneration()) {
-          setError(failure instanceof Error ? failure.message : '论文列表读取失败');
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted && generation === getSessionGeneration()) {
-          setLoading(false);
-        }
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-    return () => action.current?.abort();
-  }, [load]);
-
+    listPersonalPapers({ limit: PAGE_SIZE + 1, offset }, current.signal).then((rows) => {
+      if (!current.signal.aborted && generation === getSessionGeneration()) {
+        setPapers(rows.slice(0, PAGE_SIZE)); setHasMore(rows.length > PAGE_SIZE);
+      }
+    }).catch((cause: unknown) => {
+      if (!current.signal.aborted && generation === getSessionGeneration()) setError(cause instanceof Error ? cause.message : '旧论文读取失败');
+    }).finally(() => {
+      if (!current.signal.aborted && generation === getSessionGeneration()) setLoading(false);
+    });
+  }, [offset, isAuthenticated, isAuthenticating]);
+  useEffect(() => { load(); return () => controller.current?.abort(); }, [load, sessionEpoch]);
   useEffect(() => registerSessionReset(() => {
-    action.current?.abort();
-    setPapers([]);
-    setError('');
+    controller.current?.abort(); setPapers([]); setOffset(0); setHasMore(false); setBusy(''); setError(''); setMessage(''); setDeleteTarget(null); setLoading(false); setSessionEpoch(getSessionGeneration());
   }), []);
 
-  const upload = async (file: File) => {
-    const controller = new AbortController();
-    action.current?.abort();
-    action.current = controller;
+  const migrate = async (paper: PersonalPaper) => {
+    const current = new AbortController();
+    controller.current?.abort(); controller.current = current;
     const generation = getSessionGeneration();
-    setUploading(true);
-    setError('');
+    setBusy(paper.paper_id); setError(''); setMessage('');
     try {
-      await uploadPersonalPaper(file, controller.signal);
-      if (!controller.signal.aborted && generation === getSessionGeneration()) {
-        load();
-      }
-    } catch (failure: unknown) {
-      if (!controller.signal.aborted && generation === getSessionGeneration()) {
-        setError(failure instanceof Error ? failure.message : '论文上传失败');
+      await migratePersonalPaper(paper.paper_id, current.signal);
+      if (current.signal.aborted || generation !== getSessionGeneration()) return;
+      setPapers((rows) => rows.filter((row) => row.paper_id !== paper.paper_id));
+      setMessage('论文已迁移到下方文档列表；开源版暂不支持论文解析。');
+      setBusy('');
+      onImported?.();
+      load();
+    } catch (cause) {
+      if (!current.signal.aborted && generation === getSessionGeneration()) {
+        const detail: unknown = isAxiosError(cause) ? cause.response?.data?.detail : undefined;
+        setError(typeof detail === 'string' ? detail : cause instanceof Error ? cause.message : '迁移失败');
       }
     } finally {
-      if (!controller.signal.aborted && generation === getSessionGeneration()) {
-        setUploading(false);
-      }
-      if (fileInput.current) fileInput.current.value = '';
+      if (!current.signal.aborted && generation === getSessionGeneration()) setBusy('');
     }
   };
-
-  const remove = async (paper: PersonalPaper) => {
-    if (!window.confirm(`删除论文 ${paper.filename}？\n文件与记录都会被删除，不可恢复。`)) return;
-    const controller = new AbortController();
-    action.current?.abort();
-    action.current = controller;
-    const generation = getSessionGeneration();
-    setBusyId(paper.paper_id);
-    setError('');
-    try {
-      await deletePersonalPaper(paper.paper_id, controller.signal);
-      if (!controller.signal.aborted && generation === getSessionGeneration()) {
-        setPapers((rows) => rows.filter((row) => row.paper_id !== paper.paper_id));
-      }
-    } catch (failure: unknown) {
-      if (!controller.signal.aborted && generation === getSessionGeneration()) {
-        setError(failure instanceof Error ? failure.message : '论文删除失败');
-      }
-    } finally {
-      if (!controller.signal.aborted && generation === getSessionGeneration()) {
-        setBusyId('');
-      }
-    }
-  };
-
   const download = async (paper: PersonalPaper) => {
-    const controller = new AbortController();
-    setBusyId(paper.paper_id);
-    setError('');
+    const current = new AbortController();
+    controller.current?.abort(); controller.current = current;
+    const generation = getSessionGeneration();
+    setBusy(paper.paper_id); setError('');
     try {
-      const blob = await downloadPersonalPaper(paper.paper_id, controller.signal);
+      const blob = await downloadPersonalPaper(paper.paper_id, current.signal);
+      if (current.signal.aborted || generation !== getSessionGeneration()) return;
       const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = paper.filename;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = paper.filename;
+      document.body.appendChild(anchor); anchor.click(); anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
-    } catch (failure: unknown) {
-      setError(failure instanceof Error ? failure.message : '论文下载失败');
+    } catch (cause) {
+      if (!current.signal.aborted && generation === getSessionGeneration()) setError(cause instanceof Error ? cause.message : '下载失败');
     } finally {
-      setBusyId('');
+      if (!current.signal.aborted && generation === getSessionGeneration()) setBusy('');
     }
   };
-
-  return (
-    <Card className="glass">
-      <CardHeader className="pb-2 flex flex-row items-center justify-between">
-        <CardTitle className="text-sm">我的论文 · 本人上传持久保存</CardTitle>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={uploading}
-          onClick={() => fileInput.current?.click()}
-        >
-          {uploading ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="mr-1 h-3.5 w-3.5" />}
-          上传论文
-        </Button>
-        <input
-          ref={fileInput}
-          type="file"
-          accept=".pdf,application/pdf"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) void upload(file);
-          }}
-        />
-      </CardHeader>
-      <CardContent>
-        {error && <p className="mb-2 text-xs text-destructive">{error}</p>}
-        {loading ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">正在读取本人论文…</p>
-        ) : papers.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">还没有上传论文，仅支持 PDF（单文件最大 20 MiB）。</p>
-        ) : (
-          <ul className="space-y-1.5">
-            {papers.map((paper) => (
-              <li key={paper.paper_id} className="flex items-center justify-between gap-3 rounded-lg border border-border/60 p-2.5">
-                <div className="min-w-0">
-                  <div className="truncate text-xs font-medium" title={paper.filename}>{paper.filename}</div>
-                  <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-                    {formatBytes(paper.size_bytes)} · {formatDateTime(paper.created_at)}
-                  </div>
-                </div>
-                <div className="flex shrink-0 gap-1">
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="下载" disabled={!!busyId} onClick={() => void download(paper)}>
-                    <Download className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="删除论文（文件与记录，不可恢复）" disabled={!!busyId} onClick={() => void remove(paper)}>
-                    {busyId === paper.paper_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5 text-destructive" />}
-                  </Button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </CardContent>
-    </Card>
-  );
+  const remove = async (paper: PersonalPaper) => {
+    setDeleteTarget(null);
+    const current = new AbortController();
+    controller.current?.abort(); controller.current = current;
+    const generation = getSessionGeneration();
+    setBusy(paper.paper_id); setError('');
+    try {
+      await deletePersonalPaper(paper.paper_id, current.signal);
+      if (current.signal.aborted || generation !== getSessionGeneration()) return;
+      setBusy(''); load();
+    } catch (cause) {
+      if (!current.signal.aborted && generation === getSessionGeneration()) setError(cause instanceof Error ? cause.message : '删除失败');
+    } finally {
+      if (!current.signal.aborted && generation === getSessionGeneration()) setBusy('');
+    }
+  };
+  if (!loading && !papers.length && offset === 0 && !error && !message) return null;
+  return <Card className="glass">
+    <CardHeader><CardTitle className="text-sm">待迁移的旧论文</CardTitle></CardHeader>
+    <CardContent>
+      <p className="mb-2 text-xs text-muted-foreground">迁移后可在统一列表中管理，原文件不会复制。开源版暂不支持论文解析。</p>
+      {error && <p className="mb-2 text-xs text-destructive">{error}</p>}
+      {message && <p role="status" className="mb-2 text-xs text-muted-foreground">{message}</p>}
+      {loading ? <p>正在读取旧论文…</p> : <ul className="space-y-1">
+        {papers.map((paper) => <li key={paper.paper_id} className="flex items-center justify-between gap-2 text-xs">
+          <span className="truncate">{paper.filename}</span><span className="flex shrink-0 gap-1">
+            <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => void migrate(paper)}>迁移到文档</Button>
+            <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => void download(paper)}>下载</Button>
+            <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => setDeleteTarget(paper)}>删除</Button>
+          </span>
+        </li>)}
+      </ul>}
+      <div className="mt-2 flex justify-end gap-2">
+        <Button variant="outline" size="sm" disabled={offset === 0 || !!busy || loading} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>上一页</Button>
+        <Button variant="outline" size="sm" disabled={!hasMore || !!busy || loading} onClick={() => setOffset(offset + PAGE_SIZE)}>下一页</Button>
+      </div>
+    </CardContent>
+    <Modal centered title="删除旧论文" open={!!deleteTarget} okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onCancel={() => setDeleteTarget(null)} onOk={() => { if (deleteTarget) void remove(deleteTarget); }}>
+      <p>确定删除“{deleteTarget?.filename}”吗？此操作不可恢复。</p>
+    </Modal>
+  </Card>;
 };

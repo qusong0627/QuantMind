@@ -158,7 +158,7 @@ export async function uploadResearchDocument(fileOrFiles: File | File[], signal?
   const response = await apiClient.post<ApiEnvelope<ResearchDocumentUpload>>(
     '/alpha-agent/docs',
     form,
-    { signal },
+    { signal, headers: { 'Content-Type': undefined } },
   );
   return unwrap(response);
 }

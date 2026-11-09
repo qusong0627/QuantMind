@@ -252,6 +252,8 @@ class DocStore:
         if status is not None:
             where.append("status=:status")
             params["status"] = status
+        else:
+            where.append("status <> 'deleted'")
         async with get_session(read_only=True) as session:
             result = await session.execute(
                 text(

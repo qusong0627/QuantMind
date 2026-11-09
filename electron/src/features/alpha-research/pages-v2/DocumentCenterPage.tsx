@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Input, Modal } from 'antd';
 import { AlertCircle, Download, Eye, FileText, Pencil, RefreshCw, Save, Trash2, UploadCloud, WandSparkles, CircleStop, Play } from 'lucide-react';
 import { useAppSelector } from '../../../store';
 import { getSessionGeneration, registerSessionReset } from '../../../store/sessionBoundary';
@@ -42,7 +43,7 @@ function errorMessage(error: unknown): string {
       : '文档请求失败，请稍后重试';
 }
 
-export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHeader = false }) => {
+export const DocumentCenterPage: React.FC<{ hideHeader?: boolean; refreshToken?: number }> = ({ hideHeader = false, refreshToken = 0 }) => {
   const isAuthenticated = useAppSelector((state) => state.auth.isAuthenticated);
   const isAuthenticating = useAppSelector((state) => state.auth.isLoading);
   const [documents, setDocuments] = useState<ResearchDocument[]>([]);
@@ -52,6 +53,9 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
   const [busyId, setBusyId] = useState('');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<ResearchDocument | null>(null);
+  const [reconcileTarget, setReconcileTarget] = useState<ResearchDocument | null>(null);
+  const [reconcileBatchId, setReconcileBatchId] = useState('');
   const [markdownPreview, setMarkdownPreview] = useState<{ filename: string; content: string; truncated: boolean } | null>(null);
   const [organizeTarget, setOrganizeTarget] = useState<ResearchDocument | null>(null);
   const [organizeKind, setOrganizeKind] = useState<'free' | 'paper'>('free');
@@ -71,6 +75,7 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
   const listController = useRef<AbortController | null>(null);
   const actionController = useRef<AbortController | null>(null);
   const requestEpoch = useRef(0);
+  const lastRefresh = useRef(refreshToken);
 
   useEffect(() => registerSessionReset(() => {
     requestEpoch.current += 1;
@@ -84,6 +89,9 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
     setBusyId('');
     setError('');
     setMessage('');
+    setDeleteTarget(null);
+    setReconcileTarget(null);
+    setReconcileBatchId('');
     setMarkdownPreview(null);
     setOrganizeTarget(null);
     setOrganizedDraft(null);
@@ -118,7 +126,7 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
     try {
       const page = await listResearchDocuments({ limit: PAGE_SIZE, offset: nextOffset }, controller.signal);
       if (controller.signal.aborted || generation !== getSessionGeneration() || requestId !== requestEpoch.current) return;
-      setDocuments(page.items);
+      setDocuments(page.items.filter((document) => document.status !== 'deleted'));
       setHasMore(page.has_more);
     } catch (cause) {
       if (!controller.signal.aborted && generation === getSessionGeneration()) setError(errorMessage(cause));
@@ -128,8 +136,15 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
   }, [isAuthenticated, isAuthenticating, offset]);
 
   useEffect(() => {
+    if (lastRefresh.current !== refreshToken) {
+      lastRefresh.current = refreshToken;
+      if (offset !== 0) {
+        setOffset(0);
+        return;
+      }
+    }
     void loadDocuments(offset);
-  }, [loadDocuments, offset, sessionEpoch]);
+  }, [loadDocuments, offset, sessionEpoch, refreshToken]);
 
   useEffect(() => {
     if (!documents.some((document) => document.status === 'parsing' || ['queued', 'running', 'stopping'].includes(document.organize_state || ''))) return undefined;
@@ -204,13 +219,14 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
   };
 
   const handleDelete = async (document: ResearchDocument) => {
-    if (!window.confirm(`删除本人文档“${document.filename}”？`)) return;
+    setDeleteTarget(null);
     const { controller, generation } = startAction();
     setBusyId(document.doc_id);
     setError('');
     try {
       await deleteResearchDocument(document.doc_id, controller.signal);
       if (controller.signal.aborted || generation !== getSessionGeneration()) return;
+      setDocuments((rows) => rows.filter((row) => row.doc_id !== document.doc_id));
       setMessage(`已删除：${document.filename}`);
       await loadDocuments(offset);
     } catch (cause) {
@@ -253,11 +269,11 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
     }
   };
 
-  const handleReconcileParse = async (document: ResearchDocument) => {
-    const batchId = window.prompt(
-      '请从 MinerU 管理端找到这份文档原提交对应的 batch_id。系统会查询批次并核对文档全部原件 ID；不要填写其他文档的批次。',
-    )?.trim();
+  const handleReconcileParse = async (document: ResearchDocument, input: string) => {
+    const batchId = input.trim();
     if (!batchId) return;
+    setReconcileTarget(null);
+    setReconcileBatchId('');
     const { controller, generation } = startAction();
     setBusyId(document.doc_id);
     setError('');
@@ -510,15 +526,16 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
 
   return (
     <div className="space-y-4 animate-fade-in-up">
-      {!hideHeader && (
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
+          {!hideHeader && <>
           <h1 className="text-xl font-bold flex items-center gap-2">
             <FileText className="h-5 w-5 text-primary" />研究文档
           </h1>
           <p className="text-xs text-muted-foreground mt-0.5">
             PDF 原文和 MinerU 解析产物按当前账号隔离保存；解析结果可供后续整理与文档驱动挖掘使用。
           </p>
+          </>}
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" className="text-xs" onClick={() => void loadDocuments(offset)} disabled={loading || !!busyId}>
@@ -537,13 +554,12 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
           />
         </div>
       </header>
-      )}
 
       {error && <Card className="border-destructive/50"><CardContent className="p-4 flex items-center gap-2 text-destructive"><AlertCircle className="h-4 w-4" />{error}</CardContent></Card>}
       {message && <div role="status" className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-xs text-emerald-700">{message}</div>}
 
       <Card className="glass">
-        <CardHeader><CardTitle className="text-sm">本人文档</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-sm">因子挖掘文档</CardTitle></CardHeader>
         <CardContent className="p-0 overflow-x-auto">
           <table className="w-full text-xs">
             <thead><tr className="border-b border-border/60 text-muted-foreground">
@@ -558,13 +574,13 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
                   <td className="p-3 text-muted-foreground">{new Date(document.created_at).toLocaleString()}</td>
                   <td className="p-3 text-right whitespace-nowrap">
                     {(document.status === 'uploaded' || document.status === 'parse_failed') && (
-                      <Button variant="ghost" size="sm" title="开始解析" onClick={() => void handleParse(document)} disabled={!!busyId}>
+                      <Button variant="ghost" size="sm" title="开源版暂不支持论文解析" onClick={() => void handleParse(document)} disabled>
                         <WandSparkles className="h-4 w-4" />
                       </Button>
                     )}
                     {document.status === 'parsing' && document.parse_job_id && (
                       document.parse_state === 'uncertain' ? (
-                        <Button variant="outline" size="sm" title="核验并恢复原 MinerU 批次" onClick={() => void handleReconcileParse(document)} disabled={!!busyId}>
+                        <Button variant="outline" size="sm" title="核验并恢复原 MinerU 批次" onClick={() => { setReconcileBatchId(''); setReconcileTarget(document); }} disabled={!!busyId}>
                           {busyId === document.doc_id ? '核验中…' : '核验批次'}
                         </Button>
                       ) : (
@@ -601,7 +617,7 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
                     <Button variant="ghost" size="sm" title="下载原文" onClick={() => void handleDownload(document)} disabled={!!busyId}>
                       <Download className="h-4 w-4" />
                     </Button>
-                    <Button variant="ghost" size="sm" title="删除文档" onClick={() => void handleDelete(document)} disabled={!!busyId || document.status === 'parsing' || ['queued', 'running', 'stopping'].includes(document.organize_state || '')}>
+                    <Button variant="ghost" size="sm" title="删除文档" onClick={() => setDeleteTarget(document)} disabled={!!busyId || document.status === 'parsing' || ['queued', 'running', 'stopping'].includes(document.organize_state || '')}>
                       <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
                   </td>
@@ -620,6 +636,13 @@ export const DocumentCenterPage: React.FC<{ hideHeader?: boolean }> = ({ hideHea
           </div>
         </div>
       </Card>
+      <Modal centered title="删除文档" open={!!deleteTarget} okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onCancel={() => setDeleteTarget(null)} onOk={() => { if (deleteTarget) void handleDelete(deleteTarget); }}>
+        <p>确定删除“{deleteTarget?.filename}”吗？此操作不可恢复。</p>
+      </Modal>
+      <Modal centered title="核验原解析批次" open={!!reconcileTarget} okText="核验批次" cancelText="取消" okButtonProps={{ disabled: !reconcileBatchId.trim() }} onCancel={() => { setReconcileTarget(null); setReconcileBatchId(''); }} onOk={() => { if (reconcileTarget) void handleReconcileParse(reconcileTarget, reconcileBatchId); }}>
+        <p>请从 MinerU 管理端找到该文档原提交的 batch_id。系统会核对全部原件 ID，请勿填写其他文档的批次。</p>
+        <Input aria-label="MinerU batch_id" value={reconcileBatchId} onChange={(event) => setReconcileBatchId(event.target.value)} />
+      </Modal>
       {markdownPreview && (
         <Card className="glass">
           <CardHeader className="flex flex-row items-center justify-between">

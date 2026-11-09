@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { BookOpen } from 'lucide-react';
 import { MyPapersPanel } from '../components-v2/MyPapersPanel';
 import { DocumentCenterPage } from './DocumentCenterPage';
 
 export const PaperLibraryPage: React.FC = () => {
+  const [documentRefresh, setDocumentRefresh] = useState(0);
   return (
     <div className="space-y-4 animate-fade-in-up">
       <div>
@@ -12,11 +13,11 @@ export const PaperLibraryPage: React.FC = () => {
           论文库
         </h1>
         <p className="text-xs text-muted-foreground mt-0.5">
-          本人上传的论文持久保存，支持下载与删除；下方研究文档走解析整理流程，解析结果可供文档驱动挖掘使用。
+          保存和管理 PDF 原文。开源版暂不支持论文解析及由论文发起挖掘。
         </p>
       </div>
-      <MyPapersPanel />
-      <DocumentCenterPage hideHeader />
+      <MyPapersPanel onImported={() => setDocumentRefresh((value) => value + 1)} />
+      <DocumentCenterPage hideHeader refreshToken={documentRefresh} />
     </div>
   );
 };

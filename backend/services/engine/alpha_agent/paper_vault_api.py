@@ -21,6 +21,7 @@ from backend.services.engine.alpha_agent.doc_api import (
 from backend.services.engine.auth_context import get_authenticated_identity
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.owner_scope import OwnerScope
+from backend.shared.utc_datetime import utc_now
 
 router = APIRouter()
 
@@ -67,7 +68,9 @@ async def upload_paper(request: Request) -> dict:
     try:
         values = form.getlist("file")
         if len(values) != 1 or not isinstance(values[0], UploadFile):
-            raise HTTPException(status_code=400, detail="缺少 PDF 文件（multipart 字段名 file）")
+            raise HTTPException(
+                status_code=400, detail="缺少 PDF 文件（multipart 字段名 file）"
+            )
         upload = values[0]
         filename = upload.filename or ""
         if not _SAFE_PAPER_FILENAME.fullmatch(filename) or filename.startswith("."):
@@ -101,7 +104,9 @@ async def upload_paper(request: Request) -> dict:
             resource_namespace="pipeline_artifacts",
         )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="存储配额或论文空间暂不可用") from exc
+        raise HTTPException(
+            status_code=503, detail="存储配额或论文空间暂不可用"
+        ) from exc
 
     try:
         owner = OwnerScope(tenant_id, user_id)
@@ -149,15 +154,19 @@ async def list_papers(
     owner = OwnerScope(tenant_id, user_id)
     async with get_session(read_only=True) as session:
         rows = (
-            await session.execute(
-                text(
-                    "SELECT paper_id,filename,size_bytes,sha256,created_at "
-                    "FROM user_papers WHERE tenant_id=:tenant_id AND user_id=:user_id "
-                    "ORDER BY created_at DESC, paper_id DESC LIMIT :limit OFFSET :offset"
-                ),
-                {**owner.sql_params(), "limit": limit, "offset": offset},
+            (
+                await session.execute(
+                    text(
+                        "SELECT paper_id,filename,size_bytes,sha256,created_at "
+                        "FROM user_papers WHERE tenant_id=:tenant_id AND user_id=:user_id "
+                        "ORDER BY created_at DESC, paper_id DESC LIMIT :limit OFFSET :offset"
+                    ),
+                    {**owner.sql_params(), "limit": limit, "offset": offset},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
     return {"code": 200, "data": [_public(dict(row)) for row in rows]}
 
 
@@ -169,15 +178,19 @@ async def get_paper(paper_id: str, request: Request, response: Response) -> dict
     owner = OwnerScope(tenant_id, user_id)
     async with get_session(read_only=True) as session:
         row = (
-            await session.execute(
-                text(
-                    "SELECT paper_id,filename,size_bytes,sha256,created_at "
-                    "FROM user_papers "
-                    "WHERE tenant_id=:tenant_id AND user_id=:user_id AND paper_id=:paper"
-                ),
-                {**owner.sql_params(), "paper": paper_id},
+            (
+                await session.execute(
+                    text(
+                        "SELECT paper_id,filename,size_bytes,sha256,created_at "
+                        "FROM user_papers "
+                        "WHERE tenant_id=:tenant_id AND user_id=:user_id AND paper_id=:paper"
+                    ),
+                    {**owner.sql_params(), "paper": paper_id},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     if row is None:
         raise HTTPException(status_code=404, detail="论文不存在")
     response.headers["Cache-Control"] = "private, no-store"
@@ -192,14 +205,18 @@ async def download_paper(paper_id: str, request: Request):
     owner = OwnerScope(tenant_id, user_id)
     async with get_session(read_only=True) as session:
         row = (
-            await session.execute(
-                text(
-                    "SELECT filename,storage_key FROM user_papers "
-                    "WHERE tenant_id=:tenant_id AND user_id=:user_id AND paper_id=:paper"
-                ),
-                {**owner.sql_params(), "paper": paper_id},
+            (
+                await session.execute(
+                    text(
+                        "SELECT filename,storage_key FROM user_papers "
+                        "WHERE tenant_id=:tenant_id AND user_id=:user_id AND paper_id=:paper"
+                    ),
+                    {**owner.sql_params(), "paper": paper_id},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     if row is None:
         raise HTTPException(status_code=404, detail="论文不存在")
     try:
@@ -216,32 +233,111 @@ async def download_paper(paper_id: str, request: Request):
     )
 
 
+@router.post("/papers/{paper_id}/migrate")
+async def migrate_paper(paper_id: str, request: Request) -> dict:
+    """Transfer a legacy paper to the document workflow without copying its file."""
+    tenant_id, user_id = _owner(request)
+    if not _PAPER_ID.fullmatch(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    owner = OwnerScope(tenant_id, user_id)
+    doc_id = f"paper-{hashlib.sha256(paper_id.encode()).hexdigest()}"
+    params = {**owner.sql_params(), "paper": paper_id, "doc_id": doc_id}
+    async with get_session() as session:
+        row = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT filename,size_bytes,sha256,storage_key,created_at FROM user_papers "
+                        "WHERE tenant_id=:tenant_id AND user_id=:user_id AND paper_id=:paper FOR UPDATE"
+                    ),
+                    params,
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            existing = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT doc_id,status FROM rd_agent_docs WHERE tenant_id=:tenant_id "
+                            "AND user_id=:user_id AND doc_id=:doc_id"
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if existing and existing["status"] not in {"deleted", "expired"}:
+                return {"code": 200, "data": {"doc_id": params["doc_id"]}}
+            raise HTTPException(status_code=404, detail="论文不存在")
+        from backend.services.engine.alpha_agent.doc_parser import _safe_source_parts
+
+        try:
+            await asyncio.to_thread(
+                _safe_source_parts,
+                {**dict(row), "ext": "pdf", "files_count": 1},
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=409, detail="论文原件不可用或校验失败"
+            ) from exc
+        result = await session.execute(
+            text(
+                "INSERT INTO rd_agent_docs "
+                "(tenant_id,user_id,doc_id,filename,ext,size_bytes,sha256,storage_key,"
+                "files_count,original_parts,status,created_at,updated_at) "
+                "VALUES (:tenant_id,:user_id,:doc_id,:filename,'pdf',:size_bytes,:sha256,"
+                ":storage_key,1,CAST('[]' AS jsonb),'uploaded',:now,:now) "
+                "ON CONFLICT (tenant_id,user_id,doc_id) DO NOTHING"
+            ),
+            {**params, **dict(row), "now": utc_now()},
+        )
+        if result.rowcount != 1:
+            raise HTTPException(status_code=409, detail="文档编号冲突，论文未迁移")
+        await session.execute(
+            text(
+                "DELETE FROM user_papers WHERE tenant_id=:tenant_id AND user_id=:user_id AND paper_id=:paper"
+            ),
+            params,
+        )
+    return {"code": 200, "data": {"doc_id": params["doc_id"]}}
+
+
 @router.delete("/papers/{paper_id}")
 async def delete_paper(paper_id: str, request: Request, response: Response) -> dict:
     tenant_id, user_id = _owner(request)
     if not _PAPER_ID.fullmatch(paper_id):
         raise HTTPException(status_code=404, detail="论文不存在")
     owner = OwnerScope(tenant_id, user_id)
-    async with get_session(read_only=True) as session:
+    async with get_session() as session:
         row = (
-            await session.execute(
-                text(
-                    "SELECT storage_key FROM user_papers "
-                    "WHERE tenant_id=:tenant_id AND user_id=:user_id AND paper_id=:paper"
-                ),
-                {**owner.sql_params(), "paper": paper_id},
+            (
+                await session.execute(
+                    text(
+                        "SELECT storage_key FROM user_papers "
+                        "WHERE tenant_id=:tenant_id AND user_id=:user_id AND paper_id=:paper FOR UPDATE"
+                    ),
+                    {**owner.sql_params(), "paper": paper_id},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if row is None:
             raise HTTPException(status_code=404, detail="论文不存在")
         storage_key = str(row["storage_key"])
-    # Delete the artifact first: a quota failure keeps the row for a clean retry
-    # instead of orphaning the file.
-    try:
-        await _delete_file_and_usage(tenant_id, user_id, storage_key)
-    except HTTPException as exc:
-        raise HTTPException(status_code=503, detail="论文文件清理失败，请稍后重试") from exc
-    async with get_session() as session:
+        # Hold the row lock until cleanup and deletion finish, excluding migration.
+        try:
+            await _delete_file_and_usage(tenant_id, user_id, storage_key)
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=503, detail="论文文件清理失败，请稍后重试"
+            ) from exc
         result = await session.execute(
             text(
                 "DELETE FROM user_papers "

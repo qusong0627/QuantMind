@@ -44,7 +44,7 @@ describe('private research document API', () => {
     expect(url).toBe('/alpha-agent/docs');
     expect(body).toBeInstanceOf(FormData);
     expect((body as FormData).get('file')).toMatchObject({ name: 'research.pdf' });
-    expect(options).toEqual({ signal });
+    expect(options).toEqual({ signal, headers: { 'Content-Type': undefined } });
   });
 
   it('uploads multiple PDFs in merge order using repeated file fields', async () => {
