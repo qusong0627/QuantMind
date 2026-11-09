@@ -12,9 +12,11 @@
   - `rank_4h` = 同日同 cutoff 的截面分位（0-1）
 - 可交易性：
   - `is_limit_up`：px/昨收 - 1 ≥ 涨停阈值 - 0.3%，且买一为空/量为 0（封板买不进）
+  - `is_sealed`：卖一无货（ask1 为空或卖一量 0）——**任何价位都买不进**，含 ST 股 5% 涨停；
+    原判据按 10%/20% 阈值漏掉 ST（2026-11-09 修，回测中买单 40% 是这类票）
   - `is_suspended`：分钟数 < 60 或全天成交量 0
   - `is_new`：60 个交易日前无日线（次新，前 60 日剔除）
-  - `tradable = not (limit_up or suspended or new) and px not null`
+  - `tradable = not (limit_up or sealed or suspended or new) and px not null`
 
 输出：`data/minute_model/panel/date=YYYYMMDD/data.parquet`（约 2.5 万行/天）
 
@@ -61,7 +63,45 @@ CONTEXT_COLS = [
     "style_beta_20", "style_idio_vol_20",
     "tech_bb_pos", "tech_close_to_high_20", "tech_max_drawdown_20",
     "mfi_14", "obv_slope_20",
+    "turn_breakout_20",
+    "turn_high_days_10",
+    "turn_acc_20",
+    "amt_skew_20",
+    "amt_high_days_10",
+    "vol_parkinson_20",
+    "vol_gk_20",
+    "vol_turnover_open",
+    "vol_turnover_close",
+    "ind_netflow_rank_20",
+    "ind_relative_pe",
+    "ind_breadth_up_20",
+    "concept_flow_rank",
+    "concept_leader_score",
+    "chip_profit_delta_5",
+    "chip_cost_90_width",
+    "style_residual_ret_20",
+    "tech_cci_20",
+    "tech_adx_14",
+    "tech_bb_width",
+    "flow_medium_net",
+    "flow_small_net",
+    "flow_big_trade_ratio",
+    "flow_medium_ratio",
+    "micro_vpin_tail_risk",
+    "micro_vpin_entropy",
+    "micro_vpin_hurst",
+    "micro_trade_run_length",
+    "micro_trade_arrival_rate",
+    "micro_liquidity_roll",
+    "micro_liquidity_cost",
+    "micro_liquidity_volatility",
+    "mom_rsi_14",
+    "amt_net_flow_20",
 ]
+
+# 当日截面分位（相对强弱，避免绝对值口径）
+RANK_COLS = ["ret_open", "range_pos", "vwap_gap", "ret_5m", "ret_30m", "vol_30m",
+             "buy_ratio", "net_amt", "imb_5", "amt_ratio_5_30", "dir_autocorr", "large_ratio"]
 
 # cutoff -> 5h 终点（"next cutoff" = 次日同 cutoff；"close" = 次日收盘）
 FIVE_H_MAP = {"10:30": "11:30", "11:30": "13:30", "13:30": "14:30", "14:30": "close", "14:50": "close"}
@@ -193,15 +233,30 @@ WITH f AS (
                  AND (ask1 IS NULL OR ask_depth_1 = 0) THEN TRUE
             ELSE FALSE
         END AS is_limit_up,
+        -- 卖一无货 = 任何价位都买不进（含 ST 股 5% 涨停、一字板）：
+        -- 原 is_limit_up 按 10%/20% 阈值判定，漏掉 ST 的 5% 涨停（2026-11-09 修）
+        (ask1 IS NULL OR ask_depth_1 = 0) AS is_sealed,
         (n_bars < 60 OR cum_volume = 0) AS is_suspended,
         (has_60d_history IS DISTINCT FROM TRUE) AS is_new
     FROM base
 )
 SELECT *,
     ret_4h IS NOT NULL AND ret_4h BETWEEN -0.35 AND 0.35 AS label_ok,
-    (NOT is_limit_up AND NOT is_suspended AND NOT is_new AND px IS NOT NULL) AS tradable,
+    (NOT is_limit_up AND NOT is_sealed AND NOT is_suspended AND NOT is_new AND px IS NOT NULL) AS tradable,
     percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_4h) AS rank_4h,
-    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_5h) AS rank_5h
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_5h) AS rank_5h,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_open) AS ret_open_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY range_pos) AS range_pos_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY vwap_gap) AS vwap_gap_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_5m) AS ret_5m_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY ret_30m) AS ret_30m_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY vol_30m) AS vol_30m_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY buy_ratio) AS buy_ratio_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY net_amt) AS net_amt_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY imb_5) AS imb_5_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY amt_ratio_5_30) AS amt_ratio_5_30_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY dir_autocorr) AS dir_autocorr_rk,
+    percent_rank() OVER (PARTITION BY date, cutoff ORDER BY large_ratio) AS large_ratio_rk
 FROM labels
 """
 

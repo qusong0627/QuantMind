@@ -80,7 +80,12 @@ def _frame(con, d: str) -> pd.DataFrame:
     df["is_limit_up"] = (df["px"] / df["prev_close"] - 1 >= lim - 0.003) & (
         df["ask1"].isna() | (df["ask_depth_1"] == 0)
     )
-    df["tradable"] = (df["n_bars"] >= 60) & (df["cum_volume"] > 0) & df["px"].notna() & (~df["is_limit_up"])
+    # 卖一无货 = 任何价位都买不进（含 ST 股 5% 涨停）；原判据按 10%/20% 阈值漏掉 ST（2026-11-09 修）
+    df["is_sealed"] = df["ask1"].isna() | (df["ask_depth_1"] == 0)
+    df["tradable"] = (
+        (df["n_bars"] >= 60) & (df["cum_volume"] > 0) & df["px"].notna()
+        & (~df["is_limit_up"]) & (~df["is_sealed"])
+    )
     return df
 
 

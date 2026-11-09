@@ -54,7 +54,7 @@ def _days(start: str, end: str) -> list[str]:
 
 def _predict_day(con, d: str, models, feats_list) -> pd.DataFrame:
     df = con.sql(f"SELECT * FROM read_parquet('{PANEL}/date={d}/data.parquet') WHERE cutoff = '{CUTOFF}'").df()
-    df = df[df["label_ok"] & df["tradable"] & df["ret_4h"].notna()]
+    df = df[df["label_ok"] & df["tradable"] & df["ret_4h"].notna() & (df["ask_depth_1"] > 0)]
     if len(df) < 100:
         return pd.DataFrame()
     df["cutoff_idx"] = CUTOFF_IDX
