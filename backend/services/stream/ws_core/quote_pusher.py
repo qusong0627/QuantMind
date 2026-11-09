@@ -101,6 +101,9 @@ class QuotePusher:
     async def subscribe_quote(self, stock_code: str):
         """订阅股票行情"""
         self.subscribed_stocks.add(stock_code)
+        # 新订阅强制下次全量推送首包：_has_quote_changed 按全局缓存判重，
+        # 后加入的客户端在价格/昨收无变化时永远收不到首包，持仓当日收益 stuck `--`。
+        self.cache.pop(stock_code, None)
         logger.info(f"订阅列表增加: {stock_code}, 当前共 {len(self.subscribed_stocks)} 只")
 
     async def unsubscribe_quote(self, stock_code: str):
@@ -115,6 +118,9 @@ class QuotePusher:
             topic.split("stock.", 1)[1] for topic in topics if isinstance(topic, str) and topic.startswith("stock.")
         }
         if stock_topics != self.subscribed_stocks:
+            # 新增标的同样清缓存逼出首包（与 subscribe_quote 同理）。
+            for _new in stock_topics - self.subscribed_stocks:
+                self.cache.pop(_new, None)
             self.subscribed_stocks = stock_topics
             logger.info("订阅列表已重算: %d 只股票", len(self.subscribed_stocks))
 
