@@ -171,7 +171,8 @@ def _apply_label_formula_overrides(cfg: dict) -> None:
     旧版 _normalize_payload 白名单不会保留 execution_price/label_transform/
     label_top_pct/label_drop_extreme_pct；label_formula 是白名单字段。格式：
     'execution_price=open;label_transform=top_tail;label_top_pct=0.2'。
-    显式 config 字段优先（setdefault），只覆盖缺省。
+    label_formula 是**显式覆盖通道**：与 config 里的同名字段同时出现时以它为准
+    （API 侧 label_transform 只认旧枚举，size_excess_rank 等新标签必须走这里）。
     """
     label = cfg.get("label")
     if not isinstance(label, dict):
@@ -187,7 +188,7 @@ def _apply_label_formula_overrides(cfg: dict) -> None:
         k, v = part.split("=", 1)
         k, v = k.strip(), v.strip()
         if k in allowed and v:
-            label.setdefault(k, v)
+            label[k] = v
             applied[k] = v
     if applied:
         logger.info("Label formula overrides: %s", applied)
