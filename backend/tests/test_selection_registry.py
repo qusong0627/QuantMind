@@ -470,3 +470,39 @@ def test_merge_lessons_updates_kind_on_same_object():
     assert merged[0]["statement"] == "new"
     assert merged[0]["times_seen"] == 2
     assert merged[0]["status"] == "confirmed"
+
+
+@pytest.mark.unit
+def test_strict_lessons_flags_negative_and_filter():
+    record = _record_with_oos()
+    record["strict_backtests"] = {
+        "t3_baseline": {
+            "costs": {
+                "0.15%": {
+                    "Top20": {
+                        "net_5d_pct": 0.1,
+                        "nw_t": 0.3,
+                        "ann_pct": -5.0,
+                        "mdd_pct": -27.0,
+                    }
+                }
+            }
+        },
+        "t3_ma20": {
+            "filter": {"ma": 20},
+            "costs": {
+                "0.15%": {
+                    "Top20": {
+                        "net_5d_pct": -0.4,
+                        "nw_t": -0.8,
+                        "ann_pct": -38.0,
+                        "mdd_pct": -20.0,
+                    }
+                }
+            },
+        },
+    }
+    lessons = reg.strict_lessons(record)
+    assert any(x["scope"] == "model" and x["kind"] == "pitfall" for x in lessons)
+    assert any("过滤" in x["statement"] for x in lessons)
+    assert all(x["do_not_apply_to"] == ["test"] for x in lessons)

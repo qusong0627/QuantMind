@@ -466,6 +466,68 @@ def _confidence(*, strong: bool, n: int) -> str:
     return "low"
 
 
+def strict_lessons(record: dict) -> list[dict]:
+    """从严格回测结果提炼模型级经验/坑（长多是否成立、过滤是否有害）。"""
+    out: list[dict] = []
+    runs = record.get("strict_backtests") or {}
+    baseline: dict[str, dict] = {}
+    for label, metrics in sorted(runs.items()):
+        top = (((metrics.get("costs") or {}).get("0.15%") or {}).get("Top20")) or {}
+        if not top:
+            continue
+        model = str(label).split("_")[0]
+        if "_ma" not in str(label):
+            baseline[model] = top
+            t_stat = float(top.get("nw_t") or 0.0)
+            if float(top.get("ann_pct") or 0.0) < 0 or t_stat < 1.5:
+                out.append(
+                    _lesson(
+                        record,
+                        kind="pitfall",
+                        scope="model",
+                        key=f"strict_long_only:{label}",
+                        statement=(
+                            f"{label} 长多 Top20 在 0.15% 成本下 5日净 "
+                            f"{top.get('net_5d_pct', 0):+.3f}%、NW t {t_stat:+.2f}、"
+                            f"年化 {top.get('ann_pct', 0):+.1f}%、"
+                            f"MDD {top.get('mdd_pct', 0):.1f}%；长多不成立"
+                        ),
+                        evidence=deepcopy(top),
+                        confidence="high" if t_stat < 1.0 else "medium",
+                    )
+                )
+        else:
+            base = baseline.get(model)
+            if not base:
+                continue
+            delta = float(top.get("net_5d_pct") or 0) - float(
+                base.get("net_5d_pct") or 0
+            )
+            if delta < -0.05:
+                out.append(
+                    _lesson(
+                        record,
+                        kind="pitfall",
+                        scope="model",
+                        key=f"strict_filter:{label}",
+                        statement=(
+                            f"{label} 的沪深300 MA 过滤把 5日净从 "
+                            f"{base.get('net_5d_pct', 0):+.3f}% 降到 "
+                            f"{top.get('net_5d_pct', 0):+.3f}%（Δ {delta:+.3f}%），"
+                            "该过滤方向有害"
+                        ),
+                        evidence={
+                            "baseline_net_5d_pct": base.get("net_5d_pct"),
+                            "filtered_net_5d_pct": top.get("net_5d_pct"),
+                            "ma": (metrics.get("filter") or {}).get("ma"),
+                            "delta": delta,
+                        },
+                        confidence="high",
+                    )
+                )
+    return out
+
+
 def build_lessons(record: dict, window: str = "valid") -> list[dict]:
     """从 valid 窗口自动提炼经验/坑；test 窗口永不参与（防过拟合）。"""
     if window != "valid":
@@ -658,6 +720,7 @@ def build_lessons(record: dict, window: str = "valid") -> list[dict]:
                 confidence=str(issue.get("confidence") or "medium"),
             )
         )
+    lessons.extend(strict_lessons(record))
     return lessons
 
 
@@ -889,7 +952,7 @@ def render_lessons_md(lessons: list[dict], out: Path) -> None:
         for x in lessons
         if x.get("status") == "open"
         and x.get("kind") == "lesson"
-        and x.get("scope") in ("metric", "group", "library", "data")
+        and x.get("scope") in ("metric", "group", "library", "data", "model")
     ]
     feature_open = [
         x for x in lessons if x.get("status") == "open" and x.get("scope") == "feature"
@@ -909,7 +972,7 @@ def render_lessons_md(lessons: list[dict], out: Path) -> None:
         f"坑 {len(pitfalls)} 条；"
         f"`confirmed` {len(confirmed)} 条，`open` {sum(1 for x in lessons if x.get('status') == 'open')} 条。",
         f"- 特征级 {sum(1 for x in lessons if x.get('scope') == 'feature')} 条，"
-        f"类别/库/指标/数据级 {sum(1 for x in lessons if x.get('scope') != 'feature')} 条。",
+        f"类别/库/指标/数据/模型级 {sum(1 for x in lessons if x.get('scope') != 'feature')} 条。",
         "- 完整清单（含 evidence）见 `lessons.json`；这里是按严重度排序的摘要。",
         "",
         "## 一、优先处理：confirmed + 所有坑",
@@ -1094,6 +1157,14 @@ class SelectionRegistry:
         self._write_oos_csv(record)
         return record
 
+    def attach_strict(self, run_id: str, label: str, metrics: dict) -> dict:
+        record = self.get(run_id)
+        strict = dict(record.get("strict_backtests") or {})
+        strict[str(label)] = deepcopy(metrics)
+        record["strict_backtests"] = strict
+        self._write_run(record)
+        return record
+
     def add_lessons(self, run_id: str, lessons: list[dict]) -> list[dict]:
         merged = merge_lessons(self._load_lessons(), lessons)
         _atomic_write_json(
@@ -1272,6 +1343,11 @@ def main() -> int:
     p.add_argument("--run-id", required=True)
     p.add_argument("--oos", required=True)
 
+    p = sub.add_parser("attach-strict", help="挂严格回测结果")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--label", required=True)
+    p.add_argument("--metrics", required=True)
+
     p = sub.add_parser("learn", help="从 valid 窗口自动生成经验/坑")
     p.add_argument("--run-id", required=True)
 
@@ -1307,6 +1383,12 @@ def main() -> int:
             f"attached oos -> {record['run_id']} valid n={audit.get('n', 0)} "
             f"sign_hit={audit.get('sign_hit_rate')} "
             f"spearman={audit.get('spearman_signed')}"
+        )
+    elif args.cmd == "attach-strict":
+        record = store.attach_strict(args.run_id, args.label, _load_json(args.metrics))
+        print(
+            f"attached strict -> {record['run_id']} "
+            f"{sorted((record.get('strict_backtests') or {}).keys())}"
         )
     elif args.cmd == "learn":
         record = store.get(args.run_id)
