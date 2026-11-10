@@ -7,6 +7,7 @@
 
 这些函数是纯函数，直接在宿主机 venv 跑，不依赖训练镜像。
 """
+
 from __future__ import annotations
 
 import sys
@@ -118,3 +119,35 @@ def test_label_config_and_request_validation() -> None:
         TrainingRequest.validate_request({**base, "label_transform": "bad"})
     with pytest.raises(HTTPException):
         TrainingRequest.validate_request({**base, "label_drop_extreme_pct": 0.5})
+
+
+def test_size_excess_rank_removes_bucket_level() -> None:
+    labels = pd.Series([1.0, 2.0, 3.0, 10.0, 20.0, 30.0])
+    dates = pd.Series(["d1"] * 6)
+    sizes = pd.Series([1.0, 2.0, 3.0, 100.0, 200.0, 300.0])
+    out = preprocessing.cross_sectional_label_transform(
+        labels, dates, "size_excess_rank", size=sizes, n_size_buckets=3
+    )
+    # 桶内超额 = [0,-0.5,0.5,-10,0,10]；全局 pct rank - 0.5
+    assert out.tolist() == pytest.approx([1 / 12, -1 / 6, 1 / 3, -1 / 3, 1 / 12, 0.5])
+
+
+def test_size_excess_rank_invariant_to_bucket_level_shift() -> None:
+    labels = pd.Series([1.0, 2.0, 3.0, 10.0, 20.0, 30.0])
+    shifted = pd.Series([1.0, 2.0, 3.0, 20.0, 30.0, 40.0])
+    dates = pd.Series(["d1"] * 6)
+    sizes = pd.Series([1.0, 2.0, 3.0, 100.0, 200.0, 300.0])
+    a = preprocessing.cross_sectional_label_transform(
+        labels, dates, "size_excess_rank", size=sizes
+    )
+    b = preprocessing.cross_sectional_label_transform(
+        shifted, dates, "size_excess_rank", size=sizes
+    )
+    assert a.tolist() == pytest.approx(b.tolist())
+
+
+def test_size_excess_rank_requires_size() -> None:
+    labels = pd.Series([1.0, 2.0, 3.0])
+    dates = pd.Series(["d1"] * 3)
+    with pytest.raises(ValueError):
+        preprocessing.cross_sectional_label_transform(labels, dates, "size_excess_rank")

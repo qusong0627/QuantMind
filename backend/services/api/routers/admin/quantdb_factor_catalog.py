@@ -935,13 +935,13 @@ async def clone_version_mappings(
         INSERT INTO qm_training_factor_mapping
           (mapping_id, version_id, source_dataset, source_column, feature_key, display_name,
            category_id, category_name, enabled, default_selected, required, sort_order)
-        SELECT :prefix || mapping_id, :target_version_id, source_dataset, source_column,
+        SELECT md5(random()::text || mapping_id || clock_timestamp()::text),
+               :target_version_id, source_dataset, source_column,
                feature_key, display_name, category_id, category_name, enabled,
                default_selected, required, sort_order
         FROM qm_training_factor_mapping WHERE version_id = :source_version_id
         ON CONFLICT (version_id, source_dataset, feature_key) DO NOTHING
     """), {
-        "prefix": f"{uuid.uuid4().hex[:8]}-",
         "target_version_id": target_version_id,
         "source_version_id": source_version_id,
     })

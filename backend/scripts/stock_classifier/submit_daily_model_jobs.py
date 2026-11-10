@@ -82,6 +82,8 @@ def _submit(
     versions: dict[str, str],
     anchor: str,
     name: str,
+    label_transform: str = "rank",
+    label_formula: str = "",
 ) -> str:
     payload = {
         "display_name": name,
@@ -96,7 +98,8 @@ def _submit(
         "target_horizon_days": horizon,
         "target_mode": "return",
         "execution_price": "open",
-        "label_transform": "rank",
+        "label_transform": label_transform,
+        "label_formula": label_formula,
         "features": features,
         "factor_source": anchor,
         "factor_catalog_version": versions[anchor],
@@ -195,6 +198,24 @@ def main() -> int:
         help="特征选择台账目录；给了就在提交时自动 upsert、每个 job 结束后 attach",
     )
     ap.add_argument("--protocol", default=str(PROTOCOL_FILE))
+    ap.add_argument(
+        "--label-transform",
+        default="rank",
+        choices=[
+            "rank",
+            "zscore",
+            "raw",
+            "top_tail",
+            "size_excess_rank",
+            "size_excess_zscore",
+        ],
+        help="训练标签变换；H1 size-neutral 用 size_excess_rank",
+    )
+    ap.add_argument(
+        "--run-tag",
+        default="",
+        help="追加到 job 名称，便于区分 H1 等实验（如 size_neutral）",
+    )
     args = ap.parse_args()
     secret = os.environ.get("INTERNAL_CALL_SECRET", "").strip()
     if not secret:
@@ -312,7 +333,11 @@ def main() -> int:
             features=feats,
             versions=versions,
             anchor=anchor,
-            name=f"CN日频 T+{horizon} · 2016-2024训/2025验/2026测 · sel{args.top}",
+            name=(
+                f"CN日频 T+{horizon} · 2016-2024训/2025验/2026测 · sel{args.top}"
+                + (f" · {args.run_tag}" if args.run_tag else "")
+            ),
+            label_transform=args.label_transform,
         )
         jobs[f"t{horizon}"] = {"run_id": run_id}
         if store:

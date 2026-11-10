@@ -19,9 +19,11 @@ import pandas as pd
 
 try:
     from backend.shared.logging_config import get_logger
+
     logger = get_logger("training.preprocessing")
 except Exception:  # pragma: no cover - 训练容器内可能无后端 logging
     import logging
+
     logger = logging.getLogger("training.preprocessing")
 
 # 该特征当日非 NaN 行数低于 min(总行数×MIN_COVER_RATIO, MIN_COVER_ROWS) 视为整列缺失
@@ -113,9 +115,7 @@ def cross_sectional_median_fill(
     if str(fill_value or "median").strip().lower() == "zero":
         for chunk in _date_chunks(out["trade_date"]):
             m = out["trade_date"].isin(chunk)
-            out.loc[m, features] = (
-                out.loc[m, features].fillna(0.0).astype(np.float32)
-            )
+            out.loc[m, features] = out.loc[m, features].fillna(0.0).astype(np.float32)
         return out
     zero_filled = 0
     for chunk in _date_chunks(out["trade_date"]):
@@ -181,7 +181,9 @@ def cross_sectional_zscore(
         xg["trade_date"] = sub["trade_date"].to_numpy()
         g2 = xg.groupby("trade_date", sort=False)
         mu = g2[features].transform("mean")
-        sd = g2[features].transform(lambda s: s.std(ddof=0))  # 对齐旧实现 np.nanstd(ddof=0)
+        sd = g2[features].transform(
+            lambda s: s.std(ddof=0)
+        )  # 对齐旧实现 np.nanstd(ddof=0)
         sd_ok = sd.gt(0) & np.isfinite(sd)
         Z = (X - mu).div(sd.where(sd_ok))
         valid = X.notna()
@@ -212,7 +214,9 @@ def cross_sectional_rank(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     return out
 
 
-def cross_sectional_robust_zscore(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+def cross_sectional_robust_zscore(
+    df: pd.DataFrame, features: list[str]
+) -> pd.DataFrame:
     """按 (trade_date, feature) 截面稳健 Z-score：(x - median) / (IQR/1.349)。
 
     IQR 对极端值免疫，不需要先缩尾；IQR=0 时回退到标准差，仍为 0 的截面
@@ -245,20 +249,61 @@ def cross_sectional_robust_zscore(df: pd.DataFrame, features: list[str]) -> pd.D
     return out
 
 
+def _size_bucket_keys(
+    dates: pd.Series, size: pd.Series | np.ndarray, n_buckets: int
+) -> np.ndarray:
+    """按日市值分桶的整数键（date_code * (n+1) + bucket+1）。
+
+    size 缺失（NaN）归入 bucket=-1，单独一组；不丢弃标签。
+    """
+    d = pd.Series(dates)
+    s = pd.Series(size, index=d.index).astype(np.float64)
+    size_pct = s.groupby(d).rank(pct=True)
+    n = max(1, int(n_buckets))
+    bucket = np.floor(size_pct.to_numpy() * n)
+    bucket = np.clip(bucket, 0, n - 1)
+    bucket = np.where(np.isfinite(size_pct.to_numpy()), bucket, -1.0)
+    codes, _ = pd.factorize(d, sort=False)
+    return codes.astype(np.int64) * (n + 1) + (bucket.astype(np.int64) + 1)
+
+
 def cross_sectional_label_transform(
     labels: pd.Series,
     dates: pd.Series,
     mode: str = "rank",
     top_pct: float = 0.2,
+    size: pd.Series | np.ndarray | None = None,
+    n_size_buckets: int = 3,
 ) -> pd.Series:
     """标签按日截面变换：rank = pct rank - 0.5；zscore = (x-mean)/std；raw 原样。
 
     top_tail：只保留当日最强 top_pct 的排序，其余置 0（长多 top-tail 标签）。
+
+    size_excess_rank / size_excess_zscore：先按日市值分桶（默认 3 桶），
+    减去同桶均值得到「同市值桶内超额」，再做全局 rank/zscore。用于
+    2026-11-11 的 size-neutral 重训（H1）；``size`` 必须传入（total_cap）。
+
     NaN 透传；返回新 Series（不修改入参）。
     """
     mode = str(mode or "rank").strip().lower()
     x = pd.Series(labels, copy=True).astype(np.float64)
     d = pd.Series(dates)
+    if mode in ("size_excess_rank", "size_excess_zscore"):
+        if size is None:
+            raise ValueError(
+                f"{mode} requires a size series (e.g. total_cap) for size buckets"
+            )
+        key = _size_bucket_keys(d, size, n_size_buckets)
+        excess = x - x.groupby(key).transform("mean")
+        if mode == "size_excess_rank":
+            return (excess.groupby(d).rank(pct=True) - 0.5).astype(np.float32)
+        g = excess.groupby(d)
+        mu = g.transform("mean")
+        sd = g.transform(lambda s: s.std(ddof=0))
+        ok = sd.gt(0) & np.isfinite(sd)
+        out = (excess - mu).div(sd.where(ok))
+        out = out.mask(excess.notna() & ~ok, 0.0)
+        return out.astype(np.float32)
     if mode == "raw":
         return x.astype(np.float32)
     if mode == "rank":
@@ -313,7 +358,6 @@ def drop_extreme_labels(
     lo = g.transform(lambda s: s.quantile(pct))
     hi = g.transform(lambda s: s.quantile(1.0 - pct))
     return frame[(frame[label_col] >= lo) & (frame[label_col] <= hi)].copy()
-
 
 
 def cross_sectional_preprocess(

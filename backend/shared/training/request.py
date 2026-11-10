@@ -354,10 +354,20 @@ class TrainingRequest(BaseModel):
             )
 
         label_transform = str(payload.get("label_transform") or "rank").strip().lower()
-        if label_transform not in ("rank", "zscore", "raw", "top_tail"):
+        if label_transform not in (
+            "rank",
+            "zscore",
+            "raw",
+            "top_tail",
+            "size_excess_rank",
+            "size_excess_zscore",
+        ):
             raise HTTPException(
                 status_code=422,
-                detail="label_transform must be one of: rank, zscore, raw, top_tail",
+                detail=(
+                    "label_transform must be one of: rank, zscore, raw, top_tail, "
+                    "size_excess_rank, size_excess_zscore"
+                ),
             )
         try:
             label_top_pct = float(payload.get("label_top_pct") or 0.2)

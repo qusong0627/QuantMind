@@ -3,6 +3,7 @@
 本地 parquet / QuantDB 直读、ST 与北交所过滤、行业合并、泄漏列剔除、
 标签构建（T+1 执行口径，见 data.splits._EXECUTION_LAG_DAYS）。
 """
+
 from __future__ import annotations
 
 import atexit
@@ -29,7 +30,7 @@ logger = logging.getLogger("quantmind.train")
 # label）驻内存。输出与旧 `.loc[valid_index, keep_cols].reset_index(drop=True)`
 # 逐位一致（2026-10-16 探针锁定）：行序=pos 顺序、列序=[symbol, trade_date,
 # label]+features、dtype 原样。任何不可行情形（非 f32、索引非唯一、异常）回退旧写法。
-_SPILL_REFS: list = []          # 保活 memmap 对象（帧块的 base 链之外再钉一道）
+_SPILL_REFS: list = []  # 保活 memmap 对象（帧块的 base 链之外再钉一道）
 _SPILL_PATHS: list = []
 _SPILL_CHUNK_ROWS = 262_144
 
@@ -51,7 +52,9 @@ def _spill_cleanup() -> None:
 atexit.register(_spill_cleanup)
 
 
-def _clip_rows_via_spill(df: pd.DataFrame, pos, features: list[str]) -> pd.DataFrame | None:
+def _clip_rows_via_spill(
+    df: pd.DataFrame, pos, features: list[str]
+) -> pd.DataFrame | None:
     """按位置取行并把特征列落 memmap；任何不可行情形返回 None（调用方回退）。
 
     pos：df 内的行位置数组（valid_index 经 get_indexer 反查，须全部 ≥0）。
@@ -66,7 +69,8 @@ def _clip_rows_via_spill(df: pd.DataFrame, pos, features: list[str]) -> pd.DataF
     if _bad:
         logger.warning(
             "Feature spill skipped: %d feature column(s) not float32 (e.g. %s)",
-            len(_bad), _bad[:5],
+            len(_bad),
+            _bad[:5],
         )
         return None
     path = None
@@ -76,9 +80,11 @@ def _clip_rows_via_spill(df: pd.DataFrame, pos, features: list[str]) -> pd.DataF
         _SPILL_PATHS.append(path)  # 先登记，异常路径也能被 atexit 清掉
         mat = np.memmap(path, dtype=np.float32, mode="w+", shape=(n, nf))
         for start in range(0, n, _SPILL_CHUNK_ROWS):
-            idx = pos[start:start + _SPILL_CHUNK_ROWS]
+            idx = pos[start : start + _SPILL_CHUNK_ROWS]
             sub = df.take(idx)
-            mat[start:start + len(idx)] = sub[features].to_numpy(dtype=np.float32, copy=False)
+            mat[start : start + len(idx)] = sub[features].to_numpy(
+                dtype=np.float32, copy=False
+            )
             del sub
         mat.flush()
         out = pd.DataFrame(mat, columns=list(features), copy=False)
@@ -88,7 +94,10 @@ def _clip_rows_via_spill(df: pd.DataFrame, pos, features: list[str]) -> pd.DataF
         _SPILL_REFS.append(mat)
         logger.info(
             "[mem] 特征溢出到 memmap: %d 行 × %d 列 → %s（%.2fG，页缓存可回收）",
-            n, nf, path, n * nf * 4 / 1e9,
+            n,
+            nf,
+            path,
+            n * nf * 4 / 1e9,
         )
         return out
     except Exception as exc:  # noqa: BLE001
@@ -130,7 +139,9 @@ def _load_local_parquet(
         df = pd.read_parquet(file_path, columns=selected_cols, engine="pyarrow")
 
         # 先按日期裁剪每年数据，避免把无关年份全量堆进内存
-        if "trade_date" in df.columns and (clip_start is not None or clip_end is not None):
+        if "trade_date" in df.columns and (
+            clip_start is not None or clip_end is not None
+        ):
             df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
             mask = pd.Series(True, index=df.index)
             if clip_start is not None:
@@ -193,7 +204,9 @@ def load_data(
 ) -> tuple:
     local_root = Path(local_dir).expanduser() if local_dir else None
     if local_root is None:
-        raise RuntimeError("local_dir must be provided; COS data download has been removed")
+        raise RuntimeError(
+            "local_dir must be provided; COS data download has been removed"
+        )
 
     market_upper = str(market or "CN").upper()
 
@@ -202,7 +215,15 @@ def load_data(
     horizon_col = f"mom_ret_{horizon}d"
     required_columns = list(
         dict.fromkeys(
-            ["trade_date", "symbol", "mom_ret_1d", horizon_col, "is_st", "volume", "open"]
+            [
+                "trade_date",
+                "symbol",
+                "mom_ret_1d",
+                horizon_col,
+                "is_st",
+                "volume",
+                "open",
+            ]
             + list(features)
         )
     )
@@ -228,7 +249,9 @@ def load_data(
         # Direct QuantDB mode: one factor source only, never materialise or merge snapshots.
         # 与 A 股一致：直接读该市场 6_ml_datasets 下的因子分区
         # （HK: l1_factors/ccass_factors/south_factors）。
-        from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
+        from backend.services.engine.data_platform.quantdb_factor_reader import (
+            QuantDBFactorReader,
+        )
 
         reader = QuantDBFactorReader(
             quantdb_dir or os.getenv(_MARKET_DATA_DIR_ENV[market_upper]) or None,
@@ -318,9 +341,7 @@ def load_data(
             if not _wanted_early:
                 raise RuntimeError("pool_symbols 非空但无法解析出任何代码")
             _before_early = len(df)
-            df = df[
-                df["symbol"].astype(str).str.upper().isin(_wanted_early)
-            ].copy()
+            df = df[df["symbol"].astype(str).str.upper().isin(_wanted_early)].copy()
             logger.info(
                 "After early pool filter: %d rows (pool=%d symbols, before=%d)",
                 len(df),
@@ -348,9 +369,7 @@ def load_data(
         ]
         if _need_cast:
             df[_need_cast] = df[_need_cast].astype(np.float32)
-            logger.info(
-                "Direct QuantDB cast %d columns to float32", len(_need_cast)
-            )
+            logger.info("Direct QuantDB cast %d columns to float32", len(_need_cast))
         else:
             logger.info(
                 "Direct QuantDB columns already float32 (reader-side cast), skip"
@@ -394,10 +413,13 @@ def load_data(
         # 日期裁剪
         mask = (df["trade_date"] >= range_start) & (df["trade_date"] <= range_end)
         df = df.loc[mask].copy()
-        logger.info("Market %s raw data: %d rows, date range: %s to %s",
-                     market_upper, len(df),
-                     df["trade_date"].min() if not df.empty else "N/A",
-                     df["trade_date"].max() if not df.empty else "N/A")
+        logger.info(
+            "Market %s raw data: %d rows, date range: %s to %s",
+            market_upper,
+            len(df),
+            df["trade_date"].min() if not df.empty else "N/A",
+            df["trade_date"].max() if not df.empty else "N/A",
+        )
     else:
         # ── A 股：优先使用 core parquet（78列），回退到年度 parquet 文件 ──
         core_parquet_path = local_root / "model_features_core.parquet"
@@ -410,12 +432,18 @@ def load_data(
             valid_cols = [c for c in _read_columns if c in schema_cols]
             missing_cols = [c for c in _read_columns if c not in schema_cols]
             if missing_cols:
-                logger.warning("Columns not in core parquet (skipped): %s", missing_cols)
+                logger.warning(
+                    "Columns not in core parquet (skipped): %s", missing_cols
+                )
 
             if "trade_date" not in valid_cols or "symbol" not in valid_cols:
-                raise RuntimeError("Core parquet missing required columns: trade_date or symbol")
+                raise RuntimeError(
+                    "Core parquet missing required columns: trade_date or symbol"
+                )
 
-            df = pd.read_parquet(core_parquet_path, columns=valid_cols, engine="pyarrow")
+            df = pd.read_parquet(
+                core_parquet_path, columns=valid_cols, engine="pyarrow"
+            )
             df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
             df = df[df["trade_date"].notna()].copy()
 
@@ -430,13 +458,17 @@ def load_data(
                 if pd.api.types.is_numeric_dtype(df[col]):
                     df[col] = df[col].astype(np.float32, copy=False)
 
-            logger.info("Core parquet loaded: %d rows, date range: %s to %s",
-                       len(df),
-                       df["trade_date"].min() if not df.empty else "N/A",
-                       df["trade_date"].max() if not df.empty else "N/A")
+            logger.info(
+                "Core parquet loaded: %d rows, date range: %s to %s",
+                len(df),
+                df["trade_date"].min() if not df.empty else "N/A",
+                df["trade_date"].max() if not df.empty else "N/A",
+            )
         else:
             # 回退到年度 parquet 文件（197列，内存占用大）
-            logger.warning("Core parquet not found, falling back to yearly parquet files")
+            logger.warning(
+                "Core parquet not found, falling back to yearly parquet files"
+            )
             start_year = pd.Timestamp(train_start).year
             ends = [train_end]
             if valid_end:
@@ -458,7 +490,9 @@ def load_data(
                     if not df_year.empty:
                         chunks.append(df_year)
                 else:
-                    logger.warning(f"No data file found for year {year} in {local_root}, skipping")
+                    logger.warning(
+                        f"No data file found for year {year} in {local_root}, skipping"
+                    )
 
             if not chunks:
                 raise RuntimeError("No data loaded from local storage")
@@ -466,14 +500,20 @@ def load_data(
             df = pd.concat(chunks, axis=0, ignore_index=True)
             df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
             df = df[df["trade_date"].notna()].copy()
-            logger.info(f"Raw concat size: {len(df)} rows. Date range: {df['trade_date'].min()} to {df['trade_date'].max()}")
+            logger.info(
+                f"Raw concat size: {len(df)} rows. Date range: {df['trade_date'].min()} to {df['trade_date'].max()}"
+            )
 
         # 过滤 ST/*ST 股票
         if "is_st" in df.columns:
             before = len(df)
-            df["is_st"] = pd.to_numeric(df["is_st"], errors="coerce").fillna(0).astype(int)
+            df["is_st"] = (
+                pd.to_numeric(df["is_st"], errors="coerce").fillna(0).astype(int)
+            )
             df = df[df["is_st"] == 0].copy()
-            logger.info(f"After ST filter: {len(df)} rows (removed {before - len(df)} ST rows)")
+            logger.info(
+                f"After ST filter: {len(df)} rows (removed {before - len(df)} ST rows)"
+            )
 
         # 行业条件化：合并 ind_code_l1（CSRC 一级行业编码）
         if industry_as_feature or "ind_code_l1" in features:
@@ -481,12 +521,17 @@ def load_data(
                 # 优先从 QuantDB 全量挂载目录查找，回退到 feature_snapshots 子目录
                 _qdb_mount = os.getenv("QUANTDB_DATA_DIR", "/tmp/quantdb_data")
                 _sector_dirs = [
-                    Path(_qdb_mount) / "2_base_sector",  # local_docker_orchestrator 挂载的 QuantDB 全量数据
-                    local_root / "2_base_sector",  # feature_snapshots 内的子目录（兼容旧部署）
+                    Path(_qdb_mount)
+                    / "2_base_sector",  # local_docker_orchestrator 挂载的 QuantDB 全量数据
+                    local_root
+                    / "2_base_sector",  # feature_snapshots 内的子目录（兼容旧部署）
                 ]
                 ind_detail_path = None
                 for _d in _sector_dirs:
-                    for _name in ("instrument_list.parquet", "instrument_detail.parquet"):
+                    for _name in (
+                        "instrument_list.parquet",
+                        "instrument_detail.parquet",
+                    ):
                         _p = _d / "instrument_detail" / _name
                         if _p.exists():
                             ind_detail_path = _p
@@ -495,24 +540,48 @@ def load_data(
                         break
                 if ind_detail_path is not None:
                     ind_df = pd.read_parquet(ind_detail_path, engine="pyarrow")
-                    sym_col = "symbol" if "symbol" in ind_df.columns else "wind_code" if "wind_code" in ind_df.columns else None
+                    sym_col = (
+                        "symbol"
+                        if "symbol" in ind_df.columns
+                        else "wind_code"
+                        if "wind_code" in ind_df.columns
+                        else None
+                    )
                     if sym_col and "rs_hycode_sim" in ind_df.columns:
                         ind_map = ind_df[[sym_col, "rs_hycode_sim"]].dropna()
-                        ind_map = ind_map.rename(columns={sym_col: "symbol", "rs_hycode_sim": "ind_code_l1"})
+                        ind_map = ind_map.rename(
+                            columns={sym_col: "symbol", "rs_hycode_sim": "ind_code_l1"}
+                        )
                         ind_map["symbol"] = ind_map["symbol"].astype(str).str.zfill(6)
-                        ind_map["ind_code_l1"] = pd.Categorical(ind_map["ind_code_l1"]).codes.astype(np.float32)
+                        ind_map["ind_code_l1"] = pd.Categorical(
+                            ind_map["ind_code_l1"]
+                        ).codes.astype(np.float32)
                         df["symbol"] = df["symbol"].astype(str).str.zfill(6)
                         df = df.merge(ind_map, on="symbol", how="left")
                         # 缺失行业映射到 max(code)+1 的独立类别 id（而非 fillna(-1) 或 0）：
                         # 负 id 会被 CatBoost 拒绝；并入 0 会与第一个真实行业混淆。
-                        _ind_max = float(ind_map["ind_code_l1"].max()) if len(ind_map) else -1.0
-                        df["ind_code_l1"] = df["ind_code_l1"].fillna(_ind_max + 1).astype(np.float32)
-                        logger.info("Industry mapping merged: %d/%d rows have ind_code_l1",
-                                    (df["ind_code_l1"] >= 0).sum(), len(df))
+                        _ind_max = (
+                            float(ind_map["ind_code_l1"].max())
+                            if len(ind_map)
+                            else -1.0
+                        )
+                        df["ind_code_l1"] = (
+                            df["ind_code_l1"].fillna(_ind_max + 1).astype(np.float32)
+                        )
+                        logger.info(
+                            "Industry mapping merged: %d/%d rows have ind_code_l1",
+                            (df["ind_code_l1"] >= 0).sum(),
+                            len(df),
+                        )
                     else:
-                        logger.warning("instrument_detail.parquet missing symbol/wind_code or rs_hycode_sim columns")
+                        logger.warning(
+                            "instrument_detail.parquet missing symbol/wind_code or rs_hycode_sim columns"
+                        )
                 else:
-                    logger.warning("instrument_detail.parquet not found (searched: %s)", ", ".join(str(d) for d in _sector_dirs))
+                    logger.warning(
+                        "instrument_detail.parquet not found (searched: %s)",
+                        ", ".join(str(d) for d in _sector_dirs),
+                    )
             except Exception as e:
                 logger.warning("Failed to merge industry data (non-fatal): %s", e)
 
@@ -521,7 +590,10 @@ def load_data(
     # 会把北交所带进训练集。双口径（前缀式/6 位数字）判定。
     if market_upper == "CN" and "symbol" in df.columns:
         _bj_sym6 = (
-            df["symbol"].astype(str).str.upper().str.replace(r"^(SH|SZ|BJ)", "", regex=True)
+            df["symbol"]
+            .astype(str)
+            .str.upper()
+            .str.replace(r"^(SH|SZ|BJ)", "", regex=True)
         )
         _bj_mask = ~_bj_sym6.str.startswith(("4", "8"))
         _bj_removed = int((~_bj_mask).sum())
@@ -565,14 +637,20 @@ def load_data(
     # （l1/l2/ccass/south）的 return_Nd 为过去收益（pct_change 口径），
     # 不适用此剔除（HK l1_factors 的 return_1d 即过去 1 日收益）。
     _LEAKY_RETURN_COLS = (
-        "return_1d", "return_3d", "return_5d", "return_10d", "return_20d", "return_60d",
+        "return_1d",
+        "return_3d",
+        "return_5d",
+        "return_10d",
+        "return_20d",
+        "return_60d",
     )
     if not direct_factor_source:
         _leaky_present = [c for c in _LEAKY_RETURN_COLS if c in df.columns]
         if _leaky_present:
             df = df.drop(columns=_leaky_present, errors="ignore")
             logger.warning(
-                "Dropped forward-looking return columns (label leakage): %s", _leaky_present
+                "Dropped forward-looking return columns (label leakage): %s",
+                _leaky_present,
             )
 
     # 如果仍缺 mom_ret_1d，尝试从 pct_change 或 close 构建
@@ -584,7 +662,9 @@ def load_data(
             df["mom_ret_1d"] = df.groupby("symbol")["close"].pct_change(1)
             logger.info("Built mom_ret_1d from close column pct_change")
         else:
-            raise RuntimeError("Column 'mom_ret_1d' not found and cannot be constructed (no pct_change or close)")
+            raise RuntimeError(
+                "Column 'mom_ret_1d' not found and cannot be constructed (no pct_change or close)"
+            )
 
     # ── 行选择与标签构建全部在**窄表**上完成（2026-09-15）────────────────────
     # 宽表（8.5M×279 float32 ≈ 9.5GB）每整表复制一次就 +9.5GB；旧实现依次做
@@ -596,7 +676,16 @@ def load_data(
     _narrow_cols = list(
         dict.fromkeys(
             c
-            for c in ("symbol", "trade_date", "volume", "close", "open", "mom_ret_1d", _mom_col)
+            for c in (
+                "symbol",
+                "trade_date",
+                "volume",
+                "close",
+                "open",
+                "mom_ret_1d",
+                _mom_col,
+                "total_cap",
+            )
             if c in df.columns
         )
     )
@@ -615,7 +704,9 @@ def load_data(
             narrow = narrow[narrow["trade_date"].isin(_real_days)]
             logger.info(
                 "Dropped %d non-trading days (holiday fill rows): %d -> %d rows",
-                _dropped_days, _rows_before, len(narrow),
+                _dropped_days,
+                _rows_before,
+                len(narrow),
             )
     else:
         logger.warning(
@@ -649,10 +740,14 @@ def load_data(
         )
     elif _horizon == 1:
         # mom_ret_1d[T+2] = close[T+2] / close[T+1] - 1，匹配 T+1 执行。
-        narrow["label"] = narrow.groupby("symbol")["mom_ret_1d"].shift(-(_horizon + _EXECUTION_LAG_DAYS))
+        narrow["label"] = narrow.groupby("symbol")["mom_ret_1d"].shift(
+            -(_horizon + _EXECUTION_LAG_DAYS)
+        )
     elif _mom_col in narrow.columns:
         # mom_ret_H[T+1+H] = close[T+1+H] / close[T+1] - 1。
-        narrow["label"] = narrow.groupby("symbol")[_mom_col].shift(-(_horizon + _EXECUTION_LAG_DAYS))
+        narrow["label"] = narrow.groupby("symbol")[_mom_col].shift(
+            -(_horizon + _EXECUTION_LAG_DAYS)
+        )
     else:
         # 回退：通过滚动累乘 1d 收益构造 N 日远期收益
         narrow["label"] = (
@@ -664,15 +759,23 @@ def load_data(
         "Label built with target_horizon_days=%s execution_price=%s (%s)",
         _horizon,
         _exec_price,
-        "direct close" if direct_factor_source else _mom_col if _mom_col in narrow.columns else "rolling",
+        "direct close"
+        if direct_factor_source
+        else _mom_col
+        if _mom_col in narrow.columns
+        else "rolling",
     )
 
     # 标签有效性 + 裁剪到请求区间：一次布尔掩码定行（缓冲区行只为标签服务，不输出）
     valid_count_before = len(narrow)
     _label_ok = narrow["label"].notna()
-    logger.info(f"After label shift & dropna: {int(_label_ok.sum())} rows (dropped {valid_count_before - int(_label_ok.sum())} rows with missing labels)")
+    logger.info(
+        f"After label shift & dropna: {int(_label_ok.sum())} rows (dropped {valid_count_before - int(_label_ok.sum())} rows with missing labels)"
+    )
     _clip_end = test_end or valid_end or train_end
-    _in_range = (narrow["trade_date"] >= train_start) & (narrow["trade_date"] <= _clip_end)
+    _in_range = (narrow["trade_date"] >= train_start) & (
+        narrow["trade_date"] <= _clip_end
+    )
     valid_index = narrow.index[_label_ok & _in_range]
 
     # 校验特征列（选列发生在取行之前，先把缺失特征剔掉）
@@ -694,7 +797,9 @@ def load_data(
             _pos = df.index.get_indexer(valid_index)
         except Exception:  # noqa: BLE001
             _pos = None
-            logger.warning("Feature spill: get_indexer failed, falling back", exc_info=True)
+            logger.warning(
+                "Feature spill: get_indexer failed, falling back", exc_info=True
+            )
         if _pos is not None and (_pos >= 0).all():
             _spilled = _clip_rows_via_spill(df, _pos, features)
     if _spilled is not None:
@@ -712,18 +817,32 @@ def load_data(
     _target_mode = str(target_mode or "return").lower()
     if _target_mode == "classification":
         from preprocessing import binarize_labels
+
         df["label"] = binarize_labels(df["label"].to_numpy())
         _n_pos = int((df["label"] == 1).sum())
         _n_neg = int((df["label"] == 0).sum())
-        logger.info(f"Classification target: positive={_n_pos}, negative={_n_neg} (ratio={_n_pos / max(1, _n_pos + _n_neg):.3f})")
+        logger.info(
+            f"Classification target: positive={_n_pos}, negative={_n_neg} (ratio={_n_pos / max(1, _n_pos + _n_neg):.3f})"
+        )
 
     # 收益预测默认使用截面 rank 目标（强调同日选股排序）；可选 zscore / raw。
     # 分类预测保持二元标签，不做截面变换。
     if _target_mode != "classification":
         from preprocessing import cross_sectional_label_transform
 
+        _size_mode = str(label_transform or "").startswith("size_excess")
+        _size_series = df["total_cap"] if "total_cap" in df.columns else None
+        if _size_mode and _size_series is None:
+            raise RuntimeError(
+                "label_transform=size_excess_* requires a 'total_cap' feature column; "
+                "add total_cap to the training feature list"
+            )
         df["label"] = cross_sectional_label_transform(
-            df["label"], df["trade_date"], label_transform, top_pct=label_top_pct
+            df["label"],
+            df["trade_date"],
+            label_transform,
+            top_pct=label_top_pct,
+            size=_size_series,
         ).to_numpy()
         logger.info("Label transform: %s", label_transform)
 
