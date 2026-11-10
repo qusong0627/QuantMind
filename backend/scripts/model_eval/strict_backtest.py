@@ -170,9 +170,10 @@ def run(
     horizon: int = HORIZON,
     benchmark_ma: int = 0,
     index_dir: str = "data/quantdb/1_kline_data/index_daily",
+    split: str = "test",
 ) -> tuple[pd.DataFrame, dict]:
     p = pd.read_parquet(pred_path, columns=["symbol", "trade_date", "pred", "split"])
-    p = p[p["split"] == "test"].copy()
+    p = p[p["split"] == split].copy()
     p["date"] = pd.to_datetime(p["trade_date"]).dt.strftime("%Y%m%d")
     p["sym"] = p["symbol"].map(to_suffix)
     signal_dates = sorted(p["date"].unique())
@@ -399,6 +400,12 @@ def main() -> None:
         "--benchmark-ma", type=int, default=0, help="沪深300 MA 过滤；0=不过滤"
     )
     ap.add_argument(
+        "--split",
+        default="test",
+        choices=["train", "valid", "test"],
+        help="用哪段 pred 做回测（调参用 valid，最终验收用 test）",
+    )
+    ap.add_argument(
         "--index-dir",
         default="data/quantdb/1_kline_data/index_daily",
         help="指数日线目录（沪深300=000300.SH）",
@@ -418,6 +425,7 @@ def main() -> None:
         horizon=args.horizon,
         benchmark_ma=args.benchmark_ma,
         index_dir=args.index_dir,
+        split=args.split,
     )
     out = Path(args.out_dir or f"data/model_eval/{model_id}")
     out.mkdir(parents=True, exist_ok=True)
