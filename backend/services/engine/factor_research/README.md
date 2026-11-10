@@ -60,18 +60,34 @@ backend/scripts/build_factor_research.py        （构建，pandas，可宿主�
     → router.py 读取（compose/optimal 在线现算）  → 前端 features/factor-research/
 ```
 
-构建命令（仓库根，全量约 25–45 分钟）：
+构建命令（仓库根，全量约 10–20 分钟）：
 
 ```bash
-python3 backend/scripts/build_factor_research.py                 # 2020-01 至今
+python3 backend/scripts/build_factor_research.py                 # 经典库 2016-07 至今
 python3 backend/scripts/build_factor_research.py --smoke 200     # 冒烟（可用 FACTOR_RESEARCH_OUT 改临时输出目录）
 python3 backend/scripts/build_factor_research.py --skip-financial
+
+python3 backend/scripts/build_factor_panel_private.py            # 私有库 2016-07 至今
+# 增量续拉（保留旧年分区；必须复用已冻结的方向）：
+python3 backend/scripts/build_factor_panel_private.py --start 2025-01-01 \
+    --append --direction-file <root>/factor_research_private/direction.json
 ```
 
 ## 区间口径（工作台）
 
-- 区间（全部/近3年/近1年/各年/自定义）只影响**切片与重算**：净值在区间内重建（首月末=1.0，
-  首月换手 100% 全额计费）；超额 = 组合年化 − 基准年化（demo 口径）；
+- **主库窗口**：CN 默认 2016-07-01 至今（行情/估值/ST PIT 从 2016-01-04 起，
+  股票池要求近 120 日有效历史 → 2016 上半年为空窗）。非 CN 仍为 2020-01 起。
+- **年分区**：`factor_panel/year=YYYY.parquet`、`monthly_scores/year=YYYY.parquet`、
+  `stock_snapshot/year=YYYY.parquet`。运行时只读与请求区间相交的年份；
+  增量续拉只替换新年，旧年不动。
+- **方向冻结**：私有因子 sign 只在校准窗（默认 2020-01~2024-12）算一次，写
+  `direction.json`；评估窗口（尤其 2016–2019）只读不改。旧实现按全样本 IC 翻符号，
+  拿 2016–2019 做样本外时 sign 已看过 2020+ 的 IC —— 那不是样本外。
+- **覆盖率审计**：`coverage.json` 记录逐月股票池/因子数、逐因子首末有效月，
+  以及「行情有票但所有因子库都没值」的退市缺口。任一窗口缺口 >5% 记
+  `survivorship_bias=true`，该窗口只能做研究、不得作为验收依据。
+- 区间（全部/近3年/近1年/各年/自定义/时代档）只影响**切片与重算**：净值在区间内重建
+  （首月末=1.0，首月换手 100% 全额计费）；超额 = 组合年化 − 基准年化（demo 口径）；
 - 综合分 = 0.5×有效性 z(mean(z(RankIC), z(IC_IR))) + 0.5×业绩 z(mean(z(年化), z(夏普), z(−回撤), z(月胜率)))，
   分项在全因子截面标准化——**换区间会整体重算**；
 - Fitness（世坤 BRAIN 口径，**单列不并入综合分**）= IR × √(|Returns| / max(Turnover, 0.125))。
@@ -97,6 +113,7 @@ python3 backend/scripts/build_factor_research.py --skip-financial
 | POST | `/api/v1/factor-research/compare` | 对比：`{items:[{code,n}], start, end}`（每因子独立持仓数） |
 | POST | `/api/v1/factor-research/compose` | 合成：`{weights, top_n, thresholds?, threshold?, start?, end?}` |
 | POST | `/api/v1/factor-research/optimal-weights` | 网格搜索最优权重：`{codes, top_n, start?, end?}`（夏普/年化/超额各一组） |
+| POST | `/api/v1/factor-research/build?dataset=&market=&start=&end=&append=` | 后台构建/增量续拉（private append 需已有 direction.json；classic 不支持 append） |
 | GET | `/api/v1/factor-research/screening` | 筛选结果（保留清单/去重剔除/门槛剔除） |
 
 > valuation 的 TTM 字段（net_profit/revenue/pe/ps）若在源侧回归中损坏，可本地兜底：

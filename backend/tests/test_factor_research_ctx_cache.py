@@ -60,8 +60,8 @@ def env(monkeypatch):
         "topn_entered": threading.Event(),
     }
 
-    def fake_panel(dataset="classic", market="CN"):
-        # market 参数：service 层 2026-10 起按市场取值（分层），打桩签名须同步放宽
+    def fake_panel(*args, **kwargs):
+        # dataset/market/start/end 都可能传（2026-11 起窗口化读取），打桩签名须同步放宽
         state["builds"] += 1
         if state["delay"]:
             time.sleep(state["delay"])

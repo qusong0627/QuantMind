@@ -28,9 +28,15 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from backend.services.engine.factor_research import windows as frwindows
+
 TTL_SECONDS = 600  # 快照读取缓存（构建脚本重跑后 10 分钟内自动失效）
 _cache: dict[str, tuple[float, object]] = {}
 _lock = threading.Lock()
+# Panel 是窗口化后最大的对象（10 年 private ≈1.4G/份）；不能像元数据那样无限留。
+# 只留最近 2 个窗口，服务层 _ctx_cache 另有 4 份上限，二者相加即内存上界。
+_panel_cache: dict[str, tuple[float, object]] = {}
+_MAX_PANELS = 2
 
 # 数据集 → 产物目录名
 DATASET_DIRS = {"classic": "factor_research", "private": "factor_research_private"}
@@ -122,6 +128,21 @@ def _cached_obj(key: str, loader):
     return obj
 
 
+def _panel_cached(key: str, loader):
+    """Panel 专用 LRU（最多 2 个窗口）；窗口化后不能沿用无界元数据缓存。"""
+    now = time.time()
+    with _lock:
+        hit = _panel_cache.get(key)
+        if hit and now - hit[0] < TTL_SECONDS:
+            return hit[1]
+    obj = loader()
+    with _lock:
+        while len(_panel_cache) >= _MAX_PANELS:
+            _panel_cache.pop(next(iter(_panel_cache)))
+        _panel_cache[key] = (now, obj)
+    return obj
+
+
 def _file_key(p: Path, prefix: str, extra: str = "") -> str:
     """缓存 key = 路径 + mtime + 参数 —— 构建脚本重跑后旧缓存立即失效（不受 TTL 限制）。"""
     try:
@@ -131,13 +152,39 @@ def _file_key(p: Path, prefix: str, extra: str = "") -> str:
     return f"{prefix}:{p}:{mtime}:{extra}"
 
 
-def panel_stamp(dataset: str = "classic", market: str = "CN") -> str:
-    """面板快照标识（路径 + mtime）。
+def panel_stamp(
+    dataset: str = "classic",
+    market: str = "CN",
+    start: str | None = None,
+    end: str | None = None,
+) -> str:
+    """面板快照标识（目录/文件路径 + mtime + 窗口）。
 
     给上层当缓存键用：重建脚本一落盘，键就变，上层那份重算几十秒的上下文自动作废 ——
-    不需要再靠 TTL 猜什么时候过期。
+    不需要再靠 TTL 猜什么时候过期。窗口进键：同一份主库切 2016–2019 与 2020–2024
+    是两个 Panel，不能互相命中。
     """
-    return _file_key(artifact_dir(dataset, market) / "factor_panel.parquet", "obj")
+    root = artifact_dir(dataset, market)
+    files = frwindows.year_files(root / frwindows.PANEL_DIR, start, end)
+    if files:
+        return "obj:" + frwindows.files_stamp(files, f"{start or ''}|{end or ''}")
+    return _file_key(
+        root / "factor_panel.parquet", "obj", f"{start or ''}|{end or ''}"
+    )
+
+
+def window_meta(dataset: str = "classic", market: str = "CN") -> dict:
+    """快照的窗口/方向/覆盖率元信息（factors.json 或 metrics.json 的 meta 字段）。"""
+    if dataset == "private":
+        f = factors_meta("private", market) or {}
+        return f.get("meta", {}) or {}
+    m = metrics(dataset, market) or {}
+    return m.get("meta", {}) or {}
+
+
+def coverage(dataset: str = "classic", market: str = "CN") -> dict | None:
+    """逐月/逐因子的覆盖率审计（coverage.json；无分区旧快照可能为 None）。"""
+    return load_json(frwindows.COVERAGE_FILE, dataset, market)
 
 
 def load_json(name: str, dataset: str = "classic", market: str = "CN"):
@@ -228,51 +275,159 @@ def benchmark_table(
     return load_parquet("benchmarks.parquet", dataset, market)
 
 
-def panel(dataset: str = "classic", market: str = "CN"):
-    """月末名次面板（scorecard.Panel；进程内缓存）。"""
+def panel(
+    dataset: str = "classic",
+    market: str = "CN",
+    start: str | None = None,
+    end: str | None = None,
+):
+    """月末名次面板（scorecard.Panel；进程内缓存，按窗口）。
+
+    优先读 ``factor_panel/year=YYYY.parquet``（只读与请求区间相交的年份）；
+    旧快照没有年分区时回退整份 ``factor_panel.parquet`` 再按日期裁剪。
+    """
     from backend.services.engine.factor_research import scorecard
 
-    p = artifact_dir(dataset, market) / "factor_panel.parquet"
+    root = artifact_dir(dataset, market)
+    part_dir = root / frwindows.PANEL_DIR
+    miss = frwindows.missing_years(part_dir, start, end)
+    if miss:
+        raise SnapshotMissing(
+            f"年分区不完整：缺 {miss}（构建中断？请重建或回退整份快照）"
+        )
+    files = frwindows.year_files(part_dir, start, end)
+    if files:
+        key = "obj:" + frwindows.files_stamp(files, f"{start or ''}|{end or ''}")
+
+        def _rd_parts():
+            df = pd.concat([pd.read_parquet(p) for p in files], ignore_index=True)
+            df = frwindows.clip_dates(df, "trade_date", start, end)
+            if df.empty:
+                return None  # 请求区间落在快照窗口外
+            return scorecard.Panel(df)
+
+        return _panel_cached(key, _rd_parts)
+
+    p = root / "factor_panel.parquet"
 
     def _rd():
         if not p.exists():
             return None
-        return scorecard.Panel(pd.read_parquet(p))
+        df = pd.read_parquet(p)
+        df = frwindows.clip_dates(df, "trade_date", start, end)
+        if df.empty:
+            return None  # 请求区间落在快照窗口外
+        return scorecard.Panel(df)
 
-    return _cached_obj(_file_key(p, "obj"), _rd)
+    return _panel_cached(
+        _file_key(p, "obj", f"{start or ''}|{end or ''}"), _rd
+    )
 
 
-def stock_snapshot(market: str = "CN") -> pd.DataFrame | None:
-    """最新截面个股元数据（名称/行业/市值/PE/PB/近一年日均成交额）。
+def stock_snapshot(market: str = "CN", as_of=None) -> pd.DataFrame | None:
+    """个股截面元数据（名称/行业/市值/PE/PB/近一年日均成交额）。
 
-    数据集无关（股票池元数据同一份）。CN：优先经典目录、私人库回退经典；
-    非 CN 只有私人目录（classic 为 A 股专属，不得去碰 classic 路径）。
+    ``as_of`` 给了就优先读 ``stock_snapshot/year=YYYY.parquet``（历史窗口的
+    持仓画像必须用当期截面，不能拿今天的最新快照回看 2016）；没有年分区/该年
+    缺失时回退最新整份。数据集无关（股票池元数据同一份）：CN 优先经典目录。
     """
     from backend.shared.feature_source import validate_market
 
-    if validate_market(market) == "CN":
+    mk = validate_market(market)
+
+    def _from_years(root: Path) -> pd.DataFrame | None:
+        d = root / frwindows.SNAPSHOT_DIR
+        files = sorted(d.glob("year=*.parquet"))
+        if not files:
+            return None
+        if as_of is not None:
+            want = f"year={int(pd.Timestamp(as_of).year)}.parquet"
+            hit = [p for p in files if p.name == want]
+            if hit:
+                return _cached_obj(_file_key(hit[0], "pq", "snap"), lambda: pd.read_parquet(hit[0]))
+        latest = files[-1]
+        return _cached_obj(_file_key(latest, "pq", "snap"), lambda: pd.read_parquet(latest))
+
+    if mk == "CN":
+        snap = _from_years(artifact_dir("classic", "CN"))
+        if snap is not None:
+            return snap
         df = load_parquet("stock_snapshot.parquet", "classic", "CN")
         if df is not None:
             return df
-    return load_parquet("stock_snapshot.parquet", "private", market)
+    snap = _from_years(artifact_dir("private", mk))
+    if snap is not None:
+        return snap
+    return load_parquet("stock_snapshot.parquet", "private", mk)
 
 
 def scores_for(
-    codes: list[str], dataset: str = "classic", market: str = "CN"
+    codes: list[str],
+    dataset: str = "classic",
+    market: str = "CN",
+    start: str | None = None,
+    end: str | None = None,
 ) -> pd.DataFrame | None:
     """按因子读取月末打分（长表：trade_date/symbol/factor_code/score）。
 
-    classic：长表 parquet 行组过滤；private：宽表按列裁剪 + melt（不缓存，避免大对象驻留）。
+    优先读 ``monthly_scores/year=YYYY.parquet``（只取相交年份）；旧快照回退整份。
+    private 年分区是宽表（按列裁剪 + melt），classic 是长表（factor_code 过滤）。
     """
     codes = list(codes)
+    root = artifact_dir(dataset, market)
+    miss = frwindows.missing_years(root / frwindows.SCORES_DIR, start, end)
+    if miss:
+        raise SnapshotMissing(
+            f"打分年分区不完整：缺 {miss}（构建中断？请重建或回退整份快照）"
+        )
+    part_files = frwindows.year_files(root / frwindows.SCORES_DIR, start, end)
     if dataset != "private":
+        if part_files:
+            frames = []
+            for f in part_files:
+                df = pd.read_parquet(
+                    f, filters=[("factor_code", "in", codes)]
+                )
+                if not df.empty:
+                    frames.append(
+                        frwindows.clip_dates(df, "trade_date", start, end)
+                    )
+            if not frames:
+                return pd.DataFrame()
+            return pd.concat(frames, ignore_index=True)
         return load_parquet(
             "monthly_scores.parquet",
             dataset,
             market,
             filters=[("factor_code", "in", codes)],
         )
-    p = artifact_dir("private", market) / "monthly_scores.parquet"
+
+    if part_files:
+        import pyarrow.parquet as pq
+
+        frames = []
+        for f in part_files:
+            names = set(pq.ParquetFile(f).schema.names)
+            cols = [c for c in codes if c in names]
+            if not cols:
+                continue
+            df = pd.read_parquet(f, columns=["trade_date", "symbol", *cols])
+            df = frwindows.clip_dates(df, "trade_date", start, end)
+            if df.empty:
+                continue
+            frames.append(
+                df.melt(
+                    id_vars=["trade_date", "symbol"],
+                    value_vars=cols,
+                    var_name="factor_code",
+                    value_name="score",
+                ).dropna(subset=["score"])
+            )
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    p = root / "monthly_scores.parquet"
     if not p.exists():
         return None
     import pyarrow.parquet as pq
@@ -282,6 +437,7 @@ def scores_for(
     if not cols:
         return pd.DataFrame()
     df = pd.read_parquet(p, columns=["trade_date", "symbol", *cols])
+    df = frwindows.clip_dates(df, "trade_date", start, end)
     return df.melt(
         id_vars=["trade_date", "symbol"],
         value_vars=cols,

@@ -2,7 +2,8 @@
 """因子研究快照构建（QuantDB → factor_research 数据集）
 
 用法（仓库根执行）:
-    python3 backend/scripts/build_factor_research.py                 # 全量 2020-01 至今
+    python3 backend/scripts/build_factor_research.py                 # CN 默认 2016-07 至今
+    python3 backend/scripts/build_factor_research.py --start 2025-01-01 --end 2025-12-31
     python3 backend/scripts/build_factor_research.py --smoke 200     # 冒烟：200 只 + 2023 起
     python3 backend/scripts/build_factor_research.py --skip-financial
 
@@ -13,12 +14,15 @@
     nav.parquet         Top-N 回测净值（date × factor；top_n 见 meta）
     corr.parquet        因子两两相关（全窗口均值）
     monthly_scores.parquet  月末截面打分（合成/对比用）
+    monthly_scores/year=YYYY.parquet  同上，按年分区
     fwd_returns.parquet 月末→次月末持有期收益
     holdings_latest.json    最新一期各因子 Top-N 持仓
     benchmarks.parquet  基准净值（沪深300/中证800/中证500，index_code 区分）
     factor_panel.parquet    月末名次面板：每因子每期前 K 名的 symbol/score/raw/fwd_ret
                             （任意 N 与任意区间回测的 O(1) 底料，见 scorecard.py）
-    stock_snapshot.parquet  最新截面个股元数据：名称/申万行业/市值/PE/PB/近一年日均成交额
+    factor_panel/year=YYYY.parquet  同上，按年分区（运行时只读相交年份）
+    stock_snapshot.parquet  最新截面个股元数据
+    stock_snapshot/year=YYYY.parquet  按年末截面（历史持仓画像不回看今天）
 """
 
 from __future__ import annotations
@@ -39,10 +43,11 @@ if str(_ROOT) not in sys.path:
 from backend.services.engine.factor_research import analysis  # noqa: E402
 from backend.services.engine.factor_research import data as frdata  # noqa: E402
 from backend.services.engine.factor_research import engine, financials  # noqa: E402
+from backend.services.engine.factor_research import windows as frwindows  # noqa: E402
 from backend.services.engine.factor_research.catalog import FACTORS, BY_CODE  # noqa: E402
 
-LOOKBACK_START = "2018-06-01"  # 252 日窗口预热
-DEFAULT_START = "2020-01-01"
+LOOKBACK_START = frwindows.CN_LOOKBACK_START  # 252 日窗口预热（2016-01-04 起）
+DEFAULT_START = frwindows.CN_START
 TOP_N = 30
 
 # 基准指数（净值供超额收益口径；首个为主基准，写入 meta["benchmark"]）
@@ -154,23 +159,40 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default=DEFAULT_START, help="首个采样月末（含）")
     ap.add_argument("--end", default=None, help="截止日（默认最新）")
-    ap.add_argument("--smoke", type=int, default=0, help="冒烟模式：只取 N 只股票")
+    ap.add_argument(
+        "--lookback-start", default=LOOKBACK_START, help="预热起点（默认 2016-01-04）"
+    )
+    ap.add_argument(
+        "--smoke", type=int, default=0, help="冒烟模式：只取 N 只股票"
+    )
     ap.add_argument(
         "--skip-financial", action="store_true", help="跳过财务/行为类（仅行情+估值）"
     )
     ap.add_argument("--top-n", type=int, default=TOP_N)
+    ap.add_argument("--out", default=None, help="输出目录（默认按市场解析）")
+    ap.add_argument(
+        "--no-partition", action="store_true", help="只写整份产物（冒烟/兼容用）"
+    )
     args = ap.parse_args()
 
     t0 = time.time()
-    out = _out_dir()
+    out = Path(args.out) if args.out else _out_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    start_ts = pd.Timestamp(args.start)
+    end_ts = pd.Timestamp(args.end) if args.end else None
     end_s = args.end or "20991231"
-    print(
-        f"[1/8] 载入 daily_forward / valuation / index ... ({LOOKBACK_START} ~ {args.end or 'latest'})"
+    load_end = (
+        (end_ts + pd.Timedelta(days=frwindows.FWD_BUFFER_DAYS)).strftime("%Y%m%d")
+        if end_ts is not None
+        else end_s
     )
-    daily = frdata.load_daily_panel(LOOKBACK_START, end_s)
-    val = frdata.load_valuation_panel(LOOKBACK_START, end_s)
+    print(
+        f"[1/8] 载入 daily_forward / valuation / index ... ({args.lookback_start} ~ {load_end})"
+    )
+    daily = frdata.load_daily_panel(args.lookback_start, load_end)
+    val = frdata.load_valuation_panel(args.lookback_start, load_end)
     bench_series = {
-        sym: frdata.load_index_close(LOOKBACK_START, end_s, sym)
+        sym: frdata.load_index_close(args.lookback_start, load_end, sym)
         for sym, _ in BENCHMARKS
     }
     instr = frdata.load_instrument()
@@ -183,12 +205,21 @@ def main() -> int:
                 d_[k] = d_[k][syms]
         close = daily["close"]
 
+    all_dates = frdata.month_end_dates(close.index)
     dates = [
-        d for d in frdata.month_end_dates(close.index) if d >= pd.Timestamp(args.start)
+        d
+        for d in all_dates
+        if d >= start_ts and (end_ts is None or d <= end_ts)
     ]
+    fwd_dates = list(dates)
+    if end_ts is not None:
+        nxt = [d for d in all_dates if d > dates[-1]]
+        if nxt:
+            fwd_dates.append(nxt[0])
     universe = frdata.build_universe(instr, close)
     print(
-        f"      交易日 {len(close)}，采样日 {len(dates)}（{dates[0].date()} ~ {dates[-1].date()}），股票 {close.shape[1]}"
+        f"      交易日 {len(close)}，采样日 {len(dates)}（{dates[0].date()} ~ {dates[-1].date()}），"
+        f"股票 {close.shape[1]}"
     )
 
     print("[2/8] 行情类 + 估值类因子 ...")
@@ -232,7 +263,11 @@ def main() -> int:
         )
 
     print("[5/8] 持有期收益 / IC / 回测 ...")
-    fwd = analysis.forward_returns(close, dates, universe)
+    # fwd 多算一个采样日：`--end 2019-12-31` 时 2019-12 的持有期收益要 2020-01 的价格，
+    # 否则块末月 fwd=NaN，窗口边界直接断链。
+    fwd = analysis.forward_returns(
+        close, fwd_dates, universe.reindex(fwd_dates).fillna(False)
+    ).reindex(index=dates)
     metrics: dict[str, dict] = {}
     ic_all, nav_all, holdings_latest = [], [], {}
     for code, sc in scores.items():
@@ -259,7 +294,15 @@ def main() -> int:
 
     print("[6/8] 月末名次面板 + 最新截面个股快照 ...")
     panel = _build_panel(scores, raw, fwd, PANEL_K)
-    stock_snap = _build_stocks_snapshot(daily, val, instr, dates[-1])
+    # 每年一份截面快照：历史窗口的持仓画像（市值/行业）必须用当年末的数，
+    # 拿今天的最新截面回看 2016 就是把未来信息贴到过去。
+    year_last: dict[int, pd.Timestamp] = {}
+    for d in dates:
+        year_last[int(d.year)] = d
+    stock_snaps = {
+        y: _build_stocks_snapshot(daily, val, instr, d) for y, d in year_last.items()
+    }
+    stock_snap = stock_snaps[int(dates[-1].year)]
     print(f"      面板 {len(panel):,} 行（K={PANEL_K}）；个股快照 {len(stock_snap)} 只")
 
     print("[7/8] 因子相关矩阵 ...")
@@ -281,6 +324,8 @@ def main() -> int:
         )
     long = pd.concat(long_rows, ignore_index=True)
     long.to_parquet(out / "monthly_scores.parquet", index=False)
+    if not args.no_partition:
+        frwindows.write_year_partitions(long, out, frwindows.SCORES_DIR)
 
     fwd_long = fwd.stack()
     pd.DataFrame(
@@ -323,12 +368,24 @@ def main() -> int:
     )
     panel.to_parquet(out / "factor_panel.parquet", index=False)
     stock_snap.to_parquet(out / "stock_snapshot.parquet", index=False)
+    if not args.no_partition:
+        frwindows.write_year_partitions(panel, out, frwindows.PANEL_DIR)
+        for y, snap in stock_snaps.items():
+            p = out / frwindows.SNAPSHOT_DIR / f"year={y}.parquet"
+            frwindows.atomic_write_parquet(snap, p)
 
     lb = analysis.leaderboard(metrics)
     available = {f["code"]: f for f in FACTORS if f["available"]}
     meta = {
         "built_at": pd.Timestamp.now().isoformat(timespec="seconds"),
         "window": [str(dates[0].date()), str(dates[-1].date())],
+        "lookback_start": args.lookback_start,
+        "direction_calibration": {
+            "start": frwindows.DIRECTION_START,
+            "end": frwindows.DIRECTION_END,
+            "source": "catalog",  # 经典因子的方向是目录静态定义，不按 IC 翻
+        },
+        "partitioned": not args.no_partition,
         "n_dates": len(dates),
         "n_symbols": int(close.shape[1]),
         "top_n": args.top_n,

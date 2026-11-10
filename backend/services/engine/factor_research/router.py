@@ -205,12 +205,20 @@ async def get_snapshot_status(dataset: FactorDataset = "classic", market: str = 
 
 
 @router.post("/build")
-async def post_build(dataset: FactorDataset = "classic", market: str = "CN"):
+async def post_build(
+    dataset: FactorDataset = "classic",
+    market: str = "CN",
+    start: str | None = None,
+    end: str | None = None,
+    append: bool = False,
+):
     """一键计算快照（后台子进程，全本地 QuantDB 计算、不上传任何数据）。
 
     private 市场感知：非 CN 会以 ``--market`` 装配构建脚本（构建落本市场根目录）。
+    ``start``/``end`` 只重建该区间；``append=true`` 为增量续拉（保留旧年分区，
+    私有库须已有 direction.json）。classic 不支持 append（全量重建约 6 分钟）。
     """
-    out = await _run(service.start_build, dataset, _market(market))
+    out = await _run(service.start_build, dataset, _market(market), start, end, append)
     if out.get("error"):
         raise HTTPException(status_code=500, detail=out["error"])
     return out

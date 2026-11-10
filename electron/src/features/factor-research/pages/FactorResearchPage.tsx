@@ -18,7 +18,7 @@ import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { getMarketConfig } from '../../../config/marketConfig';
 import { ApiError, getCatalog, getLeaderboard } from '../services/factorResearchService';
 import type { FactorDataset, RangeParams } from '../services/factorResearchService';
-import type { CategoryFilter, FactorMeta, LeaderboardRow, ResearchMarket } from '../types/factorResearch';
+import type { CategoryFilter, FactorMeta, LeaderboardRow, RangeMeta, ResearchMarket } from '../types/factorResearch';
 import { RangePicker } from '../components/common';
 import type { RangeValue } from '../components/common';
 import { CatalogSidebar } from '../components/CatalogSidebar';
@@ -471,7 +471,7 @@ const FactorResearchPage: React.FC = () => {
 
   const window_ = meta?.window as string[] | undefined;
   const available = factors.filter((f) => f.available).length;
-  const rangeMeta = meta?.range as { start?: string; end?: string; n_months?: number } | undefined;
+  const rangeMeta = meta?.range as RangeMeta | undefined;
 
   return (
     <div className={PAGE_LAYOUT.outerClass}>
@@ -641,6 +641,26 @@ const FactorResearchPage: React.FC = () => {
               {rangeMeta?.n_months !== undefined && (
                 <span className="text-[10px] font-mono text-slate-400">
                   {rangeMeta.n_months} 个月末
+                </span>
+              )}
+              {rangeMeta?.window && (
+                <span
+                  className="text-[10px] font-mono text-slate-400"
+                  title={
+                    rangeMeta.direction_calibration
+                      ? `主库 ${rangeMeta.window[0]} ~ ${rangeMeta.window[1]}；方向校准窗 ${rangeMeta.direction_calibration.start} ~ ${rangeMeta.direction_calibration.end}（评估窗口不回算符号）`
+                      : `主库 ${rangeMeta.window[0]} ~ ${rangeMeta.window[1]}`
+                  }
+                >
+                  主库 {rangeMeta.window[0]} ~ {rangeMeta.window[1]}
+                </span>
+              )}
+              {rangeMeta?.survivorship_bias && (
+                <span
+                  className="rounded-full border border-amber-200 bg-amber-50 px-1.5 py-[1px] text-[9px] font-bold text-amber-600"
+                  title="该窗口有退市股因子值缺口（>5% 行情池）；只能做研究，不得作为验收依据。详见 coverage.json。"
+                >
+                  退市覆盖缺口
                 </span>
               )}
               {/* 扫描只对私人库有意义：经典库的目录来自内置 catalog.py，

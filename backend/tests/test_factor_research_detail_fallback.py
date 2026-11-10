@@ -116,3 +116,25 @@ def test_detail_fresh_factor_not_marked_stale(env):
     assert d["stocks_date"] == "2026-10-08"
     assert d["stocks_stale"] is False
     assert len(d["stocks"]) == 2
+
+
+def test_absent_factor_returns_empty_detail_not_none(env, monkeypatch):
+    """目录里有、所选窗口无数据的因子（如 2016–2019 的 l2/gap）不能 404。
+
+    单因子页是「点目录里的因子」进入的，404 会让人以为因子坏了；必须返回
+    空 variants + 可读的 unavailable_reason（含数据起始日）。
+    """
+    monkeypatch.setattr(
+        service.store,
+        "factors_meta",
+        lambda *a, **k: {"factors": [_factor_meta("FRESH"), _factor_meta("ABSENT")]},
+    )
+    service._ctx_cache.clear()
+    service._derived_cache.clear()
+
+    d = service.factor_detail("ABSENT", [30], None, None, 30, "private", "CN")
+
+    assert d is not None
+    assert d["code"] == "ABSENT"
+    assert d["variants"] == [] and d["stocks"] == []
+    assert "无有效截面" in d["unavailable_reason"]

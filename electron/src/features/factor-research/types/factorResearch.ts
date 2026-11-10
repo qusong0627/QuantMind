@@ -54,6 +54,13 @@ export interface RangeMeta {
   start: string | null;
   end: string | null;
   n_months: number;
+  /** 主库全窗口（快照边界；与当前切片 start/end 不同） */
+  window?: [string, string] | null;
+  lookback_start?: string | null;
+  /** 方向校准窗：私有因子 sign 只在这里算一次，评估窗口只读 */
+  direction_calibration?: { start: string; end: string; source?: string } | null;
+  /** 历史窗口退市股覆盖缺口；true = 只能做研究，不得作为验收依据 */
+  survivorship_bias?: boolean;
 }
 
 export interface FactorKpi {
@@ -220,6 +227,8 @@ export interface FactorDetail {
    */
   source_library?: string;
   available: boolean;
+  /** 该因子在所选窗口内无数据时的可读原因（含数据起始日）；有数据时不出现 */
+  unavailable_reason?: string;
   env_tag: string;
   time_tag: string;
   range: RangeMeta;

@@ -280,17 +280,33 @@ const shiftMonth = (ym: string, delta: number): string => {
   return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, '0')}`;
 };
 
-/** 依据快照窗口生成预置区间 */
+/** 依据快照窗口生成预置区间（含「时代」快捷档 + 窗口内全部年份）。
+ *
+ * 2026-11 起主库从 2016-07 开始，年份档不能再只列最近 5 年 —— 否则
+ * 2016–2019 这段真正的样本外窗口在 UI 上根本点不到。
+ */
 export function rangePresets(windowStr?: string[]): Array<{ key: string; label: string; start: string | null; end: string | null }> {
   const out: Array<{ key: string; label: string; start: string | null; end: string | null }> = [
     { key: 'all', label: '全部', start: null, end: null },
   ];
   if (windowStr?.[1]) {
     const endYm = windowStr[1].slice(0, 7);
+    const startYear = Number(windowStr[0].slice(0, 4));
+    const endYear = Number(endYm.slice(0, 4));
     out.push({ key: '3y', label: '近3年', start: `${shiftMonth(endYm, -35)}-01`, end: null });
     out.push({ key: '1y', label: '近1年', start: `${shiftMonth(endYm, -11)}-01`, end: null });
-    const endYear = Number(endYm.slice(0, 4));
-    for (let y = endYear; y >= Math.max(endYear - 4, 2015); y -= 1) {
+    // 时代档：与快照窗口有交集才出现（不渲染点了必然空的按钮）
+    const era = (key: string, label: string, y0: number, y1: number | null) => {
+      const hi = y1 ?? 9999;
+      if (endYear >= y0 && startYear <= hi) {
+        out.push({ key, label, start: `${y0}-01`, end: y1 === null ? null : `${y1}-12` });
+      }
+    };
+    era('era2016', '2016–2019', 2016, 2019);
+    era('era2020', '2020–2024', 2020, 2024);
+    era('era2025', '2025–今', 2025, null);
+    // 窗口内全部年份（最多 15 个，防止异常 meta 把工具条撑爆）
+    for (let y = endYear, n = 0; y >= startYear && n < 15; y -= 1, n += 1) {
       out.push({ key: `y${y}`, label: String(y), start: `${y}-01`, end: `${y}-12` });
     }
   }

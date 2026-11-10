@@ -38,6 +38,7 @@ from backend.services.engine.factor_research import (
     scorecard,
     store,
     taxonomy,
+    windows as frwindows,
 )
 from backend.services.engine.factor_research.catalog import BY_CODE, FACTORS, L1_ORDER
 
@@ -173,20 +174,26 @@ _ctx_cache: dict[tuple, dict] = {}
 _derived_cache: dict[tuple, dict] = {}
 _ctx_lock = threading.Lock()
 _derived_lock = threading.Lock()
-_MAX_CTX = 4  # 面板本体在 store 里另有共享缓存，这里每份只几十 MB，留几份够切数据集
+_MAX_CTX = 2  # 窗口化后每份 ctx 持有一个 Panel（10 年 private ≈1.4G）；只留最近 2 个窗口
 
 
 def _range_key(start: str | None, end: str | None, dataset: str, market: str) -> tuple:
     # market 必须进键：否则先构建的市场会被另一市场按 (区间, 数据集) 命中缓存，
     # 港股页面戴 A 股面板 —— 全程不报错（store 侧面板缓存已按市场分键，
     # 这里漏了等于把上面一层防住了、这一层又漏出去）。
-    return (start or "", end or "", dataset, market, store.panel_stamp(dataset, market))
+    return (
+        start or "",
+        end or "",
+        dataset,
+        market,
+        store.panel_stamp(dataset, market, start, end),
+    )
 
 
 def _build_ctx(
     key: tuple, start: str | None, end: str | None, dataset: str, market: str
 ) -> dict:
-    p = store.panel(dataset, market)
+    p = store.panel(dataset, market, start, end)
     if p is None:
         raise store.SnapshotMissing(
             f"factor_panel.parquet 缺失（数据集 {dataset}；请先跑构建或点「快照-一键计算」）"
@@ -205,8 +212,10 @@ def _build_ctx(
     if prim is not None and len(prim["nav"]) > 1:
         nav = prim["nav"]
         bench_ret = nav[1:] / nav[:-1] - 1
+    cov = store.coverage(dataset, market) or {}
     return {
         "_key": key,
+        "dataset": dataset,
         "market": market,
         "bench_order": order,
         "bench_names": scorecard.bench_names_for_market(market),
@@ -217,6 +226,21 @@ def _build_ctx(
         "ic": ic,
         "ic_index": scorecard.ic_index(ic) if ic is not None else {},
         "bench_ret": bench_ret,
+        "snapshot_meta": store.window_meta(dataset, market),
+        # 覆盖率全文（每因子）很大，ctx 只留摘要；需要逐因子时走 coverage 端点/文件。
+        "coverage_summary": {
+            k: cov.get(k)
+            for k in (
+                "window",
+                "survivorship_bias",
+                "survivorship_threshold",
+                "direction_calibration",
+                "lookback_start",
+            )
+        },
+        # 逐月覆盖（131 行，很小）：窗口级 survivorship 必须按**当前切片**判，
+        # 不能拿全库一个 flag 盖到所有年份上（2020+ 覆盖好、2016 缺口大）。
+        "coverage_months": cov.get("months", []),
     }
 
 
@@ -286,11 +310,37 @@ def _range_ctx_full(
 
 def _range_meta(ctx: dict) -> dict:
     rdates = ctx["rdates"]
+    snap_meta = ctx.get("snapshot_meta") or {}
+    cov = ctx.get("coverage_summary") or {}
+    # 窗口级退市缺口：只统计当前切片覆盖到的月份（全库 flag 会误标覆盖良好的年份）
+    sel = {str(pd.Timestamp(d).date()) for d in rdates}
+    thr = float(cov.get("survivorship_threshold") or 0.05)
+    months = ctx.get("coverage_months") or []
+    if months:
+        def _gap(m: dict) -> float:
+            # 优先用逐库审计（行存在性下界）；旧快照/未审计时退回并集口径
+            v = m.get("worst_library_missing")
+            return float(v if v is not None else (m.get("missing_ratio") or 0))
+        surv = any(
+            m.get("date") in sel
+            and _gap(m) > thr
+            and int(m.get("kline_symbols") or 0) > 0
+            for m in months
+        )
+    else:
+        surv = bool(cov.get("survivorship_bias", snap_meta.get("survivorship_bias", False)))
     return {
         "start": str(pd.Timestamp(rdates[0]).date()) if len(rdates) else None,
         "end": str(pd.Timestamp(rdates[-1]).date()) if len(rdates) else None,
         "n_months": int(len(rdates)),
         "market": ctx["market"],
+        # 主库全窗口（与用户选中的 start/end 不同：前者是快照边界，后者是切片）
+        "window": cov.get("window") or snap_meta.get("window"),
+        "lookback_start": cov.get("lookback_start") or snap_meta.get("lookback_start"),
+        "direction_calibration": cov.get("direction_calibration")
+        or snap_meta.get("direction_calibration"),
+        # 历史窗口的退市股覆盖缺口：true 表示该窗口只能做研究、不得作为验收依据
+        "survivorship_bias": surv,
     }
 
 
@@ -384,7 +434,9 @@ def leaderboard(
         if n == 30
         else {c: scorecard.topn_series(p, p.index(c), n, ctx["mask"]) for c in p.codes}
     )
-    snap_mv, snap_ind = _snapshot_maps(store.stock_snapshot(mk))
+    snap_mv, snap_ind = _snapshot_maps(
+        store.stock_snapshot(mk, as_of=rdates[-1] if len(rdates) else None)
+    )
     rows = []
     ic_index = ctx["ic_index"]  # 全表分好组再逐因子取，别在循环里全表扫（22s → 秒级）
     for code in p.codes:
@@ -510,7 +562,50 @@ def factor_detail(
     ctx = _range_ctx_full(start, end, dataset, mk)  # 用到 env_tags/time_tags
     p, ic = ctx["panel"], ctx["ic"]
     if code not in p.ci:
-        return None
+        # 因子存在、但所选窗口内没有有效截面（如 l2/gap/rd/minute 在 2016–2019）。
+        # 不能 404：目录里能点到它，404 会让人以为整个因子坏了。给一个明确
+        # 「该窗口无数据 + 数据自何时起」的空详情，前端渲染空表而不是报错。
+        cov = store.coverage(dataset, mk) or {}
+        fcov = (cov.get("factors") or {}).get(code) or {}
+        reason = "该因子在所选窗口内无有效截面"
+        if fcov.get("first_valid"):
+            reason += f"（该因子数据自 {fcov['first_valid']} 起）"
+        return store._sanitize(
+            {
+                "code": code,
+                "name_cn": meta.get("name_cn", code),
+                "display_name": meta.get("display_name", ""),
+                "l1": meta.get("l1", ""),
+                "l2": meta.get("l2", ""),
+                "direction": int(meta.get("direction", 1)),
+                "description": meta.get("description", ""),
+                "formula": meta.get("formula", ""),
+                "wind_source": meta.get("wind_source", ""),
+                "source_library": discovery.source_of(meta.get("wind_source", "")),
+                "available": bool(meta.get("available", True)),
+                "unavailable_reason": reason,
+                "env_tag": ctx["env_tags"].get(code, meta.get("env_tag", "")),
+                "time_tag": ctx["time_tags"].get(code, meta.get("time_tag", "")),
+                "range": _range_meta(ctx),
+                "variants": [],
+                "benchmarks": [],
+                "nscan": [],
+                "ic": [],
+                "ic_kpi": {
+                    "ic_mean": None,
+                    "ic_std": None,
+                    "ic_ir": None,
+                    "ic_win_rate": None,
+                },
+                "stocks": [],
+                "stocks_date": None,
+                "stocks_stale": False,
+                "industry_dist": [],
+                "cap_dist": [
+                    {"name": label, "count": 0} for label in scorecard.CAP_LABELS
+                ],
+            }
+        )
     fi = p.index(code)
     mask = ctx["mask"]
 
@@ -559,7 +654,9 @@ def factor_detail(
     # 有数据的截面；stocks_stale 供前端提示「数据未更新到最新截面」。
     last = scorecard.latest_data_month(p, fi)
     stocks_stale = last is not None and last < len(p.dates) - 1
-    snap = store.stock_snapshot(mk)
+    snap = store.stock_snapshot(
+        mk, as_of=p.dates[last] if last is not None else None
+    )
     snap_idx = snap.set_index("symbol") if snap is not None else None
     kk = min(int(stocks_n), p.fwd.shape[2])
     stocks: list[dict] = []
@@ -868,13 +965,17 @@ def snapshot_status(dataset: str = "classic", market: str = "CN") -> dict:
                     break
         except OSError:
             pass
+    part_dir = d / frwindows.PANEL_DIR
+    has_parts = part_dir.is_dir() and any(part_dir.glob("year=*.parquet"))
     return {
-        "exists": (d / "factor_panel.parquet").exists(),
+        "exists": has_parts or (d / "factor_panel.parquet").exists(),
         "running": pid is not None,
         "built_at": meta.get("built_at"),
         "window": meta.get("window"),
         "n_factors": meta.get("n_factors") or meta.get("n_factors_computed"),
         "n_dates": meta.get("n_dates"),
+        "partitioned": bool(meta.get("partitioned", has_parts)),
+        "survivorship_bias": meta.get("survivorship_bias"),
         "step": step,
         "log_tail": log_tail,
         "dataset": dataset,
@@ -888,12 +989,28 @@ _BUILD_SCRIPTS = {
 }
 
 
-def start_build(dataset: str = "classic", market: str = "CN") -> dict:
-    """启动快照构建（后台子进程；已在构建则直接返回运行中）。全部本地计算。"""
+def start_build(
+    dataset: str = "classic",
+    market: str = "CN",
+    start: str | None = None,
+    end: str | None = None,
+    append: bool = False,
+) -> dict:
+    """启动快照构建（后台子进程；已在构建则直接返回运行中）。全部本地计算。
+
+    ``start``/``end`` 给了就只重建该区间（年分区按年替换）；``append=True`` 为
+    增量续拉：保留旧年分区，只替换本次区间，旧 factors/ic/coverage 合并。
+    私有库增量必须已有 ``direction.json``（方向冻结表），否则拒绝 —— 不能拿
+    新窗口的 IC 重算 sign。
+    """
     mk = _market_key(market)
     d = store.artifact_dir(dataset, mk)
     if (pid := _build_running(d)) is not None:
         return {"started": False, "running": True, "pid": pid}
+    if append and dataset == "private" and not (d / frwindows.DIRECTION_FILE).exists():
+        return {
+            "error": f"增量续拉需要先有一次全量构建生成 {frwindows.DIRECTION_FILE}"
+        }
     d.mkdir(parents=True, exist_ok=True)
     root = (
         Path(__file__).resolve().parents[4]
@@ -907,10 +1024,33 @@ def start_build(dataset: str = "classic", market: str = "CN") -> dict:
     if not script.exists():
         return {"error": f"构建脚本缺失: {script}"}
     cmd = [sys.executable, str(script)]
+    if start:
+        cmd += ["--start", start]
+    if end:
+        cmd += ["--end", end]
     if dataset == "private":
         # 私有面板构建器带 --market（classic 构建脚本没有该参数、也不服务非 CN）。
         # 显式传规范键：脚本缺省是 CN，漏传的后果是「港股页点了计算，默默建了 A 股」。
+        # direction：首次构建冻结校准窗方向；增量续拉只读冻结表，绝不重算符号。
         cmd += ["--market", mk]
+        if append:
+            # 先读冻结表，再把本块新增因子（校准窗无数据、按块内 IC 兜底）补写进去：
+            # 不补写的话，这些因子的 fallback sign 每次续拉都可能变，不可复现。
+            cmd += [
+                "--append",
+                "--direction-file",
+                str(d / frwindows.DIRECTION_FILE),
+                "--direction-out",
+                str(d / frwindows.DIRECTION_FILE),
+            ]
+        else:
+            # 已有冻结表时必须先读后写：全量重建也复用同一份 sign，避免换一次
+            # 构建窗口就把方向重算一遍（那正是本轮要修的样本外泄漏）。
+            if (d / frwindows.DIRECTION_FILE).exists():
+                cmd += ["--direction-file", str(d / frwindows.DIRECTION_FILE)]
+            cmd += ["--direction-out", str(d / frwindows.DIRECTION_FILE)]
+    elif append:
+        return {"error": "classic 不支持增量续拉（全量重建约 6 分钟），请去掉 append"}
     log = open(d / _BUILD_LOG, "a", encoding="utf-8")  # noqa: SIM115 - 交给子进程持有
     log.write(
         f"\n===== build started {pd.Timestamp.now().isoformat(timespec='seconds')}"
@@ -1115,7 +1255,7 @@ def compose(
     if not weights:
         return {"error": "weights 为空"}
     codes = list(weights)
-    scores = store.scores_for(codes, dataset, mk)
+    scores = store.scores_for(codes, dataset, mk, start, end)
     if scores is None or scores.empty:
         return {"error": "快照缺失（请在「快照」中一键计算）"}
     scores = _scores_in_range(scores, start, end)

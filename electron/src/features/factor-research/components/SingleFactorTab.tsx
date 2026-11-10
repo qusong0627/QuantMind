@@ -197,6 +197,12 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset, market,
         <div className="flex-1 rounded-2xl bg-slate-50 animate-pulse" />
       ) : detail ? (
         <>
+          {detail.variants.length === 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+              {detail.unavailable_reason || '该因子在所选窗口内无有效截面'}
+              <span className="ml-1 text-amber-500">（换一个窗口或看该因子的首个有效月）</span>
+            </div>
+          )}
           {/* 定义 */}
           <Card
             title="因子定义"
