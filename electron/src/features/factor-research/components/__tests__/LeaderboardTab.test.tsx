@@ -188,10 +188,32 @@ describe('LeaderboardTab：Fitness 列（BRAIN 口径）', () => {
     ]);
 
     expect(screen.getAllByText('Fitness').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('日均换手').length).toBeGreaterThan(0);
+    expect(screen.getByText('3.00%')).toBeTruthy();
     const cell = screen.getByText('1.80').closest('td');
     expect(cell?.getAttribute('title')).toContain('Good（良好）');
     expect(cell?.getAttribute('title')).toContain('日均单边换手 3.00%');
     // 缺失给「—」；0 会被读成「真的算出来是 0」
     expect(screen.queryByText('0.00')).toBeNull();
+  });
+});
+
+
+describe('LeaderboardTab：全库排行榜滚动加载', () => {
+  test('默认 100 行；加载更多只追加，不丢全库计数', () => {
+    const rows = Array.from({ length: 120 }, (_, i) =>
+      row({ code: `c${i}`, name_cn: `c${i}`, rank: i + 1 }),
+    );
+    renderTab(rows);
+
+    expect(screen.getByText(/已显示 100 \/ 120 个/)).toBeTruthy();
+    expect(screen.getByText('c99')).toBeTruthy();
+    expect(screen.queryByText('c100')).toBeNull();
+
+    fireEvent.click(screen.getByText('滚动或点此加载更多'));
+
+    expect(screen.getByText(/已显示 120 \/ 120 个/)).toBeTruthy();
+    expect(screen.getByText('c100')).toBeTruthy();
+    expect(screen.getByText('c99')).toBeTruthy(); // 追加，不是翻页
   });
 });

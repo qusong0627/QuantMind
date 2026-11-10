@@ -17,7 +17,7 @@
  * （值走 `excess_by_bench`，名来自 meta.benchmarks）；无基准市场（期货）整段不渲染——
  * 挂两列全「—」的 A 股超额是假话。环境标签口径的基准同理取本市场主基准。
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRightLeft, CheckSquare, Combine, Filter, Layers, Loader2, PackagePlus, Search, Square, Star, X } from 'lucide-react';
 import type { BenchMeta, CategoryFilter, LeaderboardDedupMeta, LeaderboardRow, ResearchMarket } from '../types/factorResearch';
 import { Card, ENV_TAGS, TIME_TAGS, TagChip, fmtNum, fmtPct } from './common';
@@ -98,6 +98,16 @@ const BASE_COLS: Col[] = [
       '月频组合日均换手通常 <12.5%，换手项多数落在地板，Fitness 近似 夏普×√(|年化|/0.125)；不做验收门槛。',
     fmt: (v) => fmtNum(v as number),
   },
+  {
+    key: 'brain_turnover',
+    label: '日均换手',
+    width: 'w-16',
+    align: 'right',
+    hint:
+      '月均单边换手 ÷21 的日均折算（与 Fitness 同口径，不是逐日实测）。' +
+      '月频组合通常 1–5%/日；<0.125 时 Fitness 换手项落在地板。',
+    fmt: (v) => fmtPct(v as number, 2),
+  },
   { key: 'max_drawdown', label: '最大回撤', width: 'w-16', align: 'right', fmt: (v) => fmtPct(v as number) },
   { key: 'win_rate', label: '月胜率', width: 'w-14', align: 'right', fmt: (v) => fmtPct(v as number) },
 ];
@@ -158,6 +168,10 @@ export const LeaderboardTab: React.FC<Props> = ({
   const dedupDropped = dedupMeta?.applied ? dedupMeta.dropped : undefined;
   const [sortKey, setSortKey] = useState<string>('composite');
   const [asc, setAsc] = useState(false);
+  // 排行榜一次返回全库（4000+ 行）；DOM 全量渲染会把浏览器拖死。滚动到接近
+  // 底部时追加 100 行（滚动加载，不是分页；排序/筛选仍是全库口径）。
+  const [visibleCount, setVisibleCount] = useState(100);
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
   const [filters, setFilters] = useState<LeaderboardFilters>(EMPTY_LEADERBOARD_FILTERS);
   const [filterOpen, setFilterOpen] = useState<{ key: string; x: number; y: number } | null>(null);
   const [favsOnly, setFavsOnly] = useState(false);
@@ -217,6 +231,23 @@ export const LeaderboardTab: React.FC<Props> = ({
     });
     return sorted;
   }, [rows, sortKey, asc, tagFilter, categoryFilter, filters, favsOnly, favs]);
+
+  const visibleRows = view.slice(0, visibleCount);
+  // 筛选/排序/切库后重新从 100 行开始
+  useEffect(() => {
+    setVisibleCount(100);
+  }, [rows, filters, tagFilter, categoryFilter, sortKey, asc, favsOnly]);
+  const loadMore = () => setVisibleCount((n) => Math.min(n + 100, view.length));
+  const onTableScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (filterOpen) setFilterOpen(null);
+    const el = e.currentTarget;
+    if (
+      visibleCount < view.length &&
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 160
+    ) {
+      loadMore();
+    }
+  };
 
   /** 每个标签的命中数：在「除标签外」的当前筛选下，该标签能捞到多少行 */
   const tagCounts = useMemo(() => {
@@ -335,7 +366,7 @@ export const LeaderboardTab: React.FC<Props> = ({
   };
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col gap-1.5">
+    <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-1.5">
       {/* 工具条 */}
       <div className="shrink-0 flex items-center gap-2 flex-wrap">
         <span className="flex items-center gap-1">
@@ -541,7 +572,7 @@ export const LeaderboardTab: React.FC<Props> = ({
       {/* 表格 */}
       <Card
         title={`因子排行榜（${view.length}${activeCount > 0 ? ` / 全部 ${rows.length}` : ''}）`}
-        className="flex-1"
+        className="flex-1 min-w-0"
         extra={
           loading && rows.length ? (
             <span className="flex items-center gap-1 text-[10px] font-bold text-indigo-500">
@@ -565,11 +596,14 @@ export const LeaderboardTab: React.FC<Props> = ({
             </div>
           </div>
         ) : (
-          <div
-            className={`h-full overflow-y-auto custom-scrollbar ${loading ? 'opacity-60 pointer-events-none' : ''}`}
-            onScroll={() => filterOpen && setFilterOpen(null)}
-          >
-            <table className="w-full text-[11px]">
+          <div className="h-full flex flex-col min-h-0">
+            <div
+              ref={tableScrollRef}
+              data-testid="leaderboard-scroll"
+              className={`flex-1 min-h-0 min-w-0 overflow-auto custom-scrollbar ${loading ? 'opacity-60 pointer-events-none' : ''}`}
+              onScroll={onTableScroll}
+            >
+              <table className="w-full min-w-[1500px] text-[11px]">
               <thead className="sticky top-0 z-10 bg-white/95 backdrop-blur-sm shadow-[0_1px_0_0_#e2e8f0]">
                 <tr className="text-slate-400 font-bold">
                   <th className="w-6 py-1" aria-label="自选"></th>
@@ -588,7 +622,7 @@ export const LeaderboardTab: React.FC<Props> = ({
                     </td>
                   </tr>
                 )}
-                {view.map((r) => {
+                {visibleRows.map((r) => {
                   const isSel = selected.includes(r.code);
                   const isFav = favs.includes(r.code);
                   return (
@@ -640,8 +674,13 @@ export const LeaderboardTab: React.FC<Props> = ({
                               {r.code}
                             </span>
                           )}
-                          <span className="shrink-0 text-[9px] text-slate-300 whitespace-nowrap">
-                            {r.l1.slice(0, 2)} / {r.category_name || r.l2}
+                          {/* 分类标签：旧版是 9px 浅灰「Al / l2」，几乎看不见；改成可见芯片，
+                              悬停给完整 l1/l2。私人库用语义类别，经典库回退 l2。 */}
+                          <span
+                            className="shrink-0 rounded-full bg-slate-100 px-1.5 py-[1px] text-[9px] font-bold text-slate-500"
+                            title={`${r.l1} / ${r.l2}`}
+                          >
+                            {r.category_name || r.l2}
                           </span>
                           {r.insufficient && (
                             <span className="shrink-0 rounded-full bg-amber-50 border border-amber-100 px-1.5 py-[1px] text-[9px] font-bold text-amber-600">
@@ -674,6 +713,16 @@ export const LeaderboardTab: React.FC<Props> = ({
                         }
                       >
                         {fmtNum(r.fitness)}
+                      </td>
+                      <td
+                        className={`py-1 text-right font-mono ${r.brain_turnover == null ? 'text-slate-300' : 'text-slate-600'}`}
+                        title={
+                          r.brain_turnover == null
+                            ? '样本不足 6 个月或序列退化，换手不可计算'
+                            : `月均单边换手 ÷21 的日均折算；Fitness 口径，非逐日实测`
+                        }
+                      >
+                        {fmtPct(r.brain_turnover, 2)}
                       </td>
                       <td className="py-1 text-right font-mono text-slate-500">{fmtPct(r.max_drawdown)}</td>
                       <td className="py-1 text-right font-mono text-slate-500">{fmtPct(r.win_rate)}</td>
@@ -740,7 +789,25 @@ export const LeaderboardTab: React.FC<Props> = ({
                   );
                 })}
               </tbody>
-            </table>
+              </table>
+            </div>
+            {view.length > 0 && (
+              <div className="shrink-0 flex items-center justify-end gap-2 border-t border-slate-100 pt-1 text-[10px] text-slate-500">
+                <span className="font-mono">
+                  已显示 {Math.min(visibleCount, view.length)} / {view.length} 个
+                </span>
+                {visibleCount < view.length ? (
+                  <button
+                    onClick={loadMore}
+                    className="rounded-lg border border-slate-200 bg-white px-1.5 py-0.5 font-bold text-slate-600 hover:bg-slate-50"
+                  >
+                    滚动或点此加载更多
+                  </button>
+                ) : (
+                  <span className="text-slate-400">已到末尾</span>
+                )}
+              </div>
+            )}
           </div>
         )}
       </Card>
