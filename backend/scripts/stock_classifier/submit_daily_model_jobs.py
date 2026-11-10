@@ -26,6 +26,12 @@ from pathlib import Path
 
 import requests
 
+from backend.scripts.stock_classifier.selection_registry import (
+    PROTOCOL_FILE,
+    SelectionRegistry,
+    load_protocol_snapshot,
+)
+
 API = "http://127.0.0.1:8000"
 USER = "10000001"
 TENANT = "default"
@@ -183,11 +189,28 @@ def main() -> int:
     ap.add_argument(
         "--out", default="data/stock_classifier/feature_selection/model_jobs.json"
     )
+    ap.add_argument(
+        "--registry",
+        default="",
+        help="特征选择台账目录；给了就在提交时自动 upsert、每个 job 结束后 attach",
+    )
+    ap.add_argument("--protocol", default=str(PROTOCOL_FILE))
     args = ap.parse_args()
     secret = os.environ.get("INTERNAL_CALL_SECRET", "").strip()
     if not secret:
         raise SystemExit("缺少 INTERNAL_CALL_SECRET")
     sel = json.loads(Path(args.selection).read_text(encoding="utf-8"))
+    store = None
+    reg_run_id = ""
+    if args.registry:
+        store = SelectionRegistry(args.registry)
+        record = store.upsert(
+            sel,
+            top=args.top,
+            protocol_snapshot=load_protocol_snapshot(args.protocol),
+        )
+        reg_run_id = record["run_id"]
+        print(f"[registry] {reg_run_id} <- {args.selection}")
     entries = sel["selected"][str(args.top)]
     # top100 可能因注册跳过/相关性少于 100：注册 top200，按 100→200 顺序补足
     entries_wide = sel["selected"].get("200") or entries
@@ -208,6 +231,25 @@ def main() -> int:
     skipped = reg.get("skipped", [])
     if skipped:
         print(f"[register] 跳过 {len(skipped)}：{skipped[:5]}")
+        if store:
+            counts: dict[str, int] = {}
+            for item in skipped:
+                reason = str(item.get("reason") or "unknown")
+                counts[reason] = counts.get(reason, 0) + 1
+            store.upsert(
+                sel,
+                top=args.top,
+                protocol_snapshot=load_protocol_snapshot(args.protocol),
+                data_issues=[
+                    {
+                        "key": f"register_skip:{reason[:48]}",
+                        "statement": f"注册训练目录跳过 {count} 个因子：{reason}",
+                        "evidence": {"reason": reason, "count": count},
+                        "confidence": "high" if count >= 5 else "medium",
+                    }
+                    for reason, count in counts.items()
+                ],
+            )
     versions = {str(k): str(v) for k, v in (reg.get("versions") or {}).items()}
     # 只发布「真有已注册映射」的来源库：空草稿 publish 会被闸门拒绝
     # （A published catalog needs at least one enabled factor）。
@@ -273,6 +315,8 @@ def main() -> int:
             name=f"CN日频 T+{horizon} · 2016-2024训/2025验/2026测 · sel{args.top}",
         )
         jobs[f"t{horizon}"] = {"run_id": run_id}
+        if store:
+            store.attach_jobs(reg_run_id, {"jobs": jobs})
         result = _wait(s, run_id)
         jobs[f"t{horizon}"]["status"] = result.get("status")
         jobs[f"t{horizon}"]["result"] = result
@@ -292,6 +336,10 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"[done] h{horizon} status={result.get('status')}")
+        if store:
+            store.attach_jobs(reg_run_id, {"jobs": jobs})
+    if store:
+        print(f"[registry] updated {reg_run_id}（OOS/经验用 daily_growth.py 收口）")
     return 0
 
 
