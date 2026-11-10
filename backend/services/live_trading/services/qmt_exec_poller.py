@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from backend.services.live_trading.services.qmt_exec_client import (
@@ -46,10 +47,16 @@ from backend.shared.trade_contract import SYNTH_TRADE_PREFIX
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL_SECONDS = 2.0  # 交易时段轮询间隔
+POLL_INTERVAL_SECONDS = 5.0  # 交易时段轮询间隔（桥的容器交易查询桶 1 条/3s）
 OFF_HOURS_SLEEP_SECONDS = 30.0  # 非交易时段（只需低频确认开盘）
 DISABLED_SLEEP_SECONDS = 60.0  # 未启用/未配置时空转间隔
 SETTINGS_REFRESH_SECONDS = 30.0  # 页面配置重读间隔
+# 每轮只发**一条**交易上下文查询：桥侧令牌桶 ``rpc.trade_min_interval_s`` 默认
+# 3s/条、容量 3，旧实现每 2s 连发 query_orders + query_trades，第二条必然
+# TRADE_RPC_THROTTLED；两条又在同一个 try 里，整轮被丢弃（orders 结果也丢）。
+# 现在按轮次轮转：orders 每轮一次，trades 每 N 轮一次（5s × 5 = 25s）。
+TRADE_QUERY_EVERY_N_ROUNDS = 5
+THROTTLE_LOG_INTERVAL_S = 60.0  # THROTTLED 属预期退避，限频告警
 
 # 合成成交幂等键前缀：唯一事实源在 shared（对账/体检也要认族，见 trade_contract）。
 _SYNTH_TRADE_PREFIX = SYNTH_TRADE_PREFIX
@@ -77,6 +84,9 @@ class QmtExecPoller:
         self._warned_unmatched: set[str] = set()
         self._day = ""
         self._settings_at = 0.0
+        # 轮次计数：决定本轮查 orders 还是 trades（每轮只发一条，见模块常量）。
+        self._round_no = 0
+        self._last_throttle_log = 0.0
         self.stats: dict[str, int] = {
             "rounds": 0,
             "orders": 0,
@@ -84,6 +94,7 @@ class QmtExecPoller:
             "changed": 0,
             "unmatched": 0,
             "errors": 0,
+            "throttled": 0,
         }
 
     # -- 依赖 -----------------------------------------------------------
@@ -137,33 +148,57 @@ class QmtExecPoller:
 
     # -- 单轮 -----------------------------------------------------------
     async def poll_once(self) -> dict[str, int]:
-        """执行一轮回收。返回本轮计数（供测试/观测）。"""
+        """执行一轮回收：每轮**只发一条**交易上下文查询（orders/trades 轮转）。
+
+        桥的容器交易查询令牌桶默认 1 条/3s（容量 3）。旧实现每轮连发
+        query_orders + query_trades，第二条必被 TRADE_RPC_THROTTLED，且两条
+        在同一个 try 里 → 整轮丢弃（orders 结果也一起丢）。现在：
+        orders 每轮一次，trades 每 ``TRADE_QUERY_EVERY_N_ROUNDS`` 轮一次。
+        """
         client = self.client
         await self._refresh_settings()
         if not client.configured:
             return {"skipped": 1}
 
         self._rollover_if_new_day()
-        try:
-            orders = await client.query_orders()
-            trades = await client.query_trades()
-        except QmtExecError as exc:
-            self.stats["errors"] += 1
-            logger.warning("[QmtExecPoller] 查询失败 code=%s: %s", exc.code, exc)
-            return {"error": 1}
+        self._round_no += 1
+        want_trades = self._round_no % TRADE_QUERY_EVERY_N_ROUNDS == 0
+
+        orders: list[dict[str, Any]] | None = None
+        trades: list[dict[str, Any]] | None = None
+        if want_trades:
+            try:
+                trades = await client.query_trades()
+            except QmtExecError as exc:
+                self._note_query_error("trades", exc)
+                return {"error": 1}
+        else:
+            try:
+                orders = await client.query_orders()
+            except QmtExecError as exc:
+                self._note_query_error("orders", exc)
+                return {"error": 1}
 
         cfg = client.effective_config()
         strategy_name = str(cfg.get("strategy_name") or "")
         self.stats["rounds"] += 1
-        self.stats["orders"] += len(orders)
-        self.stats["trades"] += len(trades)
+        self.stats["orders"] += len(orders or [])
+        self.stats["trades"] += len(trades or [])
 
         changed = 0
         async with self._session() as db:
+            touched: list[tuple[Any, Any]] = []
             # 先落真实成交明细、再处理委托回报：反过来的话，委托回报会先补一条
-            # 合成成交，同一轮稍后到达的成交明细又入账一次（同一笔成交双计）。
-            touched = await self._sync_trades(db, trades, strategy_name=strategy_name)
-            touched += await self._sync_orders(db, orders, strategy_name=strategy_name)
+            # 合成成交，随后到达的成交明细又入账一次（同一笔成交双计）。
+            # 分轮之后顺序不变：trades 轮只落成交，orders 轮只落委托。
+            if trades is not None:
+                touched += await self._sync_trades(
+                    db, trades, strategy_name=strategy_name
+                )
+            if orders is not None:
+                touched += await self._sync_orders(
+                    db, orders, strategy_name=strategy_name
+                )
             if touched:
                 await db.commit()
                 redis = self._redis_handle()
@@ -171,7 +206,32 @@ class QmtExecPoller:
                     publish_order_event(redis, order, status)
                 changed = len(touched)
         self.stats["changed"] += changed
-        return {"changed": changed, "orders": len(orders), "trades": len(trades)}
+        return {
+            "changed": changed,
+            "orders": len(orders or []),
+            "trades": len(trades or []),
+        }
+
+    def _note_query_error(self, kind: str, exc: QmtExecError) -> None:
+        """查询失败分账：THROTTLED 是桥的预期退避，限频告警；其它错误照常。"""
+        self.stats["errors"] += 1
+        code = str(getattr(exc, "code", "") or "")
+        if "THROTTLED" not in f"{code} {exc}":
+            logger.warning(
+                "[QmtExecPoller] %s 查询失败 code=%s: %s", kind, code, exc
+            )
+            return
+        self.stats["throttled"] += 1
+        now = time.monotonic()
+        if now - self._last_throttle_log >= THROTTLE_LOG_INTERVAL_S:
+            self._last_throttle_log = now
+            logger.info(
+                "[QmtExecPoller] %s 查询被桥限速（THROTTLED），按轮转节奏退避；"
+                "累计 throttled=%d errors=%d",
+                kind,
+                self.stats["throttled"],
+                self.stats["errors"],
+            )
 
     @staticmethod
     def _session() -> Any:

@@ -156,6 +156,14 @@ def _run_poll(
         return asyncio.run(poller.poll_once())
 
 
+def _run_trade_round(
+    poller: QmtExecPoller, session: FakeSession | None = None
+) -> dict[str, int]:
+    """把下一轮推到 trades 查询轮（每 N 轮一次，见 poller 常量）。"""
+    poller._round_no = mod.TRADE_QUERY_EVERY_N_ROUNDS - 1
+    return _run_poll(poller, session)
+
+
 class TestMatchers:
     def test_is_ours_by_remark_prefix(self) -> None:
         assert QmtExecPoller._is_ours({"order_remark": "qmabc123"}, "") is True
@@ -281,15 +289,15 @@ class TestPollOnce:
             patch.object(mod, "apply_execution_report", apply),
             patch.object(QmtExecPoller, "_has_trade", AsyncMock(return_value=True)),
         ):
-            _run_poll(poller)
+            _run_trade_round(poller)
             first_calls = apply.await_count
-            _run_poll(poller)
+            _run_trade_round(poller)
         assert poller._seen_trades == {"T1"}
-        # 第二轮委托状态未变 + 成交 id 已见 → 不再落库
+        # 同一成交 id 重放 → 不再落库
         assert apply.await_count == first_calls
 
-    def test_same_round_trade_not_double_counted(self) -> None:
-        """同一轮既有委托回报又有成交明细：只入账一次，不得再补合成成交。"""
+    def test_trade_round_then_order_round_not_double_counted(self) -> None:
+        """成交轮先入账，随后委托轮不得再补合成成交（跨轮不双计）。"""
         order_item = {
             "order_sysid": "123",
             "order_remark": "qmabc",
@@ -318,14 +326,19 @@ class TestPollOnce:
             return OrderStatus.FILLED
 
         poller = _make_poller(FakeClient(orders=[order_item], trades=[trade_item]))
+
+        async def has_trade(*_args: Any, **_kwargs: Any) -> bool:
+            return bool(poller._seen_trades)
+
         with (
             patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=order)),
             patch.object(
                 mod, "apply_execution_report", AsyncMock(side_effect=fake_apply)
             ),
-            # 库内暂无成交行 → 旧实现会在委托阶段补一条合成成交，造成双计
-            patch.object(QmtExecPoller, "_has_trade", AsyncMock(return_value=False)),
+            # 库内暂无成交行 → 委托轮若不知道成交已入账，会补一条合成成交
+            patch.object(QmtExecPoller, "_has_trade", staticmethod(has_trade)),
         ):
+            _run_trade_round(poller, FakeSession())
             _run_poll(poller, FakeSession())
         assert order.filled_quantity == 100.0
         assert synth_ids == []
@@ -452,7 +465,7 @@ class TestPollOnce:
         assert poller._seen_trades == {"T1"}
 
     def test_poll_order_of_sync_trades_before_orders(self) -> None:
-        """成交明细必须先于委托回报处理（否则同轮双计）。"""
+        """成交轮先落成交、委托轮后落委托（跨轮顺序不变，避免同笔双计）。"""
         calls: list[str] = []
 
         async def sync_trades(*_a: Any, **_k: Any) -> list[Any]:
@@ -468,6 +481,7 @@ class TestPollOnce:
             patch.object(QmtExecPoller, "_sync_trades", sync_trades),
             patch.object(QmtExecPoller, "_sync_orders", sync_orders),
         ):
+            _run_trade_round(poller, FakeSession())
             _run_poll(poller, FakeSession())
         assert calls == ["trades", "orders"]
 
@@ -480,6 +494,49 @@ class TestPollOnce:
 
         assert _run_poll(_make_poller(Broken())) == {"error": 1}
 
+    def test_trade_query_only_on_trade_round(self) -> None:
+        """每轮只发一条交易上下文查询：orders 每轮、trades 每 N 轮。"""
+        class Counting(FakeClient):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.q_orders = 0
+                self.q_trades = 0
+
+            async def query_orders(self) -> list[dict[str, Any]]:
+                self.q_orders += 1
+                return list(self.orders)
+
+            async def query_trades(self) -> list[dict[str, Any]]:
+                self.q_trades += 1
+                return list(self.trades)
+
+        client = Counting()
+        poller = _make_poller(client)
+        for _ in range(mod.TRADE_QUERY_EVERY_N_ROUNDS - 1):
+            _run_poll(poller)
+        assert client.q_orders == mod.TRADE_QUERY_EVERY_N_ROUNDS - 1
+        assert client.q_trades == 0
+        _run_trade_round(poller)
+        assert client.q_trades == 1
+
+    def test_throttled_warning_is_rate_limited(self, caplog: Any) -> None:
+        """THROTTLED 是桥的预期退避：计数但限频告警，不再每 2s 刷 WARN。"""
+        from backend.services.live_trading.services.qmt_exec_client import QmtExecError
+
+        class Throttled(FakeClient):
+            async def query_orders(self) -> list[dict[str, Any]]:
+                raise QmtExecError("交易查询限速", code="TRADE_RPC_THROTTLED")
+
+        poller = _make_poller(Throttled())
+        with caplog.at_level(logging.INFO, logger=mod.logger.name):
+            for _ in range(4):  # 全是 orders 轮（trades 每 N 轮才一次）
+                assert _run_poll(poller) == {"error": 1}
+        assert poller.stats["throttled"] == 4
+        throttled_logs = [
+            r for r in caplog.records if "THROTTLED" in r.message
+        ]
+        assert len(throttled_logs) == 1
+
 
 def _poll_on(poller: QmtExecPoller, day: str) -> dict[str, int]:
     session = FakeSession()
@@ -489,6 +546,11 @@ def _poll_on(poller: QmtExecPoller, day: str) -> dict[str, int]:
         patch.object(mod, "publish_order_event"),
     ):
         return asyncio.run(poller.poll_once())
+
+
+def _poll_on_trade(poller: QmtExecPoller, day: str) -> dict[str, int]:
+    poller._round_no = mod.TRADE_QUERY_EVERY_N_ROUNDS - 1
+    return _poll_on(poller, day)
 
 
 class TestUnmatchedWarningDedup:
@@ -520,20 +582,22 @@ class TestUnmatchedWarningDedup:
         poller = _make_poller(FakeClient(orders=[self.ORDER], trades=[self.TRADE]))
         with patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=None)):
             with caplog.at_level(logging.WARNING, logger=mod.logger.name):
-                _poll_on(poller, DAY)
-                _poll_on(poller, DAY)
-                _poll_on(poller, DAY)
+                for _ in range(3):
+                    _poll_on_trade(poller, DAY)
+                    _poll_on(poller, DAY)
         messages = self._messages(caplog)
         assert any("委托无法匹配订单 key=777" in m for m in messages)
         assert any("成交无法匹配订单 trade_id=T9" in m for m in messages)
-        assert len(messages) == 2  # 两个 key 各一条，三轮轮询不再重复
+        assert len(messages) == 2  # 两个 key 各一条，多轮轮询不再重复
 
     def test_day_rollover_allows_warning_again(self, caplog: Any) -> None:
         poller = _make_poller(FakeClient(orders=[self.ORDER], trades=[self.TRADE]))
         with patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=None)):
             with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+                _poll_on_trade(poller, DAY)
                 _poll_on(poller, DAY)
                 first = len(self._messages(caplog))
+                _poll_on_trade(poller, "20260910")
                 _poll_on(poller, "20260910")
                 second = len(self._messages(caplog))
         assert first == 2

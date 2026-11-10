@@ -63,12 +63,12 @@ DEFAULT_CONFIG = {
     # worker 零延迟同时开跑，瞬间并发打到 QMT 单线程交易 API。错峰后同一时刻
     # 只有一个 worker 热身。
     'startup': {'grace_s': 8.0, 'step_s': 3.0},
-    'positions': {'enabled': True, 'interval_s': 3, 'ttl_s': 120},
+    'positions': {'enabled': True, 'interval_s': 10, 'ttl_s': 120},
     'quotes': {'enabled': True, 'tier_a_interval_s': 2, 'tier_b_interval_s': 10,
                'chunk': 25, 'max_symbols': 250, 'stale_after_s': 10,
                'indices': ['000001.SH', '399001.SZ', '000300.SH'], 'watchlist': []},
-    'orders': {'enabled': True, 'interval_s': 2, 'maxlen': 2000},
-    'trades': {'enabled': True, 'interval_s': 5, 'maxlen': 2000},
+    'orders': {'enabled': True, 'interval_s': 5, 'maxlen': 2000},
+    'trades': {'enabled': True, 'interval_s': 15, 'maxlen': 2000},
     'budget': {'window_s': 10, 'market_ms': 2000, 'rpc_preempt_queue': 1,
                # 订单队列积压闸：待处理订单请求 >= N 时直接 BRIDGE_BUSY 快速失败，
                # 避免调用方在单线程管道里干等 25s（2026-10-30 实测头阻塞）。

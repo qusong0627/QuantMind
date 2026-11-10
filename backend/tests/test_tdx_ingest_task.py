@@ -400,6 +400,28 @@ async def test_run_dataset_blocked_family(monkeypatch, sinks_spy):
 
 
 @pytest.mark.asyncio
+async def test_run_dataset_require_nonempty_empty_marks_blocked(sinks_spy):
+    """SC 家族桥返回 ErrorId=0 但 Value=null：空集不是合法结果，必须记 blocked。
+
+    2026-11-10 实测 SC01–SC42 对 3 周区间全返 null，旧逻辑把空集写成 ok，
+    面板一直是绿的——「存了看不见」的又一处。
+    """
+    client = _FakeClient(result={"ErrorId": "0", "Value": None})
+    res = await task.run_dataset(
+        get_dataset_spec("sc"),
+        slot="23:50",
+        target_date="20261015",
+        client=client,
+        budget=_FakeBudget(),
+        redis_client=None,
+    )
+    assert res["status"] == "blocked"
+    assert res["rows_written"] == 0
+    assert "空" in res["error"]
+    assert sinks_spy["runs"][0]["status"] == "blocked"
+
+
+@pytest.mark.asyncio
 async def test_run_dataset_rate_limited_retries_then_reports(sinks_spy):
     client = _FakeClient(error=BridgeError("rate_limited", "RATE_LIMITED"))
     budget = _FakeBudget()

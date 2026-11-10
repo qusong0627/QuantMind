@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, 'bridge_config.json')
 STATE_KEY = 'qm:qmt:strategy:watchdog'
+METRICS_KEY = 'qm:qmt:pipe:metrics'
 QUEUE_KEY_TMPL = 'bigqmt:rpc:queue:%s'
 
 #: 订单/撤单类方法：出现即禁止 reload（在途委托不能被 reset 打断）。
@@ -77,6 +78,11 @@ DEFAULT_CONFIG = {
     'bridge_restart_max_per_hour': 6,
     'bridge_start_cmd': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\start_pipe_bridge.cmd',
     'bridge_restart_wait_s': 15.0,
+    # 自愈顺序：首选重启伴生桥（断管道解锁主线程），reload_deployment 降为兜底。
+    # 2026-11-10 实测：reload 只重载 deployment、不重跑 init，行情 Tap 注册随之丢失
+    #（日志里 `[v2] quote tap installed` 不再出现），之后只能人工在 QMT 编辑器里
+    # 停止/运行策略才能装回——"每次都要重启"就是这条自愈路径造成的。
+    'prefer_bridge_restart': True,
 }
 
 
@@ -194,6 +200,32 @@ def evaluate(
     if queue_has_orders:
         return Decision('observe', 'order rpc in flight; reload deferred',
                         failures, state)
+
+    # 自愈首选：重启伴生桥（断管道解锁主线程，不碰策略运行态 → Tap 不丢）。
+    # 2026-11-10 实测：reload_deployment 只重载 deployment、不重跑 init，策略的
+    # 行情 Tap 注册丢失（`[v2] quote tap installed` 不再出现），之后只能人工在
+    # QMT 编辑器里停止/运行策略——"每次都要重启"就是先 reload 造成的。
+    if bool(cfg.get('prefer_bridge_restart', True)):
+        allowed, why = should_restart_bridge(state, now_ts, cfg)
+        if allowed:
+            return Decision('restart_bridge', f'account hung; {why}',
+                            failures, state)
+        since = float(state.get('unresponsive_since') or 0.0)
+        if since > 0 and now_ts - since < float(cfg['bridge_restart_after_s']):
+            # 先等满 bridge_restart_after_s，别急着 reload（reload 会丢 Tap）。
+            return Decision('observe', f'bridge restart window ({why})',
+                            failures, state)
+        if now_ts - state['last_reload_ts'] < float(cfg['reload_cooldown_s']):
+            return Decision('observe', f'reload cooldown ({why})', failures, state)
+        if reload_count >= int(cfg['reload_max_per_day']):
+            return Decision('alert', 'reload budget exhausted; manual restart needed',
+                            failures, state)
+        state['reload_count'] = reload_count + 1
+        state['last_reload_ts'] = now_ts
+        return Decision('reload', 'account query hung; bridge restart unavailable; '
+                        'scheduling reload_deployment', failures, state)
+
+    # 旧顺序（先 reload）：仅当显式配置 prefer_bridge_restart=false 时使用。
     if now_ts - state['last_reload_ts'] < float(cfg['reload_cooldown_s']):
         # reload 冷却中也不该干等：桥重启（断管道）是更轻、更快的恢复手段。
         allowed, why = should_restart_bridge(state, now_ts, cfg)
@@ -313,6 +345,22 @@ def probe_once(transport, cfg: dict) -> Probe:
     ms = (time.perf_counter() - t0) * 1000.0
     return Probe(reachable=True, account_ok=asset is not None,
                  error=asset_err, asset_ms=round(ms, 1))
+
+
+def _tap_state(redis_client) -> str:
+    """读伴生桥的行情 Tap 状态（``qm:qmt:pipe:metrics.tap_state``）。
+
+    reload_deployment 之后即使账户查询恢复，策略的 Tap 注册也可能已经丢了
+    （2026-11-10 实测：`quote_tap_subscribe: rpc method is not allowed`）。
+    这种情况不能判「已恢复」，否则下游看到的就是「账户正常但行情无推送」。
+    """
+    if redis_client is None:
+        return ''
+    try:
+        raw = redis_client.hget(METRICS_KEY, 'tap_state')
+    except Exception:  # noqa: BLE001 - 读不到不阻塞恢复判定
+        return ''
+    return raw.decode() if isinstance(raw, bytes) else str(raw or '')
 
 
 def _load_state(redis_client) -> dict:
@@ -497,8 +545,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f'{stamp} after bridge restart: account_ok={after.account_ok} '
               f'ms={after.asset_ms} err={after.error[:120]}')
         if after.account_ok:
+            tap = _tap_state(redis_client)
+            dec.state['tap_state'] = tap
             dec.state['unresponsive_since'] = 0.0
             dec.state['failures'] = 0
+            if tap and tap != 'on':
+                return Decision(
+                    'alert', 'account recovered but quote tap is down '
+                    f'(tap_state={tap}); restart the strategy in QMT strategy '
+                    'editor to reinstall the tap', 0, dec.state)
             return Decision('ok', 'account query ok after bridge restart', 0,
                             dec.state)
         return Decision('alert', f'{why}; bridge restarted but account still hung '
@@ -526,6 +581,18 @@ def main(argv: list[str] | None = None) -> int:
                 decision = _restart_or_alert(
                     decision, f'reload did not recover account queries ({after.error})')
                 print(f'{stamp} {decision.action.upper()} {decision.reason}')
+            else:
+                tap = _tap_state(redis_client)
+                decision.state['tap_state'] = tap
+                if tap and tap != 'on':
+                    # reload 换掉了策略运行态但没重跑 init：账户回来了、Tap 没了。
+                    # 这一步只有 QMT 编辑器里的「停止 → 运行」能补，继续自动
+                    # reload 只会多丢一次，直接告警收口。
+                    decision = Decision(
+                        'alert', 'reload recovered account queries but lost the '
+                        f'quote tap (tap_state={tap}); restart the strategy in '
+                        'QMT strategy editor', decision.failures, decision.state)
+                    print(f'{stamp} {decision.action.upper()} {decision.reason}')
     elif decision.action == 'restart_bridge' and not args.dry_run:
         decision = _restart_or_alert(decision, decision.reason)
         print(f'{stamp} {decision.action.upper()} {decision.reason}')

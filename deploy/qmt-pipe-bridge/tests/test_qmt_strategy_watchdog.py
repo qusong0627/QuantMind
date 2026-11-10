@@ -60,10 +60,39 @@ def test_first_timeout_only_observes():
     assert d.failures == 1
 
 
-def test_threshold_timeouts_schedule_reload():
+def test_threshold_timeouts_wait_for_bridge_restart_window():
+    """默认自愈顺序：先等满 bridge_restart_after_s，优先重启伴生桥（不丢 Tap）。"""
     prev = {'failures': 1, 'day': time.strftime('%Y%m%d')}
     d = wd.evaluate(prev, _probe(account_ok=False), now_ts=_ts(10, 0),
                     queue_has_orders=False)
+    assert d.action == 'observe'
+    assert 'bridge restart window' in d.reason
+    assert d.failures == 2
+
+
+def test_bridge_restart_preferred_after_window():
+    now = _ts(10, 2)
+    prev = {'failures': 3, 'day': time.strftime('%Y%m%d'),
+            'unresponsive_since': now - 61}
+    d = wd.evaluate(prev, _probe(account_ok=False), now_ts=now,
+                    queue_has_orders=False)
+    assert d.action == 'restart_bridge'
+
+
+def test_reload_used_when_bridge_budget_exhausted():
+    now = _ts(10, 2)
+    stamps = ','.join(str(int(now - 60 * i)) for i in range(1, 7))
+    prev = {'failures': 3, 'day': time.strftime('%Y%m%d'),
+            'unresponsive_since': now - 120, 'bridge_restart_ts': stamps}
+    d = wd.evaluate(prev, _probe(account_ok=False), now_ts=now,
+                    queue_has_orders=False)
+    assert d.action == 'reload'
+
+
+def test_threshold_timeouts_schedule_reload_in_legacy_order():
+    prev = {'failures': 1, 'day': time.strftime('%Y%m%d')}
+    d = wd.evaluate(prev, _probe(account_ok=False), now_ts=_ts(10, 0),
+                    queue_has_orders=False, cfg={'prefer_bridge_restart': False})
     assert d.action == 'reload'
     assert d.failures == 2
     assert d.state['reload_count'] == 1
@@ -83,16 +112,18 @@ def test_cooldown_blocks_second_reload():
     prev = {'failures': 3, 'day': time.strftime('%Y%m%d'),
             'last_reload_ts': now - 60, 'reload_count': 1}
     d = wd.evaluate(prev, _probe(account_ok=False), now_ts=now,
-                    queue_has_orders=False)
+                    queue_has_orders=False,
+                    cfg={'prefer_bridge_restart': False})
     assert d.action == 'observe'
     assert 'cooldown' in d.reason
 
 
 def test_daily_budget_exhausted_alerts():
-    prev = {'failures': 3, 'day': time.strftime('%Y%m%d'),
+    prev = {'failures': 3, 'day': '20261106',
             'last_reload_ts': 0, 'reload_count': 3}
     d = wd.evaluate(prev, _probe(account_ok=False), now_ts=_ts(10, 0),
-                    queue_has_orders=False)
+                    queue_has_orders=False,
+                    cfg={'prefer_bridge_restart': False})
     assert d.action == 'alert'
     assert 'manual restart' in d.reason
 
@@ -128,7 +159,8 @@ def test_new_day_resets_reload_budget():
     prev = {'failures': 3, 'day': '20261105', 'last_reload_ts': 0,
             'reload_count': 3}
     d = wd.evaluate(prev, _probe(account_ok=False), now_ts=_ts(10, 0),
-                    queue_has_orders=False)
+                    queue_has_orders=False,
+                    cfg={'prefer_bridge_restart': False})
     assert d.action == 'reload'
     assert d.state['reload_count'] == 1
 
@@ -225,6 +257,22 @@ def test_load_config_missing_file_uses_defaults(tmp_path):
     cfg = wd.load_config(str(tmp_path / 'nope.json'))
     assert cfg['fail_threshold'] == wd.DEFAULT_CONFIG['fail_threshold']
     assert cfg['enabled'] is True
+    assert cfg['prefer_bridge_restart'] is True
+
+
+class _FakeRedis:
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def hget(self, key, field):
+        return self.mapping.get((key, field))
+
+
+def test_tap_state_reads_pipe_metrics():
+    assert wd._tap_state(None) == ''
+    assert wd._tap_state(
+        _FakeRedis({(wd.METRICS_KEY, 'tap_state'): b'on'})) == 'on'
+    assert wd._tap_state(_FakeRedis({})) == ''
 
 
 

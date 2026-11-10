@@ -248,6 +248,9 @@ class DatasetSpec:
     pk_cols: tuple[str, ...]  # upsert 冲突键
     jsonb_cols: tuple[str, ...] = ()  # 需要 json.dumps 的列
     blocked_family: bool = False  # 数据包家族（table_list 失败置 blocked）
+    # 空集不是合法结果的集（市场级序列）：桥返回空 → 记 blocked 而不是 ok。
+    # 2026-11-10 实测 SC01–SC42 对 3 周区间全返空，但台账一直写 ok（静默绿）。
+    require_nonempty: bool = False
     enabled: bool = True  # False=挂起（不入库）
     suspended_reason: str = ""
     fields: tuple[str, ...] = ()  # field_list（空=不带）
@@ -328,6 +331,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
         est_calls=1,
         pk_cols=("trade_date", "field_code"),
         blocked_family=True,
+        require_nonempty=True,
         fields=SC_FIELDS,
         units=_SC_UNITS,
         desc="SC01–SC42（两融/北向/涨停家数/质押…）；无股票维度",

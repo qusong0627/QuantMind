@@ -275,17 +275,24 @@ async def run_dataset(
                     len(ctx.failures),
                     ctx.failures[0],
                 )
-            written = await sinks.upsert_rows(spec, rows)
-            try:
-                archive_path, archived = await sinks.write_archive(
-                    spec, rows, target_date
-                )
-            except Exception as exc:  # noqa: BLE001 - PG 已成，归档失败记 partial
-                status = "partial"
-                error = f"归档失败: {exc}"
-                logger.warning("[TdxIngest] %s 归档失败: %s", spec.key, exc)
-            if ctx.failures and not error:
-                error = f"软失败 {len(ctx.failures)} 笔: {ctx.failures[0]}"
+            if spec.require_nonempty and not rows and not ctx.failures:
+                # 市场级序列（SC 家族）空集不是合法结果：桥 ErrorId=0 + Value=null
+                # 说明客户端没有这份专业数据。记 blocked（面板可见），不要写成 ok。
+                status = "blocked"
+                error = "桥返回空：市场级数据包/权限缺失（require_nonempty）"
+                logger.warning("[TdxIngest] %s 返回空集 → blocked: %s", spec.key, error)
+            else:
+                written = await sinks.upsert_rows(spec, rows)
+                try:
+                    archive_path, archived = await sinks.write_archive(
+                        spec, rows, target_date
+                    )
+                except Exception as exc:  # noqa: BLE001 - PG 已成，归档失败记 partial
+                    status = "partial"
+                    error = f"归档失败: {exc}"
+                    logger.warning("[TdxIngest] %s 归档失败: %s", spec.key, exc)
+                if ctx.failures and not error:
+                    error = f"软失败 {len(ctx.failures)} 笔: {ctx.failures[0]}"
         except BridgeError as exc:
             calls = ctx.calls
             if exc.kind == "blocked":
