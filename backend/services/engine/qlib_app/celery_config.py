@@ -89,6 +89,15 @@ CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "3600"))
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "3300"))
 CELERY_WORKER_PREFETCH_MULTIPLIER = int(os.getenv("CELERY_WORKER_PREFETCH_MULTIPLIER", "1"))
 CELERY_WORKER_MAX_TASKS_PER_CHILD = int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD", "10"))
+# 单个子进程 RSS 上限（单位 KiB，Celery 的坑：这里是 KB 不是 MB）。
+# 2026-11-10：近 7 天 15 次 cgroup OOM 全是 celery 撞 12g 硬限（死亡现场
+# anon-rss 11.58G），光靠 max_tasks_per_child=10 兜不住——重负载 job 之间
+# 子进程 RSS 回不来。基线约 350MB，单个全窗 CUSTOM 回测峰值 7.8G；
+# 设 2.5G：concurrency=4 时最坏 10G，给父进程和抖动留 2G 余量。
+# 注意只在任务结束后检查，不会打断正在跑的任务——峰值仍由容器 12g 硬限兜。
+CELERY_WORKER_MAX_MEMORY_PER_CHILD = int(
+    os.getenv("CELERY_WORKER_MAX_MEMORY_PER_CHILD", str(2_500_000))
+)
 CELERY_WORKER_DISABLE_RATE_LIMITS = os.getenv("CELERY_WORKER_DISABLE_RATE_LIMITS", "false").lower() == "true"
 CELERY_TASK_ACKS_LATE = os.getenv("CELERY_TASK_ACKS_LATE", "true").lower() == "true"
 CELERY_TASK_REJECT_ON_WORKER_LOST = os.getenv("CELERY_TASK_REJECT_ON_WORKER_LOST", "true").lower() == "true"
@@ -355,6 +364,7 @@ celery_app.conf.update(
     # 工作进程配置
     worker_prefetch_multiplier=CELERY_WORKER_PREFETCH_MULTIPLIER,
     worker_max_tasks_per_child=CELERY_WORKER_MAX_TASKS_PER_CHILD,
+    worker_max_memory_per_child=CELERY_WORKER_MAX_MEMORY_PER_CHILD,
     worker_disable_rate_limits=CELERY_WORKER_DISABLE_RATE_LIMITS,
     # 结果配置
     result_expires=CELERY_RESULT_EXPIRES,
