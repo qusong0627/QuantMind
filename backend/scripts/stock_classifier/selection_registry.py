@@ -541,10 +541,18 @@ def build_lessons(record: dict, window: str = "valid") -> list[dict]:
             if bucket["n"] < min_n:
                 continue
             hit = bucket["sign_hit_rate"]
+            mean_abs = float(bucket.get("mean_abs_oos") or 0.0)
+            rho = bucket.get("spearman_signed")
             if hit < 0.5:
                 kind, verdict = "pitfall", "方向命中率低于掷硬币"
             elif hit > 0.65:
-                kind, verdict = "lesson", "方向命中率显著高于掷硬币"
+                if mean_abs >= 0.15 and (rho is None or rho >= 0):
+                    kind, verdict = "lesson", "方向命中率高且 OOS 强度/排序可"
+                else:
+                    kind, verdict = (
+                        "lesson",
+                        "方向命中率高但 OOS 强度/排序偏弱，不宜单独依赖",
+                    )
             else:
                 continue
             lessons.append(
@@ -555,15 +563,18 @@ def build_lessons(record: dict, window: str = "valid") -> list[dict]:
                     key=bucket["name"],
                     statement=(
                         f"{bucket['name']} 的 {bucket['n']} 个特征在验证窗 {verdict}"
-                        f"（同号率 {hit:.0%}）"
+                        f"（同号率 {hit:.0%}，平均|OOS ICIR| {mean_abs:.2f}，"
+                        f"Spearman {_num(rho)}）"
                     ),
                     evidence={
                         "n": bucket["n"],
                         "sign_hit_rate": hit,
-                        "spearman_signed": bucket["spearman_signed"],
+                        "mean_abs_oos": mean_abs,
+                        "spearman_signed": rho,
                     },
                     confidence=_confidence(
-                        strong=hit < 0.35 or hit > 0.75, n=bucket["n"]
+                        strong=hit < 0.35 or (hit > 0.75 and mean_abs >= 0.2),
+                        n=bucket["n"],
                     ),
                 )
             )
@@ -604,7 +615,22 @@ def build_lessons(record: dict, window: str = "valid") -> list[dict]:
                     confidence=_confidence(strong=rho_signed <= -0.4, n=n_metric),
                 )
             )
-        if rho_abs is not None and rho_abs <= 0.1:
+        if rho_abs is not None and rho_abs <= -0.2:
+            lessons.append(
+                _lesson(
+                    record,
+                    kind="pitfall",
+                    scope="metric",
+                    key=name,
+                    statement=(
+                        f"{name} 与验证窗 OOS 强度负相关（Spearman {rho_abs:+.2f}），"
+                        "高值反而对应更弱的 OOS，不应按“越大越好”使用"
+                    ),
+                    evidence={"spearman_abs": rho_abs, "n": n_metric},
+                    confidence=_confidence(strong=rho_abs <= -0.4, n=n_metric),
+                )
+            )
+        elif rho_abs is not None and rho_abs <= 0.1:
             lessons.append(
                 _lesson(
                     record,
@@ -636,11 +662,15 @@ def build_lessons(record: dict, window: str = "valid") -> list[dict]:
 
 
 def merge_lessons(existing: list[dict], new: list[dict]) -> list[dict]:
-    """按 (kind, scope, key) 合并；跨 run 复现 >=2 次标 confirmed。"""
+    """按 (scope, key) 合并；跨 run 复现 >=2 次标 confirmed。
+
+    同一对象的最新观察会覆盖旧的 kind/statement（历史仍留在 lessons.jsonl），
+    避免「去年是 lesson、今年是 pitfall」两条互相打架的记录同时挂着。
+    """
     out = [deepcopy(x) for x in existing or []]
-    index = {(x.get("kind"), x.get("scope"), x.get("key")): x for x in out}
+    index = {(x.get("scope"), x.get("key")): x for x in out}
     for lesson in new or []:
-        key = (lesson.get("kind"), lesson.get("scope"), lesson.get("key"))
+        key = (lesson.get("scope"), lesson.get("key"))
         current = index.get(key)
         if current is None:
             item = deepcopy(lesson)
@@ -665,6 +695,7 @@ def merge_lessons(existing: list[dict], new: list[dict]) -> list[dict]:
         current["status"] = "confirmed" if len(seen) >= 2 else "open"
         current["evidence"] = deepcopy(lesson.get("evidence") or {})
         current["statement"] = lesson.get("statement") or current.get("statement")
+        current["kind"] = lesson.get("kind") or current.get("kind")
         current["confidence"] = lesson.get("confidence") or current.get("confidence")
         current["updated_at"] = _now()
     out.sort(key=lambda x: str(x.get("created_at") or ""))

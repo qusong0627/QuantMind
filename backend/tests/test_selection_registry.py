@@ -440,3 +440,33 @@ def test_load_model_eval_reads_split_and_shap(tmp_path: Path):
     assert evaluation["by_split"]["test"]["icir"] == 0.4
     assert evaluation["long_short"] == {"sharpe": 4.6, "max_drawdown": -0.32}
     assert evaluation["shap_top"][0] == {"feature": "a", "mean_abs_shap": 0.005}
+
+
+@pytest.mark.unit
+def test_merge_lessons_updates_kind_on_same_object():
+    first = [
+        {
+            "kind": "lesson",
+            "scope": "metric",
+            "key": "selection_pos5",
+            "statement": "old",
+            "seen_in_runs": ["r1"],
+            "run_id": "r1",
+        }
+    ]
+    second = [
+        {
+            "kind": "pitfall",
+            "scope": "metric",
+            "key": "selection_pos5",
+            "statement": "new",
+            "seen_in_runs": ["r2"],
+            "run_id": "r2",
+        }
+    ]
+    merged = reg.merge_lessons(first, second)
+    assert len(merged) == 1
+    assert merged[0]["kind"] == "pitfall"
+    assert merged[0]["statement"] == "new"
+    assert merged[0]["times_seen"] == 2
+    assert merged[0]["status"] == "confirmed"
