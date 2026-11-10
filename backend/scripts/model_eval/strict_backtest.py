@@ -91,6 +91,18 @@ def load_benchmark(
     return df.set_index("date")["close"].sort_index()
 
 
+def load_mv(
+    date: str, valuation_dir: str = "data/quantdb/5_technical_derived/valuation"
+) -> pd.Series:
+    """读取某日总市值（symbol 后缀式 → total_mv）。"""
+    path = Path(valuation_dir) / f"dt={date.replace('-', '')}" / "data.parquet"
+    if not path.exists():
+        return pd.Series(dtype=float)
+    df = pd.read_parquet(path, columns=["symbol", "total_mv"])
+    df["sym"] = df["symbol"].astype(str).map(to_suffix)
+    return df.drop_duplicates("sym").set_index("sym")["total_mv"].astype(float)
+
+
 def load_daily(
     daily_dir: str, lo: str, hi: str
 ) -> tuple[pd.DataFrame, dict, list[str], dict]:
@@ -171,6 +183,9 @@ def run(
     benchmark_ma: int = 0,
     index_dir: str = "data/quantdb/1_kline_data/index_daily",
     split: str = "test",
+    neutralize_size: bool = False,
+    size_buckets: int = 3,
+    valuation_dir: str = "data/quantdb/5_technical_derived/valuation",
 ) -> tuple[pd.DataFrame, dict]:
     p = pd.read_parquet(pred_path, columns=["symbol", "trade_date", "pred", "split"])
     p = p[p["split"] == split].copy()
@@ -244,6 +259,26 @@ def run(
                 "kept_pct": round(kept_days / max(total_days, 1) * 100, 1),
             }
         )
+
+    if neutralize_size:
+        mv_frames = []
+        for signal_date in sorted(m["date"].unique()):
+            mv = load_mv(signal_date, valuation_dir)
+            if mv.empty:
+                continue
+            sub = m[m["date"] == signal_date].copy()
+            sub["mv"] = sub["sym"].map(mv)
+            mv_frames.append(sub)
+        m = pd.concat(mv_frames, ignore_index=True) if mv_frames else m.iloc[0:0].copy()
+        m = m[np.isfinite(m["mv"]) & (m["mv"] > 0)].copy()
+        buckets = max(1, int(size_buckets))
+        m["size_pct"] = m.groupby("date")["mv"].rank(pct=True)
+        m["size_bucket"] = np.minimum(
+            (m["size_pct"] * buckets).astype(int), buckets - 1
+        )
+        m["pred"] = m.groupby(["date", "size_bucket"])["pred"].rank(pct=True) - 0.5
+        filter_info["neutralize_size"] = True
+        filter_info["size_buckets"] = buckets
 
     records: dict[int, pd.DataFrame] = {}
     for N in topns:
@@ -353,6 +388,11 @@ def render_report(model_id: str, metrics: dict, horizon: int = HORIZON) -> str:
             f"- 沪深300 MA{filt['ma']} 过滤：保留 {filt.get('kept_days')}/{filt.get('total_days')}"
             f" 个信号日（{filt.get('kept_pct')}%）",
         )
+    if filt.get("neutralize_size"):
+        lines.insert(
+            -1,
+            f"- 市值中性化：按当日市值 {filt.get('size_buckets')} 桶内 rank(pred) 选股",
+        )
     for cost, rows in metrics["costs"].items():
         lines += [
             f"## 成本 {cost}",
@@ -406,6 +446,16 @@ def main() -> None:
         help="用哪段 pred 做回测（调参用 valid，最终验收用 test）",
     )
     ap.add_argument(
+        "--neutralize-size",
+        action="store_true",
+        help="组合选股前按当日市值桶内 rank 中性化 pred（诊断纯 alpha）",
+    )
+    ap.add_argument("--size-buckets", type=int, default=3)
+    ap.add_argument(
+        "--valuation-dir",
+        default="data/quantdb/5_technical_derived/valuation",
+    )
+    ap.add_argument(
         "--index-dir",
         default="data/quantdb/1_kline_data/index_daily",
         help="指数日线目录（沪深300=000300.SH）",
@@ -426,6 +476,9 @@ def main() -> None:
         benchmark_ma=args.benchmark_ma,
         index_dir=args.index_dir,
         split=args.split,
+        neutralize_size=args.neutralize_size,
+        size_buckets=args.size_buckets,
+        valuation_dir=args.valuation_dir,
     )
     out = Path(args.out_dir or f"data/model_eval/{model_id}")
     out.mkdir(parents=True, exist_ok=True)
