@@ -698,6 +698,31 @@ def render_audit_md(record: dict, out: Path) -> None:
         lines.append(
             f"| {horizon} | `{job.get('run_id') or '—'}` | {job.get('status') or '—'} |"
         )
+    eval_rows = []
+    for horizon, job in sorted((record.get("model_jobs") or {}).items()):
+        evaluation = job.get("eval") or {}
+        split = evaluation.get("by_split") or {}
+        if not split:
+            continue
+        train = split.get("train") or {}
+        valid = split.get("valid") or {}
+        test = split.get("test") or {}
+        long_short = evaluation.get("long_short") or {}
+        eval_rows.append(
+            f"| {horizon} | {_fmt(train.get('mean'))} | {_fmt(valid.get('mean'))} | "
+            f"{_fmt(test.get('mean'))} | {_fmt(test.get('icir'))} | "
+            f"{_pct(test.get('win_rate'))} | {_fmt(long_short.get('sharpe'))} | "
+            f"{_pct(long_short.get('max_drawdown'))} | "
+            f"{_fmt(evaluation.get('groups_monotonicity'))} |"
+        )
+    if eval_rows:
+        lines += [
+            "",
+            "### 模型级 OOS（eval_report）",
+            "",
+            "| Horizon | train rankIC | valid rankIC | test rankIC | test ICIR | test win | 全样本 LS Sharpe | LS MaxDD | groups mono |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ] + eval_rows
     audit_valid = (record.get("audit") or {}).get("valid") or {}
     audit_test = (record.get("audit") or {}).get("test") or {}
     lines += [
@@ -786,6 +811,10 @@ def _num(value: float | None) -> str:
     return "—" if value is None else f"{value:+.2f}"
 
 
+def _pct(value: float | None) -> str:
+    return "—" if value is None else f"{value:.1%}"
+
+
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -870,6 +899,50 @@ def render_lessons_md(lessons: list[dict], out: Path) -> None:
         "",
     ]
     _write_text(out, "\n".join(lines))
+
+
+def load_model_eval(run_id: str, root: Path | str = "/data/training_jobs") -> dict:
+    """从训练产物目录读取 eval_report.json / shap_summary.csv 摘要。"""
+    base = Path(root) / str(run_id)
+    out: dict = {}
+    eval_path = base / "eval_report.json"
+    if eval_path.exists():
+        report = json.loads(eval_path.read_text(encoding="utf-8"))
+        out["by_split"] = report.get("by_split") or {}
+        out["rank_ic"] = report.get("rank_ic") or {}
+        out["long_short"] = {
+            key: value
+            for key, value in (report.get("long_short") or {}).items()
+            if key != "curve"
+        }
+        out["groups_monotonicity"] = (report.get("groups") or {}).get("monotonicity")
+        out["n_days"] = report.get("n_days")
+    shap_path = base / "shap_summary.csv"
+    if shap_path.exists():
+        with shap_path.open(encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        out["shap_top"] = [
+            {
+                "feature": row.get("feature"),
+                "mean_abs_shap": _to_float(row.get("mean_abs_shap")),
+            }
+            for row in rows[:20]
+        ]
+    return out
+
+
+def _enrich_model_jobs(record: dict, model_root: Path | str) -> dict:
+    for job in (record.get("model_jobs") or {}).values():
+        run_id = str(job.get("run_id") or "")
+        if not run_id:
+            continue
+        try:
+            evaluation = load_model_eval(run_id, model_root)
+        except Exception:  # noqa: BLE001 - 产物缺失不影响台账
+            continue
+        if evaluation:
+            job["eval"] = evaluation
+    return record
 
 
 class SelectionRegistry:
@@ -971,8 +1044,11 @@ class SelectionRegistry:
         self._write_run(record)
         return record
 
-    def attach_jobs(self, run_id: str, jobs: dict) -> dict:
+    def attach_jobs(
+        self, run_id: str, jobs: dict, model_root: str | Path = "/data/training_jobs"
+    ) -> dict:
         record = merge_model_jobs(self.get(run_id), jobs)
+        record = _enrich_model_jobs(record, model_root)
         self._write_run(record)
         return record
 

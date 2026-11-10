@@ -414,3 +414,29 @@ def test_registry_flags_protocol_drift(tmp_path: Path):
         _protocol_snapshot()
     )
     assert second["protocol_drift"]["actual_hash"] == reg.protocol_hash(changed)
+
+
+@pytest.mark.unit
+def test_load_model_eval_reads_split_and_shap(tmp_path: Path):
+    job_dir = tmp_path / "train_1"
+    job_dir.mkdir()
+    (job_dir / "eval_report.json").write_text(
+        json.dumps(
+            {
+                "by_split": {"test": {"mean": 0.08, "icir": 0.4, "win_rate": 0.62}},
+                "rank_ic": {"mean": 0.1},
+                "long_short": {"sharpe": 4.6, "max_drawdown": -0.32, "curve": []},
+                "groups": {"monotonicity": 1.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "shap_summary.csv").write_text(
+        "feature,mean_abs_shap,mean_shap,positive_ratio\n"
+        "a,0.005,0.001,0.6\nb,0.004,0.002,0.5\n",
+        encoding="utf-8",
+    )
+    evaluation = reg.load_model_eval("train_1", root=tmp_path)
+    assert evaluation["by_split"]["test"]["icir"] == 0.4
+    assert evaluation["long_short"] == {"sharpe": 4.6, "max_drawdown": -0.32}
+    assert evaluation["shap_top"][0] == {"feature": "a", "mean_abs_shap": 0.005}

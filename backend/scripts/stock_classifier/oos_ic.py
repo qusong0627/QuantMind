@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 from pathlib import Path
 
 import numpy as np
@@ -49,7 +48,9 @@ def _aggregate(values: list[float]) -> dict | None:
         return None
     mean = float(vals.mean())
     std = float(vals.std(ddof=1)) if vals.size > 1 else 0.0
-    icir = mean / std * math.sqrt(vals.size) if std > 0 else 0.0
+    # 与选择器同口径：ICIR = mean/std（不乘 sqrt(n)）。乘 sqrt(n) 会随采样
+    # 密度变化，导致 OOS ICIR 与选择 ICIR 不可比。
+    icir = mean / std if std > 0 else 0.0
     pos = (
         float((np.sign(vals) == np.sign(mean)).mean())
         if mean != 0
@@ -86,6 +87,7 @@ def compute_oos(
     seen = dict.fromkeys(("valid", "test"), 0)
     n_dates = {"valid": 0, "test": 0}
     last_usable = None
+    processed = 0
 
     for date in dates:
         i = close.index.get_loc(date)
@@ -161,6 +163,9 @@ def compute_oos(
                 value = float(matrix[j])
                 if np.isfinite(value):
                     bucket.setdefault(key, []).append(value)
+        processed += 1
+        if processed % 20 == 0:
+            log.info("OOS %d/%d 日（last=%s）", processed, len(dates), date.date())
 
     out: dict[str, dict] = {"valid": {}, "test": {}}
     for window in ("valid", "test"):

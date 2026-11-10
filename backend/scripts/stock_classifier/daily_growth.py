@@ -38,6 +38,7 @@ def main() -> int:
     ap.add_argument("--protocol", default=str(PROTOCOL_FILE))
     ap.add_argument("--registry", required=True)
     ap.add_argument("--jobs", default="", help="submit 脚本产出的 model_jobs.json")
+    ap.add_argument("--model-root", default="/data/training_jobs")
     ap.add_argument("--data-issues", default="")
     ap.add_argument("--oos", default="", help="oos_ic.py 产出的 JSON")
     ap.add_argument("--compute-oos", action="store_true")
@@ -62,6 +63,8 @@ def main() -> int:
         data_issues=data_issues,
     )
     run_id = record["run_id"]
+    if jobs:
+        record = store.attach_jobs(run_id, jobs, model_root=args.model_root)
     has_oos = any((f.get("oos") or {}).get("valid") for f in record["features"])
 
     if (args.oos or args.compute_oos) and (args.force_oos or not has_oos):
@@ -71,9 +74,7 @@ def main() -> int:
             # 仅容器内可用：延迟导入，宿主机不加载重依赖
             from backend.scripts.stock_classifier.oos_ic import compute_oos
 
-            oos = compute_oos(
-                args.selection, args.top, args.start, args.end, args.step
-            )
+            oos = compute_oos(args.selection, args.top, args.start, args.end, args.step)
         record = store.attach_oos(run_id, oos)
         has_oos = True
 
