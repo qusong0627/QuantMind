@@ -53,6 +53,19 @@ TRADING_DAYS = 252
 TURNOVER_FLOOR = 0.125
 """Fitness 公式里换手率的下限（WorldQuant BRAIN 约定）。低换手因子不因此被无限放大。"""
 
+FITNESS_GRADES: tuple[tuple[float, str], ...] = (
+    (2.5, "Spectacular（卓越）"),
+    (2.0, "Excellent（优秀）"),
+    (1.5, "Good（良好）"),
+    (1.0, "Average（一般）"),
+    (-math.inf, "Need Improve（需改进）"),
+)
+"""Fitness 五档分级（世坤口径，阈值**降序**；`>=` 取第一个命中档）。
+
+边界归入高档（Fitness=2.0 → Excellent）。负值落入最后一档；缺失（None/NaN）
+由 :func:`fitness_grade` 单独处理为 None ——「没算出来」不等于「算出来很差」。
+"""
+
 DEFAULT_PARTICIPATION = 0.10
 """容量估算的参与率假设：单标的单日成交不超过其日成交额的 10%。
 与模拟盘 ``SIMULATION_MAX_PARTICIPATION_RATE`` 同值 —— **是假设，不是实测**。"""
@@ -94,6 +107,8 @@ DEFINITIONS: dict[str, str] = {
     "margin": "Margin = Returns / Turnover（量纲不齐，为 WorldQuant BRAIN 既有约定）。",
     "fitness": f"Fitness = IR × √(|Returns| / max(Turnover, {TURNOVER_FLOOR}))。"
     f"换手低于 {TURNOVER_FLOOR} 时按 {TURNOVER_FLOOR} 计（BRAIN 约定）。",
+    "fitness_grade": "Fitness 五档（世坤口径）：≥2.5 卓越｜2–2.5 优秀｜1.5–2 良好｜"
+    "1–1.5 一般｜<1 需改进。边界归入高档；负 Fitness 记「需改进」。",
     "ic": "日频横截面 Spearman 秩相关：当日因子值 vs T+k 前瞻收益。",
     "icir": "ICIR = mean(IC) / std(IC)，**不年化**（与平台既有口径一致）。",
     "t_value": "普通 t 值 = ICIR × √n。IC 存在自相关时会**高估**显著性，"

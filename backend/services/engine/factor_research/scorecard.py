@@ -19,13 +19,23 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
+from backend.services.engine.factor_report.metrics import (
+    TRADING_DAYS,
+    fitness_grade,
+    fitness_of,
+)
 from backend.services.engine.factor_research import analysis
 from backend.shared.benchmark import BENCHMARK_NAME, BENCHMARK_SYMBOL
 
 COST_RATE = analysis.COST_RATE
+MONTHS_PER_YEAR = 12
+"""月频序列的年化期数。BRAIN 公式本来是日频；本工作台是月末调仓，折算见
+:func:`brain_metrics`。"""
 BENCH_PRIMARY = BENCHMARK_SYMBOL
 BENCH_ORDER = (BENCHMARK_SYMBOL, "000906.SH", "000905.SH")
 BENCH_NAMES = {
@@ -203,13 +213,80 @@ def nav_from_rets(rets: np.ndarray) -> np.ndarray:
 
 MIN_MONTHS = 6  # 回测最少月数：不足则不给年化/夏普等（避免 2 个月年化出假数）
 
+_BRAIN_KEYS = (
+    "fitness",
+    "fitness_grade",
+    "brain_returns",
+    "brain_ir",
+    "brain_turnover",
+)
+
+
+def brain_metrics(rets: np.ndarray, turnover: np.ndarray) -> dict:
+    """BRAIN 口径 Fitness + 三个可对账输入（月频序列 → 日频口径折算）。
+
+    公式只在 ``factor_report.metrics.fitness_of`` 实现，这里不另抄一份。口径：
+    - Returns  = 月均**毛**收益 × 12（简单年化，不是 CAGR）
+    - IR       = 月均毛收益 / 月标准差(ddof=1) × √12
+    - Turnover = 月均单边换手 × 12 / 252（日均单边；均摊假设，非逐日实测）
+    - Fitness  = IR × √(|Returns| / max(Turnover, 0.125))
+
+    毛收益由净收益还原：``gross = net + turnover × COST_RATE``。工作台净值已扣
+    「换手 × 双边成本」，而 BRAIN 的成本只经公式里的换手项计一次 —— 拿净收益
+    再除以换手就是重复扣费，故这里必须还原成毛。
+
+    ⚠️ 月频组合的日均换手通常 < 0.125，换手项多数落在地板上（Fitness 退化为
+    ``IR × √(|Returns|/0.125)``）。这是 BRAIN 口径对低换手策略的既有盲区，
+    不是本实现的偏差；做参数搜索后仍需 DSR/PBO 复核。
+    """
+    r = np.asarray(rets, dtype=np.float64)
+    t = np.asarray(turnover, dtype=np.float64)
+    ok = np.isfinite(r) & np.isfinite(t)
+    out: dict = {
+        "fitness": None,
+        "fitness_grade": None,
+        "brain_returns": None,
+        "brain_ir": None,
+        "brain_turnover": None,
+    }
+    if int(ok.sum()) < 2:
+        return out
+    gross = r[ok] + t[ok] * COST_RATE
+    mu = float(gross.mean())
+    sd = float(gross.std(ddof=1))
+    returns = mu * MONTHS_PER_YEAR
+    turnover_daily = float(t[ok].mean()) * MONTHS_PER_YEAR / TRADING_DAYS
+    ir = (mu / sd * math.sqrt(MONTHS_PER_YEAR)) if sd > 0 else None
+    fit = fitness_of(ir, returns, turnover_daily)
+    out.update(
+        {
+            "fitness": round(fit, 3) if fit is not None else None,
+            # 先按未舍入值定档：1.4999 舍入成 1.5 后不应跳成「良好」
+            "fitness_grade": fitness_grade(fit),
+            "brain_returns": round(returns, 6),
+            "brain_ir": round(ir, 4) if ir is not None else None,
+            "brain_turnover": round(turnover_daily, 6),
+        }
+    )
+    return out
+
+
+def gate_brain(kpi: dict, min_months: int = MIN_MONTHS) -> dict:
+    """样本不足时清空 Fitness 及其输入（与 :func:`gate_kpi` 同一门槛）。"""
+    out = dict(kpi)
+    if int(out.get("n_months") or 0) < min_months:
+        for k in _BRAIN_KEYS:
+            out[k] = None
+    return out
+
 
 def gate_kpi(kpi: dict, min_months: int = MIN_MONTHS) -> dict:
-    """样本不足（n_months < min_months）时清空年化/夏普/回撤/胜率/Calmar。"""
+    """样本不足（n_months < min_months）时清空年化/夏普等（含 Fitness 族）。"""
     out = dict(kpi)
     if int(out.get("n_months") or 0) < min_months:
         for k in ("annual_return", "sharpe", "max_drawdown", "win_rate", "calmar"):
             out[k] = None
+        out = gate_brain(out, min_months)
     return out
 
 
@@ -228,17 +305,23 @@ def kpi_of(rets: np.ndarray, nav: np.ndarray) -> dict:
 
 
 def topn_series(panel: Panel, fi: int, n: int, mask: np.ndarray) -> dict:
-    """组合序列 + KPI（供区间内重建净值）。返回 dates/ret/nav/turnover/kpi。"""
+    """组合序列 + KPI（供区间内重建净值）。返回 dates/ret/nav/turnover/kpi。
+
+    KPI 含 BRAIN 口径 ``fitness`` / ``fitness_grade`` 与三个可对账输入
+    （``brain_returns`` / ``brain_ir`` / ``brain_turnover``，见 :func:`brain_metrics`）。
+    """
     dates, rets, tos = topn_runs(panel, fi, n, mask)
     nav = nav_from_rets(rets)
     idx = np.where(mask)[0]
     nav_dates = panel.dates[idx[: len(nav)]]
+    kpi = kpi_of(rets, nav)
+    kpi.update(brain_metrics(rets, tos))
     return {
         "dates": nav_dates,
         "ret": rets,
         "nav": nav,
         "turnover": tos,
-        "kpi": kpi_of(rets, nav),
+        "kpi": kpi,
     }
 
 

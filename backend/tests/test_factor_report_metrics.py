@@ -64,6 +64,25 @@ def test_fitness_地板_0_125_生效():
     assert low == pytest.approx(1.0 * np.sqrt(0.10 / 0.125))
 
 
+def test_fitness_grade_五档边界():
+    """世坤五档：≥2.5 卓越｜2–2.5 优秀｜1.5–2 良好｜1–1.5 一般｜<1 需改进。
+
+    边界值归入**高档**（>=）；负 Fitness 一律「需改进」；缺失给 None 而不是最低档
+    ——「没算出来」与「算出来很差」在展示面上是两件事。
+    """
+    assert M.fitness_grade(3.0) == "Spectacular（卓越）"
+    assert M.fitness_grade(2.5) == "Spectacular（卓越）"
+    assert M.fitness_grade(2.4999) == "Excellent（优秀）"
+    assert M.fitness_grade(2.0) == "Excellent（优秀）"
+    assert M.fitness_grade(1.5) == "Good（良好）"
+    assert M.fitness_grade(1.0) == "Average（一般）"
+    assert M.fitness_grade(0.9999) == "Need Improve（需改进）"
+    assert M.fitness_grade(-0.5) == "Need Improve（需改进）"
+    assert M.fitness_grade(None) is None
+    assert M.fitness_grade(float("nan")) is None
+
+
+
 def test_brain_headline_恒等式自洽():
     """brain_headline 产出的四个数必须满足两条恒等式（同一份输入，不许各自为政）。"""
     rng = np.random.default_rng(3)

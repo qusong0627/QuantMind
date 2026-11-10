@@ -52,6 +52,18 @@ function KpiRow({ label, kpi, color, excess, excessNone }: {
         {fmtPct(kpi.annual_return)}
       </td>
       <td className="py-1 text-right font-mono text-slate-600">{fmtNum(kpi.sharpe)}</td>
+      <td
+        className={`py-1 text-right font-mono ${
+          kpi.fitness == null ? 'text-slate-300' : kpi.fitness >= 0 ? 'text-rose-600' : 'text-emerald-600'
+        }`}
+        title={
+          kpi.fitness == null
+            ? '样本不足 6 个月或序列退化，Fitness 不可计算'
+            : `${kpi.fitness_grade ?? ''}｜可对账输入：毛 IR ${fmtNum(kpi.brain_ir)} · 简单年化毛收益 ${fmtPct(kpi.brain_returns)} · 日均单边换手 ${fmtPct(kpi.brain_turnover, 2)}`
+        }
+      >
+        {fmtNum(kpi.fitness)}
+      </td>
       <td className="py-1 text-right font-mono text-slate-500">{fmtPct(kpi.max_drawdown)}</td>
       <td className="py-1 text-right font-mono text-slate-500">{fmtPct(kpi.win_rate)}</td>
       <td className={`py-1 text-right font-mono ${(excess || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
@@ -346,6 +358,7 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset, market,
                         <th className="text-left py-1">组合 / 基准</th>
                         <th className="text-right py-1">年化收益</th>
                         <th className="text-right py-1">夏普</th>
+                        <th className="text-right py-1" title="世坤 BRAIN 口径：IR × √(|Returns| / max(Turnover, 0.125))；月频折算，悬停数值看分级">Fitness</th>
                         <th className="text-right py-1">最大回撤</th>
                         <th className="text-right py-1">月度胜率</th>
                         <th className="text-right py-1">{excessBench ? `超额 vs ${excessBench.name}` : '超额 vs 基准'}</th>
@@ -370,6 +383,7 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset, market,
                 </div>
                 <div className="shrink-0 pt-1 text-[10px] text-slate-400">
                   区间内 RankIC {fmtNum(detail.ic_kpi.ic_mean, 4)} · IC_IR {fmtNum(detail.ic_kpi.ic_ir)}（与持仓数无关）
+                  <span className="ml-2">Fitness 为 BRAIN 粗筛口径（月频折算；悬停数值看分级与三个输入）</span>
                 </div>
               </div>
             </Card>

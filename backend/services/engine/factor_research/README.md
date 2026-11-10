@@ -74,6 +74,13 @@ python3 backend/scripts/build_factor_research.py --skip-financial
   首月换手 100% 全额计费）；超额 = 组合年化 − 基准年化（demo 口径）；
 - 综合分 = 0.5×有效性 z(mean(z(RankIC), z(IC_IR))) + 0.5×业绩 z(mean(z(年化), z(夏普), z(−回撤), z(月胜率)))，
   分项在全因子截面标准化——**换区间会整体重算**；
+- Fitness（世坤 BRAIN 口径，**单列不并入综合分**）= IR × √(|Returns| / max(Turnover, 0.125))。
+  公式只在 `factor_report.metrics.fitness_of` 实现；工作台月频序列按日频口径折算
+  （Returns=月均毛收益×12、IR=月均/标准差×√12、Turnover=月均单边换手÷21），
+  毛收益由净收益还原（`gross = net + to×COST_RATE`，成本只经换手项计一次）。
+  五档分级见 `metrics_core.FITNESS_GRADES`。⚠️ 月频组合日均换手通常 <0.125 地板，
+  换手项多数不参与区分（Fitness 近似 夏普×√(|年化|/0.125)）；粗筛分，不是验收门槛，
+  做过参数搜索的因子仍须补 DSR/PBO；
 - 标签（每个因子 2 个，随区间重算）：市场环境（沪深300 滚动 3 月分牛/熊/震荡 → 三环境月均超额 z 取最高，
   均 <0.5 为全天候型）；时效（近 12 月 RankIC 与区间全样本差 ±0.012，双低为持续低效）；
 - 最优权重：非负、和为 1 的粗网格（≤900 组，目标=夏普/年化/超额），在「各因子月末前 150 名的并集」

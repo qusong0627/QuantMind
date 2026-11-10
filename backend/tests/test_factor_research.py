@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from backend.services.engine.factor_report import metrics as M
 from backend.services.engine.factor_research import analysis, scorecard, service
 from backend.services.engine.factor_research.engine import rank_to_score
 from backend.services.engine.factor_research.financials import (
@@ -203,6 +205,85 @@ def test_panel_topn_returns_and_cost():
     s2 = scorecard.topn_series(p, p.index("X"), 2, mask)
     assert abs(s2["ret"][0] - ((0.10 + 0.04) / 2 - 0.002)) < 1e-5
     assert s2["nav"][-1] < s1["nav"][-1]  # 更强的个股集中在 top1
+
+
+# ---------------------------------------------------------------------------
+# BRAIN 口径 Fitness（月频序列 → 日频口径折算）
+# ---------------------------------------------------------------------------
+def test_brain_metrics_毛收益还原与日均换手折算():
+    """Fitness 的三个输入必须可从净值序列复算。
+
+    月频工作台的收益是**净**的（已扣 换手×双边成本），而 BRAIN 的 Returns
+    要**毛**收益（成本只经换手项计一次）。故 gross = net + to×COST_RATE，
+    Returns = 月均 gross × 12（简单年化），IR = 月均/月标准差×√12，
+    Turnover = 月均单边换手 × 12/252（日均单边，均摊假设）。
+    """
+    rets = np.array([0.01, 0.02, 0.03])
+    tos = np.array([1.0, 0.0, 0.0])
+    b = scorecard.brain_metrics(rets, tos)
+
+    gross = rets + tos * analysis.COST_RATE
+    exp_returns = float(gross.mean()) * 12
+    exp_ir = float(gross.mean() / gross.std(ddof=1) * np.sqrt(12))
+    exp_turnover = float(tos.mean()) * 12 / M.TRADING_DAYS
+    exp_fitness = M.fitness_of(exp_ir, exp_returns, exp_turnover)
+
+    assert b["brain_returns"] == pytest.approx(exp_returns, abs=1e-6)
+    assert b["brain_ir"] == pytest.approx(exp_ir, abs=1e-4)
+    assert b["brain_turnover"] == pytest.approx(exp_turnover, abs=1e-6)
+    assert b["fitness"] == pytest.approx(exp_fitness, abs=1e-3)
+    # 日换手 1/3/21 ≈ 1.6% < 0.125 → 换手项落在地板上（BRAIN 既有口径）
+    assert exp_turnover < M.TURNOVER_FLOOR
+    assert b["fitness_grade"] == M.fitness_grade(exp_fitness)
+
+
+def test_brain_metrics_样本不足或零方差_返回_None():
+    b = scorecard.brain_metrics(np.array([0.01]), np.array([1.0]))
+    assert b["fitness"] is None and b["fitness_grade"] is None
+    assert b["brain_returns"] is None and b["brain_ir"] is None
+
+    b2 = scorecard.brain_metrics(np.array([0.01, 0.01]), np.array([0.0, 0.0]))
+    assert b2["brain_ir"] is None and b2["fitness"] is None
+    # Returns/Turnover 仍可给（无 IR 时 Fitness 无定义，但不虚报 0）
+    assert b2["brain_returns"] == pytest.approx(0.12, abs=1e-9)
+    assert b2["brain_turnover"] == 0.0
+
+
+def test_topn_series_携带_fitness_与可对账输入():
+    p = _const_panel()
+    mask = scorecard.month_mask(p.dates, None, None)
+    s = scorecard.topn_series(p, p.index("X"), 1, mask)
+    for key in (
+        "fitness",
+        "fitness_grade",
+        "brain_returns",
+        "brain_ir",
+        "brain_turnover",
+    ):
+        assert key in s["kpi"]
+
+
+def test_gate_kpi_样本不足时清空_fitness_而不是给_0():
+    k = {
+        "n_months": 3,
+        "annual_return": 0.2,
+        "fitness": 1.8,
+        "fitness_grade": "Good（良好）",
+        "brain_returns": 0.2,
+        "brain_ir": 1.2,
+        "brain_turnover": 0.03,
+    }
+    g = scorecard.gate_kpi(k)
+    for key in (
+        "fitness",
+        "fitness_grade",
+        "brain_returns",
+        "brain_ir",
+        "brain_turnover",
+    ):
+        assert g[key] is None
+    assert k["fitness"] == 1.8  # 门控返回副本，不改原字典
+
 
 
 def _legacy_panel_matrix(df: pd.DataFrame) -> dict:

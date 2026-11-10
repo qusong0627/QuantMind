@@ -24,6 +24,7 @@ from .metrics_core import (
     DEFAULT_PARTICIPATION,
     DEGENERATE_REL_STD,
     DEFINITIONS,
+    FITNESS_GRADES,
     MAD_TO_SIGMA,
     MIN_SAMPLES,
     MIN_TSTAT_SAMPLES,
@@ -54,6 +55,7 @@ from .metrics_eval import (
     crowding_score,
     deflated_sharpe,
     fitness_of,
+    fitness_grade,
     holding_period_sweep,
     margin_of,
     normal_cdf,
@@ -79,8 +81,8 @@ from .metrics_series import (
 __all__ = [
     # 口径常量（改口径 = 改 metrics_core，且只有那里）
     "CLIP_MAD_K", "DEFAULT_COST_BPS", "DEFAULT_PARTICIPATION", "DEGENERATE_REL_STD",
-    "MAD_TO_SIGMA", "MIN_SAMPLES", "MIN_TSTAT_SAMPLES", "TRADING_DAYS", "TURNOVER_FLOOR",
-    "DEFINITIONS",
+    "FITNESS_GRADES", "MAD_TO_SIGMA", "MIN_SAMPLES", "MIN_TSTAT_SAMPLES",
+    "TRADING_DAYS", "TURNOVER_FLOOR", "DEFINITIONS",
     # §0 基础统计原语
     "rank_of", "pearson", "spearman",
     # §1 IC 体系
@@ -90,7 +92,7 @@ __all__ = [
     # §3 收益分布与尾部
     "return_distribution",
     # §4 BRAIN 头部指标
-    "margin_of", "fitness_of", "brain_headline",
+    "margin_of", "fitness_of", "fitness_grade", "brain_headline",
     # §5 显著性
     "plain_tstat", "newey_west_lag", "nw_tstat", "normal_pvalue", "normal_cdf",
     "bhy_qvalues", "bootstrap_ci", "deflated_sharpe", "crowding_score",

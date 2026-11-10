@@ -86,6 +86,18 @@ const BASE_COLS: Col[] = [
   { key: 'composite', label: '综合分', width: 'w-14', align: 'right', fmt: (v) => fmtNum(v as number, 3) },
   { key: 'annual_return', label: '年化', width: 'w-14', align: 'right', fmt: (v) => fmtPct(v as number) },
   { key: 'sharpe', label: '夏普', width: 'w-12', align: 'right', fmt: (v) => fmtNum(v as number) },
+  {
+    key: 'fitness',
+    label: 'Fitness',
+    width: 'w-16',
+    align: 'right',
+    hint:
+      '世坤 BRAIN 口径：Fitness = IR × √(|Returns| / max(Turnover, 0.125))。' +
+      '本工作台为月频：Returns=月均毛收益×12、IR=月均/月标准差×√12、Turnover=月均单边换手÷21。' +
+      '五档：≥2.5 卓越｜2–2.5 优秀｜1.5–2 良好｜1–1.5 一般｜<1 需改进。' +
+      '月频组合日均换手通常 <12.5%，换手项多数落在地板，Fitness 近似 夏普×√(|年化|/0.125)；不做验收门槛。',
+    fmt: (v) => fmtNum(v as number),
+  },
   { key: 'max_drawdown', label: '最大回撤', width: 'w-16', align: 'right', fmt: (v) => fmtPct(v as number) },
   { key: 'win_rate', label: '月胜率', width: 'w-14', align: 'right', fmt: (v) => fmtPct(v as number) },
 ];
@@ -281,8 +293,9 @@ export const LeaderboardTab: React.FC<Props> = ({
         : '没有符合当前筛选的因子——点「清除筛选」回到全量';
 
   /** 表头单元格：点文字排序 + 漏斗筛选（无配置的列只有排序）。
-   *  label 缺省查 LABELS；动态超额列的标签不在表里，由列自带传入。 */
-  const headCell = (key: string, width: string, align: 'left' | 'right', sortable = true, label?: string) => {
+   *  label 缺省查 LABELS；动态超额列的标签不在表里，由列自带传入。
+   *  hint 给列头补口径说明（悬停可见）。 */
+  const headCell = (key: string, width: string, align: 'left' | 'right', sortable = true, label?: string, hint?: string) => {
     const cfg = COL_FILTERS[key];
     const active = colActive(key);
     const text = label ?? LABELS[key];
@@ -290,7 +303,7 @@ export const LeaderboardTab: React.FC<Props> = ({
       <th key={key} className={`group/th py-1 ${width} ${align === 'right' ? 'text-right' : 'text-left'}`}>
         <div className={`flex items-center gap-0.5 ${align === 'right' ? 'justify-end' : ''}`}>
           {sortable ? (
-            <button onClick={() => clickSort(key)} title="点击排序" className="hover:text-slate-600">
+            <button onClick={() => clickSort(key)} title={hint || '点击排序'} className="hover:text-slate-600">
               {text}
               {sortKey === key ? (
                 <span className="ml-0.5 text-indigo-500">{asc ? '↑' : '↓'}</span>
@@ -480,6 +493,13 @@ export const LeaderboardTab: React.FC<Props> = ({
             没有估值快照的市场该列显示「—」，不代填）。{universeNote}。
           </p>
           <p>
+            <b>Fitness</b>（世坤 BRAIN 口径，单列不并入综合分）= IR × √(|Returns| / max(Turnover, 0.125))；
+            月频工作台按日频口径折算：Returns=月均毛收益×12、IR=月均/月标准差×√12、Turnover=月均单边换手÷21。
+            五档：≥2.5 卓越 · 2–2.5 优秀 · 1.5–2 良好 · 1–1.5 一般 · &lt;1 需改进（悬停单元格看分级与三个输入）。
+            ⚠️ 月频组合日均换手通常低于 12.5% 地板，换手项多数不参与区分，Fitness 近似 夏普×√(|年化|/0.125)；
+            它是**粗筛分**，样本不足 6 个月不计算，做过参数搜索的因子仍须补 DSR/PBO。
+          </p>
+          <p>
             标签（每个因子 2 个，按当前区间自动判定，基准 top-30）：
             {benchPrimaryName ? (
               <>市场环境——{benchPrimaryName} 滚动 3 月涨跌 &gt;+5% 记牛、&lt;−5% 记熊、其余震荡，
@@ -547,7 +567,7 @@ export const LeaderboardTab: React.FC<Props> = ({
                 <tr className="text-slate-400 font-bold">
                   <th className="w-6 py-1" aria-label="自选"></th>
                   <th className="text-left py-1 pl-1 w-8"></th>
-                  {cols.map((c) => headCell(c.key, c.width || '', c.align || 'left', true, c.label))}
+                  {cols.map((c) => headCell(c.key, c.width || '', c.align || 'left', true, c.label, c.hint))}
                   {headCell('mv_style', 'w-16', 'right', false)}
                   <th className="text-left py-1 pl-1">标签</th>
                   {headCell('industry', '', 'left', false)}
@@ -636,6 +656,18 @@ export const LeaderboardTab: React.FC<Props> = ({
                         {fmtPct(r.annual_return)}
                       </td>
                       <td className="py-1 text-right font-mono text-slate-600">{fmtNum(r.sharpe)}</td>
+                      <td
+                        className={`py-1 text-right font-mono ${
+                          r.fitness == null ? 'text-slate-300' : r.fitness >= 0 ? 'text-rose-600' : 'text-emerald-600'
+                        }`}
+                        title={
+                          r.fitness == null
+                            ? '样本不足 6 个月或序列退化，Fitness 不可计算'
+                            : `${r.fitness_grade ?? ''}｜可对账输入：毛 IR ${fmtNum(r.brain_ir)} · 简单年化毛收益 ${fmtPct(r.brain_returns)} · 日均单边换手 ${fmtPct(r.brain_turnover, 2)}`
+                        }
+                      >
+                        {fmtNum(r.fitness)}
+                      </td>
                       <td className="py-1 text-right font-mono text-slate-500">{fmtPct(r.max_drawdown)}</td>
                       <td className="py-1 text-right font-mono text-slate-500">{fmtPct(r.win_rate)}</td>
                       {/* 超额列按市场渲染（CN 两列 / 非 CN 逐基准一列 / 无基准市场无此段） */}

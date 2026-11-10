@@ -58,6 +58,7 @@ export const COL_FILTERS: Record<string, ColFilterConfig> = {
   composite: { kind: 'range', hint: '综合分原值（如 0.5）' },
   annual_return: { kind: 'range', scale: 100, hint: '按百分比填（如 15 表示 15%）' },
   sharpe: { kind: 'range', hint: '夏普原值（如 1）' },
+  fitness: { kind: 'range', hint: 'BRAIN Fitness 原值（如 1.5）；≥1.5 良好、≥2 优秀' },
   max_drawdown: { kind: 'range', scale: 100, magnitude: true, hint: '回撤幅度按百分比填（如 20 表示回撤不超过 20%）' },
   win_rate: { kind: 'range', scale: 100, hint: '按百分比填（如 50 表示 50%）' },
   excess_300: { kind: 'range', scale: 100, hint: '按百分比填（如 5 表示 5%）' },

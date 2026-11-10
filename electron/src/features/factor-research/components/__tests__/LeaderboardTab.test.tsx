@@ -165,3 +165,33 @@ describe('LeaderboardTab：分类限定与加载提示', () => {
     expect(screen.getByText('rd_x1')).toBeTruthy();
   });
 });
+
+describe('LeaderboardTab：Fitness 列（BRAIN 口径）', () => {
+  test('展示值 + 分级悬停文案；缺失显示「—」而不是 0', () => {
+    renderTab([
+      row({
+        code: 'fit_ok',
+        name_cn: 'fit_ok',
+        fitness: 1.8,
+        fitness_grade: 'Good（良好）',
+        brain_ir: 1.2,
+        brain_returns: 0.2,
+        brain_turnover: 0.03,
+      }),
+      row({
+        code: 'fit_na',
+        name_cn: 'fit_na',
+        rank: 2,
+        fitness: null,
+        fitness_grade: null,
+      }),
+    ]);
+
+    expect(screen.getAllByText('Fitness').length).toBeGreaterThan(0);
+    const cell = screen.getByText('1.80').closest('td');
+    expect(cell?.getAttribute('title')).toContain('Good（良好）');
+    expect(cell?.getAttribute('title')).toContain('日均单边换手 3.00%');
+    // 缺失给「—」；0 会被读成「真的算出来是 0」
+    expect(screen.queryByText('0.00')).toBeNull();
+  });
+});

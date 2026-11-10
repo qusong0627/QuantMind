@@ -67,6 +67,21 @@ export interface FactorKpi {
   ic_std?: number | null;
   ic_ir?: number | null;
   ic_win_rate?: number | null;
+  /**
+   * BRAIN 口径 Fitness = IR × √(|Returns| / max(Turnover, 0.125))。
+   * 工作台为月频回测，后端已按日频口径折算（见 scorecard.brain_metrics）：
+   * Returns=月均毛收益×12、IR=月均/标准差×√12、Turnover=月均单边换手/21。
+   * 样本不足 6 个月为 null（不写 0）。
+   */
+  fitness?: number | null;
+  /** Fitness 五档：卓越 / 优秀 / 良好 / 一般 / 需改进（后端世坤口径） */
+  fitness_grade?: string | null;
+  /** Fitness 可对账输入：简单年化毛收益（小数） */
+  brain_returns?: number | null;
+  /** Fitness 可对账输入：毛信息比率（月频×√12） */
+  brain_ir?: number | null;
+  /** Fitness 可对账输入：日均单边换手（月均换手/21；均摊假设） */
+  brain_turnover?: number | null;
 }
 
 /**

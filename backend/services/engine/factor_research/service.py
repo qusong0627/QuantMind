@@ -687,6 +687,9 @@ def compare(
             ]
             sub = sub.reindex(pd.DatetimeIndex(ctx["rdates"])).dropna()
             ic_points = _points(sub.index, sub.to_numpy(dtype=float))
+        kpi = dict(s["kpi"])
+        if ctx["ic"] is not None:
+            kpi.update(scorecard.ic_stats_from(ctx["ic_index"].get(code), ctx["rdates"]))
         out.append(
             {
                 "code": code,
@@ -694,12 +697,8 @@ def compare(
                 "l1": meta["l1"],
                 "l2": meta["l2"],
                 "n": n,
-                "kpi": {
-                    **s["kpi"],
-                    **scorecard.ic_stats_from(ctx["ic_index"].get(code), ctx["rdates"]),
-                }
-                if ctx["ic"] is not None
-                else s["kpi"],
+                # 对比页既有口径不动；只对新增的 Fitness 族做样本不足门控
+                "kpi": scorecard.gate_brain(kpi),
                 "excess": scorecard.excess_vs(
                     ctx["benches"], s["kpi"], ctx["bench_order"]
                 ),
@@ -1166,6 +1165,13 @@ def compose(
         cost_rate=cost_rate or analysis.COST_RATE,
     )
     k = analysis.kpi(bt["ret"], bt["nav"])
+    # BRAIN 口径 Fitness：与单因子榜同源（含样本不足门控）。
+    k.update(
+        scorecard.brain_metrics(
+            bt["ret"].to_numpy(dtype=float), bt["turnover"].to_numpy(dtype=float)
+        )
+    )
+    k = scorecard.gate_brain(k)
     ctx = _range_ctx(start, end, dataset, mk)
     k_ex = scorecard.excess_vs(ctx["benches"], k, ctx["bench_order"])
 

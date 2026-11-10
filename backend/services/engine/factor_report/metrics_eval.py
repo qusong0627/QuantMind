@@ -16,6 +16,7 @@ import numpy as np
 from .metrics_core import (
     DEFAULT_COST_BPS,
     DEFAULT_PARTICIPATION,
+    FITNESS_GRADES,
     MIN_SAMPLES,
     MIN_TSTAT_SAMPLES,
     TRADING_DAYS,
@@ -46,6 +47,20 @@ def fitness_of(
         return None
     floor = max(abs(float(t)), TURNOVER_FLOOR)
     return float(i) * math.sqrt(abs(float(r)) / floor)
+
+
+def fitness_grade(value: float | None) -> str | None:
+    """Fitness → 世坤五档标签（阈值与文案见 ``metrics_core.FITNESS_GRADES``）。
+
+    None/NaN → None：缺失与「算出来很差」在展示面上必须可区分。
+    """
+    v = _none_if_nan(value)
+    if v is None:
+        return None
+    for threshold, label in FITNESS_GRADES:
+        if v >= threshold:
+            return label
+    return FITNESS_GRADES[-1][1]  # pragma: no cover - 末档 -inf 必然命中
 
 
 def brain_headline(

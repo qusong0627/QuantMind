@@ -17,20 +17,26 @@ interface KpiTilesProps {
   compact?: boolean;
 }
 
-/** KPI 磁贴：年化 / 夏普 / 最大回撤 / 月胜率 / IC 均值 / ICIR */
+/** KPI 磁贴：年化 / 夏普 / Fitness / 最大回撤 / 月胜率 / IC 均值 / ICIR */
 export const KpiTiles: React.FC<KpiTilesProps> = ({ kpi, compact }) => {
-  const items: Array<{ label: string; value: string; tone?: 'pos' | 'neg' }> = [
+  const items: Array<{ label: string; value: string; tone?: 'pos' | 'neg'; hint?: string }> = [
     { label: '年化收益', value: fmtPct(kpi.annual_return), tone: (kpi.annual_return || 0) >= 0 ? 'pos' : 'neg' },
     { label: '夏普', value: fmtNum(kpi.sharpe), tone: (kpi.sharpe || 0) >= 0 ? 'pos' : 'neg' },
+    {
+      label: 'Fitness',
+      value: fmtNum(kpi.fitness),
+      tone: kpi.fitness == null ? undefined : kpi.fitness >= 0 ? 'pos' : 'neg',
+      hint: kpi.fitness == null ? '样本不足 6 个月，不计算 Fitness' : kpi.fitness_grade || 'BRAIN 口径粗筛分',
+    },
     { label: '最大回撤', value: fmtPct(kpi.max_drawdown) },
     { label: '月胜率', value: fmtPct(kpi.win_rate) },
     { label: 'IC 均值', value: fmtNum(kpi.ic_mean, 3), tone: (kpi.ic_mean || 0) >= 0 ? 'pos' : 'neg' },
     { label: 'ICIR', value: fmtNum(kpi.ic_ir, 2) },
   ];
   return (
-    <div className={`grid ${compact ? 'grid-cols-3' : 'grid-cols-3 lg:grid-cols-6'} gap-2`}>
+    <div className={`grid ${compact ? 'grid-cols-3' : 'grid-cols-3 lg:grid-cols-7'} gap-2`}>
       {items.map((it) => (
-        <div key={it.label} className="rounded-xl border border-slate-200/80 bg-white px-3 py-2">
+        <div key={it.label} className="rounded-xl border border-slate-200/80 bg-white px-3 py-2" title={it.hint}>
           <div className="text-[10px] font-bold text-slate-400">{it.label}</div>
           <div
             className={`text-sm font-extrabold font-mono ${

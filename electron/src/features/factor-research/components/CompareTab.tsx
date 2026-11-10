@@ -162,6 +162,7 @@ export const CompareTab: React.FC<Props> = ({ codes, onRemove, nameOf, range, da
                   <th className="text-right py-1 w-12">N</th>
                   <th className="text-right py-1">年化</th>
                   <th className="text-right py-1">夏普</th>
+                  <th className="text-right py-1" title="世坤 BRAIN 口径：IR × √(|Returns| / max(Turnover, 0.125))；月频折算">Fitness</th>
                   <th className="text-right py-1">最大回撤</th>
                   <th className="text-right py-1">月胜率</th>
                   <th className="text-right py-1">{benchPrimary ? `超额vs${benchPrimary.name}` : '超额'}</th>
@@ -180,6 +181,18 @@ export const CompareTab: React.FC<Props> = ({ codes, onRemove, nameOf, range, da
                     <td className="py-1 text-right font-mono text-slate-500">{f.n}</td>
                     <td className={`py-1 text-right font-mono ${(f.kpi.annual_return || 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>{fmtPct(f.kpi.annual_return)}</td>
                     <td className="py-1 text-right font-mono text-slate-600">{fmtNum(f.kpi.sharpe)}</td>
+                    <td
+                      className={`py-1 text-right font-mono ${
+                        f.kpi.fitness == null ? 'text-slate-300' : f.kpi.fitness >= 0 ? 'text-rose-600' : 'text-emerald-600'
+                      }`}
+                      title={
+                        f.kpi.fitness == null
+                          ? '样本不足 6 个月或序列退化，Fitness 不可计算'
+                          : `${f.kpi.fitness_grade ?? ''}｜可对账输入：毛 IR ${fmtNum(f.kpi.brain_ir)} · 简单年化毛收益 ${fmtPct(f.kpi.brain_returns)} · 日均单边换手 ${fmtPct(f.kpi.brain_turnover, 2)}`
+                      }
+                    >
+                      {fmtNum(f.kpi.fitness)}
+                    </td>
                     <td className="py-1 text-right font-mono text-slate-500">{fmtPct(f.kpi.max_drawdown)}</td>
                     <td className="py-1 text-right font-mono text-slate-500">{fmtPct(f.kpi.win_rate)}</td>
                     <td className={`py-1 text-right font-mono ${(benchPrimary ? f.excess[benchPrimary.code] || 0 : 0) >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
