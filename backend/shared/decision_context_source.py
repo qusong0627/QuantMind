@@ -220,6 +220,27 @@ def _f(value: object) -> float | None:
     return out if out == out and out not in (float("inf"), float("-inf")) else None
 
 
+def snapshot_price(snap: Mapping[str, Any] | None) -> float | None:
+    """快照 → 现价；``Now``/``now`` 两套字段都认，缺失/非正 → ``None``。
+
+    取价是**消费侧唯一入口**（决策轮、推理 ``expected_price`` 等）：键形有两套
+    （见 :func:`snapshot_key_suffix`），字段名也有两套（标准键 ``Now`` 与原始
+    推送 ``now``）。分散实现必然漂移——2026-11-10 推理取价只认 ``Now`` + 前缀键，
+    3272 只命中 0，``engine_signal_scores.expected_price`` 全 NULL。
+
+    **缺失一律 ``None``，不是 0**：0 会被下游当真实价格。
+    """
+    if not isinstance(snap, Mapping):
+        return None
+    price = _f(snap.get("Now"))
+    if price is None:
+        # ``Now`` 缺失/空串/脏值 → 再试原始推送字段 ``now``（两套写侧并存）。
+        price = _f(snap.get("now"))
+    if price is None or price <= 0:
+        return None
+    return price
+
+
 def day_change_pct(snap: Mapping[str, Any] | None) -> float | None:
     """快照 → 今日涨跌%。``Now``/``PreClose`` 缺任一 → ``None``。
 
@@ -364,8 +385,8 @@ def quotes_from_snapshots(
         snap = snaps.get(row.code)
         if not snap:
             continue
-        price = _f(snap.get("Now") if snap.get("Now") is not None else snap.get("now"))
-        if price is None or price <= 0:
+        price = snapshot_price(snap)
+        if price is None:
             continue
         age = snapshot_age_min(snap, now)
         if age is None:

@@ -33,17 +33,15 @@ class _FakePipeline:
     def __init__(self, store: dict[str, dict[str, str]], sink: list[str]):
         self._store = store
         self._sink = sink
-        self._issued: list[tuple[str, str]] = []
+        self._issued: list[str] = []
 
-    def hget(self, key: str, field: str):
-        self._issued.append((key, field))
+    def hgetall(self, key: str):
+        self._issued.append(key)
         self._sink.append(key)
         return self
 
     def execute(self):
-        out = []
-        for key, field in self._issued:
-            out.append(self._store.get(key, {}).get(field))
+        out = [self._store.get(key, {}) for key in self._issued]
         self._issued = []
         return out
 
@@ -79,6 +77,9 @@ def test_fetch_expected_prices_uses_snapshot_contract_keys():
     assert out == {"600036": 42.77, "000001": 11.64}
     assert "300750" not in out, "未命中的不写 0，也不进表（诚实缺失）"
     assert all(k.startswith("market:snapshot:") for k in redis.issued_keys)
+    assert "market:snapshot:600036.SH" in redis.issued_keys, (
+        "必须发后缀式键（远端行情服写侧实测 5563/5563 是该形）"
+    )
     assert not any(k.startswith("stock:") for k in redis.issued_keys), (
         "stock:{code}.SH 是已退役命名空间（远端 n=0），出现即为回退"
     )
@@ -94,9 +95,10 @@ def test_fetch_expected_prices_is_one_pipeline_for_many_symbols():
     out = InferenceScriptRunner._fetch_expected_prices(redis, syms, None)
 
     assert len(out) == 500
-    # 500 只 / 分片 200 → 3 次 pipeline（不是 500 次单键往返）
+    # 500 只 / 分片 200 → 3 次 pipeline（不是 500 次单键往返）；
+    # read_snapshots 每只发后缀+前缀两套键 → 500 × 2 条命令。
     assert redis.pipeline_calls == 3
-    assert len(redis.issued_keys) == 500
+    assert len(redis.issued_keys) == 1000
 
 
 @pytest.mark.unit

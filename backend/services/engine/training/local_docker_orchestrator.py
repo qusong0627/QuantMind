@@ -63,6 +63,30 @@ _TRAINING_IMAGE = (os.getenv("TRAINING_IMAGE") or "quantmind-trainer:latest").st
 _TRAINING_BOOTSTRAP_PIP = (os.getenv("TRAINING_BOOTSTRAP_PIP") or "duckdb pyqlib").strip()
 
 
+def _format_failure_diag(
+    exit_code: int, state: dict | None, host_config: dict | None
+) -> str:
+    """训练失败诊断行：ExitCode + OOMKilled + 容器内存上限。
+
+    ``Exit 137`` 只证明 SIGKILL，**不是** OOM 的证明：2026-11-10 实测残留容器
+    ``Exited 137`` 但 ``OOMKilled=false``（用户取消）；另有 peak≈22G（限额 53G）
+    仍在迭代中被杀的任务。故只有 ``OOMKilled=true`` 才能写 OOM，false 时显式
+    标注「不可判为 OOM」。peak RSS 需运行时 ``stats()`` 采样，停止后的 inspect
+    不保留，这里不编造。
+    """
+    state = state or {}
+    host_config = host_config or {}
+    oom_killed = bool(state.get("OOMKilled"))
+    mem_limit = host_config.get("Memory")
+    line = (
+        f"[FAILED] ExitCode={exit_code} "
+        f"OOMKilled={str(oom_killed).lower()} MemoryLimitBytes={mem_limit}"
+    )
+    if exit_code == 137 and not oom_killed:
+        line += " (SIGKILL；OOMKilled=false 时不可判为 OOM)"
+    return line
+
+
 def _host_mem_limit_gb() -> str | None:
     """训练容器的 mem_limit（GB 字符串），保护宿主机不被训练进程打爆。
 
@@ -1664,25 +1688,29 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                                     container_id=container_id[:12],
                                 )
                 else:
+                    # 失败归档补已有 inspect 字段（OOMKilled / 内存上限）：
+                    # Exit 137 只是 SIGKILL，不能只凭它断言 OOM（见
+                    # _format_failure_diag 注释）。
+                    diag = _format_failure_diag(
+                        exit_code, c.attrs.get("State"), c.attrs.get("HostConfig")
+                    )
                     async with get_session() as db:
                         r = await db.get(TrainingJobRecord, run_id)
                         if r:
                             r.status = "failed"
-                            r.logs = (
-                                r.logs or ""
-                            ) + f"[FAILED] ExitCode={exit_code}\n{tail_logs}"
+                            r.logs = (r.logs or "") + f"{diag}\n{tail_logs}"
                             r.progress = 100
                             await db.commit()
                     self.log_stream.append_log(
                         run_id=run_id,
                         tenant_id=tenant_id,
                         user_id=user_id,
-                        line=f"[FAILED] ExitCode={exit_code}",
+                        line=diag,
                         status="failed",
                         progress=100,
                         container_id=container_id[:12],
                     )
-                    logger.error("[%s] Training failed, ExitCode=%d", run_id, exit_code)
+                    logger.error("[%s] Training failed: %s", run_id, diag)
 
                 try:
                     c.remove(force=True, v=True)

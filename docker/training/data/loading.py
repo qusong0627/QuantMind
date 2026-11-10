@@ -223,6 +223,7 @@ def load_data(
                 "is_st",
                 "volume",
                 "open",
+                "close",
             ]
             + list(features)
         )
@@ -730,6 +731,20 @@ def load_data(
         # execution_price=open：t+1 开盘买（严格实盘口径）；close：t+1 收盘买（旧口径）。
         _lag = _EXECUTION_LAG_DAYS
         _entry_col = "open" if _exec_price == "open" else "close"
+        # 缺列必须在这里说清楚：拖到 groupby 只会抛 pandas ``KeyError: 'Column
+        # not found: open'``，日志里没有列清单（2026-11-08 任务
+        # train_20261109123002_56a909dc 即此形态，``admin_training_jobs.logs``
+        # 为空）。CUSTOM 市场允许因子源不带 OHLCV，这条闸是最后一道可读出口。
+        _label_cols = list(dict.fromkeys((_entry_col, "close")))
+        _missing_label_cols = [c for c in _label_cols if c not in narrow.columns]
+        if _missing_label_cols:
+            raise RuntimeError(
+                "标签构建缺少必要列: "
+                f"{_missing_label_cols} (factor_source={direct_factor_source}, "
+                f"execution_price={_exec_price})；"
+                f"已加载 {len(narrow.columns)} 列，前 40 列: "
+                f"{sorted(narrow.columns)[:40]}"
+            )
         execution_close = narrow.groupby("symbol")[_entry_col].shift(-_lag)
         future_close = narrow.groupby("symbol")["close"].shift(-(_lag + _horizon))
         narrow["label"] = future_close / execution_close - 1.0

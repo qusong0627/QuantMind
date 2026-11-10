@@ -151,3 +151,36 @@ def test_size_excess_rank_requires_size() -> None:
     dates = pd.Series(["d1"] * 3)
     with pytest.raises(ValueError):
         preprocessing.cross_sectional_label_transform(labels, dates, "size_excess_rank")
+
+
+def test_label_top_tail_multi_chunk_no_unequal_broadcast_nan_passthrough() -> None:
+    """top_tail 分块回归（2026-11-09 任务 ``train_20261109143427_60b2845c``）。
+
+    旧实现把**全帧掩码** ``m`` 与**块内子集** ``sub_x`` 做 ``m & ~isfinite(sub_x)``：
+    10,703,603 行 vs 72,634 行 → ``ValueError: operands could not be broadcast``。
+
+    本用例 40 个交易日 × 5 只 = 200 行，跨 ``_date_chunks`` 的 30/10 两个块，
+    每块的 ``m`` 都只是全帧的一部分，旧写法必现不等长广播；同时钉住 NaN 透传。
+    """
+    n_dates, n_stocks = 40, 5
+    dates = pd.Series(
+        [f"d{i:02d}" for i in range(n_dates) for _ in range(n_stocks)]
+    )
+    labels = pd.Series(
+        [float(s) for _ in range(n_dates) for s in range(n_stocks)]
+    )
+    labels.iloc[7] = np.nan  # d01 的一只标的缺失
+
+    out = preprocessing.cross_sectional_label_transform(
+        labels, dates, "top_tail", top_pct=0.2
+    )
+
+    assert len(out) == len(labels)
+    assert out.dtype == np.float32
+    assert np.isnan(out.iloc[7]), "NaN 必须透传，不能当 0 参与排序"
+    for day in dates.unique():
+        block = out[dates == day]
+        valid = labels[dates == day].notna()
+        assert block[~valid].isna().all()
+        # 5 只 × top 20% = 每日恰好 1 只入尾，且尾部值为正
+        assert int((block[valid] > 0).sum()) == 1

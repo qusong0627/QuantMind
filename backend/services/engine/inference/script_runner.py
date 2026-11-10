@@ -2356,50 +2356,58 @@ class InferenceScriptRunner:
         symbols: list[str],
         raw_symbols: list[str] | None = None,
     ) -> dict[str, float | None]:
-        """一次 pipeline 批量取现价 → ``{归一 symbol: 现价}``（取不到的不入表）。
+        """一次批量取现价 → ``{归一 symbol: 现价}``（取不到的不入表）。
 
-        - 键构造走 ``decision_context_source.snapshot_key()``（唯一契约实现，
-          ``market:snapshot:{prefix.lower()}``）——**不要**再手拼 ``stock:{code}.SH``，
-          那是已退役命名空间（远端 n=0，静默全空）。
-        - 分片 ``pipeline(transaction=False)``，每片一次往返（不比逐键慢，且避免
-          跨公网时延摊销到每一只）。
-        - 连接不可用 / 取数异常一律 WARNING 留痕并返回空表（诚实缺失，不是 0）；
-          调用方据此把 ``expected_price`` 写成 NULL。
+        键形与字段名统一走 ``decision_context_source`` 的标准取价面：
+
+        - :func:`read_snapshots` 同时发**后缀式**（``market:snapshot:600036.SH``，
+          远端行情服实测写侧）与**前缀式**（``market:snapshot:sh600036``，本仓
+          ``tdx_aidata`` 写侧）两套键，且走 ``transaction=False`` 管道（该服禁
+          ``MULTI``）。
+        - :func:`snapshot_price` 同时认 ``Now``/``now``。
+
+        2026-11-10 推理只查前缀键 + 只读 ``Now``，远端 3272 只命中 0，
+        ``engine_signal_scores.expected_price`` 全 NULL —— 不得再手拼单套键。
+
+        分片沿用 ``_QUOTE_CHUNK``：每片 ``2×N`` 条命令（双键），200 只 → 400
+        条/批（远端实测该量级 OK）。连接不可用 / 取数异常一律 WARNING 留痕并
+        返回已取到的部分（诚实缺失，不是 0）；调用方据此把 ``expected_price``
+        写成 NULL。
         """
         if not quote_redis or not symbols:
             return {}
-        from backend.shared.decision_context_source import snapshot_key
+        from backend.shared.decision_context_source import (
+            read_snapshots,
+            snapshot_price,
+        )
+        from backend.shared.stock_utils import StockCodeUtil
 
-        # 归一 symbol → 查询键：优先用 raw_symbols（保留原始市场前缀），
-        # raw_symbols 缺失或同形时回落到归一 symbol 本身。
-        key_for: dict[str, str] = {}
+        # 归一 symbol → 行情层 suffix（read_snapshots 的出口键）；raw 保留原始
+        # 市场信息（模型产物可能是 SH600036 / 600036.SH / sh600036），raw 缺失
+        # 或不可解析时回落到归一 symbol。
+        suffix_for: dict[str, str] = {}
         for idx, sym in enumerate(symbols):
             raw = raw_symbols[idx] if raw_symbols and idx < len(raw_symbols) else sym
-            key = snapshot_key(raw)
-            if key is None:
-                key = snapshot_key(sym)
-            if key is not None:
-                key_for[sym] = key
-        if not key_for:
+            suffix = StockCodeUtil.to_suffix(
+                str(raw or "").strip()
+            ) or StockCodeUtil.to_suffix(str(sym or "").strip())
+            if suffix:
+                suffix_for[sym] = suffix
+        if not suffix_for:
             return {}
 
-        items = list(key_for.items())
+        items = list(suffix_for.items())
         out: dict[str, float | None] = {}
         try:
             for start in range(0, len(items), cls._QUOTE_CHUNK):
                 chunk = items[start : start + cls._QUOTE_CHUNK]
-                pipe = quote_redis.pipeline(transaction=False)
-                for _sym, key in chunk:
-                    pipe.hget(key, "Now")
-                for (sym, _key), raw_price in zip(
-                    chunk, pipe.execute(), strict=False
-                ):
-                    if raw_price is None or raw_price == "":
-                        continue
-                    try:
-                        out[sym] = float(raw_price)
-                    except (TypeError, ValueError):
-                        continue
+                snaps = read_snapshots(
+                    quote_redis, [suffix for _sym, suffix in chunk]
+                )
+                for sym, suffix in chunk:
+                    price = snapshot_price(snaps.get(suffix))
+                    if price is not None:
+                        out[sym] = price
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[InferenceScriptRunner] 批量取价失败（expected_price 写 NULL）: %s", exc
