@@ -81,6 +81,12 @@ def main() -> int:
         "| 类别 | 数量 | 来源库 | 数量 |",
         "|---|---:|---|---:|",
     ]
+    if proto.get("label_mode") == "size_excess":
+        lines.insert(
+            9,
+            "- 标签：**同市值桶内超额**（每交易日按总市值 3 桶，减去同桶均值后再算 IC/ICIR 与 LGB 标签）；"
+            "用于 H1 size-neutral 重训，不是原始远期收益。",
+        )
     g = Counter(e.get("group", "") for e in entries)
     lib = Counter(e.get("library", "") for e in entries)
     gl = sorted(g.items(), key=lambda x: -x[1])

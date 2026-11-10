@@ -94,3 +94,16 @@ def test_other_category_fallbacks(code: str, expected: str):
         code, "factor_defs", "factor_defs", "factor_defs", "", "other"
     )
     assert group == expected
+
+
+@pytest.mark.unit
+def test_size_excess_removes_bucket_mean():
+    import numpy as np
+
+    from backend.scripts.stock_classifier.select_daily_features import _size_excess
+
+    y = np.array([1.0, 2.0, 3.0, 10.0, 20.0, 30.0])
+    mv = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    out = _size_excess(y, mv, n_buckets=3)
+    # 三桶 [1,2] [3,4] [5,6] 的均值 1.5/6.5/25 → 桶内超额
+    assert out.tolist() == pytest.approx([-0.5, 0.5, -3.5, 3.5, -5.0, 5.0])

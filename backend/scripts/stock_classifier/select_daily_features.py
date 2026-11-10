@@ -133,6 +133,22 @@ def _rank_pct(values: np.ndarray) -> np.ndarray:
     return out
 
 
+def _size_excess(y: np.ndarray, mv: np.ndarray, n_buckets: int = 3) -> np.ndarray:
+    """按当期总市值分桶，减去同桶均值（size-neutral 标签）。"""
+    values = np.asarray(y, dtype=float).copy()
+    size = np.asarray(mv, dtype=float)
+    ok = np.isfinite(values) & np.isfinite(size)
+    if int(ok.sum()) < 3:
+        return values
+    edges = np.nanquantile(size[ok], [1.0 / n_buckets, 2.0 / n_buckets])
+    bucket = np.digitize(size, edges)
+    for k in range(n_buckets):
+        mask = ok & (bucket == k)
+        if mask.any():
+            values[mask] = values[mask] - np.nanmean(values[mask])
+    return values
+
+
 def _ic_one(x: np.ndarray, y: np.ndarray) -> float:
     ok = np.isfinite(x) & np.isfinite(y)
     if int(ok.sum()) < 100:
@@ -477,6 +493,12 @@ def main() -> int:
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--coarse", type=int, default=320)
     ap.add_argument("--step", type=int, default=SAMPLE_STEP)
+    ap.add_argument(
+        "--label-mode",
+        default="raw",
+        choices=["raw", "size_excess"],
+        help="raw=v1 原始远期收益；size_excess=同日市值三桶内超额（H1）",
+    )
     ap.add_argument("--top", default="100,200")
     ap.add_argument("--out", default=str(OUT / "daily_feature_selection.json"))
     args = ap.parse_args()
@@ -598,12 +620,19 @@ def main() -> int:
         x = vals[sub]
         coverage_hits += np.isfinite(x).sum(axis=0)
         seen += int(sub.sum())
-        ic5.append(_ic_matrix(x, y5[sub]))
-        ic3.append(_ic_matrix(x, y3[sub]))
-        ic1.append(_ic_matrix(x, y1[sub]))
-        ic1cc.append(_ic_matrix(x, y1cc[sub]))
-        # 市值三档
         mv_sub = mv[sub]
+        if args.label_mode == "size_excess":
+            y5v = _size_excess(y5[sub], mv_sub)
+            y3v = _size_excess(y3[sub], mv_sub)
+            y1v = _size_excess(y1[sub], mv_sub)
+            y1ccv = _size_excess(y1cc[sub], mv_sub)
+        else:
+            y5v, y3v, y1v, y1ccv = y5[sub], y3[sub], y1[sub], y1cc[sub]
+        ic5.append(_ic_matrix(x, y5v))
+        ic3.append(_ic_matrix(x, y3v))
+        ic1.append(_ic_matrix(x, y1v))
+        ic1cc.append(_ic_matrix(x, y1ccv))
+        # 市值三档
         edges = np.nanquantile(mv_sub, [1 / 3, 2 / 3])
         row = np.full((N_CAP, len(features)), np.nan, dtype=np.float32)
         for k in range(N_CAP):
@@ -615,10 +644,10 @@ def main() -> int:
                 else (mv_sub > edges[1])
             )
             if int(mk.sum()) >= 100:
-                row[k] = _ic_matrix(x[mk], y5[sub][mk])
+                row[k] = _ic_matrix(x[mk], y5v[mk])
         cap_ic.append(row)
         # cap 平衡抽样（LGB 只学截面 rank，不做全量）
-        yr = _rank_pct(y5[sub])
+        yr = _rank_pct(y5v)
         for k in range(N_CAP):
             mk = (
                 (mv_sub <= edges[0])
@@ -887,6 +916,7 @@ def main() -> int:
             "n_sample_days": len(ic5),
             "n_sample_rows": int(seen),
             "n_lgb_rows": int(len(x_all)),
+            "label_mode": args.label_mode,
         },
         "selected": selections,
         "metrics": {
