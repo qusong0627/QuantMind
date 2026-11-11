@@ -61,6 +61,14 @@ ORDER BY updated_at DESC LIMIT 5;
   沉底，生产读数直接换口径。
 - **容器时钟**：引擎容器时钟比宿主慢 1h（实测）；用 `now()` 的判读以宿主机时间为准。
 - `trade_date` 是交易日（date）；跨日观察用 `source='realtime'` 过滤。
+- **`expected_price` 在盘前批次里结构上取不到实时价**（2026-11-11）：自动推理固定在
+  交易日 08:00 CST，而热集行情快照 09:26 才开始写、`SNAPSHOT_TTL=300s`。实测
+  2026-11-06 盘中 10:14–10:18 五次推理命中 633/633、619/619、620/620（100%），
+  而所有盘前批次为 0%。**排查此字段先看推理时刻，再看键形与 db**——键命名空间
+  与 `db=3` 是 2026-10-13 / 11-10 已修的两条旧根因，修完仍 NULL 属时点问题。
+  2026-11-11 起实时缺失时回落到 QuantDB 上一交易日收盘，来源写入
+  `expected_price_source`（`live` / `prev_close`）；历史行该列为 NULL = 来源未知，
+  **展示面不得当作实时价**。
 
 ## 4. 表注释 DDL（可重放——新环境/重建库执行一次）
 
@@ -71,6 +79,10 @@ COMMENT ON COLUMN engine_signal_scores.created_at IS
   '首次落库时刻（upsert 不更新，≠最后写入时刻；判写活跃请用 signal_ts）。审计 M1 / T4-3';
 COMMENT ON COLUMN engine_signal_scores.signal_ts IS
   '信号最后写入时刻（实时行=本周期发布时刻，约每 15s 刷新；批量=写入时刻；历史批量行多为 NULL）。判写活跃的主判据';
+COMMENT ON COLUMN engine_signal_scores.expected_price IS
+  '推理时刻的参考价。盘前批次取不到实时快照，回落上一交易日收盘（见 expected_price_source）；取不到时 NULL，绝不写 0';
+COMMENT ON COLUMN engine_signal_scores.expected_price_source IS
+  'expected_price 的取价来源：live=盘中实时快照 / prev_close=盘前兜底上一交易日收盘；NULL=来源未知（历史行）';
 ```
 
 > 备注：本部署已实库执行上述 COMMENT；并入版本化升级文件（`data/upgrade_*.sql`）
