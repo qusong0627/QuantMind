@@ -19,6 +19,39 @@ def _price(value):
         return None
 
 
+def _previous_session(day):
+    """返回 day 的前一交易日；日历不可用时返回 None（不猜）。"""
+    try:
+        import exchange_calendars as xcals
+
+        calendar = xcals.get_calendar("XSHG")
+        try:
+            session = calendar.previous_session(date.fromisoformat(day))
+        except Exception:
+            # 非交易日（节假日等）先归一到最近的前一交易日，再取它的上一交易日。
+            session = calendar.previous_session(
+                calendar.date_to_session(day, direction="previous")
+            )
+        return str(session.date())
+    except Exception:
+        return None
+
+
+def _breadth(values):
+    """涨跌家数统计：None 记为缺失，不参与计数。"""
+    rising = sum(1 for v in values if v is not None and v > 0)
+    falling = sum(1 for v in values if v is not None and v < 0)
+    flat = sum(1 for v in values if v == 0)
+    counted = rising + falling + flat
+    return {
+        "rising": rising,
+        "falling": falling,
+        "flat": flat,
+        "coverage": counted,
+        "missing": len(values) - counted,
+    }
+
+
 _INDEX_TENCENT = {
     "000300.SH": "sh000300",
     "000905.SH": "sh000905",
@@ -289,17 +322,8 @@ async def calculate_review(detail, top_k, exclude_st, benchmark, buy_close=False
             }
         )
     realtime_values = {}
-    previous_date = None
-    try:
-        import exchange_calendars as xcals
-
-        previous_date = str(
-            xcals.get_calendar("XSHG")
-            .previous_session(date.fromisoformat(latest_date))
-            .date()
-        )
-    except Exception:
-        pass  # 无法确认上一交易日时，不拼接历史日线和实时行情。
+    # 无法确认上一交易日时，不拼接历史日线和实时行情。
+    previous_date = _previous_session(latest_date)
     missing_previous = [
         code for code, q in live.items() if not _price(q.get("close_price"))
     ]
@@ -424,16 +448,7 @@ async def calculate_review(detail, top_k, exclude_st, benchmark, buy_close=False
     # 历史日线的日涨跌必须使用同一复权口径的上一交易日收盘价。
     historical_previous = {}
     if latest_date:
-        try:
-            import exchange_calendars as xcals
-
-            historical_previous_date = str(
-                xcals.get_calendar("XSHG")
-                .previous_session(date.fromisoformat(latest_date))
-                .date()
-            )
-        except Exception:
-            historical_previous_date = None
+        historical_previous_date = _previous_session(latest_date)
         if historical_previous_date:
             historical_previous = {
                 s["code"]: history.get(s["code"], {})
@@ -496,6 +511,54 @@ async def calculate_review(detail, top_k, exclude_st, benchmark, buy_close=False
                 "source": q.get("kind", "实时") if q else "日线" if hist else "缺失",
             }
         )
+    # 复盘口径的涨跌家数：严格历史口径——目标日收盘 vs 其前一交易日收盘，
+    # 全部取 QuantDB 日线（前复权）。最新日横截面会随行情前移，历史批次每天
+    # 打开结果都不同，不能作为复盘结论。
+    target_previous = _previous_session(target) if target else None
+    target_changes = {}
+    if target:
+        for s in stocks:
+            code = s["code"]
+            close = history.get(code, {}).get(target, {}).get("close")
+            previous = (
+                history.get(code, {}).get(target_previous, {}).get("close")
+                if target_previous
+                else None
+            )
+            if close and _price(previous):
+                target_changes[code] = (close / previous - 1) * 100
+        # 默认取数窗口从目标日开始，前一交易日收盘不在 history 内，需补拉。
+        missing = [
+            s["code"]
+            for s in stocks
+            if s["code"] not in target_changes
+            and target_previous
+            and history.get(s["code"], {}).get(target, {}).get("close")
+        ]
+        if missing and target_previous:
+            filled = await asyncio.to_thread(
+                _previous_closes, missing, target_previous, "qfq"
+            )
+            for code in missing:
+                close = history.get(code, {}).get(target, {}).get("close")
+                previous = _price(filled.get(code))
+                if close and previous:
+                    target_changes[code] = (close / previous - 1) * 100
+    # 唯一例外：目标日就是今天、且当日日线还没落库时，用 Redis 在线行情
+    # （前复权价 / 昨收）临时补。已落库的股票不走在线行情，历史日更不走。
+    if target and target == now.date().isoformat():
+        for s in stocks:
+            code = s["code"]
+            if code in target_changes:
+                continue
+            if history.get(code, {}).get(target, {}).get("close"):
+                continue  # 有当日日线但缺昨收：记缺失，不拿实时价凑
+            q = live.get(code)
+            price = _price(q.get("adjusted_price")) if q else None
+            previous = _price(q.get("adjusted_previous")) if q else None
+            if price and previous:
+                target_changes[code] = (price / previous - 1) * 100
+    target_values = [target_changes.get(s["code"]) for s in stocks]
     return {
         "stocks": stocks,
         "days": rows,
@@ -507,5 +570,7 @@ async def calculate_review(detail, top_k, exclude_st, benchmark, buy_close=False
         "entry_label": "推理日收盘起算" if buy_close else "目标日开盘起算",
         "quote_coverage": len(live),
         "quote_time": min((q["timestamp"] for q in live.values()), default=None),
-        "message": "备注：固定等权组合，历史行情采用前复权；当日涨跌以昨收为基准，累计收益以目标日开盘价为基准，尾盘买入时以推理日收盘价为基准。结果为事后观察，未计费用和成交限制。当日行情依上一交易日前复权价与昨收换算，时序数据缺少交易所昨收时使用上日原始收盘价估算，除权除息日可能失真；行情缺失时不展示组合收益。",
+        "target_date": target,
+        "target_breadth": _breadth(target_values),
+        "message": "备注：固定等权组合，历史行情采用前复权；上涨/下跌按目标日收盘对前一交易日收盘统计，当日涨跌以昨收为基准，累计收益以目标日开盘价为基准，尾盘买入时以推理日收盘价为基准。结果为事后观察，未计费用和成交限制。当日行情依上一交易日前复权价与昨收换算，时序数据缺少交易所昨收时使用上日原始收盘价估算，除权除息日可能失真；行情缺失时不展示组合收益。",
     }

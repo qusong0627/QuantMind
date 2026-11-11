@@ -218,7 +218,11 @@ def test_historical_daily_uses_previous_session_not_previous_available_quote(mon
     data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-04'}}, 10, False, '000300.SH'))
     assert data['stocks'][0]['daily'] == pytest.approx(20)
     assert data['stocks'][1]['daily'] is None
-    assert calls == [(['600519.SH'], '2026-11-05', 'qfq')]
+    # 最新日（11-06）的昨收必须取真实前一交易日 11-05，而不是行情里最近可用的 11-04。
+    latest_fills = [call for call in calls if call[1] == '2026-11-05']
+    assert latest_fills == [(['600519.SH'], '2026-11-05', 'qfq')]
+    # 目标日（11-04）同样只补它的前一交易日 11-03；补不到就记缺失，不猜。
+    assert data['target_breadth'] == {'rising': 0, 'falling': 0, 'flat': 0, 'coverage': 0, 'missing': 2}
 
 
 def test_first_historical_day_fetches_previous_close(monkeypatch):
@@ -343,3 +347,102 @@ def test_quantdb_close_wins_when_tencent_supplies_target_open(monkeypatch):
     data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-06'}}, 10, False, '000300.SH'))
     assert data['days'][-1]['benchmark'] == pytest.approx(5)
     assert data['days'][-1]['benchmark_source'] == 'QuantDB 日线，腾讯开盘价'
+
+
+def test_target_breadth_uses_target_day_not_latest_day(monkeypatch):
+    """涨跌家数必须按目标日统计：最新日横截面每天前移，不是复盘结论。"""
+    stocks = [{'code': '600036.SH'}, {'code': '600519.SH'}, {'code': '300750.SZ'}]
+    history = {
+        '600036.SH': {'2026-11-04': {'open': 10, 'close': 10}, '2026-11-05': {'open': 10, 'close': 9}, '2026-11-06': {'open': 9, 'close': 12}},
+        '600519.SH': {'2026-11-04': {'open': 20, 'close': 20}, '2026-11-05': {'open': 20, 'close': 19}, '2026-11-06': {'open': 19, 'close': 20}},
+        '300750.SZ': {'2026-11-04': {'open': 30, 'close': 30}, '2026-11-05': {'open': 30, 'close': 30}, '2026-11-06': {'open': 30, 'close': 33}},
+    }
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-05'}}, 10, True, '000300.SH'))
+    # 目标日 11-05：2 跌 1 平；最新日 11-06：2 涨 1 平。
+    assert data['target_date'] == '2026-11-05'
+    assert data['target_breadth'] == {'rising': 0, 'falling': 2, 'flat': 1, 'coverage': 3, 'missing': 0}
+    assert data['stocks'][0]['daily'] == pytest.approx(100 / 3)
+
+
+def test_target_breadth_fetches_previous_close_for_target(monkeypatch):
+    stocks = [{'code': '600036.SH'}, {'code': '600519.SH'}]
+    history = {
+        '600036.SH': {'2026-11-05': {'open': 10, 'close': 11}},
+        '600519.SH': {'2026-11-05': {'open': 20, 'close': 18}},
+    }
+    calls = []
+    def previous(symbols, day, adjust):
+        calls.append((symbols, day, adjust))
+        if day == '2026-11-04' and adjust == 'qfq':
+            return {'600036.SH': 10, '600519.SH': 20}
+        return {}
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    monkeypatch.setattr(review, '_previous_closes', previous)
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-05'}}, 10, False, '000300.SH'))
+    assert data['target_breadth'] == {'rising': 1, 'falling': 1, 'flat': 0, 'coverage': 2, 'missing': 0}
+    assert (['600036.SH', '600519.SH'], '2026-11-04', 'qfq') in calls
+
+
+def test_target_breadth_missing_previous_close_stays_missing(monkeypatch):
+    """昨收缺失时 fail-closed：记入缺失，不得用当日收盘冒充涨跌为 0。"""
+    stocks = [{'code': '600036.SH'}]
+    history = {'600036.SH': {'2026-11-05': {'open': 10, 'close': 11}}}
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', NoQuotes)
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-05'}}, 10, False, '000300.SH'))
+    assert data['target_breadth'] == {'rising': 0, 'falling': 0, 'flat': 0, 'coverage': 0, 'missing': 1}
+
+
+def test_target_breadth_uses_live_quote_only_when_today_bar_not_landed(monkeypatch):
+    """目标日=今天且 QuantDB 当日日线未落库时，才用 Redis 在线行情补涨跌家数。"""
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 6, 14, 0, tzinfo=review._TZ).astimezone(tz or timezone.utc)
+
+    now = FixedDateTime.now(timezone.utc)
+    stocks = [{'code': '600036.SH'}]
+    monkeypatch.setattr(review, 'datetime', FixedDateTime)
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, {}, {}, 0))
+    class Quote:
+        _client = None
+        async def fetch_quotes(self, symbols, **kwargs):
+            return [{'symbol': '600036.SH', 'timestamp': now, 'is_stale': False,
+                     'open_price': 10, 'current_price': 11, 'close_price': 10}]
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', Quote)
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {'600036.SH': 10})
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-06'}}, 10, True, '000300.SH'))
+    assert data['target_breadth'] == {'rising': 1, 'falling': 0, 'flat': 0, 'coverage': 1, 'missing': 0}
+
+
+def test_target_breadth_ignores_live_quote_when_today_bar_landed(monkeypatch):
+    """当日日线已落库时，即使 Redis 有新价格也按历史日线统计（严格历史口径）。"""
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 6, 16, 30, tzinfo=review._TZ).astimezone(tz or timezone.utc)
+
+    now = FixedDateTime.now(timezone.utc)
+    stocks = [{'code': '600036.SH'}, {'code': '600519.SH'}]
+    history = {
+        '600036.SH': {'2026-11-05': {'open': 10, 'close': 10}, '2026-11-06': {'open': 10, 'close': 12}},
+        '600519.SH': {'2026-11-05': {'open': 20, 'close': 20}, '2026-11-06': {'open': 20, 'close': 19}},
+    }
+    monkeypatch.setattr(review, 'datetime', FixedDateTime)
+    monkeypatch.setattr(review, '_historical', lambda *args: (stocks, history, {}, 0))
+    class DivergentQuote:
+        _client = None
+        async def fetch_quotes(self, symbols, **kwargs):
+            return [{'symbol': '600036.SH', 'timestamp': now, 'is_stale': False,
+                     'open_price': 10, 'current_price': 99, 'close_price': 10}]
+    monkeypatch.setattr(remote_redis_source, 'RemoteRedisDataSource', DivergentQuote)
+    monkeypatch.setattr(review, '_previous_closes', lambda *args: {})
+    data = asyncio.run(review.calculate_review({'summary': {'prediction_trade_date': '2026-11-06'}}, 10, True, '000300.SH'))
+    # 日线口径：600036 +20%、600519 -5% → 1 涨 1 跌；Redis 的 99 元不得影响统计。
+    assert data['target_breadth'] == {'rising': 1, 'falling': 1, 'flat': 0, 'coverage': 2, 'missing': 0}
+    assert data['stocks'][0]['daily'] == pytest.approx(20)
