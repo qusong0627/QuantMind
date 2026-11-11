@@ -478,19 +478,109 @@ class StrategyListResponse(BaseModel):
     strategies: list[StrategyListItem]
 
 
-async def _fetch_sim_fund_fallback(
-    tenant_id: str, user_sub: str
-) -> dict[str, float] | None:
-    """模拟盘收益兜底（策略监控用）。
+def _get_sim_trade_redis():
+    """直连模拟账户所在的 trade Redis DB（`REDIS_DB_TRADE`，默认 2）。
 
-    实盘组合行（portfolios）由 runner 维护；模拟策略直接交易共享模拟账户，
-    portfolios 表为空时活跃策略的今日/累计收益全 0。此处直读该用户模拟账户
-    最新资金快照，把账户级收益归因给活跃策略（与原 portfolio 快照口径一致）。
-    无快照返回 None，调用方保持原值。
+    engine 的 sentinel 客户端固定在 DB 0，读不到 `simulation:account:*`；
+    此处短直连只读实时 total，不写。失败返回 None，调用方回退 PG 快照。
     """
+    try:
+        from redis import Redis
+
+        host = (os.getenv("REDIS_HOST") or "").strip()
+        if not host:
+            host = "quantmind-redis" if os.path.exists("/.dockerenv") else "127.0.0.1"
+        elif os.path.exists("/.dockerenv") and host in {"localhost", "127.0.0.1"}:
+            host = "quantmind-redis"
+        client = Redis(
+            host=host,
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            db=int(os.getenv("REDIS_DB_TRADE", "2")),
+            password=os.getenv("REDIS_PASSWORD") or None,
+            decode_responses=True,
+            socket_timeout=3.0,
+            socket_connect_timeout=3.0,
+        )
+        client.ping()
+        return client
+    except Exception as exc:
+        logger.warning("sim trade redis unavailable: %s", exc)
+        return None
+
+
+def _read_sim_live_account(
+    redis_client: Any, tenant_id: str, user_sub: str
+) -> tuple[float, float] | None:
+    """读实时模拟账户：跨市场 total 累加 + settings 初始资金。
+
+    与 `SimulationFundSnapshotService.capture_all` 合并口径一致
+    （同一用户 CN/HK/US 账户累加）。返回 (live_total, initial_capital)，
+    无账户返回 None。
+    """
+    import json as _json
+
+    from backend.shared.simulation_account_keys import (
+        ledger_user_id_candidates,
+        parse_account_key,
+        settings_lookup_keys,
+    )
+
+    tenant = str(tenant_id or "default")
+    aliases = set(ledger_user_id_candidates(user_sub))
+    try:
+        keys = list(
+            redis_client.scan_iter(match=f"simulation:account:{tenant}:*", count=500)
+        )
+    except Exception as exc:
+        logger.warning("sim live account scan failed: %s", exc)
+        return None
+    live_total = 0.0
+    found = False
+    for key in keys:
+        try:
+            key_str = key.decode() if isinstance(key, bytes) else str(key)
+            parsed = parse_account_key(key_str)
+            if not parsed:
+                continue
+            key_tenant, key_user, _market = parsed
+            if key_tenant != tenant or key_user not in aliases:
+                continue
+            raw = redis_client.get(key_str)
+            if not raw:
+                continue
+            account = _json.loads(raw)
+            if not isinstance(account, dict):
+                continue
+            live_total += float(account.get("total_asset") or 0.0)
+            found = True
+        except Exception:
+            continue
+    if not found:
+        return None
+    initial_capital = 0.0
+    try:
+        for skey in settings_lookup_keys(tenant, user_sub):
+            sraw = redis_client.get(skey)
+            if not sraw:
+                continue
+            sdata = _json.loads(sraw)
+            if isinstance(sdata, dict) and sdata.get("initial_cash") is not None:
+                initial_capital = float(sdata.get("initial_cash") or 0.0)
+                break
+    except Exception:
+        pass
+    return live_total, initial_capital
+
+
+async def _query_sim_pg_snapshot_row(
+    tenant_id: str, user_sub: str
+) -> tuple[float, float, float, float] | None:
+    """读 PG 资金快照最新行：(total_asset, today_pnl, total_pnl, initial_capital)。"""
     from backend.shared.simulation_account_keys import ledger_user_id_candidates
 
     candidates = ledger_user_id_candidates(user_sub)
+    if not candidates:
+        return None
     preferred = candidates[0]
     try:
         async with get_session(read_only=True) as session:
@@ -519,23 +609,111 @@ async def _fetch_sim_fund_fallback(
     if not row:
         return None
     try:
-        today_pnl = float(row[1] or 0.0)
-        total_pnl = float(row[2] or 0.0)
-        initial_capital = float(row[3] or 0.0)
+        return (
+            float(row[0] or 0.0),
+            float(row[1] or 0.0),
+            float(row[2] or 0.0),
+            float(row[3] or 0.0),
+        )
     except Exception:
         return None
-    # 分母与 _fetch_active_portfolio_snapshot 对齐：均按初始资金，避免轻仓失真
-    total_return_pct = (
-        total_pnl / initial_capital * 100.0 if initial_capital > 0 else 0.0
-    )
-    today_return_pct = (
-        today_pnl / initial_capital * 100.0 if initial_capital > 0 else 0.0
-    )
+
+
+async def _fetch_sim_fund_fallback(
+    tenant_id: str, user_sub: str
+) -> dict[str, float] | None:
+    """模拟盘收益兜底（策略监控用），口径与资金概览对齐。
+
+    资金概览（`simulation.py` 账户接口）：total 取 Redis 实时，
+    日初基线取 PG `get_baselines`，今日收益 = 今日盈亏 / 日初权益。
+    此前这里只读 PG 快照最新行：EOD 落库后周期采集当天不再更新
+    （`capture_all(skip_eod_completed=True)`），盘后实时重估只进 Redis
+    不进 PG，策略卡片显示的是 EOD 时刻陈旧值；且今日收益误用初始资金
+    作分母。现改为 Redis 实时优先，PG 快照仅作 Redis 不可达时的降级
+    （分母同样按日初修正）。
+    """
+    from decimal import Decimal
+
+    from backend.shared.simulation_account_keys import ledger_user_id_candidates
+
+    tenant = str(tenant_id or "default")
+    candidates = ledger_user_id_candidates(user_sub)
+    preferred = candidates[0] if candidates else str(user_sub)
+
+    try:
+        from backend.services.simulation.services.fund_snapshot_service import (
+            SimulationFundSnapshotService,
+        )
+    except Exception as exc:
+        logger.warning("sim fund baselines import failed: %s", exc)
+        SimulationFundSnapshotService = None  # type: ignore[no-redef]
+
+    async def _day_open(initial: float) -> float:
+        if SimulationFundSnapshotService is None:
+            return initial
+        try:
+            baselines = await SimulationFundSnapshotService.get_baselines(
+                tenant_id=tenant,
+                user_id=preferred,
+                initial_capital=Decimal(str(initial)),
+            )
+            return float(baselines.get("day_open_equity") or initial)
+        except Exception as exc:
+            logger.warning("sim fund baselines query failed: %s", exc)
+            return initial
+
+    # 1) Redis 实时优先
+    redis_client = _get_sim_trade_redis()
+    if redis_client is not None:
+        try:
+            live = _read_sim_live_account(redis_client, tenant, user_sub)
+        except Exception as exc:
+            logger.warning("sim live account read failed: %s", exc)
+            live = None
+        finally:
+            try:
+                redis_client.close()
+            except Exception:
+                pass
+        if live is not None:
+            live_total, initial = live
+            if initial <= 0:
+                pg_row = await _query_sim_pg_snapshot_row(tenant, user_sub)
+                if pg_row is not None and pg_row[3] > 0:
+                    initial = pg_row[3]
+                else:
+                    initial = live_total
+            day_open = await _day_open(initial if initial > 0 else live_total)
+            today_pnl = live_total - day_open
+            total_pnl = live_total - initial if initial > 0 else 0.0
+            return {
+                "today_pnl": today_pnl,
+                "total_pnl": total_pnl,
+                "today_return": (
+                    today_pnl / day_open * 100.0 if day_open > 0 else 0.0
+                ),
+                "total_return": (
+                    total_pnl / initial * 100.0 if initial > 0 else 0.0
+                ),
+            }
+
+    # 2) PG 快照降级：total 为快照时刻值，今日盈亏按日初基线重算
+    pg_row = await _query_sim_pg_snapshot_row(tenant, user_sub)
+    if pg_row is None:
+        return None
+    snap_total, _snap_today, snap_total_pnl, initial = pg_row
+    if initial <= 0:
+        initial = snap_total
+    day_open = await _day_open(initial)
+    today_pnl = snap_total - day_open
+    total_pnl = snap_total - initial if initial > 0 else snap_total_pnl
     return {
         "today_pnl": today_pnl,
         "total_pnl": total_pnl,
-        "today_return": today_return_pct,
-        "total_return": total_return_pct,
+        # 今日收益分母必须为日初权益（与资金概览/strategy_monitor_pusher 一致），
+        # 此前误用初始资金，轻仓/浮盈时会系统性偏小。
+        "today_return": (today_pnl / day_open * 100.0 if day_open > 0 else 0.0),
+        "total_return": (total_pnl / initial * 100.0 if initial > 0 else 0.0),
     }
 
 
@@ -745,12 +923,13 @@ async def list_user_strategies(
                 trade_daily_pnl = (trading_status or {}).get("daily_pnl")
                 if trade_daily_pnl is None and isinstance(trade_portfolio, dict):
                     trade_daily_pnl = trade_portfolio.get("daily_pnl")
-                # 模拟盘收益以资金快照为准，避免空 portfolios 行的 0 盈亏盖住真实账户。
+                # 模拟盘收益以实时账户为准（与资金概览同口径），避免空 portfolios 行
+                # 的 0 盈亏盖住真实账户；活跃策略无条件覆盖，回测摘要的陈旧 total
+                # 不得残留（此前仅 total==0 时覆盖，陈旧非零值会一直显示）。
                 if sim_mode == "SIMULATION" and sim_fund is not None:
                     today_pnl = float(sim_fund["today_pnl"])
                     today_return = float(sim_fund["today_return"])
-                    if total_return == 0.0:
-                        total_return = float(sim_fund["total_return"])
+                    total_return = float(sim_fund["total_return"])
                 else:
                     if trade_today_return is not None:
                         today_return = _to_float(trade_today_return, today_return)
