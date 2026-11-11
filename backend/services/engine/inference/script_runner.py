@@ -100,6 +100,25 @@ _BACKGROUND_PUSH_TASKS: set[asyncio.Task] = set()
 # 保留此说明以防有人再加一把无效锁。
 
 
+def _coerce_trade_date(value: Any) -> date | None:
+    """``YYYY-MM-DD`` 字符串 / ``date`` / ``datetime`` → ``date``；解析不了返回 ``None``。
+
+    推理链路上交易日一路以字符串传递（``prediction_trade_date``），而 QuantDB 取价
+    要按 ``date`` 比较；只有 ``None`` 一种「不可用」语义，调用方据此跳过兜底。
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def _resolve_quantdb_data_dir() -> str:
     """QuantDB 因子数据目录：QUANTDB_DATA_DIR → QM_QUANTDB_DATA_DIR → hub 统一解析。
 
@@ -2420,6 +2439,105 @@ class InferenceScriptRunner:
         )
         return out
 
+    #: ``expected_price_source`` 取值（写入 ``engine_signal_scores``）。
+    PRICE_SOURCE_LIVE = "live"
+    PRICE_SOURCE_PREV_CLOSE = "prev_close"
+
+    @classmethod
+    def _resolve_expected_prices(
+        cls,
+        live: dict[str, float],
+        prev_close: dict[str, float],
+    ) -> tuple[dict[str, float], dict[str, str]]:
+        """合并两套取价来源 → ``(价格表, 来源表)``。
+
+        实时快照优先；只有实时缺失的标的才用昨收兜底。两套都没有的标的不进表
+        （调用方写 NULL）——**绝不补 0**，缺失就是缺失。
+        """
+        prices: dict[str, float] = {}
+        sources: dict[str, str] = {}
+        for sym, price in (live or {}).items():
+            prices[sym] = price
+            sources[sym] = cls.PRICE_SOURCE_LIVE
+        for sym, price in (prev_close or {}).items():
+            if sym in prices:
+                continue
+            prices[sym] = price
+            sources[sym] = cls.PRICE_SOURCE_PREV_CLOSE
+        return prices, sources
+
+    @classmethod
+    def _fetch_prev_close_prices(
+        cls,
+        symbols: list[str],
+        prediction_trade_date,
+        market_data=None,
+        raw_symbols: list[str] | None = None,
+    ) -> dict[str, float]:
+        """QuantDB 上一交易日收盘价（盘前推理的兜底取价）。
+
+        自动推理固定在交易日 08:00，而热集行情快照 09:26 才开始写、TTL 仅 300s
+        ——盘前批次**结构上**取不到实时价。此处在实时缺失时回落到上一交易日收盘。
+
+        纪律：
+        - **只认严格早于预测日的交易日**——盘后补跑时库里最新日可能就是预测日
+          本身，拿当日收盘冒充「昨收」是前视；
+        - 0 价 / 负价 / 查不到一律不进表（调用方写 NULL，不伪造 0）；
+        - 任何异常只告警并返回已取到的部分，不阻断写库事务。
+        """
+        if not symbols:
+            return {}
+
+        as_of = _coerce_trade_date(prediction_trade_date)
+        if as_of is None:
+            return {}
+        try:
+            upper = as_of - timedelta(days=1)
+        except (TypeError, OverflowError):
+            return {}
+
+        from backend.shared.stock_utils import StockCodeUtil
+
+        out: dict[str, float] = {}
+        trade_date = None
+        try:
+            if market_data is None:
+                from backend.services.simulation.services.local_market_data import (
+                    get_local_market_data,
+                )
+
+                market_data = get_local_market_data()
+            trade_date = market_data.latest_trade_date(on_or_before=upper)
+            if trade_date is None or trade_date > upper:
+                return {}
+            for idx, sym in enumerate(symbols):
+                raw = (
+                    raw_symbols[idx]
+                    if raw_symbols and idx < len(raw_symbols)
+                    else sym
+                )
+                suffix = StockCodeUtil.to_suffix(
+                    str(raw or "").strip()
+                ) or StockCodeUtil.to_suffix(str(sym or "").strip())
+                if not suffix:
+                    continue
+                bar = market_data.get_bar(suffix, trade_date)
+                close = float(getattr(bar, "close", 0) or 0) if bar is not None else 0.0
+                if close > 0:
+                    out[sym] = close
+        except Exception as exc:  # noqa: BLE001 — 兜底失败不阻断写库
+            logger.warning(
+                "[InferenceScriptRunner] 昨收兜底取价失败（该批 expected_price 写 NULL）: %s",
+                exc,
+            )
+        logger.info(
+            "[InferenceScriptRunner] 昨收兜底：请求 %d 只，命中 %d 只（交易日=%s）",
+            len(symbols),
+            len(out),
+            trade_date,
+        )
+        return out
+
     @staticmethod
     def _retention_rows_exist(db, probe_sql: str, params: dict) -> bool:
         """保留期 DELETE 的存在性探针。
@@ -2750,7 +2868,7 @@ class InferenceScriptRunner:
         # 现在：键构造统一走 `snapshot_key()`（唯一契约实现）+ 连接透传解析出的
         # db=3，分片 pipeline 一次往返（实测 3206 键 ≈ 1.6 s，本地 ≈ 0.17 s），
         # 结果在 Step 2/Step 3 之间复用，不再重查。
-        price_map = self._fetch_expected_prices(
+        live_prices = self._fetch_expected_prices(
             quote_redis,
             symbols,
             raw_symbols,
@@ -2760,6 +2878,33 @@ class InferenceScriptRunner:
                 quote_redis.close()
             except Exception:
                 pass
+
+        # 盘前兜底取价（2026-11-11）：自动推理固定在交易日 08:00 CST，而热集行情
+        # 快照 09:26 才开始写入、`SNAPSHOT_TTL=300s` —— 盘前批次**结构上**取不到
+        # 实时价（实测 2026-11-06 盘中 10:14–10:18 五次推理 100% 命中，盘前全 NULL）。
+        # 实时缺失的标的回落到 QuantDB 上一交易日收盘价，并在
+        # `expected_price_source` 标 `prev_close`，展示面据此标注，绝不冒充实时价。
+        missing_idx = [i for i, s in enumerate(symbols) if s not in live_prices]
+        if missing_idx:
+            missing_syms = [symbols[i] for i in missing_idx]
+            missing_raws = (
+                [
+                    raw_symbols[i] if i < len(raw_symbols) else missing_syms[k]
+                    for k, i in enumerate(missing_idx)
+                ]
+                if raw_symbols
+                else None
+            )
+            prev_close_prices = self._fetch_prev_close_prices(
+                missing_syms,
+                prediction_trade_date,
+                raw_symbols=missing_raws,
+            )
+        else:
+            prev_close_prices = {}
+        price_map, price_source_map = self._resolve_expected_prices(
+            live_prices, prev_close_prices
+        )
 
         # 写入语义同 realtime_contract.mark_signal_ready（审计 M1 / T4-3）：
         # created_at 只在 INSERT 落 = 首次落库；DO UPDATE 只刷 signal_ts（真实最后
@@ -2771,13 +2916,13 @@ class InferenceScriptRunner:
                 model_version, feature_version, universe_tag,
                 light_score, tft_score, fusion_score, risk_weight, regime,
                 signal_side, expected_price, quality, created_at,
-                market, rank_pct, source, signal_ts
+                market, rank_pct, source, signal_ts, expected_price_source
             ) VALUES (
                 :run_id, :tenant_id, :user_id, :trade_date, :symbol,
                 'inference_script', :feature_version, :universe_tag,
                 NULL, NULL, :score, 1.0, :regime,
                 :signal_side, :expected_price, CAST(:quality AS jsonb), NOW(),
-                :market, :rank_pct, :source, NOW()
+                :market, :rank_pct, :source, NOW(), :expected_price_source
             )
             ON CONFLICT (tenant_id, user_id, trade_date, symbol, model_version, feature_version, run_id)
             DO UPDATE SET
@@ -2785,6 +2930,7 @@ class InferenceScriptRunner:
                 regime = EXCLUDED.regime,
                 signal_side = EXCLUDED.signal_side,
                 expected_price = EXCLUDED.expected_price,
+                expected_price_source = EXCLUDED.expected_price_source,
                 quality = EXCLUDED.quality,
                 market = EXCLUDED.market,
                 rank_pct = EXCLUDED.rank_pct,
@@ -2822,6 +2968,7 @@ class InferenceScriptRunner:
                     "regime": regime_value,
                     "signal_side": signal_side,
                     "expected_price": expected_price,
+                    "expected_price_source": price_source_map.get(sym),
                     "quality": quality,
                     "market": contract_market,
                     "rank_pct": rank_pcts[idx],

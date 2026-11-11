@@ -123,7 +123,13 @@ def test_realtime_writer_includes_contract_columns():
 def test_migration_is_idempotent_and_db_init_in_sync():
     assert "ADD COLUMN IF NOT EXISTS" in ALTER_TEMPLATE
     names = {name for name, _ in CONTRACT_COLUMNS}
-    assert names == {"market", "rank_pct", "source", "signal_ts"}
+    assert names == {
+        "market",
+        "rank_pct",
+        "source",
+        "signal_ts",
+        "expected_price_source",
+    }
     ddl = (_BACKEND / "shared/db_init.sql").read_text(encoding="utf-8")
     for name in names:
         assert name in ddl, f"db_init.sql 缺少契约列 {name}"

@@ -97,6 +97,38 @@ describe('CrossSectionTable 合规展示', () => {
       expect(csv).not.toContain(word);
     }
   });
+
+  it('参考价列标出来源：盘前兜底是「昨收」，实时是「实时」，缺失留空', () => {
+    const csv = buildCrossSectionCsv(
+      [
+        { rank: 1, code: 'SH600001', name: '甲', score: 0.81, signal: 'buy', expected_price: 12.34, expected_price_source: 'live' },
+        { rank: 2, code: 'SH600002', name: '乙', score: 0.42, signal: 'hold', expected_price: 9.1, expected_price_source: 'prev_close' },
+        { rank: 3, code: 'SH600003', name: '丙', score: 0.03, signal: 'sell', expected_price: null, expected_price_source: null },
+      ],
+      {
+        runId: 'run-20261019-abcdef',
+        inferenceDate: '2026-10-19',
+        targetDate: '2026-10-20',
+        modelId: 'mdl_demo',
+        total: 3,
+      },
+    );
+
+    expect(csv).toContain('参考价');
+    expect(csv).toContain('实时');
+    expect(csv).toContain('昨收');
+    expect(csv).toContain('12.34');
+    // 缺失行的列数必须与表头一致，且不得带上任何来源角标（缺失就是缺失，不补 0）
+    const lines = csv.split('\r\n');
+    const header = lines.find((l) => l.startsWith('排名')) ?? '';
+    const missingRow = lines.find((l) => l.includes('丙')) ?? '';
+    expect(missingRow.split(',').length).toBe(header.split(',').length);
+    expect(missingRow).not.toContain('实时');
+    expect(missingRow).not.toContain('昨收');
+    for (const word of BANNED_WORDS) {
+      expect(csv).not.toContain(word);
+    }
+  });
 });
 
 describe('RankingList 合规展示', () => {

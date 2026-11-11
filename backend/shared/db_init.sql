@@ -385,6 +385,9 @@ CREATE TABLE IF NOT EXISTS engine_signal_scores (
     rank_pct        DOUBLE PRECISION,
     source          TEXT,
     signal_ts       TIMESTAMPTZ,
+    -- expected_price 的取价来源：live=盘中实时快照 / prev_close=盘前兜底上一交易日收盘
+    -- （自动推理 08:00 时行情快照尚未开始写，历史 NULL 视为来源未知）
+    expected_price_source TEXT,
     UNIQUE (tenant_id, user_id, trade_date, symbol, model_version, feature_version, run_id)
 );
 

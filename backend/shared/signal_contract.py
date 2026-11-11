@@ -5,6 +5,8 @@
   rank_pct  DOUBLE PRECISION  — **截面分位 0..1**（percent_rank 口径，与 PG percent_rank() 对齐）
   source    TEXT              — batch | realtime（历史 NULL 视为 batch）
   signal_ts TIMESTAMPTZ       — 信号产生时间（批量≈created_at；实时为事件时刻）
+  expected_price_source TEXT  — live | prev_close（expected_price 的取价来源；
+                                历史 NULL 视为未知，展示面不得当作实时价）
 
 命名决策：既有 ``score_rank INTEGER``（名次旧口径，selection/手动任务在消费）保持不变；
 分位以 ``rank_pct`` 新增。**策略/风控阈值只允许引用 rank_pct**（主文档铁律三：阈值分位化）。
@@ -24,6 +26,7 @@ CONTRACT_COLUMNS = (
     ("rank_pct", "DOUBLE PRECISION"),
     ("source", "TEXT"),
     ("signal_ts", "TIMESTAMPTZ"),
+    ("expected_price_source", "TEXT"),
 )
 
 ALTER_TEMPLATE = (

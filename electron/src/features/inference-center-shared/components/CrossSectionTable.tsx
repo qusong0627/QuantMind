@@ -41,6 +41,16 @@ function signalKeyOf(v: string | undefined): SignalKey {
   return 'hold';
 }
 
+/**
+ * 参考价来源文案（表格角标 + CSV）。
+ * 只描述价格口径，不构成方向提示：盘前批次没有实时快照，价格来自上一交易日收盘。
+ */
+function priceSourceLabel(v: InferenceRankingItem['expected_price_source']): string {
+  if (v === 'live') return '实时';
+  if (v === 'prev_close') return '昨收';
+  return '';
+}
+
 /** 分数 → 显示色（正红负绿，与全站一致） */
 const scoreClass = (v: number | null | undefined): string =>
   v == null ? 'text-slate-400' : v > 0 ? 'text-rose-600' : v < 0 ? 'text-emerald-600' : 'text-slate-600';
@@ -70,13 +80,14 @@ export interface CrossSectionCsvMeta {
 export function buildCrossSectionCsv(rows: InferenceRankingItem[], meta: CrossSectionCsvMeta): string {
   const head = [
     '排名', '代码', '名称', '分数', '位置', '行业', '板块', '趋势',
-    '市值(亿)', '市值分层', '上期分数', '分数变化', '负向标签',
+    '参考价', '参考价来源', '市值(亿)', '市值分层', '上期分数', '分数变化', '负向标签',
   ];
   const body = rows.map((r) => {
     const delta = r.prev_score == null ? null : r.score - r.prev_score;
     return [
       r.rank, r.code, r.name, r.score, SIGNAL_META[signalKeyOf(r.signal)].label,
       r.industry ?? '', r.board ?? '', r.trend ?? '',
+      r.expected_price ?? '', priceSourceLabel(r.expected_price_source),
       r.market_cap_yi ?? '', r.market_cap_tier ?? '',
       r.prev_score ?? '', delta == null ? '' : delta.toFixed(6),
       r.negative_tag ?? '',
@@ -303,6 +314,25 @@ export const CrossSectionTable: React.FC<CrossSectionTableProps> = ({
     {
       title: '趋势', dataIndex: 'trend', width: 96, ellipsis: true,
       render: (v: string) => (v ? <Tag className="!m-0 text-[10px] leading-tight">{v}</Tag> : <span className="text-slate-300">—</span>),
+    },
+    {
+      // 参考价 = 推理时刻的行情价。盘前批次行情快照还没开始写（09:26 才有），
+      // 兜底用上一交易日收盘，必须标出来——不标就等于把昨收冒充实时价。
+      title: '参考价', dataIndex: 'expected_price', width: 118, align: 'right',
+      sorter: (a, b) => (a.expected_price ?? -1) - (b.expected_price ?? -1),
+      render: (v: number | null, row) =>
+        v == null ? (
+          <span className="text-slate-300">—</span>
+        ) : (
+          <span className="font-mono text-[11px] text-slate-700">
+            {v.toFixed(2)}
+            {row.expected_price_source === 'prev_close' && (
+              <Tooltip title="盘前推理无实时行情快照，取上一交易日收盘价">
+                <span className="ml-1 text-[10px] font-bold text-slate-500">昨收</span>
+              </Tooltip>
+            )}
+          </span>
+        ),
     },
     {
       title: '市值(亿)', dataIndex: 'market_cap_yi', width: 100, align: 'right',

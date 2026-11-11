@@ -223,13 +223,13 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
             model_version, feature_version,
             light_score, tft_score, fusion_score, risk_weight, regime, score_rank,
             universe_tag, signal_side, expected_price, quality, created_at,
-            market, rank_pct, source, signal_ts
+            market, rank_pct, source, signal_ts, expected_price_source
         ) VALUES (
             :run_id, :tenant_id, :user_id, :trade_date, :symbol,
             :model_version, :feature_version,
             :light_score, :tft_score, :fusion_score, :risk_weight, :regime, :score_rank,
             :universe_tag, :signal_side, :expected_price, CAST(:quality AS jsonb), NOW(),
-            :market, :rank_pct, :source, NOW()
+            :market, :rank_pct, :source, NOW(), :expected_price_source
         )
         ON CONFLICT (
             tenant_id, user_id, trade_date, symbol, model_version, feature_version, run_id
@@ -244,6 +244,7 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
             universe_tag = EXCLUDED.universe_tag,
             signal_side = EXCLUDED.signal_side,
             expected_price = EXCLUDED.expected_price,
+            expected_price_source = EXCLUDED.expected_price_source,
             quality = EXCLUDED.quality,
             market = EXCLUDED.market,
             rank_pct = EXCLUDED.rank_pct,
@@ -315,6 +316,11 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
                     "universe_tag": item.universe_tag,
                     "signal_side": item.signal_side,
                     "expected_price": item.expected_price,
+                    # 实时链路的价来自事件时刻的行情快照；无价时来源也留空，
+                    # 不把「缺失」标成任何来源（展示面据 NULL 显示 —）。
+                    "expected_price_source": (
+                        "live" if item.expected_price is not None else None
+                    ),
                     "quality": json.dumps(item.quality or {}, ensure_ascii=False),
                     "market": item_market,
                     "rank_pct": item.rank_pct if item.rank_pct is not None else rank_pcts[idx],

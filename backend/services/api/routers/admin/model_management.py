@@ -508,6 +508,7 @@ async def get_prediction_run_detail(
                             score_rank,
                             signal_side,
                             expected_price,
+                            expected_price_source,
                             quality,
                             created_at
                         FROM engine_signal_scores
@@ -568,7 +569,7 @@ async def export_prediction_run_csv(
         stmt = text(f"""
             SELECT 
                 symbol, fusion_score, light_score, tft_score, 
-                score_rank, signal_side, expected_price, created_at
+                score_rank, signal_side, expected_price, expected_price_source, created_at
             FROM engine_signal_scores
             WHERE {where_sql}
             ORDER BY fusion_score DESC NULLS LAST, symbol ASC
@@ -586,7 +587,7 @@ async def export_prediction_run_csv(
     # Header
     writer.writerow([
         "symbol", "fusion_score", "light_score", "tft_score",
-        "rank", "side", "expected_price", "created_at"
+        "rank", "side", "expected_price", "expected_price_source", "created_at"
     ])
 
     # Data rows
@@ -599,6 +600,7 @@ async def export_prediction_run_csv(
             row["score_rank"],
             row["signal_side"],
             row["expected_price"],
+            row["expected_price_source"],
             row["created_at"].isoformat() if row["created_at"] else ""
         ])
 

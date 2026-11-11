@@ -280,6 +280,10 @@ export interface InferenceRankingItem {
   neutral_rank?: number | null;
   /** 名次变化 = 原始 rank − 中性化 rank；正数表示中性化后上升 */
   neutral_delta?: number | null;
+  /** 信号价（推理时刻的参考价；缺失为 null，绝不补 0） */
+  expected_price?: number | null;
+  /** 信号价来源：live=盘中实时快照；prev_close=盘前无快照时的上一交易日收盘 */
+  expected_price_source?: 'live' | 'prev_close' | null;
 }
 
 export interface NegativeCandidate {
@@ -1060,6 +1064,7 @@ class ModelTrainingService {
         score_rank: number | null;
         signal_side: string | null;
         expected_price: number | null;
+        expected_price_source: string | null;
         quality: string | null;
         created_at: string | null;
         stock_name?: string | null;
@@ -1098,6 +1103,14 @@ class ModelTrainingService {
         market_cap_yi: item.market_cap_yi !== null && item.market_cap_yi !== undefined ? Number(item.market_cap_yi) : null,
         market_cap_tier: item.market_cap_tier || undefined,
         negative_tag: item.negative_tag || undefined,
+        expected_price:
+          item.expected_price !== null && item.expected_price !== undefined
+            ? Number(item.expected_price)
+            : null,
+        expected_price_source:
+          item.expected_price_source === 'live' || item.expected_price_source === 'prev_close'
+            ? item.expected_price_source
+            : null,
       })),
     };
   }
