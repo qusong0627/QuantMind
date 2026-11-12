@@ -2,7 +2,7 @@
  * 回测历史模块（适配新布局）
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import ReactECharts from 'echarts-for-react';
 import {
@@ -16,7 +16,8 @@ import {
 } from 'lucide-react';
 import { BacktestHistory, resolveStrategyName } from '../backtest/BacktestHistory';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
-import type { BacktestResult } from '../../services/backtestService';
+import { backtestService, type BacktestResult } from '../../services/backtestService';
+import { normalizeSymbol } from '../../utils/portfolioUtils';
 import { authService } from '../../features/auth/services/authService';
 import { normalizeUserId } from '../../features/strategy-wizard/utils/userId';
 
@@ -46,6 +47,7 @@ export const BacktestHistoryModule: React.FC = () => {
       <AnimatePresence>
         {selectedBacktest && (
           <BacktestDetailModal
+            key={selectedBacktest.backtest_id}
             backtest={selectedBacktest}
             onClose={() => setSelectedBacktest(null)}
           />
@@ -64,10 +66,42 @@ interface BacktestDetailModalProps {
   onClose: () => void;
 }
 
-const BacktestDetailModal: React.FC<BacktestDetailModalProps> = ({
-  backtest,
+export const BacktestDetailModal: React.FC<BacktestDetailModalProps> = ({
+  backtest: summary,
   onClose,
 }) => {
+  const [detail, setDetail] = useState<BacktestResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  const [page, setPage] = useState(1);
+  const [query, setQuery] = useState('');
+  const [side, setSide] = useState('all');
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    setDetail(null);
+    setPage(1);
+    backtestService.getResult(summary.backtest_id, false).then((result) => {
+      if (!cancelled) setDetail(result);
+    }).catch(() => {
+      if (!cancelled) setError('完整回测结果加载失败，请重试。');
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [summary.backtest_id, attempt]);
+  const backtest = detail ? { ...summary, ...detail } : summary;
+  const trades = (detail?.trades || []).filter((trade) =>
+    (side === 'all' || trade.action === side) &&
+    (!query || normalizeSymbol(trade.symbol).toLowerCase().includes(query.trim().toLowerCase()) || trade.date.includes(query.trim()))
+  );
+  const pageCount = Math.max(1, Math.ceil(trades.length / 20));
+  const currentPage = Math.min(page, pageCount);
+  const number = (value: number | undefined, digits = 2) =>
+    typeof value === 'number' && Number.isFinite(value)
+      ? value.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits }) : '—';
   const config = (backtest as BacktestResult & { config?: Record<string, unknown> }).config || {};
   const strategyName = resolveStrategyName(backtest);
   const detailStartDate = String(backtest.start_date || config.start_date || '-');
@@ -221,6 +255,7 @@ const BacktestDetailModal: React.FC<BacktestDetailModalProps> = ({
               </p>
             </div>
             <button
+              aria-label="关闭回测详情"
               onClick={onClose}
               className="p-2 hover:bg-gray-100 rounded-2xl transition-colors"
             >
@@ -230,6 +265,8 @@ const BacktestDetailModal: React.FC<BacktestDetailModalProps> = ({
         </div>
 
         <div className="p-4 space-y-6">
+          {loading && <p role="status" className="text-blue-600">正在加载收益曲线和成交记录…</p>}
+          {error && <div role="alert" className="text-red-600">{error} <button onClick={() => setAttempt((n) => n + 1)} className="underline">重新加载</button></div>}
           <div className="grid grid-cols-3 gap-4">
             {metrics.map((metric) => (
               <div
@@ -245,18 +282,49 @@ const BacktestDetailModal: React.FC<BacktestDetailModalProps> = ({
             ))}
           </div>
 
-          {backtest.equity_curve && backtest.equity_curve.length > 0 && (
+          {detail?.equity_curve && detail.equity_curve.length > 0 && (
             <div className="bg-gray-50 rounded-2xl p-4 border border-gray-200">
-              <h3 className="text-lg font-bold text-slate-800 tracking-tight mb-4">权益曲线</h3>
+              <h3 className="text-lg font-bold text-slate-800 tracking-tight mb-4">收益曲线（账户权益）</h3>
               <ReactECharts option={equityCurveOption} style={{ height: '280px' }} />
             </div>
           )}
 
-          {backtest.drawdown_curve && backtest.drawdown_curve.length > 0 && (
+          {detail?.drawdown_curve && detail.drawdown_curve.length > 0 && (
             <div className="bg-gray-50 rounded-2xl p-4 border border-gray-200">
               <h3 className="text-lg font-bold text-slate-800 tracking-tight mb-4">回撤曲线</h3>
               <ReactECharts option={drawdownOption} style={{ height: '280px' }} />
             </div>
+          )}
+          {detail && (
+            <section className="bg-gray-50 rounded-2xl p-4 border border-gray-200">
+              {!detail.equity_curve?.length && <p className="text-gray-500 mb-4">此记录未保存权益曲线。</p>}
+              <h3 className="text-lg font-bold text-slate-800 mb-3">成交记录 · {detail.trades?.length || 0} 笔</h3>
+              <div className="flex gap-3 mb-3">
+                <input aria-label="搜索成交记录" placeholder="股票代码或交易日期" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} className="border rounded-lg px-3 py-2 flex-1 min-w-0" />
+                <select aria-label="成交方向" value={side} onChange={(e) => { setSide(e.target.value); setPage(1); }} className="border rounded-lg px-3">
+                  <option value="all">全部买卖</option><option value="buy">买入</option><option value="sell">卖出</option>
+                </select>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm whitespace-nowrap">
+                  <thead><tr>{['交易日期', '股票代码', '方向', '成交价', '数量', '成交金额', '交易费用'].map((label) => <th key={label} className="p-2 text-left border-b">{label}</th>)}</tr></thead>
+                  <tbody>{trades.slice((currentPage - 1) * 20, currentPage * 20).map((trade, index) => (
+                    <tr key={`${currentPage}-${index}`} className="border-b border-gray-200">
+                      <td className="p-2">{trade.date}</td><td className="p-2">{normalizeSymbol(trade.symbol)}</td>
+                      <td className={`p-2 ${trade.action === 'buy' ? 'text-red-600' : 'text-green-600'}`}>{trade.action === 'buy' ? '买入' : trade.action === 'sell' ? '卖出' : trade.action}</td>
+                      <td className="p-2">{number(trade.price, 4)}</td><td className="p-2">{number(trade.quantity)}</td>
+                      <td className="p-2">{number(trade.amount ?? trade.totalAmount)}</td><td className="p-2">{number(trade.commission)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+                {!trades.length && <p className="py-6 text-gray-500">{detail.trades?.length ? '没有符合筛选条件的成交。' : '此记录没有已保存的成交明细。'}</p>}
+              </div>
+              <div className="flex justify-end items-center gap-4 mt-4">
+                <span>共 {trades.length} 笔 · 第 {currentPage} / {pageCount} 页</span>
+                <button disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)} className="border rounded-lg px-3 py-1 disabled:opacity-40">上一页</button>
+                <button disabled={currentPage >= pageCount} onClick={() => setPage(currentPage + 1)} className="border rounded-lg px-3 py-1 disabled:opacity-40">下一页</button>
+              </div>
+            </section>
           )}
         </div>
       </motion.div>
