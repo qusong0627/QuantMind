@@ -66,6 +66,9 @@ _TRIGGER_TIME = _parse_hhmm(
 _SESSION_CLOSE = _parse_hhmm(os.getenv("SIM_EOD_SESSION_CLOSE"), "15:00")
 _INTERVAL_SEC = 60
 
+#: 最近一次因「目标日日线未落盘」而延后的结算日（仅用于日志节流）
+_LAST_DEFERRED_DATE: date | None = None
+
 
 def _resolve_target_trade_date(now: datetime | None = None) -> date:
     """返回「已收盘、待结算」的目标自然日（是否交易日由 _should_run_eod 兜底）。
@@ -424,10 +427,19 @@ async def _execute_eod(trade_date: date) -> bool:
             # 只能拿到 D-1 价格——历史 BUG 正是这样把 T-1 估值写成 T 日终，使
             # 整条日收益曲线错后一天。宁可延后重试，也不用错价结算。
             if not await _daily_bar_available(session, trade_date):
-                logger.info(
-                    "Simulation EOD deferred for %s: daily bars not available yet",
-                    trade_date,
-                )
+                # 延后期间每 60s 重试一次，只在首次（或换日）打 INFO，避免刷屏
+                global _LAST_DEFERRED_DATE
+                if _LAST_DEFERRED_DATE != trade_date:
+                    _LAST_DEFERRED_DATE = trade_date
+                    logger.info(
+                        "Simulation EOD deferred for %s: daily bars not available "
+                        "yet, will retry after data sync",
+                        trade_date,
+                    )
+                else:
+                    logger.debug(
+                        "Simulation EOD still deferred for %s", trade_date
+                    )
                 return False
 
             # 预热本地日线缓存：取价优先 local_market_data（权威日线源），
