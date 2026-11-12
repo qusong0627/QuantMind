@@ -419,9 +419,20 @@ async def _execute_eod(trade_date: date) -> bool:
             projection_svc = SimulationProjectionService(session)
             snapshot_svc = SimulationDailySnapshotService(session)
 
+            # 硬护栏：目标交易日的收盘价必须已经落盘。EOD 在 D 当天收盘后触发
+            # 时（容器重启/worker 轮询），D 的日线要等次日凌晨同步，此时结算
+            # 只能拿到 D-1 价格——历史 BUG 正是这样把 T-1 估值写成 T 日终，使
+            # 整条日收益曲线错后一天。宁可延后重试，也不用错价结算。
+            if not await _daily_bar_available(session, trade_date):
+                logger.info(
+                    "Simulation EOD deferred for %s: daily bars not available yet",
+                    trade_date,
+                )
+                return False
+
             # 预热本地日线缓存：取价优先 local_market_data（权威日线源），
             # 单次全市场加载后逐股命中缓存，避免并发重复读分区。
-            await asyncio.to_thread(_prime_local_close_cache_sync)
+            await asyncio.to_thread(_prime_local_close_cache_sync, trade_date)
 
             # P0-2：逐户独立提交。单户异常只回滚该户，不污染后续户事务；
             # P0-6：total计入Redis侧short_proceeds，与盘中equity口径对齐。
@@ -441,7 +452,7 @@ async def _execute_eod(trade_date: date) -> bool:
                         tenant_id=account.tenant_id,
                         user_id=account.user_id,
                         latest_price_loader=lambda symbol: _load_close_price(
-                            session, symbol
+                            session, symbol, trade_date
                         ),
                     )
                     projection_account = projection.account
@@ -657,12 +668,19 @@ def _rebuild_redis(
     write_trade_account_cache(redis_client, tenant_id, user_id, payload)
 
 
-def _local_close_price_sync(symbol: str) -> float:
-    """本地 parquet 日线最近交易日收盘价（同步磁盘 IO，调用方须放线程）。
+def _local_close_price_sync(
+    symbol: str, trade_date: date | None = None
+) -> float:
+    """本地 parquet 日线收盘价（同步磁盘 IO，调用方须放线程）。
 
     与权益结算 worker 的兜底口径一致：local_market_data 是模拟盘权威日线源，
     随数据同步落盘；stock_daily_latest 只在同步开启后刷新，未配置时会长期停在
     旧日期，导致日终权益被打回 T-1 甚至更早。
+
+    `trade_date` 必须由结算方显式传入目标交易日：不传才回退「最新可得日」。
+    历史 BUG：EOD 在 D 当天 15:00 触发时，D 的日线要等次日凌晨同步才落盘，
+    这里取「最新可得日」拿到的是 D-1 收盘价，却写进 D 的日终快照，导致整条
+    日收益曲线整体错后一天（今日盈亏里混入前一日涨跌）。
     """
     try:
         from backend.services.simulation.services.local_market_data import (
@@ -670,10 +688,10 @@ def _local_close_price_sync(symbol: str) -> float:
         )
 
         lmd = get_local_market_data("CN")
-        trade_date = lmd.latest_trade_date()
-        if trade_date is None:
+        target = trade_date or lmd.latest_trade_date()
+        if target is None:
             return 0.0
-        bar = lmd.get_bar(symbol, trade_date)
+        bar = lmd.get_bar(symbol, target)
         if bar is None:
             return 0.0
         close = float(bar.close or 0.0)
@@ -683,7 +701,7 @@ def _local_close_price_sync(symbol: str) -> float:
         return 0.0
 
 
-def _prime_local_close_cache_sync() -> None:
+def _prime_local_close_cache_sync(trade_date: date | None = None) -> None:
     """预热本地日线缓存，避免并发取价时重复读取同一分区。"""
     try:
         from backend.services.simulation.services.local_market_data import (
@@ -691,19 +709,67 @@ def _prime_local_close_cache_sync() -> None:
         )
 
         lmd = get_local_market_data("CN")
-        trade_date = lmd.latest_trade_date()
-        if trade_date is not None:
-            lmd.load_date(trade_date)
+        target = trade_date or lmd.latest_trade_date()
+        if target is not None:
+            lmd.load_date(target)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Prime local daily cache failed: %s", exc)
 
 
-async def _load_close_price(session, symbol: str) -> float:
-    """EOD 收盘价：本地 parquet 日线优先，PG stock_daily_latest 兜底。
+def _local_latest_trade_date_sync() -> date | None:
+    try:
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
 
-    本地 parquet 缺失（同步未落盘/新标的）时才回退到 PG 快照表。
+        return get_local_market_data("CN").latest_trade_date()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Local latest trade date load failed: %s", exc)
+        return None
+
+
+async def _daily_bar_available(session, trade_date: date) -> bool:
+    """目标交易日日线是否已落盘（本地 parquet 优先，PG 兜底）。
+
+    EOD 只在目标日收盘价可得时才允许结算；否则一律延后重试，绝不用 T-1
+    价格冒充 T 日终。日线同步默认次日 03:00，06:05 的 EOD 正常能命中。
     """
-    local_price = await asyncio.to_thread(_local_close_price_sync, symbol)
+    local_latest = await asyncio.to_thread(_local_latest_trade_date_sync)
+    if local_latest is not None and local_latest >= trade_date:
+        return True
+    try:
+        from sqlalchemy import text
+
+        row = (
+            await session.execute(
+                text(
+                    "SELECT 1 FROM stock_daily_latest "
+                    "WHERE trade_date = :trade_date LIMIT 1"
+                ),
+                {"trade_date": trade_date},
+            )
+        ).fetchone()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("EOD daily bar availability check failed: %s", exc)
+        return False
+
+
+async def _load_close_price(
+    session, symbol: str, trade_date: date | None = None
+) -> float:
+    """收盘价：本地 parquet 日线优先，PG stock_daily_latest 兜底。
+
+    传 `trade_date` 时严格取该交易日收盘价（EOD 结算口径）；不传则取最新
+    可得日（Redis 缺键时按现值重建账户的口径）。本地 parquet 缺失（同步未
+    落盘/新标的）时才回退到 PG 快照表，且同样按 trade_date 过滤。
+    """
+    if trade_date is None:
+        local_price = await asyncio.to_thread(_local_close_price_sync, symbol)
+    else:
+        local_price = await asyncio.to_thread(
+            _local_close_price_sync, symbol, trade_date
+        )
     if local_price > 0:
         return local_price
 
@@ -712,12 +778,22 @@ async def _load_close_price(session, symbol: str) -> float:
 
     suffix = StockCodeUtil.normalize(symbol)
     prefix = StockCodeUtil.to_prefix(suffix)
-    query = text(
-        "SELECT close, adj_factor FROM stock_daily_latest "
-        "WHERE symbol = :symbol ORDER BY trade_date DESC LIMIT 1"
-    )
+    if trade_date is not None:
+        query = text(
+            "SELECT close FROM stock_daily_latest "
+            "WHERE symbol = :symbol AND trade_date = :trade_date LIMIT 1"
+        )
+        params: dict[str, object] = {"trade_date": trade_date}
+    else:
+        # 兜底取最新一行：stock_daily_latest 未开启同步时会停在旧日期，
+        # 故仅用于「重建现值」而非日终结算。
+        query = text(
+            "SELECT close, adj_factor FROM stock_daily_latest "
+            "WHERE symbol = :symbol ORDER BY trade_date DESC LIMIT 1"
+        )
+        params = {}
     for candidate in (suffix, prefix):
-        result = await session.execute(query, {"symbol": candidate})
+        result = await session.execute(query, {"symbol": candidate, **params})
         row = result.fetchone()
         if not row:
             continue

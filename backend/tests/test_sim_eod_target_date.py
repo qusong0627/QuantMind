@@ -127,7 +127,13 @@ def test_execute_eod_skips_account_with_trades_after_settlement_date(monkeypatch
     monkeypatch.setattr(
         eod, "get_session", lambda read_only=False: _FakeCtx(session)
     )
-    monkeypatch.setattr(eod, "_prime_local_close_cache_sync", lambda: None)
+    monkeypatch.setattr(
+        eod, "_prime_local_close_cache_sync", lambda *args, **kwargs: None
+    )
+    # 本用例只验证「结算日之后已有成交」护栏；日线可用性由独立用例覆盖。
+    monkeypatch.setattr(
+        eod, "_daily_bar_available", lambda *args, **kwargs: _true_async()
+    )
 
     snapshot_calls = []
     monkeypatch.setattr(
@@ -155,3 +161,7 @@ def test_execute_eod_skips_account_with_trades_after_settlement_date(monkeypatch
 async def _noop_async(calls, payload):
     calls.append(payload)
     return None
+
+
+async def _true_async():
+    return True

@@ -36,7 +36,8 @@ class _FakeSession:
 
 
 class _FakeBar:
-    close = 9.87
+    def __init__(self, close: float = 9.87):
+        self.close = close
 
 
 class _FakeLocalMarketData:
@@ -92,6 +93,95 @@ def test_load_close_price_falls_back_to_pg(monkeypatch):
 
 def test_remark_lua_syncs_equity_with_total_asset():
     assert "account.equity = account.total_asset" in _REMARK_LUA
+
+
+class _DatePinnedLocal:
+    """按 trade_date 返回不同收盘价，用于锁定「结算日取当日价」口径。"""
+
+    def __init__(self):
+        self.calls: list[date | None] = []
+
+    def latest_trade_date(self, on_or_before=None):
+        return date(2026, 11, 10)
+
+    def get_bar(self, _symbol, trade_date):
+        self.calls.append(trade_date)
+        if trade_date == date(2026, 11, 11):
+            return _FakeBar(13.08)
+        if trade_date == date(2026, 11, 10):
+            return _FakeBar(12.68)
+        return None
+
+
+def test_local_close_price_pins_target_trade_date(monkeypatch):
+    """EOD 结算 11-11 必须取 11-11 收盘价，不能退化成「最新可得日」。"""
+    lmd = _DatePinnedLocal()
+    _patch_local(monkeypatch, lmd)
+    assert eod._local_close_price_sync("SZ001202", date(2026, 11, 11)) == 13.08
+    assert lmd.calls == [date(2026, 11, 11)]
+
+
+def test_local_close_price_target_date_missing_returns_zero(monkeypatch):
+    """目标日无日线时返回 0（由可用性护栏延后结算），不得回退到 T-1 价格。"""
+    lmd = _DatePinnedLocal()
+    _patch_local(monkeypatch, lmd)
+    assert eod._local_close_price_sync("SZ001202", date(2026, 11, 12)) == 0.0
+
+
+def test_load_close_price_pg_fallback_filters_trade_date(monkeypatch):
+    """PG 兜底也必须按 trade_date 过滤，不能取最新一行。"""
+    captured: dict[str, object] = {}
+
+    class _Session:
+        async def execute(self, query, params):
+            captured["sql"] = str(query)
+            captured["params"] = dict(params)
+            return _FakeResult(None)
+
+    monkeypatch.setattr(eod, "_local_close_price_sync", lambda _s, _d=None: 0.0)
+    asyncio.run(
+        eod._load_close_price(_Session(), "SZ001202", date(2026, 11, 11))
+    )
+    assert "trade_date = :trade_date" in captured["sql"]
+    assert captured["params"]["trade_date"] == date(2026, 11, 11)
+
+
+def test_daily_bar_available_true_when_local_latest_reaches_target(monkeypatch):
+    monkeypatch.setattr(
+        eod, "_local_latest_trade_date_sync", lambda: date(2026, 11, 11)
+    )
+    assert asyncio.run(
+        eod._daily_bar_available(_FakeSession({}), date(2026, 11, 11))
+    )
+
+
+def test_daily_bar_available_false_when_target_not_synced(monkeypatch):
+    """D 当天 15:00 触发时 D 的日线尚未落盘 → 必须判定不可用（延后结算）。"""
+
+    class _EmptySession:
+        async def execute(self, _query, _params=None):
+            return _FakeResult(None)
+
+    monkeypatch.setattr(
+        eod, "_local_latest_trade_date_sync", lambda: date(2026, 11, 10)
+    )
+    assert not asyncio.run(
+        eod._daily_bar_available(_EmptySession(), date(2026, 11, 11))
+    )
+
+
+def test_daily_bar_available_true_via_pg_when_local_stale(monkeypatch):
+    class _HitSession:
+        async def execute(self, query, params=None):
+            assert params["trade_date"] == date(2026, 11, 11)
+            return _FakeResult((1,))
+
+    monkeypatch.setattr(
+        eod, "_local_latest_trade_date_sync", lambda: date(2026, 11, 10)
+    )
+    assert asyncio.run(
+        eod._daily_bar_available(_HitSession(), date(2026, 11, 11))
+    )
 
 
 class _CountResult:
