@@ -24,8 +24,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import json
 import logging
 import os
+import shutil
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -117,21 +119,186 @@ def _existing_stocks(partition: str) -> set[str]:
     return set(df["stock_code"].astype(str))
 
 
-def _trading_days(end: date, n_days: int, calendar_cls) -> list[date]:
-    """取最近 n 个交易日（用爬虫的交易日历）。"""
-    days = []
+def _hk_trading_days() -> set[str]:
+    """港股实际交易日集合（优先 index_daily，其次 daily_forward 分区）。
+
+    分区由行情链维护，比 yfinance 日历可靠——实测 yfinance 把 2026-01-01、
+    春节、复活节、端午等港股假期当成交易日，导致 CCASS 在假期抓到「上一
+    交易日快照」并以假期日期落盘（8 个重复分区）。目录不可用时返回空集，
+    调用方退化到工作日判断。
+    """
+    root = _quanthk_root()
+    for rel in ("1_kline_data/index_daily", "1_kline_data/daily_forward"):
+        d = root / rel
+        if not d.is_dir():
+            continue
+        out = {
+            p.name[3:]
+            for p in d.glob("dt=*")
+            if (p / "data.parquet").is_file()
+        }
+        if out:
+            return out
+    return set()
+
+
+def _skip_reason(day: date, calendar: set[str]) -> str | None:
+    """非交易日跳过原因；``None`` = 允许抓取。
+
+    日历只覆盖到「已落盘的最后一个交易日」；对更新的日期（通常是今天，
+    行情链还没写分区）不做日历否决，交给 HKEX + 重复指纹兜底。
+    """
+    if day.weekday() >= 5:
+        return "weekend"
+    if not calendar:
+        return None
+    ds = day.strftime("%Y%m%d")
+    if ds in calendar:
+        return None
+    if ds > max(calendar):
+        return None
+    if ds < min(calendar):
+        # 日历还没覆盖到该日期（历史回填早于行情分区起点）：不否决
+        return None
+    return "non_trading_day"
+
+
+def _recent_trading_days(end: date, n_days: int, calendar: set[str]) -> list[date]:
+    """最近 n 个候选交易日。
+
+    日历只覆盖行情分区已有的日期：
+    - 日历范围内：只取真实交易日（假期不抓）；
+    - 日历范围外（今天/未来或更早的回填）：按工作日尝试，交给 HKEX +
+      重复指纹判定。否则「今天还没写进 kline」会把当天 CCASS 漏掉。
+    """
+    days: list[date] = []
     d = end
-    while len(days) < n_days:
-        if calendar_cls.is_trading_day(d.strftime("%Y-%m-%d")):
+    lo = min(calendar) if calendar else None
+    hi = max(calendar) if calendar else None
+    for _ in range(366 * 3):
+        if len(days) >= n_days:
+            break
+        ds = d.strftime("%Y%m%d")
+        if calendar and lo <= ds <= hi:
+            if ds in calendar:
+                days.append(d)
+        elif d.weekday() < 5:
             days.append(d)
         d -= timedelta(days=1)
     return list(reversed(days))
 
 
+def _previous_partition_day(day: date, calendar: set[str]) -> str | None:
+    """上一个有分区/在日历内的交易日（YYYYMMDD）。"""
+    ds = day.strftime("%Y%m%d")
+    candidates = {d for d in calendar if d < ds}
+    candidates |= {d for d in _existing_partitions() if d < ds}
+    return max(candidates) if candidates else None
+
+
+def _is_duplicate_partition(
+    date_str: str, partition_dir: Path, calendar: set[str]
+) -> bool:
+    """当日分区是否与上一交易日逐行相同（假期/上游未发布时 HKEX 会回旧数据）。"""
+    cur = partition_dir / "data.parquet"
+    if not cur.is_file():
+        return False
+    try:
+        day = datetime.strptime(date_str, "%Y%m%d").date()
+    except ValueError:
+        return False
+    prev_day = _previous_partition_day(day, calendar)
+    if not prev_day:
+        return False
+    prev = _target_dir() / f"dt={prev_day}" / "data.parquet"
+    if not prev.is_file():
+        return False
+    try:
+        a = pd.read_parquet(
+            prev, columns=["stock_code", "participant_id", "holding_quantity"]
+        )
+        b = pd.read_parquet(
+            cur, columns=["stock_code", "participant_id", "holding_quantity"]
+        )
+    except Exception:  # noqa: BLE001 - 读取失败时不做重复判定
+        return False
+    if a.empty or b.empty:
+        return False
+    m = a.merge(
+        b, on=["stock_code", "participant_id"], suffixes=("_a", "_b")
+    )
+    if len(m) < 0.99 * min(len(a), len(b)):
+        return False
+    same = (m["holding_quantity_a"] == m["holding_quantity_b"]).mean()
+    return bool(same >= 0.999)
+
+
+def _quarantine_root() -> Path:
+    d = _quanthk_root() / "2_base_sector" / "ccass_top50_quarantine"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _quarantine_partition(partition_dir: Path, reason: str) -> str:
+    """把问题分区移到隔离目录并记账（不删除，可回查）。"""
+    qroot = _quarantine_root()
+    target = qroot / partition_dir.name
+    if target.exists():
+        target = qroot / f"{partition_dir.name}__{datetime.now():%Y%m%d%H%M%S}"
+    shutil.move(str(partition_dir), str(target))
+    manifest = qroot / "manifest.jsonl"
+    with manifest.open("a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "dt": partition_dir.name[3:],
+                    "reason": reason,
+                    "moved_to": str(target),
+                    "moved_at": datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    return str(target)
+
+
+def _write_qc(partition_dir: Path, status: str) -> dict:
+    """写分区级质检侧车 ``qc.json``（可观测性；数据读取方只认 data.parquet）。"""
+    from backend.shared.ccass_top50 import qc_summary
+
+    df = pd.read_parquet(partition_dir / "data.parquet")
+    qc = qc_summary(df)
+    qc.update(
+        {
+            "dt": partition_dir.name[3:],
+            "status": status,
+            "generated_at": datetime.now().isoformat(),
+        }
+    )
+    tmp = partition_dir / ".qc.json.tmp"
+    tmp.write_text(json.dumps(qc, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(partition_dir / "qc.json")
+    return qc
+
+
+def _trading_days(end: date, n_days: int, calendar_cls=None) -> list[date]:
+    """最近 n 个交易日（保留旧签名；优先行情分区日历）。"""
+    return _recent_trading_days(end, n_days, _hk_trading_days())
+
+
 def _normalise_fetch(
     df: pd.DataFrame, stock_code: str, stock_name: str, query_date: date
 ) -> pd.DataFrame | None:
-    """爬虫输出 → 标准化列。取 top50（按持股数量降序）。"""
+    """爬虫输出 → 标准化列。取 top50（按持股数量降序）。
+
+    百分比口径（2026-11-13 修复）：
+    - HKEX 对部分股票不返回百分比列（4 列布局），爬虫给 None；这里必须落
+      NaN，**绝不能 fillna(0)**（0 会被下游当成「持仓占比 0」）；
+    - 旧实现对缺失列 fallback 到持股量，带逗号的数解析失败变 0、小于 1000 股
+      变 数量/100；这里对 >100% 的值一律置 NaN；
+    - 跨期单位修复由 ``backend.shared.ccass_top50.repair_percentages`` 统一做。
+    """
     if df is None or df.empty:
         return None
     # 爬虫列：参与者编号/参与者名称/持股数量/占已发行股份百分比
@@ -143,20 +310,22 @@ def _normalise_fetch(
     }
     df = df.rename(columns=rename)
     df["participant_id"] = df["participant_id"].astype(str).str.strip()
-    df["participant_name"] = df["participant_name"].astype(str).str.strip()
-    df["holding_quantity"] = (
-        pd.to_numeric(df["holding_quantity"], errors="coerce").fillna(0).astype("int64")
-    )
-    # 百分比 "32.44%" → 0.3244
-    df["holding_percentage"] = (
-        df["holding_percentage"]
-        .astype(str)
+    df["participant_name"] = df["participant_name"].fillna("").astype(str).str.strip()
+    qty = pd.to_numeric(df["holding_quantity"], errors="coerce")
+    df = df.loc[qty.notna()].copy()
+    df["holding_quantity"] = qty.loc[qty.notna()].astype("int64")
+    df = df.loc[df["holding_quantity"] > 0]
+    # 百分比 "36.33%" → 0.3633；None/""/-- → NaN；>100% → NaN
+    pct_text = (
+        df.get("holding_percentage", pd.Series(index=df.index, dtype="object"))
+        .astype("object")
+        .map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
         .str.replace("%", "", regex=False)
         .str.strip()
     )
-    df["holding_percentage"] = (
-        pd.to_numeric(df["holding_percentage"], errors="coerce").fillna(0.0) / 100.0
-    )
+    pct = pd.to_numeric(pct_text, errors="coerce") / 100.0
+    # 0% 与缺失同义（HKEX 两位小数会把小持仓四舍五入成 0.00%），统一 NaN。
+    df["holding_percentage"] = pct.where(pct.gt(0) & pct.le(1.0001))
     # 按持股数量降序取 top50
     df = df.sort_values("holding_quantity", ascending=False).head(50).copy()
     # 代码统一为后缀格式（00700 → 0700.HK；创业板 8 开头保留 5 位+.HK）
@@ -218,6 +387,12 @@ async def sync_partition(
     mod = _load_crawler()
     date_str = target_day.strftime("%Y%m%d")
     hkex_date = target_day.strftime("%Y/%m/%d")
+
+    calendar = _hk_trading_days()
+    skip = _skip_reason(target_day, calendar)
+    if skip:
+        log.info("[%s] 跳过（%s）", date_str, skip)
+        return {"date": date_str, "status": skip}
 
     target = _target_dir()
     partition_dir = target / f"dt={date_str}"
@@ -318,6 +493,28 @@ async def sync_partition(
             "banned": banned,
         }
 
+    # 重复快照守卫：HKEX 对非交易日（或尚未发布的最新交易日）会返回上一
+    # 交易日数据。2026 年实测 8 个港股假期分区与前一日逐行相同。整市场
+    # 2,700 只股票不可能在真实交易日完全不变，99.9% 行同值即判重复。
+    if _is_duplicate_partition(date_str, partition_dir, calendar):
+        prev_day = _previous_partition_day(target_day, calendar)
+        qpath = _quarantine_partition(partition_dir, "duplicate_prev_day")
+        log.warning(
+            "[%s] 与上一交易日 %s 逐行相同，判为重复快照并隔离: %s",
+            date_str,
+            prev_day,
+            qpath,
+        )
+        return {
+            "date": date_str,
+            "status": "duplicate_prev_day",
+            "duplicate_of": prev_day,
+            "quarantined_to": qpath,
+            "tried": len(todo),
+            "success": success,
+        }
+
+    qc = _write_qc(partition_dir, "synced" if not banned else "partial")
     return {
         "date": date_str,
         "status": "synced" if not banned else "partial",
@@ -325,6 +522,7 @@ async def sync_partition(
         "success": success,
         "rows": sum(len(r) for r in rows),
         "banned": banned,
+        "qc": qc,
     }
 
 
@@ -337,15 +535,20 @@ def run(
     dry_run: bool = False,
     limit: int = 0,
 ) -> dict:
-    """增量同步最近 N 天（或指定日期/股票）。"""
-    mod = _load_crawler()
-    mod.HKEXTradingCalendar._build_trading_calendar()
+    """增量同步最近 N 天（或指定日期/股票）。
+
+    交易日取自行情分区（不是 yfinance 日历）；节假日直接跳过，不创建分区。
+    """
+    calendar = _hk_trading_days()
+    if not calendar:
+        log.warning("行情分区日历不可用（index_daily/daily_forward 均无分区），退化为工作日判断")
 
     end = date.today()
     if target_date:
         end = datetime.strptime(target_date, "%Y-%m-%d").date()
-
-    trading = _trading_days(end, days, mod.HKEXTradingCalendar)
+        trading = [end]
+    else:
+        trading = _recent_trading_days(end, days, calendar)
     log.info(
         "待同步交易日: %d 个 (%s ~ %s)",
         len(trading),

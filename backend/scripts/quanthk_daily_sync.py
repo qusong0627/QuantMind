@@ -15,10 +15,15 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from backend.scripts.global_market_sync import run as _yahoo_run
+
+log = logging.getLogger(__name__)
 
 # akshare 港股基本面数据集 → akshare_hk_fundamental 的 field
 AKSHARE_HK_FIELDS = {
@@ -101,19 +106,118 @@ def _refresh_l1_dataset(result: dict[str, Any], *, days: int) -> None:
 
 
 def _refresh_signal_datasets(result: dict[str, Any]) -> None:
-    """本地信号数据集刷新钩子（南向/CCASS 因子等）。
+    """在**子进程**里重建南向/CCASS 因子与参与方流水。
 
-    对应生成器模块属内部资产、不入库；模块缺失（如新装环境）时优雅跳过。"""
+    2026-11-13：旧实现 in-process 调用生成器，CCASS 全量面板（493 天 × 13.6
+    万行 × 5 列）把 celery worker RSS 打爆（SIGKILL），整条港股同步任务死在
+    该步骤，Yahoo 元数据段永远跑不到（ccass_factors 停更、财务/分析师数据
+    停在 8~9 月）。子进程 + RLIMIT_AS 把 OOM 关在子进程里，父任务照常继续。
+    """
+    import json
+    import subprocess
+
+    root = Path(__file__).resolve().parents[2]
+    script = root / "backend" / "scripts" / "build_ml_signal_datasets.py"
+    cmd = [sys.executable, str(script), "--dataset", "all"]
+    mem_gib = float(os.getenv("HK_SIGNAL_FACTOR_MEM_LIMIT_GIB", "6"))
+    timeout_s = int(os.getenv("HK_SIGNAL_FACTOR_TIMEOUT_S", "3600"))
+
+    def _limit_mem() -> None:
+        try:
+            import resource
+
+            lim = int(mem_gib * 1024**3)
+            resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
+        except Exception:  # noqa: BLE001 - 平台不支持时不做限制
+            pass
+
     try:
-        from backend.scripts.build_ml_signal_datasets import refresh_signal_datasets as _fn
-
-        result["signal_datasets"] = _fn(result)
-    except ModuleNotFoundError as exc:
-        if "build_ml_signal_datasets" not in str(exc):
-            raise
-        result["signal_datasets"] = {"status": "skipped", "reason": "local module absent"}
-    except Exception as exc:  # noqa: BLE001
+        proc = subprocess.run(
+            cmd,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            preexec_fn=_limit_mem,
+        )
+    except subprocess.TimeoutExpired as exc:
+        log.error("[信号数据集] 子进程超时（%ss）: %s", timeout_s, exc)
+        result["signal_datasets"] = {
+            "status": "timeout",
+            "timeout_s": timeout_s,
+        }
+        return
+    except Exception as exc:  # noqa: BLE001 - 子进程失败不能拖垮整条同步链
+        log.exception("[信号数据集] 子进程启动失败: %s", exc)
         result["signal_datasets"] = {"status": "error", "error": str(exc)}
+        return
+
+    ok = proc.returncode == 0
+    payload: dict[str, Any] = {
+        "status": "ok" if ok else "failed",
+        "returncode": proc.returncode,
+        "stdout_tail": (proc.stdout or "")[-2000:],
+        "stderr_tail": (proc.stderr or "")[-2000:],
+    }
+    if ok:
+        try:
+            payload.update(json.loads((proc.stdout or "").strip().splitlines()[-1]))
+        except Exception:  # noqa: BLE001 - 日志尾部不是 JSON 时忽略
+            pass
+    else:
+        log.error(
+            "[信号数据集] 子进程失败 rc=%s: %s",
+            proc.returncode,
+            (proc.stderr or proc.stdout or "")[-1000:],
+        )
+    result["signal_datasets"] = payload
+
+
+def _refresh_adjust_factors(result: dict[str, Any]) -> None:
+    """增量刷新复权因子链 + daily_backward（子进程，失败不拖垮主链）。
+
+    2026-11-14 起改为 Yahoo Adj Close 口径（东财 stock_hk_hist 已不可达），
+    只重写「最后一个完整 backward 分区」之后的日期；本函数只负责隔离执行。
+    """
+    import json
+    import subprocess
+
+    if str(os.getenv("HK_ADJUST_FACTORS_ENABLED", "true")).strip().lower() in {
+        "0", "false", "no", "off"
+    }:
+        result["adjust_factors"] = {"status": "disabled"}
+        return
+    root = Path(__file__).resolve().parents[2]
+    script = root / "backend" / "scripts" / "quanthk_adjust_factor.py"
+    cmd = [sys.executable, str(script)]
+    timeout_s = int(os.getenv("HK_ADJUST_FACTORS_TIMEOUT_S", "2400"))
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(root), capture_output=True, text=True, timeout=timeout_s
+        )
+    except subprocess.TimeoutExpired:
+        log.error("[复权因子] 子进程超时（%ss）", timeout_s)
+        result["adjust_factors"] = {"status": "timeout", "timeout_s": timeout_s}
+        return
+    except Exception as exc:  # noqa: BLE001 - 失败不能拖垮整条同步链
+        log.exception("[复权因子] 子进程启动失败: %s", exc)
+        result["adjust_factors"] = {"status": "error", "error": str(exc)}
+        return
+    ok = proc.returncode == 0
+    payload: dict[str, Any] = {
+        "status": "ok" if ok else "failed",
+        "returncode": proc.returncode,
+        "stdout_tail": (proc.stdout or "")[-2000:],
+        "stderr_tail": (proc.stderr or "")[-2000:],
+    }
+    if ok:
+        try:
+            payload.update(json.loads((proc.stdout or "").strip().splitlines()[-1]))
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        log.error("[复权因子] 子进程失败 rc=%s", proc.returncode)
+    result["adjust_factors"] = payload
 
 
 def _sync_index(result: dict) -> None:
@@ -163,6 +267,9 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
         # 之前：雅虎元数据受上游限流常吃满剩余预算，因子集排在其后会被超时饿停
         # （2026-09-12~10-07 因子集停更 4 周的根因）。
         _refresh_signal_datasets(result)
+        # 复权因子链（daily_backward）生产化：与信号因子同样在雅虎段之前，
+        # 子进程隔离 + 增量抓取，失败不影响后面的元数据段。
+        _refresh_adjust_factors(result)
         result["yahoo"] = _yahoo_run("HK", days=days, symbols=symbols, fast=fast, skip_kline=True)
         return result
 
@@ -171,8 +278,15 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
         result["sources"] = {"hsgt_south": _south_source_result(days=days)}
 
     # 南向/CCASS 等信号数据集（本地可选模块）
-    if "south_factors" in datasets or "ccass_factors" in datasets:
+    if (
+        "south_factors" in datasets
+        or "ccass_factors" in datasets
+        or "ccass_participant_flows" in datasets
+    ):
         _refresh_signal_datasets(result)
+
+    if "adjust_factors" in datasets:
+        _refresh_adjust_factors(result)
 
     # 雅虎负责元数据段；daily_forward 从雅虎清单里剔除（K线口径铁律）
     yahoo_ds = [d for d in datasets if d in _YAHOO_DATASETS and d != "daily_forward"]

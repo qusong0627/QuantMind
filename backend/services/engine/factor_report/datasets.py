@@ -264,7 +264,8 @@ DATASETS_BY_MARKET: dict[str, dict[str, dict]] = {
             "dir_parts": ("6_ml_datasets", "ccass_factors"),
             "label_mode": "close_fwd_donor",
             "donor_parts": ("6_ml_datasets", "l1_factors"),
-            "meta_cols": _ID_COLS,
+            # 两个诊断列不是因子：是否可算 pct / 是否撞分母异常
+            "meta_cols": _ID_COLS + ("ca_pct_usable", "ca_pct_bad_sum"),
             "library_rule": "fixed:ccass",
             "universe": "港股 CCASS 覆盖池 · 中央结算持股因子（行情列取自 L1 因子库）",
             "build_start": "20241125",

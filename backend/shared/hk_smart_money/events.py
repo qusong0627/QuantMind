@@ -478,6 +478,20 @@ def build_events(rebuild_days: int = 40) -> dict[str, Any]:
                 counts["south_flow_rows"] = int(len(sf))
                 counts["south_qty_sum"] = int(cur_south["holding_quantity"].sum())
                 counts["south_available"] = True
+                # 对账必须在**同一股票集合**上做：CCASS 只存 top50，部分股票的
+                # 中国结算席位排在 50 名之外（2026-11-12 有 86 只），拿全量南向
+                # 对比会凭空少 3%。这里取两边都可见的交集，才是真对账。
+                a_series = (
+                    cur.loc[cur["participant_id"].isin(SOUTHBOUND_SEAT_IDS)]
+                    .groupby("stock_code")["holding_quantity"]
+                    .sum()
+                )
+                s_series = cur_south.set_index("symbol")["holding_quantity"]
+                common = a_series.index.intersection(s_series.index)
+                counts["a_seat_qty_common"] = int(a_series.loc[common].sum())
+                counts["south_qty_common"] = int(s_series.loc[common].sum())
+                counts["south_common_n"] = int(len(common))
+                counts["south_total_n"] = int(len(s_series))
                 if len(sf):
                     flows = pd.concat([flows, sf], ignore_index=True)
             else:
@@ -496,14 +510,19 @@ def build_events(rebuild_days: int = 40) -> dict[str, Any]:
     # 南向 vs A 席对账（数据质量门：逐股 ±2%，聚合应更紧）
     if last_cur_ts is not None:
         counts_last = _read_counts(last_cur_ts)
-        a_qty = counts_last.get("a_seat_qty_sum")
-        s_qty = counts_last.get("south_qty_sum")
+        # 优先同一股票集合的对账（见上方 common 计算）；旧 counts 无该字段时
+        # 退回全量口径，仅用于兼容历史产物。
+        a_qty = counts_last.get("a_seat_qty_common") or counts_last.get("a_seat_qty_sum")
+        s_qty = counts_last.get("south_qty_common") or counts_last.get("south_qty_sum")
         if a_qty and s_qty:
             stats["reconciliation"] = {
                 "as_of": last_cur_ts,
                 "a_seat_qty_sum": a_qty,
                 "south_qty_sum": s_qty,
                 "ratio": round(a_qty / s_qty, 4),
+                "universe": "common_top50" if "a_seat_qty_common" in counts_last else "all_south",
+                "common_n": counts_last.get("south_common_n"),
+                "south_n": counts_last.get("south_total_n"),
             }
             if abs(a_qty / s_qty - 1.0) > 0.02:
                 log.warning(

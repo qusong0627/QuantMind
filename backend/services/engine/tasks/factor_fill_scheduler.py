@@ -53,6 +53,11 @@ FACTOR_DATASETS: dict[str, dict[str, tuple[str, str]]] = {
         "l1_factors": ("6_ml_datasets/l1_factors", "1_kline_data/daily_forward"),
         "south_factors": ("6_ml_datasets/south_factors", "2_base_sector/hsgt_south"),
         "ccass_factors": ("6_ml_datasets/ccass_factors", "2_base_sector/ccass_top50"),
+        # 机构级参与方日频流水（2026-11-13 新增；由同一份 CCASS 源重建）
+        "ccass_participant_flows": (
+            "6_ml_datasets/ccass_participant_flows",
+            "2_base_sector/ccass_top50",
+        ),
     },
     "US": {
         "l1_factors": ("6_ml_datasets/l1_factors", "1_kline_data/daily_forward"),
@@ -175,14 +180,23 @@ def _data_dir(market: str) -> Path:
 
 
 def _latest_partition_dt(root: Path, rel: str) -> str | None:
-    """目录下 dt=YYYYMMDD 分区的最大日期（YYYYMMDD 字符串，无分区返回 None）。"""
+    """目录下 dt=YYYYMMDD 分区的最大日期（要求 data.parquet 存在）。
+
+    只看目录名会把「建了目录但写盘中断」的半成品当成最新，导致「落后才建」
+    判据误判为已追平、永远不补。
+    """
     d = root / rel
     if not d.is_dir():
         return None
     best: str | None = None
     for p in d.glob("dt=*"):
         v = p.name[3:]
-        if len(v) == 8 and v.isdigit() and (best is None or v > best):
+        if (
+            len(v) == 8
+            and v.isdigit()
+            and (p / "data.parquet").is_file()
+            and (best is None or v > best)
+        ):
             best = v
     return best
 
@@ -290,6 +304,7 @@ def _fill_dataset(market: str, name: str) -> dict[str, Any]:
     try:
         from backend.scripts.build_ml_signal_datasets import (
             build_ccass_factors,
+            build_participant_flows,
             build_south_factors,
         )
     except ModuleNotFoundError as exc:
@@ -300,6 +315,8 @@ def _fill_dataset(market: str, name: str) -> dict[str, Any]:
         return build_south_factors()
     if name == "ccass_factors":
         return build_ccass_factors()
+    if name == "ccass_participant_flows":
+        return build_participant_flows()
     raise KeyError(f"未知数据集: {name}")
 
 

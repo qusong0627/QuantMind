@@ -73,17 +73,6 @@ SEAT_V2_COLUMNS = frozenset(
 )
 
 
-def _sum_qty(rel: str, dt: str, extra_where: str = "") -> int:
-    path = feed.DATA_DIR / rel / f"dt={dt}" / "data.parquet"
-    where = f"WHERE {extra_where}" if extra_where else ""
-    row = (
-        duckdb.connect()
-        .execute(f"SELECT sum(holding_quantity) FROM read_parquet('{path}') {where}")
-        .fetchone()
-    )
-    return int(row[0] or 0)
-
-
 def _common_date(rel_a: str, rel_b: str) -> str:
     """两 rel 的最新公共分区日（各自原始字串）；无交集则 fail。"""
     da = {
@@ -112,15 +101,45 @@ def product():
 
 
 def test_南向对账A席_vs_hsgt_south_独立重算():
-    """±2% 数据质量门：独立从源分区分算（不读产物结论），防双重计数漂移。"""
+    """±2% 数据质量门：按**两边都可见的股票交集**独立重算。
+
+    CCASS 只披露前 50 大参与者；部分股票的中国结算席位排在第 50 名之外
+    （2026-11-12 有 86 只），用全量南向做分母会凭空少 ~3%。对账必须在同一
+    股票集合上做，并保留覆盖率门防止代码映射大面积断裂。
+    """
     dt = _common_date(feed.CCASS_TOP50_REL, feed.SOUTH_REL)
     seats = ",".join(f"'{s}'" for s in SOUTHBOUND_SEAT_IDS)
-    a_qty = _sum_qty(feed.CCASS_TOP50_REL, dt, f"participant_id IN ({seats})")
-    s_qty = _sum_qty(feed.SOUTH_REL, dt)
-    assert a_qty > 0 and s_qty > 0
+    a_path = feed.DATA_DIR / feed.CCASS_TOP50_REL / f"dt={dt}" / "data.parquet"
+    s_path = feed.DATA_DIR / feed.SOUTH_REL / f"dt={dt}" / "data.parquet"
+    row = (
+        duckdb.connect()
+        .execute(
+            f"""
+            WITH a AS (
+              SELECT stock_code AS symbol, sum(holding_quantity) AS qty
+              FROM read_parquet('{a_path}')
+              WHERE participant_id IN ({seats})
+              GROUP BY stock_code
+            ), s AS (
+              SELECT symbol, sum(holding_quantity) AS qty
+              FROM read_parquet('{s_path}')
+              GROUP BY symbol
+            )
+            SELECT sum(a.qty), sum(s.qty), count(*) AS n,
+                   (SELECT count(*) FROM s) AS south_n
+            FROM a JOIN s USING(symbol)
+            """
+        )
+        .fetchone()
+    )
+    a_qty, s_qty, n, south_n = row
+    assert a_qty and s_qty and n
+    # 覆盖率门：两库交集至少 90% 南向股票（防代码映射断裂/整库缺失）
+    assert n >= 0.9 * south_n, f"CCASS/南向代码交集仅 {n}/{south_n}"
     ratio = a_qty / s_qty
     assert abs(ratio - 1.0) < 0.02, (
-        f"A 席/南向 {dt} 比值 {ratio:.4f} 偏离 1.0（口径漂移？A={a_qty} S={s_qty}）"
+        f"A 席/南向 {dt} 交集比值 {ratio:.4f} 偏离 1.0"
+        f"（A={a_qty} S={s_qty} n={n}/{south_n}）"
     )
 
 

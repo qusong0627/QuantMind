@@ -647,11 +647,7 @@ def get_ccass_holding(symbol: str, limit: int = 30) -> dict[str, Any]:
     """个股 CCASS 席位穿透：前 N 大托管行/券商持仓明细（最新快照）。"""
 
     def _load():
-        d = (
-            list_partition_dates(CCASS_TOP50_REL, DATA_DIR)[-1]
-            if list_partition_dates(CCASS_TOP50_REL, DATA_DIR)
-            else None
-        )
+        d = _latest_ccass_top_date()
         if not d:
             return {"trade_date": "", "symbol": symbol, "name": symbol, "items": []}
         sym = symbol.upper()
@@ -1405,13 +1401,47 @@ def _text_variants(text: str) -> set[str]:
     }
 
 
+def _drop_incomplete_tail(dates: list[str]) -> list[str]:
+    """去掉尾部「抓取中」的半成品分区（股票数 < 近期峰值 80%）。
+
+    夜间同步按批次落盘；最新分区可能只有几百只股票。以最近 5 个分区的最大
+    股票数为峰值，尾部低于 80% 峰值的一律视为半成品（11-13 实测 462/2,745）。
+    """
+    if not dates:
+        return dates
+    tail = dates[-5:]
+    counts: dict[str, int] = {}
+    for d in tail:
+        try:
+            n = _q(
+                "SELECT count(DISTINCT stock_code) AS n FROM read_parquet("
+                f"'{DATA_DIR / CCASS_TOP50_REL}/dt={d}/data.parquet')"
+            ).iloc[0, 0]
+        except Exception:  # noqa: BLE001
+            continue
+        counts[d] = int(n)
+    if not counts:
+        return dates
+    peak = max(counts.values())
+    drop = 0
+    for d in reversed(tail):
+        if counts.get(d, 0) < 0.8 * peak:
+            drop += 1
+        else:
+            break
+    return dates[:-drop] if drop else dates
+
+
 def _ccass_top_dates(n: int) -> list[str]:
-    """ccass_top50 自身单位分区日历最近 n 天（升序；n<=0 返空）。"""
-    dates = list_partition_dates(CCASS_TOP50_REL, DATA_DIR)
-    return dates[-n:] if n > 0 else []
+    """ccass_top50 自身单位分区日历最近 n 天（升序；跳过尾部半成品）。"""
+    if n <= 0:
+        return []
+    dates = _drop_incomplete_tail(list_partition_dates(CCASS_TOP50_REL, DATA_DIR))
+    return dates[-n:] if dates else []
 
 
 def _latest_ccass_top_date() -> str | None:
+    """最新**完整**的 CCASS 分区（跳过抓取中的半成品）。"""
     d = _ccass_top_dates(1)
     return d[-1] if d else None
 

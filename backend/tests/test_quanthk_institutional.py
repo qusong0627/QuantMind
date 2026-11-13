@@ -2,8 +2,9 @@
 
 核心见证：
 - overview 分类占比自洽（口径 D1：ccass_top50 单源）
-- 交叉验证闸门：内资·港股通（A 席）持仓量 ≈ hsgt_south 同日全市场总量（±2%）
-  —— 防「财务双计」口径漂移（D2）
+- 交叉验证闸门：内资·港股通（A 席）与 hsgt_south 在**同一股票集合**上
+  持仓量一致（±2%）—— ccass_top50 只披露前 50 大参与方，全量分母会凭空
+  少约 3%（2026-11-12 有 86 只股票的中国结算席位在 50 名外）
 - 窗口增减持/个股详情/简繁搜索
 
 与 test_quanthk_market_analysis.py 同款直连模式，无网络依赖。
@@ -21,23 +22,13 @@ from backend.services.api.market_analysis_hk.institutional_classifier import (
     load_overrides,
 )
 from backend.services.api.market_analysis_shared import market_days
+from backend.shared.hk_smart_money import SOUTHBOUND_SEAT_IDS
 
 
 def _latest_ccass_dt() -> str:
     d = feed._latest_ccass_top_date()
     assert d, "ccass_top50 无数据"
     return d
-
-
-def _latest_south_qty() -> int:
-    dates = market_days.list_partition_dates(feed.SOUTH_REL, feed.DATA_DIR)
-    assert dates, "南向无分区"
-    # 目前 dt= 分区布局与 ccass 分区布局同日（2026-09 实测一致）
-    df = duckdb.connect().execute(
-        "SELECT sum(holding_quantity) AS q FROM read_parquet("
-        f"'{feed.DATA_DIR / feed.SOUTH_REL}/dt={dates[-1]}/data.parquet')"
-    ).fetchone()
-    return int(df[0] or 0)
 
 
 # ---- 市场概览 ----
@@ -60,14 +51,43 @@ def test_institutional_overview_shape():
 
 
 def test_institutional_overview_southbound_cross_check():
-    """交叉验证闸门：A 席（港股通）持仓量 ≈ hsgt_south 披露总量（±2%）。"""
+    """交叉验证闸门：A 席 vs hsgt_south，在**两边都可见的股票交集**上 ±2%。
+
+    ccass_top50 只披露前 50 大参与方；部分股票的中国结算席位排在第 50 名
+    之外（2026-11-12 有 86 只），拿全量南向做分母会凭空少约 3%。
+    """
     ov = feed.get_institutional_overview()
-    south_row = next(c for c in ov["categories"] if c["category"] == CATEGORY_SOUTHBOUND)
-    assert south_row["holding_qty"] > 0
-    south_total = _latest_south_qty()
-    assert south_total > 0
-    ratio = south_row["holding_qty"] / south_total
-    assert abs(ratio - 1.0) < 0.02, f"A席/南向比值 {ratio:.4f} 偏离 1.0（口径漂移？）"
+    dt = ov["trade_date"].replace("-", "")
+    seats = ",".join(f"'{s}'" for s in SOUTHBOUND_SEAT_IDS)
+    cc_path = feed.DATA_DIR / feed.CCASS_TOP50_REL / f"dt={dt}" / "data.parquet"
+    south_path = feed.DATA_DIR / feed.SOUTH_REL / f"dt={dt}" / "data.parquet"
+    a_qty, s_qty, n, south_n = (
+        duckdb.connect()
+        .execute(
+            f"""
+            WITH a AS (
+              SELECT stock_code AS symbol, sum(holding_quantity) AS q
+              FROM read_parquet('{cc_path}')
+              WHERE participant_id IN ({seats})
+              GROUP BY stock_code
+            ), s AS (
+              SELECT symbol, sum(holding_quantity) AS q
+              FROM read_parquet('{south_path}')
+              GROUP BY symbol
+            )
+            SELECT sum(a.q), sum(s.q), count(*), (SELECT count(*) FROM s)
+            FROM a JOIN s USING(symbol)
+            """
+        )
+        .fetchone()
+    )
+    assert a_qty and s_qty and n
+    # 覆盖率门：交集至少 90% 南向股票（防代码映射断裂/整库缺失）
+    assert n >= 0.9 * south_n, f"CCASS/南向代码交集仅 {n}/{south_n}"
+    ratio = a_qty / s_qty
+    assert abs(ratio - 1.0) < 0.02, (
+        f"A席/南向比值 {ratio:.4f} 偏离 1.0（A={a_qty} S={s_qty} n={n}/{south_n}）"
+    )
 
 
 # ---- 增减持榜 ----
@@ -188,7 +208,8 @@ def test_institutional_participants_keyword():
 
 def test_classifier_full_registry_coverage():
     dates = market_days.list_partition_dates(feed.CCASS_TOP50_REL, feed.DATA_DIR)
-    dt = dates[-1]
+    # 用最新**完整**分区：夜间抓取中的半成品只有几百只，会随机缺席位
+    dt = feed._latest_ccass_top_date() or dates[-1]
     df = duckdb.connect().execute(
         "SELECT DISTINCT participant_id, participant_name FROM read_parquet("
         f"'{feed.DATA_DIR / feed.CCASS_TOP50_REL}/dt=*/data.parquet', hive_partitioning=1) "

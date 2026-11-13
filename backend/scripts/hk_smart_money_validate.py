@@ -53,6 +53,7 @@ from backend.shared.hk_smart_money import (  # noqa: E402
     MIN_Q51_BP,
     SIGNAL_KEY_SEP,
     SIGNAL_LABELS,
+    SOUTHBOUND_SEAT_IDS,
     TRANSFER_AMOUNT_RATIO,
     WARMUP_DAYS,
 )
@@ -155,18 +156,41 @@ def _exclusions() -> dict[str, Any]:
 
 
 def _reconciliation() -> dict[str, Any] | None:
-    """A 席（南向结算席）持股与 hsgt_south 总量的最新对账比（数据质量门）。"""
+    """A 席（南向结算席）与 hsgt_south 的**同一股票集合**对账（数据质量门）。
+
+    CCASS 只披露 top50，部分股票的中国结算席位排在 50 名之外（2026-11-12
+    有 86 只）；拿全量南向对比会凭空少 ~3%。按两边都可见的股票交集重算。
+    """
     dates = ds.event_dates()
-    if not dates:
-        return None
-    c = ev_mod.read_counts(dates[-1])
-    a, s = c.get("a_seat_qty_sum"), c.get("south_qty_sum")
-    if a and s:
+    south_dates = set(ds.south_dates())
+    cc_dates = set(ds.ccass_dates())
+    for dt in reversed(dates):
+        if dt not in south_dates or dt not in cc_dates:
+            continue
+        try:
+            cur = ds.load_ccass(dt)
+            cur_south = ds.load_south(dt)
+        except Exception:  # noqa: BLE001 - 单日读取失败换下一日
+            continue
+        a = (
+            cur.loc[cur["participant_id"].isin(SOUTHBOUND_SEAT_IDS)]
+            .groupby("stock_code")["holding_quantity"]
+            .sum()
+        )
+        s = cur_south.set_index("symbol")["holding_quantity"]
+        common = a.index.intersection(s.index)
+        if not len(common):
+            continue
+        a_sum = int(a.loc[common].sum())
+        s_sum = int(s.loc[common].sum())
         return {
-            "as_of": _iso(dates[-1]),
-            "a_seat_qty_sum": int(a),
-            "south_qty_sum": int(s),
-            "ratio": round(a / s, 4),
+            "as_of": _iso(dt),
+            "a_seat_qty_sum": a_sum,
+            "south_qty_sum": s_sum,
+            "ratio": round(a_sum / s_sum, 4),
+            "universe": "common_top50",
+            "common_n": int(len(common)),
+            "south_n": int(len(s)),
         }
     return None
 
@@ -332,6 +356,11 @@ def run(
         raise RuntimeError("daily_forward 无可用分区（ccass 覆盖段内）")
     calendar = close.index
     fwd_map = ds.forward_matrices(close)
+    # 评估窗终点必须由**事件数据**决定，不能取价格日历末日：港股 K 线常在
+    # CCASS 数据之前落盘（T 日 K 线当晚有、HKEX 持股要等到次日），取价格末日
+    # 会让 evidence.eval_end 比产物 as_of 多一天，三面自洽检查误报。
+    event_dates = ds.event_dates()
+    eval_end = pd.Timestamp(event_dates[-1]) if event_dates else calendar[-1]
 
     eval_start = (
         pd.Timestamp(eval_start_arg)
@@ -339,11 +368,12 @@ def run(
         else calendar[min(WARMUP_DAYS, max(len(calendar) - 1, 0))]
     )
     log.info(
-        "评估窗：%s ~ %s（暖机 %d 交易日；日历 %d 日）",
+        "评估窗：%s ~ %s（暖机 %d 交易日；日历 %d 日；事件 %d 日）",
         eval_start.strftime("%Y-%m-%d"),
-        calendar[-1].strftime("%Y-%m-%d"),
+        eval_end.strftime("%Y-%m-%d"),
         WARMUP_DAYS,
         len(calendar),
+        len(event_dates),
     )
 
     # 3) 标定（可选，先于评估；只读）
@@ -442,7 +472,7 @@ def run(
         "version": 1,
         "window": {
             "eval_start": eval_start.strftime("%Y-%m-%d"),
-            "eval_end": calendar[-1].strftime("%Y-%m-%d"),
+            "eval_end": eval_end.strftime("%Y-%m-%d"),
             "warmup_days": WARMUP_DAYS,
             "event_days": int(len(ds.event_dates())),
             "event_rows": exclusions["events"],
