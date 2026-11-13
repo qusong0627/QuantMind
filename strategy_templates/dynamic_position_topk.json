@@ -1,0 +1,55 @@
+{
+  "id": "dynamic_position_topk",
+  "sort": 20,
+  "name": "动态仓位TOPK策略",
+  "description": "标准 Top-K 选股 + 调仓日全市场预测均分动态仓位：均分 ≥ 0 时满仓，均分 < 0 时五成仓。严格按目标仓位执行，超配会卖出降仓。默认每 3 个交易日调仓一次。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票数量",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数量（0 = 不主动换仓）",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日），默认 3",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "仓位规则：全市场预测均分 ≥ 0 满仓；< 0 五成仓。",
+    "均分口径与「大盘分析 → 全市场均分时序」一致。"
+  ],
+  "dir": "通用策略",
+  "markets": []
+}
