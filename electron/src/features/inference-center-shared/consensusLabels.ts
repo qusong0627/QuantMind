@@ -18,6 +18,7 @@ export const SKIP_REASON_LABEL: Record<string, string> = {
   no_storage: '注册表无路径',
   read_error: '产物读取失败',
   exec_failed: '点名模型推理失败',
+  no_recent_inference: '近 30 天无推理',
 };
 
 /** 点名补算失败的原因码 → 人话 */

@@ -7,7 +7,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildModelSelectOptions, modelOptionLabel } from '../modelOptions';
+import {
+  buildModelSelectOptions,
+  buildTerminalModelOptions,
+  modelOptionLabel,
+} from '../modelOptions';
 import type { StockModelOption } from '../../stock-terminal-shared/types';
 
 const m = (patch: Partial<StockModelOption>): StockModelOption => ({
@@ -100,5 +104,43 @@ describe('buildModelSelectOptions', () => {
 
   it('空列表：空数组', () => {
     expect(buildModelSelectOptions([])).toEqual([]);
+  });
+});
+
+describe('buildTerminalModelOptions（个股终端默认模型下拉）', () => {
+  it('默认项 value 为空字符串，不传字面量 default', () => {
+    const out = buildTerminalModelOptions([], '默认模型A');
+    expect(out).toEqual([{ value: '', label: '默认模型 · 默认模型A' }]);
+  });
+
+  it('选项带 T+N、默认标记与无 pred 置灰', () => {
+    const out = buildTerminalModelOptions([
+      { model_id: 'a', display_name: '模型A', horizon: 20, is_default: true, has_pred: true },
+      { model_id: 'b', display_name: '模型B', horizon: 5, has_pred: false },
+    ]);
+    expect(out[1]).toEqual({ value: 'a', label: '模型A · T+20 · 默认' });
+    expect(out[2]).toEqual({
+      value: 'b',
+      label: '模型B · T+5 · 无 pred',
+      disabled: true,
+    });
+  });
+
+  it('老后端无 horizon/has_pred：不编造，仍可选', () => {
+    const out = buildTerminalModelOptions([{ model_id: 'x', display_name: 'X' }]);
+    expect(out[1]).toEqual({ value: 'x', label: 'X' });
+    expect(out[1].disabled).toBeUndefined();
+  });
+
+  it('没有显示名时回退 model_id', () => {
+    const out = buildTerminalModelOptions([{ model_id: 'mdl_abc' }]);
+    expect(out[1].label).toBe('mdl_abc');
+  });
+
+  it('有 pred 时显示精确最后分数日（月-日）', () => {
+    const out = buildTerminalModelOptions([
+      { model_id: 'a', display_name: 'A', horizon: 20, has_pred: true, pred_last_date: '2026-11-12' },
+    ]);
+    expect(out[1].label).toBe('A · T+20 · 分数至 11-12');
   });
 });

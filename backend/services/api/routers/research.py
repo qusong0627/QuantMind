@@ -10,6 +10,7 @@ import backend.services.api.routers.research_service as _research_service
 from backend.services.api.routers.research_schemas import (
     BatchFeaturesRequest,
     PoolAddRequest,
+    PredictionDriversRequest,
     SingleStockPredictionRequest,
     SymbolsFeaturesRequest,
     WatchlistAddRequest,
@@ -31,6 +32,7 @@ from backend.services.api.routers.research_service import (
     get_user_research_pool as get_user_research_pool_service,
     get_user_watchlist as get_user_watchlist_service,
     predict_single_stock as predict_single_stock_service,
+    predict_single_stock_drivers as predict_single_stock_drivers_service,
     remove_from_research_pool as remove_from_research_pool_service,
     remove_from_watchlist as remove_from_watchlist_service,
     sync_watchlist_positions_service,
@@ -288,4 +290,26 @@ async def predict_single_stock(
         market=req.market,
         consensus_model_ids=req.consensus_model_ids,
         execute=req.execute,
+        include_drivers=str(req.drivers_mode or "inline").lower() != "none",
+    )
+
+
+@router.post("/predict-stock/drivers")
+async def predict_single_stock_drivers(
+    req: PredictionDriversRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """异步 SHAP 归因：核心图先出，前端随后单独取；字段与 predict-stock 的 drivers_* 一致。"""
+    tid, uid = str(current_user["tenant_id"]), str(current_user["user_id"])
+    return await predict_single_stock_drivers_service(
+        tid,
+        uid,
+        symbol=req.symbol,
+        model_id=req.model_id,
+        target_date=req.date,
+        horizon=req.horizon,
+        market=req.market,
+        as_of_date=req.as_of_date,
+        model_name=req.model_name,
+        consensus_model_ids=req.consensus_model_ids,
     )

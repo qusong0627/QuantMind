@@ -45,6 +45,22 @@ export interface SingleStockPredictionResponse {
   /** 调用方请求的周期；与 horizon 不一致时 horizon_warning 非空 */
   requested_horizon?: number;
   horizon_warning?: string | null;
+  /** 数据日 D / 执行日 T+lag / 目标日 T+lag+N（后端按交易日历算好，前端不得再推自然日） */
+  data_date?: string;
+  entry_date?: string | null;
+  target_date?: string | null;
+  execution_lag_days?: number;
+  target_mode?: string | null;
+  forecast_window?: {
+    data_date: string;
+    entry_date: string;
+    target_date: string;
+    horizon: number;
+    execution_lag_days: number;
+    window_dates: string[];
+  } | null;
+  /** pred_parquet / engine_signal_scores：分数真实来源 */
+  score_source?: string;
   /** 该市场现存模型覆盖的周期分布（周期选择器据此渲染可用性） */
   available_horizons?: { horizon: number; model_count: number }[];
   predicted_score: number;
@@ -108,6 +124,21 @@ export interface SingleStockPredictionResponse {
   error?: string | null;
 }
 
+/** 异步归因响应（与 predict-stock 的 drivers_* 字段同构） */
+export interface PredictionDriversResponse {
+  status: string;
+  drivers: FeatureDriverItem[];
+  drivers_source?: 'shap' | null;
+  drivers_note?: string | null;
+  drivers_model_id?: string | null;
+  drivers_model_name?: string | null;
+  model_id?: string;
+  model_name?: string;
+  as_of_date?: string;
+  horizon?: number;
+  error?: string | null;
+}
+
 export interface SingleStockPredictionRequest {
   symbol: string;
   model_id?: string;
@@ -118,6 +149,11 @@ export interface SingleStockPredictionRequest {
   consensus_model_ids?: string[];
   /** 是否立即执行已注册模型；false 时仅读取已有真实结果。 */
   execute?: boolean;
+  /**
+   * 归因返回方式：`inline` 随核心响应返回（旧后端默认）；`none` 核心图先出，
+   * 前端随后单独调 `/research/predict-stock/drivers`。树模型 SHAP 较慢时必须用 none。
+   */
+  drivers_mode?: 'inline' | 'none';
 }
 
 export interface KlineItem {
@@ -141,6 +177,18 @@ export interface AvailableModelOption {
   horizon?: number | null;
   /** 目标口径（return / rank / …）；非 return 时区间数值不是收益率 */
   targetMode?: string;
+  /** 训练标签的执行滞后（默认 1） */
+  executionLagDays?: number;
+  /** 是否用户当前默认模型 */
+  isDefault?: boolean;
+  /** 磁盘产物缺项（空 = 健全）；含 pred.parquet 缺失 */
+  assetGaps?: string[];
+  /** 是否有 pred.parquet 产物；false 时选中也画不出分数 */
+  hasPred?: boolean;
+  /** pred.parquet 文件日期（快速新鲜度近似） */
+  predMtime?: string | null;
+  /** 精确最后分数日（后端读 Parquet footer 统计） */
+  predLastDate?: string | null;
 }
 
 class InferenceCenterService {
@@ -203,6 +251,12 @@ class InferenceCenterService {
         // 周期与口径必须透传：周期选择器与「分数含义」标注都以它为准
         horizon: m.horizon ?? m.target_horizon_days ?? null,
         targetMode: m.targetMode || m.target_mode || '',
+        executionLagDays: m.executionLagDays ?? m.execution_lag_days ?? 1,
+        isDefault: Boolean(m.isDefault ?? m.is_default),
+        assetGaps: Array.isArray(m.assetGaps) ? m.assetGaps : [],
+        hasPred: Boolean(m.hasPred ?? m.has_pred),
+        predMtime: m.predMtime ?? m.pred_mtime ?? null,
+        predLastDate: m.predLastDate ?? m.pred_last_date ?? null,
       }));
     } catch (e) {
       console.warn('获取可用模型列表失败:', e);
@@ -257,6 +311,27 @@ class InferenceCenterService {
       return (resp.data as any).data;
     }
     return resp.data as SingleStockPredictionResponse;
+  }
+
+  /** 核心图渲染后单独取 SHAP；失败不阻断图，由面板显性提示。 */
+  async getPredictionDrivers(req: {
+    symbol: string;
+    model_id?: string;
+    date?: string;
+    horizon?: number;
+    market?: string;
+    /** 核心响应已解析出的实际模型/日期/共识成员，避免异步端重新解析到别的模型 */
+    as_of_date?: string;
+    model_name?: string;
+    consensus_model_ids?: string[];
+  }): Promise<PredictionDriversResponse> {
+    const resp = await this.client.post<
+      { code?: number; data?: PredictionDriversResponse } | PredictionDriversResponse
+    >('/research/predict-stock/drivers', req);
+    if ((resp.data as any)?.data) {
+      return (resp.data as any).data;
+    }
+    return resp.data as PredictionDriversResponse;
   }
 }
 

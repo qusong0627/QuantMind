@@ -15,7 +15,8 @@ import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { useStockTerminal } from '../adapter';
 import { StockListItem, StockProfile, KlineBar, KlineMarker, type TradeMarker } from '../types';
 import type { KlineAdjust } from '../service';
-import { modelTrainingService } from '../../../services/modelTrainingService';
+import { useStockScoreSeries } from '../../shared/hooks/useStockScoreSeries';
+import { latestScore } from '../../shared/scoreWindow';
 import { StockSearchBar } from '../components/StockSearchBar';
 import type { Point as ScorePoint } from '../components/InferenceScoreChart';
 import { KlineChart, type SignalPoint } from '../components/KlineChart';
@@ -23,6 +24,7 @@ import { DrillDownDrawer } from '../../shared/DrillDownDrawer';
 import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
 import { signalPointDrillEntries, tradeMarkerDrillEntries } from '../utils';
 import { signalPositionLabel } from '../../shared/signalVocabulary';
+import { buildTerminalModelOptions } from '../../stock-terminal/modelOptions';
 
 export interface DetailRenderContext {
   symbol: string;
@@ -76,7 +78,7 @@ function weekKey(date: string): string {
 }
 
 export default function StockTerminalShell({ renderDetail, renderHeaderExtra, renderBanner, initialSymbol, bottomReserve = 84 }: Props) {
-  const { service, theme, toWatchSymbol } = useStockTerminal();
+  const { market, service, theme, toWatchSymbol } = useStockTerminal();
   const [selected, setSelected] = useState<StockListItem | null>(null);
   const [profile, setProfile] = useState<StockProfile | null>(null);
   const [bars, setBars] = useState<KlineBar[]>([]);
@@ -95,62 +97,79 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
   const [adjust, setAdjust] = useState<KlineAdjust>(theme.defaultAdjust);
   const [signalDate, setSignalDate] = useState<string | undefined>(undefined);
   const [watchlist, setWatchlist] = useState<Set<string>>(new Set());
-  const [scorePoints, setScorePoints] = useState<ScorePoint[]>([]);
   // 多模型切换：当前选中模型（undefined=默认模型）+ 下拉模型列表
   const [modelId, setModelId] = useState<string | undefined>(undefined);
-  const [scoreModels, setScoreModels] = useState<Array<{ model_id: string; display_name?: string }>>([]);
-  const [modelName, setModelName] = useState<string>('');
-  const [scoreLast, setScoreLast] = useState<{ value: number; date: string; up: boolean; side: string | null } | null>(null);
-  const [scoreLoading, setScoreLoading] = useState(false);
 
-  // 拉起推理分数：喂给 K线底部分数副图 + 顶部最近分数 + 模型下拉列表。
-  // 不渲染独立折线图组件，分数统一由 K线底部副图承载（与主图同 x 轴对齐）。
-  useEffect(() => {
-    if (!selected) {
-      setScorePoints([]);
-      setScoreLast(null);
-      setScoreModels([]);
-      setScoreLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setScoreLoading(true);
-    const code = selected.symbol.split('.')[0];
-    modelTrainingService
-      .getStockInferenceHistory(code, 750, modelId || undefined)
-      .then((resp) => {
-        if (cancelled) return;
-        const pts: ScorePoint[] = (resp.items ?? [])
-          .filter((it) => it.fusion_score != null)
-          .map((it) => ({
-            date: String(it.trade_date).slice(0, 10),
-            value: Number(it.fusion_score),
-            side: it.signal_side ? String(it.signal_side) : null,
-          }))
-          .sort((a, b) => a.date.localeCompare(b.date));
-        setScorePoints(pts);
-        const last = pts[pts.length - 1];
-        setScoreLast(last && typeof last.value === 'number'
-          ? { value: Number(last.value), date: last.date, up: Number(last.value) >= 0, side: last.side ?? null }
-          : null);
-        const models = resp.models ?? [];
-        setScoreModels(models);
-        const chosen = modelId ? models.find((m) => m.model_id === modelId) : models[0];
-        setModelName(chosen ? (chosen.display_name || chosen.model_id || '') : '');
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setScorePoints([]);
-          setScoreLast(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setScoreLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selected, modelId]);
+  // 分数序列（React Query 缓存/去重）：750 自然日覆盖 2 年 K 线。
+  // staleTime 60s + 同 key 去重：来回切股票/模型不再重复扫 parquet。
+  // 模型列表随响应一起回来（含 horizon/has_pred/pred_last_date），
+  // 即使分数请求失败也不会只剩「默认模型」一项。
+  const scoreQuery = useStockScoreSeries({
+    symbol: selected?.symbol ?? '',
+    market,
+    modelId: modelId || undefined,
+    days: 750,
+    enabled: Boolean(selected),
+  });
+  const scoreModels = scoreQuery.models;
+  const scorePoints = useMemo<ScorePoint[]>(
+    () =>
+      scoreQuery.points
+        .filter((it) => it.fusion_score != null)
+        .map((it) => ({
+          date: String(it.trade_date).slice(0, 10),
+          value: Number(it.fusion_score),
+          side: it.signal_side ? String(it.signal_side) : null,
+        })),
+    [scoreQuery.points],
+  );
+  const latest = latestScore(scoreQuery.points);
+  const scoreLast = latest
+    ? {
+        value: latest.value,
+        date: latest.date,
+        up: latest.value >= 0,
+        side: scorePoints.find((p) => p.date === latest.date)?.side ?? null,
+      }
+    : null;
+  const scoreLoading = scoreQuery.loading || scoreQuery.refreshing;
+  const chosenModel =
+    scoreQuery.model ??
+    scoreModels.find((m) => m.model_id === modelId) ??
+    scoreModels.find((m) => m.is_default) ??
+    null;
+  const modelName = chosenModel?.display_name || chosenModel?.model_id || '';
+  const defaultModel =
+    scoreModels.find((m) => m.is_default && m.has_pred !== false) ??
+    scoreModels.find((m) => m.is_default) ??
+    null;
+  const defaultModelName = defaultModel?.display_name || defaultModel?.model_id || '';
+  const scoreWindow = scoreQuery.window;
+  const windowDates = scoreWindow?.window_dates ?? [];
+  const lastBar = bars.length ? bars[bars.length - 1] : null;
+  const latestValue = latest?.value ?? null;
+  const latestDate = latest?.date ?? null;
+  // 用「分数日的收盘」换算目标价，而不是当前价：分数过期时用现价会把
+  // 之后的行情算进预测，等于偷看未来。
+  const scoreAnchorClose =
+    (latestDate ? bars.find((b) => b.date === latestDate)?.close : undefined) ??
+    lastBar?.close ??
+    0;
+  const predictionWindow = useMemo(
+    () =>
+      scoreWindow && latestValue != null
+        ? {
+            entryDate: scoreWindow.entry_date,
+            targetDate: scoreWindow.target_date,
+            horizon: scoreWindow.horizon,
+            latestScore: latestValue,
+            targetMode: chosenModel?.target_mode ?? null,
+            lastClose: scoreAnchorClose,
+            staleDays: scoreQuery.staleDays,
+          }
+        : null,
+    [scoreWindow, latestValue, scoreAnchorClose, chosenModel?.target_mode, scoreQuery.staleDays],
+  );
 
   // watchlist 仅为搜索下拉星标
   useEffect(() => {
@@ -332,15 +351,14 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
               <span className="text-slate-300">·</span>
               <Select
                 size="small"
-                style={{ width: 130 }}
+                style={{ width: 190 }}
                 placeholder="默认模型"
-                value={modelId}
-                onChange={setModelId}
+                value={modelId ?? ''}
+                onChange={(v) => setModelId(v ? String(v) : undefined)}
                 popupMatchSelectWidth={false}
-                options={[
-                  { value: 'default', label: '默认模型' },
-                  ...scoreModels.map((m) => ({ value: m.model_id, label: m.display_name || m.model_id })),
-                ]}
+                showSearch
+                optionFilterProp="label"
+                options={buildTerminalModelOptions(scoreModels, defaultModelName)}
               />
             </div>
           )}
@@ -432,10 +450,27 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
                           </span>
                         )}
                         <span className="font-mono text-slate-400">{scoreLast.date}</span>
+                        {(scoreQuery.staleDays ?? 0) > 0 && (
+                          <span className="font-bold text-rose-500">
+                            已过期 {scoreQuery.staleDays} 天
+                          </span>
+                        )}
+                        {scoreWindow && (
+                          <span>
+                            窗口 <b className="font-mono text-slate-700">T+{scoreWindow.horizon}</b>
+                            <span className="text-slate-400">（{scoreWindow.entry_date} → {scoreWindow.target_date}）</span>
+                          </span>
+                        )}
+                        {period !== 'daily' && predictionWindow && (
+                          <span className="text-slate-400">周/月预测段按执行日/目标日单点显示</span>
+                        )}
+                        {scoreQuery.windowWarning && (
+                          <span className="text-amber-700">{scoreQuery.windowWarning}</span>
+                        )}
                         {scoreLoading && <span className="text-purple-400 animate-pulse">更新中…</span>}
                       </>
                     ) : (
-                      <span className="text-slate-400 animate-pulse">推理分数加载中…（750 日窗口，首次可能稍慢）</span>
+                      <span className="text-slate-400 animate-pulse">推理分数加载中…（750 日窗口）</span>
                     )}
                   </div>
                 )}
@@ -445,6 +480,8 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
                   ) : bars.length ? (
                     <div className="flex-1 min-h-0">
                       <KlineChart bars={bars} config={{ ma: true, boll: false, subplots: ['vol'] }} overlays={[]} period={period} scorePoints={scorePoints.map((p) => ({ date: p.date, value: p.value }))} showScoreSubplot={true} markers={markers} signals={signals} trades={trades} adjust={adjust} zoomStart={zoomStart} zoomEnd={100}
+                        futureDates={windowDates}
+                        predictionWindow={predictionWindow}
                         onTradeClick={(m) =>
                           setDrill({
                             title: `${m.side === 'buy' ? '买入' : '卖出'} ${selected?.symbol ?? ''} · ${m.date}`,

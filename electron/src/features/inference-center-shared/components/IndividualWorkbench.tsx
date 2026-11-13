@@ -9,7 +9,7 @@
  * 圆角与阴影收敛到同一档，避免卡片套卡片的杂乱感。
  */
 
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { Button, DatePicker, Input, Select, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import { clsx } from 'clsx';
 import {
@@ -31,6 +31,7 @@ import {
     researchScore,
     researchScoreBand,
 } from '../../shared/researchScore';
+import type { ScorePointLike } from '../../shared/scoreWindow';
 
 const { Text } = Typography;
 
@@ -97,6 +98,33 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
   toSuffixSymbol,
 }) => {
   const { prediction } = ip;
+  // 分数落点：预测日（默认，分数画在 D）/ 兑现日（分数画在 D+1+N）。
+  const [anchorMode, setAnchorMode] = useState<'prediction' | 'resolution'>('prediction');
+
+  // 图表用的分数序列 = 历史序列 + 本次预测的分数（如果该日尚未落库）。
+  // 后端可能用独立轻路线算出当天分数但不写 pred.parquet；不补这一点，
+  // 图上最新分数会停在上一个落库日，和上方 forecast 的 as-of 不一致。
+  const chartScorePoints = useMemo<ScorePointLike[]>(() => {
+    const pts: ScorePointLike[] = [...ip.scorePoints];
+    if (prediction && prediction.predicted_score != null && prediction.as_of_date) {
+      const asOf = String(prediction.as_of_date).slice(0, 10);
+      if (!pts.some((p) => String(p.trade_date).slice(0, 10) === asOf)) {
+        pts.push({
+          trade_date: asOf,
+          target_date:
+            prediction.forecast_window?.target_date ?? prediction.target_date ?? null,
+          fusion_score: Number(prediction.predicted_score),
+          signal_side: null,
+        });
+      }
+    }
+    return pts;
+  }, [ip.scorePoints, prediction]);
+  const forecastWindow = prediction?.forecast_window ?? null;
+  const predictionDate = prediction?.data_date || prediction?.as_of_date || '';
+  const historyBehind = Boolean(
+    predictionDate && ip.scoreLastDate && ip.scoreLastDate < predictionDate,
+  );
 
   /**
    * 研究评分徽标：显示该标的在**同一模型、同一交易日**截面内的分位（0–100）。
@@ -246,13 +274,34 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
           optionLabelProp="label"
           options={ip.filteredModels.map((m) => ({
             value: m.modelId,
-            label: m.modelName,
-            // 下拉里保留原卡片列表的全部信息：名称 + 训练状态
+            label: `${m.modelName}${m.horizon ? ` · T+${m.horizon}` : ''}${
+              m.predLastDate ? ` · 分数至 ${m.predLastDate.slice(5)}` : ''
+            }`,
+            // 没有 pred.parquet 的模型选中也画不出分数：置灰并说明原因，
+            // 而不是让用户选完得到一个空白图。
+            disabled: m.hasPred === false,
             display: (
               <div className="flex items-center justify-between gap-3">
                 <span className="truncate">{m.modelName}</span>
-                <span className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded bg-slate-100 border border-slate-300 text-slate-600 shrink-0">
-                  {m.tag}
+                <span className="flex items-center gap-1 shrink-0">
+                  {m.isDefault && (
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-700">
+                      默认
+                    </span>
+                  )}
+                  <span className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded bg-slate-100 border border-slate-300 text-slate-600">
+                    {m.horizon ? `T+${m.horizon}` : '周期未记录'}
+                  </span>
+                  {m.hasPred !== false && m.predLastDate && (
+                    <span className="text-[10px] font-mono text-slate-500">
+                      至 {m.predLastDate.slice(5)}
+                    </span>
+                  )}
+                  {m.hasPred === false && (
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-400">
+                      无 pred
+                    </span>
+                  )}
                 </span>
               </div>
             ),
@@ -443,6 +492,52 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
               </div>
             )}
 
+            {/* 口径行：把「这个分数是哪天产生的、对应哪段窗口、模型实际周期、数据来源」
+                一次说清。展示面只写数据日/执行日/目标日，不写方向性动作。 */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[10px] text-slate-600">
+              <span>
+                数据日 <b className="font-mono text-slate-800">{prediction.data_date || prediction.as_of_date}</b>
+              </span>
+              <span>
+                执行日 <b className="font-mono text-slate-800">{forecastWindow?.entry_date || prediction.entry_date || ip.scoreWindow?.entry_date || '—'}</b>
+              </span>
+              <span>
+                目标日 <b className="font-mono text-slate-800">{forecastWindow?.target_date || prediction.target_date || ip.scoreWindow?.target_date || '—'}</b>
+                <span className="text-slate-400">（T+{prediction.horizon ?? ip.horizon}）</span>
+              </span>
+              <span>
+                模型实际 <b className="font-mono text-indigo-600">T+{prediction.horizon ?? ip.horizon}</b>
+              </span>
+              <span>
+                来源 <b className="text-slate-800">{ip.scoreSource || prediction.score_source || '—'}</b>
+              </span>
+              {prediction.model_id && ip.modelId && prediction.model_id !== ip.modelId && (
+                <span className="font-bold text-rose-600">
+                  后端实际使用模型 {prediction.model_id}（与所选不同，分数口径以实际模型为准）
+                </span>
+              )}
+              {ip.scoreLastDate && (
+                <span>
+                  最后分数日 <b className="font-mono text-slate-800">{ip.scoreLastDate}</b>
+                </span>
+              )}
+              {historyBehind ? (
+                <span className="font-bold text-amber-700">
+                  历史序列最后日 {ip.scoreLastDate}（本次预测分数已补入 {predictionDate}）
+                </span>
+              ) : (ip.scoreStaleDays ?? 0) > 0 ? (
+                <span className="font-bold text-rose-600">
+                  分数已过期 {ip.scoreStaleDays} 天
+                </span>
+              ) : null}
+              {ip.scoreWindowWarning && (
+                <span className="font-bold text-amber-700">{ip.scoreWindowWarning}</span>
+              )}
+              {ip.scoreError && (
+                <span className="font-bold text-rose-600">分数序列加载失败：{ip.scoreError.message}</span>
+              )}
+            </div>
+
             {/* 上排：K 线自适应 + 指标定宽侧栏。
                 刻意**不用**按比例的分栏网格 —— 指标卡的内容高度是恒定的，按比例发宽度
                 会在超宽屏把它拉成一大片空白（2560 下实测 781px 宽、约 200px 高的空档），
@@ -462,6 +557,17 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
                   currentPrice={prediction.current_price}
                   modelName={prediction.model_name || ip.selectedModel?.modelName}
                   asOfDate={prediction.as_of_date}
+                  scorePoints={chartScorePoints}
+                  horizon={prediction.horizon ?? ip.horizon}
+                  windowDates={forecastWindow?.window_dates ?? ip.scoreWindow?.window_dates ?? []}
+                  anchorMode={anchorMode}
+                  onAnchorModeChange={setAnchorMode}
+                  targetMode={prediction.target_mode ?? ip.selectedModel?.targetMode}
+                  entryDate={forecastWindow?.entry_date ?? ip.scoreWindow?.entry_date ?? prediction.entry_date ?? undefined}
+                  targetDate={forecastWindow?.target_date ?? ip.scoreWindow?.target_date ?? prediction.target_date ?? undefined}
+                  scoreSource={ip.scoreSource || prediction.score_source}
+                  staleDays={historyBehind ? null : ip.scoreStaleDays}
+                  refreshing={ip.refreshing || ip.scoreRefreshing}
                 />
               </div>
 
@@ -586,10 +692,11 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
             >
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 <FeatureDriversPanel
-                  drivers={prediction.drivers}
-                  source={prediction.drivers_source}
-                  note={prediction.drivers_note}
-                  modelName={prediction.drivers_model_name}
+                  drivers={ip.drivers}
+                  source={ip.driversSource ?? prediction.drivers_source}
+                  note={ip.driversNote ?? prediction.drivers_note}
+                  modelName={ip.driversModelName ?? prediction.drivers_model_name}
+                  loading={ip.driversLoading}
                 />
               </div>
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">

@@ -5,16 +5,23 @@
  * 支持被「截面推理排名」联动触发 —— 传 symbol 即按该标的出图，不重新输入代码。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dayjs, { type Dayjs } from 'dayjs';
 import { message } from 'antd';
 import {
   inferenceCenterService,
   type AvailableModelOption,
+  type FeatureDriverItem,
   type KlineItem,
   type SingleStockPredictionResponse,
 } from '../../../services/inferenceCenterService';
 import type { SuggestionItem } from '../adapter';
+import { useStockScoreSeries } from '../../shared/hooks/useStockScoreSeries';
+import type {
+  StockScoreHistoryItem,
+  StockScoreModelMeta,
+  StockScoreWindow,
+} from '../../../services/modelTrainingService';
 
 /** 可用模型卡片：在市场返回的模型上补出分类与标签，供 UI 直接渲染 */
 export type ModelCardOption = AvailableModelOption & {
@@ -59,8 +66,30 @@ export interface IndividualPrediction {
   setConsensusModelIds: (ids: string[]) => void;
 
   loading: boolean;
+  /** 同标的换模型/换周期：保留旧图，背景刷新（不要清空整块结果区） */
+  refreshing: boolean;
   prediction: SingleStockPredictionResponse | null;
   kline: KlineItem[];
+
+  /** 与上方预测同源、同模型、同 as-of 的历史分数序列（供 K 线叠加） */
+  scorePoints: StockScoreHistoryItem[];
+  scoreModels: StockScoreModelMeta[];
+  scoreWindow: StockScoreWindow | null;
+  scoreWindowWarning: string | null;
+  scoreLastDate: string | null;
+  scoreStaleDays: number | null;
+  scoreSource: string;
+  scoreLoading: boolean;
+  scoreRefreshing: boolean;
+  scoreError: Error | null;
+
+  /** SHAP 归因（核心图先出，异步单独取；旧后端内联时直接复用） */
+  drivers: FeatureDriverItem[];
+  driversSource: 'shap' | null;
+  driversNote: string | null;
+  driversModelName: string | null;
+  driversLoading: boolean;
+  driversError: Error | null;
 
   suggestions: SuggestionItem[];
   showSuggestions: boolean;
@@ -117,9 +146,9 @@ function classifyModel(kind: string): ModelCardOption['category'] {
 }
 
 export function useIndividualPrediction(
-  adapter: { market: string; defaultSymbol: string; search: (kw: string) => Promise<SuggestionItem[]>; normalize: (raw: string) => string; toSymbol: (item: SuggestionItem) => string; fetchKline: (symbol: string, days: number, endDate?: string, startDate?: string) => Promise<KlineItem[]> },
+  adapter: { market: string; defaultSymbol: string; search: (kw: string) => Promise<SuggestionItem[]>; normalize: (raw: string) => string; toSymbol: (item: SuggestionItem) => string; toSuffixSymbol: (symbol: string) => string; fetchKline: (symbol: string, days: number, endDate?: string, startDate?: string) => Promise<KlineItem[]> },
 ): IndividualPrediction {
-  const { market, defaultSymbol, search, normalize, toSymbol, fetchKline } = adapter;
+  const { market, defaultSymbol, search, normalize, toSymbol, toSuffixSymbol, fetchKline } = adapter;
 
   const [symbol, setSymbol] = useState(defaultSymbol);
   const [inputCode, setInputCode] = useState(defaultSymbol);
@@ -133,8 +162,22 @@ export function useIndividualPrediction(
   const [consensusModelIds, setConsensusModelIds] = useState<string[]>([]);
 
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [kline, setKline] = useState<KlineItem[]>([]);
   const [prediction, setPrediction] = useState<SingleStockPredictionResponse | null>(null);
+  const predictionRef = useRef<SingleStockPredictionResponse | null>(null);
+  useEffect(() => {
+    predictionRef.current = prediction;
+  }, [prediction]);
+
+  // 异步 SHAP 归因：核心图先出，归因随后到；旧后端内联返回时直接复用。
+  const [drivers, setDrivers] = useState<FeatureDriverItem[]>([]);
+  const [driversSource, setDriversSource] = useState<'shap' | null>(null);
+  const [driversNote, setDriversNote] = useState<string | null>(null);
+  const [driversModelName, setDriversModelName] = useState<string | null>(null);
+  const [driversLoading, setDriversLoading] = useState(false);
+  const [driversError, setDriversError] = useState<Error | null>(null);
+  const driversKeyRef = useRef<string>('');
 
   const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -168,13 +211,30 @@ export function useIndividualPrediction(
     };
   }, [market]);
 
-  // 模型对账：首次拿到列表、或原选中项已不在列表里时回退到首个模型。
-  // 用对账 effect 而非函数式 setState —— 本项目的 useState setter 类型不接受更新函数。
+  // 模型对账：首次拿到列表、或原选中项已不在列表里时回退。
+  // 优先「默认 + 有 pred 产物」→「默认」→「有 pred」→ 第一个；默认模型是
+  // 用户显式设置的口径，不能因为列表排序把它静默换掉。
   useEffect(() => {
     if (models.length === 0) return;
     if (modelId && models.some((m) => m.modelId === modelId)) return;
-    setModelId(models[0].modelId);
+    const preferred =
+      models.find((m) => m.isDefault && m.hasPred !== false) ||
+      models.find((m) => m.isDefault) ||
+      models.find((m) => m.hasPred !== false) ||
+      models[0];
+    setModelId(preferred.modelId);
   }, [models, modelId]);
+
+  // 周期与模型对账：用户切到 T+20 后，当前 T+5 模型必须让位给同周期模型，
+  // 否则后端会回填 horizon_warning，而图上的分数仍是 T+5 的语义。
+  useEffect(() => {
+    if (!modelId || models.length === 0) return;
+    const current = models.find((m) => m.modelId === modelId);
+    if (!current) return;
+    if (current.horizon == null || current.horizon === horizon) return;
+    const same = models.find((m) => m.horizon === horizon);
+    if (same) setModelId(same.modelId);
+  }, [horizon, models, modelId]);
 
   // 共识点名对账：切换市场会换掉整份模型列表，旧市场点名的 id 留在状态里会变成
   // 一次注定失败的现场推理（后端按 id 解析、解不到就记失败）。这里按下沉列表剔除，
@@ -208,10 +268,14 @@ export function useIndividualPrediction(
     };
   }, [inputCode, showSuggestions, search]);
 
-  const filteredModels = useMemo(
-    () => (categoryFilter === 'all' ? models : models.filter((m) => m.category === categoryFilter)),
-    [models, categoryFilter],
-  );
+  const filteredModels = useMemo(() => {
+    // 先按当前预测周期过滤：周期选择器的语义就是「用哪个 T+N 模型」，
+    // 把 T+5 模型留在 T+20 的下拉里只会制造 horizon_warning。
+    // 该周期一个模型都没有时保留全量（老模型可能没记录 horizon），由后端告警。
+    const horizonMatched = models.filter((m) => m.horizon === horizon);
+    const base = horizonMatched.length > 0 ? horizonMatched : models;
+    return categoryFilter === 'all' ? base : base.filter((m) => m.category === categoryFilter);
+  }, [models, categoryFilter, horizon]);
 
   const selectedModel = useMemo(
     () => models.find((m) => m.modelId === modelId) || models[0],
@@ -254,8 +318,13 @@ export function useIndividualPrediction(
       // 实际走势对照预测；数字口径（基准价/扇形）仍按基准日截断，无前视泄露
       const startStr = date ? date.subtract(KLINE_PRE_BASE_DAYS, 'day').format('YYYY-MM-DD') : undefined;
 
-      setPrediction(null);
-      setLoading(true);
+      // 同标的换模型/换周期：保留旧图，避免整块结果区闪成空白；换标的一律先清空，
+      // 防止上一只股票的预测扇形配着新股票 K 线（历史踩过）。
+      const sameSymbol = sym === symbol;
+      const hadPrediction = Boolean(predictionRef.current) && sameSymbol;
+      if (!hadPrediction) setPrediction(null);
+      setLoading(!hadPrediction);
+      setRefreshing(hadPrediction);
       try {
         const klineData = await fetchKline(sym, KLINE_LOOKBACK_DAYS, undefined, startStr);
         // 必须先清空再写入：早先只在「有数据」时 setKline，取数失败/该标的无行情时
@@ -265,12 +334,17 @@ export function useIndividualPrediction(
 
         const res = await inferenceCenterService.predictSingleStock({
           symbol: sym,
-          model_id: target.modelId || undefined,
+          // 用户显式选的模型必须真正下发；target.modelId 优先（排名联动），
+          // 否则用当前下拉选中项。早先这里只认 target.modelId，下拉等于装饰。
+          model_id: target.modelId || modelId || undefined,
           date: dateStr,
           horizon,
           market,
           consensus_model_ids: consensusModelIds.length ? consensusModelIds : undefined,
           execute: target.execute,
+          // 核心图先出：归因单独走 /predict-stock/drivers，树模型 SHAP 不再阻塞
+          // 分数与扇形（旧后端会忽略该字段并内联返回，下面的 effect 会自动复用）。
+          drivers_mode: 'none',
         });
 
         if (res && res.status === 'success') {
@@ -290,9 +364,10 @@ export function useIndividualPrediction(
         message.error(apiMessage || `推理接口异常: ${e?.message || '未知错误'}`);
       } finally {
         setLoading(false);
+        setRefreshing(false);
       }
     },
-    [date, horizon, market, modelId, consensusModelIds, fetchKline],
+    [date, horizon, market, modelId, symbol, consensusModelIds, fetchKline],
   );
 
   const commitCode = useCallback(
@@ -301,10 +376,11 @@ export function useIndividualPrediction(
       const normalized = normalize(raw.trim());
       setSymbol(normalized);
       setInputCode(normalized);
-      // 提交代码只读已有分数，不触发新的模型执行
-      void run({ symbol: normalized, execute: false });
+      // 提交代码只读已有分数，不触发新的模型执行；带上当前模型，避免换完模型
+      // 再回车又回到后端按周期挑第一个模型。
+      void run({ symbol: normalized, modelId: modelId || undefined, execute: false });
     },
-    [normalize, run],
+    [normalize, run, modelId],
   );
 
   const predictFor = useCallback(
@@ -314,14 +390,140 @@ export function useIndividualPrediction(
       setSymbol(normalized);
       setInputCode(normalized);
       // 联动场景：截面推理刚跑完，分数已落库，直读即可（execute=false 秒出）
+      if (options?.modelId) {
+        const linked = models.find((m) => m.modelId === options.modelId);
+        // 把周期/模型下拉同步到联动模型，避免图上是 T+20、下拉还停在 T+5。
+        if (linked?.horizon) setHorizon(linked.horizon);
+        setModelId(options.modelId);
+        // 本次联动已经显式跑了一次，别让自动重拉 effect 再补一发。
+        autoKeyRef.current = null;
+      }
       void run({ symbol: normalized, modelId: options?.modelId, execute: false });
     },
-    [normalize, run],
+    [normalize, run, models],
   );
 
   const execute = useCallback(() => {
-    void run({ symbol, execute: true });
-  }, [run, symbol]);
+    void run({ symbol, modelId: modelId || undefined, execute: true });
+  }, [run, symbol, modelId]);
+
+  // 下拉选完模型 / 切完周期立即出图：只读已落库分数（execute=false），
+  // 不要求用户再点「开始个股推理」。首次由空 modelId 对账到默认模型时跳过，
+  // 保持首屏不自动打接口的既有行为。
+  const autoKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!symbol || !modelId) return;
+    // key 不含 symbol：换标的由 commitCode/predictFor 显式跑一次，避免再触发一次重复请求；
+    // 模型/周期/基准日变化才是「同一张图换口径」，必须自动重拉。
+    const key = `${modelId}|${horizon}|${date ? date.format('YYYY-MM-DD') : ''}`;
+    if (autoKeyRef.current === null) {
+      autoKeyRef.current = key;
+      return;
+    }
+    if (autoKeyRef.current === key) return;
+    autoKeyRef.current = key;
+    const timer = setTimeout(() => {
+      void run({ symbol, modelId, execute: false });
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [symbol, modelId, horizon, date, run]);
+
+  // 与上方 K 线同窗口、同模型、同 as-of 的历史分数（右轴叠加 + 兑现日模式的底料）。
+  // endDate 必须给：as-of 之后已落库的分数属于前视，不能出现在图上。
+  // 用所选日期做终点并提前发起：预测接口较慢时分数可以先到，不串行等两次往返。
+  const asOfDate = prediction?.as_of_date || (date ? date.format('YYYY-MM-DD') : undefined);
+  const scoreQuery = useStockScoreSeries({
+    symbol: toSuffixSymbol(symbol),
+    market,
+    // 用「预测实际使用的模型」而不是下拉当前值：换模型时先保留旧分数，
+    // 等新预测回来再一起切换，避免新分数配旧扇形。
+    modelId: prediction?.model_id || modelId || undefined,
+    days: 260,
+    endDate: asOfDate,
+    enabled: Boolean(symbol && modelId),
+  });
+
+  // 归因 effect：旧后端 inline 返回时直接复用；新后端返回空 drivers 时单独取。
+  useEffect(() => {
+    if (!prediction) {
+      setDrivers([]);
+      setDriversSource(null);
+      setDriversNote(null);
+      setDriversModelName(null);
+      setDriversError(null);
+      setDriversLoading(false);
+      driversKeyRef.current = '';
+      return;
+    }
+    const inline = prediction.drivers ?? [];
+    if (inline.length || prediction.drivers_note) {
+      setDrivers(inline);
+      setDriversSource(prediction.drivers_source ?? null);
+      setDriversNote(prediction.drivers_note ?? null);
+      setDriversModelName(prediction.drivers_model_name ?? null);
+      setDriversError(null);
+      setDriversLoading(false);
+      return;
+    }
+    const key = `${prediction.symbol || symbol}|${prediction.model_id || ''}|${prediction.as_of_date || ''}|${prediction.horizon ?? horizon}`;
+    if (driversKeyRef.current === key) return;
+    driversKeyRef.current = key;
+    let cancelled = false;
+    setDrivers([]);
+    setDriversSource(null);
+    setDriversNote(null);
+    setDriversModelName(null);
+    setDriversError(null);
+    setDriversLoading(true);
+    inferenceCenterService
+      .getPredictionDrivers({
+        symbol: prediction.symbol || symbol,
+        model_id: prediction.model_id || undefined,
+        date: prediction.as_of_date || undefined,
+        horizon: prediction.horizon ?? horizon,
+        market,
+        // 带上核心响应解析出的实际上下文：execute 路径不落库时，异步端重跑可能
+        // 解析到另一个模型/日期，归因就会描述错对象。
+        as_of_date: prediction.as_of_date || undefined,
+        model_name: prediction.model_name || undefined,
+        consensus_model_ids: (prediction.consensus || [])
+          .map((c) => c.model_id)
+          .filter(Boolean),
+      })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.status === 'success') {
+          setDrivers(res.drivers ?? []);
+          setDriversSource(res.drivers_source ?? null);
+          setDriversNote(res.drivers_note ?? null);
+          setDriversModelName(res.drivers_model_name ?? null);
+        } else {
+          setDriversNote(res.drivers_note || res.error || '归因不可用');
+        }
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        const msg =
+          err?.response?.data?.detail || err?.response?.data?.error?.message || err?.message || '归因请求失败';
+        setDriversError(new Error(String(msg)));
+        setDriversNote(`归因请求失败：${msg}`);
+      })
+      .finally(() => {
+        if (!cancelled) setDriversLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    prediction?.model_id,
+    prediction?.as_of_date,
+    prediction?.symbol,
+    prediction?.horizon,
+    prediction,
+    symbol,
+    market,
+    horizon,
+  ]);
 
   const selectSuggestion = useCallback(
     (item: SuggestionItem) => {
@@ -351,8 +553,25 @@ export function useIndividualPrediction(
     consensusModelIds,
     setConsensusModelIds,
     loading,
+    refreshing,
     prediction,
     kline,
+    scorePoints: scoreQuery.points,
+    scoreModels: scoreQuery.models,
+    scoreWindow: scoreQuery.window,
+    scoreWindowWarning: scoreQuery.windowWarning,
+    scoreLastDate: scoreQuery.lastScoreDate,
+    scoreStaleDays: scoreQuery.staleDays,
+    scoreSource: scoreQuery.source,
+    scoreLoading: scoreQuery.loading,
+    scoreRefreshing: scoreQuery.refreshing,
+    scoreError: scoreQuery.error,
+    drivers,
+    driversSource,
+    driversNote,
+    driversModelName,
+    driversLoading,
+    driversError,
     suggestions,
     showSuggestions,
     setShowSuggestions,

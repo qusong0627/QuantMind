@@ -49,7 +49,7 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
     // days 由调用方控制窗口（个股终端传 750 保证覆盖最长 2 年的 K 线）
     // endDate 指定时窗口以基准日为终点，保证与上方K线重叠（个股推理30天小卡）
     modelTrainingService
-      .getStockInferenceHistory(code, days, modelId || undefined, endDate || undefined)
+      .getStockInferenceHistory(code, days, modelId || undefined, endDate || undefined, undefined, false)
       .then((resp) => {
         if (cancelled) return;
         const pts: Point[] = (resp.items ?? [])

@@ -8,6 +8,7 @@ import { KlineBar, KlineMarker, type TradeMarker } from '../types';
 import { boll, kdj, macd, rsi, sma, volMa, Series } from '../engine/indicators';
 import { useStockTerminal } from '../adapter';
 import type { KlineAdjust } from '../service';
+import { impliedTargetPrice, futureDatesForPeriod } from '../../shared/scoreWindow';
 
 export type { KlineMarker };
 
@@ -136,6 +137,24 @@ interface Props {
   /** 初始缩放窗口（%）：默认 0-100 全显；个股终端首屏聚焦最近 200 根 */
   zoomStart?: number;
   zoomEnd?: number;
+  /**
+   * T+N 预测窗口的未来交易日（含执行日与目标日）。
+   * 仅日 K 生效：周/月重采样无法可靠映射未来交易日，传入也忽略。
+   */
+  futureDates?: string[];
+  /**
+   * 预测窗口元数据：用于画窗口阴影、最新分数虚线与分数隐含目标价。
+   * 目标价只在 targetMode=return 时绘制（rank 口径不是收益率）。
+   */
+  predictionWindow?: {
+    entryDate: string;
+    targetDate: string;
+    horizon: number;
+    latestScore: number | null;
+    targetMode?: string | null;
+    lastClose: number;
+    staleDays?: number | null;
+  } | null;
   onBarClick?: (bar: KlineBar) => void;
   /** T-FE-07 复权口径角标（图内左上角；口径变更会改变价格可比性） */
   adjust?: KlineAdjust;
@@ -150,6 +169,7 @@ export function KlineChart({
   signals = [], btEquity = [], scoreSeries = [], scorePoints, showScoreSubplot = false, alerts = [], trades = [], refLines = [],
   markers = [],
   zoomStart = 0, zoomEnd = 100, onBarClick, adjust, onTradeClick, onSignalClick,
+  futureDates = [], predictionWindow = null,
 }: Props) {
   // 自适应容器高度：图表铺满父容器（个股终端 K 线卡内部空间），不再写死 320 留下大片空白；
   // 未测量到时回退 height 属性（其它定高调用方）
@@ -170,27 +190,57 @@ export function KlineChart({
   const goldenLine = useMemo(() => defaultRefLine(theme.refLineLabel), [theme.refLineLabel]);
 
   const option = useMemo(() => {
-    const dates = bars.map(b => b.date);
-    const closes = bars.map(b => b.close);
-    const volumes = bars.map(b => b.volume ?? 0);
+    // 时间轴 = 历史 K 线 ∪ 未来交易日。
+    // 日 K 用后端给的完整 window_dates（执行日 → 目标日）；周/月只延长
+    // 执行日/目标日两个点（无法把未来交易日可靠映射到周/月桶，但目标日本身
+    // 是真实交易日，可以单点标注，不会伪造周/月 K 线）。
+    const barDates = bars.map(b => b.date);
+    const future = futureDatesForPeriod(
+      period,
+      futureDates ?? [],
+      barDates,
+      predictionWindow?.entryDate,
+      predictionWindow?.targetDate,
+    );
+    const dates = [...barDates, ...future];
+    const barByDate = new Map(bars.map(b => [b.date, b]));
+    const padTail = <T,>(arr: T[]): (T | null)[] => [...arr, ...new Array(future.length).fill(null)];
+
+    const barCloses = bars.map(b => b.close);
+    const volumes = padTail(bars.map(b => b.volume ?? 0));
     const idxByDate = new Map(dates.map((d, i) => [d, i]));
-    const ma5 = config.ma ? sma(closes, 5) : null;
-    const ma10 = config.ma ? sma(closes, 10) : null;
-    const ma20 = config.ma ? sma(closes, 20) : null;
-    const ma60 = config.ma ? sma(closes, 60) : null;
-    const bb = config.boll ? boll(closes) : null;
-    const macdRes = config.subplots.includes('macd') ? macd(closes) : null;
-    const kdjRes = config.subplots.includes('kdj') ? kdj(bars) : null;
-    const rsiRes = config.subplots.includes('rsi') ? rsi(closes) : null;
-    const volMa5 = config.subplots.includes('vol') ? volMa(bars, 5) : null;
-    const volMa10 = config.subplots.includes('vol') ? volMa(bars, 10) : null;
+    const ma5 = config.ma ? padTail(sma(barCloses, 5)) : null;
+    const ma10 = config.ma ? padTail(sma(barCloses, 10)) : null;
+    const ma20 = config.ma ? padTail(sma(barCloses, 20)) : null;
+    const ma60 = config.ma ? padTail(sma(barCloses, 60)) : null;
+    const bb = config.boll
+      ? (() => {
+          const r = boll(barCloses);
+          return { mid: padTail(r.mid), upper: padTail(r.upper), lower: padTail(r.lower) };
+        })()
+      : null;
+    const macdRes = config.subplots.includes('macd')
+      ? (() => {
+          const r = macd(barCloses);
+          return { dif: padTail(r.dif), dea: padTail(r.dea), hist: padTail(r.hist) };
+        })()
+      : null;
+    const kdjRes = config.subplots.includes('kdj')
+      ? (() => {
+          const r = kdj(bars);
+          return { k: padTail(r.k), d: padTail(r.d), j: padTail(r.j) };
+        })()
+      : null;
+    const rsiRes = config.subplots.includes('rsi') ? padTail(rsi(barCloses)) : null;
+    const volMa5 = config.subplots.includes('vol') ? padTail(volMa(bars, 5)) : null;
+    const volMa10 = config.subplots.includes('vol') ? padTail(volMa(bars, 10)) : null;
 
     // 指数叠加：以各自首日为基准归一化为百分比
     const overlaySeries = overlays.map(ov => {
       const byDate = new Map(ov.closes.map(c => [c.date, c.close]));
       const base = ov.closes.length ? ov.closes[0].close : 1;
-      const aligned = bars.map(b => {
-        const c = byDate.get(b.date);
+      const aligned = dates.map(date => {
+        const c = byDate.get(date);
         return c != null && base > 0 ? Number((((c - base) / base) * 100).toFixed(2)) : null;
       });
       return { name: ov.name, data: aligned, color: ov.color };
@@ -202,7 +252,18 @@ export function KlineChart({
     const GAP = 28;                    // 主图与第一个副图间距
     const SUB_GAP = 24;                // 副图之间间距
     const TOP = 24;                    // 顶部留出图例行
-    const hasScoreSubplot = !!(showScoreSubplot && scorePoints?.length);
+    const hasScoreSubplot = !!(showScoreSubplot && (scorePoints?.length || predictionWindow?.latestScore != null));
+    // 预测窗口：只有 entry/target 都在当前时间轴内才画阴影；目标价只在 return 口径画。
+    const entryIdx = predictionWindow ? idxByDate.get(predictionWindow.entryDate) : undefined;
+    const targetIdx = predictionWindow ? idxByDate.get(predictionWindow.targetDate) : undefined;
+    const hasWindow = entryIdx != null && targetIdx != null && targetIdx >= entryIdx;
+    const targetPrice = predictionWindow
+      ? impliedTargetPrice(
+          predictionWindow.latestScore,
+          predictionWindow.lastClose,
+          predictionWindow.targetMode,
+        )
+      : null;
     // 分数副图高度按整图高度动态取 ≈38%（K线主图区约占 60%）：默认就给底部分数图大框
     const scoreSubH = hasScoreSubplot ? Math.max(120, Math.round((chartH - TOP - GAP - 26) * 0.38)) : 0;
     const subCount = config.subplots.length + (hasScoreSubplot ? 1 : 0);
@@ -256,12 +317,66 @@ export function KlineChart({
       });
     }
 
-    // 蜡烛
+    // 蜡烛：未来窗口没有行情，用 '-' 占位，不画假蜡烛
     series.push({
       name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0,
-      data: bars.map(b => [b.open, b.close, b.low, b.high]),
+      data: dates.map(d => {
+        const b = barByDate.get(d);
+        return b ? [b.open, b.close, b.low, b.high] : '-';
+      }),
       itemStyle: { color: COLORS.up, color0: COLORS.down, borderColor: COLORS.up, borderColor0: COLORS.down },
+      markArea: hasWindow && predictionWindow
+        ? {
+            silent: true,
+            itemStyle: { color: 'rgba(99, 102, 241, 0.06)' },
+            label: {
+              show: true,
+              position: 'insideTop',
+              formatter: `T+${predictionWindow.horizon} 预测窗口`,
+              color: '#6366f1',
+              fontSize: 9,
+              fontWeight: 700,
+            },
+            data: [[
+              { xAxis: predictionWindow.entryDate },
+              { xAxis: predictionWindow.targetDate },
+            ]],
+          }
+        : undefined,
     });
+
+    // 分数隐含目标价（仅 return 口径）：窗口内画一条虚线，目标日打点。
+    // 这不是分位预测，只是把「最新分数 × 最新收盘」画出来；rank 口径不画。
+    if (targetPrice != null && hasWindow) {
+      const winStart = Number(entryIdx);
+      const winEnd = Number(targetIdx);
+      series.push({
+        name: '分数隐含目标价',
+        type: 'line',
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: dates.map((_, i) => (i >= winStart && i <= winEnd ? targetPrice : null)),
+        symbol: 'none',
+        connectNulls: true,
+        lineStyle: { color: '#f59e0b', width: 1.2, type: 'dashed' },
+        itemStyle: { color: '#f59e0b' },
+        markPoint: {
+          symbol: 'circle',
+          symbolSize: 8,
+          data: [{ coord: [winEnd, targetPrice], value: targetPrice }],
+          itemStyle: { color: '#f59e0b', borderColor: '#fff', borderWidth: 1 },
+          label: {
+            show: true,
+            position: 'top',
+            formatter: `目标价 ${targetPrice.toFixed(2)}`,
+            color: '#b45309',
+            fontSize: 9,
+            fontWeight: 700,
+          },
+        },
+        z: 4,
+      });
+    }
 
     const line = (name: string, data: Series, color: string, yAxisIdx = 0, width = 1.2) =>
       series.push({
@@ -291,7 +406,7 @@ export function KlineChart({
       line('BOLL上轨', bb.upper, COLORS.boll);
       line('BOLL下轨', bb.lower, COLORS.boll);
     }
-    overlaySeries.forEach((ov, i) => line(ov.name, ov.data, ov.color, 1, 1.2));
+    overlaySeries.forEach((ov) => line(ov.name, ov.data, ov.color, 1, 1.2));
 
     // 策略净值叠加
     if (btEquity.length) {
@@ -315,7 +430,8 @@ export function KlineChart({
       for (const sig of signals) {
         const i = idxByDate.get(sig.date);
         if (i == null) continue;
-        const bar = bars[i];
+        const bar = barByDate.get(sig.date);
+        if (!bar) continue;
         // 三角落在 K 线下方（靠前）或上方（靠后），几何本身只表示位置高低
         const v = sig.side === 'BUY' ? bar.low * 0.99 : bar.high * 1.01;
         if (sig.side === 'BUY') buyData.push({ value: [i, Number(v.toFixed(2))], sig });
@@ -340,7 +456,8 @@ export function KlineChart({
       for (const t of trades) {
         const i = idxByDate.get(t.date);
         if (i == null) continue;
-        const bar = bars[i];
+        const bar = barByDate.get(t.date);
+        if (!bar) continue;
         const v = t.side === 'buy' ? bar.low * 0.985 : bar.high * 1.015;
         if (t.side === 'buy') buyT.push({ value: [i, Number(v.toFixed(2))], t });
         else sellT.push({ value: [i, Number(v.toFixed(2))], t });
@@ -375,7 +492,13 @@ export function KlineChart({
       if (sp === 'vol') {
         series.push({
           name: '成交量', type: 'bar', xAxisIndex: xi, yAxisIndex: yi,
-          data: volumes.map((v, i) => ({ value: v, itemStyle: { color: bars[i].close >= bars[i].open ? COLORS.volUp : COLORS.volDown } })),
+          data: volumes.map((v, i) => {
+            const b = barByDate.get(dates[i]);
+            return {
+              value: v,
+              itemStyle: { color: b && b.close >= b.open ? COLORS.volUp : COLORS.volDown },
+            };
+          }),
         });
         series.push({ name: 'VMA5', type: 'line', xAxisIndex: xi, yAxisIndex: yi, data: volMa5, symbol: 'none', lineStyle: { width: 1, color: COLORS.ma5 }, z: 3 });
         series.push({ name: 'VMA10', type: 'line', xAxisIndex: xi, yAxisIndex: yi, data: volMa10, symbol: 'none', lineStyle: { width: 1, color: COLORS.ma10 }, z: 3 });
@@ -397,7 +520,7 @@ export function KlineChart({
     });
 
     // ── 推理分数副图（主图下方独立副图，与主图同 x 轴对齐）──
-    if (hasScoreSubplot && scorePoints?.length) {
+    if (hasScoreSubplot) {
       const gi = grids.length;
       const xi = xAxes.length;
       const yi = yAxes.length;
@@ -407,41 +530,80 @@ export function KlineChart({
         axisLine: AXIS_LINE, axisTick: { show: false },
         axisLabel: { ...AXIS_LABEL, color: '#94a3b8' },
       });
-      const vals = scorePoints.map((p) => p.value);
-      const lo = Math.min(...vals);
-      const hi = Math.max(...vals);
+      const vals = [
+        ...(scorePoints ?? []).map((p) => p.value),
+        ...(predictionWindow?.latestScore != null ? [predictionWindow.latestScore] : []),
+      ].filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+      const lo = vals.length ? Math.min(...vals) : 0;
+      const hi = vals.length ? Math.max(...vals) : 1;
       const span = hi - lo;
-      const pad = span > 1e-9 ? span * 0.15 : Math.max(0.002, Math.abs(hi) * 0.3);
       // 刻度小数位随量级收紧：跨度过小时 toFixed(2) 会全部显示 0.00
       const digits = span < 0.01 ? 4 : span < 0.1 ? 3 : 2;
       yAxes.push({ type: 'value', gridIndex: gi, scale: true, axisLabel: { ...AXIS_LABEL, formatter: (v: number) => Number(v).toFixed(digits) }, axisLine: { lineStyle: { color: '#6366f1' } }, splitLine: SPLIT_LINE });
       gridAxes[gi] = { x: xi, y: yi };
-      const scoreMap = new Map(scorePoints.map((p) => [p.date, p.value]));
-      series.push({
-        name: '推理分数', type: 'line', xAxisIndex: xi, yAxisIndex: yi,
-        data: bars.map((b) => {
-          // 日线精确到日；周/月取该周期内最后一条分数（weekKey 模块级，周一为周起点）
-          if (period === 'daily') {
-            const v = scoreMap.get(b.date);
-            return v != null ? Number(v) : null;
-          }
-          let last: number | null = null;
-          for (const p of scorePoints) {
-            if (period === 'weekly') {
-              if (weekKey(p.date) === weekKey(b.date)) last = p.value;
-            } else if (p.date.slice(0, 7) === b.date.slice(0, 7)) {
-              last = p.value;
+      const scoreMap = new Map((scorePoints ?? []).map((p) => [p.date, p.value]));
+      let scoreSeriesIdx = -1;
+      if ((scorePoints ?? []).length) {
+        series.push({
+          name: '推理分数', type: 'line', xAxisIndex: xi, yAxisIndex: yi,
+          data: dates.map((d) => {
+            const bar = barByDate.get(d);
+            // 日线精确到日；周/月取该周期内最后一条分数（weekKey 模块级，周一为周起点）
+            if (period === 'daily' || !bar) {
+              const v = scoreMap.get(d);
+              return v != null ? Number(v) : null;
             }
-          }
-          return last != null ? Number(last) : null;
-        }),
-        symbol: 'none', lineStyle: { width: 1.8, color: '#6366f1' }, itemStyle: { color: '#6366f1' }, areaStyle: { color: 'rgba(99,102,241,0.12)' }, z: 5, connectNulls: false,
-      });
-      // 0 轴参考线
-      series[series.length - 1].markLine = {
-        silent: true, symbol: 'none',
-        data: [{ yAxis: 0, lineStyle: { color: '#94a3b8', type: 'dashed', width: 1 }, label: { formatter: '0', fontSize: 9, color: '#94a3b8' } }],
-      } as any;
+            let last: number | null = null;
+            for (const p of scorePoints ?? []) {
+              if (period === 'weekly') {
+                if (weekKey(p.date) === weekKey(bar.date)) last = p.value;
+              } else if (p.date.slice(0, 7) === bar.date.slice(0, 7)) {
+                last = p.value;
+              }
+            }
+            return last != null ? Number(last) : null;
+          }),
+          symbol: 'none', lineStyle: { width: 1.8, color: '#6366f1' }, itemStyle: { color: '#6366f1' }, areaStyle: { color: 'rgba(99,102,241,0.12)' }, z: 5, connectNulls: false,
+        });
+        scoreSeriesIdx = series.length - 1;
+      }
+
+      // 预测段：最新分数以虚线水平延伸到目标日（不是逐日价格路径）。
+      const latestDate = (scorePoints ?? []).reduce(
+        (max, p) => (p.date > max ? p.date : max),
+        '',
+      );
+      if (predictionWindow?.latestScore != null && latestDate && predictionWindow.targetDate) {
+        const projectStart = predictionWindow.entryDate || latestDate;
+        const projection = dates.map((d) =>
+          d >= projectStart && d <= predictionWindow.targetDate
+            ? predictionWindow.latestScore
+            : null,
+        );
+        if (projection.some((v) => v != null)) {
+          series.push({
+            name: '分数·预测',
+            type: 'line',
+            xAxisIndex: xi,
+            yAxisIndex: yi,
+            data: projection,
+            symbol: 'none',
+            connectNulls: true,
+            lineStyle: { width: 1.5, color: '#6366f1', type: 'dashed' },
+            itemStyle: { color: '#6366f1' },
+            z: 5,
+          });
+          if (scoreSeriesIdx < 0) scoreSeriesIdx = series.length - 1;
+        }
+      }
+
+      // 0 轴参考线：挂在主分数线上；没有历史分数时挂在预测段上。
+      if (scoreSeriesIdx >= 0) {
+        (series[scoreSeriesIdx] as any).markLine = {
+          silent: true, symbol: 'none',
+          data: [{ yAxis: 0, lineStyle: { color: '#94a3b8', type: 'dashed', width: 1 }, label: { formatter: '0', fontSize: 9, color: '#94a3b8' } }],
+        };
+      }
       subTop += scoreSubH + SUB_GAP;
     }
 
@@ -451,18 +613,19 @@ export function KlineChart({
         const scoreMap = new Map(sr.points.map(p => [p.date, p.fusion]));
         series.push({
           name: `分数·${sr.model.slice(0, 10)}`, type: 'line', xAxisIndex: 0, yAxisIndex: scoreYI,
-          data: bars.map(b => {
+          data: dates.map(d => {
+            const bar = barByDate.get(d);
             // 日线精确到日；周/月取该周期内最后一条可用分数（周期落在 K 线日期上）
-            if (period === 'daily') {
-              const f = scoreMap.get(b.date);
+            if (period === 'daily' || !bar) {
+              const f = scoreMap.get(d);
               return f != null ? Number(f) : null;
             }
             let last: number | null = null;
             for (const p of sr.points) {
               if (p.fusion == null) continue;
               if (period === 'weekly') {
-                if (weekKey(p.date) === weekKey(b.date)) last = p.fusion;
-              } else if (p.date.slice(0, 7) === b.date.slice(0, 7)) {
+                if (weekKey(p.date) === weekKey(bar.date)) last = p.fusion;
+              } else if (p.date.slice(0, 7) === bar.date.slice(0, 7)) {
                 last = p.fusion;
               }
             }
@@ -477,12 +640,12 @@ export function KlineChart({
       // 策略提醒标记（菱形，按 severity 着色，画在分数轴上）
       if (alerts.length) {
         const byDate = new Map(alerts.map(a => [a.date, a]));
-        const alertData = bars
-          .map((b, i) => {
-            const a = byDate.get(b.date);
+        const alertData = dates
+          .map((d, i) => {
+            const a = byDate.get(d);
             if (!a) return null;
             const sr = scoreSeries[0];
-            const f = a.score ?? sr?.points.find(p => p.date === b.date)?.fusion ?? null;
+            const f = a.score ?? sr?.points.find(p => p.date === d)?.fusion ?? null;
             return f == null ? null : { value: [i, Number(f)], a };
           })
           .filter(Boolean);
@@ -608,7 +771,7 @@ export function KlineChart({
       ],
       series,
     };
-  }, [bars, config, overlays, chartH, signals, btEquity, scoreSeries, scorePoints, showScoreSubplot, period, alerts, trades, refLines, markers, zoomStart, zoomEnd, goldenLine, theme.klineBottomReserve, theme.sliderBottom, theme.sliderHeight]);
+  }, [bars, config, overlays, chartH, signals, btEquity, scoreSeries, scorePoints, showScoreSubplot, period, alerts, trades, refLines, markers, zoomStart, zoomEnd, goldenLine, theme.klineBottomReserve, theme.sliderBottom, theme.sliderHeight, futureDates, predictionWindow]);
 
   const onEvents = (onBarClick || onTradeClick || onSignalClick) ? {
     click: (params: any) => {

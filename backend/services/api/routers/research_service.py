@@ -23,7 +23,9 @@ from backend.services.engine.data_platform.quantdb_hub import _resolve_data_dir
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.model_assets import model_asset_gaps
 from backend.shared.inference_stats import compute_score_distribution
+from backend.shared.pred_freshness import pred_last_date
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+from backend.shared.score_window import CalendarUnavailable, label_window
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
@@ -1202,7 +1204,39 @@ def _humanize_model_name(model_id: str) -> str:
     return model_id.replace("_", " ").title()
 
 
-async def get_available_models(tid: str, uid: str, market: str | None = None) -> dict[str, Any]:
+def _artifact_meta(storage_path: str | None) -> dict[str, Any]:
+    """模型目录的轻量产物信息（只做文件存在性/时间，不扫 parquet）。
+
+    ``hasPred`` 是选中前就该看见的事实：没有 pred.parquet 的模型可以训练完成、
+    也可以被注册，但分数曲线一定为空。精确最后分数日由 score-series 的单模型
+    字段返回（逐个模型读 parquet 会把一次列表请求拖到十几秒）。
+    """
+    path = Path(str(storage_path or "").strip())
+    if not storage_path or not path.is_dir():
+        return {"hasPred": False, "predMtime": None, "predLastDate": None}
+    for candidate in (path / "pred.parquet", path / "pred" / "pred.parquet"):
+        if candidate.is_file():
+            try:
+                mtime = datetime.fromtimestamp(candidate.stat().st_mtime).date().isoformat()
+            except OSError:
+                mtime = None
+            return {
+                "hasPred": True,
+                "predMtime": mtime,
+                "predLastDate": pred_last_date(storage_path),
+            }
+    return {"hasPred": False, "predMtime": None, "predLastDate": None}
+
+
+def _coerce_lag(value: Any) -> int:
+    try:
+        lag = int(str(value).strip()) if value is not None else 1
+    except (TypeError, ValueError):
+        lag = 1
+    return max(0, lag)
+
+
+async def _load_available_models(tid: str, uid: str, market: str | None = None) -> dict[str, Any]:
     async with get_session(read_only=True) as session:
         # 市场口径唯一实现（SQL 侧 qm_market_of 同源 DDL，见 data/upgrade_v1.1.4.sql）
         from backend.shared.model_registry import _canonical_market
@@ -1223,6 +1257,9 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
                     -- 训练周期（T+N）：周期分派与前端周期可用性都以此为准，
                     -- 早先不查此列 → 前端只能把 horizon 当装饰回显
                     um.metadata_json->>'target_horizon_days' AS horizon,
+                   um.metadata_json->>'execution_lag_days' AS execution_lag_days,
+                   um.is_default AS is_default,
+                   um.status AS status,
                    um.metadata_json->'metrics' AS metrics,
                    um.metrics_json AS metrics_json,
                    um.storage_path AS storage_path,
@@ -1251,8 +1288,12 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
                     "targetMode": r["target_mode"] or "",
                     "predictionMode": r["prediction_mode"] or "",
                     "horizon": _coerce_horizon(r["horizon"]),
+                    "executionLagDays": _coerce_lag(r["execution_lag_days"]),
+                    "isDefault": bool(r["is_default"]),
+                    "status": r["status"] or "",
                     "ic": _extract_ic(r["metrics"], r["metrics_json"]),
                     "hasInference": bool(r["has_inference"]),
+                    **_artifact_meta(r["storage_path"]),
                     # 资产缺项（空 = 健全）：注册表里有行但磁盘产物缺失的模型
                     # 推理必失败，必须在选中之前就看得见
                     "assetGaps": model_asset_gaps(r["storage_path"]),
@@ -1267,7 +1308,7 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
         disk_model_metas = glob.glob(f"{users_root}/{tid}/{uid}/*/metadata.json")
         if not disk_model_metas:
             disk_model_metas = glob.glob(f"{users_root}/*/*/*/metadata.json")
-        
+
         seen_mids = {m["modelId"] for m in models}
         for mp in disk_model_metas:
             try:
@@ -1291,11 +1332,15 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
                         "targetMode": meta.get("target_mode") or "",
                         "predictionMode": meta.get("prediction_mode") or "",
                         "horizon": _coerce_horizon(meta.get("target_horizon_days")),
+                        "executionLagDays": _coerce_lag(meta.get("execution_lag_days")),
+                        "isDefault": False,
+                        "status": "ready",
                         # 无 IC 记录就必须是 None。这里早先兜底 `or 0.128`——一个凭空
                         # 捏造的 IC 会原样显示成模型的真实评估指标，出现在投研界面里
                         # 与「伪造回测结果」同类。前端已按「—」渲染 None。
                         "ic": _extract_ic(metrics, meta.get("metrics_json")),
                         "hasInference": (p.parent / "inference.py").is_file(),
+                        **_artifact_meta(str(p.parent)),
                         # 磁盘发现路径：metadata.json 能被 glob 到，目录必然存在
                         "assetGaps": model_asset_gaps(str(p.parent)),
                     })
@@ -1303,6 +1348,29 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
                 pass
 
         return {"code": 200, "data": {"models": models}}
+
+
+# 模型列表按 (用户, 市场) 缓存 60s：/research/models 会被个股预测、周期选择器、
+# 模型下拉各调一次，每次都要 DB + 磁盘 glob；60s 足够短到新模型下一分钟出现。
+_AVAILABLE_MODELS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_AVAILABLE_MODELS_TTL = 60.0
+_AVAILABLE_MODELS_CACHE_MAX = 64
+
+
+async def get_available_models(
+    tid: str, uid: str, market: str | None = None
+) -> dict[str, Any]:
+    """可用模型列表（带短 TTL 进程缓存）。"""
+    key = f"{tid}|{uid}|{str(market or '').strip().upper()}"
+    now = time.time()
+    hit = _AVAILABLE_MODELS_CACHE.get(key)
+    if hit and now - hit[0] < _AVAILABLE_MODELS_TTL:
+        return hit[1]
+    result = await _load_available_models(tid, uid, market)
+    if len(_AVAILABLE_MODELS_CACHE) >= _AVAILABLE_MODELS_CACHE_MAX:
+        _AVAILABLE_MODELS_CACHE.clear()
+    _AVAILABLE_MODELS_CACHE[key] = (now, result)
+    return result
 
 
 def _coerce_horizon(value: Any) -> int | None:
@@ -1618,6 +1686,17 @@ def _read_pred_single_symbol(
             return f"regexp_replace(CAST({sym_col} AS VARCHAR), '[^0-9]', '', 'g')"
         return f"regexp_replace(UPPER(CAST({sym_col} AS VARCHAR)), '[^A-Z0-9]', '', 'g')"
 
+    # 缓存键含文件 mtime：模型重训/追加 pred 后自动失效；同一 (模型,日期,标的)
+    # 在共识兜底/多次翻看里只读一次。
+    try:
+        _mtime = parquet_file.stat().st_mtime
+    except OSError:
+        _mtime = 0.0
+    _cache_key = f"{parquet_file}|{_mtime}|{str(trade_date)[:10]}|{'cn' if is_cn else 'tk'}:{sym_key}"
+    _hit = _PRED_SINGLE_CACHE.get(_cache_key)
+    if _hit and time.time() - _hit[0] < _PRED_SINGLE_CACHE_TTL:
+        return _hit[1]
+
     try:
         import duckdb
 
@@ -1647,9 +1726,19 @@ def _read_pred_single_symbol(
                 """,
                 [str(trade_date), sym_key],
             ).fetchone()
-            if not row or row[0] is None:
-                return None
-            return float(row[0])
+            value = float(row[0]) if row and row[0] is not None else None
+            if len(_PRED_SINGLE_CACHE) >= _PRED_SINGLE_CACHE_MAX:
+                _now = time.time()
+                _stale = [
+                    k for k, (at, _v) in _PRED_SINGLE_CACHE.items()
+                    if _now - at >= _PRED_SINGLE_CACHE_TTL
+                ]
+                for k in _stale:
+                    _PRED_SINGLE_CACHE.pop(k, None)
+                if len(_PRED_SINGLE_CACHE) >= _PRED_SINGLE_CACHE_MAX:
+                    _PRED_SINGLE_CACHE.clear()
+            _PRED_SINGLE_CACHE[_cache_key] = (time.time(), value)
+            return value
         finally:
             try:
                 con.close()
@@ -1662,6 +1751,11 @@ def _read_pred_single_symbol(
 
 _PRED_DATES_CACHE: dict[str, tuple[float, list[str]]] = {}
 _PRED_DATES_CACHE_TTL = 600.0
+# 单标的单日 pred 分数缓存：共识兜底最多扫 6 个模型，但同一 (模型,日期,标的)
+# 在多用户/多次翻看里会反复命中；缓存后第二次请求不再开 parquet。
+_PRED_SINGLE_CACHE: dict[str, tuple[float, float | None]] = {}
+_PRED_SINGLE_CACHE_TTL = 600.0
+_PRED_SINGLE_CACHE_MAX = 2048
 
 
 async def _score_consensus_models(
@@ -2979,6 +3073,117 @@ _SHAP_MAX_DRIVERS = 6
 _SHAP_FALLBACK_MODEL_LIMIT = 3
 _SHAP_MIN_DRIVERS = 3  # 真值特征少于 3 个上榜则放弃 SHAP，降级启发式
 
+
+async def _compute_drivers_payload(
+    *,
+    chosen_model_id: str,
+    chosen_model_name: str,
+    normalized_symbol: str,
+    resolved_date: str,
+    market: str,
+    available_models: list[dict[str, Any]],
+    candidate_model_ids: list[str],
+) -> dict[str, Any]:
+    """SHAP 归因 + 同批次树模型回退（核心预测与异步端点共用）。
+
+    头条模型是深度学习架构时没有 pred_contrib 通道；同一批次里往往还有树模型
+    给这只票打了分。退而取**真实**的树模型归因，并在 note 里标明「描述的是
+    哪个模型」，不让用户把替代模型的解释当成头条模型的。
+
+    返回扁平字典，直接并入 predict-stock 响应字段。
+    """
+    drivers: list[dict[str, Any]] = []
+    drivers_source: str | None = None
+    drivers_model_id: str | None = None
+    drivers_model_name: str | None = None
+    shap_reason: str | None = None
+    shap_meta_source: str | None = None
+
+    try:
+        shap_drivers, shap_reason, shap_meta_source = await asyncio.wait_for(
+            asyncio.to_thread(
+                _compute_shap_drivers_sync,
+                chosen_model_id,
+                normalized_symbol,
+                resolved_date,
+                market,
+            ),
+            timeout=_SHAP_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        shap_drivers, shap_reason = [], "timeout"
+        logger.warning("SHAP 归因超时（>%ss），模型 %s", _SHAP_TIMEOUT_SEC, chosen_model_id)
+    except Exception as e:  # noqa: BLE001
+        shap_drivers, shap_reason = [], "error"
+        logger.warning("SHAP 归因失败，模型 %s: %s", chosen_model_id, e)
+    if shap_drivers:
+        drivers = shap_drivers
+        drivers_source = "shap"
+        drivers_model_id = chosen_model_id
+        shap_reason = None
+
+    if not drivers and shap_reason and shap_reason.startswith("framework_unsupported:"):
+        tried: set[str] = {chosen_model_id}
+        for cand_id in candidate_model_ids:
+            if len(tried) > _SHAP_FALLBACK_MODEL_LIMIT:
+                break
+            cand_id = str(cand_id or "").strip()
+            if not cand_id or cand_id in tried:
+                continue
+            tried.add(cand_id)
+            try:
+                cand_drivers, _cand_reason, cand_meta_source = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _compute_shap_drivers_sync,
+                        cand_id,
+                        normalized_symbol,
+                        resolved_date,
+                        market,
+                    ),
+                    timeout=_SHAP_TIMEOUT_SEC,
+                )
+            except Exception:  # noqa: BLE001 - 单个候选失败不影响其余候选
+                continue
+            if cand_drivers:
+                drivers = cand_drivers
+                drivers_source = "shap"
+                drivers_model_id = cand_id
+                drivers_model_name = next(
+                    (m.get("name") for m in available_models if m.get("modelId") == cand_id),
+                    None,
+                ) or _humanize_model_name(cand_id)
+                shap_reason = None
+                shap_meta_source = cand_meta_source
+                logger.info(
+                    "头条模型 %s 无树归因通道，改用同批次树模型 %s 的 SHAP",
+                    chosen_model_id,
+                    cand_id,
+                )
+                break
+
+    drivers_note = _shap_reason_note(shap_reason)
+    if drivers and drivers_model_id and drivers_model_id != chosen_model_id:
+        drivers_note = (
+            f"头条模型（{chosen_model_name}）为深度学习架构，不提供树模型 SHAP 通道；"
+            f"以下归因来自同批次对同一标的打分的树模型「{drivers_model_name}」，"
+            "描述的是该模型的决策依据，可用于判断信号方向，但不等价于头条模型的解释。"
+        )
+    elif drivers and shap_meta_source == "registry_recovered":
+        drivers_note = (
+            "该模型目录内的 metadata.json 与其实际权重文件不一致（疑似同批次训练覆写），"
+            "本次归因已按模型注册表记录恢复后计算；建议重新训练或修复该模型产物。"
+        )
+
+    return {
+        "drivers": drivers,
+        "drivers_source": drivers_source,
+        "drivers_model_id": drivers_model_id,
+        "drivers_model_name": drivers_model_name,
+        "drivers_note": drivers_note,
+        "shap_reason": shap_reason,
+        "shap_meta_source": shap_meta_source,
+    }
+
 # 共识样本下限：少于该数量的模型「算得出占比但构不成共识」，前端须据此改措辞
 CONSENSUS_THIN_MIN = 3
 
@@ -3363,8 +3568,10 @@ async def predict_single_stock(
     market: str = "CN",
     consensus_model_ids: list[str] | None = None,
     execute: bool = False,
+    include_drivers: bool = True,
 ) -> dict[str, Any]:
     """单只股票未来走势与区间分位数预测服务。"""
+    _t0 = time.perf_counter()
     # symbol 归一必须按市场选口径：一律套 A 股前缀式（to_prefix）会让港股 4 位裸码
     # 「2057」原样透传（既非 6 位数字也非 SH/SZ 前缀，函数原样返回），QuantDB/聚合表
     # 按 2057 查不到 → 404「HK 市场无 2057 的历史行情数据」。推理中心港股页的排名列表
@@ -3744,6 +3951,7 @@ async def predict_single_stock(
         "no_same_day_score": 0,  # 有产物但该基准日无该标的分数
         "read_error": 0,        # 读取异常
         "exec_failed": 0,       # 用户点名后现场补算仍失败
+        "no_recent_inference": 0,  # 近 30 天没跑过推理（不参与机会性兜底扫描）
     }
     # 兜底扫描的范围与「共识口径」一致：用户点名了模型就只扫点名的，
     # 否则会把没被点名的模型也塞进共识，出现 scored > total 的荒谬覆盖度。
@@ -3752,6 +3960,43 @@ async def predict_single_stock(
         if selected_set
         else available_models
     )
+    # 机会性兜底只扫「近 30 天真的跑过推理」的模型：CN 有 100+ 个注册模型，
+    # 逐个打开 100MB 级 pred.parquet 会把一次单票请求拖到十几秒。用户显式点名
+    # 的模型不受此限（点名是明确意图，必须按 id 解析后如实报成功/失败）。
+    if not selected_set and consensus_pool_models:
+        try:
+            _recent_since = date.today() - timedelta(days=30)
+            async with get_session(read_only=True) as _rs:
+                _recent_ids = set(
+                    (
+                        await _rs.execute(
+                            text(
+                                """
+                                SELECT DISTINCT model_id FROM qm_model_inference_runs
+                                WHERE tenant_id = :tid AND user_id = :uid
+                                  AND status = 'completed'
+                                  AND COALESCE(data_trade_date, prediction_trade_date) >= :since
+                                LIMIT 50
+                                """
+                            ),
+                            {"tid": tid, "uid": uid, "since": _recent_since},
+                        )
+                    ).scalars().all()
+                )
+            _recent_ids = {str(x).strip() for x in _recent_ids if str(x or "").strip()}
+            if _recent_ids:
+                _kept = [
+                    m for m in consensus_pool_models
+                    if str(m.get("modelId") or "").strip() in _recent_ids
+                ]
+                consensus_skip["no_recent_inference"] += len(consensus_pool_models) - len(_kept)
+                consensus_pool_models = _kept
+            else:
+                # 一个近 30 天有推理的模型都没有：不做机会性扫描（main_row 仍会展示）。
+                consensus_skip["no_recent_inference"] += len(consensus_pool_models)
+                consensus_pool_models = []
+        except Exception as exc:  # noqa: BLE001 - 查询失败退回旧行为，不阻断主流程
+            logger.debug("[predict_single_stock] 近 30 天模型过滤失败，保留全量: %s", exc)
     # 现场补算用户显式点名的共识模型（T-CONS-02）——**先于**机会性兜底扫描。
     # 顺序有意义：用户点名是明确意图，兜底是顺手补齐；先跑点名，兜底才会看到
     # 这些模型已在 consensus_rows 里而跳过，否则它们会被记成「该日无分数」，
@@ -3881,92 +4126,35 @@ async def predict_single_stock(
             detail="该标的没有真实模型推理结果；请点击“开始预测推理”执行模型后重试",
         )
 
-    # SHAP 归因（失败时给出可执行的诊断码，而不是留一个空面板）
-    drivers_source = None
-    drivers_model_id: str | None = None
-    drivers_model_name: str | None = None
-    shap_reason: str | None = None
-    shap_meta_source: str | None = None
-    try:
-        shap_drivers, shap_reason, shap_meta_source = await asyncio.wait_for(
-            asyncio.to_thread(
-                _compute_shap_drivers_sync,
-                chosen_model_id,
-                normalized_symbol,
-                resolved_date,
-                market,
-            ),
-            timeout=_SHAP_TIMEOUT_SEC,
+    # SHAP 归因：默认内联（兼容旧调用方）；drivers_mode='none' 时跳过，
+    # 由前端在核心图渲染后单独请求 /predict-stock/drivers。
+    drivers_payload: dict[str, Any] = {
+        "drivers": [],
+        "drivers_source": None,
+        "drivers_model_id": None,
+        "drivers_model_name": None,
+        "drivers_note": None,
+        "shap_reason": None,
+        "shap_meta_source": None,
+    }
+    if include_drivers:
+        drivers_payload = await _compute_drivers_payload(
+            chosen_model_id=chosen_model_id,
+            chosen_model_name=chosen_model_name,
+            normalized_symbol=normalized_symbol,
+            resolved_date=resolved_date,
+            market=market,
+            available_models=available_models,
+            candidate_model_ids=[
+                str(r.get("run_model_id") or r.get("run_id") or "")
+                for r in consensus_rows
+            ],
         )
-    except asyncio.TimeoutError:
-        shap_drivers, shap_reason = [], "timeout"
-        logger.warning("SHAP 归因超时（>%ss），模型 %s", _SHAP_TIMEOUT_SEC, chosen_model_id)
-    except Exception as e:  # noqa: BLE001
-        shap_drivers, shap_reason = [], "error"
-        logger.warning("SHAP 归因失败，模型 %s: %s", chosen_model_id, e)
-    if shap_drivers:
-        drivers = shap_drivers
-        drivers_source = "shap"
-        drivers_model_id = chosen_model_id
-        shap_reason = None
-
-    # 头条模型是深度学习架构时没有 pred_contrib 通道，但同一批次里往往还有树模型
-    # 给这只票打了分。退而取**真实**的树模型归因（宁可换模型也不编造：
-    # 归因面板必须标出它描述的是哪个模型，否则会被误读成头条模型的解释）。
-    if not drivers and shap_reason and shap_reason.startswith("framework_unsupported:"):
-        # 候选来自同一交易日已落库的分数行（consensus_rows 在 SHAP 之前就已算好），
-        # 按落库新鲜度去重取前 N 个；每个候选失败得很快（多数只是读不到 metadata）。
-        tried: set[str] = {chosen_model_id}
-        for cand_row in consensus_rows:
-            if len(tried) > _SHAP_FALLBACK_MODEL_LIMIT:
-                break
-            cand_id = str(cand_row["run_model_id"] or "")
-            if not cand_id or cand_id in tried:
-                continue
-            tried.add(cand_id)
-            try:
-                cand_drivers, _cand_reason, cand_meta_source = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        _compute_shap_drivers_sync,
-                        cand_id,
-                        normalized_symbol,
-                        resolved_date,
-                        market,
-                    ),
-                    timeout=_SHAP_TIMEOUT_SEC,
-                )
-            except Exception:  # noqa: BLE001  # 单个候选失败不影响其余候选
-                continue
-            if cand_drivers:
-                drivers = cand_drivers
-                drivers_source = "shap"
-                drivers_model_id = cand_id
-                drivers_model_name = next(
-                    (m.get("name") for m in available_models if m.get("modelId") == cand_id),
-                    None,
-                ) or _humanize_model_name(cand_id)
-                shap_reason = None
-                shap_meta_source = cand_meta_source
-                logger.info(
-                    "头条模型 %s 无树归因通道，改用同批次树模型 %s 的 SHAP",
-                    chosen_model_id,
-                    cand_id,
-                )
-                break
-    drivers_note = _shap_reason_note(shap_reason)
-    if drivers and drivers_model_id and drivers_model_id != chosen_model_id:
-        drivers_note = (
-            f"头条模型（{chosen_model_name}）为深度学习架构，不提供树模型 SHAP 通道；"
-            f"以下归因来自同批次对同一标的打分的树模型「{drivers_model_name}」，"
-            "描述的是该模型的决策依据，可用于判断信号方向，但不等价于头条模型的解释。"
-        )
-    elif drivers and shap_meta_source == "registry_recovered":
-        # 目录里的 metadata.json 与产物不符（港股 0902 树模型被同批 GRU 覆写），
-        # 归因按注册表恢复后计算——这属于模型产物问题，用户有权知道。
-        drivers_note = (
-            "该模型目录内的 metadata.json 与其实际权重文件不一致（疑似同批次训练覆写），"
-            "本次归因已按模型注册表记录恢复后计算；建议重新训练或修复该模型产物。"
-        )
+    drivers = drivers_payload["drivers"]
+    drivers_source = drivers_payload["drivers_source"]
+    drivers_model_id = drivers_payload["drivers_model_id"]
+    drivers_model_name = drivers_payload["drivers_model_name"]
+    drivers_note = drivers_payload["drivers_note"]
 
     # 只有真实分位模型才返回区间；旧模型仍绝不将波动率公式伪装成分位数。
     p50_ret = round(fusion_score, 4)
@@ -3977,6 +4165,33 @@ async def predict_single_stock(
     forecast_basis: str | None = None
     forecast_note: str | None = None
     curr_p = latest_close if latest_close > 0 else 100.0
+
+    # T+N 交易窗口：唯一口径实现见 backend/shared/score_window.py。
+    # 绝不再用 timedelta(days=horizon) 按自然日推目标日——T+20 会落到周末/节假日，
+    # 且与训练标签 D+lag+N 差一天以上。日历答不了就不画目标日（显性告警），
+    # 不允许退回自然日近似。
+    lag_days = 1
+    forecast_window: dict[str, Any] | None = None
+    target_day: date | None = None
+    try:
+        lw = label_window(
+            market_key,
+            date.fromisoformat(resolved_date),
+            int(chosen_horizon),
+            lag_days,
+        )
+        target_day = lw.target_date
+        forecast_window = {
+            "data_date": lw.data_date.isoformat(),
+            "entry_date": lw.entry_date.isoformat(),
+            "target_date": lw.target_date.isoformat(),
+            "horizon": lw.horizon,
+            "execution_lag_days": lw.execution_lag_days,
+            "window_dates": [d.isoformat() for d in lw.window_dates],
+        }
+    except (CalendarUnavailable, ValueError) as exc:
+        forecast_warning = f"交易日历不可用，未生成 T+{chosen_horizon} 目标日：{exc}"
+
     quantile_prediction: dict[str, Any] | None = None
     if main_row is not None:
         quality = main_row.get("quality")
@@ -4011,18 +4226,21 @@ async def predict_single_stock(
                             )
                             quantile_prediction = None
                         else:
-                            target_day = date.fromisoformat(resolved_date) + timedelta(days=max(1, int(chosen_horizon)))
-                            forecast_curve = [{
-                                "step": int(chosen_horizon),
-                                "date": target_day.isoformat(),
-                                "p10": round(p10_ret * 100, 4),
-                                "p50": round(p50_ret * 100, 4),
-                                "p90": round(p90_ret * 100, 4),
-                                "predicted_price": round(curr_p * (1 + p50_ret), 4),
-                                "upper_price": round(curr_p * (1 + p90_ret), 4),
-                                "lower_price": round(curr_p * (1 + p10_ret), 4),
-                            }]
-                            forecast_basis = "model_quantile"
+                            if target_day is None:
+                                # 日历不可用：保留分数与告警，不生成错误日期的扇形。
+                                quantile_prediction = None
+                            else:
+                                forecast_curve = [{
+                                    "step": int(chosen_horizon),
+                                    "date": target_day.isoformat(),
+                                    "p10": round(p10_ret * 100, 4),
+                                    "p50": round(p50_ret * 100, 4),
+                                    "p90": round(p90_ret * 100, 4),
+                                    "predicted_price": round(curr_p * (1 + p50_ret), 4),
+                                    "upper_price": round(curr_p * (1 + p90_ret), 4),
+                                    "lower_price": round(curr_p * (1 + p10_ret), 4),
+                                }]
+                                forecast_basis = "model_quantile"
                 except (KeyError, TypeError, ValueError):
                     quantile_prediction = None
 
@@ -4036,13 +4254,12 @@ async def predict_single_stock(
     if quantile_prediction is None and not forecast_curve and latest_close > 0:
         h_days = max(1, int(chosen_horizon))
         sigma_h = max(0.0, float(daily_vol_pct)) * math.sqrt(h_days)
-        if sigma_h > 0:
+        if sigma_h > 0 and target_day is not None:
             # z 取 80% 双侧区间（与机构风险报告常用的 1.2816 一致）
             z = 1.2816
             cone_low = round((p50_ret - z * sigma_h) * 100, 4)
             cone_mid = round(p50_ret * 100, 4)
             cone_high = round((p50_ret + z * sigma_h) * 100, 4)
-            target_day = date.fromisoformat(resolved_date) + timedelta(days=h_days)
             forecast_curve = [{
                 "step": h_days,
                 "date": target_day.isoformat(),
@@ -4104,6 +4321,10 @@ async def predict_single_stock(
                 parts.append(f"{consensus_skip['no_same_day_score']} 个模型该日无该标的分数")
             if consensus_skip["no_storage"]:
                 parts.append(f"{consensus_skip['no_storage']} 个模型注册表无 storage_path")
+            if consensus_skip["no_recent_inference"]:
+                parts.append(
+                    f"{consensus_skip['no_recent_inference']} 个模型近 30 天无推理，未参与兜底"
+                )
             if consensus_skip["exec_failed"]:
                 parts.append(f"{consensus_skip['exec_failed']} 个点名模型现场推理失败")
             consensus_note = (
@@ -4137,6 +4358,20 @@ async def predict_single_stock(
         "horizon": chosen_horizon,
         "requested_horizon": req_horizon or chosen_horizon,
         "horizon_warning": horizon_warning,
+        # T+N 窗口（唯一口径 = score_window.label_window）：
+        # 数据日 D → 执行日 D+lag → 目标日 D+lag+N，全部交易日。
+        # 前端必须用 target_date 落点，不得再按自然日推算。
+        "data_date": resolved_date,
+        "entry_date": forecast_window["entry_date"] if forecast_window else None,
+        "target_date": target_day.isoformat() if target_day else None,
+        "execution_lag_days": lag_days,
+        "target_mode": chosen_target_mode or None,
+        "forecast_window": forecast_window,
+        "score_source": (
+            str((independent_main or {}).get("source") or "pred_parquet")
+            if independent_main is not None
+            else "engine_signal_scores"
+        ),
         "available_horizons": [
             {"horizon": h, "model_count": n} for h, n in sorted(avail_horizons.items())
         ],
@@ -4186,4 +4421,111 @@ async def predict_single_stock(
         "drivers_source": drivers_source,
         "error": None,
     }
+    logger.info(
+        "predict-stock symbol=%s model=%s horizon=%s source=%s consensus=%d drivers=%d elapsed_ms=%.1f",
+        normalized_symbol,
+        chosen_model_id,
+        chosen_horizon,
+        payload_data.get("score_source"),
+        len(consensus),
+        len(drivers or []),
+        (time.perf_counter() - _t0) * 1000,
+    )
     return {"code": 200, "data": payload_data}
+
+
+async def predict_single_stock_drivers(
+    tid: str,
+    uid: str,
+    symbol: str,
+    model_id: str | None = None,
+    target_date: str | None = None,
+    horizon: int = 5,
+    market: str = "CN",
+    as_of_date: str | None = None,
+    model_name: str | None = None,
+    consensus_model_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """异步归因端点：核心图先出，前端带着解析结果再来单独取 SHAP。
+
+    优先使用前端回传的 `model_id + as_of_date`：execute=true 的独立轻路线不落库，
+    重新跑一次核心预测可能解析到**另一个**模型/日期，归因就会描述错对象。
+    只有缺上下文时才回退到重跑一次核心预测。
+    """
+    market_key = str(market or "CN").strip().upper() or "CN"
+    available_models = (
+        (await get_available_models(tid, uid, market_key)).get("data", {}).get("models", [])
+    )
+
+    if model_id and as_of_date:
+        chosen_id = str(model_id)
+        resolved_date = str(as_of_date)[:10]
+        chosen_name = (
+            str(model_name or "").strip()
+            or next(
+                (m.get("name") for m in available_models if m.get("modelId") == chosen_id),
+                "",
+            )
+            or _humanize_model_name(chosen_id)
+        )
+        candidate_ids = [str(x).strip() for x in (consensus_model_ids or []) if str(x).strip()]
+        raw_symbol = str(symbol or "").strip()
+        if market_key == "HK":
+            normalized_symbol = StockCodeUtil.to_hk_suffix(raw_symbol)
+        elif market_key == "FUTURES":
+            normalized_symbol = raw_symbol
+        else:
+            normalized_symbol = StockCodeUtil.to_prefix(raw_symbol)
+    else:
+        core = await predict_single_stock(
+            tid,
+            uid,
+            symbol=symbol,
+            model_id=model_id,
+            target_date=target_date,
+            horizon=horizon,
+            market=market_key,
+            consensus_model_ids=None,
+            execute=False,
+            include_drivers=False,
+        )
+        data = core.get("data") or {}
+        if data.get("status") != "success":
+            return {
+                "code": 200,
+                "data": {
+                    "status": "error",
+                    "drivers": [],
+                    "drivers_note": data.get("error") or "预测上下文不可用，无法计算归因",
+                    "error": data.get("error") or "prediction_context_unavailable",
+                },
+            }
+        chosen_id = str(data.get("model_id") or "")
+        resolved_date = str(data.get("as_of_date") or "")
+        chosen_name = str(data.get("model_name") or "")
+        normalized_symbol = str(data.get("symbol") or symbol)
+        candidate_ids = [
+            str(c.get("model_id") or "")
+            for c in (data.get("consensus") or [])
+            if str(c.get("model_id") or "").strip()
+        ]
+
+    payload = await _compute_drivers_payload(
+        chosen_model_id=chosen_id,
+        chosen_model_name=chosen_name,
+        normalized_symbol=normalized_symbol,
+        resolved_date=resolved_date,
+        market=market_key,
+        available_models=available_models,
+        candidate_model_ids=candidate_ids,
+    )
+    payload.update(
+        {
+            "status": "success",
+            "model_id": chosen_id,
+            "model_name": chosen_name,
+            "as_of_date": resolved_date,
+            "horizon": horizon,
+        }
+    )
+    return {"code": 200, "data": payload}

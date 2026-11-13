@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import time
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -43,6 +44,15 @@ from backend.services.engine.inference.batch_aggregator import aggregate_batch
 from backend.services.engine.inference.batch_orchestrator import (
     batch_inference_orchestrator,
 )
+from backend.shared.pred_freshness import (
+    pred_last_date,
+    pred_parquet_path,
+)
+from backend.shared.score_window import (
+    CalendarUnavailable,
+    label_targets_bulk,
+    label_window,
+)
 from backend.services.engine.inference.fusion_orchestrator import (
     build_fusion_preview,
     create_fusion_model,
@@ -52,7 +62,6 @@ from backend.services.engine.inference.model_backfill import (
     MAX_GAP_DAYS_PER_MODEL,
     compute_coverage,
     resolve_backfill_model,
-    resolve_pred_candidates,
 )
 from backend.services.engine.inference.script_runner import InferenceScriptRunner
 from backend.services.engine.services.model_inference_job_service import (
@@ -1519,7 +1528,6 @@ async def get_model_market_regime(
 # ── 推理覆盖与一键补全（追加至 pred.parquet） ──────────────────────────────
 # 缺口计算/单日执行/串行编排已收敛到 model_backfill（P3）；
 # 旧端点保留，内部改为创建 qm_model_inference_jobs 任务。
-_resolve_pred_candidates = resolve_pred_candidates
 
 
 @router.get("/{model_id}/inference/coverage", summary="获取推理覆盖（用户态）")
@@ -4084,9 +4092,100 @@ async def delete_model_inference_run(
 
 
 # 模型分数曲线主数据源：模型目录 pred.parquet（训练生成时的全量历史分数序列），
-# 不依赖每日推理批次；进程内缓存（模型+股票+起始日），避免反复扫描 100MB+ 文件
+# 不依赖每日推理批次；按「模型文件 + 股票」缓存全量序列，窗口在内存里切片
+# （换窗口/换基准日不再重扫 100MB+ 文件）。
 _PRED_HIST_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _PRED_HIST_TTL = 600.0
+_PRED_HIST_CACHE_MAX = 256
+# pred.parquet 路径 / 最后日期（Parquet footer 统计 + mtime 缓存）的唯一实现在
+# backend/shared/pred_freshness.py；这里保留旧私有名供本模块与测试使用。
+_pred_parquet_path = pred_parquet_path
+_pred_last_date = pred_last_date
+
+
+def _meta_int(meta: dict[str, Any], *keys: str) -> int | None:
+    """从 metadata 里取正整数（兼容 jsonb 字符串与数字）。"""
+    for key in keys:
+        value = meta.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+def _model_metadata(model: dict[str, Any] | None) -> dict[str, Any]:
+    meta = (model or {}).get("metadata_json") or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _model_horizon(model: dict[str, Any] | None) -> int | None:
+    return _meta_int(_model_metadata(model), "target_horizon_days", "target_horizon")
+
+
+def _model_execution_lag(model: dict[str, Any] | None) -> int:
+    meta = _model_metadata(model)
+    value = meta.get("execution_lag_days")
+    try:
+        lag = int(str(value).strip()) if value is not None else 1
+    except (TypeError, ValueError):
+        lag = 1
+    return max(0, lag)
+
+
+def _model_target_mode(model: dict[str, Any] | None) -> str | None:
+    meta = _model_metadata(model)
+    value = meta.get("target_mode")
+    return str(value).strip().lower() if value else None
+
+
+def _model_dropdown_item(
+    model: dict[str, Any], *, include_last_date: bool = True
+) -> dict[str, Any]:
+    """模型下拉/曲线元数据：名称 + 周期 + 产物可用性 + 新鲜度。
+
+    前端必须能区分「模型没训练好」与「界面漏了」：``has_pred`` 为 False 的
+    模型仍列出，但置灰并给出原因；``pred_last_date`` 过期时显性提示。
+
+    ``include_last_date`` 默认 True：Parquet footer 统计是毫秒级；统计缺失的
+    文件才回退 DuckDB 全列 max。``pred_mtime`` 仍保留，供前端在精确日期缺失时
+    显示「文件时间」近似值。
+    """
+    meta = _model_metadata(model)
+    storage_path = str(model.get("storage_path") or "").strip()
+    pred_path = _pred_parquet_path(storage_path) if storage_path else None
+    pred_last = (
+        _pred_last_date(storage_path)
+        if include_last_date and pred_path is not None
+        else None
+    )
+    pred_mtime: str | None = None
+    if pred_path is not None:
+        try:
+            pred_mtime = datetime.fromtimestamp(pred_path.stat().st_mtime).date().isoformat()
+        except OSError:
+            pred_mtime = None
+    return {
+        "model_id": str(model.get("model_id") or ""),
+        "display_name": meta.get("display_name")
+        or meta.get("model_name")
+        or str(model.get("model_id") or ""),
+        "is_default": bool(model.get("is_default")),
+        "train_start": str(meta.get("train_start") or "")[:10],
+        "train_end": str(meta.get("train_end") or "")[:10],
+        "horizon": _model_horizon(model),
+        "target_mode": _model_target_mode(model),
+        "execution_lag_days": _model_execution_lag(model),
+        "has_pred": pred_path is not None,
+        "pred_last_date": pred_last,
+        "pred_mtime": pred_mtime,
+        "asset_gaps": model_asset_gaps(storage_path) if storage_path else ["注册表无 storage_path"],
+    }
+
 
 
 def _read_stock_pred_history(
@@ -4096,41 +4195,51 @@ def _read_stock_pred_history(
     model_id: str,
     anchor: date | None = None,
     ticker_mode: bool = False,
+    include_rank: bool = False,
 ) -> list[dict[str, Any]]:
-    """从模型目录 pred.parquet 读取该股历史分数时序（含每日截面排名）。
+    """从模型目录 pred.parquet 读取该股历史分数时序（可按需含每日截面排名）。
 
     兼容多种列名（pred/fusion_score/score、trade_date/date/datetime、
     symbol/instrument 前缀/后缀/小写式均可）；无文件或读取失败返回 []。
-    anchor 非空时窗口为 [cutoff, anchor]，否则为 [cutoff, ∞)。
+    cutoff/anchor 在内存里切片（缓存的是「模型 + 股票」全量序列），
+    换窗口不会重扫文件。
 
     symbol 匹配按市场分派：ticker_mode=False（CN）按数字段匹配（SH600519/600519.SH/
     sh600519 归一为 600519）；ticker_mode=True（US/HK）按去非字母数字后的整串匹配
     （BRK.B 与 BRK-B 同一只）—— 纯字母 ticker 用数字段会变成空串匹配不到任何行。
+
+    include_rank=True 时额外计算每日截面排名；默认关闭——图表不需要它，
+    而全窗口 RANK() 会把一次单股查询放大成全市场窗口函数。
     """
     import time as _time
 
+    parquet_file = _pred_parquet_path(storage_path)
+    if parquet_file is None:
+        return []
+    try:
+        mtime = parquet_file.stat().st_mtime
+    except OSError:
+        return []
+
     cache_key = (
-        f"{storage_path}|{'tk' if ticker_mode else 'cn'}:{sym_key}"
-        f"|{cutoff.isoformat()}|{anchor.isoformat() if anchor else ''}"
+        f"{parquet_file}|{mtime}|{'tk' if ticker_mode else 'cn'}:{sym_key}"
+        f"|{'rank' if include_rank else 'plain'}"
     )
     hit = _PRED_HIST_CACHE.get(cache_key)
     if hit and _time.time() - hit[0] < _PRED_HIST_TTL:
-        return hit[1]
-
-    items: list[dict[str, Any]] = []
-    parquet_file = next(
-        (p for p in _resolve_pred_candidates(storage_path) if p.is_file()), None
-    )
-    if parquet_file:
+        all_items = hit[1]
+    else:
+        all_items = []
         try:
             import duckdb
 
+            escaped = str(parquet_file).replace("'", "''")
             con = duckdb.connect()
             try:
                 cols = [
                     r[0]
                     for r in con.execute(
-                        f"SELECT * FROM read_parquet('{str(parquet_file)}') LIMIT 0"
+                        f"SELECT * FROM read_parquet('{escaped}') LIMIT 0"
                     ).description
                 ]
                 score_col = next(
@@ -4165,33 +4274,45 @@ def _read_stock_pred_history(
                                   OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ200%'
                                   OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'BJ%'
                               )"""
-                    rows = con.execute(
-                        f"""
-                        WITH d AS (
+                    if include_rank:
+                        rows = con.execute(
+                            f"""
+                            WITH d AS (
+                                SELECT CAST({date_col} AS DATE) AS td,
+                                       CAST({score_col} AS DOUBLE) AS sc,
+                                       {key_expr} AS sym_key,
+                                       RANK() OVER (PARTITION BY CAST({date_col} AS DATE)
+                                                    ORDER BY CAST({score_col} AS DOUBLE) DESC) AS rk,
+                                       COUNT(*) OVER (PARTITION BY CAST({date_col} AS DATE)) AS tot
+                                FROM read_parquet('{escaped}')
+                                WHERE CAST({score_col} AS DOUBLE) IS NOT NULL
+                                  {excl}
+                            )
+                            SELECT td, sc, rk, tot FROM d
+                            WHERE sym_key = ? ORDER BY td DESC
+                            """,
+                            [sym_key],
+                        ).fetchall()
+                    else:
+                        rows = con.execute(
+                            f"""
                             SELECT CAST({date_col} AS DATE) AS td,
-                                   CAST({score_col} AS DOUBLE) AS sc,
-                                   {key_expr} AS sym_key,
-                                   RANK() OVER (PARTITION BY CAST({date_col} AS DATE)
-                                                ORDER BY CAST({score_col} AS DOUBLE) DESC) AS rk,
-                                   COUNT(*) OVER (PARTITION BY CAST({date_col} AS DATE)) AS tot
-                            FROM read_parquet('{str(parquet_file)}')
+                                   CAST({score_col} AS DOUBLE) AS sc
+                            FROM read_parquet('{escaped}')
                             WHERE CAST({score_col} AS DOUBLE) IS NOT NULL
-                              AND CAST({date_col} AS DATE) >= CAST(? AS DATE)
-                              {f"AND CAST({date_col} AS DATE) <= CAST('{anchor.isoformat()}' AS DATE)" if anchor else ""}
+                              AND {key_expr} = ?
                               {excl}
-                        )
-                        SELECT td, sc, rk, tot FROM d
-                        WHERE sym_key = ? ORDER BY td DESC
-                        """,
-                        [cutoff, sym_key],
-                    ).fetchall()
-                    items = [
+                            ORDER BY td DESC
+                            """,
+                            [sym_key],
+                        ).fetchall()
+                    all_items = [
                         {
                             "trade_date": str(r[0])[:10],
                             "fusion_score": float(r[1]),
                             "signal_side": None,
-                            "score_rank": int(r[2]),
-                            "total_in_market": int(r[3]),
+                            "score_rank": int(r[2]) if include_rank and len(r) > 2 else None,
+                            "total_in_market": int(r[3]) if include_rank and len(r) > 3 else None,
                             "run_id": "",
                             "created_at": None,
                             "data_trade_date": None,
@@ -4207,11 +4328,39 @@ def _read_stock_pred_history(
                     pass
         except Exception as exc:  # noqa: BLE001
             logger.warning("读取模型 pred.parquet 分数历史失败 %s: %s", parquet_file, exc)
+            all_items = []
 
-    if len(_PRED_HIST_CACHE) > 256:
-        _PRED_HIST_CACHE.clear()
-    _PRED_HIST_CACHE[cache_key] = (_time.time(), items)
-    return items
+        if len(_PRED_HIST_CACHE) >= _PRED_HIST_CACHE_MAX:
+            # 简单 LRU：过期项先删，仍满则整体清空（与旧行为一致的兜底）。
+            now = _time.time()
+            stale = [k for k, (at, _) in _PRED_HIST_CACHE.items() if now - at >= _PRED_HIST_TTL]
+            for k in stale:
+                _PRED_HIST_CACHE.pop(k, None)
+            if len(_PRED_HIST_CACHE) >= _PRED_HIST_CACHE_MAX:
+                _PRED_HIST_CACHE.clear()
+        _PRED_HIST_CACHE[cache_key] = (_time.time(), all_items)
+
+    # 窗口在内存里切片：缓存的是该股全量序列，换 cutoff/anchor 不再扫文件。
+    start = cutoff.isoformat()
+    stop = anchor.isoformat() if anchor else None
+    sliced = [
+        item
+        for item in all_items
+        if item["trade_date"] >= start
+        and (stop is None or item["trade_date"] <= stop)
+    ]
+    # 同一裸码可能以多种写法（600519.SH / SH600519）同时出现在 pred.parquet，
+    # 按日去重（保留倒序里的第一条），避免图上同一天两个点。
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for item in sliced:
+        d = item["trade_date"]
+        if d in seen:
+            continue
+        seen.add(d)
+        out.append(item)
+    return out
+
 
 
 async def _load_stock_pred_history(
@@ -4223,6 +4372,7 @@ async def _load_stock_pred_history(
     cutoff: date,
     anchor: date | None = None,
     market: str | None = None,
+    include_rank: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """读模型目录 pred.parquet 的全量历史分数序列。
 
@@ -4268,6 +4418,7 @@ async def _load_stock_pred_history(
         str(model.get("model_id") or ""),
         anchor,
         ticker_mode,
+        include_rank,
     )
     return (items or []), model
 
@@ -4287,6 +4438,14 @@ async def get_stock_inference_history(
     market: str | None = Query(
         None, description="模型列表市场过滤（CN/HK/US）；缺省按 symbol 形态推断"
     ),
+    include_rank: bool = Query(
+        False,
+        description="是否计算每日截面排名；默认关闭（图表不需要，且全窗口 RANK 很重）",
+    ),
+    include_models: bool = Query(
+        True,
+        description="是否返回模型下拉列表；多模型小卡可传 false 减少 100+ 模型元数据的重复传输",
+    ),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     """返回某只股票的历史模型分数（供 K 线下方分数曲线叠加）。
@@ -4297,6 +4456,7 @@ async def get_stock_inference_history(
     end_date 指定时窗口为 [end_date-days, end_date]，否则为 [今日-days, 今日]。
     """
     tenant_id, user_id = _owner_scope(current_user)
+    _t0 = time.perf_counter()
     from datetime import timedelta as _td
     from backend.shared.stock_utils import StockCodeUtil
 
@@ -4375,70 +4535,9 @@ async def get_stock_inference_history(
         else:
             resolved_model_id = None
 
-    async with get_session(read_only=True) as session:
-        # 性能：先用 (tenant_id, symbol, trade_date) 索引取该股每日最新一条（毫秒级），
-        # 排名用相关子查询只统计所在 run 内的行（idx_ess_run_id），避免对全市场做窗口函数
-        # （旧写法 CTE 对所有股票 RANK() 后才过滤 symbol，500 天要 20s，现 ~0.6s）。
-        # 排名仍在同一批 run 内计算：同一天多个 run 各自内部排名，取最新批次那条。
-        # 有 end_date（个股推理以基准日为终点）时加 trade_date 上限，保证与上方K线重叠。
-        end_filter = "AND e.trade_date <= :anchor" if end_date else ""
-        if end_date:
-            params["anchor"] = anchor
-        rows = (
-            (
-                await session.execute(
-                    text(
-                        f"""
-                    WITH mine AS (
-                        SELECT DISTINCT ON (e.trade_date)
-                               e.trade_date, e.run_id, e.fusion_score, e.signal_side, e.created_at
-                        FROM engine_signal_scores e
-                        WHERE e.symbol = ANY(:syms)
-                          AND e.trade_date >= :cutoff
-                          {end_filter}
-                          AND e.tenant_id = :tenant_id AND e.user_id = :user_id
-                          {model_filter_sql}
-                        ORDER BY e.trade_date, e.created_at DESC
-                    )
-                    SELECT m.trade_date, m.fusion_score, m.signal_side,
-                           (SELECT COUNT(*) + 1 FROM engine_signal_scores e2
-                            WHERE e2.run_id = m.run_id
-                              AND e2.tenant_id = :tenant_id AND e2.user_id = :user_id
-                              AND e2.fusion_score > m.fusion_score) AS score_rank,
-                           m.run_id, m.created_at, r.data_trade_date, r.model_id AS signal_model_id
-                    FROM mine m
-                    LEFT JOIN qm_model_inference_runs r ON r.run_id = m.run_id
-                    ORDER BY m.trade_date DESC
-                    """
-                    ),
-                    params,
-                )
-            )
-            .mappings()
-            .all()
-        )
-
-    # 按交易日去重（同一天多批次只取最新 created_at 的一条）
-    by_date: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        # 日期口径统一为数据日 T（与 pred.parquet 一致）：engine_signal_scores
-        # .trade_date 是信号生效日 T+1，run 记录里的 data_trade_date 才是 T。
-        # 两套数据源切换（pred.parquet 主源 ↔ 批次回退）时曲线不再错位一天。
-        d = str(row.get("data_trade_date") or row["trade_date"])[:10]
-        if d not in by_date:
-            by_date[d] = dict(row)
-            by_date[d]["trade_date"] = d
-            if by_date[d].get("data_trade_date") is not None:
-                by_date[d]["data_trade_date"] = str(by_date[d]["data_trade_date"])
-            if by_date[d].get("created_at") is not None:
-                by_date[d]["created_at"] = by_date[d]["created_at"].isoformat()
-
-    items = sorted(by_date.values(), key=lambda x: x["trade_date"], reverse=True)
-
-    # ── 分数曲线锁定「用户默认模型」目录的 pred.parquet（训练生成的全量历史分数），
-    # 不受每日推理批次影响，也不展示非默认模型；默认模型缺失/无 pred 文件时才回退
-    # 上面的 engine_signal_scores 批次结果。end_date 指定时窗口以基准日为终点，
-    # 保证与上方K线重叠（个股推理30天小卡）。
+    # 先读 pred.parquet（主数据源）：读到了就完全不需要扫信号表。
+    # 旧实现先跑 0.4-0.6s 的 engine_signal_scores SQL，pred 非空时又把结果整段丢弃；
+    # pred 行本来就不带 signal_side/rank（前端信号三角同样为空），跳过不改变语义。
     pred_items, pred_model = await _load_stock_pred_history(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -4447,9 +4546,70 @@ async def get_stock_inference_history(
         cutoff=cutoff,
         anchor=anchor,
         market=eff_market,
+        include_rank=include_rank,
     )
-    if pred_items:
-        items = pred_items
+
+    items: list[dict[str, Any]] = pred_items
+    if not pred_items:
+        # 性能：先用 (tenant_id, symbol, trade_date) 索引取该股每日最新一条（毫秒级），
+        # 排名用相关子查询只统计所在 run 内的行（idx_ess_run_id），避免对全市场做窗口函数
+        # （旧写法 CTE 对所有股票 RANK() 后才过滤 symbol，500 天要 20s，现 ~0.6s）。
+        # 排名仍在同一批 run 内计算：同一天多个 run 各自内部排名，取最新批次那条。
+        # 有 end_date（个股推理以基准日为终点）时加 trade_date 上限，保证与上方K线重叠。
+        end_filter = "AND e.trade_date <= :anchor" if end_date else ""
+        if end_date:
+            params["anchor"] = anchor
+        async with get_session(read_only=True) as session:
+            rows = (
+                (
+                    await session.execute(
+                        text(
+                            f"""
+                        WITH mine AS (
+                            SELECT DISTINCT ON (e.trade_date)
+                                   e.trade_date, e.run_id, e.fusion_score, e.signal_side, e.created_at
+                            FROM engine_signal_scores e
+                            WHERE e.symbol = ANY(:syms)
+                              AND e.trade_date >= :cutoff
+                              {end_filter}
+                              AND e.tenant_id = :tenant_id AND e.user_id = :user_id
+                              {model_filter_sql}
+                            ORDER BY e.trade_date, e.created_at DESC
+                        )
+                        SELECT m.trade_date, m.fusion_score, m.signal_side,
+                               (SELECT COUNT(*) + 1 FROM engine_signal_scores e2
+                                WHERE e2.run_id = m.run_id
+                                  AND e2.tenant_id = :tenant_id AND e2.user_id = :user_id
+                                  AND e2.fusion_score > m.fusion_score) AS score_rank,
+                               m.run_id, m.created_at, r.data_trade_date, r.model_id AS signal_model_id
+                        FROM mine m
+                        LEFT JOIN qm_model_inference_runs r ON r.run_id = m.run_id
+                        ORDER BY m.trade_date DESC
+                        """
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+        # 按交易日去重（同一天多批次只取最新 created_at 的一条）
+        by_date: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            # 日期口径统一为数据日 T（与 pred.parquet 一致）：engine_signal_scores
+            # .trade_date 是信号生效日 T+1，run 记录里的 data_trade_date 才是 T。
+            # 两套数据源切换（pred.parquet 主源 ↔ 批次回退）时曲线不再错位一天。
+            d = str(row.get("data_trade_date") or row["trade_date"])[:10]
+            if d not in by_date:
+                by_date[d] = dict(row)
+                by_date[d]["trade_date"] = d
+                if by_date[d].get("data_trade_date") is not None:
+                    by_date[d]["data_trade_date"] = str(by_date[d]["data_trade_date"])
+                if by_date[d].get("created_at") is not None:
+                    by_date[d]["created_at"] = by_date[d]["created_at"].isoformat()
+
+        items = sorted(by_date.values(), key=lambda x: x["trade_date"], reverse=True)
 
     # 附带股票名称/板块/行业（从 stocks 表）
     stock_meta: dict[str, Any] = {}
@@ -4489,7 +4649,9 @@ async def get_stock_inference_history(
     else:
         board = "其他"
 
-    # 曲线模型下拉：返回该用户全部可用模型（供个股终端切换），而非仅当前分数对应的单一模型
+    # 曲线模型下拉：返回该用户全部可用模型（供个股终端切换），而非仅当前分数对应的单一模型。
+    # 每个选项带 horizon / target_mode / has_pred / pred_last_date —— 前端据此
+    # 显示「T+N」「无 pred 产物」「最后分数日」，并置灰不可用项。
     models: list[dict[str, Any]] = []
     try:
         from backend.shared.model_registry import model_registry_service
@@ -4502,54 +4664,110 @@ async def get_stock_inference_history(
             # symbol 形态推断；推断不出（None）则保持旧行为不过滤。
             market=eff_market,
         )
-        for m in all_models:
-            pmeta = m.get("metadata_json") or {}
-            if not isinstance(pmeta, dict):
-                pmeta = {}
-            models.append(
-                {
-                    "model_id": str(m.get("model_id") or ""),
-                    "display_name": pmeta.get("display_name")
-                    or pmeta.get("model_name")
-                    or str(m.get("model_id") or ""),
-                    "is_default": bool(m.get("is_default")),
-                    "train_start": str(pmeta.get("train_start") or "")[:10],
-                    "train_end": str(pmeta.get("train_end") or "")[:10],
-                }
-            )
-        # 若用户暂无模型记录（历史数据），回退到单模型兜底
-        if not models and pred_model:
-            pmeta = pred_model.get("metadata_json") or {}
-            if not isinstance(pmeta, dict):
-                pmeta = {}
-            models.append(
-                {
-                    "model_id": str(pred_model.get("model_id") or ""),
-                    "display_name": pmeta.get("display_name")
-                    or pmeta.get("model_name")
-                    or "",
-                    "is_default": bool(pred_model.get("is_default")),
-                    "train_start": str(pmeta.get("train_start") or "")[:10],
-                    "train_end": str(pmeta.get("train_end") or "")[:10],
-                }
-            )
+        models = [_model_dropdown_item(m) for m in all_models]
     except Exception as _e:
         logger.debug(f"加载模型列表失败，回退单模型: {_e}")
-        if pred_model:
-            pmeta = pred_model.get("metadata_json") or {}
-            if not isinstance(pmeta, dict):
-                pmeta = {}
-            models.append(
-                {
-                    "model_id": str(pred_model.get("model_id") or ""),
-                    "display_name": pmeta.get("display_name")
-                    or pmeta.get("model_name")
-                    or "",
-                    "is_default": bool(pred_model.get("is_default")),
-                    "train_start": str(pmeta.get("train_start") or "")[:10],
-                    "train_end": str(pmeta.get("train_end") or "")[:10],
-                }
+    # 若用户暂无模型记录（历史数据），回退到单模型兜底
+    if not models and pred_model:
+        models = [_model_dropdown_item(pred_model)]
+    # 多模型小卡只要分数，不需要下拉列表：省掉 100+ 条模型元数据的重复传输。
+    if not include_models:
+        models = []
+
+    # 当前分数对应的模型：pred 主源直接是 pred_model；回退批次时按显式 model_id
+    # 或默认模型解析。解析不到就只回分数，不编造模型元数据。
+    chosen_model: dict[str, Any] | None = pred_model
+    if chosen_model is None and resolved_model_id:
+        try:
+            from backend.shared.model_registry import model_registry_service as _mrs
+
+            chosen_model = await _mrs.get_model(
+                tenant_id=tenant_id, user_id=user_id, model_id=resolved_model_id
             )
+        except Exception:  # noqa: BLE001
+            chosen_model = None
+    model_meta = (
+        _model_dropdown_item(chosen_model, include_last_date=True)
+        if chosen_model
+        else None
+    )
+    # 把选中模型的精确 pred_last_date 合并进下拉列表；其余模型保留 pred_mtime
+    # 近似值（避免为 100+ 个模型逐个扫 parquet）。
+    if model_meta and include_models:
+        for idx, item in enumerate(models):
+            if item.get("model_id") == model_meta.get("model_id"):
+                models[idx] = model_meta
+                break
+        else:
+            models.insert(0, model_meta)
+    # 下拉排序：默认模型 → 有 pred 产物 → 产物文件更新。两级稳定排序，
+    # 组内保持 pred_mtime 倒序；无产物的模型排最后但仍然可见（可解释）。
+    models.sort(key=lambda m: m.get("pred_mtime") or "", reverse=True)
+    models.sort(
+        key=lambda m: (
+            0 if m.get("is_default") else 1,
+            0 if m.get("has_pred") else 1,
+        )
+    )
+
+    # T+N 窗口（唯一口径 = backend/shared/score_window.py）：
+    # 锚点 = 最后一条真实分数日（不是今天）；过期只标 stale_days，不假装是今日预测。
+    last_score_date = str(items[0]["trade_date"])[:10] if items else None
+    window: dict[str, Any] | None = None
+    window_warning: str | None = None
+    target_map: dict[date, date | None] = {}
+    if items and chosen_model is not None:
+        horizon = _model_horizon(chosen_model)
+        lag = _model_execution_lag(chosen_model)
+        if horizon is None:
+            window_warning = "模型未记录 target_horizon_days，无法计算 T+N 窗口"
+        else:
+            try:
+                dates = [date.fromisoformat(str(it["trade_date"])[:10]) for it in items]
+                target_map = label_targets_bulk(
+                    eff_market or "CN", dates, horizon, lag
+                )
+                lw = label_window(
+                    eff_market or "CN",
+                    date.fromisoformat(str(last_score_date)),
+                    horizon,
+                    lag,
+                )
+                window = {
+                    "data_date": lw.data_date.isoformat(),
+                    "entry_date": lw.entry_date.isoformat(),
+                    "target_date": lw.target_date.isoformat(),
+                    "horizon": lw.horizon,
+                    "execution_lag_days": lw.execution_lag_days,
+                    "window_dates": [d.isoformat() for d in lw.window_dates],
+                }
+            except (CalendarUnavailable, ValueError) as exc:
+                window_warning = f"交易日历不可用，未生成 T+N 窗口：{exc}"
+    for item in items:
+        try:
+            d = date.fromisoformat(str(item["trade_date"])[:10])
+            target = target_map.get(d)
+            item["target_date"] = target.isoformat() if target else None
+        except (KeyError, TypeError, ValueError):
+            item["target_date"] = None
+
+    stale_days: int | None = None
+    if last_score_date:
+        try:
+            stale_days = (date.today() - date.fromisoformat(last_score_date)).days
+        except ValueError:
+            stale_days = None
+
+    logger.info(
+        "score-series symbol=%s model=%s rows=%d source=%s models=%d window=%s elapsed_ms=%.1f",
+        sym,
+        (model_meta or {}).get("model_id"),
+        len(items),
+        "pred_parquet" if pred_items else "inference_runs",
+        len(models),
+        bool(window),
+        (time.perf_counter() - _t0) * 1000,
+    )
 
     return {
         "symbol": sym,
@@ -4560,8 +4778,46 @@ async def get_stock_inference_history(
         "total": len(items),
         "items": items,
         "models": models,
+        "model": model_meta,
+        "window": window,
+        "window_warning": window_warning,
+        "last_score_date": last_score_date,
+        "stale_days": stale_days,
         "score_source": "pred_parquet" if pred_items else "inference_runs",
+        "source": "pred_parquet" if pred_items else "signal_scores",
     }
+
+
+@router.get(
+    "/inference/stock/{symbol}/score-series",
+    summary="查询单只股票的历史推理分数与 T+N 窗口（用户态）",
+)
+async def get_stock_score_series(
+    symbol: str,
+    days: int = Query(180, ge=7, le=7300, description="回溯天数"),
+    model_id: str | None = Query(None, description="按模型过滤；缺省取用户默认模型"),
+    end_date: str | None = Query(
+        None, description="窗口终点 YYYY-MM-DD（含当日），单票研判用它防前视"
+    ),
+    market: str | None = Query(None, description="市场过滤（CN/HK/US）"),
+    include_rank: bool = Query(False, description="是否计算每日截面排名"),
+    include_models: bool = Query(True, description="是否返回模型下拉列表"),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """`/history` 的语义化别名：响应额外带 model/window/last_score_date/stale_days。
+
+    两个路径共用同一实现，新增字段全部是增量的；旧调用方不受影响。
+    """
+    return await get_stock_inference_history(
+        symbol=symbol,
+        days=days,
+        model_id=model_id,
+        end_date=end_date,
+        market=market,
+        include_rank=include_rank,
+        include_models=include_models,
+        current_user=current_user,
+    )
 
 
 @router.get("/inference/settings/{model_id}", summary="获取模型自动推理设置（用户态）")

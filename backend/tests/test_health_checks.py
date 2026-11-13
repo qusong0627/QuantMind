@@ -20,6 +20,7 @@ from backend.scripts.diagnose.health import (
     classify_ledger_writes,
     classify_local_market_data,
     classify_model_artifact_drift,
+    classify_model_score_freshness,
     classify_projection_orphans,
     classify_signal_distribution,
     classify_snapshot_consistency,
@@ -1069,6 +1070,51 @@ def test_c15_empty_storage_path_is_skipped_not_reported(tmp_path):
     r = classify_model_artifact_drift(rows, lambda p: False)
 
     assert r.level == "ok"
+
+
+# --- C17 模型分数新鲜度：默认模型 pred.parquet 最后分数日 ---------------------
+
+
+def _entry(model_id="m1", last_date="2026-11-12", stale_days=1):
+    return {"model_id": model_id, "last_date": last_date, "stale_days": stale_days}
+
+
+def test_c17_no_default_model_is_warn():
+    r = classify_model_score_freshness("CN", [])
+    assert r.level == "warn"
+    assert "无默认模型" in r.detail
+
+
+def test_c17_missing_pred_is_warn():
+    r = classify_model_score_freshness("CN", [_entry(last_date=None, stale_days=None)])
+    assert r.level == "warn"
+    assert "无 pred.parquet 分数" in r.detail
+
+
+def test_c17_fresh_is_ok():
+    r = classify_model_score_freshness("CN", [_entry(stale_days=1)])
+    assert r.level == "ok"
+    assert r.metrics["worst_stale_days"] == 1
+
+
+def test_c17_two_days_stale_is_warn():
+    r = classify_model_score_freshness("CN", [_entry(stale_days=3)])
+    assert r.level == "warn"
+    assert "落后 3 个交易日" in r.detail
+
+
+def test_c17_five_days_stale_is_fail_and_names_model():
+    r = classify_model_score_freshness(
+        "CN", [_entry(model_id="m_slow", stale_days=6), _entry(model_id="m_ok", stale_days=0)]
+    )
+    assert r.level == "fail"
+    assert "m_slow" in r.detail
+    assert r.metrics["worst_model"] == "m_slow"
+
+
+def test_c17_market_is_in_label():
+    r = classify_model_score_freshness("HK", [_entry(stale_days=0)])
+    assert "HK" in r.name
 
 
 @pytest.mark.asyncio

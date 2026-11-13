@@ -303,6 +303,38 @@ export interface StockScoreHistoryItem {
   run_id: string;
   created_at: string | null;
   signal_model_id?: string;
+  /** T+N 目标日（后端按交易日历算好；非交易日/日历越界为 null） */
+  target_date?: string | null;
+}
+
+/** 模型下拉/曲线元数据（与后端 score-series.models 对齐） */
+export interface StockScoreModelMeta {
+  model_id: string;
+  display_name?: string;
+  is_default?: boolean;
+  train_start?: string;
+  train_end?: string;
+  /** 模型真实训练周期 T+N；老模型未记录时为 null */
+  horizon?: number | null;
+  target_mode?: string | null;
+  execution_lag_days?: number;
+  /** 是否有 pred.parquet 产物；false = 选中也画不出分数 */
+  has_pred?: boolean;
+  /** pred.parquet 的文件日期（快速新鲜度近似；精确最后分数日看 chosen model） */
+  pred_mtime?: string | null;
+  /** 选中模型的精确最后分数日；仅 model 字段保证有 */
+  pred_last_date?: string | null;
+  asset_gaps?: string[];
+}
+
+export interface StockScoreWindow {
+  data_date: string;
+  entry_date: string;
+  target_date: string;
+  horizon: number;
+  execution_lag_days: number;
+  /** 执行日 → 目标日的全部交易日（含两端） */
+  window_dates: string[];
 }
 
 export interface StockScoreHistoryResponse {
@@ -313,7 +345,17 @@ export interface StockScoreHistoryResponse {
   board?: string;
   total: number;
   items: StockScoreHistoryItem[];
-  models?: Array<{ model_id: string; display_name?: string }>;
+  models?: StockScoreModelMeta[];
+  /** 当前分数序列对应的模型（历史/产物/周期/新鲜度） */
+  model?: StockScoreModelMeta | null;
+  /** 以最后一条真实分数日为锚点的 T+N 窗口 */
+  window?: StockScoreWindow | null;
+  window_warning?: string | null;
+  last_score_date?: string | null;
+  /** 最后分数日距今的自然日数；>0 表示分数过期，前端必须显性提示 */
+  stale_days?: number | null;
+  score_source?: 'pred_parquet' | 'inference_runs';
+  source?: 'pred_parquet' | 'signal_scores';
 }
 
 export interface NegativeAnalysis {
@@ -1115,12 +1157,67 @@ class ModelTrainingService {
     };
   }
 
-  async getStockInferenceHistory(symbol: string, days = 180, modelId?: string, endDate?: string): Promise<StockScoreHistoryResponse> {
+  async getStockInferenceHistory(
+    symbol: string,
+    days = 180,
+    modelId?: string,
+    endDate?: string,
+    market?: string,
+    includeModels = true,
+  ): Promise<StockScoreHistoryResponse> {
     const resp = await this.client.get<StockScoreHistoryResponse>(
       `/models/inference/stock/${encodeURIComponent(symbol)}/history`,
-      { params: { days, ...(modelId ? { model_id: modelId } : {}), ...(endDate ? { end_date: endDate } : {}) } },
+      {
+        params: {
+          days,
+          ...(modelId ? { model_id: modelId } : {}),
+          ...(endDate ? { end_date: endDate } : {}),
+          ...(market ? { market } : {}),
+          ...(includeModels ? {} : { include_models: false }),
+        },
+      },
     );
     return resp.data;
+  }
+
+  /**
+   * 语义化分数序列接口：与 history 同源，额外保证返回 model/window/last_score_date/stale_days。
+   * 单票研判必须带 endDate（防前视）；个股终端不传 endDate（看最新）。
+   */
+  async getStockScoreSeries(opts: {
+    symbol: string;
+    days?: number;
+    modelId?: string;
+    endDate?: string;
+    market?: string;
+    includeRank?: boolean;
+  }): Promise<StockScoreHistoryResponse> {
+    const params = {
+      days: opts.days ?? 180,
+      ...(opts.modelId ? { model_id: opts.modelId } : {}),
+      ...(opts.endDate ? { end_date: opts.endDate } : {}),
+      ...(opts.market ? { market: opts.market } : {}),
+      ...(opts.includeRank ? { include_rank: true } : {}),
+    };
+    try {
+      const resp = await this.client.get<StockScoreHistoryResponse>(
+        `/models/inference/stock/${encodeURIComponent(opts.symbol)}/score-series`,
+        { params },
+      );
+      return resp.data;
+    } catch (err: any) {
+      // 滚动部署兼容：旧后端没有 /score-series 时回退 /history（字段是超集，
+      // 老响应缺 model/window，前端会按「无窗口」降级，不崩）。
+      if (err?.response?.status === 404) {
+        return this.client
+          .get<StockScoreHistoryResponse>(
+            `/models/inference/stock/${encodeURIComponent(opts.symbol)}/history`,
+            { params },
+          )
+          .then((r) => r.data);
+      }
+      throw err;
+    }
   }
 
   async deleteInferenceRun(runId: string): Promise<boolean> {

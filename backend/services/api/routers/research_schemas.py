@@ -46,6 +46,24 @@ class SingleStockPredictionRequest(BaseModel):
     consensus_model_ids: list[str] | None = None
     # 点击“开始预测推理”时由服务端执行已注册模型；查询历史结果时保持 false。
     execute: bool = False
+    # 归因返回方式：inline=随核心响应返回（兼容旧调用方）；none=核心图先出，
+    # 前端再调 /predict-stock/drivers。树模型 SHAP 较慢，默认仍保持 inline 兼容。
+    drivers_mode: str = "inline"
+
+
+class PredictionDriversRequest(BaseModel):
+    """异步归因请求：核心预测完成后单独取 SHAP。"""
+
+    symbol: str
+    model_id: str | None = None
+    date: str | None = None
+    horizon: int = 5
+    market: str = "CN"
+    # 核心响应已解析出的实际模型/日期/共识成员；传了就跳过重解析，保证
+    # 异步归因与图上那份预测是同一个模型、同一天（execute 路径不落库时尤其重要）。
+    as_of_date: str | None = None
+    model_name: str | None = None
+    consensus_model_ids: list[str] | None = None
 
 
 class FeatureDriverItem(BaseModel):

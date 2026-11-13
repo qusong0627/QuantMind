@@ -1,6 +1,6 @@
 import React from 'react';
 import { FeatureDriverItem } from '../../../services/inferenceCenterService';
-import { ArrowUpRight, ArrowDownRight, Zap, ShieldAlert, Sparkles, Inbox } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, Loader2, Zap, ShieldAlert, Sparkles, Inbox } from 'lucide-react';
 import { barWidthPct, formatImpact, maxAbsImpact } from '../driversScale';
 
 interface FeatureDriversPanelProps {
@@ -14,6 +14,8 @@ interface FeatureDriversPanelProps {
   note?: string | null;
   /** 归因实际描述的模型名（与头条模型不同时值得显式标出） */
   modelName?: string | null;
+  /** 核心图已出、归因仍在异步计算中 */
+  loading?: boolean;
 }
 
 export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({
@@ -21,6 +23,7 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({
   source,
   note,
   modelName,
+  loading = false,
 }) => {
   const positiveDrivers = drivers.filter(d => d.direction === 'positive' || d.impact > 0);
   const negativeDrivers = drivers.filter(d => d.direction === 'negative' || d.impact < 0);
@@ -84,7 +87,17 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({
       {/* 归因两列（正向/负向）在窄屏硬挤成两列时每列只剩 ~190px，特征名全被截断；
           1520 以上（本机与常见副屏）才分两列，否则单列通栏。 */}
       <div className={`grid grid-cols-1 ${twoColumns ? '2xl:grid-cols-2' : ''} gap-x-4 gap-y-3 flex-1 min-h-0 overflow-y-auto`}>
-        {drivers.length === 0 ? (
+        {loading ? (
+          <div className="col-span-1 2xl:col-span-2 flex flex-col items-center justify-center gap-2 py-8 text-center">
+            <div className="w-10 h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-500">
+              <Loader2 className="w-5 h-5 animate-spin" />
+            </div>
+            <p className="text-xs font-semibold text-slate-700 m-0">正在计算 SHAP 归因…</p>
+            <p className="text-[11px] text-slate-600 m-0 leading-relaxed max-w-[280px]">
+              核心预测与 K 线已先出；归因单独返回，通常几秒内完成。
+            </p>
+          </div>
+        ) : drivers.length === 0 ? (
           <div className="col-span-1 2xl:col-span-2 flex flex-col items-center justify-center gap-2 py-8 text-center">
             <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center text-slate-300">
               <Inbox className="w-5 h-5" />

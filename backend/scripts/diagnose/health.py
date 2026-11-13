@@ -1441,6 +1441,135 @@ def classify_model_artifact_drift(
     )
 
 
+def classify_model_score_freshness(
+    market: str, entries: list[dict]
+) -> CheckResult:
+    """C17 判定（纯函数）：默认模型的 pred.parquet 最后分数日是否落后。
+
+    entries: [{model_id, last_date(str|None), stale_days(int|None)}]
+    ``stale_days`` = 最后分数日到「应同步交易日」之间的交易日数（日历不可用时
+    退化为自然日）。默认模型超过 2 个交易日无新分数 = 推理/调度链停更，不是
+    「没有信号」——必须在健康页可见。
+    """
+    if not entries:
+        return CheckResult(
+            "C17",
+            f"模型分数新鲜度({market})",
+            "warn",
+            "该市场无默认模型（或默认模型无 storage_path）",
+            "在模型管理设置该市场默认模型；否则分数曲线会回落到信号表",
+            {"market": market, "checked": 0},
+        )
+    missing = [e for e in entries if not e.get("last_date")]
+    scored = [e for e in entries if e.get("last_date")]
+    stale_pairs = [
+        (e, int(e.get("stale_days") or 0)) for e in scored
+    ]
+    stale_pairs.sort(key=lambda x: x[1], reverse=True)
+    worst_model, worst_days = (stale_pairs[0] if stale_pairs else (None, 0))
+    def _label(e: dict) -> str:
+        return (
+            f"{e.get('model_id')}(u={e.get('user_id')})"
+            if e.get("user_id")
+            else str(e.get("model_id"))
+        )
+
+    metrics = {
+        "market": market,
+        "checked": len(entries),
+        "missing_pred": len(missing),
+        "worst_model": (worst_model or {}).get("model_id"),
+        "worst_user": (worst_model or {}).get("user_id"),
+        "worst_stale_days": worst_days,
+    }
+    if missing:
+        sample = "，".join(
+            f"{e.get('model_id')}(u={e.get('user_id')})" if e.get("user_id") else str(e.get("model_id"))
+            for e in missing[:3]
+        )
+        return CheckResult(
+            "C17",
+            f"模型分数新鲜度({market})",
+            "warn",
+            f"{len(missing)} 个默认模型无 pred.parquet 分数（{sample}）",
+            "检查模型训练/推理是否产出 pred.parquet；无产物时前端分数曲线会静默回退信号表",
+            metrics,
+        )
+    if worst_days >= 5:
+        return CheckResult(
+            "C17",
+            f"模型分数新鲜度({market})",
+            "fail",
+            f"默认模型 {_label(worst_model)} 最后分数日 {worst_model.get('last_date')}，落后 {worst_days} 个交易日",
+            "检查推理任务/调度是否停更；分数过期时展示面必须显示 stale，不能用旧分数冒充今日预测",
+            metrics,
+        )
+    if worst_days >= 2:
+        return CheckResult(
+            "C17",
+            f"模型分数新鲜度({market})",
+            "warn",
+            f"默认模型 {_label(worst_model)} 落后 {worst_days} 个交易日",
+            "确认最近一次推理是否成功；连续两个交易日未更新再看调度",
+            metrics,
+        )
+    return CheckResult(
+        "C17",
+        f"模型分数新鲜度({market})",
+        "ok",
+        f"{len(scored)} 个默认模型分数最新（最差落后 {worst_days} 个交易日）",
+        "",
+        metrics,
+    )
+
+
+async def check_c17_model_score_freshness(ctx: HealthContext) -> CheckResult:
+    """默认模型的 pred.parquet 新鲜度巡检（真实产物，不看调度标记）。"""
+    from backend.shared.pred_freshness import pred_last_date
+    from backend.shared.trading_calendar import trading_days_xcal
+
+    try:
+        rows = ctx.query(
+            "SELECT tenant_id, user_id, model_id, storage_path FROM qm_user_models "
+            "WHERE is_default = TRUE AND status IN ('ready', 'active') "
+            "AND COALESCE(storage_path, '') <> '' "
+            "AND qm_market_of(metadata_json) = :m",
+            m=ctx.market,
+        )
+    except Exception as exc:  # noqa: BLE001 - 旧库/函数缺失不阻断
+        return CheckResult(
+            "C17", f"模型分数新鲜度({ctx.market})", "warn", f"默认模型查询失败: {exc}"
+        )
+    expected = expected_synced_date(ctx)
+    entries: list[dict] = []
+    for row in rows:
+        last = pred_last_date(str(row.get("storage_path") or ""))
+        stale_days: int | None = None
+        if last:
+            try:
+                last_d = date.fromisoformat(str(last)[:10])
+                days = trading_days_xcal(
+                    ctx.market, last_d + timedelta(days=1), expected
+                )
+                stale_days = (
+                    len(days)
+                    if days is not None
+                    else max(0, (expected - last_d).days)
+                )
+            except (TypeError, ValueError):
+                stale_days = None
+        entries.append(
+            {
+                "tenant_id": str(row.get("tenant_id") or ""),
+                "user_id": str(row.get("user_id") or ""),
+                "model_id": str(row.get("model_id") or ""),
+                "last_date": last,
+                "stale_days": stale_days,
+            }
+        )
+    return classify_model_score_freshness(ctx.market, entries)
+
+
 async def check_c15_model_artifact_consistency(ctx: HealthContext) -> CheckResult:
     """注册表（qm_user_models.status∈ready/active）与磁盘目录的漂移巡检。
 
@@ -1599,6 +1728,7 @@ CHECKS: list[tuple[str, str, Callable]] = [
     ("C14", "分账账本一致性", check_c14_agent_ledger_parity),
     ("C15", "模型产物一致", check_c15_model_artifact_consistency),
     ("C16", "投影孤儿", check_c16_projection_orphans),
+    ("C17", "模型分数新鲜度", check_c17_model_score_freshness),
 ]
 
 
