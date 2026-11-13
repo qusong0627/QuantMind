@@ -104,6 +104,62 @@ class TestDynamicExposure:
         assert default_cfg["dynamic_exposure"] is False
         assert default_cfg["target_exposure"] == 1.0
 
+    def test_crash_params_infer_crash_filter(self):
+        cfg = dynamic_config_from_params(
+            {
+                "score_threshold": 0.0,
+                "pos_down": 0.5,
+                "crash_exposure": 0.3,
+                "crash_ret10": -0.06,
+            }
+        )
+        assert cfg["crash_filter"] is True
+        assert cfg["crash_exposure"] == 0.3
+        assert cfg["crash_ret10"] == -0.06
+
+    def test_crash_filter_overrides_positive_mean(self, monkeypatch):
+        calc = RebalanceCalculator()
+        signals = [
+            _sig("600000.SH", 0.01),
+            _sig("600001.SH", 0.02),
+            _sig("600002.SH", 0.03),
+        ]
+        strategy = StrategyConfig(
+            topk=3,
+            n_drop=0,
+            max_position_pct=1.0,
+            dynamic_exposure=True,
+            score_threshold=0.0,
+            pos_up=1.0,
+            pos_down=0.5,
+            crash_filter=True,
+            crash_exposure=0.3,
+            defensive_universe="csi300",
+        )
+        account = _account(
+            {"600000.SH": 1000, "600001.SH": 1000, "600002.SH": 1000}
+        )
+        quotes = {s.symbol: _quote(s.symbol) for s in signals}
+        monkeypatch.setattr(
+            rc,
+            "index_members_on",
+            lambda market, day: {"600000.SH", "600001.SH", "600002.SH"},
+        )
+
+        orders = calc.calculate(
+            signals, strategy, quotes, account, market_crash=True
+        )
+
+        # 均分为正本应 100%，但急跌信号把目标压到 30%：
+        # 3 万总资产 × 30% / 3 只 / 10 元 = 300 股（整手 100），原 1000 股 → 卖 700
+        sells = {o.symbol: o.quantity for o in orders if o.side == "SELL"}
+        assert sells == {
+            "600000.SH": 700,
+            "600001.SH": 700,
+            "600002.SH": 700,
+        }
+        assert [o for o in orders if o.side == "BUY"] == []
+
 
 class TestDynamicUniverse:
     def test_negative_mean_filters_to_defensive_universe(self, monkeypatch):
@@ -185,3 +241,47 @@ STRATEGY_CONFIG = {
     assert kwargs["score_threshold"] == 0.0
     assert kwargs["pos_down"] == 0.5
     assert kwargs["defensive_universe"] == "csi300"
+
+
+class _FakeHub:
+    def __init__(self, closes: list[float]):
+        self._closes = closes
+
+    def fetch_index_kline(self, symbol, start, end):
+        import pandas as pd
+
+        return pd.DataFrame({"close": self._closes})
+
+
+class _FakeMarketData:
+    def __init__(self, closes: list[float]):
+        self._hub = _FakeHub(closes)
+
+
+def test_csi300_crash_active_triggers_on_fast_decline():
+    from backend.services.simulation.services import market_regime
+
+    market_regime._CACHE.clear()
+    # 10 个交易日从 100 跌到 90，约 -10%
+    md = _FakeMarketData([100.0 - i for i in range(11)])
+
+    assert (
+        market_regime.csi300_crash_active(
+            md, date(2026, 3, 11), ret10_threshold=-0.06, ret5_threshold=-0.04
+        )
+        is True
+    )
+
+
+def test_csi300_crash_active_false_on_flat_market():
+    from backend.services.simulation.services import market_regime
+
+    market_regime._CACHE.clear()
+    md = _FakeMarketData([100.0] * 11)
+
+    assert (
+        market_regime.csi300_crash_active(
+            md, date(2026, 3, 11), ret10_threshold=-0.06, ret5_threshold=-0.04
+        )
+        is False
+    )

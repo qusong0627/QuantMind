@@ -747,9 +747,30 @@ class ReplayDayRunner:
             total_asset=float(account_data.get("total_asset", 0)),
             positions=account_data.get("positions", {}) or {},
         )
+        market_crash = False
+        if config.crash_filter:
+            from backend.services.simulation.services.market_regime import (
+                csi300_crash_active,
+            )
+
+            trade_date = None
+            if signals:
+                trade_date = signals[0].trade_date
+            elif bars:
+                trade_date = next(iter(bars.values())).trade_date
+            market_crash = csi300_crash_active(
+                self._market_data,
+                trade_date,
+                ret10_threshold=config.crash_ret10,
+                ret5_threshold=config.crash_ret5,
+            )
         return self._calculator.calculate(
-            signals=signals, strategy=config, quotes=quotes, account=account,
+            signals=signals,
+            strategy=config,
+            quotes=quotes,
+            account=account,
             day_index=day_index,
+            market_crash=market_crash,
         )
 
     async def _execute(

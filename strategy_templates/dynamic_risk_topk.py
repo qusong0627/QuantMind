@@ -322,6 +322,7 @@ STRATEGY_CONFIG = {
         "pos_up": 1.0,
         "pos_down": 0.5,
         "defensive_universe": "csi300",
+        "crash_filter": True,
         "crash_exposure": 0.3,
         "crash_ret10": -0.06,
         "crash_ret5": -0.04,

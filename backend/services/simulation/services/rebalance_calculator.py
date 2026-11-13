@@ -62,6 +62,13 @@ def dynamic_config_from_params(params: dict[str, Any] | None) -> dict[str, Any]:
         or params.get("defensive_market")
         or ""
     )
+    crash_filter = _as_bool(params.get("crash_filter"), False)
+    if not crash_filter and (
+        params.get("crash_exposure") is not None
+        or params.get("crash_ret10") is not None
+        or params.get("crash_ret5") is not None
+    ):
+        crash_filter = True
     return {
         "dynamic_exposure": dynamic,
         "score_threshold": _float(threshold, 0.0),
@@ -69,6 +76,10 @@ def dynamic_config_from_params(params: dict[str, Any] | None) -> dict[str, Any]:
         "pos_down": _float(pos_down, 0.5),
         "target_exposure": _float(params.get("target_exposure"), 1.0),
         "defensive_universe": str(defensive).strip(),
+        "crash_filter": crash_filter,
+        "crash_exposure": _float(params.get("crash_exposure"), 0.3),
+        "crash_ret10": _float(params.get("crash_ret10"), -0.06),
+        "crash_ret5": _float(params.get("crash_ret5"), -0.04),
     }
 
 
@@ -93,6 +104,11 @@ class StrategyConfig:
     target_exposure: float = 1.0
     # 负分时切换到的防御池（qlib instruments 文件名，如 "csi300"）；空 = 不切换。
     defensive_universe: str = ""
+    # 快速崩盘过滤：指数急跌时把目标仓位压到 crash_exposure（独立于均分）。
+    crash_filter: bool = False
+    crash_exposure: float = 0.3
+    crash_ret10: float = -0.06
+    crash_ret5: float = -0.04
 
     # ── 以下为 R2 新增，默认值保持既有行为，实盘路径不受影响 ──
     # 是否启用 min_score 过滤。历史上 min_score 字段存在但从未被读取（死配置），
@@ -171,6 +187,7 @@ class RebalanceCalculator:
         quotes: dict[str, Quote],
         account: SimulationAccount,
         day_index: int = 0,
+        market_crash: bool = False,
     ) -> list[Order]:
         """
         计算调仓指令。
@@ -181,6 +198,7 @@ class RebalanceCalculator:
             quotes: 行情数据 {symbol: Quote}
             account: 当前账户状态
             day_index: 会话内第几个交易日（0 起），用于调仓周期闸门
+            market_crash: 指数急跌信号（由调用方按沪深300成分收益计算）
 
         Returns:
             交易指令列表（先卖后买）
@@ -211,9 +229,10 @@ class RebalanceCalculator:
                 logger.info("RebalanceCalculator: min_score 过滤后无信号")
                 return []
 
-        # 0.5 动态仓位 / 动态股票池（策略显式开启时才生效）
+        # 0.5 动态仓位 / 动态股票池 / 急跌过滤（策略显式开启时才生效）
         effective_exposure = max(0.0, min(1.0, float(strategy.target_exposure)))
         active_universe_members: set[str] | None = None
+        defensive = False
         if strategy.dynamic_exposure:
             mean_score = sum(float(s.score) for s in signals) / len(signals)
             is_up = mean_score >= strategy.score_threshold
@@ -221,34 +240,49 @@ class RebalanceCalculator:
                 0.0,
                 min(1.0, float(strategy.pos_up if is_up else strategy.pos_down)),
             )
-            if not is_up and strategy.defensive_universe:
-                members = index_members_on(
-                    strategy.defensive_universe, signals[0].trade_date
-                )
-                if members:
-                    filtered = [
-                        sig
-                        for sig in signals
-                        if StockCodeUtil.normalize(sig.symbol) in members
-                    ]
-                    if filtered:
-                        signals = filtered
-                        active_universe_members = members
-                    else:
-                        logger.warning(
-                            "RebalanceCalculator: 防御池 %s 过滤后无信号，回退全市场",
-                            strategy.defensive_universe,
-                        )
+            defensive = not is_up
+        else:
+            mean_score = None
+
+        crash_active = bool(strategy.crash_filter and market_crash)
+        if crash_active:
+            effective_exposure = min(
+                effective_exposure,
+                max(0.0, min(1.0, float(strategy.crash_exposure))),
+            )
+            defensive = True
+
+        if defensive and strategy.defensive_universe:
+            members = index_members_on(
+                strategy.defensive_universe, signals[0].trade_date
+            )
+            if members:
+                filtered = [
+                    sig
+                    for sig in signals
+                    if StockCodeUtil.normalize(sig.symbol) in members
+                ]
+                if filtered:
+                    signals = filtered
+                    active_universe_members = members
                 else:
                     logger.warning(
-                        "RebalanceCalculator: 防御池 %s 无成分数据，回退全市场",
+                        "RebalanceCalculator: 防御池 %s 过滤后无信号，回退全市场",
                         strategy.defensive_universe,
                     )
+            else:
+                logger.warning(
+                    "RebalanceCalculator: 防御池 %s 无成分数据，回退全市场",
+                    strategy.defensive_universe,
+                )
+
+        if strategy.dynamic_exposure or crash_active:
             logger.info(
-                "RebalanceCalculator: 动态仓位 mean=%.6f exposure=%.2f universe=%s",
-                mean_score,
+                "RebalanceCalculator: 动态仓位 mean=%s exposure=%.2f universe=%s crash=%s",
+                format(mean_score, ".6f") if mean_score is not None else "-",
                 effective_exposure,
                 strategy.defensive_universe if active_universe_members else "all",
+                crash_active,
             )
 
         # 1–2. 全市场按分排序后跳过不可交易，连续补位直到凑满 topk
@@ -680,10 +714,11 @@ class RebalanceCalculator:
         return max(1, int(lot_size_for_symbol(symbol) or strategy.lot_size or 100))
 
     def _floor_to_lot(self, quantity: float, lot_size: int = 100) -> int:
-        """向下取整到整手"""
+        """向下取整到整手（容忍浮点误差，避免 300 股被算成 299 → 200）。"""
         if quantity <= 0:
             return 0
-        return int(quantity // lot_size) * lot_size
+        lots = math.floor(float(quantity) / lot_size + 1e-9)
+        return int(lots) * lot_size
 
     @staticmethod
     def _clamp_sell_qty(current_pos: dict[str, Any], target_qty: int) -> int:

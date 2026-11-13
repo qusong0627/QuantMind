@@ -1048,6 +1048,10 @@ _PARAM_ALIAS = {
     "pos_down": "pos_down",
     "target_exposure": "target_exposure",
     "defensive_universe": "defensive_universe",
+    "crash_filter": "crash_filter",
+    "crash_exposure": "crash_exposure",
+    "crash_ret10": "crash_ret10",
+    "crash_ret5": "crash_ret5",
 }
 
 
@@ -1098,6 +1102,10 @@ def _to_replay_params(tpl: Any) -> dict[str, Any]:
             "target_exposure",
             "defensive_universe",
             "defensive_market",
+            "crash_filter",
+            "crash_exposure",
+            "crash_ret10",
+            "crash_ret5",
         ):
             if key in code_kwargs and key not in out:
                 out[key] = code_kwargs[key]

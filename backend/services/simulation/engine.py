@@ -79,6 +79,11 @@ _STRATEGY_KWARG_KEYS = (
     "target_exposure",
     "defensive_universe",
     "defensive_market",
+    # 快速崩盘过滤（动态风控 TOPK）
+    "crash_filter",
+    "crash_exposure",
+    "crash_ret10",
+    "crash_ret5",
 )
 
 
@@ -505,11 +510,31 @@ class SimulationEngine:
                 report.signal_count = len(signals)
                 report.st_filtered_count = st_dropped
                 report.fundamental_filtered_count = fundamental_dropped
+
+                market_crash = False
+                if getattr(strategy_config, "crash_filter", False):
+                    from backend.services.simulation.services.market_regime import (
+                        csi300_crash_active,
+                    )
+
+                    market_crash = await asyncio.to_thread(
+                        csi300_crash_active,
+                        self._market_data,
+                        datetime.now().date(),
+                        ret10_threshold=float(
+                            getattr(strategy_config, "crash_ret10", -0.06)
+                        ),
+                        ret5_threshold=float(
+                            getattr(strategy_config, "crash_ret5", -0.04)
+                        ),
+                    )
+
                 orders = self.rebalance_calculator.calculate(
                     signals=signals,
                     strategy=strategy_config,
                     quotes=quotes,
                     account=account,
+                    market_crash=market_crash,
                 )
                 orders = self._apply_risk_buy_locks(
                     orders, tenant=tenant, user_id=uid, trade_date=datetime.now().date()
