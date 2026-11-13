@@ -1,0 +1,53 @@
+{
+  "id": "dynamic_universe_topk",
+  "sort": 21,
+  "name": "动态股票池TOPK策略",
+  "description": "标准 Top-K 选股 + 全市场预测均分动态切换股票池：均分 ≥ 0 时使用全市场股票池并满仓，均分 < 0 时切换到沪深300股票池并五成仓。严格按目标仓位执行。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票数量",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数量（0 = 不主动换仓）",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日），默认 3",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": ["PM"],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "仓位规则：均分 ≥ 0 满仓（全市场）；< 0 五成仓（沪深300）。",
+    "防御池使用 qlib csi300 成分股，按交易日取当日成分。"
+  ],
+  "dir": "通用策略",
+  "markets": []
+}
