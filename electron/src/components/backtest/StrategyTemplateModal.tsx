@@ -93,7 +93,7 @@ export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  // 通用策略置顶；A 股 01-10 收进「A股策略」，避免 10 个子目录再加通用变成 11 组。
+  // 通用策略置顶；多级目录（如 港股策略/核心）收进第一级分组，避免子目录过多把通用策略挤下去。
   // 必须在 isOpen 早退之前调用，否则打开弹窗时 hook 数量会比上一轮多。
   const { filtered, sections } = useMemo(() => {
     const filteredList =

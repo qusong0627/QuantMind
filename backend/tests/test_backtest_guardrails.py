@@ -462,7 +462,7 @@ def test_dynamic_risk_degree_hook_applies_then_restores(monkeypatch):
 def test_risk_degree_kwarg_reaches_topk_dropout_attribute(monkeypatch):
     """回归：risk_degree 被 init_dynamic_risk pop 成 default_risk_degree 后，
     BaseSignalStrategy 又把它设回默认 0.95，模板里的 risk_degree 因此静默失效
-    （实测 as40「固定 60% 仓位」一直按 95% 下单）。修复后必须回写到 self.risk_degree。"""
+    （曾实测「固定 60% 仓位」一直按 95% 下单）。修复后必须回写到 self.risk_degree。"""
     qlib = pytest.importorskip("qlib")
     assert qlib is not None
 
@@ -504,58 +504,9 @@ def test_market_state_series_scales_risk_degree_for_topk(monkeypatch):
     assert strategy._dynamic_risk_degree(0.95, pd.Timestamp("2026-04-01")) == pytest.approx(0.95)
 
 
-def test_inverse_vol_template_weights_by_inverse_vol(monkeypatch):
-    """回归：as37 的逆波动加权必须走 WeightStrategyBase 链路（会真正调用
-    generate_target_weight_position），权重 ∝ 1/σ 且受单票上限约束。"""
-    qlib = pytest.importorskip("qlib")
-    assert qlib is not None
-
-    import importlib.util
-
-    import pandas as pd
-    from backend.services.engine.qlib_app.utils import recording_strategy as rs
-
-    path = Path(__file__).resolve().parents[2] / "strategy_templates" / "as37_inverse_vol.py"
-    spec = importlib.util.spec_from_file_location("qm_tpl_as37_inverse_vol", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    cls = module.InverseVolWeightStrategy
-
-    assert issubclass(cls, rs.WeightStrategyBase)
-
-    strategy = cls.__new__(cls)
-    strategy.vol_window = 20
-    strategy.weight_cap = 0.6
-    strategy.use_fundamental_filter = False
-    strategy.topk = None
-    strategy.min_score = 0.0
-    strategy.max_weight = 1.0
-    strategy.account_stop_loss = 0.0
-    strategy._is_account_stopped = False
-    strategy.rebalance_days = 5
-    monkeypatch.setattr(cls, "_prev_trade_date", lambda self: pd.Timestamp("2026-03-31"))
-    monkeypatch.setattr(
-        cls,
-        "_vol_map",
-        lambda self, stocks, ref_date: pd.Series({"SH600001": 0.01, "SH600002": 0.04}),
-    )
-
-    weights = strategy.generate_target_weight_position(
-        pd.Series({"SH600001": 0.9, "SH600002": 0.8}),
-        current=None,
-        trade_exchange=None,
-        trade_start_time=pd.Timestamp("2026-04-01"),
-        trade_end_time=pd.Timestamp("2026-04-01"),
-    )
-
-    # 等权应被 1/σ 改写（低波动那只权重更大），再按 60% 单票上限归一化
-    assert weights["SH600001"] == pytest.approx(0.75)
-    assert weights["SH600002"] == pytest.approx(0.25)
-
-
 def test_price_frame_prefetches_once_and_slices(monkeypatch):
     """回归：D.features 对全市场每调一次要 10~17 秒且不跨调用复用，自定义类若在
-    每个调仓步各调一次，一年回测会被拖到几十分钟（实测 as11 单次回测 60 分钟没结束）。
+    每个调仓步各调一次，一年回测会被拖到几十分钟（曾实测单次回测 60 分钟没结束）。
     ``_price_frame`` 必须首次就把回测区间（含回看 buffer）取满，之后只做切片；
     中途新出现的标的只增量补取它自己。"""
     qlib = pytest.importorskip("qlib")
@@ -620,11 +571,11 @@ def test_price_frame_prefetches_once_and_slices(monkeypatch):
     assert set(third.index.get_level_values("instrument")) == {"SH600002"}
 
 
-def test_custom_templates_do_not_call_dfeatures_directly():
-    """回归：自定义模板类取行情必须走基类缓存，禁止直接 D.features（见上一条测试）。"""
+def test_templates_do_not_call_dfeatures_directly():
+    """回归：模板策略类取行情必须走基类缓存，禁止直接 D.features（见上一条测试）。"""
     template_dir = Path(__file__).resolve().parents[2] / "strategy_templates"
     offenders = []
-    for path in sorted(template_dir.glob("as*.py")):
+    for path in sorted(template_dir.glob("*.py")):
         code = path.read_text(encoding="utf-8")
         if "class " not in code:
             continue
@@ -807,7 +758,7 @@ def test_crash_buy_dip_initializes_instruments_and_crash_dates(monkeypatch):
 def test_trade_stats_win_rate_ignores_flat_days():
     """回归：无 pnl 的成交流水回退到日收益口径时，空仓日（收益恰为 0）不能算进分母。
 
-    否则事件型策略（as41 大部分时间空仓）的胜率会被 200 多个空仓日摊成 3%，
+    否则事件型策略（大部分时间空仓）的胜率会被 200 多个空仓日摊成 3%，
     而年化是 +21%。"""
     import pandas as pd
 

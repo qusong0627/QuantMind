@@ -182,14 +182,12 @@ export function getTemplateById(id: string): StrategyTemplate | undefined {
 /** 无 dir 的内置模板归入此分组，并固定排在模板选择器最前。 */
 export const GENERAL_STRATEGY_DIR = '通用策略';
 
-const ASHARE_ID = /^as\d{2}(_|$)/i;
 const HK_ID = /^hk_/i;
 const MINIBT_ID = /^minibt_/i;
 
 export function resolveTemplateDir(template: StrategyTemplate): string {
   const explicit = template.dir?.trim();
   if (explicit) return explicit;
-  if (ASHARE_ID.test(template.id)) return 'A股策略/未分类';
   if (HK_ID.test(template.id)) return '港股策略';
   if (MINIBT_ID.test(template.id)) return 'minibt策略';
   return GENERAL_STRATEGY_DIR;
@@ -236,7 +234,7 @@ export type StrategyTemplateSection = {
   children: Array<{ label: string; items: StrategyTemplate[] }>;
 };
 
-/** 通用策略置顶；A股/港股等按第一级目录收拢，避免 10 个子目录再加通用变成 11 组。 */
+/** 通用策略置顶；多级目录（如 港股策略/核心）按第一级收拢为分组。 */
 export function groupStrategyTemplateSections(
   templates: StrategyTemplate[],
 ): StrategyTemplateSection[] {

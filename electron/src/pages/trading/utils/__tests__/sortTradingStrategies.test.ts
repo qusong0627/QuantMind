@@ -25,8 +25,8 @@ describe('sortTradingStrategies', () => {
     const topk = strategy('42', '默认 Top-K 选股策略', {
       parameters: { strategy_type: 'standard_topk' },
     });
-    const later = strategy('8', 'A股微盘流动性溢价', {
-      parameters: { strategy_type: 'as47_micro_liquidity' },
+    const later = strategy('8', '自定义量价策略', {
+      parameters: { strategy_type: 'custom_price_volume' },
     });
     const earlier = strategy('3', '动量策略', {
       parameters: { strategy_type: 'momentum' },
