@@ -11,8 +11,10 @@ from datetime import date
 from enum import Enum
 from typing import Any
 
+from backend.services.simulation.services.index_universe import index_members_on
 from backend.services.simulation.services.signal_loader import SignalScore
 from backend.services.simulation.services.market_rules import lot_size_for_symbol
+from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,52 @@ class WeightMode(str, Enum):
     CUSTOM = "custom"  # 自定义权重
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def dynamic_config_from_params(params: dict[str, Any] | None) -> dict[str, Any]:
+    """解析动态仓位/动态股票池参数，并兼容未显式写 `dynamic_exposure` 的旧模板。
+
+    旧模板（动态仓位TOPK / 动态股票池TOPK）只在代码 kwargs 里写了
+    `score_threshold / pos_up / pos_down`，没有 `dynamic_exposure`。
+    这里在检测到这些仓位字段时自动开启动态仓位，避免存量策略库副本失效。
+    """
+    params = params or {}
+    threshold = params.get("score_threshold")
+    pos_up = params.get("pos_up")
+    pos_down = params.get("pos_down")
+    dynamic = _as_bool(params.get("dynamic_exposure"), False)
+    if not dynamic and threshold is not None and (
+        pos_up is not None or pos_down is not None
+    ):
+        dynamic = True
+
+    def _float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    defensive = (
+        params.get("defensive_universe")
+        or params.get("defensive_market")
+        or ""
+    )
+    return {
+        "dynamic_exposure": dynamic,
+        "score_threshold": _float(threshold, 0.0),
+        "pos_up": _float(pos_up, 1.0),
+        "pos_down": _float(pos_down, 0.5),
+        "target_exposure": _float(params.get("target_exposure"), 1.0),
+        "defensive_universe": str(defensive).strip(),
+    }
+
+
 @dataclass
 class StrategyConfig:
     """策略配置"""
@@ -33,6 +81,18 @@ class StrategyConfig:
     min_score: float = 0.0
     max_position_pct: float = 0.15  # 单只股票最大仓位比例
     lot_size: int = 100  # 最小交易单位
+
+    # ── 动态仓位 / 动态股票池（默认关闭，保持既有策略行为不变）──
+    # dynamic_exposure=True 时，用当日全市场信号均分决定总仓位：
+    #   mean >= score_threshold → pos_up；否则 → pos_down。
+    # target_exposure 是非动态策略的固定目标仓位（1.0 = 投满）。
+    dynamic_exposure: bool = False
+    score_threshold: float = 0.0
+    pos_up: float = 1.0
+    pos_down: float = 0.5
+    target_exposure: float = 1.0
+    # 负分时切换到的防御池（qlib instruments 文件名，如 "csi300"）；空 = 不切换。
+    defensive_universe: str = ""
 
     # ── 以下为 R2 新增，默认值保持既有行为，实盘路径不受影响 ──
     # 是否启用 min_score 过滤。历史上 min_score 字段存在但从未被读取（死配置），
@@ -151,6 +211,46 @@ class RebalanceCalculator:
                 logger.info("RebalanceCalculator: min_score 过滤后无信号")
                 return []
 
+        # 0.5 动态仓位 / 动态股票池（策略显式开启时才生效）
+        effective_exposure = max(0.0, min(1.0, float(strategy.target_exposure)))
+        active_universe_members: set[str] | None = None
+        if strategy.dynamic_exposure:
+            mean_score = sum(float(s.score) for s in signals) / len(signals)
+            is_up = mean_score >= strategy.score_threshold
+            effective_exposure = max(
+                0.0,
+                min(1.0, float(strategy.pos_up if is_up else strategy.pos_down)),
+            )
+            if not is_up and strategy.defensive_universe:
+                members = index_members_on(
+                    strategy.defensive_universe, signals[0].trade_date
+                )
+                if members:
+                    filtered = [
+                        sig
+                        for sig in signals
+                        if StockCodeUtil.normalize(sig.symbol) in members
+                    ]
+                    if filtered:
+                        signals = filtered
+                        active_universe_members = members
+                    else:
+                        logger.warning(
+                            "RebalanceCalculator: 防御池 %s 过滤后无信号，回退全市场",
+                            strategy.defensive_universe,
+                        )
+                else:
+                    logger.warning(
+                        "RebalanceCalculator: 防御池 %s 无成分数据，回退全市场",
+                        strategy.defensive_universe,
+                    )
+            logger.info(
+                "RebalanceCalculator: 动态仓位 mean=%.6f exposure=%.2f universe=%s",
+                mean_score,
+                effective_exposure,
+                strategy.defensive_universe if active_universe_members else "all",
+            )
+
         # 1–2. 全市场按分排序后跳过不可交易，连续补位直到凑满 topk
         # （禁止先截断宇宙再过滤，否则真 TOP 被滤掉后无法用更低名次补齐）
         ranked = sorted(signals, key=lambda x: x.score, reverse=True)
@@ -176,7 +276,26 @@ class RebalanceCalculator:
             topk_signals, signals, account, strategy
         )
 
-        if dropout_active:
+        # 防御池切换：持仓中不属于目标池的标的必须从目标集剔除（相当于卖出）。
+        if active_universe_members is not None:
+            target_signals = [
+                sig
+                for sig in target_signals
+                if StockCodeUtil.normalize(sig.symbol) in active_universe_members
+            ]
+            if not target_signals:
+                logger.info(
+                    "RebalanceCalculator: 防御池切换后目标为空，清仓非成分持仓"
+                )
+
+        # 动态仓位 / 固定目标仓位 < 100% 时不能走「保留股不动」的增量路径，
+        # 否则旧持仓不会按目标仓位降下来；改为全量目标权重（保留 n_drop 选股）。
+        use_dropout_positions = (
+            dropout_active
+            and not strategy.dynamic_exposure
+            and effective_exposure >= 0.999
+        )
+        if use_dropout_positions:
             # 增量模式：保留股不动（不重新配权），剔除股全卖，
             # 新增股用剔除腾出的资金均分 —— 与回测引擎 TopkDropout 一致，
             # 轮换笔数被钉死在每期 ≤ 2×n_drop。
@@ -184,8 +303,10 @@ class RebalanceCalculator:
                 target_signals, quotes, account, strategy
             )
         else:
-            # 3. 计算目标权重（首日建仓 / 全量调仓路径）
-            weights = self._calc_weights(target_signals, strategy)
+            # 3. 计算目标权重（首日建仓 / 全量调仓 / 动态仓位降仓路径）
+            weights = self._calc_weights(
+                target_signals, strategy, exposure=effective_exposure
+            )
 
             # 4. 计算目标持仓
             target_positions = self._calc_target_positions(
@@ -409,19 +530,28 @@ class RebalanceCalculator:
         self,
         signals: list[SignalScore],
         strategy: StrategyConfig,
+        exposure: float = 1.0,
     ) -> dict[str, float]:
-        """计算目标权重"""
+        """计算目标权重（总权重 = exposure，剩余留现金）。"""
         if not signals:
             return {}
 
+        exposure = max(0.0, min(1.0, float(exposure)))
+        if exposure <= 0:
+            return {}
+
         if strategy.weight_mode == WeightMode.CUSTOM and strategy.custom_weights:
-            return strategy.custom_weights
+            return {
+                symbol: float(weight) * exposure
+                for symbol, weight in strategy.custom_weights.items()
+                if float(weight) > 0
+            }
 
         if strategy.weight_mode == WeightMode.SCORE_WEIGHTED:
             total_score = sum(sig.score for sig in signals)
             if total_score > 0:
                 return {
-                    sig.symbol: sig.score / total_score
+                    sig.symbol: sig.score / total_score * exposure
                     for sig in signals
                 }
             # 分数全为非正：退化为等权（与下方分支一致）
@@ -438,13 +568,13 @@ class RebalanceCalculator:
         if n < basis:
             logger.info(
                 "RebalanceCalculator: 可交易 %d 只 < topk=%d，等权按 1/%d 配权"
-                "（总目标仓位 %.1f%%，不足部分留现金）",
+                "（目标仓位 %.1f%%，不足部分留现金）",
                 n,
                 basis,
                 basis,
-                100.0 * n / basis,
+                100.0 * exposure * n / basis,
             )
-        weight = 1.0 / basis
+        weight = exposure / basis
         return {sig.symbol: weight for sig in signals}
 
     def _calc_target_positions(
@@ -461,18 +591,25 @@ class RebalanceCalculator:
 
         # bug 6 fix: max_position_pct 与 topk 冲突时的处理。
         # 例：topk=5 等权 → 每只 0.2，被 cap=0.15 砍削后总和 0.75 → 25% 永久空仓。
-        # n * cap < 1 说明单票上限与持仓数在数学上无法同时满足，此时以「投满」
-        # 为优先，把 cap 放宽到 1/n —— 否则用户设了 topk=5 却永远只有 75% 仓位，
-        # 且没有任何提示。cap 仍对个别超配标的（score_weighted 下）生效。
+        # n * cap < 目标总权重说明单票上限与目标仓位在数学上无法同时满足，此时以
+        # 「投到目标仓位」为优先，把 cap 放宽到 target_total/n；否则用户设了
+        # topk=5 却永远只有 75% 仓位。动态仓位策略同样按 target_total（如 0.5）判断。
         cap = strategy.max_position_pct
-        if strategy.renormalize_weights and weights:
+        target_total = sum(weights.values()) if weights else 0.0
+        if weights and (strategy.renormalize_weights or strategy.dynamic_exposure):
             n = len(weights)
-            if n > 0 and n * cap < 1.0:
-                relaxed = 1.0 / n
+            if n > 0 and n * cap < target_total:
+                relaxed = target_total / n
                 logger.info(
-                    "RebalanceCalculator: max_position_pct=%.4f 与 topk=%d 冲突"
-                    "（上限合计 %.2f < 1），放宽单票上限至 %.4f 以避免资金闲置",
-                    cap, n, n * cap, relaxed,
+                    "RebalanceCalculator: max_position_pct=%.4f 与 topk=%d"
+                    "（目标仓位 %.2f）冲突（上限合计 %.2f < %.2f），"
+                    "放宽单票上限至 %.4f 以避免资金闲置",
+                    cap,
+                    n,
+                    target_total,
+                    n * cap,
+                    target_total,
+                    relaxed,
                 )
                 cap = relaxed
             weights = self._waterfill_weights(weights, cap)

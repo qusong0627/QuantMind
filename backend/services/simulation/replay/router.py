@@ -1041,6 +1041,13 @@ _PARAM_ALIAS = {
     "n_drop": "n_drop",
     "n_drop_ratio": "n_drop_ratio",
     "rebalance_days": "rebalance_days",
+    # 动态仓位 / 动态股票池
+    "dynamic_exposure": "dynamic_exposure",
+    "score_threshold": "score_threshold",
+    "pos_up": "pos_up",
+    "pos_down": "pos_down",
+    "target_exposure": "target_exposure",
+    "defensive_universe": "defensive_universe",
 }
 
 
@@ -1072,6 +1079,30 @@ def _to_replay_params(tpl: Any) -> dict[str, Any]:
         out["weight_mode"] = "score_weighted"
     else:
         out["weight_mode"] = "equal"
+
+    # 动态仓位/动态股票池参数通常写在 STRATEGY_CONFIG.kwargs（不在 JSON params
+    # 里），回放创建会话时必须一并带过去，否则策略退化成普通 Top-K。
+    try:
+        from backend.services.simulation.engine import (
+            _extract_strategy_config_kwargs,
+        )
+
+        code_kwargs = _extract_strategy_config_kwargs(
+            str(getattr(tpl, "code", "") or "")
+        )
+        for key in (
+            "dynamic_exposure",
+            "score_threshold",
+            "pos_up",
+            "pos_down",
+            "target_exposure",
+            "defensive_universe",
+            "defensive_market",
+        ):
+            if key in code_kwargs and key not in out:
+                out[key] = code_kwargs[key]
+    except Exception:
+        pass
     return out
 
 

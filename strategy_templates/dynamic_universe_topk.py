@@ -27,7 +27,12 @@ class DynamicUniverseTopkStrategy(RedisWeightStrategy):
         self.score_threshold = float(kwargs.pop("score_threshold", 0.0))
         self.pos_up = float(kwargs.pop("pos_up", 1.0))
         self.pos_down = float(kwargs.pop("pos_down", 0.5))
-        self.defensive_market = str(kwargs.pop("defensive_market", "csi300"))
+        self.defensive_universe = str(
+            kwargs.pop(
+                "defensive_universe",
+                kwargs.pop("defensive_market", "csi300"),
+            )
+        )
         self._score_mean = None
         self._last_bucket = None
         self._csi300_intervals = None
@@ -63,7 +68,7 @@ class DynamicUniverseTopkStrategy(RedisWeightStrategy):
             start = pd.Timestamp(cal.get_step_time(0)[0])
             end = pd.Timestamp(cal.get_step_time(cal.get_trade_len() - 1)[0])
             raw = D.list_instruments(
-                D.instruments(self.defensive_market),
+                D.instruments(self.defensive_universe),
                 start_time=start,
                 end_time=end,
                 as_list=False,
@@ -183,9 +188,10 @@ STRATEGY_CONFIG = {
         "topk": 50,
         "n_drop": 10,
         "rebalance_days": 3,
+        "dynamic_exposure": True,
         "score_threshold": 0.0,
         "pos_up": 1.0,
         "pos_down": 0.5,
-        "defensive_market": "csi300",
+        "defensive_universe": "csi300",
     },
 }

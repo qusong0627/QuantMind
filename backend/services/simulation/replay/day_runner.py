@@ -60,6 +60,7 @@ from backend.services.simulation.services.rebalance_calculator import (
     SimulationAccount,
     StrategyConfig,
     WeightMode,
+    dynamic_config_from_params,
 )
 from backend.services.simulation.replay.signal_generator import (
     ReplaySignalLoader,
@@ -739,6 +740,7 @@ class ReplayDayRunner:
             force_exit_on_limit_down=bool(
                 strategy_params.get("force_exit_on_limit_down", True)
             ),
+            **dynamic_config_from_params(strategy_params),
         )
         account = SimulationAccount(
             cash=float(account_data.get("cash", 0)),

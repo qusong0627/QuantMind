@@ -145,6 +145,7 @@ STRATEGY_CONFIG = {
         "topk": 50,
         "n_drop": 10,
         "rebalance_days": 3,
+        "dynamic_exposure": True,
         "score_threshold": 0.0,
         "pos_up": 1.0,
         "pos_down": 0.5,
