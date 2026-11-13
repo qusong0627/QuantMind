@@ -8,6 +8,8 @@
  *   回退到原有 l2 分组 —— 两库各自命名空间，切数据集要清限定（页面已保证）。
  *   点分类名 = 把右侧排行榜限定到该分类（再点取消）；折叠箭头独立成钮 ——
  *   「看子类」和「筛榜单」是两个动作，合成一个按钮会互相打架；
+ *   大类默认折叠（首屏先给概览），但搜索/标签筛选生效、或分类限定落在该组时
+ *   自动展开命中项 —— 否则搜索只剩几个大类名、生效中的限定也看不见；
  * - 「列表」：全库平铺、按综合分降序 —— 「整个列表排序」不用切到右侧看。
  */
 import React, { useMemo, useState } from 'react';
@@ -49,7 +51,8 @@ export const CatalogSidebar: React.FC<Props> = ({
   categoryFilter, onSelectCategory, onToggle, onOpen,
 }) => {
   const [query, setQuery] = useState('');
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  /** 用户显式展开过的 L1 大类（缺省=折叠；见下方 filtering 的自动展开） */
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [mode, setMode] = useState<ViewMode>('tree');
 
   const filtered = useMemo(() => {
@@ -117,6 +120,9 @@ export const CatalogSidebar: React.FC<Props> = ({
     const compositeOf = (code: string) => rowsByCode.get(code)?.composite ?? -Infinity;
     return [...filtered].sort((a, b) => compositeOf(b.code) - compositeOf(a.code));
   }, [filtered, rowsByCode]);
+
+  /** 搜索/标签筛选生效：命中项要能直接看到，不能只剩几个折叠着的大类名 */
+  const filtering = query.trim().length > 0 || tagFilter.length > 0;
 
   const rowOf = (f: FactorMeta, showPath = false) => {
     const row = rowsByCode.get(f.code);
@@ -225,7 +231,8 @@ export const CatalogSidebar: React.FC<Props> = ({
           empty
         ) : (
           groups.map((g) => {
-            const isCollapsed = collapsed[g.l1];
+            // 默认折叠；筛选生效或限定落在本组时自动展开（用户手动操作优先）
+            const isCollapsed = !(expanded[g.l1] ?? (filtering || categoryFilter?.l1 === g.l1));
             const l1Active =
               categoryFilter?.l1 === g.l1 && !categoryFilter?.l2 && !categoryFilter?.category;
             return (
@@ -233,7 +240,7 @@ export const CatalogSidebar: React.FC<Props> = ({
                 <div className={`flex items-center ${l1Active ? 'bg-blue-50' : 'hover:bg-slate-50'}`}>
                   <button
                     aria-label={isCollapsed ? `展开 ${g.l1}` : `折叠 ${g.l1}`}
-                    onClick={() => setCollapsed({ ...collapsed, [g.l1]: !isCollapsed })}
+                    onClick={() => setExpanded({ ...expanded, [g.l1]: isCollapsed })}
                     className="p-1.5 text-slate-400 hover:text-slate-600"
                   >
                     {isCollapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}

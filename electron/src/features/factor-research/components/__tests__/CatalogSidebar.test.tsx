@@ -81,21 +81,28 @@ function renderSidebar(over: SidebarOver = {}) {
 }
 
 describe('CatalogSidebar：分类点击与视图模式', () => {
-  test('点 L1 分类名发起大类限定（l2=null）；箭头只折叠、绝不筛榜', () => {
+  test('默认折叠；点 L1 分类名发起大类限定（l2=null）；箭头只折叠/展开、绝不筛榜', () => {
     const onSelectCategory = vi.fn();
     renderSidebar({ onSelectCategory });
 
     // 提示行把两个动作讲明白
     expect(screen.getByText(/点分类名 → 右侧只排这一类/)).toBeTruthy();
+    // 首屏默认折叠：子类不占版面
+    expect(screen.queryByText('子类甲一')).toBeNull();
 
     fireEvent.click(screen.getByText('大类甲'));
     expect(onSelectCategory).toHaveBeenCalledWith({ l1: '大类甲', l2: null });
 
-    // 折叠箭头：只收起来，不发筛选
+    // 展开箭头：只打开子类，不发筛选
     onSelectCategory.mockClear();
-    fireEvent.click(screen.getByLabelText('折叠 大类甲'));
+    fireEvent.click(screen.getByLabelText('展开 大类甲'));
+    expect(screen.getByText('子类甲一')).toBeTruthy();
     expect(onSelectCategory).not.toHaveBeenCalled();
+
+    // 再点箭头收回
+    fireEvent.click(screen.getByLabelText('折叠 大类甲'));
     expect(screen.queryByText('子类甲一')).toBeNull();
+    expect(onSelectCategory).not.toHaveBeenCalled();
   });
 
   test('已限定的 L1 再点一次 = 取消限定（回全部）', () => {
@@ -110,6 +117,7 @@ describe('CatalogSidebar：分类点击与视图模式', () => {
     const onSelectCategory = vi.fn();
     renderSidebar({ onSelectCategory });
 
+    fireEvent.click(screen.getByLabelText('展开 大类甲'));
     fireEvent.click(screen.getByText('子类甲二'));
     expect(onSelectCategory).toHaveBeenCalledWith({ l1: '大类甲', l2: '子类甲二' });
   });
@@ -225,6 +233,7 @@ describe('CatalogSidebar：语义类别分组（私人库）', () => {
     const onSelectCategory = vi.fn();
     renderCat({ onSelectCategory });
 
+    fireEvent.click(screen.getByLabelText('展开 库甲'));
     expect(screen.getByText('动量趋势')).toBeTruthy();
     expect(screen.getByText('波动风险')).toBeTruthy();
     // 类别组计数（动量 2 个）显示在该组头里
@@ -256,6 +265,7 @@ describe('CatalogSidebar：语义类别分组（私人库）', () => {
   test('类别组按固定展示顺序渲染（量价在前、兜底桶垫底）', () => {
     renderCat();
 
+    fireEvent.click(screen.getByLabelText('展开 库甲'));
     const order = ['动量趋势', '波动风险', '其他/未分类'];
     const nodes = order.map((t) => screen.getByText(t));
     for (let i = 1; i < nodes.length; i++) {
