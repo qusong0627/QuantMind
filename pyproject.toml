@@ -121,6 +121,10 @@ exclude = [
     "user_strategies",
     "examples/testing",
     "backend/scripts/ccass_crawler.py",  # 第三方 HKEX 爬虫（导入自外部项目），不按本项目规范 lint
+    # arena 数据面是 quant-Trader 的**逐字节移植副本 + 补丁头**（见各文件顶部移植注）：
+    # 保持与上游 `diff` 可验，不按本仓风格重排；新增胶水模块也在同包内，随包豁免。
+    "backend/services/agent_arena",
+    "backend/services/api/routers/agent_arena",
 ]
 
 [tool.ruff.lint]

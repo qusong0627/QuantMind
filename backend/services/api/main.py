@@ -91,10 +91,10 @@ from backend.services.api.user_app.api.v1.subscriptions import (
     router as subscriptions_router,
 )
 
-# 本机 arena（quant-Trader）数据面——2026-09-29 起为 QuantMind **原生**实现
-# （上游退役后由代理改直连，见 docs/local/arena-ui-native-migration-plan.md）。
-# 模块随「实盘交易」栏一起本地独有、不进公开仓（electron/src/features/local-live/
-# 同纪律）。公开仓缺该包时静默跳过，端点树与本机制引入前逐位相同。
+# arena（quant-Trader）数据面——2026-09-29 起为 QuantMind **原生**实现
+# （上游退役后由代理改直连；启用与数据面说明见 docs/实盘模块_启用与通道指南.md）。
+# 模块自 2026-11-13 起随仓分发（electron/src/features/local-live/ 同）。
+# try/except 保留给老检出/裁剪产物：缺包时静默跳过，端点树与本机制引入前逐位相同。
 try:  # pragma: no cover - 取决于本地是否存在该模块
     from backend.services.api.routers.agent_arena import (
         router as agent_arena_router,

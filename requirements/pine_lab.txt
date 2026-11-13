@@ -1,0 +1,26 @@
+# Pine 行情回测宿主运行时（pynecore）——由 scripts/setup_pine_lab.sh 安装到
+# pine_lab/.venv（该目录不入仓，122MB 二进制运行时）。
+#
+# 版本与运营机现网运行时逐包对齐（2026-11-13，Python 3.14 / linux-x64）。
+# pynecore 要求 Python >= 3.11；主运行环境是 3.10，所以单独建 venv。
+# 升级流程：先在非交易时段跑通一次转写 + 沙箱回测，再改这里的钉版。
+pynesys-pynecore==6.9.2
+duckdb==1.5.5
+fastapi==0.141.1
+pydantic==2.13.5
+pydantic-core==2.46.5
+starlette==1.6.0
+anyio==4.15.1
+idna==3.19
+annotated-doc==0.0.5
+annotated-types==0.8.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+Pygments==2.21.0
+PyYAML==6.0.3
+rich==15.0.0
+shellingham==1.5.4
+typer==0.27.2
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+tzdata==2026.3

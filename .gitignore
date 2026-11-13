@@ -344,22 +344,12 @@ minibt/build/
 deploy/live-win/
 # 本机独有运维文档（含内网地址、隔壁项目拓扑，绝不进公开仓）
 docs/local/
-# arena 数据面（quant-Trader 原生迁移，2026-09-29）：实盘栏的 arena 页面
-# （智能体交易/实况/行情回测/总控/数据）由 QM 原生路由供数，服务层是从隔壁
-# 逐字节移植的副本。公开仓缺这两个包时 main.py 的 try/except 注册静默跳过
-# （端点树不变）。
-backend/services/agent_arena/
-backend/services/api/routers/agent_arena/
-backend/tests/test_agent_arena_native.py
-backend/tests/test_arena_files.py
-# arena 行情回测宿主链路（2026-10-08 随 B2 worker 迁移，同一纪律）：Pine 转写 CLI +
-# 两个文件队列 worker + 索引构建器；宿主 pynecore 运行时目录（122MB，不进仓）。
-# 公开仓无这些文件时，只读面与新挂写端点会在导入/入队处如实报错，不产生假活。
-scripts/pine_to_pyne.py
-scripts/pine_transpile_worker.py
-scripts/pine_chat_worker.py
-scripts/pine_library_index.py
-backend/tests/test_pine_*.py
+# arena 数据面（quant-Trader 原生迁移）：2026-11-13 起**随仓分发**——实盘栏的
+# 智能体交易/实况/行情回测/总控/数据/关于由 QM 原生路由供数，服务层与路由层都在
+# backend/ 内。运行期数据仍不入仓（data/ 是仓库外符号链接；空数据根即可启动）。
+# Pine 宿主链路（转写 CLI + 两个队列 worker + 索引构建器 + 批量回测 CLI）同样入仓。
+# 仅 pynecore 运行时目录（pine_lab/，122MB venv）不入仓；首次安装执行
+# `bash scripts/setup_pine_lab.sh` 按 requirements/pine_lab.txt 重建。
 pine_lab/
 # 导出的实盘增量包（推理结果 + 策略的 CSV，属业务数据；CSV 已被 *.csv 覆盖，
 # 这里连 manifest.json/目录本身一起挡掉）
