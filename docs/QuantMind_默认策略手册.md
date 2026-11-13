@@ -14,7 +14,7 @@
 | 2 | 多空 Top-K 对冲 | `RedisLongShortTopkStrategy` | 模型预测 | 50/50 | 多空双向 + 5 日调仓 |
 | 3 | 分数加权组合 | `RedisWeightStrategy` | 模型预测 | 50 | 按分数权重 + 单票上限 |
 | 4 | 动量增强选股 | `RedisMomentumStrategy` | 模型预测 | 30 | 动量因子加权 |
-| 5 | 风险守卫 Top-K | `RedisRiskGuardTopkStrategy` | 模型预测 | 50 | 多因子风控过滤 |
+| 5 | 动态风控 TOPK | `DynamicRiskTopkStrategy` | 模型预测 + 沪深300 | 50 | 均分择时 + 换池 + 急跌过滤 |
 | 6 | 价值成长精选 | `RedisRecordingStrategy` | 模型预测 | 30 | 估值+成长双约束 |
 | 7 | 自适应漂移 | `RedisRecordingStrategy` | 模型预测 | 50 | 动态仓位 |
 | 8 | 全 Alpha 截面 | `RedisFullAlphaStrategy` | 模型预测 | 50 | 每日调仓 |
@@ -130,36 +130,35 @@
 
 ---
 
-### 5. 风险守卫 Top-K（Risk-Guard Top-K）
+### 5. 动态风控 TOPK（Dynamic Risk Top-K）
 
-**文件**：`strategy_templates/risk_guard_topk.py`
-**策略类**：`RedisRiskGuardTopkStrategy`
+**文件**：`strategy_templates/dynamic_risk_topk.py`
+**策略类**：`DynamicRiskTopkStrategy`
 
-**逻辑**：在 Top-K 基础上叠加**多重风控过滤**（最强风控模板）：
-- **基本面过滤**：排除 ST（`exclude_st`）、上市不足 120 天（`f_listed_days_min=120`）
-- **交易异常过滤**：排除今日涨跌停（`f_limit_up/down_today_not`）、连板股（`f_consecutive_limit_up_days_max=0`）、微盘跳空（`f_micro_jump_flag_not`）
-- **流动性过滤**：换手率 0.5%-15%（`f_turnover_rate_min/max`）
-- **风险过滤**：Beta 20 日 ≤1.5（`f_beta_20_max`）、流通市值 ≥5 亿（`f_float_mv_min`）
-- **行业分散**：行业权重上限 30%（`industry_cap_ratio=0.30`），防行业集中
-- **市场状态**：参考沪深 300（`market_state_symbol=SH000300`）20 日趋势，市况不佳时降低仓位
-- **3 日调仓**（`rebalance_days=3`），更灵敏
+**逻辑**：在 Top-K 选股上叠加三层风控：
+- **均分择时**：当日全市场预测均分 ≥ 0 → 全市场池 + 100% 仓位；< 0 → 沪深300池 + 50% 仓位
+- **快速崩盘过滤**：沪深300 近 10 日跌幅 ≤ -6% 或近 5 日 ≤ -4% 时，次日降到 **30%** 仓位，维持 3 个交易日
+- **每日仓位检查**：风险档位变化当天强制调整目标仓位，选股仍按 3 日低换手轮动
+- 严格目标仓位执行：超配卖出、低配补仓，避免 `risk_degree` 只限买入导致仓位漂移
 
 **参数**：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `topk` | 50 | 持仓数量 |
-| `rebalance_days` | 3 | 调仓周期 |
-| `max_industry_count` | 0 | 行业数量上限（0=不限） |
-| `industry_cap_ratio` | 0.30 | 单行业权重上限 |
-| `exclude_st` | True | 排除 ST |
-| `f_listed_days_min` | 120 | 最少上市天数 |
-| `f_turnover_rate_min/max` | 0.5 / 15.0 | 换手率区间（%） |
-| `f_beta_20_max` | 1.5 | Beta 上限 |
-| `f_float_mv_min` | 5 亿 | 最小流通市值 |
-| `market_state_symbol` | SH000300 | 市场状态基准 |
+| `n_drop` | 10 | 每期最多替换数量 |
+| `rebalance_days` | 3 | 选股调仓周期（交易日） |
+| `score_threshold` | 0.0 | 均分多空分界 |
+| `pos_up` / `pos_down` | 1.0 / 0.5 | 正分 / 负分目标仓位 |
+| `crash_exposure` | 0.3 | 急跌触发后的目标仓位 |
+| `crash_ret10` / `crash_ret5` | -0.06 / -0.04 | 10 日 / 5 日指数跌幅阈值 |
+| `crash_hold_days` | 3 | 急跌状态维持交易日数 |
+| `defensive_universe` | csi300 | 负分/急跌时的防御池 |
 
-**适用场景**：稳健型组合首选，适合风控要求高的资金。
+**参考回测**（默认模型，2025-11-13 → 2026-11-12，3 日调仓）：
+年化 **+15.04%**、夏普 **1.161**、最大回撤 **-4.31%**；同期沪深300 为 -13.32%。
+
+**适用场景**：希望保留 Top-K 选股 alpha，同时控制单边下跌回撤的稳健型组合。
 
 ---
 
@@ -319,7 +318,7 @@
 | 多空对冲 | 50/50 | - | 5日 | 5% | 多空双向 |
 | 分数加权 | 50 | - | 信号日 | 5% | 分数门槛 |
 | 动量增强 | 30 | 6 | 信号日 | - | 动量 20日 |
-| 风险守卫 | 50 | 10 | 3日 | 30%行业 | 全因子过滤 |
+| 动态风控 | 50 | 10 | 3日 | 均分100/50 + 急跌30 | 沪深300换池 |
 | 价值成长 | 30 | 5 | 信号日 | - | 估值+ROE |
 | 自适应漂移 | 50 | 10 | 信号日 | - | 动态仓位 |
 | 全 Alpha | 50 | - | 1日 | 5% | 高频 |
@@ -344,7 +343,7 @@
 - **`n_drop`**：换手控制，越大换手越高、信号响应越快。10-20 较常见
 - **`rebalance_days`**：调仓频率，1=日频（高 Alpha 捕捉）、5=周频（低换手）
 - **`max_weight`**：单票集中度，5% 较分散，10% 以上更集中
-- **风控因子**（风险守卫）：建议保留默认，除非对特定因子有明确判断
+- **风控档位**（动态风控）：默认均分正 100%、负 50%、指数急跌 30%，不建议关闭
 
 ### 4.3 信号源说明
 - 所有策略的 `signal` 默认为 `<PRED>`，即所选模型的每日预测分数

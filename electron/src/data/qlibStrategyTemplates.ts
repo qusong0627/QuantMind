@@ -87,51 +87,6 @@ STRATEGY_CONFIG = {
     ]
   },
   {
-    id: 'risk_guard_topk',
-    name: '大盘风控 Top-K 选股策略',
-    description: '以 features_daily 的市值、估值、波动与趋势做硬过滤，并在大盘下行时自动降仓。',
-    category: 'risk_control',
-    difficulty: 'intermediate',
-    code: `"""
-大盘风控 Top-K 选股策略 (Risk-Guarded Top-K)
-[Native] 核心逻辑：Top-K 选股 + 基本面硬过滤 + 大盘周期降仓。
-"""
-STRATEGY_CONFIG = {
-    "class": "RedisRiskGuardTopkStrategy",
-    "kwargs": {
-        "signal": "<PRED>",
-        "topk": 50,
-        "n_drop": 10,
-        "rebalance_days": 3,
-        "market_state_symbol": "000300.SH",
-        "market_state_window": 20,
-        "industry_cap_ratio": 0.30,
-        "f_total_mv_min": 2000000000,
-        "f_float_mv_min": 500000000,
-        "f_beta_20_max": 1.5,
-        "f_vol_std_20_max": 0.06,
-        "f_ma_gap_20_min": -0.12,
-        "f_pe_ttm_min": 0,
-        "f_pe_ttm_max": 80,
-    }
-}
-`,
-    params: [
-      { name: 'topk', description: '持仓股票总数', default: 50, min: 5, max: 200 },
-      { name: 'n_drop', description: '每期替换数量', default: 10, min: 0, max: 200 },
-      { name: 'rebalance_days', description: '调仓周期 (天)', default: 3, min: 1, max: 60 },
-      { name: 'market_state_symbol', description: '市场状态参考指数', default: '000300.SH' },
-      { name: 'market_state_window', description: '大盘状态判定窗口 (交易日)', default: 20, min: 5, max: 120 },
-      { name: 'industry_cap_ratio', description: '单行业持仓上限占比', default: 0.3, min: 0.1, max: 0.6 },
-      { name: 'f_total_mv_min', description: '总市值下限 (元)', default: 2000000000, min: 100000000, max: 100000000000 },
-      { name: 'f_float_mv_min', description: '流通市值下限 (元)', default: 500000000, min: 100000000, max: 100000000000 },
-      { name: 'f_beta_20_max', description: '20日 Beta 上限', default: 1.5, min: 0.5, max: 3 },
-      { name: 'f_vol_std_20_max', description: '20日收益波动率上限', default: 0.06, min: 0.01, max: 0.2 },
-      { name: 'f_ma_gap_20_min', description: '相对20日均线偏离下限', default: -0.12, min: -0.5, max: 0.2 },
-      { name: 'f_pe_ttm_max', description: 'PE（TTM）上限', default: 80, min: 1, max: 300 },
-    ]
-  },
-  {
     id: 'alpha_cross_section',
     name: '截面 Alpha 预测策略',
     description: '根据预测分自动分配资金权重，分高者重仓。',
