@@ -661,7 +661,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     "freq": "day",
                     "start_time": request.start_date,
                     "end_time": request.end_date,
-                    "limit_threshold": 0.095,
+                    # 涨停/跌停/一字板由 CnExchange.check_stock_limit 按板块
+                    # 精确成交价判断；不再传 limit_threshold，避免用当日收盘
+                    # 涨幅（$change）在开盘成交时引入前视偏差。
                     "deal_price": request.deal_price,
                     "commission": comm,
                     "min_commission": request.min_commission,

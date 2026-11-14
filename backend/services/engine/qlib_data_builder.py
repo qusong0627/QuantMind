@@ -684,8 +684,9 @@ class QlibDataBuilder:
                 for field, arr in aligned.items():
                     self._write_bin_file(feat_dir / f"{field}.day.bin", start_idx, arr)
                 if is_cn:
-                    # $change = pct_change(close)：除权日分母自然换成参考价，
-                    # CnExchange.check_stock_limit 读的就是这一列
+                    # $change = pct_change(close)：qlib Exchange 的 necessary field，
+                    # 除权日分母自然换成参考价。涨跌停过滤已由
+                    # CnExchange.check_stock_limit 按精确成交价判断，不再读这一列。
                     close_arr = aligned["close"]
                     chg = np.full(span, np.nan, dtype=np.float32)
                     with np.errstate(invalid="ignore", divide="ignore"):

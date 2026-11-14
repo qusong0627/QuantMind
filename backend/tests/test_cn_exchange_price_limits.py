@@ -71,8 +71,24 @@ def test_afternoon_limit_does_not_reject_earlier_open_fill():
 
 
 @pytest.mark.parametrize("price", [9.0, 10.0, 10.5, 11.0])
-def test_strict_equal_open_close_rejects_buys_even_without_st_metadata(price):
-    assert blocked(exchange(price, price))
+def test_strict_equal_open_close_rejects_close_fills_even_without_st_metadata(price):
+    # The strict open == close policy is only observable on a close fill.
+    assert blocked(exchange(price, price, deal_price="$close"))
+
+
+@pytest.mark.parametrize("price", [9.0, 10.0, 10.5])
+def test_open_fill_equal_open_close_is_allowed_below_limit(price):
+    # At the open, today's close is unknown; only the limit price can veto.
+    assert not blocked(exchange(price, price, deal_price="$open"))
+
+
+@pytest.mark.parametrize(
+    "future_close", [None, np.nan, np.inf, 0.0, 9.0, 10.0, 10.1, 11.0]
+)
+def test_open_buy_does_not_depend_on_future_close(future_close):
+    obj = exchange(10.0, 10.1, deal_price="$open")
+    obj.quote.values["$close"] = future_close
+    assert not blocked(obj)
 
 
 def test_limit_up_can_be_sold_and_limit_down_cannot():
@@ -88,16 +104,24 @@ def test_directionless_filter_checks_both_sides():
 
 
 def test_raw_cent_rounding_and_float32_adjusted_prices():
-    obj = exchange(3.55, 3.55, reference=3.23, factor=2.030070066)
+    obj = exchange(3.55, 3.55, reference=3.23, factor=2.030070066, deal_price="$close")
     obj.quote.values = {k: np.float32(v) for k, v in obj.quote.values.items()}
     assert blocked(obj)
     assert not blocked(exchange(3.54, 3.53, reference=3.23))
 
 
+@pytest.mark.parametrize("field", ["$open", "$factor", "Ref($close, 1)"])
+@pytest.mark.parametrize("value", [None, np.nan, np.inf, 0.0])
+def test_missing_invalid_quotes_fail_closed_in_open_mode(field, value):
+    obj = exchange(10, 10.1)
+    obj.quote.values[field] = value
+    assert blocked(obj)
+
+
 @pytest.mark.parametrize("field", ["$open", "$close", "$factor", "Ref($close, 1)"])
 @pytest.mark.parametrize("value", [None, np.nan, np.inf, 0.0])
-def test_missing_invalid_current_quotes_fail_closed(field, value):
-    obj = exchange(10, 10.1)
+def test_missing_invalid_quotes_fail_closed_in_close_mode(field, value):
+    obj = exchange(10, 10.1, deal_price="$close")
     obj.quote.values[field] = value
     assert blocked(obj)
 

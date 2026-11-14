@@ -84,6 +84,19 @@ class CnExchange(Exchange):
             except Exception as e:
                 task_logger.warning("redis_client_init_failed", "Failed to initialize Redis client in CnExchange", error=str(e))
 
+    def _update_limit(self, limit_threshold) -> None:
+        """Drop qlib's coarse ``$change`` limit columns.
+
+        Limit-up buys and limit-down sells are decided in
+        :meth:`check_stock_limit` from the exact execution price and the dated
+        board rules, so a same-day ``$change >= threshold`` gate must not veto
+        an open fill (it is future data at that time point). Only the
+        suspension marker is kept for qlib internals.
+        """
+        suspended = self.quote_df["$close"].isna()
+        self.quote_df["limit_buy"] = suspended
+        self.quote_df["limit_sell"] = suspended
+
     @staticmethod
     def _is_invalid_quote(value: object) -> bool:
         if value is None:
@@ -311,40 +324,6 @@ class CnExchange(Exchange):
 
         return amount
 
-    _ST_SYMBOLS_CACHE: frozenset | None = None
-
-    @classmethod
-    def _resolve_is_st(cls, stock_id: str) -> bool:
-        """尽力判定 ST（快照口径，失败回 False）。
-
-        instrument_detail 是单一快照，历史回放会沿用该快照：对 2024 年老
-        ST 可能误判，但比永远 False 更能堵住当前 ST 5% 板一字买入。
-        """
-        try:
-            if cls._ST_SYMBOLS_CACHE is None:
-                from backend.services.simulation.services.local_market_data import (
-                    get_local_market_data,
-                )
-
-                cls._ST_SYMBOLS_CACHE = frozenset(get_local_market_data("CN").st_symbols())
-            return StockCodeUtil.to_suffix(stock_id) in (cls._ST_SYMBOLS_CACHE or frozenset())
-        except Exception:
-            return False
-
-    @staticmethod
-    def _get_limit_threshold(stock_id: str, trade_date=None) -> float:
-        """Use the shared dated board rules (including historical ChiNext/BSE)."""
-        from backend.services.simulation.services.local_market_data import limit_pct
-
-        day = pd.Timestamp(trade_date or datetime.now()).date()
-        return float(
-            limit_pct(
-                StockCodeUtil.to_suffix(stock_id),
-                is_st=CnExchange._resolve_is_st(stock_id),
-                trade_date=day,
-            )
-        )
-
     def check_stock_limit(
         self,
         stock_id: str,
@@ -354,11 +333,14 @@ class CnExchange(Exchange):
     ) -> bool:
         """Block at the execution price; never use today's return for an open fill.
 
-        A buy with open == close is rejected under the strict user policy,
-        regardless of its daily return or historical ST metadata. A buy at the
-        upper limit is also rejected even if the daily bar contains volume.
-        Missing reference or
-        execution quotes fail closed; historical quote fallback is valuation only.
+        A buy with open == close is rejected under the strict user policy, but
+        that comparison needs today's close, which is unknown at an open fill.
+        The strict bar filter therefore only applies on close fills; an open
+        fill is judged from the open price and the previous close alone and
+        never reads ``$close`` (future data at that time point). A buy at the
+        upper limit is rejected for both fill modes even if the daily bar
+        contains volume. Missing reference or execution quotes fail closed;
+        historical quote fallback is valuation only.
         """
         symbol = StockCodeUtil.to_suffix(stock_id)
         if not symbol.endswith((".SH", ".SZ", ".BJ")):
@@ -385,7 +367,9 @@ class CnExchange(Exchange):
             upper, lower = compute_limits(
                 symbol,
                 reference,
-                is_st=self._resolve_is_st(stock_id),
+                # 回测不做历史 ST 身份推断：instrument_detail 只有当前快照，
+                # 回溯历史会误判，统一按板块涨跌幅处理。
+                is_st=False,
                 trade_date=pd.Timestamp(start_time).date(),
             )
             # Qlib stores float32 adjusted quotes. Compare raw cents with a
@@ -398,9 +382,13 @@ class CnExchange(Exchange):
                 field = self.buy_price if side == OrderDir.BUY else self.sell_price
                 price = quote(field) / factor
                 if side == OrderDir.BUY:
-                    opening = quote("$open") / factor
-                    close = quote("$close") / factor
-                    one_price_bar = abs(opening - close) <= epsilon
+                    # open == close can only be known after the close; an open
+                    # fill must not read today's close (look-ahead). Keep the
+                    # strict user policy for close fills only.
+                    one_price_bar = False
+                    if field == "$close":
+                        opening = quote("$open") / factor
+                        one_price_bar = abs(opening - price) <= epsilon
                     if one_price_bar or price >= upper - epsilon:
                         return True
                 elif side == OrderDir.SELL and price <= lower + epsilon:
