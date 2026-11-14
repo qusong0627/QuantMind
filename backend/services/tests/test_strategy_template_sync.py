@@ -41,15 +41,15 @@ def test_existing_template_markers_ignores_blank_and_non_template_tags():
 
 
 @pytest.mark.anyio
-async def test_perform_sync_skips_existing_type_tag_and_name(monkeypatch):
+async def test_perform_sync_updates_system_copies_and_adds_missing(monkeypatch):
     templates = [
         SimpleNamespace(
             id="standard_topk",
             name="默认 Top-K 选股策略",
-            description="d",
+            description="新描述",
             category="basic",
             difficulty="beginner",
-            code="print(1)",
+            code="print('v2')",
         ),
         SimpleNamespace(
             id="momentum",
@@ -74,11 +74,13 @@ async def test_perform_sync_skips_existing_type_tag_and_name(monkeypatch):
         def list(self, user_id=None):
             return [
                 {
+                    "id": "11",
                     "name": "默认 Top-K 选股策略",
                     "parameters": {"strategy_type": "standard_topk"},
-                    "tags": [],
+                    "tags": ["basic", "SystemSync", "template:standard_topk"],
                 },
                 {
+                    "id": "12",
                     "name": "动量",
                     "parameters": {},
                     "tags": ["template:momentum"],
@@ -88,6 +90,12 @@ async def test_perform_sync_skips_existing_type_tag_and_name(monkeypatch):
         async def save(self, **kwargs):
             saved.append(kwargs)
 
+        async def delete(self, strategy_id, user_id):
+            raise AssertionError("should not delete")
+
+    async def _no_refs(strategy_id):
+        return False
+
     monkeypatch.setattr(
         "backend.shared.strategy_template_sync._load_templates",
         lambda: templates,
@@ -96,8 +104,96 @@ async def test_perform_sync_skips_existing_type_tag_and_name(monkeypatch):
         "backend.shared.strategy_template_sync._storage_service",
         lambda: _Svc(),
     )
+    monkeypatch.setattr(
+        "backend.shared.strategy_template_sync._has_references", _no_refs
+    )
+
     count = await sync_builtin_templates("00000001")
+
+    assert count == 2
+    by_name = {item["name"]: item for item in saved}
+    assert set(by_name) == {"默认 Top-K 选股策略", "新策略"}
+    assert by_name["默认 Top-K 选股策略"]["strategy_id"] == "11"
+    assert by_name["默认 Top-K 选股策略"]["code"] == "print('v2')"
+    assert by_name["新策略"].get("strategy_id") is None
+    assert by_name["新策略"]["metadata"]["parameters"]["strategy_type"] == "new_one"
+
+
+@pytest.mark.anyio
+async def test_perform_sync_removes_stale_system_copy(monkeypatch):
+    deleted: list[tuple[str, str]] = []
+
+    class _Svc:
+        def list(self, user_id=None):
+            return [
+                {
+                    "id": "19",
+                    "name": "动态风控TOPK策略 v9",
+                    "parameters": {"strategy_type": "dynamic_risk_topk_v9"},
+                    "tags": ["advanced", "SystemSync", "template:dynamic_risk_topk_v9"],
+                }
+            ]
+
+        async def save(self, **kwargs):
+            raise AssertionError("should not save")
+
+        async def delete(self, strategy_id, user_id):
+            deleted.append((strategy_id, user_id))
+            return True
+
+    async def _no_refs(strategy_id):
+        return False
+
+    monkeypatch.setattr(
+        "backend.shared.strategy_template_sync._load_templates",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "backend.shared.strategy_template_sync._storage_service",
+        lambda: _Svc(),
+    )
+    monkeypatch.setattr(
+        "backend.shared.strategy_template_sync._has_references", _no_refs
+    )
+
+    count = await sync_builtin_templates("00000001")
+
     assert count == 1
-    assert saved[0]["name"] == "新策略"
-    assert saved[0]["metadata"]["parameters"]["strategy_type"] == "new_one"
-    assert saved[0]["metadata"]["parameters"]["sort"] == 100
+    assert deleted == [("19", "00000001")]
+
+
+@pytest.mark.anyio
+async def test_perform_sync_keeps_referenced_stale_copy(monkeypatch):
+    class _Svc:
+        def list(self, user_id=None):
+            return [
+                {
+                    "id": "19",
+                    "name": "旧模板",
+                    "parameters": {"strategy_type": "gone"},
+                    "tags": ["SystemSync", "template:gone"],
+                }
+            ]
+
+        async def save(self, **kwargs):
+            raise AssertionError("should not save")
+
+        async def delete(self, strategy_id, user_id):
+            raise AssertionError("should not delete referenced copy")
+
+    async def _refs(strategy_id):
+        return True
+
+    monkeypatch.setattr(
+        "backend.shared.strategy_template_sync._load_templates",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "backend.shared.strategy_template_sync._storage_service",
+        lambda: _Svc(),
+    )
+    monkeypatch.setattr("backend.shared.strategy_template_sync._has_references", _refs)
+
+    count = await sync_builtin_templates("00000001")
+
+    assert count == 0
