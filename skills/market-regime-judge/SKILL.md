@@ -423,7 +423,7 @@ Authorization: Bearer <JWT>
 - 文件：`electron/src/features/market-analysis/components/panorama/MarketPanoramaPanel.tsx`（子卡：`IndexTape` / `StageSummaryCard` / `SentimentSummaryCard` / `FlowSummaryCard`）。
 - 数据：并行取 `/regime`、`/sentiment`、`/money-flow/panorama`（1日/行业二级），页面另预取 `/indices/overview`、`/breadth`、`/heatmap?category=shenwan`。
 - 版式（自上而下）：
-  1. **结论条**（浅色渐变，不是深色底）：状态/六块总分/日期/宇宙 + 一句话（长期/中期/短期、暴露、情绪、主力、涨跌家数、赚钱效应）+ 风险灯（顶风险/底部/情绪/主力）+ 刷新。
+  1. **结论条（浅色渐变，图表化）**：左侧状态/六块总分 + 五段评分尺（防守→风险偏好高）；中间五层结构（长期/中期/短期/当日）双向条；右侧基础暴露、情绪压力、赚钱效应、主力净额四条量表；底部涨/平/跌广度条 + 顶风险/底部/情绪/主力事件灯。
   2. **指数快照带**：5 个指数一格（价格/涨跌/成交额/迷你走势），替代原来的大卡片。
   3. **三张总结卡**：市场阶段（雷达 + 四层阶段 + 六块评分 + 暴露/风险）、大盘情绪（赚钱效应/广度压力计/60日压力曲线/七档分布/涨跌停）、资金流全景（全市场主力净额/板块流入流出 Top3/20日主力净额）。
   4. **底部方块图**：`HeatmapDrillCard` 全宽（面积=市值，颜色=涨跌/主力净额，点板块下钻个股）；用户明确要求保留，不能删。
@@ -431,6 +431,32 @@ Authorization: Bearer <JWT>
 - 事件旗标：阶段卡底部加 `TRIN_量`（>2 投降）、`额价差`（>20pp 40日风险）、`10:10→收盘 Q1–Q5` 五档（热集样本会标「热集」）。
 - 指标体检：市场阶段页底部 `IndicatorHealthCard`，**默认折叠**；标题行给「有效 5 · 弱有效 3 · 仅状态 1 · 无效 1 · 缺口 1」摘要，展开后是「有效 / 弱有效 / 仅状态 / 无效 / 数据缺口」+ 当前值 + 证据，避免把描述性指标当预测。
 - 日期：右上「回看日期」支持近 2 年（周日起始，周末不可选）。阶段/情绪/资金流按所选日回看；指数带、广度、方块图只覆盖有行情快照的日期（当前 2026-08-31 起），无快照时显示「无行情快照」并降级为提示条，**绝不拿最新快照冒充历史**。
+
+### 9.2c 喂给交易 Agent（收盘 vs 盘中）
+
+- **收盘快照**：`backend/scripts/market_regime_snapshot.py --date YYYY-MM-DD` → `/data/market-analysis/regime/{date}.json`（ALL 另写 `latest.json`）。Celery `engine.tasks.market_regime_snapshot` 在交易日 23:30 与次日 06:30 各跑一次（06:30 补赚钱效应/炸板率，赶在 08:30 首轮交易前）。
+- **研究总控**：`research_control.dossier.collect_market` 收盘/夜间档自动 `ensure_snapshot`，把 `render_stage_text`（六块/五层/事件/情绪/Q1–Q5/板块）拼进「市场与资金」事实包；缺失如实写数据缺口。
+- **交易 Agent**：`decision_round_io.load_market_stage` 只读最近一份收盘快照；`build_market_state_block` 前置【上一交易日市场阶段·参考】，再拼实时 `qm:regime:intraday`。实时快照超过 **120 分钟**直接降级为「本轮无实时快照」——盘前 08:30/09:00 不会把上周五 15:09 的旧状态当周一当前状态。
+- **纪律**：六块/估值/额价差/ADL 等日频指标只在收盘快照里；盘中只认 `qm:regime:intraday` 的实时 state/仓位/指数/广度。两者都带日期/时点，不混用。
+
+### 9.2d 盘中提示词升级（2026-11-14）
+
+- **10:15 新槽**：10:10 全市场快照刚出，给一次盘中决策窗口；原 10:00/10:05 等槽位一个不删。`decision_round_core.SLOTS`。
+- **今日 10:10 块**：`shared/intraday_1010.py` → 广度、MCL5（日频，最近交易日）、Q1–Q5 中位；全市场快照缺失回退 L0.5 热集并明确标“非全市场”。10:10 之前整段不出现。
+- **槽位守则**：`shared/decision_slot_playbook.py` → 每槽任务、本轮新开预算、阶段（防守默认 0）、失效/退出、历史负向（首板/连板次日高开、弱广度接飞刀不做）；只追加不删减。
+- **14:45**：0 新开；14:50 后只限价；弱票收盘卖、强票才留隔夜；写次日卖点/止损。
+- **数据缺口**：`intraday_snapshot_1010.parquet` / `intraday_path_panel.parquet` 目前止于 2026-11-10，10:10 块走 L0.5 热集（约 590 只）；要全市场精度需恢复 10:10 快照产出。
+
+### 9.2e 交易 Agent 执行层升级（2026-11-14，P0–P2）
+
+- **风险定额（P0）**：`BuyGate.risk_budget_per_trade = quota × 0.4%`（20 万≈¥800）；`check_buy` 按 `qty × (现价 − stop_loss)` 夹取 `pct`，超预算**缩小而不是拒单**；缺 `stop_loss` 留 note「风险预算未判」并在提示词要求必填。
+- **信号期限（P0）**：`build_signal_meta_block` 明确「模型分是 T+5/T+10 截面分位，不是 T+1 方向；T+1 买入必须有板块/量价/L2 第二腿」。
+- **上轮状态（P1）**：`_decision_line` 带「已报 order_id/待确认」或「被拒：price_drift/inflight_dup」；一致性规则要求同一代码不得原价重提。
+- **同码拥挤（P1）**：`build_cross_agent_block` 对 2 家以上最新买卖同码加「同码拥挤」提示，要求新增证据、最多再加 1 家。
+- **12:00（P2）**：`run_exec` 在 12:00 传 `gate=None` → 买入腿 noop，卖出/守护照常；不再浪费午休买单。
+- **Agent 反馈（P2）**：`shared/decision_feedback.py` + `feeds.agent_feedback` 读最近 5 笔平仓，提示词显示胜率/平均收益/平均持有；连续低胜率提醒减少低质量交易（样本 <3 不写结论）。
+- **决策账定价（P2 数据面，2026-11-14 补齐）**：`qm_decision_ledger` 的 `entry_px`/`fwd`（t1/t5/t20/t60）由**另一条作业**回填（`backend/scripts/decision_ledger.py scorecard`），不是决策轮写；此前没人跑，1682 行只有 162 行带价。现由 Celery `decision-ledger-scorecard`（交易日 07:10）每日兜底，窗口 40 天、已定价行重算（t20/t60 晚到才补得上）、`price_row_monotone` 只升不降。**大批量回填必须切块**：asyncpg 单语句 32767 参数，本表 36 列 ≈ 910 行即撞线（`_UPSERT_BATCH=200`）。记分卡 `report --days 40` 按 agent × 类别 × 形态标签出 T+1/5/20/60 胜率与超额。
+- **仍待补（P2 数据面）**：全市场 10:10 快照产出停更（上游 `l2_min1` 分钟分区块止于 2026-11-10，`intraday_1010` 只能回退 L0.5 热集）；跨 agent 硬性同码持仓上限（当前仅提示，硬上限需账户级策略）。
 
 ### 9.3 验收
 

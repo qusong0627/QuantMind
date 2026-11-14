@@ -236,6 +236,9 @@ class BuyGate:
     max_new_buys_round: int = 0
     #: 子账户虚拟现金（元）。``None`` = 未建模（P2.7 之前），不判 + 留 note。
     virtual_cash: float | None = None
+    #: 单笔风险预算（元）：按 ``qty × (现价 − 止损)`` 夹取 pct；``None`` = 不判。
+    #: 2026-11-14 用户口径：每笔风险约额度 0.3%~0.5%，不许按 pct 拍脑袋放大。
+    risk_budget_per_trade: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -258,6 +261,10 @@ class BuyGate:
             )
         if self.max_new_buys_round < 0:
             raise ValueError(f"max_new_buys_round={self.max_new_buys_round!r} 不能为负")
+        if self.risk_budget_per_trade is not None and self.risk_budget_per_trade <= 0:
+            raise ValueError(
+                f"risk_budget_per_trade={self.risk_budget_per_trade!r} 必须为正数或 None"
+            )
 
 
 # ── 单条判据 ─────────────────────────────────────────────────────────
@@ -418,6 +425,21 @@ def check_buy(
             pct = gate.per_stock_pct
     else:
         notes.append("单票额度未配置：不夹取")
+
+    # 单笔风险预算：qty × (现价 − 止损) ≤ risk_budget_per_trade。
+    # 缺止损/现价 → 不判并留痕（提示词要求买入必须带 stop_loss）。
+    risk_budget = gate.risk_budget_per_trade
+    if risk_budget is not None and risk_budget > 0:
+        px = _as_float(price)
+        stop = _as_float(decision.stop_loss)
+        if px is None or stop is None or stop <= 0 or stop >= px:
+            notes.append("风险预算未判：缺有效止损/现价（买入必须给 stop_loss）")
+        elif budget is not None and budget > 0:
+            max_pct = (risk_budget / (px - stop)) * px / budget
+            if pct > max_pct:
+                notes.append(f"按单笔风险预算夹取 {pct:g}→{max_pct:g}")
+                pct = max(0.0, max_pct)
+                need_amount = budget * pct
 
     if not held:
         if not gate.allow_out_of_pool and (

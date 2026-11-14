@@ -236,8 +236,20 @@ async def notify_bridge_event(
 
     恢复事件额外显式 force 推 QQ——QQ 旁路的等级过滤会挡掉 success，
     但「掉线→恢复」的闭环必须回到手机；普通 success 生产者不得照抄此法。
+    盘前/盘后掉线提醒每段最多 2 次（``health_alert_throttle``）；盘中不限。
     任何投递失败只记日志，不影响监视循环。
     """
+    if event.kind == EVENT_DOWN:
+        from backend.services.live_trading.services.health_alert_throttle import (
+            allow_health_alert,
+        )
+
+        if not allow_health_alert("tdx_bridge"):
+            logger.info(
+                "[BridgeHealth] 盘外提醒已达上限（2 次/段），跳过本次掉线提醒: %s",
+                event.detail,
+            )
+            return False
     title, content, level = build_alert(
         event, bridge_url=bridge_url, interval_seconds=interval_seconds
     )

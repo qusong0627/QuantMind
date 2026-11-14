@@ -32,11 +32,16 @@ from zoneinfo import ZoneInfo
 
 from backend.shared.decision.context import PoolQuote
 from backend.shared.decision_context_source import day_change_pct
+from backend.shared.market_stage_snapshot import render_market_stage_prompt
 from backend.shared.stock_utils import StockCodeUtil
 
 #: regime 快照「新鲜」窗口（分钟）：引擎 60 秒刷新，超过 5 分钟没动 = 服务停摆或
 #: 非交易时段（盘前轮拿到的多是昨收后那一版）——如实标旧，不静默当实时。
 MARKET_STATE_STALE_MIN = 5.0
+#: 硬过期（分钟）：超过这个年龄的盘中快照不再当“当前状态”渲染，只保留上一交易日
+#: 市场阶段参考。盘前 08:30/09:00 拿到的是上一交易日 15:09 那份（60+ 小时），
+#: 若不掐掉，模型会把周五收盘的“中性”当成周一盘前状态。
+MARKET_STATE_HARD_STALE_MIN = 120.0
 
 #: regime 三态中文化（``market_regime.STATES`` 的展示面）。表外的原样回显——
 #: 不认识就照抄，绝不猜。
@@ -134,6 +139,8 @@ def build_signal_meta_block(
         "一次快照可能混合多个推理批次（各批标的集与分母不同），"
         f"跨批次/跨模型不可直接比较；本轮行情块 {int(total)} 只中 {int(filled)} 只"
         "有分，无分的不显示该字段。"
+        "\n- 期限：这是 T+5/T+10 截面信号，不是 T+1 方向；T+1 买入必须有"
+        "板块/量价/L2 另一条腿确认，不能只因分数高就买。"
     )
 
 
@@ -229,23 +236,56 @@ def build_market_state_block(
     regime: Mapping[str, Any] | None,
     index_snap: Mapping[str, Any] | None,
     now: datetime,
+    market_stage: Mapping[str, Any] | None = None,
 ) -> str:
     """盘中 regime 快照 → 【盘中市场状态】块；读不到 → 如实渲染「本轮不可得」。
 
     ``regime`` = db0 ``qm:regime:intraday`` Hash（全字符串；写侧见
     ``services/engine/realtime_regime.py``——breadth/notes 是 JSON 编码的字段）。
     ``index_snap`` = 同一批行情快照里 ``regime["index"]`` 那一只（可缺）。
+    ``market_stage`` = 最近一份收盘市场阶段快照（``shared.market_stage_snapshot``）；
+    有值时**前置**一段【上一交易日市场阶段·参考】，并明确标注“不是盘中实时”。
+    缺省 ``None`` 时输出与历史逐字节一致。
 
     渲染字段全部来自快照本身，**不做二次判定**（state 用快照值不重算：
     写侧 ``classify_regime`` 才是唯一分级实现）；``inputs_ok=False`` 时状态段
     附「输入不完整」标记——那时写侧的 neutral 是缺省值而不是判定值，标出来
     防模型把缺省当结论。
     """
+    stage_text = render_market_stage_prompt(market_stage, now) if market_stage else ""
     if not regime:
-        return (
+        live = (
             "【盘中市场状态】本轮不可得（regime 快照缺失或读取失败：引擎实时 regime "
             "服务未开）——不要凭空断言大盘强弱。"
         )
+        return f"{stage_text}\n\n{live}" if stage_text else live
+
+    moment = None
+    generated = regime.get("generated_at")
+    if isinstance(generated, datetime):
+        moment = generated
+    else:
+        try:
+            moment = datetime.fromisoformat(str(generated)) if generated else None
+        except ValueError:
+            moment = None
+    if moment is None:
+        ts = _f(regime.get("ts"))
+        if ts is not None and ts > 0:
+            moment = datetime.fromtimestamp(ts, tz=now.tzinfo)
+    if moment is not None and moment.tzinfo is None:
+        moment = moment.replace(tzinfo=now.tzinfo)
+    if (
+        moment is not None
+        and (now - moment).total_seconds() / 60 > MARKET_STATE_HARD_STALE_MIN
+    ):
+        live = (
+            f"【盘中市场状态】本轮无实时快照（最近一次 {moment:%F %T}，"
+            f"{_age_text(moment, now)}）——盘前/休市请以【上一交易日市场阶段·参考】"
+            "与研究 brief 为准，不要用旧状态判断当前强弱。"
+        )
+        return f"{stage_text}\n\n{live}" if stage_text else live
+
     state_raw = str(regime.get("state") or "").strip()
     state = _STATE_ZH.get(state_raw, state_raw or "—")
     state_disp = (
@@ -314,24 +354,11 @@ def build_market_state_block(
             line += "（" + " ／ ".join(tail) + "）"
         lines.append(line)
 
-    stamp = ""
-    generated = regime.get("generated_at")
-    if isinstance(generated, datetime):
-        moment = generated
-    else:
-        moment = None
-        try:
-            moment = datetime.fromisoformat(str(generated)) if generated else None
-        except ValueError:
-            moment = None
-    if moment is None:
-        ts = _f(regime.get("ts"))
-        if ts is not None and ts > 0:
-            moment = datetime.fromtimestamp(ts, tz=now.tzinfo)
-    if moment is not None and moment.tzinfo is None:
-        moment = moment.replace(tzinfo=now.tzinfo)
-    if moment is not None:
-        stamp = f"- 快照生成于 {moment:%F %T}（{_age_text(moment, now)}）"
+    stamp = (
+        f"- 快照生成于 {moment:%F %T}（{_age_text(moment, now)}）"
+        if moment is not None
+        else ""
+    )
     notes = [str(n) for n in _json_list(regime.get("notes")) if str(n).strip()]
     if stamp and notes:
         lines.append(stamp + " ｜ 注：" + "；".join(notes))
@@ -339,7 +366,8 @@ def build_market_state_block(
         lines.append(stamp)
     elif notes:
         lines.append("- 注：" + "；".join(notes))
-    return "\n".join(lines)
+    live = "\n".join(lines)
+    return f"{stage_text}\n\n{live}" if stage_text else live
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -892,7 +920,8 @@ def build_indices_block(
 CONSISTENCY_RULES = (
     "一致性规则：反转必须有硬理由（新事实/新价格），否则沿用上一轮判断；"
     "上一轮已卖出、现已不在持仓里的股票不要再输出 sell；同一只票不要在一日内"
-    "无理由来回翻转。"
+    "无理由来回翻转。上一轮已报同一代码、但持仓未体现成交（或拒因 price_drift/"
+    "inflight_dup）的，本轮不得原价重提——先查在途委托，等回踩或放弃。"
 )
 
 
@@ -907,8 +936,16 @@ def _decision_line(rec: Any) -> str:
     reason = str(rec.reason or "").strip()
     if len(reason) > 60:
         reason = reason[:60] + "…"
+    status = ""
+    if bool(getattr(rec, "armed", False)):
+        order_id = str(getattr(rec, "order_id", "") or "").strip()
+        status = f"（已报 {order_id}，待确认）" if order_id else "（已报，待确认）"
+    else:
+        reject = str(getattr(rec, "reject_reason", "") or "").strip()
+        if reject:
+            status = f"（被拒：{reject[:24]}）"
     tail = f"：{reason}" if reason else ""
-    return f"- {action_zh}{pct} {rec.code or rec.code_raw}{tail}"
+    return f"- {action_zh}{pct} {rec.code or rec.code_raw}{status}{tail}"
 
 
 def _actionable(rows: Sequence[Any]) -> list[Any]:
@@ -962,6 +999,7 @@ def build_cross_agent_block(rows: Sequence[Any], agent: str) -> str:
     for r in others:
         by_agent.setdefault(str(r.agent), []).append(r)
     lines = ["【其他 agent 动态】（各家今日最新一轮的买卖动作；同码反向注意对撞）"]
+    crowded: dict[str, set[str]] = {}
     for name, group in sorted(by_agent.items()):
         latest_round = max(group, key=lambda r: (r.decided_at, r.id)).round_id
         picks = _actionable([r for r in group if r.round_id == latest_round])
@@ -971,6 +1009,20 @@ def build_cross_agent_block(rows: Sequence[Any], agent: str) -> str:
             continue
         for r in picks:
             lines.append(f"- {name}（{_cst_hm(stamp)}）：{_decision_line(r)[2:]}")
+            code = str(getattr(r, "code", "") or getattr(r, "code_raw", "") or "").strip()
+            if code:
+                crowded.setdefault(code, set()).add(name)
+    if crowded:
+        parts = [
+            f"{code}（{len(names)} 家：{','.join(sorted(names))}）"
+            for code, names in sorted(crowded.items())
+            if len(names) >= 2
+        ]
+        if parts:
+            lines.append(
+                "- 同码拥挤：" + "；".join(parts[:6])
+                + "——本轮新开同码必须有新增证据，最多再加 1 家。"
+            )
     return "\n".join(lines)
 
 

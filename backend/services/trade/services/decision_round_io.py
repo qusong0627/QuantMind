@@ -2,15 +2,12 @@
 
 一条纪律：**本模块不复制任何取数口径**。账户三数选源走 ``real_positions`` 的
 源仲裁、账户身份走 ``simulation_account_keys`` 的收口、档位走 ``shared/risk/tiers``、
-行情走 ``remote_quote_config``——每一样在别处都已有唯一实现，这里只做「谁是当前
-该用的那一个」的拼装。替身测试不需要本模块（``RoundDeps`` 逐项换掉即可）。
-
+行情走 ``remote_quote_config``——这里只做「谁是当前该用的那一个」的拼装。
 Redis 客户端**两套并存**且分工明确（理由见 ``decision_round`` 模块 docstring）：
 认领/去重/状态键走本模块的 :func:`native_redis_client`（原生，异常可见），
 规则表/档位走 ``trade_shared.deps.get_redis()``（包装，内部自带解包）。
 
-名册（P2.9）：:func:`default_roster` 只在 ``QM_DECISION_LLM_ROSTER`` **显式开了**时
-逐家返回，未开返回空 ⇒ 走单家路径、键形与 P2.8 逐字一致（升级零风险，见该函数）。
+名册（P2.9）：只在 ``QM_DECISION_LLM_ROSTER`` 显式开了时逐家返回，未开返回空 ⇒ 单家路径。
 """
 
 from __future__ import annotations
@@ -43,6 +40,7 @@ from backend.services.trade.services.decision_round_core import (
     as_float,
 )
 from backend.shared.trading_policy import load_trading_policy
+from backend.shared.market_stage_snapshot import load_latest_snapshot
 from backend.shared.decision.contract import SCHEMA_INTRADAY
 
 # arena 文件面写侧是**本机独有**的包（与「实盘交易」栏同纪律，见 .gitignore）：
@@ -470,6 +468,8 @@ def default_round_deps() -> RoundDeps:
         now=now_cn,
         load_trading_policy=load_trading_policy,
         load_regime=load_intraday_regime,
+        load_market_stage=load_latest_snapshot,
+        load_agent_feedback=feeds.agent_feedback,
         load_scores=load_signal_scores,
         # Stage 2 第二批：丁1–丁9 取数面 + 丙1 唤醒上下文（口径与降级见 feeds 模块）
         load_news_files=feeds.read_news_files,

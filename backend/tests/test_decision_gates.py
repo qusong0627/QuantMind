@@ -269,6 +269,36 @@ class TestPctExecutability:
         v = _check(_buy(pct=0.9), _gate(per_stock_pct=0.0))
         assert v.allowed and v.pct == pytest.approx(0.9) and v.note
 
+
+class TestRiskBudget:
+    """单笔风险预算：qty × (价 − 止损) 超预算 → 夹 pct，不拒单。"""
+
+    def test_risk_budget_clamps_pct(self) -> None:
+        d = Decision(
+            action=BUY, code="600036.SH", pct=parse_pct(0.5), stop_loss=9.5
+        )
+        v = _check(
+            d,
+            _gate(per_stock_pct=1.0, risk_budget_per_trade=800),
+            budget=100_000.0,
+            price=10.0,
+        )
+        assert v.allowed
+        # 800 / (10-9.5) * 10 / 100000 = 0.16
+        assert v.pct == pytest.approx(0.16)
+        assert "风险预算夹取" in v.note
+
+    def test_missing_stop_is_not_judged_but_says_so(self) -> None:
+        d = Decision(action=BUY, code="600036.SH", pct=parse_pct(0.2))
+        v = _check(
+            d,
+            _gate(per_stock_pct=1.0, risk_budget_per_trade=800),
+            budget=100_000.0,
+            price=10.0,
+        )
+        assert v.allowed
+        assert "风险预算未判" in v.note
+
     def test_percent_unit_cap_is_rejected(self) -> None:
         """传 15 表示「十五个百分点」是单位错误：静默当比例会让夹取变空操作。"""
         with pytest.raises(ValueError):

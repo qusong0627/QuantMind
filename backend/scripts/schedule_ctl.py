@@ -484,6 +484,20 @@ def _run_health_recheck(date_str: str | None, force: bool) -> int:
     return 0 if not summary.get("errors") else 1
 
 
+def _run_tianfeng_daily(date_str: str | None, force: bool) -> int:
+    """天风 50 因子日频物化：重跑 = 立刻检查并补齐最新分区（幂等）。
+
+    引擎与公式在 ``/data/quantcustom/factor_engines/tianfeng/``（不入 git）；
+    ``--date`` 不看——脚本自己按源库最新日期决定重算窗口，已最新则秒退。
+    """
+    script = "/data/quantcustom/factor_engines/tianfeng/update_daily.py"
+    if not os.path.isfile(script):
+        print(f"引擎不存在: {script}")
+        return 1
+    proc = subprocess.run([sys.executable, script], check=False)
+    return proc.returncode
+
+
 def _run_tca_report(date_str: str | None, force: bool) -> int:
     """执行损耗 TCA 读数（P1.6）：重跑 = 立刻按默认窗口（30 天）重算并落盘。
 
@@ -572,6 +586,48 @@ def _run_training_reaper(date_str: str | None, force: bool) -> int:
     if summary["errors"]:
         print(f"  错误: {summary['errors']}")
     return 0 if not summary["errors"] else 1
+
+
+def _run_market_regime_snapshot(date_str: str | None, force: bool) -> int:
+    """市场阶段快照（研究总控/交易 agent）：重跑 = 立刻按当前数据重建一份。"""
+    _ = force
+    from backend.shared.market_stage_snapshot import build_snapshot, write_snapshot
+
+    snap = build_snapshot(date_str)
+    path = write_snapshot(snap)
+    print(
+        f"市场阶段快照: date={snap.get('date')} score={snap.get('score')} path={path}"
+    )
+    return 0
+
+
+def _run_close_sentiment_alert(date_str: str | None, force: bool) -> int:
+    """收盘情绪 QQ 提示：重跑 = 再构建一次；同日去重会跳过。"""
+    _ = date_str, force
+    from backend.services.live_trading.services.close_sentiment_alert import (
+        send_close_sentiment,
+    )
+
+    result = send_close_sentiment()
+    print(f"收盘情绪提示: {result}")
+    return 0 if result.get("status") in {"sent", "skipped"} else 1
+
+
+def _run_decision_ledger_scorecard(date_str: str | None, force: bool) -> int:
+    """决策账定价回填：重跑 = 立刻按当前行情再记一遍（只升不降，幂等）。
+
+    ``date_str`` 不适用（窗口按 ``--days`` 滚动，不是某一天）——给了会被静默忽略，
+    这里明说；区间回填直接跑 ``python backend/scripts/decision_ledger.py scorecard``。
+    """
+    _ = date_str, force
+    from argparse import Namespace
+
+    from backend.scripts.decision_ledger import cmd_scorecard
+
+    code = cmd_scorecard(
+        Namespace(days=40, end=None, tenant=None, agent=None, limit=5000, apply=True)
+    )
+    return 0 if code in (0, 1) else code
 
 
 def _run_regime_persist(date_str: str | None, force: bool) -> int:
@@ -879,10 +935,18 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "leverage_trim": _run_leverage_trim,
     # P1.6 TCA 读数面：纯读，重跑 = 重算并覆盖当日报告（无副作用）。
     "tca_report": _run_tca_report,
+    # 天风因子日频物化：重跑 = 检查并补齐最新分区（幂等；引擎在 quantcustom）。
+    "tianfeng_daily": _run_tianfeng_daily,
     # P0-3 训练僵尸作业回收：重跑 = 立刻真扫真标（判死不重投，容器在场只重挂）。
     "training_reaper": _run_training_reaper,
     # P3 Regime 状态日更：纯台账写入且冻结幂等（重跑对已写生效日 = 0 新行）。
     "regime_persist": _run_regime_persist,
+    # 收盘市场阶段快照：研究事实包与次日交易 agent 盘前块同源；同日覆盖。
+    "market_regime_snapshot": _run_market_regime_snapshot,
+    # 收盘情绪 QQ 提示（15:10 交易日一次；同日去重）。
+    "close_sentiment_alert": _run_close_sentiment_alert,
+    # 决策账定价回填（入场价/四期收益/形态标签；只升不降，重跑幂等）。
+    "decision_ledger_scorecard": _run_decision_ledger_scorecard,
     # P2-d 可交易性掩码刷新（重跑 = 立刻再扫一遍最近两周；区间替换合并，确定性幂等）
     "trade_mask_refresh": _run_trade_mask_refresh,
     # P2-f 因子概率板滚动重选（重跑 = 立刻跑一次；--date=历史回填 as_of）

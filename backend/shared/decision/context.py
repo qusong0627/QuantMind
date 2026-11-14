@@ -194,6 +194,12 @@ class RebalanceContext:
     #: 【盘中市场状态】块（盘中 regime 快照渲染，见 ``shared/decision_blocks``）。
     #: 空串 = 整段不出现——默认值下与上游金样逐字节一致。
     market_state_block: str = ""
+    #: 【今日10:10快照】块（今日全市场/热集广度+MCL5+Q1–Q5；10:10 之前为空）。
+    intraday_1010_block: str = ""
+    #: 【槽位守则】块（本轮预算/任务/阶段/失效条件；按槽位生成）。
+    slot_playbook_block: str = ""
+    #: 【你的近期战绩】块（最近平仓胜率/盈亏；只做事实反馈）。
+    agent_feedback_block: str = ""
     #: 【盘中模型信号】块（行情行内「信号分」的出处/刻度/覆盖率）。只注解行情块，
     #: 行情块没渲染时它也不出现（见 :func:`_pool_lines`）。
     signal_meta_block: str = ""
@@ -717,6 +723,9 @@ def _context_body(ctx: RebalanceContext) -> list[str]:
     # 「同一件事的慢/快两拍」。空串 = 整段不出现（金样逐字节不动的默认路径）。
     if ctx.market_state_block:
         lines += [ctx.market_state_block, ""]
+    # 【今日10:10快照】：10:15 起的盘中槽位；10:10 之前为空，金样路径不变。
+    if ctx.intraday_1010_block:
+        lines += [ctx.intraday_1010_block, ""]
     # 丁5【大盘指数】行：状态块的取数面（同一批快照）。空串 = 未接线。
     if ctx.indices_block:
         lines += [ctx.indices_block, ""]
@@ -724,6 +733,11 @@ def _context_body(ctx: RebalanceContext) -> list[str]:
     # 紧跟大盘快照之后。空串 = 未接线/未产出，逐字节不出现。
     if ctx.research_block:
         lines += [ctx.research_block, ""]
+    # 【槽位守则】：本轮任务/预算/阶段/失效条件；空串 = 未接线，金样不变。
+    if ctx.slot_playbook_block:
+        lines += [ctx.slot_playbook_block, ""]
+    if ctx.agent_feedback_block:
+        lines += [ctx.agent_feedback_block, ""]
     if ctx.extra_context:
         lines += [ctx.extra_context, ""]
     lines += _pool_lines(ctx)

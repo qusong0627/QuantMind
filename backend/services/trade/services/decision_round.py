@@ -16,13 +16,13 @@
 09:35        rebalance  **建仓轮**：hold / sell / buy，提交腿
 10:00        intraday   整点守护轮
 10:05        rebalance  补跑（当日未出过 rebalance 决策才跑）
+10:15        intraday   10:10 全市场快照后的决策窗
 11:00        intraday   整点守护轮
 11:05        rebalance  补跑（同上）
 12:00        intraday   午间再决策（非交易时段不提交）
 13:00/14:00  intraday   整点守护轮
 14:45        intraday   尾盘决策
 ===========  =========  ==================================================
-
 隔壁 crontab 的三条来源：``live_llm_trade.py``（09:35 主决策 + 10:05/11:05
 ``--catch-up``）与 ``live_hourly_analysis.py``（08:30 / 09:00–14:00 整点 / 14:45，
 见 ``docs/local/quant-trader-migration-plan.md`` §P4）。它那侧靠系统 cron 拉起
@@ -423,9 +423,9 @@ async def _run_once_inner(
             allow_st=False,
             allow_out_of_pool=agent_policy.allow_out_of_pool,
             max_new_buys_round=max_new_buys,
-            # 子账户虚拟现金（本 agent 的名义额度余额）：买入腿的硬上限，
-            # 与真实账户现金**各自独立**成立（隔壁 `o["cost"] > vcash` 那条闸）。
+            # 子账户虚拟现金：买入腿硬上限（与真实账户现金各自独立成立）。
             virtual_cash=virtual_cash,
+            risk_budget_per_trade=round(quota_total * 0.004, 2),
         )
     except ValueError as exc:
         # per_stock_pct 不是比例（例如档位文档里写了 15）：夹取会变成空操作，
@@ -486,8 +486,8 @@ async def _run_once_inner(
     quotes, blocks = await enrich_quotes_with_blocks(
         deps, round_id, agent, user, regime, snapped, quotes, holding_rows, now, notes,
         tier=effective_tier, score_leaders_limit=agent_policy.score_leaders_limit,
+        slot_hhmm=slot.hhmm,
     )
-
     context = build_round_context(
         blocks,
         agent=agent,
@@ -580,7 +580,7 @@ async def _run_once_inner(
                 round_id=round_id,
                 holdings=exec_holdings,
                 quotes=exec_quotes,
-                gate=gate,
+                gate=None if slot.hhmm == "1200" else gate,
                 # 腿的**尺度口径**取两个额度里更紧的那个（``per_stock_budget`` 同式）：
                 # 执行段按 ``quota × pct`` 算股数（``execution._Plan.buy``）。授予额度
                 # 的剩余量是用户允许这条线动用的上限；``virtual_cash`` 是账上现钱。

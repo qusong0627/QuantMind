@@ -436,6 +436,30 @@ def test_prompt_without_quotes_has_no_quote_section() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_intraday_1010_and_slot_playbook_append_without_touching_golden(
+    golden: dict,
+) -> None:
+    """新增两块只在有值时出现；默认空串路径仍与金样逐字节一致。"""
+    case = next(c for c in golden["cases"] if c["name"] == "minimal")
+    ctx = _spec_to_ctx(case["inputs"])
+    ctx = replace(
+        ctx,
+        intraday_1010_block="【今日10:10快照·盘中参考】\n- 广度：涨 100 / 跌 200",
+        slot_playbook_block="【槽位守则｜1015 10:15】\n- 本轮新开预算：最多 2 笔",
+        agent_feedback_block="【你的近期战绩】\n- 胜率 1/4",
+    )
+    text = ctxmod.render_intraday_prompt(ctx)
+    assert "【今日10:10快照·盘中参考】" in text
+    assert "【槽位守则｜1015 10:15】" in text
+    assert "【你的近期战绩】" in text
+    assert text.index("【今日10:10快照") < text.index("【槽位守则")
+    # 默认路径（三块空串）不出现任何新段
+    plain = ctxmod.render_intraday_prompt(_spec_to_ctx(case["inputs"]))
+    assert "【今日10:10快照" not in plain
+    assert "【槽位守则" not in plain
+    assert "【你的近期战绩】" not in plain
+
+
 def test_block_order_holdings_direction_pool_risk_rules() -> None:
     ctx = RebalanceContext(
         agent="flash",

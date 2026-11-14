@@ -175,6 +175,16 @@ if REGIME_PERSIST_ENABLED:
         "schedule": crontab(minute="30", hour="16", day_of_week="1-5"),
     }
 
+# 天风 50 因子日频物化：数据同步时间由用户在前端配置（常见次日 00:00 后），
+# 所以这里给 06:30/07:30/08:30/09:30 四个幂等重试点——脚本先查库内最大 dt，
+# 已是最新就秒退；同步晚到也能在盘中前补上。引擎在
+# /data/quantcustom/factor_engines/tianfeng/，不在 git 内。
+if os.getenv("TIANFENG_DAILY_MATERIALIZE_ENABLED", "true").lower() == "true":
+    beat_schedule["tianfeng-daily-materialize"] = {
+        "task": "engine.tasks.tianfeng_daily_materialize",
+        "schedule": crontab(minute="30", hour="6-9", day_of_week="1-6"),
+    }
+
 if NEWS_ENRICH_ENABLED:
     beat_schedule["news-enrich-recent"] = {
         "task": "engine.tasks.news_enrich_recent",
@@ -260,6 +270,38 @@ if os.getenv("MARKET_SNAPSHOT_ENABLED", "true").lower() == "true":
         # 数据（实测 2026-09-11 周五的数据在周日仍缺失）。任务自带新鲜度门控，
         # 周六无新分区时会自行跳过，不会白跑。
         "schedule": crontab(minute="*/10", hour="4-5", day_of_week="mon-sat"),
+    }
+
+# 收盘市场阶段快照：研究总控事实包 + 次日交易 agent 盘前参考块共用。
+# 23:30（日线同步实测 20:58 落分区之后、夜间研究 02:10 之前）；若同步仍滞后，
+# 任务按实际最新日期落盘并在文本里写明，不冒充复盘日。
+if os.getenv("MARKET_REGIME_SNAPSHOT_ENABLED", "true").lower() == "true":
+    beat_schedule["market-regime-snapshot"] = {
+        "task": "engine.tasks.market_regime_snapshot",
+        "schedule": crontab(minute="30", hour="23", day_of_week="mon-fri"),
+    }
+    # 次日 06:30 再补一次：23:30 跑时市场分析快照（04:00–05:50 产出）还没生成，
+    # 赚钱效应/炸板率会缺；06:30 覆盖同日文件，赶在 08:30 首轮交易 agent 之前补齐。
+    beat_schedule["market-regime-snapshot-morning"] = {
+        "task": "engine.tasks.market_regime_snapshot",
+        "schedule": crontab(minute="30", hour="6", day_of_week="mon-fri"),
+    }
+
+# 收盘情绪 QQ 提示（15:10，交易日一次；同日去重）。今日实时广度 + 上一交易日
+# 六块/事件/情绪；官方情绪快照次日凌晨才产出，不冒充。
+if os.getenv("CLOSE_SENTIMENT_ALERT_ENABLED", "true").lower() == "true":
+    beat_schedule["close-sentiment-alert"] = {
+        "task": "engine.tasks.close_sentiment_alert",
+        "schedule": crontab(minute="10", hour="15", day_of_week="mon-fri"),
+    }
+
+# 决策账定价回填（入场价 / t1·t5·t20·t60 / 形态标签）：07:10 在隔夜日线同步之后、
+# 08:30 首轮交易 agent 之前。窗口 40 天、已定价行也重算（t20/t60 晚到才补得上），
+# `price_row_monotone` 只升不降——漏跑一天不要紧，下次自动补。
+if os.getenv("DECISION_LEDGER_SCORECARD_ENABLED", "true").lower() == "true":
+    beat_schedule["decision-ledger-scorecard"] = {
+        "task": "engine.tasks.decision_ledger_scorecard",
+        "schedule": crontab(minute="10", hour="7", day_of_week="mon-fri"),
     }
 
 # 因子概率板（市场分析 · 细案 §六，2026-10-11）：T 日批量模型信号（前一晚链已

@@ -477,6 +477,21 @@ JOBS: tuple[JobSpec, ...] = (
         "成交损耗读数（基准=orders.ref_price，正号=比基准差）→ "
         "data/reports/tca/{date}_tca.{json,md}；补写前的老成交计「不可定价」不倒推基准",
     ),
+    # 天风 50 因子日频物化：06:30/07:30/08:30/09:30 四个幂等重试点，脚本先查库内
+    # 最大 dt，已最新就秒退。引擎与公式在 /data/quantcustom/factor_engines/tianfeng/。
+    JobSpec(
+        "tianfeng_daily",
+        "天风因子日频物化",
+        "celery_beat",
+        "celery",
+        "周一至周六 06:30~09:30（每小时，幂等）",
+        "TIANFENG_DAILY_MATERIALIZE_ENABLED",
+        True,
+        345600,
+        "python backend/scripts/schedule_ctl.py run tianfeng_daily",
+        "重算最近 400 个交易日并覆盖 tianfeng_daily 分区；引擎在 "
+        "/data/quantcustom/factor_engines/tianfeng/update_daily.py",
+    ),
     # T-RC-14：两个关键交易循环此前不在册——它们挂掉时 C07 无项可判，
     # 表现为「体检全绿但策略不再调仓」。心跳写 ``qm:sched:hb:*``（db0）。
     JobSpec(
@@ -570,6 +585,51 @@ JOBS: tuple[JobSpec, ...] = (
         "python backend/scripts/schedule_ctl.py run regime_persist",
         "指数历史 → qm_regime_daily（生效日口径，历史行冻结）：每市场重算尾部 10 个"
         "生效日吸收迟到数据；表外市场诚实拒绝；重跑 = 立刻按日更形态再写一遍（0 新行即幂等）",
+    ),
+    # 收盘市场阶段快照：研究总控事实包 + 次日交易 agent 盘前参考块共用。
+    # 23:30 在日线同步（实测 20:58 落分区）之后、夜间研究 02:10 之前。
+    JobSpec(
+        "market_regime_snapshot",
+        "市场阶段快照（研究/交易 agent）",
+        "celery_beat",
+        "celery",
+        "交易日 23:30",
+        "MARKET_REGIME_SNAPSHOT_ENABLED",
+        True,
+        345600,
+        "python backend/scripts/schedule_ctl.py run market_regime_snapshot [--date YYYY-MM-DD]",
+        "六块评分/五层阶段/事件/情绪/Q1-Q5 → /data/market-analysis/regime/{date}.json；"
+        "研究总控事实包与次日交易 agent 盘前参考块同源；日线未就绪时按实际最新日期落盘，"
+        "文本写明日期，不冒充复盘日；重跑 = 同日覆盖",
+    ),
+    # 收盘情绪 QQ 提示：15:10 交易日一次，同日去重；只发手机提示，不进订单链路。
+    JobSpec(
+        "close_sentiment_alert",
+        "收盘情绪 QQ 提示",
+        "celery_beat",
+        "celery",
+        "交易日 15:10",
+        "CLOSE_SENTIMENT_ALERT_ENABLED",
+        True,
+        345600,
+        "python backend/scripts/schedule_ctl.py run close_sentiment_alert",
+        "今日实时广度（qm:regime:intraday）+ 上一交易日六块/事件/情绪/Q1–Q5 → QQ 一条；"
+        "官方情绪快照次日凌晨才产出，不冒充今日；同日去重，手动重跑当天不重复发",
+    ),
+    # 决策账定价回填：决策轮只写审计行，入场价/前向收益是另一条作业；不跑就永远
+    # 没有 fwd/entry_px，按槽位/agent 的前向胜率也算不出来。
+    JobSpec(
+        "decision_ledger_scorecard",
+        "决策账定价回填",
+        "celery_beat",
+        "celery",
+        "交易日 07:10",
+        "DECISION_LEDGER_SCORECARD_ENABLED",
+        True,
+        345600,
+        "python backend/scripts/schedule_ctl.py run decision_ledger_scorecard",
+        "qm_decision_ledger 补 entry_px + t1/t5/t20/t60 收益 + 形态标签（窗口 40 天，"
+        "已定价行重算；price_row_monotone 只升不降，漏跑自动补）",
     ),
     # 心跳 TTL 4 天（同 tca/regime）：cron 是 mon-fri，周末最长间隔 72h。
     JobSpec(

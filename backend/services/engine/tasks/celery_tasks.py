@@ -1651,6 +1651,83 @@ def run_market_snapshot() -> dict[str, Any]:
         return {"status": "failed", "error": str(e)}
 
 
+@celery_app.task(name="engine.tasks.market_regime_snapshot")
+def run_market_regime_snapshot(date: str | None = None) -> dict[str, Any]:
+    """收盘市场阶段快照（六块/事件/情绪/Q1-Q5）→ /data/market-analysis/regime。
+
+    研究总控事实包与次日交易 agent 盘前参考块共用；与会话端点同一实现。
+    **不冒充日期**：若当日日线分区还没落（同步未完成），``build_snapshot``
+    会按实际最新日期返回，落盘文件名也用实际日期。
+    """
+    from backend.shared.market_stage_snapshot import build_snapshot, write_snapshot
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("market_regime_snapshot")
+
+    snap = build_snapshot(date)
+    path = write_snapshot(snap)
+    logger.info(
+        "[MarketRegimeSnapshot] date=%s score=%s path=%s",
+        snap.get("date"),
+        snap.get("score"),
+        path,
+    )
+    return {
+        "status": "ok",
+        "date": snap.get("date"),
+        "score": snap.get("score"),
+        "path": str(path),
+    }
+
+
+@celery_app.task(name="engine.tasks.close_sentiment_alert")
+def run_close_sentiment_alert() -> dict[str, Any]:
+    """收盘情绪 QQ 提示（15:10 交易日一次；同日去重）。"""
+    from backend.services.live_trading.services.close_sentiment_alert import (
+        send_close_sentiment,
+    )
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("close_sentiment_alert")
+
+    result = send_close_sentiment()
+    logger.info("[CloseSentimentAlert] %s", result)
+    return result
+
+
+@celery_app.task(name="engine.tasks.decision_ledger_scorecard")
+def run_decision_ledger_scorecard(days: int = 40) -> dict[str, Any]:
+    """决策账定价回填：入场价 + t1/t5/t20/t60 收益 + 形态标签（每日兜底）。
+
+    决策轮每轮都往 ``qm_decision_ledger`` 写审计行，但**定价是另一条作业**
+    （``backend/scripts/decision_ledger.py scorecard``）：没人跑，账上就永远没有
+    ``entry_px``/``fwd``，按槽位/agent 的前向胜率也就永远算不出来（2026-11-14
+    实测 1682 行只有 162 行带价，10-05 之后一行都没有）。此前只能手工跑，还撞上
+    asyncpg 单语句 32767 参数上限（950 行回填直接 InterfaceError，已在
+    ``decision_ledger_store._upsert`` 切块修掉）。
+
+    纪律照搬脚本：窗口固定 40 天，**已定价的行也重算**（t20/t60 晚到才补得上），
+    写入走 ``price_row_monotone`` 只升不降，重跑安全；退码 1 = 有人要看的降级
+    （读盘与已存结果冲突，保留已存的），不是失败。
+    """
+    from argparse import Namespace
+
+    from backend.scripts.decision_ledger import cmd_scorecard
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("decision_ledger_scorecard")
+    ns = Namespace(
+        days=int(days), end=None, tenant=None, agent=None, limit=5000, apply=True
+    )
+    code = cmd_scorecard(ns)
+    status = "ok" if code == 0 else ("attention" if code == 1 else "error")
+    if code != 0:
+        logger.warning("[DecisionLedgerScorecard] exit=%s status=%s", code, status)
+    else:
+        logger.info("[DecisionLedgerScorecard] 完成 exit=0")
+    return {"status": status, "exit": code, "days": int(days)}
+
+
 @celery_app.task(name="engine.tasks.factor_board_build")
 def run_factor_board_build() -> dict[str, Any]:
     """因子概率板每日产物（市场分析 · 细案 §六，2026-10-11）。
@@ -2153,4 +2230,44 @@ def run_factor_board_reselect() -> dict[str, Any]:
         }
     except Exception as e:  # noqa: BLE001
         logger.exception("[FactorBoardReselect] 失败: %s", e)
+        return {"status": "failed", "error": str(e)}
+
+
+@celery_app.task(name="engine.tasks.tianfeng_daily_materialize")
+def tianfeng_daily_materialize() -> dict[str, Any]:
+    """天风 50 因子日频物化：重算最近 400 个交易日并覆盖对应分区。
+
+    引擎与公式不在 git 里，放在 ``/data/quantcustom/factor_engines/tianfeng/``；
+    本任务只负责按日触发与心跳，不复制任何因子口径。
+    """
+    import subprocess
+
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("tianfeng_daily")
+    script = Path("/data/quantcustom/factor_engines/tianfeng/update_daily.py")
+    if not script.is_file():
+        return {"status": "failed", "error": f"engine not found: {script}"}
+    try:
+        proc = subprocess.run(
+            ["python3", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+        if proc.returncode != 0:
+            logger.error(
+                "[TianfengDaily] 失败 code=%d stderr=%s",
+                proc.returncode,
+                proc.stderr[-4000:],
+            )
+            return {
+                "status": "failed",
+                "returncode": proc.returncode,
+                "stderr_tail": proc.stderr[-4000:],
+            }
+        logger.info("[TianfengDaily] 完成\n%s", proc.stdout[-2000:])
+        return {"status": "success", "stdout_tail": proc.stdout[-2000:]}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[TianfengDaily] 失败: %s", e)
         return {"status": "failed", "error": str(e)}

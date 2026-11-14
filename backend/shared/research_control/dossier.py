@@ -406,6 +406,20 @@ def collect_market(d: Dossier, env: dict[str, str], conn) -> None:
                     d.gaps.append("quotes_stale")
         except Exception:  # noqa: BLE001
             pass
+    # 4) 收盘市场阶段快照（六块/事件/情绪/Q1-Q5；与交易 agent 盘前块同源）
+    try:
+        from backend.shared.market_stage_snapshot import (
+            ensure_snapshot,
+            render_stage_text,
+        )
+
+        snap = ensure_snapshot(d.day)
+        if str(snap.get("date")) != d.day:
+            d.gaps.append("market_stage_behind_review_day")
+        lines.append(render_stage_text(snap))
+    except Exception as exc:  # noqa: BLE001 - 研究事实包缺这段也要能出稿
+        d.gaps.append("market_stage_unavailable")
+        lines.append(f"【市场阶段】数据缺口：{type(exc).__name__}")
     d.sections["market"] = "\n".join(lines)
 
 

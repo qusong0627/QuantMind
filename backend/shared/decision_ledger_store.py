@@ -599,6 +599,12 @@ def _dedup(rows: Sequence[DecisionRecord]) -> list[DecisionRecord]:
     return list(by_id.values())
 
 
+#: 单条 INSERT 的最大行数。asyncpg 一条语句封顶 32767 个参数，本表 36 列
+#: → 理论 ~910 行；批量回填（40 天 ≈ 950 行）正好撞线报 InterfaceError。
+#: 200 留足余量，也不至于把大回填拖成上千条往返。语句在同一事务内，语义不变。
+_UPSERT_BATCH = 200
+
+
 async def _upsert(session: Any, rows: Sequence[DecisionRecord], *, priced: bool) -> int:
     """一拨写入（`priced` 决定触发时覆盖哪组列，见写纪律 1）。"""
     if not rows:
@@ -613,10 +619,14 @@ async def _upsert(session: Any, rows: Sequence[DecisionRecord], *, priced: bool)
         prepared.append(record_values(r))
     if not prepared:
         return 0
-    stmt = pg_insert(_table()).values(prepared)
-    set_: dict[str, Any] = {c: getattr(stmt.excluded, c) for c in cols}
-    set_["updated_at"] = text("NOW()")
-    await session.execute(stmt.on_conflict_do_update(index_elements=["id"], set_=set_))
+    for start in range(0, len(prepared), _UPSERT_BATCH):
+        chunk = prepared[start : start + _UPSERT_BATCH]
+        stmt = pg_insert(_table()).values(chunk)
+        set_: dict[str, Any] = {c: getattr(stmt.excluded, c) for c in cols}
+        set_["updated_at"] = text("NOW()")
+        await session.execute(
+            stmt.on_conflict_do_update(index_elements=["id"], set_=set_)
+        )
     return len(prepared)
 
 

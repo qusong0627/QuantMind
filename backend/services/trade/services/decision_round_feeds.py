@@ -309,6 +309,44 @@ async def l2_snapshots(
     return out
 
 
+async def agent_feedback(agent: str, user: str, limit: int = 5) -> dict[str, Any] | None:
+    """本 agent 最近 N 笔**平仓**（分账账本），供提示词做事实反馈。
+
+    读主库；无记录返回 None（不渲染空块）；读失败上抛由装配层降级。
+    """
+    from sqlalchemy import text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    async with get_session(read_only=False) as session:
+        rows = (
+            await session.execute(
+                text(
+                    "select code, realized_pnl, pnl_pct, holding_days, exit_reason, "
+                    "sell_ts from qm_agent_ledger_roundtrip "
+                    "where tenant_id=:t and user_id=:u and agent=:a "
+                    "order by sell_ts desc limit :n"
+                ),
+                {"t": TENANT_ID, "u": user, "a": agent, "n": max(1, limit)},
+            )
+        ).mappings().all()
+    if not rows:
+        return {"n": 0, "rows": []}
+    return {
+        "n": len(rows),
+        "rows": [
+            {
+                "code": str(row.get("code") or ""),
+                "pnl": row.get("realized_pnl"),
+                "pct": row.get("pnl_pct"),
+                "days": row.get("holding_days"),
+                "exit_reason": str(row.get("exit_reason") or ""),
+            }
+            for row in rows
+        ],
+    }
+
+
 async def load_decision_rows(trade_date: date | str, user: str) -> Sequence[Any]:
     """当日审计行（丁6/丁9 原料）。过滤口径 = 写侧 ``build_records``（tenant+user）。
 

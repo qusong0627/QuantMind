@@ -212,6 +212,12 @@ def test_all_jobs_heartbeat_wired_in_source():
         "smart_money",
         # 港股聪明钱产物（市场分析 · 港股聪明钱深度分析）
         "hk_smart_money",
+        # 2026-11-14 收盘市场阶段快照 / 收盘情绪 QQ / 决策账定价回填
+        "market_regime_snapshot",
+        "close_sentiment_alert",
+        "decision_ledger_scorecard",
+        # 天风 50 因子日频物化（心跳在 celery_tasks，注册时漏登本守卫）
+        "tianfeng_daily",
     ):
         assert f'_sched_heartbeat("{job_key}")' in celery_src, f"{job_key} 未接心跳"
 
@@ -239,6 +245,12 @@ def test_all_jobs_heartbeat_wired_in_source():
         "smart_money",
         # 港股聪明钱产物（市场分析 · 港股聪明钱深度分析）
         "hk_smart_money",
+        # 2026-11-14 收盘市场阶段快照 / 收盘情绪 QQ / 决策账定价回填
+        "market_regime_snapshot",
+        "close_sentiment_alert",
+        "decision_ledger_scorecard",
+        # 天风 50 因子日频物化（心跳在 celery_tasks，注册时漏登本守卫）
+        "tianfeng_daily",
     }
     registry = {j.key for j in JOBS if j.heartbeat_ttl is not None}
     assert registry == wired, f"注册表与接线不一致: {registry ^ wired}"
@@ -313,6 +325,12 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "flow_predictive",
         "flow_probability",
         "sector_direction",
+        # 2026-11-14 收盘市场阶段快照 / 收盘情绪 QQ / 决策账定价回填
+        "market_regime_snapshot",
+        "close_sentiment_alert",
+        "decision_ledger_scorecard",
+        # 天风 50 因子日频物化（分发表已有入口，等值守卫漏登）
+        "tianfeng_daily",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）

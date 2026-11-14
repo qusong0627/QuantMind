@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -51,6 +52,9 @@ from backend.shared.decision_blocks import (
     build_tier_block,
 )
 from backend.shared.decision_context_source import build_context
+from backend.shared.decision_feedback import build_agent_feedback_block
+from backend.shared.decision_slot_playbook import build_slot_playbook_block
+from backend.shared.intraday_1010 import build_intraday_1010_block
 from backend.shared.decision_risk_blocks import (
     build_industry_caution_block,
     build_risk_block,
@@ -276,6 +280,9 @@ class RoundBlocks:
 
     market_state_block: str = ""
     signal_meta_block: str = ""
+    intraday_1010_block: str = ""
+    slot_playbook_block: str = ""
+    agent_feedback_block: str = ""
     alert_block: str = ""
     indices_block: str = ""
     stage2_block: str = ""
@@ -296,6 +303,9 @@ def build_round_context(blocks: RoundBlocks, **legacy: Any) -> RebalanceContext:
     """
     return replace(
         build_context(**legacy),
+        intraday_1010_block=blocks.intraday_1010_block,
+        slot_playbook_block=blocks.slot_playbook_block,
+        agent_feedback_block=blocks.agent_feedback_block,
         alert_block=blocks.alert_block,
         indices_block=blocks.indices_block,
         stage2_block=blocks.stage2_block,
@@ -341,6 +351,7 @@ async def enrich_quotes_with_blocks(
     notes: list[str],
     tier: Any | None = None,
     score_leaders_limit: int = 0,
+    slot_hhmm: str = "",
 ) -> tuple[tuple[PoolQuote, ...], RoundBlocks]:
     """⑦b+⑦c 行情行填「信号分」+ 全部提示词补块（两批合并收口）。
 
@@ -378,14 +389,49 @@ async def enrich_quotes_with_blocks(
     scored_seq = tuple(scored_quotes)
 
     market_state_block = ""
-    if deps.load_regime is not None:
+    market_stage = None
+    if deps.load_market_stage is not None:
+        try:
+            market_stage = deps.load_market_stage()
+        except Exception as exc:  # noqa: BLE001 盘前参考块失败不拦轮
+            logger.warning("[DecisionRound] %s 市场阶段快照读取异常: %s", round_id, exc)
+    if deps.load_regime is not None or market_stage is not None:
         index = str((regime or {}).get("index") or "").strip()
         index_snap = snapped.get(StockCodeUtil.to_suffix(index)) if index else None
-        market_state_block = build_market_state_block(regime, index_snap, now)
-        if regime is None:
+        market_state_block = build_market_state_block(
+            regime, index_snap, now, market_stage=market_stage
+        )
+        if deps.load_regime is not None and regime is None:
             note = "盘中 regime 不可得：市场状态块本轮为「不可得」降级"
             notes.append(note)
             logger.warning("[DecisionRound] %s %s", round_id, note)
+    slot_playbook_block = ""
+    if slot_hhmm:
+        slot_playbook_block = build_slot_playbook_block(
+            slot_hhmm, stage=market_stage, now=now
+        )
+    agent_feedback_block = ""
+    if deps.load_agent_feedback is not None:
+        try:
+            feedback = await deps.load_agent_feedback(agent, user)
+            if feedback:
+                agent_feedback_block = build_agent_feedback_block(feedback)
+        except Exception as exc:  # noqa: BLE001 - 反馈块失败不拦轮
+            logger.warning("[DecisionRound] %s 近期战绩读取异常: %s", round_id, exc)
+    intraday_1010_block = ""
+    if slot_hhmm and slot_hhmm >= "1015":
+        try:
+            intraday_1010_block = await asyncio.to_thread(
+                build_intraday_1010_block, now
+            )
+        except Exception as exc:  # noqa: BLE001 - 10:10 块失败不拦轮
+            logger.warning(
+                "[DecisionRound] %s 今日10:10快照读取异常: %s", round_id, exc
+            )
+            intraday_1010_block = (
+                "【今日10:10快照】读取异常（本轮不可得）"
+                "——不要用昨日快照冒充今日。"
+            )
     signal_meta_block = (
         build_signal_meta_block(score_meta, filled=scored_n, total=len(scored_seq))
         if scores_wired
@@ -585,6 +631,9 @@ async def enrich_quotes_with_blocks(
     blocks = RoundBlocks(
         market_state_block=market_state_block,
         signal_meta_block=signal_meta_block,
+        intraday_1010_block=intraday_1010_block,
+        slot_playbook_block=slot_playbook_block,
+        agent_feedback_block=agent_feedback_block,
         alert_block=build_freshness_block(alerts),
         indices_block=indices_block,
         stage2_block=stage2_block,

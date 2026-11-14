@@ -570,6 +570,37 @@ def test_empty_batch_writes_nothing():
     assert s.stmts == []
 
 
+def test_large_backfill_is_chunked_under_the_driver_argument_cap():
+    """asyncpg 单语句参数上限 32767，本表 36 列 → ~910 行即撞线。
+
+    实测：40 天回填 952 行直接 `InterfaceError: the number of query arguments
+    cannot exceed 32767`——回填越是「第一次认真跑」越会踩到，故写作必须切块。
+    """
+    from backend.shared.decision_ledger_store import _UPSERT_BATCH
+
+    n = _UPSERT_BATCH * 2 + 5
+    rows = [
+        DecisionRecord(
+            **{
+                **vars(_rec()),
+                "id": decision_id("r1", i, f"SZ{i:06d}", "buy"),
+                "code": f"SZ{i:06d}",
+                "action": "buy",
+                "fwd": {"1": {"ret": 0.01}},
+                "entry_px": 1.0,
+                "priced_at": _TS,
+            }
+        )
+        for i in range(n)
+    ]
+    s = _FakeSession()
+    assert asyncio.run(upsert_rows(s, rows)) == n
+    assert len(s.stmts) == 3, "超批必须切成 ceil(n/batch) 条语句"
+    for stmt in s.stmts:
+        params = stmt.compile(dialect=postgresql.dialect()).params
+        assert len(params) <= 32767, "单条语句仍会撞 asyncpg 参数上限"
+
+
 def test_duplicate_keys_collapse_before_hitting_the_database():
     """同一语句里重复主键会让 PG 报 `cannot affect row a second time`。"""
     s = _FakeSession()

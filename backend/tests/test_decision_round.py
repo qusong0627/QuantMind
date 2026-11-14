@@ -533,6 +533,18 @@ def test_round_slot_rejects_bad_hhmm_and_schema():
         RoundSlot("0935", "rebalance-2")
 
 
+def test_slot_1015_added_with_intraday_schema():
+    """10:15 槽：10:10 全市场快照刚出，给一次盘中决策窗口；原槽位不删。"""
+    slot = next(s for s in SLOTS if s.hhmm == "1015")
+    assert slot.schema == "intraday"
+    assert [s.hhmm for s in SLOTS if s.hhmm in {"1000", "1005", "1015", "1100"}] == [
+        "1000",
+        "1005",
+        "1015",
+        "1100",
+    ]
+
+
 def test_due_slots_window_and_order():
     # 未到点不跑
     assert due_slots(datetime(2026, 9, 24, 8, 29, tzinfo=CST)) == ()
@@ -541,9 +553,11 @@ def test_due_slots_window_and_order():
     # 09:00 超窗（>45min）而 09:35 仍在窗内
     assert [s.hhmm for s in due_slots(TICK_NOW)] == ["0935"]
     # 10:05 的补跑槽在 10:47 仍可跑（10:00 已超窗 47 分钟）
-    assert [s.hhmm for s in due_slots(TICK_1005)] == ["1005"]
-    # 10:05 超窗（46min）而 11:00 未到点：无槽可跑（迟到太久就不补了）
-    assert due_slots(datetime(2026, 9, 24, 10, 51, tzinfo=CST)) == ()
+    assert [s.hhmm for s in due_slots(TICK_1005)] == ["1005", "1015"]
+    # 10:51：10:05 超窗 46 分钟；10:15 仍在 45 分钟窗内 → 只补 1015
+    assert [s.hhmm for s in due_slots(datetime(2026, 9, 24, 10, 51, tzinfo=CST))] == [
+        "1015"
+    ]
 
 
 def test_due_slots_returns_each_slot_once_in_time_order():
@@ -2387,7 +2401,7 @@ async def test_round_renders_batch2_blocks_when_wired():
     )
     promised = round_id_for(DAY, SLOT_0935)
     native.store[W.WAKE_CTX_KEY.format(round_id=promised)] = (
-        "【本轮为触发唤醒】（10:52，非整点槽位——盘中触发器把控制权叫醒）\n"
+        "【本轮为触发唤醒】（13:46，非整点槽位——盘中触发器把控制权叫醒）\n"
         "- 波动 招商银行(600036.SH)：浮盈 -5.00% → +5.26%"
     )
     result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
@@ -2428,7 +2442,7 @@ async def test_round_renders_batch2_blocks_when_wired():
     assert "【行业整体劣化（赛道级软提示，不硬拦）】（清单日期 2026-09-24）" in prompt
     assert "- 银行：长期排除清单剔除率 71.4%（30/42 只）" in prompt
     # 丙1 唤醒说明（extra_context）
-    assert "【本轮为触发唤醒】（10:52" in prompt
+    assert "【本轮为触发唤醒】（13:46" in prompt
     # 丁7 风险预算档位
     assert "【风险预算档位】（normal，来源 doc）" in prompt
     assert "- 单票买入上限 15% ｜ 单轮最多新开 2 只" in prompt
@@ -2697,8 +2711,9 @@ async def test_round_batch2_empty_ledger_is_an_honest_first_round():
 
 
 # ── 丙1 唤醒编排（wake_tick：闸门 → 观测 → 判据 → 合成槽轮）──────────
-#: 10:52：无槽位临期（10:05 窗到 10:50）、小时内评估节拍已过——唤醒轮的可跑时刻。
-WAKE_NOW = datetime(2026, 9, 24, 10, 52, tzinfo=CST)
+#: 13:46：连续竞价、无槽位临期（13:00 窗到 13:45）、小时内评估节拍已过——
+#: 唤醒轮的可跑时刻（10:15 新槽后上午没有这样的空档）。
+WAKE_NOW = datetime(2026, 9, 24, 13, 46, tzinfo=CST)
 
 
 def _seed_wake_state(native, *, day="20260924", **fields):
@@ -2714,7 +2729,7 @@ def _state_of(native, *, day="20260924"):
 
 @pytest.mark.asyncio
 async def test_wake_tick_fires_a_synthetic_round_on_a_volatility_trigger():
-    """浮盈偏离基线 10.26pp → 合成槽 1052 跑一轮：唤醒说明进提示词（经真读回）、
+    """浮盈偏离基线 10.26pp → 合成槽 1346 跑一轮：唤醒说明进提示词（经真读回）、
     状态计数/心跳/冷却落键、round_id 与合成槽一致。"""
     native = FakeNative()
     seen: list[str] = []
@@ -2731,16 +2746,16 @@ async def test_wake_tick_fires_a_synthetic_round_on_a_volatility_trigger():
     )
     results = await wake_tick(deps=h.deps, native=native, now=WAKE_NOW)
     assert [r.status for r in results] == [R.STATUS_OK]
-    assert results[0].slot.hhmm == "1052"
-    assert results[0].round_id == "rnd-20260924-1052"
+    assert results[0].slot.hhmm == "1346"
+    assert results[0].round_id == "rnd-20260924-1346"
     prompt = h.log["llm"][0]["prompt"]
-    assert "【本轮为触发唤醒】（10:52" in prompt
+    assert "【本轮为触发唤醒】（13:46" in prompt
     assert "波动 招商银行(600036.SH)：浮盈 -5.00% → +5.26%（Δ+10.26pp）" in prompt
     # 唤醒说明按本轮 round_id 写键、轮内按同一键读回
-    ctx_key = W.WAKE_CTX_KEY.format(round_id="rnd-20260924-1052")
+    ctx_key = W.WAKE_CTX_KEY.format(round_id="rnd-20260924-1346")
     assert ctx_key in native.store
     assert "本轮结论只针对以上触发事项" in native.store[ctx_key]
-    assert seen == ["rnd-20260924-1052"]
+    assert seen == ["rnd-20260924-1346"]
     # 状态推进：计数 +1、心跳、同码同向冷却 60 分钟、基线重置为当前观测
     st = _state_of(native)
     assert st.wake_count == 1
@@ -2834,7 +2849,7 @@ async def test_wake_tick_budget_exhausted_records_cooldown_without_a_round():
     )
     assert await wake_tick(deps=h.deps, native=native, now=WAKE_NOW) == ()
     assert h.log["llm"] == []  # 不跑轮
-    assert W.WAKE_CTX_KEY.format(round_id="rnd-20260924-1052") not in native.store
+    assert W.WAKE_CTX_KEY.format(round_id="rnd-20260924-1346") not in native.store
     st = _state_of(native)
     assert "预算用尽" in st.last_note
     assert st.cooldowns["600036.SH|up"] > WAKE_NOW.timestamp()  # 冷却照落
@@ -3550,7 +3565,7 @@ async def test_force_read_failure_takes_over_quietly_but_still_runs():
 async def test_expired_slot_is_not_caught_up():
     h = make_harness()
     native = FakeNative()
-    late = datetime(2026, 9, 24, 10, 51, tzinfo=CST)  # 10:05 已过期 46 分钟
+    late = datetime(2026, 9, 24, 13, 46, tzinfo=CST)  # 13:00 已过期 46 分钟
     assert await round_tick(deps=h.deps, native=native, now=late) == ()
     assert native.calls == []
 

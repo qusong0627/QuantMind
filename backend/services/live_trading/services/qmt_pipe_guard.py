@@ -257,6 +257,17 @@ def build_alert(event: PipeEvent, *, account: str = "") -> tuple[str, str, str]:
 
 # ---------------------------------------------------------------- I/O
 async def _notify(event: PipeEvent, *, account: str = "") -> bool:
+    if event.kind == EVENT_DOWN:
+        from backend.services.live_trading.services.health_alert_throttle import (
+            allow_health_alert,
+        )
+
+        if not allow_health_alert("qmt_pipe"):
+            logger.info(
+                "[QmtPipeGuard] 盘外提醒已达上限（2 次/段），跳过本次异常提醒: %s",
+                event.issues,
+            )
+            return False
     title, content, level = build_alert(event, account=account)
     sent = False
     try:

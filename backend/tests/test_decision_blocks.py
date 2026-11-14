@@ -175,6 +175,44 @@ class TestBuildMarketStateBlock:
         assert "快照生成于 2026-10-14 09:35:00（0 分钟前）" in text
         assert "超新鲜窗口" not in text
 
+    STAGE = {
+        "date": "2026-11-13",
+        "universe_label": "全A等权",
+        "score": -9,
+        "state": "防守",
+        "layers": [
+            {"key": "long", "label": "长期", "stage": "MA250下方", "score": -2},
+            {"key": "short", "label": "短期", "stage": "超卖（反抽候选）", "score": 1},
+        ],
+        "exposure": {"actual": 0.2, "ceiling": 0.4},
+        "top_risk": {"flag": False},
+        "bottom": {"flag": False},
+        "events": {},
+        "stock_breadth": {"available": False},
+        "sentiment": {},
+        "breadth": {},
+        "sector": {},
+        "gaps": [],
+    }
+
+    def test_prior_close_stage_is_prepended_with_caveat(self):
+        text = build_market_state_block(self.REGIME, None, NOW, market_stage=self.STAGE)
+        assert text.startswith("【上一交易日市场阶段·参考（截至 2026-11-13 收盘）】")
+        assert "六块 -9/±12（防守）" in text
+        assert "上一交易日收盘，不是盘中实时" in text
+        assert "【盘中市场状态】" in text
+
+    def test_hard_stale_live_snapshot_is_not_rendered_as_current(self):
+        # 周一 08:30 拿到的是上周五 15:09 的 regime：旧状态不能当“当前”喂给模型
+        stale = {
+            **self.REGIME,
+            "generated_at": (NOW - timedelta(hours=25)).isoformat(),
+        }
+        text = build_market_state_block(stale, None, NOW, market_stage=self.STAGE)
+        assert "本轮无实时快照" in text
+        assert "状态：偏弱" not in text
+        assert "上一交易日市场阶段" in text
+
     def test_missing_regime_renders_unavailable(self):
         for regime in (None, {}):
             text = build_market_state_block(regime, None, NOW)
@@ -917,6 +955,15 @@ class TestBuildCrossAgentBlock:
     def test_no_others_says_so(self):
         text = build_cross_agent_block((_rec(id="x1", agent="a1"),), "a1")
         assert "今日暂无可参考的他家决策" in text
+
+    def test_same_code_crowding_is_flagged(self):
+        rows = (
+            _rec(id="x1", agent="a2", round_id="rnd-2", action="buy", code="601668.SH"),
+            _rec(id="x2", agent="a3", round_id="rnd-2", action="buy", code="601668.SH"),
+        )
+        text = build_cross_agent_block(rows, "a1")
+        assert "同码拥挤" in text
+        assert "601668.SH（2 家" in text
 
 
 class TestBuildFreshnessBlock:

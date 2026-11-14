@@ -105,14 +105,15 @@ class RoundSlot:
         )
 
 
-#: 槽位表（见模块 docstring 的时刻表）。**顺序即执行顺序**：同一个 tick 里可能有多
-#: 个槽同时落在宽限窗内（服务重启后补跑），按时间从早到晚跑。
+#: 槽位表（顺序即执行顺序；同 tick 多槽按时间跑）。
 SLOTS: tuple[RoundSlot, ...] = (
     RoundSlot("0830", SCHEMA_INTRADAY),
     RoundSlot("0900", SCHEMA_INTRADAY),
     RoundSlot("0935", SCHEMA_REBALANCE),
     RoundSlot("1000", SCHEMA_INTRADAY),
     RoundSlot("1005", SCHEMA_REBALANCE, catch_up=True),
+    # 10:15：10:10 全市场快照刚出；原槽位不删。
+    RoundSlot("1015", SCHEMA_INTRADAY),
     RoundSlot("1100", SCHEMA_INTRADAY),
     RoundSlot("1105", SCHEMA_REBALANCE, catch_up=True),
     RoundSlot("1200", SCHEMA_INTRADAY),
@@ -120,7 +121,6 @@ SLOTS: tuple[RoundSlot, ...] = (
     RoundSlot("1400", SCHEMA_INTRADAY),
     RoundSlot("1445", SCHEMA_INTRADAY),
 )
-
 SLOTS_BY_HHMM: dict[str, RoundSlot] = {s.hhmm: s for s in SLOTS}
 
 
@@ -382,17 +382,16 @@ class RoundDeps:
     real_enabled: Callable[[], bool]
     #: () → 当前北京时间（aware）
     now: Callable[[], datetime]
-    #: () → (镜像通道是否就绪, 不就绪原因)（P2-2）。口径同 ``real_mirror_service``。
-    #: ``None``/探测失败 = 探不到，审计记 None——绝不把「没探测」粉饰成「就绪」。
+    #: () → (镜像通道是否就绪, 不就绪原因)（P2-2）；None/探测失败 = 探不到。
     mirror_ready: Callable[[], tuple[bool, str]] | None = None
     #: (now) → 是否**连续竞价**（09:30-11:30 / 13:00-15:00）；None=未接线退回旧口径。
     is_continuous_trading: Callable[[datetime], bool] | None = None
-    #: () → 名册（P2.9）：**一家一项**，顺序即执行顺序（``None``/空 = 单家路径，
-    #: 走 ``load_llm`` 那一条）。解析失败上抛，由 tick 收成「一家都跑不动」。
+    #: () → 名册（P2.9）：一家一项，顺序即执行顺序；None = 单家路径。
     roster: Callable[[], Sequence[AgentRun]] | None = None
-    #: () → 盘中 regime 快照（db0 ``qm:regime:intraday``；服务未开/读失败 → ``None``）。
-    #: **缺失不拦轮**：提示词按「本轮不可得」降级（``build_market_state_block``）。``None`` = 未接线。
+    #: () → 盘中 regime 快照（db0 ``qm:regime:intraday``）；None = 未接线。
     load_regime: Callable[[], Mapping[str, Any] | None] | None = None
+    load_market_stage: Callable[[], Mapping[str, Any] | None] | None = None
+    load_agent_feedback: Callable[[str, str], Awaitable[Mapping[str, Any] | None]] | None = None
     #: (tenant, user) → (score_map, meta)；取数失败那边已吞成 ``ok=False``+原因，异常同样按不可得降级、不拦轮。``None`` = 未接线。
     load_scores: ScoreRead | None = None
     #: (codes, 交易日) → {前缀码: 当日最新 L2 快照}（丁2）；None = 未接线（历史字节）。
@@ -411,6 +410,7 @@ class RoundDeps:
     read_mirror_ctx: Callable[[], Mapping[str, Any]] | None = None
     load_research_brief: Callable[[str], str] | None = None  # 研究总控 brief
     load_trading_policy: Callable[[], Any] | None = None  # 阶段1 单一策略源；None=默认
+
 
 @dataclass(frozen=True, slots=True)
 class RoundResult:

@@ -30,6 +30,16 @@ from backend.services.live_trading.services.bridge_health_watch import (
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _no_health_throttle(monkeypatch):
+    """本文件测投递路由，不测盘外节流；否则同日多次跑测试会被 2 次上限挡住。"""
+    from backend.services.live_trading.services import health_alert_throttle
+
+    monkeypatch.setattr(
+        health_alert_throttle, "allow_health_alert", lambda *args, **kwargs: True
+    )
+
+
 # ── 结论识别 ─────────────────────────────────────────────────────────────
 
 

@@ -31,6 +31,7 @@ from typing import Any
 
 from backend.shared.freshness import FRESH, STALE
 from backend.services.live_trading.services.bridge_health_watch import (
+    EVENT_DOWN,
     EVENT_RECOVERED,
     VERDICT_HARD,
     VERDICT_OK,
@@ -153,7 +154,19 @@ async def notify_quote_event(
 
     恢复事件显式 ``force`` 推 QQ——断流告警的闭环必须回到同一面（手机），
     与 ``bridge_health_watch`` 同纪律。任何投递失败只记日志，不影响监视循环。
+    盘前/盘后断流提醒每段最多 2 次；盘中不限。
     """
+    if event.kind == EVENT_DOWN:
+        from backend.services.live_trading.services.health_alert_throttle import (
+            allow_health_alert,
+        )
+
+        if not allow_health_alert("quote_freshness"):
+            logger.info(
+                "[QuoteWatch] 盘外提醒已达上限（2 次/段），跳过本次断流提醒: %s",
+                event.detail,
+            )
+            return False
     title, content, level = build_quote_alert(
         event, sample=sample, interval_seconds=interval_seconds
     )
