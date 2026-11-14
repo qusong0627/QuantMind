@@ -220,6 +220,76 @@ def _refresh_adjust_factors(result: dict[str, Any]) -> None:
     result["adjust_factors"] = payload
 
 
+def _run_local_data_script(
+    result: dict[str, Any],
+    *,
+    key: str,
+    script_name: str,
+    env_flag: str,
+    timeout_s: int = 300,
+) -> None:
+    """跑本地数据补充脚本（脚本不入库；缺失时跳过，失败不拖垮主链）。"""
+    import json
+    import subprocess
+
+    if str(os.getenv(env_flag, "true")).strip().lower() in {"0", "false", "no", "off"}:
+        result[key] = {"status": "disabled"}
+        return
+    root = Path(__file__).resolve().parents[2]
+    script = root / "backend" / "scripts" / script_name
+    if not script.is_file():
+        result[key] = {"status": "skipped", "reason": "local script missing"}
+        return
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        result[key] = {"status": "timeout", "timeout_s": timeout_s}
+        return
+    except Exception as exc:  # noqa: BLE001
+        result[key] = {"status": "error", "error": str(exc)}
+        return
+    payload: dict[str, Any] = {
+        "status": "ok" if proc.returncode == 0 else "failed",
+        "returncode": proc.returncode,
+        "stdout_tail": (proc.stdout or "")[-1200:],
+        "stderr_tail": (proc.stderr or "")[-1200:],
+    }
+    if proc.returncode == 0:
+        try:
+            payload.update(json.loads((proc.stdout or "").strip().splitlines()[-1]))
+        except Exception:  # noqa: BLE001
+            pass
+    result[key] = payload
+
+
+def _refresh_hkex_snapshots(result: dict[str, Any]) -> None:
+    """HKEX 当前快照：北向合资格名单 + 最新沽空日报（脚本本地保留）。"""
+    _run_local_data_script(
+        result,
+        key="hkex_snapshot",
+        script_name="hkex_snapshot_sync.py",
+        env_flag="HKEX_SNAPSHOT_ENABLED",
+        timeout_s=300,
+    )
+
+
+def _refresh_event_calendar(result: dict[str, Any]) -> None:
+    """重建 PIT 事件日历（南向首次/拆合股/除净）；脚本本地保留。"""
+    _run_local_data_script(
+        result,
+        key="hk_event_calendar",
+        script_name="hk_event_calendar.py",
+        env_flag="HK_EVENT_CALENDAR_ENABLED",
+        timeout_s=300,
+    )
+
+
 def _sync_index(result: dict) -> None:
     """akshare 指数日线增量同步（index_daily）。
 
@@ -270,6 +340,9 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
         # 复权因子链（daily_backward）生产化：与信号因子同样在雅虎段之前，
         # 子进程隔离 + 增量抓取，失败不影响后面的元数据段。
         _refresh_adjust_factors(result)
+        # 本地数据补充（脚本不入库）：HKEX 当前快照 + PIT 事件日历
+        _refresh_hkex_snapshots(result)
+        _refresh_event_calendar(result)
         result["yahoo"] = _yahoo_run("HK", days=days, symbols=symbols, fast=fast, skip_kline=True)
         return result
 
