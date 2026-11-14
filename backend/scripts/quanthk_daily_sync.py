@@ -290,6 +290,17 @@ def _refresh_event_calendar(result: dict[str, Any]) -> None:
     )
 
 
+def _refresh_hk_alt_data(result: dict[str, Any]) -> None:
+    """港股另类数据：HKMA 宏观、SFC 周度沽空、HKEXnews 公告、指数成分快照。"""
+    _run_local_data_script(
+        result,
+        key="hk_alt_data",
+        script_name="hk_alt_data_sync.py",
+        env_flag="HK_ALT_DATA_ENABLED",
+        timeout_s=900,
+    )
+
+
 def _sync_index(result: dict) -> None:
     """akshare 指数日线增量同步（index_daily）。
 
@@ -343,6 +354,7 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
         # 本地数据补充（脚本不入库）：HKEX 当前快照 + PIT 事件日历
         _refresh_hkex_snapshots(result)
         _refresh_event_calendar(result)
+        _refresh_hk_alt_data(result)
         result["yahoo"] = _yahoo_run("HK", days=days, symbols=symbols, fast=fast, skip_kline=True)
         return result
 

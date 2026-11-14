@@ -295,6 +295,7 @@ backend/scripts/quanthk_south_sync.py
 # 本地港股事件日历 / HKEX 快照采集（仅本机跑，不入库）
 backend/scripts/hk_event_calendar.py
 backend/scripts/hkex_snapshot_sync.py
+backend/scripts/hk_alt_data_sync.py
 
 # 本地信号因子生成器（内部资产）
 backend/scripts/build_ml_signal_datasets.py
