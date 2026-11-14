@@ -7,6 +7,7 @@ import { HeatmapDrillCard } from '../components/HeatmapDrillCard';
 import { StockMoneyFlowTable, StockMoneyFlowItem } from '../components/StockMoneyFlowTable';
 import { MarketBreadthCard } from '../components/MarketBreadthCard';
 import { MarketSentimentPanel } from '../components/MarketSentimentPanel';
+import { MarketRegimePanel } from '../components/MarketRegimePanel';
 import { StockTerminalSearchBox } from '../../market-analysis-shared/components/StockTerminalSearchBox';
 import { StockTerminalWindow } from '../../market-analysis-shared/components/StockTerminalWindow';
 import { FactorBoardPanel } from '../components/FactorBoardPanel';
@@ -241,6 +242,7 @@ export const MarketAnalysisPage: React.FC = () => {
 
   const navTabs = [
     { id: 'panorama', label: '大盘全景看板', icon: Activity },
+    { id: 'regime', label: '市场阶段', icon: Gauge },
     { id: 'sentiment', label: '大盘情绪', icon: Gauge },
     { id: 'flow-panorama', label: '资金流全景', icon: Network },
     { id: 'factor-board', label: '因子概率板', icon: Sparkles },
@@ -413,6 +415,10 @@ export const MarketAnalysisPage: React.FC = () => {
               </div>
               </div>
             </div>
+          )}
+
+          {activeTab === 'regime' && (
+            <MarketRegimePanel onOpenStock={(s) => setWindowSymbol(s)} />
           )}
 
           {activeTab === 'sentiment' && <MarketSentimentPanel />}

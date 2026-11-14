@@ -45,6 +45,10 @@ from .quantdb_realtime import QuantDBRealtimeUnavailable, get_snapshots
 
 router = APIRouter(prefix="/api/v1/market-analysis", tags=["Market Analysis"])
 
+from . import regime as _regime  # noqa: E402
+
+router.include_router(_regime.router)
+
 
 @router.get("/realtime/snapshots")
 async def get_realtime_snapshots(
