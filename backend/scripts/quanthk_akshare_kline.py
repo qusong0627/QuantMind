@@ -36,6 +36,8 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.shared.kline_canonical import canonicalize  # noqa: E402
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -269,7 +271,8 @@ def sync(
         if out.exists():
             old = pd.read_parquet(out)
             combined = pd.concat([old, chunk], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["symbol", "time"], keep="last")
+            # 一个股票日只留一行：paid_hk 历史优先于 akshare（见 kline_canonical）
+            combined = canonicalize(combined)
             combined.to_parquet(out, index=False)
         else:
             chunk.to_parquet(out, index=False)

@@ -39,6 +39,8 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.shared.kline_canonical import canonicalize  # noqa: E402
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -336,7 +338,12 @@ def _write_backward(
             continue
         if raw.empty:
             continue
-        raw = raw.drop_duplicates("symbol", keep="last").copy()
+        # 一个股票日只取一个 release：paid_hk 历史优先，避免 akshare 的
+        # 1/100 价格或 0 价格被 keep="last" 选中后写进复权序列。
+        if {"symbol", "time"}.issubset(raw.columns):
+            raw = canonicalize(raw)
+        else:
+            raw = raw.drop_duplicates("symbol", keep="last").copy()
         factors = raw["symbol"].map(factor_panel.get(dt, {}))
         raw["factor"] = pd.to_numeric(factors, errors="coerce")
         missing = int(raw["factor"].isna().sum())
