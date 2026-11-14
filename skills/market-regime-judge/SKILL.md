@@ -339,6 +339,13 @@ Authorization: Bearer <JWT>
   "intraday": {"available": true, "times": ["10:10"], "breadth": [33.8],
                "mcl_chg5": [null], "note": "..."},
   "blocks": [{"key": "trend", "label": "趋势", "score": -2, "value": -8.4}],
+  "events": {"trin_vol": 0.49, "trin_surrender": false, "amount_gap_pp": 9.2,
+             "amount_gap_risk": false, "adl_divergence": false,
+             "breadth_1010": 33.8, "mcl_chg5": null},
+  "stock_breadth": {"available": true, "sample": "hot_set", "n": 587,
+                    "q1_minus_q5_after": 0.77,
+                    "quintiles": [{"q": "Q1", "n": 118, "ret_1010": -1.42,
+                                   "ret_after": -0.91, "up_share_after": 13.6}]},
   "block_history": [{"date": "2026-11-13", "scores": [-2, -1, -2, -2, -1, 0]}],
   "sector": {"up_share": 7.0, "dispersion": 1.37,
              "list": [{"name": "影视院线", "n": 20, "ret": 4.37,
@@ -348,6 +355,8 @@ Authorization: Bearer <JWT>
 ```
 
 - `block_history`：最近 60 日六块评分，供雷达“20日前”与 sparkline。
+- `events`：事件旗标。`trin_surrender` 只在 TRIN_量>2（投降确认），`amount_gap_risk` 只在额价差>20pp（40日风险）；`adl_divergence` 与 `top_risk.flag` 同源；`breadth_1010`/`mcl_chg5` 来自当日 10:10。
+- `stock_breadth`：按 10:10 相对强弱分五档（Q1=最弱），`ret_after` = 10:10→收盘中位收益；历史强广度日 Q1 跑赢 Q5，弱广度日不接飞刀。`sample=hot_set` 表示全市场快照缺口时用 L0.5 热集（约 590 只）补数，只看形状；`sample=full` 才是全市场。
 - `/regime/sector-stocks` 返回 `rs_1010`（10:10 相对强弱，%）；该日无 `l2_min1`
   快照时为 `null`，前端自动回退条形图。
 - `/regime/compare` 返回 6 个指数的横向对比：`chg`、`score`（-12~+12）、
@@ -408,6 +417,20 @@ Authorization: Bearer <JWT>
 | 第四行左 | 短期：收盘涨家柱（红涨绿跌，15/80 虚线） | 超卖/过热 |
 | 第四行右 | 估值：PB 便宜分位线（0.2/0.8 虚线） | 便宜/贵 |
 | 第五行 | 当日：10:10 广度 + MCL 折线 | 今天下午强/弱 |
+
+### 9.2b 大盘全景看板（`大盘全景看板` 页签）
+
+- 文件：`electron/src/features/market-analysis/components/panorama/MarketPanoramaPanel.tsx`（子卡：`IndexTape` / `StageSummaryCard` / `SentimentSummaryCard` / `FlowSummaryCard`）。
+- 数据：并行取 `/regime`、`/sentiment`、`/money-flow/panorama`（1日/行业二级），页面另预取 `/indices/overview`、`/breadth`、`/heatmap?category=shenwan`。
+- 版式（自上而下）：
+  1. **结论条**（浅色渐变，不是深色底）：状态/六块总分/日期/宇宙 + 一句话（长期/中期/短期、暴露、情绪、主力、涨跌家数、赚钱效应）+ 风险灯（顶风险/底部/情绪/主力）+ 刷新。
+  2. **指数快照带**：5 个指数一格（价格/涨跌/成交额/迷你走势），替代原来的大卡片。
+  3. **三张总结卡**：市场阶段（雷达 + 四层阶段 + 六块评分 + 暴露/风险）、大盘情绪（赚钱效应/广度压力计/60日压力曲线/七档分布/涨跌停）、资金流全景（全市场主力净额/板块流入流出 Top3/20日主力净额）。
+  4. **底部方块图**：`HeatmapDrillCard` 全宽（面积=市值，颜色=涨跌/主力净额，点板块下钻个股）；用户明确要求保留，不能删。
+- 口径：所有缺失显示 `—`；红涨绿跌；卡片可点「完整判断 / 情绪全貌 / 资金流全景」跳到对应页签。
+- 事件旗标：阶段卡底部加 `TRIN_量`（>2 投降）、`额价差`（>20pp 40日风险）、`10:10→收盘 Q1–Q5` 五档（热集样本会标「热集」）。
+- 指标体检：市场阶段页底部 `IndicatorHealthCard`，**默认折叠**；标题行给「有效 5 · 弱有效 3 · 仅状态 1 · 无效 1 · 缺口 1」摘要，展开后是「有效 / 弱有效 / 仅状态 / 无效 / 数据缺口」+ 当前值 + 证据，避免把描述性指标当预测。
+- 日期：右上「回看日期」支持近 2 年（周日起始，周末不可选）。阶段/情绪/资金流按所选日回看；指数带、广度、方块图只覆盖有行情快照的日期（当前 2026-08-31 起），无快照时显示「无行情快照」并降级为提示条，**绝不拿最新快照冒充历史**。
 
 ### 9.3 验收
 

@@ -13,6 +13,7 @@ pytest.importorskip("fastapi")
 from fastapi import HTTPException  # noqa: E402
 
 from backend.services.api.market_analysis.regime import (  # noqa: E402
+    _amount_gap_pp,
     _cap,
     _color,
     _pick,
@@ -68,6 +69,16 @@ class TestPick:
             _pick(d, "not-a-date")
 
 
+class TestAmountGap:
+    def test_positive_gap(self):
+        r = pd.Series({"n_up": 60, "n_down": 40, "amt_up": 80, "amt_down": 20})
+        assert _amount_gap_pp(r) == 20.0
+
+    def test_missing_returns_none(self):
+        r = pd.Series({"n_up": 0, "n_down": 0, "amt_up": 0, "amt_down": 0})
+        assert _amount_gap_pp(r) is None
+
+
 class TestEndpoint:
     def test_shape(self):
         r = market_regime(date=None, current_user={})
@@ -80,6 +91,19 @@ class TestEndpoint:
         assert len(r["quadrant"]["x"]) > 500
         assert len(r["quadrant"]["x"]) == len(r["quadrant"]["y"])
         assert len(r["quadrant"]["x"]) == len(r["quadrant"]["ret"])
+        assert {
+            "trin_vol",
+            "trin_surrender",
+            "amount_gap_pp",
+            "amount_gap_risk",
+            "adl_divergence",
+            "breadth_1010",
+            "mcl_chg5",
+        } <= set(r["events"])
+        assert "available" in r["stock_breadth"]
+        if r["stock_breadth"]["available"]:
+            assert len(r["stock_breadth"]["quintiles"]) == 5
+            assert r["stock_breadth"]["sample"] in {"full", "hot_set"}
         assert len(r["blocks"]) == 6
         assert r["summary"]["score"] == sum(b["score"] for b in r["blocks"])
         assert len(r["block_history"]) > 0

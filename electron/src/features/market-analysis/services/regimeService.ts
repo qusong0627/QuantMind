@@ -127,12 +127,42 @@ export interface RegimeUniverse {
   label: string;
 }
 
+export interface RegimeEventFlags {
+  trin_vol: number | null;
+  trin_surrender: boolean;
+  amount_gap_pp: number | null;
+  amount_gap_risk: boolean;
+  adl_divergence: boolean;
+  breadth_1010: number | null;
+  mcl_chg5: number | null;
+}
+
+export interface StockBreadthQuintile {
+  q: string;
+  n: number;
+  ret_1010: number;
+  ret_after: number;
+  up_share_after: number;
+}
+
+export interface RegimeStockBreadth {
+  available: boolean;
+  date?: string;
+  n?: number;
+  sample?: 'full' | 'hot_set';
+  quintiles?: StockBreadthQuintile[];
+  q1_minus_q5_after?: number | null;
+  note?: string;
+}
+
 export interface RegimeResponse {
   date: string;
   layers: RegimeLayer[];
   exposure: { ceiling: number; actual: number; label: string };
   top_risk: { flag: boolean; text: string };
   bottom: { flag: boolean; text: string };
+  events: RegimeEventFlags;
+  stock_breadth: RegimeStockBreadth;
   charts: RegimeCharts;
   quadrant: RegimeQuadrant;
   intraday: RegimeIntraday;

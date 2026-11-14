@@ -1,15 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Activity, Network, TrendingUp, Clock, RefreshCw, Zap, Radar, Gauge } from 'lucide-react';
+import { Sparkles, Activity, Network, Clock, RefreshCw, Zap, Radar, Gauge } from 'lucide-react';
 import { DatePicker, message } from 'antd';
+import zhCN from 'antd/locale/zh_CN';
 import dayjs from 'dayjs';
-import { BroadMarketHeader, IndexItem } from '../components/BroadMarketHeader';
-import { HeatmapDrillCard } from '../components/HeatmapDrillCard';
-import { StockMoneyFlowTable, StockMoneyFlowItem } from '../components/StockMoneyFlowTable';
-import { MarketBreadthCard } from '../components/MarketBreadthCard';
+import type { IndexItem } from '../components/BroadMarketHeader';
 import { MarketSentimentPanel } from '../components/MarketSentimentPanel';
 import { MarketRegimePanel } from '../components/MarketRegimePanel';
+import { MarketPanoramaPanel } from '../components/panorama/MarketPanoramaPanel';
 import { StockTerminalSearchBox } from '../../market-analysis-shared/components/StockTerminalSearchBox';
 import { StockTerminalWindow } from '../../market-analysis-shared/components/StockTerminalWindow';
+import type { SectorHeatmapItem } from '../../market-analysis-shared/SectorHeatmapChart';
 import { FactorBoardPanel } from '../components/FactorBoardPanel';
 import { FlowPanoramaPanel } from '../components/FlowPanoramaPanel';
 import { SmartMoneyPanel } from '../components/smart-money/SmartMoneyPanel';
@@ -18,6 +18,20 @@ import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { fmtBeijingClock } from '../../../utils/timeBeijing';
 
 const MARKET_ANALYSIS_API = `${SERVICE_ENDPOINTS.USER_SERVICE}/market-analysis`;
+
+/** 周日作为一周第一天的中文日历：antd 只把 locale.lang 传给 rc-picker，
+ *  所以周起始日与星期文案必须写在 lang 里。 */
+const SUNDAY_PICKER_LOCALE = {
+  ...zhCN.DatePicker,
+  lang: {
+    ...zhCN.DatePicker.lang,
+    locale: 'en',
+    monthFormat: 'M月',
+    shortWeekDays: ['日', '一', '二', '三', '四', '五', '六'],
+  },
+};
+/** 阶段/情绪历史窗口约 2 年；更早日期后端取不到同口径的日频面板。 */
+const MIN_SELECTABLE_DATE = dayjs().subtract(2, 'year').startOf('day');
 
 interface MarketBreadthData {
   trade_date: string;
@@ -36,10 +50,9 @@ export const MarketAnalysisPage: React.FC = () => {
   const [analyzing, setAnalyzing] = useState(false);
   const [activeTab, setActiveTab] = useState('panorama'); // 默认进入大盘全景看板
   const [indices, setIndices] = useState<IndexItem[]>([]);
-  const [stockFlows, setStockFlows] = useState<StockMoneyFlowItem[]>([]);
   const [breadth, setBreadth] = useState<MarketBreadthData | null>(null);
+  const [heatmapData, setHeatmapData] = useState<SectorHeatmapItem[]>([]);
   const [dataDate, setDataDate] = useState<string>('');
-  const [heatmapData, setHeatmapData] = useState<any[]>([]);
   const [updateTime, setUpdateTime] = useState<string>('');
   // 🎯 个股资金流聚焦（顶栏搜索 / 排行榜下钻 → 资金流全景内打开个股详情卡）
   const [focusSymbol, setFocusSymbol] = useState<string | null>(null);
@@ -51,6 +64,11 @@ export const MarketAnalysisPage: React.FC = () => {
   const [snapDates, setSnapDates] = useState<string[]>([]);
   // 🎯 手动分析完成后切换为实时模式（GET 接口跳过快照，展示最新交易日数据）
   const [realtime, setRealtime] = useState(false);
+
+  // 选中日期没有行情快照：阶段/情绪/资金流可回看，但指数带/广度/方块图无同口径数据
+  const snapshotMissing =
+    !!snapDate && snapDates.length > 0 && !snapDates.includes(snapDate);
+  const snapshotFrom = snapDates.length ? snapDates[snapDates.length - 1] : undefined;
 
   useEffect(() => {
     fetchMarketData();
@@ -85,7 +103,7 @@ export const MarketAnalysisPage: React.FC = () => {
   useEffect(() => {
     fetchMarketData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapDate]);
+  }, [snapDate, snapDates.length]);
 
   const fetchMarketData = async (forceRealtime?: boolean) => {
     setLoading(true);
@@ -95,10 +113,20 @@ export const MarketAnalysisPage: React.FC = () => {
     const qs = buildQS(snapDate, useRealtime);
     const qsWithAmp = qs ? qs.replace('?', '&') : '';
 
+    // 该日期不在快照覆盖内：不要把「最新快照」冒充成历史数据
+    if (snapshotMissing && !useRealtime) {
+      setIndices([]);
+      setBreadth(null);
+      setHeatmapData([]);
+      setDataDate(snapDate || '');
+      setUpdateTime(fmtBeijingClock(Date.now(), { withSeconds: false }));
+      setLoading(false);
+      return;
+    }
+
     try {
-      const [resIdx, resStock, resBreadth, resHeatmap] = await Promise.all([
+      const [resIdx, resBreadth, resHeatmap] = await Promise.all([
         fetch(`${MARKET_ANALYSIS_API}/indices/overview${qs}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/money-flow/stocks?limit=50${qsWithAmp}`, { headers }),
         fetch(`${MARKET_ANALYSIS_API}/breadth${qs}`, { headers }),
         fetch(`${MARKET_ANALYSIS_API}/heatmap?category=shenwan${qsWithAmp}`, { headers }),
       ]);
@@ -107,12 +135,6 @@ export const MarketAnalysisPage: React.FC = () => {
         const idxData = await resIdx.json();
         if (Array.isArray(idxData) && idxData.length > 0) {
           setIndices(idxData);
-        }
-      }
-      if (resStock.ok) {
-        const stockData = await resStock.json();
-        if (Array.isArray(stockData) && stockData.length > 0) {
-          setStockFlows(stockData);
         }
       }
       if (resBreadth.ok) {
@@ -137,11 +159,6 @@ export const MarketAnalysisPage: React.FC = () => {
     }
   };
 
-  // 点击个股 → 资金流全景 tab 打开个股详情卡（聚焦个股 + 板块归因可回跳板块视角）
-  const openStockDetail = (item: StockMoneyFlowItem) => {
-    setFocusSymbol(item.symbol);
-    setActiveTab('flow-panorama');
-  };
 
   /** 手动触发读取 QuantDB 数据，SSE 逐步流式推送，边分析边渲染 */
   const handleTriggerAnalysis = async () => {
@@ -185,11 +202,6 @@ export const MarketAnalysisPage: React.FC = () => {
           case 'heatmap':
             if (Array.isArray(data?.heatmap) && data.heatmap.length > 0) {
               setHeatmapData(data.heatmap);
-            }
-            break;
-          case 'stock_flow':
-            if (Array.isArray(data?.stock_flow) && data.stock_flow.length > 0) {
-              setStockFlows(data.stock_flow);
             }
             break;
           default:
@@ -285,7 +297,7 @@ export const MarketAnalysisPage: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2.5 flex-shrink-0">
-            {dataDate && (
+            {dataDate && !snapshotMissing && (
               <span
                 title="行情数据对应的最新交易日"
                 className="hidden lg:flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-50 text-slate-600 border border-slate-200/70 text-[11px] font-bold font-mono whitespace-nowrap"
@@ -296,21 +308,36 @@ export const MarketAnalysisPage: React.FC = () => {
               </span>
             )}
 
-            {/* 🎯 快照历史日期选择器 */}
+            {/* 🎯 历史回看日期选择器：阶段/情绪/资金流近 2 年；行情快照自 2026-08-31 起 */}
             <div className="flex items-center gap-1.5">
               <DatePicker
                 allowClear
                 value={snapDate ? dayjs(snapDate) : null}
                 onChange={(d) => setSnapDate(d ? d.format('YYYY-MM-DD') : undefined)}
-                disabledDate={(d) => (snapDates.length > 0 ? !snapDates.includes(d.format('YYYY-MM-DD')) : false)}
-                placeholder="快照日期(默认最新)"
+                disabledDate={(d) =>
+                  d.isAfter(dayjs(), 'day') ||
+                  d.isBefore(MIN_SELECTABLE_DATE, 'day') ||
+                  d.day() === 0 ||
+                  d.day() === 6
+                }
+                placeholder="回看日期(默认最新)"
                 className="!w-36 sm:!w-40"
                 size="small"
+                locale={SUNDAY_PICKER_LOCALE}
+                title={`阶段/情绪/资金流支持近 2 年回看；指数带、广度与板块方块图仅支持有行情快照的日期${snapshotFrom ? `（${snapshotFrom} 起）` : ''}`}
                 suffixIcon={<Clock className="w-3 h-3 text-purple-400" />}
               />
               {snapDate && (
                 <span className="text-[11px] text-slate-400 cursor-pointer hover:text-purple-600 whitespace-nowrap" onClick={() => setSnapDate(undefined)}>
                   最新
+                </span>
+              )}
+              {snapshotMissing && (
+                <span
+                  className="hidden xl:inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700 whitespace-nowrap"
+                  title="该日期无行情快照：阶段/情绪/资金流为历史回看，指数带/广度/方块图不展示"
+                >
+                  无快照
                 </span>
               )}
             </div>
@@ -365,56 +392,20 @@ export const MarketAnalysisPage: React.FC = () => {
           </div>
         </div>
 
-        {/* 📈 主内容区：全景看板禁用外部滚动条，保证 100% 紧凑铺满 */}
-        <div className={`flex-1 min-h-0 ${activeTab === 'panorama' ? 'overflow-hidden p-4' : 'overflow-y-auto p-6 pb-20'} flex flex-col gap-3.5 bg-[#f8fafc] custom-scrollbar`}>
+        {/* 📈 主内容区：全景看板优先一屏铺满，窄屏可滚动 */}
+        <div className={`flex-1 min-h-0 ${activeTab === 'panorama' ? 'overflow-y-auto p-4 pb-40 [@media(max-height:950px)]:pb-52' : 'overflow-y-auto p-6 pb-20'} flex flex-col gap-3.5 bg-[#f8fafc] custom-scrollbar`}>
           {activeTab === 'panorama' && (
-            <div className="flex flex-col gap-3 flex-1 min-h-0 overflow-hidden">
-              {/* 核心指数快照（含多周期模型预测）：只在全景看板页签内，不占其它页签空间 */}
-              <div className="shrink-0">
-                <BroadMarketHeader indices={indices} loading={loading} compact />
-              </div>
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-stretch flex-1 min-h-0 overflow-hidden">
-                <div className="lg:col-span-5 flex flex-col justify-between gap-3 min-h-0">
-                <MarketBreadthCard
-                  advanceCount={breadth?.advance_count}
-                  declineCount={breadth?.decline_count}
-                  flatCount={breadth?.flat_count}
-                  limitUpCount={breadth?.limit_up_count}
-                  limitDownCount={breadth?.limit_down_count}
-                  totalTurnoverYi={breadth?.total_turnover_yi}
-                  profitEffect={breadth?.profit_effect}
-                  limitUpBrokenRatio={breadth?.limit_up_broken_ratio}
-                />
-                <div className="flex flex-col gap-2 bg-white/95 backdrop-blur-md rounded-2xl p-3.5 border border-purple-100/80 shadow-md shadow-purple-500/5 min-h-0 flex-1">
-                  <div className="flex items-center justify-between shrink-0">
-                    <h3 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
-                      <TrendingUp className="w-3.5 h-3.5 text-purple-600" />
-                      <span>主力资金净流入 Top {Math.min(50, stockFlows.length) || 50} 股票</span>
-                      <span className="text-[10px] font-mono font-normal text-slate-400">列表内滚动查看</span>
-                    </h3>
-                    <span
-                      onClick={() => setActiveTab('flow-panorama')}
-                      className="text-[11px] text-purple-600 font-extrabold hover:underline cursor-pointer flex items-center"
-                    >
-                      资金流全景 ➔
-                    </span>
-                  </div>
-                  {/* 滚动容器 + 表头吸顶（antd 表头默认 relative，!sticky 覆盖） */}
-                  <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar rounded-xl [&_.ant-table-thead>tr>th]:!sticky [&_.ant-table-thead>tr>th]:top-0 [&_.ant-table-thead>tr>th]:z-10">
-                    <StockMoneyFlowTable items={stockFlows.slice(0, 50)} isMini={true} onStockClick={openStockDetail} />
-                  </div>
-                </div>
-              </div>
-
-              <div className="lg:col-span-7 min-h-0">
-                <HeatmapDrillCard
-                  topItems={heatmapData}
-                  date={snapDate}
-                  onStockClick={(symbol, name) => openStockDetail({ symbol, name } as StockMoneyFlowItem)}
-                />
-              </div>
-              </div>
-            </div>
+            <MarketPanoramaPanel
+              date={snapDate}
+              indices={indices}
+              breadth={breadth}
+              heatmap={heatmapData}
+              loading={loading}
+              snapshotMissing={snapshotMissing}
+              snapshotFrom={snapshotFrom}
+              onNavigate={setActiveTab}
+              onOpenStock={(symbol) => setWindowSymbol(symbol)}
+            />
           )}
 
           {activeTab === 'regime' && (

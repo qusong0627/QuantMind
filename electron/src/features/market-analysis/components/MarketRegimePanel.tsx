@@ -19,6 +19,7 @@ import {
   type RegimeResponse,
   type SectorStock,
 } from '../services/regimeService';
+import { IndicatorHealthCard } from './IndicatorHealthCard';
 
 const DOT: Record<RegimeColor, string> = {
   green: '#16a34a',
@@ -1743,6 +1744,8 @@ export function MarketRegimePanel({
               背离等样本有限，按“风险提示”用，不重仓外推。
             </p>
           </div>
+
+          <IndicatorHealthCard data={data} />
         </>
       )}
     </div>

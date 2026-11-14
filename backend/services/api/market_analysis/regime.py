@@ -43,6 +43,7 @@ SNAP = ROOT / "5_technical_derived" / "market_breadth" / "intraday_market_panel.
 SNAP1010 = (
     ROOT / "5_technical_derived" / "market_breadth" / "intraday_snapshot_1010.parquet"
 )
+L05 = ROOT.parent / "l05_snapshots"
 KLINE = ROOT / "1_kline_data" / "daily_backward"
 INST = ROOT / "2_base_sector" / "instrument_detail" / "instrument_detail.parquet"
 
@@ -119,10 +120,43 @@ def _sector_snapshot(ts: pd.Timestamp, universe: str = "ALL") -> dict:
 
 
 @functools.lru_cache(maxsize=32)
+def _rs_1010_hot(date_str: str, universe: str = "ALL") -> pd.DataFrame:
+    """全市场 10:10 快照缺口时，用 L0.5 热集（约 590 只）补五档形状。"""
+    b = L05 / f"date={date_str.replace('-', '')}"
+    if not b.exists():
+        return pd.DataFrame(columns=["symbol", "rs_1010", "ret_1010", "sample"])
+    frames = []
+    for f in os.listdir(b):
+        if f.endswith(".parquet"):
+            frames.append(
+                pq.read_table(
+                    b / f, columns=["symbol", "refresh_time", "price", "pre_close"]
+                ).to_pandas()
+            )
+    if not frames:
+        return pd.DataFrame(columns=["symbol", "rs_1010", "ret_1010", "sample"])
+    df = pd.concat(frames, ignore_index=True)
+    df["rt"] = df["refresh_time"].astype(str).str.zfill(6).astype(int)
+    s = df[df["rt"] <= 101000].sort_values("rt").groupby("symbol").tail(1)
+    s = s[(s["pre_close"] > 0) & (s["price"] > 0)].copy()
+    syms = universe_symbols(universe, set(s["symbol"]))
+    if syms is not None:
+        s = s[s["symbol"].isin(syms)]
+    if s.empty:
+        return pd.DataFrame(columns=["symbol", "rs_1010", "ret_1010", "sample"])
+    s["ret_m"] = s["price"] / s["pre_close"] - 1
+    s["rs_1010"] = (s["ret_m"] - s["ret_m"].median()) * 100
+    s["ret_1010"] = s["ret_m"] * 100
+    s["sample"] = "hot_set"
+    return s[["symbol", "rs_1010", "ret_1010", "sample"]]
+
+
+@functools.lru_cache(maxsize=32)
 def _rs_1010(date_str: str, universe: str = "ALL") -> pd.DataFrame:
-    """该日 10:10 个股相对强弱（相对同宇宙中位数，%）；无数据返回空表。"""
+    """该日 10:10 个股相对强弱（相对同宇宙中位数，%）；无数据回退热集。"""
+    empty = pd.DataFrame(columns=["symbol", "rs_1010", "ret_1010", "sample"])
     if not SNAP1010.exists():
-        return pd.DataFrame(columns=["symbol", "rs_1010"])
+        return _rs_1010_hot(date_str, universe)
     q = f"""
         SELECT symbol, px40
         FROM read_parquet('{SNAP1010}')
@@ -131,9 +165,9 @@ def _rs_1010(date_str: str, universe: str = "ALL") -> pd.DataFrame:
     try:
         snap = duckdb.connect().execute(q).fetchdf()
     except Exception:  # noqa: BLE001
-        return pd.DataFrame(columns=["symbol", "rs_1010"])
+        return _rs_1010_hot(date_str, universe)
     if snap.empty:
-        return pd.DataFrame(columns=["symbol", "rs_1010"])
+        return _rs_1010_hot(date_str, universe)
     cur_tag, prev_tag = _day_tags(pd.Timestamp(date_str))
     d = _day_returns(cur_tag, prev_tag)[["symbol", "prev_close"]]
     m = snap.merge(d, on="symbol", how="inner")
@@ -142,10 +176,12 @@ def _rs_1010(date_str: str, universe: str = "ALL") -> pd.DataFrame:
     if syms is not None:
         m = m[m["symbol"].isin(syms)]
     if m.empty:
-        return pd.DataFrame(columns=["symbol", "rs_1010"])
+        return empty
     m["ret_m"] = m["px40"] / m["prev_close"] - 1
     m["rs_1010"] = (m["ret_m"] - m["ret_m"].median()) * 100
-    return m[["symbol", "rs_1010"]]
+    m["ret_1010"] = m["ret_m"] * 100
+    m["sample"] = "full"
+    return m[["symbol", "rs_1010", "ret_1010", "sample"]]
 
 
 def _sector_stocks(ts: pd.Timestamp, sector: str, universe: str = "ALL") -> list[dict]:
@@ -172,6 +208,88 @@ def _sector_stocks(ts: pd.Timestamp, sector: str, universe: str = "ALL") -> list
         }
         for _, r in sub.head(80).iterrows()
     ]
+
+
+def _amount_gap_pp(r: pd.Series) -> float | None:
+    """额价差 = 涨额占比 − 涨家占比（pp）。
+
+    正值越大，资金越集中在少数上涨股；>20pp 在 2016–2026 实测对应
+    40 日 −1.6~−2.5pp（t −2.4~−3.1，89 段），只作 40 日风险提示。
+    """
+    n_up = float(r.get("n_up", np.nan))
+    n_down = float(r.get("n_down", np.nan))
+    a_up = float(r.get("amt_up", np.nan))
+    a_down = float(r.get("amt_down", np.nan))
+    count = n_up + n_down
+    amount = a_up + a_down
+    if not np.isfinite(count) or not np.isfinite(amount) or count <= 0 or amount <= 0:
+        return None
+    return round((a_up / amount - n_up / count) * 100, 2)
+
+
+def _stock_breadth(ts: pd.Timestamp, universe: str = "ALL") -> dict:
+    """10:10 相对强弱五档 → 10:10 之后到收盘的中位收益。
+
+    历史结论：强广度日 Q1（10:10 最弱）收盘反而跑赢 Q5（最强），
+    弱广度日不接飞刀；这里是当日描述，不是未来收益承诺。
+    """
+    cur_tag, prev_tag = _day_tags(ts)
+    rs = _rs_1010(ts.strftime("%Y-%m-%d"), universe)
+    if rs.empty:
+        return {
+            "available": False,
+            "note": "该日期无 10:10 快照；五档相对强弱只在有盘中快照的交易日可用。",
+        }
+    d = _day_returns(cur_tag, prev_tag)[["symbol", "ret"]]
+    m = rs.merge(d, on="symbol", how="inner")
+    m = m[m["ret_1010"] > -99.0].copy()
+    if m.empty:
+        return {"available": False, "note": "该日期 10:10 与日线无法对齐。"}
+    m["ret_after"] = ((1 + m["ret"]) / (1 + m["ret_1010"] / 100) - 1) * 100
+    m["q"] = pd.qcut(
+        m["rs_1010"].rank(method="first"),
+        5,
+        labels=["Q1", "Q2", "Q3", "Q4", "Q5"],
+    )
+    g = m.groupby("q", observed=True).agg(
+        n=("symbol", "size"),
+        ret_1010=("ret_1010", "median"),
+        ret_after=("ret_after", "median"),
+        up_share_after=("ret_after", lambda x: float((x > 0).mean() * 100)),
+    )
+    rows = [
+        {
+            "q": str(idx),
+            "n": int(row["n"]),
+            "ret_1010": round(float(row["ret_1010"]), 2),
+            "ret_after": round(float(row["ret_after"]), 2),
+            "up_share_after": round(float(row["up_share_after"]), 1),
+        }
+        for idx, row in g.iterrows()
+    ]
+    q1 = next((x for x in rows if x["q"] == "Q1"), None)
+    q5 = next((x for x in rows if x["q"] == "Q5"), None)
+    spread = (
+        round(q1["ret_after"] - q5["ret_after"], 2)
+        if q1 is not None and q5 is not None
+        else None
+    )
+    sample = str(m["sample"].iloc[0]) if "sample" in m.columns else "full"
+    return {
+        "available": True,
+        "date": ts.strftime("%Y-%m-%d"),
+        "n": int(len(m)),
+        "sample": sample,
+        "quintiles": rows,
+        "q1_minus_q5_after": spread,
+        "note": "按 10:10 相对强弱分五档（Q1=最弱）；ret_after=10:10→收盘中位收益。"
+        + (
+            "当前为 L0.5 热集样本，只看形状，不是全市场。"
+            if sample == "hot_set"
+            else "全市场 10:10 快照。"
+        )
+        + "历史：强广度日 Q1 收盘跑赢 Q5；弱广度日不接飞刀。",
+    }
 
 
 def _pick(d: pd.DataFrame, date: str | None) -> pd.Timestamp:
@@ -396,10 +514,13 @@ def market_regime(
     intra = _intraday(ts) if universe == "ALL" else intraday_universe(ts, universe, d)
     intra_score, intra_stage = 0, "无盘中数据"
     intra_k = 0
+    intra_b: float | None = None
+    intra_m: float | None = None
     if intra["available"] and intra["breadth"]:
         intra_k = intra["times"].index("10:10") if "10:10" in intra["times"] else 0
         b = intra["breadth"][intra_k]
         m = intra["mcl_chg5"][intra_k] if intra["mcl_chg5"] else None
+        intra_b, intra_m = b, m
         if b > 60 and (m is not None and m > 0):
             intra_score, intra_stage = 2, "强延续（下午偏强）"
         elif b > 60:
@@ -585,6 +706,18 @@ def market_regime(
         ),
     ]
 
+    amount_gap = _amount_gap_pp(r)
+    trin_vol = float(r["trin_vol"]) if np.isfinite(r["trin_vol"]) else None
+    events = {
+        "trin_vol": round(trin_vol, 2) if trin_vol is not None else None,
+        "trin_surrender": bool(trin_vol is not None and trin_vol > 2),
+        "amount_gap_pp": amount_gap,
+        "amount_gap_risk": bool(amount_gap is not None and amount_gap > 20),
+        "adl_divergence": bool(r["idx_hi"] and not r["adl_hi"]),
+        "breadth_1010": intra_b,
+        "mcl_chg5": intra_m,
+    }
+
     return {
         "date": ts.strftime("%Y-%m-%d"),
         "layers": layers,
@@ -605,6 +738,8 @@ def market_regime(
             if bottom
             else "底部不成立（估值不便宜或未投降）",
         },
+        "events": events,
+        "stock_breadth": _stock_breadth(ts, universe),
         "charts": _series(d, ts),
         "quadrant": _quadrant(r, quadrant_long(universe, _last_kline_tag())),
         "intraday": intra,

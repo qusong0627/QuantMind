@@ -215,6 +215,9 @@ def build_frame(code: str, last_tag: str) -> pd.DataFrame:  # noqa: ARG001
         amt_up / amt_down.replace(0, np.nan)
     )
     out["ret_mean"] = ret.mean(axis=1)
+    out["amt_total"] = amt.sum(axis=1)
+    out["amt_up"] = amt_up
+    out["amt_down"] = amt_down
 
     if code == "ALL":
         idx = (1.0 + out["ret_mean"].fillna(0.0)).cumprod() * 1000.0
