@@ -41,26 +41,121 @@ _RUN_LOCK = threading.Lock()
 
 # ---------- 路径 ----------
 
-def _root_candidates() -> tuple[Path, ...]:
-    """quantdb 根候选（移植注①）：QM 数据根优先，env 与 /data 兜底。"""
-    cands = [arena_config.data_root() / "quantdb"]
-    env_dir = os.getenv("QM_QUANTDB_DATA_DIR", "")
-    if env_dir:
-        cands.append(Path(env_dir))
-    cands.append(Path("/data/quantdb"))
-    seen: set[Path] = set()
-    out: list[Path] = []
-    for p in cands:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return tuple(out)
-
 ADJ_DIRS = {
     "unadjusted": "daily_unadjusted",
     "forward": "daily_forward",
     "backward": "daily_backward",
 }
+
+# ---------- 多市场注册表（2026-11-15） ----------
+# 行情实验室从「只读 quantdb」扩到回测中心后可跟随右上角市场切换。
+# 各市场数据布局一致（1_kline_data/<adj>/dt=*/ *.parquet + symbol/time/OHLCV），
+# 差异只在根目录、复权目录可用性、代码格式与名称表。
+# 复权口径**不做假**：某个市场没有某档目录就不对外声明该档（见 available_adjs）。
+
+MARKET_SPECS: dict[str, dict] = {
+    "cn": {"dir": "quantdb", "env": "QM_QUANTDB_DATA_DIR", "label": "A股", "currency": "CNY"},
+    "hk": {"dir": "quanthk", "env": "QM_QUANTHK_DATA_DIR", "label": "港股", "currency": "HKD"},
+    "us": {"dir": "quantus", "env": "QM_QUANTUS_DATA_DIR", "label": "美股", "currency": "USD"},
+    "futures": {"dir": "quantfutures", "env": "QM_QUANTFUTURES_DATA_DIR",
+                "label": "期货/贵金属", "currency": "CNY"},
+    "crypto": {"dir": "quantbc", "env": "QM_QUANTBC_DATA_DIR", "label": "区块链", "currency": "USDT"},
+}
+
+MARKET_ALIASES = {
+    "a_share": "cn", "cn": "cn", "ashare": "cn", "a股": "cn",
+    "hong_kong": "hk", "hk": "hk", "港股": "hk",
+    "us_stock": "us", "us": "us", "美股": "us",
+    "futures": "futures", "期货": "futures",
+    "crypto": "crypto", "区块链": "crypto",
+}
+
+#: K线周期。1d = 日线（默认）；5m/1m = 分钟线（仅 A股/加密有落盘）
+FREQ_LABELS = {"1d": "日线", "5m": "5分钟", "1m": "1分钟"}
+MINUTE_DIRS = {"5m": "min5_kline", "1m": "min1_kline"}
+
+
+def normalize_market(market: object = None) -> str:
+    """前端/接口的市场 id → 注册表键。未知值报错而不是静默当 A 股。"""
+    key = str(market or "").strip().lower()
+    if not key:
+        return "cn"
+    hit = MARKET_ALIASES.get(key)
+    if not hit:
+        raise ValueError(f"未知市场: {market!r}（可用: {', '.join(MARKET_SPECS)}）")
+    return hit
+
+
+def _market_root(market: str = "cn") -> Path:
+    """某市场数据根：QM 数据根优先，env 覆盖，/data 兜底（与 quantdb 同纪律）。"""
+    m = normalize_market(market)
+    spec = MARKET_SPECS[m]
+    cands = [arena_config.data_root() / spec["dir"]]
+    env_dir = os.getenv(spec["env"], "")
+    if env_dir:
+        cands.append(Path(env_dir))
+    cands.append(Path("/data") / spec["dir"])
+    for p in cands:
+        if (p / "1_kline_data").is_dir():
+            return p
+    return cands[0]
+
+
+def _market_adj_dir(market: str, adj: str) -> str:
+    """市场 → 复权目录。非 A 股只有原始价（部分市场另有后复权）。"""
+    m = normalize_market(market)
+    adj = str(adj or "unadjusted").strip().lower()
+    if m == "cn":
+        d = ADJ_DIRS.get(adj)
+        if not d:
+            raise ValueError(f"未知复权口径: {adj}")
+        return d
+    if adj in ("unadjusted", "forward"):
+        # 非 A 股的 daily_forward 是**原始价**（akshare/yahoo/binance 原值）：
+        # 前端只声明「不复权」一档，这里兼容旧调用把 forward 也当原始价。
+        return "daily_forward"
+    if adj == "backward" and (_market_root(m) / "1_kline_data" / "daily_backward").is_dir():
+        return "daily_backward"
+    raise ValueError(f"{MARKET_SPECS[m]['label']}无「{adj}」复权数据")
+
+
+def available_adjs(market: str = "cn") -> list[str]:
+    """该市场真正可用的复权档（前端按此渲染按钮，不展示假档）。"""
+    m = normalize_market(market)
+    if m == "cn":
+        return [k for k, d in ADJ_DIRS.items() if (_market_root(m) / "1_kline_data" / d).is_dir()]
+    adjs = ["unadjusted"]
+    if (_market_root(m) / "1_kline_data" / "daily_backward").is_dir():
+        adjs.append("backward")
+    return adjs
+
+
+def available_freqs(market: str = "cn") -> list[str]:
+    """该市场真正有落盘的 K 线周期（1d 恒有；分钟线按目录存在性声明）。"""
+    m = normalize_market(market)
+    out = ["1d"]
+    for freq, d in MINUTE_DIRS.items():
+        if (_market_root(m) / "1_kline_data" / d).is_dir():
+            out.append(freq)
+    return out
+
+
+def market_meta() -> list[dict]:
+    """前端市场选择器用：id/标签/币种/可用复权档/可选周期/实际有数据的周期。"""
+    out = []
+    for m, spec in MARKET_SPECS.items():
+        out.append({
+            "id": m,
+            "label": spec["label"],
+            "currency": spec["currency"],
+            "adjs": available_adjs(m),
+            # freqs = 界面可选项（三档都列）；avail_freqs = 该市场真有落盘的周期。
+            # 选到没有的档由前端自动回退日线，而不是把按钮藏起来（用户口径 2026-11-15）。
+            "freqs": list(FREQ_LABELS),
+            "avail_freqs": available_freqs(m),
+            "has_data": (_market_root(m) / "1_kline_data").is_dir(),
+        })
+    return out
 
 STRATEGY_DIR = Path(__file__).resolve().parent / "lab_strategies"
 
@@ -68,7 +163,7 @@ STRATEGY_DIR = Path(__file__).resolve().parent / "lab_strategies"
 STRATEGIES: dict[str, dict] = {
     "sma_cross": {
         "file": "sma_cross.py", "name": "双均线交叉",
-        "desc": "快线上穿慢线买入，死叉离场。经典趋势跟随，参数少、抗过拟合。",
+        "desc": "快线上穿慢线入场，死叉离场。经典趋势跟随，参数少、抗过拟合。",
         "params": [{"k": "fast", "label": "快线", "default": 5},
                    {"k": "slow", "label": "慢线", "default": 20}]},
     "ema_trend": {
@@ -78,23 +173,23 @@ STRATEGIES: dict[str, dict] = {
                    {"k": "slow", "label": "慢线", "default": 60}]},
     "rsi_reversal": {
         "file": "rsi_reversal.py", "name": "RSI 反转",
-        "desc": "RSI 从超卖区上穿买入，进入超买区离场。震荡市风格。",
+        "desc": "RSI 从超卖区上穿入场，进入超买区离场。震荡市风格。",
         "params": [{"k": "length", "label": "RSI 周期", "default": 14},
                    {"k": "oversold", "label": "超卖线", "default": 30},
                    {"k": "overbought", "label": "超买线", "default": 70}]},
     "boll_breakout": {
         "file": "boll_breakout.py", "name": "布林带突破",
-        "desc": "收盘上穿上轨买入，回落中轨离场。波动放大时入场。",
+        "desc": "收盘上穿上轨入场，回落中轨离场。波动放大时入场。",
         "params": [{"k": "length", "label": "周期", "default": 20},
                    {"k": "mult", "label": "带宽倍数", "default": 2.0}]},
     "donchian": {
         "file": "donchian.py", "name": "唐奇安通道突破",
-        "desc": "突破 N 日新高买入，跌破 M 日新低离场（海龟简化版）。",
+        "desc": "突破 N 日新高入场，跌破 M 日新低离场（海龟简化版）。",
         "params": [{"k": "entry_len", "label": "入场周期", "default": 20},
                    {"k": "exit_len", "label": "离场周期", "default": 10}]},
     "atr_trend": {
         "file": "atr_trend.py", "name": "ATR 通道趋势",
-        "desc": "上穿 EMA+ATR 上轨买入，跌破 EMA 离场。波动率自适应止损。",
+        "desc": "上穿 EMA+ATR 上轨入场，跌破 EMA 离场。波动率自适应止损。",
         "params": [{"k": "ma_len", "label": "均线周期", "default": 20},
                    {"k": "atr_len", "label": "ATR 周期", "default": 14},
                    {"k": "mult", "label": "通道倍数", "default": 1.5}]},
@@ -102,26 +197,62 @@ STRATEGIES: dict[str, dict] = {
 
 
 def _root() -> Path:
-    for p in _root_candidates():
-        if (p / "1_kline_data").is_dir():
-            return p
+    """A 股 quantdb 根（兼容旧调用）。"""
+    root = _market_root("cn")
+    if (root / "1_kline_data").is_dir():
+        return root
     raise FileNotFoundError("quantdb 未挂载（QM 数据根/quantdb 或 /data/quantdb）")
 
 
-def _kline_glob(adj: str) -> str:
-    d = ADJ_DIRS.get(adj)
-    if not d:
-        raise ValueError(f"未知复权口径: {adj}")
-    return str(_root() / "1_kline_data" / d / "dt=*" / "*.parquet")
+def _kline_glob(adj: str, market: str = "cn") -> str:
+    d = _market_adj_dir(market, adj)
+    return str(_market_root(market) / "1_kline_data" / d / "dt=*" / "*.parquet")
 
 
 # ---------- 代码归一 / 名称 ----------
 
-def normalize_code(symbol: str) -> str:
-    """600309 / 600309.SH / SH600309 / 600309.SS → 600309.SH。"""
-    s = str(symbol or "").strip().upper().replace(" ", "")
+def normalize_code(symbol: str, market: str = "cn") -> str:
+    """各市场代码归一（默认 A 股，保持旧调用逐位不变）。
+
+    - A 股：600309 / 600309.SH / SH600309 / 600309.SS → 600309.SH
+    - 港股：700 / 0700 / 0700.HK → 0700.HK（数字补 4 位）
+    - 美股：aapl / AAPL.US → AAPL
+    - 期货：按 futures_universe 的规范键大小写不敏感匹配（Au99.99 / RB0.CN / CL.FUT）
+    - 加密：btc/usdt → BTCUSDT
+    """
+    m = normalize_market(market)
+    s = str(symbol or "").strip().replace(" ", "")
     if not s:
         return ""
+    if m == "cn":
+        return _normalize_cn(s)
+    if m == "hk":
+        u = s.upper()
+        base = u[:-3] if u.endswith(".HK") else u
+        return f"{int(base):04d}.HK" if base.isdigit() else u
+    if m == "us":
+        u = s.upper()
+        return u[:-3] if u.endswith(".US") else u
+    if m == "futures":
+        from backend.shared.futures_universe import FUTURES_META
+
+        if s in FUTURES_META:
+            return s
+        u = s.upper()
+        if u in FUTURES_META:
+            return u
+        for key in FUTURES_META:
+            if key.upper() == u:
+                return key
+        return s
+    if m == "crypto":
+        return s.upper().replace("/", "").replace("-", "")
+    return s
+
+
+def _normalize_cn(s: str) -> str:
+    """A 股代码归一（旧实现，行为保持不变）。"""
+    s = s.upper()
     if s.endswith(".SS"):
         s = s[:-3] + ".SH"
     if "." in s:
@@ -140,87 +271,180 @@ def normalize_code(symbol: str) -> str:
     return s
 
 
-_names_cache: dict | None = None
+_names_cache: dict[str, dict] | None = None
 
 
-def _names() -> dict:
-    """全市场代码→名称（instrument_detail，进程内缓存）。"""
+def _names(market: str = "cn") -> dict:
+    """全市场代码→名称（按市场缓存；缺失名称表时返回空，不影响行情）。
+
+    - A 股：quantdb instrument_detail
+    - 港股/美股：security_master/data.parquet（cn_name 优先，回退 en_name）
+    - 期货：backend/shared/futures_universe.FUTURES_META
+    - 加密：Binance 无名称表，用最新分区的 distinct symbol 当代码表
+    """
     global _names_cache
-    if _names_cache is not None:
-        return _names_cache
-    out: dict = {}
-    for p in (_root() / "2_base_sector/instrument_detail/instrument_detail.parquet",
-              _root() / "2_base_sector/instrument_detail.parquet"):
-        if not p.is_file():
-            continue
-        try:
-            import duckdb
+    m = normalize_market(market)
+    if _names_cache is None:
+        _names_cache = {}
+    if m in _names_cache:
+        return _names_cache[m]
 
-            for sym, nm in duckdb.connect().execute(
-                    "SELECT Symbol, Name FROM read_parquet(?)", [str(p)]).fetchall():
-                if sym and nm:
-                    out[str(sym)] = str(nm)
-        except Exception:  # noqa: BLE001 名称缺失不影响行情
-            pass
-        break
-    _names_cache = out
+    out: dict = {}
+    if m == "cn":
+        for p in (_root() / "2_base_sector/instrument_detail/instrument_detail.parquet",
+                  _root() / "2_base_sector/instrument_detail.parquet"):
+            if not p.is_file():
+                continue
+            try:
+                import duckdb
+
+                for sym, nm in duckdb.connect().execute(
+                        "SELECT Symbol, Name FROM read_parquet(?)", [str(p)]).fetchall():
+                    if sym and nm:
+                        out[str(sym)] = str(nm)
+            except Exception:  # noqa: BLE001 名称缺失不影响行情
+                pass
+            break
+    elif m in ("hk", "us"):
+        p = _market_root(m) / "2_base_sector/security_master/data.parquet"
+        if p.is_file():
+            try:
+                import duckdb
+
+                rows = duckdb.connect().execute(
+                    "SELECT symbol, coalesce(cn_name, en_name) AS name "
+                    "FROM read_parquet(?) WHERE coalesce(cn_name, en_name) IS NOT NULL",
+                    [str(p)]).fetchall()
+                out = {str(s): str(n) for s, n in rows if s and n}
+            except Exception:  # noqa: BLE001
+                pass
+    elif m == "futures":
+        from backend.shared.futures_universe import FUTURES_META
+
+        out = {k: (v.get("name") or k) for k, v in FUTURES_META.items()}
+    elif m == "crypto":
+        files = sorted((_market_root(m) / "1_kline_data" / "daily_forward").glob("dt=*/*.parquet"))
+        if files:
+            try:
+                import duckdb
+
+                rows = duckdb.connect().execute(
+                    "SELECT DISTINCT symbol FROM read_parquet(?) ORDER BY symbol",
+                    [str(files[-1])]).fetchall()
+                out = {str(s): str(s) for (s,) in rows if s}
+            except Exception:  # noqa: BLE001
+                pass
+
+    _names_cache[m] = out
     return out
 
 
-def stock_name(symbol: str) -> str:
-    code = normalize_code(symbol)
-    return _names().get(code, "") or code.split(".")[0]
+def stock_name(symbol: str, market: str = "cn") -> str:
+    m = normalize_market(market)
+    code = normalize_code(symbol, m)
+    return _names(m).get(code, "") or code.split(".")[0]
 
 
-def search_symbols(q: str = "", limit: int = 30) -> list[dict]:
+def search_symbols(q: str = "", limit: int = 30, market: str = "cn") -> list[dict]:
     """代码/名称模糊搜索（代码前缀优先，其次名称包含）。"""
-    names = _names()
+    m = normalize_market(market)
+    names = _names(m)
     if not names:
         return []
     q = str(q or "").strip()
     hits = []
     for code, name in names.items():
-        if q and not (code.startswith(q.upper()) or q in name):
+        if q and not (code.upper().startswith(q.upper()) or q in name):
             continue
         hits.append({"code": code, "name": name})
         if len(hits) >= limit * 4:
             break
-    hits.sort(key=lambda x: (0 if x["code"].startswith(q.upper()) else 1, x["code"]))
+    hits.sort(key=lambda x: (0 if x["code"].upper().startswith(q.upper()) else 1, x["code"]))
     return hits[:limit]
 
 
 # ---------- K线 ----------
 
+def _date_arg(raw: str, end_of_day: bool = False) -> str:
+    """YYYYMMDD / YYYY-MM-DD → SQL 比较用的日期串；分钟线结束日补到 23:59:59。"""
+    t = str(raw or "").strip()
+    if len(t) == 8 and t.isdigit():
+        t = f"{t[:4]}-{t[4:6]}-{t[6:8]}"
+    if end_of_day and len(t) == 10:
+        t += " 23:59:59"
+    return t
+
+
 def load_klines(symbol: str, adj: str = "unadjusted", limit: int = 600,
-                start: str = "", end: str = "") -> list[dict]:
-    """quantdb 日线 → [{date, open, high, low, close, volume}]（旧→新）。"""
+                start: str = "", end: str = "", market: str = "cn",
+                freq: str = "1d") -> list[dict]:
+    """各市场 K 线 → [{date, open, high, low, close, volume}]（旧→新）。
+
+    freq=1d 日线；5m/1m 分钟线（仅 A股/加密有落盘，分钟线只有不复权）。
+    分钟线返回的 date 是完整 `YYYY-MM-DD HH:MM:SS`（北京墙钟 / 加密 UTC）。
+    """
     import duckdb
 
-    code = normalize_code(symbol)
+    m = normalize_market(market)
+    code = normalize_code(symbol, m)
     if not code:
         return []
+    freq = str(freq or "1d").strip().lower()
+    if freq not in FREQ_LABELS:
+        raise ValueError(f"未知周期: {freq}（可用：{'/'.join(FREQ_LABELS)}）")
+
+    if freq != "1d":
+        if freq not in available_freqs(m):
+            raise ValueError(f"{MARKET_SPECS[m]['label']}无「{FREQ_LABELS[freq]}」数据")
+        if adj != "unadjusted":
+            raise ValueError("分钟线只有不复权数据")
+        path = _market_root(m) / "1_kline_data" / MINUTE_DIRS[freq] / f"{code}.parquet"
+        if not path.is_file():
+            return []
+        where: list[str] = []
+        params: list[str] = [str(path)]
+        if start:
+            params.append(_date_arg(start))
+            where.append("time >= ?")
+        if end:
+            params.append(_date_arg(end, end_of_day=True))
+            where.append("time <= ?")
+        sql = "SELECT time, open, high, low, close, volume FROM read_parquet(?)"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        if limit:
+            sql += " ORDER BY time DESC LIMIT ?"
+            params.append(int(limit))
+        else:
+            sql += " ORDER BY time"
+        rows = duckdb.connect().execute(sql, params).fetchall()
+        if limit:
+            rows = rows[::-1]          # 取了尾部 N 根，翻回旧→新
+        return [{"date": str(t)[:19], "open": float(o), "high": float(h),
+                 "low": float(low), "close": float(c), "volume": float(v or 0)}
+                for t, o, h, low, c, v in rows
+                if o == o and c == c]
+
     # 参数化（改写点③）：上游把 code/start/end f-string 拼进 SQL，而
     # normalize_code 对无法识别的串原样放行——DuckDB 表函数可借注入读任意
     # 本地文件（侦察轮点名的注入面）。`?` 参数化后合法输入行为逐位不变。
     where = ["symbol = ?"]
     params: list[str] = [code]
     if start:
-        params.append(start[:4] + "-" + start[4:6] + "-" + start[6:8]
-                      if len(start) == 8 else start)
+        params.append(_date_arg(start))
         where.append("time >= ?")
     if end:
-        params.append(end[:4] + "-" + end[4:6] + "-" + end[6:8]
-                      if len(end) == 8 else end)
+        params.append(_date_arg(end))
         where.append("time <= ?")
     sql = (f"SELECT time, open, high, low, close, volume "
-           f"FROM read_parquet('{_kline_glob(adj)}') "
+           f"FROM read_parquet('{_kline_glob(adj, m)}') "
            f"WHERE {' AND '.join(where)} ORDER BY time")
     rows = duckdb.connect().execute(sql, params).fetchall()
     if limit and len(rows) > limit:
         rows = rows[-limit:]
-    return [{"date": str(t)[:10], "open": float(o), "high": float(h), "low": float(l),
+    return [{"date": str(t)[:10], "open": float(o), "high": float(h), "low": float(low),
              "close": float(c), "volume": float(v or 0)}
-            for t, o, h, l, c, v in rows
+            for t, o, h, low, c, v in rows
             if o == o and c == c]      # NaN 行（停牌/坏数据）剔除
 
 
@@ -237,29 +461,80 @@ def _require_pyne():
         ) from exc
 
 
-def _syminfo(symbol: str, name: str):
+def _syminfo(symbol: str, name: str, market: str = "cn"):
     from pynecore.core.syminfo import SymInfo
 
-    code = normalize_code(symbol)
+    m = normalize_market(market)
+    code = normalize_code(symbol, m)
+    if m == "cn":
+        return SymInfo(
+            prefix="SSE" if code.endswith(".SH") else ("BSE" if code.endswith(".BJ") else "SZSE"),
+            description=name or code, ticker=code.split(".")[0], currency="CNY",
+            basecurrency=None, period="1D", type="stock", volumetype="base",
+            mintick=0.01, pricescale=100, minmove=1, pointvalue=1.0, mincontract=100.0,
+            opening_hours=[], session_starts=[], session_ends=[], timezone="Asia/Shanghai",
+        )
+    if m == "hk":
+        return SymInfo(
+            prefix="HKEX", description=name or code, ticker=code.split(".")[0],
+            currency="HKD", basecurrency=None, period="1D", type="stock", volumetype="base",
+            mintick=0.01, pricescale=100, minmove=1, pointvalue=1.0, mincontract=100.0,
+            opening_hours=[], session_starts=[], session_ends=[], timezone="Asia/Hong_Kong",
+        )
+    if m == "us":
+        return SymInfo(
+            prefix="US", description=name or code, ticker=code,
+            currency="USD", basecurrency=None, period="1D", type="stock", volumetype="base",
+            mintick=0.01, pricescale=100, minmove=1, pointvalue=1.0, mincontract=1.0,
+            opening_hours=[], session_starts=[], session_ends=[], timezone="America/New_York",
+        )
+    if m == "futures":
+        from backend.shared.futures_universe import symbol_meta
+
+        meta = symbol_meta(code)
+        exchange = str(meta.get("exchange") or "").upper()
+        foreign = code.endswith(".FUT") or exchange in {"NYMEX", "COMEX", "ICE", "LME", "CBOT"}
+        multiplier = float(meta.get("multiplier") or 1.0)
+        return SymInfo(
+            prefix=exchange or ("FUT" if foreign else "CNF"),
+            description=name or code, ticker=code,
+            currency="USD" if foreign else "CNY", basecurrency=None, period="1D",
+            type="futures", volumetype="base",
+            mintick=0.01, pricescale=100, minmove=1, pointvalue=multiplier, mincontract=1.0,
+            opening_hours=[], session_starts=[], session_ends=[],
+            timezone="America/New_York" if foreign else "Asia/Shanghai",
+        )
+    # crypto
     return SymInfo(
-        prefix="SSE" if code.endswith(".SH") else ("BSE" if code.endswith(".BJ") else "SZSE"),
-        description=name or code, ticker=code.split(".")[0], currency="CNY",
-        basecurrency=None, period="1D", type="stock", volumetype="base",
-        mintick=0.01, pricescale=100, minmove=1, pointvalue=1.0, mincontract=100.0,
-        opening_hours=[], session_starts=[], session_ends=[], timezone="Asia/Shanghai",
+        prefix="BINANCE", description=name or code, ticker=code,
+        currency="USDT", basecurrency=None, period="1D", type="crypto", volumetype="base",
+        mintick=0.01, pricescale=100, minmove=1, pointvalue=1.0, mincontract=1.0,
+        opening_hours=[], session_starts=[], session_ends=[], timezone="UTC",
     )
 
 
-def _bars_ohlcv(bars: list[dict]):
+def _bars_ohlcv(bars: list[dict], market: str = "cn"):
     from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
 
     from pynecore.types.ohlcv import OHLCV
 
-    cn = timezone(timedelta(hours=8))
+    m = normalize_market(market)
+    tz = ZoneInfo({
+        "cn": "Asia/Shanghai", "hk": "Asia/Hong_Kong", "us": "America/New_York",
+        "futures": "Asia/Shanghai", "crypto": "UTC",
+    }[m])
+    hour, minute = (0, 0) if m == "crypto" else ((9, 0) if m == "futures" else (9, 30))
     out = []
     for b in bars:
-        y, m, d = (int(x) for x in b["date"].split("-"))
-        ts = int(datetime(y, m, d, 9, 30, tzinfo=cn).timestamp() * 1000)
+        s = str(b["date"])
+        if len(s) > 10:
+            # 分钟线：date 是完整时间；按市场墙钟挂到对应时区
+            dt = datetime.fromisoformat(s)
+            ts = int(dt.replace(tzinfo=tz).timestamp() * 1000)
+        else:
+            y, mon, d = (int(x) for x in s.split("-"))
+            ts = int(datetime(y, mon, d, hour, minute, tzinfo=tz).timestamp() * 1000)
         out.append(OHLCV(timestamp=ts, open=b["open"], high=b["high"], low=b["low"],
                          close=b["close"], volume=b["volume"]))
     return out
@@ -358,7 +633,8 @@ def _purge_script_module(script_path: Path) -> None:
 
 def _run_strategy_on_bars(strategy_id: str, bars: list[dict], symbol: str, adj: str,
                           overrides: dict | None = None, want_trades: bool = True,
-                          want_indicators: bool = False) -> dict:
+                          want_indicators: bool = False, market: str = "cn",
+                          freq: str = "1d") -> dict:
     """核心回测：K线已在手 → 跑一次 PyneCore，返回 {stats, trades, equity, meta}。
 
     与 run_backtest 分离是为了批量回测：同一标的的 K 线只从 quantdb 读一次，
@@ -371,19 +647,22 @@ def _run_strategy_on_bars(strategy_id: str, bars: list[dict], symbol: str, adj: 
     if not script.is_file():
         raise FileNotFoundError(f"策略文件缺失: {script}")
     return _run_script(script, strategy_id, spec["name"], bars, symbol, adj,
-                       overrides, want_trades, want_indicators)
+                       overrides, want_trades, want_indicators, market, freq)
 
 
 def run_script_file(script: Path, symbol: str, adj: str = "backward", start: str = "",
                     end: str = "", overrides: dict | None = None,
-                    want_indicators: bool = False) -> dict:
+                    want_indicators: bool = False, market: str = "cn",
+                    freq: str = "1d") -> dict:
     """跑任意 Pyne 脚本文件（不进策略注册表）。AI 转写候选的验证走这条路。"""
     script = Path(script)
     if not script.is_file():
         raise FileNotFoundError(f"脚本文件缺失: {script}")
-    bars = load_klines(symbol, adj=adj, limit=0, start=start, end=end)
+    bars = load_klines(symbol, adj=adj, limit=0, start=start, end=end,
+                       market=market, freq=freq)
     return _run_script(script, script.stem, script.stem, bars, symbol, adj,
-                       overrides, want_trades=True, want_indicators=want_indicators)
+                       overrides, want_trades=True, want_indicators=want_indicators,
+                       market=market, freq=freq)
 
 
 def _price_ref(bars: list[dict]) -> float | None:
@@ -394,11 +673,14 @@ def _price_ref(bars: list[dict]) -> float | None:
 
 def _run_script(script: Path, strategy_id: str, name: str, bars: list[dict], symbol: str,
                 adj: str, overrides: dict | None, want_trades: bool,
-                want_indicators: bool = False) -> dict:
+                want_indicators: bool = False, market: str = "cn",
+                freq: str = "1d") -> dict:
     _require_pyne()
     from pynecore.core.script_runner import ScriptRunner
 
-    code = normalize_code(symbol)
+    m = normalize_market(market)
+    code = normalize_code(symbol, m)
+    display_name = stock_name(symbol, m)
     indicators = None
     with tempfile.TemporaryDirectory(prefix="lab_bt_") as td:
         tdir = Path(td)
@@ -411,8 +693,8 @@ def _run_script(script: Path, strategy_id: str, name: str, bars: list[dict], sym
             # 每次回测前把残留清掉。
             script.with_suffix(".toml").unlink(missing_ok=True)
             runner = ScriptRunner(
-                script_path=script, ohlcv_iter=iter(_bars_ohlcv(bars)),
-                syminfo=_syminfo(symbol, stock_name(symbol)),
+                script_path=script, ohlcv_iter=iter(_bars_ohlcv(bars, m)),
+                syminfo=_syminfo(symbol, display_name, m),
                 plot_path=None, strat_path=strat_csv, trade_path=trade_csv,
                 inputs=overrides or None,
             )
@@ -438,23 +720,26 @@ def _run_script(script: Path, strategy_id: str, name: str, bars: list[dict], sym
         "equity": equity,
         "indicators": indicators,
         "meta": {"strategy": strategy_id, "name": name, "symbol": code,
-                 "name_cn": stock_name(symbol), "adj": adj,
+                 "name_cn": display_name, "adj": adj, "market": m,
+                 "freq": freq,
                  "start": bars[0]["date"], "end": bars[-1]["date"], "bars": len(bars),
                  "params": overrides or {}},
     }
 
 
 def run_backtest(strategy_id: str, symbol: str, adj: str = "backward",
-                 start: str = "", end: str = "", params: dict | None = None) -> dict:
+                 start: str = "", end: str = "", params: dict | None = None,
+                 market: str = "cn", freq: str = "1d") -> dict:
     """单策略 × 单标的回测。返回 {stats, trades, equity, indicators, meta}。"""
     if strategy_id not in STRATEGIES:
         raise ValueError(f"未知策略: {strategy_id}")
-    bars = load_klines(symbol, adj=adj, limit=0, start=start, end=end)
+    bars = load_klines(symbol, adj=adj, limit=0, start=start, end=end,
+                       market=market, freq=freq)
     if len(bars) < 60:
         raise ValueError(f"K线不足（{len(bars)} 根，至少 60 根）")
     overrides = {k: v for k, v in (params or {}).items() if v is not None and v != ""}
     return _run_strategy_on_bars(strategy_id, bars, symbol, adj, overrides,
-                                 want_indicators=True)
+                                 want_indicators=True, market=market, freq=freq)
 
 
 def list_strategies() -> list[dict]:

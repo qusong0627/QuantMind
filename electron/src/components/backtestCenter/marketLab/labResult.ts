@@ -7,7 +7,7 @@
  *    而模板的 `trades` 就是明细数组。两者字段名不同、语义也不同，别混用。
  *    `trade_rows` 的字段与 `BtTrade` 完全一致，可直接喂 `KLineChart` 的 markers。
  */
-import type { BtResult, BtStat, BtTrade, IndicatorSet, PineReport } from '../../api/client';
+import type { BtResult, BtStat, BtTrade, Freq, IndicatorSet, LabMarket, PineReport } from './api';
 
 export type LabSource = 'template' | 'pine';
 
@@ -16,6 +16,10 @@ export const EMPTY_INDICATORS: IndicatorSet = { bars: 0, overlays: [], panes: []
 
 export interface LabResult {
   source: LabSource;
+  /** 回测所属市场（老产物无字段 → cn） */
+  market: LabMarket;
+  /** 回测周期（老产物无字段 → 1d） */
+  freq: Freq;
   /** 主标题（模板名 / 策略库标题） */
   title: string;
   /** 副标题（来源与规模说明） */
@@ -54,6 +58,8 @@ const normIndicators = (raw: IndicatorSet | null | undefined): IndicatorSet =>
 
 export const fromTemplate = (r: BtResult): LabResult => ({
   source: 'template',
+  market: (r.meta.market as LabMarket) || 'cn',
+  freq: (r.meta.freq as Freq) || '1d',
   title: r.meta.name,
   subtitle: `${r.meta.strategy} · ${r.meta.bars} 根K线`,
   symbol: r.meta.symbol,
@@ -69,6 +75,8 @@ export const fromTemplate = (r: BtResult): LabResult => ({
 
 export const fromPineReport = (r: PineReport, title = ''): LabResult => ({
   source: 'pine',
+  market: r.market || 'cn',
+  freq: r.freq || '1d',
   title: title || r.id,
   subtitle: `AI 转写 · ${r.trades ?? 0} 笔成交`,
   symbol: r.symbol,

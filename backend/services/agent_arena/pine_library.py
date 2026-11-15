@@ -47,7 +47,7 @@ def edited_dir() -> Path:
     return lib_dir() / "edited"
 
 MAX_SOURCE_BYTES = 512 * 1024
-ID_RE = re.compile(r"^(?:\d{4}|x\d{3})$")
+ID_RE = re.compile(r"^(?:\d{4}|x\d{3}|u\d{3})$")
 
 
 class LibraryError(ValueError):
@@ -59,6 +59,125 @@ def _check_id(item_id: str) -> str:
     if not ID_RE.match(item_id):
         raise LibraryError(f"无效的策略 id: {item_id!r}")
     return item_id
+
+
+# ---------- 自定义策略（2026-11-15：新增 Pine 策略库） ----------
+# 桌面语料索引（index.json）由 scripts/pine_library_index.py 整体重建，自建条目
+# 写进去会在下次重建时丢。所以单独一套 custom/index.json + custom/source/<id>.pine，
+# list_items/get_source 在读取时合并——重建索引不影响自建条目。
+
+CUSTOM_ID_RE = re.compile(r"^u\d{3}$")
+VERSION_RE = re.compile(r"//@version=(\d+)")
+_BLOCK_RE = re.compile(r"^\s*(?:if|for|while|switch|else)\b|=>\s*$")
+
+
+def custom_dir() -> Path:
+    return lib_dir() / "custom"
+
+
+def custom_index_file() -> Path:
+    return custom_dir() / "index.json"
+
+
+def _custom_source_dir() -> Path:
+    return custom_dir() / "source"
+
+
+def _pine_meta(text: str) -> dict:
+    """与 scripts/pine_library_index.py::_meta 同口径的最小实现。"""
+    lines = text.splitlines()
+    indent_ok = True
+    for i, ln in enumerate(lines):
+        if not _BLOCK_RE.search(ln.rstrip()):
+            continue
+        for nxt in lines[i + 1:]:
+            if not nxt.strip() or nxt.lstrip().startswith("//"):
+                continue
+            indent_ok = nxt[:1] in (" ", "\t")
+            break
+        break
+    m = VERSION_RE.search(text)
+    return {
+        "version": int(m.group(1)) if m else 0,
+        "lines": len(lines),
+        "bytes": len(text.encode("utf-8")),
+        "indent_ok": indent_ok,
+        "has_strategy": bool(re.search(r"^\s*strategy\s*\(", text, re.MULTILINE)),
+    }
+
+
+def _load_custom() -> list[dict]:
+    p = custom_index_file()
+    if not p.exists():
+        return []
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        return [it for it in doc.get("items", []) if isinstance(it, dict) and it.get("id")]
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_custom(items: list[dict]) -> None:
+    custom_dir().mkdir(parents=True, exist_ok=True)
+    tmp = custom_index_file().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(custom_index_file())
+
+
+def _next_custom_id(items: list[dict]) -> str:
+    used = {int(it["id"][1:]) for it in items if CUSTOM_ID_RE.match(str(it.get("id", "")))}
+    n = 1
+    while n in used:
+        n += 1
+    return f"u{n:03d}"
+
+
+def create_item(title: str, category: str = "", source: str = "",
+                title_en: str = "", url: str = "") -> dict:
+    """新增一条自定义 Pine 策略：写 custom/source/<id>.pine + custom/index.json。"""
+    title = str(title or "").strip()
+    if not title:
+        raise LibraryError("策略标题不能为空")
+    if not isinstance(source, str) or not source.strip():
+        raise LibraryError("Pine 源码不能为空")
+    if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
+        raise LibraryError("源码过大（>512KB）")
+
+    items = _load_custom()
+    item_id = _next_custom_id(items)
+    dst = _custom_source_dir() / f"{item_id}.pine"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(".pine.tmp")
+    tmp.write_text(source, encoding="utf-8")
+    tmp.replace(dst)
+
+    item = {
+        "id": item_id,
+        "title": title,
+        "title_en": str(title_en or "").strip(),
+        "category": str(category or "").strip() or "我的策略",
+        "file": f"{item_id}.pine",
+        "url": str(url or "").strip(),
+        "source_kind": "custom",
+        "mtime": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **_pine_meta(source),
+    }
+    items.append(item)
+    _save_custom(items)
+    return item
+
+
+def delete_item(item_id: str) -> dict:
+    """删除自定义策略（内置/语料条目拒绝）。"""
+    item_id = _check_id(item_id)
+    items = _load_custom()
+    if not any(it.get("id") == item_id for it in items):
+        raise LibraryError("只能删除自定义策略；内置/语料条目请用「丢弃编辑」")
+    _save_custom([it for it in items if it.get("id") != item_id])
+    (_custom_source_dir() / f"{item_id}.pine").unlink(missing_ok=True)
+    (edited_dir() / f"{item_id}.pine").unlink(missing_ok=True)
+    (notes_dir() / f"{item_id}.json").unlink(missing_ok=True)
+    return {"id": item_id, "deleted": True}
 
 
 def load_index() -> dict:
@@ -76,37 +195,52 @@ def _match(item: dict, q: str) -> bool:
 
 
 def list_items(category: str = "", q: str = "", limit: int = 200, offset: int = 0) -> dict:
-    """分类 + 关键词过滤后的列表（不带源码，界面列表用）。"""
+    """分类 + 关键词过滤后的列表（不带源码，界面列表用）。
+
+    自定义策略（custom/index.json）排在最前，与语料索引合并展示。
+    """
     idx = load_index()
-    items = idx.get("items", [])
+    custom = _load_custom()
+    all_items = custom + idx.get("items", [])
+    items = all_items
     if category:
         items = [it for it in items if it.get("category") == category]
     if q:
         items = [it for it in items if _match(it, q)]
     total = len(items)
     page = items[offset:offset + limit]
+    counts: dict[str, int] = {}
+    for it in all_items:
+        name = str(it.get("category") or "")
+        counts[name] = counts.get(name, 0) + 1
+    categories = [{"name": name, "count": n}
+                  for name, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
     return {
         "generated": idx.get("generated", ""),
-        "total": idx.get("total", 0),
-        "usable": idx.get("usable", 0),
+        "total": len(custom) + idx.get("total", 0),
+        "usable": sum(1 for it in all_items if it.get("indent_ok")),
         "filtered": total,
-        "categories": idx.get("categories", []),
+        "categories": categories,
         "items": page,
     }
 
 
 def _find(idx: dict, item_id: str) -> dict:
-    for it in idx.get("items", []):
+    for it in _load_custom() + idx.get("items", []):
         if it.get("id") == item_id:
             return it
     raise LibraryError(f"策略不存在: {item_id}")
 
 
 def source_path(item_id: str) -> Path:
-    """当前生效的源码文件（edited/ 优先，与索引构建的来源优先级一致）。"""
+    """当前生效的源码文件（edited/ 优先，自定义条目回退 custom/source/）。"""
     item_id = _check_id(item_id)
     edited_path = edited_dir() / f"{item_id}.pine"
-    return edited_path if edited_path.exists() else source_dir() / f"{item_id}.pine"
+    if edited_path.exists():
+        return edited_path
+    if CUSTOM_ID_RE.match(item_id):
+        return _custom_source_dir() / f"{item_id}.pine"
+    return source_dir() / f"{item_id}.pine"
 
 
 def get_source(item_id: str) -> dict:
@@ -288,12 +422,13 @@ def queue_dir() -> Path:
 ADJS = ("backward", "forward", "unadjusted")
 
 
-def _check_symbol(symbol: str) -> str:
+def _check_symbol(symbol: str, market: str = "cn") -> str:
     from backend.services.agent_arena import market_lab as ml
 
-    code = ml.normalize_code(symbol)
-    if not code or code not in ml._names():
-        raise LibraryError(f"未知标的: {symbol!r}")
+    m = ml.normalize_market(market)
+    code = ml.normalize_code(symbol, m)
+    if not code or code not in ml._names(m):
+        raise LibraryError(f"未知标的: {symbol!r}（市场 {m}）")
     return code
 
 
@@ -306,24 +441,46 @@ def job_status(item_id: str) -> dict:
     return job
 
 
-def report_path(item_id: str) -> Path:
-    """正式回测报告文件（对话 worker 靠它的 mtime 判断「改前」基线有多旧）。"""
-    return transpile_dir() / _check_id(item_id) / "report.json"
+def _safe_report_name(symbol: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(symbol or "")) or "symbol"
 
 
-def read_report(item_id: str) -> dict:
-    """回测报告（stats + 逐笔 + 净值）。没跑过 → 空 dict。"""
-    return _read_json(report_path(item_id))
+def report_path(item_id: str, market: str = "", symbol: str = "",
+                adj: str = "", freq: str = "") -> Path:
+    """回测报告落点。
+
+    - 传全 market/symbol/adj/freq → `reports/<market>/<symbol>_<adj>_<freq>.json`
+    - 不传 → 最新指针 `report.json`（聊天/采用/列表等「最近一次」语义）
+    """
+    base = transpile_dir() / _check_id(item_id)
+    if market and symbol and adj and freq:
+        return (base / "reports" / str(market)
+                / f"{_safe_report_name(symbol)}_{adj}_{freq}.json")
+    return base / "report.json"
+
+
+def read_report(item_id: str, market: str = "", symbol: str = "",
+                adj: str = "", freq: str = "") -> dict:
+    """回测报告。指定四元组时**只读该键**（没有就空，不回退到别的市场）。"""
+    p = report_path(item_id, market, symbol, adj, freq)
+    return _read_json(p) if p.is_file() else {}
 
 
 def enqueue_backtest(item_id: str, symbol: str, adj: str = "backward",
-                     model: str = "", force: bool = False) -> dict:
+                     model: str = "", force: bool = False,
+                     market: str = "cn", freq: str = "1d") -> dict:
     """把「转写 + 回测」请求排进队列，由宿主 worker 消费。"""
+    from backend.services.agent_arena import market_lab as ml
+
     item_id = _check_id(item_id)
     get_source(item_id)                      # id 必须存在
-    code = _check_symbol(symbol)
-    if adj not in ADJS:
-        raise LibraryError(f"未知复权口径: {adj}")
+    m = ml.normalize_market(market)
+    code = _check_symbol(symbol, m)
+    if adj not in ADJS or adj not in ml.available_adjs(m):
+        raise LibraryError(f"{ml.MARKET_SPECS[m]['label']}不支持复权口径: {adj}")
+    freq = str(freq or "1d").strip().lower()
+    if freq not in ml.FREQ_LABELS or freq not in ml.available_freqs(m):
+        raise LibraryError(f"{ml.MARKET_SPECS[m]['label']}不支持周期: {freq}")
     qpath = queue_dir() / f"{item_id}.json"
     if qpath.exists():
         raise LibraryError("该策略已在队列里")
@@ -331,7 +488,7 @@ def enqueue_backtest(item_id: str, symbol: str, adj: str = "backward",
         raise LibraryError("该策略正在跑，等它结束")
 
     req = {"id": item_id, "symbol": code, "adj": adj, "model": model,
-           "force": bool(force),
+           "market": m, "freq": freq, "force": bool(force),
            "requested": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     queue_dir().mkdir(parents=True, exist_ok=True)
     tmp = qpath.with_suffix(".json.tmp")
@@ -498,19 +655,21 @@ def _write_edited(item_id: str, text: str) -> None:
     (edited_dir() / f"{item_id}.pine").write_text(text, encoding="utf-8")
 
 
-def _requeue(item_id: str, symbol: str, adj: str) -> tuple[bool, str]:
+def _requeue(item_id: str, symbol: str, adj: str, market: str = "cn",
+             freq: str = "1d") -> tuple[bool, str]:
     """采用/回滚后自动重跑官方产物。入不了队不算失败，但要如实回报原因。"""
     if not symbol:
         return False, "没有标的，未自动重跑"
     try:
-        enqueue_backtest(item_id, symbol, adj=adj, force=True)
+        enqueue_backtest(item_id, symbol, adj=adj, force=True, market=market, freq=freq)
         return True, ""
     except LibraryError as exc:
         return False, str(exc)
 
 
 def apply_candidate(item_id: str, job_id: str, symbol: str = "",
-                    adj: str = "backward") -> dict:
+                    adj: str = "backward", market: str = "",
+                    freq: str = "") -> dict:
     """采用候选：快照当前源码 → 写 edited/<id>.pine → 入队重跑转写+回测。"""
     item_id = _check_id(item_id)
     job_id = _check_job_id(job_id)
@@ -523,10 +682,12 @@ def apply_candidate(item_id: str, job_id: str, symbol: str = "",
     report = got.get("report") or {}
     symbol = symbol or report.get("symbol") or read_report(item_id).get("symbol") or ""
     adj = adj or report.get("adj") or "backward"
+    market = market or report.get("market") or read_report(item_id).get("market") or "cn"
+    freq = freq or report.get("freq") or read_report(item_id).get("freq") or "1d"
 
     snap = _snapshot(item_id, get_source(item_id)["source"])
     _write_edited(item_id, got["pine"])
-    queued, queue_error = _requeue(item_id, symbol, adj)
+    queued, queue_error = _requeue(item_id, symbol, adj, market, freq)
     return {"id": item_id, "job_id": job_id, "applied": True, "snapshot": snap,
             "bytes": len(got["pine"].encode("utf-8")), "queued": queued,
             "queue_error": queue_error}
@@ -564,7 +725,9 @@ def revert_source(item_id: str, version: str = "") -> dict:
     path.unlink(missing_ok=True)
     report = read_report(item_id)
     queued, queue_error = _requeue(item_id, report.get("symbol") or "",
-                                   report.get("adj") or "backward")
+                                   report.get("adj") or "backward",
+                                   report.get("market") or "cn",
+                                   report.get("freq") or "1d")
     return {"id": item_id, "reverted": version, "bytes": len(text.encode("utf-8")),
             "remaining": list_versions(item_id)["count"],
             "queued": queued, "queue_error": queue_error}

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import market_lab as ml
@@ -54,6 +55,211 @@ def batch_dir() -> Path:
 
 
 # 跑批脚本与 API 进程同写同读 QM 数据根下的 lab_batch/（一个容器一个根），无需搬运。
+
+
+# ---------- 提交 / 进度（2026-11-15：界面发起批量回测） ----------
+# 跑批必须用宿主 pynecore（容器 Python 3.10 装不了），所以 API 只写队列文件，
+# 宿主 worker（scripts/lab_batch_worker.py）消费并跑 CLI；状态落 status/<run_id>.json。
+# 这条链路与 Pine 转写 worker 同构：容器不执行回测代码，只做入队与读状态。
+
+class BatchBusy(RuntimeError):
+    """已有批次在跑（跑批吃满 CPU，同一时间只允许一个）。"""
+
+
+def queue_dir() -> Path:
+    return batch_dir() / "queue"
+
+
+def status_dir() -> Path:
+    return batch_dir() / "status"
+
+
+def requests_dir() -> Path:
+    return batch_dir() / "requests"
+
+
+def status_file(run_id: str) -> Path:
+    return status_dir() / f"{Path(run_id).name}.json"
+
+
+def _atomic_json(path: Path, payload: dict) -> None:
+    """原子写 JSON。
+
+    ⚠️ 权限：容器里的 API 进程以 root 跑，宿主 worker 以普通用户跑，两者共用
+    `<数据根>/lab_batch/`。目录 0777 / 文件 0666 是**必要的**——否则 worker
+    删不掉 API 写的队列文件、也替换不了 root 建的 status 文件（2026-11-15 实测
+    PermissionError）。单用户本地部署，`/data` 本身不是多租户边界。
+    """
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(parent, 0o777)
+    except OSError:
+        pass
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o666)
+    except OSError:
+        pass
+    tmp.replace(path)
+    try:
+        os.chmod(path, 0o666)
+    except OSError:
+        pass
+
+
+def write_status(run_id: str, **fields) -> dict:
+    """合并写状态文件（worker 逐行更新进度也走这里，原子替换）。"""
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        raise ValueError("run_id 不能为空")
+    path = status_file(run_id)
+    cur = {}
+    if path.is_file():
+        try:
+            cur = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cur = {}
+    cur.update(fields)
+    cur["run_id"] = run_id
+    cur["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _atomic_json(path, cur)
+    return cur
+
+
+def get_status(run_id: str) -> dict:
+    """批次状态。优先 status/；老批次没有状态文件但结果已落盘 → done。"""
+    path = status_file(run_id)
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))
+    result = (batch_dir() / f"{Path(run_id).name}.json")
+    if result.is_file():
+        try:
+            d = json.loads(result.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            d = {}
+        return {"run_id": run_id, "status": "done", "stage": "done",
+                "pool": d.get("pool"), "pool_label": d.get("pool_label"),
+                "universe": d.get("universe"), "counts": d.get("counts"),
+                "elapsed_sec": d.get("elapsed_sec"), "error": ""}
+    raise FileNotFoundError(f"批次不存在: {run_id}")
+
+
+def active_run() -> dict | None:
+    """当前排队/运行中的批次（队列里或状态为 queued/running）。
+
+    running 状态超过 30 分钟没有心跳更新 → 判定 worker 已退出，标 failed 并放行，
+    避免一个崩溃的批次永久堵住队列（worker 每 2 秒写一次进度/心跳）。
+    """
+    if status_dir().is_dir():
+        for p in sorted(status_dir().glob("*.json")):
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            status = d.get("status")
+            if status not in ("queued", "running"):
+                continue
+            if status == "running":
+                try:
+                    ts = datetime.fromisoformat(str(d.get("updated") or ""))
+                    if (datetime.now(timezone.utc) - ts).total_seconds() > 1800:
+                        d = write_status(
+                            d.get("run_id") or p.stem, status="failed", stage="worker",
+                            error="worker 超过 30 分钟无心跳（可能已退出）",
+                        )
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            return d
+    if queue_dir().is_dir():
+        for p in sorted(queue_dir().glob("*.json")):
+            return {"run_id": p.stem, "status": "queued", "stage": "queued"}
+    return None
+
+
+def _normalize_codes(codes: list | None) -> list[str]:
+    names = ml._names("cn")
+    out, bad, seen = [], [], set()
+    for raw in codes or []:
+        code = ml.normalize_code(str(raw or ""), "cn")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        if code not in names:
+            bad.append(str(raw))
+            continue
+        out.append(code)
+    if bad:
+        raise ValueError(f"未知 A 股代码: {', '.join(bad[:10])}"
+                         + ("…" if len(bad) > 10 else ""))
+    return out
+
+
+def create_request(pool: str = "hs300", codes: list | None = None,
+                   strategies: list | None = None, adj: str = "backward",
+                   limit: int = 0, min_bars: int = 0,
+                   requested_by: str = "") -> dict:
+    """入队一批回测。pool=custom 时用 codes；其余走已有股票池名。"""
+    active = active_run()
+    if active:
+        raise BatchBusy(f"已有批次在跑：{active.get('run_id')}（{active.get('status')}）")
+
+    pool = str(pool or "hs300").strip()
+    custom = pool == "custom" or bool(codes)
+    if custom:
+        codes = _normalize_codes(codes)
+        if not codes:
+            raise ValueError("自定义池至少给一个 A 股代码")
+        pool_id = "custom"
+        label = f"自定义（{len(codes)} 只）"
+    else:
+        if pool not in INDEX_POOLS and pool != "all":
+            raise ValueError(
+                f"未知股票池: {pool}（可用：{'/'.join(INDEX_POOLS)}/all/custom）"
+            )
+        codes = []
+        pool_id = pool
+        label = pool_label(pool)
+
+    strategies = [str(s).strip() for s in (strategies or list(ml.STRATEGIES))]
+    strategies = [s for s in strategies if s]
+    bad = [s for s in strategies if s not in ml.STRATEGIES]
+    if bad:
+        raise ValueError(f"未知策略: {', '.join(bad)}")
+    if not strategies:
+        raise ValueError("至少选一个策略")
+    if adj not in ml.ADJ_DIRS:
+        raise ValueError(f"未知复权口径: {adj}")
+    if limit and limit < 0:
+        raise ValueError("limit 不能为负")
+    min_bars = int(min_bars or MIN_BARS)
+    if min_bars < 60:
+        raise ValueError("min_bars 至少 60")
+
+    run_id = new_run_id(pool_id)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    req = {
+        "run_id": run_id,
+        "created": now,
+        "pool": pool_id,
+        "pool_label": label,
+        "codes": codes,
+        "strategies": strategies,
+        "adj": adj,
+        "limit": int(limit or 0),
+        "min_bars": int(min_bars),
+        "requested_by": str(requested_by or ""),
+    }
+    _atomic_json(queue_dir() / f"{run_id}.json", req)
+    status = write_status(
+        run_id, status="queued", stage="queued", pool=pool_id,
+        pool_label=label, universe=len(codes) if custom else 0,
+        total=len(codes) if custom else 0, done=0, rows=0, error="",
+        created=now,
+    )
+    return {"request": req, "status": status}
 
 # 批量回测最少 K 线根数：次新股/长期停牌没有统计意义
 MIN_BARS = 250
@@ -112,13 +318,10 @@ def resolve_pool(pool: str = "hs300", limit: int = 0) -> list[dict]:
     pool = (pool or "hs300").strip()
     if pool.startswith("file:"):
         codes = _from_file(pool[5:])
-        label = Path(pool[5:]).name
     elif pool in INDEX_POOLS:
         codes = _index_members(INDEX_POOLS[pool][0])
-        label = INDEX_POOLS[pool][1]
     elif pool == "all":
         codes = _all_stocks(limit)
-        label = "全市场"
     else:
         raise ValueError(f"未知股票池: {pool}（可用：{'/'.join(INDEX_POOLS)}/all/file:<path>）")
 

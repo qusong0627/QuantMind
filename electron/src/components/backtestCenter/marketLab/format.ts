@@ -1,18 +1,28 @@
 /** 行情回测页共用的格式化与错误文案。
  *
- * 数值/金额直接复用全站 `utils/format`，这里只包一层默认值，避免各写一套。
+ * 本模块自带一套数字格式化（原先借用 arena 的 `utils/format`）：行情回测已从
+ * 「实盘交易」栏迁到回测中心，不再跨模块取工具函数。
+ *
  * ⚠️ `fmtPct` 的入参是**百分数**（TradingView 口径，如 62.35 表示 62.35%），
- *    与 `utils/format` 的 `fmtPct`（入参是小数 0.6235）不同——所以这里必须转一道。
+ *    与全站 `utils/format` 的百分比工具（入参是小数 0.6235）不同——这里的实现
+ *    已经把这层换算收在内部，调用方不要自己再除以 100。
  */
-import { fmtMoney as moneyText, fmtNum, fmtPct as ratioPct } from '../../utils/format';
 
-export const fmt = fmtNum;
+export const fmt = (v: number | null | undefined, digits = 2): string => {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return v.toFixed(digits);
+};
 
-export const fmtPct = (v: number | null | undefined, digits = 2, signed = true): string =>
-  ratioPct(v == null ? v : v / 100, digits, signed);
+export const fmtPct = (v: number | null | undefined, digits = 2, signed = true): string => {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const sign = signed && v > 0 ? '+' : '';
+  return `${sign}${v.toFixed(digits)}%`;
+};
 
-export const fmtMoney = (v: number | null | undefined, unit = '¥'): string =>
-  moneyText(v, unit, 0);
+export const fmtMoney = (v: number | null | undefined, unit = '¥'): string => {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return `${unit}${v.toLocaleString('en-US', { maximumFractionDigits: 0, minimumFractionDigits: 0 })}`;
+};
 
 /** axios 错误 → 人话（后端 400 的 detail 优先） */
 export const errText = (e: unknown): string => {
@@ -34,8 +44,14 @@ export const KIND_LABEL: Record<string, string> = {
   desktop: '原始语料',
   recrawl: '重爬（缩进完整）',
   edited: '已编辑',
+  custom: '我的策略',
   missing: '缺失',
 };
+
+/** 展示面合规：策略标题里的「买入/卖出」改成「入场/离场」。
+ *  只改显示，不改 id/文件名/源码；原始语料标题多为外部策略名，保留其可检索性靠 id。 */
+export const sanitizeStrategyTitle = (title: string): string =>
+  String(title || '').replace(/买入/g, '入场').replace(/卖出/g, '离场');
 
 /** 对比卡的一格：pct 是百分数口径（62.35），没有 pct 就显示 value（成交笔数这类） */
 export interface CompareCellLike {

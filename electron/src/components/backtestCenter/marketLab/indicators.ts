@@ -4,7 +4,7 @@
  *  必须按尾部对齐，否则指标会整体错位（画出来完全不对，且不报错）。
  */
 import type { Time } from 'lightweight-charts';
-import type { IndicatorSet } from '../../api/client';
+import type { IndicatorSet } from './api';
 
 /** 与 lightweight-charts 的 LineData / WhitespaceData 结构兼容：
  *  有值就是点，没值（预热期 NA）只给 time → 画成断口，而不是连一条假线过去。 */

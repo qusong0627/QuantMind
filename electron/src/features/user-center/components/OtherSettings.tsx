@@ -205,7 +205,7 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
   const handleClearApiKey = async () => {
     setIsSaving(true);
     try {
-      await userCenterService.saveLLMConfig('');
+      await userCenterService.saveLLMConfig('', undefined, undefined, undefined, undefined, true);
       message.success('API Key 已清除');
       setHasKey(false);
       setMaskedKey('');
@@ -272,7 +272,7 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
             </div>
             <div>
               <h3 className="text-sm font-semibold text-gray-800">AI 服务配置</h3>
-              <p className="text-[11px] text-gray-500">配置模型供应商的 API Key、模型和接口地址，用于 AI-IDE 智能助手</p>
+              <p className="text-[11px] text-gray-500">配置模型供应商的 API Key、模型和接口地址，用于 AI-IDE 智能助手与 Pine 策略转写（默认转换接口）</p>
             </div>
           </div>
 

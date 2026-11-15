@@ -1,12 +1,17 @@
-/** 左栏：策略来源。上段是后端 6 个内置模板，下段是 1001 条 Pine 语料。
+/** 左栏：策略来源。上段是后端 6 个内置模板，下段是 Pine 语料 + 自定义条目。
  *  两段共用中栏同一个回测区——这是「合并页」的核心，不再是两个 tab 各看各的。 */
+import { useState } from 'react';
+import NewPineModal from './NewPineModal';
+import { sanitizeStrategyTitle } from './format';
 import type { Workbench } from './useWorkbench';
 
 export default function StrategyList({ wb }: { wb: Workbench }) {
   const items = wb.list?.items ?? [];
   const canMore = wb.list ? wb.list.filtered > items.length : false;
+  const [newOpen, setNewOpen] = useState(false);
 
   return (
+    <>
     <aside className="lab-rail">
       <section className="lab-rail-sec">
         <div className="lab-rail-title">
@@ -39,6 +44,9 @@ export default function StrategyList({ wb }: { wb: Workbench }) {
         <div className="lab-rail-title">
           <span className="t">Pine 策略库</span>
           <span className="lab-rail-count">{wb.list?.filtered ?? 0}</span>
+          <button className="lab-more lab-new" onClick={() => setNewOpen(true)}>
+            ＋ 新增
+          </button>
         </div>
 
         <div className="lab-rail-filter">
@@ -71,7 +79,7 @@ export default function StrategyList({ wb }: { wb: Workbench }) {
               >
                 <div className="lab-pine-row">
                   <span className="i">{it.id}</span>
-                  <span className="n">{it.title || it.file}</span>
+                  <span className="n">{sanitizeStrategyTitle(it.title || it.file)}</span>
                   <span className="b">
                     {wb.noteIds.has(it.id) && (
                       <em className="note" title="有备注">
@@ -79,6 +87,9 @@ export default function StrategyList({ wb }: { wb: Workbench }) {
                       </em>
                     )}
                     {it.source_kind === 'edited' && <em className="edited">改</em>}
+                    {it.source_kind === 'custom' && (
+                      <em className="edited" title="自定义（可删除）">自</em>
+                    )}
                     {tp && (
                       <em className="ai" title="已 AI 转写为 Pyne-Python">
                         AI
@@ -110,5 +121,7 @@ export default function StrategyList({ wb }: { wb: Workbench }) {
         {!wb.listBusy && !items.length && !wb.listErr && <div className="lab-empty">没有匹配的策略</div>}
       </section>
     </aside>
+    {newOpen && <NewPineModal wb={wb} onClose={() => setNewOpen(false)} />}
+    </>
   );
 }

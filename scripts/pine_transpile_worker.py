@@ -139,6 +139,8 @@ def process(req: dict, item_dir: Path | None = None,
     item_id = str(req.get("id") or "").strip()
     symbol = str(req.get("symbol") or "").strip()
     adj = str(req.get("adj") or "backward")
+    market = str(req.get("market") or "cn")
+    freq = str(req.get("freq") or "1d")
     model = str(req.get("model") or "")
     source = str(req.get("source") or "").strip()
     if not item_id or not symbol:
@@ -152,7 +154,7 @@ def process(req: dict, item_dir: Path | None = None,
         return _write_job_at(job_path, id=item_id, **fields)
 
     write_job(status="running", stage="transpile", symbol=symbol, adj=adj,
-              error="", started=_now())
+              market=market, freq=freq, error="", started=_now())
 
     # 候选与正式产物走同一套 CLI、同一道静态闸、同一个沙箱，只有路径改道。
     where = ["--out", str(item_dir)]
@@ -191,7 +193,8 @@ def process(req: dict, item_dir: Path | None = None,
             try:
                 argv = sandbox_cmd(item_dir, ["--id", item_id, *where,
                                               "--no-transpile",
-                                              "--validate", symbol, "--adj", adj])
+                                              "--validate", symbol, "--adj", adj,
+                                              "--market", market, "--freq", freq])
             except RuntimeError as exc:
                 return write_job(status="failed", stage="backtest", error=str(exc))
             try:

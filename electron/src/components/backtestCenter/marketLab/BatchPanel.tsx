@@ -1,13 +1,13 @@
-/** 批量回测结果：批次选择 + 策略排行 / 单策略选股两个子视图。
+/** 批量回测结果：发起批次 + 批次选择 + 策略排行 / 单策略选股两个子视图。
  *
- * 数据来自 scripts/lab_batch_backtest.py 跑出的 data/lab_batch/*.json，
- * 页面只读（跑批是 CPU 密集作业，不进 API 进程）。
+ * 发起走 API 队列（宿主 worker 执行），结果来自 data/lab_batch/*.json。
  */
-import { useEffect, useState } from 'react';
-import { fetchLabBatchRun, fetchLabBatchRuns, type LabBatchDetail, type LabBatchRun } from '../../api/client';
+import { useCallback, useEffect, useState } from 'react';
+import { fetchLabBatchRun, fetchLabBatchRuns, type LabBatchDetail, type LabBatchRun } from './api';
 import BatchRankTable from './BatchRankTable';
 import BatchScreener from './BatchScreener';
-import { asUpdater } from '../../reactCompat';
+import BatchStartPanel from './BatchStartPanel';
+import { asUpdater } from './reactCompat';
 
 export type LabView = 'rank' | 'screener';
 
@@ -26,14 +26,21 @@ export default function BatchPanel({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
-  useEffect(() => {
+  const loadRuns = useCallback((prefer = '') => {
     fetchLabBatchRuns(30)
       .then((list) => {
         setRuns(list);
-        setRunId(asUpdater((cur) => cur || (list[0]?.run_id ?? '')));
+        setRunId(asUpdater((cur: string) =>
+          prefer
+          || (list.some((r) => r.run_id === cur) ? cur : (list[0]?.run_id ?? '')),
+        ));
       })
       .catch(() => setErr('批次列表加载失败'));
   }, []);
+
+  useEffect(() => {
+    loadRuns();
+  }, [loadRuns]);
 
   useEffect(() => {
     if (!runId) return;
@@ -48,18 +55,20 @@ export default function BatchPanel({
       .finally(() => setBusy(false));
   }, [runId]);
 
-  if (!runs.length && !err) {
-    return (
-      <div className="lab-empty">
-        <b>还没有批量回测结果</b>
-        先在服务器上跑一批，跑完这里会出现策略排行与选股：
-        <code>pine_lab/.venv/bin/python scripts/lab_batch_backtest.py --pool hs300</code>
-      </div>
-    );
-  }
-
   return (
     <div className="lab-batch">
+      <BatchStartPanel onDone={(newRunId) => loadRuns(newRunId)} />
+
+      {!runs.length && !err && (
+        <div className="lab-empty">
+          <b>还没有批量回测结果</b>
+          在上方选股票池（沪深300 / 中证1000 / 全市场 / 自定义代码）与策略，点「开始回测」；
+          宿主机 worker 跑完后这里会出现策略排行与选股。
+        </div>
+      )}
+
+      {!!runs.length && (
+        <>
       <div className="lab-batch-bar">
         <label>
           <span>批次</span>
@@ -85,9 +94,9 @@ export default function BatchPanel({
       </div>
 
       <details className="lab-cmd">
-        <summary>跑新批次 · 在服务器上执行（跑批吃 CPU，不进 API 进程）</summary>
+        <summary>命令行跑批（可选 · 与界面入队等价）</summary>
         <div className="lab-cmd-body">
-          在仓库根目录执行：
+          界面入队由宿主机 worker <code>scripts/lab_batch_worker.py</code> 执行；也可在仓库根手动跑：
           <code>pine_lab/.venv/bin/python scripts/lab_batch_backtest.py --pool hs300</code>
           池子可换 sz50 / zz500 / zz1000 / all（全市场，按流通市值降序，配 --limit N 限量）。
         </div>
@@ -99,6 +108,8 @@ export default function BatchPanel({
       {detail && view === 'rank' && <BatchRankTable detail={detail} />}
       {detail && view === 'screener' && (
         <BatchScreener runId={detail.run_id} strategies={detail.strategies ?? []} onPickSymbol={onPickSymbol} />
+      )}
+        </>
       )}
     </div>
   );

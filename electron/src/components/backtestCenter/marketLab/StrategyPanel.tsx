@@ -2,9 +2,16 @@
 import { useState } from 'react';
 import AgentChatPanel from './AgentChatPanel';
 import NotePanel from './NotePanel';
-import { fmt, fmtPct, KIND_LABEL, STAGE_LABEL } from './format';
+import { FREQ_NAME, MARKET_NAME } from './markets';
+import { fmt, fmtPct, KIND_LABEL, STAGE_LABEL, sanitizeStrategyTitle } from './format';
 import type { Workbench } from './useWorkbench';
-import { asUpdater } from '../../reactCompat';
+import { asUpdater } from './reactCompat';
+
+const ADJ_LABEL: Record<string, string> = {
+  unadjusted: '不复权',
+  forward: '前复权',
+  backward: '后复权',
+};
 
 function SubTabs({ wb }: { wb: Workbench }) {
   const [sub, setSub] = useState<'note' | 'chat'>('note');
@@ -73,8 +80,14 @@ export default function StrategyPanel({ wb }: { wb: Workbench }) {
             ))}
           </div>
           <button className="lab-run" disabled={wb.runBusy} onClick={wb.run}>
-            {wb.runBusy ? '回测中…' : '运行回测（后复权 · 全历史）'}
+            {wb.runBusy ? '回测中…' : `运行回测（${ADJ_LABEL[wb.runAdj]} · ${FREQ_NAME[wb.freq]} · 全历史）`}
           </button>
+          {wb.market !== 'cn' && (
+            <p className="lab-note">
+              {MARKET_NAME[wb.market]}回测沿用 A 股模板的费用/仓位口径（双边 0.05% / 95% 仓位），
+              收益仅作策略形态参考，不是该市场的精确撮合成本。
+            </p>
+          )}
         </div>
       )}
 
@@ -82,7 +95,7 @@ export default function StrategyPanel({ wb }: { wb: Workbench }) {
         <div className="lab-panel-block">
           <div className="lab-block-title">策略库</div>
           <div className="lab-lib-title">
-            <strong>{wb.cur.title || wb.cur.file}</strong>
+            <strong>{sanitizeStrategyTitle(wb.cur.title || wb.cur.file)}</strong>
             <span className="code">{wb.cur.id}</span>
           </div>
           <div className="lab-lib-tags">
@@ -107,8 +120,17 @@ export default function StrategyPanel({ wb }: { wb: Workbench }) {
           )}
 
           <button className="lab-run" disabled={wb.runBusy || wb.running} onClick={wb.run}>
-            {wb.running ? '跑着呢…' : wb.runBusy ? '入队中…' : '转写并回测'}
+            {wb.running ? '跑着呢…' : wb.runBusy ? '入队中…' : `转写并回测（${ADJ_LABEL[wb.runAdj]} · ${FREQ_NAME[wb.freq]}）`}
           </button>
+          {wb.market !== 'cn' && (
+            <p className="lab-note">
+              {MARKET_NAME[wb.market]}回测沿用 A 股模板的费用/仓位口径，收益仅作策略形态参考。
+            </p>
+          )}
+          <p className="lab-note">
+            AI 转写使用「个人中心 → 其他设置 → AI 服务配置」的 Key / 模型 / 接口地址；
+            未配置时回退服务器 .env。
+          </p>
 
           {wb.running && (
             <div className="lab-transpile">
@@ -157,6 +179,24 @@ export default function StrategyPanel({ wb }: { wb: Workbench }) {
             {wb.saveMsg && <span className="lab-lib-msg">{wb.saveMsg}</span>}
             {wb.saveErr && <span className="lab-lib-msg err">{wb.saveErr}</span>}
           </details>
+
+          {wb.cur.source_kind === 'custom' && (
+            <div className="lab-lib-actions lab-lib-danger">
+              <button
+                className="lab-more"
+                disabled={wb.deleteBusy}
+                onClick={async () => {
+                  if (!window.confirm(
+                    `删除自定义策略「${wb.cur?.title ?? wb.cur?.id}」？源码与备注一并删除，不可恢复。`,
+                  )) return;
+                  await wb.deletePine();
+                }}
+              >
+                {wb.deleteBusy ? '删除中…' : '删除这条自定义策略'}
+              </button>
+              {wb.deleteErr && <span className="lab-lib-msg err">{wb.deleteErr}</span>}
+            </div>
+          )}
         </div>
       )}
 
@@ -165,17 +205,27 @@ export default function StrategyPanel({ wb }: { wb: Workbench }) {
           <div className="lab-block-title">摘要</div>
           {st ? (
             <div className="lab-stats">
-              <div className={`lab-stat ${(st['Net profit']?.pct ?? 0) >= 0 ? 'up' : 'down'}`}>
+              <div
+                className={`lab-stat ${
+                  st['Net profit']?.pct == null
+                    ? ''
+                    : st['Net profit']!.pct >= 0 ? 'up' : 'down'
+                }`}
+              >
                 <span className="k">策略收益</span>
                 <span className="v">{fmtPct(st['Net profit']?.pct)}</span>
               </div>
               <div className="lab-stat">
-                <span className="k">买入持有</span>
+                <span className="k">持有基准</span>
                 <span className="v">{fmtPct(st['Buy & hold return']?.pct)}</span>
               </div>
               <div className="lab-stat down">
                 <span className="k">最大回撤</span>
-                <span className="v">{fmtPct(-(st['Max equity drawdown']?.pct ?? 0))}</span>
+                <span className="v">
+                  {st['Max equity drawdown']?.pct == null
+                    ? '—'
+                    : fmtPct(-st['Max equity drawdown'].pct)}
+                </span>
               </div>
               <div className="lab-stat">
                 <span className="k">夏普 / 成交</span>

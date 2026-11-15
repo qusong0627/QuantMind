@@ -42,6 +42,10 @@ dist/
 out/
 electron/dist/
 electron/out/
+# Playwright 产物（截图/视频/报告；e2e 跑完自动生成，不入库）
+electron/test-results/
+electron/playwright-report/
+electron/test-results.json
 !web/
 !web/dist/
 !web/dist/**

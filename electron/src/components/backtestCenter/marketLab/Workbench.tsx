@@ -3,7 +3,8 @@ import ResultView from './ResultView';
 import StrategyList from './StrategyList';
 import StrategyPanel from './StrategyPanel';
 import { useWorkbench } from './useWorkbench';
-import type { AdjMode } from '../../api/client';
+import { FREQ_NAME, MARKET_DOWN_COLOR, MARKET_UP_COLOR, SEARCH_HINT } from './markets';
+import type { AdjMode, Freq, LabMarket } from './api';
 
 const ADJ_LABELS: { id: AdjMode; label: string }[] = [
   { id: 'unadjusted', label: '不复权' },
@@ -11,14 +12,18 @@ const ADJ_LABELS: { id: AdjMode; label: string }[] = [
   { id: 'backward', label: '后复权' },
 ];
 
+const FREQ_ORDER: Freq[] = ['1d', '5m', '1m'];
+
 export default function Workbench({
+  market,
   symbol,
   onSymbol,
 }: {
+  market: LabMarket;
   symbol: string;
   onSymbol: (code: string) => void;
 }) {
-  const wb = useWorkbench(symbol, onSymbol);
+  const wb = useWorkbench(market, symbol, onSymbol);
 
   return (
     <>
@@ -28,7 +33,7 @@ export default function Workbench({
           <div className="lab-input-wrap">
             <input
               value={wb.query}
-              placeholder="代码或名称：600309 / 万华化学"
+              placeholder={`代码或名称：${SEARCH_HINT[wb.market] ?? SEARCH_HINT.cn}`}
               onChange={(e) => wb.onQuery(e.target.value)}
               onFocus={() => wb.hits.length && wb.setShowHits(true)}
             />
@@ -49,23 +54,48 @@ export default function Workbench({
           <span className="code">{wb.symbol}</span>
           <span className="lab-chip">日线</span>
         </div>
+        <div className="lab-freq">
+          <span className="lab-k">周期</span>
+          <span className="seg">
+            {FREQ_ORDER.filter((f) => wb.freqs.includes(f)).map((f) => {
+              const usable = wb.availFreqs.includes(f);
+              return (
+                <button
+                  key={f}
+                  className={`${wb.freq === f ? 'on' : ''}${usable ? '' : ' unavailable'}`}
+                  title={usable ? undefined : '该市场暂无此周期数据（点击自动回日线）'}
+                  onClick={() => wb.setFreq(f)}
+                >
+                  {FREQ_NAME[f]}
+                </button>
+              );
+            })}
+          </span>
+        </div>
         <div className="lab-adj">
           <span className="lab-k">复权</span>
           <span className="seg">
-            {ADJ_LABELS.map((a) => (
-              <button key={a.id} className={wb.adj === a.id ? 'on' : ''} onClick={() => wb.setAdj(a.id)}>
-                {a.label}
-              </button>
-            ))}
+            {ADJ_LABELS
+              .filter((a) => (wb.freq === '1d' ? wb.adjs : ['unadjusted'] as AdjMode[]).includes(a.id))
+              .map((a) => (
+                <button key={a.id} className={wb.adj === a.id ? 'on' : ''} onClick={() => wb.setAdj(a.id)}>
+                  {a.label}
+                </button>
+              ))}
           </span>
         </div>
       </header>
 
       {wb.err && <div className="lab-err">{wb.err}</div>}
+      {wb.freqNote && <div className="lab-warn">{wb.freqNote}</div>}
 
       <div className="lab-wb">
         <StrategyList wb={wb} />
         <ResultView
+          market={wb.market}
+          freq={wb.freq}
+          upColor={MARKET_UP_COLOR[wb.market]}
+          downColor={MARKET_DOWN_COLOR[wb.market]}
           bars={wb.bars}
           barsBusy={wb.barsBusy}
           symbol={wb.symbol}

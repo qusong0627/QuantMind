@@ -5,6 +5,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { STAGE_LABEL, compareCellText, compareDeltaClass, compareDeltaText, fmtWhen } from './format';
+import { FREQ_NAME, MARKET_NAME } from './markets';
 import type { Workbench } from './useWorkbench';
 
 /** 空白对话时的快捷提问——把「不知道怎么问」的空白填掉 */
@@ -29,7 +30,7 @@ function CandidateCard({ wb }: { wb: Workbench }) {
       <div className="lab-cand-head">
         <b>候选回测对比</b>
         <span>
-          {cand.compare.symbol} · {cand.compare.adj} · 成交 {cand.trades ?? '—'} 笔
+          {MARKET_NAME[cand.compare.market || 'cn']} · {FREQ_NAME[cand.compare.freq || '1d']} · {cand.compare.symbol} · {cand.compare.adj} · 成交 {cand.trades ?? '—'} 笔
           {cand.compare.before_at ? ` · 改前基线 ${fmtWhen(cand.compare.before_at)}` : ''}
         </span>
       </div>

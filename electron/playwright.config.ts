@@ -31,8 +31,8 @@ export default defineConfig({
 
   // 全局配置
   use: {
-    // 基础URL
-    baseURL: 'http://localhost:5173',
+    // 基础URL（与 vite.config.ts 的 server.port / `npm run dev:react` 同口径：3000）
+    baseURL: 'http://localhost:3000',
 
     // 追踪配置
     trace: 'on-first-retry',
@@ -74,10 +74,10 @@ export default defineConfig({
     // },
   ],
 
-  // Web服务器配置
+  // Web服务器配置（只起前端 dev server；e2e 不需要 Electron 壳）
   webServer: {
-    command: 'npm run dev',
-    port: 5173,
+    command: 'npm run dev:react',
+    port: 3000,
     timeout: 120 * 1000,
     reuseExistingServer: !process.env.CI,
   },

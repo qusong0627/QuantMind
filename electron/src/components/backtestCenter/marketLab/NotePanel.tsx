@@ -3,9 +3,9 @@
  * 表单状态是本地草稿（保存前的编辑不该被服务端回包打断），只在切换策略时用服务端值重置。
  */
 import { useEffect, useRef, useState } from 'react';
-import { NOTE_STATUSES, type NoteStatus } from '../../api/client';
+import { NOTE_STATUSES, type NoteStatus } from './api';
 // T6-3：备注更新时刻统一北京口径（aware 换算 / naive 原样）
-import { fmtBeijingDateTime } from '../../../../../../utils/timeBeijing';
+import { fmtBeijingDateTime } from '../../../utils/timeBeijing';
 import type { Workbench } from './useWorkbench';
 
 export default function NotePanel({ wb }: { wb: Workbench }) {

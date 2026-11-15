@@ -21,17 +21,31 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import type { BtTrade, IndicatorSeries, IndicatorSet, Kline } from '../api/client';
+import type { BtTrade, Freq, IndicatorSeries, IndicatorSet, Kline } from './api';
 import {
-  DOWN_COLOR as DOWN,
+  DOWN_COLOR as DEFAULT_DOWN,
   paneGroups,
   seriesColor,
   toPoints,
-  UP_COLOR as UP,
-} from './lab/indicators';
+  UP_COLOR as DEFAULT_UP,
+} from './indicators';
 
-/** 'YYYY-MM-DD' → lightweight-charts 的 Time */
-const toTime = (d: string) => d as unknown as Time;
+/** 'YYYY-MM-DD'（日线）或 'YYYY-MM-DD HH:MM:SS'（分钟线）→ lightweight-charts 的 Time。
+ *  分钟线按**市场墙钟**解析成 epoch 秒（北京 +08:00 / 加密 UTC），显示时再加回偏移。 */
+const toTime = (d: string, tzOffsetHours = 8): Time => {
+  const s = String(d || '');
+  if (s.length > 10) {
+    const sign = tzOffsetHours >= 0 ? '+' : '-';
+    const off = `${sign}${String(Math.abs(tzOffsetHours)).padStart(2, '0')}:00`;
+    const ms = Date.parse(s.replace(' ', 'T') + off);
+    return Math.floor((Number.isFinite(ms) ? ms : 0) / 1000) as UTCTimestamp;
+  }
+  return s as unknown as Time;
+};
+
+/** #rrggbb + 两位 alpha（非 6 位 hex 原样返回，避免拼出非法颜色） */
+const withAlpha = (hex: string, alpha: string) =>
+  /^#[0-9a-f]{6}$/i.test(hex) ? `${hex}${alpha}` : hex;
 
 export default function KLineChart({
   bars,
@@ -40,6 +54,10 @@ export default function KLineChart({
   showMarkers = true,
   indicators,
   showIndicators = true,
+  upColor = DEFAULT_UP,
+  downColor = DEFAULT_DOWN,
+  freq = '1d',
+  tzOffsetHours = 8,
 }: {
   bars: Kline[];
   trades?: BtTrade[];
@@ -48,7 +66,15 @@ export default function KLineChart({
   /** 策略回测时真正算过的指标（可能来自老报告，缺省即无） */
   indicators?: IndicatorSet;
   showIndicators?: boolean;
+  /** 涨跌配色：美股/加密绿涨红跌，A股/港股/期货红涨绿跌（由页面按市场传入） */
+  upColor?: string;
+  downColor?: string;
+  /** 周期：日线用日期轴；分钟线显示时/分 */
+  freq?: Freq;
+  /** 分钟线时间轴的墙钟偏移（A股 +8 / 加密 0） */
+  tzOffsetHours?: number;
 }) {
+  const intraday = freq !== '1d';
   const boxRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -77,24 +103,52 @@ export default function KLineChart({
         borderColor: '#000000',
         rightOffset: 4,
         barSpacing: 6,
+        timeVisible: intraday,
+        secondsVisible: false,
         // 默认最小 0.5px/根：2595 根全历史在 ~1080px 宽里塞不下（只能看到后 2100 根），
         // 放宽到 0.2 让「全历史」真的全览（缩略图观感，放大后正常）
         minBarSpacing: 0.2,
+        ...(intraday ? {
+          // 刻度按市场墙钟显示（默认按 UTC，会差 8 小时）；
+          // 跨日时第一次出现的刻度用日期，其余用时分（否则每个交易日都显示 09:35）
+          tickMarkFormatter: (() => {
+            let lastDay = '';
+            return (t: Time) => {
+              const sec = typeof t === 'number' ? t : 0;
+              const d = new Date((sec + tzOffsetHours * 3600) * 1000);
+              const p = (n: number) => String(n).padStart(2, '0');
+              const day = `${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+              if (day !== lastDay) {
+                lastDay = day;
+                return day;
+              }
+              return `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+            };
+          })(),
+        } : {}),
       },
       localization: {
         locale: 'zh-CN',
         priceFormatter: (p: number) => p.toFixed(2),
+        timeFormatter: (t: Time) => {
+          if (!intraday) return '';
+          const sec = typeof t === 'number' ? t : 0;
+          const d = new Date((sec + tzOffsetHours * 3600) * 1000);
+          const p = (n: number) => String(n).padStart(2, '0');
+          return `${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+            + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+        },
       },
     });
     chartRef.current = chart;
 
     candleRef.current = chart.addSeries(CandlestickSeries, {
-      upColor: UP,
-      downColor: DOWN,
-      borderUpColor: UP,
-      borderDownColor: DOWN,
-      wickUpColor: UP,
-      wickDownColor: DOWN,
+      upColor,
+      downColor,
+      borderUpColor: upColor,
+      borderDownColor: downColor,
+      wickUpColor: upColor,
+      wickDownColor: downColor,
       priceLineVisible: false,
     });
     volRef.current = chart.addSeries(HistogramSeries, {
@@ -124,7 +178,7 @@ export default function KLineChart({
       volRef.current = null;
       marksRef.current = null;
     };
-  }, [height]);
+  }, [height, upColor, downColor, intraday, tzOffsetHours]);
 
   // 灌数据
   useEffect(() => {
@@ -135,7 +189,7 @@ export default function KLineChart({
 
     candle.setData(
       bars.map((b) => ({
-        time: toTime(b.date),
+        time: toTime(b.date, tzOffsetHours),
         open: b.open,
         high: b.high,
         low: b.low,
@@ -144,9 +198,9 @@ export default function KLineChart({
     );
     vol.setData(
       bars.map((b) => ({
-        time: toTime(b.date),
+        time: toTime(b.date, tzOffsetHours),
         value: b.volume,
-        color: b.close >= b.open ? 'rgba(226,55,59,0.35)' : 'rgba(26,158,92,0.35)',
+        color: b.close >= b.open ? withAlpha(upColor, '59') : withAlpha(downColor, '59'),
       })),
     );
 
@@ -155,30 +209,31 @@ export default function KLineChart({
       for (const t of trades) {
         if (t.entry_time) {
           marks.push({
-            time: t.entry_time.slice(0, 10) as unknown as UTCTimestamp,
+            time: toTime(t.entry_time, tzOffsetHours),
             position: 'belowBar',
-            color: UP,
+            color: upColor,
             shape: 'arrowUp',
-            text: '买',
+            // 合规：展示面不出现「买/卖」字眼，只用箭头方向表达入场/离场
+            text: '',
           });
         }
         if (t.exit_time) {
           marks.push({
-            time: t.exit_time.slice(0, 10) as unknown as UTCTimestamp,
+            time: toTime(t.exit_time, tzOffsetHours),
             position: 'aboveBar',
-            color: DOWN,
+            color: downColor,
             shape: 'arrowDown',
-            text: '卖',
+            text: '',
           });
         }
       }
-      marks.sort((a, b) => (a.time as string).localeCompare(b.time as string));
+      marks.sort((a, b) => String(a.time).localeCompare(String(b.time)));
       marksRef.current?.setMarkers(marks);
     } else {
       marksRef.current?.setMarkers([]);
     }
     chart.timeScale().fitContent();
-  }, [bars, trades, showMarkers, height]);   // height 变化会重建图表（见建图 effect），数据得重灌
+  }, [bars, trades, showMarkers, height, upColor, downColor, freq, tzOffsetHours]);   // height 变化会重建图表（见建图 effect），数据得重灌
 
   // 指标：叠加线挂主图（pane 0），振荡指标按调用点分组，每组一个副图（pane 1..N）
   useEffect(() => {
@@ -197,7 +252,7 @@ export default function KLineChart({
         );
         hist.setData(pts.map((p) => (p.value == null
           ? { time: p.time }
-          : { time: p.time, value: p.value, color: p.value >= 0 ? UP : DOWN })));
+          : { time: p.time, value: p.value, color: p.value >= 0 ? upColor : downColor })));
         created.push(hist);
         return;
       }
@@ -233,7 +288,7 @@ export default function KLineChart({
       // 序列移除后空副图可能残留，显式回收，只留主图
       while (chart.panes().length > 1) chart.removePane(chart.panes().length - 1);
     };
-  }, [bars, indicators, showIndicators]);
+  }, [bars, indicators, showIndicators, upColor, downColor]);
 
   return <div ref={boxRef} className="kline-box" style={{ height }} />;
 }

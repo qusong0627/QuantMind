@@ -1,14 +1,15 @@
-/** 中栏结果区：K线（带买卖点）+ 净值 + 统计卡 + 逐笔。
+/** 中栏结果区：K线（带进出场箭头）+ 净值 + 统计卡 + 逐笔。
  *
  * 内置模板与 Pine 库策略两条链路跑完都落到同一个 `LabResult`，这里只负责画，
  * 不关心策略从哪来——合并页能做到「选中即同屏对比」的关键。
  */
 import { useMemo } from 'react';
-import EquityChart, { type ChartLine } from '../EquityChart';
-import KLineChart from '../KLineChart';
-import type { Kline } from '../../api/client';
+import EquityLineChart from './EquityLineChart';
+import KLineChart from './KLineChart';
+import type { Freq, Kline, LabMarket } from './api';
+import { FREQ_NAME, MARKET_NAME, MARKET_SOURCE, MARKET_TZ_OFFSET } from './markets';
 import type { LabResult } from './labResult';
-import { DOWN_COLOR, paneGroups, seriesColor, UP_COLOR } from './indicators';
+import { paneGroups, seriesColor } from './indicators';
 import { fmt, fmtMoney, fmtPct } from './format';
 
 const TRADE_ROWS = 60;
@@ -19,12 +20,21 @@ function StatCards({ result }: { result: LabResult }) {
     {
       label: '策略净收益',
       value: `${fmtMoney(st['Net profit']?.value, result.unit)} (${fmtPct(st['Net profit']?.pct)})`,
-      tone: (st['Net profit']?.pct ?? 0) >= 0 ? 'up' : 'down',
+      // 缺失不猜方向：null 时不加涨跌色（值本身显示「—」）
+      tone: st['Net profit']?.pct == null
+        ? undefined
+        : st['Net profit']!.pct >= 0 ? 'up' : 'down',
       hero: true,
     },
-    { label: '买入持有', value: fmtPct(st['Buy & hold return']?.pct) },
-    { label: '最大回撤', value: fmtPct(-(st['Max equity drawdown']?.pct ?? 0)) },
-    { label: '胜率', value: `${fmt(st['Percent profitable']?.pct)}%` },
+    { label: '持有基准', value: fmtPct(st['Buy & hold return']?.pct) },
+    {
+      label: '最大回撤',
+      // 缺失一律「—」：`pct ?? 0` 会把「没这个指标」画成 0.00%（假平盘）
+      value: st['Max equity drawdown']?.pct == null
+        ? '—'
+        : fmtPct(-st['Max equity drawdown'].pct),
+    },
+    { label: '胜率', value: st['Percent profitable']?.pct == null ? '—' : `${fmt(st['Percent profitable'].pct)}%` },
     { label: '盈亏比', value: fmt(st['Profit factor']?.value) },
     { label: '夏普', value: fmt(st['Sharpe ratio']?.value) },
     { label: '索提诺', value: fmt(st['Sortino ratio']?.value) },
@@ -45,6 +55,8 @@ function StatCards({ result }: { result: LabResult }) {
 
 function TradeTable({ result }: { result: LabResult }) {
   const rows = useMemo(() => result.trades.slice(-TRADE_ROWS).reverse(), [result]);
+  // 分钟线的成交时刻是完整时间；日线只显示日期
+  const when = (s?: string | null) => (s ? s.slice(0, s.length > 10 ? 16 : 10) : '');
   if (!rows.length) return null;
   return (
     <section className="lab-trades">
@@ -55,10 +67,10 @@ function TradeTable({ result }: { result: LabResult }) {
         <table>
           <thead>
             <tr>
-              <th>买入时间</th>
-              <th>买入价</th>
-              <th>卖出时间</th>
-              <th>卖出价</th>
+              <th>入场时间</th>
+              <th>入场价</th>
+              <th>离场时间</th>
+              <th>离场价</th>
               <th>盈亏</th>
             </tr>
           </thead>
@@ -68,9 +80,9 @@ function TradeTable({ result }: { result: LabResult }) {
                 key={`${t.entry_time}-${i}`}
                 className={(t.profit ?? 0) >= 0 ? 'up' : 'down'}
               >
-                <td>{t.entry_time?.slice(0, 10)}</td>
+                <td>{when(t.entry_time)}</td>
                 <td>{fmt(t.entry_price)}</td>
-                <td>{t.exit_time?.slice(0, 10) ?? '持仓中'}</td>
+                <td>{t.exit_time ? when(t.exit_time) : '持仓中'}</td>
                 <td>{fmt(t.exit_price)}</td>
                 <td>{t.profit === null ? '—' : fmtPct(t.profit_pct)}</td>
               </tr>
@@ -83,7 +95,11 @@ function TradeTable({ result }: { result: LabResult }) {
 }
 
 /** 图例：取色必须与 KLineChart 一致（叠加线按序取、副图组内按序取）。 */
-function IndicatorLegend({ result }: { result: LabResult }) {
+function IndicatorLegend({ result, upColor, downColor }: {
+  result: LabResult;
+  upColor: string;
+  downColor: string;
+}) {
   const ind = result.indicators;
   const groups = paneGroups(ind);
   if (!ind.overlays.length && !groups.length) return null;
@@ -105,7 +121,7 @@ function IndicatorLegend({ result }: { result: LabResult }) {
                 <i
                   style={swatch(
                     s.kind === 'hist'
-                      ? `linear-gradient(90deg, ${UP_COLOR} 50%, ${DOWN_COLOR} 50%)`
+                      ? `linear-gradient(90deg, ${upColor} 50%, ${downColor} 50%)`
                       : seriesColor(false, si),
                   )}
                 />
@@ -119,6 +135,10 @@ function IndicatorLegend({ result }: { result: LabResult }) {
 }
 
 export default function ResultView({
+  market,
+  freq,
+  upColor,
+  downColor,
   bars,
   barsBusy,
   symbol,
@@ -131,6 +151,10 @@ export default function ResultView({
   onToggleSpan,
   onSyncSymbol,
 }: {
+  market: LabMarket;
+  freq: Freq;
+  upColor: string;
+  downColor: string;
   bars: Kline[];
   barsBusy: boolean;
   symbol: string;
@@ -143,29 +167,30 @@ export default function ResultView({
   onToggleSpan: () => void;
   onSyncSymbol: () => void;
 }) {
-  const equityLines = useMemo<ChartLine[]>(
-    () =>
-      result
-        ? [
-            {
-              id: 'equity',
-              label: '策略净值',
-              color: '#1a1a1a',
-              points: result.equity.map((p) => ({ t: Date.parse(p.date), v: p.value })),
-            },
-          ]
-        : [],
-    [result],
-  );
+  const equityPoints = useMemo(() => result?.equity ?? [], [result]);
   const hasIndicators = !!result
     && (result.indicators.overlays.length > 0 || result.indicators.panes.length > 0);
   // 每个指标副图约 70px：不抬高容器的话，4 个副图会把主图挤成一条缝
   const paneCount = result && showIndicators ? paneGroups(result.indicators).length : 0;
   const chartHeight = 460 + Math.min(paneCount, 6) * 70;
 
+  const crossMarket = !!result && result.market !== market;
+  const crossFreq = !!result && result.freq !== freq;
   return (
     <div className="lab-center">
-      {result?.symbol && result.symbol !== symbol && (
+      {crossMarket && (
+        <div className="lab-warn">
+          这份回测属于 {MARKET_NAME[result.market]} 市场，与当前 {MARKET_NAME[market]} K线不是同一数据面——
+          成交点不画在当前图上；切到 {MARKET_NAME[result.market]} 或重新运行即可。
+        </div>
+      )}
+      {crossFreq && !crossMarket && (
+        <div className="lab-warn">
+          这份回测是 {FREQ_NAME[result.freq]}，与当前 {FREQ_NAME[freq]} K线不是同一周期——
+          成交点不画在当前图上；切到 {FREQ_NAME[result.freq]} 或重新运行即可。
+        </div>
+      )}
+      {!crossMarket && !crossFreq && result?.symbol && result.symbol !== symbol && (
         <div className="lab-warn">
           成交点属于 {result.symbol}（{result.adj}），与当前K线 {symbol} 不是同一只——
           <button onClick={onSyncSymbol}>切到 {result.symbol}</button>
@@ -175,7 +200,11 @@ export default function ResultView({
         {barsBusy && <div className="lab-mask">加载中…</div>}
         <KLineChart
           bars={bars}
-          trades={result?.trades ?? []}
+          trades={crossMarket || crossFreq ? [] : (result?.trades ?? [])}
+          upColor={upColor}
+          downColor={downColor}
+          freq={freq}
+          tzOffsetHours={MARKET_TZ_OFFSET[market]}
           height={chartHeight}
           showMarkers={showMarkers}
           indicators={result?.indicators}
@@ -183,7 +212,7 @@ export default function ResultView({
         />
         <div className="lab-hint">
           <span>
-            quantdb 日线 · {bars.length} 根 · {bars[0]?.date ?? '—'} ~{' '}
+            {MARKET_SOURCE[market]} {FREQ_NAME[freq]} · {bars.length} 根 · {bars[0]?.date ?? '—'} ~{' '}
             {bars[bars.length - 1]?.date ?? '—'}
           </span>
           <div className="lab-tools">
@@ -200,13 +229,15 @@ export default function ResultView({
             )}
           </div>
         </div>
-        {hasIndicators && showIndicators && result && <IndicatorLegend result={result} />}
+        {hasIndicators && showIndicators && result && (
+          <IndicatorLegend result={result} upColor={upColor} downColor={downColor} />
+        )}
       </section>
 
       {!result && (
         <div className="lab-empty">
           <b>还没有回测结果</b>
-          左栏挑一个策略（内置模板或 Pine 库）→ 右栏点运行：K 线上标出买卖点，
+          左栏挑一个策略（内置模板或 Pine 库）→ 右栏点运行：K 线上用 ↑/↓ 箭头标出入场/离场点，
           下面给出净值曲线、九项统计与逐笔明细。
         </div>
       )}
@@ -225,13 +256,16 @@ export default function ResultView({
 
           <section className="lab-equity">
             <div className="lab-block-title">
-              净值曲线（初始 {result.unit}
-              {result.capital.toLocaleString('zh-CN')}）
+              净值曲线（初始{' '}
+              {result.equity.length
+                ? `${result.unit}${result.capital.toLocaleString('zh-CN')}`
+                : '—'}）
               {result.source === 'pine' && (
                 <span className="lab-tag-src">本金取自候选的 initial_capital</span>
               )}
             </div>
-            <EquityChart lines={equityLines} currency={result.unit} mode="dollar" height={200} />
+            <EquityLineChart points={equityPoints} height={200}
+                             tzOffsetHours={MARKET_TZ_OFFSET[result.market]} />
           </section>
 
           <TradeTable result={result} />

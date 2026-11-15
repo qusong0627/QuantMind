@@ -6,10 +6,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import {
   applyChatCandidate,
+  createPineItem,
+  deletePineItem,
   fetchChatJob,
   fetchChatThread,
   fetchLabKlines,
   fetchLabStrategies,
+  fetchMarketMeta,
   fetchNote,
   fetchNoteIds,
   fetchPineJob,
@@ -30,21 +33,26 @@ import {
   type ChatJob,
   type ChatMessage,
   type ChatMode,
+  type Freq,
   type Kline,
+  type LabMarket,
   type LabStrategy,
   type LabSymbol,
+  type MarketInfo,
   type NoteDoc,
   type NoteInput,
   type PineJob,
+  type PineItem,
   type PineList,
   type PineListItem,
   type PineReport,
   type PineTranspile,
   type VersionRow,
-} from '../../api/client';
+} from './api';
 import { fromPineReport, fromTemplate, type LabResult } from './labResult';
 import { errText } from './format';
-import { asUpdater } from '../../reactCompat';
+import { FREQ_NAME, MARKET_NAME } from './markets';
+import { asUpdater } from './reactCompat';
 
 const PAGE = 200;
 const POLL_MS = 2500;
@@ -52,6 +60,25 @@ const POLL_MS = 2500;
 export type Selection = { kind: 'template' | 'pine'; id: string };
 
 export interface Workbench {
+  // 市场
+  market: LabMarket;
+  marketInfo: MarketInfo | null;
+  /** 该市场真实可用的复权档 */
+  adjs: AdjMode[];
+  /** 界面可选的周期（三档都列；无数据的档点击后回退日线） */
+  freqs: Freq[];
+  /** 该市场真实有落盘的周期 */
+  availFreqs: Freq[];
+  /** 当前 K 线周期（默认日线） */
+  freq: Freq;
+  setFreq: (f: Freq) => void;
+  /** 选到无数据周期时的回退提示 */
+  freqNote: string;
+  /** 本次回测实际使用的复权口径（分钟线恒为不复权） */
+  runAdj: AdjMode;
+  /** 本次回测口径（有后复权用后复权，否则该市场第一档） */
+  backtestAdj: AdjMode;
+
   // 标的与图
   symbol: string;
   adj: AdjMode;
@@ -91,6 +118,14 @@ export interface Workbench {
   loadMore: () => void;
   transpile: Record<string, PineTranspile>;
   cur: PineListItem | null;
+  /** 新增自定义策略（成功后刷新列表并选中） */
+  createPine: (payload: { title: string; category?: string; source: string }) => Promise<boolean>;
+  createBusy: boolean;
+  createErr: string;
+  /** 删除当前自定义策略（仅 source_kind=custom） */
+  deletePine: () => Promise<boolean>;
+  deleteBusy: boolean;
+  deleteErr: string;
 
   // 选择与运行
   sel: Selection | null;
@@ -151,13 +186,41 @@ export interface Workbench {
 }
 
 /** 标的由页面持有：选股页点一行也能直接跳到工作台看这只票。 */
-export function useWorkbench(symbol: string, setSymbol: (code: string) => void): Workbench {
+export function useWorkbench(
+  market: LabMarket,
+  symbol: string,
+  setSymbol: (code: string) => void,
+): Workbench {
+  // ---- 市场 ----
+  const [marketInfo, setMarketInfo] = useState<MarketInfo | null>(null);
+  const adjs = useMemo<AdjMode[]>(
+    () => marketInfo?.adjs ?? (market === 'cn'
+      ? ['unadjusted', 'forward', 'backward']
+      : market === 'hk' ? ['unadjusted', 'backward'] : ['unadjusted']),
+    [marketInfo, market],
+  );
+  /** 回测口径：有后复权用后复权，否则用该市场第一档（美股/期货/加密只有原始价）。 */
+  const backtestAdj: AdjMode = adjs.includes('backward') ? 'backward' : (adjs[0] ?? 'unadjusted');
+  /** 该市场可选的 K 线周期（三档都列；无数据的档由 chooseFreq 回退） */
+  const freqs = useMemo<Freq[]>(
+    () => marketInfo?.freqs ?? ['1d', '5m', '1m'],
+    [marketInfo],
+  );
+  const availFreqs = useMemo<Freq[]>(
+    () => marketInfo?.avail_freqs ?? ['1d'],
+    [marketInfo],
+  );
+  const [freq, setFreq] = useState<Freq>('1d');
+  const [freqNote, setFreqNote] = useState('');
+  /** 回测复权：分钟线只有不复权；日线按市场能力选后复权/第一档 */
+  const runAdj: AdjMode = freq === '1d' ? backtestAdj : 'unadjusted';
+
   // ---- 标的与K线 ----
   const [adj, setAdj] = useState<AdjMode>('unadjusted');
   const [stockName, setStockName] = useState('');
   const [bars, setBars] = useState<Kline[]>([]);
   const [barsBusy, setBarsBusy] = useState(false);
-  /** 看盘默认近 600 根；跑完回测自动切全历史，否则 10 年回测的买卖点大多落在图外 */
+  /** 看盘默认近 600 根；跑完回测自动切全历史，否则 10 年回测的进出场箭头大多落在图外 */
   const [fullSpan, setFullSpan] = useState(false);
   const [showMarkers, setShowMarkers] = useState(true);
   const [showIndicators, setShowIndicators] = useState(true);
@@ -166,6 +229,45 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
   const [hits, setHits] = useState<LabSymbol[]>([]);
   const [showHits, setShowHits] = useState(false);
   const timer = useRef<number | null>(null);
+  /** K线请求序号：快速切标的/复权时，旧请求晚到不许覆盖新数据 */
+  const barsSeq = useRef(0);
+
+  // 市场元数据（可用复权档）。失败时退回前端静态表，不阻塞页面。
+  useEffect(() => {
+    let alive = true;
+    fetchMarketMeta()
+      .then((list) => {
+        if (alive) setMarketInfo(list.find((m) => m.id === market) ?? null);
+      })
+      .catch(() => {
+        if (alive) setMarketInfo(null);
+      });
+    return () => { alive = false; };
+  }, [market]);
+
+  // 切市场后若当前复权档不存在（如 A股后复权 → 美股只有原始价），落到第一档
+  useEffect(() => {
+    if (!adjs.includes(adj)) setAdj(adjs[0] ?? 'unadjusted');
+  }, [adjs, adj]);
+
+  // 切市场后周期在該市场没有数据 → 自动回日线（不把按钮藏起来）
+  useEffect(() => {
+    if (!availFreqs.includes(freq)) {
+      setFreq('1d');
+      setFreqNote(`${MARKET_NAME[market]}暂无「${FREQ_NAME[freq]}」数据，已按日线显示`);
+    }
+  }, [availFreqs, freq, market]);
+
+  /** 界面点击周期：无数据档自动回退日线并给出提示 */
+  const chooseFreq = (f: Freq) => {
+    if (f !== '1d' && !availFreqs.includes(f)) {
+      setFreqNote(`该市场暂无「${FREQ_NAME[f]}」数据，已自动按日线显示`);
+      setFreq('1d');
+      return;
+    }
+    setFreqNote('');
+    setFreq(f);
+  };
 
   // ---- 选择与结果 ----
   const [sel, setSel] = useState<Selection | null>(null);
@@ -336,7 +438,7 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
     setApplyBusy(true);
     setApplyMsg('');
     setApplyErr('');
-    applyChatCandidate(sel.id, chatJob.job_id, symbol, adj)
+    applyChatCandidate(sel.id, chatJob.job_id, symbol, adj, market, freq)
       .then((r) => {
         setApplyMsg(r.queued
           ? '已采用，正在重跑转写 + 回测…'
@@ -387,27 +489,37 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
             : Object.fromEntries(list2[0].params.map((p) => [p.k, p.default])),
         ));
       })
-      .catch(() => setErr('策略列表加载失败（后端 /api/market-lab 未就绪？）'));
+      .catch((e) => setErr(`策略列表加载失败（${errText(e)}）`));
   }, []);
 
   // ---- K线 ----
   const loadBars = useCallback(async (sym: string, mode: AdjMode, full: boolean) => {
+    const mySeq = ++barsSeq.current;
     setBarsBusy(true);
     try {
-      const r = await fetchLabKlines(sym, mode, full ? 3000 : 600);
+      const r = await fetchLabKlines(sym, mode, full ? 3000 : 600, market, freq);
+      if (mySeq !== barsSeq.current) return;   // 已有更新的请求在飞
       setBars(r.bars);
       setStockName(r.name);
-    } catch {
+      // 只清掉上一次的「K线加载失败」，别顺手抹掉回测/任务错误
+      setErr(asUpdater((cur: string) => (cur.startsWith('K线加载失败') ? '' : cur)));
+    } catch (e) {
+      if (mySeq !== barsSeq.current) return;
       setBars([]);
-      setErr(`K线加载失败：${sym}`);
+      setErr(`K线加载失败：${sym}（${errText(e)}）`);
     } finally {
-      setBarsBusy(false);
+      if (mySeq === barsSeq.current) setBarsBusy(false);
     }
-  }, []);
+  }, [market, freq]);
 
   useEffect(() => {
     if (symbol) void loadBars(symbol, adj, fullSpan);
-  }, [symbol, adj, fullSpan, loadBars]);
+  }, [symbol, adj, fullSpan, market, freq, loadBars]);
+
+  // 卸载时收掉防抖定时器（否则 setHits 会落在已卸载组件上）
+  useEffect(() => () => {
+    if (timer.current) window.clearTimeout(timer.current);
+  }, []);
 
   // ---- 标的搜索（防抖） ----
   const onQuery = (v: string) => {
@@ -419,7 +531,7 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
       return;
     }
     timer.current = window.setTimeout(() => {
-      searchLabSymbols(v, 20)
+      searchLabSymbols(v, 20, market)
         .then((rows) => {
           setHits(rows);
           setShowHits(true);
@@ -471,13 +583,22 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
   }, [refreshTranspile]);
 
   const loadJob = useCallback((id: string) => {
-    fetchPineJob(id)
+    // 先按当前市场/标的/复权/周期取那一份；没有该键的报告再回退「最新」，
+    // 保证切市场/周期后能看到该市场跑过的那份，也不丢「该策略上次跑过」的线索。
+    fetchPineJob(id, { market, symbol, adj, freq })
       .then((d) => {
-        setJob(d.job);
-        setReport(d.report);
+        if (d.report) {
+          setJob(d.job);
+          setReport(d.report);
+          return;
+        }
+        return fetchPineJob(id).then((latest) => {
+          setJob(latest.job);
+          setReport(latest.report);
+        });
       })
       .catch(() => undefined);
-  }, []);
+  }, [market, symbol, adj, freq]);
 
   // ---- 选中 ----
   const selectTemplate = (id: string) => {
@@ -506,6 +627,68 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
     reloadSource(id);
   };
 
+  // ---- 新增 / 删除自定义策略 ----
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createErr, setCreateErr] = useState('');
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteErr, setDeleteErr] = useState('');
+
+  const createPine = async (payload: { title: string; category?: string; source: string }) => {
+    setCreateBusy(true);
+    setCreateErr('');
+    try {
+      const item: PineItem = await createPineItem(payload);
+      // 乐观插到列表顶部（顺序与后端 custom-first 一致），不为一新增重拉 1001 条
+      setList(asUpdater((prev) => prev ? {
+        ...prev,
+        items: [item, ...prev.items],
+        total: prev.total + 1,
+        filtered: prev.filtered + 1,
+        categories: prev.categories.some((c) => c.name === item.category)
+          ? prev.categories.map((c) => (c.name === item.category ? { ...c, count: c.count + 1 } : c))
+          : [...prev.categories, { name: item.category, count: 1 }],
+      } : prev));
+      selectPine(item.id);
+      return true;
+    } catch (e) {
+      setCreateErr(errText(e) || '新增失败');
+      return false;
+    } finally {
+      setCreateBusy(false);
+    }
+  };
+
+  const deletePine = async () => {
+    if (!sel || sel.kind !== 'pine') return false;
+    const id = sel.id;
+    setDeleteBusy(true);
+    setDeleteErr('');
+    try {
+      await deletePineItem(id);
+      setList(asUpdater((prev) => prev ? {
+        ...prev,
+        items: prev.items.filter((it) => it.id !== id),
+        total: Math.max(0, prev.total - 1),
+        filtered: Math.max(0, prev.filtered - 1),
+      } : prev));
+      setSel(null);
+      setCur(null);
+      setDraft('');
+      setDirty(false);
+      setJob(null);
+      setReport(null);
+      setNote(null);
+      refreshNoteIds();
+      refreshTranspile();
+      return true;
+    } catch (e) {
+      setDeleteErr(errText(e) || '删除失败');
+      return false;
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
   // ---- 轮询：任务在跑就每 2.5s 拉一次；跑完刷新列表上的 AI/▶ 角标 ----
   const running = job?.status === 'queued' || job?.status === 'running';
   useEffect(() => {
@@ -522,15 +705,48 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
   // 报告自带 symbol/adj，K线必须用报告自己的口径拉，否则成交点会落在错误的K线上。
   // 只在「换了一份报告」时对齐一次，之后用户仍可自由切标的看别的票。
   const syncedRef = useRef('');
+  const marketRef = useRef(market);
+  // 切市场：旧市场的结果/任务/错误一律作废；周期回日线（A股默认口径）
+  useEffect(() => {
+    if (marketRef.current === market) return;
+    marketRef.current = market;
+    setBt(null);
+    setReport(null);
+    setJob(null);
+    setErr('');
+    setFullSpan(false);
+    setFreq('1d');
+    syncedRef.current = '';
+  }, [market]);
+
+  const freqRef = useRef(freq);
+  // 切周期：旧周期的回测结果不能叠到新周期 K 线上（成交点/指标会错位）
+  useEffect(() => {
+    if (freqRef.current === freq) return;
+    freqRef.current = freq;
+    if (freq !== '1d' && adj !== 'unadjusted') setAdj('unadjusted');
+    setBt(null);
+    setReport(null);
+    setJob(null);
+    setErr('');
+    setFullSpan(false);
+    syncedRef.current = '';
+  }, [freq, adj]);
+
   useEffect(() => {
     if (!report || !cur) return;
-    const key = `${cur.id}|${report.symbol}|${report.adj}`;
-    if (syncedRef.current === key) return;
-    syncedRef.current = key;
-    if (report.symbol && report.symbol !== symbol) setSymbol(report.symbol);
-    if (report.adj && report.adj !== adj) setAdj(report.adj as AdjMode);
+    // 不在加载旧报告时强行改标的/复权——会被用户「换只票看看」的意图反拽。
+    // 只把图切到全历史；成交点不属于当前 K 线时由 ResultView 的提示按钮显式同步。
+    if (syncedRef.current === cur.id) return;
+    syncedRef.current = cur.id;
     setFullSpan(true);
-  }, [report, cur, symbol, adj]);
+  }, [report, cur]);
+
+  // 市场/周期/标的/复权变化 → 重新取该四元组的报告（没有则回退最新）
+  useEffect(() => {
+    if (sel?.kind !== 'pine') return;
+    loadJob(sel.id);
+  }, [sel, loadJob]);
 
   const result = useMemo<LabResult | null>(() => {
     if (sel?.kind === 'template') return bt ? fromTemplate(bt) : null;
@@ -539,7 +755,7 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
   }, [sel, bt, report, cur]);
 
   const syncToResult = () => {
-    if (!result) return;
+    if (!result || result.market !== market || result.freq !== freq) return;
     if (result.symbol) setSymbol(result.symbol);
     if (result.adj) setAdj(result.adj as AdjMode);
   };
@@ -550,11 +766,11 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
     setErr('');
     if (sel.kind === 'template') {
       setBtBusy(true);
-      runLabBacktest({ strategy: sel.id, symbol, adj: 'backward', params })
+      runLabBacktest({ strategy: sel.id, symbol, adj: runAdj, params, market, freq })
         .then((r) => {
           setBt(r);
-          // 成交点标注要落在同一价格序列上 → 切到后复权（回测口径）+ 全历史
-          if (adj !== 'backward') setAdj('backward');
+          // 成交点标注要落在同一价格序列上 → 切到回测口径 + 全历史
+          if (adj !== runAdj) setAdj(runAdj);
           setFullSpan(true);
         })
         .catch((e) => {
@@ -565,7 +781,7 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
       return;
     }
     setQueuing(true);
-    runPineBacktest(sel.id, symbol)
+    runPineBacktest(sel.id, symbol, runAdj, false, market, freq)
       .then(() => {
         setJob({ status: 'queued', stage: 'queued' });
         setReport(null);
@@ -602,6 +818,16 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
   };
 
   return {
+    market,
+    marketInfo,
+    adjs,
+    freqs,
+    availFreqs,
+    freq,
+    setFreq: chooseFreq,
+    freqNote,
+    runAdj,
+    backtestAdj,
     symbol,
     adj,
     setAdj,
@@ -636,6 +862,12 @@ export function useWorkbench(symbol: string, setSymbol: (code: string) => void):
     loadMore: () => load(category, q, list?.items.length ?? 0),
     transpile,
     cur,
+    createPine,
+    createBusy,
+    createErr,
+    deletePine,
+    deleteBusy,
+    deleteErr,
 
     sel,
     selectTemplate,

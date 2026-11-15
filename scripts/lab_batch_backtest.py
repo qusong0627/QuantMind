@@ -26,6 +26,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+
+def _pine_site() -> Path | None:
+    """pynecore 站点目录：本机 ``pine_lab/.venv`` 可能只有 site-packages、没有 bin
+    （见 scripts/setup_pine_lab.sh 的注释），此时用系统 python 跑、把站点目录挂进
+    sys.path 即可（与 scripts/pine_to_pyne.py::_pine_site 同口径）。"""
+    env = os.environ.get("QM_PINE_SITE")
+    if env:
+        return Path(env).expanduser()
+    lib = Path(__file__).resolve().parents[1] / "pine_lab/.venv/lib"
+    if lib.is_dir():
+        for cand in sorted(lib.glob("python3.*/site-packages"), reverse=True):
+            return cand
+    return None
+
+
+_PINE_SITE = _pine_site()
+if _PINE_SITE and _PINE_SITE.is_dir() and str(_PINE_SITE) not in sys.path:
+    sys.path.append(str(_PINE_SITE))
+
 from backend.services.agent_arena import lab_batch as lb  # noqa: E402
 from backend.services.agent_arena import market_lab as ml  # noqa: E402
 

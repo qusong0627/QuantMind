@@ -49,10 +49,14 @@ const ROOT_CLASS = 'qm-arena-root';
 const ROOT_SEL = `.${ROOT_CLASS}`;
 const DRY = process.argv.includes('--dry-run');
 
-/** 要搬的入口：用户点名的五个页面 + 总控里点模型名下钻的详情页 + 全局样式表 */
+/** 要搬的入口：用户点名的页面 + 总控里点模型名下钻的详情页 + 全局样式表
+ *
+ *  `pages/MarketLab.tsx` 已于 2026-11-15 整体迁到回测中心
+ *  （`electron/src/components/backtestCenter/marketLab/`），不再属于实盘栏；
+ *  这里同步移除入口，重跑脚本不会把行情回测重新搬回实盘。
+ */
 const ENTRIES = [
   'pages/Live.tsx',
-  'pages/MarketLab.tsx',
   'pages/Control.tsx',
   'pages/DataPlatform.tsx',
   'pages/About.tsx',
@@ -612,18 +616,8 @@ export const fetchFutuOrders = async (
     find: '快照 {acc.ts.slice(0, 16).replace(\'T\', \' \')}',
     replace: '快照 {fmtBeijingDateTime(acc.ts, { withSeconds: false })}',
   },
-  {
-    file: 'components/lab/NotePanel.tsx',
-    why: 'T6-3：宿主 timeBeijing 导入（备注 updated 可能是 aware UTC）',
-    find: `import { NOTE_STATUSES, type NoteStatus } from '../../api/client';\nimport type { Workbench } from './useWorkbench';`,
-    replace: `import { NOTE_STATUSES, type NoteStatus } from '../../api/client';\n// T6-3：备注更新时刻统一北京口径（aware 换算 / naive 原样）\nimport { fmtBeijingDateTime } from '../../../../../../utils/timeBeijing';\nimport type { Workbench } from './useWorkbench';`,
-  },
-  {
-    file: 'components/lab/NotePanel.tsx',
-    why: 'T6-3：更新时刻从裸 replace+slice(0,19) 改 fmtBeijingDateTime',
-    find: `更新于 {wb.note.updated.replace('T', ' ').slice(0, 19)} · {wb.note.by}`,
-    replace: `更新于 {fmtBeijingDateTime(wb.note.updated)} · {wb.note.by}`,
-  },
+  // 行情回测（components/lab/*、pages/MarketLab.tsx）2026-11-15 已整体迁到回测中心，
+  // 不再由本脚本搬运；原先给它打的两条 T6-3 补丁一并移除。
   {
     file: 'pages/Live.tsx',
     why: 'T6-3：宿主 timeBeijing 导入（实盘账户 ts 可能是 aware UTC）',

@@ -457,8 +457,8 @@ const LiveTradingPage: React.FC = () => {
             // 「推送下单」「风控止损」**不在这里**（2026-09-23 用户要求「推送下单放手动
             // 任务、风控止损放持仓监控那」）：它们各自并进宿主页，走下面的
             // `manualTaskExtras` / `positionRailExtras` 两个槽位，侧栏不再占位。
-            // arena（Quant Agent Trader）整棵移植过来的四栏：智能体台账 / 盘中实况 /
-            // 行情回测 / 关于。顺序按用户 2026-09-22 点名的顺序，关于排在最后。
+            // arena（Quant Agent Trader）移植过来的两栏：智能体台账 / 盘中实况。
+            // 「行情回测」2026-11-15 已整体迁到回测中心，不再占实盘侧栏；
             // 总控与数据不在这里 —— 它们是设置页里的两块（见下面 settingsPanels）。
             ...ARENA_TABS,
         ],

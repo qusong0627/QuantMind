@@ -1,5 +1,5 @@
-/** 策略排行：一个股票池里，每个策略在全池标的上的平均表现（跑赢买入持有的比例是核心列）。 */
-import type { LabBatchDetail, LabBatchRank } from '../../api/client';
+/** 策略排行：一个股票池里，每个策略在全池标的上的平均表现（跑赢持有基准的比例是核心列）。 */
+import type { LabBatchDetail, LabBatchRank } from './api';
 
 const fmt = (v: number | null, d = 1, suffix = '') =>
   v === null || v === undefined || Number.isNaN(v) ? '—' : `${v.toFixed(d)}${suffix}`;
@@ -101,7 +101,7 @@ export default function BatchRankTable({ detail }: { detail: LabBatchDetail }) {
       <p className="lab-note">
         口径：{detail.adj === 'backward' ? '后复权' : detail.adj} · A股多头单向 · 本金 10 万 /
         95% 仓位 / 双边 0.05% 费率 / 1 tick 滑点 · 单标的 K 线不足 250 根不入统计。
-        「跑赢持有」= 该策略跑赢买入持有的标的占比（长期牛市里趋势策略天然吃亏，看这个比看收益更实在）。
+        「跑赢持有」= 该策略跑赢持有基准的标的占比（长期牛市里趋势策略天然吃亏，看这个比看收益更实在）。
       </p>
     </div>
   );

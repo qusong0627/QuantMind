@@ -193,6 +193,7 @@ async def save_llm_config(request: Request, config: LLMConfig):
     api_gateway = _get_api_gateway_url()
 
     try:
+        profile_data: dict = {}
         async with httpx.AsyncClient(timeout=10.0) as client:
             headers = {
                 "X-Internal-Call": get_internal_call_secret(),
@@ -215,12 +216,55 @@ async def save_llm_config(request: Request, config: LLMConfig):
                 )
                 raise HTTPException(status_code=resp.status_code, detail="同步到用户服务失败")
 
+            # 本次没带 Key（只改模型/地址）：镜像需要完整的 key/base/model，
+            # 从 profile 读一次当前值；不打印响应内容（含明文 Key）。
+            if "api_key" not in payload:
+                try:
+                    pr = await client.get(
+                        f"{api_gateway}/api/v1/profiles/{user_id}", headers=headers,
+                    )
+                    if pr.status_code == 200:
+                        profile_data = (pr.json() or {}).get("data") or {}
+                except Exception:  # noqa: BLE001
+                    profile_data = {}
+
+        # 镜像到共享文件：宿主 Pine 转写 worker 没有用户会话，读不到 profile。
+        # 文件含明文 Key（0600、不入 git）；镜像失败不影响 profile 已保存。
+        try:
+            from backend.services.agent_arena import ai_service
+
+            cur = ai_service.read_config()
+            if "api_key" in payload and not str(payload.get("api_key") or "").strip():
+                ai_service.write_config("")          # 显式清 Key → 删除共享文件
+            else:
+                key = str(payload.get("api_key") or profile_data.get("api_key")
+                          or cur.get("api_key") or "").strip()
+                base = str(payload.get("llm_base_url") or profile_data.get("llm_base_url")
+                           or cur.get("base_url") or "").strip()
+                model = str(payload.get("llm_model") or profile_data.get("llm_model")
+                            or cur.get("model") or "").strip()
+                extra = cur.get("extra_headers") or {}
+                if payload.get("llm_extra_headers") is not None:
+                    raw = str(payload.get("llm_extra_headers") or "").strip()
+                    extra = {}
+                    if raw:
+                        import json as _json
+                        try:
+                            extra = _json.loads(raw)
+                        except _json.JSONDecodeError:
+                            extra = {}
+                ai_service.write_config(
+                    key, base, model, extra if isinstance(extra, dict) else {},
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("mirror ai_service.json failed: %s", exc)
+
         return {"success": True, "message": "配置已成功同步到个人档案"}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to save config for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 class LLMTestConfig(BaseModel):

@@ -22,6 +22,8 @@
     "build:package:win:publish": "npm run build:react && npm run build:electron && electron-builder --win nsis portable --x64 --publish=always",
     "clean": "node scripts/clean.js",
     "typecheck": "tsc --noEmit",
+    "lab:batch-cron": "bash ../scripts/setup_lab_batch_worker.sh",
+    "lab:batch-worker": "/usr/bin/python3 ../scripts/lab_batch_worker.py",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:changed": "node scripts/lint-changed.js",
     "lint:phase": "node scripts/lint-phase.js",

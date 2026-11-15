@@ -849,9 +849,23 @@ export class UserCenterService extends BaseApiClient {
 
   /**
    * 保存 LLM 配置 (API Key + Model + Base URL + 自定义请求头)
+   *
+   * `clearKey=true` 才是显式清除；普通保存时 apiKey 为空**不发送** qwen_api_key，
+   * 避免「只改模型/地址」把已保存的 Key 清掉（后端把显式空串当清除）。
    */
-  async saveLLMConfig(apiKey: string, model?: string, baseUrl?: string, provider?: string, extraHeaders?: string): Promise<{ success: boolean; message?: string }> {
-    return this.post('/ai-ide/config/llm', { qwen_api_key: apiKey, model, base_url: baseUrl, provider, extra_headers: extraHeaders });
+  async saveLLMConfig(
+    apiKey: string,
+    model?: string,
+    baseUrl?: string,
+    provider?: string,
+    extraHeaders?: string,
+    clearKey = false,
+  ): Promise<{ success: boolean; message?: string }> {
+    const body: Record<string, unknown> = {
+      model, base_url: baseUrl, provider, extra_headers: extraHeaders,
+    };
+    if (clearKey || apiKey.trim()) body.qwen_api_key = apiKey;
+    return this.post('/ai-ide/config/llm', body);
   }
 
   /**

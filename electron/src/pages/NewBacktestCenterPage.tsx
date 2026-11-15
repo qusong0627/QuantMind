@@ -18,6 +18,8 @@ import { ParameterOptimizationModule } from '../components/backtestCenter/Parame
 import { StrategyManagementModule } from '../components/backtestCenter/StrategyManagementModule';
 import { EnhancedAdvancedAnalysisModule } from '../components/backtestCenter/EnhancedAdvancedAnalysisModule';
 import { StrategyEditorModule } from '../components/backtestCenter/StrategyEditorModule';
+import MarketLabModule from '../components/backtestCenter/marketLab/MarketLabModule';
+import type { LabMarket } from '../components/backtestCenter/marketLab/api';
 import { useBacktestCenterStore, ModuleId } from '../stores/backtestCenterStore';
 import { MarketSelector } from '../components/layout/MarketSelector';
 import { Bell } from 'lucide-react';
@@ -35,7 +37,7 @@ export const NewBacktestCenterPage: React.FC = () => {
   // 组件挂载时，仅在 activeModule 为空或无效时重置为默认模块
   useEffect(() => {
     const validModules: ModuleId[] = [
-      'strategy-editor', 'quick-backtest', 'expert-mode', 'backtest-history',
+      'strategy-editor', 'market-lab', 'quick-backtest', 'expert-mode', 'backtest-history',
       'strategy-compare', 'parameter-optimize', 'strategy-management', 'advanced-analysis'
     ];
     if (!validModules.includes(activeModule)) {
@@ -48,6 +50,9 @@ export const NewBacktestCenterPage: React.FC = () => {
     switch (activeModule) {
       case 'strategy-editor':
         return <StrategyEditorModule />;
+      case 'market-lab':
+        // 右上角市场选择器（CN/HK/US/CRYPTO/FUTURES）→ 行情实验室数据面同步切换
+        return <MarketLabModule market={currentMarket.toLowerCase() as LabMarket} />;
       case 'quick-backtest':
         return <QlibQuickBacktest />;
       case 'expert-mode':
@@ -71,6 +76,7 @@ export const NewBacktestCenterPage: React.FC = () => {
   const getBreadcrumb = () => {
     const moduleNames: Record<ModuleId, string> = {
       'strategy-editor': '策略编辑',
+      'market-lab': '行情回测',
       'quick-backtest': '快速回测',
       'expert-mode': '专家模式',
       'backtest-history': '回测历史',
@@ -85,6 +91,8 @@ export const NewBacktestCenterPage: React.FC = () => {
   // 策略编辑是「工作台」不是「文档」：取消 contentOuter 的 24px 内边距，
   // 让 Monaco/参数栏/结果坞吃满 1150px 内容区（旧版卡片套卡片进一步压窄画布）。
   const isFullBleed = activeModule === 'parameter-optimize' || activeModule === 'strategy-editor';
+  // 行情回测自带页头与内边距（整页迁入），去掉外层 padding，但仍由外层滚动容器负责滚动
+  const isFlush = activeModule === 'market-lab';
 
   return (
     <div className={PAGE_LAYOUT.outerClass}>
@@ -154,7 +162,7 @@ export const NewBacktestCenterPage: React.FC = () => {
                 scrollbarColor: '#cbd5e1 #f1f5f9'
               }}
             >
-              <div className={`${isFullBleed ? 'h-full' : PAGE_LAYOUT.contentOuterClass} h-full`}>
+              <div className={`${isFullBleed || isFlush ? 'h-full' : PAGE_LAYOUT.contentOuterClass} h-full`}>
                 <AnimatePresence mode="wait">
                   <motion.div
                     key={activeModule}

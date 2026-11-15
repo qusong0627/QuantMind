@@ -1,19 +1,21 @@
 /**
- * arena（Quant Agent Trader）移植层 —— 本机实盘栏专用，整个 `agent-arena/` 目录不入库。
+ * arena（Quant Agent Trader）移植层 —— 本机实盘栏专用（源码自 2026-11-13 起随仓分发）。
  *
  * 对外只有两样东西：
- *  - `ARENA_TABS`：追加到交易台侧栏的三栏（智能体台账 / 盘中实况 / 行情回测）
+ *  - `ARENA_TABS`：追加到交易台侧栏的两栏（智能体台账 / 盘中实况）
  *  - `ARENA_SETTINGS_PANELS`：嵌进「设置」页的三块（总控 / 数据 / 关于）
  *
  * 页面代码来自 quant-Trader 的 arena 前端，由 `tools/port-from-arena.mjs` 搬运并
  * 作用域化（见同目录 PORTING.md）。要跟着 arena 更新，重跑那个脚本即可。
+ *
+ * 「行情回测」2026-11-15 已整体迁到回测中心（`components/backtestCenter/marketLab/`），
+ * 不再属于实盘栏；移植脚本的入口清单同步移除了 `pages/MarketLab.tsx`。
  */
-import { Activity, Blocks, Bot, BrainCircuit, Info, LayoutDashboard, Database } from 'lucide-react';
+import { Activity, Bot, BrainCircuit, Info, LayoutDashboard, Database } from 'lucide-react';
 import type { RealTradingExtraTab } from '../../../pages/trading/RealTradingPage';
 import type { SettingsExtraPanel } from '../../../pages/trading/tabs/SettingsCenter';
 import AgentLedgerTab from './tabs/AgentLedgerTab';
 import LiveTab from './tabs/LiveTab';
-import MarketLabTab from './tabs/MarketLabTab';
 import AboutPanel from './settings/AboutPanel';
 import ControlPanel from './settings/ControlPanel';
 import DataPanel from './settings/DataPanel';
@@ -35,7 +37,6 @@ export const ARENA_TABS: readonly RealTradingExtraTab[] = [
     render: () => <AgentLedgerTab />,
   },
   { id: 'arena-live', label: '盘中实况', icon: Activity, render: () => <LiveTab /> },
-  { id: 'arena-market-lab', label: '行情回测', icon: Blocks, render: () => <MarketLabTab /> },
 ];
 
 /** 设置页里的几块（顺序即设置页顶部按钮条上的顺序） */

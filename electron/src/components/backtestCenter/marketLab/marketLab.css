@@ -1,18 +1,39 @@
-/* 由 tools/port-from-arena.mjs 从 arena 生成：选择器已作用域化到 .qm-arena-root，勿手改 */
-/* 行情回测（quantdb K线 + 策略回测）— 终端风（2026-09-10 版式改版）
-   基调：与全站一致的新粗野——2px 黑框 + 硬阴影 + 等宽字体，
+/* 行情回测（quantdb K线 + 策略回测）— 终端风
+   2026-11-15 从「实盘交易」栏迁入回测中心：作用域 .market-lab-root → .market-lab-root，
+   不再依赖 arena 的主题层（下面四个变量原本由 arena 的 globals.css 提供）。 */
+
+.market-lab-root {
+  --text-tertiary: #666;
+  --bg-tertiary: #f5f5f5;
+  --up-color: #e0483e;
+  --down-color: #12b886;
+
+  color: #1a1a1a;
+  background: #fff;
+}
+
+.market-lab-root *,
+.market-lab-root *::before,
+.market-lab-root *::after {
+  box-sizing: border-box;
+}
+
+/* 基调：与全站一致的新粗野——2px 黑框 + 硬阴影 + 等宽字体，
    页头带说明、每栏是一块有名字的板子、结论先于明细。 */
 
-.qm-arena-root .lab-page {
+.market-lab-root .lab-page {
   max-width: 1440px;
   margin: 0 auto;
   padding: 16px 20px 60px;
   font-family: 'Courier New', monospace;
   color: #1a1a1a;
+  /* 三栏工作台的宽度断点按**内容区**算：嵌在回测中心（左侧还有 240px 导航）时
+     视口宽度不等于可用宽度，媒体查询会在 1440 屏上误判成宽屏。 */
+  container-type: inline-size;
 }
 
 /* ---------- 页头：标题带（左）+ 带说明的分段标签（右） ---------- */
-.qm-arena-root .lab-head {
+.market-lab-root .lab-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -23,7 +44,7 @@
   margin-bottom: 16px;
 }
 
-.qm-arena-root .lab-title h1 {
+.market-lab-root .lab-title h1 {
   font-size: 30px;
   font-weight: 700;
   letter-spacing: -0.5px;
@@ -31,7 +52,7 @@
   margin: 0;
 }
 
-.qm-arena-root .lab-sub {
+.market-lab-root .lab-sub {
   margin-top: 8px;
   font-size: 10px;
   letter-spacing: 0.14em;
@@ -39,11 +60,11 @@
 }
 
 /* ---------- 顶部标签：主标题 + 一句说明，自解释不必靠 hover ---------- */
-.qm-arena-root .lab-tabs {
+.market-lab-root .lab-tabs {
   display: flex;
 }
 
-.qm-arena-root .lab-tabs button {
+.market-lab-root .lab-tabs button {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -60,36 +81,36 @@
   transition: background 0.12s, color 0.12s;
 }
 
-.qm-arena-root .lab-tabs button:last-child {
+.market-lab-root .lab-tabs button:last-child {
   border-right: 2px solid #000;
 }
 
-.qm-arena-root .lab-tabs .t {
+.market-lab-root .lab-tabs .t {
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.02em;
 }
 
-.qm-arena-root .lab-tabs .h {
+.market-lab-root .lab-tabs .h {
   font-size: 9px;
   color: var(--text-tertiary);
 }
 
-.qm-arena-root .lab-tabs button:hover {
+.market-lab-root .lab-tabs button:hover {
   background: #f2f2f2;
 }
 
-.qm-arena-root .lab-tabs button.on {
+.market-lab-root .lab-tabs button.on {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-tabs button.on .h {
+.market-lab-root .lab-tabs button.on .h {
   color: #bbb;
 }
 
 /* ---------- 行情条：标的 / 名称 / 复权，一块板子 ---------- */
-.qm-arena-root .lab-k {
+.market-lab-root .lab-k {
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.14em;
@@ -97,7 +118,7 @@
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-chip {
+.market-lab-root .lab-chip {
   padding: 1px 7px;
   font-size: 9px;
   font-weight: 700;
@@ -105,20 +126,20 @@
   border: 1px solid #000;
 }
 
-.qm-arena-root .lab-search {
+.market-lab-root .lab-search {
   display: flex;
   align-items: center;
   gap: 9px;
   flex: 0 1 300px;
 }
 
-.qm-arena-root .lab-input-wrap {
+.market-lab-root .lab-input-wrap {
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.qm-arena-root .lab-search input {
+.market-lab-root .lab-search input {
   width: 100%;
   padding: 6px 9px;
   font-size: 11px;
@@ -129,11 +150,11 @@
   outline: none;
 }
 
-.qm-arena-root .lab-search input:focus {
+.market-lab-root .lab-search input:focus {
   box-shadow: inset 0 -2px 0 #000;
 }
 
-.qm-arena-root .lab-hits {
+.market-lab-root .lab-hits {
   position: absolute;
   z-index: 30;
   top: 100%;
@@ -149,7 +170,7 @@
   border-top: none;
 }
 
-.qm-arena-root .lab-hits li {
+.market-lab-root .lab-hits li {
   display: flex;
   gap: 10px;
   padding: 5px 9px;
@@ -157,32 +178,32 @@
   cursor: pointer;
 }
 
-.qm-arena-root .lab-hits li:hover {
+.market-lab-root .lab-hits li:hover {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-hits .code {
+.market-lab-root .lab-hits .code {
   font-family: 'Courier New', monospace;
   min-width: 74px;
 }
 
-.qm-arena-root .lab-hits .name {
+.market-lab-root .lab-hits .name {
   color: #666;
 }
 
-.qm-arena-root .lab-hits li:hover .name {
+.market-lab-root .lab-hits li:hover .name {
   color: #ccc;
 }
 
-.qm-arena-root .lab-symbol {
+.market-lab-root .lab-symbol {
   display: flex;
   align-items: center;
   gap: 9px;
   min-width: 0;
 }
 
-.qm-arena-root .lab-symbol strong {
+.market-lab-root .lab-symbol strong {
   font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.3px;
@@ -191,23 +212,23 @@
   text-overflow: ellipsis;
 }
 
-.qm-arena-root .lab-symbol .code {
+.market-lab-root .lab-symbol .code {
   font-size: 11px;
   color: #666;
 }
 
-.qm-arena-root .lab-adj {
+.market-lab-root .lab-adj {
   display: flex;
   align-items: center;
   gap: 9px;
   margin-left: auto;
 }
 
-.qm-arena-root .lab-adj .seg {
+.market-lab-root .lab-adj .seg {
   display: flex;
 }
 
-.qm-arena-root .lab-adj button {
+.market-lab-root .lab-adj button {
   padding: 4px 11px;
   font-size: 10px;
   font-weight: 700;
@@ -219,21 +240,63 @@
   cursor: pointer;
 }
 
-.qm-arena-root .lab-adj button:last-child {
+.market-lab-root .lab-adj button:last-child {
   border-right: 1.5px solid #000;
 }
 
-.qm-arena-root .lab-adj button:hover {
+.market-lab-root .lab-adj button:hover {
   background: #f2f2f2;
 }
 
-.qm-arena-root .lab-adj button.on,
-.qm-arena-root .lab-adj button.on:hover {
+.market-lab-root .lab-adj button.on,
+.market-lab-root .lab-adj button.on:hover {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-err {
+/* 周期切换（日线 / 5分钟 / 1分钟）：与复权分段按钮同一视觉语言 */
+.market-lab-root .lab-freq {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.market-lab-root .lab-freq .seg {
+  display: flex;
+}
+
+.market-lab-root .lab-freq button {
+  padding: 4px 11px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  border-right: none;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+}
+
+.market-lab-root .lab-freq button:last-child {
+  border-right: 1.5px solid #000;
+}
+
+.market-lab-root .lab-freq button:hover {
+  background: #f2f2f2;
+}
+
+.market-lab-root .lab-freq button.on,
+.market-lab-root .lab-freq button.on:hover {
+  background: #000;
+  color: #fff;
+}
+
+.market-lab-root .lab-freq button.unavailable {
+  color: #999;
+  border-style: dashed;
+}
+
+.market-lab-root .lab-err {
   margin-bottom: 12px;
   padding: 7px 10px;
   font-size: 11px;
@@ -244,7 +307,7 @@
   background: #fff5f5;
 }
 
-.qm-arena-root .lab-chart {
+.market-lab-root .lab-chart {
   position: relative;
   border: 2px solid #000;
   box-shadow: 4px 4px 0 #000;
@@ -252,11 +315,16 @@
   padding: 2px;
 }
 
-.qm-arena-root .kline-box {
+.market-lab-root .kline-box {
   width: 100%;
 }
 
-.qm-arena-root .lab-mask {
+/* 净值曲线容器（EquityLineChart）：与 K 线同宽，高度由组件内联 */
+.market-lab-root .lab-equity-box {
+  width: 100%;
+}
+
+.market-lab-root .lab-mask {
   position: absolute;
   inset: 0;
   z-index: 10;
@@ -270,7 +338,7 @@
 }
 
 /* K 线底部工具条：左meta / 右按钮组（按钮独立成组，别再各自 auto 外边距分家） */
-.qm-arena-root .lab-hint {
+.market-lab-root .lab-hint {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -282,14 +350,14 @@
   background: var(--bg-tertiary);
 }
 
-.qm-arena-root .lab-tools {
+.market-lab-root .lab-tools {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-left: auto;
 }
 
-.qm-arena-root .lab-span {
+.market-lab-root .lab-span {
   padding: 3px 9px;
   font-size: 10px;
   font-weight: 700;
@@ -301,13 +369,13 @@
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-span:hover {
+.market-lab-root .lab-span:hover {
   background: #000;
   color: #fff;
 }
 
 /* 指标图例：色块与 K 线上的线一一对应（副图按调用点分组，组间用竖线隔开） */
-.qm-arena-root .lab-legend {
+.market-lab-root .lab-legend {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -319,19 +387,19 @@
   color: #444;
 }
 
-.qm-arena-root .lab-legend-item {
+.market-lab-root .lab-legend-item {
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
-.qm-arena-root .lab-legend-item i {
+.market-lab-root .lab-legend-item i {
   width: 10px;
   height: 3px;
   border-radius: 1px;
 }
 
-.qm-arena-root .lab-legend-group {
+.market-lab-root .lab-legend-group {
   display: inline-flex;
   align-items: center;
   gap: 10px;
@@ -340,19 +408,19 @@
 }
 
 /* ---------- 右侧面板 ---------- */
-.qm-arena-root .lab-panel {
+.market-lab-root .lab-panel {
   display: flex;
   flex-direction: column;
   gap: 14px;
 }
 
-.qm-arena-root .lab-panel-block {
+.market-lab-root .lab-panel-block {
   border: 2px solid #000;
   background: #fff;
   padding: 12px;
 }
 
-.qm-arena-root .lab-block-title {
+.market-lab-root .lab-block-title {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -366,7 +434,7 @@
   border-bottom: 2px solid #000;
 }
 
-.qm-arena-root .lab-panel select {
+.market-lab-root .lab-panel select {
   width: 100%;
   padding: 5px 7px;
   font-size: 11px;
@@ -377,14 +445,14 @@
   outline: none;
 }
 
-.qm-arena-root .lab-desc {
+.market-lab-root .lab-desc {
   margin: 8px 0 0;
   font-size: 10px;
   line-height: 1.7;
   color: #555;
 }
 
-.qm-arena-root .lab-params {
+.market-lab-root .lab-params {
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -393,7 +461,7 @@
   border-top: 1px dashed #ddd;
 }
 
-.qm-arena-root .lab-params label {
+.market-lab-root .lab-params label {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -402,7 +470,7 @@
   color: #333;
 }
 
-.qm-arena-root .lab-params input {
+.market-lab-root .lab-params input {
   width: 92px;
   padding: 5px 7px;
   font-size: 11px;
@@ -413,11 +481,11 @@
   outline: none;
 }
 
-.qm-arena-root .lab-params input:focus {
+.market-lab-root .lab-params input:focus {
   box-shadow: inset 0 0 0 1px #000;
 }
 
-.qm-arena-root .lab-run {
+.market-lab-root .lab-run {
   width: 100%;
   margin-top: 12px;
   padding: 11px 0;
@@ -433,21 +501,21 @@
   transition: background 0.12s, color 0.12s, box-shadow 0.12s, transform 0.12s;
 }
 
-.qm-arena-root .lab-run:hover:not(:disabled) {
+.market-lab-root .lab-run:hover:not(:disabled) {
   background: #fff;
   color: #000;
   box-shadow: 1px 1px 0 #000;
   transform: translate(3px, 3px);
 }
 
-.qm-arena-root .lab-run:disabled {
+.market-lab-root .lab-run:disabled {
   opacity: 0.45;
   cursor: not-allowed;
   box-shadow: none;
 }
 
 /* ---------- 统计卡：头号指标放大跨两格，其余等权小格 ---------- */
-.qm-arena-root .lab-stats {
+.market-lab-root .lab-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
   gap: 1px;
@@ -455,7 +523,7 @@
   border: 1px solid #ddd;
 }
 
-.qm-arena-root .lab-stat {
+.market-lab-root .lab-stat {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -463,62 +531,62 @@
   background: #fff;
 }
 
-.qm-arena-root .lab-stat .k {
+.market-lab-root .lab-stat .k {
   font-size: 9px;
   color: var(--text-tertiary);
   letter-spacing: 0.08em;
 }
 
-.qm-arena-root .lab-stat .v {
+.market-lab-root .lab-stat .v {
   font-size: 13px;
   font-weight: 700;
   font-family: 'Courier New', monospace;
   font-variant-numeric: tabular-nums;
 }
 
-.qm-arena-root .lab-stat.hero {
+.market-lab-root .lab-stat.hero {
   grid-column: span 2;
   padding: 12px 14px;
 }
 
-.qm-arena-root .lab-stat.hero .k {
+.market-lab-root .lab-stat.hero .k {
   font-size: 10px;
 }
 
-.qm-arena-root .lab-stat.hero .v {
+.market-lab-root .lab-stat.hero .v {
   font-size: 26px;
   letter-spacing: -0.5px;
   line-height: 1.15;
 }
 
-.qm-arena-root .lab-stat.up .v {
+.market-lab-root .lab-stat.up .v {
   color: var(--up-color);
 }
 
-.qm-arena-root .lab-stat.down .v {
+.market-lab-root .lab-stat.down .v {
   color: var(--down-color);
 }
 
-.qm-arena-root .lab-equity,
-.qm-arena-root .lab-trades {
+.market-lab-root .lab-equity,
+.market-lab-root .lab-trades {
   border: 2px solid #000;
   background: #fff;
   padding: 12px;
 }
 
-.qm-arena-root .lab-table-wrap {
+.market-lab-root .lab-table-wrap {
   max-height: 200px;
   overflow-y: auto;
 }
 
-.qm-arena-root .lab-trades table {
+.market-lab-root .lab-trades table {
   width: 100%;
   border-collapse: collapse;
   font-size: 10px;
   font-family: 'Courier New', monospace;
 }
 
-.qm-arena-root .lab-trades th {
+.market-lab-root .lab-trades th {
   position: sticky;
   top: 0;
   padding: 5px 6px;
@@ -529,28 +597,28 @@
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-trades th.num,
-.qm-arena-root .lab-trades td.num {
+.market-lab-root .lab-trades th.num,
+.market-lab-root .lab-trades td.num {
   text-align: right;
 }
 
-.qm-arena-root .lab-trades td {
+.market-lab-root .lab-trades td {
   padding: 4px 6px;
   border-bottom: 1px solid #f0f0f0;
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-trades tr.up td:last-child {
+.market-lab-root .lab-trades tr.up td:last-child {
   color: #e2373b;
 }
 
-.qm-arena-root .lab-trades tr.down td:last-child {
+.market-lab-root .lab-trades tr.down td:last-child {
   color: #1a9e5c;
 }
 
 /* ---------- 批量回测（策略排行 / 单策略选股） ---------- */
 
-.qm-arena-root .lab-empty {
+.market-lab-root .lab-empty {
   padding: 30px 16px;
   font-size: 11px;
   line-height: 1.9;
@@ -561,14 +629,14 @@
   background: #fcfcfc;
 }
 
-.qm-arena-root .lab-empty b {
+.market-lab-root .lab-empty b {
   display: block;
   margin-bottom: 6px;
   font-size: 12px;
   color: #000;
 }
 
-.qm-arena-root .lab-empty code {
+.market-lab-root .lab-empty code {
   display: inline-block;
   margin-top: 8px;
   padding: 3px 8px;
@@ -576,7 +644,7 @@
   background: #000;
 }
 
-.qm-arena-root .lab-batch-bar {
+.market-lab-root .lab-batch-bar {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -587,7 +655,7 @@
   margin-bottom: 0;
 }
 
-.qm-arena-root .lab-batch-bar label {
+.market-lab-root .lab-batch-bar label {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -597,8 +665,8 @@
   color: var(--text-tertiary);
 }
 
-.qm-arena-root .lab-batch-bar select,
-.qm-arena-root .lab-screen-bar select {
+.market-lab-root .lab-batch-bar select,
+.market-lab-root .lab-screen-bar select {
   padding: 6px 9px;
   font-size: 11px;
   font-family: inherit;
@@ -609,14 +677,14 @@
   max-width: 320px;
 }
 
-.qm-arena-root .lab-batch-meta {
+.market-lab-root .lab-batch-meta {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   margin-left: auto;
 }
 
-.qm-arena-root .lab-batch-meta span {
+.market-lab-root .lab-batch-meta span {
   padding: 2px 8px;
   font-size: 10px;
   font-family: 'Courier New', monospace;
@@ -625,7 +693,7 @@
   background: #fafafa;
 }
 
-.qm-arena-root .lab-batch-body {
+.market-lab-root .lab-batch-body {
   border: 2px solid #000;
   background: #fff;
   box-shadow: 5px 5px 0 #000;
@@ -633,23 +701,23 @@
 }
 
 /* 批次结论带：进页先给答案（谁最强/谁最稳），明细留给下面的表 */
-.qm-arena-root .lab-hero {
+.market-lab-root .lab-hero {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   border-bottom: 2px solid #000;
 }
 
-.qm-arena-root .lab-hero-cell {
+.market-lab-root .lab-hero-cell {
   padding: 12px 14px;
   border-right: 1px solid #ddd;
   min-width: 0;
 }
 
-.qm-arena-root .lab-hero-cell:last-child {
+.market-lab-root .lab-hero-cell:last-child {
   border-right: none;
 }
 
-.qm-arena-root .lab-hero-k {
+.market-lab-root .lab-hero-k {
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.14em;
@@ -657,7 +725,7 @@
   color: var(--text-tertiary);
 }
 
-.qm-arena-root .lab-hero-v {
+.market-lab-root .lab-hero-v {
   margin-top: 7px;
   font-size: 17px;
   font-weight: 700;
@@ -668,7 +736,7 @@
   text-overflow: ellipsis;
 }
 
-.qm-arena-root .lab-hero-s {
+.market-lab-root .lab-hero-s {
   margin-top: 5px;
   font-size: 10px;
   color: var(--text-tertiary);
@@ -678,14 +746,14 @@
 }
 
 /* 跑新批次的命令：默认收起，别再拿一坨命令行占着头屏 */
-.qm-arena-root .lab-cmd {
+.market-lab-root .lab-cmd {
   border: 2px solid #000;
   border-top: none;
   background: #fafafa;
   margin-bottom: 14px;
 }
 
-.qm-arena-root .lab-cmd summary {
+.market-lab-root .lab-cmd summary {
   padding: 8px 14px;
   font-size: 10px;
   font-weight: 700;
@@ -694,14 +762,14 @@
   cursor: pointer;
 }
 
-.qm-arena-root .lab-cmd-body {
+.market-lab-root .lab-cmd-body {
   padding: 0 14px 12px;
   font-size: 10px;
   line-height: 1.9;
   color: #777;
 }
 
-.qm-arena-root .lab-cmd-body code {
+.market-lab-root .lab-cmd-body code {
   display: block;
   margin-top: 7px;
   padding: 7px 10px;
@@ -711,7 +779,7 @@
   white-space: pre;
 }
 
-.qm-arena-root .lab-screen-bar {
+.market-lab-root .lab-screen-bar {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -721,11 +789,11 @@
 }
 
 /* 选股页的结论带夹在控制条与表格之间，得自己带上边框 */
-.qm-arena-root .lab-screen-bar + .lab-hero {
+.market-lab-root .lab-screen-bar + .lab-hero {
   border-top: 2px solid #000;
 }
 
-.qm-arena-root .lab-screen-bar label {
+.market-lab-root .lab-screen-bar label {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -735,26 +803,26 @@
   color: var(--text-tertiary);
 }
 
-.qm-arena-root .lab-screen-stat {
+.market-lab-root .lab-screen-stat {
   margin-left: auto;
   font-size: 10px;
   font-family: 'Courier New', monospace;
   color: var(--text-tertiary);
 }
 
-.qm-arena-root .lab-table-tall {
+.market-lab-root .lab-table-tall {
   max-height: 620px;
 }
 
 /* 排行/选股表：数字列一律等宽右对齐，条形嵌在收益列里 */
-.qm-arena-root .lab-rank {
+.market-lab-root .lab-rank {
   width: 100%;
   border-collapse: collapse;
   font-size: 11px;
   font-family: 'Courier New', monospace;
 }
 
-.qm-arena-root .lab-rank th {
+.market-lab-root .lab-rank th {
   position: sticky;
   top: 0;
   z-index: 1;
@@ -770,28 +838,28 @@
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-rank th.num,
-.qm-arena-root .lab-rank td.num {
+.market-lab-root .lab-rank th.num,
+.market-lab-root .lab-rank td.num {
   text-align: right;
 }
 
-.qm-arena-root .lab-rank td {
+.market-lab-root .lab-rank td {
   padding: 8px 10px;
   border-bottom: 1px solid #eee;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
-.qm-arena-root .lab-rank tbody tr:hover {
+.market-lab-root .lab-rank tbody tr:hover {
   background: rgba(0, 0, 0, 0.035);
 }
 
-.qm-arena-root .lab-rank .idx {
+.market-lab-root .lab-rank .idx {
   width: 44px;
 }
 
 /* 名次徽章：前三名描边加重，第一名实心 */
-.qm-arena-root .lab-idx {
+.market-lab-root .lab-idx {
   display: inline-block;
   min-width: 22px;
   padding: 2px 0;
@@ -800,22 +868,22 @@
   color: #aaa;
 }
 
-.qm-arena-root .lab-idx.top {
+.market-lab-root .lab-idx.top {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-idx.medal {
+.market-lab-root .lab-idx.medal {
   border: 1.5px solid #000;
   color: #000;
 }
 
-.qm-arena-root .lab-rank .name {
+.market-lab-root .lab-rank .name {
   font-family: inherit;
   font-weight: 700;
 }
 
-.qm-arena-root .lab-rank .name .code {
+.market-lab-root .lab-rank .name .code {
   margin-left: 7px;
   font-family: 'Courier New', monospace;
   font-size: 10px;
@@ -823,40 +891,40 @@
   color: #999;
 }
 
-.qm-arena-root .lab-rank td.up {
+.market-lab-root .lab-rank td.up {
   color: var(--up-color);
 }
 
-.qm-arena-root .lab-rank td.down {
+.market-lab-root .lab-rank td.down {
   color: var(--down-color);
 }
 
-.qm-arena-root .lab-rank .range {
+.market-lab-root .lab-rank .range {
   color: #999;
   font-size: 10px;
 }
 
 /* 选股表可点行 */
-.qm-arena-root .lab-rank tbody tr {
+.market-lab-root .lab-rank tbody tr {
   cursor: default;
 }
 
-.qm-arena-root .lab-rank tbody tr[title] {
+.market-lab-root .lab-rank tbody tr[title] {
   cursor: pointer;
 }
 
-.qm-arena-root .lab-rank tbody tr[title]:hover {
+.market-lab-root .lab-rank tbody tr[title]:hover {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-rank tbody tr[title]:hover .name .code,
-.qm-arena-root .lab-rank tbody tr[title]:hover .range {
+.market-lab-root .lab-rank tbody tr[title]:hover .name .code,
+.market-lab-root .lab-rank tbody tr[title]:hover .range {
   color: #ccc;
 }
 
 /* 均值净收益量级条（类名与工作台的 .lab-bar 行情条分开，别再撞名） */
-.qm-arena-root .lab-mag {
+.market-lab-root .lab-mag {
   display: block;
   width: 72px;
   height: 6px;
@@ -865,20 +933,20 @@
   border: 1px solid #ddd;
 }
 
-.qm-arena-root .lab-mag i {
+.market-lab-root .lab-mag i {
   display: block;
   height: 100%;
 }
 
-.qm-arena-root .lab-mag i.pos {
+.market-lab-root .lab-mag i.pos {
   background: var(--up-color);
 }
 
-.qm-arena-root .lab-mag i.neg {
+.market-lab-root .lab-mag i.neg {
   background: var(--down-color);
 }
 
-.qm-arena-root .lab-note {
+.market-lab-root .lab-note {
   margin: 9px 0 0;
   font-size: 10px;
   line-height: 1.8;
@@ -886,18 +954,18 @@
 }
 
 /* 批次口径脚注：贴在表格板子底部，与明细分开 */
-.qm-arena-root .lab-batch-body > .lab-note {
+.market-lab-root .lab-batch-body > .lab-note {
   margin: 0;
   padding: 10px 14px;
   border-top: 1px solid #ddd;
   background: var(--bg-tertiary);
 }
 
-.qm-arena-root .lab-note-top {
+.market-lab-root .lab-note-top {
   margin: 0 0 12px;
 }
 
-.qm-arena-root .lab-note code {
+.market-lab-root .lab-note code {
   margin: 0 3px;
   padding: 1px 5px;
   font-family: 'Courier New', monospace;
@@ -906,61 +974,61 @@
 }
 
 @media (max-width: 1080px) {
-  .qm-arena-root .lab-head {
+  .market-lab-root .lab-head {
     align-items: flex-start;
   }
 
-  .qm-arena-root .lab-tabs {
+  .market-lab-root .lab-tabs {
     flex-wrap: wrap;
   }
 
-  .qm-arena-root .lab-tabs button {
+  .market-lab-root .lab-tabs button {
     min-width: 0;
   }
 
-  .qm-arena-root .lab-batch-bar {
+  .market-lab-root .lab-batch-bar {
     align-items: flex-start;
     flex-direction: column;
     gap: 9px;
   }
 
-  .qm-arena-root .lab-batch-meta,
-  .qm-arena-root .lab-screen-stat {
+  .market-lab-root .lab-batch-meta,
+  .market-lab-root .lab-screen-stat {
     margin-left: 0;
   }
 
-  .qm-arena-root .lab-hero {
+  .market-lab-root .lab-hero {
     grid-template-columns: 1fr 1fr;
   }
 
-  .qm-arena-root .lab-hero-cell:nth-child(1),
-  .qm-arena-root .lab-hero-cell:nth-child(2) {
+  .market-lab-root .lab-hero-cell:nth-child(1),
+  .market-lab-root .lab-hero-cell:nth-child(2) {
     border-bottom: 1px solid #ddd;
   }
 
-  .qm-arena-root .lab-hero-cell:nth-child(2) {
+  .market-lab-root .lab-hero-cell:nth-child(2) {
     border-right: none;
   }
 }
 
-.qm-arena-root .lab-rank td.cat {
+.market-lab-root .lab-rank td.cat {
   font-family: inherit;
   font-size: 10px;
   color: #666;
 }
 
-.qm-arena-root .lab-rank tbody tr.on {
+.market-lab-root .lab-rank tbody tr.on {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-rank tbody tr.on .code,
-.qm-arena-root .lab-rank tbody tr.on .cat,
-.qm-arena-root .lab-rank tbody tr.on .idx {
+.market-lab-root .lab-rank tbody tr.on .code,
+.market-lab-root .lab-rank tbody tr.on .cat,
+.market-lab-root .lab-rank tbody tr.on .idx {
   color: #ccc;
 }
 
-.qm-arena-root .dot {
+.market-lab-root .dot {
   display: inline-block;
   width: 6px;
   height: 6px;
@@ -969,15 +1037,15 @@
   vertical-align: 1px;
 }
 
-.qm-arena-root .dot.ok {
+.market-lab-root .dot.ok {
   background: #1a9e5c;
 }
 
-.qm-arena-root .dot.bad {
+.market-lab-root .dot.bad {
   background: #e8a33d;
 }
 
-.qm-arena-root .lab-more {
+.market-lab-root .lab-more {
   width: 100%;
   margin-top: 8px;
   padding: 6px 0;
@@ -989,41 +1057,41 @@
   cursor: pointer;
 }
 
-.qm-arena-root .lab-more:hover:not(:disabled) {
+.market-lab-root .lab-more:hover:not(:disabled) {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-more:disabled {
+.market-lab-root .lab-more:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-.qm-arena-root .lab-lib-title {
+.market-lab-root .lab-lib-title {
   display: flex;
   align-items: baseline;
   gap: 8px;
   margin-bottom: 6px;
 }
 
-.qm-arena-root .lab-lib-title strong {
+.market-lab-root .lab-lib-title strong {
   font-size: 12px;
   font-weight: 700;
 }
 
-.qm-arena-root .lab-lib-title .code {
+.market-lab-root .lab-lib-title .code {
   font-family: 'Courier New', monospace;
   font-size: 10px;
   color: #999;
 }
 
-.qm-arena-root .lab-lib-tags {
+.market-lab-root .lab-lib-tags {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
 }
 
-.qm-arena-root .tag {
+.market-lab-root .tag {
   padding: 2px 7px;
   font-size: 10px;
   font-family: 'Courier New', monospace;
@@ -1033,19 +1101,19 @@
   text-decoration: none;
 }
 
-.qm-arena-root .tag.warn {
+.market-lab-root .tag.warn {
   border-color: #e8a33d;
   color: #a9701a;
   background: #fff9f0;
 }
 
-.qm-arena-root .tag.link:hover {
+.market-lab-root .tag.link:hover {
   background: #000;
   color: #fff;
   border-color: #000;
 }
 
-.qm-arena-root .lab-lib-editor {
+.market-lab-root .lab-lib-editor {
   width: 100%;
   height: 520px;
   padding: 8px;
@@ -1062,12 +1130,12 @@
   resize: vertical;
 }
 
-.qm-arena-root .lab-lib-editor:focus {
+.market-lab-root .lab-lib-editor:focus {
   background: #fff;
   box-shadow: inset 0 0 0 1px #000;
 }
 
-.qm-arena-root .lab-transpile {
+.market-lab-root .lab-transpile {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1079,20 +1147,20 @@
   background: #fafafa;
 }
 
-.qm-arena-root .lab-transpile-stats {
+.market-lab-root .lab-transpile-stats {
   font-size: 10px;
   font-family: 'Courier New', monospace;
   color: #555;
 }
 
-.qm-arena-root .lab-lib-actions {
+.market-lab-root .lab-lib-actions {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-top: 8px;
 }
 
-.qm-arena-root .lab-lib-run label {
+.market-lab-root .lab-lib-run label {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1101,7 +1169,7 @@
   color: #555;
 }
 
-.qm-arena-root .lab-lib-save {
+.market-lab-root .lab-lib-save {
   flex: 0 0 auto;
   width: auto;
   min-width: 104px;
@@ -1110,7 +1178,7 @@
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-lib-actions .lab-more {
+.market-lab-root .lab-lib-actions .lab-more {
   flex: 0 0 auto;
   width: auto;
   margin-top: 0;
@@ -1118,27 +1186,27 @@
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-lib-msg {
+.market-lab-root .lab-lib-msg {
   font-size: 10px;
   font-family: 'Courier New', monospace;
   color: #1a9e5c;
 }
 
-.qm-arena-root .lab-lib-msg.err {
+.market-lab-root .lab-lib-msg.err {
   color: #e2373b;
 }
 
 @media (max-width: 1080px) {
   
 
-  .qm-arena-root .lab-lib-editor {
+  .market-lab-root .lab-lib-editor {
     height: 360px;
   }
 }
 
 /* ---------- 工作台：三栏（策略 / K线结果 / 运行与备注） ---------- */
 
-.qm-arena-root .lab-bar {
+.market-lab-root .lab-bar {
   display: flex;
   align-items: center;
   gap: 18px;
@@ -1149,19 +1217,19 @@
   background: #fff;
 }
 
-.qm-arena-root .lab-wb {
+.market-lab-root .lab-wb {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr) 320px;
   gap: 16px;
   align-items: start;
 }
 
-.qm-arena-root .lab-hidden {
+.market-lab-root .lab-hidden {
   display: none;
 }
 
 /* 左栏 */
-.qm-arena-root .lab-rail {
+.market-lab-root .lab-rail {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1173,22 +1241,22 @@
   padding: 10px;
 }
 
-.qm-arena-root .lab-rail-sec {
+.market-lab-root .lab-rail-sec {
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
-.qm-arena-root .lab-rail-grow {
+.market-lab-root .lab-rail-grow {
   flex: 1 1 auto;
 }
 
-.qm-arena-root .lab-rail-sec + .lab-rail-sec {
+.market-lab-root .lab-rail-sec + .lab-rail-sec {
   padding-top: 10px;
   border-top: 1px solid #000;
 }
 
-.qm-arena-root .lab-rail-title {
+.market-lab-root .lab-rail-title {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1203,11 +1271,11 @@
 }
 
 /* 标题文字必须是独立元素：直接当 flex 匿名项会被右侧计数挤断行（"PIN / E"） */
-.qm-arena-root .lab-rail-title .t {
+.market-lab-root .lab-rail-title .t {
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-rail-count {
+.market-lab-root .lab-rail-count {
   margin-left: auto;
   padding: 0 6px;
   font-weight: 400;
@@ -1216,15 +1284,15 @@
   border: 1px solid #ddd;
 }
 
-.qm-arena-root .lab-rail-filter {
+.market-lab-root .lab-rail-filter {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin-bottom: 8px;
 }
 
-.qm-arena-root .lab-rail-filter select,
-.qm-arena-root .lab-rail-filter input {
+.market-lab-root .lab-rail-filter select,
+.market-lab-root .lab-rail-filter input {
   width: 100%;
   padding: 5px 7px;
   font-size: 11px;
@@ -1235,37 +1303,37 @@
   outline: none;
 }
 
-.qm-arena-root .lab-tpl-list,
-.qm-arena-root .lab-pine-list {
+.market-lab-root .lab-tpl-list,
+.market-lab-root .lab-pine-list {
   margin: 0;
   padding: 0;
   list-style: none;
   overflow-y: auto;
 }
 
-.qm-arena-root .lab-tpl-list li {
+.market-lab-root .lab-tpl-list li {
   padding: 6px 7px;
   border: 1px solid transparent;
   border-bottom: 1px solid #f0f0f0;
   cursor: pointer;
 }
 
-.qm-arena-root .lab-tpl-list li:hover {
+.market-lab-root .lab-tpl-list li:hover {
   background: #fafafa;
 }
 
-.qm-arena-root .lab-tpl-list li.on {
+.market-lab-root .lab-tpl-list li.on {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-tpl-list .n {
+.market-lab-root .lab-tpl-list .n {
   display: block;
   font-size: 11px;
   font-weight: 700;
 }
 
-.qm-arena-root .lab-tpl-list .d {
+.market-lab-root .lab-tpl-list .d {
   display: block;
   margin-top: 2px;
   font-size: 9px;
@@ -1273,43 +1341,43 @@
   color: #777;
 }
 
-.qm-arena-root .lab-tpl-list li.on .d {
+.market-lab-root .lab-tpl-list li.on .d {
   color: #ccc;
 }
 
-.qm-arena-root .lab-pine-list {
+.market-lab-root .lab-pine-list {
   flex: 1 1 auto;
   min-height: 0;
 }
 
-.qm-arena-root .lab-pine-list li {
+.market-lab-root .lab-pine-list li {
   padding: 5px 7px;
   border-bottom: 1px solid #f0f0f0;
   cursor: pointer;
 }
 
-.qm-arena-root .lab-pine-list li:hover {
+.market-lab-root .lab-pine-list li:hover {
   background: #fafafa;
 }
 
-.qm-arena-root .lab-pine-list li.on {
+.market-lab-root .lab-pine-list li.on {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-pine-row {
+.market-lab-root .lab-pine-row {
   display: flex;
   align-items: baseline;
   gap: 6px;
 }
 
-.qm-arena-root .lab-pine-row .i {
+.market-lab-root .lab-pine-row .i {
   font-size: 9px;
   font-family: 'Courier New', monospace;
   color: #bbb;
 }
 
-.qm-arena-root .lab-pine-row .n {
+.market-lab-root .lab-pine-row .n {
   flex: 1 1 auto;
   min-width: 0;
   font-size: 11px;
@@ -1319,13 +1387,13 @@
   white-space: nowrap;
 }
 
-.qm-arena-root .lab-pine-row .b {
+.market-lab-root .lab-pine-row .b {
   display: flex;
   gap: 3px;
   flex: 0 0 auto;
 }
 
-.qm-arena-root .lab-pine-row em {
+.market-lab-root .lab-pine-row em {
   padding: 0 3px;
   font-size: 8px;
   font-style: normal;
@@ -1334,45 +1402,45 @@
   color: #1a9e5c;
 }
 
-.qm-arena-root .lab-pine-row em.edited {
+.market-lab-root .lab-pine-row em.edited {
   border-color: #a9701a;
   color: #a9701a;
 }
 
-.qm-arena-root .lab-pine-row em.rep {
+.market-lab-root .lab-pine-row em.rep {
   border-color: #555;
   color: #555;
 }
 
-.qm-arena-root .lab-pine-list li.on .lab-pine-row em {
+.market-lab-root .lab-pine-list li.on .lab-pine-row em {
   border-color: #ccc;
   color: #ccc;
 }
 
-.qm-arena-root .lab-pine-sub {
+.market-lab-root .lab-pine-sub {
   margin-top: 2px;
   font-size: 9px;
   font-family: 'Courier New', monospace;
   color: #999;
 }
 
-.qm-arena-root .lab-pine-sub .dot {
+.market-lab-root .lab-pine-sub .dot {
   margin: 0 5px 0 7px;
 }
 
 /* 中栏 */
-.qm-arena-root .lab-center {
+.market-lab-root .lab-center {
   display: flex;
   flex-direction: column;
   gap: 14px;
   min-width: 0;
 }
 
-.qm-arena-root .lab-center .lab-table-wrap {
+.market-lab-root .lab-center .lab-table-wrap {
   max-height: 360px;
 }
 
-.qm-arena-root .lab-tag-src {
+.market-lab-root .lab-tag-src {
   margin-left: auto;
   padding: 1px 6px;
   font-size: 9px;
@@ -1383,7 +1451,7 @@
   color: #666;
 }
 
-.qm-arena-root .lab-warn {
+.market-lab-root .lab-warn {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1396,7 +1464,7 @@
   color: #a9701a;
 }
 
-.qm-arena-root .lab-warn button {
+.market-lab-root .lab-warn button {
   padding: 2px 8px;
   font-size: 10px;
   font-weight: 700;
@@ -1407,19 +1475,19 @@
   cursor: pointer;
 }
 
-.qm-arena-root .lab-warn button:hover {
+.market-lab-root .lab-warn button:hover {
   background: #a9701a;
   color: #fff;
 }
 
 /* 右栏：备注 / 对话 */
-.qm-arena-root .lab-subtabs {
+.market-lab-root .lab-subtabs {
   display: flex;
   margin-bottom: 9px;
   border-bottom: 1px solid #000;
 }
 
-.qm-arena-root .lab-subtabs button {
+.market-lab-root .lab-subtabs button {
   padding: 4px 12px;
   font-size: 10px;
   font-weight: 700;
@@ -1431,16 +1499,16 @@
   cursor: pointer;
 }
 
-.qm-arena-root .lab-subtabs button.on {
+.market-lab-root .lab-subtabs button.on {
   background: #000;
   color: #fff;
 }
 
-.qm-arena-root .lab-src {
+.market-lab-root .lab-src {
   margin-top: 10px;
 }
 
-.qm-arena-root .lab-src summary {
+.market-lab-root .lab-src summary {
   padding: 5px 0;
   font-size: 10px;
   font-weight: 700;
@@ -1450,13 +1518,13 @@
   border-bottom: 1px solid #000;
 }
 
-.qm-arena-root .lab-src .lab-lib-editor {
+.market-lab-root .lab-src .lab-lib-editor {
   height: 320px;
   margin-top: 8px;
 }
 
 /* 备注编辑器 */
-.qm-arena-root .lab-note-edit {
+.market-lab-root .lab-note-edit {
   width: 100%;
   height: 150px;
   padding: 7px 8px;
@@ -1470,19 +1538,19 @@
   resize: vertical;
 }
 
-.qm-arena-root .lab-note-edit:focus {
+.market-lab-root .lab-note-edit:focus {
   background: #fff;
   box-shadow: inset 0 0 0 1px #000;
 }
 
-.qm-arena-root .lab-note-meta {
+.market-lab-root .lab-note-meta {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin-top: 8px;
 }
 
-.qm-arena-root .lab-note-meta label {
+.market-lab-root .lab-note-meta label {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1492,8 +1560,8 @@
   color: #555;
 }
 
-.qm-arena-root .lab-note-meta input,
-.qm-arena-root .lab-note-meta select {
+.market-lab-root .lab-note-meta input,
+.market-lab-root .lab-note-meta select {
   flex: 0 1 190px;
   padding: 3px 6px;
   font-size: 11px;
@@ -1504,7 +1572,7 @@
   outline: none;
 }
 
-.qm-arena-root .lab-note-stamp {
+.market-lab-root .lab-note-stamp {
   margin-top: 6px;
   font-size: 9px;
   font-family: 'Courier New', monospace;
@@ -1512,7 +1580,7 @@
 }
 
 /* 对话（P2：只读问答） */
-.qm-arena-root .lab-chat-log {
+.market-lab-root .lab-chat-log {
   max-height: 340px;
   overflow-y: auto;
   padding: 8px;
@@ -1520,15 +1588,15 @@
   background: #fcfcfc;
 }
 
-.qm-arena-root .lab-msg {
+.market-lab-root .lab-msg {
   margin-bottom: 10px;
 }
 
-.qm-arena-root .lab-msg:last-child {
+.market-lab-root .lab-msg:last-child {
   margin-bottom: 0;
 }
 
-.qm-arena-root .lab-msg-role {
+.market-lab-root .lab-msg-role {
   margin-bottom: 3px;
   font-size: 9px;
   font-weight: 700;
@@ -1537,7 +1605,7 @@
   color: #999;
 }
 
-.qm-arena-root .lab-msg-body {
+.market-lab-root .lab-msg-body {
   padding: 6px 8px;
   font-size: 11px;
   line-height: 1.7;
@@ -1547,45 +1615,45 @@
   background: #fff;
 }
 
-.qm-arena-root .lab-msg.user .lab-msg-role {
+.market-lab-root .lab-msg.user .lab-msg-role {
   color: #666;
 }
 
-.qm-arena-root .lab-msg.user .lab-msg-body {
+.market-lab-root .lab-msg.user .lab-msg-body {
   border-left-color: #c9c9c9;
   background: #f2f2f2;
 }
 
-.qm-arena-root .lab-msg.pending .lab-msg-body {
+.market-lab-root .lab-msg.pending .lab-msg-body {
   opacity: 0.55;
 }
 
-.qm-arena-root .lab-typing {
+.market-lab-root .lab-typing {
   color: #666;
   font-style: italic;
 }
 
-.qm-arena-root .lab-chat-quick {
+.market-lab-root .lab-chat-quick {
   display: flex;
   flex-direction: column;
   gap: 4px;
   margin-top: 8px;
 }
 
-.qm-arena-root .lab-chat-quick .lab-more {
+.market-lab-root .lab-chat-quick .lab-more {
   margin-top: 0;
   padding: 5px 7px;
   text-align: left;
 }
 
-.qm-arena-root .lab-chat-form {
+.market-lab-root .lab-chat-form {
   display: flex;
   gap: 6px;
   align-items: stretch;
   margin-top: 8px;
 }
 
-.qm-arena-root .lab-chat-input {
+.market-lab-root .lab-chat-input {
   flex: 1 1 auto;
   min-width: 0;
   padding: 6px 8px;
@@ -1599,42 +1667,42 @@
   resize: vertical;
 }
 
-.qm-arena-root .lab-chat-input:focus {
+.market-lab-root .lab-chat-input:focus {
   box-shadow: inset 0 0 0 1px #000;
 }
 
-.qm-arena-root .lab-chat-input:disabled {
+.market-lab-root .lab-chat-input:disabled {
   background: #f4f4f4;
   color: #999;
 }
 
-.qm-arena-root .lab-chat-send {
+.market-lab-root .lab-chat-send {
   flex: 0 0 66px;
   margin-top: 0;
 }
 
 /* 对话模式切换（问策略 / 改策略） */
-.qm-arena-root .lab-chat-modes {
+.market-lab-root .lab-chat-modes {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 8px;
 }
 
-.qm-arena-root .lab-chat-modes .lab-more.on {
+.market-lab-root .lab-chat-modes .lab-more.on {
   background: #000;
   color: #fff;
   border-color: #000;
 }
 
-.qm-arena-root .lab-chat-hint {
+.market-lab-root .lab-chat-hint {
   font-size: 9px;
   font-family: 'Courier New', monospace;
   color: #999;
 }
 
 /* agent 回答下方的动作（写入备注） */
-.qm-arena-root .lab-msg-act {
+.market-lab-root .lab-msg-act {
   margin-top: 4px;
   padding: 2px 6px;
   font-size: 9px;
@@ -1645,17 +1713,17 @@
   cursor: pointer;
 }
 
-.qm-arena-root .lab-msg-act:hover:not(:disabled) {
+.market-lab-root .lab-msg-act:hover:not(:disabled) {
   border-color: #000;
   color: #000;
 }
 
-.qm-arena-root .lab-msg-act:disabled {
+.market-lab-root .lab-msg-act:disabled {
   opacity: 0.5;
   cursor: default;
 }
 
-.qm-arena-root .lab-ok {
+.market-lab-root .lab-ok {
   margin-bottom: 12px;
   padding: 7px 10px;
   font-size: 11px;
@@ -1667,13 +1735,13 @@
 }
 
 /* 候选对比卡（edit 模式）：改前 / 改后 / 变化 */
-.qm-arena-root .lab-cand {
+.market-lab-root .lab-cand {
   margin: 10px 0;
   border: 1.5px solid #000;
   background: #fff;
 }
 
-.qm-arena-root .lab-cand-head {
+.market-lab-root .lab-cand-head {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
@@ -1685,16 +1753,16 @@
   background: #f4f4f4;
 }
 
-.qm-arena-root .lab-cand-head b {
+.market-lab-root .lab-cand-head b {
   font-size: 11px;
 }
 
-.qm-arena-root .lab-cand-head span {
+.market-lab-root .lab-cand-head span {
   color: #666;
 }
 
 /* 「改前」基线比当前源码旧时的提醒：黄底黑框，别做成红色警报吓人 */
-.qm-arena-root .lab-cand-warn {
+.market-lab-root .lab-cand-warn {
   padding: 6px 8px;
   border-bottom: 1.5px solid #000;
   background: #fff3bf;
@@ -1703,52 +1771,52 @@
   font-family: 'Courier New', monospace;
 }
 
-.qm-arena-root .lab-cand-table {
+.market-lab-root .lab-cand-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 10px;
   font-family: 'Courier New', monospace;
 }
 
-.qm-arena-root .lab-cand-table th,
-.qm-arena-root .lab-cand-table td {
+.market-lab-root .lab-cand-table th,
+.market-lab-root .lab-cand-table td {
   padding: 4px 8px;
   text-align: right;
   border-bottom: 1px solid #eee;
 }
 
-.qm-arena-root .lab-cand-table th:first-child,
-.qm-arena-root .lab-cand-table td:first-child {
+.market-lab-root .lab-cand-table th:first-child,
+.market-lab-root .lab-cand-table td:first-child {
   text-align: left;
 }
 
-.qm-arena-root .lab-cand-table th {
+.market-lab-root .lab-cand-table th {
   font-size: 9px;
   color: #999;
   font-weight: 400;
 }
 
-.qm-arena-root .lab-cand-table td.up {
+.market-lab-root .lab-cand-table td.up {
   color: #0a7d3c;
 }
 
-.qm-arena-root .lab-cand-table td.down {
+.market-lab-root .lab-cand-table td.down {
   color: #e2373b;
 }
 
-.qm-arena-root .lab-cand-src {
+.market-lab-root .lab-cand-src {
   padding: 6px 8px;
   font-size: 10px;
   font-family: 'Courier New', monospace;
   border-top: 1px solid #eee;
 }
 
-.qm-arena-root .lab-cand-src summary {
+.market-lab-root .lab-cand-src summary {
   cursor: pointer;
   color: #666;
 }
 
-.qm-arena-root .lab-cand-src pre {
+.market-lab-root .lab-cand-src pre {
   max-height: 220px;
   overflow: auto;
   margin: 6px 0 0;
@@ -1759,13 +1827,13 @@
   border: 1px solid #eee;
 }
 
-.qm-arena-root .lab-cand .lab-run {
+.market-lab-root .lab-cand .lab-run {
   width: 100%;
   margin: 0;
   border-top: 1.5px solid #000;
 }
 
-.qm-arena-root .lab-versions {
+.market-lab-root .lab-versions {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1776,32 +1844,302 @@
   color: #666;
 }
 
-.qm-arena-root .lab-tpl-list em.note,
-.qm-arena-root .lab-pine-row em.note {
+.market-lab-root .lab-tpl-list em.note,
+.market-lab-root .lab-pine-row em.note {
   margin-left: 5px;
   font-size: 9px;
   font-style: normal;
   line-height: 1;
 }
 
-.qm-arena-root .lab-pine-row em.note {
+.market-lab-root .lab-pine-row em.note {
   margin-left: 0;
   padding: 0 2px;
   border: none;
 }
 
 @media (max-width: 1280px) {
-  .qm-arena-root .lab-wb {
+  .market-lab-root .lab-wb {
     grid-template-columns: 260px minmax(0, 1fr) 280px;
   }
 }
 
 @media (max-width: 1080px) {
-  .qm-arena-root .lab-wb {
+  .market-lab-root .lab-wb {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .qm-arena-root .lab-rail {
+  .market-lab-root .lab-rail {
     max-height: 460px;
   }
+}
+
+/* 容器宽度断点（优先于上面的视口媒体查询）：回测中心内容区 ≈ 视口 − 240px 侧栏。
+   ≤1180px 收窄两侧栏，≤980px 塌成单栏（左栏限高、可滚动）。 */
+@container (max-width: 1180px) {
+  .market-lab-root .lab-wb {
+    grid-template-columns: 250px minmax(0, 1fr) 280px;
+  }
+}
+
+@container (max-width: 980px) {
+  .market-lab-root .lab-wb {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .market-lab-root .lab-rail {
+    max-height: 460px;
+  }
+}
+
+/* ---------- 新增自定义策略（2026-11-15） ---------- */
+.market-lab-root .lab-new {
+  margin-left: auto;
+  padding: 3px 9px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
+}
+
+.market-lab-root .lab-new:hover {
+  background: #000;
+  color: #fff;
+}
+
+.market-lab-root .lab-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.market-lab-root .lab-modal {
+  width: min(760px, 100%);
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 14px;
+  background: #fff;
+  border: 2px solid #000;
+  box-shadow: 8px 8px 0 #000;
+}
+
+.market-lab-root .lab-modal-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 9px;
+  margin-bottom: 12px;
+  border-bottom: 2px solid #000;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.06em;
+}
+
+.market-lab-root .lab-modal-x {
+  width: 26px;
+  height: 26px;
+  border: 1.5px solid #000;
+  background: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.market-lab-root .lab-modal-x:hover {
+  background: #000;
+  color: #fff;
+}
+
+.market-lab-root .lab-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 10px;
+  color: #333;
+}
+
+.market-lab-root .lab-field > span {
+  flex: 0 0 54px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+.market-lab-root .lab-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  background: #fff;
+  outline: none;
+}
+
+.market-lab-root .lab-field-col {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.market-lab-root .lab-modal-src {
+  width: 100%;
+  height: 300px;
+  resize: vertical;
+}
+
+.market-lab-root .lab-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.market-lab-root .lab-modal-actions .lab-more {
+  padding: 9px 16px;
+}
+
+.market-lab-root .lab-modal-ok {
+  width: auto;
+  min-width: 140px;
+  margin-top: 0;
+  padding: 10px 18px;
+}
+
+.market-lab-root .lab-lib-danger {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed #e2373b;
+}
+
+.market-lab-root .lab-lib-danger .lab-more {
+  color: #e2373b;
+  border-color: #e2373b;
+}
+
+.market-lab-root .lab-lib-danger .lab-more:hover:not(:disabled) {
+  background: #e2373b;
+  color: #fff;
+}
+
+/* 合规声明：研究/回测展示面固定披露，不随 tab 消失 */
+.market-lab-root .lab-compliance {
+  margin-top: 24px;
+  padding-top: 10px;
+  border-top: 1px solid #ddd;
+  font-size: 10px;
+  line-height: 1.8;
+  color: #888;
+}
+
+/* ---------- 批量回测发起器（2026-11-15） ---------- */
+.market-lab-root .lab-batch-start {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 2px solid #000;
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.12);
+}
+
+.market-lab-root .lab-batch-start-head {
+  margin-bottom: 10px;
+}
+
+.market-lab-root .lab-batch-form {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.market-lab-root .lab-batch-form select {
+  min-width: 240px;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  border: 1.5px solid #000;
+  background: #fff;
+  color: #000;
+  outline: none;
+}
+
+.market-lab-root .lab-batch-codes {
+  width: 100%;
+  padding: 7px 9px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  line-height: 1.6;
+  border: 1.5px solid #000;
+  background: #fff;
+  resize: vertical;
+  outline: none;
+}
+
+.market-lab-root .lab-batch-strategies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.market-lab-root .lab-batch-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  cursor: pointer;
+}
+
+.market-lab-root .lab-batch-check input {
+  accent-color: #000;
+}
+
+.market-lab-root .lab-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.market-lab-root .lab-batch-submit {
+  width: auto;
+  min-width: 220px;
+  margin-top: 0;
+  padding: 9px 16px;
+}
+
+.market-lab-root .lab-batch-hint {
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: var(--text-tertiary);
+  font-style: normal;
+}
+
+.market-lab-root .lab-batch-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 2px;
+}
+
+.market-lab-root .lab-batch-progress-bar {
+  height: 10px;
+  background: #eee;
+  border: 1.5px solid #000;
+}
+
+.market-lab-root .lab-batch-progress-bar i {
+  display: block;
+  height: 100%;
+  background: #000;
+  transition: width 0.3s ease;
 }

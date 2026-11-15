@@ -22,6 +22,7 @@ interface CustomWebSocket extends WebSocket {
 
 export type ModuleId =
   | 'strategy-editor'
+  | 'market-lab'
   | 'quick-backtest'
   | 'expert-mode'
   | 'backtest-history'

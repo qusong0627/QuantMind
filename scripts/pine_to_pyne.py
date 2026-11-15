@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import re
@@ -162,6 +163,9 @@ def main(fast=input(5, "快线周期"), slow=input(20, "慢线周期")):
     （小本金 × 1% 仓位在 A 股算出不足 1 股、整场 0 笔成交；固定手数配不同本金
     等于杠杆随本金变，跨策略收益不可比）。静态闸会**校验取值**，写错会被打回重修。
 12. 输出**只有一个 python 代码块**，不要解释文字。
+13. 合规用词：代码注释、变量名、说明文字**不得出现「买入 / 卖出」**，
+    用「入场 / 离场」「开仓 / 平仓」或 ↑/↓ 箭头表达；`strategy.entry/close`
+    这类库 API 原名保持不变。
 
 ## 常用库
 
@@ -200,17 +204,44 @@ def _env() -> dict:
     return env
 
 
+def _llm_config() -> dict:
+    """转写用的 AI 服务配置：个人中心「AI 服务配置」镜像优先，回退 .env。
+
+    宿主 worker 没有用户会话，读不到 user_profiles；AI-IDE 保存配置时会把
+    key/base/model 镜像到 `<数据根>/arena/ai_service.json`（见 ai_service.py）。
+    """
+    try:
+        from backend.services.agent_arena import ai_service
+
+        cfg = ai_service.read_config()
+    except Exception:  # noqa: BLE001 镜像缺失/损坏都不阻断 .env 兜底
+        cfg = {}
+    env = _env()
+    return {
+        "api_key": str(cfg.get("api_key") or env.get("OPENAI_API_KEY", "")).strip(),
+        "base_url": str(cfg.get("base_url") or env.get("OPENAI_API_BASE", "")).strip().rstrip("/"),
+        "model": str(cfg.get("model") or "").strip(),
+        "headers": cfg.get("extra_headers") if isinstance(cfg.get("extra_headers"), dict) else {},
+    }
+
+
 def _chat(messages: list[dict], model: str,
           think: bool = False) -> tuple[str, dict | None, bool]:
     """直连 OpenAI 兼容接口（重试 1 次）。返回 (文本, usage, 是否被截断)。
 
     ``think=False``（默认）关掉推理：转写产物是照模板的代码，长思考只会把额度烧光。
+    配置来源：个人中心「AI 服务配置」（镜像文件）→ .env 的 OPENAI_API_BASE/KEY。
     """
-    env = _env()
-    base = env.get("OPENAI_API_BASE", "").rstrip("/")
-    key = env.get("OPENAI_API_KEY", "")
+    cfg = _llm_config()
+    base = cfg["base_url"]
+    key = cfg["api_key"]
     if not base or not key:
-        raise RuntimeError("OPENAI_API_BASE/OPENAI_API_KEY 缺失（.env）")
+        raise RuntimeError(
+            "AI 服务未配置：请在个人中心「其他设置 → AI 服务配置」填写 API Key / 模型 / 接口地址，"
+            "或在服务器 .env 配置 OPENAI_API_BASE/OPENAI_API_KEY"
+        )
+    if cfg["model"] and model == MODEL:
+        model = cfg["model"]          # 未显式 --model 时跟随 AI 服务配置
     import requests
 
     payload = {"model": model, "messages": messages,
@@ -218,11 +249,12 @@ def _chat(messages: list[dict], model: str,
                "max_tokens": MAX_TOKENS if think else MAX_TOKENS_FAST}
     if not think:
         payload.update(NO_THINKING)
+    headers = {"Authorization": f"Bearer {key}", **cfg["headers"]}
     last: Exception | None = None
     for attempt in range(2):
         try:
             resp = requests.post(f"{base}/chat/completions",
-                                 headers={"Authorization": f"Bearer {key}"},
+                                 headers=headers,
                                  json=payload, timeout=600)
             resp.raise_for_status()
             break
@@ -1232,6 +1264,10 @@ REPAIR_PROMPT = """你上一次的转写没通过静态检查 / 回测。下面�
 """
 
 
+def _source_sha(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
 def transpile(item_id: str, model: str = MODEL) -> dict:
     got = _load_pine(item_id)
     user = _pine_prompt(got)
@@ -1257,6 +1293,8 @@ def transpile(item_id: str, model: str = MODEL) -> dict:
     meta = {"id": item_id, "title": got.get("title"), "category": got.get("category"),
             "pine_version": got.get("version"), "pine_indent_ok": got.get("indent_ok"),
             "model": model, "think": think_used,
+            # 源码指纹：复用候选前比对，源码改过就必须重新转写（2026-11-15）
+            "source_sha": _source_sha(got.get("source") or ""),
             "elapsed_sec": round(time.time() - t0, 1), "usage": usage,
             "auto_fixes": fixes, "problems": problems,
             "generated": datetime.now(timezone.utc).isoformat(timespec="seconds")}
@@ -1297,7 +1335,29 @@ def repair(item_id: str, error: str, model: str = MODEL) -> dict:
     return meta
 
 
-def validate(item_id: str, symbol: str, adj: str = "backward") -> dict:
+def _safe_report_name(symbol: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(symbol or "")) or "symbol"
+
+
+def _write_report(out: Path, report: dict) -> None:
+    """同时写「最新指针」report.json 与「按市场/标的/口径」的 report 文件。
+
+    转写产物（candidate.py/meta.json）是**策略级**、跨市场复用；回测报告才是
+    market × symbol × adj × freq 四元组的结果，必须分文件存，否则跑完港股会覆盖
+    A股那份（2026-11-15 用户口径）。
+    """
+    text = json.dumps(report, ensure_ascii=False, indent=2)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "report.json").write_text(text, encoding="utf-8")
+    d = out / "reports" / str(report.get("market") or "cn")
+    d.mkdir(parents=True, exist_ok=True)
+    key = (f"{_safe_report_name(str(report.get('symbol') or ''))}"
+           f"_{report.get('adj') or 'unadjusted'}_{report.get('freq') or '1d'}.json")
+    (d / key).write_text(text, encoding="utf-8")
+
+
+def validate(item_id: str, symbol: str, adj: str = "backward", market: str = "cn",
+             freq: str = "1d") -> dict:
     from backend.services.agent_arena import market_lab as ml
 
     out = _out(item_id)
@@ -1305,10 +1365,12 @@ def validate(item_id: str, symbol: str, adj: str = "backward") -> dict:
     if not cand.exists():
         raise SystemExit(f"没有候选文件：{cand}（先跑 --id {item_id}）")
     t0 = time.time()
-    res = ml.run_script_file(cand, symbol, adj=adj, want_indicators=True)
+    res = ml.run_script_file(cand, symbol, adj=adj, want_indicators=True,
+                             market=market, freq=freq)
     stats = res.get("stats") or {}
     trades = res.get("trades") or []
-    report = {"id": item_id, "symbol": symbol, "adj": adj,
+    report = {"id": item_id, "symbol": symbol, "adj": adj, "market": market,
+              "freq": freq,
               "elapsed_sec": round(time.time() - t0, 1),
               "stats": stats, "trades": len(trades),
               # 逐笔与净值一并落盘：界面要画净值曲线 / 列成交，重跑一次回测没必要。
@@ -1318,8 +1380,7 @@ def validate(item_id: str, symbol: str, adj: str = "backward") -> dict:
               "indicators": res.get("indicators") or {},
               "meta": res.get("meta"),
               "validated": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2),
-                                     encoding="utf-8")
+    _write_report(out, report)
     return report
 
 
@@ -1385,6 +1446,10 @@ def main() -> int:
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--validate", metavar="SYMBOL", help="用该标的跑一次真实回测")
     ap.add_argument("--adj", default="backward")
+    ap.add_argument("--market", default="cn",
+                    help="市场 id：cn|hk|us|futures|crypto（默认 cn）")
+    ap.add_argument("--freq", default="1d",
+                    help="K线周期：1d|5m|1m（分钟线仅 cn/crypto）")
     ap.add_argument("--install", action="store_true", help="装进 lab_strategies")
     ap.add_argument("--force", action="store_true", help="已有候选时强制重新转写")
     ap.add_argument("--no-transpile", action="store_true",
@@ -1429,9 +1494,20 @@ def main() -> int:
         meta = _refresh_problems(
             args.id, json.loads(meta_path.read_text(encoding="utf-8")))
     elif cand.exists() and meta_path.exists() and not args.force:
-        meta = _refresh_problems(
-            args.id, json.loads(meta_path.read_text(encoding="utf-8")))
-        print(f"复用已有候选：{meta.get('title')}（--force 可重新转写）")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        cur_sha = _source_sha(_load_pine(args.id).get("source") or "")
+        if meta.get("source_sha") == cur_sha:
+            meta = _refresh_problems(args.id, meta)
+            print(f"复用已有候选：{meta.get('title')}（--force 可重新转写）")
+        else:
+            # 源码改过（编辑/采用候选/自定义条目）→ 旧候选已过期，重新转写
+            print("源码已变化，重新转写…")
+            try:
+                meta = transpile(args.id, model=args.model)
+            except RuntimeError as exc:
+                print(f"转写失败：{exc}")
+                return 3
+            print(f"转写完成：{meta['title']}（{meta['elapsed_sec']}s，{meta['usage']}）")
     else:
         try:
             meta = transpile(args.id, model=args.model)
@@ -1448,13 +1524,14 @@ def main() -> int:
     print("静态检查通过")
 
     if args.validate:
-        rep = validate(args.id, args.validate, adj=args.adj)
+        rep = validate(args.id, args.validate, adj=args.adj, market=args.market,
+                       freq=args.freq)
         s = rep["stats"]
         net = (s.get("Net profit") or {}).get("pct")
         dd = (s.get("Max equity drawdown") or {}).get("pct")
         bh = (s.get("Buy & hold return") or {}).get("pct")
         print(f"回测 {args.validate}：净收益 {net:.1f}% · 最大回撤 {dd:.1f}% · "
-              f"买入持有 {bh:.1f}% · 成交 {rep['trades']} 笔")
+              f"持有基准 {bh:.1f}% · 成交 {rep['trades']} 笔")
     return 0
 
 

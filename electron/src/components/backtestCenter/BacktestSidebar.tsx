@@ -18,7 +18,7 @@ import {
   Settings,
   FolderKanban,
   TrendingUp,
-  BarChart3,
+  CandlestickChart,
 } from 'lucide-react';
 import HelpCenterLink from '../common/HelpCenterLink';
 import { ModuleId } from '../../stores/backtestCenterStore';
@@ -38,6 +38,14 @@ const modules: Module[] = [
     icon: SquareTerminal,
     color: 'text-emerald-400',
     description: '策略工作台：编写 / 回测 / 复盘'
+  },
+  {
+    // 2026-11-15 从「实盘交易」栏整体迁入，按用户要求排在快速回测之前
+    id: 'market-lab',
+    name: '行情回测',
+    icon: CandlestickChart,
+    color: 'text-rose-400',
+    description: '单标的回测 / 策略排行 / 单策略选股'
   },
   {
     id: 'quick-backtest',
@@ -158,6 +166,8 @@ const ModuleButton: React.FC<ModuleButtonProps> = ({
       onClick={onClick}
       whileHover={{ x: 4 }}
       whileTap={{ scale: 0.98 }}
+      // 稳定标识：探针/E2E 按 id 断言顺序，不依赖文案（文案会改）
+      data-module-id={module.id}
       className={`
         relative w-full px-6 text-left transition-colors
         ${isActive ? 'bg-blue-50' : 'hover:bg-gray-50'}

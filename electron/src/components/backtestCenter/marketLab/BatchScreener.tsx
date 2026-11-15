@@ -1,10 +1,10 @@
 /** 单策略选股：选定一个策略 → 全池标的按该策略的回测表现排序，挑最适合它的股票。
  *
- * 与「策略排行」互补：排行回答「哪个策略平均最强」，选股回答「这个策略该买哪几只」。
+ * 与「策略排行」互补：排行回答「哪个策略平均最强」，选股回答「这个策略适合哪几只」。
  */
 import { useEffect, useState } from 'react';
-import { fetchLabBatchRun, type LabBatchRow } from '../../api/client';
-import { asUpdater } from '../../reactCompat';
+import { fetchLabBatchRun, type LabBatchRow } from './api';
+import { asUpdater } from './reactCompat';
 
 const SORTS: { id: string; label: string }[] = [
   { id: 'net', label: '净收益' },
@@ -108,7 +108,7 @@ export default function BatchScreener({
           </select>
         </label>
         <div className="lab-screen-stat">
-          {busy ? '计算中…' : `${rows.length} 只 · 跑赢买入持有 ${winners} 只`}
+          {busy ? '计算中…' : `${rows.length} 只 · 跑赢持有基准 ${winners} 只`}
         </div>
       </div>
 
@@ -117,7 +117,7 @@ export default function BatchScreener({
       {rows.length > 0 && (
         <div className="lab-hero">
           <div className="lab-hero-cell">
-            <div className="lab-hero-k">跑赢买入持有</div>
+            <div className="lab-hero-k">跑赢持有基准</div>
             <div className="lab-hero-v">
               {winners} / {rows.length} 只
             </div>
@@ -133,7 +133,7 @@ export default function BatchScreener({
           <div className="lab-hero-cell">
             <div className="lab-hero-k">中位超额</div>
             <div className={`lab-hero-v ${tone(medExcess)}`}>{fmtPct(medExcess)}</div>
-            <div className="lab-hero-s">策略收益 − 买入持有</div>
+            <div className="lab-hero-s">策略收益 − 持有基准</div>
           </div>
           <div className="lab-hero-cell">
             <div className="lab-hero-k">全池最赚</div>
@@ -152,7 +152,7 @@ export default function BatchScreener({
               <th>#</th>
               <th>标的</th>
               <th className="num">策略收益</th>
-              <th className="num">买入持有</th>
+              <th className="num">持有基准</th>
               <th className="num">超额</th>
               <th className="num">回撤</th>
               <th className="num">夏普</th>
@@ -196,7 +196,7 @@ export default function BatchScreener({
         <div className="lab-empty">该批次没有这个策略的结果（跑批时未包含？）</div>
       )}
       <p className="lab-note">
-        点任意一行 → 跳到「单标的回测」看这只票的 K 线与逐笔。「超额」= 策略收益 − 买入持有，
+        点任意一行 → 跳到「工作台」看这只票的 K 线与逐笔。「超额」= 策略收益 − 持有基准，
         正值说明这段时间里择时比躺着强。
       </p>
     </div>

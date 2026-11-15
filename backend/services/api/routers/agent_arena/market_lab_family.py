@@ -51,14 +51,26 @@ def _pine_lib():
 
 # ---------- K线 / 标的 / 策略 ----------
 
+@router.get("/market-lab/markets")
+def lab_markets(_current_user: dict = Depends(get_current_user)):
+    """可切换市场 + 各市场真实可用的复权档（前端据此渲染，不展示假档）。"""
+    try:
+        return {"success": True, "data": _lab().market_meta()}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": f"市场列表失败: {e}"}
+
+
 @router.get("/market-lab/symbols")
 def lab_symbols(
     q: str = "",
     limit: int = Query(30, ge=1, le=200),
+    market: str = "cn",
     _current_user: dict = Depends(get_current_user),
 ):
     try:
-        return {"success": True, "data": _lab().search_symbols(q, limit)}
+        return {"success": True, "data": _lab().search_symbols(q, limit, market=market)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"标的搜索失败: {e}"}
 
@@ -70,15 +82,22 @@ def lab_klines(
     limit: int = Query(600, ge=60, le=3000),
     start: str = "",
     end: str = "",
+    market: str = "cn",
+    freq: str = "1d",
     _current_user: dict = Depends(get_current_user),
 ):
-    """日线（adj=unadjusted|forward|backward）。看盘默认不复权，回测默认后复权。"""
+    """K线（market=cn|hk|us|futures|crypto；freq=1d|5m|1m；adj 按市场可用档）。"""
     try:
         ml = _lab()
-        bars = ml.load_klines(symbol, adj=adj, limit=limit, start=start, end=end)
-        return {"success": True, "data": {"symbol": ml.normalize_code(symbol),
-                                          "name": ml.stock_name(symbol), "adj": adj,
-                                          "count": len(bars), "bars": bars}}
+        bars = ml.load_klines(symbol, adj=adj, limit=limit, start=start, end=end,
+                              market=market, freq=freq)
+        return {"success": True, "data": {
+            "market": ml.normalize_market(market),
+            "symbol": ml.normalize_code(symbol, market),
+            "name": ml.stock_name(symbol, market), "adj": adj, "freq": freq,
+            "count": len(bars), "bars": bars}}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"K线查询失败: {e}"}
 
@@ -96,7 +115,7 @@ def lab_backtest(
     payload: dict = Body(...),
     _current_user: dict = Depends(get_current_user),
 ):
-    """{strategy, symbol, adj?, start?, end?, params?} → 统计/逐笔/净值。"""
+    """{strategy, symbol, adj?, start?, end?, params?, market?} → 统计/逐笔/净值。"""
     try:
         ml = _lab()
         data = ml.run_backtest(
@@ -106,6 +125,8 @@ def lab_backtest(
             start=str(payload.get("start") or ""),
             end=str(payload.get("end") or ""),
             params=payload.get("params") or {},
+            market=str(payload.get("market") or "cn"),
+            freq=str(payload.get("freq") or "1d"),
         )
         return {"success": True, "data": data}
     except (ValueError, FileNotFoundError) as e:
@@ -146,6 +167,54 @@ def lab_batch_pools(_current_user: dict = Depends(get_current_user)):
         return {"success": True, "data": data}
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"股票池列表失败: {e}"}
+
+
+@router.get("/market-lab/batch/active")
+def lab_batch_active(_current_user: dict = Depends(get_current_user)):
+    """当前排队/运行中的批次（界面刷新时恢复进度条）。"""
+    try:
+        return {"success": True, "data": _lab_batch().active_run()}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": f"批次状态失败: {e}"}
+
+
+@router.post("/market-lab/batch")
+def lab_batch_create(
+    payload: dict = Body(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """入队一批回测（池 / 自定义代码 × 策略）。
+
+    执行在宿主 worker（scripts/lab_batch_worker.py）；容器只写请求与读状态。
+    同时只允许一个批次（跑批吃满 CPU）。
+    """
+    try:
+        data = _lab_batch().create_request(
+            pool=str(payload.get("pool") or "hs300"),
+            codes=payload.get("codes") or [],
+            strategies=payload.get("strategies") or [],
+            adj=str(payload.get("adj") or "backward"),
+            limit=int(payload.get("limit") or 0),
+            min_bars=int(payload.get("min_bars") or 250),
+            requested_by=str((current_user or {}).get("username") or ""),
+        )
+        return {"success": True, "data": data}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        logger.error("lab batch create failed: %s", e, exc_info=True)
+        return {"success": False, "error": f"入队失败: {e}"}
+
+
+@router.get("/market-lab/batch/{run_id}/status")
+def lab_batch_status(run_id: str, _current_user: dict = Depends(get_current_user)):
+    """批次进度（queued/running/done/failed + done/total/rows）。"""
+    try:
+        return {"success": True, "data": _lab_batch().get_status(run_id)}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": f"状态读取失败: {e}"}
 
 
 @router.get("/market-lab/batch/{run_id}")
@@ -202,6 +271,27 @@ def pine_library_list(
         return {"success": False, "error": f"策略库读取失败: {e}"}
 
 
+@router.post("/market-lab/library")
+def pine_library_create(
+    payload: dict = Body(...),
+    _current_user: dict = Depends(get_current_user),
+):
+    """新增一条**自定义** Pine 策略（落 custom/，索引重建不丢）。"""
+    try:
+        return {"success": True, "data": _pine_lib().create_item(
+            title=str(payload.get("title") or ""),
+            category=str(payload.get("category") or ""),
+            source=str(payload.get("source") or ""),
+            title_en=str(payload.get("title_en") or ""),
+            url=str(payload.get("url") or ""),
+        )}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        logger.error("pine library create failed: %s", e, exc_info=True)
+        return {"success": False, "error": f"新增失败: {e}"}
+
+
 @router.get("/market-lab/notes")
 def pine_notes_index(_current_user: dict = Depends(get_current_user)):
     """有备注的策略 id 集合（左栏角标用）。"""
@@ -233,7 +323,8 @@ def pine_library_backtest(
     try:
         return {"success": True, "data": _pine_lib().enqueue_backtest(
             item_id, payload.get("symbol", ""), payload.get("adj", "backward"),
-            payload.get("model", ""), bool(payload.get("force")))}
+            payload.get("model", ""), bool(payload.get("force")),
+            payload.get("market", "cn"), payload.get("freq", "1d"))}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
@@ -279,6 +370,18 @@ def pine_library_reset(item_id: str, _current_user: dict = Depends(get_current_u
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"重置失败: {e}"}
+
+
+@router.delete("/market-lab/library/{item_id}/custom")
+def pine_library_delete(item_id: str, _current_user: dict = Depends(get_current_user)):
+    """删除**自定义**策略（内置/语料条目拒绝删除，只允许丢弃编辑）。"""
+    try:
+        return {"success": True, "data": _pine_lib().delete_item(item_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        logger.error("pine library delete failed: %s", e, exc_info=True)
+        return {"success": False, "error": f"删除失败: {e}"}
 
 
 @router.get("/market-lab/library/{item_id}/note")
@@ -375,7 +478,8 @@ def pine_library_chat_apply(
     """
     try:
         return {"success": True, "data": _pine_lib().apply_candidate(
-            item_id, job_id, payload.get("symbol", ""), payload.get("adj", "backward"))}
+            item_id, job_id, payload.get("symbol", ""), payload.get("adj", "backward"),
+            payload.get("market", ""), payload.get("freq", ""))}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
@@ -413,14 +517,23 @@ def pine_library_revert(
 
 
 @router.get("/market-lab/library/{item_id}/job")
-def pine_library_job(item_id: str, _current_user: dict = Depends(get_current_user)):
-    """该策略的转写/回测任务状态 + 回测报告（净值、逐笔）。没跑过 → report 为 null。"""
+def pine_library_job(
+    item_id: str,
+    market: str = "",
+    freq: str = "",
+    symbol: str = "",
+    adj: str = "",
+    _current_user: dict = Depends(get_current_user),
+):
+    """该策略的任务状态 + 回测报告（可按 market/symbol/adj/freq 取指定那一份）。"""
     try:
         pl = _pine_lib()
         job = pl.job_status(item_id)
         # 报告文件不存在时服务层给的是 {}——空对象在 JS 里是 truthy，界面会当成
         # 「有报告」去读 stats 然后炸掉。这里统一收敛成 null（上游同款注释）。
-        report = pl.read_report(item_id) or None
+        report = pl.read_report(
+            item_id, market=market, symbol=symbol, adj=adj, freq=freq,
+        ) or None
         return {"success": True, "data": {"job": job, "report": report}}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e

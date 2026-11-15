@@ -223,6 +223,108 @@ def _build_arena_fixture(root: Path) -> None:
         root / "quantdb" / "2_base_sector" / "index_weights" / "000300.SH.parquet",
         "SELECT * FROM (VALUES ('000001.SZ'), ('600519.SH')) AS t(Symbol)",
     )
+    # A股分钟线（2026-11-15）：单文件/标的、完整时间戳；没有 symbol 列
+    _write_parquet(
+        root / "quantdb" / "1_kline_data" / "min5_kline" / "600519.SH.parquet",
+        """
+        SELECT CAST(time AS TIMESTAMP) AS time, CAST(o AS DOUBLE) AS open,
+               CAST(h AS DOUBLE) AS high, CAST(l AS DOUBLE) AS low,
+               CAST(c AS DOUBLE) AS close, CAST(v AS DOUBLE) AS volume
+        FROM (VALUES
+            ('2026-09-01 09:35:00', 100.0, 101.0, 99.5, 100.5, 1000.0),
+            ('2026-09-01 09:40:00', 100.5, 102.0, 100.0, 101.5, 1100.0),
+            ('2026-09-01 09:45:00', 101.5, 102.5, 101.0, 102.0, 1200.0)
+        ) AS t(time, o, h, l, c, v)
+        """,
+    )
+
+    # ---- A3b：多市场 K线 + 名称表（2026-11-15 行情实验室跟随右上角市场切换）----
+    # 港股：daily_forward 原始价 + daily_backward 后复权（两档都可用）
+    _write_parquet(
+        root / "quanthk" / "1_kline_data" / "daily_forward" / "dt=2026-09-01" / "part.parquet",
+        """
+        SELECT CAST(time AS DATE) AS time, CAST(o AS DOUBLE) AS open,
+               CAST(h AS DOUBLE) AS high, CAST(l AS DOUBLE) AS low,
+               CAST(c AS DOUBLE) AS close, CAST(v AS DOUBLE) AS volume, symbol
+        FROM (VALUES
+            ('2026-08-28', 410.0, 415.0, 405.0, 412.0, 1000.0, '0700.HK'),
+            ('2026-08-31', 412.0, 418.0, 408.0, 416.0, 1100.0, '0700.HK'),
+            ('2026-09-01', 416.0, 420.0, 410.0, 418.0, 1200.0, '0700.HK')
+        ) AS t(time, o, h, l, c, v, symbol)
+        """,
+    )
+    _write_parquet(
+        root / "quanthk" / "1_kline_data" / "daily_backward" / "dt=2026-09-01" / "part.parquet",
+        """
+        SELECT CAST(time AS DATE) AS time, CAST(o AS DOUBLE) AS open,
+               CAST(h AS DOUBLE) AS high, CAST(l AS DOUBLE) AS low,
+               CAST(c AS DOUBLE) AS close, CAST(v AS DOUBLE) AS volume, symbol
+        FROM (VALUES
+            ('2026-08-28', 205.0, 207.5, 202.5, 206.0, 1000.0, '0700.HK'),
+            ('2026-08-31', 206.0, 209.0, 204.0, 208.0, 1100.0, '0700.HK'),
+            ('2026-09-01', 208.0, 210.0, 205.0, 209.0, 1200.0, '0700.HK')
+        ) AS t(time, o, h, l, c, v, symbol)
+        """,
+    )
+    _write_parquet(
+        root / "quanthk" / "2_base_sector" / "security_master" / "data.parquet",
+        """
+        SELECT * FROM (VALUES
+            ('0700.HK', '腾讯控股', 'TENCENT', 'akshare', '2026-09-01T00:00:00'),
+            ('0005.HK', '汇丰控股', 'HSBC', 'akshare', '2026-09-01T00:00:00')
+        ) AS t(symbol, cn_name, en_name, source, updated_at)
+        """,
+    )
+    # 美股：只有 daily_forward（原始价）→ 前端只应声明「不复权」
+    _write_parquet(
+        root / "quantus" / "1_kline_data" / "daily_forward" / "dt=2026-09-01" / "part.parquet",
+        """
+        SELECT CAST(time AS DATE) AS time, CAST(o AS DOUBLE) AS open,
+               CAST(h AS DOUBLE) AS high, CAST(l AS DOUBLE) AS low,
+               CAST(c AS DOUBLE) AS close, CAST(v AS DOUBLE) AS volume, symbol
+        FROM (VALUES
+            ('2026-08-28', 200.0, 205.0, 198.0, 204.0, 5000.0, 'AAPL'),
+            ('2026-08-31', 204.0, 208.0, 202.0, 206.0, 5200.0, 'AAPL'),
+            ('2026-09-01', 206.0, 210.0, 204.0, 208.0, 5400.0, 'AAPL')
+        ) AS t(time, o, h, l, c, v, symbol)
+        """,
+    )
+    _write_parquet(
+        root / "quantus" / "2_base_sector" / "security_master" / "data.parquet",
+        """
+        SELECT * FROM (VALUES
+            ('AAPL', '苹果', 'Apple', 'tencent_quote', '2026-09-01T00:00:00'),
+            ('MSFT', '微软', 'Microsoft', 'tencent_quote', '2026-09-01T00:00:00')
+        ) AS t(symbol, cn_name, en_name, source, updated_at)
+        """,
+    )
+    # 期货：RB0.CN 名称来自 backend/shared/futures_universe.FUTURES_META
+    _write_parquet(
+        root / "quantfutures" / "1_kline_data" / "daily_forward" / "dt=2026-09-01" / "part.parquet",
+        """
+        SELECT CAST(time AS DATE) AS time, CAST(o AS DOUBLE) AS open,
+               CAST(h AS DOUBLE) AS high, CAST(l AS DOUBLE) AS low,
+               CAST(c AS DOUBLE) AS close, CAST(v AS DOUBLE) AS volume, symbol
+        FROM (VALUES
+            ('2026-08-28', 3000.0, 3050.0, 2980.0, 3040.0, 600000.0, 'RB0.CN'),
+            ('2026-08-31', 3040.0, 3070.0, 3020.0, 3060.0, 620000.0, 'RB0.CN'),
+            ('2026-09-01', 3060.0, 3090.0, 3040.0, 3080.0, 640000.0, 'RB0.CN')
+        ) AS t(time, o, h, l, c, v, symbol)
+        """,
+    )
+    # 加密：无名称表，代码表取最新分区 distinct symbol
+    _write_parquet(
+        root / "quantbc" / "1_kline_data" / "daily_forward" / "dt=2026-09-01" / "part.parquet",
+        """
+        SELECT CAST(time AS DATE) AS time, CAST(o AS DOUBLE) AS open,
+               CAST(h AS DOUBLE) AS high, CAST(l AS DOUBLE) AS low,
+               CAST(c AS DOUBLE) AS close, CAST(v AS DOUBLE) AS volume, symbol
+        FROM (VALUES
+            ('2026-08-31', 78000.0, 79000.0, 77500.0, 78500.0, 100.0, 'BTCUSDT'),
+            ('2026-09-01', 78500.0, 79500.0, 78000.0, 79000.0, 110.0, 'BTCUSDT')
+        ) AS t(time, o, h, l, c, v, symbol)
+        """,
+    )
 
     # ---- A3：批量回测产物（lab_batch，两个批次测时间倒序）----
     (root / "lab_batch").mkdir(parents=True, exist_ok=True)
@@ -372,6 +474,18 @@ def _build_arena_fixture(root: Path) -> None:
                 "adj": "backward",
                 "stats": {"Net profit": {"pct": 4.2}},
                 "trades": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+    # 分市场/周期报告（2026-11-15）：同一策略跑港股的历史产物，不与最新报告混用
+    (root / "pine_transpile" / "0001" / "reports" / "hk").mkdir(parents=True, exist_ok=True)
+    (root / "pine_transpile" / "0001" / "reports" / "hk" /
+     "0700.HK_unadjusted_1d.json").write_text(
+        json.dumps(
+            {
+                "symbol": "0700.HK", "adj": "unadjusted", "market": "hk", "freq": "1d",
+                "stats": {"Net profit": {"pct": 7.7}}, "trades": 9,
             }
         ),
         encoding="utf-8",
@@ -911,6 +1025,125 @@ def test_lab_backtest_passes_kwargs_and_reports_runtime_error(client, monkeypatc
     assert r2.json()["success"] is False and "回测失败" in r2.json()["error"]
 
 
+def test_lab_markets_meta_declares_only_available_adjs(client):
+    """市场切换：复权档按目录真实可用性声明，不展示假档。"""
+    data = client.get(f"{BASE}/market-lab/markets").json()["data"]
+    meta = {m["id"]: m for m in data}
+    assert set(meta) == {"cn", "hk", "us", "futures", "crypto"}
+    assert meta["cn"]["adjs"] == ["unadjusted", "forward", "backward"]
+    assert meta["hk"]["adjs"] == ["unadjusted", "backward"]
+    assert meta["us"]["adjs"] == ["unadjusted"]
+    assert meta["futures"]["adjs"] == ["unadjusted"]
+    assert meta["crypto"]["currency"] == "USDT"
+    # 周期：三档都列给界面选；avail_freqs 才是真实有落盘的档
+    assert meta["cn"]["freqs"] == ["1d", "5m", "1m"]
+    assert meta["cn"]["avail_freqs"] == ["1d", "5m"]
+    assert meta["hk"]["freqs"] == ["1d", "5m", "1m"]
+    assert meta["hk"]["avail_freqs"] == ["1d"]
+
+
+def test_lab_klines_minute_and_fallback_guard(client):
+    m5 = client.get(
+        f"{BASE}/market-lab/klines",
+        params={"symbol": "600519", "adj": "unadjusted", "limit": 60,
+                "market": "cn", "freq": "5m"},
+    ).json()["data"]
+    assert m5["freq"] == "5m" and m5["count"] == 3
+    assert m5["bars"][0]["date"] == "2026-09-01 09:35:00"
+
+    # 港股没有分钟库 → 400（前端会先按 avail_freqs 自动回日线）
+    assert client.get(
+        f"{BASE}/market-lab/klines",
+        params={"symbol": "0700.HK", "adj": "unadjusted", "limit": 60,
+                "market": "hk", "freq": "5m"},
+    ).status_code == 400
+    # 分钟线只有不复权
+    assert client.get(
+        f"{BASE}/market-lab/klines",
+        params={"symbol": "600519", "adj": "backward", "limit": 60,
+                "market": "cn", "freq": "5m"},
+    ).status_code == 400
+
+
+def test_lab_symbols_dispatch_by_market(client):
+    def codes(market: str, q: str) -> list[str]:
+        return [
+            x["code"]
+            for x in client.get(
+                f"{BASE}/market-lab/symbols", params={"q": q, "market": market}
+            ).json()["data"]
+        ]
+
+    assert codes("hk", "0700") == ["0700.HK"]
+    assert codes("hk", "腾讯") == ["0700.HK"]
+    assert codes("us", "AAPL") == ["AAPL"]
+    assert codes("us", "苹果") == ["AAPL"]
+    assert codes("futures", "螺纹") == ["RB0.CN"]
+    assert codes("crypto", "BTC") == ["BTCUSDT"]
+    assert (
+        client.get(
+            f"{BASE}/market-lab/symbols", params={"market": "nope"}
+        ).status_code
+        == 400
+    )
+
+
+def test_lab_klines_dispatch_and_adj_guard(client):
+    hk = client.get(
+        f"{BASE}/market-lab/klines",
+        params={"symbol": "700", "adj": "unadjusted", "limit": 60, "market": "hk"},
+    ).json()["data"]
+    assert hk["market"] == "hk" and hk["symbol"] == "0700.HK"
+    assert hk["name"] == "腾讯控股" and hk["bars"][-1]["close"] == 418.0
+
+    hk_back = client.get(
+        f"{BASE}/market-lab/klines",
+        params={"symbol": "0700.HK", "adj": "backward", "limit": 60, "market": "hk"},
+    ).json()["data"]
+    assert hk_back["bars"][-1]["close"] == 209.0   # 走 daily_backward
+
+    us = client.get(
+        f"{BASE}/market-lab/klines",
+        params={"symbol": "aapl", "adj": "unadjusted", "limit": 60, "market": "us"},
+    ).json()["data"]
+    assert us["symbol"] == "AAPL" and us["name"] == "苹果"
+    assert us["bars"][-1]["close"] == 208.0
+
+    fut = client.get(
+        f"{BASE}/market-lab/klines",
+        params={"symbol": "rb0.cn", "adj": "unadjusted", "limit": 60, "market": "futures"},
+    ).json()["data"]
+    assert fut["symbol"] == "RB0.CN" and fut["name"] == "螺纹钢"
+
+    bad_adj = client.get(
+        f"{BASE}/market-lab/klines",
+        params={"symbol": "AAPL", "adj": "backward", "limit": 60, "market": "us"},
+    )
+    assert bad_adj.status_code == 400
+    assert "无「backward」复权数据" in bad_adj.json()["detail"]
+
+
+def test_lab_backtest_forwards_market(client, monkeypatch):
+    seen: dict = {}
+
+    def fake(**kw):
+        seen.update(kw)
+        return {"stats": {}, "trades": [], "equity": [], "indicators": None, "meta": {}}
+
+    monkeypatch.setattr("backend.services.agent_arena.market_lab.run_backtest", fake)
+    r = client.post(
+        f"{BASE}/market-lab/backtest",
+        json={
+            "strategy": "sma_cross",
+            "symbol": "AAPL",
+            "adj": "unadjusted",
+            "market": "us",
+        },
+    )
+    assert r.status_code == 200 and r.json()["success"] is True
+    assert seen["market"] == "us" and seen["symbol"] == "AAPL"
+
+
 def test_lab_batch_runs_not_swallowed_by_run_id_route(client):
     """/batch/runs 必须命中字面量路由，不能被 /batch/{run_id} 吞成 404。"""
     data = client.get(f"{BASE}/market-lab/batch/runs").json()["data"]
@@ -948,6 +1181,83 @@ def test_lab_batch_detail_filter_sort_and_404(client):
     assert [r["trades"] for r in by_trades["rows"]] == [4, 3]
 
     assert client.get(f"{BASE}/market-lab/batch/no-such-run").status_code == 404
+
+
+def test_lab_batch_create_request_active_and_status(client, arena_root):
+    """界面发起批量：自定义代码入队 → active/status 可读；同时间只允许一批。"""
+    r = client.post(
+        f"{BASE}/market-lab/batch",
+        json={
+            "pool": "custom",
+            "codes": ["600519", "000001"],
+            "strategies": ["sma_cross", "donchian"],
+        },
+    )
+    assert r.status_code == 200 and r.json()["success"] is True
+    data = r.json()["data"]
+    run_id = data["request"]["run_id"]
+    assert data["request"]["codes"] == ["600519.SH", "000001.SZ"]
+    assert data["request"]["pool_label"] == "自定义（2 只）"
+    assert data["status"]["status"] == "queued" and data["status"]["total"] == 2
+    assert (arena_root / "lab_batch" / "queue" / f"{run_id}.json").is_file()
+
+    active = client.get(f"{BASE}/market-lab/batch/active").json()["data"]
+    assert active["run_id"] == run_id
+
+    st = client.get(f"{BASE}/market-lab/batch/{run_id}/status").json()["data"]
+    assert st["status"] == "queued" and st["done"] == 0 and st["total"] == 2
+
+    # 单批次闸门：跑批吃满 CPU，不允许并发入队
+    busy = client.post(f"{BASE}/market-lab/batch", json={"pool": "hs300"}).json()
+    assert busy["success"] is False and "已有批次在跑" in busy["error"]
+
+
+def test_lab_batch_create_validation(client):
+    assert client.post(
+        f"{BASE}/market-lab/batch", json={"pool": "nope"}
+    ).status_code == 400
+    bad_code = client.post(
+        f"{BASE}/market-lab/batch",
+        json={"pool": "custom", "codes": ["999999"]},
+    )
+    assert bad_code.status_code == 400
+    assert "未知 A 股代码" in bad_code.json()["detail"]
+    bad_strategy = client.post(
+        f"{BASE}/market-lab/batch",
+        json={"pool": "hs300", "strategies": ["nope"]},
+    )
+    assert bad_strategy.status_code == 400
+
+
+def test_lab_batch_status_falls_back_to_result_file(client):
+    """老批次没有 status/，但结果已落盘 → 如实报 done。"""
+    st = client.get(
+        f"{BASE}/market-lab/batch/20260930-120000-hs300/status"
+    ).json()["data"]
+    assert st["status"] == "done" and st["counts"]["rows"] == 3
+    assert client.get(f"{BASE}/market-lab/batch/no-such-run/status").status_code == 404
+
+
+def test_ai_service_shared_config_roundtrip_and_permissions(tmp_path, monkeypatch):
+    """AI 服务配置镜像：0600、转写脚本可读、显式清 Key 删文件。"""
+    monkeypatch.setenv("QM_ARENA_DATA_ROOT", str(tmp_path))
+    from backend.services.agent_arena import ai_service
+
+    assert ai_service.read_config() == {}
+    out = ai_service.write_config(
+        "sk-x", "https://api.example.com/v1", "m", {"x": "y"},
+    )
+    assert out["model"] == "m" and out["extra_headers"] == {"x": "y"}
+    assert ai_service.config_path().stat().st_mode & 0o777 == 0o600
+
+    from scripts.pine_to_pyne import _llm_config
+
+    cfg = _llm_config()
+    assert cfg["base_url"] == "https://api.example.com/v1"
+    assert cfg["api_key"] == "sk-x" and cfg["headers"] == {"x": "y"}
+
+    ai_service.write_config("")
+    assert not ai_service.config_path().exists()
 
 
 def test_lab_library_list_filters_and_edited_priority(client):
@@ -1015,6 +1325,25 @@ def test_lab_versions_transpile_and_job_null_report(client):
     assert j2["job"]["status"] == "queued" and j2["report"] is None
 
 
+def test_lab_job_report_scoped_by_market_symbol_adj_freq(client):
+    """报告按 market×symbol×adj×freq 分文件；无该键时 null，不回退到别的市场。"""
+    hk = client.get(
+        f"{BASE}/market-lab/library/0001/job",
+        params={"market": "hk", "symbol": "0700.HK", "adj": "unadjusted", "freq": "1d"},
+    ).json()["data"]
+    assert hk["report"]["market"] == "hk" and hk["report"]["symbol"] == "0700.HK"
+    assert hk["report"]["stats"]["Net profit"]["pct"] == 7.7
+
+    us = client.get(
+        f"{BASE}/market-lab/library/0001/job",
+        params={"market": "us", "symbol": "AAPL", "adj": "unadjusted", "freq": "1d"},
+    ).json()["data"]
+    assert us["report"] is None
+
+    latest = client.get(f"{BASE}/market-lab/library/0001/job").json()["data"]
+    assert latest["report"]["symbol"] == "600519.SH"
+
+
 # ---------- 族 2 写面（B2：编辑/备注/对话/采用/回滚/转写回测入队） ----------
 # 写端点只落文件、执行在宿主 worker；这里锁的是「落对了文件 + 错误分档」，
 # 而不是任何执行行为（执行链路的测试见 test_pine_*.py）。
@@ -1043,6 +1372,91 @@ def test_lab_save_source_writes_edited_and_reset_removes(client, arena_root):
     assert not edited.exists()
     d2 = client.delete(f"{BASE}/market-lab/library/0002").json()["data"]
     assert d2["removed"] is False  # 幂等：再删一次如实报「没有可删的」
+
+
+def test_lab_custom_pine_create_edit_delete(client, arena_root):
+    """新增 Pine 策略：custom/ 独立落盘，编辑走 edited/ 覆盖层，删除只限自建。"""
+    created = client.post(
+        f"{BASE}/market-lab/library",
+        json={
+            "title": "我的均线",
+            "category": "我的策略",
+            "source": "//@version=5\nstrategy('mine')\n",
+        },
+    )
+    assert created.status_code == 200 and created.json()["success"] is True
+    item = created.json()["data"]
+    assert item["id"] == "u001" and item["source_kind"] == "custom"
+    assert (arena_root / "pine_library" / "custom" / "source" / "u001.pine").is_file()
+
+    listed = client.get(
+        f"{BASE}/market-lab/library", params={"q": "我的均线"}
+    ).json()["data"]
+    assert [x["id"] for x in listed["items"]] == ["u001"]
+
+    got = client.get(f"{BASE}/market-lab/library/u001").json()["data"]
+    assert "strategy('mine')" in got["source"] and got["edited"] is False
+
+    # 编辑写 edited/ 覆盖层；丢弃编辑回到创建时源码
+    client.put(
+        f"{BASE}/market-lab/library/u001",
+        json={"source": "//@version=5\nstrategy('mine2')\n"},
+    )
+    edited = client.get(f"{BASE}/market-lab/library/u001").json()["data"]
+    assert "strategy('mine2')" in edited["source"] and edited["edited"] is True
+    client.delete(f"{BASE}/market-lab/library/u001")
+    reset = client.get(f"{BASE}/market-lab/library/u001").json()["data"]
+    assert "strategy('mine')" in reset["source"]
+
+    gone = client.delete(f"{BASE}/market-lab/library/u001/custom").json()["data"]
+    assert gone == {"id": "u001", "deleted": True}
+    assert client.get(f"{BASE}/market-lab/library/u001").status_code == 404
+
+
+def test_lab_custom_pine_validation_and_builtin_delete_guard(client):
+    assert client.post(
+        f"{BASE}/market-lab/library", json={"title": "", "source": "x"}
+    ).status_code == 400
+    assert client.post(
+        f"{BASE}/market-lab/library", json={"title": "x", "source": "  "}
+    ).status_code == 400
+    # 内置/语料条目只能「丢弃编辑」，不能删除
+    assert client.delete(f"{BASE}/market-lab/library/0001/custom").status_code == 400
+
+    ids = [
+        client.post(
+            f"{BASE}/market-lab/library",
+            json={"title": f"自建{i}", "source": "//@version=5\nstrategy('x')\n"},
+        ).json()["data"]["id"]
+        for i in (1, 2)
+    ]
+    assert ids == ["u001", "u002"]
+
+
+def test_lab_custom_pine_enqueue_backtest_carries_market(client, arena_root):
+    item = client.post(
+        f"{BASE}/market-lab/library",
+        json={"title": "港股自检", "source": "//@version=5\nstrategy('x')\n"},
+    ).json()["data"]
+    r = client.post(
+        f"{BASE}/market-lab/library/{item['id']}/backtest",
+        json={"symbol": "700", "adj": "unadjusted", "market": "hk"},
+    )
+    assert r.status_code == 200 and r.json()["success"] is True
+    req = json.loads(
+        (arena_root / "pine_transpile" / "queue" / f"{item['id']}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert req["market"] == "hk" and req["symbol"] == "0700.HK"
+
+    # 美股没有后复权：400，不静默降级成不复权
+    bad = client.post(
+        f"{BASE}/market-lab/library/{item['id']}/backtest",
+        json={"symbol": "AAPL", "adj": "backward", "market": "us"},
+    )
+    assert bad.status_code == 400
+    assert "不支持复权口径" in bad.json()["detail"]
 
 
 def test_lab_note_save_roundtrip_and_validation(client, arena_root):

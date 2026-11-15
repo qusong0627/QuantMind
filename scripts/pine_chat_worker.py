@@ -157,7 +157,7 @@ def compare(before: dict, after: dict, symbol: str, adj: str) -> dict:
 
 
 def run_candidate(item_id: str, job_id: str, pine_text: str, symbol: str, adj: str,
-                  model: str) -> tuple[dict, Path]:
+                  model: str, market: str = "cn", freq: str = "1d") -> tuple[dict, Path]:
     """候选落盘 → 走正式链路（转写 → 静态闸 → 沙箱回测），返回 (job 字段, 候选目录)。
 
     路径改道（``--source``/``--out``）后与正式产物完全隔离；进度写进对话 job
@@ -171,7 +171,7 @@ def run_candidate(item_id: str, job_id: str, pine_text: str, symbol: str, adj: s
     tmp.replace(pine_path)
 
     return ptw.process({"id": item_id, "symbol": symbol, "adj": adj, "model": model,
-                        "source": str(pine_path)},
+                        "market": market, "freq": freq, "source": str(pine_path)},
                        item_dir=cand_dir,
                        job_path=pl.chat_jobs() / f"{job_id}.json",
                        success_status="staged"), cand_dir
@@ -237,7 +237,8 @@ def _baseline(item_id: str) -> dict:
 
 
 def _finish_edit(job_id: str, item_id: str, raw: str, usage, truncated: bool,
-                 model: str, symbol: str, adj: str) -> dict:
+                 model: str, symbol: str, adj: str, market: str = "cn",
+                 freq: str = "1d") -> dict:
     """改策略：模型出 Pine → 同一套链路跑候选 → 前后指标对比。"""
     pine = extract_pine(raw)
     explain = strip_pine_block(raw)
@@ -249,7 +250,8 @@ def _finish_edit(job_id: str, item_id: str, raw: str, usage, truncated: bool,
 
     _write_job(job_id, id=item_id, status="running", stage="transpile", error="")
     try:
-        fields, cand_dir = run_candidate(item_id, job_id, pine, symbol, adj, model)
+        fields, cand_dir = run_candidate(item_id, job_id, pine, symbol, adj, model,
+                                          market, freq)
     except Exception as exc:  # noqa: BLE001
         return _write_job(job_id, id=item_id, status="failed", stage="edit",
                           error=f"候选链路失败: {exc}", reply=explain, usage=usage)
@@ -269,7 +271,7 @@ def _finish_edit(job_id: str, item_id: str, raw: str, usage, truncated: bool,
     cand = {"pine": pine, "problems": got["meta"].get("problems") or [],
             "stats": got["report"].get("stats") or {},
             "trades": got["report"].get("trades"),
-            "symbol": symbol, "adj": adj,
+            "symbol": symbol, "adj": adj, "market": market, "freq": freq,
             "compare": {**compare(before, got["report"], symbol, adj), **_baseline(item_id)}}
     reply = explain or "已生成候选。"
     _append_thread(item_id, {"timestamp": _now(), "role": "assistant",
@@ -322,7 +324,9 @@ def process(req: dict) -> dict:
         report = pl.read_report(item_id) or {}
         symbol = str(req.get("symbol") or report.get("symbol") or DEFAULT_SYMBOL)
         return _finish_edit(job_id, item_id, reply, usage, truncated, model,
-                            symbol, str(report.get("adj") or "backward"))
+                            symbol, str(report.get("adj") or "backward"),
+                            str(report.get("market") or "cn"),
+                            str(report.get("freq") or "1d"))
     return _finish_ask(job_id, item_id, reply, usage, truncated, mode)
 
 
