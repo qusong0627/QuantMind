@@ -117,11 +117,11 @@ export interface LeaderboardRow extends FactorKpi {
   excess_300?: number | null;
   excess_800?: number | null;
   excess_500?: number | null;
-  /** 最新截面 Top-N 持仓的中位总市值（亿；非 CN 无估值源时缺失） */
+  /** 最新截面 Top-N 持仓的中位规模（亿；CN/HK/US=总市值，FUTURES=持仓名义规模） */
   median_mv_yi?: number | null;
-  /** 市值风格：大盘（≥500亿）/ 中盘（100-500亿）/ 小盘（<100亿）；非 CN 多为 null */
+  /** 规模风格：股票=大盘（≥500亿）/中盘（100-500亿）/小盘（<100亿）；期货=大规模/中规模/小规模 */
   mv_style?: string | null;
-  /** 最新截面 Top-N 持仓的前三行业（CN=申万二级；非 CN=该市场板块维度，缺源则空） */
+  /** 最新截面 Top-N 持仓的前三行业（CN=申万二级；HK=恒生行业；US=Yahoo 行业；FUTURES=品种板块） */
   top_industries?: Array<{ name: string; count: number }> | null;
   env_tag: string;
   time_tag: string;

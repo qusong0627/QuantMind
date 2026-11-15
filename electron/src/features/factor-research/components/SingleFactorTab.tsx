@@ -74,6 +74,8 @@ function KpiRow({ label, kpi, color, excess, excessNone }: {
 }
 
 export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset, market, onOpenReport }) => {
+  /** 期货无市值/行业：同列展示持仓名义规模与品种板块 */
+  const isFutures = market === 'FUTURES';
   const [detail, setDetail] = useState<FactorDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -423,7 +425,7 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset, market,
             >
               {detail.stocks_stale && (
                 <div className="mb-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] leading-relaxed text-amber-700">
-                  该因子数据未更新到最新截面，以下为它最近一个有数据的截面（{detail.stocks_date}），行业/市值分布同口径。
+                  该因子数据未更新到最新截面，以下为它最近一个有数据的截面（{detail.stocks_date}），{isFutures ? '板块/规模' : '行业/市值'}分布同口径。
                 </div>
               )}
               <div className="h-full min-h-0 overflow-auto custom-scrollbar" style={{ maxHeight: 320 }}>
@@ -434,8 +436,8 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset, market,
                       <th className="text-left py-1 w-14">代码</th>
                       <th className="text-left py-1">名称</th>
                       {/* 行业口径随市场：CN=申万（instrument_detail）；非 CN=该市场板块维度 */}
-                      <th className="text-left py-1 w-20">{market === 'CN' ? '申万行业' : '行业'}</th>
-                      <th className="text-right py-1 w-16">市值(亿)</th>
+                      <th className="text-left py-1 w-20">{isFutures ? '板块' : market === 'CN' ? '申万行业' : '行业'}</th>
+                      <th className="text-right py-1 w-16">{isFutures ? '规模(亿)' : '市值(亿)'}</th>
                       <th className="text-right py-1 w-14">PE</th>
                       <th className="text-right py-1 w-10">PB</th>
                       <th className="text-right py-1 w-20">日均成交额(亿)</th>
@@ -470,10 +472,10 @@ export const SingleFactorTab: React.FC<Props> = ({ code, range, dataset, market,
               </div>
             </Card>
             <div className="flex flex-col gap-2 min-h-0">
-              <Card title={market === 'CN' ? '选出股票的行业分布（申万二级）' : '选出股票的行业分布'}>
+              <Card title={isFutures ? '选出合约的品种板块分布' : market === 'CN' ? '选出股票的行业分布（申万二级）' : '选出股票的行业分布'}>
                 <DistBars rows={detail.industry_dist.slice(0, 12)} color="#6366f1" height={128} />
               </Card>
-              <Card title="市值分布（按总市值分档）">
+              <Card title={isFutures ? '规模分布（持仓名义规模分档）' : '市值分布（按总市值分档）'}>
                 <DistBars rows={detail.cap_dist} color="#0891b2" height={128} />
               </Card>
             </div>

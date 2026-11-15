@@ -25,6 +25,7 @@ import { FuturesInventoryPanel } from '../components/FuturesInventoryPanel';
 import { FuturesSpreadPanel } from '../components/FuturesSpreadPanel';
 import { getOverview, getStatus, refreshMarket } from '../services/api';
 import type { FuturesFeedStatus, FuturesOverview } from '../types';
+import { MarketSelector } from '../../../components/layout/MarketSelector';
 
 const NAV_TABS = [
   { id: 'panorama', label: '行情总览', icon: Activity },
@@ -122,6 +123,7 @@ export const MarketAnalysisFuturesPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2.5 flex-shrink-0">
+          <MarketSelector />
           {dataDate && (
             <span
               title="行情数据对应的最新交易日（完整交易日以国内品种齐全的分区为准）"

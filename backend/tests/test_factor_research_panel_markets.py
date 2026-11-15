@@ -211,8 +211,8 @@ def test_e2e_hk_个股快照名称链与诚实置空(hk_e2e):
     assert snap.loc[SYMS[0], "name"] == "名称1"  # cn_name 优先
     assert snap.loc[SYMS[30], "name"] == "EN31"  # cn 空 → en_name
     assert snap.loc[SYMS[35], "name"] == SYMS[35]  # 主表无此标的 → 回退代码
-    assert snap["industry"].isna().all()  # HK sector 实测全空 → 置空，不造行业
-    assert snap["total_mv_yi"].isna().all()  # 估值供给注册表不含 HK
+    assert snap["industry"].isna().all()  # 夹具未提供 profile/sector 值 → 置空，不造行业
+    assert snap["total_mv_yi"].isna().all()  # 夹具未提供 akshare_financial → 不造市值
     assert np.isfinite(snap["avg_amount_yi"]).all()  # 近 252 日均额（元→亿换算）有值
 
 
@@ -252,8 +252,9 @@ def test_e2e_futures_无主表名称回退代码(fut_e2e):
     snap = pd.read_parquet(fut_e2e["out"] / "stock_snapshot.parquet")
     assert len(snap) == 40
     assert (snap["name"] == snap["symbol"]).all()
-    assert snap["total_mv_yi"].isna().all()
-    assert snap["industry"].isna().all()
+    # 无持仓/乘数 → 20 日成交额代理；未识别品种归「其他」，两项都不留空
+    assert np.isfinite(snap["total_mv_yi"]).all()
+    assert (snap["industry"] == "其他").all()
 
 
 # ─────────────────────── 口径收口点 ───────────────────────
@@ -410,7 +411,7 @@ def test_板块目录缺失返回none(tmp_path, monkeypatch):
     assert list(out["symbol"]) == ["0001.HK"]
 
 
-def test_估值快照供给由注册表裁决(tmp_path, monkeypatch):
+def test_估值快照_us分区与hk财务表(tmp_path, monkeypatch):
     us, hk = tmp_path / "quantus", tmp_path / "quanthk"
     monkeypatch.setenv("QM_QUANTUS_DATA_DIR", str(us))
     monkeypatch.setenv("QM_QUANTHK_DATA_DIR", str(hk))
@@ -422,17 +423,92 @@ def test_估值快照供给由注册表裁决(tmp_path, monkeypatch):
         "20260202",
         [{"symbol": "AAPL", "total_mv": 10.0, "pe_ttm": 20.0, "pb": 30.0}],
     )
-    _write_val(  # HK 盘上有分区（脏行）也不供给 —— 注册表裁决，不是「有文件就用」
-        hk,
-        "20260101",
-        [{"symbol": "0001.HK", "total_mv": None, "pe_ttm": None, "pb": None}],
-    )
+    # HK：5_technical_derived/valuation 为空，估值走 akshare_financial
+    fin = hk / "2_base_sector" / "akshare_financial"
+    fin.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "0001.HK",
+                "总市值(港元)": 2.69e11,
+                "已发行股本(股)": 3.83e9,
+                "市盈率": 7.1,
+                "市净率": 0.47,
+            }
+        ]
+    ).to_parquet(fin / "0001.HK.parquet", index=False)
 
     us_out = frdata.load_valuation_snapshot("US")
     assert us_out is not None and float(us_out.loc[0, "total_mv"]) == 10.0  # 取最新分区
 
-    assert frdata.load_valuation_snapshot("HK") is None
+    hk_out = frdata.load_valuation_snapshot("HK")
+    assert hk_out is not None
+    row = hk_out.set_index("symbol").loc["0001.HK"]
+    assert float(row["total_mv"]) == pytest.approx(2.69e11)
+    assert float(row["shares"]) == pytest.approx(3.83e9)
+    assert float(row["pe_ttm"]) == pytest.approx(7.1)
     assert frdata.load_valuation_snapshot("FUTURES") is None
+
+
+def test_hk行业回退到profile_不拿空串或英文sector凑数(tmp_path, monkeypatch):
+    root = tmp_path / "quanthk"
+    monkeypatch.setenv("QM_QUANTHK_DATA_DIR", str(root))
+    d = root / "2_base_sector" / "sector"
+    d.mkdir(parents=True)
+    pd.DataFrame(
+        [{"symbol": "0001.HK", "sector": "Conglomerates", "industry": ""}]
+    ).to_parquet(d / "0001.HK.parquet", index=False)
+    prof = root / "2_base_sector" / "akshare_profile"
+    prof.mkdir(parents=True)
+    pd.DataFrame(
+        [{"symbol": "0001.HK", "所属行业": "综合企业"}]
+    ).to_parquet(prof / "0001.HK.parquet", index=False)
+
+    out = frdata.load_sector_map("HK")
+    assert out is not None
+    row = out.set_index("symbol").loc["0001.HK"]
+    assert row["industry"] == "综合企业"  # 恒生中文行业优先于 Yahoo sector
+
+
+def test_期货品种板块与乘数映射(tmp_path, monkeypatch):
+    root = tmp_path / "quantfutures"
+    monkeypatch.setenv("QM_QUANTFUTURES_DATA_DIR", str(root))
+    rule = root / "2_base_sector" / "trade_rule" / "dt=20260101"
+    rule.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "variety": "CU",
+                "variety_name": "铜",
+                "exchange": "上期所",
+                "multiplier": 5,
+            },
+            {
+                "variety": "T",
+                "variety_name": "10年期国债",
+                "exchange": "中金所",
+                "multiplier": 10000,
+            },
+            {
+                "variety": "M",
+                "variety_name": "豆粕",
+                "exchange": "大商所",
+                "multiplier": 10,
+            },
+        ]
+    ).to_parquet(rule / "data.parquet", index=False)
+
+    assert frdata.futures_variety_code("CU0.CN") == "CU"
+    assert frdata.futures_variety_code("CU2610.CN") == "CU"
+    assert frdata.futures_variety_code("CL.FUT") == "CL"
+    smap = frdata.futures_variety_sector_map()
+    assert smap["CU"] == "有色"
+    assert smap["T"] == "金融"
+    assert smap["M"] == "农产品"
+    assert smap["CL"] == "能化"  # 外盘显式表兜底
+    mult = frdata.futures_multiplier_map()
+    assert mult["CU"] == 5
+    assert mult["T"] == 10000
 
 
 # ─────────────────────── 非 CN 个股快照组装 ───────────────────────

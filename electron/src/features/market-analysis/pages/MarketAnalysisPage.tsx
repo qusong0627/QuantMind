@@ -15,6 +15,7 @@ import { FlowPanoramaPanel } from '../components/FlowPanoramaPanel';
 import { SmartMoneyPanel } from '../components/smart-money/SmartMoneyPanel';
 import { SERVICE_ENDPOINTS } from '../../../config/services';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
+import { MarketSelector } from '../../../components/layout/MarketSelector';
 import { fmtBeijingClock } from '../../../utils/timeBeijing';
 
 const MARKET_ANALYSIS_API = `${SERVICE_ENDPOINTS.USER_SERVICE}/market-analysis`;
@@ -297,6 +298,7 @@ export const MarketAnalysisPage: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2.5 flex-shrink-0">
+            <MarketSelector />
             {dataDate && !snapshotMissing && (
               <span
                 title="行情数据对应的最新交易日"

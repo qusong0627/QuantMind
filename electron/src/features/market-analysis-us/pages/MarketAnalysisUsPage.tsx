@@ -33,6 +33,7 @@ import {
   getBreadth, getHeatmap, getIndicesOverview, getMarketStats, getStatus, refreshMarket,
 } from '../services/api';
 import type { UsBreadthData, UsIndexItem, UsMarketStats, UsSectorHeatItem } from '../types';
+import { MarketSelector } from '../../../components/layout/MarketSelector';
 
 const NAV_TABS = [
   { id: 'panorama', label: '大盘脉搏', icon: Activity },
@@ -123,6 +124,7 @@ export const MarketAnalysisUsPage: React.FC = () => {
           <StockTerminalSearchBox market="US" accent="blue" widthClass="w-full max-w-[500px]" />
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
+          <MarketSelector />
           {dataDate && (
             <span className="hidden md:flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/80 text-slate-600 border border-blue-200/70 text-[10px] font-extrabold font-mono whitespace-nowrap">
               <Clock className="w-3 h-3 text-blue-500" />

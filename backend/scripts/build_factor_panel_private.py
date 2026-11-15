@@ -13,9 +13,10 @@ CN/HK/US/FUTURES 各自构建快照，产物写 ``<市场根>/factor_research_pr
 - **不读经典目录**（classic 为 A 股专属）：持有期收益本地重算、基准按市场
   注册表写（HK=恒生系 / US=标普系 / FUTURES 无指数数据 → 空表，缺文件=没建过、
   空表=本市场无基准，两信号不混）；
-- 本脚本自产 ``stock_snapshot.parquet``（名称←security_master、行业←sector、
-  市值/PE/PB←valuation 最新分区〔仅 US，注册表裁决；HK 分区脏、FUT 无目录
-  → 诚实置空〕）；CN 的仍由 build_factor_research.py 写经典目录，此处不重复。
+- 本脚本自产 ``stock_snapshot.parquet``（名称←security_master、行业←sector /
+  HK akshare_profile / FUTURES 品种板块、市值/PE/PB←US valuation 分区 /
+  HK akshare_financial / FUTURES 持仓名义规模；缺数据处诚实置空，不造数）；
+  CN 的仍由 build_factor_research.py 写经典目录，此处不重复。
 
 来源（``--source``，默认 ``auto``）：
 - ``auto``（默认）：**自动扫描 ``6_ml_datasets/`` 下的全部因子数据集**（alpha_library 429、
@@ -287,10 +288,12 @@ def _stock_snapshot_non_cn(market: str, daily: dict[str, pd.DataFrame]) -> pd.Da
     """非 CN 自产个股快照（列与经典 ``_build_stocks_snapshot`` 同构，前端零改动）。
 
     - name ← security_master（cn_name → en_name → symbol；FUTURES 无主表 → symbol）；
-    - industry ← sector/（industry 列优先、空串回退 sector 列；HK 实测全空 → 整列
-      缺省，界面按缺省渲染，绝不填假行业）；
-    - total_mv_yi/pe_ttm/pb ← 最新估值分区（供给由 ``frdata.VALUATION_SNAPSHOT_MARKETS``
-      裁决：仅 US；HK 分区脏、FUT 无目录 → NaN）；
+    - industry ← sector/（industry 列优先、空串回退 sector 列；HK 走 profile
+      恒生行业、FUTURES 走品种板块）；无法判定 → 缺省，绝不填假行业；
+    - total_mv_yi/pe_ttm/pb ← 最新估值（供给由 ``frdata.load_valuation_snapshot``
+      裁决：US=valuation 分区、HK=akshare_financial、FUTURES=无市值 → 名义规模）；
+    - FUTURES：total_mv_yi = 收盘价 × 合约乘数 × 持仓量（20 日均值，亿元）；
+      无持仓/乘数的外盘与现货品种退回 20 日成交额（量级代理，不含杠杆）；
     - avg_amount_yi ← 面板最近 252 行日均成交额（单位换算走 ``frdata.amount_yi_factor``，
       CN 万元 / 非 CN 元的差异只在那一处收口）。
     """
@@ -318,19 +321,63 @@ def _stock_snapshot_non_cn(market: str, daily: dict[str, pd.DataFrame]) -> pd.Da
     else:
         ind = pd.Series(dtype=object)
     snap["industry"] = ind.reindex(snap["symbol"]).to_numpy()
-    val = frdata.load_valuation_snapshot(market)
-    for col, src in (("total_mv_yi", "total_mv"), ("pe_ttm", "pe_ttm"), ("pb", "pb")):
-        if val is not None and src in val.columns:
-            v = pd.to_numeric(
-                val.drop_duplicates("symbol").set_index("symbol")[src], errors="coerce"
-            )
-            if src == "total_mv":
-                v = v / 1e8  # 元 → 亿元（与经典 stock_snapshot 同口径）
-            snap[col] = v.reindex(snap["symbol"]).to_numpy(dtype=float)
-        else:
-            snap[col] = np.nan
+    if market == "FUTURES":
+        vmap = frdata.futures_variety_sector_map()
+        # 未识别品种归「其他」，不把行业列留空（板块是分类事实，不是估值假数）
+        snap["industry"] = [
+            vmap.get(frdata.futures_variety_code(sym), "其他") for sym in snap["symbol"]
+        ]
+
     amt = daily["amount"].tail(252).mean() * frdata.amount_yi_factor(market)
     snap["avg_amount_yi"] = amt.reindex(snap["symbol"]).to_numpy(dtype=float)
+
+    if market == "FUTURES":
+        snap["total_mv_yi"] = np.nan
+        snap["pe_ttm"] = np.nan
+        snap["pb"] = np.nan
+        position = daily.get("position")
+        mult = frdata.futures_multiplier_map()
+        if position is not None and mult:
+            mult_s = pd.Series(
+                {c: mult.get(frdata.futures_variety_code(c)) for c in close.columns}
+            )
+            notional = (close.tail(20) * position.tail(20)).mul(mult_s, axis=1)
+            med = notional.mean() / 1e8
+            snap["total_mv_yi"] = med.reindex(snap["symbol"]).to_numpy(dtype=float)
+        # 无持仓/乘数（外盘、现货、部分新合约）→ 20 日成交额代理，量级可比但不含杠杆
+        missing = snap["total_mv_yi"].isna() & snap["avg_amount_yi"].notna()
+        snap.loc[missing, "total_mv_yi"] = snap.loc[missing, "avg_amount_yi"]
+    else:
+        val = frdata.load_valuation_snapshot(market)
+        if market == "HK" and val is not None and "shares" in val.columns:
+            # 港股：已发行股本 × 最新收盘价（价格更新后市值仍对齐），缺值回退快照总市值
+            v = val.drop_duplicates("symbol").set_index("symbol")
+            shares = pd.to_numeric(v["shares"], errors="coerce")
+            last_close = close.ffill().iloc[-1] if len(close) else pd.Series(dtype=float)
+            mv = shares * last_close.reindex(shares.index)
+            mv = mv.fillna(pd.to_numeric(v["total_mv"], errors="coerce"))
+            snap["total_mv_yi"] = (mv / 1e8).reindex(snap["symbol"]).to_numpy(dtype=float)
+            for col, src in (("pe_ttm", "pe_ttm"), ("pb", "pb")):
+                if src in v.columns:
+                    snap[col] = (
+                        pd.to_numeric(v[src], errors="coerce")
+                        .reindex(snap["symbol"])
+                        .to_numpy(dtype=float)
+                    )
+                else:
+                    snap[col] = np.nan
+        else:
+            for col, src in (("total_mv_yi", "total_mv"), ("pe_ttm", "pe_ttm"), ("pb", "pb")):
+                if val is not None and src in val.columns:
+                    v = pd.to_numeric(
+                        val.drop_duplicates("symbol").set_index("symbol")[src],
+                        errors="coerce",
+                    )
+                    if src == "total_mv":
+                        v = v / 1e8  # 元 → 亿元（与经典 stock_snapshot 同口径）
+                    snap[col] = v.reindex(snap["symbol"]).to_numpy(dtype=float)
+                else:
+                    snap[col] = np.nan
     return snap
 
 
@@ -425,7 +472,24 @@ def main() -> int:
         if end_ts is not None
         else "20991231"
     )
-    daily = frdata.load_daily_panel(lookback_s, load_end, market=mk)
+    daily_fields = ("open", "high", "low", "close", "volume", "amount")
+    if mk == "FUTURES":
+        # 快照的「规模」列需要持仓量：收盘 × 合约乘数 × position。
+        # 老分区/外部市场可能没有 position 列（如测试夹具、部分外盘），
+        # 缺列时退回无持仓口径（快照构建器会用成交额代理），不阻断整条构建。
+        try:
+            daily = frdata.load_daily_panel(
+                lookback_s, load_end, fields=(*daily_fields, "position"), market=mk
+            )
+        except (KeyError, ValueError) as exc:
+            print(f"      ⚠ daily_forward 缺 position 列，期货规模退回成交额代理: {exc}")
+            daily = frdata.load_daily_panel(
+                lookback_s, load_end, fields=daily_fields, market=mk
+            )
+    else:
+        daily = frdata.load_daily_panel(
+            lookback_s, load_end, fields=daily_fields, market=mk
+        )
     # 股票池：CN 走 instrument（ST/退市口径）；非 CN 无对应物 → instr=None，
     # 只做历史过滤（缺哪层过滤的事实由 meta.universe 说明，绝不冒充经典口径）。
     instr = frdata.load_instrument() if mk == "CN" else None

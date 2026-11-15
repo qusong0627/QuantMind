@@ -14,7 +14,7 @@ type DriftFeature = {
   rank_reliable: boolean;
 };
 
-export const DriftTabPanel: React.FC<{ modelId: string }> = ({ modelId }) => {
+export const DriftTabPanel: React.FC<{ modelId: string; marketLabel?: string }> = ({ modelId, marketLabel }) => {
   const [loading, setLoading] = useState(true);
   const [drift, setDrift] = useState<any>(null);
   const [search, setSearch] = useState('');
@@ -74,6 +74,11 @@ export const DriftTabPanel: React.FC<{ modelId: string }> = ({ modelId }) => {
     <div className="space-y-4">
       {/* 说明 独立卡 */}
       <Card className="rounded-2xl border-slate-200" size="small">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs font-black text-slate-700">数据漂移</span>
+          {marketLabel && <Tag color="blue" className="m-0 text-[10px] font-bold">{marketLabel}</Tag>}
+          <span className="text-[10px] text-slate-400">随所选模型所属市场</span>
+        </div>
         <Collapse
           ghost
           items={[

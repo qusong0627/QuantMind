@@ -42,6 +42,7 @@ import { StockPoolPickerModal } from '../../../components/backtest/StockPoolPick
 import type { StockPoolOption } from '../../../services/stockPoolOptionService';
 import type { InferenceRankingItem, UserModelRecord } from '../../../services/modelTrainingService';
 import { extractModelType, modelDisplayName } from '../../../pages/modelRegistryUtils';
+import { MarketSelector } from '../../../components/layout/MarketSelector';
 
 const { Text } = Typography;
 
@@ -263,6 +264,9 @@ export const InferenceCenterShell: React.FC = () => {
           <Tag color="blue" className="rounded text-[11px] font-bold border-0 px-1.5 py-0 m-0 shrink-0">
             {marketLabel}
           </Tag>
+          <div className="ml-1 shrink-0">
+            <MarketSelector />
+          </div>
           <WorkspaceTabs
             active={workspace}
             onChange={setWorkspace}

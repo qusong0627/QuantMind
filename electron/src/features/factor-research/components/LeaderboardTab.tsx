@@ -164,6 +164,8 @@ export const LeaderboardTab: React.FC<Props> = ({
   onSendCompare, onSendCompose, onOpenSingle, meta, dedup, onToggleDedup,
   onRegisterToTraining,
 }) => {
+  /** 期货无市值：同列展示「持仓名义规模」，风格档与筛选选项随之改口径 */
+  const isFutures = market === 'FUTURES';
   const dedupMeta = meta.dedup as LeaderboardDedupMeta | undefined;
   const dedupDropped = dedupMeta?.applied ? dedupMeta.dropped : undefined;
   const [sortKey, setSortKey] = useState<string>('composite');
@@ -191,6 +193,20 @@ export const LeaderboardTab: React.FC<Props> = ({
 
   /** 本市场基准清单（meta 下发；CN 的列不读它，走存量键） */
   const benchList = useMemo(() => (meta.benchmarks as BenchMeta[] | undefined) ?? [], [meta]);
+  /** 期货的规模风格档位与股票市值风格不同，筛选下拉必须跟着换 */
+  const colFilters = useMemo(
+    () =>
+      isFutures
+        ? {
+            ...COL_FILTERS,
+            mv_style: {
+              ...COL_FILTERS.mv_style,
+              options: ['大规模', '中规模', '小规模'],
+            },
+          }
+        : COL_FILTERS,
+    [isFutures],
+  );
   /** 环境标签口径里的基准名（后端 env_tags 取本市场主基准）：CN 存量=沪深300；无基准市场=null */
   const benchPrimaryName = market === 'CN' ? '沪深300' : (benchList[0]?.name ?? null);
   /** 股票池事实：私人库构建器把它写进 factors.json 的 meta.universe（CN=ST/退市口径，
@@ -213,7 +229,25 @@ export const LeaderboardTab: React.FC<Props> = ({
       fmt: (v: unknown) => fmtPct(v as number),
     }));
   }, [market, benchList]);
-  const cols = useMemo(() => [...BASE_COLS, ...excessCols, ...TAIL_COLS], [excessCols]);
+  const tailCols = useMemo<Col[]>(
+    () =>
+      TAIL_COLS.map((c) => {
+        if (c.key !== 'median_mv_yi') return c;
+        return {
+          ...c,
+          label: isFutures ? '中位规模(亿)' : '中位市值(亿)',
+          hint: isFutures
+            ? '持仓名义规模 = 收盘价 × 合约乘数 × 持仓量（20 日均值）；无持仓数据的外盘/现货退 20 日成交额'
+            : '最新截面 Top-N 持仓的中位总市值（本币亿元）',
+          fmt: (v) => fmtNum(v as number, isFutures ? 2 : market === 'CN' ? 0 : 1),
+        };
+      }),
+    [isFutures, market],
+  );
+  const cols = useMemo(
+    () => [...BASE_COLS, ...excessCols, ...tailCols],
+    [excessCols, tailCols],
+  );
 
   const view = useMemo(() => {
     const scoped = favsOnly ? rows.filter((r) => favs.includes(r.code)) : rows;
@@ -272,7 +306,7 @@ export const LeaderboardTab: React.FC<Props> = ({
   };
 
   const colActive = (key: string): boolean => {
-    const cfg = COL_FILTERS[key];
+    const cfg = colFilters[key];
     if (!cfg) return false;
     if (cfg.kind === 'text') return (key === 'industry' ? filters.industry : filters.name).trim() !== '';
     if (cfg.kind === 'select') return filters.mvStyle !== '';
@@ -291,7 +325,7 @@ export const LeaderboardTab: React.FC<Props> = ({
   };
 
   const valueFor = (key: string): ColFilterValue => {
-    const cfg = COL_FILTERS[key];
+    const cfg = colFilters[key];
     if (cfg.kind === 'text') return { kind: 'text', text: key === 'industry' ? filters.industry : filters.name };
     if (cfg.kind === 'select') return { kind: 'select', value: filters.mvStyle };
     return { kind: 'range', filter: filters.numeric[key] || {} };
@@ -327,7 +361,7 @@ export const LeaderboardTab: React.FC<Props> = ({
    *  label 缺省查 LABELS；动态超额列的标签不在表里，由列自带传入。
    *  hint 给列头补口径说明（悬停可见）。 */
   const headCell = (key: string, width: string, align: 'left' | 'right', sortable = true, label?: string, hint?: string) => {
-    const cfg = COL_FILTERS[key];
+    const cfg = colFilters[key];
     const active = colActive(key);
     const text = label ?? LABELS[key];
     return (
@@ -519,9 +553,11 @@ export const LeaderboardTab: React.FC<Props> = ({
             所有因子按综合得分排名。综合分 = 因子有效性(50%) + 实战业绩(50%)：分项指标在**全因子截面**标准化
             (z-score) 后加权，方向已统一（数值越大越好）。有效性 = RankIC 均值与 IC_IR；业绩 = 年化 / 夏普 /
             −最大回撤 / 月度胜率。业绩口径：top-N 等权（持仓数可切换）、月末调仓、0.2% 双边成本（按换手计）；
-            区间选择会整体重算。中位市值 / 市值风格与前三行业按最新截面的 Top-N 持仓统计
-            （市值风格阈值：大盘≥500亿 · 中盘100-500亿 · 小盘&lt;100亿{market === 'CN' ? '' : '，单位随该市场估值快照'}；
-            没有估值快照的市场该列显示「—」，不代填）。{universeNote}。
+            区间选择会整体重算。{isFutures ? '中位规模 / 规模风格与前三板块' : '中位市值 / 市值风格与前三行业'}按最新截面的 Top-N 持仓统计
+            （{isFutures
+              ? '期货无市值：规模 = 收盘价 × 合约乘数 × 持仓量（20 日均值），无持仓数据的外盘/现货退 20 日成交额；规模风格阈值：大规模≥500亿 · 中规模100-500亿 · 小规模<100亿'
+              : `市值风格阈值：大盘≥500亿 · 中盘100-500亿 · 小盘<100亿${market === 'CN' ? '' : '，单位随该市场估值快照（HK 港元 / US 美元）'}`}；
+            个别标的缺数据时该行显示「—」，不代填）。{universeNote}。
           </p>
           <p>
             <b>Fitness</b>（世坤 BRAIN 口径，单列不并入综合分）= IR × √(|Returns| / max(Turnover, 0.125))；
@@ -555,7 +591,7 @@ export const LeaderboardTab: React.FC<Props> = ({
             <b>筛选</b>：点列头漏斗按列筛（阈值按显示单位填——年化填 15 表示 15%；回撤按幅度；
             RankIC 可勾「按绝对值」找强因子，正反不限）；上方搜索框 = 因子名/代码包含。
             <b>标签</b>：点一个只看它；同组多选取并集（环境内 / 时效内），两组同时选取得交集。
-            点行内标签、市值风格芯片同样能直接筛。
+            点行内标签、{isFutures ? '规模' : '市值'}风格芯片同样能直接筛。
             <b>自选</b>：行首 ★ 收藏（按数据集记住），「自选 N」一键只看收藏。
             <b>去重</b>：一键剔同源（|ρ| ≥ 0.9，逐月截面 Spearman 均值口径，与筛选页一致）——
             成对的重复因子只留榜单更靠前的一个，其余不再显示、名次重新连续编号（综合分不重算）。
@@ -609,9 +645,9 @@ export const LeaderboardTab: React.FC<Props> = ({
                   <th className="w-6 py-1" aria-label="自选"></th>
                   <th className="text-left py-1 pl-1 w-8"></th>
                   {cols.map((c) => headCell(c.key, c.width || '', c.align || 'left', true, c.label, c.hint))}
-                  {headCell('mv_style', 'w-16', 'right', false)}
+                  {headCell('mv_style', 'w-16', 'right', false, isFutures ? '规模风格' : '市值风格')}
                   <th className="text-left py-1 pl-1">标签</th>
-                  {headCell('industry', '', 'left', false)}
+                  {headCell('industry', '', 'left', false, isFutures ? '前三板块' : '前三行业')}
                 </tr>
               </thead>
               <tbody>
@@ -739,7 +775,9 @@ export const LeaderboardTab: React.FC<Props> = ({
                         {fmtNum(r.ic_mean, 3)}
                       </td>
                       <td className="py-1 text-right font-mono text-slate-500">{fmtNum(r.ic_ir)}</td>
-                      <td className="py-1 text-right font-mono text-slate-600">{fmtNum(r.median_mv_yi, 0)}</td>
+                      <td className="py-1 text-right font-mono text-slate-600">
+                        {fmtNum(r.median_mv_yi, isFutures ? 2 : market === 'CN' ? 0 : 1)}
+                      </td>
                       <td className="py-1 text-right">
                         {r.mv_style ? (
                           <button
@@ -747,7 +785,7 @@ export const LeaderboardTab: React.FC<Props> = ({
                               e.stopPropagation();
                               setFilters((prev) => ({ ...prev, mvStyle: prev.mvStyle === r.mv_style ? '' : (r.mv_style as string) }));
                             }}
-                            title={filters.mvStyle === r.mv_style ? '取消该市值风格筛选' : `只看「${r.mv_style}」的因子`}
+                            title={filters.mvStyle === r.mv_style ? `取消该${isFutures ? '规模' : '市值'}风格筛选` : `只看「${r.mv_style}」的因子`}
                             className={`rounded-full border px-1.5 py-[1px] text-[9px] font-bold transition-colors ${
                               filters.mvStyle === r.mv_style
                                 ? 'border-indigo-200 bg-indigo-50 text-indigo-600'
@@ -813,10 +851,18 @@ export const LeaderboardTab: React.FC<Props> = ({
       </Card>
 
       {/* 列筛选浮层（fixed 定位，逃出表格滚动容器的裁剪） */}
-      {filterOpen && COL_FILTERS[filterOpen.key] && (
+      {filterOpen && colFilters[filterOpen.key] && (
         <ColumnFilterPopover
-          label={LABELS[filterOpen.key]}
-          config={COL_FILTERS[filterOpen.key]}
+          label={
+            filterOpen.key === 'median_mv_yi' && isFutures
+              ? '中位规模(亿)'
+              : filterOpen.key === 'mv_style' && isFutures
+                ? '规模风格'
+                : filterOpen.key === 'industry' && isFutures
+                  ? '前三板块'
+                  : LABELS[filterOpen.key]
+          }
+          config={colFilters[filterOpen.key]}
           value={valueFor(filterOpen.key)}
           anchor={filterOpen}
           onChange={(v) => setFilters((prev) => applyValue(prev, filterOpen.key, v))}

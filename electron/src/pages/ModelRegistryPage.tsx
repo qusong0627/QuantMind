@@ -70,6 +70,7 @@ import { PAGE_LAYOUT } from '../config/pageLayout';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
+import { MarketSelector } from '../components/layout/MarketSelector';
 const { Text } = Typography;
 
 type ModelListTab = 'active' | 'favorites' | 'archived';
@@ -650,6 +651,10 @@ export const ModelRegistryPage: React.FC = () => {
                   </button>
                 </div>
               </div>
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <MarketSelector />
+                <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">切换市场 → 当前模型库</span>
+              </div>
               <Input
                 prefix={<Search size={13} className="text-slate-300" />}
                 placeholder="搜索模型..."
@@ -985,7 +990,7 @@ export const ModelRegistryPage: React.FC = () => {
                             数据漂移
                           </span>
                         ),
-                        children: <DriftTabPanel modelId={selectedModel.model_id} />,
+                        children: <DriftTabPanel modelId={selectedModel.model_id} marketLabel={marketConfig.label} />,
                       },
                       {
                         key: 'market',

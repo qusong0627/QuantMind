@@ -20,11 +20,13 @@ from fastapi.responses import StreamingResponse
 
 from backend.services.api.market_analysis_hk import (
     hk_heatmap_drill as drill,
+    hk_index_model,
     hk_opportunity as opp,
     hk_smart_money as hksm,
     quanthk_feed as feed,
 )
 from backend.services.api.user_app.middleware.auth import get_current_user
+from backend.shared.model_registry import model_registry_service
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,42 @@ router = APIRouter(prefix="/api/v1/market-analysis-hk", tags=["Market Analysis H
 def _fatal(exc: Exception) -> HTTPException:
     logger.exception("[market-analysis-hk] 请求失败")
     return HTTPException(status_code=500, detail=f"港股市场分析失败: {exc}")
+
+
+def _is_hk_model(model: dict) -> bool:
+    meta = model.get("metadata_json") or {}
+    if isinstance(meta, str):
+        meta = {}
+    raw = str(meta.get("market") or (meta.get("context") or {}).get("market") or "")
+    if raw.upper() in {"HK", "HONG_KONG", "港股", "HKEX", "XHKG"}:
+        return True
+    return "mdl_hk_" in str(model.get("model_id") or "").lower()
+
+
+async def _resolve_hk_model(
+    *, tenant_id: str, user_id: str, model_id: str | None
+) -> dict | None:
+    """显式 model_id 优先；否则默认港股模型；再否则最近一个 ready/active 港股模型。"""
+    if model_id:
+        model = await model_registry_service.get_model(
+            tenant_id=tenant_id, user_id=user_id, model_id=model_id
+        )
+        if not model:
+            raise HTTPException(status_code=404, detail=f"模型不存在: {model_id}")
+        if not _is_hk_model(model):
+            raise HTTPException(status_code=422, detail="该模型不是港股模型")
+        return model
+    model = await model_registry_service.get_default_model(
+        tenant_id=tenant_id, user_id=user_id, market="HK"
+    )
+    if model:
+        return model
+    models = await model_registry_service.list_models(
+        tenant_id=tenant_id, user_id=user_id, market="HK"
+    )
+    return next(
+        (m for m in models if str(m.get("status") or "") in {"ready", "active"}), None
+    )
 
 
 # ---- 诊断 ----
@@ -60,6 +98,37 @@ async def get_indices_overview(
     try:
         return await asyncio.to_thread(feed.get_indices_overview)
     except Exception as exc:
+        raise _fatal(exc) from exc
+
+
+@router.get("/indices/model-scores")
+async def get_indices_model_scores(
+    model_id: str | None = Query(
+        default=None, max_length=120, description="港股模型 ID；缺省取默认/最新可用模型"
+    ),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """宽基指数模型排序分：HSI/HSCEI/HSTECH/HSCCI 成分聚合（只描述位置）。"""
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    try:
+        model = await _resolve_hk_model(
+            tenant_id=tenant_id, user_id=user_id, model_id=model_id
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _fatal(exc) from exc
+    if model is None:
+        return {
+            "available": False,
+            "reason": "暂无可用港股模型（请先在模型管理训练或设默认）",
+            "model": None,
+            "indices": [],
+        }
+    try:
+        return await asyncio.to_thread(hk_index_model.get_index_model_scores, model)
+    except Exception as exc:  # noqa: BLE001
         raise _fatal(exc) from exc
 
 

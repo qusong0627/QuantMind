@@ -1305,6 +1305,12 @@ export function NeutralizationOverviewPanel({
     [models, selected],
   );
 
+  // 总览接口按用户返回全部市场；本面板只展示当前市场模型，避免港股页混入 A股/美股配置。
+  const visibleRows = useMemo(() => {
+    const allowed = new Set(models.map((m) => m.model_id));
+    return rows.filter((r) => allowed.has(r.model_id));
+  }, [rows, models]);
+
   const load = async () => {
     setLoading(true);
     try {
@@ -1320,14 +1326,14 @@ export function NeutralizationOverviewPanel({
     void load();
   }, []);
 
-  const configured = new Set(rows.map((r) => r.model_id));
+  const configured = new Set(visibleRows.map((r) => r.model_id));
   const candidates = models.filter((m) => !configured.has(m.model_id));
-  const okCount = rows.filter((r) => r.last_status === 'ok').length;
-  const degradedCount = rows.filter((r) => r.last_status === 'degraded' || r.last_status === 'failed').length;
+  const okCount = visibleRows.filter((r) => r.last_status === 'ok').length;
+  const degradedCount = visibleRows.filter((r) => r.last_status === 'degraded' || r.last_status === 'failed').length;
   const avgCoverage =
-    rows.filter((r) => r.coverage != null).length > 0
-      ? rows.reduce((sum, r) => sum + (r.coverage ?? 0), 0) /
-        rows.filter((r) => r.coverage != null).length
+    visibleRows.filter((r) => r.coverage != null).length > 0
+      ? visibleRows.reduce((sum, r) => sum + (r.coverage ?? 0), 0) /
+        visibleRows.filter((r) => r.coverage != null).length
       : null;
 
   const columns: ColumnsType<NeutralizationOverviewRow> = [
@@ -1505,7 +1511,7 @@ export function NeutralizationOverviewPanel({
 
       {/* 汇总 */}
       <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
-        <StatTile label="已配置模型" value={String(rows.length)} hint="含关闭/影子/启用" icon={ShieldCheck} />
+        <StatTile label="已配置模型" value={String(visibleRows.length)} hint="含关闭/影子/启用" icon={ShieldCheck} />
         <StatTile
           label="最近正常"
           value={String(okCount)}
@@ -1535,7 +1541,7 @@ export function NeutralizationOverviewPanel({
           rowKey="model_id"
           loading={loading}
           columns={columns}
-          dataSource={rows}
+          dataSource={visibleRows}
           pagination={{ pageSize: 10, size: 'small', hideOnSinglePage: true }}
           locale={{ emptyText: '还没有模型开启中性化。先从右上角选择模型并保存为「影子」模式。' }}
         />

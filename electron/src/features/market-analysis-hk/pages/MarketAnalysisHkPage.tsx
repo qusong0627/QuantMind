@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { message } from 'antd';
 import { HkIndexCards } from '../components/HkIndexCards';
+import { HkIndexModelPanel } from '../components/HkIndexModelPanel';
 import { HkBreadthCard } from '../components/HkBreadthCard';
 import { ProfitLeadersCard } from '../components/HkProfitLeaders';
 import { HkHeatmapDrillCard } from '../components/HkHeatmapDrillCard';
@@ -34,6 +35,7 @@ import {
   getBreadth, getHeatmap, getIndicesOverview, getStatus, refreshMarket,
 } from '../services/api';
 import type { HkBreadthData, HkIndexItem, HkSectorHeatItem } from '../types';
+import { MarketSelector } from '../../../components/layout/MarketSelector';
 
 const NAV_TABS = [
   { id: 'panorama', label: '恒指脉搏', icon: Activity },
@@ -55,6 +57,8 @@ export const MarketAnalysisHkPage: React.FC = () => {
   const [updateTime, setUpdateTime] = useState('');
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  // 宽基指数模型面板的刷新计数（行情刷新后一并重新拉模型排序分）
+  const [modelRefreshKey, setModelRefreshKey] = useState(0);
   // 个股终端浮窗选中标的（页面统一持有：热力图 L2 色块 / 机会雷达 / 各面板行点击）
   const [windowSymbol, setWindowSymbol] = useState<string | null>(null);
 
@@ -95,6 +99,7 @@ export const MarketAnalysisHkPage: React.FC = () => {
     try {
       const res = await refreshMarket();
       message.success(`${res.message}（${res.trade_date}）`);
+      setModelRefreshKey((k) => k + 1);
       await loadCore();
     } catch (e) {
       message.error(`刷新失败: ${(e as Error).message}`);
@@ -127,6 +132,7 @@ export const MarketAnalysisHkPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2.5 flex-shrink-0">
+          <MarketSelector />
           {dataDate && (
             <span title="行情数据对应的最新交易日" className="hidden md:flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/80 text-slate-600 border border-indigo-200/70 text-[11px] font-extrabold font-mono whitespace-nowrap shadow-2xs">
               <Clock className="w-3 h-3 text-indigo-500" />
@@ -152,6 +158,12 @@ export const MarketAnalysisHkPage: React.FC = () => {
 
       {/* 恒生四大指数 */}
       <HkIndexCards indices={indices} loading={loading} />
+
+      {/* 宽基指数 · 模型排序分（HSI/HSCEI/HSTECH/HSCCI 成分聚合） */}
+      <HkIndexModelPanel
+        refreshKey={modelRefreshKey}
+        onPick={(symbol) => setWindowSymbol(symbol)}
+      />
 
       {/* Tab 导航 */}
       <div className="flex items-center justify-between border-b border-indigo-100/80 pb-1 pt-0.5">

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,12 @@ INSTRUMENT_PARTS = ("2_base_sector", "instrument_detail")
 ST_PIT_PARTS = ("2_base_sector", "st_pit")
 SECURITY_MASTER_PARTS = ("2_base_sector", "security_master", "data.parquet")
 SECTOR_PARTS = ("2_base_sector", "sector")
+# 港股估值/行业：5_technical_derived/valuation 在 HK 为空目录，改用本地
+# akshare_financial（总市值/已发行股本/PE/PB）与 akshare_profile（恒生行业）。
+HK_FINANCIAL_PARTS = ("2_base_sector", "akshare_financial")
+HK_PROFILE_PARTS = ("2_base_sector", "akshare_profile")
+# 期货品种规则（乘数 / 品种名 → 板块）；连续合约 XX0.CN 由品种码映射。
+FUTURES_TRADE_RULE_PARTS = ("2_base_sector", "trade_rule")
 INCOME_PARTS = ("3_financial_data", "income")
 BALANCE_PARTS = ("3_financial_data", "balance")
 CASHFLOW_PARTS = ("3_financial_data", "cashflow")
@@ -41,9 +48,10 @@ HOLDER_PARTS = ("3_financial_data", "holder_num")
 # 基准指数（demo 口径用中证500；回归市场组合同样用它做基准）
 BENCHMARK_SYMBOL = "000905.SH"
 
-# stock_snapshot 估值列（市值/PE/PB）的供给市场注册表：**加市场 = 加条目**。
-# 判据是数据质量实测（20261016）：US valuation 550 分区可用；HK 仅 7 分区且
-# close=0 脏行、FUT 无目录 → 置空（诚实 '—'，绝不拿脏数当市值）。
+# stock_snapshot 估值列（市值/PE/PB）的 partition 供给注册表：**加市场 = 加条目**。
+# 判据是数据质量实测（20261016）：US valuation 550 分区可用。HK 的 valuation
+# 目录为空，改走 ``akshare_financial``（见 ``_load_hk_valuation``）；FUTURES 无
+# 市值概念，供给由快照构建器按持仓名义规模另算（``load_valuation_snapshot`` 返回 None）。
 VALUATION_SNAPSHOT_MARKETS = {"US"}
 
 
@@ -274,36 +282,114 @@ def load_security_master(market: str = "CN") -> pd.DataFrame | None:
     return df[["symbol", "cn_name", "en_name"]]
 
 
+def _load_hk_profile_industry(market: str) -> pd.DataFrame | None:
+    """港股恒生行业（``akshare_profile/所属行业``）→ symbol/industry。
+
+    ``2_base_sector/sector`` 的 HK 文件实测 industry/sector 全为空串；profile
+    是同一数据平台里唯一稳定的行业源（2026-11-15 实测 2783/2784 有值）。
+    """
+    d = _market_root(market).joinpath(*HK_PROFILE_PARTS)
+    if not d.is_dir() or not any(d.glob("*.parquet")):
+        return None
+    import duckdb
+
+    out = duckdb.sql(
+        "SELECT symbol, NULLIF(TRIM(\"所属行业\"), '') AS industry "
+        f"FROM read_parquet('{d}/*.parquet', union_by_name=true)"
+    ).to_df()
+    if out.empty or "symbol" not in out.columns:
+        return None
+    out = out.dropna(subset=["industry"]).drop_duplicates("symbol", keep="last")
+    return out if not out.empty else None
+
+
 def load_sector_map(market: str = "CN") -> pd.DataFrame | None:
     """行业映射（``2_base_sector/sector/<symbol>.parquet`` → symbol/industry/sector）。
 
     目录缺失或全空 → None（调用方把行业列置空，绝不编造）。逐文件 schema 有漂移
     （HK 实测 industry/sector 全为空串、US 两类都有），故用 DuckDB ``union_by_name``
     一次扫全目录，返回**实际存在的**列（调用方 industry 缺则回退 sector）。
+
+    HK：sector 目录存在但行业全空时，回退 ``akshare_profile/所属行业``（恒生行业，
+    2783/2784 覆盖）；不回退成空串，也不拿别的市场行业代填。
     """
-    d = _market_root(market).joinpath(*SECTOR_PARTS)
+    from backend.shared.feature_source import validate_market
+
+    mk = validate_market(market)
+    d = _market_root(mk).joinpath(*SECTOR_PARTS)
+    out = None
+    if d.is_dir() and any(d.glob("*.parquet")):
+        import duckdb
+
+        raw = duckdb.sql(
+            f"SELECT * FROM read_parquet('{d}/*.parquet', union_by_name=true)"
+        ).to_df()
+        keep = [c for c in ("symbol", "industry", "sector") if c in raw.columns]
+        if "symbol" in keep:
+            out = raw[keep]
+    if mk != "HK":
+        return out
+    profile = _load_hk_profile_industry(mk)
+    if out is None:
+        return profile
+    if profile is None or out.empty:
+        return out
+    base = out.copy()
+    if "industry" not in base.columns:
+        base["industry"] = None
+    base["industry"] = base["industry"].replace("", pd.NA)
+    merged = base.merge(
+        profile.rename(columns={"industry": "_profile_industry"}),
+        on="symbol",
+        how="outer",
+    )
+    # 恒生行业（中文、与市场分析页同源）优先于 sector/ 的 Yahoo 英文行业；
+    # profile 缺该股时再保留 sector/ 值，最后才留空。
+    merged["industry"] = merged["_profile_industry"].fillna(merged["industry"])
+    return merged.drop(columns=["_profile_industry"])
+
+
+def _load_hk_valuation(market: str) -> pd.DataFrame | None:
+    """港股估值快照（``akshare_financial``）→ symbol/total_mv/shares/pe_ttm/pb。
+
+    ``总市值(港元)`` 是抓取时点的快照；``已发行股本(股)`` 供快照构建器用最新
+    收盘价重算市值（价格变动后仍能对齐）。脏行（市值 ≤0）置 NaN，不伪装成 0。
+    """
+    d = _market_root(market).joinpath(*HK_FINANCIAL_PARTS)
     if not d.is_dir() or not any(d.glob("*.parquet")):
         return None
     import duckdb
 
     out = duckdb.sql(
-        f"SELECT * FROM read_parquet('{d}/*.parquet', union_by_name=true)"
+        "SELECT symbol, "
+        "TRY_CAST(\"总市值(港元)\" AS DOUBLE) AS total_mv, "
+        "TRY_CAST(\"已发行股本(股)\" AS DOUBLE) AS shares, "
+        "TRY_CAST(\"市盈率\" AS DOUBLE) AS pe_ttm, "
+        "TRY_CAST(\"市净率\" AS DOUBLE) AS pb "
+        f"FROM read_parquet('{d}/*.parquet', union_by_name=true)"
     ).to_df()
-    keep = [c for c in ("symbol", "industry", "sector") if c in out.columns]
-    if "symbol" not in keep:
+    if out.empty or "symbol" not in out.columns:
         return None
-    return out[keep]
+    out = out.drop_duplicates("symbol", keep="last")
+    out.loc[~(out["total_mv"] > 0), "total_mv"] = np.nan
+    out.loc[~(out["shares"] > 0), "shares"] = np.nan
+    return out
 
 
 def load_valuation_snapshot(market: str = "CN") -> pd.DataFrame | None:
-    """最新一期 valuation 截面（symbol/total_mv/pe_ttm/pb）；无分区 → None。
+    """最新一期估值截面（symbol/total_mv/pe_ttm/pb）；无数据源 → None。
 
-    只读**最新一个分区**（stock_snapshot 是最新截面，不需要全历史）；供给与否
-    由 ``VALUATION_SNAPSHOT_MARKETS`` 注册表裁决（HK 脏行 / FUT 无目录 → 不供给）。
+    - US：读 ``5_technical_derived/valuation`` 最新 dt 分区（注册表准入）；
+    - HK：读 ``2_base_sector/akshare_financial``（5_technical_derived/valuation 为空）；
+    - FUTURES：无市值概念（名义规模在快照构建器里按持仓×乘数另算）→ None。
+
+    单位：total_mv 为**本币元**（HK=港元、US=美元），快照构建器统一 /1e8 转亿。
     """
     from backend.shared.feature_source import validate_market
 
     mk = validate_market(market)
+    if mk == "HK":
+        return _load_hk_valuation(mk)
     if mk not in VALUATION_SNAPSHOT_MARKETS:
         return None
     files = _partition_files(VALUATION_PARTS, None, None, mk)
@@ -314,6 +400,204 @@ def load_valuation_snapshot(market: str = "CN") -> pd.DataFrame | None:
     if "symbol" not in cols:
         return None
     return df[cols]
+
+
+def futures_variety_code(symbol: str) -> str:
+    """期货代码 → 品种码：``CU0.CN``→``CU``、``CU2610.CN``→``CU``、``CL.FUT``→``CL``。"""
+    s = str(symbol or "").upper().strip()
+    if s.endswith(".CN"):
+        return re.sub(r"\d+\.CN$", "", s)
+    if s.endswith(".FUT"):
+        return s[:-4]
+    return s
+
+
+#: 外盘/现货品种 → 板块（国内品种由 trade_rule 的中文品种名规则判定）。
+_FOREIGN_FUTURES_SECTOR: dict[str, str] = {
+    "CL": "能化",
+    "NG": "能化",
+    "BO": "能化",
+    "OIL": "能化",
+    "EUA": "能化",
+    "GC": "贵金属",
+    "SI": "贵金属",
+    "XAU": "贵金属",
+    "XAG": "贵金属",
+    "XPT": "贵金属",
+    "XPD": "贵金属",
+    "PL": "贵金属",
+    "PA": "贵金属",
+    "HG": "有色",
+    "NI": "有色",
+    "SN": "有色",
+    "AL": "有色",
+    "CU": "有色",
+    "ZN": "有色",
+    "PB": "有色",
+    "PBD": "有色",
+    "NID": "有色",
+    "SND": "有色",
+    "AHD": "有色",
+    "C": "农产品",
+    "S": "农产品",
+    "W": "农产品",
+    "CT": "农产品",
+    "FCPO": "农产品",
+    "LHC": "农产品",
+    "RSS3": "农产品",
+    "RS": "农产品",
+    "BTC": "金融",
+    "CAD": "金融",
+    "FEF": "黑色",
+    "ZSD": "其他",
+    "TRB": "其他",
+}
+
+_FUTURES_SECTOR_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("金融", ("股指", "国债", "期权")),
+    ("贵金属", ("黄金", "白银", "铂", "钯")),
+    (
+        "有色",
+        (
+            "铜",
+            "铝",
+            "锌",
+            "铅",
+            "镍",
+            "锡",
+            "不锈钢",
+            "氧化铝",
+            "铝合金",
+            "工业硅",
+            "碳酸锂",
+            "多晶硅",
+        ),
+    ),
+    ("黑色", ("螺纹", "热轧", "线材", "铁矿石", "焦炭", "焦煤", "锰硅", "硅铁", "动力煤")),
+    (
+        "能化",
+        (
+            "原油",
+            "燃料油",
+            "沥青",
+            "橡胶",
+            "纸浆",
+            "聚乙烯",
+            "聚氯乙烯",
+            "聚丙烯",
+            "苯乙烯",
+            "乙二醇",
+            "液化石油气",
+            "甲醇",
+            "PTA",
+            "玻璃",
+            "纯碱",
+            "尿素",
+            "短纤",
+            "对二甲苯",
+            "烧碱",
+            "丙烯",
+            "瓶片",
+            "纯苯",
+            "胶版印刷纸",
+            "集运",
+            "碳排放",
+        ),
+    ),
+    (
+        "农产品",
+        (
+            "豆",
+            "玉米",
+            "淀粉",
+            "鸡蛋",
+            "粳米",
+            "生猪",
+            "苹果",
+            "红枣",
+            "花生",
+            "菜籽",
+            "菜粕",
+            "菜油",
+            "白糖",
+            "棉花",
+            "棉纱",
+            "强麦",
+            "普麦",
+            "稻",
+            "原木",
+            "纤维板",
+            "胶合板",
+            "棕榈油",
+        ),
+    ),
+)
+
+
+def _futures_sector(variety: str, name: str, exchange: str) -> str:
+    """期货品种 → 板块（金融/贵金属/有色/黑色/能化/农产品/其他）。"""
+    text = f"{name} {variety}"
+    if exchange in ("中金所", "CFFEX"):
+        return "金融"
+    if variety.startswith(("AU", "AG", "PT", "MAU")):
+        return "贵金属"
+    for sector, keywords in _FUTURES_SECTOR_KEYWORDS:
+        if any(k in text for k in keywords):
+            return sector
+    return _FOREIGN_FUTURES_SECTOR.get(variety, "其他")
+
+
+def load_futures_rule_snapshot() -> pd.DataFrame | None:
+    """最新期货交易规则（variety/multiplier/variety_name/exchange）；无分区 → None。"""
+    files = _partition_files(FUTURES_TRADE_RULE_PARTS, None, None, "FUTURES")
+    if not files:
+        return None
+    df = pd.read_parquet(files[-1])
+    cols = [
+        c
+        for c in ("variety", "multiplier", "variety_name", "exchange")
+        if c in df.columns
+    ]
+    if "variety" not in cols:
+        return None
+    out = df[cols].copy()
+    out["variety"] = out["variety"].astype(str).str.upper().str.strip()
+    out = out.drop_duplicates("variety", keep="last")
+    return out
+
+
+def futures_variety_sector_map() -> dict[str, str]:
+    """品种码 → 板块（来自最新 trade_rule；外盘/现货用显式表兜底）。"""
+    out = dict(_FOREIGN_FUTURES_SECTOR)
+    rules = load_futures_rule_snapshot()
+    if rules is None:
+        return out
+    for row in rules.itertuples(index=False):
+        variety = str(getattr(row, "variety", "") or "").upper().strip()
+        if not variety:
+            continue
+        # 期权品种（CU_O 等）不映射到板块；快照里只有期货连续合约。
+        if variety.endswith("_O") or "_" in variety:
+            continue
+        out[variety] = _futures_sector(
+            variety,
+            str(getattr(row, "variety_name", "") or ""),
+            str(getattr(row, "exchange", "") or ""),
+        )
+    return out
+
+
+def futures_multiplier_map() -> dict[str, float]:
+    """品种码 → 合约乘数（trade_rule 唯一来源；缺失品种不猜测）。"""
+    rules = load_futures_rule_snapshot()
+    if rules is None or "multiplier" not in rules.columns:
+        return {}
+    mult = pd.to_numeric(rules["multiplier"], errors="coerce")
+    return {
+        str(v): float(m)
+        for v, m in zip(rules["variety"], mult, strict=False)
+        if pd.notna(m) and float(m) > 0
+    }
 
 
 def month_end_dates(index: pd.DatetimeIndex) -> list[pd.Timestamp]:

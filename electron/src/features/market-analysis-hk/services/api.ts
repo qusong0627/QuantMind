@@ -12,6 +12,7 @@ import type {
   HkFeedStatus,
   HkHeatmapDrill,
   HkIndexItem,
+  HkIndexModelResponse,
   HkOpportunitySectors,
   HkOpportunityStocks,
   HkOpportunitySummary,
@@ -53,6 +54,12 @@ export function getStatus(): Promise<HkFeedStatus> {
 
 export function getIndicesOverview(): Promise<HkIndexItem[]> {
   return getJson<HkIndexItem[]>('/indices/overview');
+}
+
+/** 宽基指数模型排序分（缺省取默认/最新可用港股模型） */
+export function getIndexModelScores(modelId?: string): Promise<HkIndexModelResponse> {
+  const q = modelId ? `?model_id=${encodeURIComponent(modelId)}` : '';
+  return getJson<HkIndexModelResponse>(`/indices/model-scores${q}`);
 }
 
 export function getBreadth(): Promise<HkBreadthData> {

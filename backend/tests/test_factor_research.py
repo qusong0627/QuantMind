@@ -600,6 +600,39 @@ def test_holdings_profile_uses_factor_own_last_month():
     assert style == "中盘"
     assert {r["name"] for r in top} == {"银行", "医药"}
 
+    # 期货无市值：同一数值按名义规模档叫「中规模」，不冒充股票「中盘」
+    _, fut_style, _ = service._holdings_profile(
+        p, p.index("LATE"), 2, snap_mv, snap_ind, "FUTURES"
+    )
+    assert fut_style == "中规模"
+
+
+def test_holdings_profile_skips_thin_tail_section():
+    """末截面只有 2 只（源库尾段未齐）→ 回退到最近一个 ≥5 只的截面。"""
+    syms = [f"S{i}" for i in range(6)]
+    rows = []
+    for dt, n in (("2026-09-30", 6), ("2026-10-31", 2)):
+        for rk, sym in enumerate(syms[:n], 1):
+            rows.append(
+                {
+                    "factor_code": "F",
+                    "trade_date": pd.Timestamp(dt),
+                    "rank": rk,
+                    "symbol": sym,
+                    "score": float(10 - rk),
+                    "raw": float(rk),
+                    "fwd_ret": 0.01 * rk,
+                }
+            )
+    p = scorecard.Panel(pd.DataFrame(rows))
+    snap_mv = {s: float((i + 1) * 10) for i, s in enumerate(syms)}
+    med, style, top = service._holdings_profile(
+        p, p.index("F"), 6, snap_mv, {}, "CN"
+    )
+    assert med == 35.0  # median(10,20,30,40,50,60)，不是末截面 median(10,20)
+    assert style == "小盘"
+    assert len(top) == 0  # 没给行业映射
+
 
 # ---------------------------------------------------------------------------
 # 目录/元数据读取时富化（taxonomy 接线：类别 id/中文 + name_cn 回填）

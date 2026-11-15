@@ -438,3 +438,70 @@ export interface InstitutionalSuggestItem {
   symbol: string;
   name: string;
 }
+
+/** 宽基指数 · 模型排序分（/indices/model-scores；只描述位置，不是涨跌预测） */
+export interface HkIndexModelConstituent {
+  symbol: string;
+  name: string;
+  score: number;
+  weight: number | null;
+}
+
+export interface HkIndexModelMetrics {
+  ic: number | null;
+  rank_ic: number | null;
+  ic_t: number | null;
+  ic_win: number | null;
+  top_ann: number | null;
+  bottom_ann: number | null;
+  long_short: number | null;
+  long_short_sharpe: number | null;
+}
+
+export interface HkIndexModelInfo {
+  model_id: string;
+  display_name: string;
+  model_type: string;
+  status: string;
+  feature_count: number | null;
+  horizon_days: number | null;
+  metrics: HkIndexModelMetrics;
+  score_date?: string;
+  universe_size?: number;
+}
+
+export interface HkIndexModelItem {
+  code: string;
+  name: string;
+  index_symbol: string;
+  available: boolean;
+  reason: string | null;
+  n_members: number;
+  n_scored: number;
+  coverage: number | null;
+  mean_score: number | null;
+  median_score: number | null;
+  weighted_score: number | null;
+  breadth: number | null;
+  top_quintile_share: number | null;
+  bottom_quintile_share: number | null;
+  position: '靠前' | '居中' | '靠后' | null;
+  top_constituents: HkIndexModelConstituent[];
+  bottom_constituents: HkIndexModelConstituent[];
+}
+
+export interface HkIndexModelResponse {
+  available: boolean;
+  reason: string | null;
+  model: HkIndexModelInfo | null;
+  membership_date?: string | null;
+  universe?: {
+    n_scored: number;
+    mean_score: number;
+    median_score: number;
+    top_quintile_cut: number | null;
+    bottom_quintile_cut: number | null;
+  };
+  indices: HkIndexModelItem[];
+  wording?: string;
+}

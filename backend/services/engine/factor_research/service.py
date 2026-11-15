@@ -274,10 +274,11 @@ def _build_derived(ctx: dict) -> dict:
     p, mask = ctx["panel"], ctx["mask"]
     series30 = {c: scorecard.topn_series(p, p.index(c), 30, mask) for c in p.codes}
     bench_ret = ctx["bench_ret"]
-    env = (
-        scorecard.env_tags({c: s["ret"] for c, s in series30.items()}, bench_ret)
-        if bench_ret is not None and len(bench_ret) >= 6
-        else {}
+    # 无基准市场（FUTURES）也要有标签面：传空数组 → scorecard.env_tags 的
+    # 既定「不造假基准」分支，全因子恒为「全天候型」，不再整列空白。
+    env = scorecard.env_tags(
+        {c: s["ret"] for c, s in series30.items()},
+        bench_ret if bench_ret is not None else np.array([]),
     )
     ic = ctx["ic"]
     ttag = scorecard.time_tags(ic, p.codes, ctx["rdates"]) if ic is not None else {}
@@ -367,18 +368,27 @@ def _snapshot_maps(snap: pd.DataFrame | None) -> tuple[dict, dict]:
 
 
 def _holdings_profile(
-    p, fi: int, n: int, snap_mv: dict, snap_ind: dict
+    p, fi: int, n: int, snap_mv: dict, snap_ind: dict, market: str = "CN"
 ) -> tuple[float | None, str | None, list[dict]]:
-    """最新截面 Top-N 持仓画像：(中位市值亿, 市值风格, 前三行业)。
+    """最新截面 Top-N 持仓画像：(中位规模亿, 规模风格, 前三行业)。
 
-    市值风格（按中位总市值）：≥500 亿大盘 · 100~500 亿中盘 · <100 亿小盘。
+    市值/规模风格（按中位总市值）：≥500 亿大盘 · 100~500 亿中盘 · <100 亿小盘。
+    期货无市值：total_mv_yi 是持仓名义规模（收盘×乘数×持仓量，缺失时成交额代理），
+    风格档用「大规模 / 中规模 / 小规模」同一 500/100 亿阈值，措辞不与股票混用。
 
     截面取该因子**自身**最近有数据的月份：断更因子（面板末月无行）取全局末月
-    会得到空持仓 → 中位市值/风格/行业全空。
+    会得到空持仓 → 中位市值/风格/行业全空。末月不足 5 只（源库尾段未齐）时
+    回退到最近一个 ≥5 只的截面，避免用 2 只标的的中位数冒充全市场画像。
     """
     last = scorecard.latest_data_month(p, fi)
     if last is None:
         return None, None, []
+    # 末截面可能只有 1–2 只（源库尾部未齐，期货 2026-10-15 实测 2/93）：
+    # 中位数没有统计意义，回退到最近一个有 ≥5 只的截面；找不到就保留原末月。
+    for idx in range(last, -1, -1):
+        if int(np.isfinite(p.score[fi, idx, :]).sum()) >= 5:
+            last = idx
+            break
     mvs: list[float] = []
     inds: dict[str, int] = {}
     for sym in p.sym_at(fi, last, n):
@@ -391,7 +401,10 @@ def _holdings_profile(
     med = round(float(np.median(mvs)), 1) if mvs else None
     style = None
     if med is not None:
-        style = "大盘" if med >= 500 else ("中盘" if med >= 100 else "小盘")
+        if market == "FUTURES":
+            style = "大规模" if med >= 500 else ("中规模" if med >= 100 else "小规模")
+        else:
+            style = "大盘" if med >= 500 else ("中盘" if med >= 100 else "小盘")
     top_ind = [
         {"name": k, "count": v}
         for k, v in sorted(inds.items(), key=lambda kv: -kv[1])[:3]
@@ -447,7 +460,7 @@ def leaderboard(
             kpi.update(scorecard.ic_stats_from(ic_index.get(code), rdates))
         ex = scorecard.excess_vs(ctx["benches"], kpi, ctx["bench_order"])
         med_mv, mv_style, top_ind = _holdings_profile(
-            p, p.index(code), n, snap_mv, snap_ind
+            p, p.index(code), n, snap_mv, snap_ind, mk
         )
         row = {
             "code": code,

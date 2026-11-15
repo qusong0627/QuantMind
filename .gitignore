@@ -363,3 +363,11 @@ deploy/portable/live-out/
 # 容器 cwd=/app/backend 是 bind mount → 直接落进仓库工作树（实测 15.9GB）。
 core.[0-9]*
 backend/core.*
+
+# 港股多因子研究（代码即公式，按用户纪律不入库；数据在 /data 已忽略）
+backend/scripts/hk_factor_lab/
+backend/tests/test_hk_factor*
+docs/local/hk_factor*
+
+# 港股因子库技能（含本地因子研究说明，不入公开仓）
+.claude/skills/hk-factor/
