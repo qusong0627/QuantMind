@@ -18,4 +18,4 @@ if [[ -n ${QUANTMIND_DEPLOY_SHA256:-} ]]; then
         || { echo '部署脚本校验失败'; exit 1; }
 fi
 
-bash "$TEMP_DIR/deploy.sh" "$@"
+bash "$TEMP_DIR/deploy.sh" --ref "$REF" "$@"

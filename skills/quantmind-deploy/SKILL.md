@@ -175,10 +175,10 @@ sudo cp -r /opt/quantmind/data /opt/quantmind/data.bak.$(date +%Y%m%d)
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/v1.9.0-beta/deploy/quick-deploy.sh | sudo bash
 
 # 使用最新 master（不推荐生产）
-QUANTMIND_DEPLOY_TAG=master curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/quick-deploy.sh | sudo bash
+QUANTMIND_DEPLOY_REF=master curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/quick-deploy.sh | sudo bash
 
 # 校验 deploy.sh 完整性（生产建议设置 SHA256）
-QUANTMIND_DEPLOY_SHA256=<sha256> QUANTMIND_DEPLOY_TAG=v1.9.0-beta sudo bash quick-deploy.sh
+QUANTMIND_DEPLOY_SHA256=<sha256> QUANTMIND_DEPLOY_REF=v1.9.0-beta sudo bash quick-deploy.sh
 ```
 
 **部署 6 阶段**：

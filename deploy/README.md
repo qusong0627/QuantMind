@@ -24,8 +24,12 @@ quantmind_qwenpaw-*.tar.zst
 README.txt
 ```
 
+> 本文件对应 **`next` 开发预览分支**，以下命令默认安装 **next**；需要稳定版把
+> `next` 换成 `master`（`QUANTMIND_REF` 不传时脚本默认仍是 `master`）。
+
 ```bash
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/next/deploy/full-deploy.sh \
+  | sudo QUANTMIND_REF=next bash
 ```
 
 > **数据初始化**：完整包已含基础业务数据；若需补齐 QuantDB 全量历史，部署完成后到
@@ -37,7 +41,7 @@ curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.
 
 ```bash
 sudo QUANTMIND_OFFLINE_BASE_URL='https://example.com/quantmind-offline' \
-  QUANTMIND_REF='master' \
+  QUANTMIND_REF='next' \
   QUANTMIND_DOCKER_MIRROR='https://你的镜像加速域名' \
   bash deploy/full-deploy.sh
 ```
