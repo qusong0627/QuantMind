@@ -849,6 +849,9 @@ export const ModelRegistryPage: React.FC = () => {
                         <Tag className="rounded-xl border-none text-[9px] font-black uppercase bg-cyan-50 text-cyan-600 m-0">
                           {extractModelType(selectedModel)}
                         </Tag>
+                        <Tag className="rounded-xl border-none text-[9px] font-black bg-blue-50 text-blue-600 m-0">
+                          市场: {marketConfig.label}
+                        </Tag>
                         {getMeta(selectedModel).feature_count && (
                           <Tag className="rounded-xl border-none text-[9px] font-black bg-purple-50 text-purple-600 m-0">
                             {getMeta(selectedModel).feature_count} 维
@@ -999,7 +1002,7 @@ export const ModelRegistryPage: React.FC = () => {
                             大盘分析
                           </span>
                         ),
-                        children: <MarketRegimePanel modelId={selectedModel.model_id} />,
+                        children: <MarketRegimePanel modelId={selectedModel.model_id} market={currentMarket} />,
                       },
                       {
                         key: 'inference-mgmt',
@@ -1184,7 +1187,7 @@ export const ModelRegistryPage: React.FC = () => {
             onPressEnter={handleRename}
             maxLength={80}
             showCount
-            placeholder="给模型起一个能看懂的名字，如：沪深300增强-低波"
+            placeholder={`给模型起一个能看懂的名字，如：${marketConfig.benchmarkName}增强-低波`}
             className="rounded-xl"
             autoFocus
           />

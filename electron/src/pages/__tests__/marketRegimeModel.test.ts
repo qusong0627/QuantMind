@@ -4,9 +4,33 @@
 import { describe, it, expect } from 'vitest';
 import {
   rebaseIndexPoints,
+  regimeIndexOptions,
   resolveScoreRows,
   type RegimeIndexSeries,
 } from '../marketRegimeModel';
+
+describe('regimeIndexOptions（按市场取候选，绝不跨市场拿 A 股指数）', () => {
+  it('CN 默认沪深300', () => {
+    expect(regimeIndexOptions('CN')[0]).toEqual({ code: '000300.SH', name: '沪深300' });
+  });
+
+  it('HK 只给恒生系，不含 000300.SH', () => {
+    const codes = regimeIndexOptions('HK').map((x) => x.code);
+    expect(codes).toContain('HSI.HK');
+    expect(codes).toContain('HSTECH.HK');
+    expect(codes).not.toContain('000300.SH');
+  });
+
+  it('US 只给美股指数，FUTURES 只给中证商品指数', () => {
+    expect(regimeIndexOptions('US').map((x) => x.code)).not.toContain('000300.SH');
+    expect(regimeIndexOptions('FUTURES')[0].code).toBe('100001.CCI');
+  });
+
+  it('未接入市场 → 空表（不回落 CN）', () => {
+    expect(regimeIndexOptions('CRYPTO')).toEqual([]);
+    expect(regimeIndexOptions('UNKNOWN')).toEqual([]);
+  });
+});
 
 describe('rebaseIndexPoints', () => {
   it('首个有效日 = 100，后续按比例', () => {

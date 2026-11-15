@@ -7,7 +7,7 @@
  * 降级为副行 admin-num 小字（保留工程师核对用）。无名字段不回填假名，
  * 训练任务缺名时按「类型 + 创建时间」生成兜底名。
  */
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
     Table, Button, message, Space, Tag, Modal, Collapse, Descriptions,
     Tooltip, Typography, Spin, Tabs, Progress, Select, Segmented
@@ -23,8 +23,19 @@ import remarkGfm from 'remark-gfm';
 import { adminService } from '../services/adminService';
 import { ModelDirectoryInfo, ModelScanResult } from '../types';
 import { Panel } from './ui/AdminPrimitives';
+import { useAppSelector } from '../../../store';
+import { selectCurrentMarket } from '../../../store/slices/uiSlice';
+import { MarketSelector } from '../../../components/layout/MarketSelector';
 
 const { Text } = Typography;
+
+const MARKET_TO_FILTER: Record<string, string> = {
+    CN: 'a_share',
+    HK: 'hong_kong',
+    US: 'us_stock',
+    CRYPTO: 'crypto',
+    FUTURES: 'futures',
+};
 
 const MODEL_MARKET_OPTIONS = [
     { value: 'all', label: '全部', color: 'default' },
@@ -248,7 +259,15 @@ export const AdminModelManagement: React.FC = () => {
     const [jobDetail, setJobDetail] = useState<any>(null);
     const [jobDetailLoading, setJobDetailLoading] = useState(false);
     const [activeAdminTab, setActiveAdminTab] = useState('models');
-    const [modelMarketFilter, setModelMarketFilter] = useState<string>('all');
+    const currentMarket = useAppSelector(selectCurrentMarket);
+    const [modelMarketFilter, setModelMarketFilter] = useState<string>(
+        () => MARKET_TO_FILTER[currentMarket] ?? 'all',
+    );
+
+    // 全局市场切换 → 模型目录筛选跟随；用户仍可手动切回「全部」
+    useEffect(() => {
+        setModelMarketFilter(MARKET_TO_FILTER[currentMarket] ?? 'all');
+    }, [currentMarket]);
 
     const filteredModels = useMemo(() => {
         if (!scanResult?.models) return [];
@@ -600,6 +619,7 @@ export const AdminModelManagement: React.FC = () => {
                             : '自动扫描 models 产物目录，聚合 metadata / 配置 / 性能指标'}
                         right={
                             <Space size={8}>
+                                <MarketSelector />
                                 {modelMarketFilter !== 'all' && (
                                     <span className="text-[11px] text-slate-400">筛选 {filteredModels.length} 个</span>
                                 )}

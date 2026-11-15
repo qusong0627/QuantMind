@@ -1055,14 +1055,121 @@ async def get_model_drift(
     return {"model_id": model_id, **drift}
 
 
-#: 大盘分析可叠加的指数（QuantDB index_daily 后缀口径；顺序即前端图例顺序）
-_MARKET_REGIME_INDICES: tuple[tuple[str, str], ...] = (
-    ("000300.SH", "沪深300"),
-    ("000905.SH", "中证500（沪深500）"),
-    ("000852.SH", "中证1000（沪深1000）"),
-    ("000001.SH", "上证综指（沪市）"),
-    ("399001.SZ", "深证成指（深市）"),
-)
+#: 大盘分析可叠加的指数（按市场；QuantDB index_daily 后缀口径；顺序即前端图例顺序）
+#: FUTURES 无 index_daily，走 ccidx_index（中证商品期货指数）单独取数。
+_MARKET_REGIME_INDICES_BY_MARKET: dict[str, tuple[tuple[str, str], ...]] = {
+    "CN": (
+        ("000300.SH", "沪深300"),
+        ("000905.SH", "中证500（沪深500）"),
+        ("000852.SH", "中证1000（沪深1000）"),
+        ("000001.SH", "上证综指（沪市）"),
+        ("399001.SZ", "深证成指（深市）"),
+    ),
+    "HK": (
+        ("HSI.HK", "恒生指数"),
+        ("HSCEI.HK", "恒生国企"),
+        ("HSTECH.HK", "恒生科技"),
+        ("HSCCI.HK", "恒生红筹"),
+    ),
+    "US": (
+        ("SPX.US", "标普500"),
+        ("NDX.US", "纳斯达克100"),
+        ("DJI.US", "道琼斯工业"),
+        ("IXIC.US", "纳斯达克综指"),
+    ),
+    "FUTURES": (
+        ("100001.CCI", "中证商品期货指数"),
+        ("000001.CCI", "中证商品期货价格指数"),
+    ),
+    "CRYPTO": (),
+}
+# 兼容旧常量名（同模块内/外部若还引用 CN 表）
+_MARKET_REGIME_INDICES = _MARKET_REGIME_INDICES_BY_MARKET["CN"]
+
+
+def _model_market_tag(meta: dict[str, Any], storage_path: str = "") -> str:
+    """模型市场标签（metadata.market → context.market → 目录 metadata.json）。"""
+    ctx = meta.get("context") if isinstance(meta.get("context"), dict) else {}
+    raw = str(meta.get("market") or ctx.get("market") or "").upper().strip()
+    if "FUT" in raw:
+        return "FUTURES"
+    if "CRYPTO" in raw or "加密" in raw:
+        return "CRYPTO"
+    if "HONG" in raw or raw in {"HK", "HKEX", "XHKG", "港股"}:
+        return "HK"
+    if raw in {"US", "NYSE", "XNYS", "NASDAQ", "XNAS", "AMEX"} or "US_STOCK" in raw:
+        return "US"
+    if raw in {"CN", "A", "A_SHARE", "SSE", "XSHG", "SZSE"} or "A股" in raw:
+        return "CN"
+    if storage_path:
+        return _get_model_market(Path(storage_path))
+    return "CN"
+
+
+def _market_regime_indices(market: str) -> tuple[tuple[str, str], ...]:
+    return _MARKET_REGIME_INDICES_BY_MARKET.get(market, ())
+
+
+def _hk_index_constituents(index_code: str) -> list[str]:
+    """港指最新成分（index_membership/dt=*/HSI.parquet 等）；缺快照 → 空表。"""
+    if not index_code.upper().endswith(".HK"):
+        return []
+    try:
+        import pandas as pd
+
+        from backend.shared.feature_source import resolve_market_root
+
+        root = resolve_market_root("HK") / "2_base_sector" / "index_membership"
+        for d in sorted(root.glob("dt=*"), reverse=True):
+            f = d / f"{index_code.upper()[:-3]}.parquet"
+            if not f.is_file():
+                continue
+            df = pd.read_parquet(f)
+            if "stock_code" not in df.columns:
+                continue
+            return sorted(
+                {str(x).upper().strip() for x in df["stock_code"] if str(x).strip()}
+            )
+    except Exception as exc:  # noqa: BLE001 - 成分缺失回退全市场
+        logger.warning("港股指数成分读取失败 %s: %s", index_code, exc)
+    return []
+
+
+def _load_futures_regime_closes(
+    symbols: list[str], start_iso: str, end_iso: str
+) -> dict[str, dict[str, float]]:
+    """期货大盘分析指数（ccidx_index）：code → {YYYY-MM-DD: close}。"""
+    import pandas as pd
+
+    from backend.shared.feature_source import resolve_market_root
+
+    path = (
+        resolve_market_root("FUTURES")
+        / "2_base_sector"
+        / "ccidx_index"
+        / "data.parquet"
+    )
+    if not path.is_file():
+        raise FileNotFoundError(f"期货指数数据缺失: {path}")
+    df = pd.read_parquet(path, columns=["time", "index_code", "close"])
+    if df.empty:
+        return {}
+    df = df[df["index_code"].astype(str).isin(symbols)].copy()
+    if df.empty:
+        return {}
+    df["time"] = pd.to_datetime(df["time"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = df.dropna(subset=["time", "close"])
+    df = df[(df["time"] >= start_iso) & (df["time"] <= end_iso)]
+    out: dict[str, dict[str, float]] = {}
+    for row in df.itertuples(index=False):
+        try:
+            close = float(row.close)
+        except (TypeError, ValueError):
+            continue
+        if close > 0:
+            out.setdefault(str(row.index_code), {})[str(row.time)] = round(close, 4)
+    return out
 
 
 def _align_index_points(
@@ -1098,13 +1205,19 @@ def _align_index_points(
     return points
 
 
-def _index_scope(index_code: str) -> tuple[str, Any]:
-    """指数对应的**分数口径**：交易所宽基按代码前缀，中证指数按成分股。
+def _index_scope(index_code: str, market: str = "CN") -> tuple[str, Any]:
+    """指数对应的**分数口径**：交易所宽基按代码前缀，指数成分按成分股。
 
-    - 上证综指 → 全部 SH 前缀股票；深证成指 → 全部 SZ 前缀；
-    - 沪深300/中证500/中证1000 → QuantDB index_weights 成分股（prefix 化）；
-    - 取不到成分 → ("all", None)，前端回退全市场均分。
+    - CN：上证综指 → 全部 SH 前缀；深证成指 → 全部 SZ 前缀；
+      沪深300/中证500/中证1000 → QuantDB index_weights 成分股（prefix 化）；
+    - HK：HSI/HSCEI/HSTECH/HSCCI → 最新 ``index_membership`` 成分股；
+    - US/FUTURES：无成分快照 → ("all", None)，前端回退全市场均分。
     """
+    if market == "HK":
+        symbols = _hk_index_constituents(index_code)
+        return ("constituents", symbols) if symbols else ("all", None)
+    if market != "CN":
+        return "all", None
     if index_code == "000001.SH":
         return "exchange", "SH"
     if index_code == "399001.SZ":
@@ -1266,6 +1379,8 @@ async def get_model_market_regime(
         horizon_days = max(1, int(model_meta.get("target_horizon_days") or 1))
     except (TypeError, ValueError):
         horizon_days = 1
+    model_market = _model_market_tag(model_meta, str(model.get("storage_path") or ""))
+    regime_indices = _market_regime_indices(model_market)
     # 全市场均值量级小（Top100 均值约 0.02~0.05，全市场约低一个量级），阈值相应下调
     bull_thr, bear_thr = 0.01, 0.0
     series: list[dict[str, Any]] = []
@@ -1426,17 +1541,17 @@ async def get_model_market_regime(
         # 只读 index_daily（QuantDB），失败不阻断主曲线（返回 indices_error 如实标注）。
         indices: list[dict[str, Any]] = []
         indices_error: str | None = None
-        if series:
+        if series and regime_indices:
             start_iso = str(series[0]["trade_date"])
             # 指数取到「今天」而不是序列末日：错开 N 个交易日需要末日之后的收盘
             end_iso = date.today().isoformat()
             # 各指数的分数口径（成分股 / 交易所前缀 / 全市场）
             index_scopes = {
-                code: _index_scope(code) for code, _ in _MARKET_REGIME_INDICES
+                code: _index_scope(code, model_market) for code, _ in regime_indices
             }
             scope_stats: dict[str, dict[str, dict[str, Any]]] = {}
             if pred_file_path and pred_score_col and pred_date_col:
-                for code, _name in _MARKET_REGIME_INDICES:
+                for code, _name in regime_indices:
                     kind, value = index_scopes[code]
                     if kind == "all":
                         continue
@@ -1453,27 +1568,37 @@ async def get_model_market_regime(
                     if stats:
                         scope_stats[code] = stats
             try:
-                from backend.shared.benchmark import load_index_frame
+                if model_market == "FUTURES":
+                    # 期货没有 index_daily；大盘对比走中证商品期货指数
+                    closes = await asyncio.to_thread(
+                        _load_futures_regime_closes,
+                        [code for code, _ in regime_indices],
+                        start_iso,
+                        end_iso,
+                    )
+                else:
+                    from backend.shared.benchmark import load_index_frame
 
-                frame = await asyncio.to_thread(
-                    load_index_frame,
-                    columns=("close",),
-                    symbols=[code for code, _ in _MARKET_REGIME_INDICES],
-                    start=start_iso,
-                    end=end_iso,
-                )
-                closes: dict[str, dict[str, float]] = {}
-                for record in frame.to_dict("records"):
-                    code = str(record.get("symbol") or "")
-                    day = str(record.get("time"))[:10]
-                    try:
-                        close = float(record.get("close"))
-                    except (TypeError, ValueError):
-                        continue
-                    if close > 0:
-                        closes.setdefault(code, {})[day] = round(close, 4)
+                    frame = await asyncio.to_thread(
+                        load_index_frame,
+                        columns=("close",),
+                        symbols=[code for code, _ in regime_indices],
+                        start=start_iso,
+                        end=end_iso,
+                        market=model_market,
+                    )
+                    closes = {}
+                    for record in frame.to_dict("records"):
+                        code = str(record.get("symbol") or "")
+                        day = str(record.get("time"))[:10]
+                        try:
+                            close = float(record.get("close"))
+                        except (TypeError, ValueError):
+                            continue
+                        if close > 0:
+                            closes.setdefault(code, {})[day] = round(close, 4)
                 dates = [str(point["trade_date"]) for point in series]
-                for code, name in _MARKET_REGIME_INDICES:
+                for code, name in regime_indices:
                     day_map = closes.get(code) or {}
                     points = _align_index_points(dates, day_map, index_offset)
                     if points:
@@ -1507,6 +1632,7 @@ async def get_model_market_regime(
         current = series[-1] if series else None
         payload: dict[str, Any] = {
             "model_id": model_id,
+            "market": model_market,
             "window": int(window),
             "horizon_days": horizon_days,
             "index_offset": int(index_offset),
@@ -1515,7 +1641,7 @@ async def get_model_market_regime(
             "current": current,
             "indices": indices,
             "index_options": [
-                {"code": code, "name": name} for code, name in _MARKET_REGIME_INDICES
+                {"code": code, "name": name} for code, name in regime_indices
             ],
         }
         if indices_error:

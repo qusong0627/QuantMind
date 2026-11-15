@@ -16,12 +16,18 @@ import { formatPct, formatSignedAmount, formatWinRate } from './periodReturnMode
 import { formatCount, formatDays, formatMultiple, formatRatio } from './portfolioMetricsModel';
 import type { MetricItem, MetricSection } from './PortfolioMetricsStrip';
 
-function benchmarkHint(performance: BlendRollingPerformance): string {
+function benchmarkHint(
+  performance: BlendRollingPerformance,
+  benchmarkName?: string | null,
+): string {
+  const label = benchmarkName || '本市场基准';
   const coverage = performance.benchmark_coverage_pct;
   if (typeof coverage === 'number' && Number.isFinite(coverage)) {
-    return `沪深300 按日收益复利；区间覆盖率 ${coverage.toFixed(0)}%（<95% 时基准与超额置 —）`;
+    return `${label} 按日收益复利；区间覆盖率 ${coverage.toFixed(0)}%（<95% 时基准与超额置 —）`;
   }
-  return '沪深300 行情不可用：基准与超额一律显示 —，不写 0';
+  return benchmarkName
+    ? `${label} 行情不可用：基准与超额一律显示 —，不写 0`
+    : '本市场基准未接入：基准与超额一律显示 —，不写 0';
 }
 
 function amountWithPct(amount: number, pct: number | null | undefined): string {
@@ -170,6 +176,7 @@ function tradabilityItems(
 export function buildRollingMetricSections(
   performance: BlendRollingPerformance,
   filters?: BlendRollingFilters,
+  benchmarkName?: string | null,
 ): MetricSection[] {
   const returns: MetricItem[] = [
     {
@@ -218,7 +225,7 @@ export function buildRollingMetricSections(
       label: '基准',
       value: formatReturnPct(performance.benchmark_return_pct),
       tone: returnToneClass(performance.benchmark_return_pct),
-      hint: benchmarkHint(performance),
+      hint: benchmarkHint(performance, benchmarkName),
       testId: 'combo-rolling-benchmark',
     },
     {

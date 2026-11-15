@@ -74,6 +74,19 @@ export const INDEX_COLORS: Record<string, string> = {
   '000852.SH': '#ec4899',
   '000001.SH': '#10b981',
   '399001.SZ': '#06b6d4',
+  // HK
+  'HSI.HK': '#f59e0b',
+  'HSCEI.HK': '#8b5cf6',
+  'HSTECH.HK': '#ec4899',
+  'HSCCI.HK': '#06b6d4',
+  // US
+  'SPX.US': '#f59e0b',
+  'NDX.US': '#8b5cf6',
+  'DJI.US': '#ec4899',
+  'IXIC.US': '#06b6d4',
+  // 期货（中证商品期货指数）
+  '100001.CCI': '#10b981',
+  '000001.CCI': '#06b6d4',
 };
 
 export const FALLBACK_INDEX_OPTIONS: RegimeIndexOption[] = [
@@ -83,6 +96,33 @@ export const FALLBACK_INDEX_OPTIONS: RegimeIndexOption[] = [
   { code: '000001.SH', name: '上证综指（沪市）' },
   { code: '399001.SZ', name: '深证成指（深市）' },
 ];
+
+/** 各市场默认指数候选（后端 index_options 缺失时的兜底；绝不跨市场拿 A 股指数）。 */
+export const REGIME_INDEX_OPTIONS_BY_MARKET: Record<string, RegimeIndexOption[]> = {
+  CN: FALLBACK_INDEX_OPTIONS,
+  HK: [
+    { code: 'HSI.HK', name: '恒生指数' },
+    { code: 'HSCEI.HK', name: '恒生国企' },
+    { code: 'HSTECH.HK', name: '恒生科技' },
+    { code: 'HSCCI.HK', name: '恒生红筹' },
+  ],
+  US: [
+    { code: 'SPX.US', name: '标普500' },
+    { code: 'NDX.US', name: '纳斯达克100' },
+    { code: 'DJI.US', name: '道琼斯工业' },
+    { code: 'IXIC.US', name: '纳斯达克综指' },
+  ],
+  FUTURES: [
+    { code: '100001.CCI', name: '中证商品期货指数' },
+    { code: '000001.CCI', name: '中证商品期货价格指数' },
+  ],
+  CRYPTO: [],
+};
+
+export function regimeIndexOptions(market?: string): RegimeIndexOption[] {
+  const key = String(market || 'CN').toUpperCase();
+  return REGIME_INDEX_OPTIONS_BY_MARKET[key] ?? [];
+}
 
 /**
  * 指数收盘 → 以窗口首个有效日为 100 的归一序列；缺失日保持 null（connectNulls）。

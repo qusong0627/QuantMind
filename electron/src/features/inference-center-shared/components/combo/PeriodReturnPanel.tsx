@@ -8,7 +8,7 @@
  * - 收盘价建仓与退出，**不计手续费、印花税与滑点**；
  * - 输出总收益、月度拆解、权益曲线与交易明细，用于评估组合综合选股能力。
  *
- * 机构级统计（2026-10-21 追加）：已实现与浮动拆分、基准（沪深300）与超额、
+ * 机构级统计（2026-10-21 追加）：已实现与浮动拆分、基准（本市场主基准，A股=沪深300）与超额、
  * 年化/波动/夏普/索提诺/卡玛、最大回撤窗口、跟踪误差与信息比率、盈利因子与盈亏比、
  * 换手与平均仓位；数据端口（pred 测试集 / 推理台账）与可用区间常驻展示。
  *
@@ -172,8 +172,11 @@ export const PeriodReturnPanel: React.FC<PeriodReturnPanelProps> = ({
     [period, summary, benchmarkSeries],
   );
   const metricSections = useMemo(
-    () => (summary ? buildPeriodMetricSections(summary) : []),
-    [summary],
+    () =>
+      summary
+        ? buildPeriodMetricSections(summary, period?.benchmark?.name)
+        : [],
+    [summary, period?.benchmark?.name],
   );
 
   const monthColumns: ColumnsType<BlendPeriodMonth> = [
@@ -716,7 +719,8 @@ export const PeriodReturnPanel: React.FC<PeriodReturnPanelProps> = ({
 
       <div className="shrink-0 px-3 py-1.5 border-t border-slate-100 text-[10px] text-slate-400">
         口径：评分日收盘价建仓，固定持有 H 个交易日后收盘价退出（停牌顺延），每仓目标金额 =
-        初始资金 ÷ 持仓上限；期末未到期按最后有效收盘价估值。基准为沪深300，按日收益复利并与
+        初始资金 ÷ 持仓上限；期末未到期按最后有效收盘价估值。基准为
+        {period?.benchmark?.name ?? '本市场基准（未接入）'}，按日收益复利并与
         组合同轴展示；覆盖率不足 95% 时基准与超额一律显示 —。不计手续费、印花税与滑点。
         结果用于评估组合综合选股能力，不构成任何投资建议。
       </div>

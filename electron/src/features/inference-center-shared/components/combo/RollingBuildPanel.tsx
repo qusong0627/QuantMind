@@ -322,8 +322,11 @@ export const RollingBuildPanel: React.FC<RollingBuildPanelProps> = ({
   // filters 用于区分「数据源不可用」与「该市场不适用 / 手动关闭」
   const filters = rolling?.filters;
   const metricSections = useMemo(
-    () => (performance ? buildRollingMetricSections(performance, filters) : []),
-    [performance, filters],
+    () =>
+      performance
+        ? buildRollingMetricSections(performance, filters, rolling?.benchmark?.name)
+        : [],
+    [performance, filters, rolling?.benchmark?.name],
   );
   // 折叠后仍保留一行关键数字：窗口收益 / 收益金额 / 建仓覆盖 / 期末现金
   const collapsedSummary = useMemo(() => {

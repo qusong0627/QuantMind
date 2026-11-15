@@ -639,7 +639,7 @@ Qlib 引擎会优先解析 STRATEGY_CONFIG 或 get_strategy_config()。
 2. 当前系统默认口径
 --------------------
 - 初始资金：专家模式 UI 默认 100 万；若走后端接口，请显式传入 initial_capital。
-- 基准指数：默认 {currentMarket === 'HK' ? marketConfig.benchmark + '（' + marketConfig.benchmarkName + '）' : 'SH000300'}。
+- 基准指数：默认 {marketConfig.benchmark}（{marketConfig.benchmarkName}）。
 - 成交价格：后端默认 close；若要降低前视偏差，建议显式切换为 open。
 - 交易参数：topk=50、n_drop=5、rebalance_days=3 是常见默认值，代码中显式写出即以代码为准。
 - 回测日期：如需固定区间，在代码中二选一写出（写出即覆盖 UI 日期）：

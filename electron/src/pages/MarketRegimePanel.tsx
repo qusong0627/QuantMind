@@ -4,9 +4,9 @@ import { TrendingUp, Info } from 'lucide-react';
 import ReactECharts from 'echarts-for-react';
 import { modelTrainingService } from '../services/modelTrainingService';
 import {
-  FALLBACK_INDEX_OPTIONS,
   INDEX_COLORS,
   rebaseIndexPoints,
+  regimeIndexOptions,
   resolveScoreRows,
   type RegimeIndexOption,
   type RegimeIndexSeries,
@@ -14,13 +14,24 @@ import {
 
 const { Text } = Typography;
 
-export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) => {
+export const MarketRegimePanel: React.FC<{ modelId: string; market?: string }> = ({
+  modelId,
+  market,
+}) => {
+  const fallbackOptions = useMemo(() => regimeIndexOptions(market), [market]);
+  const marketLabel = String(market || 'CN').toUpperCase();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
-  // 默认沪深300；用户可多选（含「全部叠加」）
-  const [selectedIndices, setSelectedIndices] = useState<string[]>(['000300.SH']);
+  // 默认取本市场首个指数（CN=沪深300 / HK=恒生 / US=标普500 / 期货=中证商品）；
+  // 数据到达后若该指数无序列，再收敛到实际可用指数。
+  const [selectedIndices, setSelectedIndices] = useState<string[]>([]);
   // 均分是信号日 T 的分数，指数默认错开 T+1（次日可交易）；可切 T+N / 不错开
   const [indexOffset, setIndexOffset] = useState(1);
+
+  useEffect(() => {
+    // 市场切换：先落到本市场默认指数，避免保留上一市场的 000300.SH
+    setSelectedIndices(fallbackOptions[0] ? [fallbackOptions[0].code] : []);
+  }, [fallbackOptions]);
 
   useEffect(() => {
     if (!modelId) return;
@@ -35,7 +46,7 @@ export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) =>
   const series: any[] = data?.series ?? [];
   const current = data?.current ?? null;
   const indexOptions: RegimeIndexOption[] =
-    (data?.index_options?.length ?? 0) > 0 ? data.index_options : FALLBACK_INDEX_OPTIONS;
+    (data?.index_options?.length ?? 0) > 0 ? data.index_options : fallbackOptions;
   const availableIndices: RegimeIndexSeries[] = data?.indices ?? [];
 
   // 模型切换后若原选择不在新数据里，收敛到首个可用指数（不静默画空线）
@@ -193,6 +204,22 @@ export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) =>
   const latestLabel =
     scoreInfo.scoped && scopedIndex ? `最新均分（${scopedIndex.name}）` : '最新均分';
 
+  const indexHint =
+    marketLabel === 'HK'
+      ? '可多选恒生指数 / 恒生国企 / 恒生科技 / 恒生红筹；「全部叠加」一次画全。'
+      : marketLabel === 'US'
+        ? '可多指标普500 / 纳斯达克100 / 道琼斯工业 / 纳斯达克综指；「全部叠加」一次画全。'
+        : marketLabel === 'FUTURES'
+          ? '可叠加中证商品期货指数 / 中证商品期货价格指数；「全部叠加」一次画全。'
+          : marketLabel === 'CRYPTO'
+            ? '本市场暂无指数叠加，只显示均分曲线。'
+            : '可多选沪深300 / 中证500 / 中证1000 / 上证综指 / 深证成指；「全部叠加」一次画全。';
+  const scopeHint = availableIndices.some(
+    (x) => x.scope === 'constituents' && x.points.some((p) => p.avg_score != null),
+  )
+    ? '**单选有成分映射的指数时，均分按该指数范围计算**；多选或「仅均分」时用全市场均分。'
+    : '本市场指数无成分映射（或数据未覆盖），单选指数只叠加走势，均分仍为全市场均分。';
+
   return (
     <div className="space-y-4">
       <Card size="small" className="rounded-2xl">
@@ -204,9 +231,9 @@ export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) =>
             children: <div className="text-xs text-slate-600 leading-relaxed space-y-1">
               <div>均分 = 当日全市场 `pred / fusion_score` 均值（与个股终端一致，回退读 `pred.parquet`）。</div>
               <div>均分日期 = **信号日 T**（用 T 日及之前数据算出）；指数默认取 **T+1（次日可交易）** 对齐，可切换 T+N / 不错开。</div>
-              <div>**单选指数时，均分按该指数范围计算**（沪深300/500/1000=成分股，沪市/深市=交易所全部股票）；多选或「仅均分」时用全市场均分。</div>
+              <div>{scopeHint}</div>
               <div>指数叠加用于**走势对比**：按窗口首个有效日归一为 100，与均分（左轴）分轴显示，不改变均分口径。</div>
-              <div>可多选沪深300 / 中证500 / 中证1000 / 上证综指 / 深证成指；「全部叠加」一次画全。</div>
+              <div>{indexHint}</div>
             </div>,
           }]}
         />
@@ -250,6 +277,7 @@ export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) =>
             maxTagCount="responsive"
             style={{ minWidth: 240, maxWidth: 420 }}
             className="ml-2"
+            disabled={indexOptions.length === 0}
           />
           <Select
             size="small"
@@ -259,15 +287,21 @@ export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) =>
             style={{ width: 190 }}
             title="均分日期=信号日 T；指数默认取 T+1（次日可交易）"
           />
-          <Button
-            size="small"
-            onClick={() => setSelectedIndices(indexOptions.map((o) => o.code))}
-          >
-            全部叠加
-          </Button>
-          <Button size="small" onClick={() => setSelectedIndices([])}>
-            仅均分
-          </Button>
+          {indexOptions.length > 0 ? (
+            <>
+              <Button
+                size="small"
+                onClick={() => setSelectedIndices(indexOptions.map((o) => o.code))}
+              >
+                全部叠加
+              </Button>
+              <Button size="small" onClick={() => setSelectedIndices([])}>
+                仅均分
+              </Button>
+            </>
+          ) : (
+            <Tag className="text-[10px]">本市场无指数叠加</Tag>
+          )}
           {selectedSeries.length > 0 && (
             <span className="ml-auto text-[10px] text-slate-400">
               指数按窗口首日=100 归一 · 右轴 · 信号日 T → 指数 T+{indexOffset}

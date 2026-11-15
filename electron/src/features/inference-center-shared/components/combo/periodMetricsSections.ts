@@ -16,12 +16,18 @@ import {
 } from './portfolioMetricsModel';
 import type { MetricItem, MetricSection } from './PortfolioMetricsStrip';
 
-function benchmarkHint(summary: BlendPeriodSummary): string {
+function benchmarkHint(
+  summary: BlendPeriodSummary,
+  benchmarkName?: string | null,
+): string {
+  const label = benchmarkName || '本市场基准';
   const coverage = summary.benchmark_coverage_pct;
   if (typeof coverage === 'number' && Number.isFinite(coverage)) {
-    return `沪深300 按日收益复利；区间覆盖率 ${coverage.toFixed(0)}%（<95% 时基准与超额置 —）`;
+    return `${label} 按日收益复利；区间覆盖率 ${coverage.toFixed(0)}%（<95% 时基准与超额置 —）`;
   }
-  return '沪深300 行情不可用：基准与超额一律显示 —，不写 0';
+  return benchmarkName
+    ? `${label} 行情不可用：基准与超额一律显示 —，不写 0`
+    : '本市场基准未接入：基准与超额一律显示 —，不写 0';
 }
 
 /** 金额 + 收益率（%）；收益率缺失时只给金额 */
@@ -29,7 +35,10 @@ function amountWithPct(amount: number, pct: number | null | undefined): string {
   return `${formatSignedAmount(amount)} · ${formatPct(pct)}`;
 }
 
-export function buildPeriodMetricSections(summary: BlendPeriodSummary): MetricSection[] {
+export function buildPeriodMetricSections(
+  summary: BlendPeriodSummary,
+  benchmarkName?: string | null,
+): MetricSection[] {
   const drawdown = drawdownWindowLabel(summary);
   const returns: MetricItem[] = [
     {
@@ -75,7 +84,7 @@ export function buildPeriodMetricSections(summary: BlendPeriodSummary): MetricSe
       label: '基准',
       value: formatReturnPct(summary.benchmark_return_pct),
       tone: returnToneClass(summary.benchmark_return_pct),
-      hint: benchmarkHint(summary),
+      hint: benchmarkHint(summary, benchmarkName),
       testId: 'combo-period-benchmark',
     },
     {
