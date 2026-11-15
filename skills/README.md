@@ -22,6 +22,8 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 其他工具（OpenCode / Codex / Trae / CodeBuddy 等）读取项目 `AGENTS.md`：把技能要点（部署检查表、API 端点清单等）并入 `AGENTS.md` 即可按流程执行。
 
 > 注：部分技能（a-share-*、stock-universal-analysis、market-sentiment-dashboard、tdx 系等）导入自 dsh 技能库，其「运行环境契约」按原 dsh 宿主机环境编写；在 QuantBot 中由 `docker/dsh/AGENTS.md` 的运行环境映射统一转译（重依赖脚本到 quantmind 容器执行等）。
+>
+> **新用户 / QuantBot 第一次对话**：先读 [quantmind-platform-map](quantmind-platform-map/)（12 个一级栏目路径 + 四种角色链路）；数据问题读 [quantmind-market-data](quantmind-market-data/)（QuantDB/QuantHK/QuantUS/QuantBC/QuantFutures/QuantCustom）。
 
 ## 技能总览
 
@@ -30,6 +32,8 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 | 技能 | 功能 | 触发词示例 |
 |------|------|-----------|
 | [quantmind-operations](quantmind-operations/) | 平台运营总指南：模型训练（5 步流程）、模型管理、后台数据更新、RSS 新闻对接 | 模型训练、数据更新、RSS、新闻分析 |
+| [quantmind-platform-map](quantmind-platform-map/) | 平台地图与角色指南：12 个一级栏目的菜单路径/Web 路由/职责、研究者/模拟/实盘/管理员四种角色链路、新手问题路由 | 平台地图、栏目、菜单、路径、入口、在哪、我该做什么、角色、新手 |
+| [quantmind-market-data](quantmind-market-data/) | 多市场数据地图：QuantDB(A股)/QuantHK/QuantUS/QuantBC/QuantFutures/QuantCustom 的目录、同步脚本、代码格式、读取入口与常见坑 | 数据在哪、数据目录、数据同步、美股数据、港股数据、期货数据、查不到数据 |
 | [quantmind-deploy](quantmind-deploy/) | 部署运维：一键/快速/手动部署、数据库初始化、健康检查、问题排查、AutoDL 云端 GPU 训练 | 部署、一键部署、部署失败、装不上 |
 | [portable-pack-update](portable-pack-update/) | 一键启动包（便携包/免 Docker）更新：更新类型判断、后端/web 补丁包生成与套用、stop→start 重启与验证口径 | 便携包、升级包、覆盖前端、补丁包、重启便携包 |
 | [quantdb-sdk](quantdb-sdk/) | QuantDB 数据 SDK：API Key 配置、数据集目录、字段查询、K线/财务/因子远程查询 | quantdb、数据key、数据集、查询K线 |

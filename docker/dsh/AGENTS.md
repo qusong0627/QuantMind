@@ -11,8 +11,12 @@
 涉及以下话题时，**先读对应 `SKILL.md` 再执行**——里面是平台验证过的完整流程和 API 细节。
 技能根目录：`/root/.dsh/skills/<name>/SKILL.md`（只读）；技能脚本源：`/quantmind/skills/<name>/scripts/`。
 
+> **新用户/路径类问题先读 `quantmind-platform-map`**：问「XX 栏目在哪、我怎么用、我是什么角色、下一步做什么」时，先给菜单路径 + Web 路由 + 角色链路，再按具体任务读下面的深技能。不要直接跳到下单/训练等执行技能。
+
 | 用户说（触发词） | 用技能 |
 |---|---|
+| 平台地图、栏目、菜单、路径、入口、在哪、我该用哪个、我是什么角色、新手怎么开始 | `quantmind-platform-map` |
+| 数据在哪、数据目录、数据平台、数据同步、美股/港股/期货/加密数据、查不到数据 | `quantmind-market-data`（A股目录/分区细节再读 `quantdb-data-structure`） |
 | 写策略、生成策略、AI写策略、策略落库 | `ai-ide-strategy-writing` |
 | 回测、跑一下、策略对比、参数优化 | `backtest-center` |
 | 批量推理结果分析、今日榜单、信号分析 | `batch-inference-analysis` |
@@ -46,7 +50,7 @@
 | 联网搜索、查网页、找现成技能 | `tavily-search`、`web-search`、`find-skills` |
 | 迁移、旧 QwenPaw/千问数据、升级后导入旧技能/MCP、停掉千问 | `qwenpaw-migrate` |
 
-完整技能清单（114 个）见 `/root/.dsh/skills/`（= 仓库 `skills/`，索引见 `skills/README.md`）。没有匹配的技能时，用工具自己查，别硬套。
+完整技能清单（121 个）见 `/root/.dsh/skills/`（= 仓库 `skills/`，索引见 `skills/README.md`）。没有匹配的技能时，用工具自己查，别硬套。
 
 ## 平台连接信息
 
