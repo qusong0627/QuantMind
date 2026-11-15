@@ -63,7 +63,22 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Shortcut    # 顺带建桌
 
 - A 股（QuantDB）：约 60GB，首次全量同步耗时较长
 - 美股（QuantUS）/ 港股（QuantHK）/ 期货（QuantFutures）：按需
-- 若拿到了离线数据包，直接把内容放进 `data/quantdb`、`data/quanthk` 等目录即可，无需联网同步
+- 若拿到了离线数据包，直接把内容放进 `data/quantdb`、`data/quanthk` 等目录即可，无需联网同步。
+  官方全量 A 股数据包在 **ModelScope**：<https://www.modelscope.cn/datasets/qusong0627/LightGBM_Alpha300>
+  （约 56GB / 7.4 万文件），解压到 `data/quantdb` 即可
+
+## 可选：Pine 策略库 / 批量回测（宿主 worker）
+
+回测中心的 Pine 转写与批量回测需要 pynecore + bwrap，在**宿主侧**执行，不在便携包的内嵌
+Python 里跑。Linux / WSL2 下在包根执行：
+
+```bash
+bash scripts/setup_pine_lab.sh      # 建 pine_lab/.venv（pynecore）+ 检查 bwrap
+bash scripts/setup_host_workers.sh  # 安装转写 / 对话 / 批量回测三条 cron
+```
+
+Windows 原生没有 cron/bwrap：请用 **WSL2** 或 Docker 版；不做这两步时页面照常打开，
+只是「转写并回测 / 批量回测」会停在排队或提示运行时未安装。
 
 ## 模型训练（免 Docker 本机直跑）
 

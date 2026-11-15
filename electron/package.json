@@ -24,6 +24,7 @@
     "typecheck": "tsc --noEmit",
     "lab:batch-cron": "bash ../scripts/setup_lab_batch_worker.sh",
     "lab:batch-worker": "/usr/bin/python3 ../scripts/lab_batch_worker.py",
+    "host:workers": "bash ../scripts/setup_host_workers.sh",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:changed": "node scripts/lint-changed.js",
     "lint:phase": "node scripts/lint-phase.js",

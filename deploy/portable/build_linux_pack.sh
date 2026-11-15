@@ -252,6 +252,15 @@ for d in backend strategy_templates; do
     rm -rf "$STAGE/$d"
     cp -a "$REPO_ROOT/$d" "$STAGE/$d"
 done
+# 宿主 worker（Pine 转写/对话 + 批量回测）只需这几个脚本与钉版依赖；
+# 不整目录拷贝（scripts/ 含 90MB+ 的本地工具/数据，便携包不背这个）。
+mkdir -p "$STAGE/scripts" "$STAGE/requirements"
+for f in pine_to_pyne.py pine_transpile_worker.py pine_chat_worker.py \
+         lab_batch_backtest.py lab_batch_worker.py pine_library_index.py \
+         setup_pine_lab.sh setup_lab_batch_worker.sh setup_host_workers.sh; do
+    cp -a "$REPO_ROOT/scripts/$f" "$STAGE/scripts/$f"
+done
+cp -a "$REPO_ROOT/requirements/pine_lab.txt" "$STAGE/requirements/pine_lab.txt"
 # config 单独走 tar：必须排除 runtime.env。那份文件是**宿主机上跑着的后端**写入的运行期
 # 密钥（容器以 root 落盘，本机 0600 root:root），两个理由都不能进包：
 #   1. 跨节点泄漏 INTERNAL_CALL_SECRET —— 目标机的密钥必须自己生成；

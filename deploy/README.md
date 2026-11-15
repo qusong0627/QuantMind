@@ -28,6 +28,11 @@ README.txt
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 ```
 
+> **数据初始化**：完整包已含基础业务数据；若需补齐 QuantDB 全量历史，部署完成后到
+> 【管理后台】→【数据管理】点击【初始化数据】（**ModelScope** 数据集
+> `qusong0627/LightGBM_Alpha300`，约 56 GB / 7.4 万文件），或按
+> [docs/部署指南.md §数据准备](../docs/部署指南.md) 解压到 `/opt/quantmind/data/quantdb`。
+
 可覆盖完整部署包地址、代码分支或 Docker 加速地址：
 
 ```bash
@@ -124,6 +129,23 @@ sudo bash deploy/deploy.sh --force
 ```
 
 在线脚本会安装运行时、配置 Docker 镜像加速、同步代码、首次生成 `.env`、构建核心镜像并启动 Compose 服务。
+
+## 可选：Pine 策略库 / 批量回测（宿主 worker）
+
+这两项的执行面需要 pynecore + bwrap，且**不在容器里跑**（镜像基座 Python 3.10，
+pynecore 要求 ≥3.11）。装完 Docker 服务后，在仓库根用**仓库属主用户**执行一次：
+
+```bash
+bash scripts/setup_pine_lab.sh      # 建 pine_lab/.venv（pynecore），检查 bwrap
+bash scripts/setup_host_workers.sh  # 幂等安装 cron：转写 / 对话 / 批量回测
+```
+
+- 不装：回测中心页面照常打开，K线/榜单/自定义 Pine 都可用；点「转写并回测 / 批量回测」
+  会停在排队或如实报「PyneCore 运行时未安装」
+- 已装：三条 worker 每分钟消费队列；批量回测由「策略排行」页发起，进度写
+  `<数据根>/lab_batch/status/<run_id>.json`
+- 只用批量回测：`bash scripts/setup_lab_batch_worker.sh`
+- 便携包没有 cron/bwrap：Windows 用 WSL2 或 Docker 版
 
 ## 一键更新
 
