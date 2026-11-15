@@ -46,13 +46,14 @@
 ***
 
 > **分支说明**：本 README 对应 **`next` 开发预览分支**，下面「一键安装」默认安装 **next**。
-> 需要稳定版请把命令里的 `next` 换成 `master`；分支差异与切换见 [本地开发](#本地开发)。
+> 需要稳定版请把命令里的 `next` 换成 `master`；Gitee 默认分支是 `master`，在那里看到的是稳定版 README。
+> 分支差异与切换见 [本地开发](#本地开发)。
 
 ***
 
 ## 项目简介
 
-**QuantMind（量化大脑）** 是面向个人量化研究者、投研团队与专业机构的一体化 AI 原生量化交易平台。深度集成微软 **Qlib** 量化框架、**RD-Agent** 研发智能体与 **TradingAgents** 多 Agent 投研体系，并以 **QuantBot（dsh / DeepSeek Harness）** 作为自然语言总入口，全面打通量化全流程闭环：
+**QuantMind（量化大脑）** 是面向个人量化研究者、投研团队与专业机构的一体化 AI 原生量化交易平台。深度集成微软 **Qlib** 量化框架与 **RD-Agent** 研发智能体，并以 **QuantBot（dsh / DeepSeek Harness）** 作为自然语言总入口，全面打通量化全流程闭环：
 
 ```text
 数据底座 -> 因子挖掘 -> 因子物化 -> 因子研究 -> 模型训练（自物化因子）-> 批量推理 -> 组合回测 -> 模拟盘演练 -> 生产监控
@@ -103,16 +104,39 @@
 
 > 📖 **完整部署指南**（含在线/手动部署、`.env`、**QuantBot / dsh**、数据目录与排障）见 **[docs/部署指南.md](docs/部署指南.md)**。
 
+### 0. AI 代理部署（机器可执行清单）
+
+> AI 助手 / 自动化脚本请直接按 **[docs/AI部署指南.md](docs/AI部署指南.md)** 执行：非交互、含验收判据与失败处理。核心只有三步：
+
+```bash
+# ① 预检：期望 Ubuntu 22.04/24.04、≥4 核 / 8GB、/opt 可用 ≥100GB
+cat /etc/os-release | grep -E '^(ID|VERSION_ID)='
+
+# ② 完整包部署 next（含数据，约 15–50 分钟；后台执行并写日志）
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/next/deploy/full-deploy.sh \
+  -o /tmp/quantmind-full-deploy.sh
+sudo env QUANTMIND_REF=next QUANTMIND_REPO_URL=https://gitee.com/qusong0627/QuantMind.git \
+  nohup bash /tmp/quantmind-full-deploy.sh > /tmp/quantmind-deploy.log 2>&1 &
+
+# ③ 验收：两条都要通过（health 返回 healthy；Web 返回 200）
+curl -fsS http://127.0.0.1:8000/health
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/
+```
+
+完整判据、数据初始化、失败处理与最终报告模板见 **[docs/AI部署指南.md](docs/AI部署指南.md)**。
+
 ### 1. 完整在线一键部署（主推 · 生产就绪 · 默认装 next）
 
 从 CDN 下载**完整预构建镜像 + 业务数据 + 预训练模型 + Qlib 数据 + PostgreSQL 初始化备份**，校验后一次性恢复，部署完即可登录体验：
 
 ```bash
-# 安装 next（本 README 对应的开发预览版）
+# next（本 README 对应的开发预览版）
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/next/deploy/full-deploy.sh \
   | sudo QUANTMIND_REF=next bash
 
-# 安装稳定版 master：把上面两处 next 都换成 master
+# 稳定版 master（Gitee 默认分支）
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh \
+  | sudo QUANTMIND_REF=master bash
 ```
 
 部署完成后即可访问：
@@ -126,9 +150,13 @@ curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/next/deploy/full-deploy.sh
 ### 2. 在线部署与平滑更新
 
 ```bash
-# 在线源码部署 next
+# 在线源码部署 next（本 README 对应）
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/next/deploy/deploy.sh \
   | sudo QUANTMIND_REF=next bash
+
+# 在线源码部署稳定版 master
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/deploy.sh \
+  | sudo QUANTMIND_REF=master bash
 
 # 已部署服务器一键更新（跟随当前 checkout 分支；next 安装后仍更新 next）
 sudo bash deploy/update.sh
@@ -326,11 +354,23 @@ quantmind/
 
 * [Microsoft RD-Agent](https://github.com/microsoft/RD-Agent) — 微软研发智能体框架
 
-* [TradingAgents-Astock](https://github.com/simonlin1212/TradingAgents-astock) — 多 Agent A 股投研框架
-
 * [LightGBM](https://github.com/microsoft/LightGBM) / [CatBoost](https://github.com/catboost/catboost) / [XGBoost](https://github.com/dmlc/xgboost) — 经典梯度提升树算法
 
-* [FastAPI](https://fastapi.tiangolo.com/) & [PyTorch](https://pytorch.org/) — 现代高性能后端与深度学习底座
+* [PyTorch](https://pytorch.org/) — 深度学习训练与推理底座
+
+* [FastAPI](https://fastapi.tiangolo.com/) — 后端 API 框架
+
+* [DuckDB](https://duckdb.org/) / [Apache Parquet](https://parquet.apache.org/) — 列式存算与因子数据底座
+
+* [PostgreSQL](https://www.postgresql.org/) / [Redis](https://redis.io/) — 业务数据库与缓存/消息队列
+
+* [Electron](https://www.electronjs.org/) / [React](https://react.dev/) / [TypeScript](https://www.typescriptlang.org/) — 桌面与 Web 前端
+
+* [Optuna](https://optuna.org/) — 自动化超参寻优
+
+* **PyneCore** — Pine 策略转写与回测运行时
+
+* **DeepSeek Harness (dsh)** — QuantBot 自然语言总入口
 
 ***
 

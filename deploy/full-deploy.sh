@@ -658,8 +658,9 @@ main() {
     echo " 1. QuantDB 在线下载及日常增量更新（推荐）："
     echo "    在客户端【个人中心】->【数据平台】配置 API Key，"
     echo "    或在终端执行: docker exec quantmind python backend/scripts/quantdb_daily_sync.py"
-    echo " 2. 百度网盘完整历史数据包（备选）："
-    echo "    链接: https://pan.baidu.com/s/5IT4p5nFlglZ7zu_0H_fA8Q"
+    echo " 2. ModelScope 离线数据包（备选 · 全量）："
+    echo "    数据集: https://www.modelscope.cn/datasets/qusong0627/LightGBM_Alpha300"
+    echo "    或在【管理后台】->【数据管理】点击【初始化数据】"
     echo "========================================================================="
     echo ""
 }

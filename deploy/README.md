@@ -1,5 +1,7 @@
 # QuantMind 部署指南
 
+> 🤖 **AI 代理 / 自动化部署**：按 **[docs/AI部署指南.md](../docs/AI部署指南.md)** 执行（非交互命令 + 验收判据 + 失败处理 + 报告模板）。
+
 ## 选择部署方式
 
 | 方式 | 适用场景 | 入口 |
@@ -28,8 +30,13 @@ README.txt
 > `next` 换成 `master`（`QUANTMIND_REF` 不传时脚本默认仍是 `master`）。
 
 ```bash
+# next（本文件对应的开发预览分支）
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/next/deploy/full-deploy.sh \
   | sudo QUANTMIND_REF=next bash
+
+# 稳定版 master（Gitee 默认分支）
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh \
+  | sudo QUANTMIND_REF=master bash
 ```
 
 > **数据初始化**：完整包已含基础业务数据；若需补齐 QuantDB 全量历史，部署完成后到

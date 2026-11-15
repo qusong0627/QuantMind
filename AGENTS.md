@@ -2,6 +2,8 @@
 
 本文件为 AI 编码助手（Claude Code / Codex / QwenPaw 等）在此仓库中工作时提供指导。
 
+> **要部署 QuantMind（而不是改代码）**：直接按 **[docs/AI部署指南.md](docs/AI部署指南.md)** 执行——环境预检、非交互部署命令、验收判据、失败处理与报告模板都在那里。
+
 ## 项目概述
 
 QuantMind 是一个量化交易平台，后端为 Python（FastAPI），前端为 Electron/React/TypeScript。开源版（OSS）采用单容器部署，所有后端服务运行在同一个容器中。

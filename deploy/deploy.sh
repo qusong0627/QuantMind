@@ -270,9 +270,10 @@ show_completion_tips() {
     echo " 1. QuantDB 在线下载及更新（推荐）："
     echo "    在 Web 端【个人中心】->【数据平台】中填入 API Key 即可在线同步，"
     echo "    或在终端执行: docker exec quantmind python backend/scripts/quantdb_daily_sync.py"
-    echo " 2. 百度网盘离线数据包（备选）："
-    echo "    链接: https://pan.baidu.com/s/5IT4p5nFlglZ7zu_0H_fA8Q"
-    echo "    内含 QuantDB 数据，解压到 $PROJECT_DIR/data/quantdb（容器内 /data/quantdb）"
+    echo " 2. ModelScope 离线数据包（备选 · 全量）："
+    echo "    数据集: https://www.modelscope.cn/datasets/qusong0627/LightGBM_Alpha300"
+    echo "    也可在【管理后台】->【数据管理】点击【初始化数据】拉取；"
+    echo "    或解压到 $PROJECT_DIR/data/quantdb（容器内 /data/quantdb）"
     echo "========================================================================="
     echo ""
 }
