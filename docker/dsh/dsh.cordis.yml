@@ -9,7 +9,8 @@
 #
 # ⚠️ 两条已验证的硬约束（对齐 dsh 源码，蓝本 baymax 实测）：
 #   1. patch 的 config 是「整体替换」而非合并：写 connection 时必须重声明 trustedHosts
-#      （!!js ctx.webRuntime.trustedHosts = CLI --trusted-host 传入的列表），
+#      （!!js ctx.webStartup.trustedHosts = CLI --trusted-host 传入的列表；0.2.2 起
+#      服务名从 webRuntime 改为 webStartup，且 connection 行需显式 inject），
 #      否则 web-app 默认围栏被抹掉 → 所有 /api 请求 403。
 #   2. cookie 硬上限：expiresAt - issuedAt <= cookieMaxAgeDays × 1天
 #      （dsh-client-connection authorizeIndex）。下方 3650；mint_cookies.py 按 3600 天
@@ -58,6 +59,7 @@
 
 # ---- 连接参数 ----
 - id: connection
+  inject: [credentials, webStartup]
   config:
-    trustedHosts: !!js ctx.webRuntime.trustedHosts
+    trustedHosts: !!js ctx.webStartup.trustedHosts
     cookieMaxAgeDays: 3650

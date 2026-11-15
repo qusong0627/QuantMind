@@ -37,6 +37,10 @@ PROFILE_DIR="$DSH_HOME/profiles/web"
 PROFILE_SRC=/app/dsh/profile
 if [[ -f "$PROFILE_SRC/package.json" ]]; then
     mkdir -p "$PROFILE_DIR"
+    # pnpm 工作区配置：0.2.2 起 plugin manager 用它固定 nodeLinker=hoisted /
+    # autoInstallPeers=false；缺失会让 --frozen-lockfile 报配置不一致而拒装。
+    [[ -f "$PROFILE_SRC/pnpm-workspace.yaml" ]] \
+        && cp "$PROFILE_SRC/pnpm-workspace.yaml" "$PROFILE_DIR/pnpm-workspace.yaml"
     _want=$(sha256sum "$PROFILE_SRC/package.json" | cut -d' ' -f1)
     _have=$(cat "$PROFILE_DIR/.manifest.sha" 2>/dev/null || true)
     if [[ "$_want" != "$_have" ]]; then

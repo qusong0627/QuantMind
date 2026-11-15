@@ -213,7 +213,9 @@ start_services() {
         quantmind
     # dsh（QuantBot 默认后端）：镜像内已烘焙 python3/nginx/docker CLI（docker/Dockerfile.dsh），
     # buildkit 自动拉取 node:22-slim 基础层后叠加。旧 QwenPaw 服务/镜像已退役删除。
-    "${QM_COMPOSE[@]}" build dsh
+    # 注入 qm.git.* 身份戳：update/full-deploy 据此判断镜像是否与检出同 commit。
+    QM_GIT_COMMIT="$git_commit" QM_GIT_BRANCH="$git_branch" QM_GIT_DIRTY="$git_dirty" \
+        "${QM_COMPOSE[@]}" build dsh
     "${QM_COMPOSE[@]}" up -d --remove-orphans
 
     # P2-6 发布断言（覆盖层模式）：三容器零代码挂载 + 运行态戳==检出 HEAD。

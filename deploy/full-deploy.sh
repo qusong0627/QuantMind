@@ -592,6 +592,27 @@ build_and_start() {
                 || die "构建产物身份断言失败：镜像=${built_sha:-无} 检出=${head_sha:0:12}"
         fi
     fi
+    # dsh（QuantBot）镜像身份闸门：离线包里的 quantmind-dsh 必须与检出同 commit
+    # （其构建上下文含 docker/dsh/profile 插件清单、ds-bot 版本与 loopback 补丁）。
+    # 不一致 → 本地重建对齐；纯离线机若重建失败，明确提示重新出片，绝不静默跑旧 dsh。
+    local dsh_head dsh_branch dsh_dirty dsh_image_commit
+    dsh_head="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    dsh_branch="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ]]; then
+        dsh_dirty=true
+    else
+        dsh_dirty=false
+    fi
+    dsh_image_commit="$(qm_image_git_commit quantmind-dsh:latest)"
+    if [[ "$dsh_image_commit" != "$dsh_head" ]]; then
+        log "重建 dsh 镜像（QuantBot）：镜像=${dsh_image_commit:-无} ≠ 检出 ${dsh_head:0:12}"
+        QM_GIT_COMMIT="$dsh_head" QM_GIT_BRANCH="$dsh_branch" QM_GIT_DIRTY="$dsh_dirty" \
+            "${QM_COMPOSE[@]}" build dsh \
+            || die 'dsh 镜像重建失败：离线包内 quantmind-dsh 与代码不同 commit，且本地构建失败。请使用与代码同 commit 的新离线包重新出片（构建需联网）'
+        [[ "$(qm_image_git_commit quantmind-dsh:latest)" == "$dsh_head" ]] \
+            || die "dsh 构建产物身份断言失败（镜像=$(qm_image_git_commit quantmind-dsh:latest)，检出=${dsh_head:0:12}）"
+        log "dsh 镜像已对齐检出：${dsh_head:0:12}"
+    fi
     # minibt 策略/AI-IDE 回测依赖独立 runner 镜像；compose 不管它。
     # 按「镜像存在 + minibt 源码/构建脚本指纹」决定是否重建；失败只警告。
     qm_build_minibt_runner_if_needed "$PROJECT_DIR" || true

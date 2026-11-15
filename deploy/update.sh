@@ -245,6 +245,30 @@ build_core() {
             need_build=true; reason="镜像身份 ${image_sha:0:12} ≠ 检出 ${head_sha:0:12}"
         fi
     fi
+    # dsh（QuantBot）镜像身份闸门：其构建上下文含 docker/dsh/profile 插件清单、
+    # ds-bot 版本与 loopback 补丁，必须与检出同 commit；旧镜像无 qm.git.commit
+    # 也视为过期。与 quantmind-oss 的构建决策解耦（纯 dsh 改动也要重建）。
+    local dsh_head dsh_have dsh_branch dsh_dirty
+    dsh_head="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    dsh_branch="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ]]; then
+        dsh_dirty=true
+    else
+        dsh_dirty=false
+    fi
+    dsh_have="$(qm_image_git_commit quantmind-dsh:latest)"
+    if [[ "$dsh_have" != "$dsh_head" ]]; then
+        log "2/5 重建 dsh 镜像（QuantBot；镜像=${dsh_have:-无} ≠ 检出 ${dsh_head:0:12}）"
+        QM_GIT_COMMIT="$dsh_head" QM_GIT_BRANCH="$dsh_branch" QM_GIT_DIRTY="$dsh_dirty" \
+            docker compose -f "$PROJECT_DIR/docker-compose.yml" build dsh \
+            || die 'dsh 镜像重建失败（QuantBot）：检查 docker/Dockerfile.dsh 与构建网络'
+        [[ "$(qm_image_git_commit quantmind-dsh:latest)" == "$dsh_head" ]] \
+            || die "dsh 构建产物身份断言失败（镜像=$(qm_image_git_commit quantmind-dsh:latest)，检出=${dsh_head:0:12}）"
+        log "2/5 dsh 镜像已注戳：quantmind-dsh:latest @ ${dsh_head:0:12}"
+    else
+        log "2/5 dsh 镜像已对应当前检出（${dsh_head:0:12}），跳过重建"
+    fi
+
     if ! $need_build; then
         if [[ "${QM_PROD_OVERLAY_OK:-false}" == true ]]; then
             log "2/5 镜像已对应当前检出（${head_sha:0:12}），跳过重建"

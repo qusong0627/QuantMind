@@ -71,9 +71,18 @@ requirements 指纹写入 Label `qm.req.sha`，部署时与当前代码算出的
 **制作镜像时必须打指纹戳**（否则部署侧视为无指纹、每次触发重建）：
 
 ```bash
-QM_REQ_SHA=$(bash deploy/req-fingerprint.sh) docker compose build quantmind
-docker save quantmind-oss:latest <其余镜像...> | zstd -T0 -o images.tar.zst
+QM_REQ_SHA=$(bash deploy/req-fingerprint.sh) \
+QM_GIT_COMMIT=$(git rev-parse HEAD) \
+QM_GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD) \
+QM_GIT_DIRTY=$(test -n "$(git status --porcelain)" && echo true || echo false) \
+docker compose build quantmind dsh
+docker save quantmind-oss:latest quantmind-dsh:latest <其余镜像...> | zstd -T0 -o images.tar.zst
 ```
+
+> `quantmind-dsh:latest` 也必须打进 `images.tar.zst`，且与 `quantmind-oss` 同 commit 构建：
+> 其构建上下文含 `docker/dsh/profile`（dsh 版本、ds-bot 与插件清单）和 loopback 补丁。
+> `full-deploy` / `update.sh` 会按 `qm.git.commit` 校验，不一致时联网重建；纯离线机
+> 会因重建失败而停工，所以出片时必须带上 dsh 镜像。
 
 **部署真相戳（T7-3）**：`deploy/{update,full-deploy,deploy}.sh` 构建时会自动注入
 `QM_GIT_COMMIT/QM_GIT_BRANCH/QM_GIT_DIRTY`，写入镜像 Label（`docker inspect` 可核对

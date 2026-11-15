@@ -11,7 +11,19 @@ FROM node:22-slim
 # 升级流程：先在非交易时段用 --dump-config 与真实 boot 双重验证新版本，再改这里重建。
 # 0.2.0-rc.2 升级预检（2026-10-07）：loopback 补丁锚点、cookie 签名格式（v1/HMAC）、
 # .credentials.yaml 结构、--profile web 全部旗标、plugin 子命令均逐字比对兼容，实测通过。
-ARG DSH_VERSION=0.2.0-rc.2
+# 0.2.2-rc.3 升级预检（2026-11-15）：补丁目标拆为 client.browser.js + client.node.js，
+# 已适配；profile 需带 pnpm-workspace.yaml（autoInstallPeers=false），否则插件冻结安装
+# 报 LOCKFILE_CONFIG_MISMATCH；插件集 frozen install + --dump-config 均通过。
+ARG DSH_VERSION=0.2.2-rc.3
+# 部署真相戳：与 quantmind-oss 同一套 qm.git.* Label 口径，供 full-deploy/update
+# 判断「离线包/本机 dsh 镜像是否由当前检出构建」，不一致时自动重建对齐。
+ARG QM_GIT_COMMIT=unknown
+ARG QM_GIT_BRANCH=unknown
+ARG QM_GIT_DIRTY=unknown
+LABEL qm.git.commit="${QM_GIT_COMMIT}" \
+      qm.git.branch="${QM_GIT_BRANCH}" \
+      qm.git.dirty="${QM_GIT_DIRTY}" \
+      qm.dsh.version="${DSH_VERSION}"
 # pnpm：`dsh plugin add` 会把参数转给 profile 目录下的 pnpm，镜像里没有就无法装插件
 ARG PNPM_VERSION=11.24.0
 # docker CLI 静态二进制（技能契约：docker cp/exec quantmind 执行重依赖脚本）
