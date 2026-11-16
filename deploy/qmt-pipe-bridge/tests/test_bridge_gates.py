@@ -107,3 +107,36 @@ def test_take_token_pair_is_atomic():
     # 只剩 1 个时取 2 必须失败（不能只发一半）
     ok, left, _ = gates.take_token(1.0, 100.0, 100.0, 2.0, 4, n=2)
     assert ok is False and left == 1.0
+
+
+def test_split_backlog_drops_only_trade_context_and_never_orders():
+    identity = lambda text: text  # noqa: E731 - 载荷本身就是 JSON
+    items = [
+        '{"request_id":"1","method":"query_stock_orders"}',
+        '{"request_id":"2","method":"query_stock_asset"}',
+        '{"request_id":"3","method":"get_full_tick"}',
+        '{"request_id":"4","method":"order_stock"}',
+        '{"request_id":"5","method":"cancel_order_stock"}',
+        '{"request_id":"6","method":"order_stock_async"}',
+        '{"request_id":"7","method":"reload_deployment"}',
+        '{bad json',
+    ]
+    purge, keep = gates.split_backlog(
+        items, gates.STATE_UNRESPONSIVE, decode_payload=identity
+    )
+    assert [req['method'] for _raw, req in purge] == [
+        'query_stock_orders', 'query_stock_asset', 'reload_deployment'
+    ]
+    assert '{"request_id":"3","method":"get_full_tick"}' in keep
+    assert '{"request_id":"4","method":"order_stock"}' in keep
+    assert '{"request_id":"5","method":"cancel_order_stock"}' in keep
+    assert '{"request_id":"6","method":"order_stock_async"}' in keep
+    assert '{bad json' in keep  # 解不开 = 可能是订单，保留
+
+
+def test_split_backlog_purges_nothing_when_healthy():
+    identity = lambda text: text  # noqa: E731
+    items = ['{"request_id":"1","method":"query_stock_orders"}']
+    purge, keep = gates.split_backlog(items, gates.STATE_OK, decode_payload=identity)
+    assert purge == []
+    assert keep == items

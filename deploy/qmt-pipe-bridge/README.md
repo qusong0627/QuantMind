@@ -87,6 +87,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File register_strategy_watchdog.p
 五个 worker 零延迟同时开跑时，QMT 单线程交易 API 在启动瞬间被打爆
 （2026-11-06 三次实测：桥一启动，策略 40-60s 内必挂）。错峰后同一时刻只有
 一个 worker 热身，rpc_worker 也延后消费队列，避免容器积压在启动窗口灌进来。
+桥启动时 ``strategy_state`` 先置 **unresponsive**，首次 ``get_asset`` 探针成功
+才放行交易查询——启动窗口内到达的交易类只读请求按判死处理（订单/行情不受
+影响），不会灌进还没热身的策略。
 
 **交易类 RPC 全局限速（令牌桶，双桶）**：容器请求桶 `rpc.trade_min_interval_s`
 （默认 2s，容量 `trade_burst`=1）；桥内部轮询桶 `rpc.internal_trade_min_interval_s`
@@ -96,6 +99,71 @@ powershell -NoProfile -ExecutionPolicy Bypass -File register_strategy_watchdog.p
 跳过；订单/撤单/行情不受限制。依据：2026-11-06 实测「桥停掉的 35 秒里账户
 通道自己恢复，恢复流量后一分钟内又挂」——``get_trade_detail_data`` 连续查询
 会长时间阻塞、空载可自愈，速率是可控变量。
+
+## 为什么「经常要重启」与 2026-11-16 修复
+
+QMT 的交易查询（`get_asset` / `get_positions` / `query_orders` / `query_trades`）
+**只能在策略 adjust 主线程执行**，`get_trade_detail_data` 一旦阻塞，主线程就不再
+tick；而 `ping` 与行情方法跑在后台 listener 线程，仍然正常——这就是「QMT 在线、
+账户/委托查询全死」的假活。轻量恢复顺序必须是：
+
+1. **清积压**：策略判死后容器仍在入队，重启 QMT 前先清交易类只读请求
+   （订单/撤单永不删）：
+   ```bash
+   python scripts/qmt_rpc_queue_hygiene.py --account <资金账号>
+   python scripts/qmt_rpc_queue_hygiene.py --account <资金账号> --trim \
+     --drop-methods query_stock_orders,query_stock_asset,subscribe_whole_quote
+   ```
+2. **重启伴生桥**（断管道解锁主线程，不碰策略运行态 → Tap 不丢）；
+3. 账户仍不恢复 → 在 QMT 策略编辑器里**停止 → 运行**（重新执行 init，装回 Tap）；
+4. 最后才重启整个 QMT 客户端。
+
+**2026-11-16 新增**：
+
+- `pipe_redis_bridge.py` 在 `strategy_state=unresponsive` 期间**自动清理**队列里
+  已积压的交易类只读请求（`bridge_gates.split_backlog`），并立即回
+  `STRATEGY_UNHEALTHY` 失败回复；订单/撤单、行情类、解码失败条目一律保留。
+  指标新增 `qm:qmt:pipe:metrics.purged_backlog`。这修的是「重启后积压回灌，
+  存活 12h → 6min → 3min」那条事故链。
+- `ping` 新增 `quote_push_ready`：false 表示全推行情订阅服务未装配（策略文件/
+  配置旧，或 `quote_push.enabled=false`），此时 `subscribe_whole_quote` 会报
+  `whole-quote push subscription is not configured on this server`。看门狗状态
+  `qm:qmt:strategy:watchdog.quote_push_ready` 同步可见。修法是同步最新
+  `bigqmt_signal_trader_strategy.py` 后在 QMT 编辑器停止/运行一次策略。
+- `bridge_config.example.json` 已补齐 `rpc` 令牌桶、`startup` 错峰、
+  `budget` 让路闸、`tap`/`sweep`、`watchdog.prefer_bridge_restart` 等键。
+  **Windows 上的 `bridge_config.json` 若是旧版，按新 example 合并**；尤其是
+  `rpc.internal_trade_min_interval_s=2` / `trade_min_interval_s=3` /
+  `startup.grace_s=8` / `step_s=3` 与 `watchdog.prefer_bridge_restart=true`。
+
+### 2026-11-16 上线清单（Windows，建议收盘后）
+
+1. 备份现有 `pipe_redis_bridge.py` / `bridge_gates.py` / `qmt_strategy_watchdog.py` /
+   `bridge_config.json`。
+2. 复制本仓 `deploy/qmt-pipe-bridge/` 下：
+   `pipe_redis_bridge.py`、`bridge_gates.py`、`qmt_strategy_watchdog.py` 到
+   `qmt-tools\`（覆盖）；`bridge_config.example.json` 只作合并参考，**不要覆盖**
+   你的 `bridge_config.json`。
+3. 把 **`rpc` / `startup` / `budget` / `tap` / `sweep` / `watchdog`** 这几段按新
+   example 合并进 `bridge_config.json`（尤其 `watchdog.prefer_bridge_restart=true`、
+   `rpc.trade_min_interval_s=3`、`rpc.internal_trade_min_interval_s=2`、
+   `startup.grace_s=8`、`startup.step_s=3`）。
+4. 复制本仓 `deploy/qmt-bridge-kit/bigqmt_signal_trader/redis_rpc.py` 到 QMT
+   python 目录下的 `bigqmt_signal_trader\`（覆盖）；如果 `ping` 的
+   `quote_push_ready` 仍为 false，再把 `bigqmt_signal_trader_strategy.py` /
+   `qmt_quote_tap.py` 一起覆盖，并在 QMT 编辑器里**停止 → 运行**策略一次
+   （`reload_deployment` 不刷新顶层策略文件）。
+5. 重启伴生桥（`start_pipe_bridge.cmd` 或看门狗自动拉起），**不需要重启 QMT
+   客户端**；确认 `qm:qmt:pipe:metrics.strategy_state=ok`、`queue_len=0`。
+6. 验证：
+   ```bash
+   # 容器内
+   docker exec -w /app quantmind python -c "import asyncio,json; from backend.services.live_trading.services.tdx_push_service import tdx_pusher as p; print(asyncio.run(p.tdx_call('ping',{},source='qmt')))"
+   # 期望 quote_push_ready: True；同时 qm:qmt:pipe:metrics 出现 purged_backlog
+   ```
+7. 若 `quote_push_ready=false`：先查 QMT python 目录
+   `bigqmt_signal_trader_local_config.py` 里 `quote_push.enabled` 是否被显式关掉；
+   否则就是策略文件旧，按第 4 步停/运行一次。
 
 ## 接口
 

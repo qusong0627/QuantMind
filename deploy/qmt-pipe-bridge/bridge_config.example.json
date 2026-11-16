@@ -11,7 +11,15 @@
   },
   "rpc": {
     "timeout_s": 15,
-    "queue_blpop_s": 0.5
+    "queue_blpop_s": 0.5,
+    "trade_min_interval_s": 3.0,
+    "trade_burst": 3,
+    "internal_trade_min_interval_s": 2.0,
+    "internal_trade_burst": 6
+  },
+  "startup": {
+    "grace_s": 8.0,
+    "step_s": 3.0
   },
   "positions": {
     "enabled": true,
@@ -22,7 +30,7 @@
     "enabled": true,
     "tier_a_interval_s": 2,
     "tier_b_interval_s": 10,
-    "chunk": 20,
+    "chunk": 25,
     "max_symbols": 250,
     "stale_after_s": 10,
     "indices": [
@@ -44,8 +52,10 @@
   },
   "budget": {
     "window_s": 10,
-    "market_ms": 3000,
-    "rpc_preempt_queue": 1
+    "market_ms": 2000,
+    "rpc_preempt_queue": 1,
+    "order_preempt_queue": 3,
+    "market_preempt_queue": 2
   },
   "risk": {
     "enabled": true,
@@ -56,7 +66,14 @@
     "blacklist_name_keywords": [
       "ST",
       "退"
-    ]
+    ],
+    "apply_to_sells": false,
+    "sell_price_band_pct": 20.0,
+    "enrich_unknown": true
+  },
+  "reload": {
+    "enabled": true,
+    "key": "qm:qmt:pipe:reload"
   },
   "health": {
     "heartbeat_key": "qm:qmt:pipe:heartbeat",
@@ -67,11 +84,25 @@
     "account_probe_timeout_s": 6
   },
   "tap": {
-    "enabled": false,
+    "enabled": true,
     "interval_s": 0.5,
     "subscribe_refresh_s": 60,
     "max_symbols": 250,
-    "respect_budget": false
+    "respect_budget": false,
+    "universe_key": "",
+    "day_snapshot": true,
+    "day_snapshot_key": "quote:snap:%s",
+    "day_snapshot_expire_hhmm": "09:05"
+  },
+  "sweep": {
+    "enabled": true,
+    "interval_s": 300,
+    "chunk": 500,
+    "ttl_s": 360,
+    "universe_key": "",
+    "max_symbols": 6000,
+    "start_hhmm": 930,
+    "end_hhmm": 1500
   },
   "source_http": {
     "enabled": true,
@@ -79,5 +110,16 @@
     "port": 17720,
     "stale_after_s": 30,
     "allow_orders": false
+  },
+  "watchdog": {
+    "enabled": true,
+    "prefer_bridge_restart": true,
+    "fail_threshold": 2,
+    "reload_cooldown_s": 600,
+    "reload_max_per_day": 3,
+    "bridge_restart_after_s": 60,
+    "bridge_restart_max_per_hour": 6,
+    "bridge_restart_wait_s": 15,
+    "bridge_start_cmd": "C:\\<QMT_TOOLS>\\start_pipe_bridge.cmd"
   }
 }

@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import json
+
 #: 订单/撤单类方法：任何情况下都放行（宁可让它超时，也不能本地丢掉）。
 ORDER_LIKE_METHODS = frozenset({
     'order_stock', 'order_stock_async', 'order_stock_batch', 'passorder',
@@ -76,6 +78,44 @@ def should_drop_request(method: str | None, strategy_state: str) -> bool:
     if is_order_like(method):
         return False
     return is_trade_context(method)
+
+
+def split_backlog(items, strategy_state: str, decode_payload=None):
+    """RPC 队列条目 → (可清除的 ``[(raw, req)]``, 保留的 ``[raw]``)。
+
+    这是「账户通道判死后**清掉已积压的交易类只读请求**」的纯判定，防止
+    QMT 重启时把旧查询一次性灌给新策略（2026-11-06 实测存活 12h→6min→3min）。
+
+    保留（fail-closed）：订单/撤单、行情类、以及**解码失败**的条目——解不开
+    就当它有可能是订单，宁可让它超时，也不本地丢。
+    """
+    if decode_payload is None:
+        from bigqmt_signal_trader.redis_rpc import (  # noqa: PLC0415
+            decode_rpc_request_payload,
+        )
+
+        decode_payload = decode_rpc_request_payload
+    purge: list[tuple[object, dict]] = []
+    keep: list[object] = []
+    for item in items or ():
+        try:
+            text = (
+                item.decode("utf-8", "replace")
+                if isinstance(item, (bytes, bytearray))
+                else str(item)
+            )
+            req = json.loads(decode_payload(text))
+            if not isinstance(req, dict):
+                raise ValueError("not a dict")
+            method = str(req.get("method") or "")
+        except Exception:  # noqa: BLE001 - 解码失败按订单处理，保留
+            keep.append(item)
+            continue
+        if should_drop_request(method, strategy_state):
+            purge.append((item, req))
+        else:
+            keep.append(item)
+    return purge, keep
 
 
 def next_state(prev: str, probe_ok: bool, consecutive_failures: int,

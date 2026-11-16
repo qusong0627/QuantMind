@@ -97,6 +97,8 @@ class Probe:
     account_ok: bool
     error: str = ''
     asset_ms: float = 0.0
+    #: ping 返回的全推行情订阅服务装配状态；None = 旧版 ping 没这个字段。
+    quote_push_ready: bool | None = None
 
 
 @dataclass
@@ -340,11 +342,15 @@ def probe_once(transport, cfg: dict) -> Probe:
     ping, ping_err = _call(transport, 'ping', {}, cfg['ping_timeout_s'])
     if ping is None:
         return Probe(reachable=False, account_ok=False, error=ping_err)
+    quote_ready = (
+        ping.get('quote_push_ready') if isinstance(ping, dict) else None
+    )
     t0 = time.perf_counter()
     asset, asset_err = _call(transport, 'get_asset', {}, cfg['asset_timeout_s'])
     ms = (time.perf_counter() - t0) * 1000.0
     return Probe(reachable=True, account_ok=asset is not None,
-                 error=asset_err, asset_ms=round(ms, 1))
+                 error=asset_err, asset_ms=round(ms, 1),
+                 quote_push_ready=quote_ready)
 
 
 def _tap_state(redis_client) -> str:
@@ -391,6 +397,9 @@ def _save_state(redis_client, decision: Decision, probe: Probe, cfg: dict) -> No
         'reachable': '1' if probe.reachable else '0',
         'account_ok': '1' if probe.account_ok else '0',
         'asset_ms': str(probe.asset_ms),
+        'quote_push_ready': (
+            '' if probe.quote_push_ready is None
+            else ('1' if probe.quote_push_ready else '0')),
         'last_error': probe.error[:200],
     }
     try:
@@ -516,7 +525,8 @@ def main(argv: list[str] | None = None) -> int:
     stamp = time.strftime('%Y-%m-%d %H:%M:%S')
     print(f'{stamp} action={decision.action} reason={decision.reason} '
           f'reachable={probe.reachable} account_ok={probe.account_ok} '
-          f'asset_ms={probe.asset_ms} err={probe.error[:120]}')
+          f'asset_ms={probe.asset_ms} quote_push={probe.quote_push_ready} '
+          f'err={probe.error[:120]}')
 
     def _restart_or_alert(dec: Decision, why: str) -> Decision:
         """先尝试重启伴生桥（断管道解锁策略），失败才降级为人工告警。"""

@@ -14,6 +14,7 @@
 重写用:
   QMT_DATA_STALE_TRADING_S / QMT_DATA_STALE_IDLE_S
 """
+import json
 import os
 import sys
 import time
@@ -24,9 +25,29 @@ import redis  # noqa: E402
 
 THRESHOLD_S = 60
 METRICS_KEY = 'qm:qmt:pipe:metrics'
-REDIS_HOST = os.getenv('QMT_REDIS_HOST', '127.0.0.1')
-REDIS_PORT = int(os.getenv('QMT_REDIS_PORT', '6379'))
-REDIS_DB = int(os.getenv('QMT_REDIS_DB', '5'))
+
+#: 与伴生桥同一份配置：健康检查必须读桥实际写入的 Redis。
+#: 旧实现只看 env/127.0.0.1，而桥配置指向 192.168.31.68 → watchdog 永远
+#: 读不到心跳，误判「进程死了」反复重启健康桥（2026-11-16 现场）。
+CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'bridge_config.json'
+)
+
+
+def _redis_config() -> dict:
+    try:
+        with open(CONFIG_PATH, encoding='utf-8') as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    redis_cfg = doc.get('redis') if isinstance(doc, dict) else None
+    return redis_cfg if isinstance(redis_cfg, dict) else {}
+
+
+_CFG = _redis_config()
+REDIS_HOST = os.getenv('QMT_REDIS_HOST') or _CFG.get('host') or '127.0.0.1'
+REDIS_PORT = int(os.getenv('QMT_REDIS_PORT') or _CFG.get('port') or 6379)
+REDIS_DB = int(os.getenv('QMT_REDIS_DB') or _CFG.get('db') or 5)
 
 
 def _env_int(name, default):

@@ -14,10 +14,19 @@ function Write-Log($msg) {
     Add-Content -Path $log -Value ("$ts $msg") -Encoding UTF8
 }
 
-$procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-         Select-Object -ExpandProperty CommandLine
 $running = $false
-foreach ($c in $procs) { if ($c -and $c -match 'pipe_redis_bridge') { $running = $true } }
+# Prefer the 17720 listener: CIM CommandLine can be a false negative
+# (permissions/timing), and a false negative goes down the "STOPPED"
+# unconditional-restart branch, restarting a healthy bridge.
+try {
+    $listener = Get-NetTCPConnection -LocalPort 17720 -State Listen -ErrorAction SilentlyContinue
+    if ($listener) { $running = $true }
+} catch { }
+if (-not $running) {
+    $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+             Select-Object -ExpandProperty CommandLine
+    foreach ($c in $procs) { if ($c -and $c -match 'pipe_redis_bridge') { $running = $true } }
+}
 
 $health = & $py (Join-Path $base 'qmt-external-bridge\bridge_health.py') 2>&1
 $healthCode = $LASTEXITCODE
@@ -30,6 +39,13 @@ if ($healthCode -eq 3) {
 $healthy = ($healthCode -eq 0)
 
 if ($running -and $healthy) { exit 0 }
+
+# Heartbeat fresh but process detection missed it (CIM/port race at startup).
+# Do NOT restart a live bridge just because Get-CimInstance cannot see it.
+if (-not $running -and $healthy) {
+    Write-Log "DETECT_MISS $health (no restart)"
+    exit 0
+}
 
 if (-not $running) {
     Write-Log "STOPPED restarting (health=$health)"

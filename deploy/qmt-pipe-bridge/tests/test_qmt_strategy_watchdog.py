@@ -320,6 +320,24 @@ def test_evaluate_tracks_unresponsive_since():
     assert d2.state['unresponsive_since'] == 0.0
 
 
+def test_probe_once_records_quote_push_ready():
+    class _Transport:
+        def __init__(self, ping_data):
+            self.ping_data = ping_data
+
+        def send_request(self, req, timeout_seconds):
+            if req['method'] == 'ping':
+                return {'ok': True, 'data': self.ping_data}
+            return {'ok': True, 'data': {'cash': 1}}
+
+    cfg = dict(wd.DEFAULT_CONFIG)
+    p = wd.probe_once(_Transport({'pong': True, 'quote_push_ready': False}), cfg)
+    assert p.reachable is True and p.account_ok is True
+    assert p.quote_push_ready is False
+    p2 = wd.probe_once(_Transport({'pong': True}), cfg)
+    assert p2.quote_push_ready is None  # 旧版 ping 没这个字段
+
+
 # --------------------------------------------------------------------------
 # 管道调用线程超时（2026-11-06：看门狗自己卡死 8 分钟，任务被 IgnoreNew 吞掉）
 # --------------------------------------------------------------------------

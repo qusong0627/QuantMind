@@ -38,6 +38,40 @@ sys.path.insert(0, os.environ.get('QMT_VENV_SITE_PACKAGES',
                                    r'C:\xmt\venv\Lib\site-packages'))
 sys.path.insert(0, BASE)
 
+# ---- 单实例锁（必须在 import redis / NamedPipeTransport 之前）----------
+# 第二个进程若在 import/构造管道阶段才退出，会先卡在管道连接上；看门狗
+# 再拉一个，就堆成多个 python.exe 抢同一条管道。TCP 17719 跨会话、不依赖
+# SMB 文件锁、不需要特权；进程退出由 OS 释放。
+_INSTANCE_SOCK = None
+_INSTANCE_LOCK_PORT = 17719
+
+
+def _acquire_single_instance():
+    global _INSTANCE_SOCK
+    if os.name != 'nt':
+        return True
+    try:
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        exclusive = getattr(socket, 'SO_EXCLUSIVEADDRUSE', None)
+        if exclusive is not None:
+            sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        sock.bind(('127.0.0.1', _INSTANCE_LOCK_PORT))
+        sock.listen(1)
+        _INSTANCE_SOCK = sock
+        return True
+    except OSError:
+        return False
+    except Exception:  # noqa: BLE001 - 锁不可用时不拦启动
+        return True
+
+
+if not _acquire_single_instance():
+    print('%s another pipe bridge is already running; exiting'
+          % time.strftime('%Y-%m-%d %H:%M:%S'), file=sys.stderr, flush=True)
+    os._exit(0)
+
 import redis  # noqa: E402
 from bigqmt_signal_trader.transports.pipe_transport import NamedPipeTransport  # noqa: E402
 from bigqmt_signal_trader.redis_rpc import decode_rpc_request_payload  # noqa: E402
@@ -210,12 +244,15 @@ class State(object):
         self.errors = 0
         self.last_error = ''
         self.rpc_calls = 0
+        self.purged_backlog = 0
         self.tap_ticks = 0
         self.tap_batches = 0
         self.tap_last_push = 0.0
         # 策略账户通道健康（判定见 bridge_gates）：unknown / ok / unresponsive。
-        # unresponsive 时交易类只读请求立即失败、不再转发（防止挂死后积压回灌）。
-        self.strategy_state = bridge_gates.STATE_UNKNOWN
+        # 启动时**先按 unresponsive 处理**，等 health worker 的 get_asset 探针
+        # 成功才放行交易类查询——桥刚重启的启动窗口里，策略可能还没热身完；
+        # 此时把队列里的旧交易查询直接转进去，就是「重启后积压回灌」本身。
+        self.strategy_state = bridge_gates.STATE_UNRESPONSIVE
         self.account_fail_count = 0
         self.account_probe_ok_ts = 0.0
         # 令牌桶：容器请求桶容量 1（超速即失败）；桥内部轮询桶容量 4
@@ -481,6 +518,52 @@ def write_reply(req, resp):
         R.expire(req['reply_list'], ttl)
     if req.get('reply_channel'):
         R.publish(req['reply_channel'], raw)
+
+
+def purge_trade_backlog(limit=200):
+    """策略账户通道判死后，清掉队列里**已积压**的交易类只读请求。
+
+    为什么：``rpc_worker`` 只拦「判死之后新到的」请求；判死之前已经入队的
+    旧查询仍留在 Redis 队列里，QMT 一重启就会灌给新策略（2026-11-06 实测：
+    三次重启存活 12h → 6min → 3min，积压一轮比一轮多）。
+
+    只清 ``bridge_gates.should_drop_request`` 命中的方法；订单/撤单、行情类、
+    解码失败的条目一律保留（fail-closed）。被清的请求会立刻收到同文案的
+    ``STRATEGY_UNHEALTHY`` 失败回复，调用方不再干等 15–25s。
+    """
+    account = str(CFG.get('account_id') or '')
+    if not account:
+        return 0
+    queue = 'bigqmt:rpc:queue:%s' % account
+    try:
+        items = R.lrange(queue, 0, max(1, int(limit)) - 1)
+    except Exception as exc:  # noqa: BLE001 - 读队列失败只记日志
+        STATE.note_error('backlog.lrange', exc)
+        return 0
+    if not items:
+        return 0
+    with STATE.lock:
+        strategy_state = STATE.strategy_state
+    purge, keep = bridge_gates.split_backlog(items, strategy_state)
+    removed = 0
+    for raw, req in purge:
+        try:
+            R.lrem(queue, 1, raw)
+            write_reply(req, {
+                'request_id': req.get('request_id'),
+                'ok': False,
+                'error': 'STRATEGY_UNHEALTHY: 交易查询通道卡死，请求已从队列清除'
+                         '（防止重启后积压回灌）',
+            })
+            removed += 1
+        except Exception as exc:  # noqa: BLE001 - 单条失败不拦其余
+            STATE.note_error('backlog.lrem', exc)
+    if removed:
+        with STATE.lock:
+            STATE.purged_backlog += removed
+        log('purged %d trade-context requests (kept=%d) from %s'
+            % (removed, len(keep), queue))
+    return removed
 
 
 # ---------------------------------------------------------------- 风控 + 幂等
@@ -1139,6 +1222,7 @@ def _metrics_snapshot():
             'sweep_ms': round(STATE.sweep_last_ms, 1),
             'tap_subscribed': len(_TAP_STATE['subscribed']),
             'rpc_calls': STATE.rpc_calls,
+            'purged_backlog': STATE.purged_backlog,
             'errors': STATE.errors,
             'last_error': STATE.last_error or _TAP_STATE['last_error'],
             'duty_ms_10s': round(BUDGET.used_ms(), 0),
@@ -1462,6 +1546,9 @@ def strategy_health_worker():
             fails = STATE.account_fail_count
         if new != prev:
             log('strategy account channel %s -> %s (fails=%d)' % (prev, new, fails))
+        if new == bridge_gates.STATE_UNRESPONSIVE:
+            # 判死后每轮清一次已积压的交易类只读请求；订单/行情不动。
+            purge_trade_backlog()
         time.sleep(max(5.0, interval))
 
 

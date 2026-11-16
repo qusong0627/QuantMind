@@ -677,6 +677,10 @@ class BigQmtRpcHandlers:
             "allow_order_methods": bool(self.allow_order_methods),
             "rpc_revision": RPC_REVISION,
             "version": _deployed_version(),
+            # 全推行情订阅服务是否装配：false = 策略文件/配置是旧的，或
+            # quote_push.enabled=false。此时 subscribe_whole_quote 会报
+            # "whole-quote push subscription is not configured on this server"。
+            "quote_push_ready": self.quote_subscription_manager is not None,
             "account_type": self._reported_account_type(
                 params.get("account_id") or self.account_id),
             "server_time": _dt.datetime.now(),

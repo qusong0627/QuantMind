@@ -18,6 +18,9 @@ QMT_READONLY_METHODS = frozenset({
     "snapshot", "get_market_snapshot", "get_full_tick",
     "get_market_data", "get_market_data_ex", "get_trading_dates",
     "quote_tap_status",
+    # 部署/能力诊断（只读；用于确认 Windows 侧跑的是哪份策略文件、
+    # quote_push 是否装配——`quote_push_ready` 见 ping）
+    "get_deployment_info", "probe_capabilities", "reload_status",
     # 账户 / 持仓 / 委托 / 成交
     "ping", "get_asset", "get_positions", "account_snapshot",
     "query_orders", "query_trades", "get_instrument_detail",
