@@ -61,7 +61,7 @@ export function OverviewTab({ profile }: Props) {
         />
         <Field label="总市值" value={fmt(profile.total_mv, '亿')} />
         <Field label="流通市值" value={fmt(profile.float_mv, '亿')} />
-        <Field label="总股本" value={profile.total_share ? `${(profile.total_share / 10000).toFixed(1)}亿股` : '--'} />
+        <Field label="总股本" value={profile.total_share ? `${(profile.total_share / 1e8).toFixed(1)}亿股` : '--'} />
         <Field label="涨跌停价" value={profile.limit_up_price ? `${fmt(profile.limit_up_price)} / ${fmt(profile.limit_down_price)}` : '--'} />
       </div>
 
