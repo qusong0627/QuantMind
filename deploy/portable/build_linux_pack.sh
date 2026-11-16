@@ -371,8 +371,11 @@ fi
 if find "$STAGE/logs" -type f 2>/dev/null | grep -q .; then
     fail "staging logs 非空（日志不能随包）"
 fi
+# 旧 staging 根目录残留（历史手工拷贝）：清掉，避免包根混入陈旧脚本/字节码。
+rm -rf "$STAGE/__pycache__"
+rm -f "$STAGE/parallel_utils.py" "$STAGE/preprocessing.py"
 
-GIT_REV="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GIT_REV="${GIT_REV:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 {
     echo "pack=QuantMind-Portable-linux-x64"
     echo "git=$GIT_REV"
