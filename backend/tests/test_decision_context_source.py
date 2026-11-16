@@ -32,6 +32,7 @@ from backend.shared.decision_context_source import (
     read_snapshots,
     snapshot_age_min,
     snapshot_key,
+    snapshot_key_qmt,
     snapshot_key_suffix,
 )
 
@@ -343,6 +344,48 @@ def test_read_snapshots_falls_back_to_legacy_prefix_form() -> None:
     out = read_snapshots(_FakeRedis(store), ["600036.SH"])
     # 后缀式优先只发一条命令；前缀式是无后缀形态（如指数/自定义码）的回落
     assert isinstance(out, dict)
+
+
+def test_read_snapshots_prefers_qmt_five_level_key() -> None:
+    """QMT 真五档键优先：同码三键都在时，5 档快照必须赢过 1 档主源。"""
+    store = {
+        "market:snapshot:qmt:600036.SH": {
+            "Now": "43.27",
+            "PreClose": "42.93",
+            "source": "qmt_full_tick",
+            "bid5": "43.23",
+        },
+        "market:snapshot:600036.SH": {"Now": "43.20", "PreClose": "42.93"},
+    }
+    out = read_snapshots(_FakeRedis(store), ["600036.SH"], include_qmt=True)
+    assert out["600036.SH"]["source"] == "qmt_full_tick"
+    assert out["600036.SH"]["Now"] == "43.27"
+
+
+def test_read_snapshots_default_does_not_query_qmt_key() -> None:
+    """批量推理等 2×N 调用方默认不查 QMT 键（3,206 只会多打一份命令）。"""
+    store = {
+        "market:snapshot:qmt:600036.SH": {
+            "Now": "43.27",
+            "source": "qmt_full_tick",
+        },
+        "market:snapshot:600036.SH": {"Now": "43.20"},
+    }
+    out = read_snapshots(_FakeRedis(store), ["600036.SH"])
+    assert out["600036.SH"]["Now"] == "43.20"
+
+
+def test_read_snapshots_falls_back_when_qmt_key_absent() -> None:
+    store = {"market:snapshot:600036.SH": {"Now": "43.20", "PreClose": "42.93"}}
+    out = read_snapshots(_FakeRedis(store), ["600036.SH"], include_qmt=True)
+    assert out["600036.SH"]["Now"] == "43.20"
+
+
+def test_qmt_snapshot_key_contract() -> None:
+    assert snapshot_key_qmt("600036.SH") == "market:snapshot:qmt:600036.SH"
+    assert snapshot_key_qmt("SH600036") == "market:snapshot:qmt:600036.SH"
+    assert snapshot_key_qmt("sh600036") == "market:snapshot:qmt:600036.SH"
+    assert snapshot_key_qmt("") == ""
 
 
 def test_read_snapshots_uses_nontransactional_pipeline_source_guard() -> None:

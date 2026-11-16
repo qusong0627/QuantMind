@@ -402,6 +402,9 @@ class RoundDeps:
     load_risk_files: Callable[[], tuple[Mapping[str, Any] | None, ...]] | None = None
     #: (codes) → {suffix: SeriesSummary}；丁1/丁3 原料。**第二批总接线标记**。
     read_series_summary: Callable[[Sequence[str]], Mapping[str, Any]] | None = None
+    #: () → 盘中结构文档（全市场涨跌停/炸板/板块/量能；交易库 db2）。
+    #: None = 未接线（历史字节）；读不到/过期 → 渲染层整段不出现。
+    read_intraday_live: Callable[[], Mapping[str, Any] | None] | None = None
     #: (trade_date, user) → 当日审计行（丁6/丁9）。口径同 build_records 写侧。
     load_decision_rows: Callable[[date, str], Awaitable[Sequence[Any]]] | None = None
     #: (round_id) → 丙1 唤醒文本（非唤醒轮 ""）。写 wake_tick，渲染 extra_context。

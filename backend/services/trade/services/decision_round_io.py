@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -452,7 +452,7 @@ def default_round_deps() -> RoundDeps:
         load_pool=_load_pool_with_overlay,
         load_excluded=load_excluded_symbols,
         quote_client=make_sync_client,
-        read_snaps=read_snapshots,
+        read_snaps=lambda client, codes: read_snapshots(client, codes, True),
         load_tier=lambda: load_tier(get_redis()),
         load_llm=_default_llm_binding,
         roster=default_roster,
@@ -478,30 +478,29 @@ def default_round_deps() -> RoundDeps:
         load_l2_snapshot=feeds.l2_snapshots,
         load_decision_rows=feeds.load_decision_rows,
         read_wake_ctx=_read_wake_ctx,
+        read_intraday_live=lambda: _read_with_native_client(
+            feeds.read_intraday_live, None
+        ),
         # 镜像闸门/回注（P0 审计修）：非镜像部署下 active=False → 两块整段空串
         read_mirror_ctx=_read_mirror_ctx,
         load_research_brief=feeds.research_brief,  # 研究总控（前一日夜间综合）
     )
 
 
-def _read_wake_ctx(round_id: str) -> str:
-    """唤醒上下文读口：现造现关的原生客户端（**交易库 db2，与写侧同库**）。
-
-    与写侧 ``wake_tick`` 同库是契约（不同库=卡片读不到且全链无报错）；连不上降级。
-    """
+def _read_with_native_client(fn: Callable[[Any], Any], default: Any) -> Any:
     client = None
     try:
         client = native_redis_client()
-        return feeds.read_wake_ctx(client, round_id)
-    except Exception as exc:  # noqa: BLE001 连不上就当非唤醒轮
-        logger.warning("[DecisionRound] 唤醒上下文客户端不可用: %s", exc)
-        return ""
+        return fn(client)
+    except Exception as exc:  # noqa: BLE001 - 读口失败一律降级
+        logger.warning("[DecisionRound] Redis 读口不可用: %s", exc)
+        return default
     finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
+        client and client.close()
+
+
+def _read_wake_ctx(round_id: str) -> str:
+    return _read_with_native_client(lambda c: feeds.read_wake_ctx(c, round_id), "")
 
 
 def native_redis_client() -> Any:

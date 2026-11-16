@@ -456,6 +456,30 @@ def _snap_now(snap: Mapping[str, Any] | None) -> float | None:
     return _f(snap.get("Now") if snap.get("Now") is not None else snap.get("now"))
 
 
+def _depth_levels(snap: Mapping[str, Any] | None) -> int:
+    """快照实际有几档（买/卖任一档价>0 即算）；0 = 盘口不可用。"""
+    if not isinstance(snap, Mapping):
+        return 0
+    levels = 0
+    for i in range(1, 6):
+        bid = _f(snap.get(f"bid{i}"))
+        ask = _f(snap.get(f"ask{i}"))
+        if (bid is not None and bid > 0) or (ask is not None and ask > 0):
+            levels = i
+    return levels
+
+
+def _imb_label(levels: int) -> str:
+    """盘口档位 → 失衡口径标签（不足 5 档不许冒充「五档失衡」）。"""
+    if levels >= 5:
+        return "五档失衡"
+    if levels == 1:
+        return "一档失衡"
+    if levels >= 2:
+        return f"{levels}档失衡"
+    return "盘口失衡"
+
+
 def _book_ladder(snap: Mapping[str, Any], side: str, levels: int = 5) -> str:
     """买/卖 1→5 档 ``价×量`` 串（量=手）；坏价/0 价逐档跳过，整侧无有效档 → ``—``。"""
     parts: list[str] = []
@@ -537,12 +561,15 @@ def build_orderbook_block(
     entries.extend(("池", q) for q in pool if str(q.code) not in held)
     lines: list[str] = []
     missing = 0
+    max_levels = 0
     for role, item in entries:
         code = str(item.code)
         snap = snaps.get(code)
         if not snap:
             missing += 1
             continue
+        levels = _depth_levels(snap)
+        max_levels = max(max_levels, levels)
         now_px = _snap_now(snap)
         chg = day_change_pct(snap)
         head = f"- [{role}] {item.name}({code})"
@@ -550,13 +577,17 @@ def build_orderbook_block(
             head += f" 现价 {now_px:.2f}（{_pct2(chg)}）"
         head += f" ｜ 买 {_book_ladder(snap, 'bid')} ｜ 卖 {_book_ladder(snap, 'ask')}"
         imb = book_imbalance(snap)
+        imb_label = _imb_label(levels)
         if imb is None:
-            head += " ｜ 五档失衡 —（盘口不可验证）"
+            head += f" ｜ {imb_label} —（盘口不可验证）"
         else:
             strength = ""
             if abs(imb) >= OB_IMB_STRONG:
                 strength = "，买盘强" if imb > 0 else "，卖盘强"
-            head += f" ｜ 五档失衡 {imb:+.1%}（强阈 ±{OB_IMB_STRONG:.0%}{strength}）"
+            head += (
+                f" ｜ {imb_label} {imb:+.1%}"
+                f"（强阈 ±{OB_IMB_STRONG:.0%}{strength}）"
+            )
         # 跳空：开盘 vs 昨收；两个价都在才算。
         open_px = _f(snap.get("Open"))
         pre_close = _f(snap.get("PreClose"))
@@ -578,9 +609,18 @@ def build_orderbook_block(
             )
         return ""
     header = (
-        "【实时盘口】（持仓+候选池逐股五档；买/卖各列 1–5 档，格式 价×量、量单位手。"
-        "量比：5 日均量源未接入，不渲染。指数五档在行情帧里是坏值，天然不出现）"
+        "【实时盘口】（持仓+候选池逐股买/卖盘口；按行情源实际档位列示，"
+        "格式 价×量、量单位手。"
+        "量比：5 日均量源未接入，不渲染。指数盘口在行情帧里是坏值，天然不出现）"
     )
+    if max_levels < 5:
+        if max_levels <= 0:
+            header += "——本轮盘口不可用（0 档）：只看价格/成交额，不要推断买卖强弱"
+        else:
+            header += (
+                f"——本轮行情源最多只回 {max_levels} 档："
+                "五档盘口/五档失衡不可用，不要据此判多空强弱"
+            )
     if missing:
         lines.append(f"- （另有 {missing} 只标的（持仓/池）本轮快照未取到）")
     return "\n".join([header] + lines)
@@ -678,7 +718,7 @@ def _l2_factor_tokens(row: Mapping[str, Any], zones: set[str]) -> list[str]:
     tokens: list[str] = []
     imbalance = value("micro_zone_distribution")
     if imbalance is not None:
-        tokens.append(f"L2五档失衡 {imbalance:+.2f}")
+        tokens.append(f"L2深度失衡 {imbalance:+.2f}")
     vpin_vol = value("micro_vpin_vol_ratio")
     vpin_amt = value("micro_vpin_amount_ratio")
     if vpin_vol is not None or vpin_amt is not None:

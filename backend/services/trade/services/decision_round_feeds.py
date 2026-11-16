@@ -38,9 +38,10 @@ import os
 import re
 import time
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from backend.services.simulation.services.redis_series_quote import (
     recent_traded_shares,
@@ -53,6 +54,10 @@ from backend.shared.decision_context_source import reports_dir
 from backend.shared.remote_quote_config import make_sync_client
 
 logger = logging.getLogger(__name__)
+
+_CST = ZoneInfo("Asia/Shanghai")
+#: 盘中结构文档最大允许年龄（秒）：任务每 60s 写一次；15 分钟没更新 = 停摆。
+_INTRADAY_MAX_AGE_S = 900.0
 
 #: 动量参考窗：现价对 (last_ts − N 分钟) 前最近一条成员。
 _MOM_LONG_MIN = 30.0
@@ -359,6 +364,40 @@ async def load_decision_rows(trade_date: date | str, user: str) -> Sequence[Any]
 
     async with get_session(read_only=False) as session:
         return await load_day(session, trade_date, tenant_id=TENANT_ID, user_id=user)
+
+
+def read_intraday_live(client: Any) -> Mapping[str, Any] | None:
+    """盘中结构文档（``qm:intraday:market:{YYYYMMDD}`` 的 ``doc``）。
+
+    写侧 = ``live_trading.services.intraday_market_watch``（交易库 db2）。
+    读不到/坏 JSON/超过 :data:`_INTRADAY_MAX_AGE_S` → ``None``（块整段不出现）；
+    读失败不抛——盘中结构是增益面，不拦决策轮。
+    """
+    if client is None:
+        return None
+    day = datetime.now(_CST).strftime("%Y%m%d")
+    try:
+        raw = client.hget(f"qm:intraday:market:{day}", "doc")
+    except Exception as exc:  # noqa: BLE001 - 读失败按不可得降级
+        logger.warning("[DecisionRound] 盘中结构读取失败: %s", exc)
+        return None
+    if not raw:
+        return None
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        logger.warning("[DecisionRound] 盘中结构 JSON 坏: %s", exc)
+        return None
+    if not isinstance(doc, Mapping):
+        return None
+    try:
+        age = time.time() - float(doc.get("ts") or 0)
+    except (TypeError, ValueError):
+        age = None
+    if age is not None and age > _INTRADAY_MAX_AGE_S:
+        logger.info("[DecisionRound] 盘中结构已 %.0fs 未更新，按缺位处理", age)
+        return None
+    return doc
 
 
 def read_wake_ctx(client: Any, round_id: str) -> str:

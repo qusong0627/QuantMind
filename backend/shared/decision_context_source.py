@@ -209,6 +209,18 @@ def snapshot_key_suffix(code: str) -> str:
     return f"market:snapshot:{StockCodeUtil.to_suffix(code).upper()}"
 
 
+def snapshot_key_qmt(code: str) -> str:
+    """任意形态 → ``market:snapshot:qmt:{600036.SH}``（QMT 真五档，2026-11-16）。
+
+    独立命名空间：写侧 ``intraday_market_watch`` 只对持仓+池写 5 档，
+    **不覆盖**主源标准键；读侧优先命中它，没写/过期再回落后缀式/前缀式。
+    """
+    from backend.shared.stock_utils import StockCodeUtil
+
+    suffix = StockCodeUtil.to_suffix(code)
+    return f"market:snapshot:qmt:{suffix.upper()}" if suffix else ""
+
+
 def _f(value: object) -> float | None:
     """快照字段 → float；空/脏一律 ``None``（**不是 0**）。"""
     if value is None or value == "":
@@ -310,7 +322,9 @@ def _bridge_client() -> Any:
         return _BRIDGE_CLIENT
 
 
-def read_snapshots(client: Any, codes: Iterable[str]) -> dict[str, Mapping[str, Any]]:
+def read_snapshots(
+    client: Any, codes: Iterable[str], include_qmt: bool = False
+) -> dict[str, Mapping[str, Any]]:
     """批量读快照 Hash（pipeline，逐只缺键就是缺键）。``code`` 用 suffix 形态做键。
 
     行数上限由调用方控制——热集是全市场的子集，持仓 + 池加起来通常两位数。
@@ -319,18 +333,24 @@ def read_snapshots(client: Any, codes: Iterable[str]) -> dict[str, Mapping[str, 
 
     1. ``pipeline(transaction=False)`` —— 远端行情服禁 ``MULTI``，默认事务型管道
        会抛 ``NoPermissionError``，**整批**读取全废。
-    2. **两套键形都发** —— 现役写侧（远端服生产写侧）落后缀式
-       （``market:snapshot:600036.SH``，实测 5563/5563），本仓 ``tdx_aidata`` 订阅
-       引擎落小写前缀式（``sh600036``）。同一只标的两条都发，先命中的那条赢。
+    2. **键形都发** —— 默认两套（后缀式 + 小写前缀式），先命中的赢；
+       ``include_qmt=True`` 时再加 **QMT 真五档** ``market:snapshot:qmt:{suffix}``
+       并排在最前（2026-11-16，只覆盖持仓+池）。决策轮用 True；批量推理等
+       按 3,206 只取价的调用方**必须用默认 False**（2×N 命令，别多打一份）。
 
-    容量：2×N 条命令一批。实测该服 400 命令/批仍 OK（真正的天花板是 TCP 包文本
-    长度，约 1024 键），而本函数调用方上限 64 → 128 条，余量充足。若将来把调用方
-    上限提到 512，这里要跟着分片。
+    容量：默认 2×N、含 QMT 3×N 条命令一批。实测该服 400 命令/批仍 OK（真正的
+    天花板是 TCP 包文本长度，约 1024 键），而决策轮调用方上限 64 → 192 条，
+    余量充足。若将来把调用方上限提到 512，这里要跟着分片。
     """
     keys: list[tuple[str, str]] = []  # [(查询键, 归一 symbol)]
+    builders = (
+        (snapshot_key_qmt, snapshot_key_suffix, snapshot_key)
+        if include_qmt
+        else (snapshot_key_suffix, snapshot_key)
+    )
     for code in codes:
         suffix = _to_suffix(code)
-        for builder in (snapshot_key_suffix, snapshot_key):
+        for builder in builders:
             try:
                 k = builder(code)
             except Exception:  # noqa: BLE001 - 键构造失败按该形不可用

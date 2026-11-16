@@ -534,18 +534,19 @@ class TdxPushService:
             }
         return resp
 
-    async def tdx_call(self, method: str, params: dict | None = None) -> dict:
+    async def tdx_call(
+        self, method: str, params: dict | None = None, source: str | None = None
+    ) -> dict:
         """通用 JSON-RPC 透传（桥 /api/v1/tdx/call，白名单方法）。
 
         用于实时行情（get_market_snapshot 等）拉取。返回桥 result 字典。
+        ``source="qmt"`` 走桥的同机 QMT 伴生渠道（只读；``get_full_tick`` 五档），
+        不传则仍走通达信客户端。
         """
-        resp = await self._post(
-            "/api/v1/tdx/call",
-            {
-                "method": method,
-                "params": params or {},
-            },
-        )
+        payload: dict = {"method": method, "params": params or {}}
+        if source:
+            payload["source"] = source
+        resp = await self._post("/api/v1/tdx/call", payload)
         result = resp.get("result") if isinstance(resp, dict) else resp
         return result if isinstance(result, dict) else {"result": result}
 

@@ -55,6 +55,7 @@ from backend.shared.decision_context_source import build_context
 from backend.shared.decision_feedback import build_agent_feedback_block
 from backend.shared.decision_slot_playbook import build_slot_playbook_block
 from backend.shared.intraday_1010 import build_intraday_1010_block
+from backend.shared.intraday_live_blocks import build_intraday_live_block
 from backend.shared.decision_risk_blocks import (
     build_industry_caution_block,
     build_risk_block,
@@ -286,6 +287,9 @@ class RoundBlocks:
     alert_block: str = ""
     indices_block: str = ""
     stage2_block: str = ""
+    #: 【盘中结构】全市场涨跌停/炸板/板块强度/个股量能/异动（免费 TDX 桥采集）。
+    #: 空串 = 未接线/采集任务未运行（渲染层整段不出现，历史提示词不变）。
+    intraday_live_block: str = ""
     tier_block: str = ""
     extra_context: str = ""
     risk_block: str = ""
@@ -309,6 +313,7 @@ def build_round_context(blocks: RoundBlocks, **legacy: Any) -> RebalanceContext:
         alert_block=blocks.alert_block,
         indices_block=blocks.indices_block,
         stage2_block=blocks.stage2_block,
+        intraday_live_block=blocks.intraday_live_block,
         tier_block=blocks.tier_block,
         extra_context=blocks.extra_context,
         risk_block=blocks.risk_block,
@@ -585,6 +590,26 @@ async def enrich_quotes_with_blocks(
         if part
     )
 
+    # 【盘中结构】全市场涨跌停/炸板/板块/量能/异动（2026-11-16）：自有接线。
+    # 数据源 = 交易服务常驻任务 intraday_market_watch（免费 TDX 桥，db2）。
+    # 读不到 → 整段不出现 + 丁8 留痕；绝不编 0。
+    intraday_live_block = ""
+    if deps.read_intraday_live is not None:
+        live_doc: Mapping[str, Any] | None = None
+        try:
+            live_doc = deps.read_intraday_live()
+        except Exception as exc:  # noqa: BLE001 - 增益面失败不拦轮
+            logger.warning("[DecisionRound] %s 盘中结构读取异常: %s", round_id, exc)
+            alerts.append(f"盘中结构读取失败（{type(exc).__name__}）：块降级")
+        else:
+            intraday_live_block = build_intraday_live_block(
+                live_doc, holdings, scored_seq, now
+            )
+            if live_doc is None:
+                alerts.append(
+                    "盘中结构/量能本轮不可得（采集任务未运行/非交易时段）"
+                )
+
     # 风险两槽（risk_block / industry_caution，上游既有槽，第二批补取数）
     risk_block = ""
     industry_caution = ""
@@ -637,6 +662,7 @@ async def enrich_quotes_with_blocks(
         alert_block=build_freshness_block(alerts),
         indices_block=indices_block,
         stage2_block=stage2_block,
+        intraday_live_block=intraday_live_block,
         tier_block=tier_block,
         extra_context=extra_context,
         risk_block=risk_block,

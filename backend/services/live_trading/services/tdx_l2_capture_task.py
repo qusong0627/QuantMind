@@ -474,7 +474,10 @@ async def fetch_l2_data(symbol_suffix: str, with_more: bool = False) -> tuple[di
     决策池/持仓**每轮必取**（决策轮只读这些票），其余每 8 只抽样一次，省下
     1 次桥调用（600/min 限流与行情推送共享）。
     """
-    exday = await _tdx_call("get_exday_data", {"stock_code": symbol_suffix, "count": 1})
+    exday = await _tdx_call(
+        "get_exday_data",
+        {"stock_code": symbol_suffix, "count": 1, "_nc": str(time.time())},
+    )
     row = None
     if isinstance(exday, list) and exday:
         row = exday[0]
@@ -485,7 +488,10 @@ async def fetch_l2_data(symbol_suffix: str, with_more: bool = False) -> tuple[di
 
     data = parse_exday_row(row) if row else None
     if data is not None and with_more:
-        more = await _tdx_call("get_more_info", {"stock_code": symbol_suffix})
+        more = await _tdx_call(
+            "get_more_info",
+            {"stock_code": symbol_suffix, "_nc": str(time.time())},
+        )
         more_v = more.get("Value") if isinstance(more, dict) else None
         if isinstance(more_v, dict):
             data["l2_tic_num"] = int(_f(more_v.get("L2TicNum")))

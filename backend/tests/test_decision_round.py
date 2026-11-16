@@ -2527,7 +2527,7 @@ async def test_round_feeds_paid_tdx_l2_snapshots_into_the_prompt():
     assert "- [持仓] 招商银行(600036.SH) 现价 40.00（+1.27%）" in prompt
     assert "分 61.2（原始）" in prompt
     assert "快照 41s 前" in prompt
-    assert "L2五档失衡 +0.31" in prompt
+    assert "L2深度失衡 +0.31" in prompt
     assert "VPIN量/额 0.22/—" in prompt  # 额侧因子缺 → 显式缺位，不补 0
     assert "量价背离 -0.18" in prompt
     assert "委撤 买 25.0%/卖 10.0%" in prompt

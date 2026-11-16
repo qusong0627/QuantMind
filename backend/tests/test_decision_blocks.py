@@ -450,7 +450,7 @@ class TestBuildOrderbookBlock:
         assert "量比：5 日均量源未接入，不渲染" in text
         assert "[持仓] 招商银行(600036.SH) 现价 40.00（+1.27%）" in text
         assert "买 39.99×300" in text and "卖 40.01×100" in text
-        assert "五档失衡 +50.0%" in text and "买盘强" in text
+        assert "一档失衡 +50.0%" in text and "买盘强" in text
         assert "跳空 +0.76%（开 39.80）" in text
         assert "5分钟涨速 -0.42%" in text
 
@@ -478,7 +478,7 @@ class TestBuildOrderbookBlock:
         assert "买 39.99×300 39.98×200" in text
         assert "卖 40.01×100 40.02×80" in text
         # (500−180)/(500+180) = +47.1%
-        assert "五档失衡 +47.1%" in text
+        assert "2档失衡 +47.1%" in text
         assert "成交额 3.52 亿" in text
 
     def test_pool_and_holding_overlap_is_rendered_once(self):
@@ -500,7 +500,7 @@ class TestBuildOrderbookBlock:
         # 五档全是 0（指数垃圾/单边帧）→ 失衡行显式「—」，不编数也不消失
         snap = _book_snap(bid1=0.0, ask1=0.0, bid_vol1=0.0, ask_vol1=0.0)
         text = build_orderbook_block((_holding(),), {"600036.SH": snap}, {}, NOW)
-        assert "五档失衡 —" in text
+        assert "盘口失衡 —" in text
 
     def test_all_snapshots_missing_says_unavailable(self):
         text = build_orderbook_block((_holding(),), {}, {}, NOW)
@@ -728,7 +728,7 @@ class TestBuildL2Block:
         assert "- [持仓] 招商银行(600036.SH) 现价 9.45（-0.63%）" in text
         assert "分 52.3（原始）" in text
         assert "快照 38s 前" in text
-        assert "L2五档失衡 +0.14" in text
+        assert "L2深度失衡 +0.14" in text
         assert "VPIN量/额 0.21/0.18" in text
         assert "量价背离 +0.32" in text
         assert "冲击衰减 0.27" in text
@@ -767,7 +767,7 @@ class TestBuildL2Block:
     def test_missing_factors_are_skipped_never_rendered_as_zero(self):
         row = _l2_row(factors={"micro_zone_distribution": None}, signal_score=None)
         text = build_l2_block({"SH600036": row}, [_holding()], (), L2_NOW)
-        assert "L2五档失衡" not in text
+        assert "L2深度失衡" not in text
         assert " · 分 " not in text  # 分缺失 → 整段不出，绝不写 0
         assert "VPIN" not in text
 

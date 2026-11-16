@@ -209,6 +209,9 @@ class RebalanceContext:
     #: 丁5【大盘指数】行（指数快照 + 板块涨幅门控）。空串 = 未接线/未取到路径由
     #: 调用方自决（渲染序字节冻结纪律同 `market_state_block`）。
     indices_block: str = ""
+    #: 【盘中结构】全市场涨跌停/炸板/板块强度/个股量能/异动（免费 TDX 桥采集）。
+    #: 空串 = 未接线/采集任务未运行——默认路径与历史金样逐字节一致。
+    intraday_live_block: str = ""
     #: Stage 2 第二批聚合块：丁1 盘口 / 丁3 分钟 / 丁2 L2 门控 / 丁4 新闻 /
     #: 丁6 跨 agent / 丁9 上一轮（装配顺序即渲染顺序，见 ``shared/decision_blocks``）。
     #: 空串 = 未接线（旧替身）→ 提示词逐字节等于历史。
@@ -729,6 +732,9 @@ def _context_body(ctx: RebalanceContext) -> list[str]:
     # 丁5【大盘指数】行：状态块的取数面（同一批快照）。空串 = 未接线。
     if ctx.indices_block:
         lines += [ctx.indices_block, ""]
+    # 【盘中结构】：全市场涨跌停/炸板/板块强度/个股量能/异动。空串 = 未接线。
+    if ctx.intraday_live_block:
+        lines += [ctx.intraday_live_block, ""]
     # 【研究总控·交易日前瞻】：慢变量（前一日夜间综合 + 当日各档复盘），
     # 紧跟大盘快照之后。空串 = 未接线/未产出，逐字节不出现。
     if ctx.research_block:
