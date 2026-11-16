@@ -126,7 +126,7 @@ def _val(data: dict, field: str, symbol: str, i: int) -> Any:
 
 
 def bars_from_market_data(data: dict, symbol: str) -> list[dict[str, Any]]:
-    """tqs.get_market_data 结果 → 统一 bar 列表；close 无效（NaN/None/≤0）行剔除。"""
+    """tqs.get_market_data 结果 → 统一 bar 列表（OHLCV + Amount + VolInStock + ForwardFactor）；close 无效行剔除。"""
     if not isinstance(data, dict):
         return []
     bars: list[dict[str, Any]] = []
@@ -149,9 +149,32 @@ def bars_from_market_data(data: dict, symbol: str) -> list[dict[str, Any]]:
                 "close": c,
                 "volume": _val(data, "Volume", symbol, i),
                 "amount": _val(data, "Amount", symbol, i),
+                "volinstock": _val(data, "VolInStock", symbol, i),
+                "forwardfactor": _val(data, "ForwardFactor", symbol, i),
             }
         )
     return bars
+
+
+def as_records(value: Any) -> Any:
+    """SDK 返回值 → JSON 安全结构（IPC 前置归一的唯一入口）。
+
+    1.3.x 起装有 pandas 时 get_tick_data 等接口返回 DataFrame（1.2.x 是 {字段: [值...]}）。
+    DataFrame 不能过 IPC，且 worker 侧 if not data 会抛 truth value ambiguous，
+    必须先还原成 {字段: [值...]}；原生 dict/list 原样返回。
+    """
+    if value is None or isinstance(value, (dict, list, str, int, float, bool)):
+        return value
+    to_dict = getattr(value, 'to_dict', None)
+    if callable(to_dict):
+        try:
+            return to_dict(orient='list')
+        except TypeError:
+            return to_dict()
+    tolist = getattr(value, 'tolist', None)
+    if callable(tolist):
+        return tolist()
+    return value
 
 
 # ── 订阅推送解析（2026-09-16 真机样本定形）─────────────────────────

@@ -552,6 +552,7 @@ class AidataWorker:
             if not symbol or not date:
                 raise ValueError("symbol/date 必填")
             data, out = _capture_fd_call(tqs._tdx().get_minute_data, symbol, date)
+            data = protocol.as_records(data)
             if not data and out.strip():
                 return {"__sdk_error__": out}
             return data or {}
@@ -569,6 +570,7 @@ class AidataWorker:
                 startxh=int(params.get("startxh") or 0),
                 wantnum=wantnum,
             )
+            data = protocol.as_records(data)
             if not data and out.strip():
                 return {"__sdk_error__": out}
             return data or {}
@@ -589,6 +591,7 @@ class AidataWorker:
                 field_list=[],
                 type=auction_type,
             )
+            data = protocol.as_records(data)
             if not data and out.strip():
                 return {"__sdk_error__": out}
             return data or {}

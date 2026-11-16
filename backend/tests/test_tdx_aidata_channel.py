@@ -80,6 +80,8 @@ def test_bars_from_market_data_drops_nan_rows():
         "Close": _Col([10.5, float("nan"), 30.5], "600036.SH"),
         "Volume": _Col([100, 200, 300], "600036.SH"),
         "Amount": _Col([1000, 2000, 3000], "600036.SH"),
+        "VolInStock": _Col([123.0, 123.0, 123.0], "600036.SH"),
+        "ForwardFactor": _Col([1.5, 1.5, 1.5], "600036.SH"),
         "_dates": ["2026-09-14", "2026-09-15", "2026-09-16"],
     }
 
@@ -87,6 +89,8 @@ def test_bars_from_market_data_drops_nan_rows():
     # 中间 NaN close 行被剔除
     assert [b["date"] for b in bars] == ["2026-09-14", "2026-09-16"]
     assert bars[0]["close"] == 10.5 and bars[1]["close"] == 30.5
+    # 1.3.x 补齐两列：流通股本 / 复权因子（此前被归一函数丢掉）
+    assert bars[0]["volinstock"] == 123.0 and bars[0]["forwardfactor"] == 1.5
 
 
 @pytest.mark.unit
@@ -360,3 +364,53 @@ async def test_client_recovers_after_worker_crash(tmp_path):
         await client.close()
     finally:
         await worker.close()
+
+
+
+
+# 6. SDK 1.3.x 返回类型兼容（DataFrame 返回，2026-11-16）
+
+class _FakeFrame:
+    # 与 pandas DataFrame 同形：to_dict 还原列字典
+    def __init__(self, cols, empty=False):
+        self._cols = cols
+        self.empty = empty
+
+    def to_dict(self, orient="dict"):
+        assert orient == "list"
+        return {} if self.empty else {k: list(v) for k, v in self._cols.items()}
+
+
+@pytest.mark.unit
+def test_as_records_unwraps_dataframe_like():
+    from backend.shared.tdx_aidata import protocol
+
+    frame = _FakeFrame({"Time": ["093000","093003"], "Price": [10.0,10.1]})
+    assert protocol.as_records(frame) == {"Time": ["093000","093003"], "Price": [10.0,10.1]}
+    raw = {"Time": ["093000"], "Price": [10.0]}
+    assert protocol.as_records(raw) is raw
+    assert protocol.as_records(None) is None
+
+
+@pytest.mark.unit
+def test_worker_tick_accepts_dataframe_return(monkeypatch):
+    from backend.shared.tdx_aidata import worker as worker_mod
+
+    # 旁路 fd 捕获（测试内无需重定向 fd1/fd2）
+    monkeypatch.setattr(worker_mod, "_capture_fd_call", lambda fn, *a, **kw: (fn(*a, **kw), ""))
+
+    class _StubTqs:
+        def __init__(self, frame):
+            self._frame = frame
+
+        def get_tick_data(self, **kwargs):
+            return self._frame
+
+    w = worker_mod.AidataWorker.__new__(worker_mod.AidataWorker)
+    w.tqs = _StubTqs(_FakeFrame({"Time": ["093000"], "Price": [10.0], "Volume": [100]}))
+    out = w._invoke("get_tick_data", {"symbol": "600036.SH", "date": "2026-09-16", "wantnum": 1})
+    assert out == {"Time": ["093000"], "Price": [10.0], "Volume": [100]}
+
+    # 空 DataFrame：不得抛 truth value ambiguous，按无数据处理
+    w.tqs = _StubTqs(_FakeFrame({}, empty=True))
+    assert w._invoke("get_tick_data", {"symbol": "600036.SH", "date": "2026-09-16", "wantnum": 1}) == {}
