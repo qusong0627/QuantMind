@@ -365,6 +365,62 @@ class HotSetBuilder:
                 pass
 
 
+def mirror_hot_set_to_qmt(
+    symbols: list[str] | None = None,
+    *,
+    client_factory: Callable[[], Any] | None = None,
+    ttl_s: int = 3 * 86400,
+    key: str = "qm:qmt:hot_set",
+) -> int:
+    """把本地热集镜像到 **QMT 桥 Redis（db5）** 的 ``qm:qmt:hot_set``。
+
+    用途：伴生桥的 ``sweep`` 备源用 ``get_full_tick`` 分批轮询这个集合
+    （listener 线程，不会卡 adjust 主线程）；桥的 tap 一律 ``subscribe_whole_quote``
+    大列表会把主线程挂死（2026-11-16 实测 590 只直接 TransportTimeout），所以
+    590 只热集只能走 sweep，不能走 tap。
+
+    best-effort：任何失败只告警，不影响热集主集合构建。返回镜像条数。
+    """
+    try:
+        if symbols is None:
+            from backend.shared.hot_set_store import read_hot_set_symbols
+
+            symbols = read_hot_set_symbols()
+        clean = [str(s) for s in (symbols or []) if str(s)]
+        if client_factory is None:
+            import redis as _redis
+
+            client_factory = lambda: _redis.Redis(  # noqa: E731
+                host=os.getenv("REDIS_HOST") or "redis",
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                password=os.getenv("REDIS_PASSWORD") or None,
+                db=int(os.getenv("QM_QMT_HOT_SET_DB", "5")),
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=5,
+            )
+        client = client_factory()
+        try:
+            tmp_key = f"{key}:tmp:{uuid.uuid4().hex[:8]}"
+            pipe = client.pipeline(transaction=True)
+            if clean:
+                pipe.sadd(tmp_key, *clean)
+                pipe.rename(tmp_key, key)
+            else:
+                pipe.delete(key)
+            pipe.expire(key, int(ttl_s))
+            pipe.execute()
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return len(clean)
+    except Exception as exc:  # noqa: BLE001 - 备源镜像失败不影响主热集
+        logger.warning("QMT 热集镜像失败: %s", exc)
+        return 0
+
+
 async def run_hot_set_builder_worker() -> None:
     """常驻热集构建循环（trade 服务内注册；间隔/开关 env 可配）。"""
     interval = max(10, int(os.getenv("QM_HOT_SET_BUILD_S", "60")))
@@ -385,6 +441,9 @@ async def run_hot_set_builder_worker() -> None:
             pass
         try:
             await builder.build_once()
+            mirrored = await asyncio.to_thread(mirror_hot_set_to_qmt)
+            if mirrored:
+                logger.info("hot_set 已镜像到 QMT db5: %s 只", mirrored)
         except Exception as exc:  # noqa: BLE001 - 循环永不退出
             logger.error("hot_set builder cycle failed: %s", exc, exc_info=True)
         await asyncio.sleep(interval)
