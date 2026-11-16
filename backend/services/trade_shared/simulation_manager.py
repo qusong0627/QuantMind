@@ -154,6 +154,10 @@ end
 
 local account = cjson.decode(raw)
 local cash = tonumber(account.cash or 0)
+-- available_cash 必须与 cash 同步变动（frozen_cash = cash - available）。
+-- 历史 bug：这里只改 cash，available_cash 长期停在开户/导入时的旧值，
+-- 导致风险闸按虚高的可用资金放行、账户页显示 60 万可用但实际现金 14 万。
+local available_cash = tonumber(account.available_cash or cash)
 local positions = account.positions or {}
 
 local pos = positions[symbol]
@@ -176,9 +180,10 @@ else
 end
 
 local new_cash = cash + delta_cash
+local new_available_cash = available_cash + delta_cash
 local new_volume = old_volume + delta_volume
 
-if new_cash < -0.000001 then
+if new_cash < -0.000001 or new_available_cash < -0.000001 then
     return cjson.encode({success=false, reason="INSUFFICIENT_CASH"})
 end
 
@@ -228,6 +233,8 @@ for _, p in pairs(positions) do
 end
 
 account.cash = new_cash
+account.available_cash = new_available_cash
+account.frozen_cash = math.max(0, new_cash - new_available_cash)
 account.positions = positions
 account.market_value = total_market_value
 account.total_asset = new_cash + total_market_value
@@ -318,7 +325,9 @@ return cjson.encode({success=true, cash=new_cash})
 
         return account_key(tenant_id, canonical_sim_user_suffix(user_id), market)
 
-    def _lookup_keys(self, user_id: int, tenant_id: str, market: str = "CN") -> list[str]:
+    def _lookup_keys(
+        self, user_id: int, tenant_id: str, market: str = "CN"
+    ) -> list[str]:
         """账户读取候选键：**实例自身规范键优先**（子类可覆写 _get_key，如回放会话），
         再并入用户名别名键（admin '1'/'00000001' 双形兼容）。"""
         from backend.shared.simulation_account_keys import account_lookup_keys
@@ -615,6 +624,8 @@ return 0
 
         account_data = {
             "cash": initial_cash,
+            "available_cash": initial_cash,
+            "frozen_cash": 0.0,
             "total_asset": initial_cash,
             "market_value": 0.0,
             "short_market_value": 0.0,
@@ -945,6 +956,14 @@ return 0
             return {"success": False, "reason": "REDIS_UNAVAILABLE"}
 
         tenant_id = self._normalize_tenant(tenant_id)
+        # 账户持仓键统一后缀式（600036.SH/002552.SZ）：信号、订单、执行引擎都用
+        # 后缀，前缀式是早期 OCR 导入遗留。写入前归一，避免同一股票生成两条 lot。
+        try:
+            from backend.shared.stock_utils import StockCodeUtil
+
+            symbol = str(StockCodeUtil.to_suffix(str(symbol))).upper()
+        except Exception:
+            symbol = str(symbol).strip().upper()
         cached = self._pick_cached_account(user_id, tenant_id, market)
         key = self._get_key(user_id, tenant_id, market)
         if not cached:
@@ -1143,12 +1162,12 @@ return 0
             return {"success": False, "reason": "REDIS_UNAVAILABLE"}
         market_norm = self._normalize_market(market)
         if market_norm != "CN":
-            return await self.unlock_t1(user_id, tenant_id=tenant_id, market=market_norm)
+            return await self.unlock_t1(
+                user_id, tenant_id=tenant_id, market=market_norm
+            )
 
         tenant_id = self._normalize_tenant(tenant_id)
-        target_date = as_of_date or _datetime.now(
-            _ZoneInfo("Asia/Shanghai")
-        ).date()
+        target_date = as_of_date or _datetime.now(_ZoneInfo("Asia/Shanghai")).date()
         try:
             async with self.locked_execution(user_id, tenant_id):
                 account = self._pick_cached_account(user_id, tenant_id, market_norm)
@@ -1195,13 +1214,9 @@ return 0
                         # Unknown Redis-only holdings retain their current lock
                         # state. Never increase sellable quantity without dated
                         # evidence, but do not permanently relock old accounts.
-                        ledger_value = float(
-                            raw_pos.get("available_volume") or 0.0
-                        )
+                        ledger_value = float(raw_pos.get("available_volume") or 0.0)
                     volume = max(0.0, float(raw_pos.get("volume") or 0.0))
-                    old_value = max(
-                        0.0, float(raw_pos.get("available_volume") or 0.0)
-                    )
+                    old_value = max(0.0, float(raw_pos.get("available_volume") or 0.0))
                     new_value = min(volume, max(0.0, float(ledger_value)))
                     if abs(old_value - new_value) > 1e-6:
                         unlocked += 1

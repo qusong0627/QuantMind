@@ -53,17 +53,38 @@ class SimulationLedgerService:
         return ledger_account_id(tenant_id, user_id, market)
 
     @staticmethod
-    def build_cash_entries(*, side: str, trade_value: float, commission: float, stamp_duty: float, transfer_fee: float) -> list[CashLedgerEntry]:
+    def build_cash_entries(
+        *,
+        side: str,
+        trade_value: float,
+        commission: float,
+        stamp_duty: float,
+        transfer_fee: float,
+    ) -> list[CashLedgerEntry]:
         normalized_side = str(side or "").strip().lower()
-        principal_event = "BUY_SETTLEMENT" if normalized_side == "buy" else "SELL_PROCEEDS"
-        principal_amount = -abs(float(trade_value or 0.0)) if normalized_side == "buy" else abs(float(trade_value or 0.0))
+        principal_event = (
+            "BUY_SETTLEMENT" if normalized_side == "buy" else "SELL_PROCEEDS"
+        )
+        principal_amount = (
+            -abs(float(trade_value or 0.0))
+            if normalized_side == "buy"
+            else abs(float(trade_value or 0.0))
+        )
         entries = [CashLedgerEntry(event_type=principal_event, amount=principal_amount)]
         if commission:
-            entries.append(CashLedgerEntry(event_type="COMMISSION", amount=-abs(float(commission))))
+            entries.append(
+                CashLedgerEntry(event_type="COMMISSION", amount=-abs(float(commission)))
+            )
         if stamp_duty:
-            entries.append(CashLedgerEntry(event_type="STAMP_DUTY", amount=-abs(float(stamp_duty))))
+            entries.append(
+                CashLedgerEntry(event_type="STAMP_DUTY", amount=-abs(float(stamp_duty)))
+            )
         if transfer_fee:
-            entries.append(CashLedgerEntry(event_type="TRANSFER_FEE", amount=-abs(float(transfer_fee))))
+            entries.append(
+                CashLedgerEntry(
+                    event_type="TRANSFER_FEE", amount=-abs(float(transfer_fee))
+                )
+            )
         return entries
 
     @staticmethod
@@ -79,9 +100,20 @@ class SimulationLedgerService:
         liabilities = float(snapshot.get("liabilities") or 0.0)
         short_market_value = float(snapshot.get("short_market_value") or 0.0)
 
-        side = str(getattr(getattr(trade, "side", None), "value", getattr(trade, "side", "")) or "").strip().lower()
+        side = (
+            str(
+                getattr(
+                    getattr(trade, "side", None), "value", getattr(trade, "side", "")
+                )
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         trade_action = str(getattr(trade, "trade_action", None) or "").strip().lower()
-        position_side = str(getattr(trade, "position_side", None) or "long").strip().lower()
+        position_side = (
+            str(getattr(trade, "position_side", None) or "long").strip().lower()
+        )
         gross = float(getattr(trade, "trade_value", 0.0) or 0.0)
         total_fee = float(getattr(trade, "total_fee", 0.0) or 0.0)
 
@@ -132,7 +164,9 @@ class SimulationLedgerService:
         )
 
         await ensure_accounts_market_contract_async()
-        tenant_id = str(getattr(order, "tenant_id", None) or "default").strip() or "default"
+        tenant_id = (
+            str(getattr(order, "tenant_id", None) or "default").strip() or "default"
+        )
         user_id = str(getattr(order, "user_id", None) or "").strip()
         if not user_id:
             return
@@ -264,7 +298,11 @@ class SimulationLedgerService:
         if account is None:
             initial_equity = float(
                 account_snapshot.get("initial_equity")
-                or ((account_snapshot.get("baseline") or {}).get("initial_equity") if isinstance(account_snapshot.get("baseline"), dict) else 0.0)
+                or (
+                    (account_snapshot.get("baseline") or {}).get("initial_equity")
+                    if isinstance(account_snapshot.get("baseline"), dict)
+                    else 0.0
+                )
                 or account_snapshot.get("total_asset")
                 or account_snapshot.get("cash")
                 or 0.0
@@ -276,13 +314,25 @@ class SimulationLedgerService:
                 market=market,
                 initial_equity=initial_equity,
                 cash=float(account_snapshot.get("cash") or 0.0),
-                available_cash=float(account_snapshot.get("available_cash") or account_snapshot.get("cash") or 0.0),
-                total_asset=float(account_snapshot.get("total_asset") or initial_equity),
+                available_cash=float(
+                    account_snapshot.get("available_cash")
+                    or account_snapshot.get("cash")
+                    or 0.0
+                ),
+                total_asset=float(
+                    account_snapshot.get("total_asset") or initial_equity
+                ),
                 equity=float(account_snapshot.get("total_asset") or initial_equity),
-                long_market_value=max(0.0, float(account_snapshot.get("market_value") or 0.0)),
-                short_market_value=max(0.0, float(account_snapshot.get("short_market_value") or 0.0)),
+                long_market_value=max(
+                    0.0, float(account_snapshot.get("market_value") or 0.0)
+                ),
+                short_market_value=max(
+                    0.0, float(account_snapshot.get("short_market_value") or 0.0)
+                ),
                 liabilities=float(account_snapshot.get("liabilities") or 0.0),
-                maintenance_margin_ratio=float(account_snapshot.get("maintenance_margin_ratio") or 0.0),
+                maintenance_margin_ratio=float(
+                    account_snapshot.get("maintenance_margin_ratio") or 0.0
+                ),
             )
             self.db.add(account)
             await self.db.flush()
@@ -340,9 +390,20 @@ class SimulationLedgerService:
             return
         price = float(getattr(trade, "price", 0.0) or 0.0)
         total_fee = float(getattr(trade, "total_fee", 0.0) or 0.0)
-        side = str(getattr(getattr(order, "side", None), "value", getattr(order, "side", "")) or "").strip().lower()
+        side = (
+            str(
+                getattr(
+                    getattr(order, "side", None), "value", getattr(order, "side", "")
+                )
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         trade_action = str(getattr(order, "trade_action", None) or "").strip().lower()
-        position_side = str(getattr(order, "position_side", None) or "long").strip().lower()
+        position_side = (
+            str(getattr(order, "position_side", None) or "long").strip().lower()
+        )
         occurred_at = _naive_utc(getattr(trade, "executed_at", None))
         fill_id = str(getattr(trade, "trade_id", "") or "")
 
@@ -390,7 +451,9 @@ class SimulationLedgerService:
                     open_date=occurred_at,
                     quantity_open=quantity,
                     quantity_remaining=quantity,
-                    cost_price=((price * quantity) + total_fee) / quantity if quantity > 0 else price,
+                    cost_price=((price * quantity) + total_fee) / quantity
+                    if quantity > 0
+                    else price,
                     cost_amount=(price * quantity) + total_fee,
                     status="open",
                 )
@@ -460,18 +523,28 @@ class SimulationLedgerService:
         market_value = float(account_snapshot.get("market_value") or 0.0)
         short_market_value = float(account_snapshot.get("short_market_value") or 0.0)
         account.cash = float(account_snapshot.get("cash") or account.cash or 0.0)
-        account.available_cash = float(
+        # 不变式：0 <= available_cash <= cash；frozen_cash = cash - available。
+        # 历史脏值（available > cash）在这里收口，避免投影把错误值继续传下去。
+        available_cash = float(
             account_snapshot.get("available_cash")
             or account_snapshot.get("cash")
             or account.available_cash
             or 0.0
         )
-        account.frozen_cash = max(0.0, account.cash - account.available_cash)
+        available_cash = max(0.0, min(available_cash, account.cash))
+        account.available_cash = available_cash
+        account.frozen_cash = max(0.0, account.cash - available_cash)
         account.long_market_value = max(0.0, market_value)
         account.short_market_value = max(0.0, short_market_value)
-        account.total_asset = float(account_snapshot.get("total_asset") or account.total_asset or 0.0)
-        account.liabilities = float(account_snapshot.get("liabilities") or account.liabilities or 0.0)
-        account.equity = float(account_snapshot.get("total_asset") or account.equity or 0.0)
+        account.total_asset = float(
+            account_snapshot.get("total_asset") or account.total_asset or 0.0
+        )
+        account.liabilities = float(
+            account_snapshot.get("liabilities") or account.liabilities or 0.0
+        )
+        account.equity = float(
+            account_snapshot.get("total_asset") or account.equity or 0.0
+        )
         account.maintenance_margin_ratio = float(
             account_snapshot.get("maintenance_margin_ratio")
             or account.maintenance_margin_ratio

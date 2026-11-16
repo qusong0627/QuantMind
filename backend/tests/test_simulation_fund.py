@@ -322,3 +322,135 @@ def test_fund_lua_does_not_invent_available_cash_when_absent(
     assert "available_cash" not in account
     assert account["cash"] == pytest.approx(1000.0)
     assert account["total_asset"] == pytest.approx(2000.0)
+
+
+# ── 3. update_balance Lua：available_cash 必须与 cash 同步 ──────────────
+
+
+@pytest.fixture(scope="module")
+def update_lua() -> str:
+    return _extract_lua("_update_balance_lua")
+
+
+@pytest.mark.unit
+@pytest.mark.message_broker
+def test_update_lua_keeps_available_cash_in_sync_on_buy(
+    redis_client, update_lua, account_key
+):
+    """买入：cash 与 available_cash 同减，frozen=0。
+
+    历史 bug：Lua 只改 cash，available_cash 停在开户/导入值，风险闸按虚高可用资金放行。
+    """
+    _seed(
+        redis_client,
+        account_key,
+        {
+            "cash": 1000.0,
+            "available_cash": 1000.0,
+            "frozen_cash": 0.0,
+            "total_asset": 1000.0,
+            "market_value": 0.0,
+            "positions": {},
+        },
+    )
+
+    result = _run(
+        redis_client, update_lua, account_key, "600036.SH", "-100", "100", "10", "0"
+    )
+
+    assert result["success"] is True
+    account = _read(redis_client, account_key)
+    assert account["cash"] == pytest.approx(900.0)
+    assert account["available_cash"] == pytest.approx(900.0)
+    assert account["frozen_cash"] == pytest.approx(0.0)
+    assert account["positions"]["600036.SH"]["volume"] == pytest.approx(100)
+
+
+@pytest.mark.unit
+@pytest.mark.message_broker
+def test_update_lua_keeps_available_cash_in_sync_on_sell(
+    redis_client, update_lua, account_key
+):
+    """卖出：cash 与 available_cash 同增，清仓后持仓键移除。"""
+    _seed(
+        redis_client,
+        account_key,
+        {
+            "cash": 900.0,
+            "available_cash": 900.0,
+            "frozen_cash": 0.0,
+            "total_asset": 1900.0,
+            "market_value": 1000.0,
+            "positions": {
+                "600036.SH": {
+                    "volume": 100,
+                    "available_volume": 100,
+                    "cost": 10.0,
+                    "price": 10.0,
+                    "market_value": 1000.0,
+                }
+            },
+        },
+    )
+
+    result = _run(
+        redis_client, update_lua, account_key, "600036.SH", "1200", "-100", "12", "0"
+    )
+
+    assert result["success"] is True
+    account = _read(redis_client, account_key)
+    assert account["cash"] == pytest.approx(2100.0)
+    assert account["available_cash"] == pytest.approx(2100.0)
+    assert account["frozen_cash"] == pytest.approx(0.0)
+    assert account["positions"] == {}
+
+
+@pytest.mark.unit
+@pytest.mark.message_broker
+def test_update_lua_rejects_buy_beyond_available_cash(
+    redis_client, update_lua, account_key
+):
+    """超额买入拒单：cash/available_cash 都不允许变负。"""
+    _seed(
+        redis_client,
+        account_key,
+        {
+            "cash": 100.0,
+            "available_cash": 100.0,
+            "frozen_cash": 0.0,
+            "total_asset": 100.0,
+            "market_value": 0.0,
+            "positions": {},
+        },
+    )
+
+    result = _run(
+        redis_client, update_lua, account_key, "600036.SH", "-5000", "100", "10", "0"
+    )
+
+    assert result == {"success": False, "reason": "INSUFFICIENT_CASH"}
+    account = _read(redis_client, account_key)
+    assert account["cash"] == pytest.approx(100.0)
+    assert account["available_cash"] == pytest.approx(100.0)
+
+
+@pytest.mark.unit
+@pytest.mark.message_broker
+def test_update_lua_initializes_missing_available_cash_from_cash(
+    redis_client, update_lua, account_key
+):
+    """旧账户缺 available_cash：以 cash 为初值继续同步，不报错。"""
+    _seed(
+        redis_client,
+        account_key,
+        {"cash": 1000.0, "total_asset": 1000.0, "market_value": 0.0, "positions": {}},
+    )
+
+    result = _run(
+        redis_client, update_lua, account_key, "600036.SH", "-100", "100", "10", "0"
+    )
+
+    assert result["success"] is True
+    account = _read(redis_client, account_key)
+    assert account["available_cash"] == pytest.approx(900.0)
+    assert account["frozen_cash"] == pytest.approx(0.0)

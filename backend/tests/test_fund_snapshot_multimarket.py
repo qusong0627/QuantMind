@@ -22,9 +22,21 @@ from backend.shared.simulation_account_keys import parse_account_key
 def test_parse_account_key_accepts_all_markets():
     # CN（无后缀）与带市场后缀的键都应解析成功，交给 capture_all 合并
     assert parse_account_key("simulation:account:default:1") == ("default", "1", "CN")
-    assert parse_account_key("simulation:account:default:1:CN") == ("default", "1", "CN")
-    assert parse_account_key("simulation:account:default:1:HK") == ("default", "1", "HK")
-    assert parse_account_key("simulation:account:default:1:US") == ("default", "1", "US")
+    assert parse_account_key("simulation:account:default:1:CN") == (
+        "default",
+        "1",
+        "CN",
+    )
+    assert parse_account_key("simulation:account:default:1:HK") == (
+        "default",
+        "1",
+        "HK",
+    )
+    assert parse_account_key("simulation:account:default:1:US") == (
+        "default",
+        "1",
+        "US",
+    )
     assert parse_account_key("simulation:account:default:1:FUTURES") == (
         "default",
         "1",
@@ -97,7 +109,9 @@ def test_multi_market_seed_sum_fixes_phantom_profit():
 
 
 def test_scheduler_trading_day_fallback():
-    scheduler = SimulationScheduler.__new__(SimulationScheduler)  # 不走 __init__（避免连 Redis）
+    scheduler = SimulationScheduler.__new__(
+        SimulationScheduler
+    )  # 不走 __init__（避免连 Redis）
     sh = ZoneInfo("Asia/Shanghai")
     # 周六无论日历与否必非交易日（日历可用时同样返回 False）
     saturday = datetime(2026, 9, 12, 9, 35, tzinfo=sh)
@@ -153,7 +167,9 @@ def test_compute_market_baselines_new_market_seed_not_profit():
     assert out["CN"]["day_open_equity"] == Decimal("1000000")
     assert out["FUTURES"]["day_open_equity"] == Decimal("1000000")  # 种子，不是 0
     assert out["ALL"]["day_open_equity"] == Decimal("2000000")
-    assert out["ALL"]["month_open_equity"] == Decimal("1980000")  # 980000 + FUTURES 种子
+    assert out["ALL"]["month_open_equity"] == Decimal(
+        "1980000"
+    )  # 980000 + FUTURES 种子
 
 
 def test_compute_market_baselines_unknown_seed_uses_today_total():
@@ -212,8 +228,10 @@ async def _ensure_db_pool():
 
 @pytest.mark.asyncio
 async def test_capture_all_market_dimension_real_db():
-    """真库 E2E：双市场账户（CN 有昨日快照 + FUTURES 当日新开）→ 三行（CN/FUTURES/ALL），
-    FUTURES 种子进基线不计 today_pnl，ALL 不出现 +100 万假收益。"""
+    """真库 E2E：CN 活跃 + FUTURES 未交易空种子 → FUTURES 不进 ALL。
+
+    2026-11-16 口径修正：无持仓/无成交的非 CN 空种子账户（如误开的 FUTURES
+    100 万）不再合并进 ALL，避免 98 万账户显示 198 万；有持仓或成交后恢复活跃。"""
     import json as _json
     import uuid as _uuid
     from datetime import date
@@ -230,12 +248,22 @@ async def test_capture_all_market_dimension_real_db():
     yesterday = date(2026, 12, 7)
     store = {
         f"simulation:account:default:{user}:CN": _json.dumps(
-            {"total_asset": 1010000, "cash": 900000, "market_value": 110000,
-             "initial_cash": 1000000, "positions": {}}
+            {
+                "total_asset": 1010000,
+                "cash": 900000,
+                "market_value": 110000,
+                "initial_cash": 1000000,
+                "positions": {},
+            }
         ),
         f"simulation:account:default:{user}:FUTURES": _json.dumps(
-            {"total_asset": 1000000, "cash": 1000000, "market_value": 0,
-             "initial_cash": 1000000, "positions": {}}
+            {
+                "total_asset": 1000000,
+                "cash": 1000000,
+                "market_value": 0,
+                "initial_cash": 1000000,
+                "positions": {},
+            }
         ),
     }
     try:
@@ -251,7 +279,7 @@ async def test_capture_all_market_dimension_real_db():
         result = await SimulationFundSnapshotService.capture_all(
             _FakeRedisWrapper(store), snapshot_date=today
         )
-        assert result.upserted_rows == 3  # CN + FUTURES + ALL
+        assert result.upserted_rows == 2  # 活跃 CN + ALL（空闲 FUTURES 被跳过）
 
         async with get_session(read_only=True) as session:
             rows = (
@@ -265,15 +293,13 @@ async def test_capture_all_market_dimension_real_db():
                 )
             ).all()
         by = {str(r[0]): r for r in rows}
-        assert set(by) == {"CN", "FUTURES", "ALL"}
+        assert set(by) == {"CN", "ALL"}
         # CN：昨日 100 万 → 今日 101 万 = 真实 +1 万
         assert float(by["CN"][3]) == 10000.0  # [3]=today_pnl
-        # FUTURES 新开：种子 100 万计入基线，today_pnl = 0（**不是 +100 万**）
-        assert float(by["FUTURES"][3]) == 0.0
-        # ALL：合计基线 = 100 万(昨日 CN) + 100 万(FUTURES 种子) → 仍只有真实 +1 万
+        # ALL：只含活跃 CN，不再把 FUTURES 空种子算进总资产
+        assert float(by["ALL"][1]) == 1010000.0  # [1]=total_asset
+        assert float(by["ALL"][2]) == 1000000.0  # [2]=initial_capital
         assert float(by["ALL"][3]) == 10000.0
-        assert float(by["ALL"][1]) == 2010000.0  # [1]=total_asset
-        assert float(by["ALL"][2]) == 2000000.0  # [2]=initial_capital（Σ 种子，P0-05 口径保持）
     finally:
         async with get_session(read_only=False) as session:
             await session.execute(
@@ -311,7 +337,13 @@ async def test_get_baselines_market_aware_real_db():
                 ("HK", today, 2000000),  # HK 新开（无历史）：种子 200 万
                 ("ALL", today, 3005000),
             ):
-                seed = 1000000 if market == "CN" else 2000000 if market == "HK" else 3000000
+                seed = (
+                    1000000
+                    if market == "CN"
+                    else 2000000
+                    if market == "HK"
+                    else 3000000
+                )
                 await session.execute(
                     sa_text(
                         "INSERT INTO simulation_fund_snapshots "
@@ -398,11 +430,16 @@ def test_fund_snapshot_contract_and_reader_source_guards():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    contract = (root / "shared" / "fund_snapshot_contract.py").read_text(encoding="utf-8")
+    contract = (root / "shared" / "fund_snapshot_contract.py").read_text(
+        encoding="utf-8"
+    )
     assert "lock_timeout" in contract
     assert "information_schema" in contract  # 预检
     assert "不阻断" in contract  # 失败不抛出不阻断业务
-    assert "DROP CONSTRAINT IF EXISTS" in contract and "CREATE UNIQUE INDEX IF NOT EXISTS" in contract
+    assert (
+        "DROP CONSTRAINT IF EXISTS" in contract
+        and "CREATE UNIQUE INDEX IF NOT EXISTS" in contract
+    )
 
     # 交易台按**页签市场**取快照行（比写死 'ALL' 更严：页面在哪个市场就取哪个市场的行，
     # 与 account_card 的 per-market 口径一致）。要防的仍是同一事故形态：同日多市场行
@@ -411,10 +448,14 @@ def test_fund_snapshot_contract_and_reader_source_guards():
     assert "AND market = :m " in desk, "desk 盈亏卡未按市场取行（会混排）"
     assert 'params["m"] = market' in desk, "desk 盈亏卡市场谓词未绑定页签市场"
 
-    shadow = (root / "services/trade/services/shadow_compare_service.py").read_text(encoding="utf-8")
+    shadow = (root / "services/trade/services/shadow_compare_service.py").read_text(
+        encoding="utf-8"
+    )
     assert "market = 'ALL'" in shadow
 
-    user_strategies = (root / "services/engine/qlib_app/api/user_strategies.py").read_text(encoding="utf-8")
+    user_strategies = (
+        root / "services/engine/qlib_app/api/user_strategies.py"
+    ).read_text(encoding="utf-8")
     assert "market = 'ALL'" in user_strategies
 
     health = (root / "scripts/diagnose/health.py").read_text(encoding="utf-8")

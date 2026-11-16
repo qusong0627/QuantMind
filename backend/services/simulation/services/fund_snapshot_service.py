@@ -289,7 +289,10 @@ class SimulationFundSnapshotService:
                         month_open = day_open
             except Exception as exc:
                 logger.warning(
-                    "get_baselines failed tenant=%s user=%s: %s", tenant_id, user_id, exc
+                    "get_baselines failed tenant=%s user=%s: %s",
+                    tenant_id,
+                    user_id,
+                    exc,
                 )
             return {"day_open_equity": day_open, "month_open_equity": month_open}
 
@@ -311,7 +314,9 @@ class SimulationFundSnapshotService:
                         )
                     ).all()
                     if today_rows:
-                        today_totals = {str(r[0]): _to_decimal(r[1]) for r in today_rows}
+                        today_totals = {
+                            str(r[0]): _to_decimal(r[1]) for r in today_rows
+                        }
                         seeds: dict[str, Decimal | None] = {
                             str(r[0]): _to_decimal(r[2]) for r in today_rows
                         }
@@ -344,7 +349,10 @@ class SimulationFundSnapshotService:
                         month_open = month_row
                     elif month_start == today:
                         month_open = day_open
-                    return {"day_open_equity": day_open, "month_open_equity": month_open}
+                    return {
+                        "day_open_equity": day_open,
+                        "month_open_equity": month_open,
+                    }
             except Exception as exc:
                 logger.warning(
                     "get_baselines(ALL) failed tenant=%s user=%s: %s",
@@ -464,6 +472,9 @@ class SimulationFundSnapshotService:
                     "frozen_balance": Decimal("0"),
                     "market_value": Decimal("0"),
                     "seed": None,
+                    # 从未交易过的空种子市场（如误开的 FUTURES 100 万空账户）
+                    # 不参与 ALL 合并，避免把未启用的市场本金算进总资产。
+                    "active": False,
                 },
             )
             bucket["total_asset"] = _to_decimal(bucket["total_asset"]) + _to_decimal(
@@ -498,6 +509,33 @@ class SimulationFundSnapshotService:
             else:
                 bucket["seed"] = _to_decimal(bucket["seed"]) + seed
 
+            positions = account.get("positions") or {}
+            has_positions = isinstance(positions, dict) and any(
+                isinstance(pos, dict) and float(pos.get("volume") or 0) > 0
+                for pos in positions.values()
+            )
+            account_total = _to_decimal(account.get("total_asset"))
+            account_cash = _to_decimal(
+                account.get("cash") or account.get("available_balance")
+            )
+            # 非 CN 市场的「无持仓 + 现金=总资产=种子」视为未启用空账户；
+            # CN 主账户始终计入（新用户尚未建仓也要有资金曲线）。
+            idle_seed = (
+                market_key != "CN"
+                and not has_positions
+                and seed is not None
+                and abs(account_total - seed) <= Decimal("0.01")
+                and abs(account_cash - seed) <= Decimal("0.01")
+            )
+            bucket["active"] = bool(bucket.get("active")) or not idle_seed
+            if idle_seed:
+                logger.info(
+                    "fund snapshot: skip idle seed market=%s key=%s amount=%s",
+                    market_key,
+                    key,
+                    account_total,
+                )
+
         if not per_market:
             return SnapshotUpsertResult(upserted_rows=0, scanned_accounts=len(keys))
 
@@ -512,12 +550,17 @@ class SimulationFundSnapshotService:
                     for (t, u, m) in per_market
                     if (t, u) == (tenant_id, user_id)
                 }
+                active_buckets = {
+                    m: b for m, b in buckets.items() if b.get("active", True)
+                }
+                if not active_buckets:
+                    continue
                 today_totals = {
-                    m: _to_decimal(b["total_asset"]) for m, b in buckets.items()
+                    m: _to_decimal(b["total_asset"]) for m, b in active_buckets.items()
                 }
                 seeds: dict[str, Decimal | None] = {
                     m: (None if b["seed"] is None else _to_decimal(b["seed"]))
-                    for m, b in buckets.items()
+                    for m, b in active_buckets.items()
                 }
                 prev_day = await _latest_totals_by_market_before(
                     session, tenant_id, user_id, snap_date
@@ -532,7 +575,7 @@ class SimulationFundSnapshotService:
                     prev_month,
                     is_month_start=is_month_start,
                 )
-                for market_key, bucket in buckets.items():
+                for market_key, bucket in active_buckets.items():
                     total = _to_decimal(bucket["total_asset"])
                     seed = seeds[market_key]
                     # 单市场行：未知种子回退当日总资产（盈亏 0 口径，不声称未知盈亏）
@@ -581,22 +624,32 @@ class SimulationFundSnapshotService:
                         "market": ALL_MARKET,
                         "total_asset": total_all,
                         "available_balance": sum(
-                            (_to_decimal(b["available_balance"]) for b in buckets.values()),
+                            (
+                                _to_decimal(b["available_balance"])
+                                for b in active_buckets.values()
+                            ),
                             Decimal("0"),
                         ),
                         "frozen_balance": sum(
-                            (_to_decimal(b["frozen_balance"]) for b in buckets.values()),
+                            (
+                                _to_decimal(b["frozen_balance"])
+                                for b in active_buckets.values()
+                            ),
                             Decimal("0"),
                         ),
                         "market_value": sum(
-                            (_to_decimal(b["market_value"]) for b in buckets.values()),
+                            (
+                                _to_decimal(b["market_value"])
+                                for b in active_buckets.values()
+                            ),
                             Decimal("0"),
                         ),
                         "initial_capital": initial_all,
                         "total_pnl": total_all - initial_all,
                         # 新市场首日：其种子已进 ALL 基线（compute_market_baselines），
                         # 不再把一次性资本注入算成今日盈利（T-P1-07 ②）
-                        "today_pnl": total_all - baselines[ALL_MARKET]["day_open_equity"],
+                        "today_pnl": total_all
+                        - baselines[ALL_MARKET]["day_open_equity"],
                         "source": "redis_simulation_account",
                     }
                 )

@@ -31,9 +31,19 @@ class _FakeRedisClient:
         delta_volume = float(args[3])
         price = float(args[4])
         account = json.loads(self.store[key])
+        old_available = float(
+            account.get("available_cash") or account.get("cash") or 0.0
+        )
         account["cash"] = float(account.get("cash") or 0.0) + delta_cash
+        account["available_cash"] = max(0.0, old_available + delta_cash)
+        account["frozen_cash"] = max(
+            0.0, float(account["cash"]) - float(account["available_cash"])
+        )
         positions = dict(account.get("positions") or {})
-        pos = dict(positions.get(symbol) or {"volume": 0, "cost": 0, "market_value": 0, "price": 0})
+        pos = dict(
+            positions.get(symbol)
+            or {"volume": 0, "cost": 0, "market_value": 0, "price": 0}
+        )
         pos["volume"] = float(pos.get("volume") or 0.0) + delta_volume
         pos["price"] = price
         pos["market_value"] = float(pos["volume"] or 0.0) * price
@@ -71,11 +81,43 @@ async def test_simulation_manager_writes_settings_and_account_json():
         default_initial_cash=500_000,
     )
     assert settings["initial_cash"] == 1_000_000
-    assert json.loads(redis.client.get("simulation:settings:default:42"))["initial_cash"] == 1_000_000
+    assert (
+        json.loads(redis.client.get("simulation:settings:default:42"))["initial_cash"]
+        == 1_000_000
+    )
 
-    account = await manager.init_account(user_id=42, tenant_id="default", initial_cash=2_000_000)
+    account = await manager.init_account(
+        user_id=42, tenant_id="default", initial_cash=2_000_000
+    )
     assert account["cash"] == 2_000_000
-    assert json.loads(redis.client.get("simulation:account:default:42"))["cash"] == 2_000_000
+    assert account["available_cash"] == 2_000_000
+    assert account["frozen_cash"] == 0.0
+    assert (
+        json.loads(redis.client.get("simulation:account:default:42"))["cash"]
+        == 2_000_000
+    )
+
+
+@pytest.mark.asyncio
+async def test_simulation_manager_normalizes_symbol_to_suffix_on_write():
+    """写入统一后缀式：前缀式 SH600000 落库为 600000.SH，避免同股两条 lot。"""
+    redis = _FakeRedis()
+    manager = SimulationAccountManager(redis)
+
+    await manager.init_account(user_id=42, tenant_id="default", initial_cash=1_000_000)
+    result = await manager.update_balance(
+        user_id=42,
+        symbol="SH600000",
+        delta_cash=-1000,
+        delta_volume=100,
+        price=10.0,
+        tenant_id="default",
+    )
+
+    assert result["success"] is True
+    cached = json.loads(redis.client.get("simulation:account:default:42"))
+    assert "600000.SH" in cached["positions"]
+    assert "SH600000" not in cached["positions"]
 
 
 @pytest.mark.asyncio
@@ -96,6 +138,8 @@ async def test_simulation_manager_account_update_uses_cache_helper():
     assert result["success"] is True
     cached = json.loads(redis.client.get("simulation:account:default:42"))
     assert cached["cash"] == 999000
+    assert cached["available_cash"] == 999000
+    assert cached["frozen_cash"] == 0
     assert cached["total_asset"] > 0
 
 
