@@ -78,6 +78,12 @@ def _env_seconds(name: str, default: int) -> int:
         return default
 
 
+def _str_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [str(x) for x in value]
+    return []
+
+
 def batch_quantdb_last_close(symbols: list[str]) -> dict[str, float]:
     """批量取 QuantDB 最近交易日收盘价（持仓现价缺失时补全）。"""
     if not symbols:
@@ -114,6 +120,8 @@ class _SyncHealth:
         self.consecutive_failures = 0
         self.last_error = ""
         self.last_alert_at = 0.0
+        #: 最近一次"通道可连但跳过落库"的原因（陈旧/空账户），用于告警文案
+        self.last_skip_reason = ""
 
     def record(self, result: dict[str, Any]) -> None:
         if not result.get("success"):
@@ -122,8 +130,18 @@ class _SyncHealth:
             return
         self.consecutive_failures = 0
         self.last_error = ""
-        if not result.get("skipped"):
-            self.last_write_at = time.monotonic()
+        if result.get("skipped"):
+            reason = str(result.get("reason") or "")
+            stale_reasons = result.get("stale_reasons") or []
+            if stale_reasons:
+                self.last_skip_reason = "%s (%s)" % (
+                    reason, ", ".join(str(x) for x in stale_reasons)
+                )
+            else:
+                self.last_skip_reason = reason
+            return
+        self.last_skip_reason = ""
+        self.last_write_at = time.monotonic()
 
     @property
     def stale_seconds(self) -> float:
@@ -145,7 +163,9 @@ class QmtAccountSyncService:
         """拉取并归一化账户全景（资金 + 持仓）。"""
         client = self.client
         asset = await client.get_asset()
+        asset_observed_at = time.time()
         positions_raw = await client.get_positions()
+        positions_observed_at = time.time()
         price_map = await asyncio.to_thread(
             batch_quantdb_last_close,
             [str(p.get("symbol") or "") for p in positions_raw],
@@ -191,6 +211,18 @@ class QmtAccountSyncService:
             # 桥回落的历史快照：数字是最后一次可用的，但不能当新快照落库
             "stale": bool(getattr(client, "last_stale", False)),
             "snapshot_at": str(getattr(client, "last_snapshot_at", "") or ""),
+            # 分组件新鲜度：桥侧资产与持仓各自观测时间；QmtExec 直连没有这两
+            # 个字段时留空，不伪造。
+            "asset_status": str(getattr(client, "last_asset_status", "") or ""),
+            "positions_status": str(
+                getattr(client, "last_positions_status", "") or ""
+            ),
+            "stale_reasons": _str_list(
+                getattr(client, "last_stale_reasons", [])),
+            "degraded_reasons": _str_list(
+                getattr(client, "last_degraded_reasons", [])),
+            "asset_observed_at": asset_observed_at,
+            "positions_observed_at": positions_observed_at,
         }
 
     async def sync_account_to_pg(
@@ -212,14 +244,17 @@ class QmtAccountSyncService:
         # 陈旧快照（休市或 RPC 停摆，桥回落的历史数据）：跳过落库，避免把旧值写成新快照。
         # 最后一条真实快照留在库里，前端继续显示它自己的时间。
         if snapshot.get("stale"):
+            stale_reasons = list(snapshot.get("stale_reasons") or [])
             logger.info(
-                "[QmtSync] 陈旧快照（%s），跳过落库：不把旧数据写成新快照",
+                "[QmtSync] 陈旧快照（%s；原因=%s），跳过落库：不把旧数据写成新快照",
                 snapshot.get("snapshot_at") or "时间未知",
+                ", ".join(str(x) for x in stale_reasons) or "未标注",
             )
             return {
                 "success": True,
                 "skipped": True,
                 "reason": "stale_snapshot",
+                "stale_reasons": stale_reasons,
                 "position_count": len(snapshot.get("positions") or []),
             }
 
@@ -318,6 +353,8 @@ def _maybe_alert_stale(
             f"连续 {health.consecutive_failures} 次拉取失败"
             f"（最近原因：{health.last_error or '未知'}）"
         )
+    elif health.last_skip_reason:
+        detail = f"通道可连但快照被跳过（{health.last_skip_reason}）"
     else:
         detail = "通道可连但账户为空（未落库）"
     logger.error(

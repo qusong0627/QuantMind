@@ -49,7 +49,10 @@ tdx:
   max_retries: 0
 
 sltp_daemon:
-  enabled: true
+  # 唯一所有者 = QuantMind sltp_executor。桥侧 daemon 是历史第二卖出者，
+  # 同触发会对同一持仓超卖；默认关，所有者字段防止被误开。
+  enabled: false
+  owner: quantmind
   poll_interval_seconds: 5
   state_file: "./data/stop_loss_state.json"
 

@@ -236,8 +236,91 @@ def test_order_method_detection(bridge):
     assert bridge.is_order_method("order_stock")
     assert bridge.is_order_method("passorder")
     assert bridge.is_order_method("submit_order")
+    assert bridge.is_order_method("order_stock_async")
+    assert bridge.is_order_method("order_stock_batch")
+    assert bridge.is_order_method("cancel_order_stock_sysid")
     assert not bridge.is_order_method("query_stock_orders")
     assert not bridge.is_order_method("")
+
+
+def test_order_stock_async_cannot_bypass_risk_gate(bridge):
+    """别名曾经绕过只认 order_stock 的风控（2026-11-16 审计）。"""
+    reason = bridge.risk_gate(
+        "order_stock_async", _order("600289.SH", 100, 5.0, 23))
+    assert reason and "blacklisted name" in reason
+
+
+def test_order_stock_batch_checks_each_item(bridge):
+    params = {"orders": [
+        {"stock_code": "600036.SH", "order_volume": 100, "price": 39.0,
+         "order_type": 23},
+        {"stock_code": "600289.SH", "order_volume": 100, "price": 5.0,
+         "order_type": 23},
+    ]}
+    reason = bridge.risk_gate("order_stock_batch", params)
+    assert reason and "blacklisted name" in reason
+
+
+def test_order_stock_batch_empty_is_rejected(bridge):
+    assert bridge.risk_gate("order_stock_batch", {"orders": []})
+
+
+def test_passorder_order_code_is_recognized(bridge):
+    params = {"order_code": "600289.SH", "volume": 100, "price": 5.0,
+              "op_type": 23}
+    reason = bridge.risk_gate("passorder", params)
+    assert reason and "blacklisted name" in reason
+
+
+def test_source_methods_include_diagnostics(bridge):
+    for method in ("get_deployment_info", "probe_capabilities", "reload_status"):
+        assert method in bridge._SOURCE_METHODS
+
+
+def test_source_rpc_drops_trade_context_when_unresponsive(bridge, monkeypatch):
+    bridge.STATE.strategy_state = "unresponsive"
+    called = []
+    monkeypatch.setattr(bridge, "rpc", lambda *a, **k: called.append(a) or {})
+    with pytest.raises(bridge.SourceError) as exc:
+        bridge._source_rpc("get_asset", {}, timeout=1)
+    assert exc.value.status == 503
+    assert called == []
+
+
+def test_source_rpc_uses_trade_token_bucket(bridge, monkeypatch):
+    bridge.STATE.strategy_state = "ok"
+    bridge.STATE.queue_trade_tokens = 0.0
+    bridge.STATE.queue_trade_ts = bridge.time.time()
+    bridge.CFG._data["rpc"]["trade_min_interval_s"] = 3.0
+    bridge.CFG._data["rpc"]["trade_burst"] = 1
+    called = []
+    monkeypatch.setattr(bridge, "rpc", lambda *a, **k: called.append(a) or {})
+    with pytest.raises(bridge.SourceError) as exc:
+        bridge._source_rpc("get_asset", {}, timeout=1)
+    assert exc.value.status == 429
+    assert called == []
+
+
+def test_position_payload_marks_asset_unavailable_when_never_observed(bridge):
+    payload = bridge.build_position_payload(
+        {"cash": 1.0}, {},
+        asset_observed_at=0.0, positions_observed_at=1000.0,
+    )
+    assert payload["asset_status"] == "unavailable"
+    assert payload["positions_status"] == "ok"
+    assert payload["stale"] is True
+    assert "asset:unavailable" in payload["stale_reasons"]
+
+
+def test_position_payload_reports_degraded_refresh_without_false_stale(bridge):
+    payload = bridge.build_position_payload(
+        {"cash": 1.0}, {},
+        asset_observed_at=990.0, positions_observed_at=1000.0,
+        asset_error="get_asset timeout",
+    )
+    assert payload["asset_status"] == "ok"
+    assert payload["stale"] is False
+    assert "asset:last_refresh_failed" in payload["degraded_reasons"]
 
 
 def test_order_backlog_gate(bridge):

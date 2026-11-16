@@ -199,6 +199,53 @@ def test_queue_ignores_read_only_methods():
     assert not wd.queue_has_order_requests([payload], decode_payload=lambda raw: raw)
 
 
+def test_queue_detects_write_aliases():
+    for method in ('order_stock_async', 'order_stock_batch',
+                   'cancel_order_stock_sysid'):
+        payload = json.dumps({'method': method, 'params': {}})
+        assert wd.queue_has_order_requests([payload], decode_payload=lambda raw: raw)
+
+
+def test_inflight_records_detect_unresolved_only():
+    assert wd.inflight_records_have_orders(
+        [json.dumps({'state': 'unknown'})]
+    ) is True
+    assert wd.inflight_records_have_orders(
+        [json.dumps({'state': 'inflight'})]
+    ) is True
+    assert wd.inflight_records_have_orders(
+        [json.dumps({'state': 'done'})]
+    ) is False
+
+
+class _IntentRedis:
+    def __init__(self, *, inflight=None, processing=None):
+        self._inflight = list(inflight or [])
+        self._processing = list(processing or [])
+
+    def hvals(self, key):
+        return self._inflight
+
+    def lrange(self, key, start, end):
+        return self._processing
+
+
+def test_redis_order_intent_checks_processing_and_inflight():
+    order = json.dumps({'method': 'order_stock', 'params': {}})
+    identity = lambda raw: raw  # noqa: E731
+    assert wd.redis_has_order_intent(
+        _IntentRedis(processing=[order]), '40327478', decode_payload=identity
+    ) is True
+    assert wd.redis_has_order_intent(
+        _IntentRedis(inflight=[json.dumps({'state': 'unknown'})]), '40327478',
+        decode_payload=identity,
+    ) is True
+    read = json.dumps({'method': 'get_asset', 'params': {}})
+    assert wd.redis_has_order_intent(
+        _IntentRedis(processing=[read]), '40327478', decode_payload=identity
+    ) is False
+
+
 def test_undecodable_item_counts_as_order():
     assert wd.queue_has_order_requests(['not-json'], decode_payload=lambda raw: raw)
 

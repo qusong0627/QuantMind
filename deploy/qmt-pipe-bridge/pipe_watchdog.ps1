@@ -7,11 +7,40 @@
 $base = 'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools'
 $log  = Join-Path $base 'logs\pipe_watchdog.log'
 $cool = Join-Path $base 'logs\.pipe_watchdog_last_restart'
+$pidFile = Join-Path $base 'data\pipe_bridge.pid'
 $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $py   = 'C:\xmt\venv\Scripts\python.exe'
 
 function Write-Log($msg) {
     Add-Content -Path $log -Value ("$ts $msg") -Encoding UTF8
+}
+
+# Exact process identity: prefer the bridge's own PID file, then the owner of
+# the 17720 listener. Never kill every python.exe whose command line contains
+# a substring - that is how a watchdog kills unrelated processes.
+function Get-BridgeTargetPid {
+    if (Test-Path $pidFile) {
+        try {
+            $doc = Get-Content -Path $pidFile -Raw | ConvertFrom-Json
+            $candidate = [int]$doc.pid
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$candidate" -ErrorAction SilentlyContinue
+            if ($proc -and ([string]$proc.CommandLine) -match 'pipe_redis_bridge') {
+                return $candidate
+            }
+        } catch { }
+    }
+    try {
+        $listener = Get-NetTCPConnection -LocalPort 17720 -State Listen -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+        if ($listener) {
+            $candidate = [int]$listener.OwningProcess
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$candidate" -ErrorAction SilentlyContinue
+            if ($proc -and ([string]$proc.CommandLine) -match 'pipe_redis_bridge') {
+                return $candidate
+            }
+        }
+    } catch { }
+    return 0
 }
 
 $running = $false
@@ -36,6 +65,12 @@ if ($healthCode -eq 3) {
     Write-Log "DATA_STALE $health (no restart)"
     exit 0
 }
+# 4 = unresolved order intent (inflight/unknown) in Redis or processing list.
+# Restarting the bridge would cut in-flight order reports; wait for human.
+if ($healthCode -eq 4) {
+    Write-Log "INFLIGHT $health (no restart)"
+    exit 0
+}
 $healthy = ($healthCode -eq 0)
 
 if ($running -and $healthy) { exit 0 }
@@ -57,9 +92,13 @@ if (-not $running) {
         Write-Log "HEALTH $health COOLDOWN skip"
         exit 0
     }
-    Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
-        if ($_.CommandLine -match 'pipe_redis_bridge') { Stop-Process -Id $_.ProcessId -Force }
+    $target = Get-BridgeTargetPid
+    if ($target -le 0) {
+        Write-Log "NO_TARGET health=$health (no kill)"
+        exit 1
     }
+    Stop-Process -Id $target -Force
+    Write-Log "KILLED pid=$target health=$health"
     Start-Sleep -Seconds 2
     Set-Content -Path $cool -Value $now
     Write-Log "HEALTH $health restarting"

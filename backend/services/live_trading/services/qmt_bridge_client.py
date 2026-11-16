@@ -76,6 +76,11 @@ class QmtBridgeClient:
         #: 桥回落的历史快照（休市）：同步任务据此跳过落库
         self.last_stale = False
         self.last_snapshot_at = ""
+        #: 分组件新鲜度（2026-11-16 审计）：资产与持仓不能共用一个时间戳
+        self.last_asset_status = ""
+        self.last_positions_status = ""
+        self.last_stale_reasons: list[str] = []
+        self.last_degraded_reasons: list[str] = []
 
     # -- 与 QmtExecClient 同形 ------------------------------------------------
     @property
@@ -173,6 +178,16 @@ class QmtBridgeClient:
         self._cache = body
         self.last_stale = bool(body.get("stale"))
         self.last_snapshot_at = str(body.get("snapshot_at") or "")
+        self.last_asset_status = str(body.get("asset_status") or "")
+        self.last_positions_status = str(body.get("positions_status") or "")
+        raw_stale = body.get("stale_reasons")
+        self.last_stale_reasons = (
+            [str(x) for x in raw_stale] if isinstance(raw_stale, list) else []
+        )
+        raw_degraded = body.get("degraded_reasons")
+        self.last_degraded_reasons = (
+            [str(x) for x in raw_degraded] if isinstance(raw_degraded, list) else []
+        )
         account_id = str(body.get("account_id") or "")
         if account_id:
             self._account_id = account_id

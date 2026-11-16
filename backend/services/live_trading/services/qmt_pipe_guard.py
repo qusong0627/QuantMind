@@ -70,8 +70,14 @@ def evaluate_pipe_metrics(
     queue_len = int(_f(metrics.get("queue_len")))
     if queue_max > 0 and queue_len >= queue_max:
         issues.append(f"请求队列积压 {queue_len}（阈值 {queue_max}）")
-    pos_age = _f(metrics.get("pos_age_s"), -1.0)
-    if pos_age_max_s > 0 and pos_age > pos_age_max_s:
+    raw_pos_age = metrics.get("pos_age_s")
+    try:
+        pos_age = float(raw_pos_age) if raw_pos_age is not None else None
+    except (TypeError, ValueError):
+        pos_age = None
+    if pos_age_max_s > 0 and pos_age is not None and pos_age < 0:
+        issues.append("持仓推送从未上报（pos_age=-1）")
+    elif pos_age_max_s > 0 and pos_age is not None and pos_age > pos_age_max_s:
         issues.append(f"持仓推送停滞 {pos_age:.0f}s（阈值 {pos_age_max_s:.0f}s）")
     order_age = _f(metrics.get("order_age_s"), -1.0)
     if order_age_max_s > 0 and order_age > order_age_max_s:

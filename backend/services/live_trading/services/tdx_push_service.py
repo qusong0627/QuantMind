@@ -13,10 +13,14 @@ import logging
 import math
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
 from backend.services.live_trading.services.tdx_cancel_verify import (
     verify_cancel_terminal,
+)
+from backend.services.live_trading.services.tdx_order_merge import (
+    should_apply_order_update,
 )
 from backend.services.live_trading.services.trading_session import (
     TZ,
@@ -642,7 +646,7 @@ class TdxPushService:
                 "position_count": len(positions),
             }
 
-        from datetime import date, datetime, timezone
+        from datetime import date
 
         from sqlalchemy import insert
 
@@ -830,8 +834,6 @@ class TdxPushService:
         原先的裸 ``except → logger.warning → return []`` 把「成交回报落不进去」
         伪装成「桥今天没成交」——两者在库里长得一模一样，没人能分辨。
         """
-        from datetime import datetime
-
         from sqlalchemy import func, select, text
 
         from backend.services.trade_shared.models.enums import (
@@ -857,6 +859,14 @@ class TdxPushService:
         fills: list[dict] = []
         # 预载本地订单行：既有状态（判「首次转 FILLED」，轮询刷新不许重复当新成交推）
         # + 成交增量所需的前值（已成交量/均价）+ 分账归属（agent，成交回报里没有）。
+        # 2026-11-16 审计：必须限定当前交易日——QMT/桥的委托号每日重置，跨日
+        # 同号会把昨天的行当成今天的单更新。
+        now_cn = (
+            now.replace(tzinfo=timezone.utc).astimezone(TZ).replace(tzinfo=None)
+            if now.tzinfo is None else now.astimezone(TZ).replace(tzinfo=None)
+        )
+        day_start = now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
         existing: dict[str, _LocalOrderState] = {}
         for row in (
             await db.execute(
@@ -872,6 +882,8 @@ class TdxPushService:
                     Order.exchange_order_id.is_not(None),
                     Order.tenant_id == tenant_id,
                     Order.user_id == str(user_id),
+                    Order.created_at >= day_start,
+                    Order.created_at < day_end,
                 )
             )
         ).fetchall():
@@ -951,6 +963,16 @@ class TdxPushService:
             became_filled = _fill_transitioned(
                 str(prior_status or ""), order_status.value, filled_volume
             )
+            if prior and not should_apply_order_update(
+                prior.status, prior.filled_quantity,
+                order_status.value, filled_volume,
+            ):
+                logger.info(
+                    "[TdxSync] 跳过回退回报 order=%s 本地=%s/%.0f 桥=%s/%.0f",
+                    exchange_id, prior_status, float(prior.filled_quantity or 0),
+                    order_status.value, filled_volume,
+                )
+                continue
 
             if prior:
                 order_pk = prior.order_id
@@ -1028,7 +1050,9 @@ class TdxPushService:
                         "commission": fee,
                         "submitted_at": submitted_at,
                         "filled_at": filled_at,
-                        "client_order_id": f"tdx-{exchange_id}",
+                        "client_order_id": (
+                            f"tdx-{now_cn.strftime('%Y%m%d')}-{exchange_id}"
+                        ),
                         "exchange_order_id": exchange_id,
                         "remarks": "通达信桥委托",
                     },

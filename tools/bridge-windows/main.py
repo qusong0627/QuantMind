@@ -274,15 +274,19 @@ async def main():
         fs = FileSyncChannel(shared_dir, executor)
         tasks.append(asyncio.create_task(fs.run()))
 
-    # 默认 **关**（原为 True）。这个 `.get` 的字面量才是真正生效的门：
-    # `Config.get` 在 config.yaml 存在但缺 `sltp_daemon` 段时返回这里给的默认值，
-    # 也就是说 Dockerfile/打包脚本带的 config.yaml 一旦没写这一段，
-    # 无论 DEFAULT_CONFIG 改成什么都仍是「开」。
     # 桥自带 daemon 是独立卖出者（触发即市价卖出），守护单已由 QuantMind 的
     # sltp_executor 承担 —— 两者同触发即对同一持仓超卖。
+    # 2026-11-16 审计：即使 enabled=true，也必须 owner=="bridge" 才允许启动；
+    # owner 缺省按 quantmind 处理（fail-safe，不静默放第二卖出者进来）。
+    owner = str(cfg.get("sltp_daemon.owner", "quantmind") or "quantmind").strip().lower()
     if cfg.get("sltp_daemon.enabled", False):
-        log.warning("⚠️ 桥自带止损守护已启用 —— 确认主系统未同时接管守护单，否则会重复卖出")
-        tasks.append(asyncio.create_task(sltp.run()))
+        if owner != "bridge":
+            log.error(
+                "sltp_daemon.enabled=true 但 owner=%s（非 bridge），拒绝启动桥侧止损；"
+                "QuantMind sltp_executor 是唯一卖出者" % (owner or "?"))
+        else:
+            log.warning("⚠️ 桥自带止损守护已启用（owner=bridge）——确认主系统未同时接管")
+            tasks.append(asyncio.create_task(sltp.run()))
 
     if not tasks:
         log.error("没有启动任何通道")

@@ -994,6 +994,16 @@ def build_app(token: str, tdx: TdxClient, executor: PlanExecutor,
             # 休市回落的历史快照：数字是最后一次可用的，页面必须标出来
             "stale": bool(snap.get("stale")),
             "snapshot_source": snap.get("snapshot_source") or "snapshot",
+            # 分组件新鲜度（2026-11-16 审计）：资产与持仓各有观测时间，
+            # 不能用一个 updated_at 把陈旧资产包装成新快照。
+            "asset_status": snap.get("asset_status") or "",
+            "positions_status": snap.get("positions_status") or "",
+            "asset_observed_at": snap.get("asset_observed_at") or "",
+            "positions_observed_at": snap.get("positions_observed_at") or "",
+            "asset_age_s": snap.get("asset_age_s"),
+            "positions_age_s": snap.get("positions_age_s"),
+            "stale_reasons": snap.get("stale_reasons") or [],
+            "degraded_reasons": snap.get("degraded_reasons") or [],
         })
 
     async def query_account(request: web.Request):

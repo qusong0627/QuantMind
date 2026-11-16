@@ -42,7 +42,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File register_pipe_watchdog.ps1
 ```
 
 `bridge_health.py` 退出码：0=正常；1=心跳缺失/过期；2=读不到心跳；
-3=心跳正常但账户快照停摆（只告警，不自动重启——交易时段重启会打断在途 RPC）。
+3=心跳正常但账户快照停摆（只告警，不自动重启——交易时段重启会打断在途 RPC）；
+4=存在 inflight/unknown 订单意图（processing 或 inflight hash），**只告警不重启**，
+等人工核对柜台后用 `bridge_ops.py resolve` 归档。
 
 ### 策略看门狗（交易查询通道卡死 → 自救/告警）
 
@@ -136,14 +138,43 @@ tick；而 `ping` 与行情方法跑在后台 listener 线程，仍然正常—�
   `rpc.internal_trade_min_interval_s=2` / `trade_min_interval_s=3` /
   `startup.grace_s=8` / `step_s=3` 与 `watchdog.prefer_bridge_restart=true`。
 
+### 2026-11-16 审计后的 P0（订单意图 / 快照 / 止损）
+
+这一批是审计确认的 High，和上面的「防误重启」不是同一层：
+
+- **订单意图持久化**：`rpc_worker` 用 `BLMOVE` 把队首原子搬到
+  `bigqmt:rpc:processing:{account}`，再写 `qm:qmt:pipe:inflight:{account}`；
+  进程在两步之间崩溃不会出现「队列没有了、Redis 也没记录」。重启时
+  `recover_processing()` 把订单标 `unknown` 并保留，绝不重放。
+- **未知结果不可重试**：发送超时/回写失败 → `ORDER_RESULT_UNKNOWN` +
+  `retriable=false`；同 remark 重试直接返回该结果，不再发第二笔。
+- **看门狗看到在途单**：`bridge_health.py` 退出码 4；`pipe_watchdog.ps1` 与
+  `qmt_strategy_watchdog.py` 同时检查 queue + processing + inflight，任一有单
+  就 defer 重启。`pipe_watchdog.ps1` 改为按 `data/pipe_bridge.pid` 精确杀，
+  PID 文件缺失时用 17720 监听者 PID，不再按命令行子串扫杀。
+- **快照分组件计时**：`positions_worker` 的 `get_asset` 失败不再刷新资产时间；
+  payload 带 `asset_observed_at` / `positions_observed_at` /
+  `asset_status` / `positions_status` / `stale_reasons`。资产阈值独立
+  `positions.asset_stale_s`（默认 120s），持仓沿用 `source_http.stale_after_s`。
+- **回报先落再记 seen**：桥 `events_worker` 先 `XADD` 成功再记 seen；后端
+  `QmtExecPoller` 在 `db.commit()` 成功后才更新 `_seen_orders/_seen_trades`。
+- **止损唯一所有者**：桥自带 `StopLossDaemon` 默认关闭，且只有
+  `sltp_daemon.owner=bridge` 才会启动；QuantMind `sltp_executor` 是唯一卖出者。
+  卖出失败（无仓/超时/拒单/异常）不再无条件 `enabled=false`，会保留规则并退避。
+- **运维工具**：`python bridge_ops.py list` 查看 inflight/processing；
+  人工核对柜台后 `python bridge_ops.py resolve --request-id <id> --outcome filled`。
+  `resolve` **只归档，不重发、不改订单账本**。
+
 ### 2026-11-16 上线清单（Windows，建议收盘后）
 
 1. 备份现有 `pipe_redis_bridge.py` / `bridge_gates.py` / `qmt_strategy_watchdog.py` /
    `bridge_config.json`。
 2. 复制本仓 `deploy/qmt-pipe-bridge/` 下：
-   `pipe_redis_bridge.py`、`bridge_gates.py`、`qmt_strategy_watchdog.py` 到
-   `qmt-tools\`（覆盖）；`bridge_config.example.json` 只作合并参考，**不要覆盖**
-   你的 `bridge_config.json`。
+   `pipe_redis_bridge.py`、`bridge_gates.py`、`bridge_account_state.py`、
+   `bridge_order_intent.py`、`bridge_health.py`、`bridge_ops.py`、
+   `qmt_strategy_watchdog.py` 到 `qmt-tools\`（覆盖）；
+   `pipe_watchdog.ps1` 到 `qmt-tools\`（覆盖）；`bridge_config.example.json`
+   只作合并参考，**不要覆盖**你的 `bridge_config.json`。
 3. 把 **`rpc` / `startup` / `budget` / `tap` / `sweep` / `watchdog`** 这几段按新
    example 合并进 `bridge_config.json`（尤其 `watchdog.prefer_bridge_restart=true`、
    `rpc.trade_min_interval_s=3`、`rpc.internal_trade_min_interval_s=2`、

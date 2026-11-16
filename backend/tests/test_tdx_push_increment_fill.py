@@ -182,6 +182,24 @@ def _sync(svc, db):
     )
 
 
+class _CaptureSession(_FakeSession):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sqls: list[str] = []
+
+    async def execute(self, stmt, params=None):
+        self.sqls.append(str(stmt))
+        return await super().execute(stmt, params)
+
+
+def test_preload_is_scoped_to_current_trade_day(ledger_calls):
+    """跨日同号委托不能被今日回报更新（2026-11-16 审计）。"""
+    db = _CaptureSession(preload=[])
+    _sync(_service([_bridge_order()]), db)
+    preload = next(s for s in db.sqls if "orders.exchange_order_id" in s)
+    assert "orders.created_at" in preload
+
+
 # ---------------------------------------------------------------- 累计台阶增量
 
 

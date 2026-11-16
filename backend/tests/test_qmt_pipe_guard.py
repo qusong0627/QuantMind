@@ -30,6 +30,13 @@ def test_evaluate_pipe_metrics_queue_backlog():
     assert len(issues) == 1 and "积压" in issues[0]
 
 
+def test_evaluate_pipe_metrics_negative_pos_age_is_issue():
+    issues = g.evaluate_pipe_metrics(
+        {"queue_len": "0", "pos_age_s": "-1", "order_age_s": "1"}
+    )
+    assert len(issues) == 1 and "从未上报" in issues[0]
+
+
 def test_evaluate_pipe_metrics_stalled_positions_and_orders():
     issues = g.evaluate_pipe_metrics(
         {"queue_len": "0", "pos_age_s": "120", "order_age_s": "61"}

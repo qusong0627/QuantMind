@@ -53,18 +53,45 @@ STATE_UNRESPONSIVE = 'unresponsive'
 #: 账户探针连续失败达到该值 → 判定 unresponsive
 FAIL_THRESHOLD = 2
 
+#: QMT 线名 → 策略侧 canonical 名（与 ``bigqmt_signal_trader.redis_rpc``
+#: ``METHOD_ALIASES`` 同源）。风控/幂等/积压闸必须按 canonical 判定，否则
+#: ``order_stock_async`` 这类别名会绕过只认 ``order_stock`` 的闸门。
+METHOD_ALIASES = {
+    'get_full_tick': 'get_ticks',
+    'get_instrument_detail': 'get_instrument',
+    'get_instrumentdetail': 'get_instrument',
+    'getdividfactors': 'get_divid_factors',
+    'query_stock_asset': 'get_asset',
+    'query_stock_positions': 'get_positions',
+    'query_position_statistics': 'get_position_statistics',
+    'query_stock_orders': 'query_orders',
+    'query_stock_trades': 'query_trades',
+    'order_stock': 'submit_order',
+    'order_stock_async': 'submit_order',
+    'order_stock_batch': 'submit_orders_batch',
+    'cancel_order_stock': 'cancel_order',
+    'cancel_order_stock_sysid': 'cancel_order',
+    'cancel_order_stock_batch': 'cancel_orders_batch',
+}
+
 
 def normalize_method(method: str | None) -> str:
     return str(method or '').strip().lower()
 
 
+def canonical_method(method: str | None) -> str:
+    """线名 → canonical 名；未知方法原样返回（小写）。"""
+    name = normalize_method(method)
+    return METHOD_ALIASES.get(name, name)
+
+
 def is_order_like(method: str | None) -> bool:
-    return normalize_method(method) in ORDER_LIKE_METHODS
+    return canonical_method(method) in ORDER_LIKE_METHODS
 
 
 def is_trade_context(method: str | None) -> bool:
     """该方法是否走 adjust 主线程（挂了就会超时的那一类）。"""
-    return normalize_method(method) in TRADE_CONTEXT_METHODS
+    return canonical_method(method) in TRADE_CONTEXT_METHODS
 
 
 def should_drop_request(method: str | None, strategy_state: str) -> bool:

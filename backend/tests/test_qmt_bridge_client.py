@@ -315,6 +315,29 @@ def test_sync_skips_stale_snapshot(monkeypatch):
     assert result["position_count"] == 1
 
 
+def test_account_freshness_fields_pass_through():
+    body = dict(
+        ACCOUNT_OK,
+        stale=True,
+        asset_status="stale",
+        positions_status="ok",
+        stale_reasons=["asset:stale"],
+        degraded_reasons=["positions:last_refresh_failed"],
+    )
+    client = _client(lambda request: httpx.Response(200, json=body))
+
+    async def _run():
+        await client.get_asset()
+        await client.get_positions()
+
+    asyncio.run(_run())
+    assert client.last_stale is True
+    assert client.last_asset_status == "stale"
+    assert client.last_positions_status == "ok"
+    assert client.last_stale_reasons == ["asset:stale"]
+    assert client.last_degraded_reasons == ["positions:last_refresh_failed"]
+
+
 def test_factory_prefers_bridge(monkeypatch):
     from backend.services.live_trading.services import qmt_account_sync_task as task
 

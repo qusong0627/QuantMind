@@ -3,7 +3,6 @@ import logging
 import os
 import threading
 import time
-from collections import OrderedDict
 from datetime import datetime
 
 from ..core.trade_plan import TradePlan
@@ -11,6 +10,11 @@ from ..core.types import OrderStatus, PriceType, Side
 from ..security.trade_limits import TradeRateGuard, verify_hard_limits
 from ..tdx import parser
 from ..tdx.client import TdxClient, TdxError, TdxTimeoutError
+from .plan_state import (
+    DECISION_DUPLICATE,
+    DECISION_UNKNOWN,
+    PlanStateStore,
+)
 
 log = logging.getLogger(__name__)
 
@@ -28,9 +32,9 @@ class PlanExecutor:
         self.shared_report_dir = shared_report_dir
         self.trade_log_file = os.path.join(shared_report_dir, trade_log_file)
         self.state_dir = state_dir
-        # 幂等去重：check-then-add 必须原子（trade 槽 2 并发 + file_sync 同进程）
-        self._executed_plans: OrderedDict[str, bool] = OrderedDict()
+        # 持久化幂等：内存只做进程内互斥，跨重启靠按日 JSON。
         self._dedup_lock = threading.Lock()
+        self._plan_state = PlanStateStore(state_dir or shared_report_dir)
         self._account_id = -1          # 未显式指定则用 0
         # 写死的交易硬上限：299/秒、1999/日（见 security/trade_limits.py）
         verify_hard_limits()
@@ -41,12 +45,15 @@ class PlanExecutor:
         self._plan_deadline_s = 20.0
 
     def resolve_account_id(self, account: str, account_type: str) -> int:
-        """用户指定账号则取句柄, 否则默认 0."""
+        """用户指定账号则取句柄；显式账号解析失败必须 fail-closed。"""
         if account:
             aid = self.tdx.stock_account(account=account, account_type=account_type)
             if aid >= 0:
                 return aid
-            log.warning(f"stock_account 返回句柄 {aid}, 回退默认 0")
+            raise ValueError(
+                f"account={account!r} 解析失败（stock_account 返回 {aid}）；"
+                "拒绝回退 0 号账户，避免把单下到别的账户"
+            )
         return 0
 
     # ---- 交易记录同步 ----
@@ -65,17 +72,34 @@ class PlanExecutor:
     # ---- 主流程 ----
 
     def execute_plan(self, plan: TradePlan) -> dict:
+        # 跨重启幂等：started/unknown 绝不自动重放；done/partial/rejected 返回 duplicate。
         with self._dedup_lock:
-            if plan.plan_id in self._executed_plans:
+            decision = self._plan_state.classify(plan.plan_id)
+            if decision == DECISION_UNKNOWN:
+                return {
+                    "plan_id": plan.plan_id, "status": "unknown",
+                    "message": "上次执行已开始但未确认完成；请核对柜台后人工处理",
+                }
+            if decision == DECISION_DUPLICATE:
                 return {"plan_id": plan.plan_id, "status": "duplicate",
                         "message": "plan 已执行过"}
-            self._executed_plans[plan.plan_id] = True
-            if len(self._executed_plans) > 100000:
-                self._executed_plans.popitem(last=False)
+            try:
+                self._plan_state.mark(plan.plan_id, "started")
+            except OSError as e:
+                log.error(f"plan 状态落盘失败，拒绝执行 {plan.plan_id}: {e}")
+                return {"plan_id": plan.plan_id, "status": "rejected",
+                        "message": f"plan 状态无法持久化，拒绝执行: {e}"}
 
         self.log_trade({"event": "plan_received", "plan": plan.to_dict()})
         deadline = time.monotonic() + self._plan_deadline_s
-        account_id = self.resolve_account_id(plan.account, plan.account_type)
+        try:
+            account_id = self.resolve_account_id(plan.account, plan.account_type)
+        except (ValueError, TdxError) as e:
+            self._mark_done(plan.plan_id, "rejected", error=str(e))
+            self.log_trade({"event": "plan_rejected", "plan_id": plan.plan_id,
+                            "error": str(e)})
+            return {"plan_id": plan.plan_id, "status": "rejected",
+                    "message": f"账户解析失败: {e}"}
 
         orders_out = []
         statuses = []
@@ -88,7 +112,15 @@ class PlanExecutor:
                     o, "error", None, "计划总超时，未执行（勿重试）"))
                 statuses.append("rejected")
                 continue
-            result = self._execute_one(account_id, o, plan)
+            try:
+                result = self._execute_one(account_id, o, plan)
+            except Exception as e:  # noqa: BLE001 - 已发单可能已在柜台
+                log.error(f"plan {plan.plan_id} 单笔执行异常: {e}", exc_info=True)
+                self._mark_done(plan.plan_id, "unknown", error=str(e))
+                orders_out.append(self._order_out(
+                    o, "error", None, f"执行异常，结果未知（勿重试）: {e}"))
+                statuses.append("rejected")
+                break
             orders_out.append(result)
             if result["status"] == "filled":
                 statuses.append("filled")
@@ -101,6 +133,13 @@ class PlanExecutor:
         if not orders_out:
             overall = "rejected"
 
+        try:
+            state = self._plan_state.get(plan.plan_id) or {}
+        except Exception:  # noqa: BLE001
+            state = {}
+        if state.get("status") != "unknown":
+            self._mark_done(plan.plan_id, overall)
+
         report = {
             "plan_id": plan.plan_id,
             "status": overall,
@@ -110,27 +149,22 @@ class PlanExecutor:
         self.log_trade({"event": "plan_done", "plan_id": plan.plan_id, "status": overall})
         return report
 
+    def _mark_done(self, plan_id: str, status: str, **fields) -> None:
+        try:
+            self._plan_state.mark(plan_id, status, **fields)
+        except OSError as e:
+            # 状态写不进去不能改变已发生的下单事实；只能告警。
+            log.error(f"plan 状态写盘失败 {plan_id} status={status}: {e}")
+
     # ---- 单笔下单 ----
 
     def _execute_one(self, account_id: int, order, plan: TradePlan) -> dict:
         side = Side(order.side)
         stock = order.stock_code
 
-        # 幂等: 查今日委托是否已存在同代码同方向
-        # BSFlag=0(买)/1(卖), 缺失时用 WtVol 符号兜底
-        try:
-            existing = self.tdx.query_stock_orders(account_id, stock_code=stock)
-            want_flag = 1 if side == Side.SELL else 0
-            for eo in existing:
-                flag = eo.get("BSFlag")
-                if flag in (None, ""):
-                    flag = 1 if float(eo.get("WtVol") or 0) < 0 else 0
-                if int(float(flag)) == want_flag and eo.get("Status") in ("3", 3):
-                    log.info(f"{stock} 已有成交委托, 跳过重复下单")
-                    return self._order_out(order, "duplicate", None,
-                                           "当日已有同方向成交, 跳过")
-        except TdxError as e:
-            log.warning(f"查委托失败(继续): {e}")
+        # 注：旧实现在这里按「当日已有同方向成交」跳过整笔，会挡住合法的
+        # 加仓/分批卖。plans 的幂等已由 plan_id + 持久化状态承担，单笔不再
+        # 用宽泛的当日方向判据。
 
         # 卖前校验可用持仓
         if side == Side.SELL:

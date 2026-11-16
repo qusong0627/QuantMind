@@ -12,6 +12,8 @@
   "rpc": {
     "timeout_s": 15,
     "queue_blpop_s": 0.5,
+    "inflight_ttl_s": 86400,
+    "processing_max": 5000,
     "trade_min_interval_s": 3.0,
     "trade_burst": 3,
     "internal_trade_min_interval_s": 2.0,
@@ -24,7 +26,9 @@
   "positions": {
     "enabled": true,
     "interval_s": 10,
-    "ttl_s": 120
+    "ttl_s": 120,
+    "asset_refresh_s": 60,
+    "asset_stale_s": 120
   },
   "quotes": {
     "enabled": true,
@@ -120,6 +124,8 @@
     "bridge_restart_after_s": 60,
     "bridge_restart_max_per_hour": 6,
     "bridge_restart_wait_s": 15,
-    "bridge_start_cmd": "C:\\<QMT_TOOLS>\\start_pipe_bridge.cmd"
+    "bridge_start_cmd": "C:\\<QMT_TOOLS>\\start_pipe_bridge.cmd",
+    "bridge_pid_file": "C:\\<QMT_TOOLS>\\data\\pipe_bridge.pid",
+    "bridge_script": "C:\\<QMT_TOOLS>\\qmt-external-bridge\\pipe_redis_bridge.py"
   }
 }

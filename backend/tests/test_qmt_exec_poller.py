@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from backend.services.trade_shared.models.enums import OrderStatus
 from backend.services.live_trading.services import qmt_exec_poller as mod
 from backend.services.live_trading.services.qmt_exec_poller import QmtExecPoller
@@ -268,6 +270,38 @@ class TestPollOnce:
         assert second["changed"] == 0  # (状态, 成交量) 未变化 → 不重复落库
         assert apply.await_count == 1
         assert session.commits == 1
+
+    def test_commit_failure_does_not_mark_seen(self) -> None:
+        """commit 失败时本轮回报不得进 seen；下一轮必须重投。"""
+        item = {
+            "order_sysid": "123",
+            "order_remark": "qmabc",
+            "status": "FILLED",
+            "traded_volume": 100,
+            "traded_price": 10.5,
+        }
+        poller = _make_poller(FakeClient(orders=[item]))
+        failing = FakeSession()
+
+        async def _boom():
+            raise RuntimeError("db down")
+
+        failing.commit = _boom  # type: ignore[method-assign]
+        apply = AsyncMock(return_value=OrderStatus.FILLED)
+        with (
+            patch.object(
+                QmtExecPoller, "_resolve", AsyncMock(return_value=_fake_order())
+            ),
+            patch.object(mod, "apply_execution_report", apply),
+            patch.object(QmtExecPoller, "_has_trade", AsyncMock(return_value=True)),
+        ):
+            with pytest.raises(RuntimeError):
+                _run_poll(poller, failing)
+            assert poller._seen_orders == {}
+            retry = _run_poll(poller, FakeSession())
+        assert retry["changed"] == 1
+        assert "123" in poller._seen_orders
+        assert apply.await_count == 2
 
     def test_trade_dedup(self) -> None:
         order_item = {

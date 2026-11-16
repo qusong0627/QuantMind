@@ -188,19 +188,29 @@ class QmtExecPoller:
         changed = 0
         async with self._session() as db:
             touched: list[tuple[Any, Any]] = []
+            # seen 变更先放本地，commit 成功后才落到内存缓存：否则 commit 失败
+            # 时这笔回报已被标"看过"，下一轮不会再写库（审计 High）。
+            pending_orders: dict[str, tuple[str, float]] = {}
+            pending_trades: set[str] = set()
             # 先落真实成交明细、再处理委托回报：反过来的话，委托回报会先补一条
             # 合成成交，随后到达的成交明细又入账一次（同一笔成交双计）。
             # 分轮之后顺序不变：trades 轮只落成交，orders 轮只落委托。
             if trades is not None:
                 touched += await self._sync_trades(
-                    db, trades, strategy_name=strategy_name
+                    db, trades, strategy_name=strategy_name,
+                    pending_trades=pending_trades,
                 )
             if orders is not None:
                 touched += await self._sync_orders(
-                    db, orders, strategy_name=strategy_name
+                    db, orders, strategy_name=strategy_name,
+                    pending_orders=pending_orders,
                 )
-            if touched:
+            if pending_orders or pending_trades:
                 await db.commit()
+                # 只有 commit 成功才承认"已看过"。
+                self._seen_orders.update(pending_orders)
+                self._seen_trades.update(pending_trades)
+            if touched:
                 redis = self._redis_handle()
                 for order, status in touched:
                     publish_order_event(redis, order, status)
@@ -263,16 +273,19 @@ class QmtExecPoller:
 
     # -- 委托 -----------------------------------------------------------
     async def _sync_orders(
-        self, db: Any, orders: list[dict[str, Any]], *, strategy_name: str
+        self, db: Any, orders: list[dict[str, Any]], *, strategy_name: str,
+        pending_orders: dict[str, tuple[str, float]] | None = None,
     ) -> list[tuple[Any, Any]]:
         touched: list[tuple[Any, Any]] = []
+        seen_target = self._seen_orders if pending_orders is None else pending_orders
         for item in orders:
             if not self._is_ours(item, strategy_name):
                 continue
             key = self._order_key(item)
             status = str(item.get("status") or "")
             traded_volume = float(item.get("traded_volume") or 0)
-            if self._seen_orders.get(key) == (status, traded_volume):
+            if (seen_target.get(key) if key in seen_target
+                    else self._seen_orders.get(key)) == (status, traded_volume):
                 continue
 
             order = await self._resolve(db, item)
@@ -302,7 +315,7 @@ class QmtExecPoller:
                 report_symbol=str(item.get("symbol") or ""),
                 report_side=str(item.get("side") or ""),
             )
-            self._seen_orders[key] = (status, traded_volume)
+            seen_target[key] = (status, traded_volume)
             if new_status != prev_status:
                 touched.append((order, new_status))
                 logger.info(
@@ -374,14 +387,16 @@ class QmtExecPoller:
 
     # -- 成交 -----------------------------------------------------------
     async def _sync_trades(
-        self, db: Any, trades: list[dict[str, Any]], *, strategy_name: str
+        self, db: Any, trades: list[dict[str, Any]], *, strategy_name: str,
+        pending_trades: set[str] | None = None,
     ) -> list[tuple[Any, Any]]:
         touched: list[tuple[Any, Any]] = []
+        seen_target = self._seen_trades if pending_trades is None else pending_trades
         for item in trades:
             if not self._is_ours(item, strategy_name):
                 continue
             trade_id = self._trade_key(item)
-            if not trade_id or trade_id in self._seen_trades:
+            if not trade_id or trade_id in seen_target or trade_id in self._seen_trades:
                 continue
             volume = float(item.get("traded_volume") or 0)
             if volume <= 0:
@@ -416,7 +431,7 @@ class QmtExecPoller:
                 report_symbol=str(item.get("symbol") or ""),
                 report_side=str(item.get("side") or ""),
             )
-            self._seen_trades.add(trade_id)
+            seen_target.add(trade_id)
             if new_status != prev_status:
                 touched.append((order, new_status))
             logger.info(

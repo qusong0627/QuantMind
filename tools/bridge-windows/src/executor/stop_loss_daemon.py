@@ -7,7 +7,15 @@ from datetime import datetime
 
 from ..core.types import PriceType, Side
 from ..executor.order_tracker import atomic_write
-from ..tdx.client import TdxClient, TdxError
+from ..tdx.client import TdxClient, TdxError, TdxTimeoutError
+from .exit_result import (
+    KIND_ERROR,
+    KIND_NO_POSITION,
+    KIND_UNKNOWN,
+    ExitResult,
+    apply_exit_outcome,
+    classify_order_result,
+)
 
 log = logging.getLogger(__name__)
 
@@ -98,8 +106,16 @@ class StopLossDaemon:
 
     def _tick(self) -> None:
         dirty = False
+        now = datetime.now().timestamp()
         for code, it in list(self._items.items()):
             if not it["enabled"]:
+                continue
+            # 失败退避窗内不重复触发（超时/拒单/无仓都保留规则）。
+            try:
+                retry_at = float(it.get("retry_after_ts") or 0.0)
+            except (TypeError, ValueError):
+                retry_at = 0.0
+            if retry_at > now:
                 continue
             try:
                 price = self.tdx.get_latest_price(code)
@@ -113,13 +129,33 @@ class StopLossDaemon:
                 dirty = True
 
             trigger, reason = self._check(it, price)
-            if trigger:
-                log.warning(f"[{reason}] {code} 现价 {price}")
-                self._execute_exit(it, code, reason, price)
-                it["enabled"] = False
-                dirty = True
+            if not trigger:
+                continue
+            log.warning(f"[{reason}] {code} 现价 {price}")
+            result = self._execute_exit(it, code, reason, price)
+            self._items[code] = apply_exit_outcome(it, result, now)
+            if not result.is_success:
+                # 保留 enabled，退避 + 告警；不再"卖失败就永久停用"。
+                log.error(
+                    f"{code} 止损退出未成功 kind={result.kind}: {result.detail}"
+                )
+                self._log_exit_failure(code, reason, result, price)
+            dirty = True
         if dirty:
             self.save()
+
+    def _log_exit_failure(self, code: str, reason: str, result: ExitResult,
+                          price: float) -> None:
+        if not self.trade_log:
+            return
+        try:
+            self.trade_log({
+                "event": "sltp_exit_failed", "stock": code,
+                "reason": reason, "trigger_price": price,
+                "result": result.kind, "msg": result.detail,
+            })
+        except Exception as e:  # noqa: BLE001 - 日志失败不影响规则
+            log.warning(f"写止损失败记录失败(忽略): {e}")
 
     def _check(self, it: dict, price: float):
         entry = it["entry_price"]
@@ -140,8 +176,9 @@ class StopLossDaemon:
                 return True, f"移动止损 price={price:.2f} <= {trail:.2f} (最高 {highest:.2f})"
         return None, None
 
-    def _execute_exit(self, it: dict, code: str, reason: str, price: float) -> None:
-        """触发后市价卖出."""
+    def _execute_exit(self, it: dict, code: str, reason: str,
+                      price: float) -> ExitResult:
+        """触发后市价卖出；返回三态结果，调用方据此决定是否停用规则。"""
         volume = it["volume"]
         try:
             positions = self.tdx.query_stock_positions(self.account_id)
@@ -149,17 +186,29 @@ class StopLossDaemon:
                           if p.get("Code") == code), 0)
             if avail <= 0:
                 log.warning(f"{code} 无可卖持仓, 跳过止损卖出")
-                return
+                return ExitResult(KIND_NO_POSITION, "no available position")
             volume = min(volume, avail) if volume else avail
             res = self.tdx.order_stock(self.account_id, code, Side.SELL, volume,
                                        PriceType.MARKET, 0.0)
-            value = str(res.get("Value", "0"))
+            result = classify_order_result(
+                res.get("Value", "0"), str(res.get("Msg", "") or ""))
             record = {"event": "sltp_exit", "stock": code, "reason": reason,
                       "trigger_price": price, "volume": volume,
-                      "order_id": str(res.get("Wtbh", "")), "value": value,
+                      "order_id": str(res.get("Wtbh", "")),
+                      "value": str(res.get("Value", "0")),
+                      "result": result.kind,
                       "msg": res.get("Msg", "")}
             log.info(f"止损卖出 {code}: {record}")
             if self.trade_log:
                 self.trade_log(record)
+            return ExitResult(
+                result.kind, result.detail, str(res.get("Wtbh", "") or ""))
+        except TdxTimeoutError as e:
+            log.error(f"止损卖出 {code} 超时(结果未知): {e}")
+            return ExitResult(KIND_UNKNOWN, f"timeout: {e}")
         except TdxError as e:
             log.error(f"止损卖出 {code} 失败: {e}")
+            return ExitResult(KIND_ERROR, str(e))
+        except Exception as e:  # noqa: BLE001 - 未预期异常也必须保留规则
+            log.error(f"止损卖出 {code} 异常: {e}", exc_info=True)
+            return ExitResult(KIND_ERROR, f"{type(e).__name__}: {e}")

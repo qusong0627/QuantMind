@@ -9,11 +9,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+from types import SimpleNamespace
 
 from sqlalchemy.dialects import postgresql
 
 from backend.services.trade.services import close_cleanup_audit_task as audit
+from backend.services.trade_shared.models.enums import OrderStatus
 
 
 def _sql(clause) -> str:
@@ -78,3 +81,139 @@ def test_classify_close_state_flags_counter_terminal() -> None:
         local_orders=[{"status": "submitted", "exchange_order_id": "10236"}],
     )
     assert result["local_stale"][0]["reason"] == "counter_terminal"
+
+
+def test_cross_session_unverified_never_mutates() -> None:
+    action, target = audit.classify_cross_session_order(
+        status="submitted",
+        exchange_order_id="10236",
+        counter_orders=[],
+        counter_ok=False,
+    )
+    assert action == "unverified" and target is None
+
+
+def test_cross_session_counter_terminal_maps_local_status() -> None:
+    action, target = audit.classify_cross_session_order(
+        status="submitted",
+        exchange_order_id="10236",
+        counter_orders=[{"order_id": "10236", "status": "FILLED"}],
+        counter_ok=True,
+    )
+    assert action == "terminal" and target == "filled"
+
+
+def test_cross_session_counter_missing_only_then_expires() -> None:
+    action, target = audit.classify_cross_session_order(
+        status="submitted",
+        exchange_order_id="10236",
+        counter_orders=[],
+        counter_ok=True,
+    )
+    assert action == "expire" and target is None
+
+
+def test_cross_session_counter_open_is_kept() -> None:
+    action, target = audit.classify_cross_session_order(
+        status="submitted",
+        exchange_order_id="10236",
+        counter_orders=[{"order_id": "10236", "status": "SUBMITTED"}],
+        counter_ok=True,
+    )
+    assert action == "keep_open" and target == "SUBMITTED"
+
+
+class _Result:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _Session:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.commits = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, _stmt):
+        return _Result(self.rows)
+
+    async def commit(self):
+        self.commits += 1
+
+
+def _order(**over):
+    base = {
+        "status": OrderStatus.SUBMITTED,
+        "submitted_at": datetime(2026, 10, 29, 10, 0),
+        "exchange_order_id": "10236",
+        "client_order_id": "mir-1",
+        "symbol": "600036.SH",
+        "remarks": "",
+    }
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_expire_does_not_mutate_when_counter_unavailable(monkeypatch) -> None:
+    order = _order()
+    session = _Session([order])
+
+    async def _run():
+        from backend.shared import database_manager_v2
+        monkeypatch.setattr(database_manager_v2, "get_session",
+                            lambda **kwargs: session)
+        return await audit.expire_cross_session_orphans(
+            "20261030", counter_orders=[], counter_ok=False)
+
+    result = asyncio.run(_run())
+    assert result["unverified"]
+    assert order.status == OrderStatus.SUBMITTED
+    assert session.commits == 0
+
+
+def test_expire_marks_only_counter_missing(monkeypatch) -> None:
+    order = _order()
+    session = _Session([order])
+
+    async def _run():
+        from backend.shared import database_manager_v2
+        monkeypatch.setattr(database_manager_v2, "get_session",
+                            lambda **kwargs: session)
+        return await audit.expire_cross_session_orphans(
+            "20261030", counter_orders=[], counter_ok=True)
+
+    result = asyncio.run(_run())
+    assert result["expired"]
+    assert order.status == OrderStatus.EXPIRED
+    assert session.commits == 1
+
+
+def test_expire_follows_counter_terminal(monkeypatch) -> None:
+    order = _order()
+    session = _Session([order])
+
+    async def _run():
+        from backend.shared import database_manager_v2
+        monkeypatch.setattr(database_manager_v2, "get_session",
+                            lambda **kwargs: session)
+        return await audit.expire_cross_session_orphans(
+            "20261030",
+            counter_orders=[{"order_id": "10236", "status": "FILLED"}],
+            counter_ok=True,
+        )
+
+    result = asyncio.run(_run())
+    assert result["resolved"][0]["status"] == "filled"
+    assert order.status == OrderStatus.FILLED
+    assert session.commits == 1

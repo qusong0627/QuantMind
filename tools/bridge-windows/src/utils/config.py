@@ -47,6 +47,8 @@ sltp_daemon:
   # 与主系统打架的止损」，对一个共享桥上的真钱账户过于危险。
   # 需要它时在 config.yaml 显式写 enabled: true（但仍须确认主系统未接管守护单）。
   enabled: false
+  # 唯一所有者：默认 quantmind。只有显式改成 bridge 且 enabled=true 才启动。
+  owner: quantmind
   poll_interval_seconds: 5
 order_tracking:
   state_file: "./data/active_orders.json"

@@ -49,12 +49,17 @@ CONFIG_PATH = os.path.join(BASE, 'bridge_config.json')
 STATE_KEY = 'qm:qmt:strategy:watchdog'
 METRICS_KEY = 'qm:qmt:pipe:metrics'
 QUEUE_KEY_TMPL = 'bigqmt:rpc:queue:%s'
+PROCESSING_KEY_TMPL = 'bigqmt:rpc:processing:%s'
+INFLIGHT_KEY_TMPL = 'qm:qmt:pipe:inflight:%s'
 
-#: 订单/撤单类方法：出现即禁止 reload（在途委托不能被 reset 打断）。
-#: 写方法与 pipe_redis_bridge.is_order_method 同源，另加撤单。
+#: 订单/撤单类方法：出现即禁止 reload/重启（在途委托不能被 reset 打断）。
+#: 与 bridge_gates.ORDER_LIKE_METHODS 同源；这里保留一份独立常量，避免
+#: 看门狗在极小部署里因导入失败而失去保护。
 ORDER_METHODS = frozenset({
-    'order_stock', 'passorder', 'submit_order',
-    'cancel_order_stock', 'cancel_order',
+    'order_stock', 'order_stock_async', 'order_stock_batch', 'passorder',
+    'submit_order', 'submit_orders_batch',
+    'cancel_order_stock', 'cancel_order_stock_sysid',
+    'cancel_order_stock_batch', 'cancel_order', 'cancel_orders_batch',
 })
 
 DEFAULT_CONFIG = {
@@ -77,6 +82,8 @@ DEFAULT_CONFIG = {
     'bridge_restart_after_s': 60,
     'bridge_restart_max_per_hour': 6,
     'bridge_start_cmd': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\start_pipe_bridge.cmd',
+    'bridge_pid_file': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\data\pipe_bridge.pid',
+    'bridge_script': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\qmt-external-bridge\pipe_redis_bridge.py',
     'bridge_restart_wait_s': 15.0,
     # 自愈顺序：首选重启伴生桥（断管道解锁主线程），reload_deployment 降为兜底。
     # 2026-11-10 实测：reload 只重载 deployment、不重跑 init，行情 Tap 注册随之丢失
@@ -142,6 +149,40 @@ def queue_has_order_requests(items, decode_payload=None) -> bool:
         if method in ORDER_METHODS:
             return True
     return False
+
+
+def inflight_records_have_orders(values) -> bool:
+    """inflight hash 的原始值里是否有 inflight/unknown 订单。"""
+    for raw in values or ():
+        try:
+            doc = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+        except Exception:  # noqa: BLE001 - 解不开按有单处理
+            return True
+        state = str((doc or {}).get('state') or '')
+        if state in ('inflight', 'unknown'):
+            return True
+    return False
+
+
+def redis_has_order_intent(redis_client, account_id: str, decode_payload=None) -> bool:
+    """队列 + processing + inflight 三处任一有单/未知，都算"在途"。
+
+    旧实现只看 queue：BLPOP 已取走、进程随后崩溃的那一笔在队列里已经消失，
+    看门狗却会重启桥并再次拉起，结果未知的单因此无人核对（审计 High）。
+    """
+    if not account_id:
+        return False
+    try:
+        records = redis_client.hvals(INFLIGHT_KEY_TMPL % account_id) or []
+    except Exception:  # noqa: BLE001 - 读不到按有单处理
+        return True
+    if inflight_records_have_orders(records):
+        return True
+    try:
+        items = redis_client.lrange(PROCESSING_KEY_TMPL % account_id, 0, -1) or []
+    except Exception:  # noqa: BLE001
+        return True
+    return queue_has_order_requests(items, decode_payload=decode_payload)
 
 
 def evaluate(
@@ -409,41 +450,101 @@ def _save_state(redis_client, decision: Decision, probe: Probe, cfg: dict) -> No
         pass
 
 
+def _read_bridge_pid(cfg: dict) -> int:
+    """读桥写出的精确 PID 文件，并校验命令行确实是同一脚本。"""
+    path = str(cfg.get('bridge_pid_file') or '')
+    if not path:
+        return 0
+    try:
+        with open(path, encoding='utf-8') as fh:
+            doc = json.load(fh)
+        pid = int((doc or {}).get('pid') or 0)
+    except (OSError, ValueError, TypeError):
+        return 0
+    if pid <= 0:
+        return 0
+    try:
+        import psutil  # noqa: PLC0415
+
+        proc = psutil.Process(pid)
+        cmdline = ' '.join(proc.cmdline())
+    except Exception:  # noqa: BLE001 - 进程不在/无 psutil
+        return 0
+    expected = os.path.normcase(os.path.abspath(
+        str(cfg.get('bridge_script') or '')))
+    actual = os.path.normcase(cmdline)
+    if expected and expected not in actual and 'pipe_redis_bridge' not in actual:
+        return 0
+    return pid
+
+
+def _kill_pid(pid: int) -> bool:
+    try:
+        import psutil  # noqa: PLC0415
+
+        psutil.Process(pid).kill()
+        return True
+    except Exception:  # noqa: BLE001 - 没有 psutil 走 taskkill
+        try:
+            import subprocess  # noqa: PLC0415
+
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                           capture_output=True, timeout=10)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+
 def _restart_bridge(cfg: dict) -> bool:
     """杀掉伴生桥并脱离本会话重新拉起。成功返回 True。
 
-    只动 pipe_redis_bridge 进程（按命令行匹配，绝不按进程名杀——容器里所有
-    服务都叫 python 的教训同理）。拉起用 DETACHED_PROCESS，避免随本进程退出。
+    只动 **PID 文件指向的那个进程**（并校验命令行是同一脚本）；PID 文件缺失
+    时才退回精确脚本路径扫描。绝不按 ``pipe_redis_bridge`` 子串扫杀——容器/
+    桌面里同名的 python.exe 不止一个，子串匹配会误杀别的进程。
     """
     import subprocess  # noqa: PLC0415
 
     killed = False
-    try:
-        import psutil  # noqa: PLC0415
-
-        for proc in psutil.process_iter(['pid', 'cmdline']):
-            try:
-                cmdline = ' '.join(proc.info.get('cmdline') or [])
-            except Exception:  # noqa: BLE001
-                continue
-            if 'pipe_redis_bridge' in cmdline:
-                proc.kill()
-                killed = True
-    except Exception:  # noqa: BLE001 - 没有 psutil 就退回 wmic/taskkill
+    pid = _read_bridge_pid(cfg)
+    if pid:
+        killed = _kill_pid(pid)
+    if not killed:
         try:
-            out = subprocess.run(
-                ['wmic', 'process', 'where', "name='python.exe'", 'get',
-                 'ProcessId,CommandLine', '/format:csv'],
-                capture_output=True, text=True, timeout=15).stdout
-            for line in out.splitlines():
-                if 'pipe_redis_bridge' in line:
-                    pid = line.rstrip().split(',')[-1].strip()
-                    if pid.isdigit():
-                        subprocess.run(['taskkill', '/F', '/PID', pid],
+            import psutil  # noqa: PLC0415
+
+            expected = os.path.normcase(os.path.abspath(
+                str(cfg.get('bridge_script') or '')))
+            for proc in psutil.process_iter(['pid', 'cmdline']):
+                try:
+                    cmdline = proc.info.get('cmdline') or []
+                except Exception:  # noqa: BLE001
+                    continue
+                if any(
+                    expected
+                    and os.path.normcase(os.path.abspath(str(part))) == expected
+                    for part in cmdline
+                ):
+                    proc.kill()
+                    killed = True
+        except Exception:  # noqa: BLE001 - 没有 psutil 就退回 wmic/taskkill
+            expected = str(cfg.get('bridge_script') or '')
+            if not expected:
+                return False
+            try:
+                out = subprocess.run(
+                    ['wmic', 'process', 'where', "name='python.exe'", 'get',
+                     'ProcessId,CommandLine', '/format:csv'],
+                    capture_output=True, text=True, timeout=15).stdout
+                for line in out.splitlines():
+                    if not expected or expected.lower() not in line.lower():
+                        continue
+                    pid_text = line.rstrip().split(',')[-1].strip()
+                    if pid_text.isdigit():
+                        subprocess.run(['taskkill', '/F', '/PID', pid_text],
                                        capture_output=True, timeout=10)
                         killed = True
-        except Exception:  # noqa: BLE001
-            return False
+            except Exception:  # noqa: BLE001
+                return False
     if not killed:
         # 桥本来就没在跑：等价于需要拉起，继续。
         pass
@@ -512,7 +613,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         redis_client = _connect_redis(cfg)
         items = redis_client.lrange(QUEUE_KEY_TMPL % cfg['account_id'], 0, -1)
-        queue_has_orders = queue_has_order_requests(items)
+        queue_has_orders = (
+            queue_has_order_requests(items)
+            or redis_has_order_intent(redis_client, cfg['account_id'])
+        )
     except Exception as exc:  # noqa: BLE001 - 读不到队列按有单处理（fail-closed）
         queue_has_orders = True
         print(f'watchdog: queue check failed ({exc}); treating as order-in-flight',

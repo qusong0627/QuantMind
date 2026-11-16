@@ -209,3 +209,15 @@ def test_preflight_actually_registers_the_check():
     assert 'add_check(\n            "bridge_sltp_disarmed"' in src or \
         '"bridge_sltp_disarmed"' in src, "preflight 未接入桥侧止损检查"
     assert "check_bridge_sltp_disarmed" in src, "preflight 未调用 check_bridge_sltp_disarmed"
+
+
+def test_main_requires_explicit_bridge_owner():
+    """即使 config 写 enabled=true，owner 不是 bridge 也不能启动 daemon。"""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    bridge = root / "tools/bridge-windows"
+    if not bridge.exists():
+        pytest.skip("容器 /app 未挂载 tools/")
+    src = (bridge / "main.py").read_text(encoding="utf-8")
+    assert "sltp_daemon.owner" in src
+    assert 'if owner != "bridge"' in src
+    assert 'cfg.get("sltp_daemon.enabled", False)' in src

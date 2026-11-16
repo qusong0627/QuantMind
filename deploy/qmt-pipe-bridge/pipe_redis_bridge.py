@@ -46,10 +46,9 @@ _INSTANCE_SOCK = None
 _INSTANCE_LOCK_PORT = 17719
 
 
-def _acquire_single_instance():
+def _try_bind_instance_lock():
+    """尝试绑定单实例 TCP 锁；True=拿到，False=已有实例，异常=不拦启动。"""
     global _INSTANCE_SOCK
-    if os.name != 'nt':
-        return True
     try:
         import socket
 
@@ -67,6 +66,24 @@ def _acquire_single_instance():
         return True
 
 
+def _acquire_single_instance():
+    global _INSTANCE_SOCK
+    if os.name != 'nt':
+        return True
+    if _try_bind_instance_lock():
+        return True
+    # 自重启：旧进程先 spawn 新进程、随后 os._exit(0)。新进程启动时旧进程
+    # 可能还占着 17719，若立即退出会被看成"重复实例"，留下无桥空窗
+    # （2026-11-16 上线实测）。reload 子进程给旧进程最多 5s 释放锁。
+    if os.environ.get('QM_RELOAD_CHILD') != '1':
+        return False
+    for _ in range(20):
+        time.sleep(0.25)
+        if _try_bind_instance_lock():
+            return True
+    return False
+
+
 if not _acquire_single_instance():
     print('%s another pipe bridge is already running; exiting'
           % time.strftime('%Y-%m-%d %H:%M:%S'), file=sys.stderr, flush=True)
@@ -76,15 +93,22 @@ import redis  # noqa: E402
 from bigqmt_signal_trader.transports.pipe_transport import NamedPipeTransport  # noqa: E402
 from bigqmt_signal_trader.redis_rpc import decode_rpc_request_payload  # noqa: E402
 import bridge_gates  # noqa: E402
+import bridge_account_state as account_state  # noqa: E402
+import bridge_order_intent as order_intent  # noqa: E402
 
 CONFIG_PATH = os.path.join(BASE, 'bridge_config.json')
 LOG_PATH = os.path.join(BASE, '..', 'logs', 'pipe_bridge.log')
+PID_PATH = os.path.join(BASE, '..', 'data', 'pipe_bridge.pid')
 
 DEFAULT_CONFIG = {
     'redis': {'host': '127.0.0.1', 'port': 6379, 'db': 5},
     'account_id': '',  # set in bridge_config.json
     'pipe': {'name': 'bigqmt_rpc', 'connect_timeout_s': 3.0},
     'rpc': {'timeout_s': 15, 'queue_blpop_s': 0.5,
+            # 订单意图：原子取件 + inflight 记录；TTL 覆盖一个交易日即可。
+            # processing 列表是 BLMOVE 的落点，inflight hash 是"这笔单是谁、
+            # 走到哪一步"的可读账本；两者任一非空，看门狗都不得重启桥。
+            'inflight_ttl_s': 86400, 'processing_max': 5000,
             # 交易类 RPC 最小间隔：QMT 的 get_trade_detail_data 连续查询会阻塞，
             # 空载可自愈（2026-11-06 实测），把速率压下来是唯一可控变量。
             # 双桶：容器请求与桥内部轮询各自限速，互不饿死（内部抢光令牌会让
@@ -97,7 +121,10 @@ DEFAULT_CONFIG = {
     # worker 零延迟同时开跑，瞬间并发打到 QMT 单线程交易 API。错峰后同一时刻
     # 只有一个 worker 热身。
     'startup': {'grace_s': 8.0, 'step_s': 3.0},
-    'positions': {'enabled': True, 'interval_s': 10, 'ttl_s': 120},
+    'positions': {'enabled': True, 'interval_s': 10, 'ttl_s': 120,
+                  # 资产刷新比持仓慢（asset_refresh_s=60），stale 阈值必须
+                  # 独立且大于刷新周期；否则每轮正常刷新都会被误判陈旧。
+                  'asset_refresh_s': 60, 'asset_stale_s': 120},
     'quotes': {'enabled': True, 'tier_a_interval_s': 2, 'tier_b_interval_s': 10,
                'chunk': 25, 'max_symbols': 250, 'stale_after_s': 10,
                'indices': ['000001.SH', '399001.SZ', '000300.SH'], 'watchlist': []},
@@ -405,107 +432,458 @@ def _startup_delay(step: int) -> None:
         time.sleep(delay)
 
 
+# ---------------------------------------------------------------- A0. 订单意图
+def processing_key() -> str:
+    return 'bigqmt:rpc:processing:%s' % CFG.get('account_id')
+
+
+def inflight_key() -> str:
+    return 'qm:qmt:pipe:inflight:%s' % CFG.get('account_id')
+
+
+def _intent_ttl_s() -> int:
+    try:
+        return max(60, int(CFG.get('rpc.inflight_ttl_s') or 86400))
+    except (TypeError, ValueError):
+        return 86400
+
+
+def _load_intent(key):
+    if not key:
+        return None
+    try:
+        raw = R.get(key)
+        if not raw:
+            return None
+        return json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+    except Exception as exc:  # noqa: BLE001 - 读失败按"未知"处理，绝不重发
+        STATE.note_error('intent.load', exc)
+        return {'state': order_intent.STATE_UNKNOWN, 'error': repr(exc)}
+
+
+def _save_intent(key, record) -> None:
+    if not key:
+        return
+    try:
+        R.set(key, json.dumps(record, ensure_ascii=False, default=str),
+              ex=_intent_ttl_s())
+    except Exception as exc:  # noqa: BLE001 - 持久化失败不能把响应弄丢
+        STATE.note_error('intent.save', exc)
+
+
+def _store_inflight(req_id, req, raw, state='inflight', error='') -> bool:
+    if not req_id:
+        return False
+    payload = {
+        'request_id': str(req_id),
+        'method': str((req or {}).get('method') or ''),
+        'state': str(state),
+        'started_at': time.time(),
+        'raw': str(raw or ''),
+        'error': str(error or ''),
+    }
+    try:
+        R.hset(inflight_key(), str(req_id),
+               json.dumps(payload, ensure_ascii=False, default=str))
+        R.expire(inflight_key(), _intent_ttl_s())
+        return True
+    except Exception as exc:  # noqa: BLE001
+        STATE.note_error('inflight.store', exc)
+        return False
+
+
+def _clear_inflight(req_id) -> None:
+    if not req_id:
+        return
+    try:
+        R.hdel(inflight_key(), str(req_id))
+    except Exception as exc:  # noqa: BLE001
+        STATE.note_error('inflight.clear', exc)
+
+
+def _remove_processing(raw) -> None:
+    try:
+        R.lrem(processing_key(), 1, raw)
+    except Exception as exc:  # noqa: BLE001
+        STATE.note_error('processing.lrem', exc)
+
+
+def _pop_request(queue):
+    """原子取件：BLMOVE 把队首搬到 processing，再处理。
+
+    旧实现先 BLPOP 再送管道：一旦进程在两步之间挂掉，这笔单既不在队列、
+    也没有任何落点，看门狗只查队列就会把"结果未知"当成"没有在途单"。
+    Redis 7 的 BLMOVE 没有这个窗口。老 Redis 降级 BLPOP + 立即 RPUSH，
+    并明确记录仍有毫秒级窗口。
+    """
+    timeout = float(CFG.get('rpc.queue_blpop_s') or 0.5)
+    try:
+        return R.blmove(queue, processing_key(), timeout=timeout,
+                        src='LEFT', dest='LEFT')
+    except Exception as exc:  # noqa: BLE001
+        text = str(exc).lower()
+        if 'unknown command' not in text and 'not supported' not in text:
+            raise
+        log('BLMOVE unavailable, falling back to BLPOP+RPUSH: %r' % (exc,))
+        item = R.blpop(queue, timeout=timeout)
+        if not item:
+            return None
+        raw = item[1]
+        R.rpush(processing_key(), raw)
+        return raw
+
+
+def _reply_for_decision(decision, record, req):
+    req_id = (req or {}).get('request_id')
+    if decision == order_intent.DECISION_REPLAY:
+        if isinstance(record, dict):
+            response = record.get('response')
+            if isinstance(response, dict):
+                return response
+            # 旧版本缓存的是裸响应
+            if any(k in record for k in ('ok', 'data', 'error')):
+                return record
+        return {'request_id': req_id, 'ok': True, 'data': record}
+    if decision == order_intent.DECISION_CONFLICT:
+        return {
+            'request_id': req_id, 'ok': False,
+            'code': 'IDEMPOTENCY_CONFLICT', 'retriable': False,
+            'error': 'IDEMPOTENCY_CONFLICT: 同一业务键携带了不同订单参数，拒绝发送',
+        }
+    if decision == order_intent.DECISION_IN_PROGRESS:
+        return {
+            'request_id': req_id, 'ok': False,
+            'code': 'IDEMPOTENCY_IN_PROGRESS', 'retriable': False,
+            'error': 'IDEMPOTENCY_IN_PROGRESS: 同一业务键的订单仍在途，禁止重发',
+        }
+    return {
+        'request_id': req_id, 'ok': False,
+        'code': 'ORDER_RESULT_UNKNOWN', 'retriable': False,
+        'error': 'ORDER_RESULT_UNKNOWN: 订单结果未知，禁止重发；请核对柜台',
+    }
+
+
+def _send_order_intent(req, raw=None, reply_fn=None):
+    """订单写入的唯一出口：原子幂等 + inflight + 未知结果不可重试。
+
+    返回 ``(response, remove_processing)``。``remove_processing=False`` 表示
+    这是结果未知的单，processing 条目必须保留给看门狗/人工核对。
+    """
+    params = (req or {}).get('params') or {}
+    method = str((req or {}).get('method') or '')
+    account = str(CFG.get('account_id') or '')
+    req_id = str((req or {}).get('request_id') or next_request_id())
+    req['request_id'] = req_id
+    key = order_intent.idempotency_key(account, method, params)
+    fingerprint = order_intent.order_fingerprint(method, params)
+
+    record = None
+    claim_attempts = 0
+    while True:
+        existing = _load_intent(key) if key else None
+        decision = order_intent.classify_intent(existing, fingerprint)
+        if decision != order_intent.DECISION_NEW:
+            response = _reply_for_decision(decision, existing, req)
+            if reply_fn is not None:
+                try:
+                    reply_fn(req, response)
+                except Exception as exc:  # noqa: BLE001
+                    STATE.note_error('rpc.reply', exc)
+            return response, True
+        record = order_intent.make_intent_record(
+            account_id=account, method=method, params=params,
+            request_id=req_id, fingerprint=fingerprint, now=time.time(),
+            raw=raw,
+        )
+        if not key:
+            break
+        try:
+            claimed = R.set(key, json.dumps(record, ensure_ascii=False, default=str),
+                            nx=True, ex=_intent_ttl_s())
+        except Exception as exc:  # noqa: BLE001 - 幂等不可用就不发单
+            STATE.note_error('intent.claim', exc)
+            response = {
+                'request_id': req_id, 'ok': False,
+                'code': 'IDEMPOTENCY_UNAVAILABLE', 'retriable': False,
+                'error': 'IDEMPOTENCY_UNAVAILABLE: 幂等存储不可用，拒绝发送订单',
+            }
+            if reply_fn is not None:
+                try:
+                    reply_fn(req, response)
+                except Exception as reply_exc:  # noqa: BLE001
+                    STATE.note_error('rpc.reply', reply_exc)
+            return response, False
+        if claimed:
+            break
+        # GET 与 SETNX 之间被别人抢占：重读一次走 replay/in_progress 分支。
+        # 最多重试 3 次，避免存储异常导致自旋。
+        claim_attempts += 1
+        if claim_attempts >= 3:
+            response = {
+                'request_id': req_id, 'ok': False,
+                'code': 'IDEMPOTENCY_UNAVAILABLE', 'retriable': False,
+                'error': 'IDEMPOTENCY_UNAVAILABLE: 幂等键状态无法确认，拒绝发送订单',
+            }
+            if reply_fn is not None:
+                try:
+                    reply_fn(req, response)
+                except Exception as reply_exc:  # noqa: BLE001
+                    STATE.note_error('rpc.reply', reply_exc)
+            return response, False
+
+    if not _store_inflight(req_id, req, raw, state=order_intent.STATE_INFLIGHT):
+        # 意图落不了盘就不发单：否则进程崩了没人知道这笔单存在。
+        # 这笔没有真正发出，释放幂等占位，允许调用方在 Redis 恢复后重试。
+        if key:
+            try:
+                R.delete(key)
+            except Exception as exc:  # noqa: BLE001
+                STATE.note_error('intent.release', exc)
+        response = {
+            'request_id': req_id, 'ok': False,
+            'code': 'ORDER_INTENT_STORE_FAILED', 'retriable': False,
+            'error': 'ORDER_INTENT_STORE_FAILED: 订单意图无法持久化，拒绝发送',
+        }
+        if reply_fn is not None:
+            try:
+                reply_fn(req, response)
+            except Exception as reply_exc:  # noqa: BLE001
+                STATE.note_error('rpc.reply', reply_exc)
+        return response, False
+    try:
+        response = TR.send_request(
+            req, timeout_seconds=float(CFG.get('rpc.timeout_s') or 15))
+    except Exception as exc:  # noqa: BLE001 - 超时/断管 = 结果未知
+        error = '%s: %s' % (type(exc).__name__, exc)
+        if record is not None:
+            record = order_intent.mark_intent(
+                record, order_intent.STATE_UNKNOWN, now=time.time(), error=error)
+            _save_intent(key, record)
+        _store_inflight(req_id, req, raw,
+                        state=order_intent.STATE_UNKNOWN, error=error)
+        response = {
+            'request_id': req_id, 'ok': False,
+            'code': 'ORDER_RESULT_UNKNOWN', 'retriable': False,
+            'error': 'ORDER_RESULT_UNKNOWN: %s（禁止重发，请核对柜台）' % error,
+        }
+        if reply_fn is not None:
+            try:
+                reply_fn(req, response)
+            except Exception as reply_exc:  # noqa: BLE001
+                STATE.note_error('rpc.reply', reply_exc)
+        return response, False
+
+    if not isinstance(response, dict):
+        response = {'request_id': req_id, 'ok': False,
+                    'error': 'bad response type: %r' % (type(response),)}
+    if reply_fn is not None:
+        try:
+            reply_fn(req, response)
+        except Exception as exc:  # noqa: BLE001 - 单可能已发出，回报失败=未知
+            error = 'reply failed after send: %r' % (exc,)
+            if record is not None:
+                record = order_intent.mark_intent(
+                    record, order_intent.STATE_UNKNOWN, now=time.time(),
+                    error=error)
+                _save_intent(key, record)
+            _store_inflight(req_id, req, raw,
+                            state=order_intent.STATE_UNKNOWN, error=error)
+            STATE.note_error('rpc.reply', exc)
+            return {
+                'request_id': req_id, 'ok': False,
+                'code': 'ORDER_RESULT_UNKNOWN', 'retriable': False,
+                'error': 'ORDER_RESULT_UNKNOWN: 回报写入失败，禁止重发；请核对柜台',
+            }, False
+
+    state = (order_intent.STATE_DONE if response.get('ok')
+             else order_intent.STATE_REJECTED)
+    if record is not None:
+        record = order_intent.mark_intent(
+            record, state, now=time.time(), response=response)
+        _save_intent(key, record)
+    _clear_inflight(req_id)
+    return response, True
+
+
+def recover_processing() -> int:
+    """启动恢复：processing 里的订单只标 unknown，绝不重放。
+
+    BLMOVE 保证"取出来的条目一定落在 processing"。进程崩溃后这些条目就是
+    结果未知的订单：可能已到策略、也可能没有。重放会造第二笔；丢掉会让
+    看门狗以为没有在途单。正确做法是保留并向运维暴露。
+    """
+    queue = 'bigqmt:rpc:queue:%s' % CFG.get('account_id')
+    try:
+        items = R.lrange(processing_key(), 0, -1) or []
+    except Exception as exc:  # noqa: BLE001
+        STATE.note_error('processing.recover', exc)
+        return 0
+    unknown = 0
+    for index, raw in enumerate(items):
+        text = raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else str(raw)
+        try:
+            req = json.loads(decode_rpc_request_payload(text))
+        except Exception:  # noqa: BLE001 - 解不开按订单处理
+            req = None
+        method = str((req or {}).get('method') or '')
+        if req is None or order_intent.is_order_method(method):
+            req_id = str((req or {}).get('request_id') or 'recovered-%d-%s' % (
+                index, time.strftime('%H%M%S')))
+            _store_inflight(
+                req_id, req or {'method': method}, text,
+                state=order_intent.STATE_UNKNOWN,
+                error='bridge restarted with processing item; verify counter',
+            )
+            unknown += 1
+            continue
+        # 只读请求：重新入队，交给新进程重试；不写 inflight。
+        try:
+            R.lrem(processing_key(), 1, raw)
+            R.rpush(queue, raw)
+        except Exception as exc:  # noqa: BLE001
+            STATE.note_error('processing.requeue', exc)
+    if unknown:
+        log('recovered %d unresolved order intent(s) as UNKNOWN; no replay' % unknown)
+    return unknown
+
+
 def rpc_worker():
     account = str(CFG.get('account_id'))
     queue = 'bigqmt:rpc:queue:%s' % account
-    blpop_s = float(CFG.get('rpc.queue_blpop_s') or 0.5)
     log('rpc worker start queue=%s' % queue)
     _startup_delay(0)
     while not STATE.stop.is_set():
         try:
-            item = R.blpop(queue, timeout=blpop_s)
+            item = _pop_request(queue)
         except Exception as exc:
-            STATE.note_error('rpc.blpop', exc)
+            STATE.note_error('rpc.pop', exc)
             time.sleep(1)
             continue
-        if not item:
+        if item is None:
             continue
-        payload = item[1].decode('utf-8', 'replace') if isinstance(item[1], bytes) else item[1]
+        payload = item.decode('utf-8', 'replace') if isinstance(item, bytes) else item
+        keep_processing = False
         try:
-            req = json.loads(decode_rpc_request_payload(payload))
-        except Exception as exc:
-            STATE.note_error('rpc.decode', exc)
-            continue
-        method = str(req.get('method') or '')
-        with STATE.lock:
-            strategy_state = STATE.strategy_state
-        if bridge_gates.should_drop_request(method, strategy_state):
-            # 策略主线程已判定卡死：交易类只读请求立即失败，不转发。继续转发
-            # 只会占住单线程管道，QMT 重启后还会把这些积压回灌给新策略
-            # （2026-11-06：三次重启存活 12h → 6min → 3min，积压一轮比一轮多）。
-            resp = {
-                'request_id': req.get('request_id'), 'ok': False,
-                'error': 'STRATEGY_UNHEALTHY: 交易查询通道卡死，请求未转发'
-                         '（防止重启后积压回灌）',
-            }
-            STATE.note_error('rpc.drop_unhealthy', method)
+            try:
+                req = json.loads(decode_rpc_request_payload(payload))
+            except Exception as exc:
+                # 解不开的条目有可能是订单：保留并标 unknown，绝不静默丢。
+                STATE.note_error('rpc.decode', exc)
+                _store_inflight(
+                    'decode-%d' % int(time.time() * 1000),
+                    {'method': ''}, payload,
+                    state=order_intent.STATE_UNKNOWN,
+                    error='decode failed: %r' % (exc,),
+                )
+                keep_processing = True
+                continue
+            method = str(req.get('method') or '')
+            with STATE.lock:
+                strategy_state = STATE.strategy_state
+            if bridge_gates.should_drop_request(method, strategy_state):
+                # 策略主线程已判定卡死：交易类只读请求立即失败，不转发。继续转发
+                # 只会占住单线程管道，QMT 重启后还会把这些积压回灌给新策略
+                # （2026-11-06：三次重启存活 12h → 6min → 3min，积压一轮比一轮多）。
+                resp = {
+                    'request_id': req.get('request_id'), 'ok': False,
+                    'error': 'STRATEGY_UNHEALTHY: 交易查询通道卡死，请求未转发'
+                             '（防止重启后积压回灌）',
+                }
+                STATE.note_error('rpc.drop_unhealthy', method)
+                try:
+                    write_reply(req, resp)
+                except Exception as exc:
+                    STATE.note_error('rpc.reply', exc)
+                continue
+            if is_order_method(method):
+                busy = order_backlog_gate(
+                    rpc_backlog(), CFG.get('budget.order_preempt_queue') or 0)
+                if busy is not None:
+                    resp = {'request_id': req.get('request_id'), 'ok': False,
+                            'error': busy}
+                    STATE.note_error('rpc.busy', busy)
+                    try:
+                        write_reply(req, resp)
+                    except Exception as exc:
+                        STATE.note_error('rpc.reply', exc)
+                    continue
+            if is_market_method(method):
+                busy = order_backlog_gate(
+                    rpc_backlog(), CFG.get('budget.market_preempt_queue') or 0,
+                    label='market')
+                if busy is not None:
+                    resp = {'request_id': req.get('request_id'), 'ok': False,
+                            'error': busy}
+                    STATE.note_error('rpc.market_busy', busy)
+                    try:
+                        write_reply(req, resp)
+                    except Exception as exc:
+                        STATE.note_error('rpc.reply', exc)
+                    continue
+            # 交易类请求限速：只限交易上下文方法，订单/撤单/行情一律不受影响。
+            # QMT 的 get_trade_detail_data 连续查询会长时间阻塞，令牌桶把持续速率
+            # 压到 rpc.trade_min_interval_s 一条，容器请求桶容量 1。
+            if (bridge_gates.is_trade_context(method)
+                    and not bridge_gates.is_order_like(method)):
+                interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
+                capacity = int(CFG.get('rpc.trade_burst') or 1)
+                with STATE.lock:
+                    ok, STATE.queue_trade_tokens, STATE.queue_trade_ts = (
+                        bridge_gates.take_token(
+                            STATE.queue_trade_tokens, STATE.queue_trade_ts,
+                            time.time(), interval, capacity))
+                if not ok:
+                    resp = {'request_id': req.get('request_id'), 'ok': False,
+                            'error': 'TRADE_RPC_THROTTLED: 交易查询限速，稍后重试'}
+                    try:
+                        write_reply(req, resp)
+                    except Exception as exc:
+                        STATE.note_error('rpc.reply', exc)
+                    continue
+            gate = risk_gate(method, req.get('params') or {})
+            if gate is not None:
+                resp = {'request_id': req.get('request_id'), 'ok': False,
+                        'error': gate}
+                try:
+                    write_reply(req, resp)
+                except Exception as exc:
+                    STATE.note_error('rpc.reply', exc)
+                continue
+            if is_order_method(method):
+                # 订单唯一出口：原子幂等 + inflight + 未知不可重试。
+                try:
+                    resp, remove = _send_order_intent(
+                        req, raw=payload, reply_fn=write_reply)
+                except Exception as exc:  # noqa: BLE001 - 未知异常也保留意图
+                    STATE.note_error('rpc.order', exc)
+                    keep_processing = True
+                    resp = {
+                        'request_id': req.get('request_id'), 'ok': False,
+                        'code': 'ORDER_RESULT_UNKNOWN', 'retriable': False,
+                        'error': 'ORDER_RESULT_UNKNOWN: %s（禁止重发，请核对柜台）'
+                                 % exc,
+                    }
+                    try:
+                        write_reply(req, resp)
+                    except Exception as reply_exc:  # noqa: BLE001
+                        STATE.note_error('rpc.reply', reply_exc)
+                    continue
+                keep_processing = not remove
+                continue
+            try:
+                resp = TR.send_request(
+                    req, timeout_seconds=float(CFG.get('rpc.timeout_s') or 15))
+            except Exception as exc:
+                resp = {'request_id': req.get('request_id'), 'ok': False,
+                        'error': '%s: %s' % (type(exc).__name__, exc)}
+                STATE.note_error('rpc.forward', exc)
             try:
                 write_reply(req, resp)
             except Exception as exc:
                 STATE.note_error('rpc.reply', exc)
-            continue
-        if is_order_method(method):
-            busy = order_backlog_gate(
-                rpc_backlog(), CFG.get('budget.order_preempt_queue') or 0)
-            if busy is not None:
-                resp = {'request_id': req.get('request_id'), 'ok': False, 'error': busy}
-                STATE.note_error('rpc.busy', busy)
-                try:
-                    write_reply(req, resp)
-                except Exception as exc:
-                    STATE.note_error('rpc.reply', exc)
-                continue
-        if is_market_method(method):
-            busy = order_backlog_gate(
-                rpc_backlog(), CFG.get('budget.market_preempt_queue') or 0,
-                label='market')
-            if busy is not None:
-                resp = {'request_id': req.get('request_id'), 'ok': False, 'error': busy}
-                STATE.note_error('rpc.market_busy', busy)
-                try:
-                    write_reply(req, resp)
-                except Exception as exc:
-                    STATE.note_error('rpc.reply', exc)
-                continue
-        # 交易类请求限速：只限交易上下文方法，订单/撤单/行情一律不受影响。
-        # QMT 的 get_trade_detail_data 连续查询会长时间阻塞，令牌桶把持续速率
-        # 压到 rpc.trade_min_interval_s 一条，容器请求桶容量 1。
-        if (bridge_gates.is_trade_context(method)
-                and not bridge_gates.is_order_like(method)):
-            interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
-            capacity = int(CFG.get('rpc.trade_burst') or 1)
-            with STATE.lock:
-                ok, STATE.queue_trade_tokens, STATE.queue_trade_ts = (
-                    bridge_gates.take_token(
-                        STATE.queue_trade_tokens, STATE.queue_trade_ts,
-                        time.time(), interval, capacity))
-            if not ok:
-                resp = {'request_id': req.get('request_id'), 'ok': False,
-                        'error': 'TRADE_RPC_THROTTLED: 交易查询限速，稍后重试'}
-                try:
-                    write_reply(req, resp)
-                except Exception as exc:
-                    STATE.note_error('rpc.reply', exc)
-                continue
-        gate = risk_gate(method, req.get('params') or {})
-        if gate is not None:
-            resp = {'request_id': req.get('request_id'), 'ok': False, 'error': gate}
-        else:
-            idem = idempotent_lookup(req)
-            if idem is not None:
-                resp = idem
-            else:
-                try:
-                    resp = TR.send_request(req, timeout_seconds=float(CFG.get('rpc.timeout_s') or 15))
-                    idempotent_store(req, resp)
-                except Exception as exc:
-                    resp = {'request_id': req.get('request_id'), 'ok': False,
-                            'error': '%s: %s' % (type(exc).__name__, exc)}
-                    STATE.note_error('rpc.forward', exc)
-        try:
-            write_reply(req, resp)
-        except Exception as exc:
-            STATE.note_error('rpc.reply', exc)
+        finally:
+            if not keep_processing:
+                _remove_processing(payload)
 
 
 def write_reply(req, resp):
@@ -572,7 +950,8 @@ _order_lock = threading.Lock()
 
 
 def _order_params(params):
-    symbol = params.get('stock_code') or params.get('symbol') or params.get('code') or ''
+    symbol = (params.get('stock_code') or params.get('symbol')
+              or params.get('code') or params.get('order_code') or '')
     volume = params.get('volume') or params.get('order_volume') or params.get('quantity') or 0
     price = params.get('price') or 0
     try:
@@ -603,8 +982,8 @@ def _order_side(params):
 
 
 def is_order_method(method):
-    """订单写方法集合（与 risk_gate / 幂等同源）。"""
-    return str(method or '').lower() in ('order_stock', 'passorder', 'submit_order')
+    """订单写方法集合（含策略侧别名，与 risk_gate / 幂等同源）。"""
+    return bridge_gates.is_order_like(method)
 
 
 _MARKET_METHODS = ('get_full_tick', 'get_instrument_detail', 'get_stock_list')
@@ -673,17 +1052,20 @@ def _sell_price_band_reason(symbol, price):
     return None
 
 
-def risk_gate(method, params):
-    """下单/撤单前置检查。返回 None=放行，字符串=拒绝原因。"""
-    if not bool(CFG.get('risk.enabled')):
-        return None
-    m = method.lower()
-    is_order = m in ('order_stock', 'passorder', 'submit_order')
-    is_cancel = m in ('cancel_order_stock', 'cancel_order', 'cancel')
-    if not (is_order or is_cancel):
-        return None
-    if is_cancel:
-        return None
+def _risk_rate_limit():
+    with _order_lock:
+        now = time.time()
+        while _order_hits and now - _order_hits[0] > 60:
+            _order_hits.popleft()
+        rate_limit = int(CFG.get('risk.max_orders_per_min') or 0)
+        if rate_limit > 0 and len(_order_hits) >= rate_limit:
+            return 'risk: rate limit %d/min' % rate_limit
+        _order_hits.append(now)
+    return None
+
+
+def _risk_gate_order(params):
+    """单笔买入检查（不计数）。batch 逐笔调用它，再统一算一次频率。"""
     symbol, volume, price = _order_params(params)
     if not symbol:
         return 'risk: empty symbol'
@@ -710,53 +1092,55 @@ def risk_gate(method, params):
         dev = abs(price / pre - 1) * 100.0
         if dev > dev_limit:
             return 'risk: price deviation %.2f%% > %.2f%%' % (dev, dev_limit)
-    with _order_lock:
-        now = time.time()
-        while _order_hits and now - _order_hits[0] > 60:
-            _order_hits.popleft()
-        rate_limit = int(CFG.get('risk.max_orders_per_min') or 0)
-        if rate_limit > 0 and len(_order_hits) >= rate_limit:
-            return 'risk: rate limit %d/min' % rate_limit
-        _order_hits.append(now)
     return None
+
+
+def risk_gate(method, params):
+    """下单/撤单前置检查。返回 None=放行，字符串=拒绝原因。"""
+    if not bool(CFG.get('risk.enabled')):
+        return None
+    # 先规范化别名：order_stock_async → submit_order，否则会绕过只认
+    # order_stock 的闸门（2026-11-16 审计）。
+    m = bridge_gates.canonical_method(method)
+    if m in ('cancel_order', 'cancel_orders_batch', 'cancel'):
+        return None
+    if m == 'submit_orders_batch':
+        # batch 是别名入口之一：逐笔做买入闸，再统一计一次频率。
+        orders = (params or {}).get('orders') or []
+        if not isinstance(orders, list) or not orders:
+            return 'risk: empty batch'
+        if len(orders) > 500:
+            return 'risk: batch exceeds 500'
+        has_buy = False
+        for item in orders:
+            if not isinstance(item, dict):
+                return 'risk: invalid batch item'
+            gate = _risk_gate_order(item)
+            if gate:
+                return gate
+            if not (_order_side(item) == 'SELL'
+                    and not bool(CFG.get('risk.apply_to_sells'))):
+                has_buy = True
+        return _risk_rate_limit() if has_buy else None
+    if m not in ('submit_order', 'passorder'):
+        return None
+    gate = _risk_gate_order(params)
+    if gate:
+        return gate
+    # 卖出是减风险动作：默认连频率闸也跳过（与旧行为一致）。
+    if (_order_side(params) == 'SELL'
+            and not bool(CFG.get('risk.apply_to_sells'))):
+        return None
+    return _risk_rate_limit()
 
 
 def _idem_key(req):
-    params = req.get('params') or {}
-    # xtquant ``order_stock`` 把幂等键放在 ``order_remark``；HTTP 路由用 ``remark``。
-    # 只认 remark/order_id 时 order_stock 永远拿不到键 → 幂等等于没开（2026-10-30 实测）。
-    key = (params.get('remark') or params.get('order_remark')
-           or params.get('order_id') or params.get('user_order_id'))
-    if not key:
-        return None
-    return 'qm:qmt:pipe:idem:%s:%s' % (CFG.get('account_id'), key)
-
-
-def idempotent_lookup(req):
-    if str(req.get('method') or '').lower() not in ('order_stock', 'passorder', 'submit_order'):
-        return None
-    key = _idem_key(req)
-    if not key:
-        return None
-    try:
-        raw = R.get(key)
-        if raw:
-            return json.loads(raw if isinstance(raw, str) else raw.decode('utf-8'))
-    except Exception:
-        return None
-    return None
-
-
-def idempotent_store(req, resp):
-    key = _idem_key(req)
-    if not key:
-        return
-    try:
-        if not resp.get('ok'):
-            return
-        R.set(key, json.dumps(resp, ensure_ascii=False, default=str), ex=86400)
-    except Exception:
-        pass
+    """业务幂等键（兼容旧测试/调用）；字段选择在 bridge_order_intent。"""
+    return order_intent.idempotency_key(
+        CFG.get('account_id'),
+        (req or {}).get('method'),
+        (req or {}).get('params') or {},
+    )
 
 
 # ---------------------------------------------------------------- B. 持仓
@@ -765,6 +1149,7 @@ _last_pos_material = [None]
 # positions 每轮单发（风控刚需），asset 降频到 positions.asset_refresh_s 一次。
 _asset_cache = [None]
 _asset_cache_ts = [0.0]
+_asset_error = [""]
 
 
 def positions_worker():
@@ -789,10 +1174,20 @@ def positions_worker():
                     _asset_cache[0] = market_call(
                         'get_asset', {}, est_ms=100, budget=False, backlog=False)
                     _asset_cache_ts[0] = now
+                    _asset_error[0] = ''
                 except Exception as exc:  # noqa: BLE001 - 保留旧值，不拖垮本轮
+                    # 关键：失败只记录错误，**不刷新** _asset_cache_ts。
+                    # 旧实现复用缓存却把 payload.updated_at 写成当前时间，
+                    # 后端/看门狗把陈旧资产当成新快照（2026-11-16 审计）。
+                    _asset_error[0] = '%s: %s' % (type(exc).__name__, exc)
                     if 'skipped' not in str(exc):
                         STATE.note_error('positions.asset', exc)
-            payload = build_position_payload(_asset_cache[0] or {}, pos)
+            payload = build_position_payload(
+                _asset_cache[0] or {}, pos,
+                asset_observed_at=_asset_cache_ts[0],
+                positions_observed_at=now,
+                asset_error=_asset_error[0],
+            )
             raw = json.dumps(payload, ensure_ascii=False)
             R.set(key, raw, ex=int(CFG.get('positions.ttl_s') or 120))
             material = json.dumps({k: v for k, v in payload.items() if k != 'updated_at'},
@@ -811,7 +1206,28 @@ def positions_worker():
         time.sleep(max(1.0, interval))
 
 
-def build_position_payload(asset, pos):
+def _fmt_ts(ts):
+    try:
+        value = float(ts or 0)
+    except (TypeError, ValueError):
+        return ''
+    if value <= 0:
+        return ''
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(value))
+
+
+def _parse_ts(value):
+    if not value:
+        return 0.0
+    try:
+        return time.mktime(time.strptime(str(value), '%Y-%m-%d %H:%M:%S'))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_position_payload(asset, pos, *, asset_observed_at=None,
+                           positions_observed_at=None, asset_error='',
+                           positions_error=''):
     a = asset or {}
     rows = pos or {}
     if isinstance(rows, list):
@@ -827,10 +1243,25 @@ def build_position_payload(asset, pos):
             'cost': row.get('cost', row.get('open_price')),
             'stock_name': row.get('stock_name') or row.get('instrument_name') or '',
         }
+    positions_ts = float(positions_observed_at or time.time())
+    asset_ts = float(asset_observed_at or 0.0)
+    meta = account_state.merge_observation(
+        asset_observed_at=asset_ts or None,
+        positions_observed_at=positions_ts,
+        now=positions_ts,
+        asset_stale_after_s=CFG.get('positions.asset_stale_s') or 120,
+        positions_stale_after_s=CFG.get('source_http.stale_after_s') or 30,
+        asset_error=asset_error,
+        positions_error=positions_error,
+    )
     return {
         'account_id': str(CFG.get('account_id')),
         'reason': 'bridge',
-        'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        # updated_at 代表「持仓轮次」；资产单独计时，见 asset_observed_at。
+        'updated_at': _fmt_ts(positions_ts),
+        'positions_observed_at': _fmt_ts(positions_ts),
+        'asset_observed_at': _fmt_ts(asset_ts),
+        **meta,
         'asset': {
             'cash': a.get('cash'),
             'total_asset': a.get('total_asset'),
@@ -1072,6 +1503,14 @@ def quotes_worker():
 # ---------------------------------------------------------------- D. 委托/成交
 _order_seen = {}
 _trade_seen = {}
+_SEEN_MAX = 5000
+
+
+def _remember_seen(seen, key, raw_state):
+    """有界记忆：先写流成功，才允许记 seen；超过上限丢最旧。"""
+    seen[key] = raw_state
+    while len(seen) > _SEEN_MAX:
+        seen.pop(next(iter(seen)), None)
 
 
 def _order_fingerprint(row):
@@ -1083,6 +1522,30 @@ def _order_fingerprint(row):
 def _trade_fingerprint(row):
     return str(row.get('trade_id') or row.get('m_strTradeID') or row.get('traded_id') or
                row.get('m_strTradeId') or '') + '|' + str(row.get('traded_volume') or row.get('m_nVolume') or '')
+
+
+def _emit_events_once(kind, rows, seen, fp, stream, account):
+    """把一批回报写进 Redis Stream；写成功才记 seen。
+
+    抽成独立函数是为了可测：第一次 XADD 失败时 seen 必须保持未变，
+    下一次轮询要重投同一条回报（至少一次语义）。
+    """
+    wrote = 0
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        key = fp(row)
+        raw_state = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+        if seen.get(key) == raw_state:
+            continue
+        payload = {'account_id': account, 'kind': kind,
+                   'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'), 'row': row}
+        # 先 XADD 成功，再记 seen：写流失败时下一轮必须重投。
+        R.xadd(stream, {'payload': json.dumps(payload, ensure_ascii=False, default=str)},
+               maxlen=int(CFG.get('%ss.maxlen' % kind) or 2000), approximate=True)
+        _remember_seen(seen, key, raw_state)
+        wrote += 1
+    return wrote
 
 
 def events_worker(kind):
@@ -1101,18 +1564,7 @@ def events_worker(kind):
         try:
             rows = market_call(method, {}, est_ms=120)
             if isinstance(rows, list):
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    key = fp(row)
-                    raw_state = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
-                    if seen.get(key) == raw_state:
-                        continue
-                    seen[key] = raw_state
-                    payload = {'account_id': account, 'kind': kind,
-                               'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'), 'row': row}
-                    R.xadd(stream, {'payload': json.dumps(payload, ensure_ascii=False, default=str)},
-                           maxlen=int(CFG.get('%ss.maxlen' % kind) or 2000), approximate=True)
+                _emit_events_once(kind, rows, seen, fp, stream, account)
             with STATE.lock:
                 if kind == 'order':
                     STATE.last_order_age = time.time()
@@ -1200,14 +1652,58 @@ def tap_worker():
         time.sleep(max(0.1, interval))
 
 
+def _inflight_counts():
+    """(processing_len, inflight_orders, unknown_orders)；读失败返回 -1。"""
+    try:
+        processing_len = int(R.llen(processing_key()))
+        records = R.hvals(inflight_key()) or []
+    except Exception:  # noqa: BLE001
+        return -1, -1, -1
+    inflight = 0
+    unknown = 0
+    for raw in records:
+        try:
+            doc = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+        except Exception:  # noqa: BLE001
+            continue
+        state = str((doc or {}).get('state') or '')
+        if state == order_intent.STATE_INFLIGHT:
+            inflight += 1
+        elif state == order_intent.STATE_UNKNOWN:
+            unknown += 1
+    return processing_len, inflight, unknown
+
+
 def _metrics_snapshot():
     now = time.time()
+    # Redis I/O 放在 STATE.lock 外面：Redis 卡住时不能连持仓线程一起堵。
+    processing_len, inflight_orders, unknown_orders = _inflight_counts()
     with STATE.lock:
+        positions_age = (round(now - STATE.last_pos_age, 1)
+                         if STATE.last_pos_age else -1)
+        asset_age = (round(now - _asset_cache_ts[0], 1)
+                     if _asset_cache_ts[0] else -1)
+        asset_status = account_state.component_status(
+            _asset_cache_ts[0] or None, now,
+            CFG.get('positions.asset_stale_s') or 120,
+            error=_asset_error[0],
+        )
+        positions_status = account_state.component_status(
+            STATE.last_pos_age, now,
+            CFG.get('source_http.stale_after_s') or 30,
+        )
         return {
             'state': 'ok',
             'account_id': str(CFG.get('account_id')),
             'last_rpc_ms': round(STATE.last_rpc_ms, 1),
-            'pos_age_s': round(now - STATE.last_pos_age, 1) if STATE.last_pos_age else -1,
+            'pos_age_s': positions_age,
+            'positions_age_s': positions_age,
+            'asset_age_s': asset_age,
+            'asset_status': asset_status,
+            'positions_status': positions_status,
+            'processing_len': processing_len,
+            'inflight_orders': inflight_orders,
+            'unknown_orders': unknown_orders,
             'order_age_s': round(now - STATE.last_order_age, 1) if STATE.last_order_age else -1,
             'trade_age_s': round(now - STATE.last_trade_age, 1) if STATE.last_trade_age else -1,
             'quote_symbols': len(STATE.quote_ts),
@@ -1246,10 +1742,16 @@ _SOURCE_METHODS = {'get_market_snapshot', 'snapshot', 'get_full_tick', 'get_mark
                    'query_orders', 'query_trades', 'get_instrument_detail',
                    # 只读诊断：资产行全字段 / ORDER/DEAL 字段名（不返回订单值）
                    'query_account_infos', 'describe_trade_detail_fields',
+                   # 部署/能力诊断（与 8550 QMT_READONLY_METHODS 对齐）
+                   'get_deployment_info', 'probe_capabilities', 'reload_status',
                    # 写入面：默认关（source_http.allow_orders=false），且策略
                    # ALLOW_ORDER_METHODS 必须同时打开；风控/幂等在本层执行
                    'order_stock', 'submit_order',
-                   'cancel_order_stock', 'cancel_order'}
+                   'order_stock_async', 'order_stock_batch',
+                   'submit_orders_batch', 'passorder',
+                   'cancel_order_stock', 'cancel_order',
+                   'cancel_order_stock_sysid', 'cancel_order_stock_batch',
+                   'cancel_orders_batch'}
 
 
 def _redis_hash(code_key):
@@ -1299,18 +1801,24 @@ def _account_snapshot():
         raise ValueError('account snapshot is not valid json: %r' % (exc,))
     positions = payload.get('positions') or {}
     updated_at = payload.get('updated_at')
-    age = None
-    if updated_at:
-        try:
-            age = max(0.0, time.time() - time.mktime(
-                time.strptime(updated_at, '%Y-%m-%d %H:%M:%S')))
-        except (TypeError, ValueError):
-            age = None
+    positions_ts = _parse_ts(payload.get('positions_observed_at') or updated_at)
+    asset_ts = _parse_ts(payload.get('asset_observed_at'))
+    now = time.time()
+    meta = account_state.merge_observation(
+        asset_observed_at=asset_ts or None,
+        positions_observed_at=positions_ts or None,
+        now=now,
+        asset_stale_after_s=CFG.get('positions.asset_stale_s') or 120,
+        positions_stale_after_s=stale_after,
+        asset_error=str(payload.get('asset_error') or ''),
+        positions_error=str(payload.get('positions_error') or ''),
+    )
+    age = meta['positions_age_s']
+    stale = bool(meta['stale'])
     # 账户快照本身过期时**不合并当前行情**：旧量配新价会把浮盈做成假实时。
-    # 宁可整份都按快照时间展示，也不混两个时点的数据。
-    stale = age is None or age > stale_after
+    # 资产陈旧不影响持仓价合并（两者独立），但整份仍标 stale，后端不落库。
     codes = list(positions.keys())
-    if codes and not stale:
+    if codes and meta['positions_status'] == account_state.STATUS_OK:
         pipe = R.pipeline()
         for code in codes:
             pipe.hgetall('market:snapshot:%s' % code)
@@ -1330,7 +1838,7 @@ def _account_snapshot():
             # 行情也要新鲜：休市时 market:snapshot 可能还是上午的价
             try:
                 quote_ts = float(data.get('ts'))
-                if time.time() - quote_ts > stale_after:
+                if now - quote_ts > stale_after:
                     continue
             except (TypeError, ValueError):
                 continue
@@ -1345,9 +1853,10 @@ def _account_snapshot():
                         (price - float(cost)) * volume, 2)
             except (TypeError, ValueError):
                 continue
-    payload['age_s'] = round(age, 1) if age is not None else None
+    payload.update(meta)
+    payload['age_s'] = age
     payload['snapshot_source'] = source
-    payload['stale'] = bool(stale)
+    payload['stale'] = stale
     return payload
 
 
@@ -1378,6 +1887,43 @@ def _snapshot_from_tick(code):
     }
 
 
+class SourceError(RuntimeError):
+    """QMT source HTTP 的可映射错误（503/429），与裸 ValueError 区分。"""
+
+    def __init__(self, message, code='SOURCE_ERROR', status=503):
+        super().__init__(message)
+        self.code = code
+        self.status = int(status)
+
+
+def _source_rpc(method, params=None, timeout=None):
+    """HTTP 只读账户/委托查询也走健康门禁与交易令牌桶。
+
+    旧实现直接 ``rpc()``：策略主线程已判死时仍往单线程管道灌查询，且
+    容器侧可绕过限速把队列打满（审计 Secondary）。
+    """
+    with STATE.lock:
+        strategy_state = STATE.strategy_state
+    if bridge_gates.should_drop_request(method, strategy_state):
+        raise SourceError(
+            'STRATEGY_UNHEALTHY: 交易查询通道卡死，请求未转发',
+            code='STRATEGY_UNHEALTHY', status=503)
+    if (bridge_gates.is_trade_context(method)
+            and not bridge_gates.is_order_like(method)):
+        interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
+        capacity = int(CFG.get('rpc.trade_burst') or 1)
+        with STATE.lock:
+            ok, STATE.queue_trade_tokens, STATE.queue_trade_ts = (
+                bridge_gates.take_token(
+                    STATE.queue_trade_tokens, STATE.queue_trade_ts,
+                    time.time(), interval, capacity))
+        if not ok:
+            raise SourceError(
+                'TRADE_RPC_THROTTLED: 交易查询限速，稍后重试',
+                code='TRADE_RPC_THROTTLED', status=429)
+    return rpc(method, params or {}, timeout=timeout)
+
+
 def _source_call(method, params):
     method = str(method or '').strip()
     params = dict(params or {})
@@ -1398,44 +1944,39 @@ def _source_call(method, params):
     if method == 'ping':
         return rpc('ping', {}, timeout=10)
     if method == 'get_asset':
-        return rpc('get_asset', {}, timeout=15)
+        return _source_rpc('get_asset', {}, timeout=15)
     if method == 'get_positions':
-        return rpc('get_positions', {}, timeout=20)
+        return _source_rpc('get_positions', {}, timeout=20)
     if method == 'query_orders':
         req = {'cancelable_only': bool(params.get('cancelable_only'))}
         if params.get('strategy_name') is not None:
             req['strategy_name'] = str(params.get('strategy_name'))
-        return rpc('query_orders', req, timeout=25)
+        return _source_rpc('query_orders', req, timeout=25)
     if method == 'query_trades':
         req = {}
         if params.get('strategy_name') is not None:
             req['strategy_name'] = str(params.get('strategy_name'))
-        return rpc('query_trades', req, timeout=25)
-    if method in ('order_stock', 'submit_order'):
+        return _source_rpc('query_trades', req, timeout=25)
+    if bridge_gates.is_order_like(method):
         if not bool(CFG.get('source_http.allow_orders')):
             raise ValueError('orders disabled on qmt source')
         gate = risk_gate(method, params)
         if gate:
             raise ValueError(gate)
-        request = {'method': method, 'params': params}
-        hit = idempotent_lookup(request)
-        if hit is not None:
-            return hit
-        result = rpc('order_stock', params, timeout=30)
-        key = _idem_key(request)
-        status = (str((result or {}).get('status') or '').upper()
-                  if isinstance(result, dict) else '')
-        if key and status not in ('REJECTED', 'ERROR'):
-            try:
-                R.set(key, json.dumps(result, ensure_ascii=False, default=str),
-                      ex=86400)
-            except Exception:
-                pass
-        return result
-    if method in ('cancel_order_stock', 'cancel_order'):
-        if not bool(CFG.get('source_http.allow_orders')):
-            raise ValueError('orders disabled on qmt source')
-        return rpc('cancel_order_stock', params, timeout=30)
+        request = {
+            'request_id': next_request_id(),
+            'method': method,
+            'params': params,
+        }
+        # 与 Redis worker 共用同一幂等/inflight 状态机：
+        # - 同 remark 同参数 -> 返回上次结果，不重发；
+        # - 同 remark 不同参数 -> 冲突；
+        # - 超时/断管 -> unknown，HTTP 侧也不得重试。
+        response, _remove = _send_order_intent(
+            request, raw=None, reply_fn=None)
+        if not isinstance(response, dict) or not response.get('ok'):
+            raise ValueError(str((response or {}).get('error') or 'order failed'))
+        return response.get('data')
     if method == 'get_instrument_detail':
         code = params.get('code') or params.get('stock_code')
         if not code:
@@ -1454,10 +1995,12 @@ def _source_call(method, params):
         return rpc('get_trading_dates', params, timeout=15)
     if method == 'query_account_infos':
         # 资产行全字段（诊断 total_asset 与 cash+mv 的差额）
-        return rpc('query_account_infos', params, timeout=20)
+        return _source_rpc('query_account_infos', params, timeout=20)
     if method == 'describe_trade_detail_fields':
         # 只返回字段名/形状，不返回订单值
-        return rpc('describe_trade_detail_fields', params, timeout=20)
+        return _source_rpc('describe_trade_detail_fields', params, timeout=20)
+    if method in ('get_deployment_info', 'probe_capabilities', 'reload_status'):
+        return _source_rpc(method, params, timeout=15)
     raise ValueError('unsupported method: %s' % method)
 
 
@@ -1498,6 +2041,10 @@ class _QmtSourceHandler(BaseHTTPRequestHandler):
         try:
             result = _source_call(method, params)
             self._send(200, {'success': True, 'method': method, 'result': result, 'source': 'qmt'})
+        except SourceError as exc:
+            self._send(exc.status, {
+                'success': False, 'method': method, 'code': exc.code,
+                'error': str(exc), 'source': 'qmt'})
         except Exception as exc:
             self._send(400, {'success': False, 'method': method, 'error': str(exc), 'source': 'qmt'})
 
@@ -1590,6 +2137,7 @@ def watchdog_config_loop():
                         spawn = subprocess.Popen(
                             [sys.executable, '-u', os.path.abspath(__file__)],
                             close_fds=True,
+                            env=dict(os.environ, QM_RELOAD_CHILD='1'),
                             creationflags=(
                                 getattr(subprocess, 'DETACHED_PROCESS', 0)
                                 | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
@@ -1610,9 +2158,39 @@ def watchdog_config_loop():
         time.sleep(10)
 
 
+def _write_pid_file() -> None:
+    """写精确 PID 文件：看门狗只杀这一 PID，不再按命令行子串扫杀。"""
+    try:
+        os.makedirs(os.path.dirname(PID_PATH), exist_ok=True)
+        with open(PID_PATH, 'w', encoding='utf-8') as fh:
+            json.dump({
+                'pid': os.getpid(),
+                'started_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'script': os.path.abspath(__file__),
+            }, fh, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001 - PID 文件写不了不拦启动
+        log('pid file write failed: %r' % (exc,))
+
+
+def _remove_pid_file() -> None:
+    try:
+        with open(PID_PATH, encoding='utf-8') as fh:
+            doc = json.load(fh)
+        if int(doc.get('pid') or 0) == os.getpid():
+            os.remove(PID_PATH)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main():
     log('pipe bridge v2 starting account=%s pipe=%s' %
         (CFG.get('account_id'), CFG.get('pipe.name')))
+    _write_pid_file()
+    # 先把上次崩溃留在 processing 的订单标 unknown；绝不重放。
+    try:
+        recover_processing()
+    except Exception as exc:  # noqa: BLE001 - 恢复失败不能拦住桥启动
+        log('recover_processing failed: %r' % (exc,))
     threads = [
         threading.Thread(target=watchdog_config_loop, daemon=True, name='cfg'),
         threading.Thread(target=rpc_worker, daemon=True, name='rpc'),
@@ -1634,6 +2212,7 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         STATE.stop.set()
+        _remove_pid_file()
         log('stopping by KeyboardInterrupt')
 
 

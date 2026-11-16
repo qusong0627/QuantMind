@@ -154,8 +154,60 @@ def is_cross_session_orphan(status: str, submitted_at, day_start) -> bool:
     return submitted_at < day_start
 
 
-async def expire_cross_session_orphans(date_str: str) -> list[dict]:
-    """把上一个交易日之前仍非终态的 REAL 单标记 EXPIRED，返回处理清单。"""
+def classify_cross_session_order(
+    *,
+    status,
+    exchange_order_id,
+    counter_orders: list[dict] | None,
+    counter_ok: bool,
+) -> tuple[str, str | None]:
+    """跨日残留单的处置（纯函数）。
+
+    返回 ``(action, target_status)``：
+
+    * ``unverified``：柜台没查成，**不得改本地状态**；
+    * ``expire``：柜台查询成功且确实没有这张单 -> 才置 EXPIRED；
+    * ``terminal``：柜台有同号终态 -> 本地跟随为 filled/cancelled/rejected；
+    * ``keep_open``：柜台仍非终态 -> 保留并告警。
+
+    2026-11-16 审计：旧实现只按时间就置 EXPIRED，没有柜台证据；这里把
+    "先对柜台、再收口"固化成纯判定。
+    """
+    if not counter_ok:
+        return "unverified", None
+    order_id = str(exchange_order_id or "").strip()
+    counter = None
+    for item in counter_orders or []:
+        ids = {
+            str(item.get(key) or "").strip()
+            for key in ("order_id", "order_sysid", "exchange_order_id")
+        }
+        if order_id and order_id in ids:
+            counter = item
+            break
+    if counter is None:
+        return "expire", None
+    raw = str(counter.get("status") or "").strip().upper()
+    if raw == "FILLED":
+        return "terminal", "filled"
+    if raw == "CANCELLED":
+        return "terminal", "cancelled"
+    if raw == "REJECTED":
+        return "terminal", "rejected"
+    return "keep_open", str(counter.get("status") or "")
+
+
+async def expire_cross_session_orphans(
+    date_str: str,
+    *,
+    counter_orders: list[dict] | None = None,
+    counter_ok: bool = False,
+) -> dict:
+    """收口跨日残留：**先对柜台，再改状态**。
+
+    柜台未查成（``counter_ok=False``）时只登记 ``unverified``，绝不改本地状态；
+    柜台确认无此单才置 EXPIRED；柜台是同号终态则本地跟随终态。
+    """
     from sqlalchemy import and_, select
 
     from backend.services.trade_shared.models.enums import OrderStatus
@@ -164,7 +216,9 @@ async def expire_cross_session_orphans(date_str: str) -> list[dict]:
 
     day = datetime.strptime(date_str, "%Y%m%d")
     day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-    expired: list[dict] = []
+    result: dict[str, list[dict]] = {
+        "expired": [], "resolved": [], "unverified": [], "still_open": [],
+    }
     async with get_session(read_only=False) as db:
         rows = (
             (
@@ -182,6 +236,7 @@ async def expire_cross_session_orphans(date_str: str) -> list[dict]:
                             ),
                             Order.submitted_at.is_not(None),
                             Order.submitted_at < day_start,
+                            _qmt_channel_clause(),
                         )
                     )
                     .limit(500)
@@ -190,25 +245,55 @@ async def expire_cross_session_orphans(date_str: str) -> list[dict]:
             .scalars()
             .all()
         )
+        changed = False
         for order in rows:
             if not is_cross_session_orphan(order.status, order.submitted_at, day_start):
                 continue
-            order.status = OrderStatus.EXPIRED
-            order.remarks = (order.remarks or "") + (
-                f" [EXPIRED: cross_session submitted_at={order.submitted_at}]"
+            item = {
+                "client_order_id": order.client_order_id,
+                "symbol": order.symbol,
+                "exchange_order_id": str(order.exchange_order_id or ""),
+                "submitted_at": str(order.submitted_at),
+            }
+            action, target = classify_cross_session_order(
+                status=order.status,
+                exchange_order_id=order.exchange_order_id,
+                counter_orders=counter_orders,
+                counter_ok=counter_ok,
             )
-            expired.append(
-                {
-                    "client_order_id": order.client_order_id,
-                    "symbol": order.symbol,
-                    "submitted_at": str(order.submitted_at),
-                }
+            if action == "unverified":
+                result["unverified"].append(item)
+                continue
+            if action == "expire":
+                order.status = OrderStatus.EXPIRED
+                order.remarks = (order.remarks or "") + (
+                    f" [EXPIRED: counter_missing submitted_at={order.submitted_at}]"
+                )
+                result["expired"].append(item)
+                changed = True
+                continue
+            if action == "terminal" and target:
+                order.status = OrderStatus(target)
+                order.remarks = (order.remarks or "") + (
+                    f" [RESOLVED: counter_terminal={target} "
+                    f"submitted_at={order.submitted_at}]"
+                )
+                result["resolved"].append({**item, "status": target})
+                changed = True
+                continue
+            result["still_open"].append(
+                {**item, "counter_status": target or "unknown"}
             )
-        if expired:
+        if changed:
             await db.commit()
-    if expired:
-        logger.warning("[CloseAudit] 跨日残留委托已置 EXPIRED: %d", len(expired))
-    return expired
+    if result["expired"] or result["resolved"]:
+        logger.warning(
+            "[CloseAudit] 跨日残留收口：expired=%d resolved=%d unverified=%d "
+            "still_open=%d",
+            len(result["expired"]), len(result["resolved"]),
+            len(result["unverified"]), len(result["still_open"]),
+        )
+    return result
 
 
 async def run_close_audit(redis, date_str: str | None = None) -> dict:
@@ -228,15 +313,11 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
         "counter_open": [],
         "local_stale": [],
         "expired_cross_session": [],
+        "resolved_cross_session": [],
+        "unverified_cross_session": [],
+        "still_open_cross_session": [],
         "errors": [],
     }
-
-    # 跨日残留收口：本地状态卫生，与柜台是否配置无关。
-    try:
-        report["expired_cross_session"] = await expire_cross_session_orphans(date_str)
-    except Exception as exc:  # noqa: BLE001 - 清理失败不影响下面的柜台核对
-        logger.error("[CloseAudit] 跨日残留清理失败: %s", exc, exc_info=True)
-        report["errors"].append(f"cross_session_expire_failed: {exc}")
 
     client = get_qmt_exec_client()
     try:
@@ -248,11 +329,25 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
         return {"date": date_str, "skipped": "qmt_not_configured"}
 
     counter_orders: list[dict] = []
+    counter_ok = True
     try:
         counter_orders = list(await client.query_orders() or [])
     except Exception as exc:  # noqa: BLE001
+        counter_ok = False
         logger.warning("[CloseAudit] 查询柜台委托失败: %s", exc)
         report["errors"].append(f"query_orders_failed: {exc}")
+
+    # 先对柜台、再收口：柜台没查成时不得按时间把真单置 EXPIRED。
+    try:
+        cross = await expire_cross_session_orphans(
+            date_str, counter_orders=counter_orders, counter_ok=counter_ok)
+        report["expired_cross_session"] = cross.get("expired", [])
+        report["resolved_cross_session"] = cross.get("resolved", [])
+        report["unverified_cross_session"] = cross.get("unverified", [])
+        report["still_open_cross_session"] = cross.get("still_open", [])
+    except Exception as exc:  # noqa: BLE001 - 清理失败不影响下面的柜台核对
+        logger.error("[CloseAudit] 跨日残留清理失败: %s", exc, exc_info=True)
+        report["errors"].append(f"cross_session_expire_failed: {exc}")
 
     try:
         local_orders = await _collect_local_open_orders(date_str)
@@ -289,17 +384,30 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
         }
         for item in classified["local_stale"]
     ]
-    report["ok"] = classified["ok"] and not report["errors"]
+    report["ok"] = (
+        classified["ok"]
+        and not report["errors"]
+        and not report["unverified_cross_session"]
+        and not report["still_open_cross_session"]
+    )
 
     _save_report(redis, report)
     logger.info(
-        "[CloseAudit] %s 收盘核对：柜台委托=%d 未终结=%d 本地残留=%d",
+        "[CloseAudit] %s 收盘核对：柜台委托=%d 未终结=%d 本地残留=%d "
+        "跨日expired=%d resolved=%d unverified=%d still_open=%d",
         date_str,
         report["counter_orders"],
         len(report["counter_open"]),
         len(report["local_stale"]),
+        len(report["expired_cross_session"]),
+        len(report["resolved_cross_session"]),
+        len(report["unverified_cross_session"]),
+        len(report["still_open_cross_session"]),
     )
-    if not report["ok"] or report["expired_cross_session"]:
+    if (not report["ok"] or report["expired_cross_session"]
+            or report["resolved_cross_session"]
+            or report["unverified_cross_session"]
+            or report["still_open_cross_session"]):
         await _notify_report(redis, report)
     return report
 
@@ -433,6 +541,17 @@ async def _notify_report(redis, report: dict) -> None:
             f"本地残留：{item.get('symbol')} 本地 {item.get('status')} / "
             f"柜台 {item.get('counter_status') or item.get('reason')}"
             f"（委托号 {item.get('order_id')}）"
+        )
+    for item in report.get("unverified_cross_session") or []:
+        lines.append(
+            f"跨日未核对：{item.get('symbol')} 本地 {item.get('submitted_at')} "
+            f"（委托号 {item.get('exchange_order_id')}）——柜台查询失败，"
+            "未改本地状态"
+        )
+    for item in report.get("still_open_cross_session") or []:
+        lines.append(
+            f"跨日柜台仍开放：{item.get('symbol')} 柜台 {item.get('counter_status')}"
+            f"（委托号 {item.get('exchange_order_id')}）"
         )
     if report.get("errors"):
         lines.append(f"核对任务异常：{'; '.join(report['errors'])}")
