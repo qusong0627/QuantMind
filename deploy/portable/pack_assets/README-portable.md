@@ -46,6 +46,35 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Shortcut    # 顺带建桌
 `certutil -hashfile QuantMind-Portable-win-x64.zip SHA256`（Windows）或
 `sha256sum -c QuantMind-Portable-win-x64.zip.sha256`（Linux/WSL）。
 
+## 一键安装（Linux，推荐）
+
+1. 解压到任意目录（建议路径不含中文/空格）。
+2. 执行：
+
+   ```bash
+   bash install.sh
+   ```
+
+   安装器会先体检：平台/架构/非 root、包完整性、磁盘 ≥10GB、端口占用；
+   首次生成 `pack.env`（随机数据库口令）；默认端口被占时自动切到
+   `18000` 段（PG 15432 / Redis 16379），不会和 Docker 栈抢端口。
+   随后后台启动并等待健康检查，就绪后打印
+   `http://127.0.0.1:<API_PORT>/` 与默认账号 `admin / admin123`。
+
+常用选项：
+
+```bash
+bash install.sh --no-start    # 只体检 + 生成 pack.env
+bash install.sh --foreground  # 前台启动，Ctrl+C 停止
+bash stop.sh                  # 停止后台实例
+```
+
+首次启动需要 1-3 分钟（初始化 PostgreSQL → 建库 → 4 个后端服务 + Celery）。
+不需要系统预装 `curl`：启动脚本用包内 Python 做 HTTP 探活。
+
+**下载校验**：产物随附 `QuantMind-Portable-linux-x64.tar.gz.sha256`，
+`sha256sum -c QuantMind-Portable-linux-x64.tar.gz.sha256`。
+
 ## 启动步骤（手动）
 
 1. 把整个文件夹解压到任意**纯英文、不含空格**的路径（如 `D:\QuantMind` 或 `~/quantmind`）。

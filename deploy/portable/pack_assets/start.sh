@@ -159,6 +159,20 @@ PYTHON="$ROOT/runtime/python/bin/python3"
 PGBIN="$ROOT/pgsql/bin"
 export LD_LIBRARY_PATH="$ROOT/pgsql/lib:${LD_LIBRARY_PATH:-}"
 
+# HTTP 探活不依赖系统 curl（最小化 Ubuntu/Debian 服务器经常没装 curl）。
+# 用内嵌 Python 的 urllib，避免用户为了启动包再装系统包。
+http_ok() {
+    "$PYTHON" - "$1" >/dev/null 2>&1 <<'PY'
+import sys
+import urllib.request
+try:
+    with urllib.request.urlopen(sys.argv[1], timeout=2) as resp:
+        raise SystemExit(0 if resp.status < 400 else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 log()  { echo -e "\033[36m[QuantMind]\033[0m $*"; }
 ok()   { echo -e "\033[32m[QuantMind]\033[0m $*"; }
 fail() { echo -e "\033[31m[QuantMind]\033[0m $*" >&2; exit 1; }
@@ -216,7 +230,7 @@ export RSSHUB_BASE_URL="${RSSHUB_BASE_URL:-http://127.0.0.1:1200}"
 # celery/资讯 enrich 直读 Huntly sqlite 的真实包内路径（docker 默认 /data/huntly 在本机不存在）
 export HUNTLY_SQLITE_PATH="${HUNTLY_SQLITE_PATH:-$STORAGE_ROOT/huntly/db.sqlite}"
 if [ -x "$ROOT/huntly/jre/bin/java" ] && [ -f "$ROOT/huntly/server.jar" ]; then
-    if curl -fsS -m 2 "http://127.0.0.1:${HUNTLY_PORT}/" >/dev/null 2>&1; then
+    if http_ok "http://127.0.0.1:${HUNTLY_PORT}/"; then
         log "Huntly 已在运行（端口 $HUNTLY_PORT），跳过启动"
     else
         log "启动 Huntly (端口 $HUNTLY_PORT，首次启动初始化约 30 秒) ..."
@@ -239,7 +253,7 @@ export QWENPAW_SHARED_FILES_DIR="${QWENPAW_SHARED_FILES_DIR:-$STORAGE_ROOT/qwenp
 export QWENPAW_SHARED_VISIBLE_DIR="${QWENPAW_SHARED_VISIBLE_DIR:-$STORAGE_ROOT/qwenpaw-working}"
 mkdir -p "$QWENPAW_SHARED_FILES_DIR" "$QWENPAW_SHARED_VISIBLE_DIR" "$STORAGE_ROOT/qwenpaw-home"
 if [ -x "$ROOT/qwenpaw_runtime/python/bin/python3" ]; then
-    if curl -fsS -m 2 "http://127.0.0.1:${QWENPAW_PORT}/" >/dev/null 2>&1; then
+    if http_ok "http://127.0.0.1:${QWENPAW_PORT}/"; then
         log "QwenPaw 已在运行（端口 $QWENPAW_PORT），跳过启动"
     else
         log "启动 QwenPaw (端口 $QWENPAW_PORT) ..."
@@ -322,8 +336,8 @@ start_celery
 # ── 就绪等待 + 打开浏览器 ────────────────────────────────────
 log "等待服务就绪（首次启动需初始化数据库，可能需要 1-2 分钟）..."
 READY=0
-for _ in $(seq 1 180); do
-    if curl -fsS "http://127.0.0.1:${QM_API_PORT}/health" >/dev/null 2>&1; then READY=1; break; fi
+for _ in $(seq 1 300); do
+    if http_ok "http://127.0.0.1:${QM_API_PORT}/health"; then READY=1; break; fi
     sleep 1
 done
 

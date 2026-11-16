@@ -169,19 +169,33 @@ print('  fastapi', fastapi.__version__, '| torch', torch.__version__,
 "
 ok "依赖自检通过"
 
-# ── 4. Redis（源码编译，回环使用）────────────────────────────
-if [ ! -x "$STAGE/redis/redis-server" ]; then
-    log "编译 Redis $REDIS_VERSION ..."
+# ── 4. Redis（源码静态编译，回环使用）────────────────────────
+# 关键：不能把构建机 glibc 的符号版本带进包。2026-11-16 实测在 Ubuntu 24.04
+# 宿主编出的 redis-server 依赖 GLIBC_2.38，Ubuntu 20.04（glibc 2.31）直接
+# 报 "version `GLIBC_2.38' not found"——用户看到的就是「安装不上」。
+redis_is_portable() {
+    [ -x "$1" ] || return 1
+    ! ldd "$1" 2>&1 | grep -q 'libc\.so'
+}
+if ! redis_is_portable "$STAGE/redis/redis-server" \
+        || ! redis_is_portable "$STAGE/redis/redis-cli"; then
+    log "编译静态 Redis $REDIS_VERSION（避免 glibc 版本锁死）..."
     if [ ! -f "$BUILD/cache/redis-$REDIS_VERSION.tar.gz" ]; then
         dl "https://download.redis.io/releases/redis-$REDIS_VERSION.tar.gz" \
            "$BUILD/cache/redis-$REDIS_VERSION.tar.gz"
     fi
+    rm -rf "$BUILD/redis-$REDIS_VERSION"
     tar -xzf "$BUILD/cache/redis-$REDIS_VERSION.tar.gz" -C "$BUILD"
-    make -C "$BUILD/redis-$REDIS_VERSION" -j"$NPROC" MALLOC=libc BUILD_TLS=no >/dev/null
+    make -C "$BUILD/redis-$REDIS_VERSION" -j"$NPROC" \
+        MALLOC=libc BUILD_TLS=no LDFLAGS="-static" >/dev/null \
+        || fail "Redis 静态编译失败（需要 libc 静态库 libc.a；Ubuntu: apt-get install libc6-dev）"
     mkdir -p "$STAGE/redis"
     cp "$BUILD/redis-$REDIS_VERSION/src/redis-server" "$STAGE/redis/"
     cp "$BUILD/redis-$REDIS_VERSION/src/redis-cli" "$STAGE/redis/"
     rm -rf "$BUILD/redis-$REDIS_VERSION"
+    redis_is_portable "$STAGE/redis/redis-server" \
+        && redis_is_portable "$STAGE/redis/redis-cli" \
+        || fail "Redis 仍为动态链接，拒绝出包（会在老 glibc 机器上启动失败）"
 fi
 "$STAGE/redis/redis-server" --version
 
@@ -292,13 +306,41 @@ cp -a "$REPO_ROOT/docker/training" "$STAGE/docker/training"
 # ── 7. 启动脚本与文档 ────────────────────────────────────────
 log "写入启动脚本与说明 ..."
 cp "$HERE/pack_assets/start.sh" "$HERE/pack_assets/stop.sh" "$HERE/pack_assets/sync_from_git.sh" "$HERE/pack_assets/restore_backup.sh" "$STAGE/"
+cp "$HERE/pack_assets/install.sh" "$STAGE/"
+chmod 755 "$STAGE/install.sh" "$STAGE/start.sh" "$STAGE/stop.sh" 2>/dev/null || true
 cp "$HERE/pack_assets/start.bat" "$HERE/pack_assets/stop.bat" "$HERE/pack_assets/sync_from_git.bat" "$HERE/pack_assets/restore_backup.bat" "$STAGE/"
 cp "$HERE/pack_assets/pg_setup.py" "$STAGE/"
 cp "$HERE/pack_assets/pack.env.example" "$STAGE/pack.env.example"
 cp "$HERE/pack_assets/README-portable.md" "$STAGE/README.md"
 cp "$REPO_ROOT/LICENSE" "$STAGE/LICENSE" 2>/dev/null || true
 
+# 运行态/私有数据绝不能进包：旧 staging 里可能残留测试 pgdata、日志、
+# 本机 pack.env 与 models/users（用户模型）。2026-11-16 用户反馈「安装不上」
+# 的根因之一就是 pgdata 带着测试口令被一起打包。
+rm -rf "$STAGE/pgdata" "$STAGE/logs" "$STAGE/run" "$STAGE/data"
+rm -f "$STAGE/pack.env"
 mkdir -p "$STAGE/data" "$STAGE/logs" "$STAGE/run"
+
+# 预置模型：production/FinBERT 是纯数据；users 是用户私有模型，永不打包。
+# staging 已有 production（历史离线模型）时保留；否则从仓库可见副本补。
+rm -rf "$STAGE/models/users"
+if [ ! -d "$STAGE/models/production" ] || [ -z "$(ls -A "$STAGE/models/production" 2>/dev/null)" ]; then
+    rm -rf "$STAGE/models/production"
+    if [ -d "$REPO_ROOT/models/production" ] && [ -n "$(ls -A "$REPO_ROOT/models/production" 2>/dev/null)" ]; then
+        mkdir -p "$STAGE/models"
+        cp -a "$REPO_ROOT/models/production" "$STAGE/models/production"
+    elif [ -d "$REPO_ROOT/models/production_archived/20261021_legacy_system_models" ]; then
+        mkdir -p "$STAGE/models"
+        cp -a "$REPO_ROOT/models/production_archived/20261021_legacy_system_models" "$STAGE/models/production"
+    else
+        log "警告: 无预置 production 模型（模型页需用户自行导入）"
+    fi
+fi
+if [ ! -d "$STAGE/models/finbert-zh-base" ] && [ -d "$REPO_ROOT/models/finbert-zh-base" ]; then
+    mkdir -p "$STAGE/models"
+    cp -a "$REPO_ROOT/models/finbert-zh-base" "$STAGE/models/finbert-zh-base"
+fi
+
 # 增量升级 SQL（data/upgrade_*.sql）：容器版挂 /data，便携包为 <包根>/data，
 # main_oss._upgrade_sql_files() 按候选目录探测执行（含 <backend>/../data）。
 # 缺这些文件则 system_events 等增量迁移永不执行——历史 bug，勿删。
@@ -317,6 +359,19 @@ if [ -f "$REPO_ROOT/data/stocks/stocks_index.json" ]; then
 else
     fail "仓库 data/stocks/stocks_index.json 缺失（股票中文名将全部为空）"
 fi
+
+# 出厂闸门：运行态/私有/半成品绝不进 tar。
+[ ! -e "$STAGE/pgdata" ] || fail "staging 含 pgdata（测试数据库不能随包）"
+[ ! -e "$STAGE/models/users" ] || fail "staging 含 models/users（用户私有模型不能随包）"
+[ ! -e "$STAGE/pack.env" ] || fail "staging 含 pack.env（本机口令不能随包）"
+[ ! -e "$STAGE/config/runtime.env" ] || fail "staging 含 config/runtime.env（运行期密钥不能随包）"
+[ ! -e "$STAGE/run/secrets.env" ] || fail "staging 含 run/secrets.env（运行期密钥不能随包）"
+[ -f "$STAGE/web/index.html" ] || fail "staging 缺 web/index.html"
+[ -f "$STAGE/data/stocks/stocks_index.json" ] || fail "staging 缺股票名称索引"
+if find "$STAGE/logs" -type f 2>/dev/null | grep -q .; then
+    fail "staging logs 非空（日志不能随包）"
+fi
+
 GIT_REV="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 {
     echo "pack=QuantMind-Portable-linux-x64"
@@ -341,4 +396,6 @@ else
         tar -C "$BUILD" -czf "$TAROUT" "$(basename "$STAGE")"
     fi
     ok "打包完成: $TAROUT ($(du -sh "$TAROUT" | cut -f1))"
+    ( cd "$DIST" && sha256sum "$(basename "$TAROUT")" > "$(basename "$TAROUT").sha256" )
+    ok "校验文件: $TAROUT.sha256"
 fi
