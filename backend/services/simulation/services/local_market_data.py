@@ -332,6 +332,14 @@ class LocalMarketData:
 
         bars = self._build_date(trade_date)
 
+        # 空结果绝不入缓存：当日分区是盘中/盘后才落盘的，缓存一次「该日暂无数据」
+        # 就等于让整个进程生命周期对该交易日永久失明。历史 BUG：11-16 盘中第一笔
+        # 模拟撮合按 date.today() 取价时分区还没到，空表被缓存；当晚 20:26 分区
+        # 落盘、20:29 EOD 重试仍读到空表，41 只持仓按 0 元估值写进日终快照，次日
+        # 「今日盈亏」虚增 72 万。空结果重查的代价只是一次分区目录探测。
+        if not bars:
+            return bars
+
         with self._lock:
             self._date_cache[trade_date] = bars
             self._date_cache.move_to_end(trade_date)
@@ -442,9 +450,13 @@ class LocalMarketData:
             return pd.DataFrame()
 
     def _probe_kline_root(self) -> Path | None:
-        """hive 分区根目录；非 dt= 分区布局（或 hub 无 data_dir）时返回 None。"""
+        """hive 分区根目录；非 dt= 分区布局（或 hub 无 data_dir）时返回 None。
+
+        只缓存「探测成功」的结果：探测失败（分区还没落盘/数据目录后补）时每次
+        重新探测，避免进程启动早期的一次失败把该市场永久钉在 DuckDB 视图慢路径上。
+        """
         with self._lock:
-            if self._kline_root_probed:
+            if self._kline_root_probed and self._kline_root is not None:
                 return self._kline_root
         root: Path | None = None
         try:

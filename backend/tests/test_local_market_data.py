@@ -519,6 +519,23 @@ class TestPartitionScan:
         assert lmd.load_date(date(2026, 7, 2)) == {}
         assert hub.queries == []
 
+    def test_empty_result_is_not_cached(self, tmp_path):
+        """空结果不得进缓存：分区晚到后同一实例必须立刻能读到。
+
+        历史 BUG：盘中按 date.today() 取价时分区还没有，空表被永久缓存，
+        当晚 EOD 仍读空表，把全部持仓按 0 元写进日终快照。
+        """
+        hub = _FakeHub(tmp_path)
+        lmd = LocalMarketData(hub=hub, market="CN")
+
+        assert lmd.load_date(date(2026, 7, 20)) == {}
+        _write_partition(tmp_path, 20260720, _DAILY)
+        lmd._session_dates = None
+        lmd._sessions_at = None
+
+        bars = lmd.load_date(date(2026, 7, 20))
+        assert bars["600036.SH"].close == 38.65
+
     def test_bad_columns_fall_back_to_view(self, tmp_path):
         _write_partition(tmp_path, 20260720, pd.DataFrame({"foo": [1]}))
         hub = _FakeHub(tmp_path)

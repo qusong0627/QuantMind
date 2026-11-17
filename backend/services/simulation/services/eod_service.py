@@ -390,6 +390,34 @@ async def _repair_eod_fund_snapshot(
         )
 
 
+def _position_price_gaps(positions: dict | None) -> tuple[int, list[str]]:
+    """返回 (有股数的持仓数, 取不到收盘价的有股数持仓代码)。
+
+    EOD 估值只用 `positions[*]["price"]`（由 `latest_price_loader` 填充），取价
+    失败时该键为 0；projection 会把 0 价持仓的市值记 0，于是日终总资产退化成
+    「只剩现金」。这里把缺口统计出来，由调用方决定本轮是否作废。
+    """
+    held = 0
+    missing: list[str] = []
+    for symbol, pos in (positions or {}).items():
+        if not isinstance(pos, dict):
+            continue
+        try:
+            qty = float(pos.get("volume") or pos.get("quantity") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+        held += 1
+        try:
+            price = float(pos.get("price") or pos.get("last_price") or 0.0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            missing.append(str(symbol))
+    return held, missing
+
+
 async def _execute_eod(trade_date: date) -> bool:
     """Run the full EOD pipeline. Returns True only when all accounts succeed."""
     try:
@@ -473,6 +501,36 @@ async def _execute_eod(trade_date: date) -> bool:
                         continue
 
                     positions = projection.positions or {}
+
+                    # 取价完整性护栏：过半持仓有股数却拿不到收盘价，说明当日行情
+                    # 还没就绪（同步抢跑/分区未写完），本轮一律作废等下次重试——
+                    # 宁可延后结算，也绝不把 0 元估值写成日终快照（历史 BUG 正是
+                    # 这样把 242,525.74 写成日终总资产，次日「今日盈亏」虚增 72 万）。
+                    held_count, unpriced = _position_price_gaps(positions)
+                    if unpriced and len(unpriced) * 2 >= held_count:
+                        logger.error(
+                            "Simulation EOD deferred for %s (%s): %d/%d holding(s) "
+                            "have no close price (%s); refusing to settle at zero "
+                            "valuation",
+                            trade_date,
+                            account.account_id,
+                            len(unpriced),
+                            held_count,
+                            ", ".join(unpriced[:5]),
+                        )
+                        await session.rollback()
+                        failed_accounts += 1
+                        continue
+                    if unpriced:
+                        # 少量取不到价格（退市/停牌缺行）不阻断结算，但必须留痕
+                        logger.warning(
+                            "Simulation EOD %s (%s): %d holding(s) settled at zero "
+                            "valuation (%s)",
+                            trade_date,
+                            account.account_id,
+                            len(unpriced),
+                            ", ".join(unpriced[:5]),
+                        )
 
                     long_mv = 0.0
                     short_mv = 0.0
@@ -740,6 +798,19 @@ def _local_latest_trade_date_sync() -> date | None:
         return None
 
 
+def _local_bar_count_sync(trade_date: date) -> int:
+    """目标交易日本地日线能读出多少条（0 = 当日行情还不可用）。"""
+    try:
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+
+        return len(get_local_market_data("CN").load_date(trade_date))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Local daily bar probe failed %s: %s", trade_date, exc)
+        return 0
+
+
 async def _daily_bar_available(session, trade_date: date) -> bool:
     """目标交易日日线是否已落盘（本地 parquet 优先，PG 兜底）。
 
@@ -748,7 +819,10 @@ async def _daily_bar_available(session, trade_date: date) -> bool:
     """
     local_latest = await asyncio.to_thread(_local_latest_trade_date_sync)
     if local_latest is not None and local_latest >= trade_date:
-        return True
+        # 分区目录存在 ≠ 当日行情可读：必须确认目标日真能读出日线，
+        # 否则会在「目录已建、文件未写完」的窗口里把持仓按 0 元结算。
+        if await asyncio.to_thread(_local_bar_count_sync, trade_date) > 0:
+            return True
     try:
         from sqlalchemy import text
 

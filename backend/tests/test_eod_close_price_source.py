@@ -150,9 +150,36 @@ def test_daily_bar_available_true_when_local_latest_reaches_target(monkeypatch):
     monkeypatch.setattr(
         eod, "_local_latest_trade_date_sync", lambda: date(2026, 11, 11)
     )
+    monkeypatch.setattr(eod, "_local_bar_count_sync", lambda _d: 5579)
     assert asyncio.run(
         eod._daily_bar_available(_FakeSession({}), date(2026, 11, 11))
     )
+
+
+def test_daily_bar_available_false_when_partition_not_readable(monkeypatch):
+    """分区目录已建但当日日线读不出来（同步写文件中）→ 不可用，必须延后。
+
+    历史 BUG：只校验「目录存在」就放行，EOD 在同步抢跑窗口里把 41 只持仓
+    按 0 元估值，日终总资产退化成「只剩现金」。
+    """
+    monkeypatch.setattr(
+        eod, "_local_latest_trade_date_sync", lambda: date(2026, 11, 11)
+    )
+    monkeypatch.setattr(eod, "_local_bar_count_sync", lambda _d: 0)
+    assert not asyncio.run(
+        eod._daily_bar_available(_FakeSession({}), date(2026, 11, 11))
+    )
+
+
+def test_position_price_gaps_flags_unpriced_holdings():
+    positions = {
+        "001202.SZ": {"volume": 1500, "price": 12.6, "market_value": 18900.0},
+        "002225.SZ": {"volume": 6100, "price": 0.0, "market_value": 0.0},
+        "003027.SZ": {"volume": 0, "price": 0.0, "market_value": 0.0},
+    }
+    held, missing = eod._position_price_gaps(positions)
+    assert held == 2
+    assert missing == ["002225.SZ"]
 
 
 def test_daily_bar_available_false_when_target_not_synced(monkeypatch):

@@ -45,9 +45,10 @@ async def _enrich_positions_with_prev_close(
     背景：持仓 payload 只写 `price/market_value/cost`，前端当日收益
     `(现价-昨收)*股数` 的昨收此前 100% 依赖 WS `pre_close` 推送；WS 断流、
     快照超 300s 被丢弃或新订阅无差分不推送时，明细全 `--`。
-    此处用本地 QuantDB 日线（与撮合/EOD 同源，`DailyBar.pre_close`）在
-    `/account` 单点补齐，前端 `pos.prev_close/pre_close/close_price`
-    兜底即生效；WS 仍可覆盖为更新值。`remark` 只改现价不删键，补的键可保留。
+    此处用本地 QuantDB 日线（与撮合/EOD 同源）在 `/account` 单点补齐，昨收取
+    「最新交易日收盘价」（当日日线已同步时取当日 pre_close），前端
+    `pos.prev_close/pre_close/close_price` 兜底即生效；WS 仍可覆盖为更新值。
+    `remark` 只改现价不删键，补的键可保留。
     """
     if not isinstance(positions, dict) or not positions:
         return
@@ -74,7 +75,7 @@ async def _enrich_positions_with_prev_close(
         if not wanted:
             return
 
-        def _load():
+        def _load() -> dict[str, float]:
             from backend.services.simulation.services.local_market_data import (
                 get_local_market_data,
             )
@@ -83,17 +84,33 @@ async def _enrich_positions_with_prev_close(
             latest = md.latest_trade_date()
             if latest is None:
                 return {}
-            return md.load_date(latest, symbols=wanted)
+            bars = md.load_date(latest, symbols=wanted)
+            if not bars:
+                return {}
+            # 昨收口径：最新交易日早于今天时，它的收盘价才是「今天」的昨收；
+            # 最新交易日就是今天（盘后当日日线已同步）时，昨收取当日 pre_close。
+            # 历史 BUG：一律取 DailyBar.pre_close（= 上一交易日收盘），昨收整体
+            # 差一个交易日，当日收益变成「两天涨跌合计」。
+            use_close = latest < date.today()
+            values: dict[str, float] = {}
+            for _sym, _bar in bars.items():
+                try:
+                    _value = float(
+                        getattr(_bar, "close" if use_close else "pre_close", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if _value <= 0:
+                    continue
+                try:
+                    values[StockCodeUtil.to_suffix(str(_sym)).upper()] = _value
+                except Exception:
+                    continue
+            return values
 
-        bars = await asyncio.to_thread(_load)
-        if not bars:
+        by_suffix = await asyncio.to_thread(_load)
+        if not by_suffix:
             return
-        by_suffix: dict[str, object] = {}
-        for _sym, _bar in bars.items():
-            try:
-                by_suffix[StockCodeUtil.to_suffix(str(_sym)).upper()] = _bar
-            except Exception:
-                continue
         for _key, _pos in positions.items():
             if not isinstance(_pos, dict):
                 continue
@@ -115,13 +132,7 @@ async def _enrich_positions_with_prev_close(
                 _lookup = StockCodeUtil.to_suffix(_sym).upper() or _sym.upper()
             except Exception:
                 _lookup = _sym.upper()
-            _bar = by_suffix.get(_lookup)
-            if _bar is None:
-                continue
-            try:
-                _pre = float(getattr(_bar, "pre_close", 0) or 0)
-            except (TypeError, ValueError):
-                _pre = 0.0
+            _pre = by_suffix.get(_lookup) or 0.0
             if _pre > 0:
                 _pos["prev_close"] = round(_pre, 4)
                 _pos.setdefault("pre_close", round(_pre, 4))
