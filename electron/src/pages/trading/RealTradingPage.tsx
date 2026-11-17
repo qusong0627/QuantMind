@@ -3,6 +3,7 @@ import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clo
 import type { LucideIcon } from 'lucide-react';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
 import TopBar from './components/TopBar';
+import { TradingShell, TradingSidebar, TradingMain } from '../../components/layout/TradingShell';
 import TopologyConsole from './tabs/StrategyConsole/TopologyConsole';
 import ManualTaskPage from './tabs/ManualTaskPage';
 import PersonalCenter from './tabs/PersonalCenter';
@@ -499,12 +500,18 @@ const RealTradingPage: React.FC = () => {
         { id: 'settings', label: '设置', icon: Settings },
     ];
 
+    // 侧边栏分组（顺序与上方 tabs 对应；增删 tab 时同步维护）
+    const tabSections: Array<{ label: string; ids: ActiveTab[] }> = [
+        { label: '交易', ids: ['manage', 'manual-task'] },
+        { label: '组合与风控', ids: ['position', 'history'] },
+        { label: '账户', ids: ['personal', 'settings'] },
+    ];
+
     return (
-        <div className="w-full h-full bg-[#f8fafc] p-6 flex flex-col overflow-hidden font-sans box-border">
-            {/* Unified Frame Container with 32px Border Radius (BacktestCenter Style) */}
-            <div className="bg-white border border-gray-200 shadow-sm w-full h-full rounded-[32px] flex flex-col overflow-hidden">
-                {/* Integrated Top Header - Account Overview（占可用高度 3/10） */}
-                <div className="flex-[3] min-h-0 flex flex-col bg-white border-b border-gray-200 overflow-hidden z-10">
+        <TradingShell>
+            <div className="flex h-full w-full flex-col overflow-hidden font-sans">
+                {/* 账户概览：TopBar 自带背景与下边框，按内容自然高度占位 */}
+                <div className="relative z-10 shrink-0">
                     <TopBar
                         isConnected={!!status}
                         strategyStatus={strategyStatus}
@@ -517,35 +524,72 @@ const RealTradingPage: React.FC = () => {
                     />
                 </div>
 
-                {/* Bottom Section - Sidebar & Content（占可用高度 7/10） */}
-                <div className="flex-[7] min-h-0 flex overflow-hidden">
-                    {/* Left Sidebar - Navigation */}
-                    <div className="w-[200px] flex flex-col border-r border-gray-200 bg-white shrink-0">
-                        <div className="flex-1 overflow-y-auto py-3.5 px-3 space-y-1.5 custom-scrollbar">
-                            <div className="px-2.5 py-1 mb-1">
-                                <span className="text-[12px] font-black text-slate-400 uppercase tracking-widest">功能导航</span>
+                <div className="flex min-h-0 flex-1 overflow-hidden">
+                    {/* 左侧导航：品牌头 + 分组菜单 + 运行状态卡 */}
+                    <TradingSidebar>
+                        <div className="border-b border-slate-100 px-5 py-4">
+                            <div className="flex items-center gap-2.5">
+                                <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#172238] text-white shadow-sm">
+                                    <LayoutDashboard size={15} />
+                                </div>
+                                <div>
+                                    <div className="text-[13px] font-extrabold tracking-tight text-slate-800">交易工作台</div>
+                                    <div className="mt-0.5 text-[12px] font-bold uppercase tracking-[0.18em] text-slate-400">Workspace</div>
+                                </div>
                             </div>
-                            {tabs.map(tab => (
-                                <button
-                                    key={tab.id}
-                                    onClick={() => setActiveTab(tab.id)}
-                                    className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[17px] tracking-wide transition-all duration-150
-                                        ${activeTab === tab.id
-                                            ? 'bg-blue-50 text-blue-600 border border-blue-200/80 shadow-2xs font-bold'
-                                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium'
-                                        }
-                                    `}
-                                >
-                                    <tab.icon size={19} className={activeTab === tab.id ? 'text-blue-500' : 'text-slate-400'} />
-                                    <span>{tab.label}</span>
-                                </button>
-                            ))}
                         </div>
-                    </div>
 
-                    {/* Right Content Area */}
-                    <div className="flex-1 overflow-hidden relative bg-gray-50/50">
-                    {activeTab === 'manage' && (
+                        <nav className="custom-scrollbar flex-1 space-y-3 overflow-y-auto px-3 py-2">
+                            {tabSections.map((section) => {
+                                const items = tabs.filter((tab) => section.ids.includes(tab.id));
+                                if (items.length === 0) return null;
+                                return (
+                                    <div key={section.label}>
+                                        <div className="mb-1.5 px-3 text-[12px] font-extrabold uppercase tracking-[0.18em] text-slate-400">{section.label}</div>
+                                        <div className="space-y-1">
+                                            {items.map((tab) => {
+                                                const selected = activeTab === tab.id;
+                                                return (
+                                                    <button
+                                                        key={tab.id}
+                                                        onClick={() => setActiveTab(tab.id)}
+                                                        className={`group relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] transition-all duration-200 ${
+                                                            selected
+                                                                ? 'bg-white font-bold text-indigo-600 shadow-[0_5px_18px_-8px_rgba(79,70,229,0.35)] ring-1 ring-slate-200/70'
+                                                                : 'font-medium text-slate-500 hover:bg-white/70 hover:text-slate-800'
+                                                        }`}
+                                                    >
+                                                        {selected && <span className="absolute -left-3 h-5 w-[3px] rounded-r-full bg-indigo-500" />}
+                                                        <tab.icon size={17} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'text-indigo-500' : 'text-slate-400 group-hover:text-slate-600'} />
+                                                        <span>{tab.label}</span>
+                                                        {tab.id === 'manage' && isRuntimeActive && (
+                                                            <span className="ml-auto h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.12)]" />
+                                                        )}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </nav>
+
+                        <div className="mx-3 mb-4 rounded-[22px] border border-white/80 bg-[#f6f8fa] p-5 shadow-sm">
+                            <div className="flex items-center justify-between">
+                                <span className="text-[12px] font-bold text-slate-500">SIMULATION</span>
+                                <span className={`h-1.5 w-1.5 rounded-full ${status ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                            </div>
+                            <div className="mt-1.5 truncate font-mono text-[12px] text-slate-400" title={userId}>{userId}</div>
+                            <div className="mt-2 flex items-center gap-1.5 text-[12px] font-medium text-slate-400">
+                                <span className="rounded bg-slate-100 px-1.5 py-0.5">A 股</span>
+                                <span>本地安全沙箱</span>
+                            </div>
+                        </div>
+                    </TradingSidebar>
+
+                    {/* 右侧内容区：带细点网格底纹 */}
+                    <TradingMain>
+                        {activeTab === 'manage' && (
                             <TopologyConsole
                                 tenantId={tenantId}
                                 userId={userId}
@@ -555,37 +599,36 @@ const RealTradingPage: React.FC = () => {
                                 onOpenManualTask={() => setActiveTab('manual-task')}
                                 onOpenHistory={() => setActiveTab('history')}
                             />
-                    )}
-                    {activeTab === 'manual-task' && (
-                        <ManualTaskPage tenantId={tenantId} userId={userId} tradingMode={tradingMode} onBack={() => setActiveTab('manage')} />
-                    )}
-                    {activeTab === 'personal' && (
-                        <PersonalCenter
-                            tenantId={tenantId}
-                            userId={userId}
-                            status={status}
-                            tradingMode={tradingMode}
-                        />
-                    )}
-                    {activeTab === 'position' && (
-                        <PositionMonitor
-                            userId={userId}
-                            isActive={activeTab === 'position'}
-                            accountInfo={accountInfo}
-                        />
-                    )}
-                    {activeTab === 'history' && (
-                        <TradingHistory
-                            userId={userId}
-                            isActive={activeTab === 'history'}
-                            tradingMode={tradingMode}
-                        />
-                    )}
-                    {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
-                    {activeTab === 'replay' && <ReplayPage />}
+                        )}
+                        {activeTab === 'manual-task' && (
+                            <ManualTaskPage tenantId={tenantId} userId={userId} tradingMode={tradingMode} onBack={() => setActiveTab('manage')} />
+                        )}
+                        {activeTab === 'personal' && (
+                            <PersonalCenter
+                                tenantId={tenantId}
+                                userId={userId}
+                                status={status}
+                                tradingMode={tradingMode}
+                            />
+                        )}
+                        {activeTab === 'position' && (
+                            <PositionMonitor
+                                userId={userId}
+                                isActive={activeTab === 'position'}
+                                accountInfo={accountInfo}
+                            />
+                        )}
+                        {activeTab === 'history' && (
+                            <TradingHistory
+                                userId={userId}
+                                isActive={activeTab === 'history'}
+                                tradingMode={tradingMode}
+                            />
+                        )}
+                        {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
+                        {activeTab === 'replay' && <ReplayPage />}
+                    </TradingMain>
                 </div>
-            </div>
-        </div>
 
             <Modal
                 title={
@@ -828,7 +871,8 @@ const RealTradingPage: React.FC = () => {
                 onCancel={() => setWizardOpen(false)}
                 onConfirm={handleWizardConfirm}
             />
-        </div>
+            </div>
+        </TradingShell>
     );
 };
 

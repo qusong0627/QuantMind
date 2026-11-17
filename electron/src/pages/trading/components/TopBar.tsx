@@ -1,5 +1,14 @@
 import React from 'react';
-import { Wallet, Wifi, Activity, Layers, Cpu, Server } from 'lucide-react';
+import {
+    Activity,
+    ArrowDownRight,
+    ArrowUpRight,
+    Layers,
+    PieChart,
+    Wallet,
+    Wifi,
+} from 'lucide-react';
+import type { DeployMode } from '../../../types/liveTrading';
 
 interface AccountInfo {
     total_asset: number;
@@ -24,173 +33,217 @@ interface TopBarProps {
     isConnected: boolean;
     strategyStatus: 'running' | 'starting' | 'stopped';
     tradingMode?: 'real' | 'simulation';
-    runMode?: 'REAL' | 'SHADOW' | 'SIMULATION';
+    runMode?: DeployMode;
     orchestrationMode?: 'docker' | 'k8s';
 }
 
-const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatus, tradingMode, runMode, orchestrationMode }) => {
-    const formatMoney = (val: number | undefined) => {
-        if (val === undefined || (!accountInfo && val === 0)) return '0.00';
-        return val.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    };
-
-    const formatPercent = (val: number | undefined) => {
-        if (val === undefined || (!accountInfo && val === 0)) return '0.00%';
-        return `${(val * 100).toFixed(2)}%`;
-    };
-
+/**
+ * 交易页顶部账户概览（设计对齐企业版模拟盘）：
+ * 深色总资产卡 + 2×2 指标卡 + 环形仓位卡，三栏栅格。
+ */
+const TopBar: React.FC<TopBarProps> = ({
+    accountInfo,
+    isConnected,
+    strategyStatus,
+    tradingMode,
+    runMode,
+    orchestrationMode,
+}) => {
     const info = accountInfo;
+    const isLive = tradingMode === 'real';
+    const formatMoney = (value?: number) => {
+        if (value === undefined) return '—';
+        return value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+    const formatSignedMoney = (value?: number) => {
+        if (value === undefined) return '—';
+        return `${value > 0 ? '+' : ''}${formatMoney(value)}`;
+    };
+    const formatPercent = (value?: number, signed = false) => {
+        if (value === undefined) return '—';
+        return `${signed && value > 0 ? '+' : ''}${(value * 100).toFixed(2)}%`;
+    };
+    // A 股习惯：红涨绿跌
+    const pnlColor = (value: number, dark = false) => {
+        if (value > 0) return dark ? 'text-[#fb7185]' : 'text-red-600';
+        if (value < 0) return dark ? 'text-[#34d399]' : 'text-emerald-600';
+        return dark ? 'text-white' : 'text-slate-800';
+    };
+    const strategyStatusLabel = strategyStatus === 'running'
+        ? '策略运行中'
+        : strategyStatus === 'starting'
+            ? '正在启动'
+            : '策略待运行';
+    const strategyStatusColor = strategyStatus === 'running'
+        ? 'bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.12)]'
+        : strategyStatus === 'starting'
+            ? 'bg-amber-400 animate-pulse'
+            : 'bg-slate-300';
+    const allocation = Math.max(0, Math.min(1, info?.position_ratio || 0));
+    const allocationPercent = allocation * 100;
+    const circumference = 2 * Math.PI * 42;
+    const dailyPnl = info?.daily_pnl || 0;
+    const floatingPnl = info?.floating_pnl || 0;
+    const totalPnl = info?.total_pnl || 0;
 
-    const getPnLColor = (val: number) => val > 0 ? 'text-red-600' : val < 0 ? 'text-emerald-600' : 'text-slate-800';
-    const getPnLTagClass = (val: number) => val > 0
-        ? 'bg-red-50 text-red-600 border-red-200'
-        : (val < 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-slate-100 text-slate-700 border-slate-200');
-
-    const modeLabel = tradingMode === 'real' ? '实盘' : '模拟盘';
-    const runModeLabel = runMode === 'SHADOW'
-        ? '影子运行'
-        : (runMode === 'REAL' ? '实盘运行' : (runMode === 'SIMULATION' ? '模拟运行' : '未启动'));
-    const runModeTone = runMode === 'SHADOW' ? 'bg-purple-50 text-purple-700 border-purple-200'
-        : (runMode === 'REAL' ? 'bg-blue-50 text-blue-700 border-blue-200'
-            : (runMode === 'SIMULATION' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-slate-100 text-slate-500 border-slate-200'));
-
-    const deployChannelLabel = runMode === 'SIMULATION'
-        ? '本地沙箱'
-        : (runMode === 'REAL' || runMode === 'SHADOW'
-            ? (orchestrationMode === 'docker' ? 'Docker 容器' : (orchestrationMode === 'k8s' ? 'K8s 集群' : '容器节点'))
-            : '待部署');
-    const deployChannelTone = runMode === 'SHADOW' ? 'bg-purple-50/60 text-purple-600 border-purple-200'
-        : (runMode === 'REAL' ? 'bg-blue-50/60 text-blue-600 border-blue-200'
-            : (runMode === 'SIMULATION' ? 'bg-amber-50/60 text-amber-600 border-amber-200' : 'bg-slate-50 text-slate-400 border-slate-200'));
-
-    const strategyStatusLabel = strategyStatus === 'running' ? '策略运行中' : (strategyStatus === 'starting' ? '正在启动' : '策略已停止');
-    const strategyStatusColor = strategyStatus === 'running' ? 'text-emerald-500' : (strategyStatus === 'starting' ? 'text-amber-500' : 'text-slate-400');
-
-    // 保留早期 4×2 信息密度：每张卡只消费已由 accountAdapter 归一化的账户字段，
-    // 不新增接口或改变现有账户/行情刷新链路。
     const metrics = [
         {
-            label: '总资产',
-            hint: '账户当前总权益，含现金与持仓市值。',
-            value: formatMoney(info?.total_asset),
-            subLabel: '账户权益',
-        },
-        {
-            label: '初始权益',
-            hint: '统一基线口径，对应账户初始权益。',
-            value: formatMoney(info?.initial_equity),
-            subLabel: '收益计算基线',
-        },
-        {
             label: '可用资金',
-            hint: '可用现金口径，冻结资金单独展示。',
             value: formatMoney(info?.cash),
-            subLabel: `冻结 ${formatMoney(info?.frozen)}`,
+            detail: `冻结 ${formatMoney(info?.frozen)}`,
+            icon: Wallet,
+            tone: 'bg-indigo-50 text-indigo-600',
         },
         {
             label: '持仓市值',
-            hint: '当前持仓证券的实时市值汇总。',
             value: formatMoney(info?.market_value),
-            subLabel: `仓位 ${formatPercent(info?.position_ratio)}`,
-        },
-        {
-            label: '累计总盈亏',
-            hint: '累计盈亏金额；副标签展示总收益率。',
-            value: formatMoney(info?.total_pnl),
-            subLabel: `${(info?.total_pnl || 0) > 0 ? '+' : ''}${formatPercent(info?.total_pnl_percent)}`,
-            highlight: true,
-            pnl: info?.total_pnl || 0,
+            detail: `${info?.position_count || 0} 只持仓`,
+            icon: PieChart,
+            tone: 'bg-cyan-50 text-cyan-600',
         },
         {
             label: '今日盈亏',
-            hint: '交易日口径盈亏；副标签展示日收益率。',
-            value: formatMoney(info?.daily_pnl),
-            subLabel: `${(info?.daily_pnl || 0) > 0 ? '+' : ''}${formatPercent(info?.daily_pnl_percent)}`,
-            highlight: true,
-            pnl: info?.daily_pnl || 0,
+            value: formatSignedMoney(info?.daily_pnl),
+            detail: formatPercent(info?.daily_pnl_percent, true),
+            icon: dailyPnl >= 0 ? ArrowUpRight : ArrowDownRight,
+            tone: dailyPnl > 0 ? 'bg-red-50 text-red-500' : dailyPnl < 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 text-slate-500',
+            pnl: dailyPnl,
         },
         {
             label: '浮动盈亏',
-            hint: '当前持仓未实现盈亏；副标签展示相对持仓市值收益率。',
-            value: formatMoney(info?.floating_pnl),
-            subLabel: `${(info?.floating_pnl || 0) > 0 ? '+' : ''}${formatPercent(info?.floating_pnl_percent)}`,
-            highlight: true,
-            pnl: info?.floating_pnl || 0,
-        },
-        {
-            label: '持仓数量',
-            hint: '当前持仓标的数量；副标签展示仓位占比。',
-            value: `${info?.position_count || 0} 只`,
-            subLabel: `仓位 ${formatPercent(info?.position_ratio)}`,
+            value: formatSignedMoney(info?.floating_pnl),
+            detail: formatPercent(info?.floating_pnl_percent, true),
+            icon: floatingPnl >= 0 ? ArrowUpRight : ArrowDownRight,
+            tone: floatingPnl > 0 ? 'bg-red-50 text-red-500' : floatingPnl < 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 text-slate-500',
+            pnl: floatingPnl,
         },
     ];
 
     return (
-        <div className="flex flex-col gap-2 p-4 px-6 bg-white h-full w-full min-h-0">
-            {/* Header: Title, Tags, and Status Indicators */}
-            <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                    <div className="p-1.5 bg-blue-50 text-blue-600 rounded-xl">
-                        <Wallet size={18} />
+        <header className="relative shrink-0 overflow-hidden border-b border-slate-200/70 bg-white px-6 pb-5 pt-4">
+            <div className="pointer-events-none absolute -right-20 -top-32 h-72 w-72 rounded-full bg-indigo-100/50 blur-3xl" />
+            <div className="relative mb-4 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                    <div>
+                        <div className="mb-0.5 flex items-center gap-2 text-[12px] font-extrabold uppercase tracking-[0.24em] text-slate-400">
+                            <span>{isLive ? 'Live trading' : 'Paper trading'}</span>
+                            <span className="h-px w-6 bg-slate-200" />
+                            <span>CN</span>
+                        </div>
+                        <h1 className="text-xl font-black tracking-tight text-slate-900">
+                            {isLive ? '实盘交易仪表盘' : '模拟交易仪表盘'}
+                        </h1>
                     </div>
-                    <div className="flex items-baseline gap-2">
-                        <span className="text-base font-bold text-slate-800 tracking-tight">资产概览</span>
-                    </div>
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200/80 rounded-full text-xs text-slate-600 font-medium">
-                        <Layers size={13} className="text-slate-400" />
-                        <span>{modeLabel}</span>
-                    </span>
-                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${runModeTone}`}>
-                        <Cpu size={13} />
-                        <span>{runModeLabel}</span>
-                    </span>
-                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${deployChannelTone}`}>
-                        <Server size={13} />
-                        <span>{deployChannelLabel}</span>
+                    <span className="ml-1 inline-flex items-center gap-1.5 rounded-full border border-indigo-100 bg-indigo-50/70 px-2.5 py-1 text-[12px] font-bold text-indigo-600">
+                        <Layers size={12} />
+                        {isLive ? '实盘账户' : '模拟账户'}
                     </span>
                 </div>
-
-                <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200/80 rounded-full text-xs text-slate-600 font-medium">
-                        <Wifi size={13} className={isConnected ? 'text-emerald-500 animate-pulse' : 'text-slate-300'} />
-                        <span>{isConnected ? '行情已连接' : '未连接'}</span>
+                <div className="flex items-center gap-2.5 text-[12px] font-semibold">
+                    <div className="flex items-center gap-2 rounded-full border border-slate-200/80 bg-slate-50/80 px-3 py-1.5 text-slate-500">
+                        <Wifi size={13} className={isConnected ? 'text-indigo-500' : 'text-slate-300'} />
+                        {isConnected ? '数据已同步' : '等待数据'}
                     </div>
-                    <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200/80 rounded-full text-xs text-slate-600 font-medium">
-                        <Activity size={13} className={strategyStatusColor} />
-                        <span>{strategyStatusLabel}</span>
+                    <div className="flex items-center gap-2 rounded-full border border-slate-200/80 bg-white px-3 py-1.5 text-slate-600 shadow-sm">
+                        <span className={`h-1.5 w-1.5 rounded-full ${strategyStatusColor}`} />
+                        {strategyStatusLabel}
+                        {runMode === 'SIMULATION' && orchestrationMode && (
+                            <span className="border-l border-slate-200 pl-2 font-mono text-[12px] uppercase text-slate-400">{orchestrationMode}</span>
+                        )}
                     </div>
                 </div>
             </div>
 
-            {/* 8 卡片弹性填满 30% 区域：桌面端固定 4×2，较窄屏幕自然折行。 */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 sm:grid-rows-2 gap-2 flex-1 min-h-0">
-                {metrics.map((metric) => {
-                    const pnl = metric.pnl || 0;
-                    const valueClass = metric.highlight ? getPnLColor(pnl) : 'text-slate-900';
-                    return (
-                        <div
-                            key={metric.label}
-                            title={metric.hint}
-                            className="flex min-h-0 h-full flex-col items-center justify-center rounded-2xl border border-slate-200 bg-slate-50/80 p-2 text-center transition-all hover:bg-white hover:shadow-xs overflow-hidden"
-                        >
-                            <span className="mb-1 text-[11px] font-bold tracking-wide text-slate-600">
-                                {metric.label}
-                            </span>
-                            <span className={`font-mono text-lg font-black tracking-tight ${valueClass}`}>
-                                {metric.highlight && pnl > 0 ? '+' : ''}{metric.value}
-                            </span>
-                            <span
-                                className={metric.highlight
-                                    ? `mt-1 rounded border px-1.5 py-0.5 text-[11px] font-bold ${getPnLTagClass(pnl)}`
-                                    : 'mt-1 text-[11px] font-medium text-slate-500'}
-                            >
-                                {metric.subLabel}
+            <div className="relative grid grid-cols-1 gap-3 xl:grid-cols-[1.12fr_1.35fr_0.78fr]">
+                {/* 总资产：深色主卡 */}
+                <section className="relative min-h-[164px] overflow-hidden rounded-[22px] bg-[#131d31] px-6 py-5 text-white shadow-[0_16px_36px_-18px_rgba(15,23,42,0.65)]">
+                    <div className="pointer-events-none absolute -right-12 -top-20 h-56 w-56 rounded-full bg-indigo-500/20 blur-2xl" />
+                    <div className="pointer-events-none absolute bottom-0 right-0 h-24 w-48 bg-gradient-to-tl from-cyan-400/10 to-transparent" />
+                    <div className="relative flex h-full flex-col">
+                        <div className="flex items-center justify-between">
+                            <span className="text-[12px] font-semibold tracking-[0.14em] text-slate-400">TOTAL EQUITY · 总资产</span>
+                            <Activity size={15} className="text-indigo-300" />
+                        </div>
+                        <div className="mt-2 flex items-end gap-2 whitespace-nowrap">
+                            <span className="mb-1.5 text-lg font-medium text-slate-400">¥</span>
+                            <span className="font-mono text-[34px] font-bold leading-none tracking-[-0.045em] text-white">{formatMoney(info?.total_asset)}</span>
+                        </div>
+                        <div className="mt-3 flex items-center gap-2.5">
+                            <span className={`font-mono text-sm font-bold ${pnlColor(totalPnl, true)}`}>{formatSignedMoney(info?.total_pnl)}</span>
+                            <span className="rounded-md border border-white/10 bg-white/[0.06] px-2 py-0.5 font-mono text-[12px] text-slate-300">
+                                累计 {formatPercent(info?.total_pnl_percent, true)}
                             </span>
                         </div>
-                    );
-                })}
+                        <div className="mt-auto flex items-center justify-between border-t border-white/[0.08] pt-3 text-[12px] text-slate-400">
+                            <span>初始权益 <b className="ml-1 font-mono font-medium text-slate-200">{formatMoney(info?.initial_equity)}</b></span>
+                            <span className="inline-flex items-center gap-1.5"><span className="h-1 w-1 rounded-full bg-emerald-400" />{isLive ? '容器节点' : '本地沙箱'}</span>
+                        </div>
+                    </div>
+                </section>
+
+                {/* 资金/持仓/盈亏：2×2 指标卡 */}
+                <section className="grid min-h-[164px] grid-cols-2 overflow-hidden rounded-[22px] border border-slate-200/80 bg-white shadow-[0_8px_28px_-20px_rgba(15,23,42,0.25)]">
+                    {metrics.map((metric, index) => (
+                        <div
+                            key={metric.label}
+                            className={`relative flex min-w-0 flex-col justify-center px-4 py-3 ${index % 2 === 0 ? 'border-r border-slate-100' : ''} ${index < 2 ? 'border-b border-slate-100' : ''}`}
+                        >
+                            <div className="flex items-center gap-2">
+                                <span className={`flex h-6 w-6 items-center justify-center rounded-lg ${metric.tone}`}>
+                                    <metric.icon size={13} strokeWidth={2.2} />
+                                </span>
+                                <span className="text-[12px] font-semibold text-slate-500">{metric.label}</span>
+                            </div>
+                            <div className={`mt-1.5 truncate text-center font-mono text-[17px] font-bold tracking-tight ${metric.pnl !== undefined ? pnlColor(metric.pnl) : 'text-slate-800'}`} title={metric.value}>
+                                {metric.value}
+                            </div>
+                            <div className={`mt-0.5 text-center font-mono text-[12px] ${metric.pnl !== undefined ? pnlColor(metric.pnl) : 'text-slate-400'}`}>{metric.detail}</div>
+                        </div>
+                    ))}
+                </section>
+
+                {/* 资金配置：环形仓位 */}
+                <section className="flex min-h-[164px] items-center gap-4 rounded-[22px] border border-slate-200/80 bg-[#f8fafc] px-5 py-4">
+                    <div className="relative h-[104px] w-[104px] shrink-0">
+                        <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90" aria-hidden="true">
+                            <circle cx="50" cy="50" r="42" fill="none" stroke="#e8edf3" strokeWidth="7" />
+                            <circle
+                                cx="50"
+                                cy="50"
+                                r="42"
+                                fill="none"
+                                stroke="#6366f1"
+                                strokeWidth="7"
+                                strokeLinecap="round"
+                                strokeDasharray={circumference}
+                                strokeDashoffset={circumference * (1 - allocation)}
+                                className="transition-all duration-700"
+                            />
+                        </svg>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center">
+                            <span className="font-mono text-xl font-black tracking-tight text-slate-800">{info ? `${allocationPercent.toFixed(1)}%` : '—'}</span>
+                            <span className="mt-0.5 text-[12px] font-semibold text-slate-400">当前仓位</span>
+                        </div>
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-3">
+                        <div>
+                            <div className="text-[12px] font-bold uppercase tracking-[0.16em] text-slate-400">Allocation</div>
+                            <div className="mt-0.5 text-sm font-extrabold text-slate-700">资金配置</div>
+                        </div>
+                        <div className="space-y-2 text-[12px]">
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="flex items-center gap-1.5 text-slate-500"><i className="h-1.5 w-1.5 rounded-full bg-indigo-500" />持仓</span>
+                                <b className="font-mono text-slate-700">{info ? `${allocationPercent.toFixed(1)}%` : '—'}</b>
+                            </div>
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="flex items-center gap-1.5 text-slate-500"><i className="h-1.5 w-1.5 rounded-full bg-slate-200" />现金</span>
+                                <b className="font-mono text-slate-700">{info ? `${(100 - allocationPercent).toFixed(1)}%` : '—'}</b>
+                            </div>
+                        </div>
+                    </div>
+                </section>
             </div>
-        </div>
+        </header>
     );
 };
 
