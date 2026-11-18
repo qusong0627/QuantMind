@@ -32,6 +32,7 @@ import {
     CloudServerOutlined,
     OrderedListOutlined,
     SafetyCertificateOutlined,
+    AuditOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
 } from '@ant-design/icons';
@@ -98,6 +99,9 @@ const NAV_GROUPS: NavGroupDef[] = [
         items: [
             { key: 'orders', label: '订单管理', icon: <OrderedListOutlined /> },
             { key: 'risk', label: '风险控制', icon: <SafetyCertificateOutlined /> },
+            // 评估中心自交易控制台迁入（2026-11-18）：评的是订单/持仓/策略/模型同一批
+            // 交易核心对象，与风险控制同组；交易控制台的页签已随之删除。
+            { key: 'eval', label: '评估中心', icon: <AuditOutlined /> },
         ],
     },
     {
@@ -345,7 +349,7 @@ const AdminPage: React.FC = () => {
                     {/* 大屏页面用全宽，其余保留 1400px 阅读宽度（沿用旧规则） */}
                     <div
                         className={
-                            ['news', 'inference', 'tags', 'settings', 'stock-pools', 'orders', 'risk', 'profile'].includes(currentKey)
+                            ['news', 'inference', 'tags', 'settings', 'stock-pools', 'orders', 'risk', 'eval', 'profile'].includes(currentKey)
                                 ? `min-h-0 animate-in fade-in slide-in-from-bottom-4 duration-500 ${
                                       ['orders', 'risk', 'profile'].includes(currentKey)
                                           ? 'flex w-full flex-1 flex-col'

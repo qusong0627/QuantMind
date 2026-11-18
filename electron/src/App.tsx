@@ -107,6 +107,9 @@ const AdminSystemSettings = lazy(() => import('./features/admin/components/Admin
 const AdminStockPool = lazy(() => import('./features/admin/components/AdminStockPool'));
 const AdminRiskControl = lazy(() => import('./features/admin/components/AdminRiskControl').then(m => ({ default: m.AdminRiskControl })));
 const AdminOrderManagement = lazy(() => import('./features/admin/components/AdminOrderManagement').then(m => ({ default: m.AdminOrderManagement })));
+// 评估中心（2026-11-18 自交易控制台「评估中心」页签迁入后台管理·交易核心；
+// 交易控制台那边已删栏，旧深链 /trading?tab=eval 不再可达）
+const EvalCenterPanel = lazy(() => import('./features/eval-center/components/EvalCenterPanel').then(m => ({ default: m.EvalCenterPanel })));
 const AdminInferenceMonitor = lazy(() => import('./features/admin/components/AdminInferenceMonitor').then(m => ({ default: m.AdminInferenceMonitor })));
 const AlphaResearchPage = lazy(() => import('./features/alpha-research/pages/AlphaResearchPage'));
 const DeskTodayPage = lazy(() => import('./features/desk/DeskTodayPage'));
@@ -828,6 +831,7 @@ export default function App() {
                     <Route path="inference" element={<Suspense fallback={<Spin size="large" />}><AdminInferenceMonitor /></Suspense>} />
                     <Route path="orders" element={<Suspense fallback={<Spin size="large" />}><AdminOrderManagement /></Suspense>} />
                     <Route path="risk" element={<Suspense fallback={<Spin size="large" />}><AdminRiskControl /></Suspense>} />
+                    <Route path="eval" element={<Suspense fallback={<Spin size="large" />}><EvalCenterPanel /></Suspense>} />
                     {/* 个人中心：内嵌在后台 shell 右侧内容区（同一 UserCenterPage，按路由自适应布局） */}
                     <Route path="profile" element={<Suspense fallback={<Spin size="large" />}><UserCenterPage /></Suspense>} />
                     <Route path="quotes" element={<Suspense fallback={<Spin size="large" />}><AdminDataPlatform /></Suspense>} />

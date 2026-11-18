@@ -7,7 +7,6 @@
 export type ActiveTab =
   | 'desk'
   | 'signals'
-  | 'eval'
   | 'manage'
   | 'manual-task'
   | 'personal'
@@ -26,10 +25,13 @@ export const DEFAULT_ACTIVE_TAB: ActiveTab = 'desk';
 
 /**
  * 只有这几条支持深链直达——别的一律回落默认，不盲信 URL。
- * `eval` 来自评估徽章跳转，`signals` 来自候选信号跳转，
- * `position` 来自持仓预警（哨兵 `action_url`，点「去持仓」要真的落到持仓页）。
+ * `signals` 来自候选信号跳转，`position` 来自持仓预警（哨兵 `action_url`，
+ * 点「去持仓」要真的落到持仓页）。
+ *
+ * 评估中心原为深链目标（徽章 `?tab=eval&object=…`），2026-11-18 迁后台管理后
+ * 不再属于本控制台：徽章改跳 `/admin/eval`，这里同步删掉 `eval`。
  */
-const DEEP_LINKABLE: readonly ActiveTab[] = ['eval', 'signals', 'position'];
+const DEEP_LINKABLE: readonly ActiveTab[] = ['signals', 'position'];
 
 /**
  * 深链白名单判定。挂载（`resolveInitialTab`）与**页内 URL 变化**（`RealTradingPage`

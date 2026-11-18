@@ -1,5 +1,5 @@
 /**
- * 交易控制台页签表 —— 基础 9 栏 + 「追加页签」机制的纯逻辑。
+ * 交易控制台页签表 —— 基础 8 栏 + 「追加页签」机制的纯逻辑。
  *
  * 存在理由：本机独有的「实盘交易」栏目（`features/local-live/`，不入库）要求
  * **与模拟交易同一个控制台**，只多出实盘专属的几栏。做法不是把外壳复制一份
@@ -11,7 +11,6 @@
  */
 
 import {
-    Award,
     BarChart3,
     ClipboardList,
     FileText,
@@ -45,8 +44,8 @@ export const BASE_CONSOLE_TABS: readonly ConsoleTab[] = [
     { id: 'desk' satisfies ActiveTab, label: '系统健康', icon: HeartPulse },
     // 候选信号独立成栏（2026-09-17 自交易台拆出）
     { id: 'signals' satisfies ActiveTab, label: '候选信号', icon: BarChart3 },
-    // 评估中心自因子研究迁入（2026-09-17），置于策略管理之前（评估与策略同组）
-    { id: 'eval' satisfies ActiveTab, label: '评估中心', icon: Award },
+    // 评估中心已于 2026-11-18 迁至后台管理「交易核心 → 评估中心」（/admin/eval），
+    // 本页签删除；别再以「评估与策略同组」为由加回来。
     { id: 'manage' satisfies ActiveTab, label: '策略管理', icon: LayoutDashboard },
     // 时光回放功能尚存多处问题，暂时隐藏入口，完善后取消注释即可恢复（ReplayPage 渲染分支保留）
     // { id: 'replay', label: '时光回放', icon: Clock },

@@ -11,7 +11,6 @@ import TradingHistory from './tabs/TradingHistory';
 import SettingsCenter, { type SettingsExtraPanel } from './tabs/SettingsCenter';
 import ReplayPage from './tabs/ReplayPage';
 import DeskTodayPage from '../../features/desk/DeskTodayPage';
-import { EvalCenterPanel } from '../../features/eval-center/components/EvalCenterPanel';
 import SignalsExplorerPage from './tabs/SignalsExplorerPage';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import type { StartGateFailure } from '../../services/realTradingService';
@@ -192,7 +191,7 @@ export interface RealTradingPageProps {
 
 const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, topBarExtras, extraTabs, banner, settingsPanels, manualTaskExtras, positionRailExtras }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
-    // 默认「系统健康」，深链 ?tab=eval|signals 直达 —— 规则见 utils/activeTab.ts（有测试锁定）
+    // 默认「系统健康」，深链 ?tab=signals|position 直达 —— 规则见 utils/activeTab.ts（有测试锁定）
     const initialTab: ActiveTab = resolveInitialTab(
         typeof window === 'undefined' ? null : window.location.hash,
     );
@@ -200,20 +199,20 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, to
     const [initialSymbol] = useState<string | null>(() =>
         typeof window === 'undefined' ? null : resolveInitialSymbol(window.location.hash),
     );
-    // 取值域含追加页签 id，故为 string；基础 9 栏的 id 仍由 consoleTabs 钉在 ActiveTab 上
+    // 取值域含追加页签 id，故为 string；基础 8 栏的 id 仍由 consoleTabs 钉在 ActiveTab 上
     const [activeTab, setActiveTab] = useState<string>(initialTab);
 
     // 页签 ↔ URL 双向同步（replace，不留历史栈）：
     // - 切页签写 URL：刷新/转发能停在原栏（此前 URL 永远停在进入时那一栏）；
-    // - URL 变化读页签：**页内**深链（如候选信号页里的评估徽章 navigate 到 ?tab=eval）
-    //   不重挂载本组件，useState 初值不会重算 —— 缺这条监听时「页内点徽章无效」。
+    // - URL 变化读页签：**页内**深链（如候选信号页里的持仓预警 navigate 到 ?tab=position）
+    //   不重挂载本组件，useState 初值不会重算 —— 缺这条监听时「页内点跳转无效」。
     // 白名单与挂载口径一致（utils/activeTab.isDeepLinkableTab，有测试锁定）。
     const [searchParams, setSearchParams] = useSearchParams();
     const switchTab = useCallback(
         (t: string) => {
             setActiveTab(t);
-            // 离开评估中心时顺带清掉对象深链参数：否则下次从别处进 eval 会
-            // 被残留的 object/object_id 拽到旧对象上。
+            // 切栏只保留 tab 一个参数：残留的 symbol/object 等深链参数会把下一次
+            // 进栏拽到旧对象上（评估中心迁走后 object 参数已不由本页消费，同样清掉）。
             setSearchParams(t === DEFAULT_ACTIVE_TAB ? {} : { tab: t }, { replace: true });
         },
         [setSearchParams],
@@ -668,7 +667,7 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, to
         }
     };
 
-    // 基础 9 栏 + 调用方追加栏（本机「实盘交易」栏目）。清单与顺序的唯一事实源在
+    // 基础 8 栏 + 调用方追加栏（本机「实盘交易」栏目）。清单与顺序的唯一事实源在
     // `utils/consoleTabs.ts`——实盘与模拟共用同一张表，改一处两边同时生效。
     const tabs = useMemo(() => composeConsoleTabs(extraTabs), [extraTabs]);
 
@@ -788,11 +787,6 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, to
                         /* 候选信号：quant-Trader 个股终端左栏复刻（列表/筛选/补推理）；
                            模型刷新（补推理）完成后跳「系统健康」 */
                         <SignalsExplorerPage onModelRefreshed={() => switchTab('desk')} />
-                    )}
-                    {activeTab === 'eval' && (
-                        <div className="h-full overflow-y-auto p-4">
-                            <EvalCenterPanel />
-                        </div>
                     )}
                     {activeTab === 'manage' && (
                             <TopologyConsole

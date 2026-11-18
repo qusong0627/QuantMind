@@ -4,13 +4,15 @@
  *
  * 契约：objectType ∈ eval API 枚举；objectId 对齐写侧（model=model_id、
  * strategy_health=策略 id、daily_selection=信号交易日）。无记录 → 渲染「未评分」
- * 灰态（不隐藏、不伪造）。点击跳转模拟交易-评估中心。
+ * 灰态（不隐藏、不伪造）。点击跳后台管理·交易核心·评估中心（`/admin/eval`，
+ * 2026-11-18 自交易控制台迁入）。
  */
 
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { listScores } from '../../features/eval-center/services/evalCenterService';
 import { gradeMeta } from '../../features/eval-center/components/evalCenterModel';
+import { useAppSelector } from '../../store';
 
 interface EvalScoreBadgeProps {
   objectType: 'model' | 'strategy_health' | 'daily_selection' | 'factor' | 'account' | 'strategy';
@@ -36,6 +38,9 @@ export const EvalScoreBadge: React.FC<EvalScoreBadgeProps> = ({
   className,
 }) => {
   const navigate = useNavigate();
+  // 评估中心迁入后台管理（/admin 需管理员），非管理员点进去只会撞 403 ——
+  // 那就保留徽章读数、去掉点击（不是隐藏，读数本身对普通用户仍有意义）。
+  const isAdmin = useAppSelector((state) => Boolean(state.auth.user?.is_admin));
   const [row, setRow] = useState<{ grade: string | null; score: number | null; low: boolean; red: string[] } | null>(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -87,10 +92,27 @@ export const EvalScoreBadge: React.FC<EvalScoreBadgeProps> = ({
     `${prefix || DEFAULT_PREFIX[objectType]}：${row.grade || '—'}`,
     row.score !== null ? `${Number(row.score).toFixed(1)} 分` : null,
     row.red.length ? `红线：${row.red.join('、')}` : null,
-    '点击前往评估中心下钻',
+    isAdmin ? '点击前往后台管理·评估中心下钻' : '评估中心在后台管理（需管理员权限）',
   ]
     .filter(Boolean)
     .join(' · ');
+
+  const body = (
+    <>
+      {prefix || DEFAULT_PREFIX[objectType]} {row.grade || '—'}
+      {meta.isLowConfidence ? ' †' : ''}
+      {row.red.length > 0 ? ' ⚠' : ''}
+    </>
+  );
+  const badgeClass = `text-[10px] px-1.5 py-0.5 rounded-full border ${meta.className} ${className || ''}`;
+
+  if (!isAdmin) {
+    return (
+      <span title={title} className={badgeClass}>
+        {body}
+      </span>
+    );
+  }
 
   return (
     <button
@@ -100,15 +122,13 @@ export const EvalScoreBadge: React.FC<EvalScoreBadgeProps> = ({
         // 深链带上对象（object/object_id）：落地就选中这枚徽章对应的对象，
         // 而不是让评估中心停在榜单第一行（那会让人以为评分被清空了）。
         navigate(
-          `/trading?tab=eval&object=${encodeURIComponent(objectType)}&object_id=${encodeURIComponent(objectId)}`,
+          `/admin/eval?object=${encodeURIComponent(objectType)}&object_id=${encodeURIComponent(objectId)}`,
         );
       }}
       title={title}
-      className={`text-[10px] px-1.5 py-0.5 rounded-full border cursor-pointer hover:brightness-95 ${meta.className} ${className || ''}`}
+      className={`${badgeClass} cursor-pointer hover:brightness-95`}
     >
-      {prefix || DEFAULT_PREFIX[objectType]} {row.grade || '—'}
-      {meta.isLowConfidence ? ' †' : ''}
-      {row.red.length > 0 ? ' ⚠' : ''}
+      {body}
     </button>
   );
 };

@@ -3,7 +3,7 @@
  *
  * 布局：左侧因子目录（分类树 + 搜索 + 标签筛选）· 顶部区间选择 · 两组页签：
  * 研究：排行榜 / 单因子分析 / 多因子对比 / 多因子合成 / 筛选
- * 工具：因子报告（2026-09-17 由技能中心迁入，全宽渲染；策略模板已迁至回测中心·策略管理右侧，评估中心已迁至模拟交易页签）
+ * 工具：因子报告（2026-09-17 由技能中心迁入，全宽渲染；策略模板已迁至回测中心·策略管理右侧，评估中心已迁至后台管理·交易核心）
  * 数据：/api/v1/factor-research（引擎服务，快照由 build_factor_research.py 构建）
  *
  * 市场分层（2026-10）：跟随全局市场选择器（CN/HK/US/FUTURES），market 进全部
@@ -72,7 +72,7 @@ const isToolTab = (t: Tab): boolean => TOOL_TABS.includes(t);
 const isValidTab = (v: string | null): v is Tab => TABS.some((t) => t.key === v);
 
 const FactorResearchPage: React.FC = () => {
-  // 页签支持深链（如评估徽章跳 /factor-research?tab=eval）；切换时同步回 URL
+  // 页签支持深链（如外部跳 /factor-research?tab=factor-report）；切换时同步回 URL
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const [tab, setTabState] = useState<Tab>(() => {

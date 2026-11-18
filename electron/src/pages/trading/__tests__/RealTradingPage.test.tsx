@@ -47,9 +47,6 @@ vi.mock('../../../features/desk/DeskTodayPage', () => ({
 vi.mock('../tabs/SignalsExplorerPage', () => ({
     default: () => <div data-testid="pane-signals" />,
 }));
-vi.mock('../../../features/eval-center/components/EvalCenterPanel', () => ({
-    EvalCenterPanel: () => <div data-testid="pane-eval" />,
-}));
 vi.mock('../tabs/ManualTaskPage', () => ({
     default: () => <div data-testid="pane-manual-task" />,
 }));
@@ -319,26 +316,33 @@ describe('RealTradingPage 外壳接线', () => {
     const search = () =>
         document.querySelector('[data-testid="location-probe"]')?.getAttribute('data-search') ?? '';
 
-    it('切页签写 URL：?tab=eval，切回默认栏清空', () => {
+    it('切页签写 URL：?tab=signals，切回默认栏清空', () => {
         renderPage();
 
-        clickTab('评估中心');
-        expect(pane('eval')).not.toBeNull();
-        expect(search()).toBe('?tab=eval');
+        clickTab('候选信号');
+        expect(pane('signals')).not.toBeNull();
+        expect(search()).toBe('?tab=signals');
 
         clickTab('系统健康');
         expect(pane('desk')).not.toBeNull();
         expect(search()).toBe('');
     });
 
-    it('URL 深链（含对象参数）落地即跳：页内徽章导航不重挂载也生效', () => {
+    it('URL 深链落地即跳：页内导航不重挂载也生效', () => {
         // 挂载路径读的是 window.location.hash（jsdom 里为空 → 默认栏），
-        // 这条断言的正是 searchParams 监听把页签拉过去的那半边 —— 缺它则「页内点徽章无效」。
+        // 这条断言的正是 searchParams 监听把页签拉过去的那半边 —— 缺它则「页内跳转无效」。
+        renderPage({}, '/trading?tab=signals');
+
+        expect(pane('signals')).not.toBeNull();
+        expect(search()).toBe('?tab=signals');
+    });
+
+    it('迁走的 eval 深链不再生效（评估中心已到后台管理 /admin/eval）', () => {
+        // 旧书签/旧徽章链接不该把人留在空白栏：白名单删掉 eval 后回落默认栏
         renderPage({}, '/trading?tab=eval&object=model&object_id=mdl_x');
 
-        expect(pane('eval')).not.toBeNull();
-        // 页签监听不吞对象参数（评估面板按它预选对象）
-        expect(search()).toBe('?tab=eval&object=model&object_id=mdl_x');
+        expect(pane('desk')).not.toBeNull();
+        expect(pane('signals')).toBeNull();
     });
 
     it('深链白名单外的 tab 不在页内生效（与挂载口径同一把尺子）', () => {
@@ -348,9 +352,9 @@ describe('RealTradingPage 外壳接线', () => {
         expect(pane('settings')).toBeNull();
     });
 
-    it('切换到非评估栏时清掉对象深链参数（防止下次进 eval 被拽回旧对象）', () => {
-        renderPage({}, '/trading?tab=eval&object=model&object_id=mdl_x');
-        expect(pane('eval')).not.toBeNull();
+    it('切栏时丢弃残留的深链参数（防止下次进栏被拽回旧对象）', () => {
+        renderPage({}, '/trading?tab=position&symbol=SZ000001');
+        expect(pane('position')).not.toBeNull();
 
         clickTab('候选信号');
         expect(search()).toBe('?tab=signals');

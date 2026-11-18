@@ -26,11 +26,10 @@ import {
 const EXTRA: ConsoleTab = { id: 'extra-one', label: '追加栏一', icon: Star };
 
 describe('BASE_CONSOLE_TABS', () => {
-    it('基础页签就是这 9 个，顺序即侧栏顺序', () => {
+    it('基础页签就是这 8 个，顺序即侧栏顺序', () => {
         expect(BASE_CONSOLE_TABS.map((t) => t.id)).toEqual([
             'desk',
             'signals',
-            'eval',
             'manage',
             'manual-task',
             'position',
@@ -90,7 +89,7 @@ describe('composeConsoleTabs', () => {
         const extra: ConsoleTab[] = [EXTRA];
         composeConsoleTabs(extra);
         expect(extra).toHaveLength(1);
-        expect(BASE_CONSOLE_TABS).toHaveLength(9);
+        expect(BASE_CONSOLE_TABS).toHaveLength(8);
     });
 });
 

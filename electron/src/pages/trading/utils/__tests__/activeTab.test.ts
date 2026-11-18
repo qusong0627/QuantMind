@@ -20,13 +20,17 @@ describe('resolveInitialTab', () => {
     expect(resolveInitialTab(null)).toBe('desk');
   });
 
-  it('深链 tab=eval / tab=signals 仍然直达（评估徽章与候选信号跳转）', () => {
-    expect(resolveInitialTab('#/trading?tab=eval')).toBe('eval');
+  it('深链 tab=signals 仍然直达（候选信号跳转）', () => {
     expect(resolveInitialTab('#/trading?tab=signals')).toBe('signals');
   });
 
+  it('tab=eval 不再是交易页签（评估中心 2026-11-18 迁至后台管理）', () => {
+    // 旧链接/旧书签不再把人留在空白栏，而是回落默认；徽章改跳 /admin/eval
+    expect(resolveInitialTab('#/trading?tab=eval')).toBe('desk');
+  });
+
   it('hash 不带 # 前缀也能解析（部分入口直接拼 ?tab=）', () => {
-    expect(resolveInitialTab('?tab=eval')).toBe('eval');
+    expect(resolveInitialTab('?tab=signals')).toBe('signals');
   });
 
   it('持仓预警深链 tab=position 直达持仓监控（哨兵「去持仓」落点）', () => {
@@ -58,16 +62,16 @@ describe('resolveInitialTab', () => {
 
 /**
  * 页内 URL 变化（RealTradingPage 的 searchParams 监听）与挂载解析必须同一把尺子：
- * 白名单放宽会让「手输 ?tab=settings 生效、刷新却不生效」，收紧会让页内徽章跳转失效。
+ * 白名单放宽会让「手输 ?tab=settings 生效、刷新却不生效」，收紧会让页内跳转失效。
  */
 describe('isDeepLinkableTab', () => {
-  it('只认白名单三条（与挂载口径一致）', () => {
-    expect(isDeepLinkableTab('eval')).toBe(true);
+  it('只认白名单两条（与挂载口径一致）', () => {
     expect(isDeepLinkableTab('signals')).toBe(true);
     expect(isDeepLinkableTab('position')).toBe(true);
   });
 
-  it('其余页签与空值一律不认', () => {
+  it('其余页签与空值一律不认（含迁走的 eval）', () => {
+    expect(isDeepLinkableTab('eval')).toBe(false);
     expect(isDeepLinkableTab('desk')).toBe(false);
     expect(isDeepLinkableTab('manage')).toBe(false);
     expect(isDeepLinkableTab('__evil__')).toBe(false);
