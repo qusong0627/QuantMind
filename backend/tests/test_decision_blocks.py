@@ -655,6 +655,20 @@ class TestBuildNewsBlock:
         assert "- P2 招商银行(600036.SH) 业绩" in text
         assert "·stale" in text
 
+    def test_candidate_p0_rendered_as_no_buy(self):
+        brief = {
+            **self.BRIEF,
+            "decisions": [{
+                "code": "301585.SZ", "name": "蓝宇股份", "decision": "P0",
+                "event_type": "监管处罚", "pre5": 0.085, "tier": "L2", "layer": 0,
+                "source": "财联社", "reason": "硬利空+pre5>5%",
+                "data_quality": {"stale": False},
+            }],
+        }
+        text = build_news_block(brief, None, ("600036.SH",), NOW)
+        assert "候选 P0 禁买 蓝宇股份(301585.SZ)" in text
+        assert "pre5 +8.5%" in text
+
 
 class TestBuildIndicesBlock:
     def test_renders_four_indices_and_sector_gated_line(self):

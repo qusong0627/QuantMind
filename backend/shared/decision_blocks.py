@@ -897,13 +897,16 @@ def build_news_block(
     decision_rows = [
         item for item in _json_list(brief.get("decisions"))
         if isinstance(item, Mapping)
-        and str(item.get("code") or "").strip() in held
         and str(item.get("decision") or "") in decision_order
     ]
     decision_rows.sort(key=lambda x: decision_order.get(str(x.get("decision")), 9))
     for item in decision_rows:
         code = str(item.get("code") or "").strip()
         decision = str(item.get("decision") or "")
+        in_held = code in held
+        # 非持仓只提示买入侧风险：P0 禁买、P2 不追；P1/WATCH 不占候选段。
+        if not in_held and decision not in ("P0", "P2"):
+            continue
         name = str(item.get("name") or "")
         event = str(item.get("event_type") or "")
         pre5 = _f(item.get("pre5"))
@@ -914,11 +917,16 @@ def build_news_block(
         reason = str(item.get("reason") or "")
         dq = item.get("data_quality")
         stale = "·stale" if isinstance(dq, Mapping) and dq.get("stale") else ""
+        prefix = "" if in_held else (
+            "候选 P0 禁买" if decision == "P0" else "候选 P2 不追"
+        )
+        label = decision if in_held else prefix
         lines.append(
-            f"- {decision} {name}({code}) {event} · pre5 {pre5_txt} · "
+            f"- {label} {name}({code}) {event} · pre5 {pre5_txt} · "
             f"{tier}/L{layer} · {source} · {reason}{stale}"
         )
-        decision_codes.add(code)
+        if in_held:
+            decision_codes.add(code)
         headers_hits += 1
     for item in _json_list(brief.get("holdings")):
         if not isinstance(item, Mapping):
