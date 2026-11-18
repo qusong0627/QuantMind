@@ -179,6 +179,31 @@ def test_news_same_or_older_ts_quiet_and_weak_impact_quiet():
     assert W.news_triggers(weak, _state(news_ts=900.0)) == ()
 
 
+def test_news_p0_fires_without_impact_and_is_priority():
+    obs = _obs(brief_ts=1000.0, news_hits=(_hit(impact=None, decision="P0", pre5=0.07),))
+    out = W.news_triggers(obs, _state(news_ts=900.0))
+    assert len(out) == 1
+    assert out[0].priority is True
+    assert "[P0]" in out[0].detail and "+7.0%" in out[0].detail
+
+
+def test_news_p2_watch_do_not_fire():
+    for decision in ("P2", "WATCH", "INFO"):
+        obs = _obs(brief_ts=1000.0, news_hits=(_hit(impact=2.0, decision=decision),))
+        assert W.news_triggers(obs, _state(news_ts=900.0)) == (), decision
+
+
+def test_p0_does_not_count_toward_budget_and_uses_5min_cooldown():
+    hit = _hit(impact=None, decision="P0")
+    obs = _obs(brief_ts=1000.0, news_hits=(hit,))
+    fired = W.news_triggers(obs, _state(news_ts=900.0))
+    state = _state(wake_count=W.DAILY_WAKE_LIMIT)
+    out = W.woken_state(state, obs, now=NOW, fired=fired, log_round_ts=0.0)
+    assert out.wake_count == W.DAILY_WAKE_LIMIT
+    key = W.cooldown_key(fired[0])
+    assert abs(out.cooldowns[key] - (NOW.timestamp() + 300.0)) < 1e-6
+
+
 # ── 板块门控 ─────────────────────────────────────────────────────────
 
 

@@ -45,6 +45,27 @@ def test_read_news_files_bad_or_non_object_json_is_none(tmp_path):
     assert brief is None and watch is None
 
 
+def test_read_news_files_merges_fast_decisions(tmp_path):
+    _write(tmp_path, "news_brief/latest.json", {"ts": "2026-09-24T09:30:00+08:00"})
+    _write(tmp_path, "news_brief/news_decisions.json", {
+        "as_of": "2026-09-24T10:05:00+08:00",
+        "items": [{"code": "600519.SH", "decision": "P0"}],
+    })
+    brief, _watch = F.read_news_files(root=tmp_path)
+    assert brief["decisions"][0]["decision"] == "P0"
+    assert brief["ts"] == "2026-09-24T09:30:00+08:00"
+
+
+def test_read_news_files_fast_decisions_without_latest(tmp_path):
+    _write(tmp_path, "news_brief/news_decisions.json", {
+        "as_of": "2026-09-24T10:05:00+08:00",
+        "items": [{"code": "600519.SH", "decision": "P0"}],
+    })
+    brief, _watch = F.read_news_files(root=tmp_path)
+    assert brief["decisions"][0]["code"] == "600519.SH"
+    assert brief["ts"] == "2026-09-24T10:05:00+08:00"
+
+
 def test_read_risk_files_returns_the_three_slots(tmp_path):
     _write(tmp_path, "risk_block.json", {"asof": "2026-09-24", "items": {}})
     _write(tmp_path, "industry_risk.json", {"asof": "2026-09-24", "items": []})

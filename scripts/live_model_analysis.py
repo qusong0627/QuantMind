@@ -572,6 +572,18 @@ def _news_block() -> str:
         return ""
     if not isinstance(brief, dict):
         return ""
+    # 快速通道 decisions 优先（不必等下一轮主编分子）
+    if str(os.getenv("NEWS_DECISION_ENABLED", "true")).strip().lower() != "false":
+        try:
+            fast = json.loads(
+                (BRIEF_FILE.parent / "news_decisions.json").read_text(encoding="utf-8")
+            )
+            if isinstance(fast, dict) and isinstance(fast.get("items"), list):
+                brief = {**brief, "decisions": fast["items"]}
+        except (OSError, json.JSONDecodeError):
+            pass
+    else:
+        brief = {k: v for k, v in brief.items() if k != "decisions"}
     seg = brief.get("segments") or {}
     macro = seg.get("news-macro") or brief.get("macro") or {}
     micro = seg.get("news-micro") or brief.get("micro") or {}
@@ -585,6 +597,22 @@ def _news_block() -> str:
     if isinstance(macro, dict):
         for r in (macro.get("risks") or [])[:3]:
             lines.append(f"- 风险：{r}")
+    decisions = brief.get("decisions") or []
+    if isinstance(decisions, list):
+        order = {"P0": 0, "P1": 1, "P2": 2, "WATCH": 3}
+        rows = [d for d in decisions if isinstance(d, dict)
+                and str(d.get("decision") or "") in order]
+        rows.sort(key=lambda d: order.get(str(d.get("decision")), 9))
+        for d in rows[:8]:
+            pre5 = d.get("pre5")
+            try:
+                p5 = f"{float(pre5) * 100:+.1f}%"
+            except (TypeError, ValueError):
+                p5 = "—"
+            lines.append(
+                f"- 决策 {d.get('decision')} {d.get('name')}({d.get('code')}) "
+                f"{d.get('event_type')} · pre5 {p5} · {d.get('reason')}"
+            )
     if isinstance(micro, dict):
         themes = micro.get("themes") or []
         if themes:

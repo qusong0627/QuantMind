@@ -892,11 +892,41 @@ def build_news_block(
         )
     lines: list[str] = []
     headers_hits = 0
+    decision_codes: set[str] = set()
+    decision_order = {"P0": 0, "P1": 1, "P2": 2, "WATCH": 3}
+    decision_rows = [
+        item for item in _json_list(brief.get("decisions"))
+        if isinstance(item, Mapping)
+        and str(item.get("code") or "").strip() in held
+        and str(item.get("decision") or "") in decision_order
+    ]
+    decision_rows.sort(key=lambda x: decision_order.get(str(x.get("decision")), 9))
+    for item in decision_rows:
+        code = str(item.get("code") or "").strip()
+        decision = str(item.get("decision") or "")
+        name = str(item.get("name") or "")
+        event = str(item.get("event_type") or "")
+        pre5 = _f(item.get("pre5"))
+        pre5_txt = "—" if pre5 is None else f"{pre5 * 100:+.1f}%"
+        tier = str(item.get("tier") or "")
+        layer = _int_or(item.get("layer"), 0)
+        source = str(item.get("source") or "")
+        reason = str(item.get("reason") or "")
+        dq = item.get("data_quality")
+        stale = "·stale" if isinstance(dq, Mapping) and dq.get("stale") else ""
+        lines.append(
+            f"- {decision} {name}({code}) {event} · pre5 {pre5_txt} · "
+            f"{tier}/L{layer} · {source} · {reason}{stale}"
+        )
+        decision_codes.add(code)
+        headers_hits += 1
     for item in _json_list(brief.get("holdings")):
         if not isinstance(item, Mapping):
             continue
         code = str(item.get("code") or "").strip()
         if code not in held:
+            continue
+        if code in decision_codes:
             continue
         verdict = str(item.get("verdict") or "情报")
         name = str(item.get("name") or "")

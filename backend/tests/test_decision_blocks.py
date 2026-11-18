@@ -627,6 +627,34 @@ class TestBuildNewsBlock:
         text = build_news_block(self.BRIEF, watch, (), NOW)
         assert "异动5" in text and "异动6" not in text
 
+    def test_decision_p0_rendered_first_and_no_duplicate_holding(self):
+        brief = {
+            **self.BRIEF,
+            "decisions": [{
+                "code": "600036.SH", "name": "招商银行", "decision": "P0",
+                "event_type": "监管处罚", "pre5": 0.072, "tier": "L2", "layer": 0,
+                "source": "财联社", "reason": "硬利空+pre5>5%",
+                "data_quality": {"stale": False},
+            }],
+        }
+        text = build_news_block(brief, None, ("600036.SH",), NOW)
+        assert "- P0 招商银行(600036.SH) 监管处罚 · pre5 +7.2%" in text
+        assert "[利空] 招商银行" not in text
+
+    def test_decision_p2_rendered(self):
+        brief = {
+            **self.BRIEF,
+            "decisions": [{
+                "code": "600036.SH", "name": "招商银行", "decision": "P2",
+                "event_type": "业绩", "pre5": 0.06, "tier": "L2", "layer": 0,
+                "source": "新浪财经", "reason": "利好+pre5>5%",
+                "data_quality": {"stale": True},
+            }],
+        }
+        text = build_news_block(brief, None, ("600036.SH",), NOW)
+        assert "- P2 招商银行(600036.SH) 业绩" in text
+        assert "·stale" in text
+
 
 class TestBuildIndicesBlock:
     def test_renders_four_indices_and_sector_gated_line(self):

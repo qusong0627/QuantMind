@@ -131,6 +131,24 @@ def test_intraday_content_unchanged_shape(lma):
     assert "盘中分析" in content
 
 
+def test_news_block_includes_p0_decisions(lma, tmp_path, monkeypatch):
+    brief = {
+        "ts": "2026-11-18T10:05:00+08:00",
+        "window": {"start": "2026-11-18T09:30:00+08:00", "end": "2026-11-18T10:05:00+08:00"},
+        "decisions": [{
+            "code": "600519.SH", "name": "贵州茅台", "decision": "P0",
+            "event_type": "监管处罚", "pre5": 0.072, "reason": "硬利空+pre5>5%",
+            "data_quality": {"stale": False},
+        }],
+    }
+    f = tmp_path / "latest.json"
+    f.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(lma, "BRIEF_FILE", f)
+    text = lma._news_block()
+    assert "P0 贵州茅台(600519.SH)" in text
+    assert "+7.2%" in text
+
+
 def test_account_unreachable_still_forbids_position_commentary_both_modes(lma):
     for mode in ("intraday", "review"):
         content, gaps = lma.build_user_content({}, ledger=None, mode=mode)

@@ -103,9 +103,27 @@ def _load_json(path: Path) -> Mapping[str, Any] | None:
 def read_news_files(
     root: Path | None = None,
 ) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]:
-    """``(简报, 观察文件)``；缺谁谁 ``None``（丁4 据此如实降级，见 ``blocks``）。"""
+    """``(简报, 观察文件)``；缺谁谁 ``None``（丁4 据此如实降级，见 ``blocks``）。
+
+    快速通道 ``news_decisions.json`` 优先合并进简报的 ``decisions``：P0 不必等
+    下一轮主编分子落盘。只影响 decisions 字段，叙事仍来自 ``latest.json``。
+    """
     base = (root or data_root()) / "news_brief"
-    return _load_json(base / "latest.json"), _load_json(base / "intraday_watch.json")
+    brief = _load_json(base / "latest.json")
+    watch = _load_json(base / "intraday_watch.json")
+    enabled = str(os.getenv("NEWS_DECISION_ENABLED", "true")).strip().lower() != "false"
+    if not enabled:
+        if isinstance(brief, Mapping) and "decisions" in brief:
+            brief = {k: v for k, v in brief.items() if k != "decisions"}
+        return brief, watch
+    decisions = _load_json(base / "news_decisions.json")
+    items = decisions.get("items") if isinstance(decisions, Mapping) else None
+    if isinstance(items, list):
+        if brief is None:
+            brief = {"ts": decisions.get("as_of"), "decisions": items}
+        else:
+            brief = {**brief, "decisions": items}
+    return brief, watch
 
 
 def read_risk_files(

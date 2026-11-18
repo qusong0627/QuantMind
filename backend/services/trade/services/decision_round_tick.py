@@ -498,13 +498,40 @@ async def gather_wake_obs(deps: RoundDeps) -> WakeObs | None:
             logger.warning("[DecisionRound] 唤醒评估：新闻简报读取失败: %s", exc)
         brief_ts = parse_brief_ts(brief) or 0.0
         held = set(codes)
+        seen: set[str] = set()
+        decisions = (brief or {}).get("decisions")
+        for item in decisions if isinstance(decisions, list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            code = str(item.get("code") or "").strip()
+            if code not in held or code in seen:
+                continue
+            seen.add(code)
+            decision = str(item.get("decision") or "")
+            if decision not in ("P0", "P1"):
+                continue
+            news_hits.append(
+                NewsHit(
+                    code=code,
+                    name=str(item.get("name") or ""),
+                    verdict=str(item.get("direction") or ""),
+                    impact=as_float(item.get("impact")),
+                    event_type=str(item.get("event_type") or ""),
+                    headline=str(item.get("reason") or ""),
+                    decision=decision,
+                    pre5=as_float(item.get("pre5")),
+                    layer=int(as_float(item.get("layer")) or 0),
+                    decision_id=str(item.get("decision_id") or ""),
+                )
+            )
         items = (brief or {}).get("holdings")
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, Mapping):
                 continue
             code = str(item.get("code") or "").strip()
-            if code not in held:
+            if code not in held or code in seen:
                 continue
+            seen.add(code)
             news_hits.append(
                 NewsHit(
                     code=code,
@@ -640,7 +667,7 @@ async def _wake_cycle(
             ),
         )
         return ()
-    if not budget_ok(state):
+    if not budget_ok(state) and not any(t.priority for t in fired):
         # 预算用尽：照 ``woken_state`` 记冷却（防 60 秒一遍刷屏），但**不跑轮**。
         new_state = woken_state(
             state, obs, now=now, fired=fired, log_round_ts=log_round_ts

@@ -818,6 +818,19 @@ def brief_to_text(b: dict) -> str:
     head = (f"【新闻分子（主编 {_bj_fmt(ts, '%H:%M')} · "
             f"窗口 {str(win.get('start') or '')[:16]}→{str(win.get('end') or '')[:16]}）】")
     lines = [head]
+    decisions = _list_of_dicts(b.get("decisions"))
+    if str(os.getenv("NEWS_DECISION_ENABLED", "true")).strip().lower() == "false":
+        decisions = []
+    if decisions:
+        order = {"P0": 0, "P1": 1, "P2": 2, "WATCH": 3, "INFO": 4}
+        for item in sorted(decisions, key=lambda x: order.get(str(x.get("decision")), 9))[:8]:
+            dec = str(item.get("decision") or "")
+            if dec == "INFO":
+                continue
+            lines.append(
+                f"- 决策 {dec} {item.get('name')}({item.get('code')}) "
+                f"{item.get('event_type')} · {item.get('reason')}"
+            )
     if m:
         drv = "；".join(d.get("item", "") for d in _list_of_dicts(m.get("drivers"))[:3])
         lines.append(f"- 宏观：{str(m.get('view') or '—')}"
@@ -1327,6 +1340,16 @@ def run_pipeline(since_iso: str = "", stages: tuple = ALL_STAGES,
                                "warns": warns})
     watch_line = _watch_line(watch_codes)
 
+    # 2b) pre5 缓存：决策层用（行业调整 5 日收益）；读不到 → 决策降级 INFO
+    pre5_map = {}
+    try:
+        from backend.shared.news_pre5 import load_pre5_map
+
+        pre5_map = load_pre5_map(now.strftime("%Y%m%d"))
+        print(f"ℹ️ pre5 缓存 {len(pre5_map)} 只")
+    except Exception as exc:  # noqa: BLE001 pre5 不可达不阻塞新闻管线
+        print(f"⚠️ pre5 缓存不可用：{str(exc)[:100]}")
+
     # 3) 门卫（agent 化金融相关 + macro/micro/holdings 方向；分批防超限/防指令丢失）
     g_macro, g_micro, h_art, g_skip = [], [], [], 0
     if GATE in stages:
@@ -1450,6 +1473,24 @@ def run_pipeline(since_iso: str = "", stages: tuple = ALL_STAGES,
                 "confidence": conf,
                 "editor_note": d.get("editor_note") or "",
             }
+            # 2c) 确定性新闻决策（P0/P1/P2/WATCH/INFO）→ latest.json
+            try:
+                from backend.shared.news_brief_decisions import merge_into_brief
+
+                merge_into_brief(
+                    brief, pre5_map,
+                    trade_date=now.strftime("%Y%m%d"),
+                    now=now.isoformat(),
+                )
+                counts = {}
+                for item in brief.get("decisions") or []:
+                    key = str(item.get("decision") or "?")
+                    counts[key] = counts.get(key, 0) + 1
+                print(f"✓ 新闻决策 {counts} → latest.json")
+            except Exception as exc:  # noqa: BLE001 决策失败不阻塞叙事分子
+                print(f"⚠️ 新闻决策构建失败：{str(exc)[:120]}")
+                brief.setdefault("decisions", [])
+                brief["data_quality"] = {"stale": False, "missing": ["decision_builder_error"]}
             brief["text"] = brief_to_text(brief)
             save_brief(brief)
             # 盘中异动关注（micro 事件 + 主编 watch）→ L2 轮询合并，视野不闭集

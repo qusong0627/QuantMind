@@ -25,6 +25,7 @@ cron：北京 02:30 周二~周六（JST 03:30）→ 等 quantdb 当日分区落�
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import date, datetime
@@ -143,6 +144,22 @@ def _news_block(d0: str) -> str:
             lines.append(
                 f"【新闻 agent·最新分子（{str(latest.get('ts'))[:16]}）】\n{text}"
             )
+        decisions = latest.get("decisions") or []
+        if str(os.getenv("NEWS_DECISION_ENABLED", "true")).strip().lower() == "false":
+            decisions = []
+        if isinstance(decisions, list):
+            order = {"P0": 0, "P1": 1, "P2": 2, "WATCH": 3}
+            rows = [d for d in decisions if isinstance(d, dict)
+                    and str(d.get("decision") or "") in order]
+            rows.sort(key=lambda d: order.get(str(d.get("decision")), 9))
+            if rows:
+                seg = ["【新闻 agent·决策（P0 禁买 / P2 不追）】"]
+                for d in rows[:10]:
+                    seg.append(
+                        f"- {d.get('decision')} {d.get('name')}({d.get('code')}) "
+                        f"{d.get('event_type')} · {d.get('reason')}"
+                    )
+                lines.append("\n".join(seg))
     except (OSError, _json.JSONDecodeError):
         pass
 
@@ -817,6 +834,8 @@ def run(session: str, target: str, dry: bool = False) -> int:
 4. 若现有持仓 688183/600309/300750 等本身强势也可保留注明。
 5. 候选中【事件】字段标注解禁/质押/回购风险：近期大比例解禁或质押≥50%的标的
    建仓需在理由中明确风险对冲，无事件字段=无已知事件风险。
+6. **新闻决策硬约束**：若上方出现 P0 名单，这些 code 一律不得进入 pool；P2 是「不追/不加仓」，
+   不得作为买入理由；WATCH 只观察。新闻层不产生买入信号。
 盘面状态：{state}{_gap_note(d0)}
 {news}
 {research_part}

@@ -92,7 +92,7 @@ def wake_enabled() -> bool:
 
 @dataclass(frozen=True, slots=True)
 class NewsHit:
-    """简报中命中持仓的一条（``news_brief/latest.json`` 的 holdings 条目）。"""
+    """简报中命中持仓的一条（``news_brief/latest.json`` 的 holdings/decisions）。"""
 
     code: str
     name: str = ""
@@ -100,6 +100,10 @@ class NewsHit:
     impact: float | None = None
     event_type: str = ""
     headline: str = ""
+    decision: str = ""
+    pre5: float | None = None
+    layer: int = 0
+    decision_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +133,8 @@ class WakeTrigger:
     name: str = ""
     direction: str = ""
     detail: str = ""
+    #: P0 新闻优先：不占日唤醒预算，冷却缩短到 5 分钟。
+    priority: bool = False
 
     def label(self) -> str:
         zh = KIND_ZH.get(self.kind, self.kind)
@@ -309,17 +315,47 @@ def book_triggers(obs: WakeObs, state: WakeState) -> tuple[WakeTrigger, ...]:
 
 
 def news_triggers(obs: WakeObs, state: WakeState) -> tuple[WakeTrigger, ...]:
-    """新闻类：简报 ts 变新 且命中持仓 且 |impact|≥1.0（每条命中一条触发）。"""
+    """新闻类：简报 ts 变新 且命中持仓。
+
+    P0 必触发（priority=True，不占预算）；P1 触发；P2/WATCH/INFO 不触发。
+    没有 decision 的旧简报仍按 |impact|≥1.0 兼容。
+    """
     if obs.brief_ts <= state.news_ts:
         return ()
     out: list[WakeTrigger] = []
     for hit in obs.news_hits:
-        impact = hit.impact
-        if impact is None or abs(impact) < TRIGGER_NEWS_IMPACT:
-            continue
         direction = (
             "up" if hit.verdict == "利好" else "down" if hit.verdict == "利空" else ""
         )
+        if hit.decision == "P0":
+            pre5 = "" if hit.pre5 is None else f" pre5 {hit.pre5 * 100:+.1f}%"
+            out.append(
+                WakeTrigger(
+                    kind="news",
+                    code=hit.code,
+                    name=hit.name,
+                    direction=direction or "down",
+                    detail=f"[P0] {hit.event_type}：{hit.headline}{pre5} L{hit.layer}",
+                    priority=True,
+                )
+            )
+            continue
+        if hit.decision == "P1":
+            out.append(
+                WakeTrigger(
+                    kind="news",
+                    code=hit.code,
+                    name=hit.name,
+                    direction=direction or "down",
+                    detail=f"[P1] {hit.event_type}：{hit.headline}",
+                )
+            )
+            continue
+        if hit.decision in ("P2", "WATCH", "INFO"):
+            continue
+        impact = hit.impact
+        if impact is None or abs(impact) < TRIGGER_NEWS_IMPACT:
+            continue
         out.append(
             WakeTrigger(
                 kind="news",
@@ -456,14 +492,15 @@ def woken_state(
     """唤醒轮派出后推进状态：计数 +1、落冷却、基线重置、新闻锚推进。"""
     now_s = now.timestamp()
     cooldowns = dict(state.cooldowns)
-    until = now_s + SAME_DIR_COOLDOWN_MIN * 60.0
     for t in fired:
-        cooldowns[cooldown_key(t)] = until
+        minutes = 5.0 if t.priority else SAME_DIR_COOLDOWN_MIN
+        cooldowns[cooldown_key(t)] = now_s + minutes * 60.0
+    counts_toward_budget = any(not t.priority for t in fired)
     return replace(
         state,
         last_eval_ts=now_s,
         last_round_ts=max(state.last_round_ts, log_round_ts),
-        wake_count=state.wake_count + 1,
+        wake_count=state.wake_count + (1 if counts_toward_budget else 0),
         news_ts=max(state.news_ts, obs.brief_ts),
         baselines=baseline_of(obs),
         cooldowns=cooldowns,
@@ -488,7 +525,7 @@ def context_text(
     if suppressed:
         names = "、".join(t.label() for t in suppressed)
         lines.append(
-            f"- （同码同向 {SAME_DIR_COOLDOWN_MIN:.0f} 分钟冷却中、本轮不重复唤醒：{names}）"
+            f"- （同码同向冷却中、本轮不重复唤醒：{names}）"
         )
     lines.append("- 本轮结论只针对以上触发事项；其余持仓按既有纪律管理。")
     return "\n".join(lines)
