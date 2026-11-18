@@ -182,3 +182,32 @@ def merge_into_brief(
         "n_decisions": len(decisions),
     }
     return brief
+
+
+def merge_fast_into_brief(
+    brief: dict[str, Any],
+    fast: Mapping[str, Any] | None,
+    *,
+    trade_date: str,
+) -> dict[str, Any]:
+    """把快速通道当日 decisions 按 decision_id 叠加进 latest.json。"""
+    items = fast.get("items") if isinstance(fast, Mapping) else None
+    if not isinstance(items, list):
+        return brief
+    base = [x for x in (brief.get("decisions") or []) if isinstance(x, Mapping)]
+    merged = {
+        str(x.get("decision_id")): x
+        for x in base
+        if x.get("decision_id")
+    }
+    for x in items:
+        if not isinstance(x, Mapping):
+            continue
+        did = str(x.get("decision_id") or "")
+        if did.startswith(trade_date + "-"):
+            merged[did] = x
+    brief["decisions"] = list(merged.values())
+    dq = dict(brief.get("data_quality") or {})
+    dq["n_decisions"] = len(brief["decisions"])
+    brief["data_quality"] = dq
+    return brief

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from backend.shared.news_brief_decisions import build_decisions, merge_into_brief
+from backend.shared.news_brief_decisions import (
+    build_decisions,
+    merge_fast_into_brief,
+    merge_into_brief,
+)
 
 
 def _brief():
@@ -119,5 +123,22 @@ def test_merge_into_brief_adds_v2_fields():
     assert out["schema_version"] == "news_brief.v2"
     assert out["decisions"]
     assert out["risk_overlay"]
+    assert out["data_quality"]["n_decisions"] == len(out["decisions"])
+
+
+def test_merge_fast_into_brief_overlays_by_id():
+    brief = merge_into_brief(
+        _brief(),
+        {"600519.SH": 0.07, "300750.SZ": 0.06, "000001.SZ": 0.03},
+        trade_date="20261118",
+        now="2026-11-18T10:06:00+08:00",
+    )
+    fast = {"items": [{
+        "decision_id": "20261118-301585.SZ-fast-1",
+        "code": "301585.SZ", "decision": "P0", "reason": "fast",
+    }]}
+    out = merge_fast_into_brief(brief, fast, trade_date="20261118")
+    ids = {x.get("decision_id") for x in out["decisions"]}
+    assert "20261118-301585.SZ-fast-1" in ids
     assert out["data_quality"]["n_decisions"] == len(out["decisions"])
 

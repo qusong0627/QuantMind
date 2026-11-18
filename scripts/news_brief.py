@@ -1475,12 +1475,23 @@ def run_pipeline(since_iso: str = "", stages: tuple = ALL_STAGES,
             }
             # 2c) 确定性新闻决策（P0/P1/P2/WATCH/INFO）→ latest.json
             try:
-                from backend.shared.news_brief_decisions import merge_into_brief
+                from backend.shared.news_brief_decisions import (
+                    merge_fast_into_brief,
+                    merge_into_brief,
+                )
 
                 merge_into_brief(
                     brief, pre5_map,
                     trade_date=now.strftime("%Y%m%d"),
                     now=now.isoformat(),
+                )
+                fast_path = BRIEF_FILE.parent / "news_decisions.json"
+                try:
+                    fast = json.loads(fast_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    fast = {}
+                merge_fast_into_brief(
+                    brief, fast, trade_date=now.strftime("%Y%m%d")
                 )
                 counts = {}
                 for item in brief.get("decisions") or []:
