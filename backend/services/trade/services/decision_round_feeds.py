@@ -125,12 +125,19 @@ def read_news_files(
             if isinstance(x, Mapping)
             and str(x.get("decision_id") or "").startswith(today + "-")
         ]
-        # 快速通道当日无决策时保留 latest.json 的 decisions（不能拿空列表覆盖）
+        # 快速通道当日项叠加到 latest.json 的 decisions（按 decision_id 去重），
+        # 不能整表替换：快速通道只覆盖最近窗口，latest.json 是整轮主编产物。
         if today_items:
-            if brief is None:
-                brief = {"ts": decisions.get("as_of"), "decisions": today_items}
-            else:
-                brief = {**brief, "decisions": today_items}
+            base = list((brief or {}).get("decisions") or [])
+            merged = {
+                str(x.get("decision_id")): x
+                for x in base
+                if isinstance(x, Mapping) and x.get("decision_id")
+            }
+            for x in today_items:
+                merged[str(x.get("decision_id"))] = x
+            brief = {**(brief or {"ts": decisions.get("as_of")}),
+                     "decisions": list(merged.values())}
     return brief, watch
 
 

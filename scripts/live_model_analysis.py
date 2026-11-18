@@ -586,7 +586,15 @@ def _news_block() -> str:
                     and str(x.get("decision_id") or "").startswith(today + "-")
                 ]
                 if today_items:
-                    brief = {**brief, "decisions": today_items}
+                    base = list(brief.get("decisions") or [])
+                    merged = {
+                        str(x.get("decision_id")): x
+                        for x in base
+                        if isinstance(x, dict) and x.get("decision_id")
+                    }
+                    for x in today_items:
+                        merged[str(x.get("decision_id"))] = x
+                    brief = {**brief, "decisions": list(merged.values())}
         except (OSError, json.JSONDecodeError):
             pass
     else:

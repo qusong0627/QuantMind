@@ -91,6 +91,19 @@ def test_stale_fast_does_not_overwrite_latest_decisions(tmp_path):
     assert [x["decision"] for x in brief["decisions"]] == ["P2"]
 
 
+def test_fast_decisions_merge_with_latest_by_id(tmp_path):
+    _write(tmp_path, "news_brief/latest.json", {
+        "ts": "2026-09-24T09:30:00+08:00",
+        "decisions": [{"decision_id": f"{TODAY}-600519.SH-1", "code": "600519.SH", "decision": "P2"}],
+    })
+    _write(tmp_path, "news_brief/news_decisions.json", {
+        "as_of": f"{TODAY}T10:05:00+08:00",
+        "items": [{"decision_id": f"{TODAY}-000001.SZ-1", "code": "000001.SZ", "decision": "P0"}],
+    })
+    brief, _watch = F.read_news_files(root=tmp_path)
+    assert {x["decision"] for x in brief["decisions"]} == {"P0", "P2"}
+
+
 def test_read_risk_files_returns_the_three_slots(tmp_path):
     _write(tmp_path, "risk_block.json", {"asof": "2026-09-24", "items": {}})
     _write(tmp_path, "industry_risk.json", {"asof": "2026-09-24", "items": []})
