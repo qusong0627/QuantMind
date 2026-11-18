@@ -120,15 +120,17 @@ def read_news_files(
     items = decisions.get("items") if isinstance(decisions, Mapping) else None
     if isinstance(items, list):
         today = datetime.now(_CST).strftime("%Y%m%d")
-        items = [
+        today_items = [
             x for x in items
             if isinstance(x, Mapping)
             and str(x.get("decision_id") or "").startswith(today + "-")
         ]
-        if brief is None:
-            brief = {"ts": decisions.get("as_of"), "decisions": items}
-        else:
-            brief = {**brief, "decisions": items}
+        # 快速通道当日无决策时保留 latest.json 的 decisions（不能拿空列表覆盖）
+        if today_items:
+            if brief is None:
+                brief = {"ts": decisions.get("as_of"), "decisions": today_items}
+            else:
+                brief = {**brief, "decisions": today_items}
     return brief, watch
 
 

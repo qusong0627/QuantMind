@@ -580,11 +580,13 @@ def _news_block() -> str:
             )
             if isinstance(fast, dict) and isinstance(fast.get("items"), list):
                 today = datetime.now(CN_TZ).strftime("%Y%m%d")
-                brief = {**brief, "decisions": [
+                today_items = [
                     x for x in fast["items"]
                     if isinstance(x, dict)
                     and str(x.get("decision_id") or "").startswith(today + "-")
-                ]}
+                ]
+                if today_items:
+                    brief = {**brief, "decisions": today_items}
         except (OSError, json.JSONDecodeError):
             pass
     else:
