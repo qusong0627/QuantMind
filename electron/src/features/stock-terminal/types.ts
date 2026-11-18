@@ -65,7 +65,7 @@ export interface StockProfile {
   pct_change: number | null;
   total_mv: number | null;        // 亿元
   float_mv: number | null;        // 亿元
-  total_share: number | null;     // 万股
+  total_share: number | null;     // 股
   free_float_share: number | null;
   pe_dynamic: number | null;
   pb: number | null;
