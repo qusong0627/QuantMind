@@ -174,6 +174,30 @@ def test_news_block_includes_p0_decisions(npa, tmp_path, monkeypatch):
     assert "P0 禁买" in text
 
 
+def test_news_block_merges_fast_p0_decisions(npa, tmp_path, monkeypatch):
+    import json as _json
+
+    today = npa.now_cn().strftime("%Y%m%d")
+    monkeypatch.setattr(npa, "ROOT", tmp_path)
+    nb = tmp_path / "data" / "news_brief"
+    nb.mkdir(parents=True)
+    (nb / "latest.json").write_text(_json.dumps({
+        "ts": "2026-11-18T19:05:00+08:00",
+        "text": " molecule ",
+        "decisions": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (nb / "news_decisions.json").write_text(_json.dumps({
+        "as_of": "2026-11-18T21:00:00+08:00",
+        "items": [{
+            "decision_id": f"{today}-301585.SZ-fast-1",
+            "code": "301585.SZ", "name": "某股", "decision": "P0",
+            "event_type": "监管处罚", "reason": "硬利空+pre5>5%",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    text = npa._news_block("20261118")
+    assert "P0 某股(301585.SZ)" in text
+
+
 def _dialogue_rows(root: Path) -> list[dict]:
     lf = (
         root

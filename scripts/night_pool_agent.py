@@ -139,6 +139,22 @@ def _news_block(d0: str) -> str:
     # 1) 最新分子（主编汇总）
     try:
         latest = _json.loads((nb / "latest.json").read_text(encoding="utf-8"))
+        # 快速通道当日 decisions 叠加（不必等次日 09:25 主编重跑）
+        try:
+            fast = _json.loads((nb / "news_decisions.json").read_text(encoding="utf-8"))
+            today_c = today.replace("-", "")
+            base = {
+                str(x.get("decision_id")): x
+                for x in (latest.get("decisions") or [])
+                if isinstance(x, dict) and x.get("decision_id")
+            }
+            for x in (fast.get("items") or []):
+                if isinstance(x, dict) and str(x.get("decision_id") or "").startswith(today_c + "-"):
+                    base[str(x["decision_id"])] = x
+            if base:
+                latest["decisions"] = list(base.values())
+        except (OSError, _json.JSONDecodeError):
+            pass
         text = str(latest.get("text") or "")
         if text:
             lines.append(
