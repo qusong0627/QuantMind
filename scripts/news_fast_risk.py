@@ -79,6 +79,9 @@ def _write_redis(items: list[NewsDecision]) -> None:
         from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 
         client = get_redis_sentinel_client()
+    except ModuleNotFoundError:
+        # 宿主机 Python 常未装 redis；JSON 是交易层主读路径，静默降级。
+        return
     except Exception as exc:  # noqa: BLE001
         print(f"⚠️ Redis 不可用，跳过：{str(exc)[:80]}")
         return
