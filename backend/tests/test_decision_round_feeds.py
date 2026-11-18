@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,8 @@ from backend.services.trade.services import decision_round_feeds as F
 from backend.services.trade.services.decision_round_core import TENANT_ID
 
 DAY = date(2026, 9, 24)
+CN_TZ = timezone(timedelta(hours=8))
+TODAY = datetime.now(CN_TZ).strftime("%Y%m%d")
 
 
 # ── 文件面（news_brief / 风险三文件）──────────────────────────────────
@@ -49,7 +51,7 @@ def test_read_news_files_merges_fast_decisions(tmp_path):
     _write(tmp_path, "news_brief/latest.json", {"ts": "2026-09-24T09:30:00+08:00"})
     _write(tmp_path, "news_brief/news_decisions.json", {
         "as_of": "2026-09-24T10:05:00+08:00",
-        "items": [{"code": "600519.SH", "decision": "P0"}],
+        "items": [{"decision_id": f"{TODAY}-600519.SH-1", "code": "600519.SH", "decision": "P0"}],
     })
     brief, _watch = F.read_news_files(root=tmp_path)
     assert brief["decisions"][0]["decision"] == "P0"
@@ -59,11 +61,21 @@ def test_read_news_files_merges_fast_decisions(tmp_path):
 def test_read_news_files_fast_decisions_without_latest(tmp_path):
     _write(tmp_path, "news_brief/news_decisions.json", {
         "as_of": "2026-09-24T10:05:00+08:00",
-        "items": [{"code": "600519.SH", "decision": "P0"}],
+        "items": [{"decision_id": f"{TODAY}-600519.SH-1", "code": "600519.SH", "decision": "P0"}],
     })
     brief, _watch = F.read_news_files(root=tmp_path)
     assert brief["decisions"][0]["code"] == "600519.SH"
     assert brief["ts"] == "2026-09-24T10:05:00+08:00"
+
+
+def test_read_news_files_drops_stale_fast_decisions(tmp_path):
+    _write(tmp_path, "news_brief/latest.json", {"ts": "2026-09-24T09:30:00+08:00"})
+    _write(tmp_path, "news_brief/news_decisions.json", {
+        "as_of": "2026-01-01T10:05:00+08:00",
+        "items": [{"decision_id": "20260101-600519.SH-1", "code": "600519.SH", "decision": "P0"}],
+    })
+    brief, _watch = F.read_news_files(root=tmp_path)
+    assert brief.get("decisions") == []
 
 
 def test_read_risk_files_returns_the_three_slots(tmp_path):

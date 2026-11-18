@@ -119,6 +119,12 @@ def read_news_files(
     decisions = _load_json(base / "news_decisions.json")
     items = decisions.get("items") if isinstance(decisions, Mapping) else None
     if isinstance(items, list):
+        today = datetime.now(_CST).strftime("%Y%m%d")
+        items = [
+            x for x in items
+            if isinstance(x, Mapping)
+            and str(x.get("decision_id") or "").startswith(today + "-")
+        ]
         if brief is None:
             brief = {"ts": decisions.get("as_of"), "decisions": items}
         else:
