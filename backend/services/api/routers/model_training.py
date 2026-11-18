@@ -39,7 +39,7 @@ from backend.services.engine.data_platform.quantdb_factor_reader import (
     DEFAULT_FACTOR_SOURCE,
 )
 from backend.services.api.training_shap_summary import read_shap_summary_rows, to_int_or
-from backend.services.api.user_app.middleware.auth import get_current_user
+from backend.services.api.user_app.middleware.auth import get_current_user, require_admin
 from backend.services.engine.inference.batch_aggregator import aggregate_batch
 from backend.services.engine.inference.batch_orchestrator import (
     batch_inference_orchestrator,
@@ -1806,6 +1806,142 @@ async def get_backfill_status(
         "skipped": skipped,
         "error": job.get("error"),
     }
+
+
+# ── 模型推理成绩单（滚动一个月：胜率 / 收益 / 准确性 / 权重）──────────────
+# 2026-11-18：口径见 backend/services/engine/inference/model_scorecard.py。
+# 展示面只读成绩（不重算）；重算走 Celery 任务，避免 API 进程扛全市场读盘。
+
+
+def _parse_scorecard_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"as_of 需要 YYYY-MM-DD：{value}") from exc
+
+
+@router.get("/scorecards", summary="模型推理成绩单（滚动一个月）")
+async def list_model_scorecards(
+    market: Optional[str] = Query(default=None),
+    horizon: Optional[int] = Query(default=None, ge=1, le=252),
+    as_of: Optional[str] = Query(default=None),
+    top_k: int = Query(default=20, ge=1, le=500),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """按模型返回最近一期滚动成绩（胜率/收益/超额/IC/综合分/权重）。
+
+    数据由 ``engine.tasks.model_scorecard_refresh`` 每日盘后写入；本端不触发计算。
+    """
+    as_of_date = _parse_scorecard_date(as_of)
+    where = ["r.top_k = :k"]
+    params: dict[str, Any] = {"k": int(top_k)}
+    if as_of_date is not None:
+        where.append("r.as_of = :d")
+        params["d"] = as_of_date
+    else:
+        where.append(
+            "r.as_of = (SELECT MAX(as_of) FROM qm_model_scorecard_rolling WHERE top_k = :k)"
+        )
+    if market:
+        where.append("r.market = :m")
+        params["m"] = str(market).upper()
+    if horizon:
+        where.append("r.horizon_days = :h")
+        params["h"] = int(horizon)
+
+    sql = (
+        "SELECT r.model_id, r.market, r.horizon_days, r.as_of, r.top_k, r.window_days, "
+        "       r.cohorts, r.win_rate, r.avg_return, r.median_return, r.cohort_hit_rate, "
+        "       r.excess_return, r.rank_ic, r.ic_ir, r.t_stat, r.score, r.weight, "
+        "       COALESCE(m.metadata_json->>'display_name', "
+        "                m.metadata_json->>'model_name', r.model_id) AS display_name "
+        "FROM qm_model_scorecard_rolling r "
+        "LEFT JOIN qm_user_models m ON m.model_id = r.model_id "
+        " AND m.tenant_id = :tid AND m.user_id = :uid "
+        "WHERE " + " AND ".join(where) + " "
+        "ORDER BY r.horizon_days, r.score DESC NULLS LAST"
+    )
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    params.update({"tid": tenant_id, "uid": user_id})
+    try:
+        async with get_session(read_only=True) as session:
+            rows = (await session.execute(text(sql), params)).mappings().all()
+    except Exception as exc:  # noqa: BLE001 表未建（功能尚未跑过）→ 空结果而非 500
+        logger.warning("[Scorecard] 读取失败（可能表未建）：%s", exc)
+        rows = []
+    data = [
+        {k: (str(v) if k == "as_of" and v is not None else v) for k, v in dict(r).items()}
+        for r in rows
+    ]
+    return {
+        "success": True,
+        "data": data,
+        "meta": {"count": len(data), "top_k": int(top_k)},
+    }
+
+
+@router.get("/scorecards/cohorts", summary="模型推理成绩单：逐批次明细")
+async def list_model_scorecard_cohorts(
+    model_id: str = Query(...),
+    limit: int = Query(default=30, ge=1, le=500),
+    top_k: int = Query(default=20, ge=1, le=500),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    sql = (
+        "SELECT model_id, market, horizon_days, signal_date, entry_date, exit_date, top_k, "
+        "       n_signals, n_matured, win_rate, avg_return, median_return, excess_return, "
+        "       rank_ic, ic, top_decile_avg, bottom_decile_avg, long_short "
+        "FROM qm_model_scorecard_cohorts "
+        "WHERE model_id = :m AND top_k = :k "
+        "ORDER BY signal_date DESC LIMIT :lim"
+    )
+    try:
+        async with get_session(read_only=True) as session:
+            rows = (
+                await session.execute(
+                    text(sql), {"m": model_id, "k": int(top_k), "lim": int(limit)}
+                )
+            ).mappings().all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Scorecard] 批次读取失败：%s", exc)
+        rows = []
+    date_keys = {"signal_date", "entry_date", "exit_date"}
+    data = [
+        {k: (str(v) if k in date_keys and v is not None else v) for k, v in dict(r).items()}
+        for r in rows
+    ]
+    return {"success": True, "data": data, "meta": {"count": len(data)}}
+
+
+@router.post("/scorecards/refresh", summary="重算模型成绩单（管理员）")
+async def refresh_model_scorecards(
+    as_of: Optional[str] = Query(default=None),
+    top_k: int = Query(default=20, ge=1, le=500),
+    admin_user: dict[str, Any] = Depends(require_admin),
+):
+    """触发全模型成绩单重算（Celery ``engine.tasks.model_scorecard_refresh``）。"""
+    as_of_date = _parse_scorecard_date(as_of)
+    try:
+        from backend.services.engine.qlib_app.celery_config import celery_app
+
+        task = celery_app.send_task(
+            "engine.tasks.model_scorecard_refresh",
+            kwargs={
+                "as_of": as_of_date.isoformat() if as_of_date else None,
+                "top_k": int(top_k),
+            },
+        )
+        return {
+            "success": True,
+            "task_id": getattr(task, "id", None),
+            "as_of": as_of or "today",
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[Scorecard] 触发重算失败")
+        raise HTTPException(status_code=503, detail=f"重算任务派发失败：{exc}") from exc
 
 
 @router.get("/{model_id}", summary="获取单个用户模型（用户态）")

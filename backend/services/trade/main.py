@@ -66,6 +66,7 @@ async def lifespan(app: FastAPI):
     qmt_sltp_executor_task = None
     qmt_quote_backup_task = None
     dual_book_reconcile_task = None
+    manual_sell_absorb_task = None
     shadow_compare_task = None
     eval_scores_task = None
     sentinel_alert_task = None
@@ -378,6 +379,16 @@ async def lifespan(app: FastAPI):
         dual_book_reconcile_task = asyncio.create_task(
             run_dual_book_reconciliation_task(),
             name="dual-book-reconcile",
+        )
+        # 人工卖出成交自动吸收：每 60s 把「账户已清空 + 未归属卖出」的幻影仓
+        # 吸收进分账，保证下一次 agent 分析/止损评估读到真实持仓（2026-11-18）
+        from backend.services.trade.services.manual_sell_absorb_task import (
+            run_manual_sell_absorb_task,
+        )
+
+        manual_sell_absorb_task = asyncio.create_task(
+            run_manual_sell_absorb_task(),
+            name="manual-sell-absorb",
         )
         # 影子对照（T-P2-06）：每日 15:15 汇总模拟↔真单价格偏差/成交率/跟踪误差
         from backend.services.trade.services.shadow_compare_service import (
@@ -1015,6 +1026,7 @@ async def lifespan(app: FastAPI):
         qmt_sltp_executor_task,
         qmt_quote_backup_task,
         dual_book_reconcile_task,
+        manual_sell_absorb_task,
         shadow_compare_task,
         eval_scores_task,
         health_recheck_task,

@@ -1130,6 +1130,34 @@ def backfill_inference_quality(horizon_days: int = 5, limit: int = 500) -> dict[
 
 
 # ---------------------------------------------------------------------------
+# 模型推理成绩单（滚动 1 个月：胜率 / 收益 / 准确性 / 权重，2026-11-18）
+# ---------------------------------------------------------------------------
+@celery_app.task(name="engine.tasks.model_scorecard_refresh")
+def model_scorecard_refresh(as_of: str | None = None, top_k: int = 20) -> dict[str, Any]:
+    """重算模型成绩单：已成熟批次（T+1 开盘→T+1+N 收盘）+ 滚动 22 批次 + 同组权重。
+
+    盘后 16:45 与次日 02:40 各跑一次：前者算「昨天到期」的批次，后者等
+    QuantDB 当日日线同步完成后补算「今天到期」的批次（任务幂等，重复跑只更新）。
+    """
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("model_scorecard")
+    try:
+        from datetime import date as _date
+
+        from backend.services.engine.inference.model_scorecard import refresh_all
+
+        target = _date.fromisoformat(str(as_of)[:10]) if as_of else None
+        return {
+            "status": "completed",
+            **_run_async(refresh_all(target, top_k=int(top_k))),
+        }
+    except Exception as e:  # noqa: BLE001 任务失败如实上报，不吞
+        logger.exception("[Scorecard] 失败")
+        return {"status": "failed", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # 市场状态日更持久化（P3 · 设计 §6.2）
 # ---------------------------------------------------------------------------
 @celery_app.task(name="engine.tasks.regime_daily_persist")

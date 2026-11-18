@@ -452,6 +452,12 @@ class TdxPushService:
             "order_type": "limit" if price else "market",
             "price_type": price_type if price_type is not None else (0 if price else 1),
             "price": price,
+            # 0=需客户端确认 1=请求免确认。智能体单不能被人工确认卡死（30 分钟
+            # 未确认即过期），默认请求免确认；客户端不支持时仍会提示。
+            "notify": 1
+            if str(os.getenv("TDX_ORDER_NOTIFY", "1")).strip().lower()
+            in {"1", "true", "yes", "on"}
+            else 0,
         }
         return await self._post(
             "/api/v1/plans/execute",

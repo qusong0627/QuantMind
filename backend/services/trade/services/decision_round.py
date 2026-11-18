@@ -512,6 +512,16 @@ async def _run_once_inner(
     # ⑧ LLM 调用（模型名与调用器同源，见 LLMBinding）：decide 同步阻塞 httpx（最长 ~120s），必须 to_thread
     prompt = render_prompt_for(context, slot.schema)
     attempt = await asyncio.to_thread(binding.decide, prompt, slot.schema)
+    # 瞬时故障（SSL EOF / ReadTimeout）重试一次：2026-11-18 审计里 117 轮有 2 轮
+    # 因此丢整槽决策。只对 api_failed 重试——格式/截断类失败重发同一提示词没用
+    #（那条在 llm_call 内部已有一次修复调用）。
+    if not getattr(attempt, "ok", False) and str(
+        getattr(attempt, "status", "")
+    ) == "api_failed":
+        await asyncio.sleep(2.0)
+        retry = await asyncio.to_thread(binding.decide, prompt, slot.schema)
+        if getattr(retry, "ok", False):
+            attempt = retry
     if not getattr(attempt, "ok", False):
         # 没出决策：**不写审计行、不置 done 键**（补跑槽还能再来一次），只留状态。
         reason = str(getattr(attempt, "error_text", lambda: "")() or "")

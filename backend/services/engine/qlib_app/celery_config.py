@@ -124,6 +124,9 @@ TCA_REPORT_ENABLED = os.getenv("TCA_REPORT_ENABLED", "true").lower() == "true"
 # 开关独立（同上理由）：关掉它只影响「状态时间线」的日频留痕，不影响推理/回测
 # 里的 regime 计算（那些是即时算的）。
 REGIME_PERSIST_ENABLED = os.getenv("REGIME_PERSIST_ENABLED", "true").lower() == "true"
+# 模型推理成绩单（滚动 1 个月）：16:45 盘后先算「昨天到期」的批次；次日 02:40
+# 等 QuantDB 日线同步后再补算「今天到期」的批次（任务幂等，重复跑只更新）。
+MODEL_SCORECARD_ENABLED = os.getenv("MODEL_SCORECARD_ENABLED", "true").lower() == "true"
 # 滚动窗口天数（含产出当天）。取数走 orders.ref_price（决策链取价时刻），
 # 补写是 2026-09-24 上的，故窗口开头的成交天然落在「不可定价」——报告里如实分列。
 TCA_REPORT_DAYS = int(os.getenv("TCA_REPORT_DAYS", "30"))
@@ -173,6 +176,20 @@ if REGIME_PERSIST_ENABLED:
     beat_schedule["regime-daily-persist"] = {
         "task": "engine.tasks.regime_daily_persist",
         "schedule": crontab(minute="30", hour="16", day_of_week="1-5"),
+    }
+
+# 模型推理成绩单（2026-11-18）：16:45 = 盘后先算「昨天到期」批次；次日 02:40 =
+# QuantDB 日线同步完成后补算「今天到期」批次（幂等，重复跑只 upsert）。
+if MODEL_SCORECARD_ENABLED:
+    beat_schedule["model-scorecard-refresh"] = {
+        "task": "engine.tasks.model_scorecard_refresh",
+        "schedule": crontab(minute="45", hour="16", day_of_week="1-5"),
+        "kwargs": {"top_k": 20},
+    }
+    beat_schedule["model-scorecard-refresh-post-sync"] = {
+        "task": "engine.tasks.model_scorecard_refresh",
+        "schedule": crontab(minute="40", hour="2", day_of_week="1-6"),
+        "kwargs": {"top_k": 20},
     }
 
 # 天风 50 因子日频物化：数据同步时间由用户在前端配置（常见次日 00:00 后），

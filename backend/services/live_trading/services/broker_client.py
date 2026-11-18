@@ -1178,6 +1178,12 @@ class TdxBroker(BaseBroker):
 
         # plan_id 撞号 = 桥按 plan_id 去重后整单丢弃（详见 shared.order_contract）
         plan_id = build_bridge_plan_id(client_order_id)
+        # notify：0=需通达信客户端人工确认，1=请求免确认（桥侧支持 TQ 版本）。
+        # 默认 1：智能体单/止损单等人点击 30 分钟就会过期（2026-11-18 审计：
+        # 5 笔 expired 都是确认链断掉）。客户端不支持该参数时仍会退回人工确认。
+        notify = 1 if str(os.getenv("TDX_ORDER_NOTIFY", "1")).strip().lower() in {
+            "1", "true", "yes", "on"
+        } else 0
         payload = {
             "plan_id": plan_id,
             "account": self.account,

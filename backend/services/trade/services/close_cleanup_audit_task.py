@@ -197,6 +197,28 @@ def classify_cross_session_order(
     return "keep_open", str(counter.get("status") or "")
 
 
+async def _notify_expired_agent_order(order) -> None:
+    """智能体委托跨日过期 → 告警（柜台查无 ≠ 没成交，需人工核对分账）。"""
+    try:
+        from backend.shared.notification_publisher import publish_notification_async
+
+        await publish_notification_async(
+            user_id=str(order.user_id),
+            tenant_id=str(order.tenant_id or "default"),
+            title=f"{order.symbol} 过期委托待对账",
+            content=(
+                f"{order.agent} 的 TDX 委托已跨日过期（柜台无记录），但可能已在客户端成交。"
+                "若账户持仓与这笔委托的方向/数量一致，请在「交易记录/分账」里核对；"
+                "自动对账任务也会把账户与分账的差异告警出来。"
+            ),
+            type="trading",
+            level="warning",
+            action_url="/trading",
+        )
+    except Exception as exc:  # noqa: BLE001 告警失败不影响收口
+        logger.warning("[CloseAudit] 过期委托告警失败 %s: %s", order.symbol, exc)
+
+
 async def expire_cross_session_orphans(
     date_str: str,
     *,
@@ -271,6 +293,10 @@ async def expire_cross_session_orphans(
                 )
                 result["expired"].append(item)
                 changed = True
+                # 智能体委托过期不能静默：TDX 柜台只给当日委托，「查无此单」不等于
+                # 没成交（2026-11-18 审计：5 笔 expired 实际都成交了）。提醒用户核对。
+                if str(getattr(order, "agent", "") or "").strip():
+                    await _notify_expired_agent_order(order)
                 continue
             if action == "terminal" and target:
                 order.status = OrderStatus(target)
