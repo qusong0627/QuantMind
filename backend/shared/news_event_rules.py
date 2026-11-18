@@ -86,6 +86,25 @@ _SPEC = re.compile(
     r"次新股|新股|低价股|小盘股|壳资源|ST"
 )
 
+#: 券商研报作者前缀：``[东吴证券]`` / ``中信证券：`` / ``【国金证券】``。
+#: 这类标题里的「监管/处罚/增持」说的是被覆盖的行业或个股，不是券商自身事件；
+#: 研究口径（2026-11-18 §2.1）把作者从「被报道主体」里剔除。
+_RESEARCH_AUTHOR = re.compile(
+    r"^\s*[\[【(（]?\s*([一-龥A-Za-z]{2,12}(?:证券|研究院|研究所))"
+    r"\s*[\]】)）]?\s*[：:]?"
+)
+_RESEARCH_CONTENT = re.compile(
+    r"行业研究|策略|晨报|周报|月报|研报|研究|评级|目标价|首次覆盖|维持|上调|下调|"
+    r"看好|推荐|增持|点评|跟踪|展望|建议|关注|有望|晨会"
+)
+
+#: 多票汇总稿：一篇稿子里同时讲 N 家公司，事件标签无法归到单一主体。
+_ROUNDUP = re.compile(
+    r"公告集锦|公告精选|公告速递|公告一览|公告汇总|晚间公告|早间公告|"
+    r"盘前播报|收盘播报|涨停复盘|板块复盘|市场综述|收评|午评|早评|"
+    r"要闻速递|业绩速递|公告解读"
+)
+
 _GOOD_SOURCES = {
     "新浪财经": 0.60,
     "人民日报": 0.60,
@@ -129,10 +148,18 @@ def classify_event(
     先看 enrichment event_tags（更准），再标题正则，最后 sentiment 兜底。
     """
     tags = _tag_names(event_tags)
-    for tag in tags:
-        if tag in _TAG_CATEGORY:
-            cat, direction = _TAG_CATEGORY[tag]
-            return cat, direction, tag
+    # 同一篇稿可能同时带「业绩风险」和「退市风险」；硬风险必须优先，
+    # 不能因为数组顺序把退市稿降成软利空。
+    for category, direction in (
+        ("硬利空", "利空"),
+        ("软利空", "利空"),
+        ("硬利好", "利好"),
+        ("治理利好", "利好"),
+    ):
+        for tag in tags:
+            mapped = _TAG_CATEGORY.get(tag)
+            if mapped and mapped[0] == category:
+                return category, direction, tag
 
     text = str(title or "")
     for cat, direction, event_type, pattern in _RULES:
@@ -165,6 +192,10 @@ def validate_title(title: str, code: str, name: str, category: str) -> bool:
     has_name = bool(name and str(name) in text)
     if not (has_code or has_name):
         return False
+    if _ROUNDUP.search(text):
+        return False
+    if _RESEARCH_AUTHOR.search(text) and _RESEARCH_CONTENT.search(text):
+        return False
     pre = text[max(0, m.start() - 12):m.start()]
     if _NEG.search(pre):
         return False
@@ -191,6 +222,17 @@ def tier_for(title: str, code: str, name: str) -> str:
 def is_speculative(title: str, event_tags: Iterable[str] | None = None) -> bool:
     text = str(title or "") + " " + " ".join(_tag_names(event_tags))
     return bool(_SPEC.search(text))
+
+
+def is_research_report(title: str) -> bool:
+    """券商研报（作者前缀 + 研究词）→ 不是公司事件，不得据标题打风险/利好。"""
+    text = str(title or "").strip()
+    return bool(_RESEARCH_AUTHOR.match(text) and _RESEARCH_CONTENT.search(text))
+
+
+def is_roundup(title: str) -> bool:
+    """多票汇总稿（公告集锦/涨停复盘/收评）→ 事件标签不能落到单只股票。"""
+    return bool(_ROUNDUP.search(str(title or "")))
 
 
 def source_quality(source: str) -> float:

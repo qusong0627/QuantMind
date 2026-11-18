@@ -49,6 +49,18 @@ def test_validate_title_negation_and_rating():
     assert validate_title("贵州茅台维持增持评级", "600519", "贵州茅台", "硬利好") is False
 
 
+def test_validate_title_rejects_broker_research_author():
+    assert validate_title(
+        "[东吴证券]贵州茅台业绩点评：维持看好", "600519", "贵州茅台", "硬利好"
+    ) is False
+
+
+def test_validate_title_rejects_roundup():
+    assert validate_title(
+        "贵州茅台、五粮液等白酒股涨停复盘", "600519", "贵州茅台", "硬利好"
+    ) is False
+
+
 def test_tier_for():
     assert tier_for("600519 被立案调查", "600519", "贵州茅台") == "L1"
     assert tier_for("贵州茅台被立案调查", "600519", "贵州茅台") == "L2"
