@@ -67,6 +67,7 @@ from backend.services.live_trading.services.tdx_quote_feed import (
 from backend.services.live_trading.services.trading_session import (
     TZ,
     is_trading_time,
+    now_shanghai,
     trade_date_str,
 )
 from backend.shared.exit_rules import ratchet_stop_price
@@ -2682,7 +2683,11 @@ def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
         from sqlalchemy import text
 
         params = _ledger_params(agent, symbol, user_id, tenant_id)
-        params["d"] = trade_date_str()
+        # trade_date 是 DATE 列：asyncpg 对 DATE 参数只认 datetime.date，传
+        # trade_date_str() 的 'YYYYMMDD' 字符串会抛 DataError（'str' object has
+        # no attribute 'toordinal'）→ 调用方 fail-closed → 所有 llm 止损都不下单。
+        # 2026-11-18 事故：600011/601668 止损触发但一笔没卖，根因就是这里。
+        params["d"] = now_shanghai().date()
         async with get_session(read_only=True) as db:
             res = await db.execute(
                 text(
