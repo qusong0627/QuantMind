@@ -151,6 +151,33 @@ def _resolve_model_market(meta: dict) -> str:
         return "CN"
 
 
+#: 只是「数据集选择器」、不是交易市场的取值。写库/健康/交易台都按交易市场取数，
+#: 直接落这类值会让信号对自己市场不可见（2026-11-19：CUSTOM 模型 3277 条批量信号
+#: 被 CN 过滤掉，证据矩阵信号环判 fail）。
+_DATASET_ONLY_MARKETS = {"CUSTOM"}
+
+
+def _resolve_persist_market(model_market: str, meta: dict) -> str:
+    """落库用**交易市场**（CN/HK/US/…），不写数据集选择器（CUSTOM）。
+
+    优先显式 ``context.universe_market`` / ``trading_market``；否则按基准指数
+    前缀推断（SH/SZ/BJ → CN）；都不可用时回落 CN（当前自定义合并库仅由 A 股构成）。
+    数据根不受影响：``quantdb_dir`` pin 仍指向自定义库。
+    """
+    mk = str(model_market or "").upper().strip()
+    if mk and mk not in _DATASET_ONLY_MARKETS:
+        return "CN" if mk == "A" else mk
+    ctx = meta.get("context") if isinstance(meta.get("context"), dict) else {}
+    for key in ("universe_market", "trading_market"):
+        val = str(meta.get(key) or ctx.get(key) or "").upper().strip()
+        if val and val not in _DATASET_ONLY_MARKETS:
+            return "CN" if val == "A" else val
+    bench = str(ctx.get("benchmark") or meta.get("benchmark") or "").upper()
+    if bench.startswith(("SH", "SZ", "BJ")) or bench.endswith((".SH", ".SZ", ".BJ")):
+        return "CN"
+    return "CN"
+
+
 def _resolve_market_factor_data_dir(meta: dict) -> str:
     """解析模型直读因子的数据根目录：metadata.quantdb_dir（训练时 pin）优先，否则按市场。
 
@@ -1657,7 +1684,7 @@ class InferenceScriptRunner:
         # 写库 + 发布 Redis Stream（partial=单股补推时局部覆盖，不整桶删除）。
         # universe_tag 标注市场（HK 推理 → 'HK'），老行 NULL=CN；A 股路径值 'CN' 与历史等价。
         # persist=False（个股独立路线）时跳过，只返回内存信号。
-        persist_market = "CN" if model_market in ("A", "") else model_market
+        persist_market = _resolve_persist_market(model_market, primary_meta)
         # 写库 + 发布 Redis Stream（partial=单股补推/股票池时局部覆盖，不整桶删除）。
         # persist=False（个股独立路线）时跳过，只返回内存信号。
         # 股票池推理必须局部覆盖：整桶删除会把同日全市场 run 的信号清空，
