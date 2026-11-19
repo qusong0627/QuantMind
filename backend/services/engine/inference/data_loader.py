@@ -329,12 +329,29 @@ def load_forward_labels(
             if not available:
                 return pd.DataFrame(columns=["symbol", "trade_date", FORWARD_RETURN_COL])
             max_needed = available[min(len(available) - 1, len(dates) + horizon + signal_lag_days - 1)]
-            frame = reader.read_range(
-                source, features=[], start=min(dates), end=max_needed,
+            # 标签取价优先 qfq 面板（daily_forward）：因子源自带的 close 在
+            # 2016 前可能是不复权（daily_backward 口径），会把分红/送转当亏损。
+            # 仅 CN 生效；HK/US 的 daily_forward 口径不同，仍走原路径。
+            from backend.shared.qfq_label_prices import (
+                forward_return_labels,
+                load_qfq_label_panel,
             )
-            labels = reader.forward_labels(
-                frame, horizon=horizon, signal_lag_days=signal_lag_days,
-            ).rename(columns={"label": FORWARD_RETURN_COL})
+
+            _market = str((meta.get("context") or {}).get("market") or "CN").upper()
+            panel = load_qfq_label_panel(
+                reader.data_dir, min(dates), max_needed, market=_market
+            )
+            if not panel.empty:
+                labels = forward_return_labels(
+                    panel, horizon=horizon, signal_lag_days=signal_lag_days
+                ).rename(columns={"label": FORWARD_RETURN_COL})
+            else:
+                frame = reader.read_range(
+                    source, features=[], start=min(dates), end=max_needed,
+                )
+                labels = reader.forward_labels(
+                    frame, horizon=horizon, signal_lag_days=signal_lag_days,
+                ).rename(columns={"label": FORWARD_RETURN_COL})
             labels["trade_date"] = pd.to_datetime(labels["trade_date"]).dt.strftime("%Y-%m-%d")
             return labels[labels["trade_date"].isin(dates)].dropna(subset=[FORWARD_RETURN_COL])
         except Exception as exc:

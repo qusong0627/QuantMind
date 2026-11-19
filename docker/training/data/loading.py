@@ -34,6 +34,10 @@ _SPILL_REFS: list = []  # 保活 memmap 对象（帧块的 base 链之外再钉�
 _SPILL_PATHS: list = []
 _SPILL_CHUNK_ROWS = 262_144
 
+# 训练报告四道闸的评估周期（与主训练目标独立；见 model_trainers/gates.py）。
+# 标签构建阶段一次性写入 label_return_h{1,2,3,5,10}，供 horizon curve 使用。
+GATE_HORIZONS: tuple[int, ...] = (1, 2, 3, 5, 10)
+
 
 def _spill_enabled() -> bool:
     v = os.environ.get("QM_TRAIN_FEATURE_SPILL", "0").strip().lower()
@@ -246,6 +250,7 @@ def load_data(
 
     direct_factor_source = str(factor_source or "").strip()
     _train_cache_key = None
+    _label_panel = None
     if direct_factor_source and market_upper in _MARKET_DATA_DIR_ENV:
         # Direct QuantDB mode: one factor source only, never materialise or merge snapshots.
         # 与 A 股一致：直接读该市场 6_ml_datasets 下的因子分区
@@ -272,7 +277,9 @@ def load_data(
         if cache_dir:
             try:
                 from backend.shared.train_cache import (
+                    TRAIN_CACHE_CODE_VERSION,
                     build_cache_key,
+                    combine_source_stamps,
                     read_cache,
                     source_stamp,
                 )
@@ -280,6 +287,24 @@ def load_data(
                 _src_stamp = source_stamp(
                     _status, reader.source_path(direct_factor_source)
                 )
+                # 副库（factor_dictionary 等）数据指纹也进 key：只哈希映射会让
+                # 「V5 回填/因子库重写后仍命中旧特征」这种静默错误发生。
+                _field_stamps: dict[str, str] = {}
+                for _lib in sorted({
+                    str(v).split(":", 1)[0]
+                    for v in (factor_field_sources or {}).values()
+                    if ":" in str(v)
+                }):
+                    if _lib == direct_factor_source:
+                        continue
+                    try:
+                        _st = reader.describe(_lib)
+                        _field_stamps[_lib] = source_stamp(
+                            _st, reader.source_path(_lib)
+                        )
+                    except Exception:  # noqa: BLE001 - 副库不可读时保守失效
+                        _field_stamps[_lib] = "unavailable"
+                _src_stamp = combine_source_stamps(_src_stamp, _field_stamps)
                 _train_cache_key = build_cache_key(
                     market=market_upper,
                     factor_source=direct_factor_source,
@@ -290,10 +315,15 @@ def load_data(
                     test_end=test_end,
                     horizon=horizon,
                     target_mode=target_mode,
+                    label_transform=label_transform,
+                    label_top_pct=label_top_pct,
+                    execution_price=execution_price,
+                    execution_lag_days=_EXECUTION_LAG_DAYS,
                     features=features,
                     factor_field_sources=factor_field_sources,
                     pool_symbols=pool_symbols,
                     industry_as_feature=industry_as_feature,
+                    code_version=TRAIN_CACHE_CODE_VERSION,
                 )
                 _cached = read_cache(cache_dir, _train_cache_key)
                 if _cached is not None:
@@ -375,6 +405,28 @@ def load_data(
             logger.info(
                 "Direct QuantDB columns already float32 (reader-side cast), skip"
             )
+
+        # ── 标签取价：daily_forward(qfq) 面板（2026-11-19 审计修复）──────────
+        # 默认因子源 l1_factors 的 OHLCV 直通 daily_backward；而 backward 在
+        # 2016 前是不复权（治理方案冻结「禁止跨 2016 使用 backward」）。若用
+        # 因子源自带的 close 造标签，2010-2015 会把分红/送转当亏损，且 2016
+        # 前后标签定义不一致。这里只装载 qfq 价面板，合并推迟到窄表阶段
+        # （避免 10M 行全宽表 merge 抬升内存峰值）；面板只含「当日有 bar」
+        # 的行，据此剔除停牌僵尸行（绝不按最后收盘填充）。
+        if direct_factor_source and market_upper == "CN":
+            from backend.shared.qfq_label_prices import load_qfq_label_panel
+
+            _label_panel = load_qfq_label_panel(
+                quantdb_dir or os.getenv(_MARKET_DATA_DIR_ENV[market_upper]) or None,
+                range_start,
+                range_end,
+                market=market_upper,
+            )
+            if _label_panel.empty:
+                logger.warning(
+                    "qfq 标签面板为空（daily_forward 不可读）；标签回退因子源 close"
+                )
+                _label_panel = None
     elif market_upper in _MARKET_PARQUET_FILES:
         # ── 非 A 股市场：从单一 parquet 文件加载 ──
         parquet_name = _MARKET_PARQUET_FILES[market_upper]
@@ -715,6 +767,18 @@ def load_data(
             "labels may span fewer real trading days than target_horizon_days"
         )
 
+    # qfq 标签取价 + 停牌剔除（窄表阶段，避免全宽表 merge 抬升内存）
+    if _label_panel is not None:
+        narrow["trade_date"] = pd.to_datetime(narrow["trade_date"])
+        _before_label_merge = len(narrow)
+        narrow = narrow.merge(_label_panel, on=["symbol", "trade_date"], how="left")
+        narrow = narrow[narrow["_qfq_close"].notna()].copy()
+        logger.info(
+            "QFQ 标签面板: %d -> %d 行（剔除无当日 bar 的停牌/无数据行）",
+            _before_label_merge,
+            len(narrow),
+        )
+
     # 标签：基于 target_horizon_days 构建 N 日远期收益
     # 注：mom_ret_{N}d 列是过去 N 日收益（backward-looking），如 mom_ret_5d[T] = (close[T]-close[T-5])/close[T-5]
     # shift(-N) 后，行 T 得到行 T+N 的值 = (close[T+N]-close[T])/close[T]，即正确的 N 日远期收益
@@ -729,13 +793,20 @@ def load_data(
     if direct_factor_source:
         # Raw factor sources carry open/close, so labels are true forward returns.
         # execution_price=open：t+1 开盘买（严格实盘口径）；close：t+1 收盘买（旧口径）。
+        # 取价优先 qfq 面板（daily_forward）：2016 前 daily_backward 是不复权，
+        # 用因子源自带 close 会把分红/送转当亏损（2026-11-19 审计）。
         _lag = _EXECUTION_LAG_DAYS
-        _entry_col = "open" if _exec_price == "open" else "close"
+        if "_qfq_close" in narrow.columns:
+            _entry_col = "_qfq_open" if _exec_price == "open" else "_qfq_close"
+            _future_col = "_qfq_close"
+        else:
+            _entry_col = "open" if _exec_price == "open" else "close"
+            _future_col = "close"
         # 缺列必须在这里说清楚：拖到 groupby 只会抛 pandas ``KeyError: 'Column
         # not found: open'``，日志里没有列清单（2026-11-08 任务
         # train_20261109123002_56a909dc 即此形态，``admin_training_jobs.logs``
         # 为空）。CUSTOM 市场允许因子源不带 OHLCV，这条闸是最后一道可读出口。
-        _label_cols = list(dict.fromkeys((_entry_col, "close")))
+        _label_cols = list(dict.fromkeys((_entry_col, _future_col)))
         _missing_label_cols = [c for c in _label_cols if c not in narrow.columns]
         if _missing_label_cols:
             raise RuntimeError(
@@ -746,7 +817,7 @@ def load_data(
                 f"{sorted(narrow.columns)[:40]}"
             )
         execution_close = narrow.groupby("symbol")[_entry_col].shift(-_lag)
-        future_close = narrow.groupby("symbol")["close"].shift(-(_lag + _horizon))
+        future_close = narrow.groupby("symbol")[_future_col].shift(-(_lag + _horizon))
         narrow["label"] = future_close / execution_close - 1.0
     elif _exec_price == "open":
         raise RuntimeError(
@@ -770,6 +841,63 @@ def load_data(
             .transform(lambda s: (1 + s).rolling(_horizon).apply(np.prod, raw=True) - 1)
             .shift(-(_horizon + _EXECUTION_LAG_DAYS))
         )
+
+    # ── 风险/多周期评估标签（不参与主训练目标）────────────────────────────
+    # label_vol：主 horizon 的已实现波动（收盘-收盘日收益的均方根），供波动率
+    # 目标模型；label_return_h{h}：1/2/3/5/10 日远期收益，供 horizon curve。
+    # 只在 close 可用时构建；缺失时优雅跳过（vol 模型/闸门各自 skipped）。
+    # 价基必须与主标签一致：主标签构建段已把 entry 切到 qfq 面板，这里若继续
+    # 用因子源自带 close 造 h1..h10/vol，会变成「qfq 买、不复权卖」的混合口径
+    # ——值偏离量级、符号随机（2026-11-19 任务 train_79_t10_2010 实测 h10 IC
+    # 0.003 而主标签 IC 0.153，即此形态）。
+    _label_extra_cols: list[str] = []
+    _eval_col = (
+        _future_col
+        if direct_factor_source and "_qfq_close" in narrow.columns
+        else "close"
+    )
+    _eval_entry_col = (
+        _entry_col
+        if direct_factor_source and "_qfq_close" in narrow.columns
+        else "close"
+    )
+    if _eval_col in narrow.columns:
+        _entry = narrow.groupby("symbol")[_eval_entry_col].shift(-_EXECUTION_LAG_DAYS)
+        for _h in GATE_HORIZONS:
+            _future = narrow.groupby("symbol")[_eval_col].shift(
+                -(_EXECUTION_LAG_DAYS + int(_h))
+            )
+            _col = f"label_return_h{int(_h)}"
+            narrow[_col] = _future / _entry - 1.0
+            _label_extra_cols.append(_col)
+        _daily = narrow.groupby("symbol")[_eval_col].pct_change()
+        # 逐日累加平方和，避免 N×horizon 的 column_stack（10M×20×8B ≈ 1.6GB）
+        # 在已吃紧的加载阶段再叠一份大临时量。
+        _vol_sum = np.zeros(len(narrow), dtype=np.float64)
+        _vol_cnt = np.zeros(len(narrow), dtype=np.int64)
+        for _k in range(1, _horizon + 1):
+            _r = _daily.groupby(narrow["symbol"]).shift(
+                -(_EXECUTION_LAG_DAYS + _k)
+            ).to_numpy(dtype=np.float64)
+            _ok = np.isfinite(_r)
+            _vol_sum[_ok] += _r[_ok] ** 2
+            _vol_cnt[_ok] += 1
+        narrow["label_vol"] = np.sqrt(
+            np.divide(
+                _vol_sum,
+                _vol_cnt,
+                out=np.full(len(_vol_sum), np.nan, dtype=np.float64),
+                where=_vol_cnt > 0,
+            )
+        )
+        _label_extra_cols.append("label_vol")
+    else:
+        logger.warning(
+            "Column %r unavailable — label_vol/label_return_h* skipped "
+            "(vol target model and horizon curve will be skipped)",
+            _eval_col,
+        )
+
     logger.info(
         "Label built with target_horizon_days=%s execution_price=%s (%s)",
         _horizon,
@@ -803,7 +931,9 @@ def load_data(
 
     # 宽表一次性取回（行=已排序有效行，列=最终保留列），label 从窄表对齐写入
     df["label"] = narrow["label"]
-    keep_cols = ["symbol", "trade_date", "label"] + features
+    for _c in _label_extra_cols:
+        df[_c] = narrow[_c]
+    keep_cols = ["symbol", "trade_date", "label"] + _label_extra_cols + features
     # 优先走 memmap 溢出（见 _clip_rows_via_spill：全窗下旧写法的 3 份帧级拷贝
     # 必 OOM）；不可行时回退旧写法（当前窗口记忆里安全，全窗下则是已知风险路径）。
     _spilled = None
@@ -881,6 +1011,13 @@ def load_data(
                     "market": market_upper,
                     "train_start": str(train_start),
                     "train_end": str(train_end),
+                    "valid_end": str(valid_end or ""),
+                    "test_end": str(test_end or ""),
+                    "horizon": horizon,
+                    "target_mode": target_mode,
+                    "label_transform": label_transform,
+                    "label_top_pct": label_top_pct,
+                    "execution_price": execution_price,
                 },
             )
         except Exception as exc:  # noqa: BLE001

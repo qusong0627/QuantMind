@@ -24,7 +24,12 @@ import pandas as pd
 
 logger = logging.getLogger("quantmind.train")
 
-CACHE_VERSION = "v1"
+CACHE_VERSION = "v2"
+# 训练缓存口径版本：改标签取价/缓存结构时 bump，旧缓存自动失效。
+# 与 docker/training/data/loading.py 共用（训练容器挂载 backend）。
+# v3（2026-11-19）：评估标签 label_return_h*/label_vol 统一到 qfq 价基
+# （v2 缓存里这两组列是「qfq 买、不复权卖」的混合口径，不能复用）。
+TRAIN_CACHE_CODE_VERSION = "qfq-labels-v3"
 DEFAULT_MAX_GB = 5.0
 META_KEYS = {"symbol", "trade_date", "label"}
 
@@ -59,6 +64,57 @@ def source_stamp(status: Any, source_path: str | Path | None) -> str:
     return f"{schema}|{max_date}|{files}|{latest}"
 
 
+def combine_source_stamps(
+    anchor_stamp: str, field_source_stamps: dict[str, str] | None = None
+) -> str:
+    """锚库指纹 + 所有副库指纹（factor_field_sources 里的 lib:col）。
+
+    副库数据更新（V5 回填 / 因子库重写）必须让缓存失效；只哈希映射不够。
+    """
+    if not field_source_stamps:
+        return str(anchor_stamp)
+    parts = ";".join(f"{k}={v}" for k, v in sorted(field_source_stamps.items()))
+    return f"{anchor_stamp}||{parts}"
+
+
+def default_cache_dir() -> Path:
+    """API/训练共享缓存目录（宿主机 data/training_cache ↔ 容器 /training_cache）。"""
+    return Path(os.getenv("QM_TRAIN_CACHE_DIR", "/data/training_cache"))
+
+
+def describe_cache(cache_dir: str | Path, key: str) -> dict[str, Any] | None:
+    """只读探测缓存条目；命中返回元数据，不加载 parquet。"""
+    parquet_path, meta_path = _paths(Path(cache_dir), key)
+    if not parquet_path.is_file() or not meta_path.is_file():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    if meta.get("key") != key or meta.get("cache_version") != CACHE_VERSION:
+        return None
+    try:
+        size = int(meta.get("bytes") or parquet_path.stat().st_size)
+    except OSError:
+        return None
+    return {
+        "hit": True,
+        "key": key,
+        "path": str(parquet_path),
+        "bytes": size,
+        "rows": meta.get("rows"),
+        "features": meta.get("features") or [],
+        "created_at": meta.get("created_at"),
+        **{
+            k: v
+            for k, v in meta.items()
+            if k not in {"key", "cache_version", "bytes", "rows", "features", "created_at", "dtypes"}
+        },
+    }
+
+
 def build_cache_key(
     *,
     market: str,
@@ -70,6 +126,10 @@ def build_cache_key(
     test_end: Any = None,
     horizon: int = 1,
     target_mode: str = "return",
+    label_transform: str = "rank",
+    label_top_pct: float = 0.2,
+    execution_price: str = "close",
+    execution_lag_days: int = 1,
     features: list[str] | None = None,
     factor_field_sources: dict[str, str] | None = None,
     pool_symbols: list[str] | None = None,
@@ -93,6 +153,10 @@ def build_cache_key(
             str(test_end or ""),
             str(int(horizon)),
             str(target_mode or "return"),
+            str(label_transform or "rank"),
+            f"{float(label_top_pct):.6f}",
+            str(execution_price or "close"),
+            str(int(execution_lag_days)),
             feat_hash,
             _sha(ffs),
             pool_hash,

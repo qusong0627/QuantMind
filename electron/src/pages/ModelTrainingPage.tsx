@@ -15,7 +15,7 @@ import { modelTrainingService } from '../services/modelTrainingService';
 import { useAppDispatch, useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket, setMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
-import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER, TrainingMarket, resolveTrainingMarket, resolveTrainingPoolMarket, getEnabledTrainingMarketOptions, buildCrossSourceFeaturePlan, buildExtraFactorSourceOptions, buildFeatureOwnershipMap, findCrossSourceFeatureConflicts, formatCrossSourceConflictMessage, mergeSourceFeatureCategories, sanitizeExtraFactorSources, normalizeTrainingTarget } from './training/trainingUtils';
+import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, RETRAIN_SEED_STORAGE_KEY, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER, TrainingMarket, resolveTrainingMarket, resolveTrainingPoolMarket, getEnabledTrainingMarketOptions, buildCrossSourceFeaturePlan, buildExtraFactorSourceOptions, buildFeatureOwnershipMap, findCrossSourceFeatureConflicts, formatCrossSourceConflictMessage, mergeSourceFeatureCategories, sanitizeExtraFactorSources, normalizeTrainingTarget } from './training/trainingUtils';
 import { AdminModelFeatureDataCoverage, QuantDBTrainingSource } from '../features/admin/types';
 import { adminService } from '../features/admin/services/adminService';
 import { FeatureSelector } from './training/FeatureSelector';
@@ -609,7 +609,7 @@ export const ModelTrainingPage: React.FC = () => {
       // 附加因子库不在这里恢复：它已在 useState 初始化器（readDraftExtraFactorSources）里
       // 同步读出，否则首轮目录加载会按「只有锚库」过滤掉草稿里副库的特征。
       // 是否可用由目录加载时按当前市场的来源列表再过滤一次。
-      if (!draftRestoreNoticeShown) {
+      if (!draftRestoreNoticeShown && !sessionStorage.getItem(RETRAIN_SEED_STORAGE_KEY)) {
         draftRestoreNoticeShown = true;
         message.success('已恢复上次训练草稿');
       }
@@ -675,6 +675,76 @@ export const ModelTrainingPage: React.FC = () => {
     });
   };
 
+  const [cacheChecking, setCacheChecking] = useState(false);
+  const [cacheStatus, setCacheStatus] = useState<{
+    hit: boolean; bytes?: number; rows?: number; created_at?: string;
+  } | null>(null);
+
+  /** 当前页配置 → 后端训练载荷（训练与缓存探测共用，避免两处口径漂移） */
+  const buildCurrentPayload = () => {
+    const payload = buildBackendTrainingPayload(requestPreview, timePeriods, {
+      nodeId: selectedNode,
+      maxTimeMinutes,
+      factorFilter,
+      // 跨源：锚库发裸名、附加库发 "库:feature_key"，并 pin 副库目录版本
+      crossSource: isQuantDBMarket(trainingMarket)
+        ? { anchorSource: factorSource, ownership: featureOwnership, extraCatalogVersions }
+        : undefined,
+    });
+    if (isQuantDBMarket(trainingMarket) && factorCatalogVersion) {
+      payload.factor_source = factorSource;
+      payload.factor_catalog_version = factorCatalogVersion;
+    }
+    return payload;
+  };
+
+  /** 探测本地训练缓存：key 与训练侧同源；同特征/窗口/周期换模型会命中 */
+  const checkTrainingCache = async () => {
+    if (!isReadyToTrain) {
+      message.warning(
+        crossSourceBlocker
+          || (isQuantDBMarket(trainingMarket) ? '数据源、映射版本或覆盖范围尚未就绪' : '配置不完整'),
+      );
+      return;
+    }
+    setCacheChecking(true);
+    try {
+      const payload = buildCurrentPayload();
+      const status = await modelTrainingService.getTrainingCacheStatus({
+        market: payload.context?.market || 'CN',
+        factor_source: payload.factor_source,
+        features: payload.features,
+        factor_field_sources: payload.factor_field_sources || {},
+        pool_symbols: payload.pool_symbols ?? null,
+        train_start: payload.train_start,
+        train_end: payload.train_end,
+        valid_end: payload.valid_end,
+        test_end: payload.test_end,
+        target_horizon_days: payload.target_horizon_days,
+        target_mode: payload.target_mode,
+        label_transform: payload.label_transform,
+        label_top_pct: payload.label_top_pct,
+        execution_price: payload.execution_price,
+        industry_as_feature: payload.context?.industry_as_feature ?? false,
+      });
+      setCacheStatus(status);
+      if (status.hit) {
+        const gb = status.bytes ? (status.bytes / 1024 ** 3).toFixed(2) : '?';
+        message.success(
+          `本地缓存命中：${gb}GB / ${status.rows ?? '?'} 行${status.created_at ? ` / ${status.created_at}` : ''}；本次训练将跳过特征载入`,
+        );
+      } else {
+        message.info('本地无缓存：首次训练需载入特征（2010-2024 约 10-15 分钟）');
+      }
+    } catch (error: unknown) {
+      message.error(
+        error instanceof Error ? `缓存探测失败：${error.message}` : '缓存探测失败',
+      );
+    } finally {
+      setCacheChecking(false);
+    }
+  };
+
   const startTraining = async () => {
     if (isTrainingInProgress) {
       message.warning('训练任务进行中，请稍候');
@@ -701,19 +771,7 @@ export const ModelTrainingPage: React.FC = () => {
     pushLog(`正在提交训练请求：${displayName}`);
 
     try {
-      const payload = buildBackendTrainingPayload(requestPreview, timePeriods, {
-        nodeId: selectedNode,
-        maxTimeMinutes,
-        factorFilter,
-        // 跨源：锚库发裸名、附加库发 "库:feature_key"，并 pin 副库目录版本
-        crossSource: isQuantDBMarket(trainingMarket)
-          ? { anchorSource: factorSource, ownership: featureOwnership, extraCatalogVersions }
-          : undefined,
-      });
-      if (isQuantDBMarket(trainingMarket) && factorCatalogVersion) {
-        payload.factor_source = factorSource;
-        payload.factor_catalog_version = factorCatalogVersion;
-      }
+      const payload = buildCurrentPayload();
       const { runId } = await modelTrainingService.runTraining(payload);
       setActiveRunId(runId);
       pushLog(`提交成功，Run ID: ${runId}`);
@@ -925,9 +983,7 @@ export const ModelTrainingPage: React.FC = () => {
     }
   };
 
-  const confirmImportConfig = () => {
-    if (!importPreview) return;
-    const { config } = importPreview;
+  const applyImportedConfig = (config: ImportedTrainingConfig) => {
     clearTimers();
     importedFeaturesRef.current = config.draft.selectedFeatures;
     // 配置中的时间切分优先级高于数据目录给出的首次打开建议值。
@@ -957,8 +1013,10 @@ export const ModelTrainingPage: React.FC = () => {
       ? config.factorSource
       : factorSource;
     const importedExtras = sanitizeExtraFactorSources(config.extraFactorSources, importedAnchor);
+    // 来源列表未就绪（如重新训练带入时页面刚挂载）先原样带入，目录加载时会按
+    // 新市场的已发布来源再过滤一次；拿空列表就地过滤会把副库全删掉。
     setExtraFactorSources(
-      config.market === trainingMarket
+      config.market === trainingMarket && factorSources.length > 0
         ? importedExtras.filter((lib) => isExtraFactorSourceUsable(lib))
         : importedExtras,
     );
@@ -966,9 +1024,36 @@ export const ModelTrainingPage: React.FC = () => {
     setResult(null);
     setResultError('');
     setCurrentStep(0);
+  };
+
+  const confirmImportConfig = () => {
+    if (!importPreview) return;
+    applyImportedConfig(importPreview.config);
     setImportPreview(null);
     message.success('训练配置已导入');
   };
+
+  // 模型管理「重新训练」带入：mount 后消费一次 sessionStorage 种子，等价于导入一份配置。
+  // 必须在 applyImportedConfig 定义之后声明（effect 回调执行时闭包已初始化）。
+  const retrainSeedConsumedRef = useRef(false);
+  useEffect(() => {
+    if (retrainSeedConsumedRef.current) return;
+    retrainSeedConsumedRef.current = true;
+    const raw = sessionStorage.getItem(RETRAIN_SEED_STORAGE_KEY);
+    if (!raw) return;
+    sessionStorage.removeItem(RETRAIN_SEED_STORAGE_KEY);
+    try {
+      const config = parseTrainingConfig(raw);
+      applyImportedConfig(config);
+      message.success(
+        `已带入「${config.draft.displayName || '模型'}」：${config.draft.selectedFeatures.length} 个特征，可调整时间切分后开始训练`,
+      );
+    } catch (error) {
+      message.error(error instanceof Error ? `带入训练配置失败：${error.message}` : '带入训练配置失败');
+    }
+    // 只在 mount 消费一次；applyImportedConfig 依赖本页状态，不随依赖重跑
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleExportConfig = async () => {
     const draft = {
@@ -1153,6 +1238,29 @@ export const ModelTrainingPage: React.FC = () => {
                 </>
               )}
               <Button size="small" icon={<RefreshCcw size={14}/>} className="rounded-xl h-8 font-bold px-3" onClick={handleResetAll} disabled={isTrainingInProgress}>清空</Button>
+              {currentStep === 3 && (
+                <>
+                  <Tooltip title="探测本地训练缓存：同特征/时间窗/预测周期换模型可复用；载入从 10-15 分钟降到 1-2 分钟（模型类型/超参不影响缓存）">
+                    <Button
+                      size="small"
+                      icon={<Database size={14} />}
+                      className="rounded-xl h-8 font-bold px-3"
+                      loading={cacheChecking}
+                      disabled={isTrainingInProgress || !isReadyToTrain}
+                      onClick={checkTrainingCache}
+                    >
+                      本地缓存
+                    </Button>
+                  </Tooltip>
+                  {cacheStatus && (
+                    <Tag color={cacheStatus.hit ? 'green' : 'default'} className="!m-0">
+                      {cacheStatus.hit
+                        ? `命中${cacheStatus.bytes ? ` ${(cacheStatus.bytes / 1024 ** 3).toFixed(1)}GB` : ''}`
+                        : '无缓存'}
+                    </Tag>
+                  )}
+                </>
+              )}
               {isTrainingInProgress && (
                 <Button
                   size="small"

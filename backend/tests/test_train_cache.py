@@ -69,6 +69,31 @@ def test_cache_key_is_deterministic_and_sensitive():
     assert base != _key(factor_field_sources={"f1": "lib2:f1"})
 
 
+def test_cache_key_sensitive_to_label_params():
+    """缓存里存的是已变换的标签：label_transform/top_pct/执行价必须进 key。"""
+    base = _key()
+    assert base != _key(label_transform="raw")
+    assert base != _key(label_top_pct=0.1)
+    assert base != _key(execution_price="open")
+    assert base != _key(execution_lag_days=0)
+
+
+def test_combine_source_stamps_sensitive_to_field_lib_stamp():
+    assert c.combine_source_stamps("anchor") == "anchor"
+    a = c.combine_source_stamps("anchor", {"v5": "s1"})
+    assert a != c.combine_source_stamps("anchor", {"v5": "s2"})
+    assert a != c.combine_source_stamps("anchor", {"v5": "s1", "fd": "s1"})
+
+
+def test_describe_cache_hit_and_miss(tmp_path: Path):
+    key = _key()
+    assert c.write_cache(tmp_path, key, _frame(), ["f1", "f2"]) is not None
+    hit = c.describe_cache(tmp_path, key)
+    assert hit is not None and hit["hit"] is True
+    assert hit["rows"] == 2 and hit["features"] == ["f1", "f2"]
+    assert c.describe_cache(tmp_path, "other-key") is None
+
+
 def test_write_and_read_roundtrip(tmp_path: Path):
     frame = _frame()
     key = _key()

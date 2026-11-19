@@ -236,6 +236,13 @@ _TRAINERS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "model_tr
 _DIAGNOSTICS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "diagnostics")
 # 训练数据包：train.py 顶层 `from data... import ...`，整目录挂载
 _DATA_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "data")
+# 跨任务共享的训练缓存（特征+标签窄表）：同特征/窗口/周期换模型可命中，载入从十几分钟降到 1-2 分钟。
+# 必须挂到容器内可写路径；默认宿主机 data/training_cache。
+_TRAIN_CACHE_HOST_PATH = (
+    os.getenv("QM_TRAIN_CACHE_HOST_PATH", "").strip()
+    or str(_HOST_PROJECT_PATH / "data" / "training_cache")
+)
+_TRAIN_CACHE_MOUNT_DIR = "/training_cache"
 
 def _validate_config_dict(run_id: str, config: dict) -> dict:
     """B1 schema 门：config.yaml 经 TrainingConfig 校验后返回契约字典。
@@ -806,7 +813,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                     url=f"{self.api_base}/api/v1/models/training-runs/{run_id}/complete",
                     secret=self.internal_secret,
                 ),
-                cache={"dir": "/tmp" if data_source_mode == "LOCAL" else None},
+                cache={"dir": _TRAIN_CACHE_MOUNT_DIR if data_source_mode == "LOCAL" else None},
                 wfa=payload.get("wfa") if isinstance(payload.get("wfa"), dict) else None,
                 rolling_meta=payload.get("rolling_meta")
                 if isinstance(payload.get("rolling_meta"), dict)
@@ -946,6 +953,13 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         volumes: dict[str, dict[str, str]] = {
             str(host_output_dir): {"bind": "/workspace", "mode": "rw"},
         }
+        # 跨任务共享训练缓存（LOCAL 直读模式）：同特征/窗口/周期换模型命中，
+        # 载入阶段从十几分钟降到 1-2 分钟；缓存 key 不含模型类型/超参。
+        if str(payload.get("data_source_mode", "LOCAL")).upper() == "LOCAL":
+            volumes[str(_TRAIN_CACHE_HOST_PATH)] = {
+                "bind": _TRAIN_CACHE_MOUNT_DIR,
+                "mode": "rw",
+            }
         if not config.get("data", {}).get("factor_source"):
             volumes[str(_LOCAL_DATA_PATH)] = {"bind": _LOCAL_DATA_MOUNT_DIR, "mode": "ro"}
         # 挂载 QuantDB 全量数据（6大类：kline/base_sector/financial/bond_etf/technical_derived/ml_datasets）

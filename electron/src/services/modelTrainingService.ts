@@ -27,6 +27,27 @@ export interface ModelTrainingRunStatus {
   isCompleted: boolean;
 }
 
+/** 训练数据缓存探测结果（D3；key 与训练侧同源） */
+export interface TrainingCacheStatus {
+  hit: boolean;
+  key: string;
+  cache_dir: string;
+  bytes?: number;
+  rows?: number;
+  features?: string[];
+  created_at?: string;
+  factor_source?: string;
+  train_start?: string;
+  train_end?: string;
+  valid_end?: string;
+  test_end?: string;
+  horizon?: number;
+  target_mode?: string;
+  label_transform?: string;
+  label_top_pct?: number;
+  execution_price?: string;
+}
+
 /** 任务提交时的请求载荷（与轮询端点分开：载荷含全部特征，体积大，只拉一次） */
 export interface ModelTrainingRunRequest {
   runId: string;
@@ -701,6 +722,23 @@ class ModelTrainingService {
 
   async runTraining<T extends object>(payload: T): Promise<ModelTrainingRunResponse> {
     const resp = await this.client.post<ModelTrainingRunResponse>('/models/run-training', payload);
+    return resp.data;
+  }
+
+  /** 探测本地训练数据缓存（同特征/窗口/周期换模型会命中；模型超参不影响 key） */
+  async getTrainingCacheStatus<T extends object>(payload: T): Promise<TrainingCacheStatus> {
+    const resp = await this.client.post<TrainingCacheStatus>(
+      '/models/training-cache/status',
+      payload,
+    );
+    return resp.data;
+  }
+
+  /** 清理指定缓存（管理员）；用于数据更新后强制重建 */
+  async deleteTrainingCache(key: string): Promise<{ deleted: boolean; key: string }> {
+    const resp = await this.client.delete<{ deleted: boolean; key: string }>(
+      `/models/training-cache/${key}`,
+    );
     return resp.data;
   }
 
