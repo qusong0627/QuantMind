@@ -258,6 +258,9 @@ export default function ModelChat({
           const toolLine = extractToolLine(r.thought);
           const status =
             r.kind === 'review' ? '盘后复盘' : fillCount ? `成交 ${fillCount} 笔` : r.thought ? '未成交' : '仅提示';
+          // 四段式标记：缺标记的回合走 parseAnalysis 的兜底解析，UI 要如实标「未结构化」，
+          // 不能显示成「本轮未输出决策」（模型其实可能在正文里写了操作倾向）。
+          const structured = /【总体总结】|【分析链路】|【推理论证】|【决策】/.test(r.thought || '');
           const summary =
             (pa.summary || r.thought || r.user).replace(/\s+/g, ' ').trim() || '（无内容）';
           return (
@@ -340,7 +343,13 @@ export default function ModelChat({
                   )}
                   <Section
                     title="结构化决策"
-                    hint={pa.decisions.length ? `${pa.decisions.length} 条` : '本轮未输出 JSON 决策'}
+                    hint={
+                      pa.decisions.length
+                        ? `${pa.decisions.length} 条`
+                        : structured
+                          ? '本轮未输出 JSON 决策'
+                          : '未按四段式输出（正文见推理论证）'
+                    }
                   >
                     {pa.decisions.length ? (
                       <div className="mc-dec-list">
@@ -354,7 +363,11 @@ export default function ModelChat({
                         ))}
                       </div>
                     ) : (
-                      <div className="mc-no-trade">本轮未输出结构化决策 JSON。</div>
+                      <div className="mc-no-trade">
+                        {structured
+                          ? '本轮未输出结构化决策 JSON。'
+                          : '本轮模型未按四段式输出，操作倾向请见上方正文。'}
+                      </div>
                     )}
                   </Section>
                   <Section

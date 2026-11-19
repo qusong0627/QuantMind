@@ -271,6 +271,30 @@ def collect_system(d: Dossier, env: dict[str, str], conn) -> None:
     d.sections["system"] = _bullet(lines)
 
 
+def _intraday_market_doc(day: str) -> dict[str, Any] | None:
+    """同日盘中实况（``qm:intraday:market:{YYYYMMDD}``，trade Redis db2）。
+
+    日线分区要等 20:55 同步才落盘，16:20 的收盘复盘只能拿到上一交易日；
+    这份 TDX 桥收盘快照提供**当日**广度/涨停跌停/行业涨跌，作为补数。
+    读不到返回 ``None``（不新增缺口，日线口径的缺口已如实记录）。
+    """
+    try:
+        import redis as _redis
+
+        client = _redis.Redis(
+            host=os.getenv("REDIS_HOST") or "redis",
+            port=int(os.getenv("REDIS_PORT") or 6379),
+            db=int(os.getenv("REDIS_DB_TRADE") or 2),
+            decode_responses=True,
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
+        )
+        raw = client.hget(f"qm:intraday:market:{day.replace('-', '')}", "doc")
+        return json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 - 补数失败不阻断复盘
+        return None
+
+
 def collect_market(d: Dossier, env: dict[str, str], conn) -> None:
     lines: list[str] = []
     # 1) 指数日线（parquet，最近两个可用分区）
@@ -406,14 +430,51 @@ def collect_market(d: Dossier, env: dict[str, str], conn) -> None:
                     d.gaps.append("quotes_stale")
         except Exception:  # noqa: BLE001
             pass
+    # 3b) 同日盘中实况（TDX 桥收盘快照）：日线分区 20:55 才落盘，16:20 复盘
+    # 用这份「当日」广度/行业补数；只读，不新增缺口（日线口径的缺口照常如实记录）。
+    intraday = _intraday_market_doc(d.day)
+    if intraday:
+        breadth = intraday.get("breadth") or {}
+        if breadth.get("n"):
+            lines.append(
+                f"盘中实况（{intraday.get('source', '?')}，"
+                f"{breadth.get('sample', '?')} 样本 {breadth['n']} 只）："
+                f"上涨 {breadth.get('up')} / 下跌 {breadth.get('down')} / "
+                f"平 {breadth.get('flat')}｜涨停 {breadth.get('limit_up')} / "
+                f"跌停 {breadth.get('limit_down')}｜炸板率 {breadth.get('broke_rate')}%"
+            )
+        sectors = [
+            s for s in (intraday.get("sectors") or [])
+            if isinstance(s, dict) and s.get("name")
+        ]
+        sectors.sort(key=lambda s: float(s.get("chg") or 0), reverse=True)
+        if sectors:
+            top = "；".join(
+                f"{s.get('name')} {float(s.get('chg') or 0):+.2f}%（{s.get('up')}/{s.get('n')}）"
+                for s in sectors[:6]
+            )
+            bottom = "；".join(
+                f"{s.get('name')} {float(s.get('chg') or 0):+.2f}%（{s.get('up')}/{s.get('n')}）"
+                for s in sectors[-5:][::-1]
+            )
+            lines.append(f"盘中行业前列：{top}")
+            lines.append(f"盘中行业后列：{bottom}")
     # 4) 收盘市场阶段快照（六块/事件/情绪/Q1-Q5；与交易 agent 盘前块同源）
     try:
         from backend.shared.market_stage_snapshot import (
             ensure_snapshot,
+            load_latest_snapshot,
             render_stage_text,
         )
 
-        snap = ensure_snapshot(d.day)
+        try:
+            snap = ensure_snapshot(d.day)
+        except Exception:
+            # 当日快照算不出来（当日行情未就绪）时退到最近一份可用快照，
+            # 让下方「date != review day」照实标 behind，而不是整段 unavailable。
+            snap = load_latest_snapshot(on_or_before=d.day)
+            if snap is None:
+                raise
         if str(snap.get("date")) != d.day:
             d.gaps.append("market_stage_behind_review_day")
         lines.append(render_stage_text(snap))

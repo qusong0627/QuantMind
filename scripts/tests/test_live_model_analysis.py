@@ -142,6 +142,13 @@ class TestDataGapTemplate:
         assert gaps == ["account_unreachable"]  # 新闻缺失不是账户缺口（本项范围外）
         assert "【当日新闻分子】" not in content
 
+    def test_requirement_block_requires_four_section_markers(self):
+        """四段式标记是前端 parseAnalysis 的切段契约；缺了会掉进兜底解析。"""
+        for mode in ("intraday", "review"):
+            content, _ = _build(_ledger(_pos("600036.SH")), mode=mode)
+            for marker in ("【总体总结】", "【分析链路】", "【推理论证】", "【决策】"):
+                assert marker in content, f"{mode} 缺少 {marker}"
+
 
 class TestLedgerRead:
     """分账账本是 agent 可见面的唯一账户口径：脏行跳过、失败即降级、不含总额。"""
