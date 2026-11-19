@@ -137,8 +137,68 @@ def fetch_publish_times(
     return {}
 
 
+def fetch_publish_meta(
+    ids: Sequence[int], *, db: str | None = None
+) -> dict[int, tuple[datetime, str | None]]:
+    """批量取发布时间 + 源域名（aware UTC, domain）。
+
+    与 `fetch_publish_times` 同源同容错，多带一列 `source.domain`——**域名是噪声
+    守卫的唯一可靠输入**：实测「标题含招标类词」只能覆盖采购稿的 32%，而按域名
+    黑名单覆盖 100%；「源站本身是上市公司」同理（署名出现在每篇正文里，标题
+    几乎不提）。仍然只取三列小字段，不碰正文大字段。
+    """
+    wanted = [int(i) for i in ids]
+    if not wanted:
+        return {}
+    path = db or db_path()
+    last_exc: Exception | None = None
+    for attempt in range(1, _HUNTLY_RETRIES + 1):
+        try:
+            conn = sqlite3.connect(f"file:{path}?immutable=1", uri=True, timeout=10)
+            try:
+                conn.execute("CREATE TEMP TABLE _wanted(id INTEGER PRIMARY KEY)")
+                conn.executemany(
+                    "INSERT INTO _wanted VALUES(?)", [(i,) for i in wanted]
+                )
+                rows = conn.execute(
+                    "SELECT p.id, p.connected_at, s.domain FROM page p "
+                    "JOIN _wanted w ON w.id = p.id "
+                    "LEFT JOIN source s ON s.id = p.source_id"
+                ).fetchall()
+            finally:
+                conn.close()
+            out: dict[int, tuple[datetime, str | None]] = {}
+            dropped = 0
+            for pid, raw, domain in rows:
+                parsed = parse_huntly_time(raw)
+                if parsed is None:
+                    dropped += 1
+                    continue
+                clean = str(domain).strip().lower() if domain else None
+                out[int(pid)] = (parsed, clean or None)
+            if dropped:
+                logger.warning(
+                    "[Rollup] %d 行发布时间不可用（哨兵/格式异常），已丢弃", dropped
+                )
+            return out
+        except sqlite3.DatabaseError as exc:  # 撕裂页 / 被写锁挡住
+            last_exc = exc
+            logger.warning(
+                "[Rollup] Huntly 读取失败（第 %d/%d 次）: %s",
+                attempt,
+                _HUNTLY_RETRIES,
+                exc,
+            )
+            if attempt < _HUNTLY_RETRIES:
+                import time as _time
+
+                _time.sleep(2 * attempt)
+    logger.error("[Rollup] Huntly 读取连续失败，本次放弃索引同步: %s", last_exc)
+    return {}
+
+
 async def sync_publish_index(*, reindex: bool = False) -> int:
-    """增量补齐发布时间索引。返回写入行数。"""
+    """增量补齐发布时间索引（含源域名）。返回写入行数。"""
     if reindex:
         missing = sorted(await load_enrichment_page_ids())
         logger.info("[Rollup] 发布时间索引：全量重建 %d 条", len(missing))
@@ -148,8 +208,10 @@ async def sync_publish_index(*, reindex: bool = False) -> int:
     written = 0
     for start in range(0, len(missing), _HUNTLY_BATCH):
         chunk = missing[start : start + _HUNTLY_BATCH]
-        fetched = fetch_publish_times(chunk)
-        rows = sorted(fetched.items())
+        fetched = fetch_publish_meta(chunk)
+        rows = sorted(
+            (pid, pub, domain) for pid, (pub, domain) in fetched.items()
+        )
         for i in range(0, len(rows), _PG_BATCH):
             written += await upsert_publish_index(rows[i : i + _PG_BATCH])
     logger.info("[Rollup] 发布时间索引：写入 %d 条", written)
@@ -226,6 +288,8 @@ async def _run(
             "tickers": list(r["tickers"] or []),
             "event_tags": list(r["event_tags"] or []),
             "title": r["title"] or "",
+            # 噪声守卫输入：源站本身是上市公司 / 招标采购平台，都要靠域名识别
+            "source_domain": r.get("source_domain") or "",
         }
         for r in rows
     ]

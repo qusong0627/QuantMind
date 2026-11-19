@@ -65,6 +65,7 @@ from backend.services.engine.inference.model_backfill import (
 )
 from backend.services.engine.inference.script_runner import InferenceScriptRunner
 from backend.services.engine.services.model_inference_job_service import (
+    REAP_TIMEOUT_SECONDS,
     JobValidationError,
     create_job,
     model_inference_job_persistence,
@@ -84,9 +85,14 @@ from backend.shared.model_registry import (
 )
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.trading_calendar import calendar_service
+from backend.shared.training.retrain_config import build_retrain_payload
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# 推理详情含 parquet 市值/行业/趋势回填，单次 ~1s；同批次重复打开复用 30s。
+_INFER_DETAIL_CACHE: dict[tuple[str, str, str, int], tuple[float, dict[str, Any]]] = {}
+_INFER_DETAIL_TTL = 30.0
 
 
 def compute_market_signals(signals: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1656,6 +1662,37 @@ async def get_model_market_regime(
 # 旧端点保留，内部改为创建 qm_model_inference_jobs 任务。
 
 
+@router.get(
+    "/{model_id}/retrain-config",
+    summary="读取模型的训练配置（模型管理 → 重新训练）",
+)
+async def get_model_retrain_config(
+    model_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """把模型目录里的 config.yaml + metadata 折成训练页可带入的配置载荷。
+
+    config.yaml 可能带 ``callback.secret``——helper 已剔除，禁止整包透传。
+    """
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    model = await model_registry_service.get_model(
+        tenant_id=tenant_id, user_id=user_id, model_id=model_id
+    )
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    metadata = (
+        model.get("metadata_json")
+        if isinstance(model.get("metadata_json"), dict)
+        else {}
+    )
+    return build_retrain_payload(
+        model_id=model_id,
+        metadata=metadata,
+        storage_path=str(model.get("storage_path") or "").strip() or None,
+    )
+
+
 @router.get("/{model_id}/inference/coverage", summary="获取推理覆盖（用户态）")
 async def get_inference_coverage(
     model_id: str,
@@ -1764,6 +1801,13 @@ async def get_backfill_status(
 ):
     tenant_id = str(current_user.get("tenant_id") or "default")
     user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    # 轮询侧也自愈：进程重启后任务行永远停在 running，旧面板会一直轮询并
+    # 显示「进行中」。读之前先回收心跳超时的任务，让它落 failed 终态。
+    await model_inference_job_persistence.reap_stale(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        heartbeat_timeout_seconds=REAP_TIMEOUT_SECONDS,
+    )
     job = await model_inference_job_persistence.get_job(
         task_id, tenant_id=tenant_id, user_id=user_id
     )
@@ -3578,9 +3622,14 @@ def _load_features_daily_market_cap(
 @router.get("/inference/runs/{run_id}", summary="查看模型推理结果明细（用户态）")
 async def get_model_inference_run_detail(
     run_id: str,
+    limit: int = Query(0, ge=0, le=10000, description="0=全部；>0 只返回前 N 行"),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     tenant_id, user_id = _owner_scope(current_user)
+    cache_key = (tenant_id, user_id, run_id, limit)
+    cached = _INFER_DETAIL_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < _INFER_DETAIL_TTL:
+        return cached[1]
     run = await model_inference_persistence.get_run(
         run_id=run_id, tenant_id=tenant_id, user_id=user_id
     )
@@ -3659,12 +3708,14 @@ async def get_model_inference_run_detail(
                                 ON s.symbol = ess.canonical_symbol
                                 OR s.symbol = ess.symbol
                             ORDER BY ess.fusion_score DESC NULLS LAST, ess.symbol ASC
+                            LIMIT :row_limit
                             """
                             ),
                             {
                                 "run_id": run_id,
                                 "tenant_id": tenant_id,
                                 "user_id": user_id,
+                                "row_limit": limit if limit > 0 else 1000000,
                             },
                         )
                     )
@@ -4330,13 +4381,15 @@ async def get_model_inference_run_detail(
         except Exception as exc:  # pragma: no cover - 负分分析失败不影响主流程
             logger.warning("负分分析失败: %s", exc)
 
-    return {
+    payload = {
         "summary": summary,
         "page": 1,
         "page_size": len(signals) or 1,
         "total": len(signals),
         "items": signals,
     }
+    _INFER_DETAIL_CACHE[cache_key] = (time.time(), payload)
+    return payload
 
 
 @router.delete("/inference/runs/{run_id}", summary="删除推理运行记录（用户态）")
@@ -4350,6 +4403,7 @@ async def delete_model_inference_run(
     )
     if not delete.get("deleted"):
         raise HTTPException(status_code=404, detail="推理批次不存在或已删除")
+    _INFER_DETAIL_CACHE.clear()
     return delete
 
 
@@ -5195,14 +5249,38 @@ async def get_model_inference_latest(
     model_id: str | None = Query(
         None, description="模型ID，可选，用于检查是否与当前生效模型匹配"
     ),
-    current_user: dict[str, Any] = Depends(get_current_user),
+    per_model: bool = Query(
+        False,
+        description="true=返回该模型自己最近一个已完成批次（资讯中心切模型用）；"
+        "false=返回交易侧当前生效批次",
+    ),
+    current_user: dict = Depends(get_current_user),
 ):
     tenant_id, user_id = _owner_scope(current_user)
     latest_key = f"qm:signal:latest:{tenant_id}:{user_id}"
     latest_run_id = _read_latest_run_id_from_redis(latest_key)
 
     run: dict[str, Any] | None = None
-    if latest_run_id:
+    if per_model and model_id:
+        # 指定模型时以该模型最近一个已完成批次为准。Redis 键是全局「当前生效」，
+        # 直接拿它会把所有模型都指到同一个 run —— 切模型后榜单/截面不动的根因。
+        page = await model_inference_persistence.list_runs(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=model_id,
+            status="completed",
+            page=1,
+            page_size=1,
+        )
+        items = page.get("items") or []
+        if items:
+            latest_run_id = str(items[0].get("run_id") or "")
+            run = await model_inference_persistence.get_run(
+                run_id=latest_run_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            ) or items[0]
+    elif latest_run_id:
         run = await model_inference_persistence.get_run(
             run_id=latest_run_id,
             tenant_id=tenant_id,
@@ -5248,8 +5326,10 @@ async def get_model_inference_latest(
     if not run:
         return {
             "latest_key": latest_key,
-            "run_id": latest_run_id or "",
-            "model_id": "",
+            # 指定模型且该模型无已完成批次时，绝不回落到全局 run_id：
+            # 否则前端会拿别的市场/别的模型的批次渲染，误报「批次不是本市场标的」。
+            "run_id": "" if (per_model and model_id) else (latest_run_id or ""),
+            "model_id": str(model_id or "") if per_model else "",
             "prediction_trade_date": "",
             "target_date": "",
             "status": "",

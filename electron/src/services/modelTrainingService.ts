@@ -10,6 +10,7 @@ import type {
   BackfillJobList,
   BackfillPreview,
 } from './modelInferenceJobTypes';
+import type { RetrainConfigPayload } from '../pages/training/retrainConfig';
 
 export interface ModelTrainingRunResponse {
   runId: string;
@@ -861,6 +862,14 @@ class ModelTrainingService {
     return resp.data;
   }
 
+  /** 模型管理「重新训练」：读取模型训练配置（config.yaml 优先，metadata 兜底）。 */
+  async getRetrainConfig(modelId: string): Promise<RetrainConfigPayload> {
+    const resp = await this.client.get<RetrainConfigPayload>(
+      `/models/${encodeURIComponent(modelId)}/retrain-config`,
+    );
+    return resp.data;
+  }
+
   async triggerInferenceBackfill(modelId: string): Promise<any> {
     const resp = await this.client.post<any>(`/models/${encodeURIComponent(modelId)}/inference/backfill`);
     return resp.data;
@@ -1092,7 +1101,7 @@ class ModelTrainingService {
     };
   }
 
-  async getInferenceResult(runId: string): Promise<InferenceRankingResult> {
+  async getInferenceResult(runId: string, limit?: number): Promise<InferenceRankingResult> {
     const resp = await this.client.get<{
       summary: InferenceRunRecord;
       page: number;
@@ -1120,7 +1129,9 @@ class ModelTrainingService {
         market_cap_tier?: string | null;
         negative_tag?: string | null;
       }>;
-    }>(`/models/inference/runs/${runId}`);
+    }>(`/models/inference/runs/${runId}`, {
+      params: limit && limit > 0 ? { limit } : undefined,
+    });
 
     const data = resp.data;
     const summary = this.normalizeInferenceRun(data.summary);
@@ -1248,9 +1259,15 @@ class ModelTrainingService {
     };
   }
 
-  async getLatestInferenceRun(modelId?: string): Promise<LatestInferenceRunInfo | null> {
+  async getLatestInferenceRun(
+    modelId?: string,
+    opts?: { perModel?: boolean },
+  ): Promise<LatestInferenceRunInfo | null> {
     const resp = await this.client.get<LatestInferenceRunInfo>('/models/inference/latest', {
-      params: modelId ? { model_id: modelId } : undefined,
+      params: {
+        ...(modelId ? { model_id: modelId } : {}),
+        ...(opts?.perModel ? { per_model: true } : {}),
+      },
     });
     const data = resp.data as any;
     return {

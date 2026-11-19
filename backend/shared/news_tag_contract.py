@@ -39,9 +39,17 @@ _CREATE_PUBLISH_INDEX_SQL = f"""
 CREATE TABLE IF NOT EXISTS {PUBLISH_INDEX_TABLE} (
     huntly_page_id BIGINT PRIMARY KEY,
     published_at TIMESTAMPTZ NOT NULL,
+    source_domain TEXT,
     indexed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 """
+
+#: 存量表补列（v2）：`source_domain` 是噪声守卫的输入——「源站本身是上市公司」
+#: 与「招标/采购平台源」这两类假阳性只能按域名识别（词面判断实测只覆盖 32%）。
+#: 用 ADD COLUMN IF NOT EXISTS 保证幂等，存量行留 NULL（守卫退化为纯标题判断）。
+_ALTER_PUBLISH_INDEX_DOMAIN_SQL = (
+    f"ALTER TABLE {PUBLISH_INDEX_TABLE} ADD COLUMN IF NOT EXISTS source_domain TEXT"
+)
 
 _CREATE_PUBLISH_INDEX_IX_SQL = (
     f"CREATE INDEX IF NOT EXISTS idx_huntly_publish_at "
@@ -102,17 +110,27 @@ async def ensure_news_tag_tables_async() -> bool:
                 await session.execute(
                     _text(
                         "SELECT to_regclass('public.huntly_publish_index'), "
-                        "to_regclass('public.news_stock_tags')"
+                        "to_regclass('public.news_stock_tags'), "
+                        "(SELECT count(*) FROM information_schema.columns "
+                        " WHERE table_name = 'huntly_publish_index' "
+                        "   AND column_name = 'source_domain')"
                     )
                 )
             ).first()
-        if exists and exists[0] is not None and exists[1] is not None:
+        # 快路径：两张表都在、且域名列已就位 → 零 DDL
+        if (
+            exists
+            and exists[0] is not None
+            and exists[1] is not None
+            and int(exists[2] or 0) > 0
+        ):
             return True
         async with get_session() as session:
             await session.execute(_text("SET LOCAL lock_timeout = '3s'"))
             for sql in (
                 _CREATE_PUBLISH_INDEX_SQL,
                 _CREATE_PUBLISH_INDEX_IX_SQL,
+                _ALTER_PUBLISH_INDEX_DOMAIN_SQL,
                 _CREATE_STOCK_TAGS_SQL,
                 _CREATE_STOCK_TAGS_IX_SQL,
             ):
@@ -125,8 +143,12 @@ async def ensure_news_tag_tables_async() -> bool:
         return False
 
 
-async def upsert_publish_index(rows: Sequence[tuple[int, datetime]]) -> int:
-    """增量写发布时间索引（``published_at`` 变化时更新，否则不动）。返回写入行数。"""
+async def upsert_publish_index(rows: Sequence[tuple]) -> int:
+    """增量写发布时间索引。返回写入行数。
+
+    每行 ``(page_id, published_at)`` 或 ``(page_id, published_at, source_domain)``
+    ——二元组保持旧调用方兼容（存量回填/测试），域名缺失时**不清空**已有值。
+    """
     if not rows:
         return 0
     from sqlalchemy import text as _text
@@ -135,18 +157,32 @@ async def upsert_publish_index(rows: Sequence[tuple[int, datetime]]) -> int:
 
     if not await ensure_news_tag_tables_async():
         return 0
+    params = []
+    for row in rows:
+        pid, pub = row[0], row[1]
+        domain = row[2] if len(row) > 2 else None
+        params.append(
+            {"pid": int(pid), "pub": pub, "domain": (domain or None) and str(domain).lower()}
+        )
     try:
         async with get_session() as session:
             await session.execute(
                 _text(
-                    f"INSERT INTO {PUBLISH_INDEX_TABLE} (huntly_page_id, published_at) "
-                    "VALUES (:pid, :pub) "
+                    f"INSERT INTO {PUBLISH_INDEX_TABLE} "
+                    "(huntly_page_id, published_at, source_domain) "
+                    "VALUES (:pid, :pub, :domain) "
                     "ON CONFLICT (huntly_page_id) DO UPDATE "
-                    f"SET published_at = EXCLUDED.published_at, indexed_at = now() "
+                    "SET published_at = EXCLUDED.published_at, "
+                    "    source_domain = COALESCE("
+                    f"        EXCLUDED.source_domain, {PUBLISH_INDEX_TABLE}.source_domain), "
+                    "    indexed_at = now() "
                     f"WHERE {PUBLISH_INDEX_TABLE}.published_at IS DISTINCT FROM "
-                    "EXCLUDED.published_at"
+                    "      EXCLUDED.published_at "
+                    f"   OR (EXCLUDED.source_domain IS NOT NULL AND "
+                    f"       {PUBLISH_INDEX_TABLE}.source_domain IS DISTINCT FROM "
+                    "        EXCLUDED.source_domain)"
                 ),
-                [{"pid": int(p), "pub": t} for p, t in rows],
+                params,
             )
             await session.commit()
         return len(rows)
@@ -353,7 +389,8 @@ async def load_enrichment_rows(
     from backend.shared.database_manager_v2 import get_session
 
     sql = (
-        "SELECT e.huntly_page_id, e.tickers, e.event_tags, e.title, p.published_at "
+        "SELECT e.huntly_page_id, e.tickers, e.event_tags, e.title, "
+        "p.published_at, p.source_domain "
         "FROM news_article_enrichment e "
         f"JOIN {PUBLISH_INDEX_TABLE} p ON p.huntly_page_id = e.huntly_page_id "
     )

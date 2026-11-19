@@ -27,6 +27,14 @@
   overflow: hidden;
 }
 
+/* 嵌入资讯中心：贴着页面标题铺满，去掉外层留白与卡片圆角 */
+.news-panel.is-embedded { padding: 0; background: #ffffff; }
+.news-panel.is-embedded .news-frame {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 /* —— Toolbar (2-row aligned) —— */
 .news-toolbar {
   display: flex;
@@ -55,6 +63,36 @@
   gap: 10px;
   flex-wrap: wrap;
   min-width: 0;
+}
+.news-toolbar-left.is-embedded { gap: 8px; }
+/* 资讯中心的视图页签并进工具条：去掉页面级下划线行的高度与底色 */
+.news-toolbar-left .ni-tabs {
+  height: auto;
+  padding: 0;
+  background: transparent;
+  border-bottom: 0;
+}
+.news-toolbar-left .ni-tab {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+.news-health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: #cbd5e1;
+}
+.news-health-dot.is-up { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15); }
+.news-health-dot.is-down { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15); }
+.news-latest-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
 }
 /* 第一行中段：全部筛选 + 搜索（单行工具条，放不下时自动折行） */
 .news-toolbar-mid {
@@ -140,6 +178,181 @@
   padding: 12px 10px 64px;
   background: #ffffff;
   border-right: 1px solid #e2e8f0;
+}
+
+/* —— 左栏切换：订阅源 / 筛选 —— */
+.news-left-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  margin-bottom: 10px;
+  background: #f1f5f9;
+  border-radius: 999px;
+}
+.news-left-tab {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #64748b;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.news-left-tab em {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.7;
+  margin-left: 2px;
+}
+.news-left-tab:hover { color: #334155; }
+.news-left-tab.active {
+  background: #ffffff;
+  color: #1e293b;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+/* —— 分类导航：桌面竖排在左栏顶部（不再占顶部整行阅读高度）；移动端仍用横排 —— */
+.news-left-tools {
+  margin: 0 0 8px;
+  padding: 10px 10px 12px;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  border: 1px solid #eef2f7;
+  border-radius: 12px;
+}
+.news-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.news-chip-group + .news-chip-group { margin-top: 12px; }
+.news-category-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: #94a3b8;
+  margin-bottom: 2px;
+}
+.news-category-label::before {
+  content: '';
+  width: 3px;
+  height: 10px;
+  border-radius: 2px;
+  background: #c7d2fe;
+}
+.news-chip.ant-tag-checkable {
+  margin: 0;
+  padding: 1px 9px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  font-size: 12px;
+  line-height: 18px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.news-chip.ant-tag-checkable:hover { border-color: #c7d2fe; color: #4338ca; }
+.news-chip.ant-tag-checkable-checked { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; font-weight: 600; }
+.news-chip.is-risk.ant-tag-checkable-checked { background: #fff1f2; border-color: #fecdd3; color: #9f1239; }
+.news-chip.is-down.ant-tag-checkable-checked { background: #f0fdf4; border-color: #bbf7d0; color: #15803d; }
+.news-chip.is-up.ant-tag-checkable-checked { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+.news-chip.is-neutral.ant-tag-checkable-checked { background: #f8fafc; border-color: #cbd5e1; color: #334155; }
+.news-chip-n { margin-left: 4px; font-size: 10px; font-weight: 400; opacity: 0.55; }
+.news-advanced-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+}
+.news-quick-filter-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed #e2e8f0;
+}
+.news-quick-filter-rail .ant-segmented,
+.news-quick-filter-rail .ant-btn,
+.news-quick-filter-rail .ant-select {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+.news-quick-filter-rail .ant-select .ant-select-selector { width: 100%; }
+.news-advanced-rail > div {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  flex-shrink: 1;
+}
+.news-advanced-rail .ant-select {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+}
+/* 栅栏里 select 的 placeholder 已经是字段名，隐藏重复的行内标签 */
+.news-advanced-rail > div > span:first-child { display: none; }
+.news-source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px 8px;
+}
+.news-source-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  letter-spacing: 0.04em;
+}
+.news-source-title::before {
+  content: '';
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: #6366f1;
+}
+.news-source-count {
+  font-size: 10px;
+  color: #64748b;
+  background: #f1f5f9;
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 16px;
+}
+.news-category-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 16px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+  background: rgba(255, 255, 255, 0.85);
+  flex-wrap: wrap;
+}
+.news-active-filter-block {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  width: 100%;
+  margin-top: 6px;
+}
+.news-active-filter-block .news-active-chips {
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 
 .news-tree-node {

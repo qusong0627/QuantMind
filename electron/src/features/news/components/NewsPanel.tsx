@@ -19,6 +19,7 @@ import {
   Button,
   DatePicker,
   Drawer,
+  Dropdown,
   Empty,
   Input,
   List,
@@ -47,6 +48,7 @@ import {
   GlobalOutlined,
   LinkOutlined,
   MinusOutlined,
+  MoreOutlined,
   ReloadOutlined,
   RiseOutlined,
   SearchOutlined,
@@ -153,22 +155,48 @@ function saveFilters(state: FilterState) {
   } catch { /* ignore */ }
 }
 
-// 高频事件 chip 默认折叠到前 N 个（外加当前已选中的），其余收进「更多分类」——
-// 词典大类之外的 top_events 动辄三十几个，全摆出来工具栏要占两屏高
+  // 高频事件 chip 默认折叠到前 N 个（外加当前已选中的），其余收进「更多分类」——
+  // 词典大类之外的 top_events 动辄三十几个，全摆出来工具栏要占两屏高
 const HOT_EVENTS_COLLAPSED = 4;
 
-// 新闻大类快捷导航（对应 finance_lexicon 事件大类，点击按 event_tags 筛选）
-const QUICK_EVENT_CHIPS = [
-  { label: '全部', value: '' },
-  { label: '政策', value: '政策' },
-  { label: '宏观', value: '宏观' },
-  { label: '产业', value: '产业' },
-  { label: '财报', value: '财报' },
-  { label: '市场', value: '市场' },
-  { label: '监管', value: '监管' },
-  { label: '地缘', value: '地缘' },
-  { label: '加密', value: '加密' },
-  { label: '期货', value: '期货' },
+// 非事件类标签（实体/板块维度）有专门的筛选入口，不混进「高频事件」。
+const ENTITY_EVENT_TAGS = new Set([
+  '省份', '城市', '国家', '地区', '部门', '领导人', '调研', '日期',
+  '概念板块', '行业板块', '股票行业',
+]);
+
+// 新闻分类快捷导航：按 2026-11-18 研究口径重构（硬利空/软利空/硬利好/治理 + 宽类）。
+// 每组是多个 event_tags；后端 `event_tags && ARRAY[...]` 为「任一命中」，点一下筛一组。
+const QUICK_EVENT_CHIPS: {
+  label: string;
+  value: string[];
+  tone?: 'risk' | 'down' | 'up' | 'neutral';
+}[] = [
+  { label: '全部', value: [] },
+  {
+    label: '硬利空',
+    tone: 'risk',
+    value: ['立案调查', '财务造假', '内幕交易', '警示函', '处罚', '退市风险', '违规', '操纵市场', '问询函', '监管函', '违规担保', '债务', '业绩暴雷', '减值'],
+  },
+  {
+    label: '软利空',
+    tone: 'down',
+    value: ['减持', '解禁', '质押', '诉讼', '业绩亏损', '净利润下滑'],
+  },
+  {
+    label: '硬利好',
+    tone: 'up',
+    value: ['中标', '订单', '业绩预增', '净利润增长', '扭亏为盈', '回购', '增持', '分红', '并购', '重组', '战略合作'],
+  },
+  { label: '治理', tone: 'neutral', value: ['股权激励', '公司治理', '定增'] },
+  { label: '政策', value: ['政策', '货币政策', '财政政策', '专项债', '降息'] },
+  { label: '宏观', value: ['宏观'] },
+  { label: '产业', value: ['产业'] },
+  { label: '财报', value: ['财报', '业绩预告', '业绩快报'] },
+  { label: '市场', value: ['市场', 'IPO', '涨停', '跌停', '创新高', '大涨', '大跌', '反弹', '回调', '震荡', '破发'] },
+  { label: '地缘', value: ['地缘'] },
+  { label: '加密', value: ['加密'] },
+  { label: '期货', value: ['期货'] },
 ];
 
 const formatRelative = (iso?: string | null) => {
@@ -214,10 +242,18 @@ function countActiveFilters(f: FilterState): number {
   return n;
 }
 
-export const NewsPanel: React.FC = () => {
+export interface NewsPanelProps {
+  /** 嵌入资讯中心时去掉内层品牌行，避免与页面标题重复占高。 */
+  embedded?: boolean;
+  /** 嵌入时把页面的视图页签并到工具条同一行。 */
+  tabsSlot?: React.ReactNode;
+}
+
+export const NewsPanel: React.FC<NewsPanelProps> = ({ embedded = false, tabsSlot }) => {
   // —— persisted filter state ——
   const [f, setF] = useState<FilterState>(loadFilters);
   const [debouncedKeyword] = useDebounce(f.keyword, 300);
+  const [leftTab, setLeftTab] = useState<'sources' | 'filters'>('sources');
 
   const updateF = useCallback((patch: Partial<FilterState>) => {
     const next = { ...f, ...patch };
@@ -631,7 +667,12 @@ export const NewsPanel: React.FC = () => {
   // 高频事件 chip（词典大类之外）：默认折叠到前 N 个 + 当前已选中的，其余靠「更多分类」展开；
   // 排序沿用后端 top_events（按文章数降序），不在这里重排
   const hotEvents = useMemo(
-    () => (stats?.top_events ?? []).filter((e) => !QUICK_EVENT_CHIPS.some((q) => q.value === e.name)),
+    () =>
+      (stats?.top_events ?? []).filter(
+        (e) =>
+          !ENTITY_EVENT_TAGS.has(e.name) &&
+          !QUICK_EVENT_CHIPS.some((q) => q.value.includes(e.name)),
+      ),
     [stats],
   );
   const visibleHotEvents = catExpanded
@@ -801,23 +842,201 @@ export const NewsPanel: React.FC = () => {
     )
   );
 
+  // 分类导航（研究口径分组 + 高频事件）：桌面放进左栏竖排，不再占顶部整行阅读高度。
+  const renderCategoryChips = () => (
+    <>
+      <div className="news-chip-group">
+        <Text type="secondary" className="news-category-label">事件分类 · 研究口径</Text>
+        {QUICK_EVENT_CHIPS.map((chip) => {
+          const isAll = chip.value.length === 0;
+          const active = isAll
+            ? f.selectedEventTags.length === 0
+            : chip.value.every((v) => f.selectedEventTags.includes(v));
+          const cnt = isAll
+            ? 0
+            : chip.value.reduce(
+                (sum, v) => sum + (stats?.top_events.find((e) => e.name === v)?.count ?? 0),
+                0,
+              );
+          return (
+            <Tag.CheckableTag
+              key={chip.label}
+              checked={active}
+              className={`news-chip ${chip.tone ? `is-${chip.tone}` : ''}`}
+              onChange={(c) => {
+                if (isAll) {
+                  updateF({ selectedEventTags: [] });
+                  return;
+                }
+                // 一次更新整组（updateF 不是函数式 setter，逐项 addFilter 会互相覆盖）
+                updateF({
+                  selectedEventTags: c
+                    ? [...new Set([...f.selectedEventTags, ...chip.value])]
+                    : f.selectedEventTags.filter((v) => !chip.value.includes(v)),
+                });
+              }}
+            >
+              {chip.label}
+              {chip.value.length === 1 && cnt > 0 && (
+                <span className="news-chip-n">{cnt.toLocaleString()}</span>
+              )}
+            </Tag.CheckableTag>
+          );
+        })}
+      </div>
+      {(visibleHotEvents.length > 0 || hotEvents.length > HOT_EVENTS_COLLAPSED) && (
+        <div className="news-chip-group">
+          <Text type="secondary" className="news-category-label">高频事件</Text>
+          {visibleHotEvents.map((e) => {
+          const active = f.selectedEventTags.includes(e.name);
+          return (
+            <Tag.CheckableTag
+              key={`ev-${e.name}`}
+              checked={active}
+              className="news-chip"
+              onChange={(c) => {
+                if (c) addFilter('selectedEventTags', e.name);
+                else removeFilter('selectedEventTags', e.name);
+              }}
+            >
+              {e.name} <span className="news-chip-n">{e.count.toLocaleString()}</span>
+            </Tag.CheckableTag>
+          );
+        })}
+        {hotEvents.length > HOT_EVENTS_COLLAPSED && (
+          <Button type="link" size="small" className="news-category-more"
+            onClick={() => setCatExpanded(!catExpanded)}
+            style={{ fontSize: 12, padding: 0 }}>
+            {catExpanded ? <>收起 <ArrowUpOutlined /></> : <>更多 ({hiddenHotCount}) <ArrowDownOutlined /></>}
+          </Button>
+        )}
+        </div>
+      )}
+      {activeFilterCount > 0 && (
+        <div className="news-active-filter-block">
+          <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>已选筛选</Text>
+          {renderChips()}
+          <Button type="link" size="small" onClick={clearAllFilters} icon={<ClearOutlined />} style={{ padding: 0, fontSize: 12 }}>清除</Button>
+        </div>
+      )}
+    </>
+  );
+
+  // 快速筛选（全部/事件/收藏、情绪、强信号、时间、排序）：嵌入时收进左栏「筛选」页签，
+  // 桌面顶部只留视图页签 + 搜索 + 操作，省掉一整行高度。
+  const renderQuickFilters = () => (
+    <>
+      <Segmented
+        size="small"
+        value={f.feedMode}
+        onChange={(v) => updateF({ feedMode: v as FeedMode })}
+        options={[
+          { label: <span><GlobalOutlined /> 全部</span>, value: 'all' },
+          { label: <span><ThunderboltOutlined /> 事件</span>, value: 'events' },
+          { label: <span><StarFilled style={{ color: '#fbbf24', fontSize: 12 }} /> 收藏</span>, value: 'starred' },
+        ]}
+      />
+      <Segmented
+        size="small"
+        value={f.sentiment}
+        onChange={(v) => updateF({ sentiment: v as SentimentFilter })}
+        options={[
+          { label: '全部', value: 'any' },
+          { label: <span style={{ color: COLOR_BULLISH }}>利好</span>, value: 'bullish' },
+          { label: <span style={{ color: COLOR_BEARISH }}>利空</span>, value: 'bearish' },
+          { label: <span style={{ color: COLOR_NEUTRAL }}>中性</span>, value: 'neutral' },
+        ]}
+      />
+      <Tooltip title="仅显示强信号 (|情感分|>=0.5)">
+        <Button size="small" type={f.strongOnly ? 'primary' : 'default'} danger={f.strongOnly}
+          icon={<FireOutlined />} onClick={() => updateF({ strongOnly: !f.strongOnly })}>强信号</Button>
+      </Tooltip>
+      <Segmented
+        size="small"
+        value={f.datePreset}
+        onChange={(v) => {
+          const today = dayjs().endOf('day');
+          let range: [Dayjs | null, Dayjs | null] = null;
+          switch (v) {
+            case 'all': range = null; break;
+            case '1d': range = [dayjs().startOf('day'), today]; break;
+            case '3d': range = [dayjs().subtract(2, 'day').startOf('day'), today]; break;
+            case '7d': range = [dayjs().subtract(6, 'day').startOf('day'), today]; break;
+            case '30d': range = [dayjs().subtract(29, 'day').startOf('day'), today]; break;
+          }
+          updateF({
+            datePreset: v as string,
+            dateRange: range ? [range[0]!.toISOString(), range[1]!.toISOString()] : [null, null],
+          });
+        }}
+        options={[
+          { label: '不限', value: 'all' },
+          { label: '今日', value: '1d' },
+          { label: '3日', value: '3d' },
+          { label: '7日', value: '7d' },
+          { label: '30日', value: '30d' },
+        ]}
+      />
+      <Select
+        size="small"
+        value={f.sort}
+        onChange={(v) => updateF({ sort: v as SortMode })}
+        options={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label as any }))}
+        style={{ width: 110 }}
+      />
+    </>
+  );
+
+  // 高级筛选（股票/行业/国家/地区/关键词/省份/城市/领导人/调研/部门/日期）：
+  // 桌面同样收进左栏，点工具栏「筛选」展开，不再横占阅读区。
+  const renderAdvancedFilters = () => (
+    <>
+      <FilterSelect label="股票" value={f.selectedTickers} options={stats?.top_tickers ?? []} onChange={(v) => updateF({ selectedTickers: v })} showSearch />
+      <FilterSelect label="行业" value={f.selectedIndustries} options={stats?.top_industries ?? []} onChange={(v) => updateF({ selectedIndustries: v })} showSearch />
+      <FilterSelect label="国家" value={f.selectedCountries} options={stats?.top_countries ?? []} onChange={(v) => updateF({ selectedCountries: v })} showSearch />
+      <FilterSelect label="地区" value={f.selectedRegions} options={stats?.top_regions ?? []} onChange={(v) => updateF({ selectedRegions: v })} showSearch />
+      <FilterSelect label="关键词" value={f.selectedKeyTerms} options={stats?.top_key_terms ?? []} onChange={(v) => updateF({ selectedKeyTerms: v })} showSearch />
+      <FilterSelect label="省份" value={f.selectedProvinces} options={stats?.top_provinces ?? []} onChange={(v) => updateF({ selectedProvinces: v })} showSearch />
+      <FilterSelect label="城市" value={f.selectedCities} options={stats?.top_cities ?? []} onChange={(v) => updateF({ selectedCities: v })} showSearch />
+      <FilterSelect label="领导人" value={f.selectedPoliticians} options={stats?.top_politicians ?? []} onChange={(v) => updateF({ selectedPoliticians: v })} showSearch />
+      <FilterSelect label="调研" value={f.selectedVisits} options={stats?.top_visits ?? []} onChange={(v) => updateF({ selectedVisits: v })} showSearch />
+      <FilterSelect label="部门" value={f.selectedDepartments} options={stats?.top_departments ?? []} onChange={(v) => updateF({ selectedDepartments: v })} showSearch />
+      <FilterSelect label="日期" value={f.selectedDateEnts} options={stats?.top_dates ?? []} onChange={(v) => updateF({ selectedDateEnts: v })} showSearch />
+      <RangePicker size="small" value={f.dateRange[0] ? [dayjs(f.dateRange[0]), dayjs(f.dateRange[1])] as any : null}
+        onChange={(v) => updateF({ dateRange: v ? [v[0]!.toISOString(), v[1]!.toISOString()] : [null, null] })}
+        allowClear style={{ width: '100%' }} />
+    </>
+  );
+
   // —— render ——
   return (
-    <div className="news-panel">
+    <div className={`news-panel${embedded ? ' is-embedded' : ''}`}>
       <div className="news-frame">
         {/* ===== Toolbar (2-row aligned) ===== */}
         <div className="news-toolbar">
           {/* Row 1: header + actions */}
           <div className="news-toolbar-row news-toolbar-head">
-            <div className="news-toolbar-left">
-              <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-md shrink-0">
-                <BellOutlined style={{ color: '#ffffff', fontSize: 16 }} />
-              </div>
-              <Title level={5} style={{ margin: 0, fontSize: 16, fontWeight: 700, whiteSpace: 'nowrap' }}>RSS信息流</Title>
-              <Tag color={health?.huntly_status === 'up' ? 'green' : 'red'} style={{ margin: 0 }}>{health?.huntly_status === 'up' ? '已连接' : '未连接'}</Tag>
-              {!isMobile && (
-                <Tooltip title={latestPublishedAt ? `最新发布于 ${new Date(latestPublishedAt).toLocaleString('zh-CN')}` : '暂无'}>
-                  <Tag icon={<SyncOutlined spin={loading} />} color="processing" style={{ margin: 0 }}>最新：{formatRelative(latestPublishedAt)}</Tag>
+            <div className={`news-toolbar-left ${embedded ? 'is-embedded' : ''}`}>
+              {embedded && tabsSlot}
+              {!embedded && (
+                <>
+                  <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-md shrink-0">
+                    <BellOutlined style={{ color: '#ffffff', fontSize: 16 }} />
+                  </div>
+                  <Title level={5} style={{ margin: 0, fontSize: 16, fontWeight: 700, whiteSpace: 'nowrap' }}>RSS信息流</Title>
+                  <Tag color={health?.huntly_status === 'up' ? 'green' : 'red'} style={{ margin: 0 }}>{health?.huntly_status === 'up' ? '已连接' : '未连接'}</Tag>
+                </>
+              )}
+              {embedded && (
+                <Tooltip title={health?.huntly_status === 'up' ? 'Huntly 已连接' : 'Huntly 未连接'}>
+                  <span className={`news-health-dot ${health?.huntly_status === 'up' ? 'is-up' : 'is-down'}`} />
+                </Tooltip>
+              )}
+              {!isMobile && latestPublishedAt && (
+                <Tooltip title={`最新发布于 ${new Date(latestPublishedAt).toLocaleString('zh-CN')}`}>
+                  <span className="news-latest-text">
+                    <SyncOutlined spin={loading} /> 最新 {formatRelative(latestPublishedAt)}
+                  </span>
                 </Tooltip>
               )}
               <Badge count={totalUnread} overflowCount={9999} style={{ backgroundColor: '#6366f1' }} className="news-toolbar-badge" />
@@ -830,99 +1049,41 @@ export const NewsPanel: React.FC = () => {
             {/* Row 1 中段：高频紧凑筛选（自第二行上移）；移动端收进可折叠的「筛选」面板 */}
             <div className="news-toolbar-mid">
               <div className={`news-toolbar-filters${mobileFiltersOpen ? ' is-open' : ''}`}>
-              {/* 移动端未展开时只留「搜索框 + 筛选/分类」两个控件，其余筛选收起 */}
-              {(!isMobile || mobileFiltersOpen) && (<>
-              <Segmented
-                size="small"
-                value={f.feedMode}
-                onChange={(v) => updateF({ feedMode: v as FeedMode })}
-                options={[
-                  { label: <span><GlobalOutlined /> 全部</span>, value: 'all' },
-                  { label: <span><ThunderboltOutlined /> 事件</span>, value: 'events' },
-                  { label: <span><StarFilled style={{ color: '#fbbf24', fontSize: 12 }} /> 收藏</span>, value: 'starred' },
-                ]}
-              />
-              <Segmented
-                size="small"
-                value={f.sentiment}
-                onChange={(v) => updateF({ sentiment: v as SentimentFilter })}
-                options={[
-                  { label: '全部', value: 'any' },
-                  { label: <span style={{ color: COLOR_BULLISH }}>利好</span>, value: 'bullish' },
-                  { label: <span style={{ color: COLOR_BEARISH }}>利空</span>, value: 'bearish' },
-                  { label: <span style={{ color: COLOR_NEUTRAL }}>中性</span>, value: 'neutral' },
-                ]}
-              />
-              <Tooltip title="仅显示强信号 (|情感分|>=0.5)">
-                <Button size="small" type={f.strongOnly ? 'primary' : 'default'} danger={f.strongOnly}
-                  icon={<FireOutlined />} onClick={() => updateF({ strongOnly: !f.strongOnly })}>强信号</Button>
-              </Tooltip>
-              </>)}
-              <Input
-                allowClear
-                size="small"
-                className="news-toolbar-search"
-                prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
-                placeholder="搜索标题/内容/股票/标签..."
-                value={f.keyword}
-                onChange={(e) => updateF({ keyword: e.target.value })}
-                style={{ flex: '1 1 170px', minWidth: 150, maxWidth: 240 }}
-              />
-              {isMobile && (
-                <Button
+                {/* 桌面嵌入模式：快速筛选已收进左栏「筛选」页签，这里只留搜索 + 筛选入口 */}
+                {(!embedded || isMobile) && (!isMobile || mobileFiltersOpen) && renderQuickFilters()}
+                <Input
+                  allowClear
                   size="small"
-                  className="news-toolbar-filter-toggle"
-                  icon={<FilterOutlined />}
-                  type={mobileFiltersOpen || activeFilterCount > 0 ? 'primary' : 'default'}
-                  ghost={mobileFiltersOpen || activeFilterCount > 0}
-                  onClick={() => setMobileFiltersOpen(!mobileFiltersOpen)}
-                >
-                  筛选/分类{mobileFiltersOpen ? ' ▴' : ' ▾'}
-                </Button>
-              )}
-              {(!isMobile || mobileFiltersOpen) && (<>
-              <Segmented
-                size="small"
-                value={f.datePreset}
-                onChange={(v) => {
-                  const today = dayjs().endOf('day');
-                  let range: [Dayjs | null, Dayjs | null] = null;
-                  switch (v) {
-                    case 'all': range = null; break;
-                    case '1d': range = [dayjs().startOf('day'), today]; break;
-                    case '3d': range = [dayjs().subtract(2, 'day').startOf('day'), today]; break;
-                    case '7d': range = [dayjs().subtract(6, 'day').startOf('day'), today]; break;
-                    case '30d': range = [dayjs().subtract(29, 'day').startOf('day'), today]; break;
-                  }
-                  updateF({
-                    datePreset: v as string,
-                    dateRange: range ? [range[0]!.toISOString(), range[1]!.toISOString()] : [null, null],
-                  });
-                }}
-                options={[
-                  { label: '不限', value: 'all' },
-                  { label: '今日', value: '1d' },
-                  { label: '3日', value: '3d' },
-                  { label: '7日', value: '7d' },
-                  { label: '30日', value: '30d' },
-                ]}
-              />
-              <Select
-                size="small"
-                value={f.sort}
-                onChange={(v) => updateF({ sort: v as SortMode })}
-                options={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label as any }))}
-                style={{ width: 110 }}
-              />
-              <Tooltip title={`高级筛选${activeFilterCount > 0 ? ` (${activeFilterCount} 项激活)` : ''}`}>
-                <Button size="small" icon={<FilterOutlined />}
-                  type={activeFilterCount > 0 ? 'primary' : 'default'}
-                  ghost={activeFilterCount > 0}
-                  onClick={() => updateF({ advancedOpen: !f.advancedOpen })}>
-                  筛选{activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
-                </Button>
-              </Tooltip>
-              </>)}
+                  className="news-toolbar-search"
+                  prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+                  placeholder="搜索标题/内容/股票/标签..."
+                  value={f.keyword}
+                  onChange={(e) => updateF({ keyword: e.target.value })}
+                  style={{ flex: '1 1 170px', minWidth: 150, maxWidth: 240 }}
+                />
+                {isMobile && (
+                  <Button
+                    size="small"
+                    className="news-toolbar-filter-toggle"
+                    icon={<FilterOutlined />}
+                    type={mobileFiltersOpen || activeFilterCount > 0 ? 'primary' : 'default'}
+                    ghost={mobileFiltersOpen || activeFilterCount > 0}
+                    onClick={() => setMobileFiltersOpen(!mobileFiltersOpen)}
+                  >
+                    筛选/分类{mobileFiltersOpen ? ' ▴' : ' ▾'}
+                  </Button>
+                )}
+                <Tooltip title={`高级筛选${activeFilterCount > 0 ? ` (${activeFilterCount} 项激活)` : ''}`}>
+                  <Button size="small" icon={<FilterOutlined />}
+                    type={activeFilterCount > 0 ? 'primary' : 'default'}
+                    ghost={activeFilterCount > 0}
+                    onClick={() => {
+                      setLeftTab('filters');
+                      updateF({ advancedOpen: !f.advancedOpen });
+                    }}>
+                    筛选{activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
+                  </Button>
+                </Tooltip>
               </div>
             </div>
             <div className="news-toolbar-actions">
@@ -932,107 +1093,61 @@ export const NewsPanel: React.FC = () => {
               <Tooltip title="重建标签">
                 <Button size="small" ghost danger icon={<SyncOutlined spin={rebuilding} />} loading={rebuilding} onClick={handleRebuildTags}>重建</Button>
               </Tooltip>
-              <Tooltip title="一键重建全部">
-                <Button size="small" type="primary" danger ghost icon={<SyncOutlined spin={rebuildingAll} />} loading={rebuildingAll} onClick={handleRebuildAll}>
-                  {rebuildingAll && rebuildProgress && rebuildProgress.total > 0 ? `${rebuildProgress.processed}/${rebuildProgress.total}` : '全量'}
-                </Button>
-              </Tooltip>
-              <Tooltip title="一键清理超过 24 小时的资讯（不可恢复）">
-                <Button size="small" danger icon={<DeleteOutlined />} loading={purging} onClick={handlePurgeOld}>清理</Button>
-              </Tooltip>
-              {!isMobile && health?.huntly_base_url && (
-                <Tooltip title="Huntly 后台">
-                  <a href={`${SERVICE_ENDPOINTS.USER_SERVICE}/news/huntly-ui/`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#6366f1', whiteSpace: 'nowrap' }}>
-                    <LinkOutlined /> 后台
-                  </a>
-                </Tooltip>
-              )}
+              <Dropdown
+                trigger={['click']}
+                menu={{
+                  items: [
+                    {
+                      key: 'rebuild-all',
+                      icon: <SyncOutlined spin={rebuildingAll} />,
+                      label:
+                        rebuildingAll && rebuildProgress && rebuildProgress.total > 0
+                          ? `全量重建中 ${rebuildProgress.processed}/${rebuildProgress.total}`
+                          : '一键重建全部标签',
+                      onClick: handleRebuildAll,
+                    },
+                    {
+                      key: 'purge',
+                      icon: <DeleteOutlined />,
+                      danger: true,
+                      label: '清理 24 小时前资讯（不可恢复）',
+                      onClick: handlePurgeOld,
+                    },
+                    ...(health?.huntly_base_url
+                      ? [
+                          {
+                            key: 'huntly',
+                            icon: <LinkOutlined />,
+                            label: '打开 Huntly 后台',
+                            onClick: () =>
+                              window.open(
+                                `${SERVICE_ENDPOINTS.USER_SERVICE}/news/huntly-ui/`,
+                                '_blank',
+                                'noreferrer',
+                              ),
+                          },
+                        ]
+                      : []),
+                  ],
+                }}
+              >
+                <Button size="small" icon={<MoreOutlined />} loading={purging}>更多</Button>
+              </Dropdown>
             </div>
           </div>
         </div>
 
-      {/* ===== 分类导航：词典大类 + 全部高频事件标签（含文章数），点击按 event_tags 筛选 ===== */}
-      <div className="news-category-row" style={{ display: isMobile && !mobileFiltersOpen ? 'none' : 'flex', alignItems: 'center', gap: 2, padding: '4px 16px', borderBottom: '1px solid rgba(226,232,240,0.8)', background: 'rgba(255,255,255,0.85)', flexWrap: 'wrap' }}>
-        <Text type="secondary" style={{ fontSize: 12, marginRight: 6, whiteSpace: 'nowrap' }}>分类:</Text>
-        {QUICK_EVENT_CHIPS.map((chip) => {
-          const active = chip.value === '' ? f.selectedEventTags.length === 0 : f.selectedEventTags.includes(chip.value);
-          const cnt = chip.value ? stats?.top_events.find((e) => e.name === chip.value)?.count : undefined;
-          return (
-            <Tag.CheckableTag
-              key={chip.value || '__all'}
-              checked={active}
-              onChange={(c) => {
-                if (chip.value === '') {
-                  // 全部：清空所有事件筛选
-                  updateF({ selectedEventTags: [] });
-                } else if (c) {
-                  addFilter('selectedEventTags', chip.value);
-                } else {
-                  removeFilter('selectedEventTags', chip.value);
-                }
-              }}
-              style={{ fontSize: 12, padding: '2px 10px', borderRadius: 12, margin: 0, fontWeight: active ? 600 : 400 }}
-            >
-              {chip.label}
-              {cnt != null && <span style={{ opacity: 0.5, fontWeight: 400 }}> ({cnt.toLocaleString()})</span>}
-            </Tag.CheckableTag>
-          );
-        })}
-        {/* 高频事件标签（词典大类之外；默认只出前 4 + 已选中的，其余收进「更多分类」，含文章数） */}
-        {visibleHotEvents.map((e) => {
-          const active = f.selectedEventTags.includes(e.name);
-          return (
-            <Tag.CheckableTag
-              key={`ev-${e.name}`}
-              checked={active}
-              onChange={(c) => {
-                if (c) addFilter('selectedEventTags', e.name);
-                else removeFilter('selectedEventTags', e.name);
-              }}
-              style={{ fontSize: 12, padding: '2px 10px', borderRadius: 12, margin: 0, fontWeight: active ? 600 : 400 }}
-            >
-              {e.name} <span style={{ opacity: 0.5, fontWeight: 400 }}>({e.count.toLocaleString()})</span>
-            </Tag.CheckableTag>
-          );
-        })}
-        {hotEvents.length > HOT_EVENTS_COLLAPSED && (
-          <Button type="link" size="small" className="news-category-more"
-            onClick={() => setCatExpanded(!catExpanded)}
-            style={{ fontSize: 12, padding: 0 }}>
-            {catExpanded ? <>收起 <ArrowUpOutlined /></> : <>更多分类 ({hiddenHotCount}) <ArrowDownOutlined /></>}
-          </Button>
-        )}
-        {/* 当前筛选标签：紧跟分类 Tab 之后 */}
-        {activeFilterCount > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', marginLeft: 4 }}>
-            <Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>筛选:</Text>
-            {renderChips()}
-            <Button type="link" size="small" onClick={clearAllFilters} icon={<ClearOutlined />} style={{ padding: 0, fontSize: 12 }}>清除</Button>
-          </div>
-        )}
-      </div>
+      {/* ===== 分类导航：桌面已收进左栏（news-category-rail）；移动端保留一条可折叠横排 ===== */}
+      {isMobile && mobileFiltersOpen && (
+        <div className="news-category-row">
+          {renderCategoryChips()}
+        </div>
+      )}
 
-      {/* ===== Advanced filter panel (collapsible) ===== */}
-      {f.advancedOpen && (
+      {/* ===== Advanced filter panel（移动端顶部展开；桌面收进左栏） ===== */}
+      {isMobile && f.advancedOpen && (
         <div className="news-advanced-panel">
-          <div className="news-advanced-row">
-            <FilterSelect label="股票" value={f.selectedTickers} options={stats?.top_tickers ?? []} onChange={(v) => updateF({ selectedTickers: v })} showSearch />
-            <FilterSelect label="行业" value={f.selectedIndustries} options={stats?.top_industries ?? []} onChange={(v) => updateF({ selectedIndustries: v })} showSearch />
-            <FilterSelect label="国家" value={f.selectedCountries} options={stats?.top_countries ?? []} onChange={(v) => updateF({ selectedCountries: v })} showSearch />
-            <FilterSelect label="地区" value={f.selectedRegions} options={stats?.top_regions ?? []} onChange={(v) => updateF({ selectedRegions: v })} showSearch />
-            <FilterSelect label="关键词" value={f.selectedKeyTerms} options={stats?.top_key_terms ?? []} onChange={(v) => updateF({ selectedKeyTerms: v })} showSearch />
-          </div>
-          <div className="news-advanced-row">
-            <FilterSelect label="省份" value={f.selectedProvinces} options={stats?.top_provinces ?? []} onChange={(v) => updateF({ selectedProvinces: v })} showSearch />
-            <FilterSelect label="城市" value={f.selectedCities} options={stats?.top_cities ?? []} onChange={(v) => updateF({ selectedCities: v })} showSearch />
-            <FilterSelect label="领导人" value={f.selectedPoliticians} options={stats?.top_politicians ?? []} onChange={(v) => updateF({ selectedPoliticians: v })} showSearch />
-            <FilterSelect label="调研" value={f.selectedVisits} options={stats?.top_visits ?? []} onChange={(v) => updateF({ selectedVisits: v })} showSearch />
-            <FilterSelect label="部门" value={f.selectedDepartments} options={stats?.top_departments ?? []} onChange={(v) => updateF({ selectedDepartments: v })} showSearch />
-            <FilterSelect label="日期" value={f.selectedDateEnts} options={stats?.top_dates ?? []} onChange={(v) => updateF({ selectedDateEnts: v })} showSearch />
-            <RangePicker size="small" value={f.dateRange[0] ? [dayjs(f.dateRange[0]), dayjs(f.dateRange[1])] as any : null}
-              onChange={(v) => updateF({ dateRange: v ? [v[0]!.toISOString(), v[1]!.toISOString()] : [null, null] })}
-              allowClear style={{ width: 230 }} />
-          </div>
+          <div className="news-advanced-row">{renderAdvancedFilters()}</div>
         </div>
       )}
 
@@ -1042,7 +1157,51 @@ export const NewsPanel: React.FC = () => {
         {!isMobile && (
           <>
             <div className="news-left-panel" style={{ flex: `0 0 ${leftWidth}%` }}>
-              {renderSourceTree()}
+              <div className="news-left-tabs" role="tablist" aria-label="左栏">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={leftTab === 'sources'}
+                  className={`news-left-tab ${leftTab === 'sources' ? 'active' : ''}`}
+                  onClick={() => setLeftTab('sources')}
+                >
+                  订阅源 <em>{sources.length}</em>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={leftTab === 'filters'}
+                  className={`news-left-tab ${leftTab === 'filters' ? 'active' : ''}`}
+                  onClick={() => setLeftTab('filters')}
+                >
+                  筛选 <em>{activeFilterCount}</em>
+                </button>
+              </div>
+              {leftTab === 'sources' ? (
+                <>
+                  <div className="news-source-head">
+                    <span className="news-source-title">订阅源</span>
+                    <span className="news-source-count">{sources.length}</span>
+                  </div>
+                  {renderSourceTree()}
+                </>
+              ) : (
+                <div className="news-left-tools">
+                  {embedded && (
+                    <div className="news-quick-filter-rail">
+                      <Text type="secondary" className="news-category-label">快速筛选</Text>
+                      {renderQuickFilters()}
+                    </div>
+                  )}
+                  <div className="news-category-rail">{renderCategoryChips()}</div>
+                  {f.advancedOpen && (
+                    <div className="news-advanced-rail">
+                      <Text type="secondary" className="news-category-label">高级筛选</Text>
+                      {renderAdvancedFilters()}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Drag handle L-M */}
