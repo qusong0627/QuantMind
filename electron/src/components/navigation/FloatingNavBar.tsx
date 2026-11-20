@@ -60,7 +60,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     // 1. 大盘分析模块
     { id: 'dashboard', label: marketLabel, icon: LayoutDashboard },
     { id: 'market-analysis', label: '市场分析', icon: BarChart3 },
-    { id: 'rss-news', label: 'RSS信息流', icon: Rss },
+    { id: 'rss-news', label: '资讯中心', icon: Rss },
     { id: 'backtest', label: '回测中心', icon: FlaskConical },
     { id: 'trading', label: modeCopy(tradingLabelKey).full, icon: ArrowLeftRight },
     // 3. 模型区域

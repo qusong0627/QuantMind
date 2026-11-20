@@ -97,7 +97,7 @@ const AdminModelManagement = lazy(() => import('./features/admin/components/Admi
 const AdminDataManagement = lazy(() => import('./features/admin/components/AdminDataManagement').then(m => ({ default: m.AdminDataManagement })));
 const AdminQlibDataPanel = lazy(() => import('./features/admin/components/AdminQlibDataPanel').then(m => ({ default: m.AdminQlibDataPanel })));
 const AdminStrategyTemplates = lazy(() => import('./features/admin/components/AdminStrategyTemplates').then(m => ({ default: m.AdminStrategyTemplates })));
-const AdminNewsPage = lazy(() => import('./features/news/components/NewsPanel').then(m => ({ default: m.NewsPanel })));
+const NewsIntelPage = lazy(() => import('./features/news-intel/pages/NewsIntelPage'));
 const AdminDataPlatform = lazy(() => import('./features/admin/components/AdminDataPlatform').then(m => ({ default: m.AdminDataPlatform })));
 const AdminNewsEmotion = lazy(() => import('./features/admin/components/AdminNewsEmotion').then(m => ({ default: m.default })));
 const AdminFeatureCatalog = lazy(() => import('./features/admin/components/AdminFeatureCatalog').then(m => ({ default: m.AdminFeatureCatalog })));
@@ -754,7 +754,7 @@ export default function App() {
                     element={
                       <ProtectedRoute>
                         <Suspense fallback={<Spin size="large" />}>
-                          <AdminNewsPage />
+                          <NewsIntelPage />
                         </Suspense>
                       </ProtectedRoute>
                     }

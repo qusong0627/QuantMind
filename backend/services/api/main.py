@@ -63,6 +63,7 @@ from backend.services.api.routers.news import (
     public_router as news_public_router,
     router as news_router,
 )
+from backend.services.api.routers.news_intel import router as news_intel_router
 from backend.services.api.routers.research import router as research_router
 from backend.services.api.routers.desk import router as desk_router
 from backend.services.api.routers.eval_scores import router as eval_router
@@ -577,6 +578,8 @@ app.include_router(trade_proxy_router)
 app.include_router(ai_ide_proxy_router)
 app.include_router(qwenpaw_proxy_router)
 app.include_router(news_router)
+# 资讯中心 2.0：决策级新闻流 / 个股档案 / 板块雷达 / 订阅置顶
+app.include_router(news_intel_router)
 # 免鉴权子集：/health、/rsshub/*（图标 <img src>）、/huntly-ui*（新标签页导航）
 app.include_router(news_public_router)
 app.include_router(data_gateway_proxy_router)

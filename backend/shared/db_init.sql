@@ -261,6 +261,27 @@ CREATE INDEX IF NOT EXISTS idx_news_enrichment_score
     ON news_article_enrichment (sentiment_score DESC NULLS LAST);
 
 -- ========================
+-- 6.5 QM_NEWS_SUBSCRIPTION（资讯中心 2.0：订阅个股新闻置顶）
+-- ========================
+CREATE TABLE IF NOT EXISTS qm_news_subscription (
+    id              BIGSERIAL PRIMARY KEY,
+    tenant_id       TEXT NOT NULL DEFAULT 'default',
+    user_id         TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    name            TEXT,
+    pinned          BOOLEAN NOT NULL DEFAULT TRUE,
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+    source          TEXT NOT NULL DEFAULT 'manual',
+    last_synced_at  TIMESTAMPTZ,
+    last_read_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, user_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_news_sub_user
+    ON qm_news_subscription (tenant_id, user_id, pinned DESC, sort_order);
+
+-- ========================
 -- 7. FINANCE_LEXICON (from 2026_05_25 SQL)
 -- ========================
 CREATE TABLE IF NOT EXISTS finance_lexicon (
