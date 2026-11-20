@@ -33,7 +33,6 @@ import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
 import { useWebSocket } from '../../utils/websocket';
 import { strategyTemplates, getTemplateById } from '../../constants/strategyTemplates';
 import { blendBacktestProgress, getBacktestStageMessage } from '../backtest/progressUtils';
-import { getStoredTailTradeMode, setStoredTailTradeMode, getTailTradeDealPrice, getTailTradeSignalLagDays, ALLOW_FEATURE_SIGNAL_FALLBACK } from '../../shared/qlib/tailTradeMode';
 import { Modal } from 'antd';
 import type { StockPoolOption } from '../../services/stockPoolOptionService';
 import { StockPoolPickerModal } from '../backtest/StockPoolPickerModal';
@@ -82,16 +81,6 @@ export const EnhancedQuickBacktest: React.FC = () => {
   const [customPoolOpen, setCustomPoolOpen] = useState(false);
   const [selectedCustomPool, setSelectedCustomPool] = useState<StockPoolOption | null>(null);
   const customPoolActive = (backtestConfig.symbol || '').startsWith('pool:');
-
-  // 尾盘交易模式开关（持久化）
-  const [tailTradeEnabled, setTailTradeEnabled] = useState<boolean>(() => getStoredTailTradeMode());
-  const [showTailTradeTooltip, setShowTailTradeTooltip] = useState(false);
-  const tailTradeTimerRef = useRef<number | null>(null);
-
-  // 切换开关时同步缓存
-  useEffect(() => {
-    setStoredTailTradeMode(tailTradeEnabled);
-  }, [tailTradeEnabled]);
 
   const backtestId = useRef<string>('');
   const backtestWsBaseRef = useRef<string>('');
@@ -291,9 +280,10 @@ export const EnhancedQuickBacktest: React.FC = () => {
         strategy_code: strategyCode,
         initial_capital: backtestConfig.initial_capital || 100000,
         user_id: backtestConfig.user_id || 'default',
-        deal_price: getTailTradeDealPrice(tailTradeEnabled),
-        signal_lag_days: getTailTradeSignalLagDays(tailTradeEnabled),
-        allow_feature_signal_fallback: ALLOW_FEATURE_SIGNAL_FALLBACK,
+        // 成交价用配置区用户自选项；signal_lag_days 恒为 1 避免前视偏差，禁止静默降级。
+        deal_price: backtestConfig.deal_price || 'open',
+        signal_lag_days: 1,
+        allow_feature_signal_fallback: false,
       } as any);
       backtestId.current = response.backtest_id;
       if (!isConnected) {
@@ -342,7 +332,6 @@ export const EnhancedQuickBacktest: React.FC = () => {
   useEffect(() => {
     return () => {
       stopSimulatedProgress();
-      if (tailTradeTimerRef.current) clearTimeout(tailTradeTimerRef.current);
     };
   }, []);
 
@@ -407,45 +396,6 @@ export const EnhancedQuickBacktest: React.FC = () => {
           <ConfigSection
             title="基本配置"
             icon={SettingsIcon}
-            headerExtra={
-              <div
-                className="relative flex items-center gap-2 shrink-0"
-                onMouseEnter={() => {
-                  tailTradeTimerRef.current = window.setTimeout(() => setShowTailTradeTooltip(true), 1000);
-                }}
-                onMouseLeave={() => {
-                  if (tailTradeTimerRef.current) { clearTimeout(tailTradeTimerRef.current); tailTradeTimerRef.current = null; }
-                  setShowTailTradeTooltip(false);
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
-                  className={`flex items-center gap-2 px-2.5 py-1 rounded-full border transition-all duration-200 ${
-                    tailTradeEnabled
-                      ? 'bg-blue-50 border-blue-200 text-blue-700'
-                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
-                  }`}
-                >
-                  <span className="text-[11px] font-bold">尾盘交易</span>
-                  <span className={`px-1.5 py-0.5 rounded-lg text-[9px] font-black min-w-[28px] text-center transition-all ${
-                    tailTradeEnabled
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white text-gray-500 border border-gray-100 shadow-sm'
-                  }`}>
-                    {tailTradeEnabled ? 'ON' : 'OFF'}
-                  </span>
-                </button>
-                {showTailTradeTooltip && (
-                  <div className="absolute top-full right-0 mt-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">
-                    {tailTradeEnabled
-                      ? '尾盘交易：T日信号+T+1收盘成交'
-                      : '标准口径：T日信号+T+1开盘成交'}
-                    <div className="absolute bottom-full right-3 border-4 border-transparent border-b-gray-900" />
-                  </div>
-                )}
-              </div>
-            }
           >
             <div className="space-y-3">
               <div className="space-y-1">
@@ -531,12 +481,9 @@ export const EnhancedQuickBacktest: React.FC = () => {
                     <label className="text-sm font-medium text-gray-700">基准价格</label>
                   </div>
                   <select
-                    value={getTailTradeDealPrice(tailTradeEnabled)}
+                    value={backtestConfig.deal_price || 'open'}
                     onChange={(e) => updateBacktestConfig({ deal_price: e.target.value as any })}
-                    disabled={tailTradeEnabled}
-                    className={`w-full px-3 py-2 bg-white border border-gray-300 rounded-2xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${
-                      tailTradeEnabled ? 'text-gray-400 cursor-not-allowed bg-gray-100' : ''
-                    }`}
+                    className="w-full px-3 py-2 bg-white border border-gray-300 rounded-2xl text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                   >
                     <option value="open">开盘价 (Open)</option>
                     <option value="close">收盘价 (Close)</option>

@@ -24,7 +24,6 @@ import { QLIB_REBALANCE_DAY_OPTIONS } from '../../shared/qlib/rebalance';
 import { getTemplateById } from '../../data/qlibStrategyTemplates';
 import { blendBacktestProgress, getBacktestStageMessage } from './progressUtils';
 import { getDefaultStrategyParams, sanitizeStrategyParams } from '../../shared/qlib/strategyParams';
-import { getStoredTailTradeMode, setStoredTailTradeMode, getTailTradeDealPrice, getTailTradeSignalLagDays, ALLOW_FEATURE_SIGNAL_FALLBACK } from '../../shared/qlib/tailTradeMode';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { modelTrainingService, UserModelRecord } from '../../services/modelTrainingService';
 import type { StockPoolOption } from '../../services/stockPoolOptionService';
@@ -120,21 +119,6 @@ export const QlibQuickBacktest: React.FC = () => {
   const [benchmark, setBenchmark] = useState(marketConfig.benchmark);
   const [seed] = useState('');
   const [dealPrice, setDealPrice] = useState<'open' | 'close'>('open');
-
-  // 尾盘交易模式开关（持久化）
-  const [tailTradeEnabled, setTailTradeEnabled] = useState<boolean>(() => getStoredTailTradeMode());
-  const [showTailTradeTooltip, setShowTailTradeTooltip] = useState(false);
-  const tailTradeTimerRef = useRef<number | null>(null);
-
-  // 切换开关时同步缓存，并自动修正 dealPrice
-  useEffect(() => {
-    setStoredTailTradeMode(tailTradeEnabled);
-    if (tailTradeEnabled) {
-      setDealPrice('close');
-    } else {
-      setDealPrice('open');
-    }
-  }, [tailTradeEnabled]);
   
   // 数据日期范围（从后端获取）
   const [dataMinDate, setDataMinDate] = useState<string | null>(null);
@@ -410,9 +394,10 @@ export const QlibQuickBacktest: React.FC = () => {
         model_id: selectedModelId || undefined,
         seed: seed.trim() === '' ? undefined : Number(seed),
         commission: 0.00025,
-        deal_price: getTailTradeDealPrice(tailTradeEnabled),
-        signal_lag_days: getTailTradeSignalLagDays(tailTradeEnabled),
-        allow_feature_signal_fallback: ALLOW_FEATURE_SIGNAL_FALLBACK,
+        // 成交价用户自选；signal_lag_days 恒为 1 避免前视偏差，禁止静默降级。
+        deal_price: dealPrice,
+        signal_lag_days: 1,
+        allow_feature_signal_fallback: false,
         qlib_provider_uri: marketConfig.qlibProviderUri,
         qlib_region: marketConfig.qlibRegion,
       };
@@ -474,7 +459,6 @@ export const QlibQuickBacktest: React.FC = () => {
     return () => {
       stopSimulatedProgress();
       if (stopPollingRef.current) stopPollingRef.current();
-      if (tailTradeTimerRef.current) clearTimeout(tailTradeTimerRef.current);
     };
   }, []);
 
@@ -791,43 +775,6 @@ export const QlibQuickBacktest: React.FC = () => {
                   <span className="w-8 h-8 rounded-xl bg-blue-500/10 flex items-center justify-center"><Settings2 className="w-4 h-4 text-blue-600" /></span> 基础配置
                 </h3>
               </div>
-              <div
-                className="relative flex items-center gap-2 shrink-0"
-                onMouseEnter={() => {
-                  tailTradeTimerRef.current = window.setTimeout(() => setShowTailTradeTooltip(true), 1000);
-                }}
-                onMouseLeave={() => {
-                  if (tailTradeTimerRef.current) { clearTimeout(tailTradeTimerRef.current); tailTradeTimerRef.current = null; }
-                  setShowTailTradeTooltip(false);
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
-                  className={`flex items-center gap-2 px-2.5 py-1 rounded-full border transition-all duration-200 ${
-                    tailTradeEnabled
-                      ? 'bg-blue-50 border-blue-200 text-blue-700'
-                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
-                  }`}
-                >
-                  <span className="text-[11px] font-bold">尾盘交易</span>
-                  <span className={`px-1.5 py-0.5 rounded-lg text-[9px] font-black min-w-[28px] text-center transition-all ${
-                    tailTradeEnabled
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white text-gray-500 border border-gray-100 shadow-sm'
-                  }`}>
-                    {tailTradeEnabled ? 'ON' : 'OFF'}
-                  </span>
-                </button>
-                {showTailTradeTooltip && (
-                  <div className="absolute top-full right-0 mt-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">
-                    {tailTradeEnabled
-                      ? '尾盘交易：T日信号+T+1收盘成交'
-                      : '标准口径：T日信号+T+1开盘成交'}
-                    <div className="absolute bottom-full right-3 border-4 border-transparent border-b-gray-900" />
-                  </div>
-                )}
-              </div>
             </div>
 
             <div>
@@ -950,12 +897,9 @@ export const QlibQuickBacktest: React.FC = () => {
                   <label className="text-sm font-medium text-gray-600">成交价格 (Deal Price)</label>
                 </div>
                 <select
-                  value={getTailTradeDealPrice(tailTradeEnabled)}
+                  value={dealPrice}
                   onChange={(e) => setDealPrice(e.target.value as 'open' | 'close')}
-                  disabled={tailTradeEnabled}
-                  className={`w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-blue-500 ${
-                    tailTradeEnabled ? 'text-gray-400 cursor-not-allowed' : ''
-                  }`}
+                  className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-blue-500"
                 >
                   <option value="open">开盘价成交 (Open)</option>
                   <option value="close">收盘价成交 (Close)</option>
