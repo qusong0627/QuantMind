@@ -1515,6 +1515,36 @@ CREATE TABLE IF NOT EXISTS admin_training_jobs (
 );
 
 -- ========================
+-- 55b. TRAINING STRICT REPORTS（WP2 严格评估）
+-- ========================
+CREATE TABLE IF NOT EXISTS qm_training_strict_reports (
+    run_id          TEXT PRIMARY KEY,
+    model_id        TEXT,
+    market          TEXT NOT NULL DEFAULT 'CN',
+    horizon_days    INTEGER NOT NULL DEFAULT 10,
+    entry_price     TEXT NOT NULL DEFAULT 'open',
+    status          TEXT NOT NULL DEFAULT 'ready',
+    report          JSONB NOT NULL,
+    error           TEXT NOT NULL DEFAULT '',
+    generated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ========================
+-- 55c. TRAINING AUDIT REPORTS（WP7 数据审计）
+-- ========================
+CREATE TABLE IF NOT EXISTS qm_training_audit_reports (
+    run_id          TEXT PRIMARY KEY,
+    model_id        TEXT,
+    status          TEXT NOT NULL DEFAULT 'ready',
+    blocked         BOOLEAN NOT NULL DEFAULT FALSE,
+    report          JSONB NOT NULL,
+    error           TEXT NOT NULL DEFAULT '',
+    generated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ========================
 -- 56. LOGIN_DEVICES
 -- ========================
 CREATE TABLE IF NOT EXISTS login_devices (

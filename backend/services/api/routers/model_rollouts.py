@@ -80,6 +80,14 @@ class DecisionBody(BaseModel):
     allow_schema_drift: bool = Field(
         default=False, description="允许训练/推理特征 schema 漂移（需在理由中说明）"
     )
+    # WP6：严格评估缺失/为负默认阻断晋升；显式 true 才放行（留 warning 审计）。
+    allow_strict_fail: bool = Field(
+        default=False, description="允许严格评估缺失或净收益为负（需在理由中说明）"
+    )
+    # WP7：数据审计未通过默认阻断；显式 true 才放行（留 warning 审计）。
+    allow_audit_fail: bool = Field(
+        default=False, description="允许数据审计缺失或存在 fail 级检查（需在理由中说明）"
+    )
 
 
 @router.get("")
@@ -169,6 +177,8 @@ async def promote_rollout(
             notes=body.notes,
             owner=(tenant_id, user_id),
             allow_schema_drift=body.allow_schema_drift,
+            allow_strict_fail=body.allow_strict_fail,
+            allow_audit_fail=body.allow_audit_fail,
         )
     except (RolloutNotFound, RolloutConflict, RolloutInvalid) as exc:
         raise _as_http(exc) from exc

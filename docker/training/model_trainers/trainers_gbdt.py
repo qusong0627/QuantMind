@@ -129,8 +129,10 @@ def _lgb_rank_ic_feval(preds: np.ndarray, dataset: lgb.Dataset) -> tuple[str, fl
 
 @register_trainer("lightgbm", framework="lightgbm")
 def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
-               X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None) -> Any:
+               X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None,
+               sample_weight: tuple | None = None) -> Any:
     """LightGBM 训练；objective 为 lambdarank/rank_xendcg 时按日分组。"""
+    w_train, w_val = sample_weight if sample_weight is not None else (None, None)
     model_cfg = cfg.get("model", {})
     params = {**DEFAULT_LGB_PARAMS, **model_cfg.get("params", {})}
     if str((cfg.get("label", {}) or {}).get("target_mode") or "return").lower() == "classification":
@@ -157,19 +159,19 @@ def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
         y_va = _bin_rank_labels(y_val, gva) if _objective == "lambdarank" else y_val
         ds_train = lgb.Dataset(
             X_train, label=y_tr, group=_group_counts(gtr),
-            feature_name=features, free_raw_data=True,
+            weight=w_train, feature_name=features, free_raw_data=True,
         )
         ds_val = lgb.Dataset(
             X_val, label=y_va, group=_group_counts(gva),
-            feature_name=features, reference=ds_train, free_raw_data=True,
+            weight=w_val, feature_name=features, reference=ds_train, free_raw_data=True,
         )
         logger.info(
             "LightGBM rank loss: objective=%s train_groups=%d val_groups=%d",
             _objective, len(np.unique(np.asarray(gtr))), len(np.unique(np.asarray(gva))),
         )
     else:
-        ds_train = lgb.Dataset(X_train, label=y_train, feature_name=features, free_raw_data=True)
-        ds_val = lgb.Dataset(X_val, label=y_val, feature_name=features, free_raw_data=True)
+        ds_train = lgb.Dataset(X_train, label=y_train, weight=w_train, feature_name=features, free_raw_data=True)
+        ds_val = lgb.Dataset(X_val, label=y_val, weight=w_val, feature_name=features, free_raw_data=True)
 
 
     callbacks = [
@@ -193,8 +195,10 @@ def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
 
 @register_trainer("xgboost", framework="xgboost")
 def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
-               X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None) -> Any:
+               X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None,
+               sample_weight: tuple | None = None) -> Any:
     """XGBoost 训练；objective 为 rank:* 时按日分组。"""
+    w_train, w_val = sample_weight if sample_weight is not None else (None, None)
     import xgboost as xgb
     model_cfg = cfg.get("model", {})
     params = {**DEFAULT_XGB_PARAMS, **model_cfg.get("xgb_params", {})}
@@ -229,8 +233,8 @@ def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
         # 也要求整数标签（XGBoost 实测报 label_is_integer），分 10 档损失极小。
         y_tr = _bin_rank_labels(y_train, gtr)
         y_va = _bin_rank_labels(y_val, gva)
-        dtrain = xgb.QuantileDMatrix(X_train, label=y_tr, feature_names=features)
-        dval = xgb.QuantileDMatrix(X_val, label=y_va, feature_names=features, ref=dtrain)
+        dtrain = xgb.QuantileDMatrix(X_train, label=y_tr, weight=w_train, feature_names=features)
+        dval = xgb.QuantileDMatrix(X_val, label=y_va, weight=w_val, feature_names=features, ref=dtrain)
         dtrain.set_group(_group_counts(gtr))
         dval.set_group(_group_counts(gva))
         logger.info(
@@ -238,9 +242,9 @@ def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
             _objective, len(np.unique(np.asarray(gtr))), len(np.unique(np.asarray(gva))),
         )
     else:
-        dtrain = xgb.QuantileDMatrix(X_train, label=y_train, feature_names=features)
+        dtrain = xgb.QuantileDMatrix(X_train, label=y_train, weight=w_train, feature_names=features)
         dval = xgb.QuantileDMatrix(
-            X_val, label=y_val, feature_names=features, ref=dtrain
+            X_val, label=y_val, weight=w_val, feature_names=features, ref=dtrain
         )
 
 
@@ -257,8 +261,10 @@ def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
 
 @register_trainer("catboost", framework="catboost")
 def _train_catboost(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
-                    X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None) -> Any:
+                    X_val: np.ndarray, y_val: np.ndarray, groups: tuple | None = None,
+                    sample_weight: tuple | None = None) -> Any:
     """CatBoost 训练。支持 cat_features；YetiRank/Query* 时按日传 group_id。"""
+    w_train, w_val = sample_weight if sample_weight is not None else (None, None)
     from catboost import CatBoost, Pool
     model_cfg = cfg.get("model", {})
     params = {**DEFAULT_CATBOOST_PARAMS, **model_cfg.get("catboost_params", {})}
@@ -300,10 +306,12 @@ def _train_catboost(cfg: dict, features: list[str], X_train: np.ndarray, y_train
     if _rank:
         gtr, gva = groups
         train_pool = Pool(
-            X_train, label=y_train, group_id=_factorize_groups(gtr), **_pool_kwargs
+            X_train, label=y_train, group_id=_factorize_groups(gtr),
+            weight=w_train, **_pool_kwargs
         )
         val_pool = Pool(
-            X_val, label=y_val, group_id=_factorize_groups(gva), **_pool_kwargs
+            X_val, label=y_val, group_id=_factorize_groups(gva),
+            weight=w_val, **_pool_kwargs
         )
         logger.info(
             "CatBoost rank loss: loss=%s train_groups=%d val_groups=%d",
@@ -311,15 +319,15 @@ def _train_catboost(cfg: dict, features: list[str], X_train: np.ndarray, y_train
         )
     elif has_time:
         try:
-            train_pool = Pool(X_train, label=y_train, has_time=True, **_pool_kwargs)
-            val_pool = Pool(X_val, label=y_val, has_time=True, **_pool_kwargs)
+            train_pool = Pool(X_train, label=y_train, has_time=True, weight=w_train, **_pool_kwargs)
+            val_pool = Pool(X_val, label=y_val, has_time=True, weight=w_val, **_pool_kwargs)
         except TypeError:
             logger.warning("当前 catboost 版本不支持 has_time，降级为不带该参数")
-            train_pool = Pool(X_train, label=y_train, **_pool_kwargs)
-            val_pool = Pool(X_val, label=y_val, **_pool_kwargs)
+            train_pool = Pool(X_train, label=y_train, weight=w_train, **_pool_kwargs)
+            val_pool = Pool(X_val, label=y_val, weight=w_val, **_pool_kwargs)
     else:
-        train_pool = Pool(X_train, label=y_train, **_pool_kwargs)
-        val_pool = Pool(X_val, label=y_val, **_pool_kwargs)
+        train_pool = Pool(X_train, label=y_train, weight=w_train, **_pool_kwargs)
+        val_pool = Pool(X_val, label=y_val, weight=w_val, **_pool_kwargs)
 
     model = CatBoost(params)
     model.fit(train_pool, eval_set=val_pool, early_stopping_rounds=max(1, int(model_cfg.get("early_stopping_rounds", 100) or 100)))

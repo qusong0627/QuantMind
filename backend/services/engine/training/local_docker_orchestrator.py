@@ -230,6 +230,8 @@ _TRAINING_SCRIPT_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "t
 _PREPROCESSING_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "preprocessing.py")
 # 多核因子筛选：train.py 顶层 `from parallel_utils import ...`，需与 train.py 一并挂载
 _PARALLEL_UTILS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "parallel_utils.py")
+# 样本权重（WP3）：train.py 顶层 `from sample_weights import build_weights`，随仓库挂载
+_SAMPLE_WEIGHTS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "sample_weights.py")
 # 模型训练器包：train.py 顶层 `from model_trainers... import ...`，整目录挂载
 _TRAINERS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "model_trainers")
 # 训练诊断包：train.py 顶层 `from diagnostics... import ...`，整目录挂载
@@ -688,13 +690,25 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 run_id, requested_features
             )
         if missing_features:
-            logger.warning(
-                "[%s] %d/%d requested features not in parquet, filtered out: %s...",
-                run_id,
-                len(missing_features),
-                len(requested_features),
-                missing_features[:10],
+            preview = ", ".join(str(x) for x in missing_features[:10])
+            if len(missing_features) > 10:
+                preview += ", ..."
+            message = (
+                f"[{run_id}] {len(missing_features)}/{len(requested_features)} 个请求特征"
+                f"在因子目录/物理数据中不存在：{preview}"
             )
+            allow_missing = str(payload.get("allow_missing_features", "")).strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+            if not allow_missing:
+                # 默认硬阻断：目录映射陈旧时只会打一条 warning，模型静默少列
+                # （2026-11-19：100 特征模型实际 88 入训、34 入模，名字仍是
+                # “100特征”）。要跑残缺特征集必须显式 allow_missing_features=true。
+                raise RuntimeError(
+                    f"{message} —— 训练已阻断（防止静默少列）。请修正目录/字段来源，"
+                    "或显式设置 allow_missing_features=true。"
+                )
+            logger.warning("%s —— allow_missing_features=true，按可用特征继续", message)
         # 将过滤结果存到 payload 中，供后续返回给前端
         payload["_valid_features"] = valid_features
         payload["_missing_features"] = missing_features
@@ -821,6 +835,11 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 max_time_minutes=payload.get("max_time_minutes"),
                 factor_selection=factor_selection,
                 preprocessing=preprocessing,
+                sample_weight=(
+                    payload.get("sample_weight")
+                    if isinstance(payload.get("sample_weight"), dict)
+                    else None
+                ),
             )
         except Exception as exc:
             raise RuntimeError(f"[{run_id}] TrainingConfig construction failed: {exc}") from exc
@@ -1025,6 +1044,12 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         # 多核因子筛选；与 train.py 一样无条件挂载（路径可见性限制同上）。
         volumes[str(_PARALLEL_UTILS_HOST_PATH)] = {
             "bind": "/app/parallel_utils.py",
+            "mode": "ro",
+        }
+        # sample_weights.py 与 train.py 同目录导入（WP3 样本权重）；无条件挂载，
+        # 避免镜像未重建时 `from sample_weights import ...` 秒挂。
+        volumes[str(_SAMPLE_WEIGHTS_HOST_PATH)] = {
+            "bind": "/app/sample_weights.py",
             "mode": "ro",
         }
         # model_trainers/ 包与 train.py 同目录导入（`from model_trainers... import ...`）；

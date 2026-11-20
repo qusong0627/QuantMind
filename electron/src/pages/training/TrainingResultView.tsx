@@ -1,5 +1,5 @@
 import React from 'react';
-import { Card, Divider, Alert, Tag, Space, Typography, Empty, Button, Table, Tooltip as AntTooltip } from 'antd';
+import { Card, Divider, Alert, Tag, Space, Typography, Empty, Button, Table, Tooltip as AntTooltip, Modal, Input } from 'antd';
 import { BarChart, MonitorPlay, Activity, Download, Filter } from 'lucide-react';
 import {
   BarChart as ReBarChart,
@@ -24,6 +24,13 @@ import {
   getTargetModeDescription,
   resolveEvalIcHeadline,
 } from './trainingUtils';
+import {
+  modelTrainingService,
+  type StrictEvalCostBlock,
+  type StrictEvalReportRow,
+  type TrainingAuditRow,
+  type TrainingRunCompareResult,
+} from '../../services/modelTrainingService';
 
 const { Text } = Typography;
 
@@ -46,6 +53,8 @@ interface TrainingResultViewProps {
   onSetDefaultModel: () => void;
   onExportConfig: () => void;
   trainingStatus: string;
+  /** 训练 run id：用于拉取 WP2 严格评估报告 */
+  runId?: string;
 }
 
 const MetricCard: React.FC<{
@@ -333,6 +342,403 @@ const WfaInterpretation: React.FC<{ wfa: any }> = ({ wfa }) => {
   );
 };
 
+const LineageItem: React.FC<{ label: string; value?: string }> = ({ label, value }) => (
+  <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2">
+    <span className="shrink-0 text-slate-500">{label}</span>
+    <span className="break-all font-mono text-[11px] text-slate-800">{value || '—'}</span>
+  </div>
+);
+
+const SEGMENT_LABELS: Record<string, string> = { valid: '验证集', test: '测试集', custom: '自定义窗口' };
+
+/** WP2 严格评估：净 Top-N（可成交 + 三档成本 + HAC/PSR + 换手）。 */
+const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
+  const [loading, setLoading] = React.useState(false);
+  const [row, setRow] = React.useState<StrictEvalReportRow | null>(null);
+
+  React.useEffect(() => {
+    if (!runId) {
+      setRow(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    modelTrainingService
+      .getTrainingStrictReport(runId)
+      .then((data) => {
+        if (!cancelled) setRow(data);
+      })
+      .catch(() => {
+        if (!cancelled) setRow(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  if (!runId) return null;
+
+  const pct = (v?: number) => (v == null || Number.isNaN(v) ? '—' : `${(v * 100).toFixed(2)}%`);
+  const num = (v?: number, digits = 2) =>
+    v == null || Number.isNaN(v) ? '—' : v.toFixed(digits);
+  const tone = (v?: number) =>
+    v == null || Number.isNaN(v) ? 'text-slate-400' : v >= 0 ? 'text-emerald-600' : 'text-rose-500';
+
+  return (
+    <Card
+      className="rounded-2xl border-indigo-100"
+      size="small"
+      title={
+        <span className="text-sm font-black text-slate-800">
+          严格评估
+          <span className="ml-2 text-[10px] font-normal text-slate-400">
+            净 Top-N · T+1 {row?.entry_price === 'close' ? '收盘' : '开盘'}买入 · 可成交 · 三档成本
+          </span>
+        </span>
+      }
+    >
+      {loading ? (
+        <div className="py-6 text-center text-xs text-slate-500">正在加载严格评估…</div>
+      ) : null}
+      {!loading && row?.status === 'running' ? (
+        <div className="py-6 text-center text-xs text-slate-500">严格评估计算中…</div>
+      ) : null}
+      {!loading && (!row || row.status === 'failed') ? (
+        <Alert
+          type={row?.status === 'failed' ? 'error' : 'info'}
+          showIcon
+          className="rounded-2xl"
+          message={row?.status === 'failed' ? '严格评估失败' : '严格评估尚未生成'}
+          description={
+            row?.error ||
+            '训练完成后会自动计算净 Top-N；老模型可在后台点「重算严格评估」。'
+          }
+        />
+      ) : null}
+      {!loading && row?.status === 'ready' && row.report ? (
+        <div className="space-y-4">
+          {Object.entries(row.report.results || {}).map(([seg, tops]) => {
+            const top20 = (tops['top20'] || {}) as Record<string, unknown>;
+            const c15 = top20['cost_15bp'] as StrictEvalCostBlock | undefined;
+            const c25 = top20['cost_25bp'] as StrictEvalCostBlock | undefined;
+            const c40 = top20['cost_40bp'] as StrictEvalCostBlock | undefined;
+            return (
+              <div key={seg}>
+                <div className="mb-2 flex items-center gap-2">
+                  <Tag className="m-0 rounded-full border-0 bg-indigo-50 px-3 py-0.5 text-indigo-600">
+                    {SEGMENT_LABELS[seg] || seg}
+                  </Tag>
+                  <span className="text-[10px] text-slate-400">
+                    {row.report.segments?.[seg]?.start} ~ {row.report.segments?.[seg]?.end}
+                  </span>
+                </div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-slate-400">
+                      <th className="py-1 text-left font-normal">Top-N</th>
+                      <th className="py-1 text-right font-normal">批次</th>
+                      <th className="py-1 text-right font-normal">25bp 收益</th>
+                      <th className="py-1 text-right font-normal">MDD</th>
+                      <th className="py-1 text-right font-normal">超额 HS300</th>
+                      <th className="py-1 text-right font-normal">HAC t</th>
+                      <th className="py-1 text-right font-normal">PSR</th>
+                      <th className="py-1 text-right font-normal">换手/批</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(tops).map(([top, raw]) => {
+                      const block = raw as Record<string, unknown>;
+                      const c = block['cost_25bp'] as StrictEvalCostBlock | undefined;
+                      if (!c) return null;
+                      return (
+                        <tr key={top} className="border-t border-slate-100">
+                          <td className="py-1 font-semibold text-slate-700">
+                            {top.replace('top', 'Top ')}
+                          </td>
+                          <td className="py-1 text-right text-slate-500">
+                            {String(block.batches ?? '—')}
+                          </td>
+                          <td className={clsx('py-1 text-right font-semibold', tone(c.total))}>
+                            {pct(c.total)}
+                          </td>
+                          <td className="py-1 text-right text-slate-600">{pct(c.mdd)}</td>
+                          <td className={clsx('py-1 text-right', tone(c.excess_hs300))}>
+                            {pct(c.excess_hs300)}
+                          </td>
+                          <td className="py-1 text-right text-slate-600">{num(c.hac_t)}</td>
+                          <td className="py-1 text-right text-slate-600">{num(c.psr)}</td>
+                          <td className="py-1 text-right text-slate-500">
+                            {typeof block.turnover_per_batch === 'number'
+                              ? `${(block.turnover_per_batch * 100).toFixed(0)}%`
+                              : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {c15 && c25 && c40 ? (
+                  <div className="mt-1 text-[10px] text-slate-500">
+                    Top20 成本敏感性：15bp {pct(c15.total)} · 25bp {pct(c25.total)} · 40bp{' '}
+                    {pct(c40.total)}；95% bootstrap CI{' '}
+                    [{pct(c25.bootstrap_ci?.[0])}, {pct(c25.bootstrap_ci?.[1])}]
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+          <div className="text-[10px] leading-relaxed text-slate-400">
+            口径：信号日收盘出分，T+1 {row.entry_price === 'close' ? '收盘' : '开盘'}买入，T+1+
+            {row.horizon_days} 收盘卖出；ST/停牌/涨停买不进按 trade_mask 剔除；成本为往返；每只固定名义本金，
+            参与率按当日成交额计算。
+          </div>
+        </div>
+      ) : null}
+    </Card>
+  );
+};
+
+/** WP6 run 对比：贴 run_id（2~5 个），同口径严格评估 + 配置 diff + 单轴判定。 */
+const CompareRunsModal: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  defaultRunId?: string;
+}> = ({ open, onClose, defaultRunId }) => {
+  const [idsText, setIdsText] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
+  const [data, setData] = React.useState<TrainingRunCompareResult | null>(null);
+
+  React.useEffect(() => {
+    if (open) {
+      setIdsText(defaultRunId ? `${defaultRunId},` : '');
+      setData(null);
+    }
+  }, [open, defaultRunId]);
+
+  const runCompare = async () => {
+    const ids = idsText
+      .split(/[\s,]+/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (ids.length < 2) {
+      setData(null);
+      return;
+    }
+    setLoading(true);
+    const result = await modelTrainingService.compareTrainingRuns(ids);
+    setData(result);
+    setLoading(false);
+  };
+
+  const pct = (v?: number) => (v == null || Number.isNaN(v) ? '—' : `${(v * 100).toFixed(2)}%`);
+  const num = (v?: number, d = 2) => (v == null || Number.isNaN(v) ? '—' : v.toFixed(d));
+
+  return (
+    <Modal
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      width={920}
+      title="训练 run 对比（严格评估口径）"
+    >
+      <div className="space-y-3">
+        <div className="text-xs text-slate-500">
+          第一行作为基线。配置 diff 只比较实验字段（特征/参数/标签/切分/样本权重）；
+          只差一个轴才算严格 A/B。
+        </div>
+        <Input.TextArea
+          rows={2}
+          value={idsText}
+          onChange={(e) => setIdsText(e.target.value)}
+          placeholder="逗号或换行分隔 run_id，2~5 个，例如 train_xxx,train_yyy"
+        />
+        <div className="flex items-center gap-2">
+          <Button type="primary" size="small" loading={loading} onClick={runCompare}>
+            对比
+          </Button>
+          <span className="text-[11px] text-slate-400">run_id 取自训练任务详情</span>
+        </div>
+        {data ? (
+          <div className="space-y-3">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-400">
+                  <th className="py-1 text-left font-normal">run</th>
+                  <th className="py-1 text-left font-normal">模型</th>
+                  <th className="py-1 text-right font-normal">特征</th>
+                  <th className="py-1 text-right font-normal">seed</th>
+                  <th className="py-1 text-right font-normal">test RankIC</th>
+                  <th className="py-1 text-right font-normal">Top20 25bp</th>
+                  <th className="py-1 text-right font-normal">MDD</th>
+                  <th className="py-1 text-right font-normal">HAC t</th>
+                  <th className="py-1 text-center font-normal">单轴</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.runs.map((row) => (
+                  <tr key={row.run_id} className="border-t border-slate-100">
+                    <td className="py-1 pr-2 font-mono text-[10px] text-slate-600 break-all">
+                      {row.run_id}
+                      {row.run_id === data.baseline_run_id ? (
+                        <Tag className="ml-1 rounded-full border-0 bg-slate-100 px-2 py-0 text-slate-500">
+                          基线
+                        </Tag>
+                      ) : null}
+                    </td>
+                    <td className="py-1 text-slate-600">{row.model_type || '—'}</td>
+                    <td className="py-1 text-right text-slate-600">{row.feature_count ?? '—'}</td>
+                    <td className="py-1 text-right text-slate-600">{row.seed ?? '—'}</td>
+                    <td className="py-1 text-right text-slate-600">{num(row.test_rank_ic, 4)}</td>
+                    <td className="py-1 text-right font-semibold text-slate-700">
+                      {pct(row.strict?.total_25bp)}
+                    </td>
+                    <td className="py-1 text-right text-slate-600">{pct(row.strict?.mdd)}</td>
+                    <td className="py-1 text-right text-slate-600">{num(row.strict?.hac_t)}</td>
+                    <td className="py-1 text-center">
+                      {row.run_id === data.baseline_run_id ? (
+                        '—'
+                      ) : row.single_axis ? (
+                        <Tag className="m-0 rounded-full border-0 bg-emerald-50 px-2 text-emerald-600">
+                          单轴
+                        </Tag>
+                      ) : (
+                        <Tag className="m-0 rounded-full border-0 bg-rose-50 px-2 text-rose-500">
+                          多轴
+                        </Tag>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {data.runs
+              .filter((row) => row.run_id !== data.baseline_run_id)
+              .map((row) => (
+                <div key={`diff-${row.run_id}`} className="rounded-xl bg-slate-50 p-2">
+                  <div className="text-[11px] font-semibold text-slate-600">
+                    {row.run_id} 相对基线差异（{row.diff_axes?.join(' / ') || '无'}）
+                  </div>
+                  <div className="mt-1 space-y-0.5 text-[11px] text-slate-600">
+                    {(row.diff_vs_baseline || []).map((d) => (
+                      <div key={d.path} className="font-mono break-all">
+                        <span className="text-slate-400">{d.path}</span>：{String(d.baseline)} →{' '}
+                        {String(d.candidate)}
+                      </div>
+                    ))}
+                    {!row.diff_vs_baseline?.length ? <div>配置一致</div> : null}
+                  </div>
+                </div>
+              ))}
+          </div>
+        ) : null}
+      </div>
+    </Modal>
+  );
+};
+
+/** WP7 数据审计：未来列/标签契约/trade_mask/ST/退市/指纹/季度 PIT 探针。 */
+const AuditSection: React.FC<{ runId?: string }> = ({ runId }) => {
+  const [loading, setLoading] = React.useState(false);
+  const [row, setRow] = React.useState<TrainingAuditRow | null>(null);
+
+  React.useEffect(() => {
+    if (!runId) {
+      setRow(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    modelTrainingService
+      .getTrainingAuditReport(runId)
+      .then((data) => {
+        if (!cancelled) setRow(data);
+      })
+      .catch(() => {
+        if (!cancelled) setRow(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  if (!runId) return null;
+
+  const levelTone: Record<string, string> = {
+    pass: 'bg-emerald-50 text-emerald-600',
+    fail: 'bg-rose-50 text-rose-500',
+    warn: 'bg-amber-50 text-amber-600',
+    info: 'bg-slate-100 text-slate-500',
+  };
+
+  return (
+    <Card
+      className="rounded-2xl border-slate-200"
+      size="small"
+      title={
+        <span className="text-sm font-black text-slate-800">
+          数据审计
+          <span className="ml-2 text-[10px] font-normal text-slate-400">
+            PIT / 泄漏 / 可成交 / 复现
+          </span>
+        </span>
+      }
+    >
+      {loading ? <div className="py-4 text-center text-xs text-slate-500">正在加载数据审计…</div> : null}
+      {!loading && (!row || row.status === 'failed') ? (
+        <Alert
+          type={row?.status === 'failed' ? 'error' : 'info'}
+          showIcon
+          className="rounded-2xl"
+          message={row?.status === 'failed' ? '数据审计失败' : '数据审计尚未生成'}
+          description={row?.error || '训练完成后会自动运行；老模型可在后台点「重算数据审计」。'}
+        />
+      ) : null}
+      {!loading && row?.status === 'ready' && row.report ? (
+        <div className="space-y-2">
+          {row.report.blocked ? (
+            <Alert
+              type="error"
+              showIcon
+              className="rounded-2xl"
+              message="审计未通过：该模型不可晋升"
+              description="存在 fail 级检查（见下方明细）。"
+            />
+          ) : null}
+          {(row.report.checks || []).map((check) => (
+            <div key={check.id} className="flex items-start gap-2 text-xs">
+              <Tag
+                className={clsx(
+                  'm-0 shrink-0 rounded-full border-0 px-2 py-0 text-[10px]',
+                  levelTone[check.status === 'fail' ? 'fail' : check.level] || levelTone.info,
+                )}
+              >
+                {check.status === 'fail' ? '未通过' : check.level === 'info' ? '信息' : '通过'}
+              </Tag>
+              <div className="min-w-0">
+                <span className="font-mono text-[11px] text-slate-600">{check.id}</span>
+                <span className="ml-2 text-slate-500">{check.detail}</span>
+              </div>
+            </div>
+          ))}
+          {row.report.warnings?.length ? (
+            <div className="rounded-xl bg-amber-50/60 p-2 text-[11px] text-amber-700">
+              {row.report.warnings.map((w, i) => (
+                <div key={i}>• {w}</div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </Card>
+  );
+};
+
 export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
   result,
   resultError,
@@ -340,7 +746,9 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
   onSetDefaultModel,
   onExportConfig,
   trainingStatus,
+  runId,
 }) => {
+  const [compareOpen, setCompareOpen] = React.useState(false);
   if (!result && !resultError) {
     return (
       <Card className="rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: 20 } }}>
@@ -359,6 +767,24 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
   const selectedFactors: FactorReportRow[] = (
     (result?.metadata?.factor_selection?.features ?? []) as FactorReportRow[]
   ).filter((f) => f.status === 'selected');
+
+  // WP1 输入漏斗：请求原文 → 目录解析 → 实际入模（老模型没有新字段时退化为原值）
+  const originalFeatureCount =
+    result?.metadata.requested_feature_count_original
+    ?? result?.metadata.requested_features_original?.length
+    ?? result?.metadata.requested_feature_count
+    ?? 0;
+  const resolvedFeatureCount =
+    result?.metadata.resolved_feature_count
+    ?? result?.metadata.resolved_features?.length
+    ?? result?.metadata.requested_feature_count
+    ?? 0;
+  const trainedFeatureCount = result?.metadata.feature_count ?? 0;
+  const missingFeatures = result?.metadata.missing_features ?? [];
+  const lineage = result?.metadata.lineage;
+  const catalogVersions = Object.entries(lineage?.factor_catalog_versions || {})
+    .map(([lib, vid]) => `${lib}:${String(vid).slice(-8)}`)
+    .join(' · ');
 
   return (
     <div className="space-y-4">
@@ -432,6 +858,14 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
                 >
                   导出训练配置
                 </Button>
+                <Button
+                  size="small"
+                  className="rounded-xl"
+                  disabled={!runId}
+                  onClick={() => setCompareOpen(true)}
+                >
+                  对比其他 run
+                </Button>
               </div>
             </Card>
 
@@ -451,21 +885,68 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
                 centered
               />
               <MetricCard
-                label="提交特征数"
-                value={`${result.metadata.requested_feature_count}`}
-                hint={`${result.request.selectedFeatures.length} 个提交维度`}
+                label="请求特征数"
+                value={`${originalFeatureCount}`}
+                hint={`目录解析 ${resolvedFeatureCount} 个`}
                 centered
               />
               <MetricCard
                 label="实际入模特征数"
-                value={`${result.metadata.feature_count}`}
-                hint={result.metadata.feature_categories.join(' / ') || '—'}
+                value={`${trainedFeatureCount}`}
+                hint={
+                  missingFeatures.length
+                    ? `缺失 ${missingFeatures.length} 个`
+                    : result.metadata.feature_categories.join(' / ') || '—'
+                }
                 centered
               />
             </div>
 
+            {missingFeatures.length > 0 ? (
+              <Alert
+                type="error"
+                showIcon
+                className="rounded-2xl"
+                message={`${missingFeatures.length} 个请求特征未进入训练`}
+                description={
+                  <span className="text-xs">
+                    目录解析后物理列缺失：{missingFeatures.slice(0, 20).join('、')}
+                    {missingFeatures.length > 20 ? ` …(+${missingFeatures.length - 20})` : ''}
+                  </span>
+                }
+              />
+            ) : null}
+
+            {lineage ? (
+              <Card className="rounded-2xl border-slate-200" size="small" title="训练血缘（可复现）">
+                <div className="grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-3">
+                  <LineageItem label="config hash" value={lineage.config_hash} />
+                  <LineageItem
+                    label="git commit"
+                    value={lineage.git_commit ? lineage.git_commit.slice(0, 10) : ''}
+                  />
+                  <LineageItem label="镜像" value={lineage.app_image} />
+                  <LineageItem
+                    label="seed"
+                    value={lineage.seed !== undefined ? String(lineage.seed) : ''}
+                  />
+                  <LineageItem label="因子目录" value={catalogVersions} />
+                  <LineageItem
+                    label="schema hash"
+                    value={lineage.factor_schema_hash ? lineage.factor_schema_hash.slice(0, 12) : ''}
+                  />
+                </div>
+              </Card>
+            ) : null}
+
             {/* 模型评估报告（预测强弱：IC 时序 / 分层收益 / 多空组合） */}
             <EvalReportSection report={result.eval_report || result.metadata.eval_report} />
+
+            {/* WP2 严格评估：净 Top-N / 可成交 / 三档成本 / HAC / PSR */}
+            <StrictEvalSection runId={runId} />
+
+            {/* WP7 数据审计：PIT / 泄漏 / 可成交 / 复现 */}
+            <AuditSection runId={runId} />
 
             <Card className="rounded-2xl border-slate-200" size="small" title="建议落盘文件">
               <div className="flex flex-wrap gap-2">
@@ -685,6 +1166,12 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
       {result?.metadata?.factor_selection ? (
         <FactorSelectionReport report={result.metadata.factor_selection} />
       ) : null}
+
+      <CompareRunsModal
+        open={compareOpen}
+        onClose={() => setCompareOpen(false)}
+        defaultRunId={runId}
+      />
     </div>
   );
 };

@@ -86,21 +86,27 @@ def _dispatch_gbdt_sklearn(
     X_val: np.ndarray,
     y_val: np.ndarray,
     groups: tuple | None = None,
+    sample_weight: tuple | None = None,
 ) -> Any:
     """GBDT/sklearn 组统一分派：lightgbm/xgboost/catboost/linear/random_forest/mlp。
 
     optuna 预搜索与分位分支保留在调用方原逻辑中，此处只替换裸训练函数选择。
     groups=(train_dates, val_dates)：排序损失（LambdaRank/YetiRank/rank:*）
     必需，按日分组；树模型之外的训练器忽略该参数。
+    sample_weight=(w_train, w_val)：WP3 样本权重，仅三棵 GBDT 支持（其余忽略并告警）。
     """
     trainer = MODEL_REGISTRY.get(model_type)
     if trainer is None:
         raise ValueError(f"Unsupported model_type: {model_type}")
+    kwargs: dict[str, Any] = {}
     if groups is not None and model_type in ("lightgbm", "xgboost", "catboost"):
-        return trainer.train_fn(
-            cfg, features, X_train, y_train, X_val, y_val, groups=groups
-        )
-    return trainer.train_fn(cfg, features, X_train, y_train, X_val, y_val)
+        kwargs["groups"] = groups
+    if sample_weight is not None:
+        if model_type in ("lightgbm", "xgboost", "catboost"):
+            kwargs["sample_weight"] = sample_weight
+        else:
+            logger.warning("sample_weight is ignored for model_type=%s", model_type)
+    return trainer.train_fn(cfg, features, X_train, y_train, X_val, y_val, **kwargs)
 
 class DLAdapter:
     """B3：DL/TFT 组统一分派适配（DataFrame 专属签名，与 6 参 Trainer 分离）。

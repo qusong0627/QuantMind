@@ -1,0 +1,14 @@
+# 临时派生构建：在现有 GPU 训练镜像上覆盖最新训练代码（含 WP3 sample_weights）。
+# 用途：避免 30-60 分钟的全量重建（torch/apt 缓存已失效），同时保持「镜像重建」而非热补丁。
+# 全量重建可后续用 docker/Dockerfile.oss --build-arg TORCH_DEVICE=gpu 完成。
+FROM quantmind-oss-gpu:latest
+
+COPY docker/training/train.py /app/train.py
+COPY docker/training/preprocessing.py /app/preprocessing.py
+COPY docker/training/parallel_utils.py /app/parallel_utils.py
+COPY docker/training/sample_weights.py /app/sample_weights.py
+COPY docker/training/model_trainers /app/model_trainers
+COPY docker/training /app/docker/training
+
+LABEL qm.torch.device=gpu
+LABEL qm.patch=wp3-sample-weights

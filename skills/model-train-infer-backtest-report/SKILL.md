@@ -1,6 +1,6 @@
 ---
 name: model-train-infer-backtest-report
-description: "模型训练-推理-组合回测-专业报告 全流程 — 提交T+N周期模型训练（13种模型类型：lightgbm/xgboost/catboost/random_forest/linear/mlp/gru/lstm/alstm/transformer/tabnet/tcn/nativetft，GPU训练+GPU推理）、批量推理全年、自定义组合策略回测(分数阈值+大盘MA+止损)、导出研报级MD+PDF报告。在 QuantBot / Claude Code 中训练模型、推理历史、回测策略、对比T+N周期、止损、大盘过滤、出报告、效益分析时使用。触发词：训练模型、模型训练、13种模型、推理全年、回测策略、T+3、T+5、周期对比、止损、大盘过滤、出报告、效益分析"
+description: "模型训练-推理-组合回测-专业报告 全流程 — 提交T+N周期模型训练（13种模型类型：lightgbm/xgboost/catboost/random_forest/linear/mlp/gru/lstm/alstm/transformer/tabnet/tcn/nativetft，GPU训练+GPU推理）、批量推理全年、自定义组合策略回测(分数阈值+大盘MA+止损)、严格评估（净Top-N/三档成本/HAC/PSR）、数据审计（PIT/泄漏/可成交）、多种子、A/B对比、导出研报级MD+PDF报告。在 QuantBot / Claude Code 中训练模型、推理历史、回测策略、对比T+N周期、止损、大盘过滤、出报告、效益分析时使用。触发词：训练模型、模型训练、13种模型、推理全年、回测策略、T+3、T+5、周期对比、止损、大盘过滤、出报告、效益分析、严格评估、净Top20、数据审计、多种子、A/B对比"
 ---
 
 > ## ⚙️ 运行环境契约（最高优先级，先于本文其余内容执行）
@@ -22,7 +22,7 @@ description: "模型训练-推理-组合回测-专业报告 全流程 — 提交
 
 # 模型训练-推理-回测-报告（全流程）技能
 
-覆盖 QuantMind 量化策略的**完整闭环**：训练模型 → 推理历史 → 组合回测 → 专业报告。用于验证"改个参数（周期/阈值/风控）收益会不会更好"这类问题，用数据说话而不是猜。
+覆盖 QuantMind 量化策略的**完整闭环**：训练模型 → 严格评估/数据审计 → 推理历史 → 组合回测 → 专业报告。用于验证"改个参数（周期/阈值/风控）收益会不会更好"这类问题，用数据说话而不是猜。
 
 ## 架构总览
 
@@ -31,10 +31,15 @@ description: "模型训练-推理-组合回测-专业报告 全流程 — 提交
    ├─ 模型类型 (13 种全支持): lightgbm / xgboost / catboost / random_forest /
    |  linear / mlp / gru / lstm / alstm / transformer / tabnet / tcn / nativetft
    ├─ T+N 周期选择 (T+1/T+3/T+5...)
-   ├─ 特征 (75~182 个来自 QuantDB)
-   ├─ GPU: 训练 GPU 满载; 推理已改 CUDA (train.py _predict_dl/_predict_nativetft, 有算力就用 GPU)
-   ├─ 质量门禁: test_rank_icir<0.05 或 test_rank_ic 非正 → status=candidate (产品逻辑, 非失败)
-   |  └─ 训练 2023-2025 → 推理 2026
+   ├─ 特征来源必须可解析：缺失即 422（allow_missing_features=true 才放行）
+   ├─ 损失: regression / binary / rank_xendcg / lambdarank
+   ├─ 样本卫生: tradeable_mask / ST PIT / 时间衰减
+   ├─ 质量门禁: test_rank_icir<0.05 或 test_rank_ic 非正 → status=candidate
+   └─ 训练完成 → 自动排队 严格评估 + 数据审计（应用侧，需重启后生效）
+①.5 严格评估 / 数据审计 (后置产物)
+   ├─ 严格评估: 净 Top-N × 三档成本 + HAC/PSR + 月度 + 换手 + 容量
+   ├─ 数据审计: 未来列 / 标签契约 / trade_mask / ST / 幸存者 / 指纹 / PIT 探针
+   └─ 晋升闸: 净 Top20(25bp)>0 且审计无 fail 才可 promote
 ② 推理历史 (批量推理 API)
    ├─ 单日 /models/inference/run
    └─ 批量 range 模式 推理全年逐个交易日
@@ -143,6 +148,69 @@ for m in json.load(sys.stdin)['data']:
 | T+5 | 稳定，低频 |
 | 判断 | 需要真实回测对比，不能凭感觉 |
 
+### 1.5 严格化训练管线（2026-11-20，WP1–WP7）
+
+训练提交与判优新增了四道闸，**判模型先看严格报告，不要只看 IC**。
+
+#### 提交侧硬闸
+- 请求特征在目录里有映射、但物理列不存在 → **422**（列出特征名，提示用 `库:列`，如 `tdx_ind:tdx_amihud`）。确实要跑残缺特征集才传 `allow_missing_features=true`（编排器只告警）。
+- 训练结果页显示漏斗：`请求 N → 目录解析 M → 入模 K`；有缺失时红色告警条，并带训练血缘（git commit / config hash / 目录版本 / seed）。
+- 排序损失与分位推理/Optuna 互斥：`objective=rank_xendcg|lambdarank` 时不要同时开 `prediction_mode=quantile` 或 `optuna.enabled`（提交期 422）。
+
+#### 新增可调开关（payload 直传）
+| 开关 | 作用 |
+|---|---|
+| `lgb_params.objective=rank_xendcg`（连续）或 `lambdarank`（10 档） | 排序损失；trainer 自动按 `trade_date` 分组，早停指标切 ndcg |
+| `lgb_params.seed/bagging_seed/feature_fraction_seed` | 显式随机种子；训练页也提供 seed 输入（LGB/XGB/CAT 自动映射） |
+| `sample_weight: {tradeable_mask: true, st: true, time_decay_half_life_days: 730}` | 不可交易/ST 样本权重置 0（标签仍按全市场截面算）；时间衰减只作用于 train；缺 mask/st 缓存时训练端 fail-closed |
+| `label_drop_extreme_pct: 0.05` | train 段剔除两端 5% 极端标签 |
+
+#### 训练完成后的两个后置产物（自动排队，失败不影响训练）
+1. **严格评估** `strict_report`：信号日收盘出分 → T+1 开盘买入（可切 close 对照）→ T+1+N 收盘卖出；ST/停牌/涨停买不进按 `trade_mask` 剔除；成本 15/25/40bp 三档；统计 HAC t、block bootstrap 95% CI、PSR；组合层给净 Top-N（20/50/100/200/500）、MDD、月度、换手、容量参与率。
+2. **数据审计** `audit_report`：未来列命名、标签契约（T+1/horizon/lag）、`trade_mask` 覆盖、ST 缓存覆盖、历史股票池幸存者代理、数据指纹、季度财务 PIT 探针摘要。
+
+查询（用户态，需登录）：
+```bash
+curl -s -H "$AUTH" "$BASE/api/v1/models/training-runs/<runId>/strict-report"
+curl -s -H "$AUTH" "$BASE/api/v1/models/training-runs/<runId>/audit-report"
+# 未生成返回 404；训练结果页会自动展示（严格评估卡 / 数据审计卡）
+# 管理员重算（后台异步）：
+#   POST $BASE/api/v1/admin/models/training-runs/<runId>/strict-report
+#   POST $BASE/api/v1/admin/models/training-runs/<runId>/audit-report
+```
+
+命令行回填/复算（容器内）：
+```bash
+docker exec -w /app quantmind python backend/scripts/strict_eval_run.py \
+  --run-id <runId> --model-id <modelId> --store --write-standard
+docker exec -w /app quantmind python backend/scripts/training_audit_run.py \
+  --run-id <runId> --model-id <modelId> --store
+```
+
+#### 判优口径（替代「只看 IC」）
+- **主判据**：测试段净 **Top20 @ 25bp > 0**，再看 MDD、超额（HS300/ZZ1000）、HAC t≥2、PSR≥0.8、月度不靠 1–2 个月。
+- 2026-11-19 实例（开盘买入 / 25bp）：`100特征 L1V5均衡` 测试段 Top20 +11.6%（MDD −15.2%，HAC t 0.67）；`100特征 2010起` +9.7%（MDD −26.7%，HAC t 0.42）。**同收益、回撤差一倍**——这就是严格报告的价值。
+- 数据审计里 `survivorship_universe` 常见 warning：pred 缺历史池 6.8% 股票，提示可能剔除了退市/长停股；不阻断但要在报告里写明。
+
+#### A/B 对比与多种子
+```bash
+# 两个 run 同口径对比（配置 diff + 单轴判定 + 严格评估摘要）
+curl -s -H "$AUTH" "$BASE/api/v1/models/training-runs/compare?ids=<runA>,<runB>"
+# 训练结果页「对比其他 run」弹窗同款；只差一个轴才算严格 A/B
+
+# 多种子顺序派发（单飞锁下串行，跑完自动汇总离散度）
+docker exec -w /app quantmind python backend/scripts/multi_seed_dispatch.py \
+  --base-run <runId> --seeds 42,7,2024 --submit
+```
+
+#### 晋升闸（模型 rollouts）
+`POST /api/v1/models/rollouts/{id}/promote` 默认要求：
+- 严格评估存在且测试段净 Top20(25bp) > 0；
+- 数据审计 ready 且无 fail 级检查。
+缺失/为负默认 400 阻断；确需放行要显式 `allow_strict_fail=true` / `allow_audit_fail=true`，warning 写进晋升审计。
+
+> 运维前提：后置评估与审计跑在**应用容器**（读 `/data`），训练完成后自动排队；训练镜像只负责训练。`sample_weight` 的 trainer 改动需要重建训练镜像后生效。
+
 ---
 
 ## ② 批量推理历史（全年）
@@ -200,6 +268,8 @@ asyncio.run(m())"
 | `backtest_l2_year.py` | 严格版 | 全年+滑点0.2%+T+1+涨跌停+ST剔除+资金分配 |
 | **`backtest_l2_optimized.py`** | **优化版（推荐）** | 分数阈值+大盘MA20过滤+止损5%+ST剔除+滑点+T+1 |
 
+> 与训练后置严格评估的分工：训练侧 strict_report 是「固定 H 日批次、同口径可比」的裁决口径；③ 的回测脚本是「策略参数（阈值/MA/止损）扫描」的研究口径。两者结论不一致时，以 strict_report 的可比口径做模型选择，再在脚本里找执行规则。
+
 ### 3.2 优化版策略规则（实测最有效）
 
 ```python
@@ -214,6 +284,8 @@ SLIPPAGE = 0.002        # 滑点0.2%
 1. **分数阈值**：只买 ≥0.015 高分（胜率 82-92%），<0.005 卖出
 2. **大盘 MA 过滤**：上证 <MA20 时空仓（躲开系统性下跌，回撤 51%→11%）
 3. **止损 5%**：单票亏 5% 止损（控制单票风险）
+
+> 注意：以上阈值来自 L2 家族的特定模型。换模型/换周期必须重跑 A/B，不要照搬。
 
 ### 3.3 运行回测（拷贝进容器，数据在 /data）
 
@@ -279,6 +351,8 @@ docker cp quantmind:/tmp/xxx_report.pdf "docs/xxx_report.pdf"
 8. **交易明细**：买卖/价格/盈亏/原因
 9. **策略规则说明**
 
+> 2026-11-20 起，报告里的模型段应附上 strict_report 的净 Top20（三档成本）与数据审计结论；只有 IC 没有净收益的报告不再作为选型依据。
+
 ---
 
 ## 5. 完整工作流示例（对比 T+3 vs T+5）
@@ -287,12 +361,13 @@ docker cp quantmind:/tmp/xxx_report.pdf "docs/xxx_report.pdf"
 # 1) 训练 T+3
 docker exec quantmind python3 /tmp/submit_t3_training.py   # → runId
 # 2) 等完成（轮询 training-runs）
-# 3) 推理全年
+# 3) 等严格评估就绪（GET .../strict-report；或 POST 管理员重算）
+# 4) 推理全年
 curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/models/inference/batch" \
   -d '{"model_id":"<T+3_id>","mode":"range","start_date":"2026-01-06","end_date":"2026-08-19"}'
-# 4) 回测 T+3 和 T+5（同一优化规则，各跑一次 backtest_l2_optimized）
-# 5) 对比：哪个收益高、回撤小、月/周表现
-# 6) 出报告：report_l2_optimized → md_to_pdf
+# 5) 回测 T+3 和 T+5（同一优化规则，各跑一次 backtest_l2_optimized）
+# 6) 对比：优先用 /training-runs/compare 的严格评估与单轴 diff
+# 7) 出报告：report_l2_optimized → md_to_pdf
 ```
 
 ---
@@ -302,11 +377,17 @@ curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/models/inference/batch" \
 | 问题 | 处置 |
 |---|---|
 | 训练进度卡住 | `docker ps` 看 qm-train 容器，`docker logs` 看 train.py 输出 |
+| 提交 422「目录陈旧/特征缺失」 | 该特征在目录里有映射但物理列没了；用 `库:列` 限定（如 `tdx_ind:tdx_amihud`）或先刷新/重发目录；确需放行才 `allow_missing_features=true` |
+| 实际入模特征远少于请求 | 看结果页漏斗与「缺失特征」红条；再看 `factor_selection.stage_counts`（IC/相关/PFS/DH 各剩多少） |
+| 严格评估 404 / 未生成 | 后置任务需要 API 进程已加载新代码；管理员 `POST .../strict-report` 重算，或容器内跑 `strict_eval_run.py --store` |
+| 排序损失提交 422 | rank_xendcg/lambdarank 与 quantile/optuna 互斥，先关掉后者 |
+| 样本权重训练直接报错 | `trade_mask.parquet` / `st_pit_cache` 缺失（fail-closed）；确认 `/data/quantdb` 对应路径存在 |
 | 推理慢/超时 | range 批量后台跑，耐心等；reuse_existing=true 断点续跑 |
 | 回测无买入 | 检查 MODEL_ID 是否对、分数是否 ≥0.015（分数太低自然空仓） |
 | 报告收益异常 | 确认 klines 覆盖区间、涨跌停/停牌处理、cron 时间 |
 | asyncio 冲突 | 混用 load_signals(asyncio) 和 psycopg2 时，加载函数统一用 psycopg2 同步 |
 | 年化离谱 | 短周期外推失真，看累计收益和回撤，别信年化 |
+| 晋升被 400 阻断 | 严格评估净 Top20≤0 或数据审计 fail；先看结果页两张卡，确需放行用 `allow_strict_fail/allow_audit_fail` |
 | 训练完主栏模型管理看不到 | 后台"模型管理"= 扫磁盘目录（148+ 个、按 updated_at 倒序、打开自动扫描）；主栏"模型管理"= 按登录用户查 qm_user_models。看不到先查归属：`SELECT user_id FROM qm_user_models WHERE model_id='mdl_cn_train_...'`，若 user_id ≠ 登录账号的 user_id，需 UPDATE 转移 |
 | 模型 status=candidate | 质量门禁未过（IC 不达标），正常流程非失败；CatBoost/Linear/NativeTFT 常落此档，推理/回测仍可用 |
 | DL 训练慢/卡 epoch1 | epoch1 CPU DataLoader 预热 3.5min 属正常，之后 GPU 满载 80s/epoch；若一直不动看 qm-train 容器日志 |
@@ -328,6 +409,8 @@ curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/models/inference/batch" \
 
 - 归档：qm_user_models `UPDATE ... SET status='archived'`（每用户唯一 is_default 约束：`uq_qm_user_models_default_per_user`，改默认前先摘旧）
 - 训练任务：admin_training_jobs（request_payload 可复刻、logs、result）
+- 严格评估：`qm_training_strict_reports`（run_id → report JSONB）
+- 数据审计：`qm_training_audit_reports`（run_id → report JSONB, blocked）
 
 ## 9. 相关脚本
 
@@ -336,4 +419,7 @@ curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/models/inference/batch" \
 - `scripts/backtest_l2_year.py` — 全年严格版
 - `scripts/backtest_l2_top20.py` — 基础版
 - `scripts/report_l2_optimized.py` — 研报级 MD 生成
+- `backend/scripts/strict_eval_run.py` — 严格评估（净 Top-N/三档成本/HAC/PSR）回填与落库
+- `backend/scripts/training_audit_run.py` — 数据审计（PIT/泄漏/可成交）
+- `backend/scripts/multi_seed_dispatch.py` — 多种子顺序派发 + 离散度
 - `backend/scripts/md_to_pdf_report.py` — MD→PDF 研报排版

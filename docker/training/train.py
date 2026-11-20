@@ -165,6 +165,42 @@ def _is_rank_loss(cfg: dict, model_type: str) -> bool:
     return loss in RANK_OBJECTIVES.get(mt, set())
 
 
+def _maybe_build_sample_weights(cfg: dict, train_df, val_df):
+    """WP3：按配置构建 (w_train, w_val)；未启用返回 None。
+
+    不可交易/ST 样本权重置 0（标签仍按全市场截面算），时间衰减只作用于 train。
+    缺 trade_mask/st_pit_cache 时抛错（fail-closed），绝不静默全 1。
+    """
+    sw = cfg.get("sample_weight")
+    if not isinstance(sw, dict) or not sw:
+        return None
+    enabled = (
+        bool(sw.get("tradeable_mask"))
+        or bool(sw.get("st"))
+        or float(sw.get("time_decay_half_life_days") or 0) > 0
+    )
+    if not enabled:
+        return None
+    quantdb_dir = str((cfg.get("data") or {}).get("quantdb_dir") or "").strip() or None
+    market = str((cfg.get("context") or {}).get("market") or "CN")
+    from sample_weights import build_weights
+
+    w_train = build_weights(
+        train_df, quantdb_dir=quantdb_dir, config=sw, market=market, with_decay=True
+    )
+    w_val = build_weights(
+        val_df, quantdb_dir=quantdb_dir, config=sw, market=market, with_decay=False
+    )
+    if float(w_train.sum()) <= 0:
+        raise RuntimeError("sample_weight: 训练集权重全为 0（可交易/ST 过滤过严）")
+    logger.info(
+        "Sample weights: train mean=%.3f zero=%.1f%%; val mean=%.3f zero=%.1f%%",
+        float(w_train.mean()), 100.0 * float((w_train == 0).mean()),
+        float(w_val.mean()), 100.0 * float((w_val == 0).mean()),
+    )
+    return (w_train, w_val)
+
+
 def _apply_label_formula_overrides(cfg: dict) -> None:
     """兼容旧 API 编排器：新标签字段也可能写在 label_formula 里。
 
@@ -477,6 +513,7 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
         extra_frames=[test_df, df], clip_value=feature_clip_for(model_type),
     )
     _trim_memory("after prepare")
+    _sample_weight = _maybe_build_sample_weights(cfg, train_df, val_df)
 
     # 路由到对应训练函数
     logger.info("Training model: %s (framework=%s)", model_type, _get_model_framework(model_type))
@@ -513,9 +550,9 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
             quantile_result = {"models": quantile_models, "calibration": calibration}
         else:
             # B2：树组查表分派（optuna 预搜索与分位分支保持原逻辑）
-            model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups)
+            model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups, sample_weight=_sample_weight)
     elif model_type in ("linear", "random_forest", "mlp"):
-        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups)
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups, sample_weight=_sample_weight)
     elif model_type == "nativetft":
         del X_train, X_val
         _trim_memory("before DL dispatch")
@@ -711,6 +748,7 @@ def _train_single_model(
         train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {},
         extra_frames=[test_df, df], clip_value=feature_clip_for(model_type),
     )
+    _sample_weight = _maybe_build_sample_weights(cfg, train_df, val_df)
 
     if model_type in ("lightgbm", "xgboost", "catboost"):
         # Optuna 自动超参搜索：显式 optuna.enabled=true 时，先搜索最优参数再训练。
@@ -734,9 +772,9 @@ def _train_single_model(
                 _merge_cfg["model"] = _model_cfg
                 cfg = _merge_cfg
         # B2：树组查表分派（optuna 预搜索保持原逻辑）
-        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups)
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups, sample_weight=_sample_weight)
     elif model_type in ("linear", "random_forest", "mlp"):
-        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups)
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val, groups=_rank_groups, sample_weight=_sample_weight)
     elif model_type == "nativetft":
         del X_train, X_val
         _trim_memory("before DL dispatch (single tft)")

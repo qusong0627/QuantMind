@@ -185,6 +185,8 @@ class TrainingConfig(BaseModel):
     max_time_minutes: int = 120
     factor_selection: dict | None = None
     preprocessing: dict | None = None
+    # WP3 样本权重：{tradeable_mask, st, time_decay_half_life_days}
+    sample_weight: dict | None = None
     # ── 死配置：只建类型，不发射 ──
     optuna: dict | None = Field(default=None, exclude=True)
     drift: dict | None = Field(default=None, exclude=True)
@@ -204,7 +206,14 @@ class TrainingConfig(BaseModel):
 
 
 # 条件键：现状缺失时不发射（无键），schema 侧以 None 占位。
-CONDITIONAL_KEYS = ("split", "wfa", "rolling_meta", "factor_selection", "preprocessing")
+CONDITIONAL_KEYS = (
+    "split",
+    "wfa",
+    "rolling_meta",
+    "factor_selection",
+    "preprocessing",
+    "sample_weight",
+)
 
 
 def dump_contract_dict(cfg: TrainingConfig) -> dict:

@@ -388,6 +388,34 @@ async def cancel_training_run(
 
 
 @router.post(
+    "/training-runs/{run_id}/strict-report",
+    summary="重算严格评估报告（管理员，后台异步）",
+)
+async def recompute_strict_report(
+    run_id: str,
+    current_user: dict[str, Any] = Depends(require_admin),
+):
+    from backend.services.engine.training.strict_eval_service import schedule_strict_eval
+
+    schedule_strict_eval(run_id)
+    return {"ok": True, "run_id": run_id, "scheduled": True}
+
+
+@router.post(
+    "/training-runs/{run_id}/audit-report",
+    summary="重算数据审计报告（管理员，后台异步）",
+)
+async def recompute_audit_report(
+    run_id: str,
+    current_user: dict[str, Any] = Depends(require_admin),
+):
+    from backend.services.engine.training.pit_audit_service import schedule_audit
+
+    schedule_audit(run_id)
+    return {"ok": True, "run_id": run_id, "scheduled": True}
+
+
+@router.post(
     "/training-runs/{run_id}/complete",
     summary="训练完成回调（内部接口）",
     status_code=401,

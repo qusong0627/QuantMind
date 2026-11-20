@@ -27,6 +27,121 @@ export interface ModelTrainingRunStatus {
   isCompleted: boolean;
 }
 
+/** WP2 严格评估：单个 Top-N 的成本块（15/25/40bp 各一份） */
+export interface StrictEvalCostBlock {
+  total: number;
+  annualized: number;
+  mdd: number;
+  win_batches: number;
+  avg_ret: number;
+  excess_hs300: number;
+  excess_zz1000: number;
+  t_stat: number;
+  hac_t: number;
+  bootstrap_ci: [number, number];
+  psr: number;
+  monthly: Array<{ month: string; ret: number }>;
+}
+
+export interface StrictEvalTopBlock {
+  batches: number;
+  gross_mean: number;
+  win_batches: number;
+  overlap_prev: number | null;
+  turnover_per_batch: number | null;
+  bench_hs300: number;
+  bench_zz1000: number;
+  participation: {
+    n: number;
+    median?: number;
+    p95?: number;
+    max?: number;
+    over_10pct?: number;
+  };
+  signal_dates: string[];
+  batch_returns_gross: number[];
+  monthly_gross: Array<{ month: string; ret: number }>;
+  [costKey: string]: unknown;
+}
+
+export interface StrictEvalReportRow {
+  run_id: string;
+  model_id?: string | null;
+  market: string;
+  horizon_days: number;
+  entry_price: string;
+  status: 'ready' | 'running' | 'failed' | string;
+  error?: string;
+  generated_at?: string;
+  report: {
+    version: number;
+    run_id: string;
+    market: string;
+    horizon_days: number;
+    entry_price: string;
+    cost_bps: number[];
+    segments: Record<string, { start: string; end: string }>;
+    results: Record<string, Record<string, StrictEvalTopBlock>>;
+  };
+}
+
+/** WP6 run 对比 */
+export interface TrainingRunCompareRow {
+  run_id: string;
+  status?: string;
+  display_name?: string;
+  model_type?: string;
+  target_horizon_days?: number;
+  feature_count?: number;
+  seed?: number;
+  test_rank_ic?: number;
+  strict: {
+    status: string;
+    segment?: string;
+    window?: { start?: string; end?: string } | null;
+    batches?: number;
+    total_25bp?: number;
+    mdd?: number;
+    excess_hs300?: number;
+    hac_t?: number;
+    psr?: number;
+    turnover_per_batch?: number;
+    error?: string;
+  };
+  diff_vs_baseline?: Array<{ path: string; baseline: unknown; candidate: unknown }>;
+  diff_axes?: string[];
+  single_axis?: boolean;
+}
+
+export interface TrainingRunCompareResult {
+  baseline_run_id: string;
+  runs: TrainingRunCompareRow[];
+}
+
+/** WP7 数据审计 */
+export interface TrainingAuditCheck {
+  id: string;
+  level: 'fail' | 'warn' | 'info' | string;
+  status: 'pass' | 'fail' | string;
+  detail: string;
+}
+
+export interface TrainingAuditRow {
+  run_id: string;
+  model_id?: string | null;
+  status: 'ready' | 'running' | 'failed' | string;
+  blocked: boolean;
+  error?: string;
+  generated_at?: string;
+  report: {
+    version: number;
+    run_id: string;
+    blocked: boolean;
+    warnings: string[];
+    checks: TrainingAuditCheck[];
+  };
+}
+
 /** 训练数据缓存探测结果（D3；key 与训练侧同源） */
 export interface TrainingCacheStatus {
   hit: boolean;
@@ -745,6 +860,43 @@ class ModelTrainingService {
   async getTrainingRun(runId: string): Promise<ModelTrainingRunStatus> {
     const resp = await this.client.get<ModelTrainingRunStatus>(`/models/training-runs/${runId}`);
     return resp.data;
+  }
+
+  /** 严格评估报告（WP2）：未生成/计算中返回 null，由页面显示占位。 */
+  async getTrainingStrictReport(runId: string): Promise<StrictEvalReportRow | null> {
+    try {
+      const resp = await this.client.get<StrictEvalReportRow>(
+        `/models/training-runs/${runId}/strict-report`,
+      );
+      return resp.data ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** WP6 训练 run 对比：同口径严格评估 + 配置 diff + 单轴判定。 */
+  async compareTrainingRuns(ids: string[]): Promise<TrainingRunCompareResult | null> {
+    try {
+      const resp = await this.client.get<TrainingRunCompareResult>(
+        `/models/training-runs/compare`,
+        { params: { ids: ids.join(',') } },
+      );
+      return resp.data ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** WP7 数据审计报告：未生成返回 null。 */
+  async getTrainingAuditReport(runId: string): Promise<TrainingAuditRow | null> {
+    try {
+      const resp = await this.client.get<TrainingAuditRow>(
+        `/models/training-runs/${runId}/audit-report`,
+      );
+      return resp.data ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**

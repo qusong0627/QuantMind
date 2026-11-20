@@ -860,6 +860,79 @@ async def get_active_training_run(
     return latest
 
 
+@router.get(
+    "/training-runs/compare",
+    summary="训练 run 对比（同口径严格评估 + 配置 diff + 单轴判定）",
+)
+async def compare_training_runs(
+    ids: str = Query(..., description="逗号分隔 run_id（2~5 个）"),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    run_ids = [x.strip() for x in str(ids or "").split(",") if x.strip()]
+    if not (2 <= len(run_ids) <= 5):
+        raise HTTPException(status_code=422, detail="ids 需要 2~5 个 run_id")
+
+    from backend.services.engine.training.run_compare import (
+        canonical_config,
+        config_diff,
+        diff_axes,
+        is_single_axis,
+        summarize_strict,
+    )
+    from backend.services.engine.training.strict_eval_service import fetch_report
+
+    rows: list[dict[str, Any]] = []
+    configs: list[dict[str, Any]] = []
+    for rid in run_ids:
+        detail = await get_training_run_for_owner(rid, current_user)
+        request = await get_training_run_request_for_owner(rid, current_user)
+        payload = request.get("request") if isinstance(request, dict) else {}
+        payload = payload if isinstance(payload, dict) else {}
+        cfg = canonical_config(payload)
+        report = await fetch_report(rid)
+        result = detail.get("result") if isinstance(detail, dict) else {}
+        meta = (result or {}).get("metadata") or {}
+        eval_report = (result or {}).get("eval_report") or meta.get("eval_report") or {}
+        by_split = (eval_report or {}).get("by_split") or {}
+        test_split = by_split.get("test") or {}
+        test_metrics = ((result or {}).get("metrics") or {}).get("test") or {}
+        lineage = meta.get("lineage") if isinstance(meta.get("lineage"), dict) else {}
+        lgb_params = payload.get("lgb_params") if isinstance(payload.get("lgb_params"), dict) else {}
+        trained_count = meta.get("feature_count")
+        rows.append(
+            {
+                "run_id": rid,
+                "status": detail.get("status"),
+                "display_name": payload.get("display_name")
+                or payload.get("job_name")
+                or meta.get("display_name")
+                or rid,
+                "model_type": payload.get("model_type"),
+                "target_horizon_days": payload.get("target_horizon_days"),
+                "feature_count": trained_count or len(payload.get("features") or []),
+                "seed": lineage.get("seed")
+                if lineage.get("seed") is not None
+                else lgb_params.get("seed"),
+                "test_rank_ic": test_metrics.get("rank_ic")
+                if test_metrics.get("rank_ic") is not None
+                else test_split.get("mean"),
+                "strict": summarize_strict(report),
+            }
+        )
+        configs.append(cfg)
+
+    baseline = configs[0]
+    rows[0]["diff_vs_baseline"] = []
+    rows[0]["diff_axes"] = []
+    rows[0]["single_axis"] = True
+    for idx in range(1, len(rows)):
+        diffs = config_diff(baseline, configs[idx])
+        rows[idx]["diff_vs_baseline"] = diffs
+        rows[idx]["diff_axes"] = diff_axes(diffs)
+        rows[idx]["single_axis"] = is_single_axis(diffs)
+    return {"baseline_run_id": run_ids[0], "runs": rows}
+
+
 @router.get("/training-runs/{run_id}", summary="获取训练任务状态（用户态）")
 async def get_training_run(
     run_id: str,
@@ -877,6 +950,40 @@ async def get_training_run_request(
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     return await get_training_run_request_for_owner(run_id, current_user)
+
+
+@router.get(
+    "/training-runs/{run_id}/strict-report",
+    summary="获取训练 run 的严格评估报告（用户态）",
+)
+async def get_training_run_strict_report(
+    run_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    await get_training_run_for_owner(run_id, current_user)  # 所有权/存在性校验
+    from backend.services.engine.training.strict_eval_service import fetch_report
+
+    report = await fetch_report(run_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="strict_report_not_ready")
+    return report
+
+
+@router.get(
+    "/training-runs/{run_id}/audit-report",
+    summary="获取训练 run 的数据审计报告（用户态）",
+)
+async def get_training_run_audit_report(
+    run_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    await get_training_run_for_owner(run_id, current_user)
+    from backend.services.engine.training.pit_audit_service import fetch_audit
+
+    audit = await fetch_audit(run_id)
+    if audit is None:
+        raise HTTPException(status_code=404, detail="audit_report_not_ready")
+    return audit
 
 
 @router.post("/training-runs/{run_id}/cancel", summary="取消训练任务（用户态）")

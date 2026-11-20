@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from argparse import Namespace
 from datetime import datetime, timezone
 from typing import Any
@@ -48,6 +49,104 @@ from backend.shared.model_registry import (
     _model_market_of,
     model_registry_service,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def audit_gate(
+    *,
+    source_run_id: str | None,
+    audit_row: dict[str, Any] | None,
+    allow_fail: bool = False,
+) -> tuple[bool, str, list[str]]:
+    """WP7 晋升闸：数据审计必须 ready 且无 fail 级检查；allow 才放行。"""
+    warnings: list[str] = []
+    if not source_run_id:
+        return False, "", ["模型无 source_run_id，跳过数据审计闸"]
+    if not audit_row:
+        if allow_fail:
+            warnings.append("缺少数据审计（allow_audit_fail=true 放行）")
+            return False, "", warnings
+        return (
+            True,
+            f"模型 {source_run_id} 缺少数据审计报告：先 POST "
+            f"/api/v1/models/training-runs/{source_run_id}/audit-report",
+            [],
+        )
+    status = str(audit_row.get("status") or "")
+    if status != "ready":
+        if allow_fail:
+            warnings.append(f"数据审计状态={status}（allow_audit_fail=true 放行）")
+            return False, "", warnings
+        return True, f"数据审计状态={status}，未就绪", []
+    report = audit_row.get("report") or {}
+    failing = [
+        c for c in (report.get("checks") or [])
+        if str(c.get("level")) == "fail" and str(c.get("status")) == "fail"
+    ]
+    if failing and not allow_fail:
+        detail = "; ".join(f"{c.get('id')}: {c.get('detail')}" for c in failing[:4])
+        return True, f"数据审计未通过：{detail}", []
+    if failing and allow_fail:
+        warnings.append(
+            "数据审计未通过（allow_audit_fail=true 放行）："
+            + "; ".join(str(c.get("id")) for c in failing[:6])
+        )
+    warnings.extend(str(w) for w in (audit_row.get("report") or {}).get("warnings") or [])
+    return False, "", warnings
+
+
+def strict_report_gate(
+    *,
+    source_run_id: str | None,
+    report_row: dict[str, Any] | None,
+    allow_fail: bool = False,
+) -> tuple[bool, str, list[str]]:
+    """WP6 晋升闸：有训练 run 的挑战者必须有严格评估，且测试段净 Top20(25bp) > 0。
+
+    返回 (blocked, reason, warnings)。``allow_fail=True`` 只放行「报告缺失/状态非 ready/
+    收益 ≤ 0」三类，并留 warning 供审计；不改变其他闸门。
+    """
+    warnings: list[str] = []
+    if not source_run_id:
+        return False, "", ["模型无 source_run_id，跳过严格评估闸"]
+    if not report_row:
+        if allow_fail:
+            warnings.append("缺少严格评估报告（allow_strict_fail=true 放行）")
+            return False, "", warnings
+        return (
+            True,
+            f"模型 {source_run_id} 缺少严格评估报告：先 POST "
+            f"/api/v1/models/training-runs/{source_run_id}/strict-report",
+            [],
+        )
+    status = str(report_row.get("status") or "")
+    if status != "ready":
+        if allow_fail:
+            warnings.append(f"严格评估状态={status}（allow_strict_fail=true 放行）")
+            return False, "", warnings
+        return True, f"严格评估状态={status}，未就绪", []
+
+    report = report_row.get("report") or {}
+    results = report.get("results") or {}
+    segment = results.get("test") or (list(results.values())[-1] if results else {})
+    top20 = (segment or {}).get("top20") or {}
+    cost = top20.get("cost_25bp") or {}
+    total = cost.get("total")
+    if total is None:
+        return True, "严格评估缺少 top20 / cost_25bp 结果", []
+    total = float(total)
+    if total <= 0 and not allow_fail:
+        return True, f"严格评估测试段净 Top20(25bp) = {total:.2%} ≤ 0，禁止晋升", []
+    hac = cost.get("hac_t")
+    psr = cost.get("psr")
+    if hac is not None and float(hac) < 2:
+        warnings.append(f"严格评估 HAC t={float(hac):.2f} < 2（统计不显著）")
+    if psr is not None and float(psr) < 0.8:
+        warnings.append(f"严格评估 PSR={float(psr):.2f} < 0.8")
+    if allow_fail and total <= 0:
+        warnings.append(f"allow_strict_fail=true 放行负收益（{total:.2%}）")
+    return False, "", warnings
 from backend.shared.model_rollout import evaluate_rollout
 from backend.shared.utc_datetime import utc_now
 from backend.services.engine.services.model_inference_persistence import (
@@ -494,6 +593,8 @@ class ModelRolloutService:
         notes: str,
         owner: tuple[str, str] | None = None,
         allow_schema_drift: bool = False,
+        allow_strict_fail: bool = False,
+        allow_audit_fail: bool = False,
     ) -> dict[str, Any]:
         if not str(notes or "").strip():
             raise RolloutInvalid("晋升必须填写理由（审计）")
@@ -528,6 +629,46 @@ class ModelRolloutService:
         if promotion_contract.get("blocked"):
             raise RolloutInvalid(contract_block_message(promotion_contract))
         warnings.extend(str(w) for w in promotion_contract.get("warnings") or [])
+
+        # WP6 晋升闸：严格评估（净 Top20 / 25bp / 可成交）必须存在且为正；
+        # 显式 allow_strict_fail=true 可放行但留 warning（审计）。
+        source_run_id = str((challenger or {}).get("source_run_id") or "")
+        strict_row = None
+        if source_run_id:
+            try:
+                from backend.services.engine.training.strict_eval_service import (
+                    fetch_report,
+                )
+
+                strict_row = await fetch_report(source_run_id)
+            except Exception as exc:  # noqa: BLE001 — 评估表缺失不阻断契约层；由闸门判定
+                logger.warning("strict report fetch failed for %s: %s", source_run_id, exc)
+        strict_blocked, strict_reason, strict_warnings = strict_report_gate(
+            source_run_id=source_run_id,
+            report_row=strict_row,
+            allow_fail=allow_strict_fail,
+        )
+        if strict_blocked:
+            raise RolloutInvalid(strict_reason)
+        warnings.extend(strict_warnings)
+
+        # WP7 数据审计闸：未来列/标签契约/trade_mask 覆盖等 fail 级检查必须通过。
+        audit_row = None
+        if source_run_id:
+            try:
+                from backend.services.engine.training.pit_audit_service import fetch_audit
+
+                audit_row = await fetch_audit(source_run_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("audit report fetch failed for %s: %s", source_run_id, exc)
+        audit_blocked, audit_reason, audit_warnings = audit_gate(
+            source_run_id=source_run_id,
+            audit_row=audit_row,
+            allow_fail=allow_audit_fail,
+        )
+        if audit_blocked:
+            raise RolloutInvalid(audit_reason)
+        warnings.extend(audit_warnings)
 
         now = datetime.now(timezone.utc)
 

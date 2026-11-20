@@ -124,8 +124,21 @@ export interface TrainingParams {
   bagging_fraction: number;
   num_boost_round: number;
   early_stopping_rounds: number;
-  objective: 'regression' | 'binary';
-  metric: 'l2' | 'rmse' | 'mae' | 'auc' | 'binary_logloss';
+  objective:
+    | 'regression'
+    | 'binary'
+    | 'rank_xendcg'
+    | 'lambdarank';
+  metric:
+    | 'l2'
+    | 'rmse'
+    | 'mae'
+    | 'auc'
+    | 'binary_logloss'
+    | 'ndcg'
+    | 'map';
+  /** 随机种子（WP4/WP5）：GBDT 三棵树共用一个入口 */
+  seed?: number;
   // LightGBM specific (optional, falls back to shared learning_rate/max_depth)
   lgb_learning_rate?: number;
   lgb_max_depth?: number;
@@ -171,6 +184,12 @@ export interface TrainingParams {
   preprocessingStandardize?: 'zscore' | 'rank';
   /** 缺失填充：median（默认，截面中位数）| zero（直接填 0） */
   preprocessingFill?: 'median' | 'zero';
+  /** WP3 样本权重：不可交易（涨停/停牌）样本权重置 0 */
+  sampleTradeableMask?: boolean;
+  /** WP3 样本权重：ST 样本权重置 0（PIT） */
+  sampleExcludeST?: boolean;
+  /** WP3 样本权重：时间衰减半衰期（天），0=不衰减 */
+  sampleDecayHalfLifeDays?: number;
   /** Stacking 集成参数 */
   n_folds?: number;
   meta_alpha?: number;
@@ -393,6 +412,23 @@ export interface TrainingResult {
     feature_count: number;
     requested_feature_count: number;
     requested_features: string[];
+    /** WP1 输入可审计：请求原文（可能含目录解析前就被过滤的项） */
+    requested_features_original?: string[];
+    requested_feature_count_original?: number;
+    /** 目录解析后进入训练配置的特征 */
+    resolved_features?: string[];
+    resolved_feature_count?: number;
+    /** 目录有映射但物理列缺失 / 物理核对被丢弃的特征 */
+    missing_features?: string[];
+    /** 训练血缘：代码、镜像、配置哈希、目录版本、seed */
+    lineage?: {
+      git_commit?: string;
+      app_image?: string;
+      config_hash?: string;
+      factor_catalog_versions?: Record<string, string>;
+      factor_schema_hash?: string;
+      seed?: number;
+    };
     auto_appended_feature_count: number;
     auto_appended_features: string[];
     feature_categories: string[];
@@ -532,6 +568,8 @@ export interface FeatureCategory {
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
 export const STORAGE_KEY = 'qm:model-training:draft';
+/** 模型管理「重新训练」带入的配置（sessionStorage，消费一次即删）。 */
+export const RETRAIN_SEED_STORAGE_KEY = 'qm:model-training:seed-from-model';
 export const TRAINING_CONFIG_KIND = 'quantmind-model-training-config';
 export const TRAINING_CONFIG_SCHEMA_VERSION = 1 as const;
 export const DEFAULT_MODEL_VERSION = 'Base';
@@ -782,11 +820,17 @@ export const DEFAULT_PARAMS: TrainingParams = {
   early_stopping_rounds: 50,
   objective: 'regression',
   metric: 'l2',
+  // 随机种子：显式下发，保证同一配置可复现（后端默认也是 42）
+  seed: 42,
   // 特征截面预处理（精细口径，未启用时不进载荷）
   preprocessingEnabled: false,
   preprocessingWinsorQ: [0.01, 0.99],
   preprocessingStandardize: 'zscore',
   preprocessingFill: 'median',
+  // 样本卫生（WP3）：默认关闭，显式开启才进载荷
+  sampleTradeableMask: false,
+  sampleExcludeST: false,
+  sampleDecayHalfLifeDays: 0,
   // XGBoost
   xgb_max_depth: 4,
   xgb_subsample: 0.7,
@@ -1730,6 +1774,13 @@ export const buildBackendTrainingPayload = (
       bagging_fraction: request.params.bagging_fraction,
       objective: request.params.objective,
       metric: request.params.metric,
+      ...(request.params.seed != null
+        ? {
+            seed: request.params.seed,
+            bagging_seed: request.params.seed,
+            feature_fraction_seed: request.params.seed,
+          }
+        : {}),
     },
     xgb_params: {
       max_depth: request.params.xgb_max_depth ?? (request.params.max_depth && request.params.max_depth > 0 ? request.params.max_depth : 4),
@@ -1739,7 +1790,15 @@ export const buildBackendTrainingPayload = (
       reg_alpha: request.params.xgb_reg_alpha ?? 0.5,
       reg_lambda: request.params.xgb_reg_lambda ?? 2.0,
       min_child_weight: request.params.xgb_min_child_weight ?? 100,
-      objective: request.params.objective === 'binary' ? 'binary:logistic' : 'reg:squarederror',
+      objective:
+        request.params.objective === 'binary'
+          ? 'binary:logistic'
+          : request.params.objective === 'lambdarank'
+            ? 'rank:ndcg'
+            : request.params.objective === 'rank_xendcg'
+              ? 'rank:pairwise'
+              : 'reg:squarederror',
+      ...(request.params.seed != null ? { seed: request.params.seed } : {}),
     },
     catboost_params: {
       depth: request.params.cb_depth ?? request.params.max_depth ?? 6,
@@ -1748,7 +1807,13 @@ export const buildBackendTrainingPayload = (
       random_strength: request.params.cb_random_strength ?? 1.5,
       bagging_temperature: request.params.cb_bagging_temperature ?? 0.8,
       od_wait: request.params.cb_od_wait ?? 100,
-      loss_function: request.params.metric === 'auc' ? 'Logloss' : 'RMSE',
+      loss_function:
+        request.params.objective === 'rank_xendcg' || request.params.objective === 'lambdarank'
+          ? 'YetiRank'
+          : request.params.metric === 'auc'
+            ? 'Logloss'
+            : 'RMSE',
+      ...(request.params.seed != null ? { random_seed: request.params.seed } : {}),
     },
     dl_params: {
       hidden_size: request.params.dl_hidden_size ?? 64,
@@ -1823,6 +1888,20 @@ export const buildBackendTrainingPayload = (
       preprocessing.fill = 'zero';
     }
     payload.preprocessing = preprocessing;
+  }
+
+  // 样本卫生（WP3）：可交易 mask / ST PIT / 时间衰减；三项全关不发载荷。
+  const sampleWeight = {
+    tradeable_mask: !!request.params.sampleTradeableMask,
+    st: !!request.params.sampleExcludeST,
+    time_decay_half_life_days: Number(request.params.sampleDecayHalfLifeDays || 0),
+  };
+  if (
+    sampleWeight.tradeable_mask ||
+    sampleWeight.st ||
+    sampleWeight.time_decay_half_life_days > 0
+  ) {
+    payload.sample_weight = sampleWeight;
   }
 
   // 训练节点（local=本机 Docker，autodl-xxx=AutoDL 远程 GPU）

@@ -361,6 +361,8 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                       options={[
                         { label: '回归 (regression)', value: 'regression' },
                         { label: '二分类 (binary)', value: 'binary' },
+                        { label: '排序 XendCG (rank_xendcg)', value: 'rank_xendcg' },
+                        { label: '排序 LambdaRank (lambdarank)', value: 'lambdarank' },
                       ]}
                     />
                   </div>
@@ -378,8 +380,28 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                         { label: 'MAE', value: 'mae' },
                         { label: 'AUC', value: 'auc' },
                         { label: 'Binary Logloss', value: 'binary_logloss' },
+                        { label: 'NDCG（排序）', value: 'ndcg' },
+                        { label: 'MAP（排序）', value: 'map' },
                       ]}
                     />
+                  </div>
+                </Col>
+              </Row>
+              <Row gutter={[12, 12]}>
+                <Col span={12}>
+                  <div className="space-y-1">
+                    <div className="text-xs text-slate-500">随机种子 (seed)</div>
+                    <InputNumber
+                      value={params.seed ?? 42}
+                      min={0}
+                      max={999999}
+                      step={1}
+                      className="w-full"
+                      onChange={(v) => onParamsChange({ ...params, seed: Number(v ?? 42) })}
+                    />
+                    <div className="text-[10px] text-slate-400">
+                      同一配置 + 同一种子可复现；多种子对照见 multi_seed_dispatch.py
+                    </div>
                   </div>
                 </Col>
               </Row>
@@ -869,6 +891,53 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                 </div>
               </div>
             )}
+          </div>
+
+          {/* ── 样本卫生（WP3） ── */}
+          <div className="rounded-2xl border border-emerald-100 bg-white px-3 py-2">
+            <div className="space-y-0.5">
+              <div className="text-xs font-semibold text-slate-700">样本卫生（可交易 / ST / 时间衰减）</div>
+              <div className="text-[11px] text-slate-400 leading-relaxed">
+                不可交易样本权重置 0（标签仍按全市场截面计算，不改变目标分布）；时间衰减让近期样本权重更高。仅 CN 可用，缺数据时训练端会直接报错。
+              </div>
+            </div>
+            <div className="mt-2.5 grid grid-cols-3 gap-2 border-t border-emerald-50 pt-2.5">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-[11px] text-slate-500">可交易过滤</span>
+                <Switch
+                  size="small"
+                  checked={!!params.sampleTradeableMask}
+                  onChange={(checked) =>
+                    onParamsChange({ ...params, sampleTradeableMask: checked })
+                  }
+                />
+              </div>
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-[11px] text-slate-500">剔除 ST</span>
+                <Switch
+                  size="small"
+                  checked={!!params.sampleExcludeST}
+                  onChange={(checked) => onParamsChange({ ...params, sampleExcludeST: checked })}
+                />
+              </div>
+              <div className="space-y-1">
+                <div className="text-[11px] text-slate-500">时间衰减半衰期</div>
+                <Select
+                  size="small"
+                  className="w-full"
+                  value={params.sampleDecayHalfLifeDays || 0}
+                  onChange={(v) =>
+                    onParamsChange({ ...params, sampleDecayHalfLifeDays: Number(v) })
+                  }
+                  options={[
+                    { value: 0, label: '不衰减' },
+                    { value: 365, label: '1 年' },
+                    { value: 730, label: '2 年' },
+                    { value: 1095, label: '3 年' },
+                  ]}
+                />
+              </div>
+            </div>
           </div>
 
           {/* ── 收益率分位推理 ── */}

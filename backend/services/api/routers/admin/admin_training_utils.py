@@ -26,6 +26,7 @@ from backend.services.engine.training.local_docker_orchestrator import LocalDock
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
 from backend.services.engine.data_platform.quantdb_factor_reader import (
     QuantDBFactorReader,
+    split_features_by_availability,
     split_qualified_source,
 )
 from backend.shared.database_manager_v2 import get_session
@@ -50,6 +51,50 @@ _MARKET_TO_XCAL = {"CN": "XSHG", "US": "XNYS", "HK": "XHKG", "FUTURES": "CME"}
 
 
 # _clamp_int 下沉至 backend.shared.training.request（单源），此处 import 复用。
+
+
+def _read_git_commit() -> str:
+    """读 .git/HEAD（容器挂载了 /app/.git）；读不到返回空串，不阻塞提交。"""
+    try:
+        root = Path(__file__).resolve().parents[5]
+        git_dir = root / ".git"
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref: "):
+            return head
+        ref = head[5:].strip()
+        ref_path = git_dir / ref
+        if ref_path.exists():
+            return ref_path.read_text(encoding="utf-8").strip()
+        packed = git_dir / "packed-refs"
+        if packed.exists():
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return parts[0]
+        return ""
+    except Exception:  # noqa: BLE001 — 血缘是增值信息，不得阻塞训练
+        return ""
+
+
+def _build_lineage(payload: dict[str, Any]) -> dict[str, Any]:
+    """训练血缘：git 版本、镜像、配置哈希、目录版本、数据指纹、seed。
+
+    唯一目的：任何模型都能回答「用哪份代码、哪份数据、哪套目录、哪个 seed 训的」。
+    """
+    import hashlib
+
+    volatile = {"generated_at", "tenant_id", "user_id", "job_name", "display_name"}
+    stable = {k: v for k, v in payload.items() if k not in volatile}
+    encoded = json.dumps(stable, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    lgb_params = payload.get("lgb_params") if isinstance(payload.get("lgb_params"), dict) else {}
+    return {
+        "git_commit": _read_git_commit(),
+        "app_image": str(os.getenv("APP_IMAGE") or os.getenv("IMAGE_NAME") or ""),
+        "config_hash": hashlib.sha256(encoded).hexdigest()[:16],
+        "factor_catalog_versions": dict(payload.get("factor_catalog_versions") or {}),
+        "factor_schema_hash": str(payload.get("factor_schema_hash") or ""),
+        "seed": int(lgb_params.get("seed") or 42),
+    }
 
 
 def _coerce_flag(value: Any, default: bool) -> bool:
@@ -392,6 +437,18 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
             "enabled": bool(payload["preprocessing"].get("enabled", False)),
             "winsor": bool(payload["preprocessing"].get("winsor", True)),
         }
+    # WP3 样本权重：可交易 mask / ST / 时间衰减（缺数据时训练端 fail-closed）
+    if isinstance(payload.get("sample_weight"), dict):
+        raw_sw = payload["sample_weight"]
+        try:
+            half_life = max(0, int(float(raw_sw.get("time_decay_half_life_days") or 0)))
+        except (TypeError, ValueError):
+            half_life = 0
+        normalized["sample_weight"] = {
+            "tradeable_mask": _coerce_flag(raw_sw.get("tradeable_mask"), False),
+            "st": _coerce_flag(raw_sw.get("st"), False),
+            "time_decay_half_life_days": half_life,
+        }
     # 因子筛选配置透传：此前被白名单剥掉，orchestrator 收不到 factor_selection，
     # 永远走默认 top-80 筛选，用户显式指定的 n_top（如 L2 特征集 150）失效
     if isinstance(payload.get("factor_selection"), dict):
@@ -416,6 +473,12 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         normalized["auto_feature_filter"] = str(
             raw_aff if raw_aff is not None else "true"
         ).strip().lower()
+    if "allow_missing_features" in payload:
+        # 显式放行「请求特征缺失」必须透传到编排器；否则提交侧跳过缺列闸后
+        # 编排器仍按默认硬阻断，两边口径相反。
+        normalized["allow_missing_features"] = _coerce_flag(
+            payload.get("allow_missing_features"), False
+        )
     # 训练时长预算（分钟），默认 120
     normalized["max_time_minutes"] = _clamp_int(payload.get("max_time_minutes"), 120, 10, 1440)
     if wfa_config:
@@ -430,6 +493,12 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         normalized["factor_schema_hash"] = str(payload.get("factor_schema_hash") or "")
         normalized["factor_catalog_published_at"] = str(payload.get("factor_catalog_published_at") or "")
         normalized["factor_coverage"] = dict(payload.get("factor_coverage") or {})
+
+    # 训练血缘与特征漏斗（WP1）：请求原文 / 解析后 / 缺失清单全部随 run 落盘。
+    for key in ("requested_features_original", "resolved_features", "missing_features"):
+        if key in payload:
+            normalized[key] = payload[key]
+    normalized["lineage"] = _build_lineage(payload)
 
     # 滚动训练溯源（P1）：campaign 关联信息透传（白名单成员，见
     # recipe_registry.build_rolling_meta），随 config.yaml 落到 metadata.json。
@@ -510,11 +579,81 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
 
     normalized["deploy_to_production"] = bool(payload.get("deploy_to_production", False))
 
+    # WP5 损失函数组合校验：排序损失需要按日分组，与分位推理/Optuna 互斥。
+    _lgb_obj = str((normalized.get("lgb_params") or {}).get("objective") or "").lower()
+    _rank_loss = _lgb_obj in ("lambdarank", "rank_xendcg")
+    if _rank_loss and str(normalized.get("prediction_mode") or "point") == "quantile":
+        raise HTTPException(
+            status_code=422,
+            detail="prediction_mode=quantile 与排序损失 (rank_xendcg/lambdarank) 互斥",
+        )
+    if (
+        _rank_loss
+        and isinstance(normalized.get("optuna"), dict)
+        and normalized["optuna"].get("enabled")
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="optuna 与排序损失互斥（分组搜索未支持，请先关掉 optuna）",
+        )
+
     generated_at = str(payload.get("generated_at") or "").strip()
     if generated_at:
         normalized["generated_at"] = generated_at
 
     return normalized
+
+
+def _find_physically_missing(
+    reader: Any,
+    *,
+    features: list[str],
+    feature_sources: dict[str, str],
+    anchor: str,
+    columns_of: Any = None,
+) -> list[str]:
+    """目录映射存在 ≠ 物理列存在：返回物理列缺失的特征名。"""
+    _, missing = split_features_by_availability(
+        reader, features, feature_sources, anchor=anchor, columns_of=columns_of
+    )
+    return missing
+
+
+def _missing_features_detail(missing: list[str]) -> str:
+    preview = "、".join(missing[:12])
+    if len(missing) > 12:
+        preview += f" …(+{len(missing) - 12})"
+    return (
+        f"以下 {len(missing)} 个特征在已发布目录里有映射、但物理列不存在（目录陈旧）："
+        f"{preview}。请刷新并重新发布对应因子目录；跨库特征请用 '库:列' 显式限定"
+        "（如 'tdx_ind:tdx_amihud'）。"
+    )
+
+
+def _assert_features_physically_available(
+    reader: Any,
+    *,
+    features: list[str],
+    feature_sources: dict[str, str],
+    anchor: str,
+    columns_of: Any = None,
+) -> None:
+    """目录映射存在 ≠ 物理列存在：陈旧映射会导致训练**静默少列**。
+
+    2026-11-19 实例：``l1_factors`` 目录残留 24 个 ``tdx_*`` 映射（该库最新
+    parquet 已无这些列），100 特征模型的 12 个 tdx 特征被静默丢掉，最终
+    只有 34 个特征入模，模型名仍叫“100特征”。提交时按物理 schema 再核一遍，
+    缺失即 422 并列出特征名，绝不带着缺特征进训练。
+    """
+    missing = _find_physically_missing(
+        reader,
+        features=features,
+        feature_sources=feature_sources,
+        anchor=anchor,
+        columns_of=columns_of,
+    )
+    if missing:
+        raise HTTPException(status_code=422, detail=_missing_features_detail(missing))
 
 
 async def _resolve_quantdb_factor_payload(payload: dict[str, Any], market: str) -> tuple[dict[str, Any], list[str]]:
@@ -535,8 +674,9 @@ async def _resolve_quantdb_factor_payload(payload: dict[str, Any], market: str) 
     version_id = str(payload.get("factor_catalog_version") or "").strip()
     if not version_id:
         raise HTTPException(status_code=422, detail="factor_catalog_version is required for QuantDB direct training")
+    reader = QuantDBFactorReader(market=market)
     try:
-        status = QuantDBFactorReader(market=market).assert_ready(
+        status = reader.assert_ready(
             source,
             start=str(payload.get("train_start") or "") or None,
             end=str(payload.get("test_end") or payload.get("valid_end") or payload.get("train_end") or "") or None,
@@ -655,6 +795,28 @@ async def _resolve_quantdb_factor_payload(payload: dict[str, Any], market: str) 
             for lib, vid in used_versions.items()
         },
     }
+    # 目录映射齐全不代表物理列还在（陈旧映射）。请求显式放行时跳过阻断，
+    # 但缺失特征仍写进 payload/metadata（编排器默认也会阻断）。
+    allow_missing = _coerce_flag(payload.get("allow_missing_features"), False)
+    col_cache: dict[str, set[str]] = {source: {str(c) for c in status.columns}}
+
+    def _columns_of(lib: str) -> set[str]:
+        if lib not in col_cache:
+            col_cache[lib] = {str(c) for c in reader.describe(lib).columns}
+        return col_cache[lib]
+
+    missing_physical = _find_physically_missing(
+        reader,
+        features=pinned_features,
+        feature_sources=pinned_sources,
+        anchor=source,
+        columns_of=_columns_of,
+    )
+    if missing_physical and not allow_missing:
+        raise HTTPException(status_code=422, detail=_missing_features_detail(missing_physical))
+    pinned["requested_features_original"] = list(requested)
+    pinned["resolved_features"] = list(pinned_features)
+    pinned["missing_features"] = missing_physical
     allowed = [key for mapping in per_lib.values() for key in mapping]
     return pinned, allowed
 
@@ -726,6 +888,24 @@ def _build_default_metadata(request_payload: dict[str, Any], run_id: str) -> dic
     lgb_params = request_payload.get("lgb_params") if isinstance(request_payload.get("lgb_params"), dict) else {}
     features = request_payload.get("features") if isinstance(request_payload.get("features"), list) else []
     submitted_features = [str(item).strip() for item in features if str(item).strip()]
+    raw_original = request_payload.get("requested_features_original")
+    original_features = (
+        [str(item).strip() for item in raw_original if str(item).strip()]
+        if isinstance(raw_original, list) and raw_original
+        else list(submitted_features)
+    )
+    raw_resolved = request_payload.get("resolved_features")
+    resolved_features = (
+        [str(item).strip() for item in raw_resolved if str(item).strip()]
+        if isinstance(raw_resolved, list) and raw_resolved
+        else list(submitted_features)
+    )
+    raw_missing = request_payload.get("missing_features")
+    missing_features = (
+        [str(item).strip() for item in raw_missing if str(item).strip()]
+        if isinstance(raw_missing, list)
+        else []
+    )
     auto_appended_features = [feature for feature in _TRAINING_BASE_FEATURES if feature not in submitted_features]
     feature_categories = (
         request_payload.get("feature_categories")
@@ -749,6 +929,13 @@ def _build_default_metadata(request_payload: dict[str, Any], run_id: str) -> dic
         "feature_count": len(features),
         "requested_feature_count": len(submitted_features),
         "requested_features": submitted_features,
+        # WP1 输入可审计：请求原文 → 目录解析 → 实际入模，三段都可对账
+        "requested_features_original": original_features,
+        "requested_feature_count_original": len(original_features),
+        "resolved_features": resolved_features,
+        "resolved_feature_count": len(resolved_features),
+        "missing_features": missing_features,
+        "lineage": dict(request_payload.get("lineage") or {}),
         "auto_appended_feature_count": len(auto_appended_features),
         "auto_appended_features": auto_appended_features,
         "feature_categories": [str(x) for x in feature_categories if str(x).strip()],
@@ -1681,5 +1868,18 @@ async def complete_training_run(
             else str(normalized_result.get("error") or "training_failed")
         ),
     )
+
+    # WP2/WP7 后置评估：严格评估 + 数据审计，训练完成即排队；失败不影响回调。
+    if status == "completed":
+        try:
+            from backend.services.engine.training.pit_audit_service import schedule_audit
+            from backend.services.engine.training.strict_eval_service import (
+                schedule_strict_eval,
+            )
+
+            schedule_strict_eval(run_id, registered_model_id or None)
+            schedule_audit(run_id, registered_model_id or None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] post-training eval scheduling failed: %s", run_id, exc)
 
     return {"ok": True, "runId": run_id, "status": status}

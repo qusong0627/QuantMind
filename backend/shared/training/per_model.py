@@ -44,6 +44,7 @@ _SHARED_FIELDS: dict[str, Any] = {
     "optuna": (Any, None),
     "pause_others": (Any, None),
     "preprocessing": (Any, None),
+    "sample_weight": (Any, None),
     "factor_selection": (Any, None),
     "auto_feature_filter": (Any, None),
     "max_time_minutes": (Any, None),

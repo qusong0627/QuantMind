@@ -894,6 +894,35 @@ async def upsert_factor_mapping(version_id: str, payload: MappingUpdate, current
     return {"mapping_id": mapping_id, "version_id": version_id}
 
 
+async def find_stale_catalog_mappings(
+    session, *, version_id: str
+) -> list[dict[str, Any]]:
+    """返回目录里「启用了、但物理列已不存在」的映射（feature_key/source_column）。
+
+    发布闸门专用：目录映射是**快照**，库的 parquet 可能后来删列/改名。陈旧映射
+    不会被读取端发现（读时按列名取不到才静默丢），必须在发布时拦住。
+    判定依据是字段注册表 ``is_present``——发布前必须先跑一次「刷新字段」。
+    """
+    rows = (await session.execute(text("""
+        SELECT m.feature_key, m.source_column
+        FROM qm_training_factor_mapping m
+        JOIN qm_training_factor_catalog_version v
+          ON v.version_id = m.version_id
+        LEFT JOIN qm_quantdb_factor_field f
+          ON f.market = v.market
+         AND f.dataset_id = m.source_dataset
+         AND f.column_name = m.source_column
+        WHERE m.version_id = :version_id
+          AND m.enabled
+          AND (f.column_name IS NULL OR f.is_present = FALSE)
+        ORDER BY m.feature_key
+    """), {"version_id": version_id})).mappings().all()
+    return [
+        {"feature_key": str(r["feature_key"]), "source_column": str(r["source_column"])}
+        for r in rows
+    ]
+
+
 async def publish_catalog_version(session, version_id: str) -> None:
     """草稿 → 发布（同源同市场旧版本自动归档）。端点与引导脚本共用。"""
     version = (await session.execute(text("""
@@ -910,6 +939,22 @@ async def publish_catalog_version(session, version_id: str) -> None:
     """), {"version_id": version_id})).scalar_one()
     if not count:
         raise HTTPException(status_code=400, detail="A published catalog needs at least one enabled factor")
+    # 发布闸门：启用的映射必须对应物理存在的列（字段注册表 is_present）。
+    # 2026-11-19 事故：l1_factors 目录带着 24 个已删除的 tdx_* 映射发布，
+    # 训练请求按裸名命中锚库后物理核对失败 → 静默少 12 列。
+    # 先刷新字段（record_source_fields）再发布；确需保留旧映射请先禁用。
+    stale = await find_stale_catalog_mappings(session, version_id=version_id)
+    if stale:
+        preview = "、".join(f"{item['feature_key']}→{item['source_column']}" for item in stale[:10])
+        if len(stale) > 10:
+            preview += f" …(+{len(stale) - 10})"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"目录里有 {len(stale)} 个启用映射的物理列已不存在（先刷新字段再发布，"
+                f"或先禁用这些映射）：{preview}"
+            ),
+        )
     await session.execute(text("""
         UPDATE qm_training_factor_catalog_version SET status = 'archived'
         WHERE source_dataset = :source_dataset AND market = :market AND status = 'published'
