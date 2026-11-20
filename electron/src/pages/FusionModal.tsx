@@ -8,6 +8,7 @@ import {
   modelTrainingService,
   type FusionMemberRow,
   type FusionPreviewResponse,
+  type ScoreNorm,
   type UserModelRecord,
 } from '../services/modelTrainingService';
 import { modelDisplayName } from './modelRegistryUtils';
@@ -21,6 +22,20 @@ import {
 } from './fusionUtils';
 
 type WeightStrategy = 'icir_shrunk' | 'equal' | 'manual';
+
+const SCORE_NORM_OPTIONS: Array<{ value: ScoreNorm; label: string; hint: string }> = [
+  { value: 'zscore', label: 'z-score（默认）', hint: '截面标准化后加权，保留分数强弱幅度；回测最优口径' },
+  { value: 'zscore_clip', label: 'z-score ±2.5σ', hint: '同 z-score，对极端分数截尾，抑制单成员极端值主导' },
+  { value: 'rank_pct', label: '分位（旧口径）', hint: '逐成员转截面百分位后加权，只保留排序不保留幅度' },
+  { value: 'minmax', label: 'min-max', hint: '线性拉伸到 [0,1]，受极值影响较大' },
+];
+
+const SCORE_NORM_SHORT: Record<ScoreNorm, string> = {
+  zscore: 'z-score',
+  zscore_clip: 'z-score ±2.5σ',
+  rank_pct: '分位',
+  minmax: 'min-max',
+};
 
 interface FusionModalProps {
   open: boolean;
@@ -39,9 +54,12 @@ function errText(err: unknown): string {
 
 export const FusionModal: React.FC<FusionModalProps> = ({ open, models, onCancel, onCreated }) => {
   const [strategy, setStrategy] = useState<WeightStrategy>('icir_shrunk');
+  const [scoreNorm, setScoreNorm] = useState<ScoreNorm>('zscore');
   const [manualWeights, setManualWeights] = useState<Record<string, number>>({});
   const [displayName, setDisplayName] = useState('');
   const [preview, setPreview] = useState<FusionPreviewResponse | null>(null);
+  // null=尚未预览；false=运行中的后端还不回显 score_norm（旧进程，重启前创建仍走分位口径）
+  const [backendNormSupported, setBackendNormSupported] = useState<boolean | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const [creating, setCreating] = useState(false);
@@ -58,22 +76,27 @@ export const FusionModal: React.FC<FusionModalProps> = ({ open, models, onCancel
           source_model_ids: sourceIds,
           weight_strategy: ws,
           manual_weights: ws === 'manual' ? manual ?? manualWeights : undefined,
+          score_norm: scoreNorm,
         });
         setPreview(resp);
+        setBackendNormSupported(typeof resp.score_norm === 'string');
       } catch (err) {
         setPreview(null);
+        setBackendNormSupported(null);
         setPreviewError(errText(err));
       } finally {
         setPreviewing(false);
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     },
-    [sourceIds.join(','), manualWeights],
+    [sourceIds.join(','), manualWeights, scoreNorm],
   );
 
   useEffect(() => {
     if (!open) return;
     setStrategy('icir_shrunk');
+    setScoreNorm('zscore');
+    setBackendNormSupported(null);
     setPreview(null);
     setPreviewError('');
     setDisplayName('');
@@ -97,6 +120,7 @@ export const FusionModal: React.FC<FusionModalProps> = ({ open, models, onCancel
         weight_strategy: strategy,
         manual_weights: strategy === 'manual' ? { ...manualWeights } : undefined,
         fusion_strategy: 'linear',
+        score_norm: scoreNorm,
       });
       message.success(`融合模型已创建并加入日更推理：${created.model_id}`);
       onCreated(created.model_id);
@@ -187,6 +211,28 @@ export const FusionModal: React.FC<FusionModalProps> = ({ open, models, onCancel
           </span>
         </div>
 
+        {/* 分数标准化 */}
+        <div className="space-y-1">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-[10px] font-black text-slate-500 tracking-wider">分数标准化</span>
+            <Radio.Group
+              size="small"
+              value={scoreNorm}
+              onChange={(e) => setScoreNorm(e.target.value as ScoreNorm)}
+            >
+              {SCORE_NORM_OPTIONS.map((o) => (
+                <Radio.Button key={o.value} value={o.value}>{o.label}</Radio.Button>
+              ))}
+            </Radio.Group>
+            <span className="text-[9px] text-slate-400">
+              {SCORE_NORM_OPTIONS.find((o) => o.value === scoreNorm)?.hint}
+            </span>
+          </div>
+          <div className="text-[9px] text-slate-400">
+            各成员先做截面标准化再加权。2026 回测（LGBM 0.7 + TFT 0.3，Top20/10 日）：z-score 累计 +18.6%、夏普 0.88；分位口径 +10.5%。
+          </div>
+        </div>
+
         {strategy === 'manual' && (
           <div className="grid grid-cols-2 gap-2">
             {models.map((m) => (
@@ -209,6 +255,20 @@ export const FusionModal: React.FC<FusionModalProps> = ({ open, models, onCancel
         )}
 
         {/* 警示面 */}
+        {backendNormSupported === false && (
+          <Alert
+            type="warning"
+            showIcon
+            icon={<AlertTriangle size={14} />}
+            message={<span className="text-[10px] font-black">后端尚未加载分数标准化口径</span>}
+            description={
+              <span className="text-[10px] text-slate-600">
+                当前运行的后端进程还不支持 score_norm（需重启后端服务后生效）。重启前创建的融合模型仍按旧「分位」口径加权。
+              </span>
+            }
+            className="rounded-xl"
+          />
+        )}
         {previewError && (
           <Alert type="error" showIcon message="预览失败" description={previewError} className="rounded-xl" />
         )}
@@ -247,7 +307,10 @@ export const FusionModal: React.FC<FusionModalProps> = ({ open, models, onCancel
         {/* 成员证据与权重 */}
         <div className="rounded-2xl border border-slate-100 overflow-hidden">
           <div className="px-3 py-2 bg-slate-50/70 flex items-center justify-between">
-            <span className="text-[10px] font-black text-slate-600 tracking-wider">成员证据与权重预览</span>
+            <span className="text-[10px] font-black text-slate-600 tracking-wider">
+              成员证据与权重预览
+              <span className="ml-2 font-mono font-normal text-[9px] text-slate-400">{SCORE_NORM_SHORT[scoreNorm]} 标准化</span>
+            </span>
             {previewing && <Spin size="small" />}
           </div>
           <Table<FusionMemberRow>

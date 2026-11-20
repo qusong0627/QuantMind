@@ -638,7 +638,9 @@ def predict_with_model(model, meta: dict, day_df: pd.DataFrame) -> dict[str, flo
 # 5. 融合逻辑
 # ═══════════════════════════════════════════════════════════════════════════
 
-_Z_CLIP = 3.0  # 保留（兼容 detail 展示用），融合主通道改为截面 rank 百分位
+_ZSCORE_CLIP = 3.0  # z-score 默认截尾
+_ZSCORE_CLIP_TIGHT = 2.5  # zscore_clip 模式
+_SCORE_NORMS = ("rank_pct", "zscore", "zscore_clip", "minmax")
 _RANK_DECAY = 0.6  # 时间平滑指数衰减（近5日）
 _IC_DECAY = 0.1  # 动态权重 IC 指数衰减（exp(-d/10)）
 
@@ -655,6 +657,49 @@ def _cross_sectional_rank(scores: dict[str, float]) -> dict[str, float]:
     s = pd.Series(vals)
     ranks = s.rank(method="average", pct=True)  # 0~1
     return {sym: float(ranks.iloc[i]) for i, sym in enumerate(syms)}
+
+
+def _cross_sectional_norm(
+    scores: dict[str, float], method: str = "rank_pct"
+) -> dict[str, float]:
+    """单模型当日分数 → 0..1 的截面标准化值（0.5 = 中性）。
+
+    - ``rank_pct``：分位（旧口径，稳健但丢失分数强度）；
+    - ``zscore``：截面 z-score 截 ±3 后线性映射，保留强弱差异；
+    - ``zscore_clip``：同上但截 ±2.5，更抗极端值；
+    - ``minmax``：线性 Min-Max。
+
+    非有限值按中性 0.5 处理；标准差为 0 / 全等时全部 0.5。
+    """
+    method = str(method or "rank_pct").lower()
+    if method == "rank_pct":
+        return _cross_sectional_rank(scores)
+    if method not in _SCORE_NORMS:
+        raise ValueError(f"未知 score_norm: {method}（可选 {', '.join(_SCORE_NORMS)}）")
+    if not scores:
+        return {}
+    syms = list(scores.keys())
+    vals = np.asarray([scores[s] for s in syms], dtype=float)
+    mask = np.isfinite(vals)
+    finite = vals[mask]
+    if finite.size == 0:
+        return dict.fromkeys(syms, 0.5)
+    if method in ("zscore", "zscore_clip"):
+        mu = float(finite.mean())
+        sd = float(finite.std())
+        if not np.isfinite(sd) or sd <= 0:
+            return dict.fromkeys(syms, 0.5)
+        clip = _ZSCORE_CLIP_TIGHT if method == "zscore_clip" else _ZSCORE_CLIP
+        z = np.zeros_like(vals)
+        z[mask] = np.clip((vals[mask] - mu) / sd, -clip, clip)
+        return {sym: float(0.5 + z[i] / (2.0 * clip)) for i, sym in enumerate(syms)}
+    lo = float(finite.min())
+    hi = float(finite.max())
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return dict.fromkeys(syms, 0.5)
+    out = np.full_like(vals, 0.5)
+    out[mask] = (vals[mask] - lo) / (hi - lo)
+    return {sym: float(out[i]) for i, sym in enumerate(syms)}
 
 
 def _apply_time_smoothing(ranked: dict[str, float], history: dict[str, dict] | None,
@@ -743,10 +788,12 @@ def fuse_scores(
     strategy_config: dict | None = None,
     model_horizons: dict[str, int] | None = None,
     model_dir: Path | None = None,
+    score_norm: str = "rank_pct",
 ) -> list[dict]:
     """生产级五层融合。
 
-    L1 截面 rank 化：每模型当日分数 → rank 百分位 (0,1)，消除量纲
+    L1 截面标准化：每模型当日分数 → 0..1（0.5=中性），口径由 ``score_norm`` 决定
+       （``rank_pct`` 分位 / ``zscore`` / ``zscore_clip`` / ``minmax``）
     L2 时间平滑：与近5日历史分数指数加权（读 smooth_history.json）
     L3 动态权重：读 weight_snapshot.json（recent_ic 动态权）或静态权重
     L4 共识调节：方向一致率放大、分歧度收缩
@@ -759,13 +806,14 @@ def fuse_scores(
     model_horizons = model_horizons or {}
     boundary = float(strategy_config.get("periodic_boundary", 10))
     gate_threshold = float(strategy_config.get("confidence_threshold", 0.6))
+    norm = str(score_norm or "rank_pct").lower()
 
-    # L1: 每模型截面 rank 化
+    # L1: 每模型截面标准化（rank 分位 / z-score / min-max）
     ranked: dict[str, dict[str, float]] = {}
     for mid, scores in all_scores.items():
         if not scores:
             continue
-        r = _cross_sectional_rank(scores)
+        r = _cross_sectional_norm(scores, norm)
         if r:
             ranked[mid] = r
 
@@ -865,6 +913,7 @@ def fuse_scores(
             "consensus": int(consensus),
             "confidence": round(float(confidence), 4),
             "zfusion": round(float(fused_signal), 6),
+            "score_norm": norm,
             "detail": per_model,
         })
 
@@ -935,6 +984,11 @@ def main():
     # 融合算法与参数（ensemble_config.json）
     fusion_strategy = str(config.get("fusion_strategy") or "linear")
     strategy_config = config.get("strategy_config") or {}
+    # 兼容旧模型：没有 score_norm 字段 → 沿用历史 rank_pct 口径，输出不变。
+    score_norm = str(
+        config.get("score_norm") or strategy_config.get("score_norm") or "rank_pct"
+    ).lower()
+    logger.info("  score_norm: %s", score_norm)
 
     # 3. 逐源模型推理（缺失模型优雅降级）
     all_scores: dict[str, dict[str, float]] = {}
@@ -986,6 +1040,7 @@ def main():
         strategy_config=strategy_config,
         model_horizons=model_horizons,
         model_dir=model_dir,
+        score_norm=score_norm,
     )
     signals.sort(key=lambda x: x["score"], reverse=True)
     logger.info("融合完成: %d 条信号 (strategy=%s)", len(signals), fusion_strategy)

@@ -38,6 +38,9 @@ _ALLOWED_MODEL_STATUSES = {
     "failed",
 }
 _READY_STATUSES = {"ready", "active"}
+# 融合模型成员分数的截面标准化口径；zscore 为 2026 回测优选默认，
+# 旧融合模型 ensemble_config 无该字段 → 推理模板回落 rank_pct，输出不变。
+_ENSEMBLE_SCORE_NORMS = {"rank_pct", "zscore", "zscore_clip", "minmax"}
 _SYSTEM_MODEL_METADATA = {"system_default": True, "readonly": True}
 
 # 展示名长度上限（用户态重命名；与前端 maxLength 同口径）。
@@ -2732,6 +2735,7 @@ class ModelRegistryService:
         manual_weights: dict[str, float] | None = None,
         fusion_strategy: str = "linear",
         strategy_config: dict[str, float] | None = None,
+        score_norm: str = "zscore",
         weights_override: dict[str, float] | None = None,
         weight_diagnostics: list[dict[str, Any]] | None = None,
         fusion_eval: dict[str, Any] | None = None,
@@ -2767,6 +2771,12 @@ class ModelRegistryService:
         ]
         if len(source_model_ids) < 2:
             raise ValueError("融合至少需要 2 个源模型")
+
+        score_norm = str(score_norm or "zscore").strip().lower()
+        if score_norm not in _ENSEMBLE_SCORE_NORMS:
+            raise ValueError(
+                f"未知融合标准化口径: {score_norm}（可选 {', '.join(sorted(_ENSEMBLE_SCORE_NORMS))}）"
+            )
 
         # 加载全部源模型（含 metadata_json + metrics_json）
         sources: list[dict[str, Any]] = []
@@ -2934,6 +2944,7 @@ class ModelRegistryService:
             "model_file": "ensemble_config.json",
             "framework": "ensemble",
             "fusion_strategy": fusion_strategy,
+            "score_norm": score_norm,
             "strategy_config": strategy_config or {},
             "source_models": source_meta_list,
             "source_model_ids": [str(s["model_id"]) for s in sources],
@@ -2975,6 +2986,7 @@ class ModelRegistryService:
             "created_at": now.isoformat(),
             "weight_strategy": weight_strategy,
             "fusion_strategy": fusion_strategy,
+            "score_norm": score_norm,
             "strategy_config": strategy_config or {},
             "horizon_days": int(target_horizon_days or 15),
             "weights": {

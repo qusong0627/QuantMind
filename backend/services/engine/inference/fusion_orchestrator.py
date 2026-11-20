@@ -313,6 +313,7 @@ async def create_fusion_model(
     manual_weights: dict[str, float] | None = None,
     fusion_strategy: str = "linear",
     strategy_config: dict[str, float] | None = None,
+    score_norm: str = "zscore",
     config: FusionWeightConfig | None = None,
 ) -> dict[str, Any]:
     """预览（服务器权威口径）→ 注册落库 + 落盘工件 + 写日更名单。"""
@@ -335,6 +336,7 @@ async def create_fusion_model(
         manual_weights=manual_weights,
         fusion_strategy=fusion_strategy,
         strategy_config=strategy_config,
+        score_norm=score_norm,
         weights_override=preview["weights"],
         weight_diagnostics=preview["diagnostics"],
         fusion_eval=preview["replay"],

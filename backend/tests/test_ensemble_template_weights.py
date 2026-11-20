@@ -86,3 +86,62 @@ class TestSnapshotCompat:
     def test_v1_without_numeric_values_falls_back_to_static(self, tpl, tmp_path):
         model_dir = _write(tmp_path, {"note": "junk", "_updated_at": "2026-09-01"})
         assert tpl._load_dynamic_weights(model_dir, _STATIC) == _STATIC
+
+
+class TestScoreNorm:
+    """融合成员分数的截面标准化口径（2026-11-20 增加 z-score 默认）。"""
+
+    def test_rank_pct_is_legacy_percentile(self, tpl):
+        out = tpl._cross_sectional_norm({"a": 1.0, "b": 2.0, "c": 3.0}, "rank_pct")
+        assert out == pytest.approx({"a": 1 / 3, "b": 2 / 3, "c": 1.0})
+
+    def test_zscore_maps_to_centered_unit_interval(self, tpl):
+        out = tpl._cross_sectional_norm({"a": 1.0, "b": 2.0, "c": 3.0}, "zscore")
+        assert out["b"] == pytest.approx(0.5)
+        assert out["a"] < 0.5 < out["c"]
+        # 总体标准差 (ddof=0): sd=sqrt(2/3) → z=±sqrt(3/2)；映射 0.5 + z/(2*3)
+        offset = (1.5**0.5) / 6.0
+        assert out["a"] == pytest.approx(0.5 - offset)
+        assert out["c"] == pytest.approx(0.5 + offset)
+
+    def test_zscore_clip_saturates_earlier(self, tpl):
+        # 9 个点、单个离群值 → 离群点 z≈2.83（介于 2.5 与 3 之间）
+        raw = {**{f"s{i}": 0.0 for i in range(8)}, "outlier": 1.0}
+        z = tpl._cross_sectional_norm(raw, "zscore")
+        tight = tpl._cross_sectional_norm(raw, "zscore_clip")
+        # zscore_clip 在 ±2.5 处先饱和（离群点直接打满 1.0）
+        assert tight["outlier"] == pytest.approx(1.0)
+        assert z["outlier"] < 1.0
+        # 中段被映射得更开（除数 2*2.5 更小）
+        assert tight["s0"] < z["s0"]
+
+    def test_minmax(self, tpl):
+        out = tpl._cross_sectional_norm({"a": 1.0, "b": 2.0, "c": 3.0}, "minmax")
+        assert out == pytest.approx({"a": 0.0, "b": 0.5, "c": 1.0})
+
+    def test_constant_scores_are_neutral(self, tpl):
+        for method in ("zscore", "zscore_clip", "minmax"):
+            out = tpl._cross_sectional_norm({"a": 1.0, "b": 1.0}, method)
+            assert out == pytest.approx({"a": 0.5, "b": 0.5})
+
+    def test_nan_is_neutral_and_ignored_in_stats(self, tpl):
+        out = tpl._cross_sectional_norm(
+            {"a": 1.0, "b": float("nan"), "c": 3.0}, "zscore"
+        )
+        assert out["b"] == pytest.approx(0.5)
+        assert out["a"] < 0.5 < out["c"]
+
+    def test_empty_and_unknown(self, tpl):
+        assert tpl._cross_sectional_norm({}, "zscore") == {}
+        with pytest.raises(ValueError):
+            tpl._cross_sectional_norm({"a": 1.0}, "nope")
+
+    def test_fuse_scores_records_norm(self, tpl):
+        out = tpl.fuse_scores(
+            {"m1": {"a": 1.0, "b": 2.0}, "m2": {"a": 2.0, "b": 1.0}},
+            {"m1": 0.5, "m2": 0.5},
+            score_norm="zscore",
+        )
+        assert out and all(row["score_norm"] == "zscore" for row in out)
+        # 两成员完全反向 → 加权后中性，score ≈ 0
+        assert all(abs(row["score"]) < 1e-9 for row in out)

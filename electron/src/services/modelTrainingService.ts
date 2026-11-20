@@ -244,6 +244,7 @@ export interface FusionPreviewResponse {
   horizon_days: number;
   weight_strategy: string;
   weights: Record<string, number>;
+  score_norm?: ScoreNorm;
   diagnostics: FusionDiagnosticRow[];
   members: FusionMemberRow[];
   corr: Record<string, Record<string, number>>;
@@ -256,6 +257,8 @@ export interface FusionPreviewResponse {
   warnings: string[];
 }
 
+export type ScoreNorm = 'rank_pct' | 'zscore' | 'zscore_clip' | 'minmax';
+
 export interface EnsembleCreatePayload {
   source_model_ids: string[];
   display_name?: string;
@@ -263,6 +266,7 @@ export interface EnsembleCreatePayload {
   manual_weights?: Record<string, number>;
   fusion_strategy?: 'linear' | 'majority_vote' | 'periodic_hierarchy' | 'confidence_gate';
   strategy_config?: Record<string, number>;
+  score_norm?: ScoreNorm;
 }
 
 export interface FusionCreateResult {
@@ -1018,6 +1022,7 @@ class ModelTrainingService {
     source_model_ids: string[];
     weight_strategy?: string;
     manual_weights?: Record<string, number>;
+    score_norm?: ScoreNorm;
   }): Promise<FusionPreviewResponse> {
     const resp = await this.client.post<FusionPreviewResponse>(
       `/models/ensemble/preview`,
