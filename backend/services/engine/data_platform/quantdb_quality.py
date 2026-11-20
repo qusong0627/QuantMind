@@ -459,17 +459,19 @@ def _emit_alerts(
 
 
 def default_datasets(root: str | Path) -> list[str]:
-    """默认检查面：本地**已有 dt 分区**的 partition 数据集。
+    """默认检查面：本地**已有 dt 分区**的必检 partition 数据集。
 
-    不检查「从未同步过的 optional 数据集」（如未开启的 V5 宽表）与
-    非标准布局（如 tick_data 的按 symbol 文件），否则正常同步后会因为
-    一个用户没启用的数据集而报红。同步钩子仍会显式传入本轮请求的数据集，
-    核心数据集缺失不会被漏掉。
+    不检查 optional 数据集（如 ETF 日线、分钟线）：它们按需同步，用户没勾选
+    时本地可能停在半年前的旧分区；把它当 error 会让每次默认同步后都亮红灯。
+    同步钩子显式传入本轮请求的数据集时仍会检查 optional，用户主动同步后才需要
+    保证它完整。
     """
     root = Path(root)
     out: list[str] = []
     for spec in DATASETS:
         if spec.layout != "partition":
+            continue
+        if spec.sync == "optional_v2":
             continue
         base = root / spec.rel_dir
         if not base.is_dir():
@@ -505,7 +507,10 @@ def run_quality_gate(
     trading_days, calendar_source = load_trading_days(root)
     expected_latest, relaxed_from = _expected_latest(trading_days, today, max_lag_days)
 
-    names = list(datasets) if datasets is not None else default_datasets(root)
+    # 显式同步单个数据集时，报告仍要保留默认核心数据集的覆盖结果；
+    # 否则一次 factor_dictionary 同步会把 latest.json 覆盖成只有它一个数据集，
+    # 质量卡看起来全绿，但核心 12 库其实没检查（2026-11-16 现场）。
+    names = list(dict.fromkeys([*default_datasets(root), *(datasets or [])]))
     report: dict[str, Any] = {
         "checked_at": _now_iso(),
         "today": today.isoformat(),

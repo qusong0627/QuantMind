@@ -240,6 +240,50 @@ def test_default_datasets_only_include_existing_dirs(tmp_path: Path):
     assert "factor_dictionary" not in names
 
 
+def test_default_datasets_exclude_partially_synced_optional(tmp_path: Path):
+    """optional 数据集即使本地已有旧分区，也不该进默认检查面。
+
+    现场（2026-11-16）：factor_dictionary 已改为默认同步；这里用仍为
+    optional_v2 的 etf_kline 守住「可选数据集不因旧分区报红」的口径。
+    """
+    _write_calendar(tmp_path)
+    _write_history(tmp_path, DATES[:-1])
+    _write_partition(
+        tmp_path,
+        DATES[0],
+        rel="4_bond_etf/etf_kline",
+    )
+
+    names = q.default_datasets(tmp_path)
+    assert DAILY in names
+    assert "etf_kline" not in names
+
+    # 用户显式勾选同步 etf_kline 时仍要检查它
+    explicit = _gate(
+        tmp_path,
+        datasets=["etf_kline"],
+        today=TODAY,
+    )
+    assert explicit["datasets"]["etf_kline"]["skipped"] is False
+
+
+def test_explicit_sync_keeps_default_coverage(tmp_path: Path):
+    """单数据集同步后的质量报告不能丢掉默认核心数据集的检查结果。"""
+    _write_calendar(tmp_path)
+    _write_history(tmp_path, DATES[:-1])
+    _write_partition(tmp_path, DATES[0], rel="6_ml_datasets/factor_dictionary")
+
+    report = q.run_quality_gate(
+        ["factor_dictionary"],
+        tmp_path,
+        today=TODAY,
+        max_lag_days=1,
+        alert_service=False,
+    )
+    assert DAILY in report["datasets"]
+    assert "factor_dictionary" in report["datasets"]
+
+
 def test_margin_trading_allows_t_plus_one_lag(tmp_path: Path):
     """两融 T+1：today 11/05、全局按 11/04，两融按 11/03 判定不误报。"""
     dates = ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05"]

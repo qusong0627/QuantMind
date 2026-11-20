@@ -45,7 +45,15 @@ DRIFT_MIN_COMMON = 100
 #: 不豁免的后果是长窗遍**每晚**判失败 → 长窗列永远合并不进去（2026-10-14 起
 #: f13_0645 / f13_0261 全空，正是 300 因子模型在用的两列）。名单里的列降级为
 #: informational，仍然可见，只是不再阻断合并。
-DRIFT_EXEMPT_COLUMNS = frozenset({"f13_0654"})
+DRIFT_EXEMPT_COLUMNS = frozenset(
+    {"f13_0654", "f13_0080", "f13_0121", "f13_0123", "IND_MOM_3M"}
+)
+#: 豁免列也必须满足的秩相关下限：豁免只容忍「同一公式、不同数据版本」的
+#: 数值漂移，**不容忍符号反转/结构性破坏**。2026-11-10 实测：报告季 Q3
+#: 补录后 EP 中位数变化 5.3%（秩 0.98），PE=1/EP 在盈亏平衡附近放大到
+#: 0.83，f13_0121 再放大到 0.73；而公式断裂类（f13_0035 减值符号反转）
+#: 秩为负。低于该下限仍判 required_drift。
+DRIFT_EXEMPT_MIN_RANK = 0.5
 
 
 def _read(path: Path) -> pd.DataFrame | None:
@@ -251,8 +259,9 @@ def compare_partitions(
         elif is_required and left_nonnull > 0 and coverage_ratio < min_coverage_ratio:
             issues.append({"kind": "required_coverage_drop", **entry})
         elif is_required and rank_corr is not None and rank_corr < min_rank_corr:
-            if column in DRIFT_EXEMPT_COLUMNS:
-                # 阈值计数型：基准漂移导致的边界翻转，不阻断合并（见常量注释）
+            if column in DRIFT_EXEMPT_COLUMNS and rank_corr >= DRIFT_EXEMPT_MIN_RANK:
+                # 同公式、不同数据版本（qfq/报告补录）导致的漂移，不阻断合并；
+                # 低于 DRIFT_EXEMPT_MIN_RANK 视为结构性破坏，仍判失败
                 informational.append({"kind": "required_drift_exempt", **entry})
             else:
                 issues.append({"kind": "required_drift", **entry})
