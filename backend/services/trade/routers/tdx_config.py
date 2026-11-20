@@ -54,7 +54,9 @@ class TdxRollingSignalsRequest(BaseModel):
 
 
 class TdxRollingConfigUpdate(BaseModel):
-    score_threshold: float = Field(..., gt=0, le=10, description="买入分数阈值（>此分数买入）")
+    score_threshold: float | None = Field(
+        None, ge=0, le=10, description="绝对分阈值（仅 score 模式；rank_pct 模式忽略）"
+    )
     fixed_buy_amount: float = Field(..., gt=0, description="每只固定买入金额（元）")
     execute_mode: Literal["off", "tdx", "paper"] | None = Field(
         None,
@@ -62,6 +64,19 @@ class TdxRollingConfigUpdate(BaseModel):
     )
     auto_place: bool | None = Field(
         None, description="旧字段兼容: true=通达信下单(tdx) / false=仅预警(off)"
+    )
+    threshold_mode: Literal["rank_pct", "score"] | None = Field(
+        None,
+        description="阈值口径: rank_pct=截面分位（默认，跨模型量纲一致）/ score=绝对分（旧）",
+    )
+    rank_pct_threshold: float | None = Field(
+        None,
+        gt=0,
+        lt=0.5,
+        description="分位阈值: 持仓分位≤此值卖 / 分位≥1-此值买（默认 0.10）",
+    )
+    signal_model_id: str | None = Field(
+        None, description="信号模型 ID；空=策略绑定→用户默认模型"
     )
 
 
@@ -332,21 +347,32 @@ async def push_rolling_signals_to_tdx(
 
 @router.get("/tdx/rolling-config")
 async def get_rolling_config(auth: AuthContext = Depends(get_auth_context)):
-    """读取滚动买卖配置（分数阈值 + 每只固定金额 + 执行模式）。"""
+    """读取滚动买卖配置（阈值口径 + 金额 + 执行模式 + 信号模型）。"""
     from backend.services.live_trading.services.tdx_rolling_trade_service import (
         DEFAULT_EXECUTE_MODE,
-        load_rolling_config,
+        load_rolling_settings,
+        resolve_signal_model,
     )
 
-    threshold, amount, execute_mode = load_rolling_config(
-        (auth.tenant_id or "default").strip() or "default",
-        str(auth.user_id or "00000001").strip() or "00000001",
+    tenant_id = (auth.tenant_id or "default").strip() or "default"
+    user_id = str(auth.user_id or "00000001").strip() or "00000001"
+    settings_obj = load_rolling_settings(tenant_id, user_id)
+    signal_model = await resolve_signal_model(
+        tenant_id, user_id, settings_obj.signal_model_id
     )
     return {
-        "score_threshold": threshold,
-        "fixed_buy_amount": amount,
-        "execute_mode": execute_mode,
-        "auto_place": execute_mode != DEFAULT_EXECUTE_MODE,
+        "score_threshold": settings_obj.score_threshold,
+        "fixed_buy_amount": settings_obj.fixed_buy_amount,
+        "execute_mode": settings_obj.execute_mode,
+        "auto_place": settings_obj.execute_mode != DEFAULT_EXECUTE_MODE,
+        "threshold_mode": settings_obj.threshold_mode,
+        "rank_pct_threshold": settings_obj.rank_pct_threshold,
+        "signal_model_id": settings_obj.signal_model_id,
+        "signal_model": {
+            "model_id": signal_model.model_id,
+            "display_name": signal_model.display_name,
+            "source": signal_model.source,
+        },
     }
 
 
@@ -359,28 +385,81 @@ async def update_rolling_config(
     """
     from backend.services.live_trading.services.tdx_rolling_trade_service import (
         DEFAULT_EXECUTE_MODE,
+        load_rolling_settings,
         save_rolling_config,
     )
 
+    tenant_id = (auth.tenant_id or "default").strip() or "default"
+    user_id = str(auth.user_id or "00000001").strip() or "00000001"
+    current = load_rolling_settings(tenant_id, user_id)
     execute_mode = data.execute_mode
     if execute_mode is None and data.auto_place is not None:
         execute_mode = "tdx" if data.auto_place else "off"
     if execute_mode is None:
-        raise HTTPException(status_code=400, detail="execute_mode 或 auto_place 必填")
+        execute_mode = current.execute_mode
+    threshold_mode = data.threshold_mode or current.threshold_mode
+    score_threshold = (
+        data.score_threshold
+        if data.score_threshold is not None
+        else current.score_threshold
+    )
+    rank_pct_threshold = (
+        data.rank_pct_threshold
+        if data.rank_pct_threshold is not None
+        else current.rank_pct_threshold
+    )
+    signal_model_id = (
+        data.signal_model_id
+        if data.signal_model_id is not None
+        else current.signal_model_id
+    )
+    if signal_model_id:
+        from sqlalchemy import text
+
+        from backend.shared.database_manager_v2 import get_session
+
+        async with get_session(read_only=True) as db:
+            exists = (
+                await db.execute(
+                    text(
+                        """
+                        SELECT 1 FROM qm_user_models
+                        WHERE tenant_id = :tenant_id AND user_id = :user_id
+                          AND model_id = :model_id AND status = 'ready'
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "tenant_id": tenant_id,
+                        "user_id": user_id,
+                        "model_id": signal_model_id,
+                    },
+                )
+            ).first()
+        if not exists:
+            raise HTTPException(
+                status_code=422, detail="signal_model_id 不存在或未就绪"
+            )
 
     save_rolling_config(
-        (auth.tenant_id or "default").strip() or "default",
-        str(auth.user_id or "00000001").strip() or "00000001",
-        score_threshold=data.score_threshold,
+        tenant_id,
+        user_id,
+        score_threshold=score_threshold,
         fixed_buy_amount=data.fixed_buy_amount,
         execute_mode=execute_mode,
+        threshold_mode=threshold_mode,
+        rank_pct_threshold=rank_pct_threshold,
+        signal_model_id=signal_model_id,
     )
     return {
         "success": True,
-        "score_threshold": data.score_threshold,
+        "score_threshold": score_threshold,
         "fixed_buy_amount": data.fixed_buy_amount,
         "execute_mode": execute_mode,
         "auto_place": execute_mode != DEFAULT_EXECUTE_MODE,
+        "threshold_mode": threshold_mode,
+        "rank_pct_threshold": rank_pct_threshold,
+        "signal_model_id": signal_model_id,
     }
 
 

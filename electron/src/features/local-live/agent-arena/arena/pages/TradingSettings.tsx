@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { BrokerMarketInfo, fetchBrokerMarket, saveBrokerMarket } from '../api/client';
 import { api } from '../api/client';
 import { usePolling } from '../hooks/usePolling';
+import { modelTrainingService } from '../../../../../services/modelTrainingService';
 import './TradingSettings.css';
 
 // T6-3：桥 server_time 可能是 aware UTC——只取时钟列的裸截断会把 UTC 当北京展示
@@ -54,6 +55,10 @@ interface RollingConfig {
   score_threshold: number;
   fixed_buy_amount: number;
   execute_mode: 'off' | 'tdx' | 'paper';
+  threshold_mode?: 'rank_pct' | 'score';
+  rank_pct_threshold?: number;
+  signal_model_id?: string;
+  signal_model?: { model_id: string; display_name: string; source: string };
 }
 
 interface SltpConfig {
@@ -191,6 +196,11 @@ export default function TradingSettings({ embedded = false }: { embedded?: boole
   const [tdxMsg, setTdxMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [threshold, setThreshold] = useState('2.2');
+  const [thresholdMode, setThresholdMode] = useState<'rank_pct' | 'score'>('rank_pct');
+  const [rankThreshold, setRankThreshold] = useState('0.10');
+  const [signalModelId, setSignalModelId] = useState('');
+  const [signalModelLabel, setSignalModelLabel] = useState('');
+  const [modelOptions, setModelOptions] = useState<{ value: string; label: string }[]>([]);
   const [amount, setAmount] = useState('10000');
   const [execMode, setExecMode] = useState<ExecuteMode>('off');
   const [rollingDate, setRollingDate] = useState('');
@@ -212,8 +222,28 @@ export default function TradingSettings({ embedded = false }: { embedded?: boole
     void getJson<RollingConfig>('/quantmind/tdx/rolling-config')
       .then((c) => {
         setThreshold(String(c.score_threshold ?? '2.2'));
+        setThresholdMode(c.threshold_mode ?? 'rank_pct');
+        setRankThreshold(String(c.rank_pct_threshold ?? '0.10'));
+        setSignalModelId(c.signal_model_id ?? '');
+        setSignalModelLabel(
+          c.signal_model?.display_name || c.signal_model?.model_id || '',
+        );
         setAmount(String(c.fixed_buy_amount ?? '10000'));
         setExecMode(c.execute_mode ?? 'off');
+      })
+      .catch(() => {});
+
+    // 信号模型下拉：用户 ready 模型 + 「自动（策略绑定 → 默认模型）」
+    void modelTrainingService
+      .listUserModels()
+      .then((res) => {
+        const items = (res?.items ?? [])
+          .filter((m) => m.status === 'ready')
+          .map((m) => {
+            const display = String(m.metadata_json?.display_name || m.model_id);
+            return { value: m.model_id, label: display };
+          });
+        setModelOptions([{ value: '', label: '自动（策略绑定 → 默认模型）' }, ...items]);
       })
       .catch(() => {});
 
@@ -259,8 +289,16 @@ export default function TradingSettings({ embedded = false }: { embedded?: boole
   const saveRolling = useCallback(async () => {
     const t = parseFloat(threshold);
     const a = parseFloat(amount);
-    if (!Number.isFinite(t) || t <= 0 || t > 10) {
-      setRollingMsg({ ok: false, text: '❌ 阈值需在 0-10 之间' });
+    const rank = parseFloat(rankThreshold);
+    if (thresholdMode === 'score' && (!Number.isFinite(t) || t <= 0 || t > 10)) {
+      setRollingMsg({ ok: false, text: '❌ 绝对分阈值需在 0-10 之间' });
+      return;
+    }
+    if (
+      thresholdMode === 'rank_pct' &&
+      (!Number.isFinite(rank) || rank <= 0 || rank >= 0.5)
+    ) {
+      setRollingMsg({ ok: false, text: '❌ 分位阈值需在 0-0.5 之间（如 0.10 = 后/前 10%）' });
       return;
     }
     if (!Number.isFinite(a) || a <= 0) {
@@ -269,9 +307,12 @@ export default function TradingSettings({ embedded = false }: { embedded?: boole
     }
     setRollingMsg(null);
     const r = await putJson('/quantmind/tdx/rolling-config', {
-      score_threshold: t,
+      score_threshold: Number.isFinite(t) ? t : 2.2,
       fixed_buy_amount: a,
       execute_mode: execMode,
+      threshold_mode: thresholdMode,
+      rank_pct_threshold: Number.isFinite(rank) ? rank : 0.1,
+      signal_model_id: signalModelId,
     });
     setRollingMsg(r.ok
       ? { ok: true, text: '✅ 已保存，推理自动推送即时生效' }
@@ -280,12 +321,25 @@ export default function TradingSettings({ embedded = false }: { embedded?: boole
       void getJson<RollingConfig>('/quantmind/tdx/rolling-config')
         .then((c) => {
           setThreshold(String(c.score_threshold ?? threshold));
+          setThresholdMode(c.threshold_mode ?? thresholdMode);
+          setRankThreshold(String(c.rank_pct_threshold ?? rankThreshold));
+          setSignalModelId(c.signal_model_id ?? signalModelId);
+          setSignalModelLabel(
+            c.signal_model?.display_name || c.signal_model?.model_id || '',
+          );
           setAmount(String(c.fixed_buy_amount ?? amount));
           setExecMode(c.execute_mode ?? execMode);
         })
         .catch(() => {});
     }
-  }, [threshold, amount, execMode]);
+  }, [
+    threshold,
+    amount,
+    execMode,
+    thresholdMode,
+    rankThreshold,
+    signalModelId,
+  ]);
 
   // ---- 动作：保存止损止盈 ----
   const saveSltp = useCallback(async () => {
@@ -477,9 +531,39 @@ export default function TradingSettings({ embedded = false }: { embedded?: boole
                   <div className="ts-cfg-title">滚动买卖配置（quantmind 推理引擎 · 阈值与金额可自己改）</div>
                   <div className="ts-cfg-fields">
                     <label className="ts-field">
-                      <span className="ts-field-label">买入分数阈值（{'>'}此分买入，低于则卖出）</span>
-                      <input className="ts-input" type="number" step="0.1" min="0" max="10"
-                        value={threshold} onChange={(e) => setThreshold(e.target.value)} />
+                      <span className="ts-field-label">阈值口径</span>
+                      <select className="ts-input" value={thresholdMode}
+                        onChange={(e) => setThresholdMode(e.target.value as 'rank_pct' | 'score')}>
+                        <option value="rank_pct">截面分位（推荐，跨模型可比）</option>
+                        <option value="score">绝对分（旧，模型相关）</option>
+                      </select>
+                    </label>
+                    {thresholdMode === 'rank_pct' ? (
+                      <label className="ts-field">
+                        <span className="ts-field-label">分位阈值（持仓分位 ≤ 此值卖，≥ 1-此值买）</span>
+                        <input className="ts-input" type="number" step="0.01" min="0.01" max="0.49"
+                          value={rankThreshold} onChange={(e) => setRankThreshold(e.target.value)} />
+                      </label>
+                    ) : (
+                      <label className="ts-field">
+                        <span className="ts-field-label">买入分数阈值（{'>'}此分买入，低于则卖出）</span>
+                        <input className="ts-input" type="number" step="0.1" min="0" max="10"
+                          value={threshold} onChange={(e) => setThreshold(e.target.value)} />
+                      </label>
+                    )}
+                    <label className="ts-field">
+                      <span className="ts-field-label">信号模型（空=策略绑定 → 默认模型）</span>
+                      <select className="ts-input" value={signalModelId}
+                        onChange={(e) => setSignalModelId(e.target.value)}>
+                        {modelOptions.length === 0 ? (
+                          <option value="">自动（策略绑定 → 默认模型）</option>
+                        ) : modelOptions.map((opt) => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                      {signalModelLabel ? (
+                        <span className="ts-hint">当前生效：{signalModelLabel}</span>
+                      ) : null}
                     </label>
                     <label className="ts-field">
                       <span className="ts-field-label">每只固定买入金额（元）</span>
@@ -504,7 +588,7 @@ export default function TradingSettings({ embedded = false }: { embedded?: boole
                     ))}
                   </div>
                   <div className="ts-hint">
-                    卖单市价、买单收盘价限价；先卖后买。规则：分数 &gt; 阈值 → 买入；持仓分数 ≤ 阈值 → 卖出；大盘低于 MA20 → 只卖不买。推历史日期时跳过当日大盘过滤。执行模式选「通达信下单」或「模拟盘直接下单」后，信号直接生成委托。
+                    卖单市价、买单收盘价限价；先卖后买。分位口径（推荐）：持仓分位 ≤ 阈值 → 卖、分位 ≥ 1-阈值 → 买；绝对分口径：分数 &gt; 阈值买、≤ 阈值卖。大盘低于 MA20 → 只卖不买；缺分位/分数的持仓跳过不卖。信号模型按「所选 → 策略绑定 → 默认模型」解析，不再取最后跑完的推理。执行模式选「通达信下单」或「模拟盘直接下单」后，信号直接生成委托。
                   </div>
                   {rollingMsg && (
                     <div className={`ts-msg ${rollingMsg.ok ? 'ok' : 'err'}`}>{rollingMsg.text}</div>

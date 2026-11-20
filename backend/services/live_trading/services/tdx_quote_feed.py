@@ -777,12 +777,62 @@ def format_sltp_alert_text(
     return title, content
 
 
+def strategy_alert_decision(
+    *,
+    score: float | None,
+    rank_pct: float | None,
+    threshold_mode: str,
+    score_threshold: float,
+    rank_pct_threshold: float,
+) -> tuple[bool, str]:
+    """策略提醒判定（纯函数）：返回 (是否提醒, 文案)。
+
+    - rank_pct：缺分位 → 不提醒（数据缺失不是卖出信号）；
+    - score：缺分数 → 不提醒（旧配置也改为保守口径，避免 0/None 误卖）；
+    - 阈值比较：持仓分位 ≤ 阈值 / 分数 ≤ 阈值。
+    """
+    if threshold_mode == "rank_pct":
+        if not isinstance(rank_pct, (int, float)):
+            return False, ""
+        if float(rank_pct) > float(rank_pct_threshold):
+            return False, ""
+        return True, (
+            f"最新推理位置靠后（分位 {float(rank_pct):.3f} ≤ "
+            f"{float(rank_pct_threshold):.3f}）"
+        )
+    if not isinstance(score, (int, float)):
+        return False, ""
+    if float(score) > float(score_threshold):
+        return False, ""
+    return True, (
+        f"最新推理分数 {float(score):.2f} ≤ 阈值 {float(score_threshold):.2f}"
+    )
+
+
 def format_strategy_digest_line(
-    *, symbol: str, name: str, score: float, threshold: float
+    *,
+    symbol: str,
+    name: str,
+    score: float | None,
+    threshold: float,
+    rank_pct: float | None = None,
+    threshold_mode: str = "score",
+    rank_pct_threshold: float | None = None,
+    model_name: str = "",
 ) -> str:
-    """策略提醒 → QQ 摘要单行（``qq_digest`` 批量卡用）。纯函数、绝不抛。"""
+    """策略提醒 → QQ 摘要单行（``qq_digest`` 批量卡用）。纯函数、绝不抛。
+
+    ``rank_pct`` 模式（新默认）说**位置**（分位），score 模式保留旧文案。
+    """
     ident = display_identity(symbol, hint=name) or str(symbol or "")
-    return f"⚠️ {ident} 推理分数 {float(score):.2f} ≤ 阈值 {float(threshold):.2f}"
+    if threshold_mode == "rank_pct" and rank_pct is not None:
+        cut = float(rank_pct_threshold if rank_pct_threshold is not None else 0.10)
+        model = f" ｜ {model_name}" if model_name else ""
+        return (
+            f"⚠️ {ident} 位置靠后（分位 {float(rank_pct):.3f} ≤ {cut:.3f}）{model}"
+        )
+    score_text = f"{float(score):.2f}" if score is not None else "—"
+    return f"⚠️ {ident} 推理分数 {score_text} ≤ 阈值 {float(threshold):.2f}"
 
 
 def _enqueue_strategy_qq(
@@ -791,8 +841,12 @@ def _enqueue_strategy_qq(
     user_id: str,
     symbol: str,
     name: str,
-    score: float,
+    score: float | None,
     threshold: float,
+    rank_pct: float | None = None,
+    threshold_mode: str = "score",
+    rank_pct_threshold: float | None = None,
+    model_name: str = "",
 ) -> None:
     """本轮策略提醒 → QQ 摘要卡（120s 窗口合并，2026-10-16 拍板）；失败绝不阻断。"""
     try:
@@ -802,7 +856,14 @@ def _enqueue_strategy_qq(
             digest_key=f"strategy:{tenant_id}:{user_id}",
             header="🔔 策略提醒",
             line=format_strategy_digest_line(
-                symbol=symbol, name=name, score=score, threshold=threshold
+                symbol=symbol,
+                name=name,
+                score=score,
+                threshold=threshold,
+                rank_pct=rank_pct,
+                threshold_mode=threshold_mode,
+                rank_pct_threshold=rank_pct_threshold,
+                model_name=model_name,
             ),
             footer="交易台 › 持仓监控",
         )
@@ -893,13 +954,20 @@ async def _check_strategy_alerts(
     user_id: str,
     positions: list[dict],
 ) -> None:
-    """策略提醒：持仓股最新推理 fusion_score ≤ 滚动阈值 → 提醒分数已落到阈值下。
+    """策略提醒：持仓股在「信号模型」最新推理里的位置/分数落到阈值下 → 提醒。
 
+    口径与滚动买卖共用 ``load_rolling_settings``：
+    - 默认 ``rank_pct``：持仓分位 ≤ 阈值（默认 0.10）才提醒；**缺分位跳过**
+      （数据缺失不是卖出信号，2026-11-20 修：旧绝对分阈值 2.2 对当前模型恒真，
+      曾把全部持仓报成「分数 0.00 ≤ 2.20」）；
+    - 显式 ``score`` 旧配置：保留「分数 ≤ 阈值」文案；缺分数同样跳过。
+
+    信号模型固定为 显式配置 → 策略绑定 → 用户默认模型（``resolve_signal_model``），
+    不再取「最后跑完的 run」——多模型并行时那会让同一持仓的结论随机漂移。
     每个新推理 run 检查一次（last_run 存 Redis，避免每 3s 重复查库/重复提醒）。
 
-    站内通知只说**分数与阈值的关系**（这条查询根本没取 `rank_pct`，写成「截面靠后」
-    就是编造一个没算过的排名）；通达信预警仍按 sell 侧推送 —— 那是执行面，
-    客户端收的是委托要素，不是给人读的结论。
+    站内通知若走 rank 口径，说的是**位置**（分位），不是买卖建议；通达信预警仍按
+    sell 侧推送 —— 那是执行面，客户端收的是委托要素。
     """
     held = {p["symbol"]: p for p in positions}
     if not held:
@@ -907,11 +975,18 @@ async def _check_strategy_alerts(
     try:
         from backend.services.trade_shared.redis_client import get_redis
         from backend.services.live_trading.services.tdx_rolling_trade_service import (
-            load_rolling_config,
+            load_rolling_settings,
+            resolve_signal_model,
         )
 
+        settings = load_rolling_settings(tenant_id, user_id)
+        signal_model = await resolve_signal_model(
+            tenant_id, user_id, settings.signal_model_id
+        )
+        model_label = (
+            signal_model.display_name or signal_model.model_id or "未解析默认模型"
+        )
         redis_client = get_redis()
-        threshold, _, _ = load_rolling_config(tenant_id, user_id)
         last_key = LAST_RUN_KEY.format(tenant_id=tenant_id, user_id=user_id)
         last_run = redis_client.get(last_key)
 
@@ -919,24 +994,20 @@ async def _check_strategy_alerts(
         from backend.shared.database_manager_v2 import get_session
 
         async with get_session(read_only=True) as db:
+            run_sql = """
+                SELECT run_id, prediction_trade_date::text AS prediction_trade_date
+                FROM qm_model_inference_runs
+                WHERE tenant_id = :tenant_id
+                  AND user_id = :user_id
+                  AND status = 'completed'
+            """
+            run_params: dict = {"tenant_id": tenant_id, "user_id": user_id}
+            if signal_model.model_id:
+                run_sql += " AND model_id = :model_id"
+                run_params["model_id"] = signal_model.model_id
+            run_sql += " ORDER BY created_at DESC LIMIT 1"
             row = (
-                (
-                    await db.execute(
-                        text(
-                            """
-                        SELECT run_id, prediction_trade_date::text AS prediction_trade_date
-                        FROM qm_model_inference_runs
-                        WHERE tenant_id = :tenant_id
-                          AND user_id = :user_id
-                          AND status = 'completed'
-                        ORDER BY created_at DESC LIMIT 1
-                        """
-                        ),
-                        {"tenant_id": tenant_id, "user_id": user_id},
-                    )
-                )
-                .mappings()
-                .first()
+                (await db.execute(text(run_sql), run_params)).mappings().first()
             )
             if not row:
                 return
@@ -948,7 +1019,7 @@ async def _check_strategy_alerts(
                     await db.execute(
                         text(
                             """
-                        SELECT symbol, fusion_score
+                        SELECT symbol, fusion_score, rank_pct
                         FROM engine_signal_scores
                         WHERE run_id = :run_id AND tenant_id = :tenant_id AND user_id = :user_id
                           AND (universe_tag IS NULL OR universe_tag = 'CN')
@@ -962,49 +1033,79 @@ async def _check_strategy_alerts(
             )
 
         redis_client.set(last_key, run_id)
+        skipped = 0
         for r in rows:
             symbol = _normalize_prefix(str(r.get("symbol") or ""))
-            score = r.get("fusion_score")
             p = held.get(symbol)
-            if p is None or not isinstance(score, (int, float)):
+            if p is None:
                 continue
-            if float(score) <= threshold:
-                name = str(p.get("name") or "").strip()
-                reason = (
-                    f"最新推理分数 {float(score):.2f} ≤ 阈值 {float(threshold):.2f}"
-                )
-                logger.info(
-                    "[TdxFeed] 策略分数提醒 %s %s: %s", name or symbol, symbol, reason
-                )
-                await _notify(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    title=(f"策略提醒 · {display_identity(symbol, hint=name)}"),
-                    content=(
-                        f"{reason} ｜ 预测日 {row.get('prediction_trade_date') or '--'}"
-                    ),
-                    level="warning",
-                    qq_alert=False,  # QQ 面走 qq_digest 批量卡（2026-10-16 拍板）
-                    push_tdx=[
-                        {
-                            "symbol": p["suffix"],
-                            "side": "sell",
-                            "price": 0,
-                            "close": 0,
-                            "volume": int(p.get("volume") or 0),
-                            "reason": reason,
-                        }
-                    ],
-                )
-                _enqueue_strategy_qq(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    symbol=symbol,
-                    name=name,
-                    score=float(score),
-                    threshold=float(threshold),
-                )
-                feed_status["strategy_alerts_fired"] += 1
+            score = r.get("fusion_score")
+            rank = r.get("rank_pct")
+            should_alert, reason = strategy_alert_decision(
+                score=score if isinstance(score, (int, float)) else None,
+                rank_pct=rank if isinstance(rank, (int, float)) else None,
+                threshold_mode=settings.threshold_mode,
+                score_threshold=settings.score_threshold,
+                rank_pct_threshold=settings.rank_pct_threshold,
+            )
+            if not should_alert:
+                if (
+                    settings.threshold_mode == "rank_pct"
+                    and not isinstance(rank, (int, float))
+                ) or (
+                    settings.threshold_mode != "rank_pct"
+                    and not isinstance(score, (int, float))
+                ):
+                    skipped += 1
+                continue
+            name = str(p.get("name") or "").strip()
+            logger.info(
+                "[TdxFeed] 策略分数提醒 %s %s: %s（模型 %s / run %s）",
+                name or symbol,
+                symbol,
+                reason,
+                model_label,
+                run_id,
+            )
+            await _notify(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                title=(f"策略提醒 · {display_identity(symbol, hint=name)}"),
+                content=(
+                    f"{reason} ｜ 模型 {model_label} ｜ run {run_id} ｜ "
+                    f"预测日 {row.get('prediction_trade_date') or '--'}"
+                ),
+                level="warning",
+                qq_alert=False,  # QQ 面走 qq_digest 批量卡（2026-10-16 拍板）
+                push_tdx=[
+                    {
+                        "symbol": p["suffix"],
+                        "side": "sell",
+                        "price": 0,
+                        "close": 0,
+                        "volume": int(p.get("volume") or 0),
+                        "reason": reason,
+                    }
+                ],
+            )
+            _enqueue_strategy_qq(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                symbol=symbol,
+                name=name,
+                score=float(score) if isinstance(score, (int, float)) else None,
+                threshold=float(settings.score_threshold),
+                rank_pct=float(rank) if isinstance(rank, (int, float)) else None,
+                threshold_mode=settings.threshold_mode,
+                rank_pct_threshold=settings.rank_pct_threshold,
+                model_name=model_label,
+            )
+            feed_status["strategy_alerts_fired"] += 1
+        if skipped:
+            logger.info(
+                "[TdxFeed] 策略提醒跳过 %d 只无分位/分数的持仓（数据缺失不卖）",
+                skipped,
+            )
     except Exception as exc:
         logger.warning("[TdxFeed] 策略提醒检查失败: %s", exc)
 

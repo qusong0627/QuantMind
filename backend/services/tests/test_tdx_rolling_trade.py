@@ -11,6 +11,8 @@ import pytest
 from backend.services.live_trading.services.tdx_rolling_trade_service import (
     DEFAULT_EXECUTE_MODE,
     DEFAULT_SCORE_THRESHOLD,
+    RollingSettings,
+    SignalModel,
     TdxRollingTradeService,
     load_rolling_config,
     save_rolling_config,
@@ -256,14 +258,31 @@ class TestRunRollingPushExecuteMode:
         buys = [{"symbol": "600519.SH", "score": 2.8, "volume": 100, "close": 1500.0}]
         sells = []
         with (
-            patch(f"{ROLLING_MODULE}.load_rolling_config", return_value=(2.2, 10000.0, "paper")),
+            patch(
+                f"{ROLLING_MODULE}.load_rolling_settings",
+                return_value=RollingSettings(
+                    threshold_mode="score",
+                    score_threshold=2.2,
+                    fixed_buy_amount=10000.0,
+                    execute_mode="paper",
+                ),
+            ),
+            patch(
+                f"{ROLLING_MODULE}.resolve_signal_model",
+                new=AsyncMock(return_value=SignalModel("sig", "sig", "test")),
+            ),
             patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx),
             patch(
                 "backend.services.trade.services.member_gate.is_paid_member",
                 new=AsyncMock(return_value=True),
             ),
-            patch.object(svc, "load_latest_scores", new=AsyncMock(
-                return_value=("run1", {"600519.SH": 2.8}, "2026-08-25")
+            patch.object(svc, "load_latest_scores_with_rank", new=AsyncMock(
+                return_value=(
+                    "run1",
+                    {"600519.SH": 2.8},
+                    {"600519.SH": 0.95},
+                    "2026-08-25",
+                )
             )),
             patch.object(svc, "load_positions_from_paper", new=AsyncMock(return_value=([], ""))),
             patch.object(svc, "load_positions_from_tdx") as load_tdx,
@@ -295,8 +314,17 @@ class TestRunRollingPushExecuteMode:
         notifier, redis = _SpyNotifier(), _FakeRedis()
         with (
             patch(
-                f"{ROLLING_MODULE}.load_rolling_config",
-                return_value=(2.2, 10000.0, "tdx"),
+                f"{ROLLING_MODULE}.load_rolling_settings",
+                return_value=RollingSettings(
+                    threshold_mode="score",
+                    score_threshold=2.2,
+                    fixed_buy_amount=10000.0,
+                    execute_mode="tdx",
+                ),
+            ),
+            patch(
+                f"{ROLLING_MODULE}.resolve_signal_model",
+                new=AsyncMock(return_value=SignalModel("sig", "sig", "test")),
             ),
             patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx),
             # 告警面必须走替身：此前漏铺通知桩，用例把「桥未配置」假告警
@@ -323,13 +351,30 @@ class TestRunRollingPushExecuteMode:
         fake_tdx = MagicMock()
         fake_tdx.enabled = False
         with (
-            patch(f"{ROLLING_MODULE}.load_rolling_config", return_value=(2.2, 10000.0, "off")),
+            patch(
+                f"{ROLLING_MODULE}.load_rolling_settings",
+                return_value=RollingSettings(
+                    threshold_mode="score",
+                    score_threshold=2.2,
+                    fixed_buy_amount=10000.0,
+                    execute_mode="off",
+                ),
+            ),
+            patch(
+                f"{ROLLING_MODULE}.resolve_signal_model",
+                new=AsyncMock(return_value=SignalModel("sig", "sig", "test")),
+            ),
             patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx),
             patch(
                 "backend.services.trade.services.member_gate.is_paid_member"
             ) as check_member,
-            patch.object(svc, "load_latest_scores", new=AsyncMock(
-                return_value=("run1", {"600519.SH": 2.8}, "2026-08-25")
+            patch.object(svc, "load_latest_scores_with_rank", new=AsyncMock(
+                return_value=(
+                    "run1",
+                    {"600519.SH": 2.8},
+                    {"600519.SH": 0.95},
+                    "2026-08-25",
+                )
             )),
             patch.object(svc, "load_positions_from_tdx", new=AsyncMock(return_value=([], ""))),
             patch.object(svc, "is_index_above_ma20", new=AsyncMock(return_value=(True, "ok"))),
@@ -456,7 +501,22 @@ def _patch_stack(*, mode: str, in_session: bool, notifier, redis):
 
     stack = ExitStack()
     stack.enter_context(
-        patch(f"{ROLLING_MODULE}.load_rolling_config", return_value=(2.2, 10000.0, mode))
+        patch(
+            f"{ROLLING_MODULE}.load_rolling_settings",
+            return_value=RollingSettings(
+                threshold_mode="score",
+                rank_pct_threshold=0.10,
+                score_threshold=2.2,
+                fixed_buy_amount=10000.0,
+                execute_mode=mode,
+            ),
+        )
+    )
+    stack.enter_context(
+        patch(
+            f"{ROLLING_MODULE}.resolve_signal_model",
+            new=AsyncMock(return_value=SignalModel("sig", "sig", "test")),
+        )
     )
     stack.enter_context(patch(f"{ROLLING_MODULE}.is_trading_time", return_value=in_session))
     stack.enter_context(patch(f"{ROLLING_MODULE}.trade_redis", redis))
@@ -488,8 +548,13 @@ _SELL = {"symbol": "000001.SZ", "score": 1.5, "volume": 200, "available_volume":
 
 def _arm(svc, *, sells=None, buys=None):
     """铺好「有买卖信号」的一次运行所需的全部旁路（执行段之前）。"""
-    svc.load_latest_scores = AsyncMock(
-        return_value=("run1", {"600519.SH": 2.8, "000001.SZ": 1.5}, "2026-08-25")
+    svc.load_latest_scores_with_rank = AsyncMock(
+        return_value=(
+            "run1",
+            {"600519.SH": 2.8, "000001.SZ": 1.5},
+            {"600519.SH": 0.95, "000001.SZ": 0.05},
+            "2026-08-25",
+        )
     )
     svc.is_index_above_ma20 = AsyncMock(return_value=(True, "ok"))
     svc.compute_rolling_signals = MagicMock(
@@ -614,7 +679,9 @@ class TestRollingExecutionGates:
 
         # 另一条分支：早退型失败（无分数）必须带上原因，aborted 判据靠它
         svc2 = TdxRollingTradeService()
-        svc2.load_latest_scores = AsyncMock(return_value=(None, {}, ""))
+        svc2.load_latest_scores_with_rank = AsyncMock(
+            return_value=(None, {}, {}, "")
+        )
         notifier2, redis2 = _SpyNotifier(), _FakeRedis()
         with _patch_stack(mode="tdx", in_session=True, notifier=notifier2, redis=redis2), \
                 patch(f"{ROLLING_MODULE}.tdx_pusher", _pusher()):
@@ -813,7 +880,9 @@ class TestAlertDiscipline:
         """运行中途抛异常（DB/数据源）也必须有人看见——此前只有 script_runner 的
         一行 warning，而告警面是「人不在场时唯一会响的东西」。异常照旧上抛。"""
         svc = TdxRollingTradeService()
-        svc.load_latest_scores = AsyncMock(side_effect=RuntimeError("db down"))
+        svc.load_latest_scores_with_rank = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
         fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
 
         with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \

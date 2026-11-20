@@ -1,11 +1,15 @@
 """
 TDX Rolling Trade Service - 按分数滚动买卖并推送（三档执行模式）
 
-规则（每日推理完成后执行一次）：
-  1. 个股 fusion_score > SCORE_THRESHOLD（2.2）→ 进入买入候选
-  2. 已持仓且最新分数 <= 2.2（或最新推理不再有该股）→ 卖出
-  3. 已持仓且最新分数仍 > 2.2 → 持有不动
+规则（每日推理完成后执行一次；阈值默认走截面分位 rank_pct）：
+  1. 个股 rank_pct ≥ 1 - RANK_PCT_THRESHOLD（默认前 10%）→ 进入买入候选
+  2. 已持仓且 rank_pct ≤ RANK_PCT_THRESHOLD（默认后 10%）→ 卖出；
+     最新推理无该股分位 → 跳过（数据缺失不是卖出信号）
+  3. 其余持仓持有不动
   4. 上证指数（000001.SH）收盘 < MA20 → 只卖不买（强制过滤）
+
+  旧 score 模式（显式配置才启用）：fusion_score > 2.2 买 / ≤ 2.2 卖。
+  ⚠️ 绝对分依赖模型量纲，当前模型分数约 [-0.33, +0.17]，2.2 只在 0-10 分时代成立。
 
 执行模式（设置页可改，存 Redis，QuantDB 付费会员专属）：
   off   -> 仅推通达信预警（默认，半自动）
@@ -16,6 +20,7 @@ TDX Rolling Trade Service - 按分数滚动买卖并推送（三档执行模式�
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -38,10 +43,16 @@ from backend.services.live_trading.services.trading_session import (
 
 logger = logging.getLogger(__name__)
 
-# 默认分数阈值: fusion_score 高于该阈值即进入买入候选（可在设置页修改，存 Redis）。
-# ⚠️ 这是**绝对分**阈值不是截面分位：`fusion_score > 2.2` 说明不了「当日排前几%」
-# （那要看 rank_pct）。注释与推送文案都别把它说成「截面靠前/靠后」——没算过的排名不能说。
+# 默认分数阈值（**仅 score 模式**）：fusion_score 高于该阈值即买入。
+# ⚠️ 绝对分阈值依赖模型量纲：2026-11-20 实测当前模型 fusion_score 在
+# [-0.33, +0.17]，2.2 恒大于所有分数 → 买入永不触发、全部持仓触发卖出。
+# 新配置默认走 rank_pct（截面分位），跨模型量纲一致；score 模式仅为旧配置兼容。
 DEFAULT_SCORE_THRESHOLD = 2.2
+# 阈值口径：rank_pct=截面分位（推荐）/ score=绝对分（旧）。
+THRESHOLD_MODES = ("rank_pct", "score")
+DEFAULT_THRESHOLD_MODE = "rank_pct"
+# 分位阈值：持仓分位 ≤ 该值 → 卖；分位 ≥ 1-该值 → 买（默认后/前 10%）。
+DEFAULT_RANK_PCT_THRESHOLD = 0.10
 # 默认每只股票固定买入金额（元）
 DEFAULT_FIXED_BUY_AMOUNT = 10000.0
 # 买入手数向下取整到 100 股
@@ -65,33 +76,79 @@ def _normalize_execute_mode(value: Any) -> str:
     return mode if mode in EXECUTE_MODES else DEFAULT_EXECUTE_MODE
 
 
-def load_rolling_config(
+@dataclass(frozen=True)
+class RollingSettings:
+    """滚动买卖配置（阈值口径 + 金额 + 执行模式 + 信号模型）。"""
+
+    threshold_mode: str = DEFAULT_THRESHOLD_MODE
+    rank_pct_threshold: float = DEFAULT_RANK_PCT_THRESHOLD
+    score_threshold: float = DEFAULT_SCORE_THRESHOLD
+    fixed_buy_amount: float = DEFAULT_FIXED_BUY_AMOUNT
+    execute_mode: str = DEFAULT_EXECUTE_MODE
+    signal_model_id: str = ""
+
+
+@dataclass(frozen=True)
+class SignalModel:
+    """策略提醒/滚动买卖的信号模型（显式 > 策略绑定 > 默认模型）。"""
+
+    model_id: str = ""
+    display_name: str = ""
+    source: str = "unresolved"
+
+
+def _normalize_threshold_mode(value: Any, default: str = DEFAULT_THRESHOLD_MODE) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in THRESHOLD_MODES else default
+
+
+def load_rolling_settings(
     tenant_id: str,
     user_id: str,
-) -> tuple[float, float, str]:
-    """读取滚动买卖配置 (score_threshold, fixed_buy_amount, execute_mode)。
+) -> RollingSettings:
+    """读取滚动买卖完整配置（Redis 优先，env/默认值兜底）。
 
-    优先读 Redis（设置页保存），未保存时用环境变量/默认值。
-    execute_mode: off=仅预警 / tdx=通达信下单(收费TQ账号直接提交) / paper=模拟盘直接下单(免确认)。
+    兼容迁移：旧配置只有 ``score_threshold``、没有 ``threshold_mode`` 时，按
+    **rank_pct** 读取（2026-11-20：旧绝对阈值 2.2 对当前模型恒真，必须迁移）。
+    显式保存 ``threshold_mode=score`` 的配置仍按旧口径执行。
     """
-    threshold = _env_float("TDX_ROLLING_SCORE_THRESHOLD", DEFAULT_SCORE_THRESHOLD)
+    score_threshold = _env_float("TDX_ROLLING_SCORE_THRESHOLD", DEFAULT_SCORE_THRESHOLD)
+    rank_pct_threshold = _env_float(
+        "TDX_ROLLING_RANK_PCT_THRESHOLD", DEFAULT_RANK_PCT_THRESHOLD
+    )
+    threshold_mode = _normalize_threshold_mode(
+        os.getenv("TDX_ROLLING_THRESHOLD_MODE", "")
+    )
     amount = _env_float("TDX_ROLLING_FIXED_BUY_AMOUNT", DEFAULT_FIXED_BUY_AMOUNT)
     raw_mode = os.getenv("TDX_ROLLING_EXECUTE_MODE", "").strip().lower()
     execute_mode = _normalize_execute_mode(raw_mode)
     if not raw_mode and _env_bool("TDX_ROLLING_AUTO_PLACE", False):
         # 旧环境变量兼容: TDX_ROLLING_AUTO_PLACE=true -> tdx
         execute_mode = "tdx"
+    signal_model_id = ""
     try:
         from backend.services.trade_shared.redis_client import get_redis
 
-        saved = get_redis().get(_ROLLING_CONFIG_KEY.format(tenant_id=tenant_id, user_id=user_id))
+        saved = get_redis().get(
+            _ROLLING_CONFIG_KEY.format(tenant_id=tenant_id, user_id=user_id)
+        )
         if isinstance(saved, dict):
+            if "threshold_mode" in saved:
+                threshold_mode = _normalize_threshold_mode(
+                    saved.get("threshold_mode"), threshold_mode
+                )
+            else:
+                # 旧配置迁移：绝对分阈值对当前量纲失效
+                threshold_mode = DEFAULT_THRESHOLD_MODE
+            r = saved.get("rank_pct_threshold")
+            if isinstance(r, (int, float)) and 0 < float(r) < 0.5:
+                rank_pct_threshold = float(r)
             t = saved.get("score_threshold")
             a = saved.get("fixed_buy_amount")
             m = _normalize_execute_mode(saved.get("execute_mode"))
             p = saved.get("auto_place")
             if isinstance(t, (int, float)) and 0 < float(t) <= 10:
-                threshold = float(t)
+                score_threshold = float(t)
             if isinstance(a, (int, float)) and float(a) > 0:
                 amount = float(a)
             if m != DEFAULT_EXECUTE_MODE or saved.get("execute_mode") is not None:
@@ -99,9 +156,30 @@ def load_rolling_config(
             elif isinstance(p, bool) and p:
                 # 旧配置兼容: auto_place=true -> tdx
                 execute_mode = "tdx"
+            signal_model_id = str(saved.get("signal_model_id") or "").strip()
     except Exception as exc:
         logger.warning("[TdxRolling] 读取滚动配置失败，使用默认值: %s", exc)
-    return threshold, amount, execute_mode
+    return RollingSettings(
+        threshold_mode=threshold_mode,
+        rank_pct_threshold=rank_pct_threshold,
+        score_threshold=score_threshold,
+        fixed_buy_amount=amount,
+        execute_mode=execute_mode,
+        signal_model_id=signal_model_id,
+    )
+
+
+def load_rolling_config(
+    tenant_id: str,
+    user_id: str,
+) -> tuple[float, float, str]:
+    """兼容包装：返回 (score_threshold, fixed_buy_amount, execute_mode)。
+
+    新代码（策略提醒/滚动买卖）用 ``load_rolling_settings``；L2 实时等旧调用方
+    只关心金额/执行模式，保留三元组避免破坏。
+    """
+    settings = load_rolling_settings(tenant_id, user_id)
+    return settings.score_threshold, settings.fixed_buy_amount, settings.execute_mode
 
 
 def save_rolling_config(
@@ -111,23 +189,131 @@ def save_rolling_config(
     score_threshold: float,
     fixed_buy_amount: float,
     execute_mode: str = DEFAULT_EXECUTE_MODE,
+    threshold_mode: str | None = None,
+    rank_pct_threshold: float | None = None,
+    signal_model_id: str | None = None,
 ) -> None:
     """保存滚动买卖配置到 Redis（设置页）。
 
     同时写入旧字段 auto_place（execute_mode != off），兼容旧读取方。
+    threshold_mode 缺省不写（读取端按旧配置迁移到 rank_pct）。
     """
     from backend.services.trade_shared.redis_client import get_redis
 
     mode = _normalize_execute_mode(execute_mode)
+    payload: dict[str, Any] = {
+        "score_threshold": float(score_threshold),
+        "fixed_buy_amount": float(fixed_buy_amount),
+        "execute_mode": mode,
+        "auto_place": mode != DEFAULT_EXECUTE_MODE,
+    }
+    if threshold_mode is not None:
+        payload["threshold_mode"] = _normalize_threshold_mode(threshold_mode)
+    if rank_pct_threshold is not None:
+        payload["rank_pct_threshold"] = float(rank_pct_threshold)
+    if signal_model_id is not None:
+        payload["signal_model_id"] = str(signal_model_id).strip()
     get_redis().set(
         _ROLLING_CONFIG_KEY.format(tenant_id=tenant_id, user_id=user_id),
-        {
-            "score_threshold": float(score_threshold),
-            "fixed_buy_amount": float(fixed_buy_amount),
-            "execute_mode": mode,
-            "auto_place": mode != DEFAULT_EXECUTE_MODE,
-        },
+        payload,
     )
+
+
+async def resolve_signal_model(
+    tenant_id: str,
+    user_id: str,
+    explicit_model_id: str = "",
+) -> SignalModel:
+    """解析策略提醒/滚动买卖使用的信号模型。
+
+    优先级：显式配置 → 策略绑定（最近更新）→ 用户默认模型（CN）→ 未解析。
+    「最近一次完成的推理 run」不再作为信号来源：多模型并行时它会随机漂移
+    （2026-11-20：同一持仓在三个模型下 rank_pct 从 0.05 跳到 0.87）。
+    """
+    explicit = str(explicit_model_id or "").strip()
+    async with get_session(read_only=True) as db:
+        if explicit:
+            row = (
+                (
+                    await db.execute(
+                        text(
+                            """
+                            SELECT model_id,
+                                   COALESCE(metadata_json->>'display_name', model_id) AS display_name
+                            FROM qm_user_models
+                            WHERE tenant_id = :tenant_id AND user_id = :user_id
+                              AND model_id = :model_id AND status = 'ready'
+                            LIMIT 1
+                            """
+                        ),
+                        {
+                            "tenant_id": tenant_id,
+                            "user_id": user_id,
+                            "model_id": explicit,
+                        },
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row:
+                return SignalModel(
+                    str(row["model_id"]), str(row["display_name"]), "explicit"
+                )
+            logger.warning(
+                "[TdxRolling] 指定信号模型不可用，回退绑定/默认模型: %s", explicit
+            )
+        row = (
+            (
+                await db.execute(
+                    text(
+                        """
+                        SELECT b.model_id,
+                               COALESCE(m.metadata_json->>'display_name', b.model_id) AS display_name
+                        FROM qm_strategy_model_bindings b
+                        LEFT JOIN qm_user_models m
+                          ON m.tenant_id = b.tenant_id
+                         AND m.user_id = b.user_id
+                         AND m.model_id = b.model_id
+                        WHERE b.tenant_id = :tenant_id AND b.user_id = :user_id
+                        ORDER BY b.updated_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"tenant_id": tenant_id, "user_id": user_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row:
+            return SignalModel(
+                str(row["model_id"]), str(row["display_name"]), "strategy_binding"
+            )
+        row = (
+            (
+                await db.execute(
+                    text(
+                        """
+                        SELECT model_id,
+                               COALESCE(metadata_json->>'display_name', model_id) AS display_name
+                        FROM qm_user_models
+                        WHERE tenant_id = :tenant_id AND user_id = :user_id
+                          AND is_default = TRUE
+                        LIMIT 1
+                        """
+                    ),
+                    {"tenant_id": tenant_id, "user_id": user_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row:
+            return SignalModel(
+                str(row["model_id"]), str(row["display_name"]), "default"
+            )
+    return SignalModel()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -158,19 +344,20 @@ class TdxRollingTradeService:
 
     # ---------- 数据侧 ----------
 
-    async def load_latest_scores(
+    async def load_latest_scores_with_rank(
         self,
         *,
         tenant_id: str,
         user_id: str,
         run_id: str | None = None,
         trade_date: str | None = None,
-    ) -> tuple[str | None, dict[str, float], str | None]:
-        """读取推理 run 的 symbol->fusion_score。
+        model_id: str | None = None,
+    ) -> tuple[str | None, dict[str, float], dict[str, float], str | None]:
+        """读取推理 run 的 symbol->fusion_score 与 rank_pct。
 
-        优先 run_id；否则 trade_date 指定的预测日期（推历史分数）；都没有取最新。
-        返回 (run_id, score_map, prediction_trade_date)。score_map 的 key 为
-        suffix 格式（600519.SH）。
+        优先 run_id；否则 trade_date 指定的预测日期（推历史分数）；否则取
+        ``model_id`` 的最新完成 run（为空时取全局最新，仅旧调用方使用）。
+        返回 (run_id, score_map, rank_map, prediction_trade_date)，key 为 suffix。
         """
         async with get_session(read_only=True) as db:
             prediction_trade_date: str | None = None
@@ -199,6 +386,9 @@ class TdxRollingTradeService:
                       AND status = 'completed'
                 """
                 params: dict[str, Any] = {"tenant_id": tenant_id, "user_id": user_id}
+                if model_id:
+                    query += " AND model_id = :model_id"
+                    params["model_id"] = model_id
                 if trade_date:
                     query += " AND prediction_trade_date = :trade_date"
                     try:
@@ -221,7 +411,7 @@ class TdxRollingTradeService:
                 await db.execute(
                     text(
                         """
-                        SELECT symbol, fusion_score
+                        SELECT symbol, fusion_score, rank_pct
                         FROM engine_signal_scores
                         WHERE run_id = :run_id
                           AND tenant_id = :tenant_id
@@ -234,13 +424,44 @@ class TdxRollingTradeService:
             ).mappings().all()
 
             score_map: dict[str, float] = {}
+            rank_map: dict[str, float] = {}
             for r in rows:
                 symbol = _to_suffix(str(r.get("symbol") or ""))
                 score = r.get("fusion_score")
-                if symbol and isinstance(score, (int, float)):
+                rank = r.get("rank_pct")
+                if not symbol:
+                    continue
+                if isinstance(score, (int, float)):
                     score_map[symbol] = float(score)
+                if isinstance(rank, (int, float)):
+                    rank_map[symbol] = float(rank)
 
-            return selected_run, score_map, prediction_trade_date
+            return selected_run, score_map, rank_map, prediction_trade_date
+
+    async def load_latest_scores(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str | None = None,
+        trade_date: str | None = None,
+        model_id: str | None = None,
+    ) -> tuple[str | None, dict[str, float], str | None]:
+        """兼容包装：返回 (run_id, score_map, prediction_trade_date)。
+
+        L2 实时/采集等旧调用方只关心分数；新代码用
+        ``load_latest_scores_with_rank`` 取分位。
+        """
+        selected_run, score_map, _rank_map, prediction_trade_date = (
+            await self.load_latest_scores_with_rank(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                run_id=run_id,
+                trade_date=trade_date,
+                model_id=model_id,
+            )
+        )
+        return selected_run, score_map, prediction_trade_date
 
     async def load_positions_from_tdx(self) -> tuple[list[dict[str, Any]], str]:
         """从通达信桥拉取当前持仓。
@@ -387,26 +608,78 @@ class TdxRollingTradeService:
         index_above_ma20: bool,
         fixed_buy_amount: float = DEFAULT_FIXED_BUY_AMOUNT,
         score_threshold: float = DEFAULT_SCORE_THRESHOLD,
+        rank_map: dict[str, float] | None = None,
+        threshold_mode: str = "score",
+        rank_pct_threshold: float = DEFAULT_RANK_PCT_THRESHOLD,
     ) -> dict[str, Any]:
         """计算滚动买卖信号。
 
-        返回 {buys, sells, holds, market_detail}:
-          buys: [{symbol,name,score,volume,close,reason}]
-          sells: [{symbol,name,score,volume,reason}]
+        ``threshold_mode``:
+        - ``rank_pct``（默认新配置）：持仓分位 ≤ rank_pct_threshold → 卖；
+          分位 ≥ 1-rank_pct_threshold → 买；**缺分位 → 跳过（不卖）**。
+        - ``score``（旧配置）：分数 ≤ score_threshold → 卖；> 阈值 → 买；
+          缺分数按旧语义卖（仅为兼容，不再作为默认）。
+
+        返回 {buys, sells, holds, unscored, market_detail, signal_basis}:
+          buys: [{symbol,name,score,rank_pct,volume,close,reason}]
+          sells: [{symbol,name,score,rank_pct,volume,reason}]
         """
+        mode = _normalize_threshold_mode(threshold_mode, "score")
+        rank_map = rank_map or {}
+        buy_cut = max(0.0, 1.0 - float(rank_pct_threshold))
         held = {p["symbol"]: p for p in positions}
 
-        # 卖出: 持仓且 (最新分数 <= 阈值 或 最新推理无该股)
         sells: list[dict[str, Any]] = []
         holds: list[dict[str, Any]] = []
+        unscored: list[dict[str, Any]] = []
         for symbol, pos in held.items():
             score = score_map.get(symbol)
+            rank = rank_map.get(symbol)
+            if mode == "rank_pct":
+                if rank is None:
+                    # 机构口径：缺分位是数据缺失，不是卖出信号
+                    unscored.append(
+                        {
+                            "symbol": symbol,
+                            "name": pos.get("name") or symbol,
+                            "volume": pos["volume"],
+                            "reason": "最新推理无该股分位（跳过，不卖）",
+                        }
+                    )
+                    continue
+                if float(rank) <= float(rank_pct_threshold):
+                    sells.append(
+                        {
+                            "symbol": symbol,
+                            "name": pos.get("name") or symbol,
+                            "score": score,
+                            "rank_pct": float(rank),
+                            "volume": pos["volume"],
+                            "available_volume": pos["available_volume"],
+                            "reason": (
+                                f"截面位置靠后（分位 {float(rank):.3f} ≤ "
+                                f"{float(rank_pct_threshold):.3f}）"
+                            ),
+                        }
+                    )
+                else:
+                    holds.append(
+                        {
+                            "symbol": symbol,
+                            "name": pos.get("name") or symbol,
+                            "score": score,
+                            "rank_pct": float(rank),
+                            "volume": pos["volume"],
+                        }
+                    )
+                continue
             if score is None or score <= score_threshold:
                 sells.append(
                     {
                         "symbol": symbol,
                         "name": pos.get("name") or symbol,
                         "score": score,
+                        "rank_pct": rank,
                         "volume": pos["volume"],
                         "available_volume": pos["available_volume"],
                         "reason": (
@@ -422,38 +695,54 @@ class TdxRollingTradeService:
                         "symbol": symbol,
                         "name": pos.get("name") or symbol,
                         "score": score,
+                        "rank_pct": rank,
                         "volume": pos["volume"],
                     }
                 )
 
         buys: list[dict[str, Any]] = []
         if index_above_ma20:
-            # 买入候选: 分数 > 阈值 且未持仓，按分数降序
-            candidates = sorted(
-                (
-                    (sym, score)
-                    for sym, score in score_map.items()
-                    if score > score_threshold and sym not in held
-                ),
-                key=lambda kv: kv[1],
-                reverse=True,
-            )
-            close_map = _batch_last_close([sym for sym, _ in candidates])
-            for sym, score in candidates:
+            if mode == "rank_pct":
+                candidates = sorted(
+                    (
+                        (sym, float(rank), score_map.get(sym))
+                        for sym, rank in rank_map.items()
+                        if float(rank) >= buy_cut and sym not in held
+                    ),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+            else:
+                candidates = sorted(
+                    (
+                        (sym, None, float(score))
+                        for sym, score in score_map.items()
+                        if score > score_threshold and sym not in held
+                    ),
+                    key=lambda item: item[2] or 0.0,
+                    reverse=True,
+                )
+            close_map = _batch_last_close([sym for sym, _rank, _score in candidates])
+            for sym, rank, score in candidates:
                 close = close_map.get(sym, 0.0)
                 if close <= 0:
                     continue
                 volume = int((fixed_buy_amount / close) // LOT_SIZE) * LOT_SIZE
                 if volume < LOT_SIZE:
                     continue
+                if mode == "rank_pct":
+                    reason = f"分位 {rank:.3f} ≥ {buy_cut:.3f}"
+                else:
+                    reason = f"分数 {score:.2f} > {score_threshold}"
                 buys.append(
                     {
                         "symbol": sym,
-                        "score": round(float(score), 4),
+                        "score": round(float(score), 4) if score is not None else None,
+                        "rank_pct": round(float(rank), 4) if rank is not None else None,
                         "volume": volume,
                         "close": round(close, 2),
                         "amount": round(volume * close, 2),
-                        "reason": f"分数 {score:.2f} > {score_threshold}",
+                        "reason": reason,
                     }
                 )
 
@@ -461,8 +750,11 @@ class TdxRollingTradeService:
             "buys": buys,
             "sells": sells,
             "holds": holds,
+            "unscored": unscored,
             "index_above_ma20": index_above_ma20,
+            "threshold_mode": mode,
             "score_threshold": score_threshold,
+            "rank_pct_threshold": float(rank_pct_threshold),
             "fixed_buy_amount": fixed_buy_amount,
         }
 
@@ -733,9 +1025,20 @@ class TdxRollingTradeService:
 
         返回 {success, run_id, market, buys, sells, holds, warnings, error}
         """
-        score_threshold, saved_amount, execute_mode = load_rolling_config(tenant_id, user_id)
+        settings = load_rolling_settings(tenant_id, user_id)
+        threshold_mode = settings.threshold_mode
+        rank_pct_threshold = settings.rank_pct_threshold
+        score_threshold = settings.score_threshold
+        execute_mode = settings.execute_mode
         if fixed_buy_amount is None:
-            fixed_buy_amount = saved_amount
+            fixed_buy_amount = settings.fixed_buy_amount
+        signal_model = await resolve_signal_model(
+            tenant_id, user_id, settings.signal_model_id
+        )
+        if not signal_model.model_id:
+            logger.warning(
+                "[TdxRolling] 未解析到信号模型（无策略绑定/默认模型），回退最新完成 run"
+            )
         # 时段事实（一次取值，下面三处共用：真单闸门、预警面、结果字典）。
         in_session = is_trading_time()
 
@@ -752,10 +1055,16 @@ class TdxRollingTradeService:
             await _alert_rolling_run(outcome, user_id=user_id)
             return outcome
 
-        selected_run, score_map, prediction_trade_date = await self.load_latest_scores(
-            tenant_id=tenant_id, user_id=user_id, run_id=run_id, trade_date=trade_date
+        selected_run, score_map, rank_map, prediction_trade_date = (
+            await self.load_latest_scores_with_rank(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                run_id=run_id,
+                trade_date=trade_date,
+                model_id=signal_model.model_id or None,
+            )
         )
-        if not selected_run or not score_map:
+        if not selected_run or (not score_map and not rank_map):
             outcome = {
                 "success": False,
                 "error": (
@@ -794,6 +1103,9 @@ class TdxRollingTradeService:
             index_above_ma20=index_above,
             fixed_buy_amount=fixed_buy_amount,
             score_threshold=score_threshold,
+            rank_map=rank_map,
+            threshold_mode=threshold_mode,
+            rank_pct_threshold=rank_pct_threshold,
         )
 
         buys = signals["buys"]
@@ -987,6 +1299,14 @@ class TdxRollingTradeService:
                 "ma_window": MA_WINDOW,
             },
             "score_threshold": score_threshold,
+            "threshold_mode": threshold_mode,
+            "rank_pct_threshold": rank_pct_threshold,
+            "signal_model": {
+                "model_id": signal_model.model_id,
+                "display_name": signal_model.display_name,
+                "source": signal_model.source,
+            },
+            "unscored": signals.get("unscored") or [],
             "execute_mode": execute_mode,
             "bridge_ok": bridge_ok,
             "auto_place": execute_mode != DEFAULT_EXECUTE_MODE,
