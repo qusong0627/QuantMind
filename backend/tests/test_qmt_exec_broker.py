@@ -116,6 +116,18 @@ class TestPlaceOrder:
         assert sent["price"] == 10.0
         assert sent["client_order_id"] == "mir-cid-1"
 
+    def test_forwards_user_and_tenant_to_client(self) -> None:
+        """台账 user_id 必须是这笔单的真实归属，而不是 ``QMT_DIRECT_USER_ID`` 常量。
+
+        ``orders`` 唯一键是 ``(tenant_id, user_id, client_order_id)``：user 对不上
+        既有的引擎行就撞不上，会多留一条永远 ``submitted`` 的僵尸在途单。
+        """
+        client = FakeExecClient()
+        _place(client, user_id="00000001", tenant_id="tenant-x")
+        sent = client.submitted[0]
+        assert sent["user_id"] == "00000001"
+        assert sent["tenant_id"] == "tenant-x"
+
     def test_lowercase_side_normalized(self) -> None:
         client = FakeExecClient()
         assert _place(client, side="sell").success is True

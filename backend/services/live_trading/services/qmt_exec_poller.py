@@ -43,6 +43,7 @@ from backend.services.live_trading.services.trading_session import (
     is_trading_time,
     trade_date_str,
 )
+from backend.services.trade_shared.order_fees import fee_columns
 from backend.shared.trade_contract import SYNTH_TRADE_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -536,6 +537,23 @@ class QmtExecPoller:
         if price:
             row.price = price
             row.trade_value = new_value
+        # 合成行是按**整单量**计费的；升级成单笔真实成交后必须按这一笔重算四列费用，
+        # 否则整单费留在第一笔上、后续每笔再各记一次 → 合计虚高 1.5~2 倍
+        # （2026-11-17 实测：卖 1200 股 33.48 元 vs 应 ≈21.76）。费用是派生量，
+        # 跟着 quantity/price 一起改。
+        effective_price = float(row.price or 0.0)
+        if float(volume) > 0 and effective_price > 0:
+            fees = fee_columns(
+                order.symbol,
+                float(volume),
+                effective_price,
+                getattr(order, "side", None),
+                market=getattr(order, "market", None),
+            )
+            row.commission = fees["commission"]
+            row.stamp_duty = fees["stamp_duty"]
+            row.transfer_fee = fees["transfer_fee"]
+            row.total_fee = fees["total_fee"]
         row.remarks = "成交回报（替换合成成交）"
         logger.info(
             "[QmtExecPoller] 合成成交升级为真实成交 order_id=%s synth_qty=%s "

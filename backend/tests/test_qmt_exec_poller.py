@@ -407,6 +407,40 @@ class TestPollOnce:
         assert order.filled_value == 1050.0
         assert order.average_price == 10.5
 
+    def test_synth_upgrade_recomputes_fees_for_real_fill(self) -> None:
+        """合成成交按整单量计费；升级为真实单笔成交后必须按**这一笔**重算四列费用。
+
+        2026-11-17 实测：卖 1200 股合成行费用 33.48 元，升级成首笔 500 股后仍保留
+        整单费用，后续每笔再各记一次 → 合计虚高 54%~100%。费用是派生量，必须跟着
+        ``quantity/price`` 一起改。
+        """
+        from backend.services.trade_shared.order_fees import fee_columns
+
+        row = _fake_trade_row(qty=1200.0, price=67.02)
+        order_fee = fee_columns("603256.SH", 1200.0, 67.02, "sell")
+        row.commission = order_fee["commission"]
+        row.stamp_duty = order_fee["stamp_duty"]
+        row.transfer_fee = order_fee["transfer_fee"]
+        row.total_fee = order_fee["total_fee"]
+        session = FakeSession(rows=[row])
+        order = _fake_order("PARTIALLY_FILLED", 1200.0)
+        order.symbol = "603256.SH"
+        order.side = "sell"
+        order.quantity = 1200.0
+        poller = _make_poller(FakeClient())
+        upgraded = asyncio.run(
+            poller._upgrade_synth_trade(
+                session, order, trade_id="T1", volume=500.0, price=67.01
+            )
+        )
+        assert upgraded is True
+        expected = fee_columns("603256.SH", 500.0, 67.01, "sell")
+        assert row.commission == expected["commission"]
+        assert row.stamp_duty == expected["stamp_duty"]
+        assert row.transfer_fee == expected["transfer_fee"]
+        assert row.total_fee == expected["total_fee"]
+        assert row.total_fee < order_fee["total_fee"]  # 不再继承整单费
+
     def test_real_trade_partial_replaces_synth_total(self) -> None:
         """合成的是累计量、真实明细是单笔量：按差额校正订单累计。"""
         row = _fake_trade_row(qty=100.0, price=10.0)

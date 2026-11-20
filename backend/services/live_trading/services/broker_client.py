@@ -1197,6 +1197,7 @@ class TdxBroker(BaseBroker):
                     "order_type": "limit" if price_type == 0 else "market",
                     "price_type": price_type,
                     "price": price_value if price_type == 0 else None,
+                    "notify": notify,
                 }
             ],
         }
@@ -1460,8 +1461,11 @@ class QmtExecBroker(BaseBroker):
         else:
             self._client = get_qmt_exec_client()
         if not self._client.configured:
-            logger.warning(
-                "[QmtExecBroker] QMT 执行端未启用/未配置（QMT_EXEC_ENABLED、QMT_EXEC_ACCOUNT_ID）"
+            # 构造期只知道 env 基线：页面配置（broker:config:qmt_exec）要等
+            # refresh_settings() 才加载，这里判 False 不代表真的没配——实测下单正常。
+            # 真未启用由 submit_order → _require_enabled() 在用时明确报错。
+            logger.debug(
+                "[QmtExecBroker] 构造时 QMT 执行端未启用/未配置（可能是页面配置尚未加载）"
             )
 
     @property
@@ -1484,7 +1488,7 @@ class QmtExecBroker(BaseBroker):
     ) -> BrokerResult:
         if (refusal := _session_refusal()) is not None:
             return refusal
-        _ = (user_id, tenant_id, trade_action, position_side, is_margin_trade)
+        _ = (trade_action, position_side, is_margin_trade)
         from backend.services.live_trading.services.qmt_exec_client import QmtExecError
 
         side_raw = str(side or "").strip().upper()
@@ -1525,6 +1529,10 @@ class QmtExecBroker(BaseBroker):
                 order_type=order_type_raw,
                 price=price,
                 client_order_id=str(client_order_id or ""),
+                # 台账归属透传：唯一键是 (tenant, user, client_order_id)，与引擎行
+                # 用同一个 user 才能 ON CONFLICT 跳过；None 交给客户端回落 env。
+                user_id=str(user_id) if user_id not in (None, "") else None,
+                tenant_id=str(tenant_id) if tenant_id else None,
             )
         except QmtExecError as exc:
             logger.error(

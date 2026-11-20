@@ -251,6 +251,108 @@ async def test_cancel_resolves_placeholder_id_by_remark():
 
 
 @pytest.mark.asyncio
+async def test_submit_order_forwards_identity_to_ledger(monkeypatch):
+    """平台派发的单把 (tenant, user) 传给直连台账，供唯一键与引擎行对齐。"""
+    monkeypatch.delenv("QMT_ASYNC_ORDERS", raising=False)
+    fake_redis = _FakeRedis()
+
+    async def _redis():
+        return fake_redis
+
+    captured: dict[str, Any] = {}
+
+    async def _record(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    client = _client(_AsyncBackend())
+    client._get_redis = _redis  # type: ignore[method-assign]
+    client._page_settings = {"record_orders": "true"}
+    monkeypatch.setattr(client, "_record_order_row", _record, raising=True)
+
+    await client.submit_order(
+        symbol="600036.SH",
+        side="BUY",
+        quantity=100,
+        price=40.0,
+        client_order_id="cid-1",
+        user_id="00000001",
+        tenant_id="tenant-x",
+    )
+    assert captured["user_id"] == "00000001"
+    assert captured["tenant_id"] == "tenant-x"
+
+
+def _capture_ledger_params(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """把 ``orders`` INSERT 的参数截下来（不需要真库）。"""
+    captured: dict[str, Any] = {}
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def execute(self, _statement: Any, params: dict[str, Any]) -> None:
+            captured.update(params)
+
+        async def commit(self) -> None:
+            pass
+
+    class _Factory:
+        def __call__(self, **_kwargs: Any) -> _Session:
+            return _Session()
+
+    monkeypatch.setattr(
+        "backend.shared.database_manager_v2.get_session", _Factory(), raising=True
+    )
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_record_order_row_uses_passed_identity(monkeypatch):
+    """有归属时台账按传入的 tenant/user 落库（不再固定 10000001）。"""
+    captured = _capture_ledger_params(monkeypatch)
+    client = QmtExecClient(enabled=True, account_id="8888")
+    await client._record_order_row(
+        symbol="600036.SH",
+        side="BUY",
+        quantity=100,
+        price=40.0,
+        order_type="LIMIT",
+        client_order_id="cid-1",
+        exchange_order_id="1001",
+        status="submitted",
+        remark="qmabc",
+        user_id="00000001",
+        tenant_id="tenant-x",
+    )
+    assert captured["user_id"] == "00000001"
+    assert captured["tenant_id"] == "tenant-x"
+
+
+@pytest.mark.asyncio
+async def test_record_order_row_falls_back_to_env_identity(monkeypatch):
+    """无归属（脚本直连）时仍回落 env 常量，保持原行为。"""
+    monkeypatch.setenv("QMT_DIRECT_USER_ID", "10000009")
+    captured = _capture_ledger_params(monkeypatch)
+    client = QmtExecClient(enabled=True, account_id="8888")
+    await client._record_order_row(
+        symbol="600036.SH",
+        side="BUY",
+        quantity=100,
+        price=40.0,
+        order_type="LIMIT",
+        client_order_id="cid-2",
+        exchange_order_id="1002",
+        status="submitted",
+        remark="qmabc",
+    )
+    assert captured["user_id"] == "10000009"
+    assert captured["tenant_id"] == "default"
+
+
+@pytest.mark.asyncio
 async def test_cancel_without_mapping_raises_original_error():
     fake_redis = _FakeRedis()
 

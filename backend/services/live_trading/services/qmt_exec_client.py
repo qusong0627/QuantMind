@@ -1139,6 +1139,8 @@ class QmtExecClient:
         order_type: str = "LIMIT",
         price: float | None = None,
         client_order_id: str = "",
+        user_id: str | int | None = None,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         """真实下单。返回 ``{order_id, order_sysid, remark, ...}``。
 
@@ -1215,6 +1217,8 @@ class QmtExecClient:
                 exchange_order_id=str(result.get("order_id") or ""),
                 status="submitted",
                 remark=remark,
+                user_id=user_id,
+                tenant_id=tenant_id,
             )
         return result
 
@@ -1274,19 +1278,33 @@ class QmtExecClient:
         exchange_order_id: str,
         status: str,
         remark: str,
+        user_id: str | int | None = None,
+        tenant_id: str | None = None,
     ) -> None:
         """直连 RPC 下的真单补一条 ``orders`` 台账（source=qmt_direct）。
 
         与引擎/派发链已落库的单按 ``client_order_id`` 唯一索引冲突跳过
         （``ON CONFLICT DO NOTHING``），不会重复记账。台账写失败只告警，
         绝不影响已受理的委托。
+
+        ``user_id``/``tenant_id`` 由下单方传入：唯一键是
+        ``(tenant_id, user_id, client_order_id)``，用固定 env 常量会与引擎行错开
+        → 同一笔单留两行、引擎行永远停在 ``submitted``（2026-11-17 实测）。
+        脚本直连没有归属时仍回落 ``QMT_DIRECT_USER_ID``。
         """
         try:
             from sqlalchemy import text as sql_text
 
             from backend.shared.database_manager_v2 import get_session
 
-            user_id = str(os.getenv("QMT_DIRECT_USER_ID", "10000001") or "10000001")
+            resolved_user = str(user_id).strip() if user_id not in (None, "") else ""
+            if not resolved_user:
+                resolved_user = str(
+                    os.getenv("QMT_DIRECT_USER_ID", "10000001") or "10000001"
+                )
+            resolved_tenant = (
+                str(tenant_id).strip() if tenant_id not in (None, "") else ""
+            ) or "default"
             side_value = "buy" if str(side).upper() == "BUY" else "sell"
             type_value = "market" if str(order_type).upper() == "MARKET" else "limit"
             async with get_session(read_only=False) as session:
@@ -1302,7 +1320,7 @@ class QmtExecClient:
                             submitted_at, created_at, updated_at,
                             client_order_id, exchange_order_id, remarks, source
                         ) VALUES (
-                            :order_id, 'default', :user_id, 0, NULL, :symbol,
+                            :order_id, :tenant_id, :user_id, 0, NULL, :symbol,
                             :side, NULL, 'LONG', FALSE,
                             :order_type, 'REAL', :status,
                             :quantity, 0, :price, NULL,
@@ -1315,7 +1333,8 @@ class QmtExecClient:
                     ),
                     {
                         "order_id": str(uuid.uuid4()),
-                        "user_id": user_id,
+                        "user_id": resolved_user,
+                        "tenant_id": resolved_tenant,
                         "symbol": _to_prefix_symbol(symbol),
                         "side": side_value,
                         "order_type": type_value,
