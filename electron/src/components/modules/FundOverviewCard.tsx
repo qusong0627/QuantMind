@@ -7,7 +7,7 @@ import { FundData } from '../../services/userService';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 
-const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
+const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链', FUTURES: '期货', CUSTOM: '自定义' };
 
 const formatMoney = (value: number): string =>
   value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -20,6 +20,7 @@ const formatSignedMoney = (value: number): string => {
 export const FundOverviewCard: React.FC = () => {
   const currentMarket = useAppSelector(selectCurrentMarket);
   const { data, loading, error, isSimulated, tradingMode } = useFundData({
+    market: currentMarket,
     autoRefresh: true,
     refreshInterval: 5000 // 实时数据刷新，间隔缩短
   });

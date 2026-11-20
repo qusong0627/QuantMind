@@ -338,6 +338,7 @@ class PortfolioService {
         userId: string,
         mode: 'real' | 'simulation' = 'simulation',
         tenantId = 'default',
+        market?: string,
     ): Promise<{ data: FundData; isSimulated: boolean }> {
         try {
             const { realTradingService } = await import('./realTradingService');
@@ -359,7 +360,7 @@ class PortfolioService {
                     account = await realTradingService.getSimulationAccount(
                         userId,
                         tenantId,
-                        undefined,
+                        market,
                         { timeoutMs: 8_000 },
                     );
                     useSimulation = true;
@@ -368,7 +369,7 @@ class PortfolioService {
                 account = await realTradingService.getSimulationAccount(
                     userId,
                     tenantId,
-                    undefined,
+                    market,
                     { timeoutMs: 8_000 },
                 );
                 useSimulation = true;

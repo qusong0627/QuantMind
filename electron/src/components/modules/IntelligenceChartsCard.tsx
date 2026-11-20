@@ -7,7 +7,10 @@ import { Activity, Wifi, WifiOff } from 'lucide-react';
 import { EChartsChart } from '../common/EChartsChart';
 import { getChartOption } from '../../utils/chartOptions';
 import { useIntelligenceCharts } from '../../hooks/useIntelligenceCharts';
+import { useMarketAccountPresence } from '../../hooks/useMarketAccountPresence';
 import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
 import { formatBackendTime } from '../../utils/format';
 
 // 图表区域占位 shimmer
@@ -17,6 +20,9 @@ const ChartShimmer: React.FC<{ className?: string }> = ({ className = '' }) => (
 
 const IntelligenceChartsCard: React.FC = () => {
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
+  const currentMarket = useAppSelector(selectCurrentMarket);
+  const marketLabel = getMarketConfig(currentMarket).label;
+  const { present: marketActive, loading: presenceLoading } = useMarketAccountPresence(currentMarket);
   const {
     data: chartData,
     loading,
@@ -43,6 +49,14 @@ const IntelligenceChartsCard: React.FC = () => {
 
   return (
     <Card title="智能图表" height="100%" background="charts">
+      {!presenceLoading && !marketActive ? (
+        <div className="flex flex-col items-center justify-center h-full py-10 text-center">
+          <Activity size={28} className="text-slate-200 mb-2" />
+          <div className="text-xs font-bold text-slate-400">{marketLabel}暂无账户活动</div>
+          <div className="text-[10px] text-slate-300 mt-1">该市场无持仓与成交时不展示其他市场曲线</div>
+        </div>
+      ) : (
+      <>
       <div className="grid grid-rows-[1.05fr_1fr] gap-3 h-full">
         <motion.div
           className="rounded-xl bg-white/30 border border-white/40 p-2"
@@ -116,6 +130,8 @@ const IntelligenceChartsCard: React.FC = () => {
         </div>
         <div>最后更新 {formatTimestamp(lastUpdatedAt)}</div>
       </div>
+      </>
+      )}
     </Card>
   );
 };

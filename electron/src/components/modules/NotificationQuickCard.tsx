@@ -1,8 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { Bell, AlertCircle, TrendingUp, Settings, ArrowRight, RefreshCw, WifiOff, X, CheckCheck, Trash2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { setCurrentTab } from '../../store/slices/aiStrategySlice';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
+import { useMarketAccountPresence } from '../../hooks/useMarketAccountPresence';
 import { useNotifications, resolveNotificationTarget, getNavigationHint } from '../../hooks/useNotifications';
 import { getRelativeTime } from '../../utils/format';
 import { NotificationSkeleton } from '../common/CardSkeletons';
@@ -33,6 +36,9 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const setBacktestModule = useBacktestCenterStore((state) => state.setActiveModule);
+  const currentMarket = useSelector(selectCurrentMarket);
+  const marketLabel = getMarketConfig(currentMarket).label;
+  const { present: marketActive, loading: presenceLoading } = useMarketAccountPresence(currentMarket);
 
   const {
     notifications,
@@ -113,6 +119,29 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
 
   if (loading && notifications.length === 0) {
     return <NotificationSkeleton />;
+  }
+
+  // 该市场无持仓无成交时整卡显空（通知模型无市场维度，不做条目过滤）。
+  if (!presenceLoading && !marketActive) {
+    return (
+      <motion.div className="panel-card bg-white border border-slate-200 shadow-sm relative">
+        <div className="relative mb-3.5 z-10">
+          <div className="text-center px-8">
+            <h3 className="text-base font-black text-slate-800 inline-flex items-center gap-2">
+              信息通知
+            </h3>
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">
+              {marketLabel} · 暂无账户活动
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-col items-center justify-center py-10 text-center">
+          <Bell className="w-8 h-8 text-slate-200 mb-2" />
+          <p className="text-xs font-bold text-slate-400">该市场暂无账户活动</p>
+          <p className="text-[10px] text-slate-300 mt-1">切换回有持仓/成交的市场查看通知</p>
+        </div>
+      </motion.div>
+    );
   }
 
   return (

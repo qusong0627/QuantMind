@@ -6,7 +6,7 @@ import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { formatBackendTime, parseBackendTimestamp } from '../../utils/format';
 
-const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
+const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链', FUTURES: '期货', CUSTOM: '自定义' };
 
 export const TradeRecordsCard: React.FC = () => {
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
@@ -14,6 +14,7 @@ export const TradeRecordsCard: React.FC = () => {
   const { records, loading, isOffline, isFallbackToOrders, isStale, lastUpdatedAt, refresh } = useTradeRecords({
     limit: 8,
     tradingMode,
+    market: currentMarket,
     autoRefresh: true,
     refreshInterval: 12000,
   });

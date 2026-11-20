@@ -14,12 +14,15 @@ import { shouldUpdateByFingerprint } from '../utils/dataChange';
 import { refreshOrchestrator } from '../services/refreshOrchestrator';
 import { useTradeWebSocket } from './useTradeWebSocket';
 import { marketDataService } from '../services/marketDataService';
+import { symbolToAppMarket } from '../utils/portfolioUtils';
 
 export interface UseTradeRecordsOptions {
     limit?: number;
     tradingMode?: TradingMode;
     autoRefresh?: boolean;
     refreshInterval?: number;
+    /** 按市场过滤（首页仪表盘跟随全局 pill）；不传则不过滤 */
+    market?: string;
 }
 
 export interface UseTradeRecordsReturn {
@@ -39,6 +42,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
         tradingMode,
         autoRefresh = false,
         refreshInterval = 60000, // 1分钟
+        market,
     } = options;
 
     const [records, setRecords] = useState<TradeRecord[]>([]);
@@ -63,7 +67,13 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
             byId.set(item.id, item);
         }
 
-        return Array.from(byId.values())
+        let list = Array.from(byId.values());
+        // 市场过滤在截断之前：避免该市场成交沉在 8 条之后导致卡片被误清空
+        if (market) {
+            const target = market.toUpperCase();
+            list = list.filter((r) => symbolToAppMarket(r.symbol) === (target as ReturnType<typeof symbolToAppMarket>));
+        }
+        return list
             .sort((a, b) => {
                 const ta = new Date(a.time).getTime();
                 const tb = new Date(b.time).getTime();
@@ -73,7 +83,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
                 return tb - ta;
             })
             .slice(0, limit);
-    }, [limit]);
+    }, [limit, market]);
 
     const clearRetryTimer = useCallback(() => {
         if (retryTimerRef.current !== null) {
@@ -102,7 +112,9 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
             }
             setError(null);
 
-            const result = await tradingService.getRecentTrades(limit, tradingMode);
+            // 按市场过滤时拉深一点再在 normalize 里过滤截断，避免误清空
+            const fetchLimit = market ? Math.max(limit, 100) : limit;
+            const result = await tradingService.getRecentTrades(fetchLimit, tradingMode);
             const normalizedRecords = normalizeRecords(result.records);
 
             // 批量获取股票名称并补全

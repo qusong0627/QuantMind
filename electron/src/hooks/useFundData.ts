@@ -11,6 +11,8 @@ export interface UseFundDataOptions {
   refreshInterval?: number;
   userId?: string;
   tenantId?: string;
+  /** 按市场取模拟账户（后端分市场记账）；不传则默认 CN */
+  market?: string;
 }
 
 export interface UseFundDataReturn {
@@ -29,6 +31,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
     refreshInterval = 30000,
     userId,
     tenantId,
+    market,
   } = options;
 
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
@@ -70,7 +73,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
       }
       setError(null);
 
-      const result = await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId);
+      const result = await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId, market);
 
       // 已有更新的请求发出，丢弃本次过期响应（否则会把新数据覆盖回旧值）
       if (seq !== requestSeqRef.current) {
@@ -115,7 +118,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
         setLoading(false);
       }
     }
-  }, [resolvedUserId, resolvedTenantId, tradingMode]);
+  }, [resolvedUserId, resolvedTenantId, tradingMode, market]);
 
   const refresh = useCallback(async () => {
     await fetchData({ silent: true });
