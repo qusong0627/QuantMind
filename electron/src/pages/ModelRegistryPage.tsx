@@ -64,8 +64,11 @@ import { NeutralizationModelPanel } from '../features/inference-center-shared/pa
 import {
   buildFeatureLabelMap,
   DEFAULT_FEATURE_CATEGORIES,
+  RETRAIN_SEED_STORAGE_KEY,
+  serializeTrainingConfig,
   toDynamicCategories,
 } from './training/trainingUtils';
+import { buildRetrainTrainingConfig } from './training/retrainConfig';
 import { PAGE_LAYOUT } from '../config/pageLayout';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
@@ -92,6 +95,7 @@ export const ModelRegistryPage: React.FC = () => {
   const [archiving, setArchiving] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [activating, setActivating] = useState(false);
+  const [retraining, setRetraining] = useState(false);
   const [showRenameModal, setShowRenameModal] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [renaming, setRenaming] = useState(false);
@@ -484,6 +488,25 @@ export const ModelRegistryPage: React.FC = () => {
         } finally { setRestoring(false); }
       },
     });
+  };
+
+  const handleRetrain = async () => {
+    if (!selectedModel) return;
+    setRetraining(true);
+    try {
+      const payload = await modelTrainingService.getRetrainConfig(selectedModel.model_id);
+      const { config, warnings } = buildRetrainTrainingConfig(payload);
+      sessionStorage.setItem(RETRAIN_SEED_STORAGE_KEY, serializeTrainingConfig(config));
+      if (warnings.length > 0) message.warning(warnings.join('；'));
+      message.success(
+        `已带入「${config.configuration.displayName || '模型'}」：${config.configuration.selectedFeatures.length} 个特征，可在训练页调整时间切分`,
+      );
+      navigate('/model-training');
+    } catch (err: any) {
+      message.error(`带入训练配置失败: ${err?.message ?? '未知'}`);
+    } finally {
+      setRetraining(false);
+    }
   };
 
   const handleActivate = () => {
@@ -894,6 +917,14 @@ export const ModelRegistryPage: React.FC = () => {
                         className="rounded-xl h-9 px-4 font-bold border-slate-200 text-xs"
                         onClick={() => setShowConfigModal(true)}
                       >配置</Button>
+                      {!isSystemModel(selectedModel) && (
+                        <Button
+                          icon={<RefreshCw size={13} />}
+                          className="rounded-xl h-9 px-4 font-bold border-emerald-200 text-emerald-700 bg-emerald-50/50 hover:bg-emerald-100 text-xs"
+                          onClick={() => void handleRetrain()}
+                          loading={retraining}
+                        >重新训练</Button>
+                      )}
                       {selectedModel.status === 'archived' ? (
                         <Button
                           type="primary"
