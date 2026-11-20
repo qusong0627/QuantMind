@@ -120,7 +120,7 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
         try {
             const [ruleRows, eventRows] = await Promise.all([
                 riskControlService.listRules(false),
-                riskControlService.listEvents({ limit: 50 }),
+                riskControlService.listEvents({ limit: 200 }),
             ]);
             setRules(ruleRows || []);
             setEvents(eventRows || []);
@@ -341,7 +341,7 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
                 loading={loading}
                 columns={ruleColumns}
                 dataSource={rules}
-                pagination={false}
+                pagination={{ pageSize: 20, hideOnSinglePage: true, showTotal: (total) => `共 ${total} 条` }}
                 size="middle"
             />
 
@@ -352,7 +352,7 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
                     loading={loading}
                     columns={eventColumns}
                     dataSource={events}
-                    pagination={false}
+                    pagination={{ pageSize: 20, hideOnSinglePage: true, showTotal: (total) => `共 ${total} 条` }}
                     size="small"
                 />
             </div>
