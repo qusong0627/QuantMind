@@ -88,11 +88,18 @@ _JSON_COLUMNS = frozenset({"model_results", "logs"})
 
 
 class ActiveJobExistsError(RuntimeError):
-    """同一用户已有活跃任务（部分唯一索引冲突）。"""
+    """同一用户已有活跃任务（部分唯一索引冲突）。
 
-    def __init__(self, job_id: str | None = None) -> None:
+    ``job`` 携带活跃任务整行（可选）：上层据此拼「是哪个模型在跑、剩余
+    几天」的可读提示，避免只丢一个 job_id 让用户不知道在等什么。
+    """
+
+    def __init__(
+        self, job_id: str | None = None, *, job: dict[str, Any] | None = None
+    ) -> None:
         super().__init__("已有补推任务在执行")
         self.job_id = job_id
+        self.job = job
 
 
 class ModelInferenceJobPersistence:
@@ -215,7 +222,7 @@ class ModelInferenceJobPersistence:
     ) -> dict[str, Any]:
         active = await self.active_job(tenant_id=tenant_id, user_id=user_id)
         if active:
-            raise ActiveJobExistsError(active.get("job_id"))
+            raise ActiveJobExistsError(active.get("job_id"), job=active)
         try:
             async with get_session() as session:
                 await session.execute(
@@ -244,7 +251,10 @@ class ModelInferenceJobPersistence:
                 )
         except IntegrityError as exc:
             active = await self.active_job(tenant_id=tenant_id, user_id=user_id)
-            raise ActiveJobExistsError(active.get("job_id") if active else None) from exc
+            raise ActiveJobExistsError(
+                active.get("job_id") if active else None,
+                job=active,
+            ) from exc
         created = await self.get_job(job_id, tenant_id=tenant_id, user_id=user_id)
         if created is None:  # pragma: no cover - 插入后必然可读
             raise RuntimeError("创建补推任务后无法读回")
@@ -316,9 +326,9 @@ class ModelInferenceJobPersistence:
     async def reap_stale(
         self, *, tenant_id: str, user_id: str, heartbeat_timeout_seconds: int = 600
     ) -> int:
-        """把心跳超时（或从未心跳）的 queued/running 标记为 failed。
+        """把心跳超时（或从未心跳）的 queued/running/cancelling 标记为 failed。
 
-        读列表/读详情时顺带自愈；进程重启后无需人工清表。
+        读列表/读详情/建单前顺带自愈；进程重启后无需人工清表。
         """
         async with get_session() as session:
             result = await session.execute(
@@ -330,7 +340,7 @@ class ModelInferenceJobPersistence:
                         finished_at = NOW(),
                         updated_at = NOW()
                     WHERE tenant_id = :tenant_id AND user_id = :user_id
-                      AND status IN ('queued','running')
+                      AND status IN ('queued','running','cancelling')
                       AND COALESCE(heartbeat_at, created_at)
                           < NOW() - make_interval(secs => :timeout)
                     """

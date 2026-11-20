@@ -369,6 +369,13 @@ def test_legacy_status_maps_job_fields(monkeypatch):
     from backend.services.api.routers import model_training as mt
 
     class FakePersistence:
+        def __init__(self) -> None:
+            self.reaped: list[dict] = []
+
+        async def reap_stale(self, **kwargs):
+            self.reaped.append(kwargs)
+            return 0
+
         async def get_job(self, job_id, **kwargs):
             return _job(
                 "job_1",
@@ -384,7 +391,8 @@ def test_legacy_status_maps_job_fields(monkeypatch):
                 logs=["a", "b"],
             )
 
-    monkeypatch.setattr(mt, "model_inference_job_persistence", FakePersistence())
+    persistence = FakePersistence()
+    monkeypatch.setattr(mt, "model_inference_job_persistence", persistence)
     payload = _run(
         mt.get_backfill_status(
             "mdl_1", "job_1", {"tenant_id": "default", "user_id": "u1"}
@@ -396,12 +404,23 @@ def test_legacy_status_maps_job_fields(monkeypatch):
     assert payload["merged_days"] == 2
     assert payload["failed"] == 1
     assert payload["logs"] == "a\nb"
+    # 轮询侧自愈：读任务前先回收心跳超时的陈旧 running 行
+    assert persistence.reaped == [
+        {
+            "tenant_id": "default",
+            "user_id": "u1",
+            "heartbeat_timeout_seconds": mt.REAP_TIMEOUT_SECONDS,
+        }
+    ]
 
 
 def test_legacy_status_404_for_other_model(monkeypatch):
     from backend.services.api.routers import model_training as mt
 
     class FakePersistence:
+        async def reap_stale(self, **kwargs):
+            return 0
+
         async def get_job(self, job_id, **kwargs):
             return _job("job_1", model_ids=["other"])
 

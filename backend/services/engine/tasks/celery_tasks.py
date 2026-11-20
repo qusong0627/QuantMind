@@ -1595,6 +1595,34 @@ def run_market_snapshot() -> dict[str, Any]:
                 "[MarketSnapshot][Breadth] 异常（情绪快照将退回旧面板/全市场口径）: %s", bexc
             )
 
+        # TRIN / 市场广度日频面板（trin_daily.parquet）：情绪历史回看、breadth_regime、
+        # 盘中广度探针、市场阶段仪表盘都读它。此前**没有任何调度接管**（beat 与
+        # scheduler_registry 均无该任务），2026-10-28 后停更 → 情绪接口带 date 回看
+        # 永远吸附到旧交易日（11-20 事故根因之一）。
+        # 用追加式刷新（trin_breadth_append）：只补新交易日，历史数值不随上游复权
+        # 回灌整体位移；脚本自带新鲜度门控，无新分区时 no-op 退码 0。
+        try:
+            trin_proc = subprocess.run(
+                [sys.executable, "-m", "backend.scripts.trin_breadth_append"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
+            if trin_proc.returncode != 0:
+                logger.warning(
+                    "[MarketSnapshot][Trin] 广度面板刷新失败 code=%d stderr=%s",
+                    trin_proc.returncode,
+                    trin_proc.stderr[-1500:],
+                )
+            else:
+                logger.info(
+                    "[MarketSnapshot][Trin] 广度面板刷新完成: %s",
+                    (trin_proc.stdout or "").strip()[-300:],
+                )
+        except Exception as texc:  # noqa: BLE001
+            logger.warning("[MarketSnapshot][Trin] 异常（情绪回看将卡在旧交易日）: %s", texc)
+
         # 大盘情绪快照：与市场快照同源（同一份后复权日线）、同频（T 日盘后一次）。
         # 独立 try/except —— 情绪快照失败只告警，绝不影响市场分析主链路。
         # 新鲜度自门控：已是最新交易日则不重跑，避免 04:00–05:50 每 10 分钟白算。

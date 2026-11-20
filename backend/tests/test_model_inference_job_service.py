@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -203,6 +204,7 @@ def test_create_job_rejects_existing_active(monkeypatch):
             )
         )
     assert exc.value.job_id == "active"
+    assert exc.value.job is not None and exc.value.job["job_id"] == "active"
     assert len(session.executed) == 1
 
 
@@ -246,6 +248,7 @@ def test_create_job_maps_integrity_error_to_active_conflict(monkeypatch):
             )
         )
     assert exc.value.job_id == "winner"
+    assert exc.value.job is not None and exc.value.job["job_id"] == "winner"
 
 
 def test_update_job_whitelists_columns_and_casts_json(monkeypatch):
@@ -548,8 +551,13 @@ class _FakePersistenceForCreate:
     def __init__(self, job=None, raise_error: Exception | None = None) -> None:
         self.created: dict | None = None
         self.updates: list[tuple[str, dict]] = []
+        self.reaped: list[dict] = []
         self.job = job or _row(job_id="job_new", status="queued")
         self.raise_error = raise_error
+
+    async def reap_stale(self, **kwargs):
+        self.reaped.append(kwargs)
+        return 1
 
     async def create_job(self, **kwargs):
         if self.raise_error is not None:
@@ -659,6 +667,75 @@ def test_create_job_maps_active_conflict(monkeypatch):
     assert exc.value.code == "active_job_exists"
 
 
+def test_describe_active_job_names_model_progress_and_eta():
+    started = datetime(2026, 11, 17, 2, 0, tzinfo=timezone.utc)
+    job = {
+        "job_id": "job_run",
+        "status": "running",
+        "model_ids": ["m1"],
+        "current_model_id": "m1",
+        "model_results": [
+            {"model_id": "m1", "display_name": "T+5 跨库300因子 CatBoost_CN"}
+        ],
+        "total_days": 17,
+        "completed_days": 8,
+        "failed_days": 0,
+        "skipped_days": 0,
+        "started_at": started,
+    }
+    message = js.describe_active_job(
+        job, now=started + timedelta(minutes=16)
+    )
+    assert "T+5 跨库300因子 CatBoost_CN" in message
+    assert "8/17 日" in message
+    assert "剩 9 日" in message
+    assert "约 18 分钟" in message
+    assert "job_id=job_run" in message
+
+
+def test_describe_active_job_queued_and_missing_job():
+    queued = js.describe_active_job(
+        {"job_id": "job_q", "status": "queued", "model_ids": ["m9"], "total_days": 0}
+    )
+    assert "排队中" in queued
+    assert "m9" in queued
+    # 只有 job_id、没有任务行时退回旧文案，不能抛异常
+    assert js.describe_active_job(None, job_id="job_x") == (
+        "已有补推任务在执行（job_id=job_x）"
+    )
+
+
+def test_create_job_active_conflict_message_carries_active_job(monkeypatch):
+    started = datetime.now(timezone.utc) - timedelta(minutes=16)
+    active = {
+        "job_id": "other",
+        "status": "running",
+        "model_ids": ["m1"],
+        "current_model_id": "m1",
+        "model_results": [{"model_id": "m1", "display_name": "L1L2 优选模型"}],
+        "total_days": 17,
+        "completed_days": 8,
+        "started_at": started,
+    }
+    persistence = _FakePersistenceForCreate(
+        raise_error=mp.ActiveJobExistsError("other", job=active)
+    )
+    _patch_preview(monkeypatch, _preview([_entry("m1"), _entry("m2")]))
+    with pytest.raises(js.JobValidationError) as exc:
+        _run(
+            js.create_job(
+                tenant_id="default",
+                user_id="u1",
+                model_ids=["m1", "m2"],
+                persistence=persistence,
+            )
+        )
+    assert exc.value.code == "active_job_exists"
+    assert "L1L2 优选模型" in exc.value.message
+    assert "8/17 日" in exc.value.message
+    assert "剩 9 日" in exc.value.message
+
+
 def test_create_job_zero_gap_marks_completed_without_runner(monkeypatch):
     persistence = _FakePersistenceForCreate()
     _patch_preview(monkeypatch, _preview([_entry("m1", gaps=0), _entry("m2", gaps=0)]))
@@ -695,6 +772,33 @@ def test_create_job_starts_runner_when_days_present(monkeypatch):
     )
     assert started == [job["job_id"]]
     assert persistence.created["model_ids"] == ["m1", "m2"]
+
+
+def test_create_job_reaps_stale_jobs_before_create(monkeypatch):
+    """建单前必须回收心跳死任务，否则陈旧 running 行会永久占住唯一索引。
+
+    旧单模型端点（「推理管理」页）只轮询状态、不读 jobs 列表端点（reap 原本
+    只挂在那里），进程重启后整页推理入口会被一条死任务堵死。
+    """
+    persistence = _FakePersistenceForCreate()
+    _patch_preview(monkeypatch, _preview([_entry("m1"), _entry("m2")]))
+    monkeypatch.setattr(js, "start_job_runner", lambda *a, **k: None)
+    _run(
+        js.create_job(
+            tenant_id="default",
+            user_id="u1",
+            model_ids=["m1", "m2"],
+            persistence=persistence,
+        )
+    )
+    assert persistence.reaped == [
+        {
+            "tenant_id": "default",
+            "user_id": "u1",
+            "heartbeat_timeout_seconds": js.REAP_TIMEOUT_SECONDS,
+        }
+    ]
+    assert persistence.created is not None
 
 
 def test_job_status_branches():

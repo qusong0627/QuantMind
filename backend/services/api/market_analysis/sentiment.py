@@ -84,10 +84,34 @@ def _read_snapshot() -> dict:
     return payload
 
 
+def _frames_key() -> tuple:
+    """三份面板的 (路径, mtime_ns, size)——盘后链重建文件后缓存自动失效。
+
+    此前只判 ``"df" in _CACHE``，缓存活多久数据就冻多久：trin_daily 停更再补齐后，
+    带 date 的回看仍吸附在旧交易日，必须重启 API 才生效（2026-10-28~11-20 事故）。
+    """
+    from backend.scripts.breadth_regime import PANEL_PATH as _pan
+    from backend.scripts.market_sentiment_snapshot import (
+        INDEX_OHLC_PATH as _ohlc,
+        UNIVERSE_PANEL_PATH as _uni,
+    )
+
+    key = []
+    for _p in (_pan, _uni, _ohlc):
+        try:
+            _st = Path(_p).stat()
+            key.append((str(_p), _st.st_mtime_ns, _st.st_size))
+        except OSError:
+            key.append((str(_p), None, None))
+    return tuple(key)
+
+
 def _frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
-    """加载面板、扩张分位与分市场面板（进程内缓存，只算一次）。"""
+    """加载面板、扩张分位与分市场面板（进程内缓存；面板文件变化即重算）。"""
+    frames_key = _frames_key()
     with _LOCK:
-        if "df" not in _CACHE:
+        if _CACHE.get("frames_key") != frames_key:
+            _CACHE["payloads"] = {}
             from backend.scripts.breadth_regime import build_features, load_panel
             from backend.scripts.market_sentiment_snapshot import (
                 PANEL_PATH,
@@ -101,6 +125,7 @@ def _frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataF
             uni = load_universe_panel()
             _CACHE["uni"] = None if uni.empty else uni
             _CACHE["ohlc"] = load_index_ohlc()
+            _CACHE["frames_key"] = frames_key  # 载入成功才记 key，失败下次重试
         return (
             _CACHE["df"],  # type: ignore[return-value]
             _CACHE["feats"],  # type: ignore[return-value]

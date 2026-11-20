@@ -18,7 +18,7 @@ import statistics
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -357,6 +357,78 @@ async def build_preview(
     return result
 
 
+def _format_eta(seconds: float) -> str:
+    minutes = int(round(seconds / 60))
+    if minutes < 1:
+        return "不足 1 分钟"
+    if minutes < 60:
+        return f"约 {minutes} 分钟"
+    hours, rest = divmod(minutes, 60)
+    return f"约 {hours} 小时 {rest} 分" if rest else f"约 {hours} 小时"
+
+
+def describe_active_job(
+    job: dict[str, Any] | None,
+    *,
+    job_id: str | None = None,
+    now: datetime | None = None,
+) -> str:
+    """把正在执行的补推任务折成一句可读的阻塞提示。
+
+    只做展示：模型名取 ``model_results`` 里的 display_name（runner 启动后
+    才写入），排队阶段回退到 model_ids；ETA 按「已用时间 / 已完成日」外推，
+    已完成不足 2 日不报 ETA（首日启动开销会被放大成离谱估计）。
+    """
+    identifier = job_id or (job or {}).get("job_id") or "未知"
+    fallback = f"已有补推任务在执行（job_id={identifier}）"
+    if not job:
+        return fallback
+
+    current_model_id = str(job.get("current_model_id") or "")
+    name = ""
+    results = job.get("model_results") or []
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict) and item.get("display_name"):
+                if item.get("model_id") == current_model_id:
+                    name = str(item["display_name"])
+                    break
+        if not name:
+            for item in results:
+                if isinstance(item, dict) and item.get("display_name"):
+                    name = str(item["display_name"])
+                    break
+    if not name:
+        model_ids = job.get("model_ids") or []
+        name = current_model_id or (str(model_ids[0]) if model_ids else "未知模型")
+
+    total = int(job.get("total_days") or 0)
+    done = (
+        int(job.get("completed_days") or 0)
+        + int(job.get("failed_days") or 0)
+        + int(job.get("skipped_days") or 0)
+    )
+    if str(job.get("status") or "") == "queued" or total <= 0:
+        return f"已有补推任务在执行：{name}（排队中；job_id={identifier}）"
+
+    remaining = max(total - done, 0)
+    detail = f"{done}/{total} 日"
+    if remaining:
+        detail += f"，剩 {remaining} 日"
+    eta_text = ""
+    started_at = job.get("started_at")
+    if isinstance(started_at, datetime) and done >= 2 and remaining:
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        current = now or utc_now()
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        pace = (current - started_at).total_seconds() / done
+        if pace > 0:
+            eta_text = f"，{_format_eta(pace * remaining)}"
+    return f"已有补推任务在执行：{name}（{detail}{eta_text}；job_id={identifier}）"
+
+
 async def create_job(
     *,
     tenant_id: str,
@@ -366,6 +438,15 @@ async def create_job(
     mode: str = "gaps",
     min_models: int = MIN_MODELS,
 ) -> dict[str, Any]:
+    # 建单前先自愈：进程重启后旧任务会永远停在 running，占住部分唯一索引。
+    # 旧单模型端点（「推理管理」页）只读 /inference/backfill/{task_id}、不读
+    # jobs 列表，而 reap 原本只在列表侧触发——2026-11-17 实证：一条 18 天
+    # 前心跳停滞的任务把整页推理入口堵死（409 active_job_exists）。
+    await persistence.reap_stale(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        heartbeat_timeout_seconds=REAP_TIMEOUT_SECONDS,
+    )
     preview = await build_preview(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -408,7 +489,7 @@ async def create_job(
     except ActiveJobExistsError as exc:
         raise JobValidationError(
             "active_job_exists",
-            f"已有补推任务在执行（job_id={exc.job_id or '未知'}）",
+            describe_active_job(exc.job, job_id=exc.job_id),
         ) from exc
 
     if preview.total_days == 0:
@@ -752,6 +833,7 @@ __all__ = [
     "REAP_TIMEOUT_SECONDS",
     "build_preview",
     "create_job",
+    "describe_active_job",
     "estimate_seconds_by_model",
     "job_payload",
     "model_inference_job_persistence",
