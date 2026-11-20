@@ -124,6 +124,8 @@ npm run dashboard:build  # 生产环境构建
 
 - Python：行宽 88，使用 ruff 做检查与格式化
 - TypeScript：提交前端改动前必须运行 `npm run typecheck`
+- **浏览器支持策略（`modern-web-guidance` skill 的 fallback 判据）**：Web 构建按 Baseline Widely available（该 skill 的默认口径）；Electron 43 桌面端内置 Chromium 更新，可放宽到该版本已实现的 API，但 Electron/Web 共享代码必须保留 Web 端的 fallback，不引入 polyfill
+- **前端任务先查指南**：改 `electron/src` 的 HTML/CSS/客户端交互（dialog/popover、表格、暗色模式、表单与校验、动画/滚动、a11y、CWV 性能）前，先调用 `modern-web-guidance` skill 检索再写码；纯后端、构建工具、测试类改动不查。npx 被工具闸拦时，直接读 `~/.claude/skills/modern-web-guidance/guides/<分类>/<指南>.md`
 
 ## 部署工作流
 
