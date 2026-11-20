@@ -21,6 +21,13 @@ function fmt(v: number | null | undefined, suffix = '', digits = 2): string {
   return `${v.toFixed(digits)}${suffix}`;
 }
 
+function fmtShare(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '--';
+  // total_share 透传 QuantDB instrument_detail J_zgb，服务器实测单位为股
+  //（如招商银行 25219845000 股），除以 1e8 得亿股。
+  return `${(v / 1e8).toFixed(2)}亿股`;
+}
+
 export function OverviewTab({ profile }: Props) {
   if (!profile) return <div className="py-10 text-center text-[11px] text-slate-400">选择股票后展示概况</div>;
 
@@ -61,7 +68,7 @@ export function OverviewTab({ profile }: Props) {
         />
         <Field label="总市值" value={fmt(profile.total_mv, '亿')} />
         <Field label="流通市值" value={fmt(profile.float_mv, '亿')} />
-        <Field label="总股本" value={profile.total_share ? `${(profile.total_share / 10000).toFixed(1)}亿股` : '--'} />
+        <Field label="总股本" value={fmtShare(profile.total_share)} />
         <Field label="涨跌停价" value={profile.limit_up_price ? `${fmt(profile.limit_up_price)} / ${fmt(profile.limit_down_price)}` : '--'} />
       </div>
 

@@ -2117,7 +2117,7 @@ async def stock_profile(
         "pct_change": _safe_f(r.get("pct_change")),
         "total_mv": _safe_f(r.get("Zsz")),       # 亿元
         "float_mv": _safe_f(r.get("Ltsz")),      # 亿元
-        "total_share": _safe_f(r.get("J_zgb")),  # 万股
+        "total_share": _safe_f(r.get("J_zgb")),  # 股（instrument_list.parquet 实测：600036.SH=25219845000股）
         "free_float_share": _safe_f(r.get("FreeLtgb")),
         "pe_dynamic": _safe_f(r.get("DynaPE")),
         "pb": _safe_f(r.get("PB_MRQ")),
