@@ -97,6 +97,13 @@ deploy/portable/
 deploy/live-win/
 deploy/qmt-bridge-kit/
 
+# 本机打包工作区与本地 torch wheel 缓存（2026-11-17）：均不进任何镜像。
+# .pack-build 是便携包构建目录（~12GB），docker/torch_wheels 是宿主离线 wheel
+# 缓存（~3.8GB，Dockerfile.oss 的本地 COPY 分支默认关闭）。留在上下文里会让每次
+# docker build 都先搬十几 GB。
+.pack-build/
+docker/torch_wheels/
+
 # Large non-essential directories
 models/
 alphaagent/

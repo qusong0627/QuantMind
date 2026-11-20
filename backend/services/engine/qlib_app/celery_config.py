@@ -43,6 +43,10 @@ if _runtime_secrets_loaded:
 
 # Redis连接配置
 def _is_running_in_docker() -> bool:
+    # 便携包（QM_PORTABLE=1）自带 redis/pg，宿主就是本机；即便被装进容器
+    # / WSL 里跑，也必须连 127.0.0.1，不能改写成 compose 服务名。
+    if os.getenv("QM_PORTABLE") == "1":
+        return False
     return os.path.exists("/.dockerenv")
 
 

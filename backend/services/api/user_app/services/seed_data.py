@@ -36,6 +36,14 @@ async def init_admin_data(db: AsyncSession):
     # 1. 确保RBAC角色存在
     await init_default_roles_and_permissions(db)
 
+    # 1b. 补齐 user_profiles 的增量列（llm/embedding/mineru）。
+    # 新装库的 user_profiles 由旧迁移建表，不含这些列；而下面 select(UserProfile)
+    # 按 ORM 全列查询，缺列会 UndefinedColumn → 整个 seed 失败 → 管理员档案不落库
+    # （2026-11-16 便携包首装实测：display_name 为空、日志报 llm_base_url 不存在）。
+    from backend.services.api.user_app.services.profile_service import ProfileService
+
+    await ProfileService()._ensure_profile_table(db)
+
     # 2. 检查管理员用户是否存在
     stmt = select(User).where(
         User.username == "admin",

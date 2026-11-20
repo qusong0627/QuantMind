@@ -76,6 +76,7 @@ export APP_ENV=production
 export SERVICE_MODE=all
 export TZ="${TZ:-Asia/Shanghai}"
 export PYTHONPATH="$ROOT"
+export PATH="$ROOT/runtime/python/bin:$PATH"   # dsh 插件（dsh-memory）调用 python3
 export SECRET_KEY JWT_SECRET_KEY INTERNAL_CALL_SECRET
 export DB_DRIVER=asyncpg
 export DB_HOST=127.0.0.1
@@ -112,6 +113,8 @@ export USER_SERVICE_URL="http://127.0.0.1:${QM_TRADE_PORT}"
 export REAL_TRADING_SERVICE_URL="http://127.0.0.1:${QM_TRADE_PORT}"
 export ENABLE_TDX_PUSH="${ENABLE_TDX_PUSH:-false}"
 export ENABLE_REAL_TRADING="${ENABLE_REAL_TRADING:-false}"
+# 便携包文档挖掘默认开（因子挖掘「上传文档」链；数据出网 MinerU 在界面固定披露）
+export ENABLE_DOC_MINING="${ENABLE_DOC_MINING:-true}"
 export DEBUG=false
 export LOG_LEVEL=INFO
 export STRATEGY_TEMPLATES_DIR="$ROOT/strategy_templates"
@@ -153,6 +156,12 @@ export ADMIN_DASHBOARD_QWENPAW_PORT="${QM_QWENPAW_PORT:-8088}"
 export ADMIN_DASHBOARD_HUNTLY_HOST="127.0.0.1"
 export ADMIN_DASHBOARD_HUNTLY_PORT="${QM_HUNTLY_PORT:-18090}"
 export REDIS_URL="redis://127.0.0.1:${QM_REDIS_PORT}"
+# 便携包：即使运行在容器/WSL 的 Docker 环境里，Redis 也是本机进程，
+# 禁止 redis_sentinel_client 把 127.0.0.1 改写成 compose 服务名。
+export QM_PORTABLE=1
+# 离线服务器：禁止 LiteLLM 在 import 时拉远程 model cost map（否则每个
+# Python 进程启动都要等 20-30s 网络超时；2026-11-16 安装实测）。
+export LITELLM_LOCAL_MODEL_COST_MAP="${LITELLM_LOCAL_MODEL_COST_MAP:-True}"
 mkdir -p "$MPLCONFIGDIR"
 
 PYTHON="$ROOT/runtime/python/bin/python3"
@@ -162,7 +171,7 @@ export LD_LIBRARY_PATH="$ROOT/pgsql/lib:${LD_LIBRARY_PATH:-}"
 # HTTP 探活不依赖系统 curl（最小化 Ubuntu/Debian 服务器经常没装 curl）。
 # 用内嵌 Python 的 urllib，避免用户为了启动包再装系统包。
 http_ok() {
-    "$PYTHON" - "$1" >/dev/null 2>&1 <<'PY'
+    "$PYTHON" -S - "$1" >/dev/null 2>&1 <<'PY'
 import sys
 import urllib.request
 try:
@@ -188,17 +197,17 @@ if [ ! -f "$ROOT/pgdata/PG_VERSION" ]; then
     rm -f "$ROOT/run/pg_pw.txt"
 fi
 
-if "$PYTHON" "$ROOT/pg_setup.py" wait --timeout 1 2>/dev/null; then
+if QM_SKIP_LITELLM_SHIM=1 "$PYTHON" "$ROOT/pg_setup.py" wait --timeout 1 2>/dev/null; then
     log "PostgreSQL 已在运行（端口 $QM_PG_PORT），跳过启动"
 else
     log "启动 PostgreSQL (端口 $QM_PG_PORT) ..."
     "$PGBIN/pg_ctl" -D "$ROOT/pgdata" -l "$ROOT/logs/postgres.log" \
         -o "-p $QM_PG_PORT -c listen_addresses=127.0.0.1 -k $ROOT/run" start >/dev/null
 fi
-if ! "$PYTHON" "$ROOT/pg_setup.py" wait --timeout 60 2>/dev/null; then
+if ! QM_SKIP_LITELLM_SHIM=1 "$PYTHON" "$ROOT/pg_setup.py" wait --timeout 60 2>/dev/null; then
     fail "PostgreSQL 启动失败（端口 $QM_PG_PORT 可能被占用），见 logs/postgres.log"
 fi
-"$PYTHON" "$ROOT/pg_setup.py" ensure-db || fail "创建数据库 $DB_NAME 失败"
+QM_SKIP_LITELLM_SHIM=1 "$PYTHON" "$ROOT/pg_setup.py" ensure-db || fail "创建数据库 $DB_NAME 失败"
 ok "PostgreSQL 就绪"
 
 # ── 2. Redis ────────────────────────────────────────────────
@@ -245,27 +254,76 @@ else
     log "Huntly 未包含在包内，新闻聚合功能降级"
 fi
 
-# ── 2c. QwenPaw（AI 助手，独立 Python 3.11 运行时，可选组件）──
-QWENPAW_PID=""
-QWENPAW_PORT="${QM_QWENPAW_PORT:-8088}"
-export QWENPAW_BASE_URL="http://127.0.0.1:${QWENPAW_PORT}"
-export QWENPAW_SHARED_FILES_DIR="${QWENPAW_SHARED_FILES_DIR:-$STORAGE_ROOT/qwenpaw-shared}"
-export QWENPAW_SHARED_VISIBLE_DIR="${QWENPAW_SHARED_VISIBLE_DIR:-$STORAGE_ROOT/qwenpaw-working}"
-mkdir -p "$QWENPAW_SHARED_FILES_DIR" "$QWENPAW_SHARED_VISIBLE_DIR" "$STORAGE_ROOT/qwenpaw-home"
-if [ -x "$ROOT/qwenpaw_runtime/python/bin/python3" ]; then
-    if http_ok "http://127.0.0.1:${QWENPAW_PORT}/"; then
-        log "QwenPaw 已在运行（端口 $QWENPAW_PORT），跳过启动"
+# ── 2c. dsh（DeepSeek Harness，QuantBot AI 助手，免 Docker 载荷）──
+# 容器版由 quantmind-dsh 镜像 + nginx 前门提供；便携包用包内 node + dsh 树，
+# 由 dsh_proxy.py 做回环前门（注入签名 cookie、反代 HTTP/WebSocket）。
+DSH_PORT="${QM_DSH_PORT:-18088}"
+export QM_DSH_PORT="$DSH_PORT"
+DSH_HOME="${DSH_HOME:-$STORAGE_ROOT/dsh-home}"
+DSH_WORKSPACE="${DSH_WORKSPACE:-$STORAGE_ROOT/dsh-workspace}"
+export DSH_HOME DSH_WORKSPACE
+if [ -x "$ROOT/dsh/node" ] && [ -f "$ROOT/dsh/global/node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then
+    mkdir -p "$DSH_HOME" "$DSH_WORKSPACE"
+    if [ ! -f "$DSH_HOME/.factory-seeded" ]; then
+        log "初始化 dsh 数据目录（首次约 1-2 分钟）..."
+        cp -a "$ROOT/dsh/home/." "$DSH_HOME/"
+        date -Iseconds > "$DSH_HOME/.factory-seeded"
+    fi
+    # 容器路径 → 本包路径（persona/技能路由表里写的是 /root/.dsh、/quantmind、/data）
+    # 注意顺序：先替换 /data，再注入含 /data 的 DSH_HOME，否则会得到 /pack/pack/data/...
+    sed -e "s#/data#$STORAGE_ROOT#g" \
+        -e "s#/root/.dsh#$DSH_HOME#g" \
+        -e "s#/root/workspace#$DSH_WORKSPACE#g" \
+        -e "s#/quantmind#$ROOT#g" \
+        -e "s#/app#$ROOT#g" \
+        "$ROOT/dsh/home/dsh.cordis.yml" > "$DSH_HOME/dsh.portable.yml"
+    sed -e "s#/data#$STORAGE_ROOT#g" \
+        -e "s#/root/.dsh#$DSH_HOME#g" \
+        -e "s#/root/workspace#$DSH_WORKSPACE#g" \
+        -e "s#/quantmind#$ROOT#g" \
+        -e "s#/app#$ROOT#g" \
+        "$ROOT/dsh/home/AGENTS.md" > "$DSH_HOME/AGENTS.portable.md"
+    mv -f "$DSH_HOME/AGENTS.portable.md" "$DSH_HOME/AGENTS.md"
+    export DSH_PERMISSION_MODE="${DSH_PERMISSION_MODE:-danger-full-access}"
+    export QUANTMIND_API_BASE_URL="http://127.0.0.1:${QM_API_PORT}"
+    export QUANTMIND_ENGINE_URL="http://127.0.0.1:${QM_ENGINE_PORT}"
+    export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+    if [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -f "$ROOT/config/runtime.env" ]; then
+        DEEPSEEK_API_KEY="$(grep -E '^DEEPSEEK_API_KEY=' "$ROOT/config/runtime.env" | tail -1 | cut -d= -f2-)"
+        export DEEPSEEK_API_KEY
+    fi
+    if http_ok "http://127.0.0.1:${DSH_PORT}/"; then
+        log "dsh 已在运行（端口 $DSH_PORT），跳过启动"
     else
-        log "启动 QwenPaw (端口 $QWENPAW_PORT) ..."
-        setsid env HOME="$STORAGE_ROOT/qwenpaw-home" \
-            "$ROOT/qwenpaw_runtime/python/bin/python3" -m qwenpaw app \
-            --host 127.0.0.1 --port "$QWENPAW_PORT" \
-            > "$ROOT/logs/qwenpaw.log" 2>&1 &
-        QWENPAW_PID=$!
-        [ "$BG" = "1" ] && echo "$QWENPAW_PID" > "$ROOT/run/qwenpaw.pid"
+        log "启动 dsh (端口 $DSH_PORT，首次初始化约 30 秒) ..."
+        setsid "$ROOT/dsh/node" \
+            "$ROOT/dsh/global/node_modules/@deepseek-ai/dsh/lib/bin.js" \
+            --profile web --patch "$DSH_HOME/dsh.portable.yml" \
+            --host 127.0.0.1 --port 3081 --no-open \
+            --trusted-host 127.0.0.1:3081 --trusted-host localhost:3081 \
+            > "$ROOT/logs/dsh.log" 2>&1 &
+        DSH_PID=$!
+        echo "$DSH_PID" > "$ROOT/run/dsh.pid"
+        # 等 dsh 生成签名密钥（首启 5-15s）
+        for _ in $(seq 1 120); do
+            [ -f "$DSH_HOME/.credentials.yaml" ] && break
+            kill -0 "$DSH_PID" 2>/dev/null || break
+            sleep 1
+        done
+        # 凭据在上次启动可能已存在；还要等 dsh 真正监听 3081，
+        # 否则前门先起会短时 500（2026-11-16 66 重启实测）。
+        for _ in $(seq 1 120); do
+            "$PYTHON" -S -c "import socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(0 if s.connect_ex(('127.0.0.1',3081))==0 else 1)" && break
+            kill -0 "$DSH_PID" 2>/dev/null || break
+            sleep 1
+        done
+        setsid env QM_SKIP_LITELLM_SHIM=1 "$PYTHON" "$ROOT/dsh_proxy.py" \
+            --listen "0.0.0.0:${DSH_PORT}" --upstream 127.0.0.1:3081 --home "$DSH_HOME" \
+            > "$ROOT/logs/dsh-proxy.log" 2>&1 &
+        echo $! > "$ROOT/run/dsh-proxy.pid"
     fi
 else
-    log "QwenPaw 未包含在包内，AI 助手功能降级"
+    log "dsh 未包含在包内，QuantBot AI 助手不可用"
 fi
 
 # ── 启动后端（前台模式等待就绪；后台模式直接放行）────────────

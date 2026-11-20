@@ -43,7 +43,11 @@ class RedisSentinelConfig:
         if not self.host:
             self.host = "quantmind-redis" if is_docker else "127.0.0.1"
             print(f"[RedisSentinelConfig] REDIS_HOST not set, defaulting to: {self.host}")
-        elif is_docker and self.host in ("localhost", "127.0.0.1"):
+        elif (is_docker and self.host in ("localhost", "127.0.0.1")
+              and os.getenv("QM_PORTABLE") != "1"):
+            # Docker 编排默认走服务名；但便携包在容器/WSL 里运行时 Redis 就在
+            # 本机，不能把显式 127.0.0.1 改写成 quantmind-redis（2026-11-16
+            # 便携包容器安装实测：所有 Redis key 写失败）。
             self.host = "quantmind-redis"
             print(f"[RedisSentinelConfig] Corrected localhost to quantmind-redis in Docker: {self.host}")
 

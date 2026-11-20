@@ -10,6 +10,11 @@
 #     import raises ImportError and RDLoop.mount() dies at step 1. Backfill the
 #     3.11-only typing names from typing_extensions before litellm is imported.
 #     Root cause is also pinned in rd-agent/requirements.txt (litellm<1.98).
+import os as _os
+
+# avoid a network fetch on every python process (offline servers otherwise
+# stall 20-30s at import; 2026-11-16 portable install test)
+_os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 try:
     import typing as _typing
 
@@ -37,11 +42,18 @@ except Exception:
 #     resolve in utils.py's namespace where the name is absent ->
 #     PydanticUndefinedAnnotation ("Message is not fully defined"). Inject the
 #     name from llms.openai where it is actually defined, then rebuild.
-try:
-    import litellm.types.utils as _U
-    from litellm.types.llms.openai import ChatCompletionReasoningSummaryTextBlock
+#
+# Only import litellm for processes that need it. Utility scripts (pg_setup,
+# health probes) set QM_SKIP_LITELLM_SHIM=1; otherwise every `python -c` on a
+# server without internet pays the import/network cost at startup.
+if _os.environ.get("QM_SKIP_LITELLM_SHIM") != "1":
+    try:
+        import litellm.types.utils as _U
+        from litellm.types.llms.openai import ChatCompletionReasoningSummaryTextBlock
 
-    _U.ChatCompletionReasoningSummaryTextBlock = ChatCompletionReasoningSummaryTextBlock
-    _U.Message.model_rebuild()
-except Exception:
-    pass
+        _U.ChatCompletionReasoningSummaryTextBlock = (
+            ChatCompletionReasoningSummaryTextBlock
+        )
+        _U.Message.model_rebuild()
+    except Exception:
+        pass

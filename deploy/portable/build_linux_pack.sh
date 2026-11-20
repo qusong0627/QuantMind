@@ -128,6 +128,13 @@ if ! "$PY" -c "import fastapi" 2>/dev/null; then
     [ "$PIP_OK" = "1" ] || fail "所有 PyPI 镜像安装依赖均失败"
 fi
 
+# quantdb-sdk 契约版本必须锁定：staging 复用旧 runtime 时（fastapi 已存在，跳过上面
+# 整段安装）会残留旧版（2026-11-16 实测 0.3.3 vs 契约 0.5.0，V5 宽表会按旧列集解析）。
+if ! "$PY" -c "import quantdb_sdk, sys; sys.exit(0 if getattr(quantdb_sdk, '__version__', '') == '0.5.0' else 1)" 2>/dev/null; then
+    log "对齐 quantdb-sdk==0.5.0 ..."
+    "$PY" -m pip install "quantdb-sdk==0.5.0"
+fi
+
 # ── 2b. rd-agent（因子演化，与镜像安装方式一致）──────────────
 # rd-agent 依赖链会同时把 fastapi/pydantic/starlette 等升级到新版
 # （生产镜像正是这个状态，代码已按新版演进）
@@ -234,38 +241,55 @@ if [ ! -f "$STAGE/huntly/server.jar" ]; then
 fi
 [ -f "$STAGE/huntly/server.jar" ] && "$STAGE/huntly/jre/bin/java" -version 2>&1 | head -1
 
-# ── 5c. QwenPaw（AI 助手，独立 Python 3.11 运行时，从本地 docker 镜像提取）──
-if [ ! -x "$STAGE/qwenpaw_runtime/python/bin/python3" ]; then
-    if docker images agentscope/qwenpaw:latest --format '{{.Repository}}' 2>/dev/null | grep -q qwenpaw; then
-        log "提取 QwenPaw（独立 Python 3.11 运行时 + site-packages）..."
-        resolve_pbs_asset "3.11" "x86_64-unknown-linux-gnu-install_only"
-        if [ ! -f "$BUILD/cache/$PBS_ASSET" ]; then
-            dl "https://github.com/astral-sh/python-build-standalone/releases/download/$PBS_TAG/$PBS_ASSET" \
-               "$BUILD/cache/$PBS_ASSET"
-        fi
-        rm -rf "$STAGE/qwenpaw_runtime"
-        mkdir -p "$STAGE/qwenpaw_runtime"
-        tar -xzf "$BUILD/cache/$PBS_ASSET" -C "$STAGE/qwenpaw_runtime"
-        _QC="$(docker create agentscope/qwenpaw:latest)"
-        rm -rf "$BUILD/cache/qwenpaw_sp" && mkdir -p "$BUILD/cache/qwenpaw_sp"
-        docker cp "$_QC":/app/venv/lib/python3.11/site-packages/. "$BUILD/cache/qwenpaw_sp/"
-        docker rm "$_QC" >/dev/null 2>&1 || true
-        QSP="$STAGE/qwenpaw_runtime/python/lib/python3.11/site-packages"
-        cp -a "$BUILD/cache/qwenpaw_sp/." "$QSP/"
-        # qwenpaw 在镜像内非 editable 安装于 site-packages，与 PBS 3.11 兼容（cp311 wheel）
-        "$STAGE/qwenpaw_runtime/python/bin/python3" -c "import qwenpaw; print('  qwenpaw OK:', qwenpaw.__file__)"
-        ok "QwenPaw 运行时就绪 ($(du -sh "$STAGE/qwenpaw_runtime" | cut -f1))"
+# ── 5c. dsh（QuantBot AI 面，从本地 docker 镜像提取 Linux 载荷）──
+# 容器版 quantmind-dsh 用 nginx + cookie 注入；便携包把 node/dsh 树照搬进包，
+# 由 dsh_proxy.py（aiohttp）做回环前门，行为等价且不依赖 nginx/docker。
+DSH_MARK="$STAGE/dsh/global/node_modules/@deepseek-ai/dsh/lib/bin.js"
+if [ ! -f "$DSH_MARK" ]; then
+    if docker images quantmind-dsh:latest --format '{{.Repository}}' 2>/dev/null | grep -q quantmind-dsh; then
+        log "提取 dsh（node + dsh 本体 + profiles）..."
+        _DC="$(docker create quantmind-dsh:latest)"
+        rm -rf "$STAGE/dsh"
+        mkdir -p "$STAGE/dsh/global/node_modules/@deepseek-ai" "$STAGE/dsh/home"
+        docker cp "$_DC":/usr/local/bin/node "$STAGE/dsh/node"
+        docker cp "$_DC":/usr/local/lib/node_modules/@deepseek-ai/dsh \
+            "$STAGE/dsh/global/node_modules/@deepseek-ai/dsh"
+        docker cp "$_DC":/root/.dsh/profiles "$STAGE/dsh/home/profiles"
+        docker rm "$_DC" >/dev/null 2>&1 || true
+        chmod 755 "$STAGE/dsh/node"
+        # 配置面/技能用仓库源（版本可追溯）；容器里可能被现场改过
+        cp "$REPO_ROOT/docker/dsh/dsh.cordis.yml" "$STAGE/dsh/home/dsh.cordis.yml"
+        cp "$REPO_ROOT/docker/dsh/AGENTS.md" "$STAGE/dsh/home/AGENTS.md"
+        rm -rf "$STAGE/dsh/home/skills"
+        cp -a "$REPO_ROOT/skills" "$STAGE/dsh/home/skills"
+        # 用户态配置/凭据/会话不入包（首启由 dsh 自己生成）
+        rm -f "$STAGE/dsh/home/profiles/web/cordis.patch.yml"
+        rm -rf "$STAGE/dsh/home/profiles/web/.plugin-manager"
+        rm -rf "$STAGE/dsh/home/.credentials.yaml" "$STAGE/dsh/home/sessions" \
+               "$STAGE/dsh/home/storages" "$STAGE/dsh/home/logs"
+        "$STAGE/dsh/node" --version | sed 's/^/  node /'
+        ok "dsh 运行时就绪 ($(du -sh "$STAGE/dsh" | cut -f1))"
     else
-        log "警告: 本地无 agentscope/qwenpaw 镜像，跳过 QwenPaw（AI 助手降级）"
+        log "警告: 本地无 quantmind-dsh 镜像，跳过 dsh（QuantBot 不可用）"
     fi
 fi
 
 # ── 6. 源码与前端产物 ────────────────────────────────────────
 log "复制源码与前端产物 ..."
-for d in backend strategy_templates; do
+for d in backend strategy_templates minibt; do
     rm -rf "$STAGE/$d"
     cp -a "$REPO_ROOT/$d" "$STAGE/$d"
 done
+# Windows 实盘桥源码（Linux 主机接 Windows 通达信/QMT 时用）：
+# 只带源码/脚本/文档，build、dist、data（运行态缓存）与 __pycache__ 一律不进包。
+rm -rf "$STAGE/bridge"
+mkdir -p "$STAGE/bridge/windows" "$STAGE/bridge/qmt-pipe"
+tar -C "$REPO_ROOT/tools/bridge-windows" \
+    --exclude='build' --exclude='dist' --exclude='data' --exclude='__pycache__' \
+    -cf - . | tar -C "$STAGE/bridge/windows" -xf -
+tar -C "$REPO_ROOT/deploy/qmt-pipe-bridge" --exclude='__pycache__' \
+    -cf - . | tar -C "$STAGE/bridge/qmt-pipe" -xf -
+cp "$HERE/pack_assets/README-bridge.md" "$STAGE/bridge/README.md"
 # 宿主 worker（Pine 转写/对话 + 批量回测）只需这几个脚本与钉版依赖；
 # 不整目录拷贝（scripts/ 含 90MB+ 的本地工具/数据，便携包不背这个）。
 mkdir -p "$STAGE/scripts" "$STAGE/requirements"
@@ -307,7 +331,8 @@ cp -a "$REPO_ROOT/docker/training" "$STAGE/docker/training"
 log "写入启动脚本与说明 ..."
 cp "$HERE/pack_assets/start.sh" "$HERE/pack_assets/stop.sh" "$HERE/pack_assets/sync_from_git.sh" "$HERE/pack_assets/restore_backup.sh" "$STAGE/"
 cp "$HERE/pack_assets/install.sh" "$STAGE/"
-chmod 755 "$STAGE/install.sh" "$STAGE/start.sh" "$STAGE/stop.sh" 2>/dev/null || true
+cp "$HERE/pack_assets/dsh_proxy.py" "$STAGE/dsh_proxy.py"
+chmod 755 "$STAGE/install.sh" "$STAGE/start.sh" "$STAGE/stop.sh" "$STAGE/dsh_proxy.py" 2>/dev/null || true
 cp "$HERE/pack_assets/start.bat" "$HERE/pack_assets/stop.bat" "$HERE/pack_assets/sync_from_git.bat" "$HERE/pack_assets/restore_backup.bat" "$STAGE/"
 cp "$HERE/pack_assets/pg_setup.py" "$STAGE/"
 cp "$HERE/pack_assets/pack.env.example" "$STAGE/pack.env.example"
@@ -318,6 +343,7 @@ cp "$REPO_ROOT/LICENSE" "$STAGE/LICENSE" 2>/dev/null || true
 # 本机 pack.env 与 models/users（用户模型）。2026-11-16 用户反馈「安装不上」
 # 的根因之一就是 pgdata 带着测试口令被一起打包。
 rm -rf "$STAGE/pgdata" "$STAGE/logs" "$STAGE/run" "$STAGE/data"
+rm -rf "$STAGE/qwenpaw_runtime"   # 0.5 起由 dsh 取代（2026-11-16）
 rm -f "$STAGE/pack.env"
 mkdir -p "$STAGE/data" "$STAGE/logs" "$STAGE/run"
 
@@ -368,6 +394,17 @@ fi
 [ ! -e "$STAGE/run/secrets.env" ] || fail "staging 含 run/secrets.env（运行期密钥不能随包）"
 [ -f "$STAGE/web/index.html" ] || fail "staging 缺 web/index.html"
 [ -f "$STAGE/data/stocks/stocks_index.json" ] || fail "staging 缺股票名称索引"
+[ ! -e "$STAGE/dsh/home/.credentials.yaml" ] || fail "staging 含 dsh 凭据（不能随包）"
+[ ! -e "$STAGE/dsh/home/sessions" ] || fail "staging 含 dsh 历史会话（不能随包）"
+[ ! -e "$STAGE/dsh/home/storages" ] || fail "staging 含 dsh 会话缓存（不能随包）"
+if [ "${QM_ALLOW_NO_DSH:-0}" != "1" ]; then
+    [ -f "$STAGE/dsh/global/node_modules/@deepseek-ai/dsh/lib/bin.js" ] \
+        || fail "staging 缺 dsh 运行时（QuantBot 不可用；确需无 dsh 出包设 QM_ALLOW_NO_DSH=1）"
+fi
+[ -f "$STAGE/dsh_proxy.py" ] || fail "staging 缺 dsh_proxy.py"
+[ -f "$STAGE/bridge/windows/setup.bat" ] || fail "staging 缺 Windows 实盘桥源码"
+[ -f "$STAGE/bridge/qmt-pipe/pipe_redis_bridge.py" ] || fail "staging 缺 QMT 管道桥源码"
+[ ! -e "$STAGE/bridge/windows/data" ] || fail "staging 含桥运行态 data（不能随包）"
 if find "$STAGE/logs" -type f 2>/dev/null | grep -q .; then
     fail "staging logs 非空（日志不能随包）"
 fi
@@ -383,6 +420,9 @@ GIT_REV="${GIT_REV:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || 
     echo "python=$("$PY" --version 2>&1)"
     echo "postgres=$PG_VERSION"
     echo "redis=$("$STAGE/redis/redis-server" --version | awk '{print $2, $3}')"
+    if [ -f "$STAGE/dsh/global/node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then
+        echo "dsh=$("$STAGE/dsh/node" "$STAGE/dsh/global/node_modules/@deepseek-ai/dsh/lib/bin.js" --version 2>/dev/null || echo unknown)"
+    fi
 } > "$STAGE/VERSION"
 
 # ── 8. 打包 ─────────────────────────────────────────────────

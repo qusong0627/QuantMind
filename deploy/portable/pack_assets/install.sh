@@ -61,12 +61,12 @@ fi
 
 # ── 磁盘 ────────────────────────────────────────────────────
 AVAIL_KB="$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')"
-if [ "${AVAIL_KB:-0}" -lt 10485760 ]; then
-    fail "磁盘剩余不足 10GB（当前 $(( ${AVAIL_KB:-0} / 1024 / 1024 ))GB）。行情数据建议另备 60GB。"
+if [ "${AVAIL_KB:-0}" -lt 15728640 ]; then
+    fail "磁盘剩余不足 15GB（当前 $(( ${AVAIL_KB:-0} / 1024 / 1024 ))GB）。解压后约 7.3GB，行情数据建议另备 60GB。"
 fi
 
 http_ok() {
-    "$PY" - "$1" >/dev/null 2>&1 <<'PY'
+    "$PY" -S - "$1" >/dev/null 2>&1 <<'PY'
 import sys
 import urllib.request
 try:
@@ -78,13 +78,14 @@ PY
 }
 
 ports_free() {
-    "$PY" - "$@" >/dev/null 2>&1 <<'PY'
+    "$PY" -S - "$@" >/dev/null 2>&1 <<'PY'
 import socket
 import sys
 bad = []
 for item in sys.argv[1:]:
     host, port = item.rsplit(":", 1)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind((host, int(port)))
     except OSError:
@@ -106,11 +107,13 @@ if [ ! -f "$ROOT/pack.env" ]; then
     TRADE_PORT=8002
     STREAM_PORT=8003
     HUNTLY_PORT=18090
-    QWENPAW_PORT=8088
+    # dsh（QuantBot AI 面）固定 18088：前端构建期按该端口内联，
+    # 不能跟着“默认端口空闲与否”漂移到 8088。
+    DSH_PORT=18088
     if ! ports_free "127.0.0.1:$PG_PORT" "127.0.0.1:$REDIS_PORT" \
         "0.0.0.0:$API_PORT" "0.0.0.0:$ENGINE_PORT" \
         "0.0.0.0:$TRADE_PORT" "0.0.0.0:$STREAM_PORT" \
-        "127.0.0.1:$HUNTLY_PORT" "127.0.0.1:$QWENPAW_PORT"; then
+        "127.0.0.1:$HUNTLY_PORT" "0.0.0.0:$DSH_PORT"; then
         # 默认端口被占（Docker 栈/其他服务）：整组切到 18000 段，避免和本机实例冲突。
         PG_PORT=15432
         REDIS_PORT=16379
@@ -119,16 +122,16 @@ if [ ! -f "$ROOT/pack.env" ]; then
         TRADE_PORT=18002
         STREAM_PORT=18003
         HUNTLY_PORT=18090
-        QWENPAW_PORT=18088
+        DSH_PORT=18088
         ports_free "127.0.0.1:$PG_PORT" "127.0.0.1:$REDIS_PORT" \
             "0.0.0.0:$API_PORT" "0.0.0.0:$ENGINE_PORT" \
             "0.0.0.0:$TRADE_PORT" "0.0.0.0:$STREAM_PORT" \
-            "127.0.0.1:$HUNTLY_PORT" "127.0.0.1:$QWENPAW_PORT" \
+            "127.0.0.1:$HUNTLY_PORT" "0.0.0.0:$DSH_PORT" \
             || fail "默认端口和 18000 段都被占用，请复制 pack.env.example 为 pack.env 后手动改端口。"
     fi
     OPEN_BROWSER=0
     if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then OPEN_BROWSER=1; fi
-    DB_PASSWORD="$("$PY" -c 'import secrets; print(secrets.token_hex(16))')"
+    DB_PASSWORD="$("$PY" -S -c 'import secrets; print(secrets.token_hex(16))')"
     cat > "$ROOT/pack.env" <<EOF
 # 由 install.sh 首次生成；可手工修改后重启生效。
 QM_PG_PORT=$PG_PORT
@@ -138,7 +141,7 @@ QM_ENGINE_PORT=$ENGINE_PORT
 QM_TRADE_PORT=$TRADE_PORT
 QM_STREAM_PORT=$STREAM_PORT
 QM_HUNTLY_PORT=$HUNTLY_PORT
-QM_QWENPAW_PORT=$QWENPAW_PORT
+QM_DSH_PORT=$DSH_PORT
 QM_OPEN_BROWSER=$OPEN_BROWSER
 DB_PASSWORD=$DB_PASSWORD
 EOF
@@ -152,7 +155,7 @@ API_PORT="${QM_API_PORT:-8000}"
 PG_PORT="${QM_PG_PORT:-5432}"
 REDIS_PORT="${QM_REDIS_PORT:-6379}"
 HUNTLY_PORT="${QM_HUNTLY_PORT:-18090}"
-QWENPAW_PORT="${QM_QWENPAW_PORT:-8088}"
+DSH_PORT="${QM_DSH_PORT:-18088}"
 
 # 已在运行：先判活，再判端口。否则用户第二次运行 install.sh 会被
 # 自己实例占用的端口误报成「端口冲突」。
@@ -165,7 +168,7 @@ if [ "$NEW_ENV" = "0" ]; then
     ports_free "127.0.0.1:$PG_PORT" "127.0.0.1:$REDIS_PORT" \
         "0.0.0.0:${QM_API_PORT:-8000}" "0.0.0.0:${QM_ENGINE_PORT:-8001}" \
         "0.0.0.0:${QM_TRADE_PORT:-8002}" "0.0.0.0:${QM_STREAM_PORT:-8003}" \
-        "127.0.0.1:$HUNTLY_PORT" "127.0.0.1:$QWENPAW_PORT" \
+        "127.0.0.1:$HUNTLY_PORT" "0.0.0.0:$DSH_PORT" \
         || fail "pack.env 里的端口已被占用，请修改 port 后重试（ss -ltnp 查看占用）。"
 fi
 

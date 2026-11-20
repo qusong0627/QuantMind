@@ -274,8 +274,9 @@ def get_cache_manager() -> CacheManager:
         import os
 
         # 确定 Redis 主机，如果在 Docker 中且未配置或配置为 localhost，则使用容器名
+        # （便携包 QM_PORTABLE=1 例外：自带 Redis，永远连本机）
         redis_host = os.getenv("REDIS_HOST")
-        is_docker = os.path.exists("/.dockerenv")
+        is_docker = os.path.exists("/.dockerenv") and os.getenv("QM_PORTABLE") != "1"
 
         if not redis_host:
             redis_host = "quantmind-redis" if is_docker else "localhost"

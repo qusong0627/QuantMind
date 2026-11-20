@@ -13,11 +13,13 @@ import { AlertTriangle, RefreshCw } from 'lucide-react';
 import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
 import { LIVE_NODE_ONLY } from '../../../config/liveNodeFlags';
 
-/** 无任何服务器配置时的兜底地址（dsh 容器宿主映射端口） */
-const QWENPAW_LOCAL_FALLBACK_URL = 'http://127.0.0.1:8088/';
+/** dsh 直连 Web UI 端口：Docker 栈默认 8088；便携包构建期注入 18088 */
+const QWENPAW_DIRECT_PORT = Number(
+  (import.meta.env.VITE_DSH_PORT as string | undefined) || 8088,
+);
 
-/** dsh 直连 Web UI 端口（quantmind-dsh 容器的宿主映射端口） */
-const QWENPAW_DIRECT_PORT = 8088;
+/** 无任何服务器配置时的兜底地址（dsh 容器宿主映射端口） */
+const QWENPAW_LOCAL_FALLBACK_URL = `http://127.0.0.1:${QWENPAW_DIRECT_PORT}/`;
 
 /** iframe 加载超时时间（毫秒） */
 const IFRAME_LOAD_TIMEOUT_MS = 15_000;
@@ -82,7 +84,7 @@ export function useQuantBotFrame(): QuantBotFrameState {
     // Web：dsh 部署在提供页面的同一台服务器，按当前主机名直连 8088，
     // 避免走网关代理导致实时（WebSocket）链路不稳定。
     if (typeof window !== 'undefined' && window.location?.hostname) {
-      return `http://${window.location.hostname}:8088/`;
+      return `http://${window.location.hostname}:${QWENPAW_DIRECT_PORT}/`;
     }
 
     return QWENPAW_LOCAL_FALLBACK_URL;

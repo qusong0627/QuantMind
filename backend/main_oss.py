@@ -524,11 +524,17 @@ def _ensure_database_schema():
         if result.returncode == 0:
             logger.info("数据库表结构自检完成")
         else:
-            # 部分表可能已存在，返回非零但无碍
+            # psql 存在但不可用（典型：宿主机装了不匹配的 PG 客户端/libpq，
+            # 报 symbol lookup error）时不能只警告——新库会一行 schema 都没有。
+            # 直接回退 psycopg2 路径（幂等，可重放）。
             logger.warning(
-                "数据库初始化有警告（可忽略，表可能已存在）: %s",
-                result.stderr[:200] if result.stderr else "",
+                "psql 执行失败，回退 Python 初始化: %s",
+                (result.stderr or "").strip().splitlines()[-1][:200]
+                if result.stderr
+                else f"exit={result.returncode}",
             )
+            _ensure_database_schema_python()
+            return
         # 执行市场分析模块建表（qm_market_sectors 等，不在 db_init.sql 内）
         _ensure_market_analysis_tables(env)
         # 执行增量升级脚本（system_events、news title 等，不在 db_init.sql 内，幂等可重放）
@@ -653,10 +659,11 @@ def _ensure_upgrade_scripts(env: dict) -> None:
                 logger.info("增量升级已执行: %s", os.path.basename(sql_path))
             else:
                 logger.warning(
-                    "增量升级有警告 %s: %s",
+                    "增量升级 psql 失败，回退 Python %s: %s",
                     os.path.basename(sql_path),
                     (result.stderr or "")[:200],
                 )
+                _ensure_upgrade_scripts_python(sql_path)
         except FileNotFoundError:
             _ensure_upgrade_scripts_python(sql_path)
         except Exception as e:  # noqa: BLE001
@@ -743,6 +750,18 @@ def _ensure_market_analysis_tables(env: dict) -> None:
         logger.warning("市场分析建表失败（不影响启动）: %s", e)
 
 
+def _rollback_quiet(cur) -> None:
+    """结束可能残留的事务（含 aborted 状态），保证后续 SQL 文件还能执行。
+
+    psycopg2 在 ``autocommit=True`` 下不跟踪 SQL 文本里显式 BEGIN 开启的事务，
+    ``conn.rollback()`` 不会清掉它；必须直接执行 ROLLBACK。
+    """
+    try:
+        cur.execute("ROLLBACK")
+    except Exception:  # noqa: BLE001 - 无事务/连接已断开时忽略
+        pass
+
+
 def _exec_sql_python(cur, sql_path: str, ok_msg: str) -> None:
     """执行单个 SQL 文件；失败仅告警，不中断后续文件。
 
@@ -790,6 +809,7 @@ def _ensure_database_schema_python():
         conn.autocommit = True
         with conn.cursor() as cur:
             _exec_sql_python(cur, init_sql, "数据库表结构自检完成 (Python psycopg2)")
+            _rollback_quiet(cur)
             # 市场分析建表（qm_market_sectors 等，不在 db_init.sql 内）
             market_sql = _sql_file(
                 "services/api/market_analysis/migrations/001_create_market_analysis.sql"
@@ -798,11 +818,17 @@ def _ensure_database_schema_python():
                 _exec_sql_python(
                     cur, market_sql, "市场分析表结构自检完成 (Python psycopg2)"
                 )
+                _rollback_quiet(cur)
             # 增量升级（system_events、news title 等，幂等）
+            # 注意：升级文件自带 BEGIN/COMMIT；文件里任意语句失败会跳过该文件余下
+            # 语句并留下 aborted 事务。不 rollback 的话，后续所有升级文件都会报
+            # "current transaction is aborted" 而全部不执行（2026-11-16 便携包
+            # 首装实测：v1.1.8 中性化影子表因此缺失）。
             for _up in _upgrade_sql_files():
                 _exec_sql_python(
                     cur, _up, f"增量升级已执行(Python): {os.path.basename(_up)}"
                 )
+                _rollback_quiet(cur)
         conn.close()
     except Exception as e:
         logger.warning("数据库自动建表失败（不影响启动）: %s", e)

@@ -75,6 +75,16 @@ bash stop.sh                  # 停止后台实例
 **下载校验**：产物随附 `QuantMind-Portable-linux-x64.tar.gz.sha256`，
 `sha256sum -c QuantMind-Portable-linux-x64.tar.gz.sha256`。
 
+## QuantBot（dsh AI 助手）
+
+包内自带 dsh（DeepSeek Harness），启动后监听 **18088**（可在 `pack.env` 改 `QM_DSH_PORT`），
+平台「QuantBot」页会直接嵌入该地址。
+
+- 模型调用需要 DeepSeek Key：把 `DEEPSEEK_API_KEY=sk-...` 写进包根 `pack.env`，重启生效。
+- 首次启动 dsh 会自行生成签名凭据（`data/dsh-home/.credentials.yaml`），不要手工拷贝或外传。
+- 若 18088 被占用，`install.sh` 会直接报错；换一个空闲端口并同步改前端构建不现实，
+  请先释放 18088 或改 `QM_DSH_PORT` 后重新构建前端。
+
 ## 启动步骤（手动）
 
 1. 把整个文件夹解压到任意**纯英文、不含空格**的路径（如 `D:\QuantMind` 或 `~/quantmind`）。
@@ -162,6 +172,9 @@ runtime/   内嵌 Python 3.10 + 全部依赖（勿动）
 pgsql/     便携 PostgreSQL 15（勿动）
 redis/     便携 Redis（勿动）
 backend/   后端源码
+minibt/    内置回测引擎（AI-IDE minibt 策略用）
+bridge/    Windows 实盘桥源码（windows/ 通达信桥、qmt-pipe/ QMT 管道桥）
+dsh/       QuantBot AI 助手运行时（dsh + 插件 + 技能）
 web/       前端构建产物（2026-09 起随 git 同步更新）
 data/      全部运行数据（行情 parquet、模型、报告、备份等）
 pgdata/    PostgreSQL 数据库文件（自动生成）

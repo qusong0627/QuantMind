@@ -39,7 +39,8 @@ QuantMind-Portable-xxx/
 |---|---|---|
 | 前端伺服 | quantmind-web 容器 (nginx) | api 服务直接伺服（`QM_WEB_DIST_DIR` 环境变量，见 api/main.py 末尾 SPA 兜底） |
 | Huntly/RSSHub 新闻 | 容器 | 不含，新闻功能降级 |
-| qwenpaw / ib-gateway / futu-opend | 容器 | 不含 |
+| dsh（QuantBot AI 面） | quantmind-dsh 容器 + nginx 前门 | **含**：包内 node + dsh 树，`dsh_proxy.py` 做回环前门（签名 cookie 注入 + HTTP/WS 反代），端口 18088 |
+| ib-gateway / futu-opend | 容器 | 不含 |
 | GPU 训练镜像 | quantmind-oss-gpu | 不含（训练走远程 GPU 节点链路） |
 | rd-agent 因子挖掘 | 镜像内 | **Linux 包含；Windows 包不含**：`pandarallel` 在 PyPI 上只有 sdist 没有 wheel，而交叉组装必须 `--only-binary=:all:`（不然会把需要本地编译的包也拉进来），整条解析一票否决；另运行期还要本机有 git（rd-agent 在工作区里 init/commit），便携包不带 git。想补：把这类依赖在构建机上预先编成 universal wheel 放进 `--find-links` |
 | FinBERT 权重 | 构建时预下载 | 首次使用新闻情绪时在线下载（HF_HOME=data/hf） |

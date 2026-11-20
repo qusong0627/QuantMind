@@ -76,7 +76,14 @@ class K8sManager:
                 self.api = None
                 self.core_api = None
         except Exception as e:
-            logger.error(f"Failed to initialize Docker client: {e}")
+            # 便携包用户多半没有 Docker：策略容器编排不可用时其余功能照常，
+            # 不要用 ERROR 吓人（2026-11-16 便携包首装实测日志）。
+            if os.getenv("QM_PORTABLE") == "1":
+                logger.warning(
+                    "便携模式未检测到 Docker（策略容器编排不可用，其余功能正常）: %s", e
+                )
+            else:
+                logger.error(f"Failed to initialize Docker client: {e}")
             self.api = None
             self.core_api = None
 
