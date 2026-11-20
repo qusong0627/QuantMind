@@ -13,7 +13,6 @@ import {
     Switch,
     Table,
     Tag,
-    Typography,
     message,
 } from 'antd';
 import {
@@ -21,11 +20,10 @@ import {
     PlusOutlined,
     ReloadOutlined,
 } from '@ant-design/icons';
+import { ShieldCheck } from 'lucide-react';
 import type { ColumnsType } from 'antd/es/table';
 import { riskControlService } from '../../../services/riskControlService';
 import type { RiskEventAdmin, RiskRuleAdmin } from '../../../features/admin/types';
-
-const { Title, Text } = Typography;
 
 const RULE_TYPE_OPTIONS = [
     { label: '单股止损', value: 'position_stop_loss' },
@@ -316,51 +314,64 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
     ];
 
     return (
-        <div className="space-y-6 overflow-auto h-full">
-            <div className="flex items-start justify-between gap-4">
-                <div>
-                    <Title level={4} className="!mb-1">
-                        风险控制
-                    </Title>
-                    <Text type="secondary">
-                        触发规则独立扫描（默认 60 秒）；触及后模拟盘自动平仓并当日禁买。全局规则仅只读展示，本人规则可新建/编辑/删除。
-                    </Text>
+        <div className="h-full overflow-auto p-6 pb-[96px]">
+            {/* 页头 */}
+            <div className="mb-5 flex flex-wrap items-center gap-4">
+                <h3 className="flex items-center whitespace-nowrap text-base font-bold text-gray-800">
+                    <ShieldCheck className="mr-2 text-blue-600" size={18} />
+                    风险控制
+                </h3>
+                <p className="text-xs text-gray-500">
+                    触发规则独立扫描（默认 60 秒）；触及后模拟盘自动平仓并当日禁买。全局规则仅只读展示本人规则可新建/编辑/删除。
+                </p>
+                <div className="ml-auto">
+                    <Space>
+                        <Button icon={<ReloadOutlined />} onClick={() => void loadAll()}>
+                            刷新
+                        </Button>
+                        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+                            新建规则
+                        </Button>
+                    </Space>
                 </div>
-                <Space>
-                    <Button icon={<ReloadOutlined />} onClick={() => void loadAll()}>
-                        刷新
-                    </Button>
-                    <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-                        新建规则
-                    </Button>
-                </Space>
             </div>
 
-            <Table
-                rowKey="id"
-                loading={loading}
-                columns={ruleColumns}
-                dataSource={rules}
-                pagination={{ pageSize: 20, hideOnSinglePage: true, showTotal: (total) => `共 ${total} 条` }}
-                size="middle"
-            />
+            {/* 规则列表 */}
+            <div className="mb-5 rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm">
+                <div className="mb-3 flex items-center gap-2">
+                    <span className="text-sm font-bold text-slate-800">规则列表</span>
+                    <Tag color="blue">{rules.length} 条</Tag>
+                </div>
+                <Table
+                    rowKey="id"
+                    loading={loading}
+                    columns={ruleColumns}
+                    dataSource={rules}
+                    pagination={{ pageSize: 20, hideOnSinglePage: true, showTotal: (total) => `共 ${total} 条` }}
+                    size="middle"
+                />
+            </div>
 
-            <div>
-                <Title level={5}>最近触发（本人）</Title>
+            {/* 最近触发 */}
+            <div className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm">
+                <div className="mb-3 flex items-center gap-2">
+                    <span className="text-sm font-bold text-slate-800">最近触发（本人）</span>
+                    <Tag color="blue">{events.length} 条</Tag>
+                </div>
                 <Table
                     rowKey="id"
                     loading={loading}
                     columns={eventColumns}
                     dataSource={events}
                     pagination={{ pageSize: 20, hideOnSinglePage: true, showTotal: (total) => `共 ${total} 条` }}
-                    size="small"
+                    size="middle"
                 />
             </div>
 
             <Drawer
                 title={editing ? '编辑风控规则' : '新建风控规则'}
                 open={drawerOpen}
-                width={460}
+                width={520}
                 onClose={() => setDrawerOpen(false)}
                 footer={
                     <div className="flex justify-end gap-2">
