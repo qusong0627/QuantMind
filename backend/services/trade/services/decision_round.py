@@ -123,8 +123,10 @@ from typing import Any
 from backend.shared.decision.gates import BuyGate
 from backend.shared.order_contract import normalize_agent
 from backend.shared.trading_policy import TradingPolicy, TradingPolicyError
-from backend.services.trade.services.decision_round_core import (
+from backend.services.trade.services.decision_round_core import (  # noqa: F401
     ACCOUNT_AGE_WARN_MIN,
+    # STATUS_ABORTED / STATUS_OK 供测试与历史调用方从本模块取（结果装配已拆到
+    # decision_round_results，但对外名字保持兼容）。
     STATUS_ABORTED,
     STATUS_ERROR,
     STATUS_LLM_FAILED,
@@ -157,13 +159,14 @@ from backend.services.trade.services.decision_round_io import (
     record_round_dialogue,
     record_round_position,
 )
-from backend.services.trade.services.decision_round_notes import (
-    exec_summary,
-    round_highlights,
-)
+from backend.services.trade.services.decision_round_notes import exec_summary
 from backend.services.trade.services.decision_round_policy import (
     filter_affordable_pool,
     tier_with_policy,
+)
+from backend.services.trade.services.decision_round_results import (
+    aborted_round_result,
+    ok_round_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -724,86 +727,48 @@ async def _run_once_inner(
         # 全部建仓轮**，而状态键、日志、CLI 退出码三面全绿。core 的账户闸门走
         # ``abort_result`` → ``STATUS_ABORTED`` → 不置 done 键，这里对齐同一条口径。
         # 守护规则表本轮未动，也要写进 note：那张表是**外部状态**，审计表里看不出它。
-        return RoundResult(
-            status=STATUS_ABORTED,
+        return aborted_round_result(
             day=day,
             slot=slot,
             round_id=round_id,
-            note=f"{aborted}（守护规则表本轮整组保留）",
-            errors=(aborted, outcomes_gap) if outcomes_gap else (aborted,),
             agent=agent,
             mode=mode,
-            decisions=len(decisions),
-            legs=int(summary.get("legs", 0) or 0),
+            decisions=decisions,
+            aborted=aborted,
+            outcomes_gap=outcomes_gap,
+            summary=summary,
+            outcome=outcome,
+            watch_result=watch_result,
             audit_rows=audit_rows,
-            watch_armed=len(getattr(watch_result, "armed", ()) or ()),
-            # 中止轮的要点行同样要给（腿都标「未发出」）：告警旁一句「本来要做什么」，
-            # 值班不必翻审计表就知道这轮缺的是什么。
-            meta={"highlights": round_highlights(decisions, outcome)},
         )
     # 轮终注记（2026-10-10 审计 H3/M10）：「跑成了但零产出」必须在读侧与「一切正常」
     # 区分开——空池要能看出是**设计内的看空清空**还是供给链断了；交易时段内一条腿
     # 都没提交时，note 不再含糊地说「提交完成」。判据与告警（``decision_round_alerts``）
     # 共用同一对 meta 字段（``pool.rows`` / ``in_session``），那边据此决定推不推。
     direction_text = str(getattr(direction, "direction", "") or "")
-    bearish_clear = len(pool_rows) == 0 and "看空" in direction_text
-    if aborted:
-        note = aborted
-    elif bearish_clear:
-        note = f"空池（看空清空）：方向「{direction_text}」→ 本轮不建仓"
-    elif not in_session:
-        note = "非交易时段：未提交腿"
-    elif submitted > 0:
-        note = "提交完成"
-    else:
-        note = "提交完成（0 腿）"
-    return RoundResult(
-        status=STATUS_OK,
+    return ok_round_result(
         day=day,
         slot=slot,
         round_id=round_id,
-        note=note,
-        errors=(outcomes_gap,) if outcomes_gap else (),
         agent=agent,
         mode=mode,
-        decisions=len(decisions),
-        legs=int(summary.get("legs", 0) or 0),
+        decisions=decisions,
         submitted=submitted,
-        failed=int(summary.get("failed", 0) or 0),
-        watch_armed=len(getattr(watch_result, "armed", ()) or ()),
+        summary=summary,
+        outcome=outcome,
+        watch_result=watch_result,
         audit_rows=audit_rows,
-        meta={
-            "vetoes": int(summary.get("vetoes", 0) or 0),
-            "noops": int(summary.get("noops", 0) or 0),
-            "watches": int(summary.get("watches", 0) or 0),
-            "duplicates": int(summary.get("duplicates", 0) or 0),
-            # 本轮要点（▸ 段的数据源）：摘要在计数之外要说人话——方向/标的/股数/
-            # 理由（2026-10-15 用户点名「通知了、不给建议吗」）。提炼纪律见
-            # ``decision_round_notes.round_highlights``；空列表=没可说的事，不是取不到。
-            "highlights": round_highlights(decisions, outcome),
-            # 执行段自己的注记（如「虚拟现金未建模，未判」）——是说明不是错误，
-            # 与 ``errors`` 分开：把 note 混进 errors 会让状态键红得没有意义。
-            "plan_notes": list(summary.get("notes") or [])[:5],
-            "pool": {
-                "file": pool_file,
-                # 原始行数（供给面）。**必须显式带出来**：告警侧靠「键在不在」区分
-                # 「真的是 0 行」与「取不到」（同 ``exec_summary`` 纪律）。
-                "rows": len(pool_rows),
-                "shown": len(kept_rows),
-                "dropped": len(dropped_rows),
-                # 大盘方向文本（看空清空判据；"—"=缺失，绝不编一个方向出来）。
-                "direction": direction_text,
-                "total_score": getattr(direction, "total_score", None),
-            },
-            # 告警判据：非交易时段的零腿是**设计内**（盘前规划轮不发腿）。
-            "in_session": bool(in_session),
-            # 对外状态面（前端/告警）也只暴露授予额度口径：真实账户三数只留在
-            # 审计行 ``context_meta.account`` 里，供运维复盘，不进任何模型可见面。
-            "quota": {
-                "total": quota_total,
-                "used": quota_used,
-                "remaining": ledger.quota_remaining,
-                "cash": virtual_cash,
-            },
-        },
+        outcomes_gap=outcomes_gap,
+        aborted=aborted,
+        pool_rows=pool_rows,
+        pool_file=pool_file,
+        kept_rows=kept_rows,
+        dropped_rows=dropped_rows,
+        direction=direction,
+        direction_text=direction_text,
+        in_session=in_session,
+        quota_total=quota_total,
+        quota_used=quota_used,
+        ledger=ledger,
+        virtual_cash=virtual_cash,
     )

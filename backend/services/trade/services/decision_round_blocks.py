@@ -66,6 +66,15 @@ from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
+# 大盘状态判读规则（2026-11-20 研究：护盘权重剥离 + 2017-2026 分钟扫描）。
+# 静态规则进提示词，不依赖额外取数；随【盘中市场状态】块一起给盘中交易 agent。
+MARKET_STATE_RULES = """【大盘状态判读规则（2026-11-20 研究；日频+分钟扫描）】
+- 真实指数 = 剔除成分内前 20% 流通市值权重股后的指数。官方跌得少、真实跌得多 = 护盘；官方涨、权重不涨甚至跌 = 降温。
+- 护盘失败（权重篮子也跌）不是继续跌信号：2016-2026 护盘失败后 5 日官方 +0.52%（t=2.7），偏反弹；不要据此追空。
+- 唯一稳定偏空状态 = 降温成功（指数涨、权重被压）：后 5 日官方 -0.26%、57% 为负。
+- 盘中 10:30/11:30：真实指数 > +1% → 下午偏延续（+0.30%，t=3.3）；< -1% → 下午不强但次日偏反弹（+0.25%）。不要用「早盘跌→下午反弹」——那只是 2026-06~11 的特例，全历史是延续。
+- 防守线：护盘篮子（银行/保险/茅台）与指数同步下跌、且指数开始补跌 = 护盘真失效（2018 型），此时才转防守。"""
+
 #: 毫秒戳归一阈值（快照 ``timestamp`` 契约是秒；>1e12 一律按毫秒折算）。
 _MS_TS_CUTOFF = 1e12
 
@@ -406,6 +415,8 @@ async def enrich_quotes_with_blocks(
         market_state_block = build_market_state_block(
             regime, index_snap, now, market_stage=market_stage
         )
+        if market_state_block:
+            market_state_block = f"{market_state_block}\n\n{MARKET_STATE_RULES}"
         if deps.load_regime is not None and regime is None:
             note = "盘中 regime 不可得：市场状态块本轮为「不可得」降级"
             notes.append(note)

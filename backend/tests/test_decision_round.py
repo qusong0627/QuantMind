@@ -3393,7 +3393,9 @@ async def test_catch_up_slot_is_skipped_when_the_day_already_has_a_decision():
     h = make_harness()
     native = FakeNative()
     native.store[slot_keys(DAY, SLOT_1005)[1]] = "1"  # 当日已有 rebalance 决策
-    results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    results = await round_tick(
+        deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005
+    )
     assert [r.status for r in results] == [STATUS_SKIPPED]
     assert results[0].slot.hhmm == "1005" and "已出过" in results[0].note
     assert h.log["llm"] == []  # 补跑没有真的问模型
@@ -3424,7 +3426,9 @@ async def test_catch_up_does_not_run_when_the_done_key_cannot_be_read():
     """
     h = make_harness()
     native = FakeNative(fail_get=True)
-    results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    results = await round_tick(
+        deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005
+    )
     assert [r.status for r in results] == [STATUS_SKIPPED]
     assert "done 键读取失败" in results[0].note
     assert "--force" in results[0].note  # 出口：修不好时人要能显式重跑
@@ -3441,10 +3445,15 @@ async def test_catch_up_retries_within_the_window_once_the_read_recovers():
     h = make_harness()
     native = FakeNative(fail_get=True)
     assert [
-        r.status for r in await round_tick(deps=h.deps, native=native, now=TICK_1005)
+        r.status
+        for r in await round_tick(
+            deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005
+        )
     ] == [STATUS_SKIPPED]
     native.fail_get = False  # 运维修好了
-    results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    results = await round_tick(
+        deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005
+    )
     assert [r.status for r in results] == [R.STATUS_OK]
     assert h.log["llm"] != []  # 这一次真的问了模型
 
@@ -3455,7 +3464,9 @@ async def test_catch_up_claim_release_failure_still_reports_skipped(caplog):
     h = make_harness()
     native = FakeNative(fail_get=True, fail_delete=True)
     with caplog.at_level("WARNING"):
-        results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+        results = await round_tick(
+            deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005
+        )
     assert [r.status for r in results] == [STATUS_SKIPPED]
     assert any("认领键释放失败" in r.message for r in caplog.records)
 
@@ -3474,7 +3485,9 @@ async def test_tick_never_marks_done_when_the_quote_gate_aborts(caplog):
     done_key = slot_keys(DAY, SLOT_0935)[1]
     assert done_key not in native.store
     # 紧接着的补跑槽：done 键不在 ⇒ 它真的会跑（这里用同一批替身再 tick 一次）
-    catch_up = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    catch_up = await round_tick(
+        deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005
+    )
     assert [r.status for r in catch_up] == [R.STATUS_ABORTED]  # 行情还没好，仍在 abort
     assert h.log["llm"] == []
 
@@ -3484,7 +3497,9 @@ async def test_force_reruns_even_when_done_is_set():
     h = make_harness()
     native = FakeNative()
     native.store[slot_keys(DAY, SLOT_1005)[1]] = "1"
-    results = await round_tick(deps=h.deps, native=native, now=TICK_1005, force=True)
+    results = await round_tick(
+        deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005, force=True
+    )
     assert [r.status for r in results] == [R.STATUS_OK]
 
 
@@ -3710,7 +3725,9 @@ async def test_catch_up_slot_resumes_only_the_agent_that_missed():
     h = _roster_harness("pro", "flash")
     native = FakeNative()
     native.store[slot_keys(DAY, SLOT_0935, "pro")[1]] = "1"  # pro 出过决策
-    results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    results = await round_tick(
+        deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005
+    )
     assert [(r.agent, r.status) for r in results] == [
         ("pro", STATUS_SKIPPED),
         ("flash", R.STATUS_OK),
@@ -3720,10 +3737,18 @@ async def test_catch_up_slot_resumes_only_the_agent_that_missed():
 
     # 窗口内不再重跑（认领键按家、按槽按着）：要来第二次只能由人点名，而点名的
     # 那家**只跑那家**——静默跑全员 = 运营以为在补 flash，实际三家都下了单。
-    assert await round_tick(deps=h.deps, native=native, now=TICK_1005) == ()
+    assert (
+        await round_tick(deps=h.deps, native=native, now=TICK_1005, slot=SLOT_1005)
+        == ()
+    )
     h.log["llm"].clear()
     forced = await round_tick(
-        deps=h.deps, native=native, now=TICK_1005, force=True, agent="flash"
+        deps=h.deps,
+        native=native,
+        now=TICK_1005,
+        slot=SLOT_1005,
+        force=True,
+        agent="flash",
     )
     assert [(r.agent, r.status) for r in forced] == [("flash", R.STATUS_OK)]
     assert [t["agent"] for t in h.log["llm"]] == ["flash"]
