@@ -62,7 +62,7 @@ const SUPPORTED_INDICES = {
 };
 
 // 多市场指数配置
-export type MarketId = 'CN' | 'HK' | 'US' | 'CRYPTO' | 'FUTURES';
+export type MarketId = 'CN' | 'HK' | 'US' | 'CRYPTO' | 'FUTURES' | 'CUSTOM';
 
 export const MARKET_INDICES: Record<MarketId, { symbol: string; name: string; basePrice: number }[]> = {
   CN: [
@@ -105,6 +105,8 @@ export const MARKET_INDICES: Record<MarketId, { symbol: string; name: string; ba
     { symbol: 'ag', name: '沪银', basePrice: 7500 },
     { symbol: 'sc', name: '原油主力', basePrice: 520 },
   ],
+  // 自定义市场无公开指数行情：空数组调用方按“暂无行情”处理。
+  CUSTOM: [],
 };
 
 // 腾讯财经API字段映射（完整标准）

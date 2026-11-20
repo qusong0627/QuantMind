@@ -15,5 +15,7 @@ export const ENABLE_CRYPTO: boolean =
 
 export function isMarketEnabled(market: string): boolean {
   if (market === 'CRYPTO') return ENABLE_CRYPTO;
+  // 自定义市场为用户自传因子：无外部行情依赖，始终可用。
+  if (market === 'CUSTOM') return true;
   return true;
 }

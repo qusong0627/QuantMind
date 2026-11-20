@@ -1,7 +1,7 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { isMarketEnabled } from '../../config/marketFlags';
 
-export type AppMarket = 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
+export type AppMarket = 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES' | 'CUSTOM';
 
 export interface UIState {
   theme: 'light' | 'dark';
@@ -11,7 +11,7 @@ export interface UIState {
   currentMarket: AppMarket;
 }
 
-const MARKET_PREF_KEY = 'qm:current_market';
+export const MARKET_PREF_KEY = 'qm:current_market';
 
 // 仅保留模拟交易：实盘入口已在前端移除（HeaderBar / RealTradingPage），默认值必须与
 // 产品口径一致为 simulation。历史 localStorage 可能残留 'real'，这里不再读取——否则
@@ -20,7 +20,7 @@ const MARKET_PREF_KEY = 'qm:current_market';
 const initialTradingMode: 'real' | 'simulation' = 'simulation';
 
 const savedMarket = localStorage.getItem(MARKET_PREF_KEY);
-const validMarkets: AppMarket[] = (['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'] as AppMarket[]).filter((m) => isMarketEnabled(m));
+const validMarkets: AppMarket[] = (['CN', 'US', 'HK', 'CRYPTO', 'FUTURES', 'CUSTOM'] as AppMarket[]).filter((m) => isMarketEnabled(m));
 const initialMarket: AppMarket =
   validMarkets.includes(savedMarket as AppMarket) ? (savedMarket as AppMarket) : 'CN';
 

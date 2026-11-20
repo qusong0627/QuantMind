@@ -137,7 +137,7 @@ export interface TrainingContext {
   commissionRate: number;
   slippage: number;
   dealPrice: DealPrice;
-  market?: 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
+  market?: 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES' | 'CUSTOM';
   industry_as_feature?: boolean;
 }
 
@@ -484,6 +484,8 @@ export const TRAINING_BASE_FEATURES = [
 // Market-specific default feature sets
 export const MARKET_DEFAULT_FEATURES: Record<string, string[]> = {
   CN: PRESET_DEFAULT_FEATURES,
+  // 自定义市场因子完全由用户自传/挖掘决定：默认不勾选，由字段发现后的动态分类决定。
+  CUSTOM: [],
   HK: [
     // 基本面因子
     'pe_ttm', 'pb', 'roe', 'ep_ttm', 'bp',
@@ -735,7 +737,7 @@ export const restoreRange = (range: [string, string] | undefined, fallback: [Day
   return [start, end];
 };
 
-const CONFIG_MARKETS: NonNullable<TrainingContext['market']>[] = ['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'];
+const CONFIG_MARKETS: NonNullable<TrainingContext['market']>[] = ['CN', 'US', 'HK', 'CRYPTO', 'FUTURES', 'CUSTOM'];
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null && !Array.isArray(value)

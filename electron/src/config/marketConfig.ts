@@ -84,6 +84,19 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     calendar: 'CME',
     adapterId: 'futures',
   },
+  CUSTOM: {
+    label: '自定义',
+    qlibRegion: 'cn',
+    // 自定义市场走 QuantDB 直读训练/推理（quantcustom），无 Qlib 缓存；该路径仅占位。
+    qlibProviderUri: '/data/quantcustom/.qlib_cache/custom_data',
+    defaultUniverse: 'all',
+    benchmark: 'CUSTOM',
+    benchmarkName: '自定义市场',
+    currency: 'CNY',
+    // 推理日期解析走交易日历服务（未知市场回退 SSE），用户因子多为日频。
+    calendar: 'SSE',
+    adapterId: 'custom',
+  },
 };
 
 export function getMarketConfig(market: AppMarket): MarketConfig {

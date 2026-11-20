@@ -7,6 +7,7 @@ import {
     BankOutlined,
     StarFilled,
     ReloadOutlined,
+    ExperimentOutlined,
 } from '@ant-design/icons';
 import { KlineChart } from '../components/KlineChart';
 import { TradingViewChart } from '../components/TradingViewChart';
@@ -19,6 +20,7 @@ import { dataDashboardService, isRequestCancelled, KlineItem } from '../services
 import { listUserPoolSymbols, USER_POOL_FAVORITES } from '../../../services/userStockPoolService';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { selectCurrentMarket, setMarket, AppMarket } from '../../../store/slices/uiSlice';
+import { notifySharedAdminMarket, type SharedAdminMarket } from '../../admin/hooks/useSharedAdminMarket';
 import { isMarketEnabled } from '../../../config/marketFlags';
 import { toSuffixCode } from '../../../utils/portfolioUtils';
 
@@ -30,6 +32,7 @@ const MARKET_TABS = [
     { key: 'US' as AppMarket, label: '美股', icon: <BarChartOutlined /> },
     { key: 'CRYPTO' as AppMarket, label: '区块链', icon: <AppstoreOutlined /> },
     { key: 'FUTURES' as AppMarket, label: '期货', icon: <StockOutlined /> },
+    { key: 'CUSTOM' as AppMarket, label: '自定义', icon: <ExperimentOutlined /> },
 ].filter((t) => isMarketEnabled(t.key));
 
 const DEFAULT_SYMBOLS: Record<string, { symbol: string; name: string }> = {
@@ -38,6 +41,8 @@ const DEFAULT_SYMBOLS: Record<string, { symbol: string; name: string }> = {
     US: { symbol: 'AAPL', name: 'Apple' },
     CRYPTO: { symbol: 'BTCUSDT', name: '比特币' },
     FUTURES: { symbol: 'RB0.CN', name: '螺纹钢主力' },
+    // 自定义市场无默认标的：切入后标的/K线/板块均显空，字段目录展示自传因子。
+    CUSTOM: { symbol: '', name: '' },
 };
 
 interface WatchlistItem {
@@ -120,14 +125,20 @@ const DashboardPage: React.FC = () => {
         }
     }, []);
 
-    // When market changes, reset to default symbol
+    // When market changes, reset to default symbol（自定义无默认标的：清空K线显空）
     useEffect(() => {
         const def = DEFAULT_SYMBOLS[market];
-        if (def) {
-            setSymbol(def.symbol);
-            setSymbolName(def.name);
-            loadKline(market, def.symbol);
+        if (!def) return;
+        setSymbol(def.symbol);
+        setSymbolName(def.name);
+        if (!def.symbol) {
+            klineReq.current += 1;
+            setKlineData([]);
+            setKlineSource('');
+            setKlineLoading(false);
+            return;
         }
+        loadKline(market, def.symbol);
     }, [market, loadKline]);
 
     // Handle stock selection from search
@@ -171,7 +182,7 @@ const DashboardPage: React.FC = () => {
     const handleWatchlistClick = useCallback(
         (item: WatchlistItem) => {
             const { symbol: sym, market: m } = normalizeSymbol(item.symbol);
-            startTransition(() => { dispatch(setMarket(m)); });
+            startTransition(() => { dispatch(setMarket(m)); notifySharedAdminMarket(m as SharedAdminMarket); });
             setSymbol(sym);
             setSymbolName(item.stockName || item.symbol);
             loadKline(m, sym);
@@ -194,7 +205,7 @@ const DashboardPage: React.FC = () => {
                 {/* Market Tabs */}
                 <Tabs
                     activeKey={market}
-                    onChange={(k) => startTransition(() => { dispatch(setMarket(k as AppMarket)); })}
+                    onChange={(k) => startTransition(() => { dispatch(setMarket(k as AppMarket)); notifySharedAdminMarket(k as SharedAdminMarket); })}
                     items={MARKET_TABS.map((t) => ({
                         key: t.key,
                         label: (

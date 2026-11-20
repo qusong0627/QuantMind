@@ -102,6 +102,21 @@ export const toSuffixCode = (raw: string): string => {
 };
 
 /**
+ * 代码 -> AppMarket 归属（首页仪表盘按市场过滤交易/持仓用）。
+ * 后缀口径：SH/SZ/BJ→CN，HK→港股，FUT/CNF/CN后缀→期货，USDT/USDC→区块链，其余→美股。
+ * 自定义市场无统一后缀落到 US（自传标的不参与 suffix 过滤，调用方另行处理）。
+ */
+export const symbolToAppMarket = (raw: string): 'CN' | 'HK' | 'US' | 'CRYPTO' | 'FUTURES' => {
+    const s = (raw || '').trim().toUpperCase();
+    if (!s) return 'CN';
+    if (/^(SZ|SH|BJ)\d{6}$/.test(s) || /^\d{6}\.(SH|SZ|BJ)$/.test(s)) return 'CN';
+    if (s.endsWith('.HK') || /^\d{5}$/.test(s)) return 'HK';
+    if (/\.(CN|FUT|CNF)$/.test(s)) return 'FUTURES';
+    if (/USDT$|USDC$|^BTC|^ETH|^BNB|^SOL|^XRP|^DOGE/.test(s)) return 'CRYPTO';
+    return 'US';
+};
+
+/**
  * 后缀/前缀/裸码 -> Qlib 口径全小写（600519.SH -> sh600519），Qlib 层边界唯一出口。
  * 与后端 StockCodeUtil.to_qlib 同口径；指数/池关键词（csi300/all 等）与 pool: 引用
  * 不在此处理——调用方须先分流透传，禁止把关键词喂进来转小写。
