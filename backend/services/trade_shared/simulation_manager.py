@@ -19,6 +19,26 @@ logger = logging.getLogger(__name__)
 RESERVED_NON_NUMERIC_USER_ID = 0
 
 
+def _position_market_of(symbol: str) -> str:
+    """持仓 symbol -> 账户市场维度（CN/HK/US/CRYPTO/FUTURES）。
+
+    与前端 symbolToAppMarket 同口径。自定义市场无统一后缀恒返回 ''，
+    调用方据此把 CUSTOM 重建视为空账户（自传因子不落持仓）。
+    """
+    s = str(symbol or "").strip().upper()
+    if not s:
+        return ""
+    if s.endswith((".SH", ".SZ", ".BJ")):
+        return "CN"
+    if s.endswith(".HK") or s.isdigit():
+        return "HK"
+    if s.endswith((".CN", ".FUT", ".CNF")):
+        return "FUTURES"
+    if s.endswith(("USDT", "USDC")):
+        return "CRYPTO"
+    return "US"
+
+
 def canonical_sim_uid(raw_user_id: object) -> int:
     """模拟盘 int user_id：管理员族 → 10000001，其它数字保持 int，其余 → 0。"""
     from backend.shared.simulation_account_keys import (
@@ -663,6 +683,23 @@ return 0
                 if projection_account is None:
                     return None
                 positions = projection.positions or {}
+                market_norm = self._normalize_market(market)
+                if market_norm != "CN":
+                    # 分市场重建：台账投影不分市场，非 CN 请求只保留本市场持仓，
+                    # 否则 FUTURES/CUSTOM 等键会被 CN 持仓污染并回填 Redis（仪表盘串市场）。
+                    # 现金无法按市场拆分统一按 0 计；无本市场持仓返回 None（空账户）。
+                    positions = {
+                        k: v
+                        for k, v in positions.items()
+                        if isinstance(v, dict)
+                        and _position_market_of(str(k)) == market_norm
+                    }
+                    if not positions:
+                        return None
+                    cash = 0.0
+                    projection_account.cash = 0.0
+                else:
+                    cash = float(projection_account.cash or 0.0)
                 long_mv = 0.0
                 short_mv = 0.0
                 for pos in positions.values():
@@ -673,7 +710,6 @@ return 0
                         short_mv += mv
                     else:
                         long_mv += mv
-                cash = float(projection_account.cash or 0.0)
                 # 口径与 EOD 一致：现金 + 多头市值 - 空头市值（Redis 缺键时
                 # short_proceeds 不可考，按 0 计；EOD 会补齐）。
                 total_asset = round(cash + long_mv - short_mv, 4)
