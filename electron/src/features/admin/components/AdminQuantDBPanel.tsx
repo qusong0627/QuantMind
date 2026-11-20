@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-    Alert, Button, Checkbox, Col, Input, Modal, Progress,
+    Alert, Button, Col, Input, Modal, Progress,
     Row, Space, Statistic, Table, Tag, Tooltip, Typography, message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
     ApiOutlined, CheckCircleFilled, CloseCircleFilled, CloudDownloadOutlined,
-    DatabaseOutlined, FileSearchOutlined, GlobalOutlined, ReloadOutlined,
+    FileSearchOutlined, GlobalOutlined, ReloadOutlined,
     SettingOutlined, StopOutlined, CloudSyncOutlined,
 } from '@ant-design/icons';
 import {
@@ -63,8 +63,6 @@ export const AdminQuantDBPanel: React.FC = () => {
         refreshCounter.current += 1;
         setCatalogRefreshSignal(refreshCounter.current);
     }, []);
-    const [sources, setSources] = useState<Array<{ source: string; label: string; enabled: boolean }>>([]);
-    const [sourcesLoading, setSourcesLoading] = useState(false);
     const [scanOpen, setScanOpen] = useState(false);
     const [initOpen, setInitOpen] = useState(false);
 
@@ -79,36 +77,6 @@ export const AdminQuantDBPanel: React.FC = () => {
             setLoading(false);
         }
     }, []);
-
-    const loadSources = useCallback(async () => {
-        setSourcesLoading(true);
-        try {
-            const resp = await dataPlatformService.getMarketDataSources('quantdb');
-            setSources(resp.sources);
-        } catch (error: unknown) {
-            message.error(`加载数据源配置失败: ${describeError(error)}`);
-        } finally {
-            setSourcesLoading(false);
-        }
-    }, []);
-
-    const saveSources = useCallback(async (source: string, enabled: boolean) => {
-        const next = sources.map((s) => (s.source === source ? { ...s, enabled } : s));
-        setSources(next);
-        try {
-            const payload: Record<string, boolean> = {};
-            next.forEach((s) => { payload[s.source] = s.enabled; });
-            await dataPlatformService.saveMarketDataSources('quantdb', payload);
-            message.success('A股数据源配置已保存');
-        } catch (error: unknown) {
-            message.error(`保存数据源配置失败: ${describeError(error)}`);
-            loadSources();
-        }
-    }, [sources, loadSources]);
-
-    useEffect(() => {
-        loadSources();
-    }, [loadSources]);
 
     useEffect(() => {
         loadInfo();
@@ -180,7 +148,7 @@ export const AdminQuantDBPanel: React.FC = () => {
                         <Tag color={info?.connected ? 'green' : 'red'} className="m-0 rounded-full px-2.5 font-bold border-none">
                             {info?.connected ? '已连接' : '未连接'}
                         </Tag>
-                        <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => { loadInfo(); loadSources(); }} className="rounded-lg">
+                        <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => { loadInfo(); }} className="rounded-lg">
                             刷新
                         </Button>
                     </Space>
@@ -283,35 +251,12 @@ export const AdminQuantDBPanel: React.FC = () => {
             <SectionCard
                 index="03"
                 title="同步设置"
-                desc="数据源策略与定时同步"
+                desc="定时同步"
                 icon={<SettingOutlined />}
                 tone="amber"
                 extra={<Tag className="m-0 rounded-full bg-slate-50 border-slate-200 text-slate-500 text-[11px] font-bold">A 股专用</Tag>}
             >
                 <div className="space-y-4">
-                    <div className="rounded-2xl border border-slate-100 bg-slate-50/50 p-4">
-                        <div className="flex items-center gap-2 mb-3">
-                            <DatabaseOutlined className="text-slate-600" />
-                            <Text strong className="text-sm">数据源策略</Text>
-                            <Text type="secondary" className="text-xs">默认 QuantDB / akshare / 北向 / 南向；雅虎默认关闭</Text>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                            {sources.map((s) => (
-                                <Checkbox
-                                    key={s.source}
-                                    checked={s.enabled}
-                                    disabled={sourcesLoading}
-                                    onChange={(e) => saveSources(s.source, e.target.checked)}
-                                    className="bg-white rounded-lg border border-slate-100 px-2.5 py-1.5 m-0"
-                                >
-                                    <Text className="text-xs font-medium">{s.label}</Text>
-                                    <Text type="secondary" className="text-[11px] ml-1">({s.source})</Text>
-                                </Checkbox>
-                            ))}
-                            {sources.length === 0 && <Text type="secondary" className="text-xs">加载中...</Text>}
-                        </div>
-                    </div>
-
                     <SyncSchedulePanel market="A" defaultDays={5} />
                 </div>
             </SectionCard>
