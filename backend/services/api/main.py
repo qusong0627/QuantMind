@@ -44,6 +44,7 @@ from backend.services.api.routers.news import (
     router as news_router,
 )
 from backend.services.api.routers.research import router as research_router
+from backend.services.api.routers.risk_rules import router as risk_rules_router
 from backend.services.api.routers.stocks_search import router as stocks_search_router
 from backend.services.api.routers.stock_terminal import router as stock_terminal_router
 from backend.services.api.routers.system import router as system_router
@@ -427,6 +428,7 @@ app.include_router(
     tags=["ModelTraining"],
 )
 app.include_router(research_router)
+app.include_router(risk_rules_router, prefix="/api/v1", tags=["RiskRules"])
 app.include_router(stocks_search_router)
 app.include_router(stock_terminal_router)
 app.include_router(trading_calendar.router)

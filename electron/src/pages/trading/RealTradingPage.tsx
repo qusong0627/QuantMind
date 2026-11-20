@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock } from 'lucide-react';
+import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock, ShieldCheck } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
 import TopBar from './components/TopBar';
@@ -10,6 +10,7 @@ import PersonalCenter from './tabs/PersonalCenter';
 import PositionMonitor from './tabs/PositionMonitor';
 import TradingHistory from './tabs/TradingHistory';
 import SettingsCenter from './tabs/SettingsCenter';
+import RiskControlTab from './tabs/RiskControl';
 import ReplayPage from './tabs/ReplayPage';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { authService } from '../../features/auth/services/authService';
@@ -22,7 +23,7 @@ import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
 import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
 
 type TradingMode = 'real' | 'simulation'; // 仅保留模拟交易：实盘入口已隐藏，store 被强制为 simulation（恢复见 git 历史）
-type ActiveTab = 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
+type ActiveTab = 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay' | 'risk';
 type PreflightStage = 'trading-readiness' | 'preflight';
 type PendingDeploy = {
     strategyId: string;
@@ -496,6 +497,7 @@ const RealTradingPage: React.FC = () => {
         { id: 'manual-task', label: '手动任务', icon: ClipboardList },
         { id: 'position', label: '持仓监控', icon: PieChart },
         { id: 'history', label: '交易记录', icon: FileText },
+        { id: 'risk', label: '风险控制', icon: ShieldCheck },
         { id: 'personal', label: '个人中心', icon: User },
         { id: 'settings', label: '设置', icon: Settings },
     ];
@@ -503,7 +505,7 @@ const RealTradingPage: React.FC = () => {
     // 侧边栏分组（顺序与上方 tabs 对应；增删 tab 时同步维护）
     const tabSections: Array<{ label: string; ids: ActiveTab[] }> = [
         { label: '交易', ids: ['manage', 'manual-task'] },
-        { label: '组合与风控', ids: ['position', 'history'] },
+        { label: '组合与风控', ids: ['position', 'history', 'risk'] },
         { label: '账户', ids: ['personal', 'settings'] },
     ];
 
@@ -625,6 +627,7 @@ const RealTradingPage: React.FC = () => {
                                 tradingMode={tradingMode}
                             />
                         )}
+                        {activeTab === 'risk' && <RiskControlTab tenantId={tenantId} />}
                         {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
                         {activeTab === 'replay' && <ReplayPage />}
                     </TradingMain>

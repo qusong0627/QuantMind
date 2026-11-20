@@ -1,3 +1,5 @@
+/** 模拟盘 Tab：风险控制（用户级，仅管理本人规则） */
+
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     Button,
@@ -20,8 +22,8 @@ import {
     ReloadOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import { adminService } from '../services/adminService';
-import type { RiskEventAdmin, RiskRuleAdmin } from '../types';
+import { riskControlService } from '../../../services/riskControlService';
+import type { RiskEventAdmin, RiskRuleAdmin } from '../../../features/admin/types';
 
 const { Title, Text } = Typography;
 
@@ -64,9 +66,6 @@ interface RuleFormValues {
     rule_type: string;
     description?: string;
     is_active: boolean;
-    applies_to_all: boolean;
-    user_ids_text?: string;
-    trading_mode: string;
     pct?: number;
     index?: string;
     max_value?: number;
@@ -78,18 +77,14 @@ interface RuleFormValues {
 const defaultForm: Partial<RuleFormValues> = {
     rule_type: 'position_stop_loss',
     is_active: true,
-    applies_to_all: true,
-    trading_mode: 'SIMULATION',
     pct: -8,
     index: '000300.SH',
     priority: 10,
 };
 
 function buildParameters(values: RuleFormValues): Record<string, any> {
-    const parameters: Record<string, any> = {
-        trading_mode: values.trading_mode,
-        markets: ['CN'],
-    };
+    // 交易模式后端强制锁定 SIMULATION，这里只传业务阈值。
+    const parameters: Record<string, any> = {};
     if (values.rule_type === 'position_stop_loss' || values.rule_type === 'position_take_profit') {
         parameters.pct = Number(values.pct) / 100;
     } else if (values.rule_type === 'market_index_move') {
@@ -105,16 +100,13 @@ function buildParameters(values: RuleFormValues): Record<string, any> {
     return parameters;
 }
 
-function parseUserIds(text?: string): number[] | null {
-    if (!text?.trim()) return null;
-    const ids = text
-        .split(/[,，\s]+/)
-        .map((item) => Number(item.trim()))
-        .filter((item) => Number.isFinite(item));
-    return ids.length ? ids : null;
+interface Props {
+    tenantId?: string;
 }
 
-export const AdminRiskControl: React.FC = () => {
+const isGlobalRule = (rule: RiskRuleAdmin) => !!rule.applies_to_all;
+
+export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
     const [rules, setRules] = useState<RiskRuleAdmin[]>([]);
     const [events, setEvents] = useState<RiskEventAdmin[]>([]);
     const [loading, setLoading] = useState(false);
@@ -127,8 +119,8 @@ export const AdminRiskControl: React.FC = () => {
         setLoading(true);
         try {
             const [ruleRows, eventRows] = await Promise.all([
-                adminService.listRiskRules(false),
-                adminService.listRiskEvents({ limit: 50 }),
+                riskControlService.listRules(false),
+                riskControlService.listEvents({ limit: 50 }),
             ]);
             setRules(ruleRows || []);
             setEvents(eventRows || []);
@@ -150,6 +142,7 @@ export const AdminRiskControl: React.FC = () => {
     };
 
     const openEdit = (rule: RiskRuleAdmin) => {
+        if (isGlobalRule(rule)) return;
         setEditing(rule);
         const params = rule.parameters || {};
         form.setFieldsValue({
@@ -157,9 +150,6 @@ export const AdminRiskControl: React.FC = () => {
             rule_type: rule.rule_type,
             description: rule.description || '',
             is_active: rule.is_active,
-            applies_to_all: rule.applies_to_all,
-            user_ids_text: (rule.user_ids || []).join(','),
-            trading_mode: params.trading_mode || 'SIMULATION',
             pct: pctToForm(params.pct),
             index: params.index || '000300.SH',
             max_value: params.max_value,
@@ -177,17 +167,18 @@ export const AdminRiskControl: React.FC = () => {
             rule_type: values.rule_type,
             description: values.description,
             is_active: values.is_active,
-            applies_to_all: values.applies_to_all,
-            user_ids: values.applies_to_all ? null : parseUserIds(values.user_ids_text),
+            // 作用域后端强制为本人模拟盘规则，前端不再传递。
+            applies_to_all: false as boolean,
+            user_ids: null as number[] | null,
             priority: values.priority,
             parameters: buildParameters(values),
         };
         try {
             if (editing) {
-                await adminService.updateRiskRule(editing.id, payload);
+                await riskControlService.updateRule(editing.id, payload);
                 message.success('规则已更新');
             } else {
-                await adminService.createRiskRule(payload);
+                await riskControlService.createRule(payload);
                 message.success('规则已创建');
             }
             setDrawerOpen(false);
@@ -199,7 +190,7 @@ export const AdminRiskControl: React.FC = () => {
 
     const toggleRule = async (rule: RiskRuleAdmin, is_active: boolean) => {
         try {
-            await adminService.updateRiskRule(rule.id, { is_active });
+            await riskControlService.updateRule(rule.id, { is_active });
             await loadAll();
         } catch (error: any) {
             message.error(error?.response?.data?.detail || error?.message || '更新失败');
@@ -208,7 +199,7 @@ export const AdminRiskControl: React.FC = () => {
 
     const removeRule = async (rule: RiskRuleAdmin) => {
         try {
-            await adminService.deleteRiskRule(rule.id);
+            await riskControlService.deleteRule(rule.id);
             message.success('已删除');
             await loadAll();
         } catch (error: any) {
@@ -217,17 +208,10 @@ export const AdminRiskControl: React.FC = () => {
     };
 
     const runDryRun = async (rule: RiskRuleAdmin) => {
-        const raw = window.prompt('预演用户 ID（模拟盘）', String((rule.user_ids || [0])[0] ?? 0));
-        if (raw == null) return;
-        const userId = Number(raw);
-        if (!Number.isFinite(userId)) {
-            message.error('用户 ID 无效');
-            return;
-        }
         try {
-            const rows = await adminService.dryRunRiskRule(rule.id, { user_id: userId, tenant_id: 'default' });
+            const rows = await riskControlService.dryRunRule(rule.id, { tenant_id: tenantId });
             if (!rows?.length) {
-                message.info('该用户当前不会触发此规则');
+                message.info('当前持仓不会触发此规则');
                 return;
             }
             message.success(`预演 ${rows.length} 条：${rows.map((item) => `${item.symbol} ${item.status}`).join('；')}`);
@@ -269,28 +253,28 @@ export const AdminRiskControl: React.FC = () => {
                 title: '范围',
                 width: 140,
                 render: (_, rule) =>
-                    rule.applies_to_all ? '全局' : `用户 ${(rule.user_ids || []).join(',') || '-'}`,
-            },
-            {
-                title: '模式',
-                width: 110,
-                render: (_, rule) => rule.parameters?.trading_mode || 'SIMULATION',
+                    isGlobalRule(rule) ? <Tag color="blue">全局</Tag> : <Tag color="green">本人</Tag>,
             },
             {
                 title: '启用',
                 width: 80,
-                render: (_, rule) => (
-                    <Switch checked={rule.is_active} onChange={(checked) => void toggleRule(rule, checked)} />
-                ),
+                render: (_, rule) =>
+                    isGlobalRule(rule) ? (
+                        <Tag color={rule.is_active ? 'success' : 'default'}>{rule.is_active ? '生效中' : '已停用'}</Tag>
+                    ) : (
+                        <Switch checked={rule.is_active} onChange={(checked) => void toggleRule(rule, checked)} />
+                    ),
             },
             {
                 title: '操作',
                 width: 220,
                 render: (_, rule) => (
                     <Space>
-                        <Button type="link" size="small" onClick={() => openEdit(rule)}>
-                            编辑
-                        </Button>
+                        {!isGlobalRule(rule) && (
+                            <Button type="link" size="small" onClick={() => openEdit(rule)}>
+                                编辑
+                            </Button>
+                        )}
                         {isTriggerType(rule.rule_type) && (
                             <Button
                                 type="link"
@@ -301,21 +285,23 @@ export const AdminRiskControl: React.FC = () => {
                                 预演
                             </Button>
                         )}
-                        <Popconfirm title="确认删除该规则？" onConfirm={() => void removeRule(rule)}>
-                            <Button type="link" size="small" danger>
-                                删除
-                            </Button>
-                        </Popconfirm>
+                        {!isGlobalRule(rule) && (
+                            <Popconfirm title="确认删除该规则？" onConfirm={() => void removeRule(rule)}>
+                                <Button type="link" size="small" danger>
+                                    删除
+                                </Button>
+                            </Popconfirm>
+                        )}
                     </Space>
                 ),
             },
         ],
-        [loadAll],
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [],
     );
 
     const eventColumns: ColumnsType<RiskEventAdmin> = [
         { title: '时间', dataIndex: 'created_at', width: 180, render: (value: string) => value?.replace('T', ' ').slice(0, 19) },
-        { title: '用户', dataIndex: 'user_id', width: 80 },
         { title: '类型', dataIndex: 'rule_type', width: 150, render: (value: string) => RULE_TYPE_LABEL[value] || value },
         { title: '标的', dataIndex: 'symbol', width: 110 },
         {
@@ -330,14 +316,14 @@ export const AdminRiskControl: React.FC = () => {
     ];
 
     return (
-        <div className="p-6 space-y-6 overflow-auto h-full">
+        <div className="space-y-6 overflow-auto h-full">
             <div className="flex items-start justify-between gap-4">
                 <div>
                     <Title level={4} className="!mb-1">
                         风险控制
                     </Title>
                     <Text type="secondary">
-                        触发规则独立扫描（默认 60 秒），高于策略调仓窗口；触及后模拟盘自动平仓并当日禁买。实盘仅告警。
+                        触发规则独立扫描（默认 60 秒）；触及后模拟盘自动平仓并当日禁买。全局规则仅只读展示，本人规则可新建/编辑/删除。
                     </Text>
                 </div>
                 <Space>
@@ -360,7 +346,7 @@ export const AdminRiskControl: React.FC = () => {
             />
 
             <div>
-                <Title level={5}>最近触发</Title>
+                <Title level={5}>最近触发（本人）</Title>
                 <Table
                     rowKey="id"
                     loading={loading}
@@ -395,15 +381,6 @@ export const AdminRiskControl: React.FC = () => {
                     <Form.Item name="description" label="说明">
                         <Input.TextArea rows={2} maxLength={500} />
                     </Form.Item>
-                    <Form.Item name="trading_mode" label="交易模式">
-                        <Select
-                            options={[
-                                { label: '仅模拟盘', value: 'SIMULATION' },
-                                { label: '仅实盘告警', value: 'REAL' },
-                                { label: '模拟+实盘告警', value: 'BOTH' },
-                            ]}
-                        />
-                    </Form.Item>
                     {(ruleType === 'position_stop_loss' ||
                         ruleType === 'position_take_profit' ||
                         ruleType === 'market_index_move') && (
@@ -412,10 +389,10 @@ export const AdminRiskControl: React.FC = () => {
                             label={ruleType === 'position_take_profit' ? '止盈 (%)' : '阈值 (%)'}
                             extra={
                                 ruleType === 'position_stop_loss'
-                                    ? '相对成本，例如 -8 表示跌 8% 平该标的'
+                                    ? '相对成本例如 -8 表示跌 8% 平该标的'
                                     : ruleType === 'market_index_move'
-                                      ? '指数当日涨跌幅，例如 -3 表示跌 3% 平全部可卖仓'
-                                      : '相对成本，例如 15 表示涨 15% 平该标的'
+                                      ? '指数当日涨跌幅例如 -3 表示跌 3% 平全部可卖仓'
+                                      : '相对成本例如 15 表示涨 15% 平该标的'
                             }
                             rules={[{ required: true, message: '请输入阈值' }]}
                         >
@@ -442,18 +419,6 @@ export const AdminRiskControl: React.FC = () => {
                             <InputNumber className="w-full" min={1} />
                         </Form.Item>
                     )}
-                    <Form.Item name="applies_to_all" label="全局生效" valuePropName="checked">
-                        <Switch />
-                    </Form.Item>
-                    <Form.Item noStyle shouldUpdate={(prev, next) => prev.applies_to_all !== next.applies_to_all}>
-                        {({ getFieldValue }) =>
-                            getFieldValue('applies_to_all') ? null : (
-                                <Form.Item name="user_ids_text" label="用户 ID" rules={[{ required: true }]}>
-                                    <Input placeholder="逗号分隔，例如 0,1001" />
-                                </Form.Item>
-                            )
-                        }
-                    </Form.Item>
                     <Form.Item name="priority" label="优先级">
                         <InputNumber className="w-full" min={0} max={100} />
                     </Form.Item>
@@ -465,3 +430,5 @@ export const AdminRiskControl: React.FC = () => {
         </div>
     );
 };
+
+export default RiskControlTab;

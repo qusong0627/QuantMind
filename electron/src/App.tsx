@@ -63,7 +63,7 @@ const AdminAutoDLNodes = lazy(() => import('./features/admin/components/AdminAut
 const AdminSystemSettings = lazy(() => import('./features/admin/components/AdminSystemSettings').then(m => ({ default: m.AdminSystemSettings })));
 const AdminHelpCenter = lazy(() => import('./features/admin/components/AdminHelpCenter').then(m => ({ default: m.AdminHelpCenter })));
 const AdminStockPool = lazy(() => import('./features/admin/components/AdminStockPool'));
-const AdminRiskControl = lazy(() => import('./features/admin/components/AdminRiskControl').then(m => ({ default: m.AdminRiskControl })));
+
 const AdminOrderManagement = lazy(() => import('./features/admin/components/AdminOrderManagement').then(m => ({ default: m.AdminOrderManagement })));
 const AdminInferenceMonitor = lazy(() => import('./features/admin/components/AdminInferenceMonitor').then(m => ({ default: m.AdminInferenceMonitor })));
 const AlphaResearchPage = lazy(() => import('./features/alpha-research/pages/AlphaResearchPage'));
@@ -625,7 +625,6 @@ export default function App() {
                     <Route path="training-datasets" element={<Suspense fallback={<RouteFallback />}><AdminTrainingDatasets /></Suspense>} />
                     <Route path="inference" element={<Suspense fallback={<RouteFallback />}><AdminInferenceMonitor /></Suspense>} />
                     <Route path="orders" element={<Suspense fallback={<RouteFallback />}><AdminOrderManagement /></Suspense>} />
-                    <Route path="risk" element={<Suspense fallback={<RouteFallback />}><AdminRiskControl /></Suspense>} />
                     <Route path="quotes" element={<Navigate to="/admin/overview" replace />} />
                     <Route path="settings" element={<Suspense fallback={<RouteFallback />}><AdminSystemSettings /></Suspense>} />
                     <Route path="help" element={<Suspense fallback={<RouteFallback />}><AdminHelpCenter /></Suspense>} />

@@ -14,10 +14,6 @@ import {
     AdminDataStatusResult,
     StrategyTemplateAdmin,
     StrategyTemplateUpsertRequest,
-    RiskRuleAdmin,
-    RiskRuleUpsertRequest,
-    RiskEventAdmin,
-    RiskDryRunItem,
     AdminOrderHistoryItem,
     AdminPlannedOrderItem,
     AdminInferenceMonitor,
@@ -646,46 +642,6 @@ class AdminService {
     async setFinbertEnabled(enabled: boolean): Promise<{ enabled: boolean; model_ready: boolean }> {
         const resp = await this.axiosInstance.post('/admin/finbert/toggle', { enabled });
         return resp.data?.data ?? resp.data;
-    }
-
-    async listRiskRules(activeOnly = false): Promise<RiskRuleAdmin[]> {
-        const resp = await this.axiosInstance.get('/admin/risk-rules', {
-            params: { active_only: activeOnly },
-        });
-        return this.unwrap(resp.data);
-    }
-
-    async createRiskRule(payload: RiskRuleUpsertRequest): Promise<RiskRuleAdmin> {
-        const resp = await this.axiosInstance.post('/admin/risk-rules', payload);
-        return this.unwrap(resp.data);
-    }
-
-    async updateRiskRule(ruleId: number, payload: Partial<RiskRuleUpsertRequest>): Promise<RiskRuleAdmin> {
-        const resp = await this.axiosInstance.patch(`/admin/risk-rules/${ruleId}`, payload);
-        return this.unwrap(resp.data);
-    }
-
-    async deleteRiskRule(ruleId: number): Promise<void> {
-        await this.axiosInstance.delete(`/admin/risk-rules/${ruleId}`);
-    }
-
-    async listRiskEvents(params?: {
-        user_id?: number;
-        rule_type?: string;
-        trade_date?: string;
-        status?: string;
-        limit?: number;
-    }): Promise<RiskEventAdmin[]> {
-        const resp = await this.axiosInstance.get('/admin/risk-events', { params });
-        return this.unwrap(resp.data);
-    }
-
-    async dryRunRiskRule(
-        ruleId: number,
-        payload: { user_id: number; tenant_id?: string; market?: string },
-    ): Promise<RiskDryRunItem[]> {
-        const resp = await this.axiosInstance.post(`/admin/risk-rules/${ruleId}/dry-run`, payload);
-        return this.unwrap(resp.data);
     }
 
     async listAutoOrderHistory(params?: {

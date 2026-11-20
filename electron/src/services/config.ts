@@ -67,6 +67,12 @@ export const API_ENDPOINTS = {
   ORDER_CANCEL: (id: string) => `${API_PATHS.V1}/orders/${id}/cancel`,
   TRADING_STATS: `${API_PATHS.V1}/trades/stats/summary`, // 交易统计
 
+  // 模拟盘风险控制（用户级：仅本人规则 + 生效中全局规则只读）
+  RISK_RULES: `${API_PATHS.V1}/risk-rules`,
+  RISK_RULE_DETAIL: (id: number) => `${API_PATHS.V1}/risk-rules/${id}`,
+  RISK_RULE_DRY_RUN: (id: number) => `${API_PATHS.V1}/risk-rules/${id}/dry-run`,
+  RISK_EVENTS: `${API_PATHS.V1}/risk-events`,
+
   // 通知中心
   NOTIFICATIONS: `${API_PATHS.V1}/notifications`,
   NOTIFICATION_READ: (id: number) => `${API_PATHS.V1}/notifications/${id}/read`,
