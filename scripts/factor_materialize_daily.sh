@@ -9,6 +9,10 @@
 # 编排本身在 backend/scripts/materialize_library_tail.py（串行、staging 隔离、
 # 重叠日探针、必需列回补）；本脚本只负责**时机、互斥、内存与告警**：
 #
+# 另有一个不经过编排的库：tdx_ind（通达信/同花顺指标截面库，81 列）。它自带
+# _state.parquet 续算累计量，单日增量约 1–2 分钟，所以在主链**之前**单独跑——
+# 主链超时也不会拖累它。失败只告警、不改主链退出码。
+#
 #   闸门：
 #   1) flock 防重入（上一轮没跑完 → 本轮跳过，绝不并行——生产者共享 _partial_pilot
 #      与内存预算）；
@@ -133,6 +137,21 @@ if [ -z "$KL_DT" ]; then
     exit 0
 fi
 log_line "开始物化（日K最新=${KL_DT} 可用内存=${AVAIL_GB}GB alpha等待=${waited}s 内存等待=${mem_waited}s）"
+
+# 3b) tdx_ind 增量（独立于编排：自带状态续算，不写 staging、不需合并）
+TDX_SCRIPT="$QM_ROOT/backend/scripts/factor_materialize/tdx_ind.py"
+if [ "$DRY_RUN" -eq 0 ] && [ -f "$TDX_SCRIPT" ]; then
+    tdx_rc=0
+    # quantdb_root() 只认 QM_QUANTDB_DATA_DIR（缺省 /data/quantdb，仅容器内存在）；
+    # 宿主机跑 keeper 时必须显式传，否则每天 rc=1「no trading days」。
+    QM_QUANTDB_DATA_DIR="$QUANTDB_ROOT" nice -n 10 "$PY" "$TDX_SCRIPT" >> "$LOG" 2>&1 || tdx_rc=$?
+    if [ "$tdx_rc" -ne 0 ]; then
+        log_line "警告：tdx_ind 增量失败 rc=$tdx_rc（不影响主链）"
+        notify "🟠 tdx_ind 增量失败" "rc=$tdx_rc；次日训练会缺 tdx_ind 列。日志：logs/keepers/factor_materialize_daily.log"
+    else
+        log_line "tdx_ind 增量完成"
+    fi
+fi
 
 ARGS=(--docker "$DOCKER_BIN" --quantdb-root "$QUANTDB_ROOT")
 [ "$DRY_RUN" -eq 1 ] && ARGS+=(--dry-run)

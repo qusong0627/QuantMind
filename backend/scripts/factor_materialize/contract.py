@@ -48,8 +48,23 @@ KNOWN_EMPTY_COLUMNS = frozenset(
 #: 次日回补窗口（repair_dates）会自动重算。覆盖闸门把它们按「延后」上报，
 #: 不判失败——否则每个交易日都会误报一次。
 KNOWN_LAG_COLUMNS: dict[str, frozenset[str]] = {
-    "l1_batch1_factors": frozenset({"mg_bal_chg_20"}),
+    # 两融三件套（2026-11-20）：mg_net_ratio_5 / sl_bal_ratio 与 mg_bal_chg_20
+    # 同源同滞后，11/19 当晚实测三列全空、前一日 67% 覆盖。
+    "l1_batch1_factors": frozenset({"mg_bal_chg_20", "mg_net_ratio_5", "sl_bal_ratio"}),
     "gap_mined": frozenset({"MG2_BALCHG_3M"}),
+    # 两融类：最新交易日当晚两融分区尚未落盘（f13_0582 融资比率 / 0583 融券比率 /
+    # 0584 融资净买入占比）。2026-11-10 实测 20261109 当日晚跑时三列全空，
+    # 而 20261102~20261106 均有值——属 T+1 滞后，非数据断供。
+    "factor1300": frozenset({"f13_0582", "f13_0583", "f13_0584"}),
+}
+
+#: 上游数据断供导致的临时空列：官方历史有值，但新日期算不出来。
+#: 与 KNOWN_EMPTY_COLUMNS 的区别：这些列**必须**在数据恢复后删除本登记。
+#: 探针闸门放行以免整库停更，覆盖闸门按「已知滞后」上报（状态可见但不判失败）。
+#: 2026-11-10：2026-11-06 收入表刷新丢失 total_operating_cost/费用/减值字段，
+#: f13_1128（去杠杆经营性资产盈利收益率）分子的 rev_ttm−cogs_ttm 整列为空。
+DATA_BLOCKED_COLUMNS: dict[str, frozenset[str]] = {
+    "factor1300": frozenset({"f13_1128"}),
 }
 
 
@@ -129,19 +144,25 @@ def load_contract(
         {lib: len(cols) for lib, cols in contract.external.items()},
         len(contract.unmapped),
     )
+    if DATA_BLOCKED_COLUMNS:
+        LOG.warning(
+            "上游断供临时放行的列（数据恢复后必须删除登记）：%s",
+            {lib: sorted(cols) for lib, cols in DATA_BLOCKED_COLUMNS.items()},
+        )
     return contract
 
 
 def gate_columns(library: str, contract: Contract) -> tuple[str, ...]:
-    """某库参与闸门的必需列（去掉结构性全空白名单）。
+    """某库参与闸门的必需列（去掉结构性全空白名单与上游断供列）。
 
     注意：**包含**已知 T+1 滞后列——回补检测要用它们（次日重算）。
     覆盖闸门请改用 :func:`coverage_columns`。
     """
+    blocked = DATA_BLOCKED_COLUMNS.get(library, frozenset())
     return tuple(
         column
         for column in contract.required.get(library, ())
-        if column not in KNOWN_EMPTY_COLUMNS
+        if column not in KNOWN_EMPTY_COLUMNS and column not in blocked
     )
 
 
@@ -150,7 +171,9 @@ def coverage_columns(
     contract: Contract,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """覆盖闸门用列：(严格列, 已知滞后列)。滞后列只上报、不判失败。"""
-    lagged = KNOWN_LAG_COLUMNS.get(library, frozenset())
+    lagged = KNOWN_LAG_COLUMNS.get(library, frozenset()) | DATA_BLOCKED_COLUMNS.get(
+        library, frozenset()
+    )
     strict: list[str] = []
     deferred: list[str] = []
     for column in gate_columns(library, contract):

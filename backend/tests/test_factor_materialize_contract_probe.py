@@ -113,6 +113,34 @@ def test_coverage_columns_separates_known_lag(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_coverage_columns_defers_all_three_margin_columns(tmp_path: Path) -> None:
+    """l1_batch1 两融三件套同为 T+1 滞后：11/19 实测三列全空，均不得判失败。
+
+    2026-11-20：此前只登记了 mg_bal_chg_20，mg_net_ratio_5/sl_bal_ratio 仍按严格列
+    判 partial，导致每个交易日早上物化 rc=1。
+    """
+    _model(
+        tmp_path,
+        "m2",
+        {
+            "factor_source": "l1_batch1_factors",
+            "feature_columns": [
+                "mg_bal_chg_20",
+                "mg_net_ratio_5",
+                "sl_bal_ratio",
+                "lu_seal_rate_20",
+            ],
+        },
+    )
+    result = contract.load_contract(tmp_path, include_users=False)
+
+    strict, deferred = contract.coverage_columns("l1_batch1_factors", result)
+
+    assert strict == ("lu_seal_rate_20",)
+    assert set(deferred) == {"mg_bal_chg_20", "mg_net_ratio_5", "sl_bal_ratio"}
+
+
+@pytest.mark.unit
 def test_compare_partitions_passes_on_identical_frames(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {"symbol": ["A", "B"], "time": [1, 1], "x": [1.0, 2.0], "y": [3.0, 4.0]}
@@ -183,8 +211,34 @@ def test_compare_partitions_flags_rank_collapse_as_required_drift(
 def test_compare_partitions_downgrades_exempt_threshold_column(
     tmp_path: Path,
 ) -> None:
-    # Arrange：阈值计数型因子（f13_0654）在 qfq 基准漂移下边界翻转，秩相关必然掉；
-    # 豁免后只报信息，不再阻断长窗遍合并（否则长窗列永远进不了正式库）
+    # Arrange：阈值计数型因子（f13_0654）在 qfq 基准漂移下边界翻转，秩相关会掉到
+    # 0.5~0.9 之间（同公式、不同数据版本）；豁免后只报信息，不再阻断合并
+    # （否则长窗列永远进不了正式库）
+    n = 120
+    values = [float(i) for i in range(n)]
+    # 固定比例的秩扰动：每 3 个位置换 1 个到 (i*37 mod n)，秩相关约 0.7
+    shuffled = [values[(i * 37) % n] if i % 3 == 0 else values[i] for i in range(n)]
+    frame = pd.DataFrame({"symbol": [f"S{i}" for i in range(n)], "f13_0654": values})
+    drifted_frame = pd.DataFrame(
+        {"symbol": [f"S{i}" for i in range(n)], "f13_0654": shuffled}
+    )
+    official = _partition(tmp_path / "official", "20261015", frame)
+    staged = _partition(tmp_path / "staged", "20261015", drifted_frame)
+
+    # Act
+    report = probe.compare_partitions(official, staged, required=["f13_0654"])
+
+    # Assert
+    assert report["ok"] is True
+    kinds = {item["kind"] for item in report["informational"]}
+    assert "required_drift_exempt" in kinds
+
+
+@pytest.mark.unit
+def test_compare_partitions_exempt_column_still_fails_on_reversal(
+    tmp_path: Path,
+) -> None:
+    # 豁免只容忍数值漂移，不容忍符号反转/结构性破坏：整列逆序仍判失败
     n = 120
     values = [float(i) for i in range(n)]
     frame = pd.DataFrame({"symbol": [f"S{i}" for i in range(n)], "f13_0654": values})
@@ -194,13 +248,11 @@ def test_compare_partitions_downgrades_exempt_threshold_column(
     official = _partition(tmp_path / "official", "20261015", frame)
     staged = _partition(tmp_path / "staged", "20261015", reversed_frame)
 
-    # Act
     report = probe.compare_partitions(official, staged, required=["f13_0654"])
 
-    # Assert
-    assert report["ok"] is True
-    kinds = {item["kind"] for item in report["informational"]}
-    assert "required_drift_exempt" in kinds
+    assert report["ok"] is False
+    kinds = {item["kind"] for item in report["issues"]}
+    assert "required_drift" in kinds
 
 
 @pytest.mark.unit
