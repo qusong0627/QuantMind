@@ -122,6 +122,8 @@ def _resolve_inference_template(workspace: Path) -> Path | None:
 # ── B4 拆包：类型集合/注册表/分派与训练器实现见 docker/training/model_trainers/ ──
 # （训练容器经挂载与镜像 COPY 双通道同步；本地见编排器 volumes，远端见 rsync。）
 from model_trainers.metrics import _compute_metrics, compute_eval_report
+from model_trainers.gates import compute_gates
+from model_trainers.vol_model import VOL_MODEL_FILENAME, train_vol_model
 from model_trainers.registry import (
     _ALL_MODEL_TYPES,
     _DL_MODEL_TYPES,
@@ -144,6 +146,90 @@ from diagnostics.wfa import train_wfa
 from data.factor_selection import _log_factor_selection_summary, select_top_factors
 from data.fingerprint import build_data_fingerprint
 from data.loading import load_data
+
+
+# 评估/闸门需要的附加列（不参与主训练目标，只随 pred_df 落盘）。
+_EVAL_EXTRA_CANDIDATES = (
+    "label_return",
+    "label_vol",
+    "total_cap",
+    "fun_total_mv",
+    "fun_float_mv",
+    "amt_log",
+    "amt_z_20",
+    "vol_20",
+    "vol_std_20",
+    "vol_amp_20",
+    "mom_20",
+    "mom_ret_20d",
+    "mom_ret_60d",
+    "turnover",
+    "turnover_20",
+    "turn_20",
+    "turn_z_20",
+)
+
+
+def _eval_extra_cols(df: pd.DataFrame) -> list[str]:
+    """pred_df 要携带的评估列：真实收益/波动/多周期收益/中性化控制变量。"""
+    cols = [c for c in _EVAL_EXTRA_CANDIDATES if c in df.columns]
+    cols.extend(c for c in df.columns if str(c).startswith("label_return_h"))
+    return list(dict.fromkeys(cols))
+
+
+def _attach_vol_model(
+    pred_df: pd.DataFrame,
+    split_frames: dict | None,
+    df: pd.DataFrame,
+    features: list[str],
+    cfg: dict,
+    workspace: Path,
+) -> tuple[pd.DataFrame, dict]:
+    """训练一次波动率目标模型，把 ``pred_vol`` 合并进主 pred_df。
+
+    风险输出与收益模型族无关，因此每次训练只训一个 LightGBM vol 模型；
+    缺 ``label_vol`` / lightgbm 时优雅降级，不阻断主训练。
+    """
+    if not split_frames:
+        return pred_df, {"enabled": False, "reason": "split_frames unavailable"}
+    if pred_df is None or not isinstance(pred_df, pd.DataFrame):
+        return pred_df, {"enabled": False, "reason": "pred_df unavailable"}
+    try:
+        res = train_vol_model(
+            split_frames["train"],
+            split_frames["valid"],
+            split_frames["test"],
+            df,
+            features,
+            workspace,
+            seed=int(cfg.get("seed") or 42),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Vol target model failed; continuing without pred_vol: %s",
+            exc,
+            exc_info=True,
+        )
+        return pred_df, {"enabled": False, "error": str(exc)}
+    if not res.get("enabled"):
+        return pred_df, res
+    vp = res.get("pred_df")
+    if vp is not None and len(vp):
+        pred_df = pred_df.merge(vp, on=["symbol", "trade_date"], how="left")
+    return pred_df, {
+        "enabled": True,
+        "metrics": res.get("metrics"),
+        "model_path": res.get("model_path"),
+    }
+
+
+def _gates_frame(pred_df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """四道闸默认只跑 test split（OOS）；没有 test 时才退回全窗。"""
+    if isinstance(pred_df, pd.DataFrame) and "split" in pred_df.columns:
+        test = pred_df[pred_df["split"] == "test"]
+        if len(test):
+            return test, "test"
+    return pred_df, "full"
 
 
 def _is_rank_loss(cfg: dict, model_type: str) -> bool:
@@ -588,9 +674,7 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
 
     # 生成全窗口预测（label_return 若在：评估报告的真实收益口径）
     _trim_memory("before full-pred")
-    _fp_cols = ["symbol", "trade_date", "label"] + (
-        ["label_return"] if "label_return" in df.columns else []
-    )
+    _fp_cols = ["symbol", "trade_date", "label"] + _eval_extra_cols(df)
     full_pred_df = df[_fp_cols].copy()
     # 分块预测：整帧 _fill(df)（8.2GB 临时）改为按日期块（100 日/块，块内 ~0.4GB），
     # 与上方 del X_* 一起把训练后阶段峰值再降 ~15GB。树/线性模型逐行独立预测。
@@ -802,9 +886,7 @@ def _train_single_model(
     # 每个 fold 对全量数据(644万行)预测+拷贝，9次叠加是 OOM 主因
     if need_full_pred:
         # 生成全窗口预测（label_return 若在：评估报告的真实收益口径）
-        _fp_cols = ["symbol", "trade_date", "label"] + (
-            ["label_return"] if "label_return" in df.columns else []
-        )
+        _fp_cols = ["symbol", "trade_date", "label"] + _eval_extra_cols(df)
         full_pred_df = df[_fp_cols].copy()
         # 分块预测：同 train_model（整帧临时 → 100 日/块），训练后阶段峰值再降 ~8GB；
         # 按掩码位置回填（df 按 symbol 排序、日期交错，拼接会错位）
@@ -1136,9 +1218,7 @@ def train_stacking(
     # 评估链（eval_report / eval_arms_ic / stage_* 复盘脚本）需要 label/label_return/split：
     # 只发 trade_date/symbol/pred 会让 stacking 的预测产物在整条评估链上**静默缺席**
     # （单模型路径一直在发这三列，这里对齐；split 边界与单模型一致按 val/test 日期区间划）。
-    _fp_cols = ["trade_date", "symbol", label_col] + (
-        ["label_return"] if "label_return" in df.columns else []
-    )
+    _fp_cols = ["trade_date", "symbol", label_col] + _eval_extra_cols(df)
     pred_df = df[_fp_cols].merge(
         pred_parts, on=["trade_date", "symbol"], how="left"
     )
@@ -1537,6 +1617,10 @@ def main() -> int:
                       if r.get("model_type") == primary_type), None)
             )
             pred_df = _apply_score_direction(pred_df, primary_direction)
+            # 风险层：在主 pred 之外补 pred_vol（一次运行只训一个 vol 模型）。
+            pred_df, vol_meta = _attach_vol_model(
+                pred_df, split_frames, df, valid_features, cfg, workspace
+            )
             pred_path = workspace / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path} (score_direction={primary_direction})")
@@ -1572,6 +1656,27 @@ def main() -> int:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Eval report failed: %s", exc, exc_info=True)
+
+            # ── 四道闸（horizon / residual / permutation / random batch）──
+            gates = None
+            try:
+                gates_df, gates_scope = _gates_frame(pred_df)
+                gates = compute_gates(gates_df, seed=int(cfg.get("seed") or 42))
+                gates["scope"] = gates_scope
+                (workspace / "gates.json").write_text(
+                    json.dumps(gates, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                _perm = gates.get("permutation") or {}
+                _rb = gates.get("random_batches") or {}
+                logger.info(
+                    "Gates: perm_p=%s resid_ic=%s random_batch_ic=%s",
+                    _perm.get("p_value"),
+                    (gates.get("residual_ic") or {}).get("resid_mean"),
+                    _rb.get("rank_ic_mean"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Gates failed: %s", exc, exc_info=True)
 
             # 保存对比报告
             comparison_path = workspace / "model_comparison.json"
@@ -1687,6 +1792,8 @@ def main() -> int:
                 "pred_rows": int(len(pred_df)),
                 "shap": shap_info,
                 "eval_report": eval_report,
+                "vol": vol_meta,
+                "gates": gates,
                 "generated_at": datetime.utcnow().isoformat(),
                 "elapsed_seconds": elapsed,
             }
@@ -1751,6 +1858,15 @@ def main() -> int:
                 result["artifacts"].append(
                     {"name": "eval_report.json", "local": str(workspace / "eval_report.json")}
                 )
+            if vol_meta.get("enabled"):
+                result["artifacts"].append(
+                    {"name": VOL_MODEL_FILENAME, "local": str(vol_meta.get("model_path"))}
+                )
+            if gates:
+                result["gates"] = gates
+                result["artifacts"].append(
+                    {"name": "gates.json", "local": str(workspace / "gates.json")}
+                )
             if is_stacking:
                 result["artifacts"].extend([
                     {"name": "meta_model.pkl", "local": str(workspace / "meta_model.pkl")},
@@ -1807,6 +1923,11 @@ def main() -> int:
                 model_filename = quantile_model_files["p50"]
                 logger.info("Quantile model artifacts saved: %s", quantile_model_files)
 
+            # 风险层：在主 pred 之外补 pred_vol（一次运行只训一个 vol 模型）。
+            pred_df, vol_meta = _attach_vol_model(
+                pred_df, split_frames, df, valid_features, cfg, workspace
+            )
+
             # 保存预测结果（parquet 压缩用于存档，比 pickle 小 ~10x）
             pred_path = workspace / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
@@ -1844,6 +1965,27 @@ def main() -> int:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Eval report failed: %s", exc, exc_info=True)
+
+            # ── 四道闸（horizon / residual / permutation / random batch）──
+            gates = None
+            try:
+                gates_df, gates_scope = _gates_frame(pred_df)
+                gates = compute_gates(gates_df, seed=int(cfg.get("seed") or 42))
+                gates["scope"] = gates_scope
+                (workspace / "gates.json").write_text(
+                    json.dumps(gates, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                _perm = gates.get("permutation") or {}
+                _rb = gates.get("random_batches") or {}
+                logger.info(
+                    "Gates: perm_p=%s resid_ic=%s random_batch_ic=%s",
+                    _perm.get("p_value"),
+                    (gates.get("residual_ic") or {}).get("resid_mean"),
+                    _rb.get("rank_ic_mean"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Gates failed: %s", exc, exc_info=True)
 
             shap_summary_path = workspace / "shap_summary.csv"
             # SHAP: pred_contrib 仅支持 LightGBM；其他框架暂跳过
@@ -1936,6 +2078,8 @@ def main() -> int:
                 "pred_rows": int(len(pred_df)),
                 "shap": shap_info,
                 "eval_report": eval_report,
+                "vol": vol_meta,
+                "gates": gates,
                 "generated_at": datetime.utcnow().isoformat(),
                 "elapsed_seconds": elapsed,
             }
@@ -2235,6 +2379,15 @@ if __name__ == "__main__":
                 result["eval_report"] = eval_report
                 result["artifacts"].append(
                     {"name": "eval_report.json", "local": str(workspace / "eval_report.json")}
+                )
+            if vol_meta.get("enabled"):
+                result["artifacts"].append(
+                    {"name": VOL_MODEL_FILENAME, "local": str(vol_meta.get("model_path"))}
+                )
+            if gates:
+                result["gates"] = gates
+                result["artifacts"].append(
+                    {"name": "gates.json", "local": str(workspace / "gates.json")}
                 )
             if shap_info.get("status") == "completed" and shap_summary_path.exists():
                 result["artifacts"].append({"name": "shap_summary.csv", "local": str(workspace / "shap_summary.csv")})
