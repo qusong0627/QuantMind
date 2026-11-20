@@ -491,11 +491,13 @@ import re as _re
 _SYMBOL_RE = _re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 
 # 财务三表 + 每股指标 关键字段（单位: 元；输出统一转亿元）
+# 注意：列名须与 3_financial_data 现行 parquet 对齐（2026-11 服务器实测）；
+# income 已无 total_operating_cost/sale_expense/inc_tax（无来源，已移除），
+# pershare 现行列为 net_roe/gross_margin/net_profit_margin/sales_cash_to_revenue。
 _INCOME_COLS = {
-    "revenue": "营业收入", "total_operating_cost": "营业成本",
+    "revenue": "营业收入",
     "oper_profit": "营业利润", "net_profit_excl_min_int_inc": "归母净利润",
-    "research_expenses": "研发费用", "sale_expense": "销售费用",
-    "inc_tax": "所得税",
+    "research_expenses": "研发费用",
 }
 _BALANCE_COLS = {
     "tot_assets": "总资产", "tot_liab": "总负债", "total_equity": "股东权益",
@@ -509,10 +511,10 @@ _CASHFLOW_COLS = {
     "net_cash_flows_fnc_act": "筹资现金流净额",
 }
 _PERSHARE_COLS = {
-    "equity_roe": "ROE(%)", "gross_profit": "毛利率(%)", "net_profit": "净利率(%)",
+    "net_roe": "ROE(%)", "gross_margin": "毛利率(%)", "net_profit_margin": "净利率(%)",
     "inc_revenue_rate": "营收增速(%)", "inc_net_profit_rate": "净利增速(%)",
     "s_fa_eps_basic": "EPS(元)", "s_fa_bps": "每股净资产(元)",
-    "sales_cash_flow": "销售现金流比",
+    "sales_cash_to_revenue": "销售现金流比",
 }
 
 # /series 时序组: (DuckDB 视图, 输出列)
