@@ -37,6 +37,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { adminService } from '../services/adminService';
 import type { AdminModelFeatureCatalog, AdminModelFeatureCategory, AdminModelFeatureItem } from '../types';
+import { type SharedAdminMarket, readSharedAdminMarket, useSharedAdminMarket } from '../hooks/useSharedAdminMarket';
 
 const { Title, Text } = Typography;
 
@@ -77,7 +78,11 @@ export const AdminFeatureCatalog: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [selectedCatId, setSelectedCatId] = useState<string | null>(null);
-  const [marketFilter, setMarketFilter] = useState<string>('ALL');
+  // 初值即跟随全局市场（此前默认 ALL）；ALL 仍可本地手动切回，仅不过滤。
+  const [marketFilter, setMarketFilter] = useState<string>(() => readSharedAdminMarket());
+  const marketFilterRef = React.useRef(marketFilter);
+  marketFilterRef.current = marketFilter;
+  const [sharedMarket, setSharedMarket] = useSharedAdminMarket();
   const [sourceFilter, setSourceFilter] = useState<string>('factor_dictionary');
   const [keyword, setKeyword] = useState('');
   // 全量目录（仅用于胶囊计数；按市场过滤后 catalog 为子集，计数仍以全量为准）
@@ -128,7 +133,21 @@ export const AdminFeatureCatalog: React.FC = () => {
     setSelectedCatId(null);
     setKeyword('');
     loadCatalog(next);
+    // 点选具体市场时广播给其他后台页；ALL 仅本地过滤不广播。
+    if (next !== 'ALL') setSharedMarket(next as SharedAdminMarket);
   };
+
+  // 全局市场切换跟随（其他后台页广播过来时本地过滤同步）。
+  const sharedMarketRef = React.useRef<SharedAdminMarket>(sharedMarket);
+  React.useEffect(() => {
+    if (sharedMarketRef.current === sharedMarket) return;
+    sharedMarketRef.current = sharedMarket;
+    if (marketFilterRef.current === sharedMarket) return;
+    setMarketFilter(sharedMarket);
+    setSelectedCatId(null);
+    setKeyword('');
+    void loadCatalog(sharedMarket);
+  }, [sharedMarket, loadCatalog]);
 
   const SOURCE_OPTIONS = [
     { value: 'factor_dictionary', label: '动态因子库' },

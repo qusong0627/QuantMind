@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { Card, Tabs, Typography, Button, Space, Tag } from 'antd';
 import {
   DatabaseOutlined,
@@ -8,16 +8,38 @@ import {
   StockOutlined,
   FundOutlined,
   CheckCircleFilled,
+  ArrowRightOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { AdminQuantDBPanel } from './AdminQuantDBPanel';
 import { AdminQuantMarketPanel } from './AdminQuantMarketPanel';
+import { type SharedAdminMarket, useSharedAdminMarket } from '../hooks/useSharedAdminMarket';
 
 const { Title, Text, Paragraph } = Typography;
 
+/** 看板 Tab ↔ 全局市场码双向映射（自定义 Tab 仅做切换标记 + 跳转数据发布）。 */
+const TAB_TO_MARKET: Record<string, SharedAdminMarket> = {
+  a_share: 'CN',
+  quanthk: 'HK',
+  quantus: 'US',
+  quantfutures: 'FUTURES',
+  quantcustom: 'CUSTOM',
+  quantbc: 'CRYPTO',
+};
+
+const MARKET_TO_TAB: Record<SharedAdminMarket, string> = {
+  CN: 'a_share',
+  HK: 'quanthk',
+  US: 'quantus',
+  FUTURES: 'quantfutures',
+  CUSTOM: 'quantcustom',
+  CRYPTO: 'quantbc',
+};
+
 export const AdminDataManagement: React.FC = () => {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<string>('a_share');
+  const [sharedMarket, setSharedMarket] = useSharedAdminMarket();
+  const activeTab = MARKET_TO_TAB[sharedMarket] ?? 'a_share';
 
   const tabItems = [
     {
@@ -82,6 +104,27 @@ export const AdminDataManagement: React.FC = () => {
       ),
     },
     {
+      key: 'quantcustom',
+      label: (
+        <span className="flex items-center gap-2 font-bold text-sm">
+          <span>🧩</span>
+          <span>自定义市场 (QuantCustom)</span>
+          <Tag className="m-0 border-cyan-200 text-cyan-600 bg-cyan-50 rounded-full px-1.5 py-0 text-[10px] font-black">自定义</Tag>
+        </span>
+      ),
+      children: (
+        <div className="p-6 flex flex-col items-center gap-3 text-center">
+          <div className="text-sm font-bold text-slate-700">自定义市场在「训练服务 → 数据发布」中管理</div>
+          <div className="text-xs text-slate-400 max-w-xl">
+            自传 parquet（<span className="font-mono">data/quantcustom/6_ml_datasets/l1_factors</span>）后端仅扫描因子；放好文件后去数据发布页字段发现、建草稿并发布，训练与推理页会自动跟随当前市场。
+          </div>
+          <Button type="primary" icon={<ArrowRightOutlined />} className="rounded-xl font-bold" onClick={() => navigate('/admin/training-datasets')}>
+            前往数据发布
+          </Button>
+        </div>
+      ),
+    },
+    {
       key: 'quantbc',
       label: (
         <span className="flex items-center gap-2 font-bold text-sm">
@@ -138,7 +181,10 @@ export const AdminDataManagement: React.FC = () => {
       <Card className="rounded-3xl border-none shadow-xl shadow-slate-200/40 bg-white overflow-hidden p-2">
         <Tabs
           activeKey={activeTab}
-          onChange={setActiveTab}
+          onChange={(key) => {
+            const next = TAB_TO_MARKET[key];
+            if (next) setSharedMarket(next);
+          }}
           items={tabItems}
           type="card"
           className="admin-market-tabs"

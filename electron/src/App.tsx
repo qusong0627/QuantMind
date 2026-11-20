@@ -22,6 +22,7 @@ import logger from './utils/safeLogger';
 import { refreshOrchestrator } from './services/refreshOrchestrator';
 import { useTradingModeInitialization } from './hooks/useTradingModeInitialization';
 import { useMarketReset } from './hooks/useMarketReset';
+import { useAdminMarketBridge } from './hooks/useAdminMarketBridge';
 import { authService } from './features/auth/services/authService';
 import { initDynamicServerUrl, isElectronEnv } from './config/services';
 
@@ -152,6 +153,8 @@ export default function App() {
   useTheme();
   useTradingModeInitialization();
   useMarketReset();
+  // 管理后台切市场时应用侧（训练/推理/行情）即时跟随。
+  useAdminMarketBridge();
   
   dayjs.locale('zh-cn');
 

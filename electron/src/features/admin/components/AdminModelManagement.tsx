@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import {
     Table, Button, message, Space, Tag, Modal, Collapse, Descriptions,
     Badge, Tooltip, Typography, Spin, Tabs, Progress, Select, Segmented
@@ -15,6 +15,7 @@ import { useDispatch } from 'react-redux';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { adminService } from '../services/adminService';
+import { useSharedAdminMarket } from '../hooks/useSharedAdminMarket';
 import { ModelDirectoryInfo, ModelScanResult } from '../types';
 import { setCurrentTab } from '../../../store/slices/aiStrategySlice';
 
@@ -28,6 +29,21 @@ const MODEL_MARKET_OPTIONS = [
     { value: 'us_stock', label: '美股', color: 'green' },
     { value: 'crypto', label: '加密', color: 'purple' },
 ];
+
+/** 本页筛选值 ↔ 全局市场码（本页无期货/自定义档位，反向映射缺省）。 */
+const MODEL_FILTER_TO_SHARED: Record<string, 'CN' | 'HK' | 'US' | 'CRYPTO'> = {
+    a_share: 'CN',
+    hong_kong: 'HK',
+    us_stock: 'US',
+    crypto: 'CRYPTO',
+};
+
+const SHARED_TO_MODEL_FILTER: Record<string, string | undefined> = {
+    CN: 'a_share',
+    HK: 'hong_kong',
+    US: 'us_stock',
+    CRYPTO: 'crypto',
+};
 
 function extractModelMarket(model: ModelDirectoryInfo): string {
     const meta = model.metadata || {};
@@ -232,6 +248,19 @@ export const AdminModelManagement: React.FC = () => {
     const [jobDetailLoading, setJobDetailLoading] = useState(false);
     const [activeAdminTab, setActiveAdminTab] = useState('models');
     const [modelMarketFilter, setModelMarketFilter] = useState<string>('all');
+    const [sharedMarket, setSharedMarket] = useSharedAdminMarket();
+    // 本页只有 A 股/港股/美股/加密四档：CN/HK/US/CRYPTO 跟随全局，
+    // FUTURES/CUSTOM 无对应档位时保持本地值不变。
+    const modelFilterRef = useRef(modelMarketFilter);
+    modelFilterRef.current = modelMarketFilter;
+    const sharedMarketRef = useRef(sharedMarket);
+    useEffect(() => {
+        if (sharedMarketRef.current === sharedMarket) return;
+        sharedMarketRef.current = sharedMarket;
+        const mapped = SHARED_TO_MODEL_FILTER[sharedMarket];
+        if (!mapped || modelFilterRef.current === mapped) return;
+        setModelMarketFilter(mapped);
+    }, [sharedMarket]);
 
     const filteredModels = useMemo(() => {
         if (!scanResult?.models) return [];
@@ -520,7 +549,12 @@ export const AdminModelManagement: React.FC = () => {
                     <Segmented
                         size="small"
                         value={modelMarketFilter}
-                        onChange={(val) => setModelMarketFilter(val as string)}
+                        onChange={(val) => {
+                            const next = val as string;
+                            setModelMarketFilter(next);
+                            const shared = MODEL_FILTER_TO_SHARED[next];
+                            if (shared) setSharedMarket(shared);
+                        }}
                         options={MODEL_MARKET_OPTIONS.map(m => ({ value: m.value, label: m.label }))}
                     />
                 </div>

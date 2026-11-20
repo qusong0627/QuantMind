@@ -7,6 +7,7 @@ import {
 import { DatabaseOutlined, EditOutlined, InfoCircleOutlined, PlusOutlined, ReloadOutlined, RocketOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { adminService } from '../services/adminService';
+import { type SharedAdminMarket, useSharedAdminMarket } from '../hooks/useSharedAdminMarket';
 
 const { Title, Text } = Typography;
 
@@ -80,7 +81,8 @@ function unavailableSourceAction(status: Record<string, any>): string {
 }
 
 export const AdminTrainingDatasets: React.FC = () => {
-  const [market, setMarket] = useState('CN');
+  // 市场为全局共享（数据管理 / 特征字典 / 模型管理跟随切换）。
+  const [market, setMarket] = useSharedAdminMarket();
   const [source, setSource] = useState('l1_factors');
   const [sources, setSources] = useState<Record<string, any>>({});
   const [sourceLabels, setSourceLabels] = useState<Record<string, string>>({});
@@ -101,8 +103,8 @@ export const AdminTrainingDatasets: React.FC = () => {
     return MARKET_SOURCE_FALLBACK[market] || MARKET_SOURCE_FALLBACK.CN;
   }, [sources, sourceLabels, market]);
 
-  // 市场切换时重置数据源为后端默认
-  const handleMarketChange = (next: string) => {
+  // 市场切换时重置数据源为后端默认（同时广播给其他后台页）。
+  const handleMarketChange = (next: SharedAdminMarket) => {
     setMarket(next);
     setSources({});
     setSourceLabels({});
@@ -279,7 +281,7 @@ export const AdminTrainingDatasets: React.FC = () => {
       <div><Title level={4} className="!mb-1 !font-black !text-slate-800 flex items-center gap-2"><span className="w-8 h-8 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 text-sm"><DatabaseOutlined /></span>数据发布</Title>
         <Text type="secondary" className="text-xs">仅读取各市场 ML 数据集原始因子；映射草稿发布后才影响新的训练任务。</Text></div>
       <Space wrap>
-        <Select value={market} options={MARKET_OPTIONS} style={{ width: 104 }} onChange={handleMarketChange} className="[&_.ant-select-selector]:!rounded-xl" />
+        <Select value={market} options={MARKET_OPTIONS} style={{ width: 104 }} onChange={(v) => handleMarketChange(v as SharedAdminMarket)} className="[&_.ant-select-selector]:!rounded-xl" />
         <Select value={source} options={sourceOptions} style={{ width: 200 }} loading={loading && !sourceOptions.length} onChange={value => { setSource(value); setDraft(null); }} className="[&_.ant-select-selector]:!rounded-xl" />
         <Button icon={<ReloadOutlined />} loading={loading} onClick={load} className="rounded-xl">刷新</Button>
         <Button type="primary" icon={<ReloadOutlined />} loading={loading} onClick={refreshDiscovery} className="rounded-xl font-bold shadow-sm">字段发现</Button>
