@@ -221,11 +221,12 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
 
     const ruleColumns: ColumnsType<RiskRuleAdmin> = useMemo(
         () => [
-            { title: '名称', dataIndex: 'rule_name', width: 180 },
+            { title: '名称', dataIndex: 'rule_name', width: 180, align: 'center' },
             {
                 title: '类型',
                 dataIndex: 'rule_type',
                 width: 160,
+                align: 'center',
                 render: (value: string) => (
                     <Tag color={isTriggerType(value) ? 'red' : 'default'}>
                         {RULE_TYPE_LABEL[value] || value}
@@ -235,6 +236,7 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
             {
                 title: '阈值',
                 width: 180,
+                align: 'center',
                 render: (_, rule) => {
                     const params = rule.parameters || {};
                     if (typeof params.pct === 'number') {
@@ -250,12 +252,14 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
             {
                 title: '范围',
                 width: 140,
+                align: 'center',
                 render: (_, rule) =>
                     isGlobalRule(rule) ? <Tag color="blue">全局</Tag> : <Tag color="green">本人</Tag>,
             },
             {
                 title: '启用',
                 width: 80,
+                align: 'center',
                 render: (_, rule) =>
                     isGlobalRule(rule) ? (
                         <Tag color={rule.is_active ? 'success' : 'default'}>{rule.is_active ? '生效中' : '已停用'}</Tag>
@@ -266,6 +270,7 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
             {
                 title: '操作',
                 width: 220,
+                align: 'center',
                 render: (_, rule) => (
                     <Space>
                         {!isGlobalRule(rule) && (
@@ -299,18 +304,19 @@ export const RiskControlTab: React.FC<Props> = ({ tenantId = 'default' }) => {
     );
 
     const eventColumns: ColumnsType<RiskEventAdmin> = [
-        { title: '时间', dataIndex: 'created_at', width: 180, render: (value: string) => value?.replace('T', ' ').slice(0, 19) },
-        { title: '类型', dataIndex: 'rule_type', width: 150, render: (value: string) => RULE_TYPE_LABEL[value] || value },
-        { title: '标的', dataIndex: 'symbol', width: 110 },
+        { title: '时间', dataIndex: 'created_at', width: 180, align: 'center', render: (value: string) => value?.replace('T', ' ').slice(0, 19) },
+        { title: '类型', dataIndex: 'rule_type', width: 150, align: 'center', render: (value: string) => RULE_TYPE_LABEL[value] || value },
+        { title: '标的', dataIndex: 'symbol', width: 110, align: 'center' },
         {
             title: '状态',
             dataIndex: 'status',
             width: 120,
+            align: 'center',
             render: (value: string) => <Tag color={STATUS_COLOR[value] || 'default'}>{value}</Tag>,
         },
-        { title: '涨跌', dataIndex: 'pnl_pct', width: 90, render: formatPct },
-        { title: '数量', dataIndex: 'quantity', width: 80 },
-        { title: '说明', dataIndex: 'message', ellipsis: true },
+        { title: '涨跌', dataIndex: 'pnl_pct', width: 90, align: 'center', render: formatPct },
+        { title: '数量', dataIndex: 'quantity', width: 80, align: 'center' },
+        { title: '说明', dataIndex: 'message', ellipsis: true, align: 'center' },
     ];
 
     return (
