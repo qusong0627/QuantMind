@@ -84,10 +84,7 @@
 从 CDN 下载**完整预构建镜像 + 业务数据 + 预训练模型 + Qlib 数据 + PostgreSQL 初始化备份**，校验后一次性恢复，部署完即可登录体验：
 
 ```bash
-# 主源（Gitea，推送后以此为准）
 curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMInd/raw/branch/master/deploy/full-deploy.sh | sudo bash
-# 镜像（Gitee）
-# curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 ```
 
 部署完成后即可访问：
