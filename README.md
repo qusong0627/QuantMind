@@ -84,7 +84,10 @@
 从 CDN 下载**完整预构建镜像 + 业务数据 + 预训练模型 + Qlib 数据 + PostgreSQL 初始化备份**，校验后一次性恢复，部署完即可登录体验：
 
 ```bash
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
+# 主源（Gitea，推送后以此为准）
+curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMInd/raw/branch/master/deploy/full-deploy.sh | sudo bash
+# 镜像（Gitee）
+# curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 ```
 
 部署完成后即可访问：
@@ -312,10 +315,11 @@ docker exec qwenpaw qwenpaw channels send
 - `master`：稳定分支，适合日常部署和体验。
 - `next`：开发预览分支，适合参与开发或提前体验尚未合入稳定分支的变更。
 
-克隆开发预览分支：
+克隆开发预览分支（主源 Gitea，Gitee/GitHub 为镜像）：
 
 ```bash
-git clone -b next https://gitee.com/qusong0627/quantmind.git
+git clone -b next https://quantmindai.cn/gitea/qusong0627/QuantMInd.git
+# 镜像：git clone -b next https://gitee.com/qusong0627/QuantMind.git
 ```
 
 已有仓库切换到开发预览分支：
@@ -365,7 +369,7 @@ quantmind/
 ├── deploy/                   # 在线部署与一键更新脚本
 ├── docs/                     # 部署、架构与外部集成说明
 ├── scripts/                  # 按用途归档的开发、校验、数据与历史脚本
-├── db/qlib_data/             # 本地 Qlib 格式二进制与 Parquet 数据
+├── data/                     # 本地数据（qlib/quantdb 行情与因子、stocks、uploads，经 ./data 挂载）
 ├── docker/                   # Dockerfile 镜像构建配置
 └── docker-compose.yml        # 容器服务编排定义（含 qwenpaw 机器人容器）
 ```
@@ -378,7 +382,7 @@ quantmind/
 
 * **代码规范**：Python 遵循 PEP8（使用 ruff 检查与格式化）；前端提交前请执行 `npm run typecheck`。
 
-* **股票代码标准化**：所有内部 Redis 键、数据库字段及 API 参数**强制采用前缀格式**（如 `SH600036`、`SZ000001`、`BJ832000`）。
+* **股票代码标准化**：所有内部 Redis 键、数据库字段及 API 参数**强制采用后缀格式**（如 `600036.SH`、`000001.SZ`、`832000.BJ`，经 `StockCodeUtil.normalize` / `to_suffix` 统一）。前缀式（如 `SH600036`）仅过渡期兼容老数据，新写入禁用。
 
 欢迎提交 Issue 与 Pull Request 共同建设！
 
