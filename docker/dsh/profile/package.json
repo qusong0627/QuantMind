@@ -2,12 +2,12 @@
   "name": "dsh-profile-web",
   "private": true,
   "dependencies": {
-    "@furongjun1999/dsh-memory": "0.9.9",
-    "@xmanrui/dsh-im": "5.4.0",
-    "ds-bot": "0.3.6",
-    "dsh-free-search": "0.9.11",
-    "dsh-mcp-connector": "0.2.76",
-    "dsh-univer-office": "0.3.7",
+    "@furongjun1999/dsh-memory": "0.10.3",
+    "@xmanrui/dsh-im": "5.10.0",
+    "ds-bot": "0.3.9",
+    "dsh-free-search": "0.9.50",
+    "dsh-mcp-connector": "0.2.119",
+    "dsh-univer-office": "0.4.0",
     "dshmarket": "1.66.9"
   },
   "dsh": {
@@ -21,9 +21,7 @@
         "dsh-univer-office",
         "@furongjun1999/dsh-memory",
         "@xmanrui/dsh-im",
-        "@deepseek-ai/dsh-experimental-agent-team-profile",
         "@deepseek-ai/dsh-experimental-auto-review",
-        "@deepseek-ai/dsh-experimental-schedule-bundle",
         "ds-bot"
       ],
       "patchReload": "live"

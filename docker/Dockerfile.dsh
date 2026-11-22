@@ -14,7 +14,11 @@ FROM node:22-slim
 # 0.2.2-rc.3 升级预检（2026-11-15）：补丁目标拆为 client.browser.js + client.node.js，
 # 已适配；profile 需带 pnpm-workspace.yaml（autoInstallPeers=false），否则插件冻结安装
 # 报 LOCKFILE_CONFIG_MISMATCH；插件集 frozen install + --dump-config 均通过。
-ARG DSH_VERSION=0.2.2-rc.3
+# 0.2.2-rc.5 升级预检（2026-11-22）：补丁锚点仍匹配、容器健康、web 8088 正常；
+# 新版插件（ds-bot 0.3.9 / MCP 连接器 0.2.119）命中 pnpm minimumReleaseAge 策略，
+# entrypoint 对 frozen-lockfile 做一次性 --config.minimum-release-age=0 重试
+# （版本仍由仓库锁文件钉死，仅跳过「发布时间太新」这一条）。
+ARG DSH_VERSION=0.2.2-rc.5
 # 部署真相戳：与 quantmind-oss 同一套 qm.git.* Label 口径，供 full-deploy/update
 # 判断「离线包/本机 dsh 镜像是否由当前检出构建」，不一致时自动重建对齐。
 ARG QM_GIT_COMMIT=unknown

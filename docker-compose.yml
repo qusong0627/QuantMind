@@ -907,7 +907,7 @@ services:
       dockerfile: docker/Dockerfile.dsh
       args:
         # dsh 预览版：钉版本；升级须先 --dump-config + 真实 boot 双验证再改（非交易时段重建）
-        DSH_VERSION: ${DSH_VERSION:-0.2.2-rc.3}
+        DSH_VERSION: ${DSH_VERSION:-0.2.2-rc.5}
         # 部署真相戳（与 quantmind-oss 同口径）：deploy/update/full-deploy 构建时注入
         QM_GIT_COMMIT: ${QM_GIT_COMMIT:-unknown}
         QM_GIT_BRANCH: ${QM_GIT_BRANCH:-unknown}

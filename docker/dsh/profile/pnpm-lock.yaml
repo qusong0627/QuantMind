@@ -9,23 +9,23 @@ importers:
   .:
     dependencies:
       '@furongjun1999/dsh-memory':
-        specifier: 0.9.9
-        version: 0.9.9
+        specifier: 0.10.3
+        version: 0.10.3
       '@xmanrui/dsh-im':
-        specifier: 5.4.0
-        version: 5.4.0(debug@4.4.3)
+        specifier: 5.10.0
+        version: 5.10.0(debug@4.4.3)
       ds-bot:
-        specifier: 0.3.6
-        version: 0.3.6
+        specifier: 0.3.9
+        version: 0.3.9
       dsh-free-search:
-        specifier: 0.9.11
-        version: 0.9.11
+        specifier: 0.9.50
+        version: 0.9.50(@deepseek-ai/schemastery@3.18.4)
       dsh-mcp-connector:
-        specifier: 0.2.76
-        version: 0.2.76(@deepseek-ai/schemastery@3.18.4)(zod@4.6.7)
+        specifier: 0.2.119
+        version: 0.2.119(@deepseek-ai/schemastery@3.18.4)
       dsh-univer-office:
-        specifier: 0.3.7
-        version: 0.3.7(@deepseek-ai/schemastery@3.18.4)
+        specifier: 0.4.0
+        version: 0.4.0(@deepseek-ai/schemastery@3.18.4)
       dshmarket:
         specifier: 1.66.9
         version: 1.66.9(@deepseek-ai/schemastery@3.18.4)
@@ -41,8 +41,8 @@ packages:
   '@emnapi/runtime@1.11.3':
     resolution: {integrity: sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==}
 
-  '@furongjun1999/dsh-memory@0.9.9':
-    resolution: {integrity: sha512-P5vrRMg9uRcp/CgrYFI8i1OcihtJwWGHTRuqeQ0Zr0vLJSFT0bsPddBqR02qbudHlvgm4Q719ejZnLPUaqNE2w==}
+  '@furongjun1999/dsh-memory@0.10.3':
+    resolution: {integrity: sha512-axAFXDjlQLjdcq606GtmROQSdtc+idgaEhYTjTPrNgigWmikbR2KszLZt/mjKeskzuT4f8+SzyaVpAF3Bym9xg==}
     engines: {node: '>=22.19'}
     hasBin: true
     peerDependencies:
@@ -225,51 +225,6 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@libsql/darwin-arm64@0.5.29':
-    resolution: {integrity: sha512-K+2RIB1OGFPYQbfay48GakLhqf3ArcbHqPFu7EZiaUcRgFcdw8RoltsMyvbj5ix2fY0HV3Q3Ioa/ByvQdaSM0A==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@libsql/darwin-x64@0.5.29':
-    resolution: {integrity: sha512-OtT+KFHsKFy1R5FVadr8FJ2Bb1mghtXTyJkxv0trocq7NuHntSki1eUbxpO5ezJesDvBlqFjnWaYYY516QNLhQ==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@libsql/linux-arm-gnueabihf@0.5.29':
-    resolution: {integrity: sha512-CD4n4zj7SJTHso4nf5cuMoWoMSS7asn5hHygsDuhRl8jjjCTT3yE+xdUvI4J7zsyb53VO5ISh4cwwOtf6k2UhQ==}
-    cpu: [arm]
-    os: [linux]
-
-  '@libsql/linux-arm-musleabihf@0.5.29':
-    resolution: {integrity: sha512-2Z9qBVpEJV7OeflzIR3+l5yAd4uTOLxklScYTwpZnkm2vDSGlC1PRlueLaufc4EFITkLKXK2MWBpexuNJfMVcg==}
-    cpu: [arm]
-    os: [linux]
-
-  '@libsql/linux-arm64-gnu@0.5.29':
-    resolution: {integrity: sha512-gURBqaiXIGGwFNEaUj8Ldk7Hps4STtG+31aEidCk5evMMdtsdfL3HPCpvys+ZF/tkOs2MWlRWoSq7SOuCE9k3w==}
-    cpu: [arm64]
-    os: [linux]
-
-  '@libsql/linux-arm64-musl@0.5.29':
-    resolution: {integrity: sha512-fwgYZ0H8mUkyVqXZHF3mT/92iIh1N94Owi/f66cPVNsk9BdGKq5gVpoKO+7UxaNzuEH1roJp2QEwsCZMvBLpqg==}
-    cpu: [arm64]
-    os: [linux]
-
-  '@libsql/linux-x64-gnu@0.5.29':
-    resolution: {integrity: sha512-y14V0vY0nmMC6G0pHeJcEarcnGU2H6cm21ZceRkacWHvQAEhAG0latQkCtoS2njFOXiYIg+JYPfAoWKbi82rkg==}
-    cpu: [x64]
-    os: [linux]
-
-  '@libsql/linux-x64-musl@0.5.29':
-    resolution: {integrity: sha512-gquqwA/39tH4pFl+J9n3SOMSymjX+6kZ3kWgY3b94nXFTwac9bnFNMffIomgvlFaC4ArVqMnOZD3nuJ3H3VO1w==}
-    cpu: [x64]
-    os: [linux]
-
-  '@libsql/win32-x64-msvc@0.5.29':
-    resolution: {integrity: sha512-4/0CvEdhi6+KjMxMaVbFM2n2Z44escBRoEYpR+gZg64DdetzGnYm8mcNLcoySaDJZNaBd6wz5DNdgRmcI4hXcg==}
-    cpu: [x64]
-    os: [win32]
-
   '@matrix-org/olm@3.2.15':
     resolution: {integrity: sha512-S7lOrndAK9/8qOtaTq/WhttJC/o4GAzdfK0MUPpo8ApzsJEC0QjtwrkC3KBXdFP1cD1MXi/mlKR7aaoVMKgs6Q==}
 
@@ -280,9 +235,6 @@ packages:
   '@modelcontextprotocol/core@2.4.0':
     resolution: {integrity: sha512-z8QBKqdfXLPzkLQuG4xp8hrVEMm1PZ1IgxMN2sMbJiFiAKOWXnAzogXn2W4aqIBlP1ea6U5yiqVquvUNM1Cj6Q==}
     engines: {node: '>=20'}
-
-  '@neon-rs/load@0.0.4':
-    resolution: {integrity: sha512-kTPhdZyTQxB+2wpiRcFWrDcejc4JI6tkPuS7UZCG4l6Zvc5kU/gGQ/ozvHTh1XR5tS+UlfAfGuPajjzQjCiHCw==}
 
   '@pinojs/redact@0.4.0':
     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
@@ -364,76 +316,73 @@ packages:
   '@univerjs-pro/cli-assets@0.1.0':
     resolution: {integrity: sha512-LWgwulcNkL4lnaosAyPwTssgtih52FCgGfMt7k6QRWz1scRakjNp++3souMaIxbzxXjIPXSJmwwXiNCsWnBMCA==}
 
-  '@univerjs-pro/engine-formula-rust-binding-darwin-arm64@1.0.1':
-    resolution: {integrity: sha512-3pLDm6BxTIPUDDdA90MeqdQmtccCO9G0OH12rR+Ct+E8BYYywEkxCMf5Ra9e5RA5nKJCbuahuBMTumw718/q3w==}
+  '@univerjs-pro/engine-formula-rust-binding-darwin-arm64@1.0.3':
+    resolution: {integrity: sha512-a/D0gEoMEARJiF6F+yKNJjjx3lC7idjJUE2N6uJP9iha4LT1mMqldtV2Zw8B99i8Gv36lXRQd34NDC5jIPLm1Q==}
     cpu: [arm64]
     os: [darwin]
 
-  '@univerjs-pro/engine-formula-rust-binding-darwin-x64@1.0.1':
-    resolution: {integrity: sha512-Bg+/CHJHaF27NFfMWDu7VFJYD7wBmxjH/Z1SWf6cZfguYWj4mjMa9XCTalHVlxIe5ODgQTgeFoYJ31Jy8Sq+6g==}
+  '@univerjs-pro/engine-formula-rust-binding-darwin-x64@1.0.3':
+    resolution: {integrity: sha512-ebhvYSqffN5Kny5P8zgMy9pVUL/kXEVWyrvaHxLQq4vDsMfVuPUvOh5v5y+IAhgpu7Wn8CvtY9wcwnIvVO1OoA==}
     cpu: [x64]
     os: [darwin]
 
-  '@univerjs-pro/engine-formula-rust-binding-linux-arm64-gnu@1.0.1':
-    resolution: {integrity: sha512-sGR4HRtnE3r3EzXwzQ4SShGlk4AgVpVPgupMPQS2c5zlrhydq/VENGg8u7a0NNv0RCEqcjhsdKfhWerrI3ercQ==}
+  '@univerjs-pro/engine-formula-rust-binding-linux-arm64-gnu@1.0.3':
+    resolution: {integrity: sha512-TAcD0phMcxJhwX5A+eKHCmg4uvKeyjZYrYDZHN8hUBXLiC7YBGf/dsT3/XvZPrCY79E8L4ID+REDJTWi2me7hQ==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@univerjs-pro/engine-formula-rust-binding-linux-x64-gnu@1.0.1':
-    resolution: {integrity: sha512-kLsbpQK1aDES0Y80FgZgjzednSM41L07vgT/5cRBGMah8BxtF895/hhK9WFYOvWEcs8xyi7EUV75A25qBoG1kA==}
+  '@univerjs-pro/engine-formula-rust-binding-linux-x64-gnu@1.0.3':
+    resolution: {integrity: sha512-MTK8UA85UduMKJgFD1UUeYvg/DnDXpVBGoBWAGnfRI4sCsadsTN23qJFpaye/8qnnHYkLpzrNUVcg3QGcxUwiA==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@univerjs-pro/engine-formula-rust-binding-win32-x64-msvc@1.0.1':
-    resolution: {integrity: sha512-wch5e5KUFwIRXkqeBGQJ8hDznvWizg58QVEZPW0qaReoW3SoUXCxDtbkzEolmYYcaC57q08zSYQPnXfGlc4DLw==}
+  '@univerjs-pro/engine-formula-rust-binding-win32-x64-msvc@1.0.3':
+    resolution: {integrity: sha512-bTLpOUCsCgXQ7zzPE73nnWI/PuCnSer0LxcKE7YgRWMxXbMMPW6B07kckSiKIOz8bF+lMqavWeaAAjS9olZIWA==}
     cpu: [x64]
     os: [win32]
 
-  '@univerjs-pro/engine-formula-rust-binding@1.0.1':
-    resolution: {integrity: sha512-b0jM8Snzlj99u68QnIasHD9YfPIHeV/CWqa7mng/1UpCXyxlyQLX0SunIDjhmpceXE9AM2HdmhdbZgBwpMyG/w==}
+  '@univerjs-pro/engine-formula-rust-binding@1.0.3':
+    resolution: {integrity: sha512-al++XMfZEUwxSHIMdkUZoVVJ1OZ9N4uOCxjyx18oWf91lVW1TKXXGz9zLaANbbIrbATf9dEsJe1Z+XAd6wuJ8Q==}
 
-  '@univerjs-pro/exchange-node-binding-darwin-arm64@1.0.1':
-    resolution: {integrity: sha512-AtmEjIr8EdeOHeVoD/mfel79TWvylmqBr4/zyB/anDQR4nxxS9eTN26RiKVZkpWCiN4ny5+dOA3CLP/u5sOcaQ==}
+  '@univerjs-pro/exchange-node-binding-darwin-arm64@1.0.4':
+    resolution: {integrity: sha512-IPwqzwxvEuDuR8Tu8CruRoDGRtCOEyxzt/m88m9RpS2U7b9occ8vx82FEZydKGKY+bkORk6bIt9Qy8ISIxQ/aQ==}
     cpu: [arm64]
     os: [darwin]
 
-  '@univerjs-pro/exchange-node-binding-darwin-x64@1.0.1':
-    resolution: {integrity: sha512-ZYc25WX2PTd28nov54b6IgolSAADy7BjU9HkV4sHJSJu8b8O/EolZ63XZzAmqg5/3jgHavTdi1cNScP7H/0TJA==}
+  '@univerjs-pro/exchange-node-binding-darwin-x64@1.0.4':
+    resolution: {integrity: sha512-lACHhvi0iEtohPqSiVZ+3Kf9t5ypvgC3X5UzZBtN0E/CFLe6/555rGBI7msHD9ZqPgdO8DeS6GMk3bEqUMd4qQ==}
     cpu: [x64]
     os: [darwin]
 
-  '@univerjs-pro/exchange-node-binding-linux-arm64-gnu@1.0.1':
-    resolution: {integrity: sha512-Q7xPDsUa6OXETQpBQ/VJhrpgnBEe1/SyPXPaLnhoYgTmriBx0LoNzWa2dGtrwZNXPGJXOq8flNvilux2YCPqCg==}
+  '@univerjs-pro/exchange-node-binding-linux-arm64-gnu@1.0.4':
+    resolution: {integrity: sha512-D11s+voo3Te9eCHlH8DF94B6OeZ/A0o0vZVg5iZy+ymsQZnjvXrD92behXkEUN1mkpUpp8DTIYvHSyvOYS7AcQ==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@univerjs-pro/exchange-node-binding-linux-x64-gnu@1.0.1':
-    resolution: {integrity: sha512-6IU+hL2YFeda7NBi0b8k+G8fgx8HbZEqKZtZ1PJHCEMN/mCWHesTHFWNVurQLKpFjjpGSh0Nkj7py+VCoruA1g==}
+  '@univerjs-pro/exchange-node-binding-linux-x64-gnu@1.0.4':
+    resolution: {integrity: sha512-ySyX2PQorQB53yAi156CLF28pNOFA2V3jzHzecq9sIPaZ/X3Ek36AxmITacF2MVUAYcagQhHATy99V8Dbsiiog==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@univerjs-pro/exchange-node-binding-win32-x64-msvc@1.0.1':
-    resolution: {integrity: sha512-PAUCt3uWcrgKNf451xVt4OG25BEUBz0e9oYuhwAjR4o3cqERKWlwn4xRf0SNxtP6oRVMuXaLEcTcpCZEIS6GTA==}
+  '@univerjs-pro/exchange-node-binding-win32-x64-msvc@1.0.4':
+    resolution: {integrity: sha512-j1Zczi6NevVmam4eEFFsZiMTj9IpJQP5ClefqNHk4PaGE9ChhEfmcsBK013CXI/j+nkLedYnpsp1cB0lc9bQIg==}
     cpu: [x64]
     os: [win32]
 
-  '@univerjs-pro/exchange-node-binding@1.0.1':
-    resolution: {integrity: sha512-311g0Md7AIRl9o+OdNY0z9LQZih63j0h+0PHfMyEnhkZlILQXsGA1F5Sn6xG9so7enpa97fCgbBrpC9wz754/A==}
+  '@univerjs-pro/exchange-node-binding@1.0.4':
+    resolution: {integrity: sha512-vhT21L/eWwTEhi4eatm3w1HwPfZFPBOsBy4YNO4O+ZGIeQmlLCXX9VSEKJtfKPHYoWxEbpV1cNulnooN7l5TWw==}
 
   '@wecom/aibot-node-sdk@1.0.7':
     resolution: {integrity: sha512-51w+sTqunry6GD3HFvmuh0gArMSJDFE418vyvR1wMJHj1N6DaFuGD3HuaY2fazZs3mb9FWeQFX3+vU5t0Qhwmw==}
 
-  '@xmanrui/dsh-im@5.4.0':
-    resolution: {integrity: sha512-hocDQXOAlQb/7rbuBsslIuTsNS+u09WXxzvZMY7kWdmeLdi4At1pywCUZkk/63x5AazpEsMvoi/fngHU3WPfJg==}
+  '@xmanrui/dsh-im@5.10.0':
+    resolution: {integrity: sha512-gWM3D3Rq6z3Plh1nFFfrV1FKKGm1OWpjWGSgUZXjqbmt/xQ+AVT/M6YFV3hpnMjXTKxzDvrPUo01Nl1FarDdkQ==}
     engines: {node: '>=22.19'}
     hasBin: true
-
-  '@zone-eu/mailsplit@5.4.20':
-    resolution: {integrity: sha512-6B2w0zRBWOwbO5h7SL5N/2z1AuNchTP3OT33MObUr4/cz9bWPrZ6KadLKxnSrOZG0AGu7Q03p4X7eQhZHc1u/A==}
 
   '@zone-eu/mailsplit@5.4.29':
     resolution: {integrity: sha512-CCUNycmUjrV5M0wNf23waWAt9eOHczhjLbUQS7k0FNJvR0py9VSqHFt+tSl/D0+XI73VLG0U+PwYtq9R0zsm9Q==}
@@ -537,10 +486,6 @@ packages:
     resolution: {integrity: sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==}
     engines: {node: '>=0.4.0'}
 
-  detect-libc@2.0.2:
-    resolution: {integrity: sha512-UX6sGumvvqSaXgdKGUsgZWqcUyIXZ/vZTrlRT/iobiKhGL0zL4d3osHj3uqllWJK+i+sixDS/3COVEOFbupFyw==}
-    engines: {node: '>=8'}
-
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
@@ -567,18 +512,21 @@ packages:
   domutils@3.2.2:
     resolution: {integrity: sha512-6kZKyUajlDuqlHKVX1w7gyslj9MPIXzIFiz/rGu35uC1wMi+kMhQwGhl4lt9unC9Vb9INnY9Z3/ZA3+FhASLaw==}
 
-  ds-bot@0.3.6:
-    resolution: {integrity: sha512-Q8caGB+G6ohJ2t7CY2ChW4EeWBfjD/Lh5qz70NoUgf4lP/OrZ7oQ3DMmmNf/aw/4hVTN0aDZwo358pijCASDPA==}
+  ds-bot@0.3.9:
+    resolution: {integrity: sha512-60gYpbR03HeEWTA2AXrRtd6znqTEUOE4QLrM263jn5xmej5g3ol9wNdU+t65d9ZPnslBlhUXu2nM7zU9KEdxDA==}
+    hasBin: true
     peerDependencies:
       '@deepseek-ai/cordis': '*'
       '@deepseek-ai/dsh-llm': '*'
       '@deepseek-ai/dsh-scope': '*'
       '@deepseek-ai/dsh-tools': '*'
+      '@deepseek-ai/dsh-typert-protocol': '*'
       '@deepseek-ai/dsh-web': '*'
 
-  dsh-free-search@0.9.11:
-    resolution: {integrity: sha512-oG1lQIxeYsSU9afHOZ63M4YH0QWC22i9tnC6SkputMrWmHlKXy6uRZ8Es+PO3DIweJ0FxALIJvpFX2B+gXYbFg==}
+  dsh-free-search@0.9.50:
+    resolution: {integrity: sha512-zQN8w/fe0FKzjWhCCYPnn8WGD0AWhu3UU7ikS0YMYDBJz0GaeMAs0wj4y/cjIXqZi2IJ7jNH9olAlFeuRbb6bQ==}
     engines: {node: '>=20'}
+    hasBin: true
     peerDependencies:
       '@deepseek-ai/cordis': ^4.0.1
       '@deepseek-ai/dsh-client-ui-commands': ^0.1.7-rc.1 || ^0.2.0-rc.1
@@ -586,6 +534,7 @@ packages:
       '@deepseek-ai/dsh-client-ui-renderer': ^0.1.7-rc.1 || ^0.2.0-rc.1
       '@deepseek-ai/dsh-settings': ^0.1.7-rc.1 || ^0.2.0-rc.1
       '@deepseek-ai/dsh-tools': ^0.1.7-rc.1 || ^0.2.0-rc.1
+      '@deepseek-ai/schemastery': '>=3.18.4 <4'
       react: ^18.2.0
     peerDependenciesMeta:
       '@deepseek-ai/cordis':
@@ -600,11 +549,13 @@ packages:
         optional: true
       '@deepseek-ai/dsh-tools':
         optional: true
+      '@deepseek-ai/schemastery':
+        optional: true
       react:
         optional: true
 
-  dsh-mcp-connector@0.2.76:
-    resolution: {integrity: sha512-iyl+T/rd3vp61dUJAdwEFfSvxvVqD9Yy8/C6mnJvWp/UfvEZWDHYJ2wCUvLJy6/yg7oy4ajDF6mYHX4NQGZZwg==}
+  dsh-mcp-connector@0.2.119:
+    resolution: {integrity: sha512-n42pkgfoKH8Wb38qOib0aHi8bjHEvG3QQ9BKmUrFmYqxc45S17dsGPritnV6+Zqfntm2pBNShy2KIVand0ohNA==}
     engines: {node: '>=20'}
     hasBin: true
     peerDependencies:
@@ -616,20 +567,19 @@ packages:
       '@deepseek-ai/schemastery': ^3.18.1
       react: ^18.2.0
       react-dom: ^18.2.0
-      zod: '>=4.1.8 <5'
 
-  dsh-univer-office@0.3.7:
-    resolution: {integrity: sha512-2eEi35ZzTOZiFQEEuNiF68MKWGKlXhVJiaOwCO5gdgNj0ZA+VesdoRxmT8hhFspbMtPfRp/0CoSo7PwFwBbBWw==}
+  dsh-univer-office@0.4.0:
+    resolution: {integrity: sha512-VSKiVZvHvlON27KWxamP5EWNty/aGJQNMaLWTJb2R4S2pERloJCm2r3KwuDPMrSChKMX0QQhX8EUcHGx9jmgnA==}
     engines: {node: '>=22.19.0'}
     peerDependencies:
       '@deepseek-ai/cordis': ^4.0.2
-      '@deepseek-ai/dsh-attachment': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1
-      '@deepseek-ai/dsh-host-webserver': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1
-      '@deepseek-ai/dsh-llm': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1
-      '@deepseek-ai/dsh-session': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1
-      '@deepseek-ai/dsh-settings': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1
-      '@deepseek-ai/dsh-skill': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1
-      '@deepseek-ai/dsh-tools': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1
+      '@deepseek-ai/dsh-attachment': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.3
+      '@deepseek-ai/dsh-host-webserver': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.3
+      '@deepseek-ai/dsh-llm': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.3
+      '@deepseek-ai/dsh-session': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.3
+      '@deepseek-ai/dsh-settings': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.3
+      '@deepseek-ai/dsh-skill': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.3
+      '@deepseek-ai/dsh-tools': ^0.1.5-rc.3 || ^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.3
       '@deepseek-ai/schemastery': ^3.18.1
 
   dshmarket@1.66.9:
@@ -768,10 +718,6 @@ packages:
     resolution: {integrity: sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==}
     engines: {node: '>=0.10.0'}
 
-  imapflow@2.2.5:
-    resolution: {integrity: sha512-fXFsI+Aeq6M5fh0pYyInnsl2c7JfhcitRW5SAdv/P0oFDuxwOE9Wma92Pm5FYd4199Mfmnpeny9o2TUyTigcuA==}
-    engines: {node: '>=20.0.0'}
-
   imapflow@2.9.1:
     resolution: {integrity: sha512-hOq2/+T+WnQzRy7D40gYlio25nG+c9bhtrxowokOQM57SwZFqRbqAtxFQcIpx82lhYBPQEEVVjmkYpd9Fplj7g==}
     engines: {node: '>=20.0.0'}
@@ -787,8 +733,8 @@ packages:
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
 
-  jose@6.2.17:
-    resolution: {integrity: sha512-wOuK9V1yujQFH5S0ZWmLcDZN7+IKh9bUCC2ZPCf2HDlol3WWHy+PPyNjEI75FXRLMp3vDKQcupP59xhVU95hcg==}
+  jose@6.2.18:
+    resolution: {integrity: sha512-doV4thUwgkrycJH4yLeqwTGIIZphHl+pk7CPReuMIhYhncmgzdko85MaCG4YQFTxqMFr1/oEH32tZuKKovcDEg==}
 
   jpeg-js@0.4.4:
     resolution: {integrity: sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg==}
@@ -800,31 +746,17 @@ packages:
   leac@0.7.0:
     resolution: {integrity: sha512-qMrZeyEekgdRQ9o6a4NAB2EQZrv827GJdn1vnapwSJ90hWRB4TzUSunvacPkxQ2TnNqHNI1/zSt0hlo0crG8Jw==}
 
-  libbase64@1.3.2:
-    resolution: {integrity: sha512-fFCoI0ceXhTu/0QiJ6Uf6BV9k7X/8QW2/D4BR1vw3BPrHcIjLbGLH+U7inQ4SeWrfNCOmpGE09Qt4XjSFfus0g==}
-
   libbase64@1.4.1:
     resolution: {integrity: sha512-Nyh3H90B3gRtrcxIe56Ayy7635J0jmh6AbxbQgQae8wrSPQMH5wFqJChiMTB13yKG512L3YspbA5DzumhFTITA==}
     engines: {node: '>=20.0.0'}
-
-  libmime@5.4.7:
-    resolution: {integrity: sha512-r1ENu4wMVSB52AAORwaW4L/MeQJr9rryzHLRpcjud3zcUPWXh1Xkgn+tAqL8oTnRO/LW7y5xxPBE20ta5amtMA==}
 
   libmime@5.6.3:
     resolution: {integrity: sha512-cuTUW/Jybvh5O4/U9p61gyutHOjDtZyGQYuY99+bfnaFwqcDf2Nb+R6hMHY6DDen2H9wLKQSMpofWUgn2TI5JQ==}
     engines: {node: '>=20.0.0'}
 
-  libqp@2.1.2:
-    resolution: {integrity: sha512-rp+U80tl9Os4K7GnVbPzPRmghPu6eqB8rcF+ontvNAnoga0JhMFG/bkTD/reC8yoznKMgOc5/ttZHJasiWeFPw==}
-
   libqp@3.0.1:
     resolution: {integrity: sha512-7QZxpPX25pga1WiMueduWxmrHMVBFrZPH6ZUaozGYa/H98JH6NVBSET3qVw+4NxzoraIW7rJ81YxSU9IalvCpg==}
     engines: {node: '>=20.0.0'}
-
-  libsql@0.5.29:
-    resolution: {integrity: sha512-8lMP8iMgiBzzoNbAPQ59qdVcj6UaE/Vnm+fiwX4doX4Narook0a4GPKWBEv+CR8a1OwbfkgL18uBfBjWdF0Fzg==}
-    cpu: [x64, arm64, wasm32, arm]
-    os: [darwin, linux, win32]
 
   linkify-it@5.0.2:
     resolution: {integrity: sha512-ONTm2jCMAVZjgQa/Fy1kScXsuOoF5NPTsoFBdE1KVIZ2vAh/r9+Bqo+0jINCBYnavTPQZz38QzFTme79ENoN3Q==}
@@ -835,10 +767,6 @@ packages:
 
   mailparser@3.12.4:
     resolution: {integrity: sha512-FdoMF+S89/AQaJHY7StwTfABPHZ8Vey+CDyUno5j+TO0jF0UxM+la4Pe9MeqKqBO4Y9ZMB2eomdyg5i+jzpfZw==}
-    engines: {node: '>=20.0.0'}
-
-  mailparser@3.9.36:
-    resolution: {integrity: sha512-Fng3OmPN7khG0oVHDwwBIOYxjGu7kFxEuN6NnVV1H2tQYCIWjqvjK6cKvhj2r3XQVToVabP0b4HF+N7YgNdXFQ==}
     engines: {node: '>=20.0.0'}
 
   math-intrinsics@1.1.0:
@@ -862,14 +790,6 @@ packages:
 
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
-
-  nodemailer@10.0.14:
-    resolution: {integrity: sha512-eJoLFKg55fesSlzUekmfOv/SBXh4KUYT8oiQc2RLP0tfG0rbNMJBK7wgHJwXTJwqyKlSJMz9UzDZ4v+aHEvo8g==}
-    engines: {node: '>=20.0.0'}
-
-  nodemailer@10.0.15:
-    resolution: {integrity: sha512-EUqp5PhtcsYXs9Fq/lS7s/8zlTrnBqmzZWzFFROrNikMiz+om/YRKMwqN907t+0A1KKyT8jd39CBUbFZmaZmcA==}
-    engines: {node: '>=20.0.0'}
 
   nodemailer@10.2.1:
     resolution: {integrity: sha512-ZrDNsPFoDMwefNs7sJwrYiEJ/CG4ClJWDZv05iNJsEBWa8GRDry1QJHTJxsuTAY9eDDKjX4k+q3SxslXJOao7w==}
@@ -988,6 +908,11 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
+  semver@7.8.6:
+    resolution: {integrity: sha512-9lpSSU4Mly3mrtruwLs1eLK6+gzbzqeBFwRNjIjE+9LuDpWdYctrQlQ3ej1Ilgi7gknpsTRnPoLP8DpCHqHIJw==}
+    engines: {node: '>=10'}
+    hasBin: true
+
   set-blocking@2.0.0:
     resolution: {integrity: sha512-KiKBS8AnWGEyLzofFfmvKwpdPzqiy16LvQfK3yv/fVH7Bj13/wl3JSR1J+rfgRE9q7xUJK4qvgS8raSOeLUehw==}
 
@@ -1064,13 +989,17 @@ packages:
     resolution: {integrity: sha512-EvRlUt/QqAEvXdQeRMYUfwOQsfzpDztykrG2owGEE/rBOBoYv9uF39ZzsNDh4lTFHhTr2XOZjKkYgueD12ZmGA==}
     engines: {node: '>=18.17'}
 
-  undici@7.29.1:
-    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
-    engines: {node: '>=20.18.1'}
-
   undici@7.30.0:
     resolution: {integrity: sha512-dkrQXeHSaoamnItlYbmzG0wFYrM0ZwDxCIg0A7aKjTyyhh9svRzCNFEzV+Vm05/yehjCzjDZ31KXfGEjYSztDQ==}
     engines: {node: '>=20.18.1'}
+
+  undici@7.30.1:
+    resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
+    engines: {node: '>=20.18.1'}
+
+  undici@8.11.2:
+    resolution: {integrity: sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==}
+    engines: {node: '>=22.19.0'}
 
   webdriver-bidi-protocol@0.4.3:
     resolution: {integrity: sha512-uuN0goWfxP22B7J/uAgBpOYNPttC+XVseYE+rSY5+rQ+YBeVz/VORw8WbmLVcqW78zNg5A4qnjNXYUWR3il2ig==}
@@ -1158,7 +1087,7 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
-  '@furongjun1999/dsh-memory@0.9.9':
+  '@furongjun1999/dsh-memory@0.10.3':
     dependencies:
       '@deepseek-ai/schemastery': 3.18.4
 
@@ -1269,33 +1198,6 @@ snapshots:
   '@img/sharp-win32-x64@0.35.5':
     optional: true
 
-  '@libsql/darwin-arm64@0.5.29':
-    optional: true
-
-  '@libsql/darwin-x64@0.5.29':
-    optional: true
-
-  '@libsql/linux-arm-gnueabihf@0.5.29':
-    optional: true
-
-  '@libsql/linux-arm-musleabihf@0.5.29':
-    optional: true
-
-  '@libsql/linux-arm64-gnu@0.5.29':
-    optional: true
-
-  '@libsql/linux-arm64-musl@0.5.29':
-    optional: true
-
-  '@libsql/linux-x64-gnu@0.5.29':
-    optional: true
-
-  '@libsql/linux-x64-musl@0.5.29':
-    optional: true
-
-  '@libsql/win32-x64-msvc@0.5.29':
-    optional: true
-
   '@matrix-org/olm@3.2.15': {}
 
   '@modelcontextprotocol/client@2.4.0':
@@ -1304,15 +1206,13 @@ snapshots:
       cross-spawn: 7.0.6
       eventsource: 3.0.7
       eventsource-parser: 3.1.1
-      jose: 6.2.17
+      jose: 6.2.18
       pkce-challenge: 5.0.1
       zod: 4.6.7
 
   '@modelcontextprotocol/core@2.4.0':
     dependencies:
       zod: 4.6.7
-
-  '@neon-rs/load@0.0.4': {}
 
   '@pinojs/redact@0.4.0': {}
 
@@ -1370,51 +1270,51 @@ snapshots:
 
   '@univerjs-pro/cli-assets@0.1.0': {}
 
-  '@univerjs-pro/engine-formula-rust-binding-darwin-arm64@1.0.1':
+  '@univerjs-pro/engine-formula-rust-binding-darwin-arm64@1.0.3':
     optional: true
 
-  '@univerjs-pro/engine-formula-rust-binding-darwin-x64@1.0.1':
+  '@univerjs-pro/engine-formula-rust-binding-darwin-x64@1.0.3':
     optional: true
 
-  '@univerjs-pro/engine-formula-rust-binding-linux-arm64-gnu@1.0.1':
+  '@univerjs-pro/engine-formula-rust-binding-linux-arm64-gnu@1.0.3':
     optional: true
 
-  '@univerjs-pro/engine-formula-rust-binding-linux-x64-gnu@1.0.1':
+  '@univerjs-pro/engine-formula-rust-binding-linux-x64-gnu@1.0.3':
     optional: true
 
-  '@univerjs-pro/engine-formula-rust-binding-win32-x64-msvc@1.0.1':
+  '@univerjs-pro/engine-formula-rust-binding-win32-x64-msvc@1.0.3':
     optional: true
 
-  '@univerjs-pro/engine-formula-rust-binding@1.0.1':
+  '@univerjs-pro/engine-formula-rust-binding@1.0.3':
     optionalDependencies:
-      '@univerjs-pro/engine-formula-rust-binding-darwin-arm64': 1.0.1
-      '@univerjs-pro/engine-formula-rust-binding-darwin-x64': 1.0.1
-      '@univerjs-pro/engine-formula-rust-binding-linux-arm64-gnu': 1.0.1
-      '@univerjs-pro/engine-formula-rust-binding-linux-x64-gnu': 1.0.1
-      '@univerjs-pro/engine-formula-rust-binding-win32-x64-msvc': 1.0.1
+      '@univerjs-pro/engine-formula-rust-binding-darwin-arm64': 1.0.3
+      '@univerjs-pro/engine-formula-rust-binding-darwin-x64': 1.0.3
+      '@univerjs-pro/engine-formula-rust-binding-linux-arm64-gnu': 1.0.3
+      '@univerjs-pro/engine-formula-rust-binding-linux-x64-gnu': 1.0.3
+      '@univerjs-pro/engine-formula-rust-binding-win32-x64-msvc': 1.0.3
 
-  '@univerjs-pro/exchange-node-binding-darwin-arm64@1.0.1':
+  '@univerjs-pro/exchange-node-binding-darwin-arm64@1.0.4':
     optional: true
 
-  '@univerjs-pro/exchange-node-binding-darwin-x64@1.0.1':
+  '@univerjs-pro/exchange-node-binding-darwin-x64@1.0.4':
     optional: true
 
-  '@univerjs-pro/exchange-node-binding-linux-arm64-gnu@1.0.1':
+  '@univerjs-pro/exchange-node-binding-linux-arm64-gnu@1.0.4':
     optional: true
 
-  '@univerjs-pro/exchange-node-binding-linux-x64-gnu@1.0.1':
+  '@univerjs-pro/exchange-node-binding-linux-x64-gnu@1.0.4':
     optional: true
 
-  '@univerjs-pro/exchange-node-binding-win32-x64-msvc@1.0.1':
+  '@univerjs-pro/exchange-node-binding-win32-x64-msvc@1.0.4':
     optional: true
 
-  '@univerjs-pro/exchange-node-binding@1.0.1':
+  '@univerjs-pro/exchange-node-binding@1.0.4':
     optionalDependencies:
-      '@univerjs-pro/exchange-node-binding-darwin-arm64': 1.0.1
-      '@univerjs-pro/exchange-node-binding-darwin-x64': 1.0.1
-      '@univerjs-pro/exchange-node-binding-linux-arm64-gnu': 1.0.1
-      '@univerjs-pro/exchange-node-binding-linux-x64-gnu': 1.0.1
-      '@univerjs-pro/exchange-node-binding-win32-x64-msvc': 1.0.1
+      '@univerjs-pro/exchange-node-binding-darwin-arm64': 1.0.4
+      '@univerjs-pro/exchange-node-binding-darwin-x64': 1.0.4
+      '@univerjs-pro/exchange-node-binding-linux-arm64-gnu': 1.0.4
+      '@univerjs-pro/exchange-node-binding-linux-x64-gnu': 1.0.4
+      '@univerjs-pro/exchange-node-binding-win32-x64-msvc': 1.0.4
 
   '@wecom/aibot-node-sdk@1.0.7(debug@4.4.3)':
     dependencies:
@@ -1427,18 +1327,18 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@xmanrui/dsh-im@5.4.0(debug@4.4.3)':
+  '@xmanrui/dsh-im@5.10.0(debug@4.4.3)':
     dependencies:
       '@matrix-org/olm': 3.2.15
       '@tencent-connect/qqbot-connector': 1.2.0
       '@tencent-connect/qqbot-nodejs': 1.0.4
       '@wecom/aibot-node-sdk': 1.0.7(debug@4.4.3)
       dingtalk-stream: 2.1.4
-      imapflow: 2.2.5
-      mailparser: 3.9.36
-      nodemailer: 10.0.15
+      imapflow: 2.9.1
+      mailparser: 3.12.4
+      nodemailer: 10.2.1
       qrcode: 1.5.4
-      undici: 7.29.1
+      undici: 7.30.1
     optionalDependencies:
       '@tencent-qqmail/agently-cli': 1.0.18
       sharp: 0.35.5
@@ -1450,12 +1350,6 @@ snapshots:
       - silk-wasm
       - supports-color
       - utf-8-validate
-
-  '@zone-eu/mailsplit@5.4.20':
-    dependencies:
-      libbase64: 1.3.2
-      libmime: 5.4.7
-      libqp: 2.1.2
 
   '@zone-eu/mailsplit@5.4.29':
     dependencies:
@@ -1548,8 +1442,6 @@ snapshots:
 
   delayed-stream@1.0.0: {}
 
-  detect-libc@2.0.2: {}
-
   detect-libc@2.1.2:
     optional: true
 
@@ -1585,7 +1477,7 @@ snapshots:
       domelementtype: 2.3.0
       domhandler: 5.0.3
 
-  ds-bot@0.3.6:
+  ds-bot@0.3.9:
     dependencies:
       '@modelcontextprotocol/client': 2.4.0
       deep-view: 0.1.2
@@ -1595,30 +1487,31 @@ snapshots:
       nodemailer: 10.2.1
       playwright-core: 1.64.1
       pngjs: 7.0.0
+      semver: 7.8.6
+      undici: 8.11.2
       ws: 8.18.3
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  dsh-free-search@0.9.11:
-    dependencies:
+  dsh-free-search@0.9.50(@deepseek-ai/schemastery@3.18.4):
+    optionalDependencies:
       '@deepseek-ai/schemastery': 3.18.4
 
-  dsh-mcp-connector@0.2.76(@deepseek-ai/schemastery@3.18.4)(zod@4.6.7):
+  dsh-mcp-connector@0.2.119(@deepseek-ai/schemastery@3.18.4):
     dependencies:
       '@deepseek-ai/schemastery': 3.18.4
       cross-spawn: 7.0.6
       undici: 6.29.1
       zod: 4.6.7
 
-  dsh-univer-office@0.3.7(@deepseek-ai/schemastery@3.18.4):
+  dsh-univer-office@0.4.0(@deepseek-ai/schemastery@3.18.4):
     dependencies:
       '@deepseek-ai/schemastery': 3.18.4
       '@puppeteer/browsers': 3.2.3
       '@univerjs-pro/cli-assets': 0.1.0
-      '@univerjs-pro/engine-formula-rust-binding': 1.0.1
-      '@univerjs-pro/exchange-node-binding': 1.0.1
-      libsql: 0.5.29
+      '@univerjs-pro/engine-formula-rust-binding': 1.0.3
+      '@univerjs-pro/exchange-node-binding': 1.0.4
       puppeteer-core: 25.12.0
     transitivePeerDependencies:
       - bufferutil
@@ -1755,17 +1648,6 @@ snapshots:
     dependencies:
       safer-buffer: 2.1.2
 
-  imapflow@2.2.5:
-    dependencies:
-      '@zone-eu/mailsplit': 5.4.20
-      encoding-japanese: 2.4.0
-      iconv-lite: 0.7.3
-      libbase64: 1.3.2
-      libmime: 5.4.7
-      libqp: 2.1.2
-      pino: 10.3.1
-      socks: 2.8.10
-
   imapflow@2.9.1:
     dependencies:
       '@zone-eu/mailsplit': 5.4.29
@@ -1783,7 +1665,7 @@ snapshots:
 
   isexe@2.0.0: {}
 
-  jose@6.2.17: {}
+  jose@6.2.18: {}
 
   jpeg-js@0.4.4: {}
 
@@ -1793,16 +1675,7 @@ snapshots:
 
   leac@0.7.0: {}
 
-  libbase64@1.3.2: {}
-
   libbase64@1.4.1: {}
-
-  libmime@5.4.7:
-    dependencies:
-      encoding-japanese: 2.4.0
-      iconv-lite: 0.7.3
-      libbase64: 1.3.2
-      libqp: 2.1.2
 
   libmime@5.6.3:
     dependencies:
@@ -1811,24 +1684,7 @@ snapshots:
       libbase64: 1.4.1
       libqp: 3.0.1
 
-  libqp@2.1.2: {}
-
   libqp@3.0.1: {}
-
-  libsql@0.5.29:
-    dependencies:
-      '@neon-rs/load': 0.0.4
-      detect-libc: 2.0.2
-    optionalDependencies:
-      '@libsql/darwin-arm64': 0.5.29
-      '@libsql/darwin-x64': 0.5.29
-      '@libsql/linux-arm-gnueabihf': 0.5.29
-      '@libsql/linux-arm-musleabihf': 0.5.29
-      '@libsql/linux-arm64-gnu': 0.5.29
-      '@libsql/linux-arm64-musl': 0.5.29
-      '@libsql/linux-x64-gnu': 0.5.29
-      '@libsql/linux-x64-musl': 0.5.29
-      '@libsql/win32-x64-msvc': 0.5.29
 
   linkify-it@5.0.2:
     dependencies:
@@ -1849,19 +1705,6 @@ snapshots:
       punycode.js: 2.3.1
       tlds: 1.261.0
 
-  mailparser@3.9.36:
-    dependencies:
-      '@zone-eu/mailsplit': 5.4.20
-      encoding-japanese: 2.4.0
-      he: 1.2.0
-      html-to-text: 10.0.1
-      iconv-lite: 0.7.3
-      libmime: 5.4.7
-      linkify-it: 5.0.2
-      nodemailer: 10.0.14
-      punycode.js: 2.3.1
-      tlds: 1.261.0
-
   math-intrinsics@1.1.0: {}
 
   mime-db@1.52.0: {}
@@ -1875,10 +1718,6 @@ snapshots:
   modern-tar@0.8.5: {}
 
   ms@2.1.3: {}
-
-  nodemailer@10.0.14: {}
-
-  nodemailer@10.0.15: {}
 
   nodemailer@10.2.1: {}
 
@@ -1982,6 +1821,8 @@ snapshots:
   semver@7.8.5:
     optional: true
 
+  semver@7.8.6: {}
+
   set-blocking@2.0.0: {}
 
   sharp@0.35.5:
@@ -2076,9 +1917,11 @@ snapshots:
 
   undici@6.29.1: {}
 
-  undici@7.29.1: {}
-
   undici@7.30.0: {}
+
+  undici@7.30.1: {}
+
+  undici@8.11.2: {}
 
   webdriver-bidi-protocol@0.4.3: {}
 

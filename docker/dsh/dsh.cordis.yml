@@ -63,3 +63,25 @@
   config:
     trustedHosts: !!js ctx.webStartup.trustedHosts
     cookieMaxAgeDays: 3650
+
+# ---- MCP 连接器面板：允许 QuantMind Web 外壳（3080）内嵌 ----
+# 插件默认 frame-ancestors 只有 'self'；QuantBot 页是 3080 的壳 + 8088 的 iframe，
+# 跨源内嵌会被浏览器以 CSP 拦截（面板白屏 / 拒绝连接）。这里显式追加壳的源。
+# config 是整体替换：连同 bundle 里的字段一起重声明，避免被 schema 默认值覆盖。
+- id: mcp-connector
+  config:
+    catalogUrl: 'https://cdn.jsdelivr.net/gh/duhu2000/dsh-mcp-connector-registry@main/catalog.json'
+    persistSecrets: true
+    entryPrefix: 'mcp'
+    refreshSkewMs: 300000
+    openBrowser: true
+    showSidebarEntry: true
+    compactManagementTools: false
+    frameAncestors:
+      - self
+      - http://localhost:3080
+      - http://127.0.0.1:3080
+      - http://192.168.31.68:3080
+      - http://192.168.31.56:3080
+      - http://tauri.localhost
+      - tauri://localhost
