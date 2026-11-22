@@ -90,6 +90,9 @@ export default function StrategyList({ wb }: { wb: Workbench }) {
                     {it.source_kind === 'custom' && (
                       <em className="edited" title="自定义（可删除）">自</em>
                     )}
+                    {it.source_kind === 'imported' && (
+                      <em className="edited" title="TradingView 社区语料（仅本地研究）">导</em>
+                    )}
                     {tp && (
                       <em className="ai" title="已 AI 转写为 Pyne-Python">
                         AI
@@ -105,6 +108,9 @@ export default function StrategyList({ wb }: { wb: Workbench }) {
                 <div className="lab-pine-sub">
                   {it.category}
                   {it.version ? ` · v${it.version}` : ''}
+                  {it.has_security && it.security_timeframes?.length
+                    ? ` · MTF ${it.security_timeframes.join('/')}`
+                    : ''}
                   <span className={it.indent_ok ? 'dot ok' : 'dot bad'} />
                   {it.indent_ok ? '可编译' : '缩进缺失'}
                 </div>

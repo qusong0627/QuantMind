@@ -295,7 +295,14 @@ export interface PineItem {
   bytes: number;
   indent_ok: boolean;
   has_strategy: boolean;
-  source_kind: 'desktop' | 'recrawl' | 'edited' | 'missing' | 'custom';
+  source_kind: 'desktop' | 'recrawl' | 'edited' | 'missing' | 'custom' | 'imported';
+  /** 外部语料（pynecore-strategies）扩展字段 */
+  source_id?: string;
+  market_hint?: string;
+  has_security?: boolean;
+  security_timeframes?: string[];
+  security_markets?: string[];
+  import_status?: string;
   mtime: string;
 }
 

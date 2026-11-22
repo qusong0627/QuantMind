@@ -84,7 +84,8 @@ export default function StrategyPanel({ wb }: { wb: Workbench }) {
           </button>
           {wb.market !== 'cn' && (
             <p className="lab-note">
-              {MARKET_NAME[wb.market]}回测沿用 A 股模板的费用/仓位口径（双边 0.05% / 95% 仓位），
+              {MARKET_NAME[wb.market]}回测使用该市场统一口径（
+              {wb.market === 'hk' ? '0.15%/边（含印花税）' : '0.05%/边'} · 95% 仓位），
               收益仅作策略形态参考，不是该市场的精确撮合成本。
             </p>
           )}
@@ -119,24 +120,57 @@ export default function StrategyPanel({ wb }: { wb: Workbench }) {
             </p>
           )}
 
+          {wb.cur.source_kind === 'imported' &&
+            wb.cur.import_status &&
+            wb.cur.import_status !== 'ready' &&
+            wb.cur.import_status !== 'ready_security' && (
+              <p className="lab-note">
+                该条未进入可运行集（{wb.cur.import_status}）：PyneCore 6.9.2 未实现相关
+                request.*，或 request.security 的标的/周期无法静态解析。清单见
+                data/pine_library/imported_deferred.json。
+              </p>
+            )}
+
+          {wb.cur.source_kind === 'imported' && (
+            <p className="lab-note">
+              外部导入：与 TradingView 计算一致；成本/仓位按当前市场统一覆盖
+              （A股/美股 0.05%/边、港股 0.15%/边）。仅本地研究，不参与评估/晋级。
+              {wb.cur.has_security && wb.cur.security_timeframes?.length
+                ? ` 多周期：${wb.cur.security_timeframes.join(' / ')}。`
+                : ''}
+            </p>
+          )}
+
           <button className="lab-run" disabled={wb.runBusy || wb.running} onClick={wb.run}>
-            {wb.running ? '跑着呢…' : wb.runBusy ? '入队中…' : `转写并回测（${ADJ_LABEL[wb.runAdj]} · ${FREQ_NAME[wb.freq]}）`}
+            {wb.running
+              ? '跑着呢…'
+              : wb.runBusy
+                ? '入队中…'
+                : wb.cur.source_kind === 'imported'
+                  ? `回测（预编译 · ${ADJ_LABEL[wb.runAdj]} · ${FREQ_NAME[wb.freq]}）`
+                  : `转写并回测（${ADJ_LABEL[wb.runAdj]} · ${FREQ_NAME[wb.freq]}）`}
           </button>
           {wb.market !== 'cn' && (
             <p className="lab-note">
-              {MARKET_NAME[wb.market]}回测沿用 A 股模板的费用/仓位口径，收益仅作策略形态参考。
+              {MARKET_NAME[wb.market]}回测使用该市场统一口径（
+              {wb.market === 'hk' ? '0.15%/边（含印花税）' : '0.05%/边'}），
+              收益仅作策略形态参考。
             </p>
           )}
-          <p className="lab-note">
-            AI 转写使用「个人中心 → 其他设置 → AI 服务配置」的 Key / 模型 / 接口地址；
-            未配置时回退服务器 .env。
-          </p>
+          {wb.cur.source_kind !== 'imported' && (
+            <p className="lab-note">
+              AI 转写使用「个人中心 → 其他设置 → AI 服务配置」的 Key / 模型 / 接口地址；
+              未配置时回退服务器 .env。
+            </p>
+          )}
 
           {wb.running && (
             <div className="lab-transpile">
               <span className="tag">{STAGE_LABEL[wb.job?.stage ?? ''] ?? wb.job?.stage}</span>
               <span className="lab-transpile-stats">
-                宿主上转写 + 沙箱回测，通常 10–30 秒（报错自动修，最多 2 轮）
+                {wb.cur.source_kind === 'imported'
+                  ? '宿主上直接沙箱回测（已预编译，不调模型）'
+                  : '宿主上转写 + 沙箱回测，通常 10–30 秒（报错自动修，最多 2 轮）'}
               </span>
             </div>
           )}

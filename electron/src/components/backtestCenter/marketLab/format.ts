@@ -45,6 +45,7 @@ export const KIND_LABEL: Record<string, string> = {
   recrawl: '重爬（缩进完整）',
   edited: '已编辑',
   custom: '我的策略',
+  imported: 'TradingView 导入',
   missing: '缺失',
 };
 
