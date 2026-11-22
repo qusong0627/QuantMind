@@ -153,6 +153,52 @@ class TestProcess:
         with pytest.raises(ValueError):
             w.process({"symbol": "600309.SH"})
 
+    def test_imported_candidate_skips_transpile(self, out_dir, monkeypatch):
+        """外部语料（imported=true）已有 candidate.py：不调 LLM，直接进沙箱。"""
+        d = out_dir / "0010"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "candidate.py").write_text("@pyne\n", encoding="utf-8")
+        (d / "meta.json").write_text(
+            json.dumps({"imported": True, "problems": []}), encoding="utf-8")
+        runs: list[list[str]] = []
+
+        def fake_run(argv, timeout):
+            runs.append(argv)
+            (d / "report.json").write_text(
+                json.dumps({"symbol": "600309.SH", "trades": 1, "stats": {}}),
+                encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(w, "_run", fake_run)
+        monkeypatch.setattr(w, "sandbox_cmd", lambda item_dir, argv: ["bwrap", *argv])
+
+        job = w.process({"id": "0010", "symbol": "600309.SH"})
+        assert job["status"] == "done"
+        assert len(runs) == 1
+        assert runs[0][0] == "bwrap" and "--no-transpile" in runs[0]
+
+    def test_imported_failure_never_calls_repair(self, out_dir, monkeypatch):
+        """语料失败 = 版本/依赖不兼容，不喂回模型改源码（会改策略语义）。"""
+        d = out_dir / "0011"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "candidate.py").write_text("@pyne\n", encoding="utf-8")
+        (d / "meta.json").write_text(
+            json.dumps({"imported": True, "problems": []}), encoding="utf-8")
+        runs: list[list[str]] = []
+
+        def fake_run(argv, timeout):
+            runs.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="AttributeError: ta.foo")
+
+        monkeypatch.setattr(w, "_run", fake_run)
+        monkeypatch.setattr(w, "sandbox_cmd", lambda item_dir, argv: ["bwrap", *argv])
+
+        job = w.process({"id": "0011", "symbol": "600309.SH"})
+        assert job["status"] == "failed" and job["stage"] == "backtest"
+        assert len(runs) == 1
+        assert not any("--repair" in r for r in runs)
+
     def test_backtest_failure_feeds_traceback_back_to_model(self, out_dir, monkeypatch):
         """回测炸了不能只报 exit code——把 traceback 喂回模型修，最多 MAX_REPAIRS 轮。"""
         runs: list[list[str]] = []

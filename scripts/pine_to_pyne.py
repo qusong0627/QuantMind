@@ -36,6 +36,17 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Python 3.14 Linux 默认 forkserver；PyneCore 的 request.security 子进程会在
+# 子进程里再 spawn（嵌套 security），forkserver 下 `_inheriting=True` 直接
+# RuntimeError。宿主链路统一 fork（Linux 可用，容器内不跑 PyneCore）。
+if sys.platform.startswith("linux"):
+    import multiprocessing as _mp
+
+    try:
+        _mp.set_start_method("fork", force=True)
+    except RuntimeError:
+        pass
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -935,7 +946,9 @@ _LIB_NAMES = (
 )
 _DEF_RE = re.compile(r"^\s*def\s+(\w+)\s*\(([^)]*)\)", re.M)
 _TARGET_RE = re.compile(r"^\s*(\w+)\s*(?::[^=\n]+)?=", re.M)
-_IMPORT_RE = re.compile(r"from\s+pynecore\.lib\s+import\s+([^\n]+)")
+_IMPORT_RE = re.compile(
+    r"from\s+pynecore\.lib\s+import\s+(\([^)]*\)|[^\n]+)", re.DOTALL
+)
 # 补 import 用：拆成「前缀 + 名字列表」两组，替换时只重写名字那截
 _LIB_IMPORT_RE = re.compile(r"(from\s+pynecore\.lib\s+import\s+)([^\n]+)")
 # 这些 ta 函数在 pynecore 里返回元组，赋给单个变量后下标会拿到「另一个指标」而不是历史值。
@@ -947,7 +960,10 @@ _EXPR_INDEX_RE = re.compile(r"\)\s*\[\s*\d+\s*\]")
 def _imported_names(code: str) -> set[str]:
     names: set[str] = set()
     for m in _IMPORT_RE.finditer(code):
-        for part in m.group(1).split(","):
+        raw = m.group(1).strip()
+        if raw.startswith("(") and raw.endswith(")"):
+            raw = raw[1:-1]
+        for part in raw.replace("\n", " ").split(","):
             name = part.strip().split(" as ")[0].strip()
             if name:
                 names.add(name)
@@ -979,13 +995,18 @@ def _import_problems(code: str) -> list[str]:
     return [f"用了 {name} 但没从 pynecore.lib 导入" for name in _missing_lib_names(code)]
 
 
-_TYPES_RE = re.compile(r"from\s+pynecore\.types\s+import\s+([^\n]+)")
+_TYPES_RE = re.compile(
+    r"from\s+pynecore\.types\s+import\s+(\([^)]*\)|[^\n]+)", re.DOTALL
+)
 
 
 def _missing_type_names(code: str) -> list[str]:
     imported: set[str] = set()
     for m in _TYPES_RE.finditer(code):
-        for part in m.group(1).split(","):
+        raw = m.group(1).strip()
+        if raw.startswith("(") and raw.endswith(")"):
+            raw = raw[1:-1]
+        for part in raw.replace("\n", " ").split(","):
             name = part.strip().split(" as ")[0].strip()
             if name:
                 imported.add(name)
@@ -1135,8 +1156,12 @@ def _persistent_history_problems(code: str) -> list[str]:
     return out
 
 
-def static_check(code: str) -> list[str]:
-    """语法 + 危险调用 + 导入/命名空间静态检查。返回问题列表（空 = 通过）。"""
+def static_check(code: str, *, enforce_sizing: bool = True) -> list[str]:
+    """语法 + 危险调用 + 导入/命名空间静态检查。返回问题列表（空 = 通过）。
+
+    ``enforce_sizing=False`` 用于外部语料：其 decorator 保留 TradingView 原设置，
+    运行时由 ``market_lab`` 的 market preset 统一覆盖，不在静态闸里要求改写源码。
+    """
     problems: list[str] = []
     for pat, why in BANNED:
         hit = re.search(pat, code)
@@ -1153,7 +1178,8 @@ def static_check(code: str) -> list[str]:
     problems += _cond_series_problems(code)
     problems += _list_container_problems(code)
     problems += _list_repeat_problems(code)
-    problems += _sizing_problems(code)
+    if enforce_sizing:
+        problems += _sizing_problems(code)
     try:
         compile(code, "<candidate>", "exec")
     except SyntaxError as exc:
@@ -1170,7 +1196,10 @@ def _refresh_problems(item_id: str, meta: dict) -> dict:
     cand = _out(item_id) / "candidate.py"
     if not cand.exists():
         return meta
-    problems = static_check(cand.read_text(encoding="utf-8"))
+    problems = static_check(
+        cand.read_text(encoding="utf-8"),
+        enforce_sizing=not meta.get("imported"),
+    )
     if problems == (meta.get("problems") or []):
         return meta
     meta = {**meta, "problems": problems,
@@ -1365,8 +1394,11 @@ def validate(item_id: str, symbol: str, adj: str = "backward", market: str = "cn
     if not cand.exists():
         raise SystemExit(f"没有候选文件：{cand}（先跑 --id {item_id}）")
     t0 = time.time()
+    # 运行口径统一：外部语料与 LLM 转写都按市场预设覆盖 decorator（成本/仓位/币种）。
+    # 原 candidate.py 不动（见 backend/services/agent_arena/pyne_overrides.py）。
+    preset = ml.STRATEGY_PRESETS.get(ml.normalize_market(market))
     res = ml.run_script_file(cand, symbol, adj=adj, want_indicators=True,
-                             market=market, freq=freq)
+                             market=market, freq=freq, strategy_settings=preset)
     stats = res.get("stats") or {}
     trades = res.get("trades") or []
     report = {"id": item_id, "symbol": symbol, "adj": adj, "market": market,

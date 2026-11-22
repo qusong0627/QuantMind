@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 import tempfile
 import threading
 from pathlib import Path
 
 from backend.services.agent_arena import arena_config
+from backend.services.agent_arena import pyne_overrides as po
 
 # PyneCore 每次 import 策略模块都会把 <script>.toml 重写一遍（core/script.py 的
 # _decorate）。批量回测是多进程、且每个回测都要清缓存重导入 → 并发写同一个 toml，
@@ -138,6 +140,39 @@ def available_freqs(market: str = "cn") -> list[str]:
         if (_market_root(m) / "1_kline_data" / d).is_dir():
             out.append(freq)
     return out
+
+
+# ---------- 外部 Pyne 语料的运行口径（2026-11-21） ----------
+# 语料（pynecore-strategies）的 decorator 保留了各自在 TradingView 上的成本/仓位，
+# 不能直接横比。运行时代码复制一份并重写 decorator（见 pyne_overrides），
+# 原文件不动；每个市场一套预设（港股含印花税，成本更高）。
+STRATEGY_PRESETS: dict[str, dict[str, str]] = {
+    m: po.preset_for_market(m) for m in MARKET_SPECS
+}
+
+
+def pine_lib_root() -> Path | None:
+    """``import lib.<Publisher>...`` 的父目录（其下必须有 ``lib/`` 包）。
+
+    ``scripts/import_pynecore_corpus.py`` 会把语料的 ``scripts/lib`` 复制到
+    ``<数据根>/pine_library/lib``，这样候选脚本落在 ``data/pine_transpile/<id>/``
+    时仍能解析库依赖。``QM_PINE_LIB_DIR`` 可覆盖。
+    """
+    env = (os.getenv("QM_PINE_LIB_DIR") or "").strip()
+    cands: list[Path] = [Path(env)] if env else []
+    cands.append(arena_config.data_root() / "pine_library")
+    for p in cands:
+        if (p / "lib").is_dir():
+            return p
+    return None
+
+
+def ensure_pine_lib_path() -> Path | None:
+    """把语料 lib 根挂进 ``sys.path``（幂等）；返回实际根或 None。"""
+    root = pine_lib_root()
+    if root is not None and str(root) not in sys.path:
+        sys.path.append(str(root))
+    return root
 
 
 def market_meta() -> list[dict]:
@@ -653,16 +688,101 @@ def _run_strategy_on_bars(strategy_id: str, bars: list[dict], symbol: str, adj: 
 def run_script_file(script: Path, symbol: str, adj: str = "backward", start: str = "",
                     end: str = "", overrides: dict | None = None,
                     want_indicators: bool = False, market: str = "cn",
-                    freq: str = "1d") -> dict:
+                    freq: str = "1d", want_trades: bool = True,
+                    strategy_settings: dict[str, str] | None = None,
+                    security_data: dict | None = None,
+                    auto_security: bool = True) -> dict:
     """跑任意 Pyne 脚本文件（不进策略注册表）。AI 转写候选的验证走这条路。"""
     script = Path(script)
     if not script.is_file():
         raise FileNotFoundError(f"脚本文件缺失: {script}")
     bars = load_klines(symbol, adj=adj, limit=0, start=start, end=end,
                        market=market, freq=freq)
-    return _run_script(script, script.stem, script.stem, bars, symbol, adj,
-                       overrides, want_trades=True, want_indicators=want_indicators,
-                       market=market, freq=freq)
+    return run_script_on_bars(
+        script, bars, symbol, adj=adj, market=market, freq=freq,
+        overrides=overrides, want_trades=want_trades,
+        want_indicators=want_indicators, strategy_settings=strategy_settings,
+        security_data=security_data, auto_security=auto_security,
+    )
+
+
+def _run_with_security(
+    script: Path, sid: str, nm: str, bars: list[dict], symbol: str, adj: str,
+    overrides: dict | None, want_trades: bool, want_indicators: bool,
+    market: str, freq: str, security_data: dict | None, auto_security: bool,
+) -> dict:
+    """有 request.security 时按脚本解析周期并构造 `.ohlcv`；否则直接跑。"""
+    if security_data is None and auto_security:
+        try:
+            source = script.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            source = ""
+        if "request.security" in source:
+            from backend.services.agent_arena import pyne_security as ps
+
+            with tempfile.TemporaryDirectory(prefix="pyne_sec_") as sd:
+                security_data = ps.build_security_data(
+                    script, symbol=symbol, market=normalize_market(market),
+                    chart_freq=freq, chart_bars=bars, out_dir=Path(sd),
+                )
+                return _run_script(
+                    script, sid, nm, bars, symbol, adj, overrides,
+                    want_trades, want_indicators, market, freq,
+                    security_data=security_data,
+                )
+    return _run_script(
+        script, sid, nm, bars, symbol, adj, overrides,
+        want_trades, want_indicators, market, freq,
+        security_data=security_data,
+    )
+
+
+def run_script_on_bars(
+    script: Path,
+    bars: list[dict],
+    symbol: str,
+    *,
+    adj: str = "backward",
+    market: str = "cn",
+    freq: str = "1d",
+    overrides: dict | None = None,
+    want_trades: bool = True,
+    want_indicators: bool = False,
+    strategy_settings: dict[str, str] | None = None,
+    strategy_id: str | None = None,
+    name: str | None = None,
+    security_data: dict | None = None,
+    auto_security: bool = True,
+) -> dict:
+    """已取好的 K 线 → 跑任意 Pyne 脚本（批量回测复用同一份 bars）。
+
+    ``strategy_settings`` 非空时把脚本复制到临时目录并重写 ``@script.strategy``
+    的成本/仓位/币种参数（见 :mod:`pyne_overrides`），原文件一个字节不动。
+    ``strategy_id`` / ``name`` 用于报告元数据；缺省用脚本文件名。
+    ``security_data`` 可预先构造（批量复用）；缺省时 ``auto_security`` 会按脚本
+    里的 ``request.security`` 周期自动聚合（见 :mod:`pyne_security`）。
+    """
+    script = Path(script)
+    if not script.is_file():
+        raise FileNotFoundError(f"脚本文件缺失: {script}")
+    if not bars:
+        raise ValueError(f"K线为空: {symbol}")
+    ensure_pine_lib_path()
+    sid = strategy_id or script.stem
+    nm = name or script.stem
+    if strategy_settings:
+        with tempfile.TemporaryDirectory(prefix="pyne_run_") as td:
+            run_path = po.materialize_script(script, strategy_settings, Path(td))
+            return _run_with_security(
+                run_path, sid, nm, bars, symbol, adj, overrides,
+                want_trades, want_indicators, market, freq,
+                security_data, auto_security,
+            )
+    return _run_with_security(
+        script, sid, nm, bars, symbol, adj, overrides,
+        want_trades, want_indicators, market, freq,
+        security_data, auto_security,
+    )
 
 
 def _price_ref(bars: list[dict]) -> float | None:
@@ -674,7 +794,7 @@ def _price_ref(bars: list[dict]) -> float | None:
 def _run_script(script: Path, strategy_id: str, name: str, bars: list[dict], symbol: str,
                 adj: str, overrides: dict | None, want_trades: bool,
                 want_indicators: bool = False, market: str = "cn",
-                freq: str = "1d") -> dict:
+                freq: str = "1d", security_data: dict | None = None) -> dict:
     _require_pyne()
     from pynecore.core.script_runner import ScriptRunner
 
@@ -697,6 +817,7 @@ def _run_script(script: Path, strategy_id: str, name: str, bars: list[dict], sym
                 syminfo=_syminfo(symbol, display_name, m),
                 plot_path=None, strat_path=strat_csv, trade_path=trade_csv,
                 inputs=overrides or None,
+                security_data=security_data,
             )
             if want_indicators:
                 from . import lab_indicators

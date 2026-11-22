@@ -153,30 +153,45 @@ def process(req: dict, item_dir: Path | None = None,
             return dict(fields, id=item_id, updated=_now())
         return _write_job_at(job_path, id=item_id, **fields)
 
-    write_job(status="running", stage="transpile", symbol=symbol, adj=adj,
-              market=market, freq=freq, error="", started=_now())
+    # 外部语料（pynecore-strategies 预编译产物）：candidate.py 已在盘，跳过 LLM
+    # 转写，直接走静态闸 + 沙箱回测。失败也不进 repair——改语料源码等于改策略语义。
+    imported = bool(_read_meta(item_dir).get("imported")) and (
+        item_dir / "candidate.py"
+    ).is_file()
 
-    # 候选与正式产物走同一套 CLI、同一道静态闸、同一个沙箱，只有路径改道。
+    if imported:
+        write_job(status="running", stage="backtest", symbol=symbol, adj=adj,
+                  market=market, freq=freq, error="", started=_now())
+    else:
+        write_job(status="running", stage="transpile", symbol=symbol, adj=adj,
+                  market=market, freq=freq, error="", started=_now())
+
+        # 候选与正式产物走同一套 CLI、同一道静态闸、同一个沙箱，只有路径改道。
+        where = ["--out", str(item_dir)]
+        if source:
+            where += ["--source", source]
+
+        # ---- 1. 转写（联网；只生成文本，不执行候选）----
+        argv = ["--id", item_id, *where]
+        if model:
+            argv += ["--model", model]
+        if req.get("force"):
+            argv.append("--force")
+        try:
+            got = _run([sys.executable, str(CLI), *argv], TRANSPILE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return write_job(status="failed", stage="transpile",
+                             error=f"转写超时（>{TRANSPILE_TIMEOUT}s）")
+        if got.returncode not in (0, 2):
+            detail = _last_line(got.stdout + "\n" + got.stderr)
+            return write_job(status="failed", stage="transpile",
+                             error=detail or f"转写失败（exit {got.returncode}）",
+                             log=_tail(got.stdout + got.stderr))
+
+    # 沙箱回测命令的公共参数（导入条目也走同一道闸）
     where = ["--out", str(item_dir)]
     if source:
         where += ["--source", source]
-
-    # ---- 1. 转写（联网；只生成文本，不执行候选）----
-    argv = ["--id", item_id, *where]
-    if model:
-        argv += ["--model", model]
-    if req.get("force"):
-        argv.append("--force")
-    try:
-        got = _run([sys.executable, str(CLI), *argv], TRANSPILE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return write_job(status="failed", stage="transpile",
-                         error=f"转写超时（>{TRANSPILE_TIMEOUT}s）")
-    if got.returncode not in (0, 2):
-        detail = _last_line(got.stdout + "\n" + got.stderr)
-        return write_job(status="failed", stage="transpile",
-                         error=detail or f"转写失败（exit {got.returncode}）",
-                         log=_tail(got.stdout + got.stderr))
 
     # ---- 2. 静态闸 + 沙箱回测：哪一段不过都把原因喂回模型重修，最多 MAX_REPAIRS 轮 ----
     # 首次转写的语法错误也走这个循环：实测 30 条抽样里 8 条卡在 Pine 残留语法，
@@ -215,6 +230,12 @@ def process(req: dict, item_dir: Path | None = None,
                 stage = "backtest"
                 detail = _last_line(got.stdout + "\n" + got.stderr)
                 feedback = _tail(got.stdout + "\n" + got.stderr)
+
+        if imported:
+            # 语料候选失败 = 版本/依赖不兼容，不喂回模型改源码（会改策略语义）
+            return write_job(status="failed", stage=stage,
+                             error=detail or "失败", problems=problems,
+                             log=_tail((got.stdout + "\n" + got.stderr) if got else ""))
 
         if attempt >= MAX_REPAIRS:
             return write_job(status="failed", stage=stage,

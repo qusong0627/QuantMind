@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.services.agent_arena import pine_library as pl  # noqa: E402
+from backend.services.agent_arena import market_lab as ml  # noqa: E402
 from scripts import pine_library_index as pli  # noqa: E402
 
 
@@ -175,7 +176,13 @@ def queue(lib, tmp_path, monkeypatch):
     d = tmp_path / "pine_transpile"
     monkeypatch.setattr(pl, "transpile_dir", lambda: d)
     monkeypatch.setattr(pl, "queue_dir", lambda: d / "queue")
-    monkeypatch.setattr(pl, "_check_symbol", lambda s: s)
+    monkeypatch.setattr(pl, "_check_symbol", lambda s, m="cn": s)
+    # conftest 把 QM_ARENA_DATA_ROOT 沙箱到 tmp，真实复权目录不存在；
+    # 本组只测队列契约，不测数据落盘，直接放行数据可用性。
+    monkeypatch.setattr(
+        ml, "available_adjs",
+        lambda market="cn": ["unadjusted", "forward", "backward"],
+    )
     return d
 
 
@@ -210,7 +217,7 @@ class TestBacktestQueue:
     def test_check_symbol_rejects_unknown(self, monkeypatch):
         from backend.services.agent_arena import market_lab as ml
 
-        monkeypatch.setattr(ml, "_names", lambda: {"600309.SH": "万华化学"})
+        monkeypatch.setattr(ml, "_names", lambda m="cn": {"600309.SH": "万华化学"})
         assert pl._check_symbol("600309") == "600309.SH"
         with pytest.raises(ValueError):
             pl._check_symbol("999999.SZ")
@@ -379,7 +386,11 @@ def staged(lib, chat, tmp_path, monkeypatch):
     monkeypatch.setattr(pl, "versions_dir", lambda: tmp_path / "versions")
     monkeypatch.setattr(pl, "transpile_dir", lambda: tmp_path / "pine_transpile")
     monkeypatch.setattr(pl, "queue_dir", lambda: tmp_path / "pine_transpile/queue")
-    monkeypatch.setattr(pl, "_check_symbol", lambda s: s)
+    monkeypatch.setattr(pl, "_check_symbol", lambda s, m="cn": s)
+    monkeypatch.setattr(
+        ml, "available_adjs",
+        lambda market="cn": ["unadjusted", "forward", "backward"],
+    )
     return lib
 
 
