@@ -877,6 +877,209 @@ async def get_active_training_run(
     return latest
 
 
+def _finite_or_none(value: Any) -> float | None:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _first_metric(*values: Any) -> float | None:
+    for value in values:
+        num = _finite_or_none(value)
+        if num is not None:
+            return num
+    return None
+
+
+def _training_run_summary(
+    row: dict[str, Any], strict_row: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """训练记录列表的一行摘要（结果页/日志仍走 detail 端点）。"""
+    req = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
+    res = row.get("result") if isinstance(row.get("result"), dict) else {}
+    meta = res.get("metadata") if isinstance(res.get("metadata"), dict) else {}
+    metrics = res.get("metrics") if isinstance(res.get("metrics"), dict) else {}
+    test = metrics.get("test") if isinstance(metrics.get("test"), dict) else {}
+    val = metrics.get("val") if isinstance(metrics.get("val"), dict) else {}
+    eval_report = (
+        res.get("eval_report")
+        or meta.get("eval_report")
+        or {}
+    )
+    by_split = (
+        eval_report.get("by_split")
+        if isinstance(eval_report, dict)
+        and isinstance(eval_report.get("by_split"), dict)
+        else {}
+    )
+    test_split = by_split.get("test") if isinstance(by_split.get("test"), dict) else {}
+    val_split = by_split.get("val") if isinstance(by_split.get("val"), dict) else {}
+    registration = (
+        res.get("model_registration")
+        if isinstance(res.get("model_registration"), dict)
+        else {}
+    )
+    created = row.get("created_at")
+    updated = row.get("updated_at")
+    duration = None
+    if isinstance(created, datetime) and isinstance(updated, datetime):
+        duration = max(0.0, (updated - created).total_seconds())
+    context = req.get("context") if isinstance(req.get("context"), dict) else {}
+    market = str(req.get("market") or context.get("market") or "").upper()
+    strict_summary = None
+    if strict_row is not None:
+        from backend.services.engine.training.run_compare import (
+            summarize_strict as _summarize_strict,
+        )
+
+        strict_summary = _summarize_strict(strict_row)
+    # 列表 SQL 只取长度（COALESCE(char_length(logs),0)），不把大日志整列拉回来；
+    # 单测直接喂原始 row 时仍兼容 logs 字符串。
+    logs_chars = row.get("logs_chars")
+    if logs_chars is None:
+        logs_chars = len(row.get("logs") or "")
+    logs_chars = int(logs_chars or 0)
+    return {
+        "run_id": row.get("id"),
+        "status": row.get("status"),
+        "progress": int(row.get("progress") or 0),
+        "created_at": created.isoformat() if isinstance(created, datetime) else None,
+        "updated_at": updated.isoformat() if isinstance(updated, datetime) else None,
+        "duration_seconds": round(duration, 1) if duration is not None else None,
+        "display_name": (
+            req.get("display_name")
+            or req.get("job_name")
+            or meta.get("display_name")
+            or row.get("id")
+        ),
+        "model_type": req.get("model_type") or meta.get("model_type") or "",
+        "market": market,
+        "target_horizon_days": req.get("target_horizon_days")
+        or meta.get("target_horizon_days"),
+        "feature_count": meta.get("feature_count") or len(req.get("features") or []),
+        "model_id": meta.get("model_id") or registration.get("model_id") or "",
+        "metrics": {
+            "test_rank_ic": _first_metric(test.get("rank_ic"), test_split.get("mean")),
+            "test_icir": _first_metric(test.get("icir"), test_split.get("icir")),
+            "test_auc": _first_metric(test.get("auc")),
+            "test_rmse": _first_metric(test.get("rmse")),
+            "val_rank_ic": _first_metric(val.get("rank_ic"), val_split.get("mean")),
+            "val_icir": _first_metric(val.get("icir"), val_split.get("icir")),
+        },
+        "strict": strict_summary,
+        "has_result": bool(res),
+        "has_logs": logs_chars > 0,
+        "logs_chars": logs_chars,
+    }
+
+
+@router.get("/training-runs", summary="训练记录列表（用户态，训练历史）")
+async def list_training_runs(
+    status: str | None = Query(None, description="按状态过滤（completed/failed/running…）"),
+    market: str | None = Query(None, description="按市场过滤（CN/HK/US/…）"),
+    q: str | None = Query(None, description="搜索 run_id / 模型名"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """当前用户的训练历史（admin_training_jobs），按创建时间倒序。
+
+    列表只回摘要（模型名/时间/耗时/测试段指标/严格评估 headline/日志有无）；
+    点进某一条时前端再拉 ``/training-runs/{run_id}``（日志+完整结果）与
+    ``/training-runs/{run_id}/request``（提交载荷），复用训练结束时的结果页。
+    """
+    from backend.shared.database_manager_v2 import get_session
+
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "unknown")
+    where = ["tenant_id = :tenant_id", "user_id = :user_id"]
+    params: dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "limit": limit,
+        "offset": offset,
+    }
+    if status:
+        where.append("status = :status")
+        params["status"] = status
+    if market:
+        where.append(
+            "UPPER(COALESCE(request_payload->>'market', "
+            "request_payload->'context'->>'market', '')) = :market"
+        )
+        params["market"] = market.upper()
+    if q:
+        where.append(
+            "(id ILIKE :q OR request_payload->>'display_name' ILIKE :q "
+            "OR request_payload->>'job_name' ILIKE :q)"
+        )
+        params["q"] = f"%{q.strip()}%"
+    where_sql = " AND ".join(where)
+
+    async with get_session(read_only=True) as db:
+        total = int(
+            (
+                await db.execute(
+                    text(f"SELECT COUNT(*) FROM admin_training_jobs WHERE {where_sql}"),
+                    params,
+                )
+            ).scalar()
+            or 0
+        )
+        rows = (
+            (
+                await db.execute(
+                    text(
+                        f"""
+                        SELECT id, status, progress, created_at, updated_at,
+                               request_payload, result,
+                               COALESCE(char_length(logs), 0) AS logs_chars
+                        FROM admin_training_jobs
+                        WHERE {where_sql}
+                        ORDER BY created_at DESC
+                        LIMIT :limit OFFSET :offset
+                        """
+                    ),
+                    params,
+                )
+            )
+            .mappings()
+            .all()
+        )
+        run_ids = [str(r.get("id")) for r in rows if r.get("id")]
+        strict_map: dict[str, dict[str, Any]] = {}
+        if run_ids:
+            strict_rows = (
+                (
+                    await db.execute(
+                        text(
+                            """
+                            SELECT run_id, status, report, error
+                            FROM qm_training_strict_reports
+                            WHERE run_id = ANY(:run_ids)
+                            """
+                        ),
+                        {"run_ids": run_ids},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            strict_map = {str(r["run_id"]): dict(r) for r in strict_rows}
+    items = [
+        _training_run_summary(dict(r), strict_map.get(str(r.get("id"))))
+        for r in rows
+    ]
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 @router.get(
     "/training-runs/compare",
     summary="训练 run 对比（同口径严格评估 + 配置 diff + 单轴判定）",

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Brain, ChevronRight, Play, Settings2, BarChart, Database,
-  Copy, Sparkles, RefreshCcw, Target, Upload, Layers, Square
+  Copy, Sparkles, RefreshCcw, Target, Upload, Layers, Square, History
 } from 'lucide-react';
 import {
   Button, Space, Tag, Typography, message, Card, Select, Modal, Alert, Tooltip
@@ -24,6 +24,7 @@ import type { StockPoolOption } from '../services/stockPoolOptionService';
 import { TrainingTargetConfig } from './training/TrainingTargetConfig';
 import { ParameterConfig } from './training/ParameterConfig';
 import { TrainingConsole } from './training/TrainingConsole';
+import { TrainingRunHistory } from './training/TrainingRunHistory';
 import { TrainingResultView } from './training/TrainingResultView';
 
 const { Title } = Typography;
@@ -261,6 +262,8 @@ export const ModelTrainingPage: React.FC = () => {
   const [factorFilter, setFactorFilter] = useState<TrainingFactorFilterConfig>({ ...DEFAULT_FACTOR_FILTER });
   // 股票池（第一步数据范围）：null 表示全市场训练，否则为 pool:<code> 引用
   const [poolPickerOpen, setPoolPickerOpen] = useState(false);
+  // 训练记录（历史训练列表；点进去复用训练结束时的结果页）
+  const [showRunHistory, setShowRunHistory] = useState(false);
 
   const timersRef = useRef<number[]>([]);
   const pollTimerRef = useRef<number | null>(null);
@@ -1237,6 +1240,7 @@ export const ModelTrainingPage: React.FC = () => {
                   </Button>
                 </>
               )}
+              <Button size="small" icon={<History size={14}/>} className="rounded-xl h-8 font-bold px-3" onClick={() => setShowRunHistory(true)}>训练记录</Button>
               <Button size="small" icon={<RefreshCcw size={14}/>} className="rounded-xl h-8 font-bold px-3" onClick={handleResetAll} disabled={isTrainingInProgress}>清空</Button>
               {currentStep === 3 && (
                 <>
@@ -1498,6 +1502,10 @@ export const ModelTrainingPage: React.FC = () => {
           </div>
         )}
       </Modal>
+      <TrainingRunHistory
+        open={showRunHistory}
+        onClose={() => setShowRunHistory(false)}
+      />
       <StockPoolPickerModal
         open={poolPickerOpen}
         onClose={() => setPoolPickerOpen(false)}

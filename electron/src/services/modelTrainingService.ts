@@ -169,6 +169,52 @@ export interface ModelTrainingRunRequest {
   request: Record<string, unknown>;
 }
 
+/** 训练记录列表的一行（/models/training-runs 摘要） */
+export interface TrainingRunHistoryItem {
+  run_id: string;
+  status: string;
+  progress: number;
+  created_at: string | null;
+  updated_at: string | null;
+  duration_seconds: number | null;
+  display_name: string;
+  model_type: string;
+  market: string;
+  target_horizon_days: number | null;
+  feature_count: number;
+  model_id: string;
+  metrics: {
+    test_rank_ic: number | null;
+    test_icir: number | null;
+    test_auc: number | null;
+    test_rmse: number | null;
+    val_rank_ic: number | null;
+    val_icir: number | null;
+  };
+  strict: {
+    status?: string;
+    segment?: string;
+    batches?: number | null;
+    total_25bp?: number | null;
+    mdd?: number | null;
+    excess_hs300?: number | null;
+    hac_t?: number | null;
+    psr?: number | null;
+    turnover_per_batch?: number | null;
+    error?: string;
+  } | null;
+  has_result: boolean;
+  has_logs: boolean;
+  logs_chars: number;
+}
+
+export interface TrainingRunHistoryResponse {
+  items: TrainingRunHistoryItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface UserModelRecord {
   tenant_id: string;
   user_id: string;
@@ -861,6 +907,26 @@ class ModelTrainingService {
     return resp.data;
   }
 
+  /** 训练记录列表（训练历史）：摘要 + 分页；详情/日志走 getTrainingRun。 */
+  async listTrainingRuns(params: {
+    status?: string;
+    market?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<TrainingRunHistoryResponse> {
+    const resp = await this.client.get<TrainingRunHistoryResponse>('/models/training-runs', {
+      params: {
+        ...(params.status ? { status: params.status } : {}),
+        ...(params.market ? { market: params.market } : {}),
+        ...(params.q ? { q: params.q } : {}),
+        limit: params.limit ?? 50,
+        offset: params.offset ?? 0,
+      },
+    });
+    return resp.data;
+  }
+
   async getTrainingRun(runId: string): Promise<ModelTrainingRunStatus> {
     const resp = await this.client.get<ModelTrainingRunStatus>(`/models/training-runs/${runId}`);
     return resp.data;
@@ -901,6 +967,25 @@ class ModelTrainingService {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 重算严格评估（管理员，后台异步）。
+   * 老模型没有严格评估时由结果页按钮触发；非管理员会收到 403。
+   */
+  async recomputeTrainingStrictReport(runId: string): Promise<{ ok: boolean; scheduled: boolean }> {
+    const resp = await this.client.post<{ ok: boolean; scheduled: boolean }>(
+      `/admin/models/training-runs/${runId}/strict-report`,
+    );
+    return resp.data;
+  }
+
+  /** 重算数据审计（管理员，后台异步）。老模型由结果页按钮触发。 */
+  async recomputeTrainingAuditReport(runId: string): Promise<{ ok: boolean; scheduled: boolean }> {
+    const resp = await this.client.post<{ ok: boolean; scheduled: boolean }>(
+      `/admin/models/training-runs/${runId}/audit-report`,
+    );
+    return resp.data;
   }
 
   /**

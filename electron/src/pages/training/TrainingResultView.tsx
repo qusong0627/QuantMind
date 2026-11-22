@@ -1,5 +1,5 @@
 import React from 'react';
-import { Card, Divider, Alert, Tag, Space, Typography, Empty, Button, Table, Tooltip as AntTooltip, Modal, Input } from 'antd';
+import { Card, Divider, Alert, Tag, Space, Typography, Empty, Button, Table, Tooltip as AntTooltip, Modal, Input, message } from 'antd';
 import { BarChart, MonitorPlay, Activity, Download, Filter } from 'lucide-react';
 import {
   BarChart as ReBarChart,
@@ -31,6 +31,7 @@ import {
   type TrainingAuditRow,
   type TrainingRunCompareResult,
 } from '../../services/modelTrainingService';
+import { useAuth } from '../../features/auth/hooks';
 
 const { Text } = Typography;
 
@@ -351,14 +352,32 @@ const LineageItem: React.FC<{ label: string; value?: string }> = ({ label, value
 
 const SEGMENT_LABELS: Record<string, string> = { valid: '验证集', test: '测试集', custom: '自定义窗口' };
 
+// 严格评估/数据审计都是后台异步任务：提交后按 8s 轮询，最多 12 分钟（90 次）。
+const REPORT_POLL_INTERVAL_MS = 8000;
+const REPORT_POLL_MAX_ATTEMPTS = 90;
+
+const extractHttpStatus = (err: unknown): number | null => {
+  const status = (err as { response?: { status?: number } })?.response?.status;
+  return typeof status === 'number' ? status : null;
+};
+
 /** WP2 严格评估：净 Top-N（可成交 + 三档成本 + HAC/PSR + 换手）。 */
 const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
   const [loading, setLoading] = React.useState(false);
   const [row, setRow] = React.useState<StrictEvalReportRow | null>(null);
+  const [refreshKey, setRefreshKey] = React.useState(0);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
+  const pollCountRef = React.useRef(0);
+  const { user } = useAuth();
+  const isAdmin = Boolean(user?.is_admin);
+
+  const reload = React.useCallback(() => setRefreshKey((key) => key + 1), []);
 
   React.useEffect(() => {
     if (!runId) {
       setRow(null);
+      setPending(false);
       return;
     }
     let cancelled = false;
@@ -366,7 +385,9 @@ const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
     modelTrainingService
       .getTrainingStrictReport(runId)
       .then((data) => {
-        if (!cancelled) setRow(data);
+        if (cancelled) return;
+        setRow(data);
+        if (data?.status === 'ready' || data?.status === 'failed') setPending(false);
       })
       .catch(() => {
         if (!cancelled) setRow(null);
@@ -377,7 +398,40 @@ const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, refreshKey]);
+
+  // 重算提交后（或后台已在计算）自动轮询，完成后停止。
+  React.useEffect(() => {
+    const active = pending || row?.status === 'running';
+    if (!active) {
+      pollCountRef.current = 0;
+      return;
+    }
+    if (pollCountRef.current >= REPORT_POLL_MAX_ATTEMPTS) return;
+    const timer = window.setTimeout(() => {
+      pollCountRef.current += 1;
+      reload();
+    }, REPORT_POLL_INTERVAL_MS);
+    return () => window.clearTimeout(timer);
+  }, [pending, row?.status, refreshKey, reload]);
+
+  const submitRecompute = async () => {
+    if (!runId || submitting) return;
+    setSubmitting(true);
+    try {
+      await modelTrainingService.recomputeTrainingStrictReport(runId);
+      message.success('已提交重算，后台计算中…');
+      pollCountRef.current = 0;
+      setPending(true);
+      reload();
+    } catch (err: unknown) {
+      message.error(
+        extractHttpStatus(err) === 403 ? '需要管理员权限才能重算严格评估' : '提交重算失败，请稍后重试',
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   if (!runId) return null;
 
@@ -400,21 +454,40 @@ const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
         </span>
       }
     >
-      {loading ? (
+      {row?.status === 'running' || pending ? (
+        <div className="py-6 text-center text-xs text-slate-500">
+          {pending && row?.status !== 'running' ? '已提交重算，后台计算中…' : '严格评估计算中…'}
+          <Button type="link" size="small" className="!px-2 !text-xs" onClick={reload}>
+            刷新
+          </Button>
+        </div>
+      ) : loading ? (
         <div className="py-6 text-center text-xs text-slate-500">正在加载严格评估…</div>
       ) : null}
-      {!loading && row?.status === 'running' ? (
-        <div className="py-6 text-center text-xs text-slate-500">严格评估计算中…</div>
-      ) : null}
-      {!loading && (!row || row.status === 'failed') ? (
+      {!loading && !pending && row?.status !== 'running' && (!row || row.status === 'failed') ? (
         <Alert
           type={row?.status === 'failed' ? 'error' : 'info'}
           showIcon
           className="rounded-2xl"
           message={row?.status === 'failed' ? '严格评估失败' : '严格评估尚未生成'}
           description={
-            row?.error ||
-            '训练完成后会自动计算净 Top-N；老模型可在后台点「重算严格评估」。'
+            <div className="space-y-2">
+              <div>
+                {row?.error || '训练完成后会自动计算净 Top-N；老模型可在这里直接重算。'}
+              </div>
+              {isAdmin ? (
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={submitting}
+                  onClick={() => void submitRecompute()}
+                >
+                  重算严格评估
+                </Button>
+              ) : (
+                <span className="text-[11px] text-slate-400">重算需要管理员权限。</span>
+              )}
+            </div>
           }
         />
       ) : null}
@@ -643,10 +716,19 @@ const CompareRunsModal: React.FC<{
 const AuditSection: React.FC<{ runId?: string }> = ({ runId }) => {
   const [loading, setLoading] = React.useState(false);
   const [row, setRow] = React.useState<TrainingAuditRow | null>(null);
+  const [refreshKey, setRefreshKey] = React.useState(0);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
+  const pollCountRef = React.useRef(0);
+  const { user } = useAuth();
+  const isAdmin = Boolean(user?.is_admin);
+
+  const reload = React.useCallback(() => setRefreshKey((key) => key + 1), []);
 
   React.useEffect(() => {
     if (!runId) {
       setRow(null);
+      setPending(false);
       return;
     }
     let cancelled = false;
@@ -654,7 +736,9 @@ const AuditSection: React.FC<{ runId?: string }> = ({ runId }) => {
     modelTrainingService
       .getTrainingAuditReport(runId)
       .then((data) => {
-        if (!cancelled) setRow(data);
+        if (cancelled) return;
+        setRow(data);
+        if (data) setPending(false);
       })
       .catch(() => {
         if (!cancelled) setRow(null);
@@ -665,7 +749,39 @@ const AuditSection: React.FC<{ runId?: string }> = ({ runId }) => {
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, refreshKey]);
+
+  // 数据审计只在完成时落库（没有 running 行），轮询只由 pending 驱动。
+  React.useEffect(() => {
+    if (!pending) {
+      pollCountRef.current = 0;
+      return;
+    }
+    if (pollCountRef.current >= REPORT_POLL_MAX_ATTEMPTS) return;
+    const timer = window.setTimeout(() => {
+      pollCountRef.current += 1;
+      reload();
+    }, REPORT_POLL_INTERVAL_MS);
+    return () => window.clearTimeout(timer);
+  }, [pending, refreshKey, reload]);
+
+  const submitRecompute = async () => {
+    if (!runId || submitting) return;
+    setSubmitting(true);
+    try {
+      await modelTrainingService.recomputeTrainingAuditReport(runId);
+      message.success('已提交重算，后台计算中…');
+      pollCountRef.current = 0;
+      setPending(true);
+      reload();
+    } catch (err: unknown) {
+      message.error(
+        extractHttpStatus(err) === 403 ? '需要管理员权限才能重算数据审计' : '提交重算失败，请稍后重试',
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   if (!runId) return null;
 
@@ -689,14 +805,39 @@ const AuditSection: React.FC<{ runId?: string }> = ({ runId }) => {
         </span>
       }
     >
-      {loading ? <div className="py-4 text-center text-xs text-slate-500">正在加载数据审计…</div> : null}
-      {!loading && (!row || row.status === 'failed') ? (
+      {pending ? (
+        <div className="py-4 text-center text-xs text-slate-500">
+          已提交重算，后台计算中…
+          <Button type="link" size="small" className="!px-2 !text-xs" onClick={reload}>
+            刷新
+          </Button>
+        </div>
+      ) : loading ? (
+        <div className="py-4 text-center text-xs text-slate-500">正在加载数据审计…</div>
+      ) : null}
+      {!loading && !pending && (!row || row.status === 'failed') ? (
         <Alert
           type={row?.status === 'failed' ? 'error' : 'info'}
           showIcon
           className="rounded-2xl"
           message={row?.status === 'failed' ? '数据审计失败' : '数据审计尚未生成'}
-          description={row?.error || '训练完成后会自动运行；老模型可在后台点「重算数据审计」。'}
+          description={
+            <div className="space-y-2">
+              <div>{row?.error || '训练完成后会自动运行；老模型可在这里直接重算。'}</div>
+              {isAdmin ? (
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={submitting}
+                  onClick={() => void submitRecompute()}
+                >
+                  重算数据审计
+                </Button>
+              ) : (
+                <span className="text-[11px] text-slate-400">重算需要管理员权限。</span>
+              )}
+            </div>
+          }
         />
       ) : null}
       {!loading && row?.status === 'ready' && row.report ? (
