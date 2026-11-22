@@ -655,6 +655,10 @@ _ENSEMBLE_FUSION_STRATEGIES = (
     "periodic_hierarchy",
     "confidence_gate",
 )
+# 成员分数截面标准化口径：zscore 为 2026 回测优选默认（保留分数强度）；
+# rank_pct 为旧口径，仅在显式选择或旧模型配置缺失时使用。
+_ENSEMBLE_SCORE_NORMS = ("rank_pct", "zscore", "zscore_clip", "minmax")
+_ENSEMBLE_DEFAULT_SCORE_NORM = "zscore"
 
 
 class EnsemblePreviewRequest(BaseModel):
@@ -666,6 +670,10 @@ class EnsemblePreviewRequest(BaseModel):
     )
     manual_weights: dict[str, float] | None = Field(
         None, description="manual 策略的成员权重（自动归一化）"
+    )
+    score_norm: str = Field(
+        _ENSEMBLE_DEFAULT_SCORE_NORM,
+        description="成员分数标准化：zscore（默认）/ zscore_clip / rank_pct / minmax",
     )
 
 
@@ -683,6 +691,11 @@ def _validate_ensemble_request(payload: EnsemblePreviewRequest) -> None:
         )
     if payload.weight_strategy == "manual" and not payload.manual_weights:
         raise HTTPException(status_code=422, detail="manual 策略必须提供 manual_weights")
+    if payload.score_norm not in _ENSEMBLE_SCORE_NORMS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"score_norm 应为 {'/'.join(_ENSEMBLE_SCORE_NORMS)}",
+        )
 
 
 @router.post("/ensemble/preview", summary="融合预览：成员证据/权重/OOS 回放（无副作用）")
@@ -694,13 +707,16 @@ async def preview_ensemble_model(
     _validate_ensemble_request(payload)
     tenant_id, user_id = _owner_scope(current_user)
     try:
-        return await build_fusion_preview(
+        result = await build_fusion_preview(
             tenant_id=tenant_id,
             user_id=user_id,
             model_ids=payload.source_model_ids,
             weight_strategy=payload.weight_strategy,
             manual_weights=payload.manual_weights,
         )
+        if isinstance(result, dict):
+            result["score_norm"] = payload.score_norm
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -731,6 +747,7 @@ async def create_ensemble_model(
             manual_weights=payload.manual_weights,
             fusion_strategy=payload.fusion_strategy,
             strategy_config=payload.strategy_config,
+            score_norm=payload.score_norm,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
