@@ -900,12 +900,18 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
               <div className="text-[11px] text-slate-400 leading-relaxed">
                 不可交易样本权重置 0（标签仍按全市场截面计算，不改变目标分布）；时间衰减让近期样本权重更高。仅 CN 可用，缺数据时训练端会直接报错。
               </div>
+              {market !== 'CN' ? (
+                <div className="text-[10px] font-semibold text-amber-600">
+                  当前市场（{market}）不可用「可交易过滤 / 剔除 ST」，提交时会自动关闭。
+                </div>
+              ) : null}
             </div>
             <div className="mt-2.5 grid grid-cols-3 gap-2 border-t border-emerald-50 pt-2.5">
               <div className="flex items-center justify-between gap-1">
                 <span className="text-[11px] text-slate-500">可交易过滤</span>
                 <Switch
                   size="small"
+                  disabled={market !== 'CN'}
                   checked={!!params.sampleTradeableMask}
                   onChange={(checked) =>
                     onParamsChange({ ...params, sampleTradeableMask: checked })
@@ -916,6 +922,7 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                 <span className="text-[11px] text-slate-500">剔除 ST</span>
                 <Switch
                   size="small"
+                  disabled={market !== 'CN'}
                   checked={!!params.sampleExcludeST}
                   onChange={(checked) => onParamsChange({ ...params, sampleExcludeST: checked })}
                 />

@@ -107,6 +107,9 @@ export const AttributionAnalysisPanel: React.FC<{
 
   const [runDetail, setRunDetail] = useState<ModelTrainingRunStatus | null>(null);
   const [runRequest, setRunRequest] = useState<Record<string, any> | null>(null);
+  const [provenance, setProvenance] = useState<
+    Record<string, { source_market: string; source_dataset: string; source_column: string }>
+  >({});
 
   useEffect(() => {
     const runId = model.source_run_id;
@@ -115,15 +118,28 @@ export const AttributionAnalysisPanel: React.FC<{
     Promise.all([
       modelTrainingService.getTrainingRun(runId).catch(() => null),
       modelTrainingService.getTrainingRunRequest(runId).catch(() => null),
-    ]).then(([detail, request]) => {
+      modelTrainingService.getModelFactorProvenance(model.model_id).catch(() => null),
+    ]).then(([detail, request, provenanceResp]) => {
       if (!alive) return;
       setRunDetail(detail);
       setRunRequest((request?.request || null) as Record<string, any> | null);
+      const mapping: Record<
+        string,
+        { source_market: string; source_dataset: string; source_column: string }
+      > = {};
+      (provenanceResp?.items || []).forEach((item) => {
+        mapping[item.feature] = {
+          source_market: item.source_market,
+          source_dataset: item.source_dataset,
+          source_column: item.source_column,
+        };
+      });
+      setProvenance(mapping);
     });
     return () => {
       alive = false;
     };
-  }, [model.source_run_id]);
+  }, [model.source_run_id, model.model_id]);
 
   const runMeta = (runDetail?.result?.metadata || {}) as Record<string, any>;
   const factorSelection = (runMeta.factor_selection || meta.factor_selection || null) as
@@ -134,6 +150,13 @@ export const AttributionAnalysisPanel: React.FC<{
     : [];
   const selectedFactors = selectionFeatures.filter((f) => f.status === 'selected');
   const stageCounts = (factorSelection?.stage_counts || {}) as Record<string, any>;
+  const provenanceCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    Object.values(provenance).forEach((item) => {
+      counts[item.source_dataset] = (counts[item.source_dataset] || 0) + 1;
+    });
+    return counts;
+  }, [provenance]);
 
   const modelType = String(meta.model_type || runRequest?.model_type || '—');
   const market = String(meta.market || runRequest?.context?.market || 'CN').toUpperCase();
@@ -387,6 +410,21 @@ export const AttributionAnalysisPanel: React.FC<{
                     <Stat key={step.label} label={step.label} value={fmtInt(step.value)} />
                   ))}
                 </div>
+                {Object.keys(provenanceCounts).length > 0 ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500">
+                    <span className="font-bold text-slate-600">原始库：</span>
+                    {Object.entries(provenanceCounts)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([lib, count]) => (
+                        <span
+                          key={lib}
+                          className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-600"
+                        >
+                          {lib} {count}
+                        </span>
+                      ))}
+                  </div>
+                ) : null}
                 {selectedFactors.length > 0 ? (
                   <div className="mt-3">
                     <Table<FactorSelectionRow>
@@ -407,6 +445,24 @@ export const AttributionAnalysisPanel: React.FC<{
                               <div className="truncate font-mono text-[9px] text-slate-400">{name}</div>
                             </div>
                           ),
+                        },
+                        {
+                          title: '来源库',
+                          width: 110,
+                          render: (_: unknown, row: FactorSelectionRow) => {
+                            const source = provenance[row.name];
+                            return source ? (
+                              <Tooltip
+                                title={`${source.source_market} · ${source.source_dataset}:${source.source_column}`}
+                              >
+                                <span className="inline-block max-w-[100px] truncate rounded-md border border-indigo-100 bg-indigo-50/70 px-1.5 py-0.5 font-mono text-[9px] text-indigo-600">
+                                  {source.source_dataset}
+                                </span>
+                              </Tooltip>
+                            ) : (
+                              <span className="text-[10px] text-slate-300">—</span>
+                            );
+                          },
                         },
                         {
                           title: 'IC',

@@ -775,6 +775,17 @@ export const ModelTrainingPage: React.FC = () => {
 
     try {
       const payload = buildCurrentPayload();
+      // 非 CN 市场：可交易掩码 / 剔除 ST 没有数据，提交前自动关闭（后端同口径兜底）
+      const sampleWeight = (payload as { sample_weight?: Record<string, unknown> }).sample_weight;
+      const marketKey = String(payload.context?.market || 'CN').toUpperCase();
+      if (sampleWeight && marketKey !== 'CN' && (sampleWeight.tradeable_mask || sampleWeight.st)) {
+        (payload as { sample_weight?: Record<string, unknown> }).sample_weight = {
+          ...sampleWeight,
+          tradeable_mask: false,
+          st: false,
+        };
+        message.warning('可交易掩码 / 剔除 ST 仅支持 CN 市场，本次已自动关闭');
+      }
       const { runId } = await modelTrainingService.runTraining(payload);
       setActiveRunId(runId);
       pushLog(`提交成功，Run ID: ${runId}`);

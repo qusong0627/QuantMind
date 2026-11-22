@@ -32,6 +32,12 @@ export interface RetrainConfigPayload {
   config?: Record<string, unknown> | null;
   metadata?: Record<string, unknown>;
   warnings?: string[];
+  /** 列级 provenance：feature → 原始库（后端按 qm_quantdb_factor_field 解析） */
+  feature_sources?: Record<
+    string,
+    { source_market?: string; source_dataset?: string; source_column?: string }
+  >;
+  source_library_counts?: Record<string, number>;
 }
 
 export interface BuiltRetrainConfig {
@@ -153,6 +159,19 @@ export function buildRetrainTrainingConfig(payload: RetrainConfigPayload): Built
   if (features.length === 0) {
     warnings.push('模型未记录特征清单，训练页将按当前目录默认勾选');
   }
+  // 合并库 provenance：只提示来源分布，不改变读取路径——CUSTOM 合并库是冻结
+  // 快照（数值已按日核对与原始库一致），跨库换源需要另开对应市场的训练任务。
+  const libraryCounts = payload.source_library_counts ?? {};
+  const libraryEntries = Object.entries(libraryCounts).filter(([, count]) => Number(count) > 0);
+  if (libraryEntries.length > 1) {
+    const summary = libraryEntries
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .map(([lib, count]) => `${lib} ${count}`)
+      .join('、');
+    warnings.push(
+      `该模型是合并因子库训练（原始库：${summary}）；本次重训仍从合并库快照读取，数值与原始库一致`,
+    );
+  }
 
   const trainRange = asRange(split.train) ?? toRange(meta.train_start, meta.train_end);
   const validRange = asRange(split.valid) ?? toRange(meta.val_start, meta.val_end);
@@ -164,6 +183,12 @@ export function buildRetrainTrainingConfig(payload: RetrainConfigPayload): Built
     warnings.push('未找到 config.yaml 时间切分，已按 metadata 日期回退');
   }
 
+  // 可交易掩码 / 剔除 ST 只有 CN 有数据；CUSTOM 等市场重训时自动关闭并提示，
+  // 否则要等训练端加载完全量数据才 fail-closed（2026-11-22 重训实测）。
+  const sampleWeightsSupported = market === 'CN';
+  if (!sampleWeightsSupported && (sampleWeight.tradeable_mask === true || sampleWeight.st === true)) {
+    warnings.push('可交易掩码 / 剔除 ST 仅支持 CN 市场，本次重训已自动关闭');
+  }
   const params: TrainingParams = {
     ...DEFAULT_PARAMS,
     model_type: modelType,
@@ -177,8 +202,8 @@ export function buildRetrainTrainingConfig(payload: RetrainConfigPayload): Built
       typeof preprocessing.enabled === 'boolean'
         ? preprocessing.enabled
         : DEFAULT_PARAMS.preprocessingEnabled,
-    sampleTradeableMask: sampleWeight.tradeable_mask === true,
-    sampleExcludeST: sampleWeight.st === true,
+    sampleTradeableMask: sampleWeightsSupported && sampleWeight.tradeable_mask === true,
+    sampleExcludeST: sampleWeightsSupported && sampleWeight.st === true,
     sampleDecayHalfLifeDays: asNumber(sampleWeight.time_decay_half_life_days) ?? 0,
   };
 

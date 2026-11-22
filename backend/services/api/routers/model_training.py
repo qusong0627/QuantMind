@@ -2138,11 +2138,98 @@ async def get_model_retrain_config(
         if isinstance(model.get("metadata_json"), dict)
         else {}
     )
-    return build_retrain_payload(
+    payload = build_retrain_payload(
         model_id=model_id,
         metadata=metadata,
         storage_path=str(model.get("storage_path") or "").strip() or None,
     )
+    # 合并库 provenance：重训页可直接看到每个因子的原始库（不改变本次读取路径，
+    # CUSTOM 合并库是冻结快照；跨市场换源需要另开 CN 训练任务）。
+    try:
+        from backend.shared.database_manager_v2 import get_session
+        from backend.shared.factor_provenance import resolve_feature_provenance
+
+        features = [
+            str(item).strip()
+            for item in (metadata.get("features") or metadata.get("requested_features") or [])
+            if str(item).strip()
+        ]
+        market = str(payload.get("market") or metadata.get("market") or "CN").upper()
+        dataset_id = str(metadata.get("factor_source") or "").strip()
+        if features and market != "CN":
+            async with get_session(read_only=True) as db:
+                mapping = await resolve_feature_provenance(
+                    db, features=features, market=market, dataset_id=dataset_id
+                )
+            counts: dict[str, int] = {}
+            for item in mapping.values():
+                lib = str(item.get("source_dataset") or "unknown")
+                counts[lib] = counts.get(lib, 0) + 1
+            payload["feature_sources"] = mapping
+            payload["source_library_counts"] = counts
+    except Exception as exc:  # noqa: BLE001 - 来源解析失败不阻断重训
+        logger.warning("retrain factor provenance failed for %s: %s", model_id, exc)
+    return payload
+
+
+@router.get(
+    "/{model_id}/factor-provenance",
+    summary="模型入模因子的原始库来源（列级，合并库审计）",
+)
+async def get_model_factor_provenance(
+    model_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """把模型入模特征解析回原始因子库（CUSTOM 合并库 provenance）。
+
+    目录命中来自 ``qm_quantdb_factor_field``；多候选按原始库优先级排序，
+    ``candidates`` 保留前 5 个供人工复核。
+    """
+    from backend.shared.database_manager_v2 import get_session
+    from backend.shared.factor_provenance import resolve_feature_provenance
+
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    model = await model_registry_service.get_model(
+        tenant_id=tenant_id, user_id=user_id, model_id=model_id
+    )
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    metadata = (
+        model.get("metadata_json") if isinstance(model.get("metadata_json"), dict) else {}
+    )
+    features: list[str] = []
+    for key in ("features", "feature_columns", "requested_features"):
+        for item in metadata.get(key) or []:
+            name = str(item).strip()
+            if name and name not in features:
+                features.append(name)
+    features = features[:2000]
+    context = metadata.get("context") if isinstance(metadata.get("context"), dict) else {}
+    market = str(metadata.get("market") or context.get("market") or "CN").upper()
+    dataset_id = str(metadata.get("factor_source") or "").strip()
+    mapping: dict[str, dict[str, Any]] = {}
+    # 只有合并库（CUSTOM 快照）需要 provenance；CN 直连单库时同名特征可能
+    # 只是副本，反查会把来源误判到别的库。CN 模型直接返回 0 解析。
+    if market != "CN":
+        async with get_session(read_only=True) as db:
+            mapping = await resolve_feature_provenance(
+                db, features=features, market=market, dataset_id=dataset_id
+            )
+    library_counts: dict[str, int] = {}
+    for item in mapping.values():
+        lib = str(item.get("source_dataset") or "unknown")
+        library_counts[lib] = library_counts.get(lib, 0) + 1
+    return {
+        "model_id": model_id,
+        "market": market,
+        "dataset_id": dataset_id,
+        "total": len(features),
+        "resolved": len(mapping),
+        "library_counts": library_counts,
+        "items": [{"feature": f, **mapping[f]} for f in features if f in mapping],
+        "unresolved": [f for f in features if f not in mapping][:50],
+    }
 
 
 @router.get("/{model_id}/inference/coverage", summary="获取推理覆盖（用户态）")

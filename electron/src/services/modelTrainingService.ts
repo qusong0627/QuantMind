@@ -1151,6 +1151,27 @@ class ModelTrainingService {
     return resp.data;
   }
 
+  /** 入模因子的原始库来源（合并库 provenance，列级）。 */
+  async getModelFactorProvenance(modelId: string): Promise<{
+    model_id: string;
+    market: string;
+    dataset_id: string;
+    total: number;
+    resolved: number;
+    library_counts: Record<string, number>;
+    items: Array<{
+      feature: string;
+      source_market: string;
+      source_dataset: string;
+      source_column: string;
+      candidates?: Array<{ market: string; dataset_id: string }>;
+    }>;
+    unresolved: string[];
+  }> {
+    const resp = await this.client.get(`/models/${encodeURIComponent(modelId)}/factor-provenance`);
+    return resp.data;
+  }
+
   async getMarketRegime(modelId: string, window = 90, indexOffset = 1): Promise<any> {
     const resp = await this.client.get<any>(`/models/${encodeURIComponent(modelId)}/market-regime`, {
       params: { window, index_offset: indexOffset },

@@ -106,6 +106,32 @@ def _coerce_flag(value: Any, default: bool) -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
+def _coerce_sample_weight_for_market(
+    market: str | None, sample_weight: dict[str, Any]
+) -> list[str]:
+    """tradeable_mask/st 仅 CN 支持；非 CN 自动关闭并返回提示。
+
+    训练端 `sample_weights.build_weights` 也会 fail-closed，但那是加载完
+    全量数据（实测约 30 分钟）之后才抛。提交期直接关掉，避免整单白跑；
+    同时写进 system_notices，训练日志里能看到「已自动关闭」。
+    """
+    market_key = str(market or "CN").strip().upper()
+    if market_key == "CN":
+        return []
+    disabled = [
+        label
+        for key, label in (("tradeable_mask", "可交易掩码"), ("st", "剔除 ST"))
+        if sample_weight.get(key)
+    ]
+    if not disabled:
+        return []
+    sample_weight["tradeable_mask"] = False
+    sample_weight["st"] = False
+    return [
+        f"样本权重「{'/'.join(disabled)}」仅支持 CN 市场（当前 market={market_key}），已自动关闭"
+    ]
+
+
 def _shift_trading_days_back(anchor: datetime, n_days: int, market: str) -> tuple[datetime, bool]:
     """从 anchor 往前数 n_days 个交易日，返回 (结果日期, 是否用了交易日历)。
 
@@ -449,6 +475,19 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
             "st": _coerce_flag(raw_sw.get("st"), False),
             "time_decay_half_life_days": half_life,
         }
+        # 提交期即拦截：tradeable_mask/st 只有 CN 有行情/ST 数据，
+        # 非 CN 市场必须让任务在**启动前**失败，而不是加载完 30 分钟数据后
+        # 才由 train.py 抛 RuntimeError（2026-11-22 CUSTOM 重训实测）。
+        # req.context 是 dict（不是 ContextCfg），必须按 dict 取 market。
+        context_market = (
+            context.get("market") if isinstance(context, dict) else getattr(context, "market", None)
+        )
+        notices = _coerce_sample_weight_for_market(
+            str(context_market or "CN"), normalized["sample_weight"]
+        )
+        if notices:
+            normalized.setdefault("system_notices", [])
+            normalized["system_notices"].extend(notices)
     # 因子筛选配置透传：此前被白名单剥掉，orchestrator 收不到 factor_selection，
     # 永远走默认 top-80 筛选，用户显式指定的 n_top（如 L2 特征集 150）失效
     if isinstance(payload.get("factor_selection"), dict):
@@ -565,7 +604,10 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
                 "valid_end": valid_end,
                 "test_start": test_start,
                 "test_end": test_end,
-                "system_notices": adjustment_notices,
+                "system_notices": [
+                    *(normalized.get("system_notices") or []),
+                    *adjustment_notices,
+                ],
             }
         )
 
