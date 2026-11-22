@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Layers, Star, RefreshCw, Search, Code, Calendar, Layers2,
@@ -43,14 +43,15 @@ import {
   ModelCard,
   ModelDetailPanel,
   TrainingSourcePanel,
-  AttributionAnalysisPanel,
 } from './modelRegistryPanels';
+import { AttributionAnalysisPanel } from './modelRegistryAttributionPanel';
 import { FusionModal } from './FusionModal';
 import {
   MODEL_SORT_OPTIONS,
   ModelListPrefs,
   ModelSortKey,
   loadModelListPrefs,
+  normalizeModelSortKey,
   saveModelListPrefs,
   sortModelRecords,
   toggleId,
@@ -90,6 +91,8 @@ export const ModelRegistryPage: React.FC = () => {
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [listTab, setListTab] = useState<ModelListTab>('active');
   const [listPrefs, setListPrefs] = useState<ModelListPrefs>(() => loadModelListPrefs(currentMarket));
+  // 置顶/收藏/排序：本地先写缓存，400ms 防抖同步到服务端（重启/换浏览器不丢）
+  const prefsSaveTimerRef = useRef<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [settingDefault, setSettingDefault] = useState(false);
   const [archiving, setArchiving] = useState(false);
@@ -246,15 +249,70 @@ export const ModelRegistryPage: React.FC = () => {
 
   useEffect(() => { loadModels(); }, [loadModels]);
 
-  // 偏好按市场隔离：切换市场时重新装载（各市场模型集合与 ID 空间不同）
+  // 偏好按市场隔离：先用本地缓存秒开，再以服务端为准（跨重启/换浏览器持久化）。
   useEffect(() => {
-    setListPrefs(loadModelListPrefs(currentMarket));
+    const market = currentMarket;
+    const local = loadModelListPrefs(market);
+    setListPrefs(local);
+    let alive = true;
+    modelTrainingService
+      .getModelListPrefs(market)
+      .then((remote) => {
+        if (!alive) return;
+        const remoteHasData =
+          (remote.pinned?.length || 0) > 0 ||
+          (remote.favorites?.length || 0) > 0 ||
+          normalizeModelSortKey(remote.sort_key) !== 'default';
+        if (remoteHasData) {
+          const next: ModelListPrefs = {
+            pinned: remote.pinned || [],
+            favorites: remote.favorites || [],
+            sortKey: normalizeModelSortKey(remote.sort_key),
+          };
+          setListPrefs(next);
+          saveModelListPrefs(market, next);
+          return;
+        }
+        // 服务端尚未保存过：把升级前的本地偏好抬到服务端（只抬一次）
+        if (local.pinned.length || local.favorites.length || local.sortKey !== 'default') {
+          void modelTrainingService
+            .saveModelListPrefs({
+              market,
+              pinned: local.pinned,
+              favorites: local.favorites,
+              sort_key: local.sortKey,
+            })
+            .catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
   }, [currentMarket]);
+
+  useEffect(
+    () => () => {
+      if (prefsSaveTimerRef.current) window.clearTimeout(prefsSaveTimerRef.current);
+    },
+    [],
+  );
 
   const updateListPrefs = (patch: Partial<ModelListPrefs>) => {
     const next = { ...listPrefs, ...patch };
     setListPrefs(next);
     saveModelListPrefs(currentMarket, next);
+    if (prefsSaveTimerRef.current) window.clearTimeout(prefsSaveTimerRef.current);
+    prefsSaveTimerRef.current = window.setTimeout(() => {
+      void modelTrainingService
+        .saveModelListPrefs({
+          market: currentMarket,
+          pinned: next.pinned,
+          favorites: next.favorites,
+          sort_key: next.sortKey,
+        })
+        .catch(() => undefined);
+    }, 400);
   };
 
   const handleTogglePin = (modelId: string) => {
@@ -1024,7 +1082,13 @@ export const ModelRegistryPage: React.FC = () => {
                             数据漂移
                           </span>
                         ),
-                        children: <DriftTabPanel modelId={selectedModel.model_id} marketLabel={marketConfig.label} />,
+                        children: (
+                          <DriftTabPanel
+                            modelId={selectedModel.model_id}
+                            marketLabel={marketConfig.label}
+                            featureLabelMap={featureLabelMap}
+                          />
+                        ),
                       },
                       {
                         key: 'market',

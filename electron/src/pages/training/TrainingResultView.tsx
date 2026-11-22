@@ -35,6 +35,12 @@ import { useAuth } from '../../features/auth/hooks';
 
 const { Text } = Typography;
 
+/**
+ * 紧凑密度开关：模型管理「训练溯源」内嵌结果页时置 true，
+ * 压小卡片留白/标题字号/图表高度，避免整页结果在页面里显得过大。
+ */
+export const TrainingResultCompactContext = React.createContext(false);
+
 // 结果元数据里的 market 是训练时的市场词表全集（TRAINING_MARKET_OPTIONS），
 // 词条必须六市场全覆盖——缺 CUSTOM 时结果卡会退化成显示原始码。单测以
 // TRAINING_MARKET_OPTIONS 为全集断言（防再漏）。
@@ -65,29 +71,35 @@ const MetricCard: React.FC<{
   centered?: boolean;
   valueClassName?: string;
   hintClassName?: string;
-}> = ({ label, value, hint, centered = false, valueClassName, hintClassName }) => (
-  <div className={clsx('rounded-2xl border border-slate-200 bg-white p-4 shadow-sm', centered && 'text-center')}>
-    <div className={clsx('text-[10px] font-black uppercase tracking-[0.18em] text-slate-400', centered && 'text-center')}>{label}</div>
-    <div className={clsx('mt-2 text-lg font-semibold text-slate-900', centered && 'text-center', valueClassName)}>{value}</div>
-    {hint ? <div className={clsx('mt-1 text-xs text-slate-500', centered && 'text-center', hintClassName)}>{hint}</div> : null}
-  </div>
-);
-
-const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactNode }> = ({ title, desc, icon }) => (
-  <div className="flex items-start justify-between gap-4">
-    <div>
-      <div className="flex items-center gap-2">
-        {icon}
-        <Typography.Title level={4} className="!mb-0 !text-slate-900">
-          {title}
-        </Typography.Title>
-      </div>
-      <Typography.Paragraph className="!mb-0 !mt-2 !text-xs !text-slate-500 leading-relaxed">
-        {desc}
-      </Typography.Paragraph>
+}> = ({ label, value, hint, centered = false, valueClassName, hintClassName }) => {
+  const compact = React.useContext(TrainingResultCompactContext);
+  return (
+    <div className={clsx('rounded-2xl border border-slate-200 bg-white shadow-sm', compact ? 'p-3' : 'p-4', centered && 'text-center')}>
+      <div className={clsx('text-[10px] font-black uppercase tracking-[0.18em] text-slate-400', centered && 'text-center')}>{label}</div>
+      <div className={clsx('mt-2 font-semibold text-slate-900', compact ? 'text-base' : 'text-lg', centered && 'text-center', valueClassName)}>{value}</div>
+      {hint ? <div className={clsx('mt-1 text-xs text-slate-500', centered && 'text-center', hintClassName)}>{hint}</div> : null}
     </div>
-  </div>
-);
+  );
+};
+
+const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactNode }> = ({ title, desc, icon }) => {
+  const compact = React.useContext(TrainingResultCompactContext);
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div>
+        <div className="flex items-center gap-2">
+          {icon}
+          <Typography.Title level={compact ? 5 : 4} className={clsx('!mb-0 !text-slate-900', compact && '!text-base')}>
+            {title}
+          </Typography.Title>
+        </div>
+        <Typography.Paragraph className={clsx('!mb-0 !text-slate-500 leading-relaxed', compact ? '!mt-1 !text-[11px]' : '!mt-2 !text-xs')}>
+          {desc}
+        </Typography.Paragraph>
+      </div>
+    </div>
+  );
+};
 
 interface FactorReportRow {
   name: string;
@@ -890,9 +902,10 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
   runId,
 }) => {
   const [compareOpen, setCompareOpen] = React.useState(false);
+  const compact = React.useContext(TrainingResultCompactContext);
   if (!result && !resultError) {
     return (
-      <Card className="rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: 20 } }}>
+      <Card className="rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: compact ? 16 : 20 } }}>
          <SectionHeader
           title="第五步：结果入库"
           desc="展示训练完成后会进入模型管理页的元数据与产物预览。"
@@ -930,13 +943,13 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
   return (
     <div className="space-y-4">
       {/* 第一排：结果入库概览全宽横条（状态 + 注册 + 关键指标 + 产物） */}
-      <Card className="rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: 20 } }}>
+      <Card className="rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: compact ? 16 : 20 } }}>
         <SectionHeader
           title="第五步：结果入库"
           desc="展示训练完成后会进入模型管理页的元数据与产物预览。"
           icon={<BarChart size={18} className="text-indigo-500" />}
         />
-        <Divider className="my-4" />
+        <Divider className={compact ? 'my-2' : 'my-4'} />
         {resultError ? (
           <Alert type="error" showIcon className="mb-4 rounded-2xl" message="训练结果异常" description={resultError} />
         ) : null}
@@ -1104,8 +1117,8 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
 
       {/* 第二排：元数据预览 + 结果摘要平铺全宽 */}
       {result ? (
-      <div className="grid gap-4 md:grid-cols-2">
-      <Card className="h-full rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: 20, height: '100%', display: 'flex', flexDirection: 'column' } }}>
+      <div className={clsx('grid', compact ? 'gap-3' : 'gap-4', 'md:grid-cols-2')}>
+      <Card className="h-full rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: compact ? 16 : 20, height: '100%', display: 'flex', flexDirection: 'column' } }}>
         <div className="mb-3 flex items-center gap-2">
           <BarChart size={15} className="text-indigo-500" />
           <span className="text-sm font-black text-slate-800">模型元数据预览</span>
@@ -1143,7 +1156,7 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
         )}
       </Card>
 
-      <Card className="h-full rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: 20 } }}>
+      <Card className="h-full rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: compact ? 16 : 20 } }}>
         <div className="mb-3 flex items-center gap-2">
           <MonitorPlay size={15} className="text-indigo-500" />
           <span className="text-sm font-black text-slate-800">结果摘要</span>
@@ -1158,7 +1171,7 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
                 <div className="mb-3 flex items-center justify-between">
                   <div className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">IC 评估图表</div>
                 </div>
-                <ResponsiveContainer width="100%" height={200}>
+                <ResponsiveContainer width="100%" height={compact ? 150 : 200}>
                   <ReBarChart
                     data={[
                       { name: '训练集', IC: result.metrics.train.ic, RankIC: result.metrics.train.rank_ic },
@@ -1242,7 +1255,7 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
                   </div>
                 </div>
 
-                <ResponsiveContainer width="100%" height={180}>
+                <ResponsiveContainer width="100%" height={compact ? 140 : 180}>
                   <ReBarChart
                     data={result.wfa.windows.map(w => ({
                       name: `W${w.window_idx + 1}`,

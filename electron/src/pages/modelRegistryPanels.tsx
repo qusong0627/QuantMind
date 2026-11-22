@@ -1,12 +1,12 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
-import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Table, Drawer, Collapse, Select, Pagination, message, Space, Alert, Checkbox, Tooltip } from 'antd';
+import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Modal, Tabs, Table, Drawer, Collapse, Select, message, Space, Alert, Checkbox, Tooltip } from 'antd';
 import { clsx } from 'clsx';
 import { EvalScoreBadge } from '../components/shared/EvalScoreBadge';
 import dayjs from 'dayjs';
 import {
-  Layers, Star, RefreshCw, Search, Code, Calendar,
-  History, Archive, Brain, CheckCircle2, Clock, XCircle, Trash2,
-  ChevronRight, Play, Cpu, TrendingUp, Download, ChevronDown,
+  Layers, Star, RefreshCw, Code, Calendar,
+  Archive, Brain, XCircle, Trash2,
+  Play, Cpu, TrendingUp, ChevronDown,
   ChevronUp, Shield, Zap, Activity, ListFilter, BarChart3, Info, AlertCircle,
   Pin, Bookmark,
 } from 'lucide-react';
@@ -29,6 +29,7 @@ import {
   resolveMetricNumber,
 } from './modelRegistryUtils';
 import { ensembleMemberIds, isEnsembleModel } from './fusionUtils';
+import { TrainingRunDetailTabs } from './training/TrainingRunDetailTabs';
 const { Text } = Typography;
 
 const MARKET_LABELS: Record<string, string> = {
@@ -639,7 +640,6 @@ export const TrainingSourcePanel: React.FC<{
 }> = ({ model, trainingRun, loading: externalLoading = false }) => {
   const [runData, setRunData] = useState<ModelTrainingRunStatus | null>(null);
   const [localLoading, setLocalLoading] = useState(false);
-  const runId = model.source_run_id || '—';
   const useExternalRun = trainingRun !== undefined;
 
   useEffect(() => {
@@ -666,324 +666,24 @@ export const TrainingSourcePanel: React.FC<{
 
   const effectiveRunData = useExternalRun ? trainingRun : runData;
   const isLoading = useExternalRun ? externalLoading : localLoading;
-  const logs = effectiveRunData?.logs || 'No logs available for this training run.';
-  const status = effectiveRunData?.status || model.status || 'unknown';
 
   return (
-    <div className="h-[calc(var(--app-h)-360px)] flex flex-col space-y-4 pt-6 pb-2 overflow-hidden">
-      {/* 顶部任务概览 */}
-      <div className="flex gap-4 shrink-0 px-1">
-        <div className="glass-panel flex-1 rounded-2xl p-4 border border-slate-100/50 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div className="bg-slate-500/10 p-2.5 rounded-xl text-slate-400">
-              <History size={20} />
-            </div>
-            <div>
-              <Text className="text-[10px] text-slate-400 font-black uppercase tracking-widest block mb-1">训练任务 ID</Text>
-              <Text className="text-sm font-mono font-bold text-slate-700">{runId}</Text>
-            </div>
-          </div>
-          <ChevronRight size={16} className="text-slate-300" />
-        </div>
-
-        <div className="glass-panel w-56 rounded-2xl p-4 border border-slate-100/50 flex items-center gap-3">
-          <div className={clsx(
-            "w-10 h-10 rounded-xl flex items-center justify-center",
-            status === 'completed' ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
-          )}>
-            {isLoading ? <Spin size="small" /> : (status === 'completed' ? <CheckCircle2 size={22} /> : <Clock size={22} />)}
-          </div>
-          <div>
-            <Text className="text-[10px] text-slate-400 font-black uppercase tracking-widest block mb-0.5">任务状态</Text>
-            <Text className="text-sm font-black text-slate-800 uppercase">{status}</Text>
-          </div>
-        </div>
-      </div>
-
-      {/* 核心日志区 - 终端模拟器风格 */}
-      <div className="glass-panel flex-1 rounded-3xl border border-slate-100/50 flex flex-col overflow-hidden mx-1">
-        <div className="bg-slate-900/90 px-5 py-3 flex items-center justify-between border-b border-white/5 shrink-0">
-          <div className="flex items-center gap-2">
-            <div className="flex gap-1.5 mr-2">
-              <div className="w-2.5 h-2.5 rounded-full bg-rose-500/80" />
-              <div className="w-2.5 h-2.5 rounded-full bg-amber-500/80" />
-              <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
-            </div>
-            <Code size={14} className="text-slate-400 ml-2" />
-            <Text className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Training Execution Logs</Text>
-          </div>
-          <div className="flex items-center gap-4">
-             <Text className="text-[9px] text-slate-500 font-mono">UTF-8 · Python 3.9</Text>
-             {status === 'running' && <div className="bg-emerald-500/20 px-2 py-0.5 rounded text-[9px] text-emerald-400 font-bold animate-pulse">LIVE</div>}
-          </div>
-        </div>
-        
-        <div className="flex-1 bg-slate-950/95 p-6 overflow-y-auto font-mono custom-scrollbar">
-          {isLoading ? (
-            <div className="h-full flex items-center justify-center">
-              <Spin />
-            </div>
-          ) : (
-            <pre className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap break-all">
-              {logs.split('\n').map((line, i) => {
-                const isNotice = line.includes('[NOTICE]');
-                const isError = line.includes('[ERROR]') || line.includes('Error');
-                return (
-                  <div key={i} className="mb-0.5 flex gap-4 hover:bg-white/5 transition-colors group">
-                    <span className="w-8 shrink-0 text-slate-600 text-right select-none text-[9px]">{i + 1}</span>
-                    <span className={clsx(
-                      "flex-1",
-                      isNotice && "text-emerald-400",
-                      isError && "text-rose-400 font-bold",
-                      !isNotice && !isError && "text-slate-300"
-                    )}>
-                      {line}
-                    </span>
-                  </div>
-                );
-              })}
-              <div className="h-4" />
-            </pre>
-          )}
-        </div>
-      </div>
+    <div className="h-[calc(var(--app-h)-340px)] overflow-y-auto custom-scrollbar px-1 pt-2 pb-2">
+      <TrainingRunDetailTabs
+        runId={model.source_run_id}
+        meta={{
+          display_name: modelDisplayName(model),
+          created_at: model.created_at,
+        }}
+        detail={effectiveRunData ?? null}
+        loading={isLoading}
+        compact
+      />
     </div>
   );
 };
 
 
-export const AttributionAnalysisPanel: React.FC<{
-  model: UserModelRecord;
-  shapSummary: ModelShapSummaryResponse | null;
-  loading: boolean;
-  error?: string;
-  featureLabelMap?: Record<string, string>;
-  onRefresh: () => void;
-}> = ({ model, shapSummary, loading, error, featureLabelMap = {}, onRefresh }) => {
-  const meta = getMeta(model);
-  const shapMeta = meta.shap && typeof meta.shap === 'object' ? meta.shap as Record<string, any> : {};
-  
-  const rows = (shapSummary?.items || shapMeta.items || []) as ModelShapSummaryItem[];
-  const status = String(shapSummary?.status || shapMeta.status || 'missing').toLowerCase();
-  const split = String(shapSummary?.split || shapMeta.split || '—');
-  const rowsUsed = Number(shapSummary?.rows_used ?? shapMeta.rows_used ?? 0);
-
-  const handleExport = () => {
-    if (!rows || rows.length === 0) {
-      message.warning('暂无数据可导出');
-      return;
-    }
-    try {
-      const headers = ['因子名称', '原始代码', '平均绝对贡献(SHAP)', '平均贡献(方向)', '正向比'];
-      const csvRows = rows.map(r => [
-        `"${featureLabelMap[r.feature] || r.feature}"`,
-        `"${r.feature}"`,
-        r.mean_abs_shap?.toFixed(8) || '0',
-        r.mean_shap?.toFixed(8) || '0',
-        ((r.positive_ratio || 0) * 100).toFixed(2) + '%'
-      ]);
-      const csvContent = [headers.join(','), ...csvRows.map(row => row.join(','))].join('\n');
-      const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-      const link = document.createElement('a');
-      const url = URL.createObjectURL(blob);
-      link.setAttribute('href', url);
-      link.setAttribute('download', `attribution_${modelDisplayName(model)}_${dayjs().format('YYYYMMDD')}.csv`);
-      link.style.visibility = 'hidden';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      message.success('导出成功');
-    } catch (err) {
-      message.error('导出失败');
-    }
-  };
-
-  const [searchText, setSearchText] = useState('');
-  const [currentPage, setCurrentPage] = useState(1);
-  const pageSize = 10;
-
-  const filteredRows = rows.filter(r => 
-    r.feature.toLowerCase().includes(searchText.toLowerCase()) || 
-    (featureLabelMap[r.feature] && featureLabelMap[r.feature].includes(searchText))
-  );
-
-  const maxAbsShap = Math.max(...rows.map(r => r.mean_abs_shap || 0), 0.0001);
-
-  return (
-    <div className="h-[calc(var(--app-h)-340px)] flex flex-col space-y-4 overflow-hidden pt-4">
-      {/* 头部统计 */}
-      <div className="glass-panel rounded-2xl p-5 border border-slate-200 bg-white shadow-sm flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-4">
-          <div className="flex flex-col">
-            <Text className="text-sm font-black text-slate-800 uppercase tracking-tight">归因分析报告</Text>
-            <Text className="text-[11px] text-slate-400 font-medium">{split} 数据集 · {rowsUsed} 个训练样本</Text>
-          </div>
-          <Tag color={status === 'completed' ? 'green' : 'blue'} className="m-0 border-0 text-[9px] font-black uppercase rounded-md h-5 leading-5 px-3">
-            {status === 'completed' ? '分析就绪' : status}
-          </Tag>
-        </div>
-        <Space>
-          <Button onClick={onRefresh} loading={loading} size="small" className="rounded-full h-8 text-[11px] font-bold border-slate-300 px-6 hover:border-violet-400 hover:text-violet-600 transition-all">刷新数据</Button>
-          <Button onClick={handleExport} icon={<Download size={14} />} size="small" className="rounded-full h-8 text-[11px] font-bold border-slate-300 px-6 hover:border-blue-400 hover:text-blue-600 transition-all">数据导出</Button>
-        </Space>
-      </div>
-
-      {/* 核心内容区 */}
-      <div className="glass-panel rounded-2xl p-5 border border-slate-200 bg-white shadow-sm flex flex-col flex-1 overflow-hidden">
-        <div className="flex items-center justify-between mb-5 shrink-0">
-          <div className="flex items-center gap-2">
-            <div className="h-4 w-1 bg-slate-300 rounded-full" />
-            <Text className="text-[11px] font-black text-slate-400 uppercase tracking-widest">影响力排行 (SHAP FEATURE IMPORTANCE)</Text>
-          </div>
-          <Input
-            size="small"
-            placeholder="按因子名搜索..."
-            prefix={<Search size={12} className="text-slate-400" />}
-            className="w-56 h-8 rounded-xl border-slate-200 bg-slate-50/80 text-[11px]"
-            value={searchText}
-            onChange={e => setSearchText(e.target.value)}
-          />
-        </div>
-
-        <div className="flex-1 overflow-hidden">
-          <div className="grid grid-cols-12 gap-6 h-full">
-            {/* 左侧：纯数据展示区 */}
-            <div className="col-span-8 flex flex-col overflow-hidden h-full">
-              <Table
-                size="small"
-                dataSource={filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize)}
-                loading={loading}
-                tableLayout="fixed"
-                pagination={false}
-                rowKey="feature"
-                className="research-table border border-slate-100 rounded-xl overflow-hidden flex-1"
-                columns={[
-                  {
-                    title: <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-center block">因子名称</span>,
-                    key: 'feature',
-                    width: 140,
-                    align: 'center',
-                    ellipsis: true,
-                    render: (_, r) => (
-                      <div className="text-center px-1">
-                        <Text className="text-[11px] font-black text-slate-800 block truncate leading-tight mb-0.5">{featureLabelMap[r.feature] || r.feature}</Text>
-                        <Text className="text-[8px] text-slate-400 font-mono font-bold block truncate leading-none opacity-80">{r.feature}</Text>
-                      </div>
-                    ),
-                  },
-                  {
-                    title: <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block text-center">平均绝对贡献</span>,
-                    dataIndex: 'mean_abs_shap',
-                    key: 'mean_abs_shap',
-                    width: 180,
-                    align: 'center',
-                    sorter: (a, b) => (a.mean_abs_shap || 0) - (b.mean_abs_shap || 0),
-                    render: (v) => {
-                      const percent = Math.min((v / maxAbsShap) * 100, 100);
-                      return (
-                        <div className="flex items-center w-full px-2 gap-3">
-                          <BarChart3 size={14} className="text-violet-400 shrink-0" />
-                          <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden relative">
-                            <div className="h-full bg-violet-500 rounded-full" style={{ width: `${percent}%` }} />
-                          </div>
-                          <Text className="text-[10px] font-mono font-black text-violet-600 shrink-0 w-[60px] text-right">
-                            {Number(v || 0).toFixed(6)}
-                          </Text>
-                        </div>
-                      );
-                    },
-                  },
-                  {
-                    title: <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-center block">方向</span>,
-                    dataIndex: 'mean_shap',
-                    key: 'mean_shap',
-                    width: 90,
-                    align: 'center',
-                    sorter: (a, b) => (a.mean_shap || 0) - (b.mean_shap || 0),
-                    render: (v) => (
-                      <div className="flex flex-col items-center leading-none">
-                        <Text className={clsx("text-[10px] font-mono font-black px-2 py-0.5 rounded", v >= 0 ? "text-rose-600 bg-rose-50" : "text-emerald-600 bg-emerald-50")}>
-                          {v >= 0 ? '+' : ''}{Number(v || 0).toFixed(6)}
-                        </Text>
-                      </div>
-                    ),
-                  },
-                  {
-                    title: <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-right block pr-3">正向比</span>,
-                    dataIndex: 'positive_ratio',
-                    key: 'positive_ratio',
-                    width: 80,
-                    align: 'right',
-                    render: (v) => (
-                      <div className="pr-3 text-right">
-                        <Text className="text-[11px] font-black text-slate-700">{(Number(v || 0) * 100).toFixed(1)}%</Text>
-                      </div>
-                    ),
-                  },
-                ]}
-              />
-            </div>
-
-            {/* 右侧：说明 + 操作区 */}
-            <div className="col-span-4 flex flex-col gap-4">
-              <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200 flex flex-col shadow-inner">
-                <div className="flex items-center gap-2 mb-4 text-violet-600">
-                  <Info size={16} />
-                  <Text className="text-xs font-black uppercase tracking-widest">说明</Text>
-                </div>
-
-                <div className="space-y-4 mb-4">
-                  <div className="relative pl-3 border-l-2 border-violet-400">
-                    <Text className="text-[11px] font-black text-slate-700 block mb-1">平均绝对贡献 (影响力)</Text>
-                    <Text className="text-[10px] text-slate-500 leading-tight block">
-                      代表因子的“话语权”。数值越高，说明该因子在模型判断中说话分量越重。
-                    </Text>
-                  </div>
-                  <div className="relative pl-3 border-l-2 border-rose-400">
-                    <Text className="text-[11px] font-black text-slate-700 block mb-1">方向 (因子脾气)</Text>
-                    <Text className="text-[10px] text-slate-500 leading-tight block">
-                      <span className="text-rose-600 font-bold">正向</span> 表示因子越大模型越看好；<span className="text-emerald-600 font-bold">负向</span> 则相反。
-                    </Text>
-                  </div>
-                  <div className="relative pl-3 border-l-2 border-emerald-400">
-                    <Text className="text-[11px] font-black text-slate-700 block mb-1">正向比 (靠谱度)</Text>
-                    <Text className="text-[10px] text-slate-500 leading-tight block">
-                      反映逻辑一致性。越高说明因子在不同样本下表现越稳健，不容易失效。
-                    </Text>
-                  </div>
-                </div>
-
-
-                <div className="p-3 bg-white rounded-xl border border-slate-200 shadow-sm">
-                  <div className="flex items-start gap-2">
-                    <Zap size={12} className="text-amber-500 mt-0.5 shrink-0" />
-                    <Text className="text-[10px] text-slate-600 leading-normal italic">
-                      选股建议仅供参考，模拟盘请结合市场环境判断。
-                    </Text>
-                  </div>
-                </div>
-              </div>
-
-              {/* 翻页操作 */}
-              <div className="mt-auto py-3 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 flex justify-center items-center shadow-inner">
-                <Pagination
-                  current={currentPage}
-                  pageSize={pageSize}
-                  total={filteredRows.length}
-                  onChange={setCurrentPage}
-                  size="small"
-                  showSizeChanger={false}
-                  className="research-pagination"
-                />
-              </div>
-            </div>
-          </div>
-
-        </div>
-      </div>
-    </div>
-  );
-};
 
 export const MetricCard: React.FC<{ label: string; value: any; digits?: number; color?: string; isLarge?: boolean }> = ({
   label, value, digits = 3, color = 'text-slate-800', isLarge = false,

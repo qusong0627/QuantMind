@@ -2013,14 +2013,21 @@ export const parseTrainingResult = (
     generated_at: request.generatedAt,
   };
 
+  const mergedMetadata: Record<string, any> = {
+    ...defaultMetadata,
+    ...metadata,
+  };
+  // 旧结果载荷会把 label_formula/training_window 写成空串，展开时会覆盖掉
+  // 从请求预览重建的值；这里对空串统一回落到默认值，避免结果页显示空白。
+  (['display_name', 'label_formula', 'training_window', 'target_mode', 'execution_price', 'label_transform'] as const).forEach((key) => {
+    if (!mergedMetadata[key]) mergedMetadata[key] = (defaultMetadata as Record<string, any>)[key];
+  });
+
   return {
     modelId: String(metadata.model_id || runId),
     modelName: String(metadata.display_name || metadata.model_name || request.displayName || `T+${request.target.horizonDays} Horizon Model`),
     request,
-    metadata: {
-      ...defaultMetadata,
-      ...metadata,
-    },
+    metadata: mergedMetadata as typeof defaultMetadata,
     metrics: {
       train: {
         rmse: Number(train.rmse), auc: Number(train.auc),

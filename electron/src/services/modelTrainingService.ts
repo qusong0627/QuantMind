@@ -932,6 +932,27 @@ class ModelTrainingService {
     return resp.data;
   }
 
+  /** 模型列表偏好（置顶/收藏/排序）：服务端持久化，重启/换浏览器不丢。 */
+  async getModelListPrefs(market: string): Promise<{
+    market: string;
+    pinned: string[];
+    favorites: string[];
+    sort_key: string;
+  }> {
+    const resp = await this.client.get('/models/list-prefs', { params: { market } });
+    return resp.data;
+  }
+
+  async saveModelListPrefs(payload: {
+    market: string;
+    pinned: string[];
+    favorites: string[];
+    sort_key: string;
+  }): Promise<{ saved: boolean }> {
+    const resp = await this.client.put('/models/list-prefs', payload);
+    return resp.data;
+  }
+
   /** 严格评估报告（WP2）：未生成/计算中返回 null，由页面显示占位。 */
   async getTrainingStrictReport(runId: string): Promise<StrictEvalReportRow | null> {
     try {

@@ -1,16 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import dayjs from 'dayjs';
 import {
-  Alert,
   Button,
   Empty,
   Input,
   Modal,
   Select,
   Space,
-  Spin,
   Table,
-  Tabs,
   Tag,
   Tooltip,
   message,
@@ -18,32 +15,15 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import {
   ArrowLeft,
-  Copy,
-  Download,
-  FileText,
   History,
   RefreshCw,
-  SlidersHorizontal,
-  Terminal,
 } from 'lucide-react';
 import {
   modelTrainingService,
-  type ModelTrainingRunRequest,
   type ModelTrainingRunStatus,
   type TrainingRunHistoryItem,
 } from '../../services/modelTrainingService';
-import {
-  DEFAULT_CONTEXT,
-  DEFAULT_PARAMS,
-  DEFAULT_TARGET,
-  parseTrainingResult,
-  type TrainingContext,
-  type TrainingParams,
-  type TrainingRequestPayload,
-  type TrainingResult,
-  type TrainingTarget,
-} from './trainingUtils';
-import { TrainingResultView } from './TrainingResultView';
+import { TrainingRunDetailTabs } from './TrainingRunDetailTabs';
 
 interface TrainingRunHistoryProps {
   open: boolean;
@@ -110,63 +90,6 @@ const StatusBadge: React.FC<{ status: string; progress?: number }> = ({ status, 
   );
 };
 
-/** 把后台提交载荷折成结果页需要的 TrainingRequestPayload（只补结果页读的字段）。 */
-const buildPreviewRequest = (
-  item: TrainingRunHistoryItem,
-  request: Record<string, unknown> | null,
-): TrainingRequestPayload => {
-  const raw = (request || {}) as Record<string, any>;
-  const ctx = (raw.context || {}) as Record<string, any>;
-  const lgb = (raw.lgb_params || {}) as Record<string, any>;
-  const features = Array.isArray(raw.features)
-    ? (raw.features as string[])
-    : Array.isArray(raw.resolved_features)
-      ? (raw.resolved_features as string[])
-      : [];
-  const target: TrainingTarget = {
-    ...DEFAULT_TARGET,
-    horizonDays: Number(raw.target_horizon_days || item.target_horizon_days || DEFAULT_TARGET.horizonDays),
-    mode: (raw.target_mode as TrainingTarget['mode']) || DEFAULT_TARGET.mode,
-    executionPrice: (raw.execution_price as TrainingTarget['executionPrice']) || DEFAULT_TARGET.executionPrice,
-    labelTransform: (raw.label_transform as TrainingTarget['labelTransform']) || DEFAULT_TARGET.labelTransform,
-    labelTopPct: Number(raw.label_top_pct ?? DEFAULT_TARGET.labelTopPct),
-    labelDropExtremePct: Number(raw.label_drop_extreme_pct ?? DEFAULT_TARGET.labelDropExtremePct),
-  };
-  const params: TrainingParams = {
-    ...DEFAULT_PARAMS,
-    objective: (lgb.objective as TrainingParams['objective']) || DEFAULT_PARAMS.objective,
-    metric: (lgb.metric as TrainingParams['metric']) || DEFAULT_PARAMS.metric,
-  };
-  const context: TrainingContext = {
-    ...DEFAULT_CONTEXT,
-    market: ((ctx.market as TrainingContext['market']) || (item.market as TrainingContext['market']) || 'CN'),
-    initialCapital: Number(ctx.initial_capital ?? DEFAULT_CONTEXT.initialCapital),
-    benchmark: String(ctx.benchmark ?? DEFAULT_CONTEXT.benchmark),
-    commissionRate: Number(ctx.commission_rate ?? DEFAULT_CONTEXT.commissionRate),
-    slippage: Number(ctx.slippage ?? DEFAULT_CONTEXT.slippage),
-    dealPrice: (ctx.deal_price as TrainingContext['dealPrice']) || DEFAULT_CONTEXT.dealPrice,
-    industry_as_feature: Boolean(ctx.industry_as_feature ?? DEFAULT_CONTEXT.industry_as_feature),
-  };
-  return {
-    displayName: String(raw.display_name || raw.job_name || item.display_name || ''),
-    selectedFeatures: features,
-    featureCategories: [],
-    target,
-    timePeriods: {
-      train: [String(raw.train_start || ''), String(raw.train_end || '')],
-      val: [String(raw.valid_start || ''), String(raw.valid_end || '')],
-      test: [String(raw.test_start || ''), String(raw.test_end || '')],
-    },
-    params,
-    context,
-    generatedAt: String(raw.generated_at || item.created_at || ''),
-    labelFormula: String(raw.label_formula || ''),
-    effectiveTradeDate: '',
-    trainingWindow: String(raw.training_window || ''),
-    pool_id: (raw.pool_id as string) || null,
-  };
-};
-
 export const TrainingRunHistory: React.FC<TrainingRunHistoryProps> = ({ open, onClose }) => {
   const [items, setItems] = useState<TrainingRunHistoryItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -225,7 +148,7 @@ export const TrainingRunHistory: React.FC<TrainingRunHistoryProps> = ({ open, on
         modelTrainingService.getTrainingRun(item.run_id),
         modelTrainingService
           .getTrainingRunRequest(item.run_id)
-          .catch((): ModelTrainingRunRequest | null => null),
+          .catch(() => null),
       ]);
       setDetail(status);
       setRunRequest(request?.request || null);
@@ -235,53 +158,6 @@ export const TrainingRunHistory: React.FC<TrainingRunHistoryProps> = ({ open, on
       setDetailLoading(false);
     }
   }, []);
-
-  const parsedResult = useMemo<TrainingResult | null>(() => {
-    if (!selected || !detail?.result) return null;
-    return parseTrainingResult(
-      buildPreviewRequest(selected, runRequest),
-      selected.run_id,
-      detail.result,
-    );
-  }, [selected, detail, runRequest]);
-
-  const copyLogs = useCallback(async () => {
-    const text = detail?.logs || '';
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      message.success('日志已复制');
-    } catch {
-      message.warning('复制失败，请手动选择日志文本');
-    }
-  }, [detail]);
-
-  const downloadLogs = useCallback(() => {
-    if (!selected || !detail?.logs) return;
-    const blob = new Blob([detail.logs], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${selected.run_id}.log`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [selected, detail]);
-
-  const exportConfig = useCallback(() => {
-    if (!selected || !runRequest) {
-      message.info('该训练没有保存提交载荷');
-      return;
-    }
-    const blob = new Blob([JSON.stringify(runRequest, null, 2)], {
-      type: 'application/json;charset=utf-8',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${selected.run_id}_request.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [selected, runRequest]);
 
   const pageCompleted = items.filter((item) => item.status === 'completed').length;
   const pageWithStrict = items.filter((item) => item.strict?.status === 'ready').length;
@@ -570,107 +446,14 @@ export const TrainingRunHistory: React.FC<TrainingRunHistoryProps> = ({ open, on
           ) : null
         }
       >
-        {detailLoading ? (
-          <div className="flex h-64 items-center justify-center">
-            <Spin tip="加载训练结果与日志…" />
-          </div>
-        ) : detailError ? (
-          <Alert type="error" showIcon message="训练详情加载失败" description={detailError} />
-        ) : (
-          <Tabs
-            items={[
-              {
-                key: 'result',
-                label: (
-                  <span className="inline-flex items-center gap-1">
-                    <FileText size={14} /> 结果
-                  </span>
-                ),
-                children: parsedResult ? (
-                  <TrainingResultView
-                    result={parsedResult}
-                    resultError={detailError}
-                    settingDefaultModel={false}
-                    onSetDefaultModel={() =>
-                      message.info('历史训练结果请到「模型管理」设置默认模型')
-                    }
-                    onExportConfig={exportConfig}
-                    trainingStatus={detail?.status || selected?.status || ''}
-                    runId={selected?.run_id}
-                  />
-                ) : (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    message="这条训练没有可解析的结果"
-                    description={
-                      <div className="space-y-2">
-                        <p className="text-xs text-slate-500">
-                          可能是训练失败、被取消，或结果载荷由旧版本产生。
-                          {detail?.result ? '原始结果如下：' : '该任务没有 result 载荷。'}
-                        </p>
-                        {detail?.result ? (
-                          <pre className="max-h-[50vh] overflow-auto rounded-lg bg-slate-50 p-3 text-[11px] text-slate-600">
-                            {JSON.stringify(detail.result, null, 2)}
-                          </pre>
-                        ) : null}
-                      </div>
-                    }
-                  />
-                ),
-              },
-              {
-                key: 'logs',
-                label: (
-                  <span className="inline-flex items-center gap-1">
-                    <Terminal size={14} /> 日志
-                  </span>
-                ),
-                children: (
-                  <div>
-                    <div className="mb-2 flex items-center gap-2">
-                      <Button size="small" icon={<Copy size={14} />} onClick={() => void copyLogs()}>
-                        复制
-                      </Button>
-                      <Button size="small" icon={<Download size={14} />} onClick={downloadLogs}>
-                        下载 .log
-                      </Button>
-                      <span className="text-[11px] text-slate-400">
-                        {(detail?.logs || '').length} 字符
-                      </span>
-                    </div>
-                    <pre className="max-h-[64vh] min-h-[240px] overflow-auto rounded-xl bg-slate-950 p-4 text-[11px] leading-relaxed text-slate-200">
-                      {detail?.logs || '该训练没有保存日志。'}
-                    </pre>
-                  </div>
-                ),
-              },
-              {
-                key: 'config',
-                label: (
-                  <span className="inline-flex items-center gap-1">
-                    <SlidersHorizontal size={14} /> 提交配置
-                  </span>
-                ),
-                children: (
-                  <div>
-                    <div className="mb-2 flex items-center gap-2">
-                      <Button size="small" icon={<Download size={14} />} onClick={exportConfig}>
-                        下载 JSON
-                      </Button>
-                      <span className="text-[11px] text-slate-400">
-                        训练提交时的钉扎载荷（含特征清单）
-                      </span>
-                    </div>
-                    <pre className="max-h-[64vh] overflow-auto rounded-xl bg-slate-50 p-4 text-[11px] text-slate-700">
-                      {runRequest ? JSON.stringify(runRequest, null, 2) : '该训练没有保存提交载荷。'}
-                    </pre>
-                  </div>
-                ),
-              },
-            ]}
-          />
-        )}
+        <TrainingRunDetailTabs
+          runId={selected?.run_id}
+          meta={selected ?? {}}
+          detail={detail}
+          runRequest={runRequest}
+          loading={detailLoading}
+          error={detailError}
+        />
       </Modal>
     </>
   );

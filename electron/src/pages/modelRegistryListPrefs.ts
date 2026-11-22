@@ -49,6 +49,11 @@ export const MODEL_SORT_OPTIONS: ModelSortOption[] = [
 const SORT_KEYS: readonly ModelSortKey[] = MODEL_SORT_OPTIONS.map((o) => o.key);
 const STORAGE_PREFIX = 'qm.model-registry.prefs.v1';
 
+/** 后端/旧缓存传来的排序键一律过白名单，非法值退 default。 */
+export function normalizeModelSortKey(value: unknown): ModelSortKey {
+  return SORT_KEYS.includes(value as ModelSortKey) ? (value as ModelSortKey) : 'default';
+}
+
 export const DEFAULT_MODEL_LIST_PREFS: ModelListPrefs = {
   pinned: [],
   favorites: [],
@@ -74,9 +79,7 @@ export function loadModelListPrefs(market: string): ModelListPrefs {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_MODEL_LIST_PREFS };
     const record = parsed as Record<string, unknown>;
-    const sortKey = SORT_KEYS.includes(record.sortKey as ModelSortKey)
-      ? (record.sortKey as ModelSortKey)
-      : 'default';
+    const sortKey = normalizeModelSortKey(record.sortKey);
     return {
       pinned: toStringList(record.pinned),
       favorites: toStringList(record.favorites),

@@ -1080,6 +1080,131 @@ async def list_training_runs(
     }
 
 
+_MODEL_LIST_PREFS_DDL = """
+CREATE TABLE IF NOT EXISTS qm_model_list_prefs (
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    market VARCHAR(16) NOT NULL,
+    prefs JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, user_id, market)
+)
+"""
+
+_MODEL_LIST_SORT_KEYS = {
+    "default",
+    "created_desc",
+    "created_asc",
+    "name_asc",
+    "test_ic_desc",
+    "horizon_asc",
+}
+
+
+def _normalize_model_list_prefs(payload: Any) -> dict[str, Any]:
+    """清洗置顶/收藏/排序偏好：去重、截断、排序键白名单。"""
+    data = payload if isinstance(payload, dict) else {}
+
+    def _clean_ids(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            if not isinstance(raw, str):
+                continue
+            item = raw.strip()
+            if not item or item in seen or len(item) > 128:
+                continue
+            seen.add(item)
+            out.append(item)
+            if len(out) >= 500:
+                break
+        return out
+
+    sort_key = str(data.get("sort_key") or "default")
+    if sort_key not in _MODEL_LIST_SORT_KEYS:
+        sort_key = "default"
+    return {
+        "pinned": _clean_ids(data.get("pinned")),
+        "favorites": _clean_ids(data.get("favorites")),
+        "sort_key": sort_key,
+    }
+
+
+def _market_key(value: str | None) -> str:
+    return (str(value or "CN").strip().upper() or "CN")[:16]
+
+
+class ModelListPrefsPayload(BaseModel):
+    market: str = Field(default="CN", max_length=16)
+    pinned: list[str] = Field(default_factory=list)
+    favorites: list[str] = Field(default_factory=list)
+    sort_key: str = Field(default="default", max_length=32)
+
+
+@router.get("/list-prefs", summary="模型列表偏好（置顶/收藏/排序，跨重启保存）")
+async def get_model_list_prefs(
+    market: str = Query("CN", max_length=16),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """置顶/收藏/排序按 用户 × 市场 存 PG；localStorage 只作前端缓存。"""
+    from backend.shared.database_manager_v2 import get_session
+
+    tenant_id, user_id = _owner_scope(current_user)
+    market_key = _market_key(market)
+    async with get_session(read_only=False) as db:
+        await db.execute(text(_MODEL_LIST_PREFS_DDL))
+        raw = (
+            await db.execute(
+                text(
+                    """
+                    SELECT prefs FROM qm_model_list_prefs
+                    WHERE tenant_id = :tenant_id AND user_id = :user_id AND market = :market
+                    """
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "market": market_key},
+            )
+        ).scalar()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = {}
+    return {"market": market_key, **_normalize_model_list_prefs(raw)}
+
+
+@router.put("/list-prefs", summary="保存模型列表偏好（置顶/收藏/排序）")
+async def save_model_list_prefs(
+    payload: ModelListPrefsPayload,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    from backend.shared.database_manager_v2 import get_session
+
+    tenant_id, user_id = _owner_scope(current_user)
+    market_key = _market_key(payload.market)
+    prefs = _normalize_model_list_prefs(payload.model_dump())
+    async with get_session(read_only=False) as db:
+        await db.execute(text(_MODEL_LIST_PREFS_DDL))
+        await db.execute(
+            text(
+                """
+                INSERT INTO qm_model_list_prefs (tenant_id, user_id, market, prefs, updated_at)
+                VALUES (:tenant_id, :user_id, :market, CAST(:prefs AS JSONB), NOW())
+                ON CONFLICT (tenant_id, user_id, market)
+                DO UPDATE SET prefs = EXCLUDED.prefs, updated_at = NOW()
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "market": market_key,
+                "prefs": json.dumps(prefs, ensure_ascii=False),
+            },
+        )
+    return {"market": market_key, **prefs, "saved": True}
+
+
 @router.get(
     "/training-runs/compare",
     summary="训练 run 对比（同口径严格评估 + 配置 diff + 单轴判定）",
