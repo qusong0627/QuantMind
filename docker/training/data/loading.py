@@ -372,7 +372,12 @@ def load_data(
             if not _wanted_early:
                 raise RuntimeError("pool_symbols 非空但无法解析出任何代码")
             _before_early = len(df)
+            # 池过滤后必须重置索引：qfq 标签面板 merge 会把窄表索引重置为 0..M-1，
+            # 若宽表仍保留过滤前的稀疏标签（例 528309…），后面
+            # `df.loc[valid_index]` 会抛 "... not in index"（2026-11-20 防守池
+            # 训练实败）。重置后与全市场路径的行序语义一致。
             df = df[df["symbol"].astype(str).str.upper().isin(_wanted_early)].copy()
+            df = df.reset_index(drop=True)
             logger.info(
                 "After early pool filter: %d rows (pool=%d symbols, before=%d)",
                 len(df),
