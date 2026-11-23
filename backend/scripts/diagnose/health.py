@@ -264,6 +264,11 @@ class LedgerParity:
     #: ``C14_TRADES_SQL`` 的 LLM 腿成交集合里，因此永远配不上对；混进 orphans 会把
     #: 一次已验收的修账报成「账本有流水、成交表没有」。
     absorbed: tuple[str, ...] = ()
+    #: 过期委托补账流水（``expired-recover:<order_id>:<agent>``，由
+    #: ``reconcile_expired_agent_orders.py`` 写）：同样**不参与配对**。TDX 柜台只给
+    #: 当日委托，跨日过期但实际成交的委托没有成交明细行可配 ⇒ 混进 orphans 会让账本环
+    #: 在每次补账后常驻 warn（2026-11-23 实测 3 条）。
+    recovered: tuple[str, ...] = ()
 
 
 def _group_by_order(rows: Any) -> dict[tuple[str, str, str], list[dict]]:
@@ -311,7 +316,8 @@ def ledger_parity(
     index_enabled: bool,
     synth_prefix: str,
     seed_prefix: str,
-    absorb_prefix: str = "",
+    absorb_prefix: str | tuple[str, ...] = "",
+    recover_prefix: str = "",
 ) -> LedgerParity:
     """逐单配对（纯函数）：成交行 ↔ 账本流水行，分成五类偏差。
 
@@ -324,12 +330,16 @@ def ledger_parity(
       持仓被裁剪）：账本其实没反映这笔成交，原因在 ``note`` 列。
 
     ``synth_prefix`` / ``seed_prefix`` / ``absorb_prefix`` 由调用方给（与写入方**同一个
-    常量**），不在这里写死字面量。``seed_prefix``（期初结转，P3 迁入时就有的仓）与
-    ``absorb_prefix``（人工卖单吸收）两族**不参与配对**、各自单独计数：它们本来就没有
-    对应的 LLM 腿成交，混进 orphans 会把「迁入」和「已验收的修账」报成异常。
+    常量**），不在这里写死字面量。``seed_prefix``（期初结转，P3 迁入时就有的仓）、
+    ``absorb_prefix``（人工卖单吸收）与 ``recover_prefix``（过期委托补账）三族
+    **不参与配对**、各自单独计数：它们本来就没有对应的 LLM 腿成交，混进 orphans 会把
+    「迁入」「已验收的修账」与「补账」报成异常。
     """
     trades_by_order = _group_by_order(trades)
     ledger_by_order = _group_by_order(ledger_fills)
+    absorb_prefixes = (
+        (absorb_prefix,) if isinstance(absorb_prefix, str) else tuple(absorb_prefix)
+    )
     posted = 0
     missing: list[str] = []
     mismatch: list[str] = []
@@ -338,6 +348,7 @@ def ledger_parity(
     unapplied: list[str] = []
     seeds: list[str] = []
     absorbed: list[str] = []
+    recovered: list[str] = []
 
     for key in sorted(set(trades_by_order) | set(ledger_by_order)):
         order_id = key[2]
@@ -348,8 +359,11 @@ def ledger_parity(
             if fill_key.startswith(seed_prefix):
                 seeds.append(f"{order_id}:{fill_key}")
                 continue
-            if absorb_prefix and fill_key.startswith(absorb_prefix):
+            if any(p and fill_key.startswith(p) for p in absorb_prefixes):
                 absorbed.append(f"{order_id}:{fill_key}")
+                continue
+            if recover_prefix and fill_key.startswith(recover_prefix):
+                recovered.append(f"{order_id}:{fill_key}")
                 continue
             by_fill_key.setdefault(fill_key, []).append(i)
             if float(row.get("applied_volume") or 0.0) == 0.0:
@@ -375,8 +389,10 @@ def ledger_parity(
             fill_key = str(row.get("fill_key") or "")
             if fill_key.startswith(seed_prefix):
                 continue  # 上面已归 seeds（这里的 continue 只防将来改结构时漏一刀）
-            if absorb_prefix and fill_key.startswith(absorb_prefix):
+            if any(p and fill_key.startswith(p) for p in absorb_prefixes):
                 continue  # 上面已归 absorbed
+            if recover_prefix and fill_key.startswith(recover_prefix):
+                continue  # 上面已归 recovered
             if fill_key.startswith(synth_prefix):
                 dup_posts.append(f"{order_id}:{fill_key}")
             else:
@@ -395,6 +411,7 @@ def ledger_parity(
         index_enabled=index_enabled,
         seeds=tuple(seeds),
         absorbed=tuple(absorbed),
+        recovered=tuple(recovered),
     )
 
 
@@ -472,6 +489,7 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
         "unapplied": len(p.unapplied),
         "seeds": len(p.seeds),
         "absorbed": len(p.absorbed),
+        "recovered": len(p.recovered),
         "trade_unique_index": p.index_enabled,
     }
     index_note = "" if p.index_enabled else "；成交唯一键未启用（并发双写无 DB 兜底）"
@@ -481,23 +499,26 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
         "（先去重），见 C14 告警里的重复组"
     )
     # 期初结转（P3）与人工卖单吸收的流水**不是**「多出来的账」：它们没有对应的
-    # LLM 腿成交，如实报出条数。
+    # LLM 腿成交，如实报出条数。过期委托补账同理（柜台无跨日成交明细）。
     seed_note = f"，另含期初结转 {len(p.seeds)} 条" if p.seeds else ""
     absorb_note = f"，另含人工卖单吸收 {len(p.absorbed)} 条" if p.absorbed else ""
-    if p.trades == 0 and p.ledger_rows == len(p.seeds) + len(p.absorbed):
+    recover_note = f"，另含过期补账 {len(p.recovered)} 条" if p.recovered else ""
+    extra_rows = len(p.seeds) + len(p.absorbed) + len(p.recovered)
+    if p.trades == 0 and p.ledger_rows == extra_rows:
         if p.index_enabled:
             return CheckResult(
                 "C14",
                 "分账账本一致性",
                 "ok",
-                f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}{absorb_note}（分账未参与）",
+                f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}{absorb_note}{recover_note}"
+                "（分账未参与）",
                 metrics=metrics,
             )
         return CheckResult(
             "C14",
             "分账账本一致性",
             "warn",
-            f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}{absorb_note}"
+            f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}{absorb_note}{recover_note}"
             f"（分账未参与）{index_note}",
             index_fix,
             metrics,
@@ -525,15 +546,15 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
             "分账账本一致性",
             "ok",
             f"近 30 日 {p.trades} 笔 LLM 腿成交全部落账（账本 {p.ledger_rows} 行，"
-            f"归属一致{seed_note}{absorb_note}）",
+            f"归属一致{seed_note}{absorb_note}{recover_note}）",
             metrics=metrics,
         )
     return CheckResult(
         "C14",
         "分账账本一致性",
         level,
-        f"近 30 日 {p.trades} 笔 LLM 腿成交 / 账本 {p.ledger_rows} 行{seed_note}{absorb_note}："
-        + "；".join(parts),
+        f"近 30 日 {p.trades} 笔 LLM 腿成交 / 账本 {p.ledger_rows} 行"
+        f"{seed_note}{absorb_note}{recover_note}：" + "；".join(parts),
         " ".join(dict.fromkeys(suggestions)),
         metrics,
     )
@@ -1317,9 +1338,10 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
     模拟盘（``sim_trades``）不写账本。窗口 :data:`AGENT_LEDGER_WINDOW_DAYS` 天，
     两侧各放宽 :data:`AGENT_LEDGER_WINDOW_SLACK_DAYS` 天（见该常量）。
     """
-    from backend.shared.decision.agent_ledger import SEED_FILL_PREFIX
+    from backend.shared.decision.agent_ledger import RECOVER_FILL_PREFIX, SEED_FILL_PREFIX
     from backend.shared.decision.manual_sell_absorption import (
         FILL_KEY_PREFIX as MANUAL_ABSORB_PREFIX,
+        MANUAL_BUY_PREFIX,
     )
     from backend.shared.trade_contract import (
         DUP_FILLS_SQL,
@@ -1387,8 +1409,9 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
             ledger,
             index_enabled=indexed,
             synth_prefix=SYNTH_TRADE_PREFIX,
-            absorb_prefix=f"{MANUAL_ABSORB_PREFIX}:",
+            absorb_prefix=(f"{MANUAL_ABSORB_PREFIX}:", f"{MANUAL_BUY_PREFIX}:"),
             seed_prefix=SEED_FILL_PREFIX,
+            recover_prefix=f"{RECOVER_FILL_PREFIX}:",
         )
     )
 
@@ -1704,6 +1727,101 @@ async def check_c16_projection_orphans(ctx: HealthContext) -> CheckResult:
     )
 
 
+def classify_real_position_parity(
+    ledger_totals: dict[str, float], real_totals: dict[str, float]
+) -> CheckResult:
+    """C18 判定（纯函数）：分账持仓（含 manual）合计 vs 桥真实持仓。"""
+    diffs: list[str] = []
+    for code in sorted(set(ledger_totals) | set(real_totals)):
+        led = round(float(ledger_totals.get(code, 0.0)), 4)
+        real = round(float(real_totals.get(code, 0.0)), 4)
+        if abs(led - real) > 1e-6:
+            diffs.append(f"{code} 账本 {led:g} / 真实 {real:g}")
+    metrics = {
+        "codes": len(set(ledger_totals) | set(real_totals)),
+        "diff_codes": len(diffs),
+    }
+    if diffs:
+        return CheckResult(
+            "C18",
+            "真实持仓一致性",
+            "fail",
+            "；".join(diffs[:5]) + (f"（共 {len(diffs)} 只）" if len(diffs) > 5 else ""),
+            "人工买卖未入账或账本漂移：跑 manual_sell_absorb_task 吸收，"
+            "并核对 orders 是否有跨日重复委托",
+            metrics,
+        )
+    return CheckResult(
+        "C18",
+        "真实持仓一致性",
+        "ok",
+        f"{len(ledger_totals)} 只持仓与真实账户一致（含 manual 归属）",
+        "",
+        metrics,
+    )
+
+
+async def check_c18_real_position_parity(ctx: HealthContext) -> CheckResult:
+    """C18：分账账本（全部 agent，含 ``manual``）合计必须等于桥真实持仓。
+
+    这是「人工买入/卖出也入账」的验收判据：只比 LLM 腿（C14）看不出人工变动，
+    只有跟桥快照对齐才能证明账本记录的是**真实持仓**。
+    """
+    import json
+    import os
+
+    from backend.shared.simulation_account_keys import normalize_runtime_user
+
+    tenant = "default"
+    user = normalize_runtime_user(
+        os.getenv("QM_DECISION_ACCOUNT_USER_ID", "").strip() or "10000001"
+    )
+    try:
+        ledger_rows = ctx.query(
+            "SELECT code, SUM(volume) AS v FROM qm_agent_ledger_position "
+            "WHERE tenant_id = :t AND user_id = :u GROUP BY code",
+            t=tenant,
+            u=user,
+        )
+        snap_rows = ctx.query(
+            "SELECT payload_json FROM real_account_snapshots "
+            "WHERE tenant_id = :t AND user_id = :u AND source = 'tdx_bridge' "
+            "ORDER BY snapshot_at DESC LIMIT 1",
+            t=tenant,
+            u=user,
+        )
+    except Exception as exc:  # noqa: BLE001 - 表缺失/取数失败不伪造成 ok
+        return CheckResult("C18", "真实持仓一致性", "warn", f"取数失败: {exc}")
+    if not snap_rows:
+        return CheckResult(
+            "C18", "真实持仓一致性", "warn", "无 tdx_bridge 快照（桥可能未同步）"
+        )
+    payload = snap_rows[0].get("payload_json")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            payload = {}
+    real: dict[str, float] = {}
+    for item in (payload or {}).get("positions") or []:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("symbol") or "").strip()
+        try:
+            volume = float(item.get("volume") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if code and volume > 0:
+            real[code] = round(real.get(code, 0.0) + volume, 4)
+    ledger = {
+        str(r.get("code") or ""): float(r.get("v") or 0.0)
+        for r in ledger_rows
+        if r.get("code")
+    }
+    result = classify_real_position_parity(ledger, real)
+    return result
+
+
 def _crypto_market_enabled() -> bool:
     """加密市场是否启用（委托 quantbc_hub，避免 ENABLE_CRYPTO 解析两处口径分叉）。"""
     from backend.services.engine.data_platform.quantbc_hub import _crypto_enabled
@@ -1729,6 +1847,7 @@ CHECKS: list[tuple[str, str, Callable]] = [
     ("C15", "模型产物一致", check_c15_model_artifact_consistency),
     ("C16", "投影孤儿", check_c16_projection_orphans),
     ("C17", "模型分数新鲜度", check_c17_model_score_freshness),
+    ("C18", "真实持仓一致性", check_c18_real_position_parity),
 ]
 
 

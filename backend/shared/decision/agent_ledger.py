@@ -81,6 +81,7 @@ __all__ = [
     "BRIDGE_OVERRIDE",
     "BRIDGE_PHANTOM",
     "DEFAULT_AGENT_QUOTA",
+    "RECOVER_FILL_PREFIX",
     "SEED_FILL_PREFIX",
     "BridgePosition",
     "LedgerChange",
@@ -472,6 +473,13 @@ def holding_age_days(buy_ts: Any, now: Any) -> int | None:
 #: 期初结转流水的 ``fill_key`` 前缀。带它的行**不是本仓成交**，是「迁入时就有的
 #: 仓」：对账侧（体检 C14）按同一常量把这类行单独计数，不当「无对应成交」报。
 SEED_FILL_PREFIX = "legacy-seed:"
+
+#: 过期委托补账流水的 ``fill_key`` 前缀（不带冒号，写入方自己拼
+#: ``expired-recover:{order_id}:{agent}``，见 ``reconcile_expired_agent_orders.py``）。
+#: 这类行记的是「TDX 跨日过期、柜台实际已成交」的补账：柜台只给当日委托，历史成交
+#: 明细不可考 ⇒ **按定义没有可配对的成交行**。对账侧（C14）必须与期初结转、人工卖单
+#: 吸收同等待遇单独计数——混进 orphans 会让账本环在补账后常驻 warn，真异常反而被淹没。
+RECOVER_FILL_PREFIX = "expired-recover"
 
 
 def seed_fill_key(agent: Any, code: Any) -> str:

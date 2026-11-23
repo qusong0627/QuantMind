@@ -40,6 +40,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.shared.agent_ledger_fill import market_of  # noqa: E402
 from backend.shared.agent_ledger_store import apply_fill  # noqa: E402
 from backend.shared.database_manager_v2 import get_session  # noqa: E402
+from backend.shared.decision.agent_ledger import RECOVER_FILL_PREFIX  # noqa: E402
 from backend.shared.decision.manual_sell_auto_absorb import (  # noqa: E402
     compute_mismatch,
     load_tdx_account_volumes,
@@ -50,7 +51,7 @@ TENANT = "default"
 USER = "10000001"
 LOOKBACK_DAYS = 60
 EPS = 1e-6
-FILL_KEY_PREFIX = "expired-recover"
+FILL_KEY_PREFIX = RECOVER_FILL_PREFIX
 
 
 @dataclass(frozen=True)

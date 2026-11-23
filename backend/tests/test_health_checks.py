@@ -479,9 +479,10 @@ async def test_c12_check_reports_missing_market_with_reason(monkeypatch):
 SYNTH = "qmt-synth-"
 SEED = "legacy-seed:"
 ABSORB = "manual-absorb:"
+RECOVER = "expired-recover:"
 
 
-def _parity(trades, ledger, *, index=True, absorb=ABSORB):
+def _parity(trades, ledger, *, index=True, absorb=ABSORB, recover=RECOVER):
     return classify_agent_ledger_parity(
         ledger_parity(
             trades,
@@ -490,6 +491,7 @@ def _parity(trades, ledger, *, index=True, absorb=ABSORB):
             synth_prefix=SYNTH,
             seed_prefix=SEED,
             absorb_prefix=absorb,
+            recover_prefix=recover,
         )
     )
 
@@ -570,6 +572,28 @@ def test_c14_only_absorb_rows_is_not_participation_failure():
     """窗口里只有吸收流水、没有 LLM 腿成交 ⇒ 按「分账未参与」如实写，不报红。"""
     r = _parity([], [_l(f"{ABSORB}o9:alpha", order="o9")])
     assert r.level == "ok", r.detail
+
+
+def test_c14_expired_recover_rows_are_counted_not_orphaned():
+    """过期委托补账流水单独计数，不当「无对应成交」报。
+
+    源委托状态 expired、柜台只给当日委托 ⇒ **没有可配对的成交明细行**，这是
+    ``reconcile_expired_agent_orders.py`` 修账的既有形态。2026-11-23 实测 3 条
+    （11-10/11-11/11-13）让账本环常驻 warn：真异常来了反而看不出来。
+    """
+    r = _parity([_t("k1")], [_l("k1"), _l(f"{RECOVER}o9:alpha", order="o9")])
+    assert r.level == "ok", r.detail
+    assert r.metrics["recovered"] == 1
+    assert r.metrics["orphans"] == 0
+    assert "过期补账 1 条" in r.detail
+
+
+def test_c14_only_recover_rows_is_not_participation_failure():
+    """窗口里只有过期补账流水、没有 LLM 腿成交 ⇒ 如实写「分账未参与」，不报红。"""
+    r = _parity([], [_l(f"{RECOVER}o9:alpha", order="o9")])
+    assert r.level == "ok", r.detail
+    assert "过期补账 1 条" in r.detail
+    assert "未参与" in r.detail
 
 
 def test_c14_missing_post_is_fail():
