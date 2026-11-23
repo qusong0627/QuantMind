@@ -153,7 +153,13 @@ async def live_equity(_current_user: dict = Depends(get_current_user)):
     try:
         async with get_session(read_only=True) as session:
             ledger = await lf.read_pg_ledger(session)
-            agents = sorted((ledger.get("agents") or {}).keys())
+            from backend.shared.decision.manual_sell_absorption import (
+                model_agent_names,
+            )
+
+            # manual 是人工买卖归属桶（让真实持仓 = 模型分账 + manual 成立），
+            # 不是模型：净值曲线只画模型，避免人工单混进赛马。
+            agents = model_agent_names(ledger.get("agents") or {})
             if not agents:
                 return {"success": True, "data": file_data}
             pg_series = await lf.equity_series_pg(

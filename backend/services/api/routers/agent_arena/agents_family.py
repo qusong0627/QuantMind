@@ -517,8 +517,15 @@ async def _cn_overview_rows() -> list[dict]:
         async with get_session(read_only=True) as session:
             ledger = await lf.read_pg_ledger(session)
             # 活账账户 = A 股实盘名册；文件目录里的历史模型（fake-model 等）没有
-            # 分账账户，不该出现在总控（否则会渲染成 -100% 的空账户卡片）
-            names = sorted(ledger.get("agents") or {})
+            # 分账账户，不该出现在总控（否则会渲染成 -100% 的空账户卡片）。
+            # ``manual``（人工买卖归属桶）也不是模型：它让「真实持仓 = 模型分账 +
+            # manual」成立，但赛马总控只比模型，不能让一条人工线混进排名
+            # （2026-11-23 用户口径）。
+            from backend.shared.decision.manual_sell_absorption import (
+                model_agent_names,
+            )
+
+            names = model_agent_names(ledger.get("agents") or {})
             rows: list[dict] = []
             for name in names:
                 perf = await lf.build_agent_performance_pg(
