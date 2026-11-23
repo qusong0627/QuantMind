@@ -95,8 +95,33 @@ const { Text } = Typography;
 
 type ModelListTab = 'active' | 'favorites' | 'archived';
 
-/** 左栏展开文件夹时内联展示的模型上限（其余见下方模型列表）。 */
-const FOLDER_CHILD_LIMIT = 50;
+/** 左栏宽度（可拖拽调整）：默认/最小/上限，按窗口宽度收敛并持久化到 localStorage。 */
+const SIDEBAR_WIDTH_DEFAULT = 380;
+const SIDEBAR_WIDTH_MIN = 300;
+const SIDEBAR_WIDTH_MAX = 720;
+const SIDEBAR_WIDTH_STORAGE_KEY = 'qm.modelRegistry.sidebarWidth';
+
+const maxSidebarWidth = (): number => {
+  if (typeof window === 'undefined') return SIDEBAR_WIDTH_MAX;
+  return Math.max(
+    SIDEBAR_WIDTH_MIN,
+    Math.min(SIDEBAR_WIDTH_MAX, Math.floor(window.innerWidth * 0.55)),
+  );
+};
+
+const clampSidebarWidth = (width: number): number =>
+  Math.round(Math.min(maxSidebarWidth(), Math.max(SIDEBAR_WIDTH_MIN, width)));
+
+const readStoredSidebarWidth = (): number => {
+  if (typeof window === 'undefined') return SIDEBAR_WIDTH_DEFAULT;
+  try {
+    const raw = Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+    if (Number.isFinite(raw) && raw > 0) return clampSidebarWidth(raw);
+  } catch {
+    /* 隐私模式/配额异常：用默认值 */
+  }
+  return clampSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+};
 
 /** 服务端是否已有可用的偏好数据（升级前只有本地缓存时才需要抬一次）。 */
 const hasPrefsData = (prefs: ModelListPrefs): boolean =>
@@ -125,8 +150,11 @@ export const ModelRegistryPage: React.FC = () => {
   const prefsTouchedRef = useRef(false);
   // 文件夹：null=全部，UNFILED_FOLDER_KEY=未分组，其余为文件夹 ID
   const [activeFolder, setActiveFolder] = useState<string | null>(null);
-  // 文件管理器式展开：展开的文件夹在左栏内联列出模型（与 activeFolder 同步）
-  const [expandedFolder, setExpandedFolder] = useState<string | null>(null);
+  // 左栏宽度：拖拽分隔条或方向键调整，双击分隔条恢复默认
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => readStoredSidebarWidth());
+  const [sidebarDragging, setSidebarDragging] = useState(false);
+  const [sidebarAnnounce, setSidebarAnnounce] = useState('');
+  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [folderPanelOpen, setFolderPanelOpen] = useState(true);
   const [folderModalMode, setFolderModalMode] = useState<'create' | 'rename' | null>(null);
   const [folderModalTargetId, setFolderModalTargetId] = useState<string | null>(null);
@@ -198,12 +226,6 @@ export const ModelRegistryPage: React.FC = () => {
     ),
     { pinned: listPrefs.pinned, sortKey: listPrefs.sortKey },
   );
-  const expandedFolderModels = expandedFolder
-    ? displayModels.slice(0, FOLDER_CHILD_LIMIT)
-    : [];
-  const expandedFolderOverflow = expandedFolder
-    ? Math.max(0, displayModels.length - FOLDER_CHILD_LIMIT)
-    : 0;
   const activeSortLabel =
     MODEL_SORT_OPTIONS.find(o => o.key === listPrefs.sortKey)?.shortLabel ?? '排序';
 
@@ -251,20 +273,57 @@ export const ModelRegistryPage: React.FC = () => {
     );
   };
 
-  /** 文件夹行点击：文件管理器语义——点开即展开并过滤，再点收起回到全部。 */
+  /** 文件夹行点击：选中即过滤下方模型列表；再点同一文件夹取消过滤回到全部。 */
   const handleSelectFolder = (filter: string | null) => {
-    if (filter === null || filter === UNFILED_FOLDER_KEY) {
-      setExpandedFolder(null);
-      setActiveFolder(filter);
-      return;
-    }
-    if (expandedFolder === filter) {
-      setExpandedFolder(null);
+    if (filter !== null && filter !== UNFILED_FOLDER_KEY && activeFolder === filter) {
       setActiveFolder(null);
       return;
     }
-    setExpandedFolder(filter);
     setActiveFolder(filter);
+  };
+
+  // ─── 左栏宽度拖拽/键盘调整 ────────────────────────────────────────
+  const handleSidebarResizeStart = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    sidebarDragRef.current = { startX: event.clientX, startWidth: sidebarWidth };
+    setSidebarDragging(true);
+  };
+
+  const handleSidebarResizeMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = sidebarDragRef.current;
+    if (!drag || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    setSidebarWidth(
+      clampSidebarWidth(drag.startWidth + (event.clientX - drag.startX)),
+    );
+  };
+
+  const handleSidebarResizeEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (!sidebarDragRef.current) return;
+    sidebarDragRef.current = null;
+    setSidebarDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setSidebarAnnounce(`模型列表宽度 ${sidebarWidth} 像素`);
+  };
+
+  const handleSidebarResizeKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    let next: number | null = null;
+    if (event.key === 'ArrowLeft') next = clampSidebarWidth(sidebarWidth - 16);
+    else if (event.key === 'ArrowRight') next = clampSidebarWidth(sidebarWidth + 16);
+    else if (event.key === 'Home') next = clampSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+    if (next === null) return;
+    event.preventDefault();
+    setSidebarWidth(next);
+    setSidebarAnnounce(`模型列表宽度 ${next} 像素`);
+  };
+
+  const handleSidebarResetWidth = () => {
+    const next = clampSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+    setSidebarWidth(next);
+    setSidebarAnnounce(`模型列表宽度已恢复默认，${next} 像素`);
   };
 
   const toggleFusionSelect = (m: UserModelRecord) => {
@@ -384,10 +443,24 @@ export const ModelRegistryPage: React.FC = () => {
     listPrefsRef.current = listPrefs;
   }, [listPrefs]);
 
+  // 左栏宽度：持久化，并在窗口变窄时重新收敛到可用范围。
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+    } catch {
+      /* 配额满 / 隐私模式：忽略 */
+    }
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    const onResize = () => setSidebarWidth((width) => clampSidebarWidth(width));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   // 切市场 / 删除当前文件夹后，筛选项必须回到「全部」，避免落到不存在的文件夹上。
   useEffect(() => {
     setActiveFolder(null);
-    setExpandedFolder(null);
     setOrganizeMode(false);
     setOrganizeSelected([]);
   }, [currentMarket]);
@@ -401,7 +474,6 @@ export const ModelRegistryPage: React.FC = () => {
     if (activeFolder === null || activeFolder === UNFILED_FOLDER_KEY) return;
     if (!listPrefs.folders.some((folder) => folder.id === activeFolder)) {
       setActiveFolder(null);
-      setExpandedFolder(null);
     }
   }, [activeFolder, listPrefs.folders]);
 
@@ -485,7 +557,6 @@ export const ModelRegistryPage: React.FC = () => {
       // 从「+」新建（无移动目标）时直接点开新文件夹；从卡片/整理模式触发则留在原视图继续整理
       if (moveIds.length === 0) {
         setActiveFolder(folderId);
-        setExpandedFolder(folderId);
       } else {
         setOrganizeSelected([]);
       }
@@ -519,7 +590,6 @@ export const ModelRegistryPage: React.FC = () => {
         commitListPrefs((prev) => deleteFolder(prev, folderId));
         if (activeFolder === folderId) {
           setActiveFolder(null);
-          setExpandedFolder(null);
         }
         message.success('文件夹已删除');
       },
@@ -971,7 +1041,10 @@ export const ModelRegistryPage: React.FC = () => {
       <div className={PAGE_LAYOUT.frameClass}>
         <div className="flex flex-row h-full w-full overflow-hidden">
           {/* ═══ 左侧边栏 ═══ */}
-          <div className="w-[360px] flex-shrink-0 border-r border-slate-100 bg-white flex flex-col shadow-lg shadow-slate-100/50 z-10 h-full overflow-hidden">
+          <div
+            className="flex-shrink-0 border-r border-slate-100 bg-white flex flex-col shadow-lg shadow-slate-100/50 z-10 h-full overflow-hidden"
+            style={{ width: `${sidebarWidth}px` }}
+          >
             {/* 顶部标题 + 搜索 */}
             <div className="px-5 pt-5 pb-4 border-b border-slate-50">
               <div className="flex items-center justify-between mb-4">
@@ -1039,16 +1112,11 @@ export const ModelRegistryPage: React.FC = () => {
               folders={listPrefs.folders}
               counts={folderCounts}
               activeFolder={activeFolder}
-              expandedFolder={expandedFolder}
-              expandedModels={expandedFolderModels}
-              expandedOverflow={expandedFolderOverflow}
-              selectedModelId={selectedId}
               open={folderPanelOpen}
               organizeMode={organizeMode}
               onToggleOpen={() => setFolderPanelOpen((prev) => !prev)}
               onToggleOrganize={toggleOrganizeMode}
               onSelectFolder={handleSelectFolder}
-              onSelectModel={setSelectedId}
               onCreateFolder={() => openCreateFolder()}
               onRenameFolder={openRenameFolder}
               onDeleteFolder={handleDeleteFolder}
@@ -1275,6 +1343,27 @@ export const ModelRegistryPage: React.FC = () => {
               )}
             </div>
           </div>
+          {/* 左栏宽度拖拽把手（可聚焦，方向键微调，双击恢复默认） */}
+          <button
+            type="button"
+            aria-label="调整模型列表宽度（拖拽或左右方向键微调，双击恢复默认）"
+            title="拖拽调整宽度，双击恢复默认"
+            onPointerDown={handleSidebarResizeStart}
+            onPointerMove={handleSidebarResizeMove}
+            onPointerUp={handleSidebarResizeEnd}
+            onPointerCancel={handleSidebarResizeEnd}
+            onLostPointerCapture={() => {
+              sidebarDragRef.current = null;
+              setSidebarDragging(false);
+            }}
+            onKeyDown={handleSidebarResizeKeyDown}
+            onDoubleClick={handleSidebarResetWidth}
+            className={clsx(
+              'shrink-0 w-1.5 cursor-col-resize touch-none select-none transition-colors',
+              sidebarDragging ? 'bg-blue-400/70' : 'bg-slate-100 hover:bg-blue-200/80',
+            )}
+          />
+          <span className="sr-only" aria-live="polite">{sidebarAnnounce}</span>
           {/* ═══ 右侧主区 ═══ */}
           <div className="flex-1 overflow-y-auto custom-scrollbar h-full bg-white relative">
             <AnimatePresence mode="wait">

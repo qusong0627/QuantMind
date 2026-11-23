@@ -2,31 +2,13 @@ import type * as React from 'react';
 import { describe, expect, test, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { UserModelRecord } from '../../services/modelTrainingService';
 import { ModelFolderModal, ModelFoldersPanel } from '../modelFoldersPanel';
-
-function model(id: string, overrides: Partial<UserModelRecord> = {}): UserModelRecord {
-  return {
-    tenant_id: 'default',
-    user_id: '1',
-    model_id: id,
-    source_run_id: '',
-    status: 'ready',
-    storage_path: '',
-    model_file: '',
-    metadata_json: { display_name: id },
-    metrics_json: {},
-    is_default: false,
-    ...overrides,
-  };
-}
 
 function renderPanel(overrides: Partial<React.ComponentProps<typeof ModelFoldersPanel>> = {}) {
   const callbacks = {
     onToggleOpen: vi.fn(),
     onToggleOrganize: vi.fn(),
     onSelectFolder: vi.fn(),
-    onSelectModel: vi.fn(),
     onCreateFolder: vi.fn(),
     onRenameFolder: vi.fn(),
     onDeleteFolder: vi.fn(),
@@ -36,10 +18,6 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof ModelFolders
       folders={[{ id: 'f1', name: 'T+5' }]}
       counts={{ total: 3, unfiled: 1, byFolder: { f1: 2 } }}
       activeFolder={null}
-      expandedFolder={null}
-      expandedModels={[]}
-      expandedOverflow={0}
-      selectedModelId={null}
       open
       organizeMode={false}
       {...callbacks}
@@ -82,34 +60,12 @@ describe('ModelFoldersPanel', () => {
     expect(screen.queryByText('全部模型')).not.toBeInTheDocument();
   });
 
-  test('展开文件夹后内联列出模型，模型可点击打开', async () => {
-    const user = userEvent.setup();
-    const { onSelectModel } = renderPanel({
-      expandedFolder: 'f1',
-      expandedModels: [model('mdl_a', { metadata_json: { display_name: '模型A' } })],
-      selectedModelId: 'mdl_a',
-    });
-
-    expect(screen.getByRole('button', { name: /^T\+5/ })).toHaveAttribute(
+  test('文件夹行只做过滤，不内联展开模型（避免与下方列表重复）', () => {
+    renderPanel();
+    expect(screen.getByRole('button', { name: /^T\+5/ })).not.toHaveAttribute(
       'aria-expanded',
-      'true',
     );
-    await user.click(screen.getByText('模型A'));
-    expect(onSelectModel).toHaveBeenCalledWith('mdl_a');
-  });
-
-  test('展开空文件夹显示空提示；超出内联上限提示剩余数量', () => {
-    renderPanel({ expandedFolder: 'f1' });
-    expect(screen.getByText('这个文件夹还是空的')).toBeInTheDocument();
-  });
-
-  test('内联模型超出上限时提示剩余数量', () => {
-    renderPanel({
-      expandedFolder: 'f1',
-      expandedModels: [model('mdl_a', { metadata_json: { display_name: '模型A' } })],
-      expandedOverflow: 37,
-    });
-    expect(screen.getByText('还有 37 个，见下方模型列表')).toBeInTheDocument();
+    expect(screen.queryByText('这个文件夹还是空的')).not.toBeInTheDocument();
   });
 });
 

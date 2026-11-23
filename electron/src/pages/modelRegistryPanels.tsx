@@ -180,15 +180,6 @@ export const ModelCard: React.FC<{
               <Layers size={8} />融合×{memberCount}
             </span>
           )}
-          {folderName && (
-            <span
-              title={`文件夹：${folderName}`}
-              className="px-1.5 py-0.5 rounded-md text-[8px] font-black tracking-wider bg-slate-100 text-slate-500 flex items-center gap-0.5 min-w-0 max-w-[96px]"
-            >
-              <Folder size={8} className="shrink-0" />
-              <span className="truncate">{folderName}</span>
-            </span>
-          )}
           {model.is_default && <Star size={9} fill="#fbbf24" className="text-amber-400" />}
         </div>
         <div className="flex items-center gap-1 shrink-0">
@@ -230,8 +221,8 @@ export const ModelCard: React.FC<{
           <Text className="text-[8px] text-slate-400 font-mono whitespace-nowrap">{createdLabel}</Text>
         </div>
       </div>
-      <div className="flex items-start justify-between gap-2">
-        <Text className={clsx('font-black text-[11px] tracking-tight truncate block leading-tight min-w-0', isSelected ? 'text-blue-700' : 'text-slate-800')}>
+      <div className="flex items-start justify-between gap-3">
+        <Text className={clsx('font-black text-[11px] tracking-tight truncate block leading-tight min-w-0 pe-0.5', isSelected ? 'text-blue-700' : 'text-slate-800')}>
           {modelDisplayName(model)}
         </Text>
         {canSetDefault && (
@@ -256,7 +247,16 @@ export const ModelCard: React.FC<{
           </Tag>
         )}
         {fc && <><span className="inline-block h-2 w-px bg-slate-300 mx-1" /><Text className="text-[9px] text-slate-400 font-mono font-bold">{fc}维</Text></>}
-        <span className="ml-auto">
+        <span className="ml-auto flex items-center gap-1.5 min-w-0">
+          {folderName && (
+            <span
+              title={`文件夹：${folderName}`}
+              className="px-1.5 py-0.5 rounded-md text-[8px] font-black tracking-wider bg-slate-100 text-slate-500 flex items-center gap-0.5 min-w-0 max-w-[140px]"
+            >
+              <Folder size={8} className="shrink-0" />
+              <span className="truncate">{folderName}</span>
+            </span>
+          )}
           {/* eval_scores 以模型目录名（无 sys- 前缀）落档；注册表 UI id 带 sys- 前缀 → 归一 */}
           <EvalScoreBadge objectType="model" objectId={String(model.model_id).replace(/^sys-/, '')} />
         </span>
