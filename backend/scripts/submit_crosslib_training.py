@@ -14,12 +14,13 @@ config.yaml>` 钉扎逐库目录版本——版本不一致即拒绝提交，保
    与该库已启用特征的 ``key -> source_column`` 映射，对 300 条 features 做逐条预校验
    （锚库裸名 ∈ 锚库键；``"库:列"`` ∈ 该库键）——**任何一条不命中即列全量缺失并退出，
    绝不带着缺特征提交**；
-3. 组装载荷：``factor_selection.method=""``（训练不做二次筛选）；
+3. 组装载荷：``factor_selection.method=""``（训练不做二次筛选；需要训练端筛选时
+   用 ``--factor-selection-method ic_icir --n-top N`` 显式开启）；
    ``factor_source`` = 锚库 + 全副库 ``factor_catalog_versions`` 版本 map；
    ``pause_others=false``（不动并行会话的非 quantmind 容器）；
 4. ``POST /models/run-training``；
 5. 轮询 ``data/training_jobs/<run_id>/config.yaml`` 断言：特征数=300、
-   ``factor_field_sources`` 逐条来源一致、label.horizon=5、method 为空、
+   ``factor_field_sources`` 逐条来源一致、label.horizon=5、筛选 method 与提交一致、
    版本 map 逐字一致、切分窗口逐字一致。
 
 用法：
@@ -253,12 +254,25 @@ def _validate_features(
     return expected
 
 
-def _build_payload(sel: dict[str, Any], versions: dict[str, str]) -> dict[str, Any]:
+def _build_payload(
+    sel: dict[str, Any],
+    versions: dict[str, str],
+    fs_method: str = "",
+    fs_n_top: int = 0,
+    fs_pfs: bool = True,
+    fs_dh: bool = True,
+    dl_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     tp = sel["train_plan"]
     anchor = tp["anchor_lib"]
     if anchor not in versions:
         _fail(f"锚库 {anchor} 缺版本号")
     feats = sel["features"]
+    method = str(fs_method or "").strip().lower()
+    n_top = int(fs_n_top or 0) or len(feats)
+    dl_params = _dl_params_for(str(tp["model_type"]))
+    if dl_override:
+        dl_params.update(dl_override)
     payload: dict[str, Any] = {
         "job_name": tp["job_name"],
         "display_name": tp["display_name"],
@@ -273,8 +287,8 @@ def _build_payload(sel: dict[str, Any], versions: dict[str, str]) -> dict[str, A
         "early_stopping_rounds": int(tp["early_stopping_rounds"]),
         "lgb_params": {},  # 走平台默认（LR/叶子数/正则等）
         # nativetft 显式传配方 dl_params（n_epochs=8 必须传，框架默认 200）；
-        # 树模型保持 {}（走各自默认）。
-        "dl_params": _dl_params_for(str(tp["model_type"])),
+        # 树模型保持 {}（走各自默认）；--dl-params 可覆盖/追加。
+        "dl_params": dl_params,
         "max_time_minutes": int(tp["max_time_minutes"]),
         "context": dict(tp["context"]),
         "explain": {
@@ -284,16 +298,16 @@ def _build_payload(sel: dict[str, Any], versions: dict[str, str]) -> dict[str, A
         },
         "ensemble": "none",
         "deploy_to_production": False,
-        # method=""：训练不做 IC/ICIR 二次筛选；显式传键，杜绝编排器默认注入
-        # method=ic_icir / n_top=80。
+        # method=""（默认）：训练不做 IC/ICIR 二次筛选；显式传键，杜绝编排器默认注入
+        # method=ic_icir / n_top=80。需要训练端筛选时经 --factor-selection-method 显式开启。
         "factor_selection": {
-            "method": "",
-            "n_top": len(feats),
+            "method": method,
+            "n_top": n_top,
             "ic_threshold": 0.01,
             "icir_threshold": 0.15,
             "correlation_threshold": 0.9,
-            "pfs_enabled": False,
-            "dh_enabled": False,
+            "pfs_enabled": bool(fs_pfs),
+            "dh_enabled": bool(fs_dh),
         },
         "auto_feature_filter": "false",
         # 显式 false：pause_others 会 stop 非 quantmind 前缀容器（并行会话的其他栈），
@@ -344,6 +358,9 @@ def _assert_config(
     sel: dict[str, Any],
     versions: dict[str, str],
     expected_sources: dict[str, str],
+    fs_method: str = "",
+    fs_n_top: int = 0,
+    dl_expected: dict[str, Any] | None = None,
 ) -> list[str]:
     """返回失败清单（空=全部通过）。"""
     fails: list[str] = []
@@ -386,13 +403,21 @@ def _assert_config(
     if str(label.get("target_mode") or "") != str(tp["label"]["target_mode"]):
         fails.append(f"label.target_mode={label.get('target_mode')!r}")
 
-    if str(fsel.get("method") or "") != "":
+    want_method = str(fs_method or "").strip().lower()
+    if str(fsel.get("method") or "").strip().lower() != want_method:
         fails.append(
-            f"factor_selection.method={fsel.get('method')!r}（应为空，训练不得二次筛选）"
+            f"factor_selection.method={fsel.get('method')!r}（应为 {want_method!r}）"
+        )
+    if want_method and int(fsel.get("n_top") or 0) != int(fs_n_top or 0):
+        fails.append(
+            f"factor_selection.n_top={fsel.get('n_top')!r}（应为 {int(fs_n_top or 0)}）"
         )
 
     if str(model.get("type") or "") != str(tp["model_type"]):
         fails.append(f"model.type={model.get('type')!r} != {tp['model_type']!r}")
+    expected_dl = _dl_params_for(str(tp["model_type"]))
+    if dl_expected:
+        expected_dl.update(dl_expected)
     if str(tp["model_type"]) in ("lightgbm", "xgboost", "catboost"):
         if int(model.get("num_boost_round") or -1) != int(tp["num_boost_round"]):
             fails.append(f"model.num_boost_round={model.get('num_boost_round')!r}")
@@ -402,23 +427,11 @@ def _assert_config(
             fails.append(
                 f"model.early_stopping_rounds={model.get('early_stopping_rounds')!r}"
             )
-    elif str(tp["model_type"]) == "nativetft":
+    elif expected_dl:
         got_dl = model.get("dl_params") or {}
-        if {k: got_dl.get(k) for k in _TFT_DL_PARAMS} != _TFT_DL_PARAMS:
+        if {k: got_dl.get(k) for k in expected_dl} != expected_dl:
             fails.append(
-                f"model.dl_params 缺项/不符：{got_dl!r}（期望含 {_TFT_DL_PARAMS!r}）"
-            )
-    elif str(tp["model_type"]) == "mlp":
-        got_dl = model.get("dl_params") or {}
-        if {k: got_dl.get(k) for k in _MLP_DL_PARAMS} != _MLP_DL_PARAMS:
-            fails.append(
-                f"model.dl_params 缺项/不符：{got_dl!r}（期望含 {_MLP_DL_PARAMS!r}）"
-            )
-    elif str(tp["model_type"]) in _QLIB_DL_TYPES:
-        got_dl = model.get("dl_params") or {}
-        if {k: got_dl.get(k) for k in _QLIB_DL_PARAMS} != _QLIB_DL_PARAMS:
-            fails.append(
-                f"model.dl_params 缺项/不符：{got_dl!r}（期望含 {_QLIB_DL_PARAMS!r}）"
+                f"model.dl_params 缺项/不符：{got_dl!r}（期望含 {expected_dl!r}）"
             )
 
     if str(context.get("market") or "") != str(tp["context"]["market"]):
@@ -518,10 +531,52 @@ async def main() -> None:
         default=None,
         help="基准 run 的 config.yaml——逐库目录版本必须与其一致，否则拒绝提交（对比训练同快照）",
     )
+    ap.add_argument(
+        "--factor-selection-method",
+        choices=["", "ic_icir", "combined"],
+        default="",
+        help=(
+            "训练端因子筛选：''（默认，不筛）/ ic_icir（IC/ICIR 初筛+相关性去冗余+PFS/DH）。"
+            "开启后模型实际入模特征由训练段筛选决定，config 里仍是提交全量清单。"
+        ),
+    )
+    ap.add_argument(
+        "--n-top",
+        type=int,
+        default=0,
+        help="训练端筛选保留特征数（0=提交特征数；仅 method 非空时生效）",
+    )
+    ap.add_argument(
+        "--no-pfs", action="store_true", help="关闭 PFS 扰动保真度闸门（默认开）"
+    )
+    ap.add_argument(
+        "--no-dh", action="store_true", help="关闭 DH 多样性增益闸门（默认开）"
+    )
+    ap.add_argument(
+        "--dl-params",
+        default="",
+        help=(
+            "JSON 对象，覆盖/追加 dl_params（仅 DL 模型；例："
+            "'{\"n_epochs\":10,\"early_stopping_rounds\":100,\"lr\":0.0001}'）"
+        ),
+    )
     args = ap.parse_args()
 
     sel = _load_selection(args.selection_json)
     tp = sel["train_plan"]
+    fs_method = str(args.factor_selection_method or "").strip().lower()
+    fs_n_top = int(args.n_top or 0) or len(sel["features"])
+    fs_pfs = bool(fs_method) and not args.no_pfs
+    fs_dh = bool(fs_method) and not args.no_dh
+    dl_override: dict[str, Any] = {}
+    if args.dl_params:
+        try:
+            parsed = json.loads(args.dl_params)
+        except json.JSONDecodeError as exc:
+            _fail(f"--dl-params 不是合法 JSON：{exc}")
+        if not isinstance(parsed, dict):
+            _fail("--dl-params 必须是 JSON 对象")
+        dl_override = parsed
     model_type = str(args.model_type or tp.get("model_type") or "lightgbm")
     if model_type not in _MODEL_TYPE_INFO:
         _fail(f"不支持的 model_type={model_type!r}（可选：{sorted(_MODEL_TYPE_INFO)}）")
@@ -602,11 +657,16 @@ async def main() -> None:
         )
         versions = {lib: str(cat["version_id"]) for lib, cat in catalogs.items()}
 
-        payload = _build_payload(sel, versions)
+        payload = _build_payload(
+            sel, versions, fs_method, fs_n_top, fs_pfs, fs_dh, dl_override
+        )
         print(f"[submit] 预校验通过：{len(expected_sources)} 条特征全部命中已发布目录")
         print(
             f"[submit] 载荷摘要：features={len(payload['features'])} "
             f"method={payload['factor_selection']['method']!r} "
+            f"n_top={payload['factor_selection']['n_top']} "
+            f"pfs={payload['factor_selection']['pfs_enabled']} "
+            f"dh={payload['factor_selection']['dh_enabled']} "
             f"pause_others={payload['pause_others']} "
             f"versions={len(payload['factor_catalog_versions']) + 1} 库"
         )
@@ -639,7 +699,9 @@ async def main() -> None:
 
         cfg_path = await _poll_config(run_id, args.wait_config)
         cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-        fails = _assert_config(cfg, sel, versions, expected_sources)
+        fails = _assert_config(
+            cfg, sel, versions, expected_sources, fs_method, fs_n_top, dl_override
+        )
         print(f"[submit] config.yaml 回读：{cfg_path}")
         if fails:
             for f in fails:
@@ -647,7 +709,7 @@ async def main() -> None:
             _fail(f"回读断言 {len(fails)} 条未通过")
         print(
             f"[submit] 回读断言全部通过：{len(expected_sources)} 特征 / "
-            f"T+{tp['label']['target_horizon_days']} / method='' / "
+            f"T+{tp['label']['target_horizon_days']} / method={fs_method!r} / "
             f"跨库来源逐条一致 / 窗口与版本钉扎一致"
         )
         print(f"[submit] run_id={run_id}，训练监控：data/training_jobs/{run_id}/")
