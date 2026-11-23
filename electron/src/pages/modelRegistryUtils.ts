@@ -40,6 +40,7 @@ export function systemModelToUserModel(s: SystemModelRecord): UserModelRecord {
       model_name:          s.display_name,
       model_type:          s.model_type || s.framework,
       framework:           s.framework,
+      market:              (s as any).market ?? 'CN',
       feature_count:       s.feature_count,
       features:            s.feature_columns,
       feature_columns:     s.feature_columns,
@@ -87,7 +88,7 @@ export function getMetrics(m: UserModelRecord) {
   const metrics = (m.metrics_json ?? {}) as Record<string, any>;
   const meta = getMeta(m);
   const metaMetrics = meta.metrics && typeof meta.metrics === 'object' ? meta.metrics as Record<string, any> : {};
-  
+
   // 增加对嵌套 performance_metrics 的提取（针对某些个人模型或系统模型同步数据）
   const perf = meta.performance_metrics as any;
   const nestedMetrics: Record<string, any> = {};
@@ -110,6 +111,14 @@ export function getMetrics(m: UserModelRecord) {
   return { ...metaMetrics, ...nestedMetrics, ...metrics };
 }
 
+/** 模型实际入模特征清单：兼容 features / feature_columns（系统模型只带后者）。 */
+export function modelFeatureList(m: UserModelRecord): string[] {
+  const meta = getMeta(m);
+  const preferred = Array.isArray(meta.features) && meta.features.length > 0 ? meta.features : meta.feature_columns;
+  if (!Array.isArray(preferred)) return [];
+  return preferred.map((item) => String(item));
+}
+
 export function resolveMetricNumber(source: Record<string, any> | null | undefined, keys: string[]) {
   if (!source) return null;
   for (const key of keys) {
@@ -119,6 +128,59 @@ export function resolveMetricNumber(source: Record<string, any> | null | undefin
     if (Number.isFinite(num)) return num;
   }
   return null;
+}
+
+export type ModelSplitKey = 'train' | 'valid' | 'test';
+
+export interface SplitMetricNumbers {
+  ic: number | null;
+  rankIc: number | null;
+  icir: number | null;
+}
+
+const SPLIT_IC_KEYS = ['ic', 'test_ic', 'val_ic', 'IC', 'mean_ic', 'rank_ic', 'train_ic'];
+// RankIC 单独取值：训练端 metadata.metrics 同时落 test_ic 与 test_rank_ic（两者不同），
+// 详情页六格（IC/RankIC/IR × 三段）必须分开取，不能拿 IC 顶替。
+const SPLIT_RANK_IC_KEYS = ['rank_ic', 'mean_rank_ic', 'RankIC', 'ic_rank', 'rank_ic_mean'];
+const SPLIT_ICIR_KEYS = [
+  'icir', 'test_rank_icir', 'val_rank_icir', 'test_icir', 'val_icir',
+  'ICIR', 'IC_IR', 'rank_icir', 'train_rank_icir',
+];
+const splitAliases = (key: ModelSplitKey): string[] => (key === 'valid' ? ['valid', 'val'] : [key]);
+
+/**
+ * 训练/验证/测试集指标口径（模型卡片与详情面板共用，别名表唯一出处）。
+ * 优先 performance_metrics.{split}，再回退 metadata.metrics 的 {split}_ic / {split}_rank_icir
+ * 平铺字段；取不到一律 null（展示层写「—」，绝不伪造 0）。
+ */
+export function resolveSplitMetrics(meta: Record<string, any>): Record<ModelSplitKey, SplitMetricNumbers> {
+  const performance = meta.performance_metrics && typeof meta.performance_metrics === 'object'
+    ? meta.performance_metrics as Record<string, any>
+    : null;
+  const metadataMetrics = meta.metrics && typeof meta.metrics === 'object'
+    ? meta.metrics as Record<string, any>
+    : null;
+  const sourceOf = (key: ModelSplitKey): Record<string, any> | null => {
+    if (!performance) return null;
+    for (const alias of splitAliases(key)) {
+      const source = performance[alias];
+      if (source && typeof source === 'object') return source as Record<string, any>;
+    }
+    return null;
+  };
+  const result = {} as Record<ModelSplitKey, SplitMetricNumbers>;
+  for (const key of ['train', 'valid', 'test'] as const) {
+    const source = sourceOf(key);
+    const aliases = splitAliases(key);
+    const ic = resolveMetricNumber(source, SPLIT_IC_KEYS)
+      ?? resolveMetricNumber(metadataMetrics, aliases.flatMap((alias) => [`${alias}_ic`, `${alias}_rank_ic`]));
+    const rankIc = resolveMetricNumber(source, SPLIT_RANK_IC_KEYS)
+      ?? resolveMetricNumber(metadataMetrics, aliases.flatMap((alias) => [`${alias}_rank_ic`, `rank_ic_${alias}`]));
+    const icir = resolveMetricNumber(source, SPLIT_ICIR_KEYS)
+      ?? resolveMetricNumber(metadataMetrics, aliases.flatMap((alias) => [`${alias}_icir`, `${alias}_rank_icir`]));
+    result[key] = { ic, rankIc, icir };
+  }
+  return result;
 }
 
 export function formatSignedValue(value: number | null, digits = 4) {

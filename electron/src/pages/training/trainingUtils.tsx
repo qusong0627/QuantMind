@@ -363,6 +363,16 @@ export interface EvalReport {
     curve?: Array<[string, number]>;
   };
   by_split?: Record<string, { mean: number | null; icir: number | null; win_rate: number | null; t_stat: number | null; n_days?: number; n_rows?: number }>;
+  /** 可交易性过滤（2026-11-23 起）：真实收益口径剔除次日涨跌停样本 */
+  tradability?: {
+    applied?: boolean;
+    method?: string;
+    excluded_rows?: number;
+    excluded_limit_up?: number;
+    excluded_limit_down?: number;
+    note?: string;
+    reason?: string;
+  };
   error?: string;
 }
 

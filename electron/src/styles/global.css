@@ -910,6 +910,28 @@ html.platform-win32.os-win10 .module-grid-container {
   background-color: var(--neutral);
 }
 
+/* 特征/标签墙专用滚动条：白底卡片上可见、可拖动（custom-scrollbar 依赖未定义的变量会隐形） */
+.chip-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f1f5f9;
+}
+.chip-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.chip-scroll::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 9999px;
+}
+.chip-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+  border: 2px solid #f1f5f9;
+}
+.chip-scroll::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
 /* ǿ��С�ֺ��ı�ʹ�ô�Ҫ����ջ������������ */
 .text-xs, 
 .text-\[11px\], 

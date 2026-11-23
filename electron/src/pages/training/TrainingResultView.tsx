@@ -1,10 +1,8 @@
 import React from 'react';
-import { Card, Divider, Alert, Tag, Space, Typography, Empty, Button, Table, Tooltip as AntTooltip, Modal, Input, message } from 'antd';
+import { Card, Divider, Alert, Tag, Typography, Empty, Button, Table, Tooltip as AntTooltip, Modal, Input, message } from 'antd';
 import { BarChart, MonitorPlay, Activity, Download, Filter } from 'lucide-react';
 import {
   BarChart as ReBarChart,
-  LineChart as ReLineChart,
-  Line,
   Bar,
   XAxis,
   YAxis,
@@ -18,17 +16,16 @@ import dayjs from 'dayjs';
 import { clsx } from 'clsx';
 import {
   TrainingResult,
-  TrainingRequestPayload,
-  EvalReport,
   getObjectiveMetricDescription,
   getTargetModeDescription,
-  resolveEvalIcHeadline,
 } from './trainingUtils';
+import { EvalReportSection } from './EvalReportSection';
+import { AuditSection } from './AuditSection';
+import { REPORT_POLL_INTERVAL_MS, REPORT_POLL_MAX_ATTEMPTS, extractHttpStatus } from './reportPolling';
 import {
   modelTrainingService,
   type StrictEvalCostBlock,
   type StrictEvalReportRow,
-  type TrainingAuditRow,
   type TrainingRunCompareResult,
 } from '../../services/modelTrainingService';
 import { useAuth } from '../../features/auth/hooks';
@@ -363,15 +360,6 @@ const LineageItem: React.FC<{ label: string; value?: string }> = ({ label, value
 );
 
 const SEGMENT_LABELS: Record<string, string> = { valid: '验证集', test: '测试集', custom: '自定义窗口' };
-
-// 严格评估/数据审计都是后台异步任务：提交后按 8s 轮询，最多 12 分钟（90 次）。
-const REPORT_POLL_INTERVAL_MS = 8000;
-const REPORT_POLL_MAX_ATTEMPTS = 90;
-
-const extractHttpStatus = (err: unknown): number | null => {
-  const status = (err as { response?: { status?: number } })?.response?.status;
-  return typeof status === 'number' ? status : null;
-};
 
 /** WP2 严格评估：净 Top-N（可成交 + 三档成本 + HAC/PSR + 换手）。 */
 const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
@@ -724,174 +712,6 @@ const CompareRunsModal: React.FC<{
   );
 };
 
-/** WP7 数据审计：未来列/标签契约/trade_mask/ST/退市/指纹/季度 PIT 探针。 */
-const AuditSection: React.FC<{ runId?: string }> = ({ runId }) => {
-  const [loading, setLoading] = React.useState(false);
-  const [row, setRow] = React.useState<TrainingAuditRow | null>(null);
-  const [refreshKey, setRefreshKey] = React.useState(0);
-  const [submitting, setSubmitting] = React.useState(false);
-  const [pending, setPending] = React.useState(false);
-  const pollCountRef = React.useRef(0);
-  const { user } = useAuth();
-  const isAdmin = Boolean(user?.is_admin);
-
-  const reload = React.useCallback(() => setRefreshKey((key) => key + 1), []);
-
-  React.useEffect(() => {
-    if (!runId) {
-      setRow(null);
-      setPending(false);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    modelTrainingService
-      .getTrainingAuditReport(runId)
-      .then((data) => {
-        if (cancelled) return;
-        setRow(data);
-        if (data) setPending(false);
-      })
-      .catch(() => {
-        if (!cancelled) setRow(null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [runId, refreshKey]);
-
-  // 数据审计只在完成时落库（没有 running 行），轮询只由 pending 驱动。
-  React.useEffect(() => {
-    if (!pending) {
-      pollCountRef.current = 0;
-      return;
-    }
-    if (pollCountRef.current >= REPORT_POLL_MAX_ATTEMPTS) return;
-    const timer = window.setTimeout(() => {
-      pollCountRef.current += 1;
-      reload();
-    }, REPORT_POLL_INTERVAL_MS);
-    return () => window.clearTimeout(timer);
-  }, [pending, refreshKey, reload]);
-
-  const submitRecompute = async () => {
-    if (!runId || submitting) return;
-    setSubmitting(true);
-    try {
-      await modelTrainingService.recomputeTrainingAuditReport(runId);
-      message.success('已提交重算，后台计算中…');
-      pollCountRef.current = 0;
-      setPending(true);
-      reload();
-    } catch (err: unknown) {
-      message.error(
-        extractHttpStatus(err) === 403 ? '需要管理员权限才能重算数据审计' : '提交重算失败，请稍后重试',
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  if (!runId) return null;
-
-  const levelTone: Record<string, string> = {
-    pass: 'bg-emerald-50 text-emerald-600',
-    fail: 'bg-rose-50 text-rose-500',
-    warn: 'bg-amber-50 text-amber-600',
-    info: 'bg-slate-100 text-slate-500',
-  };
-
-  return (
-    <Card
-      className="rounded-2xl border-slate-200"
-      size="small"
-      title={
-        <span className="text-sm font-black text-slate-800">
-          数据审计
-          <span className="ml-2 text-[10px] font-normal text-slate-400">
-            PIT / 泄漏 / 可成交 / 复现
-          </span>
-        </span>
-      }
-    >
-      {pending ? (
-        <div className="py-4 text-center text-xs text-slate-500">
-          已提交重算，后台计算中…
-          <Button type="link" size="small" className="!px-2 !text-xs" onClick={reload}>
-            刷新
-          </Button>
-        </div>
-      ) : loading ? (
-        <div className="py-4 text-center text-xs text-slate-500">正在加载数据审计…</div>
-      ) : null}
-      {!loading && !pending && (!row || row.status === 'failed') ? (
-        <Alert
-          type={row?.status === 'failed' ? 'error' : 'info'}
-          showIcon
-          className="rounded-2xl"
-          message={row?.status === 'failed' ? '数据审计失败' : '数据审计尚未生成'}
-          description={
-            <div className="space-y-2">
-              <div>{row?.error || '训练完成后会自动运行；老模型可在这里直接重算。'}</div>
-              {isAdmin ? (
-                <Button
-                  size="small"
-                  type="primary"
-                  loading={submitting}
-                  onClick={() => void submitRecompute()}
-                >
-                  重算数据审计
-                </Button>
-              ) : (
-                <span className="text-[11px] text-slate-400">重算需要管理员权限。</span>
-              )}
-            </div>
-          }
-        />
-      ) : null}
-      {!loading && row?.status === 'ready' && row.report ? (
-        <div className="space-y-2">
-          {row.report.blocked ? (
-            <Alert
-              type="error"
-              showIcon
-              className="rounded-2xl"
-              message="审计未通过：该模型不可晋升"
-              description="存在 fail 级检查（见下方明细）。"
-            />
-          ) : null}
-          {(row.report.checks || []).map((check) => (
-            <div key={check.id} className="flex items-start gap-2 text-xs">
-              <Tag
-                className={clsx(
-                  'm-0 shrink-0 rounded-full border-0 px-2 py-0 text-[10px]',
-                  levelTone[check.status === 'fail' ? 'fail' : check.level] || levelTone.info,
-                )}
-              >
-                {check.status === 'fail' ? '未通过' : check.level === 'info' ? '信息' : '通过'}
-              </Tag>
-              <div className="min-w-0">
-                <span className="font-mono text-[11px] text-slate-600">{check.id}</span>
-                <span className="ml-2 text-slate-500">{check.detail}</span>
-              </div>
-            </div>
-          ))}
-          {row.report.warnings?.length ? (
-            <div className="rounded-xl bg-amber-50/60 p-2 text-[11px] text-amber-700">
-              {row.report.warnings.map((w, i) => (
-                <div key={i}>• {w}</div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-    </Card>
-  );
-};
-
 export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
   result,
   resultError,
@@ -1047,14 +867,24 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
               <MetricCard
                 label="实际入模特征数"
                 value={`${trainedFeatureCount}`}
-                hint={
-                  missingFeatures.length
-                    ? `缺失 ${missingFeatures.length} 个`
-                    : result.metadata.feature_categories.join(' / ') || '—'
-                }
+                hint={missingFeatures.length ? `缺失 ${missingFeatures.length} 个` : undefined}
                 centered
               />
             </div>
+
+            {Array.isArray(result.metadata.feature_categories) && result.metadata.feature_categories.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] font-black tracking-wider text-slate-400">入模特征分类</span>
+                {result.metadata.feature_categories.map((cat) => (
+                  <span
+                    key={cat}
+                    className="rounded-md border border-indigo-100 bg-indigo-50/70 px-1.5 py-0.5 text-[10px] font-bold text-indigo-700"
+                  >
+                    {cat}
+                  </span>
+                ))}
+              </div>
+            )}
 
             {missingFeatures.length > 0 ? (
               <Alert
@@ -1331,109 +1161,5 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
 };
 
 /** 模型评估报告：预测强弱诊断（RankIC 稳健性 / 十分位分层收益 / 多空组合） */
-const EvalReportSection: React.FC<{ report?: EvalReport }> = ({ report }) => {
-  if (!report || report.error) return null;
-  const ls: NonNullable<EvalReport['long_short']> = report.long_short || {};
-  const groups: NonNullable<EvalReport['groups']> = report.groups || {};
-  const groupData = (groups.mean_returns || []).map((v, i) => ({
-    group: `G${i + 1}`,
-    ret: v == null ? null : Number((v * 100).toFixed(3)),
-  }));
-  const lsCurve = (ls.curve || []).map(([d, v]) => ({
-    date: String(d).slice(2, 10),
-    v: Number((v * 100).toFixed(2)),
-  }));
-  const fmt = (v: number | null | undefined, digits = 2, scale = 1) =>
-    v == null || Number.isNaN(v) ? '—' : `${(v * scale).toFixed(digits)}${scale === 100 ? '%' : ''}`;
-  const lvl = (v: number | null | undefined, good: number, ok: number) =>
-    v == null ? 'text-slate-400' : v >= good ? 'text-emerald-600' : v >= ok ? 'text-amber-600' : 'text-rose-500';
-  const basisText = report.return_basis === 'label_return' ? '真实收益口径' : '秩标签口径';
-  const bySplit = report.by_split || {} as NonNullable<EvalReport['by_split']>;
-  const splitLabel: Record<string, string> = { train: '训练', valid: '验证', test: '测试' };
-  // 主展示口径：优先测试段（样本外）——headline 是全窗合计（含训练段，约虚高 1.5 倍）。
-  // 无 test 段（老报告）时回落全窗，并在标签上如实标注口径，不让两种口径看起来一样。
-  // 口径解析钉在 resolveEvalIcHeadline（trainingUtils），单测锁定「不静默冒充样本外」。
-  const icHead = resolveEvalIcHeadline(report);
-  return (
-    <Card
-      className="rounded-2xl border-emerald-100"
-      size="small"
-      title={
-        <span className="text-sm font-black text-slate-800">
-          模型评估报告
-          <span className="ml-2 text-[10px] font-normal text-slate-400">
-            {basisText} · {report.n_days ?? '—'} 个交易日 · {Number(report.n_rows || 0).toLocaleString()} 行
-          </span>
-        </span>
-      }
-    >
-      <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
-        {/* 染色断点对齐样本外阶梯（backend/scripts/eval/model_card.py 的 score_oos：
-            IC 0.04/0.08、ICIR 0.3/0.5）。沿用旧的全窗尺度断点（0.03/0.015）会因
-            测试段普遍低于全窗而全部染绿（49 份 CN 报告 test 段 IC 全部 ≥0.05），失去分辨力。 */}
-        {[
-          { label: `RankIC ${icHead.tag}`, value: fmt(icHead.mean, 4), cls: lvl(icHead.mean, 0.08, 0.04) },
-          { label: `ICIR ${icHead.tag}`, value: fmt(icHead.icir, 3), cls: lvl(icHead.icir, 0.5, 0.3) },
-          { label: `IC 胜率 ${icHead.tag}`, value: fmt(icHead.winRate, 1, 100), cls: lvl(icHead.winRate, 0.6, 0.5) },
-          { label: '分层单调性', value: fmt(groups.monotonicity, 3), cls: lvl(groups.monotonicity, 0.9, 0.6) },
-          { label: '多空夏普', value: fmt(ls.sharpe, 2), cls: lvl(ls.sharpe, 1.0, 0.5) },
-          { label: '多空年化', value: fmt(ls.ann_return, 1, 100), cls: 'text-slate-800' },
-        ].map((it) => (
-          <div key={it.label} className="rounded-xl border border-emerald-100 bg-white px-2 py-1.5 text-center">
-            <div className="text-[9px] font-bold tracking-wider text-slate-400">{it.label}</div>
-            <div className={clsx('mt-0.5 text-sm font-black', it.cls)}>{it.value}</div>
-          </div>
-        ))}
-      </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        <div className="rounded-xl border border-slate-100 bg-white p-2">
-          <div className="mb-1 text-[10px] font-bold text-slate-500">
-            十分位分层平均收益（G1=预测最弱，G{groups.n_groups || 10}=最强）
-          </div>
-          <ResponsiveContainer width="100%" height={150}>
-            <ReBarChart data={groupData} margin={{ top: 4, right: 4, bottom: 0, left: -18 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-              <XAxis dataKey="group" tick={{ fontSize: 9 }} />
-              <YAxis tick={{ fontSize: 9 }} />
-              <Tooltip formatter={(v) => [v == null ? '—' : `${v}%`, '平均收益']} />
-              <Bar dataKey="ret" fill="#10b981" radius={[3, 3, 0, 0]} />
-            </ReBarChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="rounded-xl border border-slate-100 bg-white p-2">
-          <div className="mb-1 text-[10px] font-bold text-slate-500">多空组合累计净值（Top − Bottom，%）</div>
-          <ResponsiveContainer width="100%" height={150}>
-            <ReLineChart data={lsCurve} margin={{ top: 4, right: 4, bottom: 0, left: -18 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-              <XAxis dataKey="date" tick={{ fontSize: 9 }} minTickGap={48} />
-              <YAxis tick={{ fontSize: 9 }} />
-              <Tooltip formatter={(v) => [`${v}%`, '累计净值']} />
-              <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="2 2" />
-              <Line type="monotone" dataKey="v" stroke="#6366f1" dot={false} strokeWidth={1.6} />
-            </ReLineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-      {(Object.keys(bySplit).length > 0 || (report.yearly || []).length > 0) && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {Object.entries(bySplit).map(([name, s]) => (
-            <span key={name} className="rounded-lg border border-slate-100 bg-slate-50/70 px-2 py-1 text-[10px] text-slate-600">
-              <b className="mr-1 text-slate-700">{splitLabel[name] || name}</b>
-              IC {fmt(s.mean, 4)} · ICIR {fmt(s.icir, 2)} · 胜率 {fmt(s.win_rate, 0, 100)}
-            </span>
-          ))}
-          {(report.yearly || []).map((y) => (
-            <span key={y.year} className="rounded-lg border border-indigo-50 bg-indigo-50/50 px-2 py-1 text-[10px] text-indigo-700">
-              <b className="mr-1">{y.year}</b>IC {fmt(y.mean, 3)} · ICIR {fmt(y.icir, 2)}
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="mt-2 text-[10px] text-slate-400">
-        磁贴 RankIC/ICIR/胜率口径：{icHead.isTest ? '测试段（样本外）' : '全窗合计（该报告无测试段）'}；
-        分层与多空为全窗口径（含训练段）。分层收益为未来收益口径（T+1 执行、持有 N 日）；
-        多空净值按每日 Top−Bottom 平均收益复利累计，未扣交易成本；IC 胜率 = 日 RankIC 为正的比例。
-      </div>
-    </Card>
-  );
-};
+// 实现已抽到 ./EvalReportSection（训练结果页与模型详情页共用）。
+
