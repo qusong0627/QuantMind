@@ -1379,14 +1379,15 @@ export const ModelDetailPanel: React.FC<{
         }))}
       />
 
-      {/* 第二行：左 性能指标柱状图 ｜ 右 特征工程（右卡与左图表等高对齐） */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+      {/* 第二行：左 性能指标柱状图 ｜ 右 特征工程（两卡统一 400px 高，上下边缘严格对齐） */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
         <div className="lg:col-span-7">
           <DetailSection
             title="性能指标"
+            className="lg:h-[400px] flex flex-col"
             meta={<span className="text-[9px] font-black tracking-wider text-slate-400">IC · RANK IC · IR</span>}
           >
-            <div>
+            <div className="flex flex-1 flex-col justify-center">
               <ModelEvalCharts
                 metrics={runEval?.metrics ?? null}
                 loading={runEvalLoading}
@@ -1407,12 +1408,13 @@ export const ModelDetailPanel: React.FC<{
         </div>
 
         <div className="lg:col-span-5 flex flex-col gap-4">
-          {/* 特征工程（右栏窄版）：固定高度，行数超过约 20 个后右侧滚动条查看 */}
+          {/* 特征工程（右栏窄版）：与左图统一 400px 高，特征区自适应高度、超出部分右侧滚动条查看 */}
           <DetailSection
             title="特征工程"
+            className="lg:h-[400px] flex flex-col"
             meta={<span className="text-[10px] font-mono font-bold text-slate-400">{features.length} 维</span>}
           >
-            <div className="flex flex-col gap-2 px-4 py-3">
+            <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 py-3">
               {featureCategories.length > 0 && (
                 <div className="flex flex-wrap items-center gap-1">
                   {featureCategories.map((cat) => (
@@ -1428,7 +1430,7 @@ export const ModelDetailPanel: React.FC<{
               {features.length === 0 ? (
                 <span className="text-[10px] text-slate-400">该模型未记录特征清单；可从「特征 × 模型图谱」查看其他模型。</span>
               ) : (
-                <div className="flex h-[150px] flex-wrap content-start gap-1 overflow-y-auto chip-scroll pr-2">
+                <div className="flex min-h-0 flex-1 flex-wrap content-start gap-1 overflow-y-auto chip-scroll pr-2">
                   {features.map((f, i) => renderFeatureChip(f, i))}
                 </div>
               )}
