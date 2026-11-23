@@ -6,8 +6,9 @@ agent 净值、arena 台账仍按幻影算。修复工具把这批成交按**真
 
 计划器只做判定与分配（不碰 DB），本测试钉死四条保守判据：
 
-1. 真实账户仍持有该标的 → 不动（``real_account_still_holds``）；
-2. 未归属卖出总量不足以覆盖账本持仓 → 不动（``unattributed_sells_insufficient``）；
+1. 真实账户持仓 == 账本持仓 → 没有差额可吸收（``real_account_matches_ledger``）；
+   有底仓但账本多出（部分人工卖出）按差额吸收，不再要求清仓；
+2. 未归属卖出总量不足以覆盖**差额** → 不动（``unattributed_sells_insufficient``）；
 3. 账本行的 ``buy_ts`` 不早于可分配卖出（含未知 buy_ts）→ 不动，卖出解释不了新仓；
 4. 真实持仓读不到 → 整批不动（``real_positions_unavailable``）。
 
@@ -23,13 +24,16 @@ from datetime import date, datetime, timezone
 import pytest
 
 from backend.shared.decision.manual_sell_absorption import (
+    MANUAL_AGENT,
     REASON_BOUGHT_AFTER_SELL,
     REASON_BUY_TS_UNKNOWN,
     REASON_INSUFFICIENT,
+    REASON_NO_GAP,
     REASON_NO_SELL_EVIDENCE,
     REASON_REAL_UNAVAILABLE,
-    REASON_STILL_HELD,
     plan_absorption,
+    plan_manual_flows,
+    model_agent_names,
 )
 
 
@@ -126,14 +130,64 @@ def test_fifo_allocation_across_multiple_sell_orders():
 
 
 @pytest.mark.unit
-def test_skips_code_still_held_by_real_account():
+def test_does_not_absorb_when_real_matches_ledger():
+    """真实持仓 == 账本持仓 ⇒ 没有差额可吸收（原来「有底仓就跳过」的收敛形态）。"""
     rows = [_row("agent-a", "600760.SH", 100, 46.97, _dt(16, 3, 0))]
     plan = plan_absorption(
         rows, [_sell("ord-1", "600760.SH", 100, 47.0)], {"600760.SH": 100}
     )
 
     assert plan.fills == ()
-    assert [s.reason for s in plan.skipped] == [REASON_STILL_HELD]
+    assert [s.reason for s in plan.skipped] == [REASON_NO_GAP]
+
+
+@pytest.mark.unit
+def test_absorbs_partial_position_difference():
+    """有底仓也能吸收：账本 200 / 真实 100 ⇒ 只吸收差额 100（FIFO 先扣最早买入的）。"""
+    rows = [
+        _row("agent-early", "601825.SH", 120, 9.40, _dt(19, 1, 30)),
+        _row("agent-late", "601825.SH", 80, 9.60, _dt(20, 1, 30)),
+    ]
+    plan = plan_absorption(
+        rows,
+        [_sell("ord-manual", "601825.SH", 100, 9.64, _dt(23, 5, 20))],
+        {"601825.SH": 100},
+    )
+
+    assert not plan.skipped, plan.skipped
+    assert [(f.agent, f.volume) for f in plan.fills] == [("agent-early", 100)]
+    assert plan.fills[0].closes is False
+    assert plan.proceeds_by_agent == {"agent-early": pytest.approx(964.00)}
+
+
+@pytest.mark.unit
+def test_partial_absorption_closes_exhausted_rows():
+    """差额覆盖某家全部持仓时，该行 closes=True；未覆盖的行不动。"""
+    rows = [
+        _row("agent-early", "601825.SH", 100, 9.40, _dt(19, 1, 30)),
+        _row("agent-late", "601825.SH", 100, 9.60, _dt(20, 1, 30)),
+    ]
+    plan = plan_absorption(
+        rows,
+        [_sell("ord-manual", "601825.SH", 100, 9.64, _dt(23, 5, 20))],
+        {"601825.SH": 100},
+    )
+
+    assert [(f.agent, f.volume, f.closes) for f in plan.fills] == [
+        ("agent-early", 100, True)
+    ]
+
+
+@pytest.mark.unit
+def test_partial_absorption_needs_sells_covering_the_gap():
+    """差额 100 但未归属卖出只有 60 ⇒ 卖据不足以解释差额，整只票不动。"""
+    rows = [_row("agent-a", "601857.SH", 200, 12.33, _dt(19, 5, 0))]
+    plan = plan_absorption(
+        rows, [_sell("ord-1", "601857.SH", 60, 12.7)], {"601857.SH": 100}
+    )
+
+    assert plan.fills == ()
+    assert [s.reason for s in plan.skipped] == [REASON_INSUFFICIENT]
 
 
 @pytest.mark.unit
@@ -259,3 +313,106 @@ def test_trade_date_comes_from_sell_not_processing_day():
 
     assert plan.fills[0].trade_date == date(2026, 10, 20)
     assert plan.fills[0].filled_at == _dt(20, 5, 15)
+
+
+# --- plan_manual_flows：人工买入 + 先卖后买 + 期初差异 ---------------------
+
+
+def _buy(
+    order_id: str,
+    code: str,
+    volume: float,
+    price: float,
+    executed_at: datetime | None = None,
+) -> dict:
+    executed_at = executed_at or _dt(23, 1, 21)
+    return {
+        "order_id": order_id,
+        "code": code,
+        "volume": volume,
+        "price": price,
+        "executed_at": executed_at,
+        "trade_date": executed_at.date(),
+        "agent": "",
+    }
+
+
+@pytest.mark.unit
+def test_manual_flow_handles_sell_then_buy_same_day():
+    """2026-11-23 601825 实况：人工先卖 4500 再买 93300，期末真实 94300。
+
+    只看期末差额会把卖出吞掉（账本 5500 < 真实 94300）；按事件顺序必须
+    先 FIFO 扣模型 4500，再把 93300 记到 manual。
+    """
+    rows = [
+        _row("deepseek-v4-flash", "601825.SH", 3000, 9.40, _dt(18, 1, 30)),
+        _row("deepseek-v4-pro", "601825.SH", 1400, 9.50, _dt(18, 2, 30)),
+        _row("glm-5.3-flash", "601825.SH", 1100, 9.60, _dt(19, 1, 30)),
+    ]
+    plan = plan_manual_flows(
+        rows,
+        [_buy("b1", "601825.SH", 93300, 9.627)],
+        [_sell("s1", "601825.SH", 4500, 9.64, _dt(23, 1, 20))],
+        {"601825.SH": 94300},
+    )
+
+    assert not plan.skipped, plan.skipped
+    sells = [f for f in plan.fills if f.side == "sell"]
+    buys = [f for f in plan.fills if f.side == "buy"]
+    assert [(f.agent, f.volume, f.closes) for f in sells] == [
+        ("deepseek-v4-flash", 3000, True),
+        ("deepseek-v4-pro", 1400, True),
+        ("glm-5.3-flash", 100, False),
+    ]
+    assert [(f.agent, f.volume) for f in buys] == [(MANUAL_AGENT, 93300)]
+    assert buys[0].fill_key == "manual-buy:b1:manual"
+    # 期末账本合计 == 真实持仓
+    residual = 1100 - 100 + 93300
+    assert residual == 94300
+
+
+@pytest.mark.unit
+def test_manual_flow_adjusts_ledger_excess_at_window_start():
+    """期初账本比真实多 100 ⇒ 先记一笔卖出调整，再处理窗口内成交。"""
+    rows = [_row("agent-a", "600760.SH", 300, 46.97, _dt(19, 3, 0))]
+    plan = plan_manual_flows(rows, [], [], {"600760.SH": 200})
+
+    assert not plan.skipped, plan.skipped
+    assert [(f.side, f.agent, f.volume) for f in plan.fills] == [
+        ("sell", "agent-a", 100)
+    ]
+    assert plan.fills[0].fill_key.startswith("manual-adjust:")
+
+
+@pytest.mark.unit
+def test_manual_flow_adjusts_ledger_shortfall_at_window_start():
+    """期初账本比真实少 100 ⇒ 补一笔 manual 买入（真实账户历史人工买入）。"""
+    rows = [_row("agent-a", "600760.SH", 100, 46.97, _dt(19, 3, 0))]
+    plan = plan_manual_flows(rows, [], [], {"600760.SH": 200})
+
+    assert not plan.skipped, plan.skipped
+    assert [(f.side, f.agent, f.volume) for f in plan.fills] == [
+        ("buy", MANUAL_AGENT, 100)
+    ]
+
+
+@pytest.mark.unit
+def test_manual_flow_skips_when_start_gap_has_no_reference_price():
+    """期初账本比真实少、又没有买入成交/成本价可参考 ⇒ 只报告不写（不臆造价格）。"""
+    rows = [_row("agent-a", "600760.SH", 100, 0.0, _dt(19, 3, 0))]
+    plan = plan_manual_flows(rows, [], [], {"600760.SH": 200})
+
+    assert plan.fills == ()
+    assert [s.reason for s in plan.skipped] == [REASON_INSUFFICIENT]
+
+
+@pytest.mark.unit
+def test_model_agent_names_excludes_manual_bucket():
+    """赛马总控/净值曲线只列模型：manual 是对账桶，不参与排名。"""
+    names = model_agent_names(
+        {"deepseek-v4-flash": {}, "manual": {}, "glm-5.3-flash": {}, " ": {}}
+    )
+
+    assert names == ["deepseek-v4-flash", "glm-5.3-flash"]
+    assert model_agent_names(None) == []
+    assert model_agent_names({}) == []

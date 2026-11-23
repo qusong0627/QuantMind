@@ -867,12 +867,16 @@ class TdxPushService:
         # + 成交增量所需的前值（已成交量/均价）+ 分账归属（agent，成交回报里没有）。
         # 2026-11-16 审计：必须限定当前交易日——QMT/桥的委托号每日重置，跨日
         # 同号会把昨天的行当成今天的单更新。
+        # 2026-11-23 修正：TDX 桥的委托号**不按自然日重置**（实测 284022/290448
+        # 连续 4 天返回同一笔），只查当日会让凌晨同步把昨日委托当成新单 INSERT，
+        # 产生「同一成交号每天一行」的重复委托（污染执行统计与人工卖出吸收）。
+        # 回看 7 天、按时间升序遍历（同号取最新一行），跨日重复返回直接 UPDATE 命中原行。
         now_cn = (
             now.replace(tzinfo=timezone.utc).astimezone(TZ).replace(tzinfo=None)
             if now.tzinfo is None else now.astimezone(TZ).replace(tzinfo=None)
         )
         day_start = now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day_start + timedelta(days=1)
+        existing_lookback_start = day_start - timedelta(days=7)
         existing: dict[str, _LocalOrderState] = {}
         for row in (
             await db.execute(
@@ -888,9 +892,8 @@ class TdxPushService:
                     Order.exchange_order_id.is_not(None),
                     Order.tenant_id == tenant_id,
                     Order.user_id == str(user_id),
-                    Order.created_at >= day_start,
-                    Order.created_at < day_end,
-                )
+                    Order.created_at >= existing_lookback_start,
+                ).order_by(Order.created_at)
             )
         ).fetchall():
             existing[str(row[0])] = _LocalOrderState(

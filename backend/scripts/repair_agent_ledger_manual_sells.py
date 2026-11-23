@@ -189,6 +189,72 @@ async def load_unattributed_sells(
     return out
 
 
+async def load_unattributed_buys(
+    session: Any, tenant: str, user: str, since: datetime
+) -> list[dict[str, Any]]:
+    """窗口内 ``orders.agent`` 为空的已成交买入 → 成交面聚合（人工买入归属）。
+
+    与 :func:`load_unattributed_sells` 完全同口径（数量/价格以 ``trades`` 为准，
+    回落委托累计），只是方向为 ``buy``。
+    """
+    from sqlalchemy import text
+
+    rows = (
+        await session.execute(
+            text(
+                "SELECT o.order_id::text AS order_id, o.symbol AS code, "
+                "       o.filled_quantity, o.average_price, o.created_at, "
+                "       COALESCE(SUM(t.quantity), 0) AS trade_volume, "
+                "       CASE WHEN COALESCE(SUM(t.quantity), 0) > 0 "
+                "            THEN SUM(t.quantity * t.price) / SUM(t.quantity) "
+                "            ELSE NULL END AS trade_price, "
+                "       MIN(t.executed_at) AS first_trade_at "
+                "FROM orders o "
+                "LEFT JOIN trades t "
+                "  ON t.order_id = o.order_id "
+                " AND t.tenant_id = o.tenant_id AND t.user_id = o.user_id "
+                "WHERE o.tenant_id = :tid AND o.user_id = :uid "
+                "  AND COALESCE(o.agent, '') = '' "
+                "  AND o.side::text = 'buy' "
+                "  AND o.status::text = 'filled' "
+                "  AND o.filled_quantity > 0 "
+                "  AND o.created_at >= :since "
+                "GROUP BY o.order_id, o.symbol, o.filled_quantity, "
+                "         o.average_price, o.created_at "
+                "ORDER BY o.created_at"
+            ),
+            {"tid": tenant, "uid": user, "since": since},
+        )
+    ).fetchall()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rec = dict(row._mapping)
+        volume = to_float(rec.get("trade_volume")) or to_float(
+            rec.get("filled_quantity")
+        )
+        price = to_float(rec.get("trade_price")) or to_float(rec.get("average_price"))
+        wall = rec.get("first_trade_at") or rec.get("created_at")
+        if volume <= 0 or price <= 0 or not isinstance(wall, datetime):
+            print(
+                f"⚠️ 跳过未归属买单 {rec.get('order_id')} {rec.get('code')}："
+                f"成交量/价/时间不完整（volume={volume} price={price} at={wall}）"
+            )
+            continue
+        out.append(
+            {
+                "order_id": str(rec.get("order_id") or ""),
+                "code": to_suffix_code(rec.get("code")),
+                "volume": volume,
+                "price": price,
+                "executed_at": _wall_to_utc(wall),
+                "trade_date": wall.date(),
+                "agent": "",
+            }
+        )
+    return out
+
+
 def _wall_to_utc(value: datetime) -> datetime:
     """北京墙钟（naive）→ aware UTC；本来就是 aware 的原样归一。"""
     if value.tzinfo is None:
@@ -252,13 +318,18 @@ def _write_backup(payload: Mapping[str, Any]) -> Path:
 
 
 async def apply_plan(
-    plan: AbsorbPlan, *, tenant: str, user: str
+    plan: AbsorbPlan, *, tenant: str, user: str, quota: float | None = None
 ) -> list[dict[str, Any]]:
-    """在一个事务里逐段 ``apply_fill``；任何一段异常/重复/未记满 → 整批回滚。"""
+    """在一个事务里逐段 ``apply_fill``；任何一段异常/重复/未记满 → 整批回滚。
+
+    ``quota`` 只在**首次开户**生效（人工买入的 ``manual`` 账户要按真实账户规模开户，
+    否则虚拟现金会被一笔大额人工买入打成大额负数）。
+    """
     from backend.shared.agent_ledger_fill import market_of
     from backend.shared.agent_ledger_store import apply_fill
     from backend.shared.database_manager_v2 import get_session
 
+    extra: dict[str, Any] = {"quota": float(quota)} if quota and quota > 0 else {}
     outcomes: list[dict[str, Any]] = []
     async with get_session() as session:
         for fill in plan.fills:
@@ -268,7 +339,7 @@ async def apply_plan(
                 user_id=user,
                 agent=fill.agent,
                 code=fill.code,
-                side="sell",
+                side=fill.side if fill.side in ("buy", "sell") else "sell",
                 volume=fill.volume,
                 price=fill.price,
                 fill_key=fill.fill_key,
@@ -277,6 +348,7 @@ async def apply_plan(
                 filled_at=fill.filled_at,
                 market=market_of(fill.code),
                 exit_reason=EXIT_REASON,
+                **extra,
             )
             if outcome.duplicate:
                 raise RuntimeError(
@@ -296,6 +368,7 @@ async def apply_plan(
                     "fill_key": fill.fill_key,
                     "agent": fill.agent,
                     "code": fill.code,
+                    "side": fill.side,
                     "volume": fill.volume,
                     "price": fill.price,
                     "virtual_cash": outcome.virtual_cash,
@@ -311,8 +384,15 @@ async def verify_plan(
     tenant: str,
     user: str,
     accounts_before: Mapping[str, float],
+    ledger_before: Sequence[Mapping[str, Any]] | None = None,
+    quota: float | None = None,
 ) -> list[str]:
-    """写后回读复验：持仓行已消失、现金等于逐步预期、流水行 applied/note 正确。"""
+    """写后回读复验：持仓等于计划期末、现金等于逐步预期、流水行 applied/note 正确。
+
+    ``ledger_before`` 给了就按**期望期末持仓**校验（部分吸收后 agent 仍有仓是正常的）；
+    缺省保持旧行为（只允许清仓）。人工买入会新建 ``manual`` 账户，现金校验用
+    ``quota`` 作为开户初始值。
+    """
     from sqlalchemy import text
 
     from backend.shared.database_manager_v2 import get_session
@@ -321,6 +401,16 @@ async def verify_plan(
     by_agent: dict[str, list[AbsorbFill]] = defaultdict(list)
     for fill in plan.fills:
         by_agent[fill.agent].append(fill)
+
+    expected_end: dict[tuple[str, str], float] = {}
+    if ledger_before is not None:
+        for rec in ledger_before:
+            key = (str(rec.get("agent") or ""), str(rec.get("code") or ""))
+            expected_end[key] = expected_end.get(key, 0.0) + to_float(rec.get("volume"))
+        for fill in plan.fills:
+            key = (fill.agent, fill.code)
+            sign = 1.0 if fill.side == "buy" else -1.0
+            expected_end[key] = expected_end.get(key, 0.0) + sign * fill.volume
 
     async with get_session() as session:
         for agent, agent_fills in by_agent.items():
@@ -335,8 +425,18 @@ async def verify_plan(
                         {"tid": tenant, "uid": user, "agent": agent, "code": code},
                     )
                 ).first()
-                if row is not None:
-                    problems.append(f"{agent} {code} 仍有 {row[0]:g} 股（应已清仓）")
+                got = to_float(row[0]) if row is not None else 0.0
+                if ledger_before is None:
+                    if row is not None:
+                        problems.append(
+                            f"{agent} {code} 仍有 {got:g} 股（应已清仓）"
+                        )
+                    continue
+                want = expected_end.get((agent, code), 0.0)
+                if abs(got - want) > EPS:
+                    problems.append(
+                        f"{agent} {code} 持仓 {got:g} 股 ≠ 计划期末 {want:g} 股"
+                    )
 
         for fill in plan.fills:
             row = (
@@ -374,11 +474,14 @@ async def verify_plan(
         ).fetchall()
         cash_now = {str(r[0]): to_float(r[1]) for r in cash_rows}
         for agent, agent_fills in by_agent.items():
-            want = expected_cash(accounts_before.get(agent, 0.0), agent_fills)
+            base = accounts_before.get(agent)
+            if base is None:
+                base = float(quota or 0.0)
+            want = expected_cash(base, agent_fills)
             got = cash_now.get(agent)
             if got is None or abs(got - want) > 0.005:
                 problems.append(
-                    f"{agent} 现金 {got} ≠ 预期 {want}（写前 {accounts_before.get(agent)}）"
+                    f"{agent} 现金 {got} ≠ 预期 {want}（写前 {base}）"
                 )
 
     # 事务内返回值也要对得上（两层证据：apply_fill 的 outcome + 提交后回读）。
@@ -395,7 +498,10 @@ async def verify_plan(
         if got is None:
             problems.append(f"{fill.fill_key} 未返回记账后现金")
             continue
-        want = expected_cash(accounts_before.get(fill.agent, 0.0), applied[fill.agent])
+        base = accounts_before.get(fill.agent)
+        if base is None:
+            base = float(quota or 0.0)
+        want = expected_cash(base, applied[fill.agent])
         if abs(to_float(got) - want) > 0.005:
             problems.append(
                 f"{fill.agent} 事务内现金 {got} ≠ 逐步预期 {want}（{fill.fill_key}）"

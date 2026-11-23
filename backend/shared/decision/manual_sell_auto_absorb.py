@@ -27,10 +27,11 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from backend.shared.database_manager_v2 import get_session
-from backend.shared.decision.manual_sell_absorption import EPS, plan_absorption
+from backend.shared.decision.manual_sell_absorption import EPS, plan_manual_flows
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,34 @@ async def load_tdx_account_volumes(
     return out, f"tdx_bridge 快照，{len(out)} 只持仓"
 
 
+async def load_tdx_account_capital(tenant: str, user: str) -> float:
+    """TDX 快照里的持仓市值合计——人工买入的 ``manual`` 账户按真实账户规模开户。
+
+    快照只有 positions（无 cash/asset 字段），用 ``market_value`` 合计近似账户规模：
+    目的只是让 ``manual`` 的虚拟现金不因一笔大额人工买入变成负几十万，不参与模型额度。
+    """
+    from sqlalchemy import text
+
+    async with get_session(read_only=True) as db:
+        row = (
+            await db.execute(
+                text(_TDX_SNAPSHOT_SQL), {"tid": tenant, "uid": user}
+            )
+        ).fetchone()
+    if row is None:
+        return 0.0
+    payload = _decode_payload(row[1])
+    total = 0.0
+    for item in payload.get("positions") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            total += float(item.get("market_value") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2)
+
+
 def _write_backup(payload: Mapping[str, Any]) -> Path:
     """写前留痕（与手动脚本同口径，便于逐笔对账）。"""
     directory = Path(os.getenv("QM_LOG_DIR", str(_project_root() / "logs")))
@@ -176,6 +205,7 @@ async def absorb_manual_sells(
         apply_plan,
         load_accounts,
         load_ledger_rows,
+        load_unattributed_buys,
         load_unattributed_sells,
         verify_plan,
     )
@@ -184,9 +214,27 @@ async def absorb_manual_sells(
     since = datetime.now(BEIJING).replace(tzinfo=None) - timedelta(days=lookback_days)
 
     async with get_session(read_only=True) as db:
+        from sqlalchemy import text as sa_text
+
         ledger_rows = await load_ledger_rows(db, tenant, user)
         accounts_before = await load_accounts(db, tenant, user)
         sells = await load_unattributed_sells(db, tenant, user, since)
+        buys = await load_unattributed_buys(db, tenant, user, since)
+        # 幂等：已入过账的 order（manual-absorb / manual-buy 流水存在）不再参与计划，
+        # 否则下一轮会把「已含入账的账本」当成期初，重复生成一笔期初调整。
+        absorbed_rows = (
+            await db.execute(
+                sa_text(
+                    "SELECT DISTINCT order_id FROM qm_agent_ledger_fill "
+                    "WHERE tenant_id = :tid AND user_id = :uid "
+                    "  AND trade_date >= :since "
+                    "  AND (fill_key LIKE 'manual-absorb:%' "
+                    "       OR fill_key LIKE 'manual-buy:%')"
+                ),
+                {"tid": tenant, "uid": user, "since": since.date()},
+            )
+        ).fetchall()
+        absorbed_ids = {str(r[0]) for r in absorbed_rows if r[0]}
 
     real_volumes, note = await load_tdx_account_volumes(
         tenant, user, max_age_s=max_snapshot_age_s
@@ -197,7 +245,13 @@ async def absorb_manual_sells(
         logger.warning("[manual-absorb] 跳过：%s", note)
         return result
 
-    plan = plan_absorption(ledger_rows, sells, real_volumes)
+    plan = plan_manual_flows(
+        ledger_rows,
+        buys,
+        sells,
+        real_volumes,
+        absorbed_order_ids=absorbed_ids,
+    )
     result.skipped = {s.code: f"{s.reason}（{s.detail}）" for s in plan.skipped}
     result.proceeds_by_agent = dict(plan.proceeds_by_agent)
     result.pnl_by_agent = dict(plan.pnl_by_agent)
@@ -208,6 +262,7 @@ async def absorb_manual_sells(
                 {
                     "agent": f.agent,
                     "code": f.code,
+                    "side": f.side,
                     "volume": f.volume,
                     "price": f.price,
                     "order_id": f.order_id,
@@ -224,10 +279,12 @@ async def absorb_manual_sells(
                         "accounts_before": accounts_before,
                         "real_volumes": real_volumes,
                         "sells": sells,
+                        "buys": buys,
                         "fills": [
                             {
                                 "agent": f.agent,
                                 "code": f.code,
+                                "side": f.side,
                                 "volume": f.volume,
                                 "price": f.price,
                                 "order_id": f.order_id,
@@ -243,13 +300,18 @@ async def absorb_manual_sells(
                 )
             )
             try:
-                outcomes = await apply_plan(plan, tenant=tenant, user=user)
+                capital = await load_tdx_account_capital(tenant, user)
+                outcomes = await apply_plan(
+                    plan, tenant=tenant, user=user, quota=capital
+                )
                 problems = await verify_plan(
                     plan,
                     outcomes,
                     tenant=tenant,
                     user=user,
                     accounts_before=accounts_before,
+                    ledger_before=ledger_rows,
+                    quota=capital,
                 )
                 if problems:
                     result.error = "写后复验失败：" + "；".join(problems)

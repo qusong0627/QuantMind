@@ -8,9 +8,11 @@
 
 吸收判据（**全部满足**才吸收；任何一条不满足只报告不写）：
 
-1. 该标的已不在真实账户（真实持仓由调用方读好传入，与决策轮同一口径）；
-2. 未归属卖出总量足以覆盖账本该标的**合计持仓**（不足 = 账本本来就没记那么多，
-   **不猜**）；
+1. 账本持仓 > 真实账户持仓（真实持仓由调用方读好传入，与决策轮同一口径）——
+   **只吸收差额**；相等即无差额跳过；真实更多属于人工买入，不在本计划器处理。
+   （2026-11-23 修订：旧判据要求「该标的已清仓」，导致有底仓时的部分人工卖出
+   永远不入账，账本与真实持仓长期背离。）
+2. 未归属卖出总量足以覆盖**差额**（不足 = 账本本来就没记那么多，**不猜**）；
 3. 账本每一行的 ``buy_ts`` 早于分配到的卖出成交（卖出之后才买的仓不由这笔解释；
    ``buy_ts`` 缺失同样不动——无法证明它当时存在）。
 
@@ -35,6 +37,26 @@ from backend.shared.stock_utils import StockCodeUtil
 
 #: 幂等键前缀（体检/审计按它把这类流水与券商成交号区分开）。
 FILL_KEY_PREFIX = "manual-absorb"
+#: 人工买入归属前缀（窗口内未归属买入 → manual agent 名下）。
+MANUAL_BUY_PREFIX = "manual-buy"
+#: 期初差异调整前缀（账本与真实持仓在窗口起点就对不上时的一次性调整）。
+MANUAL_ADJUST_PREFIX = "manual-adjust"
+#: 未归属成交的归属方（不是任何一个模型：真实账户里的人工持仓）。
+MANUAL_AGENT = "manual"
+
+
+def model_agent_names(agents: Any) -> list[str]:
+    """账本 agent 集合 → **模型**名（排除 ``manual`` 归属桶），排序返回。
+
+    赛马总控/净值曲线用它：``manual`` 只是让「真实持仓 = 模型分账 + manual」
+    成立的对账桶，混进模型排名会把人工单算成模型业绩（2026-11-23 用户口径）。
+    """
+    out = {
+        str(name).strip()
+        for name in (agents or ())
+        if str(name or "").strip() and str(name).strip() != MANUAL_AGENT
+    }
+    return sorted(out)
 
 #: 卖出理由（只记录，进回合台账；与真单的 NULL 区分，行为归因可单独过滤）。
 EXIT_REASON = "manual_absorb"
@@ -44,7 +66,11 @@ EPS = 1e-6
 
 # ── 跳过原因（报告与测试共用一份常量）─────────────────────────────────
 REASON_REAL_UNAVAILABLE = "real_positions_unavailable"
-REASON_STILL_HELD = "real_account_still_holds"
+#: 真实持仓 == 账本持仓（没有差额可吸收）。取代旧「有底仓就跳过」：
+#: 部分人工卖出（真实 < 账本）同样要吸收，见 :data:`REASON_NO_GAP` 的引入背景。
+REASON_NO_GAP = "real_account_matches_ledger"
+#: 保留旧名（外部/历史调用可能 import）；语义已收窄为「无差额」。
+REASON_STILL_HELD = REASON_NO_GAP
 REASON_NO_SELL_EVIDENCE = "no_unattributed_sells"
 REASON_INSUFFICIENT = "unattributed_sells_insufficient"
 REASON_BOUGHT_AFTER_SELL = "position_bought_after_sell"
@@ -52,9 +78,9 @@ REASON_BUY_TS_UNKNOWN = "position_buy_ts_unknown"
 
 REASON_TEXT = {
     REASON_REAL_UNAVAILABLE: "真实持仓不可读",
-    REASON_STILL_HELD: "真实账户仍持有",
+    REASON_NO_GAP: "真实持仓与账本一致（无差额）",
     REASON_NO_SELL_EVIDENCE: "窗口内无未归属卖出",
-    REASON_INSUFFICIENT: "未归属卖出不足以覆盖账本持仓",
+    REASON_INSUFFICIENT: "未归属卖出不足以覆盖账本比真实多出的差额",
     REASON_BOUGHT_AFTER_SELL: "卖出之后才买入",
     REASON_BUY_TS_UNKNOWN: "买入时间未知",
 }
@@ -97,6 +123,9 @@ class AbsorbFill:
     cost_price: float
     realized_pnl: float
     closes: bool  # True = 这段把这行持仓清零（回合行 closed 口径）
+    #: ``sell`` = 吸收未归属卖出（扣模型分行）；``buy`` = 人工买入归到 manual；
+    #: ``adjust`` = 窗口起点账本与真实对不上的期初调整（方向由量价决定）。
+    side: str = "sell"
 
     @property
     def proceeds(self) -> float:
@@ -183,11 +212,17 @@ def plan_absorption(
             skipped.append(AbsorbSkip(code, REASON_REAL_UNAVAILABLE, ""))
             continue
         real = to_float(real_volumes.get(code))
-        if real > 0:
-            skipped.append(AbsorbSkip(code, REASON_STILL_HELD, f"{real:g} 股"))
+        rows = ledger_by_code[code]
+        ledger_total = round(sum(row["volume"] for row in rows), 4)
+        # 只吸收「账本比真实多出来的差额」：真实 ≥ 账本时没有可吸收的卖出
+        # （真实更多 = 人工买入，走 manual 买入归属，不在本计划器里处理）。
+        gap = round(ledger_total - real, 4)
+        if gap <= EPS:
+            skipped.append(
+                AbsorbSkip(code, REASON_NO_GAP, f"账本 {ledger_total:g} / 真实 {real:g}")
+            )
             continue
 
-        rows = ledger_by_code[code]
         if any(row["buy_ts"] is None for row in rows):
             skipped.append(
                 AbsorbSkip(
@@ -200,10 +235,18 @@ def plan_absorption(
             sells_by_code.get(code, []),
             key=lambda s: (s["executed_at"], s["order_id"]),
         )
-        ledger_total = round(sum(row["volume"] for row in rows), 4)
         sold_total = round(sum(s["volume"] for s in code_sells), 4)
         if not code_sells:
             skipped.append(AbsorbSkip(code, REASON_NO_SELL_EVIDENCE, ""))
+            continue
+        if sold_total + EPS < gap:
+            skipped.append(
+                AbsorbSkip(
+                    code,
+                    REASON_INSUFFICIENT,
+                    f"未归属卖出 {sold_total:g} 股 < 差额 {gap:g} 股",
+                )
+            )
             continue
         latest_sell = code_sells[-1]["executed_at"]
         late_rows = [row for row in rows if row["buy_ts"] > latest_sell]
@@ -222,9 +265,13 @@ def plan_absorption(
         code_fills: list[AbsorbFill] = []
         starved: dict[str, Any] | None = None
         starved_need = 0.0
+        gap_left = gap
 
         for row in rows_sorted:
-            need = row["volume"]
+            if gap_left <= EPS:
+                break
+            row_volume = row["volume"]
+            need = min(row_volume, gap_left)
             row_fills: list[AbsorbFill] = []
             for idx, sell in enumerate(code_sells):
                 if remaining[idx] <= EPS:
@@ -258,17 +305,22 @@ def plan_absorption(
                 starved = row
                 starved_need = need
                 break
-            # 这一行完整覆盖：最后一段即清仓段
-            row_fills[-1] = replace(row_fills[-1], closes=True)
+            allocated = round(min(row_volume, gap_left) - need, 6)
+            # 该行被**差额全量**吸收才标清仓；只吸收一部分时账本仍有该 agent 的仓。
+            if allocated + EPS >= row_volume:
+                row_fills[-1] = replace(row_fills[-1], closes=True)
             code_fills.extend(row_fills)
+            gap_left = round(gap_left - allocated, 6)
 
         if starved is not None:
-            detail = (
-                f"未归属卖出 {sold_total:g} 股 < 账本持仓 {ledger_total:g} 股"
-                if sold_total + EPS < ledger_total
-                else f"{starved['agent']} 缺 {starved_need:g} 股可分配卖出"
+            skipped.append(
+                AbsorbSkip(
+                    code,
+                    REASON_INSUFFICIENT,
+                    f"{starved['agent']} 缺 {starved_need:g} 股可分配卖出"
+                    f"（账本比真实多 {gap:g} 股）",
+                )
             )
-            skipped.append(AbsorbSkip(code, REASON_INSUFFICIENT, detail))
             continue
         fills.extend(code_fills)
 
@@ -278,6 +330,291 @@ def plan_absorption(
         proceeds[fill.agent] = round(proceeds[fill.agent] + fill.proceeds, 2)
         pnl[fill.agent] = round(pnl[fill.agent] + fill.realized_pnl, 2)
 
+    return AbsorbPlan(
+        fills=tuple(fills),
+        skipped=tuple(skipped),
+        proceeds_by_agent=dict(proceeds),
+        pnl_by_agent=dict(pnl),
+    )
+
+
+def plan_manual_flows(
+    ledger_rows: Sequence[Mapping[str, Any]],
+    buys: Sequence[Mapping[str, Any]],
+    sells: Sequence[Mapping[str, Any]],
+    real_volumes: Mapping[str, float] | None,
+    *,
+    fill_key_prefix: str = FILL_KEY_PREFIX,
+    absorbed_order_ids: set[str] | None = None,
+) -> AbsorbPlan:
+    """把窗口内**未归属买入/卖出 + 期初差异**全部入账，使账本合计 = 真实持仓。
+
+    与 :func:`plan_absorption` 的分工：后者只看「账本 > 真实」的期末差额，会漏掉
+    「先卖后买」的人工卖出——期末账本反而**小于**真实持仓（2026-11-23 实况：
+    601825 先卖 4500 股、又买 93300 股，期末真实 94300 ≫ 账本 5500）。
+    本函数按**事件顺序**入账：
+
+    1. 期初真实 = 期末真实 −（窗口买入 − 窗口卖出）；
+    2. 期初账本 ≠ 期初真实 → 先记 ``manual-adjust``（账本多记按 FIFO 扣模型，
+       账本少记补 ``manual`` 买入）；
+    3. 时间顺序逐笔：未归属卖出按 ``buy_ts`` FIFO 扣账本（先模型、后 manual），
+       未归属买入记 ``manual-buy`` 到 :data:`MANUAL_AGENT`；
+    4. 期末校验：账本合计 == 真实持仓，否则整只票只报告不写。
+
+    幂等键：``manual-absorb:{order_id}:{agent}`` / ``manual-buy:{order_id}:manual`` /
+    ``manual-adjust:{code}:{side}``。
+    """
+
+    def _ledger(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        out: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            code = to_suffix_code(row.get("code"))
+            volume = to_float(row.get("volume"))
+            if not code or volume <= 0:
+                continue
+            out[code].append(
+                {
+                    "agent": str(row.get("agent") or ""),
+                    "code": code,
+                    "volume": volume,
+                    "cost_price": to_float(row.get("cost_price")),
+                    "buy_ts": as_aware_utc(row.get("buy_ts")),
+                }
+            )
+        return out
+
+    def _events(items: Sequence[Mapping[str, Any]], side: str) -> dict[str, list[dict]]:
+        out: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in items:
+            if str(item.get("agent") or "").strip():
+                continue  # 归属成交走真单落账路径
+            if absorbed_order_ids and str(item.get("order_id") or "") in absorbed_order_ids:
+                continue  # 已入过账（幂等：同一 order 的 manual-* 流水已存在）
+            code = to_suffix_code(item.get("code"))
+            volume = to_float(item.get("volume"))
+            price = to_float(item.get("price"))
+            executed_at = as_aware_utc(item.get("executed_at"))
+            if not code or volume <= 0 or price <= 0 or executed_at is None:
+                continue
+            trade_date = item.get("trade_date")
+            if not isinstance(trade_date, date):
+                trade_date = executed_at.date()
+            out[code].append(
+                {
+                    "order_id": str(item.get("order_id") or ""),
+                    "code": code,
+                    "volume": volume,
+                    "price": price,
+                    "executed_at": executed_at,
+                    "trade_date": trade_date,
+                    "side": side,
+                }
+            )
+        return out
+
+    ledger_by_code = _ledger(ledger_rows)
+    buys_by_code = _events(buys, "buy")
+    sells_by_code = _events(sells, "sell")
+
+    skipped: list[AbsorbSkip] = []
+    fills: list[AbsorbFill] = []
+    codes = sorted(
+        set(ledger_by_code)
+        | set(buys_by_code)
+        | set(sells_by_code)
+        | set(real_volumes or {})
+    )
+    for code in codes:
+        if real_volumes is None:
+            skipped.append(AbsorbSkip(code, REASON_REAL_UNAVAILABLE, ""))
+            continue
+        real = to_float(real_volumes.get(code))
+        rows = ledger_by_code.get(code, [])
+        events = sorted(
+            buys_by_code.get(code, []) + sells_by_code.get(code, []),
+            key=lambda e: (e["executed_at"], e["order_id"]),
+        )
+        if any(row["buy_ts"] is None for row in rows):
+            skipped.append(
+                AbsorbSkip(
+                    code, REASON_BUY_TS_UNKNOWN, "账本行缺 buy_ts，无法证明卖出时存在"
+                )
+            )
+            continue
+        net = round(
+            sum(e["volume"] for e in events if e["side"] == "buy")
+            - sum(e["volume"] for e in events if e["side"] == "sell"),
+            4,
+        )
+        begin_real = round(real - net, 4)
+        ledger_total = round(sum(row["volume"] for row in rows), 4)
+        gap0 = round(ledger_total - begin_real, 4)
+        holdings = [dict(row) for row in rows]
+        stamp = events[-1]["executed_at"] if events else None
+        if stamp is None and holdings:
+            stamp = holdings[0]["buy_ts"]
+        if stamp is None:
+            skipped.append(
+                AbsorbSkip(code, REASON_NO_SELL_EVIDENCE, "窗口内无未归属成交")
+            )
+            continue
+        item_day = stamp.date()
+        code_fills: list[AbsorbFill] = []
+
+        # ① 期初差异：账本 vs 期初真实
+        if gap0 > EPS:
+            left = gap0
+            for held in sorted(holdings, key=lambda h: (h["buy_ts"], h["agent"])):
+                if left <= EPS:
+                    break
+                take = min(held["volume"], left)
+                code_fills.append(
+                    AbsorbFill(
+                        agent=held["agent"],
+                        code=code,
+                        volume=take,
+                        price=held["cost_price"],
+                        order_id="",
+                        fill_key=f"{MANUAL_ADJUST_PREFIX}:{code}:sell:{held['agent']}",
+                        trade_date=item_day,
+                        filled_at=stamp,
+                        cost_price=held["cost_price"],
+                        realized_pnl=0.0,
+                        closes=take + EPS >= held["volume"],
+                        side="sell",
+                    )
+                )
+                held["volume"] = round(held["volume"] - take, 6)
+                left = round(left - take, 6)
+        elif gap0 < -EPS:
+            need = round(-gap0, 4)
+            price = next(
+                (e["price"] for e in events if e["side"] == "buy"),
+                next((h["cost_price"] for h in holdings if h["cost_price"] > 0), 0.0),
+            )
+            if price <= 0:
+                skipped.append(
+                    AbsorbSkip(code, REASON_INSUFFICIENT, "无可用参考价补齐期初差额")
+                )
+                continue
+            code_fills.append(
+                AbsorbFill(
+                    agent=MANUAL_AGENT,
+                    code=code,
+                    volume=need,
+                    price=price,
+                    order_id="",
+                    fill_key=f"{MANUAL_ADJUST_PREFIX}:{code}:buy",
+                    trade_date=item_day,
+                    filled_at=stamp,
+                    cost_price=price,
+                    realized_pnl=0.0,
+                    closes=False,
+                    side="buy",
+                )
+            )
+            holdings.append(
+                {
+                    "agent": MANUAL_AGENT,
+                    "code": code,
+                    "volume": need,
+                    "cost_price": price,
+                    "buy_ts": stamp,
+                }
+            )
+
+        # ② 窗口内未归属成交：按时间顺序入账
+        starved: dict[str, Any] | None = None
+        starved_need = 0.0
+        for event in events:
+            if event["side"] == "buy":
+                code_fills.append(
+                    AbsorbFill(
+                        agent=MANUAL_AGENT,
+                        code=code,
+                        volume=event["volume"],
+                        price=event["price"],
+                        order_id=event["order_id"],
+                        fill_key=f"{MANUAL_BUY_PREFIX}:{event['order_id']}:{MANUAL_AGENT}",
+                        trade_date=event["trade_date"],
+                        filled_at=event["executed_at"],
+                        cost_price=event["price"],
+                        realized_pnl=0.0,
+                        closes=False,
+                        side="buy",
+                    )
+                )
+                holdings.append(
+                    {
+                        "agent": MANUAL_AGENT,
+                        "code": code,
+                        "volume": event["volume"],
+                        "cost_price": event["price"],
+                        "buy_ts": event["executed_at"],
+                    }
+                )
+                continue
+            left = event["volume"]
+            for held in sorted(holdings, key=lambda h: (h["buy_ts"], h["agent"])):
+                if left <= EPS:
+                    break
+                if held["volume"] <= EPS:
+                    continue
+                if held["buy_ts"] and event["executed_at"] < held["buy_ts"]:
+                    continue
+                take = min(held["volume"], left)
+                realized = round((event["price"] - held["cost_price"]) * take, 2)
+                code_fills.append(
+                    AbsorbFill(
+                        agent=held["agent"],
+                        code=code,
+                        volume=take,
+                        price=event["price"],
+                        order_id=event["order_id"],
+                        fill_key=f"{fill_key_prefix}:{event['order_id']}:{held['agent']}",
+                        trade_date=event["trade_date"],
+                        filled_at=event["executed_at"],
+                        cost_price=held["cost_price"],
+                        realized_pnl=realized,
+                        closes=take + EPS >= held["volume"],
+                        side="sell",
+                    )
+                )
+                held["volume"] = round(held["volume"] - take, 6)
+                left = round(left - take, 6)
+            if left > EPS:
+                starved = event
+                starved_need = left
+                break
+        if starved is not None:
+            skipped.append(
+                AbsorbSkip(
+                    code,
+                    REASON_INSUFFICIENT,
+                    f"未归属卖出 {starved_need:g} 股无账本持仓可扣"
+                    f"（期末真实 {real:g}）",
+                )
+            )
+            continue
+
+        after = round(sum(h["volume"] for h in holdings), 4)
+        if abs(after - real) > EPS:
+            skipped.append(
+                AbsorbSkip(
+                    code,
+                    REASON_INSUFFICIENT,
+                    f"入账后账本 {after:g} 股 ≠ 真实 {real:g} 股",
+                )
+            )
+            continue
+        fills.extend(code_fills)
+
+    proceeds: dict[str, float] = defaultdict(float)
+    pnl: dict[str, float] = defaultdict(float)
+    for fill in fills:
+        if fill.side != "buy":
+            proceeds[fill.agent] = round(proceeds[fill.agent] + fill.proceeds, 2)
+            pnl[fill.agent] = round(pnl[fill.agent] + fill.realized_pnl, 2)
     return AbsorbPlan(
         fills=tuple(fills),
         skipped=tuple(skipped),
@@ -300,12 +637,14 @@ def fill_fields(fill: AbsorbFill) -> dict[str, Any]:
         "cost_price": fill.cost_price,
         "realized_pnl": fill.realized_pnl,
         "closes": fill.closes,
+        "side": fill.side,
     }
 
 
 def expected_cash(before: float, fills: Sequence[AbsorbFill]) -> float:
-    """账本现金的期望值：与 ``record_sell`` 的 ``round(cash + sold*price, 2)`` 逐步对齐。"""
+    """账本现金的期望值：卖出 ``+volume*price``、买入 ``−volume*price``，逐步 round。"""
     cash = round(to_float(before), 2)
     for fill in fills:
-        cash = round(cash + fill.volume * fill.price, 2)
+        sign = -1.0 if fill.side == "buy" else 1.0
+        cash = round(cash + sign * fill.volume * fill.price, 2)
     return cash
