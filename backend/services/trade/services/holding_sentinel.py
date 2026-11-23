@@ -985,4 +985,14 @@ async def run_holding_sentinel_worker() -> None:
             await sentinel.run_once()
         except Exception as exc:  # noqa: BLE001 - 循环永不退出
             logger.warning("[holding_sentinel] 扫描失败: %s", exc, exc_info=True)
+        try:
+            # 价格阈值预警（P0 即时 QQ）：TQ 模拟盘的自动止损要客户端人工确认，
+            # 到价提醒是当前唯一能真正送达的风控面（见 price_alert 模块头）。
+            from backend.services.trade.services.price_alert import check_price_alerts
+
+            hits = await check_price_alerts()
+            if hits:
+                logger.warning("[holding_sentinel] 价格预警命中 %d 条", len(hits))
+        except Exception as exc:  # noqa: BLE001 - 预警失败不退出循环
+            logger.warning("[holding_sentinel] 价格预警失败: %s", exc)
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
