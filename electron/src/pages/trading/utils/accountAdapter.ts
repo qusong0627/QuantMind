@@ -185,9 +185,18 @@ export const buildTradingTopBarAccountInfo = (
     };
   }
 
-  const totalAsset = toFiniteNumber(accountInfo?.total_asset, 0);
+  const reportedTotalAsset = toFiniteNumber(accountInfo?.total_asset, 0);
   const cash = toFiniteNumber(accountInfo?.cash ?? (accountInfo as any)?.available_cash, 0);
   const marketValue = toFiniteNumber(accountInfo?.market_value, 0);
+  // 单一口径：桥/客户端上报的 total_asset 与持仓市值来自不同刷新时点
+  // （2026-11-23 实测：asset 930,295.74 vs 现金+市值 928,409.74，差 1,886 ≈
+  // 601825 两分钱 × 94,300 股）。权益与市值必须同源，否则同一张卡上
+  // 「账户权益」与「持仓市值」互相矛盾（差 1 分钱 × 持股数）。
+  const cashPlusMarket = cash + marketValue;
+  const equityMismatch =
+    Math.abs(reportedTotalAsset - cashPlusMarket) > 1 &&
+    (cash > 0 || marketValue > 0);
+  const totalAsset = equityMismatch ? cashPlusMarket : reportedTotalAsset;
   const frozen = toFiniteNumber((accountInfo as any)?.frozen ?? (accountInfo as any)?.frozen_cash, 0);
   const baselineDayOpenEquity = toFiniteNumber((accountInfo as any)?.baseline?.day_open_equity, Number.NaN);
   const baselineMonthOpenEquity = toFiniteNumber((accountInfo as any)?.baseline?.month_open_equity, Number.NaN);
@@ -211,30 +220,38 @@ export const buildTradingTopBarAccountInfo = (
     ? status.portfolio.daily_return / 100
     : (status?.daily_return != null ? (status.daily_return as number) / 100 : Number.NaN);
 
-  const dailyPnl = Number.isFinite(accountDailyPnl)
+  const serviceDailyPnl = Number.isFinite(accountDailyPnl)
     ? accountDailyPnl
     : (Number.isFinite(accountTodayPnl) ? accountTodayPnl : statusDailyPnl);
-  const totalPnl = Number.isFinite(accountTotalPnl) ? accountTotalPnl : statusTotalPnl;
+  const serviceTotalPnl = Number.isFinite(accountTotalPnl) ? accountTotalPnl : statusTotalPnl;
   const floatingPnl = Number.isFinite(accountFloatingPnl) ? accountFloatingPnl : deriveFloatingPnl(accountInfo);
   const positionCount = extractPositionCount(accountInfo) || toFiniteNumber(status?.portfolio?.position_count, 0);
   const explicitInitialEquity = toFiniteNumber((accountInfo as any)?.initial_equity, Number.NaN);
   const initialEquity = Number.isFinite(explicitInitialEquity)
     ? explicitInitialEquity
-    : (Number.isFinite(totalAsset) && Number.isFinite(totalPnl)
-      ? Math.max(0, totalAsset - totalPnl)
+    : (Number.isFinite(totalAsset) && Number.isFinite(serviceTotalPnl)
+      ? Math.max(0, totalAsset - serviceTotalPnl)
       : (Number.isFinite(statusInitialCapital) ? statusInitialCapital : 0));
   const dayOpenEquity = Number.isFinite(baselineDayOpenEquity)
     ? baselineDayOpenEquity
     : (Number.isFinite(accountDayOpenEquity)
       ? accountDayOpenEquity
-      : Math.max(0, totalAsset - dailyPnl));
+      : Math.max(0, totalAsset - serviceDailyPnl));
   const monthOpenEquity = Number.isFinite(baselineMonthOpenEquity)
     ? baselineMonthOpenEquity
     : (Number.isFinite(accountMonthOpenEquity)
       ? accountMonthOpenEquity
       : (Number.isFinite(statusInitialCapital)
         ? statusInitialCapital
-        : Math.max(0, totalAsset - totalPnl)));
+        : Math.max(0, totalAsset - serviceTotalPnl)));
+  // 权益归一时盈亏同步重算，保证「权益 − 开盘权益 = 今日盈亏」在卡片内闭环；
+  // 未归一时仍用服务端权威值，不改变原有语义。
+  const dailyPnl = equityMismatch && dayOpenEquity > 0
+    ? totalAsset - dayOpenEquity
+    : serviceDailyPnl;
+  const totalPnl = equityMismatch && initialEquity > 0
+    ? totalAsset - initialEquity
+    : serviceTotalPnl;
   const derivedDailyPnlPercent = dayOpenEquity > 0
     ? (dailyPnl / dayOpenEquity)
     : (totalAsset > 0 ? (dailyPnl / totalAsset) : 0);

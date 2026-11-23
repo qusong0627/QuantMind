@@ -273,4 +273,46 @@ describe('accountAdapter', () => {
 
     expect(view.initial_equity).toBeCloseTo(21_007_999);
   });
+
+  it('should normalize equity to cash + market value when the client fields are out of sync', () => {
+    // 2026-11-23 实况：客户端 total_asset 按 9.65 刷新、market_value 按 9.63 刷新，
+    // 两者差 1,886（≈ 601825 两分钱 × 94,300 股）。卡片必须单一口径。
+    const view = buildTradingTopBarAccountInfo(
+      {
+        total_asset: 930_295.74,
+        cash: 1_484.74,
+        market_value: 926_925.0,
+        day_open_equity: 928_699.28,
+        initial_equity: 918_934.73,
+        today_pnl: 1_596.46,
+        total_pnl: 11_361.01,
+        positions: [] as any,
+      } as any,
+      null,
+    );
+
+    expect(view.total_asset).toBeCloseTo(928_409.74, 2);
+    expect(view.daily_pnl).toBeCloseTo(928_409.74 - 928_699.28, 2);
+    expect(view.total_pnl).toBeCloseTo(928_409.74 - 918_934.73, 2);
+  });
+
+  it('should keep the reported equity when it already equals cash + market value', () => {
+    const view = buildTradingTopBarAccountInfo(
+      {
+        total_asset: 928_377.74,
+        cash: 1_484.74,
+        market_value: 926_893.0,
+        day_open_equity: 928_699.28,
+        initial_equity: 918_934.73,
+        today_pnl: -321.54,
+        total_pnl: 9_443.01,
+        positions: [] as any,
+      } as any,
+      null,
+    );
+
+    expect(view.total_asset).toBeCloseTo(928_377.74, 2);
+    expect(view.daily_pnl).toBeCloseTo(-321.54, 2);
+    expect(view.total_pnl).toBeCloseTo(9_443.01, 2);
+  });
 });
