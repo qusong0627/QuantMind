@@ -1,9 +1,10 @@
 /**
- * 模型资产列表的本地偏好：置顶 / 收藏 / 排序。
+ * 模型资产列表的本地偏好：置顶 / 收藏 / 排序 / 文件夹。
  *
- * 模型一多，左栏列表就需要「把常用模型钉在最上面、把好用的标出来、按需重排」。
- * 偏好按市场隔离（各市场模型集合不同，ID 空间也不同）；读写坏数据一律当空、
- * 写失败静默——偏好是便利功能，不该因为一条手改过的 localStorage 把整页打崩。
+ * 模型一多，左栏列表就需要「把常用模型钉在最上面、把好用的标出来、按需重排」，
+ * 并把模型收进文件夹分组。偏好按市场隔离（各市场模型集合不同，ID 空间也不同）；
+ * 读写坏数据一律当空、写失败静默——偏好是便利功能，不该因为一条手改过的
+ * localStorage 把整页打崩。
  */
 import type { UserModelRecord } from '../services/modelTrainingService';
 import {
@@ -12,6 +13,12 @@ import {
   modelDisplayName,
   resolveMetricNumber,
 } from './modelRegistryUtils';
+import {
+  normalizeFolders,
+  normalizeModelFolders,
+  type FolderState,
+  type ModelFolder,
+} from './modelRegistryFolders';
 
 export type ModelSortKey =
   | 'default'
@@ -21,7 +28,7 @@ export type ModelSortKey =
   | 'test_ic_desc'
   | 'horizon_asc';
 
-export interface ModelListPrefs {
+export interface ModelListPrefs extends FolderState {
   /** 置顶模型 ID，数组顺序即展示顺序（最近置顶的排最前）。 */
   pinned: string[];
   /** 收藏模型 ID，仅作标记与「收藏」页签筛选，不参与排序。 */
@@ -58,6 +65,8 @@ export const DEFAULT_MODEL_LIST_PREFS: ModelListPrefs = {
   pinned: [],
   favorites: [],
   sortKey: 'default',
+  folders: [],
+  modelFolders: {},
 };
 
 /** 偏好键（读写共用；市场必须进键，避免跨市场串号）。 */
@@ -80,10 +89,13 @@ export function loadModelListPrefs(market: string): ModelListPrefs {
     if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_MODEL_LIST_PREFS };
     const record = parsed as Record<string, unknown>;
     const sortKey = normalizeModelSortKey(record.sortKey);
+    const folders = normalizeFolders(record.folders);
     return {
       pinned: toStringList(record.pinned),
       favorites: toStringList(record.favorites),
       sortKey,
+      folders,
+      modelFolders: normalizeModelFolders(record.modelFolders, folders),
     };
   } catch {
     return { ...DEFAULT_MODEL_LIST_PREFS };
@@ -96,6 +108,41 @@ export function saveModelListPrefs(market: string, prefs: ModelListPrefs): void 
   } catch {
     /* 配额满 / 隐私模式：忽略 */
   }
+}
+
+/** 服务端（snake_case）→ 前端（camelCase）；坏数据一律降级为空。 */
+export function prefsFromServer(remote: {
+  pinned?: unknown;
+  favorites?: unknown;
+  sort_key?: unknown;
+  folders?: unknown;
+  model_folders?: unknown;
+}): ModelListPrefs {
+  const folders: ModelFolder[] = normalizeFolders(remote?.folders);
+  return {
+    pinned: toStringList(remote?.pinned),
+    favorites: toStringList(remote?.favorites),
+    sortKey: normalizeModelSortKey(remote?.sort_key),
+    folders,
+    modelFolders: normalizeModelFolders(remote?.model_folders, folders),
+  };
+}
+
+/** 前端偏好 → 服务端载荷（camelCase → snake_case）。 */
+export function prefsToServer(prefs: ModelListPrefs): {
+  pinned: string[];
+  favorites: string[];
+  sort_key: ModelSortKey;
+  folders: ModelFolder[];
+  model_folders: Record<string, string>;
+} {
+  return {
+    pinned: prefs.pinned,
+    favorites: prefs.favorites,
+    sort_key: prefs.sortKey,
+    folders: prefs.folders,
+    model_folders: prefs.modelFolders,
+  };
 }
 
 /** 切换集合中的 ID（纯函数，不改原数组）；prepend=true 用于置顶，最近置顶的排最前。 */

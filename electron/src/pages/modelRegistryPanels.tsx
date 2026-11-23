@@ -8,7 +8,7 @@ import {
   Archive, Brain, XCircle, Trash2,
   Play, Cpu, TrendingUp, ChevronDown,
   ChevronUp, Shield, Zap, Activity, ListFilter, BarChart3, Info, AlertCircle,
-  Pin, Bookmark,
+  Pin, Bookmark, Folder,
 } from 'lucide-react';
 import {
   UserModelRecord,
@@ -126,6 +126,10 @@ export const ModelCard: React.FC<{
   isFavorite?: boolean;
   onTogglePin?: () => void;
   onToggleFavorite?: () => void;
+  /** 所属文件夹名（仅「全部模型」视图展示，避免在文件夹视图里重复）。 */
+  folderName?: string | null;
+  /** 「移动到文件夹」菜单（页面注入，卡片保持哑组件，不感知文件夹数据）。 */
+  folderMenu?: React.ReactNode;
   /** 融合模式：卡片显示复选框，点击行为交回页面（选中/取消）。 */
   selectable?: boolean;
   selected?: boolean;
@@ -135,6 +139,7 @@ export const ModelCard: React.FC<{
 }> = ({
   model, isSelected, onClick, onSetDefault, canSetDefault,
   isPinned = false, isFavorite = false, onTogglePin, onToggleFavorite,
+  folderName = null, folderMenu,
   selectable = false, selected = false, onToggleSelect, selectDisabled = false,
 }) => {
   const sc = getStatusConfig(model.status);
@@ -175,9 +180,19 @@ export const ModelCard: React.FC<{
               <Layers size={8} />融合×{memberCount}
             </span>
           )}
+          {folderName && (
+            <span
+              title={`文件夹：${folderName}`}
+              className="px-1.5 py-0.5 rounded-md text-[8px] font-black tracking-wider bg-slate-100 text-slate-500 flex items-center gap-0.5 min-w-0 max-w-[96px]"
+            >
+              <Folder size={8} className="shrink-0" />
+              <span className="truncate">{folderName}</span>
+            </span>
+          )}
           {model.is_default && <Star size={9} fill="#fbbf24" className="text-amber-400" />}
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {folderMenu}
           {onTogglePin && (
             <Tooltip title={isPinned ? '取消置顶' : '置顶'}>
               <button

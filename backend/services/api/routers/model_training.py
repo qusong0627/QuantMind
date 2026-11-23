@@ -1100,9 +1100,66 @@ _MODEL_LIST_SORT_KEYS = {
     "horizon_asc",
 }
 
+# 文件夹上限与字段长度：偏好是 JSONB 便利功能，脏数据一律丢弃而不是报错。
+_MAX_FOLDERS = 200
+_MAX_FOLDER_ASSIGNMENTS = 2000
+_FOLDER_ID_MAX_LEN = 64
+_FOLDER_NAME_MAX_LEN = 40
+_MODEL_ID_MAX_LEN = 128
+
+
+def _normalize_folders(value: Any) -> list[dict[str, str]]:
+    """清洗文件夹定义：trim、去重（按 id）、长度上限、数量截断。"""
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        folder_id = raw.get("id")
+        name = raw.get("name")
+        if not isinstance(folder_id, str) or not isinstance(name, str):
+            continue
+        folder_id = folder_id.strip()
+        name = name.strip()
+        if not folder_id or not name:
+            continue
+        if len(folder_id) > _FOLDER_ID_MAX_LEN or len(name) > _FOLDER_NAME_MAX_LEN:
+            continue
+        if folder_id in seen_ids:
+            continue
+        seen_ids.add(folder_id)
+        out.append({"id": folder_id, "name": name})
+        if len(out) >= _MAX_FOLDERS:
+            break
+    return out
+
+
+def _normalize_model_folders(
+    value: Any, valid_folder_ids: set[str]
+) -> dict[str, str]:
+    """清洗模型→文件夹分配：只保留指向已存在文件夹的条目。"""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for raw_model_id, raw_folder_id in value.items():
+        if not isinstance(raw_model_id, str) or not isinstance(raw_folder_id, str):
+            continue
+        model_id = raw_model_id.strip()
+        folder_id = raw_folder_id.strip()
+        if not model_id or len(model_id) > _MODEL_ID_MAX_LEN:
+            continue
+        if folder_id not in valid_folder_ids:
+            continue
+        out[model_id] = folder_id
+        if len(out) >= _MAX_FOLDER_ASSIGNMENTS:
+            break
+    return out
+
 
 def _normalize_model_list_prefs(payload: Any) -> dict[str, Any]:
-    """清洗置顶/收藏/排序偏好：去重、截断、排序键白名单。"""
+    """清洗置顶/收藏/排序/文件夹偏好：去重、截断、白名单。"""
     data = payload if isinstance(payload, dict) else {}
 
     def _clean_ids(value: Any) -> list[str]:
@@ -1125,10 +1182,45 @@ def _normalize_model_list_prefs(payload: Any) -> dict[str, Any]:
     sort_key = str(data.get("sort_key") or "default")
     if sort_key not in _MODEL_LIST_SORT_KEYS:
         sort_key = "default"
+    folders = _normalize_folders(data.get("folders"))
+    folder_ids = {item["id"] for item in folders}
     return {
         "pinned": _clean_ids(data.get("pinned")),
         "favorites": _clean_ids(data.get("favorites")),
         "sort_key": sort_key,
+        "folders": folders,
+        "model_folders": _normalize_model_folders(
+            data.get("model_folders"), folder_ids
+        ),
+    }
+
+
+def _decode_prefs_json(raw: Any) -> Any:
+    """DB 里的 prefs 列可能以 JSON 字符串返回（驱动差异），统一解码。"""
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return raw
+
+
+def _merge_absent_folder_prefs(
+    incoming: dict[str, Any],
+    provided_fields: set[str],
+    existing_raw: Any,
+) -> dict[str, Any]:
+    """旧版前端不发送文件夹字段时，保留服务端已有分组，避免一次保存清空。
+
+    新前端总是显式发送 folders/model_folders（哪怕是空数组），此时以用户选择为准。
+    """
+    if {"folders", "model_folders"} & provided_fields:
+        return incoming
+    existing = _normalize_model_list_prefs(_decode_prefs_json(existing_raw))
+    return {
+        **incoming,
+        "folders": existing["folders"],
+        "model_folders": existing["model_folders"],
     }
 
 
@@ -1136,19 +1228,26 @@ def _market_key(value: str | None) -> str:
     return (str(value or "CN").strip().upper() or "CN")[:16]
 
 
+class ModelFolderPayload(BaseModel):
+    id: str = Field(max_length=64)
+    name: str = Field(max_length=40)
+
+
 class ModelListPrefsPayload(BaseModel):
     market: str = Field(default="CN", max_length=16)
     pinned: list[str] = Field(default_factory=list)
     favorites: list[str] = Field(default_factory=list)
     sort_key: str = Field(default="default", max_length=32)
+    folders: list[ModelFolderPayload] = Field(default_factory=list)
+    model_folders: dict[str, str] = Field(default_factory=dict)
 
 
-@router.get("/list-prefs", summary="模型列表偏好（置顶/收藏/排序，跨重启保存）")
+@router.get("/list-prefs", summary="模型列表偏好（置顶/收藏/排序/文件夹，跨重启保存）")
 async def get_model_list_prefs(
     market: str = Query("CN", max_length=16),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
-    """置顶/收藏/排序按 用户 × 市场 存 PG；localStorage 只作前端缓存。"""
+    """置顶/收藏/排序/文件夹按 用户 × 市场 存 PG；localStorage 只作前端缓存。"""
     from backend.shared.database_manager_v2 import get_session
 
     tenant_id, user_id = _owner_scope(current_user)
@@ -1166,15 +1265,11 @@ async def get_model_list_prefs(
                 {"tenant_id": tenant_id, "user_id": user_id, "market": market_key},
             )
         ).scalar()
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            raw = {}
+    raw = _decode_prefs_json(raw)
     return {"market": market_key, **_normalize_model_list_prefs(raw)}
 
 
-@router.put("/list-prefs", summary="保存模型列表偏好（置顶/收藏/排序）")
+@router.put("/list-prefs", summary="保存模型列表偏好（置顶/收藏/排序/文件夹）")
 async def save_model_list_prefs(
     payload: ModelListPrefsPayload,
     current_user: dict[str, Any] = Depends(get_current_user),
@@ -1186,6 +1281,21 @@ async def save_model_list_prefs(
     prefs = _normalize_model_list_prefs(payload.model_dump())
     async with get_session(read_only=False) as db:
         await db.execute(text(_MODEL_LIST_PREFS_DDL))
+        if not ({"folders", "model_folders"} & set(payload.model_fields_set)):
+            existing_raw = (
+                await db.execute(
+                    text(
+                        """
+                        SELECT prefs FROM qm_model_list_prefs
+                        WHERE tenant_id = :tenant_id AND user_id = :user_id AND market = :market
+                        """
+                    ),
+                    {"tenant_id": tenant_id, "user_id": user_id, "market": market_key},
+                )
+            ).scalar()
+            prefs = _merge_absent_folder_prefs(
+                prefs, set(payload.model_fields_set), existing_raw
+            )
         await db.execute(
             text(
                 """

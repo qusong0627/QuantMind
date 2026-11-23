@@ -932,12 +932,14 @@ class ModelTrainingService {
     return resp.data;
   }
 
-  /** 模型列表偏好（置顶/收藏/排序）：服务端持久化，重启/换浏览器不丢。 */
+  /** 模型列表偏好（置顶/收藏/排序/文件夹）：服务端持久化，重启/换浏览器不丢。 */
   async getModelListPrefs(market: string): Promise<{
     market: string;
     pinned: string[];
     favorites: string[];
     sort_key: string;
+    folders: Array<{ id: string; name: string }>;
+    model_folders: Record<string, string>;
   }> {
     const resp = await this.client.get('/models/list-prefs', { params: { market } });
     return resp.data;
@@ -948,6 +950,8 @@ class ModelTrainingService {
     pinned: string[];
     favorites: string[];
     sort_key: string;
+    folders: Array<{ id: string; name: string }>;
+    model_folders: Record<string, string>;
   }): Promise<{ saved: boolean }> {
     const resp = await this.client.put('/models/list-prefs', payload);
     return resp.data;

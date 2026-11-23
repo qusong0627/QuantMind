@@ -3,15 +3,17 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Layers, Star, RefreshCw, Search, Code, Calendar, Layers2,
   Archive, Brain, Clock, XCircle, X,
-  ChevronRight, Play, Download, ChevronDown,
+  Play, Download,
   ChevronUp, Shield, Zap, ListFilter, Activity,
   Compass, Sparkles, Pencil, ArrowUpDown, RotateCcw,
+  Folder, FolderPlus, FolderInput, FolderMinus, Check,
 } from 'lucide-react';
 import {
   Button, Card, Tag, Typography, Empty, Spin, message,
   Progress, Divider, Row, Col, Input, Modal, Tabs, Switch,
   DatePicker, Table, Badge, Tooltip, Select, Dropdown,
 } from 'antd';
+import type { MenuProps } from 'antd';
 import { clsx } from 'clsx';
 import dayjs from 'dayjs';
 import { useNavigate } from 'react-router-dom';
@@ -51,11 +53,25 @@ import {
   ModelListPrefs,
   ModelSortKey,
   loadModelListPrefs,
-  normalizeModelSortKey,
+  prefsFromServer,
+  prefsToServer,
   saveModelListPrefs,
   sortModelRecords,
   toggleId,
 } from './modelRegistryListPrefs';
+import {
+  UNFILED_FOLDER_KEY,
+  addFolder,
+  assignModelsToFolder,
+  countModelsByFolder,
+  deleteFolder,
+  filterModelsByFolder,
+  folderOfModel,
+  generateFolderId,
+  renameFolder,
+  validateFolderName,
+} from './modelRegistryFolders';
+import { ModelFolderModal, ModelFoldersPanel } from './modelFoldersPanel';
 import { PublishModelModal } from './hub/PublishModelModal';
 import { DriftTabPanel } from './DriftTabPanel';
 import { MarketRegimePanel } from './MarketRegimePanel';
@@ -79,6 +95,17 @@ const { Text } = Typography;
 
 type ModelListTab = 'active' | 'favorites' | 'archived';
 
+/** 左栏展开文件夹时内联展示的模型上限（其余见下方模型列表）。 */
+const FOLDER_CHILD_LIMIT = 50;
+
+/** 服务端是否已有可用的偏好数据（升级前只有本地缓存时才需要抬一次）。 */
+const hasPrefsData = (prefs: ModelListPrefs): boolean =>
+  prefs.pinned.length > 0 ||
+  prefs.favorites.length > 0 ||
+  prefs.sortKey !== 'default' ||
+  prefs.folders.length > 0 ||
+  Object.keys(prefs.modelFolders).length > 0;
+
 export const ModelRegistryPage: React.FC = () => {
   const navigate = useNavigate();
   const currentMarket = useAppSelector(selectCurrentMarket);
@@ -91,8 +118,23 @@ export const ModelRegistryPage: React.FC = () => {
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [listTab, setListTab] = useState<ModelListTab>('active');
   const [listPrefs, setListPrefs] = useState<ModelListPrefs>(() => loadModelListPrefs(currentMarket));
-  // 置顶/收藏/排序：本地先写缓存，400ms 防抖同步到服务端（重启/换浏览器不丢）
+  // 置顶/收藏/排序/文件夹：本地先写缓存，400ms 防抖同步到服务端（重启/换浏览器不丢）
   const prefsSaveTimerRef = useRef<number | null>(null);
+  const listPrefsRef = useRef(listPrefs);
+  // 加载期间用户已改过偏好：远端结果晚到也不能覆盖本地刚做的操作
+  const prefsTouchedRef = useRef(false);
+  // 文件夹：null=全部，UNFILED_FOLDER_KEY=未分组，其余为文件夹 ID
+  const [activeFolder, setActiveFolder] = useState<string | null>(null);
+  // 文件管理器式展开：展开的文件夹在左栏内联列出模型（与 activeFolder 同步）
+  const [expandedFolder, setExpandedFolder] = useState<string | null>(null);
+  const [folderPanelOpen, setFolderPanelOpen] = useState(true);
+  const [folderModalMode, setFolderModalMode] = useState<'create' | 'rename' | null>(null);
+  const [folderModalTargetId, setFolderModalTargetId] = useState<string | null>(null);
+  const [folderModalMoveIds, setFolderModalMoveIds] = useState<string[] | null>(null);
+  const [folderNameValue, setFolderNameValue] = useState('');
+  // 整理模式：多选卡片批量移动到文件夹（与融合模式互斥）
+  const [organizeMode, setOrganizeMode] = useState(false);
+  const [organizeSelected, setOrganizeSelected] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [settingDefault, setSettingDefault] = useState(false);
   const [archiving, setArchiving] = useState(false);
@@ -141,14 +183,27 @@ export const ModelRegistryPage: React.FC = () => {
     listTab === 'favorites' ? favoriteModels
       : listTab === 'archived' ? archivedModels
         : activeModels;
+  const folderCounts = countModelsByFolder(tabModels, listPrefs);
+  const folderFilteredModels = filterModelsByFolder(tabModels, activeFolder, listPrefs);
+  const activeFolderName = activeFolder === null
+    ? null
+    : activeFolder === UNFILED_FOLDER_KEY
+      ? '未分组'
+      : listPrefs.folders.find((folder) => folder.id === activeFolder)?.name ?? null;
   const displayModels = sortModelRecords(
-    tabModels.filter(m =>
+    folderFilteredModels.filter(m =>
       !searchQuery ||
       m.model_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
       modelDisplayName(m).toLowerCase().includes(searchQuery.toLowerCase())
     ),
     { pinned: listPrefs.pinned, sortKey: listPrefs.sortKey },
   );
+  const expandedFolderModels = expandedFolder
+    ? displayModels.slice(0, FOLDER_CHILD_LIMIT)
+    : [];
+  const expandedFolderOverflow = expandedFolder
+    ? Math.max(0, displayModels.length - FOLDER_CHILD_LIMIT)
+    : 0;
   const activeSortLabel =
     MODEL_SORT_OPTIONS.find(o => o.key === listPrefs.sortKey)?.shortLabel ?? '排序';
 
@@ -168,10 +223,48 @@ export const ModelRegistryPage: React.FC = () => {
   const canFuse = fusionSelectedModels.length >= 2 && fusionMarkets.size === 1;
 
   const toggleFusionMode = () => {
-    setFusionMode((prev) => {
-      if (prev) setFusionSelected([]);
-      return !prev;
-    });
+    if (fusionMode) {
+      setFusionMode(false);
+      setFusionSelected([]);
+      return;
+    }
+    // 融合与整理都是多选语义，同屏只保留一个
+    setOrganizeMode(false);
+    setOrganizeSelected([]);
+    setFusionMode(true);
+  };
+
+  const toggleOrganizeMode = () => {
+    if (organizeMode) {
+      setOrganizeMode(false);
+      setOrganizeSelected([]);
+      return;
+    }
+    setFusionMode(false);
+    setFusionSelected([]);
+    setOrganizeMode(true);
+  };
+
+  const toggleOrganizeSelect = (modelId: string) => {
+    setOrganizeSelected((prev) =>
+      prev.includes(modelId) ? prev.filter((id) => id !== modelId) : [...prev, modelId],
+    );
+  };
+
+  /** 文件夹行点击：文件管理器语义——点开即展开并过滤，再点收起回到全部。 */
+  const handleSelectFolder = (filter: string | null) => {
+    if (filter === null || filter === UNFILED_FOLDER_KEY) {
+      setExpandedFolder(null);
+      setActiveFolder(filter);
+      return;
+    }
+    if (expandedFolder === filter) {
+      setExpandedFolder(null);
+      setActiveFolder(null);
+      return;
+    }
+    setExpandedFolder(filter);
+    setActiveFolder(filter);
   };
 
   const toggleFusionSelect = (m: UserModelRecord) => {
@@ -253,35 +346,31 @@ export const ModelRegistryPage: React.FC = () => {
   useEffect(() => {
     const market = currentMarket;
     const local = loadModelListPrefs(market);
+    prefsTouchedRef.current = false;
+    listPrefsRef.current = local;
     setListPrefs(local);
     let alive = true;
     modelTrainingService
       .getModelListPrefs(market)
       .then((remote) => {
-        if (!alive) return;
+        if (!alive || prefsTouchedRef.current) return;
+        const remotePrefs = prefsFromServer(remote);
         const remoteHasData =
-          (remote.pinned?.length || 0) > 0 ||
-          (remote.favorites?.length || 0) > 0 ||
-          normalizeModelSortKey(remote.sort_key) !== 'default';
+          remotePrefs.pinned.length > 0 ||
+          remotePrefs.favorites.length > 0 ||
+          remotePrefs.sortKey !== 'default' ||
+          remotePrefs.folders.length > 0 ||
+          Object.keys(remotePrefs.modelFolders).length > 0;
         if (remoteHasData) {
-          const next: ModelListPrefs = {
-            pinned: remote.pinned || [],
-            favorites: remote.favorites || [],
-            sortKey: normalizeModelSortKey(remote.sort_key),
-          };
-          setListPrefs(next);
-          saveModelListPrefs(market, next);
+          listPrefsRef.current = remotePrefs;
+          setListPrefs(remotePrefs);
+          saveModelListPrefs(market, remotePrefs);
           return;
         }
         // 服务端尚未保存过：把升级前的本地偏好抬到服务端（只抬一次）
-        if (local.pinned.length || local.favorites.length || local.sortKey !== 'default') {
+        if (hasPrefsData(local)) {
           void modelTrainingService
-            .saveModelListPrefs({
-              market,
-              pinned: local.pinned,
-              favorites: local.favorites,
-              sort_key: local.sortKey,
-            })
+            .saveModelListPrefs({ market, ...prefsToServer(local) })
             .catch(() => undefined);
         }
       })
@@ -291,6 +380,31 @@ export const ModelRegistryPage: React.FC = () => {
     };
   }, [currentMarket]);
 
+  useEffect(() => {
+    listPrefsRef.current = listPrefs;
+  }, [listPrefs]);
+
+  // 切市场 / 删除当前文件夹后，筛选项必须回到「全部」，避免落到不存在的文件夹上。
+  useEffect(() => {
+    setActiveFolder(null);
+    setExpandedFolder(null);
+    setOrganizeMode(false);
+    setOrganizeSelected([]);
+  }, [currentMarket]);
+
+  // 切换页签 / 文件夹相当于换了一批可见模型：整理模式下的勾选随之清空
+  useEffect(() => {
+    setOrganizeSelected([]);
+  }, [listTab, activeFolder]);
+
+  useEffect(() => {
+    if (activeFolder === null || activeFolder === UNFILED_FOLDER_KEY) return;
+    if (!listPrefs.folders.some((folder) => folder.id === activeFolder)) {
+      setActiveFolder(null);
+      setExpandedFolder(null);
+    }
+  }, [activeFolder, listPrefs.folders]);
+
   useEffect(
     () => () => {
       if (prefsSaveTimerRef.current) window.clearTimeout(prefsSaveTimerRef.current);
@@ -298,21 +412,180 @@ export const ModelRegistryPage: React.FC = () => {
     [],
   );
 
+  /**
+   * 偏好统一写入口：用 ref 读最新值，避免同一事件里连续两次更新互相覆盖
+   * （如「新建文件夹 + 把选中模型移进去」）。本地立即落缓存，服务端 400ms 防抖。
+   */
+  const commitListPrefs = useCallback(
+    (updater: (prev: ModelListPrefs) => ModelListPrefs) => {
+      const next = updater(listPrefsRef.current);
+      if (next === listPrefsRef.current) return;
+      prefsTouchedRef.current = true;
+      listPrefsRef.current = next;
+      setListPrefs(next);
+      saveModelListPrefs(currentMarket, next);
+      if (prefsSaveTimerRef.current) window.clearTimeout(prefsSaveTimerRef.current);
+      prefsSaveTimerRef.current = window.setTimeout(() => {
+        void modelTrainingService
+          .saveModelListPrefs({ market: currentMarket, ...prefsToServer(next) })
+          .catch(() => undefined);
+      }, 400);
+    },
+    [currentMarket],
+  );
+
   const updateListPrefs = (patch: Partial<ModelListPrefs>) => {
-    const next = { ...listPrefs, ...patch };
-    setListPrefs(next);
-    saveModelListPrefs(currentMarket, next);
-    if (prefsSaveTimerRef.current) window.clearTimeout(prefsSaveTimerRef.current);
-    prefsSaveTimerRef.current = window.setTimeout(() => {
-      void modelTrainingService
-        .saveModelListPrefs({
-          market: currentMarket,
-          pinned: next.pinned,
-          favorites: next.favorites,
-          sort_key: next.sortKey,
-        })
-        .catch(() => undefined);
-    }, 400);
+    commitListPrefs((prev) => ({ ...prev, ...patch }));
+  };
+
+  const openCreateFolder = (moveModelIds?: string[]) => {
+    setFolderModalMode('create');
+    setFolderModalTargetId(null);
+    setFolderModalMoveIds(moveModelIds && moveModelIds.length > 0 ? moveModelIds : null);
+    setFolderNameValue('');
+  };
+
+  const openRenameFolder = (folderId: string) => {
+    const folder = listPrefs.folders.find((item) => item.id === folderId);
+    if (!folder) return;
+    setFolderModalMode('rename');
+    setFolderModalTargetId(folderId);
+    setFolderModalMoveIds(null);
+    setFolderNameValue(folder.name);
+  };
+
+  const closeFolderModal = () => {
+    setFolderModalMode(null);
+    setFolderModalTargetId(null);
+    setFolderModalMoveIds(null);
+    setFolderNameValue('');
+  };
+
+  const submitFolderModal = () => {
+    if (!folderModalMode) return;
+    const error = validateFolderName(
+      folderNameValue,
+      listPrefs.folders,
+      folderModalMode === 'rename' ? folderModalTargetId ?? undefined : undefined,
+    );
+    if (error) {
+      message.warning(error);
+      return;
+    }
+    const name = folderNameValue.trim();
+    if (folderModalMode === 'create') {
+      const folderId = generateFolderId(listPrefs.folders);
+      const moveIds = folderModalMoveIds ?? [];
+      commitListPrefs((prev) => {
+        const withFolder = addFolder(prev, { id: folderId, name });
+        return moveIds.length > 0
+          ? assignModelsToFolder(withFolder, moveIds, folderId)
+          : withFolder;
+      });
+      // 从「+」新建（无移动目标）时直接点开新文件夹；从卡片/整理模式触发则留在原视图继续整理
+      if (moveIds.length === 0) {
+        setActiveFolder(folderId);
+        setExpandedFolder(folderId);
+      } else {
+        setOrganizeSelected([]);
+      }
+      setFolderPanelOpen(true);
+      message.success(
+        moveIds.length > 0
+          ? `已新建文件夹「${name}」并移入 ${moveIds.length} 个模型`
+          : `已新建文件夹「${name}」`,
+      );
+    } else if (folderModalTargetId) {
+      const folderId = folderModalTargetId;
+      commitListPrefs((prev) => renameFolder(prev, folderId, name));
+      message.success(`文件夹已重命名为「${name}」`);
+    }
+    closeFolderModal();
+  };
+
+  const handleDeleteFolder = (folderId: string) => {
+    const folder = listPrefs.folders.find((item) => item.id === folderId);
+    if (!folder) return;
+    const count = countModelsByFolder(allModels, listPrefs).byFolder[folderId] ?? 0;
+    Modal.confirm({
+      title: '删除文件夹',
+      content: count > 0
+        ? `确定删除文件夹「${folder.name}」？其中 ${count} 个模型会回到「未分组」，模型本身不受影响。`
+        : `确定删除文件夹「${folder.name}」？`,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => {
+        commitListPrefs((prev) => deleteFolder(prev, folderId));
+        if (activeFolder === folderId) {
+          setActiveFolder(null);
+          setExpandedFolder(null);
+        }
+        message.success('文件夹已删除');
+      },
+    });
+  };
+
+  const handleMoveModelsToFolder = (modelIds: string[], folderId: string | null) => {
+    if (modelIds.length === 0) return;
+    const label = folderId === null
+      ? '未分组'
+      : listPrefs.folders.find((folder) => folder.id === folderId)?.name ?? '文件夹';
+    commitListPrefs((prev) => assignModelsToFolder(prev, modelIds, folderId));
+    message.success(
+      modelIds.length === 1
+        ? `已移至「${label}」`
+        : `已将 ${modelIds.length} 个模型移至「${label}」`,
+    );
+  };
+
+  /** 卡片上的「移动到文件夹」菜单：folder:<id> / create / remove。 */
+  const buildFolderMenuItems = (model: UserModelRecord): MenuProps['items'] => {
+    const current = folderOfModel(model.model_id, listPrefs);
+    return [
+      ...listPrefs.folders.map((folder) => ({
+        key: `folder:${folder.id}`,
+        label: folder.name,
+        icon: current?.id === folder.id ? <Check size={12} /> : <Folder size={12} />,
+      })),
+      ...(listPrefs.folders.length > 0 ? [{ type: 'divider' as const }] : []),
+      { key: 'create', label: '新建文件夹…', icon: <FolderPlus size={12} /> },
+      ...(current
+        ? [{ key: 'remove', label: '移出文件夹', icon: <FolderMinus size={12} /> }]
+        : []),
+    ];
+  };
+
+  const handleFolderMenuClick = (model: UserModelRecord, key: string) => {
+    if (key === 'create') {
+      openCreateFolder([model.model_id]);
+      return;
+    }
+    if (key === 'remove') {
+      handleMoveModelsToFolder([model.model_id], null);
+      return;
+    }
+    if (key.startsWith('folder:')) {
+      handleMoveModelsToFolder([model.model_id], key.slice('folder:'.length));
+    }
+  };
+
+  /** 整理模式底部动作菜单：folder:<id> / create / remove。 */
+  const handleOrganizeMenuClick: MenuProps['onClick'] = ({ key }) => {
+    if (organizeSelected.length === 0) return;
+    if (key === 'create') {
+      openCreateFolder(organizeSelected);
+      return;
+    }
+    if (key === 'remove') {
+      handleMoveModelsToFolder(organizeSelected, null);
+      setOrganizeSelected([]);
+      return;
+    }
+    if (key.startsWith('folder:')) {
+      handleMoveModelsToFolder(organizeSelected, key.slice('folder:'.length));
+      setOrganizeSelected([]);
+    }
   };
 
   const handleTogglePin = (modelId: string) => {
@@ -761,6 +1034,25 @@ export const ModelRegistryPage: React.FC = () => {
                 >{tab.label}</button>
               ))}
             </div>
+            {/* 文件夹 */}
+            <ModelFoldersPanel
+              folders={listPrefs.folders}
+              counts={folderCounts}
+              activeFolder={activeFolder}
+              expandedFolder={expandedFolder}
+              expandedModels={expandedFolderModels}
+              expandedOverflow={expandedFolderOverflow}
+              selectedModelId={selectedId}
+              open={folderPanelOpen}
+              organizeMode={organizeMode}
+              onToggleOpen={() => setFolderPanelOpen((prev) => !prev)}
+              onToggleOrganize={toggleOrganizeMode}
+              onSelectFolder={handleSelectFolder}
+              onSelectModel={setSelectedId}
+              onCreateFolder={() => openCreateFolder()}
+              onRenameFolder={openRenameFolder}
+              onDeleteFolder={handleDeleteFolder}
+            />
             {/* 模型列表 */}
             <div className="flex-1 overflow-y-auto px-3 pb-5 space-y-1.5 custom-scrollbar">
               {loading ? (
@@ -771,12 +1063,18 @@ export const ModelRegistryPage: React.FC = () => {
                     description={
                       <span className="text-xs text-slate-400">
                         {searchQuery ? '没有匹配的模型'
-                          : listTab === 'favorites' ? '还没有收藏的模型（点卡片右上角书签收藏）'
-                            : listTab === 'archived' ? '暂无归档模型'
-                              : '暂无模型'}
+                          : activeFolder !== null ? `${activeFolderName ?? '该文件夹'}里还没有模型`
+                            : listTab === 'favorites' ? '还没有收藏的模型（点卡片右上角书签收藏）'
+                              : listTab === 'archived' ? '暂无归档模型'
+                                : '暂无模型'}
                       </span>
                     }
                   />
+                  {activeFolder !== null && !searchQuery && (
+                    <p className="text-[10px] text-slate-400 text-center leading-relaxed max-w-[220px]">
+                      点卡片上的文件夹按钮可直接移入，或用「整理模式」多选后批量移动。
+                    </p>
+                  )}
                   {listTab === 'active' && (
                     <Button
                       type="primary" size="small"
@@ -790,10 +1088,19 @@ export const ModelRegistryPage: React.FC = () => {
                 <>
                   <div className="px-2 pt-2 pb-1 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 min-w-0">
-                      <Brain size={10} className="text-blue-500" />
-                      <span className="text-[9px] font-black text-blue-500 tracking-widest whitespace-nowrap">我的模型资产</span>
+                      {activeFolderName
+                        ? <Folder size={10} className="text-blue-500 shrink-0" />
+                        : <Brain size={10} className="text-blue-500 shrink-0" />}
+                      <span className="text-[9px] font-black text-blue-500 tracking-widest truncate">
+                        {activeFolderName ?? '我的模型资产'}
+                      </span>
+                      <span className="text-[9px] font-mono text-slate-400 shrink-0">{displayModels.length}</span>
                     </div>
-                    {!fusionMode ? (
+                    {fusionMode ? (
+                      <span className="text-[9px] font-black text-purple-600 tracking-widest whitespace-nowrap">融合模式 · 勾选成员</span>
+                    ) : organizeMode ? (
+                      <span className="text-[9px] font-black text-blue-600 tracking-widest whitespace-nowrap">整理模式 · 勾选模型</span>
+                    ) : (
                       <Dropdown
                         trigger={['click']}
                         placement="bottomRight"
@@ -813,8 +1120,6 @@ export const ModelRegistryPage: React.FC = () => {
                           {activeSortLabel}
                         </button>
                       </Dropdown>
-                    ) : (
-                      <span className="text-[9px] font-black text-purple-600 tracking-widest whitespace-nowrap">融合模式 · 勾选成员</span>
                     )}
                   </div>
                   {displayModels.map(model => (
@@ -824,17 +1129,46 @@ export const ModelRegistryPage: React.FC = () => {
                       isSelected={selectedId === model.model_id}
                       onClick={() => {
                         if (fusionMode) toggleFusionSelect(model);
+                        else if (organizeMode) toggleOrganizeSelect(model.model_id);
                         else setSelectedId(model.model_id);
                       }}
                       onSetDefault={() => void handleSetDefaultById(model.model_id)}
-                      canSetDefault={!fusionMode && !model.is_default && model.status !== 'archived'}
+                      canSetDefault={!fusionMode && !organizeMode && !model.is_default && model.status !== 'archived'}
                       isPinned={listPrefs.pinned.includes(model.model_id)}
                       isFavorite={listPrefs.favorites.includes(model.model_id)}
                       onTogglePin={() => handleTogglePin(model.model_id)}
                       onToggleFavorite={() => handleToggleFavorite(model.model_id)}
-                      selectable={fusionMode}
-                      selected={fusionSelected.includes(model.model_id)}
-                      onToggleSelect={() => toggleFusionSelect(model)}
+                      folderName={activeFolder === null ? folderOfModel(model.model_id, listPrefs)?.name ?? null : null}
+                      folderMenu={!fusionMode && !organizeMode ? (
+                        <span onClick={(e) => e.stopPropagation()}>
+                          <Dropdown
+                            trigger={['click']}
+                            placement="bottomRight"
+                            menu={{
+                              items: buildFolderMenuItems(model),
+                              onClick: ({ key }) => handleFolderMenuClick(model, key),
+                            }}
+                          >
+                            <button
+                              type="button"
+                              aria-label="移动到文件夹"
+                              title="移动到文件夹"
+                              onClick={(e) => e.stopPropagation()}
+                              className="w-5 h-5 flex items-center justify-center rounded-md text-slate-300 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                            >
+                              <FolderInput size={10} />
+                            </button>
+                          </Dropdown>
+                        </span>
+                      ) : undefined}
+                      selectable={fusionMode || organizeMode}
+                      selected={fusionMode
+                        ? fusionSelected.includes(model.model_id)
+                        : organizeSelected.includes(model.model_id)}
+                      onToggleSelect={() => {
+                        if (fusionMode) toggleFusionSelect(model);
+                        else toggleOrganizeSelect(model.model_id);
+                      }}
                       selectDisabled={fusionMode && !isFusionEligible(model)}
                     />
                   ))}
@@ -868,6 +1202,65 @@ export const ModelRegistryPage: React.FC = () => {
                     >
                       融合为集成模型
                     </Button>
+                  </div>
+                </div>
+              ) : organizeMode ? (
+                <div className="space-y-2">
+                  <div className="text-[9px] text-slate-500 font-bold leading-snug">
+                    已选 <span className="text-blue-600 font-black">{organizeSelected.length}</span> 个模型
+                    <button
+                      type="button"
+                      className="ml-1.5 text-blue-500 hover:underline"
+                      onClick={() => setOrganizeSelected(displayModels.map((m) => m.model_id))}
+                    >
+                      全选当前
+                    </button>
+                    {organizeSelected.length > 0 && (
+                      <button
+                        type="button"
+                        className="ml-1.5 text-slate-400 hover:underline"
+                        onClick={() => setOrganizeSelected([])}
+                      >
+                        清空
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="small"
+                      className="rounded-xl h-9 px-3 font-bold text-xs border-slate-200 text-slate-500"
+                      onClick={toggleOrganizeMode}
+                    >
+                      退出
+                    </Button>
+                    <Dropdown
+                      trigger={['click']}
+                      disabled={organizeSelected.length === 0}
+                      placement="topRight"
+                      menu={{
+                        items: [
+                          ...listPrefs.folders.map((folder) => ({
+                            key: `folder:${folder.id}`,
+                            label: folder.name,
+                            icon: <Folder size={12} />,
+                          })),
+                          ...(listPrefs.folders.length > 0 ? [{ type: 'divider' as const }] : []),
+                          { key: 'create', label: '新建文件夹并移入…', icon: <FolderPlus size={12} /> },
+                          { key: 'remove', label: '移出文件夹（未分组）', icon: <FolderMinus size={12} /> },
+                        ],
+                        onClick: handleOrganizeMenuClick,
+                      }}
+                    >
+                      <Button
+                        type="primary"
+                        size="small"
+                        icon={<FolderInput size={13} />}
+                        disabled={organizeSelected.length === 0}
+                        className="flex-1 rounded-xl h-9 bg-blue-600 hover:bg-blue-500 border-none font-black text-xs shadow-sm flex items-center justify-center gap-1.5"
+                      >
+                        移动到文件夹
+                      </Button>
+                    </Dropdown>
                   </div>
                 </div>
               ) : (
@@ -1288,6 +1681,16 @@ export const ModelRegistryPage: React.FC = () => {
           />
         </div>
       </Modal>
+
+      {/* ═══ 新建 / 重命名文件夹 Modal ═══ */}
+      <ModelFolderModal
+        mode={folderModalMode}
+        value={folderNameValue}
+        moveCount={folderModalMoveIds?.length ?? 0}
+        onChange={setFolderNameValue}
+        onCancel={closeFolderModal}
+        onSubmit={submitFolderModal}
+      />
 
       {/* ═══ 模型融合 Modal（机构级 v2：预览 → 创建即进日更推理） ═══ */}
       <FusionModal

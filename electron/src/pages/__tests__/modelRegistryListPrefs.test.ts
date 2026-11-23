@@ -5,6 +5,8 @@ import {
   MODEL_SORT_OPTIONS,
   loadModelListPrefs,
   modelListPrefsKey,
+  prefsFromServer,
+  prefsToServer,
   saveModelListPrefs,
   sortModelRecords,
   toggleId,
@@ -40,16 +42,20 @@ describe('模型列表偏好存储（置顶/收藏/排序）', () => {
     expect(loadModelListPrefs('CN')).toEqual(DEFAULT_MODEL_LIST_PREFS);
   });
 
-  test('读写往返并按市场隔离', () => {
+  test('读写往返并按市场隔离（含文件夹与分配）', () => {
     saveModelListPrefs('CN', {
       pinned: ['mdl_a'],
       favorites: ['mdl_b'],
       sortKey: 'test_ic_desc',
+      folders: [{ id: 'f1', name: 'T+5' }],
+      modelFolders: { mdl_a: 'f1' },
     });
     expect(loadModelListPrefs('CN')).toEqual({
       pinned: ['mdl_a'],
       favorites: ['mdl_b'],
       sortKey: 'test_ic_desc',
+      folders: [{ id: 'f1', name: 'T+5' }],
+      modelFolders: { mdl_a: 'f1' },
     });
     expect(loadModelListPrefs('HK')).toEqual(DEFAULT_MODEL_LIST_PREFS);
     expect(modelListPrefsKey('CN')).not.toBe(modelListPrefsKey('HK'));
@@ -67,12 +73,62 @@ describe('模型列表偏好存储（置顶/收藏/排序）', () => {
       pinned: [],
       favorites: ['mdl_b'],
       sortKey: 'default',
+      folders: [],
+      modelFolders: {},
+    });
+  });
+
+  test('读取时丢弃指向不存在文件夹的悬空分配', () => {
+    localStorage.setItem(
+      modelListPrefsKey('CN'),
+      JSON.stringify({
+        folders: [{ id: 'f1', name: 'T+5' }],
+        modelFolders: { mdl_a: 'f1', mdl_b: 'gone' },
+      }),
+    );
+    expect(loadModelListPrefs('CN').modelFolders).toEqual({ mdl_a: 'f1' });
+  });
+});
+
+describe('前后端偏好转换', () => {
+  test('服务端 snake_case → 前端 camelCase，并丢弃悬空文件夹分配', () => {
+    expect(
+      prefsFromServer({
+        pinned: ['mdl_a'],
+        favorites: ['mdl_b'],
+        sort_key: 'name_asc',
+        folders: [{ id: 'f1', name: 'T+5' }],
+        model_folders: { mdl_a: 'f1', mdl_b: 'gone' },
+      }),
+    ).toEqual({
+      pinned: ['mdl_a'],
+      favorites: ['mdl_b'],
+      sortKey: 'name_asc',
+      folders: [{ id: 'f1', name: 'T+5' }],
+      modelFolders: { mdl_a: 'f1' },
+    });
+  });
+
+  test('前端 camelCase → 服务端 snake_case', () => {
+    expect(
+      prefsToServer({
+        pinned: [],
+        favorites: [],
+        sortKey: 'default',
+        folders: [{ id: 'f1', name: 'T+5' }],
+        modelFolders: { mdl_a: 'f1' },
+      }),
+    ).toEqual({
+      pinned: [],
+      favorites: [],
+      sort_key: 'default',
+      folders: [{ id: 'f1', name: 'T+5' }],
+      model_folders: { mdl_a: 'f1' },
     });
   });
 });
 
-describe('toggleId', () => {
-  test('切换不修改原数组，置顶模式新项排最前', () => {
+describe('toggleId', () => {  test('切换不修改原数组，置顶模式新项排最前', () => {
     const original = ['a', 'b'];
     expect(toggleId(original, 'c', true)).toEqual(['c', 'a', 'b']);
     expect(toggleId(original, 'a')).toEqual(['b']);
