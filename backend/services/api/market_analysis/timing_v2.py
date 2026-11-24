@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from backend.services.api.user_app.middleware.auth import get_current_user
-from backend.shared.market_timing_v2.signals import build_snapshot, load_snapshot
+from backend.shared.market_timing_v2.auto_inference import refresh_snapshot
+from backend.shared.market_timing_v2.signals import load_snapshot
 
 router = APIRouter(prefix="/timing-v2", tags=["Market Analysis"])
 
@@ -27,7 +28,7 @@ def _now() -> str:
 
 def _run_refresh() -> None:
     try:
-        build_snapshot(force=True)
+        refresh_snapshot(force=True)
         _refresh_state.update({"error": None, "finished_at": _now()})
     except Exception as exc:  # noqa: BLE001
         _refresh_state.update({"error": str(exc)[:300], "finished_at": _now()})

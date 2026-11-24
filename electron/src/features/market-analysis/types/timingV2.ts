@@ -79,6 +79,17 @@ export interface TimingV2Snapshot {
     };
   };
   history: TimingV2HistoryPoint[];
+  inference?: {
+    enabled?: boolean;
+    status?: string;
+    tft_as_of_before?: string | null;
+    data_as_of?: string | null;
+    missing_dates?: string[];
+    attempted?: number;
+    succeeded?: number;
+    failed?: Array<{ date: string; reason: string }>;
+    error?: string;
+  };
   roles: Array<{ model: string; role: string; use: string; status: string }>;
   notes: string[];
 }

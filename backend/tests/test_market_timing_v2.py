@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from backend.shared.market_timing_v2 import signals as svc
+from backend.shared.market_timing_v2.auto_inference import missing_signal_dates
 
 
 def test_rule_states():
@@ -58,6 +59,25 @@ def test_load_snapshot_missing_and_present(tmp_path, monkeypatch):
     assert svc.load_snapshot() is None
     missing.write_text('{"status": "ok", "as_of": "2026-11-17"}', encoding="utf-8")
     assert svc.load_snapshot()["status"] == "ok"
+
+
+def test_missing_signal_dates_and_cap():
+    history = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2026-11-17", "2026-11-18", "2026-11-19", "2026-11-20", "2026-11-23"]
+            )
+        }
+    )
+    assert missing_signal_dates(history, pd.Timestamp("2026-11-17"), max_days=5) == [
+        "2026-11-18",
+        "2026-11-19",
+        "2026-11-20",
+        "2026-11-23",
+    ]
+    # 缺口超过上限：不自动补，交给页面标 stale
+    assert missing_signal_dates(history, pd.Timestamp("2026-11-17"), max_days=2) == []
+    assert missing_signal_dates(history, pd.Timestamp("2026-11-23"), max_days=5) == []
 
 
 def test_load_tft_history_reads_daily_scores(tmp_path, monkeypatch):

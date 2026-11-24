@@ -292,8 +292,14 @@ def train_mlp_artifacts(
     return hist, models
 
 
-def build_snapshot(*, force: bool = False) -> dict[str, Any]:
-    history = build_market_history(force=force)
+def build_snapshot(
+    *,
+    force: bool = False,
+    history: pd.DataFrame | None = None,
+    inference_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if history is None:
+        history = build_market_history(force=force)
     history["date"] = pd.to_datetime(history["date"])
     history = history.sort_values("date").reset_index(drop=True)
 
@@ -336,6 +342,7 @@ def build_snapshot(*, force: bool = False) -> dict[str, Any]:
             "model_version": MODEL_VERSION,
             "generated_at": _now(),
             "message": "TFT 或 MLP 信号不足 60 个交易日，暂时无法生成择时快照",
+            "inference": inference_info or {},
         }
         _write_snapshot(snapshot)
         return snapshot
@@ -473,6 +480,7 @@ def build_snapshot(*, force: bool = False) -> dict[str, Any]:
             },
         },
         "history": history_series,
+        "inference": inference_info or {"status": "not_checked"},
         "roles": [
             {
                 "model": "TFT 深度序列",
@@ -495,7 +503,7 @@ def build_snapshot(*, force: bool = False) -> dict[str, Any]:
         ],
         "notes": [
             "影子盘/研究口径，不构成投资建议；仅用于模型体检与仓位风险预算。",
-            "TFT 最新推理日可能晚于行情日；stale_trading_days 为 TFT 信号落后行情的天数。",
+            "TFT 最新推理日可能晚于行情日；stale_trading_days 为 TFT 信号落后行情的天数；盘后任务会先尝试自动补推理。",
             "MLP 长历史 2019-2026 为 walk-forward 样本外；2025-09 起的组合规则为 OOS。",
             "树模型在本口径下大盘方向判负，不进入仓位；请勿用其聚合均值预测指数。",
         ],

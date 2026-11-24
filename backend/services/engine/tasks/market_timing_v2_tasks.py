@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 from backend.services.engine.qlib_app.celery_config import celery_app
-from backend.shared.market_timing_v2.signals import build_snapshot
+from backend.shared.market_timing_v2.auto_inference import refresh_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 )
 def market_timing_v2_snapshot(self) -> dict:
     try:
-        snap = build_snapshot(force=True)
+        snap = refresh_snapshot(force=True)
         logger.info(
             "[market-timing-v2] status=%s as_of=%s tft=%s mlp=%s exposure=%s",
             snap.get("status"),

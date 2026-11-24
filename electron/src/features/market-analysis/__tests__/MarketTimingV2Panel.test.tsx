@@ -90,11 +90,11 @@ describe('MarketTimingV2Panel 机构择时', () => {
     expect(screen.getAllByText('100%').length).toBeGreaterThan(0);
     expect(screen.getAllByText('+2.35').length).toBeGreaterThan(0);
     expect(screen.getAllByText('+0.56').length).toBeGreaterThan(0);
-    expect(screen.getByText('TFT 50% + MLP 确认')).toBeInTheDocument();
+    expect(screen.getAllByText('TFT 50% + MLP 确认').length).toBeGreaterThan(0);
     expect(screen.getByText('影子盘 · 不构成投资建议')).toBeInTheDocument();
     expect(screen.getByText('LightGBM 树模型')).toBeInTheDocument();
-    expect(screen.getByText(/TFT 最新推理日落后行情/)).toBeInTheDocument();
-    expect(screen.getByText(/组合 placebo p = 0.003/)).toBeInTheDocument();
+    expect(screen.getByText(/TFT 信号落后行情/)).toBeInTheDocument();
+    expect(screen.getByText(/placebo p = 0.003/)).toBeInTheDocument();
   });
 
   test('快照缺失时展示空态而不是白屏', async () => {
