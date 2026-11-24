@@ -381,12 +381,16 @@ class RebalanceCalculator:
         - 无持仓（首日建仓）或关闭增量调仓（n_drop<=0 或 >=topk）→ (完整 topk, False)；
         - 有持仓：
           * 剔除：持仓中跌出 topk 的，按分数升序取最低的 n_drop 只卖出；
-          * 新增：topk 中未持仓的，按分数降序取前「剔除数」只买入（持仓数稳定）；
+          * 新增：topk 中未持仓的，按分数降序取前 max(剔除数, 持仓缺口) 只买入。
+            等量轮换时只换 n_drop 只（控换手）；真实持仓少于 topk 时按缺口补回
+            topk。独立风控（如 -8% 止损）会在调仓之外直接卖掉持仓，增量模式若
+            只做「等量轮换」，被止损清掉的仓位就永远补不回来——实测 50 只被
+            逐日止损清到 1 只、98% 资产变现金，账户再也无法回到目标仓位。
           * 其余持仓保留，无分数也不动。
         与 qlib 差异：qlib 用「上一期 topk 选择列表」判剔除，回放用真实持仓，
         因为成交拒绝/止损后真实持仓与选择列表可能不一致。
-        与回测一致的另一面：止损/跌停卖不掉造成的持仓缺口不会主动补满，
-        只在后续轮换中渐进修复。
+        这里给出的新增只是候选清单，实际能买几只由 _calc_dropout_positions 按
+        「能卖出的剔除股 + 账户可用现金」再钳一次：卖不掉的持仓仍占仓位，不计缺口。
         """
         held_symbols = [
             sym
@@ -407,12 +411,19 @@ class RebalanceCalculator:
         )
         drop_set = set(out_of_topk[: strategy.n_drop])
 
-        # 新增：topk 中未持仓的，按分数降序取与剔除等量（没有剔除就不买入）
-        add_signals = [
-            s for s in topk_signals if s.symbol not in held_set
-        ][: len(drop_set)]
-
         # 保留持仓：有分数用分数，无分数记 0（仅影响 score_weighted 权重）
+        kept_symbols = [sym for sym in held_symbols if sym not in drop_set]
+
+        # 持仓缺口 = topk - 保留数。被独立风控（止损）卖掉的仓位不会自己回来，
+        # 增量模式必须按缺口补仓，否则「只换不补」会让账户一路缩水到只剩现金。
+        deficit = max(0, int(strategy.topk) - len(kept_symbols))
+        add_count = max(len(drop_set), deficit)
+
+        # 新增：topk 中未持仓的，按分数降序取 max(剔除数, 缺口) 只作为候选。
+        # 候选会被 _calc_dropout_positions 按「可卖出的剔除股 + 可用现金」再钳一次。
+        add_pool = [s for s in topk_signals if s.symbol not in held_set]
+        add_signals = add_pool[:add_count]
+
         sig_date = signals[0].trade_date if signals else date.today()
         kept_signals = [
             SignalScore(
@@ -423,13 +434,15 @@ class RebalanceCalculator:
                 tenant_id="rebalance",
                 user_id="rebalance",
             )
-            for sym in held_symbols
-            if sym not in drop_set
+            for sym in kept_symbols
         ]
 
         logger.info(
-            "RebalanceCalculator: TopkDropout 持仓=%d 剔除=%d 新增=%d 目标=%d",
-            len(held_symbols), len(drop_set), len(add_signals),
+            "RebalanceCalculator: TopkDropout 持仓=%d 剔除=%d 缺口=%d 新增=%d 目标=%d",
+            len(held_symbols),
+            len(drop_set),
+            deficit,
+            len(add_signals),
             len(kept_signals) + len(add_signals),
         )
         return kept_signals + add_signals, True
@@ -442,51 +455,69 @@ class RebalanceCalculator:
         strategy: StrategyConfig,
     ) -> dict[str, int]:
         """增量调仓的目标持仓：保留股维持现股数，剔除股目标 0（不在目标里即全卖），
-        新增股用剔除持仓腾出的资金（按当前价估算）均分、取整手。
+        新增股按「等权单票目标金额 = 总资产 / topk」配资（与全量调仓同口径），
+        资金池 = 本轮剔除股释放的资金 + 账户可用现金：前者做等量轮换，后者补
+        被独立风控（止损）清掉的持仓缺口。卖不掉的剔除股（跌停/无行情/T+1 锁定）
+        仍留在账户里，计入「实际留存」并抵扣缺口。
 
-        买卖对账（bug fix）：新增只数不再钉死在「计划剔除数」，而是与「实际可释放
-        资金的剔除股」对齐——只有「T+1 可卖量 > 0 且行情价有效」的剔除股才计入可
-        释放资金，并把新增上限钳到这类标的的数量。否则盘中实时行情覆盖不全时，
-        卖了 2 只却仍按 10 只去分摊买 10 只，仓位越调越胖（实测 50→53）。
+        买卖对账：可买名额 = 能卖出的剔除股数 + 可用现金可承接的只数，且不超过
+        topk 缺口。只有「T+1 可卖量 > 0 且行情价有效」的剔除股才计入可释放资金，
+        避免盘中行情覆盖不全时卖了 2 只却仍按 10 只分摊买入、仓位越调越胖。
         """
         kept_set = {s.symbol for s in target_signals}
         positions = account.positions
         target: dict[str, int] = {}
 
         # 保留股：目标 = 当前股数（不产生调量单）
-        # 剔除股：只有「可卖量 > 0 且行情价有效」才计入可释放资金与新增上限。
-        # 无行情/T+1 不可卖的剔除股仍会在 _generate_orders 里（按 force_exit 兜底）
-        # 挂单留痕，但其资金不计入本轮买入，避免用卖不掉的持仓去超买。
+        # 剔除股：能卖出的才计入释放资金；卖不掉的（跌停/无行情/T+1）持仓事实上
+        # 还在账户里，仍占一个仓位名额，因此计入 still_held。
         freed_value = 0.0
         fundable = 0
+        still_held = 0
         for sym, pos in positions.items():
             vol = int(float(pos.get("volume", 0) or 0))
             if vol <= 0:
                 continue
             if sym in kept_set:
                 target[sym] = vol
+                still_held += 1
                 continue
             sell_qty = self._clamp_sell_qty(pos, 0)
-            if sell_qty <= 0:
-                continue
             quote = quotes.get(sym)
-            if not quote or quote.current_price <= 0:
+            if sell_qty <= 0 or not quote or quote.current_price <= 0:
+                still_held += 1
                 continue
             freed_value += sell_qty * float(quote.current_price)
             fundable += 1
 
-        # 新增股：目标集里未持仓的（顺序已按分数降序），上限 = 可释放资金标的数
+        # 新增股：目标集里未持仓的（顺序已按分数降序）。
+        # 名额 = 可释放标的数（等量轮换）+ 可用现金可承接只数（补仓缺口），
+        # 且不超过 topk 缺口（still_held 已包含卖不掉的持仓，不会超配）。
         held_with_vol = {
-            sym for sym, pos in positions.items()
+            sym
+            for sym, pos in positions.items()
             if int(float(pos.get("volume", 0) or 0)) > 0
         }
         add_pool = [s for s in target_signals if s.symbol not in held_with_vol]
-        add_list = add_pool[:fundable]
-        skipped_unfunded = [s.symbol for s in add_pool[fundable:]]
+        deficit = max(0, int(strategy.topk) - still_held)
+        per_value = self._per_position_value(account, strategy)
+        cash_available = max(0.0, float(account.cash or 0.0))
+        budget = freed_value + cash_available
+        if per_value > 0:
+            cash_slots = int(cash_available // per_value)
+        else:
+            # 没有总资产口径（异常账户）时不额外收紧名额
+            cash_slots = deficit
+        slots = max(0, min(len(add_pool), deficit, fundable + cash_slots))
+        add_list = add_pool[:slots]
+        skipped_unfunded = [s.symbol for s in add_pool[slots:]]
         skipped_no_quote: list[str] = []
         skipped_zero_qty: list[str] = []
-        if add_list and freed_value > 0:
-            per_value = freed_value / len(add_list)
+        if add_list and budget > 0:
+            if per_value > 0:
+                per_value = min(per_value, budget / len(add_list))
+            else:
+                per_value = budget / len(add_list)
             for s in add_list:
                 quote = quotes.get(s.symbol)
                 if not quote or quote.current_price <= 0:
@@ -499,15 +530,35 @@ class RebalanceCalculator:
                 else:
                     skipped_zero_qty.append(s.symbol)
         logger.info(
-            "RebalanceCalculator: Dropout 对账 可释放标的=%d 释放资金=%.2f 新增候选=%d unfunded=%s no_quote=%s zero_qty=%s",
+            "RebalanceCalculator: Dropout 对账 留存=%d 缺口=%d 可释放标的=%d "
+            "释放资金=%.2f 可用现金=%.2f 新增候选=%d unfunded=%s no_quote=%s zero_qty=%s",
+            still_held,
+            deficit,
             fundable,
             freed_value,
+            cash_available,
             len(add_list),
             ",".join(skipped_unfunded[:10]),
             ",".join(skipped_no_quote[:10]),
             ",".join(skipped_zero_qty[:10]),
         )
         return target
+
+    def _per_position_value(
+        self, account: SimulationAccount, strategy: StrategyConfig
+    ) -> float:
+        """等权单票目标金额：总资产 / topk，并受单票仓位上限约束。
+
+        与全量调仓口径一致（_calc_weights 恒 1/topk + _calc_target_positions 的
+        max_position_pct），避免增量调仓的新增股因「分摊释放资金」忽胖忽瘦。
+        """
+        total_asset = max(0.0, float(account.total_asset or 0.0))
+        topk = max(1, int(strategy.topk or 0))
+        value = total_asset / topk
+        cap = float(strategy.max_position_pct or 0.0)
+        if cap > 0:
+            value = min(value, total_asset * cap)
+        return max(0.0, value)
 
     def _filter_tradable(
         self,

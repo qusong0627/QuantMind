@@ -326,7 +326,8 @@ class SimulationEngine:
                 None 时若 run_id 以 bootstrap_ 开头则自动开启
             max_orders: 单轮订单数上限（对应 live_trade_config.max_orders_per_cycle）。
                 卖单（减仓/风控）优先且不占额度，买入超出部分被丢弃。
-                建仓轮（当前无持仓）上限不会低于策略 topk，避免账户永久少配。
+                建仓轮（当前无持仓）与补仓轮（持仓少于 topk）上限不低于策略
+                topk，避免账户因止损清仓后永久少配。
 
         Returns:
             执行报告
@@ -542,10 +543,14 @@ class SimulationEngine:
                 orders = self._apply_max_buy_drop_gate(
                     orders, live_ticks=live_ticks, tenant=tenant, user_id=uid
                 )
+                strategy_topk = int(getattr(strategy_config, "topk", 0) or 0)
                 effective_max_orders = self._resolve_max_orders(
                     max_orders,
-                    topk=int(getattr(strategy_config, "topk", 0) or 0),
+                    topk=strategy_topk,
                     is_build=not position_symbols,
+                    # 持仓少于 topk：本轮是补仓轮（止损/风控清掉的仓位），
+                    # 单轮上限必须跟着缺口放开，否则每次只能补 20 只。
+                    is_refill=0 < len(position_symbols) < strategy_topk,
                 )
                 if effective_max_orders > 0:
                     orders = self._truncate_orders(orders, effective_max_orders)
@@ -1287,6 +1292,7 @@ class SimulationEngine:
         *,
         topk: int,
         is_build: bool,
+        is_refill: bool = False,
     ) -> int:
         """解析本轮实际使用的单轮订单上限；返回 0 表示不截断。
 
@@ -1296,8 +1302,10 @@ class SimulationEngine:
         （见 RebalanceCalculator._select_topk_dropout），持仓全部留在
         topk 内时不会补仓，策略目标仓位被默认值悄悄改写。
 
-        因此建仓轮把上限抬到 topk（用户显式设得更大则保留）；日常调仓
-        仍严格按配置截断，保留限流风控语义。
+        补仓轮（持仓数 < topk，例如被 -8% 止损逐日清掉一部分）同理：缺口
+        一次性补不回来，止损会继续跑赢补仓，账户最终只剩现金。因此建仓/补仓
+        轮都把上限抬到 topk（用户显式设得更大则保留）；其余日常调仓仍严格
+        按配置截断，保留限流风控语义。
         """
         try:
             limit = int(max_orders or 0)
@@ -1305,9 +1313,10 @@ class SimulationEngine:
             limit = 0
         if limit <= 0:
             return 0
-        if is_build and topk > limit:
+        if (is_build or is_refill) and topk > limit:
             logger.info(
-                "SimulationEngine: 建仓轮单轮上限 %d → topk=%d（否则账户会永久少配）",
+                "SimulationEngine: %s单轮上限 %d → topk=%d（否则账户会永久少配）",
+                "建仓轮" if is_build else "补仓轮",
                 limit,
                 topk,
             )

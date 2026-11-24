@@ -186,6 +186,79 @@ class TestTopkDropout:
         # 资金仍只按有行情的 Z 计，买入上限 1 只（不超买）
         assert buys == ["A"]
 
+    def test_refill_after_risk_stop_loss_wiped_positions(self):
+        """独立风控（-8% 止损）把持仓清到 1 只后，调仓必须按缺口补回 topk。
+
+        回归场景：2026-11 止损逐日清仓，50 只 → 41 → … → 1，调仓只做「等量
+        轮换」，每天卖多少买多少，缺口永远补不回来，98% 资产变成现金。
+        """
+        calc = RebalanceCalculator()
+        signals = [
+            _sig("A", 0.9),
+            _sig("B", 0.8),
+            _sig("C", 0.7),
+            _sig("X", 0.05),
+        ]
+        strategy = StrategyConfig(topk=3, n_drop=1, max_position_pct=1.0)
+        # 只剩 X，且 X 已跌出 top3；其余 100 万全是现金
+        account = _account({"X": 100}, cash=1_000_000)
+        quotes = {s.symbol: _quote(s.symbol) for s in signals}
+
+        orders = calc.calculate(signals, strategy, quotes, account, day_index=6)
+
+        sells, buys = _orders_by_side(orders)
+        assert sells == ["X"]
+        assert buys == ["A", "B", "C"]  # 不是只换 1 只
+
+    def test_refill_keeps_held_in_topk_and_fills_deficit(self):
+        """持仓少于 topk 且仍在 topk 内 → 不卖，只把缺口补齐。"""
+        calc = RebalanceCalculator()
+        signals = [
+            _sig("A", 0.9),
+            _sig("B", 0.8),
+            _sig("C", 0.7),
+            _sig("D", 0.6),
+        ]
+        strategy = StrategyConfig(topk=3, n_drop=1, max_position_pct=1.0)
+        account = _account({"A": 100}, cash=100_000)
+        quotes = {s.symbol: _quote(s.symbol) for s in signals}
+
+        orders = calc.calculate(signals, strategy, quotes, account, day_index=4)
+
+        sells, buys = _orders_by_side(orders)
+        assert sells == []
+        assert buys == ["B", "C"]
+
+    def test_refill_does_not_overspend_cash(self):
+        """补仓只用可用现金：现金不够一只等权仓位时不硬买。"""
+        calc = RebalanceCalculator()
+        signals = [_sig("A", 0.9), _sig("B", 0.8), _sig("C", 0.7)]
+        strategy = StrategyConfig(topk=3, n_drop=1, max_position_pct=1.0)
+        # total_asset = 1000 持仓 + 200 现金；等权单票约 400，现金买不起一只
+        account = _account({"A": 100}, cash=200)
+        quotes = {s.symbol: _quote(s.symbol) for s in signals}
+
+        orders = calc.calculate(signals, strategy, quotes, account, day_index=2)
+
+        sells, buys = _orders_by_side(orders)
+        assert sells == []
+        assert buys == []
+
+    def test_rotation_buy_size_matches_equal_weight(self):
+        """正常等量轮换：新增股按「总资产 / topk」配资，不超配。"""
+        calc = RebalanceCalculator()
+        signals = [_sig("A", 0.9), _sig("B", 0.8), _sig("D", 0.7), _sig("C", 0.2)]
+        strategy = StrategyConfig(topk=3, n_drop=1, max_position_pct=1.0)
+        # 三只持仓各 100 股 @10 = 1000，总资产 3000，等权单票 1000
+        account = _account({"A": 100, "B": 100, "C": 100}, cash=0)
+        quotes = {s.symbol: _quote(s.symbol) for s in signals}
+
+        orders = calc.calculate(signals, strategy, quotes, account, day_index=5)
+
+        buy = next(o for o in orders if o.side == "BUY")
+        assert buy.symbol == "D"
+        assert buy.quantity == 100  # 1000 / 10，未因释放资金口径漂移
+
     def test_n_drop_zero_full_rebalance(self):
         """n_drop=0 → 既有全量调仓行为：跌出 topk 的清仓，保留股也重新配权。"""
         calc = RebalanceCalculator()

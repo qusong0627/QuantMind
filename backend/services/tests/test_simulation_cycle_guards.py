@@ -128,6 +128,25 @@ def test_resolve_max_orders_rebalance_honours_explicit_limit():
     assert SimulationEngine._resolve_max_orders(20, topk=50, is_build=False) == 20
 
 
+def test_resolve_max_orders_refill_raises_limit_to_topk():
+    """补仓轮（持仓 < topk）同样抬到 topk，否则止损缺口只能每次补 20 只。"""
+    assert (
+        SimulationEngine._resolve_max_orders(
+            20, topk=50, is_build=False, is_refill=True
+        )
+        == 50
+    )
+
+
+def test_resolve_max_orders_refill_keeps_larger_explicit_limit():
+    assert (
+        SimulationEngine._resolve_max_orders(
+            80, topk=50, is_build=False, is_refill=True
+        )
+        == 80
+    )
+
+
 def test_resolve_max_orders_unset_means_no_truncation():
     assert SimulationEngine._resolve_max_orders(None, topk=50, is_build=True) == 0
     assert SimulationEngine._resolve_max_orders(0, topk=50, is_build=True) == 0
