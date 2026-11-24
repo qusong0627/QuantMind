@@ -95,15 +95,24 @@ _GOVERNANCE_INDEX_DDL = [
 
 
 def ensure_governance_indexes(db: Any) -> list[str]:
-    """幂等补齐治理索引；单条失败只告警，不影响其余清理动作。"""
+    """幂等补齐治理索引，返回**本次真正新建**的索引名（已存在的如实跳过）。
+
+    单条失败只告警，不影响其余清理动作。
+    """
     from sqlalchemy import text as sa_text
 
     created: list[str] = []
     for ddl in _GOVERNANCE_INDEX_DDL:
         name = ddl.split("IF NOT EXISTS")[1].strip().split()[0]
         try:
+            exists = db.execute(
+                sa_text("SELECT to_regclass(:n) IS NOT NULL"), {"n": name}
+            ).scalar()
+            if bool(exists):
+                continue
             db.execute(sa_text(ddl))
             created.append(name)
+            logger.info("[SignalStorageJanitor] 已补建治理索引 %s", name)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SignalStorageJanitor] 建索引 %s 失败: %s", name, exc)
     return created
