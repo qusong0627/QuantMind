@@ -14,6 +14,13 @@ description: 模型标准化评估 — 测试集截面排序（RankIC/中性化/
 - 数据：QuantDB `/data/quantdb`；模型产物 `/app/models/users/{tenant}/{user}/{model_id}/pred.parquet`。
 - 评估报告落 `data/factor_research/{ff_attribution,model_signal,ff_validation}/`；UI 缓存落 `data/factor_research/model_signal/{model_id}/ui_63d.json`。
 
+## 安装 / 升级
+
+- **新用户**：拉仓库后 `docker compose up -d --build`；技能用 `bash scripts/install_skills.sh` 装到 `~/.claude/skills`（QuantBot/dsh 已只读挂载 `skills/`，无需安装）。
+- **老用户升级**：`git pull` → 重建/重启 `quantmind` 与 `quantmind-celery`、`quantmind-celery-beat`（新任务要重新加载）→ 前端 `bash scripts/deploy_frontend.sh`。
+- **无数据库迁移**：评估缓存是文件（`data/factor_research/model_signal/`），日更任务复用现有表；不需要跑 upgrade SQL。
+- 日更任务：交易日 16:50，默认对「默认模型 + 策略绑定模型」体检；最多 8 个/轮。
+
 ## 先看哪里
 
 1. **前端（最快）**：模型详情 → 「测试集实盘力」面板（滚动 63 个有标签交易日；只算 test 切分）。
