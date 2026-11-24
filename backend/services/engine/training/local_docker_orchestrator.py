@@ -232,6 +232,11 @@ _PREPROCESSING_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "pre
 _PARALLEL_UTILS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "parallel_utils.py")
 # 样本权重（WP3）：train.py 顶层 `from sample_weights import build_weights`，随仓库挂载
 _SAMPLE_WEIGHTS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "sample_weights.py")
+# label_diagnostics.py 与 train.py 同目录导入（Target Contract 标签诊断）；
+# 与 sample_weights 一样无条件挂载，镜像未重建时也不丢诊断门。
+_LABEL_DIAGNOSTICS_HOST_PATH = str(
+    _HOST_PROJECT_PATH / "docker" / "training" / "label_diagnostics.py"
+)
 # 模型训练器包：train.py 顶层 `from model_trainers... import ...`，整目录挂载
 _TRAINERS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "model_trainers")
 # 训练诊断包：train.py 顶层 `from diagnostics... import ...`，整目录挂载
@@ -1096,6 +1101,12 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         # 避免镜像未重建时 `from sample_weights import ...` 秒挂。
         volumes[str(_SAMPLE_WEIGHTS_HOST_PATH)] = {
             "bind": "/app/sample_weights.py",
+            "mode": "ro",
+        }
+        # label_diagnostics.py 与 train.py 同目录导入（Target Contract 标签诊断）；
+        # 无条件挂载，避免镜像未重建时 `from label_diagnostics import ...` 降级跳过。
+        volumes[str(_LABEL_DIAGNOSTICS_HOST_PATH)] = {
+            "bind": "/app/label_diagnostics.py",
             "mode": "ro",
         }
         # model_trainers/ 包与 train.py 同目录导入（`from model_trainers... import ...`）；
