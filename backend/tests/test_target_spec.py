@@ -301,11 +301,16 @@ def test_label_fields_match_detects_mismatch() -> None:
 
 def test_builtin_targets_are_valid_and_unique() -> None:
     specs = builtin_specs()
-    assert len(specs) == len(BUILTIN_TARGETS_V1) == 6
+    assert len(specs) == len(BUILTIN_TARGETS_V1) == 29
     keys = {(s.target_id, s.version) for s in specs}
     assert len(keys) == len(specs)
+    assert {s.market for s in specs} == {"CN", "HK", "US", "FUTURES"}
+    for market, prefix in (("CN", "cn"), ("HK", "hk"), ("US", "us"), ("FUTURES", "fut")):
+        market_ids = [s.target_id for s in specs if s.market == market]
+        assert any(tid.startswith(f"{prefix}_ret_1d_open_rank") for tid in market_ids)
+        assert any(tid.startswith(f"{prefix}_ret_5d_open_rank") for tid in market_ids)
+        assert any(tid.startswith(f"{prefix}_ret_10d_open_rank") for tid in market_ids)
     for spec in specs:
-        assert spec.market == "CN"
         assert len(spec.spec_hash()) == 64
     # 内置定义不得非法
     for raw in BUILTIN_TARGETS_V1:

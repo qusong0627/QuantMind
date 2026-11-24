@@ -37,7 +37,94 @@ class TargetRegistryError(RuntimeError):
         self.http_status = http_status
 
 
-# ── 内置目标（P1，CN）────────────────────────────────────────────────────────
+# ── 内置目标（CN / HK / US / FUTURES）────────────────────────────────────────
+
+
+def _market_rank_targets(
+    market: str, prefix: str, label: str
+) -> tuple[dict[str, Any], ...]:
+    """港股/美股/期货的标准目标族：T+1/T+3/T+5/T+10 rank + raw/top20/updown。
+
+    P1 只给 CN 预置分位目标；其它市场若需分位，注册自定义 target（family=
+    quantile_return，仅 CN 能力闸允许 LightGBM）。
+    """
+    specs: list[dict[str, Any]] = []
+    for horizon in (1, 3, 5, 10):
+        specs.append(
+            {
+                "target_id": f"{prefix}_ret_{horizon}d_open_rank",
+                "version": 1,
+                "market": market,
+                "family": "forward_return",
+                "mode": "regression",
+                "horizon_days": horizon,
+                "entry": {"lag_days": 1, "price": "open"},
+                "exit": {"price": "close"},
+                "transform": {
+                    "type": "rank",
+                    "top_pct": 0.2,
+                    "drop_extreme_pct": 0.0,
+                },
+                "description": (
+                    f"{label} T+1 开盘买、T+{horizon + 1} 收盘卖，"
+                    f"{horizon} 日收益截面 rank"
+                ),
+            }
+        )
+    specs.extend(
+        [
+            {
+                "target_id": f"{prefix}_ret_5d_open_raw",
+                "version": 1,
+                "market": market,
+                "family": "forward_return",
+                "mode": "regression",
+                "horizon_days": 5,
+                "entry": {"lag_days": 1, "price": "open"},
+                "exit": {"price": "close"},
+                "transform": {
+                    "type": "raw",
+                    "top_pct": 0.2,
+                    "drop_extreme_pct": 0.0,
+                },
+                "description": f"{label} T+1 开盘买、T+6 收盘卖，5 日原始收益",
+            },
+            {
+                "target_id": f"{prefix}_ret_5d_open_top20",
+                "version": 1,
+                "market": market,
+                "family": "forward_return",
+                "mode": "regression",
+                "horizon_days": 5,
+                "entry": {"lag_days": 1, "price": "open"},
+                "exit": {"price": "close"},
+                "transform": {
+                    "type": "top_tail",
+                    "top_pct": 0.2,
+                    "drop_extreme_pct": 0.0,
+                },
+                "description": f"{label} 5 日收益只学当日最强 20% 尾部，其余置 0",
+            },
+            {
+                "target_id": f"{prefix}_updown_5d_open",
+                "version": 1,
+                "market": market,
+                "family": "classification_binary",
+                "mode": "classification",
+                "horizon_days": 5,
+                "entry": {"lag_days": 1, "price": "open"},
+                "exit": {"price": "close"},
+                "transform": {
+                    "type": "rank",
+                    "top_pct": 0.2,
+                    "drop_extreme_pct": 0.0,
+                },
+                "description": f"{label} 5 日收益方向二分类（>0 为 1）",
+            },
+        ]
+    )
+    return tuple(specs)
+
 
 BUILTIN_TARGETS_V1: tuple[dict[str, Any], ...] = (
     {
@@ -112,6 +199,33 @@ BUILTIN_TARGETS_V1: tuple[dict[str, Any], ...] = (
         "transform": {"type": "raw", "top_pct": 0.2, "drop_extreme_pct": 0.0},
         "description": "A股 5 日收益 p10/p50/p90 分位回归（仅 CN 单 LightGBM）",
     },
+    {
+        "target_id": "cn_ret_3d_open_rank",
+        "version": 1,
+        "market": "CN",
+        "family": "forward_return",
+        "mode": "regression",
+        "horizon_days": 3,
+        "entry": {"lag_days": 1, "price": "open"},
+        "exit": {"price": "close"},
+        "transform": {"type": "rank", "top_pct": 0.2, "drop_extreme_pct": 0.0},
+        "description": "A股 T+1 开盘买、T+4 收盘卖，3 日收益截面 rank",
+    },
+    {
+        "target_id": "cn_ret_10d_open_rank",
+        "version": 1,
+        "market": "CN",
+        "family": "forward_return",
+        "mode": "regression",
+        "horizon_days": 10,
+        "entry": {"lag_days": 1, "price": "open"},
+        "exit": {"price": "close"},
+        "transform": {"type": "rank", "top_pct": 0.2, "drop_extreme_pct": 0.0},
+        "description": "A股 T+1 开盘买、T+11 收盘卖，10 日收益截面 rank",
+    },
+    *_market_rank_targets("HK", "hk", "港股"),
+    *_market_rank_targets("US", "us", "美股"),
+    *_market_rank_targets("FUTURES", "fut", "期货"),
 )
 
 
@@ -131,7 +245,7 @@ def builtin_specs() -> tuple[LabelTargetSpec, ...]:
 async def ensure_builtin_targets(session, *, force: bool = False) -> None:
     """幂等种子：同 id/version 已存在时校验 hash，不允许静默覆盖。
 
-    不做进程内缓存：调用点只有目标读取/解析（每次训练一次），6 条幂等 upsert
+    不做进程内缓存：调用点只有目标读取/解析（每次训练一次），29 条幂等 upsert
     的成本远低于“缓存已置位但事务回滚”导致的静默缺种子风险。
     `force` 保留给测试/运维显式重放（当前实现总是重放）。
     """

@@ -59,7 +59,7 @@ run-training → submit_training_job → LocalDockerOrchestrator
 
 ### Target Contract（2026-11-24 起）
 
-- 目标定义在 `qm_label_targets`（版本不可变 + sha256）；内置 6 个 CN 目标（`cn_ret_1d_open_rank` / `cn_ret_5d_open_rank` / `cn_ret_5d_open_raw` / `cn_ret_5d_open_top20` / `cn_updown_5d_open` / `cn_ret_5d_open_quantile`）。
+- 目标定义在 `qm_label_targets`（版本不可变 + sha256）；内置 29 个目标：CN 8 / HK 7 / US 7 / FUTURES 7（T+1/3/5/10 rank + T+5 raw/top20/updown；CN 另有 quantile）。
 - 请求首选 `target_ref: {id, version}` + 白名单 `label_overrides`；重训复现再加 `expected_target_hash`（hash 漂移 422）。
 - 只读：`GET /api/v1/models/training/capabilities`、`/training/targets?market=CN&status=active`；管理端 create/activate/deprecate 在 `/api/v1/admin/models/training/targets`。
 - 能力硬闸：classification 仅 6 个非 DL；quantile 仅 CN 单 LightGBM；排序损失仅三棵 GBDT；sample_weight 支持 lgb/xgb/cat/linear/rf；open 价需直读因子源；`size_excess_*` 需 `total_cap`。
