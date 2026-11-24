@@ -1,0 +1,52 @@
+run_id: w3_registry_validate
+job_name: w3_registry_validate
+data:
+  train_start: '2023-01-11'
+  train_end: '2024-12-31'
+  features: []
+  source_mode: LOCAL
+model:
+  type: lightgbm
+  prediction_mode: point
+  params: {}
+  xgb_params: {}
+  catboost_params: {}
+  dl_params: {}
+label:
+  target_horizon_days: 5
+  target_mode: return
+  execution_price: open
+  label_transform: rank
+  label_top_pct: 0.2
+  label_drop_extreme_pct: 0.0
+  label_formula: ''
+  effective_trade_date: ''
+  training_window: ''
+  target_id: cn_ret_5d_open_rank
+  target_version: 1
+  target_hash: 6f08d2600443ca001d6f526176bf3aea5450008099986512ac0cf01d2991dc5b
+  target_base_hash: 6f08d2600443ca001d6f526176bf3aea5450008099986512ac0cf01d2991dc5b
+  target_status: active
+  target_spec:
+    target_id: cn_ret_5d_open_rank
+    version: 1
+    market: CN
+    family: forward_return
+    mode: regression
+    horizon_days: 5
+    entry:
+      lag_days: 1
+      price: open
+    exit:
+      price: close
+    transform:
+      type: rank
+      top_pct: 0.2
+      drop_extreme_pct: 0.0
+    label_contract_version: 1
+    description: W3 validate-only golden
+  label_contract_version: 1
+context:
+  market: CN
+output:
+  result_path: /tmp/w3_registry_result.json

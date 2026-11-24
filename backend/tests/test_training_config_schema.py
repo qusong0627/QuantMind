@@ -53,6 +53,10 @@ def _full_legacy_config() -> dict:
         "label": {
             "target_horizon_days": 3,
             "target_mode": "return",
+            "execution_price": "close",
+            "label_transform": "rank",
+            "label_top_pct": 0.2,
+            "label_drop_extreme_pct": 0.0,
             "label_formula": "",
             "effective_trade_date": "",
             "training_window": "",

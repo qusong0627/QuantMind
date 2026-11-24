@@ -20,6 +20,7 @@ def _payload(**overrides):
         "train_end": "2024-12-31",
         "lgb_params": {"objective": "regression", "seed": 42},
         "label_transform": "rank",
+        "target_hash": "a" * 64,
     }
     base.update(overrides)
     return base
@@ -50,6 +51,14 @@ def test_multi_axis_detected():
     axes = diff_axes(diffs)
     assert "features" in axes and "label_transform" in axes
     assert is_single_axis(diffs) is False
+
+
+def test_target_hash_is_experiment_axis():
+    a = canonical_config(_payload())
+    b = canonical_config(_payload(target_hash="b" * 64))
+    diffs = config_diff(a, b)
+    assert [d["path"] for d in diffs] == ["target_hash"]
+    assert diff_axes(diffs) == ["target_hash"]
 
 
 def test_feature_source_repair_is_single_axis():

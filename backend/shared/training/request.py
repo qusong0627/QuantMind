@@ -15,6 +15,7 @@ _normalize_payload；这里只收敛纯输入校验，且 422 detail 与现状�
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -42,6 +43,7 @@ ALLOWED_MODEL_TYPES = frozenset(
 )
 ALLOWED_TARGET_MODE = {"return", "classification"}
 ALLOWED_DEAL_PRICE = {"open", "close"}
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _BENCHMARK_MARKET = {
     "HSI": "HK",
@@ -192,6 +194,12 @@ class TrainingRequest(BaseModel):
     dl_params: dict = Field(default_factory=dict)
     target_horizon_days: int = 1
     target_mode: str = "return"
+    #: 目标注册表引用 {id, version}；P1 新路径。旧请求不带此字段时走平铺字段。
+    target_ref: dict | None = None
+    #: 受 family 白名单约束的覆盖（horizon_days / label_transform / ...）。
+    label_overrides: dict | None = None
+    #: 重训复现凭证：原模型 metadata 的 target_hash（64 hex）。
+    expected_target_hash: str | None = None
     execution_price: str = "close"
     label_transform: str = "rank"
     label_top_pct: float = 0.2
@@ -328,6 +336,83 @@ class TrainingRequest(BaseModel):
             if not isinstance(params, dict):
                 raise HTTPException(status_code=422, detail=message)
 
+        # ── Target Contract（形状校验；注册表解析在 _normalize_payload）──
+        raw_target_ref = payload.get("target_ref")
+        target_ref: dict | None = None
+        if raw_target_ref is not None:
+            if not isinstance(raw_target_ref, dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail="target_ref_invalid: target_ref must be an object {id, version}",
+                )
+            unknown = set(raw_target_ref) - {"id", "target_id", "version"}
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"target_ref_invalid: unknown keys {sorted(unknown)}",
+                )
+            ref_id = str(
+                raw_target_ref.get("id") or raw_target_ref.get("target_id") or ""
+            ).strip()
+            if not ref_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="target_ref_invalid: target_ref.id is required",
+                )
+            if raw_target_ref.get("version") is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="target_version_required: target_ref.version is required",
+                )
+            try:
+                ref_version = int(raw_target_ref["version"])
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="target_ref_invalid: target_ref.version must be an integer",
+                ) from None
+            if ref_version < 1:
+                raise HTTPException(
+                    status_code=422,
+                    detail="target_ref_invalid: target_ref.version must be >=1",
+                )
+            target_ref = {"id": ref_id, "version": ref_version}
+
+        raw_overrides = payload.get("label_overrides")
+        label_overrides: dict | None = None
+        if raw_overrides is not None:
+            if not isinstance(raw_overrides, dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail="target_override_invalid: label_overrides must be an object",
+                )
+            for key, value in raw_overrides.items():
+                if isinstance(value, (dict, list)):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "target_override_invalid: label_overrides values must "
+                            f"be scalars (key={key})"
+                        ),
+                    )
+            label_overrides = dict(raw_overrides)
+
+        if target_ref and "=" in str(payload.get("label_formula") or ""):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "target_formula_override_forbidden: target_ref 与 label_formula "
+                    "覆盖通道不能同时使用"
+                ),
+            )
+
+        expected_target_hash = str(payload.get("expected_target_hash") or "").strip() or None
+        if expected_target_hash and not _HEX64_RE.match(expected_target_hash):
+            raise HTTPException(
+                status_code=422,
+                detail="target_hash_invalid: expected_target_hash 必须是 64 位小写 hex",
+            )
+
         try:
             target_horizon_days = int(payload.get("target_horizon_days", 1))
         except Exception:
@@ -425,6 +510,9 @@ class TrainingRequest(BaseModel):
                 dl_params=payload.get("dl_params", {}) or {},
                 target_horizon_days=target_horizon_days,
                 target_mode=target_mode,
+                target_ref=target_ref,
+                label_overrides=label_overrides,
+                expected_target_hash=expected_target_hash,
                 execution_price=execution_price,
                 label_transform=label_transform,
                 label_top_pct=label_top_pct,

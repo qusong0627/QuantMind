@@ -79,14 +79,27 @@ DEFAULT_CATBOOST_PARAMS: dict[str, Any] = {
     "verbose":          100,
 }
 
-# ── 排序损失（IC / LambdaRank 类）────────────────────────────────────────────
-# 三个 GBDT 的排序目标名不同；显式传这些 objective 时，训练端必须同时提供
-# 「按日分组」信息（group/group_id），否则 LightGBM/CatBoost/XGBoost 直接报错。
-RANK_OBJECTIVES: dict[str, set[str]] = {
-    "lightgbm": {"lambdarank", "rank_xendcg"},
-    "xgboost": {"rank:pairwise", "rank:ndcg", "rank:map"},
-    "catboost": {"yetirank", "yetirankpairwise", "queryrmse", "querysoftmax", "queryauc", "lambdamart"},
-}
+# 排序损失集合的单一事实源在 backend/shared/training/capabilities.py；
+# 旧兼容镜像无 /app/backend 时降级为本地常量（值与单一事实源逐字一致）。
+try:  # pragma: no cover - 兼容镜像分支
+    from backend.shared.training.capabilities import RANK_OBJECTIVES
+except ImportError:  # 旧兼容镜像
+    logger.warning(
+        "backend.shared.training.capabilities unavailable; "
+        "using legacy local RANK_OBJECTIVES (compat image)"
+    )
+    RANK_OBJECTIVES: dict[str, set[str]] = {
+        "lightgbm": {"lambdarank", "rank_xendcg"},
+        "xgboost": {"rank:pairwise", "rank:ndcg", "rank:map"},
+        "catboost": {
+            "yetirank",
+            "yetirankpairwise",
+            "queryrmse",
+            "querysoftmax",
+            "queryauc",
+            "lambdamart",
+        },
+    }
 
 
 def _group_counts(dates: Any) -> np.ndarray:
@@ -350,7 +363,8 @@ def _scaled_pipeline(model: Any) -> Any:
 
 @register_trainer("linear", framework="sklearn")
 def _train_linear(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
-                  X_val: np.ndarray, y_val: np.ndarray) -> Any:
+                  X_val: np.ndarray, y_val: np.ndarray,
+                  sample_weight: tuple | None = None) -> Any:
     """线性基线：收益任务用 Ridge，分类任务用 LogisticRegression（均先标准化）。"""
     from sklearn.linear_model import LogisticRegression, Ridge
     model_cfg = cfg.get("model", {})
@@ -362,12 +376,18 @@ def _train_linear(cfg: dict, features: list[str], X_train: np.ndarray, y_train: 
     else:
         model = Ridge(alpha=alpha, random_state=int((cfg.get("seed") or 42)))
     model = _scaled_pipeline(model)
-    model.fit(X_train, y_train)
+    w_train = sample_weight[0] if sample_weight is not None else None
+    if w_train is None:
+        model.fit(X_train, y_train)
+    else:
+        # Pipeline 的拟合参数必须带步骤前缀，否则 sample_weight 到不了最终估计器。
+        model.fit(X_train, y_train, model__sample_weight=w_train)
     return model
 
 @register_trainer("random_forest", framework="sklearn")
 def _train_rf(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
-              X_val: np.ndarray, y_val: np.ndarray) -> Any:
+              X_val: np.ndarray, y_val: np.ndarray,
+              sample_weight: tuple | None = None) -> Any:
     """随机森林：Bagging 基线，用于对比 Boosting 是否真优于 Bagging。
 
     与 LightGBM/XGBoost 走同一 _prepare_arrays 数据流（含可选截面预处理）。
@@ -392,7 +412,11 @@ def _train_rf(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.n
         n_jobs=_TRAIN_NTHREAD,
         random_state=seed,
     )
-    model.fit(X_train, y_train)
+    model.fit(
+        X_train,
+        y_train,
+        sample_weight=(sample_weight[0] if sample_weight is not None else None),
+    )
     return model
 
 @register_trainer("mlp", framework="sklearn")

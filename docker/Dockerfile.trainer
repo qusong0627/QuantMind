@@ -73,6 +73,7 @@ COPY backend /app/backend
 # 拷贝训练脚本及预处理函数
 COPY docker/training/train.py /app/train.py
 COPY docker/training/preprocessing.py /app/preprocessing.py
+COPY docker/training/label_diagnostics.py /app/label_diagnostics.py
 COPY docker/training/model_trainers /app/model_trainers
 COPY docker/training/diagnostics /app/diagnostics
 COPY docker/training/data /app/data

@@ -11,6 +11,15 @@ import type {
   BackfillPreview,
 } from './modelInferenceJobTypes';
 import type { RetrainConfigPayload } from '../pages/training/retrainConfig';
+import type {
+  LabelTargetSummary,
+  TrainingCapabilities,
+} from '../pages/training/trainingTargetCapabilities';
+
+export interface LabelTargetListResponse {
+  items: LabelTargetSummary[];
+  count: number;
+}
 
 export interface ModelTrainingRunResponse {
   runId: string;
@@ -881,6 +890,24 @@ class ModelTrainingService {
   async getQuantDBTrainingSources(market?: string): Promise<QuantDBTrainingSourcesResult> {
     const resp = await this.client.get<QuantDBTrainingSourcesResult>('/models/training-sources', {
       params: market ? { market } : undefined,
+    });
+    return resp.data;
+  }
+
+  /** 训练目标 × 13 模型能力矩阵（后端单一事实源，只读）。 */
+  async getTrainingCapabilities(): Promise<TrainingCapabilities> {
+    const resp = await this.client.get<TrainingCapabilities>('/models/training/capabilities');
+    return resp.data;
+  }
+
+  /** 目标注册表（只读）：前端只展示 active；legacy 目标由表单本地表达。 */
+  async listLabelTargets(params?: {
+    market?: string;
+    status?: string;
+    family?: string;
+  }): Promise<LabelTargetListResponse> {
+    const resp = await this.client.get<LabelTargetListResponse>('/models/training/targets', {
+      params,
     });
     return resp.data;
   }

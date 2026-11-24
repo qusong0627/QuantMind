@@ -372,3 +372,60 @@ def test_derive_refuses_symlinked_model_files(tmp_path, linked):
     with pytest.raises(RecipeError) as ei:
         derive_recipe_from_model(d, model_id=MODEL_ID)
     assert "符号链接" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# Target Contract：派生必须保留 target_ref + 实际 overrides + hash
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_derive_preserves_target_contract_and_overrides(tmp_path):
+    metadata = _metadata(
+        target_id="cn_ret_5d_open_rank",
+        target_version=1,
+        target_hash="a" * 64,
+        target_base_hash="a" * 64,
+        target_overrides={"horizon_days": 10},
+    )
+    config = _config()
+    config["label"].update(
+        {
+            "target_id": "cn_ret_5d_open_rank",
+            "target_version": 1,
+            "target_hash": "a" * 64,
+            "target_base_hash": "a" * 64,
+            "target_overrides": {"horizon_days": 10},
+            "target_spec": {"target_id": "cn_ret_5d_open_rank", "version": 1},
+        }
+    )
+    d = _write_model_dir(tmp_path, metadata=metadata, config=config)
+    result = derive_recipe_from_model(d, model_id=MODEL_ID)
+    recipe = result.recipe
+
+    assert recipe.target_hash == "a" * 64
+    assert recipe.payload["target_ref"] == {"id": "cn_ret_5d_open_rank", "version": 1}
+    assert recipe.payload["label_overrides"] == {"horizon_days": 10}
+    assert recipe.payload["expected_target_hash"] == "a" * 64
+
+    # 配方 hash 必须随 target_hash 变化（否则跨口径配方会被当成同一份）
+    from backend.shared.training.recipe_registry import recipe_hash
+
+    other = _metadata(
+        target_id="cn_ret_5d_open_rank",
+        target_version=1,
+        target_hash="b" * 64,
+        target_overrides={"horizon_days": 10},
+    )
+    d2 = _write_model_dir(tmp_path / "other", metadata=other, config=config)
+    result2 = derive_recipe_from_model(d2, model_id=MODEL_ID)
+    assert recipe_hash(recipe) != recipe_hash(result2.recipe)
+
+
+@pytest.mark.unit
+def test_derive_legacy_target_omits_contract_fields(tmp_path):
+    d = _write_model_dir(tmp_path, metadata=_metadata())
+    result = derive_recipe_from_model(d, model_id=MODEL_ID)
+    assert result.recipe.target_hash is None
+    assert "target_ref" not in result.recipe.payload
+    assert "label_overrides" not in result.recipe.payload

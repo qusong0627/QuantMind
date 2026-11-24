@@ -10,6 +10,7 @@ import {
   QuantDBTrainingSource,
 } from '../../features/admin/types';
 import { isMarketEnabled } from '../../config/marketFlags';
+import { buildTargetOverrides } from './trainingTargetCapabilities';
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
@@ -65,22 +66,43 @@ export const MODEL_TYPE_OPTIONS: ModelTypeOption[] = [
 ];
 
 export type ExecutionPrice = 'open' | 'close';
-export type LabelTransform = 'rank' | 'zscore' | 'raw' | 'top_tail';
+export type LabelTransform =
+  | 'rank'
+  | 'zscore'
+  | 'raw'
+  | 'top_tail'
+  | 'size_excess_rank'
+  | 'size_excess_zscore';
 
 export interface TrainingTarget {
   mode: TargetMode;
   horizonDays: number;
   /** 执行价：open = T+1 开盘买（严格实盘口径）；close = T+1 收盘买（旧口径） */
   executionPrice: ExecutionPrice;
-  /** 截面标签变换：rank / zscore / raw / top_tail（只学当日最强尾部） */
+  /** 截面标签变换：rank/zscore/raw/top_tail/size_excess_* */
   labelTransform: LabelTransform;
   /** top_tail 的尾部比例（0.05~0.5） */
   labelTopPct: number;
   /** MASTER 式极端标签清洗：只对训练段按日剔除两端比例（0 关闭，0~0.2） */
   labelDropExtremePct: number;
+  /** Target Contract：注册表目标引用；null/缺省 = legacy 自定义平铺口径 */
+  targetRef?: { id: string; version: number } | null;
+  /** 选中目标的冻结 spec（用于计算 overrides 与表单锁定；不进请求） */
+  targetSpec?: Record<string, unknown> | null;
+  /** 原训练相对 base target 的 overrides（重训时保留；新选目标为 null） */
+  targetOverrides?: Record<string, unknown> | null;
+  /** 原模型 metadata 的 target_hash（重训复现凭证；允许 deprecated 目标） */
+  expectedTargetHash?: string | null;
 }
 
-const LABEL_TRANSFORMS: LabelTransform[] = ['rank', 'zscore', 'raw', 'top_tail'];
+const LABEL_TRANSFORMS: LabelTransform[] = [
+  'rank',
+  'zscore',
+  'raw',
+  'top_tail',
+  'size_excess_rank',
+  'size_excess_zscore',
+];
 const EXECUTION_PRICES: ExecutionPrice[] = ['open', 'close'];
 
 const clampNumber = (value: unknown, fallback: number, min: number, max: number): number => {
@@ -105,6 +127,20 @@ export const normalizeTrainingTarget = (raw?: Partial<TrainingTarget> | null): T
     labelTransform,
     labelTopPct: clampNumber(source.labelTopPct, DEFAULT_TARGET.labelTopPct, 0.05, 0.5),
     labelDropExtremePct: clampNumber(source.labelDropExtremePct, DEFAULT_TARGET.labelDropExtremePct, 0, 0.2),
+    targetRef:
+      source.targetRef && typeof source.targetRef.id === 'string' && Number(source.targetRef.version) >= 1
+        ? { id: source.targetRef.id, version: Number(source.targetRef.version) }
+        : null,
+    targetSpec:
+      source.targetSpec && typeof source.targetSpec === 'object' ? source.targetSpec : null,
+    targetOverrides:
+      source.targetOverrides && typeof source.targetOverrides === 'object'
+        ? source.targetOverrides
+        : null,
+    expectedTargetHash:
+      typeof source.expectedTargetHash === 'string' && source.expectedTargetHash
+        ? source.expectedTargetHash
+        : null,
   };
 };
 
@@ -417,6 +453,16 @@ export interface TrainingResult {
     display_name: string;
     target_horizon_days: number;
     target_mode: TargetMode;
+    /** Target Contract：注册表目标身份/冻结 hash（legacy 模型为 legacy+合成 hash） */
+    target_id?: string;
+    target_version?: number;
+    target_hash?: string;
+    target_base_hash?: string;
+    target_status?: string;
+    target_overrides?: Record<string, unknown>;
+    label_contract_version?: number;
+    label_stats?: Record<string, unknown>;
+    contract_flags?: Record<string, string>;
     label_formula: string;
     training_window: string;
     feature_count: number;
@@ -959,6 +1005,10 @@ export const DEFAULT_TARGET: TrainingTarget = {
   labelTransform: 'rank',
   labelTopPct: 0.2,
   labelDropExtremePct: 0,
+  targetRef: null,
+  targetSpec: null,
+  targetOverrides: null,
+  expectedTargetHash: null,
 };
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -1215,6 +1265,10 @@ export const buildLabelTransformSummary = (target: TrainingTarget) => {
       return '原始收益（不做截面变换）';
     case 'top_tail':
       return `top-tail：只学当日最强 ${Math.round(target.labelTopPct * 100)}%，其余置 0`;
+    case 'size_excess_rank':
+      return '同市值桶内超额 → 截面 rank（需 total_cap 特征）';
+    case 'size_excess_zscore':
+      return '同市值桶内超额 → 截面 zscore（需 total_cap 特征）';
     default:
       return '截面 rank（每日 pct rank − 0.5）';
   }
@@ -1882,6 +1936,21 @@ export const buildBackendTrainingPayload = (
       val_months: request.wfa.valMonths,
       step_months: request.wfa.stepMonths,
     };
+  }
+
+  // Target Contract：注册表目标 + 只发送与冻结 spec 不同的覆盖项。
+  // 无 targetRef 时保持 legacy 平铺字段（后端合成 legacy spec，行为不变）。
+  if (request.target.targetRef) {
+    payload.target_ref = request.target.targetRef;
+    // 重训保留原训练的实际覆盖；本次表单改动优先（computed 覆盖 base）。
+    const targetOverrides = {
+      ...(request.target.targetOverrides || {}),
+      ...(buildTargetOverrides(request.target, request.target.targetSpec) || {}),
+    };
+    if (Object.keys(targetOverrides).length) payload.label_overrides = targetOverrides;
+    if (request.target.expectedTargetHash) {
+      payload.expected_target_hash = request.target.expectedTargetHash;
+    }
   }
 
   // 特征截面预处理：按交易日截面 中位数填充缺失 + 分位缩尾 + Z-score（口径可选）

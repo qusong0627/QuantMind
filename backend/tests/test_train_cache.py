@@ -76,6 +76,7 @@ def test_cache_key_sensitive_to_label_params():
     assert base != _key(label_top_pct=0.1)
     assert base != _key(execution_price="open")
     assert base != _key(execution_lag_days=0)
+    assert base != _key(target_hash="a" * 64)
 
 
 def test_combine_source_stamps_sensitive_to_field_lib_stamp():

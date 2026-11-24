@@ -957,6 +957,17 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
           {([
             { zh: '展示名称', en: 'display_name', value: <Text code className="text-[11px] break-all">{result.metadata.display_name}</Text> },
             { zh: '预测类型', en: 'target_mode', value: <span>{getTargetModeDescription(result.metadata.target_mode)}</span> },
+            {
+              zh: '目标契约',
+              en: 'target_id',
+              value: (
+                <span className="font-mono">
+                  {result.metadata.target_id
+                    ? `${result.metadata.target_id}@v${result.metadata.target_version ?? 0} · ${(result.metadata.target_hash || '').slice(0, 8)}`
+                    : '—'}
+                </span>
+              ),
+            },
             { zh: '标签公式', en: 'label_formula', value: <Text code className="text-[11px] break-all">{result.metadata.label_formula}</Text> },
             { zh: '时间窗口', en: 'training_window', value: <Text code className="text-[11px] break-all">{result.metadata.training_window}</Text> },
             { zh: '目标函数', en: 'objective_metric', value: <span>{getObjectiveMetricDescription(result.metadata.objective, result.metadata.metric)}</span> },

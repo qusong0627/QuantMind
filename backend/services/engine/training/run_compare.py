@@ -17,6 +17,7 @@ EXPERIMENT_KEYS = (
     "test_end",
     "target_horizon_days",
     "target_mode",
+    "target_hash",
     "execution_price",
     "label_transform",
     "label_top_pct",

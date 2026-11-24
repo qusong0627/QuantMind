@@ -79,13 +79,15 @@ class Recipe:
     window_policy: WindowPolicy
     payload: dict[str, Any] = field(repr=False)
     description: str = ""
+    #: Target Contract 有效标签 hash（legacy 配方为 None）。
+    target_hash: str | None = None
     #: 派生配方溯源（内建配方为 None）；不参与 recipe_hash（非训练语义）。
     source_model_id: str | None = None
     derived_at: str | None = None
 
     def semantic_dict(self) -> dict[str, Any]:
         """参与 recipe_hash 的语义子集（description 等展示字段不计入）。"""
-        return {
+        out = {
             "recipe_id": self.recipe_id,
             "market": self.market,
             "calendar_market": self.calendar_market,
@@ -95,6 +97,10 @@ class Recipe:
             "window_policy": self.window_policy.to_dict(),
             "payload": self.payload,
         }
+        # 只在有值时加入：旧配方 hash 不变，避免存量滚动活动被误判“配方变更”。
+        if self.target_hash:
+            out["target_hash"] = self.target_hash
+        return out
 
 
 def recipe_hash(recipe: Recipe) -> str:
@@ -187,6 +193,7 @@ def validate_recipe(data: Any) -> Recipe:
         window_policy=policy,
         payload=copy.deepcopy(payload),
         description=str(data.get("description") or ""),
+        target_hash=str(data.get("target_hash") or "").strip() or None,
         source_model_id=str(data["source_model_id"])
         if data.get("source_model_id")
         else None,
@@ -246,6 +253,7 @@ def recipe_summary(recipe: Recipe) -> dict[str, Any]:
         "target_horizon_days": recipe.target_horizon_days,
         "window_policy": recipe.window_policy.to_dict(),
         "recipe_hash": recipe_hash(recipe),
+        "target_hash": recipe.target_hash,
         "description": recipe.description,
         "source_model_id": recipe.source_model_id,
         "derived_at": recipe.derived_at,

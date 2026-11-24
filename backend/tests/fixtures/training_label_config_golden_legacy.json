@@ -1,0 +1,11 @@
+{
+  "effective_trade_date": "",
+  "execution_price": "open",
+  "label_drop_extreme_pct": 0.0,
+  "label_formula": "",
+  "label_top_pct": 0.2,
+  "label_transform": "rank",
+  "target_horizon_days": 5,
+  "target_mode": "return",
+  "training_window": ""
+}

@@ -1,9 +1,9 @@
 """训练数据缓存（D3）用户态端点：探测 / 清理。
 
 缓存键与训练侧完全同源（`backend/shared/train_cache.build_cache_key`）：
-锚库指纹 + 所有副库指纹 + 窗口 + horizon + 标签口径 + 特征 + field_sources +
-股票池 + industry 开关 + code_version。模型类型/超参不在键内——同特征同窗口
-换模型可直接命中。
+锚库指纹 + 所有副库指纹 + 窗口 + horizon + 标签口径 + target_hash + 特征 +
+field_sources + 股票池 + industry 开关 + code_version。模型类型/超参不在键内——
+同特征同窗口换模型可直接命中。
 """
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ class CacheStatusRequest(BaseModel):
     label_transform: str = "rank"
     label_top_pct: float = 0.2
     execution_price: str = "close"
+    target_hash: str = ""
     industry_as_feature: bool = False
     quantdb_dir: str | None = None
 
@@ -82,6 +83,7 @@ def _build_key(req: CacheStatusRequest) -> str:
         label_top_pct=req.label_top_pct,
         execution_price=req.execution_price,
         execution_lag_days=_EXECUTION_LAG_DAYS,
+        target_hash=req.target_hash,
         features=req.features,
         factor_field_sources=req.factor_field_sources,
         pool_symbols=req.pool_symbols,

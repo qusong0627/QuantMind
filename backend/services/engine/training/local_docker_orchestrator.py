@@ -759,6 +759,12 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
 
         # 收尾 1 纯 schema 产出：config.yaml 一律由 TrainingConfig 构造 + 序列化，
         # 手拼 dict 已删除。非法输入在此 fail-fast（422 上游已保证合法）。
+        _target_meta = payload.get("target_meta")
+        _target_meta = _target_meta if isinstance(_target_meta, dict) else {}
+        _target_is_registry = str(_target_meta.get("source") or "") == "registry"
+        _target_spec = (
+            _target_meta.get("spec") if isinstance(_target_meta.get("spec"), dict) else {}
+        )
         try:
             training_config = TrainingConfig(
                 run_id=run_id,
@@ -805,6 +811,46 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                     label_formula=payload.get("label_formula", ""),
                     effective_trade_date=payload.get("effective_trade_date", ""),
                     training_window=payload.get("training_window", ""),
+                    # Target Contract：只有 registry 目标写新键；legacy 保持
+                    # label 键集合与旧 config 完全一致（dump 时 None 剥离）。
+                    target_id=(
+                        str(_target_meta.get("id") or "") or None
+                        if _target_is_registry
+                        else None
+                    ),
+                    target_version=(
+                        int(_target_meta.get("version") or 0) or None
+                        if _target_is_registry
+                        else None
+                    ),
+                    target_hash=(
+                        str(_target_meta.get("effective_hash") or "") or None
+                        if _target_is_registry
+                        else None
+                    ),
+                    target_base_hash=(
+                        str(_target_meta.get("base_hash") or "") or None
+                        if _target_is_registry
+                        else None
+                    ),
+                    target_status=(
+                        str(_target_meta.get("status") or "") or None
+                        if _target_is_registry
+                        else None
+                    ),
+                    target_spec=_target_spec if _target_is_registry else None,
+                    target_overrides=(
+                        _target_meta.get("overrides")
+                        if _target_is_registry
+                        and isinstance(_target_meta.get("overrides"), dict)
+                        and _target_meta.get("overrides")
+                        else None
+                    ),
+                    label_contract_version=(
+                        int(_target_spec.get("label_contract_version") or 1)
+                        if _target_is_registry
+                        else None
+                    ),
                 ),
                 context=ContextCfg(
                     initial_capital=context.get("initial_capital", 1_000_000),

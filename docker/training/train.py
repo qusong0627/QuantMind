@@ -48,6 +48,27 @@ except Exception:
     pass
 logger = logging.getLogger("quantmind.train")
 
+# Target Contract 容器侧自校验（兼容镜像无 /app/backend 时降级跳过）。
+try:  # pragma: no cover - 兼容镜像分支
+    from backend.shared.training.target_contract import (
+        TargetContractError,
+        validate_training_target_contract,
+    )
+except ImportError:  # 旧兼容镜像
+    TargetContractError = RuntimeError  # type: ignore[assignment,misc]
+    validate_training_target_contract = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - 兼容镜像分支
+    from label_diagnostics import (
+        LabelDiagnosticError,
+        compute_label_stats,
+        enforce_label_diagnostics,
+    )
+except ImportError:  # 旧兼容镜像
+    LabelDiagnosticError = RuntimeError  # type: ignore[assignment,misc]
+    compute_label_stats = None  # type: ignore[assignment]
+    enforce_label_diagnostics = None  # type: ignore[assignment]
+
 
 def _rss_gb() -> float:
     """当前进程 RSS（GB），供阶段日志观测内存曲线。"""
@@ -299,6 +320,15 @@ def _apply_label_formula_overrides(cfg: dict) -> None:
     label = cfg.get("label")
     if not isinstance(label, dict):
         return
+    # Target Contract 新路径：label_formula 覆盖通道必须关闭，防止绕过冻结 spec。
+    if str(label.get("target_id") or "").strip():
+        raw = str(label.get("label_formula") or "")
+        if "=" in raw:
+            raise RuntimeError(
+                "target_formula_override_forbidden: 存在 target_spec 时禁止使用 "
+                f"label_formula 覆盖通道（{raw!r}）"
+            )
+        return
     raw = str(label.get("label_formula") or "")
     if "=" not in raw:
         return
@@ -511,6 +541,28 @@ def _pool_metadata(cfg: dict) -> dict:
     }
 
 
+def _target_metadata(cfg: dict) -> dict:
+    """metadata 的 label/target 单一构造点（禁止手写漂移；兼容镜像降级）。"""
+    try:
+        from backend.shared.training.target_metadata import build_target_metadata
+
+        return build_target_metadata(
+            cfg,
+            lag_days=_EXECUTION_LAG_DAYS,
+            diagnostics=cfg.get("_label_diagnostics"),
+        )
+    except ImportError:  # 旧兼容镜像：至少保留平铺字段
+        label = cfg.get("label") or {}
+        return {
+            "target_horizon_days": int(label.get("target_horizon_days") or 1),
+            "execution_lag_days": _EXECUTION_LAG_DAYS,
+            "target_mode": str(label.get("target_mode") or "return"),
+            "label_formula": str(label.get("label_formula") or ""),
+            "effective_trade_date": str(label.get("effective_trade_date") or ""),
+            "training_window": str(label.get("training_window") or ""),
+        }
+
+
 def _get_model_framework(model_type: str) -> str:
     """返回模型框架名。"""
     mapping = {
@@ -571,6 +623,10 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     if model_type not in _ALL_MODEL_TYPES:
         raise ValueError(f"Unsupported model_type: {model_type}")
     _validate_quantile_config(cfg, model_type)
+    if validate_training_target_contract is not None:
+        validate_training_target_contract(
+            cfg, model_type, (cfg.get("model") or {}).get("types")
+        )
 
     # 检查深度学习模型是否有 GPU
     if model_type in _DL_MODEL_TYPES and hardware and not hardware.get("gpu_available"):
@@ -817,6 +873,10 @@ def _train_single_model(
     """
     logger.info("--- Training %s ---", model_type)
     t0 = time.time()
+    if validate_training_target_contract is not None:
+        validate_training_target_contract(
+            cfg, model_type, (cfg.get("model") or {}).get("types")
+        )
 
     _optuna_result = None
     # 排序损失：按 trade_date 排序 + 传日期分组（与 train_model 同口径）。
@@ -1358,6 +1418,7 @@ def main() -> int:
     result: dict = {}
     callback_url    = ""
     callback_secret = ""
+    _validate_only = False
     result_path = _workspace_from_cfg() / "result.json"
 
     try:
@@ -1377,6 +1438,51 @@ def main() -> int:
             logger.warning("training schemas unavailable (compat image); skip config validation")
         except Exception as exc:
             raise RuntimeError(f"Invalid training config: {exc}") from exc
+
+        # Target Contract 自校验：新路径严格（hash/字段/能力），legacy 只告警能力冲突。
+        _target_contract = None
+        if validate_training_target_contract is not None:
+            _target_contract = validate_training_target_contract(
+                cfg,
+                str((cfg.get("model") or {}).get("type") or "lightgbm"),
+                (cfg.get("model") or {}).get("types"),
+            )
+            logger.info(
+                "Target contract: id=%s version=%s hash=%s legacy=%s",
+                _target_contract.target_id,
+                _target_contract.version,
+                _target_contract.effective_hash[:12],
+                _target_contract.legacy,
+            )
+            if str(os.getenv("QM_TRAIN_VALIDATE_ONLY") or "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                _validate_only = True
+                result = {
+                    "status": "validated",
+                    "run_id": str(cfg.get("run_id") or "unknown"),
+                    "target_contract": {
+                        "target_id": _target_contract.target_id,
+                        "target_version": _target_contract.version,
+                        "target_hash": _target_contract.effective_hash,
+                        "legacy": _target_contract.legacy,
+                    },
+                }
+                logger.info(
+                    "TARGET_CONTRACT_OK target_id=%s target_version=%s target_hash=%s legacy=%s",
+                    _target_contract.target_id,
+                    _target_contract.version,
+                    _target_contract.effective_hash,
+                    _target_contract.legacy,
+                )
+                return 0
+        else:
+            logger.warning(
+                "target contract module unavailable (compat image); skip target validation"
+            )
 
         run_id          = cfg.get("run_id", "unknown")
         job_name        = cfg.get("job_name", "unnamed")
@@ -1431,6 +1537,7 @@ def main() -> int:
             label_transform=str((cfg.get("label", {}) or {}).get("label_transform") or "rank"),
             label_top_pct=float((cfg.get("label", {}) or {}).get("label_top_pct") or 0.2),
             execution_price=str((cfg.get("label", {}) or {}).get("execution_price") or "close"),
+            target_hash=str((cfg.get("label", {}) or {}).get("target_hash") or ""),
             cache_dir=_cache_dir,
             valid_end=cfg.get("split", {}).get("valid", [None, None])[1],
             test_end=cfg.get("split", {}).get("test", [None, None])[1],
@@ -1445,6 +1552,44 @@ def main() -> int:
             pool_symbols=(cfg.get("data", {}) or {}).get("pool_symbols") or None,
         )
         _trim_memory("after load")
+
+        # ── 标签诊断（训练前硬门）：NaN/正类率/每日截面/top-tail 稳定性 ──
+        if compute_label_stats is not None:
+            _label_cfg = cfg.get("label") or {}
+            _split_cfg = cfg.get("split") or {}
+            _test_range = _split_cfg.get("test") or [None, None]
+            _diag_gate = str(
+                os.getenv("QM_LABEL_DIAGNOSTIC_GATE") or "strict"
+            ).strip().lower()
+            try:
+                _label_stats = compute_label_stats(
+                    df,
+                    target_mode=str(_label_cfg.get("target_mode") or "return"),
+                    transform_type=str(_label_cfg.get("label_transform") or "rank"),
+                    top_pct=float(_label_cfg.get("label_top_pct") or 0.2),
+                    test_start=_test_range[0],
+                    test_end=_test_range[1],
+                    horizon_days=int(_label_cfg.get("target_horizon_days") or 1),
+                    lag_days=_EXECUTION_LAG_DAYS,
+                )
+                _label_stats = enforce_label_diagnostics(
+                    _label_stats,
+                    target_mode=str(_label_cfg.get("target_mode") or "return"),
+                    transform_type=str(_label_cfg.get("label_transform") or "rank"),
+                    gate_mode=_diag_gate,
+                )
+            except LabelDiagnosticError as exc:
+                raise RuntimeError(f"{exc.code}: {exc.message}") from exc
+            cfg["_label_diagnostics"] = _label_stats
+            logger.info(
+                "Label diagnostics: rows=%s valid=%s nan=%.4f daily_min=%s pos=%s warnings=%s",
+                _label_stats.get("rows"),
+                _label_stats.get("label_valid_rows"),
+                float(_label_stats.get("nan_ratio") or 0.0),
+                _label_stats.get("daily_count_min"),
+                _label_stats.get("pos_rate"),
+                _label_stats.get("warnings"),
+            )
 
         # ─ 行业编码开关：load_data 只负责 merge 列，不会自动进入特征集 ──
         # 此前 ind_code_l1 从未被加入 valid_features，开关空转。
@@ -1643,6 +1788,7 @@ def main() -> int:
                 eval_report = compute_eval_report(
                     pred_df,
                     horizon_days=int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
+                    execution_price=str((cfg.get("label", {}) or {}).get("execution_price") or "close"),
                 )
                 (workspace / "eval_report.json").write_text(
                     json.dumps(eval_report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1767,13 +1913,8 @@ def main() -> int:
                 "factor_coverage": (cfg.get("data", {}) or {}).get("factor_coverage") or {},
                 "context": context_cfg,
                 "best_iteration": best_iteration,
-                "target_horizon_days": int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
-                "execution_lag_days": _EXECUTION_LAG_DAYS,
-                "target_mode": str((cfg.get("label", {}) or {}).get("target_mode") or "return"),
+                **_target_metadata(cfg),
                 "preprocessing": (cfg.get("preprocessing") or {}) if (cfg.get("preprocessing") or {}).get("enabled") else None,
-                "label_formula": str((cfg.get("label", {}) or {}).get("label_formula") or ""),
-                "effective_trade_date": str((cfg.get("label", {}) or {}).get("effective_trade_date") or ""),
-                "training_window": str((cfg.get("label", {}) or {}).get("training_window") or ""),
                 # 滚动训练溯源（P1）：campaign 关联（config.yaml 透传；缺失为 None）
                 "rolling_meta": cfg.get("rolling_meta") if isinstance(cfg.get("rolling_meta"), dict) else None,
                 # 数据指纹（P1 · §4.5）：可复现三件套的数据面——实况区间/行数、
@@ -1952,6 +2093,7 @@ def main() -> int:
                 eval_report = compute_eval_report(
                     pred_df,
                     horizon_days=int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
+                    execution_price=str((cfg.get("label", {}) or {}).get("execution_price") or "close"),
                 )
                 (workspace / "eval_report.json").write_text(
                     json.dumps(eval_report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -2052,14 +2194,9 @@ def main() -> int:
                 "factor_coverage": (cfg.get("data", {}) or {}).get("factor_coverage") or {},
                 "context": context_cfg,
                 "best_iteration": best_iteration,
-                "target_horizon_days": int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
-                "execution_lag_days": _EXECUTION_LAG_DAYS,
-                "target_mode": str((cfg.get("label", {}) or {}).get("target_mode") or "return"),
+                **_target_metadata(cfg),
                 "prediction_mode": "quantile" if quantile_result else "point",
                 "preprocessing": (cfg.get("preprocessing") or {}) if (cfg.get("preprocessing") or {}).get("enabled") else None,
-                "label_formula": str((cfg.get("label", {}) or {}).get("label_formula") or ""),
-                "effective_trade_date": str((cfg.get("label", {}) or {}).get("effective_trade_date") or ""),
-                "training_window": str((cfg.get("label", {}) or {}).get("training_window") or ""),
                 # 滚动训练溯源（P1）：campaign 关联（config.yaml 透传；缺失为 None）
                 "rolling_meta": cfg.get("rolling_meta") if isinstance(cfg.get("rolling_meta"), dict) else None,
                 # 数据指纹（P1 · §4.5）：可复现三件套的数据面——实况区间/行数、
@@ -2413,26 +2550,36 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        logger.exception(f"Training failed: {e}")
-        result = {"status": "failed", "run_id": run_id, "error": str(e), "traceback": tb}
+        _error_code = getattr(e, "code", None)
+        logger.exception(f"Training failed [{_error_code or 'error'}]: {e}")
+        result = {
+            "status": "failed",
+            "run_id": run_id,
+            "error": str(e),
+            "error_code": _error_code,
+            "traceback": tb,
+        }
 
     finally:
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_clean = _sanitize_nan_inf(result)
-        result_json = json.dumps(result_clean, ensure_ascii=False, indent=2)
-        result_path.write_text(result_json)
-        logger.info(f"result.json → {result_path}")
+        if not _validate_only:
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_clean = _sanitize_nan_inf(result)
+            result_json = json.dumps(result_clean, ensure_ascii=False, indent=2)
+            result_path.write_text(result_json)
+            logger.info(f"result.json → {result_path}")
 
-        if callback_url:
-            try:
-                resp = requests.post(
-                    callback_url, json=result_clean,
-                    headers={"X-Internal-Call-Secret": callback_secret},
-                    timeout=15,
-                )
-                logger.info(f"Callback → HTTP {resp.status_code}")
-            except Exception as cb_err:
-                logger.warning(f"Callback failed (non-fatal): {cb_err}")
+            if callback_url:
+                try:
+                    resp = requests.post(
+                        callback_url, json=result_clean,
+                        headers={"X-Internal-Call-Secret": callback_secret},
+                        timeout=15,
+                    )
+                    logger.info(f"Callback → HTTP {resp.status_code}")
+                except Exception as cb_err:
+                    logger.warning(f"Callback failed (non-fatal): {cb_err}")
+        else:
+            logger.info("validate-only: skip result.json/callback")
 
     logger.info("=== Training Complete ===")
     return 0 if result.get("status") == "completed" else 1

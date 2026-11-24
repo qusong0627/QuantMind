@@ -15,12 +15,24 @@ TRAINING_UTILS = ROOT / "backend" / "services" / "api" / "routers" / "admin" / "
 
 
 def test_classification_keeps_binary_labels_and_uses_classification_objectives() -> None:
-    source = TRAIN_SCRIPT.read_text(encoding="utf-8")
+    train_source = TRAIN_SCRIPT.read_text(encoding="utf-8")
+    loading_source = (ROOT / "docker" / "training" / "data" / "loading.py").read_text(
+        encoding="utf-8"
+    )
+    gbdt_source = (
+        ROOT / "docker" / "training" / "model_trainers" / "trainers_gbdt.py"
+    ).read_text(encoding="utf-8")
 
-    assert 'if _target_mode != "classification":\n        df["label"] = df.groupby("trade_date")["label"].rank' in source
-    assert 'params["objective"] = "binary"' in source
-    assert 'params["objective"] = "binary:logistic"' in source
-    assert 'params["loss_function"] = "Logloss"' in source
+    # 分类标签在 loading 二值化；截面 rank 只对回归分支执行（2026-11 拆包后位置）
+    assert 'if _target_mode == "classification":' in loading_source
+    assert "from preprocessing import binarize_labels" in loading_source
+    assert 'if _target_mode != "classification":' in loading_source
+    assert "cross_sectional_label_transform" in loading_source
+    # 分类 objective 覆盖在 GBDT 训练器
+    assert 'params["objective"] = "binary"' in gbdt_source
+    assert 'params["objective"] = "binary:logistic"' in gbdt_source
+    assert 'params["loss_function"] = "Logloss"' in gbdt_source
+    assert "**_target_metadata(cfg)" in train_source
 
 
 def test_factor_selection_uses_only_the_training_segment() -> None:
@@ -41,8 +53,8 @@ def test_labels_and_split_gap_share_t_plus_one_execution_convention() -> None:
     assert "shift(-(_horizon + _EXECUTION_LAG_DAYS))" in loading_source
     assert "_embargo_days = _horizon + _EXECUTION_LAG_DAYS" in splits_source
     assert '"execution_lag_days": _EXECUTION_LAG_DAYS' in source
-    # 多周期按最大周期留 gap（571165db 跨段泄漏修复）；单周期回落 target_horizon_days+1
+    # 单目标口径：split gap = target_horizon_days + T+1 执行滞后（W2 起单一 target）
     assert (
-        'gap_days = (max(horizons) if horizons else int(normalized.get("target_horizon_days") or 1)) + 1'
+        'gap_days = int(normalized.get("target_horizon_days") or 1) + 1'
         in utils_source
     )

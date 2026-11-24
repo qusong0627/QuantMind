@@ -327,6 +327,13 @@ def _build_payload(
             lib: vid for lib, vid in versions.items() if lib != anchor
         },
     }
+    # Target Contract 可选透传：训练计划显式带 target_ref 时，按注册表目标训练；
+    # 缺省保持 legacy 平铺字段（旧计划零变化）。
+    if isinstance(tp["label"].get("target_ref"), dict):
+        payload["target_ref"] = dict(tp["label"]["target_ref"])
+        if isinstance(tp["label"].get("label_overrides"), dict):
+            payload["label_overrides"] = dict(tp["label"]["label_overrides"])
+
     split = tp["split"]
     for key in (
         "train_start",
@@ -402,6 +409,19 @@ def _assert_config(
         )
     if str(label.get("target_mode") or "") != str(tp["label"]["target_mode"]):
         fails.append(f"label.target_mode={label.get('target_mode')!r}")
+
+    want_ref = tp["label"].get("target_ref")
+    if isinstance(want_ref, dict):
+        want_id = str(want_ref.get("id") or want_ref.get("target_id") or "")
+        want_version = int(want_ref.get("version") or 0)
+        if str(label.get("target_id") or "") != want_id:
+            fails.append(
+                f"label.target_id={label.get('target_id')!r} != {want_id!r}"
+            )
+        if int(label.get("target_version") or 0) != want_version:
+            fails.append(
+                f"label.target_version={label.get('target_version')!r} != {want_version}"
+            )
 
     want_method = str(fs_method or "").strip().lower()
     if str(fsel.get("method") or "").strip().lower() != want_method:

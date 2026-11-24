@@ -116,6 +116,15 @@ class LabelCfg(BaseModel):
     label_formula: str = ""
     effective_trade_date: str = ""
     training_window: str = ""
+    # ── Target Contract（仅新路径写；legacy 为 None，由 dump 时剥离）──
+    target_id: str | None = None
+    target_version: int | None = None
+    target_hash: str | None = None
+    target_base_hash: str | None = None
+    target_status: str | None = None
+    target_spec: dict | None = None
+    target_overrides: dict | None = None
+    label_contract_version: int | None = None
 
 
 class ContextCfg(BaseModel):
@@ -215,6 +224,18 @@ CONDITIONAL_KEYS = (
     "sample_weight",
 )
 
+#: label 块内的 Target Contract 条件键：None 时不发射（legacy 键集合零漂移）。
+LABEL_CONDITIONAL_KEYS = (
+    "target_id",
+    "target_version",
+    "target_hash",
+    "target_base_hash",
+    "target_status",
+    "target_spec",
+    "target_overrides",
+    "label_contract_version",
+)
+
 
 def dump_contract_dict(cfg: TrainingConfig) -> dict:
     """返回与现状 key 集合一致的 config 字典（条件键 None 占位剥离）。
@@ -225,4 +246,10 @@ def dump_contract_dict(cfg: TrainingConfig) -> dict:
     for _key in CONDITIONAL_KEYS:
         if out.get(_key) is None:
             out.pop(_key, None)
+    # Target Contract 只在新路径发射：legacy config 的 label 键集合必须不变。
+    label = out.get("label")
+    if isinstance(label, dict):
+        for _key in LABEL_CONDITIONAL_KEYS:
+            if label.get(_key) is None:
+                label.pop(_key, None)
     return out

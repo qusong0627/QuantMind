@@ -15,6 +15,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, create_model
 
+from backend.shared.training.capabilities import (
+    MODEL_FRAMEWORK,
+    MODEL_PARAMS_FIELD,
+)
+
 # 共享字段：各模型通用（键存在性由本层保证，值校验由 TrainingRequest 保证）。
 _SHARED_FIELDS: dict[str, Any] = {
     "job_name": (Any, None),
@@ -28,6 +33,9 @@ _SHARED_FIELDS: dict[str, Any] = {
     "feature_categories": (Any, None),
     "target_horizon_days": (Any, None),
     "target_mode": (Any, None),
+    "target_ref": (Any, None),
+    "label_overrides": (Any, None),
+    "expected_target_hash": (Any, None),
     "execution_price": (Any, None),
     "label_transform": (Any, None),
     "label_top_pct": (Any, None),
@@ -68,41 +76,9 @@ _SHARED_FIELDS: dict[str, Any] = {
     "data_source_mode": (Any, None),
 }
 
-# 模型名 → 自家 params 容器键名（与 _build_config_yaml 读取键一致）。
-# 注意 linear/rf/mlp 与 DL 组共用顶层 dl_params 键（实现如此）：
-# 顶层键隔离能拦住树↔DL 互串（G1 主案），DL 族内的子键误用无害（被忽略）。
-MODEL_PARAMS_FIELD: dict[str, str] = {
-    "lightgbm": "lgb_params",
-    "xgboost": "xgb_params",
-    "catboost": "catboost_params",
-    "linear": "dl_params",
-    "random_forest": "dl_params",
-    "mlp": "dl_params",
-    "gru": "dl_params",
-    "lstm": "dl_params",
-    "alstm": "dl_params",
-    "transformer": "dl_params",
-    "tabnet": "dl_params",
-    "tcn": "dl_params",
-    "nativetft": "dl_params",
-}
+# MODEL_PARAMS_FIELD / MODEL_FRAMEWORK 的单一事实源在 capabilities.py；
+# 这里只 re-export，保持既有 import 路径兼容（per_model.MODEL_FRAMEWORK 等）。
 
-# 模型名 → 框架（展示用，与 _get_model_framework 口径一致；mlp 为 sklearn 实现）。
-MODEL_FRAMEWORK: dict[str, str] = {
-    "lightgbm": "lightgbm",
-    "xgboost": "xgboost",
-    "catboost": "catboost",
-    "linear": "sklearn",
-    "random_forest": "sklearn",
-    "mlp": "sklearn",
-    "gru": "pytorch",
-    "lstm": "pytorch",
-    "alstm": "pytorch",
-    "transformer": "pytorch",
-    "tabnet": "pytorch",
-    "tcn": "pytorch",
-    "nativetft": "pytorch",
-}
 
 
 def _make_request_model(model_name: str, params_field: str) -> type[BaseModel]:

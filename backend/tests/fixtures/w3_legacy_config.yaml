@@ -1,0 +1,28 @@
+run_id: w3_legacy_validate
+job_name: w3_legacy_validate
+data:
+  train_start: "2023-01-11"
+  train_end: "2024-12-31"
+  features: []
+  source_mode: LOCAL
+model:
+  type: lightgbm
+  prediction_mode: point
+  params: {}
+  xgb_params: {}
+  catboost_params: {}
+  dl_params: {}
+label:
+  target_horizon_days: 5
+  target_mode: return
+  execution_price: close
+  label_transform: rank
+  label_top_pct: 0.2
+  label_drop_extreme_pct: 0.0
+  label_formula: ""
+  effective_trade_date: ""
+  training_window: ""
+context:
+  market: CN
+output:
+  result_path: /tmp/w3_legacy_result.json

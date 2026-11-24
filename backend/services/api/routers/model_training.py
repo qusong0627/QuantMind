@@ -804,6 +804,23 @@ async def get_model_feature_catalog(
     return catalog
 
 
+@router.get(
+    "/training/capabilities",
+    summary="训练目标 × 13 模型能力矩阵（用户态，只读）",
+)
+async def get_training_capabilities(
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """能力矩阵单一事实源；前端据此收敛目标类型与参数选项。
+
+    注意：必须定义在 `GET /{model_id}` 兜底之前（本文件内已前置）。
+    """
+    _ = current_user
+    from backend.shared.training.capabilities import capability_matrix
+
+    return capability_matrix()
+
+
 @router.get("/training-sources", summary="获取可选 QuantDB 训练数据源（用户态）")
 async def get_quantdb_training_sources(
     market: str | None = Query(None, description="市场（CN/HK/US/FUTURES…），默认 CN"),

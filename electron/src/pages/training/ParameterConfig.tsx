@@ -107,6 +107,35 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
   });
   const isEnsembleMixed = params.model_types.length > 1 && hasDLSelected && hasClassicSelected;
   const showEnsembleSelector = params.model_types.length > 1 && !isEnsembleMixed;
+  const isClassificationTarget = target.mode === 'classification';
+  const isQuantileMode = params.prediction_mode === 'quantile';
+  const isTreeModel = ['lightgbm', 'xgboost', 'catboost'].includes(params.model_type);
+  const objectiveLocked = isClassificationTarget || isQuantileMode;
+  const objectiveValue = isClassificationTarget
+    ? 'binary'
+    : isQuantileMode
+      ? undefined
+      : params.objective;
+  const metricValue = isClassificationTarget ? 'auc' : isQuantileMode ? undefined : params.metric;
+  const objectiveOptions = isClassificationTarget
+    ? [{ label: '二分类 (binary) · 由目标固定', value: 'binary', disabled: true }]
+    : [
+        { label: '回归 (regression)', value: 'regression' },
+        { label: '排序 XendCG (rank_xendcg)', value: 'rank_xendcg', disabled: !isTreeModel },
+        { label: '排序 LambdaRank (lambdarank)', value: 'lambdarank', disabled: !isTreeModel },
+      ];
+  const metricOptions = isClassificationTarget
+    ? [
+        { label: 'AUC · 由目标固定', value: 'auc', disabled: true },
+        { label: 'Binary Logloss · 由目标固定', value: 'binary_logloss', disabled: true },
+      ]
+    : [
+        { label: 'L2', value: 'l2' },
+        { label: 'RMSE', value: 'rmse' },
+        { label: 'MAE', value: 'mae' },
+        { label: 'NDCG（排序）', value: 'ndcg', disabled: !isTreeModel },
+        { label: 'MAP（排序）', value: 'map', disabled: !isTreeModel },
+      ];
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_0.9fr]">
       <Card className="rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: 20 } }}>
@@ -355,35 +384,40 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   <div className="space-y-1">
                     <div className="text-xs text-slate-500">Objective</div>
                     <Select
-                      value={params.objective}
+                      value={objectiveValue}
+                      disabled={objectiveLocked}
+                      placeholder={isQuantileMode ? '由分位训练器控制' : undefined}
                       className="w-full"
                       onChange={(value) => onParamsChange({ ...params, objective: value as TrainingParams['objective'] })}
-                      options={[
-                        { label: '回归 (regression)', value: 'regression' },
-                        { label: '二分类 (binary)', value: 'binary' },
-                        { label: '排序 XendCG (rank_xendcg)', value: 'rank_xendcg' },
-                        { label: '排序 LambdaRank (lambdarank)', value: 'lambdarank' },
-                      ]}
+                      options={objectiveOptions}
                     />
+                    <div className="text-[10px] text-slate-400">
+                      {isClassificationTarget
+                        ? '分类目标的 objective 由训练端固定为 binary，页面不可覆盖。'
+                        : isQuantileMode
+                          ? '分位模式由分位训练器控制，不接受 objective。'
+                          : '排序损失只支持 LightGBM/XGBoost/CatBoost。'}
+                    </div>
                   </div>
                 </Col>
                 <Col span={12}>
                   <div className="space-y-1">
                     <div className="text-xs text-slate-500">Metric</div>
                     <Select
-                      value={params.metric}
+                      value={metricValue}
+                      disabled={isQuantileMode}
+                      placeholder={isQuantileMode ? '由分位训练器控制' : undefined}
                       className="w-full"
                       onChange={(value) => onParamsChange({ ...params, metric: value as TrainingParams['metric'] })}
-                      options={[
-                        { label: 'L2', value: 'l2' },
-                        { label: 'RMSE', value: 'rmse' },
-                        { label: 'MAE', value: 'mae' },
-                        { label: 'AUC', value: 'auc' },
-                        { label: 'Binary Logloss', value: 'binary_logloss' },
-                        { label: 'NDCG（排序）', value: 'ndcg' },
-                        { label: 'MAP（排序）', value: 'map' },
-                      ]}
+                      options={metricOptions}
                     />
+                    <div className="text-[10px] text-slate-400">
+                      {isClassificationTarget
+                        ? '分类目标默认 AUC；训练端会强制覆盖。'
+                        : isQuantileMode
+                          ? '分位模式由分位训练器控制，不接受 metric。'
+                          : '排序 metric 需要对应的排序 objective。'}
+                    </div>
                   </div>
                 </Col>
               </Row>

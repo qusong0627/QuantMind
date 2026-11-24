@@ -18,6 +18,16 @@ import {
   DEFAULT_FACTOR_FILTER,
   buildLabelTransformSummary,
 } from './trainingUtils';
+import {
+  LabelTargetSummary,
+  TrainingCapabilities,
+  applyTargetSpecToTarget,
+  findTargetByKey,
+  supportedTargetModes,
+  targetFormLocks,
+  targetModeUnsupportedReason,
+  targetRefKey,
+} from './trainingTargetCapabilities';
 import { AdminModelFeatureDataCoverage } from '../../features/admin/types';
 
 const { RangePicker } = DatePicker;
@@ -31,7 +41,24 @@ interface TrainingTargetConfigProps {
   // 因子筛选开关与阈值（默认开启，阈值对齐后端 ic_icir 默认）
   factorFilter?: TrainingFactorFilterConfig;
   onFactorFilterChange?: (filter: TrainingFactorFilterConfig) => void;
+  /** 已选模型（多模型集成取交集）；用于目标类型能力收敛 */
+  modelTypes?: string[];
+  /** 后端能力矩阵（GET /models/training/capabilities）；缺省时全部可选 */
+  capabilities?: TrainingCapabilities | null;
+  /** 目标注册表（active，按市场过滤） */
+  availableTargets?: LabelTargetSummary[];
+  /** 选中/切回 legacy；父层负责把 spec 灌进 TrainingTarget */
+  onSelectTarget?: (target: LabelTargetSummary | null) => void;
 }
+
+const FAMILY_LABELS: Record<string, string> = {
+  forward_return: '收益回归',
+  classification_binary: '方向分类',
+  quantile_return: '分位回归',
+};
+
+const targetLabel = (item: LabelTargetSummary): string =>
+  `${item.id} @v${item.version} · ${FAMILY_LABELS[item.family] || item.family}`;
 
 const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactNode }> = ({ title, desc, icon }) => (
   <div className="flex items-start justify-between gap-4">
@@ -57,9 +84,50 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
   dataCoverage,
   factorFilter,
   onFactorFilterChange,
+  modelTypes = ['lightgbm'],
+  capabilities = null,
+  availableTargets = [],
+  onSelectTarget,
 }) => {
   const labelFormula = buildLabelFormula(target);
   const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0]);
+
+  const supportedModes = supportedTargetModes(modelTypes, capabilities);
+  const classificationSupported = supportedModes.includes('classification');
+  const classificationReason = targetModeUnsupportedReason(modelTypes, 'classification', capabilities);
+  const targetKey = targetRefKey(target.targetRef);
+  const selectedTarget = findTargetByKey(availableTargets, targetKey);
+  const locks = targetFormLocks(target.targetSpec);
+  const isRegistryTarget = Boolean(target.targetRef);
+  const hideDropExtreme =
+    target.mode === 'classification' ||
+    locks.hideDropExtreme ||
+    ['top_tail', 'size_excess_rank', 'size_excess_zscore'].includes(target.labelTransform);
+  const hideTransform = target.mode === 'classification' || locks.lockTransform;
+
+  const handleTargetSourceChange = (value: string) => {
+    if (value === 'legacy') {
+      onSelectTarget?.(null);
+      onTargetChange({
+        ...target,
+        targetRef: null,
+        targetSpec: null,
+        targetOverrides: null,
+        expectedTargetHash: null,
+      });
+      return;
+    }
+    const picked = findTargetByKey(availableTargets, value);
+    if (!picked) return;
+    onSelectTarget?.(picked);
+    onTargetChange({
+      ...applyTargetSpecToTarget(target, picked.spec),
+      targetRef: { id: picked.id, version: picked.version },
+      targetSpec: picked.spec,
+      targetOverrides: null,
+      expectedTargetHash: null,
+    });
+  };
 
   const trainDays = daysBetween(timePeriods.train);
   const valDays = daysBetween(timePeriods.val);
@@ -88,33 +156,95 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
         <Divider className="my-4" />
         <div className="space-y-4">
           <div>
+            <div className="mb-2 text-sm font-semibold text-slate-800">目标来源</div>
+            <Select
+              value={targetKey}
+              onChange={handleTargetSourceChange}
+              className="w-full"
+              options={[
+                { label: '自定义（legacy 平铺口径）', value: 'legacy' },
+                ...availableTargets.map((item) => ({
+                  label: targetLabel(item),
+                  value: targetRefKey(item),
+                })),
+              ]}
+            />
+            {selectedTarget ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
+                <Tag className="m-0 rounded-lg border-0 bg-emerald-50 px-2 font-bold text-emerald-700">
+                  {selectedTarget.status}
+                </Tag>
+                <span className="font-mono">hash {selectedTarget.spec_hash.slice(0, 8)}</span>
+                <span>冻结口径；仅白名单字段可覆盖</span>
+              </div>
+            ) : (
+              <div className="mt-2 text-xs text-slate-500">
+                未引用注册表目标：按平铺字段训练，metadata 记为 legacy。
+              </div>
+            )}
+          </div>
+
+          <div>
             <div className="mb-2 text-sm font-semibold text-slate-800">目标类型</div>
             <Select
               value={target.mode}
-              onChange={(value) => onTargetChange({ ...target, mode: value as TargetMode })}
+              disabled={isRegistryTarget}
+              onChange={(value) => {
+                const mode = value as TargetMode;
+                onTargetChange(
+                  mode === 'classification'
+                    ? {
+                        ...target,
+                        mode,
+                        labelTransform: 'rank',
+                        labelTopPct: 0.2,
+                        labelDropExtremePct: 0,
+                      }
+                    : { ...target, mode },
+                );
+              }}
               className="w-full"
               options={[
                 { label: '回归目标（未来收益率）', value: 'return' },
-                { label: '分类目标（涨跌方向）', value: 'classification' },
+                {
+                  label: classificationSupported
+                    ? '分类目标（涨跌方向）'
+                    : `分类目标（不可用：${classificationReason || '当前模型不支持'}）`,
+                  value: 'classification',
+                  disabled: !classificationSupported,
+                },
               ]}
             />
             <div className="mt-2 text-xs text-slate-500">
-              {target.mode === 'classification'
-                ? '适合做方向预测、事件识别等离散标签任务。'
-                : '适合做未来收益率、rank score 等连续标签任务。'}
+              {isRegistryTarget
+                ? '目标类型由注册表 spec 决定，本次训练不可切换；如需其它类型请换目标或走自定义。'
+                : target.mode === 'classification'
+                  ? '适合做方向预测、事件识别等离散标签任务。'
+                  : '适合做未来收益率、rank score 等连续标签任务。'}
             </div>
+            {!classificationSupported && !isRegistryTarget && (
+              <Alert
+                type="warning"
+                showIcon
+                className="mt-2 rounded-xl"
+                message={classificationReason || '当前模型组合不支持分类目标'}
+              />
+            )}
           </div>
 
           <div>
             <div className="mb-2 flex items-center justify-between">
               <div className="text-sm font-semibold text-slate-800">T+N 参数</div>
-              <div className="text-xs text-slate-500">允许 1~30 个交易日</div>
+              <div className="text-xs text-slate-500">
+                {locks.lockHorizon ? '分位目标不允许覆盖 horizon' : '允许 1~30 个交易日'}
+              </div>
             </div>
             <div className="flex flex-wrap gap-2">
               {TARGET_PRESETS.map((preset) => (
                 <Button
                   key={preset}
                   size="small"
+                  disabled={locks.lockHorizon}
                   type={target.horizonDays === preset ? 'primary' : 'default'}
                   className={clsx('h-8 rounded-xl font-bold px-3', target.horizonDays === preset && 'bg-indigo-600')}
                   onClick={() => onTargetChange({ ...target, horizonDays: preset })}
@@ -127,6 +257,7 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
               <InputNumber
                 min={1}
                 max={30}
+                disabled={locks.lockHorizon}
                 value={target.horizonDays}
                 onChange={(value) => onTargetChange({ ...target, horizonDays: clamp(Number(value ?? target.horizonDays), 1, 30) })}
                 className="w-28"
@@ -148,6 +279,7 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
                 <div className="mb-1 text-xs font-semibold text-slate-700">执行价</div>
                 <Select
                   value={target.executionPrice}
+                  disabled={isRegistryTarget}
                   onChange={(value) => onTargetChange({ ...target, executionPrice: value as TrainingTarget['executionPrice'] })}
                   className="w-full"
                   options={[
@@ -156,27 +288,46 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
                   ]}
                 />
                 <div className="mt-1 text-[10px] leading-relaxed text-slate-500">
-                  标签 = close(T+1+N) / 执行价(T+1) − 1
+                  {isRegistryTarget
+                    ? '执行价属于冻结目标口径，不允许在本次训练中覆盖。'
+                    : '标签 = close(T+1+N) / 执行价(T+1) − 1'}
                 </div>
               </div>
               <div>
-                <div className="mb-1 text-xs font-semibold text-slate-700">标签截面变换</div>
-                <Select
-                  value={target.labelTransform}
-                  onChange={(value) => onTargetChange({ ...target, labelTransform: value as TrainingTarget['labelTransform'] })}
-                  className="w-full"
-                  options={[
-                    { label: '截面 rank（默认）', value: 'rank' },
-                    { label: '截面 zscore', value: 'zscore' },
-                    { label: '原始收益', value: 'raw' },
-                    { label: 'top-tail（只学最强尾部）', value: 'top_tail' },
-                  ]}
-                />
-                <div className="mt-1 text-[10px] leading-relaxed text-slate-500">{buildLabelTransformSummary(target)}</div>
+                {hideTransform ? (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600">
+                    {target.mode === 'classification'
+                      ? '分类目标不做截面变换（训练端跳过；rank 仅作 config 占位）。'
+                      : '分位回归固定使用原始收益（raw），不允许截面变换。'}
+                  </div>
+                ) : (
+                  <>
+                    <div className="mb-1 text-xs font-semibold text-slate-700">标签截面变换</div>
+                    <Select
+                      value={target.labelTransform}
+                      onChange={(value) => onTargetChange({ ...target, labelTransform: value as TrainingTarget['labelTransform'] })}
+                      className="w-full"
+                      options={[
+                        { label: '截面 rank（默认）', value: 'rank' },
+                        { label: '截面 zscore', value: 'zscore' },
+                        { label: '原始收益', value: 'raw' },
+                        { label: 'top-tail（只学最强尾部）', value: 'top_tail' },
+                        { label: '同市值桶内超额 rank', value: 'size_excess_rank' },
+                        { label: '同市值桶内超额 zscore', value: 'size_excess_zscore' },
+                      ]}
+                    />
+                    <div className="mt-1 text-[10px] leading-relaxed text-slate-500">{buildLabelTransformSummary(target)}</div>
+                    {target.labelTransform.startsWith('size_excess') && (
+                      <div className="mt-1 text-[10px] leading-relaxed text-amber-600">
+                        需要特征列表包含 total_cap，否则提交会被后端拒绝。
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
-              {target.labelTransform === 'top_tail' && (
+              {target.labelTransform === 'top_tail' && !locks.hideTopPct && (
                 <div>
                   <div className="mb-1 text-xs font-semibold text-slate-700">top-tail 尾部比例</div>
                   <InputNumber
@@ -193,24 +344,26 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
                   />
                 </div>
               )}
-              <div>
-                <div className="mb-1 text-xs font-semibold text-slate-700">极端标签清洗（仅训练段）</div>
-                <InputNumber
-                  min={0}
-                  max={20}
-                  step={1}
-                  value={Math.round(target.labelDropExtremePct * 100)}
-                  onChange={(value) => onTargetChange({
-                    ...target,
-                    labelDropExtremePct: clamp(Number(value ?? 0), 0, 20) / 100,
-                  })}
-                  addonAfter="%"
-                  className="w-full"
-                />
-                <div className="mt-1 text-[10px] leading-relaxed text-slate-500">
-                  按日剔除标签两端各 N%，0 = 关闭；只作用于训练段，验证/测试段不动。
+              {!hideDropExtreme && (
+                <div>
+                  <div className="mb-1 text-xs font-semibold text-slate-700">极端标签清洗（仅训练段）</div>
+                  <InputNumber
+                    min={0}
+                    max={20}
+                    step={1}
+                    value={Math.round(target.labelDropExtremePct * 100)}
+                    onChange={(value) => onTargetChange({
+                      ...target,
+                      labelDropExtremePct: clamp(Number(value ?? 0), 0, 20) / 100,
+                    })}
+                    addonAfter="%"
+                    className="w-full"
+                  />
+                  <div className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                    按日剔除标签两端各 N%，0 = 关闭；只作用于训练段，验证/测试段不动。
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
 

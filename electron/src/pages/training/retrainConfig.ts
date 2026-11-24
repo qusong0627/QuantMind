@@ -270,6 +270,9 @@ export function buildRetrainTrainingConfig(payload: RetrainConfigPayload): Built
     params.tft_num_heads = asNumber(dlParams.num_heads) ?? params.tft_num_heads;
   }
 
+  const targetSpecRaw = asRecord(label.target_spec ?? meta.target_spec);
+  const targetOverridesRaw = asRecord(label.target_overrides ?? meta.target_overrides);
+  const targetId = asString(label.target_id) ?? asString(meta.target_id);
   const target = normalizeTrainingTarget({
     mode: label.target_mode === 'classification' || label.target_mode === 'return'
       ? label.target_mode
@@ -285,6 +288,13 @@ export function buildRetrainTrainingConfig(payload: RetrainConfigPayload): Built
         : undefined,
     labelTopPct: asNumber(label.label_top_pct),
     labelDropExtremePct: asNumber(label.label_drop_extreme_pct),
+    targetRef:
+      targetId && targetId !== 'legacy'
+        ? { id: targetId, version: asNumber(label.target_version ?? meta.target_version) ?? 1 }
+        : null,
+    targetSpec: Object.keys(targetSpecRaw).length ? targetSpecRaw : null,
+    targetOverrides: Object.keys(targetOverridesRaw).length ? targetOverridesRaw : null,
+    expectedTargetHash: asString(label.target_hash) ?? asString(meta.target_hash) ?? null,
   });
 
   const context: TrainingContext = {

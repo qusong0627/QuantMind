@@ -580,45 +580,53 @@ def _upgrade_sql_files() -> list[str]:
     import glob as _glob
 
     backend_dir = os.path.dirname(os.path.abspath(__file__))
+    backend_mig_dir = os.path.join(backend_dir, "shared", "db_migrations")
+    explicit_dir = os.getenv("QM_UPGRADE_SQL_DIR", "")
     candidates = [
-        os.getenv("QM_UPGRADE_SQL_DIR", ""),
+        explicit_dir,
         os.getenv("QM_DATA_DIR", ""),
         "/data",
         "/app/data",
         # 源码仓库 / 便携包：<root>/data（backend/ 的上一级）
         os.path.join(os.path.dirname(backend_dir), "data"),
+        # 随 backend 包发布的新增量迁移（不依赖 data/ 挂载；Dockerfile 都会 COPY backend）
+        backend_mig_dir,
     ]
-    seen: set[str] = set()
+    # 同名脚本优先级：显式 override(0) > backend canonical(1) > data 挂载(2)。
+    by_name: dict[str, tuple[int, str]] = {}
+    seen_dirs: set[str] = set()
     for directory in candidates:
-        if not directory or directory in seen:
+        if not directory or directory in seen_dirs:
             continue
-        seen.add(directory)
-        hits = sorted(_glob.glob(os.path.join(directory, "upgrade_*.sql")))
-        if not hits:
+        seen_dirs.add(directory)
+        priority = 0 if directory == explicit_dir else 1 if directory == backend_mig_dir else 2
+        for path in _glob.glob(os.path.join(directory, "upgrade_*.sql")):
+            name = os.path.basename(path)
+            existing = by_name.get(name)
+            if existing is None or priority < existing[0]:
+                by_name[name] = (priority, path)
+    # 全局按文件名排序执行，保证跨目录的版本顺序（1.0.x → 1.1.x）不被目录顺序打乱。
+    safe: list[str] = []
+    for name in sorted(by_name):
+        path = by_name[name][1]
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as e:
+            logger.warning("增量升级脚本不可读，跳过 %s: %s", name, e)
             continue
-        safe: list[str] = []
-        for path in hits:
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    text = f.read()
-            except OSError as e:
-                logger.warning(
-                    "增量升级脚本不可读，跳过 %s: %s", os.path.basename(path), e
-                )
-                continue
-            if _is_destructive_sql(text):
-                logger.warning(
-                    "跳过破坏性增量升级脚本（含 DROP/TRUNCATE/DELETE，需人工执行）: %s",
-                    os.path.basename(path),
-                )
-                continue
-            safe.append(path)
-        return safe
-    return []
+        if _is_destructive_sql(text):
+            logger.warning(
+                "跳过破坏性增量升级脚本（含 DROP/TRUNCATE/DELETE，需人工执行）: %s",
+                name,
+            )
+            continue
+        safe.append(path)
+    return safe
 
 
 def _ensure_upgrade_scripts(env: dict) -> None:
-    """执行 data/upgrade_*.sql 增量迁移（system_events、news title 等）。
+    """执行 data/upgrade_*.sql 与 backend/shared/db_migrations/upgrade_*.sql。
 
     幂等（均含 IF NOT EXISTS / DO IF NOT EXISTS），可重复执行，避免
     新表/新列因未自动迁移而导致线上 500（如 system_events 缺失、

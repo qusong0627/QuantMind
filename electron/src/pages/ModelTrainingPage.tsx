@@ -22,6 +22,12 @@ import { FeatureSelector } from './training/FeatureSelector';
 import { StockPoolPickerModal } from '../components/backtest/StockPoolPickerModal';
 import type { StockPoolOption } from '../services/stockPoolOptionService';
 import { TrainingTargetConfig } from './training/TrainingTargetConfig';
+import {
+  capabilityModelTypes,
+  supportedTargetModes,
+  type LabelTargetSummary,
+  type TrainingCapabilities,
+} from './training/trainingTargetCapabilities';
 import { ParameterConfig } from './training/ParameterConfig';
 import { TrainingConsole } from './training/TrainingConsole';
 import { TrainingRunHistory } from './training/TrainingRunHistory';
@@ -260,6 +266,11 @@ export const ModelTrainingPage: React.FC = () => {
   const maxTimeMinutes = 720;
   // 因子筛选开关与阈值（默认开启，后端默认 ic_icir: top-80 / |IC|≥0.01 / |ICIR|≥0.15 / 相关性<0.9）
   const [factorFilter, setFactorFilter] = useState<TrainingFactorFilterConfig>({ ...DEFAULT_FACTOR_FILTER });
+  // Target Contract：能力矩阵与目标注册表（只读；接口失败时前端全部可选，后端 422 兜底）
+  const [trainingCapabilities, setTrainingCapabilities] = useState<TrainingCapabilities | null>(null);
+  const [labelTargets, setLabelTargets] = useState<LabelTargetSummary[]>([]);
+  const [labelTargetsLoaded, setLabelTargetsLoaded] = useState(false);
+
   // 股票池（第一步数据范围）：null 表示全市场训练，否则为 pool:<code> 引用
   const [poolPickerOpen, setPoolPickerOpen] = useState(false);
   // 训练记录（历史训练列表；点进去复用训练结束时的结果页）
@@ -283,6 +294,100 @@ export const ModelTrainingPage: React.FC = () => {
 
   // Derive individual fields from formState for inline use
   const { selectedFeatures, timePeriods, wfaConfig, target, params, context, displayName, displayNameMode } = formState;
+
+  const effectiveModelTypes = useMemo(
+    () => capabilityModelTypes({ model_type: params.model_type, model_types: params.model_types }),
+    [params.model_type, params.model_types],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    modelTrainingService
+      .getTrainingCapabilities()
+      .then((caps) => {
+        if (!cancelled) setTrainingCapabilities(caps);
+      })
+      .catch(() => {
+        if (!cancelled) setTrainingCapabilities(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLabelTargetsLoaded(false);
+    modelTrainingService
+      .listLabelTargets({ market: trainingMarket, status: 'active' })
+      .then((resp) => {
+        if (cancelled) return;
+        setLabelTargets(resp.items || []);
+        setLabelTargetsLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLabelTargets([]);
+        setLabelTargetsLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [trainingMarket]);
+
+  // 模型/市场切换后，注册表目标若不再可用（classification × DL、quantile × 非
+  // 单 LGB/非 CN），清掉冻结引用，避免提交到能力不匹配的目标。
+  useEffect(() => {
+    const family = String(target.targetSpec?.family || '');
+    const registryTargetInvalid =
+      Boolean(target.targetRef) &&
+      ((family === 'classification_binary' &&
+        !supportedTargetModes(effectiveModelTypes, trainingCapabilities).includes('classification')) ||
+        (family === 'quantile_return' &&
+          !(effectiveModelTypes.length === 1 &&
+            effectiveModelTypes[0] === 'lightgbm' &&
+            trainingMarket === 'CN')));
+
+    if (registryTargetInvalid) {
+      dispatch({
+        type: 'SET_TARGET',
+        payload: {
+          ...target,
+          targetRef: null,
+          targetSpec: null,
+          targetOverrides: null,
+          expectedTargetHash: null,
+          mode: 'return',
+        },
+      });
+      return;
+    }
+    if (target.mode !== 'classification') return;
+    if (supportedTargetModes(effectiveModelTypes, trainingCapabilities).includes('classification')) return;
+    dispatch({
+      type: 'SET_TARGET',
+      payload: { ...target, mode: 'return', labelTransform: 'rank', labelDropExtremePct: 0 },
+    });
+  }, [
+    effectiveModelTypes,
+    trainingCapabilities,
+    trainingMarket,
+    target.mode,
+    target.targetRef?.id,
+    target.targetRef?.version,
+    target.targetSpec,
+  ]);
+
+  // 换市场后注册表目标不在当前列表：清掉引用，避免提交到不存在的 target。
+  useEffect(() => {
+    if (!labelTargetsLoaded || !target.targetRef) return;
+    const exists = labelTargets.some(
+      (item) => item.id === target.targetRef?.id && item.version === target.targetRef?.version,
+    );
+    if (!exists) {
+      dispatch({ type: 'SET_TARGET', payload: { ...target, targetRef: null, targetSpec: null } });
+    }
+  }, [labelTargetsLoaded, labelTargets, target.targetRef?.id, target.targetRef?.version]);
 
   // 目录加载 effect 要读「当前勾选」来决定增删附加库后是否保留选择。
   // 用 effect 同步（声明在目录加载 effect 之前，同一 commit 内先执行），避免读到上一轮的值。
@@ -728,6 +833,7 @@ export const ModelTrainingPage: React.FC = () => {
         label_transform: payload.label_transform,
         label_top_pct: payload.label_top_pct,
         execution_price: payload.execution_price,
+        target_hash: payload.target_hash,
         industry_as_feature: payload.context?.industry_as_feature ?? false,
       });
       setCacheStatus(status);
@@ -1446,7 +1552,7 @@ export const ModelTrainingPage: React.FC = () => {
                         <FeatureSelector categories={featureCategories} selectedFeatures={selectedFeatures} onChange={(f) => dispatch({ type: 'SET_FEATURES', payload: f })} loading={featureCatalogLoading} onGuide={() => navigate('/admin/training-datasets')} anchorSource={factorSource} />
                       </>
                     )}
-                    {currentStep === 1 && <TrainingTargetConfig target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} factorFilter={factorFilter} onFactorFilterChange={setFactorFilter} />}
+                    {currentStep === 1 && <TrainingTargetConfig target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} factorFilter={factorFilter} onFactorFilterChange={setFactorFilter} modelTypes={effectiveModelTypes} capabilities={trainingCapabilities} availableTargets={labelTargets} />}
                     {currentStep === 2 && <ParameterConfig params={params} context={context} onParamsChange={(p) => dispatch({ type: 'SET_PARAMS', payload: p })} onContextChange={(c) => dispatch({ type: 'SET_CONTEXT', payload: c })} displayName={displayName} onDisplayNameChange={(n, m) => dispatch({ type: 'SET_DISPLAY_NAME', payload: { name: n, mode: m } })} autoDisplayName={autoDisplayName} market={trainingMarket} target={target} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} wfa={wfaConfig} onWfaChange={(w) => dispatch({ type: 'SET_WFA', payload: w })} />}
                     {currentStep === 3 && <TrainingConsole trainingStatus={trainingStatus} executionStage={executionStage} progress={progress} logs={logs} backendRunStatus={backendRunStatus} result={result} requestPreview={requestPreview} runRequest={activeRunRequest} totalDays={totalDays} trainDays={trainDays} valDays={valDays} testDays={testDays} target={target} factorFilter={factorFilter} onGoToResult={() => setCurrentStep(4)} />}
                     {currentStep === 4 && <TrainingResultView result={result} resultError={resultError} settingDefaultModel={settingDefaultModel} onSetDefaultModel={handleSetDefaultModel} onExportConfig={handleExportConfig} trainingStatus={trainingStatus} runId={activeRunId} />}

@@ -46,15 +46,29 @@ def _output_dir(cfg: dict | None) -> Path:
         return hardcoded
     return Path.cwd()
 
-_TREE_MODEL_TYPES = {"lightgbm", "xgboost", "catboost", "linear", "random_forest"}
-
-_DL_MODEL_TYPES = {"gru", "lstm", "alstm", "transformer", "tabnet", "tcn", "nativetft", "mlp"}
-
-_CUSTOM_DL_MODEL_TYPES = {"nativetft", "mlp"}  # 非 Qlib 的自定义 DL 模型（hybrid 已剔除，未实现）
-
-_ALL_MODEL_TYPES = _TREE_MODEL_TYPES | _DL_MODEL_TYPES
-
-_ENSEMBLE_MODEL_TYPES = _TREE_MODEL_TYPES - {"linear"}  # 可参与集成的树模型
+# 能力/类型集合的单一事实源在 backend/shared/training/capabilities.py。
+# 旧兼容镜像（docker/Dockerfile.training，无 /app/backend）降级为本地同名常量；
+# 新训练镜像（Dockerfile.trainer，COPY backend /app/backend）走 import。
+try:  # pragma: no cover - 兼容镜像分支
+    from backend.shared.training.capabilities import (
+        ALL_MODEL_TYPES as _ALL_MODEL_TYPES,
+        CUSTOM_DL_MODEL_TYPES as _CUSTOM_DL_MODEL_TYPES,
+        DL_MODEL_TYPES as _DL_MODEL_TYPES,
+        ENSEMBLE_MODEL_TYPES as _ENSEMBLE_MODEL_TYPES,
+        TREE_MODEL_TYPES as _TREE_MODEL_TYPES,
+    )
+except ImportError:  # 旧兼容镜像：保持历史值，升级镜像后自动切到单一事实源
+    logger.warning(
+        "backend.shared.training.capabilities unavailable; "
+        "using legacy local model type sets (compat image)"
+    )
+    _TREE_MODEL_TYPES = {"lightgbm", "xgboost", "catboost", "linear", "random_forest"}
+    _DL_MODEL_TYPES = {
+        "gru", "lstm", "alstm", "transformer", "tabnet", "tcn", "nativetft", "mlp",
+    }
+    _CUSTOM_DL_MODEL_TYPES = {"nativetft", "mlp"}
+    _ALL_MODEL_TYPES = _TREE_MODEL_TYPES | _DL_MODEL_TYPES
+    _ENSEMBLE_MODEL_TYPES = _TREE_MODEL_TYPES - {"linear"}
 
 @dataclass
 class Trainer:
@@ -102,7 +116,7 @@ def _dispatch_gbdt_sklearn(
     if groups is not None and model_type in ("lightgbm", "xgboost", "catboost"):
         kwargs["groups"] = groups
     if sample_weight is not None:
-        if model_type in ("lightgbm", "xgboost", "catboost"):
+        if model_type in ("lightgbm", "xgboost", "catboost", "linear", "random_forest"):
             kwargs["sample_weight"] = sample_weight
         else:
             logger.warning("sample_weight is ignored for model_type=%s", model_type)

@@ -52,6 +52,9 @@ from backend.services.api.routers.model_inference_jobs import (
 from backend.services.api.routers.model_selection_stats import (
     router as model_selection_stats_router,
 )
+from backend.services.api.routers.training_targets import (
+    user_router as training_targets_router,
+)
 from backend.services.api.routers.model_training import router as model_training_router
 from backend.services.api.routers.training_cache import router as training_cache_router
 from backend.services.api.routers.neutralization import router as neutralization_router
@@ -534,6 +537,9 @@ app.include_router(
 app.include_router(
     training_cache_router, prefix="/api/v1/models", tags=["TrainingCache"]
 )  # 训练数据缓存探测/清理（/api/v1/models/training-cache/*，必须先于 model_training 兜底）
+app.include_router(
+    training_targets_router, prefix="/api/v1/models", tags=["ModelTraining"]
+)  # 训练目标注册表（/api/v1/models/training/targets/*，必须先于 model_training 兜底）
 app.include_router(
     model_training_router, prefix="/api/v1/models", tags=["ModelTraining"]
 )

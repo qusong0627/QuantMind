@@ -334,6 +334,34 @@ def _build_payload(
         "auto_feature_filter": "false",
     }
 
+    # Target Contract：新模型带 target_ref + 原训练的实际 overrides；
+    # 直接发送 base ref 会静默退回基础口径（例如用户把 T+5 改成 T+10 的重训）。
+    target_id = str(
+        metadata.get("target_id") or _dig(config, "label", "target_id") or ""
+    ).strip()
+    if target_id and target_id != "legacy":
+        try:
+            target_version = int(
+                metadata.get("target_version")
+                or _dig(config, "label", "target_version")
+                or 1
+            )
+        except (TypeError, ValueError):
+            target_version = 1
+        payload["target_ref"] = {"id": target_id, "version": target_version}
+        overrides = metadata.get("target_overrides")
+        if not isinstance(overrides, dict):
+            overrides = _dig(config, "label", "target_overrides")
+        if isinstance(overrides, dict) and overrides:
+            payload["label_overrides"] = dict(overrides)
+        expected_hash = str(
+            metadata.get("target_hash")
+            or _dig(config, "label", "target_hash")
+            or ""
+        ).strip()
+        if expected_hash:
+            payload["expected_target_hash"] = expected_hash
+
     # context：metadata（迁移后描述）与 config（训练当时配置）并集，config 更权威
     context: dict[str, Any] = {}
     for ctx in (_dig(metadata, "context"), _dig(config, "context")):
@@ -456,6 +484,12 @@ def derive_recipe_from_model(
         "factor_market": factor_market,
         "factor_source": factor_source,
         "target_horizon_days": horizon,
+        "target_hash": str(
+            metadata.get("target_hash")
+            or _dig(config, "label", "target_hash")
+            or ""
+        ).strip()
+        or None,
         "window_policy": _window_policy_dict(window_policy, recipe_id),
         "payload": payload,
         "source_model_id": model_id,

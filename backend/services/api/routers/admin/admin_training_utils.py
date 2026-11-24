@@ -329,6 +329,36 @@ async def _load_allowed_features(market: str | None = None) -> list[str]:
 # backend.shared.training.request（单源），此处 import 复用；context 清洗走 req.context。
 
 
+def _extract_objective(model_type: str, req) -> str | None:
+    """按主模型取出 objective（用于目标能力冲突检测）。"""
+    mt = str(model_type or "").strip().lower()
+    if mt == "lightgbm":
+        return str((req.lgb_params or {}).get("objective") or "").strip() or None
+    if mt == "xgboost":
+        return str((req.xgb_params or {}).get("objective") or "").strip() or None
+    if mt == "catboost":
+        return str((req.catboost_params or {}).get("loss_function") or "").strip() or None
+    return None
+
+
+def _sample_weight_requested(payload: dict[str, Any]) -> bool:
+    sw = payload.get("sample_weight")
+    if not isinstance(sw, dict):
+        return False
+    tradeable = str(sw.get("tradeable_mask", "")).strip().lower() in ("1", "true", "yes", "on")
+    st = str(sw.get("st", "")).strip().lower() in ("1", "true", "yes", "on")
+    try:
+        half_life = float(sw.get("time_decay_half_life_days") or 0)
+    except (TypeError, ValueError):
+        half_life = 0.0
+    return bool(tradeable or st or half_life > 0)
+
+
+def _target_gate_mode(env_key: str) -> str:
+    value = str(os.getenv(env_key, "strict") or "strict").strip().lower()
+    return value if value in {"strict", "warn", "off"} else "strict"
+
+
 def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> dict[str, Any]:
     from backend.shared.training.request import TrainingRequest
 
@@ -380,13 +410,160 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
 
     # display/日期/数值/特征/params 校验已收敛进 TrainingRequest。
 
-    target_horizon_days = int(payload.get("target_horizon_days", 1))
-    if not (1 <= target_horizon_days <= 30):
-        raise HTTPException(status_code=422, detail="target_horizon_days must be between 1 and 30")
+    # ── Target Contract：解析结果由 submit_training_job 注入 _target_meta ──
+    # 直接调用本函数的测试/旧路径没有 _target_meta：从 req 平铺字段合成 legacy，
+    # 与生产 legacy 路径走同一套 spec 校验，避免“测试路径绕过”。
+    from backend.shared.training.capabilities import (
+        CapabilityError,
+        ObjectiveConflictError,
+        validate_target_model_combo,
+    )
+    from backend.shared.training.target_registry import apply_payload_overrides
+    from backend.shared.training.target_spec import (
+        TargetSpecError,
+        spec_from_dict,
+        spec_from_label_fields,
+    )
 
-    target_mode = str(payload.get("target_mode", "return")).strip().lower()
+    target_meta_in = payload.get("_target_meta")
+    if not isinstance(target_meta_in, dict):
+        legacy_fields = {
+            "target_horizon_days": req.target_horizon_days,
+            "target_mode": req.target_mode,
+            "execution_price": req.execution_price,
+            "label_transform": req.label_transform,
+            "label_top_pct": req.label_top_pct,
+            "label_drop_extreme_pct": req.label_drop_extreme_pct,
+        }
+        legacy_spec = None
+        try:
+            legacy_spec = spec_from_label_fields(
+                legacy_fields, market=str((req.context or {}).get("market") or "CN")
+            )
+        except TargetSpecError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"{exc.code}: {exc.message}"
+            ) from exc
+        target_meta_in = {
+            "id": "legacy",
+            "version": 0,
+            "status": "legacy",
+            "source": "legacy",
+            "base_hash": legacy_spec.spec_hash(),
+            "base_spec": legacy_spec.canonical_dict(),
+        }
+
+    try:
+        base_spec = spec_from_dict(target_meta_in["base_spec"])
+        effective_spec = apply_payload_overrides(base_spec, req.label_overrides)
+    except TargetSpecError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"{exc.code}: {exc.message}"
+        ) from exc
+
+    label_fields = effective_spec.to_label_fields()
+    if target_meta_in.get("source") == "legacy":
+        # 旧请求原样透传平铺字段（含分类下无意义的 transform 占位），
+        # 保证 legacy config 与训练行为逐值不变；spec 仅用于校验/追溯。
+        label_fields = {
+            "target_horizon_days": req.target_horizon_days,
+            "target_mode": req.target_mode,
+            "execution_price": req.execution_price,
+            "label_transform": req.label_transform,
+            "label_top_pct": req.label_top_pct,
+            "label_drop_extreme_pct": req.label_drop_extreme_pct,
+        }
+    # 重训/滚动派发携带原模型的 target_hash：覆盖后必须逐字节复现，否则拒绝。
+    expected_target_hash = str(payload.get("expected_target_hash") or "").strip()
+    if expected_target_hash and expected_target_hash != effective_spec.spec_hash():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "target_hash_drift: 覆盖后的目标 hash 与原模型不一致 "
+                f"({effective_spec.spec_hash()} != {expected_target_hash})；"
+                "请检查 target_ref/label_overrides"
+            ),
+        )
+    target_horizon_days = int(label_fields["target_horizon_days"])
+    target_mode = str(label_fields["target_mode"])
     if target_mode not in _ALLOWED_TARGET_MODE:
-        raise HTTPException(status_code=422, detail="target_mode must be one of: return, classification")
+        raise HTTPException(
+            status_code=422,
+            detail="target_mode must be one of: return, classification",
+        )
+
+    prediction_mode = req.prediction_mode
+    if target_meta_in.get("source") == "registry":
+        # registry 目标必须与 prediction_mode 严格一致；legacy 保留旧行为
+        wants_quantile = prediction_mode == "quantile"
+        if wants_quantile != effective_spec.needs_quantile_prediction:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "target_prediction_mode_mismatch: family="
+                    f"{effective_spec.family} 与 prediction_mode={prediction_mode} 不一致"
+                ),
+            )
+        if effective_spec.needs_quantile_prediction:
+            prediction_mode = "quantile"
+
+    capability_gate = _target_gate_mode("QM_TARGET_CAPABILITY_GATE")
+    if capability_gate != "off":
+        model_types_for_gate = req.model_types or [req.model_type]
+        try:
+            validate_target_model_combo(
+                model_types_for_gate,
+                target_mode=target_mode,
+                prediction_mode=prediction_mode,
+                market=str((req.context or {}).get("market") or "CN"),
+                sample_weight=_sample_weight_requested(payload),
+                objective=_extract_objective(req.model_type, req),
+            )
+        except (CapabilityError, ObjectiveConflictError) as exc:
+            if capability_gate == "strict":
+                raise HTTPException(
+                    status_code=422, detail=f"{exc.code}: {exc.message}"
+                ) from exc
+            logger.warning(
+                "target capability gate (warn): %s: %s", exc.code, exc.message
+            )
+
+    # 预检：把“加载 30 分钟后才失败”的路径提前到提交期
+    if str(label_fields["execution_price"]) == "open" and not str(
+        payload.get("factor_source") or ""
+    ).strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "target_execution_price_unsupported: execution_price=open 仅支持"
+                "直读 QuantDB 因子源（需要 factor_source）"
+            ),
+        )
+    if str(label_fields["label_transform"]).startswith("size_excess") and (
+        "total_cap" not in req.features
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "target_size_excess_requires_total_cap: label_transform=size_excess_*"
+                " 要求特征列表包含 total_cap"
+            ),
+        )
+
+    target_meta_out = {
+        "id": str(target_meta_in.get("id") or "legacy"),
+        "version": int(target_meta_in.get("version") or 0),
+        "status": str(target_meta_in.get("status") or "legacy"),
+        "source": str(target_meta_in.get("source") or "legacy"),
+        "base_hash": str(target_meta_in.get("base_hash") or ""),
+        "effective_hash": effective_spec.spec_hash(),
+        "spec": effective_spec.canonical_dict(),
+        "overrides": dict(req.label_overrides or {}),
+        "contract_flags": {
+            "capability_gate": capability_gate,
+            "diagnostic_gate": _target_gate_mode("QM_LABEL_DIAGNOSTIC_GATE"),
+        },
+    }
 
     # label_formula/training_window 取 req 清洗值；effective 日期形状 schema 已验，此处复核。
     effective_trade_date = str(payload.get("effective_trade_date") or "").strip()
@@ -416,11 +593,14 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         "features": req.features,
         "feature_categories": feature_categories,
         "target_horizon_days": target_horizon_days,
-        "target_mode": req.target_mode,
-        "execution_price": req.execution_price,
-        "label_transform": req.label_transform,
-        "label_top_pct": req.label_top_pct,
-        "label_drop_extreme_pct": req.label_drop_extreme_pct,
+        "target_mode": target_mode,
+        "target_meta": target_meta_out,
+        "target_hash": target_meta_out["effective_hash"],
+        "expected_target_hash": expected_target_hash or None,
+        "execution_price": label_fields["execution_price"],
+        "label_transform": label_fields["label_transform"],
+        "label_top_pct": label_fields["label_top_pct"],
+        "label_drop_extreme_pct": label_fields["label_drop_extreme_pct"],
         "label_formula": req.label_formula,
         "effective_trade_date": req.effective_trade_date,
         "training_window": req.training_window,
@@ -434,7 +614,7 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         # 分位推理模式透传：此前被白名单剥掉，orchestrator 收不到
         # prediction_mode 永远回落 point，导致训练时选了「收益率分位推理」
         # 但模型 metadata 始终是 point，推理中心提示未启用分位推理。
-        "prediction_mode": req.prediction_mode,
+        "prediction_mode": prediction_mode,
         # 全局股票池引用透传：orchestrator 侧 resolve_training_pool 解析成
         # DataCfg 池字段（成分在编排器侧解析后随 config.yaml 进容器）。
         # 为空表示全市场训练（保持旧行为）。
@@ -1252,7 +1432,67 @@ async def submit_training_job(
     benchmark_hint = str(context.get("benchmark") or "SH000300").strip()
     market = _resolve_market(context.get("market"), benchmark_hint)
     payload, allowed_features = await _resolve_quantdb_factor_payload(payload, market)
-    normalized_payload = _normalize_payload(payload, allowed_features)
+
+    # ── Target Contract 解析（DB 在 API 侧；容器只收冻结 spec）──
+    from backend.shared.training.target_registry import (
+        TargetRegistryError,
+        record_blocked_resolve,
+        resolve_target_for_payload,
+    )
+
+    allow_draft = bool(payload.get("allow_draft_target")) and bool(
+        current_user.get("is_admin")
+    )
+    # 重训复现凭证：带原模型 target_hash 时允许 deprecated 目标（同 hash 才通过
+    # _normalize_payload 的 hash 校验；用户无法凭一个错误 hash 绕过）。
+    allow_deprecated = bool(str(payload.get("expected_target_hash") or "").strip())
+    try:
+        target_meta = await resolve_target_for_payload(
+            payload,
+            market=market,
+            allow_draft=allow_draft,
+            allow_deprecated=allow_deprecated,
+        )
+    except TargetRegistryError as exc:
+        ref = payload.get("target_ref") if isinstance(payload.get("target_ref"), dict) else {}
+        await record_blocked_resolve(
+            target_id=str(ref.get("id") or ref.get("target_id") or "unknown"),
+            version=int(ref.get("version") or 0),
+            actor=str(
+                current_user.get("username")
+                or current_user.get("user_id")
+                or current_user.get("sub")
+                or "unknown"
+            ),
+            job_id=None,
+            code=exc.code,
+            message=exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.http_status, detail=f"{exc.code}: {exc.message}"
+        ) from exc
+    payload = {**payload, "_target_meta": target_meta}
+
+    try:
+        normalized_payload = _normalize_payload(payload, allowed_features)
+    except HTTPException as exc:
+        detail = str(exc.detail or "")
+        if detail.startswith("target_"):
+            ref = target_meta
+            await record_blocked_resolve(
+                target_id=str(ref.get("id") or "unknown"),
+                version=int(ref.get("version") or 0),
+                actor=str(
+                    current_user.get("username")
+                    or current_user.get("user_id")
+                    or current_user.get("sub")
+                    or "unknown"
+                ),
+                job_id=None,
+                code=detail.split(":", 1)[0],
+                message=detail,
+            )
+        raise
     run_id = _new_training_run_id()
 
     tenant_id = str(current_user.get("tenant_id") or "default")

@@ -13,6 +13,7 @@ COPY docker/training/train.py /app/train.py
 COPY docker/training/preprocessing.py /app/preprocessing.py
 COPY docker/training/parallel_utils.py /app/parallel_utils.py
 COPY docker/training/sample_weights.py /app/sample_weights.py
+COPY docker/training/label_diagnostics.py /app/label_diagnostics.py
 COPY docker/training/model_trainers /app/model_trainers
 
 # 不设置 ENTRYPOINT，保留默认 CMD 用于本地调试
