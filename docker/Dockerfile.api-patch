@@ -1,0 +1,21 @@
+# 紧急派生 API 镜像：在现有 quantmind-oss 镜像上覆盖本次提交的 backend/训练脚本，
+# 不重装依赖。用于依赖解析受阻时的快速镜像重建；全量构建仍以 Dockerfile.oss 为准。
+# 用法：
+#   docker build -f docker/Dockerfile.api-patch -t quantmind-oss:patched <repo>
+#   docker tag quantmind-oss:patched quantmind-oss:latest
+FROM quantmind-oss:latest
+
+COPY backend /app/backend
+COPY docker/training/train.py /app/train.py
+COPY docker/training/preprocessing.py /app/preprocessing.py
+COPY docker/training/parallel_utils.py /app/parallel_utils.py
+COPY docker/training/sample_weights.py /app/sample_weights.py
+COPY docker/training/label_diagnostics.py /app/label_diagnostics.py
+COPY docker/training/model_trainers /app/model_trainers
+COPY docker/training/diagnostics /app/diagnostics
+COPY docker/training/data /app/data
+COPY docker/training /app/docker/training
+COPY config /app/config
+COPY scripts /app/scripts
+COPY docs /app/docs
+COPY strategy_templates /app/strategy_templates
