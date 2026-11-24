@@ -1714,9 +1714,6 @@ CREATE INDEX IF NOT EXISTS idx_notifications_tenant_id ON notifications (tenant_
 CREATE INDEX IF NOT EXISTS idx_notifications_type ON notifications (notification_type);
 CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications (is_read);
 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications (created_at);
-CREATE INDEX IF NOT EXISTS idx_notifications_market ON notifications (market);
-CREATE INDEX IF NOT EXISTS idx_notifications_tenant_user_market_created
-    ON notifications (tenant_id, user_id, market, created_at DESC);
 
 -- 59.8 PAYMENT_TRANSACTIONS
 CREATE TABLE IF NOT EXISTS payment_transactions (
